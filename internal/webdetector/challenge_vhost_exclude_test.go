@@ -51,7 +51,7 @@ func TestManualWinsOverExcludeDecision(t *testing.T) {
 	if !e.challengeExcludes.Add("host", "e-vafeiadis.gr", map[string]struct{}{"e-vafeiadis.gr": {}}) {
 		t.Fatalf("add exclude failed")
 	}
-	e.manualChal.set("e-vafeiadis.gr", 24*time.Hour, "manual")
+	e.manualChal.set("e-vafeiadis.gr", 24*time.Hour, "manual", "")
 
 	// The apex is both excluded and manual-covered → the guard keeps manual.
 	if !e.hostChallengeExcluded("e-vafeiadis.gr") {
@@ -88,7 +88,7 @@ func TestManualWinsOverExcludeDecision(t *testing.T) {
 func TestManualKeepSelfVsSiblingCoverage(t *testing.T) {
 	e := &Engine{}
 	e.manualChal.init("")
-	e.manualChal.set("www.only.gr", 24*time.Hour, "manual") // www-only manual
+	e.manualChal.set("www.only.gr", 24*time.Hour, "manual", "") // www-only manual
 
 	// Apex: clearing it WOULD delete the www manual entry → keep (don't clear)…
 	if covered, _ := e.manualChallengeCoversClear("only.gr"); !covered {

@@ -379,10 +379,15 @@ evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived), and
 for an armed `challenge_v2` fingerprint a failing solve earns NO clearance
 (`result=v2_reject`, retry-able with backoff) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
-enforced at verify, not at serve). Teeth are web/edge-path-only (DNAT clients
-author their own `X-CFM-TLS`), and the client-authored report is spoofable by
-a signal-aware farm — deliberate D5b residuals, documented in
-`challenge_v2.go`; Rung 2 (visible interactive, accessible) is the designed
+enforced at verify, not at serve). The verify gate ORs three arm grains:
+fingerprint policy, geo policy, and (since 2026-09-22, arm-surfaces slice A)
+a per-vhost `rung=v2` on the MANUAL vhost challenge (API/CLI/cfm-admin Tier
+picker; persisted with the challenge). Verify is reachable only through the
+edge (localhost listener; the per-IP challenge-DNAT is RETIRED per
+`docs/edge-unification-plan.md`), so the gate inputs (`X-CFM-TLS`, the
+verify host) are edge-authoritative on current confs; the client-authored
+humanity report remains spoofable by a signal-aware farm — deliberate D5b
+residual, all documented in the HONEST LIMITS block of `challenge_v2.go`; Rung 2 (visible interactive, accessible) is the designed
 escalation, not built. **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
 the ONE roadmap/decision log; the other docs' phase checklists are frozen). Design
 hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`

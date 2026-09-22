@@ -10,10 +10,12 @@ package webdetector
 // for a real user — no puzzle, no extra click, nothing visible.
 //
 // D5 is the contract this file exists to honour:
-//   (a) SCOPE      — the score has TEETH only when the solving client's
-//                    fingerprint carries an operator-armed `challenge_v2`
-//                    policy (FingerprintPolicyForID); everyone else is scored
-//                    shadow/log-only.
+//   (a) SCOPE      — the score has TEETH only for a solve covered by an
+//                    operator-armed `challenge_v2` on SOME grain: the client's
+//                    fingerprint (FingerprintPolicyForID), a fleet-armed
+//                    country/ASN policy (GeoPolicyActionForIP), or a v2-tier
+//                    manual vhost challenge (challengeV2HostArmed); everyone
+//                    else is scored shadow/log-only.
 //   (b) ABSENCE    — a solve can fail ONLY on positive headless evidence
 //                    (webdriver true, a software renderer, a self-contradicting
 //                    report). A missing payload (old cached page, blocked JS,
@@ -48,14 +50,22 @@ package webdetector
 //     clean one), so evasion shows up in the burn-in data. If a farm adapts,
 //     the escalation is Rung 2 (visible interactive check, accessible), per
 //     the ladder.
-//   - The armed gate keys on the X-CFM-TLS header, which is trustworthy only
-//     where the EDGE stamps it (OpenResty/Angie clear + re-stamp it). On the
-//     legacy DNAT path the client talks to this server directly and authors
-//     its own headers, so an armed farm there can omit/forge the id and slip
-//     the gate — Rung-1 TEETH are web/edge-path-only, same limitation family
-//     as the slice-2 edge enforcement. (A forged id also taints the fp= on
-//     would_v2 shadow lines from DNAT clients; the ledger's solver-farm
-//     conviction inputs have the same caveat, internal/tlsfp.)
+//   - The armed gate's inputs (X-CFM-TLS for the fingerprint grain, the
+//     verify host for the vhost grain) are trustworthy because verify is
+//     reachable ONLY through the edge proxy: the challenge server binds
+//     localhost (CHALLENGE_HTTP_LISTEN=127.0.0.1:9098) and the legacy per-IP
+//     challenge-DNAT redirect — the one path where clients reached this
+//     server directly and authored their own headers — is RETIRED
+//     (docs/edge-unification-plan.md; the 9099 TLS listener is gone). The
+//     reference edge confs' /__cfm_verify blocks clear+re-stamp X-CFM-TLS
+//     AND re-stamp X-Forwarded-Host = $host, so solve.Host / the fp id are
+//     edge-authoritative on current confs. Defense-in-depth residuals, not
+//     live paths: (a) a deployed edge conf predating the XFH re-stamp leaves
+//     solve.Host client-influenced — TELEMETRY only, the teeth still hold
+//     because clearance is host-bound and validated against ngx.var.host in
+//     cfm.lua; (b) an operator who re-binds CHALLENGE_HTTP_LISTEN off
+//     localhost re-opens the direct-client path and with it every
+//     client-authored-header caveat — don't.
 
 import (
 	"encoding/json"
@@ -114,9 +124,36 @@ type challengeV2State struct {
 	failScore   int
 	debug       bool
 	shadowLines bool // emit would_v2 lines to the abuse-shadow log (rides ABUSE_SHADOW)
+	// hostArmed reports whether a v2-tier VHOST arm covers this host (the
+	// engine's manual challenge store, apex→www expansion included — arm
+	// surfaces slice A). Wired at engine start; nil = no vhost arms (tests /
+	// pre-wire), fail-open like the geo resolver.
+	hostArmed func(host string) bool
 }
 
 var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore}
+
+// SetChallengeV2HostArmed wires the per-vhost v2 lookup the verify gate ORs
+// in (see the D5 gate in challenge_server.go). Same lifecycle as
+// SetFingerprintPolicyGeoResolver: set once from NewEngine.
+func SetChallengeV2HostArmed(fn func(host string) bool) {
+	challengeV2.mu.Lock()
+	challengeV2.hostArmed = fn
+	challengeV2.mu.Unlock()
+}
+
+// challengeV2HostArmed answers "does a v2 vhost arm cover this host" for the
+// verify gate. false when unwired or host is empty (fail-open — D5a: teeth
+// only where an operator explicitly armed).
+func challengeV2HostArmed(host string) bool {
+	challengeV2.mu.RLock()
+	fn := challengeV2.hostArmed
+	challengeV2.mu.RUnlock()
+	if fn == nil || host == "" {
+		return false
+	}
+	return fn(host)
+}
 
 // ConfigureChallengeV2 applies the [webdetector] knobs; called on every
 // detectors reload (webdetector_register.go).

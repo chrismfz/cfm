@@ -16,6 +16,14 @@ export const challengeMixin = {
         { value: "6h", label: "6h" },
         { value: "24h", label: "24h" },
       ],
+      // Challenge tier applied by the same buttons. v2 = ChallengeV2: the
+      // SAME challenge page is served, but a solve must also pass the passive
+      // humanity check to earn clearance (headless farms solve for nothing).
+      challengeRung: "v1",
+      challengeRungChoices: [
+        { value: "v1", label: "challenge" },
+        { value: "v2", label: "challenge v2" },
+      ],
     };
   },
 
@@ -36,6 +44,12 @@ export const challengeMixin = {
           auto_active: mode === "auto" || mode === "manual+auto",
           mode,
           state: String(row.state || ""),
+          // ChallengeV2 tier of the covering manual challenge ("v2" or "");
+          // decorated by the daemon from its manual store (the verify gate's
+          // own source). Shown in the mode pill so the operator can SEE a
+          // host is v2-armed before clicking a Challenge button whose picker
+          // would explicitly re-tier it (third-review observation).
+          rung: String(row.rung || ""),
         };
       }
       return byHost;
@@ -49,9 +63,10 @@ export const challengeMixin = {
     },
     challengeModeLabel(host) {
       const s = this.activeChallengeByHost[host] || {};
-      if (s.manual_active && s.auto_active) return "manual+auto";
-      if (s.manual_active) return "manual";
-      if (s.auto_active) return "auto";
+      const v2 = s.rung === "v2" ? " · v2" : "";
+      if (s.manual_active && s.auto_active) return "manual+auto" + v2;
+      if (s.manual_active) return "manual" + v2;
+      if (s.auto_active) return "auto" + v2;
       return "";
     },
     // Under-Attack Mode (I1b): true when the vhost has been escalated above
@@ -86,6 +101,7 @@ export const challengeMixin = {
           manual_active: manualActive,
           auto_active: autoActive,
           state: String(status.state || ""),
+          rung: String(status.rung || ""), // v2 tier rides the scoped status too
           reason: status.reason,
           expires_at: status.expires_at,
           auto_since: status.auto_since,
@@ -107,15 +123,21 @@ export const challengeMixin = {
       this.activeChallengeVhosts = this.extractRows(rows, "rows");
       return this.activeChallengeVhosts;
     },
-    async toggleChallenge(host) {
+    // tier: the Tier-picker value, passed ONLY by call sites that RENDER the
+    // picker (the `suspicious` partial). Every other Challenge button omits it
+    // → no `rung` in the payload → the server PRESERVES an existing v2 arm
+    // (an explicit rung would silently re-tier it — second-review finding).
+    async toggleChallenge(host, tier) {
       if (!host) return;
       try {
         if (this.challengeState(host)) {
           await this.postJSON("v1/challenge/vhost/remove", { host });
           this.actionMsg = `Challenge removed for ${host}`;
         } else {
-          await this.postJSON("v1/challenge/vhost/add", { host, ttl: this.challengeTTL, reason: "cfm-admin-ui" });
-          this.actionMsg = `Challenge enabled for ${host} (${this.challengeTTLLabel})`;
+          const body = { host, ttl: this.challengeTTL, reason: "cfm-admin-ui" };
+          if (typeof tier === "string" && tier) body.rung = tier;
+          await this.postJSON("v1/challenge/vhost/add", body);
+          this.actionMsg = `Challenge enabled for ${host} (${this.challengeTTLLabel}${body.rung ? ", " + body.rung : ""})`;
         }
         await this.refreshChallengeVhosts();
       } catch (err) {
@@ -123,11 +145,13 @@ export const challengeMixin = {
         console.error("[cfm-admin] challenge action failed", err);
       }
     },
-    async manualChallenge(host) {
+    async manualChallenge(host, tier) {
       if (!host) return;
       try {
-        await this.postJSON("v1/challenge/vhost/add", { host, ttl: this.challengeTTL, reason: "cfm-admin-ui-manual" });
-        this.actionMsg = `Manual challenge enabled for ${host} (${this.challengeTTLLabel})`;
+        const body = { host, ttl: this.challengeTTL, reason: "cfm-admin-ui-manual" };
+        if (typeof tier === "string" && tier) body.rung = tier;
+        await this.postJSON("v1/challenge/vhost/add", body);
+        this.actionMsg = `Manual challenge enabled for ${host} (${this.challengeTTLLabel}${body.rung ? ", " + body.rung : ""})`;
         await this.refreshChallengeVhosts();
       } catch (err) {
         this.actionMsg = `Manual challenge failed for ${host}: ${err}`;

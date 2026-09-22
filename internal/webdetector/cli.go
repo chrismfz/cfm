@@ -91,7 +91,7 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop challenge            # active vhost challenge list")
 	fmt.Println("  cfm webtop challenge host <H>   # vhost details + recent events")
 	fmt.Println("  cfm webtop challenge events [N] # last N challenge events")
-	fmt.Println("  cfm webtop challenge add <H> [--ttl 30m]  # manually challenge a vhost")
+	fmt.Println("  cfm webtop challenge add <H> [--ttl 30m] [--rung v2]  # manually challenge a vhost (v2 = humanity-gated verify)")
 	fmt.Println("  cfm webtop challenge remove <H>           # remove manual challenge")
 	fmt.Println("  cfm webtop challenge status <H>           # check challenge status")
 	fmt.Println("  cfm webtop challenge exclude list")
@@ -1507,15 +1507,16 @@ func runAttackStatus(baseURL string) error {
 	return nil
 }
 
-// runChallengeAdd handles: cfm webtop challenge add <vhost> [--ttl 30m] [--reason manual]
+// runChallengeAdd handles: cfm webtop challenge add <vhost> [--ttl 30m] [--reason manual] [--rung v2]
 func runChallengeAdd(baseURL string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cfm webtop challenge add <vhost> [--ttl 30m] [--reason text]")
+		return fmt.Errorf("usage: cfm webtop challenge add <vhost> [--ttl 30m] [--reason text] [--rung v1|v2]")
 	}
 
 	host := args[0]
 	ttlStr := "30m"
 	reason := "manual"
+	rung := ""
 
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
@@ -1531,17 +1532,25 @@ func runChallengeAdd(baseURL string, args []string) error {
 			}
 			reason = args[i+1]
 			i++
+		case "--rung":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--rung requires a value (v1 or v2)")
+			}
+			rung = args[i+1]
+			i++
 		default:
 			if strings.HasPrefix(args[i], "--ttl=") {
 				ttlStr = strings.TrimPrefix(args[i], "--ttl=")
 			} else if strings.HasPrefix(args[i], "--reason=") {
 				reason = strings.TrimPrefix(args[i], "--reason=")
+			} else if strings.HasPrefix(args[i], "--rung=") {
+				rung = strings.TrimPrefix(args[i], "--rung=")
 			}
 		}
 	}
 
-	u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=%s&reason=%s",
-		baseURL, url.QueryEscape(host), url.QueryEscape(ttlStr), url.QueryEscape(reason))
+	u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=%s&reason=%s&rung=%s",
+		baseURL, url.QueryEscape(host), url.QueryEscape(ttlStr), url.QueryEscape(reason), url.QueryEscape(rung))
 	resp, err := clihttp.Post(u, "application/json", nil)
 	if err != nil {
 		return err
@@ -1557,8 +1566,8 @@ func runChallengeAdd(baseURL string, args []string) error {
 		return fmt.Errorf("challenge add error: %s", errMsg)
 	}
 
-	fmt.Printf("✓ Challenge active for %s  ttl=%s  expires=%s  reason=%s\n",
-		result["host"], result["ttl"], result["expires_at"], result["reason"])
+	fmt.Printf("✓ Challenge active for %s  ttl=%s  expires=%s  reason=%s  rung=%v\n",
+		result["host"], result["ttl"], result["expires_at"], result["reason"], result["rung"])
 	return nil
 }
 

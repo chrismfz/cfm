@@ -36,6 +36,12 @@ type manualChalEntry struct {
 	// re-records with the REMAINING window). Zero for an entry loaded from a
 	// snapshot written before TTLs were persisted.
 	TTL time.Duration
+	// Rung is the challenge tier: "" (default, plain challenge) or "v2"
+	// (ChallengeV2 Rung 1 — the SERVE is identical, but at VERIFY a failing
+	// humanity score earns no clearance; master plan "arm surfaces" slice A).
+	// The rung changes nothing at the edge or in DNAT redirect terms; it is
+	// consulted only by the verify gate via challengeV2HostArmed.
+	Rung string
 }
 
 // manualChalPersistEntry is the on-disk shape of one manual challenge. Kept
@@ -49,6 +55,9 @@ type manualChalPersistEntry struct {
 	// written by an older build has no such key and loads as 0, which callers
 	// treat as "unknown, fall back to the remaining window".
 	TTLSec int `json:"ttl_sec,omitempty"`
+	// Rung persists the challenge tier ("v2" or absent). A snapshot from an
+	// older build has no key and loads as "" — plain challenge, fail-safe.
+	Rung string `json:"rung,omitempty"`
 }
 
 // manualChalState is embedded in Engine.
@@ -73,16 +82,31 @@ func (s *manualChalState) init(path string) {
 	s.load()
 }
 
-// set adds or refreshes a manual challenge for host.
-func (s *manualChalState) set(host string, ttl time.Duration, reason string) {
+// set adds or refreshes a manual challenge for host. rung "" = plain
+// challenge; "v2" = ChallengeV2 (verify-time distinction, see manualChalEntry).
+func (s *manualChalState) set(host string, ttl time.Duration, reason, rung string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.vhosts[host] = manualChalEntry{
 		ExpiresAt: time.Now().Add(ttl),
 		Reason:    reason,
 		TTL:       ttl,
+		Rung:      rung,
 	}
 	s.saveLocked()
+}
+
+// rung returns the challenge tier of an active (non-expired) manual challenge
+// on host: "v2", or "" for plain / none / expired. Read-only (no expiry
+// delete — active() owns the cleanup).
+func (s *manualChalState) rung(host string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.vhosts[host]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		return ""
+	}
+	return e.Rung
 }
 
 // clear removes a manual challenge (returns whether it was present).
@@ -143,6 +167,7 @@ func (s *manualChalState) load() {
 			ExpiresAt: e.ExpiresAt,
 			Reason:    reason,
 			TTL:       ttl,
+			Rung:      e.Rung, // older snapshot → "" (plain challenge)
 		}
 		restored++
 	}
@@ -178,6 +203,7 @@ func (s *manualChalState) saveLocked() {
 			ExpiresAt: e.ExpiresAt,
 			Reason:    e.Reason,
 			TTLSec:    int(e.TTL.Round(time.Second) / time.Second),
+			Rung:      e.Rung,
 		})
 	}
 	sort.Slice(arr, func(i, j int) bool { return arr[i].Host < arr[j].Host })
@@ -241,8 +267,14 @@ const defaultManualChallengeTTL = 30 * time.Minute
 //   - NginxBridge mode: pushed to OpenResty immediately.
 //   - DNAT mode:        picked up by challenge_rules.go on next tick.
 //
-// Idempotent — calling again refreshes the TTL.
-func (e *Engine) ManualChallengeVhost(host string, ttl time.Duration, reason string) {
+// rung "" = plain challenge; "v2" = ChallengeV2 (same serve, but at verify a
+// failing humanity score earns no clearance — see challengeV2HostArmed). The
+// rung never reaches the bridge: enforcement of the tier lives entirely at
+// verify, which is reachable only through the edge proxy (the challenge
+// server binds localhost; the per-IP challenge-DNAT is retired).
+//
+// Idempotent — calling again refreshes the TTL (and can change the rung).
+func (e *Engine) ManualChallengeVhost(host string, ttl time.Duration, reason, rung string) {
 	if ttl <= 0 {
 		ttl = defaultManualChallengeTTL
 	}
@@ -250,11 +282,11 @@ func (e *Engine) ManualChallengeVhost(host string, ttl time.Duration, reason str
 		reason = "manual"
 	}
 
-	e.manualChal.set(host, ttl, reason)
+	e.manualChal.set(host, ttl, reason, rung)
 
 	logging.LogfCHALLENGES(
-		"[challenge][vhost] action=manual_on host=%s ttl=%s reason=%s",
-		host, ttl, reason,
+		"[challenge][vhost] action=manual_on host=%s ttl=%s reason=%s rung=%s",
+		host, ttl, reason, rungOrV1(rung),
 	)
 
 	// NginxBridge: push immediately so OpenResty reacts without waiting for a tick.
@@ -316,6 +348,28 @@ func (e *Engine) manualChallengeCovering(host string) (bool, time.Time, string) 
 	return false, time.Time{}, ""
 }
 
+// manualChallengeRung returns the tier ("v2" or "") of the manual challenge
+// covering host, with the SAME apex→www expansion as manualChallengeCovering:
+// a v2 arm on "example.com" must gate "www.example.com" solves too (the
+// bridge installs entries for both). "" when nothing v2-armed covers host.
+func (e *Engine) manualChallengeRung(host string) string {
+	if r := e.manualChal.rung(host); r != "" {
+		return r
+	}
+	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
+		return e.manualChal.rung(apex)
+	}
+	return ""
+}
+
+// rungOrV1 renders a rung for logs/UI: "" reads as "v1".
+func rungOrV1(rung string) string {
+	if rung == "" {
+		return "v1"
+	}
+	return rung
+}
+
 // manualChallengeCoversClear reports whether calling ClearVhost(host) would
 // tear down a bridge entry that belongs to an active manual challenge, and
 // the latest such expiry (for logging).
@@ -367,8 +421,8 @@ func (e *Engine) restoreManualChallenges() {
 			continue
 		}
 		logging.LogfCHALLENGES(
-			"[challenge][vhost] action=manual_restore host=%s ttl=%s reason=%s",
-			host, rem.Round(time.Second), ent.Reason,
+			"[challenge][vhost] action=manual_restore host=%s ttl=%s reason=%s rung=%s",
+			host, rem.Round(time.Second), ent.Reason, rungOrV1(ent.Rung),
 		)
 		if e.nginxBridge != nil {
 			e.nginxBridge.ChallengeVhostWithReason(host, rem, ent.Reason)

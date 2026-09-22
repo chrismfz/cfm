@@ -129,7 +129,7 @@ func TestManualChalPersist_KeepsGrantedTTL(t *testing.T) {
 
 	var s1 manualChalState
 	s1.init(path)
-	s1.set("example.gr", 10*time.Hour, "operator")
+	s1.set("example.gr", 10*time.Hour, "operator", "")
 
 	var s2 manualChalState
 	s2.init(path)

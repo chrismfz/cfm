@@ -18,6 +18,28 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Per-vhost ChallengeV2 (master plan "arm surfaces" slice A).** A manual
+  vhost challenge now carries a TIER: plain `challenge` (default) or
+  `challenge_v2` — same challenge page, but on a v2-armed vhost a solve must
+  ALSO pass the passive humanity check to earn clearance (headless farms
+  solve for nothing). Armable everywhere the manual challenge already is:
+  cfm-admin (new "Tier" picker next to the Challenge TTL), the API
+  (`POST /api/v1/challenge/vhost/add` with `rung=v2` — scoped tokens may set
+  it for their own vhosts, it is challenge-tier by construction), and the
+  CLI (`cfm webtop challenge add <host> --rung v2`). The rung survives
+  daemon restarts with the manual challenge, covers the www variant when
+  armed on the apex, and shows in the vhost status APIs (`rung`), including
+  the scoped-readable `/challenge/vhost/status`. The tier is enforced at
+  verify, which is reachable only through the edge (the challenge server
+  binds localhost; the legacy per-IP challenge-DNAT is retired), so the
+  teeth hold on every live path — and the edge verify blocks now re-stamp
+  `X-Forwarded-Host` so the verify host is edge-authoritative, not
+  client-influenced (clearance stays host-bound regardless).
+  Wildcard hosts cannot be v2-armed yet (fail-closed: the rung
+  lookup is exact+www), and a rung-less re-add/extend PRESERVES an existing
+  v2 arm (only an explicit `rung=v1` downgrades). `CHALLENGE_V2_PASSIVE=0`
+  remains the verify-teeth kill switch.
+
 - **Fleet-armed country/ASN challenge policies (master plan "policy kinds").**
   The fingerprint-policy feed now also carries operator-armed per-country
   (ISO-2) and per-ASN policies — challenge tiers ONLY (a geo `deny` does not

@@ -788,12 +788,16 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// abuse-shadow line (rides the ABUSE_SHADOW master via
 		// ConfigureChallengeV2), clearance unaffected.
 		if v2On && hs >= v2Fail {
-			// Armed challenge_v2 via EITHER grain: the solve's TLS fingerprint
-			// (the original gate) or a fleet-armed country/ASN policy covering
-			// the client IP (policy-kinds slice; resolver wired at engine
-			// start, fail-open when absent). Same D5 semantics either way.
+			// Armed challenge_v2 via ANY grain: the solve's TLS fingerprint
+			// (the original gate), a fleet-armed country/ASN policy covering
+			// the client IP (policy-kinds slice), or a v2-tier VHOST arm
+			// covering the solve's host (arm-surfaces slice A). Each lookup
+			// is fail-open when unwired. Same D5 semantics either way; the
+			// gate inputs are edge-authoritative — see HONEST LIMITS in
+			// challenge_v2.go.
 			if FingerprintPolicyForID(solve.TLSFP) == "challenge_v2" ||
-				GeoPolicyActionForIP(solve.IP) == "challenge_v2" {
+				GeoPolicyActionForIP(solve.IP) == "challenge_v2" ||
+				challengeV2HostArmed(solve.Host) {
 				logging.LogfCHALLENGES(
 					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s tls_fp=%s ua=%q",
 					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.TLSFingerprintOrDash(), solve.UA)
