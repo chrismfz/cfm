@@ -12,6 +12,10 @@ REL_DATE     := $(shell date -u +%Y.%m.%d)
 RPM_VERSION  := $(shell echo "$(VERSION)" | sed 's/-.*//; s/[^A-Za-z0-9._+~]/./g')
 RPM_TS       := $(shell echo "$(BUILD_TIME)" | sed 's/.*T//; s/://g')
 RPM_RELEASE  := 1.$(RPM_TS)
+# Top %changelog entry date for the rpm spec: the same UTC date as Version.
+# GNU date; if it comes out empty the define is skipped and the spec falls
+# back to today (an empty --define would fail the build).
+RPM_CHANGELOG_DATE := $(shell LC_ALL=C date -u -d "$(subst .,-,$(REL_DATE))" +"%a %b %d %Y")
 RPM_ARCH     := $(shell rpm --eval '%{_arch}')
 
 
@@ -342,8 +346,14 @@ rpm: rpm_prep_dirs rpm_spec_version stage-rpm ## Δημιουργεί .rpm
 	@# and not on ubuntu CI — so check it on the build host too, not just in CI.
 	@./scripts/tests/check_rpm_spec_macros.sh
 	@echo "→ Creating RPM package: cfm-$(RPM_VERSION)-$(RPM_RELEASE)"
-	@rpmbuild \
+	@# SOURCE_DATE_EPOCH = now: EL10 rpmbuild clamps every packaged file's mtime
+	@# to it, and when it is unset derives it from the newest %changelog entry —
+	@# which is how a stale entry once dated most files "May 4". Set here it
+	@# clamps nothing staged before the build, so files keep their real mtimes
+	@# (as on EL8/9 and in the .deb, which don't clamp).
+	@SOURCE_DATE_EPOCH="$$(date -u +%s)" rpmbuild \
 	  --define "_topdir $(CURDIR)/$(RPMTOP)" \
+	  $(if $(RPM_CHANGELOG_DATE),--define "cfm_changelog_date $(RPM_CHANGELOG_DATE)") \
 	  --define "_binary_payload w9.gzdio" \
 	  --define "debug_package %{nil}" \
 	  --define "pkgroot $(CURDIR)/$(PKGROOT)" \

@@ -215,6 +215,16 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   That is what finally proved both the failure and the fix (and confirmed the
   package really does own 30 Lua modules with nothing under
   `/usr/share/cfm/configs/lua`).
+- **Never hand-date the top rpm `%changelog` entry.** EL10's rpm macros set
+  `source_date_epoch_from_changelog` and `clamp_mtime_to_source_date_epoch`:
+  with `SOURCE_DATE_EPOCH` unset, rpmbuild takes it from the newest
+  `%changelog` date and clamps every packaged file's mtime to it. A
+  hand-written `May 04 2026` entry made every file changed since then read
+  "May 4" in every later `.rpm` (EL8/9 builds and the `.deb` don't clamp, so
+  it looked EL-only and random). The top entry is `%{cfm_changelog_date}` — `make rpm`
+  passes the Version's UTC date, a bare rpmbuild falls back to today — and
+  `make rpm` exports `SOURCE_DATE_EPOCH` = build time, so files keep real
+  mtimes. Verified in almalinux:10 (the same container recipe as above).
 - **A guardrail that cannot run its matcher must FAIL, never report OK.**
   Seven `scripts/tests/check_*.sh` shell out to `ripgrep`, which the runner
   does not preinstall. `check_cli_transport.sh` piped `rg … || true`, so on CI
