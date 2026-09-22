@@ -252,6 +252,13 @@ back-filled here — see the git/PR history for that period.
 
 
 ### Security
+- **Site Cache — Tier A now stores ONLY a `200`.** A `map $upstream_status
+  $cfm_cache_non200` feeds `proxy_no_cache`, so a `3xx`/`4xx`/`5xx` is never
+  cached whatever `Cache-Control` the origin sends — closing the cached-redirect
+  class of incident (a global cache once served stale `30x` and broke
+  webmail/cPanel/SSO, the reason CFM removed it). `check_site_cache_config.sh`
+  now fails any cache location whose `proxy_no_cache` omits the rail, and
+  requires the map to be defined. Only relevant on an armed vhost.
 - **`payload.sig` is admin-only on `/api/v1/webdet/history/events`.** The new
   ChallengeV2 device readings (`hardwareConcurrency`, `deviceMemory`,
   `devicePixelRatio`, pointer/touch/key counts) that CFM's challenge page

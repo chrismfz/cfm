@@ -17,7 +17,11 @@
 #       set to "0" anywhere in the conf (that flip only ever comes from Lua).
 #     * EVERY location that activates `proxy_cache cfm_static;` ALSO carries
 #       `proxy_cache_bypass $cfm_cache_skip;` AND `proxy_no_cache
-#       $cfm_cache_skip;` — bypass-by-default, both serve-side and store-side.
+#       $cfm_cache_skip $cfm_cache_non200;` — bypass-by-default (serve + store)
+#       plus the only-200 rail, and buffering ON (nginx stores nothing off it).
+#     * the only-200 rail: a `map $upstream_status $cfm_cache_non200` block is
+#       defined AND fed into proxy_no_cache, so a 3xx/4xx/5xx is NEVER stored
+#       whatever the origin sends (a cached 30x once broke webmail/cPanel/SSO).
 #     * Set-Cookie is never added to proxy_ignore_headers (nginx must keep NOT
 #       caching a response that carries Set-Cookie).
 #   parity
@@ -60,7 +64,12 @@ for f in "$ORT" "$ANG"; do
         if (body ~ /proxy_cache[[:space:]]+cfm_static[[:space:]]*;/) {
           m=""
           if (body !~ /proxy_cache_bypass[[:space:]]+\$cfm_cache_skip[[:space:]]*;/) m=m " proxy_cache_bypass-$cfm_cache_skip"
-          if (body !~ /proxy_no_cache[[:space:]]+\$cfm_cache_skip[[:space:]]*;/)     m=m " proxy_no_cache-$cfm_cache_skip"
+          if (body !~ /proxy_no_cache[[:space:]]+\$cfm_cache_skip[[:space:];]/)      m=m " proxy_no_cache-$cfm_cache_skip"
+          # Only a 200 may ever be STORED: $cfm_cache_non200 (a map on
+          # $upstream_status) must ride proxy_no_cache, so a 3xx/4xx/5xx can never
+          # be cached whatever the origin sends — a cached 30x once broke
+          # webmail/cPanel/SSO, the reason CFM ripped out its global cache.
+          if (body !~ /proxy_no_cache[[:space:]]+\$cfm_cache_skip[[:space:]]+\$cfm_cache_non200/) m=m " proxy_no_cache-$cfm_cache_non200(non-200-could-cache)"
           # A cache location MUST buffer: nginx writes to proxy_cache only on the
           # buffered upstream path, so `proxy_buffering off` here makes caching a
           # silent no-op (stores nothing, never a HIT). Require an explicit ON
@@ -89,11 +98,19 @@ for f in "$ORT" "$ANG"; do
   if ! grep -Eq '^[[:space:]]*proxy_cache[[:space:]]+cfm_static[[:space:]]*;' "$f"; then
     err "$f: no 'proxy_cache cfm_static;' anywhere — did Tier A activation get removed? (this gate must verify something)"
   fi
-  for d in 'proxy_cache_bypass[[:space:]]+\$cfm_cache_skip' 'proxy_no_cache[[:space:]]+\$cfm_cache_skip'; do
-    if ! grep -Eq "^[[:space:]]*$d[[:space:]]*;" "$f"; then
-      err "$f: no '$(echo "$d" | sed 's/\[\[:space:\]\]+/ /g');' directive anywhere — bypass-by-default gate missing."
-    fi
-  done
+  if ! grep -Eq '^[[:space:]]*proxy_cache_bypass[[:space:]]+\$cfm_cache_skip[[:space:]]*;' "$f"; then
+    err "$f: no 'proxy_cache_bypass \$cfm_cache_skip;' directive anywhere — bypass-by-default gate missing."
+  fi
+  if ! grep -Eq '^[[:space:]]*proxy_no_cache[[:space:]]+\$cfm_cache_skip[[:space:];]' "$f"; then
+    err "$f: no 'proxy_no_cache \$cfm_cache_skip …;' directive anywhere — bypass-by-default gate missing."
+  fi
+  # 200-only rail: the map must be defined AND referenced by proxy_no_cache.
+  if ! grep -Eq '^[[:space:]]*map[[:space:]]+\$upstream_status[[:space:]]+\$cfm_cache_non200[[:space:]]*\{' "$f"; then
+    err "$f: no 'map \$upstream_status \$cfm_cache_non200 { … }' block — the 200-only rail is undefined (a 3xx/4xx/5xx could be cached)."
+  fi
+  if ! grep -Eq '^[[:space:]]*proxy_no_cache[[:space:]]+\$cfm_cache_skip[[:space:]]+\$cfm_cache_non200' "$f"; then
+    err "$f: \$cfm_cache_non200 is never fed into a proxy_no_cache directive — non-200 responses could be stored."
+  fi
 
   # ── (c) negatives: never cache-by-default, never ignore Set-Cookie ───────────
   if grep -Eq '^[[:space:]]*set[[:space:]]+\$cfm_cache_skip[[:space:]]+"0";' "$f"; then
@@ -139,4 +156,4 @@ if [ "$fail" -ne 0 ]; then
   echo "[site-cache-config] FAILED — see errors above (invariant: caching is bypass-by-default; the gate must come from Lua)." >&2
   exit 1
 fi
-echo "[site-cache-config] OK: cfm_static zone declared, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated, Set-Cookie never ignored, openresty↔angie parity ($ort_n locations)."
+echo "[site-cache-config] OK: cfm_static zone declared, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered, only-200 rail (\$cfm_cache_non200) enforced, Set-Cookie never ignored, openresty↔angie parity ($ort_n locations)."

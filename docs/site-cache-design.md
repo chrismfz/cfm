@@ -136,7 +136,7 @@ request-time (Lua, `access` phase) and response-time (nginx-native + a thin
 | Rail | Enforced where | Prevents |
 |---|---|---|
 | `GET`/`HEAD` only | `proxy_cache_methods` (default) | POST / logins cached |
-| Status: micro `200` only; static `200` (opt. `301/404`) | status gate + `proxy_cache_valid` | **3xx redirect / SSO loop cached** |
+| Status: **only `200` is stored** (as-built Tier A — dropped the optional `301/404`) | `map $upstream_status $cfm_cache_non200` → `proxy_no_cache` (hard block, beats any origin `Cache-Control`), not just `proxy_cache_valid` | **3xx redirect / SSO loop cached** (the incident that removed CFM's global cache) |
 | Response has `Set-Cookie` → never store | nginx default (we **never** add `Set-Cookie` to `proxy_ignore_headers`) | user A's session served to user B |
 | Request carries a **named app-session cookie** → `$cfm_cache_skip=1` (see §4.1 — **allowlist by name**, NOT "any cookie") | Lua cookie-name allowlist | **logged-in users get stale/foreign content** |
 | Origin `Cache-Control: private\|no-store\|no-cache` → respect | nginx default (not ignored) | origin keeps the final say |
