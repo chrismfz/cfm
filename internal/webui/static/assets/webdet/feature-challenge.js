@@ -44,6 +44,12 @@ export const challengeMixin = {
           auto_active: mode === "auto" || mode === "manual+auto",
           mode,
           state: String(row.state || ""),
+          // ChallengeV2 tier of the covering manual challenge ("v2" or "");
+          // decorated by the daemon from its manual store (the verify gate's
+          // own source). Shown in the mode pill so the operator can SEE a
+          // host is v2-armed before clicking a Challenge button whose picker
+          // would explicitly re-tier it (third-review observation).
+          rung: String(row.rung || ""),
         };
       }
       return byHost;
@@ -57,9 +63,10 @@ export const challengeMixin = {
     },
     challengeModeLabel(host) {
       const s = this.activeChallengeByHost[host] || {};
-      if (s.manual_active && s.auto_active) return "manual+auto";
-      if (s.manual_active) return "manual";
-      if (s.auto_active) return "auto";
+      const v2 = s.rung === "v2" ? " · v2" : "";
+      if (s.manual_active && s.auto_active) return "manual+auto" + v2;
+      if (s.manual_active) return "manual" + v2;
+      if (s.auto_active) return "auto" + v2;
       return "";
     },
     // Under-Attack Mode (I1b): true when the vhost has been escalated above
@@ -94,6 +101,7 @@ export const challengeMixin = {
           manual_active: manualActive,
           auto_active: autoActive,
           state: String(status.state || ""),
+          rung: String(status.rung || ""), // v2 tier rides the scoped status too
           reason: status.reason,
           expires_at: status.expires_at,
           auto_since: status.auto_since,

@@ -421,8 +421,8 @@ func (e *Engine) restoreManualChallenges() {
 			continue
 		}
 		logging.LogfCHALLENGES(
-			"[challenge][vhost] action=manual_restore host=%s ttl=%s reason=%s",
-			host, rem.Round(time.Second), ent.Reason,
+			"[challenge][vhost] action=manual_restore host=%s ttl=%s reason=%s rung=%s",
+			host, rem.Round(time.Second), ent.Reason, rungOrV1(ent.Rung),
 		)
 		if e.nginxBridge != nil {
 			e.nginxBridge.ChallengeVhostWithReason(host, rem, ent.Reason)
