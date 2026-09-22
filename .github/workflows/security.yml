@@ -68,6 +68,8 @@ jobs:
         run: ./scripts/tests/stamp_changelog_test.sh
       - name: Release-notes extractor regression test
         run: ./scripts/tests/release_notes_test.sh
+      - name: Enforce /preflight + CLAUDE.md §3 gate lists == this workflow
+        run: ./scripts/tests/check_preflight_parity.sh
       # Lua syntax check + unit tests. luajit was installed above; both
       # targets bail out with a clear message if it ever goes missing.
       - name: Lua syntax check (configs/lua)

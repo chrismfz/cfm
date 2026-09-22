@@ -73,6 +73,8 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_rpm_spec_macros.sh         # no unescaped %macro in rpm spec comments + build-dated top %changelog entry (see §5)
 ./scripts/tests/check_site_cache_config.sh       # Site Cache bypass-by-default: every proxy_cache location gated on $cfm_cache_skip (see §6)
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
+./scripts/tests/release_notes_test.sh            # release-notes extractor (make release) regression test
+./scripts/tests/check_preflight_parity.sh        # this block + /preflight list == what security.yml runs
 ./scripts/tests/check_changelog_entry.sh         # CHANGELOG structure (locally); per-PR "code changed → needs entry" runs in CI
 ```
 
