@@ -445,6 +445,28 @@ func (e *Enricher) Enabled() bool {
 	return e.asnDB != nil || e.cityDB != nil
 }
 
+// HasASN / HasCountry report whether the ASN / City database is loaded right
+// now. Either can change after New: a database installed later (the MaxMind
+// updater) is picked up by the hot reload on a later lookup, and Close drops
+// both. Cheap (one RLock); never calls out.
+func (e *Enricher) HasASN() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.asnDB != nil
+}
+
+func (e *Enricher) HasCountry() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.cityDB != nil
+}
+
 // monoStart anchors statChk to the monotonic clock (see refreshIfChanged).
 var monoStart = time.Now()
 

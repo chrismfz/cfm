@@ -238,3 +238,38 @@ func BenchmarkLookupGeoFastUnderMisses(b *testing.B) {
 	stop.Store(true)
 	wg.Wait()
 }
+
+// HasASN / HasCountry track the databases actually loaded: nothing in an
+// empty dir, each one once installed and picked up by the hot reload, and
+// neither after Close.
+func TestHasASNAndHasCountry(t *testing.T) {
+	dir := t.TempDir()
+	e, _ := New(dir)
+	defer e.Close()
+	if e.HasASN() || e.HasCountry() {
+		t.Fatal("an empty dir must load no database")
+	}
+
+	writeMMDB(t, dir, "GeoLite2-ASN.mmdb", buildMMDB("GeoLite2-ASN", asnRecord(6799, "Test AS")), time.Now())
+	e.statChk.Store(0) // bypass the 300s stat rate limit
+	e.refreshIfChanged()
+	if !e.HasASN() || e.HasCountry() {
+		t.Fatalf("after installing only the ASN database: HasASN=%v HasCountry=%v", e.HasASN(), e.HasCountry())
+	}
+
+	writeMMDB(t, dir, "GeoLite2-City.mmdb", buildMMDB("GeoLite2-City", cityRecord("GR", "Greece", "Athens")), time.Now())
+	e.statChk.Store(0)
+	e.refreshIfChanged()
+	if !e.HasASN() || !e.HasCountry() {
+		t.Fatalf("after installing both: HasASN=%v HasCountry=%v", e.HasASN(), e.HasCountry())
+	}
+
+	e.Close()
+	if e.HasASN() || e.HasCountry() {
+		t.Fatal("Close must drop both")
+	}
+	var nilE *Enricher
+	if nilE.HasASN() || nilE.HasCountry() {
+		t.Fatal("a nil Enricher has no database")
+	}
+}
