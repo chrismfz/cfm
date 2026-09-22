@@ -761,7 +761,10 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      (`policy_key_for` → exact host, or the `*.suffix` pattern for a wildcard),
      never the raw request Host, so an armed wildcard vhost cannot let a client
      explode the dict with distinct sub-hosts; cardinality is bounded by the
-     number of armed policies. The edge
+     number of armed policies. Only **cacheable responses** are counted (a
+     served/stored `200`, or a `304` revalidation) — a non-cacheable `404`/`3xx`
+     MISS (which `$cfm_cache_non200` never stores) is excluded so a broken-asset
+     URL can't peg a vhost's MISS count and depress its hit ratio. The edge
      PUSHES an absolute per-vhost snapshot to a new bridge route
      `POST /nginx/cache/stats` every ~60s (a cross-worker-locked timer in
      `cfm_cache.lua`, mirroring the WAF-stats `maybe_flush`); the daemon

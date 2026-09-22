@@ -39,8 +39,11 @@ function _M.log(zone, status, host)
   incr(d, "cache:zone:" .. zone .. ":total")
   incr(d, "cache:zone:" .. zone .. ":status:" .. status)
 
+  -- Per-vhost breakdown: status keys ONLY (no per-vhost :total). The daemon
+  -- derives a vhost's total by summing its statuses, so there is no separate
+  -- total key that could survive a get_keys() truncation while its status keys
+  -- are dropped — which would push a misleading "total>0, zero hits" row.
   if host and host ~= "" then
-    incr(d, "cache:vhost:" .. host .. ":total")
     incr(d, "cache:vhost:" .. host .. ":status:" .. status)
   end
 
@@ -56,18 +59,15 @@ function _M.snapshot_vhosts()
   local d = ngx.shared.cfm_cache_stats
   if not d then return {} end
   local out = {}
-  local keys = d:get_keys(4000)   -- 0 would warn+cap at 1024; armed vhosts are few
+  -- 0 would warn + cap at 1024. Each armed vhost uses ~ (#statuses) keys, so
+  -- 8000 covers ~1000+ armed vhosts; beyond that a vhost is simply not reported
+  -- (absent), never reported with wrong (partial) counts.
+  local keys = d:get_keys(8000)
   for _, k in ipairs(keys) do
-    local host = k:match("^cache:vhost:(.+):total$")
-    if host then
-      out[host] = out[host] or {}
-      out[host].total = tonumber(d:get(k) or 0) or 0
-    else
-      local h, st = k:match("^cache:vhost:(.+):status:([A-Z]+)$")
-      if h then
-        out[h] = out[h] or {}
-        out[h][st] = tonumber(d:get(k) or 0) or 0
-      end
+    local h, st = k:match("^cache:vhost:(.+):status:([A-Z]+)$")
+    if h then
+      out[h] = out[h] or {}
+      out[h][st] = tonumber(d:get(k) or 0) or 0
     end
   end
   return out

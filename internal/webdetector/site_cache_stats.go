@@ -163,43 +163,51 @@ func (e *Engine) armedCacheKeys() map[string]struct{} {
 	return out
 }
 
-// resolveArmedCacheKey maps a request host to the armed policy key that covers
-// it — the exact host if armed, else a "*.suffix" armed pattern the host falls
-// under — or "" if nothing armed covers it. Mirrors the edge's policy_key_for
-// so a by-host stats drill-down resolves to a wildcard-armed vhost's row.
-func resolveArmedCacheKey(host string, armed map[string]struct{}) string {
+// candidateArmedCacheKeys returns the armed policy keys covering host, in a
+// DETERMINISTIC precedence: the exact host first, then matching "*.suffix"
+// patterns most-specific (longest) first. Overlapping wildcards (e.g.
+// *.example.com and *.cdn.example.com) are rare, but the edge keys stats under
+// exactly one of them — iterating a Go map at random could resolve a drill-down
+// to a different, empty pattern between requests, so the order is fixed and the
+// caller walks it until it finds the pattern that actually holds counts.
+func candidateArmedCacheKeys(host string, armed map[string]struct{}) []string {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if host == "" {
-		return ""
+		return nil
 	}
+	out := make([]string, 0, 4)
 	if _, ok := armed[host]; ok {
-		return host
+		out = append(out, host)
 	}
+	wilds := make([]string, 0, 4)
 	for k := range armed {
 		if strings.HasPrefix(k, "*.") && strings.HasSuffix(host, k[1:]) {
-			return k
+			wilds = append(wilds, k)
 		}
 	}
-	return ""
+	sort.Slice(wilds, func(i, j int) bool {
+		if len(wilds[i]) != len(wilds[j]) {
+			return len(wilds[i]) > len(wilds[j]) // most specific (longest) first
+		}
+		return wilds[i] < wilds[j] // stable tiebreak
+	})
+	return append(out, wilds...)
 }
 
 // SiteCacheStatsHost returns one vhost's cache stats row. `host` may be a
 // concrete sub-host of a wildcard-armed vhost — it resolves to the armed policy
-// key first. ok=false if nothing armed covers it, or it is armed but the edge
-// has not reported counts yet.
+// key the edge keyed stats under. ok=false if nothing armed covers it, or it is
+// armed but the edge has not reported counts yet.
 func (e *Engine) SiteCacheStatsHost(host string) (SiteCacheStatsRow, bool) {
 	if e == nil || e.siteCacheStats == nil {
 		return SiteCacheStatsRow{}, false
 	}
-	key := resolveArmedCacheKey(host, e.armedCacheKeys())
-	if key == "" {
-		return SiteCacheStatsRow{}, false
+	for _, key := range candidateArmedCacheKeys(host, e.armedCacheKeys()) {
+		if c := e.siteCacheStats.Get(key); c != nil {
+			return siteCacheStatsRow(key, c), true
+		}
 	}
-	c := e.siteCacheStats.Get(key)
-	if c == nil {
-		return SiteCacheStatsRow{}, false
-	}
-	return siteCacheStatsRow(key, c), true
+	return SiteCacheStatsRow{}, false
 }
 
 // SiteCacheStatsAll returns the stats row for every CURRENTLY-ARMED vhost the

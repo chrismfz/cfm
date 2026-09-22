@@ -38,19 +38,17 @@ cl.log("cfm_static", "HIT", "myip.gr")
 check(dict:get("cache:total") == 1,                                "global total incremented")
 check(dict:get("cache:zone:cfm_static:total") == 1,               "zone total incremented")
 check(dict:get("cache:zone:cfm_static:status:HIT") == 1,          "zone HIT incremented")
-check(dict:get("cache:vhost:myip.gr:total") == 1,                 "vhost total incremented")
 check(dict:get("cache:vhost:myip.gr:status:HIT") == 1,            "vhost HIT incremented")
+check(dict:get("cache:vhost:myip.gr:total") == nil,              "no per-vhost :total key (statuses only, avoids truncation false-zero)")
 check(dict:get("cache:last_seen_ts") == 12345,                    "last_seen_ts set")
 
 -- ── a MISS accumulates ────────────────────────────────────────────────────────
 cl.log("cfm_static", "MISS", "myip.gr")
-check(dict:get("cache:vhost:myip.gr:total") == 2,                 "vhost total = 2 after HIT+MISS")
 check(dict:get("cache:vhost:myip.gr:status:MISS") == 1,           "vhost MISS = 1")
 
 -- ── an UNKNOWN status is ignored (VALID gate) ─────────────────────────────────
 cl.log("cfm_static", "TELEPORTED", "myip.gr")
 check(dict:get("cache:vhost:myip.gr:status:TELEPORTED") == nil,   "unknown status never keyed")
-check(dict:get("cache:vhost:myip.gr:total") == 2,                 "unknown status did not bump total")
 
 -- ── host omitted → zone/global only, no vhost key ─────────────────────────────
 cl.log("cfm_static", "HIT")
@@ -61,10 +59,10 @@ check(dict:get("cache:vhost::total") == nil,                      "no empty-host
 cl.log("cfm_static", "BYPASS", "www.example.com")
 check(dict:get("cache:vhost:www.example.com:status:BYPASS") == 1, "second vhost keyed independently")
 
--- ── snapshot_vhosts returns per-host absolute counts ──────────────────────────
+-- ── snapshot_vhosts returns per-host absolute status counts (no total key) ────
 local snap = cl.snapshot_vhosts()
-check(snap["myip.gr"] and snap["myip.gr"].total == 2,             "snapshot myip.gr total = 2")
-check(snap["myip.gr"].HIT == 1 and snap["myip.gr"].MISS == 1,     "snapshot myip.gr HIT/MISS split")
+check(snap["myip.gr"] and snap["myip.gr"].HIT == 1 and snap["myip.gr"].MISS == 1, "snapshot myip.gr HIT/MISS split")
+check(snap["myip.gr"].total == nil,                               "snapshot carries no :total (daemon derives it)")
 check(snap["www.example.com"] and snap["www.example.com"].BYPASS == 1, "snapshot second vhost BYPASS")
 
 -- ── no dict declared → full no-op / empty snapshot (fail-safe) ────────────────

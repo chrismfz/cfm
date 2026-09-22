@@ -287,13 +287,22 @@ end
 -- schedule_stats_flush_if_needed: per-worker throttle + a node-wide cross-worker
 -- lock (dict:add with TTL) so exactly one worker pushes per window. Fail-safe:
 -- any hiccup just skips this window; the counters keep accumulating.
+--
+-- INVARIANT: the per-worker throttle interval and the cross-worker lock TTL are
+-- BOTH _stats_sec, deliberately. A worker that loses the add() race has already
+-- advanced _last_stats_flush_at, so its own throttle and the lock free up at the
+-- same time and exactly one push lands per window. Keep them equal if you touch
+-- either.
 local function schedule_stats_flush_if_needed()
     if _stats_flush_in_progress then return end
     local now = ngx.now()
     if (now - _last_stats_flush_at) < _stats_sec then return end
     _last_stats_flush_at = now
+    -- The lock lives in cfm_decisions (a large, long-lived dict), NOT
+    -- cfm_cache_stats — so it can never be LRU-evicted by counter-key growth in
+    -- the stats dict (which would silently halt every push).
     local sh = ngx.shared
-    local d = sh and sh.cfm_cache_stats
+    local d = sh and sh.cfm_decisions
     if d then
         -- add() succeeds only for the worker that wins the window; the TTL
         -- releases it after _stats_sec so the next window has a fresh race.
