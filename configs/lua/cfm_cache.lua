@@ -55,6 +55,15 @@ local function site_cache_enabled()
     return bcfg.get().site_cache ~= false
 end
 
+-- micro_enforce_enabled reads the daemon-published Tier B ENFORCE gate
+-- ([webdetector] MICRO_CACHE_ENFORCE, via the same ~10s-TTL bridge cache).
+-- OPT-IN: default FALSE (absent field / older daemon → dry-run). Only an
+-- explicit true lets micro_gate() ngx.exec to a cache location — HTML
+-- micro-caching never turns itself on (mirror image of site_cache_enabled).
+local function micro_enforce_enabled()
+    return bcfg.get().micro_cache_enforce == true
+end
+
 -- ---------------------------------------------------------------------------
 -- Per-worker cache state (module-level locals persist across requests in the
 -- same worker process). `policies` maps an exact host to its policy table;
@@ -643,6 +652,42 @@ function _M.static_gate()
     ngx.var.cfm_cache_gen  = tostring(p.gen or 0)
 end
 
+-- micro_gate: PHASE B3b ACCESS-phase hook for Tier B (micro-cache of anonymous
+-- HTML). Called from cfm.lua at the Step 4 plain-allow return, AFTER $cfm_pass is
+-- set. (The Step 2b clearance fast-path is deferred until the §5.5.1 clearance-
+-- cookie-across-ngx.exec ordering is verified on a live edge — see cfm.lua.)
+-- RETURNS the internal location
+-- to serve from ("@cfm_micro_<n>s") when this request should be micro-cached, or
+-- nil to proceed normally. The caller ngx.exec()s the returned target OUTSIDE
+-- its pcall (ngx.exec never returns, so it must not be swallowed).
+--
+-- Bypass-safe: returns nil (no caching) on every miss, and specifically —
+--   * master SITE_CACHE off, or no micro-armed vhost (cheap fleet-wide early-out)
+--   * MICRO_CACHE_ENFORCE off → DRY-RUN: never exec (the observe header still
+--     shows the would-cache verdict via observe(), so burn-in is unaffected)
+--   * scheme != https: the @cfm_micro_<n>s locations live only in the HTTPS
+--     server (B3a). Executing to a missing named location would 500, so a
+--     cleartext request is never routed — it just proceeds uncached.
+--   * the §4 request-side rails (armed micro tier, GET/HEAD, not /acctxfer*,
+--     anonymous per the cookie allowlist) via micro_decision().
+-- On a cache decision it sets the same two vars static_gate does ($cfm_cache_skip
+-- =0 to open the bypass gate, $cfm_cache_gen for the purge-generation key) and
+-- returns the bucket location; the only-200 rail + response-side rails (Set-Cookie
+-- / Cache-Control: private never stored) are enforced natively in that location.
+function _M.micro_gate()
+    if not site_cache_enabled() then return nil end
+    if not _cache.has_micro then return nil end
+    if not micro_enforce_enabled() then return nil end
+    if ngx.var.scheme ~= "https" then return nil end
+    local p = _M.policy_for(ngx.var.host)
+    if not p then return nil end
+    local ok, bucket = micro_decision(p, ngx.var.request_method, ngx.var.uri, ngx.var.http_cookie)
+    if not ok then return nil end
+    ngx.var.cfm_cache_skip = "0"
+    ngx.var.cfm_cache_gen  = tostring(p.gen or 0)
+    return "@cfm_micro_" .. bucket .. "s"
+end
+
 -- Exposed for unit tests (scripts/tests/cfm_cache_test.lua): drive the cache
 -- without a live bridge/ngx, then assert lookups.
 _M._rebuild_cache      = rebuild_cache
@@ -654,5 +699,6 @@ _M._micro_zone_name    = micro_zone_name
 _M._micro_cookie       = micro_cookie_verdict
 _M._micro_decision     = micro_decision
 _M._has_micro          = function() return _cache.has_micro end
+_M._micro_enforce      = micro_enforce_enabled
 
 return _M

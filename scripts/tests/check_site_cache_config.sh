@@ -82,6 +82,20 @@ for f in "$ORT" "$ANG"; do
           # allow-path (Phase B3b); it must be `internal;` so a direct request can
           # never hit an un-enforced cache-serving location.
           if (body ~ /proxy_cache[[:space:]]+cfm_micro_[0-9]+s[[:space:]]*;/ && body !~ /[[:space:]]internal[[:space:]]*;/) m=m " missing-internal(micro-location-directly-reachable)"
+          # …and it MUST override the server-level access_by_lua_file cfm.lua with
+          # its own access handler. Without it the location inherits cfm.lua, which
+          # re-runs on the ngx.exec internal redirect, reaches Step 4, execs here
+          # again, and loops until nginx 500s (internal redirection cycle) —
+          # site-breaking the moment MICRO_CACHE_ENFORCE is armed, and the pcall
+          # around the gate cannot catch it (nginx redirect machinery, not a Lua
+          # error). Every cfm.lua-bypass location carries this override.
+          # Match the DIRECTIVE shape (access_by_lua_block {), not the bare
+          # substring: the per-location comment itself contains the words
+          # "access_by_lua_file cfm.lua", which would satisfy a substring !~ test
+          # and let a deletion of just the directive (comment kept) pass — the
+          # exact regression this must catch. The directive shape never appears
+          # in the comment.
+          if (body ~ /proxy_cache[[:space:]]+cfm_micro_[0-9]+s[[:space:]]*;/ && body !~ /access_by_lua_block[[:space:]]*\{/) m=m " missing-access-override(cfm.lua-re-entry-redirect-loop-500)"
           if (m!="") print "location@line" locline ":" m
         }
         loc=0; body=""

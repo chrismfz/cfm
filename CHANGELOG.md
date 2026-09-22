@@ -57,6 +57,34 @@ back-filled here — see the git/PR history for that period.
   policies were disarmed or expired | FP_POLICY = 0: no policy is enforced)`.
   Fingerprint policies and country `challenge` policies are never warned about;
   those work from the edge. No enforcement change.
+- **Site Cache — Tier B micro-cache stats labelling (Phase B3c).** Micro-cache
+  hits are now counted under their own `cfm_micro` zone total instead of being
+  folded into `cfm_static`: the edge `log_by_lua` labels each cache verdict by
+  the serving tier (`$cfm_upstream` — `cfm_apache_micro` vs `cfm_apache_static`),
+  so `cfm_stats.lua`'s long-standing `cfm_micro` zone reader (previously always
+  zero — nothing wrote that key) now reflects real micro effectiveness. The
+  per-vhost HIT/MISS/BYPASS breakdown stays tier-agnostic on purpose (it answers
+  "is this vhost served from cache", either tier); a vhost armed micro-only reads
+  as pure micro stats. No behaviour change beyond the counter label; nothing
+  about what is cached changes.
+- **Site Cache — Tier B micro-cache activation gate (Phase B3b, dry-run default).**
+  Wires the `cfm.lua` **Step 4 plain-allow** path to the Tier B micro gate: for
+  an armed vhost, an anonymous, cacheable
+  (GET/HEAD, non-`/acctxfer*`, no app-session cookie) request **over HTTPS** is
+  routed via `ngx.exec` to its `@cfm_micro_<n>s` bucket and served from
+  micro-cache. Gated behind a new **opt-in** knob `[webdetector]
+  MICRO_CACHE_ENFORCE` (**default 0 = dry-run**): with it off the gate is a
+  no-op (the would-cache verdict still shows on the debug `X-CFM-Cache` header),
+  so a binary/config upgrade never starts caching HTML on its own — even for a
+  vhost whose micro tier is already armed. The gate is `pcall`-guarded (a bug in
+  it can never break enforcement), HTTPS-only (the `@cfm_micro_*` locations exist
+  only in the HTTPS server, so a cleartext request proceeds uncached), and the
+  `SITE_CACHE=0` master switch still overrides it. Published to the edge via
+  `cfm_bridge_config.lua` (~10s, no proxy reload). Flip to `1` after validating
+  the cookie allowlist against your apps in dry-run. Only the Step 4 plain-allow
+  path is wired; the Step 2b clearance fast-path (the bulk of cleared traffic) is
+  deferred until the §5.5.1 clearance-cookie-across-`ngx.exec` ordering is
+  verified on a live edge. Per-vhost HIT/MISS/BYPASS stats land next.
 - **Site Cache — Tier B micro-cache internal locations (Phase B3a, inert).**
   Adds the six per-bucket `@cfm_micro_<n>s` serving locations to the HTTPS server
   of both edge confs — each `internal;` (unreachable by a direct request) and
