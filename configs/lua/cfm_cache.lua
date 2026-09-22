@@ -20,10 +20,14 @@
 --
 -- COST PER REQUEST
 -- ----------------
--- * Normal traffic (no X-CFM-Cache-Debug header): one schedule-refresh check
---   (a flag + one time compare, ~10 ns when a poll is not due — the same
---   per-response cost cfm_h3_config already pays) + one ngx.var read, then
---   return. No policy lookup on the ordinary path.
+-- * SITE_CACHE off (the operator kill switch): one cached-config bool read,
+--   then return — a full no-op, nothing else runs.
+-- * Normal traffic (SITE_CACHE on, no X-CFM-Cache-Debug header): that same
+--   cached-config read + one schedule-refresh check (a flag + one time compare,
+--   ~10 ns when a poll is not due — the per-response cost cfm_h3_config already
+--   pays) + one ngx.var read, then return. No policy lookup on the ordinary
+--   path. The config read is a cfm_filecache 10s-TTL hit (a table lookup),
+--   which cfm.lua already does per request.
 -- * An operator debug request additionally does one normalize_host + one table
 --   hash lookup (~0.5-2 µs) plus a linear scan of the (tiny) wildcard list.
 --
@@ -37,8 +41,19 @@
 -- (fail-safe: no header rather than a wrong one).
 
 local cjson = require "cjson.safe"
+local bcfg  = require "cfm_bridge_cfg"   -- master SITE_CACHE gate (~10s TTL)
 
 local _M = {}
+
+-- site_cache_enabled reads the daemon-published master KILL SWITCH
+-- ([webdetector] SITE_CACHE, via cfm_bridge_cfg's ~10s-TTL cache). Default ON:
+-- only an EXPLICIT false disarms the module (absent field / missing file → on),
+-- matching how fp_policy et al. are consumed. This is a kill switch, not an
+-- opt-in — the per-vhost policy feed (empty by default) still governs whether
+-- any vhost is armed, so nothing caches until one is (docs §0).
+local function site_cache_enabled()
+    return bcfg.get().site_cache ~= false
+end
 
 -- ---------------------------------------------------------------------------
 -- Per-worker cache state (module-level locals persist across requests in the
@@ -247,6 +262,10 @@ end
 -- armed and what would apply — without any caching taking place. Safe to call
 -- from any phase where ngx.header is writable (header_filter is recommended).
 function _M.observe()
+    -- Master kill switch first: when SITE_CACHE is off, the module is a full
+    -- no-op — no feed poll, no lookup, no header. (Default on; the per-vhost
+    -- feed, empty by default, is what actually arms a vhost.)
+    if not site_cache_enabled() then return end
     -- Keep the per-worker cache warm from ALL traffic (like cfm_h3_config's
     -- enabled_for), so a debug request reports CURRENT policy rather than the
     -- state as of the previous debug request. Cheap: a flag + one time compare

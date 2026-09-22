@@ -40,6 +40,16 @@ back-filled here — see the git/PR history for that period.
   wired, which is how it rotted unnoticed in the first place.
 
 ### Added
+- **Site Cache — Phase 3a: `SITE_CACHE` master kill switch (config-driven).** New
+  `[webdetector] SITE_CACHE` knob (**default 1 = on**) published to the edge via
+  `cfm_bridge_config.lua` (~10s, no proxy reload) — no env vars, config-file
+  driven like the other edge knobs. It is a **kill switch, not an opt-in**: the
+  per-vhost policy store is empty by default, so nothing caches anywhere until an
+  operator arms a vhost (the single opt-in). `SITE_CACHE = 0` is the panic
+  button — `cfm_cache.lua` becomes a full no-op on the hot path (no feed poll, no
+  per-request lookup, no `X-CFM-Cache` header) fleet-wide in ~10s, **without**
+  disarming any vhost, so re-arming is instant. Still caches nothing on its own
+  (no `proxy_cache` yet).
 - **`v2=<grain>` on the challenge solve line — a passed ChallengeV2 solve is
   no longer invisible.** `cfm.challenges.log` scored every solve (`hs=`/
   `tells=`) but said nothing about whether the solve was covered by an armed
