@@ -671,7 +671,13 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   identity, resolved ONCE at verify without ever blocking it: country/ASN from
   a live mmdb read (the enricher's cached record can be up to a day stale),
   PTR from the cached-or-async path. Each key is absent when unresolved — and
-  `ptr` also when the address has none. The history rows
+  `ptr` also when the address has none. The verify-side **geo arm check does
+  NOT use these values**: it matches the enricher's cached record, which can
+  lag an mmdb update by up to 24h (or be empty if cached before the mmdb
+  loaded). So a `v2=geo` line whose `cc=`/`asn=` is outside the armed set means
+  the gate acted on a stale record — a real false-positive mechanism to report,
+  not a rendering bug — and an armed country's `cc=` with no `v2=` is a gate
+  miss for the same reason. The history rows
   carry the same as `country`/`country_iso`/`asn`/`asn_name`/`ptr`. Mind the
   name clash: top-level `ptr=` is reverse DNS; `sig=ptr:` is a pointer-event
   count. Log/corpus only — nothing scores on network identity. This is the corpus half of the table above: the

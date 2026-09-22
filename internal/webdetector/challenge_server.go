@@ -820,7 +820,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			V2Grain:           v2Grain,
 		}
 		// Network identity, once, before the gate below — so a rejected solve
-		// carries it too. Cached-or-async: never blocks verify on reverse DNS.
+		// carries it too. Never blocks verify: country/ASN are a live mmdb
+		// read, only the PTR is cached-or-async.
 		solve.resolveGeo()
 
 		// One dictionary line per distinct fingerprint, so every solve can carry

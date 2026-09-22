@@ -48,9 +48,9 @@ var scopedRedactedPayloadKeys = map[string]struct{}{
 	"ptr": {},
 }
 
-// hasAdminOnlyKey reports whether a payload carries any key in
+// hasScopedRedactedKey reports whether a payload carries any key in
 // scopedRedactedPayloadKeys, so rows without one are passed through uncopied.
-func hasAdminOnlyKey(p map[string]interface{}) bool {
+func hasScopedRedactedKey(p map[string]interface{}) bool {
 	for k := range scopedRedactedPayloadKeys {
 		if _, present := p[k]; present {
 			return true
@@ -59,9 +59,9 @@ func hasAdminOnlyKey(p map[string]interface{}) bool {
 	return false
 }
 
-// redactScopedHistoryRows strips admin-only payload keys from history rows
-// before they leave the endpoint for a SCOPED (cPanel) caller. Admin callers
-// see the rows untouched.
+// redactScopedHistoryRows strips the payload keys scoped callers never see
+// (scopedRedactedPayloadKeys) from history rows before they leave the endpoint
+// for a SCOPED (cPanel) caller. Admin callers see the rows untouched.
 //
 // Two keys today. The first is payload.sig — the ChallengeV2 Rung-1 device readings
 // (hardwareConcurrency, deviceMemory, devicePixelRatio, pointer/touch/key
@@ -98,12 +98,12 @@ func redactScopedHistoryRows(r *http.Request, rows []HistoryEvent) {
 		return
 	}
 	for i := range rows {
-		if !hasAdminOnlyKey(rows[i].Payload) {
+		if !hasScopedRedactedKey(rows[i].Payload) {
 			continue
 		}
 		clean := make(map[string]interface{}, len(rows[i].Payload))
 		for k, v := range rows[i].Payload {
-			if _, adminOnly := scopedRedactedPayloadKeys[k]; adminOnly {
+			if _, redacted := scopedRedactedPayloadKeys[k]; redacted {
 				continue
 			}
 			clean[k] = v

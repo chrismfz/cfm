@@ -679,7 +679,10 @@ func NewEngine(cfg Config) *Engine {
 	//     resolved in the background for a later solve.
 	// Set on EVERY engine build, cleared when this one has no enricher: the
 	// factory rebuilds the engine on each reload, and a reload that turns
-	// enrichment off must not leave the previous engine's enricher wired.
+	// enrichment off must not keep stamping the previous engine's geo onto
+	// solves. (This does not free that enricher: the verify-side geo resolver
+	// above is never cleared and still holds it — a pre-existing gap in that
+	// enforcement path, not changed here.)
 	if e.enr != nil {
 		enr := e.enr
 		SetChallengeSolveEnricher(func(ip string) enrich.Result {

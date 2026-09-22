@@ -150,7 +150,7 @@ func TestResolveGeo(t *testing.T) {
 
 // The detectors factory rebuilds the engine on every reload. A rebuild with
 // enrichment OFF must clear the resolver, or the previous engine's enricher
-// keeps stamping geo onto every solve (and stays alive with its cache).
+// keeps stamping geo onto every solve after the operator turned it off.
 func TestNewEngineWithoutEnrichClearsTheSolveEnricher(t *testing.T) {
 	setSolveEnricher(t, func(string) enrich.Result { return enrich.Result{PTR: "stale.example"} })
 	_ = NewEngine(Config{Every: time.Second, Window: time.Minute}) // UseEnrich unset

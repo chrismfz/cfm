@@ -445,6 +445,13 @@ already opened.
         `sw_renderer`+`outer_zero` (=100) case readable was bot-shaped (AWS
         EC2, and c28caa00 bursts on vhosts the independent solver-farm
         detector convicted); no weight change was warranted.
+      - OPEN (enforcement): the verify-side geo arm check
+        (`GeoPolicyActionForIP`) matches the enricher's CACHED record — up to
+        24h stale after an mmdb update, empty if cached before the mmdb
+        loaded — while the solve line now shows the live identity. A
+        `v2=geo` reject whose `cc=` is outside the armed set is that lag
+        biting. Switching the gate to a live mmdb read is an enforcement
+        change, left out of #1462 on purpose.
       - OPEN, decide before arming ad-running vhosts: Google's proxy (PTR
         `google-proxy-*.google.com`, AS15169, fp `c41a0f3f`) scores 140
         (`sw_renderer,touch_lie,no_input`) and WOULD be rejected — seen in

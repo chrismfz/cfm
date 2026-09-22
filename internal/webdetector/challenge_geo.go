@@ -32,8 +32,19 @@ import (
 // record could be up to a day stale), PTR from the cached-or-async path
 // (served when warm, resolved in the background otherwise). The page load that
 // served this challenge already went through the bridge, so by verify the PTR
-// is usually warm. "Once" is per record: when a country/ASN policy is armed,
-// the verify-side arm check (GeoPolicyActionForIP) does its own lookup too.
+// is usually warm.
+//
+// "Once" is per record, and the record is NOT what the geo arm check saw.
+// When a country/ASN policy is armed, the verify-side check
+// (GeoPolicyActionForIP) does its own lookup, against the enricher's CACHED
+// record — up to 24h stale after an mmdb update, or empty if it was cached
+// before the mmdb loaded. So the two can disagree, and when they do the line
+// is the truth about the client and the gate is what lagged: a `v2=geo` line
+// whose cc=/asn= falls outside the armed set is a gate acting on a stale
+// record (report it — it is a real false-positive mechanism), and an armed
+// country's cc= with no v2= is a gate miss for the same reason. Aligning the
+// gate on a live read would be an enforcement change, deliberately not made
+// here.
 var challengeSolveEnricher atomic.Pointer[func(ip string) enrich.Result]
 
 // SetChallengeSolveEnricher installs the resolver behind the solve's network
