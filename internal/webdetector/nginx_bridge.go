@@ -1165,7 +1165,9 @@ func (b *NginxBridge) ChallengeVhostWithReason(host string, ttl time.Duration, r
 		}
 		if logEnter {
 			if entryReason != "" {
-				logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s reason=%s", host, ttl, entryReason)
+				// %q: reason can be scoped-customer free text (see the
+				// manual_on audit line) — never let it forge log entries.
+				logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s reason=%q", host, ttl, entryReason)
 			} else {
 				logging.Logf("[nginx_bridge] vhost_challenge host=%s ttl=%s", host, ttl)
 			}

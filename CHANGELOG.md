@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Customer "Emergency challenge" panic button (master plan "arm surfaces"
+  slice D).** The vhost-controls page (`/cfm-admin/webdetector/controls/` —
+  the page the cPanel plugin opens) gains an arm/disarm card: pick a vhost,
+  Standard or Strict (v2) mode, 1h/6h/24h, and every visitor of that vhost
+  gets the interactive challenge for the chosen window. Scoped (customer)
+  arms are limited to their own vhosts (fail-closed) and clamped to 24h
+  (`ttl_capped: true` in the response, with the effective expiry) — a
+  temporary shield, not standing configuration; admin/CLI callers are
+  uncapped. Single-vhost customers get their host preselected.
+- **Manual challenge audit: history events now record the rung and the
+  actor.** `challenge_vhost_manual_on/off` carry `payload.rung` ("v1"/"v2";
+  a missing key means a pre-upgrade event) and `payload.actor`
+  ("admin"/"scoped"), and the CHALLENGES log line gained `actor=` — "who
+  armed v2 on this vhost" no longer needs a timestamp join against
+  cfm.api.log.
 - **WAF rule tier `challenge_v2` (master plan "arm surfaces" slice C).** The
   promotion ladder gains a rung between challenge and block:
   `logonly → challenge → challenge_v2 → block`, set per rule in
@@ -89,6 +104,24 @@ back-filled here — see the git/PR history for that period.
   convicts). Revert per fleet with `rule_xss = "challenge"` in
   `/etc/cfm/cfm_waf_config.lua`. Autoblock is unaffected (challenge tier
   never feeds `waf_security`).
+
+### Security
+- **Manual-challenge audit lines can no longer be forged via the free-text
+  `reason`** (slice-D security review): the caller-supplied reason is
+  control-char-stripped and capped (200) at the API boundary and
+  `%q`-quoted at every flat-log site, so `reason="x\n… actor=admin"` can
+  no longer fabricate audit entries in cfm.challenges.log. The
+  Under-Attack `vhost/attack` override — which previously left **no**
+  audit trail — now records a `challenge_vhost_attack_override` history
+  event and a CHALLENGES log line, both with the acting principal.
+- **Cross-site request forgery closed on the scoped panel session**: the
+  cPanel-embed bootstrap cookie (deliberately `SameSite=None` for the
+  iframe) was exempt from the CSRF Origin/Referer check while the
+  challenge/exclude endpoints accept query-param POSTs — a malicious page
+  could disarm a customer's challenge or add a WAF exclude using the
+  customer's own browser session. Embed-cookie auth now goes through the
+  same same-origin validation as admin sessions; the plugin iframe's own
+  requests are same-origin and unaffected.
 
 ### Fixed
 - **12 WAF rules showed the wrong default tier in the CLI / panel / MCP rule

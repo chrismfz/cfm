@@ -317,11 +317,56 @@ already opened.
           resume path included. Version-skew hazard documented in
           docs/waf.md: an OLDER edge maps the unknown mode to `disabled` —
           upgrade before setting the tier.
-        - [ ] **D — scoped customer self-arm** (cPanel plugin "panic
-          button"): the FIRST scoped WRITE action, so it rides the hard
-          auth boundary — central validator, fail-closed, challenge tiers
-          only, OWN vhosts only, TTL cap (~24h). Last, and its own
-          security review.
+        - [x] **D — scoped customer self-arm — DONE 2026-09-22** (cPanel
+          "panic button"). The scoped WRITE path itself predated this
+          slice (slice A: `challenge/vhost/add|remove` take scoped tokens,
+          `vhostAllowed` fail-closed, challenge tiers only by
+          construction; generic per-identity rate limit 120 writes/60s).
+          Slice D added what was missing:
+          (1) **TTL cap** — a scoped arm is clamped to
+          `scopedMaxChallengeTTL` (24h), clamp-and-report
+          (`ttl_capped: true` + effective expiry in the response), admin
+          uncapped;
+          (2) **audit** — `challenge_vhost_manual_on/off` history events
+          now carry `payload.rung` (explicit "v1"; absent key = pre-D
+          event) and `payload.actor` ("admin"|"scoped" from the request
+          scope; `ManualChallengeVhostAs`/`ClearManualChallengeVhostAs`),
+          and the CHALLENGES log line gained `actor=` — "who armed v2"
+          no longer needs a cfm.api.log timestamp join;
+          (3) **the surface** — an "Emergency challenge" card on
+          `/cfm-admin/webdetector/controls/` (the page the cPanel plugin
+          iframe lands on, which had NO arm control): vhost picker,
+          Standard/Strict(v2) mode, 1h/6h/24h duration, arm/disarm,
+          status from the one scoped-readable
+          `challenge/vhost/status` (single request, no per-row fan-out);
+          single-vhost scopes preselect their host. Copy explicitly
+          distinguishes it from the adjacent Challenge ON/OFF engine
+          toggle (recon flagged the naming trap). The slice's dedicated
+          SECURITY REVIEW ran (verdict FIX-FIRST → fixed in the same PR):
+          I1 the free-text `reason` could forge the flat audit logs — now
+          control-char-stripped + capped at the input boundary
+          (`sanitizeAuditReason`) and `%q`-quoted at every log site; I3
+          the `vhost/attack` override left no audit trail — now emits a
+          `challenge_vhost_attack_override` history event + CHALLENGES
+          line with the actor; I2 the scoped embed-bootstrap cookie
+          (SameSite=None) was exempt from the CSRF Origin check while
+          every arm endpoint accepts query-param POSTs — the CSRF
+          middleware now covers embed-cookie auth too (same-origin iframe
+          XHRs pass; a cross-site form 403s). Accepted residuals
+          (review-verified, all own-vhost/self-inflicted or same-tenant):
+          no per-vhost flap throttle beyond the generic 120/60s write
+          bucket; re-arming resets the 24h window, so a scoped cron can
+          maintain a standing challenge on its own vhost (soft arms/day
+          counter is the future lever); the bridge's apex→www expansion
+          installs the www twin past the exact-match scope check
+          (same-account ServerAlias in cPanel practice); a scoped re-arm
+          may replace/downgrade an admin arm on the customer's own vhost
+          (owner self-service — an owner-immutable challenge belongs in
+          config-time CHALLENGE_VHOST); the scoped `vhost/attack`
+          override stays un-TTL'd (audited now; TTL-bound-or-admin-only
+          is a pending decision); the scoped Tier picker on the
+          WebDetector overview page pre-existed via slice A under the
+          same server-side scope checks.
 - [ ] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.

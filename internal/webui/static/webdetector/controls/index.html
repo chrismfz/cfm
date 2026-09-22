@@ -26,6 +26,36 @@
         <p class="muted">Per-vhost WAF, challenge, HTTP/3 and ClamAV controls, and security overview. <a href="/cfm-admin/webdetector/rules/">Traffic Rules</a> and <a href="/cfm-admin/webdetector/tokens/">API tokens</a> have their own pages. Supports <code>?vhost=a.com,b.com</code>.</p>
       </section>
 
+      <!-- 0. Emergency challenge (panic button, arm-surfaces slice D) -->
+      <section class="card wide" v-if="shouldShow('controls')">
+        <h2>🛡 Emergency challenge</h2>
+        <p class="muted">
+          Under attack? Arm the interactive challenge for <strong>every visitor</strong> of a vhost, right now, for a limited time.
+          Real browsers pass with an invisible check; bots don't. This is different from the table's
+          <em>Challenge ON/OFF</em> below, which only enables/disables the challenge engine.
+          Customer arms are limited to 24h — for a standing challenge, contact the operator.
+        </p>
+        <div class="toolbar wrap">
+          <label>Vhost</label>
+          <input class="input input-wide" type="text" v-model.trim="panicHost" placeholder="example.com" list="cfm-vhost-list" @change="refreshPanicStatus" />
+          <label>Mode</label>
+          <select class="input" v-model="panicTier" title="Standard serves the normal challenge. Strict additionally rejects solves that look automated (headless evidence) — same page, stricter verification.">
+            <option value="v1">Standard</option>
+            <option value="v2">Strict (v2)</option>
+          </select>
+          <label>Duration</label>
+          <select class="input" v-model="panicTTL">
+            <option value="1h">1 hour</option>
+            <option value="6h">6 hours</option>
+            <option value="24h">24 hours</option>
+          </select>
+          <button class="btn-danger" @click="panicArm" :disabled="loading">🚨 Arm challenge</button>
+          <button class="btn-quiet" @click="panicDisarm" :disabled="loading || !(panicStatus && panicStatus.manual_active)">Disarm</button>
+        </div>
+        <p class="statusline" v-if="panicMsg">{{ panicMsg }}</p>
+        <p class="muted" v-if="panicStatus">{{ panicStatusLine() }}</p>
+      </section>
+
       <!-- 1. Security Overview -->
       <section class="card wide" v-if="shouldShow('vhost_overview')">
         <h2>Security Overview</h2>

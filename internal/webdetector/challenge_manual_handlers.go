@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"cfm/internal/logging"
 )
 
 type chalVhostAddRequest struct {
@@ -30,7 +33,55 @@ type chalVhostAddResponse struct {
 	TTL       string    `json:"ttl"`
 	Reason    string    `json:"reason"`
 	Rung      string    `json:"rung"` // "v1" | "v2"
+	// TTLCapped is set when a scoped caller asked for more than the scoped
+	// TTL ceiling and the arm was clamped (slice D). The TTL/ExpiresAt
+	// fields always carry the EFFECTIVE values, so a capped arm is visible,
+	// never silent.
+	TTLCapped bool `json:"ttl_capped,omitempty"`
 }
+
+// sanitizeAuditReason bounds the free-text reason a caller may attach to a
+// manual arm: control characters (incl. CR/LF) are stripped so the value can
+// never forge lines or key=value pairs in the flat audit logs (the log sites
+// also %q-quote it — defence in depth), and the length is capped so an
+// unbounded query-param reason cannot bloat the logs or the persist file
+// (slice-D security review I1/M3).
+func sanitizeAuditReason(s string) string {
+	const maxLen = 200
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		// Byte-count BEFORE writing so a multibyte rune at the boundary
+		// can never push past the cap (never splits a rune either —
+		// the whole rune is simply dropped).
+		if b.Len()+utf8.RuneLen(r) > maxLen {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// actorFromScope maps a request's vhost scope to the audit actor recorded on
+// manual arm/disarm history events: nil scope = admin/loopback, non-nil =
+// scoped token (vhostScopeFromContext semantics).
+func actorFromScope(scope map[string]struct{}) string {
+	if scope == nil {
+		return "admin"
+	}
+	return "scoped"
+}
+
+// scopedMaxChallengeTTL caps how long a SCOPED (cPanel customer) token may arm
+// a manual challenge on its own vhost (master plan slice D: the panic button
+// is a temporary shield, not a permanent config — a customer who wants a
+// standing challenge asks the operator). Admin/loopback callers are uncapped.
+// Clamp-and-report, not reject: the panic-button UX must never fail because
+// the customer typed "7d" — the response carries ttl_capped + the effective
+// expiry instead.
+const scopedMaxChallengeTTL = 24 * time.Hour
 
 // normalizeRung maps the accepted spellings to the stored tier: "" for plain
 // challenge, "v2" for ChallengeV2; ok=false for anything else (fail-closed on
@@ -48,6 +99,10 @@ func normalizeRung(s string) (rung string, ok bool) {
 // POST /api/v1/challenge/vhost/add
 // Body: { "host": "example.gr", "ttl": "30m", "reason": "manual", "rung": "v2" }
 // Also accepts query params: ?host=example.gr&ttl=30m&reason=manual&rung=v2
+//
+// Scoped tokens: own vhosts only (vhostAllowed, fail-closed), and the TTL is
+// clamped to scopedMaxChallengeTTL (24h) with ttl_capped=true in the
+// response. Admin/loopback callers are uncapped.
 func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request) {
 	req := chalVhostAddRequest{
 		Host:   r.URL.Query().Get("host"),
@@ -85,7 +140,10 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Scope check: scoped tokens may only challenge their own vhosts.
-	if !vhostAllowed(req.Host, vhostScopeFromContext(r.Context())) {
+	// (vhostScopeFromContext: nil = admin/loopback, non-nil = scoped —
+	// including the fail-closed empty set for a scoped token with no scope.)
+	scope := vhostScopeFromContext(r.Context())
+	if !vhostAllowed(req.Host, scope) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
@@ -99,7 +157,14 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	// Scoped TTL ceiling (slice D): clamp, and say so in the response.
+	ttlCapped := false
+	if scope != nil && ttl > scopedMaxChallengeTTL {
+		ttl = scopedMaxChallengeTTL
+		ttlCapped = true
+	}
 
+	req.Reason = sanitizeAuditReason(req.Reason)
 	if req.Reason == "" {
 		req.Reason = "manual"
 	}
@@ -128,7 +193,7 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	e.ManualChallengeVhost(req.Host, ttl, req.Reason, rung)
+	e.ManualChallengeVhostAs(req.Host, ttl, req.Reason, rung, actorFromScope(scope))
 
 	writeJSON(w, http.StatusOK, chalVhostAddResponse{
 		Host:      req.Host,
@@ -137,6 +202,7 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		TTL:       ttl.String(),
 		Reason:    req.Reason,
 		Rung:      rungOrV1(rung),
+		TTLCapped: ttlCapped,
 	})
 }
 
@@ -160,12 +226,13 @@ func (e *Engine) handleChallengeVhostRemove(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Scope check: scoped tokens may only remove challenge for their own vhosts.
-	if !vhostAllowed(host, vhostScopeFromContext(r.Context())) {
+	scope := vhostScopeFromContext(r.Context())
+	if !vhostAllowed(host, scope) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
 
-	e.ClearManualChallengeVhost(host)
+	e.ClearManualChallengeVhostAs(host, actorFromScope(scope))
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"host":   host,
@@ -226,7 +293,8 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	// Scope check: scoped tokens may only override their own vhosts.
-	if !vhostAllowed(host, vhostScopeFromContext(r.Context())) {
+	scope := vhostScopeFromContext(r.Context())
+	if !vhostAllowed(host, scope) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
@@ -238,6 +306,31 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 	}
 
 	e.SetVhostAttackOverride(host, on, time.Now())
+
+	// Audit (slice-D security review I3): this override used to leave NO
+	// trail beyond the generic api.log request line — a scoped customer
+	// could force (or clear) UNDER_ATTACK on their vhost invisibly. Record
+	// it like the manual arm/disarm: a CHALLENGES log line and a history
+	// event, both carrying the actor. (The override itself stays un-TTL'd —
+	// documented residual in the master plan, pending a TTL-or-admin-only
+	// decision.)
+	actor := actorFromScope(scope)
+	reason := "attack_cleared"
+	if on {
+		reason = "attack_forced"
+	}
+	logging.LogfCHALLENGES(
+		"[challenge][vhost] action=attack_override host=%s on=%v actor=%s",
+		host, on, actorOrDash(actor),
+	)
+	e.appendHistory(HistoryEvent{
+		TsUnix:  time.Now().Unix(),
+		Type:    "challenge_vhost_attack_override",
+		Host:    host,
+		Mode:    "manual",
+		Reason:  reason,
+		Payload: map[string]interface{}{"actor": actor, "on": on},
+	})
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"host":   host,
 		"attack": on,

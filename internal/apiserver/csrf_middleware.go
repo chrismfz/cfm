@@ -21,10 +21,20 @@ var (
 )
 
 // CSRFMiddleware enforces Origin/Referer checks for unsafe methods when
-// authentication happened through a browser session cookie.
+// authentication happened through a browser cookie — the admin session
+// cookie AND the scoped embed-bootstrap cookie.
 //
 // Notes:
-//   - Bearer/scoped/embed-cookie auth is exempt (token-backed requests).
+//   - Bearer token auth (admin/scoped) is exempt: an Authorization header
+//     cannot be attached by a cross-site form, so it is not an ambient
+//     credential.
+//   - The scoped EMBED cookie is deliberately SameSite=None (the cPanel
+//     iframe needs it cross-site), which makes it an ambient credential a
+//     hostile page can ride: the arm/exclude endpoints accept query-param
+//     POSTs, so without this check a cross-site form could disarm a
+//     customer's challenge with the customer's own browser (slice-D
+//     security review I2). The iframe's own XHRs are same-origin to the
+//     daemon and pass the Origin/Referer validation unchanged.
 //   - Public auth routes (for example POST /login) are naturally exempt because
 //     TokenMiddleware treats them as public and does not mark session authn.
 func CSRFMiddleware(next http.Handler) http.Handler {
@@ -54,7 +64,8 @@ func csrfRequiresCheck(r *http.Request) bool {
 	if _, ok := csrfUnsafeMethods[r.Method]; !ok {
 		return false
 	}
-	return authnMechanismFromContext(r.Context()) == authnMechanismSession
+	mech := authnMechanismFromContext(r.Context())
+	return mech == authnMechanismSession || mech == authnMechanismEmbedCookie
 }
 
 func validateCSRFSameOrigin(r *http.Request) (bool, string) {
