@@ -10,9 +10,11 @@ package.path = "configs/lua/?.lua;" .. package.path
 package.loaded["cjson.safe"] = { decode = function() return nil end }
 
 local _header = {}
+local _now = 0            -- mutable clock (0 keeps schedule_refresh a no-op)
+local _timer_calls = 0   -- counts async-refresh schedules
 _G.ngx = {
-  now       = function() return 0 end,          -- keeps schedule_refresh a no-op
-  timer     = { at = function() return true end },
+  now       = function() return _now end,
+  timer     = { at = function() _timer_calls = _timer_calls + 1; return true end },
   log       = function() end,
   WARN      = 1,
   ERR       = 2,
@@ -77,9 +79,19 @@ check(cache._label_for({ gen = 0, micro = { on = true, recipe = "micro_safe" } }
       == "micro=micro_safe gen=0", "micro-only label, no ttl")
 check(cache._label_for({ gen = 2 }) == "gen=2", "no tiers → just gen")
 
+-- ── observe warms the cache from ALL traffic, not only debug requests ─────────
+-- (regression guard: gating the refresh behind the debug header made every
+-- debug report reflect the PREVIOUS debug request's state.)
+_now = 1000000            -- make a refresh "due"
+_timer_calls = 0
+ngx.var.http_x_cfm_cache_debug = nil
+ngx.var.host = "on.com"
+cache.observe()
+check(_timer_calls >= 1, "observe schedules a refresh even WITHOUT the debug header (cache stays warm)")
+
 -- ── observe: only stamps when the request carries X-CFM-Cache-Debug ───────────
--- Without the debug header, observe() is a no-op even for an armed vhost (no
--- disclosure to ordinary clients).
+-- Without the debug header, observe() is a no-op (header-wise) even for an armed
+-- vhost (no disclosure to ordinary clients).
 for k in pairs(_header) do _header[k] = nil end
 ngx.var.host = "myip.gr"
 ngx.var.http_x_cfm_cache_debug = nil

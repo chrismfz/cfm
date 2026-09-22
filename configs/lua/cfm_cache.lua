@@ -20,9 +20,12 @@
 --
 -- COST PER REQUEST
 -- ----------------
--- * has_any short-circuit (~10 ns) — the common case when no vhost is armed.
--- * Otherwise: one normalize_host + one table hash lookup (~0.5-2 µs), plus a
---   linear scan of the (typically tiny) wildcard list.
+-- * Normal traffic (no X-CFM-Cache-Debug header): one schedule-refresh check
+--   (a flag + one time compare, ~10 ns when a poll is not due — the same
+--   per-response cost cfm_h3_config already pays) + one ngx.var read, then
+--   return. No policy lookup on the ordinary path.
+-- * An operator debug request additionally does one normalize_host + one table
+--   hash lookup (~0.5-2 µs) plus a linear scan of the (tiny) wildcard list.
 --
 -- REFRESH MODEL
 -- -------------
@@ -278,8 +281,15 @@ end
 -- armed and what would apply — without any caching taking place. Safe to call
 -- from any phase where ngx.header is writable (header_filter is recommended).
 function _M.observe()
-    -- Common case (no debug header): a single ngx.var read, then return — so
-    -- normal traffic pays almost nothing and learns nothing.
+    -- Keep the per-worker cache warm from ALL traffic (like cfm_h3_config's
+    -- enabled_for), so a debug request reports CURRENT policy rather than the
+    -- state as of the previous debug request. Cheap: a flag + one time compare
+    -- when a refresh is not due; it never blocks the request.
+    schedule_refresh_if_needed()
+    -- Stamp only for an operator's opt-in debug request, so ordinary clients see
+    -- nothing. NOTE (Phase 3): before real cache HIT/MISS/keys are exposed here,
+    -- gate this on a shared secret or a trusted source, not just the presence of
+    -- a guessable header name.
     local dbg = ngx.var[OBSERVE_HEADER_VAR]
     if not dbg or dbg == "" then return end
     local p = _M.policy_for(ngx.var.host)
