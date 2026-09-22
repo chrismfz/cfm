@@ -99,6 +99,105 @@ function _M.detect_traversal(uri, args, _s)
   return false
 end
 
+-- Rule 103 — a `..` segment in the RAW request path.
+--
+-- The WAF's `uri` is ngx.var.uri: nginx has already percent-decoded it and
+-- RESOLVED its dot-segments, so `/a/%2e%2e/b` and `/a/../b` both reach
+-- detect_traversal as `/b`. The origin, however, receives the raw
+-- $request_uri (proxy_pass without a URI part forwards it verbatim), and an
+-- application that routes on REQUEST_URI — WordPress pretty permalinks, whose
+-- rewrite turns the path into the `pagename` query var (CVE-2026-87902) — sees
+-- the traversal the WAF never did. This closes that blind spot for every
+-- traversal, not just the one CVE.
+--
+-- Matches only a segment that is EXACTLY `..` (after the same double decode
+-- scan_str applies, `\` folded to `/`), so `...` / `pro...` slugs and
+-- `file..ext` names are not hits. Browsers and HTTP libraries remove dot
+-- segments before sending (RFC 3986 §5.2.4); a raw `..` segment is a client
+-- that deliberately kept it. The query string is out of scope here — rule 101
+-- and rule 10017 already scan the raw args. `raw_uri` is nil for callers that
+-- do not pass ctx.raw_uri (the panel gate), which keeps this rule inert there.
+function _M.detect_raw_path_dotdot(raw_uri)
+  if not raw_uri or raw_uri == "" then return nil end
+  local q = raw_uri:find("?", 1, true)
+  local p = q and raw_uri:sub(1, q - 1) or raw_uri
+  -- Fast path: a dot-dot needs a literal `..` or an encoded dot (`%2e`, or
+  -- `%252e` double-encoded). A bare `%` is NOT enough to pay for the decode —
+  -- percent-encoded Greek/UTF-8 slugs are a large share of fleet paths.
+  if not p:find("..", 1, true) and not p:find("%%2[eE]") and not p:find("%%252[eE]") then
+    return nil
+  end
+  local s = normalize(cap(p, CFG.max_scan_len or 2048)):gsub("\\", "/")
+  if s:find("/%.%./") or s:find("/%.%.$") then return "RAW_PATH" end
+  return nil
+end
+
+-- True when a (decoded, lowercased) value contains a path segment that is
+-- exactly `..` — the check core's own validate_file() applies to template
+-- names and that get_page_template() skipped for `pagename`.
+local function has_dotdot_segment(v)
+  local s = "/" .. v:gsub("\\", "/") .. "/"
+  return s:find("/%.%./") ~= nil
+end
+
+-- Rule 10017 — CVE-2026-87902 (GHSA-7hp8-65ch-5whp), WordPress core 4.7–7.1.1
+-- unauth page-template path traversal → local .php include (→ RCE with
+-- pearcmd.php and register_argc_argv=On). Source: the WordPress advisory and
+-- the Wordfence entry supplied by the operator: get_page_template() builds
+-- `page-{$pagename}.php` from the url-decoded `pagename` query var and did not
+-- run it through the `..` check the neighbouring code used.
+--
+-- Keyed on the exact vector: a `pagename` value carrying a `..` segment. A real
+-- pagename is a page slug path (`about`, `parent/child`) and never holds one.
+-- WordPress reads query vars from $_POST before $_GET, so both the query string
+-- and a POST body (urlencoded or multipart) are checked. Every `pagename=`
+-- occurrence is examined, not just the first (PHP keeps the last). The
+-- pretty-permalink route (the path itself becomes `pagename`) is covered by
+-- rule 103, which sees the raw request path.
+function _M.detect_cve_wp_pagename_traversal(args, body, method, headers)
+  -- Split the RAW string on `&` first and decode key and value separately, as
+  -- PHP does: decoding the whole string first would turn a `%26` inside the
+  -- value into a split point and cut the traversal off. Keys are decoded too
+  -- (PHP accepts `page%6eame=`). The cheap pre-filter only skips strings that
+  -- can hold neither a literal nor an encoded key.
+  local function scan_pairs(s)
+    if s == "" then return false end
+    s = cap(s, CFG.max_scan_len)
+    if not has(lower(s), "pagename") and not s:find("%", 1, true) then return false end
+    for pair in ("&" .. s):gmatch("&([^&]*)") do
+      local k, v = pair:match("^([^=]*)=(.*)$")
+      if k and normalize(k) == "pagename" and has_dotdot_segment(normalize(v)) then return true end
+    end
+    return false
+  end
+
+  if scan_pairs(args or "") then return "ARG" end
+
+  if method ~= "post" or not body or body == "" then return nil end
+  local ct = lower(header_string(headers and (headers["Content-Type"] or headers["content-type"])) or "")
+  if has(ct, "multipart/form-data") then
+    -- Each `pagename` form field: skip its part headers (there may be more
+    -- than Content-Disposition) to the blank line, take the first value line.
+    local b = cap(body, CFG.max_scan_len)
+    local lb = lower(b)
+    local pos = 1
+    while true do
+      local _, e = lb:find('name%s*=%s*"?pagename"?[;%s]', pos)
+      if not e then break end
+      local _, he = b:find("\r?\n\r?\n", e)
+      if not he then break end
+      local v = b:match("^[^\r\n]*", he + 1)
+      if v and has_dotdot_segment(normalize(v)) then return "BODY" end
+      pos = e + 1
+    end
+  elseif has(ct, "application/x-www-form-urlencoded") and scan_pairs(body) then
+    -- PHP fills $_POST only from urlencoded and multipart bodies; a JSON or
+    -- raw body never becomes a query var.
+    return "BODY"
+  end
+  return nil
+end
+
 -- A data: URI in the request PATH is a client-side artifact, not an attack: a
 -- browser or link-preview crawler (e.g. facebookexternalhit) resolved an inline
 -- `data:...` URI as a RELATIVE url, so the whole data: payload — a base64 image/

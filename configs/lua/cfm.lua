@@ -1332,6 +1332,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
     local self_origin = is_self_origin(ip)
     local hit, reason, ttl, waf_action, _waf_hits, waf_rule_id = waf.check({
       uri = uri, args = ngx.var.args or "", method = method,
+      raw_uri = ngx.var.request_uri,
       host = host, ip = ip, cookie = ngx.var.http_cookie or "",
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
       headers = req_headers, body = req_body, self_origin = self_origin,
