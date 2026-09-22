@@ -287,9 +287,12 @@ already opened.
           would remove that disarm lever if it ever shows up live.
         - [x] **C — WAF rule tier `challenge_v2` — DONE 2026-09-22.** The
           missing rung in the promotion ladder `logonly → challenge →
-          challenge_v2 → block`, operator-armed per rule via
-          `cfm_waf_config.lua` (e.g. `rule_xss = "challenge_v2"` for the
-          classic `?q=<script>alert('XSS')</script>` smoke test, rule 302).
+          challenge_v2 → block`, set per rule via `cfm_waf_config.lua`.
+          One default ships at the new tier: `rule_xss` (302) promoted
+          challenge→challenge_v2 in the same change (operator decision —
+          XSS probes like `?q=<script>alert('XSS')</script>` are a scanner
+          smoke test, so their solvers face the humanity gate; revert per
+          fleet with `rule_xss = "challenge"`).
           As-built: cfm_waf.lua accepts the mode (rule_mode/set_rule),
           severity challenge(2) < challenge_v2(3) < block(4) — only block
           short-circuits; the edge serves the SAME challenge page (cfm.lua's

@@ -58,6 +58,15 @@ local function fresh_ctx(overrides)
   return ctx
 end
 
+-- ── 0: shipped default — rule_xss (302) defaults to challenge_v2 ─────────────
+-- Operator decision 2026-09-22 (same change that shipped the tier). Runs
+-- BEFORE any set_rule mutation so it sees the module's own CFG default.
+do
+  local snap = waf.get_config()
+  check(snap.rule_xss == "challenge_v2",
+        "0: shipped default — rule_xss is challenge_v2 (got " .. tostring(snap.rule_xss) .. ")")
+end
+
 -- ── 1: set_rule accepts challenge_v2; still rejects garbage ──────────────────
 do
   local ok = waf.set_rule("rule_xss", "challenge_v2")

@@ -57,7 +57,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 309, Name: "rule_sqli_blind_lexical", ReasonFamily: "WAF_SQLI_LEXICAL", DefaultMode: "block"},
 	{ID: 319, Name: "rule_sqli_union_variant", ReasonFamily: "WAF_SQLI_UNION_VARIANT", DefaultMode: "challenge"},
 	{ID: 318, Name: "rule_superglobal_override", ReasonFamily: "WAF_SUPERGLOBAL", DefaultMode: "logonly"},
-	{ID: 302, Name: "rule_xss", ReasonFamily: "WAF_XSS", DefaultMode: "challenge"},
+	{ID: 302, Name: "rule_xss", ReasonFamily: "WAF_XSS", DefaultMode: "challenge_v2"},
 	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "challenge"},
 	{ID: 304, Name: "rule_b64_injection", ReasonFamily: "WAF_B64_INJECT", DefaultMode: "challenge"},
 	{ID: 305, Name: "rule_php_wrappers", ReasonFamily: "WAF_PHP_WRAPPER", DefaultMode: "block"},

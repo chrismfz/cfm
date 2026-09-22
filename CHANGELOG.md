@@ -79,6 +79,16 @@ back-filled here — see the git/PR history for that period.
   edge Lua changes; `FP_POLICY = 0` kills all policy kinds. Arm/disarm lives
   in cfm-web (Explain Fingerprint, from the IP section's filters).
 
+### Changed
+- **`rule_xss` (302) promoted `challenge` → `challenge_v2` by default**
+  (operator decision, same release that ships the tier). Reflected-XSS
+  probes are a favourite scanner/solver-farm smoke test, so their solves
+  now face the Rung-1 humanity gate at verify. The served page and FP cost
+  are unchanged — a real user's solve still passes (absence never
+  convicts). Revert per fleet with `rule_xss = "challenge"` in
+  `/etc/cfm/cfm_waf_config.lua`. Autoblock is unaffected (challenge tier
+  never feeds `waf_security`).
+
 ### Fixed
 - **A challenged POST is no longer invisible to the daemon.** The
   challenge-resume redirect (a POST whose body is stashed for replay after

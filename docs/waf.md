@@ -51,9 +51,13 @@ per-(ip,host) rung mark, and a solve from that pair failing the passive
 humanity score earns **no clearance** (`result=v2_reject`, retry-able — see
 `challenge_v2.go` D5). Semantics to know:
 
-- **Operator opt-in per rule** via `/etc/cfm/cfm_waf_config.lua`, e.g. to make
-  the classic XSS smoke test (`?q=<script>alert('XSS')</script>`, rule 302)
-  serve a v2 challenge: `return { rule_xss = "challenge_v2" }`.
+- **Set per rule** via `/etc/cfm/cfm_waf_config.lua`
+  (`return { rule_<name> = "challenge_v2" }`). One rule ships at this tier by
+  default: **`rule_xss` (302)** — promoted challenge→challenge_v2 on
+  2026-09-22, the day the tier landed (operator decision): XSS probes like
+  `?q=<script>alert('XSS')</script>` are a favourite scanner smoke test, so
+  their solvers face the humanity gate. Revert per fleet with
+  `rule_xss = "challenge"` in `cfm_waf_config.lua`.
 - On the wire and in the bridge the decision stays plain `challenge` (edge
   vocabulary); autoblock (`waf_security`) is untouched — it feeds on
   `action=block` pushes only, and a `challenge_v2` push is not one.

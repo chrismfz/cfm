@@ -46,8 +46,9 @@ local CFG = {
   --                     rung difference bites at VERIFY: the push records a
   --                     per-(ip,host) v2 mark daemon-side, and a solve that
   --                     fails the passive humanity score earns no clearance
-  --                     (see challenge_v2.go D5). Operator opt-in per rule via
-  --                     cfm_waf_config.lua, e.g. rule_xss = "challenge_v2".
+  --                     (see challenge_v2.go D5). Set per rule via
+  --                     cfm_waf_config.lua; rule_xss ships at this tier
+  --                     (the one default, see its entry below).
   --   "block"        -> return 403 immediately
 
   -- ── Core request-side protections ─────────────────────────────────────────
@@ -67,7 +68,16 @@ local CFG = {
                                        -- on all six servers: 0 hits.
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
   rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
-  rule_xss             = "challenge",  -- cheap reflected-XSS style patterns
+  rule_xss             = "challenge_v2", -- cheap reflected-XSS style patterns.
+                                       -- Promoted challenge→challenge_v2
+                                       -- 2026-09-22 (operator decision, same
+                                       -- day the tier shipped): XSS probes are
+                                       -- a favourite scanner/solver-farm smoke
+                                       -- test, so their solves get the Rung-1
+                                       -- humanity gate at verify. Same page
+                                       -- served; FP cost unchanged (a real
+                                       -- user's solve still passes — absence
+                                       -- never convicts, D5b).
   rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
   rule_sqli_blind_lexical = "block", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted challenge→block 2026-08-23 after expanded fleet burn-in; prior 188/188 TP, 0 FP review (docs/waf.md)
   rule_sqli_union_variant = "challenge",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; promoted logonly→challenge 2026-08-23 after clean fleet review (docs/waf.md)
