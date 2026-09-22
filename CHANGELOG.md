@@ -31,7 +31,11 @@ back-filled here — see the git/PR history for that period.
   was shadow/log-only. `result=v2_reject` lines carry the grain too. Nothing
   about enforcement changed: the D5 arm check is the same OR, now resolved
   once and shared by the gate and the log so the teeth and the line can never
-  disagree.
+  disagree. The same facts (`hs`, `tells`, `v2`, plus `hs_nopayload` for the
+  log's `hs=-`) now also land on the durable `challenge_solved` history row,
+  so "is my armed tier covering real traffic, and what is it scoring?" is
+  answerable from MCP/history instead of only by grepping each node's
+  `cfm.challenges.log`.
 
 ## 2026.09.22
 

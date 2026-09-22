@@ -92,3 +92,57 @@ func toF(v interface{}) float64 {
 	}
 	return -1e9
 }
+
+// The Rung-1 facts must reach durable history, not just the log line: an
+// operator asking "is my armed challenge_v2 covering traffic?" from MCP gets
+// nothing if hs/v2 live only in cfm.challenges.log. The rung-disabled
+// sentinel (-1) must NOT be persisted, and hs=- (nothing reported) must stay
+// distinguishable from a scored-clean hs=0 — D5d.
+func TestRecordChallengeSolved_PersistsHumanityAndV2Grain(t *testing.T) {
+	e := newSolveTestEngine(t)
+	e.RecordChallengeSolved(ChallengeSolve{
+		IP: "203.0.113.11", Host: "shop.example.com", URI: "/",
+		HumanityScore: 130, HumanityTells: "sw_renderer,outer_zero,no_input",
+		V2Grain: v2GrainMark,
+	})
+	ev := latestSolveEvent(t, e)
+	if got := toF(ev.Payload["hs"]); got != 130 {
+		t.Errorf("payload.hs = %v, want 130", ev.Payload["hs"])
+	}
+	if got, _ := ev.Payload["tells"].(string); got != "sw_renderer,outer_zero,no_input" {
+		t.Errorf("payload.tells = %q", got)
+	}
+	if got, _ := ev.Payload["v2"].(string); got != "mark" {
+		t.Errorf("payload.v2 = %q, want mark", got)
+	}
+	if _, ok := ev.Payload["hs_nopayload"]; ok {
+		t.Errorf("a scored solve must not carry hs_nopayload")
+	}
+
+	// Scored clean AND unarmed: hs present at 0, no v2 key at all.
+	e2 := newSolveTestEngine(t)
+	e2.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.12", Host: "shop.example.com", URI: "/"})
+	ev2 := latestSolveEvent(t, e2)
+	if got := toF(ev2.Payload["hs"]); got != 0 {
+		t.Errorf("clean solve: payload.hs = %v, want 0", ev2.Payload["hs"])
+	}
+	if _, ok := ev2.Payload["v2"]; ok {
+		t.Errorf("unarmed solve must carry no v2 grain, got %v", ev2.Payload["v2"])
+	}
+
+	// Nothing reported: hs=0 plus the marker that says why.
+	e3 := newSolveTestEngine(t)
+	e3.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.13", Host: "shop.example.com", URI: "/", HumanityNoPayload: true})
+	ev3 := latestSolveEvent(t, e3)
+	if ok, _ := ev3.Payload["hs_nopayload"].(bool); !ok {
+		t.Errorf("no-payload solve must be distinguishable from scored-clean, payload=%v", ev3.Payload)
+	}
+
+	// Rung disabled: the -1 sentinel must never be persisted as a score.
+	e4 := newSolveTestEngine(t)
+	e4.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.14", Host: "shop.example.com", URI: "/", HumanityScore: -1})
+	ev4 := latestSolveEvent(t, e4)
+	if _, ok := ev4.Payload["hs"]; ok {
+		t.Errorf("disabled rung must persist no hs, got %v", ev4.Payload["hs"])
+	}
+}

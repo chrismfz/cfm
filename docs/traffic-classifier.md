@@ -657,7 +657,12 @@ burn-in and FP triage with no new plumbing and no logrotate change:
 - **`cfm.abuse_shadow.log`**: `signal=humanity verdict=would_v2 …` when the score
   *would* escalate — shadow, nothing served.
 - **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls
-  into cfm-web's `fingerprints` ledger as another per-client tell.
+  into cfm-web's `fingerprints` ledger as another per-client tell. The
+  `challenge_solved` row carries `hs`, `tells`, `v2` (the arm grain) and
+  `hs_nopayload` (the durable spelling of the log's `hs=-`), so the burn-in
+  readout does not require shell access to every node. `hs` is omitted
+  entirely when the rung is off — the -1 sentinel is never persisted as a
+  score.
 
 MCP surfaces: `abuse_shadow` (per-node signal/verdict counts), `detection_history`
 (durable; `node="all"` for the fleet), `challenge_events`; suspected-FP drilldown

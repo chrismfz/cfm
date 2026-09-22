@@ -797,6 +797,27 @@ func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 	if s.TLSFP != "" {
 		payload["tls_fp"] = s.TLSFP
 	}
+	// ChallengeV2 Rung 1 (challenge_v2.go): the same two facts the solve LOG
+	// line carries, so the burn-in question "is the armed tier covering real
+	// traffic, and what is it scoring?" is answerable from durable history /
+	// MCP and not only by grepping cfm.challenges.log on each node. hs<0 is
+	// the rung-disabled sentinel — omit it rather than persist a -1 a
+	// consumer could read as a score. hs_nopayload carries what the log line
+	// spells hs=-: scored 0 because NOTHING was reported, which must stay
+	// distinguishable from a scored-clean 0 (D5d). v2 names the arm grain
+	// covering the solve, absent when unarmed (score was shadow/log-only).
+	if s.HumanityScore >= 0 {
+		payload["hs"] = s.HumanityScore
+		if s.HumanityNoPayload {
+			payload["hs_nopayload"] = true
+		}
+		if s.HumanityTells != "" {
+			payload["tells"] = s.HumanityTells
+		}
+	}
+	if s.V2Grain != "" {
+		payload["v2"] = s.V2Grain
+	}
 	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_solved", Host: s.Host, IP: s.IP, Payload: payload})
 }
 
