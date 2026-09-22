@@ -21,8 +21,10 @@ back-filled here — see the git/PR history for that period.
 - **Panel-port fingerprint-policy consult (master plan item).** The
   operator-armed per-fingerprint policy the web edge enforces pre-clearance
   now also covers the cPanel/WHM/webmail ports: an armed `deny` 403s that
-  TLS bucket on `:2083/:2087/:2096` too (a farm that solved a web challenge
-  could otherwise still hammer the panel login). New
+  TLS bucket on `:2083/:2087/:2096` too — human entry and plain `/login`
+  POSTs; the api/sso allowlist (`/json-api`, `/xml-api`, `/execute`,
+  transfers…) keeps its hard-skip, same as the panel WAF, so API traffic
+  never breaks. New
   `[webdetector] PANEL_FP_POLICY_MODE = off|logonly|enforce` (default
   enforce, like the other panel modes; env `CFM_PANEL_FP_POLICY`; flips
   reach the edge in ~10s without a proxy reload). Only `deny` acts —

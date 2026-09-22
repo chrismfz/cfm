@@ -1240,9 +1240,12 @@ end
 --     OWN handshake ($ssl_* — unspoofable), the lookup reuses the shared
 --     cfm_fppolicy cache dict + the panel's bridge client, and everything is
 --     pcall'd + fail-open: a module/bridge fault can never lock the panel.
+-- (panel_bridge_cfg is never nil — defaulted above — so the global-kill test
+-- is just "the daemon did not publish fp_policy = false"; an old bridge file
+-- without the field means default-ON, same as the web path's CFG.fp_policy.)
 local fp_mode = resolve_panel_mode("CFM_PANEL_FP_POLICY", panel_bridge_cfg and panel_bridge_cfg.panel_fp_policy_mode)
 if fp_mode ~= "off"
-   and (panel_bridge_cfg == nil or panel_bridge_cfg.fp_policy ~= false)
+   and panel_bridge_cfg.fp_policy ~= false
    and uri ~= decision_uri and uri ~= "/__cfm_verify" then
     local ok_fp, fp_act, fp_id = pcall(function()
         if panel_is_self(client_ip) then return nil, nil end

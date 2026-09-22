@@ -174,8 +174,8 @@ already opened.
         `cfm_fppolicy.lua` cache + `cfm.lua` Step 0c: `deny` 403s BEFORE the
         clearance fast-path; challenge/challenge_v2 are a floor for uncleared
         clients (v2 behaves as v1 until Rung 1 ships). Knobs `FP_POLICY` /
-        `FP_POLICY_ALLOW_FPS`; expires honoured at lookup. **Web path only** —
-        the panel-port gate (`cfm_panel.lua`) does not consult the policy yet.
+        `FP_POLICY_ALLOW_FPS`; expires honoured at lookup. (Originally web
+        path only; the panel-port consult shipped 2026-09-22 — next bullet.)
       - [x] Panel-port fp-policy consult — **DONE 2026-09-22**
         (`cfm_panel.lua` step 2f): the same operator-armed policy the web
         edge enforces at Step 0c now covers `:2083/:2087/:2096`. As-built:
@@ -191,7 +191,15 @@ already opened.
         reach the lookup; the tuple comes from the panel port's own
         handshake ($ssl_*); the lookup reuses the shared cfm_fppolicy
         cache dict + the panel's bridge client; everything pcall'd +
-        fail-open (a fault can never lock the panel).
+        fail-open (a fault can never lock the panel). Accepted scope
+        (review MINOR-4): the api/sso hard-skip returns BEFORE 2f, so a
+        denied fingerprint can still reach /json-api/*, /xml-api/*,
+        /execute/*, /session*, /cpanelwebcall* etc. — API-credential
+        brute force is NOT covered (deliberate: transfers/API must never
+        break, the same carve-out the panel WAF honours); human entry
+        and plain /login POSTs ARE covered. The env kill switch needed
+        an `env CFM_PANEL_FP_POLICY;` whitelist in both engine confs
+        (review IMPORTANT-1, folded — nginx scrubs undeclared env).
       - [x] ChallengeV2 Rung 1 — **DONE 2026-09-19** (`challenge_v2.go` +
         the challenge-page passive collectors): every solve is scored on
         positive headless evidence only (webdriver / HeadlessChrome UA fail
