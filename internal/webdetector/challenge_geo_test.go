@@ -115,8 +115,9 @@ func TestLegacyGeoTailMatchesTheOldHookByteForByte(t *testing.T) {
 
 func setSolveEnricher(t *testing.T, fn func(ip string) enrich.Result) {
 	t.Helper()
+	prev := challengeSolveEnricher.Load()
 	SetChallengeSolveEnricher(fn)
-	t.Cleanup(func() { SetChallengeSolveEnricher(nil) })
+	t.Cleanup(func() { challengeSolveEnricher.Store(prev) })
 }
 
 func TestResolveGeo(t *testing.T) {
@@ -144,6 +145,17 @@ func TestResolveGeo(t *testing.T) {
 	unwired.resolveGeo()
 	if unwired.GeoSuffix() != "" {
 		t.Fatalf("an unwired enricher must leave every geo field empty, got %q", unwired.GeoSuffix())
+	}
+}
+
+// The detectors factory rebuilds the engine on every reload. A rebuild with
+// enrichment OFF must clear the resolver, or the previous engine's enricher
+// keeps stamping geo onto every solve (and stays alive with its cache).
+func TestNewEngineWithoutEnrichClearsTheSolveEnricher(t *testing.T) {
+	setSolveEnricher(t, func(string) enrich.Result { return enrich.Result{PTR: "stale.example"} })
+	_ = NewEngine(Config{Every: time.Second, Window: time.Minute}) // UseEnrich unset
+	if challengeSolveEnricher.Load() != nil {
+		t.Fatal("an engine built without an enricher left the previous one wired")
 	}
 }
 
@@ -274,9 +286,10 @@ func startVerifyServer(t *testing.T) (string, *verifyCapture) {
 	})
 
 	capt := &verifyCapture{}
+	prevSolved, prevReject := challengeSolvedHook, challengeV2RejectHook
 	SetChallengeSolvedHook(func(s ChallengeSolve) { capt.mu.Lock(); capt.solved = append(capt.solved, s); capt.mu.Unlock() })
 	SetChallengeV2RejectHook(func(s ChallengeSolve) { capt.mu.Lock(); capt.rejects = append(capt.rejects, s); capt.mu.Unlock() })
-	t.Cleanup(func() { SetChallengeSolvedHook(nil); SetChallengeV2RejectHook(nil) })
+	t.Cleanup(func() { SetChallengeSolvedHook(prevSolved); SetChallengeV2RejectHook(prevReject) })
 
 	srv := NewChallengeServer(nil)
 	if err := srv.Start(context.Background(), "127.0.0.1:0"); err != nil {

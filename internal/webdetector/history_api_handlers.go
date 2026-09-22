@@ -40,6 +40,25 @@ type historyEventView struct {
 	ASNName string `json:"asn_name,omitempty"`
 }
 
+// scopedRedactedPayloadKeys are the history payload keys a scoped caller never
+// sees on this surface. The ONE list — docs/endpoint_scope_inventory.md mirrors
+// it; redactScopedHistoryRows explains each entry.
+var scopedRedactedPayloadKeys = map[string]struct{}{
+	"sig": {},
+	"ptr": {},
+}
+
+// hasAdminOnlyKey reports whether a payload carries any key in
+// scopedRedactedPayloadKeys, so rows without one are passed through uncopied.
+func hasAdminOnlyKey(p map[string]interface{}) bool {
+	for k := range scopedRedactedPayloadKeys {
+		if _, present := p[k]; present {
+			return true
+		}
+	}
+	return false
+}
+
 // redactScopedHistoryRows strips admin-only payload keys from history rows
 // before they leave the endpoint for a SCOPED (cPanel) caller. Admin callers
 // see the rows untouched.
@@ -56,13 +75,15 @@ type historyEventView struct {
 // for is admin/MCP.
 //
 // The second is payload.ptr — the solving client's reverse DNS, on
-// challenge_solved and challenge_v2_reject rows. Same reasoning, same default:
-// anyone holding the IP can resolve it, but this surface has never carried a
-// PTR (its enrich=1 read path deliberately stops at country/ASN), so a PTR
-// crossing to scoped callers would be a new category and does not do so by
-// accident. Country and ASN are NOT stripped: enrich=1 already hands them to
-// scoped callers. Note the name clash — sig.ptr (a pointer-event count, inside
-// sig) is gone with sig; this is the top-level payload.ptr.
+// challenge_solved and challenge_v2_reject rows. This one is defence in depth,
+// NOT a boundary: scoped callers already get a per-IP PTR for their own vhosts
+// from /api/v1/webdet/drilldown (HostDetail) and /analyze-host, and anyone
+// holding the IP can resolve it. It is stripped here only so the scoped view
+// of history rows stays what it was before these rows carried one; nothing
+// operational depends on it (FP hunting is admin/MCP). Don't read it as "PTR
+// is admin-only". Country and ASN are NOT stripped: enrich=1 already hands
+// them to scoped callers. Note the name clash — sig.ptr (a pointer-event
+// count, inside sig) goes with sig; this is the top-level payload.ptr.
 //
 // The payload map is copied rather than edited so the caller's own map is
 // never mutated, but note the LIMIT of that: the slice element is reassigned
@@ -72,22 +93,6 @@ type historyEventView struct {
 // the first scoped request would strip sig from the cached row for every
 // later admin/MCP read. Keep the key list in sync with
 // docs/endpoint_scope_inventory.md.
-// scopedRedactedPayloadKeys are the history payload keys a scoped caller never
-// sees. The ONE list — docs/endpoint_scope_inventory.md mirrors it.
-var scopedRedactedPayloadKeys = map[string]struct{}{
-	"sig": {},
-	"ptr": {},
-}
-
-func hasAdminOnlyKey(p map[string]interface{}) bool {
-	for k := range scopedRedactedPayloadKeys {
-		if _, present := p[k]; present {
-			return true
-		}
-	}
-	return false
-}
-
 func redactScopedHistoryRows(r *http.Request, rows []HistoryEvent) {
 	if IsAdminRequest(r) {
 		return

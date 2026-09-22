@@ -664,10 +664,14 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   built by the same payload builder as `challenge_solved`, so the two
   populations compare field for field — `detection_history
   type=challenge_v2_reject node="all"` is the fleet FP-hunting query. Every
-  solve and reject line also ends in `cc=`/`asn=`/`asn_name=`/`ptr=`: the
-  client's network identity, resolved ONCE at verify through the enricher's
-  cached-or-async path (never blocks verify on reverse DNS), each key absent
-  when unresolved — and `ptr` also when the address has none. The history rows
+  solve and reject line also carries `cc=`/`asn=`/`asn_name=`/`ptr=` — at the
+  end of the reject line and of the fallback solved writer, and just before
+  the legacy ` - (AS…, Country)` tail on the hook-written solved line, which
+  stays last for tooling that reads it. That is the client's network
+  identity, resolved ONCE at verify without ever blocking it: country/ASN from
+  a live mmdb read (the enricher's cached record can be up to a day stale),
+  PTR from the cached-or-async path. Each key is absent when unresolved — and
+  `ptr` also when the address has none. The history rows
   carry the same as `country`/`country_iso`/`asn`/`asn_name`/`ptr`. Mind the
   name clash: top-level `ptr=` is reverse DNS; `sig=ptr:` is a pointer-event
   count. Log/corpus only — nothing scores on network identity. This is the corpus half of the table above: the

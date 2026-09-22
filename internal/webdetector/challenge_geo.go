@@ -20,17 +20,19 @@ import (
 // rejects were the one population with no durable row at all. Log/corpus
 // only: nothing scores or gates on these fields.
 
-// challengeSolveEnricher maps a solving client's IP to its enrichment. Wired
-// once at engine start from the enricher's cached-or-async lookup
-// (SetChallengeSolveEnricher). nil leaves every geo field empty — fail-open,
+// challengeSolveEnricher maps a solving client's IP to its enrichment. Wired on
+// every engine build (SetChallengeSolveEnricher, engine.go) and cleared when
+// that engine has no enricher; nil leaves every geo field empty — fail-open,
 // the solve itself is never affected.
 //
-// Cached-or-async is a hard requirement, not a preference: verify is on the
-// request path, and a cold reverse lookup can take up to a second. A cache hit
-// returns the full record (PTR included); a miss returns country/ASN from the
-// local mmdb in microseconds and dispatches the reverse lookup for next time.
-// The page load that served this challenge already went through the bridge's
-// cached-or-async path, so by verify the full record is usually warm.
+// It must never block: verify is on the request path, and a cold reverse
+// lookup can take up to a second. So the engine wires it as two non-blocking
+// halves — country/ASN from a live mmdb read (microseconds, no DNS; the cached
+// record could be up to a day stale), PTR from the cached-or-async path
+// (served when warm, resolved in the background otherwise). The page load that
+// served this challenge already went through the bridge, so by verify the PTR
+// is usually warm. "Once" is per record: when a country/ASN policy is armed,
+// the verify-side arm check (GeoPolicyActionForIP) does its own lookup too.
 var challengeSolveEnricher atomic.Pointer[func(ip string) enrich.Result]
 
 // SetChallengeSolveEnricher installs the resolver behind the solve's network

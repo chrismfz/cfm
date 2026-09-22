@@ -669,12 +669,26 @@ func NewEngine(cfg Config) *Engine {
 
 	// Network identity for every solve and Rung-1 reject (challenge_geo.go):
 	// country / ASN / PTR on the [challenge] lines and history rows, for
-	// false-positive hunting. Same cached-or-async path — never blocks verify.
+	// false-positive hunting. Neither half can block verify:
+	//   - country/ASN from LookupGeoFast: a live mmdb read (microseconds, no
+	//     DNS), exactly what the solved line's " - (AS…, Country)" tail always
+	//     used. NOT the cached record — that is kept for up to cacheTTL (24h)
+	//     and an mmdb refresh does not purge it, so it could show a day-stale
+	//     or even empty answer (a Result cached before the mmdb arrived).
+	//   - PTR from LookupCachedOrAsync: served from cache when warm, else
+	//     resolved in the background for a later solve.
+	// Set on EVERY engine build, cleared when this one has no enricher: the
+	// factory rebuilds the engine on each reload, and a reload that turns
+	// enrichment off must not leave the previous engine's enricher wired.
 	if e.enr != nil {
 		enr := e.enr
 		SetChallengeSolveEnricher(func(ip string) enrich.Result {
-			return enr.LookupCachedOrAsync(ip)
+			r := enr.LookupGeoFast(ip)
+			r.PTR = enr.LookupCachedOrAsync(ip).PTR
+			return r
 		})
+	} else {
+		SetChallengeSolveEnricher(nil)
 	}
 
 	// Vhost-arm lookup for the same verify gate (arm-surfaces slice A): a

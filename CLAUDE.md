@@ -457,12 +457,15 @@ so a passed-under-arm solve is greppable, not mistaken for a plain v1 one;
 `sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` is the report AS
 REPORTED — mv/hc/dm/dpr/raf corpus-only and scored by nothing, ptr/tch/key
 also the no_input amplifier's inputs; absent keys = not reported, never a
-fabricated zero; since 2026-09-22 every solve AND reject line also ends in
-`cc=`/`asn=`/`asn_name=`/`ptr=`, resolved once at verify, cached-or-async —
+fabricated zero; since 2026-09-22 every solve AND reject line also carries
+`cc=`/`asn=`/`asn_name=`/`ptr=`, resolved once at verify — country/ASN from a
+live mmdb read (the cached record can be a day stale), PTR cached-or-async;
 top-level `ptr=` is reverse DNS, NOT `sig=ptr:` — and a reject writes its own
 `challenge_v2_reject` history row, never `challenge_solved`, so
 `detection_history type=challenge_v2_reject node="all"` is the FP-hunting
-query; payload `ptr`, like `sig`, is admin-only on the scoped surface), and
+query; payload `ptr` is stripped from scoped history rows like `sig`, but as
+defence in depth only — drilldown/analyze-host already show scoped callers a
+per-IP PTR, so it is NOT an admin-only datum), and
 for an armed `challenge_v2` fingerprint a failing solve earns NO clearance
 (`result=v2_reject`, retry-able with backoff) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
