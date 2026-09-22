@@ -66,6 +66,30 @@ back-filled here — see the git/PR history for that period.
   Log and corpus only: no tell, weight or threshold changed, and nothing
   scores on network identity.
 
+### Fixed
+- **The daemon could crash (SIGSEGV) when the GeoLite2 databases were
+  refreshed.** CFM's own MaxMind updater checks daily and installs a new
+  ASN/City `.mmdb` as often as every ~3 days; each enricher in the daemon then
+  reopens the files and closes the old ones on its own. The readers are
+  memory-mapped, and closing one unmaps it, but a lookup that had already
+  picked up the old reader could still be reading from it: a read of unmapped
+  memory, which Go cannot recover from (`fatal error: fault` /
+  `signal SIGSEGV`). Every challenge solve reads the database, and so does
+  every lookup for an address not yet in the enrichment cache (the edge's
+  country fallback, ASN policies, the detectors), so a busy node only needed
+  one of them to overlap a refresh. Reproduced before fixing, with a real
+  memory-mapped test database generated to the MaxMind spec, within two
+  seconds (usually under one) of lookups racing refreshes. Lookups now hold
+  the reader lock for the whole read, and an old reader is closed only once
+  nothing can still be reading it. A lookup during a refresh now sees either
+  the old or the new database, never a closed one. Previously a lookup that
+  hit the just-closed database got an error and returned empty country/ASN —
+  and the full lookup path then cached that empty answer for up to 24h.
+  The same change removed a write lock that every enrichment cache miss used
+  to take just to check whether a refresh was due; in a synthetic, miss-heavy
+  benchmark (`BenchmarkLookupGeoFastUnderMisses`) fast-path lookups got ~2.5×
+  faster (~2.8µs → ~1.1µs each). No configuration change.
+
 ## 2026.09.22
 
 ### Fixed
