@@ -323,9 +323,8 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 	// trail beyond the generic api.log request line — a scoped customer
 	// could force (or clear) UNDER_ATTACK on their vhost invisibly. Record
 	// it like the manual arm/disarm: a CHALLENGES log line and a history
-	// event, both carrying the actor. (The override itself stays un-TTL'd —
-	// documented residual in the master plan, pending a TTL-or-admin-only
-	// decision.)
+	// event, both carrying the actor (and ttl_sec when the override is
+	// TTL-bound, see overrideTTL above).
 	actor := actorFromScope(scope)
 	reason := "attack_cleared"
 	if on {

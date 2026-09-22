@@ -186,7 +186,7 @@ type attackVhost struct {
 	// (slice-D residual, resolved by operator decision 2026-09-22).
 	overrideExpires time.Time
 	suppressUntil   time.Time
-	evidence      string // last transition's evidence (kept consistent with `on`)
+	evidence        string // last transition's evidence (kept consistent with `on`)
 }
 
 // underAttackTracker holds the per-vhost state machine and the solve-rate feed.
@@ -251,6 +251,7 @@ func (t *underAttackTracker) underAttackHosts() []string {
 	if t == nil {
 		return nil
 	}
+	now := time.Now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var out []string
@@ -258,7 +259,14 @@ func (t *underAttackTracker) underAttackHosts() []string {
 		if st == nil {
 			continue
 		}
-		if st.override == +1 || (st.override == 0 && st.on) {
+		// Same expiry treatment as VhostAttackState: an expired TTL-bounded
+		// forced-ON override counts only via its auto state (review finding —
+		// the two read paths must report the same truth).
+		override := st.override
+		if override == +1 && !st.overrideExpires.IsZero() && !now.Before(st.overrideExpires) {
+			override = 0
+		}
+		if override == +1 || (override == 0 && st.on) {
 			out = append(out, host)
 		}
 	}

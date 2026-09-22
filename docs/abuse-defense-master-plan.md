@@ -368,7 +368,10 @@ already opened.
           24h ceiling as the panic arm — expiry returns the vhost to
           AUTO control via the tick (st.on stays true, so the vhost
           leaves by the normal exit rules, not mid-attack) and the read
-          path honours it immediately; admin overrides stay unbounded;
+          paths honour it immediately; admin overrides stay unbounded.
+          The SAME re-arm residual as the panic arm applies and is
+          accepted: a scoped on=1 every <24h keeps the override standing
+          (own vhost, audited per re-arm);
           the scoped Tier picker on the
           WebDetector overview page pre-existed via slice A under the
           same server-side scope checks.
