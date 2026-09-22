@@ -18,12 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
-- **Scoped challenge TTL ceiling (master plan "arm surfaces" slice D).** A
-  scoped (cPanel customer) token arming the manual challenge on its own
-  vhost is now clamped to 24h (`ttl_capped: true` in the response, with the
-  effective expiry) — the customer panic button is a temporary shield, not
-  standing configuration. Admin/CLI callers are uncapped. Own-vhost-only and
-  fail-closed scope checks unchanged.
+- **Customer "Emergency challenge" panic button (master plan "arm surfaces"
+  slice D).** The vhost-controls page (`/cfm-admin/webdetector/controls/` —
+  the page the cPanel plugin opens) gains an arm/disarm card: pick a vhost,
+  Standard or Strict (v2) mode, 1h/6h/24h, and every visitor of that vhost
+  gets the interactive challenge for the chosen window. Scoped (customer)
+  arms are limited to their own vhosts (fail-closed) and clamped to 24h
+  (`ttl_capped: true` in the response, with the effective expiry) — a
+  temporary shield, not standing configuration; admin/CLI callers are
+  uncapped. Single-vhost customers get their host preselected.
+- **Manual challenge audit: history events now record the rung and the
+  actor.** `challenge_vhost_manual_on/off` carry `payload.rung` ("v1"/"v2";
+  a missing key means a pre-upgrade event) and `payload.actor`
+  ("admin"/"scoped"), and the CHALLENGES log line gained `actor=` — "who
+  armed v2 on this vhost" no longer needs a timestamp join against
+  cfm.api.log.
 - **WAF rule tier `challenge_v2` (master plan "arm surfaces" slice C).** The
   promotion ladder gains a rung between challenge and block:
   `logonly → challenge → challenge_v2 → block`, set per rule in

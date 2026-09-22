@@ -17,6 +17,17 @@ export const controlsMixin = {
       vhostOverview: null,
       vhostOverviewHost: "",
       vhostOverviewHours: 24,
+      // Emergency challenge ("panic button", arm-surfaces slice D): ARMS the
+      // interactive challenge for every visitor of one vhost — distinct from
+      // the table's Challenge ON/OFF, which enables/disables the challenge
+      // ENGINE (the exclude list). Status comes from the one scoped-readable
+      // vhost surface (v1/challenge/vhost/status), a single request for the
+      // selected host — never a per-row fan-out.
+      panicHost: "",
+      panicTier: "v1", // "v1" plain | "v2" strict (humanity-gated at verify)
+      panicTTL: "1h",  // scoped callers are server-clamped to 24h (ttl_capped)
+      panicStatus: null,
+      panicMsg: "",
     };
   },
 
@@ -185,6 +196,12 @@ export const controlsMixin = {
       const qs = scoped ? `?vhost=${encodeURIComponent(scoped)}` : "";
       const payload = await this.fetchJSONSafe(`v1/webdet/vhosts${qs}`, { rows: [] });
       this.vhostControls = this.extractRows(payload, "rows");
+      // A single-vhost scope (the typical cPanel customer) preselects the
+      // panic target and loads its status, so the card is one click away.
+      if (!this.panicHost && this.vhostControls.length === 1) {
+        this.panicHost = String(this.vhostControls[0]?.host || "");
+        if (this.panicHost) await this.refreshPanicStatus();
+      }
     },
     async toggleVhostProtection(row, kind) {
       const host = String(row?.host || "").trim();
@@ -265,6 +282,64 @@ export const controlsMixin = {
       } catch (err) {
         this.actionMsg = `Under-attack override failed for ${host}: ${err}`;
         console.error("[cfm-admin] under-attack toggle failed", host, err);
+      }
+    },
+
+    // ── Emergency challenge (panic button, slice D) ────────────────────
+    // Arm = v1/challenge/vhost/add (scoped: own vhosts only, TTL clamped to
+    // 24h server-side — a ttl_capped response is surfaced, never hidden).
+    // Disarm = v1/challenge/vhost/remove. Both are scoped self-service
+    // writes (core.js isScopedSelfServiceWrite allowlists v1/challenge/vhost/).
+    async refreshPanicStatus() {
+      const host = String(this.panicHost || "").trim();
+      if (!host) { this.panicStatus = null; return; }
+      try {
+        this.panicStatus = await this.fetchJSONSafe(
+          `v1/challenge/vhost/status?host=${encodeURIComponent(host)}`,
+          null,
+        );
+      } catch (_) { this.panicStatus = null; }
+    },
+    panicStatusLine() {
+      const s = this.panicStatus;
+      if (!s) return "";
+      if (s.manual_active) {
+        const rung = s.rung === "v2" ? "strict (v2)" : "standard";
+        const until = s.expires_at ? new Date(s.expires_at).toLocaleString() : "?";
+        return `Challenge ACTIVE (${rung}) until ${until}`;
+      }
+      if (s.auto_active) return "Auto-challenge active (scorer-driven); arming makes it manual.";
+      return "No manual challenge active.";
+    },
+    async panicArm() {
+      const host = String(this.panicHost || "").trim();
+      if (!host) { this.panicMsg = "Pick a vhost first."; return; }
+      try {
+        const res = await this.postJSON("v1/challenge/vhost/add", {
+          host,
+          ttl: this.panicTTL,
+          rung: this.panicTier,
+          reason: "panic-button",
+        });
+        const rung = res?.rung === "v2" ? "strict (v2)" : "standard";
+        this.panicMsg = `Challenge armed on ${host} (${rung}, ${res?.ttl || this.panicTTL})` +
+          (res?.ttl_capped ? " — requested duration was capped to the 24h customer limit" : "");
+        await this.refreshPanicStatus();
+      } catch (err) {
+        this.panicMsg = `Arm failed for ${host}: ${err}`;
+        console.error("[cfm-admin] panic arm failed", host, err);
+      }
+    },
+    async panicDisarm() {
+      const host = String(this.panicHost || "").trim();
+      if (!host) { this.panicMsg = "Pick a vhost first."; return; }
+      try {
+        await this.postJSON(`v1/challenge/vhost/remove?host=${encodeURIComponent(host)}`, {});
+        this.panicMsg = `Challenge disarmed on ${host}`;
+        await this.refreshPanicStatus();
+      } catch (err) {
+        this.panicMsg = `Disarm failed for ${host}: ${err}`;
+        console.error("[cfm-admin] panic disarm failed", host, err);
       }
     },
 

@@ -37,6 +37,16 @@ type chalVhostAddResponse struct {
 	TTLCapped bool `json:"ttl_capped,omitempty"`
 }
 
+// actorFromScope maps a request's vhost scope to the audit actor recorded on
+// manual arm/disarm history events: nil scope = admin/loopback, non-nil =
+// scoped token (vhostScopeFromContext semantics).
+func actorFromScope(scope map[string]struct{}) string {
+	if scope == nil {
+		return "admin"
+	}
+	return "scoped"
+}
+
 // scopedMaxChallengeTTL caps how long a SCOPED (cPanel customer) token may arm
 // a manual challenge on its own vhost (master plan slice D: the panic button
 // is a temporary shield, not a permanent config — a customer who wants a
@@ -155,7 +165,7 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	e.ManualChallengeVhost(req.Host, ttl, req.Reason, rung)
+	e.ManualChallengeVhostAs(req.Host, ttl, req.Reason, rung, actorFromScope(scope))
 
 	writeJSON(w, http.StatusOK, chalVhostAddResponse{
 		Host:      req.Host,
@@ -188,12 +198,13 @@ func (e *Engine) handleChallengeVhostRemove(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Scope check: scoped tokens may only remove challenge for their own vhosts.
-	if !vhostAllowed(host, vhostScopeFromContext(r.Context())) {
+	scope := vhostScopeFromContext(r.Context())
+	if !vhostAllowed(host, scope) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
 
-	e.ClearManualChallengeVhost(host)
+	e.ClearManualChallengeVhostAs(host, actorFromScope(scope))
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"host":   host,

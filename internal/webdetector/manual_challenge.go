@@ -283,11 +283,26 @@ func (e *Engine) ManualChallengeVhost(host string, ttl time.Duration, reason, ru
 		reason = "manual"
 	}
 
+	e.manualChallengeVhostRecord(host, ttl, reason, rung, "")
+}
+
+// ManualChallengeVhostAs is ManualChallengeVhost with the acting principal
+// ("admin" | "scoped"; "" = unknown/legacy caller) recorded in the audit
+// trail. Slice D closed a real gap here: the history event carried neither
+// the actor nor the rung, so "who armed v2 on this vhost" needed a
+// timestamp join of cfm.api.log against the history DB. The API handlers
+// pass the actor from the request scope; internal callers may use the
+// plain wrapper.
+func (e *Engine) ManualChallengeVhostAs(host string, ttl time.Duration, reason, rung, actor string) {
+	e.manualChallengeVhostRecord(host, ttl, reason, rung, actor)
+}
+
+func (e *Engine) manualChallengeVhostRecord(host string, ttl time.Duration, reason, rung, actor string) {
 	e.manualChal.set(host, ttl, reason, rung)
 
 	logging.LogfCHALLENGES(
-		"[challenge][vhost] action=manual_on host=%s ttl=%s reason=%s rung=%s",
-		host, ttl, reason, rungOrV1(rung),
+		"[challenge][vhost] action=manual_on host=%s ttl=%s reason=%s rung=%s actor=%s",
+		host, ttl, reason, rungOrV1(rung), actorOrDash(actor),
 	)
 
 	// NginxBridge: push immediately so OpenResty reacts without waiting for a tick.
@@ -299,17 +314,37 @@ func (e *Engine) ManualChallengeVhost(host string, ttl time.Duration, reason, ru
 	if e.chalAPI != nil {
 		e.chalAPI.RecordVhostManual(host, true, ttl, reason)
 	}
-	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_manual_on", Host: host, Mode: "manual", Reason: reason, TTLSec: int(ttl / time.Second)})
+	// Rung always recorded (v1 explicit, so absence of the key means an event
+	// from before this field existed, never "v1"); actor only when known.
+	payload := map[string]interface{}{"rung": rungOrV1(rung)}
+	if actor != "" {
+		payload["actor"] = actor
+	}
+	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_manual_on", Host: host, Mode: "manual", Reason: reason, TTLSec: int(ttl / time.Second), Payload: payload})
+}
+
+// actorOrDash renders the audit actor for log lines ("-" = unknown).
+func actorOrDash(actor string) string {
+	if actor == "" {
+		return "-"
+	}
+	return actor
 }
 
 // ClearManualChallengeVhost removes the runtime manual challenge for host —
 // cleared at the edge immediately via the bridge.
 func (e *Engine) ClearManualChallengeVhost(host string) {
+	e.ClearManualChallengeVhostAs(host, "")
+}
+
+// ClearManualChallengeVhostAs is ClearManualChallengeVhost with the acting
+// principal recorded (see ManualChallengeVhostAs).
+func (e *Engine) ClearManualChallengeVhostAs(host, actor string) {
 	wasActive := e.manualChal.clear(host)
 
 	logging.LogfCHALLENGES(
-		"[challenge][vhost] action=manual_off host=%s was_active=%v",
-		host, wasActive,
+		"[challenge][vhost] action=manual_off host=%s was_active=%v actor=%s",
+		host, wasActive, actorOrDash(actor),
 	)
 
 	if e.nginxBridge != nil {
@@ -319,7 +354,11 @@ func (e *Engine) ClearManualChallengeVhost(host string) {
 	if e.chalAPI != nil {
 		e.chalAPI.RecordVhostManual(host, false, 0, "manual_off")
 	}
-	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_manual_off", Host: host, Mode: "manual", Reason: "manual_off"})
+	ev := HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_manual_off", Host: host, Mode: "manual", Reason: "manual_off"}
+	if actor != "" {
+		ev.Payload = map[string]interface{}{"actor": actor}
+	}
+	e.appendHistory(ev)
 }
 
 // IsManualChallengeActive returns whether host has an active (non-expired)

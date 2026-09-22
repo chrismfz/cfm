@@ -317,11 +317,36 @@ already opened.
           resume path included. Version-skew hazard documented in
           docs/waf.md: an OLDER edge maps the unknown mode to `disabled` —
           upgrade before setting the tier.
-        - [ ] **D — scoped customer self-arm** (cPanel plugin "panic
-          button"): the FIRST scoped WRITE action, so it rides the hard
-          auth boundary — central validator, fail-closed, challenge tiers
-          only, OWN vhosts only, TTL cap (~24h). Last, and its own
-          security review.
+        - [x] **D — scoped customer self-arm — DONE 2026-09-22** (cPanel
+          "panic button"). The scoped WRITE path itself predated this
+          slice (slice A: `challenge/vhost/add|remove` take scoped tokens,
+          `vhostAllowed` fail-closed, challenge tiers only by
+          construction; generic per-identity rate limit 120 writes/60s).
+          Slice D added what was missing:
+          (1) **TTL cap** — a scoped arm is clamped to
+          `scopedMaxChallengeTTL` (24h), clamp-and-report
+          (`ttl_capped: true` + effective expiry in the response), admin
+          uncapped;
+          (2) **audit** — `challenge_vhost_manual_on/off` history events
+          now carry `payload.rung` (explicit "v1"; absent key = pre-D
+          event) and `payload.actor` ("admin"|"scoped" from the request
+          scope; `ManualChallengeVhostAs`/`ClearManualChallengeVhostAs`),
+          and the CHALLENGES log line gained `actor=` — "who armed v2"
+          no longer needs a cfm.api.log timestamp join;
+          (3) **the surface** — an "Emergency challenge" card on
+          `/cfm-admin/webdetector/controls/` (the page the cPanel plugin
+          iframe lands on, which had NO arm control): vhost picker,
+          Standard/Strict(v2) mode, 1h/6h/24h duration, arm/disarm,
+          status from the one scoped-readable
+          `challenge/vhost/status` (single request, no per-row fan-out);
+          single-vhost scopes preselect their host. Copy explicitly
+          distinguishes it from the adjacent Challenge ON/OFF engine
+          toggle (recon flagged the naming trap). Accepted residuals:
+          no per-vhost flap throttle beyond the generic 120/60s write
+          bucket (arm/disarm flapping only affects the caller's own
+          vhost); the scoped Tier picker on the WebDetector overview
+          page pre-existed via slice A and is covered by the same
+          server-side scope checks.
 - [ ] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.

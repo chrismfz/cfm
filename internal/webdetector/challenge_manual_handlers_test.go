@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -173,5 +174,68 @@ func TestHandleChallengeVhostAdd_ScopedRoleWithoutScopeFailsClosed(t *testing.T)
 	e.handleChallengeVhostAdd(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("scoped role with no scope map must fail closed, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ── Slice D: manual arm/disarm history carries rung + actor ──────────────────
+// "Who armed v2 on this vhost" used to need a timestamp join of cfm.api.log
+// against the history DB; the history event now records both. Rung is always
+// present on manual_on (explicit "v1", so a missing key means a pre-slice-D
+// event, never "plain"); actor comes from the request scope.
+
+func TestManualChallengeHistoryCarriesRungAndActor(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.sqlite"), 30, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("NewHistoryStore: %v", err)
+	}
+	t.Cleanup(hs.Close)
+	e := &Engine{history: hs}
+	e.manualChal.init("")
+
+	// Scoped arm of a v2 challenge via the handler (actor derived from scope).
+	rr := httptest.NewRecorder()
+	e.handleChallengeVhostAdd(rr, scopedAddReq("/api/v1/challenge/vhost/add?host=tenant-a.example.com&ttl=1h&rung=v2"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped v2 arm failed: %d: %s", rr.Code, rr.Body.String())
+	}
+
+	evs, err := hs.QueryEvents("tenant-a.example.com", "", "challenge_vhost_manual_on", 5)
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("manual_on events: %v (err=%v)", evs, err)
+	}
+	if got := evs[0].Payload["rung"]; got != "v2" {
+		t.Fatalf("manual_on payload rung = %#v, want v2", got)
+	}
+	if got := evs[0].Payload["actor"]; got != "scoped" {
+		t.Fatalf("manual_on payload actor = %#v, want scoped", got)
+	}
+
+	// Admin disarm (nil scope) records actor=admin.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/remove?host=tenant-a.example.com", nil)
+	rr = httptest.NewRecorder()
+	e.handleChallengeVhostRemove(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("admin remove failed: %d: %s", rr.Code, rr.Body.String())
+	}
+	evs, err = hs.QueryEvents("tenant-a.example.com", "", "challenge_vhost_manual_off", 5)
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("manual_off events: %v (err=%v)", evs, err)
+	}
+	if got := evs[0].Payload["actor"]; got != "admin" {
+		t.Fatalf("manual_off payload actor = %#v, want admin", got)
+	}
+
+	// The legacy wrapper (internal callers) records rung but no actor key.
+	e.ManualChallengeVhost("internal.example.com", time.Hour, "manual", "")
+	evs, _ = hs.QueryEvents("internal.example.com", "", "challenge_vhost_manual_on", 5)
+	if len(evs) != 1 {
+		t.Fatalf("wrapper manual_on events: %v", evs)
+	}
+	if got := evs[0].Payload["rung"]; got != "v1" {
+		t.Fatalf("wrapper payload rung = %#v, want explicit v1", got)
+	}
+	if _, ok := evs[0].Payload["actor"]; ok {
+		t.Fatalf("wrapper must not fabricate an actor, got %#v", evs[0].Payload["actor"])
 	}
 }
