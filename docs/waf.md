@@ -759,6 +759,9 @@ Current assignments:
 1xx — Path / traversal
   101  rule_traversal                  (block; promoted challenge→block 2026-09-05, see FP review below)
   102  rule_long_path_segment
+  103  rule_traversal_raw_path         (block, 2026-09-22; a `..` segment in the RAW $request_uri — ngx.var.uri,
+                                        which 101 scans, is already dot-segment-resolved by nginx. Added for the
+                                        WordPress permalink route of CVE-2026-87902; WAF_TRAVERSAL, autoblock held)
 
 2xx — Client identity
   201  rule_bad_ua

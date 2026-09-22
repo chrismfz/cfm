@@ -21,14 +21,19 @@ relevant output and stop (don't keep going past a hard failure).
 12. `./scripts/tests/check_shared_lua_layout.sh`
 13. `./scripts/tests/check_package_lua_delivery.sh`
 14. `./scripts/tests/check_rpm_spec_macros.sh`
-15. `./scripts/tests/stamp_changelog_test.sh`
-16. `./scripts/tests/release_notes_test.sh`
-17. `./scripts/tests/check_changelog_entry.sh` (CHANGELOG structure; the per-PR
+15. `./scripts/tests/check_site_cache_config.sh` (Site Cache bypass-by-default:
+   every `proxy_cache` location gated on `$cfm_cache_skip`)
+16. `./scripts/tests/stamp_changelog_test.sh`
+17. `./scripts/tests/release_notes_test.sh`
+18. `./scripts/tests/check_preflight_parity.sh` (this list and the CLAUDE.md §3
+   block == the commands `security.yml` runs)
+19. `./scripts/tests/check_changelog_entry.sh` (CHANGELOG structure; the per-PR
    "code changed → needs a `[Unreleased]` entry" leg only runs in CI)
 
-Keep this list in sync with `security.yml` — it drifted once and silently
-stopped covering seven gates, which is the same false-confidence failure the
-guardrails themselves exist to prevent.
+Keep this list in sync with `security.yml`. It drifted twice — once silently
+dropping seven gates, later missing `check_site_cache_config.sh` — the same
+false-confidence failure the guardrails exist to prevent; step 18 now fails CI
+on any difference, in either direction.
 
 If everything passes, say so explicitly. If something fails, summarize what
 broke and the most likely fix. Do not commit or push.

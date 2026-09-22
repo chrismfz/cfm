@@ -17,7 +17,64 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **WAF: WordPress core page-template traversal, CVE-2026-87902 (critical,
+  4.7.0–7.1.1).** Unauthenticated `pagename` traversal makes WordPress include a
+  local `.php` file outside the theme, and it becomes RCE via `pearcmd.php` on
+  hosts with `register_argc_argv = On` (default on cPanel with PHP < 8.5). Two
+  block rules cover it until the sites are updated:
+  - **Rule 10017** (`WAF_CVE`, armed) matches a `pagename` value with a `..`
+    segment, from the query string or a POST body. Each hit gets a 6h nft ban
+    and a `WAF/CVE-2026-87902` alert.
+  - **Rule 103** (`WAF_TRAVERSAL`) matches a `..` segment in the **raw** request
+    path. It closes a general blind spot: the WAF inspected nginx's decoded,
+    dot-segment-resolved `$uri`, while the origin receives the raw path, so the
+    pretty-permalink route (and any other raw-path traversal) was never seen.
+    The family's autoblock stays held, so a hit is a 403 without an alert.
+
+  The real fix is the WordPress update (7.1.2 / 7.0.6 / 6.9.9 … 4.7.37).
+  Setting `register_argc_argv = Off` removes the RCE step on hosts whose sites
+  cannot be updated.
+
 ### Added
+- **Site Cache — Tier B micro-cache stats labelling (Phase B3c).** Micro-cache
+  hits are now counted under their own `cfm_micro` zone total instead of being
+  folded into `cfm_static`: the edge `log_by_lua` labels each cache verdict by
+  the serving tier (`$cfm_upstream` — `cfm_apache_micro` vs `cfm_apache_static`),
+  so `cfm_stats.lua`'s long-standing `cfm_micro` zone reader (previously always
+  zero — nothing wrote that key) now reflects real micro effectiveness. The
+  per-vhost HIT/MISS/BYPASS breakdown stays tier-agnostic on purpose (it answers
+  "is this vhost served from cache", either tier); a vhost armed micro-only reads
+  as pure micro stats. No behaviour change beyond the counter label; nothing
+  about what is cached changes.
+- **Site Cache — Tier B micro-cache activation gate (Phase B3b, dry-run default).**
+  Wires the `cfm.lua` **Step 4 plain-allow** path to the Tier B micro gate: for
+  an armed vhost, an anonymous, cacheable
+  (GET/HEAD, non-`/acctxfer*`, no app-session cookie) request **over HTTPS** is
+  routed via `ngx.exec` to its `@cfm_micro_<n>s` bucket and served from
+  micro-cache. Gated behind a new **opt-in** knob `[webdetector]
+  MICRO_CACHE_ENFORCE` (**default 0 = dry-run**): with it off the gate is a
+  no-op (the would-cache verdict still shows on the debug `X-CFM-Cache` header),
+  so a binary/config upgrade never starts caching HTML on its own — even for a
+  vhost whose micro tier is already armed. The gate is `pcall`-guarded (a bug in
+  it can never break enforcement), HTTPS-only (the `@cfm_micro_*` locations exist
+  only in the HTTPS server, so a cleartext request proceeds uncached), and the
+  `SITE_CACHE=0` master switch still overrides it. Published to the edge via
+  `cfm_bridge_config.lua` (~10s, no proxy reload). Flip to `1` after validating
+  the cookie allowlist against your apps in dry-run. Only the Step 4 plain-allow
+  path is wired; the Step 2b clearance fast-path (the bulk of cleared traffic) is
+  deferred until the §5.5.1 clearance-cookie-across-`ngx.exec` ordering is
+  verified on a live edge. Per-vhost HIT/MISS/BYPASS stats land next.
+- **Site Cache — Tier B micro-cache internal locations (Phase B3a, inert).**
+  Adds the six per-bucket `@cfm_micro_<n>s` serving locations to the HTTPS server
+  of both edge confs — each `internal;` (unreachable by a direct request) and
+  wired to its `cfm_micro_<n>s` zone with its own `proxy_cache_valid 200 <n>s`,
+  the bypass-by-default gate, the only-200 rail, buffering ON and the
+  anti-stampede trio, i.e. the Tier A recipe at a micro TTL. **Still nothing
+  caches**: nothing `ngx.exec`s to these locations yet, so they are dead config
+  until Phase B3b adds the `cfm.lua` allow-path micro gate that routes to them.
+  The config guard now pins each micro location's rails + `internal;` + both-edge
+  parity; validated with a real `nginx -t`. No Go/packaging change.
 - **Site Cache — Tier B micro-cache foundation (Phase B1, inert).** Declares the
   six per-TTL micro-cache zones `cfm_micro_{1,2,5,10,30,60}s` in both edge confs
   and creates their `/var/cache/nginx/` dirs (daemon + both installers), so the
@@ -85,6 +142,17 @@ back-filled here — see the git/PR history for that period.
   scores on network identity.
 
 ### Fixed
+- **Turning web-detector enrichment off no longer leaves country/ASN
+  `challenge_v2` policies enforced at verify.** On every reload the web
+  detector is rebuilt, and each rebuild wired the verify-side geo lookup
+  (what lets an armed country/ASN `challenge_v2` policy reject a failing
+  solve) only when the new configuration HAD enrichment — it was never
+  cleared. So after a reload that turned enrichment off (`ENRICH = 0`), the
+  verify gate kept enforcing through the previous configuration's enricher, and kept that enricher (its GeoLite2 readers and
+  lookup caches) in memory. It now follows the current configuration: without
+  enrichment the verify-side geo check is off (fail-open, as documented), the
+  same as on a daemon started without it. Fingerprint policies and the
+  decision-path challenge floor are unchanged.
 - **nftlib firewall backend: a failed netlink call can no longer corrupt the
   next one, a stuck read can no longer freeze the firewall, and a read error
   is no longer mistaken for "nothing there".** The nftlib backend used one
@@ -125,6 +193,19 @@ back-filled here — see the git/PR history for that period.
   (`[firewall] engine=nftlib netlink <call> timed out after …`).
   Startup still fails immediately if netlink is unusable. Only nodes running
   `CFM_FIREWALL_ENGINE=nftlib` are affected.
+- **Files installed from the RPM all showed a modification date of May 4
+  2026.** On EL10, `rpmbuild` sets every packaged file's timestamp to the
+  newest entry in the spec's `%changelog` whenever that entry is older than
+  the file. That entry was hand-written on May 4 and never updated, so in
+  every later `.rpm` each file changed since then — most of
+  `/var/lib/cfm/lua/*.lua` — read "May 4" after an upgrade. Only the dates
+  were wrong: the contents were always the current release's. The top
+  `%changelog` entry is now dated automatically with the build date, the same
+  UTC date as the package version, so `rpm -q --changelog cfm` shows the build
+  itself. `make rpm` also sets the timestamp source to the build time, so
+  installed files keep their real modification times — the same as an EL8/9
+  build or the `.deb`. Applies from the next `.rpm` built; no action on the
+  servers.
 - **The daemon could crash (SIGSEGV) when the GeoLite2 databases were
   refreshed.** CFM's own MaxMind updater checks daily and installs a new
   ASN/City `.mmdb` as often as every ~3 days; each enricher in the daemon then

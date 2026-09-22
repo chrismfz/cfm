@@ -81,9 +81,11 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_origin_ka_config.sh        # origin-keepalive 443 SNI-safety: keepalive 0 (OpenResty) + proxy_ssl_session_reuse off
 ./scripts/tests/check_shared_lua_layout.sh       # installer CFM_LUA_MANIFEST == configs/lua/*.lua (see §5)
 ./scripts/tests/check_package_lua_delivery.sh    # Lua ships ONLY as /var/lib/cfm/lua/*, package-owned (see §5)
-./scripts/tests/check_rpm_spec_macros.sh         # no unescaped %macro in rpm spec comments (see §5)
+./scripts/tests/check_rpm_spec_macros.sh         # no unescaped %macro in rpm spec comments + build-dated top %changelog entry (see §5)
 ./scripts/tests/check_site_cache_config.sh       # Site Cache bypass-by-default: every proxy_cache location gated on $cfm_cache_skip (see §6)
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
+./scripts/tests/release_notes_test.sh            # release-notes extractor (make release) regression test
+./scripts/tests/check_preflight_parity.sh        # this block + /preflight list == what security.yml runs
 ./scripts/tests/check_changelog_entry.sh         # CHANGELOG structure (locally); per-PR "code changed → needs entry" runs in CI
 ```
 
@@ -226,6 +228,22 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   That is what finally proved both the failure and the fix (and confirmed the
   package really does own 30 Lua modules with nothing under
   `/usr/share/cfm/configs/lua`).
+- **Never hand-date the top rpm `%changelog` entry.** EL10's rpm macros set
+  `source_date_epoch_from_changelog` and `clamp_mtime_to_source_date_epoch`:
+  with `SOURCE_DATE_EPOCH` unset, rpmbuild takes it from the newest
+  `%changelog` date and clamps every packaged file's mtime to it. A
+  hand-written `May 04 2026` entry made every file changed since then read
+  "May 4" in every later `.rpm` (EL8/9 builds and the `.deb` don't clamp, so
+  it looked EL-only and random). The top entry is `%{cfm_changelog_date}` —
+  `make rpm` passes Version's own date, a bare rpmbuild falls back to today — and
+  `make rpm` exports `SOURCE_DATE_EPOCH` = build time (unless already set), so
+  files keep real mtimes. Add hand-written entries BELOW the auto one, never
+  above: on any later day that is out of order, which EL9/EL10 report yet
+  still exit 0, silently dropping the rest of the changelog (EL8 fails).
+  `check_rpm_spec_macros.sh` enforces the top entry. To verify for real, run
+  `make -o build rpm` inside almalinux:10 (build `bin/cfm` on the host first)
+  — the bare-rpmbuild recipe above bypasses the Makefile, so it still clamps
+  today's files to 00:00 UTC.
 - **A guardrail that cannot run its matcher must FAIL, never report OK.**
   Seven `scripts/tests/check_*.sh` shell out to `ripgrep`, which the runner
   does not preinstall. `check_cli_transport.sh` piped `rg … || true`, so on CI
@@ -339,8 +357,9 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   `WAF_UPLOAD_CONTENT` (402), `WAF_WEBSHELL` since 2026-07-03 (413, the
   proper-noun drop-path subset), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305)
   and `WAF_AUTH_BURST` (510-512, the xmlrpc multicall / pingback / burst
-  rules) — all armed to 1 — plus `WAF_TRAVERSAL` since 2026-09-05 (rule 101,
-  **held at 0** through its burn-in, see below) — those are the only ones that
+  rules) — all armed to 1 — plus `WAF_TRAVERSAL` since 2026-09-05 (rule 101;
+  raw-path rule 103 since 2026-09-22; **held at 0** through its burn-in, see
+  below) — those are the only ones that
   can fire in Phase 1. The rendered `[waf_security]` template is derived from
   the same code defaults, so a fresh `detectors.conf` lists exactly these.
 - **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the

@@ -51,6 +51,12 @@ var wafRuleIDs = []WAFRule{
 	// cPanel/WHM/webmail ports too (7-day panel burn-in: 0 hits, six servers).
 	{ID: 101, Name: "rule_traversal", ReasonFamily: "WAF_TRAVERSAL", DefaultMode: "block"},
 	{ID: 102, Name: "rule_long_path_segment", ReasonFamily: "WAF_LONG_PATH", DefaultMode: "challenge"},
+	// 103 (2026-09-22): a `..` segment in the RAW request path — ngx.var.uri,
+	// which rule 101 scans, is already dot-segment-resolved by nginx, so the
+	// WordPress pretty-permalink route of CVE-2026-87902 was invisible. Block
+	// from day one for that CVE; WAF_TRAVERSAL, so its autoblock is held (403
+	// only). Web edge only: the panel gate passes no raw_uri.
+	{ID: 103, Name: "rule_traversal_raw_path", ReasonFamily: "WAF_TRAVERSAL", DefaultMode: "block"},
 
 	// 2xx client identity
 	// Mixed-mode: challenge is the parent default; score >= 99 is hard-blocked in Lua.
@@ -168,6 +174,9 @@ var wafRuleIDs = []WAFRule{
 	// 10015 intentionally skipped: the never-released, then removed vBulletin
 	// runMaths CVE-2026-61511 block rule (see WAF_CVE.md "Removed").
 	{ID: 10016, Name: "rule_cve_elementor_pro_form_upload", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	// 10017: CVE-2026-87902, WordPress core page-template traversal — a
+	// `pagename` query var (GET or POST) carrying a `..` segment. Armed.
+	{ID: 10017, Name: "rule_cve_wp_pagename_traversal", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

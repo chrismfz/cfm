@@ -12,7 +12,10 @@ package.loaded["cjson.safe"] = { decode = function() return nil end }
 -- Master SITE_CACHE gate stub (cfm_bridge_cfg). Default ON so the lookup/observe
 -- assertions below exercise the real path; flipped to false for the gate test.
 local _site_cache_on = true
-package.loaded["cfm_bridge_cfg"] = { get = function() return { site_cache = _site_cache_on } end }
+local _micro_enforce = false   -- Tier B enforce gate (opt-in; default dry-run)
+package.loaded["cfm_bridge_cfg"] = { get = function()
+  return { site_cache = _site_cache_on, micro_cache_enforce = _micro_enforce }
+end }
 
 local _header = {}
 local _now = 0            -- mutable clock (0 keeps schedule_refresh a no-op)
@@ -296,6 +299,51 @@ cache.observe()
 check(_header["X-CFM-Cache"] and not _header["X-CFM-Cache"]:find("microcache=", 1, true),
       "observe omits the microcache token for a static-only vhost")
 ngx.var.request_method = nil; ngx.var.uri = nil; ngx.var.http_cookie = nil
+
+-- ── Tier B micro-cache: the enforce gate (Phase B3b) ──────────────────────────
+-- micro_gate() returns the @cfm_micro_<n>s target to ngx.exec into, or nil to
+-- proceed uncached. DRY-RUN (enforce off) NEVER returns a target; HTTPS-only.
+local function reset_gate_vars()
+  ngx.var.cfm_cache_skip = "1"; ngx.var.cfm_cache_gen = "0"
+  ngx.var.scheme = "https"; ngx.var.request_method = "GET"; ngx.var.uri = "/"
+  ngx.var.http_cookie = nil
+end
+_site_cache_on = true
+
+-- dry-run: enforce OFF → nil, and the bypass gate is left untouched
+_micro_enforce = false
+reset_gate_vars(); ngx.var.host = "myip.gr"
+check(cache.micro_gate() == nil, "dry-run (MICRO_CACHE_ENFORCE off) → micro_gate returns nil (no exec)")
+check(ngx.var.cfm_cache_skip == "1", "dry-run leaves $cfm_cache_skip=1 (nothing cached)")
+
+-- enforce ON: an armed+anonymous GET over HTTPS routes to its bucket
+_micro_enforce = true
+reset_gate_vars(); ngx.var.host = "myip.gr"
+check(cache.micro_gate() == "@cfm_micro_1s", "enforce: myip.gr (micro ttl 1s) → @cfm_micro_1s")
+check(ngx.var.cfm_cache_skip == "0", "enforce: micro_gate opens the bypass gate ($cfm_cache_skip=0)")
+check(ngx.var.cfm_cache_gen == "3", "enforce: micro_gate stamps the purge generation")
+reset_gate_vars(); ngx.var.host = "www.myip.gr"
+check(cache.micro_gate() == "@cfm_micro_30s", "enforce: www.myip.gr (micro ttl 30s) → @cfm_micro_30s bucket")
+
+-- scheme gate: the micro locations exist only in the HTTPS server (B3a)
+reset_gate_vars(); ngx.var.scheme = "http"; ngx.var.host = "myip.gr"
+check(cache.micro_gate() == nil, "enforce: http scheme → nil (no @cfm_micro location on :80)")
+check(ngx.var.cfm_cache_skip == "1", "scheme-gated miss leaves the bypass gate closed")
+
+-- request-side rails still apply under enforce
+reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.http_cookie = "PHPSESSID=x"
+check(cache.micro_gate() == nil, "enforce: an app-session cookie → nil (bypass, never cached)")
+reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.request_method = "POST"
+check(cache.micro_gate() == nil, "enforce: POST → nil (GET/HEAD only)")
+reset_gate_vars(); ngx.var.host = "assets.cdn.example.com"
+check(cache.micro_gate() == nil, "enforce: static-only vhost → nil (micro tier not armed)")
+
+-- master kill switch beats enforce
+_site_cache_on = false
+reset_gate_vars(); ngx.var.host = "myip.gr"
+check(cache.micro_gate() == nil, "SITE_CACHE off → micro_gate nil even with enforce on")
+_site_cache_on = true; _micro_enforce = false
+ngx.var.scheme = nil; ngx.var.request_method = nil; ngx.var.uri = nil; ngx.var.http_cookie = nil
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")

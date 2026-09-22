@@ -60,7 +60,7 @@ jobs:
         run: ./scripts/tests/check_shared_lua_layout.sh
       - name: Enforce package Lua delivery invariants
         run: ./scripts/tests/check_package_lua_delivery.sh
-      - name: Reject unescaped RPM macros in spec comments
+      - name: Reject unescaped RPM macros in spec comments; require build-dated top %changelog
         run: ./scripts/tests/check_rpm_spec_macros.sh
       - name: Enforce Site Cache bypass-by-default config invariant
         run: ./scripts/tests/check_site_cache_config.sh
@@ -68,6 +68,8 @@ jobs:
         run: ./scripts/tests/stamp_changelog_test.sh
       - name: Release-notes extractor regression test
         run: ./scripts/tests/release_notes_test.sh
+      - name: Enforce /preflight + CLAUDE.md §3 gate lists == this workflow
+        run: ./scripts/tests/check_preflight_parity.sh
       # Lua syntax check + unit tests. luajit was installed above; both
       # targets bail out with a clear message if it ever goes missing.
       - name: Lua syntax check (configs/lua)

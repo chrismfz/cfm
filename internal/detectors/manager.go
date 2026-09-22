@@ -469,6 +469,14 @@ func (m *manager) maybeReload(parent context.Context) {
 				// header) fleet-wide in ~10s, without disarming any vhost, so
 				// re-arming is instant.
 				SiteCache: kvBool(wdKV, "SITE_CACHE", true),
+				// Tier B micro-cache ENFORCE gate (HTML micro-caching). Default
+				// OFF — an explicit opt-in, NOT a second kill switch: an upgrade
+				// must never start caching HTML on its own, even for a vhost whose
+				// micro tier is armed (CLAUDE.md §6 "adding X silently arms it").
+				// While off, cfm.lua's micro gate stays in DRY-RUN (verdict on the
+				// observe header, no ngx.exec, nothing stored); the operator sets
+				// MICRO_CACHE_ENFORCE=1 to activate after burn-in.
+				MicroCacheEnforce: kvBool(wdKV, "MICRO_CACHE_ENFORCE", false),
 			}
 			// Guard nonsense values; the Lua side re-guards but keep the
 			// published file sane. Idle must stay below Apache's
@@ -485,8 +493,8 @@ func (m *manager) maybeReload(parent context.Context) {
 			if err := sslcollector.WriteWebdetectorBridgeConfig(bridgeConfigPath, bridgeCfg, cfmGID); err != nil {
 				logging.Logf("[detectors] cfm_bridge_config.lua write failed path=%s err=%v", bridgeConfigPath, err)
 			} else {
-				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s panel_fp_policy_mode=%s post_clearance_cadence=%v fp_policy=%v site_cache=%v",
-					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PanelFPPolicyMode, bridgeCfg.PostClearanceCadence, bridgeCfg.FPPolicy, bridgeCfg.SiteCache)
+				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s panel_fp_policy_mode=%s post_clearance_cadence=%v fp_policy=%v site_cache=%v micro_cache_enforce=%v",
+					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PanelFPPolicyMode, bridgeCfg.PostClearanceCadence, bridgeCfg.FPPolicy, bridgeCfg.SiteCache, bridgeCfg.MicroCacheEnforce)
 			}
 		}
 	}
