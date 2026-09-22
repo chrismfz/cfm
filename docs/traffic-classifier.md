@@ -658,9 +658,19 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
   browser did not report. `mv`/`hc`/`dm`/`dpr`/`raf` are scored by nothing;
   `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, so logging
-  them makes that tell auditable. `result=v2_reject` lines carry `sig=` too —
-  a rejected solve is not published as a solved event, so its line is the only
-  place that population reaches the corpus. This is the corpus half of the table above: the
+  them makes that tell auditable. `result=v2_reject` lines carry `sig=` too.
+  A rejected solve is never published as a solved event (it cleared nothing);
+  since 2026-09-22 it writes its own `challenge_v2_reject` history row instead,
+  built by the same payload builder as `challenge_solved`, so the two
+  populations compare field for field — `detection_history
+  type=challenge_v2_reject node="all"` is the fleet FP-hunting query. Every
+  solve and reject line also ends in `cc=`/`asn=`/`asn_name=`/`ptr=`: the
+  client's network identity, resolved ONCE at verify through the enricher's
+  cached-or-async path (never blocks verify on reverse DNS), each key absent
+  when unresolved — and `ptr` also when the address has none. The history rows
+  carry the same as `country`/`country_iso`/`asn`/`asn_name`/`ptr`. Mind the
+  name clash: top-level `ptr=` is reverse DNS; `sig=ptr:` is a pointer-event
+  count. Log/corpus only — nothing scores on network identity. This is the corpus half of the table above: the
   signals listed there as ★★/★★★ candidates are measured and logged long
   before any of them is allowed to score, so a weight is set from real
   distributions rather than written from memory. `sig=` absent means nothing was

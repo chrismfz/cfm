@@ -44,7 +44,7 @@ type historyEventView struct {
 // before they leave the endpoint for a SCOPED (cPanel) caller. Admin callers
 // see the rows untouched.
 //
-// Today that is exactly payload.sig — the ChallengeV2 Rung-1 device readings
+// Two keys today. The first is payload.sig — the ChallengeV2 Rung-1 device readings
 // (hardwareConcurrency, deviceMemory, devicePixelRatio, pointer/touch/key
 // counts) collected by CFM's own challenge page. A tenant could measure the
 // same things from their own site's JS, so this is not a secret; it is
@@ -55,6 +55,15 @@ type historyEventView struct {
 // closed. Nothing is lost operationally: the burn-in readout that sig exists
 // for is admin/MCP.
 //
+// The second is payload.ptr — the solving client's reverse DNS, on
+// challenge_solved and challenge_v2_reject rows. Same reasoning, same default:
+// anyone holding the IP can resolve it, but this surface has never carried a
+// PTR (its enrich=1 read path deliberately stops at country/ASN), so a PTR
+// crossing to scoped callers would be a new category and does not do so by
+// accident. Country and ASN are NOT stripped: enrich=1 already hands them to
+// scoped callers. Note the name clash — sig.ptr (a pointer-event count, inside
+// sig) is gone with sig; this is the top-level payload.ptr.
+//
 // The payload map is copied rather than edited so the caller's own map is
 // never mutated, but note the LIMIT of that: the slice element is reassigned
 // in place, so this is safe only because QueryEvents builds a fresh
@@ -63,18 +72,33 @@ type historyEventView struct {
 // the first scoped request would strip sig from the cached row for every
 // later admin/MCP read. Keep the key list in sync with
 // docs/endpoint_scope_inventory.md.
+// scopedRedactedPayloadKeys are the history payload keys a scoped caller never
+// sees. The ONE list — docs/endpoint_scope_inventory.md mirrors it.
+var scopedRedactedPayloadKeys = map[string]struct{}{
+	"sig": {},
+	"ptr": {},
+}
+
+func hasAdminOnlyKey(p map[string]interface{}) bool {
+	for k := range scopedRedactedPayloadKeys {
+		if _, present := p[k]; present {
+			return true
+		}
+	}
+	return false
+}
+
 func redactScopedHistoryRows(r *http.Request, rows []HistoryEvent) {
 	if IsAdminRequest(r) {
 		return
 	}
-	const adminOnlyKey = "sig"
 	for i := range rows {
-		if _, present := rows[i].Payload[adminOnlyKey]; !present {
+		if !hasAdminOnlyKey(rows[i].Payload) {
 			continue
 		}
 		clean := make(map[string]interface{}, len(rows[i].Payload))
 		for k, v := range rows[i].Payload {
-			if k == adminOnlyKey {
+			if _, adminOnly := scopedRedactedPayloadKeys[k]; adminOnly {
 				continue
 			}
 			clean[k] = v
