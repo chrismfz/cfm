@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.22
+
 ### Fixed
 - **False "agent is down" alerts from nodes on the nftlib firewall backend.**
   Before every heartbeat the agent reads the firewall to report
@@ -56,8 +60,6 @@ back-filled here — see the git/PR history for that period.
   (`chown -R root:cfm` + `chmod -R g+rwX`), guarded by a cheap O(16) probe of the
   level-1 dirs so a healthy cache is never walked. Fleet-wide auto-heal on the
   next deploy; no operator action needed.
-
-## 2026.09.22
 
 ### Fixed
 - **`make release` could not build the rpm (`error: line 179: second %install`).**
