@@ -15,10 +15,11 @@ import (
 // challenge_v2_reject) all render the same answer.
 //
 // It exists for false-positive hunting on the ChallengeV2 rung. Before it, a
-// v2_reject line carried only the IP, so judging whether a rejected client was
-// a farm or a person took a separate manual lookup per address — and the
-// rejects were the one population with no durable row at all. Log/corpus
-// only: nothing scores or gates on these fields.
+// v2_reject line carried the score, tells, readings, grain, TLS fingerprint and
+// UA but no network identity, so judging whether a rejected client was a farm
+// or a person took a separate manual lookup per address — and the rejects were
+// the one population with no durable row at all. Log/corpus only: nothing
+// scores or gates on these fields.
 
 // challengeSolveEnricher maps a solving client's IP to its enrichment. Wired on
 // every engine build (SetChallengeSolveEnricher, engine.go) and cleared when
@@ -119,7 +120,8 @@ func (s ChallengeSolve) LegacyGeoTail() string {
 // Key names match the waf_trigger row (country / country_iso / asn / asn_name)
 // so one query shape reads both. Unlike waf_trigger, an unresolved field is
 // OMITTED rather than written as a zero: "asn": 0 would read as a resolved
-// answer. ptr is admin-only on the scoped surface — see
+// answer. ptr is stripped from scoped history rows as defence in depth only —
+// scoped callers already see a per-IP PTR via drilldown/analyze-host; see
 // redactScopedHistoryRows.
 func (s ChallengeSolve) addGeoPayload(p map[string]interface{}) {
 	if s.Country != "" {
