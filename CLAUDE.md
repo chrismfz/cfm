@@ -69,6 +69,7 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_logrotate_coverage.sh      # every CFM log path is rotated (see §5)
 ./scripts/tests/check_origin_ka_config.sh        # origin-keepalive 443 SNI-safety: keepalive 0 (OpenResty) + proxy_ssl_session_reuse off
 ./scripts/tests/check_shared_lua_layout.sh       # installer CFM_LUA_MANIFEST == configs/lua/*.lua (see §5)
+./scripts/tests/check_package_lua_delivery.sh    # Lua ships ONLY as /var/lib/cfm/lua/*, package-owned (see §5)
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
 ./scripts/tests/check_changelog_entry.sh         # CHANGELOG structure (locally); per-PR "code changed → needs entry" runs in CI
 ```
@@ -162,6 +163,21 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   `access.bad_request.log`, `cfm.clam.log`, `cfm.socket.log`, `ua_emergency.log`).
   Run `./scripts/tests/check_logrotate_coverage.sh --host` on a live server to
   see what is actually rotated there. See `docs/log-rotation.md`.
+- **Lua has exactly ONE delivery path: `/var/lib/cfm/lua/`, owned by the
+  package.** The Makefile stages `configs/lua/` there with `rsync --delete`
+  (that flag, not a PKGROOT wipe, is what makes a retired module leave the
+  package — `stage-pkgroot`, which the rpm path uses, never wipes), the rpm
+  `%install` copies `/var` from that staged tree, and `%files` owns each file — which is what makes an upgrade
+  install new modules, refresh changed ones and REMOVE ones a release dropped.
+  Never add a second copy or a second copier. Both existed once and both were
+  wrong: the rpm `%install` re-copied `configs/` unfiltered into
+  `/usr/share/cfm/configs/`, shipping ~900 KB of duplicate modules, and a
+  postinst loop then copied THOSE over the files the package had just
+  installed — while the "locally modified → backup" protection it advertised
+  could never fire, because rpm replaces the files before `%post` runs.
+  `check_package_lua_delivery.sh` pins all of it. A hand-edit under
+  `/var/lib/cfm/lua/` is overwritten on upgrade with no backup; the operator
+  edit surface is `/etc/cfm/*`.
 - **Match surrounding style.** Go packages are small and single-purpose;
   keep new code in the right package rather than widening `main.go`.
 - **`detectors.conf` scalar readers now tolerate an inline `;`/`#` comment.**

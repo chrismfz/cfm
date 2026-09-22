@@ -40,6 +40,18 @@ back-filled here — see the git/PR history for that period.
   overwritten on upgrade with no backup — that was always true, the loop never
   changed it. `rpm -V cfm` / `dpkg --verify cfm` report such edits. Edit
   `/etc/cfm/*`, never `/var/lib/cfm/lua/*`.
+- **New CI gate: the Lua delivery chain is now asserted, not assumed.**
+  `check_package_lua_delivery.sh` pins the invariants every upgrade depends on
+  — every rsync into the Lua payload carries `--delete`, which is what makes a
+  retired module actually leave the package (the deb target also wipes
+  `PKGROOT`; `stage-pkgroot`, the path the rpm uses, does not — so `--delete`
+  is the guarantee both rely on), no second copy of the modules anywhere under
+  `/usr/share/`, the rpm `%install` taking `/var` from the
+  staged tree, `%files` owning `/var/lib/cfm/lua/*` (unowned files are never
+  removed on upgrade), and nothing reintroducing a second copier. Nothing in
+  this chain had a test, which is how an unfiltered `cp -a configs` shipped a
+  duplicate Lua tree inside every rpm for months. Verified against each failure
+  mode by reintroducing it and watching the gate catch it.
 - **A released CHANGELOG heading was lost in a merge and is restored.** The
   `## 2026.09.22` heading was dropped while resolving an `[Unreleased]`
   conflict in #1453, which silently moved that whole released section back
