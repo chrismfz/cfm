@@ -29,9 +29,9 @@
 -- Each request that finds the cache stale schedules an ASYNC refresh via
 -- ngx.timer.at(0, ...) and serves with whatever cache it has. The bridge fetch
 -- never blocks the request path; a per-worker flag dedupes in-flight refreshes.
--- Tunable via env CFM_CACHE_REFRESH_SEC (default 60s). No nginx reload needed.
--- Bridge unreachable → keep the LAST KNOWN policy (fail-safe: no header rather
--- than a wrong one).
+-- Fixed 60s poll (no env, no knob — CFM is config-file driven, not env-driven).
+-- No nginx reload needed. Bridge unreachable → keep the LAST KNOWN policy
+-- (fail-safe: no header rather than a wrong one).
 
 local cjson = require "cjson.safe"
 
@@ -49,15 +49,21 @@ local _cache = {
 }
 local _last_refresh_at     = 0
 local _refresh_in_progress = false
-local _refresh_sec         = tonumber(os.getenv("CFM_CACHE_REFRESH_SEC") or "60") or 60
-if _refresh_sec < 1 then _refresh_sec = 1 end
+-- Fixed feed-poll interval. 60s matches the H3 sibling and needs no tuning for
+-- an observe-only phase. CFM is config-file driven, not env-driven, so there is
+-- deliberately nothing to override here (an earlier os.getenv gate was wrong:
+-- nginx strips undeclared worker env, so it never fired on a real box).
+local _refresh_sec = 60
 
--- The X-CFM-Cache observe header is OFF by default: it discloses internal cache
--- policy (recipe / TTL bucket / purge generation), so it is emitted only during
--- an operator observe window opened with CFM_CACHE_OBSERVE=1 (env, read at
--- worker start; flip it + reload nginx to toggle). Design §11.3 ("behind a debug
--- flag"). When off, observe() is a no-op — no header, no policy lookup, no leak.
-local _observe_header = (os.getenv("CFM_CACHE_OBSERVE") == "1")
+-- The X-CFM-Cache observe header is a PER-REQUEST operator opt-in: it is stamped
+-- ONLY when the request carries `X-CFM-Cache-Debug` (any non-empty value), so
+-- internal cache policy (recipe / TTL bucket / purge generation) is never
+-- disclosed to an ordinary client. Design §11.3 ("behind a debug flag"). No env
+-- var and no config plumbing — an operator just runs
+--   curl -H 'X-CFM-Cache-Debug: 1' -I https://site/
+-- The persistent fleet on/off gate is the Phase-3 SITE_CACHE config knob (via
+-- cfm_bridge_cfg), not this observe header.
+local OBSERVE_HEADER_VAR = "http_x_cfm_cache_debug"
 
 -- ---------------------------------------------------------------------------
 -- Helpers (normalize_host / glob_match / is_supported_pattern are copied
@@ -272,7 +278,10 @@ end
 -- armed and what would apply — without any caching taking place. Safe to call
 -- from any phase where ngx.header is writable (header_filter is recommended).
 function _M.observe()
-    if not _observe_header then return end
+    -- Common case (no debug header): a single ngx.var read, then return — so
+    -- normal traffic pays almost nothing and learns nothing.
+    local dbg = ngx.var[OBSERVE_HEADER_VAR]
+    if not dbg or dbg == "" then return end
     local p = _M.policy_for(ngx.var.host)
     if p then
         ngx.header["X-CFM-Cache"] = "observe " .. label_for(p)
@@ -285,6 +294,5 @@ _M._rebuild_cache   = rebuild_cache
 _M._label_for       = label_for
 _M._normalize_host  = normalize_host
 _M._has_any         = function() return _cache.has_any end
-_M._set_observe     = function(v) _observe_header = v and true or false end
 
 return _M

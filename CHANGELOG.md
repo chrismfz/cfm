@@ -22,11 +22,12 @@ back-filled here — see the git/PR history for that period.
   serves the per-vhost cache policy on the `/nginx/cache/config` bridge endpoint,
   and a new edge module `configs/lua/cfm_cache.lua` pulls it per-worker (async,
   fail-safe, ~60s, `CFM_CACHE_REFRESH_SEC`) exactly like the HTTP/3 opt-in feed.
-  From the edge `header_filter`, when an operator opens an observe window with
-  `CFM_CACHE_OBSERVE=1` (a debug flag, **off by default** so nothing is disclosed
-  to clients), it stamps an **`X-CFM-Cache`** header on responses for armed vhosts
-  so `curl -I` shows which vhosts are armed and what policy would apply. **Still
-  nothing is cached** — there is no
+  From the edge `header_filter` it stamps an **`X-CFM-Cache`** header **only when
+  the request carries `X-CFM-Cache-Debug`** (a per-request operator opt-in, so
+  internal policy is never disclosed to ordinary clients): `curl -H
+  'X-CFM-Cache-Debug: 1' -I https://site/` shows which vhosts are armed and what
+  policy would apply. No env vars — CFM is config-file driven. **Still nothing is
+  cached** — there is no
   `proxy_cache`, no change to the in-path `cfm.lua` decision, no new nginx var or
   shared dict; the whole feature is one fail-safe `header_filter` call. This
   validates the feed→edge→per-request-lookup pipeline and lets us measure its

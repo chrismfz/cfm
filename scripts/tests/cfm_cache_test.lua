@@ -77,20 +77,22 @@ check(cache._label_for({ gen = 0, micro = { on = true, recipe = "micro_safe" } }
       == "micro=micro_safe gen=0", "micro-only label, no ttl")
 check(cache._label_for({ gen = 2 }) == "gen=2", "no tiers → just gen")
 
--- ── observe: OFF by default (no disclosure), ON only via the debug flag ───────
--- Default (CFM_CACHE_OBSERVE unset): observe() is a no-op even for an armed host.
+-- ── observe: only stamps when the request carries X-CFM-Cache-Debug ───────────
+-- Without the debug header, observe() is a no-op even for an armed vhost (no
+-- disclosure to ordinary clients).
 for k in pairs(_header) do _header[k] = nil end
 ngx.var.host = "myip.gr"
+ngx.var.http_x_cfm_cache_debug = nil
 cache.observe()
-check(_header["X-CFM-Cache"] == nil, "observe is OFF by default (no header leaked)")
+check(_header["X-CFM-Cache"] == nil, "observe stamps nothing without the debug header")
 
--- With the debug flag on: stamps for an armed host, nothing for an unarmed one.
-cache._set_observe(true)
+-- With the debug header present: stamps for an armed vhost, nothing for unarmed.
+ngx.var.http_x_cfm_cache_debug = "1"
 for k in pairs(_header) do _header[k] = nil end
 ngx.var.host = "myip.gr"
 cache.observe()
 check(_header["X-CFM-Cache"] ~= nil and _header["X-CFM-Cache"]:find("static=", 1, true),
-      "observe stamps X-CFM-Cache for an armed vhost when enabled")
+      "observe stamps X-CFM-Cache for an armed vhost when the debug header is present")
 
 for k in pairs(_header) do _header[k] = nil end
 ngx.var.host = "unarmed.com"
