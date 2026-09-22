@@ -400,7 +400,12 @@ ensure_nginx_temp_dirs() {
 ensure_cache_dirs() {
     local dirs=(
         /var/cache/nginx/cfm_static
-        /var/cache/nginx/cfm_micro
+        /var/cache/nginx/cfm_micro_1s
+        /var/cache/nginx/cfm_micro_2s
+        /var/cache/nginx/cfm_micro_5s
+        /var/cache/nginx/cfm_micro_10s
+        /var/cache/nginx/cfm_micro_30s
+        /var/cache/nginx/cfm_micro_60s
     )
     local d
 

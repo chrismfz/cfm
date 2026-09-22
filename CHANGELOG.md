@@ -18,6 +18,37 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Site Cache — Tier B micro-cache foundation (Phase B1, inert).** Declares the
+  six per-TTL micro-cache zones `cfm_micro_{1,2,5,10,30,60}s` in both edge confs
+  and creates their `/var/cache/nginx/` dirs (daemon + both installers), so the
+  micro tier's storage exists and the edge config test passes ahead of the
+  Phase B2 wiring. **No behaviour change**: nothing activates `proxy_cache` on
+  these zones yet — a declared zone caches nothing until a location uses it — so
+  micro-caching is still off for every vhost. One TTL bucket per zone is required
+  because nginx's `proxy_cache_valid` is a per-location directive and is not
+  variablizable (a variable `proxy_cache $zone` selects only the storage zone),
+  so Phase B2 will route each armed vhost to the internal location that pins the
+  matching validity. `cfm_cache.lua` gains the pure, unit-tested TTL→bucket
+  snapper B2 will use, and the packaging cache-heal + config guard now cover the
+  new buckets.
+- **Site Cache — Tier B micro-cache request rules (Phase B2, observe-only).**
+  Adds the Tier B request-side decision to `cfm_cache.lua`: for a micro-armed
+  vhost, is an allowed request cacheable, and to which TTL bucket? Enforces the
+  §4.1 cookie model — a positive **auth-cookie allowlist** (PHPSESSID,
+  `wordpress_logged_in_*`, WooCommerce, cPanel/Roundcube sessions, … +
+  per-vhost extras) bypasses caching, while CFM's own `cfm_*` cookies (incl.
+  `cfm_clearance`) and common analytics/consent cookies are treated as
+  anonymous, plus the GET/HEAD-only and never-cache-path (`/acctxfer*`) rails.
+  **Still nothing caches**: the verdict is surfaced only on the debug-gated
+  `X-CFM-Cache` header (`microcache=would/<n>s` or `microcache=bypass:<reason>`),
+  so an operator can spot-check the cookie allowlist against real apps
+  (`curl -H "X-CFM-Cache-Debug: 1"`) before Phase B3 activates `proxy_cache`
+  (passive per-vhost BYPASS-counter validation lands with B3's stats). The auth
+  allowlist is PHP/cPanel-primary plus the mainstream non-PHP session cookies
+  (JSESSIONID, `.AspNetCore.*`, `connect.sid`, Django `sessionid`, Rails
+  `*_session`), biased to over-include since a false bypass only costs a cache
+  miss. Cookie parsing is `=`-in-value safe; the classifier and decision are
+  unit-tested. No config / packaging change.
 - **ChallengeV2 rejects are now recorded durably, with country / ASN / PTR —
   so false positives can actually be hunted.** Until now a solve the Rung-1
   humanity gate refused (`result=v2_reject`) left exactly one trace: its log
@@ -94,6 +125,28 @@ back-filled here — see the git/PR history for that period.
   (`[firewall] engine=nftlib netlink <call> timed out after …`).
   Startup still fails immediately if netlink is unusable. Only nodes running
   `CFM_FIREWALL_ENGINE=nftlib` are affected.
+- **The daemon could crash (SIGSEGV) when the GeoLite2 databases were
+  refreshed.** CFM's own MaxMind updater checks daily and installs a new
+  ASN/City `.mmdb` as often as every ~3 days; each enricher in the daemon then
+  reopens the files and closes the old ones on its own. The readers are
+  memory-mapped, and closing one unmaps it, but a lookup that had already
+  picked up the old reader could still be reading from it: a read of unmapped
+  memory, which Go cannot recover from (`fatal error: fault` /
+  `signal SIGSEGV`). Every challenge solve reads the database, and so does
+  every lookup for an address not yet in the enrichment cache (the edge's
+  country fallback, ASN policies, the detectors), so a busy node only needed
+  one of them to overlap a refresh. Reproduced before fixing, with a real
+  memory-mapped test database generated to the MaxMind spec, within two
+  seconds (usually under one) of lookups racing refreshes. Lookups now hold
+  the reader lock for the whole read, and an old reader is closed only once
+  nothing can still be reading it. A lookup during a refresh now sees either
+  the old or the new database, never a closed one. Previously a lookup that
+  hit the just-closed database got an error and returned empty country/ASN —
+  and the full lookup path then cached that empty answer for up to 24h.
+  The same change removed a write lock that every enrichment cache miss used
+  to take just to check whether a refresh was due; in a synthetic, miss-heavy
+  benchmark (`BenchmarkLookupGeoFastUnderMisses`) fast-path lookups got ~2.5×
+  faster (~2.8µs → ~1.1µs each). No configuration change.
 
 ## 2026.09.22
 

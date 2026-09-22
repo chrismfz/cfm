@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	lruexp "github.com/hashicorp/golang-lru/v2/expirable"
@@ -90,6 +91,18 @@ type Enricher struct {
 	// It is NOT held around cache reads/writes — the LRU has its own
 	// internal locking, so the hot path takes only one mutex (the LRU's)
 	// instead of two.
+	//
+	// READERS HOLD mu.RLock FOR THE WHOLE READ, not just to load the pointer
+	// (readGeo). The readers are mmap'd: Close() munmaps them, and the swap
+	// in refreshIfChanged used to close the old reader while a lookup that
+	// had already copied its pointer was still decoding from it — a read of
+	// unmapped memory, i.e. SIGSEGV, which Go cannot recover from. That
+	// crashed the daemon when a lookup overlapped a database refresh (CFM's
+	// own maxmindupdater, as often as every ~3 days; each Enricher swaps on
+	// its own). Reproduced: TestHotSwapNeverReadsAClosedReader. A writer now
+	// takes mu.Lock, which waits for every in-flight read, so a reader is
+	// closed only once nothing can still be reading it. Never call back into the
+	// Enricher while holding mu, and never do network I/O under it.
 	mu sync.RWMutex
 	// cache is a size-bounded TTL-expiring LRU. Eviction policy:
 	//   - entry expires after cacheTTL → auto-removed on next Get/Add
@@ -103,12 +116,22 @@ type Enricher struct {
 	asnDB    *geoip2.Reader
 	cityDB   *geoip2.Reader
 	// hot-reload state
-	asnPath     string
-	cityPath    string
-	searchDirs  []string
-	asnMTime    time.Time
-	cityMTime   time.Time
-	lastStatChk time.Time
+	asnPath    string
+	cityPath   string
+	searchDirs []string
+	asnMTime   time.Time
+	cityMTime  time.Time
+	// closed is set by Close; a refresh then installs nothing (under mu).
+	closed bool
+	// statChk is when the last on-disk change check ran, in monotonic
+	// nanoseconds since monoStart (0 = never). Atomic, NOT under mu:
+	// refreshIfChanged runs on every Lookup cache miss, and when
+	// its rate-limit test took mu.Lock, that write lock — now that readers
+	// hold mu.RLock for a whole decode — waited on in-flight reads and, with
+	// Go's writer preference, stalled every new reader behind it, on every
+	// miss (BenchmarkLookupGeoFastUnderMisses). Now mu.Lock is taken only
+	// for an actual swap. CompareAndSwap lets one caller per statEvery check.
+	statChk atomic.Int64
 	// options
 	enablePTR bool
 	// Async-dispatch primitives for LookupCachedOrAsync.
@@ -179,11 +202,56 @@ func New(dirs ...string) (*Enricher, error) {
 }
 
 func (e *Enricher) Close() {
+	// Detach under the write lock — which waits for every in-flight read —
+	// then close outside it. A lookup running concurrently with Close used to
+	// be able to read the unmapped reader; now it finishes first, and a
+	// lookup after Close sees no reader (empty geo). Close is final: closed
+	// stops a later refresh from reopening the files, and a refresh already
+	// past its stat when Close runs discards what it opened (see the swap).
+	// Callers: the nflog SMTP snoop and outbound collector workers on
+	// shutdown, and the status / ipquery CLI paths.
+	e.mu.Lock()
+	asn, city := e.asnDB, e.cityDB
+	e.asnDB, e.cityDB = nil, nil
+	e.closed = true
+	e.mu.Unlock()
+	if asn != nil {
+		_ = asn.Close()
+	}
+	if city != nil {
+		_ = city.Close()
+	}
+}
+
+// readGeo fills r's ASN / country / city from the open databases. It is the
+// ONE place the mmdb readers are read, and it holds mu.RLock for the whole
+// read — see the note on mu for why copying the pointer and unlocking first
+// is not enough. Only mmdb decoding here — no network or file I/O — though a
+// read of a cold page of the mmap'd file can page-fault. Readers share the
+// RLock, so a slow read holds up no other lookup — except while a swap is
+// waiting: a pending mu.Lock queues every new RLock behind it (Go's writer
+// preference), so for that one swap, lookups wait on the slowest read.
+func (e *Enricher) readGeo(ip net.IP, r *Result) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	if e.asnDB != nil {
-		_ = e.asnDB.Close()
+		if rec, err := e.asnDB.ASN(ip); err == nil && rec != nil {
+			r.ASN = rec.AutonomousSystemNumber
+			r.ASNName = rec.AutonomousSystemOrganization
+		}
 	}
 	if e.cityDB != nil {
-		_ = e.cityDB.Close()
+		if rec, err := e.cityDB.City(ip); err == nil && rec != nil {
+			r.CountryISO = rec.Country.IsoCode
+			if name, ok := rec.Country.Names["en"]; ok && name != "" {
+				r.Country = name
+			} else {
+				r.Country = rec.Country.IsoCode
+			}
+			if c, ok := rec.City.Names["en"]; ok {
+				r.City = c
+			}
+		}
 	}
 }
 
@@ -245,33 +313,8 @@ func (e *Enricher) Lookup(ipStr string) Result {
 		}
 	}
 
-	// ASN
-	e.mu.RLock()
-	localASN := e.asnDB
-	localCity := e.cityDB
-	e.mu.RUnlock()
-
-	if localASN != nil {
-		if rec, err := localASN.ASN(ip); err == nil && rec != nil {
-			r.ASN = rec.AutonomousSystemNumber
-			r.ASNName = rec.AutonomousSystemOrganization
-		}
-	}
-
-	// Country/City
-	if localCity != nil {
-		if rec, err := localCity.City(ip); err == nil && rec != nil {
-			r.CountryISO = rec.Country.IsoCode // ← add this line
-			if name, ok := rec.Country.Names["en"]; ok && name != "" {
-				r.Country = name
-			} else {
-				r.Country = rec.Country.IsoCode
-			}
-			if c, ok := rec.City.Names["en"]; ok {
-				r.City = c
-			}
-		}
-	}
+	// ASN + Country/City (under mu.RLock for the whole read — readGeo).
+	e.readGeo(ip, &r)
 
 	// store in cache (LRU handles its own locking + eviction)
 	e.cache.Add(ipStr, r)
@@ -299,32 +342,8 @@ func (e *Enricher) LookupGeoFast(ipStr string) Result {
 		return Result{}
 	}
 
-	e.mu.RLock()
-	localASN := e.asnDB
-	localCity := e.cityDB
-	e.mu.RUnlock()
-
 	r := Result{ts: time.Now()}
-
-	if localASN != nil {
-		if rec, err := localASN.ASN(ip); err == nil && rec != nil {
-			r.ASN = rec.AutonomousSystemNumber
-			r.ASNName = rec.AutonomousSystemOrganization
-		}
-	}
-	if localCity != nil {
-		if rec, err := localCity.City(ip); err == nil && rec != nil {
-			r.CountryISO = rec.Country.IsoCode
-			if name, ok := rec.Country.Names["en"]; ok && name != "" {
-				r.Country = name
-			} else {
-				r.Country = rec.Country.IsoCode
-			}
-			if c, ok := rec.City.Names["en"]; ok {
-				r.City = c
-			}
-		}
-	}
+	e.readGeo(ip, &r)
 	return r
 }
 
@@ -418,28 +437,45 @@ func (e *Enricher) PTREnabled() bool {
 
 // Enabled επιστρέφει true αν έχουμε τουλάχιστον μία GeoIP DB ανοιχτή.
 func (e *Enricher) Enabled() bool {
-	return e != nil && (e.asnDB != nil || e.cityDB != nil)
+	if e == nil {
+		return false
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.asnDB != nil || e.cityDB != nil
 }
+
+// monoStart anchors statChk to the monotonic clock (see refreshIfChanged).
+var monoStart = time.Now()
 
 // refreshIfChanged checks if files changed and safely reopens them.
 // CRITICAL: Does file I/O OUTSIDE the mutex to avoid blocking all Lookup() calls.
 func (e *Enricher) refreshIfChanged() {
-	now := time.Now()
+	// Monotonic, like the time.Time.Sub this replaced: a wall-clock step
+	// (NTP) must neither stall nor hasten the check. +1 keeps a real reading
+	// from ever colliding with 0, which means "never checked".
+	now := int64(time.Since(monoStart)) + 1
 
-	// Quick check + snapshot under lock
-	e.mu.Lock()
-	if now.Sub(e.lastStatChk) < statEvery {
-		e.mu.Unlock()
+	// Rate limit WITHOUT a lock (see statChk): the common case — checked
+	// recently — returns here having touched only an atomic. One caller per
+	// statEvery wins the CompareAndSwap and does the check.
+	last := e.statChk.Load()
+	if (last != 0 && now-last < int64(statEvery)) || !e.statChk.CompareAndSwap(last, now) {
 		return
 	}
-	e.lastStatChk = now
 
+	// Snapshot under the read lock; these are written only by the swap below.
+	e.mu.RLock()
+	if e.closed {
+		e.mu.RUnlock()
+		return
+	}
 	asnPath := e.asnPath
 	cityPath := e.cityPath
 	searchDirs := append([]string(nil), e.searchDirs...)
 	asnMTime := e.asnMTime
 	cityMTime := e.cityMTime
-	e.mu.Unlock()
+	e.mu.RUnlock()
 
 	// Do ALL file I/O outside lock (CRITICAL FIX)
 	var newASN, newCity *geoip2.Reader
@@ -498,31 +534,49 @@ func (e *Enricher) refreshIfChanged() {
 		}
 	}
 
-	// Quick lock to swap pointers
+	// Swap under the write lock. Taking it waits for every in-flight read
+	// (readers hold mu.RLock for the whole read), and once the pointers are
+	// swapped no new read can reach the old readers — so they are closed
+	// (munmap'd) only after the unlock, when nothing can still be reading
+	// them. Closing them while a read was in flight is what used to fault.
+	//
+	// The snapshot above may be stale by now: Close may have run, or an
+	// overlapping check (one whose stat outlasted statEvery) may already have
+	// installed this file or a newer one. A reader opened here that is not
+	// newer than the installed one — or any, after Close — is closed instead
+	// of installed, so a swap never goes backwards and Close stays final.
+	var oldASN, oldCity *geoip2.Reader
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if newASN != nil {
-		old := e.asnDB
-		e.asnDB = newASN
-		if newASNPath != "" {
-			e.asnPath = newASNPath
-		}
-		e.asnMTime = newASNTime
-		if old != nil {
-			_ = old.Close()
+		if e.closed || !newASNTime.After(e.asnMTime) {
+			oldASN = newASN
+		} else {
+			oldASN = e.asnDB
+			e.asnDB = newASN
+			if newASNPath != "" {
+				e.asnPath = newASNPath
+			}
+			e.asnMTime = newASNTime
 		}
 	}
 	if newCity != nil {
-		old := e.cityDB
-		e.cityDB = newCity
-		if newCityPath != "" {
-			e.cityPath = newCityPath
+		if e.closed || !newCityTime.After(e.cityMTime) {
+			oldCity = newCity
+		} else {
+			oldCity = e.cityDB
+			e.cityDB = newCity
+			if newCityPath != "" {
+				e.cityPath = newCityPath
+			}
+			e.cityMTime = newCityTime
 		}
-		e.cityMTime = newCityTime
-		if old != nil {
-			_ = old.Close()
-		}
+	}
+	e.mu.Unlock()
+	if oldASN != nil {
+		_ = oldASN.Close()
+	}
+	if oldCity != nil {
+		_ = oldCity.Close()
 	}
 
 }

@@ -112,6 +112,18 @@ for f in "$ORT" "$ANG"; do
     err "$f: \$cfm_cache_non200 is never fed into a proxy_no_cache directive — non-200 responses could be stored."
   fi
 
+  # ── (b2) Tier B micro-cache zones (Phase B1): all six TTL buckets declared ───
+  # Inert until Phase B2 wires the per-bucket internal locations, but each zone's
+  # dir must exist before `-t` (the daemon + installers provision all six), and a
+  # partial set would [emerg] at reload the moment a B2 location names a missing
+  # zone. Assert every bucket is present in BOTH confs (the loop runs per conf, so
+  # a bucket added to one edge but not the other fails here — the parity guard).
+  for ttl in 1s 2s 5s 10s 30s 60s; do
+    if ! grep -Eq "^[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/cfm_micro_${ttl}[[:space:]]" "$f"; then
+      err "$f: no 'proxy_cache_path .../cfm_micro_${ttl}' zone declared — Tier B micro bucket missing (all of {1,2,5,10,30,60}s are required)."
+    fi
+  done
+
   # ── (c) negatives: never cache-by-default, never ignore Set-Cookie ───────────
   if grep -Eq '^[[:space:]]*set[[:space:]]+\$cfm_cache_skip[[:space:]]+"0";' "$f"; then
     err "$f: \$cfm_cache_skip is set to \"0\" in the conf — the cache-on flip must come ONLY from cfm_cache.static_gate(), never a static default."
@@ -152,8 +164,22 @@ if ! diff <(cache_locs "$ORT") <(cache_locs "$ANG") >/dev/null 2>&1; then
   diff <(cache_locs "$ORT") <(cache_locs "$ANG") 2>/dev/null | sed 's/^/       /' >&2 || true
 fi
 
+# ── (e) micro-zone parity: the six cfm_micro_<n>s declarations must be BYTE-for-
+# byte identical between the two edges (not just present). Presence in both (b2)
+# already catches a missing bucket; this also catches a per-bucket param drift
+# (keys_zone size, max_size, inactive) between angie and openresty — a bucket B2
+# routes to must behave the same on either edge.
+micro_zones() {
+  grep -E '^[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/cfm_micro_' "$1" \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+/ /g' | sort
+}
+if ! diff <(micro_zones "$ORT") <(micro_zones "$ANG") >/dev/null 2>&1; then
+  err "openresty.conf and angie.conf declare the micro-cache zones DIFFERENTLY (a per-bucket keys_zone/max_size/inactive drift); the six cfm_micro_<n>s zones must be identical on both edges. Divergence:"
+  diff <(micro_zones "$ORT") <(micro_zones "$ANG") 2>/dev/null | sed 's/^/       /' >&2 || true
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "[site-cache-config] FAILED — see errors above (invariant: caching is bypass-by-default; the gate must come from Lua)." >&2
   exit 1
 fi
-echo "[site-cache-config] OK: cfm_static zone declared, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered, only-200 rail (\$cfm_cache_non200) enforced, Set-Cookie never ignored, openresty↔angie parity ($ort_n locations)."
+echo "[site-cache-config] OK: cfm_static zone declared, Tier B micro buckets {1,2,5,10,30,60}s declared in both confs, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered, only-200 rail (\$cfm_cache_non200) enforced, Set-Cookie never ignored, openresty↔angie parity ($ort_n locations)."

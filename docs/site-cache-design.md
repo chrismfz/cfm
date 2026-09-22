@@ -188,12 +188,23 @@ The §11 **BYPASS counter is how you validate this in production**: if a vhost
 shows high BYPASS + low HIT, the cookie allowlist (or `strict_cookies`) is
 bypassing traffic you expected to cache — tune it there, don't guess.
 
-> **As-built (Tier A / 3b):** this request-cookie allowlist is **not yet wired at
-> the edge** — `static_gate` does not read `strict_cookies`/`auth_cookies`, and
-> the built-in allowlist/ignore-list machinery ships with **Tier B** (micro-cache),
-> where it is essential. Tier A relies on the response-side rails (`Set-Cookie` /
-> `Cache-Control: private` → never stored) plus the public nature of static
-> assets. Decision + residual: §14 item 3b.
+> **As-built (Tier A / 3b):** this request-cookie allowlist is **not** wired on
+> the Tier A static path — `static_gate` does not read
+> `strict_cookies`/`auth_cookies`. Tier A relies on the response-side rails
+> (`Set-Cookie` / `Cache-Control: private` → never stored) plus the public nature
+> of static assets. Decision + residual: §14 item 3b.
+>
+> **As-built (Tier B / B2, observe-only):** the built-in allowlist/ignore-list
+> machinery now ships in `cfm_cache.lua` (`micro_cookie_verdict` + `micro_decision`),
+> exercised by the header-filter `observe()` for a micro-armed vhost. It is the
+> full request-side model — auth allowlist (built-in names + per-vhost
+> `auth_cookies`), the `cfm_*`/analytics ignore-list, `strict_cookies`, the
+> GET/HEAD rail and the `/acctxfer*` never-cache path — but **nothing caches**:
+> the verdict is surfaced only on the debug-gated `X-CFM-Cache` header
+> (`microcache=would/<n>s` | `microcache=bypass:<reason>`) so the cookie logic
+> burns in on real traffic before B3 activates `proxy_cache`. The **response**-side
+> rails (Set-Cookie / `Cache-Control: private|no-store|no-cache` → never stored)
+> stay nginx-native and are enforced at store time in B3, not here.
 
 ---
 
@@ -278,11 +289,23 @@ runs — so `X-Accel-Expires` set from Lua is **too late** and cannot drive TTL,
 and `proxy_cache_valid` is not variablizable. Truly arbitrary per-request TTL is
 therefore not natively supported.
 
-Resolution: **`proxy_cache` accepts a variable zone name.** We define a
-**menu of TTL buckets**, one cheap zone each (§5.1), and the Lua picks the zone
-by setting `$cfm_cache_zone`. Each zone carries its own `proxy_cache_valid`. A
-cache HIT costs the same regardless of which zone, so more buckets = no
-per-request cost, only a little startup memory.
+Resolution: a **menu of TTL buckets**, one cheap zone each (§5.1). A cache HIT
+costs the same regardless of which zone, so more buckets = no per-request cost,
+only a little startup memory.
+
+> **As-built correction (verified against nginx, Phase B1).** The original wording
+> here — "`proxy_cache` accepts a variable zone name … each zone carries its own
+> `proxy_cache_valid`" — is **wrong** and would have neutered the buckets. A
+> variable `proxy_cache $cfm_cache_zone` selects only the **storage** zone;
+> `proxy_cache_valid` is a **per-location** directive and is **not** variablizable,
+> so a single catch-all location applies **one** validity to every zone it caches
+> into. Confirmed empirically: two locations with `proxy_cache_valid 200 1s` vs
+> `5s` expired independently, while a variable-zone location shared its single
+> validity. So each TTL bucket is a **separate internal location**
+> `@cfm_micro_<n>s` pinning `proxy_cache cfm_micro_<n>s;` +
+> `proxy_cache_valid 200 <n>s;`, and the allow-path (Step 2b/4) `ngx.exec`s to the
+> bucket its policy snaps to. B1 declares the six zones (inert) + the
+> `cfm_cache._micro_bucket` snapper; B2 adds the internal locations + routing.
 
 **Micro — recommended presets AND custom, both work.** The recommended micro
 bucket set is **`{1, 2, 5, 10, 30, 60}s`** (6 tiny zones). The UI offers:
