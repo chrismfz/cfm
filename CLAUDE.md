@@ -70,6 +70,7 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_origin_ka_config.sh        # origin-keepalive 443 SNI-safety: keepalive 0 (OpenResty) + proxy_ssl_session_reuse off
 ./scripts/tests/check_shared_lua_layout.sh       # installer CFM_LUA_MANIFEST == configs/lua/*.lua (see §5)
 ./scripts/tests/check_package_lua_delivery.sh    # Lua ships ONLY as /var/lib/cfm/lua/*, package-owned (see §5)
+./scripts/tests/check_rpm_spec_macros.sh         # no unescaped %macro in rpm spec comments (see §5)
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
 ./scripts/tests/check_changelog_entry.sh         # CHANGELOG structure (locally); per-PR "code changed → needs entry" runs in CI
 ```
@@ -178,6 +179,21 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   `check_package_lua_delivery.sh` pins all of it. A hand-edit under
   `/var/lib/cfm/lua/` is overwritten on upgrade with no backup; the operator
   edit surface is `/etc/cfm/*`.
+- **Never write a bare `%macro` in an rpm spec COMMENT — escape it `%%`.**
+  `/usr/lib/rpm/redhat/macros` defines `%install` as a macro whose expansion
+  ends in a newline followed by `%install`. rpm expands macros on every spec
+  line, comments included, then splits the expanded buffer on newlines — so a
+  comment merely *mentioning* `%install` injects a real section header and the
+  build dies with `error: line NNN: second %install`. A comment block explaining
+  why a `%post` Lua-sync loop was removed did exactly that and broke
+  `make release`. The trap is that it is **EL-only**: Debian/Ubuntu rpm ships no
+  `redhat/macros`, so `rpmspec -P` on the dev box parses the same spec happily
+  and CI (ubuntu runners) would too — don't add an rpm parse to CI and think it
+  covers this. `check_rpm_spec_macros.sh` enforces the escape statically.
+  To verify packaging changes for real, build in an EL8 container:
+  `docker run --rm -v "$PWD":/src:ro almalinux:8 sh -c 'dnf -y install rpm-build
+  && rpmbuild --define "projectroot /src" ... -bb /src/packaging/rpm/SPECS/cfm.spec'`
+  — that is what finally proved both the failure and the fix.
 - **A guardrail that cannot run its matcher must FAIL, never report OK.**
   Seven `scripts/tests/check_*.sh` shell out to `ripgrep`, which the runner
   does not preinstall. `check_cli_transport.sh` piped `rg … || true`, so on CI
