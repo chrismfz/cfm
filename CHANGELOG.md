@@ -154,6 +154,19 @@ back-filled here — see the git/PR history for that period.
   (`[firewall] engine=nftlib netlink <call> timed out after …`).
   Startup still fails immediately if netlink is unusable. Only nodes running
   `CFM_FIREWALL_ENGINE=nftlib` are affected.
+- **Files installed from the RPM all showed a modification date of May 4
+  2026.** On EL10, `rpmbuild` sets every packaged file's timestamp to the
+  newest entry in the spec's `%changelog` whenever that entry is older than
+  the file. That entry was hand-written on May 4 and never updated, so in
+  every later `.rpm` each file changed since then — most of
+  `/var/lib/cfm/lua/*.lua` — read "May 4" after an upgrade. Only the dates
+  were wrong: the contents were always the current release's. The top
+  `%changelog` entry is now dated automatically with the build date, the same
+  UTC date as the package version, so `rpm -q --changelog cfm` shows the build
+  itself. `make rpm` also sets the timestamp source to the build time, so
+  installed files keep their real modification times — the same as an EL8/9
+  build or the `.deb`. Applies from the next `.rpm` built; no action on the
+  servers.
 - **The daemon could crash (SIGSEGV) when the GeoLite2 databases were
   refreshed.** CFM's own MaxMind updater checks daily and installs a new
   ASN/City `.mmdb` as often as every ~3 days; each enricher in the daemon then
