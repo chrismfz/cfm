@@ -278,10 +278,10 @@ func dnatDefaults(fam, tbl string) (string, string) {
 	fam = strings.TrimSpace(fam)
 	tbl = strings.TrimSpace(tbl)
 	if fam == "" {
-		fam = "inet"
+		fam = firewall.DNATDefaultFamily
 	}
 	if tbl == "" {
-		tbl = cfmTableName
+		tbl = firewall.DNATDefaultTable
 	}
 	return fam, tbl
 }
@@ -518,27 +518,6 @@ func (b *Backend) cleanupScopedDNATAccepts(namespace string) error {
 	return nil
 }
 
-func firstInputDefaultDropHandle(out string) string {
-	for _, line := range strings.Split(out, "\n") {
-		// Shared default-drop predicate (firewall.IsInputDefaultDropLine) so the
-		// matcher can't drift between the nftlib backend, the nft backend and the
-		// dnat CLI reporter; here we additionally need the handle to insert
-		// before it.
-		if !firewall.IsInputDefaultDropLine(line) {
-			continue
-		}
-		norm := strings.ReplaceAll(line, `"`, "")
-		if !strings.Contains(norm, " handle ") {
-			continue
-		}
-		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
-		if fields := strings.Fields(h); len(fields) > 0 {
-			return fields[0]
-		}
-	}
-	return ""
-}
-
 func dnatAcceptKey(spec dnatRuleSpec) string {
 	return fmt.Sprintf("f%d:p%d:d%d:t%d:a%s", spec.family, spec.proto, spec.dport, spec.toPort, dnatAddrID(spec.toAddr))
 }
@@ -559,8 +538,14 @@ func dnatAcceptRuleExpr(namespace string, spec dnatRuleSpec, beforeHandle ...str
 func (b *Backend) ensureScopedDNATAccepts(namespace string, specs []dnatRuleSpec) error {
 	_ = b.nftExec("add table inet cfm")
 	_ = b.nftExec("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
-	out, _ := b.ListChainText("inet", "cfm", "input")
-	beforeHandle := firstInputDefaultDropHandle(out)
+	// Fail closed, as the nft backend does: with no listing there is no
+	// default-drop handle, and the accepts would be appended AFTER the drop,
+	// where no packet ever reaches them.
+	out, err := b.ListChainText("inet", cfmTableName, "input")
+	if err != nil {
+		return fmt.Errorf("list inet %s input chain for dnat accepts: %w", cfmTableName, err)
+	}
+	beforeHandle := firewall.FirstInputDefaultDropHandle(out)
 	if err := b.cleanupScopedDNATAccepts(namespace); err != nil {
 		return err
 	}
@@ -794,9 +779,28 @@ func (b *Backend) DNATOff(family, table string) (err error) {
 	if err := b.cleanupScopedDNATAccepts(dnatAcceptNamespaceEdge); err != nil {
 		return err
 	}
+	family, table = dnatDefaults(family, table)
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if strings.EqualFold(family, firewall.DNATDefaultFamily) && table == firewall.DNATDefaultTable {
+		return b.deleteDNATTableUnlocked(family, table)
+	}
 	return b.dnatOffUnlocked(family, table, dnatRuleNamespaceEdge)
+}
+
+// deleteDNATTableUnlocked removes CFM's own DNAT table whole, as the nft
+// backend's DNATOff does. Removing only the rules this backend tagged would
+// leave any other redirect in the table in force — e.g. the copy an
+// exec-backend `cfm dnat on` wrote while the daemon ran nftlib — while
+// DNATStatus, which counts tagged rules only, reported DNAT off.
+// Must be called with b.mu held.
+func (b *Backend) deleteDNATTableUnlocked(family, table string) error {
+	t, err := b.findTable(table, tableFamilyFromString(family))
+	if err != nil || t == nil {
+		return err
+	}
+	b.conn.DelTable(t)
+	return b.conn.Flush()
 }
 
 func getenvInt(key string, def int) int {

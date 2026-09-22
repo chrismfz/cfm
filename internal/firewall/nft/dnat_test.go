@@ -5,6 +5,8 @@ package nft
 import (
 	"strings"
 	"testing"
+
+	"cfm/internal/firewall"
 )
 
 func TestDNATAcceptRuleExprCanInsertBeforeDefaultDropHandle(t *testing.T) {
@@ -15,9 +17,9 @@ func TestDNATAcceptRuleExprCanInsertBeforeDefaultDropHandle(t *testing.T) {
 			ct state new udp dport 0-65535 drop # handle 42
 		}
 	}`
-	handle := firstInputDefaultDropHandle(chain)
+	handle := firewall.FirstInputDefaultDropHandle(chain)
 	if handle != "41" {
-		t.Fatalf("firstInputDefaultDropHandle() = %q, want 41", handle)
+		t.Fatalf("FirstInputDefaultDropHandle() = %q, want 41", handle)
 	}
 	got := dnatAcceptRuleExpr(spec, handle)
 	if !strings.HasPrefix(got, "insert rule inet cfm input position 41 ") {

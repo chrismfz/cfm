@@ -119,6 +119,9 @@ type Backend interface {
 	DNATStatus(family, table string) (bool, error)
 	DNATShow(family, table string) (string, error)
 	DNATOn(family, table string, httpPort, httpsPort int) error
+	// DNATOff removes the web redirect and its scoped accepts. CFM's own
+	// table (DNATDefaultTable) is deleted whole on both backends, so no
+	// redirect left in it — tagged by this backend or not — survives.
 	DNATOff(family, table string) error
 	// EnsureDNATAccepts re-asserts the scoped `ct status dnat` accept rules
 	// in inet cfm/input for whatever web-DNAT mapping is currently active.
@@ -128,6 +131,7 @@ type Backend interface {
 	EnsureDNATAccepts() error
 
 	// Panel DNAT APIs manage cPanel/DirectAdmin panel redirects and scoped input accepts.
+	// The accepts are nft text on both backends (panel_dnat_accepts.go).
 	PanelDNATOn(priority int) error
 	PanelDNATOff() error
 	PanelDNATStatus() (bool, string, error)

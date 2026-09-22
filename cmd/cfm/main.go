@@ -105,7 +105,7 @@ func getBackend(engine string) (firewall.Backend, error) {
 }
 
 func mustBackend() firewall.Backend {
-	_, engine, _ := resolveFirewallEngine(nil)
+	_, engine, _ := cliFirewallEngine()
 	be, err := getBackend(engine)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -117,7 +117,7 @@ func mustBackend() firewall.Backend {
 
 func tableExistsProbe(be firewall.Backend) func() bool {
 	return func() bool {
-		if _, engine, _ := resolveFirewallEngine(nil); engine == "nft" {
+		if _, engine, _ := cliFirewallEngine(); engine == "nft" {
 			return nft.TableExistsCFM()
 		}
 		return be != nil
@@ -306,7 +306,7 @@ func main() {
 		os.Exit(dnat.RunCLI(os.Args[2:], mustBackend()))
 	case "firewall":
 		be := mustBackend()
-		_, engine, source := resolveFirewallEngine(nil)
+		_, engine, source := cliFirewallEngine()
 		os.Exit(cli.RunFirewall(os.Args[2:], be, cfgDir(), engine, source))
 
 	case "webtop", "nginx-top", "httpd-top":

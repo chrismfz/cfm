@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
+
+	"cfm/internal/firewall"
 )
 
 func TestDNATRuleSpecIdentityParsing(t *testing.T) {
@@ -223,9 +225,9 @@ func TestDNATAcceptRuleExprCanInsertBeforeDefaultDropHandle(t *testing.T) {
 			ct state new udp dport 0-65535 drop # handle 32
 		}
 	}`
-	handle := firstInputDefaultDropHandle(chain)
+	handle := firewall.FirstInputDefaultDropHandle(chain)
 	if handle != "31" {
-		t.Fatalf("firstInputDefaultDropHandle() = %q, want 31", handle)
+		t.Fatalf("FirstInputDefaultDropHandle() = %q, want 31", handle)
 	}
 	got := dnatAcceptRuleExpr(dnatAcceptNamespaceEdge, spec, handle)
 	if !strings.HasPrefix(got, "insert rule inet cfm input position 31 ") {

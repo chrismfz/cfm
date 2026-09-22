@@ -46,8 +46,16 @@ There is no monolithic `make test`. Run the Go suite directly:
 go test -race ./...
 ```
 
-Firewall backend is selectable at runtime: `CFM_FIREWALL_ENGINE=nft`
-(default, exec-based) or `nftlib` (netlink, zero-fork).
+Firewall backend is selectable at runtime: `FIREWALL_ENGINE` in `cfm.conf`
+(or the `CFM_FIREWALL_ENGINE` env var, which overrides it) = `nft` (default,
+exec-based) or `nftlib` (netlink, zero-fork set/feed writes). The daemon AND
+the one-shot CLI resolve it the same way (`cmd/cfm/engine.go`). The CLI used
+to read only the env var, so on an nftlib node `cfm dnat on` ran the exec
+backend and wrote a second copy of the daemon's DNAT rules. nftlib must never
+read `inet cfm input` over netlink: google/nftables v0.3.0 fails the whole
+dump on the `ct original …` match every DNAT accept carries, so those accepts
+are nft text on both backends (the cPanel ones in one shared implementation,
+`internal/firewall/panel_dnat_accepts.go`).
 
 ---
 

@@ -11,6 +11,17 @@ import (
 // us before: a drifted default-drop matcher is exactly how scoped accepts ended
 // up appended after the drop.
 
+// DNATDefaultFamily and DNATDefaultTable name CFM's web DNAT table, the one
+// `cfm dnat on` installs. Both backends default an empty family/table to these
+// and internal/dnat uses them, so there is one definition. The nftlib backend
+// used to default to "cfm" (the filter table), which made its
+// EnsureDNATAccepts look for the redirect rules in the wrong table and never
+// reassert the web DNAT accepts after a ports-policy rewrite.
+const (
+	DNATDefaultFamily = "inet"
+	DNATDefaultTable  = "cfm_redirect"
+)
+
 // IsInputDefaultDropLine reports whether a rendered `inet cfm input` chain line
 // is the catch-all NEW-state default drop that ApplyPortsPolicy installs
 // (`ct state new tcp|udp dport 0-65535 drop`). Scoped DNAT accepts must sit

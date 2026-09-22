@@ -429,9 +429,11 @@ for the full preflight detail.
 
 ### nftlib-only deployment requirement clarity
 
-For `CFM_FIREWALL_ENGINE=nftlib`, all mutation and feed-management paths are zero-fork (pure netlink). Structured inspection (`ListTableJSON`, `ListSetJSON`) is also native.
+For `CFM_FIREWALL_ENGINE=nftlib`, set and feed writes (blocks, allows, blocklist feeds) and the DNAT redirect tables are pure netlink, with no fork. Structured inspection (`ListTableJSON`, `ListSetJSON`) is also native.
 
-The two text-inspection diagnostic commands (`ListTableTextNoDNS`, `ListChainText`) shell out to the `nft` binary directly — no `nft` CLI backend adapter is involved, but the `nft` binary must be present on the host for those specific diagnostic paths.
+The `nft` binary must still be present on the host. The input-chain rules are written with it: the ports policy and the scoped DNAT accepts (web and cPanel). google/nftables v0.3.0 cannot read back a `ct original …` match, which every DNAT accept carries, so these are managed as nft text (`internal/firewall/panel_dnat_accepts.go`). The two text-inspection diagnostics (`ListTableTextNoDNS`, `ListChainText`) also run it.
+
+The engine comes from `FIREWALL_ENGINE` (or `CFM_FIREWALL_ENGINE`) in `cfm.conf`, and the `CFM_FIREWALL_ENGINE` environment variable overrides it. The daemon and the `cfm` CLI resolve it the same way, so CLI commands run on the same backend as the daemon.
 
 ---
 
@@ -604,9 +606,9 @@ Ensures WebDetector sees a consistent TSV schema across stacks.
 ## 5. Key Features
 
 ### 🔒 Firewall Core
-- Two independent firewall backends, selectable via `CFM_FIREWALL_ENGINE`:
+- Two independent firewall backends, selectable via `FIREWALL_ENGINE` in `cfm.conf` (or the `CFM_FIREWALL_ENGINE` environment variable, which overrides it). The daemon and the CLI both follow it:
   - `nft` (default) — exec-based nftables backend; no extra Go dependencies
-  - `nftlib` — zero-fork netlink backend (`github.com/google/nftables`); eliminates fork-storm risk on large feed updates; set `CFM_FIREWALL_ENGINE=nftlib` to enable
+  - `nftlib` — netlink backend (`github.com/google/nftables`); zero-fork set and feed writes, which eliminates the fork-storm risk on large feed updates; set `FIREWALL_ENGINE = "nftlib"` to enable
 - Auto-created `inet cfm` table/chains (idempotent on every daemon start)
 - Hook priority control (`NFT_INPUT_PRIORITY`) to run before/after other stacks (CSF/Imunify)
 - ALLOW/BLOCK sets (v4/v6) + dynamic allow via hostname/DynDNS resolution

@@ -147,6 +147,38 @@ back-filled here — see the git/PR history for that period.
   to take just to check whether a refresh was due; in a synthetic, miss-heavy
   benchmark (`BenchmarkLookupGeoFastUnderMisses`) fast-path lookups got ~2.5×
   faster (~2.8µs → ~1.1µs each). No configuration change.
+- **nftlib firewall backend: cPanel DNAT accepts can be re-checked and
+  repaired again, web DNAT accepts are reasserted, and `cfm dnat off` really
+  turns the web redirect off.** Three bugs, all on nodes running
+  `FIREWALL_ENGINE = nftlib`:
+  - Once the cPanel DNAT accepts existed, nftlib could no longer read its own
+    input chain. google/nftables can't decode the `ct original proto-dst` match
+    these rules carry, so every later check failed with "attribute 3 is not a
+    uint32": boot restore, failsafe recovery, and the reassert after a
+    ports-policy reload. The accept state read `unknown` for every panel port.
+    The accepts are now written and read as `nft` text, the same code on both
+    backends, tagged with the `cfm_cpanel_dnat:` comment. Untagged accepts left
+    by the old code are recognised and replaced automatically the next time the
+    daemon reasserts them (startup or config reload).
+  - The web DNAT accepts (80→9080, 443→9043) were never reasserted after a
+    ports-policy reload, because nftlib looked for the redirect in the wrong
+    table (`cfm` instead of `cfm_redirect`). Both backends now share that
+    default.
+  - `cfm dnat off` removed only the rules nftlib had tagged itself. Any other
+    redirect in `cfm_redirect`, such as the copy an exec-backend `cfm dnat on`
+    wrote, kept redirecting while status reported off. It now deletes the
+    `cfm_redirect` table whole, as the exec backend always did.
+- **`cfm` CLI commands now use the firewall engine configured in `cfm.conf`,
+  like the daemon.** The CLI read only the `CFM_FIREWALL_ENGINE` environment
+  variable and otherwise used the exec `nft` backend. On an nftlib node,
+  `cfm dnat on` and `cfm dnat cpanel on` therefore wrote a second, differently
+  tagged copy of the daemon's DNAT rules (e.g. both `iif "lo"` and
+  `iifname "lo"` in `cfm_redirect`), and each backend misreported the other's
+  panel accepts (`firewall=blocked` from the exec side, `unknown` from
+  nftlib). The environment variable still overrides the config file. **One-time
+  step on an nftlib node that shows duplicate rules in
+  `nft list table inet cfm_redirect`:** after upgrading, run
+  `cfm dnat off && cfm dnat on`.
 
 ## 2026.09.22
 
