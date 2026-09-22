@@ -415,6 +415,22 @@ ensure_cache_dirs() {
         chown root:cfm "$d"
         chmod 0770 "$d"
     done
+
+    # Heal stale cache-tree ownership: nginx creates the levels=1:2 subdirs as
+    # the worker (cfm), but a tree left root-owned by an older global-cache run
+    # blocks the cfm worker (Permission denied reading upstream → aborted
+    # responses). We chown only the top dir above, so recursively heal the tree
+    # once when a cheap O(16) probe of the level-1 dirs finds a non-cfm-group dir.
+    if getent group cfm >/dev/null 2>&1; then
+        for d in "${dirs[@]}"; do
+            [ -d "$d" ] || continue
+            if find "$d" -mindepth 1 -maxdepth 1 -type d ! -group cfm -print -quit 2>/dev/null | grep -q .; then
+                chown -R root:cfm "$d" || true
+                chmod -R g+rwX   "$d" || true
+                log "Healed cache-tree ownership under $d (root:cfm, group-writable)"
+            fi
+        done
+    fi
 }
 
 backup_and_copy_file() {

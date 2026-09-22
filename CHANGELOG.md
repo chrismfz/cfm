@@ -17,7 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Site Cache: static assets could break on a host with a stale root-owned
+  cache tree.** nginx creates the `levels=1:2` subdirs under
+  `/var/cache/nginx/cfm_static` (and `cfm_micro`) as the edge worker, which now
+  runs as `cfm`. On a host where an older/global-cache experiment left those
+  subdirs owned `root:root`, the `cfm` worker can neither traverse nor write
+  them — nginx logs `[crit] ... Permission denied while reading upstream` and
+  **aborts the response**, so a page that got its shell from PHP loses its
+  cached CSS/JS. The daemon and installers only chown the *top* cache dir, so
+  the stale children survived upgrades. The deb `postinst`, rpm `%post` and both
+  `scripts/install-{angie,openresty}.sh` now heal the tree once
+  (`chown -R root:cfm` + `chmod -R g+rwX`), guarded by a cheap O(16) probe of the
+  level-1 dirs so a healthy cache is never walked. Fleet-wide auto-heal on the
+  next deploy; no operator action needed.
 
 ## 2026.09.22
 

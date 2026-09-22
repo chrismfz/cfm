@@ -22,7 +22,17 @@ POSTINST=packaging/debian/DEBIAN/postinst
 
 # rpm/shell comments must never satisfy an assertion — an earlier version of
 # this file passed on a commented-out %files entry.
+#
+# Match the stripped text via a MATERIALISED variable + here-string, never
+# `uncommented "$F" | grep -q …`: under `set -o pipefail`, a `grep -q` that hits
+# closes the pipe on the first match, the upstream `sed` racing to write the
+# rest of the file takes SIGPIPE ("sed: couldn't flush stdout: Broken pipe"),
+# and pipefail then fails the pipeline even though the pattern WAS found — a
+# scheduling-dependent false FAIL that slipped past local runs and bit on CI.
+# Capturing `sed`/`awk` output first lets the producer finish before grep reads.
 uncommented() { sed 's/[[:space:]]*#.*$//' "$1"; }
+
+SPEC_NC="$(uncommented "$SPEC")"
 
 # ── 1. Every rsync into the Lua payload uses --delete ──────────────────────
 # This is THE guarantee that a module deleted from the repo leaves the package
@@ -53,21 +63,20 @@ done
 # %install re-copies %{projectroot}/configs over the staged tree, unfiltered.
 # Required unconditionally: harmless if that copy is ever removed, and NOT
 # gated on matching the copy's exact quoting (which made this check vacuous).
-uncommented "$SPEC" | grep -qE 'rm -rf .*\{buildroot\}.*(_datadir\}|/usr/share)/cfm/configs/lua' || fail \
+grep -qE 'rm -rf .*\{buildroot\}.*(_datadir\}|/usr/share)/cfm/configs/lua' <<<"$SPEC_NC" || fail \
   "%install must rm -rf the Lua tree under the buildroot's cfm/configs — its unfiltered cp -a of configs/ otherwise ships every module a second time"
 
 # ── 4. The rpm takes /var from the staged tree (where --delete applied) ────
-uncommented "$SPEC" | grep -qE 'cp -a .*\{pkgroot\}/var' || fail \
+grep -qE 'cp -a .*\{pkgroot\}/var' <<<"$SPEC_NC" || fail \
   "%install must populate /var from %{pkgroot} — that is the only tree where the --delete staging applied"
 
 # ── 5. %files OWNS each Lua file — this is what removes dropped modules ────
 # Body lines start with file-attribute directives (%attr/%dir/%config), so the
 # section can only end on a real section keyword.
-uncommented "$SPEC" \
-  | awk '/^%files([[:space:]]|$)/{f=1;next}
+files_body="$(awk '/^%files([[:space:]]|$)/{f=1;next}
          f&&/^%(package|description|prep|build|install|check|clean|pre|post|preun|postun|posttrans|triggerin|changelog)([[:space:]]|$)/{f=0}
-         f' \
-  | grep -qE '(^|[[:space:]])(/var/lib/cfm/lua/\*|%\{_sharedstatedir\}/cfm/lua/\*)[[:space:]]*$' \
+         f' <<<"$SPEC_NC")"
+grep -qE '(^|[[:space:]])(/var/lib/cfm/lua/\*|%\{_sharedstatedir\}/cfm/lua/\*)[[:space:]]*$' <<<"$files_body" \
   || fail "the %files section must own /var/lib/cfm/lua/* — unowned files are never removed on upgrade, so a retired module lingers on every node forever"
 
 # ── 6. Nothing reintroduces a second delivery path ────────────────────────
@@ -77,9 +86,10 @@ for f in "$POSTINST" "$SPEC" scripts/package-proxy-config-deploy.sh \
          scripts/install-angie.sh scripts/install-openresty.sh; do
   [ -f "$f" ] || continue
   # A line that DELETES the path is the fix, not the failure — only reads count.
-  if uncommented "$f" \
-     | grep -vE '(^|[[:space:]])rm[[:space:]]+-[rf]' \
-     | grep -qE '(share/cfm/configs/lua|share/cfm/lua|\{_datadir\}/cfm/configs/lua)'; then
+  # grep -vE reads every line (no early close), so this inner pipe can't SIGPIPE;
+  # the final match is a here-string, so grep -q can't close a pipe on sed either.
+  reads="$(uncommented "$f" | grep -vE '(^|[[:space:]])rm[[:space:]]+-[rf]' || true)"
+  if grep -qE '(share/cfm/configs/lua|share/cfm/lua|\{_datadir\}/cfm/configs/lua)' <<<"$reads"; then
     fail "$f reads a packaged Lua source path outside a comment — Lua has exactly one delivery path (/var/lib/cfm/lua, via the package manager)"
   fi
 done
