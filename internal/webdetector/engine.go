@@ -496,6 +496,7 @@ type Engine struct {
 	http3Overrides    *http3OverrideStore
 	trafficRules      *trafficRuleStore
 	challengeAccess   *challengeAccessStore
+	siteCache         *siteCacheStore
 	history           *HistoryStore
 
 	// uaEmergency holds box-wide emergency rules keyed by normalized UA.
@@ -559,6 +560,7 @@ func NewEngine(cfg Config) *Engine {
 	e.http3Overrides = newHTTP3OverrideStore(cfg.HTTP3OverridesStorePath)
 	e.trafficRules = newTrafficRuleStore(cfg.TrafficRulesStorePath)
 	e.challengeAccess = newChallengeAccessStore(cfg.ChallengeAccessStorePath)
+	e.siteCache = newSiteCacheStore(cfg.SiteCacheStorePath)
 	e.uaEmergency = NewUAEmergencyStore(cfg.UAEmergencyStorePath, cfg.UAEmergencyAuditLog)
 	// manual from api webtop challenge add// — init loads any persisted manual
 	// challenges from disk (filtering expired); restoreManualChallenges below
@@ -577,6 +579,7 @@ func NewEngine(cfg Config) *Engine {
 	e.nginxBridge.ListClamScanOverrides = e.ClamOverrideList
 	e.nginxBridge.ListClamModeOverrides = e.ClamModeOverrideList
 	e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
+	e.nginxBridge.ListCachePolicy = e.SiteCachePolicyFeed
 	e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 	e.nginxBridge.RuleNeedsVerifiedBot = e.trafficRules.NeedsVerifiedBotFor
 	e.nginxBridge.ListTrafficRules = e.TrafficRuleList
@@ -4019,6 +4022,69 @@ func (e *Engine) HTTP3OverrideHasAny() bool {
 		return false
 	}
 	return e.http3Overrides.HasAny()
+}
+
+// ---------------------------------------------------------------------------
+// Site Cache per-vhost policy. Default for every vhost is "no caching"; entries
+// here are the OPT-IN list (static and/or micro tier). Phase 1 is daemon-side
+// only — see site_cache.go and docs/site-cache-design.md.
+
+func (e *Engine) SiteCacheSet(in SiteCacheEntry) (SiteCacheEntry, error) {
+	if e == nil || e.siteCache == nil {
+		return SiteCacheEntry{}, errors.New("site cache unavailable")
+	}
+	return e.siteCache.Set(in)
+}
+
+func (e *Engine) SiteCacheRemove(host string) bool {
+	if e == nil || e.siteCache == nil {
+		return false
+	}
+	return e.siteCache.Remove(host)
+}
+
+func (e *Engine) SiteCachePurge(host string) (SiteCacheEntry, bool) {
+	if e == nil || e.siteCache == nil {
+		return SiteCacheEntry{}, false
+	}
+	return e.siteCache.Purge(host)
+}
+
+func (e *Engine) SiteCachePurgeAll() int {
+	if e == nil || e.siteCache == nil {
+		return 0
+	}
+	return e.siteCache.PurgeAll()
+}
+
+func (e *Engine) SiteCacheGet(host string) (SiteCacheEntry, bool) {
+	if e == nil || e.siteCache == nil {
+		return SiteCacheEntry{}, false
+	}
+	return e.siteCache.Get(host)
+}
+
+func (e *Engine) SiteCacheList() []SiteCacheEntry {
+	if e == nil || e.siteCache == nil {
+		return nil
+	}
+	return e.siteCache.List()
+}
+
+func (e *Engine) SiteCacheHasAny() bool {
+	if e == nil || e.siteCache == nil {
+		return false
+	}
+	return e.siteCache.HasAny()
+}
+
+// SiteCachePolicyFeed is the /nginx/cache/config bridge feed (enabled vhosts
+// only). Phase 2: observe-only at the edge.
+func (e *Engine) SiteCachePolicyFeed() []CachePolicyRow {
+	if e == nil || e.siteCache == nil {
+		return nil
+	}
+	return e.siteCache.PolicyFeed()
 }
 
 func (e *Engine) TrafficRuleAdd(rule TrafficRule) (TrafficRule, error) {

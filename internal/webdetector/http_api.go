@@ -30,6 +30,7 @@ func SharedAPIPrefixes() []string {
 		"/api/v1/cpanel/",
 		"/api/v1/http3/",
 		"/api/v1/clam/",
+		"/api/v1/site-cache/",
 	}
 }
 
@@ -119,6 +120,12 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/http3/list", e.handleHTTP3List},
 		{"/api/v1/http3/enable", requirePOST(e.handleHTTP3Enable)},
 		{"/api/v1/http3/disable", requirePOST(e.handleHTTP3Disable)},
+		// Site Cache (per-vhost edge caching opt-in; see site_cache.go)
+		{"/api/v1/site-cache/list", e.handleSiteCacheList},
+		{"/api/v1/site-cache/get", e.handleSiteCacheGet},
+		{"/api/v1/site-cache/set", requirePOST(e.handleSiteCacheSet)},
+		{"/api/v1/site-cache/remove", requirePOST(e.handleSiteCacheRemove)},
+		{"/api/v1/site-cache/purge", requirePOST(e.handleSiteCachePurge)},
 		{"/api/v1/waf/engine/summary", e.handleWAFEngineSummary},
 		{"/api/v1/waf/rules", e.handleWAFRules},
 		{"/api/v1/waf/hit-rates", e.handleWAFHitRates},

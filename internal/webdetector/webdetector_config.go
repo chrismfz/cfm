@@ -330,6 +330,9 @@ type Config struct {
 	// ChallengeAccessStorePath persists the Challenge Access-Control allow-list
 	// (multi-dimension per-vhost challenge exemptions; see challenge_access.go).
 	ChallengeAccessStorePath  string        // CHALLENGE_ACCESS_STORE_PATH
+	// SiteCacheStorePath persists the per-vhost Site Cache policy (opt-in
+	// static/micro edge caching; see site_cache.go, docs/site-cache-design.md).
+	SiteCacheStorePath        string        // SITE_CACHE_STORE_PATH
 	IPScoreRules              []IPScoreRule // IP_SCORE_RULES = block:0.90,challenge:0.75
 
 	// UA emergency control surface (bot-top).
@@ -398,6 +401,9 @@ func (c *Config) FillDefaults() {
 	}
 	if c.ChallengeAccessStorePath == "" {
 		c.ChallengeAccessStorePath = "/var/lib/cfm/webdetector_challenge_access.json"
+	}
+	if c.SiteCacheStorePath == "" {
+		c.SiteCacheStorePath = "/var/lib/cfm/webdetector_site_cache.json"
 	}
 	if c.UAEmergencyStorePath == "" {
 		c.UAEmergencyStorePath = "/var/lib/cfm/ua_emergency.json"
