@@ -17,6 +17,28 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **Both edge installers were missing four Lua modules from their pre-flight
+  manifest.** `install-angie.sh` and `install-openresty.sh` verify every
+  packaged module is present in `/var/lib/cfm/lua/` before reloading the edge,
+  so a bad package fails early with a clear message. Their `CFM_LUA_MANIFEST`
+  arrays had drifted: `cfm_fppolicy.lua`, `cfm_h3_config.lua`,
+  `cfm_panel_hosts.lua` and `cfm_ua_emergency.lua` were never added. All four
+  are `pcall`-guarded at their call sites, so a package that failed to deliver
+  one would not have crashed — it would have **silently disabled that feature**,
+  which for `cfm_fppolicy` means armed fingerprint policies quietly stop
+  enforcing, with no error and no log line. Both manifests now cover the full
+  packaged set (27 modules).
+- **`check_shared_lua_layout.sh` was itself broken, and unwired.** It asserted
+  a `configs/<file>"` copy pattern the installers stopped using when the Lua
+  moved into the package, so it failed on its first assertion — which also made
+  the panel-template ownership checks after that loop unreachable. It now
+  DERIVES the expected set from `configs/lua/*.lua` (what the Makefile actually
+  packages) and asserts both installer arrays match it exactly, replacing three
+  hand-maintained copies of one list with one source of truth. **It is now run
+  by CI** (`security.yml` build-test, and CLAUDE.md §3): it had never been
+  wired, which is how it rotted unnoticed in the first place.
+
 ### Added
 - **`v2=<grain>` on the challenge solve line — a passed ChallengeV2 solve is
   no longer invisible.** `cfm.challenges.log` scored every solve (`hs=`/

@@ -68,6 +68,7 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_bypass_list.sh             # challenge_waf_bypass.conf bounds + generator tests
 ./scripts/tests/check_logrotate_coverage.sh      # every CFM log path is rotated (see §5)
 ./scripts/tests/check_origin_ka_config.sh        # origin-keepalive 443 SNI-safety: keepalive 0 (OpenResty) + proxy_ssl_session_reuse off
+./scripts/tests/check_shared_lua_layout.sh       # installer CFM_LUA_MANIFEST == configs/lua/*.lua (see §5)
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
 ./scripts/tests/check_changelog_entry.sh         # CHANGELOG structure (locally); per-PR "code changed → needs entry" runs in CI
 ```
