@@ -387,7 +387,10 @@ const (
 	rlStateTTL   = 10 * time.Minute
 )
 
-// ChallengeSolve describes one successful challenge solve. It is a struct rather
+// ChallengeSolve describes one challenge solve: a valid PoW verify. Usually it
+// cleared the client; a ChallengeV2 Rung-1 reject is also a ChallengeSolve (the
+// PoW was valid) that earned NO clearance and goes to ChallengeV2RejectHook,
+// never ChallengeSolvedHook. It is a struct rather
 // than a positional argument list because the solve is the natural place to hang
 // client-attestation signals, and every new signal would otherwise churn the
 // hook signature and all its callers.
@@ -491,6 +494,17 @@ type ChallengeSolve struct {
 	// under an arm is otherwise byte-identical to a plain v1 solve, which reads
 	// as "the tier never fired" (D5d).
 	V2Grain string
+	// Country / CountryISO / ASN / ASNName / PTR are the solving client's
+	// network identity, resolved ONCE at verify (resolveGeo, challenge_geo.go)
+	// so every line and history row about this solve carries the same answer.
+	// Empty means not resolved at verify (for PTR, also "has none") — never a
+	// fabricated value, and no surface renders one. Log/corpus only: nothing
+	// scores or gates on them.
+	Country    string
+	CountryISO string
+	ASN        uint
+	ASNName    string
+	PTR        string
 }
 
 // TLSFingerprintOrDash renders TLSFP for a log line. Empty means "not
@@ -552,6 +566,19 @@ var challengeSolvedHook ChallengeSolvedHook
 
 // SetChallengeSolvedHook installs a callback invoked after a successful solve.
 func SetChallengeSolvedHook(h ChallengeSolvedHook) { challengeSolvedHook = h }
+
+// ChallengeV2RejectHook is invoked for a Rung-1 rejection (result=v2_reject): a
+// valid PoW solve whose humanity score reached the fail threshold under an
+// armed grain, so NO clearance was issued. Deliberately separate from
+// ChallengeSolvedHook — a reject must never reach the solved path (the solve
+// event, the challenge store's RecordSolved, the solver-farm feed), because it
+// cleared nothing. Optional: unset, the log line stays the only record.
+type ChallengeV2RejectHook func(ChallengeSolve)
+
+var challengeV2RejectHook ChallengeV2RejectHook
+
+// SetChallengeV2RejectHook installs the callback for Rung-1 rejections.
+func SetChallengeV2RejectHook(h ChallengeV2RejectHook) { challengeV2RejectHook = h }
 
 // ChallengeAbuseHook lets the detectors layer route challenge-server abuse
 // into the unified sink (API/firewall/notifier), while the challenge server
@@ -792,6 +819,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			sig:               hsSig.sigFields(),
 			V2Grain:           v2Grain,
 		}
+		// Network identity, once, before the gate below — so a rejected solve
+		// carries it too. Never blocks verify: country/ASN are a live mmdb
+		// read, only the PTR is cached-or-async.
+		solve.resolveGeo()
 
 		// One dictionary line per distinct fingerprint, so every solve can carry
 		// the 8-character id instead of the full tuple. The UA rides along
@@ -823,8 +854,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// solves must still get its id→tuple line, or the burn-in operator
 		// cannot resolve the very fingerprint being rejected (D5d; verification
 		// -pass finding). The rejected solve is deliberately NOT published/
-		// hooked as a solved event (it cleared nothing); its own log line is
-		// the record. Everyone else: a would-fail score is shadow — one
+		// hooked as a solved event (it cleared nothing); it is recorded by
+		// its own log line and the reject hook's challenge_v2_reject history
+		// row instead. Everyone else: a would-fail score is shadow — one
 		// abuse-shadow line (rides the ABUSE_SHADOW master via
 		// ConfigureChallengeV2), clearance unaffected.
 		if v2On && hs >= v2Fail {
@@ -840,14 +872,21 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// solve line, so a passed-under-arm solve is greppable too.
 			if v2Grain != "" {
 				// sig= rides this line too. The rejected solve is exactly
-				// the population the corpus exists to characterise, and
-				// this line is its ONLY record: the solve is deliberately
-				// not published/hooked as solved (it cleared nothing), so
-				// without sig= here every armed-and-rejected client would
-				// be missing from the very data used to tune the tells.
+				// the population the corpus exists to characterise, and it is
+				// deliberately not published/hooked as solved (it cleared
+				// nothing), so this line and the reject hook below are its
+				// only records — without sig= here every armed-and-rejected
+				// client would be missing from the very data used to tune the
+				// tells. cc/asn/asn_name/ptr ride at the END so no field a
+				// parser already reads moves; the hook writes the durable
+				// challenge_v2_reject history row, which is what makes the
+				// rung's false-positive rate queryable at all.
 				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q",
-					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.SignalSuffix(), v2Grain, solve.TLSFingerprintOrDash(), solve.UA)
+					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s",
+					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.SignalSuffix(), v2Grain, solve.TLSFingerprintOrDash(), solve.UA, solve.GeoSuffix())
+				if challengeV2RejectHook != nil {
+					challengeV2RejectHook(solve)
+				}
 				w.Header().Set("X-CFM-V2", "reject")
 				http.Error(w, "verification failed", http.StatusForbidden)
 				return
@@ -874,7 +913,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				solveMS = strconv.FormatInt(ms, 10)
 			}
 			logging.LogfCHALLENGES(
-				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s",
+				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s",
 				solve.IP,
 				solve.Host,
 				solve.URI,
@@ -885,6 +924,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				solve.UAFamilyOrDash(),
 				solve.UA,
 				solve.HumanitySuffix(),
+				solve.GeoSuffix(),
 			)
 		}
 

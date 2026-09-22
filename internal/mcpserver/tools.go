@@ -906,7 +906,7 @@ func registerIPDrilldown(srv *mcp.Server, d Deps) {
 
 type detectionHistoryInput struct {
 	Limit int    `json:"limit,omitempty" jsonschema:"max event rows to return; default server-side"`
-	Type  string `json:"type,omitempty" jsonschema:"filter by event type, e.g. waf, challenge_arm, clam_infected; omit for all"`
+	Type  string `json:"type,omitempty" jsonschema:"filter by event type, e.g. waf_trigger, challenge_issued, challenge_solved, challenge_v2_reject, clam_infected, hardware_ecc; omit for all"`
 	Host  string `json:"host,omitempty" jsonschema:"restrict to one vhost; omit for all"`
 	IP    string `json:"ip,omitempty" jsonschema:"restrict to ONE source IP — the events CFM recorded for it (WAF hits, challenge, autoblock), i.e. WHO/WHY this IP was acted on; omit for all. Detector/WAF/challenge bans appear here; manual/blocklist bans do not."`
 }
@@ -915,7 +915,7 @@ func registerDetectionHistory(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "detection_history",
-		Description: "Durable, time-ordered log of detection events (WAF hits, challenge arm/pass/fail, ClamAV infections, autoblocks, memory ECC/hardware errors [type=hardware_ecc], …), GeoIP-enriched. The forensic timeline: \"what has CFM detected/done over time?\". Because it is persisted, it answers questions the live snapshot can't — e.g. a corrected DRAM ECC error recorded today is still here tomorrow even after a reboot resets the EDAC counters or the dmesg ring wraps. Pass ip=<addr> to attribute one IP — the WAF/detector/challenge events behind why CFM acted on it (a firewall_blocks ban with no comment: check here for its origin; note manual/blocklist bans leave no detection event).",
+		Description: "Durable, time-ordered log of detection events (WAF hits, challenge arm/pass/fail, ClamAV infections, autoblocks, memory ECC/hardware errors [type=hardware_ecc], …), GeoIP-enriched. The forensic timeline: \"what has CFM detected/done over time?\". Because it is persisted, it answers questions the live snapshot can't — e.g. a corrected DRAM ECC error recorded today is still here tomorrow even after a reboot resets the EDAC counters or the dmesg ring wraps. Pass ip=<addr> to attribute one IP — the WAF/detector/challenge events behind why CFM acted on it (a firewall_blocks ban with no comment: check here for its origin; note manual/blocklist bans leave no detection event). ChallengeV2 false-positive hunting: type=challenge_v2_reject lists the solves the Rung-1 humanity gate REFUSED clearance (valid PoW, score at/over the fail threshold, under an armed grain); compare with type=challenge_solved, which carries the same payload keys. Both carry hs / tells / v2 (the arm grain) / sig (raw readings) and the solver's network identity as resolved at solve time — country, country_iso, asn, asn_name, ptr (reverse DNS) — each key present only when resolved (scoped cPanel API callers get neither sig nor ptr). For a v2=geo row, country/asn are the LIVE values; the geo arm check matched the enricher's cached record, so a mismatch means the gate acted on a stale record. Use node=\"all\" for the fleet view.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in detectionHistoryInput) (*mcp.CallToolResult, any, error) {
 		q := url.Values{"enrich": {"1"}}
 		setInt(q, "limit", in.Limit)
