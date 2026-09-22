@@ -14,7 +14,7 @@ import (
 func TestHandleChallengeVhostStatus_CarriesState(t *testing.T) {
 	e := newAttackHandlerEngine(true) // helper from under_attack_surfaces_test.go
 	e.chalAPI = NewChallengeAPIStore(1000)
-	e.SetVhostAttackOverride("shop.example", true, time.Now())
+	e.SetVhostAttackOverride("shop.example", true, time.Now(), 0)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/challenge/vhost/status?host=shop.example", nil)
 	rr := httptest.NewRecorder()

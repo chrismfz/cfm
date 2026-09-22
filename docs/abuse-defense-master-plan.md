@@ -362,9 +362,14 @@ already opened.
           (same-account ServerAlias in cPanel practice); a scoped re-arm
           may replace/downgrade an admin arm on the customer's own vhost
           (owner self-service — an owner-immutable challenge belongs in
-          config-time CHALLENGE_VHOST); the scoped `vhost/attack`
-          override stays un-TTL'd (audited now; TTL-bound-or-admin-only
-          is a pending decision); the scoped Tier picker on the
+          config-time CHALLENGE_VHOST); ~~the scoped `vhost/attack`
+          override stays un-TTL'd~~ RESOLVED 2026-09-22 (operator
+          decision): a scoped `on=1` override is TTL-bound to the same
+          24h ceiling as the panic arm — expiry returns the vhost to
+          AUTO control via the tick (st.on stays true, so the vhost
+          leaves by the normal exit rules, not mid-attack) and the read
+          path honours it immediately; admin overrides stay unbounded;
+          the scoped Tier picker on the
           WebDetector overview page pre-existed via slice A under the
           same server-side scope checks.
 - [ ] **E4 — Measure and publish the result** (one page appended here): bans

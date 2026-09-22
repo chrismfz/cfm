@@ -27,6 +27,12 @@ back-filled here — see the git/PR history for that period.
   (`ttl_capped: true` in the response, with the effective expiry) — a
   temporary shield, not standing configuration; admin/CLI callers are
   uncapped. Single-vhost customers get their host preselected.
+- **Scoped Under-Attack override is now TTL-bound (24h).** A customer
+  forcing their vhost into UNDER_ATTACK gets the same 24h ceiling as the
+  panic-button arm (response carries `ttl` + `expires_at`; the audit event
+  records `ttl_sec`): on expiry the vhost returns to AUTO control and
+  leaves via the normal exit rules — never a mid-attack shield drop.
+  Admin/CLI overrides stay unbounded.
 - **Manual challenge audit: history events now record the rung and the
   actor.** `challenge_vhost_manual_on/off` carry `payload.rung` ("v1"/"v2";
   a missing key means a pre-upgrade event) and `payload.actor`

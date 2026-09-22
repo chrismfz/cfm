@@ -178,8 +178,14 @@ type attackVhost struct {
 	lastEval   time.Time // last tick this vhost reached evalUnderAttack
 	// override: 0 none, +1 forced on (operator `attack on`), -1 forced off
 	// (`attack off`: leave + suppress re-entry until suppressUntil).
-	override      int8
-	suppressUntil time.Time
+	override int8
+	// overrideExpires bounds a forced-ON override: past it the override
+	// clears back to AUTO control (evalUnderAttack tick; the read path
+	// honours it too). Zero = no bound (admin override). Scoped callers get
+	// a 24h ceiling, mirroring the scoped manual-challenge TTL cap
+	// (slice-D residual, resolved by operator decision 2026-09-22).
+	overrideExpires time.Time
+	suppressUntil   time.Time
 	evidence      string // last transition's evidence (kept consistent with `on`)
 }
 
@@ -328,6 +334,14 @@ func (e *Engine) evalUnderAttack(now time.Time, host string, challenged bool, ro
 	// auto control.
 	if st.override == -1 && !now.Before(st.suppressUntil) {
 		st.override = 0
+	}
+	// A TTL-bounded forced-ON override (scoped caller) that has served its
+	// window expires back to auto control: st.on stays true, so the vhost
+	// leaves UNDER_ATTACK via the normal exit rules on the following ticks
+	// rather than dropping the shield mid-attack.
+	if st.override == +1 && !st.overrideExpires.IsZero() && !now.Before(st.overrideExpires) {
+		st.override = 0
+		st.overrideExpires = time.Time{}
 	}
 
 	var trans *attackTransition
@@ -500,7 +514,13 @@ func (e *Engine) emitUnderAttack(now time.Time, host string, on bool, row Suspic
 // transition — and activeHosts() keeps the vhost in the candidate set until then,
 // so the tick runs even with no traffic. Surfaced via
 // `cfm webtop attack on|off <vhost>` (increment I1b); callers pass time.Now().
-func (e *Engine) SetVhostAttackOverride(host string, on bool, now time.Time) {
+//
+// ttl bounds a forced-ON override: past now+ttl the override expires back to
+// AUTO control (so an armed vhost leaves UNDER_ATTACK by the normal exit
+// rules). ttl <= 0 means unbounded (admin). A scoped caller's override is
+// TTL-bound like its panic-button arm — the API handler passes the 24h
+// ceiling. ttl is ignored for on=false (the holddown already bounds it).
+func (e *Engine) SetVhostAttackOverride(host string, on bool, now time.Time, ttl time.Duration) {
 	if e == nil || e.attack == nil || host == "" {
 		return
 	}
@@ -513,8 +533,14 @@ func (e *Engine) SetVhostAttackOverride(host string, on bool, now time.Time) {
 	}
 	if on {
 		st.override = +1
+		if ttl > 0 {
+			st.overrideExpires = now.Add(ttl)
+		} else {
+			st.overrideExpires = time.Time{}
+		}
 	} else {
 		st.override = -1
+		st.overrideExpires = time.Time{}
 		st.suppressUntil = now.Add(e.cfg.UnderAttackHolddown)
 	}
 	t.mu.Unlock()
@@ -536,6 +562,12 @@ func (e *Engine) VhostAttackState(host string) (on bool, since time.Time, eviden
 	if st := t.hosts[host]; st != nil {
 		switch st.override {
 		case +1:
+			// An expired TTL-bounded override reads as AUTO immediately —
+			// don't wait for the tick to clear it (the tick still owns the
+			// actual state transition).
+			if !st.overrideExpires.IsZero() && !time.Now().Before(st.overrideExpires) {
+				return st.on, st.since, st.evidence
+			}
 			return true, st.since, st.evidence
 		case -1:
 			return false, st.since, st.evidence

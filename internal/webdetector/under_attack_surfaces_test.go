@@ -128,11 +128,11 @@ func TestHandleChallengeVhostAttack_DisabledConflict(t *testing.T) {
 func TestVhostAttackState_ReflectsOverrideImmediately(t *testing.T) {
 	e := newAttackHandlerEngine(true)
 	now := time.Unix(1_700_000_000, 0)
-	e.SetVhostAttackOverride("shop.example", true, now)
+	e.SetVhostAttackOverride("shop.example", true, now, 0)
 	if on, _, _ := e.VhostAttackState("shop.example"); !on {
 		t.Fatal("force-on override should read as on before actuation")
 	}
-	e.SetVhostAttackOverride("shop.example", false, now)
+	e.SetVhostAttackOverride("shop.example", false, now, 0)
 	if on, _, _ := e.VhostAttackState("shop.example"); on {
 		t.Fatal("force-off override should read as off immediately")
 	}
@@ -144,7 +144,7 @@ func TestVhostAttackState_ReflectsOverrideImmediately(t *testing.T) {
 func TestHandleChallengeVhost_ForcedOverrideNoStoreRow(t *testing.T) {
 	e := newAttackHandlerEngine(true)
 	e.chalAPI = NewChallengeAPIStore(1000) // empty store: no challenge row for the host
-	e.SetVhostAttackOverride("shop.example", true, time.Now())
+	e.SetVhostAttackOverride("shop.example", true, time.Now(), 0)
 
 	ctx := context.WithValue(context.Background(), CtxAuthnKey{}, true)
 	ctx = context.WithValue(ctx, CtxRoleKey{}, CtxRoleAdmin)
