@@ -22,6 +22,16 @@
 # duplicated section header, neither of which rule 1 can see.
 # Both were verified by reintroducing each failure mode and confirming this
 # script rejects it.
+#
+# Rule 3 (added the same day, same EL-only class of trap): the TOP %changelog
+# entry must be the build-dated `* %{cfm_changelog_date} …` one. EL10
+# rpmbuild derives SOURCE_DATE_EPOCH from the newest entry and clamps every
+# packaged file's mtime to it — a hand-dated "May 04 2026" top entry made
+# installed files read "May 4" for months. And the usual RPM habit of adding a
+# new entry on top breaks silently: an entry above the auto one is out of
+# chronological order on any later build day, which EL9/EL10 report as an
+# error yet still exit 0 — keeping ONLY the hand entry and dropping the rest
+# of the changelog — while EL8 fails the build.
 set -euo pipefail
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -81,6 +91,21 @@ for spec in "${specs[@]}"; do
     fi
     violations+=("$spec:${hit%%:*} — %install outside its section header; on EL it expands to a newline + '%install' and starts a second install section: $line")
   done <<< "$HITS"
+
+  # ── 3. The top %changelog entry must be the build-dated one ──────────────
+  scan '^%changelog[[:space:]]*$' "$spec"
+  if [ -n "$HITS" ]; then
+    first="${HITS%%$'\n'*}"
+    cl="${first%%:*}"
+    top=""
+    while IFS= read -r l; do
+      case "$l" in '*'*) top="$l"; break ;; esac
+    done < <(sed -n "$((cl + 1)),\$p" "$spec")
+    case "$top" in
+      '* %{cfm_changelog_date} '*) ;;
+      *) violations+=("$spec:$cl — the top %changelog entry must be '* %{cfm_changelog_date} …' (build-dated); found: ${top:-<no entry>}. EL10 rpmbuild dates every packaged file from the newest entry, and an entry above the auto one silently truncates the changelog on EL9/EL10 (EL8 fails the build). Add hand-written entries BELOW it.") ;;
+    esac
+  fi
 done
 
 if [ "${#violations[@]}" -gt 0 ]; then
@@ -90,4 +115,4 @@ if [ "${#violations[@]}" -gt 0 ]; then
   exit 1
 fi
 
-echo "OK: rpm spec comments carry no unescaped macros"
+echo "OK: rpm spec comments carry no unescaped macros; top %changelog entry is build-dated"

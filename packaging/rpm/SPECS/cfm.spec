@@ -1,10 +1,12 @@
 # Date of the top %%changelog entry = the build date, like Version. `make rpm`
-# passes it (from the same UTC date as Version); a bare rpmbuild falls back to
-# today. It must never be a fixed date: EL10 rpmbuild derives SOURCE_DATE_EPOCH
-# from the newest %%changelog entry and clamps every packaged file's mtime to
-# it, so a hand-written entry from May 04 2026 made every file changed since
-# then read "May 4" in every later package. (`make rpm` also exports SOURCE_DATE_EPOCH itself, so
-# the clamp lands on the build time, not on midnight of the build date.)
+# passes it (Version's own date); a bare rpmbuild falls back to today. It must
+# never be a fixed date: EL10 rpmbuild derives SOURCE_DATE_EPOCH from the
+# newest %%changelog entry and clamps every packaged file's mtime to it, so a
+# hand-written entry from May 04 2026 made every file changed since then read
+# "May 4" in every later package. (`make rpm` also exports SOURCE_DATE_EPOCH
+# itself, so the clamp lands on the build time, not on midnight of the build
+# date.) That entry must stay FIRST: add hand-written entries below it, never
+# above — check_rpm_spec_macros.sh enforces it.
 %{!?cfm_changelog_date:%global cfm_changelog_date %(LC_ALL=C date -u +"%%a %%b %%d %%Y")}
 
 Name:           cfm
@@ -310,8 +312,7 @@ fi
 
 %changelog
 * %{cfm_changelog_date} CFM Maintainers <maintainers@cfm.local> - %{version}-%{release}
-- Build %{version}-%{release}. Release notes: the section for this date in
-  CHANGELOG.md, also published as the GitHub release for this build's tag.
+- Build %{version}-%{release}. Release notes: CHANGELOG.md.
 
 * Mon May 04 2026 CFM Maintainers <maintainers@cfm.local> - 0.0.0-1
 - Fix cfm_clearance normalize_host trailing-dot pattern ("%.+$") to avoid invalid escape syntax.
