@@ -20,7 +20,7 @@ local CFG, util
 local has, header_string, lower, cap, count_occurs, has_long_b64_blob,
       is_known_legit_php_upload_endpoint, score_obfuscation_blob, begins,
       url_decode_once, normalize, strip_sql_comments, scan_str,
-      strip_host_port, is_ipv4_literal, is_ipv6_literal
+      strip_host_port, is_ipv4_literal, is_ipv6_literal, body_budget
 
 function _M.init(cfg, u)
   CFG  = cfg
@@ -41,6 +41,7 @@ function _M.init(cfg, u)
   strip_host_port                    = u.strip_host_port
   is_ipv4_literal                    = u.is_ipv4_literal
   is_ipv6_literal                    = u.is_ipv6_literal
+  body_budget                        = u.body_budget
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -127,7 +128,10 @@ function _M.detect_raw_path_dotdot(raw_uri)
   if not p:find("..", 1, true) and not p:find("%%2[eE]") and not p:find("%%252[eE]") then
     return nil
   end
-  local s = normalize(cap(p, CFG.max_scan_len or 2048)):gsub("\\", "/")
+  -- Same per-side request-line budget scan_str uses (audit F30).
+  local n = tonumber(CFG.uri_scan_len or CFG.max_scan_len)
+  if not n or n < 1 then n = 2048 end
+  local s = normalize(cap(p, n)):gsub("\\", "/")
   if s:find("/%.%./") or s:find("/%.%.$") then return "RAW_PATH" end
   return nil
 end
@@ -140,6 +144,17 @@ local function has_dotdot_segment(v)
   return s:find("/%.%./") ~= nil
 end
 
+-- The name PHP registers a (decoded, lowercased) request variable under, as
+-- far as it matters for `pagename`: leading whitespace is dropped and an array
+-- suffix `[...]` selects the base name. (PHP's `.`/space → `_` mangling cannot
+-- turn anything else into `pagename`, which contains neither.)
+local function php_var_name(k)
+  k = k:gsub("^%s+", "")
+  local b = k:find("[", 1, true)
+  if b then k = k:sub(1, b - 1) end
+  return k
+end
+
 -- Rule 10017 — CVE-2026-87902 (GHSA-7hp8-65ch-5whp), WordPress core 4.7–7.1.1
 -- unauth page-template path traversal → local .php include (→ RCE with
 -- pearcmd.php and register_argc_argv=On). Source: the WordPress advisory and
@@ -149,50 +164,70 @@ end
 --
 -- Keyed on the exact vector: a `pagename` value carrying a `..` segment. A real
 -- pagename is a page slug path (`about`, `parent/child`) and never holds one.
--- WordPress reads query vars from $_POST before $_GET, so both the query string
--- and a POST body (urlencoded or multipart) are checked. Every `pagename=`
--- occurrence is examined, not just the first (PHP keeps the last). The
--- pretty-permalink route (the path itself becomes `pagename`) is covered by
--- rule 103, which sees the raw request path.
-function _M.detect_cve_wp_pagename_traversal(args, body, method, headers)
+-- WordPress reads query vars from $_POST before $_GET, so the query string and
+-- a urlencoded or multipart POST body are checked (PHP builds $_POST from
+-- nothing else). Every occurrence is examined, not just the first (PHP keeps
+-- the last). The pretty-permalink route (the path itself becomes `pagename`)
+-- is rule 103, which sees the raw request path.
+--
+-- `_nab` is the memoized normalize(args & body) surface from cfm_waf.check —
+-- decoded and lowercased, so an encoded key still shows as `pagename`. When it
+-- does not contain the word the request cannot carry the var and the rule
+-- costs one find. Budgets match the rest of the engine: uri_scan_len for the
+-- query string, body_budget(headers) for the body (audits F09/F30).
+function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _nab)
+  -- _nab caps each side at body_budget(headers) — 2048 for a GET with no
+  -- Content-Type — so it may only rule the var out when it saw both sides
+  -- whole; a longer request always takes the full scan below.
+  local bn = body_budget(headers)
+  if _nab and #(args or "") <= bn and #(body or "") <= bn
+     and not has(_nab, "pagename") then
+    return nil
+  end
+
   -- Split the RAW string on `&` first and decode key and value separately, as
   -- PHP does: decoding the whole string first would turn a `%26` inside the
-  -- value into a split point and cut the traversal off. Keys are decoded too
-  -- (PHP accepts `page%6eame=`). The cheap pre-filter only skips strings that
-  -- can hold neither a literal nor an encoded key.
-  local function scan_pairs(s)
-    if s == "" then return false end
-    s = cap(s, CFG.max_scan_len)
-    if not has(lower(s), "pagename") and not s:find("%", 1, true) then return false end
+  -- value into a split point and cut the traversal off.
+  local function scan_pairs(s, n)
+    if not s or s == "" then return false end
+    s = cap(s, n)
     for pair in ("&" .. s):gmatch("&([^&]*)") do
       local k, v = pair:match("^([^=]*)=(.*)$")
-      if k and normalize(k) == "pagename" and has_dotdot_segment(normalize(v)) then return true end
+      if k and php_var_name(normalize(k:gsub("%+", " "))) == "pagename"
+         and has_dotdot_segment(normalize(v)) then
+        return true
+      end
     end
     return false
   end
 
-  if scan_pairs(args or "") then return "ARG" end
+  local un = tonumber(CFG.uri_scan_len or CFG.max_scan_len)
+  if not un or un < 1 then un = 2048 end
+  if scan_pairs(args, un) then return "ARG" end
 
   if method ~= "post" or not body or body == "" then return nil end
   local ct = lower(header_string(headers and (headers["Content-Type"] or headers["content-type"])) or "")
   if has(ct, "multipart/form-data") then
-    -- Each `pagename` form field: skip its part headers (there may be more
-    -- than Content-Disposition) to the blank line, take the first value line.
-    local b = cap(body, CFG.max_scan_len)
+    -- Each form field NAME (a `name=` parameter, never `filename=`), quoted
+    -- either way or bare; for a `pagename` field skip its part headers to the
+    -- blank line and take the first value line.
+    local b  = cap(body, bn)
     local lb = lower(b)
     local pos = 1
     while true do
-      local _, e = lb:find('name%s*=%s*"?pagename"?[;%s]', pos)
+      local _, e = lb:find("[^%w_]name%s*=%s*", pos)
       if not e then break end
-      local _, he = b:find("\r?\n\r?\n", e)
-      if not he then break end
-      local v = b:match("^[^\r\n]*", he + 1)
-      if v and has_dotdot_segment(normalize(v)) then return "BODY" end
       pos = e + 1
+      local name = lb:match('^"([^"\r\n]*)', pos) or lb:match("^'([^'\r\n]*)", pos)
+                   or lb:match("^([^;%s]*)", pos)
+      if name and php_var_name(normalize(name)) == "pagename" then
+        local _, he = b:find("\r?\n\r?\n", pos)
+        if not he then break end
+        local v = b:match("^[^\r\n]*", he + 1)
+        if v and has_dotdot_segment(normalize(v)) then return "BODY" end
+      end
     end
-  elseif has(ct, "application/x-www-form-urlencoded") and scan_pairs(body) then
-    -- PHP fills $_POST only from urlencoded and multipart bodies; a JSON or
-    -- raw body never becomes a query var.
+  elseif has(ct, "application/x-www-form-urlencoded") and scan_pairs(body, bn) then
     return "BODY"
   end
   return nil

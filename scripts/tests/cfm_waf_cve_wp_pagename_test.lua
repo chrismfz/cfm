@@ -94,7 +94,23 @@ fires(post("/", "------B\r\nContent-Disposition: form-data; name=\"pagename\"\r\
                 "Content-Type: text/plain\r\n\r\ntemplates/../../placeholder\r\n------B--\r\n", MP),
       "multipart field with an extra part header", BODY)
 
+fires(get("/", "pagename%5B%5D=templates/../../placeholder"), "array-suffixed key", ARG)
+fires(get("/", "+pagename=templates/../../placeholder"), "key with leading whitespace", ARG)
+fires(get("/", ("pad=" .. string.rep("a", 3000)) .. "&pagename=templates/../../placeholder"),
+      "pagename past the 2048-byte memoized window (GET, no Content-Type)", ARG)
+fires(post("/", ("pad=" .. string.rep("a", 3000)) .. "&pagename=templates/../../placeholder",
+           "application/x-www-form-urlencoded"), "pagename past 2 KB of urlencoded body", BODY)
+fires(post("/", "------B\r\nContent-Disposition: form-data; name='pagename'\r\n\r\n" ..
+                "templates/../../placeholder\r\n------B--\r\n", "multipart/form-data; boundary=----B"),
+      "multipart field, single-quoted name", BODY)
+fires(post("/", "------B\r\nContent-Disposition: form-data; name=pagename\r\n\r\n" ..
+                "templates/../../placeholder\r\n------B--\r\n", "multipart/form-data; boundary=----B"),
+      "multipart field, bare name", BODY)
+
 clean(get("/", "pagename=about"), "a page slug")
+clean(post("/", "------B\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"pagename\"\r\n\r\n" ..
+                "a/../../b\r\n------B--\r\n", "multipart/form-data; boundary=----B"),
+      "a FILE part named pagename is not the field")
 clean(get("/", "pagename=parent/child/grandchild"), "a hierarchical page path")
 clean(get("/", "pagename=release..notes"), "dots inside a segment")
 clean(get("/", "pagename=wait.../more"), "ellipsis slug")
@@ -121,6 +137,8 @@ fires(get("/placeholder", "", "/templates/..%2F..%2Fplaceholder"), "encoded slas
 fires(get("/placeholder", "", "/templates/%252e%252e/placeholder"), "double-encoded dots", RAW)
 fires(get("/placeholder", "", "/templates%5c..%5cplaceholder"), "backslash separators", RAW)
 fires(get("/", "", "/a/%2E%2E"), "trailing encoded segment", RAW)
+fires(get("/placeholder", "", "/" .. string.rep("a", 3000) .. "/%2e%2e/placeholder"),
+      "dot segment past 2 KB of path (uri_scan_len budget)", RAW)
 
 clean(get("/about/", "", "/about/"), "an ordinary path")
 clean(get("/product/ring...gold/", "", "/product/ring...gold/"), "ellipsis slug")

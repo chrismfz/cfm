@@ -1342,7 +1342,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_cve_wp_pagename_traversal, "block")
     if mode ~= "disabled" then
-      local tag = det.detect_cve_wp_pagename_traversal(args, body, m_lower, headers)
+      local tag = det.detect_cve_wp_pagename_traversal(uri, m_lower, args, body, headers, get_norm_ab())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_87902:WORDPRESS:" .. tag, ttl, mode, RULE_IDS.rule_cve_wp_pagename_traversal) then goto done end
