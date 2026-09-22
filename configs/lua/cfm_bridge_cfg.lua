@@ -96,6 +96,12 @@ local OPTS = {
     -- since the per-vhost policy store must still arm a vhost before anything
     -- caches. Only an EXPLICIT false disarms it (cfm_cache.lua → full no-op).
     out.site_cache = (val.site_cache ~= false)
+    -- Tier B micro-cache ENFORCE gate ([webdetector] MICRO_CACHE_ENFORCE).
+    -- OPT-IN, so the default is FALSE (absent field / older daemon → dry-run):
+    -- only an EXPLICIT true lets cfm.lua's micro gate ngx.exec to a cache
+    -- location. Mirror-image of site_cache's fail-safe idiom — HTML caching must
+    -- never turn itself on.
+    out.micro_cache_enforce = (val.micro_cache_enforce == true)
     return out
   end,
 }

@@ -273,6 +273,23 @@ local waf_ok, waf = pcall(require, "cfm_waf")
 -- fast-path. If it fails to load, the observe call below is simply skipped.
 local pcw_ok, pcw = pcall(require, "cfm_pcw")
 
+-- cfm_cache: Site Cache Tier B micro-cache gate (Phase B3b). Loaded under pcall
+-- so a load failure can never break enforcement — the gate is simply skipped.
+-- The gate itself is a NO-OP unless MICRO_CACHE_ENFORCE is armed (dry-run
+-- otherwise), and returns the @cfm_micro_<n>s location to serve from, or nil.
+local cache_ok, cfm_cache = pcall(require, "cfm_cache")
+
+-- micro_cache_target: run the Tier B gate under a pcall (so a bug in it can
+-- never break the allow path) and return the ngx.exec target, or nil. The
+-- caller must ngx.exec the non-nil result OUTSIDE this pcall — ngx.exec never
+-- returns, so wrapping it in pcall would swallow the internal redirect.
+local function micro_cache_target()
+  if not cache_ok or not cfm_cache or not cfm_cache.micro_gate then return nil end
+  local ok, target = pcall(cfm_cache.micro_gate)
+  if ok and type(target) == "string" then return target end
+  return nil
+end
+
 -- cfm_waf_util is a dependency of cfm_waf (already loaded); require it directly
 -- for the pure ct_is_inspectable() classifier used by the body-read gate (F07).
 -- If it fails to load, the F07 Content-Type branch fails closed (skips the read).
@@ -1556,6 +1573,15 @@ if clearance_allow then
   end
   ngx.header["X-CFM-Action"] = "allow_cookie"
   ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+  -- Site Cache Tier B (Phase B3b): micro-cache is deliberately NOT wired on this
+  -- clearance fast-path yet. `refresh_clearance_cookie` above sets the sliding
+  -- cfm_clearance Set-Cookie via ngx.header in THIS access phase; whether that
+  -- survives an ngx.exec internal redirect to the @cfm_micro_<n>s location is the
+  -- open clearance-cookie-ordering item (design §5.5.1) — if the refresh is lost,
+  -- a cleared visitor served from micro-cache stops re-arming their clearance.
+  -- Per that design note, micro-cache ships on the Step 4 (plain-allow) path only
+  -- and this dominant cleared path is added once the ordering is verified on a
+  -- live edge (the refresh must move to a header_filter that runs on cache HITs).
   return
 end
 
@@ -1669,6 +1695,11 @@ ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
 if CFG.log_allows or CFG.debug then
   log_route(ngx.INFO, "allow ip=" .. ip .. " host=" .. host .. " pass=" .. ngx.var.cfm_pass .. cache_flag)
 end
+-- Site Cache Tier B (Phase B3b): plain-allow path. Same micro gate as the Step 2b
+-- clearance fast-path — no-op unless MICRO_CACHE_ENFORCE is armed. ngx.exec to the
+-- @cfm_micro_<n>s bucket is the last thing here (it never returns).
+local micro_target = micro_cache_target()
+if micro_target then return ngx.exec(micro_target) end
 
 end -- cfm_enforce()
 
