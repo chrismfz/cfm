@@ -63,14 +63,14 @@ fi
 mkdir -p %{buildroot}/etc/cfm/detectors.d
 
 
-# ensure canonical shared assets are always shipped, even if %{pkgroot} staging omitted them
+# ensure canonical shared assets are always shipped, even if %%{pkgroot} staging omitted them
 mkdir -p "%{buildroot}%{_datadir}/cfm"
 if [ -d "%{projectroot}/configs" ]; then
   rm -rf "%{buildroot}%{_datadir}/cfm/configs"
   cp -a "%{projectroot}/configs" "%{buildroot}%{_datadir}/cfm/configs"
   # Lua modules belong in /var/lib/cfm/lua/ ONLY. This cp is unfiltered, so it
   # would otherwise ship ~900 KB of every module a second time here - and
-  # resurrect the source tree the removed %post sync loop used to copy from.
+  # resurrect the source tree the removed post-scriptlet sync loop copied from.
   # The Makefile's own PKGROOT staging already excludes lua/; match it.
   rm -rf "%{buildroot}%{_datadir}/cfm/configs/lua"
 fi
@@ -149,9 +149,9 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 
 # Per-server API/MaxMind secrets overlay. Seed an editable 0600 template on
 # first install only; never overwrite an operator's existing file. It is not
-# tracked by rpm (created here, not shipped in %files), so upgrades leave it be.
+# tracked by rpm (created here, not in the file manifest), so upgrades leave it.
 if [ ! -e /etc/cfm/cfm.api.conf ] && [ -f /usr/share/cfm/configs/cfm.api.conf.example ]; then
-    # Seeding is a convenience, never fatal — keep %post going regardless
+    # Seeding is a convenience, never fatal — keep the scriptlet going regardless
     # (parity with the deb postinst, which runs under set -e).
     cp -p /usr/share/cfm/configs/cfm.api.conf.example /etc/cfm/cfm.api.conf 2>/dev/null || true
     chmod 0600 /etc/cfm/cfm.api.conf 2>/dev/null || true
@@ -176,19 +176,21 @@ find /var/lib/cfm/lua -type f -exec chmod 0640 {} + || true
 #   - deb: that source was never shipped, so the loop only ever fell through to
 #     "WARNING: packaged lua source path missing" on every install and upgrade,
 #     about a path that is not supposed to exist.
-#   - rpm: the source WAS shipped (the spec %install copied the whole configs/
-#     tree unfiltered, so every module rode along a second time), and the loop
-#     re-copied ~900 KB over byte-identical files and rewrote a sha256 stamp
+#   - rpm: the source WAS shipped (this spec's install section copied the whole
+#     configs/ tree unfiltered, so every module rode along a second time), and
+#     the loop re-copied ~900 KB over byte-identical files and rewrote a stamp
 #     each run. Its headline policy - "locally modified -> backup and
 #     force-refresh" - could never fire on an upgrade anyway: rpm replaces
-#     /var/lib/cfm/lua/* BEFORE %post runs, so by the time the loop compares
+#     /var/lib/cfm/lua/* BEFORE this scriptlet runs, so by the time it compares
 #     hashes the operator edit is already gone and the hashes already match.
 # Removed 2026-09-22; the rpm no longer ships the duplicate source tree either.
 #
 # A hand-edit under /var/lib/cfm/lua/ IS overwritten on upgrade with no backup.
 # That was always true - the loop never actually changed it. These are code
-# files, deliberately not %config (a .rpmnew would freeze security code at the
-# operator version). `rpm -V cfm` / `dpkg --verify cfm` already report such
+# files, deliberately NOT marked as config (%%config(noreplace) would keep the
+# operator's edit and drop the new module beside it as .rpmnew, freezing
+# security code at the operator version; plain %%config would save the edit as
+# .rpmsave). `rpm -V cfm` / `dpkg --verify cfm` report such
 # edits. Edit /etc/cfm/*, never /var/lib/cfm/lua/*.
 
 # Retire the stamp directory the removed loop wrote into. The stamps are ours

@@ -17,40 +17,26 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-### Added
-- **Site Cache — Tier A (static-asset caching) is now wired at the edge.**
-  Building on the per-vhost Site Cache policy store and the observe-only edge
-  module, the static-asset location on both edges (OpenResty + Angie) now
-  activates an nginx `proxy_cache` (`cfm_static` zone) — but **bypass-by-default
-  and per-vhost opt-in**: a request is cached only when the operator armed that
-  exact vhost's static tier *and* the `SITE_CACHE` master switch is on. A
-  minimal fail-safe Lua gate (`cfm_cache.static_gate`, the only Lua on the
-  static hot path, double-`pcall`-guarded) flips `$cfm_cache_skip` to `0` and
-  stamps the purge generation into the cache key; any error or an unarmed vhost
-  leaves caching off, exactly as before. Cached responses honour the origin's
-  `Cache-Control`/`Expires` with a 1h fallback, only `200` is cached (a
-  transient deploy-time 404 must not stick), a `Set-Cookie` response is never
-  cached, and anti-stampede locking means a burst hits the origin about once per
-  TTL. The static-asset location now uses `proxy_buffering on` (it previously
-  streamed unbuffered): nginx populates `proxy_cache` only on the buffered path,
-  so buffering is required for the cache to store anything — small web assets
-  buffer in memory, larger ones spill into the cache dir; large media/archives
-  keep streaming from their own separate uncached location. A new CI guard
-  (`check_site_cache_config.sh`) asserts the bypass-by-default invariant and
-  buffering-on on every `proxy_cache` location, plus openresty↔angie location
-  parity, so a future refactor cannot silently reintroduce the global,
-  page-breaking cache CFM removed once before — or leave a cache location
-  unbuffered (which would silently store nothing). The Angie installer now
-  provisions the cache directory at the canonical `/var/cache/nginx/cfm_static`
-  (it had pointed at `/var/cache/angie/`, harmless until now but a mismatch with
-  the conf and the daemon that would fail `angie -t` once caching went live).
-  **Caching stays off until an operator arms a vhost**; the one edge-wide change
-  is that the static-asset location now buffers responses (it previously
-  streamed) — transparent for the small css/js/font/image assets it matches,
-  though a large image may now spill to a temp file as any buffered response
-  does, matching the global `proxy_buffering on` default that `location /`
-  already uses. Large media/archives are unaffected (their own uncached
-  streaming location keeps buffering off).
+### Fixed
+- **`make release` could not build the rpm (`error: line 179: second %install`).**
+  A comment block added to `cfm.spec` explained why the old `%post` Lua-sync
+  loop was removed, and mentioned `%install` in prose. On EL hosts
+  `/usr/lib/rpm/redhat/macros` defines `%install` as a *macro* whose expansion
+  ends in a newline followed by `%install`; rpm expands macros on every spec
+  line including comments and then splits on newlines, so the comment injected
+  a second install section and aborted the build. The offending comments were
+  reworded to drop the macro names, the one remaining reference is escaped
+  (`%%{pkgroot}`), and `scripts/tests/check_rpm_spec_macros.sh` now rejects
+  unescaped ones — in CI *and* in `make rpm`, since the failure only surfaces
+  on an EL build host. Packaging is otherwise unchanged — no operator action
+  needed, the previous release simply could not be built.
+  Note this is EL-only: Debian/Ubuntu rpm ships no `redhat/macros` and parses
+  the broken spec without complaint, which is why it reached a release. The fix
+  was verified by building the rpm end-to-end in an AlmaLinux 8 container
+  (30 Lua modules package-owned under `/var/lib/cfm/lua/`, nothing under
+  `/usr/share/cfm/configs/lua`).
+- **`cfm` upgrades were doing pointless and misleading work with the Lua
+  payload.** Both package scriptlets carried a hand-rolled "seed/refresh
   runtime Lua files" loop that copied from `/usr/share/cfm/configs/lua` over
   the modules the package had just installed into `/var/lib/cfm/lua/`. It was
   useless in both packagings, differently: on **deb** that source was never
@@ -126,6 +112,39 @@ back-filled here — see the git/PR history for that period.
   wired, which is how it rotted unnoticed in the first place.
 
 ### Added
+- **Site Cache — Tier A (static-asset caching) is now wired at the edge.**
+  Building on the per-vhost Site Cache policy store and the observe-only edge
+  module, the static-asset location on both edges (OpenResty + Angie) now
+  activates an nginx `proxy_cache` (`cfm_static` zone) — but **bypass-by-default
+  and per-vhost opt-in**: a request is cached only when the operator armed that
+  exact vhost's static tier *and* the `SITE_CACHE` master switch is on. A
+  minimal fail-safe Lua gate (`cfm_cache.static_gate`, the only Lua on the
+  static hot path, double-`pcall`-guarded) flips `$cfm_cache_skip` to `0` and
+  stamps the purge generation into the cache key; any error or an unarmed vhost
+  leaves caching off, exactly as before. Cached responses honour the origin's
+  `Cache-Control`/`Expires` with a 1h fallback, only `200` is cached (a
+  transient deploy-time 404 must not stick), a `Set-Cookie` response is never
+  cached, and anti-stampede locking means a burst hits the origin about once per
+  TTL. The static-asset location now uses `proxy_buffering on` (it previously
+  streamed unbuffered): nginx populates `proxy_cache` only on the buffered path,
+  so buffering is required for the cache to store anything — small web assets
+  buffer in memory, larger ones spill into the cache dir; large media/archives
+  keep streaming from their own separate uncached location. A new CI guard
+  (`check_site_cache_config.sh`) asserts the bypass-by-default invariant and
+  buffering-on on every `proxy_cache` location, plus openresty↔angie location
+  parity, so a future refactor cannot silently reintroduce the global,
+  page-breaking cache CFM removed once before — or leave a cache location
+  unbuffered (which would silently store nothing). The Angie installer now
+  provisions the cache directory at the canonical `/var/cache/nginx/cfm_static`
+  (it had pointed at `/var/cache/angie/`, harmless until now but a mismatch with
+  the conf and the daemon that would fail `angie -t` once caching went live).
+  **Caching stays off until an operator arms a vhost**; the one edge-wide change
+  is that the static-asset location now buffers responses (it previously
+  streamed) — transparent for the small css/js/font/image assets it matches,
+  though a large image may now spill to a temp file as any buffered response
+  does, matching the global `proxy_buffering on` default that `location /`
+  already uses. Large media/archives are unaffected (their own uncached
+  streaming location keeps buffering off).
 - **Site Cache — Phase 3a: `SITE_CACHE` master kill switch (config-driven).** New
   `[webdetector] SITE_CACHE` knob (**default 1 = on**) published to the edge via
   `cfm_bridge_config.lua` (~10s, no proxy reload) — no env vars, config-file
