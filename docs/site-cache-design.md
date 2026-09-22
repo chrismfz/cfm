@@ -141,8 +141,20 @@ request-time (Lua, `access` phase) and response-time (nginx-native + a thin
 | Request carries a **named app-session cookie** → `$cfm_cache_skip=1` (see §4.1 — **allowlist by name**, NOT "any cookie") | Lua cookie-name allowlist | **logged-in users get stale/foreign content** |
 | Origin `Cache-Control: private\|no-store\|no-cache` → respect | nginx default (not ignored) | origin keeps the final say |
 | Panel hosts/ports (`:2083/:2087/:2096`), webmail hosts, `/.well-known/`, `/acctxfer*`, cPanel/webmail bypass paths → never | Lua gate, sits **after** `cfm.lua` Step 0a1 | **cPanel / webmail / SSO / AutoSSL broken** |
-| Cache key excludes cookies | `proxy_cache_key "$scheme$host$request_uri"` | per-user fragmentation / leakage |
+| Cache key excludes cookies; carries purge generation + **destination IP** (as-built) | `proxy_cache_key "g$cfm_cache_gen\|$server_addr\|$scheme://$host$request_uri"` | per-user fragmentation / leakage; **multi-IP poisoning** — the origin is chosen by `$server_addr`, so without it a request to IP B with `Host: victim` stores B's default vhost under victim's key |
+| Request carries **`Authorization`** → never read, never store (as-built) | `$http_authorization` on `proxy_cache_bypass` **and** `proxy_no_cache` in every cache location; Tier B `micro_decision` also reports `bypass:authorization` and does not route | **basic-auth (cPanel Directory Privacy) / bearer response served to anonymous visitors** — nginx does not bypass on `Authorization` by itself |
+| **Forwarded headers pinned** in cache locations (as-built) | `proxy_set_header X-Forwarded-Host $host;` and `""` (not sent) for `X-Forwarded-Server/-Port/-Scheme/-Prefix/-Ssl`, `X-Host`, `X-Original-Host`, `X-Original-URL`, `X-Rewrite-URL`, `Forwarded`, `Front-End-Https`, `X-Url-Scheme`, `X-HTTP-Method(-Override)`, `X-Method-Override` | cache poisoning — an app building absolute URLs / routes from these writes attacker input into a page cached for everyone |
+| Lock wait bounded (as-built) | `proxy_cache_lock_timeout 1s` | a burst on an uncacheable key (Set-Cookie / no-store / non-200) queued at 500 ms steps up to the 5 s default |
 | `cfm_clearance` is edge-set, not origin | see §5.5 open item | edge cookie poisoning the cache |
+
+**Residual (cannot be seen at the edge):** an origin that varies a `200` on the
+**client IP** (`Require ip`, cPanel IP Blocker, a per-IP throttle that answers
+200) or on `Referer` (hotlink protection) fills the cache with whatever the
+first client got. Non-200 answers are safe (only-200 rail), so the classic
+cached-throttle (`429`/`503`) incident cannot recur; a 200 that depends on who
+asked can. Do not arm a vhost whose pages are IP- or Referer-gated.
+`check_site_cache_config.sh` pins every as-built rail above in every
+`proxy_cache` location of both confs.
 
 `cfm_clearance`-cookie holders (cleared visitors) are still *anonymous* to the
 app, so they **may** be served micro-cache; the cache key never varies on the

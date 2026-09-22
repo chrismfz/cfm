@@ -259,7 +259,7 @@ check(anon("myapp_sess=1", false, { ["myapp_sess"] = true }) == false, "per-vhos
 
 -- ── Tier B micro-cache: full request decision ─────────────────────────────────
 local function armed(ttl) return { micro = { on = true, ttl = ttl }, strict_cookies = false } end
-local function dec(pol, m, u, c) return cache._micro_decision(pol, m, u, c) end
+local function dec(pol, m, u, c, a) return cache._micro_decision(pol, m, u, c, a) end
 do
   local ok1, bkt1, r1 = dec(armed("5s"), "GET", "/", nil)
   check(ok1 == true and bkt1 == 5 and r1 == "ok", "armed GET, no cookie → would-cache at 5s bucket")
@@ -275,6 +275,19 @@ do
   check(ok6 == false and r6 == "unarmed", "static-only vhost → micro unarmed")
   local ok7, bkt7 = dec(armed("30s"), "HEAD", "/x", "_ga=1")
   check(ok7 == true and bkt7 == 30, "HEAD + analytics cookie + 30s ttl → would-cache at 30s")
+  -- Authorization: a credentialed request (basic auth / bearer) is per-user by
+  -- definition — the origin may gate on it (cPanel Directory Privacy) and nginx
+  -- does not bypass on it by itself, so micro must never route it.
+  local ok8, _, r8 = dec(armed("5s"), "GET", "/private/", nil, "Basic dXNlcjpwYXNz")
+  check(ok8 == false and r8 == "authorization", "GET with Authorization: Basic → bypass:authorization")
+  local ok9, _, r9 = dec(armed("5s"), "GET", "/api/me", nil, "Bearer abc.def.ghi")
+  check(ok9 == false and r9 == "authorization", "GET with Authorization: Bearer → bypass:authorization")
+  local ok10, _, r10 = dec(armed("5s"), "GET", "/", "_ga=1", "Basic eDp5")
+  check(ok10 == false and r10 == "authorization", "Authorization wins over an otherwise-anonymous cookie set")
+  local ok11, bkt11 = dec(armed("5s"), "GET", "/", nil, "")
+  check(ok11 == true and bkt11 == 5, "empty Authorization value does not count as credentialed")
+  local ok12, _, r12 = dec(armed("5s"), "POST", "/", nil, "Basic eDp5")
+  check(ok12 == false and r12 == "method", "method rail still reported first for a credentialed POST")
 end
 
 check(cache._has_micro() == true, "has_micro true (fixture arms micro on myip.gr / www.myip.gr)")
@@ -294,6 +307,12 @@ cache.observe()
 check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:auth:PHPSESSID", 1, true),
       "observe stamps microcache=bypass for a request carrying an app session cookie")
 for k in pairs(_header) do _header[k] = nil end
+ngx.var.http_cookie = nil; ngx.var.http_authorization = "Basic dXNlcjpwYXNz"
+cache.observe()
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:authorization", 1, true),
+      "observe stamps microcache=bypass:authorization for a credentialed request")
+ngx.var.http_authorization = nil
+for k in pairs(_header) do _header[k] = nil end
 ngx.var.host = "assets.cdn.example.com"; ngx.var.http_cookie = nil
 cache.observe()
 check(_header["X-CFM-Cache"] and not _header["X-CFM-Cache"]:find("microcache=", 1, true),
@@ -306,7 +325,7 @@ ngx.var.request_method = nil; ngx.var.uri = nil; ngx.var.http_cookie = nil
 local function reset_gate_vars()
   ngx.var.cfm_cache_skip = "1"; ngx.var.cfm_cache_gen = "0"
   ngx.var.scheme = "https"; ngx.var.request_method = "GET"; ngx.var.uri = "/"
-  ngx.var.http_cookie = nil
+  ngx.var.http_cookie = nil; ngx.var.http_authorization = nil
 end
 _site_cache_on = true
 
@@ -335,6 +354,9 @@ reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.http_cookie = "PHPSESSID=x"
 check(cache.micro_gate() == nil, "enforce: an app-session cookie → nil (bypass, never cached)")
 reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.request_method = "POST"
 check(cache.micro_gate() == nil, "enforce: POST → nil (GET/HEAD only)")
+reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.http_authorization = "Basic dXNlcjpwYXNz"
+check(cache.micro_gate() == nil, "enforce: Authorization header → nil (credentialed, never micro-cached)")
+check(ngx.var.cfm_cache_skip == "1", "credentialed miss leaves the bypass gate closed")
 reset_gate_vars(); ngx.var.host = "assets.cdn.example.com"
 check(cache.micro_gate() == nil, "enforce: static-only vhost → nil (micro tier not armed)")
 
@@ -344,6 +366,7 @@ reset_gate_vars(); ngx.var.host = "myip.gr"
 check(cache.micro_gate() == nil, "SITE_CACHE off → micro_gate nil even with enforce on")
 _site_cache_on = true; _micro_enforce = false
 ngx.var.scheme = nil; ngx.var.request_method = nil; ngx.var.uri = nil; ngx.var.http_cookie = nil
+ngx.var.http_authorization = nil
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
