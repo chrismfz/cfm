@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cfm/internal/dnat"
 	"cfm/internal/edgeengine"
 	"cfm/internal/firewall"
 	"cfm/internal/locate"
@@ -39,6 +38,9 @@ type Runner struct {
 	cfgDir             string
 	heartbeatSuccesses uint64
 	fpPull             fpPolicyPullState
+	dnatProbe          dnatProbeState
+	workBusySince      atomic.Int64 // unix nanos a work-loop tick started; 0 when idle
+	workStuckLogAt     atomic.Int64 // unix nanos of the last "work loop busy" line
 }
 
 func New(cfg Config) *Runner {
@@ -55,7 +57,13 @@ func New(cfg Config) *Runner {
 	return r
 }
 
-func (r *Runner) Start() { r.once.Do(func() { r.wg.Add(1); go r.loop() }) }
+func (r *Runner) Start() {
+	r.once.Do(func() {
+		r.wg.Add(2)
+		go r.heartbeatLoop()
+		go r.loop()
+	})
+}
 func (r *Runner) Stop() {
 	select {
 	case <-r.stop:
@@ -144,15 +152,62 @@ func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
 	}
 }
 
+// workLoopStuckAfter is how long one work-loop tick may run before the
+// heartbeat loop reports it. A normal tick is well under a second; each HTTP
+// call is capped at 15s, so minutes means something is wedged (e.g. an unblock
+// waiting on a stalled firewall backend).
+const workLoopStuckAfter = 2 * time.Minute
+
+// heartbeatLoop sends the heartbeat on its own ticker. Liveness must not wait
+// on the work loop: unblocks, config sync and the policy pull make firewall
+// and HTTP calls that can stall, and while they did, a shared loop sent no
+// heartbeat and cfm-web reported the node offline. A work loop stuck for
+// longer than workLoopStuckAfter is logged from here instead, since the loop
+// itself can't report while it is stuck.
+func (r *Runner) heartbeatLoop() {
+	defer r.wg.Done()
+	t := time.NewTicker(r.cur().Interval)
+	defer t.Stop()
+
+	r.doHeartbeat(context.Background())
+	for {
+		select {
+		case <-r.stop:
+			return
+		case <-t.C:
+			r.doHeartbeat(context.Background())
+			r.checkWorkLoopStuck(time.Now())
+		}
+	}
+}
+
+// checkWorkLoopStuck logs (at most every 5 minutes) when the current work-loop
+// tick has been running longer than workLoopStuckAfter.
+func (r *Runner) checkWorkLoopStuck(now time.Time) {
+	since := r.workBusySince.Load()
+	if since == 0 {
+		return
+	}
+	busy := now.Sub(time.Unix(0, since))
+	if busy < workLoopStuckAfter {
+		return
+	}
+	if last := r.workStuckLogAt.Load(); last != 0 && now.Sub(time.Unix(0, last)) < 5*time.Minute {
+		return
+	}
+	r.workStuckLogAt.Store(now.UnixNano())
+	logging.LogfAPI("[agent] work loop tick busy for %s (unblocks / config sync / policy pull); heartbeats continue",
+		busy.Round(time.Second))
+}
+
 func (r *Runner) loop() {
 	defer r.wg.Done()
 	t := time.NewTicker(r.cur().Interval)
 	defer t.Stop()
 
-	// fire immediately — the policy pull too: the enforcement store is empty
-	// on every daemon restart, so waiting for the first 20s tick would open a
-	// window where an armed deny silently stops biting.
-	r.doHeartbeat(context.Background())
+	// fire immediately: the enforcement store is empty on every daemon
+	// restart, so waiting for the first 20s tick would open a window where an
+	// armed deny silently stops biting.
 	r.fetchFPPolicies(context.Background())
 
 	for {
@@ -160,11 +215,11 @@ func (r *Runner) loop() {
 		case <-r.stop:
 			return
 		case <-t.C:
-			r.doHeartbeat(context.Background())
+			r.workBusySince.Store(time.Now().UnixNano())
 			r.fetchPendingUnblocks(context.Background())
 			r.syncConfigs(context.Background())
 			r.fetchFPPolicies(context.Background())
-
+			r.workBusySince.Store(0)
 		}
 		// (αν χρειαστεί dynamic interval, μπορούμε να αναδημιουργήσουμε ticker)
 	}
@@ -198,14 +253,9 @@ func (r *Runner) doHeartbeat(ctx context.Context) {
 	}
 
 	var hb HeartbeatRequest
-	if r.backend != nil {
-		on, err := dnat.Status(r.backend)
-		if err != nil {
-			logging.LogfAPI("[agent] heartbeat dnat status check failed: %v", err)
-		} else {
-			hb.DNATEnabled = &on
-		}
-	}
+	// Bounded: a stalled firewall read must never hold the heartbeat back
+	// (see heartbeat_dnat.go).
+	hb.DNATEnabled = r.heartbeatDNATStatus()
 	if edge, edgeVer, ok := edgeengine.Detect(ctx); ok {
 		hb.Edge = &edge
 		hb.EdgeVersion = &edgeVer

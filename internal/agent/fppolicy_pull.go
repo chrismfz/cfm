@@ -1,8 +1,9 @@
 package agent
 
-// Runner-side drive for the fingerprint-policy pull. The agent Runner already
-// ticks against cfm-web every ~20s (heartbeat / pending-unblocks / file-sync)
-// with hot-updated credentials; the policy feed rides the same loop, gated to
+// Runner-side drive for the fingerprint-policy pull. The agent Runner's work
+// loop already ticks against cfm-web every ~20s (pending-unblocks / file-sync;
+// the heartbeat has its own loop) with hot-updated credentials; the policy
+// feed rides the work loop, gated to
 // its own coarser interval. On success the full snapshot goes to the sink
 // (replace-all — mirrors the feed's semantics); on failure the previous
 // snapshot simply stays in force (stale-ok: policies are TTL'd server-side
