@@ -141,6 +141,19 @@ back-filled here — see the git/PR history for that period.
   Log and corpus only: no tell, weight or threshold changed, and nothing
   scores on network identity.
 
+### Changed
+- **Bulk block ("Block selected" in cfm-admin, `POST /api/v1/firewall/block/batch`)
+  is now one firewall transaction instead of up to three `nft` processes per
+  IP.** A 256-IP request cost up to ~770 `nft` processes on the exec engine.
+  It now costs at most three (one read per address family, one write), and one
+  netlink transaction on nftlib; 5,000 addresses take under 0.1s on either
+  engine. It only adds or extends a block: an IP
+  already blocked permanently, or for longer, keeps that block (a TTL'd bulk
+  block used to shorten it). The request is one transaction, so if it fails,
+  every IP in it is reported failed and stays selected for retry. The new
+  `AddBlockBatch` backend call behind it is the building block for faster fleet
+  blocklist propagation.
+
 ### Fixed
 - **Turning web-detector enrichment off no longer leaves country/ASN
   `challenge_v2` policies enforced at verify.** On every reload the web

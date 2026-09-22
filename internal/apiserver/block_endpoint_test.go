@@ -5,33 +5,41 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
+
+	"cfm/internal/firewall"
 )
 
-// blockRecorderBackend records AddBlock calls (the shared stubFirewallBackend
-// in unblock_endpoint_test.go is a pure no-op).
+// blockRecorderBackend records block calls (the shared stubFirewallBackend
+// in unblock_endpoint_test.go is a pure no-op). A batch containing an IP in
+// failFor fails as a whole, as the one-transaction backends do.
 type blockRecorderBackend struct {
 	stubFirewallBackend
 	mu      sync.Mutex
 	blocked []string
-	ttls    []*time.Duration
+	ttls    []time.Duration
+	batches int
 	failFor map[string]bool
 }
 
-func (b *blockRecorderBackend) AddBlock(ip net.IP, _ string, ttl *time.Duration) error {
+func (b *blockRecorderBackend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.failFor[ip.String()] {
-		return errors.New("nft add element failed (test)")
+	b.batches++
+	for _, e := range entries {
+		if b.failFor[e.IP.String()] {
+			return firewall.BlockBatchResult{}, errors.New("nft block batch failed (test)")
+		}
 	}
-	b.blocked = append(b.blocked, ip.String())
-	b.ttls = append(b.ttls, ttl)
-	return nil
+	for _, e := range entries {
+		b.blocked = append(b.blocked, e.IP.String())
+		b.ttls = append(b.ttls, e.TTL)
+	}
+	return firewall.BlockBatchResult{Added: len(entries)}, nil
 }
 
 type stubSelfIPs struct{ ips map[string]bool }
@@ -76,10 +84,10 @@ func skipReasons(rows []map[string]string) map[string]string {
 }
 
 // One batch mixing every per-IP outcome: blocked, invalid, duplicate,
-// self-IP skip, caller-IP skip, and a backend failure — the rest of the
-// batch must proceed past each skip/failure.
+// self-IP skip and caller-IP skip. The IPs past the guards go to the backend
+// as ONE batch, not one call per IP.
 func TestBlockBatch_PerIPOutcomes(t *testing.T) {
-	be := &blockRecorderBackend{failFor: map[string]bool{"198.51.100.9": true}}
+	be := &blockRecorderBackend{}
 	self := stubSelfIPs{ips: map[string]bool{"203.0.113.1": true}}
 	h := makeBlockBatchHandler(be, self)
 
@@ -92,29 +100,25 @@ func TestBlockBatch_PerIPOutcomes(t *testing.T) {
 			"198.51.100.7",  // duplicate
 			"203.0.113.1",   // self_ip
 			"192.0.2.1",     // caller_ip (RemoteAddr host)
-			"198.51.100.9",  // backend failure
-			"198.51.100.10", // blocked — must still run after the failure
+			"198.51.100.10", // blocked
 		},
 		"ttl":    "6h",
 		"reason": "test-bulk",
 	}, "", "8.8.8.8")
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
-	}
-	if out.OK {
-		t.Fatalf("ok must be false when any IP failed, body=%s", rr.Body.String())
+	if rr.Code != http.StatusOK || !out.OK {
+		t.Fatalf("expected ok 200, got %d body=%s", rr.Code, rr.Body.String())
 	}
 	wantBlocked := []string{"198.51.100.7", "198.51.100.10"}
 	if fmt.Sprint(out.Blocked) != fmt.Sprint(wantBlocked) {
 		t.Fatalf("blocked = %v, want %v", out.Blocked, wantBlocked)
 	}
-	if fmt.Sprint(be.blocked) != fmt.Sprint(wantBlocked) {
-		t.Fatalf("backend AddBlock calls = %v, want %v", be.blocked, wantBlocked)
+	if be.batches != 1 || fmt.Sprint(be.blocked) != fmt.Sprint(wantBlocked) {
+		t.Fatalf("backend got %d batches blocking %v, want one batch of %v", be.batches, be.blocked, wantBlocked)
 	}
 	for _, ttl := range be.ttls {
-		if ttl == nil || *ttl != 6*time.Hour {
-			t.Fatalf("AddBlock ttl = %v, want 6h", ttl)
+		if ttl != 6*time.Hour {
+			t.Fatalf("batch ttl = %v, want 6h", ttl)
 		}
 	}
 	reasons := skipReasons(out.Skipped)
@@ -130,8 +134,34 @@ func TestBlockBatch_PerIPOutcomes(t *testing.T) {
 	if reasons["192.0.2.1"] != "caller_ip" {
 		t.Fatalf("expected caller_ip skip, got %v", out.Skipped)
 	}
-	if len(out.Failed) != 1 || out.Failed[0]["ip"] != "198.51.100.9" {
-		t.Fatalf("failed = %v, want just 198.51.100.9", out.Failed)
+	if len(out.Failed) != 0 {
+		t.Fatalf("failed = %v, want none", out.Failed)
+	}
+}
+
+// The batch is one transaction: when it fails, every IP that passed the guards
+// is reported failed (the UI keeps them selected for retry), and the skips
+// are still reported as skips.
+func TestBlockBatch_BackendFailureFailsTheBatch(t *testing.T) {
+	be := &blockRecorderBackend{failFor: map[string]bool{"198.51.100.9": true}}
+	h := makeBlockBatchHandler(be, stubSelfIPs{})
+	_, out := doBatch(t, h, map[string]any{
+		"ips": []string{"198.51.100.8", "not-an-ip", "198.51.100.9"},
+		"ttl": "1h",
+	}, "", "")
+
+	if out.OK || len(out.Blocked) != 0 {
+		t.Fatalf("ok=%v blocked=%v, want a failed batch with nothing blocked", out.OK, out.Blocked)
+	}
+	failed := map[string]bool{}
+	for _, f := range out.Failed {
+		failed[f["ip"]] = f["error"] != ""
+	}
+	if len(failed) != 2 || !failed["198.51.100.8"] || !failed["198.51.100.9"] {
+		t.Fatalf("failed = %v, want both guarded-through IPs with the error", out.Failed)
+	}
+	if skipReasons(out.Skipped)["not-an-ip"] != "invalid" {
+		t.Fatalf("skips must still be reported, got %v", out.Skipped)
 	}
 }
 
@@ -154,8 +184,8 @@ func TestBlockBatch_CallerIPBehindProxy(t *testing.T) {
 	}
 }
 
-// Empty TTL means permanent: AddBlock must receive a nil *time.Duration
-// (an nft entry with no timeout), mirroring the single-block endpoint.
+// Empty TTL means permanent: the batch entry carries TTL 0 (an nft entry
+// with no timeout), mirroring the single-block endpoint.
 func TestBlockBatch_EmptyTTLIsPermanent(t *testing.T) {
 	be := &blockRecorderBackend{}
 	h := makeBlockBatchHandler(be, stubSelfIPs{})
@@ -168,8 +198,8 @@ func TestBlockBatch_EmptyTTLIsPermanent(t *testing.T) {
 	if rr.Code != http.StatusOK || !out.OK {
 		t.Fatalf("expected ok, got %d body=%s", rr.Code, rr.Body.String())
 	}
-	if len(be.ttls) != 1 || be.ttls[0] != nil {
-		t.Fatalf("permanent block must pass nil ttl, got %v", be.ttls)
+	if len(be.ttls) != 1 || be.ttls[0] != 0 {
+		t.Fatalf("permanent block must pass TTL 0, got %v", be.ttls)
 	}
 }
 

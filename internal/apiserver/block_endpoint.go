@@ -110,12 +110,17 @@ func makeBlockHandler(be firewall.Backend) http.HandlerFunc {
 }
 
 // makeBlockBatchHandler blocks a list of IPs in one request (the web UI's
-// "Block selected"). Same TTL semantics as the single endpoint (empty TTL =
-// permanent). Unlike the client-side loop it replaces, it guards against
-// self-lockout — an IP is skipped (never failed-hard, the rest of the batch
-// proceeds) when it is one of the server's own IPs or the calling admin's
-// own IP. Per-IP outcomes are reported so the UI can keep failed IPs
-// selected for retry.
+// "Block selected"). Empty TTL = permanent, as on the single endpoint. Unlike
+// the client-side loop it replaces, it guards against self-lockout — an IP is
+// skipped (never failed-hard, the rest of the batch proceeds) when it is one
+// of the server's own IPs or the calling admin's own IP.
+//
+// The IPs that pass the guards are blocked with ONE AddBlockBatch call: a few
+// nft processes for the whole request, not up to three per IP. It only adds or
+// extends a block: an IP already blocked permanently, or for longer, keeps
+// that block (the single endpoint's AddBlock replaces it). The batch is one
+// transaction, so on failure every one of those IPs is reported failed, and
+// the UI keeps them selected for retry.
 func makeBlockBatchHandler(be firewall.Backend, selfIPs selfIPChecker) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -177,6 +182,12 @@ func makeBlockBatchHandler(be firewall.Backend, selfIPs selfIPChecker) http.Hand
 			selfIPs.Refresh()
 		}
 
+		var ttl time.Duration
+		if ttlPtr != nil {
+			ttl = *ttlPtr
+		}
+		pending := make([]string, 0, len(req.IPs))
+		entries := make([]firewall.BlockEntry, 0, len(req.IPs))
 		blocked := make([]string, 0, len(req.IPs))
 		skipped := make([]map[string]string, 0)
 		failed := make([]map[string]string, 0)
@@ -201,11 +212,17 @@ func makeBlockBatchHandler(be firewall.Backend, selfIPs selfIPChecker) http.Hand
 				skipped = append(skipped, map[string]string{"ip": canon, "reason": "caller_ip"})
 				continue
 			}
-			if err := be.AddBlock(ip, req.Reason, ttlPtr); err != nil {
-				failed = append(failed, map[string]string{"ip": canon, "error": err.Error()})
-				continue
+			pending = append(pending, canon)
+			entries = append(entries, firewall.BlockEntry{IP: ip, TTL: ttl})
+		}
+		if len(entries) > 0 {
+			if _, err := be.AddBlockBatch(entries); err != nil {
+				for _, canon := range pending {
+					failed = append(failed, map[string]string{"ip": canon, "error": err.Error()})
+				}
+			} else {
+				blocked = pending
 			}
-			blocked = append(blocked, canon)
 		}
 
 		logging.LogfAPI("[block.batch] requester=%s n=%d blocked=%d skipped=%d failed=%d ttl=%q reason=%q",
