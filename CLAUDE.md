@@ -340,7 +340,17 @@ points:
   section for that rule in the same review.
 - **Lua↔Go id parity is enforced.** A new `10xxx` id needs matching entries in
   `configs/lua/cfm_waf.lua` `RULE_IDS` **and** `internal/webdetector/waf_rule_ids.go`
-  (`TestWAFRuleIDs_LuaParity`), plus positive+negative Lua tests. Key the
+  (`TestWAFRuleIDs_LuaParity`), plus positive+negative Lua tests.
+  **Mode parity is enforced too** (`TestWAFRuleIDs_DefaultModeLuaParity`,
+  added 2026-09-22): a rule promotion/demotion must edit the Lua CFG default
+  **and** the Go mirror's `DefaultMode` in the same change. The test exists
+  because 12 entries had silently drifted — 11 were `logonly→challenge`
+  promotions where only the Lua side was edited and the mirror was forgotten
+  (`rule_crlf_injection` drifted the other way). Enforcement was never wrong
+  (the Lua CFG is what runs) and none touched `block`, but the CLI/panel/MCP
+  glossary showed stale tiers for months, and `DefaultMode == "block"` is
+  the `waf_security` arming source — a forgotten mirror edit on a **block**
+  promotion would have mis-armed autoblock. Key the
   detector on the exact endpoint/marker, reuse hardened helpers
   (`detect_upload_content`, not a raw `<?php` scan), and decide autoblock intent
   in the same change.
