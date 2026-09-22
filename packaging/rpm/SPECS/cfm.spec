@@ -187,8 +187,10 @@ find /var/lib/cfm/lua -type f -exec chmod 0640 {} + || true
 #
 # A hand-edit under /var/lib/cfm/lua/ IS overwritten on upgrade with no backup.
 # That was always true - the loop never actually changed it. These are code
-# files, deliberately NOT config-marked (a .rpmnew would freeze security code
-# at the operator version). `rpm -V cfm` / `dpkg --verify cfm` report such
+# files, deliberately NOT marked as config (%%config(noreplace) would keep the
+# operator's edit and drop the new module beside it as .rpmnew, freezing
+# security code at the operator version; plain %%config would save the edit as
+# .rpmsave). `rpm -V cfm` / `dpkg --verify cfm` report such
 # edits. Edit /etc/cfm/*, never /var/lib/cfm/lua/*.
 
 # Retire the stamp directory the removed loop wrote into. The stamps are ours

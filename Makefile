@@ -338,6 +338,9 @@ stage-rpm: stage-pkgroot
 
 # --- RPM (.rpm) --- (μόνο η τελευταία γραμμή αλλάζει)
 rpm: rpm_prep_dirs rpm_spec_version stage-rpm ## Δημιουργεί .rpm
+	@# The spec-comment macro trap only bites on EL, i.e. here at release time
+	@# and not on ubuntu CI — so check it on the build host too, not just in CI.
+	@./scripts/tests/check_rpm_spec_macros.sh
 	@echo "→ Creating RPM package: cfm-$(RPM_VERSION)-$(RPM_RELEASE)"
 	@rpmbuild \
 	  --define "_topdir $(CURDIR)/$(RPMTOP)" \

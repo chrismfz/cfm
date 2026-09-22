@@ -189,11 +189,31 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   `make release`. The trap is that it is **EL-only**: Debian/Ubuntu rpm ships no
   `redhat/macros`, so `rpmspec -P` on the dev box parses the same spec happily
   and CI (ubuntu runners) would too — don't add an rpm parse to CI and think it
-  covers this. `check_rpm_spec_macros.sh` enforces the escape statically.
-  To verify packaging changes for real, build in an EL8 container:
-  `docker run --rm -v "$PWD":/src:ro almalinux:8 sh -c 'dnf -y install rpm-build
-  && rpmbuild --define "projectroot /src" ... -bb /src/packaging/rpm/SPECS/cfm.spec'`
-  — that is what finally proved both the failure and the fix.
+  covers this. `check_rpm_spec_macros.sh` enforces the escape statically, and
+  runs from `make rpm` as well as CI, because the break surfaces on the EL
+  build host. To verify a packaging change **for real**, use an EL container —
+  parse-only catches this class and needs no staging:
+  ```bash
+  docker run --rm --network host -v "$PWD":/src:ro almalinux:8 sh -c \
+    'dnf -y -q install rpm-build && rpmspec -P \
+       --define "pkgroot /tmp/pk" --define "projectroot /src" \
+       /src/packaging/rpm/SPECS/cfm.spec >/dev/null'
+  ```
+  A full build additionally verifies `%files`/`%post`, but needs a staged tree
+  (`%install` copies from `%{pkgroot}` and skips silently when it is absent, so
+  an unstaged run dies in `%files` with misleading "File not found"):
+  ```bash
+  make stage-rpm            # populates build/pkgroot
+  docker run --rm --network host -v "$PWD":/src:ro almalinux:8 sh -c \
+    'dnf -y -q install rpm-build && mkdir -p /rt/BUILDROOT && rpmbuild \
+       --define "_topdir /rt" --define "debug_package %{nil}" \
+       --define "pkgroot /src/build/pkgroot" --define "projectroot /src" \
+       --buildroot /rt/BUILDROOT --target x86_64 \
+       -bb /src/packaging/rpm/SPECS/cfm.spec'
+  ```
+  That is what finally proved both the failure and the fix (and confirmed the
+  package really does own 30 Lua modules with nothing under
+  `/usr/share/cfm/configs/lua`).
 - **A guardrail that cannot run its matcher must FAIL, never report OK.**
   Seven `scripts/tests/check_*.sh` shell out to `ripgrep`, which the runner
   does not preinstall. `check_cli_transport.sh` piped `rg … || true`, so on CI

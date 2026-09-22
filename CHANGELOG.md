@@ -24,10 +24,12 @@ back-filled here — see the git/PR history for that period.
   `/usr/lib/rpm/redhat/macros` defines `%install` as a *macro* whose expansion
   ends in a newline followed by `%install`; rpm expands macros on every spec
   line including comments and then splits on newlines, so the comment injected
-  a second install section and aborted the build. Every macro reference in a
-  spec comment is now escaped (`%%`), and `scripts/tests/check_rpm_spec_macros.sh`
-  rejects unescaped ones in CI. Packaging is otherwise unchanged — no operator
-  action needed, the previous release simply could not be built.
+  a second install section and aborted the build. The offending comments were
+  reworded to drop the macro names, the one remaining reference is escaped
+  (`%%{pkgroot}`), and `scripts/tests/check_rpm_spec_macros.sh` now rejects
+  unescaped ones — in CI *and* in `make rpm`, since the failure only surfaces
+  on an EL build host. Packaging is otherwise unchanged — no operator action
+  needed, the previous release simply could not be built.
   Note this is EL-only: Debian/Ubuntu rpm ships no `redhat/macros` and parses
   the broken spec without complaint, which is why it reached a release. The fix
   was verified by building the rpm end-to-end in an AlmaLinux 8 container
