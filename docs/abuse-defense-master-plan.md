@@ -116,8 +116,13 @@ D3/D4 are the process fix.
   check with an accessibility fallback); a no-recourse deny stays reserved
   for farm-unique fingerprints per D2. **(d) full observability** — every
   scored solve logs `hs=` + `tells=` so the operator can see exactly why any
-  client passed or failed, with a shadow burn-in + measured FP rate (D3 exit
-  contract) before teeth are trusted.
+  client passed or failed, `sig=` with the readings exactly as the client
+  reported them (corpus for future tells; absent key = not reported, never a
+  fabricated zero), and `v2=<fp|geo|vhost|mark>` naming the arm whenever one
+  covers the solve — an armed solve that PASSES must not read like a plain v1
+  one, or a live tier looks like a forgotten one (added 2026-09-22 after
+  exactly that confusion in the field). With a shadow burn-in + measured FP
+  rate (D3 exit contract) before teeth are trusted.
 
 ## 5. Enforcement roadmap — the only live checklist
 
@@ -205,7 +210,10 @@ already opened.
         positive headless evidence only (webdriver / HeadlessChrome UA fail
         alone at 100; SwiftShader-class renderer 60, touch-lie 50, outer-zero
         40 each PASS alone; no-input is an amplifier that never opens — D5b),
-        logged as `hs=`/`tells=` on the solve line. Armed `challenge_v2` fp +
+        logged as `hs=`/`tells=`/`sig=`/`v2=` on the solve line and as
+        `hs`/`tells`/`sig`/`v2`/`hs_nopayload` on the durable
+        `challenge_solved` history row (2026-09-22; `payload.sig` is stripped
+        for scoped callers — see docs/endpoint_scope_inventory.md). Armed `challenge_v2` fp +
         failing score ⇒ `result=v2_reject`, 403, no clearance — the page
         reloads into a fresh challenge (D5c). Everyone else: shadow
         `signal=humanity verdict=would_v2` (rides ABUSE_SHADOW). Knobs

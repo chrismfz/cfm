@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **`payload.sig` is admin-only on `/api/v1/webdet/history/events`.** The new
+  ChallengeV2 device readings (`hardwareConcurrency`, `deviceMemory`,
+  `devicePixelRatio`, pointer/touch/key counts) that CFM's challenge page
+  collects from each visitor are stripped for scoped (cPanel) callers; admins
+  and MCP see rows untouched. A tenant could measure the same values from
+  their own site's JS, so this is not secret — but the scoped surface
+  previously exposed nothing of the kind (the UA was the most it carried), and
+  a new category of per-visitor data crosses that boundary only deliberately.
+  Scoped callers keep the rest of the payload. See
+  `docs/endpoint_scope_inventory.md`.
+
 ### Added
 - **`v2=<grain>` on the challenge solve line — a passed ChallengeV2 solve is
   no longer invisible.** `cfm.challenges.log` scored every solve (`hs=`/
@@ -52,8 +64,11 @@ back-filled here — see the git/PR history for that period.
   fed the `no_input` amplifier, and logging them makes that auditable instead
   of opaque. No scoring or enforcement changes in either case. A signal the browser did not report
   (e.g. `deviceMemory`, which is Chrome-only) is an absent key, never a
-  fabricated zero, and an implausible client-authored value is dropped to
-  absent before it can reach a log line or a durable row.
+  fabricated zero. Client-authored values are bounded for digit sanity only —
+  a negative, an absurd magnitude or a positive below any sensor resolution is
+  dropped to absent — while an anomalous but *reported* reading (`hc:0`,
+  `dpr:0`, a throttled tab's huge rAF average) is kept verbatim, because that
+  is precisely the evidence the corpus is for.
 
 ## 2026.09.22
 

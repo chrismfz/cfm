@@ -1,6 +1,8 @@
 package webdetector
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -102,8 +104,9 @@ func TestRecordChallengeSolved_PersistsHumanityAndV2Grain(t *testing.T) {
 	e := newSolveTestEngine(t)
 	e.RecordChallengeSolved(ChallengeSolve{
 		IP: "203.0.113.11", Host: "shop.example.com", URI: "/",
-		HumanityScore: 130, HumanityTells: "sw_renderer,outer_zero,no_input",
-		V2Grain: v2GrainMark,
+		HumanityScored: true, HumanityScore: 130,
+		HumanityTells: "sw_renderer,outer_zero,no_input",
+		V2Grain:       v2GrainMark,
 	})
 	ev := latestSolveEvent(t, e)
 	if got := toF(ev.Payload["hs"]); got != 130 {
@@ -121,7 +124,7 @@ func TestRecordChallengeSolved_PersistsHumanityAndV2Grain(t *testing.T) {
 
 	// Scored clean AND unarmed: hs present at 0, no v2 key at all.
 	e2 := newSolveTestEngine(t)
-	e2.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.12", Host: "shop.example.com", URI: "/"})
+	e2.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.12", Host: "shop.example.com", URI: "/", HumanityScored: true})
 	ev2 := latestSolveEvent(t, e2)
 	if got := toF(ev2.Payload["hs"]); got != 0 {
 		t.Errorf("clean solve: payload.hs = %v, want 0", ev2.Payload["hs"])
@@ -132,18 +135,22 @@ func TestRecordChallengeSolved_PersistsHumanityAndV2Grain(t *testing.T) {
 
 	// Nothing reported: hs=0 plus the marker that says why.
 	e3 := newSolveTestEngine(t)
-	e3.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.13", Host: "shop.example.com", URI: "/", HumanityNoPayload: true})
+	e3.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.13", Host: "shop.example.com", URI: "/", HumanityScored: true, HumanityNoPayload: true})
 	ev3 := latestSolveEvent(t, e3)
 	if ok, _ := ev3.Payload["hs_nopayload"].(bool); !ok {
 		t.Errorf("no-payload solve must be distinguishable from scored-clean, payload=%v", ev3.Payload)
 	}
 
-	// Rung disabled: the -1 sentinel must never be persisted as a score.
+	// Never scored (rung off, or a literal that never went through verify):
+	// nothing humanity-shaped may be persisted. hs 0 is a REAL score meaning
+	// "scored clean, passed", so the zero value must not be able to assert it.
 	e4 := newSolveTestEngine(t)
-	e4.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.14", Host: "shop.example.com", URI: "/", HumanityScore: -1})
+	e4.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.14", Host: "shop.example.com", URI: "/", V2Grain: v2GrainMark})
 	ev4 := latestSolveEvent(t, e4)
-	if _, ok := ev4.Payload["hs"]; ok {
-		t.Errorf("disabled rung must persist no hs, got %v", ev4.Payload["hs"])
+	for _, k := range []string{"hs", "tells", "v2", "sig", "hs_nopayload"} {
+		if _, ok := ev4.Payload[k]; ok {
+			t.Errorf("unscored solve persisted %q = %v", k, ev4.Payload[k])
+		}
 	}
 }
 
@@ -154,6 +161,7 @@ func TestRecordChallengeSolved_PersistsRawSignals(t *testing.T) {
 	e := newSolveTestEngine(t)
 	e.RecordChallengeSolved(ChallengeSolve{
 		IP: "203.0.113.20", Host: "shop.example.com", URI: "/",
+		HumanityScored: true,
 		humanity: &humanitySignals{
 			PTR: iptr(0), TCH: iptr(0), KEY: iptr(0), MV: fptr(0),
 			HC: iptr(8), DPR: fptr(1.5), RAF: fptr(16.666666666666668),
@@ -186,8 +194,40 @@ func TestRecordChallengeSolved_PersistsRawSignals(t *testing.T) {
 
 	// No payload at all → no sig key, matching the log's missing sig= field.
 	e2 := newSolveTestEngine(t)
-	e2.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.21", Host: "shop.example.com", URI: "/"})
+	e2.RecordChallengeSolved(ChallengeSolve{IP: "203.0.113.21", Host: "shop.example.com", URI: "/", HumanityScored: true})
 	if _, present := latestSolveEvent(t, e2).Payload["sig"]; present {
 		t.Errorf("a solve with no retained report must carry no sig key")
+	}
+}
+
+// payload.sig is per-visitor device-fingerprint material CFM's own challenge
+// page collected. Scoped-vs-admin is a hard boundary and this is a NEW
+// category of data on that surface, so it must not reach a scoped (cPanel)
+// caller — while everything the scoped surface already carried stays.
+func TestHistoryEventsRedactsSigForScopedCallers(t *testing.T) {
+	rows := []HistoryEvent{{
+		Type: "challenge_solved", Host: "shop.example.com", IP: "203.0.113.30",
+		Payload: map[string]interface{}{
+			"ua": "Mozilla/5.0", "hs": 0, "v2": "mark",
+			"sig": map[string]any{"hc": 8.0, "dpr": 1.5},
+		},
+	}}
+
+	scoped := httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(scopedCtx("shop.example.com"))
+	redactScopedHistoryRows(scoped, rows)
+	if _, present := rows[0].Payload["sig"]; present {
+		t.Errorf("sig must not cross the scoped boundary, got %v", rows[0].Payload["sig"])
+	}
+	for _, k := range []string{"ua", "hs", "v2"} {
+		if _, present := rows[0].Payload[k]; !present {
+			t.Errorf("scoped caller lost %q, which it always had", k)
+		}
+	}
+
+	// Admin sees the row untouched — the burn-in readout is admin/MCP.
+	adminRows := []HistoryEvent{{Payload: map[string]interface{}{"sig": map[string]any{"hc": 8.0}}}}
+	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(adminCtx()), adminRows)
+	if _, present := adminRows[0].Payload["sig"]; !present {
+		t.Errorf("admin must still receive sig")
 	}
 }

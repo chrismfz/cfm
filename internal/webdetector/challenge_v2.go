@@ -81,6 +81,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -118,32 +119,27 @@ type humanitySignals struct {
 	RAF *float64 `json:"raf"` // avg requestAnimationFrame delta ms; absent when <8 frames elapsed before submit
 }
 
-// Sanity bounds for the retained-but-unscored values. The body is
-// CLIENT-authored (HONEST LIMITS above), so a value outside what any real
-// browser reports is dropped rather than carried: an unbounded float reaches
-// a log line and a durable history row, and a corpus built for later analysis
-// must not have to defend itself against 1e308. Dropping degrades to
-// "absent", which every consumer already handles — never to a fabricated
-// zero. JSON has no NaN/Inf literal (such a body fails to parse and scores as
-// no payload), so these comparisons cannot be defeated by a non-number.
+// Bounds for the retained readings. These exist for DIGIT SANITY only — a
+// client-authored value reaches a log line and a durable history row, and a
+// single 1e308 would be 300 characters of both. They are deliberately NOT a
+// plausibility judgement: an anomalous but REPORTED reading (hc:0 and dpr:0
+// from an embedded WebView, a throttled tab's huge rAF average) is exactly
+// the environment evidence this corpus is being built to discover — the
+// scorer's own outer_zero tell convicts on precisely that class of reported
+// zero. Dropping such a reading would erase the tell AND make it
+// indistinguishable from "the browser never reported it", which is the
+// absence/zero confusion the pointer fields exist to prevent.
+//
+// So only what is not a reading at all is dropped: a negative, an absurd
+// magnitude, and a positive below any real sensor resolution — the last of
+// which is also what keeps sigRound's no-false-zero guarantee provable.
+// JSON has no NaN/Inf literal (such a body fails to parse and scores as no
+// payload), so these comparisons cannot be defeated by a non-number.
 const (
-	sigMaxEvents   = 1_000_000 // ptr/tch/key
-	sigMaxMovement = 1e9       // px, accumulated
-	sigMaxCores    = 4096
-	sigMaxMemoryGB = 4096
-	sigMaxDPR      = 64
-	sigMaxRAFms    = 60_000
-	// sigMinPositive is the floor for the two values whose range legitimately
-	// starts at 0 (mv, raf). A positive below it is not something any device
-	// reports, and allowing it would force the renderer to either print "0"
-	// for a non-zero value — manufacturing the impossible "ptr:1,mv:0" shape
-	// — or spend 300 characters of log line proving otherwise. Dropping it to
-	// absent keeps sigFloat's no-false-zero guarantee provable.
-	sigMinPositive = 1e-6
-	// sigMaxDecimals bounds sigFloat's fallback rendering. Paired with
-	// sigMinPositive: 1e-6 is exactly representable at 6 decimals, so the
-	// fallback can never itself round a surviving value to zero.
-	sigMaxDecimals = 6
+	sigMaxInt      = 1_000_000 // ptr/tch/key/hc
+	sigMaxReading  = 1e9       // mv/dm/dpr/raf magnitude ceiling
+	sigMinPositive = 1e-6      // below this a positive is not a reading
+	sigMaxDecimals = 6         // fallback precision when display rounding would hit zero
 )
 
 // The verify body bound is maxVerifyBodyBytes (challenge_server.go, 1 KB) —
@@ -213,7 +209,7 @@ const (
 )
 
 type challengeV2MarkStore struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	m        map[string]time.Time // "ip|host" → expiry
 	fullWarn bool
 }
@@ -275,17 +271,16 @@ func challengeV2Marked(ip, host string) bool {
 		return false
 	}
 	s := &challengeV2Marks
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// RLock, and no delete: since the arm grain is resolved on EVERY scored
+	// solve, this runs on the common unarmed path too, and an exclusive Lock
+	// here would serialise every solve in a challenge storm against the same
+	// mutex the bridge writes marks through. An expired key is simply
+	// answered false and left for the write-pressure sweep in
+	// MarkChallengeV2, which is what bounds the store — reading never did.
+	s.mu.RLock()
 	exp, ok := s.m[key]
-	if !ok {
-		return false
-	}
-	if time.Now().After(exp) {
-		delete(s.m, key)
-		return false
-	}
-	return true
+	s.mu.RUnlock()
+	return ok && time.Now().Before(exp)
 }
 
 // SetChallengeV2HostArmed wires the per-vhost v2 lookup the verify gate ORs
@@ -334,7 +329,9 @@ const (
 // added to close. Cheap enough at solve rate (map reads plus, when geo
 // policies are loaded, one mmdb lookup), and reading a mark never consumes
 // it — challengeV2Marked only drops its own expired key — so the eager read
-// cannot starve the gate below.
+// cannot starve the gate below: challengeV2Marked reads under RLock and
+// never deletes, so the common unarmed path adds no exclusive lock to the
+// solve hot path.
 func challengeV2ArmGrain(fpID, ip, host string) string {
 	switch {
 	case FingerprintPolicyForID(fpID) == "challenge_v2":
@@ -427,36 +424,30 @@ func parseHumanityBody(b []byte) *humanitySignals {
 // amplifier fires exactly where it fired before. A bound must never become a
 // back-door tell.
 func (s *humanitySignals) sanitize() {
-	dropInt := func(p **int, min, max int) {
-		if *p != nil && (**p < min || **p > max) {
+	dropInt := func(p **int) {
+		if *p != nil && (**p < 0 || **p > sigMaxInt) {
 			*p = nil
 		}
 	}
-	dropFloat := func(p **float64, min, max float64) {
-		if *p != nil && (**p < min || **p > max) {
+	dropFloat := func(p **float64) {
+		if *p == nil {
+			return
+		}
+		// A reported ZERO is kept — it is a tell, not an error. Negative zero
+		// survives this check (-0.0 < 0 is false) and is normalised by
+		// sigRound, so no surface can ever carry "-0".
+		if v := **p; v < 0 || v > sigMaxReading || (v > 0 && v < sigMinPositive) {
 			*p = nil
 		}
 	}
-	dropInt(&s.PTR, 0, sigMaxEvents)
-	dropInt(&s.TCH, 0, sigMaxEvents)
-	dropInt(&s.KEY, 0, sigMaxEvents)
-	dropFloat(&s.MV, 0, sigMaxMovement)
-	dropInt(&s.HC, 1, sigMaxCores)
-	// deviceMemory is reported in GiB and can legitimately be fractional
-	// (0.25 on low-end Android), so the floor is "greater than zero", not 1.
-	dropFloat(&s.DM, 0.001, sigMaxMemoryGB)
-	dropFloat(&s.DPR, 0.001, sigMaxDPR)
-	dropFloat(&s.RAF, 0, sigMaxRAFms)
-	// mv and raf legitimately start at 0, so their range check admits a
-	// positive too small for any real device to have produced. Drop those
-	// (see sigMinPositive); an exact 0 is a real reading and is kept.
-	dropTiny := func(p **float64) {
-		if *p != nil && **p > 0 && **p < sigMinPositive {
-			*p = nil
-		}
-	}
-	dropTiny(&s.MV)
-	dropTiny(&s.RAF)
+	dropInt(&s.PTR)
+	dropInt(&s.TCH)
+	dropInt(&s.KEY)
+	dropInt(&s.HC)
+	dropFloat(&s.MV)
+	dropFloat(&s.DM)
+	dropFloat(&s.DPR)
+	dropFloat(&s.RAF)
 }
 
 // uaClaimsMobile reports whether the UA presents itself as a touch device.
@@ -523,50 +514,62 @@ func scoreHumanity(sig *humanitySignals, ua string) (hs int, tells []string) {
 // deliberate: a raw rAF average is 16.666666666666668, which bloats every row
 // and reads as false precision on a value averaged over 8 frames.
 
-// sigFloat formats a retained float at a fixed number of decimals, then trims
-// trailing zeros. 'f' (never 'g'/'e') on purpose: scientific notation in a
-// log field breaks a `grep`/`cut` corpus pass, and a %g-style verb has
-// misrendered a value in this repo before.
-func sigFloat(v float64, prec int) string {
-	trim := func(in string) string {
-		if strings.ContainsRune(in, '.') {
-			in = strings.TrimRight(in, "0")
-			in = strings.TrimSuffix(in, ".")
-		}
-		return in
+// sigRound applies the display rounding ONCE, as a float64. Both surfaces
+// then carry this exact number — the log line formats it, the history row
+// stores it — so the two can never disagree, and no value is formatted and
+// re-parsed on the way. Rounding is deliberate: a raw rAF average is
+// 16.666666666666668, which bloats every row and reads as false precision on
+// a value averaged over 8 frames.
+func sigRound(v float64, prec int) float64 {
+	if v == 0 {
+		return 0 // also normalises negative zero, which sanitize lets through
 	}
-	out := trim(strconv.FormatFloat(v, 'f', prec, 64))
-	// A REPORTED non-zero must never render as "0". `ptr:1,mv:0` is a shape
-	// no real client produces, and writing it into the corpus is the same
+	p := math.Pow(10, float64(prec))
+	if r := math.Round(v*p) / p; r != 0 {
+		return r
+	}
+	// A REPORTED non-zero must never become zero. `ptr:1,mv:0` is a shape no
+	// real client produces, and writing it into the corpus is the same
 	// fabricated-zero failure the absent-key rule prevents everywhere else —
 	// a later analyst would read it as "events fired, pointer never moved".
-	// sanitize guarantees any surviving non-zero is >= sigMinPositive, so
-	// this fallback always renders something non-zero and stays bounded.
-	if out == "0" && v != 0 {
-		out = trim(strconv.FormatFloat(v, 'f', sigMaxDecimals, 64))
-	}
-	return out
+	// sanitize guarantees a surviving positive is >= sigMinPositive, so
+	// rounding at sigMaxDecimals always leaves something non-zero, and the
+	// rendered result stays short.
+	q := math.Pow(10, sigMaxDecimals)
+	return math.Round(v*q) / q
 }
 
-// sigFields returns the retained signals in ONE fixed order — behavioural
+// sigString renders a rounded reading for the log line. 'f' with precision -1
+// emits the shortest exact decimal form — no trailing zeros to trim, and
+// never an exponent, which would break a grep/cut corpus pass (a %g-style
+// verb has misrendered a value in this repo before).
+func sigString(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+type sigField struct {
+	key string
+	val float64
+}
+
+// sigFields returns the retained readings in ONE fixed order — behavioural
 // first (the operational question is "did this client do anything?"), then
-// environment — as (key, rendered value) pairs. Absent values are omitted
-// entirely: a key that is not on the line was not reported, and no consumer
-// has to guess whether a 0 meant "none" or "unknown". Nil receiver / nil
-// payload yields nothing.
-func (s *humanitySignals) sigFields() [][2]string {
+// environment — already rounded. Absent readings are omitted entirely: a key
+// that is not there was not reported, and no consumer has to guess whether a
+// 0 meant "none" or "unknown". Nil receiver / nil payload yields nothing.
+func (s *humanitySignals) sigFields() []sigField {
 	if s == nil {
 		return nil
 	}
-	var out [][2]string
+	var out []sigField
 	addInt := func(k string, v *int) {
 		if v != nil {
-			out = append(out, [2]string{k, strconv.Itoa(*v)})
+			out = append(out, sigField{k, float64(*v)})
 		}
 	}
 	addFloat := func(k string, v *float64, prec int) {
 		if v != nil {
-			out = append(out, [2]string{k, sigFloat(*v, prec)})
+			out = append(out, sigField{k, sigRound(*v, prec)})
 		}
 	}
 	addInt("ptr", s.PTR)
@@ -601,15 +604,16 @@ func (s ChallengeSolve) SignalSuffix() string {
 	}
 	parts := make([]string, 0, len(fields))
 	for _, f := range fields {
-		parts = append(parts, f[0]+":"+f[1])
+		parts = append(parts, f.key+":"+sigString(f.val))
 	}
 	return " sig=" + strings.Join(parts, ",")
 }
 
-// signalMap is the history-row spelling of the same report: payload.sig, with
-// the rendered (rounded) values as JSON numbers so a corpus pass can aggregate
-// them without re-parsing a log field. nil when nothing was retained, so the
-// key is simply absent on such a row — matching the log's "no sig= field".
+// signalMap is the history-row spelling of the same report: payload.sig, as
+// JSON numbers so a corpus pass can aggregate without re-parsing a log field.
+// Same sigFields() source and therefore the same rounded values as the log.
+// nil when nothing was retained, so the key is simply absent on such a row —
+// matching the log's missing sig= field.
 func (s ChallengeSolve) signalMap() map[string]any {
 	fields := s.humanity.sigFields()
 	if len(fields) == 0 {
@@ -617,11 +621,7 @@ func (s ChallengeSolve) signalMap() map[string]any {
 	}
 	out := make(map[string]any, len(fields))
 	for _, f := range fields {
-		if n, err := strconv.ParseFloat(f[1], 64); err == nil {
-			out[f[0]] = n
-			continue
-		}
-		out[f[0]] = f[1] // unreachable for current fields; never drop a value silently
+		out[f.key] = f.val
 	}
 	return out
 }
@@ -629,8 +629,9 @@ func (s ChallengeSolve) signalMap() map[string]any {
 // HumanitySuffix renders the Rung-1 fields for a solve log line, in order:
 // " hs=N", " tells=a,b" when any fired, " sig=..." with the raw reported
 // signals (SignalSuffix), and " v2=<grain>" when the solve was covered by an
-// operator-armed challenge_v2. Empty when scoring was disabled (-1
-// sentinel), so pre-Rung-1 log tooling sees an unchanged line; " hs=-" when NO
+// operator-armed challenge_v2. Empty unless the scorer actually ran
+// (HumanityScored), so a disabled rung leaves pre-Rung-1 log tooling an
+// unchanged line and an UNSCORED solve can never claim a score; " hs=-" when NO
 // payload arrived and nothing fired, so "scored clean" (hs=0) and "reported
 // nothing" stay distinguishable in the burn-in data (a fleet-wide hs=- means a
 // regression or a body-stripping farm — D5d). Both solve-line writers
@@ -643,7 +644,7 @@ func (s ChallengeSolve) signalMap() map[string]any {
 // the tier never fired. Absent v2= = unarmed (score was shadow/log-only); a
 // rejected solve logs result=v2_reject and names the grain on its own line.
 func (s ChallengeSolve) HumanitySuffix() string {
-	if s.HumanityScore < 0 {
+	if !s.HumanityScored {
 		return ""
 	}
 	var out string

@@ -670,9 +670,18 @@ burn-in and FP triage with no new plumbing and no logrotate change:
 - **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls
   into cfm-web's `fingerprints` ledger as another per-client tell. The
   `challenge_solved` row carries `hs`, `tells`, `v2` (the arm grain),
-  `hs_nopayload` (the durable spelling of the log's `hs=-`) and `sig` (the raw
-  unscored report as a JSON object, same numbers and rounding as the log's
-  `sig=`), so the burn-in readout does not require shell access to every node. `hs` is omitted
+  `hs_nopayload` and `sig` (the readings as a JSON
+  object, same numbers and rounding as the log's `sig=`), so the burn-in
+  readout does not require shell access to every node. `hs_nopayload` is the
+  MORE precise of the two surfaces, not a rename of the log's `hs=-`: the log
+  collapses to `hs=-` only when the score is also 0, so a HeadlessChrome UA
+  that strips the body logs `hs=100 tells=headless_ua` while the row carries
+  `hs:100` AND `hs_nopayload:true`. Grepping `hs=-` and querying
+  `hs_nopayload` therefore return different populations — use the row.
+  `payload.sig` is admin-only (stripped for scoped callers,
+  `docs/endpoint_scope_inventory.md`); the rest of the payload is unchanged.
+  Every humanity key is gated on the scorer having actually run, so an
+  unscored solve carries none of them rather than a default-looking `hs:0`. `hs` is omitted
   entirely when the rung is off — the -1 sentinel is never persisted as a
   score.
 

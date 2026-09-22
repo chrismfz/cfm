@@ -71,8 +71,13 @@ humanity score earns **no clearance** (`result=v2_reject`, retry-able — see
   armed fingerprint/geo policy, the very same WAF-marked solve reads `v2=vhost`
   / `v2=fp` / `v2=geo` — the teeth are identical, only the label differs.)
   `v2=` absent entirely on a solve that followed a `challenge_v2` hit means the
-  mark was missing (a push without a host, or a solve later than
-  `challengeV2MarkTTL`), so the client faced a plain v1 challenge. `hs=0` is a PASS: the score is positive-evidence-only, so 0 means
+  mark was missing, so the client faced a plain v1 challenge. Three causes, in
+  the order worth checking: a push without a host (nothing to key the mark
+  on); a solve later than `challengeV2MarkTTL` (15m); or the per-(ip,host)
+  mark store hitting its cap and failing open — that one is silent except for
+  a single `[challenge_v2] per-(ip,host) mark store full` line in the daemon
+  log per episode, and a storm is exactly when it happens, so grep for it
+  before concluding the push was wrong. `hs=0` is a PASS: the score is positive-evidence-only, so 0 means
   "no headless tell fired", not "humanity proved" — a real browser is expected
   to score 0 and keep its clearance. A bite logs `result=v2_reject`.
 - Post-clearance conversion treats it exactly like `challenge` (cleared

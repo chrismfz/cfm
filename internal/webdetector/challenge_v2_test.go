@@ -2,6 +2,7 @@ package webdetector
 
 import (
 	"io"
+	"math"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -141,37 +142,37 @@ func TestChallengeV2GateScope(t *testing.T) {
 }
 
 func TestHumanitySuffix(t *testing.T) {
-	if s := (ChallengeSolve{HumanityScore: -1}).HumanitySuffix(); s != "" {
-		t.Fatalf("disabled rung must render nothing, got %q", s)
+	if s := (ChallengeSolve{}).HumanitySuffix(); s != "" {
+		t.Fatalf("an UNSCORED solve (zero value) must render nothing, got %q", s)
 	}
-	if s := (ChallengeSolve{HumanityScore: 0}).HumanitySuffix(); s != " hs=0" {
+	if s := (ChallengeSolve{HumanityScored: true, HumanityScore: 0}).HumanitySuffix(); s != " hs=0" {
 		t.Fatalf("clean solve: got %q", s)
 	}
-	if s := (ChallengeSolve{HumanityScore: 0, HumanityNoPayload: true}).HumanitySuffix(); s != " hs=-" {
+	if s := (ChallengeSolve{HumanityScored: true, HumanityScore: 0, HumanityNoPayload: true}).HumanitySuffix(); s != " hs=-" {
 		t.Fatalf("no-payload solve must be distinguishable from scored-clean, got %q", s)
 	}
 	// A UA-borne tell can fire WITH no payload: the real score wins over the dash.
-	if s := (ChallengeSolve{HumanityScore: 100, HumanityTells: "headless_ua", HumanityNoPayload: true}).HumanitySuffix(); s != " hs=100 tells=headless_ua" {
+	if s := (ChallengeSolve{HumanityScored: true, HumanityScore: 100, HumanityTells: "headless_ua", HumanityNoPayload: true}).HumanitySuffix(); s != " hs=100 tells=headless_ua" {
 		t.Fatalf("no-payload with a fired tell must show the score, got %q", s)
 	}
-	if s := (ChallengeSolve{HumanityScore: 130, HumanityTells: "sw_renderer,outer_zero,no_input"}).HumanitySuffix(); s != " hs=130 tells=sw_renderer,outer_zero,no_input" {
+	if s := (ChallengeSolve{HumanityScored: true, HumanityScore: 130, HumanityTells: "sw_renderer,outer_zero,no_input"}).HumanitySuffix(); s != " hs=130 tells=sw_renderer,outer_zero,no_input" {
 		t.Fatalf("failing solve: got %q", s)
 	}
 	// D5d: an ARMED solve that passes must be distinguishable from a plain v1
 	// one — otherwise a live tier reads as a forgotten one in the log.
-	if s := (ChallengeSolve{HumanityScore: 0, V2Grain: v2GrainMark}).HumanitySuffix(); s != " hs=0 v2=mark" {
+	if s := (ChallengeSolve{HumanityScored: true, HumanityScore: 0, V2Grain: v2GrainMark}).HumanitySuffix(); s != " hs=0 v2=mark" {
 		t.Fatalf("armed clean solve must name its grain, got %q", s)
 	}
-	if s := (ChallengeSolve{HumanityScore: 0, HumanityNoPayload: true, V2Grain: v2GrainFP}).HumanitySuffix(); s != " hs=- v2=fp" {
+	if s := (ChallengeSolve{HumanityScored: true, HumanityScore: 0, HumanityNoPayload: true, V2Grain: v2GrainFP}).HumanitySuffix(); s != " hs=- v2=fp" {
 		t.Fatalf("armed no-payload solve must name its grain, got %q", s)
 	}
-	if s := (ChallengeSolve{HumanityScore: 100, HumanityTells: "webdriver", V2Grain: v2GrainVhost}).HumanitySuffix(); s != " hs=100 tells=webdriver v2=vhost" {
+	if s := (ChallengeSolve{HumanityScored: true, HumanityScore: 100, HumanityTells: "webdriver", V2Grain: v2GrainVhost}).HumanitySuffix(); s != " hs=100 tells=webdriver v2=vhost" {
 		t.Fatalf("armed failing solve: got %q", s)
 	}
-	// The rung being off wins over everything: pre-Rung-1 log tooling must see
-	// an unchanged line even if a stale grain rode along.
-	if s := (ChallengeSolve{HumanityScore: -1, V2Grain: v2GrainGeo}).HumanitySuffix(); s != "" {
-		t.Fatalf("disabled rung must render nothing even with a grain, got %q", s)
+	// "Never scored" wins over everything: a literal that did not go through
+	// verify cannot claim a score, even with a stale grain along for the ride.
+	if s := (ChallengeSolve{V2Grain: v2GrainGeo}).HumanitySuffix(); s != "" {
+		t.Fatalf("unscored solve must render nothing even with a grain, got %q", s)
 	}
 }
 
@@ -310,49 +311,70 @@ func TestSignalSuffixNeverFakesAZero(t *testing.T) {
 // between the score and the arm, and still render nothing when the rung is off.
 func TestHumanitySuffixIncludesSignals(t *testing.T) {
 	s := ChallengeSolve{
-		HumanityScore: 0,
-		V2Grain:       v2GrainMark,
-		humanity:      &humanitySignals{PTR: iptr(0), MV: fptr(0)},
+		HumanityScored: true,
+		V2Grain:        v2GrainMark,
+		humanity:       &humanitySignals{PTR: iptr(0), MV: fptr(0)},
 	}
 	if got, want := s.HumanitySuffix(), " hs=0 sig=ptr:0,mv:0 v2=mark"; got != want {
 		t.Fatalf("\n got %q\nwant %q", got, want)
 	}
-	off := ChallengeSolve{HumanityScore: -1, humanity: &humanitySignals{PTR: iptr(5)}}
+	off := ChallengeSolve{humanity: &humanitySignals{PTR: iptr(5)}}
 	if got := off.HumanitySuffix(); got != "" {
-		t.Fatalf("disabled rung must render nothing at all, got %q", got)
+		t.Fatalf("unscored solve must render nothing at all, got %q", got)
 	}
 }
 
-// The body is client-authored, so an implausible value must degrade to ABSENT
-// before it can reach a log line or a durable history row — never to a
-// fabricated zero, and never as a value a corpus pass has to defend against.
-func TestSanitizeDropsImplausibleSignals(t *testing.T) {
+// Bounds are DIGIT SANITY, not a plausibility judgement. What is not a
+// reading at all (negative, absurd magnitude) degrades to ABSENT — never to a
+// fabricated zero — while everything a browser could actually have reported
+// survives untouched, including the anomalous readings the corpus exists to
+// find.
+func TestSanitizeDropsOnlyNonReadings(t *testing.T) {
 	sig := parseHumanityBody([]byte(`{"v":1,"ptr":-3,"tch":9000000,"key":4,` +
 		`"mv":1e300,"hc":0,"dm":99999,"dpr":0,"raf":-1}`))
 	if sig == nil {
 		t.Fatal("a well-formed body must parse")
 	}
-	for name, got := range map[string]any{
-		"ptr": sig.PTR, "tch": sig.TCH, "mv": sig.MV,
-		"hc": sig.HC, "dm": sig.DM, "dpr": sig.DPR, "raf": sig.RAF,
-	} {
-		switch v := got.(type) {
-		case *int:
-			if v != nil {
-				t.Errorf("%s = %d, want dropped", name, *v)
-			}
-		case *float64:
-			if v != nil {
-				t.Errorf("%s = %v, want dropped", name, *v)
-			}
-		}
+	// Not readings: a negative count/magnitude and an absurd magnitude.
+	if sig.PTR != nil || sig.TCH != nil || sig.MV != nil || sig.RAF != nil {
+		t.Errorf("non-readings survived: ptr=%v tch=%v mv=%v raf=%v", sig.PTR, sig.TCH, sig.MV, sig.RAF)
 	}
-	// The one in-bounds value survives untouched.
-	if sig.KEY == nil || *sig.KEY != 4 {
-		t.Errorf("an in-bounds value must survive, got %v", sig.KEY)
+	// Readings — including hc:0 and dpr:0, which are exactly the
+	// headless/embedded-WebView evidence this corpus is being built to
+	// discover. Erasing them would both destroy the tell and make it
+	// indistinguishable from "not reported".
+	if got := (ChallengeSolve{humanity: sig}).SignalSuffix(); got != " sig=key:4,hc:0,dm:99999,dpr:0" {
+		t.Errorf("readings must survive verbatim, got %q", got)
 	}
-	if got := (ChallengeSolve{humanity: sig}).SignalSuffix(); got != " sig=key:4" {
-		t.Errorf("only the surviving value may render, got %q", got)
+}
+
+// Regression anchor for the review finding this replaced: an earlier version
+// required hc >= 1 and dpr >= 0.001, so a client reporting hc:0/dpr:0 — the
+// strongest environment tell in the payload — was silently converted into
+// "the browser did not report it".
+func TestSanitizeKeepsReportedZeros(t *testing.T) {
+	sig := parseHumanityBody([]byte(`{"v":1,"ptr":0,"tch":0,"key":0,"mv":0,"hc":0,"dm":0,"dpr":0,"raf":0}`))
+	if sig == nil {
+		t.Fatal("a well-formed body must parse")
+	}
+	const want = " sig=ptr:0,tch:0,key:0,mv:0,hc:0,dm:0,dpr:0,raf:0"
+	if got := (ChallengeSolve{humanity: sig}).SignalSuffix(); got != want {
+		t.Fatalf("every reported zero must survive:\n got %q\nwant %q", got, want)
+	}
+}
+
+// Negative zero is a valid float that no reading means: it must never reach a
+// surface as "-0".
+func TestSigRoundNormalisesNegativeZero(t *testing.T) {
+	sig := parseHumanityBody([]byte(`{"v":1,"mv":-0.0,"raf":-0.0}`))
+	if sig == nil || sig.MV == nil {
+		t.Fatalf("negative zero is a reported zero and must survive sanitize, got %v", sig)
+	}
+	if got := (ChallengeSolve{humanity: sig}).SignalSuffix(); strings.Contains(got, "-0") {
+		t.Errorf("negative zero reached the log line: %q", got)
+	}
+	if m := (ChallengeSolve{humanity: sig}).signalMap(); math.Signbit(m["mv"].(float64)) {
+		t.Errorf("negative zero reached the history row: %v", m["mv"])
 	}
 }
 

@@ -451,8 +451,19 @@ type ChallengeSolve struct {
 	// TLSRaw is the full tuple behind TLSFP, kept so it can be written once per
 	// distinct fingerprint instead of on every solve.
 	TLSRaw string
+	// HumanityScored says the ChallengeV2 Rung-1 scorer actually ran for this
+	// solve. It is the ONE gate on every humanity field below, on both the
+	// log line and the durable history row, and it exists because the zero
+	// value of HumanityScore is a MEANINGFUL score (0 = scored, nothing
+	// fired = pass). Without it, any ChallengeSolve literal that omits the
+	// field — and this struct is exported, as is RecordChallengeSolved —
+	// asserts "the scorer ran and found nothing" for a solve it never saw.
+	// Harmless while that only reached a log line; not harmless now that it
+	// reaches durable history a corpus is read from.
+	HumanityScored bool
 	// HumanityScore is the ChallengeV2 Rung-1 passive score for this solve
-	// (challenge_v2.go). -1 = scoring disabled; 0 = scored, nothing fired.
+	// (challenge_v2.go), meaningful only when HumanityScored. 0 = scored,
+	// nothing fired.
 	// Positive-evidence-only by construction (D5b): a missing payload or
 	// missing signals cannot raise it. Rendered via HumanitySuffix() on both
 	// solve-line writers.
@@ -739,7 +750,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// disabled; an absent/malformed payload scores like an empty report
 		// (only UA-borne openers can fire) — absence never convicts (D5b).
 		v2On, v2Fail, v2Debug, v2Shadow := challengeV2Settings()
-		hs, hsTells, hsNoPayload, v2Grain := -1, "", false, ""
+		hs, hsTells, hsNoPayload, v2Grain := 0, "", false, ""
 		var hsSig *humanitySignals
 		if v2On {
 			sig := parseHumanityBody(humanityBody)
@@ -769,6 +780,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			UAFamily:          uaVerdict.Family,
 			TLSFP:             fp.ID,
 			TLSRaw:            fp.Raw,
+			HumanityScored:    v2On,
 			HumanityScore:     hs,
 			HumanityTells:     hsTells,
 			HumanityNoPayload: hsNoPayload,
