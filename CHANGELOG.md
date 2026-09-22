@@ -43,8 +43,14 @@ back-filled here — see the git/PR history for that period.
   unbuffered (which would silently store nothing). The Angie installer now
   provisions the cache directory at the canonical `/var/cache/nginx/cfm_static`
   (it had pointed at `/var/cache/angie/`, harmless until now but a mismatch with
-  the conf and the daemon that would fail `angie -t` once caching went live). No
-  behaviour change until an operator arms a vhost.
+  the conf and the daemon that would fail `angie -t` once caching went live).
+  **Caching stays off until an operator arms a vhost**; the one edge-wide change
+  is that the static-asset location now buffers responses (it previously
+  streamed) — transparent for the small css/js/font/image assets it matches,
+  though a large image may now spill to a temp file as any buffered response
+  does, matching the global `proxy_buffering on` default that `location /`
+  already uses. Large media/archives are unaffected (their own uncached
+  streaming location keeps buffering off).
   runtime Lua files" loop that copied from `/usr/share/cfm/configs/lua` over
   the modules the package had just installed into `/var/lib/cfm/lua/`. It was
   useless in both packagings, differently: on **deb** that source was never

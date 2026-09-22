@@ -706,6 +706,30 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
        client that didn't ask for them — a documented residual of respect-origin
        caching, not keyed in (keying would fragment the cache 3× for correct
        origins).
+     - **Unarmed vhosts still buffer (unavoidable, bounded).** `proxy_buffering`
+       is location-level — nginx cannot toggle it per request/host — so flipping
+       it on for the cache to work applies to every vhost hitting the static
+       location, armed or not (`proxy_cache_bypass`/`proxy_no_cache` suppress
+       *storing*, not *buffering*). Practical effect for an unarmed vhost: small
+       assets buffer in memory (transparent), a large image may spill to temp as
+       any buffered response does. Consistent with the global `proxy_buffering
+       on` default (`location /`); the CHANGELOG states it rather than claiming
+       "no change". Large media/archives are untouched (separate streaming
+       location).
+     - **One shared 10g zone — large images can evict small assets (accepted,
+       tunable).** css/js/fonts and multi-MB images share `cfm_static`; a burst
+       of large-image traffic on an armed vhost can LRU-evict the small
+       high-hit-ratio assets. Open-source nginx has no per-object max-cacheable
+       size, so a size cap would need a Content-Length map/Lua gate — deferred
+       with the per-tier zone split (a follow-up); single zone is the deliberate
+       minimal first cut.
+     - **`use_stale updating error timeout` serves stale during origin trouble
+       (deliberate).** When the origin errors/times out or an entry is updating,
+       an expired copy is served rather than failing — anti-stampede resilience,
+       self-healing once the origin recovers. Consequence: a static file changed
+       or withdrawn *while the origin is unhealthy* keeps serving stale until the
+       origin is back or the operator bumps the purge generation (the only
+       forced-invalidation path). Accepted; operators purge to force-invalidate.
    - **3c — stats/logging** (`cfm_cache_stats` + `cfm_cache_log` + the daemon
      `/nginx/cache/stats` aggregate + `/api/v1/site-cache/stats` + the cfm-admin
      hit-ratio column): deferred from this list's item 3, still to build.
