@@ -18,15 +18,16 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
-- **Site Cache — Phase 3a: `SITE_CACHE` master gate (config-driven).** New
-  `[webdetector] SITE_CACHE` knob (**default 0 = off**) published to the edge via
+- **Site Cache — Phase 3a: `SITE_CACHE` master kill switch (config-driven).** New
+  `[webdetector] SITE_CACHE` knob (**default 1 = on**) published to the edge via
   `cfm_bridge_config.lua` (~10s, no proxy reload) — no env vars, config-file
-  driven like the other edge knobs. When off, `cfm_cache.lua` is a full no-op on
-  the hot path (no feed poll, no per-request lookup, no `X-CFM-Cache` header),
-  not just "no armed vhosts", so the whole feature costs nothing until an
-  operator opts a node in with `SITE_CACHE = 1`. This is the master kill switch
-  the real-caching phases sit behind; the per-vhost policy store is untouched, so
-  re-arming is instant. Still caches nothing on its own.
+  driven like the other edge knobs. It is a **kill switch, not an opt-in**: the
+  per-vhost policy store is empty by default, so nothing caches anywhere until an
+  operator arms a vhost (the single opt-in). `SITE_CACHE = 0` is the panic
+  button — `cfm_cache.lua` becomes a full no-op on the hot path (no feed poll, no
+  per-request lookup, no `X-CFM-Cache` header) fleet-wide in ~10s, **without**
+  disarming any vhost, so re-arming is instant. Still caches nothing on its own
+  (no `proxy_cache` yet).
 - **Site Cache — Phase 2: edge policy feed (observe-only).** The daemon now
   serves the per-vhost cache policy on the `/nginx/cache/config` bridge endpoint,
   and a new edge module `configs/lua/cfm_cache.lua` pulls it per-worker (async,

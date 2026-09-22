@@ -26,13 +26,18 @@ in the tree (see §2).
 Everything in this design is a reaction to that one failure mode. The
 invariants, in priority order:
 
-1. **Master default OFF.** The feature can be installed and cache *nothing*
-   anywhere. `[webdetector] SITE_CACHE = 0` by default; `SITE_CACHE = 0` also
-   removes all per-request edge cost (kill-switch mirrored to the edge like
-   `FP_POLICY`).
-2. **Opt-in per vhost, exact-host.** `myip.gr` and `www.myip.gr` are two
-   explicit entries; there is **no** implicit `*.myip.gr`. Wildcards are an
-   advanced opt-in, never a default.
+1. **Safe by default via per-vhost opt-in — not a global default-off.** The
+   per-vhost policy store is empty by default, so the feature can be installed
+   and cache *nothing* anywhere until an operator arms a vhost. The master
+   `[webdetector] SITE_CACHE` is therefore a **kill switch, default ON (1)** — a
+   default-*off* master would just be a redundant second opt-in. It is not what
+   makes the feature safe; the empty per-vhost store is. `SITE_CACHE = 0` is the
+   panic button: it removes all per-request edge cost (`cfm_cache.lua` → full
+   no-op, mirrored to the edge like `FP_POLICY`) fleet-wide in ~10s **without**
+   disarming any vhost, so re-arming is instant.
+2. **Arming a vhost is the single opt-in — exact-host.** `myip.gr` and
+   `www.myip.gr` are two explicit entries; there is **no** implicit `*.myip.gr`.
+   Wildcards are an advanced opt-in, never a default.
 3. **Bypass-by-default at the edge.** The Lua sets `$cfm_cache_skip = 1` (do
    not cache) at the start of every request and flips it to `0` **only** when
    every safety gate in §4 passes. A regression that drops the gate fails
@@ -599,7 +604,7 @@ even the log-phase increments.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `SITE_CACHE` | `0` (OFF) | master gate; `0` = no caching + no edge cost (mirrored to edge via `manager.go`, like `FP_POLICY`) |
+| `SITE_CACHE` | `1` (ON) | master **kill switch** (not an opt-in — the per-vhost store arms vhosts); `0` = no caching + no edge cost fleet-wide (mirrored to edge via `manager.go`, like `FP_POLICY`) |
 | `SITE_CACHE_STORE_PATH` | `/var/lib/cfm/webdetector_site_cache.json` | per-vhost store |
 | `SITE_CACHE_SCOPED` | `1` | allow scoped cPanel self-service (§9) |
 | `SITE_CACHE_CFG_REFRESH_SEC` | `10` | edge config-pull cadence |

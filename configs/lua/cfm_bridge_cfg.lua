@@ -35,10 +35,11 @@
 --                       fingerprint-policy edge gate — [webdetector] FP_POLICY.
 --                       false = cfm.lua skips Step 0c entirely: no tlsfp tuple,
 --                       no md5, no dict, no /nginx/fppolicy lookups)
---   site_cache          boolean (default FALSE when file/field missing — a
---                       caching master gate fails to "off"; [webdetector]
---                       SITE_CACHE. false = cfm_cache.lua is a full no-op:
---                       no feed poll, no lookup, no X-CFM-Cache header)
+--   site_cache          boolean (default TRUE when file/field missing; the
+--                       Site Cache master KILL SWITCH — [webdetector] SITE_CACHE.
+--                       Not an opt-in (the per-vhost policy store arms vhosts);
+--                       false = cfm_cache.lua is a full no-op: no feed poll, no
+--                       lookup, no X-CFM-Cache header)
 
 local fc = require "cfm_filecache"
 
@@ -90,11 +91,11 @@ local OPTS = {
     -- other booleans: an older daemon's file simply lacks the field and the
     -- feature stays available; only an explicit false removes it.
     out.fp_policy = (val.fp_policy ~= false)
-    -- Site Cache master gate ([webdetector] SITE_CACHE). DEFAULT OFF, unlike the
-    -- other booleans: a caching master switch must fail to "no caching" when the
-    -- daemon predates the field or the file is missing, so only an EXPLICIT true
-    -- turns it on. false = cfm_cache.lua is a full no-op on the hot path.
-    out.site_cache = (val.site_cache == true)
+    -- Site Cache master KILL SWITCH ([webdetector] SITE_CACHE). Default TRUE like
+    -- the other booleans (absent field / older daemon → on); it is not an opt-in,
+    -- since the per-vhost policy store must still arm a vhost before anything
+    -- caches. Only an EXPLICIT false disarms it (cfm_cache.lua → full no-op).
+    out.site_cache = (val.site_cache ~= false)
     return out
   end,
 }

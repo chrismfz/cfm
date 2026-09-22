@@ -429,11 +429,12 @@ type WebdetectorBridgeConfig struct {
 	// within ~10s, not just its answers (whats_wrong-side review finding on
 	// PR #1438).
 	FPPolicy bool
-	// SiteCache mirrors [webdetector] SITE_CACHE to the edge — the master gate
-	// for per-vhost edge caching (default OFF). false makes cfm_cache.lua a
-	// no-op (no feed poll, no lookup, no header) so the whole feature costs
-	// nothing on the hot path until an operator opts the node in; the per-vhost
-	// policy still governs WHICH armed vhosts cache once this is on.
+	// SiteCache mirrors [webdetector] SITE_CACHE to the edge — the master KILL
+	// SWITCH for per-vhost edge caching (default ON). It is not a second opt-in:
+	// the per-vhost policy store (default empty) is what arms a vhost, so nothing
+	// caches until one is armed regardless of this flag. false makes cfm_cache.lua
+	// a full no-op (no feed poll, no lookup, no header) so an operator can kill all
+	// caching fleet-wide in ~10s without disarming vhosts.
 	SiteCache bool
 }
 

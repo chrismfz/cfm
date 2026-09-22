@@ -128,6 +128,16 @@ ngx.var.host = "unarmed.com"
 cache.observe()
 check(_header["X-CFM-Cache"] == nil, "observe stamps nothing for an unarmed vhost")
 
+-- ── master gate defaults ON when the field is absent (older daemon / no file) ─
+-- Kill switch, not opt-in: only an explicit false disarms it.
+_site_cache_on = nil     -- {site_cache = nil} → absent field
+for k in pairs(_header) do _header[k] = nil end
+ngx.var.http_x_cfm_cache_debug = "1"
+ngx.var.host = "myip.gr"
+cache.observe()
+check(_header["X-CFM-Cache"] ~= nil, "absent SITE_CACHE field defaults ON (kill switch, not opt-in)")
+_site_cache_on = true
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)

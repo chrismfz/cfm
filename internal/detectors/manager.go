@@ -460,12 +460,15 @@ func (m *manager) maybeReload(parent context.Context) {
 				// (daemon-side answers); published here so FP_POLICY=0 also
 				// removes the edge's whole Step-0c cost, not just its answers.
 				FPPolicy: kvBool(wdKV, "FP_POLICY", true),
-				// Site Cache master gate (per-vhost edge caching). Default OFF:
-				// the feature ships installed but caches nothing until an
-				// operator sets SITE_CACHE=1; published here so SITE_CACHE=0
-				// makes cfm_cache.lua a no-op on the hot path (no feed poll, no
-				// lookup, no header), not just "no armed vhosts".
-				SiteCache: kvBool(wdKV, "SITE_CACHE", false),
+				// Site Cache master gate (per-vhost edge caching). Default ON,
+				// but a pure KILL SWITCH — not a second opt-in: the per-vhost
+				// policy store (default empty) is the only thing that arms a
+				// vhost, so nothing caches until an operator arms one, master on
+				// or not. SITE_CACHE=0 is the panic button: cfm_cache.lua becomes
+				// a full no-op on the hot path (no feed poll, no lookup, no
+				// header) fleet-wide in ~10s, without disarming any vhost, so
+				// re-arming is instant.
+				SiteCache: kvBool(wdKV, "SITE_CACHE", true),
 			}
 			// Guard nonsense values; the Lua side re-guards but keep the
 			// published file sane. Idle must stay below Apache's
