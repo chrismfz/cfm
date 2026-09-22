@@ -1402,9 +1402,14 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       end
 
       -- ONE place for the ip_push + the waf_<action> log line, so every route
-      -- out of the action branch below reports the hit — including the
+      -- that issues this hit's decision reports it — including the
       -- challenge-resume redirect, which returns before the shared
-      -- fallthrough. That path used to skip both (an under-report: a
+      -- fallthrough. (The one exception is the block_replayed 403: an
+      -- uncleared resumed POST re-hitting a challenge-tier rule reports via
+      -- observe_waf instead — the original challenge that minted its resume
+      -- token already pushed+logged, and a blocked client never reaches
+      -- verify, so no v2 mark is owed.) The resume path used to skip both
+      -- (an under-report: a
       -- challenged POST left no cfm.waf.log record, no waf_trigger history
       -- and no ipState decision), and for challenge_v2 the push is
       -- load-bearing: it is what writes the per-(ip,host) rung mark the

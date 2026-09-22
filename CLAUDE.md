@@ -387,7 +387,10 @@ traffic rule with action `challenge_v2` at decision time (slice B:
 rules-model.js and traffic_rules.go changed in the same PR, per the
 Simulate rule) and a WAF rule set to `"challenge_v2"` in cfm_waf_config.lua
 (slice C: severity challenge < challenge_v2 < block, only block
-short-circuits; handleIPPush records the mark). Either way the wire/ipState
+short-circuits; handleIPPush records the mark; `rule_xss` 302 ships at
+challenge_v2 by default since 2026-09-22, and
+`TestWAFRuleIDs_DefaultModeLuaParity` now pins every Go DefaultMode to the
+Lua CFG default). Either way the wire/ipState
 stays plain "challenge" (the edge vocabulary), the verbatim tier reaches
 cfm.waf.log/history, and challenge-tier hits never feed waf_security
 autoblock. Version skew: an OLDER edge maps the unknown WAF mode to

@@ -21,8 +21,9 @@ back-filled here — see the git/PR history for that period.
 - **WAF rule tier `challenge_v2` (master plan "arm surfaces" slice C).** The
   promotion ladder gains a rung between challenge and block:
   `logonly → challenge → challenge_v2 → block`, set per rule in
-  `/etc/cfm/cfm_waf_config.lua` (e.g. `return { rule_xss = "challenge_v2" }`
-  arms the reflected-XSS smoke test, rule 302). The edge serves the SAME
+  `/etc/cfm/cfm_waf_config.lua` (e.g. `return { rule_serialize =
+  "challenge_v2" }`; `rule_xss` already ships at this tier — see the
+  Changed entry below). The edge serves the SAME
   challenge page as `challenge`; the push carries the v2 tier and the daemon
   marks the (ip,host) pair, so that client's solve must also pass the passive
   humanity check to earn clearance (fails stay retry-able). Doctrine intact:
@@ -90,6 +91,16 @@ back-filled here — see the git/PR history for that period.
   never feeds `waf_security`).
 
 ### Fixed
+- **12 WAF rules showed the wrong default tier in the CLI / panel / MCP rule
+  glossary.** The Go mirror's informational `DefaultMode` had silently
+  drifted from the shipped Lua defaults (e.g. `rule_reverse_shell` shown as
+  `logonly` while the edge ships it at `challenge`; `rule_crlf_injection`
+  the reverse). Enforcement was never affected — the Lua CFG is what runs,
+  and none of the drift touched `block`, so autoblock arming was correct
+  throughout. Synced to the Lua truth and now pinned by a new parity test
+  (`TestWAFRuleIDs_DefaultModeLuaParity`), because `DefaultMode == "block"`
+  IS the `waf_security` arming source and a future one-sided edit there
+  would mis-arm autoblock.
 - **A challenged POST is no longer invisible to the daemon.** The
   challenge-resume redirect (a POST whose body is stashed for replay after
   the solve) returned before the WAF hit push, so the hit left no

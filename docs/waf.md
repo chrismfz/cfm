@@ -7,7 +7,8 @@ inspect every dynamic request before it reaches origin. Severity-aggregation
 returns the strongest rule's action; per-vhost exclusions let operators
 whitelist specific rules on noisy hosts; hit-rate counters and the per-
 trigger JSON hit log (`cfm.waf.log`) give operators data-driven evidence
-before promoting any rule from `logonly` to `challenge` to `block`.
+before promoting any rule up the `logonly` → `challenge` → `challenge_v2` →
+`block` ladder.
 
 Open follow-ups (none blocking):
 

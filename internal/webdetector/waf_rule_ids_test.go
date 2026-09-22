@@ -85,6 +85,64 @@ func TestWAFRuleIDs_LuaParity(t *testing.T) {
 	}
 }
 
+// TestWAFRuleIDs_DefaultModeLuaParity asserts every WAFRule.DefaultMode in
+// the Go mirror matches the shipped default in cfm_waf.lua's CFG table, both
+// directions. DefaultMode is informational for challenge tiers, but it is the
+// ARMING SOURCE for waf_security autoblock (WAFFamilyHasBlockRule keys on
+// DefaultMode == "block") — a one-sided edit around a block promotion would
+// silently mis-arm autoblock, and until this test the two copies were kept in
+// lockstep by hand (CLAUDE.md §5: never keep a second copy that can drift;
+// the rule_xss challenge→challenge_v2 promotion was exactly such a
+// double-edit).
+func TestWAFRuleIDs_DefaultModeLuaParity(t *testing.T) {
+	luaPath := findCFMRoot(t) + "/configs/lua/cfm_waf.lua"
+	src, err := os.ReadFile(luaPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", luaPath, err)
+	}
+
+	// CFG default lines look like:
+	//   rule_xss             = "challenge_v2", -- comment
+	// The mode-string form only ever appears as a CFG default (set_rule
+	// assigns via CFG[name], never a literal), so a whole-file scrape with a
+	// strict mode whitelist is safe — and a typo'd mode simply won't parse
+	// here, which the both-directions diff below then reports as missing.
+	entryRe := regexp.MustCompile(`^\s*(rule_[a-z0-9_]+)\s*=\s*"(disabled|logonly|challenge|challenge_v2|block)"`)
+
+	luaModes := map[string]string{}
+	for _, line := range strings.Split(string(src), "\n") {
+		if m := entryRe.FindStringSubmatch(line); m != nil {
+			if _, dup := luaModes[m[1]]; dup {
+				t.Errorf("duplicate Lua CFG default for %s", m[1])
+			}
+			luaModes[m[1]] = m[2]
+		}
+	}
+	if len(luaModes) == 0 {
+		t.Fatalf("no rule-mode defaults parsed from %s", luaPath)
+	}
+
+	for _, r := range wafRuleIDs {
+		luaMode, ok := luaModes[r.Name]
+		if !ok {
+			t.Errorf("Go mirror has %s (DefaultMode=%q) but cfm_waf.lua CFG has no default for it", r.Name, r.DefaultMode)
+			continue
+		}
+		if luaMode != r.DefaultMode {
+			t.Errorf("DefaultMode drift on %s: Lua=%q Go=%q", r.Name, luaMode, r.DefaultMode)
+		}
+	}
+	goNames := map[string]bool{}
+	for _, r := range wafRuleIDs {
+		goNames[r.Name] = true
+	}
+	for name, mode := range luaModes {
+		if !goNames[name] {
+			t.Errorf("cfm_waf.lua CFG defaults %s=%q but the Go mirror is missing it", name, mode)
+		}
+	}
+}
+
 // TestWAFRuleIDs_NoRenumber pins a few load-bearing IDs so an accidental
 // renumber during refactor is caught by the test, not by an operator
 // whose --rule 320 exclusion silently starts skipping the wrong rule.

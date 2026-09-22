@@ -61,6 +61,28 @@ func TestWAFPushChallengeV2_StoresChallengeAndMarks(t *testing.T) {
 	}
 }
 
+// The mark store canonicalizes its key (challengeV2MarkKey →
+// normalizeClearanceHost): writers feed it normalizeHost output (lowercase +
+// port strip) while the verify reader's host comes via normalizeClearanceHost
+// (also trims a trailing dot, unbrackets IPv6) — without one shared
+// normalizer a `Host: example.com.` write would silently miss the verify
+// lookup and disarm v2 for that client (second-review finding).
+func TestChallengeV2Mark_HostNormalizationConverges(t *testing.T) {
+	resetChallengeV2Marks(t)
+
+	MarkChallengeV2("203.0.113.70", "Example.COM.")
+	if !challengeV2Marked("203.0.113.70", "example.com") {
+		t.Fatalf("trailing-dot/case write must match the canonical verify lookup")
+	}
+	MarkChallengeV2("203.0.113.71", "shop.example:443")
+	if !challengeV2Marked("203.0.113.71", "shop.example") {
+		t.Fatalf("port-carrying write must match the portless verify lookup")
+	}
+	if challengeV2Marked("203.0.113.70", "other.example") {
+		t.Fatalf("normalization must not widen the match")
+	}
+}
+
 func TestWAFPushChallengeV2_EmptyHostDegradesToPlainChallenge(t *testing.T) {
 	resetChallengeV2Marks(t)
 	b := NewNginxBridge("/tmp/cfm-test-wafv2b.sock", "tok", time.Minute, time.Minute)

@@ -1,8 +1,12 @@
 // Package webdetector — Go-side mirror of the cfm_waf RULE_IDS table.
 //
-// Source of truth lives in configs/lua/cfm_waf.lua (the RULE_IDS local table).
-// Drift between Lua and Go is caught by TestWAFRuleIDs_LuaParity in
-// waf_rule_ids_test.go, which parses cfm_waf.lua at test time.
+// Source of truth lives in configs/lua/cfm_waf.lua (the RULE_IDS local table
+// for ids, the CFG table for default modes). Drift between Lua and Go is
+// caught by TestWAFRuleIDs_LuaParity and TestWAFRuleIDs_DefaultModeLuaParity
+// in waf_rule_ids_test.go, which parse cfm_waf.lua at test time. (The mode
+// parity test exists because 12 DefaultMode entries had silently drifted from
+// the shipped Lua defaults by 2026-09 — none at block tier, so autoblock was
+// never mis-armed, but DefaultMode=="block" IS the wafsec arming source.)
 //
 // Stable numeric IDs grouped by first digit:
 //   1xx path / traversal
@@ -46,7 +50,7 @@ var wafRuleIDs = []WAFRule{
 	// panel-port gate (cfm_panel.lua) enforces, so traversal now denies on the
 	// cPanel/WHM/webmail ports too (7-day panel burn-in: 0 hits, six servers).
 	{ID: 101, Name: "rule_traversal", ReasonFamily: "WAF_TRAVERSAL", DefaultMode: "block"},
-	{ID: 102, Name: "rule_long_path_segment", ReasonFamily: "WAF_LONG_PATH", DefaultMode: "logonly"},
+	{ID: 102, Name: "rule_long_path_segment", ReasonFamily: "WAF_LONG_PATH", DefaultMode: "challenge"},
 
 	// 2xx client identity
 	// Mixed-mode: challenge is the parent default; score >= 99 is hard-blocked in Lua.
@@ -74,12 +78,12 @@ var wafRuleIDs = []WAFRule{
 	{ID: 317, Name: "rule_cmd_payload_backtick", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge"},
 	{ID: 320, Name: "rule_rce", ReasonFamily: "WAF_RCE", DefaultMode: "block"},
 	{ID: 321, Name: "rule_proxy_header_sqli", ReasonFamily: "WAF_PROXY_HDR", DefaultMode: "challenge"},
-	{ID: 322, Name: "rule_reverse_shell", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
-	{ID: 323, Name: "rule_persistence", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
-	{ID: 324, Name: "rule_rootkit_artifacts", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
-	{ID: 325, Name: "rule_lolbin", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
-	{ID: 326, Name: "rule_java_deserialize", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
-	{ID: 327, Name: "rule_coinminer", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
+	{ID: 322, Name: "rule_reverse_shell", ReasonFamily: "WAF_RCE", DefaultMode: "challenge"},
+	{ID: 323, Name: "rule_persistence", ReasonFamily: "WAF_RCE", DefaultMode: "challenge"},
+	{ID: 324, Name: "rule_rootkit_artifacts", ReasonFamily: "WAF_RCE", DefaultMode: "challenge"},
+	{ID: 325, Name: "rule_lolbin", ReasonFamily: "WAF_RCE", DefaultMode: "challenge"},
+	{ID: 326, Name: "rule_java_deserialize", ReasonFamily: "WAF_RCE", DefaultMode: "challenge"},
+	{ID: 327, Name: "rule_coinminer", ReasonFamily: "WAF_RCE", DefaultMode: "challenge"},
 	{ID: 328, Name: "rule_log4shell", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
 	{ID: 329, Name: "rule_php_object_injection", ReasonFamily: "WAF_RCE", DefaultMode: "block"},
 
@@ -126,11 +130,11 @@ var wafRuleIDs = []WAFRule{
 	{ID: 601, Name: "rule_ctrl_chars", ReasonFamily: "WAF_CTRL_CHARS", DefaultMode: "challenge"},
 	{ID: 602, Name: "rule_ip_host", ReasonFamily: "WAF_IP_HOST", DefaultMode: "challenge"},
 	{ID: 603, Name: "rule_header_vulns", ReasonFamily: "WAF_HEADER_VULN", DefaultMode: "challenge"},
-	{ID: 604, Name: "rule_content_type_anomaly", ReasonFamily: "WAF_CT_ANOMALY", DefaultMode: "logonly"},
-	{ID: 605, Name: "rule_crlf_injection", ReasonFamily: "WAF_CRLF", DefaultMode: "challenge"},
-	{ID: 606, Name: "rule_http_smuggling", ReasonFamily: "WAF_HTTP_SMUGGLING", DefaultMode: "logonly"},
+	{ID: 604, Name: "rule_content_type_anomaly", ReasonFamily: "WAF_CT_ANOMALY", DefaultMode: "challenge"},
+	{ID: 605, Name: "rule_crlf_injection", ReasonFamily: "WAF_CRLF", DefaultMode: "logonly"},
+	{ID: 606, Name: "rule_http_smuggling", ReasonFamily: "WAF_HTTP_SMUGGLING", DefaultMode: "challenge"},
 	{ID: 607, Name: "rule_exploit_methods", ReasonFamily: "WAF_EXPLOIT_METHOD", DefaultMode: "challenge"},
-	{ID: 608, Name: "rule_smuggling_cl", ReasonFamily: "WAF_HTTP_SMUGGLING", DefaultMode: "logonly"},
+	{ID: 608, Name: "rule_smuggling_cl", ReasonFamily: "WAF_HTTP_SMUGGLING", DefaultMode: "challenge"},
 	{ID: 609, Name: "rule_header_flood", ReasonFamily: "WAF_HEADER_FLOOD", DefaultMode: "challenge"},
 	{ID: 610, Name: "rule_range_abuse", ReasonFamily: "WAF_RANGE_ABUSE", DefaultMode: "logonly"},
 	{ID: 611, Name: "rule_bad_utf8", ReasonFamily: "WAF_BAD_UTF8", DefaultMode: "logonly"},
@@ -141,7 +145,7 @@ var wafRuleIDs = []WAFRule{
 
 	// 7xx SSRF
 	{ID: 701, Name: "rule_ssrf", ReasonFamily: "WAF_SSRF", DefaultMode: "challenge"},
-	{ID: 702, Name: "rule_c2_tunnel", ReasonFamily: "WAF_C2", DefaultMode: "logonly"},
+	{ID: 702, Name: "rule_c2_tunnel", ReasonFamily: "WAF_C2", DefaultMode: "challenge"},
 
 	// 8xx info disclosure / debug
 	{ID: 801, Name: "rule_debug_toggles", ReasonFamily: "WAF_DEBUG_TOGGLE", DefaultMode: "challenge"},

@@ -180,12 +180,29 @@ type challengeV2MarkStore struct {
 
 var challengeV2Marks = challengeV2MarkStore{m: map[string]time.Time{}}
 
+// challengeV2MarkKey canonicalizes the (ip, host) pair into the store key.
+// The WRITERS' inputs pass through normalizeHost (lowercase + port strip)
+// while the verify READER's host comes via normalizeClearanceHost, which
+// additionally trims a trailing dot and unbrackets a bare IPv6 literal —
+// so both sides run normalizeClearanceHost HERE (idempotent for
+// already-normalized input) and a `Host: example.com.` write can never
+// miss the `example.com` verify lookup. Returns "" when either half is
+// empty (callers treat that as "no mark").
+func challengeV2MarkKey(ip, host string) string {
+	ip = strings.TrimSpace(ip)
+	host = normalizeClearanceHost(host)
+	if ip == "" || host == "" {
+		return ""
+	}
+	return ip + "|" + host
+}
+
 // MarkChallengeV2 records that (ip, host) was challenged by a v2-tier source.
 func MarkChallengeV2(ip, host string) {
-	if ip == "" || host == "" {
+	key := challengeV2MarkKey(ip, host)
+	if key == "" {
 		return
 	}
-	key := ip + "|" + host
 	now := time.Now()
 	s := &challengeV2Marks
 	s.mu.Lock()
@@ -213,10 +230,10 @@ func MarkChallengeV2(ip, host string) {
 
 // challengeV2Marked reports whether a live v2 mark covers (ip, host).
 func challengeV2Marked(ip, host string) bool {
-	if ip == "" || host == "" {
+	key := challengeV2MarkKey(ip, host)
+	if key == "" {
 		return false
 	}
-	key := ip + "|" + host
 	s := &challengeV2Marks
 	s.mu.Lock()
 	defer s.mu.Unlock()
