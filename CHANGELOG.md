@@ -122,10 +122,15 @@ back-filled here — see the git/PR history for that period.
   static hot path, double-`pcall`-guarded) flips `$cfm_cache_skip` to `0` and
   stamps the purge generation into the cache key; any error or an unarmed vhost
   leaves caching off, exactly as before. Cached responses honour the origin's
-  `Cache-Control`/`Expires` with a 1h fallback, only `200` is cached (a
-  transient deploy-time 404 must not stick), a `Set-Cookie` response is never
-  cached, and anti-stampede locking means a burst hits the origin about once per
-  TTL. The static-asset location now uses `proxy_buffering on` (it previously
+  `Cache-Control`/`Expires`; only `200` gets the 1h fallback TTL (any other
+  status is cached only if the origin itself marks it cacheable, so a transient
+  deploy-time 404 gets no fallback and can't stick), a `Set-Cookie` response is
+  never cached, and anti-stampede locking means a burst hits the origin about
+  once per TTL. Per-user safety at Tier A rests on those response-side rails
+  (`Set-Cookie` / `Cache-Control: private` → never stored) plus the public
+  nature of static assets; the request-cookie allowlist (per-vhost session-cookie
+  bypass) lands with Tier B HTML micro-cache, where per-user content makes it
+  essential. The static-asset location now uses `proxy_buffering on` (it previously
   streamed unbuffered): nginx populates `proxy_cache` only on the buffered path,
   so buffering is required for the cache to store anything — small web assets
   buffer in memory, larger ones spill into the cache dir; large media/archives

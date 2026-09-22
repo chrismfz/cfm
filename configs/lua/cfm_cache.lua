@@ -295,6 +295,17 @@ end
 -- Otherwise it leaves the pre-set vars untouched ($cfm_cache_skip = "1" → no
 -- caching). Never raises (the conf pcall's it too); the fail-safe direction is
 -- "do not cache".
+--
+-- SCOPE (Tier A / 3b): this gate does NOT consult the request-cookie allowlist
+-- (design §4.1) — the policy carries strict_cookies/auth_cookies but Tier A does
+-- not read them yet. Static assets are public, and per-user safety here rests on
+-- the response-side rails nginx already enforces (a Set-Cookie or a
+-- Cache-Control: private/no-store/no-cache response is never stored). The full
+-- request-cookie allowlist (built-in names + ignore-list + strict mode) lands
+-- with Tier B micro-cache, where per-user HTML makes it essential. Residual:
+-- a static-extension URL an origin renders per-user with NEITHER Set-Cookie NOR
+-- a private Cache-Control would be cached — narrow, documented in
+-- docs/site-cache-design.md §14.
 function _M.static_gate()
     if not site_cache_enabled() then return end
     local p = _M.policy_for(ngx.var.host)

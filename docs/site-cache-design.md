@@ -188,6 +188,13 @@ The §11 **BYPASS counter is how you validate this in production**: if a vhost
 shows high BYPASS + low HIT, the cookie allowlist (or `strict_cookies`) is
 bypassing traffic you expected to cache — tune it there, don't guess.
 
+> **As-built (Tier A / 3b):** this request-cookie allowlist is **not yet wired at
+> the edge** — `static_gate` does not read `strict_cookies`/`auth_cookies`, and
+> the built-in allowlist/ignore-list machinery ships with **Tier B** (micro-cache),
+> where it is essential. Tier A relies on the response-side rails (`Set-Cookie` /
+> `Cache-Control: private` → never stored) plus the public nature of static
+> assets. Decision + residual: §14 item 3b.
+
 ---
 
 ## 5. Edge mechanics
@@ -730,6 +737,23 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
        or withdrawn *while the origin is unhealthy* keeps serving stale until the
        origin is back or the operator bumps the purge generation (the only
        forced-invalidation path). Accepted; operators purge to force-invalidate.
+     - **Request-cookie allowlist (§4.1) is NOT enforced at Tier A — deferred to
+       Tier B (decision, not oversight).** The §4 never-cache table lists the
+       *"request carries a named app-session cookie → bypass"* rail as applying
+       to every request, but `static_gate` (3b) does not consult it: the policy
+       carries `strict_cookies`/`auth_cookies`, yet the built-in allowlist +
+       ignore-list + strict-mode machinery lives nowhere at the edge yet. Rather
+       than ship a partial allowlist, Tier A relies on the **response-side rails**
+       nginx already enforces — a `Set-Cookie` or a `Cache-Control:
+       private|no-store|no-cache` response is never stored — which catch the
+       per-user cases in practice (WordPress/Woo/Laravel/Roundcube all emit one
+       or the other), and static assets are public by nature (the standard CDN
+       stance: cache static regardless of cookies). The **full §4.1 request-cookie
+       rail lands with Tier B** (HTML micro-cache), where per-user content makes
+       it essential. Residual (narrow, accepted): a static-extension URL an origin
+       renders per-user with **neither** `Set-Cookie` **nor** a private
+       `Cache-Control` would be cached and served cross-user on an armed vhost.
+       `static_gate`'s doc-comment states the same scope so code and design agree.
    - **3c — stats/logging** (`cfm_cache_stats` + `cfm_cache_log` + the daemon
      `/nginx/cache/stats` aggregate + `/api/v1/site-cache/stats` + the cfm-admin
      hit-ratio column): deferred from this list's item 3, still to build.
