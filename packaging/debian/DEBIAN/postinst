@@ -70,78 +70,37 @@ if [ -d /var/lib/cfm/lua ]; then
 fi
 
 
-# seed/refresh runtime Lua files from packaged canonical source.
-# policy:
-#  - missing runtime file -> install packaged file
-#  - existing file unchanged from last packaged fingerprint -> refresh to new packaged file
-#  - existing file locally modified -> backup and force-refresh with packaged file
-stamp_dir=/var/lib/cfm/lua/.packaged
-mkdir -p "$stamp_dir"
+# NOTE: Lua modules are delivered by the PACKAGE MANAGER, not by this script.
+# The package installs them straight to /var/lib/cfm/lua/ and owns every one,
+# so an upgrade installs new modules, refreshes changed ones and REMOVES
+# modules the new version dropped - all of it before this script runs.
+#
+# A hand-rolled "seed/refresh" loop used to live here, copying from
+# /usr/share/cfm/configs/lua over the files the package had just installed. It
+# behaved differently per packaging, and was useless in both:
+#   - deb: that source was never shipped, so the loop only ever fell through to
+#     "WARNING: packaged lua source path missing" on every install and upgrade,
+#     about a path that is not supposed to exist.
+#   - rpm: the source WAS shipped (the spec %install copied the whole configs/
+#     tree unfiltered, so every module rode along a second time), and the loop
+#     re-copied ~900 KB over byte-identical files and rewrote a sha256 stamp
+#     each run. Its headline policy - "locally modified -> backup and
+#     force-refresh" - could never fire on an upgrade anyway: rpm replaces
+#     /var/lib/cfm/lua/* BEFORE %post runs, so by the time the loop compares
+#     hashes the operator edit is already gone and the hashes already match.
+# Removed 2026-09-22; the rpm no longer ships the duplicate source tree either.
+#
+# A hand-edit under /var/lib/cfm/lua/ IS overwritten on upgrade with no backup.
+# That was always true - the loop never actually changed it. These are code
+# files, deliberately not %config (a .rpmnew would freeze security code at the
+# operator version). `rpm -V cfm` / `dpkg --verify cfm` already report such
+# edits. Edit /etc/cfm/*, never /var/lib/cfm/lua/*.
 
-lua_src_dir=""
-for cand in /usr/share/cfm/configs/lua /usr/share/cfm/lua; do
-    if [ -d "$cand" ]; then
-        lua_src_dir="$cand"
-        break
-    fi
-done
-
-if [ -n "$lua_src_dir" ]; then
-    find "$lua_src_dir" -maxdepth 1 -type f -name "*.lua" | while read -r src; do
-        base="$(basename "$src")"
-        dst="/var/lib/cfm/lua/$base"
-        stamp="$stamp_dir/$base.sha256"
-        new_hash="$(sha256sum "$src" | awk '{print $1}')"
-
-        if [ ! -f "$dst" ]; then
-            if install -m 0640 -o root -g cfm "$src" "$dst"; then
-                echo "CFM Lua sync: copied new file $dst"
-                printf '%s\n' "$new_hash" > "$stamp"
-            else
-                echo "WARNING: failed to copy new Lua file: $dst"
-            fi
-            continue
-        fi
-
-        old_hash=""
-        [ -f "$stamp" ] && old_hash="$(cat "$stamp" 2>/dev/null || true)"
-        cur_hash="$(sha256sum "$dst" | awk '{print $1}')"
-
-        if [ -n "$old_hash" ] && [ "$cur_hash" = "$old_hash" ]; then
-            if install -m 0640 -o root -g cfm "$src" "$dst"; then
-                echo "CFM Lua sync: updated file $dst"
-                printf '%s\n' "$new_hash" > "$stamp"
-            else
-                echo "WARNING: failed to update Lua file: $dst"
-            fi
-        elif [ "$cur_hash" = "$new_hash" ]; then
-            echo "CFM Lua sync: already current $dst"
-            printf '%s\n' "$new_hash" > "$stamp"
-            # Refresh dst mtime even though the content didn't change, so
-            # `ls -la /var/lib/cfm/lua/` is a useful at-a-glance check:
-            # every .lua file's mtime reflects "processed in this install"
-            # rather than "last time the content happened to change",
-            # which could be weeks ago. The other branches already get
-            # current mtime implicitly because `install` (no -p) writes
-            # the file; this branch is the only no-op path where we'd
-            # otherwise leave stale mtimes that look alarming on a fresh
-            # deploy ("why are these files 10 days old?").
-            touch "$dst" 2>/dev/null || true
-        else
-            backup="$dst.local-prepkg.$(date +%s)"
-            cp -a "$dst" "$backup" || true
-            echo "WARNING: local Lua runtime file differed; backup saved to $backup"
-            if install -m 0640 -o root -g cfm "$src" "$dst"; then
-                echo "CFM Lua sync: forced update applied $dst"
-                printf '%s\n' "$new_hash" > "$stamp"
-            else
-                echo "WARNING: failed forced update for Lua file: $dst"
-            fi
-        fi
-    done
-else
-    echo "WARNING: packaged lua source path missing: /usr/share/cfm/configs/lua (and /usr/share/cfm/lua)"
-fi
+# Retire the stamp directory the removed loop wrote into. The stamps are ours
+# and nothing reads them now; on rpm hosts the directory is NOT empty (one
+# .sha256 per module), so a bare rmdir would fail and orphan them forever.
+rm -f /var/lib/cfm/lua/.packaged/*.sha256 2>/dev/null || true
+rmdir /var/lib/cfm/lua/.packaged 2>/dev/null || true
 
 # cPanel/WHM plugin: refresh the live plugin CODE on upgrade (non-disruptive;
 # no register_appconfig / install_plugin / cpsrvd restart). Acts only when cPanel

@@ -18,6 +18,35 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **`cfm` upgrades were doing pointless and misleading work with the Lua
+  payload.** Both package scriptlets carried a hand-rolled "seed/refresh
+  runtime Lua files" loop that copied from `/usr/share/cfm/configs/lua` over
+  the modules the package had just installed into `/var/lib/cfm/lua/`. It was
+  useless in both packagings, differently: on **deb** that source was never
+  shipped, so every install and upgrade printed
+  `WARNING: packaged lua source path missing: …` about a path that is not
+  supposed to exist; on **rpm** the source *was* shipped — the spec copied the
+  whole `configs/` tree unfiltered, so every module rode along a second time —
+  and the loop re-copied ~900 KB over byte-identical files on every upgrade.
+  Its documented protection ("locally modified → backup and force-refresh")
+  could never fire there anyway: rpm replaces `/var/lib/cfm/lua/*` **before**
+  `%post` runs, so by the time the loop compared hashes the operator's edit was
+  already gone and the hashes already matched. Loop removed, its orphaned
+  `.packaged/*.sha256` stamps cleaned up, and the rpm no longer ships the
+  duplicate Lua tree under `/usr/share/cfm/configs/` (~900 KB off every
+  package). **Delivery is unchanged** — the package manager installs new
+  modules, refreshes changed ones and removes dropped ones, as it always did.
+  Operator note, now stated honestly: a hand-edit under `/var/lib/cfm/lua/` is
+  overwritten on upgrade with no backup — that was always true, the loop never
+  changed it. `rpm -V cfm` / `dpkg --verify cfm` report such edits. Edit
+  `/etc/cfm/*`, never `/var/lib/cfm/lua/*`.
+- **A released CHANGELOG heading was lost in a merge and is restored.** The
+  `## 2026.09.22` heading was dropped while resolving an `[Unreleased]`
+  conflict in #1453, which silently moved that whole released section back
+  under `[Unreleased]`. Left alone, the next `make release` would have
+  re-stamped 160 lines of already-shipped entries under a new date and erased
+  2026.09.22 from the history. Heading restored above the same entries;
+  `[Unreleased]` now holds only genuinely unreleased work.
 - **Both edge installers were missing four Lua modules from their pre-flight
   manifest.** `install-angie.sh` and `install-openresty.sh` verify every
   packaged module is present in `/var/lib/cfm/lua/` before reloading the edge,
@@ -153,6 +182,7 @@ back-filled here — see the git/PR history for that period.
   Scoped callers keep the rest of the payload. See
   `docs/endpoint_scope_inventory.md`.
 
+## 2026.09.22
 
 ### Added
 - **Site Cache — per-vhost edge caching (Phase 1: control plane).** New opt-in

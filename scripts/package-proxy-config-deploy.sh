@@ -376,10 +376,15 @@ deploy_logrotate_config() {
 
     mkdir -p "$(dirname "$dlc_dst")" 2>/dev/null || true
 
-    # Same refresh policy as the Lua runtime sync in the postinst, and for the
-    # same reason: a fleet-wide rotation fix is worthless if it does not land
-    # on upgrade, but an operator who retuned `rotate` must not lose it
-    # silently.
+    # Refresh policy: a fleet-wide rotation fix is worthless if it does not
+    # land on upgrade, but an operator who retuned `rotate` must not lose it
+    # silently — so stamp what we shipped and only overwrite a file still
+    # matching that stamp. (This used to say "same policy as the Lua runtime
+    # sync in the postinst"; that loop was removed 2026-09-22 because Lua is
+    # package-owned and the loop's own protection could never fire. THIS stamp
+    # logic is live and unrelated: different directory — /var/lib/cfm/.packaged,
+    # not /var/lib/cfm/lua/.packaged — and it guards a file the package does
+    # NOT own, which is exactly why it is still needed here.)
     #
     #   missing                      -> install
     #   identical to packaged        -> nothing to do
