@@ -475,6 +475,13 @@ func (b *Backend) loadPortScannerOnce() {
 	_, terr := b.conn.ListTableOfFamily(cfmTableName, nftables.TableFamilyINet)
 	b.mu.Unlock()
 	if terr != nil {
+		if !isNotFound(terr) {
+			// Not "missing" — the read itself failed (e.g. a netlink read
+			// timeout). Rebuilding now would flush and rewrite every set on a
+			// kernel that is already slow; skip this tick and look again next.
+			logging.Logf("[portscan] cannot check inet %s, skipping tick: %v", cfmTableName, terr)
+			return
+		}
 		if err := b.EnsureBase(); err != nil {
 			return
 		}

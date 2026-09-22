@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -79,20 +80,42 @@ func TestNewNLConn_OneSocketPerOperation(t *testing.T) {
 	}
 }
 
-// nlTestConn is an nlConn over nltest, built the same way newNLConn builds
-// it except for the socket. nltest sockets don't take deadlines, which also
-// exercises the fail-open path.
+// nlTestConn builds an nlConn through the real constructor, with every socket
+// (the startup probe included) going to fn. nltest sockets don't take
+// deadlines, which also exercises the fail-open path.
 func nlTestConn(t *testing.T, st *nlStats, fn nltest.Func) *nlConn {
 	t.Helper()
-	w, err := nftables.New(nftables.WithTestDial(fn), nftables.WithSockOptions(st.countDial))
+	orig := nlDial
+	nlDial = func() (*netlink.Conn, error) { return nltest.Dial(fn), nil }
+	defer func() { nlDial = orig }()
+	c, err := newNLConn(st, nftables.WithTestDial(fn))
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := nftables.New(nftables.WithTestDial(fn), nftables.WithSockOptions(st.readDeadline))
-	if err != nil {
-		t.Fatal(err)
+	return c
+}
+
+// The design's core property, pinned through the real constructor: a write
+// (Flush) socket never gets a deadline, a read socket always does. nltest
+// sockets refuse deadlines, so deadlineErr records the first socket that
+// tried to set one.
+func TestNewNLConn_WritesUnboundedReadsBounded(t *testing.T) {
+	var st nlStats
+	c := nlTestConn(t, &st, func([]netlink.Message) ([]netlink.Message, error) { return nil, io.EOF })
+
+	c.AddTable(&nftables.Table{Name: "t", Family: nftables.TableFamilyINet})
+	if err := c.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
 	}
-	return &nlConn{Conn: w, read: r, stats: st}
+	if st.deadlineErr != "" || st.dials != 1 {
+		t.Fatalf("a write must dial its own socket without a deadline: dials=%d deadlineErr=%q", st.dials, st.deadlineErr)
+	}
+	if _, err := c.ListTables(); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if st.deadlineErr == "" || st.dials != 2 {
+		t.Fatalf("a read must dial its own socket and set a deadline: dials=%d deadlineErr=%q", st.dials, st.deadlineErr)
+	}
 }
 
 func TestNLConn_RecordsTimeoutsAndSlowOps(t *testing.T) {
@@ -326,5 +349,98 @@ func TestPanelDNATOn_LookupErrorChangesNothing(t *testing.T) {
 	}
 	if sentBatch {
 		t.Fatal("no batch may be sent: rules added on top of a live table would be duplicated")
+	}
+}
+
+// chainMsg is a NEWCHAIN reply naming table/chain in the inet family.
+func chainMsg(table, chain string) netlink.Message {
+	ae := netlink.NewAttributeEncoder()
+	ae.String(unix.NFTA_CHAIN_TABLE, table)
+	ae.String(unix.NFTA_CHAIN_NAME, chain)
+	attrs, _ := ae.Encode()
+	return netlink.Message{
+		Header: netlink.Header{Type: netlink.HeaderType(unix.NFNL_SUBSYS_NFTABLES<<8 | unix.NFT_MSG_NEWCHAIN)},
+		Data:   append([]byte{unix.NFPROTO_INET, 0, 0, 0}, attrs...),
+	}
+}
+
+func nftMsgType(m netlink.Message) int { return int(m.Header.Type) & 0xff }
+
+// DNATOn must read the live prerouting rules before it changes anything: a
+// failed read returns at once, with nothing sent and the input-chain accepts
+// (nft CLI, run after the read) untouched. Rebuilding from a failed read
+// appended a second copy of the rules (3 became 6 on a real kernel).
+func TestInstallDNATRules_ReadErrorChangesNothing(t *testing.T) {
+	var sentBatch bool
+	b := nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
+		if isBatch(req) {
+			sentBatch = true
+			return nil, io.EOF
+		}
+		switch nftMsgType(req[0]) {
+		case unix.NFT_MSG_GETCHAIN:
+			m := chainMsg("cfm_redirect", "prerouting")
+			m.Header.Sequence = req[0].Header.Sequence // replies echo the request's sequence
+			return []netlink.Message{m}, nil
+		case unix.NFT_MSG_GETRULE:
+			return nil, os.ErrDeadlineExceeded
+		}
+		return nil, io.EOF
+	})
+	wanted := dnatUnscopedWantedSpecs(nftables.TableFamilyINet, 9080, 9043)
+	err := b.installDNATRules("inet", "cfm_redirect", wanted, dnatRuleNamespaceEdge, true)
+	if err == nil || !strings.Contains(err.Error(), "read inet cfm_redirect prerouting rules") {
+		t.Fatalf("want the read error before any change, got %v", err)
+	}
+	if sentBatch {
+		t.Fatal("no batch may be sent after a failed read")
+	}
+}
+
+func TestIntervalContains(t *testing.T) {
+	k := func(s string) []byte { return normalizeIP(net.ParseIP(s)) }
+	// 10.9.0.0/24 and 10.9.2.0-10.9.2.255, stored as [start, end) boundaries,
+	// in the kernel's dump order (ends before starts, descending).
+	elems := []nftables.SetElement{
+		{Key: k("10.9.3.0"), IntervalEnd: true}, {Key: k("10.9.2.0")},
+		{Key: k("10.9.1.0"), IntervalEnd: true}, {Key: k("10.9.0.0")},
+		{Key: k("0.0.0.0"), IntervalEnd: true},
+	}
+	for ip, want := range map[string]bool{
+		"10.9.0.0": true, "10.9.0.5": true, "10.9.0.255": true,
+		"10.9.1.0": false, "10.9.1.77": false,
+		"10.9.2.0": true, "10.9.2.255": true, "10.9.3.0": false,
+		"10.8.255.255": false, "1.2.3.4": false,
+	} {
+		if got := intervalContains(elems, k(ip)); got != want {
+			t.Errorf("%s: got %v, want %v", ip, got, want)
+		}
+	}
+	if intervalContains(elems, k("2001:db8::1")) {
+		t.Error("a v6 key must never match v4 ranges")
+	}
+	// Adjacent ranges share a boundary: the start wins.
+	adj := []nftables.SetElement{{Key: k("10.0.0.0")}, {Key: k("10.0.0.8"), IntervalEnd: true}, {Key: k("10.0.0.8")}, {Key: k("10.0.0.16"), IntervalEnd: true}}
+	if !intervalContains(adj, k("10.0.0.8")) {
+		t.Error("the shared boundary belongs to the next range")
+	}
+}
+
+// A table lookup that fails (here: times out) is not a missing table: the
+// port-scanner tick must skip, not run EnsureBase — which would invalidate
+// the caches and flush-rewrite every feed set on a kernel that is already
+// slow.
+func TestLoadPortScanner_ReadErrorIsNotAMissingTable(t *testing.T) {
+	var sentBatch bool
+	b := nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
+		if isBatch(req) {
+			sentBatch = true
+			return nil, io.EOF
+		}
+		return nil, os.ErrDeadlineExceeded
+	})
+	b.loadPortScannerOnce()
+	if sentBatch {
+		t.Fatal("a failed table read must not trigger EnsureBase")
 	}
 }

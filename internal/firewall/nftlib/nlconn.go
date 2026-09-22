@@ -173,8 +173,9 @@ type nlConn struct {
 	stats *nlStats
 }
 
-// newNLConn returns the backend's transient connections.
-func newNLConn(stats *nlStats) (*nlConn, error) {
+// newNLConn returns the backend's transient connections. extra is applied to
+// both (tests pass nftables.WithTestDial).
+func newNLConn(stats *nlStats, extra ...nftables.ConnOption) (*nlConn, error) {
 	// A transient Conn opens nothing until the first call. Dial once now so a
 	// host without usable netlink still fails at startup, as the lasting dial
 	// used to, rather than at the first firewall write.
@@ -183,11 +184,14 @@ func newNLConn(stats *nlStats) (*nlConn, error) {
 		return nil, err
 	}
 	_ = probe.Close()
-	w, err := nftables.New(nftables.WithSockOptions(stats.countDial))
+	opts := func(o nftables.ConnOption) []nftables.ConnOption {
+		return append(append([]nftables.ConnOption{}, extra...), o) // fresh slice each time
+	}
+	w, err := nftables.New(opts(nftables.WithSockOptions(stats.countDial))...)
 	if err != nil {
 		return nil, err
 	}
-	r, err := nftables.New(nftables.WithSockOptions(stats.readDeadline))
+	r, err := nftables.New(opts(nftables.WithSockOptions(stats.readDeadline))...)
 	if err != nil {
 		return nil, err
 	}

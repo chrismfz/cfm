@@ -55,9 +55,10 @@ const (
 // Backend implements firewall.Backend using github.com/google/nftables.
 // All data-plane operations use netlink directly (zero forks, zero execs).
 type Backend struct {
-	// conn is transient and deadline-bounded: every kernel round-trip gets its
-	// own socket (see nlconn.go). mu still serialises all conn use, because
-	// operations queue messages on conn and Flush sends them as one batch.
+	// conn is transient: every kernel call gets its own socket, and reads (not
+	// writes) carry a deadline (see nlconn.go). mu still serialises all conn
+	// use, because operations queue messages on conn and Flush sends them as
+	// one batch.
 	conn *nlConn
 	mu   sync.Mutex
 	nl   nlStats // every netlink round-trip, for firewall_selftest

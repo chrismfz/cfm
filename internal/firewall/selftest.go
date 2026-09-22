@@ -36,11 +36,14 @@ type NetlinkStats struct {
 	// lookups; Timeouts is the one that means trouble.
 	Errors   uint64 `json:"errors"`
 	Timeouts uint64 `json:"timeouts"`
-	// DeadlineUnsupported is set if the socket refused a deadline; operations
-	// then run unbounded, as they did before deadlines existed.
+	// Dials counts sockets opened. Every call that reaches the kernel opens
+	// its own, so Dials ≈ Ops (an empty Flush opens none).
+	Dials uint64 `json:"dials"`
+	// DeadlineUnsupported is set if a socket refused a deadline; reads then
+	// run unbounded, as they did before deadlines existed.
 	DeadlineUnsupported string            `json:"deadline_unsupported,omitempty"`
 	LastTimeout         *NetlinkOpSample  `json:"last_timeout,omitempty"`
-	SlowRecent          []NetlinkOpSample `json:"slow_recent"` // ≥1s or timed out, oldest first
+	SlowRecent          []NetlinkOpSample `json:"slow_recent"` // ≥5s or timed out, oldest first
 }
 
 // NetlinkOpSample is one slow or timed-out netlink round-trip.

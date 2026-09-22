@@ -34,18 +34,28 @@ back-filled here — see the git/PR history for that period.
   (listings and lookups) also get a 30s deadline. Writes deliberately get none:
   the kernel applies a batch while the call is in progress, possibly after
   waiting behind another tool's `nft -f`, and a deadline there would report a
-  change that WAS applied as failed. Three places treated a failed read as an
-  empty answer, which a read timeout (or any read error) could trigger:
-  `DNATOn` then re-added its DNAT rules on top of the live ones — reproduced on
-  a real kernel, 3 rules became 6 and new DNAT-bypass entries stopped matching;
-  it now fails and changes nothing. `PanelDNATOn` likewise duplicated its rules
-  when it couldn't look up its table; it now fails first. And an autoblock went
+  change that WAS applied as failed. Four places treated a failed read as an
+  empty or missing answer, which a read timeout (or any read error) could
+  trigger: `DNATOn` then re-added its DNAT rules on top of the live ones —
+  reproduced on a real kernel, 3 rules became 6 and new DNAT-bypass entries
+  stopped matching; it now reads first and fails before changing anything (the
+  input-chain accepts included, so they can't move to new ports while the
+  redirect still points at the old ones). `PanelDNATOn` likewise duplicated its
+  rules when it couldn't look up its table; it now fails first. The port
+  scanner's self-heal rebuilt the whole firewall base (flushing and rewriting
+  every feed set) on any failed table lookup; it now does that only when the
+  table is really gone and otherwise skips the tick. And an autoblock went
   ahead against an address whose ignore/allow lists couldn't be read; it is now
   skipped and notified as "not blocked: could not check …" (an allowlisted peer
-  is the operator's explicit trust decision). `firewall_selftest` gains a
-  `netlink` section covering every netlink call, not just EnsureBase: counts,
-  timeouts, and the recent slow or timed-out calls by name; a read timeout is
-  also logged (`[firewall] engine=nftlib netlink <call> timed out after …`).
+  is the operator's explicit trust decision). Also fixed: on nftlib an address
+  INSIDE an allow or ignore range (e.g. `10.9.0.5` under an ignored
+  `10.9.0.0/24`) was not recognised — only the range's first address was — so
+  it was autoblocked, written to `cfm.deny` and reported to the fleet
+  blacklist; ranges are now matched as ranges, as the exec `nft` backend
+  already did. `firewall_selftest` gains a `netlink` section covering every
+  netlink call, not just EnsureBase: counts, timeouts, sockets opened, and the
+  recent slow (≥5s) or timed-out calls by name; a read timeout is also logged
+  (`[firewall] engine=nftlib netlink <call> timed out after …`).
   Startup still fails immediately if netlink is unusable. Only nodes running
   `CFM_FIREWALL_ENGINE=nftlib` are affected.
 - **False "agent is down" alerts from nodes on the nftlib firewall backend.**

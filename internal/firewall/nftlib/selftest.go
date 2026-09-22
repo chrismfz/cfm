@@ -120,6 +120,7 @@ func (s *nlStats) snapshot() *firewall.NetlinkStats {
 		Ops:                 s.ops,
 		Errors:              s.errs,
 		Timeouts:            s.timeouts,
+		Dials:               s.dials,
 		DeadlineUnsupported: s.deadlineErr,
 		SlowRecent:          []firewall.NetlinkOpSample{},
 	}

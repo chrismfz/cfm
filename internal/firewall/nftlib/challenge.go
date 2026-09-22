@@ -603,9 +603,10 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	if len(wanted) == 0 {
 		return nil
 	}
-	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted); err != nil {
-		return err
-	}
+	// Hold b.mu from the read through the rebuild, and read FIRST: a failure
+	// then returns before anything has changed. The input-chain accepts below
+	// must not move to the new ports while the prerouting rules still redirect
+	// to the old ones — new connections would hit the default drop.
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	t, ch, err := b.getDNATTableAndChain(family, table)
@@ -614,14 +615,18 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	}
 	var rules []*nftables.Rule
 	if ch != nil {
-		// Read before queueing anything, so a failure leaves nothing queued.
 		// A failed read must not pass for an empty chain: the rebuild below
 		// would then append a second copy of the managed rules after the
 		// live ones, and new bypass entries would never match.
 		if rules, err = b.conn.GetRules(t, ch); err != nil {
 			return fmt.Errorf("nftlib: read %s %s prerouting rules: %w", family, table, err)
 		}
-	} else {
+	}
+	// nft CLI only (no b.mu inside), so safe to run under the lock.
+	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted); err != nil {
+		return err
+	}
+	if ch == nil {
 		b.conn.AddTable(t)
 		dstNat := b.dnatChainPriority()
 		policy := nftables.ChainPolicyAccept
