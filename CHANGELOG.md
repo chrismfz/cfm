@@ -37,6 +37,26 @@ back-filled here — see the git/PR history for that period.
   cannot be updated.
 
 ### Added
+- **A warning when armed country/ASN policies can't fully work on a node.**
+  Country/ASN policies need the node's GeoLite2 lookups. When a lookup is
+  missing, an armed ASN policy (any tier) never matches, and a country
+  `challenge_v2` policy acts as a plain challenge — it still challenges from
+  the country the edge sends, but a failing solve is not rejected. That is the
+  designed fail-open, but nothing said so: cfm-web showed the policies armed.
+  Two causes are detected:
+  - web-detector enrichment off (`[webdetector] ENRICH = 0`);
+  - enrichment on (the default) but the GeoLite2 ASN or City database not
+    loaded, e.g. before the first MaxMind download. This is the likelier one.
+  The main log now says which cause, with the counts and what to do:
+  `[fppolicy] WARNING: the GeoLite2-ASN database is not loaded: 2 armed ASN
+  policies cannot match …. Install the missing database (the MaxMind updater
+  writes /var/lib/cfm/maxmind), or disarm them in cfm-web.` It is logged once
+  when the situation starts or changes, not on every 60s policy pull. When it
+  clears, one line says why: `[fppolicy] armed geo policies are no longer
+  degraded (the geo lookups they need are available again | the degraded
+  policies were disarmed or expired | FP_POLICY = 0: no policy is enforced)`.
+  Fingerprint policies and country `challenge` policies are never warned about;
+  those work from the edge. No enforcement change.
 - **Site Cache — Tier B micro-cache stats labelling (Phase B3c).** Micro-cache
   hits are now counted under their own `cfm_micro` zone total instead of being
   folded into `cfm_static`: the edge `log_by_lua` labels each cache verdict by

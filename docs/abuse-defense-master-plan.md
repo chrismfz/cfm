@@ -280,7 +280,11 @@ already opened.
         `would_enforce` logonly WARN noise there (no enforcement — the panel
         probe is block-tier only); country hit wins over ASN hit at lookup;
         cold IPs (enrich cache miss) fail open for up to the 90s edge
-        decision-cache window.
+        decision-cache window; without the node's GeoLite2 lookups
+        (`[webdetector] ENRICH = 0`, or the ASN / City database not loaded)
+        an ASN policy never matches and a country `challenge_v2` acts as
+        plain challenge (fail-open) — the node logs `[fppolicy] WARNING: …`
+        naming the cause, with the counts, once per change (2026-09-22).
       - [x] **ChallengeV2 arm surfaces — DONE 2026-09-22 (slices A-D all
         shipped): v2 as an on-demand tier from WAF rules / vhost control /
         traffic rules / scoped customers.** Insight that makes this cheap: challenge_v2 is

@@ -665,14 +665,17 @@ func NewEngine(cfg Config) *Engine {
 	// itself never fails) must not leave the verify gate enforcing geo
 	// policies through the PREVIOUS engine's enricher, which that closure also
 	// kept alive.
+	// The sources half tells the policy store which databases are loaded, so
+	// it can warn when armed ASN / country challenge_v2 policies cannot work
+	// here (fppolicy.go geoDegradationLocked).
 	if e.enr != nil {
 		enr := e.enr
-		SetFingerprintPolicyGeoResolver(func(ip string) (string, uint64) {
+		SetFingerprintPolicyGeo(func(ip string) (string, uint64) {
 			r := enr.LookupCachedOrAsync(ip)
 			return r.CountryISO, uint64(r.ASN)
-		})
+		}, func() (bool, bool) { return enr.HasASN(), enr.HasCountry() })
 	} else {
-		SetFingerprintPolicyGeoResolver(nil)
+		SetFingerprintPolicyGeo(nil, nil)
 	}
 
 	// Network identity for every solve and Rung-1 reject (challenge_geo.go):

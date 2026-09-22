@@ -2,8 +2,10 @@ package webdetector
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,6 +239,160 @@ func TestNewEngineRewiresTheGeoResolverOnEveryBuild(t *testing.T) {
 	if !wired {
 		t.Fatal("an engine built with an enricher did not wire the geo resolver")
 	}
+}
+
+// captureGeoWarnings isolates the store's geo-warning state and captures what
+// it logs. Restores everything it touches.
+func captureGeoWarnings(t *testing.T) *[]string {
+	t.Helper()
+	resetFPPolicies(t)
+	fpPolicies.mu.Lock()
+	prevResolver, prevSources := fpPolicies.geoResolver, fpPolicies.geoSources
+	prevKnown, prevWarn := fpPolicies.resolverKnown, fpPolicies.geoWarn
+	fpPolicies.geoResolver, fpPolicies.geoSources = nil, nil
+	fpPolicies.resolverKnown, fpPolicies.geoWarn = false, ""
+	fpPolicies.mu.Unlock()
+	prevLogf := fpPolicyLogf
+	lines := &[]string{}
+	fpPolicyLogf = func(format string, args ...interface{}) { *lines = append(*lines, fmt.Sprintf(format, args...)) }
+	t.Cleanup(func() {
+		fpPolicyLogf = prevLogf
+		fpPolicies.mu.Lock()
+		fpPolicies.geoResolver, fpPolicies.geoSources = prevResolver, prevSources
+		fpPolicies.resolverKnown, fpPolicies.geoWarn = prevKnown, prevWarn
+		fpPolicies.mu.Unlock()
+	})
+	return lines
+}
+
+// expectLines asserts the lines logged since the last call, one substring per
+// line, and resets the capture.
+func expectLines(t *testing.T, lines *[]string, name string, want ...string) {
+	t.Helper()
+	got := *lines
+	*lines = nil
+	if len(got) != len(want) {
+		t.Fatalf("%s: logged %d lines %q, want %d", name, len(got), got, len(want))
+	}
+	for i, w := range want {
+		if !strings.Contains(got[i], w) {
+			t.Fatalf("%s: line %q does not contain %q", name, got[i], w)
+		}
+	}
+}
+
+var geoWarnTestPolicies = []FingerprintPolicy{
+	{ID: "GR", Kind: "country", Action: "challenge_v2"},
+	{ID: "CN", Kind: "country", Action: "challenge"}, // works from edge country: not counted
+	{ID: "6799", Kind: "asn", Action: "challenge"},
+	{ID: "3329", Kind: "asn", Action: "challenge_v2"},
+	{ID: "1241", Kind: "asn", Action: "challenge", ExpiresAt: time.Now().Add(-time.Minute)}, // expired: not counted
+	{ID: "aabbccdd", Action: "deny"}, // tls: unaffected by enrichment
+}
+
+func noopResolver(string) (string, uint64) { return "", 0 }
+
+// With enrichment off (ENRICH = 0) an armed ASN policy can never match and a
+// country challenge_v2 policy acts as plain challenge — the designed
+// fail-open, but silent. The store says so in the log, once per change: the
+// policy pull runs every 60s and must not repeat it every minute. A cleared
+// warning says WHY it cleared, so it is never a false "all good".
+func TestGeoDegradationIsWarnedOncePerChange(t *testing.T) {
+	lines := captureGeoWarnings(t)
+	armed := geoWarnTestPolicies
+
+	SetFingerprintPolicies(armed)
+	expectLines(t, lines, "pull before any engine build") // a nil resolver means "not built yet"
+
+	SetFingerprintPolicyGeo(nil, nil) // engine built with ENRICH = 0
+	expectLines(t, lines, "engine without enrichment",
+		"WARNING: web-detector enrichment is off ([webdetector] ENRICH = 0): 2 armed ASN policies cannot match")
+	fpPolicies.mu.RLock()
+	warn := fpPolicies.geoWarn
+	fpPolicies.mu.RUnlock()
+	if !strings.Contains(warn, "1 armed country challenge_v2 policy acts as plain challenge") ||
+		!strings.Contains(warn, "Set ENRICH = 1 in [webdetector]") {
+		t.Fatalf("warning misses the country challenge_v2 count or the remedy: %q", warn)
+	}
+
+	SetFingerprintPolicies(armed)
+	expectLines(t, lines, "next pull, same set") // no repeat every 60s
+
+	SetFingerprintPolicies(armed[:2])
+	expectLines(t, lines, "ASN policies disarmed",
+		"WARNING: web-detector enrichment is off ([webdetector] ENRICH = 0): 1 armed country challenge_v2 policy acts")
+
+	ConfigureFingerprintPolicyEnforcement(false, nil)
+	expectLines(t, lines, "FP_POLICY = 0", "no longer degraded (FP_POLICY = 0: no policy is enforced)")
+	ConfigureFingerprintPolicyEnforcement(true, nil)
+	expectLines(t, lines, "FP_POLICY back on", "WARNING:")
+
+	SetFingerprintPolicyGeo(noopResolver, func() (bool, bool) { return true, true }) // ENRICH = 1, both databases
+	expectLines(t, lines, "enrichment back", "no longer degraded (the geo lookups they need are available again)")
+
+	SetFingerprintPolicyGeo(nil, nil)
+	expectLines(t, lines, "ENRICH = 0 again", "WARNING:")
+	SetFingerprintPolicies([]FingerprintPolicy{
+		{ID: "CN", Kind: "country", Action: "challenge"},
+		{ID: "aabbccdd", Action: "challenge_v2"},
+	})
+	expectLines(t, lines, "only country-challenge and tls armed",
+		"no longer degraded (the degraded policies were disarmed or expired)")
+}
+
+// Enrichment ON is the default, and enrich.New never fails: with no GeoLite2
+// download yet it just answers no ASN / no country. That is the likelier
+// degraded node, and it must be warned too — naming the missing database —
+// not reported as fine.
+func TestGeoDegradationNamesTheMissingDatabase(t *testing.T) {
+	lines := captureGeoWarnings(t)
+	SetFingerprintPolicies(geoWarnTestPolicies)
+	hasASN, hasCountry := false, false
+	SetFingerprintPolicyGeo(noopResolver, func() (bool, bool) { return hasASN, hasCountry })
+	expectLines(t, lines, "no database",
+		"WARNING: no GeoLite2 database is loaded (GeoLite2-ASN.mmdb, GeoLite2-City.mmdb): 2 armed ASN policies cannot match")
+
+	hasCountry = true // City arrives; the pull re-evaluates
+	SetFingerprintPolicies(geoWarnTestPolicies)
+	expectLines(t, lines, "ASN still missing",
+		"WARNING: the GeoLite2-ASN database is not loaded: 2 armed ASN policies cannot match")
+	fpPolicies.mu.RLock()
+	warn := fpPolicies.geoWarn
+	fpPolicies.mu.RUnlock()
+	if strings.Contains(warn, "challenge_v2 polic") || !strings.Contains(warn, "Install the missing database") {
+		t.Fatalf("with the City database loaded, country v2 policies are not degraded: %q", warn)
+	}
+
+	hasASN, hasCountry = true, false
+	SetFingerprintPolicies(geoWarnTestPolicies)
+	expectLines(t, lines, "City missing",
+		"WARNING: the GeoLite2-City database is not loaded: 1 armed country challenge_v2 policy acts as plain challenge")
+
+	hasCountry = true
+	SetFingerprintPolicies(geoWarnTestPolicies)
+	expectLines(t, lines, "both loaded", "no longer degraded (the geo lookups they need are available again)")
+
+	// A resolver whose databases are not reported is assumed complete.
+	SetFingerprintPolicyGeoResolver(noopResolver)
+	expectLines(t, lines, "sources unknown")
+}
+
+// End to end through NewEngine: ENRICH on (the default) with no GeoLite2 files
+// is warned, not silently accepted.
+func TestNewEngineWithoutGeoLiteDatabasesWarns(t *testing.T) {
+	lines := captureGeoWarnings(t)
+	prevSolve := challengeSolveEnricher.Load()
+	challengeV2.mu.RLock()
+	prevHostArmed := challengeV2.hostArmed
+	challengeV2.mu.RUnlock()
+	t.Cleanup(func() {
+		challengeSolveEnricher.Store(prevSolve)
+		SetChallengeV2HostArmed(prevHostArmed)
+	})
+	SetFingerprintPolicies([]FingerprintPolicy{{ID: "6799", Kind: "asn", Action: "challenge"}})
+	_ = NewEngine(Config{Every: time.Second, Window: time.Minute, UseEnrich: true, EnrichDirs: []string{t.TempDir()}})
+	expectLines(t, lines, "enricher with an empty database dir",
+		"WARNING: no GeoLite2 database is loaded (GeoLite2-ASN.mmdb, GeoLite2-City.mmdb): 1 armed ASN policy cannot match")
 }
 
 func TestGeoPoliciesDoNotLeakIntoFingerprintLookup(t *testing.T) {
