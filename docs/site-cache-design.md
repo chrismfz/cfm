@@ -766,13 +766,22 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      `POST /nginx/cache/stats` every ~60s (a cross-worker-locked timer in
      `cfm_cache.lua`, mirroring the WAF-stats `maybe_flush`); the daemon
      `handleCacheStats` → `OnCacheStats` hook → `siteCacheStatsStore` (UPSERT,
-     absolute counts, in-memory/node-local). Read paths: `GET
-     /api/v1/site-cache/stats[?host=]` (scope-filtered like the other site-cache
-     endpoints), `cfm webtop site-cache stats [host]`, and two MCP tools —
-     `site_cache_status` (armed vhosts + tiers) and `site_cache_stats`
-     (HIT/MISS/BYPASS + hit ratio). `ucache="$upstream_cache_status"` was added to
-     the `cfm` access log_format so `edge_access_tail` shows the verdict per
-     request. **v1 scope:** a live totals view (counts since the edge last
+     absolute counts, in-memory/node-local). The push is triggered from the
+     **HTTP-level `log_by_lua`** (`cfm_cache.maybe_flush_stats`), NOT `observe()`
+     — `observe()` runs only in the HTTPS `header_filter`, which would leave an
+     HTTP-only box's armed vhosts counted but never pushed. **Read paths filter
+     to the CURRENTLY-armed policy set** (`armedCacheKeys`): the edge dict keeps a
+     vhost's counts until an edge reload, so a vhost unarmed after its last push
+     would otherwise linger as a stale "still cached" row — the armed store is
+     truth. A by-host query resolves a concrete sub-host to its wildcard policy
+     key (`resolveArmedCacheKey`) so a `*.suffix`-armed vhost is drillable.
+     Read via `GET /api/v1/site-cache/stats[?host=]` (scope-filtered like the
+     other site-cache endpoints), `cfm webtop site-cache stats [host]`, and two
+     MCP tools — `site_cache_status` (armed vhosts + tiers) and
+     `site_cache_stats` (HIT/MISS/BYPASS + a STRICT hit ratio — STALE/UPDATING/
+     REVALIDATED serve from cache but sit in the denominator only, so read the
+     full breakdown). `ucache="$upstream_cache_status"` was added to the `cfm`
+     access log_format so `edge_access_tail` shows the verdict per request. **v1 scope:** a live totals view (counts since the edge last
      reloaded), not hour-bucketed history, and no cfm-admin column yet — both
      follow-ups. **Deferred to a focused follow-up:** the `whats_wrong`
      "armed but ~0 hits" signal (the automated form of what `site_cache_stats`

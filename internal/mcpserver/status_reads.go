@@ -60,7 +60,7 @@ func registerSiteCacheStats(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "site_cache_stats",
-		Description: "Site Cache EFFECTIVENESS per vhost: HIT / MISS / EXPIRED / STALE / BYPASS counts and the derived hit ratio (hit / cacheable, BYPASS excluded), as the edge reports them — pushed ~every 60s, ONLY for ARMED vhosts, as absolute counts since the edge last reloaded. Answers 'is this armed vhost actually served from cache, or all misses?': an armed vhost with a near-zero hit ratio means the origin is not returning cacheable responses (or a caching misconfig — e.g. the buffering/no-store class). Pass `host` to drill into one vhost. Read-only.",
+		Description: "Site Cache EFFECTIVENESS per vhost: HIT / MISS / EXPIRED / STALE / UPDATING / REVALIDATED / BYPASS counts and a derived STRICT hit ratio (hit / cacheable, BYPASS excluded), as the edge reports them — pushed ~every 60s, ONLY for currently-ARMED vhosts, as absolute counts since the edge last reloaded. Answers 'is this armed vhost actually served from cache?'. Read the full breakdown, not just the ratio: STALE/UPDATING/REVALIDATED are also served from cache but sit in the denominator, so the strict ratio understates a vhost that leans on stale-while-revalidate. A vhost with near-zero HIT *and* high MISS/EXPIRED means the origin isn't returning cacheable responses (or a caching misconfig — e.g. the buffering/no-store class). Pass `host` (a concrete sub-host resolves to its wildcard-armed vhost) to drill into one. Read-only.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in siteCacheStatsInput) (*mcp.CallToolResult, any, error) {
 		var q url.Values
 		if h := strings.TrimSpace(in.Host); h != "" {

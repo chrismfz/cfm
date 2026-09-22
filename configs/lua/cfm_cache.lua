@@ -348,6 +348,16 @@ function _M.policy_key_for(host)
     return nil
 end
 
+-- maybe_flush_stats: public tick for the stats push, called from the HTTP-level
+-- log_by_lua so it fires for ALL traffic (both the :9080 and :9043 servers) —
+-- observe() runs only in the HTTPS header_filter, which would leave an HTTP-only
+-- box's armed vhosts counted but never pushed. Master-gated + internally
+-- throttled/locked, so calling it per request is a cheap time compare.
+function _M.maybe_flush_stats()
+    if not site_cache_enabled() then return end
+    schedule_stats_flush_if_needed()
+end
+
 -- label_for renders a compact, greppable summary of what WOULD apply.
 local function label_for(p)
     local parts = {}
@@ -379,11 +389,9 @@ function _M.observe()
     -- state as of the previous debug request. Cheap: a flag + one time compare
     -- when a refresh is not due; it never blocks the request.
     schedule_refresh_if_needed()
-    -- Reverse direction: push the accumulated per-vhost cache-verdict counters
-    -- to the daemon (throttled + cross-worker locked, so at most one worker
-    -- POSTs per window). Both are background timers; neither touches this
-    -- request's latency.
-    schedule_stats_flush_if_needed()
+    -- (The stats push is triggered from the HTTP-level log_by_lua via
+    -- maybe_flush_stats(), so it fires for both the :9080 and :9043 servers —
+    -- observe() runs only in the HTTPS header_filter.)
     -- Stamp only for an operator's opt-in debug request, so ordinary clients see
     -- nothing. NOTE (Phase 3): before real cache HIT/MISS/keys are exposed here,
     -- gate this on a shared secret or a trusted source, not just the presence of

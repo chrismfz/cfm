@@ -88,6 +88,9 @@ func TestSiteCacheStatsRow(t *testing.T) {
 // ── API handler: scope filtering (mirrors the other site-cache endpoints) ─────
 
 func seedStats(e *Engine) {
+	// Stats are shown only for CURRENTLY-armed vhosts, so arm them too.
+	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "mysite.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "other.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
 	e.siteCacheStats.Upsert("mysite.com", map[string]int{"HIT": 9, "MISS": 1, "total": 10})
 	e.siteCacheStats.Upsert("other.com", map[string]int{"HIT": 1, "MISS": 9, "total": 10})
 }
@@ -155,5 +158,47 @@ func TestSiteCacheStatsAPI_NoScopeFailsClosed(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &out)
 	if len(out.Rows) != 0 {
 		t.Fatalf("empty-scope token must see 0 rows, got %d", len(out.Rows))
+	}
+}
+
+// A vhost unarmed AFTER its counts were pushed must drop out of the view — the
+// edge dict keeps stale counts until reload, so the armed policy set is truth.
+func TestSiteCacheStats_UnarmedDropsOut(t *testing.T) {
+	e, _ := newSiteCacheAPITestEngine(t)
+	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "gone.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	e.siteCacheStats.Upsert("gone.com", map[string]int{"HIT": 5, "MISS": 5, "total": 10})
+
+	if rows := e.SiteCacheStatsAll(); len(rows) != 1 {
+		t.Fatalf("armed vhost should appear, got %d rows", len(rows))
+	}
+	// Unarm it (turn caching off) — the store still holds the stale counts.
+	e.SiteCacheRemove("gone.com")
+	if rows := e.SiteCacheStatsAll(); len(rows) != 0 {
+		t.Fatalf("unarmed vhost must not appear in stats, got %+v", rows)
+	}
+	if _, ok := e.SiteCacheStatsHost("gone.com"); ok {
+		t.Fatalf("unarmed vhost must not resolve by host")
+	}
+}
+
+// A concrete sub-host of a wildcard-armed vhost must resolve to the pattern row.
+func TestSiteCacheStats_WildcardDrilldown(t *testing.T) {
+	e, _ := newSiteCacheAPITestEngine(t)
+	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "*.cdn.example.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	// The edge keys stats under the pattern (policy_key_for folds sub-hosts).
+	e.siteCacheStats.Upsert("*.cdn.example.com", map[string]int{"HIT": 3, "MISS": 1, "total": 4})
+
+	// Drill down by a CONCRETE sub-host → resolves to the pattern row.
+	row, ok := e.SiteCacheStatsHost("assets.cdn.example.com")
+	if !ok || row.Host != "*.cdn.example.com" || row.Hit != 3 {
+		t.Fatalf("wildcard drill-down by sub-host failed: ok=%v row=%+v", ok, row)
+	}
+	// Querying the pattern itself also works.
+	if _, ok := e.SiteCacheStatsHost("*.cdn.example.com"); !ok {
+		t.Fatalf("pattern lookup should work")
+	}
+	// The bare suffix (not covered by *.cdn.example.com) does not resolve.
+	if _, ok := e.SiteCacheStatsHost("cdn.example.com"); ok {
+		t.Fatalf("bare suffix must not match the wildcard")
 	}
 }

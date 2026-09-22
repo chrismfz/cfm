@@ -98,9 +98,14 @@ func (s *siteCacheStatsStore) Hosts() map[string]map[string]int {
 }
 
 // SiteCacheStatsRow is one vhost's cache effectiveness (absolute counts since
-// the edge last reloaded). hit_ratio_pct is hit / cacheable_total, where
-// cacheable_total excludes BYPASS (a bypassed request never had a chance to
-// hit) — the same split cfm_stats.lua's cache_zone_stats uses.
+// the edge last reloaded). hit_ratio_pct is a STRICT hit ratio —
+// hit / cacheable_total, cacheable_total = hit+miss+expired+stale+updating+
+// revalidated (BYPASS excluded: a bypassed request never had a chance to hit) —
+// the same split cfm_stats.lua's cache_zone_stats uses. Note STALE / UPDATING /
+// REVALIDATED are ALSO served from cache but sit in the denominator only, so on
+// a vhost that leans on stale-while-revalidate the strict ratio understates the
+// real cache benefit; read the full HIT/MISS/EXPIRED/STALE/UPDATING breakdown,
+// not just the one number.
 type SiteCacheStatsRow struct {
 	Host           string  `json:"host"`
 	Total          int     `json:"total"`
@@ -141,28 +146,77 @@ func siteCacheStatsRow(host string, c map[string]int) SiteCacheStatsRow {
 	}
 }
 
-// SiteCacheStatsHost returns one vhost's cache stats row (ok=false if the edge
-// has not reported it — e.g. unarmed, or armed but no traffic yet).
+// armedCacheKeys is the set of currently-armed policy keys (exact hosts +
+// "*.suffix" patterns) — the same keys the edge stats are keyed under. The
+// stats read paths filter on it because the edge dict retains a vhost's counts
+// after it is unarmed (no TTL until an edge reload), so the armed policy store
+// is the source of truth for what is still live.
+func (e *Engine) armedCacheKeys() map[string]struct{} {
+	if e == nil || e.siteCache == nil {
+		return nil
+	}
+	list := e.siteCache.List()
+	out := make(map[string]struct{}, len(list))
+	for _, ent := range list {
+		out[strings.ToLower(ent.Host)] = struct{}{}
+	}
+	return out
+}
+
+// resolveArmedCacheKey maps a request host to the armed policy key that covers
+// it — the exact host if armed, else a "*.suffix" armed pattern the host falls
+// under — or "" if nothing armed covers it. Mirrors the edge's policy_key_for
+// so a by-host stats drill-down resolves to a wildcard-armed vhost's row.
+func resolveArmedCacheKey(host string, armed map[string]struct{}) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return ""
+	}
+	if _, ok := armed[host]; ok {
+		return host
+	}
+	for k := range armed {
+		if strings.HasPrefix(k, "*.") && strings.HasSuffix(host, k[1:]) {
+			return k
+		}
+	}
+	return ""
+}
+
+// SiteCacheStatsHost returns one vhost's cache stats row. `host` may be a
+// concrete sub-host of a wildcard-armed vhost — it resolves to the armed policy
+// key first. ok=false if nothing armed covers it, or it is armed but the edge
+// has not reported counts yet.
 func (e *Engine) SiteCacheStatsHost(host string) (SiteCacheStatsRow, bool) {
 	if e == nil || e.siteCacheStats == nil {
 		return SiteCacheStatsRow{}, false
 	}
-	host = strings.ToLower(strings.TrimSpace(host))
-	c := e.siteCacheStats.Get(host)
+	key := resolveArmedCacheKey(host, e.armedCacheKeys())
+	if key == "" {
+		return SiteCacheStatsRow{}, false
+	}
+	c := e.siteCacheStats.Get(key)
 	if c == nil {
 		return SiteCacheStatsRow{}, false
 	}
-	return siteCacheStatsRow(host, c), true
+	return siteCacheStatsRow(key, c), true
 }
 
-// SiteCacheStatsAll returns every reported vhost's stats row, sorted by host.
+// SiteCacheStatsAll returns the stats row for every CURRENTLY-ARMED vhost the
+// edge has reported, sorted by host. Rows for vhosts unarmed since their last
+// push are dropped (see armedCacheKeys) so the view never shows a stale vhost
+// as still cached.
 func (e *Engine) SiteCacheStatsAll() []SiteCacheStatsRow {
 	if e == nil || e.siteCacheStats == nil {
 		return nil
 	}
+	armed := e.armedCacheKeys()
 	hosts := e.siteCacheStats.Hosts()
 	out := make([]SiteCacheStatsRow, 0, len(hosts))
 	for h, c := range hosts {
+		if _, ok := armed[h]; !ok {
+			continue // unarmed → the edge's lingering counts are stale; hide it
+		}
 		out = append(out, siteCacheStatsRow(h, c))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Host < out[j].Host })
