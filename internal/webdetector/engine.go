@@ -667,6 +667,33 @@ func NewEngine(cfg Config) *Engine {
 		})
 	}
 
+	// Network identity for every solve and Rung-1 reject (challenge_geo.go):
+	// country / ASN / PTR on the [challenge] lines and history rows, for
+	// false-positive hunting. Neither half can block verify:
+	//   - country/ASN from LookupGeoFast: a live mmdb read (microseconds, no
+	//     DNS), exactly what the solved line's " - (AS…, Country)" tail always
+	//     used. NOT the cached record — that is kept for up to cacheTTL (24h)
+	//     and an mmdb refresh does not purge it, so it could show a day-stale
+	//     or even empty answer (a Result cached before the mmdb arrived).
+	//   - PTR from LookupCachedOrAsync: served from cache when warm, else
+	//     resolved in the background for a later solve.
+	// Set on EVERY engine build, cleared when this one has no enricher: the
+	// factory rebuilds the engine on each reload, and a reload that turns
+	// enrichment off must not keep stamping the previous engine's geo onto
+	// solves. (This does not free that enricher: the verify-side geo resolver
+	// above is never cleared and still holds it — a pre-existing gap in that
+	// enforcement path, not changed here.)
+	if e.enr != nil {
+		enr := e.enr
+		SetChallengeSolveEnricher(func(ip string) enrich.Result {
+			r := enr.LookupGeoFast(ip)
+			r.PTR = enr.LookupCachedOrAsync(ip).PTR
+			return r
+		})
+	} else {
+		SetChallengeSolveEnricher(nil)
+	}
+
 	// Vhost-arm lookup for the same verify gate (arm-surfaces slice A): a
 	// manual vhost challenge armed at rung v2 makes solves on that host (and
 	// its www variant) pass through the Rung-1 humanity check.
@@ -772,24 +799,84 @@ func (e *Engine) StopUAEmergencyPruner() {
 	}
 }
 
-// RecordChallengeSolved updates the store when a challenge is solved.
-//
-// The history payload carries the UA, the real solve latency and the
-// UA-plausibility verdict alongside the legacy server-side `ms`, so the
-// forensics view (which renders payload.ua) and any downstream solver-farm
-// correlation have something to work with. Before this, a solve recorded none of
-// them — which is why challenge_solved rows showed an empty UA column while
-// waf_trigger rows were populated. solve_ms, ua_impossible and tls_fp are
-// written only when known/true, so their absence is meaningful.
-//
-// tls_fp is the id of the client's TLS ClientHello as stamped by the edge; the
-// full tuple behind it is in cfm.challenges.log, written once per distinct
-// fingerprint.
+// RecordChallengeSolved updates the store when a challenge is solved. The
+// history row's payload comes from historyPayload, shared with
+// RecordChallengeV2Reject.
 func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 	if e == nil || e.chalAPI == nil {
 		return
 	}
 	e.chalAPI.RecordSolved(s.IP, s.Host, s.URI, s.Diff, s.VerifyMS)
+	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_solved", Host: s.Host, IP: s.IP, Payload: s.historyPayload()})
+}
+
+// RecordChallengeV2Reject persists a ChallengeV2 Rung-1 rejection: a valid PoW
+// solve whose humanity score reached the fail threshold under an armed grain,
+// so NO clearance was issued (the result=v2_reject line).
+//
+// It is its own history type, never challenge_solved: it cleared nothing, and
+// counting it as a solve would mark the client solved in challenge-outcomes
+// while it is still being served the challenge. It also deliberately skips
+// chalAPI.RecordSolved for the same reason.
+//
+// Before this the log line was the reject's ONLY record, which left the rung's
+// false-positive rate unmeasurable: nothing durable, nothing for MCP
+// (detection_history type=challenge_v2_reject) to query, and no country/ASN/PTR
+// without a manual lookup per address. The payload is the same builder the
+// solved row uses, so the two populations are directly comparable.
+func (e *Engine) RecordChallengeV2Reject(s ChallengeSolve) {
+	if e == nil {
+		return
+	}
+	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_v2_reject", Host: s.Host, IP: s.IP, Payload: s.historyPayload()})
+}
+
+// historyPayload is the ONE builder for a solve's history payload, shared by
+// challenge_solved and challenge_v2_reject so rejected and passing solves carry
+// the same keys and can be compared field for field.
+//
+// It carries the UA, the real solve latency and the UA-plausibility verdict
+// alongside the legacy server-side `ms`, so the forensics view (which renders
+// payload.ua) and any downstream solver-farm correlation have something to
+// work with. Before this, a solve recorded none of them — which is why
+// challenge_solved rows showed an empty UA column while waf_trigger rows were
+// populated. solve_ms, ua_impossible and tls_fp are written only when
+// known/true, so their absence is meaningful.
+//
+// tls_fp is the id of the client's TLS ClientHello as stamped by the edge; the
+// full tuple behind it is in cfm.challenges.log, written once per distinct
+// fingerprint.
+//
+// ChallengeV2 Rung 1 (challenge_v2.go). ALL of it hangs off HumanityScored,
+// the same single gate HumanitySuffix uses, so the log line and this row
+// can never disagree about whether the scorer ran — and a ChallengeSolve
+// literal that never went through verify cannot persist "scored clean"
+// (hs 0 is a real score, so the zero value had to stop meaning it).
+//
+//	hs           the score; 0 means scored-and-clean, i.e. a PASS
+//	hs_nopayload no parseable humanity body arrived (see the doc below)
+//	tells        which tells fired, comma-joined
+//	v2           the arm grain covering the solve, absent when unarmed
+//	sig          the readings as reported, same numbers and rounding as
+//	             the solve line's sig= field
+//
+// mv/hc/dm/dpr/raf are scored by nothing — corpus, so a future tell can
+// be written from measured distributions instead of from memory;
+// ptr/tch/key additionally feed the no_input amplifier, and recording
+// them is what makes it auditable. An individual signal the browser did
+// not report is simply not a key — never a fabricated zero (D5b).
+//
+// hs_nopayload is NOT merely the durable spelling of the log's "hs=-":
+// the log collapses to hs=- only when the score is also 0, so a
+// HeadlessChrome UA that strips the body logs hs=100 tells=headless_ua
+// while this row carries hs 100 AND hs_nopayload true. This row is the
+// more precise of the two; don't "align" them by making it lossier.
+//
+// The client's network identity (country / country_iso / asn / asn_name /
+// ptr, resolved once at verify) is added last, each key only when resolved —
+// see addGeoPayload. Note payload.ptr is the client's reverse DNS; the
+// humanity pointer-event count is sig.ptr, one level down.
+func (s ChallengeSolve) historyPayload() map[string]interface{} {
 	payload := map[string]interface{}{"uri": s.URI, "diff": s.Diff, "ms": s.VerifyMS}
 	if s.UA != "" {
 		payload["ua"] = s.UA
@@ -803,30 +890,6 @@ func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 	if s.TLSFP != "" {
 		payload["tls_fp"] = s.TLSFP
 	}
-	// ChallengeV2 Rung 1 (challenge_v2.go). ALL of it hangs off HumanityScored,
-	// the same single gate HumanitySuffix uses, so the log line and this row
-	// can never disagree about whether the scorer ran — and a ChallengeSolve
-	// literal that never went through verify cannot persist "scored clean"
-	// (hs 0 is a real score, so the zero value had to stop meaning it).
-	//
-	//   hs           the score; 0 means scored-and-clean, i.e. a PASS
-	//   hs_nopayload no parseable humanity body arrived (see the doc below)
-	//   tells        which tells fired, comma-joined
-	//   v2           the arm grain covering the solve, absent when unarmed
-	//   sig          the readings as reported, same numbers and rounding as
-	//                the solve line's sig= field
-	//
-	// mv/hc/dm/dpr/raf are scored by nothing — corpus, so a future tell can
-	// be written from measured distributions instead of from memory;
-	// ptr/tch/key additionally feed the no_input amplifier, and recording
-	// them is what makes it auditable. An individual signal the browser did
-	// not report is simply not a key — never a fabricated zero (D5b).
-	//
-	// hs_nopayload is NOT merely the durable spelling of the log's "hs=-":
-	// the log collapses to hs=- only when the score is also 0, so a
-	// HeadlessChrome UA that strips the body logs hs=100 tells=headless_ua
-	// while this row carries hs 100 AND hs_nopayload true. This row is the
-	// more precise of the two; don't "align" them by making it lossier.
 	if s.HumanityScored {
 		payload["hs"] = s.HumanityScore
 		if s.HumanityNoPayload {
@@ -842,7 +905,8 @@ func (e *Engine) RecordChallengeSolved(s ChallengeSolve) {
 			payload["sig"] = sig
 		}
 	}
-	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_solved", Host: s.Host, IP: s.IP, Payload: payload})
+	s.addGeoPayload(payload)
+	return payload
 }
 
 // RecordIPChallenge updates the store when we emit a challenge for an IP.

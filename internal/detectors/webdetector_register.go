@@ -282,25 +282,15 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			// Hook solved logging into detectors layer (adds enrichment + lets us emit "expired" elsewhere).
 			webdet.SetChallengeSolvedHook(func(s webdet.ChallengeSolve) {
 				ip, host, uri, diff := s.IP, s.Host, s.URI, s.Diff
-				// Best-effort enrichment using the same enricher as the engine.
-				suffix := ""
-				if enr := w.eng.Enricher(); enr != nil {
-					r := enr.LookupGeoFast(ip) // Country/ASN only; avoid blocking PTR rDNS
-					parts := []string{}
-					if r.ASN > 0 {
-						if r.ASNName != "" {
-							parts = append(parts, fmt.Sprintf("AS%d %s", r.ASN, r.ASNName))
-						} else {
-							parts = append(parts, fmt.Sprintf("AS%d", r.ASN))
-						}
-					}
-					if r.Country != "" {
-						parts = append(parts, r.Country)
-					}
-					if len(parts) > 0 {
-						suffix = " - (" + strings.Join(parts, ", ") + ")"
-					}
-				}
+				// Network identity was resolved ONCE at verify and rides on the
+				// solve. It renders twice here: as cc=/asn=/asn_name=/ptr=
+				// key=value fields (s.GeoSuffix), and as the free-text
+				// " - (AS…, Country)" tail this line has always ended with
+				// (s.LegacyGeoTail), kept byte-for-byte for tooling that reads
+				// it. Both come from the same fields as the history row, so
+				// none of the three can disagree — which a second lookup here,
+				// as this hook used to do, could not promise.
+				suffix := s.LegacyGeoTail()
 
 				// Look up WAF/detector reason + rule id BEFORE bridge.ClearIP()
 				// deletes the entry. The hook is called before ClearIP in
@@ -347,13 +337,20 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 				// ChallengeSolve.TLSFingerprintOrDash so this and the challenge
 				// server's own fallback line cannot disagree.
 				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s%s",
-					ip, host, uri, s.VerifyMS, solveMS, diff, s.TLSFingerprintOrDash(), s.UAFamilyOrDash(), s.UA, s.HumanitySuffix(), uaBad, reasonPart, ridPart, suffix,
+					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s%s%s",
+					ip, host, uri, s.VerifyMS, solveMS, diff, s.TLSFingerprintOrDash(), s.UAFamilyOrDash(), s.UA, s.HumanitySuffix(), uaBad, reasonPart, ridPart, s.GeoSuffix(), suffix,
 				)
 
 				// Record solve in challenge API store (best-effort)
 				w.eng.RecordChallengeSolved(s)
 
+			})
+
+			// Rung-1 rejections (result=v2_reject) get their own durable row,
+			// never the solved path above: a reject cleared nothing. The
+			// reject's log line is written by the challenge server itself.
+			webdet.SetChallengeV2RejectHook(func(s webdet.ChallengeSolve) {
+				w.eng.RecordChallengeV2Reject(s)
 			})
 
 			// Hook WAF trigger events (from cfm_waf.lua via POST /nginx/ip)

@@ -17,7 +17,41 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **ChallengeV2 rejects are now recorded durably, with country / ASN / PTR —
+  so false positives can actually be hunted.** Until now a solve the Rung-1
+  humanity gate refused (`result=v2_reject`) left exactly one trace: its log
+  line — the score, tells, raw readings, arm grain, TLS fingerprint and UA, but
+  no network identity. There was no history row, nothing MCP could query, and
+  judging whether a rejected client was a farm or a person meant a manual
+  lookup per address. Now:
+  - every `result=v2_reject` **and** every `result=solved` line carries
+    `cc=GR asn=6799 asn_name="OTEnet S.A." ptr=…` — the client's network
+    identity, resolved once at verify: country/ASN from a live mmdb read,
+    PTR from cache or filled in the background, so verify never waits on
+    reverse DNS. The reject line ends in them; the solved line keeps its old
+    free-text tail last (below). A key is omitted when it is not resolved (a
+    cold address has no `ptr` on its first solve), never fabricated. Note
+    `ptr=` here is reverse DNS; `sig=ptr:` is a pointer-event count.
+  - a reject writes its own **`challenge_v2_reject`** history row — never
+    `challenge_solved`, since it cleared nothing — built by the same payload
+    builder as a solve, so rejected and passing solves compare field for
+    field (`hs`, `tells`, `v2`, `sig`, `ua`, `tls_fp`, `country`, `asn`, `ptr`,
+    …). The fleet query is `detection_history type=challenge_v2_reject
+    node="all"` over MCP.
+  - the solved line keeps its free-text ` - (AS6799 OTEnet S.A., Greece)`
+    tail byte-for-byte for existing tooling, still read from the live mmdb as
+    before; it is now rendered from the same once-resolved fields rather than
+    a second lookup of its own, so it can no longer disagree with the new
+    fields or the history row.
+  - `payload.ptr` is stripped from history rows returned to scoped (cPanel)
+    callers, like `sig` — as defence in depth only: scoped callers already
+    see a per-IP PTR for their own vhosts via the drilldown and analyze-host
+    views. Country and ASN are not stripped — `enrich=1` already gives them
+    to scoped callers.
+
+  Log and corpus only: no tell, weight or threshold changed, and nothing
+  scores on network identity.
 
 ## 2026.09.22
 

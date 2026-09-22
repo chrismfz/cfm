@@ -658,9 +658,29 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
   browser did not report. `mv`/`hc`/`dm`/`dpr`/`raf` are scored by nothing;
   `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, so logging
-  them makes that tell auditable. `result=v2_reject` lines carry `sig=` too —
-  a rejected solve is not published as a solved event, so its line is the only
-  place that population reaches the corpus. This is the corpus half of the table above: the
+  them makes that tell auditable. `result=v2_reject` lines carry `sig=` too.
+  A rejected solve is never published as a solved event (it cleared nothing);
+  since 2026-09-22 it writes its own `challenge_v2_reject` history row instead,
+  built by the same payload builder as `challenge_solved`, so the two
+  populations compare field for field — `detection_history
+  type=challenge_v2_reject node="all"` is the fleet FP-hunting query. Every
+  solve and reject line also carries `cc=`/`asn=`/`asn_name=`/`ptr=` — at the
+  end of the reject line and of the fallback solved writer, and just before
+  the legacy ` - (AS…, Country)` tail on the hook-written solved line, which
+  stays last for tooling that reads it. That is the client's network
+  identity, resolved ONCE at verify without ever blocking it: country/ASN from
+  a live mmdb read (the enricher's cached record can be up to a day stale),
+  PTR from the cached-or-async path. Each key is absent when unresolved — and
+  `ptr` also when the address has none. The verify-side **geo arm check does
+  NOT use these values**: it matches the enricher's cached record, which can
+  lag an mmdb update by up to 24h (or be empty if cached before the mmdb
+  loaded). So a `v2=geo` line whose `cc=`/`asn=` is outside the armed set means
+  the gate acted on a stale record — a real false-positive mechanism to report,
+  not a rendering bug — and an armed country's `cc=` with no `v2=` is a gate
+  miss for the same reason. The history rows
+  carry the same as `country`/`country_iso`/`asn`/`asn_name`/`ptr`. Mind the
+  name clash: top-level `ptr=` is reverse DNS; `sig=ptr:` is a pointer-event
+  count. Log/corpus only — nothing scores on network identity. This is the corpus half of the table above: the
   signals listed there as ★★/★★★ candidates are measured and logged long
   before any of them is allowed to score, so a weight is set from real
   distributions rather than written from memory. `sig=` absent means nothing was
