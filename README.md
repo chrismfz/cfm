@@ -505,8 +505,8 @@ internal/
   - IPLocate's files keep their own FLAT schema under those names (`asn` — a
     string —, `org`, `country_code`, `country_name`; no city), not MaxMind's
     nested one. Both readers handle either schema: the daemon's enricher
-    (`internal/enrich/geodb.go`) and the edge's `cfm_geo.lua`. Before
-    2026-09-23 neither did, so a node on IPLocate had no country or ASN
+    (`internal/enrich/geodb.go`) and the edge's `cfm_geo.lua`. Earlier
+    releases read neither, so a node on IPLocate had no country or ASN
     anywhere. City names are empty on IPLocate (the free database has none).
 - API integration: `API_URL`, `AUTH_TOKEN`, `*_SEND_TO_API`
   - `AUTH_TOKEN` is **mandatory** when the internal API server is enabled (`PORT > 0` or `TLS_PORT > 0`) because privileged API routes require it.

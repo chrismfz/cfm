@@ -176,9 +176,17 @@ back-filled here — see the git/PR history for that period.
   Both now read either schema. Verified against the real IPLocate files: the
   daemon resolves e.g. `94.68.42.127` to AS6799 / GR / Greece, and a real
   OpenResty with `lua-resty-maxminddb` returns GR / US / AU where it returned
-  "" before. MaxMind nodes are unaffected (the whole fleet currently uses
-  MaxMind). City names stay empty on IPLocate, which has none. No
-  configuration change.
+  "" before. City names stay empty on IPLocate, which has none. A database
+  that fails to load is now logged once (`[enrich] WARNING: cannot load geo
+  database …`) instead of silently.
+  **Behaviour change on IPLocate nodes:** settings that silently did nothing
+  there start to apply after the upgrade — country traffic rules (edge and
+  bridge), armed country/ASN policies, country/ASN leniency, and solver-farm
+  country concentration. MaxMind nodes are unaffected. That covers every edge
+  node in the fleet today: their WAF events all carry an ASN and a country,
+  which an IPLocate node could not produce. A node can still end up on
+  IPLocate even with a MaxMind key: if its first MaxMind download fails, the
+  updater installs IPLocate's files instead. No configuration change.
 - **Turning web-detector enrichment off no longer leaves country/ASN
   `challenge_v2` policies enforced at verify.** On every reload the web
   detector is rebuilt, and each rebuild wired the verify-side geo lookup

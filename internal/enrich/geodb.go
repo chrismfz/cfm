@@ -5,9 +5,12 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/oschwald/geoip2-golang"
 	"github.com/oschwald/maxminddb-golang"
+
+	"cfm/internal/logging"
 )
 
 // geoDB is one open geo database, whichever schema it carries. The enricher
@@ -38,8 +41,29 @@ type geoDB interface {
 //     came back empty, silently.
 //
 // Any other database type geoip2 rejects is still an error: a schema this
-// adapter doesn't know must not be half-read.
+// adapter doesn't know must not be half-read. Every open failure is logged once
+// per (path, error) — a database that silently fails to load is exactly how
+// the IPLocate gap went unseen.
 func openGeoDB(path string) (geoDB, error) {
+	db, err := openGeoDBQuiet(path)
+	if err != nil {
+		warnOpenOnce(path, err)
+	}
+	return db, err
+}
+
+// openFailWarned de-dups the open-failure warning: the hot reload retries a
+// file it could not load on every stat interval, and must not log each time.
+var openFailWarned sync.Map // "path\x00error" -> struct{}
+
+func warnOpenOnce(path string, err error) {
+	if _, seen := openFailWarned.LoadOrStore(path+"\x00"+err.Error(), struct{}{}); seen {
+		return
+	}
+	logging.Logf("[enrich] WARNING: cannot load geo database %s: %v — its lookups (ASN or country) stay empty until it is replaced", path, err)
+}
+
+func openGeoDBQuiet(path string) (geoDB, error) {
 	r, err := geoip2.Open(path)
 	if err == nil {
 		return maxmindDB{r}, nil
@@ -100,16 +124,21 @@ func (d maxmindDB) Close() error { return d.r.Close() }
 // country_code/country_name. It has no city.
 type iplocateDB struct{ r *maxminddb.Reader }
 
-// iplocateRecord: asn is stored as a STRING ("6799" — measured on the
-// 2026-09-22 file, every network), so it is decoded as interface{} and parsed
-// by asnNumber, which also takes a number in case a later file switches. A
-// typed uint field made the whole record fail to decode.
-type iplocateRecord struct {
-	ASN         interface{} `maxminddb:"asn"`
-	Org         string      `maxminddb:"org"`
-	Name        string      `maxminddb:"name"`
-	CountryCode string      `maxminddb:"country_code"`
-	CountryName string      `maxminddb:"country_name"`
+// iplocateASNFields: asn is stored as a STRING ("6799" — measured on the
+// 2026-09-22 file, all 1.68M networks), so it is decoded as interface{} and
+// parsed by asnNumber, which also takes a number in case a later file
+// switches. A typed uint field made the whole record fail to decode. The two
+// record types are separate so each lookup decodes only the fields it uses: a
+// malformed country field can't fail an ASN lookup, or the reverse.
+type iplocateASNFields struct {
+	ASN  interface{} `maxminddb:"asn"`
+	Org  string      `maxminddb:"org"`
+	Name string      `maxminddb:"name"`
+}
+
+type iplocateCountryFields struct {
+	CountryCode string `maxminddb:"country_code"`
+	CountryName string `maxminddb:"country_name"`
 }
 
 // asnNumber reads an AS number stored as a string ("6799", "AS6799") or as an
@@ -135,17 +164,9 @@ func asnNumber(v interface{}) uint {
 	return 0
 }
 
-func (d iplocateDB) lookup(ip net.IP) (iplocateRecord, bool) {
-	var rec iplocateRecord
-	if err := d.r.Lookup(ip, &rec); err != nil {
-		return iplocateRecord{}, false
-	}
-	return rec, true
-}
-
 func (d iplocateDB) asn(ip net.IP) (uint, string, bool) {
-	rec, ok := d.lookup(ip)
-	if !ok {
+	var rec iplocateASNFields
+	if err := d.r.Lookup(ip, &rec); err != nil {
 		return 0, "", false
 	}
 	n := asnNumber(rec.ASN)
@@ -160,8 +181,8 @@ func (d iplocateDB) asn(ip net.IP) (uint, string, bool) {
 }
 
 func (d iplocateDB) country(ip net.IP) (string, string, string, bool) {
-	rec, ok := d.lookup(ip)
-	if !ok || rec.CountryCode == "" {
+	var rec iplocateCountryFields
+	if err := d.r.Lookup(ip, &rec); err != nil || rec.CountryCode == "" {
 		return "", "", "", false
 	}
 	iso := strings.ToUpper(rec.CountryCode)
