@@ -162,10 +162,10 @@ func TestRecordChallengeSolved_PersistsRawSignals(t *testing.T) {
 	e.RecordChallengeSolved(ChallengeSolve{
 		IP: "203.0.113.20", Host: "shop.example.com", URI: "/",
 		HumanityScored: true,
-		humanity: &humanitySignals{
+		sig: (&humanitySignals{
 			PTR: iptr(0), TCH: iptr(0), KEY: iptr(0), MV: fptr(0),
 			HC: iptr(8), DPR: fptr(1.5), RAF: fptr(16.666666666666668),
-		},
+		}).sigFields(),
 	})
 	sig, ok := latestSolveEvent(t, e).Payload["sig"].(map[string]any)
 	if !ok {

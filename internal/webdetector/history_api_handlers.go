@@ -55,10 +55,14 @@ type historyEventView struct {
 // closed. Nothing is lost operationally: the burn-in readout that sig exists
 // for is admin/MCP.
 //
-// Rows come fresh from QueryEvents (one JSON unmarshal per row), but the
-// payload is a reference type, so the key is removed from a COPY — a future
-// caching layer in QueryEvents must not find its map mutated by a read.
-// Keep the list in sync with docs/endpoint_scope_inventory.md.
+// The payload map is copied rather than edited so the caller's own map is
+// never mutated, but note the LIMIT of that: the slice element is reassigned
+// in place, so this is safe only because QueryEvents builds a fresh
+// []HistoryEvent with one JSON unmarshal per row on every call. If it ever
+// returns a shared or cached slice, this must copy the slice too — otherwise
+// the first scoped request would strip sig from the cached row for every
+// later admin/MCP read. Keep the key list in sync with
+// docs/endpoint_scope_inventory.md.
 func redactScopedHistoryRows(r *http.Request, rows []HistoryEvent) {
 	if IsAdminRequest(r) {
 		return
@@ -184,6 +188,12 @@ func (e *Engine) handleHistoryChallengeOutcomes(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Same redaction as handleHistoryEvents: `issued` rows are returned to the
+	// caller verbatim below, so they pass through the one helper rather than
+	// relying on challenge_issued happening not to carry an admin-only key
+	// today. `solvedRows` is only read for its (ip,host) keys and never
+	// returned, so it needs none.
+	redactScopedHistoryRows(r, issued)
 	solvedRows, _ := e.history.QueryEvents(host, q.Get("ip"), "challenge_solved", queryLimit)
 	solvedSet := make(map[string]struct{}, len(solvedRows))
 	for _, ev := range solvedRows {

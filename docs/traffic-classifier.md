@@ -663,8 +663,12 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   place that population reaches the corpus. This is the corpus half of the table above: the
   signals listed there as ★★/★★★ candidates are measured and logged long
   before any of them is allowed to score, so a weight is set from real
-  distributions rather than written from memory. `sig=` is absent when no
-  payload arrived (the same solve shows `hs=-`).
+  distributions rather than written from memory. `sig=` absent means nothing was
+  RETAINED, which is a SUPERSET of "no payload arrived": a client that posts
+  `{}`, or a body whose every reading fails the bounds, parses fine and shows
+  `hs=0` with no `sig=` — that is not an `hs=-` case. Isolate the
+  body-stripping population with `hs=-` (or the row's `hs_nopayload`); `sig=`
+  absence alone does not identify it.
 - **`cfm.abuse_shadow.log`**: `signal=humanity verdict=would_v2 …` when the score
   *would* escalate — shadow, nothing served.
 - **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls
@@ -680,10 +684,13 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `hs_nopayload` therefore return different populations — use the row.
   `payload.sig` is admin-only (stripped for scoped callers,
   `docs/endpoint_scope_inventory.md`); the rest of the payload is unchanged.
+  `challenge_solved` is the highest-volume row type, so these keys add ~50-80
+  bytes each and the history DB grows accordingly at unchanged retention (it
+  is bounded by row count, not bytes) — see the CHANGELOG storage note.
   Every humanity key is gated on the scorer having actually run, so an
-  unscored solve carries none of them rather than a default-looking `hs:0`. `hs` is omitted
-  entirely when the rung is off — the -1 sentinel is never persisted as a
-  score.
+  unscored solve carries none of them rather than a default-looking `hs:0`. Every humanity key is omitted
+  entirely when the rung is off: there is no `-1` sentinel to look for, so the
+  ABSENCE of `hs` — not a magic value — is what says "never scored".
 
 MCP surfaces: `abuse_shadow` (per-node signal/verdict counts), `detection_history`
 (durable; `node="all"` for the fleet), `challenge_events`; suspected-FP drilldown

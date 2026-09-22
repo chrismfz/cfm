@@ -1,11 +1,13 @@
 package webdetector
 
 import (
+	"fmt"
 	"io"
 	"math"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func boolp(b bool) *bool { return &b }
@@ -248,10 +250,10 @@ func TestSignalSuffix(t *testing.T) {
 
 	// The operator's real case: a genuine browser that was opened and left
 	// alone. Every counter is a REPORTED zero, which must be visible as such.
-	quiet := ChallengeSolve{humanity: &humanitySignals{
+	quiet := ChallengeSolve{sig: (&humanitySignals{
 		PTR: iptr(0), TCH: iptr(0), KEY: iptr(0), MV: fptr(0),
 		HC: iptr(8), DPR: fptr(1.5), RAF: fptr(16.666666666666668),
-	}}
+	}).sigFields()}
 	const want = " sig=ptr:0,tch:0,key:0,mv:0,hc:8,dpr:1.5,raf:16.7"
 	if got := quiet.SignalSuffix(); got != want {
 		t.Fatalf("quiet-browser solve:\n got %q\nwant %q", got, want)
@@ -264,16 +266,16 @@ func TestSignalSuffix(t *testing.T) {
 
 	// Fractional deviceMemory (low-end Android) survives rounding, and movement
 	// keeps one decimal — fractional movementX on HiDPI is a real reading.
-	busy := ChallengeSolve{humanity: &humanitySignals{
+	busy := ChallengeSolve{sig: (&humanitySignals{
 		PTR: iptr(137), MV: fptr(4821.73), DM: fptr(0.25),
-	}}
+	}).sigFields()}
 	if got, want := busy.SignalSuffix(), " sig=ptr:137,mv:4821.7,dm:0.25"; got != want {
 		t.Fatalf("busy solve:\n got %q\nwant %q", got, want)
 	}
 
 	// Never scientific notation: a %g-style verb here would break a grep/cut
 	// corpus pass (and has misrendered a value in this repo before).
-	big := ChallengeSolve{humanity: &humanitySignals{MV: fptr(123456789)}}
+	big := ChallengeSolve{sig: (&humanitySignals{MV: fptr(123456789)}).sigFields()}
 	if got := big.SignalSuffix(); strings.ContainsAny(got, "eE") {
 		t.Fatalf("no exponent form allowed on the log line, got %q", got)
 	}
@@ -285,7 +287,7 @@ func TestSignalSuffix(t *testing.T) {
 // fractional display scaling, so this is not a theoretical case.
 func TestSignalSuffixNeverFakesAZero(t *testing.T) {
 	for _, mv := range []float64{0.5, 0.04, 0.0001, sigMinPositive} {
-		got := (ChallengeSolve{humanity: &humanitySignals{PTR: iptr(1), MV: fptr(mv)}}).SignalSuffix()
+		got := (ChallengeSolve{sig: (&humanitySignals{PTR: iptr(1), MV: fptr(mv)}).sigFields()}).SignalSuffix()
 		if strings.Contains(got, "mv:0,") || strings.HasSuffix(got, "mv:0") {
 			t.Errorf("mv=%v rendered as a flat zero: %q", mv, got)
 		}
@@ -295,7 +297,7 @@ func TestSignalSuffixNeverFakesAZero(t *testing.T) {
 	}
 	// A genuine zero still renders as a plain zero — that reading is real and
 	// is exactly what "opened the page and touched nothing" looks like.
-	if got := (ChallengeSolve{humanity: &humanitySignals{MV: fptr(0)}}).SignalSuffix(); got != " sig=mv:0" {
+	if got := (ChallengeSolve{sig: (&humanitySignals{MV: fptr(0)}).sigFields()}).SignalSuffix(); got != " sig=mv:0" {
 		t.Errorf("a reported zero must stay 0, got %q", got)
 	}
 	// The guarantee rests on sanitize: a positive too small for any device to
@@ -313,12 +315,12 @@ func TestHumanitySuffixIncludesSignals(t *testing.T) {
 	s := ChallengeSolve{
 		HumanityScored: true,
 		V2Grain:        v2GrainMark,
-		humanity:       &humanitySignals{PTR: iptr(0), MV: fptr(0)},
+		sig:            (&humanitySignals{PTR: iptr(0), MV: fptr(0)}).sigFields(),
 	}
 	if got, want := s.HumanitySuffix(), " hs=0 sig=ptr:0,mv:0 v2=mark"; got != want {
 		t.Fatalf("\n got %q\nwant %q", got, want)
 	}
-	off := ChallengeSolve{humanity: &humanitySignals{PTR: iptr(5)}}
+	off := ChallengeSolve{sig: (&humanitySignals{PTR: iptr(5)}).sigFields()}
 	if got := off.HumanitySuffix(); got != "" {
 		t.Fatalf("unscored solve must render nothing at all, got %q", got)
 	}
@@ -343,7 +345,7 @@ func TestSanitizeDropsOnlyNonReadings(t *testing.T) {
 	// headless/embedded-WebView evidence this corpus is being built to
 	// discover. Erasing them would both destroy the tell and make it
 	// indistinguishable from "not reported".
-	if got := (ChallengeSolve{humanity: sig}).SignalSuffix(); got != " sig=key:4,hc:0,dm:99999,dpr:0" {
+	if got := (ChallengeSolve{sig: sig.sigFields()}).SignalSuffix(); got != " sig=key:4,hc:0,dm:99999,dpr:0" {
 		t.Errorf("readings must survive verbatim, got %q", got)
 	}
 }
@@ -358,7 +360,7 @@ func TestSanitizeKeepsReportedZeros(t *testing.T) {
 		t.Fatal("a well-formed body must parse")
 	}
 	const want = " sig=ptr:0,tch:0,key:0,mv:0,hc:0,dm:0,dpr:0,raf:0"
-	if got := (ChallengeSolve{humanity: sig}).SignalSuffix(); got != want {
+	if got := (ChallengeSolve{sig: sig.sigFields()}).SignalSuffix(); got != want {
 		t.Fatalf("every reported zero must survive:\n got %q\nwant %q", got, want)
 	}
 }
@@ -370,10 +372,10 @@ func TestSigRoundNormalisesNegativeZero(t *testing.T) {
 	if sig == nil || sig.MV == nil {
 		t.Fatalf("negative zero is a reported zero and must survive sanitize, got %v", sig)
 	}
-	if got := (ChallengeSolve{humanity: sig}).SignalSuffix(); strings.Contains(got, "-0") {
+	if got := (ChallengeSolve{sig: sig.sigFields()}).SignalSuffix(); strings.Contains(got, "-0") {
 		t.Errorf("negative zero reached the log line: %q", got)
 	}
-	if m := (ChallengeSolve{humanity: sig}).signalMap(); math.Signbit(m["mv"].(float64)) {
+	if m := (ChallengeSolve{sig: sig.sigFields()}).signalMap(); math.Signbit(m["mv"].(float64)) {
 		t.Errorf("negative zero reached the history row: %v", m["mv"])
 	}
 }
@@ -402,5 +404,59 @@ func TestSanitizeCannotChangeScoring(t *testing.T) {
 	sig = parseHumanityBody([]byte(`{"v":1,"wd":false,"ptr":0,"tch":0,"key":0,"mv":0,"hc":8,"dpr":1.5}`))
 	if hs, tells = scoreHumanity(sig, "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0"); hs != 0 || len(tells) != 0 {
 		t.Fatalf("an untouched real browser must score clean: hs=%d tells=%v", hs, tells)
+	}
+}
+
+// The "mark store full" warning must fire ONCE per saturation episode, which
+// is what docs/waf.md tells operators to grep for. Regression anchor: it used
+// to re-arm on ANY successful insert/refresh, so once reads stopped deleting
+// expired keys, a v2-tier traffic rule re-marking an existing pair would clear
+// the flag and the next NEW pair would warn again — alternating per client.
+func TestMarkStoreFullWarnsOncePerEpisode(t *testing.T) {
+	resetChallengeV2Marks(t)
+
+	challengeV2Marks.mu.Lock()
+	for i := 0; i < challengeV2MarkMaxKeys; i++ {
+		challengeV2Marks.m[fmt.Sprintf("10.0.0.%d|h%d.gr", i%256, i)] = time.Now().Add(time.Hour)
+	}
+	challengeV2Marks.mu.Unlock()
+
+	// A NEW pair at the cap warns once and is dropped (fail-open to plain v1).
+	MarkChallengeV2("198.51.100.1", "new1.gr")
+	challengeV2Marks.mu.RLock()
+	warned := challengeV2Marks.fullWarn
+	challengeV2Marks.mu.RUnlock()
+	if !warned {
+		t.Fatal("first drop at the cap must arm the warning")
+	}
+
+	// Refreshing an EXISTING pair while still saturated is not the end of the
+	// episode: the flag must stay armed so the next new pair stays silent.
+	MarkChallengeV2("10.0.0.0", "h0.gr")
+	challengeV2Marks.mu.RLock()
+	stillWarned := challengeV2Marks.fullWarn
+	challengeV2Marks.mu.RUnlock()
+	if !stillWarned {
+		t.Fatal("a refresh at capacity must not re-arm the warning (log flood)")
+	}
+
+	// Only genuine HEADROOM ends the episode. Freeing one slot and filling it
+	// again leaves the store pinned at the cap, which is still the same
+	// episode — so drain enough that the next insert lands below it.
+	challengeV2Marks.mu.Lock()
+	freed := 0
+	for k := range challengeV2Marks.m {
+		delete(challengeV2Marks.m, k)
+		if freed++; freed == 10 {
+			break
+		}
+	}
+	challengeV2Marks.mu.Unlock()
+	MarkChallengeV2("198.51.100.2", "new2.gr")
+	challengeV2Marks.mu.RLock()
+	rearmed := challengeV2Marks.fullWarn
+	challengeV2Marks.mu.RUnlock()
+	if rearmed {
+		t.Fatal("dropping below the cap must end the episode")
 	}
 }

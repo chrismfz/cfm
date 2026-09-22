@@ -258,10 +258,17 @@ func MarkChallengeV2(ip, host string) {
 		}
 	}
 	s.m[key] = now.Add(challengeV2MarkTTL)
-	// Any successful insert/refresh means the store is not saturated: re-arm
-	// the once-per-episode warning so a LATER full episode logs again even if
-	// the previous one drained via reads/expiry alone (second-review nit).
-	s.fullWarn = false
+	// Re-arm the once-per-episode warning only when the store is genuinely
+	// BELOW the cap again. Keying it on "any successful insert/refresh" was
+	// wrong once reads stopped deleting expired keys: at saturation a v2-tier
+	// traffic rule re-marks an existing pair on every request, which would
+	// clear the flag, and the next NEW pair would log the warning again —
+	// alternating per client and flooding the log with the line docs/waf.md
+	// promises appears once per episode. A refresh while still at capacity is
+	// not the end of the episode.
+	if len(s.m) < challengeV2MarkMaxKeys {
+		s.fullWarn = false
+	}
 }
 
 // challengeV2Marked reports whether a live v2 mark covers (ip, host).
@@ -326,12 +333,16 @@ const (
 // is exactly what a burn-in operator needs to see (D5d). Without it an armed
 // solve that scores clean is byte-identical in cfm.challenges.log to a plain
 // v1 one, which reads as "the tier never fired" — the gap this function was
-// added to close. Cheap enough at solve rate (map reads plus, when geo
-// policies are loaded, one mmdb lookup), and reading a mark never consumes
-// it — challengeV2Marked only drops its own expired key — so the eager read
-// cannot starve the gate below: challengeV2Marked reads under RLock and
-// never deletes, so the common unarmed path adds no exclusive lock to the
-// solve hot path.
+// added to close.
+//
+// Cost, since this now runs on the COMMON path and not just a failing solve:
+// the fingerprint, vhost and mark grains are map reads, and challengeV2Marked
+// takes only an RLock and never deletes — no exclusive lock reaches the solve
+// hot path, and reading a mark neither consumes nor rewrites it, so the eager
+// read cannot starve the gate below. The geo grain costs nothing at all until
+// a country/ASN policy exists (GeoPolicyActionForIP returns immediately on an
+// empty policy set); once one does, it is one enricher lookup per solve
+// against the cache the decision path already warmed.
 func challengeV2ArmGrain(fpID, ip, host string) string {
 	switch {
 	case FingerprintPolicyForID(fpID) == "challenge_v2":
@@ -509,15 +520,14 @@ func scoreHumanity(sig *humanitySignals, ua string) (hs int, tells []string) {
 
 // ── Retained-signal rendering (one source, two surfaces) ───────────────────
 //
-// The log line and the history row must show the SAME numbers, so both are
-// built from the same parsed payload and the same rounding. Rounding is
-// deliberate: a raw rAF average is 16.666666666666668, which bloats every row
-// and reads as false precision on a value averaged over 8 frames.
+// The log line and the history row must show the SAME numbers, so the
+// readings are rounded ONCE at verify (sigFields; see sigRound for why) and
+// both surfaces render that one slice.
 
-// sigRound applies the display rounding ONCE, as a float64. Both surfaces
-// then carry this exact number — the log line formats it, the history row
-// stores it — so the two can never disagree, and no value is formatted and
-// re-parsed on the way. Rounding is deliberate: a raw rAF average is
+// sigRound applies the display rounding, as a float64, so both surfaces carry
+// the exact same number — the log line formats it, the history row stores it —
+// and no value is formatted and re-parsed on the way. Rounding is deliberate:
+// a raw rAF average is
 // 16.666666666666668, which bloats every row and reads as false precision on
 // a value averaged over 8 frames.
 func sigRound(v float64, prec int) float64 {
@@ -598,12 +608,11 @@ func (s *humanitySignals) sigFields() []sigField {
 // is answerable from the log at all, which it was not: mv was parsed and
 // thrown away despite a comment claiming it was recorded.
 func (s ChallengeSolve) SignalSuffix() string {
-	fields := s.humanity.sigFields()
-	if len(fields) == 0 {
+	if len(s.sig) == 0 {
 		return ""
 	}
-	parts := make([]string, 0, len(fields))
-	for _, f := range fields {
+	parts := make([]string, 0, len(s.sig))
+	for _, f := range s.sig {
 		parts = append(parts, f.key+":"+sigString(f.val))
 	}
 	return " sig=" + strings.Join(parts, ",")
@@ -615,12 +624,11 @@ func (s ChallengeSolve) SignalSuffix() string {
 // nil when nothing was retained, so the key is simply absent on such a row —
 // matching the log's missing sig= field.
 func (s ChallengeSolve) signalMap() map[string]any {
-	fields := s.humanity.sigFields()
-	if len(fields) == 0 {
+	if len(s.sig) == 0 {
 		return nil
 	}
-	out := make(map[string]any, len(fields))
-	for _, f := range fields {
+	out := make(map[string]any, len(s.sig))
+	for _, f := range s.sig {
 		out[f.key] = f.val
 	}
 	return out

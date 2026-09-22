@@ -476,13 +476,14 @@ type ChallengeSolve struct {
 	// distinguishable — a fleet-wide hs=- is a regression or an evading farm,
 	// and either must be visible (D5d), never disguised as hs=0.
 	HumanityNoPayload bool
-	// humanity retains the PARSED Rung-1 payload (nil when none arrived or the
-	// rung is off) so the solve line and the history row render the same
-	// numbers from one source rather than two drifting copies. Unexported on
-	// purpose: the payload shape is this package's business, and every reader
-	// goes through SignalSuffix/signalMap. Nothing here is scored — see
-	// humanitySignals for which fields the scorer actually uses.
-	humanity *humanitySignals
+	// sig holds the retained Rung-1 readings, already rounded — resolved ONCE
+	// at verify (humanitySignals.sigFields) so the solve line and the history
+	// row render the same numbers from one slice rather than each rebuilding
+	// it, and so neither can drift. nil when no payload arrived or the rung is
+	// off. Unexported on purpose: the payload shape is this package's
+	// business, and every reader goes through SignalSuffix/signalMap. Nothing
+	// here is scored — see humanitySignals for what the scorer actually uses.
+	sig []sigField
 	// V2Grain names the operator-armed challenge_v2 grain covering this solve
 	// ("fp" / "geo" / "vhost" / "mark"), "" when none did — i.e. exactly when
 	// the D5a gate would have teeth. Filled on every scored solve, not only a
@@ -746,9 +747,13 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		fp, _ := tlsfp.Parse(r.Header.Get(tlsFingerprintHeader))
 
 		// ChallengeV2 Rung 1 (challenge_v2.go): score the passive humanity
-		// payload the page posted with this verify. hs = -1 when the rung is
-		// disabled; an absent/malformed payload scores like an empty report
-		// (only UA-borne openers can fire) — absence never convicts (D5b).
+		// payload the page posted with this verify. v2On becomes the solve's
+		// HumanityScored, which is the ONE gate on every humanity field — a
+		// disabled rung leaves hs at its zero value and nothing is rendered or
+		// persisted (there is no -1 sentinel: hs 0 is a real score meaning
+		// "scored clean, passed"). An absent/malformed payload scores like an
+		// empty report (only UA-borne openers can fire) — absence never
+		// convicts (D5b).
 		v2On, v2Fail, v2Debug, v2Shadow := challengeV2Settings()
 		hs, hsTells, hsNoPayload, v2Grain := 0, "", false, ""
 		var hsSig *humanitySignals
@@ -784,7 +789,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			HumanityScore:     hs,
 			HumanityTells:     hsTells,
 			HumanityNoPayload: hsNoPayload,
-			humanity:          hsSig,
+			sig:               hsSig.sigFields(),
 			V2Grain:           v2Grain,
 		}
 

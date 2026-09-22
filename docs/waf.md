@@ -70,9 +70,12 @@ humanity score earns **no clearance** (`result=v2_reject`, retry-able — see
   host that also carries a v2-tier vhost challenge, or for a client under an
   armed fingerprint/geo policy, the very same WAF-marked solve reads `v2=vhost`
   / `v2=fp` / `v2=geo` — the teeth are identical, only the label differs.)
-  `v2=` absent entirely on a solve that followed a `challenge_v2` hit means the
-  mark was missing, so the client faced a plain v1 challenge. Three causes, in
-  the order worth checking: a push without a host (nothing to key the mark
+  `v2=` absent entirely on a solve that followed a `challenge_v2` hit means
+  either the rung is off or the mark was missing. Check in this order. **First,
+  `CHALLENGE_V2_PASSIVE`** — with the rung disabled the whole suffix is
+  suppressed, so if the line carries no `hs=` either, stop: nothing else is
+  wrong. If `hs=` IS there the rung is on and the mark is what is missing;
+  three causes, cheapest first: a push without a host (nothing to key the mark
   on); a solve later than `challengeV2MarkTTL` (15m); or the per-(ip,host)
   mark store hitting its cap and failing open — that one is silent except for
   a single `[challenge_v2] per-(ip,host) mark store full` line in the daemon

@@ -69,6 +69,13 @@ back-filled here — see the git/PR history for that period.
   dropped to absent — while an anomalous but *reported* reading (`hc:0`,
   `dpr:0`, a throttled tab's huge rAF average) is kept verbatim, because that
   is precisely the evidence the corpus is for.
+  **Storage note:** `challenge_solved` is the highest-volume history row, and
+  the new keys add roughly 50-80 bytes to each (`sig` is up to 8 numbers, plus
+  `hs`/`tells`/`v2`/`hs_nopayload`). `HistoryStore` is bounded by
+  `retentionDays`/`maxRows` — row counts, not bytes — so the history DB grows
+  on the order of a third to a half for that row type at unchanged retention.
+  On a busy node (~100k solves/day) that is tens of MB; revisit
+  `WEBDET_HISTORY_*` retention if the node is disk-tight.
 
 ## 2026.09.22
 
