@@ -88,9 +88,27 @@ back-filled here — see the git/PR history for that period.
   `WEBDET_HISTORY_*` retention if the node is disk-tight.
 
 ### Changed
+- **The proposed retirement of `cfm_pcw` (post-clearance nav-cadence shadow,
+  Track-2 B2) is REVERSED — the signal stays.** It had been marked
+  retire-candidate since 2026-09-18 on the grounds that it "fed no decision in
+  its lifetime". A fleet-wide check run before deleting it showed that
+  reasoning was wrong on both counts. It is alive: two episodes in the live
+  window on `rigel`, each a single IP reaching 60 navigations in 60 seconds on
+  `santorinitours.org` AFTER clearing the challenge, both scoring
+  `verdict=would_deny`. And it is not redundant: `rate_outlier`, the signal
+  said to supersede it, flagged neither IP — that vhost shows up in its output
+  only under `dc_fraction`, with 50 requests spread over 50 distinct
+  datacenter IPs, which is the opposite (distributed) shape. `cfm_pcw` is also
+  the only sensor for the exact failure mode ChallengeV2 addresses: a client
+  that solves the challenge and then behaves like a scraper. It now has the
+  D3 exit contract it never had — tune `T1`/`T2` from real `[cfm_pcw]` lines
+  (they are untuned starting constants) and re-review by 2026-10-20.
+  Its known FP risk is unchanged: the counter is keyed per-(ip,host), not
+  per-browser, so a shared egress could pool real users; neither observed
+  episode has that shape.
 - **`under_attack` campaign fingerprinter (I2) is frozen**, operator-ratified
-  2026-09-22. No code change: unlike `cfm_pcw` its mechanism is sound, it
-  simply has no consumer, so it stays in the tree exactly as it is. What the
+  2026-09-22. No code change — it stays in the tree exactly as it is; the
+  freeze is a rule about future work, not a removal. What the
   freeze means going forward: no new predicates, no weight tuning, no
   sub-signals, and I3-I5 (draft rule, auto-apply, repeat-offender escalation)
   are not to be built — the master plan's E1-E3 superseded that enforcement
@@ -109,28 +127,6 @@ back-filled here — see the git/PR history for that period.
   Scoped callers keep the rest of the payload. See
   `docs/endpoint_scope_inventory.md`.
 
-
-### Removed
-- **`cfm_pcw` (post-clearance nav-cadence shadow, Track-2 B2) is retired.**
-  Operator-ratified 2026-09-22. It shipped, ran log-only for its whole life,
-  and **fed no decision** — while its premise was structurally broken at this
-  edge: static assets bypass `cfm.lua` entirely, so the original "cleared then
-  silent" tell saw every real browser as silent, and the nav-cadence
-  replacement is keyed per-IP-per-host rather than per-browser, so any shared
-  egress (CGNAT/NAT) pools real users. Removed: `configs/lua/cfm_pcw.lua` and
-  its tests, the `cfm.lua` Step-2b wiring, the `lua_shared_dict cfm_pcw 8m`
-  declaration in both reference edge confs, the `[webdetector]
-  POST_CLEARANCE_CADENCE` key, and the bridge-config field that published it.
-  Cleared traffic is already visible to `rate_outlier` in the access log.
-  **Operators:** nothing to do — the removal is safe in every upgrade order
-  (the require was always `pcall`-guarded, and an edge conf still declaring the
-  dict just holds 8 MB it no longer uses; drop the two `lua_shared_dict
-  cfm_pcw` lines from live confs at the next edit). A `POST_CLEARANCE_CADENCE`
-  line left in `/etc/cfm/detectors.conf` is ignored. Decision record kept at
-  `docs/challenge-score-b2.md`.
-
-
-## 2026.09.22
 
 ### Added
 - **Panel-port fingerprint-policy consult (master plan item).** The

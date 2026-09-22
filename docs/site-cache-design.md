@@ -79,7 +79,7 @@ leftover **code** from the ripped-out global caching. Verdicts:
 | `ngx.shared.cfm_cache_stats` | Read by `cfm_stats.lua:398-399`, **never declared** in `lua_shared_dict` → silent no-op. | **Declare it** (§11). |
 | Commented "Future caching" recipe, `openresty.conf:841-849` + `:868` (angie `:828-834`) | A deliberate note left for exactly this work; sketches `proxy_cache_path` + per-vhost `set $cfm_static_cache`. | **Implement** as Tier A (§3, §5). |
 | Cache dirs `/var/cache/nginx/cfm_static`, `/var/cache/nginx/cfm_micro` | Already created by the daemon (`cmd/cfm/main.go:628-629`). | **Use these canonical paths.** Note the stale conf comment says `/var/cache/cfm/static` — **fix the comment** in the same change. |
-| ~~`configs/lua/cfm_pcw.lua`~~ | Was the post-clearance nav-cadence shadow counter (B2 challenge-score) — **not** a cache remnant. **Deleted 2026-09-22** when B2 was retired (`docs/challenge-score-b2.md`). | Gone; nothing to do. |
+| `configs/lua/cfm_pcw.lua` | **NOT a cache remnant.** It is the live *post-clearance nav-cadence* shadow counter (B2 challenge-score, `docs/challenge-score-b2.md`), wired at `cfm.lua` Step 2b. | **Do not touch.** |
 | `configs/lua/cfm_purge.lua` + `nginx_bridge_purge.go` | Existing purge plumbing (currently purge-ip). | **Extend** for cache purge (§10). |
 
 ---
@@ -406,8 +406,7 @@ with no filesystem walking.
 |---|---|---|
 | GET  | `/api/v1/site-cache/list` | scope-filtered; supports `?host=` and sort params |
 | GET  | `/api/v1/site-cache/get?host=` | one vhost |
-| POST | `/api/v1/site-cache/add` | `requirePOST`; scoped→own host only |
-| POST | `/api/v1/site-cache/update` | scope-checks existing **and** new vhosts |
+| POST | `/api/v1/site-cache/set` | `requirePOST`; upsert (host in body); scoped→own host only. One entry per vhost, so a single upsert replaces the add/update pair — the host is the immutable key, `set` stamps `scope_hosts` from the token |
 | POST | `/api/v1/site-cache/remove` | i.e. OFF for a vhost |
 | POST | `/api/v1/site-cache/purge` | `?host=` (per-vhost) or `?all=1` (global, admin) |
 | GET  | `/api/v1/site-cache/stats?host=` | per-vhost cache stats (§11), scope-filtered (own vhosts / all) |
@@ -426,7 +425,7 @@ over the JSON API (through `internal/clihttp`, per the transport guardrail):
 ```
 cfm webtop site-cache list [--host H] [--sort host|updated]
 cfm webtop site-cache get <host>
-cfm webtop site-cache add <host> [--static RECIPE|--micro RECIPE] [--ttl D]
+cfm webtop site-cache set <host> [--static RECIPE] [--micro RECIPE] [--static-ttl D] [--micro-ttl D] [--strict-cookies]
 cfm webtop site-cache off <host>          # remove / disable
 cfm webtop site-cache purge <host>        # or: purge --all
 cfm webtop site-cache stats [host]        # hit-ratio + HIT/MISS/BYPASS breakdown
@@ -520,7 +519,7 @@ self-service power carries no cross-tenant or correctness risk.
 
 Update `docs/endpoint_scope_inventory.md` in the same change (hard rule,
 CLAUDE.md §5): site-cache list/get/stats = scoped-allowed (own host);
-add/update/remove/purge = scoped-allowed (own host); purge-all = admin-only.
+set/remove/purge = scoped-allowed (own host); purge-all = admin-only.
 
 ---
 

@@ -194,6 +194,10 @@ local CFG = setmetatable({
   -- $cfm_origin_ka_conf sentinel in origin_pass_for(). Default OFF. See
   -- cfm_origin_ka.lua and docs/proxy-performance.md.
   origin_keepalive  = (_bridge_cfg.origin_keepalive == true),
+  -- Post-clearance nav-cadence shadow (cfm_pcw, B2). Bridge-derived so it
+  -- refreshes on the 10s TTL — flip [webdetector] POST_CLEARANCE_CADENCE with no
+  -- proxy reload. Default on (nil/absent → true), matching the fail-safe idiom.
+  post_clearance_cadence = (_bridge_cfg.post_clearance_cadence ~= false),
   -- Fingerprint-policy edge gate (Step 0c). Bridge-derived, 10s TTL: flipping
   -- [webdetector] FP_POLICY=0 removes the WHOLE per-request Step-0c cost
   -- (tlsfp tuple build + md5 + dict + any /nginx/fppolicy lookup), not just
@@ -264,6 +268,11 @@ local ua_emerg_ok, ua_emerg = pcall(require, "cfm_ua_emergency")
 -- a load failure sets waf_ok=false and disables inline WAF checks.
 local waf_ok, waf = pcall(require, "cfm_waf")
 
+-- cfm_pcw: post-clearance nav-cadence shadow (Track-2 B2). Pure logic, log-only;
+-- wired at Step 2b under a pcall so a bug here can never break the clearance
+-- fast-path. If it fails to load, the observe call below is simply skipped.
+local pcw_ok, pcw = pcall(require, "cfm_pcw")
+
 -- cfm_waf_util is a dependency of cfm_waf (already loaded); require it directly
 -- for the pure ct_is_inspectable() classifier used by the body-read gate (F07).
 -- If it fails to load, the F07 Content-Type branch fails closed (skips the read).
@@ -277,6 +286,10 @@ local wutil_ok, wutil = pcall(require, "cfm_waf_util")
 -- — which is the bulk of real production traffic on logged-in vhosts.
 
 local SH = ngx.shared.cfm_decisions
+-- Dedicated bounded dict for the post-clearance cadence shadow (B2). May be nil
+-- on an edge conf that predates the `lua_shared_dict cfm_pcw` declaration — the
+-- Step 2b observe call guards on it, so an old conf just no-ops the feature.
+local PCW_SH = ngx.shared.cfm_pcw
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- UTILS
@@ -1522,9 +1535,24 @@ end
 if clearance_allow then
   refresh_clearance_cookie(clearance_cookie, ip, host, clearance_scope)
   touch_ok_scoped(ip, host, clearance_scope)
-  -- (A post-clearance nav-cadence shadow, cfm_pcw/B2, used to run here. RETIRED
-  -- 2026-09-22: static assets bypass cfm.lua entirely, so its "cleared then
-  -- silent" discriminator saw every real browser as silent — docs/challenge-score-b2.md.)
+  -- Post-clearance cadence shadow (Track-2 B2), edge-local + LOG-ONLY. A cleared
+  -- client is invisible to the in-path decision path (this short-circuit skips the
+  -- /nginx/decision RPC), so we measure its nav rate here. pcall-guarded so a bug
+  -- in the observer can NEVER break the clearance fast-path — the bulk of real
+  -- production traffic. observe() returns a verdict ONLY when a line is due.
+  if pcw_ok and pcw and CFG.post_clearance_cadence and PCW_SH then
+    -- Key at the clearance grain (ip|host|scope) so a shared egress isn't pooled
+    -- across hosts, and pass the fetch-metadata headers so is_nav counts only a
+    -- top-level document nav (not iframes / prefetch).
+    local keyid = ip .. "|" .. (host or "-") .. "|" .. clearance_scope
+    local ok, v, navs = pcall(pcw.observe, PCW_SH, keyid, method,
+      ngx.var.http_accept, ngx.var.http_sec_fetch_dest,
+      ngx.var.http_sec_purpose or ngx.var.http_purpose)
+    if ok and v then
+      log_ev(ngx.WARN, "[cfm_pcw] post_clearance_burst ip=", ip, " host=", host or "-",
+        " navs=", navs, " window=", pcw.WINDOW_SEC, " verdict=", v)
+    end
+  end
   ngx.header["X-CFM-Action"] = "allow_cookie"
   ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
   return

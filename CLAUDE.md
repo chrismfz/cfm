@@ -539,6 +539,15 @@ entry.
   case-inconsistent join that false-flagged tenants; a `%.2g` value misrender).
   Docs-only / config-comment PRs may skip it; anything with runtime behaviour
   does not. Note in the PR body that the review ran and what it found.
+- **Never retire a signal/detector on reasoning alone — check the fleet
+  first** (`docs/abuse-defense-master-plan.md` §4 D3a, added after `cfm_pcw`
+  came one review away from being deleted while alive). "It fed no decision"
+  is not evidence: a log-only signal feeds no decision by construction. Before
+  deleting, show two things with the CFM MCP (`edge_error_tail` /
+  `cfm_log_tail` / `abuse_shadow`, `node="all"`): that it actually emitted,
+  and — if the case is "signal Y already covers it" — that Y's own output
+  contains the same events. Zero emissions is a DEPLOYMENT finding, not a
+  verdict on the signal.
 - After edge-affecting changes, run the relevant runbook/checklist in `docs/`
   before considering the change done.
 - Update `CHANGELOG.md` (`[Unreleased]`) as part of the change, per §8.
