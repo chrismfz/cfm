@@ -145,3 +145,38 @@ func TestCloseUnderLookupsIsSafe(t *testing.T) {
 		t.Fatal("Enabled() must be false once the databases are closed")
 	}
 }
+
+// The refresh check is rate-limited lock-free (statChk). It must still run on
+// the very first call ("never checked"), must NOT reopen within statEvery of
+// the last check even when the files changed, and must pick the change up once
+// the interval has passed.
+func TestRefreshRateLimit(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	put := func(asn uint32, mt time.Time) {
+		writeMMDB(t, dir, "GeoLite2-ASN.mmdb", buildMMDB("GeoLite2-ASN", asnRecord(asn, "Test AS")), mt)
+	}
+	put(6799, base)
+	e, _ := New(dir)
+	defer e.Close()
+	asn := func() uint { return e.LookupGeoFast("94.68.42.127").ASN }
+
+	put(3329, base.Add(time.Minute))
+	e.refreshIfChanged() // first ever call: statChk is 0, so it checks
+	if got := asn(); got != 3329 {
+		t.Fatalf("the first refresh must run; ASN = %d, want 3329", got)
+	}
+
+	put(1241, base.Add(2*time.Minute))
+	e.refreshIfChanged() // checked a moment ago: rate-limited
+	if got := asn(); got != 3329 {
+		t.Fatalf("a refresh within statEvery must not reopen; ASN = %d, want 3329", got)
+	}
+
+	// Pretend the last check was more than statEvery ago.
+	e.statChk.Store(int64(time.Since(monoStart)) + 1 - int64(statEvery) - 1)
+	e.refreshIfChanged()
+	if got := asn(); got != 1241 {
+		t.Fatalf("once statEvery has passed the change must be picked up; ASN = %d, want 1241", got)
+	}
+}

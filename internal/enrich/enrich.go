@@ -121,8 +121,9 @@ type Enricher struct {
 	searchDirs []string
 	asnMTime   time.Time
 	cityMTime  time.Time
-	// statChk is the UnixNano of the last on-disk change check. Atomic, NOT
-	// under mu: refreshIfChanged runs on every Lookup cache miss, and when
+	// statChk is when the last on-disk change check ran, in monotonic
+	// nanoseconds since monoStart (0 = never). Atomic, NOT under mu:
+	// refreshIfChanged runs on every Lookup cache miss, and when
 	// its rate-limit test took mu.Lock, that write lock — now that readers
 	// hold mu.RLock for a whole decode — waited on in-flight reads and, with
 	// Go's writer preference, stalled every new reader behind it, on every
@@ -436,16 +437,22 @@ func (e *Enricher) Enabled() bool {
 	return e.asnDB != nil || e.cityDB != nil
 }
 
+// monoStart anchors statChk to the monotonic clock (see refreshIfChanged).
+var monoStart = time.Now()
+
 // refreshIfChanged checks if files changed and safely reopens them.
 // CRITICAL: Does file I/O OUTSIDE the mutex to avoid blocking all Lookup() calls.
 func (e *Enricher) refreshIfChanged() {
-	now := time.Now().UnixNano()
+	// Monotonic, like the time.Time.Sub this replaced: a wall-clock step
+	// (NTP) must neither stall nor hasten the check. +1 keeps a real reading
+	// from ever colliding with 0, which means "never checked".
+	now := int64(time.Since(monoStart)) + 1
 
 	// Rate limit WITHOUT a lock (see statChk): the common case — checked
 	// recently — returns here having touched only an atomic. One caller per
 	// statEvery wins the CompareAndSwap and does the check.
 	last := e.statChk.Load()
-	if now-last < int64(statEvery) || !e.statChk.CompareAndSwap(last, now) {
+	if (last != 0 && now-last < int64(statEvery)) || !e.statChk.CompareAndSwap(last, now) {
 		return
 	}
 
