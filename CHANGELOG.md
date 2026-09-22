@@ -168,6 +168,14 @@ back-filled here — see the git/PR history for that period.
     redirect in `cfm_redirect`, such as the copy an exec-backend `cfm dnat on`
     wrote, kept redirecting while status reported off. It now deletes the
     `cfm_redirect` table whole, as the exec backend always did.
+  - `EnsureBase` re-declared the input chain on every call, and the kernel
+    rejects the whole batch when the priority differs from the live chain's
+    ("operation not supported"). From then on every `EnsureBase` failed, and
+    so did every web `DNATOn`, which calls it (failsafe recovery included). The
+    priority differs whenever `NFT_INPUT_PRIORITY` changed after the chain was
+    created, and in any process without the config, such as a CLI command. An
+    existing chain is now kept with a warning, as the exec backend does;
+    `cfm reset` applies a new priority.
 - **`cfm` CLI commands now use the firewall engine configured in `cfm.conf`,
   like the daemon.** The CLI read only the `CFM_FIREWALL_ENGINE` environment
   variable and otherwise used the exec `nft` backend. On an nftlib node,

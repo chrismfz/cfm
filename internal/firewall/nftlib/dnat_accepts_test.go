@@ -3,6 +3,7 @@
 package nftlib
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -11,10 +12,12 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/google/nftables"
 	"github.com/mdlayher/netlink"
 	"golang.org/x/sys/unix"
 
 	"cfm/internal/firewall"
+	"cfm/internal/firewall/selfip"
 )
 
 // fakeNFT puts an `nft` script first in PATH for this test, so the CLI side of
@@ -203,5 +206,62 @@ func TestDNATOff_CustomTableKeepsTheTable(t *testing.T) {
 	_ = b.DNATOff("inet", "operator_nat")
 	if deleted {
 		t.Fatal("DNATOff deleted a table that is not cfm_redirect")
+	}
+}
+
+// inputChainMsg is a dump entry for inet cfm's input base chain at prio.
+func inputChainMsg(prio int32) netlink.Message {
+	hook := netlink.NewAttributeEncoder()
+	hook.ByteOrder = binary.BigEndian
+	hook.Uint32(unix.NFTA_HOOK_HOOKNUM, uint32(*nftables.ChainHookInput))
+	hook.Uint32(unix.NFTA_HOOK_PRIORITY, uint32(prio))
+	hb, _ := hook.Encode()
+	ae := netlink.NewAttributeEncoder()
+	ae.String(unix.NFTA_CHAIN_TABLE, cfmTableName)
+	ae.String(unix.NFTA_CHAIN_NAME, "input")
+	ae.Bytes(unix.NLA_F_NESTED|unix.NFTA_CHAIN_HOOK, hb)
+	attrs, _ := ae.Encode()
+	return netlink.Message{
+		Header: netlink.Header{Type: netlink.HeaderType(unix.NFNL_SUBSYS_NFTABLES<<8 | unix.NFT_MSG_NEWCHAIN)},
+		Data:   append([]byte{unix.NFPROTO_INET, 0, 0, 0}, attrs...),
+	}
+}
+
+// EnsureBase must not re-declare an input chain that already exists: with
+// another priority the kernel rejects the whole batch (EOPNOTSUPP, seen on a
+// real kernel), which failed every later EnsureBase and DNATOn. A one-shot
+// `cfm dnat on` builds its backend with no config, so its priority is the
+// -50 default whatever NFT_INPUT_PRIORITY the chain was created with.
+func TestEnsureBase_KeepsAnExistingInputChain(t *testing.T) {
+	fakeNFT(t, "")
+	var declaredInput bool
+	b := nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
+		if isBatch(req) {
+			for _, m := range req {
+				if nftMsgType(m) != unix.NFT_MSG_NEWCHAIN {
+					continue
+				}
+				ad, _ := netlink.NewAttributeDecoder(m.Data[4:])
+				for ad.Next() {
+					if ad.Type() == unix.NFTA_CHAIN_NAME && ad.String() == "input" {
+						declaredInput = true
+					}
+				}
+			}
+			return nil, io.EOF
+		}
+		if nftMsgType(req[0]) == unix.NFT_MSG_GETCHAIN {
+			m := inputChainMsg(50)
+			m.Header.Sequence = req[0].Header.Sequence
+			return []netlink.Message{m}, nil
+		}
+		return nil, io.EOF
+	})
+	b.selfResolver = selfip.New()
+	if err := b.EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase: %v", err)
+	}
+	if declaredInput {
+		t.Fatal("EnsureBase re-declared the existing input chain; with another priority that fails the whole batch")
 	}
 }

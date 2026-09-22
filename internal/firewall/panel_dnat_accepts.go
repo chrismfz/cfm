@@ -238,9 +238,10 @@ func EnsurePanelDNATAccepts(ops NFTTextOps) ([]string, error) {
 	return changes, nil
 }
 
-// RemovePanelDNATAccepts deletes every tagged and legacy panel accept. As
-// before, a chain that can't be listed is reported as nothing to remove, and
-// a failed delete is reported in the changes rather than as an error.
+// RemovePanelDNATAccepts deletes every tagged and legacy panel accept. As on
+// the nft backend it replaces, a chain that can't be listed is reported as
+// nothing to remove, and a failed delete is reported in the changes rather
+// than as an error.
 func RemovePanelDNATAccepts(ops NFTTextOps) ([]string, error) {
 	out, err := ops.ListInput()
 	if err != nil {

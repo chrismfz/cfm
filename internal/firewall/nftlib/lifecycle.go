@@ -65,14 +65,25 @@ func (b *Backend) EnsureBase() (err error) {
 
 	acceptPolicy := nftables.ChainPolicyAccept
 
-	b.conn.AddChain(&nftables.Chain{
-		Table:    table,
-		Name:     "input",
-		Type:     nftables.ChainTypeFilter,
-		Hooknum:  nftables.ChainHookInput,
-		Priority: &inputPrio,
-		Policy:   &acceptPolicy,
-	})
+	// Keep an existing input chain as it is, as the nft backend does.
+	// Re-declaring a base chain with another priority fails the whole batch
+	// (EOPNOTSUPP), so every later EnsureBase — and every DNATOn, which calls
+	// it — would fail. The priority differs whenever this process has no
+	// config (a one-shot `cfm dnat on`, which builds its backend without one)
+	// or NFT_INPUT_PRIORITY changed after the chain was created.
+	if cur := b.existingInputChain(); cur == nil {
+		b.conn.AddChain(&nftables.Chain{
+			Table:    table,
+			Name:     "input",
+			Type:     nftables.ChainTypeFilter,
+			Hooknum:  nftables.ChainHookInput,
+			Priority: &inputPrio,
+			Policy:   &acceptPolicy,
+		})
+	} else if b.cfg != nil && cur.Priority != nil && *cur.Priority != inputPrio {
+		logging.Logf("[nftlib] WARNING: input chain priority is %d, config wants %d; keeping the existing chain. Run 'cfm reset' to apply the new priority.",
+			*cur.Priority, inputPrio)
+	}
 	b.conn.AddChain(&nftables.Chain{Table: table, Name: "flood"})
 	dstNatPrio := *nftables.ChainPriorityNATDest
 	b.conn.AddChain(&nftables.Chain{
@@ -173,6 +184,24 @@ func (b *Backend) EnsureBase() (err error) {
 	b.applyBaseInputRules()
 	cliWork = time.Since(cliStart)
 
+	return nil
+}
+
+// existingInputChain returns inet cfm's input chain, or nil when it doesn't
+// exist or the chain list can't be read (EnsureBase then declares it, as it
+// always did). Only chains are listed: never the input chain's rules, which
+// google/nftables can't decode (see panel_dnat_accepts.go). Must be called
+// with b.mu held.
+func (b *Backend) existingInputChain() *nftables.Chain {
+	chains, err := b.conn.ListChainsOfTableFamily(nftables.TableFamilyINet)
+	if err != nil {
+		return nil
+	}
+	for _, ch := range chains {
+		if ch.Table != nil && ch.Table.Name == cfmTableName && ch.Name == "input" {
+			return ch
+		}
+	}
 	return nil
 }
 
