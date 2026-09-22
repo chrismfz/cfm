@@ -162,6 +162,15 @@ back-filled here — see the git/PR history for that period.
   scores on network identity.
 
 ### Fixed
+- **Leniency `MATCH_COUNTRY` now matches any ISO country code.** It compared
+  the configured value against the client's country NAME, through a built-in
+  table of ~50 names. So an ISO code for a country outside that table (`EE`,
+  `LT`, `LU`, …) never matched, and on a node reading IPLocate's database
+  (which names the Netherlands "The Netherlands") neither did `NL` or
+  `NETHERLANDS`. The client's ISO code is now compared first; English names
+  keep working. Nodes whose `MATCH_COUNTRY` lists such a code start applying
+  the softer leniency block to those clients; the shipped `GR,CY` is
+  unaffected.
 - **Nodes without a MaxMind account had no country or ASN anywhere.** When
   `MAXMIND_ACCOUNT_ID` / `MAXMIND_LICENSE_KEY` are not set, the MaxMind updater
   downloads IPLocate's free databases and installs them as

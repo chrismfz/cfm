@@ -713,7 +713,7 @@ detector logic or `*_register.go` changes — leniency is purely a sink policy.
 **Config syntax:**
 ```ini
 [exim_security.leniency]
-MATCH_COUNTRY  = "GR,CY"           ; ISO or full name, OR logic
+MATCH_COUNTRY  = "GR,CY"           ; ISO code (any country) or English name, OR logic
 ; MATCH_ASN   = "AS6799,AS6866"    ; optional, OR with country
 BLOCK          = "1h"              ; no | dryrun | permanent | <duration>
 BLOCK_COOLDOWN = "30m"
