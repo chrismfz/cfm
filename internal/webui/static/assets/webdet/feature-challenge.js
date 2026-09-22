@@ -115,15 +115,21 @@ export const challengeMixin = {
       this.activeChallengeVhosts = this.extractRows(rows, "rows");
       return this.activeChallengeVhosts;
     },
-    async toggleChallenge(host) {
+    // tier: the Tier-picker value, passed ONLY by call sites that RENDER the
+    // picker (the `suspicious` partial). Every other Challenge button omits it
+    // → no `rung` in the payload → the server PRESERVES an existing v2 arm
+    // (an explicit rung would silently re-tier it — second-review finding).
+    async toggleChallenge(host, tier) {
       if (!host) return;
       try {
         if (this.challengeState(host)) {
           await this.postJSON("v1/challenge/vhost/remove", { host });
           this.actionMsg = `Challenge removed for ${host}`;
         } else {
-          await this.postJSON("v1/challenge/vhost/add", { host, ttl: this.challengeTTL, reason: "cfm-admin-ui", rung: this.challengeRung });
-          this.actionMsg = `Challenge enabled for ${host} (${this.challengeTTLLabel}, ${this.challengeRung})`;
+          const body = { host, ttl: this.challengeTTL, reason: "cfm-admin-ui" };
+          if (typeof tier === "string" && tier) body.rung = tier;
+          await this.postJSON("v1/challenge/vhost/add", body);
+          this.actionMsg = `Challenge enabled for ${host} (${this.challengeTTLLabel}${body.rung ? ", " + body.rung : ""})`;
         }
         await this.refreshChallengeVhosts();
       } catch (err) {
@@ -131,11 +137,13 @@ export const challengeMixin = {
         console.error("[cfm-admin] challenge action failed", err);
       }
     },
-    async manualChallenge(host) {
+    async manualChallenge(host, tier) {
       if (!host) return;
       try {
-        await this.postJSON("v1/challenge/vhost/add", { host, ttl: this.challengeTTL, reason: "cfm-admin-ui-manual", rung: this.challengeRung });
-        this.actionMsg = `Manual challenge enabled for ${host} (${this.challengeTTLLabel}, ${this.challengeRung})`;
+        const body = { host, ttl: this.challengeTTL, reason: "cfm-admin-ui-manual" };
+        if (typeof tier === "string" && tier) body.rung = tier;
+        await this.postJSON("v1/challenge/vhost/add", body);
+        this.actionMsg = `Manual challenge enabled for ${host} (${this.challengeTTLLabel}${body.rung ? ", " + body.rung : ""})`;
         await this.refreshChallengeVhosts();
       } catch (err) {
         this.actionMsg = `Manual challenge failed for ${host}: ${err}`;

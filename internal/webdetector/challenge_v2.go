@@ -50,26 +50,22 @@ package webdetector
 //     clean one), so evasion shows up in the burn-in data. If a farm adapts,
 //     the escalation is Rung 2 (visible interactive check, accessible), per
 //     the ladder.
-//   - The armed gate keys on the X-CFM-TLS header, which is trustworthy only
-//     where the EDGE stamps it (OpenResty/Angie clear + re-stamp it). On the
-//     legacy DNAT path the client talks to this server directly and authors
-//     its own headers, so an armed farm there can omit/forge the id and slip
-//     the gate — Rung-1 TEETH are web/edge-path-only, same limitation family
-//     as the slice-2 edge enforcement. (A forged id also taints the fp= on
-//     would_v2 shadow lines from DNAT clients; the ledger's solver-farm
-//     conviction inputs have the same caveat, internal/tlsfp.)
-//   - The VHOST grain (arm-surfaces slice A) has the same residual through a
-//     different header: solve.Host comes from trustedForwardedHost (XFH,
-//     falling back to Host), which a DNAT client authors itself — a
-//     signal-aware farm can lie about the host on the verify POST and dodge a
-//     v2 vhost arm there. On the EDGE path the enforcement holds regardless
-//     (clearance is host-bound and validated against ngx.var.host in
-//     cfm.lua, so a spoofed-host cookie is useless on the armed vhost), but
-//     the edge's /__cfm_verify block does not clear/re-stamp XFH, so
-//     solve.Host in v2_reject/would_v2 TELEMETRY is client-influenced even
-//     there. So: the vhost grain's serve+solve-lifecycle works in both
-//     modes, its TEETH are robust on the edge path and best-effort on DNAT —
-//     the same honesty tier as the fingerprint grain above.
+//   - The armed gate's inputs (X-CFM-TLS for the fingerprint grain, the
+//     verify host for the vhost grain) are trustworthy because verify is
+//     reachable ONLY through the edge proxy: the challenge server binds
+//     localhost (CHALLENGE_HTTP_LISTEN=127.0.0.1:9098) and the legacy per-IP
+//     challenge-DNAT redirect — the one path where clients reached this
+//     server directly and authored their own headers — is RETIRED
+//     (docs/edge-unification-plan.md; the 9099 TLS listener is gone). The
+//     reference edge confs' /__cfm_verify blocks clear+re-stamp X-CFM-TLS
+//     AND re-stamp X-Forwarded-Host = $host, so solve.Host / the fp id are
+//     edge-authoritative on current confs. Defense-in-depth residuals, not
+//     live paths: (a) a deployed edge conf predating the XFH re-stamp leaves
+//     solve.Host client-influenced — TELEMETRY only, the teeth still hold
+//     because clearance is host-bound and validated against ngx.var.host in
+//     cfm.lua; (b) an operator who re-binds CHALLENGE_HTTP_LISTEN off
+//     localhost re-opens the direct-client path and with it every
+//     client-authored-header caveat — don't.
 
 import (
 	"encoding/json"

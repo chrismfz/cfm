@@ -154,7 +154,14 @@ func TestChallengeV2HostArmed_ApexCoversWWWAndWiring(t *testing.T) {
 // would leave the suite green while the teeth silently vanish).
 func TestNewEngineWiresChallengeV2HostArmed(t *testing.T) {
 	t.Cleanup(func() { SetChallengeV2HostArmed(nil) })
-	e := NewEngine(Config{Every: time.Second, Window: time.Minute})
+	// Isolated store path: FillDefaults would otherwise point manualChal at
+	// the REAL /var/lib/cfm snapshot — on a root-run test host this would
+	// persist "wired.gr" into production state (second-review finding).
+	e := NewEngine(Config{
+		Every:                    time.Second,
+		Window:                   time.Minute,
+		ChallengeManualStorePath: filepath.Join(t.TempDir(), "manual.json"),
+	})
 	e.ManualChallengeVhost("wired.gr", time.Hour, "manual", "v2")
 	if !challengeV2HostArmed("wired.gr") {
 		t.Fatalf("NewEngine did not wire the v2 vhost gate to its manual store")

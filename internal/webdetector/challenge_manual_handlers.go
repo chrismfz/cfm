@@ -109,22 +109,23 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rung: " + req.Rung + " (use v1 or v2)"})
 		return
 	}
-	// Wildcard hosts (*.example.com / cpanel.*) are challengeable, but the
-	// verify-side rung lookup is exact+www only — a wildcard v2 arm would
-	// SERVE challenges on matching hosts while the v2 gate never fires, with
-	// the status still claiming v2 (review finding: silent tier downgrade +
-	// lying status). Fail closed until the rung lookup learns the bridge's
-	// wildcard match.
-	if rung == "v2" && strings.Contains(req.Host, "*") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rung=v2 is not supported on wildcard hosts yet — arm the concrete vhost(s)"})
-		return
-	}
 	// An ABSENT tier preserves an existing arm's rung: a TTL extension or
 	// re-challenge from a rung-unaware surface (live view, bots drilldown,
 	// plain CLI) must not silently disarm v2 (review finding). An explicit
 	// rung=v1 still downgrades — that is the operator saying so.
 	if strings.TrimSpace(req.Rung) == "" {
 		rung = e.manualChal.rung(req.Host)
+	}
+	// Wildcard hosts (*.example.com / cpanel.*) are challengeable, but the
+	// verify-side rung lookup is exact+www only — a wildcard v2 arm would
+	// SERVE challenges on matching hosts while the v2 gate never fires, with
+	// the status still claiming v2 (review finding: silent tier downgrade +
+	// lying status). Fail closed until the rung lookup learns the bridge's
+	// wildcard match. Runs on the EFFECTIVE rung (after the preserve above),
+	// so even a stale preserved wildcard-v2 entry cannot be re-persisted.
+	if rung == "v2" && strings.Contains(req.Host, "*") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rung=v2 is not supported on wildcard hosts yet — arm the concrete vhost(s)"})
+		return
 	}
 
 	e.ManualChallengeVhost(req.Host, ttl, req.Reason, rung)
@@ -285,9 +286,9 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		// The tier of the covering manual challenge ("v2" or "" for plain).
 		// This is the ONE vhost surface scoped tokens can read, so a customer
 		// who armed v2 on their own vhost can see it (review finding).
-		"rung": e.manualChallengeRung(host),
-		"auto_active":   autoActive,
-		"auto_since":    autoSince,
+		"rung":        e.manualChallengeRung(host),
+		"auto_active": autoActive,
+		"auto_since":  autoSince,
 		// Scoped tokens reach the vhost list only through this endpoint, so the
 		// farm mark, the shadow outlier count, the facet cardinality, the cost
 		// pressure, the datacenter fraction and the escalation state have to ride

@@ -30,12 +30,12 @@ back-filled here — see the git/PR history for that period.
   daemon restarts with the manual challenge, covers the www variant when
   armed on the apex, and shows in the vhost status APIs (`rung`), including
   the scoped-readable `/challenge/vhost/status`. The tier is enforced at
-  verify, which always runs in the daemon — on the edge path the teeth are
-  robust (the edge now re-stamps `X-Forwarded-Host` on `/__cfm_verify`, and
-  clearance stays host-bound); on the DNAT path the verify host is
-  client-authored, so a signal-aware farm can dodge the vhost arm by lying
-  about the host — best-effort there, same honesty tier as the fingerprint
-  grain. Wildcard hosts cannot be v2-armed yet (fail-closed: the rung
+  verify, which is reachable only through the edge (the challenge server
+  binds localhost; the legacy per-IP challenge-DNAT is retired), so the
+  teeth hold on every live path — and the edge verify blocks now re-stamp
+  `X-Forwarded-Host` so the verify host is edge-authoritative, not
+  client-influenced (clearance stays host-bound regardless).
+  Wildcard hosts cannot be v2-armed yet (fail-closed: the rung
   lookup is exact+www), and a rung-less re-add/extend PRESERVES an existing
   v2 arm (only an explicit `rung=v1` downgrades). `CHALLENGE_V2_PASSIVE=0`
   remains the verify-teeth kill switch.

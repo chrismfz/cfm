@@ -270,8 +270,8 @@ const defaultManualChallengeTTL = 30 * time.Minute
 // rung "" = plain challenge; "v2" = ChallengeV2 (same serve, but at verify a
 // failing humanity score earns no clearance — see challengeV2HostArmed). The
 // rung never reaches the bridge: enforcement of the tier lives entirely at
-// verify, which works in BOTH bridge and DNAT modes (verify always runs in
-// this daemon).
+// verify, which is reachable only through the edge proxy (the challenge
+// server binds localhost; the per-IP challenge-DNAT is retired).
 //
 // Idempotent — calling again refreshes the TTL (and can change the rung).
 func (e *Engine) ManualChallengeVhost(host string, ttl time.Duration, reason, rung string) {
