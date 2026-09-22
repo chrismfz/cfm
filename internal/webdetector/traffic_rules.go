@@ -275,7 +275,7 @@ func (s *trafficRuleStore) Update(id string, in TrafficRule) (TrafficRule, error
 		return TrafficRule{}, errors.New("rule not found")
 	}
 	if cur.Unsupported {
-		return TrafficRule{}, errors.New("rule uses match fields this cfm build does not understand; upgrade cfm to edit or enable it")
+		return TrafficRule{}, errors.New("rule uses match/scope fields or an action this cfm build does not understand; upgrade cfm to edit or enable it")
 	}
 
 	in.Unsupported = false

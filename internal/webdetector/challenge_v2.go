@@ -13,9 +13,12 @@ package webdetector
 //   (a) SCOPE      — the score has TEETH only for a solve covered by an
 //                    operator-armed `challenge_v2` on SOME grain: the client's
 //                    fingerprint (FingerprintPolicyForID), a fleet-armed
-//                    country/ASN policy (GeoPolicyActionForIP), or a v2-tier
-//                    manual vhost challenge (challengeV2HostArmed); everyone
-//                    else is scored shadow/log-only.
+//                    country/ASN policy (GeoPolicyActionForIP), a v2-tier
+//                    manual vhost challenge (challengeV2HostArmed), or a
+//                    per-(ip,host) mark a v2-tier traffic rule wrote at
+//                    decision time (challengeV2Marked — same
+//                    edge-authoritative ip/host inputs as the decision and
+//                    verify paths); everyone else is scored shadow/log-only.
 //   (b) ABSENCE    — a solve can fail ONLY on positive headless evidence
 //                    (webdriver true, a software renderer, a self-contradicting
 //                    report). A missing payload (old cached page, blocked JS,
@@ -187,9 +190,12 @@ func MarkChallengeV2(ip, host string) {
 			}
 			return // fail-open: plain v1 challenge for the newcomer
 		}
-		s.fullWarn = false
 	}
 	s.m[key] = now.Add(challengeV2MarkTTL)
+	// Any successful insert/refresh means the store is not saturated: re-arm
+	// the once-per-episode warning so a LATER full episode logs again even if
+	// the previous one drained via reads/expiry alone (second-review nit).
+	s.fullWarn = false
 }
 
 // challengeV2Marked reports whether a live v2 mark covers (ip, host).
