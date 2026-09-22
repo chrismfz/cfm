@@ -197,13 +197,24 @@ func TestGeoPolicyStoreAndLookup(t *testing.T) {
 
 // The detectors factory rebuilds the engine on every reload, and NewEngine is
 // what wires the verify-side geo resolver. An engine built WITHOUT an enricher
-// (enrichment turned off, or its init failed) must clear it: it used to be set
+// (ENRICH = 0; enrich.New itself never fails) must clear it: it used to be set
 // only when an enricher existed, so the previous engine's resolver stayed
 // wired — an armed country/ASN challenge_v2 kept biting at verify through an
 // enricher the current config no longer has, and kept that enricher alive.
 func TestNewEngineRewiresTheGeoResolverOnEveryBuild(t *testing.T) {
 	resetFPPolicies(t)
-	t.Cleanup(func() { SetFingerprintPolicyGeoResolver(nil) })
+	// NewEngine also rewires the other verify-path globals; put all three
+	// back so a later test never inherits this one's engine or its real,
+	// PTR-resolving enricher.
+	prevSolve := challengeSolveEnricher.Load()
+	challengeV2.mu.RLock()
+	prevHostArmed := challengeV2.hostArmed
+	challengeV2.mu.RUnlock()
+	t.Cleanup(func() {
+		SetFingerprintPolicyGeoResolver(nil)
+		challengeSolveEnricher.Store(prevSolve)
+		SetChallengeV2HostArmed(prevHostArmed)
+	})
 	SetFingerprintPolicies([]FingerprintPolicy{{ID: "GR", Kind: "country", Action: "challenge_v2"}})
 
 	// The previous engine's resolver.

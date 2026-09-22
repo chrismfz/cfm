@@ -119,9 +119,8 @@ back-filled here — see the git/PR history for that period.
   detector is rebuilt, and each rebuild wired the verify-side geo lookup
   (what lets an armed country/ASN `challenge_v2` policy reject a failing
   solve) only when the new configuration HAD enrichment — it was never
-  cleared. So after a reload with enrichment off (or an enrichment init
-  failure), the verify gate kept enforcing through the previous
-  configuration's enricher, and kept that enricher (its GeoLite2 readers and
+  cleared. So after a reload that turned enrichment off (`ENRICH = 0`), the
+  verify gate kept enforcing through the previous configuration's enricher, and kept that enricher (its GeoLite2 readers and
   lookup caches) in memory. It now follows the current configuration: without
   enrichment the verify-side geo check is off (fail-open, as documented), the
   same as on a daemon started without it. Fingerprint policies and the

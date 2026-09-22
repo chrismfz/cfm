@@ -661,9 +661,10 @@ func NewEngine(cfg Config) *Engine {
 	// Cached-or-async — a cold IP resolves on a later solve attempt (fail-open).
 	// Set on EVERY engine build and cleared when this one has no enricher,
 	// like the solve enricher below: the factory rebuilds the engine on each
-	// reload, and a reload that turns enrichment off (or whose enricher fails
-	// to init) must not leave the verify gate enforcing geo policies through
-	// the PREVIOUS engine's enricher — which that closure also kept alive.
+	// reload, and a reload that turns enrichment off (ENRICH = 0 — enrich.New
+	// itself never fails) must not leave the verify gate enforcing geo
+	// policies through the PREVIOUS engine's enricher, which that closure also
+	// kept alive.
 	if e.enr != nil {
 		enr := e.enr
 		SetFingerprintPolicyGeoResolver(func(ip string) (string, uint64) {
