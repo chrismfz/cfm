@@ -659,12 +659,20 @@ func NewEngine(cfg Config) *Engine {
 	// Geo resolver for the verify-side challenge_v2 gate (policy-kinds slice):
 	// lets GeoPolicyActionForIP map a solving client's IP to country/ASN.
 	// Cached-or-async — a cold IP resolves on a later solve attempt (fail-open).
+	// Set on EVERY engine build and cleared when this one has no enricher,
+	// like the solve enricher below: the factory rebuilds the engine on each
+	// reload, and a reload that turns enrichment off (ENRICH = 0 — enrich.New
+	// itself never fails) must not leave the verify gate enforcing geo
+	// policies through the PREVIOUS engine's enricher, which that closure also
+	// kept alive.
 	if e.enr != nil {
 		enr := e.enr
 		SetFingerprintPolicyGeoResolver(func(ip string) (string, uint64) {
 			r := enr.LookupCachedOrAsync(ip)
 			return r.CountryISO, uint64(r.ASN)
 		})
+	} else {
+		SetFingerprintPolicyGeoResolver(nil)
 	}
 
 	// Network identity for every solve and Rung-1 reject (challenge_geo.go):
@@ -680,9 +688,8 @@ func NewEngine(cfg Config) *Engine {
 	// Set on EVERY engine build, cleared when this one has no enricher: the
 	// factory rebuilds the engine on each reload, and a reload that turns
 	// enrichment off must not keep stamping the previous engine's geo onto
-	// solves. (This does not free that enricher: the verify-side geo resolver
-	// above is never cleared and still holds it — a pre-existing gap in that
-	// enforcement path, not changed here.)
+	// solves. (The verify-side geo resolver above follows the same rule, so
+	// with both cleared nothing here holds the previous engine's enricher.)
 	if e.enr != nil {
 		enr := e.enr
 		SetChallengeSolveEnricher(func(ip string) enrich.Result {

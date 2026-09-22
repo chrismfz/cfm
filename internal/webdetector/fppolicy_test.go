@@ -195,6 +195,50 @@ func TestGeoPolicyStoreAndLookup(t *testing.T) {
 	}
 }
 
+// The detectors factory rebuilds the engine on every reload, and NewEngine is
+// what wires the verify-side geo resolver. An engine built WITHOUT an enricher
+// (ENRICH = 0; enrich.New itself never fails) must clear it: it used to be set
+// only when an enricher existed, so the previous engine's resolver stayed
+// wired — an armed country/ASN challenge_v2 kept biting at verify through an
+// enricher the current config no longer has, and kept that enricher alive.
+func TestNewEngineRewiresTheGeoResolverOnEveryBuild(t *testing.T) {
+	resetFPPolicies(t)
+	// NewEngine also rewires the other verify-path globals; put all three
+	// back so a later test never inherits this one's engine or its real,
+	// PTR-resolving enricher.
+	prevSolve := challengeSolveEnricher.Load()
+	challengeV2.mu.RLock()
+	prevHostArmed := challengeV2.hostArmed
+	challengeV2.mu.RUnlock()
+	t.Cleanup(func() {
+		SetFingerprintPolicyGeoResolver(nil)
+		challengeSolveEnricher.Store(prevSolve)
+		SetChallengeV2HostArmed(prevHostArmed)
+	})
+	SetFingerprintPolicies([]FingerprintPolicy{{ID: "GR", Kind: "country", Action: "challenge_v2"}})
+
+	// The previous engine's resolver.
+	SetFingerprintPolicyGeoResolver(func(string) (string, uint64) { return "GR", 0 })
+	if got := GeoPolicyActionForIP("203.0.113.9"); got != "challenge_v2" {
+		t.Fatalf("precondition: the armed GR policy should bite via the wired resolver, got %q", got)
+	}
+
+	_ = NewEngine(Config{Every: time.Second, Window: time.Minute}) // UseEnrich unset
+	if got := GeoPolicyActionForIP("203.0.113.9"); got != "" {
+		t.Fatalf("an engine built without an enricher left the previous resolver enforcing %q", got)
+	}
+
+	// And an engine WITH an enricher wires its own (no mmdb in the dir: the
+	// enricher still builds, it just resolves no geo).
+	_ = NewEngine(Config{Every: time.Second, Window: time.Minute, UseEnrich: true, EnrichDirs: []string{t.TempDir()}})
+	fpPolicies.mu.RLock()
+	wired := fpPolicies.geoResolver != nil
+	fpPolicies.mu.RUnlock()
+	if !wired {
+		t.Fatal("an engine built with an enricher did not wire the geo resolver")
+	}
+}
+
 func TestGeoPoliciesDoNotLeakIntoFingerprintLookup(t *testing.T) {
 	resetFPPolicies(t)
 	SetFingerprintPolicies([]FingerprintPolicy{
