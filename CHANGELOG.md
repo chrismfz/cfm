@@ -37,6 +37,20 @@ back-filled here — see the git/PR history for that period.
   cannot be updated.
 
 ### Added
+- **A warning when armed country/ASN policies can't fully work because
+  web-detector enrichment is off.** With `ENRICH = 0` the node has no ASN
+  lookup, so an armed ASN policy (any tier) never matches, and a country
+  `challenge_v2` policy acts as a plain challenge — it still challenges from
+  the country the edge sends, but a failing solve is not rejected. That is the
+  designed fail-open, but nothing said so: cfm-web showed the policies armed.
+  The main log now says it, with the counts:
+  `[fppolicy] WARNING: web-detector enrichment is off (ENRICH = 0): 2 armed
+  ASN policies cannot match …; 1 armed country challenge_v2 policies act as
+  plain challenge …`. It is logged once when the situation starts or changes
+  (not on every 60s policy pull) and once when it clears
+  (`[fppolicy] armed geo policies are no longer degraded …`). Nothing is
+  logged with `FP_POLICY = 0`, or when only fingerprint or country
+  `challenge` policies are armed. No enforcement change.
 - **Site Cache — Tier B micro-cache internal locations (Phase B3a, inert).**
   Adds the six per-bucket `@cfm_micro_<n>s` serving locations to the HTTPS server
   of both edge confs — each `internal;` (unreachable by a direct request) and

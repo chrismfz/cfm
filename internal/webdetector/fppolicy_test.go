@@ -2,8 +2,10 @@ package webdetector
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,6 +239,82 @@ func TestNewEngineRewiresTheGeoResolverOnEveryBuild(t *testing.T) {
 	if !wired {
 		t.Fatal("an engine built with an enricher did not wire the geo resolver")
 	}
+}
+
+// With enrichment off (ENRICH = 0) an armed ASN policy can never match and a
+// country challenge_v2 policy acts as plain challenge — the designed
+// fail-open, but silent. The store says so in the log, once per change: the
+// policy pull runs every 60s and must not repeat it every minute.
+func TestGeoDegradationIsWarnedOncePerChange(t *testing.T) {
+	resetFPPolicies(t)
+	fpPolicies.mu.Lock()
+	prevResolver, prevKnown, prevWarn := fpPolicies.geoResolver, fpPolicies.resolverKnown, fpPolicies.geoWarn
+	fpPolicies.geoResolver, fpPolicies.resolverKnown, fpPolicies.geoWarn = nil, false, ""
+	fpPolicies.mu.Unlock()
+	prevLogf := fpPolicyLogf
+	var lines []string
+	fpPolicyLogf = func(format string, args ...interface{}) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	t.Cleanup(func() {
+		fpPolicyLogf = prevLogf
+		fpPolicies.mu.Lock()
+		fpPolicies.geoResolver, fpPolicies.resolverKnown, fpPolicies.geoWarn = prevResolver, prevKnown, prevWarn
+		fpPolicies.mu.Unlock()
+	})
+	step := func(name string, want ...string) {
+		t.Helper()
+		got := lines
+		lines = nil
+		if len(got) != len(want) {
+			t.Fatalf("%s: logged %d lines %q, want %d", name, len(got), got, len(want))
+		}
+		for i, w := range want {
+			if !strings.Contains(got[i], w) {
+				t.Fatalf("%s: line %q does not contain %q", name, got[i], w)
+			}
+		}
+	}
+
+	armed := []FingerprintPolicy{
+		{ID: "GR", Kind: "country", Action: "challenge_v2"},
+		{ID: "CN", Kind: "country", Action: "challenge"}, // works from edge country: not counted
+		{ID: "6799", Kind: "asn", Action: "challenge"},
+		{ID: "3329", Kind: "asn", Action: "challenge_v2"},
+		{ID: "1241", Kind: "asn", Action: "challenge", ExpiresAt: time.Now().Add(-time.Minute)}, // expired: not counted
+		{ID: "aabbccdd", Action: "deny"}, // tls: unaffected by enrichment
+	}
+
+	SetFingerprintPolicies(armed)
+	step("pull before any engine build") // a nil resolver means "not built yet"
+
+	SetFingerprintPolicyGeoResolver(nil) // engine built with ENRICH = 0
+	step("engine without enrichment", "WARNING: web-detector enrichment is off (ENRICH = 0): 2 armed ASN policies cannot match")
+	fpPolicies.mu.RLock()
+	warn := fpPolicies.geoWarn
+	fpPolicies.mu.RUnlock()
+	if !strings.Contains(warn, "1 armed country challenge_v2 policies act as plain challenge") {
+		t.Fatalf("warning misses the country challenge_v2 count: %q", warn)
+	}
+
+	SetFingerprintPolicies(armed)
+	step("next pull, same set") // no repeat every 60s
+
+	SetFingerprintPolicies(armed[:2])
+	step("ASN policies disarmed", "WARNING: web-detector enrichment is off (ENRICH = 0): 1 armed country challenge_v2")
+
+	ConfigureFingerprintPolicyEnforcement(false, nil)
+	step("FP_POLICY = 0: nothing is enforced, so nothing is degraded", "no longer degraded")
+	ConfigureFingerprintPolicyEnforcement(true, nil)
+	step("FP_POLICY back on", "WARNING:")
+
+	SetFingerprintPolicyGeoResolver(func(string) (string, uint64) { return "", 0 }) // reload with ENRICH = 1
+	step("enrichment back", "no longer degraded")
+
+	SetFingerprintPolicyGeoResolver(nil)
+	SetFingerprintPolicies([]FingerprintPolicy{
+		{ID: "CN", Kind: "country", Action: "challenge"},
+		{ID: "aabbccdd", Action: "challenge_v2"},
+	})
+	step("ENRICH = 0 again, then the country v2 policy is disarmed", "WARNING:", "no longer degraded")
 }
 
 func TestGeoPoliciesDoNotLeakIntoFingerprintLookup(t *testing.T) {

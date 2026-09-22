@@ -38,6 +38,7 @@ package webdetector
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -86,7 +87,18 @@ type fpPolicyState struct {
 	// check (GeoPolicyActionForIP). Wired from the engine's enricher; nil
 	// means geo policies simply can't influence verify (fail-open).
 	geoResolver func(ip string) (string, uint64)
+	// resolverKnown: an engine has declared this process's enrichment state
+	// (SetFingerprintPolicyGeoResolver has run, nil or not). Until then a nil
+	// resolver means "not built yet", not "enrichment off" — the first pull
+	// can land before the first engine build — so nothing is warned.
+	resolverKnown bool
+	// geoWarn is the geo-degradation warning last logged ("" = none), so the
+	// every-60s pull logs it only when it CHANGES, not every minute.
+	geoWarn string
 }
+
+// fpPolicyLogf is logging.Logf, swappable so tests can read the warnings.
+var fpPolicyLogf = logging.Logf
 
 var fpPolicies = fpPolicyState{enabled: true}
 
@@ -152,7 +164,11 @@ func SetFingerprintPolicies(ps []FingerprintPolicy) {
 	fpPolicies.byASN = byASN
 	fpPolicies.lastSet = time.Now()
 	fpPolicies.lastSize = total
+	geoLine := noteGeoDegradationLocked()
 	fpPolicies.mu.Unlock()
+	if geoLine != "" {
+		fpPolicyLogf("%s", geoLine)
+	}
 
 	if dropped > 0 {
 		logging.Logf("[fppolicy] dropped %d policies with unknown/ineligible kind or action (newer cfm-web, or a geo deny)", dropped)
@@ -177,7 +193,11 @@ func ConfigureFingerprintPolicyEnforcement(enabled bool, allowIDs []string) {
 	fpPolicies.mu.Lock()
 	fpPolicies.enabled = enabled
 	fpPolicies.allow = allow
+	geoLine := noteGeoDegradationLocked()
 	fpPolicies.mu.Unlock()
+	if geoLine != "" {
+		fpPolicyLogf("%s", geoLine)
+	}
 }
 
 // FingerprintPolicyForID returns the armed action for a fingerprint id, or ""
@@ -213,7 +233,75 @@ func FingerprintPolicyForID(id string) string {
 func SetFingerprintPolicyGeoResolver(fn func(ip string) (string, uint64)) {
 	fpPolicies.mu.Lock()
 	fpPolicies.geoResolver = fn
+	fpPolicies.resolverKnown = true
+	geoLine := noteGeoDegradationLocked()
 	fpPolicies.mu.Unlock()
+	if geoLine != "" {
+		fpPolicyLogf("%s", geoLine)
+	}
+}
+
+// geoDegradationLocked says what armed geo policies CANNOT do on this node, or
+// "" when nothing armed is degraded. The one cause is web-detector enrichment
+// being off (ENRICH = 0): NewEngine then wires no geo resolver, the decision
+// bridge has no enricher, and so
+//   - an ASN policy — any tier — never matches: the ASN comes only from the
+//     local GeoLite2 lookup, on the decision path and at verify alike;
+//   - a country challenge_v2 policy still challenges (from the country the
+//     edge sends) but gets no Rung-1 check at verify: it acts as plain
+//     challenge, and its solves carry no v2= grain.
+//
+// Both are the designed fail-open, but silent: nothing else says an armed
+// policy is not doing what cfm-web shows. A country challenge policy is not
+// counted — it works whenever the edge sends the client's country, which this
+// node cannot see from here (without edge geo it never matches either; the
+// v2 line says so). Caller holds mu.
+func geoDegradationLocked() string {
+	if !fpPolicies.enabled || !fpPolicies.resolverKnown || fpPolicies.geoResolver != nil {
+		return ""
+	}
+	var asn, v2 int
+	for _, p := range fpPolicies.byASN {
+		if geoPolicyLive(p, true) != "" {
+			asn++
+		}
+	}
+	for _, p := range fpPolicies.byCountry {
+		if geoPolicyLive(p, true) == "challenge_v2" {
+			v2++
+		}
+	}
+	var parts []string
+	if asn > 0 {
+		parts = append(parts, fmt.Sprintf("%d armed ASN policies cannot match (the ASN comes only from the local GeoLite2 lookup)", asn))
+	}
+	if v2 > 0 {
+		parts = append(parts, fmt.Sprintf("%d armed country challenge_v2 policies act as plain challenge (no Rung-1 check at verify; the challenge itself also needs the edge to send the client's country)", v2))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "web-detector enrichment is off (ENRICH = 0): " + strings.Join(parts, "; ") +
+		". Set ENRICH = 1 in detectors.conf, or disarm them in cfm-web."
+}
+
+// noteGeoDegradationLocked recomputes the degradation and returns the line to
+// log when it CHANGED since the last one logged ("" = nothing new). Caller
+// holds mu for writing and logs the line after unlocking.
+func noteGeoDegradationLocked() string {
+	msg := geoDegradationLocked()
+	if msg == fpPolicies.geoWarn {
+		return ""
+	}
+	prev := fpPolicies.geoWarn
+	fpPolicies.geoWarn = msg
+	if msg == "" {
+		if prev == "" {
+			return ""
+		}
+		return "[fppolicy] armed geo policies are no longer degraded (enrichment is back, or the degraded ones were disarmed)"
+	}
+	return "[fppolicy] WARNING: " + msg
 }
 
 // geoPolicyLive re-checks expiry at lookup time (same contract as
