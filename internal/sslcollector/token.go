@@ -436,6 +436,16 @@ type WebdetectorBridgeConfig struct {
 	// a full no-op (no feed poll, no lookup, no header) so an operator can kill all
 	// caching fleet-wide in ~10s without disarming vhosts.
 	SiteCache bool
+	// MicroCacheEnforce mirrors [webdetector] MICRO_CACHE_ENFORCE to the edge —
+	// the Tier B (micro-cache of anonymous HTML) ENFORCE gate. Default OFF: unlike
+	// SiteCache this is an explicit OPT-IN, so a binary/config upgrade never turns
+	// HTML micro-caching on by itself even for a vhost whose micro tier is armed
+	// (the CLAUDE.md §6 "adding X silently arms it" lesson). While false, cfm.lua's
+	// micro gate runs in DRY-RUN — it computes the would-cache verdict for the
+	// X-CFM-Cache observe header but never ngx.exec's to a cache location, so
+	// nothing is stored. true lets an armed+anonymous+cacheable request route to
+	// its @cfm_micro_<n>s bucket. Flips within ~10s, no proxy reload.
+	MicroCacheEnforce bool
 }
 
 // WriteWebdetectorBridgeConfig atomically writes a Lua module exposing
@@ -480,6 +490,7 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 			"  post_clearance_cadence = %s,\n"+
 			"  fp_policy = %s,\n"+
 			"  site_cache = %s,\n"+
+			"  micro_cache_enforce = %s,\n"+
 			"}\n",
 		luaBool(cfg.ClearanceRefresh),
 		luaBool(cfg.OriginKeepalive),
@@ -492,6 +503,7 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 		luaBool(cfg.PostClearanceCadence),
 		luaBool(cfg.FPPolicy),
 		luaBool(cfg.SiteCache),
+		luaBool(cfg.MicroCacheEnforce),
 	)
 	return writeLuaFileAtomic(luaPath, content, cfmGID, "sslcollector", "[sslcollector]", "webdetector bridge config")
 }
