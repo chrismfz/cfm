@@ -112,6 +112,44 @@ back-filled here — see the git/PR history for that period.
   wired, which is how it rotted unnoticed in the first place.
 
 ### Added
+- **Site Cache — Tier A (static-asset caching) is now wired at the edge.**
+  Building on the per-vhost Site Cache policy store and the observe-only edge
+  module, the static-asset location on both edges (OpenResty + Angie) now
+  activates an nginx `proxy_cache` (`cfm_static` zone) — but **bypass-by-default
+  and per-vhost opt-in**: a request is cached only when the operator armed that
+  exact vhost's static tier *and* the `SITE_CACHE` master switch is on. A
+  minimal fail-safe Lua gate (`cfm_cache.static_gate`, the only Lua on the
+  static hot path, double-`pcall`-guarded) flips `$cfm_cache_skip` to `0` and
+  stamps the purge generation into the cache key; any error or an unarmed vhost
+  leaves caching off, exactly as before. Cached responses honour the origin's
+  `Cache-Control`/`Expires`; only `200` gets the 1h fallback TTL (any other
+  status is cached only if the origin itself marks it cacheable, so a transient
+  deploy-time 404 gets no fallback and can't stick), a `Set-Cookie` response is
+  never cached, and anti-stampede locking means a burst hits the origin about
+  once per TTL. Per-user safety at Tier A rests on those response-side rails
+  (`Set-Cookie` / `Cache-Control: private` → never stored) plus the public
+  nature of static assets; the request-cookie allowlist (per-vhost session-cookie
+  bypass) lands with Tier B HTML micro-cache, where per-user content makes it
+  essential. The static-asset location now uses `proxy_buffering on` (it previously
+  streamed unbuffered): nginx populates `proxy_cache` only on the buffered path,
+  so buffering is required for the cache to store anything — small web assets
+  buffer in memory, larger ones spill into the cache dir; large media/archives
+  keep streaming from their own separate uncached location. A new CI guard
+  (`check_site_cache_config.sh`) asserts the bypass-by-default invariant and
+  buffering-on on every `proxy_cache` location, plus openresty↔angie location
+  parity, so a future refactor cannot silently reintroduce the global,
+  page-breaking cache CFM removed once before — or leave a cache location
+  unbuffered (which would silently store nothing). The Angie installer now
+  provisions the cache directory at the canonical `/var/cache/nginx/cfm_static`
+  (it had pointed at `/var/cache/angie/`, harmless until now but a mismatch with
+  the conf and the daemon that would fail `angie -t` once caching went live).
+  **Caching stays off until an operator arms a vhost**; the one edge-wide change
+  is that the static-asset location now buffers responses (it previously
+  streamed) — transparent for the small css/js/font/image assets it matches,
+  though a large image may now spill to a temp file as any buffered response
+  does, matching the global `proxy_buffering on` default that `location /`
+  already uses. Large media/archives are unaffected (their own uncached
+  streaming location keeps buffering off).
 - **Site Cache — Phase 3a: `SITE_CACHE` master kill switch (config-driven).** New
   `[webdetector] SITE_CACHE` knob (**default 1 = on**) published to the edge via
   `cfm_bridge_config.lua` (~10s, no proxy reload) — no env vars, config-file

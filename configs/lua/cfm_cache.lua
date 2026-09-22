@@ -279,8 +279,41 @@ function _M.observe()
     if not dbg or dbg == "" then return end
     local p = _M.policy_for(ngx.var.host)
     if p then
-        ngx.header["X-CFM-Cache"] = "observe " .. label_for(p)
+        local lbl = "observe " .. label_for(p)
+        -- Now that Tier A caches, surface the actual verdict too (HIT / MISS /
+        -- BYPASS / EXPIRED / …) — debug-gated, so ordinary clients never see it.
+        local st = ngx.var.upstream_cache_status
+        if st and st ~= "" then lbl = lbl .. " status=" .. st end
+        ngx.header["X-CFM-Cache"] = lbl
     end
+end
+
+-- static_gate: PHASE 3b ACCESS-phase hook for the static-asset location (the
+-- ONLY Lua on that hot path). Bypass-by-default — it flips $cfm_cache_skip to
+-- "0" (cache this asset) ONLY when the master switch is on AND this vhost has
+-- its static tier armed, and carries the purge generation into $cfm_cache_gen.
+-- Otherwise it leaves the pre-set vars untouched ($cfm_cache_skip = "1" → no
+-- caching). Never raises (the conf pcall's it too); the fail-safe direction is
+-- "do not cache".
+--
+-- SCOPE (Tier A / 3b): this gate does NOT consult the request-cookie allowlist
+-- (design §4.1) — the policy carries strict_cookies/auth_cookies but Tier A does
+-- not read them yet. Static assets are public, and per-user safety here rests on
+-- the response-side rails nginx already enforces (a Set-Cookie or a
+-- Cache-Control: private/no-store/no-cache response is never stored). The full
+-- request-cookie allowlist (built-in names + ignore-list + strict mode) lands
+-- with Tier B micro-cache, where per-user HTML makes it essential. Residual:
+-- a static-extension URL an origin renders per-user with NEITHER Set-Cookie NOR
+-- a private Cache-Control would be cached — narrow, documented in
+-- docs/site-cache-design.md §14.
+function _M.static_gate()
+    if not site_cache_enabled() then return end
+    local p = _M.policy_for(ngx.var.host)
+    if not p then return end
+    local s = p.static
+    if type(s) ~= "table" or not s.on then return end
+    ngx.var.cfm_cache_skip = "0"
+    ngx.var.cfm_cache_gen  = tostring(p.gen or 0)
 end
 
 -- Exposed for unit tests (scripts/tests/cfm_cache_test.lua): drive the cache
