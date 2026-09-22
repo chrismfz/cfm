@@ -231,7 +231,14 @@ func (b *Backend) DNATOff(fam, tbl string) (err error) {
 			return err
 		}
 	}
-	return b.cleanupScopedDNATAccepts()
+	// With the redirect gone the accepts match nothing (they need ct status
+	// dnat), so a failed cleanup is only a warning. Returning it would make
+	// `cfm dnat off` fail without persisting intent OFF, and the daemon's
+	// failsafe would turn DNAT back on.
+	if err := b.cleanupScopedDNATAccepts(); err != nil {
+		b.logPhase("DNATOff", "warn", 0, err, "op=dnat leftover scoped accepts (inert without the redirect)")
+	}
+	return nil
 }
 
 func getenvInt(key string, def int) int {

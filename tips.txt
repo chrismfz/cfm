@@ -130,7 +130,7 @@ grep -A3 -B3 'cfm/internal/detectors' /tmp/cfm.gor | head -50
 #
 # Confirm which engine the running daemon is using (logged at startup, before
 # the log file is opened, so it lands in the service's stdout log):
-grep -h 'firewall engine' /var/log/cfm/cfm-service.log* 2>/dev/null | tail -1
+zgrep -h 'firewall engine' $(ls -tr /var/log/cfm/cfm-service.log*) 2>/dev/null | tail -1
 #
 # Confirm nftlib is NOT spawning nft subprocesses during a block:
 #   In one terminal, watch for nft forks:

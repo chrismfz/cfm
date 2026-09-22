@@ -155,7 +155,10 @@ back-filled here — see the git/PR history for that period.
   installed the redirect. The reload now keeps the live priority. Both engines.
 - **`cfm dnat off` removes the redirect before its input-chain accepts.** In
   the other order, a redirect that failed to go would send every web
-  connection into the default drop. Both engines.
+  connection into the default drop. Once the redirect is gone, a failed accept
+  cleanup is logged as a warning, not an error: the leftover accepts match
+  nothing, and an error would make `cfm dnat off` skip saving the OFF intent,
+  so the daemon's failsafe would turn DNAT back on. Both engines.
 - **nftlib firewall backend: cPanel DNAT accepts can be re-checked and
   repaired again, web DNAT accepts are reasserted, and `cfm dnat on`/`off`,
   `--priority` and `cfm flush` do what they say.** All on nodes running
@@ -178,7 +181,7 @@ back-filled here — see the git/PR history for that period.
     reported it, and a redirect it hadn't written itself, such as the exec
     backend's form of it, stayed in front of its own. Now, when either is the
     case, `cfm dnat on` rebuilds `cfm_redirect` whole in ONE transaction, so
-    the redirect never lapses. The exec backend replaces the table on every
+    the redirect itself never lapses. The exec backend replaces the table on every
     `cfm dnat on`, in two steps. As on exec, a rebuild drops anything else in
     `cfm_redirect`, and the daemon re-applies `cfm.conf`'s `NFT_DNAT_PRIORITY`
     the next time it installs the redirect; set it there for a change to stick.
@@ -218,8 +221,9 @@ back-filled here — see the git/PR history for that period.
   flushes every rule. Either way, restart the daemon afterwards to re-apply the
   rules and blocklists; `cfm reset` now says so. **One-time step on an nftlib
   node that shows duplicate rules in `nft list table inet cfm_redirect`:**
-  after upgrading, run `cfm dnat on`. It rebuilds the table in one transaction
-  with no gap in the redirect. It can take a minute, because nftlib's
+  after upgrading, run `cfm dnat on`. It rebuilds the table in one transaction,
+  with no gap in the redirect. The web accepts are re-created one by one, as on
+  every `cfm dnat on`, which leaves a brief window of a second or two. It can take a minute, because nftlib's
   `EnsureBase` is slow on a large ruleset. Don't use `cfm dnat off` first:
   that leaves :80/:443 un-redirected for that whole time.
 

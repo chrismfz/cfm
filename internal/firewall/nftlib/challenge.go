@@ -151,7 +151,8 @@ func dnatRuleInNamespace(r *nftables.Rule, namespace string) bool {
 		return false
 	}
 	// Edge rules are unscoped; a sourceSet marks a stale rule from the retired
-	// challenge namespace, which never matches (and gets cleaned as foreign).
+	// challenge namespace, which never matches. In cfm_redirect such a rule
+	// makes installDNATRules rebuild the table (hasForeignDNATRules).
 	_ = namespace
 	return spec.sourceSet == ""
 }
@@ -664,13 +665,19 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	return b.installEdgeDNATRules(t, ch, wanted, rules, includeLoopbackAccept)
 }
 
-// hasForeignDNATRules reports whether a prerouting chain holds a rule this
-// backend didn't write (no managed or bypass UserData tag).
+// hasForeignDNATRules reports whether a prerouting chain holds a rule the
+// rule-by-rule rebuild (installEdgeDNATRules) would leave in place: one this
+// backend didn't write, or a managed one outside the edge namespace (e.g. a
+// stale rule from the retired challenge namespace, or an unparseable id).
 func hasForeignDNATRules(rules []*nftables.Rule) bool {
 	for _, r := range rules {
-		if !managedDNATRule(r.UserData) && !dnatBypassIsManaged(r.UserData) {
-			return true
+		if dnatBypassIsManaged(r.UserData) {
+			continue
 		}
+		if managedDNATRule(r.UserData) && dnatRuleInNamespace(r, dnatRuleNamespaceEdge) {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -826,7 +833,14 @@ func (b *Backend) DNATOff(family, table string) (err error) {
 	}
 	// The accepts go last: removed first, a redirect that then failed to go
 	// would send every web connection into the default drop.
-	return b.cleanupScopedDNATAccepts(dnatAcceptNamespaceEdge)
+	// With the redirect gone the accepts match nothing (they need ct status
+	// dnat), so a failed cleanup is only a warning. Returning it would make
+	// `cfm dnat off` fail without persisting intent OFF, and the daemon's
+	// failsafe would turn DNAT back on.
+	if err := b.cleanupScopedDNATAccepts(dnatAcceptNamespaceEdge); err != nil {
+		b.logPhase("DNATOff", "warn", 0, err, "op=dnat leftover scoped accepts (inert without the redirect)")
+	}
+	return nil
 }
 
 // deleteDNATTableUnlocked removes CFM's own DNAT table whole, as the nft

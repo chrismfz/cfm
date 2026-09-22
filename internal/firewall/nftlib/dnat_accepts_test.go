@@ -26,6 +26,13 @@ import (
 // `nft -a list chain inet cfm input` with listing.
 func fakeNFT(t *testing.T, listing string) (logPath string) {
 	t.Helper()
+	return fakeNFTFailing(t, listing, "")
+}
+
+// fakeNFTFailing is fakeNFT, but a script (`nft -f -`) containing failOn
+// exits 1, as a rule deleted meanwhile by another writer would.
+func fakeNFTFailing(t *testing.T, listing, failOn string) (logPath string) {
+	t.Helper()
 	dir := t.TempDir()
 	logPath = filepath.Join(dir, "nft.log")
 	listPath := filepath.Join(dir, "listing")
@@ -34,10 +41,14 @@ func fakeNFT(t *testing.T, listing string) (logPath string) {
 	}
 	script := fmt.Sprintf(`#!/bin/sh
 echo "ARGS $*" >> %[1]q
-if [ "$1" = "-f" ]; then cat >> %[1]q; exit 0; fi
+if [ "$1" = "-f" ]; then
+	in=$(cat); printf '%%s\n' "$in" >> %[1]q
+	if [ -n %[3]q ] && printf '%%s' "$in" | grep -qF %[3]q; then exit 1; fi
+	exit 0
+fi
 if [ "$*" = "-a list chain inet cfm input" ]; then cat %[2]q; exit 0; fi
 exit 0
-`, logPath, listPath)
+`, logPath, listPath, failOn)
 	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(script), 0o700); err != nil { // #nosec G306 -- test helper must be executable
 		t.Fatal(err)
 	}
@@ -284,16 +295,18 @@ func ruleMsg(table, chain string, handle uint64, userData []byte) netlink.Messag
 }
 
 // dnatPrioBackend serves a prerouting chain of table at livePrio holding
-// rules, and records the message types of every batch sent, in order.
-func dnatPrioBackend(t *testing.T, table string, livePrio int32, rules []netlink.Message, sent *[]int) *Backend {
+// rules, and records the message types of each batch (transaction) sent.
+func dnatPrioBackend(t *testing.T, table string, livePrio int32, rules []netlink.Message, batches *[][]int) *Backend {
 	return nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
 		if len(req) == 0 {
 			return nil, io.EOF
 		}
 		if isBatch(req) {
+			var types []int
 			for _, m := range req {
-				*sent = append(*sent, nftMsgType(m))
+				types = append(types, nftMsgType(m))
 			}
+			*batches = append(*batches, types)
 			return nil, io.EOF
 		}
 		seq := req[0].Header.Sequence
@@ -363,6 +376,8 @@ func TestDNATOn_RebuildsTheRedirectTableWhenNeeded(t *testing.T) {
 	tbl := firewall.DNATDefaultTable
 	foreign := []netlink.Message{ruleMsg(tbl, "prerouting", 4, nil)}
 	managed := []netlink.Message{ruleMsg(tbl, "prerouting", 4, []byte(dnatLoopbackAcceptTag))}
+	stale := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: "challenge_v4"}
+	staleManaged := []netlink.Message{ruleMsg(tbl, "prerouting", 4, []byte(stale.id()))}
 
 	for _, tc := range []struct {
 		name    string
@@ -373,23 +388,33 @@ func TestDNATOn_RebuildsTheRedirectTableWhenNeeded(t *testing.T) {
 	}{
 		{"priority -99 → -101", tbl, -99, nil, true},
 		{"foreign rule at the wanted priority", tbl, -101, foreign, true},
+		{"managed rule the rebuild wouldn't replace", tbl, -101, staleManaged, true},
 		{"only our rules, wanted priority", tbl, -101, managed, false},
 		{"another table, other priority", "operator_nat", -99, foreign, false},
 	} {
-		var sent []int
-		b := dnatPrioBackend(t, tc.table, tc.prio, tc.rules, &sent)
+		var batches [][]int
+		b := dnatPrioBackend(t, tc.table, tc.prio, tc.rules, &batches)
 		if err := b.installDNATRules("inet", tc.table, wanted, dnatRuleNamespaceEdge, true); err != nil {
 			t.Fatalf("%s: installDNATRules: %v", tc.name, err)
 		}
-		del := index(sent, unix.NFT_MSG_DELTABLE)
+		deletes := 0
+		for _, sent := range batches {
+			deletes += count(sent, unix.NFT_MSG_DELTABLE)
+		}
 		if !tc.rebuild {
-			if del >= 0 {
-				t.Errorf("%s: deleted the table; sent %v", tc.name, sent)
+			if deletes > 0 {
+				t.Errorf("%s: deleted the table; batches %v", tc.name, batches)
 			}
 			continue
 		}
+		// One transaction: a second one would leave a moment with no redirect.
+		if len(batches) != 1 {
+			t.Fatalf("%s: %d transactions, want the rebuild in exactly one; batches %v", tc.name, len(batches), batches)
+		}
+		sent := batches[0]
+		del := index(sent, unix.NFT_MSG_DELTABLE)
 		if del < 0 || del > index(sent, unix.NFT_MSG_NEWTABLE) || del > index(sent, unix.NFT_MSG_NEWCHAIN) {
-			t.Errorf("%s: want the delete first, then the new table and chain, in one batch; sent %v", tc.name, sent)
+			t.Errorf("%s: want the delete first, then the new table and chain; sent %v", tc.name, sent)
 		}
 		if n := count(sent, unix.NFT_MSG_NEWRULE); n != 5 {
 			t.Errorf("%s: %d rules re-added, want 5 (loopback + 1 bypass + 3 DNAT); sent %v", tc.name, n, sent)
@@ -480,5 +505,25 @@ func TestDNATOff_RemovesTheRedirectBeforeItsAccepts(t *testing.T) {
 	}
 	if !strings.Contains(readLog(t, log), "delete rule inet cfm input handle 21;") {
 		t.Fatalf("the accept was not removed afterwards:\n%s", readLog(t, log))
+	}
+}
+
+// Once the redirect is gone its accepts match nothing, so a failed cleanup
+// must not fail DNATOff: `cfm dnat off` would then skip persisting intent
+// OFF, and the daemon's failsafe would turn DNAT back on ~10s later.
+func TestDNATOff_LeftoverAcceptsAreNotAnError(t *testing.T) {
+	log := fakeNFTFailing(t, `table inet cfm {
+	chain input { # handle 1
+		tcp dport 9080 ct state new ct status dnat ct original proto-dst 80 accept comment "cfm_edge_dnat_accept:web_http_tcp:80:9080" # handle 21
+	}
+}
+`, "delete rule")
+	var deleted bool
+	b := dnatOffBackend(t, firewall.DNATDefaultTable, &deleted)
+	if err := b.DNATOff("", ""); err != nil {
+		t.Fatalf("DNATOff: %v; a leftover accept is inert once the redirect is gone", err)
+	}
+	if !deleted || !strings.Contains(readLog(t, log), "delete rule inet cfm input handle 21") {
+		t.Fatalf("want the table deleted and the accept delete attempted (deleted=%v):\n%s", deleted, readLog(t, log))
 	}
 }
