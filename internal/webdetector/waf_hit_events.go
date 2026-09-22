@@ -28,7 +28,7 @@ type WAFHitEvent struct {
 	SrcIP     string // client IP — the counter / block key
 	Method    string
 	Path      string // request URI
-	Action    string // edge action: logonly / challenge / block (informational)
+	Action    string // verbatim edge action: logonly / challenge / challenge_v2 / block (informational)
 	UserAgent string
 }
 

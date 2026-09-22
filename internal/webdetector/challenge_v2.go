@@ -159,8 +159,15 @@ var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore}
 // challenge — never an error), matching D5a's "teeth only where armed".
 const (
 	// challengeV2MarkTTL comfortably covers page load + the solve retry
-	// backoff; an unsolved client that keeps browsing re-marks on every
-	// decision anyway (challenge answers are never edge-cached).
+	// backoff. Re-marking differs per writer: a v2-tier TRAFFIC RULE re-marks
+	// on every decision (the rule re-evaluates per request), but a WAF-rule
+	// mark refreshes only when the rule re-fires AND should_push's cooldown
+	// window allows — meanwhile the edge keeps serving the challenge off the
+	// plain-"challenge" ipState decision. As shipped that decision TTL
+	// (default_ttl_sec=600) sits inside this 15m, so the mark outlives the
+	// decision; an operator raising default_ttl_sec past ~900s opens a tail
+	// where a late solve passes at v1 — fail-open by doctrine, noted here so
+	// nobody "fixes" it into fail-closed.
 	challengeV2MarkTTL     = 15 * time.Minute
 	challengeV2MarkMaxKeys = 8192
 )

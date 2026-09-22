@@ -147,9 +147,14 @@ do
   local b, conv2 = waf.post_clearance_action("challenge_v2", "WAF_RCE", "logonly", "block")
   check(b == "block" and conv2 == true,   "6: v2 post-clearance — high-risk WAF_RCE escalates to block")
 
-  -- Loop guard: a buggy "challenge" conversion target must not survive.
+  -- Loop guard: a buggy challenge-tier conversion target (either rung) must
+  -- not survive — the coercion covers "challenge" AND "challenge_v2".
   local c = waf.post_clearance_action("challenge_v2", "WAF_XSS", "challenge", "challenge")
   check(c ~= "challenge" and c ~= "challenge_v2", "6: v2 post-clearance — never converts back to a challenge tier")
+  local c2 = waf.post_clearance_action("challenge", "WAF_XSS", "challenge_v2", "challenge_v2")
+  check(c2 == "logonly", "6: post-clearance — challenge_v2 target coerced to logonly (got " .. tostring(c2) .. ")")
+  local c3 = waf.post_clearance_action("challenge", "WAF_RCE", "challenge_v2", "challenge_v2")
+  check(c3 == "block", "6: post-clearance — high-risk challenge_v2 target coerced to block (got " .. tostring(c3) .. ")")
 
   -- Non-challenge tiers still pass through untouched.
   local d, conv3 = waf.post_clearance_action("block", "WAF_RCE", "logonly", "block")

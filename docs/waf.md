@@ -67,9 +67,12 @@ humanity score earns **no clearance** (`result=v2_reject`, retry-able — see
 - **Version skew warning:** on a CFM older than 2026-09-22 the Lua
   `rule_mode()` treats `challenge_v2` as an unknown value and maps it to
   `disabled` — setting the tier in `cfm_waf_config.lua` before upgrading
-  **silently turns the rule off** on that edge. Upgrade first, then set the
-  tier (the Lua and the daemon ship in the same package, so a normal upgrade
-  moves both together).
+  **silently turns the rule off** on that edge. The reverse skew (new Lua
+  loaded before the daemon restarts mid-upgrade) is transient: the old daemon
+  rejects the `challenge_v2` push, so the hit is served as a challenge but
+  leaves no mark/log/history until the daemon comes back new. Upgrade first,
+  then set the tier (the Lua and the daemon ship in the same package, so a
+  normal upgrade moves both together).
 
 Return shape: `(hit, reason, ttl, action, hits, waf_rule_id)`. The first four are the original API; `hits` is per-rule diagnostics; `waf_rule_id` is the strongest rule's stable numeric ID (see [Rule IDs](#rule-ids) below).
 

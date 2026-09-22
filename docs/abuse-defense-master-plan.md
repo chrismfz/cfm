@@ -293,7 +293,10 @@ already opened.
           As-built: cfm_waf.lua accepts the mode (rule_mode/set_rule),
           severity challenge(2) < challenge_v2(3) < block(4) — only block
           short-circuits; the edge serves the SAME challenge page (cfm.lua's
-          challenge-tier else-branch, X-CFM-Action shows the rung) and the
+          challenge-tier else-branch) and, per review, presents plain
+          "challenge" to the client on both rungs (X-CFM-Action shows the
+          rung only under CFM_DEBUG_HEADERS — echoing it would hand a
+          signal-aware farm the exact solves under v2 scrutiny); the
           ip_push carries the verbatim tier; handleIPPush (+ the events
           batch) stores a plain "challenge" decision (edge wire vocabulary)
           and writes the slice-B per-(ip,host) rung mark, which the verify
@@ -303,9 +306,14 @@ already opened.
           separately so a v1 window never masks the mark-writing push);
           post-clearance converts v2 exactly like challenge (no re-challenge
           loop); the panel gate stays block-tier (a v2 rule is observe-only
-          on panel ports). Version-skew hazard documented in docs/waf.md:
-          an OLDER edge maps the unknown mode to `disabled` — upgrade
-          before setting the tier.
+          on panel ports). Review catch folded in the same PR: the
+          challenge-resume redirect (challenged POST) used to return BEFORE
+          the ip_push — a body-carried v2 hit would never write its mark
+          (and a resumed challenge left no cfm.waf.log/history at any tier);
+          the push+log now runs on every route out of the action branch,
+          resume path included. Version-skew hazard documented in
+          docs/waf.md: an OLDER edge maps the unknown mode to `disabled` —
+          upgrade before setting the tier.
         - [ ] **D — scoped customer self-arm** (cPanel plugin "panic
           button"): the FIRST scoped WRITE action, so it rides the hard
           auth boundary — central validator, fail-closed, challenge tiers

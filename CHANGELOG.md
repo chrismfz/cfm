@@ -28,7 +28,10 @@ back-filled here — see the git/PR history for that period.
   humanity check to earn clearance (fails stay retry-able). Doctrine intact:
   challenge-tier hits never feed `waf_security` autoblock, cleared clients
   are converted (never re-challenged), and the panel-port gate stays
-  block-tier. **Version skew:** an edge older than this release treats the
+  block-tier. Both rungs present to the client as a plain challenge
+  (`X-CFM-Action` reveals the rung only under `CFM_DEBUG_HEADERS=1`, so a
+  signal-aware solver farm can't see which solves face v2 scrutiny).
+  **Version skew:** an edge older than this release treats the
   mode as unknown and DISABLES the rule — upgrade before setting the tier
   (docs/waf.md "The challenge_v2 tier").
 - **Traffic-rules action `challenge_v2` (master plan "arm surfaces" slice
@@ -75,6 +78,16 @@ back-filled here — see the git/PR history for that period.
   armed `challenge_v2` scope applies the Rung-1 humanity gate at verify. No
   edge Lua changes; `FP_POLICY = 0` kills all policy kinds. Arm/disarm lives
   in cfm-web (Explain Fingerprint, from the IP section's filters).
+
+### Fixed
+- **A challenged POST is no longer invisible to the daemon.** The
+  challenge-resume redirect (a POST whose body is stashed for replay after
+  the solve) returned before the WAF hit push, so the hit left no
+  cfm.waf.log record, no `waf_trigger` history row and no bridge decision —
+  and under the new `challenge_v2` tier a body-carried payload would never
+  have written its verify mark. The push + `waf_<action>` log line now run
+  on every route out of the WAF action branch, resume path included
+  (surfaced by the slice-C adversarial review).
 
 ## 2026.09.20
 

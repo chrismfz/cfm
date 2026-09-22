@@ -2289,8 +2289,8 @@ end
 -- reintroduce the loop.
 function _M.post_clearance_action(action, reason, after_challenge, after_high_risk)
   if action ~= "challenge" and action ~= "challenge_v2" then return action, false end
-  if after_high_risk == "challenge" then after_high_risk = "block" end
-  if after_challenge == "challenge" then after_challenge = "logonly" end
+  if after_high_risk == "challenge" or after_high_risk == "challenge_v2" then after_high_risk = "block" end
+  if after_challenge == "challenge" or after_challenge == "challenge_v2" then after_challenge = "logonly" end
   if _M.is_high_risk_reason(reason) then
     return after_high_risk or "block", true
   end

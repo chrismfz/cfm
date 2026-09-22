@@ -71,8 +71,10 @@ func TestWAFPushChallengeV2_EmptyHostDegradesToPlainChallenge(t *testing.T) {
 	}
 	b.mu.Lock()
 	entry, ok := b.ipState["203.0.113.62"]
-	markCount := len(challengeV2Marks.m)
 	b.mu.Unlock()
+	challengeV2Marks.mu.Lock()
+	markCount := len(challengeV2Marks.m)
+	challengeV2Marks.mu.Unlock()
 	if !ok || entry.Action != "challenge" {
 		t.Fatalf("hostless v2 push must still challenge the IP (ok=%v action=%q)", ok, entry.Action)
 	}
@@ -144,11 +146,10 @@ func TestRecordWAFTriggerChallengeV2_EventCarriesTierAndWafsecFilterDrops(t *tes
 	if len(got) != 1 {
 		t.Fatalf("expected 1 WAFHitEvent, got %d", len(got))
 	}
+	// Carrying the verbatim tier is also what keeps the hit out of autoblock:
+	// the Phase-1 wafsec subscribe filter (waf_security_register.go) drops
+	// every event whose Action != "block".
 	if got[0].Action != "challenge_v2" {
 		t.Fatalf("WAFHitEvent action = %q, want challenge_v2", got[0].Action)
-	}
-	// The Phase-1 wafsec subscribe filter (waf_security_register.go).
-	if got[0].Action == "block" {
-		t.Fatalf("challenge_v2 must never look like a block-tier hit to wafsec")
 	}
 }

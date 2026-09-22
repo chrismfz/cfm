@@ -266,7 +266,7 @@ func registerWAFRules(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "waf_rules",
-		Description: "The WAF rules currently loaded in the edge (id, reason family, tier: logonly/challenge/block). Use to see what the WAF can detect and at what enforcement tier.",
+		Description: "The WAF rules currently loaded in the edge (id, reason family, tier: logonly/challenge/challenge_v2/block). Use to see what the WAF can detect and at what enforcement tier.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		return dispatchJSON(ctx, d, "/api/v1/waf/rules", nil)
 	})
