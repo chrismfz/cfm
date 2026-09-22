@@ -22,7 +22,7 @@ func (b *Backend) EnsureBase() (err error) {
 	start := time.Now()
 	b.logPhase("EnsureBase", "start", 0, nil, "")
 	// Split the timing so the self-test can tell contention (lock_wait) from
-	// netlink-connection degradation (nl_work) from the nft CLI part (cli_work).
+	// slow kernel round-trips (nl_work) from the nft CLI part (cli_work).
 	var lockWait, nlWork, cliWork time.Duration
 	defer func() {
 		st := "ok"

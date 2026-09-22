@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
+
+	"github.com/google/nftables"
 )
 
 // HostRulesetJSON gives diagnostics a complete cross-owner view. Runtime
@@ -142,6 +144,15 @@ func (b *Backend) HasElem(setName, elem string) (bool, error) {
 		return false, fmt.Errorf("nftlib HasElem %s: %w", setName, err)
 	}
 
+	// Interval sets (the *_nets sets) store each range [start, end) as a start
+	// element plus an IntervalEnd element at the first address past it, so an
+	// address INSIDE a range equals neither. Test membership instead — what the
+	// exec backend gets from `nft get element`, and what an allow/ignore range
+	// means to shouldSkipAutoBlock.
+	if ip := net.ParseIP(elem); ip != nil && set.Interval {
+		return intervalContains(elems, normalizeIP(ip)), nil
+	}
+
 	// Normalise the query to canonical form so "::1" and "0:0:…:1" both match.
 	var targetStr string
 	if ip := net.ParseIP(elem); ip != nil {
@@ -160,6 +171,23 @@ func (b *Backend) HasElem(setName, elem string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// intervalContains reports whether key lies inside one of an interval set's
+// ranges: the greatest boundary at or below key must be a range start. On a
+// tie the start wins, since adjacent ranges share a boundary.
+func intervalContains(elems []nftables.SetElement, key []byte) bool {
+	var best []byte
+	bestIsStart := false
+	for _, e := range elems {
+		if len(e.Key) != len(key) || bytes.Compare(e.Key, key) > 0 {
+			continue
+		}
+		if c := bytes.Compare(e.Key, best); best == nil || c > 0 || (c == 0 && !e.IntervalEnd) {
+			best, bestIsStart = e.Key, !e.IntervalEnd
+		}
+	}
+	return best != nil && bestIsStart
 }
 
 // ListSetElementsRaw returns all elements of a named set as strings.

@@ -17,12 +17,47 @@ type NftlibSelfTest struct {
 	// one to look at first when EnsureBase is climbing.
 	EnsureBaseWorst *EnsureBaseSample `json:"ensure_base_worst,omitempty"`
 	FeedWrites      []FeedWriteSample `json:"feed_writes"`
+	// Netlink covers every netlink call the backend makes — reads such as the
+	// heartbeat's DNAT probe as well as batch writes — not just EnsureBase.
+	// The nft CLI calls some paths make are not included.
+	Netlink *NetlinkStats `json:"netlink,omitempty"`
+}
+
+// NetlinkStats summarises the backend's netlink calls since boot. Each runs on
+// its own socket. Reads (dumps, lookups) carry an OpTimeoutMs deadline, so a
+// stuck read shows up here as a timeout instead of holding the backend lock
+// forever; writes carry none, because the kernel may still be applying a batch
+// the deadline would report as failed. Timeouts > 0 means a read got no answer
+// for that long; SlowRecent names which calls, and when.
+type NetlinkStats struct {
+	OpTimeoutMs int64  `json:"op_timeout_ms"`
+	Ops         uint64 `json:"ops"`
+	// Errors counts every failed round-trip, including routine not-found
+	// lookups; Timeouts is the one that means trouble.
+	Errors   uint64 `json:"errors"`
+	Timeouts uint64 `json:"timeouts"`
+	// Dials counts sockets opened. Every call that reaches the kernel opens
+	// its own, so Dials ≈ Ops (an empty Flush opens none).
+	Dials uint64 `json:"dials"`
+	// DeadlineUnsupported is set if a socket refused a deadline; reads then
+	// run unbounded, as they did before deadlines existed.
+	DeadlineUnsupported string            `json:"deadline_unsupported,omitempty"`
+	LastTimeout         *NetlinkOpSample  `json:"last_timeout,omitempty"`
+	SlowRecent          []NetlinkOpSample `json:"slow_recent"` // ≥5s or timed out, oldest first
+}
+
+// NetlinkOpSample is one slow or timed-out netlink round-trip.
+type NetlinkOpSample struct {
+	At    string `json:"at"` // RFC3339
+	Op    string `json:"op"` // nftables call, e.g. GetRules, Flush
+	DurMs int64  `json:"dur_ms"`
+	Err   string `json:"err,omitempty"`
 }
 
 // EnsureBaseSample splits one EnsureBase call into where the time went. The
 // split is the key discriminator: a climbing LockWaitMs means contention (another
 // op holding the backend mutex — e.g. a slow/failed feed write); a climbing
-// NLWorkMs means the shared netlink connection itself is degrading; CLIWorkMs is
+// NLWorkMs means the kernel is slow to apply the batch; CLIWorkMs is
 // the `nft` CLI portion (self-sets + base input rules).
 type EnsureBaseSample struct {
 	At         string `json:"at"` // RFC3339
@@ -34,7 +69,7 @@ type EnsureBaseSample struct {
 
 // FeedWriteSample is the latest observed write of one feed/union set. A non-empty
 // Err with a large Elems (e.g. "message too long") is the "feed not applied"
-// signal; a climbing DurMs across refreshes is netlink-connection degradation.
+// signal; a climbing DurMs across refreshes means the kernel side is slowing down.
 type FeedWriteSample struct {
 	Set   string `json:"set"`
 	At    string `json:"at"` // RFC3339

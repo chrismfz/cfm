@@ -56,9 +56,10 @@ func (b *Backend) dumpFloodCountersOnce() {
 		logging.Logf("[flood] cannot get table: %v", err)
 		return
 	}
-	// b.conn wraps a single netlink socket and is NOT safe for concurrent use;
-	// this read MUST hold b.mu (releasing before GetObjects let it race a locked
-	// writer on the same socket → "unexpected header type" desync → wedge).
+	// Hold b.mu across the read: it serialises this backend's netlink calls.
+	// (While b.conn was one shared socket, releasing it before GetObjects let
+	// the read race a locked writer on that socket → "unexpected header type"
+	// desync → wedge; per-call sockets, nlconn.go, remove that failure mode.)
 	objs, err := b.conn.GetObjects(t)
 	b.mu.Unlock()
 	if err != nil {
@@ -201,7 +202,7 @@ func (b *Backend) getSetIPStrings(setName string) []string {
 		b.mu.Unlock()
 		return nil
 	}
-	// Hold b.mu across the netlink read — b.conn is a single shared socket.
+	// Hold b.mu across the netlink read — it serialises this backend's calls.
 	elems, err := b.conn.GetSetElements(set)
 	b.mu.Unlock()
 	if err != nil {
@@ -311,54 +312,45 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 }
 
 // shouldSkipAutoBlock returns (true, reason) if ip is in ignore/allow sets.
+// If a set can't be read it also skips, with the error as the reason; a set
+// that doesn't exist just lists nobody. Allow and ignore entries are the
+// operator's explicit trust decisions, and banning such an address is worse
+// than missing one autoblock while netlink is failing: an attacker trips the
+// detector again, a banned allowlisted peer stays out.
 func (b *Backend) shouldSkipAutoBlock(ip string) (bool, string) {
 	f := autoblock.ParseIPFam(ip)
 	if f == 0 {
 		return false, ""
 	}
 
-	var hostSets, netSets []string
+	type check struct{ set, reason string }
+	var checks []check
 	if f == 6 {
-		hostSets = []string{"ignore_v6", "allow_v6", "allow_dyn_v6"}
-		netSets = []string{"ignore_v6_nets", "allow_v6_nets"}
+		checks = []check{
+			{"ignore_v6", "in ignore list"}, {"allow_v6", "already allowed"}, {"allow_dyn_v6", "already allowed"},
+			{"ignore_v6_nets", "in ignore CIDR"}, {"allow_v6_nets", "allowed by CIDR"},
+			// Union sets maintained by RebuildExternalUnions cover all feed-sourced allows.
+			{"allow_ext_v6_hosts", "already allowed (feed)"}, {"allow_ext_v6_nets", "allowed by CIDR (feed)"},
+		}
 	} else {
-		hostSets = []string{"ignore_v4", "allow_v4", "allow_dyn_v4"}
-		netSets = []string{"ignore_v4_nets", "allow_v4_nets"}
-	}
-
-	for _, s := range hostSets {
-		ok, _ := b.HasElem(s, ip)
-		if ok {
-			if strings.HasPrefix(s, "ignore_") {
-				return true, "in ignore list"
-			}
-			return true, "already allowed"
+		checks = []check{
+			{"ignore_v4", "in ignore list"}, {"allow_v4", "already allowed"}, {"allow_dyn_v4", "already allowed"},
+			{"ignore_v4_nets", "in ignore CIDR"}, {"allow_v4_nets", "allowed by CIDR"},
+			{"allow_ext_v4_hosts", "already allowed (feed)"}, {"allow_ext_v4_nets", "allowed by CIDR (feed)"},
 		}
 	}
-	for _, s := range netSets {
-		ok, _ := b.HasElem(s, ip)
-		if ok {
-			if strings.HasPrefix(s, "ignore_") {
-				return true, "in ignore CIDR"
+	for _, c := range checks {
+		ok, err := b.HasElem(c.set, ip)
+		if err != nil {
+			if isNotFound(err) {
+				continue // a set that doesn't exist lists nobody
 			}
-			return true, "allowed by CIDR"
+			return true, "not blocked: could not check " + c.set + ": " + err.Error()
+		}
+		if ok {
+			return true, c.reason
 		}
 	}
-
-	// Union sets maintained by RebuildExternalUnions cover all feed-sourced allows.
-	var extHostSet, extNetSet string
-	if f == 6 {
-		extHostSet, extNetSet = "allow_ext_v6_hosts", "allow_ext_v6_nets"
-	} else {
-		extHostSet, extNetSet = "allow_ext_v4_hosts", "allow_ext_v4_nets"
-	}
-	if ok, _ := b.HasElem(extHostSet, ip); ok {
-		return true, "already allowed (feed)"
-	}
-	if ok, _ := b.HasElem(extNetSet, ip); ok {
-		return true, "allowed by CIDR (feed)"
-	}
-
 	return false, ""
 }
 
@@ -483,6 +475,13 @@ func (b *Backend) loadPortScannerOnce() {
 	_, terr := b.conn.ListTableOfFamily(cfmTableName, nftables.TableFamilyINet)
 	b.mu.Unlock()
 	if terr != nil {
+		if !isNotFound(terr) {
+			// Not "missing" — the read itself failed (e.g. a netlink read
+			// timeout). Rebuilding now would flush and rewrite every set on a
+			// kernel that is already slow; skip this tick and look again next.
+			logging.Logf("[portscan] cannot check inet %s, skipping tick: %v", cfmTableName, terr)
+			return
+		}
 		if err := b.EnsureBase(); err != nil {
 			return
 		}
@@ -653,7 +652,7 @@ func (b *Backend) dumpPortscanPairsNative() (tcp, udp map[string]map[int]struct{
 			b.mu.Unlock()
 			return m
 		}
-		// Hold b.mu across the netlink read — b.conn is a single shared socket.
+		// Hold b.mu across the netlink read — it serialises this backend's calls.
 		elems, err := b.conn.GetSetElements(set)
 		b.mu.Unlock()
 		if err != nil {
