@@ -1221,6 +1221,65 @@ if waf_mode ~= "off" and uri ~= decision_uri and uri ~= "/__cfm_verify" then
     end
 end
 
+-- 2f) Fleet-armed fingerprint policy (panel-port consult — master plan item).
+-- The SAME operator-armed per-fingerprint policy the web edge enforces at
+-- cfm.lua Step 0c now covers the panel ports: an armed `deny` 403s the TLS
+-- bucket on :2083/:2087/:2096 too (a farm that solved a web challenge could
+-- otherwise still hammer the panel login). Semantics, deliberately narrow:
+--   * ONLY `deny` acts, and only under PANEL_FP_POLICY_MODE = enforce (env
+--     CFM_PANEL_FP_POLICY → detectors.conf → default enforce, same ladder as
+--     the panel WAF/decision modes); `logonly` records `logonly=would_deny`.
+--   * challenge / challenge_v2 fingerprints are OBSERVE-ONLY here: the panel
+--     has no per-request challenge serve for them (the section-2e loop
+--     rationale — a WAF/policy-driven panel challenge re-trips forever), so
+--     the floor stays a web-path concept; the hit is logged for visibility.
+--   * The global FP_POLICY kill (bridge-published fp_policy) gates the whole
+--     step — off means zero per-request cost here, exactly like Step 0c.
+--   * Self / IGNORE_NETS clients never reach the lookup (panel_is_self, same
+--     predicate the panel WAF uses), the tuple comes from the panel port's
+--     OWN handshake ($ssl_* — unspoofable), the lookup reuses the shared
+--     cfm_fppolicy cache dict + the panel's bridge client, and everything is
+--     pcall'd + fail-open: a module/bridge fault can never lock the panel.
+local fp_mode = resolve_panel_mode("CFM_PANEL_FP_POLICY", panel_bridge_cfg and panel_bridge_cfg.panel_fp_policy_mode)
+if fp_mode ~= "off"
+   and (panel_bridge_cfg == nil or panel_bridge_cfg.fp_policy ~= false)
+   and uri ~= decision_uri and uri ~= "/__cfm_verify" then
+    local ok_fp, fp_act, fp_id = pcall(function()
+        if panel_is_self(client_ip) then return nil, nil end
+        local raw = require("cfm_tlsfp").value()
+        if not raw then return nil, nil end
+        return require("cfm_fppolicy").lookup({
+            raw = raw,
+            -- Same dedicated dict the web edge uses (http-level, shared across
+            -- server blocks); decisions dict only on upgrade lag.
+            sh  = ngx.shared.cfm_fppolicy or ngx.shared.cfm_decisions,
+            rpc = function(path)
+                if not panel_decision then return nil, "no bridge client" end
+                return panel_decision:rpc("fppolicy", "GET", path, nil,
+                    { ip = client_ip, host = normalized_host })
+            end,
+        })
+    end)
+    if ok_fp and fp_act == "deny" then
+        if fp_mode == "enforce" then
+            ngx.log(ngx.WARN, "[cfm_panel_fppolicy] enforce=deny",
+                " fpid=", tostring(fp_id or "-"),
+                " ip=", tostring(client_ip), " host=", tostring(normalized_host),
+                " uri=", tostring(uri))
+            return deny(mode, "panel_fp_deny_" .. tostring(fp_id or "-"))
+        end
+        ngx.log(ngx.WARN, "[cfm_panel_fppolicy] logonly=would_deny",
+            " fpid=", tostring(fp_id or "-"),
+            " ip=", tostring(client_ip), " host=", tostring(normalized_host),
+            " uri=", tostring(uri))
+    elseif ok_fp and (fp_act == "challenge" or fp_act == "challenge_v2") then
+        -- Web-path floor only — observe here (see the block comment above).
+        ngx.log(ngx.NOTICE, "[cfm_panel_fppolicy] observe=", tostring(fp_act),
+            " fpid=", tostring(fp_id or "-"),
+            " ip=", tostring(client_ip), " host=", tostring(normalized_host))
+    end
+end
+
 -- 3) Human panel entrypoints.
 if is_human_panel_entry(ngx.var.host or "", uri) then
     local clearance_ok, clearance_reason = clearance_cookie_state(client_ip, normalized_host, panel_scope)

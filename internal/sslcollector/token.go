@@ -407,6 +407,14 @@ type WebdetectorBridgeConfig struct {
 	// "absent → enforce" anyway.
 	PanelWAFMode      string
 	PanelDecisionMode string
+	// PanelFPPolicyMode is the panel-port consult mode for the fleet-armed
+	// fingerprint policy ("off"|"logonly"|"enforce"), sourced from
+	// detectors.conf [webdetector] PANEL_FP_POLICY_MODE — the master plan's
+	// "panel-port fp-policy consult": an operator-armed fingerprint `deny`
+	// covers :2083/:2087/:2096 too. Same resolution chain and "empty →
+	// enforce" rendering as the other panel modes; the global FPPolicy=false
+	// still kills the consult regardless of this mode.
+	PanelFPPolicyMode string
 	// PostClearanceCadence enables the edge post-clearance nav-cadence shadow
 	// (cfm_pcw, Track-2 B2 — cfm.lua Step 2b). Log-only measurement, default on;
 	// detectors.conf [webdetector] POST_CLEARANCE_CADENCE. This replaces the former
@@ -461,6 +469,7 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 			"  cookie_life_sec = %d,\n"+
 			"  panel_waf_mode = %q,\n"+
 			"  panel_decision_mode = %q,\n"+
+			"  panel_fp_policy_mode = %q,\n"+
 			"  post_clearance_cadence = %s,\n"+
 			"  fp_policy = %s,\n"+
 			"}\n",
@@ -471,6 +480,7 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 		cfg.CookieLifeSec,
 		panelMode(cfg.PanelWAFMode),
 		panelMode(cfg.PanelDecisionMode),
+		panelMode(cfg.PanelFPPolicyMode),
 		luaBool(cfg.PostClearanceCadence),
 		luaBool(cfg.FPPolicy),
 	)

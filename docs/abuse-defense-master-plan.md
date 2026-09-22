@@ -176,8 +176,22 @@ already opened.
         clients (v2 behaves as v1 until Rung 1 ships). Knobs `FP_POLICY` /
         `FP_POLICY_ALLOW_FPS`; expires honoured at lookup. **Web path only** —
         the panel-port gate (`cfm_panel.lua`) does not consult the policy yet.
-      - [ ] Panel-port fp-policy consult (`cfm_panel.lua` — same Step-0c
-        lookup so an armed deny also covers `:2083/:2087/:2096`).
+      - [x] Panel-port fp-policy consult — **DONE 2026-09-22**
+        (`cfm_panel.lua` step 2f): the same operator-armed policy the web
+        edge enforces at Step 0c now covers `:2083/:2087/:2096`. As-built:
+        ONLY `deny` acts, under the panel mode ladder
+        (`PANEL_FP_POLICY_MODE` off|logonly|enforce, default enforce like
+        its panel siblings; env `CFM_PANEL_FP_POLICY`; published via the
+        bridge config so flips land in ~10s) — `logonly` records
+        `[cfm_panel_fppolicy] logonly=would_deny`. Challenge/challenge_v2
+        fingerprints stay OBSERVE-ONLY on panel ports (logged, never
+        enforced: the panel has no per-request challenge serve — the 2e
+        loop rationale — so the floor remains a web-path concept). The
+        global `FP_POLICY=0` kills the consult too; self/IGNORE_NETS never
+        reach the lookup; the tuple comes from the panel port's own
+        handshake ($ssl_*); the lookup reuses the shared cfm_fppolicy
+        cache dict + the panel's bridge client; everything pcall'd +
+        fail-open (a fault can never lock the panel).
       - [x] ChallengeV2 Rung 1 — **DONE 2026-09-19** (`challenge_v2.go` +
         the challenge-page passive collectors): every solve is scored on
         positive headless evidence only (webdriver / HeadlessChrome UA fail

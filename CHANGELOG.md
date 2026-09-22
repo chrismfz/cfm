@@ -18,6 +18,18 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Panel-port fingerprint-policy consult (master plan item).** The
+  operator-armed per-fingerprint policy the web edge enforces pre-clearance
+  now also covers the cPanel/WHM/webmail ports: an armed `deny` 403s that
+  TLS bucket on `:2083/:2087/:2096` too (a farm that solved a web challenge
+  could otherwise still hammer the panel login). New
+  `[webdetector] PANEL_FP_POLICY_MODE = off|logonly|enforce` (default
+  enforce, like the other panel modes; env `CFM_PANEL_FP_POLICY`; flips
+  reach the edge in ~10s without a proxy reload). Only `deny` acts —
+  challenge-tier fingerprints are observe-only on panel ports (the panel
+  serves no per-request challenge). `FP_POLICY = 0` still kills the whole
+  consult; self-IPs/IGNORE_NETS are skipped and every failure is fail-open,
+  so a fault can never lock an admin out of WHM.
 - **Customer "Emergency challenge" panic button (master plan "arm surfaces"
   slice D).** The vhost-controls page (`/cfm-admin/webdetector/controls/` —
   the page the cPanel plugin opens) gains an arm/disarm card: pick a vhost,

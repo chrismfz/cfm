@@ -376,7 +376,11 @@ enforcement path is the **operator-armed** per-fingerprint policy: cfm-web
 `fingerprint_policies` (arming is permission-gated there) → agent pull →
 `internal/webdetector/fppolicy.go` store → `/nginx/fppolicy` bridge lookup →
 `cfm.lua` Step 0c (`deny` 403s pre-clearance; challenge/challenge_v2 are a floor
-for uncleared clients; web path only — the panel ports do not consult it yet).
+for uncleared clients). Since 2026-09-22 the panel ports consult it too
+(`cfm_panel.lua` step 2f, `PANEL_FP_POLICY_MODE` ladder, default enforce):
+an armed `deny` 403s on `:2083/:2087/:2096` as well, while challenge-tier
+fingerprints stay OBSERVE-ONLY there (the panel serves no per-request
+challenge — the 2e loop rationale).
 Knobs `[webdetector] FP_POLICY` / `FP_POLICY_ALLOW_FPS`. Since 2026-09-20 the
 same feed also carries **country / ASN policy kinds** (challenge tiers ONLY —
 a geo `deny` is excluded by doctrine and dropped at three gates), enforced

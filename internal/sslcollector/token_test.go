@@ -97,6 +97,9 @@ func TestWriteWebdetectorBridgeConfigContent(t *testing.T) {
 	if !strings.Contains(got, `panel_decision_mode = "enforce",`) {
 		t.Fatalf("expected panel_decision_mode = \"enforce\" (empty→default), got: %q", got)
 	}
+	if !strings.Contains(got, `panel_fp_policy_mode = "enforce",`) {
+		t.Fatalf("expected panel_fp_policy_mode = \"enforce\" (empty→default), got: %q", got)
+	}
 	if !strings.Contains(got, "post_clearance_cadence = true,") {
 		t.Fatalf("expected post_clearance_cadence = true, got: %q", got)
 	}
@@ -149,6 +152,7 @@ func TestWriteWebdetectorBridgeConfigContent(t *testing.T) {
 	cfg = WebdetectorBridgeConfig{
 		PanelWAFMode:      "off",
 		PanelDecisionMode: "garbage",
+		PanelFPPolicyMode: "logonly",
 	}
 	if err := WriteWebdetectorBridgeConfig(luaPath, cfg, 0); err != nil {
 		t.Fatalf("WriteWebdetectorBridgeConfig(modes): %v", err)
@@ -163,6 +167,9 @@ func TestWriteWebdetectorBridgeConfigContent(t *testing.T) {
 	}
 	if !strings.Contains(got, `panel_decision_mode = "enforce",`) {
 		t.Fatalf("expected unknown panel_decision_mode to normalise to \"enforce\", got: %q", got)
+	}
+	if !strings.Contains(got, `panel_fp_policy_mode = "logonly",`) {
+		t.Fatalf("expected panel_fp_policy_mode = \"logonly\", got: %q", got)
 	}
 }
 

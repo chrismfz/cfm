@@ -27,6 +27,8 @@
 --                       daemon predates the field → cfm_panel.lua defaults it to
 --                       "enforce")
 --   panel_decision_mode string  or nil (same shape as panel_waf_mode)
+--   panel_fp_policy_mode string or nil (same shape; the panel-port consult of
+--                       the fleet-armed fingerprint policy — cfm_panel step 2f)
 --   post_clearance_cadence boolean (default true when file/field missing; the
 --                       cfm_pcw B2 shadow toggle — [webdetector] POST_CLEARANCE_CADENCE)
 --   fp_policy           boolean (default true when file/field missing; the
@@ -72,6 +74,9 @@ local OPTS = {
     end
     if type(val.panel_decision_mode) == "string" then
       out.panel_decision_mode = val.panel_decision_mode
+    end
+    if type(val.panel_fp_policy_mode) == "string" then
+      out.panel_fp_policy_mode = val.panel_fp_policy_mode
     end
     -- Post-clearance nav-cadence shadow (cfm_pcw, B2). Default TRUE (nil on an
     -- older daemon's file → on), off only when explicitly published false — same
