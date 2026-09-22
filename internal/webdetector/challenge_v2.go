@@ -10,10 +10,12 @@ package webdetector
 // for a real user — no puzzle, no extra click, nothing visible.
 //
 // D5 is the contract this file exists to honour:
-//   (a) SCOPE      — the score has TEETH only when the solving client's
-//                    fingerprint carries an operator-armed `challenge_v2`
-//                    policy (FingerprintPolicyForID); everyone else is scored
-//                    shadow/log-only.
+//   (a) SCOPE      — the score has TEETH only for a solve covered by an
+//                    operator-armed `challenge_v2` on SOME grain: the client's
+//                    fingerprint (FingerprintPolicyForID), a fleet-armed
+//                    country/ASN policy (GeoPolicyActionForIP), or a v2-tier
+//                    manual vhost challenge (challengeV2HostArmed); everyone
+//                    else is scored shadow/log-only.
 //   (b) ABSENCE    — a solve can fail ONLY on positive headless evidence
 //                    (webdriver true, a software renderer, a self-contradicting
 //                    report). A missing payload (old cached page, blocked JS,
@@ -56,6 +58,18 @@ package webdetector
 //     as the slice-2 edge enforcement. (A forged id also taints the fp= on
 //     would_v2 shadow lines from DNAT clients; the ledger's solver-farm
 //     conviction inputs have the same caveat, internal/tlsfp.)
+//   - The VHOST grain (arm-surfaces slice A) has the same residual through a
+//     different header: solve.Host comes from trustedForwardedHost (XFH,
+//     falling back to Host), which a DNAT client authors itself — a
+//     signal-aware farm can lie about the host on the verify POST and dodge a
+//     v2 vhost arm there. On the EDGE path the enforcement holds regardless
+//     (clearance is host-bound and validated against ngx.var.host in
+//     cfm.lua, so a spoofed-host cookie is useless on the armed vhost), but
+//     the edge's /__cfm_verify block does not clear/re-stamp XFH, so
+//     solve.Host in v2_reject/would_v2 TELEMETRY is client-influenced even
+//     there. So: the vhost grain's serve+solve-lifecycle works in both
+//     modes, its TEETH are robust on the edge path and best-effort on DNAT —
+//     the same honesty tier as the fingerprint grain above.
 
 import (
 	"encoding/json"

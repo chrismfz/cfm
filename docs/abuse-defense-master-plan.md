@@ -246,8 +246,12 @@ already opened.
           in the engine's manual store (persisted with the challenge,
           apex→www covering) — NOT in bridge vhState: the tier is a
           verify-time distinction, so the verify gate ORs a wired
-          `challengeV2HostArmed(host)` next to the fp/geo checks, which
-          also makes it work in BOTH OpenResty and DNAT modes. Surfaces:
+          `challengeV2HostArmed(host)` next to the fp/geo checks. Teeth
+          are robust on the edge path (XFH re-stamped on /__cfm_verify;
+          clearance host-bound) and best-effort on DNAT (verify host is
+          client-authored — the fingerprint grain's honesty tier; HONEST
+          LIMITS in challenge_v2.go). Wildcard hosts fail closed for v2;
+          a rung-less re-add preserves an existing v2 arm. Surfaces:
           cfm-admin "Tier" picker next to the Challenge TTL, API
           `rung=v1|v2` on `challenge/vhost/add` (scoped tokens included —
           challenge-tier by construction, so slice D's self-arm largely

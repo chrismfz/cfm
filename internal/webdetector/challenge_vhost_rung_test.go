@@ -94,7 +94,26 @@ func TestHandleChallengeVhostAdd_Rung(t *testing.T) {
 		t.Fatalf("bad rung stored anyway: %q", got)
 	}
 
-	// Re-adding with a different rung changes the tier (idempotent refresh).
+	// A wildcard host cannot be v2-armed (the rung lookup is exact+www, so a
+	// wildcard v2 would serve challenges the gate never checks — fail closed).
+	if rr, _ := add("host=*.wild.gr&ttl=1h&rung=v2"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("wildcard v2 arm accepted: %d", rr.Code)
+	}
+	// ...plain challenge on a wildcard still works.
+	if rr, _ := add("host=*.wild.gr&ttl=1h"); rr.Code != http.StatusOK {
+		t.Fatalf("plain wildcard challenge refused: %d", rr.Code)
+	}
+
+	// A rung-LESS re-add (TTL extension from a rung-unaware surface: live
+	// view, bots drilldown, plain CLI) PRESERVES an existing v2 arm...
+	if _, m := add("host=b.gr&ttl=2h"); m["rung"] != "v2" {
+		t.Fatalf("rung-less re-add reported %v, want preserved v2", m["rung"])
+	}
+	if got := e.manualChallengeRung("b.gr"); got != "v2" {
+		t.Fatalf("rung-less re-add silently disarmed v2: %q", got)
+	}
+
+	// ...while an EXPLICIT v1 downgrades (the operator said so).
 	if _, _ = add("host=b.gr&ttl=1h&rung=v1"); e.manualChallengeRung("b.gr") != "" {
 		t.Fatalf("re-add with v1 did not clear the v2 rung")
 	}
@@ -126,6 +145,19 @@ func TestChallengeV2HostArmed_ApexCoversWWWAndWiring(t *testing.T) {
 	e.ClearManualChallengeVhost("shop.gr")
 	if challengeV2HostArmed("shop.gr") {
 		t.Fatalf("v2 gate survived the manual challenge removal")
+	}
+}
+
+// The PRODUCTION wiring: NewEngine must hook the package-level verify gate to
+// its own manual store (review finding: the wiring line was untested — the
+// sibling test above wires its own closure, so deleting the NewEngine line
+// would leave the suite green while the teeth silently vanish).
+func TestNewEngineWiresChallengeV2HostArmed(t *testing.T) {
+	t.Cleanup(func() { SetChallengeV2HostArmed(nil) })
+	e := NewEngine(Config{Every: time.Second, Window: time.Minute})
+	e.ManualChallengeVhost("wired.gr", time.Hour, "manual", "v2")
+	if !challengeV2HostArmed("wired.gr") {
+		t.Fatalf("NewEngine did not wire the v2 vhost gate to its manual store")
 	}
 }
 

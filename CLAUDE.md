@@ -382,7 +382,9 @@ still serves the same challenge page as `challenge` (the rung difference is
 enforced at verify, not at serve). The verify gate ORs three arm grains:
 fingerprint policy, geo policy, and (since 2026-09-22, arm-surfaces slice A)
 a per-vhost `rung=v2` on the MANUAL vhost challenge (API/CLI/cfm-admin Tier
-picker; persisted with the challenge; works in DNAT mode too). Teeth are web/edge-path-only (DNAT clients
+picker; persisted with the challenge; teeth robust on the edge path, and
+best-effort on DNAT where the verify host is client-authored — see the
+HONEST LIMITS block in `challenge_v2.go`). Teeth are web/edge-path-only (DNAT clients
 author their own `X-CFM-TLS`), and the client-authored report is spoofable by
 a signal-aware farm — deliberate D5b residuals, documented in
 `challenge_v2.go`; Rung 2 (visible interactive, accessible) is the designed
