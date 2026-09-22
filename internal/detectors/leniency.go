@@ -126,8 +126,10 @@ func (lp *leniencyPolicy) matchesIP(ipStr string, enr *enrich.Enricher) (bool, s
 // through the record's English NAME only, and that failed two ways: an ISO
 // code whose country is missing from countryNameToISO (only ~50 are listed —
 // "EE", "LT", "LU", …) never matched at all, and the name itself differs by
-// database — IPLocate says "The Netherlands" where MaxMind says "Netherlands",
-// so "NL" and "NETHERLANDS" both missed on an IPLocate node.
+// database and release — IPLocate (and MaxMind from ~2023 to 2026-02) says
+// "The Netherlands", current MaxMind "Netherlands" — so "NL" and "NETHERLANDS"
+// both missed there. Tokens split on spaces too, so a multi-word name
+// ("UNITED KINGDOM") can never match: ISO codes are the reliable form.
 func (lp *leniencyPolicy) matchGeo(r enrich.Result) (bool, string) {
 	if lp == nil {
 		return false, ""
@@ -140,7 +142,7 @@ func (lp *leniencyPolicy) matchGeo(r enrich.Result) (bool, string) {
 			case iso != "" && c == iso: // "GR" == record ISO
 			case name != "" && c == name: // "GREECE" == record name
 			case iso != "" && countryNameToISO[c] == iso: // "NETHERLANDS" → NL, whatever the db names it
-			case name != "" && countryNameToISO[name] == c: // a record with a name but no ISO
+			case name != "" && countryNameToISO[name] == c: // record name → ISO (e.g. its ISO field was empty)
 			default:
 				continue
 			}
