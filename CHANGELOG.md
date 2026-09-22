@@ -17,7 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The ChallengeV2 geo check at verify now reads the current GeoLite2
+  database.** When a country/ASN policy is armed at `challenge_v2`, verify
+  checks whether the solving client falls under it. That check went through
+  the enrichment cache, whose entries survive a database update for up to 24h
+  (or hold an empty answer if cached before the database loaded). So after an
+  update it could reject a client the current database places outside the
+  armed set — with a `v2=geo` line whose `cc=` contradicted it — or let
+  through one it now places inside. It now reads the database directly (a
+  microsecond, no DNS), the same source as the `cc=`/`asn=` on the line.
+  **Enforcement change** for armed geo `challenge_v2` policies only; nothing
+  changes where none is armed. The decision-path challenge floor still reads
+  through the cache.
 
 ## 2026.09.22
 

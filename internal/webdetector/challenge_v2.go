@@ -342,8 +342,8 @@ const (
 // hot path, and reading a mark neither consumes nor rewrites it, so the eager
 // read cannot starve the gate below. The geo grain costs nothing at all until
 // a country/ASN policy exists (GeoPolicyActionForIP returns immediately on an
-// empty policy set); once one does, it is one enricher lookup per solve
-// against the cache the decision path already warmed.
+// empty policy set); once one does, it is one live mmdb read per solve
+// (microseconds, no DNS).
 func challengeV2ArmGrain(fpID, ip, host string) string {
 	switch {
 	case FingerprintPolicyForID(fpID) == "challenge_v2":

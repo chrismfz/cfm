@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"cfm/internal/enrich/mmdbtest"
 	"cfm/internal/tlsfp"
 )
 
@@ -393,6 +394,54 @@ func TestNewEngineWithoutGeoLiteDatabasesWarns(t *testing.T) {
 	_ = NewEngine(Config{Every: time.Second, Window: time.Minute, UseEnrich: true, EnrichDirs: []string{t.TempDir()}})
 	expectLines(t, lines, "enricher with an empty database dir",
 		"WARNING: no GeoLite2 database is loaded (GeoLite2-ASN.mmdb, GeoLite2-City.mmdb): 1 armed ASN policy cannot match")
+}
+
+// The verify-side geo gate reads the node's database LIVE — the same source as
+// the solve line's cc=/asn= — not through the enricher's cache. A cache HIT
+// survives an mmdb update (up to 24h) and holds an empty record when cached
+// before the mmdb loaded, so the gate acted on the old answer: here, a client
+// the updated database moved from GR to DE stayed un-armed under a DE policy.
+func TestVerifyGeoGateReadsTheDatabaseLive(t *testing.T) {
+	captureGeoWarnings(t) // isolates the resolver + policy state
+	prevSolve := challengeSolveEnricher.Load()
+	challengeV2.mu.RLock()
+	prevHostArmed := challengeV2.hostArmed
+	challengeV2.mu.RUnlock()
+	t.Cleanup(func() {
+		challengeSolveEnricher.Store(prevSolve)
+		SetChallengeV2HostArmed(prevHostArmed)
+	})
+
+	const ip = "10.20.30.40" // non-routable: the enricher does no reverse DNS
+	base := time.Now().Add(-time.Hour)
+	dir := t.TempDir()
+	install := func(iso, country string, mt time.Time) {
+		mmdbtest.Write(t, dir, "GeoLite2-City.mmdb",
+			mmdbtest.Build("GeoLite2-City", mmdbtest.CityRecord(iso, country, "")), mt)
+	}
+
+	install("GR", "Greece", base)
+	e := NewEngine(Config{Every: time.Second, Window: time.Minute, UseEnrich: true, EnrichDirs: []string{dir}})
+	if e.enr == nil {
+		t.Fatal("engine built without its enricher")
+	}
+	if got := e.enr.Lookup(ip).CountryISO; got != "GR" { // warms the 24h cache
+		t.Fatalf("setup: Lookup = %q, want GR", got)
+	}
+	SetFingerprintPolicies([]FingerprintPolicy{{ID: "DE", Kind: "country", Action: "challenge_v2"}})
+	if got := GeoPolicyActionForIP(ip); got != "" {
+		t.Fatalf("a GR client under a DE policy = %q, want none", got)
+	}
+
+	// The database is updated: the address is German now.
+	install("DE", "Germany", base.Add(time.Minute))
+	e.enr.RefreshNow()
+	if got := e.enr.LookupCachedOrAsync(ip).CountryISO; got != "GR" {
+		t.Fatalf("setup: the cache should still hold the old answer, got %q", got)
+	}
+	if got := GeoPolicyActionForIP(ip); got != "challenge_v2" {
+		t.Fatalf("after the update the gate = %q, want challenge_v2 (it must read the live database, not the cached GR)", got)
+	}
 }
 
 func TestGeoPoliciesDoNotLeakIntoFingerprintLookup(t *testing.T) {

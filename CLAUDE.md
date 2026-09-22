@@ -515,10 +515,10 @@ REPORTED — mv/hc/dm/dpr/raf corpus-only and scored by nothing, ptr/tch/key
 also the no_input amplifier's inputs; absent keys = not reported, never a
 fabricated zero; since 2026-09-22 every solve AND reject line also carries
 `cc=`/`asn=`/`asn_name=`/`ptr=`, resolved once at verify — country/ASN from a
-live mmdb read (the cached record can be a day stale), PTR cached-or-async —
-NOT the values the `v2=geo` arm check matched (it reads the cached record, so
-after an mmdb update a `v2=geo` line's `cc=` can sit outside the armed set:
-that is the gate lagging, a real FP mechanism, not a render bug);
+live mmdb read (the cached record can be a day stale), PTR cached-or-async;
+the `v2=geo` arm check reads the same live database (it used to read the
+cached record, and after an mmdb update a `v2=geo` line's `cc=` could sit
+outside the armed set — seen now, that is a bug);
 top-level `ptr=` is reverse DNS, NOT `sig=ptr:` — and a reject writes its own
 `challenge_v2_reject` history row, never `challenge_solved`, so
 `detection_history type=challenge_v2_reject node="all"` is the FP-hunting

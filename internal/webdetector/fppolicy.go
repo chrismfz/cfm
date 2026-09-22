@@ -423,8 +423,8 @@ func GeoPolicyAction(country string, asnFn func() uint64) string {
 
 // GeoPolicyActionForIP resolves an IP's country/ASN via the wired resolver
 // and returns the armed action (""). Verify-side use (the Rung-1 v2 gate on
-// solves) — off the request hot path, so the resolver's cached-or-async
-// lookup cost is fine.
+// solves). NewEngine wires a live mmdb read (microseconds, no DNS), the same
+// source as the solve line's cc=/asn=.
 func GeoPolicyActionForIP(ip string) string {
 	fpPolicies.mu.RLock()
 	resolver := fpPolicies.geoResolver
