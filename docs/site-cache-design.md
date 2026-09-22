@@ -188,12 +188,23 @@ The §11 **BYPASS counter is how you validate this in production**: if a vhost
 shows high BYPASS + low HIT, the cookie allowlist (or `strict_cookies`) is
 bypassing traffic you expected to cache — tune it there, don't guess.
 
-> **As-built (Tier A / 3b):** this request-cookie allowlist is **not yet wired at
-> the edge** — `static_gate` does not read `strict_cookies`/`auth_cookies`, and
-> the built-in allowlist/ignore-list machinery ships with **Tier B** (micro-cache),
-> where it is essential. Tier A relies on the response-side rails (`Set-Cookie` /
-> `Cache-Control: private` → never stored) plus the public nature of static
-> assets. Decision + residual: §14 item 3b.
+> **As-built (Tier A / 3b):** this request-cookie allowlist is **not** wired on
+> the Tier A static path — `static_gate` does not read
+> `strict_cookies`/`auth_cookies`. Tier A relies on the response-side rails
+> (`Set-Cookie` / `Cache-Control: private` → never stored) plus the public nature
+> of static assets. Decision + residual: §14 item 3b.
+>
+> **As-built (Tier B / B2, observe-only):** the built-in allowlist/ignore-list
+> machinery now ships in `cfm_cache.lua` (`micro_cookie_verdict` + `micro_decision`),
+> exercised by the header-filter `observe()` for a micro-armed vhost. It is the
+> full request-side model — auth allowlist (built-in names + per-vhost
+> `auth_cookies`), the `cfm_*`/analytics ignore-list, `strict_cookies`, the
+> GET/HEAD rail and the `/acctxfer*` never-cache path — but **nothing caches**:
+> the verdict is surfaced only on the debug-gated `X-CFM-Cache` header
+> (`microcache=would/<n>s` | `microcache=bypass:<reason>`) so the cookie logic
+> burns in on real traffic before B3 activates `proxy_cache`. The **response**-side
+> rails (Set-Cookie / `Cache-Control: private|no-store|no-cache` → never stored)
+> stay nginx-native and are enforced at store time in B3, not here.
 
 ---
 

@@ -187,7 +187,7 @@ local _warned_unsupported = {}
 
 local function rebuild_cache(entries)
     local policies, wild = {}, {}
-    local n = 0
+    local n, micro_n = 0, 0
     for _, e in ipairs(entries or {}) do
         if type(e) == "table" and type(e.host) == "string" then
             local norm = normalize_host(e.host)
@@ -200,6 +200,7 @@ local function rebuild_cache(entries)
                     auth_cookies   = (type(e.auth_cookies) == "table") and e.auth_cookies or nil,
                 }
                 n = n + 1
+                if type(pol.micro) == "table" and pol.micro.on then micro_n = micro_n + 1 end
                 if norm:sub(1, 2) == "*." then
                     wild[#wild + 1] = { pattern = norm, policy = pol }
                 else
@@ -213,9 +214,16 @@ local function rebuild_cache(entries)
             end
         end
     end
-    _cache.policies = policies
-    _cache.wild     = wild
-    _cache.has_any  = n > 0
+    _cache.policies  = policies
+    _cache.wild      = wild
+    _cache.has_any   = n > 0
+    -- has_micro: meta flag = "some vhost has its micro tier armed". B2's observe()
+    -- is already debug-gated and per-vhost (p.micro.on), so it does not read this
+    -- yet; the flag is the cheap fleet-wide early-out that B3's ACCESS-phase micro
+    -- gate will short-circuit on (mirroring has_any) so a static-only/uncached
+    -- fleet pays nothing on the hot path (design §5.6 Invariant 2). Exercised now
+    -- by the unit tests; consumed for real in B3.
+    _cache.has_micro = micro_n > 0
 end
 
 -- ---------------------------------------------------------------------------
@@ -367,6 +375,181 @@ function _M.maybe_flush_stats()
     schedule_stats_flush_if_needed()
 end
 
+-- ---------------------------------------------------------------------------
+-- Tier B micro-cache — TTL-bucket snapping (Phase B1, pure helper).
+--
+-- proxy_cache_valid is a per-LOCATION directive and is NOT variablizable
+-- (verified against nginx: `proxy_cache $var` selects only the storage zone; a
+-- single location's proxy_cache_valid applies to every zone it caches into). So
+-- a per-vhost micro TTL is served by one internal location per bucket
+-- (`@cfm_micro_<n>s`), each pinning `proxy_cache cfm_micro_<n>s;` +
+-- `proxy_cache_valid 200 <n>s;`. B3 will read a vhost's armed micro policy and
+-- ngx.exec to the bucket location; this helper is the mapping it uses. A stored
+-- TTL (recipe preset or operator custom) SNAPS to the nearest bucket — for herd
+-- protection the gap between 7s and 8s is operationally meaningless
+-- (design §5.4), so the snapped menu behaves as effectively continuous.
+local MICRO_BUCKETS = { 1, 2, 5, 10, 30, 60 } -- seconds; mirrors the declared cfm_micro_<n>s zones
+
+-- micro_bucket_seconds: snap a stored TTL to the nearest bucket. Accepts a
+-- number of seconds or a string ("5", "5s", "30 s"); nil/empty/unparseable or
+-- <=0 snaps to the smallest bucket (the safest, shortest TTL — closest to not
+-- caching). Ties snap DOWN (the shorter, safer TTL) because the buckets ascend
+-- and the comparison keeps the first minimum.
+local function micro_bucket_seconds(ttl)
+    local n
+    if type(ttl) == "number" then
+        n = ttl
+    elseif type(ttl) == "string" then
+        n = tonumber(ttl:match("%d+"))
+    end
+    if not n or n <= 0 then return MICRO_BUCKETS[1] end
+    local best, bestd = MICRO_BUCKETS[1], math.huge
+    for _, b in ipairs(MICRO_BUCKETS) do
+        local d = b - n; if d < 0 then d = -d end
+        if d < bestd then best, bestd = b, d end
+    end
+    return best
+end
+
+-- micro_zone_name: the storage zone / internal-location suffix for a stored TTL,
+-- e.g. 5 or "7s" → "cfm_micro_5s". The single source of truth for the bucket
+-- name so the conf zones, the daemon dirs and B3's ngx.exec target can't drift.
+local function micro_zone_name(ttl)
+    return "cfm_micro_" .. micro_bucket_seconds(ttl) .. "s"
+end
+
+-- ---------------------------------------------------------------------------
+-- Tier B micro-cache — request classification (Phase B2, OBSERVE-ONLY).
+--
+-- Decides whether an ALLOWED request WOULD be micro-cacheable and to which TTL
+-- bucket. NOTHING caches in B2: observe() records the verdict on the debug-gated
+-- X-CFM-Cache header only, so the cookie allowlist + anonymity rails burn in on
+-- real traffic (curl -H "X-CFM-Cache-Debug: 1") before B3 activates proxy_cache.
+-- The RESPONSE-side rails (a Set-Cookie, or a Cache-Control: private/no-store/
+-- no-cache response, is never stored) are nginx-native and enforced at store
+-- time in B3 — this Lua covers only the REQUEST-side rails (armed, method,
+-- path, cookies).
+--
+-- Cookie model (design §4.1): the bypass is NOT "the request has a Cookie
+-- header". It is a positive AUTH allowlist (a named app-session cookie → bypass,
+-- possibly a logged-in user) plus, for the opt-in strict_cookies vhost, an
+-- IGNORE-list of cookies treated as anonymous (CFM's own cfm_* cookies — incl.
+-- cfm_clearance — and common analytics/consent cookies). A cleared but
+-- app-anonymous visitor (only cfm_clearance) IS cacheable: that post-challenge
+-- burst is exactly what micro-cache exists to absorb.
+
+-- Exact lowercase auth-cookie names + name PREFIX / SUFFIX families. A request
+-- carrying any of these bypasses micro-cache (never stored), on every vhost.
+-- Bias toward OVER-inclusion: a false bypass only costs a cache miss, while a
+-- missed session cookie would (in B3) serve one user's page to another. The set
+-- is PHP/cPanel-primary (the fleet) plus the mainstream non-PHP session cookies;
+-- a stack with an unlisted session-cookie name still relies on the response-side
+-- rails (Set-Cookie / Cache-Control: private) and the opt-in strict_cookies.
+local MICRO_AUTH_EXACT = {
+    -- PHP / cPanel ecosystem
+    ["phpsessid"] = true, ["cpsession"] = true, ["whmsession"] = true,
+    ["roundcube_sessid"] = true, ["roundcube_sessauth"] = true,
+    ["laravel_session"] = true, ["ci_session"] = true, ["xsrf-token"] = true,
+    ["horde"] = true,
+    -- mainstream non-PHP stacks
+    ["jsessionid"] = true,        -- Java / Tomcat / JSP
+    ["asp.net_sessionid"] = true, -- classic ASP.NET
+    ["connect.sid"] = true,       -- Express / Node
+    ["sessionid"] = true,         -- Django
+}
+local MICRO_AUTH_PREFIX = {
+    "wordpress_logged_in_", "wordpress_sec_", "wp-postpass_", "comment_author_",
+    "woocommerce_", "wp_woocommerce_session_", "prestashop-", "horde_",
+    ".aspnetcore.",               -- ASP.NET Core session/antiforgery/auth
+}
+-- SUFFIX families: the `*_session` convention (Rails `_<app>_session`, and the
+-- generic framework pattern). Redundant-but-harmless with the exact _session
+-- names above.
+local MICRO_AUTH_SUFFIX = { "_session" }
+-- Ignore-list (consulted ONLY under strict_cookies): a strict vhost bypasses on
+-- ANY cookie not matched here. cfm_ covers cfm_clearance + every CFM-set cookie;
+-- the rest are common non-session analytics/consent cookies.
+local MICRO_IGNORE_EXACT = {
+    ["_ga"] = true, ["_gid"] = true, ["_fbp"] = true, ["_gat"] = true,
+    ["euconsent"] = true, ["euconsent-v2"] = true,
+}
+local MICRO_IGNORE_PREFIX = {
+    "cfm_", "_ga_", "_gat", "_gcl_", "_gac_", "_dc_gtm_",
+    "cookielawinfo-", "__cmp", "_hj",
+}
+
+local function name_matches(lname, exact, prefixes, suffixes)
+    if exact[lname] then return true end
+    for _, p in ipairs(prefixes) do
+        if lname:sub(1, #p) == p then return true end
+    end
+    if suffixes then
+        for _, s in ipairs(suffixes) do
+            if #lname >= #s and lname:sub(-#s) == s then return true end
+        end
+    end
+    return false
+end
+
+-- micro_cookie_verdict: classify a request's Cookie header. Returns
+-- (anonymous:bool, reason:string|nil). Anonymous (cacheable) when no auth cookie
+-- is present and — under strict — every cookie name is ignore-listed. Cookies
+-- are split on ';' FIRST, then the name taken before the first '=', so a value
+-- that itself contains '=' (base64/JWT) can never fabricate a phantom name.
+-- extra_auth is an optional {lowername=true} set of per-vhost auth cookies.
+local function micro_cookie_verdict(cookie_header, strict, extra_auth)
+    if not cookie_header or cookie_header == "" then return true, nil end
+    for pair in cookie_header:gmatch("[^;]+") do
+        local name = pair:match("^%s*([^=%s]+)")
+        if name then
+            local lname = name:lower()
+            if name_matches(lname, MICRO_AUTH_EXACT, MICRO_AUTH_PREFIX, MICRO_AUTH_SUFFIX)
+               or (extra_auth and extra_auth[lname]) then
+                return false, "auth:" .. name
+            end
+            if strict and not name_matches(lname, MICRO_IGNORE_EXACT, MICRO_IGNORE_PREFIX) then
+                return false, "strict:" .. name
+            end
+        end
+    end
+    return true, nil
+end
+
+-- Request paths never micro-cached even for an anonymous client. /.well-known/
+-- is already routed to origin at cfm.lua Step 0a1 (never reaches an allow-
+-- return), so it is not re-checked here; /acctxfer* (cPanel account transfer)
+-- does reach an allow and must not be cached.
+local function micro_path_blocked(uri)
+    return type(uri) == "string" and uri:sub(1, 9) == "/acctxfer"
+end
+
+-- micro_decision: PURE. Given the vhost policy + request facets, return
+-- (cacheable:bool, bucket:int|nil, reason:string). reason is a compact,
+-- greppable token for the observe header and a future stat key.
+local function micro_decision(pol, method, uri, cookie_header)
+    if type(pol) ~= "table" or type(pol.micro) ~= "table" or not pol.micro.on then
+        return false, nil, "unarmed"
+    end
+    if method ~= "GET" and method ~= "HEAD" then
+        return false, nil, "method"
+    end
+    if micro_path_blocked(uri) then
+        return false, nil, "path"
+    end
+    local extra
+    if type(pol.auth_cookies) == "table" then
+        extra = {}
+        for _, nm in ipairs(pol.auth_cookies) do
+            if type(nm) == "string" then extra[nm:lower()] = true end
+        end
+    end
+    local anon, why = micro_cookie_verdict(cookie_header, pol.strict_cookies, extra)
+    if not anon then
+        return false, nil, why
+    end
+    return true, micro_bucket_seconds(pol.micro.ttl), "ok"
+end
+
 -- label_for renders a compact, greppable summary of what WOULD apply.
 local function label_for(p)
     local parts = {}
@@ -414,6 +597,20 @@ function _M.observe()
         -- BYPASS / EXPIRED / …) — debug-gated, so ordinary clients never see it.
         local st = ngx.var.upstream_cache_status
         if st and st ~= "" then lbl = lbl .. " status=" .. st end
+        -- Tier B (Phase B2, OBSERVE-ONLY): for a micro-armed vhost, surface the
+        -- would-cache verdict of the request-side rails (armed / method / path /
+        -- cookie allowlist). Nothing is cached — this is the DRY-RUN burn-in
+        -- surface so the cookie logic can be validated on real requests before
+        -- B3 activates proxy_cache. debug-gated like the rest of this stamp.
+        if type(p.micro) == "table" and p.micro.on then
+            local okc, bkt, why = micro_decision(p, ngx.var.request_method,
+                                                 ngx.var.uri, ngx.var.http_cookie)
+            if okc then
+                lbl = lbl .. " microcache=would/" .. tostring(bkt) .. "s"
+            else
+                lbl = lbl .. " microcache=bypass:" .. tostring(why)
+            end
+        end
         ngx.header["X-CFM-Cache"] = lbl
     end
 end
@@ -446,50 +643,6 @@ function _M.static_gate()
     ngx.var.cfm_cache_gen  = tostring(p.gen or 0)
 end
 
--- ---------------------------------------------------------------------------
--- Tier B micro-cache — TTL-bucket snapping (Phase B1, pure helper; INERT until
--- Phase B2 wires the allow-path routing).
---
--- proxy_cache_valid is a per-LOCATION directive and is NOT variablizable
--- (verified against nginx: `proxy_cache $var` selects only the storage zone; a
--- single location's proxy_cache_valid applies to every zone it caches into). So
--- a per-vhost micro TTL is served by one internal location per bucket
--- (`@cfm_micro_<n>s`), each pinning `proxy_cache cfm_micro_<n>s;` +
--- `proxy_cache_valid 200 <n>s;`. B2 will read a vhost's armed micro policy and
--- ngx.exec to the bucket location; this helper is the mapping it uses. A stored
--- TTL (recipe preset or operator custom) SNAPS to the nearest bucket — for herd
--- protection the gap between 7s and 8s is operationally meaningless
--- (design §5.4), so the snapped menu behaves as effectively continuous.
-local MICRO_BUCKETS = { 1, 2, 5, 10, 30, 60 } -- seconds; mirrors the declared cfm_micro_<n>s zones
-
--- micro_bucket_seconds: snap a stored TTL to the nearest bucket. Accepts a
--- number of seconds or a string ("5", "5s", "30 s"); nil/empty/unparseable or
--- <=0 snaps to the smallest bucket (the safest, shortest TTL — closest to not
--- caching). Ties snap DOWN (the shorter, safer TTL) because the buckets ascend
--- and the comparison keeps the first minimum.
-local function micro_bucket_seconds(ttl)
-    local n
-    if type(ttl) == "number" then
-        n = ttl
-    elseif type(ttl) == "string" then
-        n = tonumber(ttl:match("%d+"))
-    end
-    if not n or n <= 0 then return MICRO_BUCKETS[1] end
-    local best, bestd = MICRO_BUCKETS[1], math.huge
-    for _, b in ipairs(MICRO_BUCKETS) do
-        local d = b - n; if d < 0 then d = -d end
-        if d < bestd then best, bestd = b, d end
-    end
-    return best
-end
-
--- micro_zone_name: the storage zone / internal-location suffix for a stored TTL,
--- e.g. 5 or "7s" → "cfm_micro_5s". The single source of truth for the bucket
--- name so the conf zones, the daemon dirs and B2's ngx.exec target can't drift.
-local function micro_zone_name(ttl)
-    return "cfm_micro_" .. micro_bucket_seconds(ttl) .. "s"
-end
-
 -- Exposed for unit tests (scripts/tests/cfm_cache_test.lua): drive the cache
 -- without a live bridge/ngx, then assert lookups.
 _M._rebuild_cache      = rebuild_cache
@@ -498,5 +651,8 @@ _M._normalize_host     = normalize_host
 _M._has_any            = function() return _cache.has_any end
 _M._micro_bucket       = micro_bucket_seconds
 _M._micro_zone_name    = micro_zone_name
+_M._micro_cookie       = micro_cookie_verdict
+_M._micro_decision     = micro_decision
+_M._has_micro          = function() return _cache.has_micro end
 
 return _M
