@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cfm/internal/logging"
 )
@@ -52,10 +53,13 @@ func sanitizeAuditReason(s string) string {
 		if r < 0x20 || r == 0x7f {
 			continue
 		}
-		b.WriteRune(r)
-		if b.Len() >= maxLen {
+		// Byte-count BEFORE writing so a multibyte rune at the boundary
+		// can never push past the cap (never splits a rune either —
+		// the whole rune is simply dropped).
+		if b.Len()+utf8.RuneLen(r) > maxLen {
 			break
 		}
+		b.WriteRune(r)
 	}
 	return b.String()
 }

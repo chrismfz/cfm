@@ -464,8 +464,12 @@ func (e *Engine) restoreManualChallenges() {
 		if rem <= 0 {
 			continue
 		}
+		// %q for symmetry with the manual_on audit line: post-upgrade
+		// persist entries are already input-sanitized, but an entry a
+		// PRE-upgrade daemon persisted could carry control chars — quote
+		// so even that transition window cannot forge a log line.
 		logging.LogfCHALLENGES(
-			"[challenge][vhost] action=manual_restore host=%s ttl=%s reason=%s rung=%s",
+			"[challenge][vhost] action=manual_restore host=%s ttl=%s reason=%q rung=%s",
 			host, rem.Round(time.Second), ent.Reason, rungOrV1(ent.Rung),
 		)
 		if e.nginxBridge != nil {
