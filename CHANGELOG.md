@@ -17,18 +17,6 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-### Security
-- **`payload.sig` is admin-only on `/api/v1/webdet/history/events`.** The new
-  ChallengeV2 device readings (`hardwareConcurrency`, `deviceMemory`,
-  `devicePixelRatio`, pointer/touch/key counts) that CFM's challenge page
-  collects from each visitor are stripped for scoped (cPanel) callers; admins
-  and MCP see rows untouched. A tenant could measure the same values from
-  their own site's JS, so this is not secret — but the scoped surface
-  previously exposed nothing of the kind (the UA was the most it carried), and
-  a new category of per-visitor data crosses that boundary only deliberately.
-  Scoped callers keep the rest of the payload. See
-  `docs/endpoint_scope_inventory.md`.
-
 ### Added
 - **`v2=<grain>` on the challenge solve line — a passed ChallengeV2 solve is
   no longer invisible.** `cfm.challenges.log` scored every solve (`hs=`/
@@ -76,6 +64,49 @@ back-filled here — see the git/PR history for that period.
   on the order of a third to a half for that row type at unchanged retention.
   On a busy node (~100k solves/day) that is tens of MB; revisit
   `WEBDET_HISTORY_*` retention if the node is disk-tight.
+
+### Changed
+- **`under_attack` campaign fingerprinter (I2) is frozen**, operator-ratified
+  2026-09-22. No code change: unlike `cfm_pcw` its mechanism is sound, it
+  simply has no consumer, so it stays in the tree exactly as it is. What the
+  freeze means going forward: no new predicates, no weight tuning, no
+  sub-signals, and I3-I5 (draft rule, auto-apply, repeat-offender escalation)
+  are not to be built — the master plan's E1-E3 superseded that enforcement
+  path. I1 stays as the alarm. See `docs/under-attack-mode.md`.
+
+
+### Security
+- **`payload.sig` is admin-only on `/api/v1/webdet/history/events`.** The new
+  ChallengeV2 device readings (`hardwareConcurrency`, `deviceMemory`,
+  `devicePixelRatio`, pointer/touch/key counts) that CFM's challenge page
+  collects from each visitor are stripped for scoped (cPanel) callers; admins
+  and MCP see rows untouched. A tenant could measure the same values from
+  their own site's JS, so this is not secret — but the scoped surface
+  previously exposed nothing of the kind (the UA was the most it carried), and
+  a new category of per-visitor data crosses that boundary only deliberately.
+  Scoped callers keep the rest of the payload. See
+  `docs/endpoint_scope_inventory.md`.
+
+
+### Removed
+- **`cfm_pcw` (post-clearance nav-cadence shadow, Track-2 B2) is retired.**
+  Operator-ratified 2026-09-22. It shipped, ran log-only for its whole life,
+  and **fed no decision** — while its premise was structurally broken at this
+  edge: static assets bypass `cfm.lua` entirely, so the original "cleared then
+  silent" tell saw every real browser as silent, and the nav-cadence
+  replacement is keyed per-IP-per-host rather than per-browser, so any shared
+  egress (CGNAT/NAT) pools real users. Removed: `configs/lua/cfm_pcw.lua` and
+  its tests, the `cfm.lua` Step-2b wiring, the `lua_shared_dict cfm_pcw 8m`
+  declaration in both reference edge confs, the `[webdetector]
+  POST_CLEARANCE_CADENCE` key, and the bridge-config field that published it.
+  Cleared traffic is already visible to `rate_outlier` in the access log.
+  **Operators:** nothing to do — the removal is safe in every upgrade order
+  (the require was always `pcall`-guarded, and an edge conf still declaring the
+  dict just holds 8 MB it no longer uses; drop the two `lua_shared_dict
+  cfm_pcw` lines from live confs at the next edit). A `POST_CLEARANCE_CADENCE`
+  line left in `/etc/cfm/detectors.conf` is ignored. Decision record kept at
+  `docs/challenge-score-b2.md`.
+
 
 ## 2026.09.22
 

@@ -1,6 +1,16 @@
 # Track-2 Stage 1b/B2 — post-clearance edge tell: scope note
 
-> **Status:** DESIGN NOTE (pre-code), written after grounding B2 in the actual
+> **▶ RETIRED 2026-09-22 (operator-ratified).** `cfm_pcw` shipped, ran
+> log-only for its whole life, and **fed no decision** — so it was removed:
+> the Lua module, its `cfm.lua` Step-2b wiring, the `cfm_pcw` shared dict in
+> both edge confs, the `[webdetector] POST_CLEARANCE_CADENCE` key and the
+> bridge-config field that published it. This file is KEPT as the decision
+> record — §1/§2 below are the durable lesson (why the "cleared then silent"
+> tell is structurally unobservable at this edge), and they are the reason not
+> to re-propose it. Cleared traffic is already visible to `rate_outlier` in
+> the access log. Current plan: `docs/abuse-defense-master-plan.md` §3 row 8.
+>
+> **Status (historical):** DESIGN NOTE (pre-code), written after grounding B2 in the actual
 > edge config + `cfm.lua`. It exists because the master plan's assumed B2
 > mechanism ("cleared then silent — no follow-up asset fetch",
 > `docs/challenge-score.md` §1/§4) turns out **not to be cleanly observable at the

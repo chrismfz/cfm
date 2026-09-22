@@ -415,12 +415,6 @@ type WebdetectorBridgeConfig struct {
 	// enforce" rendering as the other panel modes; the global FPPolicy=false
 	// still kills the consult regardless of this mode.
 	PanelFPPolicyMode string
-	// PostClearanceCadence enables the edge post-clearance nav-cadence shadow
-	// (cfm_pcw, Track-2 B2 — cfm.lua Step 2b). Log-only measurement, default on;
-	// detectors.conf [webdetector] POST_CLEARANCE_CADENCE. This replaces the former
-	// CFM_PCW env kill-switch so the toggle lives in config like the others and
-	// applies within ~10s without a proxy reload.
-	PostClearanceCadence bool
 	// FPPolicy mirrors [webdetector] FP_POLICY to the edge (default on). The
 	// daemon-side knob already makes every /nginx/fppolicy lookup answer "no
 	// action"; publishing it here lets cfm.lua skip Step 0c ENTIRELY — no
@@ -470,7 +464,6 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 			"  panel_waf_mode = %q,\n"+
 			"  panel_decision_mode = %q,\n"+
 			"  panel_fp_policy_mode = %q,\n"+
-			"  post_clearance_cadence = %s,\n"+
 			"  fp_policy = %s,\n"+
 			"}\n",
 		luaBool(cfg.ClearanceRefresh),
@@ -481,7 +474,6 @@ func WriteWebdetectorBridgeConfig(luaPath string, cfg WebdetectorBridgeConfig, c
 		panelMode(cfg.PanelWAFMode),
 		panelMode(cfg.PanelDecisionMode),
 		panelMode(cfg.PanelFPPolicyMode),
-		luaBool(cfg.PostClearanceCadence),
 		luaBool(cfg.FPPolicy),
 	)
 	return writeLuaFileAtomic(luaPath, content, cfmGID, "sslcollector", "[sslcollector]", "webdetector bridge config")

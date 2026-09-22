@@ -112,9 +112,6 @@ local M = {
   -- <0.01% hit-rate evidence). See docs/waf.md "Hit-rate measurement".
   waf_stats_enable    = (os.getenv("CFM_WAF_STATS_ENABLE") or "1") == "1",
   waf_stats_flush_sec = tonumber(os.getenv("CFM_WAF_STATS_FLUSH_SEC") or "60"),
-  -- NOTE: the post-clearance cadence shadow toggle (cfm_pcw, B2) is NOT here — it
-  -- is bridge-derived ([webdetector] POST_CLEARANCE_CADENCE), read per-request from
-  -- cfm_bridge_cfg so it refreshes on the 10s TTL. See cfm.lua CFG.post_clearance_cadence.
 }
 
 -- ok_ttl_sec resolution, in priority order: explicit env override; the

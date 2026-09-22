@@ -58,13 +58,12 @@ func TestWriteWebdetectorBridgeConfigContent(t *testing.T) {
 
 	// clearance_refresh = true, origin keepalive off (the defaults)
 	cfg := WebdetectorBridgeConfig{
-		ClearanceRefresh:     true,
-		OriginKeepalive:      false,
-		OriginKAIdleSec:      3,
-		OriginKAMaxReqs:      1000,
-		CookieLifeSec:        3600,
-		PostClearanceCadence: true,
-		FPPolicy:             true,
+		ClearanceRefresh: true,
+		OriginKeepalive:  false,
+		OriginKAIdleSec:  3,
+		OriginKAMaxReqs:  1000,
+		CookieLifeSec:    3600,
+		FPPolicy:         true,
 	}
 	if err := WriteWebdetectorBridgeConfig(luaPath, cfg, 0); err != nil {
 		t.Fatalf("WriteWebdetectorBridgeConfig(defaults): %v", err)
@@ -100,8 +99,11 @@ func TestWriteWebdetectorBridgeConfigContent(t *testing.T) {
 	if !strings.Contains(got, `panel_fp_policy_mode = "enforce",`) {
 		t.Fatalf("expected panel_fp_policy_mode = \"enforce\" (empty→default), got: %q", got)
 	}
-	if !strings.Contains(got, "post_clearance_cadence = true,") {
-		t.Fatalf("expected post_clearance_cadence = true, got: %q", got)
+	// post_clearance_cadence was the cfm_pcw B2 toggle, retired 2026-09-22: the
+	// renderer must no longer publish it at all (an older edge reading a file
+	// without the field simply defaults it on, and the module it gated is gone).
+	if strings.Contains(got, "post_clearance_cadence") {
+		t.Fatalf("retired key still rendered: %q", got)
 	}
 	if !strings.Contains(got, "fp_policy = true,") {
 		t.Fatalf("expected fp_policy = true, got: %q", got)
@@ -136,10 +138,6 @@ func TestWriteWebdetectorBridgeConfigContent(t *testing.T) {
 	}
 	if !strings.Contains(got, "origin_ka_max_reqs = 500,") {
 		t.Fatalf("expected origin_ka_max_reqs = 500, got: %q", got)
-	}
-	// PostClearanceCadence left unset on the flipped cfg → renders false.
-	if !strings.Contains(got, "post_clearance_cadence = false,") {
-		t.Fatalf("expected post_clearance_cadence = false, got: %q", got)
 	}
 	// FPPolicy likewise unset on the flipped cfg → renders false (the edge
 	// gate that removes Step 0c entirely).

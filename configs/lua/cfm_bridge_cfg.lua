@@ -29,8 +29,6 @@
 --   panel_decision_mode string  or nil (same shape as panel_waf_mode)
 --   panel_fp_policy_mode string or nil (same shape; the panel-port consult of
 --                       the fleet-armed fingerprint policy — cfm_panel step 2f)
---   post_clearance_cadence boolean (default true when file/field missing; the
---                       cfm_pcw B2 shadow toggle — [webdetector] POST_CLEARANCE_CADENCE)
 --   fp_policy           boolean (default true when file/field missing; the
 --                       fingerprint-policy edge gate — [webdetector] FP_POLICY.
 --                       false = cfm.lua skips Step 0c entirely: no tlsfp tuple,
@@ -78,10 +76,8 @@ local OPTS = {
     if type(val.panel_fp_policy_mode) == "string" then
       out.panel_fp_policy_mode = val.panel_fp_policy_mode
     end
-    -- Post-clearance nav-cadence shadow (cfm_pcw, B2). Default TRUE (nil on an
-    -- older daemon's file → on), off only when explicitly published false — same
-    -- fail-safe idiom as clearance_refresh.
-    out.post_clearance_cadence = (val.post_clearance_cadence ~= false)
+    -- post_clearance_cadence was the cfm_pcw B2 toggle, RETIRED 2026-09-22. A
+    -- daemon that still publishes the field is simply ignored here.
     -- Fingerprint-policy edge gate (Step 0c). Fail-safe default TRUE like the
     -- other booleans: an older daemon's file simply lacks the field and the
     -- feature stays available; only an explicit false removes it.

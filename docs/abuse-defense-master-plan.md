@@ -73,9 +73,9 @@ reviewed PR.
 | 5 | `abuse_shadow` rate_outlier (Signal C) | `abuse_shadow.go` | shadow | populated, dominant grain-A signal | **KEEP as evidence** (Track-1 fusion input). |
 | 6 | `abuse_shadow` facet / cost / dc_fraction / fused | `abuse_shadow_{facet,cost,dcfrac,fused}.go` | shadow | thin; no Class-2 flood observed since built | **KEEP-FROZEN**: no new sub-signals, no weight-tuning PRs until the next real Class-2 flood provides data. Review then, with §4-D3 criteria. |
 | 7 | WAF rule 612 `WAF_FETCH_METADATA` (Sec-Fetch tell) | `cfm_waf.lua` | logonly | fires as designed | **KEEP logonly**; E3 seed input. Not promoted alone. |
-| 8 | `cfm_pcw` post-clearance nav cadence (B2) | `configs/lua/cfm_pcw.lua` | log-only | documented structural blind spot (fetch()-based scrapers invisible); fed no decision in its lifetime | **RETIRE (proposed).** Remove the Lua + toggle; `rate_outlier` already sees cleared traffic in the access log. |
+| 8 | `cfm_pcw` post-clearance nav cadence (B2) | ~~`configs/lua/cfm_pcw.lua`~~ **deleted** | **RETIRED 2026-09-22** | documented structural blind spot (fetch()-based scrapers invisible); fed no decision in its lifetime | **RETIRED — operator-ratified 2026-09-22, executed.** Lua module, its Step-2b wiring, the `cfm_pcw` shared dict in both edge confs, the `POST_CLEARANCE_CADENCE` key and its whole bridge-config field are gone. `rate_outlier` already sees cleared traffic in the access log. Decision record kept: `docs/challenge-score-b2.md`. |
 | 9 | `under_attack` I1 state machine + notify | `under_attack.go` | detect-only (DRYRUN) | alarm value real ("challenge defeated" as an alert) | **KEEP as the alarm.** I1b read-surfaces optional. |
-| 10 | `under_attack` campaign fingerprinter I2 | `under_attack_fingerprint.go` | shadow | no consumer; I3–I5 never built | **FREEZE (proposed).** E1–E3 supersede its enforcement path; revisit only if the draft-rule idea (I3) is ever picked up. |
+| 10 | `under_attack` campaign fingerprinter I2 | `under_attack_fingerprint.go` | shadow | no consumer; I3–I5 never built | **FROZEN — operator-ratified 2026-09-22.** Code STAYS as-is (this is a freeze, not a retire: unlike `cfm_pcw` its mechanism is sound, it simply has no consumer). No new predicates, no weight tuning, no sub-signals, no I3–I5. E1–E3 superseded its enforcement path; revisit ONLY if the draft-rule idea (I3) is deliberately picked up, and then with a §4-D3 exit contract. |
 | 11 | `ua_family=` solve-log corpus | `challenge_server.go` | log-first | builds the fp↔UA corpus | **KEEP.** Feeds E2 and the future JA4↔UA coherence tell. |
 | 12 | Humanity scorer / would_v2 Rung-1 | `challenge_v2.go` | **BUILT + ENFORCING** since 2026-09-19 (E3) | positive-only tells; `hs=`/`tells=`/`sig=`/`v2=` per solve | **KEEP.** Teeth only under an operator arm (D5a). The knobs are `CHALLENGE_V2_PASSIVE`/`_FAIL_SCORE`/`_DEBUG` — the old `HUMANITY_MIN_OBS`/`MINORITY_PCT` keys were never read by any code and are still orphans in live `/etc/cfm/detectors.conf`: **operator cleanup, still outstanding.** |
 
@@ -433,7 +433,7 @@ Rung-2 visible puzzle (only if Rung 1 is beaten), under_attack I3–I5.
 | Node-side design detail (grains, ladder, ChallengeV2 rungs) — roadmap sections frozen | `docs/traffic-classifier.md` |
 | Central ledger as-built (schema, ingestors, Phase C checklist) | `cfm-web:docs/fingerprint-reputation.md` |
 | Track-2 per-IP score design detail — plan section frozen | `docs/challenge-score.md` |
-| B2 decision record (as-built `cfm_pcw`; retire-candidate per §3) | `docs/challenge-score-b2.md` |
+| B2 decision record (why `cfm_pcw` was built and why it was RETIRED 2026-09-22) | `docs/challenge-score-b2.md` |
 | Under-attack state machine design — increments frozen | `docs/under-attack-mode.md` |
 | Historical context for the abuse_shadow signals | `docs/webdetector-refactor.md` |
 | Archived (superseded, kept for archaeology) | `docs/archive/solver-farm-fingerprint-concentration.md` · `docs/archive/solver-farm-cross-host-phase2.md` · `docs/archive/fleet-fingerprint-reputation.md` |

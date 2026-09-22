@@ -450,11 +450,6 @@ func (m *manager) maybeReload(parent context.Context) {
 				// enforce default as its siblings; FP_POLICY=0 still kills
 				// the whole consult regardless of this mode.
 				PanelFPPolicyMode: kvStrClean(wdKV, "PANEL_FP_POLICY_MODE", "enforce"),
-				// Post-clearance nav-cadence shadow (cfm_pcw, Track-2 B2). Edge
-				// LOG-ONLY measurement; default on. Replaces the CFM_PCW env
-				// kill-switch so the toggle is config-driven (POST_CLEARANCE_CADENCE=0
-				// disables) and applies within ~10s without a proxy reload.
-				PostClearanceCadence: kvBool(wdKV, "POST_CLEARANCE_CADENCE", true),
 				// Fingerprint-policy edge gate. Same key the webdetector
 				// registration feeds into ConfigureFingerprintPolicyEnforcement
 				// (daemon-side answers); published here so FP_POLICY=0 also
@@ -476,8 +471,8 @@ func (m *manager) maybeReload(parent context.Context) {
 			if err := sslcollector.WriteWebdetectorBridgeConfig(bridgeConfigPath, bridgeCfg, cfmGID); err != nil {
 				logging.Logf("[detectors] cfm_bridge_config.lua write failed path=%s err=%v", bridgeConfigPath, err)
 			} else {
-				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s panel_fp_policy_mode=%s post_clearance_cadence=%v fp_policy=%v",
-					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PanelFPPolicyMode, bridgeCfg.PostClearanceCadence, bridgeCfg.FPPolicy)
+				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s panel_fp_policy_mode=%s fp_policy=%v",
+					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PanelFPPolicyMode, bridgeCfg.FPPolicy)
 			}
 		}
 	}
