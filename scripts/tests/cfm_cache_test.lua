@@ -216,6 +216,87 @@ check(cache._micro_zone_name(1) == "cfm_micro_1s", "zone name for 1s")
 check(cache._micro_zone_name("7s") == "cfm_micro_5s", "zone name snaps 7s → 5s bucket")
 check(cache._micro_zone_name(60) == "cfm_micro_60s", "zone name for 60s")
 
+-- ── Tier B micro-cache: cookie verdict (Phase B2, observe-only) ────────────────
+-- (anonymous:bool, reason). Non-strict: bypass ONLY on a named app-session
+-- cookie; unknown/analytics/cfm_* cookies stay anonymous. Strict: bypass on any
+-- cookie not on the ignore-list.
+local function anon(c, strict, extra) local a = cache._micro_cookie(c, strict, extra); return a end
+local function why(c, strict, extra) local _, r = cache._micro_cookie(c, strict, extra); return r end
+check(anon(nil) == true, "no cookie header → anonymous")
+check(anon("") == true, "empty cookie header → anonymous")
+check(anon("cfm_clearance=abc123") == true, "cfm_clearance only → anonymous (cleared visitor is cacheable)")
+check(anon("_ga=GA1.2.3; _fbp=fb.1; _gid=x") == true, "analytics-only cookies → anonymous (non-strict)")
+check(anon("PHPSESSID=deadbeef") == false, "PHPSESSID → bypass (app session)")
+check(why("phpsessid=x") == "auth:phpsessid", "auth match is case-insensitive")
+check(anon("wordpress_logged_in_9a8b=v") == false, "wordpress_logged_in_* prefix → bypass")
+check(anon("woocommerce_cart_hash=1; _ga=2") == false, "woocommerce_* prefix → bypass even mixed with analytics")
+check(anon("cpsession=1") == false and anon("roundcube_sessauth=1") == false, "cpanel/roundcube sessions → bypass")
+check(anon("Horde=abc") == false, "Horde session cookie (exact, case-insensitive) → bypass")
+check(anon("horde_secret_key=1") == false, "horde_* prefix → bypass")
+-- mainstream non-PHP stacks (over-inclusion is the safe direction)
+check(anon("JSESSIONID=0x1") == false, "Java JSESSIONID → bypass")
+check(anon("ASP.NET_SessionId=x") == false, "classic ASP.NET session → bypass")
+check(anon(".AspNetCore.Session=x") == false, ".AspNetCore.* prefix → bypass")
+check(anon("connect.sid=s%3Aabc") == false, "Express connect.sid → bypass")
+check(anon("sessionid=django") == false, "Django sessionid → bypass")
+check(anon("_myapp_session=rails") == false, "*_session suffix (Rails) → bypass")
+check(anon("_ga=1; _gat_gtag_UA_123=1", true) == true, "strict: _gat* analytics is ignore-listed → anonymous")
+check(anon("_dc_gtm_UA-1=1", true) == true, "strict: _dc_gtm_* (GTM) is ignore-listed → anonymous")
+-- value that itself contains '=' must not fabricate a phantom auth name
+check(anon("token=aGVsbG8=d29ybGQ=") == true, "cookie value with '=' does not create a phantom name → anonymous")
+check(anon("a=1; PHPSESSID=x; b=2") == false, "auth cookie detected mid-list")
+-- strict mode
+check(anon("_ga=1", true) == true, "strict: ignore-listed analytics cookie stays anonymous")
+check(anon("cfm_clearance=x", true) == true, "strict: cfm_ cookies are ignore-listed → anonymous")
+check(anon("randomapp=1", true) == false, "strict: any non-ignored cookie → bypass")
+check(why("randomapp=1", true) == "strict:randomapp", "strict bypass names the offending cookie")
+check(anon("randomapp=1", false) == true, "non-strict: an unknown cookie stays anonymous")
+-- per-vhost extra auth cookie names
+check(anon("myapp_sess=1", false, { ["myapp_sess"] = true }) == false, "per-vhost auth_cookies → bypass")
+
+-- ── Tier B micro-cache: full request decision ─────────────────────────────────
+local function armed(ttl) return { micro = { on = true, ttl = ttl }, strict_cookies = false } end
+local function dec(pol, m, u, c) return cache._micro_decision(pol, m, u, c) end
+do
+  local ok1, bkt1, r1 = dec(armed("5s"), "GET", "/", nil)
+  check(ok1 == true and bkt1 == 5 and r1 == "ok", "armed GET, no cookie → would-cache at 5s bucket")
+  local ok2, _, r2 = dec(armed("5s"), "POST", "/", nil)
+  check(ok2 == false and r2 == "method", "POST → bypass:method")
+  local ok3, _, r3 = dec(armed("5s"), "GET", "/acctxfer/xfer.tar", nil)
+  check(ok3 == false and r3 == "path", "/acctxfer* → bypass:path")
+  local ok4, _, r4 = dec(armed("5s"), "GET", "/", "PHPSESSID=x")
+  check(ok4 == false and r4 == "auth:PHPSESSID", "armed GET with app session → bypass:cookie")
+  local ok5, _, r5 = dec({ micro = { on = false } }, "GET", "/", nil)
+  check(ok5 == false and r5 == "unarmed", "micro tier off → unarmed")
+  local ok6, _, r6 = dec({ static = { on = true } }, "GET", "/", nil)
+  check(ok6 == false and r6 == "unarmed", "static-only vhost → micro unarmed")
+  local ok7, bkt7 = dec(armed("30s"), "HEAD", "/x", "_ga=1")
+  check(ok7 == true and bkt7 == 30, "HEAD + analytics cookie + 30s ttl → would-cache at 30s")
+end
+
+check(cache._has_micro() == true, "has_micro true (fixture arms micro on myip.gr / www.myip.gr)")
+
+-- ── observe() surfaces the micro verdict (debug-gated, OBSERVE-ONLY) ───────────
+_site_cache_on = true
+ngx.var.http_x_cfm_cache_debug = "1"
+ngx.var.request_method = "GET"; ngx.var.uri = "/"; ngx.var.http_cookie = nil
+for k in pairs(_header) do _header[k] = nil end
+ngx.var.host = "myip.gr"
+cache.observe()
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=would/1s", 1, true),
+      "observe stamps microcache=would/1s for an anonymous request to a micro-armed vhost")
+for k in pairs(_header) do _header[k] = nil end
+ngx.var.http_cookie = "PHPSESSID=abc"
+cache.observe()
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:auth:PHPSESSID", 1, true),
+      "observe stamps microcache=bypass for a request carrying an app session cookie")
+for k in pairs(_header) do _header[k] = nil end
+ngx.var.host = "assets.cdn.example.com"; ngx.var.http_cookie = nil
+cache.observe()
+check(_header["X-CFM-Cache"] and not _header["X-CFM-Cache"]:find("microcache=", 1, true),
+      "observe omits the microcache token for a static-only vhost")
+ngx.var.request_method = nil; ngx.var.uri = nil; ngx.var.http_cookie = nil
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)

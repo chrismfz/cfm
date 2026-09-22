@@ -31,6 +31,24 @@ back-filled here — see the git/PR history for that period.
   matching validity. `cfm_cache.lua` gains the pure, unit-tested TTL→bucket
   snapper B2 will use, and the packaging cache-heal + config guard now cover the
   new buckets.
+- **Site Cache — Tier B micro-cache request rules (Phase B2, observe-only).**
+  Adds the Tier B request-side decision to `cfm_cache.lua`: for a micro-armed
+  vhost, is an allowed request cacheable, and to which TTL bucket? Enforces the
+  §4.1 cookie model — a positive **auth-cookie allowlist** (PHPSESSID,
+  `wordpress_logged_in_*`, WooCommerce, cPanel/Roundcube sessions, … +
+  per-vhost extras) bypasses caching, while CFM's own `cfm_*` cookies (incl.
+  `cfm_clearance`) and common analytics/consent cookies are treated as
+  anonymous, plus the GET/HEAD-only and never-cache-path (`/acctxfer*`) rails.
+  **Still nothing caches**: the verdict is surfaced only on the debug-gated
+  `X-CFM-Cache` header (`microcache=would/<n>s` or `microcache=bypass:<reason>`),
+  so an operator can spot-check the cookie allowlist against real apps
+  (`curl -H "X-CFM-Cache-Debug: 1"`) before Phase B3 activates `proxy_cache`
+  (passive per-vhost BYPASS-counter validation lands with B3's stats). The auth
+  allowlist is PHP/cPanel-primary plus the mainstream non-PHP session cookies
+  (JSESSIONID, `.AspNetCore.*`, `connect.sid`, Django `sessionid`, Rails
+  `*_session`), biased to over-include since a false bypass only costs a cache
+  miss. Cookie parsing is `=`-in-value safe; the classifier and decision are
+  unit-tested. No config / packaging change.
 - **ChallengeV2 rejects are now recorded durably, with country / ASN / PTR —
   so false positives can actually be hunted.** Until now a solve the Rung-1
   humanity gate refused (`result=v2_reject`) left exactly one trace: its log
