@@ -22,6 +22,18 @@ _Nothing yet._
 ## 2026.09.22
 
 ### Added
+- **Site Cache — per-vhost edge caching (Phase 1: control plane).** New opt-in
+  per-vhost caching policy, managed like WAF/Challenge from all three surfaces:
+  API (`/api/v1/site-cache/{list,get,set,remove,purge}`), CLI (`cfm webtop
+  site-cache …`), and scoped-token self-service (a cPanel user manages caching
+  for their OWN domains; `purge --all` stays admin-only). Each vhost carries two
+  independent tiers (static-asset cache + micro-cache of HTML) with a recipe, a
+  TTL, and a generation-bump purge. **Default is OFF everywhere** and this phase
+  does NOT make the edge cache anything yet — it only persists policy to
+  `/var/lib/cfm/webdetector_site_cache.json` (`SITE_CACHE_STORE_PATH`) so the
+  later edge phases have a source of truth. The absolute never-cache rails
+  (auth cookies, `Set-Cookie`, redirects, panel/webmail, `/.well-known`) live at
+  the edge, not here. Design + plan of record: `docs/site-cache-design.md`.
 - **Panel-port fingerprint-policy consult (master plan item).** The
   operator-armed per-fingerprint policy the web edge enforces pre-clearance
   now also covers the cPanel/WHM/webmail ports: an armed `deny` 403s that

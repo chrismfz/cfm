@@ -120,6 +120,10 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop challenge-access update <id> --file entry.json")
 	fmt.Println("  cfm webtop challenge-access remove <id>")
 	fmt.Println("  cfm webtop challenge-access simulate --host <vhost> [--ip <ip>] [--path </x>] [--asn 15169] [--verified-bot]")
+	fmt.Println("  cfm webtop site-cache list                               # per-vhost edge caching (default: all OFF)")
+	fmt.Println("  cfm webtop site-cache set <vhost> [--static RECIPE] [--micro RECIPE] [--static-ttl 7d] [--micro-ttl 1s] [--strict-cookies]")
+	fmt.Println("  cfm webtop site-cache off <vhost>                        # turn caching OFF for a vhost")
+	fmt.Println("  cfm webtop site-cache purge <vhost>                      # or: purge --all (admin)")
 	fmt.Println("  cfm webtop history [events|summary|outcomes] [--host H] [--ip IP]")
 
 	fmt.Println("  cfm webtop history prune [days]")
@@ -239,6 +243,8 @@ func RunWebTop(baseURL string, args []string) error {
 			return runRulesWebTop(baseURL, args[1:])
 		case "challenge-access", "access":
 			return runChallengeAccessWebTop(baseURL, args[1:])
+		case "site-cache", "cache":
+			return runSiteCacheWebTop(baseURL, args[1:])
 		case "history":
 			return runHistoryWebTop(baseURL, args[1:])
 		case "tokens":
