@@ -12,7 +12,6 @@ import (
 	"time"
 
 	lruexp "github.com/hashicorp/golang-lru/v2/expirable"
-	"github.com/oschwald/geoip2-golang"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -113,8 +112,8 @@ type Enricher struct {
 	// ptrCache holds resolved PTRs alone, on the much longer ptrCacheTTL, so a
 	// given IP's reverse-DNS is done ~once a month while geo stays daily-fresh.
 	ptrCache *lruexp.LRU[string, string]
-	asnDB    *geoip2.Reader
-	cityDB   *geoip2.Reader
+	asnDB    geoDB // MaxMind or IPLocate schema (geodb.go)
+	cityDB   geoDB
 	// hot-reload state
 	asnPath    string
 	cityPath   string
@@ -180,7 +179,7 @@ func New(dirs ...string) (*Enricher, error) {
 
 	// Φόρτωσε τις DBs αν βρέθηκαν (δεν είναι σφάλμα αν δεν υπάρχουν).
 	if asnPath != "" {
-		if db, err := geoip2.Open(asnPath); err == nil {
+		if db, err := openGeoDB(asnPath); err == nil {
 			e.asnDB = db
 			e.asnPath = asnPath
 			if fi, err2 := os.Stat(asnPath); err2 == nil {
@@ -189,7 +188,7 @@ func New(dirs ...string) (*Enricher, error) {
 		}
 	}
 	if cityPath != "" {
-		if db, err := geoip2.Open(cityPath); err == nil {
+		if db, err := openGeoDB(cityPath); err == nil {
 			e.cityDB = db
 			e.cityPath = cityPath
 			if fi, err2 := os.Stat(cityPath); err2 == nil {
@@ -235,22 +234,16 @@ func (e *Enricher) readGeo(ip net.IP, r *Result) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	if e.asnDB != nil {
-		if rec, err := e.asnDB.ASN(ip); err == nil && rec != nil {
-			r.ASN = rec.AutonomousSystemNumber
-			r.ASNName = rec.AutonomousSystemOrganization
+		if n, org, ok := e.asnDB.asn(ip); ok {
+			r.ASN = n
+			r.ASNName = org
 		}
 	}
 	if e.cityDB != nil {
-		if rec, err := e.cityDB.City(ip); err == nil && rec != nil {
-			r.CountryISO = rec.Country.IsoCode
-			if name, ok := rec.Country.Names["en"]; ok && name != "" {
-				r.Country = name
-			} else {
-				r.Country = rec.Country.IsoCode
-			}
-			if c, ok := rec.City.Names["en"]; ok {
-				r.City = c
-			}
+		if iso, name, city, ok := e.cityDB.country(ip); ok {
+			r.CountryISO = iso
+			r.Country = name
+			r.City = city
 		}
 	}
 }
@@ -500,7 +493,7 @@ func (e *Enricher) refreshIfChanged() {
 	e.mu.RUnlock()
 
 	// Do ALL file I/O outside lock (CRITICAL FIX)
-	var newASN, newCity *geoip2.Reader
+	var newASN, newCity geoDB
 	var newASNTime, newCityTime time.Time
 	var newASNPath, newCityPath string
 
@@ -509,7 +502,7 @@ func (e *Enricher) refreshIfChanged() {
 		for _, d := range searchDirs {
 			p := filepath.Join(d, "GeoLite2-ASN.mmdb")
 			if fi, err := os.Stat(p); err == nil {
-				if db, err := geoip2.Open(p); err == nil {
+				if db, err := openGeoDB(p); err == nil {
 					newASN = db
 					newASNTime = fi.ModTime()
 					newASNPath = p
@@ -521,7 +514,7 @@ func (e *Enricher) refreshIfChanged() {
 		// Check and load ASN DB (outside lock)
 		if fi, err := os.Stat(asnPath); err == nil {
 			if fi.ModTime().After(asnMTime) {
-				if db, err := geoip2.Open(asnPath); err == nil {
+				if db, err := openGeoDB(asnPath); err == nil {
 					newASN = db
 					newASNTime = fi.ModTime()
 					newASNPath = asnPath
@@ -535,7 +528,7 @@ func (e *Enricher) refreshIfChanged() {
 		for _, d := range searchDirs {
 			p := filepath.Join(d, "GeoLite2-City.mmdb")
 			if fi, err := os.Stat(p); err == nil {
-				if db, err := geoip2.Open(p); err == nil {
+				if db, err := openGeoDB(p); err == nil {
 					newCity = db
 					newCityTime = fi.ModTime()
 					newCityPath = p
@@ -547,7 +540,7 @@ func (e *Enricher) refreshIfChanged() {
 		// Check and load City DB (outside lock)
 		if fi, err := os.Stat(cityPath); err == nil {
 			if fi.ModTime().After(cityMTime) {
-				if db, err := geoip2.Open(cityPath); err == nil {
+				if db, err := openGeoDB(cityPath); err == nil {
 					newCity = db
 					newCityTime = fi.ModTime()
 					newCityPath = cityPath
@@ -567,7 +560,7 @@ func (e *Enricher) refreshIfChanged() {
 	// installed this file or a newer one. A reader opened here that is not
 	// newer than the installed one — or any, after Close — is closed instead
 	// of installed, so a swap never goes backwards and Close stays final.
-	var oldASN, oldCity *geoip2.Reader
+	var oldASN, oldCity geoDB
 	e.mu.Lock()
 	if newASN != nil {
 		if e.closed || !newASNTime.After(e.asnMTime) {

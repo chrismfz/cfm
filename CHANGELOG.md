@@ -162,6 +162,31 @@ back-filled here — see the git/PR history for that period.
   scores on network identity.
 
 ### Fixed
+- **Nodes without a MaxMind account had no country or ASN anywhere.** When
+  `MAXMIND_ACCOUNT_ID` / `MAXMIND_LICENSE_KEY` are not set, the MaxMind updater
+  downloads IPLocate's free databases and installs them as
+  `GeoLite2-ASN.mmdb` / `GeoLite2-City.mmdb`. But their records use a different
+  (flat) schema, and neither reader could use them:
+  - the daemon's GeoIP library refused the files outright, so the enricher
+    loaded no database at all — no ASN, no country for detectors, WAF
+    history, challenge `cc=`/`asn=`, traffic and geo policies;
+  - the edge's `cfm_geo.lua` read only MaxMind's `country.iso_code`, so every
+    lookup returned an empty country as a VALID answer, cached like a real
+    "no country".
+  Both now read either schema. Verified against the real IPLocate files: the
+  daemon resolves e.g. `94.68.42.127` to AS6799 / GR / Greece, and a real
+  OpenResty with `lua-resty-maxminddb` returns GR / US / AU where it returned
+  "" before. City names stay empty on IPLocate, which has none. A database
+  that fails to load is now logged once (`[enrich] WARNING: cannot load geo
+  database …`) instead of silently.
+  **Behaviour change on IPLocate nodes:** settings that silently did nothing
+  there start to apply after the upgrade — country traffic rules (edge and
+  bridge), armed country/ASN policies, country/ASN leniency, and solver-farm
+  country concentration. MaxMind nodes are unaffected. That covers every edge
+  node in the fleet today: their WAF events all carry an ASN and a country,
+  which an IPLocate node could not produce. A node can still end up on
+  IPLocate even with a MaxMind key: if its first MaxMind download fails, the
+  updater installs IPLocate's files instead. No configuration change.
 - **Turning web-detector enrichment off no longer leaves country/ASN
   `challenge_v2` policies enforced at verify.** On every reload the web
   detector is rebuilt, and each rebuild wired the verify-side geo lookup
