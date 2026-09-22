@@ -17,9 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-### Fixed
-- **`cfm` upgrades were doing pointless and misleading work with the Lua
-  payload.** Both package scriptlets carried a hand-rolled "seed/refresh
+### Added
+- **Site Cache — Tier A (static-asset caching) is now wired at the edge.**
+  Building on the per-vhost Site Cache policy store and the observe-only edge
+  module, the static-asset location on both edges (OpenResty + Angie) now
+  activates an nginx `proxy_cache` (`cfm_static` zone) — but **bypass-by-default
+  and per-vhost opt-in**: a request is cached only when the operator armed that
+  exact vhost's static tier *and* the `SITE_CACHE` master switch is on. A
+  minimal fail-safe Lua gate (`cfm_cache.static_gate`, the only Lua on the
+  static hot path, double-`pcall`-guarded) flips `$cfm_cache_skip` to `0` and
+  stamps the purge generation into the cache key; any error or an unarmed vhost
+  leaves caching off, exactly as before. Cached responses honour the origin's
+  `Cache-Control`/`Expires` with a 1h fallback, never cache a `Set-Cookie`
+  response, and use anti-stampede locking so a burst hits the origin about once
+  per TTL. A new CI guard (`check_site_cache_config.sh`) asserts the
+  bypass-by-default invariant on every `proxy_cache` location and openresty↔angie
+  parity, so a future refactor cannot silently reintroduce the global,
+  page-breaking cache CFM removed once before. The Angie installer now
+  provisions the cache directory at the canonical `/var/cache/nginx/cfm_static`
+  (it had pointed at `/var/cache/angie/`, harmless until now but a mismatch with
+  the conf and the daemon that would fail `angie -t` once caching went live). No
+  behaviour change until an operator arms a vhost.
   runtime Lua files" loop that copied from `/usr/share/cfm/configs/lua` over
   the modules the package had just installed into `/var/lib/cfm/lua/`. It was
   useless in both packagings, differently: on **deb** that source was never

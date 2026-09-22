@@ -15,7 +15,7 @@
 #   Extra resty:   /etc/angie/lualib/         (lua-resty-maxminddb here)
 #   Dyn modules:   /usr/lib/angie/modules/
 #   Logs:          /var/log/angie/            (chowned to cfm:cfm)
-#   Caches:        /var/cache/angie/          (chowned to cfm:cfm)
+#   Caches:        /var/cache/nginx/          (cfm_static/cfm_micro; chowned to cfm)
 #   Temp dirs:     /var/lib/cfm/nginx/*       (created & owned by cfm:cfm)
 #   Binary:        /usr/sbin/angie
 #
@@ -415,10 +415,16 @@ ensure_lua_dir() {
 }
 
 ensure_cache_dirs() {
-    # Cache dirs owned by cfm (the angie worker user per angie.conf), not angie.
+    # Path is /var/cache/nginx/ (NOT /var/cache/angie/) to match angie.conf's
+    # proxy_cache_path, the daemon's own MkdirAll (cmd/cfm/main.go), the
+    # OpenResty installer, and the openresty↔angie parity the config guard
+    # (check_site_cache_config.sh) enforces. angie.conf declares
+    # proxy_cache_path unconditionally, so this dir MUST exist (parent included)
+    # before `angie -t` runs below — otherwise the config test fails [emerg] and
+    # the edge won't deploy.
     local dirs=(
-        /var/cache/angie/cfm_static
-        /var/cache/angie/cfm_micro
+        /var/cache/nginx/cfm_static
+        /var/cache/nginx/cfm_micro
     )
     local d
 
@@ -429,9 +435,12 @@ ensure_cache_dirs() {
             mkdir -p "$d"
             log "Created cache directory: $d"
         fi
-        # Chown to cfm (worker user) so proxy cache writes succeed.
+        # root:cfm 0770 — the angie worker (cfm group) can write cache files,
+        # matching cmd/cfm/main.go and the OpenResty installer (the daemon
+        # re-applies this on every startup, so anything else is transient).
         if id -u cfm >/dev/null 2>&1; then
-            chown -R cfm:cfm "$d"
+            chown root:cfm "$d"
+            chmod 0770 "$d"
         fi
     done
 }
@@ -736,7 +745,7 @@ Pre-flight status:
   cfm user present:         $(id -u cfm >/dev/null 2>&1 && echo yes || echo "NO — angie will fail to start")
   Temp dirs (cfm:cfm):      /var/lib/cfm/nginx/{client_body_temp,proxy_temp}
   Log dir (cfm:cfm):        /var/log/angie/
-  Cache dirs (cfm:cfm):     /var/cache/angie/cfm_{static,micro}
+  Cache dirs (root:cfm):    /var/cache/nginx/cfm_{static,micro}
   Self-signed fallback:     /var/lib/cfm/certs/selfsigned/{fullchain,privkey}.pem
   CFM lua runtime checked:  /var/lib/cfm/lua/
   Extra resty (maxminddb):  /etc/angie/lualib/resty/

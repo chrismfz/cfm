@@ -60,6 +60,8 @@ jobs:
         run: ./scripts/tests/check_shared_lua_layout.sh
       - name: Enforce package Lua delivery invariants
         run: ./scripts/tests/check_package_lua_delivery.sh
+      - name: Enforce Site Cache bypass-by-default config invariant
+        run: ./scripts/tests/check_site_cache_config.sh
       - name: CHANGELOG date-stamper regression test
         run: ./scripts/tests/stamp_changelog_test.sh
       - name: Release-notes extractor regression test

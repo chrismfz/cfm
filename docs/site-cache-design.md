@@ -661,6 +661,31 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
    (`/nginx/cache/stats` pull) + `/api/v1/site-cache/stats` + the cfm-admin
    hit-ratio column + the new CI guard. Lowest-risk caching first, with the
    numbers to judge it.
+   *As built (split into 3a + 3b so each stays single-concern):*
+   - **3a — master kill-switch + edge gate.** `SITE_CACHE` is a config key in
+     `[webdetector]` (`detectors.conf`), published on the bridge config
+     (`WebdetectorBridgeConfig.SiteCache` → `cfm_bridge_config.lua`) and read by
+     `cfm_cache.site_cache_enabled()`. It is a **kill-switch, default ON** (the
+     per-vhost policy store is already the opt-in — a second default-OFF flag
+     would be redundant), so an absent field reads TRUE (`~= false`). No env
+     vars — CFM is config-file driven.
+   - **3b — Tier A static caching.** The static-asset location on both confs
+     activates the `cfm_static` `proxy_cache` zone behind the bypass-by-default
+     gate: the conf pre-sets `$cfm_cache_skip="1"` / `$cfm_cache_gen="0"` and a
+     fail-safe `cfm_cache.static_gate()` (double-`pcall`) flips skip→`0` +
+     stamps the generation **only** for a static-armed vhost while the master
+     switch is on. **TTL is respect-origin + 1h fallback** (`proxy_cache_valid
+     200 1h` / `404 1m`, honouring the origin's `Cache-Control`/`Expires`) —
+     the simplest correct nginx config; a **per-vhost forced static TTL** needs
+     a location-per-bucket layout and is deferred to a follow-up. A single
+     `cfm_static` zone (not per-tier) keeps the conf minimal. Anti-stampede
+     (`proxy_cache_lock` + `use_stale updating` + `background_update`) and a
+     generation-prefixed key (`"g$cfm_cache_gen|$scheme://$host$request_uri"`).
+     CI guard `check_site_cache_config.sh` pins the bypass-by-default invariant
+     + openresty↔angie parity.
+   - **3c — stats/logging** (`cfm_cache_stats` + `cfm_cache_log` + the daemon
+     `/nginx/cache/stats` aggregate + `/api/v1/site-cache/stats` + the cfm-admin
+     hit-ratio column): deferred from this list's item 3, still to build.
 4. **Tier B (micro-cache)** + the full §4 rails. Validate §5.5 items
    on a live box (the `myip.gr` case) per the challenge/WAF release checklist.
 5. **cfm-admin page + Recipes** (+ `make test-js`), filter/sort, per-row + global

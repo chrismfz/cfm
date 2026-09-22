@@ -138,6 +138,50 @@ cache.observe()
 check(_header["X-CFM-Cache"] ~= nil, "absent SITE_CACHE field defaults ON (kill switch, not opt-in)")
 _site_cache_on = true
 
+-- ── static_gate: PHASE 3b access-phase hook — the bypass-by-default flip ───────
+-- The conf pre-sets $cfm_cache_skip="1" / $cfm_cache_gen="0"; static_gate() flips
+-- skip→"0" and stamps the purge generation ONLY for a vhost whose STATIC tier is
+-- armed AND while the master switch is on. Every other path leaves the vars
+-- untouched — the fail-safe direction is "do not cache".
+local function reset_cache_vars()
+  ngx.var.cfm_cache_skip = "1"   -- conf default (bypass)
+  ngx.var.cfm_cache_gen  = "0"
+end
+
+-- armed static vhost → arm cache + carry generation
+reset_cache_vars()
+ngx.var.host = "myip.gr"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "0", "static_gate arms cache ($cfm_cache_skip=0) for a static-armed vhost")
+check(ngx.var.cfm_cache_gen == "3", "static_gate carries the purge generation into $cfm_cache_gen")
+
+-- wildcard static match → same behaviour, its own generation
+reset_cache_vars()
+ngx.var.host = "assets.cdn.example.com"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "0", "static_gate arms cache for a *.suffix static-armed vhost")
+check(ngx.var.cfm_cache_gen == "1", "static_gate stamps the wildcard entry's generation")
+
+-- MICRO-ONLY vhost → static_gate must NOT touch the static cache (skip stays 1)
+reset_cache_vars()
+ngx.var.host = "www.myip.gr"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "1", "static_gate leaves a micro-ONLY vhost uncached at the static tier (bypass stays)")
+
+-- unarmed host → untouched
+reset_cache_vars()
+ngx.var.host = "other.com"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "1", "static_gate leaves an unarmed host uncached (bypass stays)")
+
+-- master switch OFF → full no-op even for an armed vhost
+_site_cache_on = false
+reset_cache_vars()
+ngx.var.host = "myip.gr"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "1", "SITE_CACHE off → static_gate is a full no-op (bypass stays)")
+_site_cache_on = true
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)
