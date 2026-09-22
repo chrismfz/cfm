@@ -126,6 +126,7 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/site-cache/set", requirePOST(e.handleSiteCacheSet)},
 		{"/api/v1/site-cache/remove", requirePOST(e.handleSiteCacheRemove)},
 		{"/api/v1/site-cache/purge", requirePOST(e.handleSiteCachePurge)},
+		{"/api/v1/site-cache/stats", e.handleSiteCacheStats},
 		{"/api/v1/waf/engine/summary", e.handleWAFEngineSummary},
 		{"/api/v1/waf/rules", e.handleWAFRules},
 		{"/api/v1/waf/hit-rates", e.handleWAFHitRates},

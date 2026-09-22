@@ -112,6 +112,20 @@ back-filled here — see the git/PR history for that period.
   wired, which is how it rotted unnoticed in the first place.
 
 ### Added
+- **Site Cache — per-vhost cache stats, readable from the CLI + MCP.** The edge
+  now counts cache verdicts (HIT/MISS/EXPIRED/STALE/BYPASS) per ARMED vhost in a
+  shared dict and pushes an absolute snapshot to the daemon (`POST
+  /nginx/cache/stats`, a cross-worker-locked ~60s timer). Read it three ways:
+  `cfm webtop site-cache stats [vhost]`, `GET /api/v1/site-cache/stats[?host=]`
+  (scope-filtered — a cPanel user sees only their own vhosts), and two read-only
+  MCP tools, `site_cache_status` (which vhosts are armed + their tiers) and
+  `site_cache_stats` (HIT/MISS/BYPASS + hit ratio). An armed vhost showing a
+  near-zero hit ratio means the origin isn't returning cacheable responses (or a
+  caching misconfig). `ucache="$upstream_cache_status"` was added to the edge
+  access log so `edge_access_tail` shows the per-request verdict too. Counts are
+  a live view since the edge last reloaded (node-local); hour-bucketed history
+  and a cfm-admin column are follow-ups. Only armed vhosts are counted, so key
+  cardinality stays bounded; nothing is emitted until a vhost is armed.
 - **Site Cache — Tier A (static-asset caching) is now wired at the edge.**
   Building on the per-vhost Site Cache policy store and the observe-only edge
   module, the static-asset location on both edges (OpenResty + Angie) now
@@ -252,6 +266,13 @@ back-filled here — see the git/PR history for that period.
 
 
 ### Security
+- **Site Cache — Tier A now stores ONLY a `200`.** A `map $upstream_status
+  $cfm_cache_non200` feeds `proxy_no_cache`, so a `3xx`/`4xx`/`5xx` is never
+  cached whatever `Cache-Control` the origin sends — closing the cached-redirect
+  class of incident (a global cache once served stale `30x` and broke
+  webmail/cPanel/SSO, the reason CFM removed it). `check_site_cache_config.sh`
+  now fails any cache location whose `proxy_no_cache` omits the rail, and
+  requires the map to be defined. Only relevant on an armed vhost.
 - **`payload.sig` is admin-only on `/api/v1/webdet/history/events`.** The new
   ChallengeV2 device readings (`hardwareConcurrency`, `deviceMemory`,
   `devicePixelRatio`, pointer/touch/key counts) that CFM's challenge page

@@ -497,6 +497,7 @@ type Engine struct {
 	trafficRules      *trafficRuleStore
 	challengeAccess   *challengeAccessStore
 	siteCache         *siteCacheStore
+	siteCacheStats    *siteCacheStatsStore
 	history           *HistoryStore
 
 	// uaEmergency holds box-wide emergency rules keyed by normalized UA.
@@ -561,6 +562,7 @@ func NewEngine(cfg Config) *Engine {
 	e.trafficRules = newTrafficRuleStore(cfg.TrafficRulesStorePath)
 	e.challengeAccess = newChallengeAccessStore(cfg.ChallengeAccessStorePath)
 	e.siteCache = newSiteCacheStore(cfg.SiteCacheStorePath)
+	e.siteCacheStats = newSiteCacheStatsStore()
 	e.uaEmergency = NewUAEmergencyStore(cfg.UAEmergencyStorePath, cfg.UAEmergencyAuditLog)
 	// manual from api webtop challenge add// — init loads any persisted manual
 	// challenges from disk (filtering expired); restoreManualChallenges below
@@ -580,6 +582,7 @@ func NewEngine(cfg Config) *Engine {
 	e.nginxBridge.ListClamModeOverrides = e.ClamModeOverrideList
 	e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
 	e.nginxBridge.ListCachePolicy = e.SiteCachePolicyFeed
+	e.nginxBridge.SetCacheStatsHook(e.siteCacheStats.Upsert)
 	e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 	e.nginxBridge.RuleNeedsVerifiedBot = e.trafficRules.NeedsVerifiedBotFor
 	e.nginxBridge.ListTrafficRules = e.TrafficRuleList

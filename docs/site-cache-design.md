@@ -136,7 +136,7 @@ request-time (Lua, `access` phase) and response-time (nginx-native + a thin
 | Rail | Enforced where | Prevents |
 |---|---|---|
 | `GET`/`HEAD` only | `proxy_cache_methods` (default) | POST / logins cached |
-| Status: micro `200` only; static `200` (opt. `301/404`) | status gate + `proxy_cache_valid` | **3xx redirect / SSO loop cached** |
+| Status: **only `200` is stored** (as-built Tier A — dropped the optional `301/404`) | `map $upstream_status $cfm_cache_non200` → `proxy_no_cache` (hard block, beats any origin `Cache-Control`), not just `proxy_cache_valid` | **3xx redirect / SSO loop cached** (the incident that removed CFM's global cache) |
 | Response has `Set-Cookie` → never store | nginx default (we **never** add `Set-Cookie` to `proxy_ignore_headers`) | user A's session served to user B |
 | Request carries a **named app-session cookie** → `$cfm_cache_skip=1` (see §4.1 — **allowlist by name**, NOT "any cookie") | Lua cookie-name allowlist | **logged-in users get stale/foreign content** |
 | Origin `Cache-Control: private\|no-store\|no-cache` → respect | nginx default (not ignored) | origin keeps the final say |
@@ -754,9 +754,41 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
        renders per-user with **neither** `Set-Cookie` **nor** a private
        `Cache-Control` would be cached and served cross-user on an armed vhost.
        `static_gate`'s doc-comment states the same scope so code and design agree.
-   - **3c — stats/logging** (`cfm_cache_stats` + `cfm_cache_log` + the daemon
-     `/nginx/cache/stats` aggregate + `/api/v1/site-cache/stats` + the cfm-admin
-     hit-ratio column): deferred from this list's item 3, still to build.
+   - **3c — stats/logging (as built).** The undeclared (→ dead) `cfm_cache_stats`
+     shared dict is now declared in both confs; `cfm_cache_log.lua` gained a host
+     arg (per-vhost keys `cache:vhost:<host>:status:<S>`) and `snapshot_vhosts()`,
+     wired in the http-level `log_by_lua` — keyed by the CANONICAL policy key
+     (`policy_key_for` → exact host, or the `*.suffix` pattern for a wildcard),
+     never the raw request Host, so an armed wildcard vhost cannot let a client
+     explode the dict with distinct sub-hosts; cardinality is bounded by the
+     number of armed policies. Only **cacheable responses** are counted (a
+     served/stored `200`, or a `304` revalidation) — a non-cacheable `404`/`3xx`
+     MISS (which `$cfm_cache_non200` never stores) is excluded so a broken-asset
+     URL can't peg a vhost's MISS count and depress its hit ratio. The edge
+     PUSHES an absolute per-vhost snapshot to a new bridge route
+     `POST /nginx/cache/stats` every ~60s (a cross-worker-locked timer in
+     `cfm_cache.lua`, mirroring the WAF-stats `maybe_flush`); the daemon
+     `handleCacheStats` → `OnCacheStats` hook → `siteCacheStatsStore` (UPSERT,
+     absolute counts, in-memory/node-local). The push is triggered from the
+     **HTTP-level `log_by_lua`** (`cfm_cache.maybe_flush_stats`), NOT `observe()`
+     — `observe()` runs only in the HTTPS `header_filter`, which would leave an
+     HTTP-only box's armed vhosts counted but never pushed. **Read paths filter
+     to the CURRENTLY-armed policy set** (`armedCacheKeys`): the edge dict keeps a
+     vhost's counts until an edge reload, so a vhost unarmed after its last push
+     would otherwise linger as a stale "still cached" row — the armed store is
+     truth. A by-host query resolves a concrete sub-host to its wildcard policy
+     key (`resolveArmedCacheKey`) so a `*.suffix`-armed vhost is drillable.
+     Read via `GET /api/v1/site-cache/stats[?host=]` (scope-filtered like the
+     other site-cache endpoints), `cfm webtop site-cache stats [host]`, and two
+     MCP tools — `site_cache_status` (armed vhosts + tiers) and
+     `site_cache_stats` (HIT/MISS/BYPASS + a STRICT hit ratio — STALE/UPDATING/
+     REVALIDATED serve from cache but sit in the denominator only, so read the
+     full breakdown). `ucache="$upstream_cache_status"` was added to the `cfm`
+     access log_format so `edge_access_tail` shows the verdict per request. **v1 scope:** a live totals view (counts since the edge last
+     reloaded), not hour-bucketed history, and no cfm-admin column yet — both
+     follow-ups. **Deferred to a focused follow-up:** the `whats_wrong`
+     "armed but ~0 hits" signal (the automated form of what `site_cache_stats`
+     already shows on demand — it would have surfaced the 3b buffering no-op).
 4. **Tier B (micro-cache)** + the full §4 rails. Validate §5.5 items
    on a live box (the `myip.gr` case) per the challenge/WAF release checklist.
 5. **cfm-admin page + Recipes** (+ `make test-js`), filter/sort, per-row + global

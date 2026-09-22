@@ -23,7 +23,11 @@ local function incr(dict, key, n)
   end
 end
 
-function _M.log(zone, status)
+-- log(zone, status[, host]): count one cache verdict. `host` is optional and,
+-- when present, adds a PER-VHOST breakdown (cache:vhost:<host>:...). The caller
+-- (log_by_lua) passes host ONLY for an armed vhost, so per-vhost key cardinality
+-- stays bounded. Backward-compatible: host omitted → zone/global totals only.
+function _M.log(zone, status, host)
   if not zone or zone == "" then return end
   if not status or status == "" then return end
   if not VALID[status] then return end
@@ -35,7 +39,38 @@ function _M.log(zone, status)
   incr(d, "cache:zone:" .. zone .. ":total")
   incr(d, "cache:zone:" .. zone .. ":status:" .. status)
 
+  -- Per-vhost breakdown: status keys ONLY (no per-vhost :total). The daemon
+  -- derives a vhost's total by summing its statuses, so there is no separate
+  -- total key that could survive a get_keys() truncation while its status keys
+  -- are dropped — which would push a misleading "total>0, zero hits" row.
+  if host and host ~= "" then
+    incr(d, "cache:vhost:" .. host .. ":status:" .. status)
+  end
+
   d:set("cache:last_seen_ts", ngx.time())
+end
+
+-- snapshot_vhosts: read side for the daemon /nginx/cache/stats push. Returns
+--   { ["<host>"] = { total = N, HIT = n, MISS = n, ... }, ... }
+-- by scanning the per-vhost keys. Absolute counts (the daemon hook is
+-- UPSERT-idempotent, like the WAF-stats push). Bounded — only armed vhosts are
+-- ever keyed, each with ~1 + #statuses entries.
+function _M.snapshot_vhosts()
+  local d = ngx.shared.cfm_cache_stats
+  if not d then return {} end
+  local out = {}
+  -- 0 would warn + cap at 1024. Each armed vhost uses ~ (#statuses) keys, so
+  -- 8000 covers ~1000+ armed vhosts; beyond that a vhost is simply not reported
+  -- (absent), never reported with wrong (partial) counts.
+  local keys = d:get_keys(8000)
+  for _, k in ipairs(keys) do
+    local h, st = k:match("^cache:vhost:(.+):status:([A-Z]+)$")
+    if h then
+      out[h] = out[h] or {}
+      out[h][st] = tonumber(d:get(k) or 0) or 0
+    end
+  end
+  return out
 end
 
 function _M.log_throttle(is_meta, is_throttled, limit_status, status)
