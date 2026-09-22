@@ -21,7 +21,7 @@ back-filled here — see the git/PR history for that period.
 - **Site Cache — Phase 2: edge policy feed (observe-only).** The daemon now
   serves the per-vhost cache policy on the `/nginx/cache/config` bridge endpoint,
   and a new edge module `configs/lua/cfm_cache.lua` pulls it per-worker (async,
-  fail-safe, ~60s, `CFM_CACHE_REFRESH_SEC`) exactly like the HTTP/3 opt-in feed.
+  fail-safe, fixed ~60s poll) exactly like the HTTP/3 opt-in feed.
   From the edge `header_filter` it stamps an **`X-CFM-Cache`** header **only when
   the request carries `X-CFM-Cache-Debug`** (a per-request operator opt-in, so
   internal policy is never disclosed to ordinary clients): `curl -H

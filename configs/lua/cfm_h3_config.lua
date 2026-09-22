@@ -76,47 +76,17 @@ local _refresh_sec      = tonumber(os.getenv("CFM_H3_REFRESH_SEC") or "60") or 6
 if _refresh_sec < 1 then _refresh_sec = 1 end
 
 -- ---------------------------------------------------------------------------
--- Helpers
-
--- normalize_host: lowercase, strip trailing dot, strip optional port. Mirrors
--- the Go-side normalizeControlHost so the two ends agree on keys.
--- IPv6-aware: `[::1]:443` and `[2001:db8::1]` keep their brackets and inner
--- colons; only a trailing `:port` outside the brackets is stripped.
-local function normalize_host(raw)
-    local h = string.lower(tostring(raw or ""))
-    if h == "" then return "" end
-    if h:sub(-1) == "." then h = h:sub(1, -2) end
-    if h:sub(1, 1) == "[" then
-        -- IPv6 literal. Keep everything up to the closing bracket; strip a
-        -- trailing ":port" after it if present.
-        local close = h:find("]", 1, true)
-        if close then
-            return h:sub(1, close)
-        end
-        return h
-    end
-    -- IPv4 / hostname. Strip ":port" if present.
-    local colon = h:find(":", 1, true)
-    if colon then h = h:sub(1, colon - 1) end
-    return h
-end
-
--- glob_match: minimal subset of shell glob covering the only patterns the
--- UI/CLI actually let an operator add for vhosts: exact host and
--- "*.suffix.tld". The Go store accepts richer patterns via filepath.Match
--- (`?`, `[abc]`, mid-pattern `*`), so rebuild_cache below tags any unknown
--- wildcard as "unsupported" and logs a one-shot warning rather than
--- silently routing it where glob_match cannot find it.
-local function glob_match(pattern, host)
-    if pattern == host then return true end
-    if pattern:sub(1, 2) == "*." then
-        local suffix = pattern:sub(2)  -- ".example.com"
-        if #host >= #suffix and host:sub(-#suffix) == suffix then
-            return true
-        end
-    end
-    return false
-end
+-- Helpers: host normalization + the minimal glob matcher are shared with
+-- cfm_cache.lua via cfm_hostmatch (one matcher, no drift — CLAUDE.md §5).
+-- Aliased to locals so the call sites below are unchanged. The Go store accepts
+-- richer patterns via filepath.Match (`?`, `[abc]`, mid-pattern `*`), so
+-- rebuild_cache below tags any unknown wildcard as "unsupported" (via
+-- is_supported_pattern) and logs a one-shot warning rather than silently routing
+-- it where glob_match cannot find it.
+local hm = require "cfm_hostmatch"
+local normalize_host       = hm.normalize_host
+local glob_match           = hm.glob_match
+local is_supported_pattern = hm.is_supported_pattern
 
 -- ---------------------------------------------------------------------------
 -- Bridge fetch. Uses a private cosocket so it does not depend on cfm.lua's
@@ -186,17 +156,6 @@ end
 -- restriction without re-introducing the silent-drop bug.
 
 local _warned_unsupported = {}
-
-local function is_supported_pattern(p)
-    if not p:find("*", 1, true) and not p:find("?", 1, true) and not p:find("[", 1, true) then
-        return true  -- exact host
-    end
-    if p:sub(1, 2) == "*." and not p:sub(3):find("*", 1, true)
-       and not p:find("?", 1, true) and not p:find("[", 1, true) then
-        return true  -- "*.suffix" only
-    end
-    return false
-end
 
 local function rebuild_cache(hosts)
     local exact, wild = {}, {}

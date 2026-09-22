@@ -69,47 +69,13 @@ local _refresh_sec = 60
 local OBSERVE_HEADER_VAR = "http_x_cfm_cache_debug"
 
 -- ---------------------------------------------------------------------------
--- Helpers (normalize_host / glob_match / is_supported_pattern are copied
--- verbatim from cfm_h3_config.lua so the two ends agree on host keys and the
--- supported pattern class stays identical).
-
-local function normalize_host(raw)
-    local h = string.lower(tostring(raw or ""))
-    if h == "" then return "" end
-    if h:sub(-1) == "." then h = h:sub(1, -2) end
-    if h:sub(1, 1) == "[" then
-        local close = h:find("]", 1, true)
-        if close then
-            return h:sub(1, close)
-        end
-        return h
-    end
-    local colon = h:find(":", 1, true)
-    if colon then h = h:sub(1, colon - 1) end
-    return h
-end
-
-local function glob_match(pattern, host)
-    if pattern == host then return true end
-    if pattern:sub(1, 2) == "*." then
-        local suffix = pattern:sub(2)  -- ".example.com"
-        if #host >= #suffix and host:sub(-#suffix) == suffix then
-            return true
-        end
-    end
-    return false
-end
-
-local function is_supported_pattern(p)
-    if not p:find("*", 1, true) and not p:find("?", 1, true) and not p:find("[", 1, true) then
-        return true  -- exact host
-    end
-    if p:sub(1, 2) == "*." and not p:sub(3):find("*", 1, true)
-       and not p:find("?", 1, true) and not p:find("[", 1, true) then
-        return true  -- "*.suffix" only
-    end
-    return false
-end
+-- Host helpers: shared with cfm_h3_config.lua via cfm_hostmatch (one matcher,
+-- no drift — CLAUDE.md §5). Aliased to locals so the call sites below read the
+-- same as before.
+local hm = require "cfm_hostmatch"
+local normalize_host      = hm.normalize_host
+local glob_match          = hm.glob_match
+local is_supported_pattern = hm.is_supported_pattern
 
 -- ---------------------------------------------------------------------------
 -- Bridge fetch (identical wire format to cfm_h3_config.lua: HTTP/1.1 over the
