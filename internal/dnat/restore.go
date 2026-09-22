@@ -82,7 +82,7 @@ func scopeStatus(scope DNATScope, backend firewall.Backend) (bool, error) {
 		on, _, err := backend.PanelDNATStatus()
 		return on, err
 	}
-	return backend.DNATStatus("inet", "cfm_redirect")
+	return backend.DNATStatus(DefaultFamily, DefaultTable)
 }
 
 func scopeEnable(scope DNATScope, backend firewall.Backend) error {
@@ -98,5 +98,5 @@ func scopeEnable(scope DNATScope, backend firewall.Backend) error {
 	}
 	// backend.DNATOn already calls ensureScopedDNATAccepts internally, so
 	// the web path needs no extra accept reassert here.
-	return backend.DNATOn("inet", "cfm_redirect", getenvInt("HTTP_PORT", 9080), getenvInt("HTTPS_PORT", 9043))
+	return backend.DNATOn(DefaultFamily, DefaultTable, getenvInt("HTTP_PORT", 9080), getenvInt("HTTPS_PORT", 9043))
 }

@@ -226,8 +226,8 @@ func newWebDNATFailSafeTarget(backend firewall.Backend) (dnatFailSafeTarget, boo
 	}
 
 	// keep these aligned with RunCLI defaults
-	family := "inet"
-	table := "cfm_redirect"
+	family := DefaultFamily
+	table := DefaultTable
 
 	interval := time.Duration(getenvInt("CFM_DNAT_FAILSAFE_INTERVAL_MS", 2000)) * time.Millisecond
 	failNeed := getenvInt("CFM_DNAT_FAILSAFE_CONSECUTIVE_FAILS", 3)
@@ -320,8 +320,8 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	fs := flag.NewFlagSet("dnat", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	family := fs.String("family", "inet", "nftables family (default: inet)")
-	table := fs.String("table", "cfm_redirect", "nftables table (default: cfm_redirect)")
+	family := fs.String("family", DefaultFamily, "nftables family (default: "+DefaultFamily+")")
+	table := fs.String("table", DefaultTable, "nftables table (default: "+DefaultTable+")")
 
 	defHTTP := getenvInt("HTTP_PORT", 9080)
 	defHTTPS := getenvInt("HTTPS_PORT", 9043)

@@ -23,12 +23,3 @@ func TestPanelDNATSpecsCoverCanonicalMappings(t *testing.T) {
 		}
 	}
 }
-
-func TestPanelDNATAcceptExprIdentityCoversCanonicalMappings(t *testing.T) {
-	for _, m := range firewall.PanelDNATMappings() {
-		rule := panelDNATAcceptID(m.From, m.To)
-		if rule == "" {
-			t.Fatalf("empty accept id for %d->%d", m.From, m.To)
-		}
-	}
-}

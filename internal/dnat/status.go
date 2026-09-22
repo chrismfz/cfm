@@ -6,8 +6,8 @@ import (
 )
 
 const (
-	DefaultFamily    = "inet"
-	DefaultTable     = "cfm_redirect"
+	DefaultFamily    = firewall.DNATDefaultFamily
+	DefaultTable     = firewall.DNATDefaultTable
 	DefaultHTTPPort  = 9080
 	DefaultHTTPSPort = 9043
 	// NFTDNATPriority controls the priority of CFM's NAT prerouting chain.

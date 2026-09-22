@@ -112,18 +112,25 @@ grep -A3 -B3 'cfm/internal/detectors' /tmp/cfm.gor | head -50
 
 # ─── nftlib backend verification ────────────────────────────────────────────
 #
-# nftlib talks directly to the kernel via netlink — no nft subprocess.
-# The set/element contents are identical; only the write path changes.
+# nftlib writes blocks, allows and blocklist feeds over netlink, with no nft
+# subprocess. The self/port sets and the input-chain rules (ports policy, DNAT
+# accepts) still go through the nft binary. The set/element contents are
+# identical; only the write path changes.
 # Use the same `nft list` commands to verify state (kernel is the ground truth).
 #
-# Switch to nftlib (no restart needed for CLI commands; daemon needs restart):
+# Switch to nftlib: set CFM_FIREWALL_ENGINE = "nftlib" in /etc/cfm/cfm.conf,
+# then restart the daemon (it reads the engine only at startup). `cfm` CLI
+# commands read the same key, so they run on nftlib too:
+#   systemctl restart cfm
+# The CFM_FIREWALL_ENGINE environment variable overrides cfm.conf for the one
+# process it is set in, e.g. a one-off CLI test:
 #   CFM_FIREWALL_ENGINE=nftlib cfm status
-#   CFM_FIREWALL_ENGINE=nftlib cfm block 1.2.3.4 --ttl 1h
-#   systemctl set-environment CFM_FIREWALL_ENGINE=nftlib && systemctl restart cfm
+# Don't use `systemctl set-environment` for it: that changes only the daemon,
+# and the CLI (reading cfm.conf) would then run the other engine.
 #
-# Confirm which engine the running daemon is using:
-grep CFM_FIREWALL_ENGINE /proc/$(pgrep -f "cfm daemon" | head -1)/environ 2>/dev/null \
-  || echo "(env var not set → engine is nft)"
+# Confirm which engine the running daemon is using (logged at startup, before
+# the log file is opened, so it lands in the service's stdout log):
+zgrep -h 'firewall engine' $(ls -tr /var/log/cfm/cfm-service.log*) 2>/dev/null | tail -1
 #
 # Confirm nftlib is NOT spawning nft subprocesses during a block:
 #   In one terminal, watch for nft forks:
@@ -142,9 +149,9 @@ nft list set inet cfm block_v4 | grep 203.0.113.1
 nft list set inet cfm block_ext_v4_hosts_dshield | wc -l
 # Should be same count regardless of engine; nftlib just writes it faster.
 #
-# Check open netlink sockets (nftlib keeps one fd open per daemon; nft has none):
-ls -la /proc/$(pgrep -f "cfm daemon" | head -1)/fd 2>/dev/null | grep netlink
-# With nftlib: one NETLINK fd present. With nft: none.
+# nftlib opens a netlink socket per kernel call and closes it again, so an
+# idle daemon holds none; its call counts, errors and slow calls are in the
+# `netlink` block of the firewall_selftest MCP tool.
 #
 # Debug nftlib netlink traffic (requires root):
 nft monitor   # shows all kernel-side set/rule changes in real time

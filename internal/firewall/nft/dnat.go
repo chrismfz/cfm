@@ -19,10 +19,10 @@ func dnatDefaults(fam, tbl string) (string, string) {
 	fam = strings.TrimSpace(fam)
 	tbl = strings.TrimSpace(tbl)
 	if fam == "" {
-		fam = "inet"
+		fam = firewall.DNATDefaultFamily
 	}
 	if tbl == "" {
-		tbl = "cfm_redirect"
+		tbl = firewall.DNATDefaultTable
 	}
 	return fam, tbl
 }
@@ -84,27 +84,7 @@ func dnatAcceptRuleSpecs(httpPort, httpsPort int) []dnatAcceptRuleSpec {
 }
 
 func dnatAcceptRuleComment(label string, from, to int) string {
-	return fmt.Sprintf("cfm_dnat_accept:%s:%d:%d", label, from, to)
-}
-
-func firstInputDefaultDropHandle(out string) string {
-	for _, line := range strings.Split(out, "\n") {
-		// Single source of truth for the default-drop predicate lives in
-		// firewall.IsInputDefaultDropLine so it can't drift from the dnat CLI
-		// reporter; here we additionally need the handle to insert before it.
-		if !firewall.IsInputDefaultDropLine(line) {
-			continue
-		}
-		norm := strings.ReplaceAll(line, `"`, "")
-		if !strings.Contains(norm, " handle ") {
-			continue
-		}
-		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
-		if fields := strings.Fields(h); len(fields) > 0 {
-			return fields[0]
-		}
-	}
-	return ""
+	return fmt.Sprintf("%s:%s:%d:%d", firewall.WebDNATAcceptTagNFT, label, from, to)
 }
 
 func dnatAcceptRuleExpr(spec dnatAcceptRuleSpec, beforeHandle string) string {
@@ -121,7 +101,7 @@ func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
 	_ = b.nftCmd("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
 	// MUST list via ListChainText (argv mode). nftOut feeds its argument to
 	// `nft -f -` (script mode), where the `-a` handle flag is a syntax error —
-	// that made the listing fail silently, so firstInputDefaultDropHandle saw an
+	// that made the listing fail silently, so FirstInputDefaultDropHandle saw an
 	// error string, returned "", and the accepts were APPENDED after the default
 	// drop (never reached) instead of inserted before it. Fail closed on a list
 	// error rather than repeating that silent breakage.
@@ -129,7 +109,7 @@ func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
 	if err != nil {
 		return fmt.Errorf("list %s %s input chain for dnat accepts: %w", family, tableName, err)
 	}
-	beforeHandle := firstInputDefaultDropHandle(out)
+	beforeHandle := firewall.FirstInputDefaultDropHandle(out)
 	if err := b.cleanupScopedDNATAccepts(); err != nil {
 		return err
 	}
@@ -153,7 +133,10 @@ func (b *Backend) cleanupScopedDNATAccepts() error {
 	}
 	for _, line := range strings.Split(out, "\n") {
 		norm := strings.ReplaceAll(line, `"`, "")
-		if !strings.Contains(norm, "cfm_dnat_accept:") || !strings.Contains(norm, " handle ") {
+		// Both engines' tags: an nftlib-written accept left behind after an
+		// engine switch would otherwise stay forever.
+		tagged := strings.Contains(norm, firewall.WebDNATAcceptTagNFT+":") || strings.Contains(norm, firewall.WebDNATAcceptTagNFTLib+":")
+		if !tagged || !strings.Contains(norm, " handle ") {
 			continue
 		}
 		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
@@ -240,17 +223,22 @@ func (b *Backend) DNATOff(fam, tbl string) (err error) {
 	}()
 	fam, tbl = dnatDefaults(fam, tbl)
 
+	// Redirect first (idempotent), accepts last: removed first, a redirect
+	// that then failed to go would send every web connection into the
+	// default drop.
+	if b.dnatTableExists(fam, tbl) {
+		if err := b.nftCmd(fmt.Sprintf("delete table %s %s", fam, tbl)); err != nil {
+			return err
+		}
+	}
+	// With the redirect gone the accepts match nothing (they need ct status
+	// dnat), so a failed cleanup is only a warning. Returning it would make
+	// `cfm dnat off` fail without persisting intent OFF, and the daemon's
+	// failsafe would turn DNAT back on.
 	if err := b.cleanupScopedDNATAccepts(); err != nil {
-		return err
+		b.logPhase("DNATOff", "warn", 0, err, "op=dnat leftover scoped accepts (inert without the redirect)")
 	}
-
-	// Idempotent
-	if !b.dnatTableExists(fam, tbl) {
-		return nil
-	}
-
-	// Reuse your single-expression runner (auto adds ;)
-	return b.nftCmd(fmt.Sprintf("delete table %s %s", fam, tbl))
+	return nil
 }
 
 func getenvInt(key string, def int) int {

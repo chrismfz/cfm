@@ -342,6 +342,14 @@ func reloadDNATScope(scope firewall.DNATBypassScope, backend firewall.Backend) i
 			return 0
 		}
 		hp, hsp := currentWebDNATPorts(backend)
+		// Re-render at the LIVE priority, the way `cfm dnat on` passes its
+		// --priority. This CLI's backend carries no config, so otherwise the
+		// reload fell back to the -99 default: on a node running -101 (CFM
+		// ahead of Imunify's -100) a bypass edit silently put CFM behind it.
+		if err := os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(currentWebDNATPriority(backend))); err != nil {
+			fmt.Fprintf(os.Stderr, "web DNAT reload failed: %v\n", err)
+			return 1
+		}
 		if err := backend.DNATOn(DefaultFamily, DefaultTable, hp, hsp); err != nil {
 			fmt.Fprintf(os.Stderr, "web DNAT reload failed: %v\n", err)
 			return 1
@@ -350,6 +358,17 @@ func reloadDNATScope(scope firewall.DNATBypassScope, backend firewall.Backend) i
 		return 0
 	}
 	return 0
+}
+
+// currentWebDNATPriority returns the live web DNAT chain priority, or the
+// configured one (cfm.conf's NFT_DNAT_PRIORITY) when it can't be read.
+func currentWebDNATPriority(backend firewall.Backend) int {
+	if show, err := backend.DNATShow(DefaultFamily, DefaultTable); err == nil {
+		if p, ok := parseDNATChainPriority(show); ok {
+			return clampNFTPriority(p)
+		}
+	}
+	return clampNFTPriority(ConfiguredWebDNATPriority())
 }
 
 // currentWebDNATPorts returns the HTTP/HTTPS ports currently in use by the
