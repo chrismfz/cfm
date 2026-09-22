@@ -62,6 +62,27 @@ humanity score earns **no clearance** (`result=v2_reject`, retry-able — see
 - On the wire and in the bridge the decision stays plain `challenge` (edge
   vocabulary); autoblock (`waf_security`) is untouched — it feeds on
   `action=block` pushes only, and a `challenge_v2` push is not one.
+- **Reading it in the logs.** `cfm.waf.log` carries the verbatim
+  `"action":"challenge_v2"` (the hit), and the matching solve in
+  `cfm.challenges.log` carries `hs=<score>` plus `v2=mark` — the rung mark is
+  what proves the tier reached verify. (The solve line names ONE grain, the
+  highest-precedence arm covering it: `fp` > `geo` > `vhost` > `mark`. So on a
+  host that also carries a v2-tier vhost challenge, or for a client under an
+  armed fingerprint/geo policy, the very same WAF-marked solve reads `v2=vhost`
+  / `v2=fp` / `v2=geo` — the teeth are identical, only the label differs.)
+  `v2=` absent entirely on a solve that followed a `challenge_v2` hit means
+  either the rung is off or the mark was missing. Check in this order. **First,
+  `CHALLENGE_V2_PASSIVE`** — with the rung disabled the whole suffix is
+  suppressed, so if the line carries no `hs=` either, stop: nothing else is
+  wrong. If `hs=` IS there the rung is on and the mark is what is missing;
+  three causes, cheapest first: a push without a host (nothing to key the mark
+  on); a solve later than `challengeV2MarkTTL` (15m); or the per-(ip,host)
+  mark store hitting its cap and failing open — that one is silent except for
+  a single `[challenge_v2] per-(ip,host) mark store full` line in the daemon
+  log per episode, and a storm is exactly when it happens, so grep for it
+  before concluding the push was wrong. `hs=0` is a PASS: the score is positive-evidence-only, so 0 means
+  "no headless tell fired", not "humanity proved" — a real browser is expected
+  to score 0 and keep its clearance. A bite logs `result=v2_reject`.
 - Post-clearance conversion treats it exactly like `challenge` (cleared
   clients are never re-challenged on either rung).
 - The panel-port gate (`cfm_panel.lua`) enforces block-tier hits only, so a

@@ -1,9 +1,14 @@
 # Under-Attack Mode — per-vhost escalation state (design)
 
 > **▶ PLAN OF RECORD: `docs/abuse-defense-master-plan.md`** (2026-09-18). The
-> increment ladder below is **FROZEN** at I1/I2: I1 stays as the alarm; the I2
-> fingerprinter is frozen and I3–I5 are superseded by the master plan's E1–E3
-> enforcement path (revisit only if the draft-rule idea is picked up again).
+> increment ladder below is **FROZEN** at I1/I2 — **operator-ratified
+> 2026-09-22** (master plan §3 row 10). I1 stays as the alarm ("the challenge
+> is being solved" is worth knowing). The I2 campaign fingerprinter stays in
+> the tree exactly as it is: a freeze, not a retire — the mechanism is sound,
+> it simply has no consumer. So: no new predicates, no weight tuning, no sub
+> signals, and I3–I5 are NOT to be built; the master plan's E1–E3 superseded
+> that enforcement path. Revisit only if the draft-rule idea (I3) is
+> deliberately picked up, and then with a §4-D3 exit contract.
 
 **Status: I0 shipped; I1 (detector + state + notify, detect-only) landed —
 surfacing (I1b) + the RT-baseline clause (§3 leg 3) still open.** Siblings:

@@ -451,8 +451,19 @@ type ChallengeSolve struct {
 	// TLSRaw is the full tuple behind TLSFP, kept so it can be written once per
 	// distinct fingerprint instead of on every solve.
 	TLSRaw string
+	// HumanityScored says the ChallengeV2 Rung-1 scorer actually ran for this
+	// solve. It is the ONE gate on every humanity field below, on both the
+	// log line and the durable history row, and it exists because the zero
+	// value of HumanityScore is a MEANINGFUL score (0 = scored, nothing
+	// fired = pass). Without it, any ChallengeSolve literal that omits the
+	// field — and this struct is exported, as is RecordChallengeSolved —
+	// asserts "the scorer ran and found nothing" for a solve it never saw.
+	// Harmless while that only reached a log line; not harmless now that it
+	// reaches durable history a corpus is read from.
+	HumanityScored bool
 	// HumanityScore is the ChallengeV2 Rung-1 passive score for this solve
-	// (challenge_v2.go). -1 = scoring disabled; 0 = scored, nothing fired.
+	// (challenge_v2.go), meaningful only when HumanityScored. 0 = scored,
+	// nothing fired.
 	// Positive-evidence-only by construction (D5b): a missing payload or
 	// missing signals cannot raise it. Rendered via HumanitySuffix() on both
 	// solve-line writers.
@@ -465,6 +476,21 @@ type ChallengeSolve struct {
 	// distinguishable — a fleet-wide hs=- is a regression or an evading farm,
 	// and either must be visible (D5d), never disguised as hs=0.
 	HumanityNoPayload bool
+	// sig holds the retained Rung-1 readings, already rounded — resolved ONCE
+	// at verify (humanitySignals.sigFields) so the solve line and the history
+	// row render the same numbers from one slice rather than each rebuilding
+	// it, and so neither can drift. nil when no payload arrived or the rung is
+	// off. Unexported on purpose: the payload shape is this package's
+	// business, and every reader goes through SignalSuffix/signalMap. Nothing
+	// here is scored — see humanitySignals for what the scorer actually uses.
+	sig []sigField
+	// V2Grain names the operator-armed challenge_v2 grain covering this solve
+	// ("fp" / "geo" / "vhost" / "mark"), "" when none did — i.e. exactly when
+	// the D5a gate would have teeth. Filled on every scored solve, not only a
+	// failing one, and rendered as v2=<grain> by HumanitySuffix: a clean score
+	// under an arm is otherwise byte-identical to a plain v1 solve, which reads
+	// as "the tier never fired" (D5d).
+	V2Grain string
 }
 
 // TLSFingerprintOrDash renders TLSFP for a log line. Empty means "not
@@ -721,19 +747,29 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		fp, _ := tlsfp.Parse(r.Header.Get(tlsFingerprintHeader))
 
 		// ChallengeV2 Rung 1 (challenge_v2.go): score the passive humanity
-		// payload the page posted with this verify. hs = -1 when the rung is
-		// disabled; an absent/malformed payload scores like an empty report
-		// (only UA-borne openers can fire) — absence never convicts (D5b).
+		// payload the page posted with this verify. v2On becomes the solve's
+		// HumanityScored, which is the ONE gate on every humanity field — a
+		// disabled rung leaves hs at its zero value and nothing is rendered or
+		// persisted (there is no -1 sentinel: hs 0 is a real score meaning
+		// "scored clean, passed"). An absent/malformed payload scores like an
+		// empty report (only UA-borne openers can fire) — absence never
+		// convicts (D5b).
 		v2On, v2Fail, v2Debug, v2Shadow := challengeV2Settings()
-		hs, hsTells, hsNoPayload := -1, "", false
+		hs, hsTells, hsNoPayload, v2Grain := 0, "", false, ""
+		var hsSig *humanitySignals
 		if v2On {
 			sig := parseHumanityBody(humanityBody)
 			hsNoPayload = sig == nil
+			hsSig = sig
 			score, tells := scoreHumanity(sig, ua)
 			hs, hsTells = score, strings.Join(tells, ",")
 			if v2Debug {
 				w.Header().Set("X-CFM-HS", strconv.Itoa(score))
 			}
+			// Resolve the D5a arm ONCE, for every scored solve — the gate
+			// below consumes this same answer, and the solve line renders it,
+			// so "did the teeth cover this solve" cannot be read two ways.
+			v2Grain = challengeV2ArmGrain(fp.ID, ipStr, host)
 		}
 
 		solve := ChallengeSolve{
@@ -749,9 +785,12 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			UAFamily:          uaVerdict.Family,
 			TLSFP:             fp.ID,
 			TLSRaw:            fp.Raw,
+			HumanityScored:    v2On,
 			HumanityScore:     hs,
 			HumanityTells:     hsTells,
 			HumanityNoPayload: hsNoPayload,
+			sig:               hsSig.sigFields(),
+			V2Grain:           v2Grain,
 		}
 
 		// One dictionary line per distinct fingerprint, so every solve can carry
@@ -789,21 +828,26 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// abuse-shadow line (rides the ABUSE_SHADOW master via
 		// ConfigureChallengeV2), clearance unaffected.
 		if v2On && hs >= v2Fail {
-			// Armed challenge_v2 via ANY grain: the solve's TLS fingerprint
-			// (the original gate), a fleet-armed country/ASN policy covering
-			// the client IP (policy-kinds slice), a v2-tier VHOST arm
-			// covering the solve's host (arm-surfaces slice A), or a
-			// transient per-(ip,host) mark written at decision time by a
-			// v2-tier traffic rule (slice B). Each lookup is fail-open when
-			// unwired/absent. Same D5 semantics either way; the gate inputs
-			// are edge-authoritative — see HONEST LIMITS in challenge_v2.go.
-			if FingerprintPolicyForID(solve.TLSFP) == "challenge_v2" ||
-				GeoPolicyActionForIP(solve.IP) == "challenge_v2" ||
-				challengeV2HostArmed(solve.Host) ||
-				challengeV2Marked(solve.IP, solve.Host) {
+			// v2Grain is the ANY-grain arm resolved above (challengeV2ArmGrain):
+			// the solve's TLS fingerprint (the original gate), a fleet-armed
+			// country/ASN policy covering the client IP (policy-kinds slice),
+			// a v2-tier VHOST arm covering the solve's host (arm-surfaces
+			// slice A), or a transient per-(ip,host) mark written when a
+			// v2-tier traffic rule (slice B) or WAF rule (slice C) challenged
+			// this pair. Each lookup is fail-open when unwired/absent. Same D5
+			// semantics either way; the gate inputs are edge-authoritative —
+			// see HONEST LIMITS in challenge_v2.go. The grain also rides the
+			// solve line, so a passed-under-arm solve is greppable too.
+			if v2Grain != "" {
+				// sig= rides this line too. The rejected solve is exactly
+				// the population the corpus exists to characterise, and
+				// this line is its ONLY record: the solve is deliberately
+				// not published/hooked as solved (it cleared nothing), so
+				// without sig= here every armed-and-rejected client would
+				// be missing from the very data used to tune the tells.
 				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s tls_fp=%s ua=%q",
-					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.TLSFingerprintOrDash(), solve.UA)
+					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q",
+					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.SignalSuffix(), v2Grain, solve.TLSFingerprintOrDash(), solve.UA)
 				w.Header().Set("X-CFM-V2", "reject")
 				http.Error(w, "verification failed", http.StatusForbidden)
 				return
