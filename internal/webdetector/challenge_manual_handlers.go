@@ -265,7 +265,10 @@ func parseAttackOn(q string, body *bool) (bool, error) {
 // Operator override for Under-Attack Mode: on=1|true|on forces the vhost INTO
 // UNDER_ATTACK; on=0|false|off leaves it and suppresses auto re-entry for the
 // holddown. Body { "host": "...", "on": true } is also accepted. Scoped tokens
-// may only override their own vhosts (vhostAllowed), mirroring vhost/add|remove.
+// may only override their own vhosts (vhostAllowed), mirroring vhost/add|remove,
+// and a scoped on=1 is TTL-bound to scopedMaxChallengeTTL (24h) like the
+// panic-button arm — the response then carries ttl + expires_at; admin
+// overrides stay unbounded.
 func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Request) {
 	host := normalizeHost(r.URL.Query().Get("host"))
 	onStr := r.URL.Query().Get("on")
@@ -305,15 +308,23 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	e.SetVhostAttackOverride(host, on, time.Now())
+	// A SCOPED forced-ON override is TTL-bound to the same 24h ceiling as the
+	// panic-button arm (operator decision on the slice-D residual): the
+	// customer shield is temporary, a standing override is the operator's
+	// call. Admin overrides stay unbounded. `attack off` needs no bound (the
+	// holddown already limits the suppression).
+	var overrideTTL time.Duration
+	if scope != nil && on {
+		overrideTTL = scopedMaxChallengeTTL
+	}
+	e.SetVhostAttackOverride(host, on, time.Now(), overrideTTL)
 
 	// Audit (slice-D security review I3): this override used to leave NO
 	// trail beyond the generic api.log request line — a scoped customer
 	// could force (or clear) UNDER_ATTACK on their vhost invisibly. Record
 	// it like the manual arm/disarm: a CHALLENGES log line and a history
-	// event, both carrying the actor. (The override itself stays un-TTL'd —
-	// documented residual in the master plan, pending a TTL-or-admin-only
-	// decision.)
+	// event, both carrying the actor (and ttl_sec when the override is
+	// TTL-bound, see overrideTTL above).
 	actor := actorFromScope(scope)
 	reason := "attack_cleared"
 	if on {
@@ -323,18 +334,27 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 		"[challenge][vhost] action=attack_override host=%s on=%v actor=%s",
 		host, on, actorOrDash(actor),
 	)
+	payload := map[string]interface{}{"actor": actor, "on": on}
+	if overrideTTL > 0 {
+		payload["ttl_sec"] = int(overrideTTL / time.Second)
+	}
 	e.appendHistory(HistoryEvent{
 		TsUnix:  time.Now().Unix(),
 		Type:    "challenge_vhost_attack_override",
 		Host:    host,
 		Mode:    "manual",
 		Reason:  reason,
-		Payload: map[string]interface{}{"actor": actor, "on": on},
+		Payload: payload,
 	})
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"host":   host,
 		"attack": on,
-	})
+	}
+	if overrideTTL > 0 {
+		resp["ttl"] = overrideTTL.String()
+		resp["expires_at"] = time.Now().Add(overrideTTL)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // GET /api/v1/challenge/vhost/status?host=example.gr

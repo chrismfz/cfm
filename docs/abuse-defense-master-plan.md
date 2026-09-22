@@ -174,10 +174,32 @@ already opened.
         `cfm_fppolicy.lua` cache + `cfm.lua` Step 0c: `deny` 403s BEFORE the
         clearance fast-path; challenge/challenge_v2 are a floor for uncleared
         clients (v2 behaves as v1 until Rung 1 ships). Knobs `FP_POLICY` /
-        `FP_POLICY_ALLOW_FPS`; expires honoured at lookup. **Web path only** —
-        the panel-port gate (`cfm_panel.lua`) does not consult the policy yet.
-      - [ ] Panel-port fp-policy consult (`cfm_panel.lua` — same Step-0c
-        lookup so an armed deny also covers `:2083/:2087/:2096`).
+        `FP_POLICY_ALLOW_FPS`; expires honoured at lookup. (Originally web
+        path only; the panel-port consult shipped 2026-09-22 — next bullet.)
+      - [x] Panel-port fp-policy consult — **DONE 2026-09-22**
+        (`cfm_panel.lua` step 2f): the same operator-armed policy the web
+        edge enforces at Step 0c now covers `:2083/:2087/:2096`. As-built:
+        ONLY `deny` acts, under the panel mode ladder
+        (`PANEL_FP_POLICY_MODE` off|logonly|enforce, default enforce like
+        its panel siblings; env `CFM_PANEL_FP_POLICY`; published via the
+        bridge config so flips land in ~10s) — `logonly` records
+        `[cfm_panel_fppolicy] logonly=would_deny`. Challenge/challenge_v2
+        fingerprints stay OBSERVE-ONLY on panel ports (logged, never
+        enforced: the panel has no per-request challenge serve — the 2e
+        loop rationale — so the floor remains a web-path concept). The
+        global `FP_POLICY=0` kills the consult too; self/IGNORE_NETS never
+        reach the lookup; the tuple comes from the panel port's own
+        handshake ($ssl_*); the lookup reuses the shared cfm_fppolicy
+        cache dict + the panel's bridge client; everything pcall'd +
+        fail-open (a fault can never lock the panel). Accepted scope
+        (review MINOR-4): the api/sso hard-skip returns BEFORE 2f, so a
+        denied fingerprint can still reach /json-api/*, /xml-api/*,
+        /execute/*, /session*, /cpanelwebcall* etc. — API-credential
+        brute force is NOT covered (deliberate: transfers/API must never
+        break, the same carve-out the panel WAF honours); human entry
+        and plain /login POSTs ARE covered. The env kill switch needed
+        an `env CFM_PANEL_FP_POLICY;` whitelist in both engine confs
+        (review IMPORTANT-1, folded — nginx scrubs undeclared env).
       - [x] ChallengeV2 Rung 1 — **DONE 2026-09-19** (`challenge_v2.go` +
         the challenge-page passive collectors): every solve is scored on
         positive headless evidence only (webdriver / HeadlessChrome UA fail
@@ -362,9 +384,17 @@ already opened.
           (same-account ServerAlias in cPanel practice); a scoped re-arm
           may replace/downgrade an admin arm on the customer's own vhost
           (owner self-service — an owner-immutable challenge belongs in
-          config-time CHALLENGE_VHOST); the scoped `vhost/attack`
-          override stays un-TTL'd (audited now; TTL-bound-or-admin-only
-          is a pending decision); the scoped Tier picker on the
+          config-time CHALLENGE_VHOST); ~~the scoped `vhost/attack`
+          override stays un-TTL'd~~ RESOLVED 2026-09-22 (operator
+          decision): a scoped `on=1` override is TTL-bound to the same
+          24h ceiling as the panic arm — expiry returns the vhost to
+          AUTO control via the tick (st.on stays true, so the vhost
+          leaves by the normal exit rules, not mid-attack) and the read
+          paths honour it immediately; admin overrides stay unbounded.
+          The SAME re-arm residual as the panic arm applies and is
+          accepted: a scoped on=1 every <24h keeps the override standing
+          (own vhost, audited per re-arm);
+          the scoped Tier picker on the
           WebDetector overview page pre-existed via slice A under the
           same server-side scope checks.
 - [ ] **E4 — Measure and publish the result** (one page appended here): bans

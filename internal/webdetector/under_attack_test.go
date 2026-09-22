@@ -199,14 +199,14 @@ func TestUnderAttack_ManualOverride(t *testing.T) {
 	quiet := SuspiciousRow{Host: host, UniqueIPs: 0, ErrRatio: 0, BotRatio: 0} // fails every leg
 
 	// Force ON with nothing qualifying.
-	e.SetVhostAttackOverride(host, true, t0)
+	e.SetVhostAttackOverride(host, true, t0, 0)
 	e.evalUnderAttack(t0, host, false, quiet, out)
 	if got := countKind(drainAlerts(out), "WEB/VHOST_UNDER_ATTACK_ON"); got != 1 {
 		t.Fatalf("attack on: want 1 forced ON, got %d", got)
 	}
 
 	// Force OFF: leaves + suppresses re-entry (holddown measured from t0+2s).
-	e.SetVhostAttackOverride(host, false, t0.Add(2*time.Second))
+	e.SetVhostAttackOverride(host, false, t0.Add(2*time.Second), 0)
 	e.evalUnderAttack(t0.Add(2*time.Second), host, false, quiet, out)
 	if got := countKind(drainAlerts(out), "WEB/VHOST_UNDER_ATTACK_OFF"); got != 1 {
 		t.Fatalf("attack off: want 1 OFF, got %d", got)
@@ -315,7 +315,7 @@ func TestUnderAttack_OverrideRecordedManual(t *testing.T) {
 	host := "e-athlos.com"
 	quiet := SuspiciousRow{Host: host}
 
-	e.SetVhostAttackOverride(host, true, t0)
+	e.SetVhostAttackOverride(host, true, t0, 0)
 	e.evalUnderAttack(t0, host, false, quiet, out)
 	a, ok := firstOfKind(drainAlerts(out), "WEB/VHOST_UNDER_ATTACK_ON")
 	if !ok {

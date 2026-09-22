@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Panel-port fingerprint-policy consult (master plan item).** The
+  operator-armed per-fingerprint policy the web edge enforces pre-clearance
+  now also covers the cPanel/WHM/webmail ports: an armed `deny` 403s that
+  TLS bucket on `:2083/:2087/:2096` too — human entry and plain `/login`
+  POSTs; the api/sso allowlist (`/json-api`, `/xml-api`, `/execute`,
+  transfers…) keeps its hard-skip, same as the panel WAF, so API traffic
+  never breaks. New
+  `[webdetector] PANEL_FP_POLICY_MODE = off|logonly|enforce` (default
+  enforce, like the other panel modes; env `CFM_PANEL_FP_POLICY`; flips
+  reach the edge in ~10s without a proxy reload). Only `deny` acts —
+  challenge-tier fingerprints are observe-only on panel ports (the panel
+  serves no per-request challenge). `FP_POLICY = 0` still kills the whole
+  consult; self-IPs/IGNORE_NETS are skipped and every failure is fail-open,
+  so a fault can never lock an admin out of WHM.
 - **Customer "Emergency challenge" panic button (master plan "arm surfaces"
   slice D).** The vhost-controls page (`/cfm-admin/webdetector/controls/` —
   the page the cPanel plugin opens) gains an arm/disarm card: pick a vhost,
@@ -96,6 +110,13 @@ back-filled here — see the git/PR history for that period.
   in cfm-web (Explain Fingerprint, from the IP section's filters).
 
 ### Changed
+- **Scoped Under-Attack override is now TTL-bound (24h).** A customer
+  forcing their vhost into UNDER_ATTACK gets the same 24h ceiling as the
+  panic-button arm (response carries `ttl` + `expires_at`; the audit event
+  records `ttl_sec`): on expiry the vhost returns to AUTO control and
+  leaves via the normal exit rules — never a mid-attack shield drop.
+  Admin/CLI overrides stay unbounded; re-arming resets the window (own
+  vhost, audited per re-arm — same accepted residual as the panic arm).
 - **`rule_xss` (302) promoted `challenge` → `challenge_v2` by default**
   (operator decision, same release that ships the tier). Reflected-XSS
   probes are a favourite scanner/solver-farm smoke test, so their solves
