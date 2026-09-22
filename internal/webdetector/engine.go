@@ -1248,10 +1248,11 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	// from the challenge engine — before ANY per-host/per-IP accounting — so a
 	// CA validator that legitimately hits many domains and many one-time token
 	// paths never inflates a challenge signal (unique-hosts/paths, vhost
-	// unique-IP, RPS, 40x, …) and never gets challenge-flagged. Otherwise SSL
-	// issuance breaks: fatal in DNAT mode (the flagged IP is redirected to the
-	// challenge server before cfm.lua's in-path carve-out can serve the token).
-	// Decision-side mirror of the in-path carve-out (cfm.lua Step 0a1).
+	// unique-IP, RPS, 40x, …) and never gets challenge-flagged. A flag
+	// pollutes per-IP state (and, under the retired per-IP challenge-DNAT,
+	// redirected the validator outright and broke SSL issuance — the incident
+	// that earned this rule). Decision-side mirror of the in-path carve-out
+	// (cfm.lua Step 0a1).
 	if isWellKnownChallengeExempt(rec.URI) {
 		return
 	}
@@ -3567,10 +3568,11 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 // vhosts and many one-time token paths (e.g. Let's Encrypt / AutoSSL validating
 // a whole shared server), which otherwise trips the scanner heuristics —
 // CHALLENGE_UNIQHOSTS_IP / CHALLENGE_UNIQPATHS_IP — and challenge-flags the
-// validator IP. In OpenResty mode the in-path carve-out still serves the token,
-// but the flag pollutes per-IP state; in DNAT mode the flagged IP is redirected
-// to the challenge server before cfm.lua runs, so ACME validation fails
-// (403 urn:ietf:params:acme:error:unauthorized) and certificate issuance breaks.
+// validator IP. The in-path carve-out still serves the token, but the flag
+// pollutes per-IP state — and under the RETIRED per-IP challenge-DNAT the
+// flagged IP was redirected before cfm.lua ran, so ACME validation failed
+// (403 urn:ietf:params:acme:error:unauthorized) and certificate issuance
+// broke outright: the incident that earned this both-sides rule.
 //
 // Whole prefix, to match the in-path carve-out. Query string is stripped first.
 // Unlike the in-path guard — which runs on nginx-decoded, dot-segment-normalized

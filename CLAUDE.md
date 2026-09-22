@@ -221,14 +221,14 @@ Exclude/bypass matching must be scope-aware for scoped users, and excludes
 are increasingly **file-presence based** rather than config flags. Pre-auth
 login challenge behaviour differs between DNAT and OpenResty modes — verify
 both. `/.well-known/` needs **two** carve-outs, not one: the in-path serving
-carve-out (`cfm.lua` Step 0a1) only stops *serving* a challenge in OpenResty
-mode; the log-driven decision engine must **also** exclude the prefix from
-per-IP scoring (`isWellKnownChallengeExempt` in `engine.go`), or a CA's
-ACME/DCV validator (hits many domains + many one-time token paths) trips the
-scanner heuristics and gets flagged — which breaks SSL issuance outright in
-DNAT mode, where the flagged IP is redirected before the in-path carve-out
-runs. Any path-based challenge exemption likely needs the same both-sides
-treatment.
+carve-out (`cfm.lua` Step 0a1) only stops *serving* a challenge; the
+log-driven decision engine must **also** exclude the prefix from per-IP
+scoring (`isWellKnownChallengeExempt` in `engine.go`), or a CA's ACME/DCV
+validator (hits many domains + many one-time token paths) trips the scanner
+heuristics and gets flagged, polluting per-IP state — under the since-RETIRED
+per-IP challenge-DNAT the flag redirected the validator outright and broke
+SSL issuance, the incident that earned the rule. Any path-based challenge
+exemption likely needs the same both-sides treatment.
 
 ### Traffic rules — `Simulate` IS the enforcement path
 `trafficRuleStore.Simulate` is wired as the nginx bridge's `RuleDecision`, so
