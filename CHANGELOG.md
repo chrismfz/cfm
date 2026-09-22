@@ -53,6 +53,23 @@ back-filled here — see the git/PR history for that period.
   Log and corpus only: no tell, weight or threshold changed, and nothing
   scores on network identity.
 
+### Fixed
+- **The daemon could crash (SIGSEGV) when the GeoLite2 databases were
+  updated.** When the ASN/City `.mmdb` files change on disk — the weekly
+  `geoipupdate` — CFM reopens them and closes the old ones. The readers are
+  memory-mapped, and closing one unmaps it, but a lookup that had already
+  picked up the old reader could still be reading from it: a read of unmapped
+  memory, which Go cannot recover from (`fatal error: fault` /
+  `signal SIGSEGV`). Every edge decision and every challenge solve does such a
+  lookup, so a busy node only needed one of them to overlap the swap. It was
+  reproduced with a real memory-mapped database in about two seconds of
+  lookups racing swaps. Lookups now hold the reader lock for the whole read,
+  and an old reader is closed only once nothing can still be reading it; the
+  same applies to shutting the enricher down. A lookup during an update now
+  sees either the old or the new database, never a closed one (which also
+  used to read back as empty country/ASN for an instant). No configuration
+  change.
+
 ## 2026.09.22
 
 ### Fixed

@@ -423,6 +423,20 @@ and snapshot-refresh races. When spawning subprocesses or background
 refreshers, ensure reaping, bounded backoff, and stale-snapshot markers
 rather than advancing heartbeats on failure.
 
+**mmap'd readers: the lock must cover the READ, not just the pointer load.**
+`internal/enrich` GeoLite2 readers are memory-mapped (`maxminddb-golang`
+`Open` → mmap; `Close` → munmap). The hot-reload used to copy the reader
+pointer under `mu.RLock`, unlock, then read — while the swap closed the old
+reader — so a lookup overlapping the weekly `geoipupdate` read unmapped
+memory: an unrecoverable SIGSEGV that took the daemon down (fixed
+2026-09-22; `readGeo` holds `mu.RLock` for the whole read, and a reader is
+closed only after it is detached under `mu.Lock`). Apply the same rule to any
+mmap'd or otherwise closeable shared resource. Real GeoLite2 files can't be
+committed, but `internal/enrich/mmdb_testutil_test.go` generates spec-valid
+`.mmdb` files at test time — use it rather than assuming mmdb code is
+untestable (`TestHotSwapNeverReadsAClosedReader` reproduces the crash on the
+old code in ~2s).
+
 ### Traffic classifier / fingerprint reputation ("evidence ledger") — shadow-first signals, operator-armed enforcement
 New Sep 2026. The node convicts a **fingerprint** (TLS/JA4, e.g. `c28caa00`) and
 emits **evidence** for the central ledger in cfm-web — three grains: `solver_farm`

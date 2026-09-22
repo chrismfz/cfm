@@ -90,6 +90,17 @@ type Enricher struct {
 	// It is NOT held around cache reads/writes — the LRU has its own
 	// internal locking, so the hot path takes only one mutex (the LRU's)
 	// instead of two.
+	//
+	// READERS HOLD mu.RLock FOR THE WHOLE READ, not just to load the pointer
+	// (readGeo). The readers are mmap'd: Close() munmaps them, and the swap
+	// in refreshIfChanged used to close the old reader while a lookup that
+	// had already copied its pointer was still decoding from it — a read of
+	// unmapped memory, i.e. SIGSEGV, which Go cannot recover from. That
+	// crashed the daemon when a lookup met the weekly GeoLite2 update
+	// (reproduced: TestHotSwapNeverReadsAClosedReader). A writer now takes
+	// mu.Lock, which waits for every in-flight read, so a reader is closed
+	// only once nothing can still be reading it. Never call back into the
+	// Enricher while holding mu, and never do network I/O under it.
 	mu sync.RWMutex
 	// cache is a size-bounded TTL-expiring LRU. Eviction policy:
 	//   - entry expires after cacheTTL → auto-removed on next Get/Add
@@ -179,11 +190,46 @@ func New(dirs ...string) (*Enricher, error) {
 }
 
 func (e *Enricher) Close() {
+	// Detach under the write lock — which waits for every in-flight read —
+	// then close outside it. A lookup after Close sees no reader (empty geo)
+	// instead of reading an unmapped one.
+	e.mu.Lock()
+	asn, city := e.asnDB, e.cityDB
+	e.asnDB, e.cityDB = nil, nil
+	e.mu.Unlock()
+	if asn != nil {
+		_ = asn.Close()
+	}
+	if city != nil {
+		_ = city.Close()
+	}
+}
+
+// readGeo fills r's ASN / country / city from the open databases. It is the
+// ONE place the mmdb readers are read, and it holds mu.RLock for the whole
+// read — see the note on mu for why copying the pointer and unlocking first
+// is not enough. Pure mmdb decoding (microseconds); nothing here may block.
+func (e *Enricher) readGeo(ip net.IP, r *Result) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 	if e.asnDB != nil {
-		_ = e.asnDB.Close()
+		if rec, err := e.asnDB.ASN(ip); err == nil && rec != nil {
+			r.ASN = rec.AutonomousSystemNumber
+			r.ASNName = rec.AutonomousSystemOrganization
+		}
 	}
 	if e.cityDB != nil {
-		_ = e.cityDB.Close()
+		if rec, err := e.cityDB.City(ip); err == nil && rec != nil {
+			r.CountryISO = rec.Country.IsoCode
+			if name, ok := rec.Country.Names["en"]; ok && name != "" {
+				r.Country = name
+			} else {
+				r.Country = rec.Country.IsoCode
+			}
+			if c, ok := rec.City.Names["en"]; ok {
+				r.City = c
+			}
+		}
 	}
 }
 
@@ -245,33 +291,8 @@ func (e *Enricher) Lookup(ipStr string) Result {
 		}
 	}
 
-	// ASN
-	e.mu.RLock()
-	localASN := e.asnDB
-	localCity := e.cityDB
-	e.mu.RUnlock()
-
-	if localASN != nil {
-		if rec, err := localASN.ASN(ip); err == nil && rec != nil {
-			r.ASN = rec.AutonomousSystemNumber
-			r.ASNName = rec.AutonomousSystemOrganization
-		}
-	}
-
-	// Country/City
-	if localCity != nil {
-		if rec, err := localCity.City(ip); err == nil && rec != nil {
-			r.CountryISO = rec.Country.IsoCode // ← add this line
-			if name, ok := rec.Country.Names["en"]; ok && name != "" {
-				r.Country = name
-			} else {
-				r.Country = rec.Country.IsoCode
-			}
-			if c, ok := rec.City.Names["en"]; ok {
-				r.City = c
-			}
-		}
-	}
+	// ASN + Country/City (under mu.RLock for the whole read — readGeo).
+	e.readGeo(ip, &r)
 
 	// store in cache (LRU handles its own locking + eviction)
 	e.cache.Add(ipStr, r)
@@ -299,32 +320,8 @@ func (e *Enricher) LookupGeoFast(ipStr string) Result {
 		return Result{}
 	}
 
-	e.mu.RLock()
-	localASN := e.asnDB
-	localCity := e.cityDB
-	e.mu.RUnlock()
-
 	r := Result{ts: time.Now()}
-
-	if localASN != nil {
-		if rec, err := localASN.ASN(ip); err == nil && rec != nil {
-			r.ASN = rec.AutonomousSystemNumber
-			r.ASNName = rec.AutonomousSystemOrganization
-		}
-	}
-	if localCity != nil {
-		if rec, err := localCity.City(ip); err == nil && rec != nil {
-			r.CountryISO = rec.Country.IsoCode
-			if name, ok := rec.Country.Names["en"]; ok && name != "" {
-				r.Country = name
-			} else {
-				r.Country = rec.Country.IsoCode
-			}
-			if c, ok := rec.City.Names["en"]; ok {
-				r.City = c
-			}
-		}
-	}
+	e.readGeo(ip, &r)
 	return r
 }
 
@@ -418,7 +415,12 @@ func (e *Enricher) PTREnabled() bool {
 
 // Enabled επιστρέφει true αν έχουμε τουλάχιστον μία GeoIP DB ανοιχτή.
 func (e *Enricher) Enabled() bool {
-	return e != nil && (e.asnDB != nil || e.cityDB != nil)
+	if e == nil {
+		return false
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.asnDB != nil || e.cityDB != nil
 }
 
 // refreshIfChanged checks if files changed and safely reopens them.
@@ -498,31 +500,35 @@ func (e *Enricher) refreshIfChanged() {
 		}
 	}
 
-	// Quick lock to swap pointers
+	// Swap under the write lock. Taking it waits for every in-flight read
+	// (readers hold mu.RLock for the whole read), and once the pointers are
+	// swapped no new read can reach the old readers — so they are closed
+	// (munmap'd) only after the unlock, when nothing can still be reading
+	// them. Closing them while a read was in flight is what used to fault.
+	var oldASN, oldCity *geoip2.Reader
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if newASN != nil {
-		old := e.asnDB
+		oldASN = e.asnDB
 		e.asnDB = newASN
 		if newASNPath != "" {
 			e.asnPath = newASNPath
 		}
 		e.asnMTime = newASNTime
-		if old != nil {
-			_ = old.Close()
-		}
 	}
 	if newCity != nil {
-		old := e.cityDB
+		oldCity = e.cityDB
 		e.cityDB = newCity
 		if newCityPath != "" {
 			e.cityPath = newCityPath
 		}
 		e.cityMTime = newCityTime
-		if old != nil {
-			_ = old.Close()
-		}
+	}
+	e.mu.Unlock()
+	if oldASN != nil {
+		_ = oldASN.Close()
+	}
+	if oldCity != nil {
+		_ = oldCity.Close()
 	}
 
 }
