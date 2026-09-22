@@ -18,6 +18,31 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **False "agent is down" alerts from nodes on the nftlib firewall backend.**
+  Before every heartbeat the agent reads the firewall to report
+  `dnat_enabled`. On the exec `nft` backend that read is a subprocess with a
+  timeout. On `nftlib` it waits for the backend lock and then does a netlink
+  dump on the one shared connection, with no timeout on either — so when the
+  dump stalled or a long firewall write held the lock, the heartbeat never
+  went out and nothing was logged (the failure line comes after the send).
+  cfm-web saw no heartbeat for 3 minutes and reported the node offline while
+  it was up; it recovered by itself once the read returned. Two changes:
+  the read is now bounded to 5s — past that the heartbeat is sent without
+  `dnat_enabled`, and cfm-web keeps the last known DNAT state (it already
+  ignores an absent key) — and it is single-flight, so a stuck read is never
+  started again on top of itself. The heartbeat also runs on its own ticker
+  now, separate from the agent's other periodic work (pending unblocks,
+  config sync, fingerprint-policy pull), which can wait on the same firewall
+  lock; before, an unblock stuck behind a stalled read stopped heartbeats too.
+  New `cfm.api.log` lines make a stall visible instead of silent: `heartbeat
+  dnat status probe slow` (≥1s), `check failed`, `timed out` and `still in
+  flight` (together at most one line per 5 min, with a suppressed count), and
+  `returned late after …`, which is always written when that stall's
+  `timed out` line was, so every logged stall shows how long it lasted. When
+  the other periodic work runs over 2 minutes, `work loop tick busy for …` is
+  logged, then `work loop tick finished after …` when it ends. This does not unstick the nftlib connection itself — a
+  stalled read still delays firewall writes until it returns; that hardening
+  is separate work.
 - **Site Cache: static assets could break on a host with a stale root-owned
   cache tree.** nginx creates the `levels=1:2` subdirs under
   `/var/cache/nginx/cfm_static` (and `cfm_micro`) as the edge worker, which now
