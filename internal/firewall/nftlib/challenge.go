@@ -612,7 +612,16 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	if err != nil {
 		return err
 	}
-	if ch == nil {
+	var rules []*nftables.Rule
+	if ch != nil {
+		// Read before queueing anything, so a failure leaves nothing queued.
+		// A failed read must not pass for an empty chain: the rebuild below
+		// would then append a second copy of the managed rules after the
+		// live ones, and new bypass entries would never match.
+		if rules, err = b.conn.GetRules(t, ch); err != nil {
+			return fmt.Errorf("nftlib: read %s %s prerouting rules: %w", family, table, err)
+		}
+	} else {
 		b.conn.AddTable(t)
 		dstNat := b.dnatChainPriority()
 		policy := nftables.ChainPolicyAccept
@@ -624,9 +633,8 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 			Priority: &dstNat,
 			Policy:   &policy,
 		}
-		b.conn.AddChain(ch)
+		b.conn.AddChain(ch) // new chain: no existing rules to read
 	}
-	rules, _ := b.conn.GetRules(t, ch)
 
 	// The edge namespace (the only one — the per-IP challenge namespace is
 	// retired) owns the loopback accept and the source-IP bypass rules in

@@ -18,6 +18,36 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **nftlib firewall backend: a failed netlink call can no longer corrupt the
+  next one, a stuck read can no longer freeze the firewall, and a read error
+  is no longer mistaken for "nothing there".** The nftlib backend used one
+  long-lived netlink socket for its whole life, and every firewall operation
+  takes its turn on it. When a batch write failed part-way (e.g. `ENOBUFS`),
+  the kernel's remaining replies stayed on that socket and the NEXT operation
+  read them as its own answer; rule and set listings don't check which request
+  a reply belongs to, so that could be a silently wrong result rather than an
+  error (the old "unexpected header type" wedge was one form of this). And a
+  reply that never came held every other operation — autoblocks, feed updates,
+  unblocks — forever. Now every netlink call opens its own socket and closes
+  it, so no reply can outlive the call that asked for it; measured on a real
+  kernel, a 120,000-address feed write takes the same ~250ms as before. Reads
+  (listings and lookups) also get a 30s deadline. Writes deliberately get none:
+  the kernel applies a batch while the call is in progress, possibly after
+  waiting behind another tool's `nft -f`, and a deadline there would report a
+  change that WAS applied as failed. Three places treated a failed read as an
+  empty answer, which a read timeout (or any read error) could trigger:
+  `DNATOn` then re-added its DNAT rules on top of the live ones — reproduced on
+  a real kernel, 3 rules became 6 and new DNAT-bypass entries stopped matching;
+  it now fails and changes nothing. `PanelDNATOn` likewise duplicated its rules
+  when it couldn't look up its table; it now fails first. And an autoblock went
+  ahead against an address whose ignore/allow lists couldn't be read; it is now
+  skipped and notified as "not blocked: could not check …" (an allowlisted peer
+  is the operator's explicit trust decision). `firewall_selftest` gains a
+  `netlink` section covering every netlink call, not just EnsureBase: counts,
+  timeouts, and the recent slow or timed-out calls by name; a read timeout is
+  also logged (`[firewall] engine=nftlib netlink <call> timed out after …`).
+  Startup still fails immediately if netlink is unusable. Only nodes running
+  `CFM_FIREWALL_ENGINE=nftlib` are affected.
 - **False "agent is down" alerts from nodes on the nftlib firewall backend.**
   Before every heartbeat the agent reads the firewall to report
   `dnat_enabled`. On the exec `nft` backend that read is a subprocess with a
@@ -40,9 +70,8 @@ back-filled here — see the git/PR history for that period.
   `returned late after …`, which is always written when that stall's
   `timed out` line was, so every logged stall shows how long it lasted. When
   the other periodic work runs over 2 minutes, `work loop tick busy for …` is
-  logged, then `work loop tick finished after …` when it ends. This does not unstick the nftlib connection itself — a
-  stalled read still delays firewall writes until it returns; that hardening
-  is separate work.
+  logged, then `work loop tick finished after …` when it ends. (The nftlib
+  netlink hardening above bounds the stalled read itself.)
 - **Site Cache: static assets could break on a host with a stale root-owned
   cache tree.** nginx creates the `levels=1:2` subdirs under
   `/var/cache/nginx/cfm_static` (and `cfm_micro`) as the edge worker, which now

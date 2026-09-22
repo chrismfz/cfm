@@ -18,7 +18,7 @@ const ensureBaseRingCap = 30
 type ebSample struct {
 	at       time.Time
 	lockWait time.Duration // time to acquire b.mu (contention)
-	nlWork   time.Duration // netlink add+flush under b.mu (conn health)
+	nlWork   time.Duration // netlink add+flush under b.mu (kernel round-trip)
 	cliWork  time.Duration // refreshSelfSets + applyBaseInputRules (nft CLI)
 	err      error
 }
@@ -107,5 +107,38 @@ func (b *Backend) NftlibSelfTest() firewall.NftlibSelfTest {
 		return out.FeedWrites[i].Set < out.FeedWrites[j].Set
 	})
 
+	out.Netlink = b.nl.snapshot()
 	return out
+}
+
+// snapshot returns the netlink stats for firewall_selftest.
+func (s *nlStats) snapshot() *firewall.NetlinkStats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := &firewall.NetlinkStats{
+		OpTimeoutMs:         nlOpTimeout.Milliseconds(),
+		Ops:                 s.ops,
+		Errors:              s.errs,
+		Timeouts:            s.timeouts,
+		DeadlineUnsupported: s.deadlineErr,
+		SlowRecent:          []firewall.NetlinkOpSample{},
+	}
+	if s.lastTimeout != nil {
+		lt := s.lastTimeout.public()
+		out.LastTimeout = &lt
+	}
+	n := s.slowN
+	if n > nlSlowRingCap {
+		n = nlSlowRingCap
+	}
+	for i := s.slowN - n; i < s.slowN; i++ {
+		out.SlowRecent = append(out.SlowRecent, s.slow[i%nlSlowRingCap].public())
+	}
+	return out
+}
+
+func (x nlSample) public() firewall.NetlinkOpSample {
+	return firewall.NetlinkOpSample{
+		At: x.at.Format(time.RFC3339), Op: x.op, DurMs: x.dur.Milliseconds(), Err: x.err,
+	}
 }

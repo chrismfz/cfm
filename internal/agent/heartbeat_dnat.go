@@ -5,13 +5,16 @@ package agent
 // The heartbeat reports dnat_enabled, which means reading the firewall BEFORE
 // the POST goes out. On the exec-nft backend that read is an `nft` subprocess
 // bounded by the command runner's 10s timeout. On the nftlib backend it takes
-// the backend mutex and then does a netlink dump (ListChains + GetRules) on
-// the one lasting connection, with no timeout on either. If the dump stalled,
-// or a long firewall write held the mutex, the heartbeat used to wait with it:
-// no POST, and no log line either (the failure log sits after the send), so
-// cfm-web's last_seen went stale past its 3-minute threshold and the node was
-// reported "offline" while it was up. That is the intermittent false
-// "agent down" seen only on the nftlib node.
+// the backend mutex and then does a netlink dump (ListChains + GetRules). That
+// dump used to run on one lasting connection with no timeout, so if it
+// stalled, or a long firewall write held the mutex, the heartbeat waited with
+// it: no POST, and no log line either (the failure log sits after the send),
+// so cfm-web's last_seen went stale past its 3-minute threshold and the node
+// was reported "offline" while it was up. That is the intermittent false
+// "agent down" seen only on the nftlib node. Each netlink read now has its
+// own socket and a 30s deadline (nftlib/nlconn.go), but writes have none and
+// a mutex holder can make several calls in a row, so the wait is still far
+// too long to hold a heartbeat.
 //
 // Liveness must not depend on the data plane, so the probe is bounded: past
 // heartbeatDNATTimeout the heartbeat goes out WITHOUT dnat_enabled. The field
@@ -26,9 +29,9 @@ package agent
 // The probe is single-flight. A timed-out probe keeps running (neither the
 // mutex wait nor the netlink call can be cancelled), so starting another one
 // per beat would only pile goroutines up behind it. While one is in flight,
-// later heartbeats skip the probe. This does not unstick the backend itself —
-// a stalled read still blocks firewall writes until it returns; hardening the
-// nftlib connection is separate work.
+// later heartbeats skip the probe. The probe does not unstick the backend
+// itself; the read deadline in nftlib/nlconn.go is what bounds a stuck read
+// and lets its caller release the backend mutex.
 
 import (
 	"sync"
