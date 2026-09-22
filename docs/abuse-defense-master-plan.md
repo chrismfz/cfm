@@ -47,6 +47,13 @@ the only live enforcement born from this effort is `cookie_discard`'s
 `BLOCK=24h` and the operator's manual per-IP "Block" button on Explain
 Fingerprint. Roughly 15 shadow signals run; zero have been promoted.
 
+> **⚠ This §2 snapshot is HISTORY, kept to show what E3 was answering — all
+> three of its "missing" claims were closed between 2026-09-18 and
+> 2026-09-22.** Nodes pull `fingerprint_policies` (E3 node slice), ChallengeV2
+> Rung 1 is built and armable from five grains (E3), and the action channel
+> enforces on the web edge, the panel ports and at verify. For current state
+> read **§5**, never this section.
+
 **The failure mode to stop repeating:** "shadow-first" became shadow-forever
 because burn-ins have no exit criteria, and each burn-in review spawned a new
 signal + a new doc instead of a promote/retire decision. Hence §4-D3/D4.
@@ -70,7 +77,7 @@ reviewed PR.
 | 9 | `under_attack` I1 state machine + notify | `under_attack.go` | detect-only (DRYRUN) | alarm value real ("challenge defeated" as an alert) | **KEEP as the alarm.** I1b read-surfaces optional. |
 | 10 | `under_attack` campaign fingerprinter I2 | `under_attack_fingerprint.go` | shadow | no consumer; I3–I5 never built | **FREEZE (proposed).** E1–E3 supersede its enforcement path; revisit only if the draft-rule idea (I3) is ever picked up. |
 | 11 | `ua_family=` solve-log corpus | `challenge_server.go` | log-first | builds the fp↔UA corpus | **KEEP.** Feeds E2 and the future JA4↔UA coherence tell. |
-| 12 | Humanity scorer / would_v2 Rung-1 (`HUMANITY_MIN_OBS`, `MINORITY_PCT`) | **not built** | keys exist ONLY in live `/etc/cfm/detectors.conf` on the fleet — no code reads them | n/a | **Build inside E3** (with teeth, §5). Operator: delete the orphan keys from live configs until then. |
+| 12 | Humanity scorer / would_v2 Rung-1 | `challenge_v2.go` | **BUILT + ENFORCING** since 2026-09-19 (E3) | positive-only tells; `hs=`/`tells=`/`sig=`/`v2=` per solve | **KEEP.** Teeth only under an operator arm (D5a). The knobs are `CHALLENGE_V2_PASSIVE`/`_FAIL_SCORE`/`_DEBUG` — the old `HUMANITY_MIN_OBS`/`MINORITY_PCT` keys were never read by any code and are still orphans in live `/etc/cfm/detectors.conf`: **operator cleanup, still outstanding.** |
 
 Fleet-config cleanup that falls out of the table: remove the orphan
 `HUMANITY_*`/`MINORITY_PCT` keys (row 12); leave `UNDER_ATTACK*`,
@@ -166,8 +173,12 @@ already opened.
       `verifiedGoodBot` + the detector-sink autoblock rails; `logonly → block`
       promotion per house rule, with the partner allowlist (Skroutz/BestPrice/
       ahrefs/…) honoured before anything counts.
-- [ ] **E3 — Phase C minimal + ChallengeV2 Rung 1 with teeth** *(both repos;
-      the keystone).*
+- [x] **E3 — Phase C minimal + ChallengeV2 Rung 1 with teeth — DONE
+      2026-09-22** *(both repos; the keystone).* Every slice below shipped:
+      policy fetch, node pull + edge enforcement, panel-port consult, Rung 1,
+      country/ASN kinds, and all four arm surfaces. What remains of E3 is
+      BURN-IN, not build: watch `hs=`/`sig=`/`v2=` and `result=v2_reject`
+      against real traffic, and feed the result to E4.
       - [x] cfm-web slice 1 — **DONE 2026-09-18**: `GET /api/fingerprint-policies/fetch`
         (token-authed; serve-time re-validation — `deny` withheld below a farm
         verdict, `observe` never served), the dedicated `Arm:FingerprintPolicy`
@@ -257,9 +268,9 @@ already opened.
         probe is block-tier only); country hit wins over ASN hit at lookup;
         cold IPs (enrich cache miss) fail open for up to the 90s edge
         decision-cache window.
-      - [ ] **ChallengeV2 arm surfaces (operator ask 2026-09-20): v2 as an
-        on-demand tier from WAF rules / vhost control / traffic rules /
-        scoped customers.** Insight that makes this cheap: challenge_v2 is
+      - [x] **ChallengeV2 arm surfaces — DONE 2026-09-22 (slices A-D all
+        shipped): v2 as an on-demand tier from WAF rules / vhost control /
+        traffic rules / scoped customers.** Insight that makes this cheap: challenge_v2 is
         a VERIFY-time distinction, not a serve-time one — so "arm v2 from
         X" only needs verify to know the challenge came from a v2-tier
         source. Foundation: a small per-(ip, host) **rung mark** TTL store
