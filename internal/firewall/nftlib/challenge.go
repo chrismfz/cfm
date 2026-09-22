@@ -622,12 +622,16 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted); err != nil {
 		return err
 	}
-	// A chain's hook priority can't be changed in place. For CFM's own table,
-	// rebuild it at the wanted priority in this same batch, as the nft
-	// backend does, so `cfm dnat on --priority X` takes effect instead of
-	// silently keeping the old value. Another table keeps its chain.
-	if ch != nil && ch.Priority != nil && *ch.Priority != b.dnatChainPriority() &&
-		strings.EqualFold(family, firewall.DNATDefaultFamily) && table == firewall.DNATDefaultTable {
+	// For CFM's own table, rebuild it whole in this same batch (so the
+	// redirect never lapses) when a rule-by-rule update can't produce the
+	// wanted chain: its hook priority differs (it can't change in place, and
+	// `cfm dnat on --priority X` would silently keep the old one), or it
+	// holds rules this backend didn't write — e.g. the nft backend's form of
+	// the redirect from a CLI that ran it, which sits ahead of ours and keeps
+	// winning. The nft backend replaces the table on every DNATOn (in two
+	// steps). Another table keeps its chain.
+	if ch != nil && strings.EqualFold(family, firewall.DNATDefaultFamily) && table == firewall.DNATDefaultTable &&
+		(ch.Priority != nil && *ch.Priority != b.dnatChainPriority() || hasForeignDNATRules(rules)) {
 		b.conn.DelTable(ch.Table)
 		ch, rules = nil, nil
 	}
@@ -660,6 +664,17 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	return b.installEdgeDNATRules(t, ch, wanted, rules, includeLoopbackAccept)
 }
 
+// hasForeignDNATRules reports whether a prerouting chain holds a rule this
+// backend didn't write (no managed or bypass UserData tag).
+func hasForeignDNATRules(rules []*nftables.Rule) bool {
+	for _, r := range rules {
+		if !managedDNATRule(r.UserData) && !dnatBypassIsManaged(r.UserData) {
+			return true
+		}
+	}
+	return false
+}
+
 // installEdgeDNATRules rebuilds the edge-namespace contents of the
 // prerouting chain from scratch. Called by installDNATRules. The chain
 // is rebuilt in three positional blocks, in this order:
@@ -671,7 +686,8 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 // This guarantees first-match-wins evaluation: a packet from a bypass
 // source matches block 2 and is accepted before any NAT translation
 // runs in block 3. Unmanaged (foreign) rules elsewhere in the chain
-// are untouched.
+// are untouched (for CFM's own table, installDNATRules has already
+// rebuilt it if it held any).
 //
 // b.mu MUST be held by the caller. This function calls Flush() itself
 // and returns its error.
@@ -796,16 +812,21 @@ func (b *Backend) DNATOff(family, table string) (err error) {
 		}
 		b.logPhase("DNATOff", st, time.Since(start), err, "op=dnat")
 	}()
-	if err := b.cleanupScopedDNATAccepts(dnatAcceptNamespaceEdge); err != nil {
-		return err
-	}
 	family, table = dnatDefaults(family, table)
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	var offErr error
 	if strings.EqualFold(family, firewall.DNATDefaultFamily) && table == firewall.DNATDefaultTable {
-		return b.deleteDNATTableUnlocked(family, table)
+		offErr = b.deleteDNATTableUnlocked(family, table)
+	} else {
+		offErr = b.dnatOffUnlocked(family, table, dnatRuleNamespaceEdge)
 	}
-	return b.dnatOffUnlocked(family, table, dnatRuleNamespaceEdge)
+	b.mu.Unlock()
+	if offErr != nil {
+		return offErr
+	}
+	// The accepts go last: removed first, a redirect that then failed to go
+	// would send every web connection into the default drop.
+	return b.cleanupScopedDNATAccepts(dnatAcceptNamespaceEdge)
 }
 
 // deleteDNATTableUnlocked removes CFM's own DNAT table whole, as the nft

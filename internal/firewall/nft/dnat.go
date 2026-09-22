@@ -223,17 +223,15 @@ func (b *Backend) DNATOff(fam, tbl string) (err error) {
 	}()
 	fam, tbl = dnatDefaults(fam, tbl)
 
-	if err := b.cleanupScopedDNATAccepts(); err != nil {
-		return err
+	// Redirect first (idempotent), accepts last: removed first, a redirect
+	// that then failed to go would send every web connection into the
+	// default drop.
+	if b.dnatTableExists(fam, tbl) {
+		if err := b.nftCmd(fmt.Sprintf("delete table %s %s", fam, tbl)); err != nil {
+			return err
+		}
 	}
-
-	// Idempotent
-	if !b.dnatTableExists(fam, tbl) {
-		return nil
-	}
-
-	// Reuse your single-expression runner (auto adds ;)
-	return b.nftCmd(fmt.Sprintf("delete table %s %s", fam, tbl))
+	return b.cleanupScopedDNATAccepts()
 }
 
 func getenvInt(key string, def int) int {

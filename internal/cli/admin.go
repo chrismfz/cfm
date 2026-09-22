@@ -18,6 +18,7 @@ func RunReset(args []string, be firewall.Backend) int {
 		return 1
 	}
 	fmt.Println("✔ reset: flushed table inet cfm (rules & sets emptied)")
+	fmt.Println("  restart the daemon (systemctl restart cfm) to re-apply the firewall rules and blocklists")
 	return 0
 }
 

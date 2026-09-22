@@ -266,9 +266,26 @@ func TestEnsureBase_KeepsAnExistingInputChain(t *testing.T) {
 	}
 }
 
-// dnatPrioBackend serves a prerouting chain of table at livePrio with no rules,
-// and records the message types of every batch sent.
-func dnatPrioBackend(t *testing.T, table string, livePrio int32, sent *[]int) *Backend {
+// ruleMsg is a dump entry for one rule of table/chain, tagged with userData
+// (nil = a rule this backend didn't write).
+func ruleMsg(table, chain string, handle uint64, userData []byte) netlink.Message {
+	ae := netlink.NewAttributeEncoder()
+	ae.String(unix.NFTA_RULE_TABLE, table)
+	ae.String(unix.NFTA_RULE_CHAIN, chain)
+	ae.Uint64(unix.NFTA_RULE_HANDLE, handle)
+	if userData != nil {
+		ae.Bytes(unix.NFTA_RULE_USERDATA, userData)
+	}
+	attrs, _ := ae.Encode()
+	return netlink.Message{
+		Header: netlink.Header{Type: netlink.HeaderType(unix.NFNL_SUBSYS_NFTABLES<<8 | unix.NFT_MSG_NEWRULE)},
+		Data:   append([]byte{unix.NFPROTO_INET, 0, 0, 0}, attrs...),
+	}
+}
+
+// dnatPrioBackend serves a prerouting chain of table at livePrio holding
+// rules, and records the message types of every batch sent, in order.
+func dnatPrioBackend(t *testing.T, table string, livePrio int32, rules []netlink.Message, sent *[]int) *Backend {
 	return nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
 		if len(req) == 0 {
 			return nil, io.EOF
@@ -285,55 +302,98 @@ func dnatPrioBackend(t *testing.T, table string, livePrio int32, sent *[]int) *B
 			m := baseChainMsg(table, "prerouting", nftables.ChainHookPrerouting, livePrio)
 			m.Header.Sequence = seq
 			return []netlink.Message{m}, nil
-		case unix.NFT_MSG_GETRULE: // an empty chain: just the end of the dump
-			return []netlink.Message{{Header: netlink.Header{Type: netlink.Done, Flags: netlink.Multi, Sequence: seq}}}, nil
+		case unix.NFT_MSG_GETRULE:
+			var out []netlink.Message
+			for _, r := range rules {
+				r.Header.Sequence = seq
+				r.Header.Flags = netlink.Multi
+				out = append(out, r)
+			}
+			return append(out, netlink.Message{Header: netlink.Header{Type: netlink.Done, Flags: netlink.Multi, Sequence: seq}}), nil
 		}
 		return nil, io.EOF
 	})
 }
 
-func contains(xs []int, x int) bool {
-	for _, v := range xs {
+func contains(xs []int, x int) bool { return index(xs, x) >= 0 }
+
+func index(xs []int, x int) int {
+	for i, v := range xs {
 		if v == x {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
-// A chain's priority can't change in place, so `cfm dnat on --priority X`
-// used to keep the old one silently on nftlib while reporting X. On CFM's own
-// table the rebuild now deletes and recreates it in the same batch.
-func TestDNATOn_PriorityChangeRebuildsTheRedirectTable(t *testing.T) {
+func count(xs []int, x int) (n int) {
+	for _, v := range xs {
+		if v == x {
+			n++
+		}
+	}
+	return n
+}
+
+// hermeticBypass points the web bypass list at a temp file with one entry,
+// so tests never read the host's /etc/cfm/cfm.dnat_bypass.
+func hermeticBypass(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cfm.dnat_bypass")
+	if err := os.WriteFile(path, []byte("192.0.2.55\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	orig := firewall.DNATBypassWebPath
+	firewall.DNATBypassWebPath = path
+	t.Cleanup(func() { firewall.DNATBypassWebPath = orig })
+}
+
+// CFM's own table is rebuilt whole, in ONE batch (delete first, then the
+// table, chain, loopback, bypass and 3 DNAT rules), whenever a rule-by-rule
+// update can't produce the wanted chain:
+//   - the priority differs: it can't change in place, so `cfm dnat on
+//     --priority X` used to keep the old one while reporting X;
+//   - the chain holds a rule nftlib didn't write, e.g. the nft backend's form
+//     of the redirect, which sits ahead of ours and keeps winning.
+func TestDNATOn_RebuildsTheRedirectTableWhenNeeded(t *testing.T) {
 	fakeNFT(t, "")
+	hermeticBypass(t)
 	t.Setenv("NFT_DNAT_PRIORITY", "-101")
 	wanted := dnatUnscopedWantedSpecs(nftables.TableFamilyINet, 9080, 9043)
+	tbl := firewall.DNATDefaultTable
+	foreign := []netlink.Message{ruleMsg(tbl, "prerouting", 4, nil)}
+	managed := []netlink.Message{ruleMsg(tbl, "prerouting", 4, []byte(dnatLoopbackAcceptTag))}
 
-	var sent []int
-	b := dnatPrioBackend(t, firewall.DNATDefaultTable, -99, &sent)
-	if err := b.installDNATRules("inet", firewall.DNATDefaultTable, wanted, dnatRuleNamespaceEdge, true); err != nil {
-		t.Fatalf("installDNATRules: %v", err)
-	}
-	if !contains(sent, unix.NFT_MSG_DELTABLE) || !contains(sent, unix.NFT_MSG_NEWCHAIN) {
-		t.Fatalf("priority -99 → -101 must rebuild the table (delete + new chain) in one batch; sent %v", sent)
-	}
-
-	sent = nil
-	same := dnatPrioBackend(t, firewall.DNATDefaultTable, -101, &sent)
-	if err := same.installDNATRules("inet", firewall.DNATDefaultTable, wanted, dnatRuleNamespaceEdge, true); err != nil {
-		t.Fatalf("installDNATRules: %v", err)
-	}
-	if contains(sent, unix.NFT_MSG_DELTABLE) {
-		t.Fatalf("same priority: the table must be kept; sent %v", sent)
-	}
-
-	sent = nil
-	custom := dnatPrioBackend(t, "operator_nat", -99, &sent)
-	if err := custom.installDNATRules("inet", "operator_nat", wanted, dnatRuleNamespaceEdge, true); err != nil {
-		t.Fatalf("installDNATRules: %v", err)
-	}
-	if contains(sent, unix.NFT_MSG_DELTABLE) {
-		t.Fatalf("a table that isn't cfm_redirect must never be deleted; sent %v", sent)
+	for _, tc := range []struct {
+		name    string
+		table   string
+		prio    int32
+		rules   []netlink.Message
+		rebuild bool
+	}{
+		{"priority -99 → -101", tbl, -99, nil, true},
+		{"foreign rule at the wanted priority", tbl, -101, foreign, true},
+		{"only our rules, wanted priority", tbl, -101, managed, false},
+		{"another table, other priority", "operator_nat", -99, foreign, false},
+	} {
+		var sent []int
+		b := dnatPrioBackend(t, tc.table, tc.prio, tc.rules, &sent)
+		if err := b.installDNATRules("inet", tc.table, wanted, dnatRuleNamespaceEdge, true); err != nil {
+			t.Fatalf("%s: installDNATRules: %v", tc.name, err)
+		}
+		del := index(sent, unix.NFT_MSG_DELTABLE)
+		if !tc.rebuild {
+			if del >= 0 {
+				t.Errorf("%s: deleted the table; sent %v", tc.name, sent)
+			}
+			continue
+		}
+		if del < 0 || del > index(sent, unix.NFT_MSG_NEWTABLE) || del > index(sent, unix.NFT_MSG_NEWCHAIN) {
+			t.Errorf("%s: want the delete first, then the new table and chain, in one batch; sent %v", tc.name, sent)
+		}
+		if n := count(sent, unix.NFT_MSG_NEWRULE); n != 5 {
+			t.Errorf("%s: %d rules re-added, want 5 (loopback + 1 bypass + 3 DNAT); sent %v", tc.name, n, sent)
+		}
 	}
 }
 
@@ -382,5 +442,43 @@ func TestCleanupScopedDNATAccepts_RemovesBothEnginesTags(t *testing.T) {
 	}
 	if strings.Contains(got, "handle 23") {
 		t.Errorf("deleted the panel accept:\n%s", got)
+	}
+}
+
+// DNATOff removes the redirect before its accepts: in the other order, a
+// redirect that then failed to go would drop every web connection at the
+// default drop.
+func TestDNATOff_RemovesTheRedirectBeforeItsAccepts(t *testing.T) {
+	log := fakeNFT(t, `table inet cfm {
+	chain input { # handle 1
+		tcp dport 9080 ct state new ct status dnat ct original proto-dst 80 accept comment "cfm_edge_dnat_accept:web_http_tcp:80:9080" # handle 21
+	}
+}
+`)
+	var acceptsGoneFirst, deleted bool
+	b := nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
+		if len(req) == 0 {
+			return nil, io.EOF
+		}
+		if isBatch(req) {
+			deleted = true
+			acceptsGoneFirst = strings.Contains(readLog(t, log), "delete rule")
+			return nil, io.EOF
+		}
+		if nftMsgType(req[0]) == unix.NFT_MSG_GETTABLE {
+			m := tableMsg(firewall.DNATDefaultTable)
+			m.Header.Sequence = req[0].Header.Sequence
+			return []netlink.Message{m}, nil
+		}
+		return nil, io.EOF
+	})
+	if err := b.DNATOff("", ""); err != nil {
+		t.Fatalf("DNATOff: %v", err)
+	}
+	if !deleted || acceptsGoneFirst {
+		t.Fatalf("table deleted=%v, accepts removed before it=%v; want the table first", deleted, acceptsGoneFirst)
+	}
+	if !strings.Contains(readLog(t, log), "delete rule inet cfm input handle 21;") {
+		t.Fatalf("the accept was not removed afterwards:\n%s", readLog(t, log))
 	}
 }

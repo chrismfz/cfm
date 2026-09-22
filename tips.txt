@@ -112,8 +112,10 @@ grep -A3 -B3 'cfm/internal/detectors' /tmp/cfm.gor | head -50
 
 # ─── nftlib backend verification ────────────────────────────────────────────
 #
-# nftlib talks directly to the kernel via netlink — no nft subprocess.
-# The set/element contents are identical; only the write path changes.
+# nftlib writes blocks, allows and blocklist feeds over netlink, with no nft
+# subprocess. The self/port sets and the input-chain rules (ports policy, DNAT
+# accepts) still go through the nft binary. The set/element contents are
+# identical; only the write path changes.
 # Use the same `nft list` commands to verify state (kernel is the ground truth).
 #
 # Switch to nftlib: set CFM_FIREWALL_ENGINE = "nftlib" in /etc/cfm/cfm.conf,
@@ -126,8 +128,9 @@ grep -A3 -B3 'cfm/internal/detectors' /tmp/cfm.gor | head -50
 # Don't use `systemctl set-environment` for it: that changes only the daemon,
 # and the CLI (reading cfm.conf) would then run the other engine.
 #
-# Confirm which engine the running daemon is using (logged at startup):
-grep 'firewall engine' /var/log/cfm/cfm.log | tail -1
+# Confirm which engine the running daemon is using (logged at startup, before
+# the log file is opened, so it lands in the service's stdout log):
+grep -h 'firewall engine' /var/log/cfm/cfm-service.log* 2>/dev/null | tail -1
 #
 # Confirm nftlib is NOT spawning nft subprocesses during a block:
 #   In one terminal, watch for nft forks:
@@ -146,9 +149,9 @@ nft list set inet cfm block_v4 | grep 203.0.113.1
 nft list set inet cfm block_ext_v4_hosts_dshield | wc -l
 # Should be same count regardless of engine; nftlib just writes it faster.
 #
-# Check open netlink sockets (nftlib keeps one fd open per daemon; nft has none):
-ls -la /proc/$(pgrep -f "cfm daemon" | head -1)/fd 2>/dev/null | grep netlink
-# With nftlib: one NETLINK fd present. With nft: none.
+# nftlib opens a netlink socket per kernel call and closes it again, so an
+# idle daemon holds none; its call counts, errors and slow calls are in the
+# `netlink` block of the firewall_selftest MCP tool.
 #
 # Debug nftlib netlink traffic (requires root):
 nft monitor   # shows all kernel-side set/rule changes in real time
