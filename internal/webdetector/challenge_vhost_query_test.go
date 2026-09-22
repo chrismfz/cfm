@@ -111,7 +111,7 @@ func TestHandleChallengeVhostStatus_LiveManualNotAutoActive(t *testing.T) {
 	}
 	// Record through the engine so both the manual store and chalAPI are set,
 	// as a real operator add would.
-	e.ManualChallengeVhost("example.com", time.Hour, "manual")
+	e.ManualChallengeVhost("example.com", time.Hour, "manual", "")
 
 	for _, q := range []string{"example.com", "Example.COM", "example.com:443"} {
 		rr := get(mux, adminCtx(), "/api/v1/challenge/vhost/status?host="+q)

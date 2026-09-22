@@ -114,9 +114,36 @@ type challengeV2State struct {
 	failScore   int
 	debug       bool
 	shadowLines bool // emit would_v2 lines to the abuse-shadow log (rides ABUSE_SHADOW)
+	// hostArmed reports whether a v2-tier VHOST arm covers this host (the
+	// engine's manual challenge store, apex→www expansion included — arm
+	// surfaces slice A). Wired at engine start; nil = no vhost arms (tests /
+	// pre-wire), fail-open like the geo resolver.
+	hostArmed func(host string) bool
 }
 
 var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore}
+
+// SetChallengeV2HostArmed wires the per-vhost v2 lookup the verify gate ORs
+// in (see the D5 gate in challenge_server.go). Same lifecycle as
+// SetFingerprintPolicyGeoResolver: set once from NewEngine.
+func SetChallengeV2HostArmed(fn func(host string) bool) {
+	challengeV2.mu.Lock()
+	challengeV2.hostArmed = fn
+	challengeV2.mu.Unlock()
+}
+
+// challengeV2HostArmed answers "does a v2 vhost arm cover this host" for the
+// verify gate. false when unwired or host is empty (fail-open — D5a: teeth
+// only where an operator explicitly armed).
+func challengeV2HostArmed(host string) bool {
+	challengeV2.mu.RLock()
+	fn := challengeV2.hostArmed
+	challengeV2.mu.RUnlock()
+	if fn == nil || host == "" {
+		return false
+	}
+	return fn(host)
+}
 
 // ConfigureChallengeV2 applies the [webdetector] knobs; called on every
 // detectors reload (webdetector_register.go).

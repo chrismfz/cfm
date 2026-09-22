@@ -63,7 +63,7 @@ func TestEmitIPChallenges_ManualKeptOverExclude(t *testing.T) {
 	if !e.challengeExcludes.Add("host", host, map[string]struct{}{host: {}}) {
 		t.Fatal("add exclude failed")
 	}
-	e.ManualChallengeVhost(host, time.Hour, "manual") // pushes apex + www to the bridge
+	e.ManualChallengeVhost(host, time.Hour, "manual", "") // pushes apex + www to the bridge
 	e.vhostUnderAttack[host] = true
 
 	if !bridgeHasVhost(e, host) {
@@ -112,7 +112,7 @@ func TestEmitIPChallenges_AutoCooldownKeepsManual_NoOffAlert(t *testing.T) {
 	t.Run("manual held → no OFF alert, challenge kept", func(t *testing.T) {
 		e := mk()
 		host := "held.gr"
-		e.ManualChallengeVhost(host, time.Hour, "manual")
+		e.ManualChallengeVhost(host, time.Hour, "manual", "")
 		e.vhostUnderAttack[host] = true // currently ON → offOK path
 
 		out := make(chan core.Alert, 16)

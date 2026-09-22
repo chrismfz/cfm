@@ -17,7 +17,7 @@ func TestManualChalPersist_RoundTrip(t *testing.T) {
 
 	var s1 manualChalState
 	s1.init(path)
-	s1.set("example.gr", 10*time.Hour, "operator")
+	s1.set("example.gr", 10*time.Hour, "operator", "")
 
 	// Fresh store, same path → simulates a daemon restart.
 	var s2 manualChalState
@@ -68,7 +68,7 @@ func TestManualChalPersist_ClearRemoves(t *testing.T) {
 
 	var s1 manualChalState
 	s1.init(path)
-	s1.set("gone.gr", time.Hour, "manual")
+	s1.set("gone.gr", time.Hour, "manual", "")
 	if !s1.clear("gone.gr") {
 		t.Fatalf("clear reported entry absent, want present")
 	}
@@ -86,7 +86,7 @@ func TestManualChalPersist_FileMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "manual.json")
 	var s manualChalState
 	s.init(path)
-	s.set("perm.gr", time.Hour, "manual")
+	s.set("perm.gr", time.Hour, "manual", "")
 
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -102,7 +102,7 @@ func TestManualChalPersist_FileMode(t *testing.T) {
 func TestManualChalPersist_EmptyPathNoop(t *testing.T) {
 	var s manualChalState
 	s.init("")
-	s.set("mem.gr", time.Hour, "manual")
+	s.set("mem.gr", time.Hour, "manual", "")
 	if ok, _, _ := s.active("mem.gr"); !ok {
 		t.Errorf("in-memory set did not take effect")
 	}

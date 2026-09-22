@@ -27,6 +27,13 @@ type ChallengeVhostState struct {
 	// reader still has to gate the remaining time on Mode=="manual".
 	TTLSec int `json:"ttl_sec,omitempty"`
 
+	// Rung is the tier of an active MANUAL challenge on this host: "v2"
+	// (ChallengeV2 — humanity-gated verify) or omitted for plain challenge /
+	// auto rows. Decorated at render time from the engine's manual store (the
+	// one source of truth for the rung), never stored here — a stored copy
+	// could drift from what the verify gate actually consults.
+	Rung string `json:"rung,omitempty"`
+
 	Score     float64  `json:"score"`
 	OnThresh  float64  `json:"on_threshold"`
 	OffThresh float64  `json:"off_threshold"`

@@ -661,6 +661,13 @@ func NewEngine(cfg Config) *Engine {
 		})
 	}
 
+	// Vhost-arm lookup for the same verify gate (arm-surfaces slice A): a
+	// manual vhost challenge armed at rung v2 makes solves on that host (and
+	// its www variant) pass through the Rung-1 humanity check.
+	SetChallengeV2HostArmed(func(host string) bool {
+		return e.manualChallengeRung(host) == "v2"
+	})
+
 	return e
 }
 

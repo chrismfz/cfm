@@ -106,6 +106,9 @@ func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {
 		rows[i].CostPressure = CostShadowPressure(rows[i].Host)
 		rows[i].DCFraction = DCFracShadowPercent(rows[i].Host)
 		rows[i].State = e.deriveVhostState(&rows[i], now)
+		// Rung rides from the manual store (the verify gate's source), not the
+		// row — see ChallengeVhostState.Rung.
+		rows[i].Rung = e.manualChallengeRung(rows[i].Host)
 	}
 	writeJSON(w, http.StatusOK, rows)
 }
@@ -167,6 +170,7 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 	v.CostPressure = CostShadowPressure(v.Host)
 	v.DCFraction = DCFracShadowPercent(v.Host)
 	v.State = e.deriveVhostState(&v, now)
+	v.Rung = e.manualChallengeRung(v.Host)
 	writeJSON(w, http.StatusOK, v)
 }
 

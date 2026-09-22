@@ -16,6 +16,14 @@ export const challengeMixin = {
         { value: "6h", label: "6h" },
         { value: "24h", label: "24h" },
       ],
+      // Challenge tier applied by the same buttons. v2 = ChallengeV2: the
+      // SAME challenge page is served, but a solve must also pass the passive
+      // humanity check to earn clearance (headless farms solve for nothing).
+      challengeRung: "v1",
+      challengeRungChoices: [
+        { value: "v1", label: "challenge" },
+        { value: "v2", label: "challenge v2" },
+      ],
     };
   },
 
@@ -114,8 +122,8 @@ export const challengeMixin = {
           await this.postJSON("v1/challenge/vhost/remove", { host });
           this.actionMsg = `Challenge removed for ${host}`;
         } else {
-          await this.postJSON("v1/challenge/vhost/add", { host, ttl: this.challengeTTL, reason: "cfm-admin-ui" });
-          this.actionMsg = `Challenge enabled for ${host} (${this.challengeTTLLabel})`;
+          await this.postJSON("v1/challenge/vhost/add", { host, ttl: this.challengeTTL, reason: "cfm-admin-ui", rung: this.challengeRung });
+          this.actionMsg = `Challenge enabled for ${host} (${this.challengeTTLLabel}, ${this.challengeRung})`;
         }
         await this.refreshChallengeVhosts();
       } catch (err) {
@@ -126,8 +134,8 @@ export const challengeMixin = {
     async manualChallenge(host) {
       if (!host) return;
       try {
-        await this.postJSON("v1/challenge/vhost/add", { host, ttl: this.challengeTTL, reason: "cfm-admin-ui-manual" });
-        this.actionMsg = `Manual challenge enabled for ${host} (${this.challengeTTLLabel})`;
+        await this.postJSON("v1/challenge/vhost/add", { host, ttl: this.challengeTTL, reason: "cfm-admin-ui-manual", rung: this.challengeRung });
+        this.actionMsg = `Manual challenge enabled for ${host} (${this.challengeTTLLabel}, ${this.challengeRung})`;
         await this.refreshChallengeVhosts();
       } catch (err) {
         this.actionMsg = `Manual challenge failed for ${host}: ${err}`;

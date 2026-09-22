@@ -15,6 +15,12 @@ type chalVhostAddRequest struct {
 	Host   string `json:"host"`
 	TTL    string `json:"ttl"`    // e.g. "30m", "1h" — optional, default 30m
 	Reason string `json:"reason"` // optional, default "manual"
+	// Rung: "v1" (default; plain challenge) or "v2"/"challenge_v2"
+	// (ChallengeV2: same challenge page, but a solve failing the Rung-1
+	// humanity check earns NO clearance). Challenge-tier either way, so
+	// scoped tokens may set it for their own vhosts like any manual
+	// challenge — there is no deny here to escalate to.
+	Rung string `json:"rung"`
 }
 
 type chalVhostAddResponse struct {
@@ -23,16 +29,31 @@ type chalVhostAddResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 	TTL       string    `json:"ttl"`
 	Reason    string    `json:"reason"`
+	Rung      string    `json:"rung"` // "v1" | "v2"
+}
+
+// normalizeRung maps the accepted spellings to the stored tier: "" for plain
+// challenge, "v2" for ChallengeV2; ok=false for anything else (fail-closed on
+// typos — silently arming the wrong tier is the failure mode).
+func normalizeRung(s string) (rung string, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "v1", "challenge":
+		return "", true
+	case "v2", "challenge_v2":
+		return "v2", true
+	}
+	return "", false
 }
 
 // POST /api/v1/challenge/vhost/add
-// Body: { "host": "example.gr", "ttl": "30m", "reason": "manual" }
-// Also accepts query params: ?host=example.gr&ttl=30m&reason=manual
+// Body: { "host": "example.gr", "ttl": "30m", "reason": "manual", "rung": "v2" }
+// Also accepts query params: ?host=example.gr&ttl=30m&reason=manual&rung=v2
 func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request) {
 	req := chalVhostAddRequest{
 		Host:   r.URL.Query().Get("host"),
 		TTL:    r.URL.Query().Get("ttl"),
 		Reason: r.URL.Query().Get("reason"),
+		Rung:   r.URL.Query().Get("rung"),
 	}
 
 	// Accept both JSON body and query params.
@@ -51,6 +72,9 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		}
 		if bodyReq.Reason != "" {
 			req.Reason = bodyReq.Reason
+		}
+		if bodyReq.Rung != "" {
+			req.Rung = bodyReq.Rung
 		}
 	}
 
@@ -80,7 +104,13 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		req.Reason = "manual"
 	}
 
-	e.ManualChallengeVhost(req.Host, ttl, req.Reason)
+	rung, ok := normalizeRung(req.Rung)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rung: " + req.Rung + " (use v1 or v2)"})
+		return
+	}
+
+	e.ManualChallengeVhost(req.Host, ttl, req.Reason, rung)
 
 	writeJSON(w, http.StatusOK, chalVhostAddResponse{
 		Host:      req.Host,
@@ -88,6 +118,7 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		ExpiresAt: time.Now().Add(ttl),
 		TTL:       ttl.String(),
 		Reason:    req.Reason,
+		Rung:      rungOrV1(rung),
 	})
 }
 

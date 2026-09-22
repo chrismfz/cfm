@@ -379,7 +379,10 @@ evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived), and
 for an armed `challenge_v2` fingerprint a failing solve earns NO clearance
 (`result=v2_reject`, retry-able with backoff) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
-enforced at verify, not at serve). Teeth are web/edge-path-only (DNAT clients
+enforced at verify, not at serve). The verify gate ORs three arm grains:
+fingerprint policy, geo policy, and (since 2026-09-22, arm-surfaces slice A)
+a per-vhost `rung=v2` on the MANUAL vhost challenge (API/CLI/cfm-admin Tier
+picker; persisted with the challenge; works in DNAT mode too). Teeth are web/edge-path-only (DNAT clients
 author their own `X-CFM-TLS`), and the client-authored report is spoofable by
 a signal-aware farm — deliberate D5b residuals, documented in
 `challenge_v2.go`; Rung 2 (visible interactive, accessible) is the designed

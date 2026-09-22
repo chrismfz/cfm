@@ -241,11 +241,22 @@ already opened.
         retry-able; hs=- keeps evasion visible); consider a dedicated
         CHALLENGE_V2_ENFORCE kill switch since v2 teeth stop being
         fp-policy-only. Slices, in order:
-        - [ ] **A — rung-mark store + verify OR + per-vhost v2 mode**
-          (vhState rung; cfm-admin vhost control dropdown, API `rung=`
-          param, CLI `cfm challenge vhost <host> --rung v2 --ttl 2h`). The
-          operationally hottest: "farm is solving PoW on this shop → v2
-          for 2h".
+        - [x] **A — per-vhost v2 mode + verify OR — DONE 2026-09-22.** The
+          MANUAL vhost challenge carries a `rung` ("" plain / "v2"), stored
+          in the engine's manual store (persisted with the challenge,
+          apex→www covering) — NOT in bridge vhState: the tier is a
+          verify-time distinction, so the verify gate ORs a wired
+          `challengeV2HostArmed(host)` next to the fp/geo checks, which
+          also makes it work in BOTH OpenResty and DNAT modes. Surfaces:
+          cfm-admin "Tier" picker next to the Challenge TTL, API
+          `rung=v1|v2` on `challenge/vhost/add` (scoped tokens included —
+          challenge-tier by construction, so slice D's self-arm largely
+          exists already via the existing vhost scope checks), CLI
+          `cfm webtop challenge add <host> --rung v2`; `rung` in the
+          status API. Design note: the generic per-(ip,host) rung-mark
+          store originally sketched here was NOT needed for the vhost
+          grain and is deferred to slices B/C, where a transient
+          per-request source (rules / WAF hits) genuinely requires it.
         - [ ] **B — traffic-rules action `challenge_v2`** (rules-model.js +
           traffic_rules.go SAME PR — Simulate IS enforcement; rules builder
           option). Gives per-vhost-per-condition v2.

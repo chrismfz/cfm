@@ -44,7 +44,7 @@ func TestHandleChallengeVhostStatus_WWWCoveredByApexManual(t *testing.T) {
 	e := newTestEngineForChallengeHandlers()
 
 	// Operator challenges the apex; the bridge enforces it on apex AND www.
-	e.ManualChallengeVhost("e-vafeiadis.gr", time.Hour, "manual")
+	e.ManualChallengeVhost("e-vafeiadis.gr", time.Hour, "manual", "")
 
 	get := func(host string) map[string]interface{} {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/challenge/vhost/status?host="+host, nil)
