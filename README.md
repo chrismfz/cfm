@@ -502,6 +502,12 @@ internal/
 - **Canonical on-disk filenames**
   - CFM expects MMDB files to be present as `GeoLite2-ASN.mmdb` and `GeoLite2-City.mmdb`.
   - When fallback IPLocate sources are used, downloaded files are mapped/renamed to these canonical filenames on disk.
+  - IPLocate's files keep their own FLAT schema under those names (`asn` — a
+    string —, `org`, `country_code`, `country_name`; no city), not MaxMind's
+    nested one. Both readers handle either schema: the daemon's enricher
+    (`internal/enrich/geodb.go`) and the edge's `cfm_geo.lua`. Before
+    2026-09-23 neither did, so a node on IPLocate had no country or ASN
+    anywhere. City names are empty on IPLocate (the free database has none).
 - API integration: `API_URL`, `AUTH_TOKEN`, `*_SEND_TO_API`
   - `AUTH_TOKEN` is **mandatory** when the internal API server is enabled (`PORT > 0` or `TLS_PORT > 0`) because privileged API routes require it.
   - API ports must stay firewalled by default (`PORT` usually `6060` plaintext and `TLS_PORT` usually `6061`) and should only be reachable from localhost or explicitly allowed sources (for example entries resolved from `cfm.allow` / `cfm.dyndns`).

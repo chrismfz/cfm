@@ -162,6 +162,23 @@ back-filled here — see the git/PR history for that period.
   scores on network identity.
 
 ### Fixed
+- **Nodes without a MaxMind account had no country or ASN anywhere.** When
+  `MAXMIND_ACCOUNT_ID` / `MAXMIND_LICENSE_KEY` are not set, the MaxMind updater
+  downloads IPLocate's free databases and installs them as
+  `GeoLite2-ASN.mmdb` / `GeoLite2-City.mmdb`. But their records use a different
+  (flat) schema, and neither reader could use them:
+  - the daemon's GeoIP library refused the files outright, so the enricher
+    loaded no database at all — no ASN, no country for detectors, WAF
+    history, challenge `cc=`/`asn=`, traffic and geo policies;
+  - the edge's `cfm_geo.lua` read only MaxMind's `country.iso_code`, so every
+    lookup returned an empty country as a VALID answer, cached like a real
+    "no country".
+  Both now read either schema. Verified against the real IPLocate files: the
+  daemon resolves e.g. `94.68.42.127` to AS6799 / GR / Greece, and a real
+  OpenResty with `lua-resty-maxminddb` returns GR / US / AU where it returned
+  "" before. MaxMind nodes are unaffected (the whole fleet currently uses
+  MaxMind). City names stay empty on IPLocate, which has none. No
+  configuration change.
 - **Turning web-detector enrichment off no longer leaves country/ASN
   `challenge_v2` policies enforced at verify.** On every reload the web
   detector is rebuilt, and each rebuild wired the verify-side geo lookup

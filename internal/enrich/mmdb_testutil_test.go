@@ -156,3 +156,24 @@ func writeMMDB(t testing.TB, dir, name string, db []byte, mtime time.Time) {
 		t.Fatal(err)
 	}
 }
+
+// iplocateASNRecord / iplocateCountryRecord mirror IPLocate's FLAT records as
+// measured on the real 2026-09-22 files — note asn is a string there.
+func iplocateASNRecord(asn mmdbValue, org, name, cc string) mmdbMap {
+	return mmdbMap{
+		{"asn", asn},
+		{"country_code", cc},
+		{"domain", "example.net"},
+		{"name", name},
+		{"network", "0.0.0.0/0"},
+		{"org", org},
+	}
+}
+
+func iplocateCountryRecord(cc, name string) mmdbMap {
+	return mmdbMap{
+		{"continent_code", "EU"},
+		{"country_code", cc},
+		{"country_name", name},
+	}
+}

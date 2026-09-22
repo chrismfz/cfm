@@ -57,6 +57,25 @@ if mmdb_ok and type(mmdb) == "table" then
   end
 end
 
+-- iso_of extracts the ISO-2 country from a lookup record in either schema CFM
+-- installs at GEO_DB_PATH: MaxMind's nested {country = {iso_code = "GR"}}, or
+-- IPLocate's FLAT {country_code = "GR", country_name = "Greece"} — the MaxMind
+-- updater installs IPLocate's free ip-to-country database under the
+-- GeoLite2-City.mmdb name when no MaxMind account is configured. Reading only
+-- the nested field returned "" (as a RESOLVED answer) for every IP on such a
+-- node. The daemon's Go enricher reads both schemas the same way
+-- (internal/enrich/geodb.go).
+local function iso_of(res)
+  local c = res.country
+  if type(c) == "table" and type(c.iso_code) == "string" then
+    return c.iso_code
+  end
+  if type(res.country_code) == "string" then
+    return string.upper(res.country_code)
+  end
+  return ""
+end
+
 local function geo_warn_once(...)
   if _geo_warned then return end
   _geo_warned = true
@@ -120,7 +139,7 @@ function _M.country(ip_str)
       end
       return "", false
     end
-    return (res.country and res.country.iso_code) or "", true
+    return iso_of(res), true
   end
 
   if _geo_api_mode == "new_object" then
@@ -151,7 +170,7 @@ function _M.country(ip_str)
       end
       return "", false
     end
-    return (res.country and res.country.iso_code) or "", true
+    return iso_of(res), true
   end
 
   return "", false

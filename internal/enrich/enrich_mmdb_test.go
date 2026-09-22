@@ -273,3 +273,84 @@ func TestHasASNAndHasCountry(t *testing.T) {
 		t.Fatal("a nil Enricher has no database")
 	}
 }
+
+// Without a MaxMind account the updater installs IPLocate's free databases
+// under the GeoLite2 file names. Their schema is flat and geoip2 rejects their
+// database type, so before the geodb adapter such a node loaded neither file
+// and every ASN/country lookup came back empty. Both must read now, the ASN
+// even though IPLocate stores it as a string.
+func TestIPLocateDatabasesAreRead(t *testing.T) {
+	dir := t.TempDir()
+	mt := time.Now().Add(-time.Hour)
+	writeMMDB(t, dir, "GeoLite2-ASN.mmdb",
+		buildMMDB("iplocate ip-to-asn-20260922.mmdb", iplocateASNRecord("6799", "Ote SA (Hellenic Telecommunications Organisation)", "OTENET-GR", "GR")), mt)
+	writeMMDB(t, dir, "GeoLite2-City.mmdb",
+		buildMMDB("iplocate ip-to-country-20260922.mmdb", iplocateCountryRecord("GR", "Greece")), mt)
+
+	e, _ := New(dir)
+	defer e.Close()
+	if !e.HasASN() || !e.HasCountry() {
+		t.Fatalf("IPLocate databases not loaded: HasASN=%v HasCountry=%v", e.HasASN(), e.HasCountry())
+	}
+	r := e.LookupGeoFast("94.68.42.127")
+	if r.ASN != 6799 || r.ASNName != "Ote SA (Hellenic Telecommunications Organisation)" ||
+		r.CountryISO != "GR" || r.Country != "Greece" || r.City != "" {
+		t.Fatalf("IPLocate lookup = %+v", r)
+	}
+
+	// A MaxMind database replaced by an IPLocate one (and back) hot-swaps like
+	// any other refresh.
+	writeMMDB(t, dir, "GeoLite2-ASN.mmdb", buildMMDB("GeoLite2-ASN", asnRecord(3329, "Vodafone-Panafon")), mt.Add(time.Minute))
+	e.statChk.Store(0)
+	e.refreshIfChanged()
+	if got := e.LookupGeoFast("94.68.42.127").ASN; got != 3329 {
+		t.Fatalf("after swapping in a MaxMind ASN database: ASN=%d, want 3329", got)
+	}
+	writeMMDB(t, dir, "GeoLite2-ASN.mmdb",
+		buildMMDB("iplocate ip-to-asn-20260923.mmdb", iplocateASNRecord("1241", "Forthnet", "FORTHNET-GR", "GR")), mt.Add(2*time.Minute))
+	e.statChk.Store(0)
+	e.refreshIfChanged()
+	if got := e.LookupGeoFast("94.68.42.127").ASN; got != 1241 {
+		t.Fatalf("after swapping back to IPLocate: ASN=%d, want 1241", got)
+	}
+}
+
+// A numeric asn (should a later IPLocate file switch) reads too, and an empty
+// org falls back to the network name.
+func TestIPLocateNumericASNAndNameFallback(t *testing.T) {
+	dir := t.TempDir()
+	writeMMDB(t, dir, "GeoLite2-ASN.mmdb",
+		buildMMDB("iplocate ip-to-asn-20270101.mmdb", iplocateASNRecord(mmdbUint32(6799), "", "OTENET-GR", "GR")), time.Now())
+	e, _ := New(dir)
+	defer e.Close()
+	if r := e.LookupGeoFast("94.68.42.127"); r.ASN != 6799 || r.ASNName != "OTENET-GR" {
+		t.Fatalf("numeric IPLocate asn = %+v", r)
+	}
+}
+
+// Only IPLocate's schema is adapted: any other database type geoip2 rejects
+// must stay unloaded rather than be half-read with the wrong field names.
+func TestUnknownDatabaseTypeStaysUnloaded(t *testing.T) {
+	dir := t.TempDir()
+	writeMMDB(t, dir, "GeoLite2-ASN.mmdb", buildMMDB("Acme-Geo-ASN", iplocateASNRecord("6799", "Ote SA", "OTENET-GR", "GR")), time.Now())
+	e, _ := New(dir)
+	defer e.Close()
+	if e.HasASN() {
+		t.Fatal("an unknown database type was loaded")
+	}
+}
+
+func TestASNNumber(t *testing.T) {
+	for _, c := range []struct {
+		in   interface{}
+		want uint
+	}{
+		{"6799", 6799}, {"AS6799", 6799}, {"as6799", 6799}, {" 6799 ", 6799},
+		{"", 0}, {"AS", 0}, {"x6799", 0}, {"-1", 0}, {"4294967295", 4294967295}, {"4294967296", 0},
+		{uint64(6799), 6799}, {uint64(1) << 40, 0}, {nil, 0}, {6799.0, 0},
+	} {
+		if got := asnNumber(c.in); got != c.want {
+			t.Errorf("asnNumber(%#v) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}

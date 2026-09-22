@@ -472,7 +472,12 @@ atomic for that reason. Real GeoLite2 files can't be committed, but
 `internal/enrich/mmdb_testutil_test.go` generates spec-valid `.mmdb` files at
 test time — use it rather than assuming mmdb code is untestable
 (`TestHotSwapNeverReadsAClosedReader` reproduces the crash on the old code
-within 2s).
+within 2s). Two schemas land under the GeoLite2 file names — MaxMind's and,
+without a MaxMind account, IPLocate's flat one — and both readers (the Go
+enricher's `geodb.go`, the edge's `cfm_geo.lua`) must read both: for a long
+time neither read IPLocate's, and the node silently had no geo at all. Measure
+a third-party schema on the REAL file, never from its CSV docs: IPLocate's
+`asn` is a string, and a typed-`uint` decode failed the whole record.
 
 ### Traffic classifier / fingerprint reputation ("evidence ledger") — shadow-first signals, operator-armed enforcement
 New Sep 2026. The node convicts a **fingerprint** (TLS/JA4, e.g. `c28caa00`) and
