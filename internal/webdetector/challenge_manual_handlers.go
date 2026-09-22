@@ -30,7 +30,21 @@ type chalVhostAddResponse struct {
 	TTL       string    `json:"ttl"`
 	Reason    string    `json:"reason"`
 	Rung      string    `json:"rung"` // "v1" | "v2"
+	// TTLCapped is set when a scoped caller asked for more than the scoped
+	// TTL ceiling and the arm was clamped (slice D). The TTL/ExpiresAt
+	// fields always carry the EFFECTIVE values, so a capped arm is visible,
+	// never silent.
+	TTLCapped bool `json:"ttl_capped,omitempty"`
 }
+
+// scopedMaxChallengeTTL caps how long a SCOPED (cPanel customer) token may arm
+// a manual challenge on its own vhost (master plan slice D: the panic button
+// is a temporary shield, not a permanent config — a customer who wants a
+// standing challenge asks the operator). Admin/loopback callers are uncapped.
+// Clamp-and-report, not reject: the panic-button UX must never fail because
+// the customer typed "7d" — the response carries ttl_capped + the effective
+// expiry instead.
+const scopedMaxChallengeTTL = 24 * time.Hour
 
 // normalizeRung maps the accepted spellings to the stored tier: "" for plain
 // challenge, "v2" for ChallengeV2; ok=false for anything else (fail-closed on
@@ -48,6 +62,10 @@ func normalizeRung(s string) (rung string, ok bool) {
 // POST /api/v1/challenge/vhost/add
 // Body: { "host": "example.gr", "ttl": "30m", "reason": "manual", "rung": "v2" }
 // Also accepts query params: ?host=example.gr&ttl=30m&reason=manual&rung=v2
+//
+// Scoped tokens: own vhosts only (vhostAllowed, fail-closed), and the TTL is
+// clamped to scopedMaxChallengeTTL (24h) with ttl_capped=true in the
+// response. Admin/loopback callers are uncapped.
 func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request) {
 	req := chalVhostAddRequest{
 		Host:   r.URL.Query().Get("host"),
@@ -85,7 +103,10 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Scope check: scoped tokens may only challenge their own vhosts.
-	if !vhostAllowed(req.Host, vhostScopeFromContext(r.Context())) {
+	// (vhostScopeFromContext: nil = admin/loopback, non-nil = scoped —
+	// including the fail-closed empty set for a scoped token with no scope.)
+	scope := vhostScopeFromContext(r.Context())
+	if !vhostAllowed(req.Host, scope) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
@@ -98,6 +119,12 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid ttl: " + req.TTL})
 			return
 		}
+	}
+	// Scoped TTL ceiling (slice D): clamp, and say so in the response.
+	ttlCapped := false
+	if scope != nil && ttl > scopedMaxChallengeTTL {
+		ttl = scopedMaxChallengeTTL
+		ttlCapped = true
 	}
 
 	if req.Reason == "" {
@@ -137,6 +164,7 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		TTL:       ttl.String(),
 		Reason:    req.Reason,
 		Rung:      rungOrV1(rung),
+		TTLCapped: ttlCapped,
 	})
 }
 

@@ -18,6 +18,12 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Scoped challenge TTL ceiling (master plan "arm surfaces" slice D).** A
+  scoped (cPanel customer) token arming the manual challenge on its own
+  vhost is now clamped to 24h (`ttl_capped: true` in the response, with the
+  effective expiry) — the customer panic button is a temporary shield, not
+  standing configuration. Admin/CLI callers are uncapped. Own-vhost-only and
+  fail-closed scope checks unchanged.
 - **WAF rule tier `challenge_v2` (master plan "arm surfaces" slice C).** The
   promotion ladder gains a rung between challenge and block:
   `logonly → challenge → challenge_v2 → block`, set per rule in
