@@ -83,6 +83,13 @@ fires(get("/", "page%6eame=templates/../../placeholder"), "percent-encoded key (
 fires(get("/", "pagename=a%26/../../placeholder"), "%26 inside the value cannot split it", ARG)
 fires(get("/", "pagename=about&pagename=templates/../../placeholder"), "later duplicate (PHP keeps the last)", ARG)
 fires(get("/index.php", "p=1&pagename=templates/../../placeholder"), "not the first parameter", ARG)
+-- Shape of the first real probe seen on the fleet (mars, 2026-09-23 01:08 UTC,
+-- a POST carrying the traversal in the QUERY string, every `/` and `.` double
+-- percent-encoded, alongside page_id). Target replaced with a placeholder.
+fires({ uri = "/", raw_uri = "/", method = "POST", ip = "203.0.113.84", body = "",
+        headers = { ["Content-Type"] = "application/x-www-form-urlencoded" },
+        args = "page_id=5011&pagename=templates%252F%252e%252e%252F%252e%252e%252F%252e%252e%252Fplaceholder" },
+      "fleet probe shape (double-encoded, POST with query-string vector)", ARG)
 
 fires(post("/", "pagename=templates%2F..%2F..%2Fplaceholder", "application/x-www-form-urlencoded"),
       "urlencoded POST body ($_POST wins in WP)", BODY)
