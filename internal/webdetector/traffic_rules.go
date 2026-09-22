@@ -23,7 +23,13 @@ const (
 	TrafficActionAllow     = "allow"
 	TrafficActionBlock     = "block"
 	TrafficActionChallenge = "challenge"
-	TrafficActionThrottle  = "throttle"
+	// TrafficActionChallengeV2 (arm-surfaces slice B): the SAME challenge is
+	// served — the edge vocabulary stays block/challenge/throttle, the bridge
+	// maps this to "challenge" on the wire — but the decision handler records
+	// a per-(ip,host) v2 mark, so at VERIFY a solve must also pass the
+	// passive humanity check to earn clearance (challenge_v2.go).
+	TrafficActionChallengeV2 = "challenge_v2"
+	TrafficActionThrottle    = "throttle"
 )
 
 const (
@@ -444,7 +450,7 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 	r.Action.Type = strings.ToLower(strings.TrimSpace(r.Action.Type))
 	r.Action.Profile = strings.TrimSpace(r.Action.Profile)
 	switch r.Action.Type {
-	case TrafficActionAllow, TrafficActionBlock, TrafficActionChallenge:
+	case TrafficActionAllow, TrafficActionBlock, TrafficActionChallenge, TrafficActionChallengeV2:
 		r.Action.Profile = ""
 	case TrafficActionThrottle:
 		if r.Action.Profile == "" {

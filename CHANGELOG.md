@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Traffic-rules action `challenge_v2` (master plan "arm surfaces" slice
+  B).** The rules builder (and API) gains a fourth enforcement action beside
+  allow/block/challenge/throttle: matching requests get the SAME challenge
+  page, but the solve must also pass the passive humanity check to earn
+  clearance — per vhost, per condition (path/UA/country/IP/method/…). No
+  edge changes: the bridge serves plain "challenge" on the wire (old edges
+  work unchanged) and records the v2 intent in a bounded per-(ip,host) mark
+  the verify gate consumes (TTL 15m; on cap pressure new marks degrade to a
+  plain challenge — never an error). Simulate/UI show `challenge_v2`
+  verbatim; same priority band as challenge.
+
 - **Per-vhost ChallengeV2 (master plan "arm surfaces" slice A).** A manual
   vhost challenge now carries a TIER: plain `challenge` (default) or
   `challenge_v2` — same challenge page, but on a v2-armed vhost a solve must

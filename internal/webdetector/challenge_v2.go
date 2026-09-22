@@ -74,6 +74,9 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
+
+	"cfm/internal/logging"
 )
 
 // humanitySignals is the JSON body the challenge page posts with the verify.
@@ -132,6 +135,82 @@ type challengeV2State struct {
 }
 
 var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore}
+
+// ── Per-(ip,host) ChallengeV2 marks (arm-surfaces slice B) ──────────────────
+//
+// Some v2-tier arm sources are TRANSIENT: a traffic rule with action
+// challenge_v2 matches one request's attributes (path/UA/country/…) at
+// DECISION time, and the verify handler cannot re-evaluate the rule later
+// (the verify POST has none of the original request's attributes). So the
+// decision handler records the v2 intent per (client IP, host) here, and the
+// verify gate ORs the mark in next to the fingerprint/geo/vhost grains. The
+// key is EXACT (ip, host): the verify POST rides the same origin the
+// challenged page was served on. Bounded and fail-open: over the cap a new
+// mark is dropped after an expiry sweep (the client then faces a plain v1
+// challenge — never an error), matching D5a's "teeth only where armed".
+const (
+	// challengeV2MarkTTL comfortably covers page load + the solve retry
+	// backoff; an unsolved client that keeps browsing re-marks on every
+	// decision anyway (challenge answers are never edge-cached).
+	challengeV2MarkTTL     = 15 * time.Minute
+	challengeV2MarkMaxKeys = 8192
+)
+
+type challengeV2MarkStore struct {
+	mu       sync.Mutex
+	m        map[string]time.Time // "ip|host" → expiry
+	fullWarn bool
+}
+
+var challengeV2Marks = challengeV2MarkStore{m: map[string]time.Time{}}
+
+// MarkChallengeV2 records that (ip, host) was challenged by a v2-tier source.
+func MarkChallengeV2(ip, host string) {
+	if ip == "" || host == "" {
+		return
+	}
+	key := ip + "|" + host
+	now := time.Now()
+	s := &challengeV2Marks
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.m[key]; !exists && len(s.m) >= challengeV2MarkMaxKeys {
+		for k, exp := range s.m { // expiry sweep, only on pressure
+			if now.After(exp) {
+				delete(s.m, k)
+			}
+		}
+		if len(s.m) >= challengeV2MarkMaxKeys {
+			if !s.fullWarn {
+				s.fullWarn = true
+				logging.Logf("[challenge_v2] per-(ip,host) mark store full (%d) — new v2 marks degrade to plain challenge until pressure drops", challengeV2MarkMaxKeys)
+			}
+			return // fail-open: plain v1 challenge for the newcomer
+		}
+		s.fullWarn = false
+	}
+	s.m[key] = now.Add(challengeV2MarkTTL)
+}
+
+// challengeV2Marked reports whether a live v2 mark covers (ip, host).
+func challengeV2Marked(ip, host string) bool {
+	if ip == "" || host == "" {
+		return false
+	}
+	key := ip + "|" + host
+	s := &challengeV2Marks
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	exp, ok := s.m[key]
+	if !ok {
+		return false
+	}
+	if time.Now().After(exp) {
+		delete(s.m, key)
+		return false
+	}
+	return true
+}
 
 // SetChallengeV2HostArmed wires the per-vhost v2 lookup the verify gate ORs
 // in (see the D5 gate in challenge_server.go). Same lifecycle as

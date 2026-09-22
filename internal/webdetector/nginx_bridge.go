@@ -1963,7 +1963,18 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 			VerifiedBot: verifiedBot,
 		})
 		if rr.Matched {
-			resp["rule_action"] = rr.Action
+			ruleAction := rr.Action
+			if ruleAction == TrafficActionChallengeV2 {
+				// The edge's rule_action vocabulary is block/challenge/
+				// throttle (cfm.lua Step 3 hard-codes them; anything else
+				// falls through to allow): serve the SAME challenge and
+				// record the v2 intent per (ip, host) for the verify gate —
+				// the rung is a verify-time distinction (arm-surfaces slice
+				// B). Old and new edges both work unchanged.
+				ruleAction = TrafficActionChallenge
+				MarkChallengeV2(ip, host)
+			}
+			resp["rule_action"] = ruleAction
 			resp["rule_id"] = rr.Rule.ID
 			if rr.Profile != "" {
 				resp["throttle_profile"] = rr.Profile

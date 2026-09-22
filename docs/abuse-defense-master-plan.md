@@ -263,9 +263,19 @@ already opened.
           store originally sketched here was NOT needed for the vhost
           grain and is deferred to slices B/C, where a transient
           per-request source (rules / WAF hits) genuinely requires it.
-        - [ ] **B — traffic-rules action `challenge_v2`** (rules-model.js +
-          traffic_rules.go SAME PR — Simulate IS enforcement; rules builder
-          option). Gives per-vhost-per-condition v2.
+        - [x] **B — traffic-rules action `challenge_v2` — DONE 2026-09-22**
+          (rules-model.js + traffic_rules.go same PR — Simulate IS
+          enforcement; rules-builder option with the same band as
+          challenge). Per-vhost-per-condition v2. As-built: the rule stores
+          and simulates as `challenge_v2`; the BRIDGE maps it to plain
+          "challenge" on the wire (the edge vocabulary stays
+          block/challenge/throttle — old and new edges work unchanged) and
+          records the v2 intent in the per-(ip,host) RUNG-MARK store
+          (challenge_v2.go: TTL 15m, cap 8192, fail-open to plain v1 on
+          pressure), which the verify gate ORs in as the FOURTH arm grain.
+          The mark exists because a rule matches one request's attributes
+          at decision time and verify cannot re-evaluate it later. Slice C
+          (WAF tier) reuses this store.
         - [ ] **C — WAF rule tier `challenge_v2`** (cfm_waf.lua mode + Go
           registry + rule-mode UI): the missing rung in the promotion
           ladder `logonly → challenge → challenge_v2 → block`. Challenge
