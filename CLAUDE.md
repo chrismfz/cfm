@@ -273,6 +273,8 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
     a second copy of the store defaults);
   - the `kernsec` rollback snapshot paths;
   - the `sslcollector` `defaultCacheDir`;
+  - the `nft` `selfIPsLuaPath` (EnsureBase rewrites the edge's self-IP list;
+    this one was caught by the guard in CI, in a test added the same day);
   - the `notify` and `detectorscfg` `systemConfigPath` (via
     `SetSystemConfigPathForTest` from the apiserver `TestMain`).
 
