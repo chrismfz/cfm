@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"cfm/internal/firewall"
 	"cfm/internal/firewall/feedutil"
 	"cfm/internal/logging"
 	"github.com/google/nftables"
@@ -248,6 +249,13 @@ func selfSetElems(local []string) (v4, v6 []string) {
 	return feedutil.NormalizeCIDRsV4(v4), feedutil.NormalizeCIDRsV6(v6)
 }
 
+// icmpFloodJumps send echo-requests through the flood chain when ICMP rate
+// limiting is on.
+var icmpFloodJumps = []string{
+	`ip protocol icmp icmp type echo-request jump flood`,
+	`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
+}
+
 // applyBaseInputRules installs all permanent set-matching rules in the input chain.
 // Each rule is added only if it is not already present (idempotent): one read
 // of the chain, then the missing rules in one nft run (baseRulesScript).
@@ -293,10 +301,7 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 		`ip6 saddr @block_v6_nets drop`,
 	}
 	if icmpEnabled {
-		early = append(early,
-			`ip protocol icmp icmp type echo-request jump flood`,
-			`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
-		)
+		early = append(early, icmpFloodJumps...)
 	}
 
 	// Insert in reverse so the first item ends up at the top.
@@ -390,22 +395,25 @@ func errTail(err error, n int) string {
 }
 
 // baseRulesScript returns the statements that install the rules the input
-// chain (as `nft list chain` prints it) lacks: ins inserted at the top in the
-// order given (each lands above the previous one), adds appended. A rule
-// counts as present when the chain text contains it, the rules queued before
-// it included — the same check the one-nft-process-per-rule version made
-// against the chain as it grew.
+// chain (as `nft -a list chain` prints it) lacks: ins inserted at the top in
+// the order given (each lands above the previous one), adds appended. A rule
+// counts as present per firewall.ChainRules, the rules queued before it
+// included — the check the one-nft-process-per-rule version made against the
+// chain as it grew, except that `jump flood` must be a whole rule. Extra
+// copies of the rules that check used to miss are deleted first.
 func baseRulesScript(chain string, ins, adds []string) []string {
-	norm := func(s string) string { return " " + strings.Join(strings.Fields(s), " ") + " " }
-	have := norm(chain)
+	have := firewall.ParseChainRules(chain)
 	missing := func(expr string) bool {
-		if strings.Contains(have, norm(expr)) {
+		if have.Has(expr) {
 			return false
 		}
-		have += norm(expr)
+		have.Add(expr)
 		return true
 	}
 	var stmts []string
+	for _, h := range have.DuplicateHandles(append([]string{`iif "lo" accept`, `jump flood`}, icmpFloodJumps...)...) {
+		stmts = append(stmts, "delete rule inet cfm input handle "+h)
+	}
 	for _, e := range ins {
 		if missing(e) {
 			stmts = append(stmts, "insert rule inet cfm input position 0 "+e)

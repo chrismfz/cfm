@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"cfm/internal/firewall"
 )
 
 const nftlibCLITimeout = 10 * time.Second
@@ -47,19 +49,17 @@ func (b *Backend) chainExistsCLI(name string) bool {
 
 // ruleExistsCLI returns true if a rule containing needle is present in chain.
 func (b *Backend) ruleExistsCLI(chain, needle string) bool {
-	norm := func(s string) string {
-		return " " + strings.Join(strings.Fields(s), " ") + " "
-	}
 	text, _ := b.chainTextCLI(chain) // unreadable: every rule reads as absent, as it always had
-	return strings.Contains(norm(text), norm(needle))
+	return firewall.ParseChainRules(text).Has(needle)
 }
 
-// chainTextCLI is `nft list chain inet cfm <chain>`. It gets the CLI write
-// timeout: on a node with large feed sets one nft process takes seconds.
+// chainTextCLI is `nft -a list chain inet cfm <chain>` (with rule handles). It
+// gets the CLI write timeout: on a node with large feed sets one nft process
+// takes seconds.
 func (b *Backend) chainTextCLI(chain string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nftlibCLITimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "nft", "list", "chain", "inet", cfmTableName, chain) // #nosec G204
+	cmd := exec.CommandContext(ctx, "nft", "-a", "list", "chain", "inet", cfmTableName, chain) // #nosec G204
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

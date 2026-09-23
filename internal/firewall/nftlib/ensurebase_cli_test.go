@@ -35,7 +35,7 @@ d=%[1]q
 echo "ARGS $*" >> "$d/nft.log"
 mode=$(cat "$d/mode")
 case "$*" in
-"list chain inet cfm input")
+"-a list chain inet cfm input")
 	if [ "$mode" = readfail ]; then echo "Error: timed out" >&2; exit 1; fi
 	if [ "$mode" = rereadfail ] && [ -e "$d/read1" ]; then echo "Error: timed out" >&2; exit 1; fi
 	touch "$d/read1"; cat "$d/chain"; exit 0;;
@@ -203,7 +203,29 @@ func TestApplyBaseInputRules_FallbackRereadsTheChain(t *testing.T) {
 	if n := strings.Count(got, "ARGS -f -"); n != 1 {
 		t.Errorf("%d nft -f runs, want just the one that committed (no replay):\n%.300s", n, got)
 	}
-	if n := strings.Count(got, "ARGS list chain"); n != 2 {
+	if n := strings.Count(got, "ARGS -a list chain"); n != 2 {
 		t.Errorf("%d chain reads, want 2 (before the run, and before any fallback)", n)
+	}
+}
+
+// With ICMP rate limiting on, the plain `jump flood` is added even though the
+// ICMP jumps already end in "jump flood" — as a substring, they kept it out,
+// and TCP/UDP never went through the flood chain. Extra copies of the base
+// rules the old check missed are deleted, top-most kept.
+func TestBaseRulesScript_JumpFloodAndDuplicates(t *testing.T) {
+	chain := "table inet cfm {\n\tchain input { # handle 1\n" +
+		"\t\tiif \"lo\" accept # handle 7\n" +
+		"\t\tip protocol icmp icmp type echo-request jump flood # handle 8\n" +
+		"\t\tip protocol icmp icmp type echo-request jump flood # handle 9\n" +
+		"\t\tiif \"lo\" accept # handle 10\n" +
+		"\t}\n}\n"
+	got := baseRulesScript(chain, []string{`iif "lo" accept`, icmpFloodJumps[0]}, []string{"jump flood"})
+	want := []string{
+		"delete rule inet cfm input handle 10",
+		"delete rule inet cfm input handle 9",
+		"add rule inet cfm input jump flood",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("baseRulesScript =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }

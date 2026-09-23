@@ -314,6 +314,13 @@ func (b *Backend) ensureSet(name, typ string) error {
 	return b.ensureSetWithFlags(name, typ, "timeout")
 }
 
+// icmpFloodJumps send echo-requests through the flood chain when ICMP rate
+// limiting is on.
+var icmpFloodJumps = []string{
+	`ip protocol icmp icmp type echo-request jump flood`,
+	`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
+}
+
 func (b *Backend) EnsureBase() (err error) {
 	start := time.Now()
 	b.logPhase("EnsureBase", "start", 0, nil, "")
@@ -487,19 +494,24 @@ func (b *Backend) EnsureBase() (err error) {
 	// NOTE: querying `nft list chain ...` repeatedly can become very expensive on
 	// large installations. Cache the input chain snapshot once and keep it updated
 	// as we add/insert rules during this EnsureBase run.
-	resInput, _ := runNFTCommand(context.Background(), "list", "chain", family, tableName, "input")
-	inputChainRaw := []byte(resInput.Stdout + resInput.Stderr)
-	normalizeRule := func(s string) string {
-		s = strings.ReplaceAll(s, "\r", "")
-		s = strings.ReplaceAll(s, "\t", " ")
-		return " " + strings.Join(strings.Fields(s), " ") + " "
-	}
-	inputChainNorm := normalizeRule(string(inputChainRaw))
-	ruleInInput := func(expr string) bool {
-		return strings.Contains(inputChainNorm, normalizeRule(expr))
-	}
-	recordRuleInInput := func(expr string) {
-		inputChainNorm += normalizeRule(expr)
+	resInput, _ := runNFTCommand(context.Background(), "-a", "list", "chain", family, tableName, "input")
+	inputRules := firewall.ParseChainRules(resInput.Stdout)
+	ruleInInput := inputRules.Has
+	recordRuleInInput := inputRules.Add
+
+	// Drop the copies the old presence check piled up: it never recognised
+	// `iif lo accept` (nft prints `iif "lo" accept`), so every EnsureBase
+	// inserted another at the top of the chain.
+	if dups := inputRules.DuplicateHandles(append([]string{`iif lo accept`, `jump flood`}, icmpFloodJumps...)...); len(dups) > 0 {
+		var sb strings.Builder
+		for _, h := range dups {
+			fmt.Fprintf(&sb, "delete rule %s %s input handle %s\n", family, tableName, h)
+		}
+		if err := b.nftExpr(strings.TrimSpace(sb.String())); err != nil {
+			logging.Logf("[nft] EnsureBase: removing %d duplicate base rules failed: %v", len(dups), err)
+		} else {
+			logging.Logf("[nft] EnsureBase: removed %d duplicate base rules", len(dups))
+		}
 	}
 
 	addRule := func(expr string) error {
@@ -559,10 +571,7 @@ func (b *Backend) EnsureBase() (err error) {
 
 	// 5) ICMP → flood (below unconditional drops)
 	if b.cfg != nil && b.cfg.Hardening.ICMPRate > 0 {
-		early = append(early,
-			`ip protocol icmp icmp type echo-request jump flood`,
-			`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
-		)
+		early = append(early, icmpFloodJumps...)
 	}
 
 	// Insert in reverse so first item ends up highest in chain
@@ -663,7 +672,9 @@ func (b *Backend) EnsureBase() (err error) {
 		return err
 	}
 
-	// 6) jump flood στο τέλος του base layer
+	// 6) jump flood στο τέλος του base layer. The presence check matches it as a
+	// whole rule, not inside the ICMP jumps above (which, as a substring, kept
+	// it out whenever ICMP rate limiting was on and the chain was new).
 	if !ruleInInput("jump flood") {
 		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input jump flood`, family, tableName)); err != nil {
 			return err
