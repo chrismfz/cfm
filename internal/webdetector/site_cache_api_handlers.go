@@ -63,8 +63,8 @@ type SiteCacheSwitches struct {
 	// SiteCache false: this node caches nothing and the edge does not read
 	// the policies.
 	SiteCache bool `json:"site_cache"`
-	// MicroCacheEnforce false (the default): the micro tier is a dry run,
-	// nothing is stored.
+	// MicroCacheEnforce false: the micro tier is a dry run on this node,
+	// nothing is stored (the default is true).
 	MicroCacheEnforce bool `json:"micro_cache_enforce"`
 }
 

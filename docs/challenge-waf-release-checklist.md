@@ -32,8 +32,10 @@ Use this checklist for challenge or WAF Lua/config updates before reloading Angi
 - After the reload, on the box: an armed vhost still answers the debug stamp
   (`docs/site-cache-runbook.md` §4), its assets show `ucache="HIT"` after a
   second request, and `cfm webtop site-cache stats` still moves.
-- Never set `MICRO_CACHE_ENFORCE = 1` as part of a release — per node, only
-  after `docs/site-cache-design.md` §5.7.
+- `MICRO_CACHE_ENFORCE` defaults to `1` since 2026-09-23. A release that
+  changes the micro path (cfm_cache.lua's gate, the micro locations, the cookie
+  rails) re-runs `docs/site-cache-design.md` §5.7 steps 5–7 on one armed
+  vhost; a node that must not micro-cache sets `0`.
 
 ## Deploy/reload guardrails (required)
 

@@ -42,8 +42,9 @@
 --                       cache gate, no X-CFM-Cache header, no stats push)
 --   micro_cache_enforce boolean (default FALSE when file/field missing; the
 --                       Site Cache Tier B ENFORCE gate — [webdetector]
---                       MICRO_CACHE_ENFORCE. An opt-in: false = micro-cache dry
---                       run, true = armed vhosts' anonymous HTML is micro-cached)
+--                       MICRO_CACHE_ENFORCE, which the daemon defaults ON and
+--                       writes in every file: false = micro-cache dry run, true =
+--                       armed vhosts' anonymous HTML is micro-cached)
 
 local fc = require "cfm_filecache"
 
@@ -101,10 +102,11 @@ local OPTS = {
     -- caches. Only an EXPLICIT false disarms it (cfm_cache.lua → full no-op).
     out.site_cache = (val.site_cache ~= false)
     -- Tier B micro-cache ENFORCE gate ([webdetector] MICRO_CACHE_ENFORCE).
-    -- OPT-IN, so the default is FALSE (absent field / older daemon → dry-run):
-    -- only an EXPLICIT true lets cfm.lua's micro gate ngx.exec to a cache
-    -- location. Mirror-image of site_cache's fail-safe idiom — HTML caching must
-    -- never turn itself on.
+    -- The daemon defaults it ON and every file it writes carries the field, so
+    -- an ABSENT field means an older daemon's file (a missing or unreadable one
+    -- falls back before this): stay in dry run. Only an EXPLICIT true lets cfm.lua's
+    -- micro gate ngx.exec to a cache location. Mirror-image of site_cache's
+    -- fail-safe idiom: HTML caching never starts from a file the edge cannot read.
     out.micro_cache_enforce = (val.micro_cache_enforce == true)
     return out
   end,

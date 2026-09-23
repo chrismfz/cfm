@@ -13,7 +13,7 @@
 //   * static tier — static assets; follows the origin's Cache-Control /
 //     Expires with a 1 h fallback. Its recipe and TTL are LABELS only.
 //   * micro tier — anonymous GET/HEAD through the HTTPS `location /`, for the
-//     TTL snapped to a bucket; a dry run until MICRO_CACHE_ENFORCE = 1.
+//     TTL snapped to a bucket; a dry run where MICRO_CACHE_ENFORCE = 0.
 //   * both tiers off = an explicit opt-out (never cached, even under an armed
 //     wildcard).
 
