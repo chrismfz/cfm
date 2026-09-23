@@ -4,11 +4,14 @@ package webdetector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ── store: upsert / copy semantics / bounds ──────────────────────────────────
@@ -313,5 +316,145 @@ func TestSiteCacheStats_DrilldownMirrorsEdgeKey(t *testing.T) {
 		if r.Host == "optout.example.com" {
 			t.Fatalf("all-off vhost listed as live: %+v", r)
 		}
+	}
+}
+
+// ── PR-4b bounds ─────────────────────────────────────────────────────────────
+
+// Only the cache statuses the edge counts are stored (and "total"); a host
+// longer than a DNS name is dropped.
+func TestSiteCacheStatsStore_KeyWhitelistAndHostLength(t *testing.T) {
+	s := newSiteCacheStatsStore()
+	s.Upsert("a.com", map[string]int{"HIT": 3, "MISS": 1, "total": 4, "EVIL": 9, "hit": 7, "x-injected": 1})
+	got := s.Get("a.com")
+	if len(got) != 3 || got["HIT"] != 3 || got["MISS"] != 1 || got["total"] != 4 {
+		t.Fatalf("stored %v, want only HIT/MISS/total", got)
+	}
+	s.Upsert("junk.com", map[string]int{"EVIL": 1})
+	if s.Get("junk.com") != nil {
+		t.Fatal("a row with no known status was stored")
+	}
+	s.Upsert(strings.Repeat("a", 254), map[string]int{"HIT": 1})
+	if len(s.Hosts()) != 1 {
+		t.Fatalf("an over-long host was stored: %d hosts", len(s.Hosts()))
+	}
+}
+
+// The bridge hook keeps rows only for policy keys armed NOW, and prunes the
+// rows of keys disarmed since (at most once per siteCacheStatsPruneGap).
+func TestSiteCacheStats_IngestArmedOnlyAndPrune(t *testing.T) {
+	e, _ := newSiteCacheAPITestEngine(t)
+	on := SiteCacheTier{Enabled: true, Recipe: "static_lean"}
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "armed.com", Static: on})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "off.com", Static: SiteCacheTier{Recipe: "static_lean"}})
+	e.ingestSiteCacheStats("armed.com", map[string]int{"HIT": 1})
+	e.ingestSiteCacheStats("off.com", map[string]int{"HIT": 1})
+	e.ingestSiteCacheStats("never-configured.com", map[string]int{"HIT": 1})
+	if h := e.siteCacheStats.Hosts(); len(h) != 1 || h["armed.com"] == nil {
+		t.Fatalf("ingest kept %v, want only armed.com", h)
+	}
+	// armed.com is disarmed; a stale row lingers until the next due prune
+	e.siteCache.Remove("armed.com")
+	e.siteCacheStats.mu.Lock()
+	e.siteCacheStats.lastPrune = time.Now().Add(-2 * siteCacheStatsPruneGap)
+	e.siteCacheStats.mu.Unlock()
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "other.com", Static: on})
+	e.ingestSiteCacheStats("other.com", map[string]int{"MISS": 1})
+	if h := e.siteCacheStats.Hosts(); len(h) != 1 || h["other.com"] == nil {
+		t.Fatalf("after prune: %v, want only other.com", h)
+	}
+}
+
+// A push of more rows than the hook queue holds is delivered whole: one hook
+// event per push (it was one per row, so the queue overflowed and dropped
+// rows), and the row cap is the policy store's own limit.
+func TestNginxBridge_CacheStatsPushIsOneHookEvent(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	b.hookCh = make(chan func(), 8) // a tiny queue, no drainer
+	got := 0
+	b.SetCacheStatsHook(func(host string, counts map[string]int) { got++ })
+	var sb strings.Builder
+	sb.WriteString(`{"rows":[`)
+	for i := 0; i < maxSiteCacheEntries+10; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, `{"host":"h%d.example.com","counts":{"HIT":1}}`, i)
+	}
+	sb.WriteString(`]}`)
+	req := httptest.NewRequest(http.MethodPost, "/nginx/cache/stats", strings.NewReader(sb.String()))
+	req.Header.Set("X-CFM-Token", "tok")
+	rr := httptest.NewRecorder()
+	b.handleCacheStats(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d", rr.Code)
+	}
+	if n := len(b.hookCh); n != 1 {
+		t.Fatalf("queued %d hook events for one push, want 1", n)
+	}
+	(<-b.hookCh)()
+	if got != maxSiteCacheEntries {
+		t.Fatalf("delivered %d rows, want %d (the cap)", got, maxSiteCacheEntries)
+	}
+}
+
+// Only the canonical policy key is a stats key: "a.com:1", "a.com." … would
+// each take a row of the cap.
+func TestSiteCacheStats_ArmedKeyCanonicalOnly(t *testing.T) {
+	e, _ := newSiteCacheAPITestEngine(t)
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "armed.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	for _, k := range []string{"armed.com:1", "armed.com.", "armed.com:8080"} {
+		e.ingestSiteCacheStats(k, map[string]int{"HIT": 1})
+	}
+	e.ingestSiteCacheStats("ARMED.com", map[string]int{"HIT": 2}) // case only: the same key
+	if h := e.siteCacheStats.Hosts(); len(h) != 1 || h["armed.com"]["HIT"] != 2 {
+		t.Fatalf("stored %v, want only armed.com", h)
+	}
+}
+
+// Stale rows go even when no armed row arrives any more (the last policy was
+// disarmed, or the edge stopped pushing): every pushed row and every list read
+// runs the due prune.
+func TestSiteCacheStats_PruneWithoutArmedRows(t *testing.T) {
+	e, _ := newSiteCacheAPITestEngine(t)
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "a.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	e.ingestSiteCacheStats("a.com", map[string]int{"HIT": 1})
+	e.siteCache.Remove("a.com")
+	due := func() {
+		e.siteCacheStats.mu.Lock()
+		e.siteCacheStats.lastPrune = time.Now().Add(-2 * siteCacheStatsPruneGap)
+		e.siteCacheStats.mu.Unlock()
+	}
+	due()
+	e.ingestSiteCacheStats("a.com", map[string]int{"HIT": 5}) // rejected, but prunes
+	if n := len(e.siteCacheStats.Hosts()); n != 0 {
+		t.Fatalf("%d stale rows after a push of only unarmed rows", n)
+	}
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "b.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	e.ingestSiteCacheStats("b.com", map[string]int{"HIT": 1})
+	e.siteCache.Remove("b.com")
+	due()
+	_ = e.SiteCacheStatsAll() // no push at all: the read prunes
+	if n := len(e.siteCacheStats.Hosts()); n != 0 {
+		t.Fatalf("%d stale rows after a read", n)
+	}
+}
+
+// One panicking row does not drop the rest of its push.
+func TestNginxBridge_CacheStatsRowPanicIsolated(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	var got []string
+	b.SetCacheStatsHook(func(host string, counts map[string]int) {
+		if host == "boom.com" {
+			panic("row")
+		}
+		got = append(got, host)
+	})
+	req := httptest.NewRequest(http.MethodPost, "/nginx/cache/stats", strings.NewReader(`{"rows":[
+	 {"host":"a.com","counts":{"HIT":1}},{"host":"boom.com","counts":{"HIT":1}},{"host":"c.com","counts":{"HIT":1}}]}`))
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleCacheStats(httptest.NewRecorder(), req) // no dispatcher: runs inline
+	if strings.Join(got, ",") != "a.com,c.com" {
+		t.Fatalf("delivered %v, want a.com,c.com", got)
 	}
 }

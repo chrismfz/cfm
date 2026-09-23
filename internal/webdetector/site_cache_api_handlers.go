@@ -28,16 +28,20 @@ package webdetector
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 	"strings"
+
+	"cfm/internal/logging"
 )
 
 type siteCacheListResponse struct {
 	Rows []SiteCacheEntry `json:"rows"`
 	// Unloadable lists the hosts of stored policies this build cannot load (a
-	// newer build's recipe or field, after a downgrade) that have no row in
-	// Rows: the edge treats each as OPTED OUT (never cached), not as "no
-	// entry". Scope-filtered like Rows.
+	// newer build's recipe or field after a downgrade, or a host this version
+	// no longer accepts) that have no row in Rows: the edge treats each as
+	// OPTED OUT (never cached), not as "no entry". Scope-filtered like Rows.
 	Unloadable []string `json:"unloadable,omitempty"`
 }
 
@@ -143,6 +147,7 @@ func (e *Engine) handleSiteCacheSet(w http.ResponseWriter, r *http.Request) {
 	}
 	// Scope check before any write: the target host must be in the token scope.
 	if !scopeAllowsVhosts(r, []string{host}) {
+		logSiteCacheAudit(r, "set", host, "denied", "host not in scope")
 		writeJSON(w, http.StatusForbidden, siteCacheResultResponse{Error: "host not in scope"})
 		return
 	}
@@ -152,9 +157,11 @@ func (e *Engine) handleSiteCacheSet(w http.ResponseWriter, r *http.Request) {
 	scoped := vhostScopeFromContext(r.Context()) != nil
 	entry, err := e.SiteCacheApply(req, scoped)
 	if err != nil {
+		logSiteCacheAudit(r, "set", host, "rejected", err.Error())
 		writeJSON(w, http.StatusBadRequest, siteCacheResultResponse{Error: err.Error()})
 		return
 	}
+	logSiteCacheAudit(r, "set", entry.Host, "ok", siteCacheAuditState(entry))
 	writeJSON(w, http.StatusOK, siteCacheResultResponse{Entry: &entry})
 }
 
@@ -178,13 +185,16 @@ func (e *Engine) handleSiteCacheRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !scopeAllowsVhosts(r, []string{host}) {
+		logSiteCacheAudit(r, "remove", host, "denied", "host not in scope")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
 	if !e.SiteCacheRemove(host) {
+		logSiteCacheAudit(r, "remove", host, "notfound", "")
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no cache policy for host"})
 		return
 	}
+	logSiteCacheAudit(r, "remove", siteCacheCanonHost(host), "ok", "")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -200,10 +210,14 @@ func (e *Engine) handleSiteCachePurge(w http.ResponseWriter, r *http.Request) {
 	}
 	if isTruthyParam(r.URL.Query().Get("all")) {
 		// Global purge spans every tenant → admin only.
+		if !IsAdminRequest(r) {
+			logSiteCacheAudit(r, "purge-all", "*", "denied", "admin only")
+		}
 		if !RequireAdmin(w, r) {
 			return
 		}
 		n := e.SiteCachePurgeAll()
+		logSiteCacheAudit(r, "purge-all", "*", "ok", fmt.Sprintf("purged=%d", n))
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "purged": n})
 		return
 	}
@@ -213,28 +227,102 @@ func (e *Engine) handleSiteCachePurge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !scopeAllowsVhosts(r, []string{host}) {
+		logSiteCacheAudit(r, "purge", host, "denied", "host not in scope")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
 	entry, ok := e.SiteCachePurge(host)
 	if !ok {
+		logSiteCacheAudit(r, "purge", host, "notfound", "")
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": e.siteCacheNoPolicyMsg(host)})
 		return
 	}
+	logSiteCacheAudit(r, "purge", entry.Host, "ok", fmt.Sprintf("gen=%d", entry.Generation))
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "generation": entry.Generation})
+}
+
+// logSiteCacheAudit writes the Site Cache lifecycle trail to cfm.log: every
+// authenticated set / remove / purge / purge-all that names a host (or all) —
+// including those refused for scope, admin-only or validation — with WHO
+// (admin, or the scoped token's vhosts), from where and what resulted. Not
+// logged: unauthenticated calls (no identity to record) and bodies that fail
+// before naming a host (invalid JSON, no host). result=notfound is also what
+// a failed save of a remove/purge reports (the store logs the failure itself). A policy decides what the edge caches, a scoped
+// tenant may change its own, and an opt-out or an edit of a `*.x` pattern a
+// token's scope holds changes what an admin wildcard does, so each change
+// must be reconstructable afterwards (the exclude/clam precedent). The CLI
+// goes through this API, and the MCP tools only read, so the handlers are the
+// single choke point. result: ok | notfound | rejected | denied.
+func logSiteCacheAudit(r *http.Request, action, host, result, detail string) {
+	logging.Logf("%s", formatSiteCacheAudit(r, action, host, result, detail))
+}
+
+// formatSiteCacheAudit renders the audit line (split out for tests).
+func formatSiteCacheAudit(r *http.Request, action, host, result, detail string) string {
+	actor := "admin"
+	if scope := vhostScopeFromContext(r.Context()); scope != nil {
+		hosts := make([]string, 0, len(scope))
+		for h := range scope {
+			// a scope host is admin-minted, but keep it one field anyway
+			hosts = append(hosts, strings.Map(func(r rune) rune {
+				if r <= ' ' || r == '"' || r == 0x7f {
+					return '_'
+				}
+				return r
+			}, h))
+		}
+		sort.Strings(hosts)
+		if len(hosts) > 5 { // a large token scope must not balloon every line
+			hosts = append(hosts[:5], fmt.Sprintf("…(+%d)", len(hosts)-5))
+		}
+		actor = "scoped:" + strings.Join(hosts, ",")
+	}
+	line := fmt.Sprintf("[site_cache] action=%s host=%q result=%s actor=%s remote=%s", action, siteCacheAuditClip(host, 256), result, actor, r.RemoteAddr)
+	if detail != "" {
+		line += fmt.Sprintf(" detail=%q", siteCacheAuditClip(detail, 512))
+	}
+	return line
+}
+
+// siteCacheAuditClip bounds a caller-supplied audit field: a request can carry
+// a host of up to the header limit (~1 MiB), and a scoped token may repeat it.
+func siteCacheAuditClip(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + fmt.Sprintf("…(+%d bytes)", len(s)-max)
+}
+
+// siteCacheAuditState summarises a stored policy for the audit line.
+func siteCacheAuditState(e SiteCacheEntry) string {
+	tier := func(t SiteCacheTier) string {
+		if !t.Enabled {
+			return "off"
+		}
+		if t.TTL != "" {
+			return t.Recipe + "/" + t.TTL
+		}
+		return t.Recipe
+	}
+	return fmt.Sprintf("static=%s micro=%s strict_cookies=%t auth_cookies=%d gen=%d",
+		tier(e.Static), tier(e.Micro), e.StrictCookies, len(e.AuthCookies), e.Generation)
 }
 
 // siteCacheNoPolicyMsg explains a 404 for host: plainly "no policy", or — when
 // the host's stored policy is one this build cannot load — why it has none.
 // Callers have already scope-checked host.
 func (e *Engine) siteCacheNoPolicyMsg(host string) string {
-	if e.siteCache != nil {
-		if h, ok := e.siteCache.normalize(host); ok {
-			for _, f := range e.SiteCacheFrozenHosts() {
-				if f == h {
-					return siteCacheUnloadableMsg + "; remove it, turn it off (which replaces it), or upgrade"
-				}
+	if h := siteCacheCanonHost(host); h != "" {
+		for _, f := range e.SiteCacheFrozenHosts() {
+			if f != h {
+				continue
 			}
+			if siteCacheHostError(h) != nil {
+				// `off` would be rejected (an invalid host for a new policy),
+				// and a newer build would not read it either.
+				return siteCacheUnloadableMsg + "; its host is not valid in this version: remove it"
+			}
+			return siteCacheUnloadableMsg + "; remove it, turn it off (which replaces it), or — if a newer version wrote it — upgrade"
 		}
 	}
 	return "no cache policy for host"

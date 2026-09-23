@@ -541,7 +541,8 @@ one cache refill per such policy, once — and the file is rewritten.
 (after a downgrade: any unknown field freezes the row, since a newer build's
 safety setting must not be ignored), or a malformed hand edit — are kept in the
 file as stored (re-indented) through that rewrite and every later save, and
-never served. They FAIL CLOSED: the host of such a row is treated as an opt-out
+never served. They FAIL CLOSED: the host of such a row (when the edge can match
+it — see "Host and cookie validation") is treated as an opt-out
 (a frozen wildcard: every sub-host under it that has no more specific
 policy), so a covering armed
 wildcard does not start caching it. `list` names them under `unloadable`
@@ -568,6 +569,27 @@ rejected. Hosts carry no `:port` — the edge strips it from the request Host an
 from the feed, so a new policy with a port is rejected and a stored one is
 normalized.
 
+**Host and cookie validation.** A host is an exact DNS-style name or one
+leading `*.` over one: labels of 1-63 characters from `[a-z0-9_-]`, not
+starting or ending with `-`, at most 253 characters in all; an
+internationalized name in its punycode (`xn--`) form, as the Host header
+carries it. A wildcard needs at least two labels after `*.` — `*.com` would arm
+every `.com` vhost on the node. A stored row whose host fails these rules (an
+older build accepted it) is frozen like any row this build cannot load — never
+served as a policy, and still an opt-out when the edge can match its host (a
+label ending in `-` still reaches nginx; one with an ASCII space or control
+byte cannot) — and
+`remove <that host>` deletes it (`off` cannot: the host is invalid for a new
+policy). `auth_cookies` are at most 32 names of at most 256 bytes; the edge
+takes a request cookie's name up to `=` or whitespace in a `;`-split pair, so a
+name with whitespace, `=` or `;` could never match — it is rejected, not
+stored (a control character too), as is a 33rd name (which used to be dropped
+silently). Names are deduplicated case-insensitively the way the edge compares
+them (ASCII only). Anything else is accepted, RFC 6265 token or not (PHP array cookies
+such as `cart[id]`, commas, quotes). A stored row with a name the edge cannot
+match freezes on upgrade — fail closed: the vhost is opted out until the name
+is fixed.
+
 ---
 
 ## 7. Management surfaces
@@ -585,9 +607,14 @@ normalized.
 
 Prefix `site-cache` added to `SharedAPIPrefixes()` so the shared apiserver
 proxies it to the engine mux. Never a bare `mux.HandleFunc` (a prefix-coverage
-test walks the table). Lifecycle audit of set/remove/purge (one
-`logExcludeChange`-style choke point) is planned, NOT built yet: today only a
-failed save is logged.
+test walks the table). **Lifecycle audit:** every authenticated set / remove /
+purge / purge-all that names a host (or all) — including those refused for
+scope, admin-only or validation; not unauthenticated calls, nor a body that
+fails before naming a host — writes
+one `[site_cache] action=… host=… result=ok|notfound|rejected|denied
+actor=admin|scoped:<hosts> remote=… detail=…` line to `cfm.log`
+(`logSiteCacheAudit`; the handlers are the single choke point: the CLI goes
+through this API and the MCP tools only read).
 
 ### 7.2 CLI (`cfm webtop site-cache …`)
 
@@ -965,7 +992,8 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      — `observe()` runs only in the HTTPS `header_filter`, which would leave an
      HTTP-only box's armed vhosts counted but never pushed. **Read paths filter
      to the CURRENTLY-armed policy set** (`armedCacheKeys`): the edge dict keeps a
-     vhost's counts until an edge reload, so a vhost unarmed after its last push
+     vhost's counts until the edge RESTARTS (a reload keeps a
+     `lua_shared_dict`), so a vhost unarmed after its last push
      would otherwise linger as a stale "still cached" row — the armed store is
      truth (a stored but all-off policy is not armed). A by-host query resolves
      a concrete sub-host to the key the edge counts it under
@@ -981,8 +1009,20 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      `site_cache_stats` (HIT/MISS/BYPASS + a STRICT hit ratio — STALE/UPDATING/
      REVALIDATED serve from cache but sit in the denominator only, so read the
      full breakdown). `ucache="$upstream_cache_status"` was added to the `cfm`
-     access log_format so `edge_access_tail` shows the verdict per request. **v1 scope:** a live totals view (counts since the edge last
-     reloaded), not hour-bucketed history, and no cfm-admin column yet — both
+     access log_format so `edge_access_tail` shows the verdict per request.
+     **Bounds:** the daemon keeps a pushed row only for a policy key armed at
+     that moment, only the seven cache statuses (+ an edge `total`), at most
+     one row per stored policy (`maxSiteCacheEntries`), and prunes the rows
+     of keys disarmed since every 5 minutes; a push is ONE hook event (it was
+     one per row, which could overflow the hook queue and drop rows). The
+     edge side reads at most 8000 keys of the stats dict per push
+     (`cfm_cache_log.lua` snapshot_vhosts `get_keys(8000)`), a KEY bound, not
+     a vhost bound: the budget also holds zone/throttle keys and the stale keys
+     of disarmed vhosts, and a cut can fall inside one vhost's status keys, so
+     past roughly 1000-2600 armed vhosts some vhosts are missing from a push
+     and one can be pushed with PARTIAL counts (a skewed hit ratio). Follow-up
+     (PR-5): drop a disarmed vhost's keys at the edge, or scan them all. **v1 scope:** a live totals view (counts since the edge last
+     restarted — a reload keeps them), not hour-bucketed history, and no cfm-admin column yet — both
      follow-ups. **Deferred to a focused follow-up:** the `whats_wrong`
      "armed but ~0 hits" signal (the automated form of what `site_cache_stats`
      already shows on demand — it would have surfaced the 3b buffering no-op).

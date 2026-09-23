@@ -51,17 +51,22 @@ function _M.log(zone, status, host)
 end
 
 -- snapshot_vhosts: read side for the daemon /nginx/cache/stats push. Returns
---   { ["<host>"] = { total = N, HIT = n, MISS = n, ... }, ... }
--- by scanning the per-vhost keys. Absolute counts (the daemon hook is
--- UPSERT-idempotent, like the WAF-stats push). Bounded — only armed vhosts are
--- ever keyed, each with ~1 + #statuses entries.
+--   { ["<host>"] = { HIT = n, MISS = n, ... }, ... }
+-- (status keys only; the daemon sums them) by scanning the per-vhost keys.
+-- Absolute counts (the daemon hook is UPSERT-idempotent, like the WAF-stats
+-- push). A vhost is keyed only while armed, but its keys stay in the dict after
+-- it is disarmed (until the edge restarts: a reload keeps a lua_shared_dict);
+-- the daemon drops such rows.
 function _M.snapshot_vhosts()
   local d = ngx.shared.cfm_cache_stats
   if not d then return {} end
   local out = {}
-  -- 0 would warn + cap at 1024. Each armed vhost uses ~ (#statuses) keys, so
-  -- 8000 covers ~1000+ armed vhosts; beyond that a vhost is simply not reported
-  -- (absent), never reported with wrong (partial) counts.
+  -- 0 would warn + cap at 1024. A KEY bound, not a vhost bound: each armed
+  -- vhost uses up to #statuses keys and the budget also holds zone/throttle
+  -- keys and the stale keys of disarmed vhosts, so past roughly 1000-2600
+  -- armed vhosts some vhosts are left out — and a cut can fall inside one
+  -- vhost's keys, pushing it with PARTIAL counts (docs/site-cache-design.md
+  -- §11 "Bounds").
   local keys = d:get_keys(8000)
   for _, k in ipairs(keys) do
     local h, st = k:match("^cache:vhost:(.+):status:([A-Z]+)$")

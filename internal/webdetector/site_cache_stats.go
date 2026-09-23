@@ -7,7 +7,8 @@
 // snapshot per vhost; the /api/v1/site-cache/stats endpoint + the MCP
 // site_cache_stats tool read it.
 //
-// v1 scope: a LIVE totals view (absolute counts since the edge last reloaded,
+// v1 scope: a LIVE totals view (absolute counts since the edge last restarted —
+// a reload keeps the lua_shared_dict —
 // node-local, not persisted across daemon restarts). Hour-bucketed history —
 // the shape the WAF-stats pipeline uses — is a documented follow-up; a first
 // cut needs only "is this armed vhost actually getting HITs?".
@@ -20,43 +21,58 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // siteCacheStatsStore maps host -> cache status -> absolute count. Each push
 // REPLACES a host's counts (UPSERT), matching the edge's absolute snapshot.
 type siteCacheStatsStore struct {
-	mu    sync.RWMutex
-	hosts map[string]map[string]int
+	mu        sync.RWMutex
+	hosts     map[string]map[string]int
+	lastPrune time.Time
 }
 
 func newSiteCacheStatsStore() *siteCacheStatsStore {
 	return &siteCacheStatsStore{hosts: make(map[string]map[string]int)}
 }
 
-// Bounds against a buggy/compromised edge. The edge only keys armed vhosts
-// (few) with a fixed status set, so these sit far above any real push.
+// Bounds against a buggy/compromised edge. The edge keys only ARMED policies,
+// of which the policy store holds at most maxSiteCacheEntries (the cap used to
+// be 4096, so past that some armed vhosts never got a row), and counts only
+// the fixed set of cache statuses (cfm_cache_log.lua VALID) — any other key is
+// dropped, not stored; a key longer than maxSiteCacheHostLen too.
 const (
-	maxSiteCacheStatsHosts = 4096
-	maxSiteCacheStatsKeys  = 16
+	maxSiteCacheStatsHosts = maxSiteCacheEntries
+	siteCacheStatsPruneGap = 5 * time.Minute
 )
 
-// Upsert replaces one host's counts. Wired as the bridge SetCacheStatsHook;
-// called async, once per pushed row. The incoming map aliases request-scoped
-// memory, so it is copied (and bounded) before being retained.
+var siteCacheStatsKeys = map[string]struct{}{
+	"HIT": {}, "MISS": {}, "BYPASS": {}, "EXPIRED": {}, "STALE": {},
+	"UPDATING": {}, "REVALIDATED": {},
+	"total": {}, // an edge-supplied total (floored at the parts; see siteCacheStatsRow)
+}
+
+// Upsert replaces one host's counts. Fed from the bridge SetCacheStatsHook
+// through Engine.ingestSiteCacheStats (armed keys only); called async, once
+// per pushed row. The incoming map aliases request-scoped memory, so it is
+// copied (and bounded) before being retained.
 func (s *siteCacheStatsStore) Upsert(host string, counts map[string]int) {
 	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "" || len(counts) == 0 {
+	if host == "" || len(host) > maxSiteCacheHostLen || len(counts) == 0 {
 		return
 	}
-	cp := make(map[string]int, len(counts))
+	cp := make(map[string]int, len(siteCacheStatsKeys))
 	for k, v := range counts {
-		if len(cp) >= maxSiteCacheStatsKeys {
-			break
+		if _, known := siteCacheStatsKeys[k]; !known {
+			continue
 		}
 		if v < 0 {
 			v = 0
 		}
 		cp[k] = v
+	}
+	if len(cp) == 0 {
+		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -64,6 +80,50 @@ func (s *siteCacheStatsStore) Upsert(host string, counts map[string]int) {
 		return // at capacity; drop an unknown host rather than grow unbounded
 	}
 	s.hosts[host] = cp
+}
+
+// maybePrune drops, at most once per siteCacheStatsPruneGap, the rows of keys
+// armed() no longer holds. The edge dict keeps a vhost's counts until an edge
+// reload, and the read paths already hide unarmed rows, but without this the
+// rows of every policy ever armed stayed in memory until a daemon restart. It
+// runs on every pushed row and on the list read (so also once the edge stops
+// pushing); armed is called only when a prune is due.
+func (s *siteCacheStatsStore) maybePrune(now time.Time, armed func() map[string]struct{}) int {
+	s.mu.Lock()
+	if now.Sub(s.lastPrune) < siteCacheStatsPruneGap {
+		s.mu.Unlock()
+		return 0
+	}
+	s.lastPrune = now
+	s.mu.Unlock()
+	keep := armed() // outside s.mu: it takes the policy store's lock
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for h := range s.hosts {
+		if _, ok := keep[h]; !ok {
+			delete(s.hosts, h)
+			n++
+		}
+	}
+	return n
+}
+
+// ingestSiteCacheStats is the bridge's cache-stats hook: a row is kept only
+// for a policy key that is ARMED now (the edge can lag a disarm by a feed
+// poll, and a buggy or compromised edge can send anything), then unarmed rows
+// are pruned periodically.
+func (e *Engine) ingestSiteCacheStats(host string, counts map[string]int) {
+	if e == nil || e.siteCacheStats == nil || e.siteCache == nil {
+		return
+	}
+	// Prune first: once the last policy is disarmed every pushed row is
+	// rejected below, and the stale rows must still go.
+	e.siteCacheStats.maybePrune(time.Now(), e.armedCacheKeys)
+	if !e.siteCache.ArmedKey(host) {
+		return
+	}
+	e.siteCacheStats.Upsert(host, counts)
 }
 
 // Get returns a copy of one host's counts (nil if never seen).
@@ -98,7 +158,7 @@ func (s *siteCacheStatsStore) Hosts() map[string]map[string]int {
 }
 
 // SiteCacheStatsRow is one vhost's cache effectiveness (absolute counts since
-// the edge last reloaded). hit_ratio_pct is a STRICT hit ratio —
+// the edge last restarted; a reload keeps them). hit_ratio_pct is a STRICT hit ratio —
 // hit / cacheable_total, cacheable_total = hit+miss+expired+stale+updating+
 // revalidated (BYPASS excluded: a bypassed request never had a chance to hit) —
 // the same split cfm_stats.lua's cache_zone_stats uses. Note STALE / UPDATING /
@@ -209,6 +269,7 @@ func (e *Engine) SiteCacheStatsAll() []SiteCacheStatsRow {
 	if e == nil || e.siteCacheStats == nil {
 		return nil
 	}
+	e.siteCacheStats.maybePrune(time.Now(), e.armedCacheKeys) // also when the edge stopped pushing (SITE_CACHE=0)
 	armed := e.armedCacheKeys()
 	hosts := e.siteCacheStats.Hosts()
 	out := make([]SiteCacheStatsRow, 0, len(hosts))

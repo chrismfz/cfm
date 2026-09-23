@@ -582,7 +582,7 @@ func NewEngine(cfg Config) *Engine {
 	e.nginxBridge.ListClamModeOverrides = e.ClamModeOverrideList
 	e.nginxBridge.ListHTTP3Hosts = e.HTTP3OverrideHosts
 	e.nginxBridge.ListCachePolicy = e.SiteCachePolicyFeed
-	e.nginxBridge.SetCacheStatsHook(e.siteCacheStats.Upsert)
+	e.nginxBridge.SetCacheStatsHook(e.ingestSiteCacheStats)
 	e.nginxBridge.RuleDecision = e.TrafficRuleSimulate
 	e.nginxBridge.RuleNeedsVerifiedBot = e.trafficRules.NeedsVerifiedBotFor
 	e.nginxBridge.ListTrafficRules = e.TrafficRuleList
@@ -4177,7 +4177,8 @@ func (e *Engine) SiteCacheGet(host string) (SiteCacheEntry, bool) {
 }
 
 // SiteCacheFrozenHosts lists the hosts of stored policies this build cannot
-// load (each treated as an opt-out at the edge; see siteCacheStore.frozen).
+// load — a newer build's, or with a host this version no longer accepts —
+// each treated as an opt-out at the edge (see siteCacheStore.frozen).
 func (e *Engine) SiteCacheFrozenHosts() []string {
 	if e == nil || e.siteCache == nil {
 		return nil
@@ -4190,13 +4191,6 @@ func (e *Engine) SiteCacheList() []SiteCacheEntry {
 		return nil
 	}
 	return e.siteCache.List()
-}
-
-func (e *Engine) SiteCacheHasAny() bool {
-	if e == nil || e.siteCache == nil {
-		return false
-	}
-	return e.siteCache.HasAny()
 }
 
 // SiteCachePolicyFeed is the /nginx/cache/config bridge feed: armed vhosts

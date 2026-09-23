@@ -4,6 +4,7 @@ package webdetector
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,10 +23,6 @@ func newSiteCacheTestStore(t *testing.T) *siteCacheStore {
 func TestSiteCacheStore_SetGetListRemove(t *testing.T) {
 	s := newSiteCacheTestStore(t)
 
-	if s.HasAny() {
-		t.Fatal("fresh store must have no enabled entries")
-	}
-
 	got, err := s.Set(SiteCacheEntry{
 		Host:   "MyIP.gr.",
 		Static: SiteCacheTier{Enabled: true, Recipe: "static_aggressive", TTL: "7d"},
@@ -42,9 +39,6 @@ func TestSiteCacheStore_SetGetListRemove(t *testing.T) {
 	}
 	if got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
 		t.Fatal("timestamps not stamped")
-	}
-	if !s.HasAny() {
-		t.Fatal("HasAny should be true after enabling a tier")
 	}
 
 	e, ok := s.Get("myip.gr")
@@ -985,9 +979,16 @@ func TestSiteCacheStore_NormalizeIsIdempotent(t *testing.T) {
 	}
 	// inner whitespace / control characters are never a host (trimming them
 	// would make normalize non-idempotent)
-	for _, in := range []string{"a.com .", "a.com :80", "a.com\t.", "a .com", "a.com\x00", "a.com\u00a0."} {
+	for _, in := range []string{"a .com", "a.com\x00", "a\tb.com", "a\u00a0b.com"} {
 		if h, ok := s.normalize(in); ok {
 			t.Fatalf("normalize(%q) accepted %q", in, h)
+		}
+	}
+	// trailing whitespace/dots/port are stripped to a fixed point, so these
+	// all name a.com — an Apply lookup and the stored key agree
+	for _, in := range []string{"a.com .", "a.com :80", "a.com\t."} {
+		if h, ok := s.normalize(in); !ok || h != "a.com" {
+			t.Fatalf("normalize(%q) = %q, %v; want a.com", in, h, ok)
 		}
 	}
 	if _, err := s.Apply(SiteCachePatch{Host: "a.com", StrictCookies: boolPtr(true),
@@ -1164,5 +1165,202 @@ func TestSiteCacheAPI_NoScopeFailsClosed(t *testing.T) {
 	rr := doRequest(mux, scopedCtxNoVhosts(), http.MethodPost, "/api/v1/site-cache/set", siteCacheSetBody(t, "mysite.com"))
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("no-scope set: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// ── PR-4b validation ─────────────────────────────────────────────────────────
+
+func TestSiteCacheHostValidation(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("static_lean")}
+	for _, h := range []string{
+		"example.com", "WWW.Example.COM.", "a-b.example.com", "_acme.example.com",
+		"xn--bcher-kva.example", "*.example.com", "*.shop.example.co.uk", "192.0.2.10", "localhost",
+		strings.Repeat("a", 63) + ".com",
+	} {
+		if _, err := s.Apply(SiteCachePatch{Host: h, Static: on}, false); err != nil {
+			t.Errorf("valid host %q rejected: %v", h, err)
+		}
+	}
+	for h, why := range map[string]string{
+		"*.com":                           "at least two labels",
+		"*":                               "invalid character",
+		"a..com":                          "empty label",
+		".a.com":                          "empty label",
+		"*..com":                          "empty label",
+		"-a.com":                          "start or end",
+		"a-.com":                          "start or end",
+		"bücher.example":                  "punycode",
+		"a.com/path":                      "invalid character",
+		"a b.com":                         "invalid character",
+		"a.*.com":                         "invalid character",
+		"a?.com":                          "invalid character",
+		strings.Repeat("a", 64) + ".com":  "63",
+		strings.Repeat("a.", 127) + "com": "253",
+	} {
+		_, err := s.Apply(SiteCachePatch{Host: h, Static: on}, false)
+		if err == nil || !strings.Contains(err.Error(), why) {
+			t.Errorf("host %q: err = %v, want it to mention %q", h, err, why)
+		}
+	}
+}
+
+// A stored row whose host this build rejects (an older build accepted it) is
+// kept, listed, and removable by that host — fail closed, never lost.
+func TestSiteCacheStore_InvalidStoredHost(t *testing.T) {
+	path := writeSiteCacheStoreFile(t, `[
+	 {"host":"*.com","generation":1758585600001,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`)
+	s := newSiteCacheStore(path)
+	if len(s.List()) != 0 || len(s.PolicyFeed()) != 0 {
+		t.Fatalf("an invalid stored host is served: list=%v feed=%v", s.List(), s.PolicyFeed())
+	}
+	if got := s.FrozenHosts(); len(got) != 1 || got[0] != "*.com" {
+		t.Fatalf("FrozenHosts = %v", got)
+	}
+	if !s.Remove("*.com") {
+		t.Fatal("remove of an invalid stored host found nothing")
+	}
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), `"*.com"`) {
+		t.Fatalf("still on disk:\n%s", b)
+	}
+}
+
+func TestSiteCacheAuthCookieValidation(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("micro_safe")}
+	// Anything the edge can match is accepted — the edge takes a cookie's name
+	// up to "=" or whitespace in a ";"-split pair — incl. names RFC 6265 would
+	// not call a token (PHP array cookies, commas, quotes, UTF-8).
+	ok := []string{"wp_session", "PHPSESSID", "my-app.sid", "a!#$%&'*+-.^_`|~b", "cart[id]", "a,b", `"quoted"`, "ünicode", strings.Repeat("c", 256)}
+	e, err := s.Apply(SiteCachePatch{Host: "a.com", Micro: on, AuthCookies: &ok}, false)
+	if err != nil || len(e.AuthCookies) != len(ok) {
+		t.Fatalf("valid cookie names: %v %v", err, e.AuthCookies)
+	}
+	for _, bad := range [][]string{
+		{"has space"}, {"a=b"}, {"a;b"}, {"tab\tname"}, {"ctl\x01"}, {"nbsp\u00a0x"},
+		{strings.Repeat("c", 257)},
+	} {
+		if _, err := s.Apply(SiteCachePatch{Host: "a.com", AuthCookies: &bad}, false); err == nil {
+			t.Errorf("cookie names %q accepted", bad)
+		}
+	}
+	many := make([]string, maxSiteCacheAuthCookies+1)
+	for i := range many {
+		many[i] = "c" + strconv.Itoa(i)
+	}
+	if _, err := s.Apply(SiteCachePatch{Host: "a.com", AuthCookies: &many}, false); err == nil || !strings.Contains(err.Error(), "too many") {
+		t.Fatalf("%d auth cookies: err = %v (they used to be truncated silently)", len(many), err)
+	}
+	if got, _ := s.Get("a.com"); len(got.AuthCookies) != len(ok) {
+		t.Fatalf("a rejected patch changed the stored list: %v", got.AuthCookies)
+	}
+	dups := []string{"Sess", "sess", " SESS "}
+	if e, err := s.Apply(SiteCachePatch{Host: "a.com", AuthCookies: &dups}, false); err != nil || len(e.AuthCookies) != 1 {
+		t.Fatalf("case-insensitive dedup: %v %v", err, e.AuthCookies)
+	}
+}
+
+func TestSiteCacheAuditLine(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/site-cache/set", nil)
+	r.RemoteAddr = "192.0.2.7:1234"
+	got := formatSiteCacheAudit(r.WithContext(adminCtx()), "set", "a.com", "ok", "static=static_lean micro=off")
+	want := `[site_cache] action=set host="a.com" result=ok actor=admin remote=192.0.2.7:1234 detail="static=static_lean micro=off"`
+	if got != want {
+		t.Fatalf("admin line:\n got %s\nwant %s", got, want)
+	}
+	many := []string{"h1.com", "h2.com", "h3.com", "h4.com", "h5.com", "h6.com", "h7.com"}
+	got = formatSiteCacheAudit(r.WithContext(scopedCtx(many...)), "remove", "h1.com\n[fake] x", "denied", "")
+	if !strings.Contains(got, `actor=scoped:h1.com,h2.com,h3.com,h4.com,h5.com,…(+2)`) || strings.Contains(got, "\n") {
+		t.Fatalf("scoped line (capped actor, no raw newline): %s", got)
+	}
+	// a caller-supplied field is bounded (a host can be ~1 MiB of header)
+	got = formatSiteCacheAudit(r.WithContext(adminCtx()), "remove", strings.Repeat("h", 100000), "notfound", strings.Repeat("d", 100000))
+	if len(got) > 2000 || !strings.Contains(got, "(+99744 bytes)") || !strings.Contains(got, "(+99488 bytes)") {
+		t.Fatalf("audit fields not clipped: %d bytes: %.200s", len(got), got)
+	}
+}
+
+// A stored opt-out whose host this build rejects but nginx can still serve (a
+// label ending in "-") keeps opting that host out: the frozen row fails
+// closed, it does not hand the host to a covering admin wildcard.
+func TestSiteCacheStore_FrozenInvalidHostStillOptsOut(t *testing.T) {
+	path := writeSiteCacheStoreFile(t, `[
+	 {"host":"*.example.com","generation":1758585600001,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"foo-.example.com","generation":1758585600002,"static":{"enabled":false,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"a b.example.com","generation":1758585600003,"static":{"enabled":false},"micro":{"enabled":false}}]`)
+	s := newSiteCacheStore(path)
+	var optOut bool
+	for _, r := range s.PolicyFeed() {
+		if r.Host == "foo-.example.com" && r.Static == nil && r.Micro == nil {
+			optOut = true
+		}
+		if strings.Contains(r.Host, " ") {
+			t.Fatalf("an edge-unmatchable host reached the feed: %q", r.Host)
+		}
+	}
+	if !optOut {
+		t.Fatalf("the frozen invalid-host opt-out is gone from the feed: %+v", s.PolicyFeed())
+	}
+	if key, ok := s.StatsKeyFor("foo-.example.com"); ok {
+		t.Fatalf("an opted-out host resolved to %q", key)
+	}
+	// a request host the strict validator rejects but the edge counts under
+	// the wildcard still drills down to it
+	if key, ok := s.StatsKeyFor("b-.example.com"); !ok || key != "*.example.com" {
+		t.Fatalf("StatsKeyFor(b-.example.com) = %q, %v; want *.example.com (the edge counts it there)", key, ok)
+	}
+}
+
+// Cookie names are deduplicated the way the edge compares them (ASCII case
+// fold only): a Unicode fold would merge "\u212aname" (Kelvin sign) with
+// "kname", keep the first — which the edge never matches to a "kname" cookie.
+func TestSiteCacheCookieDedupASCIIOnly(t *testing.T) {
+	got, err := normalizeCookieNames([]string{"\u212aname", "kname", "KNAME"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("deduped to %q, want the Kelvin-sign name and one of kname/KNAME", got)
+	}
+}
+
+func TestSiteCacheCanonHostIsAFixedPoint(t *testing.T) {
+	for _, in := range []string{"a.com .", " a.com. . ", "A.com.:80", "a.com..", ".", " "} {
+		h := siteCacheCanonHost(in)
+		if siteCacheCanonHost(h) != h {
+			t.Fatalf("canon(%q) = %q is not a fixed point (→ %q)", in, h, siteCacheCanonHost(h))
+		}
+	}
+	if got := siteCacheCanonHost("a.com ."); got != "a.com" {
+		t.Fatalf("canon(\"a.com .\") = %q", got)
+	}
+}
+
+// StatsKeyFor resolves a queried request host exactly as the edge's
+// normalize_host would (ASCII fold, one trailing dot, port), so a host no
+// policy could have — a mid-host "*", a Unicode space — still drills down to
+// the wildcard the edge counts it under; a non-ASCII case variant is NOT
+// folded onto an exact ASCII policy.
+func TestSiteCacheStore_StatsKeyForMirrorsEdgeNormalize(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := SiteCacheTier{Enabled: true, Recipe: "static_lean"}
+	_, _ = s.Set(SiteCacheEntry{Host: "*.example.com", Static: on})
+	_, _ = s.Set(SiteCacheEntry{Host: "k.example.com", Static: on})
+	for host, want := range map[string]string{
+		"a*b.example.com":    "*.example.com",
+		"a b.example.com":    "*.example.com",
+		"K.example.com":      "*.example.com", // Kelvin sign: nginx/Lua do not fold it
+		"K.EXAMPLE.COM.":     "k.example.com",
+		"k.example.com:8443": "k.example.com",
+		"x.example.com.":     "*.example.com",
+	} {
+		if key, ok := s.StatsKeyFor(host); !ok || key != want {
+			t.Errorf("StatsKeyFor(%q) = %q, %v; want %q", host, key, ok, want)
+		}
+	}
+	// ASCII-only fold in the canonical form too: a Kelvin-sign policy host
+	// fails the validator instead of becoming k.example.com
+	if _, err := s.Apply(SiteCachePatch{Host: "K2.example.com", Static: &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("static_lean")}}, false); err == nil {
+		t.Fatal("a non-ASCII policy host was folded and accepted")
 	}
 }

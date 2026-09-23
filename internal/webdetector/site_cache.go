@@ -58,6 +58,10 @@ const maxSiteCacheEntries = 5000
 // maxSiteCacheAuthCookies caps the per-vhost extra auth-cookie-name list.
 const maxSiteCacheAuthCookies = 32
 
+// maxSiteCacheHostLen is the DNS name limit a policy host (and a stats key)
+// must fit.
+const maxSiteCacheHostLen = 253
+
 // cacheTierKind selects which recipe vocabulary a tier validates against.
 type cacheTierKind int
 
@@ -205,7 +209,8 @@ type siteCacheStore struct {
 }
 
 // siteCacheFrozenRow is one stored row this build could not load; host is its
-// normalized host, "" when that is unreadable too.
+// canonical host (siteCacheCanonHost — possibly one this build considers
+// invalid), "" when the row has none.
 type siteCacheFrozenRow struct {
 	host string
 	raw  json.RawMessage
@@ -259,43 +264,99 @@ func newSiteCacheStore(path string) *siteCacheStore {
 	return s
 }
 
-// normalize lowercases the host, strips a ":port" and trailing dots, and
-// accepts only exact hosts and "*.suffix" wildcards — the same key and rule
-// class as the edge (cfm_hostmatch.lua normalize_host / is_supported_pattern),
-// which strips the port too: a stored "a.com:443" always acted as "a.com"
-// there, so keeping the port here made the opt-out rows and StatsKeyFor
-// disagree with the edge. (A NEW policy with a port is rejected in Apply; this
-// strip keeps loading, and every lookup, edge-faithful.) An IPv6 literal is
-// rejected ("[").
-func (s *siteCacheStore) normalize(host string) (string, bool) {
-	h := strings.ToLower(strings.TrimSpace(host))
-	// No whitespace or control character inside a host: it is never valid
-	// there, and trimming it would make normalize non-idempotent ("a.com ."
-	// → "a.com " → "a.com"), so an Apply lookup would miss the stored entry
-	// and replace it instead of merging.
-	if strings.IndexFunc(h, func(r rune) bool { return r <= ' ' || r == 0x7f || unicode.IsSpace(r) }) >= 0 {
-		return "", false
-	}
-	// Port first, then every trailing dot, so the result is a fixed point:
-	// "a.com.:443" and "a.com.." both become "a.com" (normalizing the result
-	// again changes nothing, which the Apply lookup and the setLocked store
-	// rely on to hit the same key).
+// siteCacheCanonHost is the canonical key form of a host: lowercased and
+// trimmed, a ":port" and every trailing dot stripped — the same key the edge
+// computes (cfm_hostmatch.lua normalize_host strips the port too: a stored
+// "a.com:443" always acted as "a.com" there). Port first, then the dots, so
+// "a.com.:443" and "a.com.." both give "a.com". No validation: normalize adds
+// it. (A stored row this build cannot load is keyed on this, so `remove` can
+// still find it even when its host no longer validates.)
+func siteCacheCanonHost(host string) string {
+	// ASCII-only case fold, as nginx and the edge: a Unicode fold would turn
+	// "\u212a.example.com" (Kelvin sign) into "k.example.com" and slip past
+	// the validator's punycode rule; unfolded, it fails closed.
+	h := siteCacheASCIILower(strings.TrimSpace(host))
 	if i := strings.IndexByte(h, ':'); i >= 0 {
 		h = h[:i]
 	}
-	h = strings.TrimRight(h, ".")
-	if h == "" {
-		return "", false
+	// Until stable, so it is a fixed point for any input ("a.com ." → "a.com").
+	for {
+		t := strings.TrimSpace(strings.TrimRight(h, "."))
+		if t == h {
+			return h
+		}
+		h = t
 	}
-	if strings.ContainsAny(h, "?[") {
-		return "", false
-	}
-	if strings.Contains(h, "*") {
-		if !strings.HasPrefix(h, "*.") || strings.Contains(h[2:], "*") {
-			return "", false
+}
+
+// siteCacheASCIILower lowercases A-Z only, like Lua string.lower (the edge
+// compares cookie names that way).
+func siteCacheASCIILower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
 		}
 	}
+	return string(b)
+}
+
+// normalize returns host's canonical key when it is a valid host or
+// "*.suffix" pattern (siteCacheHostError), else "", false. It is a fixed point
+// — normalizing its result changes nothing — which the Apply lookup and the
+// setLocked store rely on to hit the same key. (A NEW policy with a port is
+// rejected in Apply; the strip keeps loading, and every lookup, edge-faithful.)
+func (s *siteCacheStore) normalize(host string) (string, bool) {
+	h := siteCacheCanonHost(host)
+	if siteCacheHostError(h) != nil {
+		return "", false
+	}
 	return h, true
+}
+
+// siteCacheHostError validates a canonical host: an exact DNS-style name or a
+// single leading "*." wildcard over one. Labels are 1-63 characters of
+// [a-z0-9_-], not starting or ending with "-"; the whole name is at most 253.
+// An internationalized name must be given in punycode (xn--), as the Host
+// header carries it. A wildcard needs at least two labels after "*." — "*.com"
+// would arm every .com vhost on the node. Whitespace, control characters,
+// "?", "[" and a second "*" are all invalid characters here (the edge matcher
+// supports nothing richer, and an IPv6 literal is not a vhost).
+func siteCacheHostError(h string) error {
+	if h == "" {
+		return errors.New("empty host")
+	}
+	if len(h) > maxSiteCacheHostLen {
+		return fmt.Errorf("longer than %d characters", maxSiteCacheHostLen)
+	}
+	name := h
+	if strings.HasPrefix(h, "*.") {
+		name = h[2:]
+		if !strings.Contains(name, ".") {
+			return errors.New(`a wildcard needs at least two labels after "*." (e.g. *.example.com, not *.com)`)
+		}
+	}
+	for _, label := range strings.Split(name, ".") {
+		if label == "" {
+			return errors.New(`empty label (".." or a leading dot)`)
+		}
+		if len(label) > 63 {
+			return errors.New("a label is longer than 63 characters")
+		}
+		for _, r := range label {
+			switch {
+			case r >= 0x80:
+				return errors.New("not ASCII: give an internationalized name in its punycode (xn--) form")
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			default:
+				return fmt.Errorf("invalid character %q", r)
+			}
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return errors.New(`a label cannot start or end with "-"`)
+		}
+	}
+	return nil
 }
 
 // parseCacheTTL accepts "<n><unit>" with unit s/m/h/d (time.ParseDuration does
@@ -345,12 +406,16 @@ func normalizeCacheTier(t SiteCacheTier, kind cacheTierKind) (SiteCacheTier, err
 	return out, nil
 }
 
-// normalizeCookieNames trims, de-duplicates (case-insensitively) and caps the
-// list. Cookie names keep their original case (some apps are case-sensitive);
-// dedup is case-insensitive to avoid near-duplicates.
-func normalizeCookieNames(in []string) []string {
+// normalizeCookieNames trims and de-duplicates (case-insensitively) the list
+// and validates it: at most maxSiteCacheAuthCookies names, none the edge can
+// never match (siteCacheCookieNameError). Such a name must be an error, not
+// stored: a configured bypass that silently never fires is exactly the
+// per-user leak the list exists to prevent. Over-long lists used to be
+// truncated silently for the same effect. Names keep their original case
+// (the edge compares case-insensitively; dedup is case-insensitive too).
+func normalizeCookieNames(in []string) ([]string, error) {
 	if len(in) == 0 {
-		return nil
+		return nil, nil
 	}
 	seen := make(map[string]struct{}, len(in))
 	out := make([]string, 0, len(in))
@@ -359,27 +424,49 @@ func normalizeCookieNames(in []string) []string {
 		if c == "" {
 			continue
 		}
-		key := strings.ToLower(c)
+		if err := siteCacheCookieNameError(c); err != nil {
+			return nil, fmt.Errorf("auth cookie %q: %v", c, err)
+		}
+		key := siteCacheASCIILower(c) // as the edge's string.lower: a Unicode fold would dedup names the edge tells apart
 		if _, dup := seen[key]; dup {
 			continue
 		}
 		seen[key] = struct{}{}
 		out = append(out, c)
-		if len(out) >= maxSiteCacheAuthCookies {
-			break
-		}
+	}
+	if len(out) > maxSiteCacheAuthCookies {
+		return nil, fmt.Errorf("too many auth cookies (%d, max %d)", len(out), maxSiteCacheAuthCookies)
 	}
 	sort.Strings(out)
 	if len(out) == 0 {
-		return nil
+		return nil, nil
 	}
-	return out
+	return out, nil
+}
+
+// siteCacheCookieNameError rejects a cookie name the edge can never match:
+// micro_cookie_verdict splits the Cookie header on ";" and takes each name up
+// to "=" or ASCII whitespace, so a name holding one of those never equals a
+// request cookie's name. A control character or other whitespace is rejected
+// too (never part of a real cookie name). Anything else is matchable — ",", quotes, brackets (PHP
+// array cookies: cart[id]) — and accepted, even though RFC 6265 would not
+// call it a token. At most 256 bytes.
+func siteCacheCookieNameError(c string) error {
+	if len(c) > 256 {
+		return errors.New("longer than 256 bytes")
+	}
+	for _, r := range c {
+		if r <= ' ' || r == 0x7f || unicode.IsSpace(r) || r == '=' || r == ';' {
+			return fmt.Errorf("invalid character %q (the edge reads a cookie name up to \"=\" or whitespace, so a name with whitespace, \"=\", \";\" or a control character never matches)", r)
+		}
+	}
+	return nil
 }
 
 func (s *siteCacheStore) normalizeEntry(in SiteCacheEntry) (SiteCacheEntry, error) {
-	h, ok := s.normalize(in.Host)
-	if !ok {
-		return SiteCacheEntry{}, errors.New("invalid or unsupported host (exact host or *.suffix only)")
+	h := siteCacheCanonHost(in.Host)
+	if err := siteCacheHostError(h); err != nil {
+		return SiteCacheEntry{}, fmt.Errorf("invalid host %q: %v", siteCacheAuditClip(in.Host, 256), err)
 	}
 	r := in
 	r.Host = h
@@ -403,7 +490,11 @@ func (s *siteCacheStore) normalizeEntry(in SiteCacheEntry) (SiteCacheEntry, erro
 	}
 	r.Micro = mi
 
-	r.AuthCookies = normalizeCookieNames(r.AuthCookies)
+	ac, err := normalizeCookieNames(r.AuthCookies)
+	if err != nil {
+		return SiteCacheEntry{}, err
+	}
+	r.AuthCookies = ac
 	if r.Generation < 0 {
 		r.Generation = 0
 	}
@@ -440,9 +531,9 @@ func (s *siteCacheStore) Apply(p SiteCachePatch, scoped bool) (SiteCacheEntry, e
 	if strings.Contains(p.Host, ":") {
 		return SiteCacheEntry{}, errors.New("host must not include a port (the edge keys policies on the bare host)")
 	}
-	h, ok := s.normalize(p.Host)
-	if !ok {
-		return SiteCacheEntry{}, errors.New("invalid or unsupported host (exact host or *.suffix only)")
+	h := siteCacheCanonHost(p.Host)
+	if err := siteCacheHostError(h); err != nil {
+		return SiteCacheEntry{}, fmt.Errorf("invalid host %q: %v", siteCacheAuditClip(p.Host, 256), err)
 	}
 	for _, tp := range []*SiteCacheTierPatch{p.Static, p.Micro} {
 		if tp != nil && tp.Recipe != nil && strings.TrimSpace(*tp.Recipe) == "" {
@@ -463,7 +554,7 @@ func (s *siteCacheStore) Apply(p SiteCachePatch, scoped bool) (SiteCacheEntry, e
 			// an empty one would silently drop that policy's settings (its
 			// cookie rails first). Only an explicit off is allowed — it
 			// replaces that policy (setLocked), which the caller asked for.
-			return SiteCacheEntry{}, errors.New(siteCacheUnloadableMsg + "; turning caching on for it is refused — remove it first (or turn it off, which replaces it), or upgrade")
+			return SiteCacheEntry{}, errors.New(siteCacheUnloadableMsg + "; turning caching on for it is refused — remove it first (or turn it off, which replaces it), or, if a newer version wrote it, upgrade")
 		}
 	}
 	applySiteCacheTierPatch(&merged.Static, p.Static)
@@ -567,8 +658,12 @@ func (s *siteCacheStore) frozenWithoutLocked(h string) []siteCacheFrozenRow {
 // all-off entry (an opt-out, what the CLI's `off` sets) to keep it uncached
 // there too.
 func (s *siteCacheStore) Remove(host string) bool {
-	h, ok := s.normalize(host)
-	if !ok {
+	// Canonical form, not normalize: a host this build considers invalid can
+	// still name a stored row it could not load (an older build accepted the
+	// host). A loaded entry always has a valid host, so this changes nothing
+	// for those.
+	h := siteCacheCanonHost(host)
+	if h == "" {
 		return false
 	}
 	s.mu.Lock()
@@ -680,19 +775,6 @@ func (s *siteCacheStore) List() []SiteCacheEntry {
 	return out
 }
 
-// HasAny reports whether any vhost has at least one ENABLED tier. (The edge
-// computes its own has_any from the feed; this is kept for tests.)
-func (s *siteCacheStore) HasAny() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, e := range s.entries {
-		if e.Static.Enabled || e.Micro.Enabled {
-			return true
-		}
-	}
-	return false
-}
-
 // CacheTierRow is one tier in the compact edge feed. Referenced by pointer in
 // CachePolicyRow so a disabled tier is OMITTED from the wire (a value-typed
 // field would always marshal, `omitempty` being a no-op on structs).
@@ -774,7 +856,8 @@ func (s *siteCacheStore) hasFrozenLocked(h string) bool {
 
 // FrozenHosts returns the sorted, de-duplicated hosts of the stored rows this
 // build cannot load (see frozen) and that have no loaded entry — each treated
-// as an opt-out at the edge. (A host with both exists only after a hand edit,
+// as an opt-out at the edge when the edge can match it (siteCacheEdgeMatchable;
+// a host it cannot match never reaches it anyway). (A host with both exists only after a hand edit,
 // until its next set; its loaded entry is what the edge uses.)
 func (s *siteCacheStore) FrozenHosts() []string {
 	s.mu.RLock()
@@ -794,12 +877,13 @@ func (s *siteCacheStore) FrozenHosts() []string {
 
 // siteCacheUnloadableMsg is the API's explanation for a host whose stored
 // policy this build cannot load.
-const siteCacheUnloadableMsg = "this host has a stored policy this build cannot load (e.g. from a newer version; the node's daemon log has the details): it is treated as opted out, never cached"
+const siteCacheUnloadableMsg = "this host has a stored policy this build cannot load (e.g. from a newer version, or a host this version no longer accepts; the node's daemon log has the details): it is treated as opted out, never cached"
 
 // feedEntriesLocked is what the feed (and StatsKeyFor) is computed over: the
-// loaded entries, plus an all-off stand-in for the host of each frozen row
-// that has no loaded entry — a row this build cannot read fails closed, as an
-// opt-out, instead of vanishing and leaving the host to a covering wildcard.
+// loaded entries, plus an all-off stand-in for the (edge-matchable) host of
+// each frozen row that has no loaded entry — a row this build cannot read
+// fails closed, as an opt-out, instead of vanishing and leaving the host to a
+// covering wildcard.
 // A loaded entry of the same host wins. Caller holds s.mu; the result is
 // READ-ONLY (with nothing frozen it is s.entries itself).
 func (s *siteCacheStore) feedEntriesLocked() map[string]SiteCacheEntry {
@@ -811,11 +895,72 @@ func (s *siteCacheStore) feedEntriesLocked() map[string]SiteCacheEntry {
 		out[h] = e
 	}
 	for _, f := range s.frozen {
-		if _, live := out[f.host]; f.host != "" && !live {
+		if _, live := out[f.host]; !live && siteCacheEdgeMatchable(f.host) {
 			out[f.host] = SiteCacheEntry{Host: f.host}
 		}
 	}
 	return out
+}
+
+// siteCacheEdgeNormalizeHost is an exact port of cfm_hostmatch.lua
+// normalize_host, which the edge applies to the request Host: ASCII lowercase,
+// ONE trailing dot stripped, then a ":port" (an IPv6 literal keeps its
+// brackets). For any valid policy host it returns the same key as
+// siteCacheCanonHost.
+func siteCacheEdgeNormalizeHost(raw string) string {
+	h := siteCacheASCIILower(strings.TrimSpace(raw))
+	if h == "" {
+		return ""
+	}
+	h = strings.TrimSuffix(h, ".")
+	if strings.HasPrefix(h, "[") {
+		if i := strings.IndexByte(h, ']'); i >= 0 {
+			return h[:i+1]
+		}
+		return h
+	}
+	if i := strings.IndexByte(h, ':'); i >= 0 {
+		h = h[:i]
+	}
+	return h
+}
+
+// siteCacheEdgeMatchable reports whether the edge can match h as a policy key
+// (cfm_hostmatch.lua is_supported_pattern; a stand-in nginx would never route
+// a request to — "/" or ".." in it — is merely a dead opt-out):
+// non-empty, no whitespace or control character, no "?" or "[", and "*" only
+// as a leading "*.". Looser than siteCacheHostError ON PURPOSE: an older build
+// accepted hosts this one rejects (a label ending in "-", say), and nginx can
+// still serve such a host — its frozen row must keep opting it out, or a
+// covering admin wildcard would start caching it. (An all-off stand-in is
+// emitted only under a covering armed wildcard, so this never widens caching.)
+func siteCacheEdgeMatchable(h string) bool {
+	if h == "" || strings.ContainsAny(h, "?[") {
+		return false
+	}
+	if strings.IndexFunc(h, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
+		return false // the bytes nginx refuses in a Host; a Unicode space it passes
+	}
+	if i := strings.IndexByte(h, '*'); i >= 0 {
+		return strings.HasPrefix(h, "*.") && !strings.Contains(h[2:], "*")
+	}
+	return true
+}
+
+// ArmedKey reports whether key — a policy key as the edge counts stats under
+// (an exact host or a "*.suffix" pattern) — is a loaded entry with a tier on.
+func (s *siteCacheStore) ArmedKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	h, ok := s.normalize(k)
+	if !ok || h != k {
+		// Only the canonical key: the stats store keys rows on the pushed
+		// string, so "a.com:1", "a.com." … would each take a row of the cap.
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, ok := s.entries[h]
+	return ok && siteCacheArmed(e)
 }
 
 // siteCacheWildcardCovers reports whether any "*.suffix" pattern matches host
@@ -852,8 +997,11 @@ func siteCacheFeedLess(a, b string) bool {
 // wildcard IN THE FEED that covers host — an armed one (its key), or an
 // all-off one a broader armed wildcard covers (an opt-out: nothing).
 func (s *siteCacheStore) StatsKeyFor(host string) (string, bool) {
-	h, ok := s.normalize(host)
-	if !ok {
+	// The QUERIED host is a request host, not a policy: resolve it exactly as
+	// the edge does (siteCacheEdgeNormalizeHost), not with the strict
+	// create-time validator — the edge counts any host nginx passes it.
+	h := siteCacheEdgeNormalizeHost(host)
+	if h == "" {
 		return "", false
 	}
 	s.mu.RLock()
@@ -937,8 +1085,8 @@ func (s *siteCacheStore) load() {
 			// Loud, not silent — and kept (as stored, re-indented by the next
 			// save): a newer build's policy (a downgrade) or a hand-edit typo
 			// must not be deleted by this build.
-			fh, _ := s.normalize(e.Host)
-			logging.Logf("[webdetector][site-cache] cannot load stored policy for %q: %v — kept in the file, not served; unless the host also has a readable row, it is treated as opted out (path=%s)", e.Host, err, s.path)
+			fh := siteCacheCanonHost(e.Host)
+			logging.Logf("[webdetector][site-cache] cannot load stored policy for %q: %v — kept in the file, not served; unless the host also has a readable row, it is treated as opted out (path=%s)", siteCacheAuditClip(e.Host, 256), err, s.path)
 			s.frozen = append(s.frozen, siteCacheFrozenRow{host: fh, raw: append(json.RawMessage(nil), raw...)})
 			if e.Generation > s.genHWM && e.Generation < siteCacheMaxGeneration {
 				s.genHWM = e.Generation
