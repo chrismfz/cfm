@@ -17,6 +17,7 @@
 //   GET  /api/v1/site-cache/get?host=            — one vhost's policy
 //   POST /api/v1/site-cache/set                  — merge-upsert (body = SiteCachePatch);
 //                                                  both tiers off = an explicit opt-out
+//                                                  (also under a broader armed wildcard)
 //   POST /api/v1/site-cache/remove?host=         — DELETE a vhost's policy (the host
 //                                                  then follows a covering *.suffix)
 //   POST /api/v1/site-cache/purge?host= | ?all=1 — bump generation (all=admin)
@@ -104,7 +105,9 @@ func (e *Engine) handleSiteCacheGet(w http.ResponseWriter, r *http.Request) {
 // Clearing takes an explicit value: `"strict_cookies":false`,
 // `"auth_cookies":[]`, `"ttl":""`. A SiteCacheEntry as returned by get is
 // accepted too, but its omitempty fields drop exactly those values, so posting
-// an edited entry back cannot clear them (it keeps them — the safe direction).
+// an edited entry back cannot clear them (it keeps them — the safe direction);
+// and it always carries both tiers' "enabled", so for a NEW host with both
+// false it creates an opt-out.
 // generation / created_at / scope_hosts in a body are ignored: server-managed.
 func (e *Engine) handleSiteCacheSet(w http.ResponseWriter, r *http.Request) {
 	if e == nil {

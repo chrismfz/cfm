@@ -484,7 +484,7 @@ func TestSiteCacheStore_StatsKeyFor(t *testing.T) {
 	}{
 		{"x.shop.example.com", "*.shop.example.com", true}, // most specific wins
 		{"a.example.com", "*.example.com", true},
-		{"y.staged.example.com", "*.example.com", true},  // an unarmed wildcard is skipped
+		{"y.staged.example.com", "", false},              // an all-off wildcard under an armed one opts out
 		{"armed.example.com", "armed.example.com", true}, // exact wins, never its wildcard
 		{"tenant.example.com", "", false},                // opt-out: counted nowhere
 		{"example.com", "", false},                       // bare suffix
@@ -612,6 +612,182 @@ func TestSiteCacheStore_GenerationsUniqueStoreWide(t *testing.T) {
 			t.Fatalf("purge-all reissued %d (%s) for %s", e.Generation, other, e.Host)
 		}
 		seen[e.Generation] = e.Host
+	}
+}
+
+// Re-arming issues a fresh generation: a vhost is often turned off BECAUSE
+// something wrong got cached, so turning it back on must not serve the pre-off
+// objects (the static zone keeps them for days). A plain config change keeps it.
+func TestSiteCacheStore_RearmIssuesFreshGeneration(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := func(r string) *SiteCacheTierPatch {
+		return &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr(r)}
+	}
+	off := &SiteCacheTierPatch{Enabled: boolPtr(false)}
+	gen := func() int64 { e, _ := s.Get("a.com"); return e.Generation }
+	apply := func(p SiteCachePatch) {
+		t.Helper()
+		p.Host = "a.com"
+		if _, err := s.Apply(p, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	apply(SiteCachePatch{Static: on("static_lean"), Micro: on("micro_safe")})
+	g0 := gen()
+	apply(SiteCachePatch{Micro: &SiteCacheTierPatch{TTL: strPtr("30s")}})
+	if gen() != g0 {
+		t.Fatal("a TTL change changed the generation")
+	}
+	apply(SiteCachePatch{Micro: off})
+	apply(SiteCachePatch{Micro: on("micro_safe")})
+	if gen() != g0 {
+		t.Fatal("micro off→on with static armed throughout changed the generation (it would purge the static cache)")
+	}
+	apply(SiteCachePatch{Static: off})
+	apply(SiteCachePatch{Static: on("static_lean")})
+	g1 := gen()
+	if g1 == g0 {
+		t.Fatal("static off→on kept the generation: the pre-off static objects would be HITs again")
+	}
+	apply(SiteCachePatch{Static: off, Micro: off}) // `off`
+	if gen() != g1 {
+		t.Fatal("turning off changed the generation")
+	}
+	apply(SiteCachePatch{Micro: on("micro_safe")}) // re-armed, micro only
+	if gen() == g1 {
+		t.Fatal("all-off → armed kept the generation")
+	}
+}
+
+// A narrower wildcard turned all-off under a broader armed one is an opt-out
+// for everything it matches, like an exact host.
+func TestSiteCacheStore_WildcardOptOut(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := SiteCacheTier{Enabled: true, Recipe: "static_lean"}
+	_, _ = s.Set(SiteCacheEntry{Host: "*.example.com", Static: on})
+	_, _ = s.Set(SiteCacheEntry{Host: "*.shop.example.com", Static: SiteCacheTier{Recipe: "static_lean"}})
+	var row *CachePolicyRow
+	for _, r := range s.PolicyFeed() {
+		if r.Host == "*.shop.example.com" {
+			r := r
+			row = &r
+		}
+	}
+	if row == nil || row.Static != nil || row.Micro != nil {
+		t.Fatalf("want a tier-less opt-out row for *.shop.example.com, got %+v", row)
+	}
+	if key, ok := s.StatsKeyFor("x.shop.example.com"); ok {
+		t.Fatalf("an opted-out sub-host resolved to %q", key)
+	}
+	if key, ok := s.StatsKeyFor("y.example.com"); !ok || key != "*.example.com" {
+		t.Fatalf("the broader wildcard's other sub-hosts: %q %v", key, ok)
+	}
+}
+
+func writeSiteCacheStoreFile(t *testing.T, raw string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "site_cache.json")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Load: duplicates keep the higher generation in either order; a legacy
+// scope_hosts list alone triggers the rewrite; a normalized file is never
+// rewritten; a row this build cannot load blocks the rewrite (it stays on disk).
+func TestSiteCacheStore_LoadRewriteRules(t *testing.T) {
+	// reversed order: the lower generation comes first
+	path := writeSiteCacheStoreFile(t, `[
+	 {"host":"A.com","generation":5,"static":{"enabled":false},"micro":{"enabled":true,"recipe":"micro_safe"}},
+	 {"host":"a.com","generation":9000,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`)
+	if e, _ := newSiteCacheStore(path).Get("a.com"); e.Generation != 9000 {
+		t.Fatalf("dedupe kept gen %d, want 9000", e.Generation)
+	}
+
+	// scope_hosts alone
+	path = writeSiteCacheStoreFile(t, `[{"host":"b.com","generation":7,"scope_hosts":["b.com","secret.com"],"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`)
+	newSiteCacheStore(path)
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "secret.com") {
+		t.Fatalf("a legacy scope_hosts list alone did not rewrite the file:\n%s", b)
+	}
+
+	// no churn: a store the daemon wrote is left byte-for-byte alone
+	s := newSiteCacheTestStore(t)
+	if _, err := s.Apply(SiteCachePatch{Host: "c.com", Static: &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("static_lean")}}, true); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(s.path)
+	fi0, _ := os.Stat(s.path)
+	time.Sleep(10 * time.Millisecond)
+	newSiteCacheStore(s.path)
+	after, _ := os.ReadFile(s.path)
+	fi1, _ := os.Stat(s.path)
+	if string(before) != string(after) || !fi0.ModTime().Equal(fi1.ModTime()) {
+		t.Fatal("loading a normalized store rewrote it")
+	}
+
+	// a row this build cannot load: no rewrite, the row survives on disk
+	path = writeSiteCacheStoreFile(t, `[
+	 {"host":"d.com","generation":7,"scope_hosts":["d.com","secret.com"],"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"e.com","generation":8,"static":{"enabled":true,"recipe":"recipe_from_a_newer_build"},"micro":{"enabled":false}}]`)
+	s2 := newSiteCacheStore(path)
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "recipe_from_a_newer_build") {
+		t.Fatal("the load-time rewrite deleted a row this build could not load")
+	}
+	if e, _ := s2.Get("d.com"); len(e.ScopeHosts) != 1 {
+		t.Fatalf("scope_hosts not trimmed in memory: %v", e.ScopeHosts)
+	}
+}
+
+// Legacy stores counted generations per policy from 0, so an exact host and
+// its covering wildcard (or nested wildcards) could share one — the same key
+// space for that host. Load reissues the narrower one, and any value the edge
+// cannot render exactly.
+func TestSiteCacheStore_LoadReissuesCollidingGenerations(t *testing.T) {
+	path := writeSiteCacheStoreFile(t, `[
+	 {"host":"*.example.com","generation":0,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"*.shop.example.com","generation":0,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"a.example.com","generation":0,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"other.com","generation":0,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"big.com","generation":123456789012345678,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`)
+	s := newSiteCacheStore(path)
+	g := func(h string) int64 { e, _ := s.Get(h); return e.Generation }
+	if g("*.example.com") != 0 || g("other.com") != 0 {
+		t.Fatal("a generation no covering wildcard shares was reissued")
+	}
+	if g("*.shop.example.com") == 0 || g("a.example.com") == 0 || g("*.shop.example.com") == g("a.example.com") {
+		t.Fatalf("colliding generations not reissued uniquely: shop=%d a=%d", g("*.shop.example.com"), g("a.example.com"))
+	}
+	if b := g("big.com"); b >= siteCacheMaxGeneration {
+		t.Fatalf("an out-of-range generation was kept: %d", b)
+	}
+	if next, _ := s.Purge("other.com"); next.Generation >= siteCacheMaxGeneration {
+		t.Fatalf("the high-water mark followed the out-of-range value: %d", next.Generation)
+	}
+}
+
+// normalize is a fixed point, so Apply looks up the key setLocked stores under:
+// "a.com.." must merge onto the stored a.com, not replace it.
+func TestSiteCacheStore_NormalizeIsIdempotent(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	for _, in := range []string{"a.com.", "a.com..", " A.COM ", "a.com.:443"} {
+		h, ok := s.normalize(in)
+		if !ok || h != "a.com" {
+			t.Fatalf("normalize(%q) = %q, %v", in, h, ok)
+		}
+	}
+	if _, err := s.Apply(SiteCachePatch{Host: "a.com", StrictCookies: boolPtr(true),
+		Static: &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("static_lean")}}, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Apply(SiteCachePatch{Host: "a.com..", Micro: &SiteCacheTierPatch{TTL: strPtr("5s")}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.StrictCookies || !got.Static.Enabled {
+		t.Fatalf("a patch on \"a.com..\" replaced the stored a.com: %+v", got)
 	}
 }
 

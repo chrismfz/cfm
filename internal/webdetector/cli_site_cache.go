@@ -12,8 +12,8 @@
 //               [--strict-cookies|--no-strict-cookies] given (merge)
 //               [--auth-cookies a,b,c|--no-auth-cookies]
 //   off     <vhost>                          — caching OFF: both tiers off, kept as an
-//                                              opt-out that also overrides a covering
-//                                              *.suffix wildcard (alias: disable)
+//                                              opt-out that also overrides a broader
+//                                              armed *.suffix wildcard (alias: disable)
 //   remove  <vhost>                          — DELETE the policy: the host then follows a
 //                                              covering *.suffix wildcard (alias: rm)
 //   purge   <vhost> | --all                  — bump generation (--all is admin-only)
@@ -87,8 +87,9 @@ Usage:
   cfm webtop site-cache get <vhost>                   show one vhost's policy (JSON)
   cfm webtop site-cache set <vhost> [flags]           create/update a policy
   cfm webtop site-cache off <vhost>                   turn caching OFF (both tiers off; this
-                                                      also opts the vhost out of an admin's
-                                                      *.suffix wildcard)
+                                                      also opts the vhost — or a narrower
+                                                      *.suffix — out of a broader armed
+                                                      wildcard; re-arming starts a fresh cache)
   cfm webtop site-cache remove <vhost>                delete the vhost's policy (it then
                                                       follows a covering *.suffix wildcard)
   cfm webtop site-cache purge <vhost>                 invalidate a vhost's cache
@@ -213,7 +214,7 @@ func runSiteCacheSet(baseURL, host string, flags []string) error {
 	if err != nil {
 		return err
 	}
-	e, err := postSiteCachePatch(baseURL, patch)
+	e, err := postSiteCachePatch(baseURL, patch, "site-cache set")
 	if err != nil {
 		return err
 	}
@@ -223,7 +224,8 @@ func runSiteCacheSet(baseURL, host string, flags []string) error {
 }
 
 // runSiteCacheOff turns BOTH tiers off and KEEPS the entry: an explicit
-// opt-out. Deleting the entry (what `off` used to do) left a host under an
+// opt-out (for an exact host, or a narrower wildcard under a broader armed
+// one). Deleting the entry (what `off` used to do) left a host under an
 // admin's armed *.suffix wildcard cached by that wildcard — and deleted an
 // opt-out, turning caching back ON.
 func runSiteCacheOff(baseURL, host string) error {
@@ -232,15 +234,25 @@ func runSiteCacheOff(baseURL, host string) error {
 		Host:   host,
 		Static: &SiteCacheTierPatch{Enabled: &off},
 		Micro:  &SiteCacheTierPatch{Enabled: &off},
-	})
+	}, "site-cache off")
 	if err != nil {
 		return err
 	}
-	fmt.Printf("✓ caching OFF for %s (both tiers off; overrides any covering *.suffix wildcard — 'remove' deletes the policy instead)\n", e.Host)
+	what := "it"
+	if strings.HasPrefix(e.Host, "*.") {
+		what = "its sub-hosts"
+	}
+	note := ""
+	if e.CreatedAt.Equal(e.UpdatedAt) {
+		// A brand-new entry: `off` used to 404 on a host with no policy, so
+		// say what happened — a typo would otherwise pass unnoticed.
+		note = " No policy existed for it; an opt-out was stored."
+	}
+	fmt.Printf("✓ caching OFF for %s: both tiers off, and a broader armed *.suffix wildcard no longer caches %s either ('remove' deletes the policy instead).%s\n", e.Host, what, note)
 	return nil
 }
 
-func postSiteCachePatch(baseURL string, patch SiteCachePatch) (*SiteCacheEntry, error) {
+func postSiteCachePatch(baseURL string, patch SiteCachePatch, label string) (*SiteCacheEntry, error) {
 	b, _ := json.Marshal(patch)
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/site-cache/set"
 	resp, err := clihttp.Post(u, "application/json", bytes.NewReader(b))
@@ -250,17 +262,17 @@ func postSiteCachePatch(baseURL string, patch SiteCachePatch) (*SiteCacheEntry, 
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("site-cache set HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("%s HTTP %d: %s", label, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var result siteCacheResultResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("site-cache set: server returned non-JSON (%d bytes): %q", len(body), strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("%s: server returned non-JSON (%d bytes): %q", label, len(body), strings.TrimSpace(string(body)))
 	}
 	if result.Error != "" {
-		return nil, fmt.Errorf("site-cache set error: %s", result.Error)
+		return nil, fmt.Errorf("%s error: %s", label, result.Error)
 	}
 	if result.Entry == nil {
-		return nil, fmt.Errorf("site-cache set: server returned no entry")
+		return nil, fmt.Errorf("%s: server returned no entry", label)
 	}
 	return result.Entry, nil
 }

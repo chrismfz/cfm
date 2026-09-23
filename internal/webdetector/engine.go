@@ -4135,8 +4135,9 @@ func (e *Engine) HTTP3OverrideHasAny() bool {
 
 // ---------------------------------------------------------------------------
 // Site Cache per-vhost policy. Default for every vhost is "no caching"; entries
-// here are the OPT-IN list (static and/or micro tier), fed to the edge on
-// /nginx/cache/config — see site_cache.go and docs/site-cache-design.md.
+// here opt a vhost in (static and/or micro tier) or, with both tiers off, out
+// of a broader armed wildcard. Fed to the edge on /nginx/cache/config — see
+// site_cache.go and docs/site-cache-design.md.
 
 // SiteCacheApply merges a patch onto a vhost's stored policy (the /set API).
 // scoped marks a scoped (tenant) caller, recorded on a new entry's audit trail.

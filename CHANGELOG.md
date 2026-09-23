@@ -88,11 +88,14 @@ back-filled here — see the git/PR history for that period.
   re-added vhost, so objects cached under an earlier generation — static
   entries live for days — could become HITs again. A new or purged generation
   is now the wall clock in milliseconds, past every generation the store has
-  issued, so no value is ever reused (across vhosts too). Existing stores keep
-  their generations until the next purge. A purge still covers one policy: a
-  host that goes back under an admin's `*.suffix` wildcard (its own policy
-  removed) finds the wildcard's cache for it again, which only a purge of the
-  wildcard clears (docs/site-cache-design.md §10).
+  issued, so a new value is never one already in use (across vhosts too; the
+  one residual — a clock stepped back across a restart — is in
+  docs/site-cache-design.md §6). Existing generations are kept, except that a
+  vhost sharing one with a wildcard that covers it (every policy used to start
+  at 0) gets a fresh one on the first start of this version — its cache
+  refills once. A purge still covers one policy: a host that goes back under
+  an admin's `*.suffix` wildcard (its own policy removed) finds the wildcard's
+  cache for it again, which only a purge of the wildcard clears (§10).
 - **Site Cache: `set` changes only what you pass.** `cfm webtop site-cache set
   <vhost> --micro micro_safe --micro-ttl 30s` used to replace the whole policy
   with just those flags: it disabled the static tier and cleared
@@ -105,18 +108,22 @@ back-filled here — see the git/PR history for that period.
   wildcard.** `cfm webtop site-cache off <vhost>` deleted the vhost's policy,
   so under an armed `*.example.com` the vhost went on being cached by the
   wildcard. `off` (and `disable`) now keeps the policy with both tiers off,
-  and the edge feed carries it as an opt-out: the vhost caches nothing. To
-  delete a policy — the vhost then follows a covering wildcard — use the new
-  `remove` (`rm`); the API `remove` endpoint keeps that meaning.
+  and the edge feed carries it as an opt-out: the vhost caches nothing. The
+  same works for a narrower wildcard (`off '*.shop.example.com'` under an armed
+  `*.example.com`). Turning it back on starts from a fresh cache — objects
+  cached before the `off` are never served again. To delete a policy — the
+  vhost then follows a covering wildcard — use the new `remove` (`rm`); the API
+  `remove` endpoint keeps that meaning. `off` on a vhost with no policy stores
+  an opt-out and says so.
   - **Upgrade note:** an existing policy with both tiers off under an armed
     wildcard now opts that vhost out (the wildcard used to cache it). A new
     policy can be created all-off only by turning both tiers off explicitly
     (as `off` does); a `set` that would just stage a TTL for an unconfigured
     vhost is rejected.
 - **Site Cache: the most specific wildcard wins.** With `*.example.com` and
-  `*.shop.example.com` both armed, `x.shop.example.com` could get either policy
-  depending on feed order. The daemon and the edge now both put the longest
-  pattern first.
+  `*.shop.example.com` both armed, `x.shop.example.com` got the broader
+  `*.example.com` policy (the feed was alphabetical and the edge took the first
+  match). The daemon and the edge now both put the longest pattern first.
 - **Site Cache: a host with a `:port` is rejected.** The edge always ignored the
   port (a stored `a.com:443` acted as `a.com`), so the daemon's view of such a
   policy disagreed with what the edge did. A stored one is normalized to the

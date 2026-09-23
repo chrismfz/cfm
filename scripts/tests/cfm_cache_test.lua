@@ -421,6 +421,19 @@ ngx.var.http_x_cfm_cache_debug = nil
 ngx.var.scheme = nil; ngx.var.request_method = nil; ngx.var.uri = nil; ngx.var.http_cookie = nil
 ngx.var.http_authorization = nil
 
+-- ── a narrower WILDCARD turned off under a broader armed one opts out too ─────
+cache._rebuild_cache({
+  { host = "*.example.com", gen = 10, static = { on = true, recipe = "static_lean", ttl = "1h" } },
+  { host = "*.shop.example.com", gen = 40 },   -- opt-out row (no tier)
+})
+local sw = cache.policy_for("x.shop.example.com")
+check(sw ~= nil and sw.gen == 40 and sw.static == nil, "a wildcard opt-out wins over the broader armed wildcard")
+check(cache.policy_key_for("x.shop.example.com") == nil, "a wildcard opt-out is uncounted (nil stats key)")
+check(cache.policy_key_for("y.example.com") == "*.example.com", "the broader wildcard still counts its other sub-hosts")
+reset_cache_vars(); ngx.var.host = "x.shop.example.com"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "1", "a wildcard opt-out: static_gate leaves its sub-hosts uncached")
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)

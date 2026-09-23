@@ -502,15 +502,35 @@ first matching wildcard, so with `*.example.com` and `*.shop.example.com` both
 armed, `x.shop.example.com` gets the narrower policy. An all-off EXACT host
 that an armed wildcard covers is sent as an **opt-out row** (no tier): the
 edge's exact match wins, so that host caches nothing — a tenant can opt its own
-vhost out of an admin wildcard. (An all-off wildcard opts nothing out.)
+vhost out of an admin wildcard. An all-off NARROWER wildcard under a broader
+armed one is an opt-out row too (the edge takes the most specific wildcard);
+an all-off entry nothing armed covers is left out of the feed.
 
 **Off vs remove.** An exact entry with both tiers off IS the opt-out, so the
 two ways to stop caching differ under an armed wildcard:
 
 - **off** (CLI `off`/`disable`; API `set` with both tiers `enabled:false`) keeps
-  an all-off entry: the host is never cached, wildcard or not.
+  an all-off entry: the host is never cached, wildcard or not. The same works
+  for a narrower wildcard under a broader armed one (`off '*.shop.example.com'`
+  under `*.example.com`): the feed carries it as an opt-out row too, so none of
+  its sub-hosts are cached.
 - **remove** (CLI `remove`/`rm`; API `remove`) deletes the entry: the host is
   uncached unless an armed wildcard covers it, which then applies.
+
+Re-arming an entry (all-off → a tier on, or the static tier off → on) issues a
+fresh generation: nothing was served from the old key space while it was off,
+and a vhost is often turned off BECAUSE something wrong got cached (a per-user
+asset, §14), so turning it back on must not serve those objects again. A micro
+tier toggled while static stays armed keeps the generation (a new one would
+also drop the static cache).
+
+Stores written before generations were unique counted every policy from 0, so
+an exact host and its covering wildcard (or nested wildcards) could share a
+generation — the same key space for that host. On load, the narrower policy of
+such a pair gets a fresh generation (and so does a value the edge cannot render
+exactly, ≥ 1e14), and the file is rewritten — unless a stored row could not be
+loaded (e.g. a recipe from a newer build), in which case nothing is rewritten
+at load, so that row stays on disk.
 
 Because an all-off entry changes what a covering wildcard does, `set` creates
 a NEW entry all-off only when it turns both tiers off explicitly; a `set` that
@@ -536,8 +556,9 @@ normalized.
 
 Prefix `site-cache` added to `SharedAPIPrefixes()` so the shared apiserver
 proxies it to the engine mux. Never a bare `mux.HandleFunc` (a prefix-coverage
-test walks the table). Every add/remove/purge routes through one
-`logExcludeChange`-style choke point for lifecycle audit.
+test walks the table). Lifecycle audit of set/remove/purge (one
+`logExcludeChange`-style choke point) is planned, NOT built yet: today only a
+failed save is logged.
 
 ### 7.2 CLI (`cfm webtop site-cache …`)
 
@@ -568,7 +589,9 @@ Multi-page app, directory-routed (`internal/webui/embed.go`). Template =
 
 - a vhost table with **filter + sort** (host, tier(s) on, recipe, TTL, gen,
   updated, HIT-ratio), a per-row **OFF** and **Purge**, and a top-level
-  **Purge all** (admin);
+  **Purge all** (admin). OFF is the opt-out (`set` with both tiers off, §6),
+  not a delete — a delete (`remove`) lets a covering wildcard cache the vhost
+  again, so if the page offers it at all, it is a separate, labelled action;
 - a **Recipes** panel (§8). Per-URL verification is done with the
   `X-CFM-Cache` debug header (§8, §11.3), not a simulate panel.
 
@@ -632,10 +655,12 @@ reuses the tested precedent verbatim:
 - `RequireScopedOrAdmin` + `scopeAllowsVhosts(r, vhosts)` on every write
   (`challenge_access_api_handlers.go` shape): nil scope = admin (unrestricted);
   empty scope = deny; else every target host must be in the token allowlist.
-- Update re-checks **both** the existing entry's and the new host set (no
-  re-scoping escalation). Remove/Purge re-fetch and scope-check first.
-- List/stats are scope-filtered (`scopeFilterChallengeAccess` shape),
-  cross-tenant hosts redacted.
+- The host is the entry's immutable key, so checking the ONE requested host
+  (literally, lowercased — the store then only trims a trailing dot or a
+  port, so it can never land on a different host) covers set, get, remove and
+  purge alike; there is no re-scoping to guard against.
+- List/stats are scope-filtered with `vhostAllowed` on each row's key (an
+  out-of-scope row is left out, not redacted).
 - **Purge-all** (`?all=1`) is **admin-only**; a scoped `purge` is implicitly
   scoped to the caller's own vhosts.
 

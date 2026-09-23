@@ -11,9 +11,10 @@
 //   - The global default for every vhost is "NO caching".
 //   - A host appears here when an operator (or a scoped cPanel user, for their
 //     own domain) configured it: with at least one tier on, or with both tiers
-//     off — an explicit opt-out, which matters when an armed "*.suffix"
-//     wildcard covers the host (the exact entry wins, so it caches nothing).
-//     A host with NO entry follows the covering armed wildcard, if any.
+//     off — an explicit opt-out, which matters when a broader armed "*.suffix"
+//     wildcard covers the entry (the more specific entry wins at the edge, so
+//     everything it matches caches nothing). A host with NO entry follows the
+//     most specific covering armed wildcard, if any.
 //   - Two INDEPENDENT tiers per host — a static-asset cache and a micro-cache
 //     of HTML — each with its own recipe + TTL, so a vhost can run one or both.
 //   - Exact host by default (e.g. "myip.gr" and "www.myip.gr" are two entries);
@@ -100,6 +101,14 @@ type SiteCacheTier struct {
 	TTL     string `json:"ttl,omitempty"`    // e.g. "1s", "30s", "1h", "7d" (a bucket; the edge snaps)
 }
 
+// siteCacheArmed reports whether an entry has at least one tier on.
+func siteCacheArmed(e SiteCacheEntry) bool { return e.Static.Enabled || e.Micro.Enabled }
+
+// siteCacheMaxGeneration bounds a generation: the edge renders it with Lua
+// tostring (%.14g), exact only below 1e14. A stored value at or past it (only
+// a hand edit can produce one) is reissued on load.
+const siteCacheMaxGeneration = int64(1e14)
+
 // SiteCacheEntry is one vhost's cache policy: independent static + micro tiers,
 // a purge generation, and the cookie-handling advanced knobs (docs §4.1, §6).
 type SiteCacheEntry struct {
@@ -114,7 +123,12 @@ type SiteCacheEntry struct {
 	// load. It does not gate access — that is the live token scope at the API.
 	ScopeHosts []string `json:"scope_hosts,omitempty"`
 	// Generation is folded into the edge cache key; a Purge replaces it so old
-	// keys become unreachable and age out — a config change never touches it.
+	// keys become unreachable and age out. A config change keeps it, EXCEPT
+	// re-arming (an all-off entry gets a tier back, or the static tier goes
+	// from off to on), which also issues a new one: nothing was served from
+	// the old key space while it was off, and a vhost is often turned off
+	// BECAUSE something wrong got cached (a per-user asset, design §14), so
+	// turning it back on must not serve those objects again.
 	// A value must NEVER be issued twice: a remove + re-add that reused an old
 	// value (it used to restart at 0) made that value's still-on-disk objects
 	// (static entries live 7 days, and may carry a year of origin max-age) HITs
@@ -209,7 +223,7 @@ func newSiteCacheStore(path string) *siteCacheStore {
 	return s
 }
 
-// normalize lowercases the host, strips a trailing dot and a ":port", and
+// normalize lowercases the host, strips a ":port" and trailing dots, and
 // accepts only exact hosts and "*.suffix" wildcards — the same key and rule
 // class as the edge (cfm_hostmatch.lua normalize_host / is_supported_pattern),
 // which strips the port too: a stored "a.com:443" always acted as "a.com"
@@ -219,10 +233,14 @@ func newSiteCacheStore(path string) *siteCacheStore {
 // rejected ("[").
 func (s *siteCacheStore) normalize(host string) (string, bool) {
 	h := strings.ToLower(strings.TrimSpace(host))
-	h = strings.TrimSuffix(h, ".")
+	// Port first, then every trailing dot, so the result is a fixed point:
+	// "a.com.:443" and "a.com.." both become "a.com" (normalizing the result
+	// again changes nothing, which the Apply lookup and the setLocked store
+	// rely on to hit the same key).
 	if i := strings.IndexByte(h, ':'); i >= 0 {
 		h = h[:i]
 	}
+	h = strings.TrimRight(h, ".")
 	if h == "" {
 		return "", false
 	}
@@ -350,8 +368,8 @@ func (s *siteCacheStore) normalizeEntry(in SiteCacheEntry) (SiteCacheEntry, erro
 }
 
 // Set upserts a vhost's WHOLE cache policy (a full replace of the tiers and
-// cookie settings; the API uses the merging Apply — Set remains for tests and
-// in-process callers). Generation and CreatedAt are preserved on an existing
+// cookie settings). TESTS ONLY: the API uses the merging Apply, and Set skips
+// Apply's input rules (no :port, no implicit all-off new entry). Generation and CreatedAt are preserved on an existing
 // host (a config change never bumps the purge generation — only Purge does).
 // Returns the stored entry.
 //
@@ -421,6 +439,10 @@ func (s *siteCacheStore) setLocked(in SiteCacheEntry) (SiteCacheEntry, error) {
 	if existed {
 		norm.CreatedAt = prev.CreatedAt
 		norm.Generation = prev.Generation
+		if (!siteCacheArmed(prev) && siteCacheArmed(norm)) || (!prev.Static.Enabled && norm.Static.Enabled) {
+			// Re-armed: start from a fresh key space (see Generation).
+			norm.Generation = s.nextGenerationLocked()
+		}
 		// Preserve the original opt-in attribution: an admin edit (nil scope →
 		// empty ScopeHosts) must not erase which tenant first enabled caching.
 		norm.ScopeHosts = prev.ScopeHosts
@@ -587,8 +609,8 @@ type CacheTierRow struct {
 // CachePolicyRow is one vhost's policy as served to the edge on
 // /nginx/cache/config. A disabled tier is a nil pointer (absent from the
 // JSON), so the edge sees only what is armed. A row with NO tier is an opt-out:
-// an exact host whose policy is all-off, emitted only when an armed wildcard
-// covers it (see PolicyFeed). Deliberately omits created_at/updated_at/
+// an all-off entry (exact host or narrower wildcard), emitted only when a
+// broader armed wildcard covers it (see PolicyFeed). Deliberately omits created_at/updated_at/
 // scope_hosts — the edge does not need them.
 type CachePolicyRow struct {
 	Host          string        `json:"host"`
@@ -600,10 +622,12 @@ type CachePolicyRow struct {
 }
 
 // PolicyFeed returns the compact per-vhost feed for the edge: every vhost with
-// at least one ENABLED tier, plus an opt-out row (no tier) for each exact host
-// whose policy is all-off but that an armed "*.suffix" wildcard covers — the
-// edge's exact match wins, so that host caches nothing (a tenant can opt its
-// own vhost out of an admin wildcard). Order: exact hosts, then wildcards
+// at least one ENABLED tier, plus an opt-out row (no tier) for each all-off
+// entry that a broader armed "*.suffix" wildcard covers — an exact host, or a
+// narrower wildcard. The edge takes the exact match, else the most specific
+// wildcard, so everything the opt-out matches caches nothing (a tenant can opt
+// its own vhost out of an admin wildcard). An all-off entry nothing armed
+// covers is left out: it changes nothing. Order: exact hosts, then wildcards
 // MOST SPECIFIC (longest) first, so an edge that takes the first matching
 // wildcard applies *.shop.example.com, not *.example.com, to x.shop.example.com
 // (the edge sorts too; this keeps the wire deterministic). Read-only snapshot
@@ -620,10 +644,8 @@ func (s *siteCacheStore) PolicyFeed() []CachePolicyRow {
 	}
 	out := make([]CachePolicyRow, 0, len(s.entries))
 	for _, e := range s.entries {
-		if !e.Static.Enabled && !e.Micro.Enabled {
-			if strings.HasPrefix(e.Host, "*.") || !siteCacheWildcardCovers(armedWild, e.Host) {
-				continue
-			}
+		if !siteCacheArmed(e) && !siteCacheWildcardCovers(armedWild, e.Host) {
+			continue
 		}
 		row := CachePolicyRow{
 			Host:          e.Host,
@@ -645,7 +667,8 @@ func (s *siteCacheStore) PolicyFeed() []CachePolicyRow {
 
 // siteCacheWildcardCovers reports whether any "*.suffix" pattern matches host
 // (a proper sub-host: *.example.com covers a.example.com, not example.com —
-// the same rule as the edge glob and StatsKeyFor).
+// the same rule as the edge glob and StatsKeyFor). host may itself be a
+// narrower pattern: *.example.com covers *.shop.example.com.
 func siteCacheWildcardCovers(wilds []string, host string) bool {
 	for _, w := range wilds {
 		if strings.HasSuffix(host, w[1:]) {
@@ -668,12 +691,13 @@ func siteCacheFeedLess(a, b string) bool {
 	return a < b
 }
 
-// StatsKeyFor mirrors the edge's policy_key_for (cfm_cache.lua): the policy
-// key the edge counts host's cache statuses under, or ok=false when it counts
-// nothing for host. An exact policy wins even when it is all-off — an opt-out
-// row, or a staged policy no wildcard covers: either way the edge never counts
-// that host under a wildcard. Otherwise the most specific (longest) ARMED
-// "*.suffix" covering host, the order both the feed and the edge use.
+// StatsKeyFor mirrors the edge's policy_key_for (cfm_cache.lua) over the
+// PolicyFeed rows: the policy key the edge counts host's cache statuses under,
+// or ok=false when it counts nothing for host. An exact entry wins even when
+// it is all-off (an opt-out, or one nothing armed covers): the edge never
+// counts that host under a wildcard. Otherwise the most specific (longest)
+// wildcard IN THE FEED that covers host — an armed one (its key), or an
+// all-off one a broader armed wildcard covers (an opt-out: nothing).
 func (s *siteCacheStore) StatsKeyFor(host string) (string, bool) {
 	h, ok := s.normalize(host)
 	if !ok {
@@ -682,21 +706,34 @@ func (s *siteCacheStore) StatsKeyFor(host string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if e, exact := s.entries[h]; exact {
-		if e.Static.Enabled || e.Micro.Enabled {
+		if siteCacheArmed(e) {
 			return h, true
 		}
 		return "", false
 	}
-	best := ""
+	var armedWild []string
 	for k, e := range s.entries {
-		if !strings.HasPrefix(k, "*.") || (!e.Static.Enabled && !e.Micro.Enabled) {
-			continue
-		}
-		if strings.HasSuffix(h, k[1:]) && (best == "" || siteCacheFeedLess(k, best)) {
-			best = k
+		if strings.HasPrefix(k, "*.") && siteCacheArmed(e) {
+			armedWild = append(armedWild, k)
 		}
 	}
-	return best, best != ""
+	best, bestArmed := "", false
+	for k, e := range s.entries {
+		if !strings.HasPrefix(k, "*.") || !strings.HasSuffix(h, k[1:]) {
+			continue
+		}
+		armed := siteCacheArmed(e)
+		if !armed && !siteCacheWildcardCovers(armedWild, k) {
+			continue // not in the feed
+		}
+		if best == "" || siteCacheFeedLess(k, best) {
+			best, bestArmed = k, armed
+		}
+	}
+	if !bestArmed {
+		return "", false
+	}
+	return best, true
 }
 
 func (s *siteCacheStore) load() {
@@ -721,17 +758,19 @@ func (s *siteCacheStore) load() {
 	// rewrite: the file holds something the store now normalizes away — a
 	// legacy scope_hosts allowlist (trimmed to [host]; rewritten at once so
 	// the other tenants' domains do not linger on disk until an unrelated
-	// write), a host with a :port, or a duplicate host.
-	rewrite := false
+	// write), a non-normalized host (a :port, a trailing dot, upper case), a
+	// duplicate host, or a generation reissued below.
+	rewrite, dropped := false, 0
 	for _, e := range arr {
 		norm, err := s.normalizeEntry(e)
 		if err != nil {
 			// Loud, not silent: a hand-edit typo or a recipe this build no longer
 			// knows would otherwise drop a policy with no trace.
 			logging.Logf("[webdetector][site-cache] dropping stored policy for %q on load: %v (path=%s)", e.Host, err, s.path)
+			dropped++
 			continue
 		}
-		if len(norm.ScopeHosts) != len(e.ScopeHosts) || strings.Contains(e.Host, ":") {
+		if norm.Host != e.Host || !sameStrings(norm.ScopeHosts, e.ScopeHosts) {
 			rewrite = true
 		}
 		if norm.CreatedAt.IsZero() {
@@ -740,7 +779,7 @@ func (s *siteCacheStore) load() {
 		if norm.UpdatedAt.IsZero() {
 			norm.UpdatedAt = norm.CreatedAt
 		}
-		if norm.Generation > s.genHWM {
+		if norm.Generation > s.genHWM && norm.Generation < siteCacheMaxGeneration {
 			s.genHWM = norm.Generation
 		}
 		if prev, dup := s.entries[norm.Host]; dup {
@@ -756,11 +795,63 @@ func (s *siteCacheStore) load() {
 		}
 		s.entries[norm.Host] = norm
 	}
+
+	// Reissue a generation the edge cannot render exactly (>= 1e14: only a
+	// hand edit), and one that a covering wildcard shares. Before generations
+	// were unique store-wide, every policy started at 0, so an exact host and
+	// its wildcard (or two nested wildcards) could share a value — the same
+	// key space for that host, so a `remove` served the exact policy's old
+	// objects under the wildcard. A reissue only costs that policy's cache
+	// (refilled as MISSes).
+	var wilds []SiteCacheEntry
+	for _, e := range s.entries {
+		if strings.HasPrefix(e.Host, "*.") {
+			wilds = append(wilds, e)
+		}
+	}
+	for h, e := range s.entries {
+		reissue := e.Generation >= siteCacheMaxGeneration
+		for _, w := range wilds {
+			if w.Host != h && w.Generation == e.Generation && strings.HasSuffix(h, w.Host[1:]) {
+				reissue = true
+				break
+			}
+		}
+		if reissue {
+			old := e.Generation
+			e.Generation = s.nextGenerationLocked()
+			s.entries[h] = e
+			rewrite = true
+			logging.Logf("[webdetector][site-cache] reissued generation %d for %q on load (out of range, or shared with a covering wildcard) (path=%s)", old, h, s.path)
+		}
+	}
+
+	if rewrite && dropped > 0 {
+		// Rewriting now would delete the dropped rows from disk (a recipe
+		// this build does not know may be valid for the build it came from).
+		// The normalization stays in memory and reaches disk with the next
+		// change, as before.
+		logging.Logf("[webdetector][site-cache] not rewriting the normalized store on load: %d stored policies could not be loaded and are kept on disk until the next change (path=%s)", dropped, s.path)
+		return
+	}
 	if rewrite {
 		if err := s.saveLocked(); err != nil {
 			logging.Logf("[webdetector][site-cache] failed to rewrite the normalized store on load: %v (path=%s)", err, s.path)
 		}
 	}
+}
+
+// sameStrings reports whether two string lists are equal (nil and empty are).
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *siteCacheStore) saveLocked() error {

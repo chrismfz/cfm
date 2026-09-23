@@ -70,7 +70,8 @@ end
 -- `wild` is an array of { pattern = "*.suffix", policy = {...} }, MOST SPECIFIC
 -- (longest) pattern first — the lookups take the first match. A policy with no
 -- armed tier is an OPT-OUT row (the daemon emits one for an all-off exact host
--- under an armed wildcard): the exact match wins, and it caches nothing.
+-- or narrower wildcard under a broader armed wildcard): being the more
+-- specific match it wins, and it caches nothing.
 
 local _cache = {
     policies = {},    -- map[host] -> policy table
@@ -376,8 +377,8 @@ end
 
 -- policy_key_for: like policy_for, but returns the CANONICAL policy KEY that
 -- matched — the exact host, or the "*.suffix" pattern for a wildcard match — or
--- nil when nothing is armed for `host` (an opt-out row included: it caches
--- nothing, so it has nothing to count). Stats are keyed on THIS, never on the
+-- nil when nothing is armed for `host` (an opt-out row included — exact or
+-- wildcard: it caches nothing, so it has nothing to count). Stats are keyed on THIS, never on the
 -- raw request Host: under an armed wildcard (`*.example.com`) a client can send
 -- unbounded distinct sub-hosts, so keying per request-host would blow the
 -- cfm_cache_stats dict; keying per policy bounds cardinality to the number of
@@ -393,7 +394,13 @@ function _M.policy_key_for(host)
         return nil
     end
     for _, w in ipairs(_cache.wild) do
-        if glob_match(w.pattern, h) then return w.pattern end
+        if glob_match(w.pattern, h) then
+            -- the most specific match decides, like policy_for: an opt-out
+            -- wildcard (a narrower one turned off under a broader armed one)
+            -- counts nothing
+            if policy_armed(w.policy) then return w.pattern end
+            return nil
+        end
     end
     return nil
 end
@@ -613,10 +620,13 @@ local function label_for(p)
     return table.concat(parts, " ")
 end
 
--- observe: PHASE 2 header-filter hook. Stamps X-CFM-Cache on responses for a
--- vhost that has a policy, so an operator can watch (curl -I) which vhosts are
--- armed and what would apply — without any caching taking place. Safe to call
--- from any phase where ngx.header is writable (header_filter is recommended).
+-- observe: header-filter hook. For a debug request (X-CFM-Cache-Debug), stamps
+-- X-CFM-Cache on responses for a vhost that has a policy, so an operator can
+-- watch (curl -I) what applies: the tiers, the generation, the cache verdict
+-- ($upstream_cache_status) and the micro would-cache verdict — or "opt-out".
+-- Observing only: the caching itself is done by static_gate / micro_gate and
+-- the proxy_cache locations. Safe to call from any phase where ngx.header is
+-- writable (header_filter is recommended).
 function _M.observe()
     -- Master kill switch first: when SITE_CACHE is off, the module is a full
     -- no-op — no feed poll, no lookup, no header. (Default on; the per-vhost
