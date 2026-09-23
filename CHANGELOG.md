@@ -83,6 +83,21 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **The flood protections (SYN/PPS/new-connection rate, connlimit, portflood,
+  bad TCP flags) could stop applying to TCP/UDP when ICMP rate limiting is on
+  (`ICMP_RATE_LIMIT`, 20 in the reference config), on both engines.** The
+  input chain's plain `jump flood` is what sends traffic through them, and
+  `EnsureBase` decides whether a base rule is present by looking for its text
+  in the chain: "jump flood" is found inside the two ICMP echo-request jumps.
+  So an input chain built while the config was loaded — the table going
+  missing and a self-heal rebuilding it, as opposed to the daemon's first
+  start — never got it back, and only ICMP echo-requests reached the flood
+  chain. `jump flood` must now be a whole rule. Also on the exec engine,
+  `EnsureBase` never recognised its own `iif lo accept` (nft prints it
+  `iif "lo" accept`) and inserted another copy at the top of the input chain
+  on every call — twice per unblock until the unblock fix below. The check
+  now reads rules as nft prints them, and `EnsureBase` deletes the copies it
+  piled up (and any repeated ICMP jump or `jump flood`), keeping the top one.
 - **nftlib: large CIDR sets were written truncated, possibly as an interval
   open to the top of the address space, usually without an error.** The
   netlink library puts all of a message's elements in one attribute whose
