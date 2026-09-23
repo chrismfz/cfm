@@ -7,6 +7,8 @@ import (
 	"net"
 	"time"
 
+	"cfm/internal/firewall"
+
 	"github.com/google/nftables"
 )
 
@@ -28,44 +30,70 @@ func (b *Backend) RemoveBlock(ip net.IP) error {
 	return b.delIPElem(setName, ip)
 }
 
+// RemoveBlockBatch unblocks many host addresses: one read of each block set,
+// then deletes of just the addresses it holds (firewall.HostsPresent), one
+// transaction per setWriteChunk. Deleting an element the set doesn't hold
+// fails the whole transaction with ENOENT, and most addresses of a fleet-wide
+// unblock aren't blocked on any one node, so the batch used to delete
+// nothing whenever one address was absent.
+//
+// An element can still expire between the read and the write (ENOENT again);
+// the write is then retried from a fresh read, up to blockBatchAttempts
+// rounds. Chunks that committed are simply gone from the next read.
 func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
-	if len(ips) == 0 {
+	v4, v6 := firewall.SplitHostAddrs(ips)
+	if len(v4)+len(v6) == 0 {
 		return nil
 	}
-
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	v4Set, err4 := b.lookupSet(setBlockV4)
-	v6Set, err6 := b.lookupSet(setBlockV6)
-
-	var v4Elems, v6Elems []nftables.SetElement
-	for _, ip := range ips {
-		if ip.To4() != nil {
-			v4Elems = append(v4Elems, nftables.SetElement{Key: normalizeIP(ip)})
-		} else {
-			v6Elems = append(v6Elems, nftables.SetElement{Key: normalizeIP(ip)})
+	fams := []struct {
+		name string
+		set  *nftables.Set
+		want []net.IP
+	}{{name: setBlockV4, want: v4}, {name: setBlockV6, want: v6}}
+	for i := range fams {
+		if len(fams[i].want) == 0 {
+			continue
 		}
+		set, err := b.lookupSet(fams[i].name)
+		if err != nil {
+			return fmt.Errorf("nftlib RemoveBlockBatch %s: %w", fams[i].name, err)
+		}
+		fams[i].set = set
 	}
-
 	var lastErr error
-	if len(v4Elems) > 0 && err4 == nil {
-		if err := b.conn.SetDeleteElements(v4Set, v4Elems); err != nil {
-			lastErr = err
+	for attempt := 0; attempt < blockBatchAttempts; attempt++ {
+		lastErr = nil
+		for _, f := range fams {
+			if len(f.want) == 0 {
+				continue
+			}
+			elems, err := b.conn.GetSetElements(f.set)
+			if err != nil {
+				return fmt.Errorf("nftlib RemoveBlockBatch read %s: %w", f.name, err)
+			}
+			present := firewall.HostsPresent(f.want, elemsToTimed(elems))
+			for i := 0; i < len(present) && lastErr == nil; i += setWriteChunk {
+				var chunk []nftables.SetElement
+				for _, ip := range present[i:min(i+setWriteChunk, len(present))] {
+					chunk = append(chunk, nftables.SetElement{Key: normalizeIP(ip)})
+				}
+				if err := b.conn.SetDeleteElements(f.set, chunk); err != nil {
+					lastErr = err
+				} else if err := b.conn.Flush(); err != nil {
+					lastErr = err
+				}
+			}
+			if lastErr != nil {
+				break
+			}
+		}
+		if lastErr == nil {
+			return nil
 		}
 	}
-	if len(v6Elems) > 0 && err6 == nil {
-		if err := b.conn.SetDeleteElements(v6Set, v6Elems); err != nil {
-			lastErr = err
-		}
-	}
-	if lastErr != nil {
-		return fmt.Errorf("nftlib RemoveBlockBatch: %w", lastErr)
-	}
-	if len(v4Elems)+len(v6Elems) == 0 {
-		return nil
-	}
-	return b.conn.Flush()
+	return fmt.Errorf("nftlib RemoveBlockBatch: %w", lastErr)
 }
 
 // ── AddAllow / RemoveAllow ───────────────────────────────────────────────────

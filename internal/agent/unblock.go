@@ -34,10 +34,6 @@ func (c *APIClient) ProcessUnblockRequest(ctx context.Context, be firewall.Backe
         return
     }
 
-	if err := be.EnsureBase(); err != nil {
-		logging.LogfAPI("[unblock] EnsureBase failed for %s: %v", ipStr, err)
-	}
-
     ttl := 4 * time.Hour // covers max feed sync interval
     whiteTTL := time.Hour // imunify grace window, mirrors cfm-web's 1h greylist
     res, err := unblock.Do(ctx, ip, unblock.Options{

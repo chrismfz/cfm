@@ -120,7 +120,10 @@ func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
 		}
 	}
 
-	// batch-remove all IPs from nft in ONE process call
+	// Remove the requested IPs from the block sets in one transaction (the
+	// backend deletes just the ones the sets hold). Each unblock.Do below
+	// still removes its IP by key as well; that is idempotent and covers an
+	// IP the batch's set read didn't show.
 	ips := make([]net.IP, 0, len(reqs))
 	for _, it := range reqs {
 		if ip := net.ParseIP(it.IP); ip != nil {

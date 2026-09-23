@@ -315,3 +315,57 @@ func TestAddBlockBatch_LastInstantIsNotPermanent(t *testing.T) {
 		t.Fatalf("res=%+v err=%v, want the expiring block extended", res, err)
 	}
 }
+
+// RemoveBlockBatch deletes just the addresses the block sets hold: deleting
+// one they don't hold fails the whole transaction with ENOENT, which used to
+// leave every address of the batch blocked.
+func TestRemoveBlockBatch_DeletesOnlyPresent(t *testing.T) {
+	f := &batchFake{dump: map[string][]wireElem{
+		setBlockV4: {{key: net.ParseIP("10.0.0.1")}, {key: net.ParseIP("10.0.0.2"), hasTimeout: true, timeout: time.Hour, expires: time.Minute}},
+		setBlockV6: {{key: net.ParseIP("2001:db8::1")}},
+	}}
+	err := f.backend(t).RemoveBlockBatch([]net.IP{
+		net.ParseIP("10.0.0.2"), net.ParseIP("10.0.0.9"), net.ParseIP("10.0.0.1"),
+		net.ParseIP("2001:db8::7"), net.ParseIP("2001:db8::1"), net.ParseIP("10.0.0.1"),
+	})
+	if err != nil {
+		t.Fatalf("RemoveBlockBatch: %v", err)
+	}
+	var got []string
+	for _, batch := range f.batches {
+		dels, adds, _ := elemsOf(t, batch)
+		if len(adds) != 0 {
+			t.Errorf("unblock sent adds: %+v", adds)
+		}
+		for _, set := range []string{setBlockV4, setBlockV6} {
+			for _, e := range dels[set] {
+				got = append(got, set+":"+e.key.String())
+			}
+		}
+	}
+	if want := "block_v4:10.0.0.2 block_v4:10.0.0.1 block_v6:2001:db8::1"; strings.Join(got, " ") != want {
+		t.Errorf("deleted %v, want %s (present ones only, once each)", got, want)
+	}
+}
+
+// Nothing to delete means no write at all; a write that keeps failing is
+// retried from a fresh read, then reported — never one transaction per address.
+func TestRemoveBlockBatch_RetriesThenReports(t *testing.T) {
+	f := &batchFake{}
+	if err := f.backend(t).RemoveBlockBatch([]net.IP{net.ParseIP("10.0.0.9")}); err != nil || len(f.batches) != 0 {
+		t.Fatalf("err=%v, %d transactions; want none for an address no set holds", err, len(f.batches))
+	}
+	f = &batchFake{failWrites: 1, dump: map[string][]wireElem{setBlockV4: {{key: net.ParseIP("10.0.0.1")}, {key: net.ParseIP("10.0.0.2")}}}}
+	if err := f.backend(t).RemoveBlockBatch([]net.IP{net.ParseIP("10.0.0.1"), net.ParseIP("10.0.0.2")}); err != nil || len(f.batches) != 2 {
+		t.Fatalf("err=%v, %d transactions; want one failed write retried once", err, len(f.batches))
+	}
+	f.failWrites = 99
+	f.batches = nil
+	err := f.backend(t).RemoveBlockBatch([]net.IP{net.ParseIP("10.0.0.1"), net.ParseIP("10.0.0.2")})
+	if err == nil || !strings.Contains(err.Error(), "nftlib RemoveBlockBatch") {
+		t.Fatalf("want the write error, got %v", err)
+	}
+	if len(f.batches) != blockBatchAttempts {
+		t.Errorf("%d transactions, want %d (no per-address fallback)", len(f.batches), blockBatchAttempts)
+	}
+}
