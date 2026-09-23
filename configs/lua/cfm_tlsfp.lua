@@ -92,8 +92,37 @@ local function clean(v)
   return cut_to(v, MAX_FIELD)
 end
 
--- value returns the versioned tuple, or nil when there is nothing to describe
--- (a plain-HTTP request has no handshake).
+-- via_trusted_proxy reports that the TLS peer is NOT the client: a trusted
+-- proxy (Cloudflare, per trusted_proxies.conf) terminated the client's TLS and
+-- opened its own connection to the edge, so $ssl_* describe the PROXY's stack.
+--
+-- Measured 2026-09-23 (docs/traffic-classifier.md, "UA ↔ TLS coherence tell"):
+-- every visitor of a Cloudflare-proxied vhost shared one fingerprint
+-- (`ba6b4aad`, and `fd4fd84d` on an edge whose OpenSSL names the curves
+-- differently) whatever their browser. The solver-farm detector groups by
+-- fingerprint, so that fingerprint picked up a farm verdict, and 7 000+ real WAF
+-- blocks and would_deny rows from those visitors were charged to it. An armed
+-- policy on it would have hit every visitor of those vhosts.
+--
+-- Same test the confs use for X-Forwarded-Proto (angie.conf/openresty.conf):
+-- the realip module rewrites $remote_addr ONLY when the peer
+-- ($realip_remote_addr) is in set_real_ip_from, so two different non-empty
+-- addresses mean "trusted proxy" and a direct client can never make them differ.
+-- Fail-open to "not proxied" when either is missing (no realip module, a
+-- variable read error): that is today's behaviour, never a new failure.
+local function via_trusted_proxy()
+  local peer = getvar("realip_remote_addr")
+  local addr = getvar("remote_addr")
+  if peer == nil or addr == nil or peer == "" or addr == "" then return false end
+  return peer ~= addr
+end
+
+-- value returns the versioned tuple, or nil when there is nothing to describe:
+-- a plain-HTTP request has no handshake, and a request relayed by a trusted
+-- proxy has only the proxy's (via_trusted_proxy). nil is "no fingerprint" to
+-- every consumer — the /__cfm_verify stamp, the fingerprint-policy lookups
+-- (cfm.lua Step 0c, cfm_panel.lua 2f) and the WAF-hit attribution — so none of
+-- them can attribute the proxy's handshake to the client.
 --
 -- Field order is part of the wire format and is parsed positionally by
 -- internal/tlsfp — append, never reorder, and bump VERSION if the meaning of an
@@ -111,6 +140,7 @@ end
 function M.value()
   local proto = clean(getvar("ssl_protocol"))
   if proto == "" then return nil end
+  if via_trusted_proxy() then return nil end
 
   local ciphers = clean(getvar("ssl_ciphers"))
   local curves  = clean(getvar("ssl_curves"))

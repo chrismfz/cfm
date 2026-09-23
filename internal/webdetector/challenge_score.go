@@ -129,7 +129,8 @@ type chalScoreMark struct {
 	// durable ledger (detection_history) and the fleet reputation store key on. A
 	// CONVICTED (farmFP) fingerprint sticks over a merely-present one: once a
 	// convicted solve is seen, a later plain solve's fp cannot overwrite it (bump).
-	// Empty when no solve carried an X-CFM-TLS stamp (older edge / plain-HTTP / DNAT).
+	// Empty when no solve carried an X-CFM-TLS stamp (older edge / plain-HTTP / DNAT /
+	// relayed by a trusted proxy such as Cloudflare).
 	fp string
 	// Lifetime tell counters (NOT decayed) — logged so burn-in shows WHY an IP
 	// scored. They can outpace the decayed score (e.g. solves=100 on a faded

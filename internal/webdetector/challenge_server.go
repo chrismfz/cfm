@@ -442,8 +442,9 @@ type ChallengeSolve struct {
 	UAFamily string
 	// TLSFP is a short id for the client's TLS ClientHello, stamped by the edge
 	// (configs/lua/cfm_tlsfp.lua) and parsed by internal/tlsfp. Empty when the
-	// edge did not supply one — an older edge config or a plain-HTTP request.
-	// (The retired per-IP challenge-DNAT path, where the daemon terminated TLS
+	// edge did not supply one — an older edge config, a plain-HTTP request, or a
+	// request relayed by a trusted proxy such as Cloudflare (its handshake is the
+	// proxy's, so the edge sends none — cfm_tlsfp.value()). (The retired per-IP challenge-DNAT path, where the daemon terminated TLS
 	// itself, also produced none.)
 	//
 	// This is the one signal on a solve the client does not author: its TLS
@@ -524,7 +525,8 @@ type ChallengeSolve struct {
 }
 
 // TLSFingerprintOrDash renders TLSFP for a log line. Empty means "not
-// available" — an older edge config or a plain-HTTP request (the retired
+// available" — an older edge config, a plain-HTTP request or a request relayed
+// by a trusted proxy such as Cloudflare (the retired
 // challenge-DNAT path also stamped none) — and "-" says so, where a bare %s would
 // produce `tls_fp= ` and read as a parse failure. Both writers of the solve line
 // go through this so the two can never disagree about what absence looks like.
