@@ -531,7 +531,9 @@ bot under a geo/vhost arm (the grains the decision exemption softens; fp and
 rule/WAF marks stay strict), waived under `CHALLENGE_GOODBOT_EXEMPT`
 (`v2_waived=<name>` on the solve line/history; Google-Read-Aloud scores 140
 from rotating first-seen IPs, so the gate forward-confirms a crawler-looking
-PTR inline — bounded, reject path only) — at the EDGE `challenge_v2`
+PTR inline — bounded, reject path only; a reject whose PTR claims a crawler
+carries `v2_waiver=<grain|off|spoofed|timeout|transient>`, or it would read
+like a spoof) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
 enforced at verify, not at serve). The verify gate ORs four arm grains:
 fingerprint policy, geo policy, a per-vhost `rung=v2` on the MANUAL vhost

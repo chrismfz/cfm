@@ -728,7 +728,7 @@ func NewEngine(cfg Config) *Engine {
 	// only, no DNS otherwise).
 	if cfg.ChallengeGoodBotExempt && e.nginxBridge != nil && e.nginxBridge.goodBot != nil {
 		gb := e.nginxBridge.goodBot
-		SetChallengeV2GoodBot(func(ctx context.Context, ip, ptr string) string {
+		SetChallengeV2GoodBot(func(ctx context.Context, ip, ptr string) (string, string) {
 			return gb.verifiedBeforeReject(ctx, ip, ptr, time.Now())
 		})
 	} else {
@@ -937,6 +937,9 @@ func (s ChallengeSolve) historyPayload() map[string]interface{} {
 		}
 		if s.V2Waived != "" {
 			payload["v2_waived"] = s.V2Waived
+		}
+		if s.V2WaiverMiss != "" {
+			payload["v2_waiver"] = s.V2WaiverMiss
 		}
 		if sig := s.signalMap(); sig != nil {
 			payload["sig"] = sig

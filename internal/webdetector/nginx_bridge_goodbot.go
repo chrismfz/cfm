@@ -390,18 +390,39 @@ func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn 
 //     positive (the IP was reassigned);
 //   - otherwise the inline forward-confirm; if it can't complete (no slot in
 //     time, resolver failure) a stale positive is still honoured, else "".
-func (s *bridgeGoodBotState) verifiedBeforeReject(ctx context.Context, ip, knownPTR string, now time.Time) string {
+//
+// miss says why a crawler-looking knownPTR got no waiver (v2WaiverSpoofed /
+// Timeout / Transient) — "" when a name is returned or the PTR doesn't claim a
+// crawler, which needs no explaining.
+func (s *bridgeGoodBotState) verifiedBeforeReject(ctx context.Context, ip, knownPTR string, now time.Time) (name, miss string) {
 	if s == nil || ip == "" {
-		return ""
+		return "", ""
 	}
 	if knownPTR == "" {
-		return s.verified(ip, nil, now)
+		return s.verified(ip, nil, now), ""
 	}
-	if l := s.lookupPTR(ip, knownPTR, true, now); l.fresh || !l.candidate {
-		return l.name
+	l := s.lookupPTR(ip, knownPTR, true, now)
+	if l.fresh {
+		// A fresh negative for a crawler-looking PTR is a forward-confirm
+		// that already failed within negTTL.
+		if l.name == "" && looksLikeGoodBotPTR(knownPTR) {
+			return "", v2WaiverSpoofed
+		}
+		return l.name, ""
 	}
-	name, _ := s.verifiedSync(ctx, ip, func() (string, bool) { return knownPTR, true }, now)
-	return name
+	if !l.candidate {
+		return "", ""
+	}
+	name, why := s.verifiedSync(ctx, ip, func() (string, bool) { return knownPTR, true }, now)
+	switch {
+	case name != "":
+		return name, ""
+	case why == verifiedInconclusiveTimeout:
+		return "", v2WaiverTimeout
+	case why != "":
+		return "", v2WaiverTransient
+	}
+	return "", v2WaiverSpoofed
 }
 
 // resolveInto performs the (DNS-bound) forward-confirm and stores the verdict.

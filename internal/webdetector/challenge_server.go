@@ -498,6 +498,11 @@ type ChallengeSolve struct {
 	// solve under an arm ("" = not waived): the D5 gate let it through instead
 	// of rejecting (challengeV2GoodBot). Rendered as v2_waived=<name>.
 	V2Waived string
+	// V2WaiverMiss is why a REJECTED solve from a crawler-looking client (a
+	// PTR with a good-bot suffix) was not waived: grain / off / spoofed /
+	// timeout / transient (v2Waiver*); "" for everyone else, whose ptr=
+	// already explains itself. Rendered as v2_waiver=<reason>.
+	V2WaiverMiss string
 	// Country / CountryISO / ASN / ASNName / PTR are the solving client's
 	// network identity, resolved ONCE at verify (resolveGeo, challenge_geo.go)
 	// so every line and history row about this solve carries the same answer.
@@ -885,9 +890,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// may forward-confirm inline — bounded, and only on this
 				// about-to-reject path. The solve then takes the normal
 				// solved path, marked v2_waived=<name>.
-				bot := ""
+				bot, miss := "", v2WaiverGrain
 				if challengeV2Waivable(v2Grain, solve.IP, solve.Host) {
-					bot = challengeV2GoodBot(r.Context(), solve.IP, solve.PTR)
+					bot, miss = challengeV2GoodBot(r.Context(), solve.IP, solve.PTR)
 				}
 				if bot != "" {
 					solve.V2Waived = bot
@@ -903,10 +908,16 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 					// tells. cc/asn/asn_name/ptr ride at the END so no field a
 					// parser already reads moves; the hook writes the durable
 					// challenge_v2_reject history row, which is what makes the
-					// rung's false-positive rate queryable at all.
+					// rung's false-positive rate queryable at all. A client
+					// whose PTR claims a crawler also gets v2_waiver=<why it
+					// was not waived>, last — or its reject would read the
+					// same as a spoof's.
+					if looksLikeGoodBotPTR(solve.PTR) {
+						solve.V2WaiverMiss = miss
+					}
 					logging.LogfCHALLENGES(
-						"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s",
-						solve.IP, solve.Host, solve.URI, hs, hsTells, solve.SignalSuffix(), v2Grain, solve.TLSFingerprintOrDash(), solve.UA, solve.GeoSuffix())
+						"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s%s",
+						solve.IP, solve.Host, solve.URI, hs, hsTells, solve.SignalSuffix(), v2Grain, solve.TLSFingerprintOrDash(), solve.UA, solve.GeoSuffix(), solve.WaiverMissSuffix())
 					if challengeV2RejectHook != nil {
 						challengeV2RejectHook(solve)
 					}

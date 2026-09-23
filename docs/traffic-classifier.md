@@ -659,7 +659,15 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   gate forward-confirms a crawler-looking PTR inline, bounded, on the reject
   path only). Only under a geo or vhost arm, the grains the decision-time
   exemption already softens; a fingerprint policy or a traffic-rule/WAF mark
-  stays strict. The history row carries it as `v2_waived`. Finally `sig=`
+  stays strict. The history row carries it as `v2_waived`. The mirror image
+  on a `result=v2_reject` line is `v2_waiver=<why not>`, last on the line and
+  only when the client's PTR claims a crawler (anyone else's `ptr=` explains
+  itself): `grain` (a fingerprint policy or mark — never waived), `off`
+  (`CHALLENGE_GOODBOT_EXEMPT = 0`), `spoofed` (the forward-confirm didn't
+  match), `timeout` (no verify slot in time) or `transient` (resolver
+  failure). Without it a Read-Aloud the gate couldn't confirm reads exactly
+  like an impostor; the `challenge_v2_reject` row carries it as `v2_waiver`.
+  Finally `sig=`
   carries the report AS REPORTED — `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
   `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
   browser did not report. `mv`/`hc`/`dm`/`dpr`/`raf` are scored by nothing;
