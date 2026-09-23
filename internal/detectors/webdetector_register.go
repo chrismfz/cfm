@@ -1018,6 +1018,9 @@ func init() {
 			kvBool(kv, "CHALLENGE_V2_DEBUG", false),
 			cfg.AbuseShadow,
 		)
+		// Kill switch for the corpus-measured device-claim tells
+		// (mobile_hw_lie / mac_hw_lie); default on.
+		webdet.ConfigureChallengeV2HWTells(kvBool(kv, "CHALLENGE_V2_HW_TELLS", true))
 
 		engine := webdet.NewEngine(cfg)
 

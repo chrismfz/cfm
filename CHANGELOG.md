@@ -58,6 +58,28 @@ back-filled here — see the git/PR history for that period.
   section that counts them by source, fingerprint, tells, provider, country and
   PTR domain.
 
+### Changed
+- **ChallengeV2 now catches the farms that were solving at volume.**
+  - Two new tells compare the CPU a solve reports with the device its
+    User-Agent claims:
+    - `mobile_hw_lie`: a phone or tablet reports 16 or more CPU threads.
+    - `mac_hw_lie`: a Mac reports 64 or more.
+  - Both were measured on 13 299 real solves before they were adopted:
+    - Farm solves that would be rejected rose from 0.1% to 46.0% (60–100% on
+      the affected farm vhosts).
+    - None of the ~2 000 likely-human solves would be rejected.
+  - One spoofed device never rejects on its own. These tells and `touch_lie`
+    count as one group, at 50 points, once. A rejection needs independent
+    evidence as well, such as a software renderer.
+  - A high core count on Windows or Linux is never treated as a lie. A person
+    on a remote-desktop server looks exactly like a farm box, so it cannot be
+    judged.
+  - They apply wherever v2 is armed, which by default includes every WAF
+    challenge-tier rule, so they take effect across the fleet on upgrade.
+    To turn them off, set `[webdetector] CHALLENGE_V2_HW_TELLS = 0`.
+  - Measurement, rejected candidates and limits: `docs/traffic-classifier.md`
+    ("Rung-1 hardware tells").
+
 ### Fixed
 - **Payment-gateway webhooks are no longer challenged by WAF rule 201.**
   - Viva Wallet's webhooks carry no User-Agent, Accept or Referer. Rule 201
