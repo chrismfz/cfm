@@ -63,6 +63,9 @@ To change a switch, edit and save `detectors.conf`; nothing needs reloading.
 - `systemctl reload cfm` is not needed for this: it restarts the daemon.
 
 To see the current values, use:
+- `cfm webtop site-cache list`, the cfm-admin Site cache page, or the MCP tool
+  `site_cache_status`: each shows the switches as the daemon runs them (the
+  list API's `switches`, which a scoped cPanel user sees too).
 - the MCP tool `detectors_config` with `merged=true`, or
   `GET /api/v1/detectors/config?view=merged`, for the effective values
   (`detectors.conf` plus any `detectors.d/*.conf` overlay). A key that is not
@@ -71,8 +74,7 @@ To see the current values, use:
   `cfm_bridge_config.lua written … site_cache=… micro_cache_enforce=…` log line,
   for what the edge was handed.
 
-The Site Cache tools (`site_cache_status` / `site_cache_stats`) do not report
-the switches.
+`site_cache_stats` does not report the switches.
 
 ## 3. Arming a vhost
 

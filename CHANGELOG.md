@@ -27,11 +27,12 @@ back-filled here — see the git/PR history for that period.
     pages, both tiers, or opt-out.
   - Copy the debug-stamp `curl` for one URL.
   - Read the hit counts.
-  - Admins see this node's `SITE_CACHE` / `MICRO_CACHE_ENFORCE`, so the micro
-    tier reads "enforced" or "dry run". Where the page cannot tell (a scoped
-    user, a failed read), it says to treat an armed micro tier as live.
-    Turning micro on asks for confirmation unless the node is known to be in
-    a dry run.
+  - The page shows this node's `SITE_CACHE` / `MICRO_CACHE_ENFORCE`, to
+    admins and scoped users alike, so the micro tier reads "enforced" or "dry
+    run". `GET /api/v1/site-cache/list` now returns them as `switches`, and
+    `cfm webtop site-cache list` prints them above the policies. If a read
+    fails, the page says to treat an armed micro tier as live. Turning micro on
+    asks for confirmation unless the node is known to be in a dry run.
   - A scoped cPanel user manages their own vhosts from the page.
   - A save sends only the fields the operator changed. A field left untouched
     never reverts a change someone else made meanwhile (a cookie rail, a

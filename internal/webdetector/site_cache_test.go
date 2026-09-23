@@ -2,6 +2,7 @@
 package webdetector
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -1120,6 +1121,45 @@ func TestSiteCacheAPI_ScopedListFiltered(t *testing.T) {
 	_ = json.Unmarshal(rr.Body.Bytes(), &all)
 	if len(all.Rows) != 2 {
 		t.Fatalf("admin list should see 2, got %d", len(all.Rows))
+	}
+}
+
+// The list reports the node switches to every caller (a scoped page cannot
+// read detectors.conf), and leaves them out when the engine was not given
+// them rather than reporting a zero value as "off".
+func TestSiteCacheAPI_ListReportsNodeSwitches(t *testing.T) {
+	e, mux := newSiteCacheAPITestEngine(t)
+	rr := doRequest(mux, adminCtx(), http.MethodGet, "/api/v1/site-cache/list", nil)
+	if strings.Contains(rr.Body.String(), `"switches"`) {
+		t.Fatalf("switches reported before they were set: %s", rr.Body.String())
+	}
+
+	e.SetSiteCacheSwitches(true, false)
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"admin", adminCtx()},
+		{"scoped", scopedCtx("mysite.com")},
+		{"scoped, empty scope", scopedCtx()},
+	} {
+		rr := doRequest(mux, tc.ctx, http.MethodGet, "/api/v1/site-cache/list", nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: list %d %s", tc.name, rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), `"switches":{"site_cache":true,"micro_cache_enforce":false}`) {
+			t.Fatalf("%s: switches not reported as the node runs them: %s", tc.name, rr.Body.String())
+		}
+	}
+
+	e.SetSiteCacheSwitches(false, true)
+	var out siteCacheListResponse
+	rr = doRequest(mux, scopedCtx("mysite.com"), http.MethodGet, "/api/v1/site-cache/list", nil)
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Switches == nil || out.Switches.SiteCache || !out.Switches.MicroCacheEnforce {
+		t.Fatalf("a later SetSiteCacheSwitches not reported: %+v", out.Switches)
 	}
 }
 

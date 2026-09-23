@@ -12,7 +12,8 @@ import (
 // reader (cfm_bridge_cfg.lua) applies the same default to an absent field.
 // Split out of Manager start so the defaults are unit-tested
 // (webdetector_bridge_config_test.go) — SITE_CACHE on, MICRO_CACHE_ENFORCE
-// off are the ones an upgrade must never flip.
+// off are the ones an upgrade must never flip. The webdetector register calls
+// it too, for the Site Cache pair /api/v1/site-cache/list reports.
 func webdetectorBridgeConfig(global, wdKV map[string]string) sslcollector.WebdetectorBridgeConfig {
 	cfg := sslcollector.WebdetectorBridgeConfig{
 		ClearanceRefresh: kvBool(wdKV, "CHALLENGE_COOKIE_REFRESH", true),

@@ -825,7 +825,7 @@ is fixed.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET  | `/api/v1/site-cache/list` | scope-filtered; every stored entry (armed, and all-off opt-outs), sorted by host; `unloadable` names hosts whose stored row this build cannot load (treated as opted out, §6) |
+| GET  | `/api/v1/site-cache/list` | scope-filtered; every stored entry (armed, and all-off opt-outs), sorted by host; `unloadable` names hosts whose stored row this build cannot load (treated as opted out, §6); `switches` is the node's `{site_cache, micro_cache_enforce}` as the daemon runs them, returned to every caller (node-wide, not tenant data) |
 | GET  | `/api/v1/site-cache/get?host=` | one vhost |
 | POST | `/api/v1/site-cache/set` | `requirePOST`; **merge**-upsert (host in body); scoped→own host only. One entry per vhost, so a single upsert replaces the add/update pair — the host is the immutable key. Only the fields present change (`{"host":"x","micro":{"ttl":"30s"}}` retunes one TTL and keeps the static tier and cookie settings; `enabled:false`, `strict_cookies:false` and an empty `auth_cookies` list are applied, JSON `null` keeps); a new host must enable a tier or turn BOTH tiers off (an opt-out, §6). `scope_hosts` comes from the token (§6) |
 | POST | `/api/v1/site-cache/remove?host=` | deletes the vhost's policy (host in the query, not the body); the host then follows a covering armed wildcard (§6 "Off vs remove") |
@@ -872,13 +872,12 @@ modelled on **Challenge-Access**. Files: `static/webdetector/site-cache/index.ht
 `assets/webdet/site-cache-recipes.js` (pure, each with a `.test.js`). The page
 has:
 
-- **callouts** saying what each tier does and never does, and, for an admin,
-  the node's `SITE_CACHE` / `MICRO_CACHE_ENFORCE` (read from
-  `GET /api/v1/detectors/config?view=merged`, admin-only, at most once a
-  minute): the micro tier reads "enforced" or "dry run" for that node. When the
-  page cannot tell (a scoped user, who is never shown the switch, or a failed
-  read) it says to treat an armed micro tier as live, never "dry run", and a
-  `SITE_CACHE = 0` node gets a danger banner;
+- **callouts** saying what each tier does and never does, and the node's
+  `SITE_CACHE` / `MICRO_CACHE_ENFORCE`, from the list response's `switches`
+  (for admins and scoped users alike): the micro tier reads "enforced" or "dry
+  run" for that node. When the page cannot tell (a failed read, or a response
+  without `switches`) it says to treat an armed micro tier as live, never "dry
+  run", and a `SITE_CACHE = 0` node gets a danger banner;
 - an **editor**: the host (exact or `*.suffix`), the static tier (on + recipe
   label), the micro tier (on, the TTL as a bucket menu, the recipe label, auth
   cookies, strict), a plain-language review sentence, and errors / warnings.

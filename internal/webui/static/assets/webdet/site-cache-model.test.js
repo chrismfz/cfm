@@ -321,12 +321,15 @@ test("sortRows: by column, host breaks ties, no ratio sorts last when descending
 
 // ── Node switches, the debug command, generations ─────────────────────────
 
-test("nodeSwitches reads [webdetector] as the daemon does", () => {
-  const payload = (keys) => ({ config: { core: [{ name: "ssh", keys: {} }], advanced: [{ name: "webdetector", keys }] } });
-  assert.deepEqual(nodeSwitches(payload({})), { siteCache: true, microEnforce: false });
-  assert.deepEqual(nodeSwitches(payload({ SITE_CACHE: "0 ; panic", MICRO_CACHE_ENFORCE: "\"1\"" })), { siteCache: false, microEnforce: true });
-  assert.deepEqual(nodeSwitches(payload({ site_cache: "maybe", micro_cache_enforce: "yes" })), { siteCache: true, microEnforce: true });
-  assert.deepEqual(nodeSwitches({ config: { core: [] } }), { siteCache: true, microEnforce: false, defaulted: true });
+test("nodeSwitches reads the list response's switches, else unknown", () => {
+  const list = (switches) => ({ rows: [], switches });
+  assert.deepEqual(nodeSwitches(list({ site_cache: true, micro_cache_enforce: false })), { siteCache: true, microEnforce: false });
+  assert.deepEqual(nodeSwitches(list({ site_cache: false, micro_cache_enforce: true })), { siteCache: false, microEnforce: true });
+  // No pair, or not a well-formed one: unknown, never a default.
+  assert.equal(nodeSwitches({ rows: [] }), null);
+  assert.equal(nodeSwitches(list(null)), null);
+  assert.equal(nodeSwitches(list({ site_cache: true })), null);
+  assert.equal(nodeSwitches(list({ site_cache: "1", micro_cache_enforce: "0" })), null);
   assert.equal(nodeSwitches(null), null);
 });
 

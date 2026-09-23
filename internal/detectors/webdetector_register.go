@@ -1018,6 +1018,12 @@ func init() {
 
 		engine := webdet.NewEngine(cfg)
 
+		// Site Cache node switches, reported on /api/v1/site-cache/list (the
+		// scoped page cannot read detectors.conf): the same derivation that
+		// writes them to the edge's cfm_bridge_config.lua (manager.go).
+		bc := webdetectorBridgeConfig(global, kv)
+		engine.SetSiteCacheSwitches(bc.SiteCache, bc.MicroCacheEnforce)
+
 		// Under-Attack Mode (I1): feed the per-vhost solving-IP rate (entry leg 2
 		// of the efficacy detector) from the challenge solve stream. Subscribed
 		// only when the feature is on; the manager's ResetChallengeSolveSubscribers

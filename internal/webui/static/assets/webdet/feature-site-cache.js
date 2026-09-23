@@ -37,10 +37,6 @@ import {
   scRecipeBuild,
 } from "./site-cache-recipes.js";
 
-// The node switches are re-read at most this often: the detectors config
-// endpoint parses the file, and the switches change rarely.
-const SWITCHES_TTL_MS = 60 * 1000;
-
 export const siteCacheMixin = {
   data() {
     return {
@@ -65,7 +61,6 @@ export const siteCacheMixin = {
       scRecipeKey: "",
       scRecipeVars: {},
       scSwitches: null,
-      scSwitchesAt: 0,
       scCheckHost: "",
       scCheckPath: "/",
       scCopied: false,
@@ -180,8 +175,8 @@ export const siteCacheMixin = {
       if (f.microOn) parts.push(`anonymous pages micro-cached for ${microBucketSeconds(String(f.microTTL || ""))} s (${recipeLabel(f.microRecipe)})`);
       return `${where}: ${parts.join("; ")}.`;
     },
-    // "enforced" / "dryrun" from this node's MICRO_CACHE_ENFORCE, or "unknown":
-    // a scoped page cannot read it, and an admin's read can fail. Unknown is
+    // "enforced" / "dryrun" from this node's MICRO_CACHE_ENFORCE (the list
+    // response's switches), or "unknown" until a read carries them. Unknown is
     // treated as possibly live, never as a dry run.
     scMicroMode() {
       if (!this.scSwitches) return "unknown";
@@ -232,6 +227,8 @@ export const siteCacheMixin = {
         if (seq !== this.scRefreshSeq) return; // a newer read is on its way
         this.scEntries = this.extractRows(payload, "rows");
         this.scUnloadable = Array.isArray(payload && payload.unloadable) ? payload.unloadable : [];
+        // A failed read (below) keeps the last known switches.
+        this.scSwitches = nodeSwitches(payload);
         this.scLoadError = "";
         this.scLoaded = true;
       } catch (err) {
@@ -244,19 +241,6 @@ export const siteCacheMixin = {
       if (stats) this.scStats = stats;
       if (!this.scLoadError) this.resyncSCEdit();
       this.adoptSCScopedPolicy();
-      await this.refreshSiteCacheSwitches();
-    },
-    // SITE_CACHE / MICRO_CACHE_ENFORCE from the merged detectors.conf. The
-    // endpoint is admin-only, so a scoped page never asks.
-    async refreshSiteCacheSwitches(force = false) {
-      if (!this.isAdmin) return;
-      if (!force && this.scSwitchesAt && Date.now() - this.scSwitchesAt < SWITCHES_TTL_MS) return;
-      this.scSwitchesAt = Date.now();
-      const payload = await this.fetchJSONSafe("v1/detectors/config?view=merged", null);
-      // A failed read keeps the last known state (a first failure leaves it
-      // unknown); it is retried after the same interval.
-      const sw = nodeSwitches(payload);
-      if (sw) this.scSwitches = sw;
     },
     // The site-cache API matches a scoped token's vhosts literally (a scope
     // entry "*.example.com" allows that policy key, not a.example.com), and an

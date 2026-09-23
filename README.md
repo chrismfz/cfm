@@ -1824,7 +1824,7 @@ The Web Detector exposes a local API used by the CLI and integrations (`API_LIST
 | `POST /api/v1/webdet/rules/update?id=<id>` | Update traffic rule (JSON body) |
 | `POST /api/v1/webdet/rules/remove?id=<id>` | Remove traffic rule |
 | `POST /api/v1/webdet/rules/simulate` | Simulate matching for a request shape |
-| `GET /api/v1/site-cache/list` | Site Cache policies (scope-filtered) + `unloadable` hosts |
+| `GET /api/v1/site-cache/list` | Site Cache policies (scope-filtered) + `unloadable` hosts + the node's `switches` (`SITE_CACHE` / `MICRO_CACHE_ENFORCE`) |
 | `GET /api/v1/site-cache/get?host=<vhost>` | One vhost's Site Cache policy |
 | `POST /api/v1/site-cache/set` | Merge-upsert a policy (JSON body; both tiers off = opt-out) |
 | `POST /api/v1/site-cache/remove?host=<vhost>` | Delete a vhost's policy |

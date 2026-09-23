@@ -468,36 +468,15 @@ export function sortRows(rows, key = "host", dir = "asc") {
 
 // ── Node switches ───────────────────────────────────────────────────────────
 
-// kvBool mirrors the daemon's detectors.conf boolean reader: an inline ; / #
-// comment and surrounding quotes are stripped; anything unrecognised is the
-// default.
-function kvBool(v, def) {
-  if (v == null) return def;
-  let s = String(v);
-  const i = s.search(/[;#]/);
-  if (i >= 0) s = s.slice(0, i);
-  s = s.trim().replace(/^["']+|["']+$/g, "").toLowerCase();
-  if (["1", "true", "yes", "on"].includes(s)) return true;
-  if (["0", "false", "no", "off"].includes(s)) return false;
-  return def;
-}
-
-// nodeSwitches reads SITE_CACHE / MICRO_CACHE_ENFORCE from a
-// GET /api/v1/detectors/config?view=merged payload (admin only). null when
-// there is no payload to read (a failed fetch). A config with no [webdetector]
-// section runs the daemon's defaults, reported as such (`defaulted`).
+// nodeSwitches reads this node's SITE_CACHE / MICRO_CACHE_ENFORCE from a
+// GET /api/v1/site-cache/list payload: `switches`, sent to admin and scoped
+// callers alike, as the daemon runs them. null when the payload carries no
+// well-formed pair (an older daemon, or one that was not given them): unknown,
+// never a guessed default.
 export function nodeSwitches(payload) {
-  const cfg = payload && payload.config;
-  if (!cfg) return null;
-  const sections = [...(cfg.core || []), ...(cfg.leniency || []), ...(cfg.advanced || [])];
-  const wd = sections.find((s) => s && String(s.name).toLowerCase() === "webdetector");
-  if (!wd) return { siteCache: true, microEnforce: false, defaulted: true };
-  const keys = {};
-  for (const [k, v] of Object.entries(wd.keys || {})) keys[k.toUpperCase()] = v;
-  return {
-    siteCache: kvBool(keys.SITE_CACHE, true),
-    microEnforce: kvBool(keys.MICRO_CACHE_ENFORCE, false),
-  };
+  const sw = payload && payload.switches;
+  if (!sw || typeof sw.site_cache !== "boolean" || typeof sw.micro_cache_enforce !== "boolean") return null;
+  return { siteCache: sw.site_cache, microEnforce: sw.micro_cache_enforce };
 }
 
 // ── Checking one URL ────────────────────────────────────────────────────────

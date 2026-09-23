@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	core "cfm/internal/detectors/core"
@@ -498,6 +499,7 @@ type Engine struct {
 	challengeAccess   *challengeAccessStore
 	siteCache         *siteCacheStore
 	siteCacheStats    *siteCacheStatsStore
+	siteCacheSwitches atomic.Pointer[SiteCacheSwitches] // nil until SetSiteCacheSwitches
 	history           *HistoryStore
 
 	// uaEmergency holds box-wide emergency rules keyed by normalized UA.
@@ -4191,6 +4193,25 @@ func (e *Engine) SiteCacheList() []SiteCacheEntry {
 		return nil
 	}
 	return e.siteCache.List()
+}
+
+// SetSiteCacheSwitches records this node's [webdetector] SITE_CACHE and
+// MICRO_CACHE_ENFORCE, which the detectors register derives with the same
+// function that writes them to the edge (cfm_bridge_config.lua). The engine
+// does not act on them; /api/v1/site-cache/list reports them.
+func (e *Engine) SetSiteCacheSwitches(siteCache, microEnforce bool) {
+	if e == nil {
+		return
+	}
+	e.siteCacheSwitches.Store(&SiteCacheSwitches{SiteCache: siteCache, MicroCacheEnforce: microEnforce})
+}
+
+// SiteCacheNodeSwitches returns what SetSiteCacheSwitches recorded, or nil.
+func (e *Engine) SiteCacheNodeSwitches() *SiteCacheSwitches {
+	if e == nil {
+		return nil
+	}
+	return e.siteCacheSwitches.Load()
 }
 
 // SiteCachePolicyFeed is the /nginx/cache/config bridge feed: armed vhosts

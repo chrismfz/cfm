@@ -15,7 +15,9 @@
 // Endpoints:
 //   GET  /api/v1/site-cache/list                 — policies (scope-filtered), plus
 //                                                  `unloadable`: hosts whose stored
-//                                                  policy this build cannot load
+//                                                  policy this build cannot load, and
+//                                                  `switches`: the node's SITE_CACHE /
+//                                                  MICRO_CACHE_ENFORCE (to every caller)
 //   GET  /api/v1/site-cache/get?host=            — one vhost's policy
 //   POST /api/v1/site-cache/set                  — merge-upsert (body = SiteCachePatch);
 //                                                  both tiers off = an explicit opt-out
@@ -45,6 +47,23 @@ type siteCacheListResponse struct {
 	// no longer accepts) that have no row in Rows: the edge treats each as
 	// OPTED OUT (never cached), not as "no entry". Scope-filtered like Rows.
 	Unloadable []string `json:"unloadable,omitempty"`
+	// Switches is this node's SITE_CACHE and MICRO_CACHE_ENFORCE. They are
+	// node-wide settings, not another tenant's data, so a scoped caller gets
+	// them too: without them its page cannot tell a dry-run micro tier from a
+	// live one. Absent when the engine was not given them.
+	Switches *SiteCacheSwitches `json:"switches,omitempty"`
+}
+
+// SiteCacheSwitches is the pair of [webdetector] knobs that override every
+// per-vhost policy on this node, as this daemon derives them from
+// detectors.conf: the values it writes to the edge's cfm_bridge_config.lua.
+type SiteCacheSwitches struct {
+	// SiteCache false: this node caches nothing and the edge does not read
+	// the policies.
+	SiteCache bool `json:"site_cache"`
+	// MicroCacheEnforce false (the default): the micro tier is a dry run,
+	// nothing is stored.
+	MicroCacheEnforce bool `json:"micro_cache_enforce"`
 }
 
 type siteCacheResultResponse struct {
@@ -87,7 +106,11 @@ func (e *Engine) handleSiteCacheList(w http.ResponseWriter, r *http.Request) {
 			unloadable = append(unloadable, h)
 		}
 	}
-	writeJSON(w, http.StatusOK, siteCacheListResponse{Rows: scopeFilterSiteCache(e.SiteCacheList(), r), Unloadable: unloadable})
+	writeJSON(w, http.StatusOK, siteCacheListResponse{
+		Rows:       scopeFilterSiteCache(e.SiteCacheList(), r),
+		Unloadable: unloadable,
+		Switches:   e.SiteCacheNodeSwitches(),
+	})
 }
 
 // GET /api/v1/site-cache/get?host=<host>
