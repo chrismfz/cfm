@@ -27,11 +27,13 @@ back-filled here — see the git/PR history for that period.
     pages, both tiers, or opt-out.
   - Copy the debug-stamp `curl` for one URL.
   - Read the hit counts.
-  - Admins see this node's `SITE_CACHE` / `MICRO_CACHE_ENFORCE`, so the micro
-    tier reads "enforced" or "dry run". Where the page cannot tell (a scoped
-    user, a failed read), it says to treat an armed micro tier as live.
-    Turning micro on asks for confirmation unless the node is known to be in
-    a dry run.
+  - The page shows this node's `SITE_CACHE` / `MICRO_CACHE_ENFORCE`, to
+    admins and scoped users alike, so the micro tier reads "enforced" or "dry
+    run". `GET /api/v1/site-cache/list` now returns them as `switches` (as the
+    edge was last handed them), and `cfm webtop site-cache list` prints them
+    above the policies. Until the page has read them, it says to treat an
+    armed micro tier as live. Turning micro on asks for confirmation unless the
+    node is known to be in a dry run.
   - A scoped cPanel user manages their own vhosts from the page.
   - A save sends only the fields the operator changed. A field left untouched
     never reverts a change someone else made meanwhile (a cookie rail, a
@@ -82,8 +84,8 @@ back-filled here — see the git/PR history for that period.
   - what BYPASS counts: mostly static assets of an armed vhost whose static
     tier is off. Micro-cache declines are not counted at all; the debug stamp
     shows them;
-  - the `SITE_CACHE` / `MICRO_CACHE_ENFORCE` state is not in their output
-    (the `detectors_config` tool has it).
+  - the `SITE_CACHE` / `MICRO_CACHE_ENFORCE` state is in `site_cache_status`
+    (`switches`), not in `site_cache_stats`.
 
   Things the docs used to get wrong, now stated:
   - **The static tier reads no request cookie and no path.** A `.css` under

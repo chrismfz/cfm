@@ -15,7 +15,10 @@
 // Endpoints:
 //   GET  /api/v1/site-cache/list                 — policies (scope-filtered), plus
 //                                                  `unloadable`: hosts whose stored
-//                                                  policy this build cannot load
+//                                                  policy this build cannot load, and
+//                                                  `switches`: the node's SITE_CACHE /
+//                                                  MICRO_CACHE_ENFORCE as last handed
+//                                                  to the edge (to every caller)
 //   GET  /api/v1/site-cache/get?host=            — one vhost's policy
 //   POST /api/v1/site-cache/set                  — merge-upsert (body = SiteCachePatch);
 //                                                  both tiers off = an explicit opt-out
@@ -34,6 +37,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"cfm/internal/logging"
 )
@@ -45,6 +49,37 @@ type siteCacheListResponse struct {
 	// no longer accepts) that have no row in Rows: the edge treats each as
 	// OPTED OUT (never cached), not as "no entry". Scope-filtered like Rows.
 	Unloadable []string `json:"unloadable,omitempty"`
+	// Switches is this node's SITE_CACHE and MICRO_CACHE_ENFORCE as the edge
+	// was last handed them. They are node-wide settings, not another tenant's
+	// data, so a scoped caller gets them too: without them its page cannot
+	// tell a dry-run micro tier from a live one. Absent until this daemon has
+	// written them (PublishSiteCacheSwitches).
+	Switches *SiteCacheSwitches `json:"switches,omitempty"`
+}
+
+// SiteCacheSwitches is the pair of [webdetector] knobs that override every
+// per-vhost policy on this node.
+type SiteCacheSwitches struct {
+	// SiteCache false: this node caches nothing and the edge does not read
+	// the policies.
+	SiteCache bool `json:"site_cache"`
+	// MicroCacheEnforce false (the default): the micro tier is a dry run,
+	// nothing is stored.
+	MicroCacheEnforce bool `json:"micro_cache_enforce"`
+}
+
+// publishedSiteCacheSwitches is what the detectors manager last wrote to the
+// edge's cfm_bridge_config.lua. It is package-level, not per Engine, because
+// the manager writes that file before the detectors are built: a reload whose
+// webdetector fails to build leaves the OLD engine answering the API, and a
+// copy on it would report the old pair while the edge runs the new one.
+var publishedSiteCacheSwitches atomic.Pointer[SiteCacheSwitches]
+
+// PublishSiteCacheSwitches records the pair the edge was just handed. The
+// manager calls it after each successful cfm_bridge_config.lua write, so a
+// failed write keeps the last pair the edge really has.
+func PublishSiteCacheSwitches(sw SiteCacheSwitches) {
+	publishedSiteCacheSwitches.Store(&sw)
 }
 
 type siteCacheResultResponse struct {
@@ -87,7 +122,11 @@ func (e *Engine) handleSiteCacheList(w http.ResponseWriter, r *http.Request) {
 			unloadable = append(unloadable, h)
 		}
 	}
-	writeJSON(w, http.StatusOK, siteCacheListResponse{Rows: scopeFilterSiteCache(e.SiteCacheList(), r), Unloadable: unloadable})
+	writeJSON(w, http.StatusOK, siteCacheListResponse{
+		Rows:       scopeFilterSiteCache(e.SiteCacheList(), r),
+		Unloadable: unloadable,
+		Switches:   publishedSiteCacheSwitches.Load(),
+	})
 }
 
 // GET /api/v1/site-cache/get?host=<host>

@@ -35,16 +35,16 @@
             sends none). It reads no request cookie: anything per-user must be marked
             <code>private</code> by the origin.
           </div>
-          <div class="callout" :class="{ warn: scMicroMode !== 'enforced' }">
+          <div class="callout" :class="{ warn: scMicroMode !== 'enforced' || scCacheOff }">
             <strong>Micro tier (B).</strong> Anonymous GET/HEAD over HTTPS, for 1–60 s.
-            <template v-if="scMicroMode === 'enforced'">This node: <strong>enforced</strong>
+            <template v-if="scCacheOff">This node: <strong>off</strong>
+              (<code>SITE_CACHE = 0</code>, below)<span v-if="scMicroMode === 'enforced'">; with
+              <code>MICRO_CACHE_ENFORCE = 1</code>, an armed micro tier is live again once it is back on</span>.</template>
+            <template v-else-if="scMicroMode === 'enforced'">This node: <strong>enforced</strong>
               (<code>MICRO_CACHE_ENFORCE = 1</code>): an armed vhost's anonymous pages are served from cache.</template>
             <template v-else-if="scMicroMode === 'dryrun'">This node: <strong>dry run</strong>
-              (<code>MICRO_CACHE_ENFORCE = 0</code><span v-if="scSwitches.defaulted">, the default: no <code>[webdetector]</code> section</span>): nothing is stored, the debug stamp only reports what would be.</template>
-            <template v-else-if="isScoped">Whether this node enforces it (<code>MICRO_CACHE_ENFORCE</code>, set by
-              the server operator) is not shown here: <strong>treat an armed micro tier as live</strong>. In a dry
-              run the debug stamp only reports what would be cached.</template>
-            <template v-else>This node's <code>MICRO_CACHE_ENFORCE</code> could not be read:
+              (<code>MICRO_CACHE_ENFORCE = 0</code><span v-if="isScoped">, set by the server operator</span>): nothing is stored, the debug stamp only reports what would be.</template>
+            <template v-else-if="scLoaded || scLoadError">This node's <code>MICRO_CACHE_ENFORCE</code> could not be read:
               <strong>treat an armed micro tier as live</strong>.</template>
           </div>
           <div class="callout">
@@ -54,10 +54,13 @@
             credential headers, partial-page requests and admin paths.
           </div>
         </div>
-        <div class="callout danger compact" v-if="scSwitches && !scSwitches.siteCache">
+        <div class="callout danger compact" v-if="scCacheOff">
           <strong>SITE_CACHE = 0 on this node:</strong> nothing is cached and the edge does not
-          read these policies. They resume as they are when it is set back to 1; after a purge,
-          reload the edge before that (runbook §8).
+          read these policies.
+          <template v-if="isScoped">The server operator has turned Site Cache off; your policies
+            are kept and resume as they are when it is back on.</template>
+          <template v-else>They resume as they are when it is set back to 1; after a purge,
+            reload the edge before that (runbook §8).</template>
         </div>
       </section>
 
@@ -249,8 +252,9 @@
                 </td>
                 <td :title="scStaticTitle(row)"><span :class="row.staticOn ? 'pill ok' : 'muted'">{{ scStaticText(row) }}</span></td>
                 <td :title="scMicroTitle(row)">
-                  <span :class="row.microOn ? (scMicroMode === 'dryrun' ? 'pill warn' : 'pill ok') : 'muted'">{{ scMicroText(row) }}</span>
-                  <span class="muted" v-if="row.microOn && scMicroMode === 'dryrun'"> dry run</span>
+                  <span :class="row.microOn ? (scMicroMode === 'dryrun' || scCacheOff ? 'pill warn' : 'pill ok') : 'muted'">{{ scMicroText(row) }}</span>
+                  <span class="muted" v-if="row.microOn && scCacheOff"> off</span>
+                  <span class="muted" v-else-if="row.microOn && scMicroMode === 'dryrun'"> dry run</span>
                   <span class="muted" v-if="row.microOn && (row.strictCookies || row.authCookies.length)"> · cookies</span>
                 </td>
                 <td :title="scGenTitle(row)">{{ scGenText(row) }}</td>

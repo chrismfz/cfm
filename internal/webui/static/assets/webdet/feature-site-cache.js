@@ -37,10 +37,6 @@ import {
   scRecipeBuild,
 } from "./site-cache-recipes.js";
 
-// The node switches are re-read at most this often: the detectors config
-// endpoint parses the file, and the switches change rarely.
-const SWITCHES_TTL_MS = 60 * 1000;
-
 export const siteCacheMixin = {
   data() {
     return {
@@ -65,7 +61,6 @@ export const siteCacheMixin = {
       scRecipeKey: "",
       scRecipeVars: {},
       scSwitches: null,
-      scSwitchesAt: 0,
       scCheckHost: "",
       scCheckPath: "/",
       scCopied: false,
@@ -180,12 +175,23 @@ export const siteCacheMixin = {
       if (f.microOn) parts.push(`anonymous pages micro-cached for ${microBucketSeconds(String(f.microTTL || ""))} s (${recipeLabel(f.microRecipe)})`);
       return `${where}: ${parts.join("; ")}.`;
     },
-    // "enforced" / "dryrun" from this node's MICRO_CACHE_ENFORCE, or "unknown":
-    // a scoped page cannot read it, and an admin's read can fail. Unknown is
+    // "enforced" / "dryrun" from this node's MICRO_CACHE_ENFORCE (the list
+    // response's switches), or "unknown" until a read carries them. Unknown is
     // treated as possibly live, never as a dry run.
     scMicroMode() {
       if (!this.scSwitches) return "unknown";
       return this.scSwitches.microEnforce ? "enforced" : "dryrun";
+    },
+    // SITE_CACHE = 0: nothing is cached now, whatever scMicroMode says.
+    scCacheOff() {
+      return Boolean(this.scSwitches && !this.scSwitches.siteCache);
+    },
+    // Who serves an armed micro tier from cache, for the confirm dialogs.
+    scMicroNodeText() {
+      if (this.scMicroMode !== "enforced") return "This page cannot tell whether this node enforces the micro tier; if it does";
+      return this.scCacheOff
+        ? "Site Cache is off on this node (SITE_CACHE = 0), and it enforces the micro tier once it is back on"
+        : "This node enforces the micro tier";
     },
     scSelectedRecipe() {
       return scRecipe(this.scRecipeKey);
@@ -232,6 +238,8 @@ export const siteCacheMixin = {
         if (seq !== this.scRefreshSeq) return; // a newer read is on its way
         this.scEntries = this.extractRows(payload, "rows");
         this.scUnloadable = Array.isArray(payload && payload.unloadable) ? payload.unloadable : [];
+        // A failed read (below) keeps the last known switches.
+        this.scSwitches = nodeSwitches(payload);
         this.scLoadError = "";
         this.scLoaded = true;
       } catch (err) {
@@ -244,19 +252,6 @@ export const siteCacheMixin = {
       if (stats) this.scStats = stats;
       if (!this.scLoadError) this.resyncSCEdit();
       this.adoptSCScopedPolicy();
-      await this.refreshSiteCacheSwitches();
-    },
-    // SITE_CACHE / MICRO_CACHE_ENFORCE from the merged detectors.conf. The
-    // endpoint is admin-only, so a scoped page never asks.
-    async refreshSiteCacheSwitches(force = false) {
-      if (!this.isAdmin) return;
-      if (!force && this.scSwitchesAt && Date.now() - this.scSwitchesAt < SWITCHES_TTL_MS) return;
-      this.scSwitchesAt = Date.now();
-      const payload = await this.fetchJSONSafe("v1/detectors/config?view=merged", null);
-      // A failed read keeps the last known state (a first failure leaves it
-      // unknown); it is retried after the same interval.
-      const sw = nodeSwitches(payload);
-      if (sw) this.scSwitches = sw;
     },
     // The site-cache API matches a scoped token's vhosts literally (a scope
     // entry "*.example.com" allows that policy key, not a.example.com), and an
@@ -401,11 +396,8 @@ export const siteCacheMixin = {
       if (!patch.micro || !patch.micro.enabled || this.scMicroMode === "dryrun") return true;
       const wasOn = Boolean(this.scOriginal && this.scOriginal.micro && this.scOriginal.micro.enabled);
       if (wasOn) return true;
-      const node = this.scMicroMode === "enforced"
-        ? "This node enforces the micro tier"
-        : "This page cannot tell whether this node enforces the micro tier; if it does";
       return window.confirm(
-        `${node}: anonymous pages of ${patch.host} will be served from cache for ` +
+        `${this.scMicroNodeText}: anonymous pages of ${patch.host} will be served from cache for ` +
         `${microBucketSeconds(patch.micro.ttl || "")} s. Checked the debug stamp on its logged-in and cart pages first?`);
     },
     async saveSC() {
@@ -555,10 +547,7 @@ export const siteCacheMixin = {
     confirmSCRecipeMicro(rows) {
       const micro = rows.some(({ patch }) => patch.micro && patch.micro.enabled);
       if (!micro || this.scMicroMode === "dryrun") return true;
-      const node = this.scMicroMode === "enforced"
-        ? "This node enforces the micro tier"
-        : "This page cannot tell whether this node enforces the micro tier; if it does";
-      return window.confirm(`${node}: the anonymous pages of these vhosts will be served from cache at once. Checked their session cookies are on the auth list? Continue?`);
+      return window.confirm(`${this.scMicroNodeText}: the anonymous pages of these vhosts will be served from cache at once. Checked their session cookies are on the auth list? Continue?`);
     },
     scPatchSummary(p) {
       const parts = [];

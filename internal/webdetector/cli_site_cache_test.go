@@ -119,3 +119,20 @@ func TestSiteCacheCLI_OffKeepsOptOutRemoveDeletes(t *testing.T) {
 		t.Fatalf("after remove the host must follow the wildcard: %q %v", key, ok)
 	}
 }
+
+func TestSiteCacheSwitchesLine(t *testing.T) {
+	for _, tc := range []struct {
+		sw   *SiteCacheSwitches
+		want string
+	}{
+		{nil, ""},
+		{&SiteCacheSwitches{SiteCache: false, MicroCacheEnforce: true}, "SITE_CACHE = 0"},
+		{&SiteCacheSwitches{SiteCache: true, MicroCacheEnforce: false}, "MICRO_CACHE_ENFORCE = 0"},
+		{&SiteCacheSwitches{SiteCache: true, MicroCacheEnforce: true}, "MICRO_CACHE_ENFORCE = 1"},
+	} {
+		got := siteCacheSwitchesLine(tc.sw)
+		if (tc.want == "" && got != "") || !strings.Contains(got, tc.want) {
+			t.Errorf("siteCacheSwitchesLine(%+v) = %q, want it to mention %q", tc.sw, got, tc.want)
+		}
+	}
+}

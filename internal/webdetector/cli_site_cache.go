@@ -133,6 +133,9 @@ func runSiteCacheList(baseURL string) error {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return fmt.Errorf("site-cache list: server returned non-JSON (%d bytes): %q", len(body), strings.TrimSpace(string(body)))
 	}
+	if line := siteCacheSwitchesLine(payload.Switches); line != "" {
+		fmt.Println(line)
+	}
 	if len(payload.Unloadable) > 0 {
 		fmt.Printf("! stored policies this build cannot load (a newer version's, or with a host or cookie name this version rejects; see the daemon log) — treated as OPTED OUT, never cached; 'remove' deletes one, 'off' replaces one whose host is still valid, an upgrade reads a newer version's: %s\n",
 			strings.Join(payload.Unloadable, ", "))
@@ -153,6 +156,21 @@ func runSiteCacheList(baseURL string) error {
 			e.UpdatedAt.Format("2006-01-02 15:04"))
 	}
 	return w.Flush()
+}
+
+// siteCacheSwitchesLine is the node-switch line `list` prints first: the
+// switches override every row. "" when the daemon did not report them.
+func siteCacheSwitchesLine(sw *SiteCacheSwitches) string {
+	switch {
+	case sw == nil:
+		return ""
+	case !sw.SiteCache:
+		return "! SITE_CACHE = 0 on this node: nothing is cached; the stored policies resume as they are when it is back on."
+	case !sw.MicroCacheEnforce:
+		return "Node: MICRO_CACHE_ENFORCE = 0, the micro tier is a dry run (nothing is stored)."
+	default:
+		return "Node: MICRO_CACHE_ENFORCE = 1, the micro tier of an armed vhost is enforced."
+	}
 }
 
 func siteCacheTierCLI(t SiteCacheTier) string {

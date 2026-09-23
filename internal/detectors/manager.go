@@ -429,6 +429,12 @@ func (m *manager) maybeReload(parent context.Context) {
 			if err := sslcollector.WriteWebdetectorBridgeConfig(bridgeConfigPath, bridgeCfg, cfmGID); err != nil {
 				logging.Logf("[detectors] cfm_bridge_config.lua write failed path=%s err=%v", bridgeConfigPath, err)
 			} else {
+				// What the edge now runs, for /api/v1/site-cache/list (a
+				// scoped page cannot read detectors.conf).
+				webdet.PublishSiteCacheSwitches(webdet.SiteCacheSwitches{
+					SiteCache:         bridgeCfg.SiteCache,
+					MicroCacheEnforce: bridgeCfg.MicroCacheEnforce,
+				})
 				logging.Logf("[detectors] cfm_bridge_config.lua written path=%s clearance_refresh=%v origin_keepalive=%v panel_waf_mode=%s panel_decision_mode=%s panel_fp_policy_mode=%s post_clearance_cadence=%v fp_policy=%v site_cache=%v micro_cache_enforce=%v",
 					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PanelFPPolicyMode, bridgeCfg.PostClearanceCadence, bridgeCfg.FPPolicy, bridgeCfg.SiteCache, bridgeCfg.MicroCacheEnforce)
 			}
