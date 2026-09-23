@@ -17,6 +17,7 @@
 //   remove  <vhost>                          — DELETE the policy: the host then follows a
 //                                              covering *.suffix wildcard (alias: rm)
 //   purge   <vhost> | --all                  — bump generation (--all is admin-only)
+//   stats   [vhost]                          — per-vhost cache verdict counts
 //
 // HTTP goes through internal/clihttp (the sanctioned CLI transport, CLAUDE.md §5).
 
@@ -102,9 +103,12 @@ turning static on, or re-enabling micro, starts the vhost from an empty cache):
   --static off           disable the static tier (its recipe/TTL are kept)
   --micro  RECIPE        enable the micro tier with RECIPE
   --micro off            disable the micro tier (its recipe/TTL are kept)
-  --static-ttl D         static TTL bucket (e.g. 1h, 7d, 30d)
-  --micro-ttl  D         micro TTL bucket (e.g. 1s, 5s, 30s)
-  --strict-cookies       bypass on ANY non-CFM cookie (max safety, less cache)
+  --static-ttl D         stored with the static tier (a label: the edge honours
+                         the origin's Cache-Control/Expires, 1h fallback)
+  --micro-ttl  D         micro TTL (s/m/h/d; snaps to 1/2/5/10/30/60s, >60s = 60s,
+                         empty = 1s; the recipe name does not set it)
+  --strict-cookies       micro: bypass on ANY cookie not on the ignore list
+                         (analytics / consent / cfm_*) — max safety, less cache
   --no-strict-cookies    back to the named auth-cookie allowlist (the default)
   --auth-cookies a,b,c   extra app-session cookie names that force a bypass
                          (replaces the stored list)

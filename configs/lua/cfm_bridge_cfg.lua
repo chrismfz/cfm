@@ -38,8 +38,12 @@
 --   site_cache          boolean (default TRUE when file/field missing; the
 --                       Site Cache master KILL SWITCH — [webdetector] SITE_CACHE.
 --                       Not an opt-in (the per-vhost policy store arms vhosts);
---                       false = cfm_cache.lua is a full no-op: no feed poll, no
---                       lookup, no X-CFM-Cache header)
+--                       false = cfm_cache.lua stops caching: no feed poll, no
+--                       cache gate, no X-CFM-Cache header, no stats push)
+--   micro_cache_enforce boolean (default FALSE when file/field missing; the
+--                       Site Cache Tier B ENFORCE gate — [webdetector]
+--                       MICRO_CACHE_ENFORCE. An opt-in: false = micro-cache dry
+--                       run, true = armed vhosts' anonymous HTML is micro-cached)
 
 local fc = require "cfm_filecache"
 

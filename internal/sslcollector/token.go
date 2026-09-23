@@ -432,17 +432,19 @@ type WebdetectorBridgeConfig struct {
 	// SiteCache mirrors [webdetector] SITE_CACHE to the edge — the master KILL
 	// SWITCH for per-vhost edge caching (default ON). It is not a second opt-in:
 	// the per-vhost policy store (default empty) is what arms a vhost, so nothing
-	// caches until one is armed regardless of this flag. false makes cfm_cache.lua
-	// a full no-op (no feed poll, no lookup, no header) so an operator can kill all
-	// caching fleet-wide in ~10s without disarming vhosts.
+	// caches until one is armed regardless of this flag. false stops Site Cache on
+	// this node's edge (no feed poll, no cache gate, no stamp, no stats push;
+	// the log phase still counts) so an operator can kill its caching ~10s
+	// after this file is written (~15s from saving detectors.conf) without
+	// disarming vhosts.
 	SiteCache bool
 	// MicroCacheEnforce mirrors [webdetector] MICRO_CACHE_ENFORCE to the edge —
-	// the Tier B (micro-cache of anonymous HTML) ENFORCE gate. Default OFF: unlike
+	// the Tier B (micro-cache of anonymous pages) ENFORCE gate. Default OFF: unlike
 	// SiteCache this is an explicit OPT-IN, so a binary/config upgrade never turns
-	// HTML micro-caching on by itself even for a vhost whose micro tier is armed
-	// (the CLAUDE.md §6 "adding X silently arms it" lesson). While false, cfm.lua's
-	// micro gate runs in DRY-RUN — it computes the would-cache verdict for the
-	// X-CFM-Cache observe header but never ngx.exec's to a cache location, so
+	// page micro-caching on by itself even for a vhost whose micro tier is armed
+	// (the CLAUDE.md §6 "adding X silently arms it" lesson). While false, Tier B
+	// runs in DRY-RUN — the X-CFM-Cache observe header still shows the would-cache
+	// verdict, but cfm.lua's micro gate never ngx.exec's to a cache location, so
 	// nothing is stored. true lets an armed+anonymous+cacheable request route to
 	// its @cfm_micro_<n>s bucket. Flips within ~10s, no proxy reload.
 	MicroCacheEnforce bool

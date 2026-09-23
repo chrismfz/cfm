@@ -122,7 +122,7 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop challenge-access simulate --host <vhost> [--ip <ip>] [--path </x>] [--asn 15169] [--verified-bot]")
 	fmt.Println("  cfm webtop site-cache list                               # per-vhost edge caching (default: all OFF)")
 	fmt.Println("  cfm webtop site-cache get <vhost> | stats [vhost]        # one policy (JSON) | HIT/MISS per vhost")
-	fmt.Println("  cfm webtop site-cache set <vhost> [--static RECIPE|off] [--micro RECIPE|off] [--static-ttl 7d] [--micro-ttl 1s] [--[no-]strict-cookies] [--auth-cookies a,b|--no-auth-cookies]")
+	fmt.Println("  cfm webtop site-cache set <vhost> [--static RECIPE|off] [--micro RECIPE|off] [--micro-ttl 5s] [--static-ttl D] [--[no-]strict-cookies] [--auth-cookies a,b|--no-auth-cookies]   # see: site-cache help")
 	fmt.Println("  cfm webtop site-cache off <vhost>                        # caching OFF (an opt-out; also under a broader *.suffix wildcard)")
 	fmt.Println("  cfm webtop site-cache remove <vhost>                     # delete the policy (the vhost then follows a covering wildcard)")
 	fmt.Println("  cfm webtop site-cache purge <vhost>                      # or: purge --all (admin)")

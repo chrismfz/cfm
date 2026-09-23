@@ -23,6 +23,8 @@
 //   POST /api/v1/site-cache/remove?host=         — DELETE a vhost's policy (the host
 //                                                  then follows a covering *.suffix)
 //   POST /api/v1/site-cache/purge?host= | ?all=1 — bump generation (all=admin)
+//   GET  /api/v1/site-cache/stats[?host=]        — per-vhost cache verdict counts
+//                                                  (site_cache_stats.go)
 
 package webdetector
 
