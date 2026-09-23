@@ -251,7 +251,7 @@ func elemsToTimed(elems []nftables.SetElement) []firewall.SetElementTimed {
 		out := make([]firewall.SetElementTimed, 0, len(elems))
 		for _, e := range elems {
 			if ip := keyToIP(e.Key); ip != nil {
-				out = append(out, firewall.SetElementTimed{Elem: ip.String(), Expires: e.Expires})
+				out = append(out, firewall.SetElementTimed{Elem: ip.String(), Expires: elemExpires(e)})
 			}
 		}
 		return out
@@ -260,10 +260,20 @@ func elemsToTimed(elems []nftables.SetElement) []firewall.SetElementTimed {
 	out := make([]firewall.SetElementTimed, 0, len(starts))
 	for i := 0; i < len(starts) && i < len(ends); i++ {
 		if s := keysToCIDR(starts[i].Key, ends[i].Key); s != "" {
-			out = append(out, firewall.SetElementTimed{Elem: s, Expires: starts[i].Expires})
+			out = append(out, firewall.SetElementTimed{Elem: s, Expires: elemExpires(starts[i])})
 		}
 	}
 	return out
+}
+
+// elemExpires is an element's remaining time. An element with a timeout read
+// at its last instant can report 0 left, which must not read as "no
+// timeout" (permanent): it is about to go.
+func elemExpires(e nftables.SetElement) time.Duration {
+	if e.Expires == 0 && e.Timeout > 0 {
+		return time.Millisecond
+	}
+	return e.Expires
 }
 
 // elemsToStrings converts kernel set elements to IP or CIDR strings.

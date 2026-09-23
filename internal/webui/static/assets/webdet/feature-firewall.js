@@ -109,6 +109,8 @@ export const firewallMixin = {
       const blocked = [];
       const skipped = [];
       const failed = [];
+      const errors = [];
+      let kept = 0;
       try {
         // One request per 256-IP chunk (the server-side cap). The batch
         // endpoint guards against self-lockout: the server's own IPs and
@@ -125,6 +127,10 @@ export const firewallMixin = {
           blocked.push(...(Array.isArray(res?.blocked) ? res.blocked : []));
           skipped.push(...(Array.isArray(res?.skipped) ? res.skipped : []));
           failed.push(...(Array.isArray(res?.failed) ? res.failed : []));
+          // The batch only adds or extends: an IP already blocked at least as
+          // long (or permanently) keeps its block and is counted as kept.
+          kept += Number(res?.kept) || 0;
+          if (res?.error) errors.push(String(res.error));
         }
       } catch (err) {
         this.bulkBusy = false;
@@ -141,11 +147,15 @@ export const firewallMixin = {
       for (const s of skipped) { if (s && s.ip) delete this.selectedIPs[s.ip]; }
       const ttlText = ttl ? `for ${this.blockTTLLabel}` : "permanently";
       const parts = [`Bulk block: ${blocked.length} blocked ${ttlText}`];
+      if (kept) {
+        parts.push(`${kept} of them already blocked at least as long (kept as is)`);
+      }
       if (skipped.length) {
         parts.push(`${skipped.length} skipped (${skipped.map((s) => `${s.ip}: ${s.reason}`).join(", ")})`);
       }
       if (failed.length) {
-        parts.push(`${failed.length} FAILED (${failed.map((f) => f.ip).join(", ")}) — kept selected, retry`);
+        const why = errors.length ? `: ${[...new Set(errors)].join("; ")}` : "";
+        parts.push(`${failed.length} FAILED (${failed.map((f) => f.ip).join(", ")})${why} — kept selected, retry`);
       }
       this.actionMsg = parts.join(" · ");
     },

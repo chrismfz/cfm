@@ -78,6 +78,10 @@ type Backend interface {
 	AddBlock(ip net.IP, comment string, ttl *time.Duration) error
 	RemoveBlock(ip net.IP) error
 	RemoveBlockBatch(ips []net.IP) error
+	// AddBlockBatch blocks many host addresses with a few kernel round trips
+	// in total (no per-address nft fork). It only adds or extends a block,
+	// never shortens one: see block_batch.go.
+	AddBlockBatch(entries []BlockEntry) (BlockBatchResult, error)
 	ListBlocks() ([]BlockedEntry, error)
 	ListAllows() ([]BlockedEntry, error)
 	AddAllow(ip net.IP, ttl *time.Duration) error
