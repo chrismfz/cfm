@@ -44,6 +44,24 @@ back-filled here — see the git/PR history for that period.
   like the existing Joomla file-manager exception: only a bare file-manager
   command is allowed, on `admin-ajax.php` only.
 ### Changed
+- **WAF logonly cleanup.** A fleet review of the log-only tell rules:
+  - **611 `rule_bad_utf8` is disabled by default.** It was fleet-proven FP-only
+    — 2 hits in 30 days, both false positives, on top of 772 historical FPs on
+    Greek WordPress sites and zero true positives. `disabled` skips the
+    per-request UTF-8 walk entirely; the detector and its regression tests are
+    kept (they document the FP lessons). Re-enable per fleet with
+    `rule_bad_utf8 = "challenge_v2"` in `cfm_waf_config.lua`.
+  - **605 `rule_crlf_injection` and 318 `rule_superglobal_override` move from
+    `logonly` to `challenge_v2`.** Both are attack-shaped (response-splitting;
+    PHP superglobal variable-poisoning) with the FP-prone surfaces already
+    carved out, so a real user's solve still passes while a headless attacker's
+    is scored.
+  - **612 `rule_fetch_metadata_missing` noise reduction (stays logonly).** It
+    feeds the challenge-score, so it is kept as a signal, not promoted; the
+    benign pools it was counting are now carved out: the IAB `ads.txt`/
+    `app-ads.txt` and feed (`/feed/`) endpoints, four self-declaring bots
+    (BitSightBot, iAskBot, Aranet-SearchBot, WP Rocket's preloader), and Viber's
+    link-preview fetcher (keyed on its fixed build; logonly-only).
 - **The whole WAF `challenge` tier now defaults to `challenge_v2`.** Every
   challenge-tier rule serves the same challenge page, but the solve is now
   scored for headless-browser evidence at verify — a failing solve (a real

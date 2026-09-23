@@ -1599,6 +1599,8 @@ do
     "rule_debug_toggles", "rule_header_flood", "rule_ssrf", "rule_js_proto",
     "rule_ctrl_chars", "rule_serialize", "rule_c2_tunnel", "rule_auth_burst",
     "rule_php_webshell_body", "rule_cmd_params", "rule_cmd_payload", "rule_bad_ua",
+    -- logonly→challenge_v2 2026-09-23 (PR3): attack-only, a human's solve passes.
+    "rule_crlf_injection", "rule_superglobal_override",
   }
   for _, name in ipairs(must_be_challenge_v2) do
     check(snap[name] == "challenge_v2",
@@ -1606,6 +1608,10 @@ do
   end
   -- The one held rule stays plain challenge.
   check(snap["rule_long_path_segment"] == "challenge", "71: rule_long_path_segment held at challenge (Googlebot FP)")
+  -- rule_bad_utf8 (611) ships DISABLED 2026-09-23: fleet-proven FP-only (2 hits/
+  -- 30d both FP + 772 historical). Detector + regression tests kept; `disabled`
+  -- skips the per-request UTF-8 walk. An accidental re-enable is caught here.
+  check(snap["rule_bad_utf8"] == "disabled", "71: rule_bad_utf8 ships disabled (FP-only, kept for reversibility)")
   local must_be_block = {
     "rule_traversal",  -- promoted challenge→block 2026-09-05 (clean 6-server FP review, docs/waf.md)
     "rule_sqli_blind_lexical",

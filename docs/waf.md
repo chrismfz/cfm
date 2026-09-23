@@ -416,6 +416,14 @@ lives in the URL/args, which are still walked, and non-multipart text bodies
 (test 77c) keeps firing. Test 77b now carries real `0xC0`-overlong bytes so
 it actually guards the skip.
 
+**Retired (2026-09-23):** even after the two carve-outs above, a fresh fleet
+review found rule 611 **FP-only** — 2 hits in 30 days, both false positives (a
+zort.me URL-shortener form), and zero true positives — so it now ships
+**`disabled` by default**. The detector and its regression tests (75–77c) are
+kept: they encode the FP lessons, and an operator can re-enable per fleet with
+`rule_bad_utf8 = "challenge_v2"` in `cfm_waf_config.lua`. `disabled` skips the
+per-request UTF-8 walk entirely.
+
 **Lesson for new encoding-validity rules:** "not UTF-8" is not the
 same as "attack". A web property that has been running long enough to
 accumulate legacy WP plugins, pre-charset forms, or file-upload
@@ -1925,7 +1933,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 51 | PHP dropper markers (423) | `'!success!'` + `'!ended!'` literals + `die(`/`exit(` framing | `cfm_waf_detectors.lua` (`detect_php_dropper_markers`) |
 | 52 | PHP filesize recon (424) | `<fs>` literal tag + `filesize(` + `SCRIPT_FILENAME` reference | `cfm_waf_detectors.lua` (`detect_php_filesize_recon`) |
 | 53 | PHP touch anti-forensic (425) | `@touch(<path>, <literal-unix-ts>)` mtime backdating + paired file-write primitive | `cfm_waf_detectors.lua` (`detect_php_touch_antiforensic`) |
-| 54 | Superglobal override (318) | param KEY = PHP superglobal name (`_GET`/`_SERVER`/`GLOBALS`/…), delimiter-anchored so `db_server=` / value-position do not match; clean-room (NinjaFirewall gap analysis), `logonly` | `cfm_waf_detectors.lua` (`detect_superglobal_override`) |
+| 54 | Superglobal override (318) | param KEY = PHP superglobal name (`_GET`/`_SERVER`/`GLOBALS`/…), delimiter-anchored so `db_server=` / value-position do not match; clean-room (NinjaFirewall gap analysis), `challenge_v2` (promoted logonly→challenge_v2 2026-09-23: attack-only, a human's solve passes) | `cfm_waf_detectors.lua` (`detect_superglobal_override`) |
 | — | Body budget by CT | json=32K / multipart=16K / xml=16K / urlencoded=8K / other=2K | `cfm_waf_util.lua:249` |
 | — | Normalize | `url_decode_once × 2` + `lower`, with no-`%` fast path. **No UTF-8 / unicode normalization.** | `cfm_waf_util.lua:211` |
 

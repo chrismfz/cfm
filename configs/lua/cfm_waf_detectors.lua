@@ -2323,6 +2323,14 @@ local CRAWLER_UA_TOKENS = {
   -- a shop is a traffic-rule decision (the `block_geedo` recipe), not this
   -- rule's.
   "geedoshopproductfinder",
+  -- 612 hygiene (2026-09-23): ad-ecosystem / security / search crawlers that
+  -- carry a `Chrome/` token yet self-declare, and a site's own cache warmer.
+  -- Named, evasion-resistant (a bare token would hand an attacker a skip).
+  --   bitsightbot     — BitSight security-ratings crawler
+  --   iaskbot         — iAsk.ai search crawler
+  --   aranet-searchbot— Aranet search crawler
+  --   wp rocket       — WP Rocket's preload fetcher (the site warming its own cache)
+  "bitsightbot", "iaskbot", "aranet-searchbot", "wp rocket",
 }
 -- IN_APP_UA_TOKENS: in-app browsers of social apps — a real person tapping a
 -- link or an ad inside the app. These are genuine Chromium WebViews (they carry
@@ -2446,7 +2454,12 @@ function _M.detect_fetch_metadata_missing(headers, method, path)
   -- cheap-first ordering this detector documents). `path` is the request path
   -- only (no query); nil is treated as "".
   local p = lower(path or "")
-  if p == "/robots.txt" or begins(p, "/.well-known/") then return nil end
+  -- robots.txt / .well-known (ACME/DCV/security validators), the IAB ad-verification
+  -- files (ads.txt/app-ads.txt crawlers: RhythmOne, code200 — 612 hygiene 2026-09-23),
+  -- and feed endpoints (RSS pollers claim text/html but ship no browser headers).
+  -- Suppress-only (path is spoofable, but this can only stand the rule DOWN).
+  if p == "/robots.txt" or p == "/ads.txt" or p == "/app-ads.txt"
+     or begins(p, "/.well-known/") or p:match("/feed/?$") then return nil end
 
   -- (2) Any Sec-Fetch-* present → a real browser (or a stack that bothers to send
   -- them); stand down. Presence, not value — a present-but-empty header still
@@ -2483,6 +2496,18 @@ function _M.detect_fetch_metadata_missing(headers, method, path)
   -- After every cheap gate, so this ~40-token scan (and clause 6's) runs only
   -- for the already-header-poor tiny set.
   if ua_is_declared_crawler(ua) then return nil end
+
+  -- (5b) Viber's link-preview fetcher (612 hygiene 2026-09-23): a header-poor
+  -- navigation with a FIXED stale build UA and no self-identifying token,
+  -- landing on shared product/article URLs — the largest benign pool in the
+  -- tell (~1.2k hits/7d from ~1k GR residential IPs). The preview hop gives no
+  -- other signal (the separate og:image fetch does carry a "Viber/" token), so
+  -- key on the build string (plain substring — a longer UA still matches).
+  -- Suppress-only, and sound ONLY because this rule is
+  -- logonly MEASUREMENT: a spoofed build buys no bypass (the tell enforces
+  -- nothing), and when Viber bumps the build this simply stops matching and the
+  -- hit falls back to the generic tag. Revisit if 612 is ever promoted.
+  if has(ua, "chrome/108.0.5359.98") then return nil end
 
   -- (6) In-app browsers (a person inside TikTok & co.) are real navigations that
   -- happen to ship header-poor: the tell's known false-positive pool, not
