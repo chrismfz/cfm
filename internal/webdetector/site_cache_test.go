@@ -4,6 +4,7 @@ package webdetector
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,10 +23,6 @@ func newSiteCacheTestStore(t *testing.T) *siteCacheStore {
 func TestSiteCacheStore_SetGetListRemove(t *testing.T) {
 	s := newSiteCacheTestStore(t)
 
-	if s.HasAny() {
-		t.Fatal("fresh store must have no enabled entries")
-	}
-
 	got, err := s.Set(SiteCacheEntry{
 		Host:   "MyIP.gr.",
 		Static: SiteCacheTier{Enabled: true, Recipe: "static_aggressive", TTL: "7d"},
@@ -42,9 +39,6 @@ func TestSiteCacheStore_SetGetListRemove(t *testing.T) {
 	}
 	if got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
 		t.Fatal("timestamps not stamped")
-	}
-	if !s.HasAny() {
-		t.Fatal("HasAny should be true after enabling a tier")
 	}
 
 	e, ok := s.Get("myip.gr")
@@ -1164,5 +1158,109 @@ func TestSiteCacheAPI_NoScopeFailsClosed(t *testing.T) {
 	rr := doRequest(mux, scopedCtxNoVhosts(), http.MethodPost, "/api/v1/site-cache/set", siteCacheSetBody(t, "mysite.com"))
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("no-scope set: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// ── PR-4b validation ─────────────────────────────────────────────────────────
+
+func TestSiteCacheHostValidation(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("static_lean")}
+	for _, h := range []string{
+		"example.com", "WWW.Example.COM.", "a-b.example.com", "_acme.example.com",
+		"xn--bcher-kva.example", "*.example.com", "*.shop.example.co.uk", "192.0.2.10", "localhost",
+		strings.Repeat("a", 63) + ".com",
+	} {
+		if _, err := s.Apply(SiteCachePatch{Host: h, Static: on}, false); err != nil {
+			t.Errorf("valid host %q rejected: %v", h, err)
+		}
+	}
+	for h, why := range map[string]string{
+		"*.com":                           "at least two labels",
+		"*":                               "invalid character",
+		"a..com":                          "empty label",
+		".a.com":                          "empty label",
+		"*..com":                          "empty label",
+		"-a.com":                          "start or end",
+		"a-.com":                          "start or end",
+		"bücher.example":                  "punycode",
+		"a.com/path":                      "invalid character",
+		"a b.com":                         "invalid character",
+		"a.*.com":                         "invalid character",
+		"a?.com":                          "invalid character",
+		strings.Repeat("a", 64) + ".com":  "63",
+		strings.Repeat("a.", 127) + "com": "253",
+	} {
+		_, err := s.Apply(SiteCachePatch{Host: h, Static: on}, false)
+		if err == nil || !strings.Contains(err.Error(), why) {
+			t.Errorf("host %q: err = %v, want it to mention %q", h, err, why)
+		}
+	}
+}
+
+// A stored row whose host this build rejects (an older build accepted it) is
+// kept, listed, and removable by that host — fail closed, never lost.
+func TestSiteCacheStore_InvalidStoredHost(t *testing.T) {
+	path := writeSiteCacheStoreFile(t, `[
+	 {"host":"*.com","generation":1758585600001,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`)
+	s := newSiteCacheStore(path)
+	if len(s.List()) != 0 || len(s.PolicyFeed()) != 0 {
+		t.Fatalf("an invalid stored host is served: list=%v feed=%v", s.List(), s.PolicyFeed())
+	}
+	if got := s.FrozenHosts(); len(got) != 1 || got[0] != "*.com" {
+		t.Fatalf("FrozenHosts = %v", got)
+	}
+	if !s.Remove("*.com") {
+		t.Fatal("remove of an invalid stored host found nothing")
+	}
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), `"*.com"`) {
+		t.Fatalf("still on disk:\n%s", b)
+	}
+}
+
+func TestSiteCacheAuthCookieValidation(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("micro_safe")}
+	ok := []string{"wp_session", "PHPSESSID", "my-app.sid", "a!#$%&'*+-.^_`|~b"}
+	e, err := s.Apply(SiteCachePatch{Host: "a.com", Micro: on, AuthCookies: &ok}, false)
+	if err != nil || len(e.AuthCookies) != len(ok) {
+		t.Fatalf("valid cookie names: %v %v", err, e.AuthCookies)
+	}
+	for _, bad := range [][]string{
+		{"has space"}, {"a=b"}, {"a;b"}, {"a,b"}, {`"quoted"`}, {"tab\tname"}, {"ünicode"},
+		{strings.Repeat("c", 129)},
+	} {
+		if _, err := s.Apply(SiteCachePatch{Host: "a.com", AuthCookies: &bad}, false); err == nil {
+			t.Errorf("cookie names %q accepted", bad)
+		}
+	}
+	many := make([]string, maxSiteCacheAuthCookies+1)
+	for i := range many {
+		many[i] = "c" + strconv.Itoa(i)
+	}
+	if _, err := s.Apply(SiteCachePatch{Host: "a.com", AuthCookies: &many}, false); err == nil || !strings.Contains(err.Error(), "too many") {
+		t.Fatalf("%d auth cookies: err = %v (they used to be truncated silently)", len(many), err)
+	}
+	if got, _ := s.Get("a.com"); len(got.AuthCookies) != len(ok) {
+		t.Fatalf("a rejected patch changed the stored list: %v", got.AuthCookies)
+	}
+	dups := []string{"Sess", "sess", " SESS "}
+	if e, err := s.Apply(SiteCachePatch{Host: "a.com", AuthCookies: &dups}, false); err != nil || len(e.AuthCookies) != 1 {
+		t.Fatalf("case-insensitive dedup: %v %v", err, e.AuthCookies)
+	}
+}
+
+func TestSiteCacheAuditLine(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/site-cache/set", nil)
+	r.RemoteAddr = "192.0.2.7:1234"
+	got := formatSiteCacheAudit(r.WithContext(adminCtx()), "set", "a.com", "ok", "static=static_lean micro=off")
+	want := `[site_cache] action=set host="a.com" result=ok actor=admin remote=192.0.2.7:1234 detail="static=static_lean micro=off"`
+	if got != want {
+		t.Fatalf("admin line:\n got %s\nwant %s", got, want)
+	}
+	many := []string{"h1.com", "h2.com", "h3.com", "h4.com", "h5.com", "h6.com", "h7.com"}
+	got = formatSiteCacheAudit(r.WithContext(scopedCtx(many...)), "remove", "h1.com\n[fake] x", "denied", "")
+	if !strings.Contains(got, `actor=scoped:h1.com,h2.com,h3.com,h4.com,h5.com,…(+2)`) || strings.Contains(got, "\n") {
+		t.Fatalf("scoped line (capped actor, no raw newline): %s", got)
 	}
 }

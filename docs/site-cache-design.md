@@ -568,6 +568,19 @@ rejected. Hosts carry no `:port` — the edge strips it from the request Host an
 from the feed, so a new policy with a port is rejected and a stored one is
 normalized.
 
+**Host and cookie validation.** A host is an exact DNS-style name or one
+leading `*.` over one: labels of 1-63 characters from `[a-z0-9_-]`, not
+starting or ending with `-`, at most 253 characters in all; an
+internationalized name in its punycode (`xn--`) form, as the Host header
+carries it. A wildcard needs at least two labels after `*.` — `*.com` would arm
+every `.com` vhost on the node. A stored row whose host fails these rules (an
+older build accepted it) is kept and never served, like any row this build
+cannot load, and `remove <that host>` still deletes it. `auth_cookies` are at
+most 32 names, each an HTTP token (RFC 6265 cookie-name, ≤ 128 characters):
+the edge reads a request cookie's name up to `=` or whitespace, so a name with
+a space, `=`, `;` or `,` could never match — it is rejected, not stored, as is
+a 33rd name (which used to be dropped silently).
+
 ---
 
 ## 7. Management surfaces
@@ -585,9 +598,12 @@ normalized.
 
 Prefix `site-cache` added to `SharedAPIPrefixes()` so the shared apiserver
 proxies it to the engine mux. Never a bare `mux.HandleFunc` (a prefix-coverage
-test walks the table). Lifecycle audit of set/remove/purge (one
-`logExcludeChange`-style choke point) is planned, NOT built yet: today only a
-failed save is logged.
+test walks the table). **Lifecycle audit:** every set / remove / purge /
+purge-all — and every refused one (out of scope, admin-only, invalid) — writes
+one `[site_cache] action=… host=… result=ok|notfound|rejected|denied
+actor=admin|scoped:<hosts> remote=… detail=…` line to `cfm.log`
+(`logSiteCacheAudit`; the handlers are the single choke point: the CLI goes
+through this API and the MCP tools only read).
 
 ### 7.2 CLI (`cfm webtop site-cache …`)
 
@@ -981,7 +997,14 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      `site_cache_stats` (HIT/MISS/BYPASS + a STRICT hit ratio — STALE/UPDATING/
      REVALIDATED serve from cache but sit in the denominator only, so read the
      full breakdown). `ucache="$upstream_cache_status"` was added to the `cfm`
-     access log_format so `edge_access_tail` shows the verdict per request. **v1 scope:** a live totals view (counts since the edge last
+     access log_format so `edge_access_tail` shows the verdict per request.
+     **Bounds:** the daemon keeps a pushed row only for a policy key armed at
+     that moment, only the seven cache statuses (+ an edge `total`), at most
+     one row per stored policy (`maxSiteCacheEntries`), and prunes the rows
+     of keys disarmed since every 5 minutes; a push is ONE hook event (it was
+     one per row, which could overflow the hook queue and drop rows). The
+     edge side reads at most 8000 dict keys per push (~1000 armed vhosts):
+     past that a vhost is absent from the push, never partial. **v1 scope:** a live totals view (counts since the edge last
      reloaded), not hour-bucketed history, and no cfm-admin column yet — both
      follow-ups. **Deferred to a focused follow-up:** the `whats_wrong`
      "armed but ~0 hits" signal (the automated form of what `site_cache_stats`

@@ -114,8 +114,8 @@ type NginxBridge struct {
 	// pushed by Lua (cfm_cache.lua schedule_stats_flush_if_needed). Each row carries a per-vhost
 	// map of cache status (HIT/MISS/BYPASS/…) to an ABSOLUTE count since the
 	// edge dict was created; the persister UPSERTs (replaces) the vhost's
-	// counts. Set via SetCacheStatsHook. Called without b.mu held; dispatched
-	// async.
+	// counts. Set via SetCacheStatsHook. Called without b.mu held; a push's
+	// rows are delivered by ONE async hook event, in order.
 	OnCacheStats func(host string, counts map[string]int)
 
 	// OnObserve is called when OpenResty (or others) reports an observed request outcome.
@@ -2689,10 +2689,11 @@ func (b *NginxBridge) handleWAFStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // maxCacheStatsRows bounds how many per-vhost rows a single /nginx/cache/stats
-// push may fan out into hooks. The edge only keys ARMED vhosts, so this sits
-// far above any real batch; excess rows from a buggy/compromised edge are
-// dropped rather than dispatched.
-const maxCacheStatsRows = 4096
+// push may hand to the hook. The edge keys only ARMED policies, of which the
+// store holds at most maxSiteCacheEntries — the bound is that, not less (it
+// was 4096, so on a store past that some armed vhosts never got stats);
+// excess rows from a buggy/compromised edge are dropped.
+const maxCacheStatsRows = maxSiteCacheEntries
 
 // handleCacheStats accepts the periodic Site Cache snapshot pushed by Lua's
 // cfm_cache.lua schedule_stats_flush_if_needed. Body: {"rows":[{host, counts:{status:count,…}}]}
@@ -2720,15 +2721,19 @@ func (b *NginxBridge) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.OnCacheStats != nil && len(msg.Rows) > 0 {
-		for i := range msg.Rows {
-			if i >= maxCacheStatsRows {
-				break
-			}
-			host, counts := msg.Rows[i].Host, msg.Rows[i].Counts
-			b.dispatchHook(func() {
-				b.OnCacheStats(host, counts)
-			})
+		rows := msg.Rows
+		if len(rows) > maxCacheStatsRows {
+			rows = rows[:maxCacheStatsRows]
 		}
+		// ONE hook event per push, not one per row: a push of a few thousand
+		// rows used to overflow the hook queue (hookQueueSize) and drop the
+		// excess, leaving those vhosts without stats.
+		fn := b.OnCacheStats
+		b.dispatchHook(func() {
+			for i := range rows {
+				fn(rows[i].Host, rows[i].Counts)
+			}
+		})
 	}
 	w.WriteHeader(http.StatusOK)
 }

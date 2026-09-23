@@ -20,43 +20,59 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // siteCacheStatsStore maps host -> cache status -> absolute count. Each push
 // REPLACES a host's counts (UPSERT), matching the edge's absolute snapshot.
 type siteCacheStatsStore struct {
-	mu    sync.RWMutex
-	hosts map[string]map[string]int
+	mu        sync.RWMutex
+	hosts     map[string]map[string]int
+	lastPrune time.Time
 }
 
 func newSiteCacheStatsStore() *siteCacheStatsStore {
 	return &siteCacheStatsStore{hosts: make(map[string]map[string]int)}
 }
 
-// Bounds against a buggy/compromised edge. The edge only keys armed vhosts
-// (few) with a fixed status set, so these sit far above any real push.
+// Bounds against a buggy/compromised edge. The edge keys only ARMED policies,
+// of which the policy store holds at most maxSiteCacheEntries (the cap used to
+// be 4096, so past that some armed vhosts never got a row), and counts only
+// the fixed set of cache statuses (cfm_cache_log.lua VALID) — any other key is
+// dropped, not stored. maxSiteCacheHostLen is the DNS name limit.
 const (
-	maxSiteCacheStatsHosts = 4096
-	maxSiteCacheStatsKeys  = 16
+	maxSiteCacheStatsHosts = maxSiteCacheEntries
+	maxSiteCacheHostLen    = 253
+	siteCacheStatsPruneGap = 5 * time.Minute
 )
 
-// Upsert replaces one host's counts. Wired as the bridge SetCacheStatsHook;
-// called async, once per pushed row. The incoming map aliases request-scoped
-// memory, so it is copied (and bounded) before being retained.
+var siteCacheStatsKeys = map[string]struct{}{
+	"HIT": {}, "MISS": {}, "BYPASS": {}, "EXPIRED": {}, "STALE": {},
+	"UPDATING": {}, "REVALIDATED": {},
+	"total": {}, // an edge-supplied total (floored at the parts; see siteCacheStatsRow)
+}
+
+// Upsert replaces one host's counts. Fed from the bridge SetCacheStatsHook
+// through Engine.ingestSiteCacheStats (armed keys only); called async, once
+// per pushed row. The incoming map aliases request-scoped memory, so it is
+// copied (and bounded) before being retained.
 func (s *siteCacheStatsStore) Upsert(host string, counts map[string]int) {
 	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "" || len(counts) == 0 {
+	if host == "" || len(host) > maxSiteCacheHostLen || len(counts) == 0 {
 		return
 	}
-	cp := make(map[string]int, len(counts))
+	cp := make(map[string]int, len(siteCacheStatsKeys))
 	for k, v := range counts {
-		if len(cp) >= maxSiteCacheStatsKeys {
-			break
+		if _, known := siteCacheStatsKeys[k]; !known {
+			continue
 		}
 		if v < 0 {
 			v = 0
 		}
 		cp[k] = v
+	}
+	if len(cp) == 0 {
+		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -64,6 +80,47 @@ func (s *siteCacheStatsStore) Upsert(host string, counts map[string]int) {
 		return // at capacity; drop an unknown host rather than grow unbounded
 	}
 	s.hosts[host] = cp
+}
+
+// maybePrune drops, at most once per siteCacheStatsPruneGap, the rows of keys
+// armed() no longer holds. The edge dict keeps a vhost's counts until an edge
+// reload, and the read paths already hide unarmed rows, but without this the
+// rows of every policy ever armed stayed in memory until a daemon restart.
+// armed is called only when a prune is due.
+func (s *siteCacheStatsStore) maybePrune(now time.Time, armed func() map[string]struct{}) int {
+	s.mu.Lock()
+	if now.Sub(s.lastPrune) < siteCacheStatsPruneGap {
+		s.mu.Unlock()
+		return 0
+	}
+	s.lastPrune = now
+	s.mu.Unlock()
+	keep := armed() // outside s.mu: it takes the policy store's lock
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for h := range s.hosts {
+		if _, ok := keep[h]; !ok {
+			delete(s.hosts, h)
+			n++
+		}
+	}
+	return n
+}
+
+// ingestSiteCacheStats is the bridge's cache-stats hook: a row is kept only
+// for a policy key that is ARMED now (the edge can lag a disarm by a feed
+// poll, and a buggy or compromised edge can send anything), then unarmed rows
+// are pruned periodically.
+func (e *Engine) ingestSiteCacheStats(host string, counts map[string]int) {
+	if e == nil || e.siteCacheStats == nil || e.siteCache == nil {
+		return
+	}
+	if !e.siteCache.ArmedKey(host) {
+		return
+	}
+	e.siteCacheStats.Upsert(host, counts)
+	e.siteCacheStats.maybePrune(time.Now(), e.armedCacheKeys)
 }
 
 // Get returns a copy of one host's counts (nil if never seen).
