@@ -415,54 +415,23 @@ ensure_lua_dir() {
 }
 
 ensure_cache_dirs() {
-    # Path is /var/cache/nginx/ (NOT /var/cache/angie/) to match angie.conf's
-    # proxy_cache_path, the daemon's own MkdirAll (cmd/cfm/main.go), the
-    # OpenResty installer, and the openresty↔angie parity the config guard
-    # (check_site_cache_config.sh) enforces. angie.conf declares
-    # proxy_cache_path unconditionally, so this dir MUST exist (parent included)
-    # before `angie -t` runs below — otherwise the config test fails [emerg] and
-    # the edge won't deploy.
-    local dirs=(
-        /var/cache/nginx/cfm_static
-        /var/cache/nginx/cfm_micro_1s
-        /var/cache/nginx/cfm_micro_2s
-        /var/cache/nginx/cfm_micro_5s
-        /var/cache/nginx/cfm_micro_10s
-        /var/cache/nginx/cfm_micro_30s
-        /var/cache/nginx/cfm_micro_60s
-    )
-    local d
-
-    for d in "${dirs[@]}"; do
-        if [ -d "$d" ]; then
-            log "Cache directory already present: $d"
-        else
-            mkdir -p "$d"
-            log "Created cache directory: $d"
-        fi
-        # root:cfm 0770 — the angie worker (cfm group) can write cache files,
-        # matching cmd/cfm/main.go and the OpenResty installer (the daemon
-        # re-applies this on every startup, so anything else is transient).
-        if id -u cfm >/dev/null 2>&1; then
-            chown root:cfm "$d"
-            chmod 0770 "$d"
-        fi
+    # The Site Cache dirs (the /var/cache/nginx parent and every
+    # proxy_cache_path leaf) must exist before `-t` runs below, or the config
+    # test fails [emerg] and the edge won't deploy. Provisioning — parent
+    # traversable by the cfm workers, zone dirs root:cfm 0770, the heal of a
+    # tree left in another group by an older run — lives in ONE helper shared
+    # with the deb postinst, the rpm scriptlet and the other edge installer.
+    local here helper
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    for helper in "$here/cfm-cache-dirs.sh" /usr/share/cfm/scripts/cfm-cache-dirs.sh; do
+        [ -f "$helper" ] && break
+        helper=""
     done
-
-    # Heal stale cache-tree ownership: nginx creates the levels=1:2 subdirs as
-    # the worker (cfm), but a tree left root-owned by an older global-cache run
-    # blocks the cfm worker (Permission denied reading upstream → aborted
-    # responses). We chown only the top dir above, so recursively heal the tree
-    # once when a cheap O(16) probe of the level-1 dirs finds a non-cfm-group dir.
-    if getent group cfm >/dev/null 2>&1; then
-        for d in "${dirs[@]}"; do
-            [ -d "$d" ] || continue
-            if find "$d" -mindepth 1 -maxdepth 1 -type d ! -group cfm -print -quit 2>/dev/null | grep -q .; then
-                chown -R root:cfm "$d" || true
-                chmod -R g+rwX   "$d" || true
-                log "Healed cache-tree ownership under $d (root:cfm, group-writable)"
-            fi
-        done
+    [ -n "$helper" ] || die "cfm-cache-dirs.sh not found next to this installer or in /usr/share/cfm/scripts — cannot provision the Site Cache dirs."
+    if sh "$helper"; then
+        log "Site Cache dirs ready under /var/cache/nginx (zone dirs root:cfm 0770, parent traversable)"
+    else
+        warn "Site Cache dir provisioning reported a problem (see above)"
     fi
 }
 

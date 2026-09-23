@@ -83,6 +83,28 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **Site Cache: a fresh `.deb` install no longer makes every armed vhost
+  return 500.** The daemon runs with `UMask=0077`, so when it created a missing
+  `/var/cache/nginx` (the postinst starts the daemon before an edge installer
+  runs) the parent came out `root:root 0700`. The edge workers could then reach
+  no cache dir, and every request of an armed vhost failed with
+  `Permission denied`. Reproduced with nginx workers running as `cfm`: 500/500
+  with the old parent, 200 MISS → 200 HIT with the fix. A missing parent is now
+  created `0755`; an existing one only gains traverse (`a+x`).
+  - **One helper, `scripts/cfm-cache-dirs.sh`, now creates and heals the cache
+    dirs.** It replaces four drifting copies: the `.deb` postinst, the `.rpm`
+    scriptlet, and both edge installers. The package scripts now run it
+    **before** the conf deploy's `openresty -t` / `angie -t`. On a first
+    install the config test used to fail on the missing parent, so the
+    packaged conf was silently not deployed.
+  - **The heal is more thorough and no longer blocks the worker.** It now also
+    checks the second directory level, which the old probe missed, and fixes a
+    `root:cfm` dir without group access. It adds group rw before moving the
+    group to `cfm`, so a live cache's worker-owned files keep their owner and
+    never lose access mid-heal. A healthy worker-owned tree is left untouched.
+  - `check_site_cache_config.sh` now fails when the dirs the daemon or the
+    helper provision differ from the confs' `proxy_cache_path` dirs. A zone
+    added to only one of them would otherwise fail `-t` on deploy.
 - **The flood protections (SYN/PPS/new-connection rate, connlimit, portflood,
   bad TCP flags) could stop applying to TCP/UDP when ICMP rate limiting is on
   (`ICMP_RATE_LIMIT`, 20 in the reference config), on both engines.** The
