@@ -47,9 +47,10 @@ package webdetector
 // is in-memory: after a daemon restart every crawler IP is first-seen again
 // (recipe warnings say so; persisting positives is a tracked follow-up).
 //
-// The simulate API uses verifiedSync (inline reverse lookup + forward-confirm
-// under the same slot bound, bounded wait) — never the decision hot path, which
-// stays cache-only. Note the hot path's first sight of a crawler IP costs it
+// The simulate APIs use verifiedSync (inline reverse lookup + forward-confirm
+// under their own slot bound, bounded wait), and the ChallengeV2 verify gate
+// uses it for an inline forward-confirm before a reject (verifiedBeforeReject)
+// — never the decision hot path, which stays cache-only. Note the hot path's first sight of a crawler IP costs it
 // more than one request: the enrich PTR itself is fetched async, so request 1
 // has no PTR (nothing to verify), request 2 kicks the forward-confirm, and the
 // verdict is there from request 3 or so.
@@ -82,9 +83,10 @@ const (
 	// cap concurrent in-flight forward-confirms so a burst of first-seen crawler
 	// IPs cannot spawn unbounded DNS goroutines.
 	goodBotIPMaxInflight = 32
-	// the simulate API's inline verifies (verifiedSync) have their OWN, smaller
-	// bound so a burst of simulate calls (reachable by scoped tokens) can never
-	// take the hot path's slots and starve real crawler verification.
+	// inline verifies (verifiedSync: the simulate APIs and the ChallengeV2
+	// verify gate) have their OWN, smaller bound so a burst of them (simulate is
+	// reachable by scoped tokens) can never take the hot path's slots and starve
+	// real crawler verification.
 	goodBotSyncMaxInflight = 4
 )
 
@@ -102,7 +104,7 @@ type bridgeGoodBotState struct {
 	inflight map[string]struct{}
 	logged   map[string]struct{} // bot names already logged (visibility, once per TYPE)
 	sem      chan struct{}       // bounds concurrent async forward-confirms (hot path)
-	syncSem  chan struct{}       // bounds concurrent inline verifies (simulate API)
+	syncSem  chan struct{}       // bounds concurrent inline verifies (simulate APIs, v2 verify gate)
 	// verify returns the good-bot name (or "") and whether the result is
 	// cacheable. cacheable=false means inconclusive (a transient resolver
 	// failure) and must NOT be pinned in the cache. Injectable for tests.
@@ -288,9 +290,9 @@ func (s *bridgeGoodBotState) kickAsyncVerify(ip, ptr string, now time.Time) {
 	}()
 }
 
-// verifiedSyncMaxWait bounds how long the simulate API waits for a verify slot
-// when all goodBotIPMaxInflight are busy (e.g. a fake-PTR flood on the hot
-// path): past it the answer is "inconclusive" rather than a hung handler.
+// verifiedSyncMaxWait bounds how long an inline verify waits for a syncSem slot
+// when all goodBotSyncMaxInflight are busy: past it the answer is
+// "inconclusive" rather than a hung handler.
 const verifiedSyncMaxWait = 3 * time.Second
 
 // Inconclusive reasons verifiedSync can report (empty = the answer is final).
@@ -299,10 +301,10 @@ const (
 	verifiedInconclusiveTransient = "transient" // resolver failed; nothing cached
 )
 
-// verifiedSync is the SIMULATE-API variant of verified(): same cache, same
-// verifier — but it runs the reverse lookup AND the forward-confirm inline
-// (DNS-bound, seconds at worst) so an operator's "test this rule" gets a
-// definitive answer now instead of "not yet". It is bounded by its OWN small
+// verifiedSync is the INLINE variant of verified(): same cache, same verifier —
+// but it runs the reverse lookup AND the forward-confirm inline (DNS-bound,
+// seconds at worst) so an operator's "test this rule" gets a definitive answer
+// now instead of "not yet". It is bounded by its OWN small
 // semaphore (goodBotSyncMaxInflight) plus ctx / verifiedSyncMaxWait, so a burst
 // of simulate calls (the endpoint is reachable by scoped tokens) can neither
 // fan out resolver work nor take the hot path's verify slots. ptrFn reports
@@ -318,7 +320,8 @@ const (
 // (TrafficRuleSimulateForAPI, the challenge-access simulate) and the ChallengeV2
 // verify gate, for a solve it is about to reject (verifiedBeforeReject). They
 // share syncSem, so neither can take the hot path's slots; a burst of one can
-// only make the other's answer "inconclusive" / no waiver.
+// only make the other's answer "inconclusive" / no waiver. The verify gate
+// passes an already-known PTR, so for it only the forward-confirm runs.
 func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn func() (ptr string, ok bool), now time.Time) (name, inconclusive string) {
 	if s == nil || ip == "" {
 		return "", ""
@@ -361,38 +364,39 @@ func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn 
 }
 
 // verifiedBeforeReject is the ChallengeV2 verify gate's good-bot check, run
-// ONLY for a solve the gate is about to reject (a failing score under an arm),
-// never for a solve that passes. The hot path's cache-only verified() would
-// almost never answer there: Google's user-driven fetchers (Google-Read-Aloud)
-// come from rotating, mostly first-seen IPs — 73 challenge solves from 48 IPs
-// fleet-wide over 2026-09-16..23 — and a lone page fetch leaves no verdict
-// behind (the decision had no PTR yet to verify). So it answers from the cache
-// when it can and otherwise verifies INLINE through verifiedSync (same verifier,
-// same syncSem bound, the verdict cached for the decision path as well).
+// ONLY for a solve the gate is about to reject (a failing score under a
+// waivable arm), never for a solve that passes. The hot path's cache-only
+// verified() would rarely answer there: Google's user-driven fetchers
+// (Google-Read-Aloud) come from rotating, mostly first-seen IPs — 73 challenge
+// solves from 48 IPs fleet-wide over 2026-09-16..23 — and a lone page fetch
+// leaves no verdict behind (the decision had no PTR yet to verify). So a cached
+// verdict answers when there is one, and otherwise a candidate PTR is
+// forward-confirmed INLINE through verifiedSync (same verifier, same syncSem
+// bound, the verdict cached for the decision path as well).
 //
-// knownPTR is the solve's PTR from the enrich cache ("" = not known yet). When
-// it is known and is not a good-bot candidate the answer is "" with no DNS and
-// no slot, so a solver farm's rejects (residential PTRs) cost nothing extra; a
-// stale positive is dropped then, as the IP was reassigned. lookupPTR (a
-// bounded reverse lookup) runs only when knownPTR is empty; nil means PTRs
-// can't be resolved (PTR enrichment off) and the answer is cache-only. A stale
-// positive whose re-verify does not complete is still honoured, as verified()
-// serves it.
-func (s *bridgeGoodBotState) verifiedBeforeReject(ctx context.Context, ip, knownPTR string, lookupPTR func() (string, bool), now time.Time) string {
+// knownPTR is the solve's PTR from the enrich cache ("" = none, or not
+// resolved yet — enrich can't tell which). The only DNS this can cost is that
+// forward-confirm, and only when knownPTR ends in a crawler's domain: the
+// lookup then goes to the crawler operator's own DNS (google.com, …), not a
+// zone the client controls, and its answer — spoofed or not — is cached. So:
+//   - a cached fresh verdict answers as is;
+//   - knownPTR "" → cache only (a stale positive is honoured, as verified()
+//     serves it); no reverse lookup, so an IP without a PTR costs nothing;
+//   - knownPTR not a crawler's → "" with no DNS and no slot, dropping a stale
+//     positive (the IP was reassigned);
+//   - otherwise the inline forward-confirm; if it can't complete (no slot in
+//     time, resolver failure) a stale positive is still honoured, else "".
+func (s *bridgeGoodBotState) verifiedBeforeReject(ctx context.Context, ip, knownPTR string, now time.Time) string {
 	if s == nil || ip == "" {
 		return ""
 	}
-	ptrFn := lookupPTR
-	switch {
-	case knownPTR != "":
-		if l := s.lookupPTR(ip, knownPTR, true, now); l.fresh || !l.candidate {
-			return l.name
-		}
-		ptrFn = func() (string, bool) { return knownPTR, true }
-	case lookupPTR == nil:
+	if knownPTR == "" {
 		return s.verified(ip, nil, now)
 	}
-	name, _ := s.verifiedSync(ctx, ip, ptrFn, now)
+	if l := s.lookupPTR(ip, knownPTR, true, now); l.fresh || !l.candidate {
+		return l.name
+	}
+	name, _ := s.verifiedSync(ctx, ip, func() (string, bool) { return knownPTR, true }, now)
 	return name
 }
 

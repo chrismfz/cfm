@@ -77,18 +77,24 @@ package webdetector
 //     localhost re-opens the direct-client path and with it every
 //     client-authored-header caveat — don't.
 //   - An FCrDNS-verified good bot is WAIVED at the gate (v2_waived=<name>),
-//     under the same CHALLENGE_GOODBOT_EXEMPT that already exempts it from
-//     the challenge at decision time. It reaches the gate at all only when
-//     no verdict existed when the challenge was served — the norm for
-//     Google-Read-Aloud's rotating first-seen IPs — so the waiver verifies
-//     inline, bounded (verifiedBeforeReject): only for a solve about to be
-//     rejected, never for one that passes, and with no DNS at all when the
-//     solve's PTR is already known not to be a crawler's. FCrDNS can't be
-//     forged, but "google" covers Google's user-driven fetchers (Read Aloud,
-//     Translate): a client routing through one passes Rung 1, exactly as it
-//     already skips the challenge once verified. Accepted — the same trust
-//     the decision path extends. A verify that can't complete (slots busy,
-//     resolver down) rejects as before (retry-able, D5c).
+//     under the same CHALLENGE_GOODBOT_EXEMPT that exempts it from the
+//     challenge at decision time — and ONLY under the grains that exemption
+//     already softens (challengeV2Waivable: geo, vhost). It reaches the gate
+//     there only when no verdict existed when the challenge was served — the
+//     norm for Google-Read-Aloud's rotating first-seen IPs — so the waiver
+//     may forward-confirm inline, bounded (verifiedBeforeReject): only for a
+//     solve about to be rejected, and only when the solve's PTR is already
+//     known and ends in a crawler's domain, so the lookup goes to the
+//     crawler operator's own DNS, never a zone the client controls. FCrDNS
+//     can't be forged, but "google" covers Google's user-driven fetchers
+//     (Read Aloud, Translate): a client routed through one passes a geo or
+//     vhost arm, exactly as it already skips those challenges once verified.
+//     Accepted — the same trust the decision path extends. A fingerprint
+//     policy or a traffic-rule / WAF mark stays strict: the decision path
+//     never softens those for good bots, and traffic rules deliberately
+//     distrust the generic "google" name (verifiedBotForRules). A verify that
+//     can't complete (slots busy, resolver down, PTR not resolved yet)
+//     rejects as before (retry-able, D5c).
 
 import (
 	"context"
@@ -192,8 +198,9 @@ type challengeV2State struct {
 	// none/unknown), for the waiver in the D5 gate: a failing solve under an
 	// arm is NOT rejected when the client is a verified crawler, the same
 	// exemption CHALLENGE_GOODBOT_EXEMPT already grants at decision time.
-	// Called ONLY on the reject path, where it may block (bounded) on an
-	// inline FCrDNS verify. Wired from NewEngine to the bridge's verdict cache
+	// Called ONLY on the reject path, for a waivable grain
+	// (challengeV2Waivable), where it may block (bounded) on an inline
+	// forward-confirm. Wired from NewEngine to the bridge's verdict cache
 	// (verifiedBeforeReject); nil = no waiver (exemption off, or pre-wire) —
 	// the gate then rejects as it always did.
 	goodBot func(ctx context.Context, ip, ptr string) string
@@ -403,6 +410,22 @@ func challengeV2ArmGrain(fpID, ip, host string) string {
 		return v2GrainMark
 	}
 	return ""
+}
+
+// challengeV2Waivable reports whether a failing solve under grain may be waived
+// for a verified good bot: only under the grains whose challenge the decision
+// path's good-bot exemption already skips (goodBotDowngrade softens the geo
+// floor and the vhost challenge), and only when no traffic-rule / WAF mark
+// covers the same client too. challengeV2ArmGrain returns the FIRST grain
+// that covers the solve (fp, geo, vhost, mark), so a geo or vhost answer
+// already rules out a fingerprint policy; the mark is checked here because it
+// comes last.
+func challengeV2Waivable(grain, ip, host string) bool {
+	switch grain {
+	case v2GrainGeo, v2GrainVhost:
+		return !challengeV2Marked(ip, host)
+	}
+	return false
 }
 
 // ConfigureChallengeV2 applies the [webdetector] knobs; called on every

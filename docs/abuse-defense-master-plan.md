@@ -468,15 +468,24 @@ already opened.
         19 vhosts fleet-wide, 2026-09-16..23, every scored one at 140 (psixokinisi.gr, smart-tech.gr,
         e-vafeiadis.gr, vitolighting.com, diora.gr, lantides.gr, karol.gr, …).
         The D5 gate now WAIVES an FCrDNS-verified good bot under the existing
-        `CHALLENGE_GOODBOT_EXEMPT` (solve line/history `v2_waived=<name>`).
-        The decision-time exemption can't catch these — the IPs are mostly
-        first-seen, so no verdict exists when the challenge is served — and
-        a cache-only waiver would miss them the same way: the gate verifies inline
-        (`verifiedBeforeReject`), bounded and ONLY for a solve about to be
-        rejected — no DNS at all when the solve's PTR is known and not a
-        crawler's. Accepted residual: "google" covers Google's user-driven
-        fetchers, so a client routed through one passes Rung 1 — the same
-        trust the decision exemption already extends.
+        `CHALLENGE_GOODBOT_EXEMPT` (solve line/history `v2_waived=<name>`),
+        under a geo or vhost arm only — exactly the challenges the decision
+        exemption (`goodBotDowngrade`) already skips for it. A fingerprint
+        policy or a traffic-rule/WAF mark stays strict: the decision path
+        never softens those, and traffic rules deliberately distrust the
+        generic "google" (`verifiedBotForRules`). The decision-time exemption
+        can't catch these fetchers — the IPs are mostly first-seen, so no
+        verdict exists when the challenge is served — and a cache-only waiver
+        would miss them the same way: the gate forward-confirms inline
+        (`verifiedBeforeReject`), bounded, ONLY for a solve about to be
+        rejected and ONLY when the solve's PTR is already known and ends in a
+        crawler's domain (no reverse lookup, so no DNS for an IP without a
+        PTR, and never into a zone the client controls). Accepted residual:
+        "google" covers Google's user-driven fetchers, so a client routed
+        through one passes a geo/vhost Rung 1 — the same trust the decision
+        exemption already extends. Adversarial review (2 SHOULD-FIX folded
+        in): the first cut waived every grain and reverse-resolved unknown
+        PTRs inline.
 
 **Deliberately BACKLOG (not next, do not start):** surface-throttle +
 gate-before-origin (Track-1 Phase 2), PoW-difficulty knob, JA4/JA4H edge

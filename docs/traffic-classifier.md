@@ -656,8 +656,10 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   v2_reject` is "did it bite"; `grep v2_waived=` is "which failing solves did
   it let through as an FCrDNS-verified good bot" (`CHALLENGE_GOODBOT_EXEMPT`;
   e.g. Google-Read-Aloud, hs=140 from rotating first-seen Google IPs — the
-  gate verifies those inline, bounded, on the reject path only). The history
-  row carries it as `v2_waived`. Finally `sig=` carries the report AS REPORTED
+  gate forward-confirms a crawler-looking PTR inline, bounded, on the reject
+  path only). Only under a geo or vhost arm, the grains the decision-time
+  exemption already softens; a fingerprint policy or a traffic-rule/WAF mark
+  stays strict. The history row carries it as `v2_waived`. Finally `sig=` carries the report AS REPORTED
   — `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
   `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
   browser did not report. `mv`/`hc`/`dm`/`dpr`/`raf` are scored by nothing;

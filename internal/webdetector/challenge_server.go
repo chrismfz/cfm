@@ -875,18 +875,24 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// see HONEST LIMITS in challenge_v2.go. The grain also rides the
 			// solve line, so a passed-under-arm solve is greppable too.
 			if v2Grain != "" {
-				// A verified good bot is waived, not rejected: the SAME
-				// FCrDNS verdict and CHALLENGE_GOODBOT_EXEMPT knob that
-				// exempt it from the challenge at decision time. It only got
-				// here because no verdict existed when the challenge was
-				// served (e.g. Google-Read-Aloud's rotating, first-seen
-				// fetcher IPs, which score sw_renderer,touch_lie,no_input =
-				// 140), so this may verify inline — bounded, and only on this
-				// about-to-reject path. The solve then takes the normal solved
-				// path, marked v2_waived=<name>.
-				bot := challengeV2GoodBot(r.Context(), solve.IP, solve.PTR)
+				// A verified good bot is waived, not rejected, under the
+				// grains whose challenge the decision path would have skipped
+				// for it (geo, vhost — challengeV2Waivable): the SAME FCrDNS
+				// verdict and CHALLENGE_GOODBOT_EXEMPT knob. It only got here
+				// because no verdict existed when the challenge was served
+				// (e.g. Google-Read-Aloud's rotating, first-seen fetcher IPs,
+				// which score sw_renderer,touch_lie,no_input = 140), so this
+				// may forward-confirm inline — bounded, and only on this
+				// about-to-reject path. The solve then takes the normal
+				// solved path, marked v2_waived=<name>.
+				bot := ""
+				if challengeV2Waivable(v2Grain, solve.IP, solve.Host) {
+					bot = challengeV2GoodBot(r.Context(), solve.IP, solve.PTR)
+				}
 				if bot != "" {
 					solve.V2Waived = bot
+					// ms= must include the waiver's inline forward-confirm.
+					solve.VerifyMS = time.Since(verifyStart).Milliseconds()
 				} else {
 					// sig= rides this line too. The rejected solve is exactly
 					// the population the corpus exists to characterise, and it is

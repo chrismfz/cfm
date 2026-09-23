@@ -24,16 +24,19 @@ back-filled here — see the git/PR history for that period.
   fails it: 73 challenge solves from 48 IPs on 19 vhosts in the last week, and
   every one scored came out at 140 (the fail line is 100). They passed only
   because none of those vhosts was armed, so arming an ad-running shop would
-  have locked it out. A solve that would be rejected is now let through
-  when the client's reverse DNS forward-confirms to a known crawler (Google,
-  Bing, Meta, Apple, Yandex — the same check and the same
-  `CHALLENGE_GOODBOT_EXEMPT` knob that already skip the challenge for them).
-  Those IPs rotate, so the check usually has no cached answer and runs a
-  short DNS lookup — only for solves about to be rejected, never for passing
-  ones, and with no lookup at all when the client's reverse DNS is already
-  known not to be a crawler's. The solve line and history row say
-  `v2_waived=<name>`. **Enforcement change** for armed `challenge_v2` only;
-  `CHALLENGE_GOODBOT_EXEMPT = 0` restores the old behaviour.
+  have locked it out. Under a **country/ASN policy or a vhost** armed at
+  `challenge_v2`, a solve that would be rejected is now let through when the
+  client's reverse DNS forward-confirms to a crawler domain CFM verifies
+  (Google — which includes Google's user-driven fetchers like Read Aloud and
+  Translate — Googlebot, Bing, Yahoo, Meta, Apple, Yandex): the same check,
+  the same `CHALLENGE_GOODBOT_EXEMPT` knob and the same arms under which they
+  already skip the challenge. A fingerprint policy or a `challenge_v2`
+  traffic rule / WAF rule still rejects them. Those IPs rotate, so there is
+  usually no cached answer and the check runs one short DNS lookup, only for
+  a solve about to be rejected whose reverse DNS is already known and ends
+  in a crawler's domain. The solve line and history row say
+  `v2_waived=<name>`. **Enforcement change** for geo/vhost `challenge_v2`
+  arms only; `CHALLENGE_GOODBOT_EXEMPT = 0` restores the old behaviour.
 
 ### Fixed
 - **The ChallengeV2 geo check at verify now reads the current GeoLite2
