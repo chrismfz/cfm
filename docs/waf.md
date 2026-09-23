@@ -746,16 +746,22 @@ rule 329 for the whole site (every Joomla request is `/index.php`), and
 the body to its plugins). `is_joomla_autoupdate_request` passes a request only
 when ALL hold: `…/index.php` with a non-empty `jautoupdate` in the query
 (Joomla's own `!empty()`, last duplicate wins); every query/body parameter is
-one `extract.php` reads; `task` is one of its three verbs (`startExtract`,
-`stepExtract`, `finalizeUpdate`); the other values carry no object marker; and
-every object in the fully decoded `instance` (form-decoded, then base64) is a
-class `extract.php` itself allows — its `unserialize()` passes
-`allowed_classes = [ZIPExtraction, stdClass]`. Every class is checked, not the
-first: on WordPress a `ZIPExtraction` with a nested gadget object would still
-instantiate the gadget. Whatever it can't vouch for falls through to the
-detector as before: a body the WAF only saw part of (Content-Length ≠ the body
-it read — the WAF reads a capped prefix), a non-form body, a value that does
-not decode, a marker it can't parse strictly. Tests:
+one `extract.php` reads, each exactly once; `task` is one of its three verbs
+(`startExtract`, `stepExtract`, `finalizeUpdate`); the other values carry no
+object marker; and every object in the fully decoded `instance` (form-decoded,
+then base64) is a class `extract.php` itself allows — its `unserialize()`
+passes `allowed_classes = [ZIPExtraction, stdClass]`. Every class is checked,
+not the first: on WordPress a `ZIPExtraction` with a nested gadget object
+would still instantiate the gadget. The decode has to match PHP's, so the
+check reads each class name by its length prefix as PHP does, and takes only
+canonical base64 — nginx's decoder stops at the first `=` while PHP's
+non-strict `base64_decode()` skips it and carries on, so `b64(clean)=b64(gadget)`
+would otherwise show the WAF the clean half only. Whatever it can't vouch for
+falls through to the detector as before: a body the WAF only saw part of
+(Content-Length ≠ the body it read — the WAF reads a capped prefix), a
+non-form body, a repeated parameter, a key PHP would rewrite (NUL, leading
+space, `.`, `[`), a value that does not decode, a marker it can't parse
+strictly. Tests:
 `scripts/tests/cfm_waf_object_injection_joomla_autoupdate_test.lua`.
 
 ### FP case 10 — `WAF_CMD_PARAM:CMD_CMD` (310) on WP File Manager

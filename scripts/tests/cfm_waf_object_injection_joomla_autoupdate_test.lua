@@ -201,6 +201,31 @@ do
 end
 check(vouches(req({ body = step_body(zip_instance()) .. "&instance%5B%5D=x" })) == false,
       "helper: an array-style key (instance[]) is not `instance`")
+-- Keys PHP rewrites before $_POST (truncates at NUL, strips a leading space):
+-- not an exact allowlisted name here, so the whole request is disqualified.
+check(vouches(req({ body = "task=stepExtract&password=" .. PASSWORD .. "&instance%00x="
+                    .. urlenc(b64enc('O:4:"Evil":0:{}')) })) == false,
+      "helper: instance%00x (PHP reads it as `instance`) disqualifies")
+check(vouches(req({ body = "task=stepExtract&password=" .. PASSWORD .. "&+instance="
+                    .. urlenc(b64enc(zip_instance())) })) == false,
+      "helper: a leading-space key disqualifies")
+check(vouches(req({ body = step_body(zip_instance()) .. "&instance="
+                    .. urlenc(b64enc(zip_instance())) })) == false,
+      "helper: a repeated parameter disqualifies, even with two clean copies")
+check(vouches(req({ args = "jautoupdate=1&task=stepExtract", body = step_body(zip_instance()) })) == false,
+      "helper: the same parameter in query AND body disqualifies")
+do
+  local c = req({ body = step_body(zip_instance()) })
+  c.headers["Content-Length"] = { c.headers["Content-Length"], "99999" }
+  check(vouches(c) == false, "helper: a repeated Content-Length disqualifies")
+end
+-- The class name is read by its length prefix, as PHP does.
+check(vouches(req({ body = step_body('O:4:"ZIPExtraction":0:{}') })) == false,
+      "helper: a length prefix that doesn't span the name disqualifies")
+check(vouches(req({ body = step_body('O:99:"ZIPExtraction":0:{}') })) == false,
+      "helper: a length prefix that overruns disqualifies")
+check(vouches(req({ body = step_body(zip_instance()):gsub("ZIPExtraction", "zipextraction", 1) })) == true,
+      "helper: class names compare case-insensitively (PHP class lookup does)")
 
 if fails > 0 then
   io.stderr:write(("cfm_waf object-injection Joomla auto-update tests: %d FAILED\n"):format(fails))

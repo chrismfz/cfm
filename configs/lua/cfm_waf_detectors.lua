@@ -1742,11 +1742,16 @@ end
 
 -- True when every object / custom-object marker in the serialized string s
 -- (O:N:"Class" or C:N:"Class", either case, ANYWHERE — string contents too)
--- names a class in `allowed`. A marker it can't parse strictly (O:+4:"X") fails.
+-- names a class in `allowed`. The name is read as PHP reads it — exactly N
+-- bytes, then a closing quote — and a marker it can't parse that way
+-- (O:+4:"X", a length that overruns) fails.
 local function _serialized_objects_only(s, allowed)
   for i in s:gmatch("()[OoCc]:[%d+%-]") do
-    local name = s:match('^[OoCc]:%d+:"([^"]*)"', i)
-    if not name or not allowed[lower(name)] then return false end
+    local n, q = s:match('^[OoCc]:(%d+):"()', i)
+    n = tonumber(n)
+    if not n then return false end
+    local name = s:sub(q, q + n - 1)
+    if #name ~= n or s:sub(q + n, q + n) ~= '"' or not allowed[lower(name)] then return false end
   end
   return true
 end
@@ -1757,7 +1762,9 @@ function _M.is_joomla_autoupdate_request(uri, args, body, headers)
   if (uri or ""):sub(-10) ~= "/index.php" then return false end
   local b = body or ""
   headers = headers or {}
-  local cl = tonumber(header_string(headers["content-length"] or headers["Content-Length"]))
+  local raw_cl = headers["content-length"] or headers["Content-Length"]
+  if type(raw_cl) == "table" then return false end   -- nginx 400s this anyway
+  local cl = tonumber(header_string(raw_cl))
   if b ~= "" or (cl and cl > 0) then
     -- The WAF reads a capped prefix of the body: a value cut short could hide a
     -- class past the cap, so only a body seen WHOLE qualifies — and only a form
@@ -1773,11 +1780,16 @@ function _M.is_joomla_autoupdate_request(uri, args, body, headers)
     if kv[1] == "jautoupdate" then routed = (kv[2] ~= "" and kv[2] ~= "0") end
   end
   if not routed then return false end
-  local has_task = false
+  -- Exactly one copy of each parameter across query and body: extract.php's
+  -- requests never repeat one, so there is no "which copy does PHP use" to get
+  -- wrong. A key PHP would rewrite (a NUL, a leading space, `.`, `[`) is not
+  -- an exact allowlisted name, so it disqualifies the request too.
+  local seen, has_task = {}, false
   for _, list in ipairs({ query, form }) do
     for _, kv in ipairs(list) do
       local k, v = kv[1], kv[2]
-      if not JOOMLA_AUTOUPDATE_PARAMS[k] then return false end
+      if not JOOMLA_AUTOUPDATE_PARAMS[k] or seen[k] then return false end
+      seen[k] = true
       if k == "instance" then
         -- Canonical base64 only (padding at the very end), so what we decode is
         -- what PHP decodes: nginx's decoder stops at the first `=`, while PHP's
