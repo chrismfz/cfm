@@ -47,18 +47,24 @@ func (b *Backend) chainExistsCLI(name string) bool {
 
 // ruleExistsCLI returns true if a rule containing needle is present in chain.
 func (b *Backend) ruleExistsCLI(chain, needle string) bool {
+	norm := func(s string) string {
+		return " " + strings.Join(strings.Fields(s), " ") + " "
+	}
+	return strings.Contains(norm(b.chainTextCLI(chain)), norm(needle))
+}
+
+// chainTextCLI is `nft list chain inet cfm <chain>`, or "" when it can't be
+// read (so every rule reads as absent, as ruleExistsCLI always had it).
+func (b *Backend) chainTextCLI(chain string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "nft", "list", "chain", "inet", cfmTableName, chain) // #nosec G204
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if cmd.Run() != nil {
-		return false
+		return ""
 	}
-	norm := func(s string) string {
-		return " " + strings.Join(strings.Fields(s), " ") + " "
-	}
-	return strings.Contains(norm(stdout.String()), norm(needle))
+	return stdout.String()
 }
 
 // ensureCounterCLI creates the named counter if it doesn't already exist (idempotent).

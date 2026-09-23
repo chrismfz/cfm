@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"cfm/internal/firewall/feedutil"
 	"cfm/internal/logging"
 	"github.com/google/nftables"
 )
@@ -205,40 +206,44 @@ func (b *Backend) existingInputChain() *nftables.Chain {
 	return nil
 }
 
+// refreshSelfSets loads self_v4/self_v6 over netlink. They used to take one
+// nft process per statement — two flushes, the static ranges, one add per
+// local address — and on a node with large feed sets each nft process costs
+// over a second (the CLI loads the whole ruleset, set elements included).
 func (b *Backend) refreshSelfSets() {
-	_ = b.nftExec("flush set inet cfm self_v4")
-	_ = b.nftExec("flush set inet cfm self_v6")
-	_ = b.nftExec("add element inet cfm self_v4 { 127.0.0.0/8 }")
-	_ = b.nftExec("add element inet cfm self_v6 { ::1 }")
-	_ = b.nftExec("add element inet cfm self_v6 { fe80::/10 }")
-
 	b.selfResolver.Refresh()
-	for _, s := range b.selfResolver.LocalIPs() {
+	v4, v6 := selfSetElems(b.selfResolver.LocalIPs())
+	_ = b.ReplaceSetFlushAdd("self_v4", v4, nil) // logs its own failure
+	_ = b.ReplaceSetFlushAdd("self_v6", v6, nil)
+}
+
+// selfSetElems is what self_v4/self_v6 hold: loopback, link-local and each
+// local address, as CIDRs with overlaps merged. The sets are interval sets,
+// which refuse overlapping elements, and a local link-local address lies
+// inside fe80::/10.
+func selfSetElems(local []string) (v4, v6 []string) {
+	v4 = []string{"127.0.0.0/8"}
+	v6 = []string{"::1/128", "fe80::/10"}
+	for _, s := range local {
 		ip := net.ParseIP(s)
-		if ip == nil {
-			continue
-		}
-		if ip.To4() != nil {
-			_ = b.nftExec("add element inet cfm self_v4 { " + s + " }")
-		} else {
-			_ = b.nftExec("add element inet cfm self_v6 { " + s + " }")
+		switch {
+		case ip == nil:
+		case ip.To4() != nil:
+			v4 = append(v4, ip.To4().String()+"/32")
+		default:
+			v6 = append(v6, ip.String()+"/128")
 		}
 	}
+	return feedutil.NormalizeCIDRsV4(v4), feedutil.NormalizeCIDRsV6(v6)
 }
 
 // applyBaseInputRules installs all permanent set-matching rules in the input chain.
-// Each rule is added only if it is not already present (idempotent).
+// Each rule is added only if it is not already present (idempotent): one read
+// of the chain, then the missing rules in one nft run (baseRulesScript).
 func (b *Backend) applyBaseInputRules() {
-	addRule := func(expr string) {
-		if !b.ruleExistsCLI("input", expr) {
-			_ = b.nftExec("add rule inet cfm input " + expr)
-		}
-	}
-	insertRule := func(expr string) {
-		if !b.ruleExistsCLI("input", expr) {
-			_ = b.nftExec("insert rule inet cfm input position 0 " + expr)
-		}
-	}
+	var ins, adds []string
+	insertRule := func(expr string) { ins = append(ins, expr) }
+	addRule := func(expr string) { adds = append(adds, expr) }
 
 	// Early rules inserted at position 0 in reverse order so the final
 	// top-down order matches the nft backend's EnsureBase:
@@ -316,9 +321,50 @@ func (b *Backend) applyBaseInputRules() {
 	addRule(`ip6 saddr @block_v6_nets drop`)
 
 	// jump flood at the end of the base layer (before ports policy rules).
-	if !b.ruleExistsCLI("input", "jump flood") {
-		_ = b.nftExec("add rule inet cfm input jump flood")
+	addRule("jump flood")
+
+	stmts := baseRulesScript(b.chainTextCLI("input"), ins, adds)
+	if len(stmts) == 0 {
+		return
 	}
+	if err := b.nftExec(strings.Join(stmts, "\n")); err != nil {
+		// Best effort, as before: a statement nft refuses mustn't keep the
+		// others out.
+		logging.Logf("[nftlib] base input rules in one nft run failed (%v); applying %d one by one", err, len(stmts))
+		for _, st := range stmts {
+			_ = b.nftExec(st)
+		}
+	}
+}
+
+// baseRulesScript returns the statements that install the rules the input
+// chain (as `nft list chain` prints it) lacks: ins inserted at the top in the
+// order given (each lands above the previous one), adds appended. A rule
+// counts as present when the chain text contains it, the rules queued before
+// it included — the same check the one-nft-process-per-rule version made
+// against the chain as it grew.
+func baseRulesScript(chain string, ins, adds []string) []string {
+	norm := func(s string) string { return " " + strings.Join(strings.Fields(s), " ") + " " }
+	have := norm(chain)
+	missing := func(expr string) bool {
+		if strings.Contains(have, norm(expr)) {
+			return false
+		}
+		have += norm(expr)
+		return true
+	}
+	var stmts []string
+	for _, e := range ins {
+		if missing(e) {
+			stmts = append(stmts, "insert rule inet cfm input position 0 "+e)
+		}
+	}
+	for _, e := range adds {
+		if missing(e) {
+			stmts = append(stmts, "add rule inet cfm input "+e)
+		}
+	}
+	return stmts
 }
 
 // DropEverything removes all CFM-owned firewall state.

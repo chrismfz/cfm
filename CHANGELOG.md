@@ -36,6 +36,18 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **nftlib: `EnsureBase` runs one `nft` process instead of ~60.** Its CLI
+  part checked each of ~30 base input rules with its own `nft list chain` and
+  wrote each missing rule, and every self-set address, with its own `nft`
+  run. On a node with large feed sets every `nft` process loads the whole
+  ruleset, set elements included, so `EnsureBase` took ~70s in production
+  (`cli_work=1m9.6s` in the log). It runs at startup, on every DNAT enable
+  (`DNATOn`) and `cfm reset`, and until the unblock fix below on every unblock. Now
+  the input chain is read once and
+  the missing rules go in one `nft` run (one per statement only if that run
+  fails), and `self_v4`/`self_v6` are written over netlink, with a link-local
+  address merged into `fe80::/10` instead of failing as an overlap. The
+  resulting ruleset is identical.
 - **Unblocks no longer run `EnsureBase`, which made them take minutes and,
   on nftlib, skip the imunify/fail2ban cleanup.** Every unblock rebuilt the
   base ruleset (`EnsureBase`), which an unblock never needs: twice per IP from
