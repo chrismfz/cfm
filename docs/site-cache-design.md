@@ -581,9 +581,10 @@ label ending in `-` still reaches nginx; one with whitespace cannot) — and
 `remove <that host>` deletes it (`off` cannot: the host is invalid for a new
 policy). `auth_cookies` are at most 32 names of at most 256 bytes; the edge
 takes a request cookie's name up to `=` or whitespace in a `;`-split pair, so a
-name with whitespace, `=`, `;` or a control character could never match — it
-is rejected, not stored, as is a 33rd name (which used to be dropped
-silently). Anything else is accepted, RFC 6265 token or not (PHP array cookies
+name with whitespace, `=` or `;` could never match — it is rejected, not
+stored (a control character too), as is a 33rd name (which used to be dropped
+silently). Names are deduplicated case-insensitively the way the edge compares
+them (ASCII only). Anything else is accepted, RFC 6265 token or not (PHP array cookies
 such as `cart[id]`, commas, quotes). A stored row with a name the edge cannot
 match freezes on upgrade — fail closed: the vhost is opted out until the name
 is fixed.

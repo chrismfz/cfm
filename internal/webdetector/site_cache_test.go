@@ -979,9 +979,16 @@ func TestSiteCacheStore_NormalizeIsIdempotent(t *testing.T) {
 	}
 	// inner whitespace / control characters are never a host (trimming them
 	// would make normalize non-idempotent)
-	for _, in := range []string{"a.com .", "a.com :80", "a.com\t.", "a .com", "a.com\x00", "a.com\u00a0."} {
+	for _, in := range []string{"a .com", "a.com\x00", "a\tb.com", "a\u00a0b.com"} {
 		if h, ok := s.normalize(in); ok {
 			t.Fatalf("normalize(%q) accepted %q", in, h)
+		}
+	}
+	// trailing whitespace/dots/port are stripped to a fixed point, so these
+	// all name a.com — an Apply lookup and the stored key agree
+	for _, in := range []string{"a.com .", "a.com :80", "a.com\t."} {
+		if h, ok := s.normalize(in); !ok || h != "a.com" {
+			t.Fatalf("normalize(%q) = %q, %v; want a.com", in, h, ok)
 		}
 	}
 	if _, err := s.Apply(SiteCachePatch{Host: "a.com", StrictCookies: boolPtr(true),
@@ -1296,5 +1303,35 @@ func TestSiteCacheStore_FrozenInvalidHostStillOptsOut(t *testing.T) {
 	}
 	if key, ok := s.StatsKeyFor("foo-.example.com"); ok {
 		t.Fatalf("an opted-out host resolved to %q", key)
+	}
+	// a request host the strict validator rejects but the edge counts under
+	// the wildcard still drills down to it
+	if key, ok := s.StatsKeyFor("b-.example.com"); !ok || key != "*.example.com" {
+		t.Fatalf("StatsKeyFor(b-.example.com) = %q, %v; want *.example.com (the edge counts it there)", key, ok)
+	}
+}
+
+// Cookie names are deduplicated the way the edge compares them (ASCII case
+// fold only): a Unicode fold would merge "\u212aname" (Kelvin sign) with
+// "kname", keep the first — which the edge never matches to a "kname" cookie.
+func TestSiteCacheCookieDedupASCIIOnly(t *testing.T) {
+	got, err := normalizeCookieNames([]string{"\u212aname", "kname", "KNAME"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("deduped to %q, want the Kelvin-sign name and one of kname/KNAME", got)
+	}
+}
+
+func TestSiteCacheCanonHostIsAFixedPoint(t *testing.T) {
+	for _, in := range []string{"a.com .", " a.com. . ", "A.com.:80", "a.com..", ".", " "} {
+		h := siteCacheCanonHost(in)
+		if siteCacheCanonHost(h) != h {
+			t.Fatalf("canon(%q) = %q is not a fixed point (→ %q)", in, h, siteCacheCanonHost(h))
+		}
+	}
+	if got := siteCacheCanonHost("a.com ."); got != "a.com" {
+		t.Fatalf("canon(\"a.com .\") = %q", got)
 	}
 }

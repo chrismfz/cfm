@@ -322,7 +322,7 @@ func (e *Engine) siteCacheNoPolicyMsg(host string) string {
 				// and a newer build would not read it either.
 				return siteCacheUnloadableMsg + "; its host is not valid in this version: remove it"
 			}
-			return siteCacheUnloadableMsg + "; remove it, turn it off (which replaces it), or upgrade"
+			return siteCacheUnloadableMsg + "; remove it, turn it off (which replaces it), or — if a newer version wrote it — upgrade"
 		}
 	}
 	return "no cache policy for host"

@@ -276,7 +276,26 @@ func siteCacheCanonHost(host string) string {
 	if i := strings.IndexByte(h, ':'); i >= 0 {
 		h = h[:i]
 	}
-	return strings.TrimRight(h, ".")
+	// Until stable, so it is a fixed point for any input ("a.com ." → "a.com").
+	for {
+		t := strings.TrimSpace(strings.TrimRight(h, "."))
+		if t == h {
+			return h
+		}
+		h = t
+	}
+}
+
+// siteCacheASCIILower lowercases A-Z only, like Lua string.lower (the edge
+// compares cookie names that way).
+func siteCacheASCIILower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
 }
 
 // normalize returns host's canonical key when it is a valid host or
@@ -405,7 +424,7 @@ func normalizeCookieNames(in []string) ([]string, error) {
 		if err := siteCacheCookieNameError(c); err != nil {
 			return nil, fmt.Errorf("auth cookie %q: %v", c, err)
 		}
-		key := strings.ToLower(c)
+		key := siteCacheASCIILower(c) // as the edge's string.lower: a Unicode fold would dedup names the edge tells apart
 		if _, dup := seen[key]; dup {
 			continue
 		}
@@ -424,10 +443,11 @@ func normalizeCookieNames(in []string) ([]string, error) {
 
 // siteCacheCookieNameError rejects a cookie name the edge can never match:
 // micro_cookie_verdict splits the Cookie header on ";" and takes each name up
-// to "=" or whitespace, so a name holding whitespace, "=", ";" or a control
-// character never equals a request cookie's name. Anything else is matchable
-// — ",", quotes, brackets (PHP array cookies: cart[id]) — and accepted, even
-// though RFC 6265 would not call it a token. At most 256 bytes.
+// to "=" or whitespace, so a name holding whitespace, "=" or ";" never equals
+// a request cookie's name. A control character is rejected too (never part of
+// a real cookie name). Anything else is matchable — ",", quotes, brackets (PHP
+// array cookies: cart[id]) — and accepted, even though RFC 6265 would not
+// call it a token. At most 256 bytes.
 func siteCacheCookieNameError(c string) error {
 	if len(c) > 256 {
 		return errors.New("longer than 256 bytes")
@@ -443,7 +463,7 @@ func siteCacheCookieNameError(c string) error {
 func (s *siteCacheStore) normalizeEntry(in SiteCacheEntry) (SiteCacheEntry, error) {
 	h := siteCacheCanonHost(in.Host)
 	if err := siteCacheHostError(h); err != nil {
-		return SiteCacheEntry{}, fmt.Errorf("invalid host %q: %v", in.Host, err)
+		return SiteCacheEntry{}, fmt.Errorf("invalid host %q: %v", siteCacheAuditClip(in.Host, 256), err)
 	}
 	r := in
 	r.Host = h
@@ -510,7 +530,7 @@ func (s *siteCacheStore) Apply(p SiteCachePatch, scoped bool) (SiteCacheEntry, e
 	}
 	h := siteCacheCanonHost(p.Host)
 	if err := siteCacheHostError(h); err != nil {
-		return SiteCacheEntry{}, fmt.Errorf("invalid host %q: %v", p.Host, err)
+		return SiteCacheEntry{}, fmt.Errorf("invalid host %q: %v", siteCacheAuditClip(p.Host, 256), err)
 	}
 	for _, tp := range []*SiteCacheTierPatch{p.Static, p.Micro} {
 		if tp != nil && tp.Recipe != nil && strings.TrimSpace(*tp.Recipe) == "" {
@@ -880,7 +900,8 @@ func (s *siteCacheStore) feedEntriesLocked() map[string]SiteCacheEntry {
 }
 
 // siteCacheEdgeMatchable reports whether the edge can match h as a policy key
-// (cfm_hostmatch.lua is_supported_pattern, and a Host header nginx accepts):
+// (cfm_hostmatch.lua is_supported_pattern; a stand-in nginx would never route
+// a request to — "/" or ".." in it — is merely a dead opt-out):
 // non-empty, no whitespace or control character, no "?" or "[", and "*" only
 // as a leading "*.". Looser than siteCacheHostError ON PURPOSE: an older build
 // accepted hosts this one rejects (a label ending in "-", say), and nginx can
@@ -950,8 +971,11 @@ func siteCacheFeedLess(a, b string) bool {
 // wildcard IN THE FEED that covers host — an armed one (its key), or an
 // all-off one a broader armed wildcard covers (an opt-out: nothing).
 func (s *siteCacheStore) StatsKeyFor(host string) (string, bool) {
-	h, ok := s.normalize(host)
-	if !ok {
+	// The QUERIED host is a request host, not a policy: the edge counts any
+	// host it can match (a label ending in "-" included), so resolve on the
+	// canonical form + the edge rule, not the strict create-time validator.
+	h := siteCacheCanonHost(host)
+	if !siteCacheEdgeMatchable(h) {
 		return "", false
 	}
 	s.mu.RLock()

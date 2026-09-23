@@ -95,11 +95,11 @@ back-filled here — see the git/PR history for that period.
   policy host must be a DNS-style name (labels of `[a-z0-9_-]`, ≤ 63 characters,
   ≤ 253 in all; an internationalized name in its `xn--` form) or `*.` over one
   with at least two labels — `*.com` would have armed every `.com` vhost on the
-  node. An `auth_cookies` name with whitespace, `=`, `;` or a control
-  character could never match at the edge (it reads a cookie's name up to `=`
-  or whitespace), so the bypass it promised silently never fired: it is now an
-  error, and so are more than 32 names (the extra ones used to be dropped
-  silently). A stored policy that fails these rules is kept but not served
+  node. An `auth_cookies` name with whitespace, `=` or `;` could never match
+  at the edge (it reads a cookie's name up to `=` or whitespace), so the
+  bypass it promised silently never fired: it is now an error (a control
+  character too), and so are more than 32 names (the extra ones used to be
+  dropped silently). A stored policy that fails these rules is kept but not served
   (listed as unloadable), and its vhost stays opted out rather than falling
   to a covering wildcard; `remove <host>` deletes it.
 - **Site Cache stats: no rows lost in the daemon, and stale rows go away.**

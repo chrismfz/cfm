@@ -130,7 +130,7 @@ func runSiteCacheList(baseURL string) error {
 		return fmt.Errorf("site-cache list: server returned non-JSON (%d bytes): %q", len(body), strings.TrimSpace(string(body)))
 	}
 	if len(payload.Unloadable) > 0 {
-		fmt.Printf("! stored policies this build cannot load (e.g. from a newer version; see the daemon log) — treated as OPTED OUT, never cached; 'off' replaces one (keeps it uncached), 'remove' deletes it, an upgrade reads it again: %s\n",
+		fmt.Printf("! stored policies this build cannot load (a newer version's, or with a host or cookie name this version rejects; see the daemon log) — treated as OPTED OUT, never cached; 'remove' deletes one, 'off' replaces one whose host is still valid, an upgrade reads a newer version's: %s\n",
 			strings.Join(payload.Unloadable, ", "))
 	}
 	if len(payload.Rows) == 0 {

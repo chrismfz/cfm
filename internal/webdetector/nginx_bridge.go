@@ -2737,7 +2737,7 @@ func (b *NginxBridge) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 				func() {
 					defer func() {
 						if r := recover(); r != nil {
-							logging.Logf("[nginx_bridge] cache stats hook panic on %q: %v", rows[i].Host, r)
+							logging.Logf("[nginx_bridge] cache stats hook panic on %q: %v", siteCacheAuditClip(rows[i].Host, 256), r)
 						}
 					}()
 					fn(rows[i].Host, rows[i].Counts)

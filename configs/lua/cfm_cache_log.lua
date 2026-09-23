@@ -51,10 +51,11 @@ function _M.log(zone, status, host)
 end
 
 -- snapshot_vhosts: read side for the daemon /nginx/cache/stats push. Returns
---   { ["<host>"] = { total = N, HIT = n, MISS = n, ... }, ... }
--- by scanning the per-vhost keys. Absolute counts (the daemon hook is
--- UPSERT-idempotent, like the WAF-stats push). Bounded — only armed vhosts are
--- ever keyed, each with ~1 + #statuses entries.
+--   { ["<host>"] = { HIT = n, MISS = n, ... }, ... }
+-- (status keys only; the daemon sums them) by scanning the per-vhost keys.
+-- Absolute counts (the daemon hook is UPSERT-idempotent, like the WAF-stats
+-- push). A vhost is keyed only while armed, but its keys stay in the dict after
+-- it is disarmed (until an edge reload); the daemon drops such rows.
 function _M.snapshot_vhosts()
   local d = ngx.shared.cfm_cache_stats
   if not d then return {} end
