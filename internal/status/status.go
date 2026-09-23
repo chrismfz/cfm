@@ -8,6 +8,7 @@ import (
 	"cfm/internal/enrich"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/setinventory"
+	"cfm/internal/ipquery"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1588,16 +1589,7 @@ func countTTLInSet(backend firewall.Backend, set string) (withTTL, total int) {
 		return 0, 0
 	}
 	for _, e := range elems {
-		addr := e.Elem
-		valid := false
-		if strings.Contains(addr, "/") {
-			if _, _, err := net.ParseCIDR(addr); err == nil {
-				valid = true
-			}
-		} else if net.ParseIP(addr) != nil {
-			valid = true
-		}
-		if !valid {
+		if _, ok := ipquery.ParseEntry(e.Elem); !ok { // address, CIDR or "first-last"
 			continue
 		}
 		total++

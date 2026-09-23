@@ -1,14 +1,17 @@
 // internal/locate/imunify.go
 //
-// imunify360 probe. Uses the documented read-only query
+// imunify360 probe. Uses the documented read-only queries
 //
 //	imunify360-agent ip-list local list --by-ip <arg> --json
+//	imunify360-agent ip-list local list --limit 10000 --json
 //
 // (--by-ip accepts an IP or a subnet in CIDR notation). Purposes map to
 // actions: white=ALLOW, drop=BLOCK (BLACK bucket), captcha/splashscreen=
-// CHALLENGE (GRAY bucket). Because --by-ip's containment semantics for
-// subnet *entries* aren't guaranteed across versions, a miss falls back
-// to listing the local list and matching containment ourselves.
+// CHALLENGE (GRAY bucket). One query asks --by-ip, and because --by-ip's
+// containment semantics for subnet *entries* aren't guaranteed across
+// versions, a miss falls back to listing the local list and matching
+// containment ourselves. Many queries list once and match locally (see
+// searchImunify).
 package locate
 
 import (
@@ -18,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/ipquery"
 )
 
 func imunifyUnitActive() bool {
@@ -25,37 +30,128 @@ func imunifyUnitActive() bool {
 		unitActive("imunify360.service") || unitActive("imunify360-agent.service")
 }
 
-// searchImunify returns (locations, "") on success or (nil, why) when
-// imunify isn't available.
-func searchImunify(ctx context.Context, q *query) ([]Location, string) {
+// imunifyListCap bounds the full-list read.
+const imunifyListCap = 10000
+
+// searchImunify returns each query's locations, or why imunify isn't
+// available (why), or, per query, why that query went unanswered (skip).
+//
+// One query asks --by-ip first, and on a miss for a plain IP lists the local
+// list and matches containment itself. Many queries list once and match
+// locally. A list that reached the cap may be missing entries, so then every
+// query is also asked --by-ip, as the single path would, while ctx allows.
+// NOTE: a covering subnet entry past the cap that --by-ip doesn't surface is
+// missed, as before; the cap keeps the list read bounded — raise it if real
+// lists approach it.
+func searchImunify(ctx context.Context, qs []*query) (locs [][]Location, skip []string, why string) {
 	if !binaryExists("imunify360-agent") {
-		return nil, "not installed"
+		return nil, nil, "not installed"
 	}
 	if !imunifyUnitActive() {
-		return nil, "service not active"
+		return nil, nil, "service not active"
 	}
 
-	out, err := runOut(ctx, "imunify360-agent", "ip-list", "local", "list", "--by-ip", q.raw, "--json")
-	if err != nil {
-		return nil, "query failed: " + trimOut(out)
+	// byIP asks --by-ip; unreadable reports output that isn't JSON (runOut
+	// returns stderr with stdout, so a warning on stderr is enough).
+	byIP := func(q *query) (l []Location, why string, unreadable bool) {
+		out, err := runOut(ctx, "imunify360-agent", "ip-list", "local", "list", "--by-ip", q.raw, "--json")
+		switch {
+		case ctx.Err() != nil:
+			return nil, "no time left to ask --by-ip", false
+		case err != nil:
+			return nil, "query failed: " + trimOut(out), false
+		}
+		items := parseImunifyList(out)
+		if items == nil {
+			return nil, "unreadable output: " + trimOut(out), true
+		}
+		return matchImunifyItems(items, []*query{q})[0], "", false
 	}
-	locs := matchImunifyItems(parseImunifyList(out), q)
-	if len(locs) > 0 {
-		return locs, ""
-	}
-
-	// Miss: a plain-IP query might still be covered by a subnet entry
-	// --by-ip didn't surface. Pull the list (bounded) and match locally.
-	// NOTE: entries beyond the 10k cap are not examined — on lists that
-	// large a covering subnet entry past the cap would be missed. The cap
-	// keeps the miss-path cost bounded; raise it if real lists approach it.
-	if q.ip != nil {
-		out, err = runOut(ctx, "imunify360-agent", "ip-list", "local", "list", "--limit", "10000", "--json")
-		if err == nil {
-			locs = matchImunifyItems(parseImunifyList(out), q)
+	if len(qs) == 1 {
+		// A miss (or an unreadable answer) for a plain IP goes on to the list.
+		l, why, unreadable := byIP(qs[0])
+		if (why != "" && !unreadable) || len(l) > 0 || qs[0].IsCIDR {
+			return [][]Location{l}, nil, why
+		}
+		if unreadable {
+			if out, err := runOut(ctx, "imunify360-agent", "ip-list", "local", "list", "--limit", strconv.Itoa(imunifyListCap), "--json"); err == nil {
+				if items := parseImunifyList(out); items != nil {
+					return matchImunifyItems(items, qs), nil, ""
+				}
+			}
+			return nil, nil, why
 		}
 	}
-	return locs, ""
+
+	out, err := runOut(ctx, "imunify360-agent", "ip-list", "local", "list", "--limit", strconv.Itoa(imunifyListCap), "--json")
+	if len(qs) == 1 {
+		// As before: the --by-ip miss stands unless the list shows more.
+		if err != nil {
+			return [][]Location{nil}, nil, ""
+		}
+		return matchImunifyItems(parseImunifyList(out), qs), nil, ""
+	}
+	if err != nil {
+		return nil, nil, "query failed: " + trimOut(out)
+	}
+	items := parseImunifyList(out)
+	if items == nil {
+		return nil, nil, "unreadable output: " + trimOut(out)
+	}
+	listed := matchImunifyItems(items, qs)
+	if imunifyListLen(out) < imunifyListCap {
+		return listed, nil, ""
+	}
+	skip = make([]string, len(qs))
+	for i, q := range qs {
+		if ctx.Err() != nil {
+			skip[i] = fmt.Sprintf("local list has %d+ entries; no time left to ask --by-ip", imunifyListCap)
+			continue
+		}
+		l, why, _ := byIP(q)
+		if why != "" {
+			skip[i] = fmt.Sprintf("local list has %d+ entries; --by-ip: %s", imunifyListCap, why)
+			continue
+		}
+		seen := map[Location]bool{}
+		for _, loc := range listed[i] {
+			seen[loc] = true
+		}
+		for _, loc := range l {
+			if !seen[loc] {
+				listed[i] = append(listed[i], loc)
+			}
+		}
+	}
+	return listed, skip, ""
+}
+
+// imunifyArray is the list's entries: the "items" array (any key case) or a
+// bare top-level array. ok is false for output that isn't JSON.
+func imunifyArray(raw []byte) (arr []any, ok bool) {
+	var root any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, false
+	}
+	switch v := root.(type) {
+	case []any:
+		arr = v
+	case map[string]any:
+		for k, val := range v {
+			if strings.EqualFold(k, "items") {
+				arr, _ = val.([]any)
+				break
+			}
+		}
+	}
+	return arr, true
+}
+
+// imunifyListLen counts the list's entries, usable or not — what the cap
+// applies to.
+func imunifyListLen(raw []byte) int {
+	arr, _ := imunifyArray(raw)
+	return len(arr)
 }
 
 // imunifyItem is the part of an ip-list entry we care about, after
@@ -72,21 +168,9 @@ type imunifyItem struct {
 // array, with item keys in any case (docs show uppercase, agents emit
 // lowercase).
 func parseImunifyList(raw []byte) []imunifyItem {
-	var root any
-	if err := json.Unmarshal(raw, &root); err != nil {
+	arr, ok := imunifyArray(raw)
+	if !ok {
 		return nil
-	}
-	var arr []any
-	switch v := root.(type) {
-	case []any:
-		arr = v
-	case map[string]any:
-		for k, val := range v {
-			if strings.EqualFold(k, "items") {
-				arr, _ = val.([]any)
-				break
-			}
-		}
 	}
 	items := make([]imunifyItem, 0, len(arr))
 	for _, e := range arr {
@@ -133,15 +217,12 @@ func parseImunifyList(raw []byte) []imunifyItem {
 	return items
 }
 
-func matchImunifyItems(items []imunifyItem, q *query) []Location {
-	var out []Location
+func matchImunifyItems(items []imunifyItem, qs []*query) [][]Location {
+	idx := ipquery.NewIndex[Location]()
 	for _, it := range items {
 		entry := it.IP
 		if it.Netmask > 0 && !strings.Contains(entry, "/") {
 			entry = fmt.Sprintf("%s/%d", entry, it.Netmask)
-		}
-		if !q.matchesEntry(entry) {
-			continue
 		}
 		action := ActionMatch
 		list := it.Purpose
@@ -164,10 +245,10 @@ func matchImunifyItems(items []imunifyItem, q *query) []Location {
 				reason = exp
 			}
 		}
-		out = append(out, Location{
+		idx.Add(entry, Location{
 			Source: "imunify360", List: list, Action: action,
 			Match: entry, Reason: reason,
 		})
 	}
-	return out
+	return matchAll(idx, qs)
 }

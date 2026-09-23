@@ -104,21 +104,7 @@ func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
 
 	// Where-&-why search BEFORE any removal, so the nft state is still
 	// intact when we capture it. Results ride back on unblock-confirm.
-	found := make(map[int]*locate.Result, len(reqs))
-	for _, it := range reqs {
-		lctx, lcancel := context.WithTimeout(ctx, 15*time.Second)
-		res, lerr := locate.Find(lctx, it.IP, locate.Options{BE: r.backend, ConfigDir: r.cfgDir})
-		lcancel()
-		if lerr != nil {
-			logging.LogfAPI("[unblock] locate failed ip=%s: %v", it.IP, lerr)
-			continue
-		}
-		found[it.ID] = res
-		for _, l := range res.Locations {
-			logging.LogfAPI("[unblock.found] ip=%s source=%s list=%s action=%s match=%s reason=%q",
-				it.IP, l.Source, l.List, l.Action, l.Match, l.Reason)
-		}
-	}
+	found := locateUnblocks(ctx, reqs, locate.Options{BE: r.backend, ConfigDir: r.cfgDir})
 
 	// Remove the requested IPs from the block sets in one batch (the backend
 	// reads each set once and deletes just the IPs it holds). Each unblock.Do below
@@ -153,6 +139,56 @@ func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
 		logging.LogfAPI("[unblock] pending ip=%s (id=%d) — processing", it.IP, it.ID)
 		api.ProcessUnblockRequest(ctx, r.backend, r.cfgDir, it.ID, it.IP, found[it.ID])
 	}
+}
+
+// locateBatchTimeout bounds the where-&-why search of one batch of unblock
+// requests. The search reads each source once for the whole batch, so it is
+// one budget, not one per IP (it was 15s per IP, and every IP re-read every
+// source: a mass unblock ran minutes of nft/fail2ban/imunify processes).
+const locateBatchTimeout = 30 * time.Second
+
+// locateUnblocks finds where each request's IP is blocked, keyed by request
+// ID. Requests for an IP that doesn't parse are left out (the unblock itself
+// rejects them); each request gets its own copy of the result, which the
+// unblock goes on to append to.
+func locateUnblocks(ctx context.Context, reqs []PendingUnblock, opts locate.Options) map[int]*locate.Result {
+	var ips []string
+	for _, it := range reqs {
+		if net.ParseIP(strings.TrimSpace(it.IP)) != nil {
+			ips = append(ips, it.IP)
+		}
+	}
+	found := make(map[int]*locate.Result, len(reqs))
+	if len(ips) == 0 {
+		return found
+	}
+	lctx, cancel := context.WithTimeout(ctx, locateBatchTimeout)
+	defer cancel()
+	start := time.Now()
+	res, err := locate.FindMany(lctx, ips, opts)
+	if err != nil {
+		logging.LogfAPI("[unblock] locate failed (%d IPs): %v", len(ips), err)
+		return found
+	}
+	logging.LogfAPI("[unblock] located %d IPs in %s", len(ips), time.Since(start).Round(time.Millisecond))
+	for _, it := range reqs {
+		r := res[it.IP]
+		if r == nil {
+			continue
+		}
+		c := *r
+		c.Locations = append([]locate.Location(nil), r.Locations...)
+		c.Skipped = make(map[string]string, len(r.Skipped))
+		for k, v := range r.Skipped {
+			c.Skipped[k] = v
+		}
+		found[it.ID] = &c
+		for _, l := range c.Locations {
+			logging.LogfAPI("[unblock.found] ip=%s source=%s list=%s action=%s match=%s reason=%q",
+				it.IP, l.Source, l.List, l.Action, l.Match, l.Reason)
+		}
+	}
+	return found
 }
 
 // workLoopStuckAfter is how long one work-loop tick may run before the

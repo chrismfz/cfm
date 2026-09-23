@@ -149,6 +149,29 @@ back-filled here — see the git/PR history for that period.
   longer lists its old counts as live, and the debug header says
   `observe opt-out …` for an opted-out vhost.
 - **Site Cache: a `set` error response no longer includes an empty `entry`.**
+- **"Where is this IP blocked" found nothing in nftables on `nftlib` nodes,
+  and missed some entries on `nft` nodes.** `cfm which`, the unblock
+  "found on" report sent to cfm-web, `cfm unblock` and the `/search` API read
+  the firewall sets only in the `nft -j` JSON shape; the nftlib engine's own
+  dump has another shape, so no set was ever found there. On the `nft`
+  engine, a CIDR added with a timeout (`{"elem":{"val":{"prefix":…}}}`) and an
+  address range were skipped. Both shapes and all element forms are read
+  now. On nftlib, meters (`syn_v4`, `pps_v4`, … — every recently seen
+  source) are not reported as matches, as on `nft`, and an interval set is
+  read in address order: nftlib's set reader paired the n-th range start
+  with the n-th range end, so one range running to the top of the address
+  space (240.0.0.0/4 or 224.0.0.0/3 in a bogon feed, `ff00::/8`, `0.0.0.0/0`),
+  which `nft` writes without an end, shifted every range after it. A batch
+  of pending unblocks from cfm-web is also searched in one pass — the
+  firewall table and each set, `cfm.deny`, the csf files, fail2ban's and
+  imunify360's lists read once, in 30s for the batch — where every IP
+  re-read every source (up to 15s per IP), so a mass unblock ran thousands
+  of `nft`, `fail2ban-client` and `imunify360-agent` processes before
+  removing anything. The firewall sets are now read within the lookup's
+  time limit too (15s for `/search` and `cfm unblock`, 20s for `cfm
+  which`), block and allow sets first: a lookup that runs out of time
+  reports the nft source as incomplete (`cfm which` and `/search` show it)
+  instead of taking as long as it needs.
 - **Site Cache: a fresh `.deb` install no longer makes every armed vhost
   return 500.** The daemon runs with `UMask=0077`, so when it created a missing
   `/var/cache/nginx` (the postinst starts the daemon before an edge installer
