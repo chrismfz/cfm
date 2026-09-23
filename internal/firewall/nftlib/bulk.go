@@ -29,10 +29,14 @@ const setWriteChunk = 1000
 //   - Interval sets (CIDR/nets): the flush must be its OWN netlink transaction —
 //     flushing and re-adding an interval set in one batch fails with ENOTEMPTY
 //     ("directory not empty"); CFM's CLI path (replacePortSetCLI) splits them for
-//     the same reason. And the elements are start/IntervalEnd PAIRS that must not
-//     be split across messages, so they go in a single add batch. Interval feeds
-//     are small in practice (a very large one could still hit the message limit —
-//     none exist today).
+//     the same reason. The elements are start/IntervalEnd PAIRS, added in
+//     batches of setWriteChunk each with its own Flush, cut only between pairs:
+//     a start without its end is an interval open to the top of the address
+//     space. The batches are not optional. google/nftables puts a message's
+//     elements in one netlink attribute, whose 16-bit length silently wraps
+//     past 64 KiB (~1,600 IPv4 or ~1,000 IPv6 CIDRs), and the kernel then read
+//     a truncated list: ~360 of 2,000 /24s, or a start left without its end,
+//     an allow set accepting everything above it.
 //   - Plain sets (host IPs): flush queued with the first batch, then batches of
 //     setWriteChunk each with its own Flush, so a huge set (e.g. a 113k blocklist)
 //     can't overflow the netlink socket buffer. A large set is briefly partial
@@ -53,13 +57,20 @@ func (b *Backend) chunkedAdd(set *nftables.Set, nftElems []nftables.SetElement, 
 				return err
 			}
 		}
-		if len(nftElems) == 0 {
-			return nil
+		for i := 0; i < len(nftElems); {
+			end := min(i+setWriteChunk, len(nftElems))
+			if end < len(nftElems) && nftElems[end].IntervalEnd {
+				end++ // keep the pair together
+			}
+			if err := b.conn.SetAddElements(set, nftElems[i:end]); err != nil {
+				return err
+			}
+			if err := b.conn.Flush(); err != nil {
+				return err
+			}
+			i = end
 		}
-		if err := b.conn.SetAddElements(set, nftElems); err != nil {
-			return err
-		}
-		return b.conn.Flush()
+		return nil
 	}
 
 	if flushFirst {

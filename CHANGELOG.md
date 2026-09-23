@@ -106,6 +106,51 @@ back-filled here — see the git/PR history for that period.
   rewrites an existing config file is caught as well. On a node where the
   CFM daemon is running, its own writes to those directories trip the guard
   too, so run the preflight elsewhere.
+- **The flood protections (SYN/PPS/new-connection rate, connlimit, portflood,
+  bad TCP flags) could stop applying to TCP/UDP when ICMP rate limiting is on
+  (`ICMP_RATE_LIMIT`, 20 in the reference config), on both engines.** The
+  input chain's plain `jump flood` is what sends traffic through them, and
+  `EnsureBase` decides whether a base rule is present by looking for its text
+  in the chain: "jump flood" is found inside the two ICMP echo-request jumps.
+  So an input chain built while the config was loaded — the table going
+  missing and a self-heal rebuilding it, as opposed to the daemon's first
+  start — never got it back, and only ICMP echo-requests reached the flood
+  chain. `jump flood` must now be a whole rule. Also on the exec engine,
+  `EnsureBase` never recognised its own `iif lo accept` (nft prints it
+  `iif "lo" accept`) and inserted another copy at the top of the input chain
+  on every call — twice per unblock until the unblock fix below. The check
+  now reads rules as nft prints them, and `EnsureBase` deletes the copies it
+  piled up (and any repeated ICMP jump or `jump flood`), keeping the top one.
+- **nftlib: large CIDR sets were written truncated, possibly as an interval
+  open to the top of the address space, usually without an error.** The
+  netlink library puts all of a message's elements in one attribute whose
+  16-bit length silently wraps past 64 KiB, and interval (CIDR) sets were
+  written in one message: past 1,639 IPv4 or 1,024 IPv6 CIDRs (1,261 / 863
+  with a feed TTL) the kernel read a truncated list, or refused it and left
+  the set empty. In a test namespace, 2,000 /24s in a block nets set arrived
+  as 362 entries, the last running to 255.255.255.255 — a drop of most of
+  the IPv4 internet; in an allow set, an accept. It affects
+  every nets feed set (`block_ext_*_nets`, `allow_ext_*_nets`, the per-feed
+  ones) on the nftlib engine. They are now written in batches of 1,000
+  elements, never splitting a start from its end. No node is near the limit
+  today: one node runs nftlib, and its largest nets set holds 140 CIDRs.
+- **nftlib: `EnsureBase` runs one or two `nft` processes instead of ~60.** Its
+  CLI part read the input chain once per rule check (47 reads, 49 with ICMP
+  rate limiting) and wrote each
+  missing rule, and every self-set address, with its own `nft` run. On a node
+  with large feed sets every `nft` process loads the whole ruleset, set
+  elements included, so `EnsureBase` took ~70s in production
+  (`cli_work=1m9.6s` in the log). It runs at startup, on every DNAT enable
+  (`DNATOn`) and `cfm reset`, when a self-heal finds the table missing, and
+  until the unblock fix below on every unblock. Now the input chain is read
+  once and the missing rules go in one `nft` run (one per statement only if
+  that run fails, after re-reading the chain; an existing chain it can't read
+  is left as is and the `EnsureBase` sample in `firewall_selftest` carries
+  the error), and `self_v4`/`self_v6` are
+  written over netlink, with a link-local address merged into `fe80::/10`
+  instead of failing as an overlap. The resulting ruleset is identical.
+  `cli_work` in `firewall_selftest` now covers the base rules only; the self
+  sets appear under `feed_writes`.
 - **Unblocks no longer run `EnsureBase`, which made them take minutes and,
   on nftlib, skip the imunify/fail2ban cleanup.** Every unblock rebuilt the
   base ruleset (`EnsureBase`), which an unblock never needs: twice per IP from
@@ -161,6 +206,84 @@ back-filled here — see the git/PR history for that period.
   The real fix is the WordPress update (7.1.2 / 7.0.6 / 6.9.9 … 4.7.37).
   Setting `register_argc_argv = Off` removes the RCE step on hosts whose sites
   cannot be updated.
+- **Site Cache: closed three ways a response meant for one client was cached
+  and served to everyone, and set the anti-stampede lock wait per tier (both
+  tiers).** Tier A (static assets) was affected
+  live on armed vhosts. Tier B was not, because micro-cache enforcement is off
+  by default.
+  - **A request with `Authorization` is never served from, or stored in, the
+    cache.** nginx does not bypass on this header by itself. On a folder
+    protected with HTTP basic auth (cPanel *Directory Privacy*), the owner's
+    logged-in fetch of `/private/logo.png` was stored and then served to
+    anonymous visitors. Every cache location now bypasses and refuses to store
+    when the header is present, including `Authorization: 0`, which a plain
+    nginx predicate would read as false. Micro-cache also refuses to route such
+    a request (`microcache=bypass:authorization` in the debug header).
+  - **The server IP and the scheme the origin is told are now in the cache
+    key.** The origin is chosen by the server IP. On a multi-IP server, a
+    request to IP B with `Host: victim` got B's default vhost and stored it
+    under victim's key. Behind a trusted peer (Cloudflare Flexible SSL), http
+    and https answers also shared one copy.
+    - New key: `g<gen>|<server IP>|<listener scheme>|<scheme told to the
+      origin>://<host><uri>`. Both schemes are needed: :80 and :443 can be
+      answered by different Apache vhosts, and behind a trusted peer the
+      scheme the origin is told can differ from the listener.
+    - Existing entries become unreachable, so each cached URL takes one MISS
+      after the upgrade.
+  - **Forwarded headers are pinned for every request through a cache
+    location**, including static assets of vhosts that are not armed.
+    `X-Forwarded-Host` is set to the real host. `Forwarded`, `X-Original-URL`,
+    `X-Rewrite-URL`, `X-Forwarded-Server/-Port/-Prefix`, `X-Host`, the
+    method-override headers and similar URL-building headers are no longer
+    passed; the full list is in `docs/site-cache-design.md` §4. An app that
+    builds absolute URLs from them (common behind "trusted proxy: \*") could
+    otherwise be made to cache a page that loads the attacker's scripts. The
+    list covers the known headers and is not exhaustive.
+  - **The anti-stampede lock wait is now set per tier.** On a key whose response
+    turns out to be uncacheable (it sets a cookie, is `no-store`, or is a popular
+    404), nginx serves waiters one at a time in 500 ms steps until the wait
+    expires. The default wait was 5 s.
+    - **Tier A: 1 s.** Static files fill fast.
+    - **Tier B: stays at 5 s.** When the wait expires, every waiter goes to the
+      origin. With 1 s, a cold 20-client burst on a 2.5 s page sent all 20 to
+      the origin; with 5 s it sends one. The uncacheable queue on Tier B stays
+      until micro-cache learns to skip keys it has seen fail to cache. That
+      cost is sustained, not only a burst: a site that sets a cookie on every
+      anonymous page (Laravel, PHP sessions) would be served one client per
+      500 ms. So that skip is a prerequisite for turning
+      `MICRO_CACHE_ENFORCE` on.
+
+  All three leaks were reproduced on stock nginx against the old rails and
+  shown closed by the new ones. `check_site_cache_config.sh` now enforces them
+  in every cache location. It also:
+  - pins the whole cache key;
+  - fails if `proxy_ignore_headers` lists `Vary` or `Cache-Control`, or if
+    `proxy_cache_methods` lists POST;
+  - lexes the conf like nginx (inline `*_by_lua_block` bodies as Lua) and
+    assembles real statements, then matches every rail as a directive at the
+    start of a statement. So comment text, a Lua comment or a quoted value no
+    longer satisfies a check, and a one-line location, a directive wrapped
+    over several lines, or `{` on the next line is checked like any other;
+  - fails if the number of locations it parsed, or of cache locations it
+    checked, differs from what the file contains. This also catches a
+    `proxy_cache` outside any location, such as at server level;
+  - pins both rail maps to exactly their two entries. The only-200 map was
+    never pinned before, so an added `"404" ""` would have started storing
+    404s unnoticed;
+  - rejects the usual ways of writing `$cfm_req_auth`, `$cfm_cache_non200` or
+    `$cfm_cache_skip` anywhere else: `set`, `set_by_lua_block`, `geo`,
+    `split_clients`, another map, or an inline-Lua assignment, in any letter
+    case;
+  - requires `set $cfm_cache_skip "1"` in every server block that holds a cache
+    location;
+  - compares the cache locations of the two confs across every zone.
+
+  The edge still cannot see an origin that answers `200` differently by client
+  IP (`Require ip`, IP Blocker), by `Referer`, or by `User-Agent` / `Accept` /
+  `Accept-Language` without sending `Vary`. On a cold key, an attacker can be
+  the first client. Don't arm a vhost whose pages are gated or negotiated this
+  way. Non-200 answers were already never stored, so a cached throttle
+  (`429`/`503`) cannot recur.
 
 ### Added
 - **A warning when armed country/ASN policies can't fully work on a node.**

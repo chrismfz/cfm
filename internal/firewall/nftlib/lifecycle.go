@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"cfm/internal/firewall"
+	"cfm/internal/firewall/feedutil"
 	"cfm/internal/logging"
 	"github.com/google/nftables"
 )
@@ -24,14 +26,22 @@ func (b *Backend) EnsureBase() (err error) {
 	// Split the timing so the self-test can tell contention (lock_wait) from
 	// slow kernel round-trips (nl_work) from the nft CLI part (cli_work).
 	var lockWait, nlWork, cliWork time.Duration
+	var rulesErr error // base input rules left incomplete; not fatal, but recorded
 	defer func() {
 		st := "ok"
 		if err != nil {
 			st = "fail"
 		}
-		b.recordEnsureBase(lockWait, nlWork, cliWork, err)
+		recErr := err
+		if recErr == nil {
+			recErr = rulesErr
+		}
+		b.recordEnsureBase(lockWait, nlWork, cliWork, recErr)
 		extra := fmt.Sprintf("lock_wait=%s nl_work=%s cli_work=%s",
 			lockWait.Round(time.Millisecond), nlWork.Round(time.Millisecond), cliWork.Round(time.Millisecond))
+		if rulesErr != nil {
+			extra += fmt.Sprintf(" base_rules_err=%q", rulesErr.Error())
+		}
 		b.logPhase("EnsureBase", st, time.Since(start), err, extra)
 	}()
 	// Baseline lock_wait immediately before Lock (not from `start`) so it measures
@@ -71,7 +81,9 @@ func (b *Backend) EnsureBase() (err error) {
 	// it — would fail. The priority differs whenever this process has no
 	// config (a one-shot `cfm dnat on`, which builds its backend without one)
 	// or NFT_INPUT_PRIORITY changed after the chain was created.
-	if cur := b.existingInputChain(); cur == nil {
+	cur := b.existingInputChain()
+	newChain := cur == nil
+	if cur == nil {
 		b.conn.AddChain(&nftables.Chain{
 			Table:    table,
 			Name:     "input",
@@ -176,12 +188,13 @@ func (b *Backend) EnsureBase() (err error) {
 	_ = b.DeleteSetIfExists("challenge_v4")
 	_ = b.DeleteSetIfExists("challenge_v6")
 
-	cliStart := time.Now()
-	// Populate self_v4 / self_v6 with loopback + local interface IPs.
+	// Populate self_v4 / self_v6 with loopback + local interface IPs (netlink;
+	// each write is recorded with the feed writes).
 	b.refreshSelfSets()
 
 	// Install base input chain rules (idempotent).
-	b.applyBaseInputRules()
+	cliStart := time.Now()
+	rulesErr = b.applyBaseInputRules(newChain)
 	cliWork = time.Since(cliStart)
 
 	return nil
@@ -205,40 +218,53 @@ func (b *Backend) existingInputChain() *nftables.Chain {
 	return nil
 }
 
+// refreshSelfSets loads self_v4/self_v6 over netlink. They used to take one
+// nft process per statement — two flushes, the static ranges, one add per
+// local address — and on a node with large feed sets each nft process costs
+// over a second (the CLI loads the whole ruleset, set elements included).
 func (b *Backend) refreshSelfSets() {
-	_ = b.nftExec("flush set inet cfm self_v4")
-	_ = b.nftExec("flush set inet cfm self_v6")
-	_ = b.nftExec("add element inet cfm self_v4 { 127.0.0.0/8 }")
-	_ = b.nftExec("add element inet cfm self_v6 { ::1 }")
-	_ = b.nftExec("add element inet cfm self_v6 { fe80::/10 }")
-
 	b.selfResolver.Refresh()
-	for _, s := range b.selfResolver.LocalIPs() {
+	v4, v6 := selfSetElems(b.selfResolver.LocalIPs())
+	_ = b.ReplaceSetFlushAdd("self_v4", v4, nil) // logs its own failure
+	_ = b.ReplaceSetFlushAdd("self_v6", v6, nil)
+}
+
+// selfSetElems is what self_v4/self_v6 hold: loopback, link-local and each
+// local address, as CIDRs with overlaps merged. The sets are interval sets,
+// which refuse overlapping elements, and a local link-local address lies
+// inside fe80::/10.
+func selfSetElems(local []string) (v4, v6 []string) {
+	v4 = []string{"127.0.0.0/8"}
+	v6 = []string{"::1/128", "fe80::/10"}
+	for _, s := range local {
 		ip := net.ParseIP(s)
-		if ip == nil {
-			continue
-		}
-		if ip.To4() != nil {
-			_ = b.nftExec("add element inet cfm self_v4 { " + s + " }")
-		} else {
-			_ = b.nftExec("add element inet cfm self_v6 { " + s + " }")
+		switch {
+		case ip == nil:
+		case ip.To4() != nil:
+			v4 = append(v4, ip.To4().String()+"/32")
+		default:
+			v6 = append(v6, ip.String()+"/128")
 		}
 	}
+	return feedutil.NormalizeCIDRsV4(v4), feedutil.NormalizeCIDRsV6(v6)
+}
+
+// icmpFloodJumps send echo-requests through the flood chain when ICMP rate
+// limiting is on.
+var icmpFloodJumps = []string{
+	`ip protocol icmp icmp type echo-request jump flood`,
+	`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
 }
 
 // applyBaseInputRules installs all permanent set-matching rules in the input chain.
-// Each rule is added only if it is not already present (idempotent).
-func (b *Backend) applyBaseInputRules() {
-	addRule := func(expr string) {
-		if !b.ruleExistsCLI("input", expr) {
-			_ = b.nftExec("add rule inet cfm input " + expr)
-		}
-	}
-	insertRule := func(expr string) {
-		if !b.ruleExistsCLI("input", expr) {
-			_ = b.nftExec("insert rule inet cfm input position 0 " + expr)
-		}
-	}
+// Each rule is added only if it is not already present (idempotent): one read
+// of the chain, then the missing rules in one nft run (baseRulesScript).
+// newChain says the chain was created by this EnsureBase, so it holds no rules
+// yet. The error says the rules may be incomplete; they are best effort.
+func (b *Backend) applyBaseInputRules(newChain bool) error {
+	var ins, adds []string
+	insertRule := func(expr string) { ins = append(ins, expr) }
+	addRule := func(expr string) { adds = append(adds, expr) }
 
 	// Early rules inserted at position 0 in reverse order so the final
 	// top-down order matches the nft backend's EnsureBase:
@@ -275,10 +301,7 @@ func (b *Backend) applyBaseInputRules() {
 		`ip6 saddr @block_v6_nets drop`,
 	}
 	if icmpEnabled {
-		early = append(early,
-			`ip protocol icmp icmp type echo-request jump flood`,
-			`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
-		)
+		early = append(early, icmpFloodJumps...)
 	}
 
 	// Insert in reverse so the first item ends up at the top.
@@ -316,9 +339,106 @@ func (b *Backend) applyBaseInputRules() {
 	addRule(`ip6 saddr @block_v6_nets drop`)
 
 	// jump flood at the end of the base layer (before ports policy rules).
-	if !b.ruleExistsCLI("input", "jump flood") {
-		_ = b.nftExec("add rule inet cfm input jump flood")
+	addRule("jump flood")
+
+	// Rules are added (only piled-up copies are ever deleted), so an unread
+	// chain must not be taken for an empty one — that would add every rule a
+	// second time — unless this
+	// EnsureBase just created it: then it is empty, and leaving it so would
+	// leave the node without its allow/block rules.
+	chain, err := b.chainTextCLI("input")
+	if err != nil && !newChain {
+		err = fmt.Errorf("can't read the input chain, left as is: %w", err)
+		logging.Logf("[nftlib] base input rules: %v", err)
+		return err
 	}
+	stmts := baseRulesScript(chain, ins, adds)
+	if len(stmts) == 0 {
+		return nil
+	}
+	err = b.nftExec(strings.Join(stmts, "\n"))
+	if err == nil {
+		if n := countPrefix(stmts, "delete rule "); n > 0 {
+			logging.Logf("[nftlib] EnsureBase: removed %d duplicate base rules", n)
+		}
+		return nil
+	}
+	// Best effort, as before: a statement nft refuses mustn't keep the others
+	// out. Re-read first — the run may have committed before failing (e.g.
+	// killed at its timeout), and running the statements again would
+	// duplicate them.
+	runErr := fmt.Errorf("one nft run of %d statements failed: %s", len(stmts), errTail(err, 300))
+	chain, err = b.chainTextCLI("input")
+	if err != nil {
+		err = fmt.Errorf("%v; can't re-read the input chain, left as is: %w", runErr, err)
+		logging.Logf("[nftlib] base input rules: %v", err)
+		return err
+	}
+	stmts = baseRulesScript(chain, ins, adds)
+	logging.Logf("[nftlib] base input rules: %v; applying %d one by one", runErr, len(stmts))
+	failed := 0
+	for _, st := range stmts {
+		if b.nftExec(st) != nil {
+			failed++
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%v; %d of %d single statements failed too", runErr, failed, len(stmts))
+	}
+	return nil
+}
+
+func countPrefix(stmts []string, prefix string) int {
+	n := 0
+	for _, s := range stmts {
+		if strings.HasPrefix(s, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// errTail is the end of err's message, where nft's own reason is (nftExec
+// quotes the whole script before it), cut to at most n bytes.
+func errTail(err error, n int) string {
+	s := err.Error()
+	if len(s) > n {
+		s = "…" + s[len(s)-n:]
+	}
+	return s
+}
+
+// baseRulesScript returns the statements that install the rules the input
+// chain (as `nft -a list chain` prints it) lacks: ins inserted at the top in
+// the order given (each lands above the previous one), adds appended. A rule
+// counts as present per firewall.ChainRules, the rules queued before it
+// included — the check the one-nft-process-per-rule version made against the
+// chain as it grew, except that `jump flood` must be a whole rule. Extra
+// copies of the rules that check used to miss are deleted first.
+func baseRulesScript(chain string, ins, adds []string) []string {
+	have := firewall.ParseChainRules(chain)
+	missing := func(expr string) bool {
+		if have.Has(expr) {
+			return false
+		}
+		have.Add(expr)
+		return true
+	}
+	var stmts []string
+	for _, h := range have.DuplicateHandles(append([]string{`iif "lo" accept`, `jump flood`}, icmpFloodJumps...)...) {
+		stmts = append(stmts, "delete rule inet cfm input handle "+h)
+	}
+	for _, e := range ins {
+		if missing(e) {
+			stmts = append(stmts, "insert rule inet cfm input position 0 "+e)
+		}
+	}
+	for _, e := range adds {
+		if missing(e) {
+			stmts = append(stmts, "add rule inet cfm input "+e)
+		}
+	}
+	return stmts
 }
 
 // DropEverything removes all CFM-owned firewall state.
