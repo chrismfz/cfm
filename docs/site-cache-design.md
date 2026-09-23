@@ -141,7 +141,7 @@ request-time (Lua, `access` phase) and response-time (nginx-native + a thin
 | Request carries a **named app-session cookie** → `$cfm_cache_skip=1` (see §4.1 — **allowlist by name**, NOT "any cookie") | Lua cookie-name allowlist | **logged-in users get stale/foreign content** |
 | Origin `Cache-Control: private\|no-store\|no-cache` → respect | nginx default (not ignored) | origin keeps the final say |
 | Panel hosts/ports (`:2083/:2087/:2096`), webmail hosts, `/.well-known/`, `/acctxfer*`, cPanel/webmail bypass paths → never | Lua gate, sits **after** `cfm.lua` Step 0a1 | **cPanel / webmail / SSO / AutoSSL broken** |
-| Cache key excludes cookies; carries purge generation, **destination IP** and the **scheme the origin is told** (as-built) | `proxy_cache_key "g$cfm_cache_gen\|$server_addr\|$cf_xfp://$host$request_uri"` | per-user fragmentation / leakage; **multi-IP poisoning** — the origin is chosen by `$server_addr`, so without it a request to IP B with `Host: victim` stores B's default vhost under victim's key; `$cf_xfp` (= `$scheme` unless a trusted peer such as Cloudflare Flexible SSL says otherwise) keeps an http and an https answer apart |
+| Cache key excludes cookies; carries purge generation, **destination IP**, the **listener scheme** and the **scheme the origin is told** (as-built) | `proxy_cache_key "g$cfm_cache_gen\|$server_addr\|$scheme\|$cf_xfp://$host$request_uri"` | per-user fragmentation / leakage; **multi-IP poisoning** — the origin is chosen by `$server_addr`, so without it a request to IP B with `Host: victim` stores B's default vhost under victim's key. **Both** schemes, not either: `$scheme` is the listener (:9080 → origin :80, :9043 → origin :443, which Apache may answer from different vhosts — e.g. a domain with no SSL vhost falls back to the IP's default SSL site), `$cf_xfp` is what the origin is told (differs from `$scheme` only behind a trusted peer such as Cloudflare Flexible SSL). Keying on `$cf_xfp` alone let a direct HTTPS client fill an entry that a Cloudflare visitor on :80 then hit (reproduced) |
 | Request carries **`Authorization`** → never read, never store (as-built) | `map $http_authorization $cfm_req_auth` (any non-empty value → `"1"`; a raw predicate would read `Authorization: 0` as false) on `proxy_cache_bypass` **and** `proxy_no_cache` in every cache location; Tier B `micro_decision` also reports `bypass:authorization` and does not route | **basic-auth (cPanel Directory Privacy) / bearer response served to anonymous visitors** — nginx does not bypass on `Authorization` by itself |
 | **Forwarded headers pinned** in cache locations (as-built) | `proxy_set_header X-Forwarded-Host $host;` and `""` (not sent) for `X-Forwarded-Server/-Port/-Scheme/-Protocol/-Prefix/-Ssl/-Uri/-Path`, `X-Host`, `X-Original-Host`, `X-Original-URL`, `X-Original-Uri`, `X-Rewrite-URL`, `Forwarded`, `Front-End-Https`, `X-Url-Scheme`, `X-Scheme`, `X-HTTP-Method(-Override)`, `X-Method-Override`. Applies to **every** request through a cache location, armed vhost or not (all vhosts' static assets use the Tier A location) | cache poisoning — an app building absolute URLs / routes from these writes attacker input into a page cached for everyone. A denylist of the known URL-building headers, not a proof |
 | Lock wait set **per tier** (as-built) | `proxy_cache_lock_timeout 1s` (Tier A) / `5s` (Tier B) | the timeout must outlast the fill, or a cold-key burst all reaches the origin (when it expires every waiter is sent upstream and nothing is stored); yet on an uncacheable key (Set-Cookie / no-store / non-200) waiters queue at 500 ms steps until it expires — nginx has no hit-for-pass. Static files fill in well under 1 s and a popular 404 is the usual uncacheable key → 1 s. HTML can take seconds to render → 5 s, paying the uncacheable queue until a remembered-uncacheable skip lands (Tier B hardening) |
@@ -267,7 +267,7 @@ proxy_cache_path /var/cache/nginx/cfm_micro_60s  levels=1:2 keys_zone=cfm_micro_
 Each cache location also carries the **anti-stampede** trio (§5.6):
 `proxy_cache_lock on;`, `proxy_cache_use_stale updating error timeout;`,
 `proxy_cache_background_update on;` — plus `proxy_cache_bypass`/`proxy_no_cache
-$cfm_cache_skip;` (§0) and `proxy_cache_key "g$cfm_cache_gen|$server_addr|$cf_xfp://$host$request_uri";` (§4, §10).
+$cfm_cache_skip;` (§0) and `proxy_cache_key "g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri";` (§4, §10).
 
 ### 5.2 Per-request decision transport: edge-pull → shared dict → local lookup
 
@@ -411,9 +411,15 @@ explicit goal. It holds only while `proxy_cache_lock_timeout` outlasts the
 fill: when the wait expires every waiter goes to the origin and nothing it
 fetches is stored. Tier B therefore uses 5 s (a 2.5 s render under a cold
 20-client burst: 1 origin hit with 5 s, 20 with 1 s — measured) and Tier A 1 s
-(§4 lock row). The cost of 5 s is the uncacheable-key queue: a Set-Cookie page
-under a burst is served one client per 500 ms up to 5 s, until Tier B learns to
-remember an uncacheable key and skip the cache for it.
+(§4 lock row). The cost of 5 s is the uncacheable-key queue, and it is a
+**sustained** cost, not a burst one: a page that sets a cookie on every
+anonymous response (Laravel, PHP `session_start`) is uncacheable on EVERY
+request, so under steady concurrency its clients are served one per 500 ms
+(measured: 10 clients on a 0.3 s Set-Cookie page — 270 requests in ~8 s
+uncached, 45 through a 5 s-lock micro location, max 5.3 s). So Tier B must
+learn to remember an uncacheable key and skip the cache for it **before**
+`MICRO_CACHE_ENFORCE` is turned on anywhere (a prerequisite, tracked with the
+Tier B hardening).
 
 **Per-request cost ledger (caching ON for a vhost):**
 
@@ -465,7 +471,7 @@ and micro together:
 ```
 
 `generation` is folded into the cache key (as built:
-`"g<gen>|$server_addr|$cf_xfp://$host$request_uri"` via a Lua-set `$cfm_cache_gen`), so a Purge
+`"g<gen>|$server_addr|$scheme|$cf_xfp://$host$request_uri"` via a Lua-set `$cfm_cache_gen`), so a Purge
 is a counter bump — old keys become unreachable and age out under `inactive`,
 with no filesystem walking.
 
@@ -601,7 +607,7 @@ set/remove/purge = scoped-allowed (own host); purge-all = admin-only.
 - **Micro-cache is self-healing** (1–30s TTL) — rarely needs an explicit purge.
 - **Static (long TTL) needs purge.** Mechanism: **generation bump.** Each
   vhost entry carries `generation`; the cache key includes it
-  (`g<gen>|<server IP>|<scheme>://<host><uri>`). Purge = `generation++` in the store →
+  (`g<gen>|<server IP>|<listener scheme>|<scheme told to origin>://<host><uri>`). Purge = `generation++` in the store →
   new key space → old entries age out under `inactive`. No filesystem walking,
   no `proxy_cache_purge` (commercial) dependency, works on both OpenResty and
   Angie. (A future per-URL purge has to cover one key per server IP the vhost
@@ -750,7 +756,7 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      `cfm_static` zone (not per-tier) keeps the conf minimal. Anti-stampede
      (`proxy_cache_lock` + `use_stale updating` + `background_update`) and a
      generation-prefixed key (`"g$cfm_cache_gen|$scheme://$host$request_uri"`;
-     since widened to `g$cfm_cache_gen|$server_addr|$cf_xfp://…` by the §4
+     since widened to `g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://…` by the §4
      request-identity rails).
      CI guard `check_site_cache_config.sh` pins the bypass-by-default invariant
      + openresty↔angie parity.

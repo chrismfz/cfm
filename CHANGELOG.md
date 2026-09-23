@@ -35,8 +35,9 @@ back-filled here — see the git/PR history for that period.
   The real fix is the WordPress update (7.1.2 / 7.0.6 / 6.9.9 … 4.7.37).
   Setting `register_argc_argv = Off` removes the RCE step on hosts whose sites
   cannot be updated.
-- **Site Cache: closed four ways a response meant for one client was cached
-  and served to everyone (both tiers).** Tier A (static assets) was affected
+- **Site Cache: closed three ways a response meant for one client was cached
+  and served to everyone, and set the anti-stampede lock wait per tier (both
+  tiers).** Tier A (static assets) was affected
   live on armed vhosts. Tier B was not, because micro-cache enforcement is off
   by default.
   - **A request with `Authorization` is never served from, or stored in, the
@@ -52,7 +53,10 @@ back-filled here — see the git/PR history for that period.
     request to IP B with `Host: victim` got B's default vhost and stored it
     under victim's key. Behind a trusted peer (Cloudflare Flexible SSL), http
     and https answers also shared one copy.
-    - New key: `g<gen>|<server IP>|<X-Forwarded-Proto scheme>://<host><uri>`.
+    - New key: `g<gen>|<server IP>|<listener scheme>|<scheme told to the
+      origin>://<host><uri>`. Both schemes are needed: :80 and :443 can be
+      answered by different Apache vhosts, and behind a trusted peer the
+      scheme the origin is told can differ from the listener.
     - Existing entries become unreachable, so each cached URL takes one MISS
       after the upgrade.
   - **Forwarded headers are pinned for every request through a cache
@@ -72,17 +76,23 @@ back-filled here — see the git/PR history for that period.
     - **Tier B: stays at 5 s.** When the wait expires, every waiter goes to the
       origin. With 1 s, a cold 20-client burst on a 2.5 s page sent all 20 to
       the origin; with 5 s it sends one. The uncacheable queue on Tier B stays
-      until micro-cache learns to skip keys it has seen fail to cache.
+      until micro-cache learns to skip keys it has seen fail to cache. That
+      cost is sustained, not only a burst: a site that sets a cookie on every
+      anonymous page (Laravel, PHP sessions) would be served one client per
+      500 ms. So that skip is a prerequisite for turning
+      `MICRO_CACHE_ENFORCE` on.
 
-  All four leaks were reproduced on stock nginx against the old rails and
+  All three leaks were reproduced on stock nginx against the old rails and
   shown closed by the new ones. `check_site_cache_config.sh` now enforces them
   in every cache location. It also:
   - pins the whole cache key;
   - fails if `proxy_ignore_headers` lists `Vary` or `Cache-Control`, or if
     `proxy_cache_methods` lists POST;
-  - strips comments before matching, so a commented-out gate no longer passes;
-  - fails if any location header is not recognised, so no location goes
-    unchecked.
+  - strips comments by the nginx lexer rule before matching, so commented-out
+    directive text no longer satisfies a check;
+  - fails if the number of locations it parsed, or of cache locations it
+    checked, differs from what the file contains. This also catches a
+    `proxy_cache` outside any location, such as at server level.
 
   The edge still cannot see an origin that answers `200` differently by client
   IP (`Require ip`, IP Blocker), by `Referer`, or by `User-Agent` / `Accept` /

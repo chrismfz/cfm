@@ -541,10 +541,10 @@ end
 -- Privacy — or a bearer token), and nginx does NOT treat Authorization as a
 -- cache bypass on its own: a stored 200 would be replayed to anonymous
 -- visitors. So a credentialed request is never routed to micro-cache. The
--- cache locations also carry $http_authorization on proxy_cache_bypass +
--- proxy_no_cache (the conf-side rail that covers Tier A too); this is the
--- request-side half, so a credentialed request does not even take the
--- buffered micro path.
+-- cache locations also carry $cfm_req_auth (a map on $http_authorization:
+-- any non-empty value, "0" included) on proxy_cache_bypass + proxy_no_cache
+-- (the conf-side rail that covers Tier A too); this is the request-side half,
+-- so a credentialed request does not even take the buffered micro path.
 local function micro_decision(pol, method, uri, cookie_header, auth_header)
     if type(pol) ~= "table" or type(pol.micro) ~= "table" or not pol.micro.on then
         return false, nil, "unarmed"
