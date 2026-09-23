@@ -99,6 +99,13 @@ export const siteCacheMixin = {
         existing: this.scEntries,
       });
     },
+    // The stored policy a NEW-policy form's host already has (the editor then
+    // offers to open it instead: saving the new form would replace it).
+    scExistingForNew() {
+      if (this.scEditHost) return null;
+      const h = canonHost(this.scForm.host);
+      return h ? this.scRows.find((r) => r.host === h) || null : null;
+    },
     canSaveSC() {
       return !this.scBusy && this.scValidation.errors.length === 0;
     },
@@ -183,6 +190,7 @@ export const siteCacheMixin = {
         this.scLoadError = `Could not load the policies: ${this.formatApiError(err)}`;
       }
       this.scStats = this.extractRows(await statsP, "rows");
+      this.adoptSCScopedPolicy();
       await this.refreshSiteCacheSwitches();
     },
     // SITE_CACHE / MICRO_CACHE_ENFORCE from the merged detectors.conf. The
@@ -277,14 +285,26 @@ export const siteCacheMixin = {
     applySCScopedDefault() {
       if (this.isScoped && this.allowedVhosts.length === 1 && !this.scForm.host.trim() && !this.scEditHost) {
         this.scForm.host = this.allowedVhosts[0];
+        this.adoptSCScopedPolicy();
       }
     },
-    editSC(row) {
+    // ...and when that vhost already has a policy, the editor opens it rather
+    // than a blank new-policy form (whose both-off tiers would replace it).
+    // Only while the form is untouched, so it never discards an edit.
+    adoptSCScopedPolicy() {
+      if (!this.isScoped || this.allowedVhosts.length !== 1 || this.scEditHost) return;
+      const pristine = JSON.stringify({ ...this.scForm, host: "" }) === JSON.stringify(emptyForm());
+      if (!pristine || canonHost(this.scForm.host) !== canonHost(this.allowedVhosts[0])) return;
+      const row = this.scExistingForNew;
+      if (row) this.editSC(row, { scroll: false });
+    },
+    editSC(row, { scroll = true } = {}) {
       this.scForm = formFromEntry(row.entry);
       this.scEditHost = row.host;
       this.scOriginal = row.entry;
       this.scCheckHost = row.host;
       this.scMode = "editor";
+      if (!scroll) return;
       try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { /* non-fatal */ }
     },
     // A new micro tier on a node that ENFORCES it serves pages from cache at

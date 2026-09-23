@@ -214,7 +214,7 @@ test("validateForm: warnings for what an operator should know", () => {
   const bump = validateForm({ ...emptyForm(), host: "a.com", staticOn: true, microOn: true }, { original });
   assert.equal(bump.warnings.filter((w) => /empty cache/.test(w)).length, 2);
   const dup = validateForm({ ...emptyForm(), host: "A.com", staticOn: true }, { existing: [{ host: "a.com" }] });
-  assert.match(dup.warnings.join(" "), /already has a policy/);
+  assert.match(dup.errors.join(" "), /already has a policy: edit it instead/);
   const covered = validateForm({ ...emptyForm(), host: "blog.shop.example.com", staticOn: true },
     { existing: [{ host: "*.example.com" }, { host: "*.shop.example.com" }] });
   assert.match(covered.warnings.join(" "), /covered by \*\.shop\.example\.com: a policy of its own replaces/);

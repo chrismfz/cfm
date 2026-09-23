@@ -295,7 +295,9 @@ export function validateForm(form, { original = null, inScope = () => true, exis
     if (!st.enabled && f.staticOn) warnings.push("Turning the static tier on starts this vhost from an empty cache (a new generation) for both tiers.");
     if (!mi.enabled && f.microOn && mi.recipe) warnings.push("Re-enabling the micro tier starts this vhost from an empty cache (a new generation) for both tiers.");
   } else if (!herr && existing.some((e) => canonHost(e.host) === host)) {
-    warnings.push(`${host} already has a policy: saving updates it (fields you leave out keep their stored value).`);
+    // A new-policy form starts with both tiers off: saving it over an existing
+    // policy would turn that vhost's caching off. Editing is the way in.
+    errors.push(`${host} already has a policy: edit it instead, so its settings are not replaced.`);
   } else if (!herr) {
     const cover = coveringWildcard(host, existing);
     if (cover) warnings.push(`${host} is covered by ${cover}: a policy of its own replaces the wildcard's for this host.`);

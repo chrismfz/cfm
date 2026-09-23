@@ -154,6 +154,9 @@
               <div class="rule-sentence">{{ scReviewSentence }}</div>
               <ul class="msg-list errors" v-if="scShownValidation.errors.length"><li v-for="e in scShownValidation.errors" :key="e">{{ e }}</li></ul>
               <ul class="msg-list warnings" v-if="scShownValidation.warnings.length"><li v-for="w in scShownValidation.warnings" :key="w">{{ w }}</li></ul>
+              <div class="toolbar" v-if="scExistingForNew">
+                <button class="btn-quiet btn-sm" @click="editSC(scExistingForNew)">Edit the policy of {{ scExistingForNew.host }}</button>
+              </div>
             </div>
 
             <div class="toolbar">
