@@ -659,8 +659,10 @@ because of that. Hard-won points:
   it next polls.
 - **`detectors.conf` edits apply without a reload.** The manager polls the file.
   The daemon has no SIGHUP handler, so `systemctl reload cfm` restarts it
-  (systemd `Restart=always`). A config reload also builds a new webdetector
-  Engine, which empties the in-memory Site Cache stats view.
+  (systemd `Restart=always`). A config reload builds a new webdetector Engine,
+  which empties the in-memory Site Cache stats view. A reload follows any save
+  (the signature is the file mtime) and the rotation of a tailed detector log
+  (its inode is hashed too).
 
 ---
 

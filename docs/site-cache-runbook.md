@@ -38,7 +38,8 @@ Caching is bypass-by-default. What is never cached, whatever a policy says
     `/sysadmin/`, `/acctxfer`, cPanel's proxy-subdomain paths).
 
   A login page at a path that is neither (`/login`, `/user/login`) is
-  micro-cached when the request is anonymous. The pages behind the login are
+  eligible for the micro-cache when the request is anonymous, and is stored
+  unless its response sets a cookie or says private / no-store. The pages behind the login are
   not, as long as their session cookie is on the auth list (built in, or added
   with `--auth-cookies`).
 
@@ -189,8 +190,12 @@ cfm webtop site-cache stats [host]      # also: MCP site_cache_stats, GET /api/v
   - a daemon restart;
   - any save of `detectors.conf` or a `detectors.d/*.conf` overlay (the daemon
     watches the files' modification time), because each reload builds a fresh
-    view. Right after flipping `MICRO_CACHE_ENFORCE`, for example, expect "No
-    cache stats yet" for up to a minute.
+    view;
+  - the rotation of a log that a detector tails (a new file at the same path
+    reloads the config too).
+
+  Right after flipping `MICRO_CACHE_ENFORCE`, for example, expect "No cache
+  stats yet" for up to a minute.
 - **What is counted.** A 200 or 304 response that went through a cache
   location: the static-asset locations, and the micro locations while
   `MICRO_CACHE_ENFORCE = 1`. HTML that Tier B declines, or that it only
@@ -268,8 +273,9 @@ Why the reload, and why before step 4:
   switch value within about 10 s. It would then serve the pre-purge objects
   again until its next poll, up to about 60 s after its last one.
 - A worker started by the reload has an empty table. It caches nothing until
-  its first poll, which it makes on the first request after step 4, and that
-  poll brings the new generations.
+  its first poll. It makes that poll on its first request after it sees the
+  switch at `1` (about 15 s after the save), and the poll brings the new
+  generations.
 
 For one bad vhost, you don't need the switch:
 1. `purge <host>` first. After a `remove`, a purge returns 404.

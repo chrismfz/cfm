@@ -1075,7 +1075,8 @@ statuses, at most one row per stored policy — and prunes the rows of keys
 disarmed since, every 5 minutes. The counts are absolute since the edge last
 restarted, so a daemon restart only empties the view until the next push.
 So does any save of `detectors.conf` or a `detectors.d/*.conf` overlay (the
-daemon watches the modification time): each config reload builds a new
+daemon watches the modification time), and the rotation of a log a detector
+tails (a new inode at the same path): each config reload builds a new
 webdetector `Engine`, and with it a new, empty store.
 This store is what the API and MCP read, so scoping is enforced daemon-side.
 
