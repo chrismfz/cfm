@@ -9,6 +9,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -278,12 +279,18 @@ type ThrottleConfig struct {
 	Enabled     bool
 	WindowSec   int
 	Hits        int
-	Mode        string // "permanent" | "ttl"
+	Mode        string // "permanent" | "ttl" | "dryrun" | "alert"
 	TTLSeconds  int
 	Sources     []string // e.g. ["syn","portflood","pps"]
 	SetTTL      int      // seconds for nft set timeout (tracking)
 	CooldownSec int      // seconds to suppress repeat autoblocks per IP
 }
+
+// throttleModeWarned holds the unrecognised THROTTLE_MODE values already
+// warned about: cfm.conf is parsed per request on some paths (nftlib block
+// reports, panelauth, the cfm-admin embed-cookie check), and a warning per
+// parse would flood the journal.
+var throttleModeWarned sync.Map
 
 type PortscanConfig struct {
 	Enabled    bool
@@ -346,10 +353,6 @@ func (c *Config) SetDefaults() {
 	if c.Throttle.Hits == 0 {
 		c.Throttle.Hits = 3
 	}
-	if c.Throttle.Mode == "" {
-		c.Throttle.Mode = "permanent"
-	}
-
 	if c.Clam.Network == "" {
 		c.Clam.Network = "unix"
 	}
@@ -389,21 +392,25 @@ func (c *Config) SetDefaults() {
 	}
 	// Editions: no hard default; user may choose ASN or City or both
 
-	// An unrecognised mode means a bounded block, not a permanent one. It
-	// used to fall back to "permanent", and the reference cfm.conf shipped
-	// THROTTLE_MODE = "tlt" (for "ttl"), so every throttle autoblock (syn,
-	// portflood, connlimit, …) was a permanent ban, written to cfm.deny and
-	// reported to the API.
-	c.Throttle.Mode = strings.ToLower(strings.TrimSpace(c.Throttle.Mode))
-	switch c.Throttle.Mode {
-	case "permanent", "ttl", "dryrun", "alert":
-		// ok
-	default:
-		log.Printf("config: warning: THROTTLE_MODE %q is not one of permanent|ttl|dryrun|alert; using \"ttl\" (THROTTLE_TTL)", c.Throttle.Mode)
-		c.Throttle.Mode = "ttl"
-	}
+	// THROTTLE_MODE: unset means "permanent"; an unrecognised value means a
+	// bounded block (THROTTLE_TTL), with a warning. It used to fall back to
+	// "permanent", and the reference cfm.conf shipped THROTTLE_MODE = "tlt"
+	// (for "ttl"), so every throttle autoblock (syn, portflood, connlimit, …)
+	// was a permanent ban, written to cfm.deny and reported to the API. The
+	// cfm-admin login brute-force autoblock follows this mode too.
 	if c.Throttle.TTLSeconds == 0 {
 		c.Throttle.TTLSeconds = 24 * 3600
+	}
+	c.Throttle.Mode = strings.ToLower(strings.TrimSpace(c.Throttle.Mode))
+	switch c.Throttle.Mode {
+	case "":
+		c.Throttle.Mode = "permanent"
+	case "permanent", "ttl", "dryrun", "alert":
+	default:
+		if _, seen := throttleModeWarned.LoadOrStore(c.Throttle.Mode, true); !seen {
+			log.Printf("config: warning: THROTTLE_MODE %q is not one of permanent|ttl|dryrun|alert; using \"ttl\" (THROTTLE_TTL=%ds)", c.Throttle.Mode, c.Throttle.TTLSeconds)
+		}
+		c.Throttle.Mode = "ttl"
 	}
 	if c.Throttle.SetTTL == 0 {
 		c.Throttle.SetTTL = 60

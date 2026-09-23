@@ -114,14 +114,50 @@ func runAuthAutoblock(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backe
 				ttlSec = int(ttl.Seconds())
 			}
 
-			if mode == "dryrun" || be.AddBlock(ip, authAutoblockReason, ttlPtr) == nil {
-				if mode != "dryrun" {
-					lastBlock[key] = time.Now()
-				}
-				_ = be.ReportBlock(key, authAutoblockReason, "detector", mode, ttlSec)
-				logging.LogfAPI("[apiserver][auth-autoblock] ip=%s fails=%d/%dm -> %s (%s)", key, len(series), int(authAutoblockWindow.Minutes()), mode, authAutoblockReason)
+			outcome := authAutoblockApply(be, ip, mode, ttlPtr)
+			if outcome == authBlockFailed {
+				continue
 			}
+			if mode != "dryrun" {
+				lastBlock[key] = time.Now()
+			}
+			if outcome == authBlockKept {
+				logging.LogfAPI("[apiserver][auth-autoblock] ip=%s already blocked for at least %s; kept (%s)", key, *ttlPtr, authAutoblockReason)
+				continue
+			}
+			_ = be.ReportBlock(key, authAutoblockReason, "detector", mode, ttlSec)
+			logging.LogfAPI("[apiserver][auth-autoblock] ip=%s fails=%d/%dm -> %s (%s)", key, len(series), int(authAutoblockWindow.Minutes()), mode, authAutoblockReason)
 		}
 		_ = rows.Close()
 	}
+}
+
+const (
+	authBlockDone   = "done"   // blocked (or, in dryrun, would have been)
+	authBlockKept   = "kept"   // ttl: already blocked at least as long
+	authBlockFailed = "failed" // the add failed
+)
+
+// authAutoblockApply blocks ip for mode. A ttl block never shortens an
+// existing one: AddBlock replaces the element, so a permanent block of the
+// address (cfm.deny, a port-scan or manual block) would become a timed one.
+// A permanent block replaces a timed one; dryrun adds nothing.
+func authAutoblockApply(be firewall.Backend, ip net.IP, mode string, ttl *time.Duration) string {
+	switch mode {
+	case "dryrun":
+		return authBlockDone
+	case "ttl":
+		res, err := be.AddBlockBatch([]firewall.BlockEntry{{IP: ip, TTL: *ttl}})
+		if err != nil {
+			return authBlockFailed
+		}
+		if res.Added+res.Extended == 0 {
+			return authBlockKept
+		}
+		return authBlockDone
+	}
+	if be.AddBlock(ip, authAutoblockReason, ttl) != nil {
+		return authBlockFailed
+	}
+	return authBlockDone
 }

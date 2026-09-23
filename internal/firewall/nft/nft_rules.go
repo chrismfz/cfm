@@ -3,12 +3,14 @@ package nft
 import (
 	"bufio"
 	cfgpkg "cfm/internal/config"
+	"cfm/internal/firewall"
 	"cfm/internal/firewall/autoblock"
 	"cfm/internal/logging"
 	"cfm/internal/notify"
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -385,7 +387,8 @@ func (b *Backend) applyPerIPRateLimit(rate, burst int, mode string) error {
 // -----------------------------------------------------------------------------
 
 // Auto-block policy (simple): if an IP is throttled >= THRESHOLD times within WINDOW,
-// add it to block_v4/v6. MODE can be "permanent" (no TTL) or "ttl" (temporary).
+// add it to block_v4/v6. MODE can be "permanent" (no TTL), "ttl" (temporary,
+// never shortening an existing block) or "dryrun"/"alert" (log only).
 
 func (b *Backend) autoBlockEval(v4, v6 []string, tc cfgpkg.ThrottleConfig) {
 	b.ab.Eval(v4, v6, tc, b.autoBlockAction)
@@ -453,33 +456,28 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 		if ttl <= 0 {
 			ttl = 3600
 		}
-		if fam == "v4" {
-			err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v4 { %s timeout %ds }", ip, ttl))
-			if err != nil {
-				if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
-					return nil
-				}
-				return err
-			}
-			logging.Logf("[autoblock] v4 %s -> block_v4 ttl=%ds (hits>=%d in %ds) reason=%s",
-				logIP, ttl, tc.Hits, tc.WindowSec, reason)
-			b.lastAutoBlockAt[ip] = time.Now()
-			_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
-			b.emitAutoBlockNotify(ip, "v4", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
-			return nil
+		// AddBlockBatch, not `add element … timeout`: the kernel takes that
+		// as a new timeout for an element already in the set, so a ttl
+		// autoblock of an address blocked permanently (cfm.deny, a port-scan
+		// or manual block) turned it into a timed one.
+		parsedIP := net.ParseIP(ip)
+		if parsedIP == nil {
+			return fmt.Errorf("autoBlockAction: invalid IP %q", ip)
 		}
-		err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s timeout %ds }", ip, ttl))
+		res, err := b.AddBlockBatch([]firewall.BlockEntry{{IP: parsedIP, TTL: time.Duration(ttl) * time.Second}})
 		if err != nil {
-			if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
-				return nil
-			}
 			return err
 		}
-		logging.Logf("[autoblock] v6 %s -> block_v6 ttl=%ds (hits>=%d in %ds) reason=%s",
-			logIP, ttl, tc.Hits, tc.WindowSec, reason)
 		b.lastAutoBlockAt[ip] = time.Now()
+		if res.Added+res.Extended == 0 {
+			logging.Logf("[autoblock] %s %s already in block_%s for at least ttl=%ds; kept (reason=%s)",
+				fam, logIP, fam, ttl, reason)
+			return nil
+		}
+		logging.Logf("[autoblock] %s %s -> block_%s ttl=%ds (hits>=%d in %ds) reason=%s",
+			fam, logIP, fam, ttl, tc.Hits, tc.WindowSec, reason)
 		_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
-		b.emitAutoBlockNotify(ip, "v6", "ttl", reason, ttl, tc.Hits, tc.WindowSec)
+		b.emitAutoBlockNotify(ip, fam, "ttl", reason, ttl, tc.Hits, tc.WindowSec)
 		return nil
 
 	default: // "permanent"

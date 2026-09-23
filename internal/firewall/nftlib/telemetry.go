@@ -13,6 +13,7 @@ import (
 	"time"
 
 	cfgpkg "cfm/internal/config"
+	"cfm/internal/firewall"
 	"cfm/internal/firewall/autoblock"
 	"cfm/internal/logging"
 	"cfm/internal/notify"
@@ -286,13 +287,21 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 		if ttl <= 0 {
 			ttl = 3600
 		}
-		d := time.Duration(ttl) * time.Second
-		if err := b.AddBlock(parsedIP, comment, &d); err != nil {
+		// AddBlockBatch, not AddBlock: AddBlock replaces the element, so a
+		// ttl autoblock of an address blocked permanently (cfm.deny, a
+		// port-scan or manual block) turned it into a timed one.
+		res, err := b.AddBlockBatch([]firewall.BlockEntry{{IP: parsedIP, TTL: time.Duration(ttl) * time.Second}})
+		if err != nil {
 			return err
+		}
+		b.lastAutoBlockAt[ip] = time.Now()
+		if res.Added+res.Extended == 0 {
+			logging.Logf("[autoblock] %s %s already in block_%s for at least ttl=%ds; kept (reason=%s)",
+				fam, logIP, fam, ttl, reason)
+			return nil
 		}
 		logging.Logf("[autoblock] %s %s -> block_%s ttl=%ds (hits>=%d in %ds) reason=%s",
 			fam, logIP, fam, ttl, tc.Hits, tc.WindowSec, reason)
-		b.lastAutoBlockAt[ip] = time.Now()
 		_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
 		b.emitAutoBlockNotify(ip, fam, "ttl", reason, ttl, tc.Hits, tc.WindowSec)
 		return nil

@@ -87,17 +87,29 @@ back-filled here — see the git/PR history for that period.
   config.** The reference `cfm.conf` set `THROTTLE_MODE = "tlt"`, and an
   unrecognised mode fell back to `permanent`, so every throttle autoblock
   (`THROTTLE_SOURCES`: syn, portflood, pps, new, icmp, connlimit) was a
-  permanent ban — written to `cfm.deny` and reported to the API. On 2026-09-21
-  a home connection that tripped the IMAPS port-flood limit (`portflood_993_tcp`)
-  was banned for good. An unrecognised mode now means `ttl` (`THROTTLE_TTL`,
-  default 24h) and logs `config: warning: THROTTLE_MODE ...` at startup; the
-  reference config says `"ttl"`. **Takes effect on upgrade** for every node
-  whose `/etc/cfm/cfm.conf` still has the typo (the conffile is not replaced);
-  an explicit `"permanent"` keeps permanent bans. Port-scan autoblocks follow
-  `PS_MODE` and are unchanged. Bans already made stay in `cfm.deny`: the
-  throttle ones read `# autoblock: <reason>` with a flood reason such as
+  permanent ban — written to `cfm.deny` and, with `AUTOBLOCK_SEND_TO_API=1`
+  (the reference default), reported without a TTL, which made it a permanent
+  row on cfm-web's fleet blacklist that every node pulls. The cfm-admin login
+  brute-force autoblock (`cfm_auth_brute`) follows the same mode and was
+  permanent too. On 2026-09-21 a home connection that tripped the IMAPS
+  port-flood limit (`portflood_993_tcp`) was banned for good. An unrecognised
+  mode now means `ttl` (`THROTTLE_TTL`, default 24h), with one
+  `config: warning: THROTTLE_MODE ...` line per process on stderr (the
+  journal); the reference config says `"ttl"`. **Takes effect on upgrade** for
+  every node whose `/etc/cfm/cfm.conf` still has the typo (a locally edited
+  conffile is kept); an explicit `"permanent"`, or no `THROTTLE_MODE` at all,
+  keeps permanent bans. Port-scan autoblocks follow `PS_MODE` and are
+  unchanged. Bans already made stay where they are and can be unblocked as
+  usual: in `cfm.deny` as `# autoblock: <reason>` with a flood reason such as
   `portflood_993_tcp`, `connlimit_…`, `SYN flood` or `Packet flood (pps)`, and
-  can be unblocked as usual.
+  on cfm-web's blacklist (source `api`, description starting with that
+  reason) — clearing `cfm.deny` alone does not lift those.
+- **A ttl autoblock no longer shortens an existing block.** A throttle or
+  login brute-force autoblock in `ttl` mode of an address already blocked
+  permanently — from `cfm.deny`, a port-scan block or a manual `cfm block` —
+  replaced the permanent block with a 24h one, on both firewall engines, and
+  reported the 24h block to the API. It now keeps the longer block, and
+  reports and notifies only a block it actually added or extended.
 - **The flood protections (SYN/PPS/new-connection rate, connlimit, portflood,
   bad TCP flags) could stop applying to TCP/UDP when ICMP rate limiting is on
   (`ICMP_RATE_LIMIT`, 20 in the reference config), on both engines.** The
