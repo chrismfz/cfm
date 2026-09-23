@@ -8,8 +8,9 @@ relevant output and stop (don't keep going past a hard failure).
 1. `go vet ./...`
 2. `go build ./...`
 3. `./scripts/tests/check_test_isolation.sh arm` (records CFM's system dirs —
-   `/var/lib/cfm`, `/run/cfm`, `/etc/cfm`, `/var/log/cfm` — creating any it can;
-   fails with the one-time `sudo install -d …` if they aren't writable by you)
+   `/var/lib/cfm`, `/run/cfm`, `/etc/cfm`, `/var/log/cfm`; fails with the
+   one-time `sudo install -d …` if they don't exist or aren't writable by you.
+   CI also seeds them like a packaged node first — `ci_seed_cfm_dirs.sh`, CI-only)
 4. `go test -race ./...`
 5. `./scripts/tests/check_test_isolation.sh verify` (fails if the Go tests wrote
    any of them; on a CFM node the running daemon's writes show up too)

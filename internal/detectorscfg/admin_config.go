@@ -81,16 +81,32 @@ type AdminConfigBackup struct {
 	Created time.Time `json:"created"`
 }
 
+// systemConfigPath is the live detectors.conf, which resolveDetectorsConfigPath
+// prefers over cfgDir whenever it exists. A var so tests can point it
+// elsewhere: it is a package conffile, present on every node, so a test that
+// passed its own cfgDir read the live file instead — and a test that saves
+// wrote over it (the daemon reloads it within seconds).
+var systemConfigPath = "/etc/cfm/detectors.conf"
+
+// SetSystemConfigPathForTest points the live-config path at path and returns
+// a func that restores it. For a test binary's TestMain, before any test runs;
+// not safe to call while tests run in parallel.
+func SetSystemConfigPathForTest(path string) (restore func()) {
+	prev := systemConfigPath
+	systemConfigPath = path
+	return func() { systemConfigPath = prev }
+}
+
 func resolveDetectorsConfigPath(cfgDir string) (string, bool) {
-	if fileExists("/etc/cfm/detectors.conf") {
-		return "/etc/cfm/detectors.conf", true
+	if fileExists(systemConfigPath) {
+		return systemConfigPath, true
 	}
 	if cfgDir != "" {
 		p := filepath.Join(cfgDir, "detectors.conf")
 		_, err := os.Stat(p)
 		return p, err == nil
 	}
-	return "/etc/cfm/detectors.conf", false
+	return systemConfigPath, false
 }
 
 func LoadAdminConfig(cfgDir string) (AdminConfig, string, error) {

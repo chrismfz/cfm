@@ -112,6 +112,21 @@ type AdminDetectorMutation struct {
 	DeleteChannels    bool      `json:"delete_channels,omitempty"`
 }
 
+// systemConfigPath is the live notify.conf resolveConfigPath falls back to. A
+// var so tests can point it elsewhere: it is a package conffile, present on
+// every node, so a test whose own cfgDir held no notify.conf fell through to it
+// and SAVED over the operator's live notifier config (plus backups and a lock).
+var systemConfigPath = "/etc/cfm/notify.conf"
+
+// SetSystemConfigPathForTest points the live-config fallback at path and
+// returns a func that restores it. For a test binary's TestMain, before any
+// test runs; not safe to call while tests run in parallel.
+func SetSystemConfigPathForTest(path string) (restore func()) {
+	prev := systemConfigPath
+	systemConfigPath = path
+	return func() { systemConfigPath = prev }
+}
+
 func resolveConfigPath(cfgDir string) (path string, exists bool) {
 	if cfgDir != "" {
 		path = filepath.Join(cfgDir, "notify.conf")
@@ -119,13 +134,13 @@ func resolveConfigPath(cfgDir string) (path string, exists bool) {
 			return path, true
 		}
 	}
-	if fileExists("/etc/cfm/notify.conf") {
-		return "/etc/cfm/notify.conf", true
+	if fileExists(systemConfigPath) {
+		return systemConfigPath, true
 	}
 	if cfgDir != "" {
 		return filepath.Join(cfgDir, "notify.conf"), false
 	}
-	return "/etc/cfm/notify.conf", false
+	return systemConfigPath, false
 }
 
 func LoadAdminConfig(cfgDir string) (AdminConfig, string, error) {

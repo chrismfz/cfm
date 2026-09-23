@@ -83,9 +83,12 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
-- **Running CFM's Go test suite no longer overwrites a host's live CFM state.**
+- **Running CFM's Go test suite no longer writes a host's live CFM files.**
   Run as root (on a CFM node, a build host or an agent container), the tests
-  wrote the real files under `/var/lib/cfm`:
+  wrote real files under `/var/lib/cfm` and `/etc/cfm`:
+  - the notifier tests saved over the live `/etc/cfm/notify.conf`, dropping
+    its channels, and left `notify.conf.bak-*` files and a
+    `notify.conf.lock`;
   - they replaced the manual vhost challenges and HTTP/3 overrides;
   - they added a WAF exclude for `mysite.com`;
   - they appended a test event to the notifier history;
@@ -96,12 +99,13 @@ back-filled here — see the git/PR history for that period.
     wrong arguments.
 
   If you ran the suite as root on a CFM host, check those files. The tests
-  now use temporary directories, and a new CI guard
-  (`scripts/tests/check_test_isolation.sh`, in `/preflight` too) fails the
-  run if the tests write anything under `/var/lib/cfm`, `/run/cfm`,
-  `/etc/cfm` or `/var/log/cfm`. On a node where the CFM daemon is running,
-  its own writes to those directories trip the guard too, so run the
-  preflight elsewhere.
+  now use temporary paths. A new guard (`scripts/tests/check_test_isolation.sh`,
+  in `/preflight` too) fails the run if the tests write anything under
+  `/var/lib/cfm`, `/run/cfm`, `/etc/cfm` or `/var/log/cfm`. In CI those
+  directories are first seeded like a packaged node, so a test that
+  rewrites an existing config file is caught as well. On a node where the
+  CFM daemon is running, its own writes to those directories trip the guard
+  too, so run the preflight elsewhere.
 - **Unblocks no longer run `EnsureBase`, which made them take minutes and,
   on nftlib, skip the imunify/fail2ban cleanup.** Every unblock rebuilt the
   base ruleset (`EnsureBase`), which an unblock never needs: twice per IP from
