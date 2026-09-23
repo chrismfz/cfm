@@ -20,7 +20,9 @@ import (
 // the safe way to merge blocks from another source: a 6h block arriving for an
 // address this node already blocks permanently (e.g. from cfm.deny) must not
 // quietly turn the permanent block into a 6h one. AddBlock, by contrast,
-// replaces whatever is there.
+// replaces whatever is there. AddAllowBatch does the same for the allow sets
+// (an unblock's feed-override allow must not shorten an operator's permanent
+// allow, which AddAllow would).
 //
 // RemoveBlockBatch is the unblock side: it reads each block set once and
 // deletes, in one transaction, just the addresses the set holds. Deleting one

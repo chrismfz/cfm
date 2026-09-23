@@ -154,6 +154,31 @@ func imunifyListLen(raw []byte) int {
 	return len(arr)
 }
 
+// ImunifyEntry is one entry of imunify360's local IP list.
+type ImunifyEntry struct {
+	IP      string // as listed; may carry "/len"
+	Netmask int    // 0 when not given
+	Purpose string // lowercased: white, drop, captcha, splashscreen, …
+}
+
+// ImunifyLocalList reads imunify360's local IP list once, up to
+// imunifyListCap entries; capped reports a list that reached the cap, which
+// may be missing entries.
+func ImunifyLocalList(ctx context.Context) (entries []ImunifyEntry, capped bool, err error) {
+	out, err := runOut(ctx, "imunify360-agent", "ip-list", "local", "list", "--limit", strconv.Itoa(imunifyListCap), "--json")
+	if err != nil {
+		return nil, false, fmt.Errorf("%v: %s", err, trimOut(out))
+	}
+	items := parseImunifyList(out)
+	if items == nil {
+		return nil, false, fmt.Errorf("unreadable output: %s", trimOut(out))
+	}
+	for _, it := range items {
+		entries = append(entries, ImunifyEntry{IP: it.IP, Netmask: it.Netmask, Purpose: it.Purpose})
+	}
+	return entries, imunifyListLen(out) >= imunifyListCap, nil
+}
+
 // imunifyItem is the part of an ip-list entry we care about, after
 // key normalization.
 type imunifyItem struct {

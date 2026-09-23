@@ -111,6 +111,11 @@ func looksLikeAddr(s string) bool {
 
 // ------------------------------------------------------------------- csf
 
+// csfInstalled reports whether csf itself is on this host. Its list files
+// outlive an uninstall (/etc/csf stays behind), and a leftover csf.deny is
+// not something anything enforces.
+var csfInstalled = func() bool { return binaryExists("csf") }
+
 // searchCSF probes csf's static and temp list files. Returns
 // (locations, "") on success or (nil, why) when csf isn't present.
 func searchCSF(opts Options, qs []*query) ([][]Location, string) {
@@ -122,7 +127,7 @@ func searchCSF(opts Options, qs []*query) ([][]Location, string) {
 	if data == "" {
 		data = "/var/lib/csf"
 	}
-	if _, err := os.Stat(etc); err != nil {
+	if _, err := os.Stat(etc); err != nil || !csfInstalled() {
 		return nil, "not installed"
 	}
 

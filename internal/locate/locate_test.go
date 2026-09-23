@@ -125,7 +125,16 @@ func TestScanCSFTempFile(t *testing.T) {
 	}
 }
 
+// withCSF makes csf look installed (or not) for the test.
+func withCSF(t *testing.T, installed bool) {
+	t.Helper()
+	orig := csfInstalled
+	csfInstalled = func() bool { return installed }
+	t.Cleanup(func() { csfInstalled = orig })
+}
+
 func TestSearchCSFFromDirs(t *testing.T) {
+	withCSF(t, true)
 	etc := t.TempDir()
 	data := t.TempDir()
 	if err := os.WriteFile(filepath.Join(etc, "csf.deny"), []byte("1.2.3.0/24 # bad net\n"), 0o600); err != nil {
@@ -148,6 +157,13 @@ func TestSearchCSFFromDirs(t *testing.T) {
 	// missing dir = not installed
 	if _, why := searchCSF(Options{CSFDir: filepath.Join(etc, "nope")}, []*query{q}); why != "not installed" {
 		t.Errorf("want 'not installed', got %q", why)
+	}
+
+	// Files left behind by an uninstall enforce nothing: no csf binary, no
+	// csf source, whatever /etc/csf still holds.
+	withCSF(t, false)
+	if all, why := searchCSF(Options{CSFDir: etc, CSFDataDir: data}, []*query{q}); why != "not installed" || all != nil {
+		t.Errorf("leftover csf files: locs %+v, why %q; want 'not installed'", all, why)
 	}
 }
 

@@ -172,6 +172,32 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **A mass unblock no longer runs fail2ban and imunify360 once per IP.** A
+  batch of pending unblocks from cfm-web now checks for csf, fail2ban and
+  imunify360 once, reads fail2ban's ban list and imunify's local list once, and
+  touches only the IPs they actually hold, many per run: one
+  `fail2ban-client unban` for the banned IPs, one `imunify360-agent ip-list
+  local delete` per list for the listed ones (IPs past a full 10 000-entry
+  list are still deleted blindly, as before). `cfm.deny` is rewritten once, the
+  feed sets are read once, the feed-origin IPs are allowed in one batch, and
+  the block sets are written in one batch. It used to run every step per IP —
+  up to three `imunify360-agent` runs (about a second each) and a
+  `fail2ban-client` run per IP on the nodes that have them, plus up to four
+  `systemctl` checks per IP just to find imunify missing. The imunify360 white
+  "grace" entry (1h, stops imunify re-greylisting a customer just unblocked)
+  still goes to every IP of a batch of up to 20; a larger batch — a mass
+  unblock — adds it only for the IPs imunify itself was blocking, since each
+  add is one `imunify360-agent` run.
+- **Unblocking an IP a feed blocks no longer shortens a permanent allow.** The
+  unblock allows a feed-blocked IP for 4h so the feed doesn't block it again
+  before its next pull; that allow replaced any allow already there, so an
+  operator's permanent allow for the IP became a 4h one. It now only adds or
+  extends an allow, on both firewall engines.
+- **`cfm which`, `/search` and the unblock report no longer read csf's
+  leftover files.** csf is uninstalled across the fleet, but `/etc/csf` is
+  still there on most nodes, and its `csf.deny` / `csf.allow` were reported as
+  live findings. The csf source is now read only when the `csf` binary is
+  installed.
 - **Site Cache refuses an auth cookie name the edge could never match** —
   one starting with `[` (PHP reads it as a nameless array) or a bare
   `__Host-` / `__Secure-` prefix — instead of storing a rule that never fires.

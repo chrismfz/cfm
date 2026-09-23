@@ -44,6 +44,17 @@ const blockBatchAttempts = 3
 // bulk-blocking) can exhaust the attempts; the call then fails cleanly, having
 // never shortened a block, and the caller can simply retry.
 func (b *Backend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
+	return b.hostBatch("block", setV4, setV6, entries)
+}
+
+// AddAllowBatch is AddBlockBatch for the allow sets: it only adds or extends
+// an allow, never shortens one — a permanent allow stays permanent.
+func (b *Backend) AddAllowBatch(entries []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
+	return b.hostBatch("allow", allowV4, allowV6, entries)
+}
+
+// hostBatch writes entries to the host sets set4/set6 (see AddBlockBatch).
+func (b *Backend) hostBatch(kind, set4, set6 string, entries []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
 	v4, v6, skipped := firewall.SplitBlockEntries(entries)
 	res := firewall.BlockBatchResult{Skipped: skipped}
 	if len(v4)+len(v6) == 0 {
@@ -51,7 +62,7 @@ func (b *Backend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBa
 	}
 	var lastErr error
 	for attempt := 0; attempt < blockBatchAttempts; attempt++ {
-		script, planned, err := b.blockBatchScript(v4, v6)
+		script, planned, err := b.hostBatchScript(set4, set6, v4, v6)
 		if err != nil {
 			return res, err
 		}
@@ -64,7 +75,7 @@ func (b *Backend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBa
 		}
 		lastErr = &nftBatchError{msg: nftFirstError(r.Stdout+r.Stderr, err), err: err}
 	}
-	return res, fmt.Errorf("nft block batch (%d v4, %d v6), %d attempts: %w", len(v4), len(v6), blockBatchAttempts, lastErr)
+	return res, fmt.Errorf("nft %s batch (%d v4, %d v6), %d attempts: %w", kind, len(v4), len(v6), blockBatchAttempts, lastErr)
 }
 
 // nftBatchError carries nft's own error line as its message and the command
@@ -128,15 +139,15 @@ func nftErrorSpan(prefix, stmt string) string {
 	return strings.TrimSpace(stmt[c1-1 : c2])
 }
 
-// blockBatchScript reads the block sets and renders the one-transaction
-// script that brings them to the plan. An empty script means nothing to write.
-func (b *Backend) blockBatchScript(v4, v6 []firewall.BlockEntry) (string, firewall.BlockBatchResult, error) {
+// hostBatchScript reads the host sets and renders the one-transaction script
+// that brings them to the plan. An empty script means nothing to write.
+func (b *Backend) hostBatchScript(set4, set6 string, v4, v6 []firewall.BlockEntry) (string, firewall.BlockBatchResult, error) {
 	var sb strings.Builder
 	var res firewall.BlockBatchResult
 	for _, fam := range []struct {
 		set  string
 		want []firewall.BlockEntry
-	}{{setV4, v4}, {setV6, v6}} {
+	}{{set4, v4}, {set6, v6}} {
 		if len(fam.want) == 0 {
 			continue
 		}
