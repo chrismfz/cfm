@@ -608,6 +608,77 @@ the ONE roadmap/decision log; the other docs' phase checklists are frozen). Desi
 hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`
 (central). See also `docs/challenge-score.md`, `docs/roadmaps/challenge-engine.md` §8.1.
 
+### Site Cache (per-vhost edge caching) — bypass-by-default, the rails are absolute
+Built Sep 2026 (`docs/site-cache-design.md` = design + as-built,
+`docs/site-cache-runbook.md` = operating it). CFM once shipped a GLOBAL cache
+and it broke redirects, SSO, webmail and cPanel — every rule here exists
+because of that. Hard-won points:
+- **Bypass-by-default, pinned by `check_site_cache_config.sh`.** The confs
+  pre-set `$cfm_cache_skip "1"`; only `cfm_cache.lua` (`static_gate` /
+  `micro_gate`) flips it. Keep the guard strict and mutation-test any change
+  to it (its header lists what it pins). nginx `set` / `map` / a regex named
+  capture / `set_by_lua*` on a `$http_*` / `$upstream_http_*` / `$cookie_*` /
+  `$arg_*` variable SHADOWS the real value (a `map` for the whole http block),
+  so a stray `map … $http_authorization` would silently turn the
+  credentialed-request rail off — the guard refuses every such writer.
+- **Tier B is an opt-in, dry run by default.** `MICRO_CACHE_ENFORCE = 0` ships;
+  never flip that default. A node turns it on only after the on-box checklist
+  in design §5.7. Micro is entered ONLY at cfm.lua's Step 4 (after WAF,
+  challenge, bridge decisions) — `cfm_micro_entry_structure_test.lua` pins it.
+- **Tier A's static recipe/TTL are labels.** The static locations follow the
+  origin's Cache-Control/Expires with a 1 h fallback; don't document or promise
+  a static TTL the edge doesn't apply. Micro TTL snaps to MICRO_BUCKETS
+  {1,2,5,10,30,60}s; the guard pins the Lua list to the conf zones/locations.
+- **Go↔Lua parity via a generated fixture.** `site_cache_edge_parity_test.go`
+  renders the real feed + `StatsKeyFor` answers into
+  `scripts/tests/fixtures/site_cache_edge_parity.lua`; the Lua test feeds it to
+  the real `cfm_cache.lua`. Regenerate with `-update-edge-parity` and REVIEW
+  the diff — a changed key is a behaviour change, not fixture noise.
+- **The cfm-admin page model is a pinned copy.** `site-cache-model.js`
+  mirrors the daemon's host / TTL / recipe / cookie rules and the edge's
+  bucket snapping. `site-cache-model.test.js` reads the recipe lists and limits
+  from `site_cache.go` and `MICRO_BUCKETS` from `cfm_cache.lua`. The cases in
+  `scripts/tests/fixtures/site_cache_ui_parity.txt` run in the JS test and on
+  the side they mirror:
+  - host / cookie through the daemon's real set path, TTL through
+    `parseCacheTTL` (`site_cache_ui_parity_test.go`);
+  - bucket through `cfm_cache.lua` (`cfm_cache_ui_parity_test.lua`).
+
+  Change a rule, a recipe or a bucket and those tests tell you the page must
+  follow. The page's saves are merge patches carrying only what the operator
+  decided. Never make one resend the whole form: that silently reverts a
+  concurrent cookie-rail change, and a new-policy form over an existing host
+  switched the host's caching off.
+- **`shdict:incr(key, n, init)` loses counters on a crc32 collision**
+  (lua-nginx-module 0.10.26, verified on nginx 1.24; the fleet's OpenResty /
+  Angie builds unchecked): the other key reads nil, or both count wrong, for
+  the dict's life (~13% odds per node at 35 000 counters). `cfm_cache_log.lua`
+  uses `incr` → `add` → `incr` instead. Seven other edge call sites still use
+  the init form (cfm.lua waf_insp, cfm_decision breaker, cfm_fppolicy budget,
+  cfm_pcw, cfm_rules rate counters, cfm_ua_emergency) — a follow-up; don't add
+  new ones.
+- **A shared dict's size change resets it on reload** (a same-size reload keeps
+  it); key counters on a fixed-size digest so capacity is a fixed number of
+  counters (the slab slot doubles past a 52-byte key).
+- **The never-cache rules differ by tier. Don't document them as one list.**
+  Both tiers: Authorization, `Set-Cookie`/private/no-store, non-200,
+  panel/webmail hosts, GET/HEAD only, script paths. Tier A reads no request
+  cookie and looks at the path only for its extension; session cookies,
+  credential headers and admin paths are Tier B only.
+- **`SITE_CACHE = 0` freezes each worker's policy table.** There is no feed
+  poll while it is off, so a purge or policy change reaches a worker only on
+  its first poll after the switch is restored, up to ~60 s later. The incident
+  procedure is: purge, reload the edge WHILE the switch is still 0, then
+  restore it (runbook §8). Reloading after the restore leaves a window: an old
+  worker re-reads the switch within ~10 s and serves the old generation until
+  it next polls.
+- **`detectors.conf` edits apply without a reload.** The manager polls the file.
+  The daemon has no SIGHUP handler, so `systemctl reload cfm` restarts it
+  (systemd `Restart=always`). A config reload builds a new webdetector Engine,
+  which empties the in-memory Site Cache stats view. A reload follows any save
+  (the signature is the file mtime) and the rotation of a tailed detector log
+  (its inode is hashed too).
+
 ---
 
 ## 7. Key docs (pointers, not duplication)
@@ -641,6 +712,7 @@ hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation
 | Endpoint scope inventory | `docs/endpoint_scope_inventory.md` |
 | Traffic Rules UX review & redesign proposal (cfm-admin rules builder / recipes) | `docs/traffic-rules-ux-proposal.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
+| Site Cache (per-vhost edge caching): design + as-built / operating it | `docs/site-cache-design.md` · `docs/site-cache-runbook.md` |
 
 **Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
 `docs/edge-lua-audit-2026-07-08.md` (audit closed) · `docs/waf-analysis-2026-05-08.md` (→ `docs/waf.md`) ·

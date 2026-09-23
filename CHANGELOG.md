@@ -18,6 +18,26 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Site Cache has a cfm-admin page:** Rules & engine → Site cache.
+  - Arm a vhost's static and micro tiers. The micro TTL is picked from the six
+    buckets the edge really uses.
+  - Opt a host out, purge a vhost (or, as admin, every vhost), or delete a
+    policy, each confirmed.
+  - Apply a recipe: static assets, a 1 s burst shield, 10–30 s near-static
+    pages, both tiers, or opt-out.
+  - Copy the debug-stamp `curl` for one URL.
+  - Read the hit counts.
+  - Admins see this node's `SITE_CACHE` / `MICRO_CACHE_ENFORCE`, so the micro
+    tier reads "enforced" or "dry run". Where the page cannot tell (a scoped
+    user, a failed read), it says to treat an armed micro tier as live.
+    Turning micro on asks for confirmation unless the node is known to be in
+    a dry run.
+  - A scoped cPanel user manages their own vhosts from the page.
+  - A save sends only the fields the operator changed. A field left untouched
+    never reverts a change someone else made meanwhile (a cookie rail, a
+    strict flag), and a new-policy form never replaces an existing policy.
+  - The page checks what the daemon checks before it sends anything. Shared
+    test cases pin it to the daemon's and the edge's rules.
 - **Site Cache changes are now in `cfm.log`.** Every set / remove / purge /
   purge-all of a Site Cache policy by an authenticated caller — including the
   refused ones (another tenant's vhost, an invalid host or cookie name, a
@@ -47,6 +67,46 @@ back-filled here — see the git/PR history for that period.
   rejects are unchanged.
 
 ### Changed
+- **Site Cache: an operator runbook, and the docs and tool help now say what
+  the settings really do.** New `docs/site-cache-runbook.md`: arming a vhost,
+  checking one URL with the `X-CFM-Cache` debug stamp (with every
+  `microcache=bypass:<reason>`), reading the stats, purge, turning the
+  micro-cache on per node, and the kill switch. `docs/site-cache-design.md`
+  now describes what was built instead of the original proposal. The README
+  gained a Site Cache section, CLI and API rows. The CLI help and the MCP
+  `site_cache_status` / `site_cache_stats` descriptions now say:
+  - the static tier's recipe and TTL are labels: static assets follow the
+    origin's `Cache-Control` / `Expires`, with a 1 h fallback;
+  - the micro TTL snaps to 1/2/5/10/30/60 s, empty means 1 s, and a recipe
+    name does not set it;
+  - what BYPASS counts: mostly static assets of an armed vhost whose static
+    tier is off. Micro-cache declines are not counted at all; the debug stamp
+    shows them;
+  - the `SITE_CACHE` / `MICRO_CACHE_ENFORCE` state is not in their output
+    (the `detectors_config` tool has it).
+
+  Things the docs used to get wrong, now stated:
+  - **The static tier reads no request cookie and no path.** A `.css` under
+    `/wp-admin/` fetched with a login cookie is cached like any other asset.
+    The session-cookie and admin-path rules are micro-tier only. The README
+    and the runbook now list the never-cache rules per tier.
+  - **After pulling `SITE_CACHE` for an incident:** purge, reload the edge
+    proxy while the switch is still `0`, and only then set it back to `1`.
+    While the switch is `0` the workers do not read the policy feed.
+    Restored without the reload, or before it, each worker serves the
+    pre-purge objects again until its next poll, up to ~60 s.
+  - **`detectors.conf` edits apply by themselves** in about 15 s. Don't
+    `systemctl reload cfm` for them: that restarts the daemon. Any save of
+    `detectors.conf` also empties the stats view until the next push.
+
+  The release checklist's Lua load smoke test could never pass under plain
+  `luajit` (no `ngx`, no `cjson`). It now runs with OpenResty's `resty`, and
+  leaves out `cfm_panel`, which is a request script, not a module.
+
+  A node installed before the per-bucket micro zones may still have
+  `/var/cache/nginx/cfm_micro`, and an older Angie install
+  `/var/cache/angie/cfm_static` and `cfm_micro`. Nothing uses or creates them
+  any more, so they are safe to delete (runbook §10).
 - **Site Cache micro-cache (Tier B) is ready to be turned on, one node at a
   time.** `MICRO_CACHE_ENFORCE` still defaults to `0`; before setting it to
   `1` on a node, run the on-box checklist in `docs/site-cache-design.md` §5.7.

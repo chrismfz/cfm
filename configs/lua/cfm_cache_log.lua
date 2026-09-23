@@ -1,8 +1,10 @@
 -- /var/lib/cfm/lua/cfm_cache_log.lua (CFM-managed canonical location)
 --
--- Lightweight cache status counters for dashboard use.
--- Intended for log_by_lua_block only.
--- No external I/O.
+-- Site Cache status counters: node-wide zone totals (cfm_stats.lua exposes them
+-- in the /cfm-admin/lua-stats JSON) and per-armed-vhost counters (read by the
+-- cfm_cache.lua stats push to the daemon). Written from the http-level
+-- log_by_lua only. No external I/O. (log_throttle keeps the meta-throttle
+-- counters of the same dict; the shipped confs do not call it.)
 
 local _M = {}
 

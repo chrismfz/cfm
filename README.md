@@ -82,6 +82,7 @@ for the trade-offs and how to choose.
    - [OpenResty vs Angie — choosing a backend](#openresty-vs-angie--choosing-a-backend)
    - [Smart Lua WAF Layer](#smart-lua-waf-layer)
    - [Advanced Challenge Rules](#advanced-challenge-rules)
+   - [Site Cache (per-vhost edge caching)](#site-cache-per-vhost-edge-caching)
    - [Full WAF rule pipeline → §9](#9-web-application-firewall-waf)
 9. [Web Application Firewall (WAF)](#9-web-application-firewall-waf)
     - [What it catches](#what-it-catches)
@@ -966,7 +967,7 @@ The shipped `openresty.conf` / `angie.conf` Lua block ties the request path into
 - IP block-set lookup (cfm nft sets)
 - Challenge cookie validation
 - Real-time cfm decision socket query
-- Optional cache via `shared_dict`
+- Decision cache via `shared_dict` (the bridge verdicts — not the Site Cache below)
 - Per-request WAF dispatch (66 detectors, severity aggregation, per-vhost exclusions)
 
 The shared self-IP snapshot (`/var/lib/cfm/lua/cfm_self_ips.lua` — atomic `.tmp` + rename) keeps nft and Lua aligned on what counts as "self traffic", so step 0a local-origin bypass behaves identically across layers. `cfm.lua` also consumes `[global] IGNORE_IPS / IGNORE_NETS` via `/var/lib/cfm/lua/cfm_ignore_nets.lua`, so an operator's "ignore my own subnet" config applies to the WAF too — not just the post-fact challenge engine.
@@ -976,6 +977,47 @@ The shared self-IP snapshot (`/var/lib/cfm/lua/cfm_self_ips.lua` — atomic `.tm
 ### Advanced Challenge Rules
 
 The `webdetector_challenge_rules.conf` system supports per-IP, per-vhost, per-UA, and per-ASN matching with TTL-based actions (`challenge`, `block`, `allow`). Rules are evaluated in priority order and can reference enrichment data (ASN, PTR, country).
+
+### Site Cache (per-vhost edge caching)
+
+The edge can cache per vhost, **off for every vhost until one is armed**
+(bypass-by-default; a global cache once broke redirects, SSO, webmail and
+cPanel, so every rail is absolute):
+
+- **Tier A — static assets** (css/js/map, fonts, png/jpg/gif/webp/ico), on
+  :9080 and :9043: the origin's `Cache-Control` / `Expires` decide the TTL,
+  1 h fallback.
+- **Tier B — micro-cache of anonymous pages** (1–60 s buckets): any anonymous
+  GET/HEAD through the HTTPS `location /`, HTML or not, after the WAF /
+  challenge / bridge decisions (cfm.lua Step 4). A **dry run** until the node
+  sets `MICRO_CACHE_ENFORCE = 1` — do that only after the on-box checklist in
+  [`docs/site-cache-design.md`](docs/site-cache-design.md) §5.7.
+
+Never cached, whatever a policy says (design §4):
+- **Both tiers:**
+  - requests with `Authorization`;
+  - `Set-Cookie` / private / no-store responses;
+  - non-200s;
+  - panel and webmail hosts;
+  - methods other than GET/HEAD;
+  - script paths.
+- **Tier B only:**
+  - session-cookie and credential-header requests;
+  - partial-page requests;
+  - admin and transfer paths.
+
+Tier A reads no request cookie, and looks at the path only for its extension.
+It relies on the origin's response headers for anything per-user.
+
+`[webdetector]` knobs: `SITE_CACHE = 1` (node kill switch, not an opt-in),
+`MICRO_CACHE_ENFORCE = 0` (the Tier B opt-in), `SITE_CACHE_STORE_PATH`.
+Manage with the cfm-admin **Site cache** page (Rules & engine: policies,
+recipes, the debug-stamp command, hit counts), `cfm webtop site-cache …` (§14)
+or `/api/v1/site-cache/*` (§15); a scoped cPanel token manages its own vhosts
+through the page or the API. Read with the MCP tools
+`site_cache_status` / `site_cache_stats`. Operating it — verifying a URL with
+the `X-CFM-Cache` debug stamp, the stats, purge, turning Tier B on, incidents:
+[`docs/site-cache-runbook.md`](docs/site-cache-runbook.md).
 
 ---
 
@@ -1591,6 +1633,16 @@ cfm webtop rules add --file docs/examples/traffic-rule-throttle-meta.json
 cfm webtop rules update <rule-id> --file docs/examples/traffic-rule-challenge-login.json
 cfm webtop rules remove <rule-id>
 cfm webtop rules simulate --host example.com --ua "facebookexternalhit/1.1" --path / --method GET --country US
+
+# Site Cache (per-vhost edge caching — docs/site-cache-runbook.md)
+cfm webtop site-cache list
+cfm webtop site-cache get <vhost>
+cfm webtop site-cache set <vhost> --static static_lean                  # Tier A
+cfm webtop site-cache set <vhost> --micro micro_safe --micro-ttl 5s     # Tier B (dry run until MICRO_CACHE_ENFORCE = 1)
+cfm webtop site-cache off <vhost>        # opt-out (also under an armed *.suffix)
+cfm webtop site-cache remove <vhost>     # delete the policy
+cfm webtop site-cache purge <vhost>      # or: purge --all (admin)
+cfm webtop site-cache stats [vhost]      # HIT / MISS / BYPASS + strict hit ratio
 ```
 
 The `--last` / `-last` duration uses Go-style duration strings, such as `30m`, `1h`, or `2h30m`.
@@ -1772,6 +1824,12 @@ The Web Detector exposes a local API used by the CLI and integrations (`API_LIST
 | `POST /api/v1/webdet/rules/update?id=<id>` | Update traffic rule (JSON body) |
 | `POST /api/v1/webdet/rules/remove?id=<id>` | Remove traffic rule |
 | `POST /api/v1/webdet/rules/simulate` | Simulate matching for a request shape |
+| `GET /api/v1/site-cache/list` | Site Cache policies (scope-filtered) + `unloadable` hosts |
+| `GET /api/v1/site-cache/get?host=<vhost>` | One vhost's Site Cache policy |
+| `POST /api/v1/site-cache/set` | Merge-upsert a policy (JSON body; both tiers off = opt-out) |
+| `POST /api/v1/site-cache/remove?host=<vhost>` | Delete a vhost's policy |
+| `POST /api/v1/site-cache/purge?host=<vhost>` \| `?all=1` | Purge (new generation); `all` is admin-only |
+| `GET /api/v1/site-cache/stats[?host=<vhost>]` | Per-vhost cache verdict counts + strict hit ratio |
 
 
 ### Traffic Rules JSON examples

@@ -895,6 +895,11 @@ code {
   background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; font-size: .86rem;
 }
 tr.row-off td { opacity: .62; }
+/* Site Cache page */
+.sc-table .pill { white-space: nowrap; }
+.sc-host .pill { margin-left: .35rem; }
+.sc-curl { white-space: pre-wrap; word-break: break-all; }
+.sc-unloadable { display: inline-flex; align-items: center; gap: .3rem; margin: .3rem .6rem 0 0; }
 tr.row-editing td { background: var(--accent-soft); }
 .toggle-on { color: var(--ok); border-color: var(--ok); }
 .toggle-off { color: var(--warn); border-color: var(--warn); }

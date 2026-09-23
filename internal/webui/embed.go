@@ -12,6 +12,7 @@
 //   /webdetector/controls/   → static/webdetector/controls/index.html
 //   /webdetector/rules/      → static/webdetector/rules/index.html
 //   /webdetector/challenge-access/ → static/webdetector/challenge-access/index.html
+//   /webdetector/site-cache/ → static/webdetector/site-cache/index.html
 //   /governor/               → static/governor/index.html
 //   /mail/                   → static/mail/index.html
 //   /mailmon/                → static/mailmon/index.html

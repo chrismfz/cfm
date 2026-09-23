@@ -53,14 +53,14 @@ func webdetectorBridgeConfig(global, wdKV map[string]string) sslcollector.Webdet
 		// but a pure KILL SWITCH — not a second opt-in: the per-vhost
 		// policy store (default empty) is the only thing that arms a
 		// vhost, so nothing caches until an operator arms one, master on
-		// or not. SITE_CACHE=0 is the panic button: cfm_cache.lua becomes
-		// a full no-op on the hot path (no feed poll, no lookup, no
-		// header) fleet-wide in ~10s, without disarming any vhost, so
-		// re-arming is instant.
+		// or not. SITE_CACHE=0 is the panic button: this node's edge stops
+		// caching (no feed poll, no cache gate, no stamp, no stats push)
+		// ~10s after this is written (~15s from saving detectors.conf),
+		// without disarming any vhost, so re-arming is instant.
 		SiteCache: kvBool(wdKV, "SITE_CACHE", true),
-		// Tier B micro-cache ENFORCE gate (HTML micro-caching). Default
-		// OFF — an explicit opt-in, NOT a second kill switch: an upgrade
-		// must never start caching HTML on its own, even for a vhost whose
+		// Tier B micro-cache ENFORCE gate (anonymous-page micro-caching).
+		// Default OFF — an explicit opt-in, NOT a second kill switch: an
+		// upgrade must never start caching pages on its own, even for a vhost whose
 		// micro tier is armed (CLAUDE.md §6 "adding X silently arms it").
 		// While off, cfm.lua's micro gate stays in DRY-RUN (verdict on the
 		// observe header, no ngx.exec, nothing stored); the operator sets

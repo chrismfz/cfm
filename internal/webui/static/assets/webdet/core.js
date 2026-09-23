@@ -84,6 +84,7 @@ export function createWebdetApp(config) {
       isControlsPage() { return this.pageMode === "controls"; },
       isRulesPage() { return this.pageMode === "rules"; },
       isChallengeAccessPage() { return this.pageMode === "challenge-access"; },
+      isSiteCachePage() { return this.pageMode === "site-cache"; },
       isTokensPage() { return this.pageMode === "tokens"; },
       lastRefreshLabel() {
         if (!this.lastRefreshAt) return "";
@@ -96,6 +97,7 @@ export function createWebdetApp(config) {
         if (this.isControlsPage) return "WebDetector / vhost controls";
         if (this.isRulesPage) return "WebDetector / traffic rules";
         if (this.isChallengeAccessPage) return "WebDetector / challenge access";
+        if (this.isSiteCachePage) return "WebDetector / site cache";
         if (this.isTokensPage) return "System / API tokens";
         return "WebDetector / overview";
       },
@@ -283,7 +285,7 @@ export function createWebdetApp(config) {
       isScopedSelfServiceWrite(path) {
         if (!this.isScoped) return false;
         const p = String(path);
-        const vhostSelfService = ["v1/challenge/vhost/", "v1/http3/", "v1/webdet/rules/"];
+        const vhostSelfService = ["v1/challenge/vhost/", "v1/http3/", "v1/webdet/rules/", "v1/site-cache/"];
         if (vhostSelfService.some((prefix) => p.startsWith(prefix))) return true;
         const excludeSelfService = ["v1/challenge/exclude/", "v1/challenge/access/", "v1/waf/exclude/"];
         if (this.scopedExcludeManagementAllowed && excludeSelfService.some((prefix) => p.startsWith(prefix))) return true;
@@ -291,7 +293,7 @@ export function createWebdetApp(config) {
       },
       async postJSON(path, body) {
         if (!this.canWrite) {
-          const writePrefixes = ["v1/challenge/", "v1/waf/", "v1/http3/", "v1/firewall/", "v1/webdet/rules/", "v1/tokens/revoke", "v1/auth/token", "v1/webdet/history/prune", "v1/webdet/history/truncate"];
+          const writePrefixes = ["v1/challenge/", "v1/waf/", "v1/http3/", "v1/firewall/", "v1/webdet/rules/", "v1/site-cache/", "v1/tokens/revoke", "v1/auth/token", "v1/webdet/history/prune", "v1/webdet/history/truncate"];
           if (writePrefixes.some((prefix) => String(path).startsWith(prefix)) && !this.isScopedSelfServiceWrite(path)) {
             throw new Error("read-only scoped viewer token");
           }
@@ -494,7 +496,7 @@ export function createWebdetApp(config) {
         "refreshIntervalSec", "topShortLimit", "longTopLimit", "ipShortLimit",
         "hotIPsLimit", "wafHours", "wafEventLimit", "wafTopN",
         "vhostControlsLimit", "vhostTopIPLimit", "vhostTopPathLimit",
-        "challengeTTL", "blockTTL", "historyType",
+        "challengeTTL", "blockTTL", "historyType", "scSortKey", "scSortDir",
       ];
       const prefsKey = `cfm-prefs:${pageMode}`;
       try {

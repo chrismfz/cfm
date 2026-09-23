@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM — Site Cache</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2032%2032%27%3E%3Crect%20width=%2732%27%20height=%2732%27%20rx=%277%27%20fill=%27%23141b2d%27/%3E%3Cpath%20d=%27M16%206l8.7%205v10L16%2026l-8.7-5V11z%27%20fill=%27none%27%20stroke=%27%234da3ff%27%20stroke-width=%272.4%27/%3E%3C/svg%3E" />
+  <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
+  <script src="/cfm-admin/assets/vendor/vue-3.5.13.global.prod.js" defer></script>
+  <script type="module">
+    import "../../assets/webdet/pages/site-cache.js";
+  </script>
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar" data-shared-nav></aside>
+<div class="main">
+<div id="app" v-cloak>
+    <div data-wd-section="topbar"></div>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>Site Cache</h2>
+        <p class="muted">
+          Per-vhost edge caching. It is <strong>off for every vhost until a policy arms it</strong>, and
+          every rule below holds whatever a policy says. The operator guide is
+          <code>docs/site-cache-runbook.md</code>.
+        </p>
+        <div class="callout-row">
+          <div class="callout">
+            <strong>Static tier (A).</strong> css, js, fonts and images, on HTTP and HTTPS, kept as
+            long as the origin's <code>Cache-Control</code> / <code>Expires</code> say (1 h when it
+            sends none). It reads no request cookie: anything per-user must be marked
+            <code>private</code> by the origin.
+          </div>
+          <div class="callout" :class="{ warn: scMicroMode !== 'enforced' }">
+            <strong>Micro tier (B).</strong> Anonymous GET/HEAD over HTTPS, for 1–60 s.
+            <template v-if="scMicroMode === 'enforced'">This node: <strong>enforced</strong>
+              (<code>MICRO_CACHE_ENFORCE = 1</code>): an armed vhost's anonymous pages are served from cache.</template>
+            <template v-else-if="scMicroMode === 'dryrun'">This node: <strong>dry run</strong>
+              (<code>MICRO_CACHE_ENFORCE = 0</code><span v-if="scSwitches.defaulted">, the default: no <code>[webdetector]</code> section</span>): nothing is stored, the debug stamp only reports what would be.</template>
+            <template v-else-if="isScoped">Whether this node enforces it (<code>MICRO_CACHE_ENFORCE</code>, set by
+              the server operator) is not shown here: <strong>treat an armed micro tier as live</strong>. In a dry
+              run the debug stamp only reports what would be cached.</template>
+            <template v-else>This node's <code>MICRO_CACHE_ENFORCE</code> could not be read:
+              <strong>treat an armed micro tier as live</strong>.</template>
+          </div>
+          <div class="callout">
+            <strong>Never cached, on either tier:</strong> a request with <code>Authorization</code>,
+            a response with <code>Set-Cookie</code> / <code>private</code> / <code>no-store</code>,
+            a non-200, panel and webmail hosts. The micro tier also skips session cookies,
+            credential headers, partial-page requests and admin paths.
+          </div>
+        </div>
+        <div class="callout danger compact" v-if="scSwitches && !scSwitches.siteCache">
+          <strong>SITE_CACHE = 0 on this node:</strong> nothing is cached and the edge does not
+          read these policies. They resume as they are when it is set back to 1; after a purge,
+          reload the edge before that (runbook §8).
+        </div>
+      </section>
+
+      <section class="card wide" v-if="shouldShow('site_cache')">
+        <datalist id="cfm-vhost-list"><option v-for="h in knownVhosts" :key="h" :value="h"></option></datalist>
+
+        <div class="toolbar wrap">
+          <button :class="scMode === 'editor' ? '' : 'btn-quiet'" @click="setSCMode('editor')">{{ scEditHost ? 'Edit policy' : 'New policy' }}</button>
+          <button :class="scMode === 'recipes' ? '' : 'btn-quiet'" @click="setSCMode('recipes')">Recipes</button>
+        </div>
+
+        <!-- ── Recipes ─────────────────────────────────────────────────── -->
+        <div v-if="scMode === 'recipes'" class="recipes-pane">
+          <p class="muted">A recipe applies a ready-made policy to one or more vhosts. It changes only the tier it names: a vhost that already caches static assets keeps them.</p>
+          <div class="recipe-grid">
+            <button v-for="r in scRecipes" :key="r.key" class="recipe-card" :class="{ selected: scRecipeKey === r.key }" @click="selectSCRecipe(r.key)">
+              <span class="recipe-title">{{ r.title }}</span>
+              <span class="recipe-desc muted">{{ r.description }}</span>
+            </button>
+          </div>
+
+          <section class="mini-card recipe-detail" v-if="scSelectedRecipe">
+            <h3>{{ scSelectedRecipe.title }}</h3>
+            <p class="muted">{{ scSelectedRecipe.description }}</p>
+            <div class="form-grid">
+              <template v-for="v in scSelectedRecipe.vars" :key="v.key">
+                <label :for="'sc-recipe-var-' + v.key">{{ v.label }}</label>
+                <select v-if="v.type === 'select'" :id="'sc-recipe-var-' + v.key" class="input" v-model="scRecipeVars[v.key]">
+                  <option v-for="o in v.options" :key="o" :value="o">{{ o }}</option>
+                </select>
+                <input v-else :id="'sc-recipe-var-' + v.key" class="input" type="text" v-model.trim="scRecipeVars[v.key]"
+                  :placeholder="v.placeholder || v.default || ''" :list="v.type === 'vhosts' ? 'cfm-vhost-list' : null" />
+              </template>
+            </div>
+            <ul class="msg-list errors" v-if="scRecipeVarErrors.length"><li v-for="e in scRecipeVarErrors" :key="e">{{ e }}</li></ul>
+
+            <div class="table-wrap" v-if="scRecipePreview.length">
+              <table class="mini-table">
+                <thead><tr><th>Vhost</th><th>Sets</th><th>Effect</th></tr></thead>
+                <tbody>
+                  <tr v-for="row in scRecipePreview" :key="row.patch.host">
+                    <td><code>{{ row.patch.host }}</code></td>
+                    <td>{{ scPatchSummary(row.patch) }}</td>
+                    <td class="muted">{{ row.note }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <ul class="msg-list warnings" v-if="scSelectedRecipe.warnings && scSelectedRecipe.warnings.length">
+              <li v-for="w in scSelectedRecipe.warnings" :key="w">{{ w }}</li>
+            </ul>
+            <div class="toolbar">
+              <button :disabled="scBusy || !scRecipePreview.length" @click="createSCRecipe">Apply to {{ scRecipePreview.length }} {{ scRecipePreview.length === 1 ? 'vhost' : 'vhosts' }}</button>
+            </div>
+          </section>
+        </div>
+
+        <div class="exclude-grid" v-if="scMode === 'editor'">
+          <!-- ── Editor ─────────────────────────────────────────────────── -->
+          <section class="mini-card rule-editor">
+            <h3>{{ scEditHost ? 'Edit ' + scEditHost : 'New policy' }}</h3>
+            <div class="form-grid">
+              <label for="sc-host">Vhost</label>
+              <input id="sc-host" class="input" type="text" v-model.trim="scForm.host" :disabled="!!scEditHost" list="cfm-vhost-list" placeholder="shop.example.com or *.example.com" />
+              <p class="muted form-hint">An exact host, or <code>*.example.com</code> for every sub-host (not example.com itself). A host with a policy of its own ignores the wildcard; the most specific wildcard wins.</p>
+            </div>
+
+            <div class="step-title">Static tier (A)</div>
+            <div class="form-grid">
+              <label for="sc-static-on">Cache</label>
+              <label class="form-check"><input id="sc-static-on" type="checkbox" v-model="scForm.staticOn" /><span>static assets (css, js, map, fonts, png/jpg/gif/webp/ico)</span></label>
+              <label for="sc-static-recipe">Recipe</label>
+              <select id="sc-static-recipe" class="input" v-model="scForm.staticRecipe" :disabled="!scForm.staticOn">
+                <option v-for="r in scStaticRecipes" :key="r" :value="r">{{ scRecipeLabel(r) }}</option>
+              </select>
+              <p class="muted form-hint">How long is up to the origin's cache headers (1 h when it sends none). The recipe is a label: both behave the same.</p>
+            </div>
+
+            <div class="step-title">Micro tier (B)</div>
+            <div class="form-grid">
+              <label for="sc-micro-on">Cache</label>
+              <label class="form-check"><input id="sc-micro-on" type="checkbox" v-model="scForm.microOn" /><span>anonymous pages over HTTPS (GET/HEAD through <code>location /</code>)</span></label>
+              <label for="sc-micro-ttl">TTL</label>
+              <select id="sc-micro-ttl" class="input" v-model="scForm.microTTL" :disabled="!scForm.microOn">
+                <option v-for="o in scMicroTTLOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+              <label for="sc-micro-recipe">Recipe</label>
+              <select id="sc-micro-recipe" class="input" v-model="scForm.microRecipe" :disabled="!scForm.microOn">
+                <option v-for="r in scMicroRecipeOptions" :key="r" :value="r">{{ scRecipeLabel(r) }}</option>
+              </select>
+              <label for="sc-auth-cookies">Auth cookies</label>
+              <input id="sc-auth-cookies" class="input" type="text" v-model.trim="scForm.authCookies" :disabled="!scForm.microOn" placeholder="myapp_session, shop_login" />
+              <p class="muted form-hint">This app's session cookies, added to the built-in list (WordPress, WooCommerce, Magento, PrestaShop, Drupal, PHP, Rails, Django, Java, ASP.NET, Node…). A request carrying one is never micro-cached.</p>
+              <label for="sc-strict">Strict</label>
+              <label class="form-check"><input id="sc-strict" type="checkbox" v-model="scForm.strictCookies" :disabled="!scForm.microOn" /><span>skip any request with a cookie that is not on the ignore list (analytics, consent, <code>cfm_*</code>)</span></label>
+            </div>
+
+            <div class="review-box">
+              <div class="rule-sentence">{{ scReviewSentence }}</div>
+              <ul class="msg-list errors" v-if="scShownValidation.errors.length"><li v-for="e in scShownValidation.errors" :key="e">{{ e }}</li></ul>
+              <ul class="msg-list warnings" v-if="scShownValidation.warnings.length"><li v-for="w in scShownValidation.warnings" :key="w">{{ w }}</li></ul>
+              <ul class="msg-list warnings" v-if="scEditStale === 'changed'"><li>This policy changed since you opened it. Saving sends only what you changed here; <a href="#" @click.prevent="reloadSCEdit">reload it</a> to see the new values.</li></ul>
+              <ul class="msg-list errors" v-if="scEditStale === 'gone'"><li>This policy was deleted since you opened it: saving is off, so it is not recreated by accident.</li></ul>
+              <p class="muted" v-if="scEditHost && !scHasChanges && !scEditStale">No changes to save.</p>
+              <p class="muted" v-if="!scEditHost && scLoadError">The policy list did not load: creating a policy waits for it, so an existing one is not replaced.</p>
+              <div class="toolbar" v-if="scExistingForNew">
+                <button class="btn-quiet btn-sm" @click="editSC(scExistingForNew)">Edit the policy of {{ scExistingForNew.host }}</button>
+              </div>
+            </div>
+
+            <div class="toolbar">
+              <button :disabled="!canSaveSC" @click="saveSC">{{ scEditHost ? 'Save changes' : 'Create policy' }}</button>
+              <button class="btn-quiet" @click="resetSCForm">{{ scEditHost ? 'New policy' : 'Clear' }}</button>
+            </div>
+          </section>
+
+          <!-- ── Check one URL ──────────────────────────────────────────── -->
+          <section class="mini-card">
+            <h3>Check one URL</h3>
+            <p class="muted">Run this <strong>on the server itself</strong>. The edge adds an <code>X-CFM-Cache</code> header only for trusted sources (the box, its own IPs, <code>IGNORE_IPS</code> / <code>IGNORE_NETS</code>). Port 443 on the box reaches the origin, not the edge, hence :9043.</p>
+            <div class="form-grid">
+              <label for="sc-check-host">Vhost</label>
+              <input id="sc-check-host" class="input" type="text" v-model.trim="scCheckHost" list="cfm-vhost-list" :placeholder="scForm.host || 'shop.example.com'" />
+              <label for="sc-check-path">Path</label>
+              <input id="sc-check-path" class="input" type="text" v-model.trim="scCheckPath" placeholder="/some/page" />
+            </div>
+            <template v-if="scCheckCurl">
+              <pre class="sc-curl">{{ scCheckCurl }}</pre>
+              <div class="toolbar">
+                <button class="btn-quiet btn-sm" @click="copySCCurl">{{ scCopied ? 'Copied' : 'Copy' }}</button>
+                <span class="muted">Replace <code>VHOST_IP</code> with the IP the vhost listens on.</span>
+              </div>
+            </template>
+            <p class="muted" v-else>Enter a valid vhost to build the command.</p>
+            <ul class="msg-list hints">
+              <li><code>status=HIT</code> (or MISS, EXPIRED, BYPASS…) is nginx's cache verdict for a request that went through a cache location.</li>
+              <li><code>microcache=would/5s</code> means the micro tier would cache this page for 5 s; <code>microcache=bypass:&lt;reason&gt;</code> says why not (<code>auth:&lt;cookie&gt;</code>, <code>path</code>, <code>method</code>…). Both show even in a dry run.</li>
+              <li>A request from the box skips the WAF and challenge, so for a page the stamp shows the would-verdict only; real traffic's verdict is <code>ucache="…"</code> in the edge's <code>access.log</code>.</li>
+              <li>No header at all: <code>SITE_CACHE = 0</code>, an untrusted source, no policy for the host yet (the edge polls about every 60 s), an opt-out no wildcard covers, or the :9080 listener.</li>
+            </ul>
+          </section>
+        </div>
+
+        <p class="statusline" v-if="actionMsg">{{ actionMsg }}</p>
+        <div class="callout danger compact" v-if="scLoadError">{{ scLoadError }}</div>
+        <div class="callout warn compact" v-if="scUnloadable.length">
+          <strong>Stored policies this version cannot read.</strong>
+          <span class="muted">&nbsp;They are treated as opted out (never cached), for example after a downgrade.</span>
+          <span v-for="h in scUnloadable" :key="h" class="sc-unloadable">
+            <code>{{ h }}</code>
+            <button class="btn-quiet btn-sm" v-if="scHostValid(h)" :disabled="scBusy" @click="offUnloadableSC(h)" title="Replace it with an opt-out">Turn off</button>
+            <button class="btn-quiet btn-sm btn-danger" :disabled="scBusy" @click="removeSC(h)">Delete</button>
+          </span>
+        </div>
+
+        <!-- ── List ─────────────────────────────────────────────────────── -->
+        <div class="toolbar wrap">
+          <button class="btn-quiet btn-sm" :class="{ 'btn-nav-active': scQuick === '' }" @click="scQuick = ''">All {{ scCounts.all }}</button>
+          <button class="btn-quiet btn-sm" :class="{ 'btn-nav-active': scQuick === 'static' }" @click="setSCQuick('static')">Static on {{ scCounts.static }}</button>
+          <button class="btn-quiet btn-sm" :class="{ 'btn-nav-active': scQuick === 'micro' }" @click="setSCQuick('micro')">Micro on {{ scCounts.micro }}</button>
+          <button class="btn-quiet btn-sm" :class="{ 'btn-nav-active': scQuick === 'optout' }" @click="setSCQuick('optout')">Opt-out {{ scCounts.optout }}</button>
+          <label for="sc-vhost-filter">Vhost</label>
+          <input id="sc-vhost-filter" class="input input-wide" type="text" v-model.trim="scVhostFilter" list="cfm-vhost-list" placeholder="any vhost" title="Show the policies that apply to this vhost: its own, or a wildcard covering it" />
+          <label for="sc-search">Search</label>
+          <input id="sc-search" class="input input-wide" type="text" v-model.trim="scSearch" placeholder="host / recipe / cookie" />
+          <span class="muted">{{ scFiltered.length }} / {{ scRows.length }} shown</span>
+          <button v-if="isAdmin" class="btn-quiet btn-sm btn-danger" :disabled="scBusy || !scRows.length" @click="purgeAllSC" title="Admin only: purge every vhost's cache on this node">Purge all</button>
+        </div>
+
+        <div class="table-wrap">
+          <table class="sc-table">
+            <thead>
+              <tr>
+                <th><button class="btn-quiet btn-sm" @click="setSCSort('host')">Vhost {{ scSortArrow('host') }}</button></th>
+                <th><button class="btn-quiet btn-sm" @click="setSCSort('tiers')" title="Sort by which tiers are on">Static {{ scSortArrow('tiers') }}</button></th>
+                <th><button class="btn-quiet btn-sm" @click="setSCSort('ttl')" title="Sort by the micro TTL bucket">Micro {{ scSortArrow('ttl') }}</button></th>
+                <th><button class="btn-quiet btn-sm" @click="setSCSort('gen')" title="When the cache last started over (a purge or a re-enable)">Cache since {{ scSortArrow('gen') }}</button></th>
+                <th><button class="btn-quiet btn-sm" @click="setSCSort('updated')">Updated {{ scSortArrow('updated') }}</button></th>
+                <th><button class="btn-quiet btn-sm" @click="setSCSort('hit')" title="Strict hit ratio: HIT ÷ everything but BYPASS">HIT % {{ scSortArrow('hit') }}</button></th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in scFiltered" :key="row.host" :class="{ 'row-off': row.optOut, 'row-editing': scEditHost === row.host }">
+                <td class="sc-host">
+                  <code>{{ row.host }}</code>
+                  <span class="pill info" v-if="row.wildcard" title="Covers every sub-host without a policy of its own">wildcard</span>
+                  <span class="pill" v-if="row.optOut" title="Both tiers off: never cached, even under an armed wildcard">opt-out</span>
+                </td>
+                <td :title="scStaticTitle(row)"><span :class="row.staticOn ? 'pill ok' : 'muted'">{{ scStaticText(row) }}</span></td>
+                <td :title="scMicroTitle(row)">
+                  <span :class="row.microOn ? (scMicroMode === 'dryrun' ? 'pill warn' : 'pill ok') : 'muted'">{{ scMicroText(row) }}</span>
+                  <span class="muted" v-if="row.microOn && scMicroMode === 'dryrun'"> dry run</span>
+                  <span class="muted" v-if="row.microOn && (row.strictCookies || row.authCookies.length)"> · cookies</span>
+                </td>
+                <td :title="scGenTitle(row)">{{ scGenText(row) }}</td>
+                <td :title="scUpdatedTitle(row)">{{ scUpdatedText(row) }}</td>
+                <td :title="scHitTitle(row)">
+                  <span v-if="row.hitPct != null" class="pill" :class="scHitPillClass(row)">{{ row.hitPct }}%</span>
+                  <span v-else class="muted">-</span>
+                </td>
+                <td class="actions-cell">
+                  <button class="btn-quiet btn-sm" @click="editSC(row)">Edit</button>
+                  <button class="btn-quiet btn-sm" @click="checkSC(row.host)" title="Build the debug-stamp command for this vhost">Check</button>
+                  <button class="btn-quiet btn-sm" v-if="!row.optOut" :disabled="scBusy" @click="purgeSC(row.host)" title="Drop this policy's cached objects">Purge</button>
+                  <button class="btn-quiet btn-sm" v-if="!row.optOut" :disabled="scBusy" @click="offSC(row.host)" title="Both tiers off: an opt-out (kept as a policy)">Turn off</button>
+                  <button class="btn-quiet btn-sm btn-danger" :disabled="scBusy" @click="removeSC(row.host)" title="Delete the policy (a covering wildcard applies again)">Delete</button>
+                </td>
+              </tr>
+              <tr v-if="!scFiltered.length"><td colspan="7" class="muted">{{ !scLoaded ? 'Loading…' : (scRows.length ? 'No policy matches the filter.' : (isScoped ? 'You have no policy yet. Create one or pick a recipe above.' : 'No vhost is cached yet. Create a policy or pick a recipe above.')) }}</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="muted">A policy change or a purge reaches each edge worker at its next poll, within about 60 s.</p>
+      </section>
+
+      <section class="card wide" v-if="shouldShow('site_cache')">
+        <h2>Hit counts</h2>
+        <p class="muted">
+          Live counts from the edge, pushed about every 60 s and only for armed vhosts, both tiers in
+          one row. They run since the edge last restarted, and this view is empty until the next push
+          after a daemon restart or any save of <code>detectors.conf</code>. A micro-tier page that is
+          declined, or only evaluated in a dry run, is not counted: use the debug stamp for those.
+          <strong>BYPASS</strong> is a counted request that could not use the cache, usually an asset of
+          a vhost whose static tier is off, or a request with <code>Authorization</code>.
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Vhost</th><th>HIT</th><th>MISS</th><th>EXPIRED</th><th>STALE</th><th>UPDATING</th><th>REVALIDATED</th><th>BYPASS</th><th title="HIT ÷ everything but BYPASS">HIT %</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="s in scStatsRows" :key="s.host">
+                <td><code>{{ s.host }}</code></td>
+                <td>{{ s.hit }}</td>
+                <td>{{ s.miss }}</td>
+                <td>{{ s.expired }}</td>
+                <td>{{ s.stale }}</td>
+                <td>{{ s.updating }}</td>
+                <td>{{ s.revalidated }}</td>
+                <td>{{ s.bypass }}</td>
+                <td>{{ s.cacheable_total > 0 ? s.hit_ratio_pct + '%' : '-' }}</td>
+              </tr>
+              <tr v-if="!scStatsRows.length"><td colspan="9" class="muted">No counts yet. An armed vhost shows up here once it serves traffic through a cache location.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="muted">STALE, UPDATING and REVALIDATED are served from cache too, but count against the strict ratio: read the breakdown, not only the percentage. Near-zero HIT with many MISS / EXPIRED usually means the origin sends <code>private</code>, <code>no-store</code> or <code>Set-Cookie</code>.</p>
+      </section>
+
+    </main>
+</div>
+</div>
+</div>
+</body>
+</html>
