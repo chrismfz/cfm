@@ -543,15 +543,19 @@ do
   for _, code in ipairs({ "401", "403", "410", "301", "302" }) do
     check(T("EXPIRED", code) == 240, "EXPIRED " .. code .. " (the page changed) marks")
   end
-  for _, code in ipairs({ "500", "502", "503", "504" }) do
+  for _, code in ipairs({ "500", "502", "503", "504", "508" }) do
     check(T("EXPIRED", code) == nil, "EXPIRED " .. code .. " never marks (the stale copy absorbs it)")
-    check(T("MISS", code) == nil, "MISS " .. code .. " never marks")
+    check(T("MISS", code) == 5, "MISS " .. code .. " marks only for the lock timeout (5s)")
   end
   for _, code in ipairs({ "400", "405", "406", "408", "411", "413", "414", "429", "431" }) do
-    check(T("MISS", code) == nil and T("EXPIRED", code) == nil, "a request-level " .. code .. " never marks")
+    check(T("EXPIRED", code) == nil, "EXPIRED request-level " .. code .. " never marks")
+    check(T("MISS", code) == 5, "MISS request-level " .. code .. " marks only for 5s")
   end
   check(T("MISS", "502, 404") == 60, "a retried fetch is judged by its LAST answer")
-  check(T("MISS", "404, 503") == nil, "a retried fetch ending in 5xx never marks")
+  check(T("MISS", "404, 503") == 5, "a retried fetch ending in 5xx: the short mark")
+  check(T("MISS", "200 : 404") == 60, "an internal-redirect status list is judged by its last entry")
+  check(T("MISS", "200", nil, "", "", nil, "No") == 60, "X-Accel-Buffering: no (any case) → not storable → marks")
+  check(T("MISS", "200", nil, "", "", nil, "yes") == nil, "X-Accel-Buffering: yes stays storable")
   check(T("MISS", "200") == nil, "a storable MISS is not marked")
   check(T("HIT", "404") == nil and T("STALE", "404") == nil and T("UPDATING", "404") == nil, "no fetch → no mark")
   check(T("MISS", nil) == nil and T("MISS", "-") == nil, "no upstream answer → no mark")
@@ -569,11 +573,11 @@ local function micro_req(host, uri)
   ngx.var.uri = uri or "/"; ngx.var.server_addr = "192.0.2.1"; ngx.var.cf_xfp = "https"
   ngx.var.cfm_micro_conf = "1"; ngx.var.args = nil; ngx.var.http_range = nil; ngx.var.http_accept = nil
 end
-local function log_micro(cache_status, status, set_cookie, cc, xae, vary)
+local function log_micro(cache_status, status, set_cookie, cc, xae, vary, xab)
   ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.upstream_cache_status = cache_status
   ngx.var.upstream_status = status; ngx.var.upstream_http_set_cookie = set_cookie
   ngx.var.cfm_cc_nostore = cc or ""; ngx.var.cfm_xae_nocache = xae or ""
-  ngx.var.upstream_http_vary = vary
+  ngx.var.upstream_http_vary = vary; ngx.var.upstream_http_x_accel_buffering = xab
   cache.micro_note()
 end
 _micro_enforce = true
@@ -601,12 +605,13 @@ local reasons = {
   { "200", nil, "1", "", nil, "Cache-Control private/no-store/no-cache" },
   { "200", nil, "", "1", nil, "X-Accel-Expires: 0" },
   { "200", nil, "", "", "*", "Vary: *" },
+  { "200", nil, "", "", nil, "X-Accel-Buffering: no", "no" },
 }
 for i, rr in ipairs(reasons) do
   _uncacheable.data = {}; _uncacheable.last_ttl = nil
   local uri = "/r" .. i
   micro_req("m.com", uri)
-  log_micro("MISS", rr[1], rr[2], rr[3], rr[4], rr[5])
+  log_micro("MISS", rr[1], rr[2], rr[3], rr[4], rr[5], rr[7])
   check(_uncacheable.last_ttl == 60, rr[6] .. ": marked for 60s")
   micro_req("m.com", uri)
   check(cache.micro_gate() == nil, rr[6] .. ": the marked key skips micro")
@@ -634,11 +639,13 @@ check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:
       "a POST to a marked key reports bypass:method, not uncacheable")
 ngx.var.http_x_cfm_cache_debug = nil
 
--- a 5xx refresh keeps the stale copy in play: nothing is marked
+-- a 5xx refresh keeps the stale copy in play: nothing is marked; a cold 5xx
+-- is marked only for the lock timeout
 _uncacheable.data = {}; _uncacheable.sets = 0
-micro_req("m.com", "/busy"); log_micro("EXPIRED", "503")
-log_micro("MISS", "502"); log_micro("EXPIRED", "429")
-check(_uncacheable.sets == 0, "EXPIRED/MISS 5xx and a 429 never mark")
+micro_req("m.com", "/busy"); log_micro("EXPIRED", "503"); log_micro("EXPIRED", "429")
+check(_uncacheable.sets == 0, "EXPIRED 5xx and a 429 never mark")
+log_micro("MISS", "502")
+check(_uncacheable.sets == 1 and _uncacheable.last_ttl == 5, "a cold (MISS) 5xx marks for 5s")
 log_micro("EXPIRED", "404")
 check(_uncacheable.last_ttl == 240, "an EXPIRED page-changed refresh marks for the long TTL")
 
@@ -674,6 +681,20 @@ micro_req("m.com", "/nodict"); log_micro("MISS", "404")
 micro_req("m.com", "/nodict")
 check(cache.micro_gate() == "@cfm_micro_5s", "without the dict the gate routes (nothing remembered)")
 ngx.shared.cfm_cache_uncacheable = _uncacheable
+
+-- the debug stamp names an internal redirect and an old nginx core, like the gate
+micro_req("m.com", "/int2"); ngx.var.http_x_cfm_cache_debug = "1"; _internal = true
+ngx.var.cfm_upstream = "cfm_apache"
+for k in pairs(_header) do _header[k] = nil end
+cache.observe()
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:location", 1, true),
+      "observe reports bypass:location on an internal redirect")
+ngx.var.cfm_upstream = "cfm_apache_micro"
+for k in pairs(_header) do _header[k] = nil end
+cache.observe()
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=would/5s", 1, true),
+      "a response the micro location served (itself internal) still reads would/")
+_internal = false; ngx.var.cfm_upstream = nil; ngx.var.http_x_cfm_cache_debug = nil
 
 -- the debug stamp names a location without the sentinel
 micro_req("m.com", "/loc"); ngx.var.cfm_micro_conf = ""; ngx.var.http_x_cfm_cache_debug = "1"
@@ -756,6 +777,12 @@ do
   _micro_enforce = true
   micro_req("m.com")
   check(c3.micro_gate() == nil, "nginx < 1.23 → micro_gate never routes")
+  ngx.var.http_x_cfm_cache_debug = "1"
+  for k in pairs(_header) do _header[k] = nil end
+  c3.observe()
+  check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:nginx-version", 1, true),
+        "observe reports bypass:nginx-version on an old core")
+  ngx.var.http_x_cfm_cache_debug = nil
   package.loaded["cfm_cache"] = nil
   ngx.config.nginx_version = 1025003
   local c4 = require("cfm_cache")

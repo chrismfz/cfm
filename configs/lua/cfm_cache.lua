@@ -755,26 +755,28 @@ end
 -- dict evicts least-recently-used marks when full, which only costs a re-probe.
 --
 -- Which answers mark (micro_mark_ttl):
---   * never a 5xx: origin trouble is transient, and on an EXPIRED key the
---     stale copy is exactly what should absorb it (use_stale updating plus
---     http_500..504 serve it, the fetching request included). Marking would
---     send the whole load to the struggling origin for the mark's lifetime,
---     and every failing probe would re-mark. On a MISS (no copy) a failing key
---     queues on the lock as it did before, which also throttles the origin.
---   * never a request-level 4xx (400, 405, 406, 408, 411, 412, 413, 414, 415,
---     416, 417, 421, 429, 431): it says nothing about the page, and any client
---     can provoke one (an oversized header, an origin rate limit or WAF rule
---     that answers 406) to switch micro off for a URL. A 401 / 403 / 404 / 410
---     does mark: the page is gone or protected now, and its old public copy
---     must age out. (An origin WAF that answers 403 to a request is the
---     residual below.)
+--   * a 5xx or a request-level 4xx (400, 405, 406, 408, 411, 412, 413, 414,
+--     415, 416, 417, 421, 429, 431) is origin trouble or about the request,
+--     not the page. On an EXPIRED key it never marks: the stale copy absorbs
+--     it (use_stale updating plus http_500..504 serve it, the fetching request
+--     included; any other 5xx, e.g. CloudLinux's 508, reaches only the request
+--     that refreshes), and a mark would send the whole load to the failing
+--     origin — any client could also provoke one (an oversized header, an
+--     origin rate limit or WAF rule answering 406) to switch micro off. On a
+--     MISS (no copy) it marks for MICRO_UNCACHEABLE_SHORT_TTL, the lock
+--     timeout: the lock does not spare the origin (every waiter reaches it,
+--     as the next filler or when its wait times out), it only delays each
+--     visitor up to 5s, so the key is served direct for a few seconds, then
+--     probed again, and caches again as soon as the origin recovers. A 401 /
+--     403 / 404 / 410 is the page (gone or protected now) and marks normally.
+--     (An origin WAF that answers 403 to a request is the residual below.)
 --   * a MISS that could not be stored: MICRO_UNCACHEABLE_TTL.
 --   * an EXPIRED refresh that could not be stored — the page changed (sets a
 --     cookie, went private, redirects, 404): MICRO_UNCACHEABLE_STALE_TTL,
 --     longer than the largest micro zone's `inactive` (180s), so the stale copy
 --     is evicted before the next probe. Otherwise every probe would serve it
 --     to the requests arriving during its fetch, for as long as they kept it
---     warm. check_site_cache_config.sh pins inactive < this value.
+--     warm. check_site_cache_config.sh pins inactive + 30s <= this value.
 -- Residual (like Varnish hit-for-miss): one client's non-storable answer skips
 -- micro for that URL for everyone until the mark expires — a client that can
 -- make the origin answer differently (a UA/language redirect, a cookie, an
@@ -783,6 +785,7 @@ end
 local UNCACHEABLE_DICT            = "cfm_cache_uncacheable"
 local MICRO_UNCACHEABLE_TTL       = 60
 local MICRO_UNCACHEABLE_STALE_TTL = 240
+local MICRO_UNCACHEABLE_SHORT_TTL = 5    -- the micro proxy_cache_lock_timeout
 local NGX_CACHE_VARY_LEN          = 128  -- nginx does not store a longer Vary
 local REQUEST_INDUCED_4XX = {
     [400] = true, [405] = true, [406] = true, [408] = true, [411] = true, [412] = true,
@@ -800,12 +803,16 @@ end
 -- location? Mirrors the location's rails: proxy_no_cache $cfm_cache_non200
 -- (only a 200), $cfm_cc_nostore and $cfm_xae_nocache (the maps on the origin's
 -- Cache-Control / X-Accel-Expires), plus nginx's own Set-Cookie and Vary rules
--- (neither header is ignored). A "*" anywhere in Vary counts, which is
--- slightly broader than nginx (only a bare "*"): the cost is a skipped micro,
--- never a stored response.
-local function micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary)
+-- (neither header is ignored), and X-Accel-Buffering: no (not ignored either:
+-- nginx then streams the response and stores nothing). A "*" anywhere in Vary
+-- counts, which is slightly broader than nginx (only a bare "*"): the cost is
+-- a skipped micro, never a stored response. (A response carrying
+-- X-Accel-Redirect is served by an internal redirect and never reaches
+-- micro_note with a fetch status — it is neither stored nor remembered.)
+local function micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering)
     if status ~= "200" then return false end
     if type(set_cookie) == "string" and set_cookie ~= "" then return false end
+    if type(x_accel_buffering) == "string" and x_accel_buffering:lower() == "no" then return false end
     if cc_nostore == "1" or xae_nocache == "1" then return false end
     if type(vary) == "string" and (vary:find("*", 1, true) or #vary > NGX_CACHE_VARY_LEN) then
         return false
@@ -817,12 +824,15 @@ end
 -- or nil to not mark it (see the rules above). cache_status is
 -- $upstream_cache_status; status is $upstream_status, whose LAST entry is the
 -- answer (a retried fetch lists every attempt).
-local function micro_mark_ttl(cache_status, status, set_cookie, cc_nostore, xae_nocache, vary)
+local function micro_mark_ttl(cache_status, status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering)
     if cache_status ~= "MISS" and cache_status ~= "EXPIRED" then return nil end
     local code = tonumber(type(status) == "string" and status:match("(%d+)%s*$") or nil)
     if not code then return nil end
-    if code >= 500 or REQUEST_INDUCED_4XX[code] then return nil end
-    if micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary) then return nil end
+    if code >= 500 or REQUEST_INDUCED_4XX[code] then
+        if cache_status == "MISS" then return MICRO_UNCACHEABLE_SHORT_TTL end
+        return nil
+    end
+    if micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering) then return nil end
     if cache_status == "EXPIRED" then return MICRO_UNCACHEABLE_STALE_TTL end
     return MICRO_UNCACHEABLE_TTL
 end
@@ -847,7 +857,8 @@ function _M.micro_note()
     local dict = ngx.shared and ngx.shared[UNCACHEABLE_DICT]
     if not dict then return end
     local ttl = micro_mark_ttl(st, v.upstream_status, v.upstream_http_set_cookie,
-                               v.cfm_cc_nostore, v.cfm_xae_nocache, v.upstream_http_vary)
+                               v.cfm_cc_nostore, v.cfm_xae_nocache, v.upstream_http_vary,
+                               v.upstream_http_x_accel_buffering)
     if ttl then dict:set(micro_mark_key(), true, ttl) end
 end
 
@@ -924,9 +935,16 @@ function _M.observe()
         if type(p.micro) == "table" and p.micro.on then
             local okc, bkt, why = micro_verdict(p)
             -- what micro_gate would also refuse here: a location other than
-            -- `location /` (no sentinel)
-            if okc and ngx.var.cfm_micro_conf ~= "1" then
-                okc, why = false, "location"
+            -- `location /` (no sentinel), an internal redirect (a response a
+            -- micro location served is itself internal: not that), an nginx
+            -- core older than 1.23
+            if okc then
+                if ngx.var.cfm_micro_conf ~= "1"
+                   or (ngx.var.cfm_upstream ~= "cfm_apache_micro" and ngx.req.is_internal()) then
+                    okc, why = false, "location"
+                elseif not NGX_JOINS_HEADERS then
+                    okc, why = false, "nginx-version"
+                end
             end
             if okc then
                 lbl = lbl .. " microcache=would/" .. tostring(bkt) .. "s"
@@ -991,8 +1009,12 @@ end
 --     live conf — one without the origin Cache-Control / X-Accel-Expires rails
 --     and with background updates on — lacks it, so newer Lua never routes
 --     into its locations.
---   * an internal redirect (error_page / try_files / an ngx.exec elsewhere):
---     the sentinel variable would survive into the target location.
+--   * an internal redirect: a redirect to a named location (error_page … =
+--     @x, ngx.exec("@x")) keeps the sentinel variable in the target location.
+--     (A redirect to a URI re-runs the server-level "" default; `rewrite …
+--     last` and ngx.req.set_uri(…, true) keep it without making the request
+--     internal — check_site_cache_config.sh forbids those in `location /` and
+--     at its server level.)
 --   * nginx core older than 1.23: it exposes only the FIRST of several
 --     Cache-Control headers in $upstream_http_cache_control, so a `private` on
 --     a second line would not reach $cfm_cc_nostore.
