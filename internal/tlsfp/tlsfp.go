@@ -34,6 +34,12 @@
 // it to frame a victim bucket into a conviction is bounded by the conviction
 // needing wide IP/subnet/country spread AND enforcement being a manual,
 // permission-gated operator arm on the corroborated evidence.
+//
+// A request relayed by a TRUSTED PROXY (Cloudflare, trusted_proxies.conf) gets
+// no header at all: the edge's handshake there is the proxy's, not the
+// client's, and cfm_tlsfp.value() returns nil for it (2026-09-23). Every
+// visitor of a proxied vhost otherwise shared one id, which the solver-farm
+// detector convicted as a farm (docs/traffic-classifier.md).
 package tlsfp
 
 import (

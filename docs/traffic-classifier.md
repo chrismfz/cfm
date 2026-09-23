@@ -808,6 +808,14 @@ device-claim group; as an independent opener it was also 0 for every F row):
   same shape explains why `ba6b4aad` has a farm verdict and still "carries
   Greek humans": every visitor to those vhosts shares it. **Arming a
   fingerprint policy on `ba6b4aad` would hit every visitor of those vhosts.**
+  The vhosts resolve to Cloudflare, and the edge trusts Cloudflare's ranges for
+  the client IP (`trusted_proxies.conf`). **Fixed 2026-09-23:** `cfm_tlsfp.value()`
+  returns no fingerprint when the TLS peer is a trusted proxy (`$realip_remote_addr`
+  ≠ `$remote_addr`, the same unforgeable test the confs use for
+  `X-Forwarded-Proto`). So the verify stamp, the fingerprint-policy lookups and
+  the WAF-hit attribution all treat such a request as "no fingerprint" instead
+  of charging the proxy's handshake to the client. The record `ba6b4aad` already
+  holds in cfm-web stays; it just stops growing.
 - **TLS-inspecting middleboxes are not rare.** Human Chrome and Firefox UAs
   (improv.gr, fcs.com.gr, webmail.deyadoxatou.gr) arrive over OpenSSL-shaped
   lists with CCM, ARIA or DHE suites that no browser offers: antivirus or

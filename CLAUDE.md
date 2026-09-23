@@ -536,7 +536,10 @@ header). Hard-won invariant, **do not cross it**: no SIGNAL keys enforcement on 
 fingerprint **automatically** — the `WAFHitEvent` published to `waf_security`
 carries **no** fingerprint (so autoblock can't key on it), and a fingerprint is a
 **population, not one client** (a legit browser/residential IP shares a coarse
-TLS bucket with a farm). Since 2026-09-19 (master plan **E3 node slice**) the ONE
+TLS bucket with a farm). A request relayed by a trusted proxy (Cloudflare) carries
+the PROXY's handshake, so `cfm_tlsfp.value()` returns no fingerprint for it since
+2026-09-23. Before that every visitor of a proxied vhost shared `ba6b4aad`, and the
+detector convicted it as a farm. Since 2026-09-19 (master plan **E3 node slice**) the ONE
 enforcement path is the **operator-armed** per-fingerprint policy: cfm-web
 `fingerprint_policies` (arming is permission-gated there) → agent pull →
 `internal/webdetector/fppolicy.go` store → `/nginx/fppolicy` bridge lookup →

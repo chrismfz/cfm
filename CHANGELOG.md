@@ -17,7 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **TLS fingerprint: a request relayed by Cloudflare no longer carries
+  Cloudflare's handshake as the client's fingerprint.**
+  - On a vhost behind Cloudflare the edge sees Cloudflare's TLS, not the
+    visitor's. Every visitor of such a vhost therefore shared one fingerprint
+    (`ba6b4aad`, 32 vhosts on mars and speedhost), whatever their browser.
+  - The solver-farm detector groups by fingerprint, so that fingerprint got a
+    farm verdict in cfm-web, 7 000+ WAF blocks and would_deny rows that
+    belonged to real visitors. A fingerprint policy armed on it would have hit
+    every visitor of those vhosts.
+  - The edge now sends no fingerprint when the TLS peer is a trusted proxy
+    (the realip module rewrote the client address, the same check the confs
+    already use for `X-Forwarded-Proto`). Challenge solves, fingerprint
+    policies (web and panel ports) and WAF-hit attribution treat those
+    requests as "no fingerprint", like plain HTTP. Direct visitors are
+    unchanged. The record already in cfm-web stays but stops growing.
 
 ## 2026.09.23
 

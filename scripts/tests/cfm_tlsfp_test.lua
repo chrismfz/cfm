@@ -199,6 +199,44 @@ fp.stamp()
 check(headers["X-CFM-TLS"] == "1|TLSv1.3||||" .. "|" or
   headers["X-CFM-TLS"]:find("|%-|") == nil, "treats \"-\" as an empty field")
 
+-- 9. a request relayed by a trusted proxy (Cloudflare) carries the PROXY's
+--    handshake: no fingerprint, and a client-supplied header is still cleared.
+reset()
+vars.ssl_protocol = "TLSv1.3"
+vars.ssl_ciphers = "TLS_AES_128_GCM_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256"
+vars.remote_addr = "203.0.113.7"          -- realip-rewritten client
+vars.realip_remote_addr = "172.70.1.1"    -- the proxy that connected
+headers["X-CFM-TLS"] = "1|TLSv1.3|spoofed|||||"
+fp.stamp()
+check(fp.value() == nil, "no fingerprint when a trusted proxy terminated TLS")
+check(headers["X-CFM-TLS"] == nil, "proxied: the client-supplied header is still cleared")
+
+-- 9b. a direct client: realip left the address alone, so both are equal
+reset()
+vars.ssl_protocol = "TLSv1.3"
+vars.remote_addr = "203.0.113.7"
+vars.realip_remote_addr = "203.0.113.7"
+check(fp.value() == "1|TLSv1.3|||||", "direct client (equal addresses) keeps its fingerprint")
+
+-- 9c. fail-open: no realip module / unreadable variable = today's behaviour
+reset()
+vars.ssl_protocol = "TLSv1.3"
+vars.remote_addr = "203.0.113.7"
+raise_on.realip_remote_addr = true
+check(fp.value() == "1|TLSv1.3|||||", "unreadable $realip_remote_addr keeps the fingerprint (fail-open)")
+reset()
+vars.ssl_protocol = "TLSv1.3"
+vars.realip_remote_addr = "172.70.1.1"
+vars.remote_addr = ""
+check(fp.value() == "1|TLSv1.3|||||", "an empty address is never read as proxied")
+
+-- 9d. IPv6 peer and client
+reset()
+vars.ssl_protocol = "TLSv1.3"
+vars.remote_addr = "2001:db8::7"
+vars.realip_remote_addr = "2a06:98c0::1"
+check(fp.value() == nil, "IPv6 trusted proxy: no fingerprint")
+
 if failures > 0 then
   print(failures .. " check(s) failed")
   os.exit(1)
