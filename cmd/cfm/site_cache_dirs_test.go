@@ -35,6 +35,30 @@ func TestEnsureSiteCacheDirs_MissingParentIsTraversableUnderUmask077(t *testing.
 	}
 }
 
+// A missing ANCESTOR of the parent must come out traversable too: os.MkdirAll
+// would create it 0700 under the daemon's umask.
+func TestEnsureSiteCacheDirs_MissingAncestorsAreTraversableUnderUmask077(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+
+	base := t.TempDir()
+	root := filepath.Join(base, "var", "cache", "nginx")
+	ensureSiteCacheDirs(root, os.Getgid())
+
+	for _, d := range []string{filepath.Join(base, "var"), filepath.Join(base, "var", "cache"), root} {
+		fi, err := os.Stat(d)
+		if err != nil {
+			t.Fatalf("%s not created: %v", d, err)
+		}
+		if got := fi.Mode().Perm(); got != 0o755 {
+			t.Fatalf("%s mode = %#o, want 0755", d, got)
+		}
+	}
+	if fi, err := os.Stat(filepath.Join(root, "cfm_static")); err != nil || fi.Mode().Perm() != 0o770 {
+		t.Fatalf("cfm_static = %v, %v; want 0770", fi, err)
+	}
+}
+
 func TestEnsureSiteCacheDirs_ExistingParentOnlyGainsTraverse(t *testing.T) {
 	for _, tc := range []struct {
 		name string

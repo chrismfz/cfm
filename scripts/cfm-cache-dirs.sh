@@ -73,8 +73,11 @@ for n in $CFM_CACHE_DIRS; do
     if [ -d "$d" ] && [ ! -L "$d" ] && find "$d" -mindepth 1 -maxdepth 2 -type d \
             \( ! -group cfm -o \( ! -user cfm ! -perm -g=rwx \) \) \
             -print -quit 2>/dev/null | grep -q .; then
-        find "$d" -mindepth 1 -delete 2>/dev/null || true
-        echo "cfm-cache-dirs: purged an unhealthy cache tree under $d (a level dir the cfm workers cannot use; nginx refills it). Restart (not reload) the edge to drop the stale cache index, or expect harmless [crit] unlink() ENOENT lines as old entries age out."
+        if find "$d" -mindepth 1 -delete 2>/dev/null; then
+            echo "cfm-cache-dirs: purged an unhealthy cache tree under $d (a level dir the cfm workers cannot use; nginx refills it). Restart (not reload) the edge to drop the stale cache index, or expect harmless [crit] unlink() ENOENT lines as old entries age out."
+        else
+            echo "cfm-cache-dirs: purge of $d was incomplete (entries the workers were writing remain); the next run probes again. Restart (not reload) the edge afterwards." >&2
+        fi
     fi
     if [ ! -d "$d" ] || [ "$(stat -L -c '%U:%G %a' "$d" 2>/dev/null)" != "root:cfm 770" ]; then
         echo "cfm-cache-dirs: $d is not root:cfm 0770" >&2
