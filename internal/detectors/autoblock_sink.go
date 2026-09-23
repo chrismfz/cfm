@@ -412,7 +412,7 @@ func (s *sectionSink) Publish(a core.Alert) {
 		if s.pol.Mode == "dryrun" {
 			enforced = "challenge_dryrun"
 		} else if nginxBridge != nil {
-			nginxBridge.ChallengeIP(ipStr, ttl)
+			nginxBridge.ChallengeIPWithReason(ipStr, ttl, firstNonEmpty(out.Extra["rule"], "WEB/CHALLENGE"))
 			enforced = "challenge"
 			out.Extra["enforced_via"] = "nginx_bridge"
 		} else {

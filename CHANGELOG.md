@@ -17,6 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Every challenge solve now says what challenged the client (`src=`).**
+  - Until now the verify never knew why the page was served, so a `would_v2`
+    line could not tell an auto vhost challenge from a WAF rule or a detector.
+    That split is what you need to size a v2 arm before switching it on.
+  - Solve, reject and `would_v2` lines, and the `challenge_solved` /
+    `challenge_v2_reject` history rows, carry
+    `src=waf:<rule>|ip:<detector rule>|vhost:<manual|vhost_config|suspicious_vhost|uniqpaths_short>|rule:<traffic rule>|fp|geo`.
+    `src=-` means nothing covered the client any more by the time it solved.
+  - It is a snapshot taken at verify, so a client covered by several sources
+    lists them all. Log-only: it arms nothing and changes no outcome.
+    Scoped (cPanel) callers do not see it in history, because `fp`/`geo`/`rule`
+    reveal the operator's fleet policy.
+  - Detector challenges now record their rule (e.g. `CHALLENGE_ERR_RATIO`) on
+    the bridge entry, so `reason=` on the solve line is no longer empty for them.
+- **`would_v2` lines say who the client is.** They now carry `cc=`, `asn=`,
+  `provider=`, `ptr=`, `ua_family=`, `ua_bot=1` (the UA calls itself a bot —
+  not verified) and `src=`. The `abuse_shadow` MCP tool gains a `humanity`
+  section that counts them by source, fingerprint, tells, provider, country and
+  PTR domain.
+
 ### Fixed
 - **Payment-gateway webhooks are no longer challenged by WAF rule 201.**
   - Viva Wallet's webhooks carry no User-Agent, Accept or Referer. Rule 201

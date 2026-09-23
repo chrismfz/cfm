@@ -569,7 +569,11 @@ outside the armed set — seen now, that is a bug);
 top-level `ptr=` is reverse DNS, NOT `sig=ptr:` — and a reject writes its own
 `challenge_v2_reject` history row, never `challenge_solved`, so
 `detection_history type=challenge_v2_reject node="all"` is the FP-hunting
-query; payload `ptr` is stripped from scoped history rows like `sig`, but as
+query; since 2026-09-23 solve / reject / would_v2 lines and both rows carry
+`src=` — a verify-time snapshot of WHAT challenged the client
+(`waf:<id>`/`ip:<rule>`/`vhost:<reason>`/`rule:<id>`/`fp`/`geo`, `challenge_src.go`),
+log-only, never an arm, stripped for scoped callers — and the `abuse_shadow` MCP
+tool's `humanity` section sizes a new v2 arm from it; payload `ptr` is stripped from scoped history rows like `sig`, but as
 defence in depth only — drilldown/analyze-host already show scoped callers a
 per-IP PTR, so it is NOT an admin-only datum), and
 for an armed `challenge_v2` fingerprint a failing solve earns NO clearance

@@ -274,6 +274,14 @@ func (c *verifyCapture) counts() (int, int) {
 
 func startVerifyServer(t *testing.T) (string, *verifyCapture) {
 	t.Helper()
+	return startVerifyServerWithBridge(t, nil)
+}
+
+// startVerifyServerWithBridge is startVerifyServer with a bridge wired BEFORE
+// the listener starts (so the handler's reads of it are ordered after the
+// write — no race), for tests that need per-IP / vhost bridge state.
+func startVerifyServerWithBridge(t *testing.T, bridge *NginxBridge) (string, *verifyCapture) {
+	t.Helper()
 	t.Setenv("CFM_CHALLENGE_SECRET", "challenge-geo-e2e-secret")
 	resetChallengeV2Marks(t)
 
@@ -292,6 +300,9 @@ func startVerifyServer(t *testing.T) (string, *verifyCapture) {
 	t.Cleanup(func() { SetChallengeSolvedHook(prevSolved); SetChallengeV2RejectHook(prevReject) })
 
 	srv := NewChallengeServer(nil)
+	if bridge != nil {
+		srv.SetNginxBridge(bridge)
+	}
 	if err := srv.Start(context.Background(), "127.0.0.1:0"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

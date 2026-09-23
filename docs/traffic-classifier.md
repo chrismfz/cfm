@@ -706,7 +706,23 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   body-stripping population with `hs=-` (or the row's `hs_nopayload`); `sig=`
   absence alone does not identify it.
 - **`cfm.abuse_shadow.log`**: `signal=humanity verdict=would_v2 …` when the score
-  *would* escalate — shadow, nothing served.
+  *would* escalate — shadow, nothing served. Since 2026-09-23 the line also
+  carries who the client is and what challenged it, space-free for the
+  abuse-shadow parser: `cc=` `asn=` `provider=` `ptr=` `ua_family=` `ua_bot=1`
+  (the UA self-declares a bot — unverified) and `src=`. The `abuse_shadow` MCP
+  tool aggregates them in its `humanity` section (`by_src_kind`, `by_src`,
+  `by_fp`, `by_provider`, `by_ptr_domain`, …).
+- **`src=` — challenge provenance** (`challenge_src.go`, 2026-09-23): a
+  snapshot, taken at verify, of every source covering (ip, host) then —
+  `waf:<rule id>`, `ip:<detector rule>`, `vhost:<manual|vhost_config|suspicious_vhost|uniqpaths_short>`,
+  `rule:<traffic rule id>`, `fp`, `geo`; `src=-` = none covered (an entry that
+  expired between serve and verify); absent = not resolved. On the solve
+  line, the reject line, the would_v2 line and the `challenge_solved` /
+  `challenge_v2_reject` rows (`payload.src`, stripped for scoped callers). It
+  is a snapshot, not the one decision that served the page: several sources
+  can be listed. LOG-ONLY — `v2=` stays the one answer to "did the teeth
+  cover this solve". It exists to size a new v2 arm (e.g. auto vhost
+  challenge at v2) from real would-rejects before turning it on.
 - **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls
   into cfm-web's `fingerprints` ledger as another per-client tell. The
   `challenge_solved` row carries `hs`, `tells`, `v2` (the arm grain),

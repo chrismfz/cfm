@@ -46,6 +46,7 @@ type historyEventView struct {
 var scopedRedactedPayloadKeys = map[string]struct{}{
 	"sig": {},
 	"ptr": {},
+	"src": {},
 }
 
 // hasScopedRedactedKey reports whether a payload carries any key in
@@ -63,7 +64,7 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // (scopedRedactedPayloadKeys) from history rows before they leave the endpoint
 // for a SCOPED (cPanel) caller. Admin callers see the rows untouched.
 //
-// Two keys today. The first is payload.sig — the ChallengeV2 Rung-1 device readings
+// Three keys today. The first is payload.sig — the ChallengeV2 Rung-1 device readings
 // (hardwareConcurrency, deviceMemory, devicePixelRatio, pointer/touch/key
 // counts) collected by CFM's own challenge page. A tenant could measure the
 // same things from their own site's JS, so this is not a secret; it is
@@ -84,6 +85,15 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // is admin-only". Country and ASN are NOT stripped: enrich=1 already hands
 // them to scoped callers. Note the name clash — sig.ptr (a pointer-event
 // count, inside sig) goes with sig; this is the top-level payload.ptr.
+//
+// The third is payload.src — the challenge provenance snapshot on
+// challenge_solved and challenge_v2_reject rows (challenge_src.go). Most of
+// it a tenant could piece together for its own vhost (its vhost challenge
+// state, the challenge_issued rows' detector rule), but two tokens are the
+// OPERATOR's fleet policy, not tenant data: `fp` / `geo` say that an
+// admin-armed fingerprint or country/ASN policy covers this visitor, and
+// `rule:<id>` names an operator traffic rule. Closed by default for the same
+// reason as sig; the sizing readout it exists for is admin/MCP.
 //
 // The payload map is copied rather than edited so the caller's own map is
 // never mutated, but note the LIMIT of that: the slice element is reassigned

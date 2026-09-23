@@ -790,9 +790,10 @@ func (s ChallengeSolve) WaiverMissSuffix() string {
 // characterise, and it is deliberately not published/hooked as solved (it
 // cleared nothing), so this line and the challenge_v2_reject history row are
 // its only records — without sig= every armed-and-rejected client would be
-// missing from the very data used to tune the tells. The geo fields and then
-// v2_waiver_miss ride at the END, so no field a parser already reads moves.
+// missing from the very data used to tune the tells. The geo fields, then
+// v2_waiver_miss, then src= ride at the END, so no field a parser already
+// reads moves.
 func (s ChallengeSolve) RejectLine() string {
-	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s%s",
-		s.IP, s.Host, s.URI, s.HumanityScore, s.HumanityTells, s.SignalSuffix(), s.V2Grain, s.TLSFingerprintOrDash(), s.UA, s.GeoSuffix(), s.WaiverMissSuffix())
+	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s%s%s",
+		s.IP, s.Host, s.URI, s.HumanityScore, s.HumanityTells, s.SignalSuffix(), s.V2Grain, s.TLSFingerprintOrDash(), s.UA, s.GeoSuffix(), s.WaiverMissSuffix(), s.SrcSuffix())
 }
