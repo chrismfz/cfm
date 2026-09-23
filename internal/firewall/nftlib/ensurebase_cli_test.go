@@ -14,10 +14,17 @@ import (
 // `list chain inet cfm input`, logs every invocation and every script fed on
 // stdin, and fails the first failScripts `nft -f -` runs.
 func fakeNFTChain(t *testing.T, chain string, failScripts int) (logPath string) {
+	return fakeNFTChainOpts(t, chain, failScripts, "")
+}
+
+// fakeNFTChainOpts is fakeNFTChain with a mode: "readfail" fails every chain
+// read; "commitfail" makes a failing -f run still commit its rules to the
+// chain first (as nft killed at its timeout after the kernel committed).
+func fakeNFTChainOpts(t *testing.T, chain string, failScripts int, mode string) (logPath string) {
 	t.Helper()
 	dir := t.TempDir()
 	logPath = filepath.Join(dir, "nft.log")
-	for name, body := range map[string]string{"chain": chain, "fails": fmt.Sprint(failScripts)} {
+	for name, body := range map[string]string{"chain": chain, "fails": fmt.Sprint(failScripts), "mode": mode} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -25,12 +32,21 @@ func fakeNFTChain(t *testing.T, chain string, failScripts int) (logPath string) 
 	script := fmt.Sprintf(`#!/bin/sh
 d=%[1]q
 echo "ARGS $*" >> "$d/nft.log"
+mode=$(cat "$d/mode")
 case "$*" in
-"list chain inet cfm input") cat "$d/chain"; exit 0;;
+"list chain inet cfm input")
+	if [ "$mode" = readfail ]; then echo "Error: timed out" >&2; exit 1; fi
+	cat "$d/chain"; exit 0;;
 "-f -")
 	in=$(cat); printf 'SCRIPT %%s\n' "$in" >> "$d/nft.log"
 	n=$(cat "$d/fails")
-	if [ "$n" -gt 0 ]; then echo $((n-1)) > "$d/fails"; exit 1; fi
+	if [ "$n" -gt 0 ]; then
+		echo $((n-1)) > "$d/fails"
+		if [ "$mode" = commitfail ]; then
+			printf '%%s\n' "$in" | sed -e 's/;$//' -e 's/^insert rule inet cfm input position 0 //' -e 's/^add rule inet cfm input //' >> "$d/chain"
+		fi
+		exit 1
+	fi
 	exit 0;;
 esac
 exit 0
@@ -141,5 +157,29 @@ func TestSelfSetElems(t *testing.T) {
 	// fe80::1234 lies inside fe80::/10: an interval set refuses the overlap.
 	if got := strings.Join(v6, " "); got != "::1/128 2001:db8::5/128 fe80::/10" {
 		t.Errorf("v6 = %s", got)
+	}
+}
+
+// Rules are only ever added, so a chain that can't be read must not be taken
+// for an empty one — that would add every rule a second time.
+func TestApplyBaseInputRules_UnreadChainWritesNothing(t *testing.T) {
+	log := fakeNFTChainOpts(t, "", 0, "readfail")
+	(&Backend{}).applyBaseInputRules()
+	if got := readNFTLog(t, log); strings.Contains(got, "ARGS -f -") {
+		t.Errorf("wrote rules without knowing the chain:\n%s", got)
+	}
+}
+
+// A run that committed before failing (e.g. killed at its timeout) is not
+// replayed statement by statement: the fallback re-reads the chain first.
+func TestApplyBaseInputRules_FallbackRereadsTheChain(t *testing.T) {
+	log := fakeNFTChainOpts(t, "", 1, "commitfail")
+	(&Backend{}).applyBaseInputRules()
+	got := readNFTLog(t, log)
+	if n := strings.Count(got, "ARGS -f -"); n != 1 {
+		t.Errorf("%d nft -f runs, want just the one that committed (no replay):\n%.300s", n, got)
+	}
+	if n := strings.Count(got, "ARGS list chain"); n != 2 {
+		t.Errorf("%d chain reads, want 2 (before the run, and before any fallback)", n)
 	}
 }

@@ -58,7 +58,8 @@ type NetlinkOpSample struct {
 // split is the key discriminator: a climbing LockWaitMs means contention (another
 // op holding the backend mutex — e.g. a slow/failed feed write); a climbing
 // NLWorkMs means the kernel is slow to apply the batch; CLIWorkMs is
-// the `nft` CLI portion (self-sets + base input rules).
+// the `nft` CLI portion (the base input rules: one chain read, at most one
+// write). The self sets are written over netlink and appear in FeedWrites.
 type EnsureBaseSample struct {
 	At         string `json:"at"` // RFC3339
 	LockWaitMs int64  `json:"lock_wait_ms"`
@@ -67,7 +68,8 @@ type EnsureBaseSample struct {
 	Err        string `json:"err,omitempty"`
 }
 
-// FeedWriteSample is the latest observed write of one feed/union set. A non-empty
+// FeedWriteSample is the latest observed write of one feed/union set (or of
+// self_v4/self_v6, which EnsureBase refreshes). A non-empty
 // Err with a large Elems (e.g. "message too long") is the "feed not applied"
 // signal; a climbing DurMs across refreshes means the kernel side is slowing down.
 type FeedWriteSample struct {

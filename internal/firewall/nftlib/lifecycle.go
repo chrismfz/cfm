@@ -177,11 +177,12 @@ func (b *Backend) EnsureBase() (err error) {
 	_ = b.DeleteSetIfExists("challenge_v4")
 	_ = b.DeleteSetIfExists("challenge_v6")
 
-	cliStart := time.Now()
-	// Populate self_v4 / self_v6 with loopback + local interface IPs.
+	// Populate self_v4 / self_v6 with loopback + local interface IPs (netlink;
+	// each write is recorded with the feed writes).
 	b.refreshSelfSets()
 
 	// Install base input chain rules (idempotent).
+	cliStart := time.Now()
 	b.applyBaseInputRules()
 	cliWork = time.Since(cliStart)
 
@@ -323,15 +324,34 @@ func (b *Backend) applyBaseInputRules() {
 	// jump flood at the end of the base layer (before ports policy rules).
 	addRule("jump flood")
 
-	stmts := baseRulesScript(b.chainTextCLI("input"), ins, adds)
+	// Rules are only ever added, so an unread chain must not be taken for an
+	// empty one: that would add every rule a second time. The chain exists
+	// (EnsureBase ensured it); the next EnsureBase installs what is missing.
+	chain, err := b.chainTextCLI("input")
+	if err != nil {
+		logging.Logf("[nftlib] base input rules: can't read the input chain, leaving it as is: %v", err)
+		return
+	}
+	stmts := baseRulesScript(chain, ins, adds)
 	if len(stmts) == 0 {
 		return
 	}
-	if err := b.nftExec(strings.Join(stmts, "\n")); err != nil {
-		// Best effort, as before: a statement nft refuses mustn't keep the
-		// others out.
-		logging.Logf("[nftlib] base input rules in one nft run failed (%v); applying %d one by one", err, len(stmts))
-		for _, st := range stmts {
+	err = b.nftExec(strings.Join(stmts, "\n"))
+	if err == nil {
+		return
+	}
+	// Best effort, as before: a statement nft refuses mustn't keep the others
+	// out. Re-read first — the run may have committed before failing (e.g.
+	// killed at its timeout), and running the statements again would
+	// duplicate them.
+	if chain, err2 := b.chainTextCLI("input"); err2 == nil {
+		stmts2 := baseRulesScript(chain, ins, adds)
+		msg := err.Error()
+		if len(msg) > 300 {
+			msg = msg[:300] + "…"
+		}
+		logging.Logf("[nftlib] base input rules: one nft run of %d statements failed, applying %d one by one: %s", len(stmts), len(stmts2), msg)
+		for _, st := range stmts2 {
 			_ = b.nftExec(st)
 		}
 	}

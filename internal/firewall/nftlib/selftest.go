@@ -19,11 +19,11 @@ type ebSample struct {
 	at       time.Time
 	lockWait time.Duration // time to acquire b.mu (contention)
 	nlWork   time.Duration // netlink add+flush under b.mu (kernel round-trip)
-	cliWork  time.Duration // refreshSelfSets + applyBaseInputRules (nft CLI)
+	cliWork  time.Duration // applyBaseInputRules (nft CLI: one chain read, at most one write)
 	err      error
 }
 
-// fwSample is the latest recorded write of one feed/union set.
+// fwSample is the latest recorded write of one feed/union set (or self set).
 type fwSample struct {
 	at    time.Time
 	elems int
