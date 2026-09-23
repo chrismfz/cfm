@@ -209,6 +209,10 @@ back-filled here — see the git/PR history for that period.
   would unblock the whole network — and the unblock report now says so. A
   `cfm.deny` line `2001:db8::1/32` (an IPv6 network) is no longer removed when
   unblocking `2001:db8::1`; `/128` is.
+- **An unblock names a feed by its whole key.** The feed behind a
+  feed-blocked IP was taken from the set name after its last `_`, so a feed
+  named `bl-v4-ssh` (key `bl_v4_ssh`) was reported as `ssh`, and two feeds
+  ending the same way as one.
 - **Where-is-this-IP-blocked never found a single-address IPv4 entry of
   imunify360's.** `cfm which`, `/search` and the unblock report read
   imunify's `netmask` as a prefix length, but imunify reports the mask itself

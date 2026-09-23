@@ -247,31 +247,41 @@ func TestRemoveFromFileMany(t *testing.T) {
 	}
 }
 
-// feedBackend lists one feed's two host sets (v4 and v6), holding feed, and
-// records the allow batch. Like nft, it rejects a lookup of an address of
-// the other family.
+// feedBackend lists one feed's two host sets (v4 and v6; the feed key is
+// key, MYBLOCK by default), holding feed, and records the allow batch. Like
+// nft, it rejects a lookup of an address of the other family.
 type feedBackend struct {
 	firewall.Backend
+	key     string
 	feed    []string
 	allowed []firewall.BlockEntry
 	batches int
 }
 
+// setIsV4 types a feed set by its prefix, as nft does by its declaration.
+func setIsV4(set string) bool {
+	return strings.HasPrefix(set, "block_ext_v4_") || strings.HasPrefix(set, "allow_ext_v4_")
+}
+
 func (b *feedBackend) ListTableTextNoDNS(string, string) (string, error) {
-	return "table inet cfm {\n\tset block_ext_v4_hosts_MYBLOCK {\n\t\ttype ipv4_addr\n\t}\n" +
-		"\tset block_ext_v6_hosts_MYBLOCK {\n\t\ttype ipv6_addr\n\t}\n}\n", nil
+	key := b.key
+	if key == "" {
+		key = "MYBLOCK"
+	}
+	return "table inet cfm {\n\tset block_ext_v4_hosts_" + key + " {\n\t\ttype ipv4_addr\n\t}\n" +
+		"\tset block_ext_v6_hosts_" + key + " {\n\t\ttype ipv6_addr\n\t}\n}\n", nil
 }
 func (b *feedBackend) ListSetElementsRaw(set string) ([]string, error) {
 	var out []string
 	for _, e := range b.feed {
-		if (net.ParseIP(e).To4() != nil) == strings.Contains(set, "_v4_") {
+		if (net.ParseIP(e).To4() != nil) == setIsV4(set) {
 			out = append(out, e)
 		}
 	}
 	return out, nil
 }
 func (b *feedBackend) HasElem(set, elem string) (bool, error) {
-	if (net.ParseIP(elem).To4() != nil) != strings.Contains(set, "_v4_") {
+	if (net.ParseIP(elem).To4() != nil) != setIsV4(set) {
 		return false, fmt.Errorf("nft get element %s{%s}: exit status 1: Error: Could not resolve hostname: Address family for hostname not supported\nget element inet cfm %s { %s }\n                              ^^^", set, elem, set, elem)
 	}
 	for _, e := range b.feed {
@@ -542,7 +552,10 @@ type unreadableFeedBackend struct {
 func (b *unreadableFeedBackend) ListSetElementsRaw(string) ([]string, error) {
 	return nil, fmt.Errorf("nft -j list set: timed out")
 }
-func (b *unreadableFeedBackend) HasElem(_, elem string) (bool, error) {
+func (b *unreadableFeedBackend) HasElem(set, elem string) (bool, error) {
+	if (net.ParseIP(elem).To4() != nil) != setIsV4(set) {
+		return b.feedBackend.HasElem(set, elem) // nft's cross-family rejection
+	}
 	b.probes++
 	if b.failAt > 0 && b.probes >= b.failAt {
 		return false, fmt.Errorf("nft get element: timed out")
@@ -641,6 +654,36 @@ func TestDoMany_NoTableNoFeedError(t *testing.T) {
 	for ip, r := range res {
 		if s := stepsOf(r, SrcFeeds); len(s) != 0 {
 			t.Errorf("%s feed steps = %+v, want none", ip, s)
+		}
+	}
+}
+
+// A feed key can contain "_v4_" (a feed named bl-v4-ssh): the family and the
+// key come from the set name's prefix, not from a substring or its last "_".
+func TestDoMany_FeedKeyWithV4InIt(t *testing.T) {
+	fakeTools(t, map[string]string{})
+	be := &feedBackend{key: "bl_v4_ssh", feed: []string{"198.51.100.1", "2001:db8::1"}}
+	for _, ip := range []string{"198.51.100.1", "2001:db8::1"} {
+		r := DoMany(context.Background(), ips(ip), Options{BE: be})[ip]
+		if len(r.FromFeeds) != 1 || r.FromFeeds[0] != "bl_v4_ssh" {
+			t.Errorf("%s feeds %v, want [bl_v4_ssh]", ip, r.FromFeeds)
+		}
+		if s := stepsOf(r, SrcFeeds); len(s) != 1 || s[0].Action != ActionChecked {
+			t.Errorf("%s feed steps = %+v", ip, s)
+		}
+	}
+}
+
+func TestNFTMissing(t *testing.T) {
+	for msg, want := range map[string]bool{
+		"nft list table inet cfm: exit status 1: Error: No such file or directory; did you mean table 'cfm' in family ip?":       true,
+		"nft get element x{1.2.3.4}: exit status 1: Error: Could not process rule: No such file or directory":                    true,
+		"nft: error while loading shared libraries: libnftables.so.1: cannot open shared object file: No such file or directory": false,
+		"fork/exec /usr/sbin/nft: no such file or directory":                                                                     false,
+		"nft -j list set: timed out": false,
+	} {
+		if got := nftMissing(fmt.Errorf("%s", msg)); got != want {
+			t.Errorf("nftMissing(%q) = %v, want %v", msg, got, want)
 		}
 	}
 }

@@ -151,13 +151,24 @@ func listSetNamesByPrefixes(be firewall.Backend, prefixes ...string) ([]string, 
 	return names, nil
 }
 
-// feedKeyFromSet extracts the feed key from a set name like "block_ext_v4_hosts_myblock".
+// feedHostSetPrefixes are the per-feed host sets' name prefixes; the feed key
+// follows them.
+var feedHostSetPrefixes = []string{
+	"allow_ext_v4_hosts_", "block_ext_v4_hosts_",
+	"allow_ext_v6_hosts_", "block_ext_v6_hosts_",
+}
 
-func feedKeyFromSet(setName string) string {
-	if i := strings.LastIndex(setName, "_"); i > 0 && i < len(setName)-1 {
-		return setName[i+1:]
+// feedKeyFromSet extracts the feed key from a set name like
+// "block_ext_v4_hosts_myblock" ("" for any other set), and whether the set
+// holds IPv4 addresses. Both come from the prefix: a feed key can itself
+// contain "_v4_" or "_" (a feed named bl-v4-ssh has the key bl_v4_ssh).
+func feedKeyFromSet(setName string) (key string, v4 bool) {
+	for _, p := range feedHostSetPrefixes {
+		if strings.HasPrefix(setName, p) && len(setName) > len(p) {
+			return setName[len(p):], strings.Contains(p, "_v4_")
+		}
 	}
-	return ""
+	return "", false
 }
 
 // unitActive returns true if `systemctl is-active --quiet <unit>` succeeds.

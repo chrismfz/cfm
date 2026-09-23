@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -39,7 +40,9 @@ const graceComment = "CFM auto-unblock"
 
 // DoMany unblocks each of ips as Do does, but reads every source once for the
 // whole batch and runs each tool only for the IPs it holds:
-//   - the feed sets are listed once and each feed host set is read once;
+//   - the feed sets are listed once, and each feed host set is read once
+//     for the batch's IPs of its family (a lone IP of a family is looked up
+//     instead, and a set that can't be read is looked up IP by IP);
 //   - the block sets are written in one batch (RemoveBlockBatch);
 //   - cfm.deny is rewritten once;
 //   - csf, fail2ban and imunify360 are each checked for once;
@@ -290,10 +293,7 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 	if be == nil || len(ips) == 0 {
 		return out, unchecked
 	}
-	sets, err := listSetNamesByPrefixes(be,
-		"allow_ext_v4_hosts_", "block_ext_v4_hosts_",
-		"allow_ext_v6_hosts_", "block_ext_v6_hosts_",
-	)
+	sets, err := listSetNamesByPrefixes(be, feedHostSetPrefixes...)
 	if err != nil {
 		if !nftMissing(err) {
 			for _, ip := range ips {
@@ -308,7 +308,7 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 	}
 	seen := map[string]map[string]bool{} // ip → feed keys
 	hit := func(ip, set string) {
-		fk := feedKeyFromSet(set)
+		fk, _ := feedKeyFromSet(set)
 		if fk == "" {
 			return
 		}
@@ -335,7 +335,7 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 		}
 	}
 	for _, s := range sets {
-		v4 := strings.Contains(s, "_v4_")
+		_, v4 := feedKeyFromSet(s)
 		var fam []net.IP
 		for _, ip := range ips {
 			if (ip.To4() != nil) == v4 {
@@ -347,8 +347,8 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 			continue
 		}
 		elems, err := be.ListSetElementsRaw(s)
-		if err != nil && !nftMissing(err) {
-			elems, err = be.ListSetElementsRaw(s)
+		if err != nil && !nftMissing(err) && !timedOut(err) {
+			elems, err = be.ListSetElementsRaw(s) // a one-off failure; a timeout would just recur
 		}
 		if err != nil {
 			if !nftMissing(err) {
@@ -372,16 +372,34 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 }
 
 // nftMissing reports an error that says the table, set or element isn't
-// there (ENOENT, on both engines).
+// there: nft's own "No such file or directory", or ENOENT from netlink. A
+// missing nft binary or library reads "no such file or directory" too, and
+// must stay an error.
 func nftMissing(err error) bool {
-	return errors.Is(err, syscall.ENOENT) || strings.Contains(strings.ToLower(err.Error()), "no such file or directory")
+	var pe *fs.PathError
+	s := err.Error()
+	if errors.As(err, &pe) || strings.Contains(s, "shared object") || strings.Contains(s, "fork/exec") {
+		return false
+	}
+	return errors.Is(err, syscall.ENOENT) ||
+		strings.Contains(s, "Error: No such file or directory") ||
+		strings.Contains(s, "Could not process rule: No such file or directory")
 }
 
-// firstLine is s up to its first newline: nft follows its error with the
-// command and a caret line.
+// timedOut reports an error from a command or call that ran out of time.
+func timedOut(err error) bool {
+	s := err.Error()
+	return errors.Is(err, context.DeadlineExceeded) || strings.Contains(s, "deadline exceeded") ||
+		strings.Contains(s, "timed out") || strings.Contains(s, "signal: killed")
+}
+
+// firstLine is s up to its first line break, raw or escaped: nft follows its
+// error with the command and a caret line.
 func firstLine(s string) string {
-	line, _, _ := strings.Cut(s, "\n")
-	return strings.TrimSpace(line)
+	for _, br := range []string{"\n", `\n`} {
+		s, _, _ = strings.Cut(s, br)
+	}
+	return strings.TrimSpace(s)
 }
 
 // removeFromFileMany drops the lines of cfgDir/filename that list one of ips

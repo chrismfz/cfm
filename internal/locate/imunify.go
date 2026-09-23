@@ -164,9 +164,10 @@ func imunifyArray(raw []byte) (arr []any, total int64, ok bool) {
 
 // imunifyIncomplete says why a list read may be missing entries, or "": it
 // reached the read's cap, it says it holds more entries than it returned
-// (max_count), or some of its entries couldn't be read (no address or no
-// purpose). An entry missed any of those ways would read as not listed. A
-// country entry has no address and is no such miss: it isn't an IP entry.
+// (max_count), or some of its entries couldn't be read (no address, one that
+// doesn't parse, or no purpose). An entry missed any of those ways would read
+// as not listed. A country entry has no address and is no such miss: it
+// isn't an IP entry.
 func imunifyIncomplete(raw []byte, items []imunifyItem) string {
 	arr, total, _ := imunifyArray(raw)
 	var why []string
@@ -177,7 +178,7 @@ func imunifyIncomplete(raw []byte, items []imunifyItem) string {
 	}
 	bad := len(arr) - len(items) - imunifyCountryEntries(arr)
 	for _, it := range items {
-		if it.Purpose == "" {
+		if _, ok := ipquery.ParseEntry(imunifyEntryString(it.IP, it.Netmask)); !ok || it.Purpose == "" {
 			bad++
 		}
 	}
@@ -189,10 +190,10 @@ func imunifyIncomplete(raw []byte, items []imunifyItem) string {
 
 // imunifyCountryEntries counts the entries without an address that block or
 // allow a country (imunify's "ip-list local … --by-type country"): a type of
-// "country", or no address key at all and a country. An IP entry carries its
-// address's country too, so an entry with an address key (even an empty one)
-// needs the type: an IP entry whose address didn't read must count as
-// unreadable, never as a country.
+// "country", or a country. imunify prints every column, a null one included,
+// so a country entry has ip and network_address keys, both null. An IP
+// entry whose address is there but doesn't parse has an address, so it
+// still counts as unreadable.
 func imunifyCountryEntries(arr []any) int {
 	n := 0
 	for _, e := range arr {
@@ -200,11 +201,10 @@ func imunifyCountryEntries(arr []any) int {
 		if !ok {
 			continue
 		}
-		var addrKey, addr, country, typed bool
+		var addr, country, typed bool
 		for k, v := range m {
 			switch strings.ToLower(k) {
 			case "ip", "network_address":
-				addrKey = true
 				addr = addr || (v != nil && v != "")
 			case "country":
 				country = v != nil && v != ""
@@ -213,7 +213,7 @@ func imunifyCountryEntries(arr []any) int {
 				typed = strings.EqualFold(t, "country")
 			}
 		}
-		if !addr && (typed || !addrKey && country) {
+		if !addr && (typed || country) {
 			n++
 		}
 	}
