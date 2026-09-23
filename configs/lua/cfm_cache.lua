@@ -3,16 +3,25 @@
 -- Site Cache — per-vhost edge caching policy, EDGE SIDE.
 -- Design / plan of record: docs/site-cache-design.md.
 --
--- PHASE 2 — OBSERVE ONLY
--- ----------------------
--- This module pulls the per-vhost cache policy the cfm daemon serves on
--- /nginx/cache/config and, from a server-level `header_filter_by_lua_block`
--- (see openresty.conf / angie.conf, next to the H3 Alt-Svc block), stamps an
--- `X-CFM-Cache` header on responses for vhosts that have a policy. It does
--- NOT cache anything — there is no `proxy_cache` wired yet. The point of this
--- phase is to validate the whole feed→edge→per-request-lookup pipeline and
--- measure its cost on real traffic BEFORE any body is cached. Later phases add
--- the safety rails and turn on caching (docs §14 Phase 3/4).
+-- WHAT IT DOES
+-- ------------
+-- Pulls the per-vhost cache policy the cfm daemon serves on /nginx/cache/config
+-- (a per-worker cache, refreshed every 60s) and decides, per request, whether
+-- the edge may cache it. Caching itself is nginx's proxy_cache in the confs,
+-- bypass-by-default ($cfm_cache_skip "1" at server level); this module only
+-- ever flips the gate open:
+--   * static_gate()  — Tier A, from the static-asset location's access phase:
+--     an armed static tier opens the cfm_static zone (origin headers decide the
+--     TTL, 1h fallback; the stored static recipe/TTL are labels only).
+--   * micro_gate()   — Tier B, from cfm.lua's Step 4 plain allow (HTTPS
+--     `location /` only): the request-side rails (micro_verdict) and, while
+--     MICRO_CACHE_ENFORCE is on, the @cfm_micro_<n>s bucket to ngx.exec to.
+--   * observe()      — the X-CFM-Cache debug stamp (header filter, HTTPS
+--     server, trusted sources with X-CFM-Cache-Debug only).
+--   * policy_key_for() / maybe_flush_stats() — the per-vhost stats key and
+--     the node-wide stats push to /nginx/cache/stats (log phase).
+--   * micro_note()   — remember a micro key whose answer could not be stored
+--     (log phase), so its next requests skip the lock queue.
 --
 -- Structure mirrors cfm_h3_config.lua on purpose (same proven per-worker
 -- async-refresh model, same fail-safe posture): a load error or an unreachable
@@ -22,14 +31,14 @@
 -- ----------------
 -- * SITE_CACHE off (the operator kill switch): one cached-config bool read,
 --   then return — a full no-op, nothing else runs.
--- * Normal traffic (SITE_CACHE on, no X-CFM-Cache-Debug header): that same
---   cached-config read + one schedule-refresh check (a flag + one time compare,
---   ~10 ns when a poll is not due — the per-response cost cfm_h3_config already
---   pays) + one ngx.var read, then return. No policy lookup on the ordinary
---   path. The config read is a cfm_filecache 10s-TTL hit (a table lookup),
---   which cfm.lua already does per request.
--- * An operator debug request additionally does one normalize_host + one table
---   hash lookup (~0.5-2 µs) plus a linear scan of the (tiny) wildcard list.
+-- * Nothing armed on the node (SITE_CACHE on): that same read + one
+--   schedule-refresh check (a flag + one time compare, ~10 ns when a poll is
+--   not due) per gate/stamp call, then return. The config read is a
+--   cfm_filecache 10s-TTL hit (a table lookup), which cfm.lua already does.
+-- * Something armed: a static asset does one policy_for (normalize_host + one
+--   table lookup + a scan of the wildcard list, ~0.5-2 µs); a Step-4 allow
+--   does the same plus, with micro armed and enforced, the request-side rails;
+--   a counted cache response does one policy_key_for in the log phase.
 --
 -- REFRESH MODEL
 -- -------------
@@ -67,7 +76,9 @@ end
 -- nginx >= 1.23 joins repeated response headers in $upstream_http_<name>; older
 -- cores expose only the first line (see micro_gate). Angie is 1.23+-based and
 -- defines nginx_version like any build lua-nginx-module compiles against.
-local NGX_JOINS_HEADERS = type(ngx.config) == "table"
+-- (Guarded on ngx itself too, so the release checklist's plain-LuaJIT require
+-- smoke test can load this module outside nginx.)
+local NGX_JOINS_HEADERS = type(ngx) == "table" and type(ngx.config) == "table"
     and (tonumber(ngx.config.nginx_version) or 0) >= 1023000
 
 -- ---------------------------------------------------------------------------
@@ -87,8 +98,9 @@ local _cache = {
 }
 local _last_refresh_at     = 0
 local _refresh_in_progress = false
--- Fixed feed-poll interval. 60s matches the H3 sibling and needs no tuning for
--- an observe-only phase. CFM is config-file driven, not env-driven, so there is
+-- Fixed feed-poll interval (60s, as the H3 sibling): a policy change or purge
+-- reaches each worker within about a minute. CFM is config-file driven, not
+-- env-driven, so there is
 -- deliberately nothing to override here (an earlier os.getenv gate was wrong:
 -- nginx strips undeclared worker env, so it never fired on a real box).
 local _refresh_sec = 60
@@ -318,12 +330,9 @@ local function rebuild_cache(entries)
     _cache.wild       = wild
     _cache.has_any    = n > 0
     _cache.stats_keys = stats_keys
-    -- has_micro: meta flag = "some vhost has its micro tier armed". B2's observe()
-    -- is already debug-gated and per-vhost (p.micro.on), so it does not read this
-    -- yet; the flag is the cheap fleet-wide early-out that B3's ACCESS-phase micro
-    -- gate will short-circuit on (mirroring has_any) so a static-only/uncached
-    -- fleet pays nothing on the hot path (design §5.6 Invariant 2). Exercised now
-    -- by the unit tests; consumed for real in B3.
+    -- has_micro: "some vhost has its micro tier armed" — the cheap early-out
+    -- micro_gate takes first (mirroring has_any), so a static-only or uncached
+    -- node pays nothing for Tier B on the hot path (design §5.6 Invariant 2).
     _cache.has_micro = micro_n > 0
 end
 
@@ -455,7 +464,7 @@ end
 -- unbounded distinct sub-hosts, so keying per request-host would blow the
 -- cfm_cache_stats dict; keying per policy bounds cardinality to the number of
 -- armed policies. Read-only (no refresh scheduling) — the log phase must not
--- drive I/O; observe() keeps the cache warm.
+-- drive I/O; static_gate / micro_gate / observe keep the cache fresh.
 function _M.policy_key_for(host)
     if not _cache.has_any then return nil end
     local h = normalize_host(host)
@@ -495,8 +504,8 @@ end
 -- single location's proxy_cache_valid applies to every zone it caches into). So
 -- a per-vhost micro TTL is served by one internal location per bucket
 -- (`@cfm_micro_<n>s`), each pinning `proxy_cache cfm_micro_<n>s;` +
--- `proxy_cache_valid 200 <n>s;`. B3 will read a vhost's armed micro policy and
--- ngx.exec to the bucket location; this helper is the mapping it uses. A stored
+-- `proxy_cache_valid 200 <n>s;`. micro_gate returns the bucket location for a
+-- vhost's armed micro policy (cfm.lua ngx.execs to it); this is the mapping. A stored
 -- TTL (recipe preset or operator custom) SNAPS to the nearest bucket — for herd
 -- protection the gap between 7s and 8s is operationally meaningless
 -- (design §5.4), so the snapped menu behaves as effectively continuous.
@@ -530,7 +539,7 @@ end
 
 -- micro_zone_name: the storage zone / internal-location suffix for a stored TTL,
 -- e.g. 5 or "7s" → "cfm_micro_5s". The single source of truth for the bucket
--- name so the conf zones, the daemon dirs and B3's ngx.exec target can't drift.
+-- name so the conf zones, the daemon dirs and micro_gate's target can't drift.
 local function micro_zone_name(ttl)
     return "cfm_micro_" .. micro_bucket_seconds(ttl) .. "s"
 end
@@ -558,7 +567,7 @@ end
 -- Exact lowercase auth-cookie names + name PREFIX / SUFFIX families. A request
 -- carrying any of these bypasses micro-cache (never stored), on every vhost.
 -- Bias toward OVER-inclusion: a false bypass only costs a cache miss, while a
--- missed session cookie would (in B3) serve one user's page to another. The set
+-- missed session cookie would serve one user's page to another. The set
 -- is PHP/cPanel-primary (the fleet) plus the mainstream non-PHP session cookies;
 -- a stack with an unlisted session-cookie name still relies on the response-side
 -- rails (Set-Cookie / Cache-Control: private) and the opt-in strict_cookies.
@@ -1117,7 +1126,7 @@ function _M.observe()
     end
 end
 
--- static_gate: PHASE 3b ACCESS-phase hook for the static-asset location (the
+-- static_gate: ACCESS-phase hook for the static-asset location (the
 -- ONLY Lua on that hot path). Bypass-by-default — it flips $cfm_cache_skip to
 -- "0" (cache this asset) ONLY when the master switch is on AND this vhost has
 -- its static tier armed, and carries the purge generation into $cfm_cache_gen.
@@ -1125,13 +1134,15 @@ end
 -- caching). Never raises (the conf pcall's it too); the fail-safe direction is
 -- "do not cache".
 --
--- SCOPE (Tier A / 3b): this gate does NOT consult the request-cookie allowlist
--- (design §4.1) — the policy carries strict_cookies/auth_cookies but Tier A does
--- not read them yet. Static assets are public, and per-user safety here rests on
+-- SCOPE (Tier A): this gate deliberately does NOT consult the request-cookie
+-- allowlist (design §4.1) — strict_cookies/auth_cookies are Tier B settings.
+-- It reads only the static tier's `on`: the stored static recipe/TTL are labels
+-- (the location's origin-headers + 1h fallback decide the TTL). Static assets
+-- are public, and per-user safety here rests on
 -- the response-side rails nginx already enforces (a Set-Cookie or a
 -- Cache-Control: private/no-store/no-cache response is never stored). The full
--- request-cookie allowlist (built-in names + ignore-list + strict mode) lands
--- with Tier B micro-cache, where per-user HTML makes it essential. Residual:
+-- request-cookie allowlist (built-in names + ignore-list + strict mode) is
+-- Tier B's, where per-user HTML makes it essential. Residual:
 -- a static-extension URL an origin renders per-user with NEITHER Set-Cookie NOR
 -- a private Cache-Control would be cached — narrow, documented in
 -- docs/site-cache-design.md §14. A panel / webmail host (panel_host) is never
@@ -1147,7 +1158,7 @@ function _M.static_gate()
     ngx.var.cfm_cache_gen  = tostring(p.gen or 0)
 end
 
--- micro_gate: PHASE B3b ACCESS-phase hook for Tier B (micro-cache of anonymous
+-- micro_gate: ACCESS-phase hook for Tier B (micro-cache of anonymous
 -- HTML). Called from cfm.lua at the Step 4 plain-allow return, AFTER $cfm_pass is
 -- set. (The Step 2b clearance fast-path is deferred until the §5.5.1 clearance-
 -- cookie-across-ngx.exec ordering is verified on a live edge — see cfm.lua.)

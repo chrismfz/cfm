@@ -412,7 +412,7 @@ type nginxWAFStatsRow struct {
 
 // nginxCacheStatsMsg is the Site Cache snapshot pushed by Lua's
 // cfm_cache.lua schedule_stats_flush_if_needed. Each row is one armed vhost's absolute
-// cache-verdict counts (status -> count, plus "total"); Go upserts idempotently
+// cache-verdict counts (status -> count); Go upserts idempotently
 // so repeated pushes replace a vhost's counts.
 type nginxCacheStatsMsg struct {
 	Rows []nginxCacheStatsRow `json:"rows"`

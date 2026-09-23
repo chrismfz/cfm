@@ -1,6 +1,6 @@
 // internal/webdetector/site_cache_stats.go
 //
-// Site Cache — Tier A per-vhost stats aggregate (design §11.2). The edge counts
+// Site Cache — per-vhost stats, both tiers (design §11.2). The edge counts
 // cache verdicts (HIT/MISS/BYPASS/…) per armed vhost in a lua_shared_dict and
 // pushes an absolute snapshot to /nginx/cache/stats every ~60s
 // (configs/lua/cfm_cache.lua schedule_stats_flush_if_needed). This store holds the latest
@@ -8,7 +8,7 @@
 // site_cache_stats tool read it.
 //
 // v1 scope: a LIVE totals view (absolute counts since the edge last restarted —
-// a reload keeps the lua_shared_dict —
+// a reload keeps the lua_shared_dict unless it changes the dict's size —
 // node-local, not persisted across daemon restarts). Hour-bucketed history —
 // the shape the WAF-stats pipeline uses — is a documented follow-up; a first
 // cut needs only "is this armed vhost actually getting HITs?".
@@ -49,7 +49,7 @@ const (
 var siteCacheStatsKeys = map[string]struct{}{
 	"HIT": {}, "MISS": {}, "BYPASS": {}, "EXPIRED": {}, "STALE": {},
 	"UPDATING": {}, "REVALIDATED": {},
-	"total": {}, // an edge-supplied total (floored at the parts; see siteCacheStatsRow)
+	"total": {}, // not sent by the edge (statuses only); accepted, floored at the parts (siteCacheStatsRow)
 }
 
 // Upsert replaces one host's counts. Fed from the bridge SetCacheStatsHook
@@ -83,8 +83,8 @@ func (s *siteCacheStatsStore) Upsert(host string, counts map[string]int) {
 }
 
 // maybePrune drops, at most once per siteCacheStatsPruneGap, the rows of keys
-// armed() no longer holds. The edge dict keeps a vhost's counts until an edge
-// reload, and the read paths already hide unarmed rows, but without this the
+// armed() no longer holds. The edge dict keeps a vhost's counts until the edge
+// restarts, and the read paths already hide unarmed rows, but without this the
 // rows of every policy ever armed stayed in memory until a daemon restart. It
 // runs on every pushed row and on the list read (so also once the edge stops
 // pushing); armed is called only when a prune is due.
@@ -158,7 +158,7 @@ func (s *siteCacheStatsStore) Hosts() map[string]map[string]int {
 }
 
 // SiteCacheStatsRow is one vhost's cache effectiveness (absolute counts since
-// the edge last restarted; a reload keeps them). hit_ratio_pct is a STRICT hit ratio —
+// the edge last restarted; a reload keeps them unless it resizes the dict). hit_ratio_pct is a STRICT hit ratio —
 // hit / cacheable_total, cacheable_total = hit+miss+expired+stale+updating+
 // revalidated (BYPASS excluded: a bypassed request never had a chance to hit) —
 // the same split cfm_stats.lua's cache_zone_stats uses. Note STALE / UPDATING /
@@ -209,8 +209,8 @@ func siteCacheStatsRow(host string, c map[string]int) SiteCacheStatsRow {
 // armedCacheKeys is the set of currently-armed policy keys (exact hosts +
 // "*.suffix" patterns with at least one ENABLED tier) — the same keys the edge
 // stats are keyed under. The stats read paths filter on it because the edge
-// dict retains a vhost's counts after it is unarmed (no TTL until an edge
-// reload), so the policy store is the source of truth for what is still live.
+// dict retains a vhost's counts after it is unarmed (no TTL; gone when the edge
+// restarts), so the policy store is the source of truth for what is still live.
 // A stored but all-off policy (an opt-out) is NOT armed: it used to count, so
 // a vhost turned off kept showing its old counts as live.
 func (e *Engine) armedCacheKeys() map[string]struct{} {

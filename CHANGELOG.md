@@ -47,6 +47,26 @@ back-filled here — see the git/PR history for that period.
   rejects are unchanged.
 
 ### Changed
+- **Site Cache: an operator runbook, and the docs and tool help now say what
+  the settings really do.** New `docs/site-cache-runbook.md`: arming a vhost,
+  checking one URL with the `X-CFM-Cache` debug stamp (with every
+  `microcache=bypass:<reason>`), reading the stats, purge, turning the
+  micro-cache on per node, and the kill switch. `docs/site-cache-design.md`
+  now describes what was built instead of the original proposal. The README
+  gained a Site Cache section, CLI and API rows. The CLI help and the MCP
+  `site_cache_status` / `site_cache_stats` descriptions now say:
+  - the static tier's recipe and TTL are labels: static assets follow the
+    origin's `Cache-Control` / `Expires`, with a 1 h fallback;
+  - the micro TTL snaps to 1/2/5/10/30/60 s, empty means 1 s, and a recipe
+    name does not set it;
+  - what BYPASS counts: mostly static assets of an armed vhost whose static
+    tier is off. Micro-cache declines are not counted at all; the debug stamp
+    shows them;
+  - the `SITE_CACHE` / `MICRO_CACHE_ENFORCE` state is not in their output.
+
+  A node installed before the per-bucket micro zones may still have
+  `/var/cache/nginx/cfm_micro`. Nothing uses it and nothing creates it any
+  more, so it is safe to delete (runbook §10).
 - **Site Cache micro-cache (Tier B) is ready to be turned on, one node at a
   time.** `MICRO_CACHE_ENFORCE` still defaults to `0`; before setting it to
   `1` on a node, run the on-box checklist in `docs/site-cache-design.md` §5.7.

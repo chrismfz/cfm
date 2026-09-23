@@ -1,18 +1,30 @@
 # Site Cache (per-vhost edge caching) — design & plan of record
 
-Status: **Proposal / design.** Nothing built yet. This is the ONE design doc for
-per-vhost edge caching in CFM; we follow it. Scope: the edge configs
-(`configs/openresty.conf`, `configs/angie.conf`), a new decision module in
-`configs/lua/`, a new per-vhost store + API + CLI in `internal/webdetector`, a
-new `/cfm-admin` page under `internal/webui/static/`, and the daemon↔edge
-bridge in `internal/webdetector/nginx_bridge.go`.
+Status: **Built** (§14 records each phase as built). This is the ONE design doc
+for per-vhost edge caching in CFM; the operator view — arming, verifying,
+stats, purge, turning Tier B on, incidents — is
+[`site-cache-runbook.md`](site-cache-runbook.md).
 
-The feature lets an operator (and a scoped cPanel user, for their own domains)
-turn caching **on per vhost** — static-asset cache and/or short micro-cache of
-HTML — pick a **recipe** (lean → aggressive) or a custom TTL, **purge** (global
-or per-vhost), and see per-vhost state in cfm-admin (filter/sort) and via the
-CLI (`cfm webtop site-cache list`). Managed identically from three surfaces —
-API, CLI, cfm-admin — exactly like WAF excludes / Challenge Access.
+- **Built:** the per-vhost store + API + CLI with scope checks
+  (`internal/webdetector/site_cache*.go`); the edge feed and decision module
+  (`configs/lua/cfm_cache.lua`); the `SITE_CACHE` kill switch; **Tier A**
+  (static assets) live for armed vhosts; **Tier B** (micro-cache of HTML)
+  built with the full §4 rails and in **dry run** until a node sets
+  `MICRO_CACHE_ENFORCE = 1` (after §5.7); purge (generation bump); per-vhost
+  stats (§11); the read-only MCP tools `site_cache_status` /
+  `site_cache_stats`; the audit log; cache-dir provisioning; the CI guard
+  (§13).
+- **Not built:** the cfm-admin page and its recipe catalog (§7.3, §8 — the
+  last item of the sweep), per-URL purge, static TTL buckets (§5.4), durable
+  or historical stats, micro-cache on the Step 2b clearance fast path (§5.5),
+  the `whats_wrong` "armed but ~0 hits" signal, the §12 "planned" knobs.
+
+The feature lets an operator (and a scoped cPanel user, for their own domains,
+through the API) turn caching **on per vhost** — static-asset cache and/or
+short micro-cache of HTML — pick a TTL, **purge** (global or per-vhost), and
+see per-vhost state and effectiveness. Managed from the API and the CLI
+(`cfm webtop site-cache …`), read through MCP; the cfm-admin page is planned
+(§7.3).
 
 ---
 
@@ -32,20 +44,26 @@ invariants, in priority order:
    `[webdetector] SITE_CACHE` is therefore a **kill switch, default ON (1)** — a
    default-*off* master would just be a redundant second opt-in. It is not what
    makes the feature safe; the empty per-vhost store is. `SITE_CACHE = 0` is the
-   panic button: it removes all per-request edge cost (`cfm_cache.lua` → full
-   no-op, mirrored to the edge like `FP_POLICY`) fleet-wide in ~10s **without**
-   disarming any vhost, so re-arming is instant.
+   panic button: it stops caching on the node (`cfm_cache.lua` gates, stamp and
+   stats push off, mirrored to the edge like `FP_POLICY`) within ~10 s — per
+   node, from its own `detectors.conf` — **without** disarming any vhost, so
+   re-arming is instant.
 2. **Arming a vhost is the single opt-in — exact-host.** `myip.gr` and
    `www.myip.gr` are two explicit entries; there is **no** implicit `*.myip.gr`.
    Wildcards are an advanced opt-in, never a default.
-3. **Bypass-by-default at the edge.** The Lua sets `$cfm_cache_skip = 1` (do
-   not cache) at the start of every request and flips it to `0` **only** when
-   every safety gate in §4 passes. A regression that drops the gate fails
-   closed (no caching), never open.
+3. **Bypass-by-default at the edge.** The conf pre-sets `$cfm_cache_skip "1"`
+   (do not cache) and `$cfm_cache_gen "0"` at server level; the Lua
+   (`static_gate` / `micro_gate`) flips skip to `0` **only** when every safety
+   gate in §4 passes. A regression that drops the gate fails closed (no
+   caching), never open.
 4. **Caching lives *behind* enforcement.** WAF, Challenge, IP-block, traffic
    rules all run in the `access` phase; the cache is consulted in the upstream
-   phase. **A cache HIT never bypasses WAF, a challenge, or an IP block** — the
-   request still runs the full `cfm.lua` before any cached body is served.
+   phase. **A Tier B HIT never bypasses WAF, a challenge, or an IP block** — the
+   request runs the full `cfm.lua` (to its Step 4 allow) before any cached
+   HTML is served. Tier A lives in the static-asset location, which never ran
+   `cfm.lua` (assets skip its WAF / challenge / bridge decisions, cached or
+   not — unchanged by caching); an nftables IP block still applies there, below
+   the edge.
 5. **The safety rails (§4) are absolute.** They do not depend on the recipe,
    the TTL, or who armed the vhost. "Full power" (§9) means freedom over TTL
    and recipe — **never** freedom to disable a rail.
@@ -68,6 +86,8 @@ with TTL and recipes as long as the rails hold.
   (OpenResty/Angie), same as WAF/rules. DNAT clients hit origin directly.
 - **Not** integration with the `ngm1` MCP `site_cache_*` tools — that is a
   separate product surface. Per decision, we ignore it and build CFM-native.
+  (CFM's own read-only MCP tools happen to share the prefix:
+  `site_cache_status`, `site_cache_stats`.)
 - **Not** arbitrary per-request TTL down to the second (nginx constraint, see
   §5.4) — we offer a rich, extensible **menu of TTL buckets** instead.
 
@@ -78,8 +98,16 @@ with TTL and recipes as long as the rails hold.
 There is **no** prior cache *design doc* — this is the first. There is only
 leftover **code** from the ripped-out global caching. Verdicts:
 
-| Leftover | What it is | Verdict |
-|---|---|---|
+| Leftover (at design time) | What it was | Verdict | As built |
+|---|---|---|---|
+| `configs/lua/cfm_cache_log.lua` | Ready HIT/MISS/BYPASS/… counter, `log_by_lua_block`-only, no I/O; orphaned. | Keep & wire (§11). | Wired: the http-level `log_by_lua` counts through it, the stats push reads it. |
+| `ngx.shared.cfm_cache_stats` | Read by `cfm_stats.lua`, never declared → silent no-op. | Declare it (§11). | Declared, `8m`, both confs (plus `cfm_cache_uncacheable 4m` for Tier B). |
+| Commented "Future caching" recipe in both confs | A note left for this work. | Implement as Tier A. | Implemented (the static-asset locations); the note is gone. |
+| Cache dirs `/var/cache/nginx/cfm_static`, `…/cfm_micro` | Created by the daemon and `scripts/cfm-cache-dirs.sh`. | Use the canonical paths. | `cfm_static` + `cfm_micro_{1,2,5,10,30,60}s`; the single `cfm_micro` is **retired** (no conf ever used it; it may linger on older nodes — runbook §10). |
+| `configs/lua/cfm_pcw.lua` | **NOT a cache remnant**: the live post-clearance nav-cadence shadow counter. | Do not touch. | Untouched. |
+| `configs/lua/cfm_purge.lua` + `nginx_bridge_purge.go` | Purge plumbing (per-IP). | Extend for cache purge (§10). | Not extended: cache purge is the generation bump in the store (§10); these still purge per-IP state only. |
+
+---|---|---|
 | `configs/lua/cfm_cache_log.lua` | Ready HIT/MISS/BYPASS/EXPIRED/STALE/… counter, `log_by_lua_block`-only, no I/O. **Orphaned** (not `require`d anywhere). | **Keep & wire** — this is our observability layer (§11). |
 | `ngx.shared.cfm_cache_stats` | Read by `cfm_stats.lua:398-399`, **never declared** in `lua_shared_dict` → silent no-op. | **Declare it** (§11). |
 | Commented "Future caching" recipe, `openresty.conf:841-849` + `:868` (angie `:828-834`) | A deliberate note left for exactly this work; sketches `proxy_cache_path` + per-vhost `set $cfm_static_cache`. | **Implement** as Tier A (§3, §5). |
@@ -94,34 +122,41 @@ leftover **code** from the ripped-out global caching. Verdicts:
 Two tiers, one management model.
 
 ```
-                         ┌───────────────────────── EDGE (OpenResty/Angie) ─────────────────────────┐
-  client ──HTTPS/QUIC──► │  server{}                                                                 │
-                         │    set $cfm_cache_skip 1;  set $cfm_cache_zone "";  set $cfm_cache_ttl 0; │
-                         │                                                                           │
-                         │  ┌ static-asset location (css/js/img/…) ──────────┐                       │
-                         │  │ minimal access_by_lua: cache-gate lookup only  │  TIER A: static cache │
-                         │  │ proxy_cache $cfm_cache_zone;                    │  (cfm_static_*)       │
-                         │  └────────────────────────────────────────────────┘                       │
-                         │  ┌ catch-all location (/) ───────────────────────┐                        │
-                         │  │ access_by_lua_file cfm.lua  (full enforcement) │  TIER B: micro-cache  │
-                         │  │   Step 2b / Step 4 allow → cache-policy lookup │  of anonymous HTML    │
-                         │  │ proxy_cache $cfm_cache_zone;                    │  (cfm_micro_*)        │
-                         │  └────────────────────────────────────────────────┘                       │
-                         │                    │ every N s: GET /nginx/cache/config (edge-pull)        │
-                         └────────────────────┼──────────────────────────────────────────────────────┘
-                                              ▼ unix socket, token-gated
-                         ┌──────────────────── DAEMON (internal/webdetector) ───────────────────────┐
-                         │  siteCacheStore  ←→  /var/lib/cfm/webdetector_site_cache.json             │
-                         │  API /api/v1/site-cache/*   CLI cfm webtop site-cache   cfm-admin page    │
-                         └──────────────────────────────────────────────────────────────────────────┘
+                     ┌──────────────────────────── EDGE (OpenResty/Angie) ────────────────────────────┐
+  client ──HTTP(S)─► │ server{}:  set $cfm_cache_skip "1";  set $cfm_cache_gen "0";                   │
+                     │           (HTTPS server also: set $cfm_micro_conf "";)                         │
+                     │                                                                                │
+                     │ ┌ static-asset location (css/js/img/fonts…) ── both servers ─┐  TIER A        │
+                     │ │ access_by_lua: cfm_cache.static_gate() only (no cfm.lua)   │  proxy_cache    │
+                     │ │ proxy_cache cfm_static;  valid 200 1h (origin headers win) │  cfm_static     │
+                     │ └────────────────────────────────────────────────────────────┘                 │
+                     │ ┌ location / (HTTPS) ── set $cfm_micro_conf "1"; ─────────────┐                 │
+                     │ │ access_by_lua_file cfm.lua (full enforcement)              │  TIER B         │
+                     │ │   Step 4 plain allow → micro_gate() → ngx.exec(@cfm_micro_N)│  (no proxy_cache│
+                     │ └────────────────────────────────────────────────────────────┘   here)         │
+                     │ ┌ location @cfm_micro_<n>s  ×6  (internal) ──────────────────┐                 │
+                     │ │ proxy_cache cfm_micro_<n>s;  valid 200 <n>s; origin CC off │                 │
+                     │ └────────────────────────────────────────────────────────────┘                 │
+                     │ log phase: cfm_cache_log counters · micro_note · stats push (1 worker/node)    │
+                     │   ▲ GET /nginx/cache/config  (each worker, every 60 s)                         │
+                     │   │ POST /nginx/cache/stats  (one worker per node, every ~60 s) ▼              │
+                     └───┼────────────────────────────────────────────────────────────┼───────────────┘
+                         │   unix socket /var/run/cfm/cfm_nginx.sock, token-gated     │
+                     ┌───┴──────────────── DAEMON (internal/webdetector) ─────────────┴───────────────┐
+                     │ siteCacheStore ←→ /var/lib/cfm/webdetector_site_cache.json · stats store (RAM) │
+                     │ API /api/v1/site-cache/*   CLI cfm webtop site-cache   MCP site_cache_status/  │
+                     │                                                             site_cache_stats   │
+                     └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Tier A — static asset cache** (low risk). Caches `css/js/woff/img/…` by
   extension, in the existing static-asset location that already skips the heavy
-  `cfm.lua`. Safe because assets carry no `Set-Cookie` and are not per-user.
+  `cfm.lua`, on both the HTTP and HTTPS servers. Safe because assets carry no
+  `Set-Cookie` and are not per-user.
 - **Tier B — micro-cache of HTML** (high risk — this is what broke before).
-  Very short TTL, **anonymous traffic only**, hard gated (§4). Absorbs bursts
-  on heavy pages (the `myip.gr` case).
+  Very short TTL, **anonymous traffic only**, hard gated (§4), HTTPS only, and
+  in dry run until `MICRO_CACHE_ENFORCE = 1`. Absorbs bursts on heavy pages
+  (the `myip.gr` case).
 
 A vhost may enable **Tier A, Tier B, or both** (per decision).
 
@@ -250,9 +285,12 @@ to `cfm_cache.lua`, asserting the stats key of every request host matches
 feed field is one the edge knows and keeps in the policy it applies.
 
 `cfm_clearance`-cookie holders (cleared visitors) are still *anonymous* to the
-app, so they **may** be served micro-cache; the cache key never varies on the
-clearance cookie, and the clearance cookie is refreshed per-response by the edge
-(§5.5 flags the ordering item to verify in implementation).
+app, and the cookie is on the ignore-list, so they **may** be served
+micro-cache; the cache key never varies on the clearance cookie. *As built they
+are not:* a cleared visitor returns at cfm.lua's Step 2b fast path, which is
+not a micro entry until the clearance-cookie ordering item (§5.5 item 1) is
+verified on a live edge — micro is entered only at Step 4 (uncleared but
+allowed).
 
 ### 4.1 Cookie handling — why the challenge cookie does **not** block caching
 
@@ -275,8 +313,9 @@ plus an explicit **ignore-list** that caching treats as anonymous:
 So the answer to "won't our own challenge-solve cookie stop caching?" is **no**:
 `cfm_clearance` is on the ignore-list. A visitor who is *anonymous but cleared*
 (solved the challenge, no app login) is exactly the burst traffic micro-cache
-exists to absorb on a heavy page — and they get cached. Only a **named app
-session** bypasses.
+exists to absorb on a heavy page — and they get cached once Step 2b becomes a
+micro entry (as built, only Step 4 is; see above). Only a **named app session**
+bypasses.
 
 **The allowlist's blind spot** is an app using an unknown session-cookie name.
 Two layers cover it: (1) the **response-side rails** — a page that renders
@@ -289,9 +328,12 @@ cookie. Default is the allowlist (effective); `strict_cookies` is opt-in for a
 site the operator wants to be paranoid about. This is the same trade-off the
 classic nginx WordPress micro-cache recipe makes, tuned for the cPanel fleet.
 
-The §11 **BYPASS counter is how you validate this in production**: if a vhost
-shows high BYPASS + low HIT, the cookie allowlist (or `strict_cookies`) is
-bypassing traffic you expected to cache — tune it there, don't guess.
+**The debug stamp is how you validate this in production**: on a micro-armed
+vhost, `X-CFM-Cache: … microcache=bypass:auth:<cookie>` / `strict:<cookie>`
+names the cookie that declined a request (§11.3; `docs/site-cache-runbook.md`
+§4) — tune the allowlist there, don't guess. The §11 counters do **not** show
+it: a request the cookie rails decline never reaches a cache location, so it
+is not counted at all (BYPASS counts something else, §11.1).
 
 > **As-built (Tier A / 3b):** this request-cookie allowlist is **not** wired on
 > the Tier A static path — `static_gate` does not read
@@ -326,13 +368,13 @@ zone only bites when a location activates `proxy_cache` **and** the bypass gate
 allows it. Declared identically in **both** confs, under
 `/var/cache/nginx/cfm_*` (the paths the daemon already creates):
 
+*As built* (the planned per-TTL static zones `cfm_static_{1h,7d,30d}` were not
+built — Tier A has one zone and follows the origin's headers, §5.4):
+
 ```nginx
-# TTL buckets (see §5.4) — an admin-extensible menu, one zone per bucket.
-# Static (disk): 1h / 7d / 30d
-proxy_cache_path /var/cache/nginx/cfm_static_1h  levels=1:2 keys_zone=cfm_static_1h:20m  max_size=5g  inactive=2h  use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_static_7d  levels=1:2 keys_zone=cfm_static_7d:20m  max_size=10g inactive=8d  use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_static_30d levels=1:2 keys_zone=cfm_static_30d:20m max_size=20g inactive=31d use_temp_path=off;
-# Micro (tiny, short-lived; may live on tmpfs — see §5.6): 1/2/5/10/30/60s
+# Static (disk): one zone
+proxy_cache_path /var/cache/nginx/cfm_static      levels=1:2 keys_zone=cfm_static:20m    max_size=10g  inactive=7d   use_temp_path=off;
+# Micro (tiny, short-lived; on disk): 1/2/5/10/30/60s — cfm_cache.lua MICRO_BUCKETS
 proxy_cache_path /var/cache/nginx/cfm_micro_1s   levels=1:2 keys_zone=cfm_micro_1s:10m  max_size=512m inactive=30s  use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_micro_2s   levels=1:2 keys_zone=cfm_micro_2s:10m  max_size=512m inactive=30s  use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_micro_5s   levels=1:2 keys_zone=cfm_micro_5s:10m  max_size=512m inactive=60s  use_temp_path=off;
@@ -342,11 +384,15 @@ proxy_cache_path /var/cache/nginx/cfm_micro_60s  levels=1:2 keys_zone=cfm_micro_
 ```
 
 Each cache location also carries the **anti-stampede** trio (§5.6):
-`proxy_cache_lock on;`, `proxy_cache_use_stale updating error timeout;`,
-`proxy_cache_background_update on;` (Tier B: `off`, §4) — plus `proxy_cache_bypass`/`proxy_no_cache
-$cfm_cache_skip;` (§0) and `proxy_cache_key "g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri";` (§4, §10).
+`proxy_cache_lock on;`, `proxy_cache_use_stale updating error timeout;`
+(Tier B adds `http_500 http_502 http_503 http_504`),
+`proxy_cache_background_update on;` (Tier B: `off`, §4) — plus
+`proxy_cache_bypass $cfm_cache_skip $cfm_req_auth;` / `proxy_no_cache
+$cfm_cache_skip $cfm_cache_non200 $cfm_req_auth …;` (§0, §4) and
+`proxy_cache_key "g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri";`
+(§4, §10). `check_site_cache_config.sh` pins every one of these (§13).
 
-### 5.2 Per-request decision transport: edge-pull → shared dict → local lookup
+### 5.2 Per-request decision transport: edge-pull → per-worker table → local lookup
 
 This is the **WAF/Clam/H3-exclude** model, **not** the fppolicy per-key RPC
 model — chosen deliberately:
@@ -354,41 +400,46 @@ model — chosen deliberately:
 - fppolicy does an **RPC per key** because fingerprints are **high-cardinality**
   (thousands) → it needs an RPC budget.
 - Cache policy is **per vhost → low cardinality** (the number of domains). So
-  the edge **polls the whole table** every `CFG.cache_cfg_refresh_sec` via
-  `GET /nginx/cache/config`, stashes it in a dedicated shared dict + a
-  `require`d per-worker module (mirrors `refresh_waf_excludes_if_needed()`,
-  `cfm.lua:876`), and **each request does a local map lookup** — zero RPC on the
-  hot path, no budget to tune.
+  the edge **polls the whole table** via `GET /nginx/cache/config` and **each
+  request does a local map lookup** — zero RPC on the hot path, no budget to
+  tune.
 
-New module `configs/lua/cfm_cache.lua` (mirrors `cfm_waf_excl.lua`): parses the
-config into host→policy, exposes `policy_for(host, uri, is_static)` returning
-`{skip, zone, ttl}`. Must be a `require`d module, not a file-local — an
-`access_by_lua_file` resets file-locals per request (the WAF-excl PITFALL).
+*As built*, `configs/lua/cfm_cache.lua` mirrors `cfm_h3_config.lua`: each
+worker keeps its own table (no shared dict), refreshed every 60 s (fixed) by
+an async `ngx.timer.at(0)` that the first request finding it stale schedules;
+a failed pull keeps the last table. `rebuild_cache` turns the feed into exact
+hosts + `*.suffix` wildcards (most specific first); `policy_for(host)` returns
+the raw policy `{gen, static, micro, strict_cookies, auth_cookies}` (or nil).
+The public entry points are `static_gate`, `micro_gate`, `observe`,
+`policy_key_for`, `maybe_flush_stats` and `micro_note`. It is a `require`d
+module, not a file-local — an `access_by_lua_file` resets file-locals per
+request (the WAF-excl PITFALL).
 
 ### 5.3 Insertion points in `cfm.lua`
 
-Micro-cache (Tier B) is decided at the **allow-returns**, after all enforcement:
-
-- **Step 2b** (`cfm.lua:1502`, the dominant real-traffic clearance path) and
-- **Step 4** (`cfm.lua:1632`, the plain allow).
-
-Both are **after** Step 0a1 (`/.well-known/` carve-out, `:1202`), so ACME/DCV is
-never cached. At those points `host`, `uri`, `method`, `scheme` and clearance
-state are already computed (`cfm.lua:1048-1054`). The Lua calls
-`cfm_cache.policy_for(...)`, applies the §4 rails, and on success sets:
+Micro-cache (Tier B) is decided at the **allow-return**, after all enforcement.
+The plan named two points — **Step 2b** (the clearance fast path) and **Step 4**
+(the plain allow); *as built* it is **Step 4 only** (Step 2b waits on §5.5
+item 1), and `cfm_micro_entry_structure_test.lua` pins that. Step 4 is after
+Step 0a1 (the `/.well-known/` carve-out), so ACME/DCV is never cached.
+`micro_cache_target()` calls `cfm_cache.micro_gate()` under a pcall;
+`micro_gate` applies the §4 rails and, on a cache decision, sets
 
 ```lua
 ngx.var.cfm_cache_skip = "0"
-ngx.var.cfm_cache_zone = pol.zone   -- e.g. "cfm_micro_1s"
-ngx.var.cfm_cache_ttl  = pol.ttl    -- informational / stats
+ngx.var.cfm_cache_gen  = tostring(pol.gen)
+return "@cfm_micro_" .. bucket .. "s"   -- cfm.lua then: return ngx.exec(target)
 ```
 
-Static (Tier A) is decided in the static-asset location. That location currently
-does `access_by_lua_block { return; }` (skips *all* of `cfm.lua`, including WAF —
-correct for assets). We replace the bare `return` with a **minimal**
-`access_by_lua_block` that does **only** the `cfm_cache` shdict lookup and sets
-the three vars — no WAF, no decision RPC. Cost is one shared-dict `get`
-(microseconds); when `SITE_CACHE=0` it short-circuits immediately.
+HTTPS only (the micro locations live in the HTTPS server), only from the
+`location /` carrying the `$cfm_micro_conf "1"` sentinel, never on an internal
+redirect, and only while `MICRO_CACHE_ENFORCE = 1`.
+
+Static (Tier A) is decided in the static-asset location, which skips *all* of
+`cfm.lua` (correct for assets). Its `access_by_lua_block` calls only
+`cfm_cache.static_gate()` — no WAF, no decision RPC: one per-worker table
+lookup; when `SITE_CACHE = 0` it returns at once. For an armed static tier (and
+not a panel host) it sets `$cfm_cache_skip = "0"` and `$cfm_cache_gen`.
 
 ### 5.4 TTL model (honest nginx constraint → TTL buckets)
 
@@ -413,16 +464,19 @@ only a little startup memory.
 > validity. So each TTL bucket is a **separate internal location**
 > `@cfm_micro_<n>s` pinning `proxy_cache cfm_micro_<n>s;` +
 > `proxy_cache_valid 200 <n>s;`, and the allow-path (Step 2b/4) `ngx.exec`s to the
-> bucket its policy snaps to. B1 declares the six zones (inert) + the
-> `cfm_cache._micro_bucket` snapper; B2 adds the internal locations + routing.
+> bucket its policy snaps to. B1 declared the six zones + the
+> `cfm_cache._micro_bucket` snapper; B3a added the internal locations and B3b
+> the routing.
 
 The stored TTL is parsed with the units the daemon accepts (`s`/`m`/`h`/`d`,
 an optional leading `+`): `1m` is 60 s (as-built fix — the edge used to read only the digits, so `1m` was
 1 s), and anything above 60 s clamps to the 60 s bucket; an empty or
 unparseable TTL gets the 1 s bucket.
 
-**Micro — recommended presets AND custom, both work.** The recommended micro
-bucket set is **`{1, 2, 5, 10, 30, 60}s`** (6 tiny zones). The UI offers:
+**Micro — recommended presets AND custom, both work.** The micro bucket set is
+**`{1, 2, 5, 10, 30, 60}s`** (6 tiny zones). *As built* the TTL comes only from
+the tier's `ttl` (`--micro-ttl`); a recipe name does not set it, so a micro
+tier without a TTL gets the 1 s bucket. The planned UI (§7.3) offers:
 - **Recommended presets:** `micro_safe → 1s`, `micro_aggressive → 15–30s`.
 - **Custom TTL field:** the operator types a value; it **snaps to the nearest
   bucket**. For micro-cache (herd protection), the difference between 7s and 8s
@@ -432,9 +486,12 @@ bucket set is **`{1, 2, 5, 10, 30, 60}s`** (6 tiny zones). The UI offers:
   admin who wants a bucket outside the menu adds one = a rare zone-list regen +
   reload (never a per-vhost event).
 
-**Static** buckets: `{1h, 7d, 30d}` (you said static is fine as-is). Aggressive
-static also adds `Cache-Control: public, immutable` via `add_header` on HIT for
-the asset location.
+**Static** buckets `{1h, 7d, 30d}` and an aggressive `Cache-Control: public,
+immutable` were planned and **not built**: *as built* Tier A has one zone
+(`cfm_static`) whose location keeps the origin's `Cache-Control` / `Expires`
+with a `proxy_cache_valid 200 1h` fallback, and `static_gate` reads only the
+static tier's `on` — the stored static recipe and TTL are labels (the CLI and
+MCP descriptions say so).
 
 If truly arbitrary (non-snapped) per-request TTL is ever required, the escape
 hatch is OpenResty `srcache` with a Lua-computed store TTL — but it needs a
@@ -471,22 +528,26 @@ The whole point is fewer origin round-trips, so the machinery itself must never
 become the cost. Three invariants make that a guarantee, not a hope:
 
 - **Invariant 1 — zero per-request daemon RPC.** A cache decision costs **one
-  shared-dict lookup** (`cfm_cache.policy_for`), never a bridge call. The policy
-  table is pulled by a background timer (`SITE_CACHE_CFG_REFRESH_SEC`, default
-  10s) into a shdict + per-worker module — the exact WAF-excludes refresh
-  pattern already in production (`cfm.lua:876`). This is *why* we chose edge-pull
-  over the fppolicy per-key RPC (§5.2): per-vhost is low-cardinality, the whole
-  table fits in a shdict, and **no request ever waits on the daemon.**
+  per-worker table lookup** (`cfm_cache.policy_for`), never a bridge call. *As
+  built:* each worker pulls the policy table on its own every 60 s (fixed, no
+  knob), from an async `ngx.timer.at(0)` that the first request finding the
+  cache stale schedules — the `cfm_h3_config.lua` model, no shared dict. This is
+  *why* we chose edge-pull over the fppolicy per-key RPC (§5.2): per-vhost is
+  low-cardinality, the whole table fits in a worker, and **no request ever
+  waits on the daemon.**
 - **Invariant 2 — near-zero cost when unused.** A `has_any` meta flag (like WAF
   `handleWAFExcludedMeta`) gates both tiers: if `SITE_CACHE=0` or no vhost has
-  caching enabled, the static-location `access_by_lua_block` and the Step 2b/4
-  hooks short-circuit on a single boolean — the static path stays effectively as
-  cheap as today's bare `return`. A fleet that doesn't use caching pays nothing.
+  caching enabled, the static-location `access_by_lua_block` and the Step 4
+  hook short-circuit on a single boolean (`has_micro` likewise for Tier B) — the
+  static path stays effectively as cheap as a bare `return`. A node that doesn't
+  use caching pays nothing.
 - **Invariant 3 — the request path never blocks on the daemon.** Fail-open
   everywhere: a failed/slow/absent config pull keeps the last snapshot, or (if
   never pulled) leaves caching off (bypass-by-default). A daemon hiccup can only
-  ever mean "no caching," never a stalled or slowed request. The pull rides the
-  existing keepalive'd unix socket + circuit breaker.
+  ever mean "no caching," never a stalled or slowed request. *As built* each
+  pull is one fresh unix-socket request (`Connection: close`, 200 ms timeouts)
+  in a timer, never on the request path; there is no circuit breaker (a failed
+  pull just keeps the last table until the next one).
 
 **Anti-stampede is the actual CPU win.** Every cache location sets
 `proxy_cache_lock on;` + `proxy_cache_use_stale updating error timeout;` +
@@ -514,26 +575,22 @@ arrive while a probe of such a key is in flight (one probe per mark) queue.
 
 | Cost | Magnitude | Notes |
 |---|---|---|
-| policy shdict lookup | µs | one lock-light read |
+| policy lookup (per-worker table) | µs | normalize_host + one table lookup + a scan of the wildcard list |
 | cache key md5 + lookup | µs | nginx-native, only in cache locations |
-| stats `incr` (log phase) | µs, off the serving path | gated by `SITE_CACHE_STATS`, cache-enabled hosts only |
-| background config pull | once / 10s / node | **not** per-request |
+| stats `incr` (log phase) | ~0.5 µs, off the serving path | counted responses of armed vhosts only (no knob) |
+| background config pull | once / 60 s / worker | **not** per-request |
+| stats push | once / 60 s / node | ~40 ms in a timer at 5000 vhosts (§14 3c) |
 | **on HIT** | **− origin round-trip, − PHP exec** | **large net CPU/latency saving** |
 | on MISS | + key hash + store | trivial vs the origin fetch it wraps |
 
 **Disk vs RAM.** `use_temp_path=off` avoids a cross-filesystem rename. Micro
 entries are tiny and short-lived, so the micro zones may optionally sit on
 **tmpfs** (RAM-backed, zero disk I/O) with a bounded `max_size` — a good default
-for herd protection. Static stays on disk (larger, longer-lived).
+for herd protection. Static stays on disk (larger, longer-lived). *As built*
+every zone is on disk under `/var/cache/nginx` (nothing provisions a tmpfs).
 
-**Validation before any real caching (Phase 2 is observe-only).** Phase 2 sets
-`$cfm_cache_*` + the `X-CFM-Cache` header but does **not** activate
-`proxy_cache`, so the added Lua cost (the shdict lookups) is measured in
-isolation on a live box — watch `$cfm_lua_ms` (already logged) before/after — and
-confirmed to be in the noise before Phase 3 turns on real caching. A `map`-based
-static gate (pure C, but reload-bound) is the fallback if the static-path lookup
-ever shows measurable overhead; we prefer shdict for no-reload consistency and
-expect no measurable delta.
+(The observe-only Phase 2 that measured this Lua cost before any body was
+cached is history: §14 item 2.)
 
 ---
 
@@ -602,9 +659,10 @@ the edge access log (`ucache=` and `up=cfm_apache_micro` vs `up=cfm_apache`).
 
 ## 6. Data model (the per-vhost store)
 
-New `siteCacheStore` in `internal/webdetector/site_cache.go`, JSON at
-`/var/lib/cfm/webdetector_site_cache.json` (knob `SITE_CACHE_STORE_PATH`),
-write-through source of truth with atomic save (the store mechanics of
+`siteCacheStore` in `internal/webdetector/site_cache.go`, JSON at
+`/var/lib/cfm/webdetector_site_cache.json` (knob `SITE_CACHE_STORE_PATH`; file
+mode 0600; at most 5000 entries), write-through source of truth with atomic
+save (the store mechanics of
 `http3_overrides_store.go`), plus the forward-compatible freezing of rows it
 cannot load that `challenge_access.go` uses (below). One entry per
 vhost, holding **independent per-tier sub-policies** so a vhost can run static
@@ -615,8 +673,8 @@ and micro together:
   "host": "myip.gr",
   "scope_hosts": ["myip.gr"],          // audit only: [host] if a scoped token created it, absent if an admin did
   "generation": 1758585600123,           // wall-clock ms, replaced by Purge (§10); part of the cache key
-  "static": { "enabled": true,  "recipe": "static_aggressive", "ttl": "7d" },
-  "micro":  { "enabled": false, "recipe": "micro_safe",        "ttl": "1s" },
+  "static": { "enabled": true,  "recipe": "static_aggressive", "ttl": "7d" },  // recipe/ttl: labels at the edge (§5.4)
+  "micro":  { "enabled": false, "recipe": "micro_safe",        "ttl": "1s" },  // ttl snaps to a bucket (§5.4)
   "strict_cookies": false,               // §4.1 advanced: bypass on ANY non-ignored cookie
   "auth_cookies": [],                    // §4.1 per-vhost extra app-session cookie names
   "created_at": "2026-09-21T...", "updated_at": "2026-09-21T..."
@@ -746,16 +804,16 @@ is fixed.
 
 ## 7. Management surfaces
 
-### 7.1 HTTP API (`/api/v1`, rows added to `apiRoutes()` in `http_api.go:44-127`)
+### 7.1 HTTP API (`/api/v1`, rows in `apiRoutes()` in `http_api.go`)
 
 | Method | Path | Notes |
 |---|---|---|
 | GET  | `/api/v1/site-cache/list` | scope-filtered; every stored entry (armed, and all-off opt-outs), sorted by host; `unloadable` names hosts whose stored row this build cannot load (treated as opted out, §6) |
 | GET  | `/api/v1/site-cache/get?host=` | one vhost |
 | POST | `/api/v1/site-cache/set` | `requirePOST`; **merge**-upsert (host in body); scoped→own host only. One entry per vhost, so a single upsert replaces the add/update pair — the host is the immutable key. Only the fields present change (`{"host":"x","micro":{"ttl":"30s"}}` retunes one TTL and keeps the static tier and cookie settings; `enabled:false`, `strict_cookies:false` and an empty `auth_cookies` list are applied, JSON `null` keeps); a new host must enable a tier or turn BOTH tiers off (an opt-out, §6). `scope_hosts` comes from the token (§6) |
-| POST | `/api/v1/site-cache/remove` | deletes the vhost's policy; the host then follows a covering armed wildcard (§6 "Off vs remove") |
-| POST | `/api/v1/site-cache/purge` | `?host=` (per-vhost) or `?all=1` (global, admin) |
-| GET  | `/api/v1/site-cache/stats?host=` | per-vhost cache stats (§11), scope-filtered (own vhosts / all) |
+| POST | `/api/v1/site-cache/remove?host=` | deletes the vhost's policy (host in the query, not the body); the host then follows a covering armed wildcard (§6 "Off vs remove") |
+| POST | `/api/v1/site-cache/purge?host=` \| `?all=1` | per-vhost → `{"status":"ok","generation":N}`; `?all=1` (admin only) → `{"status":"ok","purged":N}` (N counts opt-out entries too) |
+| GET  | `/api/v1/site-cache/stats[?host=]` | per-vhost cache stats (§11) → `{rows:[…]}`, scope-filtered (own vhosts / all); `?host=` resolves like the edge (§11.3) |
 
 Prefix `site-cache` added to `SharedAPIPrefixes()` so the shared apiserver
 proxies it to the engine mux. Never a bare `mux.HandleFunc` (a prefix-coverage
@@ -770,7 +828,7 @@ through this API and the MCP tools only read).
 
 ### 7.2 CLI (`cfm webtop site-cache …`)
 
-New `case "site-cache":` in the `webtop` dispatch (`cli.go`), implemented in
+`case "site-cache", "cache":` in the `webtop` dispatch (`cli.go`), implemented in
 `internal/webdetector/cli_site_cache.go`, mirroring `cli_challenge_access.go`
 over the JSON API (through `internal/clihttp`, per the transport guardrail):
 
@@ -787,6 +845,11 @@ cfm webtop site-cache stats [host]        # hit-ratio + HIT/MISS/BYPASS breakdow
 ```
 
 ### 7.3 cfm-admin page "Site Cache"
+
+> **Not built yet** (the last item of the sweep). Until it lands, the API,
+> the CLI and the read-only MCP tools (`site_cache_status`,
+> `site_cache_stats`) are the surfaces; a scoped cPanel user reaches it only
+> through the API. The plan below stands.
 
 Multi-page app, directory-routed (`internal/webui/embed.go`). Template =
 **Challenge-Access** (per-vhost + scoped + recipes). Files to add:
@@ -810,18 +873,35 @@ fail-closed regardless of the UI.
 
 ### 7.4 Bridge (daemon↔edge, `nginx_bridge.go`)
 
-- `GET /nginx/cache/config` → `{ "entries": [ {host, static{…}, micro{…}, gen}, … ] }`,
-  token-gated, **explicit Content-Length** (the minimal Lua parser needs it —
-  the Clam handler gotcha). Backed by a `ListCachePolicy` engine hook.
-- Purge is a **push** (like `/nginx/vhost`): daemon → edge. Phase 1 realizes
-  purge purely via the `generation` bump in the pulled config (no push needed);
-  an explicit per-URL purge push is a later extension of `cfm_purge.lua`.
+- `GET /nginx/cache/config` (`handleCacheConfig`) →
+  `{"entries":[{host, gen, static?:{on,recipe,ttl}, micro?:{…}, strict_cookies?, auth_cookies?}, …]}`
+  — a disabled tier is omitted, an opt-out row has no tier; token-gated,
+  **explicit Content-Length** (the minimal Lua reader needs it — the Clam
+  handler gotcha); `{"entries":[]}`, never null, when empty. Backed by the
+  `ListCachePolicy` engine hook (`PolicyFeed`). Pinned against the edge by
+  `site_cache_edge_parity_test.go` + `cfm_cache_edge_parity_test.lua`.
+- `POST /nginx/cache/stats` (`handleCacheStats`) ← the edge's stats push,
+  `{"rows":[{host, counts:{STATUS:n}}]}`, token-gated, 4 MiB body cap, one
+  hook event per push (§11).
+- **Purge is not a push.** It is the `generation` bump in the pulled config:
+  each worker applies it on its next poll (≤ ~60 s). A per-URL purge (an
+  extension of `cfm_purge.lua`, which today purges per-IP state only) is not
+  built.
 
 ---
 
 ## 8. Recipes
 
-Recipes are a **front-end-only catalog** (each `build(vars)` emits ordinary CRUD
+> **As built, a recipe is a label.** The daemon accepts the names below
+> (`staticCacheRecipes` / `microCacheRecipes` in `site_cache.go`) and the edge
+> uses one only in the debug stamp. What decides caching is the tier's `on` and,
+> for micro, its `ttl`, snapped to a bucket (empty = 1 s; §5.4) — so
+> `micro_aggressive` without `--micro-ttl` behaves as 1 s, every static recipe
+> behaves the same (origin headers, 1 h fallback), and `fullpage_advanced` is an
+> ordinary micro label, accepted and clamped to 60 s. The front-end catalog
+> planned below (TTL presets per recipe) comes with the cfm-admin page (§7.3).
+
+Recipes are planned as a **front-end catalog** (each `build(vars)` emits ordinary CRUD
 payloads), exactly like `CA_RECIPES` (`challenge-access-recipes.js`). Catalog:
 
 | Key | Tier | TTL | Ships | For |
@@ -841,18 +921,16 @@ legitimate traffic — hard to spot, high blast radius), a caching mistake is
 content*, never a security break, and the operator simply turns the vhost **OFF**
 (or **Purges**). Verification is therefore observational, not predictive:
 
-- **Live check for one URL:** `curl -I` and read the `X-CFM-Cache: HIT|MISS|BYPASS`
-  header (§11.3, behind a debug flag, from a trusted source: loopback /
+- **Live check for one URL:** `curl -I` and read the `X-CFM-Cache` debug stamp
+  (`observe … status=<HIT|MISS|BYPASS|…> microcache=would/<n>s|bypass:<reason>`;
+  §11.3, `docs/site-cache-runbook.md` §4 — behind a debug flag, from a trusted source: loopback /
   link-local, the box's own IPs or `IGNORE_IPS` / `IGNORE_NETS`; from the box,
   against the edge's :9043 listener — §5.7 step 3 — since loopback :443 reaches
   the origin) — this is the per-URL "would it cache / why bypassed" answer, for
   near-zero code.
-- **Aggregate check:** the §11 stats, especially the **BYPASS counter** — if a
-  vhost isn't behaving, its hit/bypass numbers show it immediately.
-
-`fullpage_advanced` still **ships disabled** simply as a safe default (the
-operator arms it when ready and watches the stats), not because a simulator gates
-it.
+- **Aggregate check:** the §11 stats — if a vhost isn't behaving, its HIT /
+  MISS numbers show it. (BYPASS is not the micro rails: those declines are not
+  counted at all; §11.1.)
 
 ---
 
@@ -872,8 +950,12 @@ reuses the tested precedent verbatim:
   purge alike; there is no re-scoping to guard against.
 - List/stats are scope-filtered with `vhostAllowed` on each row's key (an
   out-of-scope row is left out, not redacted).
-- **Purge-all** (`?all=1`) is **admin-only**; a scoped `purge` is implicitly
-  scoped to the caller's own vhosts.
+- **Purge-all** (`?all=1`) is **admin-only** (403 for a scoped caller); a
+  scoped caller purges one named in-scope host at a time (`?host=` is
+  required).
+- There is no switch for scoped self-service (the planned
+  `SITE_CACHE_SCOPED` was not built): it is always on, through the API only
+  until the cfm-admin page lands (§7.3).
 
 Because the §4 rails are absolute, a tenant's "aggressive" choice can still only
 ever cache their own anonymous, cookieless, non-redirect 200s — so full
@@ -886,15 +968,15 @@ aggregate stats row — even if an admin created it. That reaches another tenant
 only if another account hosts a sub-host of that domain, which cPanel allows
 only with its cross-account subdomain options (off by default).
 
-Update `docs/endpoint_scope_inventory.md` in the same change (hard rule,
-CLAUDE.md §5): site-cache list/get/stats = scoped-allowed (own host);
-set/remove/purge = scoped-allowed (own host); purge-all = admin-only.
+Documented in `docs/endpoint_scope_inventory.md` (hard rule, CLAUDE.md §5):
+site-cache list/get/stats = scoped-allowed (own host); set/remove/purge =
+scoped-allowed (own host); purge-all = admin-only.
 
 ---
 
 ## 10. Purge / invalidation
 
-- **Micro-cache is self-healing** (1–30s TTL) — rarely needs an explicit purge.
+- **Micro-cache is self-healing** (1–60 s buckets) — rarely needs an explicit purge.
 - **Static (long TTL) needs purge.** Mechanism: **generation bump.** Each
   vhost entry carries `generation`; the cache key includes it
   (`g<gen>|<server IP>|<listener scheme>|<scheme told to origin>://<host><uri>`). Purge = a new, never-used
@@ -906,9 +988,16 @@ set/remove/purge = scoped-allowed (own host); purge-all = admin-only.
   scheme told to the origin, since all three are in the key.)
 - **Surfaces:** `POST /api/v1/site-cache/purge?host=` (per-vhost; admin or the
   owning scoped user) and `?all=1` (global; admin). CLI `purge <host>` /
-  `purge --all`. cfm-admin per-row **Purge** + top **Purge all**.
+  `purge --all`. (cfm-admin per-row **Purge** + top **Purge all** come with
+  the page, §7.3.)
+- **Latency:** a purge is only the new generation in the store; each edge
+  worker applies it on its next feed poll, within about 60 s (the poll is
+  triggered by traffic). Until then that worker still serves the old objects.
+- **Disk:** the old objects stay on disk until `inactive` (static: 7 d) or the
+  zone's LRU (`max_size`, static 10 GB) removes them — unreachable, not
+  served.
 - **Per-URL purge** (delete a single path) is a later extension building on
-  `cfm_purge.lua`; not in Phase 1.
+  `cfm_purge.lua`; not built.
 - **A purge covers ONE policy key.** The edge keys a request on the
   generation of the policy that matched it. A host that moves back under a
   covering wildcard — its exact policy removed, or a narrower wildcard removed —
@@ -925,79 +1014,104 @@ set/remove/purge = scoped-allowed (own host); purge-all = admin-only.
 
 ## 11. Cache statistics & observability
 
-Yes — we persist per-vhost cache stats and show them in cfm-admin to **both**
-the admin (all vhosts) and the scoped user (their own vhosts only). It is cheap
-because every counter is incremented in `log_by_lua_block`, which runs **after**
-the response is served — zero cost on the serving path. We revive the orphaned
-plumbing instead of writing new.
+Per-vhost cache effectiveness, for the admin (all vhosts) and a scoped user
+(their own). Cheap: every counter is incremented in the http-level
+`log_by_lua`, which runs **after** the response is served. *As built* it is a
+**live totals view** — nothing is persisted, and there is no cfm-admin view yet.
 
 ### 11.1 Edge counters (live, in-memory)
 
-- Declare `lua_shared_dict cfm_cache_stats` (both confs).
-- Extend `cfm_cache_log.lua` to take a **host** argument and key per-vhost, but
-  **only for cache-enabled vhosts** (bounded cardinality → the shdict cannot
-  blow up):
-  - `cache:host:<h>:status:<HIT|MISS|BYPASS|EXPIRED|STALE|UPDATING|REVALIDATED>`
-  - `cache:host:<h>:total`, `cache:host:<h>:last_seen_ts`
-  - `cache:host:<h>:tier:<static|micro>:...` (so the two tiers are separable)
-  - the existing per-zone + global totals (`cfm_stats.lua:398-399` already reads
-    these — the dashboard lights up for free).
-- Fed from `$upstream_cache_status` in `log_by_lua_block`. `BYPASS` = the rails
-  (§4/§4.1) declined to cache — the most useful diagnostic number (see §4.1).
-- Reset on nginx reload/restart (in-memory) — acceptable for a *live* ratio;
-  durability is handled by the daemon (§11.2).
+- `lua_shared_dict cfm_cache_stats 8m` (both confs), written by
+  `cfm_cache_log.lua` from the http-level `log_by_lua`.
+- **What is counted:** a response with status 200 or 304 that went through a
+  cache location — the static-asset locations, and the `@cfm_micro_<n>s`
+  locations (reached only while `MICRO_CACHE_ENFORCE = 1`) — for a host that
+  `policy_key_for` maps to an ARMED policy key (the exact host or the matching
+  `*.suffix`, never the raw request host, so cardinality is bounded).
+- **Keys:** per armed key, `cvh:<md5(policy key)>:<STATUS>` for the seven
+  `$upstream_cache_status` values — both tiers in one set of counters; plus
+  node-wide `cache:zone:{cfm_static|cfm_micro}:status:<S>` / `…:total`,
+  `cache:total` and `cache:last_seen_ts`, which `cfm_stats.lua` exposes in
+  the `/cfm-admin/lua-stats` JSON under `cache.zones` (the dashboard does not
+  render them yet). Bounds, the key digest and the `incr` finding: §14 3c.
+- **BYPASS** is a counted request that could not use the cache: a static
+  asset of an armed policy whose static tier is off (a micro-only vhost shows
+  its assets as BYPASS — expected), any cache-location request with an
+  `Authorization` header (`$cfm_req_auth`), a panel / service host under an
+  armed wildcard, or anything while `SITE_CACHE = 0` (counted, not pushed). It
+  is **not** the §4.1 cookie rails nor any Tier B request-side decline: those
+  requests stay in `location /`, which has no `proxy_cache`, so they are not
+  counted at all — the debug stamp (§11.3) is the view of those.
+- A reload keeps the counters (a `lua_shared_dict` survives it unless its
+  size changes); a restart resets them.
 
-### 11.2 Daemon aggregate (durable, scoped, historical)
+### 11.2 Daemon live-totals store (in-memory, scoped)
 
-The daemon pulls a counter snapshot on its existing tick via a new bridge read
-`GET /nginx/cache/stats` (token-gated, explicit Content-Length) → `{ hosts: {
-"<h>": {hit,miss,bypass,expired,stale,total,last_seen,tier:{...}}, … } }`. The
-daemon keeps a rolling per-vhost aggregate in memory (naturally **survives edge
-reloads**, since the daemon does not restart when nginx does) with an optional
-periodic disk snapshot to survive a daemon restart. This aggregate is the source
-the API/UI reads, so scoping is enforced daemon-side.
+The edge **pushes** its snapshot: one worker per node (a cross-worker lock),
+every ~60 s, `POST /nginx/cache/stats` with `{"rows":[{host, counts:{STATUS:n}}]}`
+for the armed keys it knows (§7.4). The daemon (`site_cache_stats.go`) keeps
+the latest row per key — only for a key armed at that moment, only the known
+statuses, at most one row per stored policy — and prunes the rows of keys
+disarmed since, every 5 minutes. The counts are absolute since the edge last
+restarted, so a daemon restart only empties the view until the next push.
+This store is what the API and MCP read, so scoping is enforced daemon-side.
 
-- **v1 (Phase 3):** totals + HIT/MISS/BYPASS/EXPIRED/STALE breakdown + hit-ratio
-  + last-seen, per vhost and per tier. Cheap, immediate.
-- **v2 (later):** coarse hourly buckets (e.g. last 24×1h per vhost) for a
-  sparkline; optional bytes-saved estimate. Deferred — nice-to-have.
+- **As built (v1):** the seven statuses + a derived STRICT hit ratio
+  (hit ÷ (hit+miss+expired+stale+updating+revalidated); BYPASS excluded), per
+  policy key, both tiers together. No last-seen, no per-tier split (only the
+  node-wide zone totals, §11.1), no disk snapshot.
+- **Later:** hourly buckets for a sparkline, a per-tier split, a bytes-saved
+  estimate; the `whats_wrong` "armed but ~0 hits" signal.
 
 ### 11.3 Surfaces
 
 - **API:** `GET /api/v1/site-cache/stats[?host=]` — scope-filtered
-  (`vhostAllowed`): admin sees all, scoped user sees only their own vhosts.
-- **cfm-admin:** a **hit-ratio** column + a per-vhost detail card
-  (HIT/MISS/BYPASS breakdown, last-seen, per tier). A scoped cPanel user sees
-  their own site's effectiveness; the admin sees the fleet and a top-N.
-- **CLI:** `cfm webtop site-cache stats [host]`.
-- **`X-CFM-Cache: HIT|MISS|BYPASS`** response header (behind a debug flag:
-  `X-CFM-Cache-Debug`, honoured only from a trusted source — loopback /
-  link-local, the box's own IPs, `IGNORE_IPS` / `IGNORE_NETS` — as-built) so an
-  operator can `curl -I` (§5.7 step 3) and verify a single URL's decision on
-  the spot.
+  (`vhostAllowed`). `?host=` resolves a request host like the edge does
+  (`StatsKeyFor`: its exact policy, else the most specific wildcard; nothing
+  for an opt-out); a scoped caller resolves only to keys its scope holds (an
+  in-scope host that resolves to nothing returns `rows: null`).
+- **CLI:** `cfm webtop site-cache stats [host]`. **MCP:** `site_cache_stats`
+  (and `site_cache_status` for the policies).
+- **cfm-admin:** a hit-ratio column + per-vhost detail card — planned with the
+  page (§7.3).
+- **Debug stamp** `X-CFM-Cache: observe [opt-out ]static=<r>/<ttl>
+  micro=<r>/<ttl> gen=<n> [status=<cache status>] [microcache=would/<n>s |
+  microcache=bypass:<reason>]`, only on a request that sends
+  `X-CFM-Cache-Debug` from a trusted source (loopback / link-local, the box's
+  own IPs, `IGNORE_IPS` / `IGNORE_NETS`), and only on the HTTPS listener
+  (:9043; `observe` runs in that server's header filter). The reason
+  vocabulary and how to run it: `docs/site-cache-runbook.md` §4.
+- **Access log:** `ucache="$upstream_cache_status"` and
+  `up=cfm_apache_static|cfm_apache_micro|cfm_apache` on every request
+  (`edge_access_tail`).
 
-New knob `SITE_CACHE_STATS = 1` (§12) gates the counting + snapshot; `0` drops
-even the log-phase increments.
+There is no knob for the counting (the planned `SITE_CACHE_STATS` was not
+built); `SITE_CACHE = 0` stops the push.
 
 ---
 
 ## 12. Config knobs (`[webdetector]` in `detectors.conf`)
 
+*As built:*
+
 | Knob | Default | Meaning |
 |---|---|---|
-| `SITE_CACHE` | `1` (ON) | master **kill switch** (not an opt-in — the per-vhost store arms vhosts); `0` = no caching + no edge cost fleet-wide (mirrored to edge via `manager.go`, like `FP_POLICY`) |
-| `SITE_CACHE_STORE_PATH` | `/var/lib/cfm/webdetector_site_cache.json` | per-vhost store |
-| `SITE_CACHE_SCOPED` | `1` | allow scoped cPanel self-service (§9) |
-| `SITE_CACHE_CFG_REFRESH_SEC` | `10` | edge config-pull cadence |
-| `SITE_CACHE_STATS` | `1` | per-vhost cache counters + daemon snapshot (§11); `0` drops the log-phase increments |
-| `SITE_CACHE_AUTH_COOKIES` | (built-in allowlist) | extra app-session cookie names that force bypass, fleet-wide (§4.1); per-vhost extension lives in the store |
+| `SITE_CACHE` | `1` (ON) | node-wide **kill switch** (not an opt-in — the per-vhost store arms vhosts); `0` = no caching, no stamp, no stats push on this node within ~10 s, policies kept. Published via `webdetector_bridge_config.go` → `cfm_bridge_config.lua` (read by `cfm_bridge_cfg.lua`, absent = on) |
+| `MICRO_CACHE_ENFORCE` | `0` (OFF) | Tier B **opt-in**: `0` = dry run (the debug stamp shows the verdict, nothing HTML is cached), `1` = armed anonymous HTML is served from its micro bucket. Set per node only after §5.7. Same publication path (absent = off) |
+| `SITE_CACHE_STORE_PATH` | `/var/lib/cfm/webdetector_site_cache.json` | the per-vhost store (§6) |
 
-Add the `SITE_CACHE` doc block to `configs/detectors.conf` under `[webdetector]`
-(mirror the `FP_POLICY` block), the `Config` fields + `FillDefaults` in
-`webdetector_config.go`, the read in `webdetector_register.go` (Config build +
-a `ConfigureSiteCache(kvBool(kv,"SITE_CACHE",false), …)` in the reload block for
-the package-level gate), and the edge kill-switch mirror in `manager.go`.
-`TestWAFSecurityFamilyCoverage`-style coverage test for the knobs.
+The defaults are pinned by `webdetector_bridge_config_test.go` (code, the
+reference `detectors.conf`, the rendered file) and `cfm_bridge_cfg_test.lua`
+(the reader). There is no daemon-side gate: with `SITE_CACHE = 0` the API and
+the feed keep working and only the edge ignores the feed. The daemon logs
+`cfm_bridge_config.lua written … site_cache=… micro_cache_enforce=…` on every
+publish; no API or MCP tool reports the knob state.
+
+*Planned, not built:* `SITE_CACHE_SCOPED` (scoped self-service is always on,
+§9), `SITE_CACHE_CFG_REFRESH_SEC` (the feed poll is a fixed 60 s,
+`cfm_cache.lua` `_refresh_sec`), `SITE_CACHE_STATS` (counting has no switch,
+§11), `SITE_CACHE_AUTH_COOKIES` (the built-in session-cookie list is
+`MICRO_AUTH_*` in `cfm_cache.lua`; the per-vhost `auth_cookies` extends it).
 
 ---
 
@@ -1225,42 +1339,62 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
    the TTL-unit fix, and the trusted-source debug stamp. Enforce per node only
    after §5.7.
 5. **cfm-admin page + Recipes** (+ `make test-js`), filter/sort, per-row + global
-   Purge UI.
-6. **Purge generation-bump** end-to-end (if not already folded into 3/4).
+   Purge UI. *Not built yet* — the last item of the sweep.
+6. **Purge generation-bump** end-to-end. *As built*, folded into Phase 1 and 3b
+   (§10); the generation became wall-clock ms, never reissued (§6).
+7. *As built, the hardening sweep that followed:* PR-1 request-identity rails
+   (Authorization, server IP + schemes in the key, forwarded headers, lock
+   timeouts); PR-2 cache-dir provisioning (daemon + helper + packaging); PR-4
+   the daemon control plane (monotonic generations, `set` merge, scope
+   attribution, validation, audit); PR-3 Tier B hardening before enforce (§4
+   rows, §5.7); PR-5 the stats bound (§11, 3c), the guard's closed gaps and the
+   Go↔Lua parity / default / structural tests (§13); PR-6 this as-built pass +
+   `docs/site-cache-runbook.md`.
 
 Each edge-affecting PR runs `docs/challenge-waf-release-checklist.md`. Each
 runtime PR adds a `CHANGELOG.md [Unreleased]` entry.
 
 ---
 
-## 15. Files to add / touch (map)
+## 15. Files (as built)
 
-**Add (Go):** `internal/webdetector/site_cache.go` (store + model + policy
-resolve), `internal/webdetector/site_cache_api_handlers.go`,
-`internal/webdetector/cli_site_cache.go`.
-**Touch (Go):** `http_api.go` (`apiRoutes()` + `SharedAPIPrefixes()`),
-`cli.go` (dispatch + help), `nginx_bridge.go` (routes: `handleCachePolicy` +
-`ListCachePolicy` hook, and `handleCacheStats` snapshot read), `engine.go`
-(construct store + a per-vhost cache-stats aggregate the daemon fills from the
-`/nginx/cache/stats` pull + wire hooks),
-`webdetector_config.go` + `webdetector_register.go` + `manager.go` (knobs),
-`cmd/cfm/main.go` (canonical cache dirs already exist — reconcile bucket dirs).
+**Go (daemon):** `internal/webdetector/site_cache.go` (store, model, validation,
+feed `PolicyFeed`, `StatsKeyFor`), `site_cache_api_handlers.go` (API + audit),
+`site_cache_stats.go` (live stats store, prune, stats API), `cli_site_cache.go`
+(+ the `cli.go` dispatch/help); `nginx_bridge.go` (`handleCacheConfig`,
+`handleCacheStats`), `engine.go` (store + hooks), `http_api.go` (routes +
+`SharedAPIPrefixes`); `internal/detectors/webdetector_bridge_config.go` (the
+`SITE_CACHE` / `MICRO_CACHE_ENFORCE` defaults, called from `manager.go`),
+`internal/sslcollector/token.go` (the bridge-config fields);
+`internal/mcpserver/status_reads.go` (MCP `site_cache_status` /
+`site_cache_stats`); `cmd/cfm/site_cache_dirs.go` (cache dirs, every start).
+Tests: `site_cache_test.go`, `site_cache_stats_test.go`,
+`site_cache_edge_parity_test.go`, `cli_site_cache_test.go`,
+`webdetector_bridge_config_test.go`, `site_cache_dirs_test.go`.
 
-**Add (Lua):** `configs/lua/cfm_cache.lua`.
-**Touch (Lua/conf):** `configs/lua/cfm.lua` (Steps 2b/4 + static-location
-mini-gate + `$cfm_cache_*` var decls), `configs/openresty.conf` +
-`configs/angie.conf` (zones, `lua_shared_dict cfm_cache_stats`, cache locations,
-`log_by_lua_block` wiring, fix stale comment), **extend** `cfm_cache_log.lua`
-(per-host arg, §11).
+**Lua / conf (edge):** `configs/lua/cfm_cache.lua` (feed, gates, rails, stamp,
+stats push, remember-uncacheable), `cfm_cache_log.lua` (counters),
+`cfm_hostmatch.lua` (host matcher shared with `cfm_h3_config.lua`),
+`cfm_panel_hosts.lua` / `cfm_selfip.lua` (panel rail, trusted debug sources),
+`cfm_bridge_cfg.lua` (knob reader), `cfm_stats.lua` (zone totals in
+lua-stats), `cfm.lua` (the Step 4 micro entry only). Both confs: the zones,
+`lua_shared_dict cfm_cache_stats` / `cfm_cache_uncacheable`, the rail maps,
+the static-asset and `@cfm_micro_<n>s` locations, the `location /` sentinel,
+the log-phase hook. Tests: `cfm_cache_test.lua`, `cfm_cache_log_test.lua`,
+`cfm_cache_edge_parity_test.lua` (+ `fixtures/site_cache_edge_parity.lua`),
+`cfm_micro_entry_structure_test.lua`, `cfm_bridge_cfg_test.lua`.
 
-**Add (UI):** the six files in §7.3.
-**Touch (UI):** `nav.js`, `core.js`, (leave `controller-bootstrap.js`'s
-admin-only set unchanged).
+**Packaging / install:** `scripts/cfm-cache-dirs.sh` (called by the deb
+postinst, the rpm `%post` and both installers), `configs/detectors.conf`
+(the `[webdetector]` knob blocks).
 
-**Add (CI):** `scripts/tests/check_site_cache_config.sh` + `security.yml` wiring
-+ CLAUDE.md §3 line.
-**Docs:** this file, `docs/endpoint_scope_inventory.md`, CLAUDE.md §7 pointer
-row, `CHANGELOG.md`.
+**CI:** `scripts/tests/check_site_cache_config.sh` (§13), wired in
+`security.yml` and CLAUDE.md §3.
+
+**UI (planned, §7.3):** the six files there + `nav.js` / `core.js`.
+
+**Docs:** this file, `docs/site-cache-runbook.md`,
+`docs/endpoint_scope_inventory.md`, CLAUDE.md §6/§7, `CHANGELOG.md`.
 
 ---
 

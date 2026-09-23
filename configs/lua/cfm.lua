@@ -273,7 +273,7 @@ local waf_ok, waf = pcall(require, "cfm_waf")
 -- fast-path. If it fails to load, the observe call below is simply skipped.
 local pcw_ok, pcw = pcall(require, "cfm_pcw")
 
--- cfm_cache: Site Cache Tier B micro-cache gate (Phase B3b). Loaded under pcall
+-- cfm_cache: Site Cache Tier B micro-cache gate. Loaded under pcall
 -- so a load failure can never break enforcement — the gate is simply skipped.
 -- The gate itself is a NO-OP unless MICRO_CACHE_ENFORCE is armed (dry-run
 -- otherwise), and returns the @cfm_micro_<n>s location to serve from, or nil.
