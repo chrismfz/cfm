@@ -430,7 +430,7 @@ type Engine struct {
 	scorer  Scorer
 	enr     *enrich.Enricher
 	// simulatePTRFn overrides the reverse-DNS resolver used by
-	// TrafficRuleSimulateForAPI (tests only; nil = direct LookupAddr). ok=false
+	// simulatePTRLookup (tests only; nil = direct LookupAddr). ok=false
 	// means the lookup did not complete (resolver failure).
 	simulatePTRFn func(ip string) (ptr string, ok bool)
 
@@ -719,6 +719,24 @@ func NewEngine(cfg Config) *Engine {
 		return e.manualChallengeRung(host) == "v2"
 	})
 
+	// Good-bot waiver for the same verify gate: an FCrDNS-verified crawler is
+	// not rejected by Rung 1, under the SAME knob (CHALLENGE_GOODBOT_EXEMPT)
+	// and the SAME per-IP verdict cache the decision path uses to exempt it
+	// from the challenge outright. It only matters when no verdict existed
+	// when the challenge was served, so on a miss it verifies inline
+	// (verifiedBeforeReject: bounded, reject path only, no DNS for a known
+	// non-crawler PTR). The reverse lookup, when the solve's PTR isn't known
+	// yet, is the simulate API's direct resolver: bounded, and it tells a
+	// resolver failure from "no PTR".
+	if cfg.ChallengeGoodBotExempt && e.nginxBridge != nil && e.nginxBridge.goodBot != nil {
+		gb := e.nginxBridge.goodBot
+		SetChallengeV2GoodBot(func(ctx context.Context, ip, ptr string) string {
+			return gb.verifiedBeforeReject(ctx, ip, ptr, e.simulatePTRLookup(ip), time.Now())
+		})
+	} else {
+		SetChallengeV2GoodBot(nil)
+	}
+
 	return e
 }
 
@@ -918,6 +936,9 @@ func (s ChallengeSolve) historyPayload() map[string]interface{} {
 		}
 		if s.V2Grain != "" {
 			payload["v2"] = s.V2Grain
+		}
+		if s.V2Waived != "" {
+			payload["v2_waived"] = s.V2Waived
 		}
 		if sig := s.signalMap(); sig != nil {
 			payload["sig"] = sig
@@ -4371,7 +4392,9 @@ func (e *Engine) TrafficRuleSimulateForAPI(ctx context.Context, in TrafficRuleEv
 }
 
 // simulatePTRLookup returns the lazy reverse-DNS resolver the simulate API uses
-// for the verified_bot check: the injectable hook when set (tests), else a
+// for the verified_bot check (and the ChallengeV2 good-bot waiver, for a solve
+// whose PTR the enrich cache doesn't hold yet): the injectable hook when set
+// (tests), else a
 // direct, timeout-bounded LookupAddr — NOT the enrich cache, so an operator's
 // (or a scoped tenant's) arbitrary test IPs never populate the shared enrich /
 // persistent PTR stores, and a resolver failure is distinguishable from "no

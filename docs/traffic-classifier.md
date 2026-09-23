@@ -653,7 +653,11 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   and this solve passed it" from "the tier never fired": without it a clean
   armed solve reads exactly like a plain v1 one. `grep 'v2='` is the burn-in
   question "is my newly-armed tier actually covering traffic?"; `grep
-  v2_reject` is "did it bite". Finally `sig=` carries the report AS REPORTED
+  v2_reject` is "did it bite"; `grep v2_waived=` is "which failing solves did
+  it let through as an FCrDNS-verified good bot" (`CHALLENGE_GOODBOT_EXEMPT`;
+  e.g. Google-Read-Aloud, hs=140 from rotating first-seen Google IPs — the
+  gate verifies those inline, bounded, on the reject path only). The history
+  row carries it as `v2_waived`. Finally `sig=` carries the report AS REPORTED
   — `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
   `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
   browser did not report. `mv`/`hc`/`dm`/`dpr`/`raf` are scored by nothing;

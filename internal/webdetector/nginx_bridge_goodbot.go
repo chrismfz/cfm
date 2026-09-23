@@ -314,8 +314,11 @@ const (
 // Returns the verdict and an inconclusive reason: name=="" with reason=="" is a
 // definitive negative; a non-empty reason means "could not tell" (a non-empty
 // name WITH a reason is a stale verdict whose re-verify did not complete).
-// Never call it on the decision hot path — TrafficRuleSimulateForAPI is its
-// only caller.
+// Never call it on the decision hot path. Callers: the simulate APIs
+// (TrafficRuleSimulateForAPI, the challenge-access simulate) and the ChallengeV2
+// verify gate, for a solve it is about to reject (verifiedBeforeReject). They
+// share syncSem, so neither can take the hot path's slots; a burst of one can
+// only make the other's answer "inconclusive" / no waiver.
 func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn func() (ptr string, ok bool), now time.Time) (name, inconclusive string) {
 	if s == nil || ip == "" {
 		return "", ""
@@ -355,6 +358,42 @@ func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn 
 		return l.stale, verifiedInconclusiveTransient
 	}
 	return name, ""
+}
+
+// verifiedBeforeReject is the ChallengeV2 verify gate's good-bot check, run
+// ONLY for a solve the gate is about to reject (a failing score under an arm),
+// never for a solve that passes. The hot path's cache-only verified() would
+// almost never answer there: Google's user-driven fetchers (Google-Read-Aloud)
+// come from rotating, mostly first-seen IPs — 73 challenge solves from 48 IPs
+// fleet-wide over 2026-09-16..23 — and a lone page fetch leaves no verdict
+// behind (the decision had no PTR yet to verify). So it answers from the cache
+// when it can and otherwise verifies INLINE through verifiedSync (same verifier,
+// same syncSem bound, the verdict cached for the decision path as well).
+//
+// knownPTR is the solve's PTR from the enrich cache ("" = not known yet). When
+// it is known and is not a good-bot candidate the answer is "" with no DNS and
+// no slot, so a solver farm's rejects (residential PTRs) cost nothing extra; a
+// stale positive is dropped then, as the IP was reassigned. lookupPTR (a
+// bounded reverse lookup) runs only when knownPTR is empty; nil means PTRs
+// can't be resolved (PTR enrichment off) and the answer is cache-only. A stale
+// positive whose re-verify does not complete is still honoured, as verified()
+// serves it.
+func (s *bridgeGoodBotState) verifiedBeforeReject(ctx context.Context, ip, knownPTR string, lookupPTR func() (string, bool), now time.Time) string {
+	if s == nil || ip == "" {
+		return ""
+	}
+	ptrFn := lookupPTR
+	switch {
+	case knownPTR != "":
+		if l := s.lookupPTR(ip, knownPTR, true, now); l.fresh || !l.candidate {
+			return l.name
+		}
+		ptrFn = func() (string, bool) { return knownPTR, true }
+	case lookupPTR == nil:
+		return s.verified(ip, nil, now)
+	}
+	name, _ := s.verifiedSync(ctx, ip, ptrFn, now)
+	return name
 }
 
 // resolveInto performs the (DNS-bound) forward-confirm and stores the verdict.

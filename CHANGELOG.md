@@ -17,6 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **ChallengeV2 no longer rejects verified crawlers such as Google Read
+  Aloud.** Under an armed `challenge_v2`, a failing humanity score gets no
+  clearance. Google's Read Aloud fetcher (PTR `google-proxy-*.google.com`)
+  fails it: 73 challenge solves from 48 IPs on 19 vhosts in the last week, and
+  every one scored came out at 140 (the fail line is 100). They passed only
+  because none of those vhosts was armed, so arming an ad-running shop would
+  have locked it out. A solve that would be rejected is now let through
+  when the client's reverse DNS forward-confirms to a known crawler (Google,
+  Bing, Meta, Apple, Yandex — the same check and the same
+  `CHALLENGE_GOODBOT_EXEMPT` knob that already skip the challenge for them).
+  Those IPs rotate, so the check usually has no cached answer and runs a
+  short DNS lookup — only for solves about to be rejected, never for passing
+  ones, and with no lookup at all when the client's reverse DNS is already
+  known not to be a crawler's. The solve line and history row say
+  `v2_waived=<name>`. **Enforcement change** for armed `challenge_v2` only;
+  `CHALLENGE_GOODBOT_EXEMPT = 0` restores the old behaviour.
+
 ### Fixed
 - **The ChallengeV2 geo check at verify now reads the current GeoLite2
   database.** When a country/ASN policy is armed at `challenge_v2`, verify

@@ -494,6 +494,10 @@ type ChallengeSolve struct {
 	// under an arm is otherwise byte-identical to a plain v1 solve, which reads
 	// as "the tier never fired" (D5d).
 	V2Grain string
+	// V2Waived is the FCrDNS-verified good bot whose verdict waived a FAILING
+	// solve under an arm ("" = not waived): the D5 gate let it through instead
+	// of rejecting (challengeV2GoodBot). Rendered as v2_waived=<name>.
+	V2Waived string
 	// Country / CountryISO / ASN / ASNName / PTR are the solving client's
 	// network identity, resolved ONCE at verify (resolveGeo, challenge_geo.go)
 	// so every line and history row about this solve carries the same answer.
@@ -871,27 +875,40 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// see HONEST LIMITS in challenge_v2.go. The grain also rides the
 			// solve line, so a passed-under-arm solve is greppable too.
 			if v2Grain != "" {
-				// sig= rides this line too. The rejected solve is exactly
-				// the population the corpus exists to characterise, and it is
-				// deliberately not published/hooked as solved (it cleared
-				// nothing), so this line and the reject hook below are its
-				// only records — without sig= here every armed-and-rejected
-				// client would be missing from the very data used to tune the
-				// tells. cc/asn/asn_name/ptr ride at the END so no field a
-				// parser already reads moves; the hook writes the durable
-				// challenge_v2_reject history row, which is what makes the
-				// rung's false-positive rate queryable at all.
-				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s",
-					solve.IP, solve.Host, solve.URI, hs, hsTells, solve.SignalSuffix(), v2Grain, solve.TLSFingerprintOrDash(), solve.UA, solve.GeoSuffix())
-				if challengeV2RejectHook != nil {
-					challengeV2RejectHook(solve)
+				// A verified good bot is waived, not rejected: the SAME
+				// FCrDNS verdict and CHALLENGE_GOODBOT_EXEMPT knob that
+				// exempt it from the challenge at decision time. It only got
+				// here because no verdict existed when the challenge was
+				// served (e.g. Google-Read-Aloud's rotating, first-seen
+				// fetcher IPs, which score sw_renderer,touch_lie,no_input =
+				// 140), so this may verify inline — bounded, and only on this
+				// about-to-reject path. The solve then takes the normal solved
+				// path, marked v2_waived=<name>.
+				bot := challengeV2GoodBot(r.Context(), solve.IP, solve.PTR)
+				if bot != "" {
+					solve.V2Waived = bot
+				} else {
+					// sig= rides this line too. The rejected solve is exactly
+					// the population the corpus exists to characterise, and it is
+					// deliberately not published/hooked as solved (it cleared
+					// nothing), so this line and the reject hook below are its
+					// only records — without sig= here every armed-and-rejected
+					// client would be missing from the very data used to tune the
+					// tells. cc/asn/asn_name/ptr ride at the END so no field a
+					// parser already reads moves; the hook writes the durable
+					// challenge_v2_reject history row, which is what makes the
+					// rung's false-positive rate queryable at all.
+					logging.LogfCHALLENGES(
+						"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s",
+						solve.IP, solve.Host, solve.URI, hs, hsTells, solve.SignalSuffix(), v2Grain, solve.TLSFingerprintOrDash(), solve.UA, solve.GeoSuffix())
+					if challengeV2RejectHook != nil {
+						challengeV2RejectHook(solve)
+					}
+					w.Header().Set("X-CFM-V2", "reject")
+					http.Error(w, "verification failed", http.StatusForbidden)
+					return
 				}
-				w.Header().Set("X-CFM-V2", "reject")
-				http.Error(w, "verification failed", http.StatusForbidden)
-				return
-			}
-			if v2Shadow {
+			} else if v2Shadow {
 				logging.LogfABUSESHADOW(
 					"[abuse-shadow] signal=humanity host=%s ip=%s hs=%d tells=%s fp=%s verdict=would_v2",
 					solve.Host, solve.IP, hs, hsTells, solve.TLSFingerprintOrDash())

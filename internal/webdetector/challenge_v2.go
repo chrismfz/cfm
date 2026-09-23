@@ -76,8 +76,22 @@ package webdetector
 //     cfm.lua; (b) an operator who re-binds CHALLENGE_HTTP_LISTEN off
 //     localhost re-opens the direct-client path and with it every
 //     client-authored-header caveat — don't.
+//   - An FCrDNS-verified good bot is WAIVED at the gate (v2_waived=<name>),
+//     under the same CHALLENGE_GOODBOT_EXEMPT that already exempts it from
+//     the challenge at decision time. It reaches the gate at all only when
+//     no verdict existed when the challenge was served — the norm for
+//     Google-Read-Aloud's rotating first-seen IPs — so the waiver verifies
+//     inline, bounded (verifiedBeforeReject): only for a solve about to be
+//     rejected, never for one that passes, and with no DNS at all when the
+//     solve's PTR is already known not to be a crawler's. FCrDNS can't be
+//     forged, but "google" covers Google's user-driven fetchers (Read Aloud,
+//     Translate): a client routing through one passes Rung 1, exactly as it
+//     already skips the challenge once verified. Accepted — the same trust
+//     the decision path extends. A verify that can't complete (slots busy,
+//     resolver down) rejects as before (retry-able, D5c).
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -174,6 +188,15 @@ type challengeV2State struct {
 	// surfaces slice A). Wired at engine start; nil = no vhost arms (tests /
 	// pre-wire), fail-open like the geo resolver.
 	hostArmed func(host string) bool
+	// goodBot names the FCrDNS-verified good bot behind a solving IP ("" =
+	// none/unknown), for the waiver in the D5 gate: a failing solve under an
+	// arm is NOT rejected when the client is a verified crawler, the same
+	// exemption CHALLENGE_GOODBOT_EXEMPT already grants at decision time.
+	// Called ONLY on the reject path, where it may block (bounded) on an
+	// inline FCrDNS verify. Wired from NewEngine to the bridge's verdict cache
+	// (verifiedBeforeReject); nil = no waiver (exemption off, or pre-wire) —
+	// the gate then rejects as it always did.
+	goodBot func(ctx context.Context, ip, ptr string) string
 }
 
 var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore}
@@ -298,6 +321,30 @@ func SetChallengeV2HostArmed(fn func(host string) bool) {
 	challengeV2.mu.Lock()
 	challengeV2.hostArmed = fn
 	challengeV2.mu.Unlock()
+}
+
+// SetChallengeV2GoodBot wires the good-bot waiver the D5 gate consults before
+// rejecting (see goodBot on challengeV2State). Same lifecycle as
+// SetChallengeV2HostArmed: set from NewEngine on every engine build, nil when
+// CHALLENGE_GOODBOT_EXEMPT is off.
+func SetChallengeV2GoodBot(fn func(ctx context.Context, ip, ptr string) string) {
+	challengeV2.mu.Lock()
+	challengeV2.goodBot = fn
+	challengeV2.mu.Unlock()
+}
+
+// challengeV2GoodBot returns the verified good-bot name that waives a
+// rejection for ip, or "" (unwired, unknown, or not a verified bot). ptr is the
+// solve's PTR as already resolved ("" = not known yet). May block (bounded):
+// call it only for a solve about to be rejected.
+func challengeV2GoodBot(ctx context.Context, ip, ptr string) string {
+	challengeV2.mu.RLock()
+	fn := challengeV2.goodBot
+	challengeV2.mu.RUnlock()
+	if fn == nil || ip == "" {
+		return ""
+	}
+	return fn(ctx, ip, ptr)
 }
 
 // challengeV2HostArmed answers "does a v2 vhost arm cover this host" for the
@@ -668,6 +715,9 @@ func (s ChallengeSolve) HumanitySuffix() string {
 	out += s.SignalSuffix()
 	if s.V2Grain != "" {
 		out += " v2=" + s.V2Grain
+	}
+	if s.V2Waived != "" {
+		out += " v2_waived=" + s.V2Waived
 	}
 	return out
 }
