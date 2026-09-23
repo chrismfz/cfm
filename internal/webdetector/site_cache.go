@@ -71,8 +71,9 @@ const (
 )
 
 // Recipe vocabularies (docs §8). This list is the source of truth for the
-// recipe names; the edge reads only the TTL (it does not interpret the recipe
-// name yet).
+// recipe names; the edge uses a recipe name only as a label in the debug stamp
+// — for the micro tier it reads the TTL, for the static tier neither (Tier A
+// follows the origin's cache headers, 1h fallback).
 var staticCacheRecipes = map[string]struct{}{
 	"static_lean":       {},
 	"static_aggressive": {},

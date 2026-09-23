@@ -196,7 +196,8 @@ func siteCacheStatsRow(host string, c map[string]int) SiteCacheStatsRow {
 	}
 	total := g("total")
 	if total < cacheable+bypass {
-		// The edge sends its own "total", but never trust it below the parts.
+		// The edge sends no "total" (statuses only); a pushed one is never
+		// trusted below the parts.
 		total = cacheable + bypass
 	}
 	return SiteCacheStatsRow{

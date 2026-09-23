@@ -62,11 +62,30 @@ back-filled here — see the git/PR history for that period.
   - what BYPASS counts: mostly static assets of an armed vhost whose static
     tier is off. Micro-cache declines are not counted at all; the debug stamp
     shows them;
-  - the `SITE_CACHE` / `MICRO_CACHE_ENFORCE` state is not in their output.
+  - the `SITE_CACHE` / `MICRO_CACHE_ENFORCE` state is not in their output
+    (the `detectors_config` tool has it).
+
+  Things the docs used to get wrong, now stated:
+  - **The static tier reads no request cookie and no path.** A `.css` under
+    `/wp-admin/` fetched with a login cookie is cached like any other asset.
+    The session-cookie and admin-path rules are micro-tier only. The README
+    and the runbook now list the never-cache rules per tier.
+  - **After pulling `SITE_CACHE` for an incident:** purge, set it back to `1`,
+    then reload the edge proxy. While the switch is `0` the workers do not
+    read the policy feed, so without the reload each one keeps serving the
+    pre-purge objects for up to ~60 s.
+  - **`detectors.conf` edits apply by themselves** in about 15 s. Don't
+    `systemctl reload cfm` for them: that restarts the daemon. Any change to
+    `detectors.conf` also empties the stats view until the next push.
+
+  The release checklist's Lua load smoke test could never pass under plain
+  `luajit` (no `ngx`, no `cjson`). It now runs with OpenResty's `resty`, and
+  leaves out `cfm_panel`, which is a request script, not a module.
 
   A node installed before the per-bucket micro zones may still have
-  `/var/cache/nginx/cfm_micro`. Nothing uses it and nothing creates it any
-  more, so it is safe to delete (runbook §10).
+  `/var/cache/nginx/cfm_micro`, and an older Angie install
+  `/var/cache/angie/cfm_static` and `cfm_micro`. Nothing uses or creates them
+  any more, so they are safe to delete (runbook §10).
 - **Site Cache micro-cache (Tier B) is ready to be turned on, one node at a
   time.** `MICRO_CACHE_ENFORCE` still defaults to `0`; before setting it to
   `1` on a node, run the on-box checklist in `docs/site-cache-design.md` §5.7.

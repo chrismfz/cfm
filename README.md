@@ -984,16 +984,29 @@ The edge can cache per vhost, **off for every vhost until one is armed**
 (bypass-by-default; a global cache once broke redirects, SSO, webmail and
 cPanel, so every rail is absolute):
 
-- **Tier A — static assets** (css/js/images/fonts), on :9080 and :9043: the
-  origin's `Cache-Control` / `Expires` decide the TTL, 1 h fallback.
-- **Tier B — micro-cache of anonymous HTML** (1–60 s buckets), HTTPS only,
-  after the WAF / challenge / bridge decisions (cfm.lua Step 4). A **dry run**
-  until the node sets `MICRO_CACHE_ENFORCE = 1` — do that only after the
-  on-box checklist in [`docs/site-cache-design.md`](docs/site-cache-design.md) §5.7.
+- **Tier A — static assets** (css/js/map, fonts, png/jpg/gif/webp/ico), on
+  :9080 and :9043: the origin's `Cache-Control` / `Expires` decide the TTL,
+  1 h fallback.
+- **Tier B — micro-cache of anonymous pages** (1–60 s buckets): any anonymous
+  GET/HEAD through the HTTPS `location /`, HTML or not, after the WAF /
+  challenge / bridge decisions (cfm.lua Step 4). A **dry run** until the node
+  sets `MICRO_CACHE_ENFORCE = 1` — do that only after the on-box checklist in
+  [`docs/site-cache-design.md`](docs/site-cache-design.md) §5.7.
 
-Never cached, whatever a policy says: credentialed / session-cookie requests,
-`Set-Cookie` / private / no-store responses, non-200s, panel and webmail hosts,
-admin and script paths (design §4).
+Never cached, whatever a policy says (design §4):
+- **Both tiers:**
+  - requests with `Authorization`;
+  - `Set-Cookie` / private / no-store responses;
+  - non-200s;
+  - panel and webmail hosts;
+  - script paths.
+- **Tier B only:**
+  - session-cookie and credential-header requests;
+  - partial-page requests;
+  - admin, login and transfer paths.
+
+Tier A reads neither request cookies nor the path. It relies on the origin's
+response headers for anything per-user.
 
 `[webdetector]` knobs: `SITE_CACHE = 1` (node kill switch, not an opt-in),
 `MICRO_CACHE_ENFORCE = 0` (the Tier B opt-in), `SITE_CACHE_STORE_PATH`.

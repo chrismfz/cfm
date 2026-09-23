@@ -29,16 +29,20 @@
 --
 -- COST PER REQUEST
 -- ----------------
--- * SITE_CACHE off (the operator kill switch): one cached-config bool read,
---   then return — a full no-op, nothing else runs.
--- * Nothing armed on the node (SITE_CACHE on): that same read + one
---   schedule-refresh check (a flag + one time compare, ~10 ns when a poll is
---   not due) per gate/stamp call, then return. The config read is a
---   cfm_filecache 10s-TTL hit (a table lookup), which cfm.lua already does.
+-- * SITE_CACHE off (the operator kill switch): one cached-config bool read
+--   per gate/stamp call, then return — no feed poll, no cache gate, no stamp,
+--   no stats push (the log phase still counts; nothing is pushed). The table
+--   is not refreshed meanwhile: after the switch is restored a worker applies
+--   the current feed (e.g. a purge) on its next poll.
+-- * Nothing armed on the node (SITE_CACHE on): static_gate / observe do that
+--   same read + one schedule-refresh check (a flag + one time compare, ~10 ns
+--   when a poll is not due), then return; micro_gate returns on has_micro.
+--   The config read is a cfm_filecache 10s-TTL hit (a table lookup).
 -- * Something armed: a static asset does one policy_for (normalize_host + one
 --   table lookup + a scan of the wildcard list, ~0.5-2 µs); a Step-4 allow
---   does the same plus, with micro armed and enforced, the request-side rails;
---   a counted cache response does one policy_key_for in the log phase.
+--   does one too only with micro armed, enforce on and HTTPS, plus the
+--   request-side rails; a counted cache response does one policy_key_for in
+--   the log phase.
 --
 -- REFRESH MODEL
 -- -------------
@@ -47,7 +51,7 @@
 -- never blocks the request path; a per-worker flag dedupes in-flight refreshes.
 -- Fixed 60s poll (no env, no knob — CFM is config-file driven, not env-driven).
 -- No nginx reload needed. Bridge unreachable → keep the LAST KNOWN policy
--- (fail-safe: no header rather than a wrong one).
+-- (fail-safe: a stale table, never a missing gate).
 
 local cjson = require "cjson.safe"
 local bcfg  = require "cfm_bridge_cfg"   -- master SITE_CACHE gate (~10s TTL)
@@ -76,8 +80,9 @@ end
 -- nginx >= 1.23 joins repeated response headers in $upstream_http_<name>; older
 -- cores expose only the first line (see micro_gate). Angie is 1.23+-based and
 -- defines nginx_version like any build lua-nginx-module compiles against.
--- (Guarded on ngx itself too, so the release checklist's plain-LuaJIT require
--- smoke test can load this module outside nginx.)
+-- (Guarded on ngx itself too, so the module still loads where no ngx global
+-- exists, e.g. a plain-LuaJIT require, instead of failing at load time;
+-- scripts/tests/cfm_cache_load_test.lua pins it.)
 local NGX_JOINS_HEADERS = type(ngx) == "table" and type(ngx.config) == "table"
     and (tonumber(ngx.config.nginx_version) or 0) >= 1023000
 
@@ -126,7 +131,7 @@ local _stats_sec = 60
 -- micro path itself: the micro token is the would-cache verdict; the served
 -- verdict of real traffic is the access log's ucache= / up= fields and the
 -- stats — docs/site-cache-design.md §5.7).
--- The persistent fleet on/off gate is the Phase-3 SITE_CACHE config knob (via
+-- The persistent per-node on/off gate is the SITE_CACHE config knob (via
 -- cfm_bridge_cfg), not this observe header.
 local OBSERVE_HEADER_VAR = "http_x_cfm_cache_debug"
 
@@ -497,7 +502,7 @@ function _M.maybe_flush_stats()
 end
 
 -- ---------------------------------------------------------------------------
--- Tier B micro-cache — TTL-bucket snapping (Phase B1, pure helper).
+-- Tier B micro-cache — TTL-bucket snapping (pure helper).
 --
 -- proxy_cache_valid is a per-LOCATION directive and is NOT variablizable
 -- (verified against nginx: `proxy_cache $var` selects only the storage zone; a
@@ -537,9 +542,11 @@ local function micro_bucket_seconds(ttl)
     return best
 end
 
--- micro_zone_name: the storage zone / internal-location suffix for a stored TTL,
--- e.g. 5 or "7s" → "cfm_micro_5s". The single source of truth for the bucket
--- name so the conf zones, the daemon dirs and micro_gate's target can't drift.
+-- micro_zone_name: the storage zone name for a stored TTL, e.g. 5 or "7s" →
+-- "cfm_micro_5s" (exposed for the unit tests; micro_gate builds its
+-- "@cfm_micro_<n>s" target from the same micro_bucket_seconds). The source of
+-- truth for the buckets is MICRO_BUCKETS, which check_site_cache_config.sh
+-- pins to the conf zones, the @cfm_micro_<n>s locations and the daemon dirs.
 local function micro_zone_name(ttl)
     return "cfm_micro_" .. micro_bucket_seconds(ttl) .. "s"
 end
@@ -561,8 +568,10 @@ end
 -- possibly a logged-in user) plus, for the opt-in strict_cookies vhost, an
 -- IGNORE-list of cookies treated as anonymous (CFM's own cfm_* cookies — incl.
 -- cfm_clearance — and common analytics/consent cookies). A cleared but
--- app-anonymous visitor (only cfm_clearance) IS cacheable: that post-challenge
--- burst is exactly what micro-cache exists to absorb.
+-- app-anonymous visitor (only cfm_clearance) passes these rails — that
+-- post-challenge burst is what micro-cache exists to absorb — but as built a
+-- cleared visitor returns at cfm.lua's Step 2b, which is not a micro entry
+-- (design §5.5), so it is not micro-cached yet.
 
 -- Exact lowercase auth-cookie names + name PREFIX / SUFFIX families. A request
 -- carrying any of these bypasses micro-cache (never stored), on every vhost.
@@ -1172,7 +1181,7 @@ end
 --   * MICRO_CACHE_ENFORCE off → DRY-RUN: never exec (the observe header still
 --     shows the would-cache verdict via observe(), so burn-in is unaffected)
 --   * scheme != https: the @cfm_micro_<n>s locations live only in the HTTPS
---     server (B3a). Executing to a missing named location would 500, so a
+--     server. Executing to a missing named location would 500, so a
 --     cleartext request is never routed — it just proceeds uncached.
 --   * $cfm_micro_conf != "1": the conf sentinel, "1" only in the HTTPS
 --     server's `location /` ("" by default at server level). It pins micro to

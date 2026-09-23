@@ -645,6 +645,18 @@ because of that. Hard-won points:
 - **A shared dict's size change resets it on reload** (a same-size reload keeps
   it); key counters on a fixed-size digest so capacity is a fixed number of
   counters (the slab slot doubles past a 52-byte key).
+- **The never-cache rules differ by tier. Don't document them as one list.**
+  Both tiers: Authorization, `Set-Cookie`/private/no-store, non-200,
+  panel/webmail hosts, script paths. Tier A reads no request cookie and no
+  path; session cookies, credential headers and admin paths are Tier B only.
+- **`SITE_CACHE = 0` freezes each worker's policy table.** There is no feed
+  poll while it is off, so a purge or policy change reaches a worker only on
+  its first poll after the switch is restored, up to ~60 s later. The incident
+  procedure is: purge, restore, reload the edge (runbook §8).
+- **`detectors.conf` edits apply without a reload.** The manager polls the file.
+  The daemon has no SIGHUP handler, so `systemctl reload cfm` restarts it
+  (systemd `Restart=always`). A config reload also builds a new webdetector
+  Engine, which empties the in-memory Site Cache stats view.
 
 ---
 

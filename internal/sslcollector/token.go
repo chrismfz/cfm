@@ -432,9 +432,10 @@ type WebdetectorBridgeConfig struct {
 	// SiteCache mirrors [webdetector] SITE_CACHE to the edge — the master KILL
 	// SWITCH for per-vhost edge caching (default ON). It is not a second opt-in:
 	// the per-vhost policy store (default empty) is what arms a vhost, so nothing
-	// caches until one is armed regardless of this flag. false makes cfm_cache.lua
-	// a full no-op (no feed poll, no lookup, no header) so an operator can kill all
-	// caching fleet-wide in ~10s without disarming vhosts.
+	// caches until one is armed regardless of this flag. false stops Site Cache on
+	// this node's edge (no feed poll, no cache gate, no stamp, no stats push;
+	// the log phase still counts) so an operator can kill its caching in ~10s
+	// without disarming vhosts.
 	SiteCache bool
 	// MicroCacheEnforce mirrors [webdetector] MICRO_CACHE_ENFORCE to the edge —
 	// the Tier B (micro-cache of anonymous HTML) ENFORCE gate. Default OFF: unlike
