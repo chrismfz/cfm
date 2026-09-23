@@ -400,9 +400,9 @@ func TestNginxBridge_CacheStatsPushIsOneHookEvent(t *testing.T) {
 
 // The worst-case LEGIT push — one row per stored policy (the edge reads every
 // armed key, cfm_cache_log.lua snapshot_vhosts), each a 253-byte host with all
-// seven statuses at 16-digit counts (~2.3 MB) — is accepted in full: over the
-// old 2 MiB cap the whole push was rejected, so no vhost got stats. A body over
-// maxCacheStatsBody still is.
+// seven statuses at 14-digit counts, the longest plain number cjson writes
+// (~2.2 MB) — is accepted in full: over the old 2 MiB cap the whole push was
+// rejected, so no vhost got stats. A body over maxCacheStatsBody still is.
 func TestNginxBridge_CacheStatsWorstCaseLegitPushFits(t *testing.T) {
 	statuses := []string{"HIT", "MISS", "BYPASS", "EXPIRED", "STALE", "UPDATING", "REVALIDATED"}
 	build := func(rows, hostLen int) string {
@@ -419,7 +419,7 @@ func TestNginxBridge_CacheStatsWorstCaseLegitPushFits(t *testing.T) {
 				if j > 0 {
 					sb.WriteString(",")
 				}
-				fmt.Fprintf(&sb, `%q:%d`, st, int64(9007199254740991))
+				fmt.Fprintf(&sb, `%q:%d`, st, int64(99999999999999))
 			}
 			sb.WriteString(`}}`)
 		}
@@ -450,6 +450,27 @@ func TestNginxBridge_CacheStatsWorstCaseLegitPushFits(t *testing.T) {
 	big := `{"rows":[{"host":"` + strings.Repeat("a", maxCacheStatsBody) + `","counts":{"HIT":1}}]}`
 	if code, got := post(big); code != http.StatusBadRequest || got != 0 {
 		t.Fatalf("over-cap body: status %d, %d rows delivered, want 400 and 0", code, got)
+	}
+}
+
+// cjson writes a count of 1e14 or more in exponent form: it must not fail the
+// whole push (a count decoded into an int used to), nor any other row.
+func TestNginxBridge_CacheStatsExponentCounts(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	b.hookCh = make(chan func(), 1)
+	got := map[string]map[string]int{}
+	b.SetCacheStatsHook(func(host string, counts map[string]int) { got[host] = counts })
+	body := `{"rows":[{"host":"a.com","counts":{"HIT":1e+14,"MISS":9.007199254741e+15,"STALE":-3}},{"host":"b.com","counts":{"HIT":7}}]}`
+	req := httptest.NewRequest(http.MethodPost, "/nginx/cache/stats", strings.NewReader(body))
+	req.Header.Set("X-CFM-Token", "tok")
+	rr := httptest.NewRecorder()
+	b.handleCacheStats(rr, req)
+	if rr.Code != http.StatusOK || len(b.hookCh) != 1 {
+		t.Fatalf("status %d, %d hook events", rr.Code, len(b.hookCh))
+	}
+	(<-b.hookCh)()
+	if got["a.com"]["HIT"] != 100000000000000 || got["a.com"]["MISS"] != 1<<53 || got["a.com"]["STALE"] != 0 || got["b.com"]["HIT"] != 7 {
+		t.Fatalf("rows delivered as %v", got)
 	}
 }
 

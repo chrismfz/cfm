@@ -6,7 +6,8 @@
 -- challenge. (The Step 2b clearance fast-path is deliberately not an entry
 -- either; docs/site-cache-design.md §5.6.) Static reading of the source, with
 -- Lua comments and string contents stripped, so a comment or a log string
--- can never satisfy (or trip) a check.
+-- can never satisfy (or trip) a check. It pins the plain spellings; a
+-- deliberately obfuscated call (a name computed at run time) is beyond it.
 
 local fails = 0
 local function check(c, m)
@@ -48,14 +49,25 @@ local function strip(src, keep_strings)
       out[#out + 1] = keep_strings and body or ('""' .. body:gsub("[^\n]", ""))
       i = e + 1
     elseif c == '"' or c == "'" then
+      -- a short string: an escape takes the next char (a backslash-newline
+      -- continues the string), \z also the whitespace after it; an
+      -- unescaped newline ends it (unterminated). Newlines inside it are
+      -- kept in the output so line numbers stay right.
       local j = i + 1
       while j <= n do
         local d = src:sub(j, j)
-        if d == "\\" then j = j + 2
+        if d == "\\" then
+          if src:sub(j + 1, j + 1) == "z" then
+            j = j + 2
+            while j <= n and src:sub(j, j):match("%s") do j = j + 1 end
+          else
+            j = j + 2
+          end
         elseif d == c or d == "\n" then break
         else j = j + 1 end
       end
-      out[#out + 1] = keep_strings and src:sub(i, j) or '""'
+      local body = src:sub(i, j)
+      out[#out + 1] = keep_strings and body or ('""' .. body:gsub("[^\n]", ""))
       i = j + 1
     else
       out[#out + 1] = c
@@ -102,47 +114,59 @@ check(step4 ~= nil, "cfm.lua has no '-- ── Step 4: Allow' header")
 check(step4 == last_step_line, "a step header follows Step 4 (line " .. tostring(last_step_line) ..
       ") — the micro entry must stay the last step")
 
--- micro_cache_target: defined once, called once, at Step 4.
+-- micro_cache_target: defined once and used once — called at Step 4 (any
+-- other mention, an alias included, is a second use).
 local def = lines_of(code, "local%s+function%s+micro_cache_target%s*%(")
-local uses = lines_of(code, "micro_cache_target%s*%(")
+local uses = lines_of(code, "%f[%w_]micro_cache_target%f[^%w_]")
 check(#def == 1, #def .. " definitions of micro_cache_target (want 1)")
-check(#uses == 2, (#uses - #def) .. " calls of micro_cache_target (want exactly 1, at Step 4)")
+check(#uses == 2, (#uses - #def) .. " other uses of micro_cache_target (want exactly 1: the call at Step 4)")
 local call
 for _, l in ipairs(uses) do if l ~= def[1] then call = l end end
-check(call and step4 and call > step4, "micro_cache_target is called at line " .. tostring(call) ..
+check(call and step4 and call > step4, "micro_cache_target is used at line " .. tostring(call) ..
       ", not after the Step 4 header (line " .. tostring(step4) .. ")")
 
 -- The call hands its target straight to ngx.exec, and that is the last
 -- statement of cfm_enforce (nothing runs after the micro redirect decision).
-local tail = code:match("local%s+micro_target%s*=%s*micro_cache_target%s*%(%s*%)%s*(.-)%f[%w]end%s+local%s+function%s+main%f[%W]")
-check(tail ~= nil, "the Step 4 call is not `local micro_target = micro_cache_target()` followed by the end of cfm_enforce")
-if tail then
-  local t = tail:gsub("%s+", " ")
-  check(t == "if micro_target then return ngx.exec(micro_target) end ",
-        "after the call, cfm_enforce must only `if micro_target then return ngx.exec(micro_target) end` — got: " .. t)
-end
+local ts, te = code:find("local%s+([%a_][%w_]*)%s*=%s*micro_cache_target%s*%(%s*%)%s*if%s+%1%s+then%s+return%s+ngx%s*%.%s*exec%s*%(%s*%1%s*%)%s*end%s+end%f[^%w_]")
+check(ts ~= nil, "at Step 4, cfm_enforce must end with `local t = micro_cache_target()` + `if t then return ngx.exec(t) end` (nothing after it)")
 
 -- cfm_cache.micro_gate is reached only through micro_cache_target (the pcall
--- wrapper), and cfm.lua makes no other internal redirect that could land in
--- an @cfm_micro_<n>s location.
-local gate = lines_of(code, "micro_gate")
-for _, l in ipairs(gate) do
-  check(def[1] and l >= def[1] and l <= def[1] + 12,
-        "cfm_cache.micro_gate referenced at line " .. l .. ", outside micro_cache_target")
+-- wrapper: its body runs from the definition to the first `end` at column
+-- 0), and cfm.lua makes no other internal redirect that could land in an
+-- @cfm_micro_<n>s location.
+local wrap_s = def[1] and code:find("local%s+function%s+micro_cache_target%s*%(")
+local wrap_e = wrap_s and code:find("\nend%f[^%w_]", wrap_s)
+check(wrap_e ~= nil, "cannot find the end of micro_cache_target")
+local ngate, init = 0, 1
+while true do
+  local gs, ge = code:find("%f[%w_]micro_gate%f[^%w_]", init)
+  if not gs then break end
+  ngate = ngate + 1
+  check(wrap_s and wrap_e and gs > wrap_s and gs < wrap_e,
+        "cfm_cache.micro_gate referenced at line " .. select(2, code:sub(1, gs):gsub("\n", "")) + 1 .. ", outside micro_cache_target")
+  init = ge + 1
 end
-check(#gate >= 1, "micro_cache_target no longer calls cfm_cache.micro_gate")
-local execs = lines_of(code, "ngx%.exec%s*%(")
-check(#execs == 1 and execs[1] == call + 1,
-      #execs .. " ngx.exec call(s) in cfm.lua (want exactly the Step 4 micro one) — if a new one can reach an @cfm_micro_<n>s location it must sit at Step 4; update this test")
+check(ngate >= 1, "micro_cache_target no longer calls cfm_cache.micro_gate")
+local nexec, einit, exec_in_tail = 0, 1, false
+while true do
+  local es, ee = code:find("ngx%s*%.%s*exec%s*%(", einit)
+  if not es then break end
+  nexec = nexec + 1
+  if ts and es > ts and es < te then exec_in_tail = true end
+  einit = ee + 1
+end
+check(nexec == 1 and exec_in_tail,
+      nexec .. " ngx.exec call(s) in cfm.lua (want exactly one, the Step 4 micro one) — if a new one can reach an @cfm_micro_<n>s location it must sit at Step 4; update this test")
 
 -- No other edge module enters micro (or routes to a micro location); only
 -- cfm_cache.lua builds the target and cfm.lua execs it.
 local all = io.popen("ls configs/lua/*.lua")
 for path in all:lines() do
   if path ~= "configs/lua/cfm.lua" and path ~= "configs/lua/cfm_cache.lua" then
-    local c = strip(read(path), true)
-    check(not c:find("micro_gate", 1, true) and not c:find("@cfm_micro_", 1, true),
-          path .. " references micro_gate or an @cfm_micro_ location (only cfm.lua Step 4 enters micro)")
+    local src_m = read(path)
+    local c, cs = strip(src_m, false), strip(src_m, true)
+    check(not c:find("%f[%w_]micro_gate%f[^%w_]") and not cs:find("@cfm_micro_", 1, true),
+          path .. " calls micro_gate or names an @cfm_micro_ location (only cfm.lua Step 4 enters micro)")
   end
 end
 all:close()

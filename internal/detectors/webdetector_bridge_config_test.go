@@ -39,6 +39,33 @@ func TestWebdetectorBridgeConfig_SiteCacheDefaults(t *testing.T) {
 	}
 }
 
+// The origin keep-alive knobs are clamped to what the edge can use: idle in
+// [1, 60] s (below Apache's KeepAliveTimeout), max requests ≥ 1 (else 1000).
+func TestWebdetectorBridgeConfig_OriginKAClamp(t *testing.T) {
+	for _, c := range []struct {
+		idle, reqs         string
+		wantIdle, wantReqs int
+	}{
+		{"", "", 3, 1000},
+		{"0", "0", 1, 1000},
+		{"-5", "-1", 1, 1000},
+		{"61", "5", 60, 5},
+		{"30", "250", 30, 250},
+	} {
+		kv := map[string]string{}
+		if c.idle != "" {
+			kv["ORIGIN_KEEPALIVE_IDLE_SEC"] = c.idle
+		}
+		if c.reqs != "" {
+			kv["ORIGIN_KEEPALIVE_MAX_REQS"] = c.reqs
+		}
+		got := webdetectorBridgeConfig(map[string]string{}, kv)
+		if got.OriginKAIdleSec != c.wantIdle || got.OriginKAMaxReqs != c.wantReqs {
+			t.Errorf("idle=%q reqs=%q → %d/%d, want %d/%d", c.idle, c.reqs, got.OriginKAIdleSec, got.OriginKAMaxReqs, c.wantIdle, c.wantReqs)
+		}
+	}
+}
+
 // The reference detectors.conf (what a fresh install ships) states both knobs
 // explicitly at their defaults, and the file the daemon renders from it carries
 // them to the edge as such.

@@ -5,26 +5,32 @@
 -- body to the real cfm_cache.lua and asserts the edge
 --   * counts every request host under the key the daemon expects (the daemon
 --     keeps and serves stats rows by that key),
---   * reads the stats of exactly the feed's armed keys, and
---   * understands every field of the feed (a field the daemon adds that the
---     edge does not read fails here, so it is a decision, not a silent no-op).
+--   * pushes the stats of exactly the feed's armed keys (the real
+--     maybe_flush_stats → stats_flush_handler path, with cfm_cache_log
+--     stubbed to record what it is asked to read), and
+--   * knows every field of the feed and keeps each one in the policy it
+--     applies (a field the daemon adds that the edge does not know fails
+--     here, so it is a decision, not a silent no-op).
 
 package.path = "configs/lua/?.lua;" .. package.path
 
-package.loaded["cjson.safe"] = { decode = function() return nil end }
+local _pushed      -- what the stats push encodes
+package.loaded["cjson.safe"] = { decode = function() return nil end,
+                                 encode = function(t) _pushed = t; return "{}" end }
 package.loaded["cfm_bridge_cfg"] = { get = function()
   return { site_cache = true, micro_cache_enforce = false }
 end }
 package.loaded["cfm_selfip"] = { is_self_origin = function() return false end }
 
+local _now, _timers = 0, {}          -- 0 keeps the async refresh a no-op
 _G.ngx = {
   config = { nginx_version = 1025003 },
   req    = { is_internal = function() return false end },
-  now    = function() return 0 end,    -- 0 keeps the async refresh a no-op
-  timer  = { at = function() return true end },
+  now    = function() return _now end,
+  timer  = { at = function(_, fn) _timers[#_timers + 1] = fn; return true end },
   log    = function() end,
   md5    = function(s) return s end,
-  shared = {},
+  shared = { cfm_decisions = { add = function() return true end } },
   WARN = 1, ERR = 2,
   var    = { host = "" },
   header = {},
@@ -43,21 +49,29 @@ end
 local entries = fx.feed.entries
 check(type(entries) == "table" and #entries > 0, "fixture feed has entries")
 
--- Every field of the feed is one cfm_cache.lua rebuild_cache reads.
+-- Every field of the feed is one cfm_cache.lua knows (rebuild_cache keeps
+-- the tiers as tables; on/ttl decide, recipe labels the debug header).
 local KNOWN = { host = true, gen = true, static = true, micro = true, strict_cookies = true, auth_cookies = true }
 local KNOWN_TIER = { on = true, recipe = true, ttl = true }
 for _, e in ipairs(entries) do
   for k, v in pairs(e) do
-    check(KNOWN[k], "feed field '" .. tostring(k) .. "' (" .. tostring(e.host) .. ") is not read by cfm_cache.lua")
+    check(KNOWN[k], "feed field '" .. tostring(k) .. "' (" .. tostring(e.host) .. ") is not one cfm_cache.lua knows — teach it (and this list) or leave it out of the feed")
     if k == "static" or k == "micro" then
       for tk in pairs(v) do
-        check(KNOWN_TIER[tk], "feed tier field '" .. k .. "." .. tostring(tk) .. "' is not read by cfm_cache.lua")
+        check(KNOWN_TIER[tk], "feed tier field '" .. k .. "." .. tostring(tk) .. "' is not one cfm_cache.lua knows")
       end
     end
   end
 end
 
-cache._rebuild_cache(entries)
+-- a deep copy: the edge must keep each field, not merely the daemon's table
+local function copy(v)
+  if type(v) ~= "table" then return v end
+  local o = {}
+  for k, x in pairs(v) do o[k] = copy(x) end
+  return o
+end
+cache._rebuild_cache(copy(entries))
 
 -- 1) the stats key of every request host is the daemon's
 for _, c in ipairs(fx.cases) do
@@ -67,12 +81,30 @@ for _, c in ipairs(fx.cases) do
     c.host, tostring(got), tostring(want)))
 end
 
--- 2) the stats push reads exactly the feed's armed keys
-local got_keys = {}
-for _, k in ipairs(cache._stats_keys()) do got_keys[#got_keys + 1] = k end
-table.sort(got_keys)
-check(table.concat(got_keys, ",") == table.concat(fx.armed_keys, ","),
-  "stats_keys = " .. table.concat(got_keys, ",") .. ", daemon armed keys = " .. table.concat(fx.armed_keys, ","))
+-- 2) the stats push reads, and pushes, exactly the feed's armed keys — through
+--    the real flush path (the log phase calls maybe_flush_stats)
+local asked
+package.loaded["cfm_cache_log"] = { snapshot_vhosts = function(keys)
+  asked = keys
+  local out = {}
+  for _, k in ipairs(keys or {}) do out[k] = { HIT = 1 } end
+  return out
+end }
+_now = 1000
+cache.maybe_flush_stats()
+check(#_timers == 1, "maybe_flush_stats scheduled " .. #_timers .. " timer(s), want 1 (the stats flush)")
+if _timers[1] then _timers[1](false) end
+local function sorted(list)
+  local o = {}
+  for _, k in ipairs(list or {}) do o[#o + 1] = k end
+  table.sort(o)
+  return table.concat(o, ",")
+end
+local want_keys = table.concat(fx.armed_keys, ",")
+check(sorted(asked) == want_keys, "the flush asked snapshot_vhosts for [" .. sorted(asked) .. "], daemon armed keys [" .. want_keys .. "]")
+local pushed_hosts = {}
+for _, r in ipairs((_pushed and _pushed.rows) or {}) do pushed_hosts[#pushed_hosts + 1] = r.host end
+check(sorted(pushed_hosts) == want_keys, "the push carries rows [" .. sorted(pushed_hosts) .. "], daemon armed keys [" .. want_keys .. "]")
 
 -- 3) each row's fields land in the policy the edge applies to its host
 local function same_list(a, b)

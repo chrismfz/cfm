@@ -419,8 +419,38 @@ type nginxCacheStatsMsg struct {
 }
 
 type nginxCacheStatsRow struct {
-	Host   string         `json:"host"`
-	Counts map[string]int `json:"counts"`
+	Host   string                    `json:"host"`
+	Counts map[string]cacheStatCount `json:"counts"`
+}
+
+// cacheStatCount is one pushed counter. The edge encodes it with cjson, which
+// writes a number of 1e14 or more in exponent form ("1e+14"): decoded into an
+// int that failed the WHOLE push, so every vhost lost its stats for it. Any
+// JSON number is accepted, clamped to [0, 2^53].
+type cacheStatCount int
+
+func (c *cacheStatCount) UnmarshalJSON(b []byte) error {
+	var f float64
+	if err := json.Unmarshal(b, &f); err != nil {
+		return err
+	}
+	switch {
+	case f < 0:
+		f = 0
+	case f > 1<<53:
+		f = 1 << 53
+	}
+	*c = cacheStatCount(f)
+	return nil
+}
+
+// ints returns the row's counts as the hook takes them.
+func (r nginxCacheStatsRow) ints() map[string]int {
+	out := make(map[string]int, len(r.Counts))
+	for k, v := range r.Counts {
+		out[k] = int(v)
+	}
+	return out
 }
 
 type nginxIPClearMsg struct {
@@ -2714,11 +2744,11 @@ func (b *NginxBridge) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Cap body size. The edge pushes one row per armed policy key (at most
-	// maxSiteCacheEntries), each a host of up to 253 bytes plus seven counters:
-	// ~130 bytes for a typical host (5000 rows measured at ~0.64 MB), ~460 at
-	// worst, so ~2.3 MB — above the 2 MiB this used to be, which would have
-	// rejected the WHOLE push. The ceiling only stops a compromised edge
-	// streaming a huge array.
+	// maxSiteCacheEntries), each a host of up to 253 bytes plus seven counters
+	// (14 digits at most as cjson writes them): ~130 bytes for a typical host
+	// (5000 rows measured at ~0.64 MB), ~445 at worst, so ~2.2 MB — above the
+	// 2 MiB this used to be, which would have rejected the WHOLE push. The
+	// ceiling only stops a compromised edge streaming a huge array.
 	r.Body = http.MaxBytesReader(w, r.Body, maxCacheStatsBody)
 
 	var msg nginxCacheStatsMsg
@@ -2745,7 +2775,7 @@ func (b *NginxBridge) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 							logging.Logf("[nginx_bridge] cache stats hook panic on %q: %v", siteCacheAuditClip(rows[i].Host, 256), r)
 						}
 					}()
-					fn(rows[i].Host, rows[i].Counts)
+					fn(rows[i].Host, rows[i].ints())
 				}()
 			}
 		})

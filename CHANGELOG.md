@@ -199,17 +199,20 @@ back-filled here — see the git/PR history for that period.
   that are armed, only the known cache statuses, and drops the rows of
   disarmed vhosts within about 5 minutes (they used to stay in memory until a
   restart). The edge side had the same kind of limit: it read at most 8000
-  keys of its stats dict per push, and the 4 MB dict held about 28 000
-  counters, so past roughly 1000 armed vhosts some were missing from a push
-  or pushed with only some of their statuses (measured with 5000 armed
-  vhosts: 1143 pushed). It now reads each armed vhost's counters by name, so
-  every one is pushed with all its statuses (5000 of 5000, in about 40 ms).
-  The dict is now 8 MB, room for 5000 vhosts with every status. The daemon
-  accepts a push of up to 4 MiB: the largest legitimate one is about 2.3 MB,
-  over the old 2 MiB limit, which would have rejected the whole push. The
-  counters of a disarmed vhost are no longer pushed. The first edge reload
-  on the new config creates the larger dict, so the counters start again
-  from zero once.
+  keys of its stats dict per push, and the 4 MB dict held as few as 8 000
+  counters (their keys grew with the host name), so past roughly 1000 armed
+  vhosts some were missing from a push or pushed with only some of their
+  statuses (measured with 5000 armed vhosts: 1143 pushed). It now reads each
+  armed vhost's counters by name, each keyed on a fixed-size digest, and the
+  dict is 8 MB (about 65 000 counters), so every armed vhost is pushed with
+  all its statuses whatever its name's length (measured: 5000 of 5000 with
+  25-, 60- and 253-character hosts, about 40 ms per push). The daemon accepts
+  a push of up to 4 MiB (the largest legitimate one is about 2.2 MB, over the
+  old 2 MiB limit, which rejected the whole push), and a count cjson writes in
+  exponent form (1e14 or more) no longer fails the whole push either. The
+  counters of a disarmed vhost are no longer pushed. The first edge reload on
+  the new config creates the larger dict, so the counters start again from
+  zero once.
 - **Site Cache: a purge can no longer be undone by removing and re-adding a
   vhost.** The purge generation (part of the cache key) restarted at 0 for a
   re-added vhost, so objects cached under an earlier generation — static

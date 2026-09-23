@@ -121,7 +121,9 @@ err() { echo "❌ [site-cache-config] $*" >&2; fail=1; }
 # policy to and ngx.execs into): every conf must declare exactly those zones
 # and @cfm_micro_<n>s locations — no fewer (the exec would 500) and no more.
 micro_ttls=""
-lua_buckets=$(sed -n 's/^local MICRO_BUCKETS[[:space:]]*=[[:space:]]*{\([^}]*\)}.*$/\1/p' "$LUA_CACHE" 2>/dev/null | tr -s ', ' '\n\n' | sed '/^$/d' || true)
+# (the table may span lines; -- comments are dropped)
+lua_buckets=$(awk '/^local MICRO_BUCKETS[[:space:]]*=/ { f = 1 } f { l = $0; sub(/--.*/, "", l); b = b " " l; if (l ~ /[}]/) { print b; exit } }' "$LUA_CACHE" 2>/dev/null \
+  | sed -n 's/^[^{]*{\([^}]*\)}.*$/\1/p' | tr -s ', \t' '\n\n\n' | sed '/^$/d' || true)
 for b in $lua_buckets; do
   case "$b" in *[!0-9]*) err "$LUA_CACHE: MICRO_BUCKETS holds a non-integer entry '$b'."; continue ;; esac
   micro_ttls="$micro_ttls ${b}s"
@@ -170,16 +172,20 @@ for f in "$ORT" "$ANG"; do
   # only be `set … "1"` or a cache predicate; $cfm_micro_conf only its
   # sentinel `set … "1"` in a `location /`. The other spellings of a writer
   # are closed too: no regex named capture may be named cfm_* / cf_* / xfp_*
-  # or after a header family, nothing may write (set / set_by_lua* /
-  # auth_request_set / js_set / perl_set / map / geo / split_clients) a
+  # or after a header family (an escaped quote read as nginx reads it),
+  # nothing may write (set / any set_* such as set_by_lua* or set-misc /
+  # auth_request_set / js_set / js_var / perl_set / map / geo / split_clients /
+  # a block entry that opens with the variable, as in geoip2) a
   # $http_* / $upstream_http_* / $upstream_cookie_* / $upstream_trailer_* /
   # $cookie_* / $arg_* / $sent_http_* / $sent_trailer_* variable (either one
   # SHADOWS the request/response value — nginx 1.24, a map http-wide — so a
   # `map … $http_authorization` would turn the credentialed-request rail off),
   # no string-form *_by_lua directive (its Lua would go unlexed), and inline
-  # Lua (long strings included) uses ngx only as ngx.<field> and ngx.var only
-  # as ngx.var.<name> — never through brackets or an alias — and never assigns
-  # an ngx.var.cfm_* / cf_* / xfp_* variable. (Deliberately obfuscated Lua, a
+  # Lua uses ngx only as ngx.<field> and ngx.var only as ngx.var.<name> —
+  # never through brackets, an alias or a string naming ngx — and never
+  # assigns an ngx.var.cfm_* / cf_* / xfp_* variable (one of several targets
+  # included); those read the code with strings blanked, the rail-name ban
+  # reads it with strings (long ones included) kept. (Deliberately obfuscated Lua, a
   # global looked up by a computed name, is beyond a static check: this guards
   # against refactor mistakes and the plain spellings.) All four maps hold EXACTLY their
   # entries (two; the two micro maps also `volatile;`). proxy_ignore_headers
@@ -193,21 +199,21 @@ for f in "$ORT" "$ANG"; do
     function rep(c, n,   r) { r = ""; while (n-- > 0) r = r c; return r }
     function mask(c) { if (c == ";") return "\001"; if (c == "{") return "\002"; if (c == "}") return "\003"; return c }
     function lexline(s,   i, n, ch, out, prev) {
-      out = ""; prev = " "; n = length(s); i = 1; LQ = ""
+      out = ""; prev = " "; n = length(s); i = 1; if (!LQK) LQ = ""; LQK = 0
       while (i <= n) {
         ch = substr(s, i, 1)
         if (LUA) {
           if (LC != "") { j = index(substr(s, i), LC); if (j == 0) { if (LS) LT = LT substr(s, i); i = n + 1; continue } if (LS) LT = LT substr(s, i, j - 1) "\""; i += j - 1 + length(LC); LC = ""; LS = 0; continue }
-          if (LQ != "") { LT = LT ch; if (ch == "\\") { LT = LT substr(s, i + 1, 1); i += 2; continue } if (ch == LQ) LQ = ""; i++; continue }
+          if (LQ != "") { LT = LT ch; if (ch == "\\") { if (i == n || (substr(s, i + 1, 1) == "z" && substr(s, i + 2) ~ /^[[:space:]]*$/)) LQK = 1; LT = LT substr(s, i + 1, 1); i += 2; continue } if (ch == LQ) LQ = ""; i++; continue }
           if (substr(s, i, 2) == "--") {
             if (match(substr(s, i + 2), /^\[=*\[/)) { LC = "]" rep("=", RLENGTH - 2) "]"; i += 2 + RLENGTH; continue }
             i = n + 1; continue
           }
-          if (ch == "[" && match(substr(s, i), /^\[=*\[/)) { LC = "]" rep("=", RLENGTH - 2) "]"; LS = 1; LT = LT "\""; i += RLENGTH; continue }
-          if (ch == "\"" || ch == "\047") { LQ = ch; LT = LT ch; i++; continue }
-          if (ch == "{") { LD++; LT = LT ch; i++; continue }
-          if (ch == "}") { LD--; if (LD == 0) { LUA = 0; out = out " }"; prev = "}"; i++; continue } LT = LT ch; i++; continue }
-          LT = LT ch; i++; continue
+          if (ch == "[" && match(substr(s, i), /^\[=*\[/)) { LC = "]" rep("=", RLENGTH - 2) "]"; LS = 1; LT = LT "\""; LTC = LTC "\"\""; i += RLENGTH; continue }
+          if (ch == "\"" || ch == "\047") { LQ = ch; LT = LT ch; LTC = LTC "\"\""; i++; continue }
+          if (ch == "{") { LD++; LT = LT ch; LTC = LTC ch; i++; continue }
+          if (ch == "}") { LD--; if (LD == 0) { LUA = 0; out = out " }"; prev = "}"; i++; continue } LT = LT ch; LTC = LTC ch; i++; continue }
+          LT = LT ch; LTC = LTC ch; i++; continue
         }
         if (Q != "") { if (ch == "\\" && i < n) { out = out ch mask(substr(s, i + 1, 1)); CUR = CUR "x"; i += 2; continue } if (ch == Q) { Q = ""; out = out ch; prev = ch } else { out = out mask(ch); CUR = CUR ch } i++; continue }
         if (VB) { out = out mask(ch); if (ch == "}") VB = 0; i++; continue }
@@ -219,7 +225,7 @@ for f in "$ORT" "$ANG"; do
         if (ch == ";" || ch == "}") { CUR = ""; out = out ch; prev = ch; i++; continue }
         CUR = CUR ch; out = out ch; prev = ch; i++
       }
-      CUR = CUR " "; LT = LT "\n"
+      CUR = CUR " "; LT = LT "\n"; LTC = LTC "\n"
       return out
     }
     function emit(s, l) { K++; ST[K] = s; SL[K] = l }
@@ -466,20 +472,25 @@ for f in "$ORT" "$ANG"; do
         # map, server_name, rewrite): none may be named like a CFM variable
         # (cfm_* / cf_* / xfp_*) or a request/response-header family (which
         # it would shadow — see below).
-        cu = u
+        # nginx turns an escaped quote or backslash back into the plain
+        # character in every token (it is how a single-quoted string spells
+        # the quote form of a named capture), so match on the un-escaped text.
+        cu = u; gsub(/\\\047/, "\047", cu); gsub(/\\"/, "\"", cu)
         while (match(cu, /\(\?(p?<|\047)[a-z_][a-z0-9_]*[>\047]/)) {
           cn = substr(cu, RSTART, RLENGTH); cu = substr(cu, RSTART + RLENGTH)
           sub(/^\(\?p?[<\047]/, "", cn); sub(/[>\047]$/, "", cn)
           if (cn ~ PFX) print "ERR line " SL[k] ": a regex named capture (?<" cn ">…) — it would set $" cn ", which a cache rail reads or is a CFM variable; name it something else."
         }
-        # set / map / geo / … on $http_* / $upstream_http_* / $cookie_* / $arg_*
+        # set* / map / geo / … (or a block entry that opens with the variable, as
+        # geoip2 blocks do) on $http_* / $upstream_http_* / $cookie_* / $arg_*
         # SHADOWS the request/response value for every request the statement
         # applies to (verified on nginx 1.24; a map does it http-wide): a
         # `map … $http_authorization` would silently turn off the credentialed-
         # request rail, a `set $upstream_http_cart_token ""` the session-token
         # one. Nothing may write those families.
         wt = ""
-        if (fw ~ /^(set|set_by_lua|set_by_lua_block|set_by_lua_file|auth_request_set|js_set|perl_set)$/) { wt = u; sub(/^[[:space:]]*[a-z0-9_]+[[:space:]]+/, "", wt); sub(/[[:space:];].*$/, "", wt) }
+        if (fw ~ /^(set(_[a-z0-9_]+)?|auth_request_set|js_set|js_var|perl_set)$/) { wt = u; sub(/^[[:space:]]*[a-z0-9_]+[[:space:]]+/, "", wt); sub(/[[:space:];].*$/, "", wt) }
+        else if (u ~ /^[[:space:]]*["\047]?[$]/) { wt = u; sub(/^[[:space:]]*/, "", wt); sub(/[[:space:];].*$/, "", wt) }
         else if (fw ~ /^(map|geo|split_clients)$/ && u ~ /[{][[:space:]]*$/) { wt = u; sub(/[[:space:]]*[{][[:space:]]*$/, "", wt); sub(/^.*[[:space:]]/, "", wt) }
         gsub(/["\047${}]/, "", wt)
         if (wt ~ HDRV) print "ERR line " SL[k] ": " fw " writes $" wt " — that shadows the request/response header (or cookie/arg) value, which the cache rails read."
@@ -498,15 +509,18 @@ for f in "$ORT" "$ANG"; do
       for (k = 1; k <= K; k++) { u = ST[k]; if (u ~ /^[[:space:]]*include[[:space:]]/) { sub(/^[[:space:]]*include[[:space:]]+/, "", u); sub(/[[:space:]]*;.*$/, "", u); print "INC " u } }
       if (nign != micro_ign) print "ERR " nign " proxy_ignore_headers statements list Cache-Control / Expires / X-Accel-Expires but only " micro_ign " sit in the micro locations — Tier A (or a server/http-level one a location inherits) would let the origin set the TTL and drop the nginx private/no-store rail."
       if (all !~ (A "lua_shared_dict[[:space:]]+cfm_cache_uncacheable[[:space:]]+[0-9]+[kKmM]?[[:space:]]*;")) print "ERR no lua_shared_dict cfm_cache_uncacheable — Tier B cannot remember an uncacheable key, so its requests queue on the cache lock."
-      lt2 = tolower(LT)
+      lt2 = tolower(LT); ltc = tolower(LTC)
       if (lt2 !~ /pcall\(cm\.micro_note\)/ || lt2 !~ /"cfm_apache_micro"/) print "ERR the http-level log_by_lua no longer calls cfm_cache.micro_note for cfm_apache_micro requests — Tier B would stop remembering uncacheable keys and their requests would queue on the cache lock."
       if (lt2 ~ /cfm_req_auth|cfm_cache_skip|cfm_cache_non200|cfm_cc_nostore|cfm_xae_nocache|cfm_micro_conf/) print "ERR inline Lua references $cfm_req_auth / $cfm_cache_skip / $cfm_cache_non200 / $cfm_cc_nostore / $cfm_xae_nocache / $cfm_micro_conf — the cache rails must come only from the conf maps, the sentinel and cfm_cache.lua."
       # ...by any spelling: ngx.var is read ONLY as ngx.var.<name> (a bracket
       # index or an alias reaches a variable by a computed name, which the
-      # check above cannot see), and never assigned for a CFM variable.
-      if (cnt(lt2, "(^|[^a-z0-9_])ngx([^a-z0-9_]|$)") != cnt(lt2, "(^|[^a-z0-9_])ngx[[:space:]]*[.]")) print "ERR inline Lua uses ngx other than as ngx.<field> (ngx[...], an alias, require \"ngx\") — access ngx.var only as ngx.var.<name>."
-      if (cnt(lt2, "ngx[[:space:]]*[.][[:space:]]*var([^a-z0-9_]|$)") != cnt(lt2, "ngx[[:space:]]*[.][[:space:]]*var[[:space:]]*[.][[:space:]]*[a-z_]")) print "ERR inline Lua uses ngx.var other than as ngx.var.<name> (a bracket index or an alias) — a computed name could reach a cache rail."
-      if (lt2 ~ /ngx[[:space:]]*[.][[:space:]]*var[[:space:]]*[.][[:space:]]*(cfm_|cf_|xfp_)[a-z0-9_]*[[:space:]]*=([^=]|$)/) print "ERR inline Lua assigns an ngx.var.cfm_* / cf_* / xfp_* variable — the cache rails and their inputs are written only by conf statements and cfm_cache.lua."
+      # check above cannot see), and never assigned for a CFM variable (one of
+      # several targets included). These read the code with its strings
+      # blanked (ltc), so a log message that says "ngx" is not code.
+      if (cnt(ltc, "(^|[^a-z0-9_])ngx([^a-z0-9_]|$)") != cnt(ltc, "(^|[^a-z0-9_])ngx[[:space:]]*[.]")) print "ERR inline Lua uses ngx other than as ngx.<field> (ngx[...], an alias, require \"ngx\") — access ngx.var only as ngx.var.<name>."
+      if (lt2 ~ /["\047]ngx["\047]/) print "ERR inline Lua names ngx in a string (require \"ngx\", package.loaded[\"ngx\"], _G[\"ngx\"]) — access ngx.var only as ngx.var.<name>."
+      if (cnt(ltc, "ngx[[:space:]]*[.][[:space:]]*var([^a-z0-9_]|$)") != cnt(ltc, "ngx[[:space:]]*[.][[:space:]]*var[[:space:]]*[.][[:space:]]*[a-z_]")) print "ERR inline Lua uses ngx.var other than as ngx.var.<name> (a bracket index or an alias) — a computed name could reach a cache rail."
+      if (ltc ~ /ngx[[:space:]]*[.][[:space:]]*var[[:space:]]*[.][[:space:]]*(cfm_|cf_|xfp_)[a-z0-9_]*[[:space:]]*(,[[:space:]]*[a-z_][a-z0-9_.]*[[:space:]]*)*=([^=]|$)/) print "ERR inline Lua assigns an ngx.var.cfm_* / cf_* / xfp_* variable — the cache rails and their inputs are written only by conf statements and cfm_cache.lua."
     }
   ' "$f")
   ncache_of["$f"]=$(sed -n 's/^NCACHE //p' <<< "$parsed")
@@ -541,7 +555,7 @@ for f in "$ORT" "$ANG"; do
   # $cfm_cache_skip "1") are enforced statement-aware in section (a), counted
   # by the parser, so a commented-out directive never satisfies them.
 
-  # ── (b2) Tier B micro-cache zones (Phase B1): all six TTL buckets declared ───
+  # ── (b2) Tier B micro-cache zones (Phase B1): every MICRO_BUCKETS TTL declared ─
   # Each zone's dir must exist before `-t` (the daemon + installers provision all
   # six), and a partial set would [emerg] at reload the moment a location names a
   # missing zone. Assert every bucket zone AND its internal location is present in
@@ -580,7 +594,7 @@ if [ "${clocs_of[$ORT]:-x}" != "${clocs_of[$ANG]:-y}" ]; then
   diff <(printf '%s\n' "${clocs_of[$ORT]}") <(printf '%s\n' "${clocs_of[$ANG]}") 2>/dev/null | sed 's/^/       /' >&2 || true
 fi
 
-# ── (e) micro-zone parity: the six cfm_micro_<n>s declarations must be BYTE-for-
+# ── (e) micro-zone parity: the cfm_micro_<n>s declarations must be BYTE-for-
 # byte identical between the two edges (not just present). Presence in both (b2)
 # already catches a missing bucket; this also catches a per-bucket param drift
 # (keys_zone size, max_size, inactive) between angie and openresty — a bucket B2
@@ -591,7 +605,7 @@ micro_zones() {
   sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' <<< "${mzones_of[$1]:-}" | sort
 }
 if ! diff <(micro_zones "$ORT") <(micro_zones "$ANG") >/dev/null 2>&1; then
-  err "openresty.conf and angie.conf declare the micro-cache zones DIFFERENTLY (a per-bucket keys_zone/max_size/inactive drift); the six cfm_micro_<n>s zones must be identical on both edges. Divergence:"
+  err "openresty.conf and angie.conf declare the micro-cache zones DIFFERENTLY (a per-bucket keys_zone/max_size/inactive drift); the cfm_micro_<n>s zones must be identical on both edges. Divergence:"
   diff <(micro_zones "$ORT") <(micro_zones "$ANG") 2>/dev/null | sed 's/^/       /' >&2 || true
 fi
 
@@ -609,7 +623,7 @@ else
     # the parsed statements: comments stripped, a directive wrapped over lines
     # joined, and the LAST inactive= wins (as in nginx)
     inact=$(sed -nE 's/.*[[:space:]]inactive=([0-9]+)(s|m)?([[:space:]].*|;.*)$/\1 \2/p' <<< "${mzones_of[$f]:-}")
-    [ "$(wc -l <<< "$inact")" = "6" ] && [ -n "$inact" ] || { err "$f: could not read the inactive= of all six micro zones (want <n>s or <n>m)."; continue; }
+    [ "$(wc -l <<< "$inact")" = "$(wc -w <<< "$micro_ttls")" ] && [ -n "$inact" ] || { err "$f: could not read the inactive= of every micro zone ($micro_ttls; want <n>s or <n>m)."; continue; }
     while read -r n u; do
       secs=$n; [ "$u" = "m" ] && secs=$((n * 60))
       [ $((secs + 30)) -le "$stale_ttl" ] || err "$f: a micro zone has inactive=${n}${u:-s}, not at least 30s below cfm_cache.lua MICRO_UNCACHEABLE_STALE_TTL=${stale_ttl}s — a stale copy would survive its key's uncacheable mark and be served again at the next probe."

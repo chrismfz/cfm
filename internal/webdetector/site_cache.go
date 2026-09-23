@@ -912,11 +912,13 @@ func (s *siteCacheStore) feedEntriesLocked() map[string]SiteCacheEntry {
 	return out
 }
 
-// siteCacheEdgeNormalizeHost is an exact port of cfm_hostmatch.lua
-// normalize_host, which the edge applies to the request Host: ASCII lowercase,
-// ONE trailing dot stripped, then a ":port" (an IPv6 literal keeps its
-// brackets). For any valid policy host it returns the same key as
-// siteCacheCanonHost.
+// siteCacheEdgeNormalizeHost is a port of cfm_hostmatch.lua normalize_host,
+// which the edge applies to the request Host: ASCII lowercase, ONE trailing
+// dot stripped, then a ":port" (an IPv6 literal keeps its brackets). It also
+// trims surrounding whitespace, which the edge does not: nginx never hands it
+// a Host with any, but a host typed into the API may carry some. For any
+// valid policy host it returns the same key as siteCacheCanonHost (the parity
+// test, site_cache_edge_parity_test.go, pins the two against each other).
 func siteCacheEdgeNormalizeHost(raw string) string {
 	h := siteCacheASCIILower(strings.TrimSpace(raw))
 	if h == "" {
