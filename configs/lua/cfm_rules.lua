@@ -40,7 +40,8 @@ end
 
 -- throttle_hit returns (hit, retry_after). hit==true means reject (429).
 --
--- Lock-free fixed-window counter (audit F21): ONE atomic SH:incr per request,
+-- Lock-free fixed-window counter (audit F21): ONE atomic SH:incr per request
+-- (a window's first hit also an add, via cfm_shdict),
 -- keyed on (profile, host, ip, window). The previous implementation took a
 -- per-(profile,host,ip) spin-lock (SH:add + up to 10x ngx.sleep(1ms)) around a
 -- read-modify-write token bucket, and on lock-acquisition TIMEOUT returned a 429

@@ -242,8 +242,10 @@ back-filled here — see the git/PR history for that period.
     Rate limits could undercount, and the breaker or budget could be off by
     a collision's worth.
   - The fix: every edge counter now goes through one helper, `cfm_shdict`,
-    that avoids that path. Windows and TTLs work as before. A test fails any
-    new call in the old form.
+    that avoids that path. Windows and TTLs work as before. A test fails a
+    new direct call in the old form.
+  - A counter already miscounted keeps its wrong value until its key expires.
+    An edge reload keeps the shared dicts; restart the edge to start clean.
 - **Site Cache refuses an auth cookie name the edge could never match** —
   one starting with `[` (PHP reads it as a nameless array) or a bare
   `__Host-` / `__Secure-` prefix — instead of storing a rule that never fires.

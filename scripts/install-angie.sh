@@ -30,7 +30,7 @@ readonly CFM_SHARED_LUA_DIR="/var/lib/cfm/lua"
 # is the source of truth and this array is a mechanically verified copy, so the
 # two can never drift apart again. Two severities behind this pre-flight: a
 # missing HARD require (cfm_filecache, cfm_bridge_cfg, cfm_cfg, cfm_selfip,
-# cfm_decision, cfm_waf_excl) takes the edge down outright, while a missing
+# cfm_decision, cfm_waf_excl, cfm_shdict) takes the edge down outright, while a missing
 # pcall-guarded module (cfm_fppolicy, cfm_tlsfp, cfm_waf, cfm_clearance, ...)
 # fails OPEN and silently disables its feature - an armed security control that
 # stops enforcing without a word. Both are worth dying on here, before reload.

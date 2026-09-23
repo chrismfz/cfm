@@ -89,13 +89,28 @@ do
   check(v == nil and err == "no memory", "an incr error other than not found is returned as is")
 end
 
--- guard: no module calls :incr( with 3 or more arguments (key, n, init[, ttl])
+-- guard: no edge Lua calls dict:incr with an init argument, in the forms a
+-- call is written in: d:incr(k, n, init), d.incr(d, k, n, init) and
+-- d["incr"](d, k, n, init). An aliased function (local f = d.incr) is not
+-- seen. Scans the modules and the *_by_lua blocks of the reference confs. The
+-- helper itself is exempt: it is always required as `shd`, and defined as
+-- _M.incr in cfm_shdict.lua.
 do
-  local p = assert(io.popen("ls configs/lua/*.lua"))
-  local files = {}
-  for f in p:lines() do files[#files + 1] = f end
+  local p = assert(io.popen("ls configs/lua/*.lua configs/*.conf*"))
+  local files, mods = {}, 0
+  for f in p:lines() do
+    files[#files + 1] = f
+    if f:match("%.lua$") then mods = mods + 1 end
+  end
   p:close()
-  check(#files > 20, "found the edge modules")
+  check(mods > 20, "found the edge modules")
+  check(#files > mods, "found the reference confs")
+  -- pattern, and the most top-level commas a call without init has
+  local forms = {
+    { ":%s*incr%s*%(", 1 },
+    { "%.%s*incr%s*%(", 2 },
+    { "%[%s*[\"']incr[\"']%s*%]%s*%(", 2 },
+  }
   local calls = 0
   for _, path in ipairs(files) do
     local fh = assert(io.open(path, "r"))
@@ -103,23 +118,34 @@ do
     for line in fh:lines() do
       lineno = lineno + 1
       local code = line:gsub("%-%-.*$", "")
-      local from = 1
-      while true do
-        local s, e = code:find(":incr%s*%(", from)
-        if not s then break end
-        calls = calls + 1
-        -- count top-level commas up to the matching ")"
-        local depth, commas, i = 1, 0, e + 1
-        while i <= #code and depth > 0 do
-          local ch = code:sub(i, i)
-          if ch == "(" or ch == "{" or ch == "[" then depth = depth + 1
-          elseif ch == ")" or ch == "}" or ch == "]" then depth = depth - 1
-          elseif ch == "," and depth == 1 then commas = commas + 1 end
-          i = i + 1
+      if code:find("cfm_shdict", 1, true) and code:find("require", 1, true) then
+        check(code:match("^%s*local%s+shd%s*=%s*require%s*%(?%s*[\"']cfm_shdict[\"']"),
+          string.format("%s:%d: require cfm_shdict as `local shd` (the guard exempts shd.incr)", path, lineno))
+      end
+      for _, form in ipairs(forms) do
+        local from = 1
+        while true do
+          local s, e = code:find(form[1], from)
+          if not s then break end
+          local recv = code:sub(1, s - 1):match("([%w_]+)%s*$")
+          local helper = form[2] == 2 and code:sub(s, s) == "." and
+            (recv == "shd" or (recv == "_M" and path:match("cfm_shdict%.lua$")))
+          if helper then from = e + 1; goto continue end
+          calls = calls + 1
+          -- count top-level commas up to the matching ")"
+          local depth, commas, i = 1, 0, e + 1
+          while i <= #code and depth > 0 do
+            local ch = code:sub(i, i)
+            if ch == "(" or ch == "{" or ch == "[" then depth = depth + 1
+            elseif ch == ")" or ch == "}" or ch == "]" then depth = depth - 1
+            elseif ch == "," and depth == 1 then commas = commas + 1 end
+            i = i + 1
+          end
+          check(depth == 0, string.format("%s:%d: an incr call this guard cannot read on one line", path, lineno))
+          check(commas <= form[2], string.format("%s:%d: dict:incr with an init argument; use cfm_shdict.incr", path, lineno))
+          from = e + 1
+          ::continue::
         end
-        check(depth == 0, string.format("%s:%d: an :incr( call this guard cannot read on one line", path, lineno))
-        check(commas <= 1, string.format("%s:%d: dict:incr with an init argument; use cfm_shdict.incr", path, lineno))
-        from = e + 1
       end
     end
     fh:close()

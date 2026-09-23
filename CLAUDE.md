@@ -658,7 +658,10 @@ because of that. Hard-won points:
   TTL, then `incr` again. That covers cfm_cache_log, cfm.lua waf_insp, the
   cfm_decision breaker, the cfm_fppolicy budget, cfm_pcw, the cfm_rules rate
   counters, cfm_ua_emergency and log-cfm. It works whatever the module version.
-  `cfm_shdict_test.lua` fails any new `:incr(` call with an init argument.
+  `cfm_shdict_test.lua` fails a new direct `incr` call with an init argument
+  (`d:incr`, `d.incr`, `d["incr"]`, in the modules and the confs' inline Lua;
+  an alias such as `local f = d.incr` is not seen), and requires the helper to
+  be bound as `local shd`.
 - **A shared dict's size change resets it on reload** (a same-size reload keeps
   it); key counters on a fixed-size digest so capacity is a fixed number of
   counters (the slab slot doubles past a 52-byte key).

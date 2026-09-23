@@ -65,11 +65,20 @@ local function new_dict()
   return {
     get = function(_, k) local e = store[k]; return e and e.v or nil end,
     set = function(_, k, v, ttl) store[k] = { v = v, ttl = ttl } end,
+    -- OpenResty semantics: incr without init on a missing key is "not
+    -- found" (cfm_shdict then adds it), add refuses an existing key.
     incr = function(_, k, by, init, ttl)
       local e = store[k]
-      if not e then store[k] = { v = (init or 0) + by, ttl = ttl }; return store[k].v end
+      if not e then
+        if init == nil then return nil, "not found" end
+        store[k] = { v = init + by, ttl = ttl }; return store[k].v
+      end
       e.v = e.v + by
       return e.v
+    end,
+    add = function(_, k, v, ttl)
+      if store[k] then return false, "exists" end
+      store[k] = { v = v, ttl = ttl }; return true
     end,
     _store = store,
   }
@@ -91,6 +100,8 @@ do
   local a2, id2 = fpp.lookup(deps)
   check(a2 == "deny" and id2 == "c28caa00", "cached lookup same answer")
   check(calls == 1, "second lookup served from cache (calls=" .. calls .. ")")
+  local b = sh._store["fpp|rpc_budget"]
+  check(b and b.v == 1 and b.ttl == 1, "the rpc budget counter is created with a 1 s ttl")
 end
 
 -- GREASE rotation hits the SAME cache entry (the whole point of the key).
@@ -149,7 +160,7 @@ end
 -- key-minting client must not churn the dict) and without an RPC.
 do
   local sh, calls = new_dict(), 0
-  sh:incr("fpp|rpc_budget", 1000, 0, 1) -- budget already exhausted this second
+  sh:set("fpp|rpc_budget", 1000, 1) -- budget already exhausted this second
   local a = fpp.lookup({ raw = raw, sh = sh,
     rpc = function() calls = calls + 1; return '{"action":"deny","id":"ff","ttl":30}', nil end })
   local nkeys = 0

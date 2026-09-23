@@ -301,8 +301,8 @@ end
 -- box-wide."
 --
 -- Implemented as a LOCK-FREE fixed-window counter (audit F22): each request does
--- ONE atomic shdict:incr — no per-UA spin-lock, no read-modify-write, no
--- get/set/delete. This matters precisely under the bot wave the throttle exists
+-- ONE atomic shdict:incr (a window's first hit also an add, via cfm_shdict) —
+-- no per-UA spin-lock, no read-modify-write, no get/set/delete. This matters precisely under the bot wave the throttle exists
 -- for: thousands of req/s of the SAME UA previously thundered on one per-UA 50ms
 -- lock (each loser spinning up to 10x ngx.sleep(1ms)) and did ~3-4 shdict writes
 -- per request. One incr replaces all of it.
@@ -316,7 +316,7 @@ end
 -- seconds == BOX_RATE long-run (10/s) with a BOX_BURST head (20 in one window).
 -- A fixed window can admit up to ~2x LIMIT across a window boundary; for a coarse
 -- emergency cap that is acceptable. The key embeds the window index, so each
--- window is a fresh key that self-expires via incr's init_ttl (no scan/delete),
+-- window is a fresh key that self-expires via the TTL it is created with (no scan/delete),
 -- bounding live keys to ~2 per UA.
 local BOX_RATE  = 10.0                              -- requests/sec, long-run
 local BOX_BURST = 20                                -- requests allowed within one window

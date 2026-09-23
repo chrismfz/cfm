@@ -37,7 +37,7 @@ _G.SH = {
 }
 _G.CFG = { waf_stats_enable = true }
 -- The extracted function reads cfm_shdict through cfm.lua's `shd` local; the
--- stub SH's incr records the key (and, returning nil, sends shd on to add).
+-- stub SH's incr records the key and returns 1, so shd never goes on to add.
 package.path = "configs/lua/?.lua;" .. package.path
 _G.shd = require "cfm_shdict"
 

@@ -59,7 +59,7 @@ local function esc(s) return ngx.escape_uri(s or "") end
 --   * The failure count is CONSECUTIVE — any success resets it — so on a busy
 --     healthy node an occasional timeout among many successes never accumulates;
 --     only an unbroken run of BREAKER_FAIL_THRESHOLD failures (a real outage)
---     trips. A fixed-window init_ttl (from the first failure) backstops a stalled partial count.
+--     trips. A fixed-window TTL (from the first failure) backstops a stalled partial count.
 --   * NO single-flight probe lock and NO presence-based re-arm (both raced /
 --     mis-fired: a lock deadlocked get()'s own token-rotation retry; a
 --     presence-based re-arm let a lone stray timeout re-open on ONE blip). Once
