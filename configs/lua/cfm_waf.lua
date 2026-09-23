@@ -11,7 +11,7 @@
 -- Public API:
 --   _M.enabled() -> bool
 --   _M.check(ctx) -> hit(bool), reason(string), ttl_sec(int), action(string)
---   _M.should_push(shdict, ip, reason, action) -> bool
+--   _M.should_push(shdict, ip, reason, action, host) -> bool
 --
 -- ctx fields expected from caller:
 --   uri, args, method, host, ip, peer, cf_ip, cookie, shdict, headers, body
@@ -21,6 +21,7 @@ local _M = {}
 -- Sub-modules. _M.init() chains init() into both.
 local util = require("cfm_waf_util")
 local det  = require("cfm_waf_detectors")
+local shd  = require("cfm_shdict")
 
 -- Util helpers used inline by _M.check below.
 local lower         = util.lower
@@ -92,15 +93,18 @@ local CFG = {
                                        -- never convicts, D5b).
   rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
   rule_sqli_blind_lexical = "block", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted challenge→block 2026-08-23 after expanded fleet burn-in; prior 188/188 TP, 0 FP review (docs/waf.md)
-  rule_sqli_union_variant = "challenge",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; promoted logonly→challenge 2026-08-23 after clean fleet review (docs/waf.md)
+  rule_sqli_union_variant = "challenge_v2",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; promoted logonly→challenge 2026-08-23, challenge→challenge_v2 2026-09-23 (pure sqlmap-style attack traffic; solves get the Rung-1 humanity gate) — docs/waf.md
   rule_superglobal_override = "logonly", -- request param KEY named like a PHP superglobal (_GET/_SERVER/GLOBALS/…) = variable poisoning; observe-only pending FP review
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
   rule_php_wrappers      = "block",      -- php:// phar:// data:// zip:// expect:// glob:// (args/body only; edge-block + autoblock-armed since 2026-07-18)
-  rule_ip_host           = "challenge",  -- Host header is bare IPv4/IPv6 literal
+  rule_ip_host           = "challenge_v2",  -- Host header is bare IPv4/IPv6 literal
                                          -- (promoted from logonly: 2026-05 hit analysis showed
                                          --  100% scanner traffic against raw IPv4 hosts —
-                                         --  real users never set Host to a server IP literal)
+                                         --  real users never set Host to a server IP literal;
+                                         --  challenge→challenge_v2 2026-09-23: the one challenge
+                                         --  rule where headless scanners were seen SOLVING —
+                                         --  their solves now face the Rung-1 humanity gate)
   rule_ctrl_chars        = "challenge",  -- suspicious ASCII control chars in args/body
                                          -- (promoted from logonly: detector already excludes
                                          --  multipart/binary CTs; 0 hits over 6 weeks ×
@@ -125,9 +129,10 @@ local CFG = {
   rule_cmd_payload      = "challenge", -- fallback/default mode for payload-y separators/tokens in args
                                        -- (every emitted tag has an explicit override below; this value
                                        --  is the safety net for any new tag added to detect_cmd_payload)
-  rule_debug_toggles    = "challenge", -- xdebug, trace, debug, stacktrace
+  rule_debug_toggles    = "challenge_v2", -- xdebug, trace, debug, stacktrace
                                        -- (promoted from logonly: narrow value-equality match —
-                                       --  debug=1|true, trace=1|true, etc. — 0 hits in 6 weeks)
+                                       --  debug=1|true, trace=1|true, etc. — 0 hits in 6 weeks;
+                                       --  challenge→challenge_v2 2026-09-23: only scanners fire it)
   rule_serialize        = "challenge", -- PHP serialized object markers
                                        -- (promoted from logonly: serialized blobs in URL args are
                                        --  insecure-deserialization probes; legit apps carry these
@@ -181,7 +186,9 @@ local CFG = {
   rule_fetch_metadata_missing = "logonly",
 
   -- [top-8]  Proxy header integrity
-  rule_proxy_header_sqli = "challenge",  -- single-quote / non-string in XFF, X-Real-IP, Client-IP
+  rule_proxy_header_sqli = "challenge_v2",  -- single-quote / non-string in XFF, X-Real-IP, Client-IP
+                                         -- (challenge→challenge_v2 2026-09-23: datacenter-proxy
+                                         --  scanners only; solves get the Rung-1 humanity gate)
 
   -- [top-9]  SSRF + JS prototype pollution
   rule_ssrf             = "challenge", -- SSRF protocol schemes (file://, gopher://, …) + IP obfuscation
@@ -291,7 +298,9 @@ local CFG = {
                                         -- (RFC-violating header combos used for request smuggling)
   rule_long_path_segment = "challenge", -- single URL path segment ≥ 800 bytes (Greek/CJK
                                         -- slug-safe; observed abuse is base64 stuffing >1 KB)
-  rule_header_flood      = "challenge", -- total header bag > 16 KB excluding Cookie/Authorization volume
+  rule_header_flood      = "challenge_v2", -- total header bag > 16 KB excluding Cookie/Authorization volume
+                                       -- (challenge→challenge_v2 2026-09-23: single-scanner traffic;
+                                       --  solves get the Rung-1 humanity gate)
                                         -- (promoted from logonly: 16 KB threshold sits well above
                                         --  typical 1-3 KB real-world headers; 0 hits in 6 weeks)
   rule_range_abuse       = "logonly",   -- Apache Killer (CVE-2011-3192) style multi-range floods,
@@ -394,6 +403,13 @@ local CFG = {
   -- still collapsing rapid multi-vector bursts from a true attacker.
   block_ttl_sec     = 10,
   push_cooldown_sec = 60,
+  -- Max distinct hosts a single IP may open a challenge_v2 push+mark for per
+  -- family per push_cooldown_sec window. challenge_v2 keys the Host in (each
+  -- host needs its own rung mark), but $host is client-chosen, so this caps the
+  -- per-(ip,family) push/RPC volume a Host-rotating flood can generate — past
+  -- it, hits collapse to the family window (see should_push). 16 covers a real
+  -- multi-vhost scanner worth marking; a flood beyond it drops marks (→ v1).
+  push_v2_host_cap  = 16,
 
   -- Body scan budget, keyed by request Content-Type. The merged args+body
   -- string fed to body-aware rules (traversal/rce/xss/sqli/php-wrappers/
@@ -2269,7 +2285,7 @@ local PUSH_KEY_KEEPS_TAG = {
   WAF_FETCH_METADATA = true,
 }
 
-function _M.should_push(shdict, ip, reason, action)
+function _M.should_push(shdict, ip, reason, action, host)
   if not shdict or not ip or ip == "" then return true end
   -- Dedup on (ip, reason FAMILY, action tier).
   --   * FAMILY (the part before the first ":", the same identity
@@ -2305,6 +2321,32 @@ function _M.should_push(shdict, ip, reason, action)
     -- logonly-only (no block rule, no autoblock feed) and has two tags, so a
     -- per-IP flood still collapses to at most two pushes per window.
     key_reason = (reason and reason:match("^[^:]+:[^:]+")) or fam
+  end
+  -- challenge_v2 keys the HOST in as well: the push is what records the
+  -- per-(ip,host) v2 rung mark daemon-side (handleIPPush → MarkChallengeV2),
+  -- so a family+action+ip key would drop the mark for every host after the
+  -- first within the cooldown, and those hosts would verify at v1. But $host is
+  -- CLIENT-chosen (a catch-all server_name accepts any Host), so an unbounded
+  -- per-host key would re-open the F31 flood: one ip_push RPC + cfm.waf.log line
+  -- per Host an attacker rotates, unbounded, for the host-independent rules
+  -- (319/321/801/609). So cap distinct hosts per (ip, family) per window: the
+  -- first push_v2_host_cap hosts each push+mark, then hits collapse to the
+  -- family window (one more push, then dedup). Marks past the cap are dropped
+  -- (fail-open to v1) — the same posture as the mark store's own cap. This also
+  -- bounds shared-dict key growth to cap+2 per (ip, family). Other tiers stay
+  -- host-agnostic: v1/logonly write no mark, and block feeds the per-IP
+  -- autoblock (family-keyed, threshold 1) which a per-host key would over-notify.
+  if action == "challenge_v2" then
+    local perhost = "wafpush|" .. key_reason .. "|challenge_v2|" .. ip .. "|" .. (host or "")
+    if shdict:get(perhost) ~= nil then return false end  -- this host already pushed this window
+    local budget = "wafpushv2n|" .. key_reason .. "|" .. ip
+    local n = shd.incr(shdict, budget, 1, CFG.push_cooldown_sec)
+    if not n or n <= (CFG.push_v2_host_cap or 16) then
+      shdict:add(perhost, 1, CFG.push_cooldown_sec)
+      return true
+    end
+    -- Over the per-window host budget: dedup on the family window like v1.
+    return shdict:add("wafpush|" .. key_reason .. "|challenge_v2|" .. ip, 1, CFG.push_cooldown_sec) == true
   end
   local k  = "wafpush|" .. key_reason .. "|" .. (action or "na") .. "|" .. ip
   local ok = shdict:add(k, 1, CFG.push_cooldown_sec)

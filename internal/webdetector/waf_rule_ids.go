@@ -65,7 +65,7 @@ var wafRuleIDs = []WAFRule{
 	// 3xx injection
 	{ID: 301, Name: "rule_sqli", ReasonFamily: "WAF_SQLI", DefaultMode: "block"},
 	{ID: 309, Name: "rule_sqli_blind_lexical", ReasonFamily: "WAF_SQLI_LEXICAL", DefaultMode: "block"},
-	{ID: 319, Name: "rule_sqli_union_variant", ReasonFamily: "WAF_SQLI_UNION_VARIANT", DefaultMode: "challenge"},
+	{ID: 319, Name: "rule_sqli_union_variant", ReasonFamily: "WAF_SQLI_UNION_VARIANT", DefaultMode: "challenge_v2"},
 	{ID: 318, Name: "rule_superglobal_override", ReasonFamily: "WAF_SUPERGLOBAL", DefaultMode: "logonly"},
 	{ID: 302, Name: "rule_xss", ReasonFamily: "WAF_XSS", DefaultMode: "challenge_v2"},
 	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "challenge"},
@@ -83,7 +83,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 316, Name: "rule_cmd_payload_pipe_sh", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge"},
 	{ID: 317, Name: "rule_cmd_payload_backtick", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge"},
 	{ID: 320, Name: "rule_rce", ReasonFamily: "WAF_RCE", DefaultMode: "block"},
-	{ID: 321, Name: "rule_proxy_header_sqli", ReasonFamily: "WAF_PROXY_HDR", DefaultMode: "challenge"},
+	{ID: 321, Name: "rule_proxy_header_sqli", ReasonFamily: "WAF_PROXY_HDR", DefaultMode: "challenge_v2"},
 	{ID: 322, Name: "rule_reverse_shell", ReasonFamily: "WAF_RCE", DefaultMode: "challenge"},
 	{ID: 323, Name: "rule_persistence", ReasonFamily: "WAF_RCE", DefaultMode: "challenge"},
 	{ID: 324, Name: "rule_rootkit_artifacts", ReasonFamily: "WAF_RCE", DefaultMode: "challenge"},
@@ -134,14 +134,14 @@ var wafRuleIDs = []WAFRule{
 
 	// 6xx header / protocol anomaly
 	{ID: 601, Name: "rule_ctrl_chars", ReasonFamily: "WAF_CTRL_CHARS", DefaultMode: "challenge"},
-	{ID: 602, Name: "rule_ip_host", ReasonFamily: "WAF_IP_HOST", DefaultMode: "challenge"},
+	{ID: 602, Name: "rule_ip_host", ReasonFamily: "WAF_IP_HOST", DefaultMode: "challenge_v2"},
 	{ID: 603, Name: "rule_header_vulns", ReasonFamily: "WAF_HEADER_VULN", DefaultMode: "challenge"},
 	{ID: 604, Name: "rule_content_type_anomaly", ReasonFamily: "WAF_CT_ANOMALY", DefaultMode: "challenge"},
 	{ID: 605, Name: "rule_crlf_injection", ReasonFamily: "WAF_CRLF", DefaultMode: "logonly"},
 	{ID: 606, Name: "rule_http_smuggling", ReasonFamily: "WAF_HTTP_SMUGGLING", DefaultMode: "challenge"},
 	{ID: 607, Name: "rule_exploit_methods", ReasonFamily: "WAF_EXPLOIT_METHOD", DefaultMode: "challenge"},
 	{ID: 608, Name: "rule_smuggling_cl", ReasonFamily: "WAF_HTTP_SMUGGLING", DefaultMode: "challenge"},
-	{ID: 609, Name: "rule_header_flood", ReasonFamily: "WAF_HEADER_FLOOD", DefaultMode: "challenge"},
+	{ID: 609, Name: "rule_header_flood", ReasonFamily: "WAF_HEADER_FLOOD", DefaultMode: "challenge_v2"},
 	{ID: 610, Name: "rule_range_abuse", ReasonFamily: "WAF_RANGE_ABUSE", DefaultMode: "logonly"},
 	{ID: 611, Name: "rule_bad_utf8", ReasonFamily: "WAF_BAD_UTF8", DefaultMode: "logonly"},
 	// Fetch-metadata missing (headless / automation "Sec-Fetch tell") — Track-2
@@ -154,7 +154,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 702, Name: "rule_c2_tunnel", ReasonFamily: "WAF_C2", DefaultMode: "challenge"},
 
 	// 8xx info disclosure / debug
-	{ID: 801, Name: "rule_debug_toggles", ReasonFamily: "WAF_DEBUG_TOGGLE", DefaultMode: "challenge"},
+	{ID: 801, Name: "rule_debug_toggles", ReasonFamily: "WAF_DEBUG_TOGGLE", DefaultMode: "challenge_v2"},
 
 	// 10xxx named-vulnerability (CVE) detectors — see WAF_CVE.md.
 	{ID: 10001, Name: "rule_cve_simple_file_list_upload", ReasonFamily: "WAF_CVE", DefaultMode: "block"},

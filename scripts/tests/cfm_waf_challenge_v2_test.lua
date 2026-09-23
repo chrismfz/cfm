@@ -170,11 +170,15 @@ do
   check(d == "block" and conv3 == false,  "6: post-clearance — block passes through unconverted")
 end
 
--- ── 7: should_push — challenge_v2 is its own cooldown tier ───────────────────
+-- ── 7: should_push — challenge_v2 is its own cooldown tier, keyed per host ───
 -- A plain-challenge push must not consume the window for a later v2 push of
 -- the same family (and vice versa): the v2 push is what writes the rung mark
--- daemon-side, so suppressing it would silently downgrade the rung.
+-- daemon-side, so suppressing it would silently downgrade the rung. And because
+-- the mark is per-(ip,host), a v2 push on a SECOND host within the window must
+-- still go out — else that host would verify at v1 (the multi-host gap).
 do
+  -- Fake dict with real ngx.shared semantics (cfm_shdict.incr uses incr-then-add):
+  -- incr on a missing key is "not found"; add refuses an existing key.
   local store = {}
   local sh = {
     add = function(_, k, v, _ttl)
@@ -182,12 +186,47 @@ do
       store[k] = v
       return true
     end,
+    get = function(_, k) return store[k] end,
+    incr = function(_, k, v)
+      if store[k] == nil then return nil, "not found" end
+      store[k] = store[k] + v
+      return store[k]
+    end,
   }
   local IP = "203.0.113.99"
-  check(waf.should_push(sh, IP, "WAF_XSS", "challenge") == true,     "7: first challenge push goes out")
-  check(waf.should_push(sh, IP, "WAF_XSS", "challenge_v2") == true,  "7: v2 push not masked by the challenge window")
-  check(waf.should_push(sh, IP, "WAF_XSS", "challenge_v2") == false, "7: second v2 push within the window deduped")
-  check(store["wafpush|WAF_XSS|challenge_v2|" .. IP] ~= nil,         "7: v2 cooldown key carries the v2 tier")
+  check(waf.should_push(sh, IP, "WAF_XSS", "challenge", "a.gr") == true,     "7: first challenge push goes out")
+  check(waf.should_push(sh, IP, "WAF_XSS", "challenge_v2", "a.gr") == true,  "7: v2 push not masked by the challenge window")
+  check(waf.should_push(sh, IP, "WAF_XSS", "challenge_v2", "a.gr") == false, "7: second v2 push on the same host deduped")
+  check(waf.should_push(sh, IP, "WAF_XSS", "challenge_v2", "b.gr") == true,  "7: v2 push on a DIFFERENT host still goes out (mark per host)")
+  check(store["wafpush|WAF_XSS|challenge_v2|" .. IP .. "|a.gr"] ~= nil,      "7: v2 cooldown key carries the v2 tier and host")
+  -- A plain challenge stays host-agnostic: a second host must NOT get a
+  -- separate v1 push (no mark to protect there).
+  check(waf.should_push(sh, IP, "WAF_XSS", "challenge", "b.gr") == false,    "7: v1 challenge stays host-agnostic (deduped across hosts)")
+end
+
+-- ── 7b: challenge_v2 caps distinct hosts per (ip, family) per window ─────────
+-- $host is client-chosen (catch-all server_name), so an unbounded per-host key
+-- would let one IP rotating the Host header flood ip_push/cfm.waf.log. The
+-- push_v2_host_cap collapses hits past the cap to the family window.
+do
+  local store = {}
+  local sh = {
+    add  = function(_, k, v) if store[k] ~= nil then return false, "exists" end store[k] = v return true end,
+    get  = function(_, k) return store[k] end,
+    incr = function(_, k, v) if store[k] == nil then return nil, "not found" end store[k] = store[k] + v return store[k] end,
+  }
+  local IP = "198.51.100.7"
+  local cap = waf.get_config().push_v2_host_cap
+  check(type(cap) == "number" and cap > 0, "7b: push_v2_host_cap is a positive number (got " .. tostring(cap) .. ")")
+  local pushed = 0
+  for i = 1, cap do
+    if waf.should_push(sh, IP, "WAF_IP_HOST", "challenge_v2", "h" .. i .. ".gr") then pushed = pushed + 1 end
+  end
+  check(pushed == cap, "7b: the first cap distinct hosts each push (got " .. pushed .. "/" .. cap .. ")")
+  -- The (cap+1)th distinct host falls to the family window: it pushes once,
+  -- then any further new host in the same window is deduped there.
+  check(waf.should_push(sh, IP, "WAF_IP_HOST", "challenge_v2", "over1.gr") == true,  "7b: first over-cap host pushes on the family window")
+  check(waf.should_push(sh, IP, "WAF_IP_HOST", "challenge_v2", "over2.gr") == false, "7b: further over-cap hosts are deduped (flood bounded)")
 end
 
 if fails > 0 then
