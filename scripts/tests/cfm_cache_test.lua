@@ -107,6 +107,16 @@ check(cache.policy_key_for("images.cdn.example.com") == "*.cdn.example.com", "a 
 check(cache.policy_key_for("other.com") == nil, "unarmed host → nil key (uncounted)")
 check(cache.policy_key_for("cdn.example.com") == nil, "wildcard bare-suffix does not match → nil")
 
+-- stats_keys: the armed keys the stats push reads, as a sorted string
+local function stats_keys_str()
+  local ks = {}
+  for _, k in ipairs(cache._stats_keys()) do ks[#ks + 1] = k end
+  table.sort(ks)
+  return table.concat(ks, ",")
+end
+check(stats_keys_str() == "*.cdn.example.com,myip.gr,www.myip.gr",
+      "stats_keys = every armed key policy_key_for can return: " .. stats_keys_str())
+
 -- ── label_for: compact, greppable, tiers omitted when off ─────────────────────
 check(cache._label_for({ gen = 3,
         static = { on = true, recipe = "static_aggressive", ttl = "7d" },
@@ -511,6 +521,8 @@ local oo = cache.policy_for("tenant.example.com")
 check(oo ~= nil and oo.gen == 30 and oo.static == nil and oo.micro == nil,
       "opt-out row: the exact (tier-less) policy wins over the armed wildcard")
 check(cache.policy_key_for("tenant.example.com") == nil, "opt-out row is uncounted (nil stats key)")
+check(stats_keys_str() == "*.example.com,*.shop.example.com,big.gen",
+      "stats_keys leaves the exact opt-out row out: " .. stats_keys_str())
 reset_cache_vars(); ngx.var.host = "tenant.example.com"
 cache.static_gate()
 check(ngx.var.cfm_cache_skip == "1", "opt-out row: static_gate leaves the host uncached despite the wildcard")
@@ -547,6 +559,18 @@ local sw = cache.policy_for("x.shop.example.com")
 check(sw ~= nil and sw.gen == 40 and sw.static == nil, "a wildcard opt-out wins over the broader armed wildcard")
 check(cache.policy_key_for("x.shop.example.com") == nil, "a wildcard opt-out is uncounted (nil stats key)")
 check(cache.policy_key_for("y.example.com") == "*.example.com", "the broader wildcard still counts its other sub-hosts")
+check(stats_keys_str() == "*.example.com", "stats_keys leaves a wildcard opt-out out: " .. stats_keys_str())
+cache._rebuild_cache({
+  { host = "Dup.example", gen = 1, static = { on = true, recipe = "static_lean", ttl = "1h" } },
+  { host = "dup.example.", gen = 2, static = { on = true, recipe = "static_lean", ttl = "1h" } },
+  { host = "*.w.example", gen = 1, static = { on = true, recipe = "static_lean", ttl = "1h" } },
+  { host = "*.W.example", gen = 2, micro = { on = true, recipe = "micro_safe", ttl = "5s" } },
+})
+check(stats_keys_str() == "*.w.example,dup.example", "a key listed twice (any spelling) is read once: " .. stats_keys_str())
+cache._rebuild_cache({
+  { host = "*.example.com", gen = 10, static = { on = true, recipe = "static_lean", ttl = "1h" } },
+  { host = "*.shop.example.com", gen = 40 },
+})
 reset_cache_vars(); ngx.var.host = "x.shop.example.com"
 cache.static_gate()
 check(ngx.var.cfm_cache_skip == "1", "a wildcard opt-out: static_gate leaves its sub-hosts uncached")

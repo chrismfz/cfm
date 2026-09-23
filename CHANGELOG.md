@@ -191,16 +191,25 @@ back-filled here — see the git/PR history for that period.
   dropped silently). A stored policy that fails these rules is kept but not served
   (listed as unloadable), and its vhost stays opted out rather than falling
   to a covering wildcard; `remove <host>` deletes it.
-- **Site Cache stats: no rows lost in the daemon, and stale rows go away.**
-  A stats push of more than a few thousand rows could overflow the daemon's
-  hook queue and lose rows, and the daemon took at most 4096 vhosts per push
-  while a node can hold 5000 policies. A push is now handled as one event,
-  capped at the policy limit. The daemon now keeps rows only for vhosts that
-  are armed, only the known cache statuses, and drops the rows of disarmed
-  vhosts within about 5 minutes (they used to stay in memory until a
-  restart). Not changed yet: the edge reads at most 8000 stats keys per push,
-  so on a node with more than ~1000 armed vhosts some can still be missing
-  from a push, or pushed with partial counts.
+- **Site Cache stats: every armed vhost is counted in full, and stale rows go
+  away.** A stats push of more than a few thousand rows could overflow the
+  daemon's hook queue and lose rows, and the daemon took at most 4096 vhosts
+  per push while a node can hold 5000 policies. A push is now handled as one
+  event, capped at the policy limit. The daemon now keeps rows only for vhosts
+  that are armed, only the known cache statuses, and drops the rows of
+  disarmed vhosts within about 5 minutes (they used to stay in memory until a
+  restart). The edge side had the same kind of limit: it read at most 8000
+  keys of its stats dict per push, and the 4 MB dict held about 28 000
+  counters, so past roughly 1000 armed vhosts some were missing from a push
+  or pushed with only some of their statuses (measured with 5000 armed
+  vhosts: 1143 pushed). It now reads each armed vhost's counters by name, so
+  every one is pushed with all its statuses (5000 of 5000, in about 40 ms).
+  The dict is now 8 MB, room for 5000 vhosts with every status. The daemon
+  accepts a push of up to 4 MiB: the largest legitimate one is about 2.3 MB,
+  over the old 2 MiB limit, which would have rejected the whole push. The
+  counters of a disarmed vhost are no longer pushed. The first edge reload
+  on the new config creates the larger dict, so the counters start again
+  from zero once.
 - **Site Cache: a purge can no longer be undone by removing and re-adding a
   vhost.** The purge generation (part of the cache key) restarted at 0 for a
   re-added vhost, so objects cached under an earlier generation — static

@@ -2695,6 +2695,9 @@ func (b *NginxBridge) handleWAFStats(w http.ResponseWriter, r *http.Request) {
 // excess rows from a buggy/compromised edge are dropped.
 const maxCacheStatsRows = maxSiteCacheEntries
 
+// maxCacheStatsBody bounds a /nginx/cache/stats push body (see handleCacheStats).
+const maxCacheStatsBody = 4 << 20
+
 // handleCacheStats accepts the periodic Site Cache snapshot pushed by Lua's
 // cfm_cache.lua schedule_stats_flush_if_needed. Body: {"rows":[{host, counts:{status:count,…}}]}
 // with absolute counts per armed vhost; Go upserts each row idempotently.
@@ -2710,11 +2713,13 @@ func (b *NginxBridge) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	// Cap body size — each row is a small map and the edge reads at most 8000
-	// stats keys per push (cfm_cache_log.lua snapshot_vhosts), so a legit push
-	// stays far below this; the ceiling only stops a compromised edge
+	// Cap body size. The edge pushes one row per armed policy key (at most
+	// maxSiteCacheEntries), each a host of up to 253 bytes plus seven counters:
+	// ~130 bytes for a typical host (5000 rows measured at ~0.64 MB), ~460 at
+	// worst, so ~2.3 MB — above the 2 MiB this used to be, which would have
+	// rejected the WHOLE push. The ceiling only stops a compromised edge
 	// streaming a huge array.
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxCacheStatsBody)
 
 	var msg nginxCacheStatsMsg
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {

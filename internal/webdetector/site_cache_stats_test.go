@@ -398,6 +398,61 @@ func TestNginxBridge_CacheStatsPushIsOneHookEvent(t *testing.T) {
 	}
 }
 
+// The worst-case LEGIT push — one row per stored policy (the edge reads every
+// armed key, cfm_cache_log.lua snapshot_vhosts), each a 253-byte host with all
+// seven statuses at 16-digit counts (~2.3 MB) — is accepted in full: over the
+// old 2 MiB cap the whole push was rejected, so no vhost got stats. A body over
+// maxCacheStatsBody still is.
+func TestNginxBridge_CacheStatsWorstCaseLegitPushFits(t *testing.T) {
+	statuses := []string{"HIT", "MISS", "BYPASS", "EXPIRED", "STALE", "UPDATING", "REVALIDATED"}
+	build := func(rows, hostLen int) string {
+		var sb strings.Builder
+		sb.WriteString(`{"rows":[`)
+		for i := 0; i < rows; i++ {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			id := fmt.Sprintf("h%05d.", i)
+			host := id + strings.Repeat("a", hostLen-len(id)-len(".example")) + ".example"
+			fmt.Fprintf(&sb, `{"host":%q,"counts":{`, host)
+			for j, st := range statuses {
+				if j > 0 {
+					sb.WriteString(",")
+				}
+				fmt.Fprintf(&sb, `%q:%d`, st, int64(9007199254740991))
+			}
+			sb.WriteString(`}}`)
+		}
+		sb.WriteString(`]}`)
+		return sb.String()
+	}
+	post := func(body string) (int, int) {
+		b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+		b.hookCh = make(chan func(), 1)
+		got := 0
+		b.SetCacheStatsHook(func(string, map[string]int) { got++ })
+		req := httptest.NewRequest(http.MethodPost, "/nginx/cache/stats", strings.NewReader(body))
+		req.Header.Set("X-CFM-Token", "tok")
+		rr := httptest.NewRecorder()
+		b.handleCacheStats(rr, req)
+		if len(b.hookCh) == 1 {
+			(<-b.hookCh)()
+		}
+		return rr.Code, got
+	}
+	legit := build(maxSiteCacheEntries, 253)
+	if len(legit) <= 2<<20 {
+		t.Fatalf("worst-case body is %d bytes — no longer above the old 2 MiB cap, so this test no longer pins the raise", len(legit))
+	}
+	if code, got := post(legit); code != http.StatusOK || got != maxSiteCacheEntries {
+		t.Fatalf("worst-case legit push (%d bytes): status %d, %d rows delivered, want 200 and %d", len(legit), code, got, maxSiteCacheEntries)
+	}
+	big := `{"rows":[{"host":"` + strings.Repeat("a", maxCacheStatsBody) + `","counts":{"HIT":1}}]}`
+	if code, got := post(big); code != http.StatusBadRequest || got != 0 {
+		t.Fatalf("over-cap body: status %d, %d rows delivered, want 400 and 0", code, got)
+	}
+}
+
 // Only the canonical policy key is a stats key: "a.com:1", "a.com." … would
 // each take a row of the cap.
 func TestSiteCacheStats_ArmedKeyCanonicalOnly(t *testing.T) {

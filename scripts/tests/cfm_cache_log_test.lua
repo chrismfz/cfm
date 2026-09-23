@@ -1,6 +1,6 @@
 -- Tests for cfm_cache_log.lua — per-vhost + zone cache-status counters (Site
 -- Cache 3c). Pure luajit: ngx.shared.cfm_cache_stats is a mock dict. Drives
--- _M.log(zone, status[, host]) and asserts the key schema + _M.snapshot_vhosts.
+-- _M.log(zone, status[, host]) and asserts the key schema + _M.snapshot_vhosts(keys).
 
 package.path = "configs/lua/?.lua;" .. package.path
 
@@ -59,16 +59,37 @@ check(dict:get("cache:vhost::total") == nil,                      "no empty-host
 cl.log("cfm_static", "BYPASS", "www.example.com")
 check(dict:get("cache:vhost:www.example.com:status:BYPASS") == 1, "second vhost keyed independently")
 
--- ── snapshot_vhosts returns per-host absolute status counts (no total key) ────
-local snap = cl.snapshot_vhosts()
+-- ── snapshot_vhosts(keys) reads the named (armed) keys, nothing else ────────
+-- a disarmed vhost's counters stay in the dict but are no longer read
+cl.log("cfm_static", "HIT", "disarmed.example")
+local snap = cl.snapshot_vhosts({ "myip.gr", "www.example.com", "armed-no-traffic.example", "myip.gr", "", 7 })
 check(snap["myip.gr"] and snap["myip.gr"].HIT == 1 and snap["myip.gr"].MISS == 1, "snapshot myip.gr HIT/MISS split")
 check(snap["myip.gr"].total == nil,                               "snapshot carries no :total (daemon derives it)")
+check(snap["myip.gr"].BYPASS == nil,                              "a status never counted is absent, not a fabricated 0")
 check(snap["www.example.com"] and snap["www.example.com"].BYPASS == 1, "snapshot second vhost BYPASS")
+check(snap["disarmed.example"] == nil,                            "a key not in the list is never read")
+check(snap["armed-no-traffic.example"] == nil,                    "an armed key with no counter yet is left out")
+check(snap[""] == nil,                                            "an empty key is skipped")
+local nrows = 0; for _ in pairs(snap) do nrows = nrows + 1 end
+check(nrows == 2, "exactly the two counted armed keys (a duplicate / non-string entry adds nothing): " .. nrows)
+check(next(cl.snapshot_vhosts(nil)) == nil and next(cl.snapshot_vhosts({})) == nil, "no key list → empty snapshot")
+
+-- every counted status is read back (all seven), whatever else the dict holds:
+-- the read is by name, so it cannot be cut short like the old get_keys scan
+for _, st in ipairs({ "HIT", "MISS", "BYPASS", "EXPIRED", "STALE", "UPDATING", "REVALIDATED" }) do
+  cl.log("cfm_micro", st, "all.example")
+end
+for i = 1, 20000 do dict:set("cache:vhost:filler" .. i .. ".example:status:HIT", 1) end
+local all = cl.snapshot_vhosts({ "all.example" })["all.example"]
+local nst = 0; for _ in pairs(all or {}) do nst = nst + 1 end
+check(nst == 7, "all seven statuses of an armed key are read: " .. nst)
+dict:set("cache:vhost:all.example:status:TELEPORTED", 9)
+check(cl.snapshot_vhosts({ "all.example" })["all.example"].TELEPORTED == nil, "only the counted statuses are read")
 
 -- ── no dict declared → full no-op / empty snapshot (fail-safe) ────────────────
 _G.ngx.shared.cfm_cache_stats = nil
 cl.log("cfm_static", "HIT", "x.com")             -- must not raise
-local empty = cl.snapshot_vhosts()
+local empty = cl.snapshot_vhosts({ "x.com" })
 check(type(empty) == "table" and next(empty) == nil, "snapshot with no dict → empty table")
 
 if fails > 0 then io.stderr:write(fails .. " failure(s)\n"); os.exit(1) end

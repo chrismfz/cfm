@@ -6,15 +6,11 @@
 
 local _M = {}
 
-local VALID = {
-  HIT = true,
-  MISS = true,
-  BYPASS = true,
-  EXPIRED = true,
-  STALE = true,
-  UPDATING = true,
-  REVALIDATED = true,
-}
+-- The cache statuses counted (nginx $upstream_cache_status values). One list:
+-- the log-side gate (VALID) and the read side (snapshot_vhosts) both come from it.
+local STATUSES = { "HIT", "MISS", "BYPASS", "EXPIRED", "STALE", "UPDATING", "REVALIDATED" }
+local VALID = {}
+for _, st in ipairs(STATUSES) do VALID[st] = true end
 
 local function incr(dict, key, n)
   local ok, err = dict:incr(key, n or 1, 0)
@@ -41,8 +37,8 @@ function _M.log(zone, status, host)
 
   -- Per-vhost breakdown: status keys ONLY (no per-vhost :total). The daemon
   -- derives a vhost's total by summing its statuses, so there is no separate
-  -- total key that could survive a get_keys() truncation while its status keys
-  -- are dropped — which would push a misleading "total>0, zero hits" row.
+  -- total key that could disagree with them (an LRU eviction of one status key
+  -- would otherwise push a misleading "total>0, zero hits" row).
   if host and host ~= "" then
     incr(d, "cache:vhost:" .. host .. ":status:" .. status)
   end
@@ -50,29 +46,34 @@ function _M.log(zone, status, host)
   d:set("cache:last_seen_ts", ngx.time())
 end
 
--- snapshot_vhosts: read side for the daemon /nginx/cache/stats push. Returns
---   { ["<host>"] = { HIT = n, MISS = n, ... }, ... }
--- (status keys only; the daemon sums them) by scanning the per-vhost keys.
--- Absolute counts (the daemon hook is UPSERT-idempotent, like the WAF-stats
--- push). A vhost is keyed only while armed, but its keys stay in the dict after
--- it is disarmed (until the edge restarts: a reload keeps a lua_shared_dict);
--- the daemon drops such rows.
-function _M.snapshot_vhosts()
+-- snapshot_vhosts(keys): read side for the daemon /nginx/cache/stats push.
+-- `keys` is the list of ARMED policy keys (cfm_cache.lua builds it from the
+-- feed: every value policy_key_for can return). Returns
+--   { ["<key>"] = { HIT = n, MISS = n, ... }, ... }
+-- (status keys only; the daemon sums them), reading each key's status counters
+-- by name, so every armed vhost is read in full however many keys the dict
+-- holds (it used to scan get_keys(8000): past a few thousand vhosts some were
+-- left out, or pushed with a partial set of statuses). A key with no counter
+-- yet is left out. Absolute counts (the daemon hook is UPSERT-idempotent, like
+-- the WAF-stats push). A disarmed vhost's counters stay in the dict until the
+-- edge restarts (a reload keeps a lua_shared_dict) or LRU evicts them, but are
+-- no longer read; if it is re-armed first, its counts resume from them.
+function _M.snapshot_vhosts(keys)
   local d = ngx.shared.cfm_cache_stats
-  if not d then return {} end
+  if not d or type(keys) ~= "table" then return {} end
   local out = {}
-  -- 0 would warn + cap at 1024. A KEY bound, not a vhost bound: each armed
-  -- vhost uses up to #statuses keys and the budget also holds zone/throttle
-  -- keys and the stale keys of disarmed vhosts, so past roughly 1000-2600
-  -- armed vhosts some vhosts are left out — and a cut can fall inside one
-  -- vhost's keys, pushing it with PARTIAL counts (docs/site-cache-design.md
-  -- §11 "Bounds").
-  local keys = d:get_keys(8000)
-  for _, k in ipairs(keys) do
-    local h, st = k:match("^cache:vhost:(.+):status:([A-Z]+)$")
-    if h then
-      out[h] = out[h] or {}
-      out[h][st] = tonumber(d:get(k) or 0) or 0
+  for _, h in ipairs(keys) do
+    if type(h) == "string" and h ~= "" and out[h] == nil then
+      local pre = "cache:vhost:" .. h .. ":status:"
+      local counts
+      for _, st in ipairs(STATUSES) do
+        local v = d:get(pre .. st)
+        if v ~= nil then
+          counts = counts or {}
+          counts[st] = tonumber(v) or 0
+        end
+      end
+      if counts then out[h] = counts end
     end
   end
   return out
