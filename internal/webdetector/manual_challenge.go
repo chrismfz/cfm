@@ -111,6 +111,23 @@ func (s *manualChalState) rung(host string) string {
 	return e.Rung
 }
 
+// setRung re-tiers an ACTIVE manual challenge on host, keeping its expiry,
+// granted TTL and reason. Returns the previous rung and ok=false when host has
+// no active (non-expired) entry — re-tiering never creates or extends an arm.
+func (s *manualChalState) setRung(host, rung string) (prev string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, found := s.vhosts[host]
+	if !found || time.Now().After(e.ExpiresAt) {
+		return "", false
+	}
+	prev = e.Rung
+	e.Rung = rung
+	s.vhosts[host] = e
+	s.saveLocked()
+	return prev, true
+}
+
 // clear removes a manual challenge (returns whether it was present).
 func (s *manualChalState) clear(host string) bool {
 	s.mu.Lock()
@@ -326,6 +343,46 @@ func (e *Engine) manualChallengeVhostRecord(host string, ttl time.Duration, reas
 		payload["actor"] = actor
 	}
 	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_manual_on", Host: host, Mode: "manual", Reason: reason, TTLSec: int(ttl / time.Second), Payload: payload})
+}
+
+// SetManualChallengeRungAs switches the tier (v1 "" / v2) of the manual
+// challenge covering host WITHOUT touching its expiry or reason — the
+// "switch an armed vhost between v1 and v2" control. Coverage follows
+// manualChallengeCovering: the exact host first, else the apex for a www.
+// host (the arm the bridge actually enforces for it). Returns the host whose
+// entry was changed, its previous rung and its expiry; ok=false when no
+// active manual challenge covers host (an AUTO challenge has no tier of its
+// own — arm a manual one to pick a tier).
+//
+// Nothing reaches the edge: the serve is identical for both tiers and the
+// verify gate reads the rung live (challengeV2HostArmed), so the switch takes
+// effect on the very next solve.
+func (e *Engine) SetManualChallengeRungAs(host, rung, actor string) (target, prev string, expires time.Time, ok bool) {
+	candidates := []string{host}
+	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
+		candidates = append(candidates, apex)
+	}
+	for _, h := range candidates {
+		active, exp, _ := e.manualChal.active(h)
+		if !active {
+			continue
+		}
+		p, set := e.manualChal.setRung(h, rung)
+		if !set {
+			continue // lapsed between the two reads
+		}
+		logging.LogfCHALLENGES(
+			"[challenge][vhost] action=manual_rung host=%s from=%s to=%s actor=%s",
+			h, rungOrV1(p), rungOrV1(rung), actorOrDash(actor),
+		)
+		payload := map[string]interface{}{"from": rungOrV1(p), "rung": rungOrV1(rung)}
+		if actor != "" {
+			payload["actor"] = actor
+		}
+		e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_manual_rung", Host: h, Mode: "manual", Payload: payload})
+		return h, p, exp, true
+	}
+	return "", "", time.Time{}, false
 }
 
 // actorOrDash renders the audit actor for log lines ("-" = unknown).

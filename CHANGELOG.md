@@ -32,6 +32,20 @@ back-filled here — see the git/PR history for that period.
     reveal the operator's fleet policy.
   - Detector challenges now record their rule (e.g. `CHALLENGE_ERR_RATIO`) on
     the bridge entry, so `reason=` on the solve line is no longer empty for them.
+- **Switch a challenged vhost between v1 and v2 from cfm-admin.**
+  - Web Detector → *Suspicious + challenged vhosts*: every challenged row has
+    a tier button. A manual challenge switches `→ v2` / `→ v1` in place, and
+    keeps its expiry. An auto challenge has no tier of its own, so `→ v2
+    (manual)` arms a manual v2 challenge on top of it, for the page's TTL.
+  - Controls → *Emergency challenge*: once a vhost is armed, *Switch to Strict
+    (v2)* / *Switch to Standard (v1)* changes the tier without re-arming.
+  - Controls table: a vhost flagged 🚨 UNDER ATTACK gets a one-click
+    *→ Strict v2*. It switches an existing manual arm to v2, or arms a manual v2
+    challenge for the Emergency card's duration.
+  - New API `POST /api/v1/challenge/vhost/rung?host=&rung=v1|v2` does the
+    in-place switch (`409` when no manual challenge is active). It is audited
+    as `challenge_vhost_manual_rung`, and scoped tokens may use it on their own
+    vhosts.
 - **`would_v2` lines say who the client is.** They now carry `cc=`, `asn=`,
   `provider=`, `ptr=`, `ua_family=`, `ua_bot=1` (the UA calls itself a bot —
   not verified) and `src=`. The `abuse_shadow` MCP tool gains a `humanity`

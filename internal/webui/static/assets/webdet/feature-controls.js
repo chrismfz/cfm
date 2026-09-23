@@ -330,6 +330,57 @@ export const controlsMixin = {
         console.error("[cfm-admin] panic arm failed", host, err);
       }
     },
+    // Switch the tier of the ACTIVE manual arm on the selected host in place
+    // (v1/challenge/vhost/rung): expiry and reason are kept, unlike re-arming.
+    panicSwitchTarget() {
+      const s = this.panicStatus;
+      if (!s || !s.manual_active) return "";
+      return s.rung === "v2" ? "v1" : "v2";
+    },
+    async panicSwitchTier() {
+      const host = String(this.panicHost || "").trim();
+      const to = this.panicSwitchTarget();
+      if (!host || !to) return;
+      try {
+        const res = await this.postJSON("v1/challenge/vhost/rung", { host, rung: to });
+        const label = res?.rung === "v2" ? "strict (v2)" : "standard (v1)";
+        this.panicMsg = `Challenge on ${res?.host || host} switched to ${label} — expiry unchanged`;
+        await this.refreshPanicStatus();
+      } catch (err) {
+        this.panicMsg = `Tier switch failed for ${host}: ${err}`;
+        console.error("[cfm-admin] panic tier switch failed", host, err);
+      }
+    },
+    // One-click "Strict v2" from a table row (e.g. a vhost the Under-Attack
+    // alarm flagged): re-tiers an existing manual arm in place, else arms a
+    // manual v2 challenge for the Emergency card's duration. The Emergency
+    // card is pointed at the host afterwards, so its status and Disarm apply.
+    async quickStrict(host) {
+      host = String(host || "").trim();
+      if (!host) return;
+      this.panicHost = host;
+      try {
+        const st = await this.fetchJSONSafe(`v1/challenge/vhost/status?host=${encodeURIComponent(host)}`, null);
+        if (st && st.manual_active) {
+          if (st.rung === "v2") {
+            this.panicMsg = `${host} is already on strict (v2)`;
+          } else {
+            await this.postJSON("v1/challenge/vhost/rung", { host, rung: "v2" });
+            this.panicMsg = `Challenge on ${host} switched to strict (v2) — expiry unchanged`;
+          }
+        } else {
+          const res = await this.postJSON("v1/challenge/vhost/add", {
+            host, ttl: this.panicTTL, rung: "v2", reason: "panic-button",
+          });
+          this.panicMsg = `Strict (v2) challenge armed on ${host} for ${res?.ttl || this.panicTTL}` +
+            (res?.ttl_capped ? " — capped to the 24h customer limit" : "");
+        }
+        await this.refreshPanicStatus();
+      } catch (err) {
+        this.panicMsg = `Strict arm failed for ${host}: ${err}`;
+        console.error("[cfm-admin] quick strict failed", host, err);
+      }
+    },
     async panicDisarm() {
       const host = String(this.panicHost || "").trim();
       if (!host) { this.panicMsg = "Pick a vhost first."; return; }
