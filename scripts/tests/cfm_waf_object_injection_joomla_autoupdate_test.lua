@@ -112,6 +112,9 @@ local function clean(c, label)
   local hit, reason = waf.check(c)
   check(hit ~= true, label .. " — must NOT fire (got " .. tostring(reason) .. ")")
 end
+-- Direct carve-out result, for shapes waf.check can't surface (a request that
+-- fails to qualify just runs the detector as usual).
+local function vouches(o) return det.is_joomla_autoupdate_request(o.uri, o.args, o.body, o.headers) end
 
 set_only({ rule_php_object_injection = "block" })
 local B64HIT, PLAIN = "WAF_RCE:PHP_OBJECT_INJECTION:BASE64", "WAF_RCE:PHP_OBJECT_INJECTION:PLAIN"
@@ -153,6 +156,32 @@ fires(req({ body = step_body(zip_instance(), "&foo=bar") }),
       "a param extract.php never reads (allowlist, not denylist)", B64HIT)
 fires(req({ body = "task=stepExtract&password=" .. urlenc('O:4:"Evil":0:{}') }),
       "object marker in password", PLAIN)
+-- Review round 2 (CONFIRMED bypass): a gadget object base64'd inside an ARRAY
+-- (so the base64 doesn't start with the Tzo/Qzo prefix the base detector keys
+-- on) in password. The carve-out must still refuse to vouch, so rule 329 runs
+-- and the accompanying real instance blob is what blocks the request (BASE64).
+local ARR_GADGET = b64enc('a:1:{s:1:"a";O:4:"Evil":1:{s:3:"cmd";s:2:"id";}}')
+fires(req({ body = "task=stepExtract&password=" .. urlenc(ARR_GADGET)
+            .. "&instance=" .. urlenc(b64enc(zip_instance())) }),
+      "base64 array-nested gadget in password (round-2 bypass)", B64HIT)
+check(vouches(req({ body = "task=stepExtract&password=" .. urlenc(ARR_GADGET) })) == false,
+      "helper: base64 array-nested gadget in password disqualifies")
+fires(req({ args = "jautoupdate=" .. urlenc(ARR_GADGET),
+            body = step_body(zip_instance()) }),
+      "base64 array-nested gadget in jautoupdate value", B64HIT)
+check(vouches(req({ args = "jautoupdate=" .. urlenc(ARR_GADGET),
+                    body = step_body(zip_instance()) })) == false,
+      "helper: base64 array-nested gadget in jautoupdate disqualifies")
+-- A PHP 8.1 enum (E:) or a reference (r:/R:) inside the instance is not a
+-- ZIPExtraction member; disqualify so 329's block stands.
+check(vouches(req({ body = step_body(zip_instance('s:1:"e";E:8:"Evil:Foo";')) })) == false,
+      "helper: an E: enum inside the instance disqualifies")
+check(vouches(req({ body = step_body(zip_instance('s:1:"r";R:2;')) })) == false,
+      "helper: an r: reference inside the instance disqualifies")
+-- A genuine 32-char secret is canonical base64 of random bytes: it must still
+-- decode-and-scan clean (no false disqualification of real updates).
+check(vouches(req({ body = step_body(zip_instance()) })) == true,
+      "helper: the real password (a plain secret) still vouches")
 fires(req({ body = step_body(zip_instance()):gsub("stepExtract", "runEvil") }),
       "task outside extract.php's three verbs", B64HIT)
 fires(req({ args = "jautoupdate=0", body = step_body(zip_instance()) }),
@@ -175,7 +204,6 @@ end
 
 -- Helper-level: shapes the detector itself can't see, so waf.check can't show
 -- the carve-out refusing them — assert the carve-out directly.
-local function vouches(o) return det.is_joomla_autoupdate_request(o.uri, o.args, o.body, o.headers) end
 check(vouches(req({ body = step_body(zip_instance()) })) == true, "helper: the real request qualifies")
 check(vouches(req({ body = step_body('O:+13:"ZIPExtraction":0:{}') })) == false,
       "helper: an object marker it can't parse strictly (O:+N) disqualifies")

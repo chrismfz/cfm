@@ -1740,12 +1740,26 @@ local function _form_pairs(s, out)
   return out
 end
 
+-- Any O:/C: object, E: enum (PHP 8.1) or r:/R: reference marker in a
+-- serialized string, either case, ANYWHERE (string contents included). These
+-- are the deserialization-gadget entry points; a value that carries none is
+-- inert to unserialize().
+local function _has_serialized_gadget(s)
+  s = lower(s or "")
+  for i in s:gmatch("()[oceCRr]:%d") do
+    if s:match('^[ocer]:%d+:"', i) or s:match('^[rR]:%d+;', i) then return true end
+  end
+  return false
+end
+
 -- True when every object / custom-object marker in the serialized string s
 -- (O:N:"Class" or C:N:"Class", either case, ANYWHERE — string contents too)
 -- names a class in `allowed`. The name is read as PHP reads it — exactly N
 -- bytes, then a closing quote — and a marker it can't parse that way
--- (O:+4:"X", a length that overruns) fails.
+-- (O:+4:"X", a length that overruns) fails. An E:/r:/R: marker (enum,
+-- reference) never appears in a ZIPExtraction blob, so any of those disqualify.
 local function _serialized_objects_only(s, allowed)
+  if s:match("[Ee]:%d+:\"") or s:match("[rR]:%d+;") then return false end
   for i in s:gmatch("()[OoCc]:[%d+%-]") do
     local n, q = s:match('^[OoCc]:(%d+):"()', i)
     n = tonumber(n)
@@ -1754,6 +1768,24 @@ local function _serialized_objects_only(s, allowed)
     if #name ~= n or s:sub(q + n, q + n) ~= '"' or not allowed[lower(name)] then return false end
   end
   return true
+end
+
+-- A non-instance allowlisted value (password / jautoupdate) must carry no
+-- serialized gadget at all — RAW or base64'd. detect_php_object_injection is
+-- not enough: its base64 branch only decodes a candidate that STARTS with a
+-- base64'd `O:`/`C:` (the `Tzo`/`Qzo` prefix), so an object nested one byte
+-- into an array (`a:1:{s:1:"a";O:4:"Evil":…}`) base64'd slips past it — and the
+-- carve-out would then wave the whole request, instance blob included, past
+-- rule 329's block (review round 2). So decode the WHOLE canonical-base64
+-- value and scan all of it, the same decode PHP's base64_decode would get.
+local function _param_carries_object(v)
+  if v == "" then return false end
+  if _has_serialized_gadget(v) then return true end
+  if #v % 4 == 0 and v:match("^[%w%+/]*=?=?$") then
+    local dec = ngx.decode_base64(v)
+    if dec and _has_serialized_gadget(dec) then return true end
+  end
+  return false
 end
 
 function _M.is_joomla_autoupdate_request(uri, args, body, headers)
@@ -1799,12 +1831,15 @@ function _M.is_joomla_autoupdate_request(uri, args, body, headers)
         if #v % 4 ~= 0 or not v:match("^[%w%+/]*=?=?$") then return false end
         local dec = ngx.decode_base64(v)
         if not dec or not _serialized_objects_only(dec, JOOMLA_EXTRACT_CLASSES) then return false end
+      elseif k == "task" then
+        -- Exact-matched to extract.php's three verbs; no room for a payload.
+        if not JOOMLA_AUTOUPDATE_TASKS[v] then return false end
+        has_task = true
       else
-        if _M.detect_php_object_injection(lower(v), v, "") then return false end
-        if k == "task" then
-          if not JOOMLA_AUTOUPDATE_TASKS[v] then return false end
-          has_task = true
-        end
+        -- password / jautoupdate: must carry no serialized gadget, raw or
+        -- base64'd (a WordPress plugin that unserialize()s the param is the
+        -- threat; ZIPExtraction doesn't exist there).
+        if _param_carries_object(v) then return false end
       end
     end
   end

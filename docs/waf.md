@@ -747,12 +747,17 @@ the body to its plugins). `is_joomla_autoupdate_request` passes a request only
 when ALL hold: `…/index.php` with a non-empty `jautoupdate` in the query
 (Joomla's own `!empty()`, last duplicate wins); every query/body parameter is
 one `extract.php` reads, each exactly once; `task` is one of its three verbs
-(`startExtract`, `stepExtract`, `finalizeUpdate`); the other values carry no
-object marker; and every object in the fully decoded `instance` (form-decoded,
-then base64) is a class `extract.php` itself allows — its `unserialize()`
-passes `allowed_classes = [ZIPExtraction, stdClass]`. Every class is checked,
-not the first: on WordPress a `ZIPExtraction` with a nested gadget object
-would still instantiate the gadget. The decode has to match PHP's, so the
+(`startExtract`, `stepExtract`, `finalizeUpdate`); the other values
+(`password`, `jautoupdate`) carry no serialized gadget — an object/enum/
+reference marker in the raw value **or** in its full base64 decode (a WordPress
+plugin that `unserialize()`s the param is the threat, and a gadget nested one
+byte inside an array base64s to something the base detector's prefix-gated scan
+misses); and every object in the fully decoded `instance` (form-decoded, then
+base64) is a class `extract.php` itself allows — its `unserialize()` passes
+`allowed_classes = [ZIPExtraction, stdClass]`, and an `E:` enum or `r:`/`R:`
+reference (never in a real blob) disqualifies. Every class is checked, not the
+first: on WordPress a `ZIPExtraction` with a nested gadget object would still
+instantiate the gadget. The decode has to match PHP's, so the
 check reads each class name by its length prefix as PHP does, and takes only
 canonical base64 — nginx's decoder stops at the first `=` while PHP's
 non-strict `base64_decode()` skips it and carries on, so `b64(clean)=b64(gadget)`
