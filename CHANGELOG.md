@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.23
+
 ### Added
 - **Every challenge solve now says what challenged the client (`src=`).**
   - Until now the verify never knew why the page was served, so a `would_v2`
@@ -177,8 +181,6 @@ back-filled here — see the git/PR history for that period.
   - Before arming micro on a new kind of app (a shop, a membership site), arm
     it with `--strict-cookies`, find its session cookies with the debug stamp
     and add them with `--auth-cookies` (runbook §7).
-
-## 2026.09.23
 
 ### Added
 - **Site Cache has a cfm-admin page:** Rules & engine → Site cache.
