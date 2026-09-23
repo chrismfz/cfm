@@ -226,24 +226,18 @@ for d in /var/lib/cfm/nginx/client_body_temp /var/lib/cfm/nginx/proxy_temp; do
     chmod 700 "$d"
 done
 
-# Site Cache — heal stale cache-tree ownership. nginx creates the levels=1:2
-# subdirs under each cache root as the worker (now cfm); a tree left root-owned
-# by an older global-cache run blocks the cfm worker — "Permission denied while
-# reading upstream" aborts the response and static assets break. The daemon and
-# installers only chown the TOP dir, so heal the whole tree once here. A cheap
-# O(16) probe of the level-1 dirs skips the recursive walk when the tree is
-# already cfm-group (the common case on every later upgrade). The glob covers
-# Tier A (cfm_static) and every Tier B micro bucket (cfm_micro_1s … cfm_micro_60s),
-# so a new bucket is healed without editing this loop; a glob with no match
-# stays literal and is skipped by the -d test.
-if getent group cfm >/dev/null 2>&1; then
-    for d in /var/cache/nginx/cfm_static* /var/cache/nginx/cfm_micro*; do
-        [ -d "$d" ] || continue
-        if find "$d" -mindepth 1 -maxdepth 1 -type d ! -group cfm -print -quit 2>/dev/null | grep -q .; then
-            chown -R root:cfm "$d" || true
-            chmod -R g+rwX   "$d" || true
-        fi
-    done
+# Site Cache — provision the cache dirs BEFORE the deploy helper
+# below runs `openresty -t` / `angie -t`: every proxy_cache_path dir must exist
+# for the config test to pass (a missing /var/cache/nginx parent is an [emerg],
+# so on a first install the packaged conf was silently not deployed). The
+# helper also makes the parent traversable by the cfm workers and purges a
+# cache tree they cannot use (left in another group by an older run); it is the ONE copy of this
+# logic, shared with the deb postinst and both edge installers. Never fatal
+# in this scriptlet.
+if [ -x /usr/share/cfm/scripts/cfm-cache-dirs.sh ]; then
+    /usr/share/cfm/scripts/cfm-cache-dirs.sh || echo "WARNING: CFM cache dir provisioning reported a problem (see above)"
+else
+    echo "WARNING: CFM cache dir helper missing: /usr/share/cfm/scripts/cfm-cache-dirs.sh"
 fi
 
 # Validate and deploy packaged Angie/OpenResty configs for installed engines.

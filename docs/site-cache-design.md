@@ -83,7 +83,7 @@ leftover **code** from the ripped-out global caching. Verdicts:
 | `configs/lua/cfm_cache_log.lua` | Ready HIT/MISS/BYPASS/EXPIRED/STALE/… counter, `log_by_lua_block`-only, no I/O. **Orphaned** (not `require`d anywhere). | **Keep & wire** — this is our observability layer (§11). |
 | `ngx.shared.cfm_cache_stats` | Read by `cfm_stats.lua:398-399`, **never declared** in `lua_shared_dict` → silent no-op. | **Declare it** (§11). |
 | Commented "Future caching" recipe, `openresty.conf:841-849` + `:868` (angie `:828-834`) | A deliberate note left for exactly this work; sketches `proxy_cache_path` + per-vhost `set $cfm_static_cache`. | **Implement** as Tier A (§3, §5). |
-| Cache dirs `/var/cache/nginx/cfm_static`, `/var/cache/nginx/cfm_micro` | Already created by the daemon (`cmd/cfm/main.go:628-629`). | **Use these canonical paths.** Note the stale conf comment says `/var/cache/cfm/static` — **fix the comment** in the same change. |
+| Cache dirs `/var/cache/nginx/cfm_static`, `/var/cache/nginx/cfm_micro` | Created by the daemon (`cmd/cfm/site_cache_dirs.go`) and by `scripts/cfm-cache-dirs.sh` (packaging + installers). | **Use these canonical paths.** Note the stale conf comment says `/var/cache/cfm/static` — **fix the comment** in the same change. |
 | `configs/lua/cfm_pcw.lua` | **NOT a cache remnant.** It is the live *post-clearance nav-cadence* shadow counter (B2 challenge-score, `docs/challenge-score-b2.md`), wired at `cfm.lua` Step 2b. | **Do not touch.** |
 | `configs/lua/cfm_purge.lua` + `nginx_bridge_purge.go` | Existing purge plumbing (currently purge-ip). | **Extend** for cache purge (§10). |
 
