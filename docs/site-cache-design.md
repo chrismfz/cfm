@@ -148,6 +148,7 @@ Two tiers, one management model.
   on both the HTTP and HTTPS servers. Low risk because assets are rarely
   per-user. Its rails:
   - nginx itself never stores a `Set-Cookie` or `private` answer;
+  - only GET/HEAD is cached;
   - only a 200 is stored;
   - a request with `Authorization` is never served or stored;
   - panel and webmail hosts are skipped.

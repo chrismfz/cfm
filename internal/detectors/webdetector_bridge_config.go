@@ -58,9 +58,9 @@ func webdetectorBridgeConfig(global, wdKV map[string]string) sslcollector.Webdet
 		// ~10s after this is written (~15s from saving detectors.conf),
 		// without disarming any vhost, so re-arming is instant.
 		SiteCache: kvBool(wdKV, "SITE_CACHE", true),
-		// Tier B micro-cache ENFORCE gate (HTML micro-caching). Default
-		// OFF — an explicit opt-in, NOT a second kill switch: an upgrade
-		// must never start caching HTML on its own, even for a vhost whose
+		// Tier B micro-cache ENFORCE gate (anonymous-page micro-caching).
+		// Default OFF — an explicit opt-in, NOT a second kill switch: an
+		// upgrade must never start caching pages on its own, even for a vhost whose
 		// micro tier is armed (CLAUDE.md §6 "adding X silently arms it").
 		// While off, cfm.lua's micro gate stays in DRY-RUN (verdict on the
 		// observe header, no ngx.exec, nothing stored); the operator sets
