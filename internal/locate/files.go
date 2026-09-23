@@ -22,8 +22,8 @@ import (
 
 // ---------------------------------------------------------------- cfm.deny
 
-// searchCFMDeny scans <cfgDir>/cfm.deny. Same path constraints as
-// unblock.removeFromFile, minus the write.
+// searchCFMDeny scans <cfgDir>/cfm.deny. Same path constraints as the
+// unblock's cfm.deny cleanup (unblock.removeFromFileMany), minus the write.
 func searchCFMDeny(cfgDir string, qs []*query) ([][]Location, error) {
 	base := filepath.Clean(cfgDir)
 	path := filepath.Clean(filepath.Join(base, "cfm.deny"))

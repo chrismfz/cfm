@@ -174,25 +174,35 @@ back-filled here — see the git/PR history for that period.
 ### Fixed
 - **A mass unblock no longer runs fail2ban and imunify360 once per IP.** A
   batch of pending unblocks from cfm-web now checks for csf, fail2ban and
-  imunify360 once, reads fail2ban's ban list and imunify's local list once, and
-  touches only the IPs they actually hold, many per run: one
-  `fail2ban-client unban` for the banned IPs, one `imunify360-agent ip-list
-  local delete` per list for the listed ones (IPs past a full 10 000-entry
-  list are still deleted blindly, as before). `cfm.deny` is rewritten once, the
-  feed sets are read once, the feed-origin IPs are allowed in one batch, and
-  the block sets are written in one batch. It used to run every step per IP —
-  up to three `imunify360-agent` runs (about a second each) and a
-  `fail2ban-client` run per IP on the nodes that have them, plus up to four
-  `systemctl` checks per IP just to find imunify missing. The imunify360 white
-  "grace" entry (1h, stops imunify re-greylisting a customer just unblocked)
-  still goes to every IP of a batch of up to 20; a larger batch — a mass
-  unblock — adds it only for the IPs imunify itself was blocking, since each
-  add is one `imunify360-agent` run.
+  imunify360 once and runs each tool once per batch where it can:
+  `fail2ban-client unban` takes 200 IPs per run; imunify360's local list is
+  read once and only the IPs on its drop or captcha list are deleted, 50 per
+  `imunify360-agent ip-list local delete` run (when the list can't be read or
+  holds 10 000 entries, the IPs it didn't show are deleted blindly, as
+  before). `cfm.deny` is rewritten once, the feed sets are read once, and the
+  block sets are written in one batch (per IP if that batch fails). It used to
+  run every step per IP — up to three `imunify360-agent` runs (about a second
+  each) and a `fail2ban-client` run per IP on the nodes that have them, plus up
+  to four `systemctl` checks per IP just to find imunify missing. `cfm
+  unblock` and `/unblock` go through the same code for their one IP, so they
+  now read imunify's list too. The imunify360 white "grace" entry (1h, stops
+  imunify re-greylisting a customer just unblocked) still goes to every IP of
+  a batch of up to 20; a larger batch — a mass unblock — adds it only for the
+  IPs imunify itself was blocking, since each add is one `imunify360-agent`
+  run. An IPv6 IP is cleared, and given its grace entry, as the /64 imunify
+  lists IPv6 addresses as; it used to be passed as the address, and imunify
+  keeps IPv6 entries only as /64s.
+- **Where-is-this-IP-blocked never found an IPv4 entry of imunify360's.**
+  `cfm which`, `/search` and the unblock report read imunify's `netmask` as a
+  prefix length, but imunify reports the mask itself (4294967295 for one IPv4
+  address), so every IPv4 entry read as `address/4294967295` and matched
+  nothing; only IPv6 /64 entries were ever reported. It is now read as the mask.
 - **Unblocking an IP a feed blocks no longer shortens a permanent allow.** The
-  unblock allows a feed-blocked IP for 4h so the feed doesn't block it again
-  before its next pull; that allow replaced any allow already there, so an
-  operator's permanent allow for the IP became a 4h one. It now only adds or
-  extends an allow, on both firewall engines.
+  unblock allows a feed-blocked IP for a while (4h from cfm-web, 24h from
+  `/unblock`, 1h from `cfm unblock`) so the feed doesn't block it again before
+  its next pull; that allow replaced any allow already there, so an operator's
+  permanent allow for the IP became a timed one. It now only adds or extends an
+  allow, on both firewall engines.
 - **`cfm which`, `/search` and the unblock report no longer read csf's
   leftover files.** csf is uninstalled across the fleet, but `/etc/csf` is
   still there on most nodes, and its `csf.deny` / `csf.allow` were reported as

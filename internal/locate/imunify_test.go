@@ -79,3 +79,38 @@ func TestSearchImunify_CappedListAsksEachQuery(t *testing.T) {
 		t.Errorf("5.6.7.8 skip = %q, want the unreadable --by-ip answer named", skip[1])
 	}
 }
+
+// imunify reports netmask as the mask itself (4294967295 for one IPv4
+// address), and writes networks as "addr/len" in ip. Taking the mask as a
+// prefix length made every IPv4 entry "addr/4294967295", which parses as
+// nothing: no IPv4 entry was ever found.
+func TestImunifyEntryString(t *testing.T) {
+	for _, c := range []struct {
+		ip      string
+		netmask int
+		want    string
+	}{
+		{"198.51.100.1", 4294967295, "198.51.100.1"},
+		{"198.51.100.0", 4294967040, "198.51.100.0/24"},
+		{"198.51.100.1", 0, "198.51.100.1"},
+		{"198.51.100.0", 24, "198.51.100.0/24"}, // a length, as some outputs give it
+		{"198.51.100.1", 32, "198.51.100.1"},
+		{"2001:db8:1:2::/64", -1, "2001:db8:1:2::/64"},
+		{"198.51.100.1", 12345, "198.51.100.1"}, // not a mask
+	} {
+		if got := imunifyEntryString(c.ip, c.netmask); got != c.want {
+			t.Errorf("imunifyEntryString(%q, %d) = %q, want %q", c.ip, c.netmask, got, c.want)
+		}
+	}
+
+	// The documented JSON shape, IPv6 netmask included (past int64).
+	raw := []byte(`{"items":[{"ip":"198.51.100.1","netmask":4294967295,"network_address":3325256705,"purpose":"drop"},` +
+		`{"ip":"2001:db8:1:2::/64","netmask":340282366920938463444927863358058659840,"purpose":"drop"}]}`)
+	locs := matchImunifyItems(parseImunifyList(raw), []*query{mustQuery(t, "198.51.100.1"), mustQuery(t, "2001:db8:1:2::7")})
+	if len(locs[0]) != 1 || locs[0][0].Match != "198.51.100.1" {
+		t.Errorf("IPv4 host entry: %+v", locs[0])
+	}
+	if len(locs[1]) != 1 || locs[1][0].Match != "2001:db8:1:2::/64" {
+		t.Errorf("IPv6 /64 entry: %+v", locs[1])
+	}
+}

@@ -18,6 +18,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/bits"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -156,8 +159,7 @@ func imunifyListLen(raw []byte) int {
 
 // ImunifyEntry is one entry of imunify360's local IP list.
 type ImunifyEntry struct {
-	IP      string // as listed; may carry "/len"
-	Netmask int    // 0 when not given
+	Entry   string // an address or a CIDR (imunifyEntryString)
 	Purpose string // lowercased: white, drop, captcha, splashscreen, …
 }
 
@@ -174,9 +176,47 @@ func ImunifyLocalList(ctx context.Context) (entries []ImunifyEntry, capped bool,
 		return nil, false, fmt.Errorf("unreadable output: %s", trimOut(out))
 	}
 	for _, it := range items {
-		entries = append(entries, ImunifyEntry{IP: it.IP, Netmask: it.Netmask, Purpose: it.Purpose})
+		entries = append(entries, ImunifyEntry{Entry: imunifyEntryString(it.IP, it.Netmask), Purpose: it.Purpose})
 	}
 	return entries, imunifyListLen(out) >= imunifyListCap, nil
+}
+
+// imunifyEntryString renders a list entry as an address or a CIDR. imunify
+// writes a network as "addr/len" in ip (IPv6 only as a /64), and reports
+// netmask as the mask itself — 4294967295 for one IPv4 address — not as its
+// length; a netmask from 1 to 128 is taken as a length. It was always taken as
+// a length, so every IPv4 entry read as "addr/4294967295", which parses as
+// nothing: no IPv4 entry of imunify's was ever found.
+func imunifyEntryString(ip string, netmask int) string {
+	ip = strings.TrimSpace(ip)
+	if ip == "" || strings.Contains(ip, "/") {
+		return ip
+	}
+	var plen int
+	switch {
+	case netmask >= 1 && netmask <= 128:
+		plen = netmask
+	case netmask > 128 && netmask <= math.MaxUint32:
+		m := uint32(netmask)
+		plen = bits.OnesCount32(m)
+		if m != ^uint32(0)<<(32-plen) {
+			return ip // not a mask: the address alone
+		}
+	default:
+		return ip
+	}
+	a := net.ParseIP(ip)
+	if a == nil {
+		return ip
+	}
+	full := 128
+	if a.To4() != nil {
+		full = 32
+	}
+	if plen >= full {
+		return ip
+	}
+	return fmt.Sprintf("%s/%d", ip, plen)
 }
 
 // imunifyItem is the part of an ip-list entry we care about, after
@@ -217,6 +257,9 @@ func parseImunifyList(raw []byte) []imunifyItem {
 		num := func(key string) int64 {
 			switch n := m[key].(type) {
 			case float64:
+				if n > 1<<62 || n < -(1<<62) {
+					return -1 // an IPv6 netmask: past int64, and never needed
+				}
 				return int64(n)
 			case string:
 				if v, err := strconv.ParseInt(n, 10, 64); err == nil {
@@ -245,10 +288,7 @@ func parseImunifyList(raw []byte) []imunifyItem {
 func matchImunifyItems(items []imunifyItem, qs []*query) [][]Location {
 	idx := ipquery.NewIndex[Location]()
 	for _, it := range items {
-		entry := it.IP
-		if it.Netmask > 0 && !strings.Contains(entry, "/") {
-			entry = fmt.Sprintf("%s/%d", entry, it.Netmask)
-		}
+		entry := imunifyEntryString(it.IP, it.Netmask)
 		action := ActionMatch
 		list := it.Purpose
 		switch it.Purpose {

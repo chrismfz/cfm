@@ -57,33 +57,17 @@ func stepsOf(r *Result, src Source) []Step {
 	return out
 }
 
-// fail2ban's ban list is read once, and one unban run takes just the banned
-// IPs — not one fail2ban-client per IP, and nothing for an IP it doesn't hold.
-func TestDoMany_Fail2BanUnbansOnlyBanned(t *testing.T) {
-	calls := fakeTools(t, map[string]string{
-		"fail2ban-client": `case "$1" in banned) echo "[{'sshd': ['198.51.100.1', '10.0.0.0/24']}, {'recidive': ['198.51.100.2']}]";; esac`,
-	})
-	res := DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2", "198.51.100.3"), Options{})
-	got := calls()
-	if len(got) != 2 || got[0] != "fail2ban-client banned" || got[1] != "fail2ban-client unban 198.51.100.1 198.51.100.2" {
+// Every IP is unbanned from fail2ban in one fail2ban-client run, not one run
+// per IP — and not only the IPs banned right now: an unban also clears the
+// ban history bantime.increment reads, as the per-IP unban always did.
+func TestDoMany_Fail2BanOneRun(t *testing.T) {
+	calls := fakeTools(t, map[string]string{"fail2ban-client": ""})
+	res := DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2", "2001:db8::1"), Options{})
+	if got := calls(); len(got) != 1 || got[0] != "fail2ban-client unban 198.51.100.1 198.51.100.2 2001:db8::1" {
 		t.Fatalf("fail2ban-client runs = %q", got)
 	}
-	if s := stepsOf(res["198.51.100.3"], SrcFail2Ban); len(s) != 1 || s[0].Action != ActionNotFound {
-		t.Errorf("198.51.100.3 fail2ban steps = %+v, want not_found", s)
-	}
-	if s := stepsOf(res["198.51.100.1"], SrcFail2Ban); len(s) != 1 || s[0].Action != ActionChecked {
-		t.Errorf("198.51.100.1 fail2ban steps = %+v", s)
-	}
-}
-
-// Without the ban list (fail2ban < 0.11), every IP is unbanned, as before.
-func TestDoMany_Fail2BanWithoutBanList(t *testing.T) {
-	calls := fakeTools(t, map[string]string{
-		"fail2ban-client": `case "$1" in banned) echo "Usage: fail2ban-client ..."; exit 255;; esac`,
-	})
-	DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2"), Options{})
-	if got := calls(); len(got) != 2 || got[1] != "fail2ban-client unban 198.51.100.1 198.51.100.2" {
-		t.Fatalf("fail2ban-client runs = %q", got)
+	if s := stepsOf(res["198.51.100.2"], SrcFail2Ban); len(s) != 1 || s[0].Action != ActionChecked {
+		t.Errorf("198.51.100.2 fail2ban steps = %+v", s)
 	}
 }
 
@@ -91,31 +75,39 @@ func imunifyList(entries ...string) string {
 	return `echo '{"items":[` + strings.Join(entries, ",") + `]}'`
 }
 
-// imunify's list is read once; only listed IPs are deleted, many per run, and
-// in a small batch every IP gets the white grace entry, as Do always gave it.
+// imunify's list is read once; only listed IPs are deleted, many per run and
+// one address family per run — an IPv6 IP by the /64 imunify lists it as —
+// and in a small batch every IP gets the white grace entry, as Do always gave
+// it. The entries are in imunify's own shape: netmask is the mask
+// (4294967295 for one IPv4 address), not a prefix length.
 func TestDoMany_ImunifySmallBatch(t *testing.T) {
 	calls := fakeTools(t, map[string]string{
 		"imunify360-agent": `case "$*" in *" list "*) ` + imunifyList(
-			`{"ip":"198.51.100.1","purpose":"drop"}`,
-			`{"ip":"198.51.100.2","netmask":32,"purpose":"captcha"}`,
-			`{"ip":"198.51.100.0","netmask":24,"purpose":"drop"}`,
-			`{"ip":"198.51.100.9","purpose":"white"}`) + `;; esac`,
+			`{"ip":"198.51.100.1","netmask":4294967295,"purpose":"drop"}`,
+			`{"ip":"198.51.100.2","netmask":4294967295,"purpose":"captcha"}`,
+			`{"ip":"198.51.100.0","netmask":4294967040,"purpose":"drop"}`,
+			`{"ip":"2001:db8:1:2::/64","netmask":340282366920938463444927863358058659840,"purpose":"drop"}`,
+			`{"ip":"198.51.100.9","netmask":4294967295,"purpose":"white"}`) + `;; esac`,
 	})
 	grace := time.Hour
-	DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2", "198.51.100.3"), Options{ImunifyWhiteTTL: &grace})
+	res := DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2", "198.51.100.3", "2001:db8:1:2::7"), Options{ImunifyWhiteTTL: &grace})
 	got := calls()
 	want := []string{
 		"imunify360-agent ip-list local list --limit 10000 --json",
 		"imunify360-agent ip-list local delete --purpose drop 198.51.100.1",
+		"imunify360-agent ip-list local delete --purpose drop 2001:db8:1:2::/64",
 		"imunify360-agent ip-list local delete --purpose captcha 198.51.100.2",
 	}
-	if len(got) != 6 || strings.Join(got[:3], "|") != strings.Join(want, "|") {
-		t.Fatalf("imunify runs = %q\nwant %q then three white adds", got, want)
+	if len(got) != 8 || strings.Join(got[:4], "|") != strings.Join(want, "|") {
+		t.Fatalf("imunify runs = %q\nwant %q then four white adds", got, want)
 	}
-	for i, ip := range []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"} {
-		if !strings.HasPrefix(got[3+i], "imunify360-agent ip-list local add --purpose white --comment CFM auto-unblock "+ip+" --expiration ") {
-			t.Errorf("white add %d = %q", i, got[3+i])
+	for i, ip := range []string{"198.51.100.1", "198.51.100.2", "198.51.100.3", "2001:db8:1:2::/64"} {
+		if !strings.HasPrefix(got[4+i], "imunify360-agent ip-list local add --purpose white --comment CFM auto-unblock "+ip+" --expiration ") {
+			t.Errorf("white add %d = %q", i, got[4+i])
 		}
+	}
+	if s := stepsOf(res["198.51.100.3"], SrcImunify); len(s) != 2 || s[0].Action != ActionNotFound {
+		t.Errorf("198.51.100.3 (only in a /24) imunify steps = %+v, want not_found then the white add", s)
 	}
 }
 
@@ -123,7 +115,7 @@ func TestDoMany_ImunifySmallBatch(t *testing.T) {
 // was blocking: an add is one imunify360-agent run per IP.
 func TestDoMany_ImunifyLargeBatchGraceOnlyForListed(t *testing.T) {
 	calls := fakeTools(t, map[string]string{
-		"imunify360-agent": `case "$*" in *" list "*) ` + imunifyList(`{"ip":"10.0.0.5","purpose":"drop"}`) + `;; esac`,
+		"imunify360-agent": `case "$*" in *" list "*) ` + imunifyList(`{"ip":"10.0.0.5","netmask":4294967295,"purpose":"drop"}`) + `;; esac`,
 	})
 	var batch []net.IP
 	for i := 1; i <= graceBatchMax+5; i++ {
@@ -156,7 +148,7 @@ func TestDoMany_ImunifyLargeBatchGraceOnlyForListed(t *testing.T) {
 func TestDoMany_ImunifyCappedListDeletesUnseen(t *testing.T) {
 	var entries []string
 	for i := 0; i < 10000; i++ {
-		entries = append(entries, fmt.Sprintf(`{"ip":"172.16.%d.%d","purpose":"drop"}`, i/250, i%250+1))
+		entries = append(entries, fmt.Sprintf(`{"ip":"172.16.%d.%d","netmask":4294967295,"purpose":"drop"}`, i/250, i%250+1))
 	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "list.json"), []byte(`{"items":[`+strings.Join(entries, ",")+"]}\n"), 0o600); err != nil {
@@ -165,11 +157,13 @@ func TestDoMany_ImunifyCappedListDeletesUnseen(t *testing.T) {
 	calls := fakeTools(t, map[string]string{
 		"imunify360-agent": fmt.Sprintf(`case "$*" in *" list "*) while IFS= read -r l; do echo "$l"; done < %q;; esac`, filepath.Join(dir, "list.json")),
 	})
-	DoMany(context.Background(), ips("172.16.0.1", "198.51.100.7"), Options{})
+	DoMany(context.Background(), ips("172.16.0.1", "198.51.100.7", "2001:db8::9"), Options{})
 	got := strings.Join(calls(), "|")
 	for _, want := range []string{
-		"delete --purpose drop 172.16.0.1 198.51.100.7",
-		"delete --purpose captcha 198.51.100.7",
+		"delete --purpose drop 172.16.0.1 198.51.100.7|",
+		"delete --purpose drop 2001:db8::/64|",
+		"delete --purpose captcha 198.51.100.7|",
+		"delete --purpose captcha 2001:db8::/64",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("runs %q lack %q", got, want)
@@ -185,8 +179,8 @@ func TestRemoveFromFileMany(t *testing.T) {
 	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	removed := removeFromFileMany(dir, "cfm.deny", ips("198.51.100.1", "198.51.100.2", "198.51.100.3"))
-	if len(removed) != 2 || !removed["198.51.100.1"] || !removed["198.51.100.2"] {
+	removed, err := removeFromFileMany(dir, "cfm.deny", ips("198.51.100.1", "198.51.100.2", "198.51.100.3"))
+	if err != nil || len(removed) != 2 || !removed["198.51.100.1"] || !removed["198.51.100.2"] {
 		t.Errorf("removed = %v", removed)
 	}
 	b, _ := os.ReadFile(p) // #nosec G304 -- test temp file
@@ -196,8 +190,8 @@ func TestRemoveFromFileMany(t *testing.T) {
 	st, _ := os.Stat(p)
 	before := st.ModTime()
 	time.Sleep(10 * time.Millisecond)
-	if r := removeFromFileMany(dir, "cfm.deny", ips("192.0.2.1")); len(r) != 0 {
-		t.Errorf("removed %v", r)
+	if r, err := removeFromFileMany(dir, "cfm.deny", ips("192.0.2.1")); err != nil || len(r) != 0 {
+		t.Errorf("removed %v, err %v", r, err)
 	}
 	if st, _ := os.Stat(p); !st.ModTime().Equal(before) {
 		t.Error("rewrote cfm.deny with nothing to remove")
@@ -238,5 +232,58 @@ func TestDoMany_FeedOriginAllowedInOneBatch(t *testing.T) {
 	}
 	if r := res["198.51.100.2"]; len(r.FromFeeds) != 0 || r.Whitelisted {
 		t.Errorf("198.51.100.2 is in no feed: %+v", r)
+	}
+}
+
+// A cfm.deny it can't read to the end is left as is, and the step says so:
+// writing back what was read would drop every line after the unreadable one.
+func TestRemoveFromFileMany_UnreadableLineKeepsFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfm.deny")
+	content := "198.51.100.1\n" + strings.Repeat("x", 2<<20) + "\n198.51.100.2\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := DoMany(context.Background(), ips("198.51.100.1"), Options{ConfigDir: dir})
+	if s := stepsOf(res["198.51.100.1"], SrcCFMDeny); len(s) != 1 || s[0].Action != ActionError {
+		t.Errorf("cfm.deny steps = %+v, want an error", s)
+	}
+	if b, _ := os.ReadFile(p); string(b) != content { // #nosec G304 -- test temp file
+		t.Error("cfm.deny was rewritten")
+	}
+}
+
+// failingBatchBackend fails the batch remove and records the per-IP ones.
+type failingBatchBackend struct {
+	firewall.Backend
+	removed []string
+}
+
+func (b *failingBatchBackend) ListTableTextNoDNS(string, string) (string, error) {
+	return "", fmt.Errorf("no feed sets here")
+}
+func (b *failingBatchBackend) RemoveBlockBatch([]net.IP) error {
+	return fmt.Errorf("read inet cfm block_v6: No such file or directory")
+}
+func (b *failingBatchBackend) RemoveBlock(ip net.IP) error {
+	b.removed = append(b.removed, ip.String())
+	return nil
+}
+
+// A batch remove that fails (a block set missing, a set changing under every
+// attempt) falls back to one remove per IP, which tolerates what the batch
+// didn't: the IPs still leave the sets, and the unblock isn't reported done
+// while they stay blocked.
+func TestDoMany_NFTBatchFailureFallsBackPerIP(t *testing.T) {
+	fakeTools(t, map[string]string{})
+	be := &failingBatchBackend{}
+	res := DoMany(context.Background(), ips("198.51.100.1", "2001:db8::1"), Options{BE: be})
+	if len(be.removed) != 2 {
+		t.Fatalf("per-IP removes %v, want both IPs", be.removed)
+	}
+	for ip, r := range res {
+		if s := stepsOf(r, SrcNFT); len(s) != 1 || s[0].Action != ActionRemoved || !r.WasBlocked {
+			t.Errorf("%s nft steps = %+v", ip, s)
+		}
 	}
 }

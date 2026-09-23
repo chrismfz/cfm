@@ -8,7 +8,6 @@ package locate
 
 import (
 	"context"
-	"net"
 	"sort"
 	"strings"
 
@@ -45,29 +44,6 @@ func searchFail2Ban(ctx context.Context, qs []*query) ([][]Location, string) {
 		jails[jail] = parseF2BBannedLine(string(jout))
 	}
 	return matchF2BJails(jails, qs), ""
-}
-
-// Fail2BanBanned returns the addresses fail2ban has banned, in any jail
-// (`fail2ban-client banned`, fail2ban 0.11+; a banned subnet or range is left
-// out). ok is false when the command fails or its output doesn't parse.
-func Fail2BanBanned(ctx context.Context) (banned map[string]bool, ok bool) {
-	out, err := runOut(ctx, "fail2ban-client", "banned")
-	if err != nil {
-		return nil, false
-	}
-	jails, ok := parseF2BBannedDump(string(out))
-	if !ok {
-		return nil, false
-	}
-	banned = map[string]bool{}
-	for _, entries := range jails {
-		for _, e := range entries {
-			if ip := net.ParseIP(strings.TrimSpace(e)); ip != nil {
-				banned[ip.String()] = true
-			}
-		}
-	}
-	return banned, true
 }
 
 func matchF2BJails(jails map[string][]string, qs []*query) [][]Location {
