@@ -95,6 +95,11 @@ cookieq	a\u0085b	bad
 cookieq	a\u2028b	bad
 cookieq	a\u00a0b	bad
 cookieq	a\u2007b	bad
+cookieq	a\u007fb	bad
+cookieq	a\u1680b	bad
+cookieq	a\u2029b	bad
+cookieq	a\u202fb	bad
+cookieq	a\u205fb	bad
 cookieq	a\ufeffb	ok
 cookieq	a\u200bb	ok
 cookieq	\u212a	ok

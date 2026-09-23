@@ -326,7 +326,7 @@ test("nodeSwitches reads [webdetector] as the daemon does", () => {
   assert.deepEqual(nodeSwitches(payload({})), { siteCache: true, microEnforce: false });
   assert.deepEqual(nodeSwitches(payload({ SITE_CACHE: "0 ; panic", MICRO_CACHE_ENFORCE: "\"1\"" })), { siteCache: false, microEnforce: true });
   assert.deepEqual(nodeSwitches(payload({ site_cache: "maybe", micro_cache_enforce: "yes" })), { siteCache: true, microEnforce: true });
-  assert.equal(nodeSwitches({ config: { core: [] } }), null);
+  assert.deepEqual(nodeSwitches({ config: { core: [] } }), { siteCache: true, microEnforce: false, defaulted: true });
   assert.equal(nodeSwitches(null), null);
 });
 
@@ -339,6 +339,7 @@ test("debugCurl builds the runbook command for a valid host only", () => {
   assert.match(debugCurl("shop.example.com", "/a[1]{x,y}"), /^curl -g/, "-g: no URL globbing");
   // A wildcard's example sub-host is one without an exact policy of its own.
   assert.match(debugCurl("*.example.com", "/", ["www.example.com"]), /--resolve cfm-check\.example\.com:9043:/);
+  assert.match(debugCurl("*.example.com", "/", ["www.example.com", "cfm-check.example.com"]), /--resolve cfm-check2\.example\.com:9043:/);
   assert.equal(debugCurl("bad host; rm -rf /"), "");
   assert.equal(debugCurl(""), "");
 });

@@ -908,7 +908,9 @@ has:
   is served from its cache), **Turn off** (the opt-out: `set` with both tiers
   off, §6) and a separate, labelled **Delete** (`remove`: the host then
   follows the most specific covering wildcard, from that wildcard's cache,
-  which the confirm names; a policy added again starts from an empty cache),
+  which the confirm names; a scoped user cannot see an operator's wildcard, so
+  their confirm says one may cover the host and that Turn off keeps it
+  uncached; a policy added again starts from an empty cache),
   each confirmed; **Purge all** for an admin only; the unloadable hosts with
   Delete, and Turn off where the host is still valid (it replaces the unread
   policy, which the confirm says);

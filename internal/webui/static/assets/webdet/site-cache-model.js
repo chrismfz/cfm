@@ -483,14 +483,15 @@ function kvBool(v, def) {
 }
 
 // nodeSwitches reads SITE_CACHE / MICRO_CACHE_ENFORCE from a
-// GET /api/v1/detectors/config?view=merged payload (admin only). null when the
-// payload has no [webdetector] section to read.
+// GET /api/v1/detectors/config?view=merged payload (admin only). null when
+// there is no payload to read (a failed fetch). A config with no [webdetector]
+// section runs the daemon's defaults, reported as such (`defaulted`).
 export function nodeSwitches(payload) {
   const cfg = payload && payload.config;
   if (!cfg) return null;
   const sections = [...(cfg.core || []), ...(cfg.leniency || []), ...(cfg.advanced || [])];
   const wd = sections.find((s) => s && String(s.name).toLowerCase() === "webdetector");
-  if (!wd) return null;
+  if (!wd) return { siteCache: true, microEnforce: false, defaulted: true };
   const keys = {};
   for (const [k, v] of Object.entries(wd.keys || {})) keys[k.toUpperCase()] = v;
   return {
@@ -515,7 +516,9 @@ export function debugCurl(host, path = "/", taken = []) {
   if (isWildcard(h)) {
     const suffix = h.slice(2);
     const own = new Set((taken || []).map((t) => canonHost(t)));
-    h = ["www", "cfm-check"].map((l) => `${l}.${suffix}`).find((c) => !own.has(c)) || `cfm-check.${suffix}`;
+    const labels = ["www", "cfm-check"];
+    for (let i = 2; labels.length < 2 + own.size; i += 1) labels.push(`cfm-check${i}`);
+    h = labels.map((l) => `${l}.${suffix}`).find((c) => !own.has(c));
   }
   let p = String(path || "/").trim() || "/";
   if (!p.startsWith("/")) p = `/${p}`;

@@ -40,7 +40,7 @@
             <template v-if="scMicroMode === 'enforced'">This node: <strong>enforced</strong>
               (<code>MICRO_CACHE_ENFORCE = 1</code>): an armed vhost's anonymous pages are served from cache.</template>
             <template v-else-if="scMicroMode === 'dryrun'">This node: <strong>dry run</strong>
-              (<code>MICRO_CACHE_ENFORCE = 0</code>): nothing is stored, the debug stamp only reports what would be.</template>
+              (<code>MICRO_CACHE_ENFORCE = 0</code><span v-if="scSwitches.defaulted">, the default: no <code>[webdetector]</code> section</span>): nothing is stored, the debug stamp only reports what would be.</template>
             <template v-else-if="isScoped">Whether this node enforces it (<code>MICRO_CACHE_ENFORCE</code>, set by
               the server operator) is not shown here: <strong>treat an armed micro tier as live</strong>. In a dry
               run the debug stamp only reports what would be cached.</template>

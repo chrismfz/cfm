@@ -69,6 +69,12 @@ export const siteCacheMixin = {
       scCheckHost: "",
       scCheckPath: "/",
       scCopied: false,
+      // Bumped whenever the editor loads another form (reset / edit), so an
+      // in-flight save never overwrites a form the operator moved on to.
+      scFormEpoch: 0,
+      // Refresh sequence: a list read that resolves after a newer one started
+      // (an auto-refresh overlapping a save) is dropped.
+      scRefreshSeq: 0,
     };
   },
 
@@ -110,6 +116,13 @@ export const siteCacheMixin = {
     },
     scHasChanges() {
       return patchChanges(this.scPatch) > 0;
+    },
+    // Any difference from the form as loaded, raw text included (a cookie list
+    // still being typed can parse to the stored one): what the resync must not
+    // throw away.
+    scFormDirty() {
+      if (!this.scOriginal) return false;
+      return JSON.stringify(this.scForm) !== JSON.stringify(formFromEntry(this.scOriginal));
     },
     // The policy being edited changed ("changed") or went ("gone") since the
     // form loaded it. A save still sends only the fields changed here, but a
@@ -209,12 +222,14 @@ export const siteCacheMixin = {
       await this.refreshSiteCache();
     },
     async refreshSiteCache() {
+      const seq = ++this.scRefreshSeq;
       const statsP = this.fetchJSON("v1/site-cache/stats").then((p) => this.extractRows(p, "rows"), (err) => {
         console.error("[cfm-admin] site-cache stats fetch failed", err);
         return null; // keep the last counts
       });
       try {
         const payload = await this.fetchJSON("v1/site-cache/list");
+        if (seq !== this.scRefreshSeq) return; // a newer read is on its way
         this.scEntries = this.extractRows(payload, "rows");
         this.scUnloadable = Array.isArray(payload && payload.unloadable) ? payload.unloadable : [];
         this.scLoadError = "";
@@ -328,6 +343,7 @@ export const siteCacheMixin = {
       this.scMode = mode;
     },
     resetSCForm() {
+      this.scFormEpoch += 1;
       this.scForm = emptyForm();
       this.scEditHost = "";
       this.scOriginal = null;
@@ -351,12 +367,13 @@ export const siteCacheMixin = {
       const row = this.scExistingForNew;
       if (row) this.editSC(row, { scroll: false });
     },
-    editSC(row, { scroll = true, check = true } = {}) {
+    editSC(row, { scroll = true, check = true, mode = true } = {}) {
+      this.scFormEpoch += 1;
       this.scForm = formFromEntry(row.entry);
       this.scEditHost = row.host;
       this.scOriginal = row.entry;
       if (check) this.scCheckHost = row.host;
-      this.scMode = "editor";
+      if (mode) this.scMode = "editor";
       if (!scroll) return;
       try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { /* non-fatal */ }
     },
@@ -366,10 +383,10 @@ export const siteCacheMixin = {
     // re-sends the state from before. With unsaved changes it is left alone,
     // and the editor says the policy changed or went.
     resyncSCEdit() {
-      if (!this.scEditHost || this.scHasChanges) return;
+      if (!this.scEditHost || this.scFormDirty) return;
       const row = this.scRows.find((r) => r.host === this.scEditHost);
       if (!row) this.resetSCForm();
-      else if (this.scEditStale === "changed") this.editSC(row, { scroll: false, check: false });
+      else if (this.scEditStale === "changed") this.editSC(row, { scroll: false, check: false, mode: false });
     },
     reloadSCEdit() {
       const row = this.scRows.find((r) => r.host === this.scEditHost);
@@ -393,15 +410,16 @@ export const siteCacheMixin = {
       if (!this.canSaveSC) return;
       const patch = this.scPatch;
       if (!this.confirmSCMicroEnforced(patch)) return;
-      const editing = this.scEditHost;
+      const epoch = this.scFormEpoch;
       this.scBusy = true;
       try {
         const res = await this.postJSON("v1/site-cache/set", patch);
         const entry = (res && res.entry) || null;
         this.actionMsg = `Saved the policy for ${patch.host}. Each edge worker applies it within about 60 s.`;
         // Load the stored result into the editor, unless the operator moved on
-        // to another row while the save was in flight.
-        if (entry && this.scEditHost === editing) {
+        // (another row, Clear) while the save was in flight.
+        if (entry && this.scFormEpoch === epoch) {
+          this.scFormEpoch += 1;
           this.scForm = formFromEntry(entry);
           this.scEditHost = entry.host;
           this.scOriginal = entry;
@@ -464,7 +482,11 @@ export const siteCacheMixin = {
       const who = isWildcard(host) ? "The sub-hosts it covered (those without a policy of their own)" : host;
       const verb = isWildcard(host) ? "follow" : "follows";
       let after;
-      if (!cover) after = isWildcard(host) ? `${who} are then not cached.` : `${host} is then not cached.`;
+      if (!cover && this.isScoped) {
+        // A scoped list shows only the token's own policies: an operator's
+        // wildcard covering this host would be invisible here.
+        after = `${who} ${isWildcard(host) ? "are" : "is"} then not cached, unless a wildcard policy of the server operator (not shown here) covers ${isWildcard(host) ? "them" : "it"}. Turn off keeps ${isWildcard(host) ? "them" : "it"} uncached either way.`;
+      } else if (!cover) after = isWildcard(host) ? `${who} are then not cached.` : `${host} is then not cached.`;
       else if (isOptOut(coverEntry)) after = `${who} then ${verb} ${cover}, an opt-out: not cached.`;
       else after = `${who} then ${verb} ${cover} and ${isWildcard(host) ? "are" : "is"} served from that wildcard's cache (purge ${cover} if that holds something wrong).`;
       if (!window.confirm(`Delete the policy for ${host}? ${after} Adding a policy for it again starts from an empty cache.`)) return;

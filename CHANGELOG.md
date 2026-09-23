@@ -33,9 +33,9 @@ back-filled here — see the git/PR history for that period.
     Turning micro on asks for confirmation unless the node is known to be in
     a dry run.
   - A scoped cPanel user manages their own vhosts from the page.
-  - A save sends only what was changed. It never reverts a change someone else
-    made meanwhile (a cookie rail, a strict flag), and it never replaces an
-    existing policy from a new-policy form.
+  - A save sends only the fields the operator changed. A field left untouched
+    never reverts a change someone else made meanwhile (a cookie rail, a
+    strict flag), and a new-policy form never replaces an existing policy.
   - The page checks what the daemon checks before it sends anything. Shared
     test cases pin it to the daemon's and the edge's rules.
 - **Site Cache changes are now in `cfm.log`.** Every set / remove / purge /
