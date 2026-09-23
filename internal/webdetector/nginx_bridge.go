@@ -938,6 +938,17 @@ func NewNginxBridge(sockPath, token string, defaultTTL, okIPTTL time.Duration) *
 // ChallengeIP tells OpenResty to intercept and challenge this IP.
 // Safe to call even if OpenResty is not running (fails silently, logs warn).
 func (b *NginxBridge) ChallengeIP(ip string, ttl time.Duration) {
+	b.ChallengeIPWithReason(ip, ttl, "")
+}
+
+// ChallengeIPWithReason is ChallengeIP recording WHY (the detector rule, e.g.
+// CHALLENGE_ERR_RATIO) on the in-process entry. The reason stays daemon-side
+// (the edge message is unchanged): it is what a later solve's provenance
+// (src=ip:<reason>, challengeSources) and the solved hook's reason= read back.
+// An empty reason on a still-active challenge entry KEEPS the reason it has
+// (a reason-less refresh, e.g. the section sink re-challenging an IP the
+// webdetector just challenged with its own reason, must not erase it).
+func (b *NginxBridge) ChallengeIPWithReason(ip string, ttl time.Duration, reason string) {
 	if !b.cfg.Enabled {
 		return
 	}
@@ -951,8 +962,13 @@ func (b *NginxBridge) ChallengeIP(ip string, ttl time.Duration) {
 		ttl = b.cfg.DefaultTTL
 	}
 
+	now := time.Now()
+	reason = strings.TrimSpace(reason)
 	b.mu.Lock()
-	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: time.Now().Add(ttl)}
+	if cur, ok := b.ipState[ip]; ok && reason == "" && cur.Action == "challenge" && cur.Expires.After(now) {
+		reason = cur.Reason
+	}
+	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: reason}
 	b.mu.Unlock()
 
 	b.post("/nginx/ip", nginxIPMsg{IP: ip, Action: "challenge", TTLSec: int(ttl.Seconds())})
@@ -1890,29 +1906,8 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		geoFloored = false // a real per-IP entry owns the action now
 	}
 
-	// vhost exact match first, else wildcard
-	if h, ok := b.vhState[host]; ok && h.Expires.After(now) {
+	if h, ok := b.vhostEntryLocked(host, now); ok {
 		vhAction = h.Action
-	} else if host != "" {
-		// wildcard match: "*.example.com" (suffix) or "cpanel.*" (prefix-label)
-		for pat, e := range b.vhState {
-			if !e.Expires.After(now) {
-				continue
-			}
-			if len(pat) > 2 && pat[:2] == "*." {
-				suf := pat[1:] // ".example.com"
-				if len(host) > len(suf) && host[len(host)-len(suf):] == suf {
-					vhAction = e.Action
-					break
-				}
-			} else if strings.HasSuffix(pat, ".*") {
-				base := pat[:len(pat)-2] // "cpanel"
-				if base != "" && strings.HasPrefix(host, base+".") {
-					vhAction = e.Action
-					break
-				}
-			}
-		}
 	}
 
 	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
@@ -2058,6 +2053,11 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 				if scope == "web" {
 					MarkChallengeV2(ip, host)
 				}
+			}
+			if ruleAction == TrafficActionChallenge && scope == "web" {
+				// Telemetry only (challenge_src.go): lets the verify name
+				// this rule in src= — a rule challenge leaves no bridge state.
+				noteRuleChallenge(ip, host, rr.Rule.ID)
 			}
 			resp["rule_action"] = ruleAction
 			resp["rule_id"] = rr.Rule.ID
@@ -2869,6 +2869,37 @@ func (b *NginxBridge) checkToken(r *http.Request) bool {
 		return false
 	}
 	return r.Header.Get("X-CFM-Token") == b.cfg.Token
+}
+
+// vhostEntryLocked returns the live vhost-wide entry covering host: an exact
+// match first, else a wildcard — "*.example.com" (suffix) or "cpanel.*"
+// (prefix-label). The ONE vhost matcher: the decision path and the solve
+// provenance (challengeSources) both read through it, so "which vhost entry
+// covers this host" cannot be answered two ways. Caller holds b.mu (R or W).
+func (b *NginxBridge) vhostEntryLocked(host string, now time.Time) (bridgeVhostEntry, bool) {
+	if h, ok := b.vhState[host]; ok && h.Expires.After(now) {
+		return h, true
+	}
+	if host == "" {
+		return bridgeVhostEntry{}, false
+	}
+	for pat, e := range b.vhState {
+		if !e.Expires.After(now) {
+			continue
+		}
+		if len(pat) > 2 && pat[:2] == "*." {
+			suf := pat[1:] // ".example.com"
+			if len(host) > len(suf) && host[len(host)-len(suf):] == suf {
+				return e, true
+			}
+		} else if strings.HasSuffix(pat, ".*") {
+			base := pat[:len(pat)-2] // "cpanel"
+			if base != "" && strings.HasPrefix(host, base+".") {
+				return e, true
+			}
+		}
+	}
+	return bridgeVhostEntry{}, false
 }
 
 // GetIPDecision returns the current action and reason for an IP from the

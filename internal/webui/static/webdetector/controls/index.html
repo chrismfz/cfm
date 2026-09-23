@@ -50,6 +50,7 @@
             <option value="24h">24 hours</option>
           </select>
           <button class="btn-danger" @click="panicArm" :disabled="loading">🚨 Arm challenge</button>
+          <button class="btn-quiet" @click="panicSwitchTier" v-if="panicSwitchTarget()" :disabled="loading" :title="'Switch the ACTIVE challenge on this vhost to ' + (panicSwitchTarget() === 'v2' ? 'strict (v2)' : 'standard (v1)') + ' without re-arming it — the expiry stays as it is'">{{ panicSwitchTarget() === 'v2' ? 'Switch to Strict (v2)' : 'Switch to Standard (v1)' }}</button>
           <button class="btn-quiet" @click="panicDisarm" :disabled="loading || !(panicStatus && panicStatus.manual_active)">Disarm</button>
         </div>
         <p class="statusline" v-if="panicMsg">{{ panicMsg }}</p>
@@ -155,6 +156,7 @@
                 </td>
                 <td>
                   <button :class="row.under_attack ? 'btn-danger' : 'btn-quiet'" @click="toggleUnderAttack(row)" :disabled="loading || !row.under_attack_toggleable" :title="underAttackButtonTitle(row)">{{ row.under_attack ? '🚨 UNDER ATTACK' : 'AUTO' }}</button>
+                  <button class="btn-danger btn-sm" v-if="row.under_attack" @click="quickStrict(row.host)" :disabled="loading" :title="'Under attack = the plain challenge is being solved. Arm a strict (v2) challenge on this vhost for ' + panicTTL + ' (or switch its existing manual arm to v2, keeping the expiry). Status and Disarm in the Emergency challenge card above.'">→ Strict v2</button>
                 </td>
                 <td>
                   <button :class="vhostControlEnabled(row, 'waf') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading || !vhostControlToggleable(row, 'waf')" :title="vhostControlButtonTitle(row, 'waf')">{{ vhostControlButtonLabel(row, 'waf') }}</button>

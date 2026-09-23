@@ -412,7 +412,12 @@ func (s *sectionSink) Publish(a core.Alert) {
 		if s.pol.Mode == "dryrun" {
 			enforced = "challenge_dryrun"
 		} else if nginxBridge != nil {
-			nginxBridge.ChallengeIP(ipStr, ttl)
+			// The detector rule (Extra["rule"]), else the webdetector's
+			// limit; "" keeps the reason the entry already carries (the
+			// webdetector records its own via ChallengeIPWithReason right
+			// before it emits this alert) — never a placeholder that would
+			// overwrite it.
+			nginxBridge.ChallengeIPWithReason(ipStr, ttl, firstNonEmpty(out.Extra["rule"], out.Extra["limit"]))
 			enforced = "challenge"
 			out.Extra["enforced_via"] = "nginx_bridge"
 		} else {

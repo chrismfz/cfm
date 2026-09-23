@@ -111,6 +111,23 @@ func (s *manualChalState) rung(host string) string {
 	return e.Rung
 }
 
+// setRung re-tiers an ACTIVE manual challenge on host, keeping its expiry,
+// granted TTL and reason. Returns the previous rung and ok=false when host has
+// no active (non-expired) entry — re-tiering never creates or extends an arm.
+func (s *manualChalState) setRung(host, rung string) (prev string, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, found := s.vhosts[host]
+	if !found || time.Now().After(e.ExpiresAt) {
+		return "", false
+	}
+	prev = e.Rung
+	e.Rung = rung
+	s.vhosts[host] = e
+	s.saveLocked()
+	return prev, true
+}
+
 // clear removes a manual challenge (returns whether it was present).
 func (s *manualChalState) clear(host string) bool {
 	s.mu.Lock()
@@ -311,8 +328,13 @@ func (e *Engine) manualChallengeVhostRecord(host string, ttl time.Duration, reas
 	)
 
 	// NginxBridge: push immediately so OpenResty reacts without waiting for a tick.
+	// The bridge entry's reason is the fixed "manual" (what the reconcile
+	// re-push writes too), never the caller's free text: it is what a solve's
+	// provenance reads (src=vhost:manual), and a tenant-typed reason such as
+	// "suspicious_vhost" must not pass for an auto challenge. The free text
+	// stays in the manual store and the manual_on audit line above.
 	if e.nginxBridge != nil {
-		e.nginxBridge.ChallengeVhostWithReason(host, ttl, reason)
+		e.nginxBridge.ChallengeVhostWithReason(host, ttl, "manual")
 	}
 
 	// Record in ChalAPI store.
@@ -326,6 +348,43 @@ func (e *Engine) manualChallengeVhostRecord(host string, ttl time.Duration, reas
 		payload["actor"] = actor
 	}
 	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_manual_on", Host: host, Mode: "manual", Reason: reason, TTLSec: int(ttl / time.Second), Payload: payload})
+}
+
+// SetManualChallengeRungAs switches the tier (v1 "" / v2) of the manual
+// challenge on target WITHOUT touching its expiry or reason — the "switch an
+// armed vhost between v1 and v2" control. target is the host whose arm is
+// changed, as resolved by manualRungTarget (the caller scope-checks THAT host,
+// not only the one it was asked about). Returns the previous rung, the expiry,
+// whether anything changed, and ok=false when target has no active manual
+// challenge (an AUTO challenge has no tier of its own — arm a manual one to
+// pick a tier). A no-op switch (already at rung) writes no audit row, no log
+// line and no state file: the trail records only real changes.
+//
+// Nothing reaches the edge: the serve is identical for both tiers and the
+// verify gate reads the rung live (challengeV2HostArmed), so the switch takes
+// effect on the very next solve.
+func (e *Engine) SetManualChallengeRungAs(target, rung, actor string) (prev string, expires time.Time, changed, ok bool) {
+	active, exp, _ := e.manualChal.active(target)
+	if !active {
+		return "", time.Time{}, false, false
+	}
+	if cur := e.manualChal.rung(target); cur == rung {
+		return cur, exp, false, true
+	}
+	p, set := e.manualChal.setRung(target, rung)
+	if !set {
+		return "", time.Time{}, false, false // lapsed between the two reads
+	}
+	logging.LogfCHALLENGES(
+		"[challenge][vhost] action=manual_rung host=%s from=%s to=%s actor=%s",
+		target, rungOrV1(p), rungOrV1(rung), actorOrDash(actor),
+	)
+	payload := map[string]interface{}{"from": rungOrV1(p), "rung": rungOrV1(rung)}
+	if actor != "" {
+		payload["actor"] = actor
+	}
+	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_manual_rung", Host: target, Mode: "manual", Payload: payload})
+	return p, exp, true, true
 }
 
 // actorOrDash renders the audit actor for log lines ("-" = unknown).
@@ -393,15 +452,33 @@ func (e *Engine) manualChallengeCovering(host string) (bool, time.Time, string) 
 }
 
 // manualChallengeRung returns the tier ("v2" or "") of the manual challenge
-// covering host, with the SAME apex→www expansion as manualChallengeCovering:
-// a v2 arm on "example.com" must gate "www.example.com" solves too (the
-// bridge installs entries for both). "" when nothing v2-armed covers host.
+// covering host, with the SAME resolution as manualChallengeCovering: the
+// host's own active arm first, else the apex's for a www. host — a v2 arm on
+// "example.com" gates "www.example.com" solves too (the bridge installs
+// entries for both). The MOST SPECIFIC arm wins, including a plain one: a www
+// host with its own v1 arm is v1 even under a v2 apex. (This used to skip an
+// exact arm whose rung was "" and fall through to the apex, so re-tiering the
+// www arm to v1 answered 200 while the gate kept enforcing v2 — review
+// finding.) "" when nothing v2-armed covers host.
 func (e *Engine) manualChallengeRung(host string) string {
-	if r := e.manualChal.rung(host); r != "" {
-		return r
+	if target := e.manualRungTarget(host); target != "" {
+		return e.manualChal.rung(target)
+	}
+	return ""
+}
+
+// manualRungTarget is the host whose manual arm covers host (manualChallenge-
+// Covering's resolution): host itself when it has an active arm, else its
+// apex for a www. host, else "". The ONE resolver for both reading the tier
+// (manualChallengeRung) and changing it (SetManualChallengeRungAs).
+func (e *Engine) manualRungTarget(host string) string {
+	if ok, _, _ := e.manualChal.active(host); ok {
+		return host
 	}
 	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
-		return e.manualChal.rung(apex)
+		if ok, _, _ := e.manualChal.active(apex); ok {
+			return apex
+		}
 	}
 	return ""
 }
@@ -473,7 +550,7 @@ func (e *Engine) restoreManualChallenges() {
 			host, rem.Round(time.Second), ent.Reason, rungOrV1(ent.Rung),
 		)
 		if e.nginxBridge != nil {
-			e.nginxBridge.ChallengeVhostWithReason(host, rem, ent.Reason)
+			e.nginxBridge.ChallengeVhostWithReason(host, rem, "manual") // fixed, as in manualChallengeVhostRecord
 		}
 		if e.chalAPI != nil {
 			// rem drives the expiry; ent.TTL keeps the reported total the one

@@ -362,3 +362,64 @@ func TestSummarizePerSignalRanking(t *testing.T) {
 		t.Errorf("top_dc order = %v, want [dcA dcC dcB] (desc frac, dc_reqs tiebreak)", gotD)
 	}
 }
+
+// The humanity section sizes a v2 arm from the would_v2 shadow: which source
+// challenged each would-reject (by_src_kind counts a kind once per line) and
+// who the clients are. Lines from daemons that predate the context keys
+// count as "(unknown)", never as "none covered".
+func TestSummarizeHumanityWouldV2(t *testing.T) {
+	lines := []string{
+		"2026-09-23 06:01:23 [abuse-shadow] signal=humanity host=a.gr ip=66.102.9.230 hs=140 tells=sw_renderer,touch_lie,no_input fp=c41a0f3f verdict=would_v2 cc=US asn=15169 provider=google ptr=rate-limited-proxy-66-102-9-230.google.com ua_family=Chrome src=vhost:suspicious_vhost",
+		"2026-09-23 06:02:00 [abuse-shadow] signal=humanity host=a.gr ip=216.73.217.117 hs=190 tells=webdriver,sw_renderer,no_input fp=c28caa00 verdict=would_v2 cc=US asn=16509 provider=amazon-aws ua_family=Chrome ua_bot=1 src=vhost:suspicious_vhost,ip:CHALLENGE_ERR_RATIO",
+		"2026-09-23 06:03:00 [abuse-shadow] signal=humanity host=b.gr ip=48.47.30.107 hs=130 tells=sw_renderer,outer_zero,no_input fp=c28caa00 verdict=would_v2 ua_family=Chrome src=waf:302",
+		"2026-09-23 06:04:00 [abuse-shadow] signal=humanity host=b.gr ip=48.47.30.108 hs=130 tells=sw_renderer,outer_zero,no_input fp=- verdict=would_v2 ua_family=- src=-",
+		// Pre-context line (older daemon): no src=.
+		"2026-09-22 06:04:00 [abuse-shadow] signal=humanity host=c.gr ip=198.51.100.1 hs=100 tells=webdriver fp=95070673 verdict=would_v2",
+		// A different signal must not leak into the section.
+		"2026-09-23 06:05:00 [abuse-shadow] signal=rate_outlier host=a.gr ip=1.1.1.1 rps=9 ratio=12 reqs=100 cc=GR provider=- verdict=would_challenge",
+	}
+	s := Summarize(lines)
+	h := s.Humanity
+	if h == nil {
+		t.Fatal("humanity section missing")
+	}
+	if h.Lines != 5 || h.DistinctIPs != 5 || h.DistinctHosts != 3 {
+		t.Fatalf("counts: %+v", h)
+	}
+	if h.WithContext != 4 || h.UABot != 1 {
+		t.Fatalf("with_context=%d ua_bot=%d", h.WithContext, h.UABot)
+	}
+	get := func(list []kv, k string) int {
+		for _, e := range list {
+			if e.Key == k {
+				return e.Count
+			}
+		}
+		return 0
+	}
+	if get(h.BySrcKind, "vhost") != 2 || get(h.BySrcKind, "ip") != 1 || get(h.BySrcKind, "waf") != 1 ||
+		get(h.BySrcKind, "-") != 1 || get(h.BySrcKind, "(unknown)") != 1 {
+		t.Fatalf("by_src_kind: %+v", h.BySrcKind)
+	}
+	if get(h.BySrc, "vhost:suspicious_vhost") != 2 || get(h.BySrc, "waf:302") != 1 {
+		t.Fatalf("by_src: %+v", h.BySrc)
+	}
+	if get(h.ByFP, "c28caa00") != 2 || get(h.ByFP, "(none)") != 1 {
+		t.Fatalf("by_fp: %+v", h.ByFP)
+	}
+	if get(h.ByProvider, "amazon-aws") != 1 || get(h.ByProvider, "google") != 1 {
+		t.Fatalf("by_provider: %+v", h.ByProvider)
+	}
+	// PTR grouping covers attributable lines only; no PTR → "(none)".
+	if get(h.ByPTRDomain, "google.com") != 1 || get(h.ByPTRDomain, "(none)") != 3 {
+		t.Fatalf("by_ptr_domain: %+v", h.ByPTRDomain)
+	}
+	// The rate_outlier line keeps its own section and does not count here.
+	if s.WouldChallenge != 1 || get(s.ByProvider, "amazon-aws") != 0 {
+		t.Fatalf("humanity lines leaked into would_challenge aggregates: %+v", s)
+	}
+
+	if Summarize(lines[5:]).Humanity != nil {
+		t.Fatal("no would_v2 lines must omit the section")
+	}
+}

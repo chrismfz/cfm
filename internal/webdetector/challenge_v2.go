@@ -111,8 +111,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"cfm/internal/logging"
 )
 
 // humanitySignals is the JSON body the challenge page posts with the verify.
@@ -242,13 +240,15 @@ const (
 	challengeV2MarkMaxKeys = 8192
 )
 
-type challengeV2MarkStore struct {
-	mu       sync.RWMutex
-	m        map[string]time.Time // "ip|host" → expiry
-	fullWarn bool
+// challengeV2Marks is a presence-only pairTTLStore (pair_ttl_store.go). Its
+// knobs are the zero values on purpose: every re-mark refreshes the expiry
+// and every cap-pressure put sweeps — the gate's original behaviour.
+var challengeV2Marks = pairTTLStore[struct{}]{
+	m:       map[string]time.Time{},
+	ttl:     challengeV2MarkTTL,
+	maxKeys: challengeV2MarkMaxKeys,
+	fullMsg: "[challenge_v2] per-(ip,host) mark store full (%d) — new v2 marks degrade to plain challenge until pressure drops",
 }
-
-var challengeV2Marks = challengeV2MarkStore{m: map[string]time.Time{}}
 
 // challengeV2MarkKey canonicalizes the (ip, host) pair into the store key.
 // The WRITERS' inputs pass through normalizeHost (lowercase + port strip)
@@ -268,60 +268,22 @@ func challengeV2MarkKey(ip, host string) string {
 }
 
 // MarkChallengeV2 records that (ip, host) was challenged by a v2-tier source.
+// Over the cap a new mark is dropped (fail-open to a plain v1 challenge),
+// logged once per saturation episode.
 func MarkChallengeV2(ip, host string) {
-	key := challengeV2MarkKey(ip, host)
-	if key == "" {
-		return
-	}
-	now := time.Now()
-	s := &challengeV2Marks
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.m[key]; !exists && len(s.m) >= challengeV2MarkMaxKeys {
-		for k, exp := range s.m { // expiry sweep, only on pressure
-			if now.After(exp) {
-				delete(s.m, k)
-			}
-		}
-		if len(s.m) >= challengeV2MarkMaxKeys {
-			if !s.fullWarn {
-				s.fullWarn = true
-				logging.Logf("[challenge_v2] per-(ip,host) mark store full (%d) — new v2 marks degrade to plain challenge until pressure drops", challengeV2MarkMaxKeys)
-			}
-			return // fail-open: plain v1 challenge for the newcomer
-		}
-	}
-	s.m[key] = now.Add(challengeV2MarkTTL)
-	// Re-arm the once-per-episode warning only when the store is genuinely
-	// BELOW the cap again. Keying it on "any successful insert/refresh" was
-	// wrong once reads stopped deleting expired keys: at saturation a v2-tier
-	// traffic rule re-marks an existing pair on every request, which would
-	// clear the flag, and the next NEW pair would log the warning again —
-	// alternating per client and flooding the log with the line docs/waf.md
-	// promises appears once per episode. A refresh while still at capacity is
-	// not the end of the episode.
-	if len(s.m) < challengeV2MarkMaxKeys {
-		s.fullWarn = false
-	}
+	challengeV2Marks.put(challengeV2MarkKey(ip, host), struct{}{}, time.Now())
 }
 
 // challengeV2Marked reports whether a live v2 mark covers (ip, host).
+//
+// RLock only, and no delete: since the arm grain is resolved on EVERY scored
+// solve, this runs on the common unarmed path too, and an exclusive Lock here
+// would serialise every solve in a challenge storm against the same mutex the
+// bridge writes marks through. An expired key is simply answered false and
+// left for the write-pressure sweep in put, which is what bounds the store.
 func challengeV2Marked(ip, host string) bool {
-	key := challengeV2MarkKey(ip, host)
-	if key == "" {
-		return false
-	}
-	s := &challengeV2Marks
-	// RLock, and no delete: since the arm grain is resolved on EVERY scored
-	// solve, this runs on the common unarmed path too, and an exclusive Lock
-	// here would serialise every solve in a challenge storm against the same
-	// mutex the bridge writes marks through. An expired key is simply
-	// answered false and left for the write-pressure sweep in
-	// MarkChallengeV2, which is what bounds the store — reading never did.
-	s.mu.RLock()
-	exp, ok := s.m[key]
-	s.mu.RUnlock()
-	return ok && time.Now().Before(exp)
+	_, ok := challengeV2Marks.get(challengeV2MarkKey(ip, host), time.Now())
+	return ok
 }
 
 // SetChallengeV2HostArmed wires the per-vhost v2 lookup the verify gate ORs
@@ -790,9 +752,10 @@ func (s ChallengeSolve) WaiverMissSuffix() string {
 // characterise, and it is deliberately not published/hooked as solved (it
 // cleared nothing), so this line and the challenge_v2_reject history row are
 // its only records — without sig= every armed-and-rejected client would be
-// missing from the very data used to tune the tells. The geo fields and then
-// v2_waiver_miss ride at the END, so no field a parser already reads moves.
+// missing from the very data used to tune the tells. The geo fields, then
+// v2_waiver_miss, then src= ride at the END, so no field a parser already
+// reads moves.
 func (s ChallengeSolve) RejectLine() string {
-	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s%s",
-		s.IP, s.Host, s.URI, s.HumanityScore, s.HumanityTells, s.SignalSuffix(), s.V2Grain, s.TLSFingerprintOrDash(), s.UA, s.GeoSuffix(), s.WaiverMissSuffix())
+	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s%s%s",
+		s.IP, s.Host, s.URI, s.HumanityScore, s.HumanityTells, s.SignalSuffix(), s.V2Grain, s.TLSFingerprintOrDash(), s.UA, s.GeoSuffix(), s.WaiverMissSuffix(), s.SrcSuffix())
 }

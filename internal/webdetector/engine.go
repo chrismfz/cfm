@@ -912,6 +912,9 @@ func (e *Engine) RecordChallengeV2Reject(s ChallengeSolve) {
 // ptr, resolved once at verify) is added last, each key only when resolved —
 // see addGeoPayload. Note payload.ptr is the client's reverse DNS; the
 // humanity pointer-event count is sig.ptr, one level down.
+//
+// src is the challenge provenance snapshot (challenge_src.go), the same
+// value as the log lines' src= field; absent when it was never resolved.
 func (s ChallengeSolve) historyPayload() map[string]interface{} {
 	payload := map[string]interface{}{"uri": s.URI, "diff": s.Diff, "ms": s.VerifyMS}
 	if s.UA != "" {
@@ -948,6 +951,9 @@ func (s ChallengeSolve) historyPayload() map[string]interface{} {
 		}
 	}
 	s.addGeoPayload(payload)
+	if v := s.SrcValue(); v != "" {
+		payload["src"] = v
+	}
 	return payload
 }
 
@@ -3583,7 +3589,7 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
 			if ttl <= 0 {
 				ttl = 10 * time.Minute
 			}
-			e.nginxBridge.ChallengeIP(row.IP, ttl)
+			e.nginxBridge.ChallengeIPWithReason(row.IP, ttl, blockReason)
 		}
 		e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": outcome, "req": row.Req, "vhosts": row.Vhosts, "action": action}})
 		e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "suspicious_snapshot", IP: row.IP, Reason: strings.Join(row.Reasons, ","), Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"req": row.Req, "vhosts": row.Vhosts}})

@@ -494,6 +494,13 @@ type ChallengeSolve struct {
 	// under an arm is otherwise byte-identical to a plain v1 solve, which reads
 	// as "the tier never fired" (D5d).
 	V2Grain string
+	// Src is the challenge provenance snapshot taken at verify: every source
+	// covering (ip, host) then (challengeSources, challenge_src.go), in a
+	// fixed order. SrcResolved says the snapshot ran (a bridge was wired);
+	// resolved-and-empty renders src=-, unresolved omits the field. Log-only:
+	// it never decides anything.
+	Src         []string
+	SrcResolved bool
 	// V2Waived is the FCrDNS-verified good bot whose verdict waived a FAILING
 	// solve under an arm ("" = not waived): the D5 gate let it through instead
 	// of rejecting (challengeV2GoodBot). Rendered as v2_waived=<name>.
@@ -832,6 +839,12 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// carries it too. Never blocks verify: country/ASN are a live mmdb
 		// read, only the PTR is cached-or-async.
 		solve.resolveGeo()
+		// Provenance, once, BEFORE the gate and before releaseSolvedIP clears
+		// the per-IP entry it reads — so a reject carries it too.
+		if s.bridge != nil {
+			solve.Src = s.bridge.challengeSources(fp.ID, ipStr, host, solve.CountryISO, solve.ASN)
+			solve.SrcResolved = true
+		}
 
 		// One dictionary line per distinct fingerprint, so every solve can carry
 		// the 8-character id instead of the full tuple. The UA rides along
@@ -918,8 +931,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				}
 			} else if v2Shadow {
 				logging.LogfABUSESHADOW(
-					"[abuse-shadow] signal=humanity host=%s ip=%s hs=%d tells=%s fp=%s verdict=would_v2",
-					solve.Host, solve.IP, hs, hsTells, solve.TLSFingerprintOrDash())
+					"[abuse-shadow] signal=humanity host=%s ip=%s hs=%d tells=%s fp=%s verdict=would_v2%s",
+					solve.Host, solve.IP, hs, hsTells, solve.TLSFingerprintOrDash(), solve.ShadowContextSuffix())
 			}
 		}
 
@@ -938,7 +951,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				solveMS = strconv.FormatInt(ms, 10)
 			}
 			logging.LogfCHALLENGES(
-				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s",
+				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s",
 				solve.IP,
 				solve.Host,
 				solve.URI,
@@ -950,6 +963,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				solve.UA,
 				solve.HumanitySuffix(),
 				solve.GeoSuffix(),
+				solve.SrcSuffix(),
 			)
 		}
 

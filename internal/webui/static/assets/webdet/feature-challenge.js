@@ -158,6 +158,55 @@ export const challengeMixin = {
         console.error("[cfm-admin] manual challenge failed", err);
       }
     },
+    // Tier switch for a vhost that is ALREADY challenged (v1 <-> v2):
+    //  - a manual arm is re-tiered in place via v1/challenge/vhost/rung, which
+    //    keeps its expiry and reason (a re-arm through vhost/add would reset
+    //    both);
+    //  - an auto-only challenge has no tier of its own, so "→ v2" arms a
+    //    MANUAL v2 challenge for the page's TTL on top of it (it then outlives
+    //    the scorer until it expires or is disarmed — the label says so).
+    challengeTierTarget(host) {
+      const s = this.activeChallengeByHost[host] || {};
+      if (s.manual_active) return s.rung === "v2" ? "v1" : "v2";
+      if (s.auto_active) return "v2";
+      return "";
+    },
+    challengeTierButtonLabel(host) {
+      const s = this.activeChallengeByHost[host] || {};
+      const to = this.challengeTierTarget(host);
+      if (!to) return "";
+      return s.manual_active ? `→ ${to}` : "→ v2 (manual)";
+    },
+    challengeTierButtonTitle(host) {
+      const s = this.activeChallengeByHost[host] || {};
+      if (s.manual_active) {
+        return s.rung === "v2"
+          ? "Switch this manual challenge back to plain v1 (keeps its expiry)"
+          : "Switch this manual challenge to v2: solves must also pass the passive humanity check (keeps its expiry)";
+      }
+      return `Auto challenges have no tier: arm a MANUAL v2 challenge for ${this.challengeTTLLabel} on top of the auto one`;
+    },
+    async toggleChallengeTier(host) {
+      const to = this.challengeTierTarget(host);
+      if (!host || !to) return;
+      const s = this.activeChallengeByHost[host] || {};
+      try {
+        if (s.manual_active) {
+          const res = await this.postJSON("v1/challenge/vhost/rung", { host, rung: to });
+          this.actionMsg = `Challenge on ${res?.host || host} switched ${res?.from || "?"} → ${res?.rung || to} (expiry kept)`;
+        } else {
+          const res = await this.postJSON("v1/challenge/vhost/add", {
+            host, ttl: this.challengeTTL, rung: to, reason: "cfm-admin-ui-tier",
+          });
+          this.actionMsg = `Manual ${res?.rung || to} challenge armed on ${host} for ${res?.ttl || this.challengeTTLLabel}` +
+            (res?.ttl_capped ? " (capped to the 24h customer limit)" : "");
+        }
+        await this.refreshChallengeVhosts();
+      } catch (err) {
+        this.actionMsg = `Tier switch failed for ${host}: ${err}`;
+        console.error("[cfm-admin] challenge tier switch failed", host, err);
+      }
+    },
     async manualUnchallenge(host) {
       if (!host) return;
       try {

@@ -91,6 +91,16 @@ curl -sS -X POST \
   "$CFM_API/api/v1/challenge/vhost/add" | jq .
 ```
 
+### Switch an armed manual challenge between v1 and v2
+
+Keeps the arm's expiry and reason. `409` when only an auto challenge is active
+(it has no tier of its own — arm a manual one with `vhost/add` + `rung`).
+
+```bash
+HOST="example.com"
+curl -sS -X POST "$CFM_API/api/v1/challenge/vhost/rung?host=${HOST}&rung=v2" | jq .
+```
+
 ### Manual challenge OFF
 
 ```bash

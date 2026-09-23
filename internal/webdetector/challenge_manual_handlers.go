@@ -206,6 +206,96 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// POST /api/v1/challenge/vhost/rung
+// Body: { "host": "example.gr", "rung": "v2" }   (also ?host=&rung=)
+//
+// Switches the tier of the ACTIVE manual challenge covering host between v1
+// and v2, keeping its expiry and reason (unlike vhost/add, which re-arms with
+// a fresh TTL). "Covering" is manualRungTarget: the host's own arm, else its
+// apex for a www. host — the same arm the verify gate reads — and the scope
+// check covers that target too. Switching to the current tier is a no-op
+// (changed=false, no audit row). 409 when no manual challenge is active: an auto challenge has
+// no tier of its own — arm a manual one (vhost/add with rung) to pick one.
+// rung is REQUIRED here: on vhost/add an absent rung means "preserve", so a
+// missing one on the endpoint whose only job is changing it is a caller bug.
+// Scope: same as vhost/add (vhostAllowed, fail-closed) — challenge-tier either
+// way, so a scoped token may re-tier its own vhost's arm.
+func (e *Engine) handleChallengeVhostRung(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Host string `json:"host"`
+		Rung string `json:"rung"`
+	}
+	req.Host = r.URL.Query().Get("host")
+	req.Rung = r.URL.Query().Get("rung")
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		var body struct {
+			Host string `json:"host"`
+			Rung string `json:"rung"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+		if body.Host != "" {
+			req.Host = body.Host
+		}
+		if body.Rung != "" {
+			req.Rung = body.Rung
+		}
+	}
+	host := normalizeHost(req.Host)
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+		return
+	}
+	scope := vhostScopeFromContext(r.Context())
+	if !vhostAllowed(host, scope) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+		return
+	}
+	if strings.TrimSpace(req.Rung) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing rung (use v1 or v2)"})
+		return
+	}
+	rung, ok := normalizeRung(req.Rung)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rung: " + req.Rung + " (use v1 or v2)"})
+		return
+	}
+	// Same fail-closed rule as vhost/add: the verify-side rung lookup is
+	// exact+www only, so a wildcard v2 arm would claim a tier it never gates.
+	if rung == "v2" && strings.Contains(host, "*") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rung=v2 is not supported on wildcard hosts yet — arm the concrete vhost(s)"})
+		return
+	}
+	target := e.manualRungTarget(host)
+	if target == "" {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "no active manual challenge on " + host + " — an auto challenge has no tier of its own; arm a manual one (challenge/vhost/add with rung) to pick a tier",
+		})
+		return
+	}
+	// The arm that changes may be the APEX of the requested www host: a
+	// scoped token must hold that host too, or re-tiering www.example.com
+	// would downgrade an operator's v2 arm on example.com (fail-closed).
+	if target != host && !vhostAllowed(target, scope) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "the arm covering " + host + " is on " + target + ", which is not in scope"})
+		return
+	}
+	prev, expires, changed, ok := e.SetManualChallengeRungAs(target, rung, actorFromScope(scope))
+	if !ok {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "the manual challenge on " + target + " expired"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"host":       target,
+		"rung":       rungOrV1(rung),
+		"from":       rungOrV1(prev),
+		"changed":    changed,
+		"expires_at": expires,
+	})
+}
+
 // POST /api/v1/challenge/vhost/remove
 // Body: { "host": "example.gr" }
 // Also accepts: ?host=example.gr

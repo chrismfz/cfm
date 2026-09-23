@@ -72,6 +72,19 @@ type Entry struct {
 	FarmFP  int     `json:"farmfp,omitempty"`  // convicted-fingerprint tell count (>0 → convicted fp seen)
 	Note    string  `json:"note,omitempty"`    // non-decision note (e.g. store_cap_reached)
 	Dropped int     `json:"dropped,omitempty"` // solves dropped at the store cap (note line)
+
+	// Humanity (ChallengeV2 Rung 1) would_v2 metrics
+	// (internal/webdetector/challenge_server.go): a solve that WOULD have been
+	// rejected had a challenge_v2 arm covered it. hs/tells are always present;
+	// the context keys (ptr/ua_family/ua_bot/src, plus cc/asn/provider above)
+	// ride only on lines from daemons that write them — an older line simply
+	// lacks them. Zero/empty when the line is a different signal.
+	HS       int    `json:"hs,omitempty"`        // humanity score
+	Tells    string `json:"tells,omitempty"`     // comma-joined tells that fired
+	PTR      string `json:"ptr,omitempty"`       // client reverse DNS ("invalid" = not a plain token)
+	UAFamily string `json:"ua_family,omitempty"` // uaplausible family ("-" → "")
+	UABot    bool   `json:"ua_bot,omitempty"`    // the UA SELF-DECLARES a bot (unverified)
+	Src      string `json:"src,omitempty"`       // challenge provenance snapshot ("-" = none covered)
 }
 
 // Parse extracts an Entry from one log line. Returns ok=false for a line that
@@ -152,6 +165,18 @@ func Parse(line string) (Entry, bool) {
 			e.Note = v
 		case "dropped":
 			e.Dropped, _ = strconv.Atoi(v)
+		case "hs":
+			e.HS, _ = strconv.Atoi(v)
+		case "tells":
+			e.Tells = v
+		case "ptr":
+			e.PTR = v
+		case "ua_family":
+			e.UAFamily = dash(v)
+		case "ua_bot":
+			e.UABot = v == "1"
+		case "src":
+			e.Src = v // "-" kept: it means "resolved, none covered", not absent
 		}
 	}
 	if !got || e.Signal == "" {
@@ -230,6 +255,34 @@ type Summary struct {
 	// detection_history / the fleet ledger, throttled to 1/hr/IP). Omitted when no
 	// challenge_score line fired in the window. See ChalScoreSummary.
 	ChallengeScore *ChalScoreSummary `json:"challenge_score,omitempty"`
+
+	// Humanity would_v2 breakdown — the solves ChallengeV2 Rung 1 WOULD have
+	// rejected had an arm covered them, split by what challenged them (src) and
+	// who they are. This is the sizing view for any new v2 arm: e.g. how many
+	// would-rejects an auto-vhost v2 arm would add (by_src_kind "vhost") and
+	// who they are (by_provider / by_ptr_domain / ua_bot). Omitted when no
+	// would_v2 line fired in the window. See HumanitySummary.
+	Humanity *HumanitySummary `json:"humanity,omitempty"`
+}
+
+// HumanitySummary aggregates the signal=humanity verdict=would_v2 lines.
+// Everything here is shadow: an unarmed solve that would have failed was
+// cleared as usual. Lines written before the context keys existed carry no
+// src= and count as "(unknown)" in by_src_kind — with_context says how many
+// lines could be attributed at all.
+type HumanitySummary struct {
+	Lines         int  `json:"lines"`
+	DistinctIPs   int  `json:"distinct_ips"`
+	DistinctHosts int  `json:"distinct_hosts"`
+	WithContext   int  `json:"with_context"` // lines carrying src= (attributable)
+	UABot         int  `json:"ua_bot"`       // lines whose UA self-declares a bot (unverified)
+	BySrcKind     []kv `json:"by_src_kind"`  // per line, each distinct kind once: waf/ip/vhost/rule/fp/geo, "-" none, "(unknown)" no src=
+	BySrc         []kv `json:"by_src"`       // full tokens, e.g. vhost:suspicious_vhost, waf:302
+	ByFP          []kv `json:"by_fp"`
+	ByTells       []kv `json:"by_tells"`
+	ByProvider    []kv `json:"by_provider"`
+	ByCountry     []kv `json:"by_country"`
+	ByPTRDomain   []kv `json:"by_ptr_domain"` // last two PTR labels; "(none)" = context line without a PTR
 }
 
 // ChalScoreSummary is the per-IP challenge_score signal's dedicated view. The
@@ -313,6 +366,17 @@ func Summarize(lines []string) Summary {
 	csFPs := map[string]struct{}{}
 	csByFP := map[string]*csFP{}
 	csTop := map[string]*chalOffender{} // key ip; keep the peak-score line per IP
+
+	var hum HumanitySummary
+	humIPs := map[string]struct{}{}
+	humHosts := map[string]struct{}{}
+	humSrcKind := map[string]int{}
+	humSrc := map[string]int{}
+	humFP := map[string]int{}
+	humTells := map[string]int{}
+	humProvider := map[string]int{}
+	humCountry := map[string]int{}
+	humPTR := map[string]int{}
 
 	for _, ln := range lines {
 		e, ok := Parse(ln)
@@ -449,6 +513,56 @@ func Summarize(lines []string) Summary {
 				}
 			}
 		}
+		if e.Signal == "humanity" && e.Verdict == "would_v2" {
+			hum.Lines++
+			if e.IP != "" {
+				humIPs[e.IP] = struct{}{}
+			}
+			if e.Host != "" {
+				humHosts[e.Host] = struct{}{}
+			}
+			if e.UABot {
+				hum.UABot++
+			}
+			fpKey := e.FP
+			if fpKey == "" {
+				fpKey = "(none)"
+			}
+			humFP[fpKey]++
+			if e.Tells != "" {
+				humTells[e.Tells]++
+			}
+			if e.Provider != "" {
+				humProvider[e.Provider]++
+			}
+			if e.CC != "" {
+				humCountry[e.CC]++
+			}
+			switch e.Src {
+			case "":
+				humSrcKind["(unknown)"]++
+			case "-":
+				hum.WithContext++
+				humSrcKind["-"]++
+			default:
+				hum.WithContext++
+				seen := map[string]bool{}
+				for _, tok := range strings.Split(e.Src, ",") {
+					if tok == "" {
+						continue
+					}
+					humSrc[tok]++
+					kind, _, _ := strings.Cut(tok, ":")
+					if !seen[kind] {
+						seen[kind] = true
+						humSrcKind[kind]++
+					}
+				}
+			}
+			if e.Src != "" {
+				humPTR[ptrDomain(e.PTR)]++
+			}
+		}
 		switch e.Verdict {
 		case "would_challenge":
 			s.WouldChallenge++
@@ -477,6 +591,18 @@ func Summarize(lines []string) Summary {
 				byGoodbot[e.GoodBot]++
 			}
 		}
+	}
+	if hum.Lines > 0 {
+		hum.DistinctIPs = len(humIPs)
+		hum.DistinctHosts = len(humHosts)
+		hum.BySrcKind = topKV(humSrcKind, 20)
+		hum.BySrc = topKV(humSrc, 25)
+		hum.ByFP = topKV(humFP, 20)
+		hum.ByTells = topKV(humTells, 20)
+		hum.ByProvider = topKV(humProvider, 20)
+		hum.ByCountry = topKV(humCountry, 20)
+		hum.ByPTRDomain = topKV(humPTR, 20)
+		s.Humanity = &hum
 	}
 	s.UniqueHosts = len(hosts)
 	s.UniqueIPs = len(ips)
@@ -677,4 +803,20 @@ func tailPath() string {
 		}
 	}
 	return "tail"
+}
+
+// ptrDomain reduces a PTR to its last two labels (rate-limited-proxy-66-102-
+// 6-165.google.com → google.com) so fetchers behind one operator group
+// together. "(none)" when the line had no PTR. Grouping only — it is not a
+// public-suffix-aware registrable domain, and it verifies nothing.
+func ptrDomain(ptr string) string {
+	ptr = strings.TrimSuffix(strings.ToLower(ptr), ".")
+	if ptr == "" {
+		return "(none)"
+	}
+	labels := strings.Split(ptr, ".")
+	if len(labels) <= 2 {
+		return ptr
+	}
+	return strings.Join(labels[len(labels)-2:], ".")
 }
