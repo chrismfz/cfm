@@ -10,7 +10,7 @@ import (
 )
 
 // shared resume state for the ngm_auth detector (dir-mode, same as cpanel)
-var ngmAuthState, _ = core.LoadState("")
+var ngmAuthState = core.DefaultState()
 
 func init() {
 	meta.Register(meta.DetectorMeta{

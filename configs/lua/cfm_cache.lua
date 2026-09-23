@@ -535,12 +535,25 @@ end
 -- micro_decision: PURE. Given the vhost policy + request facets, return
 -- (cacheable:bool, bucket:int|nil, reason:string). reason is a compact,
 -- greppable token for the observe header and a future stat key.
-local function micro_decision(pol, method, uri, cookie_header)
+--
+-- auth_header is the request's Authorization value. Any non-empty value means
+-- the origin may answer per-credential (HTTP basic auth — cPanel Directory
+-- Privacy — or a bearer token), and nginx does NOT treat Authorization as a
+-- cache bypass on its own: a stored 200 would be replayed to anonymous
+-- visitors. So a credentialed request is never routed to micro-cache. The
+-- cache locations also carry $cfm_req_auth (a map on $http_authorization:
+-- any non-empty value, "0" included) on proxy_cache_bypass + proxy_no_cache
+-- (the conf-side rail that covers Tier A too); this is the request-side half,
+-- so a credentialed request does not even take the buffered micro path.
+local function micro_decision(pol, method, uri, cookie_header, auth_header)
     if type(pol) ~= "table" or type(pol.micro) ~= "table" or not pol.micro.on then
         return false, nil, "unarmed"
     end
     if method ~= "GET" and method ~= "HEAD" then
         return false, nil, "method"
+    end
+    if type(auth_header) == "string" and auth_header ~= "" then
+        return false, nil, "authorization"
     end
     if micro_path_blocked(uri) then
         return false, nil, "path"
@@ -613,7 +626,8 @@ function _M.observe()
         -- B3 activates proxy_cache. debug-gated like the rest of this stamp.
         if type(p.micro) == "table" and p.micro.on then
             local okc, bkt, why = micro_decision(p, ngx.var.request_method,
-                                                 ngx.var.uri, ngx.var.http_cookie)
+                                                 ngx.var.uri, ngx.var.http_cookie,
+                                                 ngx.var.http_authorization)
             if okc then
                 lbl = lbl .. " microcache=would/" .. tostring(bkt) .. "s"
             else
@@ -668,8 +682,9 @@ end
 --   * scheme != https: the @cfm_micro_<n>s locations live only in the HTTPS
 --     server (B3a). Executing to a missing named location would 500, so a
 --     cleartext request is never routed — it just proceeds uncached.
---   * the §4 request-side rails (armed micro tier, GET/HEAD, not /acctxfer*,
---     anonymous per the cookie allowlist) via micro_decision().
+--   * the §4 request-side rails (armed micro tier, GET/HEAD, no Authorization
+--     header, not /acctxfer*, anonymous per the cookie allowlist) via
+--     micro_decision().
 -- On a cache decision it sets the same two vars static_gate does ($cfm_cache_skip
 -- =0 to open the bypass gate, $cfm_cache_gen for the purge-generation key) and
 -- returns the bucket location; the only-200 rail + response-side rails (Set-Cookie
@@ -681,7 +696,8 @@ function _M.micro_gate()
     if ngx.var.scheme ~= "https" then return nil end
     local p = _M.policy_for(ngx.var.host)
     if not p then return nil end
-    local ok, bucket = micro_decision(p, ngx.var.request_method, ngx.var.uri, ngx.var.http_cookie)
+    local ok, bucket = micro_decision(p, ngx.var.request_method, ngx.var.uri,
+                                      ngx.var.http_cookie, ngx.var.http_authorization)
     if not ok then return nil end
     ngx.var.cfm_cache_skip = "0"
     ngx.var.cfm_cache_gen  = tostring(p.gen or 0)

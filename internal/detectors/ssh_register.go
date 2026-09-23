@@ -12,7 +12,7 @@ import (
 )
 
 // shared state for detectors
-var sshState, _ = core.LoadState("")
+var sshState = core.DefaultState()
 
 // ssh_auth source candidates for srcresolve (first = historical default).
 // Debian aliases sshd.service to ssh.service but journald indexes only the

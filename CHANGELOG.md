@@ -124,6 +124,32 @@ back-filled here — see the git/PR history for that period.
   shared the autoblock evaluator's maps with no lock; overlapping writes are
   a data race, and Go aborts the process on `concurrent map writes`. They
   now take turns.
+- **Running CFM's Go test suite no longer writes a host's live CFM files.**
+  Run as root (on a CFM node, a build host or an agent container), the tests
+  wrote real files under `/var/lib/cfm` and `/etc/cfm`:
+  - the notifier tests saved over the live `/etc/cfm/notify.conf`, dropping
+    its channels, and left `notify.conf.bak-*` files and a
+    `notify.conf.lock`;
+  - they replaced the manual vhost challenges and HTTP/3 overrides;
+  - they added a WAF exclude for `mysite.com`;
+  - they appended a test event to the notifier history;
+  - they rewrote `/var/lib/cfm/lua/cfm_self_ips.lua`, the server's own-IP
+    list that the edge's local-origin bypass trusts, with test data;
+  - they created `detectors.state.d` and the sslcollector cache directory;
+  - on a host that had never applied kernsec, they left a boot-arg rollback
+    snapshot of test values. The first real `cfm kernsec apply` then kept
+    it instead of saving its own, so a later rollback would restore the
+    wrong arguments.
+
+  If you ran the suite as root on a CFM host, check those files (the self-IP
+  list is rewritten at the next daemon start anyway). The tests
+  now use temporary paths. A new guard (`scripts/tests/check_test_isolation.sh`,
+  in `/preflight` too) fails the run if the tests write anything under
+  `/var/lib/cfm`, `/run/cfm`, `/etc/cfm` or `/var/log/cfm`. In CI those
+  directories are first seeded like a packaged node, so a test that
+  rewrites an existing config file is caught as well. On a node where the
+  CFM daemon is running, its own writes to those directories trip the guard
+  too, so run the preflight elsewhere.
 - **The flood protections (SYN/PPS/new-connection rate, connlimit, portflood,
   bad TCP flags) could stop applying to TCP/UDP when ICMP rate limiting is on
   (`ICMP_RATE_LIMIT`, 20 in the reference config), on both engines.** The
@@ -224,6 +250,84 @@ back-filled here — see the git/PR history for that period.
   The real fix is the WordPress update (7.1.2 / 7.0.6 / 6.9.9 … 4.7.37).
   Setting `register_argc_argv = Off` removes the RCE step on hosts whose sites
   cannot be updated.
+- **Site Cache: closed three ways a response meant for one client was cached
+  and served to everyone, and set the anti-stampede lock wait per tier (both
+  tiers).** Tier A (static assets) was affected
+  live on armed vhosts. Tier B was not, because micro-cache enforcement is off
+  by default.
+  - **A request with `Authorization` is never served from, or stored in, the
+    cache.** nginx does not bypass on this header by itself. On a folder
+    protected with HTTP basic auth (cPanel *Directory Privacy*), the owner's
+    logged-in fetch of `/private/logo.png` was stored and then served to
+    anonymous visitors. Every cache location now bypasses and refuses to store
+    when the header is present, including `Authorization: 0`, which a plain
+    nginx predicate would read as false. Micro-cache also refuses to route such
+    a request (`microcache=bypass:authorization` in the debug header).
+  - **The server IP and the scheme the origin is told are now in the cache
+    key.** The origin is chosen by the server IP. On a multi-IP server, a
+    request to IP B with `Host: victim` got B's default vhost and stored it
+    under victim's key. Behind a trusted peer (Cloudflare Flexible SSL), http
+    and https answers also shared one copy.
+    - New key: `g<gen>|<server IP>|<listener scheme>|<scheme told to the
+      origin>://<host><uri>`. Both schemes are needed: :80 and :443 can be
+      answered by different Apache vhosts, and behind a trusted peer the
+      scheme the origin is told can differ from the listener.
+    - Existing entries become unreachable, so each cached URL takes one MISS
+      after the upgrade.
+  - **Forwarded headers are pinned for every request through a cache
+    location**, including static assets of vhosts that are not armed.
+    `X-Forwarded-Host` is set to the real host. `Forwarded`, `X-Original-URL`,
+    `X-Rewrite-URL`, `X-Forwarded-Server/-Port/-Prefix`, `X-Host`, the
+    method-override headers and similar URL-building headers are no longer
+    passed; the full list is in `docs/site-cache-design.md` §4. An app that
+    builds absolute URLs from them (common behind "trusted proxy: \*") could
+    otherwise be made to cache a page that loads the attacker's scripts. The
+    list covers the known headers and is not exhaustive.
+  - **The anti-stampede lock wait is now set per tier.** On a key whose response
+    turns out to be uncacheable (it sets a cookie, is `no-store`, or is a popular
+    404), nginx serves waiters one at a time in 500 ms steps until the wait
+    expires. The default wait was 5 s.
+    - **Tier A: 1 s.** Static files fill fast.
+    - **Tier B: stays at 5 s.** When the wait expires, every waiter goes to the
+      origin. With 1 s, a cold 20-client burst on a 2.5 s page sent all 20 to
+      the origin; with 5 s it sends one. The uncacheable queue on Tier B stays
+      until micro-cache learns to skip keys it has seen fail to cache. That
+      cost is sustained, not only a burst: a site that sets a cookie on every
+      anonymous page (Laravel, PHP sessions) would be served one client per
+      500 ms. So that skip is a prerequisite for turning
+      `MICRO_CACHE_ENFORCE` on.
+
+  All three leaks were reproduced on stock nginx against the old rails and
+  shown closed by the new ones. `check_site_cache_config.sh` now enforces them
+  in every cache location. It also:
+  - pins the whole cache key;
+  - fails if `proxy_ignore_headers` lists `Vary` or `Cache-Control`, or if
+    `proxy_cache_methods` lists POST;
+  - lexes the conf like nginx (inline `*_by_lua_block` bodies as Lua) and
+    assembles real statements, then matches every rail as a directive at the
+    start of a statement. So comment text, a Lua comment or a quoted value no
+    longer satisfies a check, and a one-line location, a directive wrapped
+    over several lines, or `{` on the next line is checked like any other;
+  - fails if the number of locations it parsed, or of cache locations it
+    checked, differs from what the file contains. This also catches a
+    `proxy_cache` outside any location, such as at server level;
+  - pins both rail maps to exactly their two entries. The only-200 map was
+    never pinned before, so an added `"404" ""` would have started storing
+    404s unnoticed;
+  - rejects the usual ways of writing `$cfm_req_auth`, `$cfm_cache_non200` or
+    `$cfm_cache_skip` anywhere else: `set`, `set_by_lua_block`, `geo`,
+    `split_clients`, another map, or an inline-Lua assignment, in any letter
+    case;
+  - requires `set $cfm_cache_skip "1"` in every server block that holds a cache
+    location;
+  - compares the cache locations of the two confs across every zone.
+
+  The edge still cannot see an origin that answers `200` differently by client
+  IP (`Require ip`, IP Blocker), by `Referer`, or by `User-Agent` / `Accept` /
+  `Accept-Language` without sending `Vary`. On a cold key, an attacker can be
+  the first client. Don't arm a vhost whose pages are gated or negotiated this
+  way. Non-200 answers were already never stored, so a cached throttle
+  (`429`/`503`) cannot recur.
 
 ### Added
 - **A warning when armed country/ASN policies can't fully work on a node.**

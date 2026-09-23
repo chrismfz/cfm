@@ -83,7 +83,25 @@ jobs:
       - name: go vet
         run: go vet ./...
       - run: go build ./...
+      # The Go tests must never write CFM's live system dirs (they used to:
+      # manual challenges, WAF excludes, the notifier history and live
+      # notify.conf, kernsec rollback snapshots — see check_test_isolation.sh).
+      # The runner isn't root, so such a write would fail silently and the test
+      # still pass; creating the dirs writable for the runner makes it succeed,
+      # and seeding them like a packaged node exposes a test that writes only
+      # to a file that already exists. The guard then sees either.
+      - name: Create CFM's system dirs, writable, for the test-isolation guard
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" /var/lib/cfm /run/cfm /etc/cfm /var/log/cfm
+      - name: Seed them like a packaged node (conffiles, Lua, logs)
+        run: ./scripts/tests/ci_seed_cfm_dirs.sh
+      - id: arm
+        run: ./scripts/tests/check_test_isolation.sh arm
       - run: go test -race ./...
+      # Also on a red test run (a failing test can still have written the live
+      # dirs), but only once arm has recorded them.
+      - name: Fail if the Go tests wrote CFM's live system dirs
+        if: ${{ !cancelled() && steps.arm.outcome == 'success' }}
+        run: ./scripts/tests/check_test_isolation.sh verify
 
   # CHANGELOG hygiene — a separate, tiny job (own checkout so it can diff the PR
   # against its base). Two guards: the CHANGELOG structure stays stampable, and

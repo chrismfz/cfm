@@ -46,9 +46,14 @@ type Collector struct {
 	certCache map[string]cachedCert // normalized host -> cached cert
 }
 
+// defaultCacheDir is New's CacheDir when the Config leaves it empty (and the
+// daemon's real one). A var so a test binary can point it at a temp dir:
+// New creates it, and tests build collectors from an empty Config.
+var defaultCacheDir = "/var/lib/cfm/sslcollector"
+
 func New(cfg Config) *Collector {
 	if cfg.CacheDir == "" {
-		cfg.CacheDir = "/var/lib/cfm/sslcollector"
+		cfg.CacheDir = defaultCacheDir
 	}
 	if cfg.StatEvery <= 0 {
 		cfg.StatEvery = 60 * time.Second
