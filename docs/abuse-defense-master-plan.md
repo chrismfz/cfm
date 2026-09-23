@@ -77,7 +77,7 @@ reviewed PR.
 | 9 | `under_attack` I1 state machine + notify | `under_attack.go` | detect-only (DRYRUN) | alarm value real ("challenge defeated" as an alert) | **KEEP as the alarm.** I1b read-surfaces optional. |
 | 10 | `under_attack` campaign fingerprinter I2 | `under_attack_fingerprint.go` | shadow | no consumer; I3–I5 never built | **FROZEN — operator-ratified 2026-09-22.** Code STAYS as-is (this is a freeze, not a retire: unlike `cfm_pcw` its mechanism is sound, it simply has no consumer). No new predicates, no weight tuning, no sub-signals, no I3–I5. E1–E3 superseded its enforcement path; revisit ONLY if the draft-rule idea (I3) is deliberately picked up, and then with a §4-D3 exit contract. |
 | 11 | `ua_family=` solve-log corpus | `challenge_server.go` | log-first | builds the fp↔UA corpus | **KEEP.** Feeds E2 and the future JA4↔UA coherence tell. |
-| 12 | Humanity scorer / would_v2 Rung-1 | `challenge_v2.go` | **BUILT + ENFORCING** since 2026-09-19 (E3) | positive-only tells; `hs=`/`tells=`/`sig=`/`v2=` per solve | **KEEP.** Teeth only under an operator arm (D5a). The knobs are `CHALLENGE_V2_PASSIVE`/`_FAIL_SCORE`/`_DEBUG` — the old `HUMANITY_MIN_OBS`/`MINORITY_PCT` keys were never read by any code and are still orphans in live `/etc/cfm/detectors.conf`: **operator cleanup, still outstanding.** |
+| 12 | Humanity scorer / would_v2 Rung-1 | `challenge_v2.go` | **BUILT + ENFORCING** since 2026-09-19 (E3) | positive-only tells; `hs=`/`tells=`/`sig=`/`v2=` per solve | **KEEP.** Teeth only under an operator arm (D5a). The knobs are `CHALLENGE_V2_PASSIVE`/`_FAIL_SCORE`/`_DEBUG`/`_HW_TELLS` (the last a kill switch for the corpus-measured device-claim tells, 2026-09-23) — the old `HUMANITY_MIN_OBS`/`MINORITY_PCT` keys were never read by any code and are still orphans in live `/etc/cfm/detectors.conf`: **operator cleanup, still outstanding.** |
 
 Fleet-config cleanup that falls out of the table: remove the orphan
 `HUMANITY_*`/`MINORITY_PCT` keys (row 12); leave `UNDER_ATTACK*`,
@@ -463,7 +463,7 @@ already opened.
         database (a floored-but-no-longer-armed client just gets plain PoW).
       - DONE 2026-09-23 (enforcement): Google's proxy (PTR
         `google-proxy-*.google.com`, AS15169, fp `c41a0f3f`/`ba6b4aad`) is
-        Google-Read-Aloud. It scores 140 (`sw_renderer,touch_lie,no_input`)
+        Google-Read-Aloud. It scores 140 (`sw_renderer,touch_lie,no_input`; since 2026-09-23 a 16+-thread fetcher also lists `mobile_hw_lie`, same 140 — the device-claim group counts once)
         and WOULD have been rejected — 73 solves from 48 rotating IPs on
         19 vhosts fleet-wide, 2026-09-16..23, every scored one at 140
         (psixokinisi.gr, smart-tech.gr, e-vafeiadis.gr, vitolighting.com,

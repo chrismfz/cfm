@@ -797,14 +797,14 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// "scored clean, passed"). An absent/malformed payload scores like an
 		// empty report (only UA-borne openers can fire) — absence never
 		// convicts (D5b).
-		v2On, v2Fail, v2Debug, v2Shadow := challengeV2Settings()
+		v2On, v2Fail, v2Debug, v2Shadow, v2HW := challengeV2SettingsAll()
 		hs, hsTells, hsNoPayload, v2Grain := 0, "", false, ""
 		var hsSig *humanitySignals
 		if v2On {
 			sig := parseHumanityBody(humanityBody)
 			hsNoPayload = sig == nil
 			hsSig = sig
-			score, tells := scoreHumanity(sig, ua)
+			score, tells := scoreHumanityOpts(sig, ua, v2HW)
 			hs, hsTells = score, strings.Join(tells, ",")
 			if v2Debug {
 				w.Header().Set("X-CFM-HS", strconv.Itoa(score))
@@ -899,7 +899,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// verdict and CHALLENGE_GOODBOT_EXEMPT knob. It typically got
 				// here because no verdict existed when the challenge was served
 				// (e.g. Google-Read-Aloud's rotating, first-seen fetcher IPs,
-				// which score sw_renderer,touch_lie,no_input = 140), so this
+				// which score sw_renderer,touch_lie,no_input = 140 — on a 16+
+				// thread fetcher mobile_hw_lie is listed too, same score: the
+				// device-claim group counts once), so this
 				// may forward-confirm inline — bounded, and only on this
 				// about-to-reject path. The solve then takes the normal
 				// solved path, marked v2_waived=<name>.

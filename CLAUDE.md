@@ -558,7 +558,13 @@ evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
 `v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
 so a passed-under-arm solve is greppable, not mistaken for a plain v1 one;
 `sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` is the report AS
-REPORTED — mv/hc/dm/dpr/raf corpus-only and scored by nothing, ptr/tch/key
+REPORTED — mv/dm/dpr/raf corpus-only and scored by nothing, hc feeds the
+corpus-measured mobile_hw_lie/mac_hw_lie tells (2026-09-23,
+`docs/traffic-classifier.md` "Rung-1 hardware tells"; scored as ONE
+device-claim group with touch_lie — its max, once — so a single spoofed
+device never rejects alone; no core-count tell for a Windows/Linux UA — an
+RDS/VDI host is indistinguishable from a farm box; kill switch
+`CHALLENGE_V2_HW_TELLS`), ptr/tch/key
 also the no_input amplifier's inputs; absent keys = not reported, never a
 fabricated zero; since 2026-09-22 every solve AND reject line also carries
 `cc=`/`asn=`/`asn_name=`/`ptr=`, resolved once at verify — country/ASN from a

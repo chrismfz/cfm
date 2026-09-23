@@ -639,6 +639,104 @@ convicts.** Some are **positive-only** (fire → suspect; absent → proves noth
 Weighting rule: server-observed (JA4/JA4H) ≫ hard-to-fake render
 (WebGL/canvas/audio) > behavioral entropy > trivially-spoofable JS flags.
 
+#### Rung-1 hardware tells (2026-09-23) — written from the corpus, not from memory
+
+The retained `sig=` readings were collected exactly so a tell could be
+measured before it scores. The first measurement showed the passive rung was
+nearly toothless against the farms actually solving at volume: at the default
+`FAIL_SCORE = 100` only **0.1%** of farm solves would have been rejected — they
+sit just under the bar (`sw_renderer,no_input` = 90) or are fully clean.
+
+**Corpus.** 13 299 `challenge_solved` rows carrying `sig` (7 nodes, ~24 h,
+2026-09-22 20:00 → 09-23 19:00 UTC, pulled with `detection_history`). Labels
+built INDEPENDENTLY of any tell:
+
+- **H — likely human (2 031, 195 vhosts):** GR/CY source, consumer ISP (not a
+  datacenter ASN), UA not self-declared bot.
+- **F — farm (6 734):** non-GR/CY source, a convicted fingerprint
+  (`c28caa00` / `95070673` / `ba6b4aad`), on a farm-shaped vhost (≥30 solves,
+  ≥10 countries, ~1 solve per IP, <20% GR). A fingerprint alone is NOT the
+  label — `c28caa00` and `ba6b4aad` also carry Greek humans.
+
+**Adopted** — device-claim contradictions (the `touch_lie` class, so
+positive evidence under D5b; an ABSENT reading never fires). A core count
+counts only where it is IMPOSSIBLE for the claimed device:
+
+| Tell | Rule | H | F | Weight |
+|---|---|---|---|---|
+| `mobile_hw_lie` | phone/tablet UA **and** `hardwareConcurrency ≥ 16` (human mobiles report 4-10) | 0 / 1 217 mobile | 42.3% | 50 |
+| `mac_hw_lie` | Mac UA **and** `hardwareConcurrency ≥ 64` (human Macs in H topped out at 16) | 0 / 37 Mac | 15% | 50 |
+
+**The device-claim group.** `touch_lie`, `mobile_hw_lie` and `mac_hw_lie` all
+say "this is not the device the UA claims", and one spoof trips several at
+once: DevTools phone emulation or a UA switcher on a 16-thread desktop fires
+both `touch_lie` and `mobile_hw_lie`. Summed, ONE exotic setup would reject,
+which D5b forbids. So each member that fires is LISTED in `tells=`, but the
+group adds only its strongest weight to `hs`, once. All three weigh 50, so
+Google-Read-Aloud still scores exactly 140. A rejection needs independent
+evidence from outside the group; in the corpus every farm solve caught
+through it also carried `sw_renderer`.
+
+**No core-count tell for Windows/Linux UAs, however high** (second
+adversarial-review finding). A human on an RDS/VDI session host, the very
+user D5b's "sw_renderer alone passes" rule protects, reports the server's
+64+ logical processors together with a software renderer. That is identical
+to a farm box, so no weight could separate them. An earlier `hc_extreme`
+(any UA, ≥ 64) was dropped for this. It cost 2.6 points of farm catch and the
+whole CN-farm catch (Windows, hc 64), which is exactly that profile.
+
+**Result**, simulated with the exact scorer (it reproduces the stored `hs` of
+all 13 299 rows):
+
+- farm fail rate **0.1% → 46.0%**; gastronom.hk 97%, kialasiatrika.gr 99.6%,
+  vitolighting.com 60%, tzampalampa.gr 100%;
+- humans **0% → 0%**;
+- unlabelled solves 9.2% → 26.0%, the newly failing ones farm-shaped
+  (1.01 solves/IP, 85% convicted fingerprints, foreign sources on Greek shops).
+
+**Kill switch:** `[webdetector] CHALLENGE_V2_HW_TELLS` (default 1), read in the
+same settings snapshot as the other v2 knobs.
+
+**Measured, not adopted: `webkit_lie`** (an iPhone/iPad UA reporting
+`deviceMemory`, a Blink-only API). It fired on 0 of 321 human iOS solves and
+on 21% of farm solves, but only ever co-fired with `mobile_hw_lie`, so it
+added no catch. Under the EU DMA a non-WebKit iOS browser may also
+legitimately report it.
+
+**Rejected** — each fired on real humans in H:
+
+- mobile UA + `dpr = 1` — cheap Android tablets (Lenovo TB-X306) really are dpr 1;
+- `hardwareConcurrency ≥ 32` — real 32-48-thread workstations on OTE/Vodafone
+  (and any Windows/Linux core count at all — the RDS/VDI host, above);
+- Mac UA + `dpr = 1` — old Intel Macs / external monitors;
+- Chrome major lagging (≤ 151 when 153 was current) — 14% of humans;
+- `raf` ≈ 16.7 ms (a perfect 60 Hz) — 84% of one farm, but 17% of humans;
+- lowering `FAIL_SCORE` to 90 — clean on H, but H holds no RDP/VDI users, the
+  very population D5b's `sw_renderer`-alone rule protects.
+
+**Residuals (honest limits).**
+
+- **Over-bound `hc` is dropped, not clamped.** A client reporting more than
+  1 000 000 threads escapes both tells. Clamping would write a value the
+  browser never sent into `sig=`, which the corpus must keep AS REPORTED, and
+  it would close nothing: a non-integer `hc` fails the whole payload parse
+  (`hs=-`), and a farm can simply report a plausible count. It is the same
+  client-authored residual as the next point.
+- **One farm is untouched:** techking.gr, 3 235 solves on `c28caa00`, 0.4% after
+  the change. It has a real GPU and plausible hardware (hc 12, dm 16). What
+  differs is either shared with humans (dpr 1, lagging Chrome, 60 Hz rAF) or
+  an ABSENCE (0% pointer movement vs 30% of humans), which D5b forbids from
+  convicting. The levers are Rung 2 or a non-rung one; not a fingerprint
+  policy, because `c28caa00` carries humans too.
+- **Client-authored:** a farm can fix these values once they bite, the
+  standing D5b cost-lever residual.
+- **Where they bite:** only under a v2 arm (D5a), but that already includes
+  every WAF challenge-tier rule, which is `challenge_v2` by default. Those
+  per-(ip,host) marks are strict (no good-bot waiver), so the tells take
+  effect fleet-wide on upgrade. H was not sampled from WAF-mark traffic
+  specifically. Elsewhere the tells show on the `would_v2` line; re-run this
+  measurement on the `would_v2` / `src=` data before arming v2 anywhere new.
+
 #### Observability contract (shadow-first; reuses existing logs — no new log, per CLAUDE.md §5)
 
 Rung-1 writes the SAME surfaces `challenge_score` uses (open-question #4
@@ -672,7 +770,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   client isn't a crawler. Finally `sig=` carries the report AS REPORTED —
   `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
   `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
-  browser did not report. `mv`/`hc`/`dm`/`dpr`/`raf` are scored by nothing;
+  browser did not report. `mv`/`dm`/`dpr`/`raf` are scored by nothing; `hc` feeds
+  `mobile_hw_lie`/`mac_hw_lie` ("Rung-1 hardware tells" above);
   `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, so logging
   them makes that tell auditable. `result=v2_reject` lines carry `sig=` too.
   A rejected solve is never published as a solved event (it cleared nothing);

@@ -48,6 +48,8 @@ package webdetector
 //   CHALLENGE_V2_PASSIVE    (default 1) master for scoring + the armed gate
 //   CHALLENGE_V2_FAIL_SCORE (default 100) the fail threshold
 //   CHALLENGE_V2_DEBUG      (default 0) X-CFM-HS response header
+//   CHALLENGE_V2_HW_TELLS   (default 1) kill switch for mobile_hw_lie / mac_hw_lie
+//                           (ConfigureChallengeV2HWTells)
 //
 // HONEST LIMITS (documented residuals, not oversights):
 //   - The report is CLIENT-authored. A signal-aware farm can strip the body
@@ -127,13 +129,16 @@ type humanitySignals struct {
 	PTR *int   `json:"ptr"` // pointer-move events observed while solving
 	TCH *int   `json:"tch"` // touchstart events observed
 	KEY *int   `json:"key"` // keydown events observed
-	// The five below are RETAINED BUT NEVER SCORED: they are logged verbatim
-	// (sig= on the solve line, payload.sig on the history row) to build the
-	// corpus from real traffic, so a future tell can be written from measured
-	// distributions rather than from memory. They were pointer-less and
-	// silently discarded until 2026-09-22 — a `dm` absent on every Firefox
-	// then read as a reported 0.0, which is exactly the absence/zero
-	// confusion the pointer convention above exists to prevent.
+	// The five below are RETAINED readings: logged verbatim (sig= on the
+	// solve line, payload.sig on the history row) to build the corpus from
+	// real traffic, so a tell is written from measured distributions rather
+	// than from memory. Since 2026-09-23 HC feeds two tells written from that
+	// corpus (mobile_hw_lie, mac_hw_lie — see the weights below); mv/dm/dpr/raf
+	// are still scored by nothing. They
+	// were pointer-less and silently discarded until 2026-09-22 — a `dm`
+	// absent on every Firefox then read as a reported 0.0, which is exactly
+	// the absence/zero confusion the pointer convention above exists to
+	// prevent, and which these tells depend on (an ABSENT hc is never a lie).
 	MV  *float64 `json:"mv"`  // accumulated |pointer movement| in px (page always sends it; 0 = really no movement)
 	HC  *int     `json:"hc"`  // hardwareConcurrency
 	DM  *float64 `json:"dm"`  // deviceMemory — Chrome-only, genuinely absent on Firefox/Safari
@@ -181,7 +186,43 @@ const (
 	tellTouchLie   = 50  // claims a phone, reports zero touch points: the report contradicts the claim
 	tellOuterZero  = 40  // reports outerWidth==outerHeight==0: no visible window
 	ampNoInput     = 30  // zero pointer+touch+key events: AMPLIFIER only, never opens (D5b)
+
+	// Device-claim contradictions written from the 2026-09-23 fleet corpus
+	// (13 299 solves with sig, 7 nodes; docs/traffic-classifier.md, "Rung-1
+	// hardware tells"). Labels independent of the tells: ~2 000 likely-human
+	// solves (GR/CY consumer ISPs, non-bot UA, 195 vhosts) vs ~6 700 farm
+	// solves (convicted fingerprint, non-GR, farm-shaped vhost). Each fired on
+	// ZERO human solves. Weighted like touch_lie (the same class: the report
+	// contradicts the claimed device), and scored as ONE group with it.
+	tellMobileHWLie = 50 // UA claims a phone/tablet but hardwareConcurrency >= mobileHWLieMinCores — humans' mobiles report 4-10: 0/1 217 human, 42% of farm
+	tellMacHWLie    = 50 // UA claims a Mac but hardwareConcurrency >= macHWLieMinCores — no Mac reports that many threads
+
+	mobileHWLieMinCores = 16
+	macHWLieMinCores    = 64
 )
+
+// THE DEVICE-CLAIM GROUP. touch_lie, mobile_hw_lie and mac_hw_lie all say one
+// thing — "this is not the device the UA claims" — and one spoof trips several
+// at once (DevTools phone emulation or a UA switcher on a 16-thread desktop
+// reports zero touch points AND desktop core counts). Summed, a single exotic
+// setup would reject on ONE fact, which D5b forbids. So every member that
+// fires is still LISTED in tells (the log shows what was seen), but the group
+// adds only its STRONGEST weight to hs, once. A rejection therefore needs
+// evidence from outside the group. In the corpus every farm solve caught
+// through the group also carried sw_renderer, so grouping cost no catch rate.
+//
+// A core count is only a contradiction where it is IMPOSSIBLE for the claimed
+// device: a phone/tablet at 16+, a Mac at 64+. It is deliberately NOT one for
+// a Windows/Linux UA, however high: a human on an RDS/VDI session host (the
+// very user D5b's "sw_renderer alone passes" rule protects) reports the
+// server's 64+ logical processors together with a software renderer —
+// identical to a farm box, so no weight could separate them (review finding;
+// it cost 2.6 points of farm catch, 48.6% → 46.0%).
+//
+// Measured and NOT adopted: an iOS UA reporting deviceMemory (Blink-only). It
+// fired on 0 humans, but in the corpus it only ever co-fired with
+// mobile_hw_lie, so it added nothing — and under the EU DMA a Blink-engine
+// iOS browser may legitimately report it.
 
 const defaultV2FailScore = 100
 
@@ -191,6 +232,14 @@ type challengeV2State struct {
 	failScore   int
 	debug       bool
 	shadowLines bool // emit would_v2 lines to the abuse-shadow log (rides ABUSE_SHADOW)
+	// hwTells gates the device-claim hardware tells (mobile_hw_lie,
+	// mac_hw_lie): CHALLENGE_V2_HW_TELLS, default on. A kill switch, not a
+	// burn-in flag — the tells were measured before shipping — kept because
+	// they bite fleet-wide the moment the binary lands (every WAF
+	// challenge-tier rule is challenge_v2 by default, and those marks are
+	// strict). Off, the two tells are not evaluated (touch_lie is
+	// unaffected). Read in the same snapshot as the other knobs.
+	hwTells bool
 	// hostArmed reports whether a v2-tier VHOST arm covers this host (the
 	// engine's manual challenge store, apex→www expansion included — arm
 	// surfaces slice A). Wired at engine start; nil = no vhost arms (tests /
@@ -208,7 +257,15 @@ type challengeV2State struct {
 	goodBot func(ctx context.Context, ip, ptr string) (name, miss string)
 }
 
-var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore}
+var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true}
+
+// ConfigureChallengeV2HWTells applies [webdetector] CHALLENGE_V2_HW_TELLS
+// (every reload; see challengeV2State.hwTells).
+func ConfigureChallengeV2HWTells(on bool) {
+	challengeV2.mu.Lock()
+	challengeV2.hwTells = on
+	challengeV2.mu.Unlock()
+}
 
 // ── Per-(ip,host) ChallengeV2 marks (arm-surfaces slice B) ──────────────────
 //
@@ -434,9 +491,17 @@ func ConfigureChallengeV2(enabled bool, failScore int, debug, shadowLines bool) 
 }
 
 func challengeV2Settings() (enabled bool, failScore int, debug, shadowLines bool) {
+	enabled, failScore, debug, shadowLines, _ = challengeV2SettingsAll()
+	return
+}
+
+// challengeV2SettingsAll is challengeV2Settings plus the hwTells kill switch,
+// all from ONE snapshot — the verify path reads it once so a reload racing a
+// solve can never score it with a mix of old and new knobs.
+func challengeV2SettingsAll() (enabled bool, failScore int, debug, shadowLines, hwTells bool) {
 	challengeV2.mu.RLock()
 	defer challengeV2.mu.RUnlock()
-	return challengeV2.enabled, challengeV2.failScore, challengeV2.debug, challengeV2.shadowLines
+	return challengeV2.enabled, challengeV2.failScore, challengeV2.debug, challengeV2.shadowLines, challengeV2.hwTells
 }
 
 // readVerifyBody consumes and closes the verify request body under the
@@ -487,15 +552,19 @@ func parseHumanityBody(b []byte) *humanitySignals {
 // log line and the history row can only ever carry plausible numbers. It runs
 // at the ONE parse choke point, before anything reads the payload.
 //
-// SCORING IS UNCHANGED, and that is load-bearing rather than incidental. The
-// scorer's own inputs (wd/glr/mtp/ow/oh) are not touched at all. PTR/TCH/KEY
-// ARE scorer inputs — the no_input amplifier — but a bound here still cannot
-// move a verdict: no_input needs all three REPORTED and all three exactly 0,
-// dropping only ever produces absent (never a fabricated zero — D5b), and a
-// count that fails these bounds is non-zero anyway, so it already failed the
-// `== 0` test before the drop. Net effect on every possible payload: the
-// amplifier fires exactly where it fired before. A bound must never become a
-// back-door tell.
+// A bound must never become a back-door TELL. The scorer's own inputs
+// (wd/glr/mtp/ow/oh) are not touched at all. PTR/TCH/KEY feed the no_input
+// amplifier, which needs all three REPORTED and exactly 0: dropping only ever
+// produces absent (never a fabricated zero — D5b), and a count failing these
+// bounds is non-zero anyway, so it already failed `== 0` before the drop.
+// HC feeds mobile_hw_lie / mac_hw_lie (>= 16 / >= 64): a negative count could
+// not reach either bar, and an over-bound one (> sigMaxInt) is dropped to
+// absent, so it escapes both — a knowing residual, NOT closed by clamping:
+// a clamp would write a value the browser never reported into sig= (the
+// corpus must stay AS REPORTED), and it would close nothing, since a client
+// can equally send a non-integer hc (the whole payload then fails to parse,
+// hs=-), strip the body, or simply report a plausible count. All the same D5b
+// client-authored residual.
 func (s *humanitySignals) sanitize() {
 	dropInt := func(p **int) {
 		if *p != nil && (**p < 0 || **p > sigMaxInt) {
@@ -523,9 +592,16 @@ func (s *humanitySignals) sanitize() {
 	dropFloat(&s.RAF)
 }
 
-// uaClaimsMobile reports whether the UA presents itself as a touch device.
-// Used only for the touch_lie tell — a REPORTED maxTouchPoints of zero under a
-// mobile claim is a positive contradiction, not an absence.
+// uaClaimsMobile reports whether the UA presents itself as a touch device —
+// the claim the touch_lie and mobile_hw_lie tells hold the report against (a
+// REPORTED maxTouchPoints of zero, or desktop-class cores, under a mobile
+// claim is a positive contradiction, not an absence).
+// uaClaimsMac reports a desktop Mac UA ("Macintosh"; iPadOS in desktop mode
+// sends it too, and an iPad never reports 64 threads either).
+func uaClaimsMac(ua string) bool {
+	return strings.Contains(ua, "Macintosh")
+}
+
 func uaClaimsMobile(ua string) bool {
 	return strings.Contains(ua, "Android") ||
 		strings.Contains(ua, "iPhone") ||
@@ -540,9 +616,23 @@ var softwareRendererMarks = []string{
 // the UA-borne opener can then fire, and an all-absent report scores 0 — the
 // D5b invariant the tests pin.
 func scoreHumanity(sig *humanitySignals, ua string) (hs int, tells []string) {
+	return scoreHumanityOpts(sig, ua, true)
+}
+
+// scoreHumanityOpts is scoreHumanity with the CHALLENGE_V2_HW_TELLS kill switch
+// passed in (from the verify path's single settings snapshot), so the scorer
+// itself stays pure — no global read.
+func scoreHumanityOpts(sig *humanitySignals, ua string, hwTells bool) (hs int, tells []string) {
 	add := func(name string, w int) {
 		hs += w
 		tells = append(tells, name)
+	}
+	claimMax := 0
+	claim := func(name string, w int) {
+		tells = append(tells, name)
+		if w > claimMax {
+			claimMax = w
+		}
 	}
 
 	// UA-borne opener: needs no payload. uaplausible deliberately declines to
@@ -563,12 +653,25 @@ func scoreHumanity(sig *humanitySignals, ua string) (hs int, tells []string) {
 				}
 			}
 		}
+		// Device-claim group members (see THE DEVICE-CLAIM GROUP): listed
+		// as they fire, scored once at the group's strongest weight below.
 		if sig.MTP != nil && *sig.MTP == 0 && uaClaimsMobile(ua) {
-			add("touch_lie", tellTouchLie)
+			claim("touch_lie", tellTouchLie)
 		}
 		if sig.OW != nil && sig.OH != nil && *sig.OW == 0 && *sig.OH == 0 {
 			add("outer_zero", tellOuterZero)
 		}
+		// Hardware members need the reading REPORTED: an absent hc is never
+		// a lie (D5b). Kill switch: CHALLENGE_V2_HW_TELLS.
+		if sig.HC != nil && hwTells {
+			if *sig.HC >= mobileHWLieMinCores && uaClaimsMobile(ua) {
+				claim("mobile_hw_lie", tellMobileHWLie)
+			}
+			if *sig.HC >= macHWLieMinCores && uaClaimsMac(ua) {
+				claim("mac_hw_lie", tellMacHWLie)
+			}
+		}
+		hs += claimMax
 		// Amplifier ONLY (D5b): zero interaction can be a keyboard-less kiosk or
 		// a fast tab-switch — it never opens a score, it only corroborates one.
 		if hs > 0 &&
@@ -661,11 +764,12 @@ func (s *humanitySignals) sigFields() []sigField {
 // — the Rung-1 report as REPORTED, before any scoring. Empty when nothing was
 // retained, so a no-payload solve adds no field.
 //
-// Precisely: mv/hc/dm/dpr/raf are scored by NOTHING — they are corpus only,
+// Precisely: mv/dm/dpr/raf are scored by NOTHING — they are corpus only,
 // logged so a future tell can be written from measured distributions instead
-// of from memory. ptr/tch/key ARE scorer inputs (the no_input amplifier, and
-// only as an all-three-zero combination); logging them is what makes that
-// amplifier auditable rather than opaque. Either way the line shows the raw
+// of from memory. hc feeds mobile_hw_lie / mac_hw_lie (written exactly that
+// way, from this corpus), and ptr/tch/key feed the no_input amplifier (only
+// as an all-three-zero combination); logging them is what makes those tells
+// auditable rather than opaque. Either way the line shows the raw
 // reading, never a scored derivative — and "the client never moved the mouse"
 // is answerable from the log at all, which it was not: mv was parsed and
 // thrown away despite a comment claiming it was recorded.
