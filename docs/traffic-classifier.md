@@ -653,8 +653,14 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   and this solve passed it" from "the tier never fired": without it a clean
   armed solve reads exactly like a plain v1 one. `grep 'v2='` is the burn-in
   question "is my newly-armed tier actually covering traffic?"; `grep
-  v2_reject` is "did it bite". Finally `sig=` carries the report AS REPORTED
-  — `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
+  v2_reject` is "did it bite"; `grep v2_waived=` is "which failing solves did
+  it let through as an FCrDNS-verified good bot" (`CHALLENGE_GOODBOT_EXEMPT`;
+  e.g. Google-Read-Aloud, hs=140 from rotating first-seen Google IPs — the
+  gate forward-confirms a crawler-looking PTR inline, bounded, on the reject
+  path only). Only under a geo or vhost arm, the grains the decision-time
+  exemption already softens; a fingerprint policy or a traffic-rule/WAF mark
+  stays strict. The history row carries it as `v2_waived`. Finally `sig=`
+  carries the report AS REPORTED — `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
   `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
   browser did not report. `mv`/`hc`/`dm`/`dpr`/`raf` are scored by nothing;
   `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, so logging

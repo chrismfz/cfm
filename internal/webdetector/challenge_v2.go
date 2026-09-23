@@ -76,8 +76,31 @@ package webdetector
 //     cfm.lua; (b) an operator who re-binds CHALLENGE_HTTP_LISTEN off
 //     localhost re-opens the direct-client path and with it every
 //     client-authored-header caveat — don't.
+//   - An FCrDNS-verified good bot is WAIVED at the gate (v2_waived=<name>),
+//     under the same CHALLENGE_GOODBOT_EXEMPT that exempts it from the
+//     challenge at decision time — and ONLY under the grains that exemption
+//     already softens (challengeV2Waivable: geo, vhost). It typically reaches
+//     the gate there because no verdict existed when the challenge was served
+//     — the norm for Google-Read-Aloud's rotating first-seen IPs (a challenge
+//     source that is never softened, e.g. a plain WAF challenge tier, is the
+//     other way in; the waiver then just restores an unarmed host's
+//     outcome) — so the waiver
+//     may forward-confirm inline, bounded (verifiedBeforeReject): only for a
+//     solve about to be rejected, and only when the solve's PTR is already
+//     known and ends in a crawler's domain, so the lookup goes to the
+//     crawler operator's own DNS, never a zone the client controls. FCrDNS
+//     can't be forged, but "google" covers Google's user-driven fetchers
+//     (Read Aloud, Translate): a client routed through one passes a geo or
+//     vhost arm, exactly as it already skips those challenges once verified.
+//     Accepted — the same trust the decision path extends. A fingerprint
+//     policy or a traffic-rule / WAF mark stays strict: the decision path
+//     never softens those for good bots, and traffic rules deliberately
+//     distrust the generic "google" name (verifiedBotForRules). A verify that
+//     can't complete (slots busy, resolver down, PTR not resolved yet)
+//     rejects as before (retry-able, D5c).
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -174,6 +197,16 @@ type challengeV2State struct {
 	// surfaces slice A). Wired at engine start; nil = no vhost arms (tests /
 	// pre-wire), fail-open like the geo resolver.
 	hostArmed func(host string) bool
+	// goodBot names the FCrDNS-verified good bot behind a solving IP ("" =
+	// none/unknown), for the waiver in the D5 gate: a failing solve under an
+	// arm is NOT rejected when the client is a verified crawler, the same
+	// exemption CHALLENGE_GOODBOT_EXEMPT already grants at decision time.
+	// Called ONLY on the reject path, for a waivable grain
+	// (challengeV2Waivable), where it may block (bounded) on an inline
+	// forward-confirm. Wired from NewEngine to the bridge's verdict cache
+	// (verifiedBeforeReject); nil = no waiver (exemption off, or pre-wire) —
+	// the gate then rejects as it always did.
+	goodBot func(ctx context.Context, ip, ptr string) string
 }
 
 var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore}
@@ -300,6 +333,30 @@ func SetChallengeV2HostArmed(fn func(host string) bool) {
 	challengeV2.mu.Unlock()
 }
 
+// SetChallengeV2GoodBot wires the good-bot waiver the D5 gate consults before
+// rejecting (see goodBot on challengeV2State). Same lifecycle as
+// SetChallengeV2HostArmed: set from NewEngine on every engine build, nil when
+// CHALLENGE_GOODBOT_EXEMPT is off.
+func SetChallengeV2GoodBot(fn func(ctx context.Context, ip, ptr string) string) {
+	challengeV2.mu.Lock()
+	challengeV2.goodBot = fn
+	challengeV2.mu.Unlock()
+}
+
+// challengeV2GoodBot returns the verified good-bot name that waives a
+// rejection for ip, or "" (unwired, unknown, or not a verified bot). ptr is the
+// solve's PTR as already resolved ("" = not known yet). May block (bounded):
+// call it only for a solve about to be rejected.
+func challengeV2GoodBot(ctx context.Context, ip, ptr string) string {
+	challengeV2.mu.RLock()
+	fn := challengeV2.goodBot
+	challengeV2.mu.RUnlock()
+	if fn == nil || ip == "" {
+		return ""
+	}
+	return fn(ctx, ip, ptr)
+}
+
 // challengeV2HostArmed answers "does a v2 vhost arm cover this host" for the
 // verify gate. false when unwired or host is empty (fail-open — D5a: teeth
 // only where an operator explicitly armed).
@@ -356,6 +413,22 @@ func challengeV2ArmGrain(fpID, ip, host string) string {
 		return v2GrainMark
 	}
 	return ""
+}
+
+// challengeV2Waivable reports whether a failing solve under grain may be waived
+// for a verified good bot: only under the grains whose challenge the decision
+// path's good-bot exemption already skips (goodBotDowngrade softens the geo
+// floor and the vhost challenge), and only when no traffic-rule / WAF mark
+// covers the same client too. challengeV2ArmGrain returns the FIRST grain
+// that covers the solve (fp, geo, vhost, mark), so a geo or vhost answer
+// already rules out a fingerprint policy; the mark is checked here because it
+// comes last.
+func challengeV2Waivable(grain, ip, host string) bool {
+	switch grain {
+	case v2GrainGeo, v2GrainVhost:
+		return !challengeV2Marked(ip, host)
+	}
+	return false
 }
 
 // ConfigureChallengeV2 applies the [webdetector] knobs; called on every
@@ -668,6 +741,9 @@ func (s ChallengeSolve) HumanitySuffix() string {
 	out += s.SignalSuffix()
 	if s.V2Grain != "" {
 		out += " v2=" + s.V2Grain
+	}
+	if s.V2Waived != "" {
+		out += " v2_waived=" + s.V2Waived
 	}
 	return out
 }

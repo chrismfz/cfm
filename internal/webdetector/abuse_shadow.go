@@ -2,6 +2,7 @@ package webdetector
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sort"
 	"strings"
@@ -309,8 +310,23 @@ func forwardConfirms(host, ip string) bool {
 func forwardConfirmsE(host, ip string) (matched bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
+	return forwardConfirmsWith(ctx, net.DefaultResolver.LookupHost, host, ip)
+}
+
+// forwardConfirmsWith is forwardConfirmsE over an injectable lookup (tests).
+// A name that does not exist (NXDOMAIN / no address: IsNotFound) is an ANSWER,
+// not a blip: the claimed crawler name can't confirm anything, so it is a
+// definitive non-match. That is the natural spoof — a PTR of x.googlebot.com,
+// a name nobody outside Google can create — and treating it as transient left
+// the verdict uncached, so every request (and every ChallengeV2 reject) from
+// such an IP re-ran the lookup.
+func forwardConfirmsWith(ctx context.Context, lookup func(context.Context, string) ([]string, error), host, ip string) (matched bool, err error) {
+	addrs, err := lookup(ctx, host)
 	if err != nil {
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			return false, nil
+		}
 		return false, err
 	}
 	want := net.ParseIP(ip)

@@ -719,6 +719,22 @@ func NewEngine(cfg Config) *Engine {
 		return e.manualChallengeRung(host) == "v2"
 	})
 
+	// Good-bot waiver for the same verify gate: an FCrDNS-verified crawler is
+	// not rejected by Rung 1, under the SAME knob (CHALLENGE_GOODBOT_EXEMPT)
+	// and the SAME per-IP verdict cache the decision path uses to exempt it
+	// from the challenge outright. It only matters when no verdict existed
+	// when the challenge was served, so on a miss it forward-confirms a
+	// crawler-looking PTR inline (verifiedBeforeReject: bounded, reject path
+	// only, no DNS otherwise).
+	if cfg.ChallengeGoodBotExempt && e.nginxBridge != nil && e.nginxBridge.goodBot != nil {
+		gb := e.nginxBridge.goodBot
+		SetChallengeV2GoodBot(func(ctx context.Context, ip, ptr string) string {
+			return gb.verifiedBeforeReject(ctx, ip, ptr, time.Now())
+		})
+	} else {
+		SetChallengeV2GoodBot(nil)
+	}
+
 	return e
 }
 
@@ -918,6 +934,9 @@ func (s ChallengeSolve) historyPayload() map[string]interface{} {
 		}
 		if s.V2Grain != "" {
 			payload["v2"] = s.V2Grain
+		}
+		if s.V2Waived != "" {
+			payload["v2_waived"] = s.V2Waived
 		}
 		if sig := s.signalMap(); sig != nil {
 			payload["sig"] = sig
