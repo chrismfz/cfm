@@ -331,8 +331,139 @@ func TestDoMany_NFTBatchFailureFallsBackPerIP(t *testing.T) {
 		t.Fatalf("per-IP removes %v, want both IPs", be.removed)
 	}
 	for ip, r := range res {
-		if s := stepsOf(r, SrcNFT); len(s) != 1 || s[0].Action != ActionRemoved || !r.WasBlocked {
+		if s := stepsOf(r, SrcNFT); len(s) != 1 || s[0].Action != ActionRemoved || !r.WasBlocked ||
+			!strings.Contains(s[0].Detail, "after the batch failed: read inet cfm block_v6") {
 			t.Errorf("%s nft steps = %+v", ip, s)
 		}
+	}
+}
+
+// imunify's splashscreen (anti-bot) list blocks too: a listed IP is deleted
+// from it and, IPv6 included, counts as blocked for the grace entry.
+func TestDoMany_ImunifySplashscreen(t *testing.T) {
+	calls := fakeTools(t, map[string]string{
+		"imunify360-agent": `case "$*" in *" list "*) ` + imunifyList(
+			`{"ip":"2001:db8:1:2::/64","netmask":340282366920938463444927863358058659840,"purpose":"splashscreen"}`) + `;; esac`,
+	})
+	grace := time.Hour
+	DoMany(context.Background(), ips("2001:db8:1:2::7"), Options{ImunifyWhiteTTL: &grace})
+	got := calls()
+	if len(got) != 3 || got[1] != "imunify360-agent ip-list local delete --purpose splashscreen 2001:db8:1:2::/64" ||
+		!strings.HasPrefix(got[2], "imunify360-agent ip-list local add --purpose white --comment CFM auto-unblock 2001:db8:1:2::/64 ") {
+		t.Errorf("imunify runs = %q", got)
+	}
+}
+
+// A list that says it holds more than it returned (max_count), or has an
+// entry it couldn't read, may be missing the IP: unseen IPs are deleted
+// blindly from drop and captcha.
+func TestDoMany_ImunifyIncompleteListDeletesUnseen(t *testing.T) {
+	for name, list := range map[string]string{
+		"max_count":         `echo '{"items":[{"ip":"10.0.0.1","netmask":4294967295,"purpose":"drop"}],"max_count":7}'`,
+		"unreadable entry":  imunifyList(`{"ip":"10.0.0.1","netmask":4294967295,"purpose":"drop"}`, `{"netmask":4294967295,"purpose":"drop"}`),
+		"entry, no purpose": imunifyList(`{"ip":"10.0.0.1","netmask":4294967295,"purpose":"drop"}`, `{"ip":"10.0.0.2","netmask":4294967295}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			calls := fakeTools(t, map[string]string{"imunify360-agent": `case "$*" in *" list "*) ` + list + `;; esac`})
+			res := DoMany(context.Background(), ips("10.0.0.1", "10.0.0.2"), Options{})
+			got := strings.Join(calls(), "|")
+			for _, want := range []string{"delete --purpose drop 10.0.0.1 10.0.0.2|", "delete --purpose captcha 10.0.0.2"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("runs %q lack %q", got, want)
+				}
+			}
+			if s := stepsOf(res["10.0.0.2"], SrcImunify); len(s) == 0 || !strings.Contains(s[0].Detail, "local list incomplete") {
+				t.Errorf("10.0.0.2 imunify steps = %+v", s)
+			}
+		})
+	}
+}
+
+// A delete run for several entries that fails is run again one entry per
+// run: the entry imunify refuses fails alone, the others are deleted.
+func TestDoMany_ImunifyFailedRunRetriedPerEntry(t *testing.T) {
+	calls := fakeTools(t, map[string]string{
+		"imunify360-agent": `case "$*" in *" list "*) ` + imunifyList(
+			`{"ip":"10.0.0.1","netmask":4294967295,"purpose":"drop"}`,
+			`{"ip":"10.0.0.2","netmask":4294967295,"purpose":"drop"}`) + `;;
+*delete*10.0.0.2*) echo "IP 10.0.0.2 not found"; exit 1;; esac`,
+	})
+	res := DoMany(context.Background(), ips("10.0.0.1", "10.0.0.2"), Options{})
+	got := calls()
+	want := []string{
+		"imunify360-agent ip-list local delete --purpose drop 10.0.0.1 10.0.0.2",
+		"imunify360-agent ip-list local delete --purpose drop 10.0.0.1",
+		"imunify360-agent ip-list local delete --purpose drop 10.0.0.2",
+	}
+	if len(got) != 4 || strings.Join(got[1:], "|") != strings.Join(want, "|") {
+		t.Fatalf("imunify runs = %q, want the list then %q", got, want)
+	}
+	if s := stepsOf(res["10.0.0.1"], SrcImunify); len(s) != 1 || s[0].Action != ActionChecked || !strings.HasPrefix(s[0].Detail, "alone, after a run for 2 IPs failed") {
+		t.Errorf("10.0.0.1 imunify steps = %+v", s)
+	}
+	if s := stepsOf(res["10.0.0.2"], SrcImunify); len(s) != 1 || s[0].Action != ActionError {
+		t.Errorf("10.0.0.2 imunify steps = %+v", s)
+	}
+}
+
+// CFM's own earlier grace entry is refreshed; an operator's white entry is
+// left alone.
+func TestDoMany_ImunifyGraceRefreshesOwnEntryOnly(t *testing.T) {
+	calls := fakeTools(t, map[string]string{
+		"imunify360-agent": `case "$*" in *" list "*) ` + imunifyList(
+			`{"ip":"10.0.0.1","netmask":4294967295,"purpose":"white","comment":"CFM auto-unblock"}`,
+			`{"ip":"10.0.0.2","netmask":4294967295,"purpose":"white","comment":"office"}`) + `;; esac`,
+	})
+	grace := time.Hour
+	DoMany(context.Background(), ips("10.0.0.1", "10.0.0.2"), Options{ImunifyWhiteTTL: &grace})
+	var adds []string
+	for _, c := range calls() {
+		if strings.Contains(c, " add ") {
+			adds = append(adds, c)
+		}
+	}
+	if len(adds) != 1 || !strings.Contains(adds[0], " 10.0.0.1 ") {
+		t.Errorf("white adds = %q, want only 10.0.0.1's refresh", adds)
+	}
+}
+
+// halfAllowBackend fails the IPv6 allow batch.
+type halfAllowBackend struct {
+	feedBackend
+}
+
+func (b *halfAllowBackend) AddAllowBatch(e []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
+	if e[0].IP.To4() == nil {
+		return firewall.BlockBatchResult{}, fmt.Errorf("read inet cfm allow_v6: No such file or directory")
+	}
+	return b.feedBackend.AddAllowBatch(e)
+}
+
+// The allow batch runs per address family: a family whose set can't be read
+// fails only its own IPs.
+func TestDoMany_FeedAllowPerFamily(t *testing.T) {
+	fakeTools(t, map[string]string{})
+	be := &halfAllowBackend{feedBackend{feed: []string{"198.51.100.1", "2001:db8::1"}}}
+	res := DoMany(context.Background(), ips("198.51.100.1", "2001:db8::1"), Options{BE: be, TempWhitelist: true})
+	if !res["198.51.100.1"].Whitelisted || res["2001:db8::1"].Whitelisted {
+		t.Errorf("whitelisted: v4 %v, v6 %v; want v4 only", res["198.51.100.1"].Whitelisted, res["2001:db8::1"].Whitelisted)
+	}
+	if be.batches != 1 || !be.allowed[0].Permanent {
+		t.Errorf("v4 batch: %d batches, %+v", be.batches, be.allowed)
+	}
+}
+
+// An IPv6 line written with /32 is a network, not the IP: only /128 is.
+func TestRemoveFromFileMany_IPv6HostSuffix(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfm.deny")
+	if err := os.WriteFile(p, []byte("2001:db8::1/32\n2001:db8::1/128\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := removeFromFileMany(dir, "cfm.deny", ips("2001:db8::1")); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "2001:db8::1/32\n" { // #nosec G304 -- test temp file
+		t.Errorf("cfm.deny now %q", b)
 	}
 }

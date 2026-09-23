@@ -43,6 +43,8 @@ const imunifyListCap = 10000
 // list and matches containment itself. Many queries list once and match
 // locally. A list that reached the cap may be missing entries, so then every
 // query is also asked --by-ip, as the single path would, while ctx allows.
+// The same holds for a list that says it holds more than it returned, or has
+// entries it couldn't read (imunifyIncomplete).
 // NOTE: a covering subnet entry past the cap that --by-ip doesn't surface is
 // missed, as before; the cap keeps the list read bounded — raise it if real
 // lists approach it.
@@ -102,18 +104,19 @@ func searchImunify(ctx context.Context, qs []*query) (locs [][]Location, skip []
 		return nil, nil, "unreadable output: " + trimOut(out)
 	}
 	listed := matchImunifyItems(items, qs)
-	if imunifyListLen(out) < imunifyListCap {
+	incomplete := imunifyIncomplete(out, items)
+	if incomplete == "" {
 		return listed, nil, ""
 	}
 	skip = make([]string, len(qs))
 	for i, q := range qs {
 		if ctx.Err() != nil {
-			skip[i] = fmt.Sprintf("local list has %d+ entries; no time left to ask --by-ip", imunifyListCap)
+			skip[i] = fmt.Sprintf("local list incomplete (%s); no time left to ask --by-ip", incomplete)
 			continue
 		}
 		l, why, _ := byIP(q)
 		if why != "" {
-			skip[i] = fmt.Sprintf("local list has %d+ entries; --by-ip: %s", imunifyListCap, why)
+			skip[i] = fmt.Sprintf("local list incomplete (%s); --by-ip: %s", incomplete, why)
 			continue
 		}
 		seen := map[Location]bool{}
@@ -130,57 +133,82 @@ func searchImunify(ctx context.Context, qs []*query) (locs [][]Location, skip []
 }
 
 // imunifyArray is the list's entries: the "items" array (any key case) or a
-// bare top-level array. ok is false for output that isn't JSON, or an object
-// without an "items" array — read as an empty list, it would say that nothing
-// is listed.
-func imunifyArray(raw []byte) (arr []any, ok bool) {
+// bare top-level array, and total, the number of entries the list says it
+// holds (its "max_count"), or -1. ok is false for output that isn't JSON, or
+// an object without an "items" array — read as an empty list, it would say
+// that nothing is listed.
+func imunifyArray(raw []byte) (arr []any, total int64, ok bool) {
 	var root any
 	if err := json.Unmarshal(raw, &root); err != nil {
-		return nil, false
+		return nil, -1, false
 	}
 	switch v := root.(type) {
 	case []any:
-		return v, true
+		return v, -1, true
 	case map[string]any:
+		total = -1
 		for k, val := range v {
-			if strings.EqualFold(k, "items") {
+			switch {
+			case strings.EqualFold(k, "items"):
 				arr, ok = val.([]any)
-				return arr, ok
+			case strings.EqualFold(k, "max_count"):
+				if n, isNum := val.(float64); isNum && n >= 0 && n < 1<<53 {
+					total = int64(n)
+				}
 			}
 		}
+		return arr, total, ok
 	}
-	return nil, false
+	return nil, -1, false
 }
 
-// imunifyListLen counts the list's entries, usable or not — what the cap
-// applies to.
-func imunifyListLen(raw []byte) int {
-	arr, _ := imunifyArray(raw)
-	return len(arr)
+// imunifyIncomplete says why a list read may be missing entries, or "": it
+// reached the read's cap, it says it holds more entries than it returned
+// (max_count), or some of its entries couldn't be read (no address or no
+// purpose). An entry missed any of those ways would read as not listed.
+func imunifyIncomplete(raw []byte, items []imunifyItem) string {
+	arr, total, _ := imunifyArray(raw)
+	var why []string
+	if len(arr) >= imunifyListCap {
+		why = append(why, fmt.Sprintf("it reached the read's cap of %d entries", imunifyListCap))
+	} else if total > int64(len(arr)) {
+		why = append(why, fmt.Sprintf("it holds %d entries, %d returned", total, len(arr)))
+	}
+	bad := len(arr) - len(items)
+	for _, it := range items {
+		if it.Purpose == "" {
+			bad++
+		}
+	}
+	if bad > 0 {
+		why = append(why, fmt.Sprintf("%d of its entries unreadable", bad))
+	}
+	return strings.Join(why, "; ")
 }
 
 // ImunifyEntry is one entry of imunify360's local IP list.
 type ImunifyEntry struct {
 	Entry   string // an address or a CIDR (imunifyEntryString)
 	Purpose string // lowercased: white, drop, captcha, splashscreen, …
+	Comment string
 }
 
 // ImunifyLocalList reads imunify360's local IP list once, up to
-// imunifyListCap entries; capped reports a list that reached the cap, which
-// may be missing entries.
-func ImunifyLocalList(ctx context.Context) (entries []ImunifyEntry, capped bool, err error) {
+// imunifyListCap entries. incomplete, when not "", says why the list read may
+// be missing entries (imunifyIncomplete).
+func ImunifyLocalList(ctx context.Context) (entries []ImunifyEntry, incomplete string, err error) {
 	out, err := runOut(ctx, "imunify360-agent", "ip-list", "local", "list", "--limit", strconv.Itoa(imunifyListCap), "--json")
 	if err != nil {
-		return nil, false, fmt.Errorf("%v: %s", err, trimOut(out))
+		return nil, "", fmt.Errorf("%v: %s", err, trimOut(out))
 	}
 	items := parseImunifyList(out)
 	if items == nil {
-		return nil, false, fmt.Errorf("unreadable output: %s", trimOut(out))
+		return nil, "", fmt.Errorf("unreadable output: %s", trimOut(out))
 	}
 	for _, it := range items {
-		entries = append(entries, ImunifyEntry{Entry: imunifyEntryString(it.IP, it.Netmask), Purpose: it.Purpose})
+		entries = append(entries, ImunifyEntry{Entry: imunifyEntryString(it.IP, it.Netmask), Purpose: it.Purpose, Comment: it.Comment})
 	}
-	return entries, imunifyListLen(out) >= imunifyListCap, nil
+	return entries, imunifyIncomplete(out, items), nil
 }
 
 // imunifyEntryString renders a list entry as an address or a CIDR. imunify
@@ -231,7 +259,7 @@ type imunifyItem struct {
 // array, with item keys in any case (docs show uppercase, agents emit
 // lowercase).
 func parseImunifyList(raw []byte) []imunifyItem {
-	arr, ok := imunifyArray(raw)
+	arr, _, ok := imunifyArray(raw)
 	if !ok {
 		return nil
 	}
@@ -274,7 +302,17 @@ func parseImunifyList(raw []byte) []imunifyItem {
 			Expiration: num("expiration"),
 		}
 		if it.IP == "" {
-			it.IP = str("network_address")
+			// network_address is the address as a number (IPv4) in the
+			// documented shape; some outputs give it as a string.
+			switch n := m["network_address"].(type) {
+			case string:
+				it.IP = n
+			case float64:
+				if n >= 0 && n <= math.MaxUint32 && n == math.Trunc(n) {
+					v := uint32(n)
+					it.IP = net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v)).String()
+				}
+			}
 		}
 		if it.IP != "" {
 			items = append(items, it)

@@ -42,7 +42,6 @@ func (c *APIClient) ProcessUnblocks(ctx context.Context, be firewall.Backend, cf
 			Reporter:        c, // θα στείλει reason "feeds:..." ή "manual"
 			ReportWhy:       "agent",
 			SendAPI:         false,
-			Fail2BanUnban:   true, // clear fail2ban bans too on agent-driven unblocks
 			ImunifyWhiteTTL: &whiteTTL,
 			WAF:             unblock.WAFCleanerHook(), // clear OpenResty/Lua WAF planes too (nil in DNAT mode)
 		})

@@ -27,9 +27,13 @@ import (
 // imunify itself was blocking.
 const graceBatchMax = 20
 
-// toolArgsPerRun bounds the IPs passed to one fail2ban-client unban or
-// imunify360-agent delete run.
+// toolArgsPerRun bounds the entries passed to one imunify360-agent delete
+// run.
 const toolArgsPerRun = 50
+
+// graceComment marks the white grace entries CFM adds, so a later unblock
+// refreshes its own entry but leaves an operator's alone.
+const graceComment = "CFM auto-unblock"
 
 // DoMany unblocks each of ips as Do does, but reads every source once for the
 // whole batch and runs each tool only for the IPs it holds:
@@ -40,9 +44,10 @@ const toolArgsPerRun = 50
 //   - every IP is unbanned from fail2ban, many per fail2ban-client run (an
 //     unban also clears the IP's ban history, which bantime.increment reads,
 //     so it isn't limited to the IPs banned right now);
-//   - imunify360's local list is read once and only IPs on its drop or
-//     captcha list are deleted, many per run (when the list couldn't be read or
-//     reached its cap, the IPs it didn't show are deleted blindly, as before);
+//   - imunify360's local list is read once and only IPs on its drop, captcha
+//     or splashscreen list are deleted, many per run (when the list couldn't
+//     be read, or may be missing entries, the IPs it didn't show are deleted
+//     blindly from drop and captcha, as before);
 //   - the feed-origin IPs are allowed in one batch that never shortens an
 //     existing allow (AddAllowBatch).
 //
@@ -89,18 +94,26 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 		// changing under every attempt): per IP. Both engines take an IP a set
 		// doesn't hold as removed; a missing set is removed on exec nft and an
 		// error on nftlib, for the IPs of that family only.
+		var batchErr error
+		if len(list) > 1 {
+			batchErr = opts.BE.RemoveBlockBatch(list)
+		}
 		errs := map[string]error{}
-		if len(list) == 1 || opts.BE.RemoveBlockBatch(list) != nil {
+		if len(list) == 1 || batchErr != nil {
 			for _, ip := range list {
 				errs[ip.String()] = opts.BE.RemoveBlock(ip)
 			}
 		}
+		via := ""
+		if batchErr != nil {
+			via = "per IP, after the batch failed: " + batchErr.Error()
+		}
 		each(func(r *Result) {
 			if err := errs[r.IP.String()]; err != nil {
-				r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "RemoveBlock failed", Err: err.Error()})
+				r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: strings.TrimSpace("RemoveBlock failed " + via), Err: err.Error()})
 				return
 			}
-			r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionRemoved, Dur: time.Since(t1)})
+			r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionRemoved, Detail: via, Dur: time.Since(t1)})
 			r.WasBlocked = true
 		})
 	}
@@ -166,23 +179,28 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 	wg.Wait()
 
 	// 4) Feed-origin IPs: a local allow overrides the feed until it drops them
-	// (optional). One batch, and it never shortens an allow already there —
-	// AddAllow replaced it, so a permanent allow became a timed one.
+	// (optional). One batch per address family (a set of one family that
+	// can't be read fails only that family's), and it never shortens an allow
+	// already there — AddAllow replaced it, so a permanent allow became a
+	// timed one.
 	if opts.BE != nil && opts.TempWhitelist {
-		var entries []firewall.BlockEntry
-		var fromFeeds []*Result
-		each(func(r *Result) {
-			if len(r.FromFeeds) == 0 {
-				return
+		for _, v4 := range []bool{true, false} {
+			var entries []firewall.BlockEntry
+			var fromFeeds []*Result
+			each(func(r *Result) {
+				if len(r.FromFeeds) == 0 || (r.IP.To4() != nil) != v4 {
+					return
+				}
+				e := firewall.BlockEntry{IP: r.IP, Permanent: true}
+				if opts.AllowTTL != nil && *opts.AllowTTL > 0 {
+					e = firewall.BlockEntry{IP: r.IP, TTL: *opts.AllowTTL}
+				}
+				entries = append(entries, e)
+				fromFeeds = append(fromFeeds, r)
+			})
+			if len(entries) == 0 {
+				continue
 			}
-			e := firewall.BlockEntry{IP: r.IP, Permanent: true}
-			if opts.AllowTTL != nil && *opts.AllowTTL > 0 {
-				e = firewall.BlockEntry{IP: r.IP, TTL: *opts.AllowTTL}
-			}
-			entries = append(entries, e)
-			fromFeeds = append(fromFeeds, r)
-		})
-		if len(entries) > 0 {
 			_, err := opts.BE.AddAllowBatch(entries)
 			for _, r := range fromFeeds {
 				if err != nil {
@@ -292,7 +310,7 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) map[string][]string {
 }
 
 // removeFromFileMany drops the lines of cfgDir/filename that list one of ips
-// (as the address or address/32), in one read and at most one write, and
+// (as the address, or as address/32 or /128), in one read and at most one write, and
 // returns the IPs it removed. The path must stay inside cfgDir and the file
 // be an allowlisted one. A missing file is nothing to remove; a file it can't
 // read to the end is left as is, with an error.
@@ -308,8 +326,12 @@ func removeFromFileMany(cfgDir, filename string, ips []net.IP) (map[string]bool,
 	}
 	want := map[string]string{} // token as written → the IP's key
 	for _, ip := range ips {
+		host := "/32"
+		if ip.To4() == nil {
+			host = "/128" // "/32" would be a whole IPv6 network
+		}
 		want[ip.String()] = ip.String()
-		want[ip.String()+"/32"] = ip.String()
+		want[ip.String()+host] = ip.String()
 	}
 	// #nosec G304 -- path is constrained to cfgDir + allowlisted filename and verified to remain within cfgDir.
 	f, err := os.Open(cleanPath)
@@ -361,11 +383,11 @@ func fail2banUnbanMany(ctx context.Context, list []net.IP, out map[string]*Resul
 	runForChunks(ctx, list, fail2banArgsPerRun, out, SrcFail2Ban, "fail2ban-client", "unban")
 }
 
-// imunifyUnblockMany clears the IPs from imunify360's drop and captcha lists
-// and adds the white grace entry: the local list is read once, the listed IPs
-// are deleted toolArgsPerRun per run, and the grace entry goes to every IP of
-// a small batch (as Do always did) but, in a batch larger than
-// graceBatchMax, only to the IPs imunify itself was blocking.
+// imunifyUnblockMany clears the IPs from imunify360's drop, captcha and
+// splashscreen lists and adds the white grace entry: the local list is read
+// once, the listed IPs are deleted toolArgsPerRun per run, and the grace
+// entry goes to every IP of a small batch (as Do always did) but, in a batch
+// larger than graceBatchMax, only to the IPs imunify itself was blocking.
 //
 // imunify lists an IPv6 address only as its /64, so an IPv6 IP is cleared by
 // deleting the /64 entry that holds it, and IPs sharing a /64 share its
@@ -373,10 +395,14 @@ func fail2banUnbanMany(ctx context.Context, list []net.IP, out map[string]*Resul
 // imunify was blocking its /64: whitelisting the /64 otherwise would allow
 // the whole network.
 func imunifyUnblockMany(ctx context.Context, list []net.IP, out map[string]*Result, opts Options) {
-	entries, capped, err := locate.ImunifyLocalList(ctx)
-	// listed[purpose][key] = the entry as imunify lists it (key: imunifyKey).
-	listed := map[string]map[string]string{"drop": {}, "captcha": {}, "white": {}}
-	// Drop/captcha networks wider than an IP's key: never deleted (that would
+	entries, incomplete, err := locate.ImunifyLocalList(ctx)
+	blocking := []string{"drop", "captcha", "splashscreen"}
+	// listed[purpose][key] = the entries imunify lists for key (imunifyKey).
+	listed := map[string]map[string][]locate.ImunifyEntry{"white": {}}
+	for _, p := range blocking {
+		listed[p] = map[string][]locate.ImunifyEntry{}
+	}
+	// Blocking networks wider than an IP's key: never deleted (that would
 	// unblock the whole network), but imunify blocks the IPs they hold.
 	covering := ipquery.NewIndex[locate.ImunifyEntry]()
 	for _, e := range entries {
@@ -384,14 +410,19 @@ func imunifyUnblockMany(ctx context.Context, list []net.IP, out map[string]*Resu
 			continue
 		}
 		if k := imunifyEntryKey(e.Entry); k != "" {
-			listed[e.Purpose][k] = e.Entry
+			listed[e.Purpose][k] = append(listed[e.Purpose][k], e)
 		} else if e.Purpose != "white" {
 			covering.Add(e.Entry, e)
 		}
 	}
 	isListed := func(ip net.IP) bool {
 		k := imunifyKey(ip)
-		return listed["drop"][k] != "" || listed["captcha"][k] != ""
+		for _, p := range blocking {
+			if len(listed[p][k]) > 0 {
+				return true
+			}
+		}
+		return false
 	}
 	coveredBy := func(ip net.IP) []locate.ImunifyEntry {
 		q, err := ipquery.ParseQuery(ip.String())
@@ -400,26 +431,31 @@ func imunifyUnblockMany(ctx context.Context, list []net.IP, out map[string]*Resu
 		}
 		return covering.Match(q)
 	}
-	// Without the list, or past its cap, an IP it didn't show may still be
-	// listed: delete it blindly, as Do always did.
-	blind := err != nil || capped
+	// Without the whole list an IP it didn't show may still be listed: it is
+	// deleted blindly from drop and captcha, as Do always did.
+	blind := err != nil || incomplete != ""
 	for _, ip := range list {
 		r := out[ip.String()]
-		switch covers := coveredBy(ip); {
+		covers := coveredBy(ip)
+		switch {
 		case err != nil:
 			addStep(r, Step{Source: SrcImunify, Action: ActionChecked, Detail: "local list unreadable (" + err.Error() + "); deleting blindly"})
-		case capped && !isListed(ip):
-			addStep(r, Step{Source: SrcImunify, Action: ActionChecked, Detail: fmt.Sprintf("not in the first %d entries of the local list; deleting blindly", len(entries))})
+		case incomplete != "" && !isListed(ip):
+			addStep(r, Step{Source: SrcImunify, Action: ActionChecked, Detail: "local list incomplete (" + incomplete + "); deleting blindly"})
 		case isListed(ip):
 			// Deleted below; the run is its step.
+			if len(covers) > 0 {
+				addStep(r, Step{Source: SrcImunify, Action: ActionChecked,
+					Detail: fmt.Sprintf("its own entry is deleted; the covering %s (%s) stays — deleting it would unblock the whole network", covers[0].Entry, covers[0].Purpose)})
+			}
 		case len(covers) > 0:
 			addStep(r, Step{Source: SrcImunify, Action: ActionNotFound,
-				Detail: fmt.Sprintf("no entry of its own on the local drop/captcha list; the covering %s (%s) is left alone — deleting it would unblock the whole network", covers[0].Entry, covers[0].Purpose)})
+				Detail: fmt.Sprintf("no entry of its own on the local blocking lists; the covering %s (%s) is left alone — deleting it would unblock the whole network", covers[0].Entry, covers[0].Purpose)})
 		default:
-			addStep(r, Step{Source: SrcImunify, Action: ActionNotFound, Detail: "not in the local drop/captcha list"})
+			addStep(r, Step{Source: SrcImunify, Action: ActionNotFound, Detail: "not on the local drop/captcha/splashscreen list"})
 		}
 	}
-	for _, purpose := range []string{"drop", "captcha"} {
+	for _, purpose := range blocking {
 		// One address family per run.
 		for _, v4 := range []bool{true, false} {
 			var g argGroups
@@ -429,13 +465,15 @@ func imunifyUnblockMany(ctx context.Context, list []net.IP, out map[string]*Resu
 				}
 				k := imunifyKey(ip)
 				switch {
-				case listed[purpose][k] != "":
-					g.add(listed[purpose][k], ip)
-				case blind && !isListed(ip):
+				case len(listed[purpose][k]) > 0:
+					for _, e := range listed[purpose][k] {
+						g.add(e.Entry, ip)
+					}
+				case blind && purpose != "splashscreen" && !isListed(ip):
 					g.add(k, ip)
 				}
 			}
-			runGroups(ctx, g, toolArgsPerRun, out, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", purpose)
+			runGroups(ctx, g, toolArgsPerRun, true, out, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", purpose)
 		}
 	}
 
@@ -454,11 +492,17 @@ func imunifyUnblockMany(ctx context.Context, list []net.IP, out map[string]*Resu
 		}
 		k := imunifyKey(ip)
 		blocked := isListed(ip) || len(coveredBy(ip)) > 0
+		// An entry of the operator's, maybe permanent: an add could turn it
+		// into a timed one. CFM's own earlier grace entry is refreshed.
+		var own string
+		for _, e := range listed["white"][k] {
+			if e.Comment != graceComment {
+				own = e.Entry
+			}
+		}
 		switch {
-		case listed["white"][k] != "":
-			// An operator's entry, maybe permanent: an add would replace it
-			// with a timed one.
-			addStep(r, Step{Source: SrcImunify, Action: ActionChecked, Detail: "no white grace entry: already on the local white list as " + listed["white"][k]})
+		case own != "":
+			addStep(r, Step{Source: SrcImunify, Action: ActionChecked, Detail: "no white grace entry: already on the local white list as " + own})
 		case ip.To4() == nil && !blocked:
 			addStep(r, Step{Source: SrcImunify, Action: ActionChecked,
 				Detail: fmt.Sprintf("no white grace entry: imunify takes IPv6 only as a /64 and wasn't seen blocking %s; whitelisting it would allow the whole network", k)})
@@ -470,7 +514,7 @@ func imunifyUnblockMany(ctx context.Context, list []net.IP, out map[string]*Resu
 		}
 	}
 	for i, k := range grace.args {
-		whiteArgs := []string{"ip-list", "local", "add", "--purpose", "white", "--comment", "CFM auto-unblock", k}
+		whiteArgs := []string{"ip-list", "local", "add", "--purpose", "white", "--comment", graceComment, k}
 		// imunify defaults to a PERMANENT entry; bound it
 		// (--expiration wants an absolute unix timestamp).
 		if whiteTTL != nil && *whiteTTL > 0 {
@@ -492,9 +536,10 @@ func imunifyKey(ip net.IP) string {
 	return (&net.IPNet{IP: ip.Mask(m), Mask: m}).String()
 }
 
-// imunifyEntryKey is the imunifyKey a local-list entry clears: an IPv4
-// address, or an IPv6 /64 (an IPv6 address counts as its /64). Other networks
-// give "": deleting one would unblock more than the IP.
+// imunifyEntryKey is the imunifyKey of the IPs a local-list entry blocks on
+// their own: an IPv4 address, or for an IPv6 entry of /64 or narrower (an
+// address included) its /64 — imunify takes IPv6 only by the /64. Wider
+// networks give "": deleting one would unblock more than the IP.
 func imunifyEntryKey(entry string) string {
 	if !strings.Contains(entry, "/") {
 		if ip := net.ParseIP(entry); ip != nil {
@@ -509,8 +554,8 @@ func imunifyEntryKey(entry string) string {
 	switch ones, bits := n.Mask.Size(); {
 	case bits == 32 && ones == 32:
 		return n.IP.String()
-	case bits == 128 && ones == 64:
-		return n.String()
+	case bits == 128 && ones >= 64:
+		return imunifyKey(n.IP)
 	}
 	return ""
 }
@@ -543,13 +588,15 @@ func runForChunks(ctx context.Context, targets []net.IP, per int, out map[string
 	for _, ip := range targets {
 		g.add(ip.String(), ip)
 	}
-	runGroups(ctx, g, per, out, src, name, args...)
+	runGroups(ctx, g, per, false, out, src, name, args...)
 }
 
 // runGroups runs name args… arg… for g's arguments, per arguments per run,
 // and records each run on the IPs its arguments clear; the step of a run for
-// several IPs says so.
-func runGroups(ctx context.Context, g argGroups, per int, out map[string]*Result, src Source, name string, args ...string) {
+// several IPs says so. With singly, a failed run for several arguments is run
+// again one argument per run, so one argument the tool refuses (an entry that
+// expired since the list was read, say) doesn't fail the rest.
+func runGroups(ctx context.Context, g argGroups, per int, singly bool, out map[string]*Result, src Source, name string, args ...string) {
 	for i := 0; i < len(g.args); i += per {
 		j := min(i+per, len(g.args))
 		argv := append(append([]string(nil), args...), g.args[i:j]...)
@@ -557,6 +604,20 @@ func runGroups(ctx context.Context, g argGroups, per int, out map[string]*Result
 		var ips []net.IP
 		for _, group := range g.ips[i:j] {
 			ips = append(ips, group...)
+		}
+		if singly && step.Action == ActionError && j-i > 1 {
+			for k := i; k < j; k++ {
+				one := runTool(ctx, src, name, append(append([]string(nil), args...), g.args[k])...)
+				detail := fmt.Sprintf("alone, after a run for %d IPs failed (%s)", len(ips), step.Err)
+				if one.Detail != "" {
+					detail += ": " + one.Detail
+				}
+				one.Detail = detail
+				for _, ip := range g.ips[k] {
+					addStep(out[ip.String()], one)
+				}
+			}
+			continue
 		}
 		if len(ips) > 1 {
 			detail := fmt.Sprintf("one run for %d IPs", len(ips))

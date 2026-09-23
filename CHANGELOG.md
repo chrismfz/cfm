@@ -176,35 +176,43 @@ back-filled here — see the git/PR history for that period.
   batch of pending unblocks from cfm-web now checks for csf, fail2ban and
   imunify360 once and runs each tool once per batch where it can:
   `fail2ban-client unban` takes 200 IPs per run; imunify360's local list is
-  read once and only the IPs on its drop or captcha list are deleted, 50 per
-  `imunify360-agent ip-list local delete` run (when the list can't be read or
-  holds 10 000 entries, the IPs it didn't show are deleted blindly, as
-  before). `cfm.deny` is rewritten once, the feed sets are read once, and the
-  block sets are written in one batch (per IP if that batch fails). It used to
-  run every step per IP — up to three `imunify360-agent` runs (about a second
-  each) and a `fail2ban-client` run per IP on the nodes that have them, plus up
-  to four `systemctl` checks per IP just to find imunify missing. `cfm
-  unblock` and `/unblock` go through the same code for their one IP, so they
-  now read imunify's list too. The imunify360 white "grace" entry (1h, stops
-  imunify re-greylisting a customer just unblocked) still goes to every IP of
-  a batch of up to 20; a larger batch — a mass unblock — adds it only for the
-  IPs imunify itself was blocking (on their own entry or by a covering
-  network), since each add is one `imunify360-agent` run. The grace entry now
-  skips an IP already on imunify's white list, where an add could turn an
-  operator's permanent entry into a 1h one. An IPv6 IP is cleared as the /64
-  imunify lists IPv6 addresses as (IPs of one /64 share its delete); it used
-  to be passed as the address, and imunify keeps IPv6 entries only as /64s.
-  It gets the grace entry only when imunify was blocking its /64, since the
-  entry would allow the whole /64. An IP blocked only by a wider imunify
-  network entry (say a /24) keeps that entry — deleting it would unblock the
-  whole network — and the unblock report now says so.
+  read once and only the IPs on its drop, captcha or splashscreen list are
+  deleted, 50 per `imunify360-agent ip-list local delete` run (a run that
+  fails is retried one entry per run). When the list can't be read, or may be
+  missing entries (10 000 read, fewer returned than it says it holds, or
+  entries it couldn't parse), the IPs it didn't show are deleted blindly from
+  drop and captcha, as before. `cfm.deny` is rewritten once, the feed sets
+  are read once, and the block sets are written in one batch (per IP if that
+  batch fails). It used to run every step per IP — up to three
+  `imunify360-agent` runs (about a second each) and a `fail2ban-client` run
+  per IP on the nodes that have them, plus up to four `systemctl` checks per
+  IP just to find imunify missing. `cfm unblock` and `/unblock` go through the
+  same code for their one IP, so they now read imunify's list too, and clear
+  its splashscreen (anti-bot) list, which they never did. The imunify360
+  white "grace" entry (1h, stops imunify re-greylisting a customer just
+  unblocked) still goes to every IP of a batch of up to 20; a larger batch —
+  a mass unblock — adds it only for the IPs imunify itself was blocking (on
+  their own entry or by a covering network), since each add is one
+  `imunify360-agent` run. The grace entry now skips an IP an operator's white
+  entry already lists, where an add could turn a permanent entry into a 1h
+  one (CFM's own earlier grace entry is still refreshed). An IPv6 IP is
+  cleared as the /64 imunify lists IPv6 addresses as (IPs of one /64 share its
+  delete); it used to be passed as the address, and imunify keeps IPv6
+  entries only as /64s. It gets the grace entry only when imunify was
+  blocking its /64, since the entry would allow the whole /64. An IP blocked
+  by a wider imunify network entry (say a /24) keeps that entry — deleting it
+  would unblock the whole network — and the unblock report now says so. A
+  `cfm.deny` line `2001:db8::1/32` (an IPv6 network) is no longer removed when
+  unblocking `2001:db8::1`; `/128` is.
 - **Where-is-this-IP-blocked never found a single-address IPv4 entry of
   imunify360's.** `cfm which`, `/search` and the unblock report read
   imunify's `netmask` as a prefix length, but imunify reports the mask itself
   (4294967295 for one IPv4 address), so every such entry read as
   `address/4294967295` and matched nothing; only network entries, which
   imunify writes as `address/length`, were reported. It is now read as the
-  mask.
+  mask. A list that may be missing entries — fewer returned than it says it
+  holds, or entries it couldn't parse — now has each IP asked `--by-ip` too,
+  as a list at the 10 000-entry cap already did.
 - **Unblocking an IP a feed blocks no longer shortens a permanent allow.** The
   unblock allows a feed-blocked IP for a while (4h from cfm-web, 24h from
   `/unblock`, 1h from `cfm unblock`) so the feed doesn't block it again before

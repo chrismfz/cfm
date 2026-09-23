@@ -133,3 +133,40 @@ func TestParseImunifyList_ObjectWithoutItems(t *testing.T) {
 		}
 	}
 }
+
+// A list read may be missing entries when it reached the cap, says it holds
+// more than it returned, or has entries without an address or a purpose;
+// an entry's address can also come as the numeric network_address.
+func TestImunifyIncomplete(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}],"max_count":1}`:                    "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}]}`:                                  "",
+		`[{"ip":"10.0.0.1","purpose":"drop"}]`:                                            "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}],"max_count":3}`:                    "it holds 3 entries, 1 returned",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"purpose":"drop"}]}`:               "1 of its entries unreadable",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":"10.0.0.2"}]}`:                "1 of its entries unreadable",
+		`{"items":[{"network_address":167772161,"netmask":4294967295,"purpose":"drop"}]}`: "",
+	} {
+		items := parseImunifyList([]byte(raw))
+		if got := imunifyIncomplete([]byte(raw), items); got != want {
+			t.Errorf("%s: %q, want %q", raw, got, want)
+		}
+	}
+	items := parseImunifyList([]byte(`{"items":[{"network_address":167772161,"netmask":4294967295,"purpose":"drop"}]}`))
+	if len(items) != 1 || items[0].IP != "10.0.0.1" {
+		t.Errorf("numeric network_address: %+v", items)
+	}
+}
+
+// Many queries against a list that says it holds more than it returned are
+// asked --by-ip too, as at the cap.
+func TestSearchImunify_ShortListAsksEachQuery(t *testing.T) {
+	fakeImunify(t, map[string]string{
+		"list.out":         `{"items":[` + item("10.0.0.1", "drop") + `],"max_count":2}`,
+		"byip-1.2.3.4.out": `{"items":[` + item("1.2.3.4", "drop") + `]}`,
+	})
+	locs, skip, why := searchImunify(context.Background(), []*query{mustQuery(t, "1.2.3.4"), mustQuery(t, "10.0.0.1")})
+	if why != "" || len(locs[0]) != 1 || len(locs[1]) != 1 || skip[0] != "" {
+		t.Errorf("locs %+v skip %q why %q", locs, skip, why)
+	}
+}
