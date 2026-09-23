@@ -67,7 +67,11 @@ end
 -- ---------------------------------------------------------------------------
 -- Per-worker cache state (module-level locals persist across requests in the
 -- same worker process). `policies` maps an exact host to its policy table;
--- `wild` is an array of { pattern = "*.suffix", policy = {...} }.
+-- `wild` is an array of { pattern = "*.suffix", policy = {...} }, MOST SPECIFIC
+-- (longest) pattern first — the lookups take the first match. A policy with no
+-- armed tier is an OPT-OUT row (the daemon emits one for an all-off exact host
+-- or narrower wildcard under a broader armed wildcard): being the more
+-- specific match it wins, and it caches nothing.
 
 local _cache = {
     policies = {},    -- map[host] -> policy table
@@ -223,6 +227,14 @@ local function rebuild_cache(entries)
             end
         end
     end
+    -- Most specific wildcard first: with *.example.com AND *.shop.example.com
+    -- armed, x.shop.example.com must get the narrower policy. The daemon sends
+    -- this order already; sorting here keeps the edge right on its own (and
+    -- the alphabetical tie-break keeps it deterministic).
+    table.sort(wild, function(a, b)
+        if #a.pattern ~= #b.pattern then return #a.pattern > #b.pattern end
+        return a.pattern < b.pattern
+    end)
     _cache.policies  = policies
     _cache.wild      = wild
     _cache.has_any   = n > 0
@@ -337,6 +349,14 @@ end
 -- ---------------------------------------------------------------------------
 -- Public API
 
+-- policy_armed: true when at least one tier of the policy is on (false for an
+-- opt-out row).
+local function policy_armed(p)
+    if type(p.static) == "table" and p.static.on then return true end
+    if type(p.micro) == "table" and p.micro.on then return true end
+    return false
+end
+
 -- policy_for: returns the policy table for the given host, or nil. Cheap path
 -- when nothing is armed: short-circuits BEFORE any string work.
 function _M.policy_for(host)
@@ -357,7 +377,8 @@ end
 
 -- policy_key_for: like policy_for, but returns the CANONICAL policy KEY that
 -- matched — the exact host, or the "*.suffix" pattern for a wildcard match — or
--- nil when nothing is armed for `host`. Stats are keyed on THIS, never on the
+-- nil when nothing is armed for `host` (an opt-out row included — exact or
+-- wildcard: it caches nothing, so it has nothing to count). Stats are keyed on THIS, never on the
 -- raw request Host: under an armed wildcard (`*.example.com`) a client can send
 -- unbounded distinct sub-hosts, so keying per request-host would blow the
 -- cfm_cache_stats dict; keying per policy bounds cardinality to the number of
@@ -367,9 +388,19 @@ function _M.policy_key_for(host)
     if not _cache.has_any then return nil end
     local h = normalize_host(host)
     if h == "" then return nil end
-    if _cache.policies[h] then return h end
+    local p = _cache.policies[h]
+    if p then
+        if policy_armed(p) then return h end
+        return nil
+    end
     for _, w in ipairs(_cache.wild) do
-        if glob_match(w.pattern, h) then return w.pattern end
+        if glob_match(w.pattern, h) then
+            -- the most specific match decides, like policy_for: an opt-out
+            -- wildcard (a narrower one turned off under a broader armed one)
+            -- counts nothing
+            if policy_armed(w.policy) then return w.pattern end
+            return nil
+        end
     end
     return nil
 end
@@ -589,10 +620,13 @@ local function label_for(p)
     return table.concat(parts, " ")
 end
 
--- observe: PHASE 2 header-filter hook. Stamps X-CFM-Cache on responses for a
--- vhost that has a policy, so an operator can watch (curl -I) which vhosts are
--- armed and what would apply — without any caching taking place. Safe to call
--- from any phase where ngx.header is writable (header_filter is recommended).
+-- observe: header-filter hook. For a debug request (X-CFM-Cache-Debug), stamps
+-- X-CFM-Cache on responses for a vhost that has a policy, so an operator can
+-- watch (curl -I) what applies: the tiers, the generation, the cache verdict
+-- ($upstream_cache_status) and the micro would-cache verdict — or "opt-out".
+-- Observing only: the caching itself is done by static_gate / micro_gate and
+-- the proxy_cache locations. Safe to call from any phase where ngx.header is
+-- writable (header_filter is recommended).
 function _M.observe()
     -- Master kill switch first: when SITE_CACHE is off, the module is a full
     -- no-op — no feed poll, no lookup, no header. (Default on; the per-vhost
@@ -614,7 +648,9 @@ function _M.observe()
     if not dbg or dbg == "" then return end
     local p = _M.policy_for(ngx.var.host)
     if p then
-        local lbl = "observe " .. label_for(p)
+        -- An opt-out row (no armed tier) is labelled as such, not left as a
+        -- bare "gen=N" that reads like a malformed policy.
+        local lbl = "observe " .. (policy_armed(p) and "" or "opt-out ") .. label_for(p)
         -- Now that Tier A caches, surface the actual verdict too (HIT / MISS /
         -- BYPASS / EXPIRED / …) — debug-gated, so ordinary clients never see it.
         local st = ngx.var.upstream_cache_status

@@ -4135,14 +4135,17 @@ func (e *Engine) HTTP3OverrideHasAny() bool {
 
 // ---------------------------------------------------------------------------
 // Site Cache per-vhost policy. Default for every vhost is "no caching"; entries
-// here are the OPT-IN list (static and/or micro tier). Phase 1 is daemon-side
-// only — see site_cache.go and docs/site-cache-design.md.
+// here opt a vhost in (static and/or micro tier) or, with both tiers off, out
+// of a broader armed wildcard. Fed to the edge on /nginx/cache/config — see
+// site_cache.go and docs/site-cache-design.md.
 
-func (e *Engine) SiteCacheSet(in SiteCacheEntry) (SiteCacheEntry, error) {
+// SiteCacheApply merges a patch onto a vhost's stored policy (the /set API).
+// scoped marks a scoped (tenant) caller, recorded on a new entry's audit trail.
+func (e *Engine) SiteCacheApply(p SiteCachePatch, scoped bool) (SiteCacheEntry, error) {
 	if e == nil || e.siteCache == nil {
 		return SiteCacheEntry{}, errors.New("site cache unavailable")
 	}
-	return e.siteCache.Set(in)
+	return e.siteCache.Apply(p, scoped)
 }
 
 func (e *Engine) SiteCacheRemove(host string) bool {
@@ -4173,6 +4176,15 @@ func (e *Engine) SiteCacheGet(host string) (SiteCacheEntry, bool) {
 	return e.siteCache.Get(host)
 }
 
+// SiteCacheFrozenHosts lists the hosts of stored policies this build cannot
+// load (each treated as an opt-out at the edge; see siteCacheStore.frozen).
+func (e *Engine) SiteCacheFrozenHosts() []string {
+	if e == nil || e.siteCache == nil {
+		return nil
+	}
+	return e.siteCache.FrozenHosts()
+}
+
 func (e *Engine) SiteCacheList() []SiteCacheEntry {
 	if e == nil || e.siteCache == nil {
 		return nil
@@ -4187,8 +4199,9 @@ func (e *Engine) SiteCacheHasAny() bool {
 	return e.siteCache.HasAny()
 }
 
-// SiteCachePolicyFeed is the /nginx/cache/config bridge feed (enabled vhosts
-// only). Phase 2: observe-only at the edge.
+// SiteCachePolicyFeed is the /nginx/cache/config bridge feed: armed vhosts
+// plus the opt-out rows of all-off entries (exact hosts or narrower
+// wildcards) under a broader armed wildcard (see siteCacheStore.PolicyFeed).
 func (e *Engine) SiteCachePolicyFeed() []CachePolicyRow {
 	if e == nil || e.siteCache == nil {
 		return nil

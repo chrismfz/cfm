@@ -7,10 +7,15 @@
 // Subcommands:
 //   list                                     — show configured vhosts
 //   get     <vhost>                          — one vhost's policy (JSON)
-//   set     <vhost> [--static R] [--micro R] — upsert a policy
-//               [--static-ttl D] [--micro-ttl D] [--strict-cookies]
-//               [--auth-cookies a,b,c]
-//   off     <vhost>                          — turn caching OFF (aliases: remove, rm, disable)
+//   set     <vhost> [--static R|off] [--micro R|off] — create/update a policy;
+//               [--static-ttl D] [--micro-ttl D]      changes ONLY the flags
+//               [--strict-cookies|--no-strict-cookies] given (merge)
+//               [--auth-cookies a,b,c|--no-auth-cookies]
+//   off     <vhost>                          — caching OFF: both tiers off, kept as an
+//                                              opt-out that also overrides a broader
+//                                              armed *.suffix wildcard (alias: disable)
+//   remove  <vhost>                          — DELETE the policy: the host then follows a
+//                                              covering *.suffix wildcard (alias: rm)
 //   purge   <vhost> | --all                  — bump generation (--all is admin-only)
 //
 // HTTP goes through internal/clihttp (the sanctioned CLI transport, CLAUDE.md §5).
@@ -45,12 +50,17 @@ func runSiteCacheWebTop(baseURL string, args []string) error {
 		return runSiteCacheGet(baseURL, args[1])
 	case "set":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: cfm webtop site-cache set <vhost> [--static RECIPE] [--micro RECIPE] [--static-ttl D] [--micro-ttl D] [--strict-cookies] [--auth-cookies a,b,c]")
+			return fmt.Errorf("usage: cfm webtop site-cache set <vhost> [--static RECIPE|off] [--micro RECIPE|off] [--static-ttl D] [--micro-ttl D] [--strict-cookies|--no-strict-cookies] [--auth-cookies a,b,c|--no-auth-cookies]")
 		}
 		return runSiteCacheSet(baseURL, args[1], args[2:])
-	case "off", "remove", "rm", "disable":
+	case "off", "disable":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: cfm webtop site-cache off <vhost>")
+		}
+		return runSiteCacheOff(baseURL, args[1])
+	case "remove", "rm":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: cfm webtop site-cache remove <vhost>")
 		}
 		return runSiteCacheRemove(baseURL, args[1])
 	case "purge":
@@ -59,7 +69,7 @@ func runSiteCacheWebTop(baseURL string, args []string) error {
 		return runSiteCacheStats(baseURL, args[1:])
 	default:
 		printSiteCacheHelp()
-		return fmt.Errorf("unknown site-cache subcommand %q (use list|get|set|off|purge|stats)", args[0])
+		return fmt.Errorf("unknown site-cache subcommand %q (use list|get|set|off|remove|purge|stats)", args[0])
 	}
 }
 
@@ -76,18 +86,29 @@ Usage:
   cfm webtop site-cache list                          list configured vhosts
   cfm webtop site-cache get <vhost>                   show one vhost's policy (JSON)
   cfm webtop site-cache set <vhost> [flags]           create/update a policy
-  cfm webtop site-cache off <vhost>                   turn caching OFF for a vhost
+  cfm webtop site-cache off <vhost>                   turn caching OFF (both tiers off; this
+                                                      also opts the vhost — or a narrower
+                                                      *.suffix — out of a broader armed
+                                                      wildcard; re-arming starts a fresh cache)
+  cfm webtop site-cache remove <vhost>                delete the vhost's policy (it then
+                                                      follows a covering *.suffix wildcard)
   cfm webtop site-cache purge <vhost>                 invalidate a vhost's cache
   cfm webtop site-cache purge --all                   invalidate ALL vhosts (admin only)
   cfm webtop site-cache stats [vhost]                 per-vhost HIT/MISS/hit-ratio
 
-set flags:
+set flags (set changes ONLY the flags you pass; the rest of the policy is kept;
+turning static on, or re-enabling micro, starts the vhost from an empty cache):
   --static RECIPE        enable the static tier with RECIPE
+  --static off           disable the static tier (its recipe/TTL are kept)
   --micro  RECIPE        enable the micro tier with RECIPE
+  --micro off            disable the micro tier (its recipe/TTL are kept)
   --static-ttl D         static TTL bucket (e.g. 1h, 7d, 30d)
   --micro-ttl  D         micro TTL bucket (e.g. 1s, 5s, 30s)
   --strict-cookies       bypass on ANY non-CFM cookie (max safety, less cache)
+  --no-strict-cookies    back to the named auth-cookie allowlist (the default)
   --auth-cookies a,b,c   extra app-session cookie names that force a bypass
+                         (replaces the stored list)
+  --no-auth-cookies      clear the extra auth-cookie list
 
 Scope: admin tokens manage any host; scoped (cPanel) tokens manage only their
 own vhosts. purge --all is admin only.`)
@@ -108,8 +129,16 @@ func runSiteCacheList(baseURL string) error {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return fmt.Errorf("site-cache list: server returned non-JSON (%d bytes): %q", len(body), strings.TrimSpace(string(body)))
 	}
+	if len(payload.Unloadable) > 0 {
+		fmt.Printf("! stored policies this build cannot load (e.g. from a newer version; see the daemon log) — treated as OPTED OUT, never cached; 'off' replaces one (keeps it uncached), 'remove' deletes it, an upgrade reads it again: %s\n",
+			strings.Join(payload.Unloadable, ", "))
+	}
 	if len(payload.Rows) == 0 {
-		fmt.Println("No vhosts configured for caching. Default is OFF.")
+		if len(payload.Unloadable) > 0 {
+			fmt.Println("No other vhosts configured for caching.")
+		} else {
+			fmt.Println("No vhosts configured for caching. Default is OFF.")
+		}
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
@@ -190,101 +219,168 @@ func runSiteCacheGet(baseURL, host string) error {
 }
 
 func runSiteCacheSet(baseURL, host string, flags []string) error {
-	entry := SiteCacheEntry{Host: host}
-	for i := 0; i < len(flags); i++ {
-		a := flags[i]
-		next := ""
-		if i+1 < len(flags) {
-			next = flags[i+1]
-		}
-		takeVal := func() (string, error) {
-			if next == "" || strings.HasPrefix(next, "--") {
-				return "", fmt.Errorf("missing value for %s", a)
-			}
-			i++
-			return next, nil
-		}
-		switch {
-		case a == "--static":
-			v, err := takeVal()
-			if err != nil {
-				return err
-			}
-			entry.Static.Enabled = true
-			entry.Static.Recipe = v
-		case strings.HasPrefix(a, "--static="):
-			entry.Static.Enabled = true
-			entry.Static.Recipe = strings.TrimPrefix(a, "--static=")
-		case a == "--micro":
-			v, err := takeVal()
-			if err != nil {
-				return err
-			}
-			entry.Micro.Enabled = true
-			entry.Micro.Recipe = v
-		case strings.HasPrefix(a, "--micro="):
-			entry.Micro.Enabled = true
-			entry.Micro.Recipe = strings.TrimPrefix(a, "--micro=")
-		case a == "--static-ttl":
-			v, err := takeVal()
-			if err != nil {
-				return err
-			}
-			entry.Static.TTL = v
-		case strings.HasPrefix(a, "--static-ttl="):
-			entry.Static.TTL = strings.TrimPrefix(a, "--static-ttl=")
-		case a == "--micro-ttl":
-			v, err := takeVal()
-			if err != nil {
-				return err
-			}
-			entry.Micro.TTL = v
-		case strings.HasPrefix(a, "--micro-ttl="):
-			entry.Micro.TTL = strings.TrimPrefix(a, "--micro-ttl=")
-		case a == "--strict-cookies":
-			entry.StrictCookies = true
-		case a == "--auth-cookies":
-			v, err := takeVal()
-			if err != nil {
-				return err
-			}
-			entry.AuthCookies = splitCSVCLI(v)
-		case strings.HasPrefix(a, "--auth-cookies="):
-			entry.AuthCookies = splitCSVCLI(strings.TrimPrefix(a, "--auth-cookies="))
-		default:
-			return fmt.Errorf("unknown flag %q (see: cfm webtop site-cache help)", a)
-		}
+	patch, err := parseSiteCacheSetFlags(host, flags)
+	if err != nil {
+		return err
 	}
-	if !entry.Static.Enabled && !entry.Micro.Enabled {
-		return fmt.Errorf("nothing to enable: pass --static RECIPE and/or --micro RECIPE (or use 'off' to disable)")
+	e, err := postSiteCachePatch(baseURL, patch, "site-cache set")
+	if err != nil {
+		return err
 	}
+	fmt.Printf("✓ cache policy set for %s (static=%s micro=%s)\n",
+		e.Host, siteCacheTierCLI(e.Static), siteCacheTierCLI(e.Micro))
+	return nil
+}
 
-	b, _ := json.Marshal(entry)
+// runSiteCacheOff turns BOTH tiers off and KEEPS the entry: an explicit
+// opt-out (for an exact host, or a narrower wildcard under a broader armed
+// one). Deleting the entry (what `off` used to do) left a host under an
+// admin's armed *.suffix wildcard cached by that wildcard — and deleted an
+// opt-out, turning caching back ON.
+func runSiteCacheOff(baseURL, host string) error {
+	off := false
+	e, err := postSiteCachePatch(baseURL, SiteCachePatch{
+		Host:   host,
+		Static: &SiteCacheTierPatch{Enabled: &off},
+		Micro:  &SiteCacheTierPatch{Enabled: &off},
+	}, "site-cache off")
+	if err != nil {
+		return err
+	}
+	what := "it"
+	if strings.HasPrefix(e.Host, "*.") {
+		what = "its sub-hosts"
+	}
+	note := ""
+	if e.CreatedAt.Equal(e.UpdatedAt) {
+		// A brand-new entry: `off` used to 404 on a host with no policy, so
+		// say what happened — a typo would otherwise pass unnoticed.
+		note = " It had no policy this build can read; an opt-out was stored (replacing any stored policy this build could not load)."
+	}
+	fmt.Printf("✓ caching OFF for %s: both tiers off, and a broader armed *.suffix wildcard no longer caches %s either ('remove' deletes the policy instead).%s\n", e.Host, what, note)
+	return nil
+}
+
+func postSiteCachePatch(baseURL string, patch SiteCachePatch, label string) (*SiteCacheEntry, error) {
+	b, _ := json.Marshal(patch)
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/site-cache/set"
 	resp, err := clihttp.Post(u, "application/json", bytes.NewReader(b))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("site-cache set HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("%s HTTP %d: %s", label, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var result siteCacheResultResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("site-cache set: server returned non-JSON (%d bytes): %q", len(body), strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("%s: server returned non-JSON (%d bytes): %q", label, len(body), strings.TrimSpace(string(body)))
 	}
 	if result.Error != "" {
-		return fmt.Errorf("site-cache set error: %s", result.Error)
+		return nil, fmt.Errorf("%s error: %s", label, result.Error)
 	}
-	fmt.Printf("✓ cache policy set for %s (static=%s micro=%s)\n",
-		result.Entry.Host, siteCacheTierCLI(result.Entry.Static), siteCacheTierCLI(result.Entry.Micro))
-	return nil
+	if result.Entry == nil {
+		return nil, fmt.Errorf("%s: server returned no entry", label)
+	}
+	return result.Entry, nil
 }
+
+// parseSiteCacheSetFlags turns `set` flags into a merge patch: only the flags
+// given are sent, so the server keeps every other stored field (the set used
+// to send a whole policy built from the flags alone, which reset the omitted
+// tier and the cookie settings on every retune).
+func parseSiteCacheSetFlags(host string, flags []string) (SiteCachePatch, error) {
+	p := SiteCachePatch{Host: host}
+	tier := func(t **SiteCacheTierPatch) *SiteCacheTierPatch {
+		if *t == nil {
+			*t = &SiteCacheTierPatch{}
+		}
+		return *t
+	}
+	setRecipe := func(t **SiteCacheTierPatch, v string) {
+		tp := tier(t)
+		if strings.EqualFold(strings.TrimSpace(v), "off") {
+			tp.Enabled = boolPtrCLI(false)
+			return
+		}
+		tp.Enabled = boolPtrCLI(true)
+		tp.Recipe = &v
+	}
+	for i := 0; i < len(flags); i++ {
+		a := flags[i]
+		name, val, hasEq := strings.Cut(a, "=")
+		takeVal := func() (string, error) {
+			if hasEq {
+				return val, nil
+			}
+			if i+1 >= len(flags) || flags[i+1] == "" || strings.HasPrefix(flags[i+1], "--") {
+				return "", fmt.Errorf("missing value for %s", a)
+			}
+			i++
+			return flags[i], nil
+		}
+		noValue := func() error {
+			if hasEq {
+				return fmt.Errorf("%s takes no value", name)
+			}
+			return nil
+		}
+		switch name {
+		case "--static", "--micro", "--static-ttl", "--micro-ttl":
+			v, err := takeVal()
+			if err != nil {
+				return SiteCachePatch{}, err
+			}
+			if strings.TrimSpace(v) == "" {
+				return SiteCachePatch{}, fmt.Errorf("empty value for %s", name)
+			}
+			switch name {
+			case "--static":
+				setRecipe(&p.Static, v)
+			case "--micro":
+				setRecipe(&p.Micro, v)
+			case "--static-ttl":
+				tier(&p.Static).TTL = &v
+			case "--micro-ttl":
+				tier(&p.Micro).TTL = &v
+			}
+		case "--strict-cookies", "--no-strict-cookies":
+			if err := noValue(); err != nil {
+				return SiteCachePatch{}, err
+			}
+			p.StrictCookies = boolPtrCLI(name == "--strict-cookies")
+		case "--auth-cookies":
+			v, err := takeVal()
+			if err != nil {
+				return SiteCachePatch{}, err
+			}
+			list := splitCSVCLI(v)
+			if len(list) == 0 {
+				return SiteCachePatch{}, fmt.Errorf("empty --auth-cookies (use --no-auth-cookies to clear the list)")
+			}
+			p.AuthCookies = &list
+		case "--no-auth-cookies":
+			if err := noValue(); err != nil {
+				return SiteCachePatch{}, err
+			}
+			empty := []string{}
+			p.AuthCookies = &empty
+		default:
+			return SiteCachePatch{}, fmt.Errorf("unknown flag %q (see: cfm webtop site-cache help)", a)
+		}
+	}
+	if p.Static == nil && p.Micro == nil && p.StrictCookies == nil && p.AuthCookies == nil {
+		return SiteCachePatch{}, fmt.Errorf("nothing to change: pass --static RECIPE and/or --micro RECIPE, or another set flag ('off' turns caching off)")
+	}
+	return p, nil
+}
+
+func boolPtrCLI(b bool) *bool { return &b }
 
 func runSiteCacheRemove(baseURL, host string) error {
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/site-cache/remove?host=" + url.QueryEscape(host)
-	return siteCachePostStatus(u, fmt.Sprintf("✓ caching OFF for %s\n", host), "site-cache off")
+	return siteCachePostStatus(u, fmt.Sprintf("✓ policy removed for %s — it now follows the most specific *.suffix wildcard covering it, if any: when that one is armed, its policy (and its cache) applies; with none, it is uncached. Use 'off' to keep it uncached.\n", host), "site-cache remove")
 }
 
 func runSiteCachePurge(baseURL string, args []string) error {

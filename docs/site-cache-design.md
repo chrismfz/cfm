@@ -452,16 +452,17 @@ expect no measurable delta.
 
 New `siteCacheStore` in `internal/webdetector/site_cache.go`, JSON at
 `/var/lib/cfm/webdetector_site_cache.json` (knob `SITE_CACHE_STORE_PATH`),
-write-through source of truth with atomic save + forward-compat `frozen` map —
-same mechanics as `http3_overrides_store.go` / `traffic_rules.go`. One entry per
+write-through source of truth with atomic save (the store mechanics of
+`http3_overrides_store.go`), plus the forward-compatible freezing of rows it
+cannot load that `challenge_access.go` uses (below). One entry per
 vhost, holding **independent per-tier sub-policies** so a vhost can run static
 and micro together:
 
 ```jsonc
 {
   "host": "myip.gr",
-  "scope_hosts": ["myip.gr"],          // audit + scoped-token gating; caller's own scope
-  "generation": 3,                       // bumped by Purge (§10); part of the cache key
+  "scope_hosts": ["myip.gr"],          // audit only: [host] if a scoped token created it, absent if an admin did
+  "generation": 1758585600123,           // wall-clock ms, replaced by Purge (§10); part of the cache key
   "static": { "enabled": true,  "recipe": "static_aggressive", "ttl": "7d" },
   "micro":  { "enabled": false, "recipe": "micro_safe",        "ttl": "1s" },
   "strict_cookies": false,               // §4.1 advanced: bypass on ANY non-ignored cookie
@@ -472,8 +473,100 @@ and micro together:
 
 `generation` is folded into the cache key (as built:
 `"g<gen>|$server_addr|$scheme|$cf_xfp://$host$request_uri"` via a Lua-set `$cfm_cache_gen`), so a Purge
-is a counter bump — old keys become unreachable and age out under `inactive`,
-with no filesystem walking.
+is a generation change — old keys become unreachable and age out under
+`inactive`, with no filesystem walking. A value must **never be issued twice**:
+a remove + re-add that reused an old value (it used to restart at 0) turned
+that value's still-on-disk objects back into HITs, undoing an earlier purge. So
+a new or purged generation is the **wall clock in milliseconds**, bumped past
+every generation the store has issued or loaded (`nextGenerationLocked`) —
+unique store-wide, so an exact host's fresh policy never shares a key space
+with its covering wildcard either. Milliseconds because the edge renders it
+with Lua `tostring` (`%.14g`), exact only below 1e14. Neither it nor
+`created_at` is client-settable. The high-water mark is rebuilt from the stored
+entries on restart, so a removed host's last value is forgotten; a repeat then
+needs the clock to have stepped back past it (a VM restore, a boot before NTP
+sync) and a new generation to land on exactly that millisecond.
+
+`scope_hosts` records only WHO first enabled caching: exactly `[host]` when a
+scoped token created the policy, absent when an admin did, preserved across
+later edits. It used to hold the creating token's whole vhost allowlist, which
+showed a tenant's full domain list to any other tenant whose scope held that
+host; legacy entries are trimmed to `[host]` on load, and the file is
+rewritten at once (a stored `:port` or a duplicate host triggers the same
+rewrite). Access is gated by the live token scope at the API, never by this
+field.
+
+**Feed (`/nginx/cache/config`) and wildcards.** The edge feed carries every
+vhost with an armed tier, ordered exact hosts first, then `*.suffix` wildcards
+MOST SPECIFIC (longest) first — `cfm_cache.lua` sorts the same way and takes the
+first matching wildcard, so with `*.example.com` and `*.shop.example.com` both
+armed, `x.shop.example.com` gets the narrower policy. An all-off EXACT host
+that an armed wildcard covers is sent as an **opt-out row** (no tier): the
+edge's exact match wins, so that host caches nothing — a tenant can opt its own
+vhost out of an admin wildcard. An all-off NARROWER wildcard under a broader
+armed one is an opt-out row too (the edge takes the most specific wildcard);
+an all-off entry nothing armed covers is left out of the feed.
+
+**Off vs remove.** An exact entry with both tiers off IS the opt-out, so the
+two ways to stop caching differ under an armed wildcard:
+
+- **off** (CLI `off`/`disable`; API `set` with both tiers `enabled:false`) keeps
+  an all-off entry: the host is never cached, wildcard or not. The same works
+  for a narrower wildcard under a broader armed one (`off '*.shop.example.com'`
+  under `*.example.com`): the feed carries it as an opt-out row too, so none of
+  its sub-hosts are cached.
+- **remove** (CLI `remove`/`rm`; API `remove`) deletes the entry: the host is
+  uncached unless an armed wildcard covers it, which then applies.
+
+Re-arming a tier — static off → on, or micro off → on with the recipe it kept
+while off — issues a fresh generation: a tier is often turned off BECAUSE
+something wrong got cached (a per-user asset or page, §14), and its zone may
+still hold — and, through `use_stale`, serve — those objects, so turning it
+back on must not reach them. Both tiers share the generation, so re-arming one
+also starts the other from an empty cache (a refill, never a wrong answer). A
+FIRST micro enable (no stored recipe) has no old micro objects to hide and
+keeps the static cache. Turning a tier off, or any other config change, keeps
+it. The same reasoning applies to the `SITE_CACHE = 0` panic button, which
+keeps every generation: purge before setting it back to 1 if you pulled it
+because something wrong got cached.
+
+Stores written before generations were wall-clock ms counted every policy from
+0, so an exact host and its covering wildcard could share one (one key space
+for that host, whose objects may belong to either policy) and a value could be
+one a purge had retired. On load, EVERY generation below 1e12 (a legacy
+counter) or at/above 1e14 (not exactly renderable at the edge) is reissued —
+one cache refill per such policy, once — and the file is rewritten.
+
+**Rows this build cannot load** — a recipe or a field from a newer build
+(after a downgrade: any unknown field freezes the row, since a newer build's
+safety setting must not be ignored), or a malformed hand edit — are kept in the
+file as stored (re-indented) through that rewrite and every later save, and
+never served. They FAIL CLOSED: the host of such a row is treated as an opt-out
+(a frozen wildcard: every sub-host under it that has no more specific
+policy), so a covering armed
+wildcard does not start caching it. `list` names them under `unloadable`
+(scope-filtered), and `get`/`purge` say why there is no row. A `set` that would
+arm such a host is refused (merging onto an empty policy would drop the stored
+one's cookie settings); `remove` deletes it, and an explicit off REPLACES it —
+any `set` (incl. `off`) for a host replaces its unloadable rows in the same
+save, so the host then has only the new row, and a later upgrade finds the
+replacement, not the old policy. A purge does not reach an unloadable row
+(after a re-upgrade it returns with the generation it had). (A loadable and an
+unloadable row for one host — a hand edit — serve the loadable one until its
+next `set`.) Because any unknown field
+freezes a row, a NEW field must be `omitempty` with its zero value meaning the
+old behaviour — or a downgrade to a build that lacks it uncaches every vhost.
+
+A tier's recipe cannot be cleared through `set` (disable the tier instead): a
+disabled tier keeps its recipe, which is how a re-enable knows the tier may
+have cached something and must start from a fresh generation.
+
+Because an all-off entry changes what a covering wildcard does, `set` creates
+a NEW entry all-off only when it turns both tiers off explicitly; a `set` that
+would merely stage a TTL or a cookie setting for an unconfigured host is
+rejected. Hosts carry no `:port` — the edge strips it from the request Host and
+from the feed, so a new policy with a port is rejected and a stored one is
+normalized.
 
 ---
 
@@ -483,17 +576,18 @@ with no filesystem walking.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET  | `/api/v1/site-cache/list` | scope-filtered; supports `?host=` and sort params |
+| GET  | `/api/v1/site-cache/list` | scope-filtered; every stored entry (armed, and all-off opt-outs), sorted by host; `unloadable` names hosts whose stored row this build cannot load (treated as opted out, §6) |
 | GET  | `/api/v1/site-cache/get?host=` | one vhost |
-| POST | `/api/v1/site-cache/set` | `requirePOST`; upsert (host in body); scoped→own host only. One entry per vhost, so a single upsert replaces the add/update pair — the host is the immutable key, `set` stamps `scope_hosts` from the token |
-| POST | `/api/v1/site-cache/remove` | i.e. OFF for a vhost |
+| POST | `/api/v1/site-cache/set` | `requirePOST`; **merge**-upsert (host in body); scoped→own host only. One entry per vhost, so a single upsert replaces the add/update pair — the host is the immutable key. Only the fields present change (`{"host":"x","micro":{"ttl":"30s"}}` retunes one TTL and keeps the static tier and cookie settings; `enabled:false`, `strict_cookies:false` and an empty `auth_cookies` list are applied, JSON `null` keeps); a new host must enable a tier or turn BOTH tiers off (an opt-out, §6). `scope_hosts` comes from the token (§6) |
+| POST | `/api/v1/site-cache/remove` | deletes the vhost's policy; the host then follows a covering armed wildcard (§6 "Off vs remove") |
 | POST | `/api/v1/site-cache/purge` | `?host=` (per-vhost) or `?all=1` (global, admin) |
 | GET  | `/api/v1/site-cache/stats?host=` | per-vhost cache stats (§11), scope-filtered (own vhosts / all) |
 
 Prefix `site-cache` added to `SharedAPIPrefixes()` so the shared apiserver
 proxies it to the engine mux. Never a bare `mux.HandleFunc` (a prefix-coverage
-test walks the table). Every add/remove/purge routes through one
-`logExcludeChange`-style choke point for lifecycle audit.
+test walks the table). Lifecycle audit of set/remove/purge (one
+`logExcludeChange`-style choke point) is planned, NOT built yet: today only a
+failed save is logged.
 
 ### 7.2 CLI (`cfm webtop site-cache …`)
 
@@ -502,10 +596,13 @@ New `case "site-cache":` in the `webtop` dispatch (`cli.go`), implemented in
 over the JSON API (through `internal/clihttp`, per the transport guardrail):
 
 ```
-cfm webtop site-cache list [--host H] [--sort host|updated]
+cfm webtop site-cache list
 cfm webtop site-cache get <host>
-cfm webtop site-cache set <host> [--static RECIPE] [--micro RECIPE] [--static-ttl D] [--micro-ttl D] [--strict-cookies]
-cfm webtop site-cache off <host>          # remove / disable
+cfm webtop site-cache set <host> [--static RECIPE|off] [--micro RECIPE|off] [--static-ttl D] [--micro-ttl D]
+                                  [--strict-cookies|--no-strict-cookies] [--auth-cookies a,b|--no-auth-cookies]
+                                  # sends ONLY the flags given (merge)
+cfm webtop site-cache off <host>          # both tiers off, kept: an opt-out (alias: disable)
+cfm webtop site-cache remove <host>       # delete the policy; follows a covering wildcard (alias: rm)
 cfm webtop site-cache purge <host>        # or: purge --all
 cfm webtop site-cache stats [host]        # hit-ratio + HIT/MISS/BYPASS breakdown
 ```
@@ -521,7 +618,9 @@ Multi-page app, directory-routed (`internal/webui/embed.go`). Template =
 
 - a vhost table with **filter + sort** (host, tier(s) on, recipe, TTL, gen,
   updated, HIT-ratio), a per-row **OFF** and **Purge**, and a top-level
-  **Purge all** (admin);
+  **Purge all** (admin). OFF is the opt-out (`set` with both tiers off, §6),
+  not a delete — a delete (`remove`) lets a covering wildcard cache the vhost
+  again, so if the page offers it at all, it is a separate, labelled action;
 - a **Recipes** panel (§8). Per-URL verification is done with the
   `X-CFM-Cache` debug header (§8, §11.3), not a simulate panel.
 
@@ -585,16 +684,25 @@ reuses the tested precedent verbatim:
 - `RequireScopedOrAdmin` + `scopeAllowsVhosts(r, vhosts)` on every write
   (`challenge_access_api_handlers.go` shape): nil scope = admin (unrestricted);
   empty scope = deny; else every target host must be in the token allowlist.
-- Update re-checks **both** the existing entry's and the new host set (no
-  re-scoping escalation). Remove/Purge re-fetch and scope-check first.
-- List/stats are scope-filtered (`scopeFilterChallengeAccess` shape),
-  cross-tenant hosts redacted.
+- The host is the entry's immutable key, so checking the ONE requested host
+  (literally, lowercased — the store then only trims a trailing dot or a
+  port, so it can never land on a different host) covers set, get, remove and
+  purge alike; there is no re-scoping to guard against.
+- List/stats are scope-filtered with `vhostAllowed` on each row's key (an
+  out-of-scope row is left out, not redacted).
 - **Purge-all** (`?all=1`) is **admin-only**; a scoped `purge` is implicitly
   scoped to the caller's own vhosts.
 
 Because the §4 rails are absolute, a tenant's "aggressive" choice can still only
 ever cache their own anonymous, cookieless, non-redirect 200s — so full
 self-service power carries no cross-tenant or correctness risk.
+
+Scope matching is literal, as on the HTTP/3 and challenge-access endpoints: a
+token whose scope holds a `*.example.com` entry (cPanel lists an account's
+wildcard subdomain that way) manages the `*.example.com` policy — and its
+aggregate stats row — even if an admin created it. That reaches another tenant
+only if another account hosts a sub-host of that domain, which cPanel allows
+only with its cross-account subdomain options (off by default).
 
 Update `docs/endpoint_scope_inventory.md` in the same change (hard rule,
 CLAUDE.md §5): site-cache list/get/stats = scoped-allowed (own host);
@@ -607,7 +715,8 @@ set/remove/purge = scoped-allowed (own host); purge-all = admin-only.
 - **Micro-cache is self-healing** (1–30s TTL) — rarely needs an explicit purge.
 - **Static (long TTL) needs purge.** Mechanism: **generation bump.** Each
   vhost entry carries `generation`; the cache key includes it
-  (`g<gen>|<server IP>|<listener scheme>|<scheme told to origin>://<host><uri>`). Purge = `generation++` in the store →
+  (`g<gen>|<server IP>|<listener scheme>|<scheme told to origin>://<host><uri>`). Purge = a new, never-used
+  generation in the store (wall-clock ms, §6) →
   new key space → old entries age out under `inactive`. No filesystem walking,
   no `proxy_cache_purge` (commercial) dependency, works on both OpenResty and
   Angie. (A future per-URL purge has to cover every key variant the URL can
@@ -618,6 +727,17 @@ set/remove/purge = scoped-allowed (own host); purge-all = admin-only.
   `purge --all`. cfm-admin per-row **Purge** + top **Purge all**.
 - **Per-URL purge** (delete a single path) is a later extension building on
   `cfm_purge.lua`; not in Phase 1.
+- **A purge covers ONE policy key.** The edge keys a request on the
+  generation of the policy that matched it. A host that moves back under a
+  covering wildcard — its exact policy removed, or a narrower wildcard removed —
+  finds that wildcard's own cached objects for it again (served within the
+  wildcard's TTL, like any object of that policy). A purge of the host's former
+  exact policy never reached them; only a purge of the wildcard does, and a
+  scoped tenant cannot purge an admin's wildcard. To keep a tenant's purge
+  meaningful, keep an exact policy (or an opt-out) rather than removing it.
+  Follow-up: a per-host "inherit" row (the host follows the wildcard's tiers
+  under its own generation) would give a tenant a per-host purge under an
+  admin wildcard.
 
 ---
 
@@ -847,11 +967,17 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      to the CURRENTLY-armed policy set** (`armedCacheKeys`): the edge dict keeps a
      vhost's counts until an edge reload, so a vhost unarmed after its last push
      would otherwise linger as a stale "still cached" row — the armed store is
-     truth. A by-host query resolves a concrete sub-host to its wildcard policy
-     key (`resolveArmedCacheKey`) so a `*.suffix`-armed vhost is drillable.
+     truth (a stored but all-off policy is not armed). A by-host query resolves
+     a concrete sub-host to the key the edge counts it under
+     (`siteCacheStore.StatsKeyFor`, the Go mirror of `policy_key_for`: its exact
+     policy, else the most specific wildcard in the feed — nothing when that
+     one is an opt-out) so a `*.suffix`-armed vhost is drillable; a scoped
+     caller resolves only to keys inside its own scope, so not to a wildcard its
+     scope does not literally hold (that row aggregates every tenant under the
+     pattern; see §9 for a scope that holds `*.x`).
      Read via `GET /api/v1/site-cache/stats[?host=]` (scope-filtered like the
      other site-cache endpoints), `cfm webtop site-cache stats [host]`, and two
-     MCP tools — `site_cache_status` (armed vhosts + tiers) and
+     MCP tools — `site_cache_status` (stored policies + tiers) and
      `site_cache_stats` (HIT/MISS/BYPASS + a STRICT hit ratio — STALE/UPDATING/
      REVALIDATED serve from cache but sit in the denominator only, so read the
      full breakdown). `ucache="$upstream_cache_status"` was added to the `cfm`

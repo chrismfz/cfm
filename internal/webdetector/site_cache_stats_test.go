@@ -2,8 +2,12 @@
 package webdetector
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -89,8 +93,8 @@ func TestSiteCacheStatsRow(t *testing.T) {
 
 func seedStats(e *Engine) {
 	// Stats are shown only for CURRENTLY-armed vhosts, so arm them too.
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "mysite.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "other.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "mysite.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "other.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
 	e.siteCacheStats.Upsert("mysite.com", map[string]int{"HIT": 9, "MISS": 1, "total": 10})
 	e.siteCacheStats.Upsert("other.com", map[string]int{"HIT": 1, "MISS": 9, "total": 10})
 }
@@ -165,7 +169,7 @@ func TestSiteCacheStatsAPI_NoScopeFailsClosed(t *testing.T) {
 // edge dict keeps stale counts until reload, so the armed policy set is truth.
 func TestSiteCacheStats_UnarmedDropsOut(t *testing.T) {
 	e, _ := newSiteCacheAPITestEngine(t)
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "gone.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "gone.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
 	e.siteCacheStats.Upsert("gone.com", map[string]int{"HIT": 5, "MISS": 5, "total": 10})
 
 	if rows := e.SiteCacheStatsAll(); len(rows) != 1 {
@@ -176,7 +180,7 @@ func TestSiteCacheStats_UnarmedDropsOut(t *testing.T) {
 	if rows := e.SiteCacheStatsAll(); len(rows) != 0 {
 		t.Fatalf("unarmed vhost must not appear in stats, got %+v", rows)
 	}
-	if _, ok := e.SiteCacheStatsHost("gone.com"); ok {
+	if _, ok := e.SiteCacheStatsHost("gone.com", nil); ok {
 		t.Fatalf("unarmed vhost must not resolve by host")
 	}
 }
@@ -184,21 +188,130 @@ func TestSiteCacheStats_UnarmedDropsOut(t *testing.T) {
 // A concrete sub-host of a wildcard-armed vhost must resolve to the pattern row.
 func TestSiteCacheStats_WildcardDrilldown(t *testing.T) {
 	e, _ := newSiteCacheAPITestEngine(t)
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "*.cdn.example.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "*.cdn.example.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
 	// The edge keys stats under the pattern (policy_key_for folds sub-hosts).
 	e.siteCacheStats.Upsert("*.cdn.example.com", map[string]int{"HIT": 3, "MISS": 1, "total": 4})
 
 	// Drill down by a CONCRETE sub-host → resolves to the pattern row.
-	row, ok := e.SiteCacheStatsHost("assets.cdn.example.com")
+	row, ok := e.SiteCacheStatsHost("assets.cdn.example.com", nil)
 	if !ok || row.Host != "*.cdn.example.com" || row.Hit != 3 {
 		t.Fatalf("wildcard drill-down by sub-host failed: ok=%v row=%+v", ok, row)
 	}
 	// Querying the pattern itself also works.
-	if _, ok := e.SiteCacheStatsHost("*.cdn.example.com"); !ok {
+	if _, ok := e.SiteCacheStatsHost("*.cdn.example.com", nil); !ok {
 		t.Fatalf("pattern lookup should work")
 	}
 	// The bare suffix (not covered by *.cdn.example.com) does not resolve.
-	if _, ok := e.SiteCacheStatsHost("cdn.example.com"); ok {
+	if _, ok := e.SiteCacheStatsHost("cdn.example.com", nil); ok {
 		t.Fatalf("bare suffix must not match the wildcard")
+	}
+}
+
+// list names the hosts of stored policies this build cannot load (they are not
+// rows, and the edge opts them out), scope-filtered; get and purge explain the
+// 404; another tenant's is a plain 403.
+func TestSiteCacheAPI_ListShowsUnloadableHosts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "site_cache.json")
+	raw := `[
+	 {"host":"mysite.com","generation":1758585600001,"static":{"enabled":true,"recipe":"recipe_from_a_newer_build"},"micro":{"enabled":false}},
+	 {"host":"other.com","generation":1758585600002,"static":{"enabled":true,"recipe":"recipe_from_a_newer_build"},"micro":{"enabled":false}}]`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(Config{SiteCacheStorePath: path})
+	mux := http.NewServeMux()
+	e.RegisterHTTP(mux)
+	list := func(ctx context.Context) siteCacheListResponse {
+		t.Helper()
+		rr := doRequest(mux, ctx, http.MethodGet, "/api/v1/site-cache/list", nil)
+		var out siteCacheListResponse
+		if rr.Code != http.StatusOK {
+			t.Fatalf("list: %d %s", rr.Code, rr.Body.String())
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if out := list(scopedCtx("mysite.com")); len(out.Rows) != 0 || len(out.Unloadable) != 1 || out.Unloadable[0] != "mysite.com" {
+		t.Fatalf("scoped list: %+v", out)
+	}
+	if out := list(adminCtx()); len(out.Unloadable) != 2 {
+		t.Fatalf("admin list: %+v", out)
+	}
+	for _, ctx := range []context.Context{adminCtx(), scopedCtx("mysite.com")} {
+		rr := doRequest(mux, ctx, http.MethodGet, "/api/v1/site-cache/get?host=mysite.com", nil)
+		if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "cannot load") {
+			t.Fatalf("get of an unloadable host: %d %s", rr.Code, rr.Body.String())
+		}
+		rr = doRequest(mux, ctx, http.MethodPost, "/api/v1/site-cache/purge?host=mysite.com", nil)
+		if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "cannot load") {
+			t.Fatalf("purge of an unloadable host: %d %s", rr.Code, rr.Body.String())
+		}
+	}
+	// an out-of-scope unloadable host is a plain 403, no explanation
+	rr := doRequest(mux, scopedCtx("mysite.com"), http.MethodGet, "/api/v1/site-cache/get?host=other.com", nil)
+	if rr.Code != http.StatusForbidden || strings.Contains(rr.Body.String(), "cannot load") {
+		t.Fatalf("scoped get of another tenant's unloadable host: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// A scoped tenant drilling into its own sub-host of an admin's wildcard must NOT
+// get the wildcard's counts: that row aggregates every sub-host under the
+// pattern, other tenants' included.
+func TestSiteCacheStatsAPI_ScopedDrilldownNeverResolvesForeignWildcard(t *testing.T) {
+	e, mux := newSiteCacheAPITestEngine(t)
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "*.example.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	e.siteCacheStats.Upsert("*.example.com", map[string]int{"HIT": 70, "MISS": 30, "total": 100})
+
+	rr := doRequest(mux, scopedCtx("a.example.com"), http.MethodGet, "/api/v1/site-cache/stats?host=a.example.com", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("own host: expected 200, got %d", rr.Code)
+	}
+	var out siteCacheStatsResponse
+	_ = json.Unmarshal(rr.Body.Bytes(), &out)
+	if len(out.Rows) != 0 {
+		t.Fatalf("scoped drill-down resolved to the admin wildcard: %+v", out.Rows)
+	}
+	// An admin still drills down through the wildcard.
+	rr = doRequest(mux, adminCtx(), http.MethodGet, "/api/v1/site-cache/stats?host=a.example.com", nil)
+	_ = json.Unmarshal(rr.Body.Bytes(), &out)
+	if len(out.Rows) != 1 || out.Rows[0].Host != "*.example.com" {
+		t.Fatalf("admin drill-down: %+v", out.Rows)
+	}
+	// The 403 names why.
+	rr = doRequest(mux, scopedCtx("a.example.com"), http.MethodGet, "/api/v1/site-cache/stats?host=b.example.com", nil)
+	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "not in scope") {
+		t.Fatalf("out-of-scope: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// The drill-down resolves to the key the edge counts under: an exact policy
+// wins (armed → its own counts, never the wildcard's while it has none yet;
+// all-off → nothing, it is an opt-out), else the most specific armed wildcard
+// (never a broader one's counts).
+func TestSiteCacheStats_DrilldownMirrorsEdgeKey(t *testing.T) {
+	e, _ := newSiteCacheAPITestEngine(t)
+	on := SiteCacheTier{Enabled: true, Recipe: "static_lean"}
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "*.example.com", Static: on})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "*.shop.example.com", Static: on})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "new.example.com", Static: on})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "optout.example.com", Static: SiteCacheTier{Recipe: "static_lean"}})
+	e.siteCacheStats.Upsert("*.example.com", map[string]int{"HIT": 1, "total": 1})
+	e.siteCacheStats.Upsert("optout.example.com", map[string]int{"HIT": 5, "total": 5}) // stale, from when it was armed
+
+	for _, h := range []string{"new.example.com", "optout.example.com", "x.shop.example.com"} {
+		if row, ok := e.SiteCacheStatsHost(h, nil); ok {
+			t.Errorf("%s resolved to %+v; want no row", h, row)
+		}
+	}
+	if row, ok := e.SiteCacheStatsHost("a.example.com", nil); !ok || row.Host != "*.example.com" {
+		t.Fatalf("plain sub-host: ok=%v row=%+v", ok, row)
+	}
+	// An all-off policy is not armed: its lingering counts stay out of the list.
+	for _, r := range e.SiteCacheStatsAll() {
+		if r.Host == "optout.example.com" {
+			t.Fatalf("all-off vhost listed as live: %+v", r)
+		}
 	}
 }

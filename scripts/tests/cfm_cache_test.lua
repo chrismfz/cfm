@@ -372,6 +372,68 @@ _site_cache_on = true; _micro_enforce = false
 ngx.var.scheme = nil; ngx.var.request_method = nil; ngx.var.uri = nil; ngx.var.http_cookie = nil
 ngx.var.http_authorization = nil
 
+-- ── wildcard precedence, opt-out rows, wall-clock generations (PR-4a) ─────────
+-- The broader wildcard is fed FIRST on purpose: the edge must sort on its own,
+-- most specific (longest) pattern first, or x.shop.example.com would take the
+-- *.example.com policy.
+cache._rebuild_cache({
+  { host = "*.example.com", gen = 10,
+    static = { on = true, recipe = "static_lean", ttl = "1h" } },
+  { host = "*.shop.example.com", gen = 20,
+    micro = { on = true, recipe = "micro_safe", ttl = "5s" } },
+  -- opt-out row: an all-off exact host under an armed wildcard (no tier)
+  { host = "tenant.example.com", gen = 30 },
+  -- a wall-clock millisecond generation must render exactly (%.14g)
+  { host = "big.gen", gen = 1758585600123,
+    static = { on = true, recipe = "static_lean", ttl = "7d" } },
+})
+check(cache.policy_for("x.shop.example.com").gen == 20, "most specific wildcard wins regardless of feed order")
+check(cache.policy_key_for("x.shop.example.com") == "*.shop.example.com", "stats key is the most specific wildcard")
+check(cache.policy_for("a.example.com").gen == 10, "the broader wildcard still covers its other sub-hosts")
+local oo = cache.policy_for("tenant.example.com")
+check(oo ~= nil and oo.gen == 30 and oo.static == nil and oo.micro == nil,
+      "opt-out row: the exact (tier-less) policy wins over the armed wildcard")
+check(cache.policy_key_for("tenant.example.com") == nil, "opt-out row is uncounted (nil stats key)")
+reset_cache_vars(); ngx.var.host = "tenant.example.com"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "1", "opt-out row: static_gate leaves the host uncached despite the wildcard")
+_micro_enforce = true
+reset_gate_vars(); ngx.var.host = "tenant.example.com"
+check(cache.micro_gate() == nil, "opt-out row: micro_gate never routes it")
+reset_gate_vars(); ngx.var.host = "x.shop.example.com"
+check(cache.micro_gate() == "@cfm_micro_5s", "the wildcard's own sub-hosts still route (control)")
+_micro_enforce = false
+reset_cache_vars(); ngx.var.host = "big.gen"
+cache.static_gate()
+check(ngx.var.cfm_cache_gen == "1758585600123", "a millisecond generation renders exactly (no 1.7e+12)")
+-- the debug header names an opt-out row as such (not a bare "gen=N")
+for k in pairs(_header) do _header[k] = nil end
+ngx.var.http_x_cfm_cache_debug = "1"
+ngx.var.host = "tenant.example.com"
+cache.observe()
+check(_header["X-CFM-Cache"] == "observe opt-out gen=30", "observe labels an opt-out row: " .. tostring(_header["X-CFM-Cache"]))
+for k in pairs(_header) do _header[k] = nil end
+ngx.var.host = "a.example.com"
+cache.observe()
+check(_header["X-CFM-Cache"] ~= nil and not _header["X-CFM-Cache"]:find("opt-out", 1, true),
+      "an armed (wildcard) policy is not labelled opt-out")
+ngx.var.http_x_cfm_cache_debug = nil
+ngx.var.scheme = nil; ngx.var.request_method = nil; ngx.var.uri = nil; ngx.var.http_cookie = nil
+ngx.var.http_authorization = nil
+
+-- ── a narrower WILDCARD turned off under a broader armed one opts out too ─────
+cache._rebuild_cache({
+  { host = "*.example.com", gen = 10, static = { on = true, recipe = "static_lean", ttl = "1h" } },
+  { host = "*.shop.example.com", gen = 40 },   -- opt-out row (no tier)
+})
+local sw = cache.policy_for("x.shop.example.com")
+check(sw ~= nil and sw.gen == 40 and sw.static == nil, "a wildcard opt-out wins over the broader armed wildcard")
+check(cache.policy_key_for("x.shop.example.com") == nil, "a wildcard opt-out is uncounted (nil stats key)")
+check(cache.policy_key_for("y.example.com") == "*.example.com", "the broader wildcard still counts its other sub-hosts")
+reset_cache_vars(); ngx.var.host = "x.shop.example.com"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "1", "a wildcard opt-out: static_gate leaves its sub-hosts uncached")
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)

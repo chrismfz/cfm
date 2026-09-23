@@ -13,10 +13,15 @@
 //     admin-only.
 //
 // Endpoints:
-//   GET  /api/v1/site-cache/list                 — policies (scope-filtered)
+//   GET  /api/v1/site-cache/list                 — policies (scope-filtered), plus
+//                                                  `unloadable`: hosts whose stored
+//                                                  policy this build cannot load
 //   GET  /api/v1/site-cache/get?host=            — one vhost's policy
-//   POST /api/v1/site-cache/set                  — upsert (body = SiteCacheEntry)
-//   POST /api/v1/site-cache/remove?host=         — turn caching OFF for a vhost
+//   POST /api/v1/site-cache/set                  — merge-upsert (body = SiteCachePatch);
+//                                                  both tiers off = an explicit opt-out
+//                                                  (also under a broader armed wildcard)
+//   POST /api/v1/site-cache/remove?host=         — DELETE a vhost's policy (the host
+//                                                  then follows a covering *.suffix)
 //   POST /api/v1/site-cache/purge?host= | ?all=1 — bump generation (all=admin)
 
 package webdetector
@@ -29,11 +34,19 @@ import (
 
 type siteCacheListResponse struct {
 	Rows []SiteCacheEntry `json:"rows"`
+	// Unloadable lists the hosts of stored policies this build cannot load (a
+	// newer build's recipe or field, after a downgrade) that have no row in
+	// Rows: the edge treats each as OPTED OUT (never cached), not as "no
+	// entry". Scope-filtered like Rows.
+	Unloadable []string `json:"unloadable,omitempty"`
 }
 
 type siteCacheResultResponse struct {
-	Entry SiteCacheEntry `json:"entry,omitempty"`
-	Error string         `json:"error,omitempty"`
+	// A pointer so an error response carries no entry at all (omitempty is a
+	// no-op on a struct value, which used to marshal a zero entry beside the
+	// error).
+	Entry *SiteCacheEntry `json:"entry,omitempty"`
+	Error string          `json:"error,omitempty"`
 }
 
 // scopeFilterSiteCache returns only the policies a scoped token may see/manage
@@ -61,7 +74,14 @@ func (e *Engine) handleSiteCacheList(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
-	writeJSON(w, http.StatusOK, siteCacheListResponse{Rows: scopeFilterSiteCache(e.SiteCacheList(), r)})
+	var unloadable []string
+	scope := vhostScopeFromContext(r.Context())
+	for _, h := range e.SiteCacheFrozenHosts() {
+		if vhostAllowed(h, scope) {
+			unloadable = append(unloadable, h)
+		}
+	}
+	writeJSON(w, http.StatusOK, siteCacheListResponse{Rows: scopeFilterSiteCache(e.SiteCacheList(), r), Unloadable: unloadable})
 }
 
 // GET /api/v1/site-cache/get?host=<host>
@@ -84,13 +104,25 @@ func (e *Engine) handleSiteCacheGet(w http.ResponseWriter, r *http.Request) {
 	}
 	entry, ok := e.SiteCacheGet(host)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, siteCacheResultResponse{Error: "no cache policy for host"})
+		writeJSON(w, http.StatusNotFound, siteCacheResultResponse{Error: e.siteCacheNoPolicyMsg(host)})
 		return
 	}
-	writeJSON(w, http.StatusOK, siteCacheResultResponse{Entry: entry})
+	writeJSON(w, http.StatusOK, siteCacheResultResponse{Entry: &entry})
 }
 
-// POST /api/v1/site-cache/set  (upsert; host carried in the JSON body)
+// POST /api/v1/site-cache/set  (merge-upsert; host carried in the JSON body)
+//
+// The body is a SiteCachePatch: only the fields present are changed, the rest
+// of the stored policy is kept. So `{"host":"x","micro":{"ttl":"30s"}}` retunes
+// one TTL without touching the static tier or the cookie settings. A NEW host
+// must enable a tier, or turn BOTH off explicitly (an opt-out — see Apply).
+// Clearing takes an explicit value: `"strict_cookies":false`,
+// `"auth_cookies":[]`, `"ttl":""`. A SiteCacheEntry as returned by get is
+// accepted too, but its omitempty fields drop exactly those values, so posting
+// an edited entry back cannot clear them (it keeps them — the safe direction);
+// and it always carries both tiers' "enabled", so for a NEW host with both
+// false it creates an opt-out.
+// generation / created_at / scope_hosts in a body are ignored: server-managed.
 func (e *Engine) handleSiteCacheSet(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		writeJSON(w, http.StatusServiceUnavailable, siteCacheResultResponse{Error: "engine unavailable"})
@@ -99,7 +131,7 @@ func (e *Engine) handleSiteCacheSet(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
-	var req SiteCacheEntry
+	var req SiteCachePatch
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRuleBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, siteCacheResultResponse{Error: "invalid json: " + err.Error()})
 		return
@@ -114,19 +146,24 @@ func (e *Engine) handleSiteCacheSet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, siteCacheResultResponse{Error: "host not in scope"})
 		return
 	}
-	// Stamp WHO added it (audit) from the token scope; the client value is
-	// ignored so a caller cannot forge a foreign audit trail. Admin (nil scope)
-	// records no scope_hosts (global/admin-added).
-	req.ScopeHosts = scopeMapToHosts(vhostScopeFromContext(r.Context()))
-	entry, err := e.SiteCacheSet(req)
+	// WHO first enabled it (audit) comes from the token, never the body: a
+	// scoped caller creating the policy is recorded as scope_hosts=[host], an
+	// admin as nothing (see SiteCacheEntry.ScopeHosts).
+	scoped := vhostScopeFromContext(r.Context()) != nil
+	entry, err := e.SiteCacheApply(req, scoped)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, siteCacheResultResponse{Error: err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, siteCacheResultResponse{Entry: entry})
+	writeJSON(w, http.StatusOK, siteCacheResultResponse{Entry: &entry})
 }
 
 // POST /api/v1/site-cache/remove?host=<host>
+//
+// DELETES the vhost's policy. With no entry the host is uncached — unless an
+// armed "*.suffix" wildcard covers it, which then applies (its cache for the
+// host included). To keep a host uncached under a wildcard, set BOTH tiers off
+// instead: that stored opt-out is what the CLI's `off` does.
 func (e *Engine) handleSiteCacheRemove(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "engine unavailable"})
@@ -181,10 +218,26 @@ func (e *Engine) handleSiteCachePurge(w http.ResponseWriter, r *http.Request) {
 	}
 	entry, ok := e.SiteCachePurge(host)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no cache policy for host"})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": e.siteCacheNoPolicyMsg(host)})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "generation": entry.Generation})
+}
+
+// siteCacheNoPolicyMsg explains a 404 for host: plainly "no policy", or — when
+// the host's stored policy is one this build cannot load — why it has none.
+// Callers have already scope-checked host.
+func (e *Engine) siteCacheNoPolicyMsg(host string) string {
+	if e.siteCache != nil {
+		if h, ok := e.siteCache.normalize(host); ok {
+			for _, f := range e.SiteCacheFrozenHosts() {
+				if f == h {
+					return siteCacheUnloadableMsg + "; remove it, turn it off (which replaces it), or upgrade"
+				}
+			}
+		}
+	}
+	return "no cache policy for host"
 }
 
 // isTruthyParam treats 1/true/yes/on (case-insensitive) as true.

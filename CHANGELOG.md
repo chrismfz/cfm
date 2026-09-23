@@ -83,6 +83,72 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **Site Cache: a purge can no longer be undone by removing and re-adding a
+  vhost.** The purge generation (part of the cache key) restarted at 0 for a
+  re-added vhost, so objects cached under an earlier generation — static
+  entries live for days — could become HITs again. A new or purged generation
+  is now the wall clock in milliseconds, past every generation the store has
+  issued, so a new value is never one already in use (across vhosts too; the
+  one residual — a clock stepped back across a restart — is in
+  docs/site-cache-design.md §6). Every generation from an older store (they
+  started at 0, so a vhost and its wildcard could share one) is reissued on the
+  first start of this version: each armed vhost's cache refills once. A purge
+  still covers one policy: a host that goes back under
+  an admin's `*.suffix` wildcard (its own policy removed) finds the wildcard's
+  cache for it again, which only a purge of the wildcard clears (§10).
+- **Site Cache: `set` changes only what you pass.** `cfm webtop site-cache set
+  <vhost> --micro micro_safe --micro-ttl 30s` used to replace the whole policy
+  with just those flags: it disabled the static tier and cleared
+  `strict_cookies` and the extra auth cookies. `POST /api/v1/site-cache/set` is
+  now a merge (fields left out keep their stored values) and the CLI sends only
+  the flags given, so `set <vhost> --micro-ttl 30s` alone now works. New CLI
+  forms: `--static off` / `--micro off` (disable a tier, keep its recipe),
+  `--no-strict-cookies`, `--no-auth-cookies`. `set` with no flags is an error,
+  and so is clearing a tier's recipe through the API (disable the tier).
+- **Site Cache: `off` really turns caching off, also under an admin's
+  wildcard.** `cfm webtop site-cache off <vhost>` deleted the vhost's policy,
+  so under an armed `*.example.com` the vhost went on being cached by the
+  wildcard. `off` (and `disable`) now keeps the policy with both tiers off,
+  and the edge feed carries it as an opt-out: the vhost caches nothing. The
+  same works for a narrower wildcard (`off '*.shop.example.com'` under an armed
+  `*.example.com`). Turning it back on starts from a fresh cache — objects
+  cached before the `off` are never served again (a first-time micro enable
+  keeps the static cache). To delete a policy — the
+  vhost then follows a covering wildcard — use the new `remove` (`rm`); the API
+  `remove` endpoint keeps that meaning. `off` on a vhost with no policy stores
+  an opt-out and says so.
+  - **Upgrade note:** an existing policy with both tiers off under an armed
+    wildcard now opts that vhost out (the wildcard used to cache it). A new
+    policy can be created all-off only by turning both tiers off explicitly
+    (as `off` does); a `set` that would just stage a TTL for an unconfigured
+    vhost is rejected.
+- **Site Cache: the most specific wildcard wins.** With `*.example.com` and
+  `*.shop.example.com` both armed, `x.shop.example.com` got the broader
+  `*.example.com` policy (the feed was alphabetical and the edge took the first
+  match). The daemon and the edge now both put the longest pattern first.
+- **Site Cache: a stored policy this build cannot read is kept, and fails
+  closed.** A row the daemon cannot load (a recipe or a field from a newer
+  build, after a downgrade) used to be deleted from the store file at the next
+  change, and its vhost then fell back to any covering `*.suffix` wildcard. It
+  is now kept in the file and not served, and its vhost is treated as opted
+  out (a wildcard row: every sub-host under it without a more specific
+  policy) until a build that can read
+  the row loads it, or `remove` deletes it. `list` names such vhosts under
+  `unloadable`, `get`/`purge` say why there is none, and a `set` that would
+  turn caching on for one is refused (it would have dropped the stored
+  policy's cookie settings). `off` still works and replaces that policy for
+  good (a later upgrade finds the opt-out, not the old policy).
+- **Site Cache: a host with a `:port` is rejected.** The edge always ignored the
+  port (a stored `a.com:443` acted as `a.com`), so the daemon's view of such a
+  policy disagreed with what the edge did. A stored one is normalized to the
+  bare host on load (a duplicate keeps the higher generation).
+- **Site Cache stats: a drill-down shows only the vhost's own counts.**
+  `stats <vhost>` could show a broader wildcard's counts, or an exact vhost's
+  wildcard's counts while the vhost had none yet. It now resolves to the key
+  the edge actually counts the vhost under. A policy with both tiers off no
+  longer lists its old counts as live, and the debug header says
+  `observe opt-out …` for an opted-out vhost.
+- **Site Cache: a `set` error response no longer includes an empty `entry`.**
 - **"Where is this IP blocked" found nothing in nftables on `nftlib` nodes,
   and missed some entries on `nft` nodes.** `cfm which`, the unblock
   "found on" report sent to cfm-web, `cfm unblock` and the `/search` API read
@@ -283,6 +349,19 @@ back-filled here — see the git/PR history for that period.
   changes where none is armed. Not changed: whether to serve the challenge at
   all is still decided from the edge's own copy of the database, which the
   edge reads until its workers are reloaded.
+
+### Security
+- **Site Cache: a tenant can no longer see another tenant's domain list, or
+  an admin wildcard's cache counts through its own vhost.** A scoped (cPanel)
+  token that created a policy stored its WHOLE vhost allowlist as the entry's
+  `scope_hosts`, which the list/get API then showed to any other tenant whose
+  scope held that host. It is now exactly `[host]`; existing entries are
+  trimmed when the daemon loads them, and the store file is rewritten then. A
+  scoped `stats ?host=` drill-down into the tenant's own `a.example.com` could
+  also return an admin `*.example.com` row, which counts every sub-host under
+  the pattern, other tenants' included. A scoped caller now resolves only to
+  policy keys inside its own scope (a token whose scope itself lists
+  `*.example.com`, a cPanel wildcard subdomain, still sees that row).
 
 ## 2026.09.22
 
