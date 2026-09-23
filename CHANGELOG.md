@@ -91,17 +91,21 @@ back-filled here — see the git/PR history for that period.
   `Permission denied`. Reproduced with nginx workers running as `cfm`: 500/500
   with the old parent, 200 MISS → 200 HIT with the fix. A missing parent is now
   created `0755`; an existing one only gains traverse (`a+x`).
-  - **One helper, `scripts/cfm-cache-dirs.sh`, now creates and heals the cache
-    dirs.** It replaces four drifting copies: the `.deb` postinst, the `.rpm`
+  - **One helper, `scripts/cfm-cache-dirs.sh`, now creates the cache dirs and
+    purges an unusable cache tree.** It replaces four drifting copies: the `.deb` postinst, the `.rpm`
     scriptlet, and both edge installers. The package scripts now run it
     **before** the conf deploy's `openresty -t` / `angie -t`. On a first
     install the config test used to fail on the missing parent, so the
     packaged conf was silently not deployed.
-  - **The heal is more thorough and no longer blocks the worker.** It now also
-    checks the second directory level, which the old probe missed, and fixes a
-    `root:cfm` dir without group access. It adds group rw before moving the
-    group to `cfm`, so a live cache's worker-owned files keep their owner and
-    never lose access mid-heal. A healthy worker-owned tree is left untouched.
+  - **An unusable cache tree is now purged instead of repaired.** A tree the
+    workers cannot use (a level dir in another group, or root-owned without
+    group access, left by an older run) is emptied with `find -delete`, and
+    nginx refills it as MISSes. The cache is disposable anyway. The old
+    recursive root-run `chown -R` / `chmod -R` walked a tree the worker can
+    write to, which a compromised worker could race with symlinks.
+    `find -delete` never follows a link. The probe now also checks the second
+    directory level, which the old one missed. A healthy worker-owned tree is
+    left untouched.
   - `check_site_cache_config.sh` now fails when the dirs the daemon or the
     helper provision differ from the confs' `proxy_cache_path` dirs. A zone
     added to only one of them would otherwise fail `-t` on deploy.

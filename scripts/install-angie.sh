@@ -418,8 +418,8 @@ ensure_cache_dirs() {
     # The Site Cache dirs (the /var/cache/nginx parent and every
     # proxy_cache_path leaf) must exist before `-t` runs below, or the config
     # test fails [emerg] and the edge won't deploy. Provisioning — parent
-    # traversable by the cfm workers, zone dirs root:cfm 0770, the heal of a
-    # tree left in another group by an older run — lives in ONE helper shared
+    # traversable by the cfm workers, zone dirs root:cfm 0770, the purge of a
+    # cache tree the workers cannot use — lives in ONE helper shared
     # with the deb postinst, the rpm scriptlet and the other edge installer.
     local here helper
     here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

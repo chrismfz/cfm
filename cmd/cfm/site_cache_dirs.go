@@ -39,7 +39,7 @@ var siteCacheDirNames = []string{
 //
 // This is TOP-DIR provisioning only: the levels=1:2 subdirs are created by the
 // worker, and scripts/cfm-cache-dirs.sh (run from the packaging and the edge
-// installers) heals a tree left in another group by an older run. Errors are
+// installers) purges a cache tree the workers cannot use. Errors are
 // ignored, as for the daemon's other runtime dirs: a failure leaves caching
 // broken for armed vhosts only, and the edge logs it.
 func ensureSiteCacheDirs(root string, gid int) {

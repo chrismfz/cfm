@@ -392,6 +392,18 @@ helper_dirs=$( { sed -n 's/^CFM_CACHE_DIRS="\(.*\)"$/\1/p' "$HELPER" 2>/dev/null
 go_dirs=$(awk '/^var siteCacheDirNames = \[\]string\{/ { in_=1; next } in_ && /^\}/ { in_=0 } in_' "$GODIRS" 2>/dev/null | sed -n 's/^[[:space:]]*"\([^"]*\)",[[:space:]]*$/\1/p' | sort -u)
 ort_dirs=$(conf_dirs "$ORT"); ang_dirs=$(conf_dirs "$ANG")
 [ -n "$helper_dirs" ] || err "$HELPER: no CFM_CACHE_DIRS=\"…\" list found — cannot verify the provisioned cache dirs."
+# Pin what the lists are relative to, and that they are the ONLY source: every
+# proxy_cache_path (any path) must be an unquoted /var/cache/nginx/<name>, both
+# provisioners must use /var/cache/nginx as their root, the helper must assign
+# its list exactly once and loop over it.
+for f in "$ORT" "$ANG"; do
+  bad_paths=$(grep -nE '^[[:space:]]*proxy_cache_path[[:space:]]' "$f" | grep -vE '^[0-9]+:[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/[A-Za-z0-9_]+[[:space:]]' || true)
+  [ -z "$bad_paths" ] || err "$f: a proxy_cache_path is not an unquoted /var/cache/nginx/<name> — nothing provisions its dir, so -t fails with [emerg]: $(tr '\n' ' ' <<< "$bad_paths")"
+done
+[ "$(grep -c 'CFM_CACHE_DIRS=' "$HELPER" 2>/dev/null || true)" = "1" ] || err "$HELPER: CFM_CACHE_DIRS must be assigned exactly once (the parity check reads that one line)."
+grep -Eq '^ROOT=\$\{1:-/var/cache/nginx\}$' "$HELPER" || err "$HELPER: ROOT must default to /var/cache/nginx (ROOT=\${1:-/var/cache/nginx})."
+grep -Eq '^for n in \$CFM_CACHE_DIRS; do$' "$HELPER" || err "$HELPER: the provisioning loop must iterate \$CFM_CACHE_DIRS (for n in \$CFM_CACHE_DIRS; do)."
+grep -Eq '^const siteCacheRoot = "/var/cache/nginx"$' "$GODIRS" || err "$GODIRS: siteCacheRoot must be \"/var/cache/nginx\"."
 [ -n "$go_dirs" ] || err "$GODIRS: no siteCacheDirNames list found — cannot verify the daemon's cache dirs."
 [ -n "$ort_dirs" ] || err "$ORT: no proxy_cache_path under /var/cache/nginx found."
 if [ "$helper_dirs" != "$ort_dirs" ]; then

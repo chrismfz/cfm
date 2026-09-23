@@ -118,12 +118,12 @@ for d in /var/lib/cfm/nginx/client_body_temp /var/lib/cfm/nginx/proxy_temp; do
     chmod 700 "$d"
 done
 
-# Site Cache — provision and heal the cache dirs BEFORE the deploy helper
+# Site Cache — provision the cache dirs BEFORE the deploy helper
 # below runs `openresty -t` / `angie -t`: every proxy_cache_path dir must exist
 # for the config test to pass (a missing /var/cache/nginx parent is an [emerg],
 # so on a first install the packaged conf was silently not deployed). The
-# helper also makes the parent traversable by the cfm workers and heals a
-# cache tree left in another group by an older run; it is the ONE copy of this
+# helper also makes the parent traversable by the cfm workers and purges a
+# cache tree they cannot use (left in another group by an older run); it is the ONE copy of this
 # logic, shared with the rpm %post and both edge installers. Never fatal here.
 if [ -x /usr/share/cfm/scripts/cfm-cache-dirs.sh ]; then
     /usr/share/cfm/scripts/cfm-cache-dirs.sh || echo "WARNING: CFM cache dir provisioning reported a problem (see above)"
