@@ -55,7 +55,8 @@ end
 -- (status keys only; the daemon sums them) by scanning the per-vhost keys.
 -- Absolute counts (the daemon hook is UPSERT-idempotent, like the WAF-stats
 -- push). A vhost is keyed only while armed, but its keys stay in the dict after
--- it is disarmed (until an edge reload); the daemon drops such rows.
+-- it is disarmed (until the edge restarts: a reload keeps a lua_shared_dict);
+-- the daemon drops such rows.
 function _M.snapshot_vhosts()
   local d = ngx.shared.cfm_cache_stats
   if not d then return {} end

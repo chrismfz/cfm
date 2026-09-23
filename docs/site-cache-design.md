@@ -577,7 +577,8 @@ carries it. A wildcard needs at least two labels after `*.` — `*.com` would ar
 every `.com` vhost on the node. A stored row whose host fails these rules (an
 older build accepted it) is frozen like any row this build cannot load — never
 served as a policy, and still an opt-out when the edge can match its host (a
-label ending in `-` still reaches nginx; one with whitespace cannot) — and
+label ending in `-` still reaches nginx; one with an ASCII space or control
+byte cannot) — and
 `remove <that host>` deletes it (`off` cannot: the host is invalid for a new
 policy). `auth_cookies` are at most 32 names of at most 256 bytes; the edge
 takes a request cookie's name up to `=` or whitespace in a `;`-split pair, so a
@@ -991,7 +992,8 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      — `observe()` runs only in the HTTPS `header_filter`, which would leave an
      HTTP-only box's armed vhosts counted but never pushed. **Read paths filter
      to the CURRENTLY-armed policy set** (`armedCacheKeys`): the edge dict keeps a
-     vhost's counts until an edge reload, so a vhost unarmed after its last push
+     vhost's counts until the edge RESTARTS (a reload keeps a
+     `lua_shared_dict`), so a vhost unarmed after its last push
      would otherwise linger as a stale "still cached" row — the armed store is
      truth (a stored but all-off policy is not armed). A by-host query resolves
      a concrete sub-host to the key the edge counts it under
@@ -1020,7 +1022,7 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      past roughly 1000-2600 armed vhosts some vhosts are missing from a push
      and one can be pushed with PARTIAL counts (a skewed hit ratio). Follow-up
      (PR-5): drop a disarmed vhost's keys at the edge, or scan them all. **v1 scope:** a live totals view (counts since the edge last
-     reloaded), not hour-bucketed history, and no cfm-admin column yet — both
+     restarted — a reload keeps them), not hour-bucketed history, and no cfm-admin column yet — both
      follow-ups. **Deferred to a focused follow-up:** the `whats_wrong`
      "armed but ~0 hits" signal (the automated form of what `site_cache_stats`
      already shows on demand — it would have surfaced the 3b buffering no-op).

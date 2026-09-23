@@ -272,7 +272,10 @@ func newSiteCacheStore(path string) *siteCacheStore {
 // it. (A stored row this build cannot load is keyed on this, so `remove` can
 // still find it even when its host no longer validates.)
 func siteCacheCanonHost(host string) string {
-	h := strings.ToLower(strings.TrimSpace(host))
+	// ASCII-only case fold, as nginx and the edge: a Unicode fold would turn
+	// "\u212a.example.com" (Kelvin sign) into "k.example.com" and slip past
+	// the validator's punycode rule; unfolded, it fails closed.
+	h := siteCacheASCIILower(strings.TrimSpace(host))
 	if i := strings.IndexByte(h, ':'); i >= 0 {
 		h = h[:i]
 	}
@@ -443,9 +446,9 @@ func normalizeCookieNames(in []string) ([]string, error) {
 
 // siteCacheCookieNameError rejects a cookie name the edge can never match:
 // micro_cookie_verdict splits the Cookie header on ";" and takes each name up
-// to "=" or whitespace, so a name holding whitespace, "=" or ";" never equals
-// a request cookie's name. A control character is rejected too (never part of
-// a real cookie name). Anything else is matchable — ",", quotes, brackets (PHP
+// to "=" or ASCII whitespace, so a name holding one of those never equals a
+// request cookie's name. A control character or other whitespace is rejected
+// too (never part of a real cookie name). Anything else is matchable — ",", quotes, brackets (PHP
 // array cookies: cart[id]) — and accepted, even though RFC 6265 would not
 // call it a token. At most 256 bytes.
 func siteCacheCookieNameError(c string) error {
@@ -551,7 +554,7 @@ func (s *siteCacheStore) Apply(p SiteCachePatch, scoped bool) (SiteCacheEntry, e
 			// an empty one would silently drop that policy's settings (its
 			// cookie rails first). Only an explicit off is allowed — it
 			// replaces that policy (setLocked), which the caller asked for.
-			return SiteCacheEntry{}, errors.New(siteCacheUnloadableMsg + "; turning caching on for it is refused — remove it first (or turn it off, which replaces it), or upgrade")
+			return SiteCacheEntry{}, errors.New(siteCacheUnloadableMsg + "; turning caching on for it is refused — remove it first (or turn it off, which replaces it), or, if a newer version wrote it, upgrade")
 		}
 	}
 	applySiteCacheTierPatch(&merged.Static, p.Static)
@@ -899,6 +902,29 @@ func (s *siteCacheStore) feedEntriesLocked() map[string]SiteCacheEntry {
 	return out
 }
 
+// siteCacheEdgeNormalizeHost is an exact port of cfm_hostmatch.lua
+// normalize_host, which the edge applies to the request Host: ASCII lowercase,
+// ONE trailing dot stripped, then a ":port" (an IPv6 literal keeps its
+// brackets). For any valid policy host it returns the same key as
+// siteCacheCanonHost.
+func siteCacheEdgeNormalizeHost(raw string) string {
+	h := siteCacheASCIILower(strings.TrimSpace(raw))
+	if h == "" {
+		return ""
+	}
+	h = strings.TrimSuffix(h, ".")
+	if strings.HasPrefix(h, "[") {
+		if i := strings.IndexByte(h, ']'); i >= 0 {
+			return h[:i+1]
+		}
+		return h
+	}
+	if i := strings.IndexByte(h, ':'); i >= 0 {
+		h = h[:i]
+	}
+	return h
+}
+
 // siteCacheEdgeMatchable reports whether the edge can match h as a policy key
 // (cfm_hostmatch.lua is_supported_pattern; a stand-in nginx would never route
 // a request to — "/" or ".." in it — is merely a dead opt-out):
@@ -912,8 +938,8 @@ func siteCacheEdgeMatchable(h string) bool {
 	if h == "" || strings.ContainsAny(h, "?[") {
 		return false
 	}
-	if strings.IndexFunc(h, func(r rune) bool { return r <= ' ' || r == 0x7f || unicode.IsSpace(r) }) >= 0 {
-		return false
+	if strings.IndexFunc(h, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
+		return false // the bytes nginx refuses in a Host; a Unicode space it passes
 	}
 	if i := strings.IndexByte(h, '*'); i >= 0 {
 		return strings.HasPrefix(h, "*.") && !strings.Contains(h[2:], "*")
@@ -971,11 +997,11 @@ func siteCacheFeedLess(a, b string) bool {
 // wildcard IN THE FEED that covers host — an armed one (its key), or an
 // all-off one a broader armed wildcard covers (an opt-out: nothing).
 func (s *siteCacheStore) StatsKeyFor(host string) (string, bool) {
-	// The QUERIED host is a request host, not a policy: the edge counts any
-	// host it can match (a label ending in "-" included), so resolve on the
-	// canonical form + the edge rule, not the strict create-time validator.
-	h := siteCacheCanonHost(host)
-	if !siteCacheEdgeMatchable(h) {
+	// The QUERIED host is a request host, not a policy: resolve it exactly as
+	// the edge does (siteCacheEdgeNormalizeHost), not with the strict
+	// create-time validator — the edge counts any host nginx passes it.
+	h := siteCacheEdgeNormalizeHost(host)
+	if h == "" {
 		return "", false
 	}
 	s.mu.RLock()

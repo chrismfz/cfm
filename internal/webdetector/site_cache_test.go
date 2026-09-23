@@ -1335,3 +1335,32 @@ func TestSiteCacheCanonHostIsAFixedPoint(t *testing.T) {
 		t.Fatalf("canon(\"a.com .\") = %q", got)
 	}
 }
+
+// StatsKeyFor resolves a queried request host exactly as the edge's
+// normalize_host would (ASCII fold, one trailing dot, port), so a host no
+// policy could have — a mid-host "*", a Unicode space — still drills down to
+// the wildcard the edge counts it under; a non-ASCII case variant is NOT
+// folded onto an exact ASCII policy.
+func TestSiteCacheStore_StatsKeyForMirrorsEdgeNormalize(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := SiteCacheTier{Enabled: true, Recipe: "static_lean"}
+	_, _ = s.Set(SiteCacheEntry{Host: "*.example.com", Static: on})
+	_, _ = s.Set(SiteCacheEntry{Host: "k.example.com", Static: on})
+	for host, want := range map[string]string{
+		"a*b.example.com":    "*.example.com",
+		"a b.example.com":    "*.example.com",
+		"K.example.com":      "*.example.com", // Kelvin sign: nginx/Lua do not fold it
+		"K.EXAMPLE.COM.":     "k.example.com",
+		"k.example.com:8443": "k.example.com",
+		"x.example.com.":     "*.example.com",
+	} {
+		if key, ok := s.StatsKeyFor(host); !ok || key != want {
+			t.Errorf("StatsKeyFor(%q) = %q, %v; want %q", host, key, ok, want)
+		}
+	}
+	// ASCII-only fold in the canonical form too: a Kelvin-sign policy host
+	// fails the validator instead of becoming k.example.com
+	if _, err := s.Apply(SiteCachePatch{Host: "K2.example.com", Static: &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("static_lean")}}, false); err == nil {
+		t.Fatal("a non-ASCII policy host was folded and accepted")
+	}
+}

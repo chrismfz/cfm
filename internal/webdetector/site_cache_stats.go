@@ -7,7 +7,8 @@
 // snapshot per vhost; the /api/v1/site-cache/stats endpoint + the MCP
 // site_cache_stats tool read it.
 //
-// v1 scope: a LIVE totals view (absolute counts since the edge last reloaded,
+// v1 scope: a LIVE totals view (absolute counts since the edge last restarted —
+// a reload keeps the lua_shared_dict —
 // node-local, not persisted across daemon restarts). Hour-bucketed history —
 // the shape the WAF-stats pipeline uses — is a documented follow-up; a first
 // cut needs only "is this armed vhost actually getting HITs?".
@@ -157,7 +158,7 @@ func (s *siteCacheStatsStore) Hosts() map[string]map[string]int {
 }
 
 // SiteCacheStatsRow is one vhost's cache effectiveness (absolute counts since
-// the edge last reloaded). hit_ratio_pct is a STRICT hit ratio —
+// the edge last restarted; a reload keeps them). hit_ratio_pct is a STRICT hit ratio —
 // hit / cacheable_total, cacheable_total = hit+miss+expired+stale+updating+
 // revalidated (BYPASS excluded: a bypassed request never had a chance to hit) —
 // the same split cfm_stats.lua's cache_zone_stats uses. Note STALE / UPDATING /
