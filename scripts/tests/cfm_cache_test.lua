@@ -304,9 +304,15 @@ end
 -- (viewed_cookie_policy is what marks consent), so they alone stay anonymous
 check(anon("cookielawinfo-checkbox-necessary=yes; cookielawinfo-checkbox-analytics=no", false) == true,
       "CookieYes checkbox cookies alone stay anonymous (set before any consent)")
--- CSRF cookies whose token the page renders
-for _, c in ipairs({ "_csrf=abc", "csrftoken=abc", "csrfToken=abc" }) do
+-- CSRF cookies whose token the page renders, whatever the framework names them
+for _, c in ipairs({ "_csrf=abc", "csrftoken=abc", "csrfToken=abc", "csrf_cookie_name=x",
+                     "YII_CSRF_TOKEN=x", "my_xsrf=1" }) do
   check(anon(c, false) == false, "CSRF cookie → bypass: " .. c)
+end
+-- WordPress core: the comment form pre-fills from comment_author_*, and
+-- wp-postpass_* unlocks a password-protected post
+for _, c in ipairs({ "comment_author_abc=Alice", "comment_author_email_abc=a%40x", "wp-postpass_abc=x" }) do
+  check(anon(c, false) == false, "WordPress core per-visitor cookie → bypass: " .. c)
 end
 check(anon("euconsent-v2=CO", true) == true, "strict: the TCF consent string stays ignore-listed (read client-side)")
 -- a name as PHP / Rack read it: "." / " " / "[" → "_", percent-decoded
@@ -624,6 +630,8 @@ do
   check(T("MISS", "200 : 404") == 60, "an internal-redirect status list is judged by its last entry")
   check(T("MISS", "200", nil, "", "", nil, "No") == 60, "X-Accel-Buffering: no (any case) → not storable → marks")
   check(T("MISS", "200", nil, "", "", nil, "yes") == nil, "X-Accel-Buffering: yes stays storable")
+  check(T("MISS", "200", nil, "", "", nil, nil, "jwt.t_abc") == 60, "a response handing out a Cart-Token is not storable → marks")
+  check(cache._micro_storable("200", nil, "", "", nil, nil, "jwt.t_abc") == false, "micro_storable: a session-token response header is not storable")
   check(T("MISS", "200") == nil, "a storable MISS is not marked")
   check(T("HIT", "404") == nil and T("STALE", "404") == nil and T("UPDATING", "404") == nil, "no fetch → no mark")
   check(T("MISS", nil) == nil and T("MISS", "-") == nil, "no upstream answer → no mark")
@@ -641,11 +649,12 @@ local function micro_req(host, uri)
   ngx.var.uri = uri or "/"; ngx.var.server_addr = "192.0.2.1"; ngx.var.cf_xfp = "https"
   ngx.var.cfm_micro_conf = "1"; ngx.var.args = nil; ngx.var.http_range = nil; ngx.var.http_accept = nil
 end
-local function log_micro(cache_status, status, set_cookie, cc, xae, vary, xab)
+local function log_micro(cache_status, status, set_cookie, cc, xae, vary, xab, cart)
   ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.upstream_cache_status = cache_status
   ngx.var.upstream_status = status; ngx.var.upstream_http_set_cookie = set_cookie
   ngx.var.cfm_cc_nostore = cc or ""; ngx.var.cfm_xae_nocache = xae or ""
   ngx.var.upstream_http_vary = vary; ngx.var.upstream_http_x_accel_buffering = xab
+  ngx.var.upstream_http_cart_token = cart
   cache.micro_note()
 end
 _micro_enforce = true
@@ -690,12 +699,13 @@ local reasons = {
   { "200", nil, "", "1", nil, "X-Accel-Expires: 0" },
   { "200", nil, "", "", "*", "Vary: *" },
   { "200", nil, "", "", nil, "X-Accel-Buffering: no", "no" },
+  { "200", nil, "", "", nil, "a Cart-Token response header", nil, "jwt.t_abc" },
 }
 for i, rr in ipairs(reasons) do
   _uncacheable.data = {}; _uncacheable.last_ttl = nil
   local uri = "/r" .. i
   micro_req("m.com", uri)
-  log_micro("MISS", rr[1], rr[2], rr[3], rr[4], rr[5], rr[7])
+  log_micro("MISS", rr[1], rr[2], rr[3], rr[4], rr[5], rr[7], rr[8])
   check(_uncacheable.last_ttl == 60, rr[6] .. ": marked for 60s")
   micro_req("m.com", uri)
   check(cache.micro_gate() == nil, rr[6] .. ": the marked key skips micro")

@@ -76,8 +76,11 @@
 #       next probe of a page that stopped being cacheable).
 #     * proxy_cache_convert_head is never turned off, anywhere (the key has no
 #       method: a body-less HEAD entry would be served to GETs).
-#     * every cache location sends `Host $host` exactly once (the vhost the
-#       origin answers as must be the key's host).
+#     * every cache location sends `Host $host` and `X-Forwarded-Proto $cf_xfp`
+#       exactly once each (the vhost and scheme the origin answers for must be
+#       the key's), and a micro location never stores a response that hands
+#       out a session token in a header ($upstream_http_cart_token /
+#       $upstream_http_woocommerce_session on proxy_no_cache).
 #     * the conf includes exactly its known files, by full path (a new include
 #       could carry a second copy of a rail map, which this scan would not see).
 #   How: the conf is lexed like nginx (quotes, escapes, ${var}, # comments),
@@ -256,6 +259,11 @@ for f in "$ORT" "$ANG"; do
       # set exactly once (a second proxy_set_header for the same name, in any
       # case or quoted, is sent as a second header and undoes the pin).
       lb = tolower(body)
+      # X-Forwarded-Proto is the scheme the key encodes ($cf_xfp: the client
+      # header only from a trusted peer), once — else a client-chosen proto
+      # would shape stored absolute URLs outside the key.
+      if (body !~ (A "proxy_set_header[[:space:]]+X-Forwarded-Proto[[:space:]]+[$]cf_xfp[[:space:]]*;")) m = m " X-Forwarded-Proto-not-$cf_xfp(the-scheme-in-the-key)"
+      else if (cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?x-forwarded-proto[\"\047]?[[:space:]]") != 1) m = m " X-Forwarded-Proto-set-more-than-once"
       # Host is the vhost the origin answers as: $host, the host of the key, once.
       if (body !~ (A "proxy_set_header[[:space:]]+Host[[:space:]]+[$]host[[:space:]]*;")) m = m " Host-not-$host(the-origin-would-answer-another-vhost-under-this-key)"
       else if (cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?host[\"\047]?[[:space:]]") != 1) m = m " Host-set-more-than-once"
@@ -287,6 +295,8 @@ for f in "$ORT" "$ANG"; do
         else micro_ign++
         if (body !~ (A "proxy_no_cache[[:space:]][^;]*[$]cfm_cc_nostore[[:space:];]")) m = m " proxy_no_cache-$cfm_cc_nostore(private/no-store/no-cache-could-be-stored)"
         if (body !~ (A "proxy_no_cache[[:space:]][^;]*[$]cfm_xae_nocache[[:space:];]")) m = m " proxy_no_cache-$cfm_xae_nocache(X-Accel-Expires:0-could-be-stored)"
+        if (body !~ (A "proxy_no_cache[[:space:]][^;]*[$]upstream_http_cart_token[[:space:];]")) m = m " proxy_no_cache-$upstream_http_cart_token(a-WooCommerce-cart-session-could-be-stored)"
+        if (body !~ (A "proxy_no_cache[[:space:]][^;]*[$]upstream_http_woocommerce_session[[:space:];]")) m = m " proxy_no_cache-$upstream_http_woocommerce_session(a-WooGraphQL-session-could-be-stored)"
         if (body !~ (A "proxy_cache_background_update[[:space:]]+off[[:space:]]*;")) m = m " micro-proxy_cache_background_update-must-be-off(stale-page-served-while-refresh-cannot-store)"
         if (cnt(body, A "proxy_cache_use_stale[[:space:]]") != 1 || body !~ (A "proxy_cache_use_stale[[:space:]]+updating[[:space:]]+error[[:space:]]+timeout[[:space:]]+http_500[[:space:]]+http_502[[:space:]]+http_503[[:space:]]+http_504[[:space:]]*;")) m = m " micro-proxy_cache_use_stale-must-be-exactly-updating-error-timeout-http_500-http_502-http_503-http_504"
         # The bucket TTL is the only TTL now: the location name, its zone and

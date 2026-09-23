@@ -659,8 +659,18 @@ MICRO_AUTH_SUFFIX   = norm_list(MICRO_AUTH_SUFFIX)
 MICRO_IGNORE_EXACT  = norm_set(MICRO_IGNORE_EXACT)
 MICRO_IGNORE_PREFIX = norm_list(MICRO_IGNORE_PREFIX)
 
-local function name_matches(lname, exact, prefixes, suffixes)
+-- Names that CONTAIN one of these are auth / anti-forgery cookies whatever the
+-- framework calls them (CodeIgniter csrf_cookie_name, Yii YII_CSRF_TOKEN, …):
+-- a page renders their token, so a stored copy would be the next visitor's.
+local MICRO_AUTH_CONTAINS = { "csrf", "xsrf" }
+
+local function name_matches(lname, exact, prefixes, suffixes, contains)
     if exact[lname] then return true end
+    if contains then
+        for _, c in ipairs(contains) do
+            if lname:find(c, 1, true) then return true end
+        end
+    end
     for _, p in ipairs(prefixes) do
         if lname:sub(1, #p) == p then return true end
     end
@@ -701,7 +711,7 @@ local function micro_cookie_verdict(cookie_header, strict, extra_auth)
         local name = cookie_name(pair)
         if name and name ~= "" then
             local lname = cookie_key(name)
-            if name_matches(lname, MICRO_AUTH_EXACT, MICRO_AUTH_PREFIX, MICRO_AUTH_SUFFIX)
+            if name_matches(lname, MICRO_AUTH_EXACT, MICRO_AUTH_PREFIX, MICRO_AUTH_SUFFIX, MICRO_AUTH_CONTAINS)
                or (extra_auth and extra_auth[lname]) then
                 return false, "auth:" .. name:sub(1, 64)
             end
@@ -912,9 +922,12 @@ end
 -- a skipped micro, never a stored response. (A response carrying
 -- X-Accel-Redirect is served by an internal redirect and never reaches
 -- micro_note with a fetch status — it is neither stored nor remembered.)
-local function micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering)
+local function micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr)
     if status ~= "200" then return false end
     if type(set_cookie) == "string" and set_cookie ~= "" then return false end
+    -- $upstream_http_cart_token / $upstream_http_woocommerce_session on the
+    -- micro locations' proxy_no_cache: a session token handed out in a header
+    if type(session_hdr) == "string" and session_hdr ~= "" then return false end
     if type(x_accel_buffering) == "string" and x_accel_buffering:lower() == "no" then return false end
     if cc_nostore == "1" or xae_nocache == "1" then return false end
     if type(vary) == "string" and (vary:find("*", 1, true) or #vary > NGX_CACHE_VARY_LEN) then
@@ -927,7 +940,7 @@ end
 -- or nil to not mark it (see the rules above). cache_status is
 -- $upstream_cache_status; status is $upstream_status, whose LAST entry is the
 -- answer (a retried fetch lists every attempt).
-local function micro_mark_ttl(cache_status, status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering)
+local function micro_mark_ttl(cache_status, status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr)
     if cache_status ~= "MISS" and cache_status ~= "EXPIRED" then return nil end
     local code = tonumber(type(status) == "string" and status:match("(%d%d%d)%s*$") or nil)
     if not code then return nil end
@@ -935,7 +948,7 @@ local function micro_mark_ttl(cache_status, status, set_cookie, cc_nostore, xae_
         if cache_status == "MISS" then return MICRO_UNCACHEABLE_SHORT_TTL end
         return nil
     end
-    if micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering) then return nil end
+    if micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr) then return nil end
     if cache_status == "EXPIRED" then return MICRO_UNCACHEABLE_STALE_TTL end
     return MICRO_UNCACHEABLE_TTL
 end
@@ -961,7 +974,8 @@ function _M.micro_note()
     if not dict then return end
     local ttl = micro_mark_ttl(st, v.upstream_status, v.upstream_http_set_cookie,
                                v.cfm_cc_nostore, v.cfm_xae_nocache, v.upstream_http_vary,
-                               v.upstream_http_x_accel_buffering)
+                               v.upstream_http_x_accel_buffering,
+                               v.upstream_http_cart_token or v.upstream_http_woocommerce_session)
     if ttl then dict:set(micro_mark_key(), true, ttl) end
 end
 
@@ -1132,9 +1146,9 @@ end
 --     Cache-Control headers in $upstream_http_cache_control, so a `private` on
 --     a second line would not reach $cfm_cc_nostore.
 --   * the request-side rails (micro_verdict: armed micro tier, GET/HEAD, no
---     Authorization / Range / event-stream, not an admin / script / transfer
---     path, not a panel host, anonymous per the cookie allowlist, not
---     remembered as uncacheable).
+--     Authorization / Range / event-stream / partial-page / credential-style
+--     header, not an admin / script / transfer path, not a panel host,
+--     anonymous per the cookie allowlist, not remembered as uncacheable).
 -- On a cache decision it sets the same two vars static_gate does ($cfm_cache_skip
 -- =0 to open the bypass gate, $cfm_cache_gen for the purge-generation key) and
 -- returns the bucket location; the only-200 rail + response-side rails (Set-Cookie,

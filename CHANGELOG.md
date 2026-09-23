@@ -86,7 +86,9 @@ back-filled here — see the git/PR history for that period.
     checkout answers carry no cache headers before WooCommerce 10.6, so one
     customer's cart, address and token would have been everyone's —
     `WooCommerce-Session`, `X-WP-Nonce`, `X-Api-Key`, `X-Auth-Token`,
-    `X-Access-Token`), partial-page requests (`X-Requested-With`, `X-PJAX`,
+    `X-Access-Token`) and any answer that hands out such a token (the
+    token-less cart request a headless client starts with), partial-page
+    requests (`X-Requested-With`, `X-PJAX`,
     `HX-Request`, `Turbo-Frame`, `X-Inertia` — a stored fragment would be
     everyone's page; Android in-app browsers send `X-Requested-With` on every
     request, so their visitors are not micro-cached), a `Cookie` header over
@@ -95,7 +97,8 @@ back-filled here — see the git/PR history for that period.
     `cpcontacts.`) whether armed by a `*.domain` wildcard or by name.
   - More app session cookies keep a visitor off the cache: Drupal `SESS…`,
     Magento, OpenCart, Moodle, Easy Digital Downloads, `…_sid`, `token`,
-    `auth`, CSRF cookies whose token the page shows (`_csrf`, `csrftoken`), WPML
+    `auth`, CSRF cookies whose token the page shows (any name containing
+    `csrf` or `xsrf`), WPML
     language and WooCommerce currency-switcher cookies. A cookie
     name is compared the way the app reads it, so a session cookie no longer
     slips past as `wordpress.logged.in_…`, `ci+session`, `ci%2Esession` or
