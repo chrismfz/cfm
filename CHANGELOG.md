@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.23
+
 ### Added
 - **Site Cache has a cfm-admin page:** Rules & engine → Site cache.
   - Arm a vhost's static and micro tiers. The micro TTL is picked from the six
