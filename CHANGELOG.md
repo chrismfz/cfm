@@ -106,6 +106,37 @@ back-filled here — see the git/PR history for that period.
   plain addresses. Ranges are now read in address order, and a range that
   isn't one prefix is written `first-last` instead of a wrong CIDR. This is
   what `cfm which`, `/search` and the unblock report read on nftlib.
+- **Site Cache: a fresh `.deb` install no longer makes every armed vhost
+  return 500.** The daemon runs with `UMask=0077`, so when it created a missing
+  `/var/cache/nginx` (the postinst starts the daemon before an edge installer
+  runs) the parent came out `root:root 0700`. The edge workers could then reach
+  no cache dir, and every request of an armed vhost failed with
+  `Permission denied`. Reproduced with nginx workers running as `cfm`: 500/500
+  with the old parent, 200 MISS → 200 HIT with the fix. A missing parent is now
+  created `0755`; an existing one only gains traverse (`a+x`).
+  - **One helper, `scripts/cfm-cache-dirs.sh`, now creates the cache dirs and
+    purges an unusable cache tree.** It replaces four drifting copies: the `.deb` postinst, the `.rpm`
+    scriptlet, and both edge installers. The package scripts now run it
+    **before** the conf deploy's `openresty -t` / `angie -t`. On a first
+    install the config test used to fail on the missing parent, so the
+    packaged conf was silently not deployed.
+  - **An unusable cache tree is now purged instead of repaired.** A tree the
+    workers cannot use (a level dir in another group, or root-owned without
+    group access, left by an older run) is emptied with `find -delete`, and
+    nginx refills it as MISSes. The cache is disposable anyway. The old
+    recursive root-run `chown -R` / `chmod -R` walked a tree the worker can
+    write to, which a compromised worker could race with symlinks.
+    `find -delete` never follows a link. The probe now also checks the second
+    directory level, which the old one missed. A healthy worker-owned tree is
+    left untouched.
+    - After a purge, an edge that was only reloaded logs harmless
+      `[crit] unlink() … (2: No such file or directory)` lines as the old index
+      entries age out. They never cause a 5xx.
+    - Restarting the edge instead of reloading it ends them; the helper says so
+      when it purges.
+  - `check_site_cache_config.sh` now fails when the dirs the daemon or the
+    helper provision differ from the confs' `proxy_cache_path` dirs. A zone
+    added to only one of them would otherwise fail `-t` on deploy.
 - **Throttle autoblocks are 24h blocks, not permanent ones, with the reference
   config.** The reference `cfm.conf` set `THROTTLE_MODE = "tlt"`, and an
   unrecognised mode fell back to `permanent`, so every throttle autoblock
