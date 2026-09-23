@@ -28,8 +28,14 @@ back-filled here — see the git/PR history for that period.
   - Copy the debug-stamp `curl` for one URL.
   - Read the hit counts.
   - Admins see this node's `SITE_CACHE` / `MICRO_CACHE_ENFORCE`, so the micro
-    tier reads "dry run" until it is enforced.
+    tier reads "enforced" or "dry run". Where the page cannot tell (a scoped
+    user, a failed read), it says to treat an armed micro tier as live.
+    Turning micro on asks for confirmation unless the node is known to be in
+    a dry run.
   - A scoped cPanel user manages their own vhosts from the page.
+  - A save sends only what was changed. It never reverts a change someone else
+    made meanwhile (a cookie rail, a strict flag), and it never replaces an
+    existing policy from a new-policy form.
   - The page checks what the daemon checks before it sends anything. Shared
     test cases pin it to the daemon's and the edge's rules.
 - **Site Cache changes are now in `cfm.log`.** Every set / remove / purge /

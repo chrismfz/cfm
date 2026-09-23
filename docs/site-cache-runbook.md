@@ -76,10 +76,11 @@ the switches.
 
 ## 3. Arming a vhost
 
-Three ways to manage policies, with the same operations:
+Three ways to manage policies:
 - the cfm-admin **Site cache** page (Rules & engine), which also has recipes,
   the debug-stamp command for one URL, and the hit counts;
-- the admin CLI `cfm webtop site-cache …` (alias `cache`);
+- the admin CLI `cfm webtop site-cache …` (alias `cache`), which can also set
+  a custom micro TTL (it snaps to a bucket) and the static TTL label;
 - the API at `/api/v1/site-cache/*`.
 
 A scoped cPanel token manages its own vhosts through the page or the API.

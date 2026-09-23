@@ -31,6 +31,7 @@ import {
   debugCurl,
   generationSinceMs,
   coveringWildcard,
+  patchChanges,
 } from "./site-cache-model.js";
 
 // The repo root, from internal/webui/static/assets/webdet/.
@@ -49,7 +50,11 @@ test("MICRO_BUCKETS is cfm_cache.lua's MICRO_BUCKETS", () => {
 function goMapKeys(src, name) {
   const m = new RegExp(`var ${name} = map\\[string\\]struct\\{\\}\\{([\\s\\S]*?)\\n\\}`).exec(src);
   assert.ok(m, `no ${name} in site_cache.go`);
-  return [...m[1].matchAll(/"([a-z0-9_]+)":/g)].map((x) => x[1]).sort();
+  // Every quoted key, whatever it holds: a key this regex skipped would drift unseen.
+  const keys = [...m[1].matchAll(/"([^"]+)":/g)].map((x) => x[1]).sort();
+  assert.ok(keys.length > 0, `no keys in ${name}`);
+  for (const k of keys) assert.match(k, /^[a-z0-9_]+$/, `${name}: recipe key ${k}`);
+  return keys;
 }
 
 test("the recipe lists are site_cache.go's recipe vocabularies", () => {
@@ -97,13 +102,17 @@ test("the shared ttl / bucket / host / cookie cases", () => {
       assert.equal(String(microBucketSeconds(c.input)), c.want, where);
     } else if (c.kind === "host") {
       assert.equal(hostError(c.input) === "" ? "ok" : "bad", c.want, where);
-    } else if (c.kind === "cookie") {
-      assert.equal(cookieNameError(c.input) === "" ? "ok" : "bad", c.want, where);
+    } else if (c.kind === "cookie" || c.kind === "cookieq") {
+      const name = c.kind === "cookieq" ? JSON.parse(`"${c.input}"`) : c.input;
+      assert.equal(cookieNameError(name) === "" ? "ok" : "bad", c.want, where);
+      // ...and through the path that builds what is sent.
+      const parsed = parseAuthCookies(name);
+      assert.equal(parsed.errors.length === 0 && parsed.names.length === 1 ? "ok" : "bad", c.want, `${where} via parseAuthCookies`);
     } else {
       assert.fail(`${where}: unknown kind`);
     }
   }
-  for (const k of ["ttl", "bucket", "host", "cookie"]) assert.ok(counts[k] > 0, `no ${k} cases`);
+  for (const k of ["ttl", "bucket", "host", "cookie", "cookieq"]) assert.ok(counts[k] > 0, `no ${k} cases`);
 });
 
 // ── Host / TTL / cookie helpers ───────────────────────────────────────────
@@ -132,6 +141,8 @@ test("cookieNameError refuses Go's whitespace, not JavaScript's", () => {
 });
 
 test("parseAuthCookies de-duplicates case-insensitively and caps the list", () => {
+  // ASCII fold only, as the daemon: K and the Kelvin sign are two names.
+  assert.equal(parseAuthCookies("k, \u212a").names.length, 2);
   const r = parseAuthCookies("app_sess, APP_SESS, other");
   assert.deepEqual(r.names, ["app_sess", "other"]);
   assert.deepEqual(r.errors, []);
@@ -142,44 +153,69 @@ test("parseAuthCookies de-duplicates case-insensitively and caps the list", () =
 
 // ── Form → patch ──────────────────────────────────────────────────────────
 
-test("buildPatch: a new static-only policy", () => {
+test("buildPatch: a new policy sends only what it turns on", () => {
   const f = { ...emptyForm(), host: "Shop.Example.com.", staticOn: true };
-  assert.deepEqual(buildPatch(f), {
-    host: "shop.example.com",
-    static: { enabled: true, recipe: "static_lean" },
-    micro: { enabled: false },
-    strict_cookies: false,
-    auth_cookies: [],
+  assert.deepEqual(buildPatch(f), { host: "shop.example.com", static: { enabled: true, recipe: "static_lean" } });
+  const m = { ...emptyForm(), host: "a.example.com", microOn: true, microRecipe: "micro_aggressive", microTTL: "10S", strictCookies: true, authCookies: "x_sess" };
+  assert.deepEqual(buildPatch(m), {
+    host: "a.example.com",
+    micro: { enabled: true, recipe: "micro_aggressive", ttl: "10s" },
+    strict_cookies: true,
+    auth_cookies: ["x_sess"],
+  });
+  // Both off is the explicit opt-out a new host needs.
+  assert.deepEqual(buildPatch({ ...emptyForm(), host: "api.example.com" }), {
+    host: "api.example.com", static: { enabled: false }, micro: { enabled: false },
   });
 });
 
-test("buildPatch sends a tier's recipe and TTL only while it is on", () => {
-  const f = { ...emptyForm(), host: "a.example.com", microOn: true, microRecipe: "micro_aggressive", microTTL: "10S" };
-  const p = buildPatch(f);
-  assert.deepEqual(p.micro, { enabled: true, recipe: "micro_aggressive", ttl: "10s" });
-  assert.deepEqual(p.static, { enabled: false });
+const STORED = {
+  host: "shop.example.com",
+  static: { enabled: true, recipe: "static_aggressive", ttl: "7d" },
+  micro: { enabled: true, recipe: "micro_safe", ttl: "" },
+  strict_cookies: false,
+  auth_cookies: ["shop_login"],
+  updated_at: "2026-09-23T10:00:00Z",
+};
+
+test("buildPatch: an edit sends only the fields that changed", () => {
+  const f = formFromEntry(STORED);
+  assert.deepEqual(buildPatch(f, STORED), { host: "shop.example.com" }, "untouched: nothing but the host");
+  assert.equal(patchChanges(buildPatch(f, STORED)), 0);
+  // The empty stored TTL shows as 1 s and is not rewritten.
+  assert.equal(f.microTTL, "1s");
+  assert.deepEqual(buildPatch({ ...f, microTTL: "10s" }, STORED), { host: "shop.example.com", micro: { ttl: "10s" } });
+  assert.deepEqual(buildPatch({ ...f, strictCookies: true }, STORED), { host: "shop.example.com", strict_cookies: true });
+  assert.deepEqual(buildPatch({ ...f, authCookies: "shop_login, shop_cart" }, STORED), { host: "shop.example.com", auth_cookies: ["shop_login", "shop_cart"] });
+  assert.deepEqual(buildPatch({ ...f, authCookies: "shop_login " }, STORED), { host: "shop.example.com" }, "whitespace only");
+  assert.deepEqual(buildPatch({ ...f, authCookies: "" }, STORED), { host: "shop.example.com", auth_cookies: [] }, "clearing is a change");
+  assert.deepEqual(buildPatch({ ...f, staticOn: false }, STORED), { host: "shop.example.com", static: { enabled: false } });
+  assert.deepEqual(buildPatch({ ...f, microRecipe: "micro_custom" }, STORED), { host: "shop.example.com", micro: { recipe: "micro_custom" } });
+});
+
+test("buildPatch: a tier turned on sends its recipe (and TTL); turned off, only enabled", () => {
+  const off = { host: "a.com", static: { enabled: false, recipe: "static_lean" }, micro: { enabled: false, recipe: "micro_safe", ttl: "5s" } };
+  const f = formFromEntry(off);
+  assert.deepEqual(buildPatch({ ...f, microOn: true }, off), { host: "a.com", micro: { enabled: true, recipe: "micro_safe", ttl: "5s" } });
+  assert.deepEqual(buildPatch({ ...f, staticOn: true }, off), { host: "a.com", static: { enabled: true, recipe: "static_lean" } });
   // Off again: the stored recipe is kept (no recipe in the patch), so a later
   // re-enable still starts from a fresh generation.
-  assert.deepEqual(buildPatch({ ...f, microOn: false }).micro, { enabled: false });
+  const on = { host: "a.com", micro: { enabled: true, recipe: "micro_aggressive", ttl: "10s" } };
+  assert.deepEqual(buildPatch({ ...formFromEntry(on), microOn: false }, on), { host: "a.com", micro: { enabled: false } });
+});
+
+test("buildPatch: a stored cookie name the comma list cannot hold survives an edit", () => {
+  const e = { host: "a.com", micro: { enabled: true, recipe: "micro_safe", ttl: "1s" }, auth_cookies: ["a,b"] };
+  const f = formFromEntry(e);
+  assert.deepEqual(buildPatch({ ...f, microTTL: "5s" }, e), { host: "a.com", micro: { ttl: "5s" } });
 });
 
 test("formFromEntry round-trips a stored policy", () => {
-  const entry = {
-    host: "shop.example.com",
-    static: { enabled: true, recipe: "static_aggressive", ttl: "7d" },
-    micro: { enabled: false, recipe: "micro_safe", ttl: "7s" },
-    strict_cookies: true,
-    auth_cookies: ["a", "b"],
-  };
-  const f = formFromEntry(entry);
+  const f = formFromEntry(STORED);
   assert.equal(f.staticRecipe, "static_aggressive");
-  assert.equal(f.microTTL, "7s");
-  assert.equal(f.authCookies, "a, b");
-  const p = buildPatch(f);
-  assert.deepEqual(p.static, { enabled: true, recipe: "static_aggressive" }); // the static TTL label is never sent
-  assert.deepEqual(p.micro, { enabled: false });
-  assert.deepEqual(p.auth_cookies, ["a", "b"]);
+  assert.equal(f.authCookies, "shop_login");
   assert.equal(formFromEntry({ host: "x.com", micro: { enabled: true, recipe: "micro_safe" } }).microTTL, "1s");
+  assert.equal(formFromEntry({ host: "x.com", micro: { enabled: false, recipe: "micro_safe", ttl: "7s" } }).microTTL, "7s");
 });
 
 test("offPatch is the explicit opt-out", () => {
@@ -213,6 +249,17 @@ test("validateForm: warnings for what an operator should know", () => {
   const original = { host: "a.com", static: { enabled: false }, micro: { enabled: false, recipe: "micro_safe" } };
   const bump = validateForm({ ...emptyForm(), host: "a.com", staticOn: true, microOn: true }, { original });
   assert.equal(bump.warnings.filter((w) => /empty cache/.test(w)).length, 2);
+  // A first micro enable (no stored recipe) has nothing to hide: no new generation.
+  const first = validateForm({ ...emptyForm(), host: "a.com", staticOn: true, microOn: true },
+    { original: { host: "a.com", static: { enabled: true, recipe: "static_lean" }, micro: { enabled: false } } });
+  assert.equal(first.warnings.filter((w) => /empty cache/.test(w)).length, 0);
+  // An unloadable host is not a new policy.
+  const frozen = validateForm({ ...emptyForm(), host: "old.example.com" }, { unloadable: ["old.example.com"] });
+  assert.match(frozen.errors.join(" "), /cannot read/);
+  // Stored cookie values the operator did not touch are not re-validated.
+  const stored = { host: "a.com", micro: { enabled: false }, auth_cookies: ["a,[b"] };
+  assert.deepEqual(validateForm(formFromEntry(stored), { original: stored }).errors, []);
+  assert.deepEqual(validateForm(formFromEntry(stored), { original: stored }).warnings.filter((w) => /micro tier only/.test(w)), []);
   const dup = validateForm({ ...emptyForm(), host: "A.com", staticOn: true }, { existing: [{ host: "a.com" }] });
   assert.match(dup.errors.join(" "), /already has a policy: edit it instead/);
   const covered = validateForm({ ...emptyForm(), host: "blog.shop.example.com", staticOn: true },
@@ -286,9 +333,12 @@ test("nodeSwitches reads [webdetector] as the daemon does", () => {
 test("debugCurl builds the runbook command for a valid host only", () => {
   assert.equal(
     debugCurl("*.Example.com", "/a b'c"),
-    "curl -sk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' --resolve www.example.com:9043:<vhost-ip> 'https://www.example.com:9043/a%20b%27c'",
+    "curl -gsk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' --resolve www.example.com:9043:VHOST_IP 'https://www.example.com:9043/a%20b%27c'",
   );
   assert.match(debugCurl("shop.example.com", "p"), /:9043\/p'$/);
+  assert.match(debugCurl("shop.example.com", "/a[1]{x,y}"), /^curl -g/, "-g: no URL globbing");
+  // A wildcard's example sub-host is one without an exact policy of its own.
+  assert.match(debugCurl("*.example.com", "/", ["www.example.com"]), /--resolve cfm-check\.example\.com:9043:/);
   assert.equal(debugCurl("bad host; rm -rf /"), "");
   assert.equal(debugCurl(""), "");
 });
@@ -297,5 +347,6 @@ test("generationSinceMs: a wall-clock generation is a time, a counter is not", (
   const now = Date.parse("2026-09-23T12:00:00Z");
   assert.equal(generationSinceMs(1758600000000, now), 1758600000000);
   assert.equal(generationSinceMs(7, now), null);
+  assert.equal(generationSinceMs(999999999999, now), null, "below the daemon's 1e12 floor: a legacy counter");
   assert.equal(generationSinceMs(now + 2 * 86400000, now), null);
 });

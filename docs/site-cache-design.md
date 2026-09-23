@@ -875,7 +875,9 @@ has:
 - **callouts** saying what each tier does and never does, and, for an admin,
   the node's `SITE_CACHE` / `MICRO_CACHE_ENFORCE` (read from
   `GET /api/v1/detectors/config?view=merged`, admin-only, at most once a
-  minute): the micro tier reads "dry run" until the node enforces it, and a
+  minute): the micro tier reads "enforced" or "dry run" for that node. When the
+  page cannot tell (a scoped user, who is never shown the switch, or a failed
+  read) it says to treat an armed micro tier as live, never "dry run", and a
   `SITE_CACHE = 0` node gets a danger banner;
 - an **editor**: the host (exact or `*.suffix`), the static tier (on + recipe
   label), the micro tier (on, the TTL as a bucket menu, the recipe label, auth
@@ -883,42 +885,60 @@ has:
   The model validates what the daemon validates (host, TTL, recipe, cookie
   names, 32-name cap) and warns about what an operator should know: an
   opt-out, a TTL that snaps, a re-enable that starts the cache over, a host a
-  wildcard covers. The save sends a merge patch (§6): `enabled` for both
-  tiers, a tier's recipe / TTL only while it is on (a disabled tier keeps its
-  stored recipe), never the static TTL label;
+  wildcard covers. The save sends a merge patch (§6) with only what the
+  operator decided, so it never undoes a change someone else made meanwhile:
+  - a **new** policy sends only the tiers turned on (both off explicitly, for
+    an opt-out) and the cookie settings when set;
+  - an **edit** sends only the fields that differ from the stored policy it
+    loaded;
+  - a tier's recipe / TTL go only while it is on (a disabled tier keeps its
+    stored recipe), and never the static TTL label.
+
+  A new-policy form for a host that already has a policy is refused (it offers
+  "Edit" instead), and so is one for an unloadable host. So is any new policy
+  while the list has not loaded. An edit whose policy changed meanwhile is
+  reloaded if untouched, or flagged if not; one whose policy was deleted
+  cannot be saved;
 - **Check one URL**: the §11.3 debug-stamp `curl` for a vhost and path, built
   only for a valid host, with what the stamp's fields mean;
 - the **policy table** with quick filters (static / micro / opt-out), a vhost
   filter (its own policy and every wildcard covering it), search and **sort**
   (host, tiers, micro TTL, cache since = the generation's time, updated,
-  HIT %); per row **Edit**, **Check**, **Purge**, **Turn off** (the opt-out:
-  `set` with both tiers off, §6) and a separate, labelled **Delete** (`remove`:
-  a covering wildcard applies again, and a purge is no longer possible), each
-  confirmed; **Purge all** for an admin only; the unloadable hosts with Turn off
-  / Delete;
+  HIT %); per row **Edit**, **Check**, **Purge** (not on an opt-out: nothing
+  is served from its cache), **Turn off** (the opt-out: `set` with both tiers
+  off, §6) and a separate, labelled **Delete** (`remove`: the host then
+  follows the most specific covering wildcard, from that wildcard's cache,
+  which the confirm names; a policy added again starts from an empty cache),
+  each confirmed; **Purge all** for an admin only; the unloadable hosts with
+  Delete, and Turn off where the host is still valid (it replaces the unread
+  policy, which the confirm says);
 - a **Recipes** panel (§8) with a per-vhost preview ("new policy" / "updates
   the existing policy" / "starts its cache over");
 - a **Hit counts** table: the §11 breakdown per armed policy key.
 
-A new micro tier on a node that enforces it asks for confirmation (the
-switches are known to an admin only). Per-URL verification is the
+Turning the micro tier on (editor or recipe) asks for confirmation unless the
+node is known to be in a dry run. Per-URL verification is the
 `X-CFM-Cache` debug header (§8, §11.3), not a simulate panel.
 
 Scoped users: `site-cache` stays **out** of `ADMIN_ONLY_NAV_PATHS`
 (`controller-bootstrap.js`), and `v1/site-cache/` is in both the viewer write
 guard and `isScopedSelfServiceWrite` (`core.js`), like `v1/http3/`: a scoped
-token manages its own vhosts from the page, the editor starts on its vhost
-when it has one, an out-of-scope host is refused before the request, and
-Purge all and the node switches are not shown. The backends still fail
+token manages its own vhosts from the page. With one vhost the editor opens its
+stored policy (or starts a new one on it). A host outside the token's vhosts
+is refused before the request: a literal match, as the API checks, and an
+empty scope allows nothing. Purge all and the node switches are not shown. The backends still fail
 closed regardless of the UI.
 
 **Parity:** the model is a second copy of daemon and edge rules, so it is
 pinned. `site-cache-model.test.js` reads the recipe vocabularies and the limits
 from `site_cache.go` and `MICRO_BUCKETS` from `cfm_cache.lua`, and
 `scripts/tests/fixtures/site_cache_ui_parity.txt` holds TTL, bucket, host and
-cookie cases that three tests run: the page's model (JS), the daemon's set
-path (`site_cache_ui_parity_test.go`) and the edge's bucket snapping
-(`cfm_cache_ui_parity_test.lua`).
+cookie cases (the length boundaries, and escaped Unicode-whitespace cookie
+names).
+- The page's model (JS) runs every case.
+- The daemon (`site_cache_ui_parity_test.go`) runs the host and cookie cases
+  through the real set path, and the TTL cases through `parseCacheTTL`.
+- The edge (`cfm_cache_ui_parity_test.lua`) runs the bucket cases.
 
 ### 7.4 Bridge (daemon↔edge, `nginx_bridge.go`)
 

@@ -24,6 +24,10 @@ import {
   canonHost,
   isWildcard,
   generationSinceMs,
+  coveringWildcard,
+  patchChanges,
+  isOptOut,
+  hostError,
 } from "./site-cache-model.js";
 import {
   SC_RECIPES,
@@ -95,9 +99,27 @@ export const siteCacheMixin = {
     scValidation() {
       return validateForm(this.scForm, {
         original: this.scOriginal,
-        inScope: (h) => this.isHostAllowedByScope(h),
+        inScope: (h) => this.scInScope(h),
         existing: this.scEntries,
+        unloadable: this.scUnloadable,
       });
+    },
+    // What a save would send: only what the operator decided (buildPatch).
+    scPatch() {
+      return buildPatch(this.scForm, this.scOriginal);
+    },
+    scHasChanges() {
+      return patchChanges(this.scPatch) > 0;
+    },
+    // The policy being edited changed ("changed") or went ("gone") since the
+    // form loaded it. A save still sends only the fields changed here, but a
+    // deleted policy must not be silently recreated.
+    scEditStale() {
+      if (!this.scEditHost || !this.scLoaded) return "";
+      const row = this.scRows.find((r) => r.host === this.scEditHost);
+      if (!row) return "gone";
+      const was = (this.scOriginal && this.scOriginal.updated_at) || "";
+      return row.entry && row.entry.updated_at !== was ? "changed" : "";
     },
     // The stored policy a NEW-policy form's host already has (the editor then
     // offers to open it instead: saving the new form would replace it).
@@ -107,7 +129,12 @@ export const siteCacheMixin = {
       return h ? this.scRows.find((r) => r.host === h) || null : null;
     },
     canSaveSC() {
-      return !this.scBusy && this.scValidation.errors.length === 0;
+      if (this.scBusy || this.scValidation.errors.length) return false;
+      // An edit needs a change, and a policy that still exists. A new policy
+      // needs a loaded list: without it the page cannot tell that the host
+      // already has one.
+      if (this.scEditHost) return this.scHasChanges && this.scEditStale !== "gone";
+      return this.scLoaded && !this.scLoadError;
     },
     // A pristine form (no host typed yet) shows no errors: the save button is
     // disabled anyway, and the sentence says what to do.
@@ -133,26 +160,30 @@ export const siteCacheMixin = {
       const f = this.scForm;
       if (!f.host.trim()) return "Pick a vhost, then turn on a tier (or leave both off for an opt-out).";
       const host = canonHost(f.host);
-      const where = isWildcard(host) ? `every sub-host of ${host.slice(2)} without a policy of its own` : host;
+      const where = isWildcard(host) ? `every sub-host of ${host.slice(2)} without a policy of its own (or a narrower wildcard)` : host;
       if (!f.staticOn && !f.microOn) return `${where}: never cached (opt-out).`;
       const parts = [];
       if (f.staticOn) parts.push(`static assets cached by the origin's headers, 1 h fallback (${recipeLabel(f.staticRecipe)})`);
       if (f.microOn) parts.push(`anonymous pages micro-cached for ${microBucketSeconds(String(f.microTTL || ""))} s (${recipeLabel(f.microRecipe)})`);
       return `${where}: ${parts.join("; ")}.`;
     },
-    scMicroDryRun() {
-      return !this.scSwitches || !this.scSwitches.microEnforce;
+    // "enforced" / "dryrun" from this node's MICRO_CACHE_ENFORCE, or "unknown":
+    // a scoped page cannot read it, and an admin's read can fail. Unknown is
+    // treated as possibly live, never as a dry run.
+    scMicroMode() {
+      if (!this.scSwitches) return "unknown";
+      return this.scSwitches.microEnforce ? "enforced" : "dryrun";
     },
     scSelectedRecipe() {
       return scRecipe(this.scRecipeKey);
     },
     scRecipeVarErrors() {
-      return scRecipeErrors(this.scSelectedRecipe, this.scRecipeVars, { inScope: (h) => this.isHostAllowedByScope(h) });
+      return scRecipeErrors(this.scSelectedRecipe, this.scRecipeVars, { inScope: (h) => this.scInScope(h) });
     },
     // The patches a recipe would send, with what each does to an existing
     // policy: "new", "updates", and whether it starts the cache over.
     scRecipePreview() {
-      const patches = scRecipeBuild(this.scSelectedRecipe, this.scRecipeVars, { inScope: (h) => this.isHostAllowedByScope(h) });
+      const patches = scRecipeBuild(this.scSelectedRecipe, this.scRecipeVars, { inScope: (h) => this.scInScope(h) });
       const byHost = new Map(this.scEntries.map((e) => [e.host, e]));
       return patches.map((p) => {
         const cur = byHost.get(p.host) || null;
@@ -168,7 +199,7 @@ export const siteCacheMixin = {
       });
     },
     scCheckCurl() {
-      return debugCurl(this.scCheckHost || this.scForm.host, this.scCheckPath);
+      return debugCurl(this.scCheckHost || this.scForm.host, this.scCheckPath, this.scEntries.map((e) => e.host));
     },
   },
 
@@ -178,7 +209,10 @@ export const siteCacheMixin = {
       await this.refreshSiteCache();
     },
     async refreshSiteCache() {
-      const statsP = this.fetchJSONSafe("v1/site-cache/stats", { rows: [] });
+      const statsP = this.fetchJSON("v1/site-cache/stats").then((p) => this.extractRows(p, "rows"), (err) => {
+        console.error("[cfm-admin] site-cache stats fetch failed", err);
+        return null; // keep the last counts
+      });
       try {
         const payload = await this.fetchJSON("v1/site-cache/list");
         this.scEntries = this.extractRows(payload, "rows");
@@ -189,7 +223,9 @@ export const siteCacheMixin = {
         // Keep the last list rather than showing "no policies" on a failed read.
         this.scLoadError = `Could not load the policies: ${this.formatApiError(err)}`;
       }
-      this.scStats = this.extractRows(await statsP, "rows");
+      const stats = await statsP;
+      if (stats) this.scStats = stats;
+      if (!this.scLoadError) this.resyncSCEdit();
       this.adoptSCScopedPolicy();
       await this.refreshSiteCacheSwitches();
     },
@@ -200,10 +236,27 @@ export const siteCacheMixin = {
       if (!force && this.scSwitchesAt && Date.now() - this.scSwitchesAt < SWITCHES_TTL_MS) return;
       this.scSwitchesAt = Date.now();
       const payload = await this.fetchJSONSafe("v1/detectors/config?view=merged", null);
-      this.scSwitches = nodeSwitches(payload);
+      // A failed read keeps the last known state (a first failure leaves it
+      // unknown); it is retried after the same interval.
+      const sw = nodeSwitches(payload);
+      if (sw) this.scSwitches = sw;
+    },
+    // The site-cache API matches a scoped token's vhosts literally (a scope
+    // entry "*.example.com" allows that policy key, not a.example.com), and an
+    // empty scope allows nothing: the same check here, so the page refuses what
+    // the server would 403.
+    scInScope(host) {
+      if (!this.isScoped) return true;
+      const h = canonHost(host);
+      return this.allowedVhosts.some((v) => canonHost(v) === h);
     },
 
     scRecipeLabel: recipeLabel,
+    // The set API refuses a host this version no longer accepts, so such an
+    // unloadable row can only be deleted.
+    scHostValid(host) {
+      return !hostError(host);
+    },
     scIsBucket: isBucketTTL,
     scStaticText(row) {
       return row.staticOn ? recipeLabel(row.staticRecipe) : "off";
@@ -298,40 +351,62 @@ export const siteCacheMixin = {
       const row = this.scExistingForNew;
       if (row) this.editSC(row, { scroll: false });
     },
-    editSC(row, { scroll = true } = {}) {
+    editSC(row, { scroll = true, check = true } = {}) {
       this.scForm = formFromEntry(row.entry);
       this.scEditHost = row.host;
       this.scOriginal = row.entry;
-      this.scCheckHost = row.host;
+      if (check) this.scCheckHost = row.host;
       this.scMode = "editor";
       if (!scroll) return;
       try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { /* non-fatal */ }
     },
-    // A new micro tier on a node that ENFORCES it serves pages from cache at
-    // once: confirm. (Unknown switches — a scoped page — do not prompt; the
-    // micro callout says it may be a dry run.)
+    // After a fresh list: an editor with no unsaved change follows the stored
+    // policy — reloaded when it changed (Turn off from the table, a recipe,
+    // another operator), a blank form when it is gone — so a later Save never
+    // re-sends the state from before. With unsaved changes it is left alone,
+    // and the editor says the policy changed or went.
+    resyncSCEdit() {
+      if (!this.scEditHost || this.scHasChanges) return;
+      const row = this.scRows.find((r) => r.host === this.scEditHost);
+      if (!row) this.resetSCForm();
+      else if (this.scEditStale === "changed") this.editSC(row, { scroll: false, check: false });
+    },
+    reloadSCEdit() {
+      const row = this.scRows.find((r) => r.host === this.scEditHost);
+      if (row) this.editSC(row, { scroll: false });
+    },
+    // Turning the micro tier on where this node enforces it — or may: the
+    // page cannot always tell — serves anonymous pages from cache at once.
+    // Confirm, unless the node is known to be in a dry run.
     confirmSCMicroEnforced(patch) {
+      if (!patch.micro || !patch.micro.enabled || this.scMicroMode === "dryrun") return true;
       const wasOn = Boolean(this.scOriginal && this.scOriginal.micro && this.scOriginal.micro.enabled);
-      if (!patch.micro || !patch.micro.enabled || wasOn || !this.scSwitches || !this.scSwitches.microEnforce) return true;
+      if (wasOn) return true;
+      const node = this.scMicroMode === "enforced"
+        ? "This node enforces the micro tier"
+        : "This page cannot tell whether this node enforces the micro tier; if it does";
       return window.confirm(
-        `This node enforces the micro tier: anonymous pages of ${patch.host} will be served from cache for ` +
-        `${microBucketSeconds(patch.micro.ttl || "")} s. Checked the debug stamp on its logged-in / cart pages first?`);
+        `${node}: anonymous pages of ${patch.host} will be served from cache for ` +
+        `${microBucketSeconds(patch.micro.ttl || "")} s. Checked the debug stamp on its logged-in and cart pages first?`);
     },
     async saveSC() {
       if (!this.canSaveSC) return;
-      const patch = buildPatch(this.scForm);
+      const patch = this.scPatch;
       if (!this.confirmSCMicroEnforced(patch)) return;
+      const editing = this.scEditHost;
       this.scBusy = true;
       try {
         const res = await this.postJSON("v1/site-cache/set", patch);
         const entry = (res && res.entry) || null;
         this.actionMsg = `Saved the policy for ${patch.host}. Each edge worker applies it within about 60 s.`;
-        await this.refreshSiteCache();
-        if (entry) {
+        // Load the stored result into the editor, unless the operator moved on
+        // to another row while the save was in flight.
+        if (entry && this.scEditHost === editing) {
           this.scForm = formFromEntry(entry);
           this.scEditHost = entry.host;
           this.scOriginal = entry;
         }
+        await this.refreshSiteCache();
       } catch (err) {
         this.actionMsg = `Save failed: ${this.formatApiError(err)}`;
         console.error("[cfm-admin] site-cache save failed", err);
@@ -354,16 +429,28 @@ export const siteCacheMixin = {
       }
     },
     offSC(host) {
-      const scope = isWildcard(host) ? `nothing under ${host} is cached (unless a more specific policy arms it)` : `${host} is never cached, even under an armed wildcard`;
-      if (!window.confirm(`Turn caching off for ${host}? Both tiers go off: ${scope}. Objects already cached stay until they expire; purge first if something wrong was cached.`)) return;
+      const scope = isWildcard(host)
+        ? `the sub-hosts it covers are not cached, unless a policy of their own arms them`
+        : `${host} is not cached, even under an armed wildcard`;
+      if (!window.confirm(`Turn caching off for ${host}? Both tiers go off and the policy stays, as an opt-out: ${scope}. Nothing is served from its cache while it is off, and turning it on again starts from an empty cache.`)) return;
       return this.runSCAction("Turn off", async () => {
         await this.postJSON("v1/site-cache/set", offPatch(host));
-        if (this.scEditHost === host) this.resetSCForm();
         return `${host} is opted out. Each edge worker applies it within about 60 s.`;
       });
     },
+    // An unloadable row belongs to a policy this build cannot read (maybe
+    // written by a newer CFM): turning it off replaces it, dropping its settings.
+    offUnloadableSC(host) {
+      if (!window.confirm(`Replace the stored policy for ${host} with an opt-out? This version cannot read it (it may come from a newer CFM), so its settings are discarded; the host stays uncached, as it is now.`)) return;
+      return this.runSCAction("Turn off", async () => {
+        await this.postJSON("v1/site-cache/set", offPatch(host));
+        return `${host} now has an opt-out policy.`;
+      });
+    },
     purgeSC(host) {
-      const scope = isWildcard(host) ? `everything cached under ${host}` : `everything cached for ${host}`;
+      const scope = isWildcard(host)
+        ? `the cache of ${host} (the sub-hosts it covers; a sub-host with a policy of its own has its own cache)`
+        : `the cache of ${host}`;
       if (!window.confirm(`Purge ${scope}? The next requests go to the origin.`)) return;
       return this.runSCAction("Purge", async () => {
         await this.postJSON(`v1/site-cache/purge?host=${encodeURIComponent(host)}`, {});
@@ -371,11 +458,18 @@ export const siteCacheMixin = {
       });
     },
     removeSC(host) {
-      const after = isWildcard(host) ? "Its sub-hosts are then cached only by their own policies." : "The host then follows a covering wildcard again, if one is armed.";
-      if (!window.confirm(`Delete the policy for ${host}? ${after} A purge is no longer possible after this, so purge first if something wrong was cached.`)) return;
+      const others = this.scEntries.filter((e) => e.host !== host);
+      const cover = coveringWildcard(host, others);
+      const coverEntry = others.find((e) => e.host === cover);
+      const who = isWildcard(host) ? "The sub-hosts it covered (those without a policy of their own)" : host;
+      const verb = isWildcard(host) ? "follow" : "follows";
+      let after;
+      if (!cover) after = isWildcard(host) ? `${who} are then not cached.` : `${host} is then not cached.`;
+      else if (isOptOut(coverEntry)) after = `${who} then ${verb} ${cover}, an opt-out: not cached.`;
+      else after = `${who} then ${verb} ${cover} and ${isWildcard(host) ? "are" : "is"} served from that wildcard's cache (purge ${cover} if that holds something wrong).`;
+      if (!window.confirm(`Delete the policy for ${host}? ${after} Adding a policy for it again starts from an empty cache.`)) return;
       return this.runSCAction("Remove", async () => {
         await this.postJSON(`v1/site-cache/remove?host=${encodeURIComponent(host)}`, {});
-        if (this.scEditHost === host) this.resetSCForm();
         return `Deleted the policy for ${host}.`;
       });
     },
@@ -434,8 +528,11 @@ export const siteCacheMixin = {
     },
     confirmSCRecipeMicro(rows) {
       const micro = rows.some(({ patch }) => patch.micro && patch.micro.enabled);
-      if (!micro || !this.scSwitches || !this.scSwitches.microEnforce) return true;
-      return window.confirm("This node enforces the micro tier: the anonymous pages of these vhosts will be served from cache at once. Continue?");
+      if (!micro || this.scMicroMode === "dryrun") return true;
+      const node = this.scMicroMode === "enforced"
+        ? "This node enforces the micro tier"
+        : "This page cannot tell whether this node enforces the micro tier; if it does";
+      return window.confirm(`${node}: the anonymous pages of these vhosts will be served from cache at once. Checked their session cookies are on the auth list? Continue?`);
     },
     scPatchSummary(p) {
       const parts = [];

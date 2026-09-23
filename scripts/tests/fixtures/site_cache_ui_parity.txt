@@ -1,9 +1,9 @@
 # Shared vectors for the Site Cache page model (internal/webui/static/assets/webdet/site-cache-model.js).
 # One case per line, TAB-separated: <kind>	<input>	<expected>. <empty> is the empty string.
 # Read by three tests, so the page cannot drift from what it mirrors:
-#   ttl, host, cookie - internal/webdetector/site_cache_ui_parity_test.go (the daemon);
+#   ttl, host, cookie, cookieq - internal/webdetector/site_cache_ui_parity_test.go (the daemon);
 #   bucket            - scripts/tests/cfm_cache_ui_parity_test.lua (the edge);
-#   all four          - site-cache-model.test.js (the page).
+#   all of them       - site-cache-model.test.js (the page).
 #
 # ttl: parseCacheTTL -> seconds, or invalid.
 ttl	5s	5
@@ -66,6 +66,11 @@ host	example.com:443	bad
 host	bücher.example	bad
 host	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com	bad
 host	<empty>	bad
+host	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com	ok
+host	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd	ok
+host	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddde	bad
+host	*.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd	ok
+host	*.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddde	bad
 #
 # cookie: an auth cookie name the set API accepts (ok) or refuses (bad).
 cookie	myapp_session	ok
@@ -78,3 +83,18 @@ cookie	a b	bad
 cookie	__Host-	bad
 cookie	__secure-	bad
 cookie	[x	bad
+cookie	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx	ok
+cookie	xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx	bad
+cookie	éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé	ok
+cookie	ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé	bad
+#
+# cookieq: a cookie case written with \uXXXX escapes (the Go and JS readers decode them), so
+# no invisible character sits in this file. Go's unicode.IsSpace, not JavaScript's \s.
+cookieq	a\u3000b	bad
+cookieq	a\u0085b	bad
+cookieq	a\u2028b	bad
+cookieq	a\u00a0b	bad
+cookieq	a\u2007b	bad
+cookieq	a\ufeffb	ok
+cookieq	a\u200bb	ok
+cookieq	\u212a	ok

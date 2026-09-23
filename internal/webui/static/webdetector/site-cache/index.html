@@ -24,7 +24,7 @@
       <section class="card wide">
         <h2>Site Cache</h2>
         <p class="muted">
-          Per-vhost edge caching. It is <strong>off for every vhost until you arm one</strong>, and
+          Per-vhost edge caching. It is <strong>off for every vhost until a policy arms it</strong>, and
           every rule below holds whatever a policy says. The operator guide is
           <code>docs/site-cache-runbook.md</code>.
         </p>
@@ -35,12 +35,17 @@
             sends none). It reads no request cookie: anything per-user must be marked
             <code>private</code> by the origin.
           </div>
-          <div class="callout" :class="{ warn: scMicroDryRun }">
+          <div class="callout" :class="{ warn: scMicroMode !== 'enforced' }">
             <strong>Micro tier (B).</strong> Anonymous GET/HEAD over HTTPS, for 1–60 s.
-            <template v-if="scSwitches">This node: <strong>{{ scSwitches.microEnforce ? 'enforced' : 'dry run' }}</strong>
-              (<code>MICRO_CACHE_ENFORCE = {{ scSwitches.microEnforce ? 1 : 0 }}</code>).</template>
-            <template v-else>A dry run until the node sets <code>MICRO_CACHE_ENFORCE = 1</code>.</template>
-            In a dry run nothing is stored: the debug stamp only reports what would be.
+            <template v-if="scMicroMode === 'enforced'">This node: <strong>enforced</strong>
+              (<code>MICRO_CACHE_ENFORCE = 1</code>): an armed vhost's anonymous pages are served from cache.</template>
+            <template v-else-if="scMicroMode === 'dryrun'">This node: <strong>dry run</strong>
+              (<code>MICRO_CACHE_ENFORCE = 0</code>): nothing is stored, the debug stamp only reports what would be.</template>
+            <template v-else-if="isScoped">Whether this node enforces it (<code>MICRO_CACHE_ENFORCE</code>, set by
+              the server operator) is not shown here: <strong>treat an armed micro tier as live</strong>. In a dry
+              run the debug stamp only reports what would be cached.</template>
+            <template v-else>This node's <code>MICRO_CACHE_ENFORCE</code> could not be read:
+              <strong>treat an armed micro tier as live</strong>.</template>
           </div>
           <div class="callout">
             <strong>Never cached, on either tier:</strong> a request with <code>Authorization</code>,
@@ -154,6 +159,10 @@
               <div class="rule-sentence">{{ scReviewSentence }}</div>
               <ul class="msg-list errors" v-if="scShownValidation.errors.length"><li v-for="e in scShownValidation.errors" :key="e">{{ e }}</li></ul>
               <ul class="msg-list warnings" v-if="scShownValidation.warnings.length"><li v-for="w in scShownValidation.warnings" :key="w">{{ w }}</li></ul>
+              <ul class="msg-list warnings" v-if="scEditStale === 'changed'"><li>This policy changed since you opened it. Saving sends only what you changed here; <a href="#" @click.prevent="reloadSCEdit">reload it</a> to see the new values.</li></ul>
+              <ul class="msg-list errors" v-if="scEditStale === 'gone'"><li>This policy was deleted since you opened it: saving is off, so it is not recreated by accident.</li></ul>
+              <p class="muted" v-if="scEditHost && !scHasChanges && !scEditStale">No changes to save.</p>
+              <p class="muted" v-if="!scEditHost && scLoadError">The policy list did not load: creating a policy waits for it, so an existing one is not replaced.</p>
               <div class="toolbar" v-if="scExistingForNew">
                 <button class="btn-quiet btn-sm" @click="editSC(scExistingForNew)">Edit the policy of {{ scExistingForNew.host }}</button>
               </div>
@@ -179,7 +188,7 @@
               <pre class="sc-curl">{{ scCheckCurl }}</pre>
               <div class="toolbar">
                 <button class="btn-quiet btn-sm" @click="copySCCurl">{{ scCopied ? 'Copied' : 'Copy' }}</button>
-                <span class="muted">Replace <code>&lt;vhost-ip&gt;</code> with the IP the vhost listens on.</span>
+                <span class="muted">Replace <code>VHOST_IP</code> with the IP the vhost listens on.</span>
               </div>
             </template>
             <p class="muted" v-else>Enter a valid vhost to build the command.</p>
@@ -199,7 +208,7 @@
           <span class="muted">&nbsp;They are treated as opted out (never cached), for example after a downgrade.</span>
           <span v-for="h in scUnloadable" :key="h" class="sc-unloadable">
             <code>{{ h }}</code>
-            <button class="btn-quiet btn-sm" :disabled="scBusy" @click="offSC(h)" title="Replace it with an opt-out">Turn off</button>
+            <button class="btn-quiet btn-sm" v-if="scHostValid(h)" :disabled="scBusy" @click="offUnloadableSC(h)" title="Replace it with an opt-out">Turn off</button>
             <button class="btn-quiet btn-sm btn-danger" :disabled="scBusy" @click="removeSC(h)">Delete</button>
           </span>
         </div>
@@ -240,8 +249,8 @@
                 </td>
                 <td :title="scStaticTitle(row)"><span :class="row.staticOn ? 'pill ok' : 'muted'">{{ scStaticText(row) }}</span></td>
                 <td :title="scMicroTitle(row)">
-                  <span :class="row.microOn ? (scMicroDryRun ? 'pill warn' : 'pill ok') : 'muted'">{{ scMicroText(row) }}</span>
-                  <span class="muted" v-if="row.microOn && scMicroDryRun"> dry run</span>
+                  <span :class="row.microOn ? (scMicroMode === 'dryrun' ? 'pill warn' : 'pill ok') : 'muted'">{{ scMicroText(row) }}</span>
+                  <span class="muted" v-if="row.microOn && scMicroMode === 'dryrun'"> dry run</span>
                   <span class="muted" v-if="row.microOn && (row.strictCookies || row.authCookies.length)"> · cookies</span>
                 </td>
                 <td :title="scGenTitle(row)">{{ scGenText(row) }}</td>
@@ -253,12 +262,12 @@
                 <td class="actions-cell">
                   <button class="btn-quiet btn-sm" @click="editSC(row)">Edit</button>
                   <button class="btn-quiet btn-sm" @click="checkSC(row.host)" title="Build the debug-stamp command for this vhost">Check</button>
-                  <button class="btn-quiet btn-sm" :disabled="scBusy" @click="purgeSC(row.host)" title="Drop this policy's cached objects">Purge</button>
+                  <button class="btn-quiet btn-sm" v-if="!row.optOut" :disabled="scBusy" @click="purgeSC(row.host)" title="Drop this policy's cached objects">Purge</button>
                   <button class="btn-quiet btn-sm" v-if="!row.optOut" :disabled="scBusy" @click="offSC(row.host)" title="Both tiers off: an opt-out (kept as a policy)">Turn off</button>
                   <button class="btn-quiet btn-sm btn-danger" :disabled="scBusy" @click="removeSC(row.host)" title="Delete the policy (a covering wildcard applies again)">Delete</button>
                 </td>
               </tr>
-              <tr v-if="!scFiltered.length"><td colspan="7" class="muted">{{ !scLoaded ? 'Loading…' : (scRows.length ? 'No policy matches the filter.' : 'No vhost is cached yet. Create a policy or pick a recipe above.') }}</td></tr>
+              <tr v-if="!scFiltered.length"><td colspan="7" class="muted">{{ !scLoaded ? 'Loading…' : (scRows.length ? 'No policy matches the filter.' : (isScoped ? 'You have no policy yet. Create one or pick a recipe above.' : 'No vhost is cached yet. Create a policy or pick a recipe above.')) }}</td></tr>
             </tbody>
           </table>
         </div>

@@ -74,12 +74,20 @@ func TestSiteCacheUIParityFixture(t *testing.T) {
 			if got := okOrBad(err); got != c.want {
 				t.Errorf("line %d: set host %q: %s (err %v), want %s", c.line, c.in, got, err, c.want)
 			}
-		case "cookie":
+		case "cookie", "cookieq":
+			in := c.in
+			if c.kind == "cookieq" {
+				u, err := strconv.Unquote(`"` + in + `"`)
+				if err != nil {
+					t.Fatalf("line %d: cookieq %q: %v", c.line, in, err)
+				}
+				in = u
+			}
 			s := newTestSiteCacheStore(t)
-			names := []string{c.in}
+			names := []string{in}
 			_, err := s.Apply(SiteCachePatch{Host: "shop.example.com", Static: &SiteCacheTierPatch{Enabled: &on, Recipe: &recipe}, AuthCookies: &names}, false)
 			if got := okOrBad(err); got != c.want {
-				t.Errorf("line %d: set auth cookie %q: %s (err %v), want %s", c.line, c.in, got, err, c.want)
+				t.Errorf("line %d: set auth cookie %q: %s (err %v), want %s", c.line, in, got, err, c.want)
 			}
 		case "bucket":
 			// Edge-side: scripts/tests/cfm_cache_ui_parity_test.lua.
@@ -87,7 +95,7 @@ func TestSiteCacheUIParityFixture(t *testing.T) {
 			t.Errorf("line %d: unknown kind %q", c.line, c.kind)
 		}
 	}
-	for _, k := range []string{"ttl", "host", "cookie", "bucket"} {
+	for _, k := range []string{"ttl", "host", "cookie", "cookieq", "bucket"} {
 		if counts[k] == 0 {
 			t.Errorf("fixture has no %q cases", k)
 		}

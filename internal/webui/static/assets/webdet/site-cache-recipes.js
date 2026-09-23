@@ -40,7 +40,7 @@ export const SC_RECIPES = Object.freeze([
       { key: "vhosts", label: "Vhosts", type: "vhosts", required: true, placeholder: "shop.example.com" },
     ],
     warnings: [
-      "A dry run until this node sets MICRO_CACHE_ENFORCE = 1: until then the debug stamp only reports what would be cached.",
+      "Where this node has MICRO_CACHE_ENFORCE = 1, pages are served from cache at once; at 0 it is a dry run and the debug stamp only reports what would be cached.",
       "Check that the app's session cookie is on the auth list (built in, or add it in the editor) before enforcing.",
     ],
     build: (v) => hostsOf(v.vhosts).map((host) => ({ host, micro: { enabled: true, recipe: "micro_safe", ttl: "1s" } })),
@@ -55,7 +55,7 @@ export const SC_RECIPES = Object.freeze([
       { key: "ttl", label: "TTL", type: "select", required: true, default: "10s", options: ["10s", "30s"] },
     ],
     warnings: [
-      "A dry run until this node sets MICRO_CACHE_ENFORCE = 1.",
+      "Where this node has MICRO_CACHE_ENFORCE = 1, pages are served from cache at once; at 0 it is a dry run.",
       "Anything that must change at once (stock, prices, a breaking-news edit) needs a purge, or a shorter bucket.",
     ],
     build: (v) => hostsOf(v.vhosts).map((host) => ({ host, micro: { enabled: true, recipe: "micro_aggressive", ttl: v.ttl } })),
@@ -67,7 +67,7 @@ export const SC_RECIPES = Object.freeze([
     vars: [
       { key: "vhosts", label: "Vhosts", type: "vhosts", required: true, placeholder: "shop.example.com" },
     ],
-    warnings: ["The micro tier is a dry run until this node sets MICRO_CACHE_ENFORCE = 1."],
+    warnings: ["Where this node has MICRO_CACHE_ENFORCE = 1, the micro tier serves pages from cache at once; at 0 it is a dry run."],
     build: (v) => hostsOf(v.vhosts).map((host) => ({
       host,
       static: { enabled: true, recipe: "static_lean" },
@@ -82,7 +82,7 @@ export const SC_RECIPES = Object.freeze([
     vars: [
       { key: "vhosts", label: "Vhosts", type: "vhosts", required: true, placeholder: "api.example.com" },
     ],
-    warnings: ["Objects this host already has in the cache stay until they expire: purge it first if something wrong was cached."],
+    warnings: ["While it is off nothing is served from its cache, and turning it on again starts from an empty cache. What a covering wildcard cached for this host is dropped by purging the wildcard."],
     build: (v) => hostsOf(v.vhosts).map((host) => ({ host, static: { enabled: false }, micro: { enabled: false } })),
   },
 ]);

@@ -231,28 +231,65 @@ export function formFromEntry(entry) {
   };
 }
 
-// buildPatch turns the form into a set-API patch. The API MERGES (absent
-// fields keep their stored value), so the patch carries only what the form
-// decides:
-//   * enabled for both tiers, always (both off on a new host is the explicit
-//     opt-out the API requires);
-//   * a tier's recipe (and the micro TTL) only while that tier is on — a
-//     disabled tier keeps its stored recipe, which is how the daemon knows a
-//     re-enable must start from an empty cache;
-//   * the static TTL never: it is a label the edge does not apply.
-export function buildPatch(form) {
+function normTTL(v) {
+  return String(v == null ? "" : v).trim().toLowerCase();
+}
+
+// buildPatch turns the form into a set-API patch. The API MERGES (a field the
+// patch leaves out keeps its stored value), and the patch sends only what the
+// operator decided, so a save can never undo a change made meanwhile by
+// someone else (the CLI, the tenant, a recipe) — the cookie rails first.
+//
+//   * NEW policy (no `original`): only the tiers turned on, and the cookie
+//     settings only when set; both tiers off is sent explicitly, as the opt-out
+//     the API requires for a new host. Over a policy the page did not know
+//     about, that is still a merge, not a reset.
+//   * EDIT (`original` is the stored entry the form was loaded from): only the
+//     fields that differ from it. A tier's recipe and the micro TTL go with it
+//     only while it is on — a disabled tier keeps its stored recipe, which is
+//     how the daemon knows a re-enable must start from an empty cache. An
+//     empty stored TTL shown as the 1 s default is not rewritten.
+//   * never the static TTL: it is a label the edge does not apply.
+export function buildPatch(form, original = null) {
   const f = form || emptyForm();
   const patch = { host: canonHost(f.host) };
-  patch.static = { enabled: Boolean(f.staticOn) };
-  if (f.staticOn) patch.static.recipe = f.staticRecipe;
-  patch.micro = { enabled: Boolean(f.microOn) };
-  if (f.microOn) {
-    patch.micro.recipe = f.microRecipe;
-    patch.micro.ttl = String(f.microTTL || "").trim().toLowerCase();
+  const cookies = parseAuthCookies(f.authCookies).names;
+  if (!original) {
+    if (!f.staticOn && !f.microOn) {
+      patch.static = { enabled: false };
+      patch.micro = { enabled: false };
+    }
+    if (f.staticOn) patch.static = { enabled: true, recipe: f.staticRecipe };
+    if (f.microOn) patch.micro = { enabled: true, recipe: f.microRecipe, ttl: normTTL(f.microTTL) };
+    if (f.strictCookies) patch.strict_cookies = true;
+    if (cookies.length) patch.auth_cookies = cookies;
+    return patch;
   }
-  patch.strict_cookies = Boolean(f.strictCookies);
-  patch.auth_cookies = parseAuthCookies(f.authCookies).names;
+  const o = formFromEntry(original);
+  const st = {};
+  if (Boolean(f.staticOn) !== o.staticOn) st.enabled = Boolean(f.staticOn);
+  if (f.staticOn && (!o.staticOn || f.staticRecipe !== o.staticRecipe)) st.recipe = f.staticRecipe;
+  if (Object.keys(st).length) patch.static = st;
+  const mi = {};
+  if (Boolean(f.microOn) !== o.microOn) mi.enabled = Boolean(f.microOn);
+  if (f.microOn) {
+    if (!o.microOn || f.microRecipe !== o.microRecipe) mi.recipe = f.microRecipe;
+    if (!o.microOn || normTTL(f.microTTL) !== normTTL(o.microTTL)) mi.ttl = normTTL(f.microTTL);
+  }
+  if (Object.keys(mi).length) patch.micro = mi;
+  if (Boolean(f.strictCookies) !== o.strictCookies) patch.strict_cookies = Boolean(f.strictCookies);
+  // The field as loaded, untouched, is never sent: a stored name the comma
+  // list cannot express (one containing ",") survives an edit of other fields.
+  const stored = (original && original.auth_cookies) || [];
+  if (String(f.authCookies).trim() !== o.authCookies.trim() && JSON.stringify(cookies) !== JSON.stringify(stored)) {
+    patch.auth_cookies = cookies;
+  }
   return patch;
+}
+
+// patchChanges: how many settings a patch carries besides the host.
+export function patchChanges(patch) {
+  return Object.keys(patch || {}).filter((k) => k !== "host").length;
 }
 
 export function offPatch(host) {
@@ -262,7 +299,7 @@ export function offPatch(host) {
 // validateForm returns { errors, warnings } for the editor. `original` is the
 // stored entry being edited (null for a new policy); `inScope(host)` is the
 // page's scope check for a scoped token (always true for an admin).
-export function validateForm(form, { original = null, inScope = () => true, existing = [] } = {}) {
+export function validateForm(form, { original = null, inScope = () => true, existing = [], unloadable = [] } = {}) {
   const f = form || emptyForm();
   const errors = [];
   const warnings = [];
@@ -280,8 +317,14 @@ export function validateForm(form, { original = null, inScope = () => true, exis
     if (f.microRecipe === "fullpage_advanced") warnings.push("full-page advanced is a label only: the micro tier never caches longer than 60 s.");
   }
   const cookies = parseAuthCookies(f.authCookies);
-  errors.push(...cookies.errors.map((e) => `${e[0].toUpperCase()}${e.slice(1)}.`));
-  if (!f.microOn && (f.strictCookies || cookies.names.length)) {
+  // Stored values the operator did not touch are not re-validated: buildPatch
+  // does not send them, and a name the comma list cannot express (the API
+  // takes "a,b") would otherwise block every save of the policy.
+  const was = original ? formFromEntry(original) : null;
+  const cookiesTouched = !was || String(f.authCookies).trim() !== was.authCookies.trim();
+  const strictTouched = !was || Boolean(f.strictCookies) !== was.strictCookies;
+  if (cookiesTouched) errors.push(...cookies.errors.map((e) => `${e[0].toUpperCase()}${e.slice(1)}.`));
+  if (!f.microOn && ((f.strictCookies && strictTouched) || (cookies.names.length && cookiesTouched))) {
     warnings.push("Strict cookies and auth cookies apply to the micro tier only; they do nothing while it is off.");
   }
   if (!f.staticOn && !f.microOn) {
@@ -294,6 +337,8 @@ export function validateForm(form, { original = null, inScope = () => true, exis
     const mi = tierOf(original, "micro");
     if (!st.enabled && f.staticOn) warnings.push("Turning the static tier on starts this vhost from an empty cache (a new generation) for both tiers.");
     if (!mi.enabled && f.microOn && mi.recipe) warnings.push("Re-enabling the micro tier starts this vhost from an empty cache (a new generation) for both tiers.");
+  } else if (!herr && (unloadable || []).some((u) => canonHost(u) === host)) {
+    errors.push(`${host} has a stored policy this version cannot read: use Turn off or Delete in the list.`);
   } else if (!herr && existing.some((e) => canonHost(e.host) === host)) {
     // A new-policy form starts with both tiers off: saving it over an existing
     // policy would turn that vhost's caching off. Editing is the way in.
@@ -351,10 +396,11 @@ export function rowView(entry, stats) {
 
 // generationSinceMs: a policy's generation is the wall-clock ms of its last
 // purge or re-enable (nextGenerationLocked). A store written before that
-// counted generations from 1, so a small value is a counter, not a time: null.
+// counted generations from 1 (the daemon reissues anything below 1e12 on
+// load), so a small value is a counter, not a time: null.
 export function generationSinceMs(gen, nowMs = Date.now()) {
   const g = Number(gen || 0);
-  if (!(g > 1e11) || g > nowMs + 86400000) return null;
+  if (!(g >= 1e12) || g > nowMs + 86400000) return null;
   return g;
 }
 
@@ -391,12 +437,11 @@ export function filterRows(rows, { quick = "", vhost = "", search = "" } = {}) {
   });
 }
 
-export const SORT_KEYS = Object.freeze(["host", "tiers", "recipe", "ttl", "gen", "updated", "hit"]);
+export const SORT_KEYS = Object.freeze(["host", "tiers", "ttl", "gen", "updated", "hit"]);
 
 function sortValue(r, key) {
   switch (key) {
     case "tiers": return (r.staticOn ? 2 : 0) + (r.microOn ? 1 : 0);
-    case "recipe": return `${r.staticOn ? r.staticRecipe : ""}|${r.microOn ? r.microRecipe : ""}`;
     case "ttl": return r.microOn ? r.microBucket : -1;
     case "gen": return r.generation;
     case "updated": return r.updatedMs;
@@ -457,14 +502,23 @@ export function nodeSwitches(payload) {
 // ── Checking one URL ────────────────────────────────────────────────────────
 
 // debugCurl builds the runbook §4 debug-stamp request for a host: run on the
-// box itself, against the edge's HTTPS listener. A wildcard gets an example
-// sub-host. "" for an invalid host (the command is meant to be pasted into a
-// shell, so only a validated host goes into it).
-export function debugCurl(host, path = "/") {
+// box itself, against the edge's HTTPS listener. "" for an invalid host (the
+// command is meant to be pasted into a shell, so only a validated host goes
+// into it; the path stays inside single quotes, a quote in it encoded, and -g
+// stops curl reading [ ] { } in it as a URL glob). A wildcard gets an example
+// sub-host, one without an exact policy of its own (`taken`), since that
+// policy — not the wildcard — would answer. VHOST_IP is left for the
+// operator: unedited it fails as a bad address, never as shell syntax.
+export function debugCurl(host, path = "/", taken = []) {
   if (hostError(host)) return "";
-  const h = canonHost(host).replace(/^\*\./, "www.");
+  let h = canonHost(host);
+  if (isWildcard(h)) {
+    const suffix = h.slice(2);
+    const own = new Set((taken || []).map((t) => canonHost(t)));
+    h = ["www", "cfm-check"].map((l) => `${l}.${suffix}`).find((c) => !own.has(c)) || `cfm-check.${suffix}`;
+  }
   let p = String(path || "/").trim() || "/";
   if (!p.startsWith("/")) p = `/${p}`;
   p = p.replace(/'/g, "%27").replace(/\s/g, (c) => encodeURIComponent(c));
-  return `curl -sk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' --resolve ${h}:9043:<vhost-ip> 'https://${h}:9043${p}'`;
+  return `curl -gsk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' --resolve ${h}:9043:VHOST_IP 'https://${h}:9043${p}'`;
 }
