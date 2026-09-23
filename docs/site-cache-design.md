@@ -541,10 +541,20 @@ one cache refill per such policy, once — and the file is rewritten.
 (after a downgrade: any unknown field freezes the row, since a newer build's
 safety setting must not be ignored), or a malformed hand edit — are kept in the
 file as stored (re-indented) through that rewrite and every later save, and
-never served. They FAIL CLOSED: the host of such a row is treated as an opt-out,
-so a covering armed wildcard does not start caching it. `remove` deletes them;
-list/get do not show them, and a purge does not reach them (so after a
-re-upgrade such a row returns with the generation it had).
+never served. They FAIL CLOSED: the host of such a row is treated as an opt-out
+(a frozen wildcard opts out every sub-host under it), so a covering armed
+wildcard does not start caching it; a LOADED row of the same host wins over it.
+`list` names them under `unloadable` (scope-filtered), `get` says why it has no
+row, and `remove` deletes them. A `set` that would arm such a host is refused
+(merging onto an empty policy would drop the stored one's cookie settings);
+an explicit off is allowed. A purge does not reach them (so after a re-upgrade
+such a row returns with the generation it had). Because any unknown field
+freezes a row, a NEW field must be `omitempty` with its zero value meaning the
+old behaviour — or a downgrade to a build that lacks it uncaches every vhost.
+
+A tier's recipe cannot be cleared through `set` (disable the tier instead): a
+disabled tier keeps its recipe, which is how a re-enable knows the tier may
+have cached something and must start from a fresh generation.
 
 Because an all-off entry changes what a covering wildcard does, `set` creates
 a NEW entry all-off only when it turns both tiers off explicitly; a `set` that
@@ -561,7 +571,7 @@ normalized.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET  | `/api/v1/site-cache/list` | scope-filtered; every stored entry (armed, and all-off opt-outs), sorted by host |
+| GET  | `/api/v1/site-cache/list` | scope-filtered; every stored entry (armed, and all-off opt-outs), sorted by host; `unloadable` names hosts whose stored row this build cannot load (treated as opted out, §6) |
 | GET  | `/api/v1/site-cache/get?host=` | one vhost |
 | POST | `/api/v1/site-cache/set` | `requirePOST`; **merge**-upsert (host in body); scoped→own host only. One entry per vhost, so a single upsert replaces the add/update pair — the host is the immutable key. Only the fields present change (`{"host":"x","micro":{"ttl":"30s"}}` retunes one TTL and keeps the static tier and cookie settings; `enabled:false`, `strict_cookies:false` and an empty `auth_cookies` list are applied, JSON `null` keeps); a new host must enable a tier or turn BOTH tiers off (an opt-out, §6). `scope_hosts` comes from the token (§6) |
 | POST | `/api/v1/site-cache/remove` | deletes the vhost's policy; the host then follows a covering armed wildcard (§6 "Off vs remove") |

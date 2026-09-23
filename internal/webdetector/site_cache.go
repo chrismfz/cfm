@@ -172,6 +172,10 @@ type SiteCacheEntry struct {
 	AuthCookies []string  `json:"auth_cookies,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+	// A NEW field must be `omitempty`, with its zero value meaning the old
+	// behaviour: load freezes any row with a field it does not know (see
+	// siteCacheStore.frozen), so a field an older build would see on every
+	// row makes a downgrade fail EVERY vhost closed (uncached).
 }
 
 type siteCacheStore struct {
@@ -436,11 +440,26 @@ func (s *siteCacheStore) Apply(p SiteCachePatch, scoped bool) (SiteCacheEntry, e
 	if !ok {
 		return SiteCacheEntry{}, errors.New("invalid or unsupported host (exact host or *.suffix only)")
 	}
+	for _, tp := range []*SiteCacheTierPatch{p.Static, p.Micro} {
+		if tp != nil && tp.Recipe != nil && strings.TrimSpace(*tp.Recipe) == "" {
+			// A disabled tier keeps its recipe on purpose: it is how a later
+			// re-enable knows the tier may have cached something (and must
+			// start from a fresh generation — see SiteCacheEntry.Generation).
+			return SiteCacheEntry{}, errors.New("a tier's recipe cannot be cleared: disable the tier instead")
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	merged, existed := s.entries[h]
 	if !existed {
 		merged = SiteCacheEntry{Host: h}
+		if s.hasFrozenLocked(h) && ((p.Static != nil && p.Static.Enabled != nil && *p.Static.Enabled) ||
+			(p.Micro != nil && p.Micro.Enabled != nil && *p.Micro.Enabled)) {
+			// The host has a stored policy this build cannot load: merging onto
+			// an empty one would silently drop that policy's settings (its
+			// cookie rails first). Only an explicit off is allowed.
+			return SiteCacheEntry{}, errors.New("this host has a stored policy this build cannot load (see the daemon log; it is treated as opted out): remove it first, or upgrade")
+		}
 	}
 	applySiteCacheTierPatch(&merged.Static, p.Static)
 	applySiteCacheTierPatch(&merged.Micro, p.Micro)
@@ -716,11 +735,39 @@ func (s *siteCacheStore) PolicyFeed() []CachePolicyRow {
 	return out
 }
 
+// hasFrozenLocked reports whether a frozen row has host h. Caller holds s.mu.
+func (s *siteCacheStore) hasFrozenLocked(h string) bool {
+	for _, f := range s.frozen {
+		if f.host == h {
+			return true
+		}
+	}
+	return false
+}
+
+// FrozenHosts returns the sorted, de-duplicated hosts of the stored rows this
+// build cannot load (see frozen) — each treated as an opt-out at the edge.
+func (s *siteCacheStore) FrozenHosts() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	seen := map[string]struct{}{}
+	var out []string
+	for _, f := range s.frozen {
+		if _, dup := seen[f.host]; f.host != "" && !dup {
+			seen[f.host] = struct{}{}
+			out = append(out, f.host)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // feedEntriesLocked is what the feed (and StatsKeyFor) is computed over: the
 // loaded entries, plus an all-off stand-in for the host of each frozen row
 // that has no loaded entry — a row this build cannot read fails closed, as an
 // opt-out, instead of vanishing and leaving the host to a covering wildcard.
-// Caller holds s.mu.
+// A loaded entry of the same host wins. Caller holds s.mu; the result is
+// READ-ONLY (with nothing frozen it is s.entries itself).
 func (s *siteCacheStore) feedEntriesLocked() map[string]SiteCacheEntry {
 	if len(s.frozen) == 0 {
 		return s.entries
@@ -833,7 +880,7 @@ func (s *siteCacheStore) load() {
 	// the other tenants' domains do not linger on disk until an unrelated
 	// write), a non-normalized host (a :port, a trailing dot, upper case), a
 	// duplicate host, or a generation reissued below. Rows this build cannot
-	// load are kept verbatim (s.frozen), so the rewrite never loses one.
+	// load are kept as stored (s.frozen), so the rewrite never loses one.
 	rewrite := false
 	for _, raw := range raws {
 		var e SiteCacheEntry
@@ -853,8 +900,9 @@ func (s *siteCacheStore) load() {
 			norm, err = s.normalizeEntry(e)
 		}
 		if err != nil {
-			// Loud, not silent — and kept: a newer build's policy (a
-			// downgrade) or a hand-edit typo must not be deleted by this build.
+			// Loud, not silent — and kept (as stored, re-indented by the next
+			// save): a newer build's policy (a downgrade) or a hand-edit typo
+			// must not be deleted by this build.
 			fh, _ := s.normalize(e.Host)
 			logging.Logf("[webdetector][site-cache] cannot load stored policy for %q: %v — kept in the file, not served (the host is treated as opted out) (path=%s)", e.Host, err, s.path)
 			s.frozen = append(s.frozen, siteCacheFrozenRow{host: fh, raw: append(json.RawMessage(nil), raw...)})

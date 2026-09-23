@@ -615,10 +615,11 @@ func TestSiteCacheStore_GenerationsUniqueStoreWide(t *testing.T) {
 	}
 }
 
-// Re-arming (any tier off→on) issues a fresh generation: a tier is often turned
-// off BECAUSE something wrong got cached, so turning it back on must not serve
-// the pre-off objects (the static zone keeps them for days; micro serves stale
-// through use_stale). A plain config change, or turning a tier off, keeps it.
+// Re-arming (static off→on, or micro off→on with the recipe it kept while off)
+// issues a fresh generation: a tier is often turned off BECAUSE something wrong
+// got cached, so turning it back on must not serve the pre-off objects (the
+// static zone keeps them for days; micro serves stale through use_stale). A
+// first micro enable, a plain config change, or turning a tier off keeps it.
 func TestSiteCacheStore_RearmIssuesFreshGeneration(t *testing.T) {
 	s := newSiteCacheTestStore(t)
 	on := func(r string) *SiteCacheTierPatch {
@@ -825,6 +826,50 @@ func TestSiteCacheStore_FrozenRows(t *testing.T) {
 	}
 	if key, ok := s.StatsKeyFor("a.example.com"); !ok || key != "*.example.com" {
 		t.Fatalf("after remove the host follows the wildcard: %q %v", key, ok)
+	}
+}
+
+// A set on a host whose only stored row this build cannot load must not merge
+// onto an empty policy (it would silently drop that row's cookie settings):
+// arming is refused, an explicit off is allowed. The frozen row's generation
+// also bounds new ones, even when it is ahead of the clock.
+func TestSiteCacheStore_FrozenHostGuards(t *testing.T) {
+	future := time.Now().Add(24 * time.Hour).UnixMilli()
+	path := writeSiteCacheStoreFile(t, `[
+	 {"host":"a.com","generation":`+strconv.FormatInt(future, 10)+`,"static":{"enabled":true,"recipe":"recipe_from_a_newer_build"},"micro":{"enabled":false},"strict_cookies":true,"auth_cookies":["myapp_sess"]}]`)
+	s := newSiteCacheStore(path)
+	if got := s.FrozenHosts(); len(got) != 1 || got[0] != "a.com" {
+		t.Fatalf("FrozenHosts = %v", got)
+	}
+	on := &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("micro_safe")}
+	if _, err := s.Apply(SiteCachePatch{Host: "a.com", Micro: on}, false); err == nil {
+		t.Fatal("arming a host whose stored row cannot be loaded was accepted")
+	}
+	off := &SiteCacheTierPatch{Enabled: boolPtr(false)}
+	e, err := s.Apply(SiteCachePatch{Host: "a.com", Static: off, Micro: off}, false)
+	if err != nil {
+		t.Fatalf("an explicit off on a frozen host: %v", err)
+	}
+	if e.Generation <= future {
+		t.Fatalf("new generation %d is not past the frozen row's %d", e.Generation, future)
+	}
+}
+
+// A tier's recipe cannot be cleared (a disabled tier keeps it, which is how a
+// later re-enable knows the tier may have cached something).
+func TestSiteCacheStore_RecipeCannotBeCleared(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("micro_safe")}
+	if _, err := s.Apply(SiteCachePatch{Host: "a.com", Micro: on}, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []string{"", "  "} {
+		if _, err := s.Apply(SiteCachePatch{Host: "a.com", Micro: &SiteCacheTierPatch{Enabled: boolPtr(false), Recipe: strPtr(r)}}, false); err == nil {
+			t.Fatalf("recipe %q cleared", r)
+		}
+	}
+	if e, _ := s.Get("a.com"); e.Micro.Recipe != "micro_safe" || !e.Micro.Enabled {
+		t.Fatalf("a rejected patch changed the entry: %+v", e.Micro)
 	}
 }
 

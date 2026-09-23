@@ -103,7 +103,8 @@ back-filled here — see the git/PR history for that period.
   now a merge (fields left out keep their stored values) and the CLI sends only
   the flags given, so `set <vhost> --micro-ttl 30s` alone now works. New CLI
   forms: `--static off` / `--micro off` (disable a tier, keep its recipe),
-  `--no-strict-cookies`, `--no-auth-cookies`. `set` with no flags is an error.
+  `--no-strict-cookies`, `--no-auth-cookies`. `set` with no flags is an error,
+  and so is clearing a tier's recipe through the API (disable the tier).
 - **Site Cache: `off` really turns caching off, also under an admin's
   wildcard.** `cfm webtop site-cache off <vhost>` deleted the vhost's policy,
   so under an armed `*.example.com` the vhost went on being cached by the
@@ -130,8 +131,11 @@ back-filled here — see the git/PR history for that period.
   build, after a downgrade) used to be deleted from the store file at the next
   change, and its vhost then fell back to any covering `*.suffix` wildcard. It
   is now kept in the file and not served, and its vhost is treated as opted
-  out: nothing caches it until a build that can read the row loads it, or
-  `remove` deletes it.
+  out (a wildcard row: every sub-host under it) until a build that can read
+  the row loads it, or `remove` deletes it. `list` names such vhosts under
+  `unloadable`, `get` says why it has none, and a `set` that would turn
+  caching on for one is refused (it would have dropped the stored policy's
+  cookie settings); `off` still works.
 - **Site Cache: a host with a `:port` is rejected.** The edge always ignored the
   port (a stored `a.com:443` acted as `a.com`), so the daemon's view of such a
   policy disagreed with what the edge did. A stored one is normalized to the

@@ -4,6 +4,8 @@ package webdetector
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -201,6 +203,37 @@ func TestSiteCacheStats_WildcardDrilldown(t *testing.T) {
 	// The bare suffix (not covered by *.cdn.example.com) does not resolve.
 	if _, ok := e.SiteCacheStatsHost("cdn.example.com", nil); ok {
 		t.Fatalf("bare suffix must not match the wildcard")
+	}
+}
+
+// list names the hosts of stored policies this build cannot load (they are not
+// rows, and the edge opts them out), scope-filtered; get explains the 404.
+func TestSiteCacheAPI_ListShowsUnloadableHosts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "site_cache.json")
+	raw := `[
+	 {"host":"mysite.com","generation":1758585600001,"static":{"enabled":true,"recipe":"recipe_from_a_newer_build"},"micro":{"enabled":false}},
+	 {"host":"other.com","generation":1758585600002,"static":{"enabled":true,"recipe":"recipe_from_a_newer_build"},"micro":{"enabled":false}}]`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(Config{SiteCacheStorePath: path})
+	mux := http.NewServeMux()
+	e.RegisterHTTP(mux)
+	var out siteCacheListResponse
+	rr := doRequest(mux, scopedCtx("mysite.com"), http.MethodGet, "/api/v1/site-cache/list", nil)
+	_ = json.Unmarshal(rr.Body.Bytes(), &out)
+	if len(out.Rows) != 0 || len(out.Unloadable) != 1 || out.Unloadable[0] != "mysite.com" {
+		t.Fatalf("scoped list: %+v", out)
+	}
+	rr = doRequest(mux, adminCtx(), http.MethodGet, "/api/v1/site-cache/list", nil)
+	out = siteCacheListResponse{}
+	_ = json.Unmarshal(rr.Body.Bytes(), &out)
+	if len(out.Unloadable) != 2 {
+		t.Fatalf("admin list: %+v", out)
+	}
+	rr = doRequest(mux, adminCtx(), http.MethodGet, "/api/v1/site-cache/get?host=mysite.com", nil)
+	if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "cannot load") {
+		t.Fatalf("get of an unloadable host: %d %s", rr.Code, rr.Body.String())
 	}
 }
 

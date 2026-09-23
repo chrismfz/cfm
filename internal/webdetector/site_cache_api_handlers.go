@@ -32,6 +32,11 @@ import (
 
 type siteCacheListResponse struct {
 	Rows []SiteCacheEntry `json:"rows"`
+	// Unloadable lists the hosts of stored policies this build cannot load (a
+	// newer build's recipe or field, after a downgrade): they are not in Rows,
+	// and the edge treats each as OPTED OUT (never cached), not as "no entry".
+	// Scope-filtered like Rows.
+	Unloadable []string `json:"unloadable,omitempty"`
 }
 
 type siteCacheResultResponse struct {
@@ -67,7 +72,14 @@ func (e *Engine) handleSiteCacheList(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
-	writeJSON(w, http.StatusOK, siteCacheListResponse{Rows: scopeFilterSiteCache(e.SiteCacheList(), r)})
+	var unloadable []string
+	scope := vhostScopeFromContext(r.Context())
+	for _, h := range e.SiteCacheFrozenHosts() {
+		if vhostAllowed(h, scope) {
+			unloadable = append(unloadable, h)
+		}
+	}
+	writeJSON(w, http.StatusOK, siteCacheListResponse{Rows: scopeFilterSiteCache(e.SiteCacheList(), r), Unloadable: unloadable})
 }
 
 // GET /api/v1/site-cache/get?host=<host>
@@ -90,7 +102,16 @@ func (e *Engine) handleSiteCacheGet(w http.ResponseWriter, r *http.Request) {
 	}
 	entry, ok := e.SiteCacheGet(host)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, siteCacheResultResponse{Error: "no cache policy for host"})
+		msg := "no cache policy for host"
+		if h, valid := e.siteCache.normalize(host); valid && e.siteCache != nil {
+			for _, f := range e.SiteCacheFrozenHosts() {
+				if f == h {
+					msg = "this host has a stored policy this build cannot load (see the daemon log): it is treated as opted out (never cached); remove it, or upgrade"
+					break
+				}
+			}
+		}
+		writeJSON(w, http.StatusNotFound, siteCacheResultResponse{Error: msg})
 		return
 	}
 	writeJSON(w, http.StatusOK, siteCacheResultResponse{Entry: &entry})

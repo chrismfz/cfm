@@ -97,7 +97,7 @@ Usage:
   cfm webtop site-cache stats [vhost]                 per-vhost HIT/MISS/hit-ratio
 
 set flags (set changes ONLY the flags you pass; the rest of the policy is kept;
-re-arming a tier that was on before starts the vhost from an empty cache):
+turning static on, or re-enabling micro, starts the vhost from an empty cache):
   --static RECIPE        enable the static tier with RECIPE
   --static off           disable the static tier (its recipe/TTL are kept)
   --micro  RECIPE        enable the micro tier with RECIPE
@@ -128,6 +128,10 @@ func runSiteCacheList(baseURL string) error {
 	var payload siteCacheListResponse
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return fmt.Errorf("site-cache list: server returned non-JSON (%d bytes): %q", len(body), strings.TrimSpace(string(body)))
+	}
+	if len(payload.Unloadable) > 0 {
+		fmt.Printf("! %d stored polic(y/ies) this build cannot load — treated as OPTED OUT (never cached); see the daemon log, 'remove' them or upgrade: %s\n",
+			len(payload.Unloadable), strings.Join(payload.Unloadable, ", "))
 	}
 	if len(payload.Rows) == 0 {
 		fmt.Println("No vhosts configured for caching. Default is OFF.")
