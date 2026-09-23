@@ -24,13 +24,18 @@ back-filled here — see the git/PR history for that period.
   - Nothing changes on a vhost whose micro tier is not armed, and no vhost is
     armed by default. Arming a vhost's micro tier (page, CLI or API) now
     serves its anonymous pages from cache at once.
-  - A node that does not set the key follows the new default. A node whose
-    `detectors.conf` sets `MICRO_CACHE_ENFORCE = 0` keeps its dry run.
+  - A node that does not set the key follows the new default. Nearly every
+    existing node lacks it (the key entered the reference config on
+    2026.09.22, and upgrades never replace a live `detectors.conf`), so a
+    vhost armed there during the dry run goes live on upgrade, without the
+    page's confirmation. Check `cfm webtop site-cache list` for micro-armed
+    vhosts before upgrading. A node whose `detectors.conf` sets
+    `MICRO_CACHE_ENFORCE = 0` keeps its dry run.
   - `MICRO_CACHE_ENFORCE = 0` is now the node-wide kill switch for the micro
     tier: a dry run, with every policy kept.
   - Before arming micro on a new kind of app (a shop, a membership site), arm
-    it with `--strict-cookies`, or set the node to `0`, and check its
-    logged-in and cart pages with the debug stamp (runbook §7).
+    it with `--strict-cookies`, find its session cookies with the debug stamp
+    and add them with `--auth-cookies` (runbook §7).
 
 ## 2026.09.23
 

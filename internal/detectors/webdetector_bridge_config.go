@@ -13,9 +13,10 @@ import (
 // Split out of Manager start so the defaults are unit-tested
 // (webdetector_bridge_config_test.go), SITE_CACHE and MICRO_CACHE_ENFORCE
 // among them. One deliberate asymmetry: the Lua reader keeps
-// micro_cache_enforce OFF for an absent field. This function always writes it,
-// so the field is absent only when the edge cannot read what the daemon
-// decided, and then the edge stays in dry run.
+// micro_cache_enforce OFF for an absent field. Every file the daemon writes
+// carries it, so the field is absent only in a file from an older daemon, or
+// when there is no readable file (never written: the base detectors.conf has
+// no [webdetector]); then the edge stays in dry run.
 func webdetectorBridgeConfig(global, wdKV map[string]string) sslcollector.WebdetectorBridgeConfig {
 	cfg := sslcollector.WebdetectorBridgeConfig{
 		ClearanceRefresh: kvBool(wdKV, "CHALLENGE_COOKIE_REFRESH", true),

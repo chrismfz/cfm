@@ -446,8 +446,8 @@ type WebdetectorBridgeConfig struct {
 	// verdict, but cfm.lua's micro gate never ngx.exec's to a cache location, so
 	// nothing is stored. true lets an armed+anonymous+cacheable request route to
 	// its @cfm_micro_<n>s bucket. Flips within ~10s, no proxy reload. The writer
-	// renders the field faithfully and always; the edge reads an ABSENT field as
-	// false (cfm_bridge_cfg.lua), a fail-safe for a file it cannot read.
+	// renders the field in every file; the edge reads an ABSENT field (an older
+	// daemon's file) as false (cfm_bridge_cfg.lua), a fail-safe.
 	MicroCacheEnforce bool
 }
 

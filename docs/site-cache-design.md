@@ -613,9 +613,10 @@ cached is history: §14 item 2.)
 `MICRO_CACHE_ENFORCE` shipped `0` until this passed on a live vhost
 (infected.gr, a WordPress blog on virgo, 2026-09-23); it has defaulted to `1`
 since, so arming a vhost's micro tier is what turns it on. Run this on a node's
-first micro vhost (a site you control), and steps 5–7 again before arming a
-new kind of app (a shop, a membership site): arm it `--strict-cookies`, or set
-the node to `0` while you check (runbook §7). Who never takes
+first micro vhost (a site you control). For a new kind of app (a shop, a
+membership site) follow runbook §7: arm it `--strict-cookies`, find its
+session cookies with the debug stamp, add them with `--auth-cookies`, then run
+steps 5–7 here. Who never takes
 the micro path: requests from loopback, the box's own IPs, `IGNORE_IPS` /
 `IGNORE_NETS` and RFC 1918 peers (they bypass `cfm.lua` at Step 0a), the
 verified-crawler prefixes of `challenge_waf_bypass.conf` (`$cfm_bypass_ip`,
@@ -637,19 +638,23 @@ the edge access log (`ucache=` and `up=cfm_apache_micro` vs `up=cfm_apache`).
    the nginx core is ≥ 1.23 (`openresty -V` / `angie -V`); then `-t` and a
    reload. Without the sentinel micro never routes (fail-safe), whatever the
    knob says.
-2. **Arm micro on the test vhost, still dry-run:**
-   `cfm webtop site-cache set <host> --micro micro_safe --micro-ttl 5s`.
-3. **Dry-run verdicts from the box**, against the edge's HTTPS listener :9043
+2. **Arm micro on the test vhost, strict:**
+   `cfm webtop site-cache set <host> --micro micro_safe --micro-ttl 5s --strict-cookies`.
+   Enforce is on by default, so strict mode (any cookie not on the ignore list
+   bypasses) keeps visitors with a session out of the cache while you check.
+3. **Verdicts from the box** (they read the same with or without enforce), against the edge's HTTPS listener :9043
    on the vhost's own IP (so the origin answers from that vhost):
    `curl -sk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' --resolve <host>:9043:<vhost-ip> https://<host>:9043/`
    shows `microcache=would/5s`; add `-H 'Cookie: wordpress_logged_in_x=1'` →
    `bypass:auth:…`; `/wp-login.php` or `/?doing_wp_cron=1` → `bypass:path`;
    `-H 'Range: bytes=0-10'` → `bypass:range`; `webmail.<domain>` (if armed by a
    wildcard) → `bypass:panel`.
-4. **Enforce on the node:** `MICRO_CACHE_ENFORCE = 1` in `[webdetector]` (the
-   default; only a node checking in dry run sets it back); the daemon applies
-   an edited `detectors.conf` on its own within a few seconds (it polls the
-   file) and the edge picks it up ~10 s later (no proxy reload).
+4. **Cookies, then enforce:** each session cookie of the app, sent on its own,
+   must say `bypass:auth:<name>`; one that says `bypass:strict:<name>` goes into
+   `--auth-cookies` (runbook §7). Then drop strict (`--no-strict-cookies`) or
+   keep it. `MICRO_CACHE_ENFORCE` must be `1` (the default) for steps 5–7; the
+   daemon applies an edited `detectors.conf` on its own within a few seconds (it
+   polls the file) and the edge picks it up ~10 s later (no proxy reload).
 5. **From the outside client**, request a plain page three times: the access
    log shows `ucache="MISS"` then `"HIT"`, `up=cfm_apache_micro`. After the
    next stats push (~60 s) `cfm webtop site-cache stats <host>` counts the

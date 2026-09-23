@@ -630,8 +630,9 @@ because of that. Hard-won points:
   now a kill switch like `SITE_CACHE` (`0` = node-wide dry run, no vhost
   disarmed). What guards a tenant is the per-vhost arm: the page confirms it,
   and before arming micro on a new kind of app (a shop, a membership site)
-  run §5.7 steps 6–7 on it or arm it `--strict-cookies`. The edge reader still
-  treats an ABSENT field as off (fail-safe; the daemon always writes it). Micro
+  follow runbook §7 (arm it `--strict-cookies`, find its session cookies with
+  the debug stamp, then §5.7 steps 5–7). The edge reader still treats an ABSENT
+  field as off (fail-safe; every file the daemon writes carries it). Micro
   is entered ONLY at cfm.lua's Step 4 (after WAF, challenge, bridge decisions);
   `cfm_micro_entry_structure_test.lua` pins it.
 - **Tier A's static recipe/TTL are labels.** The static locations follow the

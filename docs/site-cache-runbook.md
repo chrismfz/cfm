@@ -251,24 +251,33 @@ cfm webtop site-cache purge --all           # every vhost (admin only)
 ## 7. Arming Tier B on a vhost
 
 `MICRO_CACHE_ENFORCE = 1` is the default, so arming a vhost's micro tier
-serves its anonymous pages from cache at once. What keeps a logged-in page
-out of the cache is the cookie rail, so check an app before relying on it:
+serves its anonymous pages from cache at once. What keeps a logged-in page out
+of the cache is the cookie rail, so for a kind of app this node has not
+micro-cached before (a shop, a membership site, anything with its own session
+cookie), find its session cookies first:
 
-1. For a kind of app this node has not micro-cached before (a shop, a
-   membership site, anything with its own session cookie), either arm it with
-   `--strict-cookies` (any cookie not on the ignore list bypasses), or set the
-   node to dry run (`MICRO_CACHE_ENFORCE = 0`) while you check.
-2. Arm micro (`--micro … --micro-ttl …`).
-3. Watch the debug stamp on real pages: logged-in pages, carts, forms, and
-   pages that should be personalised must say `microcache=bypass:<reason>`.
-   Add app session cookies with `--auth-cookies` where needed.
-4. Run steps 5–7 of the on-box checklist in `site-cache-design.md` §5.7 from
-   an outside client: anonymous MISS then HIT, a logged-in visitor never
-   served a cached page, anonymous HITs again after logout.
-5. Drop `--strict-cookies`, or set `MICRO_CACHE_ENFORCE = 1` again, once it
-   passes. Check that access-log lines with `ucache="HIT"` and
-   `up=cfm_apache_micro` show up. A config change empties the stats view, so
-   give the rows a minute or two to move.
+1. Arm it strict: `cfm webtop site-cache set <host> --micro micro_safe
+   --micro-ttl 5s --strict-cookies`. Any cookie not on the ignore list
+   (analytics, consent, `cfm_*`) now bypasses, so no visitor holding a session
+   is served from cache while you check.
+2. Log in to the app in a browser and read its cookies. From the box, send each
+   one on its own with the debug stamp (§4) on a logged-in page and a cart
+   page (`-H 'Cookie: <name>=<value>'`):
+   - `bypass:auth:<name>`: the rail knows it as a session cookie;
+   - `bypass:strict:<name>`: it bypasses only because of strict mode. If it is
+     a session cookie, add it with `--auth-cookies`, then check it again;
+   - no bypass reason: an analytics or consent cookie on the ignore list.
+3. When every session cookie shows `auth:`, drop strict
+   (`--no-strict-cookies`), or keep it for this vhost (less cache, nothing to
+   maintain).
+4. From an outside client, run steps 5–7 of the on-box checklist in
+   `site-cache-design.md` §5.7: anonymous MISS then HIT, a logged-in visitor
+   never served a cached page, anonymous HITs again after logout. Check that
+   access-log lines with `ucache="HIT"` and `up=cfm_apache_micro` show up.
+
+The debug stamp works whatever `MICRO_CACHE_ENFORCE` says; steps 4's MISS/HIT
+checks need it at `1`. `MICRO_CACHE_ENFORCE = 0` is the node-wide dry run: it
+stops the micro tier on every vhost of this node, not only the one you check.
 
 To roll back one vhost, `cfm webtop site-cache set <host> --micro off`; the
 whole node, `MICRO_CACHE_ENFORCE = 0` (dry run again within about 15 s). If
