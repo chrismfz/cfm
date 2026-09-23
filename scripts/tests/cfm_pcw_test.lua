@@ -12,7 +12,9 @@ local function check(c, m)
   io.stderr:write("FAIL: " .. m .. "\n")
 end
 
--- Fake ngx.shared dict: :incr/:get/:set with TTL expiry against clk.t.
+-- Fake ngx.shared dict: :incr/:add/:get/:set with TTL expiry against clk.t,
+-- with OpenResty's semantics: incr without init on a missing key is
+-- "not found" (cfm_shdict then adds it with its TTL).
 local function new_dict()
   local store, clk = {}, { t = 0 }
   local function live(k)
@@ -25,11 +27,17 @@ local function new_dict()
   function d:incr(k, v, init, ttl)
     local e = live(k)
     if not e then
-      store[k] = { val = (init or 0) + v, exp = ttl and (clk.t + ttl) or nil }
+      if init == nil then return nil, "not found" end
+      store[k] = { val = init + v, exp = ttl and (clk.t + ttl) or nil }
       return store[k].val
     end
     e.val = e.val + v
     return e.val
+  end
+  function d:add(k, v, ttl)
+    if live(k) then return false, "exists" end
+    store[k] = { val = v, exp = (ttl and ttl > 0) and (clk.t + ttl) or nil }
+    return true
   end
   function d:get(k) local e = live(k); return e and e.val or nil end
   function d:set(k, v, ttl) store[k] = { val = v, exp = ttl and (clk.t + ttl) or nil } end

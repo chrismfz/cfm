@@ -8,6 +8,8 @@
 
 local _M = {}
 
+local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
+
 -- The cache statuses counted (nginx $upstream_cache_status values). One list:
 -- the log-side gate (VALID) and the read side (snapshot_vhosts) both come from it.
 local STATUSES = { "HIT", "MISS", "BYPASS", "EXPIRED", "STALE", "UPDATING", "REVALIDATED" }
@@ -33,21 +35,12 @@ local function vhost_prefix(host)
   return p
 end
 
--- incr: count n (default 1) on key. NOT dict:incr(key, n, init): with init,
--- lua-nginx-module 0.10.26 (verified on nginx 1.24, lua-resty-core 0.1.28)
--- loses counters when the new key's crc32 — the dict's tree hash — equals an
--- existing key's: the other key then reads nil, or both count wrong, for as
--- long as the dict lives (about K^2/2^33 odds per node for K counters: ~13%
--- at 5000 vhosts x 7 statuses). incr without init, then add, never takes
--- that path; "exists" is another worker's add winning the race. Errors are
--- dropped quietly (a lost count never breaks the log phase).
+-- incr: count n (default 1) on key through cfm_shdict (never
+-- dict:incr(key, n, init), which loses counters on a crc32 collision: ~13%
+-- odds per node at 5000 vhosts x 7 statuses). Errors are dropped quietly (a
+-- lost count never breaks the log phase).
 local function incr(dict, key, n)
-  n = n or 1
-  local v, err = dict:incr(key, n)
-  if v == nil and err == "not found" then
-    local ok, aerr = dict:add(key, n)
-    if not ok and aerr == "exists" then dict:incr(key, n) end
-  end
+  shd.incr(dict, key, n)
 end
 
 -- log(zone, status[, host]): count one cache verdict. `host` is optional and,

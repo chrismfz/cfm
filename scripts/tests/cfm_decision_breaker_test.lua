@@ -53,9 +53,12 @@ local function new_sh()
     delete = function(_, k) store[k] = nil end,
     add    = function(_, k, v, ttl) if alive(k) then return false, "exists" end
                                     store[k] = { v = v, exp = ttl_exp(ttl) }; return true end,
+    -- OpenResty semantics: incr without init on a missing key is "not found".
     incr   = function(_, k, v, init, init_ttl)
       local e = alive(k)
-      if not e then store[k] = { v = (init or 0) + v, exp = ttl_exp(init_ttl) }
+      if not e then
+        if init == nil then return nil, "not found" end
+        store[k] = { v = init + v, exp = ttl_exp(init_ttl) }
       else e.v = e.v + v end
       return store[k].v
     end,

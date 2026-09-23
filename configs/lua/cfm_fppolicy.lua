@@ -52,6 +52,7 @@
 -- lookup fails open without caching (bounded work, no dict churn).
 
 local cjson = require "cjson.safe"
+local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
 
 local M = {}
 
@@ -135,7 +136,7 @@ function M.lookup(deps)
   -- Over budget: fail open, cache nothing (a churning attacker must not be
   -- able to write either).
   if sh then
-    local n = sh:incr("fpp|rpc_budget", 1, 0, 1)
+    local n = shd.incr(sh, "fpp|rpc_budget", 1, 1)
     if n and n > RPC_BUDGET then return "", nil end
   end
 

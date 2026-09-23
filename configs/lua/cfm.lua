@@ -76,6 +76,7 @@ local cjson = require "cjson.safe"
 -- require'd module because top-level locals here reset every request —
 -- see the PITFALL block above and cfm_filecache.lua for the full story.
 local fc = require "cfm_filecache"
+local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
 local function fallback_normalize_host(raw)
   local h = string.lower(tostring(raw or "")):gsub("%.$", "")
   if h == "" then return "" end
@@ -695,9 +696,9 @@ local function waf_insp_incr(host)
   if #h > 253 then h = h:sub(1, 253) end
   -- 25h TTL so an hourly bucket lives long enough for the post-rollover flush
   -- to push its final value before SQLite-side eviction.
-  SH:incr("waf_insp:hr=" .. hr .. "|host=" .. h, 1, 0, 90000)
+  shd.incr(SH, "waf_insp:hr=" .. hr .. "|host=" .. h, 1, 90000)
   if h ~= "" then
-    SH:incr("waf_insp:hr=" .. hr .. "|host=", 1, 0, 90000)
+    shd.incr(SH, "waf_insp:hr=" .. hr .. "|host=", 1, 90000)
   end
 end
 

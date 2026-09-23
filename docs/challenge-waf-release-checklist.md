@@ -19,7 +19,7 @@ Use this checklist for challenge or WAF Lua/config updates before reloading Angi
    - Run it as root, on a node where the daemon has started at least once.
      `sslcollector` reads `/var/lib/cfm/lua/cfm_token.lua` (`root:cfm`, 0640)
      when it loads.
-   - `resty -I /var/lib/cfm/lua -e 'for _, m in ipairs({"cfm_clearance","cfm_rules","cfm_waf","cfm_stats","cfm_clamav","cfm_cache_log","cfm_cache","cfm_hostmatch","cfm_panel_hosts","cfm_selfip","cfm_filecache","cfm_bridge_cfg","cfm_origin_ka","cfm_tlsfp","cfm_decision","sslcollector"}) do local ok, err = pcall(require, m); if not ok then error(m .. ": " .. tostring(err)) end end'`
+   - `resty -I /var/lib/cfm/lua -e 'for _, m in ipairs({"cfm_clearance","cfm_rules","cfm_waf","cfm_stats","cfm_clamav","cfm_cache_log","cfm_cache","cfm_hostmatch","cfm_panel_hosts","cfm_selfip","cfm_filecache","cfm_bridge_cfg","cfm_origin_ka","cfm_tlsfp","cfm_decision","cfm_shdict","sslcollector"}) do local ok, err = pcall(require, m); if not ok then error(m .. ": " .. tostring(err)) end end'`
    - `cfm_panel` is not in the list: it is the panel ports' access script, not
      a module, so requiring it runs the request handler. Steps 1–2 cover its
      syntax; step 7 covers the rest.

@@ -33,9 +33,13 @@ reset()
 
 _G.ngx = { time = function() return 3600 end } -- hr bucket = floor(3600/3600)*3600 = 3600
 _G.SH = {
-  incr = function(_, key, _v, _init, _ttl) keys[#keys + 1] = key end,
+  incr = function(_, key, _v, _init, _ttl) keys[#keys + 1] = key; return 1 end,
 }
 _G.CFG = { waf_stats_enable = true }
+-- The extracted function reads cfm_shdict through cfm.lua's `shd` local; the
+-- stub SH's incr records the key (and, returning nil, sends shd on to add).
+package.path = "configs/lua/?.lua;" .. package.path
+_G.shd = require "cfm_shdict"
 
 local waf_insp_incr = assert(load(fnsrc .. "\nreturn waf_insp_incr"))()
 assert(type(waf_insp_incr) == "function", "extracted waf_insp_incr is not a function")

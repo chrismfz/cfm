@@ -7,6 +7,8 @@
 
 local _M = {}
 
+local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
+
 local ngx = ngx
 local tonumber = tonumber
 local tostring = tostring
@@ -77,9 +79,9 @@ local function throttle_hit(profileName, host, ip)
   local key = "tr|" .. tostring(profileName or "soft_bot") .. "|" ..
               tostring(host or "-") .. "|" .. win .. "|" .. tostring(ip or "-")
 
-  -- init=0 so a fresh window key starts at 0 then +1; init_ttl (2x the window)
-  -- is applied on CREATE only, so the key ages out on its own after the window.
-  local count, err = SH:incr(key, 1, 0, window * 2)
+  -- A fresh window key starts at 1; its TTL (2x the window) is applied on
+  -- CREATE only, so the key ages out on its own after the window.
+  local count, err = shd.incr(SH, key, 1, window * 2)
   if not count then
     -- incr failed (shdict full and forcible eviction failed). Fail OPEN — a
     -- saturated dict must not black out legitimate traffic (matches the SH-missing

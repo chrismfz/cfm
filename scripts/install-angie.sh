@@ -39,7 +39,7 @@ readonly CFM_LUA_MANIFEST=(
     cfm_clamav.lua cfm_clearance.lua cfm_decision.lua cfm_filecache.lua
     cfm_fppolicy.lua cfm_geo.lua cfm_h3_config.lua cfm_hostmatch.lua
     cfm_origin_ka.lua cfm_panel.lua cfm_panel_hosts.lua cfm_panel_tunnel.lua
-    cfm_pcw.lua cfm_purge.lua cfm_rules.lua cfm_selfip.lua cfm_stats.lua
+    cfm_pcw.lua cfm_purge.lua cfm_rules.lua cfm_selfip.lua cfm_shdict.lua cfm_stats.lua
     cfm_tlsfp.lua cfm_ua_emergency.lua cfm_waf.lua cfm_waf_detectors.lua
     cfm_waf_excl.lua cfm_waf_util.lua log-cfm.lua sslcollector.lua
 )

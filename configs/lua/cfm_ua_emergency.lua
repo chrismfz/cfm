@@ -30,6 +30,7 @@
 local _M = {}
 
 local cjson = require "cjson.safe"
+local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
 
 local PATH = "/var/lib/cfm/ua_emergency.json"
 local REFRESH_INTERVAL_SEC = 3
@@ -361,11 +362,11 @@ function _M.throttle(normalized_ua)
   local win = math.floor(now / WINDOW)
   local key = "ua_emerg|" .. normalized_ua .. "|" .. win
 
-  -- One atomic increment: no lock, no read-modify-write. init=0 so a fresh
-  -- window key starts at 0 then +1; init_ttl (2x the window) is applied only
-  -- when the key is created, so the key ages out on its own once the window has
-  -- passed — no scan, no delete, ~2 live keys per UA (current + previous).
-  local count, err = _SH:incr(key, 1, 0, WINDOW * 2)
+  -- Atomic increments: no lock, no read-modify-write. A fresh window key
+  -- starts at 1; its TTL (2x the window) is applied only when the key is
+  -- created, so the key ages out on its own once the window has passed — no
+  -- scan, no delete, ~2 live keys per UA (current + previous).
+  local count, err = shd.incr(_SH, key, 1, WINDOW * 2)
   if not count then
     -- incr failed (shdict full and forcible eviction failed): the counter can't
     -- be maintained. Mirror the internal-error policy — fail-open by default so
