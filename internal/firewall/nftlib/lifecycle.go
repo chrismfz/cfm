@@ -341,8 +341,9 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	// jump flood at the end of the base layer (before ports policy rules).
 	addRule("jump flood")
 
-	// Rules are only ever added, so an unread chain must not be taken for an
-	// empty one — that would add every rule a second time — unless this
+	// Rules are added (only piled-up copies are ever deleted), so an unread
+	// chain must not be taken for an empty one — that would add every rule a
+	// second time — unless this
 	// EnsureBase just created it: then it is empty, and leaving it so would
 	// leave the node without its allow/block rules.
 	chain, err := b.chainTextCLI("input")
@@ -357,6 +358,9 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	}
 	err = b.nftExec(strings.Join(stmts, "\n"))
 	if err == nil {
+		if n := countPrefix(stmts, "delete rule "); n > 0 {
+			logging.Logf("[nftlib] EnsureBase: removed %d duplicate base rules", n)
+		}
 		return nil
 	}
 	// Best effort, as before: a statement nft refuses mustn't keep the others
@@ -382,6 +386,16 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 		return fmt.Errorf("%v; %d of %d single statements failed too", runErr, failed, len(stmts))
 	}
 	return nil
+}
+
+func countPrefix(stmts []string, prefix string) int {
+	n := 0
+	for _, s := range stmts {
+		if strings.HasPrefix(s, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
 // errTail is the end of err's message, where nft's own reason is (nftExec

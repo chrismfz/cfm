@@ -5,9 +5,10 @@ import (
 	"testing"
 )
 
-// An `nft -a list chain` listing as nft prints it: quoted interface, ICMP
-// jumps, an established/related block copy, no plain `jump flood`, and the
-// `iif lo accept` copies the old check piled up.
+// An `nft -a list chain` listing: quoted interface, the ICMP jumps (one in
+// the form an nft version might print it, without its protocol match), an
+// established/related block copy, no plain `jump flood`, and the `iif lo
+// accept` copies the old check piled up.
 const listing = `table inet cfm {
 	chain input { # handle 1
 		type filter hook input priority -50; policy accept;

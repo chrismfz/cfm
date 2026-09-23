@@ -9,10 +9,10 @@ import "strings"
 // rules have always used, so an established/related copy of a block rule
 // counts), compared as nft prints rules: quotes dropped (`iif lo` is printed
 // `iif "lo"`) and an ICMP type match without the protocol match that implies
-// it. A bare verdict (`jump flood`) must be a whole rule: as a substring it is
-// found inside every `… jump flood` rule, and with ICMP rate limiting on, the
-// plain `jump flood` that sends TCP/UDP through the flood chain was never
-// added.
+// it (nft 1.0.9 prints the ICMP jumps as written; older versions may not). A
+// bare verdict (`jump flood`) must be a whole rule: as a substring it is found
+// inside every `… jump flood` rule, and with ICMP rate limiting on, the plain
+// `jump flood` that sends TCP/UDP through the flood chain was never added.
 type ChainRules struct {
 	rules []chainRule // listing order, then rules queued with Add
 }
@@ -59,10 +59,11 @@ func (c *ChainRules) Add(expr string) {
 }
 
 // DuplicateHandles returns the handles of the listed rules that repeat one of
-// exprs exactly, all but the first (top-most) of each. The rules the old
-// presence check didn't recognise were added again on every EnsureBase — `iif
-// lo accept` on the nft backend, an ICMP jump whenever nft prints it without
-// its protocol match — so a long-running chain can hold many copies.
+// exprs exactly, all but the first (top-most) of each. A rule the old presence
+// check didn't recognise was added again on every EnsureBase — `iif lo accept`
+// on the nft backend, seen; an ICMP jump, should an nft version print it
+// differently from how it is written — so a long-running chain can hold many
+// copies.
 func (c *ChainRules) DuplicateHandles(exprs ...string) []string {
 	var out []string
 	for _, e := range exprs {

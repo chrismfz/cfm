@@ -11,7 +11,7 @@ import (
 )
 
 // fakeNFTChain puts an `nft` script first in PATH that prints chain for
-// `list chain inet cfm input`, logs every invocation and every script fed on
+// `-a list chain inet cfm input`, logs every invocation and every script fed on
 // stdin, and fails the first failScripts `nft -f -` runs.
 func fakeNFTChain(t *testing.T, chain string, failScripts int) (logPath string) {
 	return fakeNFTChainOpts(t, chain, failScripts, "")
