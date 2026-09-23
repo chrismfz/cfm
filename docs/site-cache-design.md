@@ -223,7 +223,31 @@ A), that the `$cfm_micro_conf` sentinel sits once in a redirect-free, buffering
 exists and every micro zone's `inactive` sits at least 30 s below `cfm_cache.lua`'s
 `MICRO_UNCACHEABLE_STALE_TTL`, that `proxy_cache_convert_head` is never turned
 off, that the conf includes exactly its known files, and that
-`proxy_cache_methods` never lists a non-GET/HEAD method.
+`proxy_cache_methods` never lists a non-GET/HEAD method. A rail variable can be
+written by more than a `set`, so the other spellings are refused too: a regex
+named capture named `cfm_*` / `cf_*` / `xfp_*` (or after a header family,
+escaped quotes read as nginx reads them), any writer (`set`, any `set_*` —
+`set_by_lua*`, set-misc —, `auth_request_set`, `js_set` / `js_var`,
+`perl_set`, `map`, `geo`, `split_clients`, a block entry that opens with the
+variable) of a `$http_*` / `$upstream_http_*` / `$cookie_*` /
+`$arg_*` variable — verified on nginx 1.24: each SHADOWS the request/response
+value (a `map` for the whole http block), so `map … $http_authorization`
+would turn the credentialed-request rail off and `set
+$upstream_http_cart_token ""` the session-token one — a string-form
+`*_by_lua` directive, and inline Lua that uses `ngx` / `ngx.var` other than
+as `ngx.<field>` / `ngx.var.<name>` (brackets, an alias, `require "ngx"`: a
+computed name) or assigns an `ngx.var.cfm_*` / `cf_*` / `xfp_*` (a multiple
+assignment included); a log message that merely says "ngx" is not code. The micro
+buckets are `cfm_cache.lua`'s `MICRO_BUCKETS` — every conf declares exactly
+those zones and `@cfm_micro_<n>s` locations — and the openresty↔angie micro
+blocks are compared over the span the parser closes each on, not by
+indentation. Beyond the conf: `cfm_micro_entry_structure_test.lua` pins that
+`cfm.lua` enters micro only at Step 4 (after the WAF, challenge and bridge
+decisions), and `cfm_cache_edge_parity_test.lua` feeds the daemon's own feed
+(a fixture `site_cache_edge_parity_test.go` generates from the real handler)
+to `cfm_cache.lua`, asserting the stats key of every request host matches
+`StatsKeyFor`, the real flush path pushes exactly the armed keys, and every
+feed field is one the edge knows and keeps in the policy it applies.
 
 `cfm_clearance`-cookie holders (cleared visitors) are still *anonymous* to the
 app, so they **may** be served micro-cache; the cache key never varies on the
@@ -991,7 +1015,13 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
 3. **OpenResty↔Angie parity:** the two confs declare the same zones and the same
    cache locations.
 4. **Lua↔Go parity** for any cache-policy identifiers (recipe keys), mirroring
-   `TestWAFRuleIDs_LuaParity`.
+   `TestWAFRuleIDs_LuaParity`. *As built:* the feed and the stats key, through
+   a Go-generated fixture (`site_cache_edge_parity_test.go` →
+   `scripts/tests/fixtures/site_cache_edge_parity.lua` →
+   `cfm_cache_edge_parity_test.lua`), and the feed's wire fields
+   (`TestCachePolicyRowWireFields`); the edge uses a recipe name only as a
+   label in the debug header (the TTL decides), so there is nothing to mirror
+   for the recipe vocabulary yet.
 5. **Logrotate:** if any new `/var/log/cfm/…` cache log path is added, it needs a
    rotation entry (`check_logrotate_coverage.sh`). (Stats live in a shdict, so
    likely none.)
@@ -1108,7 +1138,8 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
        `static_gate`'s doc-comment states the same scope so code and design agree.
    - **3c — stats/logging (as built).** The undeclared (→ dead) `cfm_cache_stats`
      shared dict is now declared in both confs; `cfm_cache_log.lua` gained a host
-     arg (per-vhost keys `cache:vhost:<host>:status:<S>`) and `snapshot_vhosts()`,
+     arg (per-vhost keys `cvh:<md5(policy key)>:<S>` — they were
+     `cache:vhost:<host>:status:<S>` until the bound below) and `snapshot_vhosts()`,
      wired in the http-level `log_by_lua` — keyed by the CANONICAL policy key
      (`policy_key_for` → exact host, or the `*.suffix` pattern for a wildcard),
      never the raw request Host, so an armed wildcard vhost cannot let a client
@@ -1149,14 +1180,37 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      one row per stored policy (`maxSiteCacheEntries`), and prunes the rows
      of keys disarmed since every 5 minutes; a push is ONE hook event (it was
      one per row, which could overflow the hook queue and drop rows). The
-     edge side reads at most 8000 keys of the stats dict per push
-     (`cfm_cache_log.lua` snapshot_vhosts `get_keys(8000)`), a KEY bound, not
-     a vhost bound: the budget also holds zone/throttle keys and the stale keys
-     of disarmed vhosts, and a cut can fall inside one vhost's status keys, so
-     past roughly 1000-2600 armed vhosts some vhosts are missing from a push
-     and one can be pushed with PARTIAL counts (a skewed hit ratio). Follow-up
-     (PR-5): drop a disarmed vhost's keys at the edge, or scan them all. **v1 scope:** a live totals view (counts since the edge last
-     restarted — a reload keeps them), not hour-bucketed history, and no cfm-admin column yet — both
+     edge reads each ARMED policy key's seven status counters by name
+     (`cfm_cache_log.lua` snapshot_vhosts, given `cfm_cache.lua`'s
+     `stats_keys` — exactly the values `policy_key_for` can return, built
+     with the feed), so every armed vhost is pushed with all its statuses
+     whatever else the dict holds. Each counter is keyed on a digest of its
+     policy key, `cvh:<md5>:<status>` (≤ 48 bytes), so every one takes the
+     same small shared-dict slot whatever the host's length: `cfm_cache_stats`
+     is 8m, ~65 000 counters — the 5000-policy limit × 7 statuses with room
+     to spare. Measured on nginx 1.24 with 5000 armed vhosts (every status) +
+     3000 disarmed ones (a counter each): 5000 rows, all complete, with 25-,
+     60- and 253-character hosts, ~40 ms per push in the timer, 3.3 MB of the
+     dict free. A counter is counted with `incr` without init, then `add`:
+     `incr(key, n, init)` in lua-nginx-module 0.10.26 (as shipped with nginx
+     1.24 here; the fleet's OpenResty/Angie builds are unchecked) loses
+     counters when a new key's crc32 — the dict's tree hash — equals an
+     existing key's (the other reads nil, or both count wrong, for the dict's
+     life): about K²/2³³ odds per node for K counters, ~13% at 5000 vhosts ×
+     7 statuses. Both reviewers' benchmarks hit it (one counter of 35 000
+     lost); a colliding pair counted 998 and 999 of 1000 that way, exactly
+     1000 each after the fix. It used to scan `get_keys(8000)` — a KEY bound — over keys that
+     grew with the host (the slot doubles past a 52-byte key: the 4m dict
+     held ~32 000 short counters, ~16 000 of 53-180 bytes, ~8 000 for a
+     253-byte host), which pushed
+     1143 of those 5000, one with partial counts. Past the dict's capacity,
+     LRU evicts the least recently touched counters, a disarmed vhost's first
+     (they are no longer read). The push body is ≤ ~2.2 MB at the limit
+     (253-byte hosts, 14-digit counts — the longest plain number cjson
+     writes); the daemon caps it at 4 MiB and reads a count cjson writes in
+     exponent form (1e14 or more) as a number, clamped to 2^53, instead of
+     failing the whole push. **v1 scope:** a live totals view (counts since the edge last
+     restarted — a reload keeps them, unless it changes the dict's size), not hour-bucketed history, and no cfm-admin column yet — both
      follow-ups. **Deferred to a focused follow-up:** the `whats_wrong`
      "armed but ~0 hits" signal (the automated form of what `site_cache_stats`
      already shows on demand — it would have surfaced the 3b buffering no-op).

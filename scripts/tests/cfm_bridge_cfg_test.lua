@@ -115,12 +115,35 @@ cfg = bc.get()
 check(cfg.panel_waf_mode == nil, "old daemon file: panel_waf_mode nil → resolver defaults enforce")
 check(cfg.panel_decision_mode == nil, "old daemon file: panel_decision_mode nil → resolver defaults enforce")
 
+-- 4c) Site Cache gates. SITE_CACHE is a kill switch — absent (old daemon)
+--     → on; MICRO_CACHE_ENFORCE is an opt-in — absent → off. Only an explicit
+--     value flips either (the daemon writes both, from detectors.conf).
+expire()
+fixture = "return { clearance_refresh = true }"
+cfg = bc.get()
+check(cfg.site_cache == true, "old daemon file: site_cache absent → defaults true (kill switch)")
+check(cfg.micro_cache_enforce == false, "old daemon file: micro_cache_enforce absent → defaults false (opt-in)")
+expire()
+fixture = "return { clearance_refresh = true, site_cache = false, micro_cache_enforce = true }"
+cfg = bc.get()
+check(cfg.site_cache == false, "explicit SITE_CACHE=0: site_cache is false")
+check(cfg.micro_cache_enforce == true, "explicit MICRO_CACHE_ENFORCE=1: micro_cache_enforce is true")
+expire()
+fixture = 'return { clearance_refresh = true, site_cache = "0", micro_cache_enforce = "1" }'
+cfg = bc.get()
+check(cfg.site_cache == true and cfg.micro_cache_enforce == false,
+      "a non-boolean value never flips a gate (the daemon writes Lua booleans)")
+
 -- 5) Garbage file → fallback, not a crash.
 expire()
 fixture = "return 42"
 cfg = bc.get()
 check(cfg.clearance_refresh == true and cfg.origin_keepalive == nil,
       "non-table file: fail-safe fallback served")
+-- the fallback table carries neither gate; cfm_cache.lua reads it with the
+-- same idioms (site_cache ~= false, micro_cache_enforce == true)
+check(cfg.site_cache ~= false and cfg.micro_cache_enforce ~= true,
+      "fallback (unreadable file): Site Cache on, micro enforce off")
 
 -- ── token() accessor ─────────────────────────────────────────────────────────
 -- Same loadfile-patch trick for the token path; every edge consumer

@@ -80,9 +80,10 @@ local NGX_JOINS_HEADERS = type(ngx.config) == "table"
 -- specific match it wins, and it caches nothing.
 
 local _cache = {
-    policies = {},    -- map[host] -> policy table
-    wild     = {},    -- array of { pattern, policy }
-    has_any  = false,
+    policies   = {},    -- map[host] -> policy table
+    wild       = {},    -- array of { pattern, policy }
+    has_any    = false,
+    stats_keys = {},    -- every key policy_key_for can return (the armed ones)
 }
 local _last_refresh_at     = 0
 local _refresh_in_progress = false
@@ -248,6 +249,14 @@ local function bridge_push(path, body)
     return true, nil
 end
 
+-- policy_armed: true when at least one tier of the policy is on (false for an
+-- opt-out row).
+local function policy_armed(p)
+    if type(p.static) == "table" and p.static.on then return true end
+    if type(p.micro) == "table" and p.micro.on then return true end
+    return false
+end
+
 -- ---------------------------------------------------------------------------
 -- Cache rebuild. Only exact hosts and "*.suffix" wildcards are honored (same
 -- rule as the Go store); anything else is dropped with a one-shot warning so a
@@ -292,9 +301,23 @@ local function rebuild_cache(entries)
         if #a.pattern ~= #b.pattern then return #a.pattern > #b.pattern end
         return a.pattern < b.pattern
     end)
-    _cache.policies  = policies
-    _cache.wild      = wild
-    _cache.has_any   = n > 0
+    -- stats_keys: the keys the stats are counted under — exactly the values
+    -- policy_key_for can return (an armed exact host, or an armed "*.suffix"
+    -- pattern; an opt-out row counts nothing) — which the stats push reads.
+    -- Built from the final tables, so an exact host listed twice counts once.
+    local stats_keys, seen = {}, {}
+    for h, p in pairs(policies) do
+        if policy_armed(p) then stats_keys[#stats_keys + 1] = h; seen[h] = true end
+    end
+    for _, w in ipairs(wild) do
+        if policy_armed(w.policy) and not seen[w.pattern] then
+            stats_keys[#stats_keys + 1] = w.pattern; seen[w.pattern] = true
+        end
+    end
+    _cache.policies   = policies
+    _cache.wild       = wild
+    _cache.has_any    = n > 0
+    _cache.stats_keys = stats_keys
     -- has_micro: meta flag = "some vhost has its micro tier armed". B2's observe()
     -- is already debug-gated and per-vhost (p.micro.on), so it does not read this
     -- yet; the flag is the cheap fleet-wide early-out that B3's ACCESS-phase micro
@@ -353,7 +376,7 @@ local function stats_flush_handler(premature)
         if premature then return end
         local ok2, cl = pcall(require, "cfm_cache_log")
         if not (ok2 and cl and cl.snapshot_vhosts) then return end
-        local vhosts = cl.snapshot_vhosts()
+        local vhosts = cl.snapshot_vhosts(_cache.stats_keys)
         local rows = {}
         for host, counts in pairs(vhosts) do
             rows[#rows + 1] = { host = host, counts = counts }
@@ -405,14 +428,6 @@ end
 
 -- ---------------------------------------------------------------------------
 -- Public API
-
--- policy_armed: true when at least one tier of the policy is on (false for an
--- opt-out row).
-local function policy_armed(p)
-    if type(p.static) == "table" and p.static.on then return true end
-    if type(p.micro) == "table" and p.micro.on then return true end
-    return false
-end
 
 -- policy_for: returns the policy table for the given host, or nil. Cheap path
 -- when nothing is armed: short-circuits BEFORE any string work.
@@ -1207,6 +1222,7 @@ _M._micro_storable     = micro_storable
 _M._micro_mark_ttl     = micro_mark_ttl
 _M._panel_host         = panel_host
 _M._has_micro          = function() return _cache.has_micro end
+_M._stats_keys         = function() return _cache.stats_keys end
 _M._micro_enforce      = micro_enforce_enabled
 
 return _M

@@ -398,6 +398,82 @@ func TestNginxBridge_CacheStatsPushIsOneHookEvent(t *testing.T) {
 	}
 }
 
+// The worst-case LEGIT push — one row per stored policy (the edge reads every
+// armed key, cfm_cache_log.lua snapshot_vhosts), each a 253-byte host with all
+// seven statuses at 14-digit counts, the longest plain number cjson writes
+// (~2.2 MB) — is accepted in full: over the old 2 MiB cap the whole push was
+// rejected, so no vhost got stats. A body over maxCacheStatsBody still is.
+func TestNginxBridge_CacheStatsWorstCaseLegitPushFits(t *testing.T) {
+	statuses := []string{"HIT", "MISS", "BYPASS", "EXPIRED", "STALE", "UPDATING", "REVALIDATED"}
+	build := func(rows, hostLen int) string {
+		var sb strings.Builder
+		sb.WriteString(`{"rows":[`)
+		for i := 0; i < rows; i++ {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			id := fmt.Sprintf("h%05d.", i)
+			host := id + strings.Repeat("a", hostLen-len(id)-len(".example")) + ".example"
+			fmt.Fprintf(&sb, `{"host":%q,"counts":{`, host)
+			for j, st := range statuses {
+				if j > 0 {
+					sb.WriteString(",")
+				}
+				fmt.Fprintf(&sb, `%q:%d`, st, int64(99999999999999))
+			}
+			sb.WriteString(`}}`)
+		}
+		sb.WriteString(`]}`)
+		return sb.String()
+	}
+	post := func(body string) (int, int) {
+		b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+		b.hookCh = make(chan func(), 1)
+		got := 0
+		b.SetCacheStatsHook(func(string, map[string]int) { got++ })
+		req := httptest.NewRequest(http.MethodPost, "/nginx/cache/stats", strings.NewReader(body))
+		req.Header.Set("X-CFM-Token", "tok")
+		rr := httptest.NewRecorder()
+		b.handleCacheStats(rr, req)
+		if len(b.hookCh) == 1 {
+			(<-b.hookCh)()
+		}
+		return rr.Code, got
+	}
+	legit := build(maxSiteCacheEntries, 253)
+	if len(legit) <= 2<<20 {
+		t.Fatalf("worst-case body is %d bytes — no longer above the old 2 MiB cap, so this test no longer pins the raise", len(legit))
+	}
+	if code, got := post(legit); code != http.StatusOK || got != maxSiteCacheEntries {
+		t.Fatalf("worst-case legit push (%d bytes): status %d, %d rows delivered, want 200 and %d", len(legit), code, got, maxSiteCacheEntries)
+	}
+	big := `{"rows":[{"host":"` + strings.Repeat("a", maxCacheStatsBody) + `","counts":{"HIT":1}}]}`
+	if code, got := post(big); code != http.StatusBadRequest || got != 0 {
+		t.Fatalf("over-cap body: status %d, %d rows delivered, want 400 and 0", code, got)
+	}
+}
+
+// cjson writes a count of 1e14 or more in exponent form: it must not fail the
+// whole push (a count decoded into an int used to), nor any other row.
+func TestNginxBridge_CacheStatsExponentCounts(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	b.hookCh = make(chan func(), 1)
+	got := map[string]map[string]int{}
+	b.SetCacheStatsHook(func(host string, counts map[string]int) { got[host] = counts })
+	body := `{"rows":[{"host":"a.com","counts":{"HIT":1e+14,"MISS":9.007199254741e+15,"STALE":-3}},{"host":"b.com","counts":{"HIT":7}}]}`
+	req := httptest.NewRequest(http.MethodPost, "/nginx/cache/stats", strings.NewReader(body))
+	req.Header.Set("X-CFM-Token", "tok")
+	rr := httptest.NewRecorder()
+	b.handleCacheStats(rr, req)
+	if rr.Code != http.StatusOK || len(b.hookCh) != 1 {
+		t.Fatalf("status %d, %d hook events", rr.Code, len(b.hookCh))
+	}
+	(<-b.hookCh)()
+	if got["a.com"]["HIT"] != 100000000000000 || got["a.com"]["MISS"] != 1<<53 || got["a.com"]["STALE"] != 0 || got["b.com"]["HIT"] != 7 {
+		t.Fatalf("rows delivered as %v", got)
+	}
+}
+
 // Only the canonical policy key is a stats key: "a.com:1", "a.com." … would
 // each take a row of the cap.
 func TestSiteCacheStats_ArmedKeyCanonicalOnly(t *testing.T) {

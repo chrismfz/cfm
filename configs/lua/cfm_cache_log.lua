@@ -6,25 +6,50 @@
 
 local _M = {}
 
-local VALID = {
-  HIT = true,
-  MISS = true,
-  BYPASS = true,
-  EXPIRED = true,
-  STALE = true,
-  UPDATING = true,
-  REVALIDATED = true,
-}
+-- The cache statuses counted (nginx $upstream_cache_status values). One list:
+-- the log-side gate (VALID) and the read side (snapshot_vhosts) both come from it.
+local STATUSES = { "HIT", "MISS", "BYPASS", "EXPIRED", "STALE", "UPDATING", "REVALIDATED" }
+local VALID = {}
+for _, st in ipairs(STATUSES) do VALID[st] = true end
 
+-- Per-vhost counter key: "cvh:" .. md5(policy key) .. ":" .. status — 48 bytes
+-- at most whatever the host's length, so every counter takes the same (small)
+-- shared-dict slot and the dict's capacity is a fixed number of counters (a
+-- 253-byte host used to take a slot twice as large, and two of them could not
+-- reuse the slot of an evicted short one). Only this module writes and reads
+-- these keys (log / snapshot_vhosts). The per-worker memo is keyed on the
+-- policy key — bounded by the armed policies — and reset if it ever grows past
+-- VKEY_MEMO_MAX.
+local VKEY_MEMO, VKEY_MEMO_N, VKEY_MEMO_MAX = {}, 0, 20000
+local function vhost_prefix(host)
+  local p = VKEY_MEMO[host]
+  if p then return p end
+  p = "cvh:" .. ngx.md5(host) .. ":"
+  if VKEY_MEMO_N >= VKEY_MEMO_MAX then VKEY_MEMO, VKEY_MEMO_N = {}, 0 end
+  VKEY_MEMO[host] = p
+  VKEY_MEMO_N = VKEY_MEMO_N + 1
+  return p
+end
+
+-- incr: count n (default 1) on key. NOT dict:incr(key, n, init): with init,
+-- lua-nginx-module 0.10.26 (verified on nginx 1.24, lua-resty-core 0.1.28)
+-- loses counters when the new key's crc32 — the dict's tree hash — equals an
+-- existing key's: the other key then reads nil, or both count wrong, for as
+-- long as the dict lives (about K^2/2^33 odds per node for K counters: ~13%
+-- at 5000 vhosts x 7 statuses). incr without init, then add, never takes
+-- that path; "exists" is another worker's add winning the race. Errors are
+-- dropped quietly (a lost count never breaks the log phase).
 local function incr(dict, key, n)
-  local ok, err = dict:incr(key, n or 1, 0)
-  if not ok and err ~= "not found" then
-    -- ignore quietly
+  n = n or 1
+  local v, err = dict:incr(key, n)
+  if v == nil and err == "not found" then
+    local ok, aerr = dict:add(key, n)
+    if not ok and aerr == "exists" then dict:incr(key, n) end
   end
 end
 
 -- log(zone, status[, host]): count one cache verdict. `host` is optional and,
--- when present, adds a PER-VHOST breakdown (cache:vhost:<host>:...). The caller
+-- when present, adds a PER-VHOST breakdown (vhost_prefix(host) .. status). The caller
 -- (log_by_lua) passes host ONLY for an armed vhost, so per-vhost key cardinality
 -- stays bounded. Backward-compatible: host omitted → zone/global totals only.
 function _M.log(zone, status, host)
@@ -41,38 +66,44 @@ function _M.log(zone, status, host)
 
   -- Per-vhost breakdown: status keys ONLY (no per-vhost :total). The daemon
   -- derives a vhost's total by summing its statuses, so there is no separate
-  -- total key that could survive a get_keys() truncation while its status keys
-  -- are dropped — which would push a misleading "total>0, zero hits" row.
+  -- total key that could disagree with them (an LRU eviction of one status key
+  -- would otherwise push a misleading "total>0, zero hits" row).
   if host and host ~= "" then
-    incr(d, "cache:vhost:" .. host .. ":status:" .. status)
+    incr(d, vhost_prefix(host) .. status)
   end
 
   d:set("cache:last_seen_ts", ngx.time())
 end
 
--- snapshot_vhosts: read side for the daemon /nginx/cache/stats push. Returns
---   { ["<host>"] = { HIT = n, MISS = n, ... }, ... }
--- (status keys only; the daemon sums them) by scanning the per-vhost keys.
--- Absolute counts (the daemon hook is UPSERT-idempotent, like the WAF-stats
--- push). A vhost is keyed only while armed, but its keys stay in the dict after
--- it is disarmed (until the edge restarts: a reload keeps a lua_shared_dict);
--- the daemon drops such rows.
-function _M.snapshot_vhosts()
+-- snapshot_vhosts(keys): read side for the daemon /nginx/cache/stats push.
+-- `keys` is the list of ARMED policy keys (cfm_cache.lua builds it from the
+-- feed: every value policy_key_for can return). Returns
+--   { ["<key>"] = { HIT = n, MISS = n, ... }, ... }
+-- (status keys only; the daemon sums them), reading each key's status counters
+-- by name, so every armed vhost is read in full however many keys the dict
+-- holds (it used to scan get_keys(8000): past a few thousand vhosts some were
+-- left out, or pushed with a partial set of statuses). A key with no counter
+-- yet is left out. Absolute counts (the daemon hook is UPSERT-idempotent, like
+-- the WAF-stats push). A disarmed vhost's counters stay in the dict until the
+-- edge restarts (a reload keeps a lua_shared_dict of the same size) or LRU
+-- evicts them — no longer read, they are the least recently touched — and if
+-- it is re-armed first, its counts resume from them.
+function _M.snapshot_vhosts(keys)
   local d = ngx.shared.cfm_cache_stats
-  if not d then return {} end
+  if not d or type(keys) ~= "table" then return {} end
   local out = {}
-  -- 0 would warn + cap at 1024. A KEY bound, not a vhost bound: each armed
-  -- vhost uses up to #statuses keys and the budget also holds zone/throttle
-  -- keys and the stale keys of disarmed vhosts, so past roughly 1000-2600
-  -- armed vhosts some vhosts are left out — and a cut can fall inside one
-  -- vhost's keys, pushing it with PARTIAL counts (docs/site-cache-design.md
-  -- §11 "Bounds").
-  local keys = d:get_keys(8000)
-  for _, k in ipairs(keys) do
-    local h, st = k:match("^cache:vhost:(.+):status:([A-Z]+)$")
-    if h then
-      out[h] = out[h] or {}
-      out[h][st] = tonumber(d:get(k) or 0) or 0
+  for _, h in ipairs(keys) do
+    if type(h) == "string" and h ~= "" and out[h] == nil then
+      local pre = vhost_prefix(h)
+      local counts
+      for _, st in ipairs(STATUSES) do
+        local v = d:get(pre .. st)
+        if v ~= nil then
+          counts = counts or {}
+          counts[st] = tonumber(v) or 0
+        end
+      end
+      if counts then out[h] = counts end
     end
   end
   return out
@@ -84,28 +115,26 @@ function _M.log_throttle(is_meta, is_throttled, limit_status, status)
   local d = ngx.shared.cfm_cache_stats
   if not d then return end
 
-  local function incr(k)
-    local ok, err = d:incr(k, 1, 0)
-    if not ok and err ~= "not found" then
-      -- ignore
-    end
-  end
+  local function count(k) incr(d, k, 1) end
 
-  incr("throttle:meta:total")
+  count("throttle:meta:total")
 
   if is_throttled == "1" then
-    incr("throttle:meta:throttled")
+    count("throttle:meta:throttled")
   end
 
   if limit_status == "REJECTED" then
-    incr("throttle:meta:rejected")
+    count("throttle:meta:rejected")
   elseif limit_status == "DELAYED" then
-    incr("throttle:meta:delayed")
+    count("throttle:meta:delayed")
   end
 
   if status == "429" then
-    incr("throttle:meta:http_429")
+    count("throttle:meta:http_429")
   end
 end
+
+-- Exposed for unit tests (scripts/tests/cfm_cache_log_test.lua).
+_M._vhost_prefix = vhost_prefix
 
 return _M
