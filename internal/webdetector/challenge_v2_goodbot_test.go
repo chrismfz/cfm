@@ -143,10 +143,10 @@ func TestVerify_V2GateWaivesAVerifiedGoodBot(t *testing.T) {
 }
 
 // A reject of a client whose PTR claims a crawler says why it was not waived
-// (v2_waiver=), or it reads exactly like a spoof: a Read-Aloud IP the gate
-// could not confirm in time and an impostor claiming google.com would carry
-// the same line. Everyone else's reject carries no reason — its ptr= already
-// says it isn't a crawler.
+// (v2_waiver_miss=, last on the line), or it reads exactly like a spoof: a
+// Read-Aloud IP the gate could not confirm in time and an impostor claiming
+// google.com would carry the same line. Everyone else's reject carries no
+// reason.
 func TestVerify_V2RejectSaysWhyACrawlerWasNotWaived(t *testing.T) {
 	base, capt := startVerifyServer(t)
 	const (
@@ -170,6 +170,7 @@ func TestVerify_V2RejectSaysWhyACrawlerWasNotWaived(t *testing.T) {
 	})
 	MarkChallengeV2("66.249.81.11", markHost)
 	MarkChallengeV2("203.0.113.21", markHost)
+	MarkChallengeV2("66.249.81.13", armedHost) // a mark on top of the vhost arm
 
 	reject := func(ip, host, want string) {
 		t.Helper()
@@ -184,16 +185,19 @@ func TestVerify_V2RejectSaysWhyACrawlerWasNotWaived(t *testing.T) {
 			t.Fatalf("%s on %s: no reject recorded", ip, host)
 		}
 		r := capt.rejects[before]
-		wantSuffix := ""
+		// The line as logged ends with the PTR and then the reason, so no
+		// field a parser already reads moves.
+		wantTail := " ptr=" + r.PTR
 		if want != "" {
-			wantSuffix = " v2_waiver=" + want
+			wantTail += " v2_waiver_miss=" + want
 		}
-		if r.V2WaiverMiss != want || r.WaiverMissSuffix() != wantSuffix {
-			t.Fatalf("%s on %s: v2_waiver=%q (suffix %q), want %q", ip, host, r.V2WaiverMiss, r.WaiverMissSuffix(), want)
+		if line := r.RejectLine(); r.V2WaiverMiss != want || !strings.HasSuffix(line, wantTail) {
+			t.Fatalf("%s on %s: v2_waiver_miss=%q, line %q; want %q ending %q", ip, host, r.V2WaiverMiss, line, want, wantTail)
 		}
 	}
 	reject("66.249.81.10", armedHost, v2WaiverSpoofed) // the waiver's own answer
 	reject("66.249.81.11", markHost, v2WaiverGrain)    // a mark is never waived
+	reject("66.249.81.13", armedHost, v2WaiverMark)    // v2=vhost, but a mark covers it too
 	reject("203.0.113.20", armedHost, "")              // not a crawler's PTR: nothing to explain
 	reject("203.0.113.21", markHost, "")
 
@@ -203,25 +207,26 @@ func TestVerify_V2RejectSaysWhyACrawlerWasNotWaived(t *testing.T) {
 }
 
 // Only the grains the decision-time good-bot exemption softens (the geo floor,
-// the vhost challenge) are waivable, and only without a mark on top.
-func TestChallengeV2Waivable(t *testing.T) {
+// the vhost challenge) are waivable, and only without a mark on top; the bar
+// names which of the two stopped it.
+func TestChallengeV2WaiverBar(t *testing.T) {
 	resetChallengeV2Marks(t)
 	const ip, host = "66.249.81.200", "shop.example.com"
-	for grain, want := range map[string]bool{
-		v2GrainGeo: true, v2GrainVhost: true, v2GrainFP: false, v2GrainMark: false, "": false,
+	for grain, want := range map[string]string{
+		v2GrainGeo: "", v2GrainVhost: "", v2GrainFP: v2WaiverGrain, v2GrainMark: v2WaiverGrain, "": v2WaiverGrain,
 	} {
-		if got := challengeV2Waivable(grain, ip, host); got != want {
-			t.Errorf("challengeV2Waivable(%q) = %v, want %v", grain, got, want)
+		if got := challengeV2WaiverBar(grain, ip, host); got != want {
+			t.Errorf("challengeV2WaiverBar(%q) = %q, want %q", grain, got, want)
 		}
 	}
 	MarkChallengeV2(ip, host)
 	for _, grain := range []string{v2GrainGeo, v2GrainVhost} {
-		if challengeV2Waivable(grain, ip, host) {
-			t.Errorf("grain %q with a traffic-rule/WAF mark on top must stay strict", grain)
+		if got := challengeV2WaiverBar(grain, ip, host); got != v2WaiverMark {
+			t.Errorf("grain %q with a traffic-rule/WAF mark on top = %q, want mark", grain, got)
 		}
 	}
-	if !challengeV2Waivable(v2GrainVhost, ip, "other.example.com") {
-		t.Errorf("a mark on another host must not affect this one")
+	if got := challengeV2WaiverBar(v2GrainVhost, ip, "other.example.com"); got != "" {
+		t.Errorf("a mark on another host must not affect this one, got %q", got)
 	}
 }
 
@@ -416,7 +421,7 @@ func TestForwardConfirmsWith(t *testing.T) {
 	}
 }
 
-func TestRecordChallengeV2Reject_PersistsV2Waiver(t *testing.T) {
+func TestRecordChallengeV2Reject_PersistsV2WaiverMiss(t *testing.T) {
 	e := newSolveTestEngine(t)
 	e.RecordChallengeV2Reject(ChallengeSolve{
 		IP: "66.249.81.10", Host: "shop.example.com", URI: "/",
@@ -426,8 +431,8 @@ func TestRecordChallengeV2Reject_PersistsV2Waiver(t *testing.T) {
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("QueryEvents: %d rows, err=%v", len(rows), err)
 	}
-	if p := rows[0].Payload; p["v2"] != v2GrainVhost || p["v2_waiver"] != v2WaiverTimeout {
-		t.Fatalf("reject payload v2=%v v2_waiver=%v, want vhost/timeout", p["v2"], p["v2_waiver"])
+	if p := rows[0].Payload; p["v2"] != v2GrainVhost || p["v2_waiver_miss"] != v2WaiverTimeout {
+		t.Fatalf("reject payload v2=%v v2_waiver_miss=%v, want vhost/timeout", p["v2"], p["v2_waiver_miss"])
 	}
 }
 

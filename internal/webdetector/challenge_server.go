@@ -499,9 +499,9 @@ type ChallengeSolve struct {
 	// of rejecting (challengeV2GoodBot). Rendered as v2_waived=<name>.
 	V2Waived string
 	// V2WaiverMiss is why a REJECTED solve from a crawler-looking client (a
-	// PTR with a good-bot suffix) was not waived: grain / off / spoofed /
-	// timeout / transient (v2Waiver*); "" for everyone else, whose ptr=
-	// already explains itself. Rendered as v2_waiver=<reason>.
+	// PTR with a good-bot suffix) was not waived: grain / mark / off /
+	// spoofed / timeout / transient (v2Waiver*); "" for everyone else.
+	// Rendered as v2_waiver_miss=<reason>.
 	V2WaiverMiss string
 	// Country / CountryISO / ASN / ASNName / PTR are the solving client's
 	// network identity, resolved ONCE at verify (resolveGeo, challenge_geo.go)
@@ -882,7 +882,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			if v2Grain != "" {
 				// A verified good bot is waived, not rejected, under the
 				// grains whose challenge the decision path would have skipped
-				// for it (geo, vhost — challengeV2Waivable): the SAME FCrDNS
+				// for it (geo, vhost — challengeV2WaiverBar): the SAME FCrDNS
 				// verdict and CHALLENGE_GOODBOT_EXEMPT knob. It typically got
 				// here because no verdict existed when the challenge was served
 				// (e.g. Google-Read-Aloud's rotating, first-seen fetcher IPs,
@@ -890,8 +890,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// may forward-confirm inline — bounded, and only on this
 				// about-to-reject path. The solve then takes the normal
 				// solved path, marked v2_waived=<name>.
-				bot, miss := "", v2WaiverGrain
-				if challengeV2Waivable(v2Grain, solve.IP, solve.Host) {
+				bot, miss := "", challengeV2WaiverBar(v2Grain, solve.IP, solve.Host)
+				if miss == "" {
 					bot, miss = challengeV2GoodBot(r.Context(), solve.IP, solve.PTR)
 				}
 				if bot != "" {
@@ -899,25 +899,16 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 					// ms= must include the waiver's inline forward-confirm.
 					solve.VerifyMS = time.Since(verifyStart).Milliseconds()
 				} else {
-					// sig= rides this line too. The rejected solve is exactly
-					// the population the corpus exists to characterise, and it is
-					// deliberately not published/hooked as solved (it cleared
-					// nothing), so this line and the reject hook below are its
-					// only records — without sig= here every armed-and-rejected
-					// client would be missing from the very data used to tune the
-					// tells. cc/asn/asn_name/ptr ride at the END so no field a
-					// parser already reads moves; the hook writes the durable
-					// challenge_v2_reject history row, which is what makes the
-					// rung's false-positive rate queryable at all. A client
-					// whose PTR claims a crawler also gets v2_waiver=<why it
-					// was not waived>, last — or its reject would read the
-					// same as a spoof's.
+					// RejectLine carries sig= and the geo fields (see there);
+					// the hook writes the durable challenge_v2_reject history
+					// row, which is what makes the rung's false-positive rate
+					// queryable at all. A client whose PTR claims a crawler
+					// also gets v2_waiver_miss=<why it was not waived>, last —
+					// or its reject would read the same as a spoof's.
 					if looksLikeGoodBotPTR(solve.PTR) {
 						solve.V2WaiverMiss = miss
 					}
-					logging.LogfCHALLENGES(
-						"[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s%s",
-						solve.IP, solve.Host, solve.URI, hs, hsTells, solve.SignalSuffix(), v2Grain, solve.TLSFingerprintOrDash(), solve.UA, solve.GeoSuffix(), solve.WaiverMissSuffix())
+					logging.LogfCHALLENGES("%s", solve.RejectLine())
 					if challengeV2RejectHook != nil {
 						challengeV2RejectHook(solve)
 					}

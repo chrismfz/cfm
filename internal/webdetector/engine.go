@@ -891,6 +891,8 @@ func (e *Engine) RecordChallengeV2Reject(s ChallengeSolve) {
 //	hs_nopayload no parseable humanity body arrived (see the doc below)
 //	tells        which tells fired, comma-joined
 //	v2           the arm grain covering the solve, absent when unarmed
+//	v2_waived    (solved) the verified good bot a failing solve was waived for
+//	v2_waiver_miss (reject) why a crawler-looking client was not waived
 //	sig          the readings as reported, same numbers and rounding as
 //	             the solve line's sig= field
 //
@@ -939,7 +941,7 @@ func (s ChallengeSolve) historyPayload() map[string]interface{} {
 			payload["v2_waived"] = s.V2Waived
 		}
 		if s.V2WaiverMiss != "" {
-			payload["v2_waiver"] = s.V2WaiverMiss
+			payload["v2_waiver_miss"] = s.V2WaiverMiss
 		}
 		if sig := s.signalMap(); sig != nil {
 			payload["sig"] = sig
