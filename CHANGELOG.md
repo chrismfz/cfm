@@ -83,6 +83,34 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **Site Cache: a purge can no longer be undone by removing and re-adding a
+  vhost.** The purge generation (part of the cache key) restarted at 0 for a
+  re-added vhost, so objects cached under an earlier generation — static
+  entries live for days — could become HITs again. A new or purged generation
+  is now the wall clock in milliseconds, always past the previous one, so a
+  value is never reused. Existing stores keep their generations until the next
+  purge.
+- **Site Cache: `set` changes only what you pass.** `cfm webtop site-cache set
+  <vhost> --micro-ttl 30s` used to replace the whole policy with just those
+  flags: it disabled the static tier and cleared `strict_cookies` and the extra
+  auth cookies. `POST /api/v1/site-cache/set` is now a merge (fields left out
+  keep their stored values) and the CLI sends only the flags given. New CLI
+  forms: `--static off` / `--micro off` (disable a tier, keep its recipe),
+  `--no-strict-cookies`, `--no-auth-cookies`. `set` with no flags is an error.
+- **Site Cache: the most specific wildcard wins.** With `*.example.com` and
+  `*.shop.example.com` both armed, `x.shop.example.com` could get either policy
+  depending on feed order. The daemon and the edge now both put the longest
+  pattern first.
+- **Site Cache: an exact vhost turned off is really off under an armed
+  wildcard.** Disabling both tiers of `a.example.com` dropped it from the edge
+  feed, so an admin's `*.example.com` then cached it. It is now sent as an
+  opt-out row and caches nothing.
+- **Site Cache stats: a drill-down shows only the vhost's own counts.**
+  `stats <vhost>` could show a broader wildcard's counts, or an exact vhost's
+  wildcard's counts while the vhost had none yet. It now resolves to the key
+  the edge actually counts the vhost under. A policy with both tiers off no
+  longer lists its old counts as live.
+- **Site Cache: a `set` error response no longer includes an empty `entry`.**
 - **Site Cache: a fresh `.deb` install no longer makes every armed vhost
   return 500.** The daemon runs with `UMask=0077`, so when it created a missing
   `/var/cache/nginx` (the postinst starts the daemon before an edge installer
@@ -260,6 +288,17 @@ back-filled here — see the git/PR history for that period.
   changes where none is armed. Not changed: whether to serve the challenge at
   all is still decided from the edge's own copy of the database, which the
   edge reads until its workers are reloaded.
+
+### Security
+- **Site Cache: a tenant can no longer see another tenant's domain list or
+  wildcard cache counts.** A scoped (cPanel) token that created a policy
+  stored its WHOLE vhost allowlist as the entry's `scope_hosts`, which the
+  list/get API then showed to any other tenant whose scope held that host. It
+  is now exactly `[host]`, and existing entries are trimmed when the daemon
+  loads them. A scoped `stats ?host=` drill-down into the tenant's own
+  `a.example.com` could also return an admin `*.example.com` row, which
+  counts every sub-host under the pattern, other tenants' included. A scoped
+  caller now resolves only to policy keys inside its own scope.
 
 ## 2026.09.22
 

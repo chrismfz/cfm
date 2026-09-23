@@ -7,9 +7,10 @@
 // Subcommands:
 //   list                                     — show configured vhosts
 //   get     <vhost>                          — one vhost's policy (JSON)
-//   set     <vhost> [--static R] [--micro R] — upsert a policy
-//               [--static-ttl D] [--micro-ttl D] [--strict-cookies]
-//               [--auth-cookies a,b,c]
+//   set     <vhost> [--static R|off] [--micro R|off] — create/update a policy;
+//               [--static-ttl D] [--micro-ttl D]      changes ONLY the flags
+//               [--strict-cookies|--no-strict-cookies] given (merge)
+//               [--auth-cookies a,b,c|--no-auth-cookies]
 //   off     <vhost>                          — turn caching OFF (aliases: remove, rm, disable)
 //   purge   <vhost> | --all                  — bump generation (--all is admin-only)
 //
@@ -45,7 +46,7 @@ func runSiteCacheWebTop(baseURL string, args []string) error {
 		return runSiteCacheGet(baseURL, args[1])
 	case "set":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: cfm webtop site-cache set <vhost> [--static RECIPE] [--micro RECIPE] [--static-ttl D] [--micro-ttl D] [--strict-cookies] [--auth-cookies a,b,c]")
+			return fmt.Errorf("usage: cfm webtop site-cache set <vhost> [--static RECIPE|off] [--micro RECIPE|off] [--static-ttl D] [--micro-ttl D] [--strict-cookies|--no-strict-cookies] [--auth-cookies a,b,c|--no-auth-cookies]")
 		}
 		return runSiteCacheSet(baseURL, args[1], args[2:])
 	case "off", "remove", "rm", "disable":
@@ -81,13 +82,18 @@ Usage:
   cfm webtop site-cache purge --all                   invalidate ALL vhosts (admin only)
   cfm webtop site-cache stats [vhost]                 per-vhost HIT/MISS/hit-ratio
 
-set flags:
+set flags (set changes ONLY the flags you pass; the rest of the policy is kept):
   --static RECIPE        enable the static tier with RECIPE
+  --static off           disable the static tier (its recipe/TTL are kept)
   --micro  RECIPE        enable the micro tier with RECIPE
+  --micro off            disable the micro tier (its recipe/TTL are kept)
   --static-ttl D         static TTL bucket (e.g. 1h, 7d, 30d)
   --micro-ttl  D         micro TTL bucket (e.g. 1s, 5s, 30s)
   --strict-cookies       bypass on ANY non-CFM cookie (max safety, less cache)
+  --no-strict-cookies    back to the named auth-cookie allowlist (the default)
   --auth-cookies a,b,c   extra app-session cookie names that force a bypass
+                         (replaces the stored list)
+  --no-auth-cookies      clear the extra auth-cookie list
 
 Scope: admin tokens manage any host; scoped (cPanel) tokens manage only their
 own vhosts. purge --all is admin only.`)
@@ -190,76 +196,11 @@ func runSiteCacheGet(baseURL, host string) error {
 }
 
 func runSiteCacheSet(baseURL, host string, flags []string) error {
-	entry := SiteCacheEntry{Host: host}
-	for i := 0; i < len(flags); i++ {
-		a := flags[i]
-		next := ""
-		if i+1 < len(flags) {
-			next = flags[i+1]
-		}
-		takeVal := func() (string, error) {
-			if next == "" || strings.HasPrefix(next, "--") {
-				return "", fmt.Errorf("missing value for %s", a)
-			}
-			i++
-			return next, nil
-		}
-		switch {
-		case a == "--static":
-			v, err := takeVal()
-			if err != nil {
-				return err
-			}
-			entry.Static.Enabled = true
-			entry.Static.Recipe = v
-		case strings.HasPrefix(a, "--static="):
-			entry.Static.Enabled = true
-			entry.Static.Recipe = strings.TrimPrefix(a, "--static=")
-		case a == "--micro":
-			v, err := takeVal()
-			if err != nil {
-				return err
-			}
-			entry.Micro.Enabled = true
-			entry.Micro.Recipe = v
-		case strings.HasPrefix(a, "--micro="):
-			entry.Micro.Enabled = true
-			entry.Micro.Recipe = strings.TrimPrefix(a, "--micro=")
-		case a == "--static-ttl":
-			v, err := takeVal()
-			if err != nil {
-				return err
-			}
-			entry.Static.TTL = v
-		case strings.HasPrefix(a, "--static-ttl="):
-			entry.Static.TTL = strings.TrimPrefix(a, "--static-ttl=")
-		case a == "--micro-ttl":
-			v, err := takeVal()
-			if err != nil {
-				return err
-			}
-			entry.Micro.TTL = v
-		case strings.HasPrefix(a, "--micro-ttl="):
-			entry.Micro.TTL = strings.TrimPrefix(a, "--micro-ttl=")
-		case a == "--strict-cookies":
-			entry.StrictCookies = true
-		case a == "--auth-cookies":
-			v, err := takeVal()
-			if err != nil {
-				return err
-			}
-			entry.AuthCookies = splitCSVCLI(v)
-		case strings.HasPrefix(a, "--auth-cookies="):
-			entry.AuthCookies = splitCSVCLI(strings.TrimPrefix(a, "--auth-cookies="))
-		default:
-			return fmt.Errorf("unknown flag %q (see: cfm webtop site-cache help)", a)
-		}
+	patch, err := parseSiteCacheSetFlags(host, flags)
+	if err != nil {
+		return err
 	}
-	if !entry.Static.Enabled && !entry.Micro.Enabled {
-		return fmt.Errorf("nothing to enable: pass --static RECIPE and/or --micro RECIPE (or use 'off' to disable)")
-	}
-
-	b, _ := json.Marshal(entry)
+	b, _ := json.Marshal(patch)
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/site-cache/set"
 	resp, err := clihttp.Post(u, "application/json", bytes.NewReader(b))
 	if err != nil {
@@ -277,10 +218,105 @@ func runSiteCacheSet(baseURL, host string, flags []string) error {
 	if result.Error != "" {
 		return fmt.Errorf("site-cache set error: %s", result.Error)
 	}
+	if result.Entry == nil {
+		return fmt.Errorf("site-cache set: server returned no entry")
+	}
 	fmt.Printf("✓ cache policy set for %s (static=%s micro=%s)\n",
 		result.Entry.Host, siteCacheTierCLI(result.Entry.Static), siteCacheTierCLI(result.Entry.Micro))
 	return nil
 }
+
+// parseSiteCacheSetFlags turns `set` flags into a merge patch: only the flags
+// given are sent, so the server keeps every other stored field (the set used
+// to send a whole policy built from the flags alone, which reset the omitted
+// tier and the cookie settings on every retune).
+func parseSiteCacheSetFlags(host string, flags []string) (SiteCachePatch, error) {
+	p := SiteCachePatch{Host: host}
+	tier := func(t **SiteCacheTierPatch) *SiteCacheTierPatch {
+		if *t == nil {
+			*t = &SiteCacheTierPatch{}
+		}
+		return *t
+	}
+	setRecipe := func(t **SiteCacheTierPatch, v string) {
+		tp := tier(t)
+		if strings.EqualFold(strings.TrimSpace(v), "off") {
+			tp.Enabled = boolPtrCLI(false)
+			return
+		}
+		tp.Enabled = boolPtrCLI(true)
+		tp.Recipe = &v
+	}
+	for i := 0; i < len(flags); i++ {
+		a := flags[i]
+		name, val, hasEq := strings.Cut(a, "=")
+		takeVal := func() (string, error) {
+			if hasEq {
+				return val, nil
+			}
+			if i+1 >= len(flags) || flags[i+1] == "" || strings.HasPrefix(flags[i+1], "--") {
+				return "", fmt.Errorf("missing value for %s", a)
+			}
+			i++
+			return flags[i], nil
+		}
+		noValue := func() error {
+			if hasEq {
+				return fmt.Errorf("%s takes no value", name)
+			}
+			return nil
+		}
+		switch name {
+		case "--static", "--micro", "--static-ttl", "--micro-ttl":
+			v, err := takeVal()
+			if err != nil {
+				return SiteCachePatch{}, err
+			}
+			if strings.TrimSpace(v) == "" {
+				return SiteCachePatch{}, fmt.Errorf("empty value for %s", name)
+			}
+			switch name {
+			case "--static":
+				setRecipe(&p.Static, v)
+			case "--micro":
+				setRecipe(&p.Micro, v)
+			case "--static-ttl":
+				tier(&p.Static).TTL = &v
+			case "--micro-ttl":
+				tier(&p.Micro).TTL = &v
+			}
+		case "--strict-cookies", "--no-strict-cookies":
+			if err := noValue(); err != nil {
+				return SiteCachePatch{}, err
+			}
+			p.StrictCookies = boolPtrCLI(name == "--strict-cookies")
+		case "--auth-cookies":
+			v, err := takeVal()
+			if err != nil {
+				return SiteCachePatch{}, err
+			}
+			list := splitCSVCLI(v)
+			if len(list) == 0 {
+				return SiteCachePatch{}, fmt.Errorf("empty --auth-cookies (use --no-auth-cookies to clear the list)")
+			}
+			p.AuthCookies = &list
+		case "--no-auth-cookies":
+			if err := noValue(); err != nil {
+				return SiteCachePatch{}, err
+			}
+			empty := []string{}
+			p.AuthCookies = &empty
+		default:
+			return SiteCachePatch{}, fmt.Errorf("unknown flag %q (see: cfm webtop site-cache help)", a)
+		}
+	}
+	if p.Static == nil && p.Micro == nil && p.StrictCookies == nil && p.AuthCookies == nil {
+		return SiteCachePatch{}, fmt.Errorf("nothing to change: pass --static RECIPE and/or --micro RECIPE (or another set flag; 'off' removes the whole policy)")
+	}
+	return p, nil
+}
+
+func boolPtrCLI(b bool) *bool { return &b }
 
 func runSiteCacheRemove(baseURL, host string) error {
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/site-cache/remove?host=" + url.QueryEscape(host)

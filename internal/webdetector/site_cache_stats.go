@@ -147,10 +147,14 @@ func siteCacheStatsRow(host string, c map[string]int) SiteCacheStatsRow {
 }
 
 // armedCacheKeys is the set of currently-armed policy keys (exact hosts +
-// "*.suffix" patterns) — the same keys the edge stats are keyed under. The
-// stats read paths filter on it because the edge dict retains a vhost's counts
-// after it is unarmed (no TTL until an edge reload), so the armed policy store
-// is the source of truth for what is still live.
+// "*.suffix" patterns with at least one ENABLED tier) — the same keys the edge
+// stats are keyed under. The stats read paths filter on it because the edge
+// dict retains a vhost's counts after it is unarmed (no TTL until an edge
+// reload), so the policy store is the source of truth for what is still live.
+// A stored but all-off policy is NOT armed: it used to count, so a staged or
+// disabled vhost kept showing its old counts as live — and an all-off exact
+// host under an armed wildcard (an opt-out) would shadow the wildcard in a
+// drill-down.
 func (e *Engine) armedCacheKeys() map[string]struct{} {
 	if e == nil || e.siteCache == nil {
 		return nil
@@ -158,56 +162,42 @@ func (e *Engine) armedCacheKeys() map[string]struct{} {
 	list := e.siteCache.List()
 	out := make(map[string]struct{}, len(list))
 	for _, ent := range list {
+		if !ent.Static.Enabled && !ent.Micro.Enabled {
+			continue
+		}
 		out[strings.ToLower(ent.Host)] = struct{}{}
 	}
 	return out
 }
 
-// candidateArmedCacheKeys returns the armed policy keys covering host, in a
-// DETERMINISTIC precedence: the exact host first, then matching "*.suffix"
-// patterns most-specific (longest) first. Overlapping wildcards (e.g.
-// *.example.com and *.cdn.example.com) are rare, but the edge keys stats under
-// exactly one of them — iterating a Go map at random could resolve a drill-down
-// to a different, empty pattern between requests, so the order is fixed and the
-// caller walks it until it finds the pattern that actually holds counts.
-func candidateArmedCacheKeys(host string, armed map[string]struct{}) []string {
-	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "" {
-		return nil
-	}
-	out := make([]string, 0, 4)
-	if _, ok := armed[host]; ok {
-		out = append(out, host)
-	}
-	wilds := make([]string, 0, 4)
-	for k := range armed {
-		if strings.HasPrefix(k, "*.") && strings.HasSuffix(host, k[1:]) {
-			wilds = append(wilds, k)
-		}
-	}
-	sort.Slice(wilds, func(i, j int) bool {
-		if len(wilds[i]) != len(wilds[j]) {
-			return len(wilds[i]) > len(wilds[j]) // most specific (longest) first
-		}
-		return wilds[i] < wilds[j] // stable tiebreak
-	})
-	return append(out, wilds...)
-}
-
 // SiteCacheStatsHost returns one vhost's cache stats row. `host` may be a
-// concrete sub-host of a wildcard-armed vhost — it resolves to the armed policy
-// key the edge keyed stats under. ok=false if nothing armed covers it, or it is
-// armed but the edge has not reported counts yet.
-func (e *Engine) SiteCacheStatsHost(host string) (SiteCacheStatsRow, bool) {
-	if e == nil || e.siteCacheStats == nil {
+// concrete sub-host of a wildcard-armed vhost — it resolves to the policy key
+// the edge counts it under (siteCacheStore.StatsKeyFor, the Go mirror of
+// policy_key_for: its exact policy, else the most specific armed wildcard).
+// ok=false if the edge counts nothing for it (unarmed, an opt-out, out of the
+// caller's scope) or has not reported counts yet. It used to walk every
+// covering key until one held counts, which could hand back a broader
+// wildcard's — or, for an exact host with no counts yet, its wildcard's —
+// numbers as this host's.
+//
+// scope is the caller's vhost allowlist (nil = admin/loopback): a scoped
+// caller resolves only to a policy key inside it. A "*.suffix" key aggregates
+// EVERY sub-host under the pattern — other tenants' vhosts included — so a
+// tenant asking about its own a.example.com must not be handed the counts of
+// an admin's *.example.com (it used to be).
+func (e *Engine) SiteCacheStatsHost(host string, scope map[string]struct{}) (SiteCacheStatsRow, bool) {
+	if e == nil || e.siteCacheStats == nil || e.siteCache == nil {
 		return SiteCacheStatsRow{}, false
 	}
-	for _, key := range candidateArmedCacheKeys(host, e.armedCacheKeys()) {
-		if c := e.siteCacheStats.Get(key); c != nil {
-			return siteCacheStatsRow(key, c), true
-		}
+	key, ok := e.siteCache.StatsKeyFor(host)
+	if !ok || !vhostAllowed(key, scope) {
+		return SiteCacheStatsRow{}, false
 	}
-	return SiteCacheStatsRow{}, false
+	c := e.siteCacheStats.Get(key)
+	if c == nil {
+		return SiteCacheStatsRow{}, false
+	}
+	return siteCacheStatsRow(key, c), true
 }
 
 // SiteCacheStatsAll returns the stats row for every CURRENTLY-ARMED vhost the
@@ -232,14 +222,17 @@ func (e *Engine) SiteCacheStatsAll() []SiteCacheStatsRow {
 }
 
 type siteCacheStatsResponse struct {
-	Rows []SiteCacheStatsRow `json:"rows"`
+	Rows  []SiteCacheStatsRow `json:"rows"`
+	Error string              `json:"error,omitempty"`
 }
 
 // GET /api/v1/site-cache/stats[?host=<host>]
 //
 // Scope model identical to the other site-cache handlers: admin/loopback sees
 // all; a scoped (cPanel) token sees only its own vhosts (a ?host= outside the
-// allowlist is 403, and the unfiltered list is filtered to the caller's hosts).
+// allowlist is 403, a ?host= drill-down resolves only to in-scope policy keys —
+// never an admin's wildcard — and the unfiltered list is filtered to the
+// caller's hosts).
 func (e *Engine) handleSiteCacheStats(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		writeJSON(w, http.StatusOK, siteCacheStatsResponse{Rows: nil})
@@ -250,10 +243,10 @@ func (e *Engine) handleSiteCacheStats(w http.ResponseWriter, r *http.Request) {
 	}
 	if host := strings.TrimSpace(r.URL.Query().Get("host")); host != "" {
 		if !scopeAllowsVhosts(r, []string{host}) {
-			writeJSON(w, http.StatusForbidden, siteCacheStatsResponse{})
+			writeJSON(w, http.StatusForbidden, siteCacheStatsResponse{Error: "host not in scope"})
 			return
 		}
-		row, ok := e.SiteCacheStatsHost(host)
+		row, ok := e.SiteCacheStatsHost(host, vhostScopeFromContext(r.Context()))
 		if !ok {
 			writeJSON(w, http.StatusOK, siteCacheStatsResponse{Rows: nil})
 			return

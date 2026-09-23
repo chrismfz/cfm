@@ -460,8 +460,8 @@ and micro together:
 ```jsonc
 {
   "host": "myip.gr",
-  "scope_hosts": ["myip.gr"],          // audit + scoped-token gating; caller's own scope
-  "generation": 3,                       // bumped by Purge (§10); part of the cache key
+  "scope_hosts": ["myip.gr"],          // audit only: [host] if a scoped token created it, absent if an admin did
+  "generation": 1758585600123,           // wall-clock ms, replaced by Purge (§10); part of the cache key
   "static": { "enabled": true,  "recipe": "static_aggressive", "ttl": "7d" },
   "micro":  { "enabled": false, "recipe": "micro_safe",        "ttl": "1s" },
   "strict_cookies": false,               // §4.1 advanced: bypass on ANY non-ignored cookie
@@ -472,8 +472,32 @@ and micro together:
 
 `generation` is folded into the cache key (as built:
 `"g<gen>|$server_addr|$scheme|$cf_xfp://$host$request_uri"` via a Lua-set `$cfm_cache_gen`), so a Purge
-is a counter bump — old keys become unreachable and age out under `inactive`,
-with no filesystem walking.
+is a generation change — old keys become unreachable and age out under
+`inactive`, with no filesystem walking. It must **never repeat** for a host: a
+remove + re-add that reused an old value (it used to restart at 0) would turn
+that value's still-on-disk objects back into HITs, undoing an earlier purge. So
+a new or purged generation is the **wall clock in milliseconds**, bumped past
+the value it replaces and past the last one the daemon issued for the host
+(`nextGenerationLocked`). Milliseconds because the edge renders it with Lua
+`tostring` (`%.14g`), exact only below 1e14. Neither it nor `created_at` is
+client-settable.
+
+`scope_hosts` records only WHO first enabled caching: exactly `[host]` when a
+scoped token created the policy, absent when an admin did, preserved across
+later edits. It used to hold the creating token's whole vhost allowlist, which
+showed a tenant's full domain list to any other tenant whose scope held that
+host; legacy entries are trimmed to `[host]` on load. Access is gated by the
+live token scope at the API, never by this field.
+
+**Feed (`/nginx/cache/config`) and wildcards.** The edge feed carries every
+vhost with an armed tier, ordered exact hosts first, then `*.suffix` wildcards
+MOST SPECIFIC (longest) first — `cfm_cache.lua` sorts the same way and takes the
+first matching wildcard, so with `*.example.com` and `*.shop.example.com` both
+armed, `x.shop.example.com` gets the narrower policy. An all-off EXACT host
+that an armed wildcard covers is sent as an **opt-out row** (no tier): the
+edge's exact match wins, so that host caches nothing — a tenant can opt its own
+vhost out of an admin wildcard. (An all-off wildcard is only a staged config;
+it opts nothing out.)
 
 ---
 
@@ -485,7 +509,7 @@ with no filesystem walking.
 |---|---|---|
 | GET  | `/api/v1/site-cache/list` | scope-filtered; supports `?host=` and sort params |
 | GET  | `/api/v1/site-cache/get?host=` | one vhost |
-| POST | `/api/v1/site-cache/set` | `requirePOST`; upsert (host in body); scoped→own host only. One entry per vhost, so a single upsert replaces the add/update pair — the host is the immutable key, `set` stamps `scope_hosts` from the token |
+| POST | `/api/v1/site-cache/set` | `requirePOST`; **merge**-upsert (host in body); scoped→own host only. One entry per vhost, so a single upsert replaces the add/update pair — the host is the immutable key. Only the fields present change (`{"host":"x","micro":{"ttl":"30s"}}` retunes one TTL and keeps the static tier and cookie settings; `enabled:false`, `strict_cookies:false` and an empty `auth_cookies` list are applied, JSON `null` keeps); a new host starts all-off. `scope_hosts` comes from the token (§6) |
 | POST | `/api/v1/site-cache/remove` | i.e. OFF for a vhost |
 | POST | `/api/v1/site-cache/purge` | `?host=` (per-vhost) or `?all=1` (global, admin) |
 | GET  | `/api/v1/site-cache/stats?host=` | per-vhost cache stats (§11), scope-filtered (own vhosts / all) |
@@ -504,7 +528,9 @@ over the JSON API (through `internal/clihttp`, per the transport guardrail):
 ```
 cfm webtop site-cache list [--host H] [--sort host|updated]
 cfm webtop site-cache get <host>
-cfm webtop site-cache set <host> [--static RECIPE] [--micro RECIPE] [--static-ttl D] [--micro-ttl D] [--strict-cookies]
+cfm webtop site-cache set <host> [--static RECIPE|off] [--micro RECIPE|off] [--static-ttl D] [--micro-ttl D]
+                                  [--strict-cookies|--no-strict-cookies] [--auth-cookies a,b|--no-auth-cookies]
+                                  # sends ONLY the flags given (merge)
 cfm webtop site-cache off <host>          # remove / disable
 cfm webtop site-cache purge <host>        # or: purge --all
 cfm webtop site-cache stats [host]        # hit-ratio + HIT/MISS/BYPASS breakdown
@@ -607,7 +633,8 @@ set/remove/purge = scoped-allowed (own host); purge-all = admin-only.
 - **Micro-cache is self-healing** (1–30s TTL) — rarely needs an explicit purge.
 - **Static (long TTL) needs purge.** Mechanism: **generation bump.** Each
   vhost entry carries `generation`; the cache key includes it
-  (`g<gen>|<server IP>|<listener scheme>|<scheme told to origin>://<host><uri>`). Purge = `generation++` in the store →
+  (`g<gen>|<server IP>|<listener scheme>|<scheme told to origin>://<host><uri>`). Purge = a new, never-used
+  generation in the store (wall-clock ms, §6) →
   new key space → old entries age out under `inactive`. No filesystem walking,
   no `proxy_cache_purge` (commercial) dependency, works on both OpenResty and
   Angie. (A future per-URL purge has to cover every key variant the URL can
@@ -847,8 +874,13 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      to the CURRENTLY-armed policy set** (`armedCacheKeys`): the edge dict keeps a
      vhost's counts until an edge reload, so a vhost unarmed after its last push
      would otherwise linger as a stale "still cached" row — the armed store is
-     truth. A by-host query resolves a concrete sub-host to its wildcard policy
-     key (`resolveArmedCacheKey`) so a `*.suffix`-armed vhost is drillable.
+     truth (a stored but all-off policy is not armed). A by-host query resolves
+     a concrete sub-host to the key the edge counts it under
+     (`siteCacheStore.StatsKeyFor`, the Go mirror of `policy_key_for`: its exact
+     policy — an all-off one counts nothing, it is an opt-out — else the most
+     specific armed wildcard) so a `*.suffix`-armed vhost is drillable; a scoped
+     caller resolves only to keys inside its own scope, never an admin's
+     wildcard (that row aggregates every tenant under the pattern).
      Read via `GET /api/v1/site-cache/stats[?host=]` (scope-filtered like the
      other site-cache endpoints), `cfm webtop site-cache stats [host]`, and two
      MCP tools — `site_cache_status` (armed vhosts + tiers) and

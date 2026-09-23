@@ -4,7 +4,10 @@ package webdetector
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,8 +37,8 @@ func TestSiteCacheStore_SetGetListRemove(t *testing.T) {
 	if got.Host != "myip.gr" {
 		t.Fatalf("host not normalized: %q", got.Host)
 	}
-	if got.Generation != 0 {
-		t.Fatalf("fresh generation should be 0, got %d", got.Generation)
+	if got.Generation <= 0 {
+		t.Fatalf("a new policy must get a (wall-clock) generation, got %d", got.Generation)
 	}
 	if got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
 		t.Fatal("timestamps not stamped")
@@ -85,18 +88,18 @@ func TestSiteCacheStore_SetPreservesGenerationAndCreatedAt(t *testing.T) {
 	s := newSiteCacheTestStore(t)
 	first, _ := s.Set(SiteCacheEntry{Host: "a.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})
 
-	// Purge bumps generation…
+	// Purge replaces the generation with a new, larger one…
 	purged, ok := s.Purge("a.com")
-	if !ok || purged.Generation != 1 {
-		t.Fatalf("purge: ok=%v gen=%d", ok, purged.Generation)
+	if !ok || purged.Generation <= first.Generation {
+		t.Fatalf("purge: ok=%v gen=%d (was %d)", ok, purged.Generation, first.Generation)
 	}
-	// …and a later config change must NOT reset it.
+	// …and a later config change must NOT touch it.
 	upd, err := s.Set(SiteCacheEntry{Host: "a.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_aggressive"}})
 	if err != nil {
 		t.Fatalf("Set update: %v", err)
 	}
-	if upd.Generation != 1 {
-		t.Fatalf("config change reset generation to %d (want 1)", upd.Generation)
+	if upd.Generation != purged.Generation {
+		t.Fatalf("config change changed generation to %d (want %d)", upd.Generation, purged.Generation)
 	}
 	if !upd.CreatedAt.Equal(first.CreatedAt) {
 		t.Fatalf("config change changed CreatedAt")
@@ -107,17 +110,18 @@ func TestSiteCacheStore_GenerationAndCreatedAtNotClientSettable(t *testing.T) {
 	s := newSiteCacheTestStore(t)
 	backdated := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 	before := time.Now().UTC().Add(-time.Second)
+	const seeded = 9_000_000_000_000 // far past the wall clock in ms
 	got, err := s.Set(SiteCacheEntry{
 		Host:       "a.com",
-		Generation: 2_000_000_000, // a caller must not be able to seed the cache-key generation
-		CreatedAt:  backdated,      // …nor forge the audit creation time
+		Generation: seeded,    // a caller must not be able to seed the cache-key generation
+		CreatedAt:  backdated, // …nor forge the audit creation time
 		Micro:      SiteCacheTier{Enabled: true, Recipe: "micro_safe"},
 	})
 	if err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	if got.Generation != 0 {
-		t.Fatalf("client-seeded generation honored: got %d, want 0", got.Generation)
+	if got.Generation == seeded || got.Generation < int(before.UnixMilli()) || got.Generation > int(time.Now().UnixMilli()) {
+		t.Fatalf("generation %d is not the server's wall clock (client seeded %d)", got.Generation, seeded)
 	}
 	if got.CreatedAt.Before(before) {
 		t.Fatalf("client-backdated CreatedAt honored: got %v", got.CreatedAt)
@@ -153,13 +157,18 @@ func TestSiteCacheStore_PurgeAll(t *testing.T) {
 	_, _ = s.Set(SiteCacheEntry{Host: "a.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})
 	_, _ = s.Set(SiteCacheEntry{Host: "b.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
 
+	before := map[string]int{}
+	for _, h := range []string{"a.com", "b.com"} {
+		e, _ := s.Get(h)
+		before[h] = e.Generation
+	}
 	if n := s.PurgeAll(); n != 2 {
 		t.Fatalf("PurgeAll returned %d, want 2", n)
 	}
 	for _, h := range []string{"a.com", "b.com"} {
 		e, _ := s.Get(h)
-		if e.Generation != 1 {
-			t.Fatalf("%s generation=%d, want 1", h, e.Generation)
+		if e.Generation <= before[h] {
+			t.Fatalf("%s generation=%d, want > %d", h, e.Generation, before[h])
 		}
 	}
 	// PurgeAll on an empty store is a no-op (0), never an error.
@@ -228,6 +237,267 @@ func TestSiteCacheStore_PolicyFeed(t *testing.T) {
 	}
 }
 
+// A generation must never repeat for a host: a remove + re-add (or a purge)
+// that reused an old value would turn that value's still-on-disk objects back
+// into HITs, undoing the purge. Exercised inside one millisecond on purpose.
+func TestSiteCacheStore_GenerationNeverReused(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	seen := map[int]bool{}
+	note := func(g int, what string) {
+		t.Helper()
+		if seen[g] {
+			t.Fatalf("%s reused generation %d", what, g)
+		}
+		seen[g] = true
+	}
+	micro := SiteCacheTier{Enabled: true, Recipe: "micro_safe"}
+	for i := 0; i < 50; i++ {
+		e, err := s.Set(SiteCacheEntry{Host: "a.com", Micro: micro})
+		if err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		note(e.Generation, "re-add")
+		p, ok := s.Purge("a.com")
+		if !ok {
+			t.Fatal("Purge failed")
+		}
+		note(p.Generation, "purge")
+		if !s.Remove("a.com") {
+			t.Fatal("Remove failed")
+		}
+	}
+}
+
+// Across a restart the in-memory high-water mark is rebuilt from disk, and a
+// stored generation AHEAD of the clock (a skewed clock, or a store written by a
+// host whose clock ran fast) is still never re-issued.
+func TestSiteCacheStore_GenerationPastStoredValueAfterReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "site_cache.json")
+	future := int(time.Now().Add(24 * time.Hour).UnixMilli())
+	raw := `[{"host":"a.com","generation":` + strconv.Itoa(future) + `,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newSiteCacheStore(path)
+	p, ok := s.Purge("a.com")
+	if !ok || p.Generation <= future {
+		t.Fatalf("purge after reload: ok=%v gen=%d, want > %d", ok, p.Generation, future)
+	}
+	if !s.Remove("a.com") {
+		t.Fatal("Remove failed")
+	}
+	e, err := s.Set(SiteCacheEntry{Host: "a.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Generation <= p.Generation {
+		t.Fatalf("re-add after remove got gen %d, want > %d", e.Generation, p.Generation)
+	}
+}
+
+// scope_hosts is exactly [Host] for a scoped creator — never the creating
+// token's whole allowlist (which leaked a tenant's domain list) — including a
+// legacy entry loaded from disk.
+func TestSiteCacheStore_ScopeHostsTrimmedToHost(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	got, err := s.Set(SiteCacheEntry{
+		Host:       "alice.com",
+		ScopeHosts: []string{"bob.com", "alice.com", "carol.com"},
+		Micro:      SiteCacheTier{Enabled: true, Recipe: "micro_safe"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ScopeHosts) != 1 || got.ScopeHosts[0] != "alice.com" {
+		t.Fatalf("scope_hosts = %v, want [alice.com]", got.ScopeHosts)
+	}
+
+	path := filepath.Join(t.TempDir(), "site_cache.json")
+	raw := `[{"host":"alice.com","scope_hosts":["alice.com","bob.com","carol.com"],"generation":7,"static":{"enabled":false},"micro":{"enabled":true,"recipe":"micro_safe"}}]`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, ok := newSiteCacheStore(path).Get("alice.com")
+	if !ok || len(e.ScopeHosts) != 1 || e.ScopeHosts[0] != "alice.com" {
+		t.Fatalf("legacy scope_hosts not trimmed on load: ok=%v %v", ok, e.ScopeHosts)
+	}
+	if e.Generation != 7 {
+		t.Fatalf("load changed the stored generation: %d", e.Generation)
+	}
+}
+
+func strPtr(v string) *string { return &v }
+func boolPtr(v bool) *bool    { return &v }
+
+// set is a MERGE: a field the patch does not carry keeps its stored value, so
+// retuning one knob cannot reset the cookie safety settings or the other tier.
+func TestSiteCacheStore_ApplyMerges(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	cookies := []string{"my_session"}
+	created, err := s.Apply(SiteCachePatch{
+		Host:          "a.com",
+		Static:        &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("static_lean"), TTL: strPtr("7d")},
+		Micro:         &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("micro_safe"), TTL: strPtr("1s")},
+		StrictCookies: boolPtr(true),
+		AuthCookies:   &cookies,
+	}, false)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Retune only the micro TTL.
+	got, err := s.Apply(SiteCachePatch{Host: "a.com", Micro: &SiteCacheTierPatch{TTL: strPtr("30s")}}, false)
+	if err != nil {
+		t.Fatalf("retune: %v", err)
+	}
+	if got.Micro != (SiteCacheTier{Enabled: true, Recipe: "micro_safe", TTL: "30s"}) {
+		t.Fatalf("micro tier = %+v, want micro_safe/30s still enabled", got.Micro)
+	}
+	if got.Static != (SiteCacheTier{Enabled: true, Recipe: "static_lean", TTL: "7d"}) {
+		t.Fatalf("static tier was reset by a micro retune: %+v", got.Static)
+	}
+	if !got.StrictCookies || len(got.AuthCookies) != 1 || got.AuthCookies[0] != "my_session" {
+		t.Fatalf("cookie settings were reset by a TTL retune: strict=%v auth=%v", got.StrictCookies, got.AuthCookies)
+	}
+	if got.Generation != created.Generation || !got.CreatedAt.Equal(created.CreatedAt) {
+		t.Fatal("a merge changed the generation or CreatedAt")
+	}
+
+	// Explicit values ARE applied: disable a tier (recipe kept), strict off,
+	// an empty auth-cookie list clears it.
+	empty := []string{}
+	got, err = s.Apply(SiteCachePatch{
+		Host:          "a.com",
+		Static:        &SiteCacheTierPatch{Enabled: boolPtr(false)},
+		StrictCookies: boolPtr(false),
+		AuthCookies:   &empty,
+	}, false)
+	if err != nil {
+		t.Fatalf("explicit values: %v", err)
+	}
+	if got.Static.Enabled || got.Static.Recipe != "static_lean" || !got.Micro.Enabled {
+		t.Fatalf("tier toggle: static=%+v micro=%+v", got.Static, got.Micro)
+	}
+	if got.StrictCookies || got.AuthCookies != nil {
+		t.Fatalf("explicit false / empty list not applied: strict=%v auth=%v", got.StrictCookies, got.AuthCookies)
+	}
+
+	// An invalid patch is rejected whole: nothing stored changes.
+	if _, err := s.Apply(SiteCachePatch{Host: "a.com", Micro: &SiteCacheTierPatch{Recipe: strPtr("nope")}}, false); err == nil {
+		t.Fatal("unknown recipe accepted")
+	}
+	if e, _ := s.Get("a.com"); e.Micro.Recipe != "micro_safe" || e.Micro.TTL != "30s" {
+		t.Fatalf("a rejected patch changed the stored policy: %+v", e.Micro)
+	}
+	// A new host enabled without a recipe is rejected and NOT created.
+	if _, err := s.Apply(SiteCachePatch{Host: "b.com", Micro: &SiteCacheTierPatch{Enabled: boolPtr(true)}}, false); err == nil {
+		t.Fatal("enabled tier without a recipe accepted")
+	}
+	if _, ok := s.Get("b.com"); ok {
+		t.Fatal("a rejected patch created an entry")
+	}
+}
+
+func TestSiteCacheStore_ApplyScopeAttribution(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("micro_safe")}
+	got, err := s.Apply(SiteCachePatch{Host: "Alice.com", Micro: on}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.ScopeHosts) != 1 || got.ScopeHosts[0] != "alice.com" {
+		t.Fatalf("scoped create: scope_hosts=%v, want [alice.com]", got.ScopeHosts)
+	}
+	// An admin edit keeps the tenant attribution…
+	got, _ = s.Apply(SiteCachePatch{Host: "alice.com", Micro: &SiteCacheTierPatch{TTL: strPtr("5s")}}, false)
+	if len(got.ScopeHosts) != 1 {
+		t.Fatalf("admin edit erased the attribution: %v", got.ScopeHosts)
+	}
+	// …and an admin create records none.
+	got, _ = s.Apply(SiteCachePatch{Host: "admin.com", Micro: on}, false)
+	if got.ScopeHosts != nil {
+		t.Fatalf("admin create: scope_hosts=%v, want none", got.ScopeHosts)
+	}
+}
+
+// The feed: armed vhosts, plus an opt-out row (no tier) for an all-off EXACT
+// host that an armed wildcard covers — the edge's exact match wins, so a tenant
+// can opt its vhost out of an admin wildcard. Order: exact hosts, then
+// wildcards most specific first (the edge takes the first matching wildcard).
+func TestSiteCacheStore_PolicyFeedOptOutAndOrder(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := SiteCacheTier{Enabled: true, Recipe: "static_lean"}
+	off := SiteCacheTier{Enabled: false, Recipe: "static_lean"}
+	for _, e := range []SiteCacheEntry{
+		{Host: "b.com", Static: on},
+		{Host: "*.example.com", Static: on},
+		{Host: "a.com", Static: on},
+		{Host: "*.shop.example.com", Static: on},
+		{Host: "tenant.example.com", Static: off}, // covered → opt-out row
+		{Host: "example.com", Static: off},        // bare suffix, NOT covered → absent
+		{Host: "off.com", Static: off},            // not covered → absent
+		{Host: "*.staged.com", Static: off},       // all-off wildcard → absent
+		{Host: "x.staged.com", Static: off},       // under an UNARMED wildcard → absent
+	} {
+		if _, err := s.Set(e); err != nil {
+			t.Fatalf("Set %s: %v", e.Host, err)
+		}
+	}
+	feed := s.PolicyFeed()
+	var hosts []string
+	for _, r := range feed {
+		hosts = append(hosts, r.Host)
+	}
+	want := []string{"a.com", "b.com", "tenant.example.com", "*.shop.example.com", "*.example.com"}
+	if strings.Join(hosts, " ") != strings.Join(want, " ") {
+		t.Fatalf("feed order = %v, want %v", hosts, want)
+	}
+	opt := feed[2]
+	if opt.Static != nil || opt.Micro != nil || opt.Generation <= 0 {
+		t.Fatalf("opt-out row must carry no tier (and its generation): %+v", opt)
+	}
+	b, _ := json.Marshal(opt)
+	if strings.Contains(string(b), `"static"`) || strings.Contains(string(b), `"micro"`) {
+		t.Fatalf("opt-out row leaks a tier on the wire: %s", b)
+	}
+}
+
+// StatsKeyFor must pick the key the edge counts under (policy_key_for).
+func TestSiteCacheStore_StatsKeyFor(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := SiteCacheTier{Enabled: true, Recipe: "static_lean"}
+	off := SiteCacheTier{Enabled: false, Recipe: "static_lean"}
+	for _, e := range []SiteCacheEntry{
+		{Host: "*.example.com", Static: on},
+		{Host: "*.shop.example.com", Static: on},
+		{Host: "*.staged.example.com", Static: off},
+		{Host: "armed.example.com", Static: on},
+		{Host: "tenant.example.com", Static: off},
+	} {
+		if _, err := s.Set(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		host, key string
+		ok        bool
+	}{
+		{"x.shop.example.com", "*.shop.example.com", true}, // most specific wins
+		{"a.example.com", "*.example.com", true},
+		{"y.staged.example.com", "*.example.com", true},  // an unarmed wildcard is skipped
+		{"armed.example.com", "armed.example.com", true}, // exact wins, never its wildcard
+		{"tenant.example.com", "", false},                // opt-out: counted nowhere
+		{"example.com", "", false},                       // bare suffix
+		{"*.shop.example.com", "*.shop.example.com", true},
+		{"other.com", "", false},
+	} {
+		key, ok := s.StatsKeyFor(tc.host)
+		if key != tc.key || ok != tc.ok {
+			t.Errorf("StatsKeyFor(%q) = %q,%v; want %q,%v", tc.host, key, ok, tc.key, tc.ok)
+		}
+	}
+}
+
 func TestParseCacheTTL(t *testing.T) {
 	ok := []string{"1s", "30s", "5m", "1h", "7d", "30d"}
 	for _, v := range ok {
@@ -286,6 +556,37 @@ func TestSiteCacheAPI_ScopedCanMutateOwnHost(t *testing.T) {
 	rr = doRequest(mux, scopedCtx("mysite.com"), http.MethodPost, "/api/v1/site-cache/set", siteCacheSetBody(t, "other.com"))
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("scoped set other host: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// Through the API: a patch body changes only what it carries, a scoped
+// creator is recorded as exactly the host (not its token's whole allowlist),
+// and an error response carries no entry.
+func TestSiteCacheAPI_SetMergesAndStampsHostOnly(t *testing.T) {
+	e, mux := newSiteCacheAPITestEngine(t)
+	ctx := scopedCtx("mysite.com", "tenant-other.com", "tenant-third.com")
+	full := []byte(`{"host":"mysite.com","static":{"enabled":true,"recipe":"static_lean","ttl":"7d"},"micro":{"enabled":true,"recipe":"micro_safe","ttl":"1s"},"strict_cookies":true,"auth_cookies":["sess"]}`)
+	if rr := doRequest(mux, ctx, http.MethodPost, "/api/v1/site-cache/set", full); rr.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	rr := doRequest(mux, ctx, http.MethodPost, "/api/v1/site-cache/set", []byte(`{"host":"mysite.com","micro":{"ttl":"30s"}}`))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("retune: %d %s", rr.Code, rr.Body.String())
+	}
+	got, _ := e.SiteCacheGet("mysite.com")
+	if !got.Static.Enabled || got.Static.TTL != "7d" || got.Micro.TTL != "30s" || !got.StrictCookies || len(got.AuthCookies) != 1 {
+		t.Fatalf("a TTL-only set reset other fields: %+v", got)
+	}
+	if len(got.ScopeHosts) != 1 || got.ScopeHosts[0] != "mysite.com" {
+		t.Fatalf("scope_hosts = %v, want exactly [mysite.com] (never the token's allowlist)", got.ScopeHosts)
+	}
+
+	rr = doRequest(mux, ctx, http.MethodPost, "/api/v1/site-cache/set", []byte(`{"host":"mysite.com","micro":{"recipe":"nope"}}`))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("bad recipe: %d", rr.Code)
+	}
+	if strings.Contains(rr.Body.String(), `"entry"`) {
+		t.Fatalf("error response carries an entry: %s", rr.Body.String())
 	}
 }
 

@@ -67,7 +67,10 @@ end
 -- ---------------------------------------------------------------------------
 -- Per-worker cache state (module-level locals persist across requests in the
 -- same worker process). `policies` maps an exact host to its policy table;
--- `wild` is an array of { pattern = "*.suffix", policy = {...} }.
+-- `wild` is an array of { pattern = "*.suffix", policy = {...} }, MOST SPECIFIC
+-- (longest) pattern first — the lookups take the first match. A policy with no
+-- armed tier is an OPT-OUT row (the daemon emits one for an all-off exact host
+-- under an armed wildcard): the exact match wins, and it caches nothing.
 
 local _cache = {
     policies = {},    -- map[host] -> policy table
@@ -223,6 +226,14 @@ local function rebuild_cache(entries)
             end
         end
     end
+    -- Most specific wildcard first: with *.example.com AND *.shop.example.com
+    -- armed, x.shop.example.com must get the narrower policy. The daemon sends
+    -- this order already; sorting here keeps the edge right on its own (and
+    -- the alphabetical tie-break keeps it deterministic).
+    table.sort(wild, function(a, b)
+        if #a.pattern ~= #b.pattern then return #a.pattern > #b.pattern end
+        return a.pattern < b.pattern
+    end)
     _cache.policies  = policies
     _cache.wild      = wild
     _cache.has_any   = n > 0
@@ -337,6 +348,14 @@ end
 -- ---------------------------------------------------------------------------
 -- Public API
 
+-- policy_armed: true when at least one tier of the policy is on (false for an
+-- opt-out row).
+local function policy_armed(p)
+    if type(p.static) == "table" and p.static.on then return true end
+    if type(p.micro) == "table" and p.micro.on then return true end
+    return false
+end
+
 -- policy_for: returns the policy table for the given host, or nil. Cheap path
 -- when nothing is armed: short-circuits BEFORE any string work.
 function _M.policy_for(host)
@@ -357,7 +376,8 @@ end
 
 -- policy_key_for: like policy_for, but returns the CANONICAL policy KEY that
 -- matched — the exact host, or the "*.suffix" pattern for a wildcard match — or
--- nil when nothing is armed for `host`. Stats are keyed on THIS, never on the
+-- nil when nothing is armed for `host` (an opt-out row included: it caches
+-- nothing, so it has nothing to count). Stats are keyed on THIS, never on the
 -- raw request Host: under an armed wildcard (`*.example.com`) a client can send
 -- unbounded distinct sub-hosts, so keying per request-host would blow the
 -- cfm_cache_stats dict; keying per policy bounds cardinality to the number of
@@ -367,7 +387,11 @@ function _M.policy_key_for(host)
     if not _cache.has_any then return nil end
     local h = normalize_host(host)
     if h == "" then return nil end
-    if _cache.policies[h] then return h end
+    local p = _cache.policies[h]
+    if p then
+        if policy_armed(p) then return h end
+        return nil
+    end
     for _, w in ipairs(_cache.wild) do
         if glob_match(w.pattern, h) then return w.pattern end
     end

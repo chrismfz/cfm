@@ -4135,14 +4135,23 @@ func (e *Engine) HTTP3OverrideHasAny() bool {
 
 // ---------------------------------------------------------------------------
 // Site Cache per-vhost policy. Default for every vhost is "no caching"; entries
-// here are the OPT-IN list (static and/or micro tier). Phase 1 is daemon-side
-// only — see site_cache.go and docs/site-cache-design.md.
+// here are the OPT-IN list (static and/or micro tier), fed to the edge on
+// /nginx/cache/config — see site_cache.go and docs/site-cache-design.md.
 
 func (e *Engine) SiteCacheSet(in SiteCacheEntry) (SiteCacheEntry, error) {
 	if e == nil || e.siteCache == nil {
 		return SiteCacheEntry{}, errors.New("site cache unavailable")
 	}
 	return e.siteCache.Set(in)
+}
+
+// SiteCacheApply merges a patch onto a vhost's stored policy (the /set API).
+// scoped marks a scoped (tenant) caller, recorded on a new entry's audit trail.
+func (e *Engine) SiteCacheApply(p SiteCachePatch, scoped bool) (SiteCacheEntry, error) {
+	if e == nil || e.siteCache == nil {
+		return SiteCacheEntry{}, errors.New("site cache unavailable")
+	}
+	return e.siteCache.Apply(p, scoped)
 }
 
 func (e *Engine) SiteCacheRemove(host string) bool {
@@ -4187,8 +4196,9 @@ func (e *Engine) SiteCacheHasAny() bool {
 	return e.siteCache.HasAny()
 }
 
-// SiteCachePolicyFeed is the /nginx/cache/config bridge feed (enabled vhosts
-// only). Phase 2: observe-only at the edge.
+// SiteCachePolicyFeed is the /nginx/cache/config bridge feed: armed vhosts
+// plus the opt-out rows of all-off exact hosts under an armed wildcard (see
+// siteCacheStore.PolicyFeed).
 func (e *Engine) SiteCachePolicyFeed() []CachePolicyRow {
 	if e == nil || e.siteCache == nil {
 		return nil

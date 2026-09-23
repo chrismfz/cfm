@@ -15,7 +15,7 @@
 // Endpoints:
 //   GET  /api/v1/site-cache/list                 — policies (scope-filtered)
 //   GET  /api/v1/site-cache/get?host=            — one vhost's policy
-//   POST /api/v1/site-cache/set                  — upsert (body = SiteCacheEntry)
+//   POST /api/v1/site-cache/set                  — merge-upsert (body = SiteCachePatch)
 //   POST /api/v1/site-cache/remove?host=         — turn caching OFF for a vhost
 //   POST /api/v1/site-cache/purge?host= | ?all=1 — bump generation (all=admin)
 
@@ -32,8 +32,11 @@ type siteCacheListResponse struct {
 }
 
 type siteCacheResultResponse struct {
-	Entry SiteCacheEntry `json:"entry,omitempty"`
-	Error string         `json:"error,omitempty"`
+	// A pointer so an error response carries no entry at all (omitempty is a
+	// no-op on a struct value, which used to marshal a zero entry beside the
+	// error).
+	Entry *SiteCacheEntry `json:"entry,omitempty"`
+	Error string          `json:"error,omitempty"`
 }
 
 // scopeFilterSiteCache returns only the policies a scoped token may see/manage
@@ -87,10 +90,17 @@ func (e *Engine) handleSiteCacheGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, siteCacheResultResponse{Error: "no cache policy for host"})
 		return
 	}
-	writeJSON(w, http.StatusOK, siteCacheResultResponse{Entry: entry})
+	writeJSON(w, http.StatusOK, siteCacheResultResponse{Entry: &entry})
 }
 
-// POST /api/v1/site-cache/set  (upsert; host carried in the JSON body)
+// POST /api/v1/site-cache/set  (merge-upsert; host carried in the JSON body)
+//
+// The body is a SiteCachePatch: only the fields present are changed, the rest
+// of the stored policy is kept (a new host starts all-off). So `{"host":"x",
+// "micro":{"ttl":"30s"}}` retunes one TTL without touching the static tier or
+// the cookie settings. A full SiteCacheEntry body is still accepted and acts
+// as a full replace of every field it carries (generation/created_at/
+// scope_hosts are ignored: server-managed).
 func (e *Engine) handleSiteCacheSet(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		writeJSON(w, http.StatusServiceUnavailable, siteCacheResultResponse{Error: "engine unavailable"})
@@ -99,7 +109,7 @@ func (e *Engine) handleSiteCacheSet(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
-	var req SiteCacheEntry
+	var req SiteCachePatch
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRuleBodyBytes)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, siteCacheResultResponse{Error: "invalid json: " + err.Error()})
 		return
@@ -114,16 +124,16 @@ func (e *Engine) handleSiteCacheSet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, siteCacheResultResponse{Error: "host not in scope"})
 		return
 	}
-	// Stamp WHO added it (audit) from the token scope; the client value is
-	// ignored so a caller cannot forge a foreign audit trail. Admin (nil scope)
-	// records no scope_hosts (global/admin-added).
-	req.ScopeHosts = scopeMapToHosts(vhostScopeFromContext(r.Context()))
-	entry, err := e.SiteCacheSet(req)
+	// WHO first enabled it (audit) comes from the token, never the body: a
+	// scoped caller creating the policy is recorded as scope_hosts=[host], an
+	// admin as nothing (see SiteCacheEntry.ScopeHosts).
+	scoped := vhostScopeFromContext(r.Context()) != nil
+	entry, err := e.SiteCacheApply(req, scoped)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, siteCacheResultResponse{Error: err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, siteCacheResultResponse{Entry: entry})
+	writeJSON(w, http.StatusOK, siteCacheResultResponse{Entry: &entry})
 }
 
 // POST /api/v1/site-cache/remove?host=<host>
