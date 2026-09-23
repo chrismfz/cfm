@@ -4,17 +4,22 @@
 
 package.path = "configs/lua/?.lua;" .. package.path
 
--- Minimal ngx.shared dict: incr(key,n,init) / get / set (get_keys refuses).
+-- Minimal ngx.shared dict: incr (no init) / add / get / set (get_keys refuses).
 local function new_dict()
   local store = {}
   return {
+    -- incr with init loses counters on a crc32 collision (lua-nginx-module
+    -- 0.10.26, see cfm_cache_log.lua incr): this stand-in refuses it
     incr = function(_, k, n, init)
-      if store[k] == nil then
-        if init == nil then return nil, "not found" end
-        store[k] = init
-      end
+      if init ~= nil then error("incr with init: loses counters on a key hash collision; use incr, then add") end
+      if store[k] == nil then return nil, "not found" end
       store[k] = store[k] + (n or 1)
       return store[k]
+    end,
+    add = function(_, k, v)
+      if store[k] ~= nil then return false, "exists" end
+      store[k] = v
+      return true
     end,
     get      = function(_, k) return store[k] end,
     set      = function(_, k, v) store[k] = v end,
@@ -86,17 +91,32 @@ local nrows = 0; for _ in pairs(snap) do nrows = nrows + 1 end
 check(nrows == 2, "exactly the two counted armed keys (a duplicate / non-string entry adds nothing): " .. nrows)
 check(next(cl.snapshot_vhosts(nil)) == nil and next(cl.snapshot_vhosts({})) == nil, "no key list → empty snapshot")
 
--- every counted status is read back (all seven), whatever else the dict holds:
--- the read is by name, so it cannot be cut short like the old get_keys scan
+-- every counted status is read back (all seven): the read is by name (the
+-- dict refuses a scan, see new_dict), so it cannot be cut short
 for _, st in ipairs({ "HIT", "MISS", "BYPASS", "EXPIRED", "STALE", "UPDATING", "REVALIDATED" }) do
   cl.log("cfm_micro", st, "all.example")
 end
-for i = 1, 20000 do dict:set("cache:vhost:filler" .. i .. ".example:status:HIT", 1) end
 local all = cl.snapshot_vhosts({ "all.example" })["all.example"]
 local nst = 0; for _ in pairs(all or {}) do nst = nst + 1 end
 check(nst == 7, "all seven statuses of an armed key are read: " .. nst)
 dict:set(vk("all.example", "TELEPORTED"), 9)
 check(cl.snapshot_vhosts({ "all.example" })["all.example"].TELEPORTED == nil, "only the counted statuses are read")
+
+-- ── another worker's add wins the race: the count still lands (incr again) ───
+do
+  local real_add = dict.add
+  dict.add = function(self, k, v) real_add(self, k, 5); return false, "exists" end
+  cl.log("cfm_static", "HIT", "race.example")
+  dict.add = real_add
+  check(dict:get(vk("race.example", "HIT")) == 6, "add lost to another worker's add: incr again (5 + 1)")
+end
+
+-- ── throttle counters use the same incr ───────────────────────────────────────
+cl.log_throttle("1", "1", "REJECTED", "429")
+cl.log_throttle("1", "0", "DELAYED", "200")
+check(dict:get("throttle:meta:total") == 2 and dict:get("throttle:meta:throttled") == 1
+      and dict:get("throttle:meta:rejected") == 1 and dict:get("throttle:meta:delayed") == 1
+      and dict:get("throttle:meta:http_429") == 1, "throttle counters counted")
 
 -- ── no dict declared → full no-op / empty snapshot (fail-safe) ────────────────
 _G.ngx.shared.cfm_cache_stats = nil

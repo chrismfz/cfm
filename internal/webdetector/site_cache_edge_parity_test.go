@@ -125,7 +125,8 @@ func TestSiteCacheEdgeParityFixture(t *testing.T) {
 		}
 		if r.Generation != e.Generation || r.StrictCookies != e.StrictCookies || !sameStrings(r.AuthCookies, e.AuthCookies) ||
 			!tier(r.Static, e.Static) || !tier(r.Micro, e.Micro) {
-			t.Errorf("feed row %+v does not carry stored entry %+v", r, e)
+			rj, _ := json.Marshal(r)
+			t.Errorf("feed row %s does not carry stored entry %+v", rj, e)
 		}
 	}
 	sort.Strings(armed)

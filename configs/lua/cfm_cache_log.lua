@@ -31,10 +31,20 @@ local function vhost_prefix(host)
   return p
 end
 
+-- incr: count n (default 1) on key. NOT dict:incr(key, n, init): with init,
+-- lua-nginx-module 0.10.26 (verified on nginx 1.24, lua-resty-core 0.1.28)
+-- loses counters when the new key's crc32 — the dict's tree hash — equals an
+-- existing key's: the other key then reads nil, or both count wrong, for as
+-- long as the dict lives (about K^2/2^33 odds per node for K counters: ~13%
+-- at 5000 vhosts x 7 statuses). incr without init, then add, never takes
+-- that path; "exists" is another worker's add winning the race. Errors are
+-- dropped quietly (a lost count never breaks the log phase).
 local function incr(dict, key, n)
-  local ok, err = dict:incr(key, n or 1, 0)
-  if not ok and err ~= "not found" then
-    -- ignore quietly
+  n = n or 1
+  local v, err = dict:incr(key, n)
+  if v == nil and err == "not found" then
+    local ok, aerr = dict:add(key, n)
+    if not ok and aerr == "exists" then dict:incr(key, n) end
   end
 end
 
@@ -105,27 +115,22 @@ function _M.log_throttle(is_meta, is_throttled, limit_status, status)
   local d = ngx.shared.cfm_cache_stats
   if not d then return end
 
-  local function incr(k)
-    local ok, err = d:incr(k, 1, 0)
-    if not ok and err ~= "not found" then
-      -- ignore
-    end
-  end
+  local function count(k) incr(d, k, 1) end
 
-  incr("throttle:meta:total")
+  count("throttle:meta:total")
 
   if is_throttled == "1" then
-    incr("throttle:meta:throttled")
+    count("throttle:meta:throttled")
   end
 
   if limit_status == "REJECTED" then
-    incr("throttle:meta:rejected")
+    count("throttle:meta:rejected")
   elseif limit_status == "DELAYED" then
-    incr("throttle:meta:delayed")
+    count("throttle:meta:delayed")
   end
 
   if status == "429" then
-    incr("throttle:meta:http_429")
+    count("throttle:meta:http_429")
   end
 end
 

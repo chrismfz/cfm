@@ -1189,9 +1189,17 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      same small shared-dict slot whatever the host's length: `cfm_cache_stats`
      is 8m, ~65 000 counters — the 5000-policy limit × 7 statuses with room
      to spare. Measured on nginx 1.24 with 5000 armed vhosts (every status) +
-     3000 disarmed ones: 5000 rows, all complete, with 25-, 60- and
-     253-character hosts, ~40 ms per push in the timer, 3.3 MB of the dict
-     free. It used to scan `get_keys(8000)` — a KEY bound — over keys that
+     3000 disarmed ones (a counter each): 5000 rows, all complete, with 25-,
+     60- and 253-character hosts, ~40 ms per push in the timer, 3.3 MB of the
+     dict free. A counter is counted with `incr` without init, then `add`:
+     `incr(key, n, init)` in lua-nginx-module 0.10.26 (as shipped with nginx
+     1.24 here; the fleet's OpenResty/Angie builds are unchecked) loses
+     counters when a new key's crc32 — the dict's tree hash — equals an
+     existing key's (the other reads nil, or both count wrong, for the dict's
+     life): about K²/2³³ odds per node for K counters, ~13% at 5000 vhosts ×
+     7 statuses. Both reviewers' benchmarks hit it (one counter of 35 000
+     lost); a colliding pair counted 998 and 999 of 1000 that way, exactly
+     1000 each after the fix. It used to scan `get_keys(8000)` — a KEY bound — over keys that
      grew with the host (the slot doubles past a 52-byte key: the 4m dict
      held ~32 000 short counters, ~16 000 of 53-180 bytes, ~8 000 for a
      253-byte host), which pushed

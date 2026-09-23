@@ -175,7 +175,8 @@ for f in "$ORT" "$ANG"; do
   # or after a header family (an escaped quote read as nginx reads it),
   # nothing may write (set / any set_* such as set_by_lua* or set-misc /
   # auth_request_set / js_set / js_var / perl_set / map / geo / split_clients /
-  # a block entry that opens with the variable, as in geoip2) a
+  # a block entry that opens with the variable, as in geoip2 / array-var
+  # array_* to= or in place) a
   # $http_* / $upstream_http_* / $upstream_cookie_* / $upstream_trailer_* /
   # $cookie_* / $arg_* / $sent_http_* / $sent_trailer_* variable (either one
   # SHADOWS the request/response value — nginx 1.24, a map http-wide — so a
@@ -482,7 +483,8 @@ for f in "$ORT" "$ANG"; do
           if (cn ~ PFX) print "ERR line " SL[k] ": a regex named capture (?<" cn ">…) — it would set $" cn ", which a cache rail reads or is a CFM variable; name it something else."
         }
         # set* / map / geo / … (or a block entry that opens with the variable, as
-        # geoip2 blocks do) on $http_* / $upstream_http_* / $cookie_* / $arg_*
+        # geoip2 blocks do, or an array-var array_* writing to= or in place) on
+        # $http_* / $upstream_http_* / $cookie_* / $arg_*
         # SHADOWS the request/response value for every request the statement
         # applies to (verified on nginx 1.24; a map does it http-wide): a
         # `map … $http_authorization` would silently turn off the credentialed-
@@ -491,9 +493,10 @@ for f in "$ORT" "$ANG"; do
         wt = ""
         if (fw ~ /^(set(_[a-z0-9_]+)?|auth_request_set|js_set|js_var|perl_set)$/) { wt = u; sub(/^[[:space:]]*[a-z0-9_]+[[:space:]]+/, "", wt); sub(/[[:space:];].*$/, "", wt) }
         else if (u ~ /^[[:space:]]*["\047]?[$]/) { wt = u; sub(/^[[:space:]]*/, "", wt); sub(/[[:space:];].*$/, "", wt) }
+        else if (fw ~ /^array_[a-z_]+$/) { wt = u; sub(/[[:space:]]*;.*$/, "", wt); if (match(wt, /[[:space:]]to=["\047]?[$][{]?[a-z0-9_]+/)) wt = substr(wt, RSTART + 4, RLENGTH - 4); else sub(/^.*[[:space:]]/, "", wt) }
         else if (fw ~ /^(map|geo|split_clients)$/ && u ~ /[{][[:space:]]*$/) { wt = u; sub(/[[:space:]]*[{][[:space:]]*$/, "", wt); sub(/^.*[[:space:]]/, "", wt) }
         gsub(/["\047${}]/, "", wt)
-        if (wt ~ HDRV) print "ERR line " SL[k] ": " fw " writes $" wt " — that shadows the request/response header (or cookie/arg) value, which the cache rails read."
+        if (wt ~ HDRV) print "ERR line " SL[k] ": " (fw != "" ? fw : "a block entry") " writes $" wt " — that shadows the request/response header (or cookie/arg) value, which the cache rails read."
         if (u ~ /[$][{]?cfm_cache_skip([^a-z0-9_]|$)/ && !pred && u !~ /^[[:space:]]*set[[:space:]]+[$]cfm_cache_skip[[:space:]]+"1"[[:space:]]*;[[:space:]]*$/) print "ERR line " SL[k] ": $cfm_cache_skip appears in a " fw " statement — the conf may only set it to \"1\" (the cache-on flip comes ONLY from cfm_cache.lua)."
         if (fw == "proxy_ignore_headers" && u ~ /[[:space:]]["\047]?(set-cookie|vary)["\047]?([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_ignore_headers lists Set-Cookie or Vary — nginx would then store a response that sets a cookie, or one Vary variant for everyone."
         if (fw == "proxy_cache_convert_head" && u ~ /[[:space:]]["\047]?off["\047]?([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_cache_convert_head off — the cache key has no method, so a body-less HEAD entry would be served to GET clients."
@@ -516,11 +519,13 @@ for f in "$ORT" "$ANG"; do
       # index or an alias reaches a variable by a computed name, which the
       # check above cannot see), and never assigned for a CFM variable (one of
       # several targets included). These read the code with its strings
-      # blanked (ltc), so a log message that says "ngx" is not code.
+      # blanked (ltc), so a log message that says "ngx" is not code. (They fail
+      # closed on two harmless shapes: a table constructor listing an
+      # ngx.var.cfm_* before a named field, and a string that is just "ngx".)
       if (cnt(ltc, "(^|[^a-z0-9_])ngx([^a-z0-9_]|$)") != cnt(ltc, "(^|[^a-z0-9_])ngx[[:space:]]*[.]")) print "ERR inline Lua uses ngx other than as ngx.<field> (ngx[...], an alias, require \"ngx\") — access ngx.var only as ngx.var.<name>."
       if (lt2 ~ /["\047]ngx["\047]/) print "ERR inline Lua names ngx in a string (require \"ngx\", package.loaded[\"ngx\"], _G[\"ngx\"]) — access ngx.var only as ngx.var.<name>."
       if (cnt(ltc, "ngx[[:space:]]*[.][[:space:]]*var([^a-z0-9_]|$)") != cnt(ltc, "ngx[[:space:]]*[.][[:space:]]*var[[:space:]]*[.][[:space:]]*[a-z_]")) print "ERR inline Lua uses ngx.var other than as ngx.var.<name> (a bracket index or an alias) — a computed name could reach a cache rail."
-      if (ltc ~ /ngx[[:space:]]*[.][[:space:]]*var[[:space:]]*[.][[:space:]]*(cfm_|cf_|xfp_)[a-z0-9_]*[[:space:]]*(,[[:space:]]*[a-z_][a-z0-9_.]*[[:space:]]*)*=([^=]|$)/) print "ERR inline Lua assigns an ngx.var.cfm_* / cf_* / xfp_* variable — the cache rails and their inputs are written only by conf statements and cfm_cache.lua."
+      if (ltc ~ /ngx[[:space:]]*[.][[:space:]]*var[[:space:]]*[.][[:space:]]*(cfm_|cf_|xfp_)[a-z0-9_]*[[:space:]]*(,[[:space:]]*[(]?[a-z_][a-z0-9_.]*[)]?[a-z0-9_.]*([[][^]=]*[]][a-z0-9_.]*)*[[:space:]]*)*=([^=]|$)/) print "ERR inline Lua assigns an ngx.var.cfm_* / cf_* / xfp_* variable — the cache rails and their inputs are written only by conf statements and cfm_cache.lua."
     }
   ' "$f")
   ncache_of["$f"]=$(sed -n 's/^NCACHE //p' <<< "$parsed")
@@ -556,8 +561,8 @@ for f in "$ORT" "$ANG"; do
   # by the parser, so a commented-out directive never satisfies them.
 
   # ── (b2) Tier B micro-cache zones (Phase B1): every MICRO_BUCKETS TTL declared ─
-  # Each zone's dir must exist before `-t` (the daemon + installers provision all
-  # six), and a partial set would [emerg] at reload the moment a location names a
+  # Each zone's dir must exist before `-t` (the daemon + installers provision
+  # them all), and a partial set would [emerg] at reload the moment a location names a
   # missing zone. Assert every bucket zone AND its internal location is present in
   # BOTH confs (the loop runs per conf, so a bucket added to one edge but not the
   # other fails here — the parity guard). The per-location rails (bypass gate,

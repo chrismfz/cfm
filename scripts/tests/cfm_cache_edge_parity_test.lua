@@ -15,11 +15,24 @@
 package.path = "configs/lua/?.lua;" .. package.path
 
 local _pushed      -- what the stats push encodes
+local BODY = "<encoded-stats-body>"
 package.loaded["cjson.safe"] = { decode = function() return nil end,
-                                 encode = function(t) _pushed = t; return "{}" end }
-package.loaded["cfm_bridge_cfg"] = { get = function()
-  return { site_cache = true, micro_cache_enforce = false }
-end }
+                                 encode = function(t) _pushed = t; return BODY end }
+package.loaded["cfm_bridge_cfg"] = {
+  get   = function() return { site_cache = true, micro_cache_enforce = false } end,
+  token = function() return "tok" end,
+}
+-- the bridge socket: records every request, answers 200
+local _sent = {}
+local function fake_socket()
+  return {
+    settimeouts = function() end,
+    connect     = function(_, addr) _sent.addr = addr; return true end,
+    send        = function(_, req) _sent[#_sent + 1] = req; return #req end,
+    receive     = function() return "HTTP/1.1 200 OK" end,
+    close       = function() return true end,
+  }
+end
 package.loaded["cfm_selfip"] = { is_self_origin = function() return false end }
 
 local _now, _timers = 0, {}          -- 0 keeps the async refresh a no-op
@@ -32,6 +45,7 @@ _G.ngx = {
   md5    = function(s) return s end,
   shared = { cfm_decisions = { add = function() return true end } },
   WARN = 1, ERR = 2,
+  socket = { tcp = fake_socket },
   var    = { host = "" },
   header = {},
 }
@@ -83,11 +97,11 @@ end
 
 -- 2) the stats push reads, and pushes, exactly the feed's armed keys — through
 --    the real flush path (the log phase calls maybe_flush_stats)
-local asked
+local asked, served = nil, {}
 package.loaded["cfm_cache_log"] = { snapshot_vhosts = function(keys)
   asked = keys
   local out = {}
-  for _, k in ipairs(keys or {}) do out[k] = { HIT = 1 } end
+  for i, k in ipairs(keys or {}) do out[k] = { HIT = i, MISS = 100 + i }; served[k] = out[k] end
   return out
 end }
 _now = 1000
@@ -103,8 +117,22 @@ end
 local want_keys = table.concat(fx.armed_keys, ",")
 check(sorted(asked) == want_keys, "the flush asked snapshot_vhosts for [" .. sorted(asked) .. "], daemon armed keys [" .. want_keys .. "]")
 local pushed_hosts = {}
-for _, r in ipairs((_pushed and _pushed.rows) or {}) do pushed_hosts[#pushed_hosts + 1] = r.host end
+for _, r in ipairs((_pushed and _pushed.rows) or {}) do
+  pushed_hosts[#pushed_hosts + 1] = r.host
+  local want = served[r.host]
+  check(want and type(r.counts) == "table" and r.counts.HIT == want.HIT and r.counts.MISS == want.MISS,
+        "row " .. tostring(r.host) .. " does not carry the counts snapshot_vhosts read for it")
+end
 check(sorted(pushed_hosts) == want_keys, "the push carries rows [" .. sorted(pushed_hosts) .. "], daemon armed keys [" .. want_keys .. "]")
+-- ...and it reached the bridge: one POST to /nginx/cache/stats, token and
+-- exact length, with the encoded body
+check(#_sent == 1, #_sent .. " bridge request(s) sent, want 1")
+local req = _sent[1] or ""
+check(_sent.addr == "unix:/var/run/cfm/cfm_nginx.sock", "the push connects to " .. tostring(_sent.addr))
+check(req:sub(1, #"POST /nginx/cache/stats HTTP/1.1\r\n") == "POST /nginx/cache/stats HTTP/1.1\r\n", "the push is not POST /nginx/cache/stats: " .. req:sub(1, 60))
+check(req:find("\r\nX%-CFM%-Token: tok\r\n") ~= nil, "the push carries no bridge token")
+check(req:sub(-#("Content-Length: " .. #BODY .. "\r\n\r\n" .. BODY)) == "Content-Length: " .. #BODY .. "\r\n\r\n" .. BODY,
+      "the push body is not the encoded rows with its exact Content-Length")
 
 -- 3) each row's fields land in the policy the edge applies to its host
 local function same_list(a, b)

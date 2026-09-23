@@ -7,7 +7,8 @@
 -- either; docs/site-cache-design.md §5.6.) Static reading of the source, with
 -- Lua comments and string contents stripped, so a comment or a log string
 -- can never satisfy (or trip) a check. It pins the plain spellings; a
--- deliberately obfuscated call (a name computed at run time) is beyond it.
+-- deliberately obfuscated route (a name computed at run time, a helper
+-- declared in one place and assigned in another) is beyond it.
 
 local fails = 0
 local function check(c, m)
@@ -127,7 +128,8 @@ check(call and step4 and call > step4, "micro_cache_target is used at line " .. 
 
 -- The call hands its target straight to ngx.exec, and that is the last
 -- statement of cfm_enforce (nothing runs after the micro redirect decision).
-local ts, te = code:find("local%s+([%a_][%w_]*)%s*=%s*micro_cache_target%s*%(%s*%)%s*if%s+%1%s+then%s+return%s+ngx%s*%.%s*exec%s*%(%s*%1%s*%)%s*end%s+end%f[^%w_]")
+-- (cfm_enforce's own `end` is the next statement, at column 0.)
+local ts, te = code:find("local%s+([%a_][%w_]*)%s*=%s*micro_cache_target%s*%(%s*%)%s*if%s+%1%s+then%s+return%s+ngx%s*%.%s*exec%s*%(%s*%1%s*%)%s*end%s*\nend%f[^%w_]")
 check(ts ~= nil, "at Step 4, cfm_enforce must end with `local t = micro_cache_target()` + `if t then return ngx.exec(t) end` (nothing after it)")
 
 -- cfm_cache.micro_gate is reached only through micro_cache_target (the pcall
@@ -146,17 +148,19 @@ while true do
         "cfm_cache.micro_gate referenced at line " .. select(2, code:sub(1, gs):gsub("\n", "")) + 1 .. ", outside micro_cache_target")
   init = ge + 1
 end
-check(ngate >= 1, "micro_cache_target no longer calls cfm_cache.micro_gate")
+check(ngate == 2, ngate .. " mentions of micro_gate (want 2: the wrapper's nil check and its pcall)")
 local nexec, einit, exec_in_tail = 0, 1, false
 while true do
-  local es, ee = code:find("ngx%s*%.%s*exec%s*%(", einit)
+  local es, ee = code:find("ngx%s*%.%s*exec%f[^%w_]", einit)
   if not es then break end
   nexec = nexec + 1
   if ts and es > ts and es < te then exec_in_tail = true end
   einit = ee + 1
 end
 check(nexec == 1 and exec_in_tail,
-      nexec .. " ngx.exec call(s) in cfm.lua (want exactly one, the Step 4 micro one) — if a new one can reach an @cfm_micro_<n>s location it must sit at Step 4; update this test")
+      nexec .. " mention(s) of ngx.exec in cfm.lua (want exactly one, the Step 4 micro call; an alias counts) — if a new one can reach an @cfm_micro_<n>s location it must sit at Step 4; update this test")
+-- cfm.lua itself never names a micro location (cfm_cache.lua builds it).
+check(not strip(src, true):find("@cfm_micro_", 1, true), "cfm.lua names an @cfm_micro_ location in its code — only cfm_cache.lua builds the target")
 
 -- No other edge module enters micro (or routes to a micro location); only
 -- cfm_cache.lua builds the target and cfm.lua execs it.

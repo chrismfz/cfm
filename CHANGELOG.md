@@ -209,8 +209,12 @@ back-filled here — see the git/PR history for that period.
   25-, 60- and 253-character hosts, about 40 ms per push). The daemon accepts
   a push of up to 4 MiB (the largest legitimate one is about 2.2 MB, over the
   old 2 MiB limit, which rejected the whole push), and a count cjson writes in
-  exponent form (1e14 or more) no longer fails the whole push either. The
-  counters of a disarmed vhost are no longer pushed. The first edge reload on
+  exponent form (1e14 or more) no longer fails the whole push either. A
+  counter also no longer goes missing when two counter keys share a hash:
+  the shared dict's `incr` with an initial value (lua-nginx-module 0.10.26)
+  loses counts in that case, about a 1-in-8 chance per node at 5000 vhosts;
+  the counters now use `incr`, then `add`. The counters of a disarmed vhost
+  are no longer pushed. The first edge reload on
   the new config creates the larger dict, so the counters start again from
   zero once.
 - **Site Cache: a purge can no longer be undone by removing and re-adding a
