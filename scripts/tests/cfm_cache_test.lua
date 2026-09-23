@@ -295,6 +295,13 @@ for _, c in ipairs({ "__Host-PHPSESSID=1", "__Secure-laravel_session=1", "SESS0a
   check(anon(c, false) == false, "auth/variant cookie → bypass: " .. c)
 end
 check(anon("__Host-foo=1", false) == true, "a __Host- prefixed non-session cookie stays anonymous")
+-- consent / age-gate cookies read server-side: never anonymous, strict or not
+for _, c in ipairs({ "cookie_notice_accepted=true", "hu-consent=x", "viewed_cookie_policy=yes",
+                     "cookielawinfo-checkbox-analytics=yes", "moove_gdpr_popup=x", "cmplz_marketing=allow",
+                     "age_gate=99" }) do
+  check(anon(c, false) == false and anon(c, true) == false, "consent / age-gate cookie → bypass: " .. c)
+end
+check(anon("euconsent-v2=CO", true) == true, "strict: the TCF consent string stays ignore-listed (read client-side)")
 -- a name as PHP / Rack read it: "." / " " / "[" → "_", percent-decoded
 for _, c in ipairs({ "wordpress.logged.in_abc=1", "ci.session=x", "laravel.session=x",
                      "wordpress logged in_abc=1", "wordpress%5Flogged%5Fin_abc=1",

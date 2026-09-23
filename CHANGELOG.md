@@ -95,6 +95,17 @@ back-filled here — see the git/PR history for that period.
     slips past as `wordpress.logged.in_…`, `ci+session`, `ci%2Esession` or
     `__Host-PHPSESSID` (PHP turns `.` and spaces into `_`; older PHP also
     URL-decodes names).
+  - A micro-cached request never forwards a client's own client-IP, geo or
+    TLS-hint headers (`CF-IPCountry` — which WooCommerce geolocation reads
+    first — `Client-IP`, a forged `X-Forwarded-For` prefix, `CF-Visitor`, …):
+    Cloudflare's pass only from Cloudflare, `X-Forwarded-For` is the real
+    client alone, the rest are dropped. A visitor could otherwise have stored
+    the page for a country or IP of its choosing for everyone.
+  - Consent and age-gate cookies read server-side (Cookie Notice, CookieYes
+    legacy, Moove GDPR, Complianz, Age Gate) keep a visitor off the cache: one
+    visitor's consent — the tracking scripts it enables — or age check would
+    otherwise have been everyone's. A site's own such cookie goes in the
+    vhost's `auth_cookies`.
   - A request body is never forwarded from a micro-cached request: a GET that
     carries one (the WordPress REST API reads a JSON body even on GET) could
     otherwise have stored a page shaped by that body for every visitor.

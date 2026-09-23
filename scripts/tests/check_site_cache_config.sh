@@ -58,6 +58,10 @@
 #       refuses the internal requests they make, so this is defence in depth),
 #       and buffering is never turned off in it nor at server/http level
 #       (which it would inherit).
+#     * every @cfm_micro_<n>s location sends X-Forwarded-For $remote_addr,
+#       CF-IPCountry / CF-Visitor only via the trusted-peer maps (pinned
+#       exactly) and drops the Client-IP family, X-Country-Code, HTTPS,
+#       X-Arr-Ssl, Surrogate-Capability, Proxy, Content-Type, Content-Encoding.
 #     * every @cfm_micro_<n>s location caches into a cfm_micro_<n>s zone, sets
 #       $cfm_upstream "cfm_apache_micro", and never forwards a request body
 #       (proxy_pass_request_body off + Content-Length ""): a body on a GET is
@@ -200,7 +204,7 @@ for f in "$ORT" "$ANG"; do
       }
       if (ne != nw || !ok1 || !ok2 || !ok3) print "ERR the " name " map must hold EXACTLY: " want1 " and " want2 (want3 != "" ? " and " want3 : "") " — got:" got
     }
-    function check_loc(   m, nz, lb, i, nh, H, st, mi, ns, lh, zn, hn) {
+    function check_loc(   m, nz, lb, i, nh, H, st, mi, ns, lh, zn, hn, nh2, H2) {
       # The Tier B sentinel: only `location /` may carry it (see the header).
       lh = body; sub(/^\n/, "", lh); sub(/\n.*$/, "", lh); gsub(/[[:space:]]+/, " ", lh); sub(/^ /, "", lh); sub(/ $/, "", lh)
       ns = cnt(body, A "set[[:space:]]+[$]cfm_micro_conf[[:space:]]+\"1\"[[:space:]]*;")
@@ -290,6 +294,20 @@ for f in "$ORT" "$ANG"; do
         if (zn == "" || hn != zn) m = m " micro-location-name-and-zone-disagree(@cfm_micro_" hn "s-vs-cfm_micro_" zn "s)"
         else if (cnt(body, A "proxy_cache_valid[[:space:]]") != 1 || body !~ (A "proxy_cache_valid[[:space:]]+200[[:space:]]+" zn "s[[:space:]]*;")) m = m " micro-proxy_cache_valid-must-be-exactly-200-" zn "s(the-bucket-TTL)"
       }
+      # Tier B forwards no client-forgeable client-IP / geo / TLS-hint / proxy
+      # header (an app that reads one would store the forged answer for all):
+      # X-Forwarded-For is the real client alone, CF-IPCountry / CF-Visitor come
+      # from the trusted-peer maps, the rest are dropped — each set once.
+      if (mi) {
+        if (body !~ (A "proxy_set_header[[:space:]]+X-Forwarded-For[[:space:]]+[$]remote_addr[[:space:]]*;") || cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?x-forwarded-for[\"\047]?[[:space:]]") != 1) m = m " micro-X-Forwarded-For-must-be-$remote_addr-once"
+        if (body !~ (A "proxy_set_header[[:space:]]+CF-IPCountry[[:space:]]+[$]cfm_cf_ipcountry[[:space:]]*;") || cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?cf-ipcountry[\"\047]?[[:space:]]") != 1) m = m " micro-CF-IPCountry-must-be-$cfm_cf_ipcountry-once"
+        if (body !~ (A "proxy_set_header[[:space:]]+CF-Visitor[[:space:]]+[$]cfm_cf_visitor[[:space:]]*;") || cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?cf-visitor[\"\047]?[[:space:]]") != 1) m = m " micro-CF-Visitor-must-be-$cfm_cf_visitor-once"
+        nh2 = split("True-Client-IP Client-IP X-Client-IP X-Cluster-Client-IP Fastly-Client-IP X-Originating-IP X-ProxyUser-Ip X-Forwarded X-Country-Code HTTPS X-Arr-Ssl Surrogate-Capability Proxy Content-Type Content-Encoding", H2, " ")
+        for (i = 1; i <= nh2; i++) {
+          if (body !~ (A "proxy_set_header[[:space:]]+" H2[i] "[[:space:]]+\"\"[[:space:]]*;")) m = m " micro-" H2[i] "-not-dropped"
+          else if (cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?" tolower(H2[i]) "[\"\047]?[[:space:]]") != 1) m = m " micro-" H2[i] "-set-more-than-once"
+        }
+      }
       # Fat-GET rail: a body on a GET/HEAD is not in the key, so micro never
       # forwards one (an app that reads it would store an attacker-shaped page).
       if (mi && body !~ (A "proxy_pass_request_body[[:space:]]+off[[:space:]]*;")) m = m " micro-proxy_pass_request_body-must-be-off(a-GET-body-is-not-in-the-key)"
@@ -358,6 +376,8 @@ for f in "$ORT" "$ANG"; do
       mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_status[[:space:]]+[$]cfm_cache_non200[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"200\" \"\";", "$upstream_status → $cfm_cache_non200 (only-200)", "")
       mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_cache_control[[:space:]]+[$]cfm_cc_nostore[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~*(private|no-store|no-cache|s-maxage=0*(?:[^0-9]|$))\" \"1\";", "$upstream_http_cache_control → $cfm_cc_nostore (micro: private/no-store/no-cache/s-maxage=0 never stored)", "volatile;")
       mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_x_accel_expires[[:space:]]+[$]cfm_xae_nocache[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^(?:0+|@.*)$\" \"1\";", "$upstream_http_x_accel_expires → $cfm_xae_nocache (micro: X-Accel-Expires 0 / @… never stored)", "volatile;")
+      mapcheck("^[[:space:]]*map[[:space:]]+\"[$]xfp_trusted_peer:[$]http_cf_ipcountry\"[[:space:]]+[$]cfm_cf_ipcountry[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^1:(?<cc>.+)$\" $cc;", "trusted-peer CF-IPCountry → $cfm_cf_ipcountry (micro: a client cannot forge the country)", "")
+      mapcheck("^[[:space:]]*map[[:space:]]+\"[$]xfp_trusted_peer:[$]http_cf_visitor\"[[:space:]]+[$]cfm_cf_visitor[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^1:(?<cv>.+)$\" $cv;", "trusted-peer CF-Visitor → $cfm_cf_visitor", "")
       if (!micro_seen) print "ERR no @cfm_micro_<n>s cache location found — the Tier B checks must verify something."
       if (micro_seen && http_rwlua) print "ERR an http-level rewrite_by_lua* — inherited by the `location /` of the micro server, its ngx.req.set_uri(…, true) would carry the $cfm_micro_conf sentinel into another location."
       if (!sentinels) print "ERR no set $cfm_micro_conf \"1\" sentinel found — Tier B would never route."

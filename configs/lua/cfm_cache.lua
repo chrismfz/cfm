@@ -564,6 +564,16 @@ local MICRO_AUTH_EXACT = {
     ["wp-wpml_current_language"] = true, ["_icl_current_language"] = true,
     ["wmc_current_currency"] = true, ["woocs_current_currency"] = true,
     ["aelia_cs_selected_currency"] = true,
+    -- consent / age-gate cookies the plugin reads SERVER-side (no Set-Cookie on
+    -- the GETs that carry them, no Vary): Cookie Notice prints the consented
+    -- scripts only when cookie_notice_accepted / hu-consent says so, CookieYes
+    -- legacy on viewed_cookie_policy + cookielawinfo-checkbox-*, Moove GDPR on
+    -- moove_gdpr_popup, Complianz on cmplz_*, Age Gate (PHP mode) swaps the
+    -- page for the gate on age_gate. A stored copy would hand one visitor's
+    -- consent (or age) to everyone.
+    ["cookie_notice_accepted"] = true, ["hu-consent"] = true,
+    ["viewed_cookie_policy"] = true, ["moove_gdpr_popup"] = true,
+    ["age_gate"] = true,
     -- mainstream non-PHP stacks
     ["jsessionid"] = true,        -- Java / Tomcat / JSP
     ["asp.net_sessionid"] = true, -- classic ASP.NET
@@ -573,7 +583,7 @@ local MICRO_AUTH_EXACT = {
 local MICRO_AUTH_PREFIX = {
     "wordpress_logged_in_", "wordpress_sec_", "wp-postpass_", "comment_author_",
     "woocommerce_", "wp_woocommerce_session_", "wp_edd_session_", "prestashop-",
-    "horde_", "mage-",
+    "horde_", "mage-", "cookielawinfo-checkbox-", "cmplz_",
     "sess", "ssess",              -- Drupal SESS<hash> / SSESS<hash>, and any sess*
     ".aspnetcore.",               -- ASP.NET Core session/antiforgery/auth
 }
@@ -593,7 +603,7 @@ local MICRO_IGNORE_EXACT = {
 }
 local MICRO_IGNORE_PREFIX = {
     "cfm_", "_ga_", "_gat", "_gcl_", "_gac_", "_dc_gtm_",
-    "cookielawinfo-", "__cmp", "_hj",
+    "__cmp", "_hj",
 }
 
 -- cookie_key: a cookie name as the app sees it, so a session cookie cannot be
