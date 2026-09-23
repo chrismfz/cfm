@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"time"
@@ -12,14 +13,30 @@ import (
 	"cfm/internal/unblock"
 )
 
+// unblockPart bounds the requests of one unblock.DoMany. A mass unblock is
+// split into even parts of at most this many, each confirmed as soon as it is
+// done, so cfm-web sees progress and a restart mid-way loses one part, not the
+// whole batch. Even parts keep each one of a split batch past 250 requests —
+// far past the batch size up to which every IP gets imunify's white grace
+// entry — so where the split falls never changes who gets it.
+const unblockPart = 500
+
 // ProcessUnblocks unblocks a batch of pending requests — one unblock.DoMany
-// for all their IPs (nft, cfm.deny, csf, fail2ban, imunify, feeds allow, WAF
-// planes) — then confirms each request to the API, success=true always so the
-// queue never sticks. found holds each request's pre-removal locate result
-// (where & why), keyed by request ID; it rides back on the confirm so cfm-web
-// can aggregate fleet-wide findings. cfgDir, when set, has cfm.deny cleaned
-// too (best-effort).
+// per part of up to unblockPart requests (nft, cfm.deny, csf, fail2ban,
+// imunify, feeds allow, WAF planes) — and confirms each part's requests to
+// the API as it finishes, success=true always so the queue never sticks.
+// found holds each request's pre-removal locate result (where & why), keyed
+// by request ID; it rides back on the confirm so cfm-web can aggregate
+// fleet-wide findings. cfgDir, when set, has cfm.deny cleaned too
+// (best-effort).
 func (c *APIClient) ProcessUnblocks(ctx context.Context, be firewall.Backend, cfgDir string, reqs []PendingUnblock, found map[int]*locate.Result) {
+	parts := (len(reqs) + unblockPart - 1) / unblockPart
+	for i := 0; i < parts; i++ {
+		c.processUnblockPart(ctx, be, cfgDir, reqs[i*len(reqs)/parts:(i+1)*len(reqs)/parts], found, fmt.Sprintf("part %d/%d", i+1, parts))
+	}
+}
+
+func (c *APIClient) processUnblockPart(ctx context.Context, be firewall.Backend, cfgDir string, reqs []PendingUnblock, found map[int]*locate.Result, part string) {
 	var ips []net.IP
 	for _, it := range reqs {
 		if ip := net.ParseIP(it.IP); ip != nil {
@@ -29,7 +46,7 @@ func (c *APIClient) ProcessUnblocks(ctx context.Context, be firewall.Backend, cf
 
 	var results map[string]*unblock.Result
 	if be == nil {
-		logging.LogfAPI("[unblock] no backend available for %d IPs", len(ips))
+		logging.LogfAPI("[unblock] no backend available for %d IPs (%s)", len(ips), part)
 	} else if len(ips) > 0 {
 		ttl := 4 * time.Hour  // covers max feed sync interval
 		whiteTTL := time.Hour // imunify grace window, mirrors cfm-web's 1h greylist
@@ -45,7 +62,7 @@ func (c *APIClient) ProcessUnblocks(ctx context.Context, be firewall.Backend, cf
 			ImunifyWhiteTTL: &whiteTTL,
 			WAF:             unblock.WAFCleanerHook(), // clear OpenResty/Lua WAF planes too (nil in DNAT mode)
 		})
-		logging.LogfAPI("[unblock] unblocked %d IPs in %s", len(ips), time.Since(start).Round(time.Millisecond))
+		logging.LogfAPI("[unblock] unblocked %d IPs in %s (%s)", len(ips), time.Since(start).Round(time.Millisecond), part)
 	}
 
 	for _, it := range reqs {

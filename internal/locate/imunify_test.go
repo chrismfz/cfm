@@ -139,13 +139,15 @@ func TestParseImunifyList_ObjectWithoutItems(t *testing.T) {
 // an entry's address can also come as the numeric network_address.
 func TestImunifyIncomplete(t *testing.T) {
 	for raw, want := range map[string]string{
-		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}],"max_count":1}`:                    "",
-		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}]}`:                                  "",
-		`[{"ip":"10.0.0.1","purpose":"drop"}]`:                                            "",
-		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}],"max_count":3}`:                    "it holds 3 entries, 1 returned",
-		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"purpose":"drop"}]}`:               "1 of its entries unreadable",
-		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":"10.0.0.2"}]}`:                "1 of its entries unreadable",
-		`{"items":[{"network_address":167772161,"netmask":4294967295,"purpose":"drop"}]}`: "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}],"max_count":1}`:                                        "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}]}`:                                                      "",
+		`[{"ip":"10.0.0.1","purpose":"drop"}]`:                                                                "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}],"max_count":3}`:                                        "it holds 3 entries, 1 returned",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"purpose":"drop"}]}`:                                   "1 of its entries unreadable",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":"10.0.0.2"}]}`:                                    "1 of its entries unreadable",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":null,"country":{"code":"CN"},"purpose":"drop"}]}`: "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"type":"country","purpose":"white"}]}`:                 "",
+		`{"items":[{"network_address":167772161,"netmask":4294967295,"purpose":"drop"}]}`:                     "",
 	} {
 		items := parseImunifyList([]byte(raw))
 		if got := imunifyIncomplete([]byte(raw), items); got != want {

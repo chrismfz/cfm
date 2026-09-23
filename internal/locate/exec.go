@@ -6,6 +6,7 @@
 package locate
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os/exec"
@@ -54,6 +55,20 @@ func runOut(ctx context.Context, name string, args ...string) ([]byte, error) {
 	}
 	// #nosec G204 -- name is constrained by allowedBinary, args by fixed callsites.
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+// runStdout is runOut with stdout alone, for output that is parsed: a warning
+// on stderr would make it unreadable. stderr comes back for error text.
+func runStdout(ctx context.Context, name string, args ...string) (stdout, stderr []byte, err error) {
+	if !allowedBinary(name) {
+		return nil, nil, errBlockedBinary
+	}
+	var so, se bytes.Buffer
+	// #nosec G204 -- name is constrained by allowedBinary, args by fixed callsites.
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdout, cmd.Stderr = &so, &se
+	err = cmd.Run()
+	return so.Bytes(), se.Bytes(), err
 }
 
 var errBlockedBinary = errors.New("binary not in allowlist")

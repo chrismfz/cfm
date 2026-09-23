@@ -165,7 +165,8 @@ func imunifyArray(raw []byte) (arr []any, total int64, ok bool) {
 // imunifyIncomplete says why a list read may be missing entries, or "": it
 // reached the read's cap, it says it holds more entries than it returned
 // (max_count), or some of its entries couldn't be read (no address or no
-// purpose). An entry missed any of those ways would read as not listed.
+// purpose). An entry missed any of those ways would read as not listed. A
+// country entry has no address and is no such miss: it isn't an IP entry.
 func imunifyIncomplete(raw []byte, items []imunifyItem) string {
 	arr, total, _ := imunifyArray(raw)
 	var why []string
@@ -174,7 +175,7 @@ func imunifyIncomplete(raw []byte, items []imunifyItem) string {
 	} else if total > int64(len(arr)) {
 		why = append(why, fmt.Sprintf("it holds %d entries, %d returned", total, len(arr)))
 	}
-	bad := len(arr) - len(items)
+	bad := len(arr) - len(items) - imunifyCountryEntries(arr)
 	for _, it := range items {
 		if it.Purpose == "" {
 			bad++
@@ -184,6 +185,35 @@ func imunifyIncomplete(raw []byte, items []imunifyItem) string {
 		why = append(why, fmt.Sprintf("%d of its entries unreadable", bad))
 	}
 	return strings.Join(why, "; ")
+}
+
+// imunifyCountryEntries counts the entries that block or allow a country
+// (imunify's "ip-list local … --by-type country"): no address, and a
+// country or a type of "country".
+func imunifyCountryEntries(arr []any) int {
+	n := 0
+	for _, e := range arr {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		var addr, country bool
+		for k, v := range m {
+			switch strings.ToLower(k) {
+			case "ip", "network_address":
+				addr = addr || (v != nil && v != "")
+			case "country":
+				country = country || (v != nil && v != "")
+			case "type":
+				t, _ := v.(string)
+				country = country || strings.EqualFold(t, "country")
+			}
+		}
+		if !addr && country {
+			n++
+		}
+	}
+	return n
 }
 
 // ImunifyEntry is one entry of imunify360's local IP list.
@@ -196,14 +226,17 @@ type ImunifyEntry struct {
 // ImunifyLocalList reads imunify360's local IP list once, up to
 // imunifyListCap entries. incomplete, when not "", says why the list read may
 // be missing entries (imunifyIncomplete).
+//
+// It parses stdout alone: a warning on stderr would make the whole list
+// unreadable, and every unblock would delete blindly.
 func ImunifyLocalList(ctx context.Context) (entries []ImunifyEntry, incomplete string, err error) {
-	out, err := runOut(ctx, "imunify360-agent", "ip-list", "local", "list", "--limit", strconv.Itoa(imunifyListCap), "--json")
+	out, errOut, err := runStdout(ctx, "imunify360-agent", "ip-list", "local", "list", "--limit", strconv.Itoa(imunifyListCap), "--json")
 	if err != nil {
-		return nil, "", fmt.Errorf("%v: %s", err, trimOut(out))
+		return nil, "", fmt.Errorf("%v: %s", err, trimOut(append(errOut, out...)))
 	}
 	items := parseImunifyList(out)
 	if items == nil {
-		return nil, "", fmt.Errorf("unreadable output: %s", trimOut(out))
+		return nil, "", fmt.Errorf("unreadable output: %s", trimOut(append(errOut, out...)))
 	}
 	for _, it := range items {
 		entries = append(entries, ImunifyEntry{Entry: imunifyEntryString(it.IP, it.Netmask), Purpose: it.Purpose, Comment: it.Comment})

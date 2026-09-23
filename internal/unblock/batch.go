@@ -77,13 +77,19 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 		}
 	}
 
-	// 0) Feeds: which feed host sets hold each IP.
+	// 0) Feeds: which feed host sets hold each IP. A set it couldn't read is
+	// an error step: the IP may still be blocked by that feed.
 	t0 := time.Now()
-	for ip, feeds := range feedsBlockingMany(opts.BE, list) {
-		r := out[ip]
-		r.FromFeeds = feeds
-		r.Steps = append(r.Steps, Step{Source: SrcFeeds, Action: ActionChecked, Feeds: feeds, Dur: time.Since(t0)})
-	}
+	feeds, unchecked := feedsBlockingMany(opts.BE, list)
+	each(func(r *Result) {
+		if fks := feeds[r.IP.String()]; len(fks) > 0 {
+			r.FromFeeds = fks
+			r.Steps = append(r.Steps, Step{Source: SrcFeeds, Action: ActionChecked, Feeds: fks, Dur: time.Since(t0)})
+		}
+		if why := unchecked[r.IP.String()]; len(why) > 0 {
+			r.Steps = append(r.Steps, Step{Source: SrcFeeds, Action: ActionError, Detail: "feed sets not checked", Err: strings.Join(why, "; "), Dur: time.Since(t0)})
+		}
+	})
 
 	// 1) nft remove. No EnsureBase: removing needs no base ruleset (without one
 	// there is nothing to remove), and EnsureBase runs dozens of nft processes
@@ -201,9 +207,26 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 			if len(entries) == 0 {
 				continue
 			}
+			errs := make([]error, len(entries))
 			_, err := opts.BE.AddAllowBatch(entries)
-			for _, r := range fromFeeds {
-				if err != nil {
+			for i, e := range entries {
+				if err == nil || len(entries) == 1 {
+					errs[i] = err
+					continue
+				}
+				// One entry per batch, as AddAllow went, so an entry the
+				// batch couldn't write fails alone — until one fails too:
+				// then the set is what fails (each try reads it again), and
+				// the rest keep that error.
+				if _, errs[i] = opts.BE.AddAllowBatch([]firewall.BlockEntry{e}); errs[i] != nil {
+					for j := i + 1; j < len(entries); j++ {
+						errs[j] = errs[i]
+					}
+					break
+				}
+			}
+			for i, r := range fromFeeds {
+				if err := errs[i]; err != nil {
 					r.Steps = append(r.Steps, Step{Source: SrcFeeds, Action: ActionError, Detail: "AddAllow failed", Err: err.Error(), Feeds: r.FromFeeds})
 					continue
 				}
@@ -254,19 +277,24 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 }
 
 // feedsBlockingMany returns, per IP, the feed keys whose per-feed HOST sets
-// hold it. One terse table listing discovers the sets; one IP is probed with
-// HasElem per set (constant time), more read each set once.
-func feedsBlockingMany(be firewall.Backend, ips []net.IP) map[string][]string {
-	out := map[string][]string{}
+// hold it, and the sets it couldn't check for it (why). One terse table
+// listing discovers the sets; one IP is probed with HasElem per set (constant
+// time on exec nft), more read each set once — and when a set can't be read
+// whole, are probed one by one until a probe fails too.
+func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[string][]string) {
+	out, unchecked = map[string][]string{}, map[string][]string{}
 	if be == nil || len(ips) == 0 {
-		return out
+		return out, unchecked
 	}
 	sets, err := listSetNamesByPrefixes(be,
 		"allow_ext_v4_hosts_", "block_ext_v4_hosts_",
 		"allow_ext_v6_hosts_", "block_ext_v6_hosts_",
 	)
 	if err != nil {
-		return out
+		for _, ip := range ips {
+			unchecked[ip.String()] = []string{"listing the feed sets: " + err.Error()}
+		}
+		return out, unchecked
 	}
 	want := map[string]bool{}
 	for _, ip := range ips {
@@ -283,15 +311,28 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) map[string][]string {
 		}
 		seen[ip][fk] = true
 	}
+	probe := func(s string) {
+		for i, ip := range ips {
+			ok, err := be.HasElem(s, ip.String())
+			if err != nil {
+				for _, rest := range ips[i:] {
+					unchecked[rest.String()] = append(unchecked[rest.String()], s+": "+err.Error())
+				}
+				return
+			}
+			if ok {
+				hit(ip.String(), s)
+			}
+		}
+	}
 	for _, s := range sets {
 		if len(ips) == 1 {
-			if ok, _ := be.HasElem(s, ips[0].String()); ok {
-				hit(ips[0].String(), s)
-			}
+			probe(s)
 			continue
 		}
 		elems, err := be.ListSetElementsRaw(s)
 		if err != nil {
+			probe(s)
 			continue
 		}
 		for _, e := range elems {
@@ -306,7 +347,7 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) map[string][]string {
 		}
 		sort.Strings(out[ip])
 	}
-	return out
+	return out, unchecked
 }
 
 // removeFromFileMany drops the lines of cfgDir/filename that list one of ips
@@ -446,7 +487,7 @@ func imunifyUnblockMany(ctx context.Context, list []net.IP, out map[string]*Resu
 			// Deleted below; the run is its step.
 			if len(covers) > 0 {
 				addStep(r, Step{Source: SrcImunify, Action: ActionChecked,
-					Detail: fmt.Sprintf("its own entry is deleted; the covering %s (%s) stays — deleting it would unblock the whole network", covers[0].Entry, covers[0].Purpose)})
+					Detail: fmt.Sprintf("only its own entry is to be deleted; the covering %s (%s) stays — deleting it would unblock the whole network", covers[0].Entry, covers[0].Purpose)})
 			}
 		case len(covers) > 0:
 			addStep(r, Step{Source: SrcImunify, Action: ActionNotFound,
@@ -554,6 +595,11 @@ func imunifyEntryKey(entry string) string {
 	switch ones, bits := n.Mask.Size(); {
 	case bits == 32 && ones == 32:
 		return n.IP.String()
+	case bits == 128 && n.IP.To4() != nil:
+		// An IPv4-mapped network: an IPv4 host only at /128.
+		if ones == 128 {
+			return n.IP.To4().String()
+		}
 	case bits == 128 && ones >= 64:
 		return imunifyKey(n.IP)
 	}

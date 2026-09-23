@@ -73,9 +73,9 @@ type Options struct {
 	ReportWhy     string             // π.χ. "cli" ή "agent"
 	SendAPI       bool               // αν θέλουμε να γίνει report/unblock
 	// ImunifyWhiteTTL, when set, adds an imunify white entry with this TTL
-	// on every unblock (not just feeds-origin ones), except for an IP an
-	// operator's entry already whitelists, an IPv6 IP whose /64 imunify wasn't
-	// blocking,
+	// on every unblock (not just feeds-origin ones), except for an IP (or IPv6
+	// /64) an operator's white entry already lists, an IPv6 IP whose /64
+	// imunify wasn't blocking,
 	// and, in a batch larger than graceBatchMax, an IP imunify wasn't blocking
 	// (imunifyUnblockMany). This is the grace window that stops imunify's own
 	// engine from re-greylisting the visitor seconds after we cleared them —

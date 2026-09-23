@@ -467,3 +467,113 @@ func TestRemoveFromFileMany_IPv6HostSuffix(t *testing.T) {
 		t.Errorf("cfm.deny now %q", b)
 	}
 }
+
+// A country entry has no address and isn't an IP entry: it doesn't make the
+// list incomplete. A warning imunify writes to stderr doesn't make the list
+// unreadable either: only stdout is parsed.
+func TestDoMany_ImunifyCountryEntryAndStderrWarning(t *testing.T) {
+	calls := fakeTools(t, map[string]string{
+		"imunify360-agent": `case "$*" in *" list "*) echo "WARNING: deprecated option" >&2; ` + imunifyList(
+			`{"ip":"10.0.0.1","netmask":4294967295,"purpose":"drop"}`,
+			`{"ip":null,"country":{"code":"CN"},"type":"country","purpose":"drop"}`) + `;; esac`,
+	})
+	res := DoMany(context.Background(), ips("10.0.0.1", "10.0.0.2"), Options{})
+	got := calls()
+	if len(got) != 2 || got[1] != "imunify360-agent ip-list local delete --purpose drop 10.0.0.1" {
+		t.Errorf("imunify runs = %q, want the list then 10.0.0.1's delete alone", got)
+	}
+	if s := stepsOf(res["10.0.0.2"], SrcImunify); len(s) != 1 || s[0].Action != ActionNotFound {
+		t.Errorf("10.0.0.2 imunify steps = %+v, want not listed", s)
+	}
+}
+
+func TestImunifyEntryKey(t *testing.T) {
+	for entry, want := range map[string]string{
+		"198.51.100.1":            "198.51.100.1",
+		"198.51.100.1/32":         "198.51.100.1",
+		"198.51.100.0/24":         "",
+		"2001:db8:1:2::/64":       "2001:db8:1:2::/64",
+		"2001:db8:1:2::7":         "2001:db8:1:2::/64",
+		"2001:db8:1:2::7/128":     "2001:db8:1:2::/64",
+		"2001:db8::/48":           "",
+		"::ffff:198.51.100.1/128": "198.51.100.1",
+		"::ffff:198.51.100.0/120": "",
+		"::ffff:0:0/96":           "",
+		"not an address":          "",
+	} {
+		if got := imunifyEntryKey(entry); got != want {
+			t.Errorf("imunifyEntryKey(%q) = %q, want %q", entry, got, want)
+		}
+	}
+}
+
+// unreadableFeedBackend lists feed sets it can't dump whole; HasElem answers
+// for failAt probes, then fails.
+type unreadableFeedBackend struct {
+	feedBackend
+	holds  string
+	probes int
+	failAt int
+}
+
+func (b *unreadableFeedBackend) ListSetElementsRaw(string) ([]string, error) {
+	return nil, fmt.Errorf("nft -j list set: timed out")
+}
+func (b *unreadableFeedBackend) HasElem(_, elem string) (bool, error) {
+	b.probes++
+	if b.failAt > 0 && b.probes >= b.failAt {
+		return false, fmt.Errorf("nft get element: timed out")
+	}
+	return elem == b.holds, nil
+}
+
+// A feed set that can't be read whole is probed IP by IP; when a probe fails
+// too, the IPs left unprobed get an error step instead of passing for
+// unblocked while the feed may still block them.
+func TestDoMany_FeedSetUnreadable(t *testing.T) {
+	fakeTools(t, map[string]string{})
+	be := &unreadableFeedBackend{holds: "198.51.100.2"}
+	res := DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2", "198.51.100.3"), Options{BE: be})
+	if r := res["198.51.100.2"]; len(r.FromFeeds) != 1 || r.FromFeeds[0] != "MYBLOCK" {
+		t.Errorf("probed feed IP: feeds %v", r.FromFeeds)
+	}
+
+	be = &unreadableFeedBackend{failAt: 2}
+	res = DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2", "198.51.100.3"), Options{BE: be})
+	if be.probes != 2 {
+		t.Errorf("%d probes, want the failing one to stop them", be.probes)
+	}
+	if s := stepsOf(res["198.51.100.1"], SrcFeeds); len(s) != 0 {
+		t.Errorf("198.51.100.1 (probed, not held) feed steps = %+v", s)
+	}
+	for _, ip := range []string{"198.51.100.2", "198.51.100.3"} {
+		if s := stepsOf(res[ip], SrcFeeds); len(s) != 1 || s[0].Action != ActionError || !strings.Contains(s[0].Err, "block_ext_v4_hosts_MYBLOCK: nft get element: timed out") {
+			t.Errorf("%s feed steps = %+v", ip, s)
+		}
+	}
+}
+
+// flakyAllowBackend fails any allow batch of more than one entry, and a
+// single entry for failIP.
+type flakyAllowBackend struct {
+	feedBackend
+	failIP string
+}
+
+func (b *flakyAllowBackend) AddAllowBatch(e []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
+	if len(e) > 1 || e[0].IP.String() == b.failIP {
+		return firewall.BlockBatchResult{}, fmt.Errorf("set changed under every attempt")
+	}
+	return b.feedBackend.AddAllowBatch(e)
+}
+
+// A failed allow batch is retried one entry per batch until one fails too;
+// the entries after that keep its error.
+func TestDoMany_FeedAllowBatchFallsBackPerEntry(t *testing.T) {
+	fakeTools(t, map[string]string{})
+	be := &flakyAllowBackend{feedBackend: feedBackend{feed: []string{"198.51.100.1", "198.51.100.2", "198.51.100.3"}}, failIP: "198.51.100.2"}
+	res := DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2", "198.51.100.3"), Options{BE: be, TempWhitelist: true})
+	if !res["198.51.100.1"].Whitelisted || res["198.51.100.2"].Whitelisted || res["198.51.100.3"].Whitelisted {
+		t.Errorf("whitelisted: %v %v %v; want only the first", res["198.51.100.1"].Whitelisted, res["198.51.100.2"].Whitelisted, res["198.51.100.3"].Whitelisted)
+	}
+}
