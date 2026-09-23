@@ -1485,6 +1485,13 @@ do
                                                "K2 elFinder cmd=ls"},
     {"task=connector&cmd=chmod&target=l1_x&mode=0755",
                                                "K2 elFinder cmd=chmod"},
+    -- WordPress File Manager (wp-file-manager) is elFinder behind its
+    -- admin-ajax action — a site admin was challenged on every delete / new
+    -- folder (glaveris.gr, 2026-08/09). The loop's uri is admin-ajax.php.
+    {"action=mk_file_folder_manager&_wpnonce=970f5f5c75&networkhref=&cmd=rm&targets%5B%5D=l1_cGljdHVyZXMvQUFBQS50eHQ&reqid=1a05c1634a61cc",
+                                               "WP File Manager cmd=rm"},
+    {"action=mk_file_folder_manager&_wpnonce=8e7ce7223e&networkhref=&cmd=mkdir&name=PICTURE2&target=l1_Lw&reqid=1a0479c228d186",
+                                               "WP File Manager cmd=mkdir"},
   }
   for _, c in ipairs(fp_cases) do
     local hit = waf.check(fresh_ctx({ uri = "/wp-admin/admin-ajax.php", args = c[1] }))
@@ -1505,11 +1512,14 @@ do
     {"cmd=cat+/etc/shadow",                    "CMD_CMD",       "F14: weaponized cmd=cat /etc/shadow (path)"},
     {"command=/bin/sh",                        "CMD_COMMAND",   "command=/bin/sh"},
     {"command=curl+http://attacker",           "CMD_COMMAND",   "command=curl+url"},
-    -- The elFinder carve-out is gated on task=connector AND a pristine verb,
-    -- so a still-listed verb (mkdir) without the connector marker, or an
-    -- injection that adds metacharacters / a path / a non-verb word, still
-    -- fires even with task=connector appended as evasion.
-    {"action=mk_file_folder_manager&cmd=mkdir", "CMD_CMD",      "bare cmd=mkdir, no connector"},
+    -- The elFinder carve-out is gated on task=connector (or the WP File
+    -- Manager action ON admin-ajax.php) AND a pristine verb, so a still-listed
+    -- verb (mkdir) without either marker, or an injection that adds
+    -- metacharacters / a path / a non-verb word, still fires even with
+    -- task=connector appended as evasion. (This loop's uri is `/`, so the WP
+    -- File Manager action here is off admin-ajax.php and counts for nothing.)
+    {"action=mk_file_folder_manager&cmd=mkdir", "CMD_CMD",      "WP File Manager action off admin-ajax.php"},
+    {"cmd=mkdir",                              "CMD_CMD",       "bare cmd=mkdir, no connector"},
     {"task=connector&cmd=rm;cat+/etc/passwd",  "CMD_CMD",       "connector evasion + metachar"},
     {"task=connector&cmd=cat+/etc/passwd",     "CMD_CMD",       "connector evasion + path"},
     -- `task` must be a real key == connector; the marker buried in another
@@ -1522,6 +1532,19 @@ do
           "70: TP — " .. c[3] .. " triggers WAF_CMD_PARAM")
     check(reason == "WAF_CMD_PARAM:" .. c[2],
           "70: TP — " .. c[3] .. " tag is " .. c[2] .. " (got " .. tostring(reason) .. ")")
+  end
+
+  -- ON admin-ajax.php the WP File Manager marker still only lets a pristine
+  -- verb through: a weaponized value, or the marker buried in another param's
+  -- value, fires as before.
+  for _, c in ipairs({
+    {"action=mk_file_folder_manager&cmd=rm;cat+/etc/passwd", "WP File Manager + metachar"},
+    {"action=mk_file_folder_manager&cmd=cat+/etc/passwd",   "WP File Manager + path"},
+    {"foo=action=mk_file_folder_manager&cmd=rm",            "action as other param's value"},
+  }) do
+    local hit, reason = waf.check(fresh_ctx({ uri = "/wp-admin/admin-ajax.php", args = c[1] }))
+    check(hit == true and reason == "WAF_CMD_PARAM:CMD_CMD",
+          "70: TP on admin-ajax.php — " .. c[2] .. " (got " .. tostring(reason) .. ")")
   end
 
   -- PHP-function keys still fire on key presence alone — no narrowing.

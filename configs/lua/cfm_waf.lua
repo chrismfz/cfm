@@ -887,7 +887,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_bad_ua, "logonly")
     if mode ~= "disabled" then
-      local score, tag = det.detect_bad_ua_scored(headers, uri, method)
+      local score, tag = det.detect_bad_ua_scored(headers, uri, method, args)
       local threshold = tonumber(CFG.bad_ua_min_score) or 4
       if score >= threshold then
         -- score >= 99 is reserved by detect_bad_ua_scored() for deterministic,
@@ -1612,7 +1612,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_cmd_params, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_cmd_param_key(args, get_norm_args())
+      local tag = det.detect_cmd_param_key(args, get_norm_args(), uri)
       if tag then
         if record("WAF_CMD_PARAM:" .. tag, CFG.default_ttl_sec, mode, RULE_IDS.rule_cmd_params) then goto done end
       end
@@ -1652,10 +1652,14 @@ function _M.check(ctx)
   -- Akeeba Restore endpoints (Joomla core update / Akeeba Backup restore) are
   -- excluded: they legitimately POST a base64 serialized `factory` object every
   -- extraction step, indistinguishable by shape from an attack (FP 2026-07-17).
+  -- So is the same extraction reached through the front controller by Joomla
+  -- 5.4+'s automated updates (index.php?jautoupdate=1) — keyed on the payload,
+  -- not the route (FP 2026-09-21; see is_joomla_autoupdate_request).
   do
     local mode = rule_mode(CFG.rule_php_object_injection, "block")
     if mode ~= "disabled" and not lower(cookie):find("wordpress_logged_in_", 1, true)
-       and not det.is_akeeba_restore_endpoint(uri) then
+       and not det.is_akeeba_restore_endpoint(uri)
+       and not det.is_joomla_autoupdate_request(uri, args, body, headers) then
       local tag = det.detect_php_object_injection(get_norm_ab(), args, body)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
