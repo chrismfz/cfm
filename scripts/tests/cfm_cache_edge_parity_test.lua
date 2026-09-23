@@ -101,7 +101,10 @@ local asked, served = nil, {}
 package.loaded["cfm_cache_log"] = { snapshot_vhosts = function(keys)
   asked = keys
   local out = {}
-  for i, k in ipairs(keys or {}) do out[k] = { HIT = i, MISS = 100 + i }; served[k] = out[k] end
+  for i, k in ipairs(keys or {}) do
+    out[k] = { HIT = i, MISS = 100 + i, BYPASS = 200 + i, EXPIRED = 300 + i, STALE = 400 + i, UPDATING = 500 + i, REVALIDATED = 600 + i }
+    served[k] = out[k]
+  end
   return out
 end }
 _now = 1000
@@ -120,8 +123,12 @@ local pushed_hosts = {}
 for _, r in ipairs((_pushed and _pushed.rows) or {}) do
   pushed_hosts[#pushed_hosts + 1] = r.host
   local want = served[r.host]
-  check(want and type(r.counts) == "table" and r.counts.HIT == want.HIT and r.counts.MISS == want.MISS,
-        "row " .. tostring(r.host) .. " does not carry the counts snapshot_vhosts read for it")
+  local same = want ~= nil and type(r.counts) == "table"
+  if same then
+    for st, v in pairs(want) do if r.counts[st] ~= v then same = false end end
+    for st in pairs(r.counts) do if want[st] == nil then same = false end end
+  end
+  check(same, "row " .. tostring(r.host) .. " does not carry exactly the counts snapshot_vhosts read for it")
 end
 check(sorted(pushed_hosts) == want_keys, "the push carries rows [" .. sorted(pushed_hosts) .. "], daemon armed keys [" .. want_keys .. "]")
 -- ...and it reached the bridge: one POST to /nginx/cache/stats, token and

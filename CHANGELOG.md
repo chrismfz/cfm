@@ -211,9 +211,11 @@ back-filled here — see the git/PR history for that period.
   old 2 MiB limit, which rejected the whole push), and a count cjson writes in
   exponent form (1e14 or more) no longer fails the whole push either. A
   counter also no longer goes missing when two counter keys share a hash:
-  the shared dict's `incr` with an initial value (lua-nginx-module 0.10.26)
-  loses counts in that case, about a 1-in-8 chance per node at 5000 vhosts;
-  the counters now use `incr`, then `add`. The counters of a disarmed vhost
+  the shared dict's `incr` with an initial value (lua-nginx-module 0.10.26,
+  as tested with nginx 1.24; the fleet's OpenResty/Angie builds are not
+  checked yet) can lose counts in that case, up to about a 1-in-8 chance per
+  node at 5000 vhosts with all 7 statuses; the counters now use `incr`, then
+  `add`. The counters of a disarmed vhost
   are no longer pushed. The first edge reload on
   the new config creates the larger dict, so the counters start again from
   zero once.

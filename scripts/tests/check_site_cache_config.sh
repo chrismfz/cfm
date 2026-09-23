@@ -525,7 +525,7 @@ for f in "$ORT" "$ANG"; do
       if (cnt(ltc, "(^|[^a-z0-9_])ngx([^a-z0-9_]|$)") != cnt(ltc, "(^|[^a-z0-9_])ngx[[:space:]]*[.]")) print "ERR inline Lua uses ngx other than as ngx.<field> (ngx[...], an alias, require \"ngx\") — access ngx.var only as ngx.var.<name>."
       if (lt2 ~ /["\047]ngx["\047]/) print "ERR inline Lua names ngx in a string (require \"ngx\", package.loaded[\"ngx\"], _G[\"ngx\"]) — access ngx.var only as ngx.var.<name>."
       if (cnt(ltc, "ngx[[:space:]]*[.][[:space:]]*var([^a-z0-9_]|$)") != cnt(ltc, "ngx[[:space:]]*[.][[:space:]]*var[[:space:]]*[.][[:space:]]*[a-z_]")) print "ERR inline Lua uses ngx.var other than as ngx.var.<name> (a bracket index or an alias) — a computed name could reach a cache rail."
-      if (ltc ~ /ngx[[:space:]]*[.][[:space:]]*var[[:space:]]*[.][[:space:]]*(cfm_|cf_|xfp_)[a-z0-9_]*[[:space:]]*(,[[:space:]]*[(]?[a-z_][a-z0-9_.]*[)]?[a-z0-9_.]*([[][^]=]*[]][a-z0-9_.]*)*[[:space:]]*)*=([^=]|$)/) print "ERR inline Lua assigns an ngx.var.cfm_* / cf_* / xfp_* variable — the cache rails and their inputs are written only by conf statements and cfm_cache.lua."
+      if (ltc ~ /ngx[[:space:]]*[.][[:space:]]*var[[:space:]]*[.][[:space:]]*(cfm_|cf_|xfp_)[a-z0-9_]*[[:space:]]*(,[[:space:]]*[(]?[a-z_][a-z0-9_.]*[)]?[a-z0-9_.]*([[:space:]]*[[][^]=]*[]][a-z0-9_.]*)*[[:space:]]*)*=([^=]|$)/) print "ERR inline Lua assigns an ngx.var.cfm_* / cf_* / xfp_* variable — the cache rails and their inputs are written only by conf statements and cfm_cache.lua."
     }
   ' "$f")
   ncache_of["$f"]=$(sed -n 's/^NCACHE //p' <<< "$parsed")

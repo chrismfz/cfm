@@ -172,6 +172,12 @@ for path in all:lines() do
     check(not c:find("%f[%w_]micro_gate%f[^%w_]") and not cs:find("@cfm_micro_", 1, true),
           path .. " calls micro_gate or names an @cfm_micro_ location (only cfm.lua Step 4 enters micro)")
   end
+  if path ~= "configs/lua/cfm.lua" then
+    -- nor makes an internal redirect at all (cfm_cache.lua included: an exec
+    -- there, reached from anywhere in cfm.lua, would bypass the Step 4 pin)
+    check(not strip(read(path), false):find("ngx%s*%.%s*exec%f[^%w_]"),
+          path .. " uses ngx.exec — only cfm.lua (at Step 4) redirects into micro")
+  end
 end
 all:close()
 
