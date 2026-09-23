@@ -653,8 +653,24 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   and this solve passed it" from "the tier never fired": without it a clean
   armed solve reads exactly like a plain v1 one. `grep 'v2='` is the burn-in
   question "is my newly-armed tier actually covering traffic?"; `grep
-  v2_reject` is "did it bite". Finally `sig=` carries the report AS REPORTED
-  — `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
+  v2_reject` is "did it bite"; `grep v2_waived=` is "which failing solves did
+  it let through as an FCrDNS-verified good bot" (`CHALLENGE_GOODBOT_EXEMPT`;
+  e.g. Google-Read-Aloud, hs=140 from rotating first-seen Google IPs — the
+  gate forward-confirms a crawler-looking PTR inline, bounded, on the reject
+  path only). Only under a geo or vhost arm, the grains the decision-time
+  exemption already softens; a fingerprint policy or a traffic-rule/WAF mark
+  stays strict. The history row carries it as `v2_waived`. The mirror image
+  on a `result=v2_reject` line is `v2_waiver_miss=<why not>`, last on the
+  line and only when the client's PTR claims a crawler: `grain` (the arm is a
+  fingerprint policy or a mark — never waived), `mark` (a geo/vhost arm, but
+  a mark covers the client too), `off` (`CHALLENGE_GOODBOT_EXEMPT = 0`),
+  `spoofed` (the forward-confirm didn't match), `timeout` (no verify slot in
+  time) or `transient` (resolver failure). Without it a Read-Aloud the gate
+  couldn't confirm reads exactly like an impostor; the `challenge_v2_reject`
+  row carries it as `v2_waiver_miss`. A reject with no `ptr=` has no reason
+  either — the PTR wasn't known at verify — and that is NOT evidence the
+  client isn't a crawler. Finally `sig=` carries the report AS REPORTED —
+  `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
   `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
   browser did not report. `mv`/`hc`/`dm`/`dpr`/`raf` are scored by nothing;
   `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, so logging
@@ -665,7 +681,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   populations compare field for field — `detection_history
   type=challenge_v2_reject node="all"` is the fleet FP-hunting query. Every
   solve and reject line also carries `cc=`/`asn=`/`asn_name=`/`ptr=` — at the
-  end of the reject line and of the fallback solved writer, and just before
+  end of the reject line (only `v2_waiver_miss=` follows them) and of the
+  fallback solved writer, and just before
   the legacy ` - (AS…, Country)` tail on the hook-written solved line, which
   stays last for tooling that reads it. That is the client's network
   identity, resolved ONCE at verify without ever blocking it: country/ASN from
