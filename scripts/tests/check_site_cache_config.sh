@@ -17,19 +17,25 @@
 #       set to "0" anywhere in the conf (that flip only ever comes from Lua).
 #     * EVERY location that activates `proxy_cache cfm_static;` (or a
 #       cfm_micro_<n>s bucket) ALSO carries `proxy_cache_bypass $cfm_cache_skip
-#       $http_authorization;` AND `proxy_no_cache $cfm_cache_skip
-#       $cfm_cache_non200 $http_authorization;` — bypass-by-default (serve +
-#       store), the only-200 rail and the credentialed-request rail — plus
-#       buffering ON (nginx stores nothing off it), a key that starts
-#       `g$cfm_cache_gen|$server_addr|`, a bounded proxy_cache_lock_timeout, and
-#       the forwarded-header pins (X-Forwarded-Host = $host, the rest dropped).
-#       Comments are stripped before matching, so a commented-out directive
-#       never satisfies a check.
+#       $cfm_req_auth;` AND `proxy_no_cache $cfm_cache_skip $cfm_cache_non200
+#       $cfm_req_auth;` — bypass-by-default (serve + store), the only-200 rail
+#       and the credentialed-request rail — plus buffering ON (nginx stores
+#       nothing off it), the whole key
+#       `g$cfm_cache_gen|$server_addr|$cf_xfp://$host$request_uri`, the per-tier
+#       proxy_cache_lock_timeout (1s static, 5s micro), and the forwarded-header
+#       pins (X-Forwarded-Host = $host, the rest dropped). Full-line and
+#       after-`;` comments are stripped before matching, so a commented-out
+#       directive never satisfies a check, and the parser must open every
+#       location in the file (a header it cannot read fails, not skips).
+#     * `map $http_authorization $cfm_req_auth` exists with default "1" (so
+#       `Authorization: 0`, which a raw predicate reads as false, still counts).
 #     * the only-200 rail: a `map $upstream_status $cfm_cache_non200` block is
 #       defined AND fed into proxy_no_cache, so a 3xx/4xx/5xx is NEVER stored
 #       whatever the origin sends (a cached 30x once broke webmail/cPanel/SSO).
-#     * Set-Cookie is never added to proxy_ignore_headers (nginx must keep NOT
-#       caching a response that carries Set-Cookie).
+#     * Set-Cookie, Vary and Cache-Control are never added to
+#       proxy_ignore_headers (nginx must keep NOT caching a response that sets a
+#       cookie or says private/no-store, and must keep one copy per Vary
+#       variant), and proxy_cache_methods never lists a non-GET/HEAD method.
 #   parity
 #     * both confs activate proxy_cache on the same number of locations (a cache
 #       location added to one edge but not the other is a drift bug).
@@ -59,12 +65,17 @@ for f in "$ORT" "$ANG"; do
   # tolerates the nested access_by_lua_block { ... } inside the location.
   # Comments are STRIPPED before matching (and before brace counting): the rail
   # comments quote the very directives this checks, so matching raw text let a
-  # commented-out gate pass (verified by mutation). A # inside a quoted value
-  # would truncate the line and fail the check, never pass it.
-  missing=$(awk '
-    { ln=$0; sub(/#.*/,"",ln) }
+  # commented-out gate pass (verified by mutation). Only two comment forms are
+  # stripped — a full-line comment, and a trailing one after a `;` — because a
+  # # can legitimately sit INSIDE a value (a regex location, inline Lua, a
+  # quoted string) and cutting there would hide the rest of the line. The
+  # confs use no other comment form. As a backstop, the number of locations
+  # this parser opens must equal the number of location lines in the file, so
+  # a header it fails to recognise fails the guard instead of going unchecked.
+  parsed=$(awk '
+    { ln=$0; if (ln ~ /^[[:space:]]*#/) ln=""; else sub(/;[[:space:]]*#.*$/,";",ln) }
     !loc && ln ~ /^[[:space:]]*location[[:space:]].*\{/ {
-      loc=1; body=ln "\n"; locline=NR
+      loc=1; body=ln "\n"; locline=NR; nloc++
       t=ln; o=gsub(/\{/,"",t); u=ln; c=gsub(/\}/,"",u); d=o-c
       next
     }
@@ -81,20 +92,25 @@ for f in "$ORT" "$ANG"; do
           # Request-identity rails (see the http-level note in the confs). nginx
           # does NOT bypass on Authorization by itself, so a credentialed 200
           # (basic auth / Directory Privacy) would be replayed to anonymous
-          # visitors: $http_authorization must ride BOTH predicates.
-          if (body !~ /proxy_cache_bypass[[:space:]][^;]*\$http_authorization/) m=m " proxy_cache_bypass-$http_authorization(credentialed-response-could-be-served)"
-          if (body !~ /proxy_no_cache[[:space:]][^;]*\$http_authorization/)     m=m " proxy_no_cache-$http_authorization(credentialed-response-could-be-stored)"
-          # The key must lead with the purge generation (else purge is a silent
-          # no-op) and carry the destination IP (the origin is chosen by it, so a
-          # request to another IP with a spoofed Host would poison this vhost).
-          if (body !~ /proxy_cache_key[[:space:]]+"g[$]cfm_cache_gen[|][$]server_addr[|]/) m=m " proxy_cache_key-must-start-g$cfm_cache_gen|$server_addr|"
-          # Bounded lock wait: without it a burst on an uncacheable key queues
-          # at 500ms steps up to the 5s default.
-          if (body !~ /proxy_cache_lock_timeout[[:space:]]+[0-9]+(ms|s)?[[:space:]]*;/) m=m " missing-proxy_cache_lock_timeout"
+          # visitors: $cfm_req_auth (a map on $http_authorization, so the value
+          # "0" still counts) must ride BOTH predicates.
+          if (body !~ /proxy_cache_bypass[[:space:]][^;]*\$cfm_req_auth[[:space:];]/) m=m " proxy_cache_bypass-$cfm_req_auth(credentialed-response-could-be-served)"
+          if (body !~ /proxy_no_cache[[:space:]][^;]*\$cfm_req_auth[[:space:];]/)     m=m " proxy_no_cache-$cfm_req_auth(credentialed-response-could-be-stored)"
+          # The WHOLE key is pinned: purge generation first (else purge is a
+          # silent no-op), the destination IP (the origin is chosen by it, so a
+          # request to another IP with a spoofed Host would poison this vhost),
+          # the scheme the origin is told ($cf_xfp), then host and full URI
+          # (dropping either shares one copy across vhosts or URLs).
+          if (body !~ /proxy_cache_key[[:space:]]+"g[$]cfm_cache_gen[|][$]server_addr[|][$]cf_xfp:\/\/[$]host[$]request_uri"[[:space:]]*;/) m=m " proxy_cache_key-must-be-g$cfm_cache_gen|$server_addr|$cf_xfp://$host$request_uri"
+          # Lock wait, per tier: it must outlast the fill (else a cold-key burst
+          # all reaches the origin) yet bounds the queue on an uncacheable key.
+          # Static files fill fast: 1s. HTML renders slowly: 5s.
+          if (body ~ /proxy_cache[[:space:]]+cfm_static[[:space:]]*;/ && body !~ /proxy_cache_lock_timeout[[:space:]]+1s[[:space:]]*;/)            m=m " static-proxy_cache_lock_timeout-must-be-1s"
+          if (body ~ /proxy_cache[[:space:]]+cfm_micro_[0-9]+s[[:space:]]*;/ && body !~ /proxy_cache_lock_timeout[[:space:]]+5s[[:space:]]*;/)   m=m " micro-proxy_cache_lock_timeout-must-be-5s(cold-fill-stampede)"
           # Forwarded headers an app may build URLs or routes from are not in the
           # key: X-Forwarded-Host is pinned to $host and the rest are dropped.
           if (body !~ /proxy_set_header[[:space:]]+X-Forwarded-Host[[:space:]]+\$host[[:space:]]*;/) m=m " X-Forwarded-Host-not-pinned-to-$host"
-          nh=split("X-Forwarded-Server X-Forwarded-Port X-Forwarded-Scheme X-Forwarded-Prefix X-Forwarded-Ssl X-Host X-Original-Host X-Original-URL X-Rewrite-URL Forwarded Front-End-Https X-Url-Scheme X-HTTP-Method-Override X-HTTP-Method X-Method-Override", H, " ")
+          nh=split("X-Forwarded-Server X-Forwarded-Port X-Forwarded-Scheme X-Forwarded-Protocol X-Forwarded-Prefix X-Forwarded-Ssl X-Forwarded-Uri X-Forwarded-Path X-Host X-Original-Host X-Original-URL X-Original-Uri X-Rewrite-URL Forwarded Front-End-Https X-Url-Scheme X-Scheme X-HTTP-Method-Override X-HTTP-Method X-Method-Override", H, " ")
           for (i=1; i<=nh; i++) {
             if (body !~ ("proxy_set_header[[:space:]]+" H[i] "[[:space:]]+\"\"[[:space:]]*;")) m=m " " H[i] "-not-dropped"
           }
@@ -132,7 +148,14 @@ for f in "$ORT" "$ANG"; do
         loc=0; body=""
       }
     }
+    END { print "__NLOC__ " nloc+0 }
   ' "$f")
+  nloc_parsed=$(sed -n 's/^__NLOC__ //p' <<< "$parsed")
+  missing=$(grep -v '^__NLOC__ ' <<< "$parsed" || true)
+  nloc_file=$(grep -Ec '^[[:space:]]*location[[:space:]]' "$f" || true)
+  if [ -z "$nloc_parsed" ] || [ "$nloc_parsed" != "$nloc_file" ]; then
+    err "$f: the location parser opened ${nloc_parsed:-?} locations but the file has $nloc_file location lines — a header it cannot recognise (e.g. { on the next line, or a comment form it does not strip) would go UNCHECKED; fix the conf or the parser."
+  fi
   if [ -n "$missing" ]; then
     while IFS= read -r linfo; do
       err "$f: cache $linfo — a proxy_cache location is missing a required directive (no bypass gate → unconditional caching; buffering off → nginx silently caches NOTHING)."
@@ -163,6 +186,20 @@ for f in "$ORT" "$ANG"; do
     err "$f: \$cfm_cache_non200 is never fed into a proxy_no_cache directive — non-200 responses could be stored."
   fi
 
+  # Credentialed-request rail: the map the cache predicates key on. A predicate
+  # treats "0" as false, so the map (any non-empty Authorization → "1") is what
+  # makes "Authorization: 0" bypass too; it must exist and default to "1".
+  auth_map=$(awk '
+    /^[[:space:]]*map[[:space:]]+\$http_authorization[[:space:]]+\$cfm_req_auth[[:space:]]*\{/ { inm=1; next }
+    inm && /^[[:space:]]*\}/ { inm=0 }
+    inm { sub(/#.*$/,""); gsub(/[[:space:]]+/," "); print }
+  ' "$f")
+  if ! grep -Eq '^[[:space:]]*map[[:space:]]+\$http_authorization[[:space:]]+\$cfm_req_auth[[:space:]]*\{' "$f"; then
+    err "$f: no 'map \$http_authorization \$cfm_req_auth { … }' — the credentialed-request rail the cache predicates key on is undefined."
+  elif ! grep -Eq '^ ?default "1"; ?$' <<< "$auth_map" || ! grep -Eq '^ ?"" ""; ?$' <<< "$auth_map"; then
+    err "$f: \$cfm_req_auth map must be exactly: default \"1\" (any Authorization → bypass) and \"\" \"\" (none) — got: $(tr '\n' '|' <<< "$auth_map")"
+  fi
+
   # ── (b2) Tier B micro-cache zones (Phase B1): all six TTL buckets declared ───
   # Each zone's dir must exist before `-t` (the daemon + installers provision all
   # six), and a partial set would [emerg] at reload the moment a location names a
@@ -186,6 +223,22 @@ for f in "$ORT" "$ANG"; do
   fi
   if grep -Eiq '^[[:space:]]*proxy_ignore_headers[[:space:]].*Set-Cookie' "$f"; then
     err "$f: proxy_ignore_headers lists Set-Cookie — nginx would then CACHE responses that set a cookie (session leak). Never do this in a cache path."
+  fi
+  # Vary: ignoring it stores ONE variant (one language, one encoding, one
+  # mobile/desktop page) and serves it to every client.
+  if grep -Eiq '^[[:space:]]*proxy_ignore_headers[[:space:]].*[[:space:]]Vary([[:space:];]|$)' "$f"; then
+    err "$f: proxy_ignore_headers lists Vary — nginx would store one variant and serve it to every client. Never do this in a cache path."
+  fi
+  # Cache-Control: the origin's private / no-store / no-cache is the §4 rail
+  # that keeps per-user pages out. Ignoring it needs a REPLACEMENT rail (a map
+  # on the origin Cache-Control fed into proxy_no_cache) in the same change.
+  if grep -Eiq '^[[:space:]]*proxy_ignore_headers[[:space:]].*Cache-Control' "$f"; then
+    err "$f: proxy_ignore_headers lists Cache-Control — the origin's private/no-store would no longer keep per-user pages out. Add a replacement rail and update this guard in the same change."
+  fi
+  # GET/HEAD only (the nginx default): a cached POST replays one form submission
+  # result to everyone.
+  if grep -Eiq '^[[:space:]]*proxy_cache_methods[[:space:]].*(POST|PUT|PATCH|DELETE)' "$f"; then
+    err "$f: proxy_cache_methods lists a non-GET/HEAD method — a cached POST/PUT result would be served to every client."
   fi
 done
 
@@ -262,4 +315,4 @@ if [ "$fail" -ne 0 ]; then
   echo "[site-cache-config] FAILED — see errors above (invariant: caching is bypass-by-default; the gate must come from Lua)." >&2
   exit 1
 fi
-echo "[site-cache-config] OK: cfm_static zone declared, Tier B micro buckets {1,2,5,10,30,60}s (zone + internal @cfm_micro_<n>s location) declared in both confs, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered + (micro) internal, only-200 rail (\$cfm_cache_non200) enforced, request-identity rails (Authorization bypass, g\$cfm_cache_gen|\$server_addr| key, lock_timeout, forwarded headers pinned) on every cache location, Set-Cookie never ignored, openresty↔angie parity ($ort_n static locations)."
+echo "[site-cache-config] OK: cfm_static zone declared, Tier B micro buckets {1,2,5,10,30,60}s (zone + internal @cfm_micro_<n>s location) declared in both confs, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered + (micro) internal, only-200 rail (\$cfm_cache_non200) enforced, request-identity rails (\$cfm_req_auth bypass + map, full g\$cfm_cache_gen|\$server_addr|\$cf_xfp:// key, per-tier lock_timeout, forwarded headers pinned) on every cache location, every location parsed, Set-Cookie/Vary/Cache-Control never ignored, GET/HEAD-only cache methods, openresty↔angie parity ($ort_n static locations)."

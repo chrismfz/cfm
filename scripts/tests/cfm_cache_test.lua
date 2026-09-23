@@ -286,6 +286,10 @@ do
   check(ok10 == false and r10 == "authorization", "Authorization wins over an otherwise-anonymous cookie set")
   local ok11, bkt11 = dec(armed("5s"), "GET", "/", nil, "")
   check(ok11 == true and bkt11 == 5, "empty Authorization value does not count as credentialed")
+  -- "0" is still a credential here (the conf-side $cfm_req_auth map agrees; a
+  -- raw nginx predicate would have read "0" as false).
+  local ok13, _, r13 = dec(armed("5s"), "GET", "/", nil, "0")
+  check(ok13 == false and r13 == "authorization", "Authorization: 0 → bypass:authorization (matches the conf map)")
   local ok12, _, r12 = dec(armed("5s"), "POST", "/", nil, "Basic eDp5")
   check(ok12 == false and r12 == "method", "method rail still reported first for a credentialed POST")
 end

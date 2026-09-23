@@ -35,41 +35,60 @@ back-filled here — see the git/PR history for that period.
   The real fix is the WordPress update (7.1.2 / 7.0.6 / 6.9.9 … 4.7.37).
   Setting `register_argc_argv = Off` removes the RCE step on hosts whose sites
   cannot be updated.
-- **Site Cache: a cached response can no longer depend on who asked (both
-  tiers).** Four gaps let a response meant for one client be stored and served
-  to everyone on an armed vhost. Tier A (static assets) was live-affected; Tier
-  B was not, because micro-cache enforcement is off by default.
-  - **`Authorization` is never read from or stored in the cache.** nginx does
-    not bypass on it by itself, so on a folder protected with HTTP basic auth
-    (cPanel *Directory Privacy*) the owner's logged-in fetch of
-    `/private/logo.png` was stored and then served to anonymous visitors. Every
-    cache location now carries `$http_authorization` on `proxy_cache_bypass`
-    and `proxy_no_cache`. Micro-cache also refuses to route such a request
-    (`microcache=bypass:authorization` in the debug header).
-  - **The destination IP is in the cache key.** The origin is chosen by the
-    server IP, so on a multi-IP server a request to IP B with `Host: victim`
-    got B's default vhost and stored it under victim's key. The key is now
-    `g<gen>|<server IP>|<scheme>://<host><uri>`. Existing entries become
-    unreachable, so the first request to each armed vhost after the upgrade
-    is a one-time MISS.
-  - **Forwarded headers are pinned in cache locations.** `X-Forwarded-Host` is
-    set to the real host, and `Forwarded`, `X-Original-URL`, `X-Rewrite-URL`,
-    `X-Forwarded-Server/-Port/-Scheme/-Prefix/-Ssl`, `X-Host` and the
-    method-override headers are no longer passed. An app that builds absolute
-    URLs from them (common behind "trusted proxy: *") could otherwise be made to
-    cache a page that loads the attacker's scripts.
-  - **The anti-stampede lock wait is capped at 1s** (`proxy_cache_lock_timeout`).
-    A burst on a URL that turns out uncacheable (it sets a cookie, is `no-store`,
-    or is a popular 404) was served one request at a time at 500 ms steps, up
-    to 5 s for the tenth client.
+- **Site Cache: closed four ways a response meant for one client was cached
+  and served to everyone (both tiers).** Tier A (static assets) was affected
+  live on armed vhosts. Tier B was not, because micro-cache enforcement is off
+  by default.
+  - **A request with `Authorization` is never served from, or stored in, the
+    cache.** nginx does not bypass on this header by itself. On a folder
+    protected with HTTP basic auth (cPanel *Directory Privacy*), the owner's
+    logged-in fetch of `/private/logo.png` was stored and then served to
+    anonymous visitors. Every cache location now bypasses and refuses to store
+    when the header is present, including `Authorization: 0`, which a plain
+    nginx predicate would read as false. Micro-cache also refuses to route such
+    a request (`microcache=bypass:authorization` in the debug header).
+  - **The server IP and the scheme the origin is told are now in the cache
+    key.** The origin is chosen by the server IP. On a multi-IP server, a
+    request to IP B with `Host: victim` got B's default vhost and stored it
+    under victim's key. Behind a trusted peer (Cloudflare Flexible SSL), http
+    and https answers also shared one copy.
+    - New key: `g<gen>|<server IP>|<X-Forwarded-Proto scheme>://<host><uri>`.
+    - Existing entries become unreachable, so each cached URL takes one MISS
+      after the upgrade.
+  - **Forwarded headers are pinned for every request through a cache
+    location**, including static assets of vhosts that are not armed.
+    `X-Forwarded-Host` is set to the real host. `Forwarded`, `X-Original-URL`,
+    `X-Rewrite-URL`, `X-Forwarded-Server/-Port/-Prefix`, `X-Host`, the
+    method-override headers and similar URL-building headers are no longer
+    passed; the full list is in `docs/site-cache-design.md` §4. An app that
+    builds absolute URLs from them (common behind "trusted proxy: \*") could
+    otherwise be made to cache a page that loads the attacker's scripts. The
+    list covers the known headers and is not exhaustive.
+  - **The anti-stampede lock wait is now set per tier.** On a key whose response
+    turns out to be uncacheable (it sets a cookie, is `no-store`, or is a popular
+    404), nginx serves waiters one at a time in 500 ms steps until the wait
+    expires. The default wait was 5 s.
+    - **Tier A: 1 s.** Static files fill fast.
+    - **Tier B: stays at 5 s.** When the wait expires, every waiter goes to the
+      origin. With 1 s, a cold 20-client burst on a 2.5 s page sent all 20 to
+      the origin; with 5 s it sends one. The uncacheable queue on Tier B stays
+      until micro-cache learns to skip keys it has seen fail to cache.
 
-  All four were reproduced on stock nginx against the old rails and shown
-  closed by the new ones. `check_site_cache_config.sh` now pins them in every
-  cache location. It also strips comments before matching, so a
-  commented-out gate no longer passes. Still out of reach at the edge: an
-  origin that answers `200` differently by client IP (`Require ip`, IP
-  Blocker) or by `Referer`. Don't arm a vhost whose pages are gated that way.
-  Non-200 answers were already never stored, so a cached throttle
+  All four leaks were reproduced on stock nginx against the old rails and
+  shown closed by the new ones. `check_site_cache_config.sh` now enforces them
+  in every cache location. It also:
+  - pins the whole cache key;
+  - fails if `proxy_ignore_headers` lists `Vary` or `Cache-Control`, or if
+    `proxy_cache_methods` lists POST;
+  - strips comments before matching, so a commented-out gate no longer passes;
+  - fails if any location header is not recognised, so no location goes
+    unchecked.
+
+  The edge still cannot see an origin that answers `200` differently by client
+  IP (`Require ip`, IP Blocker), by `Referer`, or by `User-Agent` / `Accept` /
+  `Accept-Language` without sending `Vary`. On a cold key, an attacker can be
+  the first client. Don't arm a vhost whose pages are gated or negotiated this
+  way. Non-200 answers were already never stored, so a cached throttle
   (`429`/`503`) cannot recur.
 
 ### Added
