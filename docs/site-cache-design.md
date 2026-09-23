@@ -13,9 +13,8 @@ stats, purge, turning Tier B on, incidents — is
   `MICRO_CACHE_ENFORCE = 1` (after §5.7); purge (generation bump); per-vhost
   stats (§11); the read-only MCP tools `site_cache_status` /
   `site_cache_stats`; the audit log; cache-dir provisioning; the CI guard
-  (§13).
-- **Not built:** the cfm-admin page and its recipe catalog (§7.3, §8 — the
-  last item of the sweep), per-URL purge, static TTL buckets (§5.4), durable
+  (§13); the cfm-admin **Site cache** page with its recipe catalog (§7.3, §8).
+- **Not built:** per-URL purge, static TTL buckets (§5.4), durable
   or historical stats, micro-cache on the Step 2b clearance fast path (§5.5),
   the `Vary: Cookie` bypass (§5.5 item 3), the `whats_wrong` "armed but ~0
   hits" signal, the §12 "planned" knobs.
@@ -23,9 +22,9 @@ stats, purge, turning Tier B on, incidents — is
 The feature lets an operator (and a scoped cPanel user, for their own domains,
 through the API) turn caching **on per vhost** — static-asset cache and/or
 short micro-cache of anonymous pages — pick a TTL, **purge** (global or per-vhost), and
-see per-vhost state and effectiveness. Managed from the API and the CLI
-(`cfm webtop site-cache …`), read through MCP; the cfm-admin page is planned
-(§7.3).
+see per-vhost state and effectiveness. Managed from the cfm-admin **Site
+cache** page (§7.3), the API and the CLI (`cfm webtop site-cache …`), read
+through MCP.
 
 ---
 
@@ -483,9 +482,11 @@ unparseable TTL gets the 1 s bucket.
 **Micro — recommended presets AND custom, both work.** The micro bucket set is
 **`{1, 2, 5, 10, 30, 60}s`** (6 tiny zones). *As built* the TTL comes only from
 the tier's `ttl` (`--micro-ttl`); a recipe name does not set it, so a micro
-tier without a TTL gets the 1 s bucket. The planned UI (§7.3) offers:
-- **Recommended presets:** `micro_safe → 1s`, `micro_aggressive → 10–30s`.
-- **Custom TTL field:** the operator types a value; it **snaps to the nearest
+tier without a TTL gets the 1 s bucket. *As built*, the cfm-admin page (§7.3)
+offers the six buckets as its TTL menu (a stored TTL that is not a bucket is
+kept and shown with the bucket it runs as), and its recipes (§8) the presets:
+- **Recommended presets:** `micro_safe → 1s`, `micro_aggressive → 10s / 30s`.
+- **Custom TTL (CLI):** `--micro-ttl` takes any TTL; it **snaps to the nearest
   bucket**. For micro-cache (herd protection), the difference between 7s and 8s
   is operationally meaningless, so the snapped set behaves as effectively
   continuous — "custom" is honoured without fighting nginx. Per-vhost choice
@@ -860,32 +861,64 @@ cfm webtop site-cache purge <host>        # or: purge --all
 cfm webtop site-cache stats [host]        # hit-ratio + HIT/MISS/BYPASS breakdown
 ```
 
-### 7.3 cfm-admin page "Site Cache"
+### 7.3 cfm-admin page "Site cache"
 
-> **Not built yet** (the last item of the sweep). Until it lands, the API,
-> the CLI and the read-only MCP tools (`site_cache_status`,
-> `site_cache_stats`) are the surfaces; a scoped cPanel user reaches it only
-> through the API. The plan below stands.
+*As built*: `/cfm-admin/webdetector/site-cache/`, under "Rules & engine" in the
+sidebar (and "Site cache for <host>" in the Ctrl-K palette; `?vhost=` filters
+the list). Multi-page app, directory-routed (`internal/webui/embed.go`),
+modelled on **Challenge-Access**. Files: `static/webdetector/site-cache/index.html`,
+`assets/webdet/pages/site-cache.js`, `assets/webdet/feature-site-cache.js`
+(the Vue mixin), `assets/webdet/site-cache-model.js` and
+`assets/webdet/site-cache-recipes.js` (pure, each with a `.test.js`). The page
+has:
 
-Multi-page app, directory-routed (`internal/webui/embed.go`). Template =
-**Challenge-Access** (per-vhost + scoped + recipes). Files to add:
-`static/webdetector/site-cache/index.html`, `assets/webdet/pages/site-cache.js`,
-`assets/webdet/feature-site-cache.js`, `assets/webdet/site-cache-model.js`
-(+`.test.js`), `assets/webdet/site-cache-recipes.js` (+`.test.js`). One
-`MENU_GROUPS` item in `nav.js` under "Rules & engine". The page has:
+- **callouts** saying what each tier does and never does, and, for an admin,
+  the node's `SITE_CACHE` / `MICRO_CACHE_ENFORCE` (read from
+  `GET /api/v1/detectors/config?view=merged`, admin-only, at most once a
+  minute): the micro tier reads "dry run" until the node enforces it, and a
+  `SITE_CACHE = 0` node gets a danger banner;
+- an **editor**: the host (exact or `*.suffix`), the static tier (on + recipe
+  label), the micro tier (on, the TTL as a bucket menu, the recipe label, auth
+  cookies, strict), a plain-language review sentence, and errors / warnings.
+  The model validates what the daemon validates (host, TTL, recipe, cookie
+  names, 32-name cap) and warns about what an operator should know: an
+  opt-out, a TTL that snaps, a re-enable that starts the cache over, a host a
+  wildcard covers. The save sends a merge patch (§6): `enabled` for both
+  tiers, a tier's recipe / TTL only while it is on (a disabled tier keeps its
+  stored recipe), never the static TTL label;
+- **Check one URL**: the §11.3 debug-stamp `curl` for a vhost and path, built
+  only for a valid host, with what the stamp's fields mean;
+- the **policy table** with quick filters (static / micro / opt-out), a vhost
+  filter (its own policy and every wildcard covering it), search and **sort**
+  (host, tiers, micro TTL, cache since = the generation's time, updated,
+  HIT %); per row **Edit**, **Check**, **Purge**, **Turn off** (the opt-out:
+  `set` with both tiers off, §6) and a separate, labelled **Delete** (`remove`:
+  a covering wildcard applies again, and a purge is no longer possible), each
+  confirmed; **Purge all** for an admin only; the unloadable hosts with Turn off
+  / Delete;
+- a **Recipes** panel (§8) with a per-vhost preview ("new policy" / "updates
+  the existing policy" / "starts its cache over");
+- a **Hit counts** table: the §11 breakdown per armed policy key.
 
-- a vhost table with **filter + sort** (host, tier(s) on, recipe, TTL, gen,
-  updated, HIT-ratio), a per-row **OFF** and **Purge**, and a top-level
-  **Purge all** (admin). OFF is the opt-out (`set` with both tiers off, §6),
-  not a delete — a delete (`remove`) lets a covering wildcard cache the vhost
-  again, so if the page offers it at all, it is a separate, labelled action;
-- a **Recipes** panel (§8). Per-URL verification is done with the
-  `X-CFM-Cache` debug header (§8, §11.3), not a simulate panel.
+A new micro tier on a node that enforces it asks for confirmation (the
+switches are known to an admin only). Per-URL verification is the
+`X-CFM-Cache` debug header (§8, §11.3), not a simulate panel.
 
-Scoped filtering: leave `site-cache` **out** of `ADMIN_ONLY_NAV_PATHS`
-(`controller-bootstrap.js`) so scoped cPanel users keep the link, and add
-`v1/site-cache/` to `isScopedSelfServiceWrite` (`core.js`). Backends still
-fail-closed regardless of the UI.
+Scoped users: `site-cache` stays **out** of `ADMIN_ONLY_NAV_PATHS`
+(`controller-bootstrap.js`), and `v1/site-cache/` is in both the viewer write
+guard and `isScopedSelfServiceWrite` (`core.js`), like `v1/http3/`: a scoped
+token manages its own vhosts from the page, the editor starts on its vhost
+when it has one, an out-of-scope host is refused before the request, and
+Purge all and the node switches are not shown. The backends still fail
+closed regardless of the UI.
+
+**Parity:** the model is a second copy of daemon and edge rules, so it is
+pinned. `site-cache-model.test.js` reads the recipe vocabularies and the limits
+from `site_cache.go` and `MICRO_BUCKETS` from `cfm_cache.lua`, and
+`scripts/tests/fixtures/site_cache_ui_parity.txt` holds TTL, bucket, host and
+cookie cases that three tests run: the page's model (JS), the daemon's set
+path (`site_cache_ui_parity_test.go`) and the edge's bucket snapping
+(`cfm_cache_ui_parity_test.lua`).
 
 ### 7.4 Bridge (daemon↔edge, `nginx_bridge.go`)
 
@@ -914,22 +947,28 @@ fail-closed regardless of the UI.
 > for micro, its `ttl`, snapped to a bucket (empty = 1 s; §5.4) — so
 > `micro_aggressive` without `--micro-ttl` behaves as 1 s, every static recipe
 > behaves the same (origin headers, 1 h fallback), and `fullpage_advanced` is an
-> ordinary micro label, accepted and clamped to 60 s. The front-end catalog
-> planned below (TTL presets per recipe) comes with the cfm-admin page (§7.3).
+> ordinary micro label, accepted and clamped to 60 s. The page's recipes
+> below therefore always send the micro TTL.
 
-Recipes are planned as a **front-end catalog** (each `build(vars)` emits ordinary CRUD
-payloads), exactly like `CA_RECIPES` (`challenge-access-recipes.js`). Catalog:
+The stored vocabulary: `static_lean`, `static_aggressive` (static);
+`micro_safe`, `micro_aggressive`, `micro_custom`, `fullpage_advanced` (micro).
+`fullpage_advanced` was planned as a disabled, hours-long full-page tier; it
+was not built, so the page offers it only on an entry that already has it.
 
-| Key | Tier | TTL | Ships | For |
-|---|---|---|---|---|
-| `static_lean` | static | 1h | enabled | the safe default for most sites |
-| `static_aggressive` | static | 7–30d + `immutable` | enabled | asset-heavy sites |
-| `micro_safe` | micro | 1s, `use_stale updating` | enabled | heavy pages / bursts (`myip.gr`) |
-| `micro_aggressive` | micro | 10–30s (stale served while one request refreshes, and while the origin fails — §4) | enabled | near-static pages |
-| `micro_custom` | micro | operator TTL (bucket) | enabled | full control |
-| `fullpage_advanced` | micro-zone, long TTL | hours | **DISABLED** | advanced, purge-aware only |
+*As built*, the recipes are a **front-end catalog** in
+`site-cache-recipes.js`, like `CA_RECIPES` (`challenge-access-recipes.js`):
+each `build(vars)` emits one ordinary `set` patch per vhost. `set` merges, so
+a recipe changes only the tier it names:
 
-A vhost can combine **one static + one micro** recipe.
+| Recipe (page) | Sets | For |
+|---|---|---|
+| Cache static assets | static on, `static_lean` | the usual first step |
+| Burst shield (micro-cache 1 s) | micro on, `micro_safe`, `1s` | heavy pages / bursts (`myip.gr`) |
+| Near-static pages | micro on, `micro_aggressive`, `10s` or `30s` | pages that rarely change |
+| Static assets + burst shield | both of the above | |
+| Never cache this host (opt-out) | both tiers off | a sub-host under an armed wildcard |
+
+A vhost can combine **one static + one micro** tier.
 
 **No Simulate.** Unlike traffic rules (where a wrong rule silently blocks
 legitimate traffic — hard to spot, high blast radius), a caching mistake is
@@ -970,8 +1009,8 @@ reuses the tested precedent verbatim:
   scoped caller purges one named in-scope host at a time (`?host=` is
   required).
 - There is no switch for scoped self-service (the planned
-  `SITE_CACHE_SCOPED` was not built): it is always on, through the API only
-  until the cfm-admin page lands (§7.3).
+  `SITE_CACHE_SCOPED` was not built): it is always on, through the API and
+  the cfm-admin page (§7.3).
 
 Because the §4 rails are absolute, a tenant's "aggressive" choice can still only
 ever cache their own anonymous, cookieless, non-redirect 200s — so full
@@ -1004,8 +1043,8 @@ scoped-allowed (own host); purge-all = admin-only.
   scheme told to the origin, since all three are in the key.)
 - **Surfaces:** `POST /api/v1/site-cache/purge?host=` (per-vhost; admin or the
   owning scoped user) and `?all=1` (global; admin). CLI `purge <host>` /
-  `purge --all`. (cfm-admin per-row **Purge** + top **Purge all** come with
-  the page, §7.3.)
+  `purge --all`. cfm-admin: a per-row **Purge** and, for an admin, **Purge
+  all** (§7.3).
 - **Latency:** a purge is only the new generation in the store; each edge
   worker applies it on its next feed poll, within about 60 s (the poll is
   triggered by traffic). Until then that worker still serves the old objects.
@@ -1037,7 +1076,7 @@ scoped-allowed (own host); purge-all = admin-only.
 Per-vhost cache effectiveness, for the admin (all vhosts) and a scoped user
 (their own). Cheap: every counter is incremented in the http-level
 `log_by_lua`, which runs **after** the response is served. *As built* it is a
-**live totals view** — nothing is persisted, and there is no cfm-admin view yet.
+**live totals view** — nothing is persisted. The cfm-admin page shows it (§7.3).
 
 ### 11.1 Edge counters (live, in-memory)
 
@@ -1096,8 +1135,8 @@ This store is what the API and MCP read, so scoping is enforced daemon-side.
   in-scope host that resolves to nothing returns `rows: null`).
 - **CLI:** `cfm webtop site-cache stats [host]`. **MCP:** `site_cache_stats`
   (and `site_cache_status` for the policies).
-- **cfm-admin:** a hit-ratio column + per-vhost detail card — planned with the
-  page (§7.3).
+- **cfm-admin:** a HIT % column in the policy table and a Hit counts table
+  with the full breakdown (§7.3).
 - **Debug stamp** `X-CFM-Cache: observe [opt-out ]static=<r>/<ttl>
   micro=<r>/<ttl> gen=<n> [status=<cache status>] [microcache=would/<n>s |
   microcache=bypass:<reason>]`, only on a request that sends
@@ -1376,8 +1415,8 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      writes); the daemon caps it at 4 MiB and reads a count cjson writes in
      exponent form (1e14 or more) as a number, clamped to 2^53, instead of
      failing the whole push. **v1 scope:** a live totals view (counts since the edge last
-     restarted — a reload keeps them, unless it changes the dict's size), not hour-bucketed history, and no cfm-admin column yet — both
-     follow-ups. **Deferred to a focused follow-up:** the `whats_wrong`
+     restarted — a reload keeps them, unless it changes the dict's size), not hour-bucketed history — a follow-up
+     (the cfm-admin HIT % column came with item 5). **Deferred to a focused follow-up:** the `whats_wrong`
      "armed but ~0 hits" signal (the automated form of what `site_cache_stats`
      already shows on demand — it would have surfaced the 3b buffering no-op).
 4. **Tier B (micro-cache)** + the full §4 rails. Validate §5.5 items
@@ -1391,7 +1430,7 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
    the TTL-unit fix, and the trusted-source debug stamp. Enforce per node only
    after §5.7.
 5. **cfm-admin page + Recipes** (+ `make test-js`), filter/sort, per-row + global
-   Purge UI. *Not built yet* — the last item of the sweep.
+   Purge UI. *As built* (the last item of the sweep): §7.3.
 6. **Purge generation-bump** end-to-end. *As built*, folded into Phase 1 and 3b
    (§10); the generation became wall-clock ms, never reissued (§6).
 7. *As built, the hardening sweep that followed:* PR-1 request-identity rails
@@ -1447,7 +1486,13 @@ postinst, the rpm `%post` and both installers), `configs/detectors.conf`
 **CI:** `scripts/tests/check_site_cache_config.sh` (§13), wired in
 `security.yml` and CLAUDE.md §3.
 
-**UI (planned, §7.3):** the six files there + `nav.js` / `core.js`.
+**UI (§7.3):** `internal/webui/static/webdetector/site-cache/index.html`,
+`assets/webdet/pages/site-cache.js`, `feature-site-cache.js`,
+`site-cache-model.js` / `site-cache-recipes.js` (+ `.test.js`), and the
+`nav.js` / `core.js` / `style.css` hooks. Parity:
+`scripts/tests/fixtures/site_cache_ui_parity.txt`,
+`internal/webdetector/site_cache_ui_parity_test.go`,
+`scripts/tests/cfm_cache_ui_parity_test.lua`.
 
 **Docs:** this file, `docs/site-cache-runbook.md`,
 `docs/endpoint_scope_inventory.md`, CLAUDE.md §6/§7, `CHANGELOG.md`.

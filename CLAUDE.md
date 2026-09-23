@@ -634,6 +634,13 @@ because of that. Hard-won points:
   `scripts/tests/fixtures/site_cache_edge_parity.lua`; the Lua test feeds it to
   the real `cfm_cache.lua`. Regenerate with `-update-edge-parity` and REVIEW
   the diff — a changed key is a behaviour change, not fixture noise.
+- **The cfm-admin page model is a pinned copy.** `site-cache-model.js`
+  mirrors the daemon's host / TTL / recipe / cookie rules and the edge's
+  bucket snapping. `site-cache-model.test.js` reads the recipe lists and limits
+  from `site_cache.go` and `MICRO_BUCKETS` from `cfm_cache.lua`. The cases in
+  `scripts/tests/fixtures/site_cache_ui_parity.txt` run through all three: JS,
+  Go (`site_cache_ui_parity_test.go`, via the real set path) and Lua. Change
+  a rule, a recipe or a bucket and those tests tell you the page must follow.
 - **`shdict:incr(key, n, init)` loses counters on a crc32 collision**
   (lua-nginx-module 0.10.26, verified on nginx 1.24; the fleet's OpenResty /
   Angie builds unchecked): the other key reads nil, or both count wrong, for

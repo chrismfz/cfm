@@ -1,0 +1,80 @@
+# Shared vectors for the Site Cache page model (internal/webui/static/assets/webdet/site-cache-model.js).
+# One case per line, TAB-separated: <kind>	<input>	<expected>. <empty> is the empty string.
+# Read by three tests, so the page cannot drift from what it mirrors:
+#   ttl, host, cookie - internal/webdetector/site_cache_ui_parity_test.go (the daemon);
+#   bucket            - scripts/tests/cfm_cache_ui_parity_test.lua (the edge);
+#   all four          - site-cache-model.test.js (the page).
+#
+# ttl: parseCacheTTL -> seconds, or invalid.
+ttl	5s	5
+ttl	1m	60
+ttl	2h	7200
+ttl	7d	604800
+ttl	+30s	30
+ttl	05s	5
+ttl	5S	5
+ttl	 10s 	10
+ttl	0s	invalid
+ttl	-5s	invalid
+ttl	5	invalid
+ttl	s	invalid
+ttl	5 s	invalid
+ttl	5x	invalid
+ttl	1.5s	invalid
+ttl	99999999999999999999s	invalid
+ttl	<empty>	invalid
+#
+# bucket: the micro TTL the edge snaps a stored TTL to (cfm_cache.lua micro_bucket_seconds).
+bucket	1s	1
+bucket	2s	2
+bucket	3s	2
+bucket	4s	5
+bucket	7s	5
+bucket	8s	10
+bucket	20s	10
+bucket	45s	30
+bucket	46s	60
+bucket	1m	60
+bucket	2h	60
+bucket	1d	60
+bucket	+5s	5
+bucket	5	5
+bucket	5 s	5
+bucket	5x	1
+bucket	0s	1
+bucket	-5s	1
+bucket	garbage	1
+bucket	<empty>	1
+#
+# host: the set API accepts the host (ok) or refuses it (bad).
+host	shop.example.com	ok
+host	Shop.Example.COM.	ok
+host	*.example.com	ok
+host	a_b.example.com	ok
+host	xn--bcher-kva.example	ok
+host	localhost	ok
+host	*.com	bad
+host	*.	bad
+host	a..b	bad
+host	.example.com	bad
+host	-a.example.com	bad
+host	a-.example.com	bad
+host	a b.example.com	bad
+host	*.*.example.com	bad
+host	a*.example.com	bad
+host	example.com:443	bad
+host	bücher.example	bad
+host	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example.com	bad
+host	<empty>	bad
+#
+# cookie: an auth cookie name the set API accepts (ok) or refuses (bad).
+cookie	myapp_session	ok
+cookie	cart[id]	ok
+cookie	__Host-PHPSESSID	ok
+cookie	"quoted"	ok
+cookie	a=b	bad
+cookie	a;b	bad
+cookie	a b	bad
+cookie	__Host-	bad
+cookie	__secure-	bad
+cookie	[x	bad

@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Site Cache has a cfm-admin page:** Rules & engine → Site cache.
+  - Arm a vhost's static and micro tiers. The micro TTL is picked from the six
+    buckets the edge really uses.
+  - Opt a host out, purge a vhost (or, as admin, every vhost), or delete a
+    policy, each confirmed.
+  - Apply a recipe: static assets, a 1 s burst shield, 10–30 s near-static
+    pages, both tiers, or opt-out.
+  - Copy the debug-stamp `curl` for one URL.
+  - Read the hit counts.
+  - Admins see this node's `SITE_CACHE` / `MICRO_CACHE_ENFORCE`, so the micro
+    tier reads "dry run" until it is enforced.
+  - A scoped cPanel user manages their own vhosts from the page.
+  - The page checks what the daemon checks before it sends anything. Shared
+    test cases pin it to the daemon's and the edge's rules.
 - **Site Cache changes are now in `cfm.log`.** Every set / remove / purge /
   purge-all of a Site Cache policy by an authenticated caller — including the
   refused ones (another tenant's vhost, an invalid host or cookie name, a
