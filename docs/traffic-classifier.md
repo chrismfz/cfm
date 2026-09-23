@@ -624,7 +624,7 @@ convicts.** Some are **positive-only** (fire → suspect; absent → proves noth
 
 | Layer | Signal | Headless-tell it catches | Weight | Trips legit (FP) |
 |---|---|---|---|---|
-| **Transport** (server-observed, unspoofable from JS; already stamped) | **JA4 (TLS) ↔ UA** | UA claims Chrome N but the ClientHello JA4 isn't that browser's (curl-impersonate, Go/Node, old Chrome) | ★★★★★ | ~0 (rare TLS-terminating proxy/AV) |
+| **Transport** (server-observed, unspoofable from JS; already stamped) | **JA4 (TLS) ↔ UA** | UA claims Chrome N but the ClientHello JA4 isn't that browser's (curl-impersonate, Go/Node, old Chrome) | ★★★★★ | measured 2026-09-23: NOT rare — front proxies (33% of human solves), AV/corporate inspection, iOS in-app browsers; not adopted, see "UA ↔ TLS coherence tell" below |
 | | **JA4H (HTTP/2)** — roadmap 2nd axis | h2 SETTINGS / header + pseudo-header order don't match the claimed browser | ★★★★★ | ~0 |
 | **Environment / render** (JS probe; costly to fake per-request at scale) | **WebGL UNMASKED_RENDERER** | SwiftShader / llvmpipe / Mesa software renderer = headless/VM | ★★★★ | RDP/VDI/GPU-blocklisted reals → confidence, not gate |
 | | **Canvas / audio hash** | software-render buckets; also session stability | ★★★ | Brave/Tor randomize → reals |
@@ -736,6 +736,103 @@ legitimately report it.
   effect fleet-wide on upgrade. H was not sampled from WAF-mark traffic
   specifically. Elsewhere the tells show on the `would_v2` line; re-run this
   measurement on the `would_v2` / `src=` data before arming v2 anywhere new.
+
+#### UA ↔ TLS coherence tell (2026-09-23) — measured, NOT adopted
+
+The "JA4 ↔ UA" row of the signal table above, and the "future JA4↔UA
+coherence tell" of the master plan (§3, row 11). Prompted by 1 334 solves on
+`c28caa00` (a Chrome-ordered cipher list) whose UA claims Chrome on iOS
+(`CriOS`), which must use Apple's TLS. No human in the corpus showed that pair.
+The question was what such a tell would catch **beyond** the tells already
+shipped. The answer is nothing, so it was not built. Don't re-open it without
+new data (see "when to revisit" below).
+
+**Corpus.** 13 720 `challenge_solved` rows with `sig` from the same 7 nodes,
+2026-09-22 19:10 → 09-23 20:22 UTC. Same independent labels as the hardware
+tells above: **H** 2 135 (197 vhosts), **F** 7 878 (10 farm-shaped vhosts),
+**U** 3 707. The simulator reproduces the stored `hs` and `tells` of all 13 720
+rows (the nodes did not run `mobile_hw_lie`/`mac_hw_lie` yet; those were then
+simulated on top). Baseline with them: H 0%, F 41.0% fail.
+
+**Stack classes come from the data, keyed on the cipher list, not the id.**
+The 8-hex id also hashes the curve list, and edge OpenSSL builds name the
+post-quantum curve differently (`X25519MLKEM768` vs `0x11ec`). So one Chrome
+stack is `c28caa00` on some nodes and `95070673` on others. The
+GREASE-stripped cipher ORDER, read
+from the `first_seen` lines, is stable across nodes. Every human plain iOS
+Safari/CriOS and Mac Safari solve on a client stack used one of two Apple
+lists (TLS 1.3 AES-256 first and 3DES last, or AES-128 first with the same
+tail). 94% of human Chromium solves on a client stack were on one Chromium
+list (the rest were ChaCha-first variants and the middleboxes below). Human
+Firefox was on its own lists.
+
+**Results** (extra = solves that would newly fail, weight 50 in the
+device-claim group; as an independent opener it was also 0 for every F row):
+
+| Candidate | H | F | U | extra F | extra U |
+|---|---|---|---|---|---|
+| iOS UA on the Chromium list | **3** | 1 471 | 158 | 0 | 0 |
+| plain iOS Safari/CriOS UA (nothing appended) on the Chromium list | 0 | 1 471 | 157 | **0** | **0** |
+| plain iOS UA on any non-Apple list | 0 | 1 471 | 157 | 0 | 0 |
+| Firefox UA on the Chromium list | 0 | 1 | 2 | 0 | 2 |
+| Chrome UA on an Apple list / Android UA on an Apple list / Mac Safari on Chromium | 0 | 0 | 0 | 0 | 0 |
+| Chrome UA on a list human Firefox showed | **1** (a CCM middlebox list, below) | 0 | 0 | 0 | 0 |
+
+**Why nothing extra:**
+
+- **`mobile_hw_lie` already covers the whole population.** All 1 628
+  plain-iOS-on-Chromium solves (F and U) already fire `mobile_hw_lie`: the
+  farm claims an iPhone from desktop hardware (hc ≥ 16). As a device-claim
+  contradiction the new tell would have to join that group (max, once), so
+  it adds 0 while both fire.
+- **The farm solves that still pass are COHERENT.** Of the 4 651 F solves
+  that pass with the hardware tells, 4 637 (99.7%) send a Chrome UA over the
+  Chromium list. No UA ↔ TLS rule can see them. The remaining 14: 11 with
+  the UA `pc`, 2 self-declared bots and 1 Firefox UA.
+
+**Why the broader rules are unsafe** (each hit H, or would have):
+
+- **iOS in-app browsers bring their own TLS.** Three human solves on ancho.gr
+  come from TikTok's in-app browser on iOS (UA ends in `musical_ly_46.x`): an
+  iPhone Safari UA over a Chromium-ordered list with no PQ curve
+  (`19877aeb`). One more human app webview (no `Safari/` token) used a third
+  stack. So "iOS UA ⇒ Apple TLS" is false for in-app browsers. The rule is
+  0-in-H only when narrowed to UAs with nothing appended after `Safari/…`,
+  and that narrowing is exactly what a farm can copy.
+- **A front proxy replaces the client's handshake for a whole vhost.**
+  `ba6b4aad` (and `fd4fd84d`, the same cipher list on speedhost) is
+  shown by every UA family: Android and desktop Chrome, iOS Safari and apps,
+  Firefox. It appears on only 10 vhosts. That shape is a CDN or reverse proxy
+  that re-originates TLS to the edge, so `X-CFM-TLS` describes the proxy and
+  not the client. It carried **700 of the 2 135 human solves (33%)**. The
+  same shape explains why `ba6b4aad` has a farm verdict and still "carries
+  Greek humans": every visitor to those vhosts shares it. **Arming a
+  fingerprint policy on `ba6b4aad` would hit every visitor of those vhosts.**
+- **TLS-inspecting middleboxes are not rare.** Human Chrome and Firefox UAs
+  (improv.gr, fcs.com.gr, webmail.deyadoxatou.gr) arrive over OpenSSL-shaped
+  lists with CCM, ARIA or DHE suites that no browser offers: antivirus or
+  corporate HTTPS inspection. So the table's "~0 FP, rare proxy/AV" guess was
+  wrong. A "browser UA on an unknown stack" rule hits humans. An allow-list of
+  browser stacks would also need a new entry for every browser and OpenSSL
+  release.
+
+**The one population it would newly catch is a fingerprint, not a
+contradiction.** `d9d37bc0` (www.smart-tech.gr on earth: 1 995 solves, 1 992
+IPs, 83% CN, `sw_renderer,no_input` = 90) sends Windows Chrome UAs over a
+list with TLS 1.2 suites first and TLS 1.3 last. No human showed that list. A
+rule naming it would be an automatic decision keyed on one fingerprint, which
+the shadow-first invariant forbids (CLAUDE.md §6). The lever for it already
+exists: an operator-armed fingerprint policy. Note that `challenge_v2` there
+would still pass these solves (90 < 100). Only `deny` would stop them, and in
+cfm-web `d9d37bc0` is a WAF-hit fingerprint with rotating UAs, not a
+convicted solver farm.
+
+**When to revisit.** Only if the farms stop claiming iPhones from desktop
+hardware but keep the iOS UA over Chrome TLS (so `mobile_hw_lie` stops firing
+while this pair stays). Re-run this measurement then, before writing any code.
+Build the stack classes from the data by cipher list, restrict to UAs with
+nothing appended, exclude vhost-bound (front-proxy) lists, and keep it in the
+device-claim group.
 
 #### Observability contract (shadow-first; reuses existing logs — no new log, per CLAUDE.md §5)
 
