@@ -51,32 +51,47 @@ back-filled here — see the git/PR history for that period.
   time.** `MICRO_CACHE_ENFORCE` still defaults to `0`; before setting it to
   `1` on a node, run the on-box checklist in `docs/site-cache-design.md` §5.7.
   What changed in the micro-cache itself:
-  - A micro-cached page lives for its TTL bucket (1–60 s), never longer. The
-    origin's `Cache-Control: max-age`, `Expires` and `X-Accel-Expires` used to
-    set how long it stayed (a `max-age=3600` page for an hour). Its
-    "do not store" signals still apply: `Cache-Control` `private`, `no-store`
-    or `no-cache`, `X-Accel-Expires: 0`, `Set-Cookie`, `Vary: *`.
+  - A micro-cached page is fresh for its TTL bucket (1–60 s), never longer.
+    The origin's `Cache-Control: max-age`, `Expires` and `X-Accel-Expires`
+    used to set how long it stayed (a `max-age=3600` page for an hour). The
+    origin's shared-cache "do not store" signals still apply: `Cache-Control`
+    `private`, `no-store`, `no-cache` or `s-maxage=0`, `X-Accel-Expires: 0`
+    (or any `@<time>`), `Set-Cookie`, `Vary: *`. `max-age=0` alone
+    deliberately does not stop it: the common `.htaccess` recipes (WP Rocket,
+    H5BP) send it on every HTML page for browsers.
   - A page that can't be cached (it sets a cookie, is private, or isn't a 200)
-    is remembered for 60 s and served straight from the origin. Before,
-    concurrent visitors of such a page queued on the cache lock, up to 5 s
-    each (measured: 8 concurrent visitors of a 1 s page took 1–6 s; once the
-    page is remembered, 1 s each).
+    is remembered and served straight from the origin: for 60 s, or 240 s when
+    a cached page changed that way, so its old copy is gone before the next
+    try. Before, concurrent visitors of such a page queued on the cache lock,
+    up to 5 s each (measured: 8 concurrent visitors of a 1 s page took 1–6 s;
+    once the page is remembered, 1 s each). An origin error (5xx) or a
+    request-level 4xx (400, 406, 429, …) is never remembered.
+  - When the origin fails (5xx, connection error, timeout) the stale copy is
+    served, to every visitor including the one whose refresh failed.
+    Measured: 10 clients on a hot page whose origin answers 503 all got 200,
+    with 4 origin hits.
   - An expired page is refreshed by the visitor who finds it expired, not in
     the background. A background refresh that could not be stored (the page
     now sets a cookie, went private or 404) left the old copy being served
     for as long as visitors kept coming.
   - Never micro-cached: `Range` requests, `Accept: text/event-stream` (live
-    streams), `/wp-admin`, `/administrator/`, `/admin/`, `/sysadmin/`, any
-    `.php` URL, `?doing_wp_cron`, and panel hosts (`cpanel.`, `whm.`,
-    `webmail.`, `webdisk.`, `mail.`, `autodiscover.`, `autoconfig.`,
-    `cpcalendars.`, `cpcontacts.`), even under an armed `*.domain` wildcard.
+    streams), `/wp-admin`, `/administrator/`, `/admin/`, `/sysadmin/`, PHP
+    script paths (`.php`, `.php7`, `.phtml`, …, including `/index.php/…`),
+    `?doing_wp_cron`, and panel hosts (`cpanel.`, `whm.`, `webmail.`,
+    `webdisk.`, `mail.`, `autodiscover.`, `autoconfig.`, `cpcalendars.`,
+    `cpcontacts.`) whether armed by a `*.domain` wildcard or by name.
+  - More app session cookies keep a visitor off the cache: Drupal `SESS…`,
+    Magento, OpenCart, Moodle, Easy Digital Downloads, `…_sid`, `token`,
+    `auth`, WPML language and WooCommerce currency-switcher cookies, and any
+    known session cookie behind a `__Host-` / `__Secure-` prefix.
   - Micro-cache is used only from the main `location /` of the HTTPS server,
     so PHP scripts and large downloads keep streaming unbuffered. A node whose
-    live edge conf predates this release (no `set $cfm_micro_conf "1"`) never
-    micro-caches, whatever `MICRO_CACHE_ENFORCE` says.
-- **Static caching (Tier A) skips panel hosts too:** a `*.domain` wildcard
-  policy no longer caches static files on `cpanel.`, `webmail.` and the other
-  panel/service hosts above.
+    live edge conf predates this release (no `set $cfm_micro_conf "1"`), or
+    whose nginx core is older than 1.23, never micro-caches, whatever
+    `MICRO_CACHE_ENFORCE` says.
+- **Static caching (Tier A) skips panel hosts too:** a policy that covers
+  `cpanel.`, `webmail.` or another panel/service host above — by name or
+  through a `*.domain` wildcard — no longer caches static files there.
 - **ChallengeV2 no longer rejects verified crawlers such as Google Read
   Aloud.** Under an armed `challenge_v2`, a failing humanity score gets no
   clearance. Google's Read Aloud fetcher (PTR `google-proxy-*.google.com`)
@@ -418,9 +433,9 @@ back-filled here — see the git/PR history for that period.
 - **The `X-CFM-Cache` debug header is only answered for trusted sources.**
   Any client sending `X-CFM-Cache-Debug` could read a vhost's cache policy,
   purge generation and HIT/MISS verdict. It is now stamped only for requests
-  from the box itself, its own IPs or `IGNORE_NETS` — run the check on the box
-  (`curl --resolve <host>:9043:127.0.0.1 …`, see `docs/site-cache-design.md`
-  §5.7).
+  from the box itself, its own IPs or `IGNORE_IPS` / `IGNORE_NETS` — run the
+  check on the box (`curl --resolve <host>:9043:<vhost-ip> …`, see
+  `docs/site-cache-design.md` §5.7).
 - **Site Cache: a tenant can no longer see another tenant's domain list, or
   an admin wildcard's cache counts through its own vhost.** A scoped (cPanel)
   token that created a policy stored its WHOLE vhost allowlist as the entry's

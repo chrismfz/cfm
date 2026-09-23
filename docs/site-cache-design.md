@@ -139,15 +139,15 @@ request-time (Lua, `access` phase) and response-time (nginx-native + a thin
 | Status: **only `200` is stored** (as-built Tier A — dropped the optional `301/404`) | `map $upstream_status $cfm_cache_non200` → `proxy_no_cache` (hard block, beats any origin `Cache-Control`), not just `proxy_cache_valid` | **3xx redirect / SSO loop cached** (the incident that removed CFM's global cache) |
 | Response has `Set-Cookie` → never store | nginx default (we **never** add `Set-Cookie` to `proxy_ignore_headers`) | user A's session served to user B |
 | Request carries a **named app-session cookie** → `$cfm_cache_skip=1` (see §4.1 — **allowlist by name**, NOT "any cookie") | Lua cookie-name allowlist | **logged-in users get stale/foreign content** |
-| Origin `Cache-Control: private\|no-store\|no-cache` → never store | Tier A: nginx default (not ignored). Tier B (as-built): the micro locations set `proxy_ignore_headers Cache-Control Expires X-Accel-Expires` so the TTL is always the bucket's, and put the "do not store" half back on `proxy_no_cache`: `map $upstream_http_cache_control $cfm_cc_nostore` (`private` / `no-store` / `no-cache` anywhere in the header, any case — `no-cache="Set-Cookie"` counts) and `map $upstream_http_x_accel_expires $cfm_xae_nocache` (`0`) | origin keeps the final say on *whether* a page is stored; on Tier B not on *how long* (a `max-age=3600` or far-future `Expires` page would otherwise sit in a micro zone for an hour, or for as long as the date says). Residual: a page whose only "do not cache" signal is a past `Expires`, or `Pragma: no-cache` (nginx never read `Pragma`), is micro-cached for the bucket TTL |
-| Panel hosts/ports (`:2083/:2087/:2096`), webmail hosts, `/.well-known/`, `/acctxfer*`, cPanel/webmail bypass paths → never | The panel ports are separate listeners with no cache location; `/.well-known/` is routed at `cfm.lua` Step 0a1. As-built: `panel_host()` in `cfm_cache.lua` skips BOTH tiers for a host with a panel prefix — the `cfm_panel_hosts.lua` list `cfm.lua` and `cfm_panel.lua` share (`cpanel`, `whm`, `webmail`, `webdisk`, `mail`) plus the cache-only service prefixes `autodiscover`, `autoconfig`, `cpcalendars`, `cpcontacts` — even under an armed wildcard; a missing module caches nothing. Tier B also skips `/acctxfer*`, `/wp-admin`, `/administrator/`, `/admin/`, `/sysadmin/`, any `*.php` path and `?doing_wp_cron` | **cPanel / webmail / SSO / AutoSSL broken** |
+| Origin `Cache-Control: private\|no-store\|no-cache` → never store | Tier A: nginx default (not ignored). Tier B (as-built): the micro locations set `proxy_ignore_headers Cache-Control Expires X-Accel-Expires` so the TTL is always the bucket's, and put the shared-cache "do not store" signals back on `proxy_no_cache` through two `volatile` maps: `$cfm_cc_nostore` (`private` / `no-store` / `no-cache` / `s-maxage=0`, anywhere in the header, any case — `no-cache="Set-Cookie"` counts) and `$cfm_xae_nocache` (`X-Accel-Expires` `0` or any absolute `@<time>`). **Deliberately not `max-age=0`**: it is aimed at browsers too, and the common `.htaccess` recipes (H5BP, WP Rocket: `ExpiresByType text/html "access plus 0 seconds"`) send it on every HTML page, so honouring it would switch micro off for exactly the sites it is for; `s-maxage=0` is the shared-cache opt-out and is honoured | origin keeps the final say on *whether* a page is stored; on Tier B not on *how long* (a `max-age=3600` or far-future `Expires` page would otherwise sit in a micro zone for an hour, or for as long as the date says). Residual: a page whose only "do not cache" signal is `max-age=0`, a past or invalid `Expires`, a malformed `Cache-Control` value nginx would refuse (`max-age="60"`, `max-age=-1`) or `Pragma: no-cache` (nginx never read `Pragma`) is micro-cached for the bucket TTL. Stricter the other way: `X-Accel-Expires: 60` + `Cache-Control: no-cache` (natively stored — `X-Accel-Expires` wins) is not stored |
+| Panel hosts/ports (`:2083/:2087/:2096`), webmail hosts, `/.well-known/`, `/acctxfer*`, cPanel/webmail bypass paths → never | The panel ports are separate listeners with no cache location; `/.well-known/` is routed at `cfm.lua` Step 0a1. As-built: `panel_host()` in `cfm_cache.lua` skips BOTH tiers for a host with a panel prefix — the `cfm_panel_hosts.lua` list `cfm.lua` and `cfm_panel.lua` share (`cpanel`, `whm`, `webmail`, `webdisk`, `mail`) plus the cache-only service prefixes `autodiscover`, `autoconfig`, `cpcalendars`, `cpcontacts` — whether the policy is a wildcard or the exact host; a missing module caches nothing (one WARN at load). Tier B also skips `/acctxfer*`, `/wp-admin`, `/administrator/`, `/admin/`, `/sysadmin/`, `/___proxy_subdomain_*`, any path to a PHP script (`.php`, `.php<digit>`, `.phtml`, `.pht`, `.phar` at the end of the path or of a segment — `/index.php/cart` too) and `?doing_wp_cron` | **cPanel / webmail / SSO / AutoSSL broken** |
 | Cache key excludes cookies; carries purge generation, **destination IP**, the **listener scheme** and the **scheme the origin is told** (as-built) | `proxy_cache_key "g$cfm_cache_gen\|$server_addr\|$scheme\|$cf_xfp://$host$request_uri"` | per-user fragmentation / leakage; **multi-IP poisoning** — the origin is chosen by `$server_addr`, so without it a request to IP B with `Host: victim` stores B's default vhost under victim's key. **Both** schemes, not either: `$scheme` is the listener (:9080 → origin :80, :9043 → origin :443, which Apache may answer from different vhosts — e.g. a domain with no SSL vhost falls back to the IP's default SSL site), `$cf_xfp` is what the origin is told (differs from `$scheme` only behind a trusted peer such as Cloudflare Flexible SSL). Keying on `$cf_xfp` alone let a direct HTTPS client fill an entry that a Cloudflare visitor on :80 then hit (reproduced) |
 | Request carries **`Authorization`** → never read, never store (as-built) | `map $http_authorization $cfm_req_auth` (any non-empty value → `"1"`; a raw predicate would read `Authorization: 0` as false) on `proxy_cache_bypass` **and** `proxy_no_cache` in every cache location; Tier B `micro_decision` also reports `bypass:authorization` and does not route | **basic-auth (cPanel Directory Privacy) / bearer response served to anonymous visitors** — nginx does not bypass on `Authorization` by itself |
 | **Forwarded headers pinned** in cache locations (as-built) | `proxy_set_header X-Forwarded-Host $host;` and `""` (not sent) for `X-Forwarded-Server/-Port/-Scheme/-Protocol/-Prefix/-Ssl/-Uri/-Path`, `X-Host`, `X-Original-Host`, `X-Original-URL`, `X-Original-Uri`, `X-Rewrite-URL`, `Forwarded`, `Front-End-Https`, `X-Url-Scheme`, `X-Scheme`, `X-HTTP-Method(-Override)`, `X-Method-Override`. Applies to **every** request through a cache location, armed vhost or not (all vhosts' static assets use the Tier A location) | cache poisoning — an app building absolute URLs / routes from these writes attacker input into a page cached for everyone. A denylist of the known URL-building headers, not a proof |
 | Lock wait set **per tier** (as-built) | `proxy_cache_lock_timeout 1s` (Tier A) / `5s` (Tier B) | the timeout must outlast the fill, or a cold-key burst all reaches the origin (when it expires every waiter is sent upstream and nothing is stored); yet on an uncacheable key (Set-Cookie / no-store / non-200) waiters queue at 500 ms steps until it expires — nginx has no hit-for-pass. Static files fill in well under 1 s and a popular 404 is the usual uncacheable key → 1 s. HTML can take seconds to render → 5 s, and Tier B remembers its uncacheable keys (next row) |
-| Tier B **remembers an uncacheable key** (as-built) | `cfm_cache.micro_note()` in the http-level `log_by_lua`: a micro request that fetched (`MISS`/`EXPIRED`) a response nginx could not store (non-200, `Set-Cookie`, `$cfm_cc_nostore`, `$cfm_xae_nocache`, `Vary: *` or a `Vary` over 128 bytes) marks `md5($server_addr\|$scheme\|$cf_xfp://$host$request_uri)` in `lua_shared_dict cfm_cache_uncacheable` for 60 s; `micro_gate` skips micro for a marked key (debug token `bypass:uncacheable`), then the next request probes again | the lock queue above: measured on a 1 s page that sets a cookie, 8 concurrent clients finished at 1, 2, 3.5, 4.5, 5.5, 6, 6, 6 s before the mark and all in ~1 s after it. The dict evicts least-recently-used marks when full (a lost mark costs one re-probe); a conf without the dict just does not remember |
-| Tier B: a stale page never outlives a refresh that cannot be stored (as-built) | `proxy_cache_background_update off` in the micro locations (Tier A keeps `on`) | with it on, an expired page is served stale while a background fetch refreshes it — and when that fetch cannot be stored (the page now sets a cookie, turned 404, went private) the stale copy is served on every request for as long as the key stays warm. Off, the request that finds the page expired fetches it itself; only requests arriving during that fetch get the stale copy (`use_stale updating`), and an origin error still serves it (`use_stale error timeout`) |
-| Tier B request rails (as-built) | `micro_decision`: a `Range` request and `Accept: text/event-stream` bypass; micro routes only from the HTTPS server's `location /` (the conf sentinel `set $cfm_micro_conf "1"`, which `micro_gate` requires) | a micro location buffers, so an SSE stream would be held back until it ends, and the no-buffer PHP/admin and streaming passthroughs would stop streaming; an older live conf (no sentinel) never gets newer Lua's micro routing |
+| Tier B **remembers an uncacheable key** (as-built) | `cfm_cache.micro_note()` in the http-level `log_by_lua`: a micro request that fetched (`MISS`/`EXPIRED`) an answer nginx could not store (non-200, `Set-Cookie`, `$cfm_cc_nostore`, `$cfm_xae_nocache`, a `*` in `Vary` or a `Vary` over 128 bytes) marks `md5($server_addr\|$scheme\|$cf_xfp://$host$request_uri)` in `lua_shared_dict cfm_cache_uncacheable`; `micro_gate` skips micro for a marked key (debug token `bypass:uncacheable`), then the next request after the mark probes again. A `MISS` marks for 60 s; an `EXPIRED` refresh (the page changed: it sets a cookie, went private, redirects, 401/403/404/410) for 240 s — longer than the largest micro zone's `inactive` (180 s; the guard pins the 30 s margin), so the old copy is evicted before the next probe. **Never marked:** a 5xx (on an expired key the stale copy absorbs origin trouble — see the next row; on a `MISS` the key queues on the lock, as before) and a request-level 4xx (400, 405, 406, 408, 411-417, 421, 429, 431), which says nothing about the page and which any client could provoke | the lock queue above: measured on a 1 s page that sets a cookie, 8 concurrent clients finished at 1, 2, 3.5, 4.5, 5.5, 6, 6, 6 s before the mark and all in ~1 s after it. The dict evicts least-recently-used marks when full (a lost mark costs one re-probe); a conf without the dict just does not remember. Residual (like Varnish hit-for-miss): one client's non-storable answer — a UA or language redirect, a cookie, an origin WAF's 403 — skips micro for that URL for everyone until the mark expires, so a client can keep micro off for one URL with a request per mark; the URL is then served as without micro, nothing wrong is stored |
+| Tier B: a stale page is not kept alive by refreshes that cannot be stored; a failing origin is (as-built) | `proxy_cache_background_update off` and `proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504` in the micro locations (Tier A keeps background updates on) | with background updates on, an expired page is served stale while a background fetch refreshes it — and when that fetch cannot be stored (the page now sets a cookie, turned 404, went private) the stale copy is served on every request for as long as the key stays warm. Off, the request that finds the page expired fetches it itself and only requests arriving during that fetch get the stale copy; a page-changed answer then marks the key long enough for the copy to age out (previous row), so it is served for one fetch window. An origin that fails — connection error, timeout, or a 500/502/503/504 answer — keeps the stale copy served, the fetching request included (measured, 10 clients on a hot page whose origin answers 503 after 1 s: 4 origin hits and all clients 200 with this, 31 hits and 31 clients 503 when a 5xx marked the key). A worker killed during a refresh can leave its entry locked stale (nginx logs `ignore long locked inactive cache entry`); a purge clears it |
+| Tier B request rails (as-built) | `micro_decision`: a `Range` request and `Accept: text/event-stream` bypass; micro routes only from the HTTPS server's `location /` (the conf sentinel `set $cfm_micro_conf "1"`, `""` by default at server level; `micro_gate` requires `"1"`), never on an internal redirect (`ngx.req.is_internal()`), and only on an nginx core ≥ 1.23 (older ones expose only the first of several `Cache-Control` headers to the map) | a micro location buffers, so an SSE stream would be held back until it ends, and the no-buffer PHP/admin and streaming passthroughs would stop streaming; a redirect would carry the sentinel into another location; an older live conf (no sentinel) never gets newer Lua's micro routing |
 | `cfm_clearance` is edge-set, not origin | see §5.5 open item | edge cookie poisoning the cache |
 
 **Residuals (cannot be seen at the edge).** An origin that varies a `200` on
@@ -177,13 +177,18 @@ pages build absolute URLs from `$host`, while uncached requests through
 `$cfm_req_auth` map + predicates, the full key, the per-tier lock timeout, the
 forwarded-header pins, buffering, `internal` + access override on micro, and on micro the exact
 `proxy_ignore_headers Cache-Control Expires X-Accel-Expires`, the
-`$cfm_cc_nostore` / `$cfm_xae_nocache` predicates (their maps exact, nothing else
-writing them) and `background_update off` — and, file-wide, that
-`proxy_ignore_headers` never lists `Set-Cookie` or `Vary` and lists
-`Cache-Control` / `Expires` / `X-Accel-Expires` only in a micro location (one at
-server/http level would be inherited by Tier A), that the `$cfm_micro_conf`
-sentinel sits once in `location /` of the server holding the micro locations and
-nowhere else, that `lua_shared_dict cfm_cache_uncacheable` exists, and that
+`$cfm_cc_nostore` / `$cfm_xae_nocache` predicates (their maps exact, `volatile`
+included, nothing else writing them), `background_update off`, the exact
+`use_stale` list and one `proxy_cache_valid 200 <N>s` matching the bucket's
+name and zone — and, file-wide, that `proxy_ignore_headers` never lists
+`Set-Cookie` or `Vary` and lists `Cache-Control` / `Expires` / `X-Accel-Expires`
+only in a micro location (one at server/http level would be inherited by Tier
+A), that the `$cfm_micro_conf` sentinel sits once in a redirect-free, buffering
+`location /` of the server holding the micro locations (with its server-level
+`""` default) and nowhere else, that `lua_shared_dict cfm_cache_uncacheable`
+exists and every micro zone's `inactive` sits 30 s below `cfm_cache.lua`'s
+`MICRO_UNCACHEABLE_STALE_TTL`, that `proxy_cache_convert_head` is never turned
+off, that the conf includes exactly its known files, and that
 `proxy_cache_methods` never lists a non-GET/HEAD method.
 
 `cfm_clearance`-cookie holders (cleared visitors) are still *anonymous* to the
@@ -349,8 +354,8 @@ only a little startup memory.
 > bucket its policy snaps to. B1 declares the six zones (inert) + the
 > `cfm_cache._micro_bucket` snapper; B2 adds the internal locations + routing.
 
-The stored TTL is parsed with the units the daemon accepts (`s`/`m`/`h`/`d`):
-`1m` is 60 s (as-built fix — the edge used to read only the digits, so `1m` was
+The stored TTL is parsed with the units the daemon accepts (`s`/`m`/`h`/`d`,
+an optional leading `+`): `1m` is 60 s (as-built fix — the edge used to read only the digits, so `1m` was
 1 s), and anything above 60 s clamps to the 60 s bucket; an empty or
 unparseable TTL gets the 1 s bucket.
 
@@ -439,9 +444,9 @@ anonymous response (Laravel, PHP `session_start`) is uncacheable on EVERY
 request, so under steady concurrency its clients are served one per 500 ms
 (measured: 10 clients on a 0.3 s Set-Cookie page — 270 requests in ~8 s
 uncached, 45 through a 5 s-lock micro location, max 5.3 s). So Tier B
-remembers an uncacheable key and skips the cache for it for 60 s (as-built,
-§4 "remembers an uncacheable key" row; measured there) — only the requests
-already queued when the first uncacheable answer lands pay the queue.
+remembers an uncacheable key and skips the cache for it (as-built, §4
+"remembers an uncacheable key" row; measured there) — only the requests that
+arrive while a probe of such a key is in flight (one probe per mark) queue.
 
 **Per-request cost ledger (caching ON for a vhost):**
 
@@ -473,43 +478,58 @@ expect no measurable delta.
 ### 5.7 Tier B enforce readiness — on-box checklist (before `MICRO_CACHE_ENFORCE = 1`)
 
 `MICRO_CACHE_ENFORCE` stays `0` (the default) on a node until this has passed
-there, one test vhost first (a WordPress site you control). Loopback, the box's
-own IPs and `IGNORE_NETS` bypass `cfm.lua` at Step 0a, so they never take the
-micro path: the debug stamp (trusted sources only) shows the would-cache
-verdict, while the served verdict of real traffic is the access log's
-`ucache=` field and `cfm webtop site-cache stats`, from an outside client.
+there, one test vhost first (a WordPress site you control). Who never takes
+the micro path: requests from loopback, the box's own IPs, `IGNORE_IPS` /
+`IGNORE_NETS` and RFC 1918 peers (they bypass `cfm.lua` at Step 0a), and a
+client holding a valid `cfm_clearance` cookie (it returns at the Step 2b
+fast-path, which does not micro-cache yet). So: the debug stamp, from the box,
+shows the would-cache verdict; the served verdict comes from a **public-IP
+client with no `cfm_clearance`** (e.g. `curl` without a cookie jar), read in
+the edge access log (`ucache=` and `up=cfm_apache_micro` vs `up=cfm_apache`).
 
 1. **The live conf carries the Tier B rails** (the reference conf ships them;
-   a live conf edited by hand may not): in the live `nginx.conf`,
-   `set $cfm_micro_conf "1";` once, `proxy_cache_background_update off;` six
-   times, `lua_shared_dict cfm_cache_uncacheable`, the `$cfm_cc_nostore` and
-   `$cfm_xae_nocache` maps; then `-t` and a reload. Without the sentinel micro
-   never routes (fail-safe), whatever the knob says.
+   a live conf edited by hand may not). In the live conf
+   (`/usr/local/openresty/nginx/conf/nginx.conf`, `/etc/angie/angie.conf`):
+   `set $cfm_micro_conf "1";` once (in the HTTPS `location /`) and
+   `set $cfm_micro_conf "";` once (its server level),
+   `proxy_cache_background_update off;` six times, `lua_shared_dict
+   cfm_cache_uncacheable`, the `$cfm_cc_nostore` and `$cfm_xae_nocache` maps;
+   the nginx core is ≥ 1.23 (`openresty -V` / `angie -V`); then `-t` and a
+   reload. Without the sentinel micro never routes (fail-safe), whatever the
+   knob says.
 2. **Arm micro on the test vhost, still dry-run:**
    `cfm webtop site-cache set <host> --micro micro_safe --micro-ttl 5s`.
-3. **Dry-run verdicts from the box** (the edge's HTTPS listener is :9043):
-   `curl -sk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' --resolve <host>:9043:127.0.0.1 https://<host>:9043/`
+3. **Dry-run verdicts from the box**, against the edge's HTTPS listener :9043
+   on the vhost's own IP (so the origin answers from that vhost):
+   `curl -sk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' --resolve <host>:9043:<vhost-ip> https://<host>:9043/`
    shows `microcache=would/5s`; add `-H 'Cookie: wordpress_logged_in_x=1'` →
    `bypass:auth:…`; `/wp-login.php` or `/?doing_wp_cron=1` → `bypass:path`;
    `-H 'Range: bytes=0-10'` → `bypass:range`; `webmail.<domain>` (if armed by a
    wildcard) → `bypass:panel`.
 4. **Enforce on the node:** `MICRO_CACHE_ENFORCE = 1` in `[webdetector]`,
    reload the daemon; the edge picks it up in ~10 s (no proxy reload).
-5. **From an outside client**, request a plain page three times: the access
-   log shows `ucache="MISS"` then `"HIT"`; `cfm webtop site-cache stats <host>`
-   counts them under `cfm_micro`.
+5. **From the outside client**, request a plain page three times: the access
+   log shows `ucache="MISS"` then `"HIT"`, `up=cfm_apache_micro`. After the
+   next stats push (~60 s) `cfm webtop site-cache stats <host>` counts the
+   HITs (per vhost; the tier split is in the edge's `/cfm-admin/lua-stats`).
 6. **Remembered-uncacheable:** a page that sets a cookie (WooCommerce
    `/cart/`, any page with `Set-Cookie`) twice from outside: first
-   `ucache="MISS"`, then `ucache="-"` (served direct) for ~60 s. No request on it
-   should take seconds longer than the page renders.
+   `ucache="MISS"`, then `ucache="-"` with `up=cfm_apache` (served direct) for
+   ~60 s. No request on it should take seconds longer than the page renders.
+   (Marks are per destination IP: a debug request to another IP does not see
+   them.)
 7. **Logged-in visitor:** log in to `/wp-admin/` from an outside browser and
-   browse the front pages: `ucache="-"` on every one (bypass), the admin bar
-   shows, no anonymous copy is served; log out → anonymous pages are HITs again.
+   browse the front pages: `up=cfm_apache` / `ucache="-"` on every one
+   (bypass), the admin bar shows, no anonymous copy is served; log out →
+   anonymous pages are HITs again. (A browser that passed a challenge holds
+   `cfm_clearance` and never takes the micro path: use a fresh profile.)
 8. **Origin TTL is not honoured:** a page with a long `Cache-Control: max-age`
    still shows `ucache="EXPIRED"` after the bucket TTL.
-9. **Error log clean:** no `cfm_cache` / Lua errors in the edge error log.
+9. **Error log clean:** no `cfm_cache` / Lua errors and no `using
+   uninitialized variable` warnings in the edge error log.
 10. **Roll back** at any point: `MICRO_CACHE_ENFORCE = 0` (~10 s), and
-    `cfm webtop site-cache purge <host>` if something wrong got cached.
+    `cfm webtop site-cache purge <host>` if something wrong got cached (also
+    the fix for an entry stuck stale after a worker crash, §4).
 
 ## 6. Data model (the per-vhost store)
 
@@ -754,7 +774,7 @@ content*, never a security break, and the operator simply turns the vhost **OFF*
 
 - **Live check for one URL:** `curl -I` and read the `X-CFM-Cache: HIT|MISS|BYPASS`
   header (§11.3, behind a debug flag, from a trusted source: the box, its own
-  IPs or `IGNORE_NETS`) — this is the per-URL "would it cache / why bypassed"
+  IPs or `IGNORE_IPS` / `IGNORE_NETS`) — this is the per-URL "would it cache / why bypassed"
   answer, for near-zero code.
 - **Aggregate check:** the §11 stats, especially the **BYPASS counter** — if a
   vhost isn't behaving, its hit/bypass numbers show it immediately.
@@ -881,7 +901,7 @@ the API/UI reads, so scoping is enforced daemon-side.
 - **CLI:** `cfm webtop site-cache stats [host]`.
 - **`X-CFM-Cache: HIT|MISS|BYPASS`** response header (behind a debug flag:
   `X-CFM-Cache-Debug`, honoured only from a trusted source — the box, its own
-  IPs, `IGNORE_NETS` — as-built) so an operator can `curl -I` and verify a
+  IPs, `IGNORE_IPS` / `IGNORE_NETS` — as-built) so an operator can `curl -I` and verify a
   single URL's decision on the spot.
 
 New knob `SITE_CACHE_STATS = 1` (§12) gates the counting + snapshot; `0` drops
@@ -1096,9 +1116,12 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
    on a live box (the `myip.gr` case) per the challenge/WAF release checklist.
    Hardening before enforce (as-built, the §4 Tier B rows): bucket-only TTL with
    the `$cfm_cc_nostore` / `$cfm_xae_nocache` store rails, `background_update
-   off`, remembered-uncacheable keys, the Range / event-stream / admin-path /
-   panel-host rails, the `location /` sentinel, the TTL-unit fix, and the
-   trusted-source debug stamp. Enforce per node only after §5.7.
+   off` + stale-on-5xx, remembered-uncacheable keys (never on 5xx / request
+   4xx; long enough after a page changed for its copy to age out), the Range /
+   event-stream / admin & script path / panel-host rails, more session
+   cookies, the `location /` sentinel (+ no internal redirects, nginx ≥ 1.23),
+   the TTL-unit fix, and the trusted-source debug stamp. Enforce per node only
+   after §5.7.
 5. **cfm-admin page + Recipes** (+ `make test-js`), filter/sort, per-row + global
    Purge UI.
 6. **Purge generation-bump** end-to-end (if not already folded into 3/4).

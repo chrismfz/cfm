@@ -64,6 +64,12 @@ local function micro_enforce_enabled()
     return bcfg.get().micro_cache_enforce == true
 end
 
+-- nginx >= 1.23 joins repeated response headers in $upstream_http_<name>; older
+-- cores expose only the first line (see micro_gate). Angie is 1.23+-based and
+-- defines nginx_version like any build lua-nginx-module compiles against.
+local NGX_JOINS_HEADERS = type(ngx.config) == "table"
+    and (tonumber(ngx.config.nginx_version) or 0) >= 1023000
+
 -- ---------------------------------------------------------------------------
 -- Per-worker cache state (module-level locals persist across requests in the
 -- same worker process). `policies` maps an exact host to its policy table;
@@ -97,14 +103,16 @@ local _stats_sec = 60
 -- The X-CFM-Cache observe header is a PER-REQUEST operator opt-in: it is stamped
 -- ONLY when the request carries `X-CFM-Cache-Debug` (any non-empty value) AND
 -- comes from a trusted source (debug_source_trusted: the box, its own IPs,
--- IGNORE_NETS), so internal cache policy (recipe / TTL bucket / purge
--- generation / HIT-MISS) is never disclosed to an ordinary client. Design §11.3
--- ("behind a debug flag"). No env var and no config plumbing — an operator runs,
--- on the box,
---   curl -H 'X-CFM-Cache-Debug: 1' -I --resolve site:443:127.0.0.1 https://site/
+-- IGNORE_IPS / IGNORE_NETS), so internal cache policy (recipe / TTL bucket /
+-- purge generation / HIT-MISS) is never disclosed to an ordinary client. Design
+-- §11.3 ("behind a debug flag"). No env var and no config plumbing — an
+-- operator runs, on the box, against the edge's HTTPS listener (:9043; :443 on
+-- loopback reaches the origin, not the edge):
+--   curl -sk -I -H 'X-CFM-Cache-Debug: 1' --resolve site:9043:<site-ip> https://site:9043/
 -- (a self-origin request bypasses cfm.lua at Step 0a, so it never takes the
 -- micro path itself: the micro token is the would-cache verdict; the served
--- verdict of real traffic is the access log's ucache= field and the stats).
+-- verdict of real traffic is the access log's ucache= / up= fields and the
+-- stats — docs/site-cache-design.md §5.7).
 -- The persistent fleet on/off gate is the Phase-3 SITE_CACHE config knob (via
 -- cfm_bridge_cfg), not this observe header.
 local OBSERVE_HEADER_VAR = "http_x_cfm_cache_debug"
@@ -127,6 +135,7 @@ local is_supported_pattern = hm.is_supported_pattern
 -- copy of the list to fall back on).
 local ok_ph, panel_hosts = pcall(require, "cfm_panel_hosts")
 if not ok_ph or type(panel_hosts) ~= "table" or type(panel_hosts.has_panel_prefix) ~= "function" then
+    ngx.log(ngx.WARN, "[cfm_cache] cfm_panel_hosts unavailable — Site Cache caches nothing: ", tostring(panel_hosts))
     panel_hosts = nil
 end
 -- Cache-only additions: cPanel service subdomains that are not panels (so they
@@ -145,11 +154,13 @@ local function panel_host(host)
     return label ~= nil and CACHE_SERVICE_PREFIXES[label] == true
 end
 
--- The debug stamp (observe) is served only to a trusted source: the box itself,
--- its own IPs, or an operator network in IGNORE_NETS — the same predicate the
--- self-origin bypass uses (cfm_selfip.lua). A missing module stamps nothing.
+-- The debug stamp (observe) is served only to a trusted source: loopback /
+-- link-local, the box's own IPs, or IGNORE_IPS / IGNORE_NETS — the same
+-- predicate the self-origin bypass uses (cfm_selfip.lua). A missing module
+-- stamps nothing.
 local ok_si, selfip = pcall(require, "cfm_selfip")
 if not ok_si or type(selfip) ~= "table" or type(selfip.is_self_origin) ~= "function" then
+    ngx.log(ngx.WARN, "[cfm_cache] cfm_selfip unavailable — no X-CFM-Cache debug stamp: ", tostring(selfip))
     selfip = nil
 end
 
@@ -477,8 +488,9 @@ end
 local MICRO_BUCKETS = { 1, 2, 5, 10, 30, 60 } -- seconds; mirrors the declared cfm_micro_<n>s zones
 
 -- micro_bucket_seconds: snap a stored TTL to the nearest bucket. Accepts a
--- number of seconds or a string "<n>[unit]" with unit s/m/h/d — the units the
--- daemon's parseCacheTTL accepts ("5", "5s", "30 s", "1m", "2h"); nil/empty/
+-- number of seconds or a string "[+]<n><unit>" with unit s/m/h/d, as the
+-- daemon's parseCacheTTL stores it ("5s", "+5s", "1m", "2h"; a bare number or
+-- inner spaces, which the daemon rejects, are read as seconds); nil/empty/
 -- unparseable or <=0 snaps to the smallest bucket (the safest, shortest TTL —
 -- closest to not caching), anything above 60s clamps to 60s. Ties snap DOWN
 -- (the shorter, safer TTL) because the buckets ascend and the comparison keeps
@@ -489,7 +501,7 @@ local function micro_bucket_seconds(ttl)
     if type(ttl) == "number" then
         n = ttl
     elseif type(ttl) == "string" then
-        local q, unit = ttl:lower():match("^%s*(%d+)%s*([a-z]?)%s*$")
+        local q, unit = ttl:lower():match("^%s*%+?(%d+)%s*([a-z]?)%s*$")
         if q and TTL_UNIT_SECONDS[unit] then n = tonumber(q) * TTL_UNIT_SECONDS[unit] end
     end
     if not n or n <= 0 then return MICRO_BUCKETS[1] end
@@ -509,16 +521,16 @@ local function micro_zone_name(ttl)
 end
 
 -- ---------------------------------------------------------------------------
--- Tier B micro-cache — request classification (Phase B2, OBSERVE-ONLY).
+-- Tier B micro-cache — request classification.
 --
--- Decides whether an ALLOWED request WOULD be micro-cacheable and to which TTL
--- bucket. NOTHING caches in B2: observe() records the verdict on the debug-gated
--- X-CFM-Cache header only, so the cookie allowlist + anonymity rails burn in on
--- real traffic (curl -H "X-CFM-Cache-Debug: 1") before B3 activates proxy_cache.
--- The RESPONSE-side rails (a Set-Cookie, or a Cache-Control: private/no-store/
--- no-cache response, is never stored) are nginx-native and enforced at store
--- time in B3 — this Lua covers only the REQUEST-side rails (armed, method,
--- path, cookies).
+-- Decides whether an ALLOWED request may be micro-cached and to which TTL
+-- bucket: the REQUEST-side rails (armed, method, credentials, Range /
+-- event-stream, path, panel host, cookies). micro_gate() routes on the verdict
+-- under MICRO_CACHE_ENFORCE=1; observe() shows it on the debug-gated
+-- X-CFM-Cache header (the dry-run burn-in surface). The RESPONSE-side rails
+-- (only a 200; Set-Cookie; Cache-Control private / no-store / no-cache /
+-- s-maxage=0; X-Accel-Expires 0 or @…) are enforced by the micro locations
+-- at store time, and micro_mark_ttl() below mirrors them.
 --
 -- Cookie model (design §4.1): the bypass is NOT "the request has a Cookie
 -- header". It is a positive AUTH allowlist (a named app-session cookie → bypass,
@@ -542,6 +554,17 @@ local MICRO_AUTH_EXACT = {
     ["laravel_session"] = true, ["ci_session"] = true, ["xsrf-token"] = true,
     ["horde"] = true,
     -- mainstream non-PHP stacks
+    ["ocsessid"] = true,          -- OpenCart
+    ["frontend"] = true,          -- Magento 1
+    ["private_content_version"] = true, -- Magento 2 (per-customer blocks)
+    ["moodlesession"] = true,     -- Moodle
+    ["edd_items_in_cart"] = true, -- Easy Digital Downloads
+    ["sid"] = true, ["token"] = true, ["auth"] = true,
+    -- a page that varies on a language / currency cookie without Vary
+    ["wp-wpml_current_language"] = true, ["_icl_current_language"] = true,
+    ["wmc_current_currency"] = true, ["woocs_current_currency"] = true,
+    ["aelia_cs_selected_currency"] = true,
+    -- mainstream non-PHP stacks
     ["jsessionid"] = true,        -- Java / Tomcat / JSP
     ["asp.net_sessionid"] = true, -- classic ASP.NET
     ["connect.sid"] = true,       -- Express / Node
@@ -549,13 +572,18 @@ local MICRO_AUTH_EXACT = {
 }
 local MICRO_AUTH_PREFIX = {
     "wordpress_logged_in_", "wordpress_sec_", "wp-postpass_", "comment_author_",
-    "woocommerce_", "wp_woocommerce_session_", "prestashop-", "horde_",
+    "woocommerce_", "wp_woocommerce_session_", "wp_edd_session_", "prestashop-",
+    "horde_", "mage-",
+    "sess", "ssess",              -- Drupal SESS<hash> / SSESS<hash>, and any sess*
     ".aspnetcore.",               -- ASP.NET Core session/antiforgery/auth
 }
 -- SUFFIX families: the `*_session` convention (Rails `_<app>_session`, and the
--- generic framework pattern). Redundant-but-harmless with the exact _session
--- names above.
-local MICRO_AUTH_SUFFIX = { "_session" }
+-- generic framework pattern) and `*_sid`. Redundant-but-harmless with the exact
+-- _session names above.
+local MICRO_AUTH_SUFFIX = { "_session", "_sid" }
+-- The __Host- / __Secure- cookie prefixes (RFC 6265bis) are stripped before
+-- matching, so __Host-PHPSESSID is PHPSESSID.
+local COOKIE_NAME_PREFIXES = { "__host-", "__secure-" }
 -- Ignore-list (consulted ONLY under strict_cookies): a strict vhost bypasses on
 -- ANY cookie not matched here. cfm_ covers cfm_clearance + every CFM-set cookie;
 -- the rest are common non-session analytics/consent cookies.
@@ -593,6 +621,9 @@ local function micro_cookie_verdict(cookie_header, strict, extra_auth)
         local name = pair:match("^%s*([^=%s]+)")
         if name then
             local lname = name:lower()
+            for _, cp in ipairs(COOKIE_NAME_PREFIXES) do
+                if lname:sub(1, #cp) == cp then lname = lname:sub(#cp + 1); break end
+            end
             if name_matches(lname, MICRO_AUTH_EXACT, MICRO_AUTH_PREFIX, MICRO_AUTH_SUFFIX)
                or (extra_auth and extra_auth[lname]) then
                 return false, "auth:" .. name
@@ -608,14 +639,23 @@ end
 -- Request paths never micro-cached even for an anonymous client. /.well-known/
 -- is already routed to origin at cfm.lua Step 0a1 (never reaches an allow-
 -- return), so it is not re-checked here; /acctxfer* (cPanel account transfer)
--- does reach an allow and must not be cached. The admin / login / PHP-script
--- paths go to the no-buffer passthrough location, which never routes to micro
--- (only `location /` carries $cfm_micro_conf); they are listed again so the
--- rail does not rest on the conf's location regex alone. Matched on the
--- lowercased path (nginx matches that location case-insensitively).
+-- does reach an allow and must not be cached. The admin / login / *.php paths
+-- go to the no-buffer passthrough location, which never routes to micro (only
+-- `location /` sets $cfm_micro_conf to "1"); they are listed again so the rail
+-- does not rest on the conf's location regex alone, and the rail also covers
+-- what that regex misses (other script extensions, PATH_INFO URLs). Matched on
+-- the decoded, lowercased path (nginx matches that location case-insensitively).
 local MICRO_PATH_PREFIX = {
     "/acctxfer", "/wp-admin", "/administrator/", "/admin/", "/sysadmin/",
+    "/___proxy_subdomain_",       -- cPanel's proxy-subdomain paths (panel services)
 }
+-- A path segment that names a PHP script: the script extensions the static-asset
+-- location excludes (php, php<digit>, phtml, pht, phar), at the end of the path
+-- or followed by "/" (PATH_INFO: /index.php/checkout/cart, /wp-login.php/).
+local function script_ext(ext)
+    return ext == "php" or ext == "phtml" or ext == "pht" or ext == "phar"
+        or ext:match("^php%d$") ~= nil
+end
 local function micro_path_blocked(uri)
     if type(uri) ~= "string" then return false end
     local u = uri:lower()
@@ -623,7 +663,11 @@ local function micro_path_blocked(uri)
         if u:sub(1, #pfx) == pfx then return true end
     end
     -- wp-login.php, xmlrpc.php, wp-cron.php and every other script
-    return u:sub(-4) == ".php"
+    for ext in u:gmatch("%.([a-z0-9]+)/") do
+        if script_ext(ext) then return true end
+    end
+    local last = u:match("%.([a-z0-9]+)$")
+    return last ~= nil and script_ext(last)
 end
 
 -- micro_args_blocked: a WordPress cron spawn (ALTERNATE_WP_CRON sends the
@@ -695,7 +739,8 @@ end
 -- Tier B remember-uncacheable (nginx has no hit-for-pass).
 --
 -- A micro key whose response cannot be stored (non-200, Set-Cookie, Cache-
--- Control private/no-store/no-cache, X-Accel-Expires: 0, Vary: *) is never
+-- Control private/no-store/no-cache/s-maxage=0, X-Accel-Expires 0 or @…,
+-- Vary: *) is never
 -- cached, yet every request for it still takes the cache lock: concurrent
 -- requests queue behind the one in flight (in 500ms steps, up to the 5s
 -- lock_timeout), so arming micro on a vhost whose pages set a cookie for every
@@ -708,9 +753,42 @@ end
 -- The mark key is the cache key without the purge generation (a purge does not
 -- change what the origin sends); hashed, so the dict holds fixed-size keys. The
 -- dict evicts least-recently-used marks when full, which only costs a re-probe.
-local UNCACHEABLE_DICT      = "cfm_cache_uncacheable"
-local MICRO_UNCACHEABLE_TTL = 60
-local NGX_CACHE_VARY_LEN    = 128  -- nginx does not store a longer Vary
+--
+-- Which answers mark (micro_mark_ttl):
+--   * never a 5xx: origin trouble is transient, and on an EXPIRED key the
+--     stale copy is exactly what should absorb it (use_stale updating plus
+--     http_500..504 serve it, the fetching request included). Marking would
+--     send the whole load to the struggling origin for the mark's lifetime,
+--     and every failing probe would re-mark. On a MISS (no copy) a failing key
+--     queues on the lock as it did before, which also throttles the origin.
+--   * never a request-level 4xx (400, 405, 406, 408, 411, 412, 413, 414, 415,
+--     416, 417, 421, 429, 431): it says nothing about the page, and any client
+--     can provoke one (an oversized header, an origin rate limit or WAF rule
+--     that answers 406) to switch micro off for a URL. A 401 / 403 / 404 / 410
+--     does mark: the page is gone or protected now, and its old public copy
+--     must age out. (An origin WAF that answers 403 to a request is the
+--     residual below.)
+--   * a MISS that could not be stored: MICRO_UNCACHEABLE_TTL.
+--   * an EXPIRED refresh that could not be stored — the page changed (sets a
+--     cookie, went private, redirects, 404): MICRO_UNCACHEABLE_STALE_TTL,
+--     longer than the largest micro zone's `inactive` (180s), so the stale copy
+--     is evicted before the next probe. Otherwise every probe would serve it
+--     to the requests arriving during its fetch, for as long as they kept it
+--     warm. check_site_cache_config.sh pins inactive < this value.
+-- Residual (like Varnish hit-for-miss): one client's non-storable answer skips
+-- micro for that URL for everyone until the mark expires — a client that can
+-- make the origin answer differently (a UA/language redirect, a cookie, an
+-- origin WAF 403) can keep micro off for one URL with a request per mark. That
+-- URL is then served as it would be without micro; nothing wrong is stored.
+local UNCACHEABLE_DICT            = "cfm_cache_uncacheable"
+local MICRO_UNCACHEABLE_TTL       = 60
+local MICRO_UNCACHEABLE_STALE_TTL = 240
+local NGX_CACHE_VARY_LEN          = 128  -- nginx does not store a longer Vary
+local REQUEST_INDUCED_4XX = {
+    [400] = true, [405] = true, [406] = true, [408] = true, [411] = true, [412] = true,
+    [413] = true, [414] = true, [415] = true, [416] = true, [417] = true, [421] = true,
+    [429] = true, [431] = true,
+}
 
 local function micro_mark_key()
     local v = ngx.var
@@ -735,6 +813,20 @@ local function micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary)
     return true
 end
 
+-- micro_mark_ttl: PURE. How long to remember this fetch's key as uncacheable,
+-- or nil to not mark it (see the rules above). cache_status is
+-- $upstream_cache_status; status is $upstream_status, whose LAST entry is the
+-- answer (a retried fetch lists every attempt).
+local function micro_mark_ttl(cache_status, status, set_cookie, cc_nostore, xae_nocache, vary)
+    if cache_status ~= "MISS" and cache_status ~= "EXPIRED" then return nil end
+    local code = tonumber(type(status) == "string" and status:match("(%d+)%s*$") or nil)
+    if not code then return nil end
+    if code >= 500 or REQUEST_INDUCED_4XX[code] then return nil end
+    if micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary) then return nil end
+    if cache_status == "EXPIRED" then return MICRO_UNCACHEABLE_STALE_TTL end
+    return MICRO_UNCACHEABLE_TTL
+end
+
 local function uncacheable_marked()
     local dict = ngx.shared and ngx.shared[UNCACHEABLE_DICT]
     if not dict then return false end
@@ -743,22 +835,20 @@ end
 
 -- micro_note: log-phase hook (the conf's http-level log_by_lua_block, for a
 -- request an @cfm_micro_<n>s location served). Marks the key uncacheable when
--- this request FETCHED from the origin (MISS / EXPIRED) and the response was
--- one nginx could not store. A fetch that looked storable but was not stored
--- (a waiter whose lock wait timed out) is never marked. Never raises into the
--- caller (the conf pcall's it too).
+-- this request FETCHED from the origin (MISS / EXPIRED) and the answer was one
+-- nginx could not store and micro_mark_ttl says to remember. A fetch that
+-- looked storable but was not stored (a waiter whose lock wait timed out) is
+-- never marked. Never raises into the caller (the conf pcall's it too).
 function _M.micro_note()
     local v = ngx.var
-    if v.cfm_upstream ~= "cfm_apache_micro" then return end
     local st = v.upstream_cache_status
     if st ~= "MISS" and st ~= "EXPIRED" then return end
+    if v.cfm_upstream ~= "cfm_apache_micro" then return end
     local dict = ngx.shared and ngx.shared[UNCACHEABLE_DICT]
     if not dict then return end
-    if micro_storable(v.upstream_status, v.upstream_http_set_cookie, v.cfm_cc_nostore,
-                      v.cfm_xae_nocache, v.upstream_http_vary) then
-        return
-    end
-    dict:set(micro_mark_key(), true, MICRO_UNCACHEABLE_TTL)
+    local ttl = micro_mark_ttl(st, v.upstream_status, v.upstream_http_set_cookie,
+                               v.cfm_cc_nostore, v.cfm_xae_nocache, v.upstream_http_vary)
+    if ttl then dict:set(micro_mark_key(), true, ttl) end
 end
 
 -- micro_verdict: the request-side decision for THIS request (impure: reads
@@ -833,6 +923,11 @@ function _M.observe()
         -- like the rest of this stamp.
         if type(p.micro) == "table" and p.micro.on then
             local okc, bkt, why = micro_verdict(p)
+            -- what micro_gate would also refuse here: a location other than
+            -- `location /` (no sentinel)
+            if okc and ngx.var.cfm_micro_conf ~= "1" then
+                okc, why = false, "location"
+            end
             if okc then
                 lbl = lbl .. " microcache=would/" .. tostring(bkt) .. "s"
             else
@@ -889,12 +984,18 @@ end
 --   * scheme != https: the @cfm_micro_<n>s locations live only in the HTTPS
 --     server (B3a). Executing to a missing named location would 500, so a
 --     cleartext request is never routed — it just proceeds uncached.
---   * $cfm_micro_conf != "1": the conf sentinel, set only in the HTTPS
---     server's `location /`. It pins micro to that location (never the
---     no-buffer PHP/admin or streaming passthroughs, whose unbuffered proxying
---     a micro location would replace), and an older live conf — one without
---     the origin Cache-Control / X-Accel-Expires rails and with background
---     updates on — lacks it, so newer Lua never routes into its locations.
+--   * $cfm_micro_conf != "1": the conf sentinel, "1" only in the HTTPS
+--     server's `location /` ("" by default at server level). It pins micro to
+--     that location (never the no-buffer PHP/admin or streaming passthroughs,
+--     whose unbuffered proxying a micro location would replace), and an older
+--     live conf — one without the origin Cache-Control / X-Accel-Expires rails
+--     and with background updates on — lacks it, so newer Lua never routes
+--     into its locations.
+--   * an internal redirect (error_page / try_files / an ngx.exec elsewhere):
+--     the sentinel variable would survive into the target location.
+--   * nginx core older than 1.23: it exposes only the FIRST of several
+--     Cache-Control headers in $upstream_http_cache_control, so a `private` on
+--     a second line would not reach $cfm_cc_nostore.
 --   * the request-side rails (micro_verdict: armed micro tier, GET/HEAD, no
 --     Authorization / Range / event-stream, not an admin / script / transfer
 --     path, not a panel host, anonymous per the cookie allowlist, not
@@ -902,16 +1003,18 @@ end
 -- On a cache decision it sets the same two vars static_gate does ($cfm_cache_skip
 -- =0 to open the bypass gate, $cfm_cache_gen for the purge-generation key) and
 -- returns the bucket location; the only-200 rail + response-side rails (Set-Cookie,
--- Cache-Control private/no-store/no-cache, X-Accel-Expires: 0 never stored) are
--- enforced natively in that location.
+-- Cache-Control private/no-store/no-cache/s-maxage=0, X-Accel-Expires 0 or @…
+-- never stored) are enforced natively in that location.
 function _M.micro_gate()
     if not site_cache_enabled() then return nil end
     if not _cache.has_micro then return nil end
+    if not NGX_JOINS_HEADERS then return nil end
     if not micro_enforce_enabled() then return nil end
     if ngx.var.scheme ~= "https" then return nil end
-    if ngx.var.cfm_micro_conf ~= "1" then return nil end
     local p = _M.policy_for(ngx.var.host)
     if not p then return nil end
+    if ngx.var.cfm_micro_conf ~= "1" then return nil end
+    if ngx.req.is_internal() then return nil end
     local ok, bucket = micro_verdict(p)
     if not ok then return nil end
     ngx.var.cfm_cache_skip = "0"
@@ -930,6 +1033,7 @@ _M._micro_zone_name    = micro_zone_name
 _M._micro_cookie       = micro_cookie_verdict
 _M._micro_decision     = micro_decision
 _M._micro_storable     = micro_storable
+_M._micro_mark_ttl     = micro_mark_ttl
 _M._panel_host         = panel_host
 _M._has_micro          = function() return _cache.has_micro end
 _M._micro_enforce      = micro_enforce_enabled

@@ -37,17 +37,32 @@
 #       method. Cache-Control / Expires / X-Accel-Expires may be ignored ONLY
 #       in a @cfm_micro_<n>s location, which must then carry exactly
 #       `proxy_ignore_headers Cache-Control Expires X-Accel-Expires;` plus the
-#       replacement rails $cfm_cc_nostore (private/no-store/no-cache) and
-#       $cfm_xae_nocache (X-Accel-Expires: 0) on proxy_no_cache — their maps
-#       exact, nothing else writing them — and proxy_cache_background_update
-#       off (on keeps serving a stale page whose refresh can no longer be
-#       stored). A proxy_ignore_headers anywhere else (Tier A, server or http
-#       level, which a location would inherit) may not list them.
+#       replacement rails $cfm_cc_nostore (private/no-store/no-cache/
+#       s-maxage=0) and $cfm_xae_nocache (X-Accel-Expires 0 / @…) on
+#       proxy_no_cache — their maps exact (volatile included), nothing else
+#       writing them — proxy_cache_background_update off (on keeps serving a
+#       stale page whose refresh can no longer be stored), exactly
+#       `proxy_cache_use_stale updating error timeout http_500 http_502
+#       http_503 http_504`, and exactly one `proxy_cache_valid 200 <N>s` with
+#       N the bucket its name and zone say (with the origin headers ignored it
+#       is the only TTL). A proxy_ignore_headers anywhere else (Tier A, server
+#       or http level, which a location would inherit) may not list them.
 #     * the Tier B sentinel `set $cfm_micro_conf "1";` sits in `location /` of
 #       every server that has micro locations, and nowhere else (cfm_cache.lua
 #       routes to micro only when it reads "1": a sentinel in a server without
-#       the named locations would 500, one in a passthrough would buffer it).
-#     * lua_shared_dict cfm_cache_uncacheable (remember-uncacheable) exists.
+#       the named locations would 500, one in a passthrough would buffer it);
+#       that server also sets the default `set $cfm_micro_conf "";` at server
+#       level, and its `location /` has no rewrite / try_files / error_page
+#       (each would carry the sentinel into another location) and does not
+#       turn buffering off.
+#     * lua_shared_dict cfm_cache_uncacheable (remember-uncacheable) exists,
+#       and every micro zone's inactive is at least 30s below cfm_cache.lua's
+#       MICRO_UNCACHEABLE_STALE_TTL (so a stale copy is evicted before the
+#       next probe of a page that stopped being cacheable).
+#     * proxy_cache_convert_head is never turned off in a cache location (the
+#       key has no method: a body-less HEAD entry would be served to GETs).
+#     * the conf includes exactly its known files (a new include could carry
+#       a second copy of a rail map, which this scan would not see).
 #   How: the conf is lexed like nginx (quotes, escapes, ${var}, # comments),
 #   inline *_by_lua_block bodies are lexed as Lua and kept out of the checks,
 #   and the text is assembled into real statements — so every rail must match
@@ -93,8 +108,9 @@ for f in "$ORT" "$ANG"; do
   #     the statement stream: only its closing } takes part in brace depth. So
   #     Lua code, Lua comments and Lua strings can neither satisfy a rail nor
   #     unbalance a location. Inline Lua must not reference the guarded
-  #     variables at all ($cfm_cache_skip / $cfm_req_auth / $cfm_cache_non200:
-  #     the cache-on flip lives in cfm_cache.lua, never inline).
+  #     variables at all ($cfm_cache_skip / $cfm_req_auth / $cfm_cache_non200 /
+  #     $cfm_cc_nostore / $cfm_xae_nocache / $cfm_micro_conf: the cache-on flip
+  #     and the micro routing live in cfm_cache.lua, never inline).
   # Every rail must then match a DIRECTIVE at a statement start, so comment
   # text or a quoted value never satisfies one; a one-line location, { on the
   # next line and a directive wrapped over several lines parse like anything
@@ -159,27 +175,29 @@ for f in "$ORT" "$ANG"; do
     }
     function emit(s, l) { K++; ST[K] = s; SL[K] = l }
     function cnt(str, re,   n) { n = 0; while (match(str, re)) { n++; str = substr(str, RSTART + RLENGTH) } return n }
-    function mapcheck(hdr_re, want1, want2, name,   k, mk, e, ne, ok1, ok2, got) {
+    function mapcheck(hdr_re, want1, want2, name, want3,   k, mk, e, ne, ok1, ok2, ok3, got, nw) {
       mk = 0
       for (k = 1; k <= K; k++) if (tolower(ST[k]) ~ hdr_re) { mk = k; break }
       if (!mk) { print "ERR no " name " map — the rail the cache predicates key on is undefined."; return }
-      ne = 0; ok1 = 0; ok2 = 0; got = ""
+      ne = 0; ok1 = 0; ok2 = 0; ok3 = (want3 == ""); got = ""; nw = (want3 == "") ? 2 : 3
       for (k = mk + 1; k <= K; k++) {
         e = ST[k]; if (e ~ /^[[:space:]]*[}][[:space:]]*$/) break
         gsub(/[[:space:]]+/, " ", e); sub(/^ /, "", e); sub(/ $/, "", e)
         ne++; got = got "|" e
-        if (e == want1) ok1 = 1; else if (e == want2) ok2 = 1
+        if (e == want1) ok1 = 1; else if (e == want2) ok2 = 1; else if (want3 != "" && e == want3) ok3 = 1
       }
-      if (ne != 2 || !ok1 || !ok2) print "ERR the " name " map must hold EXACTLY: " want1 " and " want2 " — got:" got
+      if (ne != nw || !ok1 || !ok2 || !ok3) print "ERR the " name " map must hold EXACTLY: " want1 " and " want2 (want3 != "" ? " and " want3 : "") " — got:" got
     }
-    function check_loc(   m, nz, lb, i, nh, H, st, mi, ns, lh) {
+    function check_loc(   m, nz, lb, i, nh, H, st, mi, ns, lh, zn, hn) {
       # The Tier B sentinel: only `location /` may carry it (see the header).
       lh = body; sub(/^\n/, "", lh); sub(/\n.*$/, "", lh); gsub(/[[:space:]]+/, " ", lh); sub(/^ /, "", lh); sub(/ $/, "", lh)
       ns = cnt(body, A "set[[:space:]]+[$]cfm_micro_conf[[:space:]]+\"1\"[[:space:]]*;")
       if (ns > 0) {
         sentinels += ns
         if (lh != "location / {" || ns != 1) print "ERR location@line" locline " (" lh "): set $cfm_micro_conf \"1\" belongs once in `location /` only — anywhere else micro-cache would take over a location it must not buffer."
-        else if (insrv) srv_sentinel = 1
+        if (lh == "location / {" && insrv) srv_sentinel = 1
+        if (body ~ (A "(rewrite|try_files|error_page)[[:space:]]")) print "ERR location@line" locline " (" lh "): the location carrying the $cfm_micro_conf sentinel has a rewrite / try_files / error_page — it would carry the sentinel into the location it redirects to."
+        if (body ~ (A "proxy_buffering[[:space:]]+off[[:space:]]*;")) print "ERR location@line" locline " (" lh "): the location carrying the $cfm_micro_conf sentinel turns buffering off — it streams, and micro would buffer it."
       }
       nz = cnt(body, A "proxy_cache[[:space:]]+[^[:space:];]+[[:space:]]*;") - cnt(body, A "proxy_cache[[:space:]]+off[[:space:]]*;")
       if (nz <= 0) return
@@ -247,7 +265,15 @@ for f in "$ORT" "$ANG"; do
         if (body !~ (A "proxy_no_cache[[:space:]][^;]*[$]cfm_cc_nostore[[:space:];]")) m = m " proxy_no_cache-$cfm_cc_nostore(private/no-store/no-cache-could-be-stored)"
         if (body !~ (A "proxy_no_cache[[:space:]][^;]*[$]cfm_xae_nocache[[:space:];]")) m = m " proxy_no_cache-$cfm_xae_nocache(X-Accel-Expires:0-could-be-stored)"
         if (body !~ (A "proxy_cache_background_update[[:space:]]+off[[:space:]]*;")) m = m " micro-proxy_cache_background_update-must-be-off(stale-page-served-while-refresh-cannot-store)"
+        if (cnt(body, A "proxy_cache_use_stale[[:space:]]") != 1 || body !~ (A "proxy_cache_use_stale[[:space:]]+updating[[:space:]]+error[[:space:]]+timeout[[:space:]]+http_500[[:space:]]+http_502[[:space:]]+http_503[[:space:]]+http_504[[:space:]]*;")) m = m " micro-proxy_cache_use_stale-must-be-exactly-updating-error-timeout-http_500-http_502-http_503-http_504"
+        # The bucket TTL is the only TTL now: the location name, its zone and
+        # its one proxy_cache_valid must all say the same N.
+        zn = ""; if (match(body, A "proxy_cache[[:space:]]+cfm_micro_[0-9]+s[[:space:]]*;")) { zn = substr(body, RSTART, RLENGTH); sub(/^.*cfm_micro_/, "", zn); sub(/s.*$/, "", zn) }
+        hn = lh; sub(/^location @cfm_micro_/, "", hn); sub(/s \{$/, "", hn)
+        if (zn == "" || hn != zn) m = m " micro-location-name-and-zone-disagree(@cfm_micro_" hn "s-vs-cfm_micro_" zn "s)"
+        else if (cnt(body, A "proxy_cache_valid[[:space:]]") != 1 || body !~ (A "proxy_cache_valid[[:space:]]+200[[:space:]]+" zn "s[[:space:]]*;")) m = m " micro-proxy_cache_valid-must-be-exactly-200-" zn "s(the-bucket-TTL)"
       }
+      if (body ~ (A "proxy_cache_convert_head[[:space:]]+off[[:space:]]*;")) m = m " proxy_cache_convert_head-off(a-body-less-HEAD-entry-would-be-served-to-GET)"
       hdr = body; sub(/^\n/, "", hdr); sub(/\n.*$/, "", hdr); gsub(/[[:space:]]+/, " ", hdr); sub(/^ /, "", hdr); print "CLOC " hdr
       if (m != "") print "ERR cache location@line" locline ":" m " — a proxy_cache location is missing a required rail (no bypass gate → unconditional caching; buffering off → nginx silently caches NOTHING)."
     }
@@ -272,8 +298,9 @@ for f in "$ORT" "$ANG"; do
       for (k = 1; k <= K; k++) {
         s = ST[k]; ls = tolower(s)
         isopen = (s ~ /[{][[:space:]]*$/); isclose = (s ~ /^[[:space:]]*[}][[:space:]]*$/)
-        if (!insrv && !loc && isopen && ls ~ /^[[:space:]]*server[[:space:]]*[{][[:space:]]*$/) { insrv = 1; srvD = D; srv_set = 0; srv_cache = 0; srv_micro = 0; srv_sentinel = 0; srvline = SL[k] }
+        if (!insrv && !loc && isopen && ls ~ /^[[:space:]]*server[[:space:]]*[{][[:space:]]*$/) { insrv = 1; srvD = D; srv_set = 0; srv_cache = 0; srv_micro = 0; srv_sentinel = 0; srv_mdef = 0; srvline = SL[k] }
         if (insrv && D == srvD + 1 && ls ~ /^[[:space:]]*set[[:space:]]+[$]cfm_cache_skip[[:space:]]+"1"[[:space:]]*;/) srv_set = 1
+        if (insrv && !loc && D == srvD + 1 && ls ~ /^[[:space:]]*set[[:space:]]+[$]cfm_micro_conf[[:space:]]+""[[:space:]]*;[[:space:]]*$/) { srv_mdef++; mdefs++ }
         if (!loc && s ~ /^[[:space:]]*location[[:space:]]/) { loc = 1; body = "\n"; locline = SL[k]; nloc++; d = 0; seen = 0 }
         if (loc) {
           body = body s "\n"
@@ -286,6 +313,8 @@ for f in "$ORT" "$ANG"; do
           if (srv_cache && !srv_set) print "ERR the server block opened at line " srvline " has a cache location but no server-level set $cfm_cache_skip \"1\" — bypass-by-default is lost for every vhost on it."
           if (srv_micro && !srv_sentinel) print "ERR the server block opened at line " srvline " has @cfm_micro_<n>s locations but its `location /` lacks set $cfm_micro_conf \"1\" — cfm_cache.lua would never route to them."
           if (srv_sentinel && !srv_micro) print "ERR the server block opened at line " srvline " sets $cfm_micro_conf \"1\" but has no @cfm_micro_<n>s location — an ngx.exec to a missing named location 500s."
+          if (srv_micro && srv_mdef != 1) print "ERR the server block opened at line " srvline " has @cfm_micro_<n>s locations but " srv_mdef " server-level set $cfm_micro_conf \"\" defaults (want exactly 1) — without it every read outside `location /` logs an uninitialized-variable warning."
+          if (!srv_micro && srv_mdef) print "ERR the server block opened at line " srvline " sets a $cfm_micro_conf default but has no @cfm_micro_<n>s location."
           insrv = 0 } }
       }
       if (loc) print "ERR a location opened at line " locline " never closes — the parser lost track of braces, so nothing after it was checked."
@@ -299,13 +328,13 @@ for f in "$ORT" "$ANG"; do
       print "NSTATIC " nstatic + 0
 
       # Rail maps: exactly their two entries (one extra key re-opens the leak).
-      mapcheck("^[[:space:]]*map[[:space:]]+[$]http_authorization[[:space:]]+[$]cfm_req_auth[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"\" \"\";", "$http_authorization → $cfm_req_auth")
-      mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_status[[:space:]]+[$]cfm_cache_non200[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"200\" \"\";", "$upstream_status → $cfm_cache_non200 (only-200)")
-      mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_cache_control[[:space:]]+[$]cfm_cc_nostore[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~*(private|no-store|no-cache)\" \"1\";", "$upstream_http_cache_control → $cfm_cc_nostore (micro: private/no-store/no-cache never stored)")
-      mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_x_accel_expires[[:space:]]+[$]cfm_xae_nocache[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^0+$\" \"1\";", "$upstream_http_x_accel_expires → $cfm_xae_nocache (micro: X-Accel-Expires 0 never stored)")
+      mapcheck("^[[:space:]]*map[[:space:]]+[$]http_authorization[[:space:]]+[$]cfm_req_auth[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"\" \"\";", "$http_authorization → $cfm_req_auth", "")
+      mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_status[[:space:]]+[$]cfm_cache_non200[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"200\" \"\";", "$upstream_status → $cfm_cache_non200 (only-200)", "")
+      mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_cache_control[[:space:]]+[$]cfm_cc_nostore[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~*(private|no-store|no-cache|s-maxage=0*(?:[^0-9]|$))\" \"1\";", "$upstream_http_cache_control → $cfm_cc_nostore (micro: private/no-store/no-cache/s-maxage=0 never stored)", "volatile;")
+      mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_x_accel_expires[[:space:]]+[$]cfm_xae_nocache[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^(?:0+|@.*)$\" \"1\";", "$upstream_http_x_accel_expires → $cfm_xae_nocache (micro: X-Accel-Expires 0 / @… never stored)", "volatile;")
       if (!micro_seen) print "ERR no @cfm_micro_<n>s cache location found — the Tier B checks must verify something."
       if (!sentinels) print "ERR no set $cfm_micro_conf \"1\" sentinel found — Tier B would never route."
-      nm1 = 0; nm2 = 0; nm3 = 0; nm4 = 0; nmc = 0; nign = 0
+      nm1 = 0; nm2 = 0; nm3 = 0; nm4 = 0; nmc = 0; nme = 0; nign = 0
       for (k = 1; k <= K; k++) {
         u = tolower(ST[k]); gsub(/\002/, "{", u); gsub(/\003/, "}", u); gsub(/\001/, ";", u)
         fw = u; sub(/^[[:space:]]*/, "", fw); sub(/[^a-z0-9_].*$/, "", fw)
@@ -330,6 +359,7 @@ for f in "$ORT" "$ANG"; do
         }
         if (u ~ /[$][{]?cfm_micro_conf([^a-z0-9_]|$)/) {
           if (u ~ /^[[:space:]]*set[[:space:]]+[$]cfm_micro_conf[[:space:]]+"1"[[:space:]]*;[[:space:]]*$/) nmc++
+          else if (u ~ /^[[:space:]]*set[[:space:]]+[$]cfm_micro_conf[[:space:]]+""[[:space:]]*;[[:space:]]*$/) nme++
           else print "ERR line " SL[k] ": $cfm_micro_conf appears in a " fw " statement — only its sentinel set $cfm_micro_conf \"1\" in `location /` may."
         }
         if (fw == "proxy_ignore_headers" && u ~ /[[:space:]]["\047]?(cache-control|expires|x-accel-expires)["\047]?([[:space:];]|$)/) nign++
@@ -341,7 +371,9 @@ for f in "$ORT" "$ANG"; do
       if (nm2 != 1) print "ERR $cfm_cache_non200 is written by " nm2 " copies of its map — it must have exactly one."
       if (nm3 != 1) print "ERR $cfm_cc_nostore is written by " nm3 " copies of its map — it must have exactly one."
       if (nm4 != 1) print "ERR $cfm_xae_nocache is written by " nm4 " copies of its map — it must have exactly one."
-      if (nmc != sentinels) print "ERR " nmc " set $cfm_micro_conf statements but " sentinels " sit in a `location /` — one is outside any location."
+      if (nmc != sentinels) print "ERR " nmc " set $cfm_micro_conf \"1\" statements but " sentinels " sit in a `location /` — one is outside any location."
+      if (nme != mdefs) print "ERR " nme " set $cfm_micro_conf \"\" statements but only " mdefs " are a server-level default of a micro server — one inside a location (or at http level) can clear the sentinel of `location /`."
+      for (k = 1; k <= K; k++) { u = ST[k]; if (u ~ /^[[:space:]]*include[[:space:]]/) { sub(/^[[:space:]]*include[[:space:]]+/, "", u); sub(/[[:space:]]*;.*$/, "", u); sub(/^.*\//, "", u); print "INC " u } }
       if (nign != micro_ign) print "ERR " nign " proxy_ignore_headers statements list Cache-Control / Expires / X-Accel-Expires but only " micro_ign " sit in the micro locations — Tier A (or a server/http-level one a location inherits) would let the origin set the TTL and drop the nginx private/no-store rail."
       if (all !~ (A "lua_shared_dict[[:space:]]+cfm_cache_uncacheable[[:space:]]+[0-9]+[kKmM]?[[:space:]]*;")) print "ERR no lua_shared_dict cfm_cache_uncacheable — Tier B cannot remember an uncacheable key, so its requests queue on the cache lock."
       lt2 = tolower(LT)
@@ -351,7 +383,13 @@ for f in "$ORT" "$ANG"; do
   ncache_of["$f"]=$(sed -n 's/^NCACHE //p' <<< "$parsed")
   nstatic_of["$f"]=$(sed -n 's/^NSTATIC //p' <<< "$parsed")
   clocs_of["$f"]=$(sed -n 's/^CLOC //p' <<< "$parsed" | sort)
-  parsed=$(grep -Ev '^(NCACHE|NSTATIC|CLOC) ' <<< "$parsed" || true)
+  # The includes are pinned: this scan does not read them, so a new one could
+  # carry a second copy of a rail map (a later map for the same variable wins)
+  # or a cache directive. Add one here only after checking it carries neither.
+  incs=$(sed -n 's/^INC //p' <<< "$parsed" | sort | tr '\n' ' ')
+  [ "$incs" = "cfm-panel-listeners.conf challenge_waf_bypass.conf mime.types trusted_proxies.conf " ] \
+    || err "$f: the conf includes [$incs] — expected exactly [cfm-panel-listeners.conf challenge_waf_bypass.conf mime.types trusted_proxies.conf]; an included file is not scanned by this guard."
+  parsed=$(grep -Ev '^(NCACHE|NSTATIC|CLOC|INC) ' <<< "$parsed" || true)
   if [ -n "$parsed" ]; then
     while IFS= read -r line; do
       err "$f: ${line#ERR }"
@@ -363,7 +401,7 @@ for f in "$ORT" "$ANG"; do
     err "$f: no 'proxy_cache_path .../cfm_static' zone declared — Tier A config missing?"
   fi
   # The other anchors (at least one cfm_static cache location, the bypass /
-  # no_cache / only-200 predicates, both rail maps, the per-server
+  # no_cache / only-200 predicates, the four rail maps, the per-server
   # $cfm_cache_skip "1") are enforced statement-aware in section (a), counted
   # by the parser, so a commented-out directive never satisfies them.
 
@@ -411,6 +449,27 @@ micro_zones() {
 if ! diff <(micro_zones "$ORT") <(micro_zones "$ANG") >/dev/null 2>&1; then
   err "openresty.conf and angie.conf declare the micro-cache zones DIFFERENTLY (a per-bucket keys_zone/max_size/inactive drift); the six cfm_micro_<n>s zones must be identical on both edges. Divergence:"
   diff <(micro_zones "$ORT") <(micro_zones "$ANG") 2>/dev/null | sed 's/^/       /' >&2 || true
+fi
+
+# ── (e2) a stale copy must age out while its key is marked uncacheable: after an
+# EXPIRED refresh that cannot be stored, cfm_cache.lua skips micro for the key
+# for MICRO_UNCACHEABLE_STALE_TTL, and nothing reads the entry meanwhile — so
+# every micro zone's inactive must end well inside that window (30s margin for
+# the fetch itself), or the next probe finds the old copy and serves it again
+# to the requests that arrive during its fetch.
+LUA_CACHE=configs/lua/cfm_cache.lua
+stale_ttl=$(sed -n 's/^local MICRO_UNCACHEABLE_STALE_TTL[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$LUA_CACHE" 2>/dev/null)
+if [ -z "$stale_ttl" ]; then
+  err "$LUA_CACHE: no 'local MICRO_UNCACHEABLE_STALE_TTL = <seconds>' — cannot check the micro zones' inactive against it."
+else
+  for f in "$ORT" "$ANG"; do
+    inact=$(grep -E '^[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/cfm_micro_' "$f" | sed -nE 's/.*[[:space:]]inactive=([0-9]+)(s|m)?([[:space:]].*|;.*)$/\1 \2/p')
+    [ "$(wc -l <<< "$inact")" = "6" ] && [ -n "$inact" ] || { err "$f: could not read the inactive= of all six micro zones (want <n>s or <n>m)."; continue; }
+    while read -r n u; do
+      secs=$n; [ "$u" = "m" ] && secs=$((n * 60))
+      [ $((secs + 30)) -le "$stale_ttl" ] || err "$f: a micro zone has inactive=${n}${u:-s}, not at least 30s below cfm_cache.lua MICRO_UNCACHEABLE_STALE_TTL=${stale_ttl}s — a stale copy would survive its key's uncacheable mark and be served again at the next probe."
+    done <<< "$inact"
+  done
 fi
 
 # ── (f) micro-LOCATION body parity: the full @cfm_micro_<n>s serving blocks must
@@ -487,4 +546,4 @@ if [ "$fail" -ne 0 ]; then
   echo "[site-cache-config] FAILED — see errors above (invariant: caching is bypass-by-default; the gate must come from Lua)." >&2
   exit 1
 fi
-echo "[site-cache-config] OK: cfm_static zone declared, Tier B micro buckets {1,2,5,10,30,60}s (zone + internal @cfm_micro_<n>s location) declared in both confs, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered + (micro) internal, only-200 rail (\$cfm_cache_non200) enforced, request-identity rails (\$cfm_req_auth bypass + map, full g\$cfm_cache_gen|\$server_addr|\$scheme|\$cf_xfp:// key, per-tier lock_timeout, forwarded headers pinned) on every cache location, every location + every proxy_cache directive accounted for, cache dirs provisioned by the daemon and cfm-cache-dirs.sh == the proxy_cache_path dirs, Set-Cookie/Vary never ignored, Cache-Control/Expires/X-Accel-Expires ignored only in micro with the \$cfm_cc_nostore/\$cfm_xae_nocache rails + background_update off, the \$cfm_micro_conf sentinel only in location / of the micro server, the cfm_cache_uncacheable dict, GET/HEAD-only cache methods, openresty↔angie parity ($ort_n static locations)."
+echo "[site-cache-config] OK: cfm_static zone declared, Tier B micro buckets {1,2,5,10,30,60}s (zone + internal @cfm_micro_<n>s location) declared in both confs, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered + (micro) internal, only-200 rail (\$cfm_cache_non200) enforced, request-identity rails (\$cfm_req_auth bypass + map, full g\$cfm_cache_gen|\$server_addr|\$scheme|\$cf_xfp:// key, per-tier lock_timeout, forwarded headers pinned) on every cache location, every location + every proxy_cache directive accounted for, cache dirs provisioned by the daemon and cfm-cache-dirs.sh == the proxy_cache_path dirs, Set-Cookie/Vary never ignored, Cache-Control/Expires/X-Accel-Expires ignored only in micro with the \$cfm_cc_nostore/\$cfm_xae_nocache rails (volatile maps) + background_update off + use_stale incl. http_5xx + proxy_cache_valid == the bucket, the \$cfm_micro_conf sentinel only in a redirect-free location / of the micro server (server default ""), the cfm_cache_uncacheable dict with micro inactive < MICRO_UNCACHEABLE_STALE_TTL, convert_head never off, the include set pinned, GET/HEAD-only cache methods, openresty↔angie parity ($ort_n static locations)."
