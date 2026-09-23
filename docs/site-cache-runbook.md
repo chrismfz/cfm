@@ -64,8 +64,10 @@ To change a switch, edit and save `detectors.conf`; nothing needs reloading.
 
 To see the current values, use:
 - `cfm webtop site-cache list`, the cfm-admin Site cache page, or the MCP tool
-  `site_cache_status`: each shows the switches as the daemon runs them (the
-  list API's `switches`, which a scoped cPanel user sees too).
+  `site_cache_status`: each shows the switches as the edge was last handed
+  them (the list API's `switches`, which a scoped cPanel user sees too). The
+  daemon records them each time it writes `cfm_bridge_config.lua`, so a save
+  it could not apply (the file write failed) still shows the old pair.
 - the MCP tool `detectors_config` with `merged=true`, or
   `GET /api/v1/detectors/config?view=merged`, for the effective values
   (`detectors.conf` plus any `detectors.d/*.conf` overlay). A key that is not
@@ -328,10 +330,9 @@ wildcard too (§6).
   1 h fallback.
 - Stats are a live view: nothing is persisted, there is no history, and each
   row mixes both tiers.
-- The Site Cache tools don't show the switch state (`SITE_CACHE`,
-  `MICRO_CACHE_ENFORCE`); the cfm-admin page shows it to an admin only. Read it
-  with `detectors_config` or
-  `GET /api/v1/detectors/config` (§2).
+- `site_cache_stats` doesn't show the switch state (`SITE_CACHE`,
+  `MICRO_CACHE_ENFORCE`). `site_cache_status`, the CLI `list` and the cfm-admin
+  page (admin and scoped) do (§2).
 - While `SITE_CACHE = 0` the edge does not read the policy feed. Policy
   changes and purges wait for the switch, and applying a purge before
   restoring it needs an edge reload while it is still off (§8).

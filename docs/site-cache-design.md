@@ -825,7 +825,7 @@ is fixed.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET  | `/api/v1/site-cache/list` | scope-filtered; every stored entry (armed, and all-off opt-outs), sorted by host; `unloadable` names hosts whose stored row this build cannot load (treated as opted out, §6); `switches` is the node's `{site_cache, micro_cache_enforce}` as the daemon runs them, returned to every caller (node-wide, not tenant data) |
+| GET  | `/api/v1/site-cache/list` | scope-filtered; every stored entry (armed, and all-off opt-outs), sorted by host; `unloadable` names hosts whose stored row this build cannot load (treated as opted out, §6); `switches` is the node's `{site_cache, micro_cache_enforce}` as last handed to the edge (§12), returned to every caller (node-wide, not tenant data) |
 | GET  | `/api/v1/site-cache/get?host=` | one vhost |
 | POST | `/api/v1/site-cache/set` | `requirePOST`; **merge**-upsert (host in body); scoped→own host only. One entry per vhost, so a single upsert replaces the add/update pair — the host is the immutable key. Only the fields present change (`{"host":"x","micro":{"ttl":"30s"}}` retunes one TTL and keeps the static tier and cookie settings; `enabled:false`, `strict_cookies:false` and an empty `auth_cookies` list are applied, JSON `null` keeps); a new host must enable a tier or turn BOTH tiers off (an opt-out, §6). `scope_hosts` comes from the token (§6) |
 | POST | `/api/v1/site-cache/remove?host=` | deletes the vhost's policy (host in the query, not the body); the host then follows a covering armed wildcard (§6 "Off vs remove") |
@@ -875,9 +875,10 @@ has:
 - **callouts** saying what each tier does and never does, and the node's
   `SITE_CACHE` / `MICRO_CACHE_ENFORCE`, from the list response's `switches`
   (for admins and scoped users alike): the micro tier reads "enforced" or "dry
-  run" for that node. When the page cannot tell (a failed read, or a response
-  without `switches`) it says to treat an armed micro tier as live, never "dry
-  run", and a `SITE_CACHE = 0` node gets a danger banner;
+  run" for that node. When the page cannot tell (no read has succeeded yet, or
+  a response without `switches`) it says to treat an armed micro tier as live,
+  never "dry run", and a `SITE_CACHE = 0` node gets a danger banner and shows
+  its micro tier as off;
 - an **editor**: the host (exact or `*.suffix`), the static tier (on + recipe
   label), the micro tier (on, the TTL as a bucket menu, the recipe label, auth
   cookies, strict), a plain-language review sentence, and errors / warnings.
@@ -1192,7 +1193,13 @@ the feed keep working and only the edge ignores the feed. The daemon logs
 publish (what the edge was actually given). The configured values are also
 readable remotely: the MCP tool `detectors_config` (`merged=true` for the
 effective value; `node_call node="all"` for the fleet) and the admin
-`GET /api/v1/detectors/config`. The `site_cache_*` tools do not include them.
+`GET /api/v1/detectors/config`. `GET /api/v1/site-cache/list` (and so the
+`site_cache_status` tool, the CLI `list` and the cfm-admin page) returns the
+published pair as `switches`: the manager records it after each successful
+write of `cfm_bridge_config.lua` (`webdetector.PublishSiteCacheSwitches`), so
+it is what the edge was handed, and absent until the first write. It is package
+state, not per Engine: a reload whose webdetector fails to build leaves the old
+engine serving the API, and a per-engine copy would then lag the edge.
 
 *Planned, not built:* `SITE_CACHE_SCOPED` (scoped self-service is always on,
 §9), `SITE_CACHE_CFG_REFRESH_SEC` (the feed poll is a fixed 60 s,

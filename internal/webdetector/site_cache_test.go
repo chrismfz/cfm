@@ -1124,17 +1124,20 @@ func TestSiteCacheAPI_ScopedListFiltered(t *testing.T) {
 	}
 }
 
-// The list reports the node switches to every caller (a scoped page cannot
-// read detectors.conf), and leaves them out when the engine was not given
-// them rather than reporting a zero value as "off".
+// The list reports the switches the edge was last handed to every caller (a
+// scoped page cannot read detectors.conf), and leaves them out until they were
+// published rather than reporting a zero value as "off". They are package
+// state, not per Engine: an engine built after the publish reports them too.
 func TestSiteCacheAPI_ListReportsNodeSwitches(t *testing.T) {
-	e, mux := newSiteCacheAPITestEngine(t)
+	publishedSiteCacheSwitches.Store(nil)
+	t.Cleanup(func() { publishedSiteCacheSwitches.Store(nil) })
+	_, mux := newSiteCacheAPITestEngine(t)
 	rr := doRequest(mux, adminCtx(), http.MethodGet, "/api/v1/site-cache/list", nil)
 	if strings.Contains(rr.Body.String(), `"switches"`) {
-		t.Fatalf("switches reported before they were set: %s", rr.Body.String())
+		t.Fatalf("switches reported before they were published: %s", rr.Body.String())
 	}
 
-	e.SetSiteCacheSwitches(true, false)
+	PublishSiteCacheSwitches(SiteCacheSwitches{SiteCache: true, MicroCacheEnforce: false})
 	for _, tc := range []struct {
 		name string
 		ctx  context.Context
@@ -1148,18 +1151,19 @@ func TestSiteCacheAPI_ListReportsNodeSwitches(t *testing.T) {
 			t.Fatalf("%s: list %d %s", tc.name, rr.Code, rr.Body.String())
 		}
 		if !strings.Contains(rr.Body.String(), `"switches":{"site_cache":true,"micro_cache_enforce":false}`) {
-			t.Fatalf("%s: switches not reported as the node runs them: %s", tc.name, rr.Body.String())
+			t.Fatalf("%s: switches not reported as published: %s", tc.name, rr.Body.String())
 		}
 	}
 
-	e.SetSiteCacheSwitches(false, true)
+	PublishSiteCacheSwitches(SiteCacheSwitches{SiteCache: false, MicroCacheEnforce: true})
+	_, mux2 := newSiteCacheAPITestEngine(t)
 	var out siteCacheListResponse
-	rr = doRequest(mux, scopedCtx("mysite.com"), http.MethodGet, "/api/v1/site-cache/list", nil)
+	rr = doRequest(mux2, scopedCtx("mysite.com"), http.MethodGet, "/api/v1/site-cache/list", nil)
 	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if out.Switches == nil || out.Switches.SiteCache || !out.Switches.MicroCacheEnforce {
-		t.Fatalf("a later SetSiteCacheSwitches not reported: %+v", out.Switches)
+		t.Fatalf("a later publish not reported by another engine: %+v", out.Switches)
 	}
 }
 

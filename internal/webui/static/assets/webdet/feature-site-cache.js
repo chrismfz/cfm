@@ -182,6 +182,17 @@ export const siteCacheMixin = {
       if (!this.scSwitches) return "unknown";
       return this.scSwitches.microEnforce ? "enforced" : "dryrun";
     },
+    // SITE_CACHE = 0: nothing is cached now, whatever scMicroMode says.
+    scCacheOff() {
+      return Boolean(this.scSwitches && !this.scSwitches.siteCache);
+    },
+    // Who serves an armed micro tier from cache, for the confirm dialogs.
+    scMicroNodeText() {
+      if (this.scMicroMode !== "enforced") return "This page cannot tell whether this node enforces the micro tier; if it does";
+      return this.scCacheOff
+        ? "Site Cache is off on this node (SITE_CACHE = 0), and it enforces the micro tier once it is back on"
+        : "This node enforces the micro tier";
+    },
     scSelectedRecipe() {
       return scRecipe(this.scRecipeKey);
     },
@@ -385,11 +396,8 @@ export const siteCacheMixin = {
       if (!patch.micro || !patch.micro.enabled || this.scMicroMode === "dryrun") return true;
       const wasOn = Boolean(this.scOriginal && this.scOriginal.micro && this.scOriginal.micro.enabled);
       if (wasOn) return true;
-      const node = this.scMicroMode === "enforced"
-        ? "This node enforces the micro tier"
-        : "This page cannot tell whether this node enforces the micro tier; if it does";
       return window.confirm(
-        `${node}: anonymous pages of ${patch.host} will be served from cache for ` +
+        `${this.scMicroNodeText}: anonymous pages of ${patch.host} will be served from cache for ` +
         `${microBucketSeconds(patch.micro.ttl || "")} s. Checked the debug stamp on its logged-in and cart pages first?`);
     },
     async saveSC() {
@@ -539,10 +547,7 @@ export const siteCacheMixin = {
     confirmSCRecipeMicro(rows) {
       const micro = rows.some(({ patch }) => patch.micro && patch.micro.enabled);
       if (!micro || this.scMicroMode === "dryrun") return true;
-      const node = this.scMicroMode === "enforced"
-        ? "This node enforces the micro tier"
-        : "This page cannot tell whether this node enforces the micro tier; if it does";
-      return window.confirm(`${node}: the anonymous pages of these vhosts will be served from cache at once. Checked their session cookies are on the auth list? Continue?`);
+      return window.confirm(`${this.scMicroNodeText}: the anonymous pages of these vhosts will be served from cache at once. Checked their session cookies are on the auth list? Continue?`);
     },
     scPatchSummary(p) {
       const parts = [];

@@ -158,18 +158,18 @@ func runSiteCacheList(baseURL string) error {
 	return w.Flush()
 }
 
-// siteCacheSwitchesLine is the node-switch line `list` prints above the
-// policies: they override every row. "" when the daemon did not report them.
+// siteCacheSwitchesLine is the node-switch line `list` prints first: the
+// switches override every row. "" when the daemon did not report them.
 func siteCacheSwitchesLine(sw *SiteCacheSwitches) string {
 	switch {
 	case sw == nil:
 		return ""
 	case !sw.SiteCache:
-		return "! SITE_CACHE = 0 on this node: nothing is cached; the policies below resume as they are when it is back on."
+		return "! SITE_CACHE = 0 on this node: nothing is cached; the stored policies resume as they are when it is back on."
 	case !sw.MicroCacheEnforce:
 		return "Node: MICRO_CACHE_ENFORCE = 0, the micro tier is a dry run (nothing is stored)."
 	default:
-		return "Node: MICRO_CACHE_ENFORCE = 1, an armed micro tier serves anonymous pages from cache."
+		return "Node: MICRO_CACHE_ENFORCE = 1, the micro tier of an armed vhost is enforced."
 	}
 }
 
