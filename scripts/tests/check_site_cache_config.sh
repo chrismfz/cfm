@@ -58,8 +58,10 @@
 #       refuses the internal requests they make, so this is defence in depth),
 #       and buffering is never turned off in it nor at server/http level
 #       (which it would inherit).
-#     * every @cfm_micro_<n>s location caches into a cfm_micro_<n>s zone and
-#       sets $cfm_upstream "cfm_apache_micro"; the only log_by_lua is the
+#     * every @cfm_micro_<n>s location caches into a cfm_micro_<n>s zone, sets
+#       $cfm_upstream "cfm_apache_micro", and never forwards a request body
+#       (proxy_pass_request_body off + Content-Length ""): a body on a GET is
+#       not in the key; the only log_by_lua is the
 #       http-level one and it still calls cfm_cache.micro_note (remember-
 #       uncacheable; a server- or location-level log_by_lua would override it).
 #     * lua_shared_dict cfm_cache_uncacheable (remember-uncacheable) exists,
@@ -288,6 +290,10 @@ for f in "$ORT" "$ANG"; do
         if (zn == "" || hn != zn) m = m " micro-location-name-and-zone-disagree(@cfm_micro_" hn "s-vs-cfm_micro_" zn "s)"
         else if (cnt(body, A "proxy_cache_valid[[:space:]]") != 1 || body !~ (A "proxy_cache_valid[[:space:]]+200[[:space:]]+" zn "s[[:space:]]*;")) m = m " micro-proxy_cache_valid-must-be-exactly-200-" zn "s(the-bucket-TTL)"
       }
+      # Fat-GET rail: a body on a GET/HEAD is not in the key, so micro never
+      # forwards one (an app that reads it would store an attacker-shaped page).
+      if (mi && body !~ (A "proxy_pass_request_body[[:space:]]+off[[:space:]]*;")) m = m " micro-proxy_pass_request_body-must-be-off(a-GET-body-is-not-in-the-key)"
+      if (mi && (body !~ (A "proxy_set_header[[:space:]]+Content-Length[[:space:]]+\"\"[[:space:]]*;") || cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?content-length[\"\047]?[[:space:]]") != 1)) m = m " micro-Content-Length-must-be-dropped-once"
       if (mi && body !~ (A "set[[:space:]]+[$]cfm_upstream[[:space:]]+\"cfm_apache_micro\"[[:space:]]*;")) m = m " micro-must-set-$cfm_upstream-cfm_apache_micro(the-remember-uncacheable-hook-and-the-stats-key-on-it)"
       hdr = body; sub(/^\n/, "", hdr); sub(/\n.*$/, "", hdr); gsub(/[[:space:]]+/, " ", hdr); sub(/^ /, "", hdr); print "CLOC " hdr
       if (m != "") print "ERR cache location@line" locline ":" m " — a proxy_cache location is missing a required rail (no bypass gate → unconditional caching; buffering off → nginx silently caches NOTHING)."

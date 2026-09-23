@@ -95,6 +95,9 @@ back-filled here — see the git/PR history for that period.
     slips past as `wordpress.logged.in_…`, `ci+session`, `ci%2Esession` or
     `__Host-PHPSESSID` (PHP turns `.` and spaces into `_`; older PHP also
     URL-decodes names).
+  - A request body is never forwarded from a micro-cached request: a GET that
+    carries one (the WordPress REST API reads a JSON body even on GET) could
+    otherwise have stored a page shaped by that body for every visitor.
   - Micro-cache is used only from the main `location /` of the HTTPS server,
     so PHP scripts and large downloads keep streaming unbuffered. A node whose
     live edge conf predates this release (no `set $cfm_micro_conf "1"`), or
@@ -147,6 +150,9 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **Site Cache refuses an auth cookie name the edge could never match** —
+  one starting with `[` (PHP reads it as a nameless array) or a bare
+  `__Host-` / `__Secure-` prefix — instead of storing a rule that never fires.
 - **A micro-cache TTL in minutes is no longer read as seconds.** The edge read
   only the digits of a stored TTL, so `--micro-ttl 1m` used the 1 s bucket; it
   now uses 60 s (anything above 60 s uses the 60 s bucket).

@@ -601,8 +601,9 @@ local MICRO_IGNORE_PREFIX = {
 -- the array a and turns " ", "." and a lone "[" into "_" when it builds
 -- $_COOKIE (wordpress.logged.in_x is wordpress_logged_in_x to WordPress);
 -- PHP before 7.2.34 / 7.3.23 / 7.4.11 (still served as EOL MultiPHP
--- versions) also URL-decoded the name first ("+" is a space, %xx a byte, and
--- a NUL ends it), and Rack decodes %xx. Current PHP does not decode, so
+-- versions) also URL-decoded the name first ("+" is a space, %xx a byte, a
+-- NUL ends it, leading spaces are skipped), and Rack <= 2.1 decoded %xx.
+-- Current PHP does not decode, so
 -- decoding here only ever over-includes (a cache miss). Then lowercased and a
 -- __Host- / __Secure- prefix stripped. The lists are normalised the same way
 -- at load (connect.sid and .aspnetcore. still match). Linear: plain finds and
@@ -614,6 +615,11 @@ local function cookie_key(name)
     if n:find("%", 1, true) then n = n:gsub("%%(%x%x)", hex_byte) end
     local z = n:find("\0", 1, true)
     if z then n = n:sub(1, z - 1) end
+    -- PHP skips leading spaces of the (decoded) name: +PHPSESSID is PHPSESSID
+    if n:byte(1) == 32 then
+        local s = n:find("[^ ]")
+        n = s and n:sub(s) or ""
+    end
     local b = n:find("[", 1, true)
     if b and n:find("]", b, true) then n = n:sub(1, b - 1) end
     n = n:lower()
@@ -683,10 +689,10 @@ local function micro_cookie_verdict(cookie_header, strict, extra_auth)
             local lname = cookie_key(name)
             if name_matches(lname, MICRO_AUTH_EXACT, MICRO_AUTH_PREFIX, MICRO_AUTH_SUFFIX)
                or (extra_auth and extra_auth[lname]) then
-                return false, "auth:" .. name
+                return false, "auth:" .. name:sub(1, 64)
             end
             if strict and not name_matches(lname, MICRO_IGNORE_EXACT, MICRO_IGNORE_PREFIX) then
-                return false, "strict:" .. name
+                return false, "strict:" .. name:sub(1, 64)
             end
         end
     end
@@ -786,18 +792,26 @@ local function micro_decision(pol, r)
     if panel_host(r.host) then
         return false, nil, "panel"
     end
-    local extra
-    if type(pol.auth_cookies) == "table" then
+    -- per-policy work is memoised on the policy table (rebuilt on every feed
+    -- refresh), not redone per request
+    local extra = pol._auth_set
+    if extra == nil and type(pol.auth_cookies) == "table" then
         extra = {}
         for _, nm in ipairs(pol.auth_cookies) do
             if type(nm) == "string" then extra[cookie_key(nm)] = true end
         end
+        pol._auth_set = extra
     end
     local anon, why = micro_cookie_verdict(r.cookie, pol.strict_cookies, extra)
     if not anon then
         return false, nil, why
     end
-    return true, micro_bucket_seconds(pol.micro.ttl), "ok"
+    local bucket = pol._bucket
+    if bucket == nil then
+        bucket = micro_bucket_seconds(pol.micro.ttl)
+        pol._bucket = bucket
+    end
+    return true, bucket, "ok"
 end
 
 -- ---------------------------------------------------------------------------
@@ -891,7 +905,7 @@ end
 -- answer (a retried fetch lists every attempt).
 local function micro_mark_ttl(cache_status, status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering)
     if cache_status ~= "MISS" and cache_status ~= "EXPIRED" then return nil end
-    local code = tonumber(type(status) == "string" and status:match("(%d+)%s*$") or nil)
+    local code = tonumber(type(status) == "string" and status:match("(%d%d%d)%s*$") or nil)
     if not code then return nil end
     if code >= 500 or REQUEST_INDUCED_4XX[code] then
         if cache_status == "MISS" then return MICRO_UNCACHEABLE_SHORT_TTL end

@@ -306,7 +306,8 @@ check(anon("my_app=1", false, { [cache._cookie_key("my.app")] = true }) == false
       "a per-vhost auth cookie matches its app-equivalent spelling")
 check(anon("_ga=GA1.2.3; _gid=x", true) == true, "strict: analytics cookies stay ignore-listed after normalisation")
 -- older PHP URL-decoded names ("+" = space, a NUL ends the name)
-for _, c in ipairs({ "wordpress+logged+in_abc=1", "ci+session=x", "PHPSESSID%00x=1", "laravel_session%00=1" }) do
+for _, c in ipairs({ "wordpress+logged+in_abc=1", "ci+session=x", "PHPSESSID%00x=1", "laravel_session%00=1",
+                     "+PHPSESSID=1", "%20PHPSESSID=1", "+wordpress_logged_in_x=1", "%20%20ci_session=x" }) do
   check(anon(c, false) == false, "old-PHP spelling of a session cookie → bypass: " .. c)
 end
 check(anon("a%2Bb=1", false) == true, "an encoded + stays a plain name character (anonymous)")
@@ -329,13 +330,18 @@ do
     string.rep("%41", 400),
   }
   for _ = 1, 5 do
-    for _, c in ipairs(samples) do cache._micro_cookie(c, true) end
+    for _, c in ipairs(samples) do
+      cache._micro_cookie(c, true)   -- strict: returns at the first unlisted pair
+      cache._micro_cookie(c, false)  -- non-strict: walks every pair
+    end
   end
   local dt = os.clock() - t0
   check(dt < 0.25, string.format("adversarial cookie headers parse in linear time (%.3fs)", dt))
   local t1 = os.clock()
   cache._micro_cookie("a" .. string.rep(" ", 8000) .. "b=1", true)
   check(os.clock() - t1 < 0.1, "an 8 KB run of spaces (just under the cap) parses at once")
+  local oka, whya = cache._micro_cookie("wordpress_logged_in_" .. string.rep("x", 300) .. "=1", false)
+  check(oka == false and #whya <= #"auth:" + 64, "the bypass reason clips a long cookie name")
   local okc, whyc = cache._micro_cookie(string.rep("a", 9000) .. "=1", false)
   check(okc == false and whyc == "cookie-size", "a Cookie header over 8 KB → bypass:cookie-size")
 end
