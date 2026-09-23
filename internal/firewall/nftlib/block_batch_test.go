@@ -407,3 +407,41 @@ func TestRemoveBlockBatch_ChunksAndReadError(t *testing.T) {
 		t.Fatalf("err=%v wrote=%v; want a read error and no write", err, wrote)
 	}
 }
+
+// AddAllowBatch writes the allow sets, never the block sets, and never
+// shortens an allow: a permanent one is kept, a shorter one extended.
+func TestAddAllowBatch_AllowSetsNeverShortened(t *testing.T) {
+	f := &batchFake{dump: map[string][]wireElem{setAllowV4: {
+		{key: net.ParseIP("10.0.0.1")}, // permanent
+		{key: net.ParseIP("10.0.0.2"), hasTimeout: true, timeout: 10 * time.Minute, expires: time.Minute},
+	}}}
+	b := f.backend(t)
+	for _, s := range []struct {
+		name string
+		key  nftables.SetDatatype
+	}{{setAllowV4, nftables.TypeIPAddr}, {setAllowV6, nftables.TypeIP6Addr}} {
+		b.namedSets[s.name] = &nftables.Set{Name: s.name, KeyType: s.key, HasTimeout: true,
+			Table: &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}}
+	}
+	res, err := b.AddAllowBatch([]firewall.BlockEntry{
+		{IP: net.ParseIP("10.0.0.1"), TTL: 4 * time.Hour},
+		{IP: net.ParseIP("10.0.0.2"), TTL: 4 * time.Hour},
+		{IP: net.ParseIP("2001:db8::1"), TTL: 4 * time.Hour},
+	})
+	if err != nil {
+		t.Fatalf("AddAllowBatch: %v", err)
+	}
+	if res != (firewall.BlockBatchResult{Added: 1, Extended: 1, Kept: 1}) {
+		t.Errorf("result = %+v", res)
+	}
+	if len(f.batches) != 1 {
+		t.Fatalf("%d transactions, want one", len(f.batches))
+	}
+	dels, adds, _ := elemsOf(t, f.batches[0])
+	if len(dels[setAllowV4]) != 1 || !dels[setAllowV4][0].key.Equal(net.ParseIP("10.0.0.2")) {
+		t.Errorf("deletes = %+v, want only the extended 10.0.0.2", dels)
+	}
+	if len(adds[setAllowV4]) != 1 || len(adds[setAllowV6]) != 1 || len(adds[setBlockV4])+len(adds[setBlockV6]) != 0 {
+		t.Errorf("adds = %+v, want 10.0.0.2 and 2001:db8::1 in the allow sets only", adds)
+	}
+}

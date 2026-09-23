@@ -106,39 +106,16 @@ func (r *Runner) fetchPendingUnblocks(ctx context.Context) {
 	// intact when we capture it. Results ride back on unblock-confirm.
 	found := locateUnblocks(ctx, reqs, locate.Options{BE: r.backend, ConfigDir: r.cfgDir})
 
-	// Remove the requested IPs from the block sets in one batch (the backend
-	// reads each set once and deletes just the IPs it holds). Each unblock.Do below
-	// still removes its IP by key as well; that is idempotent and covers an
-	// IP the batch's set read didn't show.
-	ips := make([]net.IP, 0, len(reqs))
-	for _, it := range reqs {
-		if ip := net.ParseIP(it.IP); ip != nil {
-			ips = append(ips, ip)
-		}
+	engine := "unknown"
+	if m, ok := r.backend.(interface{ Engine() string }); ok {
+		engine = m.Engine()
 	}
-	if be, ok := r.backend.(interface{ RemoveBlockBatch([]net.IP) error }); ok {
-		engine := "unknown"
-		if m, ok := r.backend.(interface{ Engine() string }); ok {
-			engine = m.Engine()
-		}
-		backendType := "<nil>"
-		if t := reflect.TypeOf(r.backend); t != nil {
-			backendType = t.String()
-		}
-		removeMethod := "RemoveBlockBatch"
-		removeStart := time.Now()
-		logging.LogfAPI("[unblock.exec] engine=%s backend_type=%s batch_size=%d method=%s", engine, backendType, len(ips), removeMethod)
-		if err := be.RemoveBlockBatch(ips); err != nil {
-			logging.LogfAPI("[unblock] batch nft remove error: %v", err)
-		}
-		logging.LogfAPI("[unblock.exec.done] engine=%s backend_type=%s batch_size=%d method=%s duration=%s", engine, backendType, len(ips), removeMethod, time.Since(removeStart))
+	backendType := "<nil>"
+	if t := reflect.TypeOf(r.backend); t != nil {
+		backendType = t.String()
 	}
-
-	// confirm each sequentially (API calls, not nft)
-	for _, it := range reqs {
-		logging.LogfAPI("[unblock] pending ip=%s (id=%d) — processing", it.IP, it.ID)
-		api.ProcessUnblockRequest(ctx, r.backend, r.cfgDir, it.ID, it.IP, found[it.ID])
-	}
+	logging.LogfAPI("[unblock.exec] engine=%s backend_type=%s batch_size=%d", engine, backendType, len(reqs))
+	api.ProcessUnblocks(ctx, r.backend, r.cfgDir, reqs, found)
 }
 
 // locateBatchTimeout bounds the where-&-why search of one batch of unblock

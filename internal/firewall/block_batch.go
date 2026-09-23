@@ -20,15 +20,17 @@ import (
 // the safe way to merge blocks from another source: a 6h block arriving for an
 // address this node already blocks permanently (e.g. from cfm.deny) must not
 // quietly turn the permanent block into a 6h one. AddBlock, by contrast,
-// replaces whatever is there.
+// replaces whatever is there. AddAllowBatch does the same for the allow sets
+// (an unblock's feed-override allow must not shorten an operator's permanent
+// allow, which AddAllow would).
 //
 // RemoveBlockBatch is the unblock side: it reads each block set once and
 // deletes, in one transaction, just the addresses the set holds. Deleting one
 // it doesn't hold would abort the whole transaction, and most addresses of a
 // fleet-wide unblock aren't blocked on any one node.
 
-// BlockEntry is one address for AddBlockBatch: blocked permanently, or for
-// TTL. Permanence is explicit, never "TTL 0": a caller counting a TTL down to
+// BlockEntry is one address for AddBlockBatch (or AddAllowBatch): blocked
+// (allowed) permanently, or for TTL. Permanence is explicit, never "TTL 0": a caller counting a TTL down to
 // an expiry must not turn a block whose time ran out into a permanent one.
 type BlockEntry struct {
 	IP        net.IP
@@ -36,7 +38,7 @@ type BlockEntry struct {
 	Permanent bool
 }
 
-// BlockBatchResult counts what AddBlockBatch did.
+// BlockBatchResult counts what AddBlockBatch (or AddAllowBatch) did.
 type BlockBatchResult struct {
 	Added    int // weren't blocked
 	Extended int // were blocked for less time than asked; now for the new TTL
@@ -62,7 +64,7 @@ type PlannedBlock struct {
 	Replace bool
 }
 
-// BlockBatchPlan is what one address family's block set needs.
+// BlockBatchPlan is what one address family's block (or allow) set needs.
 type BlockBatchPlan struct {
 	Writes []PlannedBlock
 	Kept   int
@@ -139,8 +141,9 @@ func longerBlock(a, b BlockEntry) bool {
 	return a.Permanent || a.TTL > b.TTL
 }
 
-// PlanBlockBatch decides, for one family's block set, which entries to add,
-// which to extend and which to keep, given the set's current elements. want
+// PlanBlockBatch decides, for one family's block set (or allow set), which
+// entries to add, which to extend and which to keep, given the set's current
+// elements. want
 // must come from SplitBlockEntries (one family, no repeats).
 //
 // An address already blocked permanently is kept. One blocked with a timeout

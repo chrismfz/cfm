@@ -31,6 +31,9 @@ func (s *stubFirewallBackend) AddBlock(net.IP, string, *time.Duration) error { r
 func (s *stubFirewallBackend) AddBlockBatch([]firewall.BlockEntry) (firewall.BlockBatchResult, error) {
 	return firewall.BlockBatchResult{}, nil
 }
+func (s *stubFirewallBackend) AddAllowBatch([]firewall.BlockEntry) (firewall.BlockBatchResult, error) {
+	return firewall.BlockBatchResult{}, nil
+}
 func (s *stubFirewallBackend) ListBlocks() ([]firewall.BlockedEntry, error)      { return nil, nil }
 func (s *stubFirewallBackend) ListAllows() ([]firewall.BlockedEntry, error)      { return nil, nil }
 func (s *stubFirewallBackend) AddAllow(net.IP, *time.Duration) error             { return nil }

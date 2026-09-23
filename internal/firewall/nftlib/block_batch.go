@@ -32,6 +32,17 @@ const blockBatchAttempts = 3
 //     holds from the read to the last write; only another process (e.g. a
 //     CLI `cfm block` in the same instant) can race it.
 func (b *Backend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
+	return b.hostBatch("AddBlockBatch", setBlockV4, setBlockV6, entries)
+}
+
+// AddAllowBatch is AddBlockBatch for the allow sets: it only adds or extends
+// an allow, never shortens one — a permanent allow stays permanent.
+func (b *Backend) AddAllowBatch(entries []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
+	return b.hostBatch("AddAllowBatch", setAllowV4, setAllowV6, entries)
+}
+
+// hostBatch writes entries to the host sets set4/set6 (see AddBlockBatch).
+func (b *Backend) hostBatch(op, set4, set6 string, entries []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
 	v4, v6, skipped := firewall.SplitBlockEntries(entries)
 	res := firewall.BlockBatchResult{Skipped: skipped}
 	if len(v4)+len(v6) == 0 {
@@ -43,14 +54,14 @@ func (b *Backend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBa
 		name string
 		set  *nftables.Set
 		want []firewall.BlockEntry
-	}{{name: setBlockV4, want: v4}, {name: setBlockV6, want: v6}}
+	}{{name: set4, want: v4}, {name: set6, want: v6}}
 	for i := range fams {
 		if len(fams[i].want) == 0 {
 			continue
 		}
 		set, err := b.lookupSet(fams[i].name)
 		if err != nil {
-			return res, fmt.Errorf("nftlib AddBlockBatch %s: %w", fams[i].name, err)
+			return res, fmt.Errorf("nftlib %s %s: %w", op, fams[i].name, err)
 		}
 		fams[i].set = set
 	}
@@ -64,7 +75,7 @@ func (b *Backend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBa
 			}
 			elems, err := b.conn.GetSetElements(f.set)
 			if err != nil {
-				return res, fmt.Errorf("nftlib AddBlockBatch read %s: %w", f.name, err)
+				return res, fmt.Errorf("nftlib %s read %s: %w", op, f.name, err)
 			}
 			plan := firewall.PlanBlockBatch(f.want, elemsToTimed(elems, f.set.Interval))
 			planned = planned.Add(plan.Result())
@@ -96,7 +107,7 @@ func (b *Backend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBa
 		}
 		lastErr = err
 	}
-	return res, fmt.Errorf("nftlib AddBlockBatch: %w", lastErr)
+	return res, fmt.Errorf("nftlib %s: %w", op, lastErr)
 }
 
 // blockWrite is one planned element and the set it goes to.

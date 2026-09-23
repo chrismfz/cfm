@@ -7,11 +7,7 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,12 +72,15 @@ type Options struct {
 	Reporter      reporting.Reporter // optional: για ReportUnblock/Block
 	ReportWhy     string             // π.χ. "cli" ή "agent"
 	SendAPI       bool               // αν θέλουμε να γίνει report/unblock
-	Fail2BanUnban bool
-	// ImunifyWhiteTTL, when set, adds an imunify white entry on EVERY
-	// unblock (not just feeds-origin ones) with this TTL. This is the
-	// grace window that stops imunify's own engine from re-greylisting
-	// the visitor seconds after we cleared them — without it, a user
-	// bounced by imunify GRAY can loop: unblock → re-greylist → unblock.
+	// ImunifyWhiteTTL, when set, adds an imunify white entry with this TTL
+	// on every unblock (not just feeds-origin ones), except for an IP (or IPv6
+	// /64) an operator's white entry already lists, an IPv6 IP whose /64
+	// imunify wasn't blocking,
+	// and, in a batch larger than graceBatchMax, an IP imunify wasn't blocking
+	// (imunifyUnblockMany). This is the grace window that stops imunify's own
+	// engine from re-greylisting the visitor seconds after we cleared them —
+	// without it, a user bounced by imunify GRAY can loop: unblock →
+	// re-greylist → unblock.
 	ImunifyWhiteTTL *time.Duration
 	// WAF, when set, also clears the OpenResty/Lua WAF planes for the IP
 	// (webdetector challenge/block + per-IP shared-dict caches) as part of a
@@ -96,156 +95,14 @@ type Options struct {
 
 // ----------------------------------------------
 
-// Do returns *Result rather than Result so the embedded sync.Mutex is never
-// copied — runCmd holds it during concurrent goroutine appends to r.Steps,
-// and a value-return would copy the mutex into the caller's frame, leaving
-// the goroutines synchronizing on a now-orphaned lock.
+// Do unblocks one IP: DoMany for one address. It returns *Result rather than
+// Result so the embedded sync.Mutex is never copied — the tool steps append
+// to r.Steps under it from concurrent goroutines.
 func Do(ctx context.Context, ip net.IP, opts Options) (*Result, error) {
 	if ip == nil {
 		return nil, errors.New("nil IP")
 	}
-	r := &Result{IP: ip}
-
-	// 0) Feeds detection — FAST: discover per-feed sets (terse) and probe membership with HasElem
-	t0 := time.Now()
-	feeds := feedsBlockingFast(opts.BE, ip)
-	if len(feeds) > 0 {
-		r.FromFeeds = feeds
-		r.Steps = append(r.Steps, Step{
-			Source: SrcFeeds, Action: ActionChecked, Feeds: feeds, Dur: time.Since(t0),
-		})
-	}
-
-	// 1) nft remove. No EnsureBase: removing needs no base ruleset (without one
-	// there is nothing to remove), and EnsureBase runs dozens of nft processes
-	// — 10-70s on busy nodes. It ran here and again in the agent's unblock
-	// (twice per IP), and here it used up the /unblock cleanup's 30s budget
-	// before csf/fail2ban/imunify ran.
-	if opts.BE != nil {
-		t1 := time.Now()
-		if err := opts.BE.RemoveBlock(ip); err != nil {
-			r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionError, Detail: "RemoveBlock failed", Err: err.Error()})
-		} else {
-			r.Steps = append(r.Steps, Step{Source: SrcNFT, Action: ActionRemoved, Dur: time.Since(t1)})
-			r.WasBlocked = true
-		}
-	}
-
-	// 1a) cfm.deny cleanup
-	if opts.ConfigDir != "" {
-		t2 := time.Now()
-		if removed := removeFromFile(opts.ConfigDir, "cfm.deny", ip.String()); removed {
-			r.Steps = append(r.Steps, Step{Source: SrcCFMDeny, Action: ActionRemoved, Dur: time.Since(t2)})
-			r.WasBlocked = true
-		} else {
-			r.Steps = append(r.Steps, Step{Source: SrcCFMDeny, Action: ActionNotFound, Dur: time.Since(t2)})
-		}
-	}
-
-	// 2) CSF (παράλληλα με άλλες εντολές)
-	var wg sync.WaitGroup
-	if binaryExists("csf") && unitActive("csf") {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// -tr, -dr, -ta
-			runCmd(ctx, r, SrcCSF, "csf", "-tr", ip.String())
-			runCmd(ctx, r, SrcCSF, "csf", "-dr", ip.String())
-			runCmd(ctx, r, SrcCSF, "csf", "-ta", ip.String())
-		}()
-	} else {
-		r.Steps = append(r.Steps, Step{Source: SrcCSF, Action: ActionChecked, Detail: "not present or inactive"})
-	}
-
-	// 2.5) Fail2Ban (no opts; check binary + unit)
-	t3 := time.Now()
-	if binaryExists("fail2ban-client") && unitActive("fail2ban") {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runCmd(ctx, r, SrcFail2Ban, "fail2ban-client", "unban", ip.String())
-		}()
-	} else {
-		r.Steps = append(r.Steps, Step{
-			Source: SrcFail2Ban, Action: ActionChecked, Detail: "not present or inactive", Dur: time.Since(t3),
-		})
-	}
-
-	// 3) Imunify360
-	imunifyActive := unitActive("imunify360") || unitActive("imunify360-agent") || unitActive("imunify360.service") || unitActive("imunify360-agent.service")
-	if binaryExists("imunify360-agent") && imunifyActive {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runCmd(ctx, r, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", "drop", ip.String())
-			runCmd(ctx, r, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", "captcha", ip.String())
-			// White entry: always when ImunifyWhiteTTL is set (manual-unblock
-			// grace window), otherwise only for feeds-origin blocks.
-			whiteTTL := opts.AllowTTL
-			if opts.ImunifyWhiteTTL != nil && *opts.ImunifyWhiteTTL > 0 {
-				whiteTTL = opts.ImunifyWhiteTTL
-			}
-			if len(r.FromFeeds) > 0 || (opts.ImunifyWhiteTTL != nil && *opts.ImunifyWhiteTTL > 0) {
-				whiteArgs := []string{"ip-list", "local", "add", "--purpose", "white", "--comment", "CFM auto-unblock", ip.String()}
-				// imunify defaults to a PERMANENT entry; bound it
-				// (--expiration wants an absolute unix timestamp).
-				if whiteTTL != nil && *whiteTTL > 0 {
-					whiteArgs = append(whiteArgs, "--expiration", strconv.FormatInt(time.Now().Add(*whiteTTL).Unix(), 10))
-				}
-				runCmd(ctx, r, SrcImunify, "imunify360-agent", whiteArgs...)
-			}
-		}()
-	} else {
-		r.Steps = append(r.Steps, Step{Source: SrcImunify, Action: ActionChecked, Detail: "not present or inactive"})
-	}
-
-	wg.Wait()
-
-	// 4) Αν είναι από feeds -> τοπικό whitelist override (προαιρετικά)
-	if len(r.FromFeeds) > 0 && opts.BE != nil && opts.TempWhitelist {
-		if err := opts.BE.AddAllow(ip, opts.AllowTTL); err != nil {
-			r.Steps = append(r.Steps, Step{Source: SrcFeeds, Action: ActionError, Detail: "AddAllow failed", Err: err.Error(), Feeds: r.FromFeeds})
-		} else {
-			r.Steps = append(r.Steps, Step{Source: SrcFeeds, Action: ActionWhitelisted, Feeds: r.FromFeeds})
-			r.Whitelisted = true
-		}
-	}
-
-	// 4a) WAF planes (OpenResty/Lua): webdetector challenge/block + per-IP
-	// shared-dict caches (throttle, decision cache, geo, ok-touch, waf-push).
-	// These live entirely outside the firewall/blocklist, so a "force unblock"
-	// that ignores them can leave a user stuck behind a challenge/throttle even
-	// though every blocklist search comes back empty. Best-effort by design.
-	if opts.WAF != nil {
-		tw := time.Now()
-		wr := opts.WAF.ForceUnblock(ip.String())
-		r.WAF = &wr
-		step := Step{Source: SrcWAF, Dur: time.Since(tw)}
-		switch {
-		case wr.Err != "":
-			step.Action = ActionError
-			step.Err = wr.Err
-			step.Detail = wr.Summary()
-		case len(wr.Cleared) > 0:
-			step.Action = ActionRemoved
-			step.Detail = wr.Summary()
-		default:
-			step.Action = ActionNotFound
-		}
-		r.Steps = append(r.Steps, step)
-	}
-
-	// 5) Optional API report (ενοποιημένα — π.χ. να στείλουμε reason = "feeds: a,b" ή "manual")
-	if opts.SendAPI && opts.Reporter != nil && opts.ReportWhy != "agent" {
-		why := "manual"
-		if len(r.FromFeeds) > 0 {
-			why = "feeds:" + strings.Join(r.FromFeeds, ",")
-		}
-		// re-use του συμβολαίου
-		_ = opts.Reporter.ReportUnblock(ip.String(), opts.ReportWhy, why)
-	}
-
-	return r, nil
+	return DoMany(ctx, []net.IP{ip}, opts)[ip.String()], nil
 }
 
 // ----------------- helpers -----------------------
@@ -253,108 +110,7 @@ func Do(ctx context.Context, ip net.IP, opts Options) (*Result, error) {
 func binaryExists(name string) bool { _, err := exec.LookPath(name); return err == nil }
 
 func runCmd(ctx context.Context, r *Result, src Source, name string, args ...string) {
-	if !allowedBinary(name) {
-		r.mu.Lock()
-		r.Steps = append(r.Steps, Step{
-			Source: src, Action: ActionError, Err: "blocked binary", Detail: "binary not in allowlist",
-		})
-		r.mu.Unlock()
-		return
-	}
-	start := time.Now()
-	// #nosec G204 -- `name/args` are constrained by an internal allowlist + fixed callsites.
-	cmd := exec.CommandContext(ctx, name, args...)
-	out, err := cmd.CombinedOutput()
-	step := Step{Source: src, Action: ActionChecked, Dur: time.Since(start)}
-	if err != nil {
-		step.Action = ActionError
-		step.Err = err.Error()
-		step.Detail = strings.TrimSpace(string(out))
-	} else {
-		step.Detail = strings.TrimSpace(string(out))
-	}
-	r.mu.Lock()
-	r.Steps = append(r.Steps, step)
-	r.mu.Unlock()
-}
-
-func removeFromFile(cfgDir, filename, ip string) bool {
-	if cfgDir == "" {
-		return false
-	}
-	if !allowedConfigFile(filename) {
-		return false
-	}
-	path := filepath.Join(cfgDir, filename)
-	baseCfg := filepath.Clean(cfgDir)
-	cleanPath := filepath.Clean(path)
-	if cleanPath != baseCfg && !strings.HasPrefix(cleanPath, baseCfg+string(os.PathSeparator)) {
-		return false
-	}
-	// #nosec G304 -- path is constrained to cfgDir + allowlisted filename and verified to remain within cfgDir.
-	f, err := os.Open(cleanPath)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	var kept []string
-	removed := false
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			kept = append(kept, line)
-			continue
-		}
-		tok := trimmed
-		if i := strings.IndexAny(tok, " \t#"); i >= 0 {
-			tok = tok[:i]
-		}
-		if tok == ip || tok == ip+"/32" {
-			removed = true
-			continue
-		}
-		kept = append(kept, line)
-	}
-	// #nosec G304 -- same validated path guarantees as above.
-	_ = os.WriteFile(cleanPath, []byte(strings.Join(kept, "\n")+"\n"), 0600)
-	return removed
-}
-
-// feedsBlockingFast returns the feed keys whose per-feed HOSTS sets contain the given IP,
-// without dumping any large set. It uses one terse table listing to discover set names,
-// and constant-time "nft get element" (via Backend.HasElem) to test membership.
-func feedsBlockingFast(be firewall.Backend, ip net.IP) []string {
-	if be == nil || ip == nil {
-		return nil
-	}
-	// Discover per-feed set names once (no elements printed).
-	sets, err := listSetNamesByPrefixes(be,
-		"allow_ext_v4_hosts_", "block_ext_v4_hosts_",
-		"allow_ext_v6_hosts_", "block_ext_v6_hosts_",
-	)
-	if err != nil {
-		return nil
-	}
-	ipStr := ip.String()
-	seen := map[string]struct{}{}
-	for _, s := range sets {
-		ok, _ := be.HasElem(s, ipStr)
-		if ok {
-			if fk := feedKeyFromSet(s); fk != "" {
-				seen[fk] = struct{}{}
-			}
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for k := range seen {
-		out = append(out, k)
-	}
-	// (optional) keep stable order
-	sort.Strings(out)
-	return out
+	addStep(r, runTool(ctx, src, name, args...))
 }
 
 // listSetNamesByPrefixes parses a single "nft -t -n list table inet cfm" output
@@ -395,13 +151,24 @@ func listSetNamesByPrefixes(be firewall.Backend, prefixes ...string) ([]string, 
 	return names, nil
 }
 
-// feedKeyFromSet extracts the feed key from a set name like "block_ext_v4_hosts_myblock".
+// feedHostSetPrefixes are the per-feed host sets' name prefixes; the feed key
+// follows them.
+var feedHostSetPrefixes = []string{
+	"allow_ext_v4_hosts_", "block_ext_v4_hosts_",
+	"allow_ext_v6_hosts_", "block_ext_v6_hosts_",
+}
 
-func feedKeyFromSet(setName string) string {
-	if i := strings.LastIndex(setName, "_"); i > 0 && i < len(setName)-1 {
-		return setName[i+1:]
+// feedKeyFromSet extracts the feed key from a set name like
+// "block_ext_v4_hosts_myblock" ("" for any other set), and whether the set
+// holds IPv4 addresses. Both come from the prefix: a feed key can itself
+// contain "_v4_" or "_" (a feed named bl-v4-ssh has the key bl_v4_ssh).
+func feedKeyFromSet(setName string) (key string, v4 bool) {
+	for _, p := range feedHostSetPrefixes {
+		if strings.HasPrefix(setName, p) && len(setName) > len(p) {
+			return setName[len(p):], strings.Contains(p, "_v4_")
+		}
 	}
-	return ""
+	return "", false
 }
 
 // unitActive returns true if `systemctl is-active --quiet <unit>` succeeds.

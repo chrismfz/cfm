@@ -79,3 +79,99 @@ func TestSearchImunify_CappedListAsksEachQuery(t *testing.T) {
 		t.Errorf("5.6.7.8 skip = %q, want the unreadable --by-ip answer named", skip[1])
 	}
 }
+
+// imunify reports netmask as the mask itself (4294967295 for one IPv4
+// address), and writes networks as "addr/len" in ip. Taking the mask as a
+// prefix length made every IPv4 entry "addr/4294967295", which parses as
+// nothing: no IPv4 entry was ever found.
+func TestImunifyEntryString(t *testing.T) {
+	for _, c := range []struct {
+		ip      string
+		netmask int64
+		want    string
+	}{
+		{"198.51.100.1", 4294967295, "198.51.100.1"},
+		{"198.51.100.0", 4294967040, "198.51.100.0/24"},
+		{"198.51.100.1", 0, "198.51.100.1"},
+		{"198.51.100.0", 24, "198.51.100.0/24"}, // a length, as some outputs give it
+		{"198.51.100.1", 32, "198.51.100.1"},
+		{"2001:db8:1:2::/64", -1, "2001:db8:1:2::/64"},
+		{"198.51.100.1", 12345, "198.51.100.1"},    // not a mask
+		{"198.51.100.1", 64, "198.51.100.1"},       // past IPv4's width
+		{"2001:db8::1", 4294967295, "2001:db8::1"}, // an IPv4 mask on an IPv6 address
+		{"2001:db8:1:2::", 64, "2001:db8:1:2::/64"},
+	} {
+		if got := imunifyEntryString(c.ip, c.netmask); got != c.want {
+			t.Errorf("imunifyEntryString(%q, %d) = %q, want %q", c.ip, c.netmask, got, c.want)
+		}
+	}
+
+	// The documented JSON shape, IPv6 netmask included (past int64).
+	raw := []byte(`{"items":[{"ip":"198.51.100.1","netmask":4294967295,"network_address":3325256705,"purpose":"drop"},` +
+		`{"ip":"2001:db8:1:2::/64","netmask":340282366920938463444927863358058659840,"purpose":"drop"}]}`)
+	locs := matchImunifyItems(parseImunifyList(raw), []*query{mustQuery(t, "198.51.100.1"), mustQuery(t, "2001:db8:1:2::7")})
+	if len(locs[0]) != 1 || locs[0][0].Match != "198.51.100.1" {
+		t.Errorf("IPv4 host entry: %+v", locs[0])
+	}
+	if len(locs[1]) != 1 || locs[1][0].Match != "2001:db8:1:2::/64" {
+		t.Errorf("IPv6 /64 entry: %+v", locs[1])
+	}
+}
+
+// An object without an "items" array is unreadable, not an empty list: read
+// as empty, it would say that imunify lists nothing, and an unblock would
+// skip the deletes.
+func TestParseImunifyList_ObjectWithoutItems(t *testing.T) {
+	for _, raw := range []string{`{"result":"error","messages":["x"]}`, `{"items":null}`, `{"items":{}}`, `"items"`} {
+		if items := parseImunifyList([]byte(raw)); items != nil {
+			t.Errorf("%s parsed as %+v, want unreadable", raw, items)
+		}
+	}
+	for _, raw := range []string{`{"items":[]}`, `{"Items":[]}`, `[]`} {
+		if items := parseImunifyList([]byte(raw)); items == nil {
+			t.Errorf("%s read as unreadable, want an empty list", raw)
+		}
+	}
+}
+
+// A list read may be missing entries when it reached the cap, says it holds
+// more than it returned, or has entries without an address or a purpose;
+// an entry's address can also come as the numeric network_address.
+func TestImunifyIncomplete(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}],"max_count":1}`:                                                      "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}]}`:                                                                    "",
+		`[{"ip":"10.0.0.1","purpose":"drop"}]`:                                                                              "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}],"max_count":3}`:                                                      "it holds 3 entries, 1 returned",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"purpose":"drop"}]}`:                                                 "1 of its entries unreadable",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":"10.0.0.2"}]}`:                                                  "1 of its entries unreadable",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":null,"network_address":null,"country":"BO","purpose":"drop"}]}`: "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":"junk","country":"BO","purpose":"drop"}]}`:                      "1 of its entries unreadable",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"country":{"code":"CN"},"purpose":"drop"}]}`:                         "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":null,"type":"country","purpose":"drop"}]}`:                      "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"type":"country","purpose":"white"}]}`:                               "",
+		`{"items":[{"network_address":167772161,"netmask":4294967295,"purpose":"drop"}]}`:                                   "",
+	} {
+		items := parseImunifyList([]byte(raw))
+		if got := imunifyIncomplete([]byte(raw), items); got != want {
+			t.Errorf("%s: %q, want %q", raw, got, want)
+		}
+	}
+	items := parseImunifyList([]byte(`{"items":[{"network_address":167772161,"netmask":4294967295,"purpose":"drop"}]}`))
+	if len(items) != 1 || items[0].IP != "10.0.0.1" {
+		t.Errorf("numeric network_address: %+v", items)
+	}
+}
+
+// Many queries against a list that says it holds more than it returned are
+// asked --by-ip too, as at the cap.
+func TestSearchImunify_ShortListAsksEachQuery(t *testing.T) {
+	fakeImunify(t, map[string]string{
+		"list.out":         `{"items":[` + item("10.0.0.1", "drop") + `],"max_count":2}`,
+		"byip-1.2.3.4.out": `{"items":[` + item("1.2.3.4", "drop") + `]}`,
+	})
+	locs, skip, why := searchImunify(context.Background(), []*query{mustQuery(t, "1.2.3.4"), mustQuery(t, "10.0.0.1")})
+	if why != "" || len(locs[0]) != 1 || len(locs[1]) != 1 || skip[0] != "" {
+		t.Errorf("locs %+v skip %q why %q", locs, skip, why)
+	}
+}
