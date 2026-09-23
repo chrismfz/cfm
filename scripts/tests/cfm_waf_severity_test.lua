@@ -1573,19 +1573,30 @@ do
   local fresh_waf = require("cfm_waf")
   local snap = fresh_waf.get_config()
   local must_be_challenge = {
-    "rule_ip_host",
     "rule_ctrl_chars",
-    "rule_debug_toggles",
     "rule_serialize",
     "rule_cmd_payload_backtick",
-    "rule_header_flood",
     "rule_cmd_payload",  -- fallback default, kept aligned with sub-rules
-    "rule_sqli_union_variant",
     "rule_ssrf",
   }
   for _, name in ipairs(must_be_challenge) do
     check(snap[name] == "challenge",
           "71: " .. name .. " ships as 'challenge' (got " .. tostring(snap[name]) .. ")")
+  end
+  -- challenge_v2: same page, solve scored for headless evidence at verify.
+  -- rule_xss (302) since 2026-09-22; 602/319/321/801/609 since 2026-09-23
+  -- (batch 1 — scanner-only challenge rules, docs/waf.md WAF hunt).
+  local must_be_challenge_v2 = {
+    "rule_xss",
+    "rule_ip_host",
+    "rule_sqli_union_variant",
+    "rule_proxy_header_sqli",
+    "rule_debug_toggles",
+    "rule_header_flood",
+  }
+  for _, name in ipairs(must_be_challenge_v2) do
+    check(snap[name] == "challenge_v2",
+          "71: " .. name .. " ships as 'challenge_v2' (got " .. tostring(snap[name]) .. ")")
   end
   local must_be_block = {
     "rule_traversal",  -- promoted challenge→block 2026-09-05 (clean 6-server FP review, docs/waf.md)

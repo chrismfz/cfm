@@ -44,6 +44,24 @@ back-filled here — see the git/PR history for that period.
   like the existing Joomla file-manager exception: only a bare file-manager
   command is allowed, on `admin-ajax.php` only.
 ### Changed
+- **Five WAF rules move from `challenge` to `challenge_v2`.** 602 (bare-IP
+  Host), 319 (obfuscated SQL `UNION`), 321 (proxy-header injection), 801 (debug
+  toggles) and 609 (header flood) now serve the same challenge page but score
+  the solve for headless-browser evidence at verify; a failing solve earns no
+  clearance. A fleet hunt found only scanners (or nobody) solving these — 602
+  is the one where headless scanners were actually seen solving. A real user's
+  solve still passes (absence never convicts). No autoblock change (challenge
+  tiers never feed `waf_security`). Older edges map the unknown tier to
+  `disabled`, so upgrade the edge before relying on it.
+- **WAF `challenge_v2` pushes are now keyed per `(ip, host)`, capped.** The
+  per-hit push is what records the per-(ip,host) v2 rung mark daemon-side, but
+  the dedup key dropped the host, so a scanner hitting several vhosts from one
+  IP within the 60 s cooldown marked only the first — the rest verified at v1.
+  Because `Host` is client-chosen, the per-host key is bounded by
+  `push_v2_host_cap` (16) distinct hosts per IP/family/window; past it, hits
+  collapse to the family window so a Host-rotating flood can't amplify the log
+  and RPC volume. Other tiers stay host-agnostic (v1/logonly write no mark;
+  block feeds the per-IP autoblock, which a per-host key would over-notify).
 - **The Site Cache micro tier is enforced by default.** `MICRO_CACHE_ENFORCE`
   now defaults to `1`; it was `0` (a dry run) until it passed the on-box
   checklist on a live WordPress vhost.
