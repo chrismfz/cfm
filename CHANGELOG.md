@@ -111,7 +111,8 @@ back-filled here — see the git/PR history for that period.
   and the edge feed carries it as an opt-out: the vhost caches nothing. The
   same works for a narrower wildcard (`off '*.shop.example.com'` under an armed
   `*.example.com`). Turning it back on starts from a fresh cache — objects
-  cached before the `off` are never served again. To delete a policy — the
+  cached before the `off` are never served again (a first-time micro enable
+  keeps the static cache). To delete a policy — the
   vhost then follows a covering wildcard — use the new `remove` (`rm`); the API
   `remove` endpoint keeps that meaning. `off` on a vhost with no policy stores
   an opt-out and says so.
@@ -124,10 +125,13 @@ back-filled here — see the git/PR history for that period.
   `*.shop.example.com` both armed, `x.shop.example.com` got the broader
   `*.example.com` policy (the feed was alphabetical and the edge took the first
   match). The daemon and the edge now both put the longest pattern first.
-- **Site Cache: a stored policy this build cannot read is kept.** A row the
-  daemon cannot load (a recipe from a newer build, after a downgrade) used to
-  be deleted from the store file at the next change. It is now kept verbatim
-  (and not served) until a build that knows it loads it.
+- **Site Cache: a stored policy this build cannot read is kept, and fails
+  closed.** A row the daemon cannot load (a recipe or a field from a newer
+  build, after a downgrade) used to be deleted from the store file at the next
+  change, and its vhost then fell back to any covering `*.suffix` wildcard. It
+  is now kept in the file and not served, and its vhost is treated as opted
+  out: nothing caches it until a build that can read the row loads it, or
+  `remove` deletes it.
 - **Site Cache: a host with a `:port` is rejected.** The edge always ignored the
   port (a stored `a.com:443` acted as `a.com`), so the daemon's view of such a
   policy disagreed with what the edge did. A stored one is normalized to the

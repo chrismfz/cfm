@@ -452,9 +452,9 @@ expect no measurable delta.
 
 New `siteCacheStore` in `internal/webdetector/site_cache.go`, JSON at
 `/var/lib/cfm/webdetector_site_cache.json` (knob `SITE_CACHE_STORE_PATH`),
-write-through source of truth with atomic save — same mechanics as
-`http3_overrides_store.go` — that keeps a stored row it cannot load verbatim
-(forward compatibility, below). One entry per
+write-through source of truth with atomic save (the store mechanics of
+`http3_overrides_store.go`), plus the forward-compatible freezing of rows it
+cannot load that `challenge_access.go` uses (below). One entry per
 vhost, holding **independent per-tier sub-policies** so a vhost can run static
 and micro together:
 
@@ -518,23 +518,33 @@ two ways to stop caching differ under an armed wildcard:
 - **remove** (CLI `remove`/`rm`; API `remove`) deletes the entry: the host is
   uncached unless an armed wildcard covers it, which then applies.
 
-Re-arming a tier (any tier going from off to on) issues a fresh generation: a
-tier is often turned off BECAUSE something wrong got cached (a per-user asset
-or page, §14), and its zone may still hold — and, through `use_stale`, serve —
-those objects, so turning it back on must not reach them. Both tiers share the
-generation, so re-arming one also starts the other from an empty cache (a
-refill, never a wrong answer). Turning a tier off, or any other config
-change, keeps it.
+Re-arming a tier — static off → on, or micro off → on with the recipe it kept
+while off — issues a fresh generation: a tier is often turned off BECAUSE
+something wrong got cached (a per-user asset or page, §14), and its zone may
+still hold — and, through `use_stale`, serve — those objects, so turning it
+back on must not reach them. Both tiers share the generation, so re-arming one
+also starts the other from an empty cache (a refill, never a wrong answer). A
+FIRST micro enable (no stored recipe) has no old micro objects to hide and
+keeps the static cache. Turning a tier off, or any other config change, keeps
+it. The same reasoning applies to the `SITE_CACHE = 0` panic button, which
+keeps every generation: purge before setting it back to 1 if you pulled it
+because something wrong got cached.
 
 Stores written before generations were wall-clock ms counted every policy from
 0, so an exact host and its covering wildcard could share one (one key space
 for that host, whose objects may belong to either policy) and a value could be
 one a purge had retired. On load, EVERY generation below 1e12 (a legacy
 counter) or at/above 1e14 (not exactly renderable at the edge) is reissued —
-one cache refill per such policy, once — and the file is rewritten. A stored
-row this build cannot load (e.g. a recipe from a newer build, after a
-downgrade) is kept in the file verbatim through that rewrite and every later
-save; it is neither served nor editable by this build.
+one cache refill per such policy, once — and the file is rewritten.
+
+**Rows this build cannot load** — a recipe or a field from a newer build
+(after a downgrade: any unknown field freezes the row, since a newer build's
+safety setting must not be ignored), or a malformed hand edit — are kept in the
+file as stored (re-indented) through that rewrite and every later save, and
+never served. They FAIL CLOSED: the host of such a row is treated as an opt-out,
+so a covering armed wildcard does not start caching it. `remove` deletes them;
+list/get do not show them, and a purge does not reach them (so after a
+re-upgrade such a row returns with the generation it had).
 
 Because an all-off entry changes what a covering wildcard does, `set` creates
 a NEW entry all-off only when it turns both tiers off explicitly; a `set` that

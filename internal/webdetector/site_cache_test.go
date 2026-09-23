@@ -634,7 +634,12 @@ func TestSiteCacheStore_RearmIssuesFreshGeneration(t *testing.T) {
 		}
 	}
 
-	apply(SiteCachePatch{Static: on("static_lean"), Micro: on("micro_safe")})
+	apply(SiteCachePatch{Static: on("static_lean")})
+	gs := gen()
+	apply(SiteCachePatch{Micro: on("micro_safe")}) // FIRST micro enable
+	if gen() != gs {
+		t.Fatal("a first micro enable changed the generation (it would drop the static cache for nothing)")
+	}
 	g0 := gen()
 	apply(SiteCachePatch{Micro: &SiteCacheTierPatch{TTL: strPtr("30s")}})
 	if gen() != g0 {
@@ -762,6 +767,64 @@ func TestSiteCacheStore_LoadRewriteRules(t *testing.T) {
 	check("a later save")
 	if got := len(newSiteCacheStore(path).List()); got != 2 {
 		t.Fatalf("reload after the saves: %d entries, want 2 (d.com, f.com)", got)
+	}
+}
+
+// A row this build cannot load (a newer build's recipe or field, a malformed
+// element) is kept as stored through every save — exactly once, not duplicated
+// — and FAILS CLOSED: its host is an opt-out in the feed (a covering armed
+// wildcard must not start caching it), counted nowhere, and `remove` deletes it.
+func TestSiteCacheStore_FrozenRows(t *testing.T) {
+	path := writeSiteCacheStoreFile(t, `[
+	 {"host":"*.example.com","generation":1758585600001,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"a.example.com","generation":1758585600002,"static":{"enabled":true,"recipe":"recipe_from_a_newer_build"},"micro":{"enabled":false}},
+	 {"host":"b.example.com","generation":1758585600003,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false},"bypass_paths":["/cart"]},
+	 31337.25,
+	 "not a row"]`)
+	s := newSiteCacheStore(path)
+	if len(s.List()) != 1 {
+		t.Fatalf("want only *.example.com loaded, got %+v", s.List())
+	}
+	feed := map[string]CachePolicyRow{}
+	for _, r := range s.PolicyFeed() {
+		feed[r.Host] = r
+	}
+	for _, h := range []string{"a.example.com", "b.example.com"} {
+		r, ok := feed[h]
+		if !ok || r.Static != nil || r.Micro != nil {
+			t.Fatalf("frozen %s must be an opt-out row under the armed wildcard, got ok=%v %+v", h, ok, r)
+		}
+		if key, ok := s.StatsKeyFor(h); ok {
+			t.Fatalf("frozen %s resolved to stats key %q", h, key)
+		}
+	}
+	count := func() map[string]int {
+		b, _ := os.ReadFile(path)
+		c := map[string]int{}
+		for _, needle := range []string{"recipe_from_a_newer_build", "bypass_paths", "31337.25", "not a row"} {
+			c[needle] = strings.Count(string(b), needle)
+		}
+		return c
+	}
+	for i := 0; i < 3; i++ { // saves and reloads never lose or duplicate a frozen row
+		if _, err := s.Apply(SiteCachePatch{Host: "c" + strconv.Itoa(i) + ".com", Static: &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("static_lean")}}, false); err != nil {
+			t.Fatal(err)
+		}
+		s = newSiteCacheStore(path)
+		for k, n := range count() {
+			if n != 1 {
+				t.Fatalf("cycle %d: %q appears %d times in the file, want 1", i, k, n)
+			}
+		}
+	}
+	if !s.Remove("a.example.com") {
+		t.Fatal("remove of a frozen-only host reported nothing removed")
+	}
+	if c := count(); c["recipe_from_a_newer_build"] != 0 || c["bypass_paths"] != 1 {
+		t.Fatalf("remove deleted the wrong frozen rows: %v", c)
+	}
+	if key, ok := s.StatsKeyFor("a.example.com"); !ok || key != "*.example.com" {
+		t.Fatalf("after remove the host follows the wildcard: %q %v", key, ok)
 	}
 }
 

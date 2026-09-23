@@ -35,6 +35,7 @@
 package webdetector
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -132,12 +133,15 @@ type SiteCacheEntry struct {
 	ScopeHosts []string `json:"scope_hosts,omitempty"`
 	// Generation is folded into the edge cache key; a Purge replaces it so old
 	// keys become unreachable and age out. A config change keeps it, EXCEPT
-	// re-arming (any tier going from off to on), which also issues a new one:
-	// a tier is often turned off BECAUSE something wrong got cached (a
-	// per-user asset or page, design §14), and its zone may still hold — and,
-	// through use_stale, serve — those objects, so turning it back on must not
-	// reach them. (Both tiers share the generation, so re-arming one also
-	// starts the other from an empty cache — a refill, never a wrong answer.)
+	// re-arming — the static tier going from off to on, or the micro tier
+	// going from off to on with the recipe it kept while off — which also
+	// issues a new one: a tier is often turned off BECAUSE something wrong got
+	// cached (a per-user asset or page, design §14), and its zone may still
+	// hold — and, through use_stale, serve — those objects, so turning it back
+	// on must not reach them. (Both tiers share the generation, so re-arming
+	// one also starts the other from an empty cache — a refill, never a wrong
+	// answer. A FIRST micro enable, with no stored recipe, has no old micro
+	// objects to hide, so it keeps the static cache.)
 	// A value must NEVER be issued twice: a remove + re-add that reused an old
 	// value (it used to restart at 0) made that value's still-on-disk objects
 	// (static entries live 7 days, and may carry a year of origin max-age) HITs
@@ -183,11 +187,22 @@ type siteCacheStore struct {
 	// issued before the restart AND a new generation then lands on exactly
 	// that millisecond.
 	genHWM int64
-	// frozen holds the stored rows this build could not load (a recipe from a
-	// newer build, a malformed hand edit), verbatim. saveLocked writes them
-	// back, so neither a normalizing rewrite at load nor a later change deletes
-	// another build's policy; this build neither serves nor edits them.
-	frozen []json.RawMessage
+	// frozen holds the stored rows this build could not load — a recipe or a
+	// field from a newer build (a downgrade), a malformed hand edit — as
+	// stored. saveLocked writes them back (re-indented), so neither a
+	// normalizing rewrite at load nor a later change deletes another build's
+	// policy. This build does not serve them: a frozen row whose host it can
+	// read FAILS CLOSED — the feed treats that host as an opt-out, never as
+	// "no entry", which would let a covering wildcard cache it. Remove deletes
+	// the frozen rows of its host; purges do not reach them.
+	frozen []siteCacheFrozenRow
+}
+
+// siteCacheFrozenRow is one stored row this build could not load; host is its
+// normalized host, "" when that is unreadable too.
+type siteCacheFrozenRow struct {
+	host string
+	raw  json.RawMessage
 }
 
 // SiteCacheTierPatch and SiteCachePatch are the MERGE form of a set request
@@ -461,7 +476,8 @@ func (s *siteCacheStore) setLocked(in SiteCacheEntry) (SiteCacheEntry, error) {
 	if existed {
 		norm.CreatedAt = prev.CreatedAt
 		norm.Generation = prev.Generation
-		if (!prev.Static.Enabled && norm.Static.Enabled) || (!prev.Micro.Enabled && norm.Micro.Enabled) {
+		if (!prev.Static.Enabled && norm.Static.Enabled) ||
+			(!prev.Micro.Enabled && norm.Micro.Enabled && prev.Micro.Recipe != "") {
 			// A tier re-armed: start from a fresh key space (see Generation).
 			norm.Generation = s.nextGenerationLocked()
 		}
@@ -494,8 +510,9 @@ func (s *siteCacheStore) setLocked(in SiteCacheEntry) (SiteCacheEntry, error) {
 	return norm, nil
 }
 
-// Remove deletes a vhost's policy. Returns true if a row was removed. The host
-// is then uncached unless an armed "*.suffix" wildcard covers it — use an
+// Remove deletes a vhost's policy — and any stored row for that host this
+// build could not load (see frozen). Returns true if a row was removed. The
+// host is then uncached unless an armed "*.suffix" wildcard covers it — use an
 // all-off entry (an opt-out, what the CLI's `off` sets) to keep it uncached
 // there too.
 func (s *siteCacheStore) Remove(host string) bool {
@@ -506,12 +523,23 @@ func (s *siteCacheStore) Remove(host string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	prev, existed := s.entries[h]
-	if !existed {
+	prevFrozen := s.frozen
+	kept := make([]siteCacheFrozenRow, 0, len(s.frozen))
+	for _, f := range s.frozen {
+		if f.host != h {
+			kept = append(kept, f)
+		}
+	}
+	if !existed && len(kept) == len(s.frozen) {
 		return false
 	}
 	delete(s.entries, h)
+	s.frozen = kept
 	if err := s.saveLocked(); err != nil {
-		s.entries[h] = prev
+		if existed {
+			s.entries[h] = prev
+		}
+		s.frozen = prevFrozen
 		logging.Logf("[webdetector][site-cache] failed to persist removal of %q (rollback): %v (path=%s)", h, err, s.path)
 		return false
 	}
@@ -658,14 +686,15 @@ type CachePolicyRow struct {
 func (s *siteCacheStore) PolicyFeed() []CachePolicyRow {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	entries := s.feedEntriesLocked()
 	var armedWild []string
-	for _, e := range s.entries {
+	for _, e := range entries {
 		if strings.HasPrefix(e.Host, "*.") && (e.Static.Enabled || e.Micro.Enabled) {
 			armedWild = append(armedWild, e.Host)
 		}
 	}
-	out := make([]CachePolicyRow, 0, len(s.entries))
-	for _, e := range s.entries {
+	out := make([]CachePolicyRow, 0, len(entries))
+	for _, e := range entries {
 		if !siteCacheArmed(e) && !siteCacheWildcardCovers(armedWild, e.Host) {
 			continue
 		}
@@ -684,6 +713,27 @@ func (s *siteCacheStore) PolicyFeed() []CachePolicyRow {
 		out = append(out, row)
 	}
 	sort.Slice(out, func(i, j int) bool { return siteCacheFeedLess(out[i].Host, out[j].Host) })
+	return out
+}
+
+// feedEntriesLocked is what the feed (and StatsKeyFor) is computed over: the
+// loaded entries, plus an all-off stand-in for the host of each frozen row
+// that has no loaded entry — a row this build cannot read fails closed, as an
+// opt-out, instead of vanishing and leaving the host to a covering wildcard.
+// Caller holds s.mu.
+func (s *siteCacheStore) feedEntriesLocked() map[string]SiteCacheEntry {
+	if len(s.frozen) == 0 {
+		return s.entries
+	}
+	out := make(map[string]SiteCacheEntry, len(s.entries)+len(s.frozen))
+	for h, e := range s.entries {
+		out[h] = e
+	}
+	for _, f := range s.frozen {
+		if _, live := out[f.host]; f.host != "" && !live {
+			out[f.host] = SiteCacheEntry{Host: f.host}
+		}
+	}
 	return out
 }
 
@@ -727,20 +777,21 @@ func (s *siteCacheStore) StatsKeyFor(host string) (string, bool) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if e, exact := s.entries[h]; exact {
+	entries := s.feedEntriesLocked()
+	if e, exact := entries[h]; exact {
 		if siteCacheArmed(e) {
 			return h, true
 		}
 		return "", false
 	}
 	var armedWild []string
-	for k, e := range s.entries {
+	for k, e := range entries {
 		if strings.HasPrefix(k, "*.") && siteCacheArmed(e) {
 			armedWild = append(armedWild, k)
 		}
 	}
 	best, bestArmed := "", false
-	for k, e := range s.entries {
+	for k, e := range entries {
 		if !strings.HasPrefix(k, "*.") || !strings.HasSuffix(h, k[1:]) {
 			continue
 		}
@@ -787,15 +838,29 @@ func (s *siteCacheStore) load() {
 	for _, raw := range raws {
 		var e SiteCacheEntry
 		err := json.Unmarshal(raw, &e)
+		if err == nil {
+			// A field this build does not know (a newer build's, e.g. a safety
+			// setting) freezes the row: loading it without the field would
+			// serve a policy that build never meant, and the next save would
+			// drop the field.
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.DisallowUnknownFields()
+			var strict SiteCacheEntry
+			err = dec.Decode(&strict)
+		}
 		var norm SiteCacheEntry
 		if err == nil {
 			norm, err = s.normalizeEntry(e)
 		}
 		if err != nil {
-			// Loud, not silent — and kept: a recipe from a newer build (a
+			// Loud, not silent — and kept: a newer build's policy (a
 			// downgrade) or a hand-edit typo must not be deleted by this build.
-			logging.Logf("[webdetector][site-cache] cannot load stored policy for %q: %v — kept in the file as is, not served (path=%s)", e.Host, err, s.path)
-			s.frozen = append(s.frozen, append(json.RawMessage(nil), raw...))
+			fh, _ := s.normalize(e.Host)
+			logging.Logf("[webdetector][site-cache] cannot load stored policy for %q: %v — kept in the file, not served (the host is treated as opted out) (path=%s)", e.Host, err, s.path)
+			s.frozen = append(s.frozen, siteCacheFrozenRow{host: fh, raw: append(json.RawMessage(nil), raw...)})
+			if e.Generation > s.genHWM && e.Generation < siteCacheMaxGeneration {
+				s.genHWM = e.Generation
+			}
 			continue
 		}
 		if norm.Host != e.Host || !sameStrings(norm.ScopeHosts, e.ScopeHosts) {
@@ -874,8 +939,8 @@ func (s *siteCacheStore) saveLocked() error {
 	for _, e := range arr {
 		rows = append(rows, e)
 	}
-	for _, raw := range s.frozen {
-		rows = append(rows, raw) // rows this build cannot load, verbatim (see frozen)
+	for _, f := range s.frozen {
+		rows = append(rows, f.raw) // rows this build cannot load, as stored (see frozen)
 	}
 	b, err := json.MarshalIndent(rows, "", "  ")
 	if err != nil {

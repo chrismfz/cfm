@@ -96,7 +96,8 @@ Usage:
   cfm webtop site-cache purge --all                   invalidate ALL vhosts (admin only)
   cfm webtop site-cache stats [vhost]                 per-vhost HIT/MISS/hit-ratio
 
-set flags (set changes ONLY the flags you pass; the rest of the policy is kept):
+set flags (set changes ONLY the flags you pass; the rest of the policy is kept;
+re-arming a tier that was on before starts the vhost from an empty cache):
   --static RECIPE        enable the static tier with RECIPE
   --static off           disable the static tier (its recipe/TTL are kept)
   --micro  RECIPE        enable the micro tier with RECIPE
