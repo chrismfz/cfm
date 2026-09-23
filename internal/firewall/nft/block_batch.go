@@ -5,6 +5,7 @@ package nft
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -173,4 +174,51 @@ func writeElemStmts(sb *strings.Builder, verb, set string, elems []string) {
 		j := min(i+blockBatchStmtElems, len(elems))
 		fmt.Fprintf(sb, "%s element %s %s %s { %s }\n", verb, family, tableName, set, strings.Join(elems[i:j], ", "))
 	}
+}
+
+// RemoveBlockBatch unblocks many host addresses: one `nft -j list set` per
+// address family, then one `nft -f -` run deleting just the addresses the
+// block sets hold (firewall.HostsPresent). Deleting one a set doesn't hold
+// would abort the whole transaction, and most addresses of a fleet-wide
+// unblock aren't blocked on any one node; that abort used to send every
+// address through RemoveBlock, one nft process each.
+//
+// An address can still expire or be removed between the read and the write,
+// which aborts the transaction; it is then retried from a fresh read, up to
+// blockBatchAttempts times, never one process per address.
+func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
+	v4, v6 := firewall.SplitHostAddrs(ips)
+	if len(v4)+len(v6) == 0 {
+		return nil
+	}
+	var lastErr error
+	for attempt := 0; attempt < blockBatchAttempts; attempt++ {
+		var sb strings.Builder
+		for _, fam := range []struct {
+			set  string
+			want []net.IP
+		}{{setV4, v4}, {setV6, v6}} {
+			if len(fam.want) == 0 {
+				continue
+			}
+			current, err := b.ListSetElementsTimed(fam.set)
+			if err != nil {
+				return fmt.Errorf("read %s %s %s: %w", family, tableName, fam.set, err)
+			}
+			var elems []string
+			for _, ip := range firewall.HostsPresent(fam.want, current) {
+				elems = append(elems, ip.String())
+			}
+			writeElemStmts(&sb, "delete", fam.set, elems)
+		}
+		if sb.Len() == 0 {
+			return nil
+		}
+		r, err := runNFTCommandInput(context.Background(), sb.String(), "-f", "-")
+		if err == nil {
+			return nil
+		}
+		lastErr = &nftBatchError{msg: nftFirstError(r.Stdout+r.Stderr, err), err: err}
+	}
+	return fmt.Errorf("nft unblock batch (%d v4, %d v6), %d attempts: %w", len(v4), len(v6), blockBatchAttempts, lastErr)
 }

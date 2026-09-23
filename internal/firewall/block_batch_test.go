@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,5 +78,37 @@ func TestPlanBlockBatch(t *testing.T) {
 		[]SetElementTimed{{Elem: "198.51.100.13", Expires: time.Second}})
 	if len(short.Writes) != 1 || !short.Writes[0].Replace {
 		t.Errorf("a 50s block with 1s left must be extended: %+v", short)
+	}
+}
+
+func TestSplitHostAddrs(t *testing.T) {
+	ip := net.ParseIP
+	v4, v6 := SplitHostAddrs([]net.IP{
+		ip("198.51.100.1"), nil, ip("0.0.0.0"), ip("::"), ip("2001:db8::1"),
+		ip("::ffff:198.51.100.2"), ip("198.51.100.1"), ip("198.51.100.2"), ip("2001:db8::1"),
+	})
+	if len(v4) != 2 || v4[0].String() != "198.51.100.1" || v4[1].String() != "198.51.100.2" || len(v4[1]) != net.IPv4len {
+		t.Errorf("v4 = %v, want .1 then .2 (as a 4-byte v4 address), once each", v4)
+	}
+	if len(v6) != 1 || v6[0].String() != "2001:db8::1" {
+		t.Errorf("v6 = %v, want 2001:db8::1 once", v6)
+	}
+}
+
+func TestHostsPresent(t *testing.T) {
+	ip := net.ParseIP
+	current := []SetElementTimed{
+		{Elem: "198.51.100.1", Expires: time.Hour},
+		{Elem: "198.51.100.3"}, // permanent
+		{Elem: "198.51.100.0/24"},
+		{Elem: "2001:db8:0:0::1"}, // non-canonical spelling
+	}
+	got := HostsPresent([]net.IP{ip("198.51.100.3"), ip("198.51.100.2"), ip("198.51.100.1"), ip("2001:db8::1")}, current)
+	var s []string
+	for _, g := range got {
+		s = append(s, g.String())
+	}
+	if want := "198.51.100.3 198.51.100.1 2001:db8::1"; strings.Join(s, " ") != want {
+		t.Errorf("HostsPresent = %v, want %s (want's order; a CIDR element is not a host)", s, want)
 	}
 }

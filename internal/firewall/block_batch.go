@@ -21,6 +21,11 @@ import (
 // address this node already blocks permanently (e.g. from cfm.deny) must not
 // quietly turn the permanent block into a 6h one. AddBlock, by contrast,
 // replaces whatever is there.
+//
+// RemoveBlockBatch is the unblock side: it reads each block set once and
+// deletes, in one transaction, just the addresses the set holds. Deleting one
+// it doesn't hold would abort the whole transaction, and most addresses of a
+// fleet-wide unblock aren't blocked on any one node.
 
 // BlockEntry is one address for AddBlockBatch: blocked permanently, or for
 // TTL. Permanence is explicit, never "TTL 0": a caller counting a TTL down to
@@ -175,4 +180,41 @@ func extendSlack(ttl time.Duration) time.Duration {
 		s = time.Minute
 	}
 	return s
+}
+
+// SplitHostAddrs splits addresses by family for RemoveBlockBatch, dropping
+// nil and unspecified addresses and repeats, in first-seen order.
+// IPv4-mapped IPv6 addresses count as IPv4.
+func SplitHostAddrs(ips []net.IP) (v4, v6 []net.IP) {
+	seen := map[string]bool{}
+	for _, ip := range ips {
+		if ip == nil || ip.IsUnspecified() || seen[ip.String()] {
+			continue
+		}
+		seen[ip.String()] = true
+		if ip4 := ip.To4(); ip4 != nil {
+			v4 = append(v4, ip4)
+		} else {
+			v6 = append(v6, ip)
+		}
+	}
+	return v4, v6
+}
+
+// HostsPresent returns the addresses of want that current holds as host
+// elements, in the order of want: what a batch unblock deletes.
+func HostsPresent(want []net.IP, current []SetElementTimed) []net.IP {
+	cur := make(map[string]bool, len(current))
+	for _, c := range current {
+		if ip := net.ParseIP(c.Elem); ip != nil {
+			cur[ip.String()] = true
+		}
+	}
+	var out []net.IP
+	for _, ip := range want {
+		if cur[ip.String()] {
+			out = append(out, ip)
+		}
+	}
+	return out
 }

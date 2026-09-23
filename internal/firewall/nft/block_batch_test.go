@@ -190,3 +190,96 @@ func TestNFTFirstError(t *testing.T) {
 		}
 	}
 }
+
+// RemoveBlockBatch reads each block set once and deletes, in ONE `nft -f -`
+// run, just the addresses the sets hold. A delete of an absent address aborts
+// the whole transaction, which used to send every address through RemoveBlock
+// (one nft process each).
+func TestRemoveBlockBatch_OneTransactionPresentOnly(t *testing.T) {
+	log := fakeNFTSets(t,
+		setJSON("block_v4", `"198.51.100.1"`, `{"elem":{"val":"198.51.100.2","timeout":3600,"expires":60}}`),
+		setJSON("block_v6", `"2001:db8::1"`), 0)
+	ips := []net.IP{net.ParseIP("198.51.100.9"), net.ParseIP("198.51.100.2"), net.ParseIP("198.51.100.1"),
+		net.ParseIP("2001:db8::7"), net.ParseIP("2001:db8::1")}
+	for i := 0; i < 300; i++ { // many absent addresses: still no per-address process
+		ips = append(ips, net.IPv4(10, 3, byte(i/250), byte(i%250+1)))
+	}
+	if err := New().RemoveBlockBatch(ips); err != nil {
+		t.Fatalf("RemoveBlockBatch: %v", err)
+	}
+	got := readFile(t, log)
+	if n := strings.Count(got, "ARGS "); n != 3 {
+		t.Fatalf("%d nft processes, want 3 (list v4, list v6, one -f):\n%.600s", n, got)
+	}
+	for _, want := range []string{
+		"delete element inet cfm block_v4 { 198.51.100.2, 198.51.100.1 }",
+		"delete element inet cfm block_v6 { 2001:db8::1 }",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("script lacks %q:\n%.600s", want, got)
+		}
+	}
+	if strings.Contains(got, "198.51.100.9") || strings.Contains(got, "10.3.") || strings.Contains(got, "2001:db8::7") {
+		t.Errorf("deleted an address the sets don't hold:\n%.600s", got)
+	}
+
+	// Nothing blocked here: two reads, no write.
+	log = fakeNFTSets(t, setJSON("block_v4"), setJSON("block_v6"), 0)
+	if err := New().RemoveBlockBatch(ips); err != nil {
+		t.Fatalf("RemoveBlockBatch: %v", err)
+	}
+	if got := readFile(t, log); strings.Count(got, "ARGS ") != 2 || strings.Contains(got, "ARGS -f -") {
+		t.Errorf("want the two reads and no write:\n%s", got)
+	}
+}
+
+// A failed delete (an address that expired between the read and the write)
+// is retried from a fresh read, then reported with nft's own error line.
+func TestRemoveBlockBatch_RetriesNeverPerAddress(t *testing.T) {
+	ips := []net.IP{net.ParseIP("198.51.100.1"), net.ParseIP("198.51.100.2")}
+	v4 := setJSON("block_v4", `"198.51.100.1"`, `"198.51.100.2"`)
+
+	log := fakeNFTSets(t, v4, setJSON("block_v6"), 1)
+	if err := New().RemoveBlockBatch(ips); err != nil {
+		t.Fatalf("one failed write must be retried: %v", err)
+	}
+	if n := strings.Count(readFile(t, log), "ARGS -f -"); n != 2 {
+		t.Errorf("%d writes, want 2", n)
+	}
+
+	log = fakeNFTSets(t, v4, setJSON("block_v6"), 99)
+	err := New().RemoveBlockBatch(ips)
+	if err == nil || !strings.Contains(err.Error(), "No such file or directory (at 198.51.100.1)") {
+		t.Fatalf("error = %v, want nft's own error line naming the element", err)
+	}
+	if n := strings.Count(readFile(t, log), "ARGS "); n != 2*blockBatchAttempts {
+		t.Errorf("%d nft processes, want %d (list + write per attempt) — no per-address fallback", n, 2*blockBatchAttempts)
+	}
+}
+
+// A block set it can't read fails the batch before any write; a delete of
+// more than blockBatchStmtElems addresses is split into statements of the
+// same one-run script.
+func TestRemoveBlockBatch_ReadErrorAndLargeDelete(t *testing.T) {
+	log := fakeNFTSets(t, setJSON("block_v4", `"198.51.100.1"`), "not json", 0)
+	err := New().RemoveBlockBatch([]net.IP{net.ParseIP("198.51.100.1"), net.ParseIP("2001:db8::1")})
+	if err == nil || strings.Contains(readFile(t, log), "ARGS -f -") {
+		t.Fatalf("err=%v; want a read error and no write", err)
+	}
+
+	var elems []string
+	var ips []net.IP
+	for i := 0; i < 2500; i++ {
+		ip := net.IPv4(10, 5, byte(i/250), byte(i%250+1))
+		ips = append(ips, ip)
+		elems = append(elems, fmt.Sprintf("%q", ip.String()))
+	}
+	log = fakeNFTSets(t, setJSON("block_v4", elems...), setJSON("block_v6"), 0)
+	if err := New().RemoveBlockBatch(ips); err != nil {
+		t.Fatalf("RemoveBlockBatch: %v", err)
+	}
+	got := readFile(t, log)
+	if strings.Count(got, "ARGS -f -") != 1 || strings.Count(got, "delete element inet cfm block_v4 {") != 3 {
+		t.Errorf("want one run with 3 delete statements (chunks of %d):\n%.400s", blockBatchStmtElems, got)
+	}
+}
