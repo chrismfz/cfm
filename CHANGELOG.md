@@ -44,6 +44,22 @@ back-filled here — see the git/PR history for that period.
   like the existing Joomla file-manager exception: only a bare file-manager
   command is allowed, on `admin-ajax.php` only.
 ### Changed
+- **The whole WAF `challenge` tier now defaults to `challenge_v2`.** Every
+  challenge-tier rule serves the same challenge page, but the solve is now
+  scored for headless-browser evidence at verify — a failing solve (a real
+  automation stack) earns no clearance, while a real user's solve still passes
+  (absence never convicts). v1 challenge was a paper wall against JS-capable
+  bots, which solve the proof-of-work and pass; v2 filters them at no cost to a
+  human. No autoblock change (challenge tiers never feed `waf_security`). One
+  rule stays at plain `challenge` on purpose: **102** (`long-path`) — a
+  rendering search crawler (Googlebot runs JS, follows long URLs) can trip it
+  and would be wrongly rejected (a WAF-rule mark is not good-bot-waived), a
+  silent de-indexing risk, and the length heuristic is FP-prone anyway. (**201**
+  `bad-ua` IS in the sweep: a JS-capable headless browser hiding behind an
+  empty/library UA solves a v1 challenge and passes, and v2 scores it; a real
+  user's UA never trips the scored tier, so no added FP, and score ≥ 99 still
+  hard-blocks.) Watch `detection_history type=challenge_v2_reject` for any rule
+  that turns out to reject legitimate solvers.
 - **Five WAF rules move from `challenge` to `challenge_v2`.** 602 (bare-IP
   Host), 319 (obfuscated SQL `UNION`), 321 (proxy-header injection), 801 (debug
   toggles) and 609 (header flood) now serve the same challenge page but score

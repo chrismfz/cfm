@@ -67,11 +67,13 @@ DECODE[CAND_NEST] = 'a:1:{i:0;O:4:"Evil":0:{}}'               -- object nested i
 DECODE[CAND_FP]   = 'foo:12:"bar baz qux extra"'              -- word ending in o, NOT an object marker
 DECODE[CAND_EVAL] = 'eval(getenv("x"));'                      -- a hostile sibling (B64_EVAL)
 
--- ── Tier pin: the scanner ships challenge. Guard against silent drift. ────────
+-- ── Tier pin: the scanner ships challenge_v2. Guard against silent drift. ─────
+-- Promoted challenge→challenge_v2 2026-09-23 (whole challenge tier; attack-only
+-- POST-body base64 scanner, a real user's solve still passes).
 do
   local snap = waf.get_config()
-  check(snap.rule_b64_injection == "challenge",
-        "rule 304 (b64 scanner) shipped default is challenge")
+  check(snap.rule_b64_injection == "challenge_v2",
+        "rule 304 (b64 scanner) shipped default is challenge_v2")
 end
 
 -- ── Positive: top-level object O:<len>:"Class" fires, but burns in at logonly ─
