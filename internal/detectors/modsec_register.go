@@ -15,7 +15,7 @@ import (
 )
 
 // shared state for detectors
-var modsecState, _ = core.LoadState("")
+var modsecState = core.DefaultState()
 
 var (
 	modsecQuick403 = regexp.MustCompile(`ModSecurity:\s+Access denied with code 403`)

@@ -19,7 +19,11 @@ func TestTailFile_UnknownKey(t *testing.T) {
 }
 
 func TestTailFile_MissingIsFoundFalse(t *testing.T) {
-	// 'waf' has a single candidate that won't exist in the test env.
+	// Point 'waf' at a path that can't exist: its real candidate is the live
+	// /var/log/cfm/cfm.waf.log, present on every node running the WAF.
+	old := fileCandidates["waf"]
+	fileCandidates["waf"] = []string{filepath.Join(t.TempDir(), "absent", "cfm.waf.log")}
+	t.Cleanup(func() { fileCandidates["waf"] = old })
 	res, err := TailFile(context.Background(), "waf", 0, 0, 0, "")
 	if err != nil {
 		t.Fatalf("missing log must not error: %v", err)
