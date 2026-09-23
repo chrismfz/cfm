@@ -76,9 +76,15 @@ the switches.
 
 ## 3. Arming a vhost
 
-The admin CLI is `cfm webtop site-cache …` (alias `cache`). The same operations
-are available over the API at `/api/v1/site-cache/*`. A scoped cPanel token
-can manage its own vhosts through the API; there is no cfm-admin page yet.
+Three ways to manage policies:
+- the cfm-admin **Site cache** page (Rules & engine), which also has recipes,
+  the debug-stamp command for one URL, and the hit counts;
+- the admin CLI `cfm webtop site-cache …` (alias `cache`), which can also set
+  a custom micro TTL (it snaps to a bucket) and the static TTL label;
+- the API at `/api/v1/site-cache/*`.
+
+A scoped cPanel token manages its own vhosts through the page or the API.
+Purge all is admin only.
 
 ```bash
 cfm webtop site-cache set shop.example --static static_lean            # Tier A
@@ -318,11 +324,11 @@ wildcard too (§6).
 
 - Static TTL and recipe are labels. Tier A follows the origin's headers with a
   1 h fallback.
-- There is no cfm-admin page yet. Use the API, CLI and MCP.
 - Stats are a live view: nothing is persisted, there is no history, and each
   row mixes both tiers.
 - The Site Cache tools don't show the switch state (`SITE_CACHE`,
-  `MICRO_CACHE_ENFORCE`). Read it with `detectors_config` or
+  `MICRO_CACHE_ENFORCE`); the cfm-admin page shows it to an admin only. Read it
+  with `detectors_config` or
   `GET /api/v1/detectors/config` (§2).
 - While `SITE_CACHE = 0` the edge does not read the policy feed. Policy
   changes and purges wait for the switch, and applying a purge before

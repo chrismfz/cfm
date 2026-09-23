@@ -27,6 +27,7 @@ const ICONS = {
   key: '<circle cx="8" cy="14" r="4"/><path d="M11 11l9-9m-4 4l3 3m-6 0l2 2"/>',
   mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>',
   pass: '<path d="M13 5l7 7-7 7"/><path d="M4 12h15"/><path d="M4 5v14"/>',
+  bolt: '<path d="M13 3L5 13h6l-1 8 8-10h-6l1-8z"/>',
 };
 
 const MENU_GROUPS = [
@@ -46,6 +47,7 @@ const MENU_GROUPS = [
     { label: "Vhost controls", href: "/cfm-admin/webdetector/controls/", icon: "sliders" },
     { label: "Traffic rules", href: "/cfm-admin/webdetector/rules/", icon: "funnel" },
     { label: "Challenge access", href: "/cfm-admin/webdetector/challenge-access/", icon: "pass" },
+    { label: "Site cache", href: "/cfm-admin/webdetector/site-cache/", icon: "bolt" },
     { label: "ClamAV", href: "/cfm-admin/webdetector/clam/", icon: "virus" },
   ]},
   { title: "Services", items: [
@@ -251,6 +253,7 @@ function hostActions(host) {
     { label: `Controls for ${host}`, hint: "WAF / Challenge / HTTP3 / Clam", href: `/cfm-admin/webdetector/controls/?vhost=${h}` },
     { label: `Traffic rules for ${host}`, hint: "Rules filtered to this vhost", href: `/cfm-admin/webdetector/rules/?vhost=${h}` },
     { label: `ClamAV for ${host}`, hint: "Upload scanning / infections", href: `/cfm-admin/webdetector/clam/?vhost=${h}` },
+    { label: `Site cache for ${host}`, hint: "Edge caching policies that apply", href: `/cfm-admin/webdetector/site-cache/?vhost=${h}` },
   ];
 }
 

@@ -1011,8 +1011,10 @@ It relies on the origin's response headers for anything per-user.
 
 `[webdetector]` knobs: `SITE_CACHE = 1` (node kill switch, not an opt-in),
 `MICRO_CACHE_ENFORCE = 0` (the Tier B opt-in), `SITE_CACHE_STORE_PATH`.
-Manage with `cfm webtop site-cache …` (§14) or `/api/v1/site-cache/*` (§15; a
-scoped cPanel token manages its own vhosts); read with the MCP tools
+Manage with the cfm-admin **Site cache** page (Rules & engine: policies,
+recipes, the debug-stamp command, hit counts), `cfm webtop site-cache …` (§14)
+or `/api/v1/site-cache/*` (§15); a scoped cPanel token manages its own vhosts
+through the page or the API. Read with the MCP tools
 `site_cache_status` / `site_cache_stats`. Operating it — verifying a URL with
 the `X-CFM-Cache` debug stamp, the stats, purge, turning Tier B on, incidents:
 [`docs/site-cache-runbook.md`](docs/site-cache-runbook.md).
