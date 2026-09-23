@@ -460,7 +460,7 @@ func (b *Backend) LoadPortScanner() {
 
 func (b *Backend) loadPortScannerOnce() {
 	// Do NOT call EnsureBase on every tick. EnsureBase's cost is its CLI part
-	// (refreshSelfSets + applyBaseInputRules fork ~26 `nft` subprocesses), and
+	// (applyBaseInputRules: ~60 `nft` processes then, one or two now), and
 	// running it every ~20s here was the driver of the nftlib EnsureBase-duration
 	// climb (cli_work grows as those forks slow with the ruleset) → watchdog
 	// restart. The base ruleset is created at startup; self-heal it here ONLY if

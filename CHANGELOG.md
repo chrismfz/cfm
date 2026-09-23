@@ -83,6 +83,36 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **nftlib: large CIDR sets were written truncated, possibly as an interval
+  open to the top of the address space, usually without an error.** The
+  netlink library puts all of a message's elements in one attribute whose
+  16-bit length silently wraps past 64 KiB, and interval (CIDR) sets were
+  written in one message: past 1,639 IPv4 or 1,024 IPv6 CIDRs (1,261 / 863
+  with a feed TTL) the kernel read a truncated list, or refused it and left
+  the set empty. In a test namespace, 2,000 /24s in a block nets set arrived
+  as 362 entries, the last running to 255.255.255.255 — a drop of most of
+  the IPv4 internet; in an allow set, an accept. It affects
+  every nets feed set (`block_ext_*_nets`, `allow_ext_*_nets`, the per-feed
+  ones) on the nftlib engine. They are now written in batches of 1,000
+  elements, never splitting a start from its end. No node is near the limit
+  today: one node runs nftlib, and its largest nets set holds 140 CIDRs.
+- **nftlib: `EnsureBase` runs one or two `nft` processes instead of ~60.** Its
+  CLI part read the input chain once per rule check (47 reads, 49 with ICMP
+  rate limiting) and wrote each
+  missing rule, and every self-set address, with its own `nft` run. On a node
+  with large feed sets every `nft` process loads the whole ruleset, set
+  elements included, so `EnsureBase` took ~70s in production
+  (`cli_work=1m9.6s` in the log). It runs at startup, on every DNAT enable
+  (`DNATOn`) and `cfm reset`, when a self-heal finds the table missing, and
+  until the unblock fix below on every unblock. Now the input chain is read
+  once and the missing rules go in one `nft` run (one per statement only if
+  that run fails, after re-reading the chain; an existing chain it can't read
+  is left as is and the `EnsureBase` sample in `firewall_selftest` carries
+  the error), and `self_v4`/`self_v6` are
+  written over netlink, with a link-local address merged into `fe80::/10`
+  instead of failing as an overlap. The resulting ruleset is identical.
+  `cli_work` in `firewall_selftest` now covers the base rules only; the self
+  sets appear under `feed_writes`.
 - **Unblocks no longer run `EnsureBase`, which made them take minutes and,
   on nftlib, skip the imunify/fail2ban cleanup.** Every unblock rebuilt the
   base ruleset (`EnsureBase`), which an unblock never needs: twice per IP from

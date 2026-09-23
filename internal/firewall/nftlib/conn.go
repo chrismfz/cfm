@@ -170,6 +170,18 @@ func parseElems(set *nftables.Set, elems []string, ttl *time.Duration) []nftable
 			if ip == nil {
 				continue
 			}
+			if set.Interval {
+				// A bare start would be an interval open to the top of the
+				// address space: encode the address as its /32 or /128.
+				bits := 128
+				if ip.To4() != nil {
+					bits = 32
+				}
+				if parts, err := cidrToIntervalElems(fmt.Sprintf("%s/%d", ip, bits), ttl); err == nil {
+					result = append(result, parts...)
+				}
+				continue
+			}
 			elem := nftables.SetElement{Key: normalizeIP(ip)}
 			if ttl != nil {
 				elem.Timeout = *ttl
