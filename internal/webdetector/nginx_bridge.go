@@ -150,8 +150,9 @@ type NginxBridge struct {
 	ListHTTP3Hosts func() []string
 
 	// ListCachePolicy returns the per-vhost Site Cache policy feed: every vhost
-	// with an enabled tier, plus an opt-out row (no tier) for an all-off exact
-	// host that an armed wildcard covers (siteCacheStore.PolicyFeed). The Lua
+	// with an enabled tier, plus an opt-out row (no tier) for an all-off entry
+	// — exact host or narrower wildcard — that a broader armed wildcard covers
+	// (siteCacheStore.PolicyFeed). The Lua
 	// worker polls this via /nginx/cache/config to refresh its per-worker
 	// cache, which gates the edge's proxy_cache locations. See
 	// configs/lua/cfm_cache.lua and site_cache.go.

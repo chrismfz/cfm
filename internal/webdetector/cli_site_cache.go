@@ -371,7 +371,7 @@ func boolPtrCLI(b bool) *bool { return &b }
 
 func runSiteCacheRemove(baseURL, host string) error {
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/site-cache/remove?host=" + url.QueryEscape(host)
-	return siteCachePostStatus(u, fmt.Sprintf("✓ policy removed for %s — it is now uncached, unless an armed *.suffix wildcard covers it: then that wildcard's policy (and its cache) applies. Use 'off' to keep it uncached.\n", host), "site-cache remove")
+	return siteCachePostStatus(u, fmt.Sprintf("✓ policy removed for %s — it now follows the most specific *.suffix wildcard covering it, if any: when that one is armed, its policy (and its cache) applies; with none, it is uncached. Use 'off' to keep it uncached.\n", host), "site-cache remove")
 }
 
 func runSiteCachePurge(baseURL string, args []string) error {

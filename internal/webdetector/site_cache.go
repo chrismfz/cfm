@@ -45,6 +45,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"cfm/internal/logging"
 )
@@ -104,10 +105,17 @@ type SiteCacheTier struct {
 // siteCacheArmed reports whether an entry has at least one tier on.
 func siteCacheArmed(e SiteCacheEntry) bool { return e.Static.Enabled || e.Micro.Enabled }
 
-// siteCacheMaxGeneration bounds a generation: the edge renders it with Lua
-// tostring (%.14g), exact only below 1e14. A stored value at or past it (only
-// a hand edit can produce one) is reissued on load.
-const siteCacheMaxGeneration = int64(1e14)
+// siteCacheMinGeneration / siteCacheMaxGeneration bound a generation. Below
+// the floor (1e12 ms = 2001-09-09) is a LEGACY value: stores written before
+// generations were wall-clock ms counted every policy from 0, so an exact host
+// and its covering wildcard could share one (the same key space for that
+// host), and a retired value could come back. At or past the ceiling the edge
+// cannot render it exactly (Lua tostring is %.14g) — only a hand edit gets
+// there. Load reissues both.
+const (
+	siteCacheMinGeneration = int64(1e12)
+	siteCacheMaxGeneration = int64(1e14)
+)
 
 // SiteCacheEntry is one vhost's cache policy: independent static + micro tiers,
 // a purge generation, and the cookie-handling advanced knobs (docs §4.1, §6).
@@ -124,11 +132,12 @@ type SiteCacheEntry struct {
 	ScopeHosts []string `json:"scope_hosts,omitempty"`
 	// Generation is folded into the edge cache key; a Purge replaces it so old
 	// keys become unreachable and age out. A config change keeps it, EXCEPT
-	// re-arming (an all-off entry gets a tier back, or the static tier goes
-	// from off to on), which also issues a new one: nothing was served from
-	// the old key space while it was off, and a vhost is often turned off
-	// BECAUSE something wrong got cached (a per-user asset, design §14), so
-	// turning it back on must not serve those objects again.
+	// re-arming (any tier going from off to on), which also issues a new one:
+	// a tier is often turned off BECAUSE something wrong got cached (a
+	// per-user asset or page, design §14), and its zone may still hold — and,
+	// through use_stale, serve — those objects, so turning it back on must not
+	// reach them. (Both tiers share the generation, so re-arming one also
+	// starts the other from an empty cache — a refill, never a wrong answer.)
 	// A value must NEVER be issued twice: a remove + re-add that reused an old
 	// value (it used to restart at 0) made that value's still-on-disk objects
 	// (static entries live 7 days, and may carry a year of origin max-age) HITs
@@ -174,6 +183,11 @@ type siteCacheStore struct {
 	// issued before the restart AND a new generation then lands on exactly
 	// that millisecond.
 	genHWM int64
+	// frozen holds the stored rows this build could not load (a recipe from a
+	// newer build, a malformed hand edit), verbatim. saveLocked writes them
+	// back, so neither a normalizing rewrite at load nor a later change deletes
+	// another build's policy; this build neither serves nor edits them.
+	frozen []json.RawMessage
 }
 
 // SiteCacheTierPatch and SiteCachePatch are the MERGE form of a set request
@@ -233,6 +247,13 @@ func newSiteCacheStore(path string) *siteCacheStore {
 // rejected ("[").
 func (s *siteCacheStore) normalize(host string) (string, bool) {
 	h := strings.ToLower(strings.TrimSpace(host))
+	// No whitespace or control character inside a host: it is never valid
+	// there, and trimming it would make normalize non-idempotent ("a.com ."
+	// → "a.com " → "a.com"), so an Apply lookup would miss the stored entry
+	// and replace it instead of merging.
+	if strings.IndexFunc(h, func(r rune) bool { return r <= ' ' || r == 0x7f || unicode.IsSpace(r) }) >= 0 {
+		return "", false
+	}
 	// Port first, then every trailing dot, so the result is a fixed point:
 	// "a.com.:443" and "a.com.." both become "a.com" (normalizing the result
 	// again changes nothing, which the Apply lookup and the setLocked store
@@ -369,9 +390,10 @@ func (s *siteCacheStore) normalizeEntry(in SiteCacheEntry) (SiteCacheEntry, erro
 
 // Set upserts a vhost's WHOLE cache policy (a full replace of the tiers and
 // cookie settings). TESTS ONLY: the API uses the merging Apply, and Set skips
-// Apply's input rules (no :port, no implicit all-off new entry). Generation and CreatedAt are preserved on an existing
-// host (a config change never bumps the purge generation — only Purge does).
-// Returns the stored entry.
+// Apply's input rules (no :port, no implicit all-off new entry). CreatedAt is
+// preserved on an existing host, and so is Generation, except that re-arming a
+// tier issues a new one (see SiteCacheEntry.Generation). Returns the stored
+// entry.
 //
 // On save failure the in-memory map is rolled back so the daemon's view matches
 // disk (a restart must not silently gain or lose a policy).
@@ -439,8 +461,8 @@ func (s *siteCacheStore) setLocked(in SiteCacheEntry) (SiteCacheEntry, error) {
 	if existed {
 		norm.CreatedAt = prev.CreatedAt
 		norm.Generation = prev.Generation
-		if (!siteCacheArmed(prev) && siteCacheArmed(norm)) || (!prev.Static.Enabled && norm.Static.Enabled) {
-			// Re-armed: start from a fresh key space (see Generation).
+		if (!prev.Static.Enabled && norm.Static.Enabled) || (!prev.Micro.Enabled && norm.Micro.Enabled) {
+			// A tier re-armed: start from a fresh key space (see Generation).
 			norm.Generation = s.nextGenerationLocked()
 		}
 		// Preserve the original opt-in attribution: an admin edit (nil scope →
@@ -744,8 +766,8 @@ func (s *siteCacheStore) load() {
 	if err != nil || len(b) == 0 {
 		return
 	}
-	var arr []SiteCacheEntry
-	if err := json.Unmarshal(b, &arr); err != nil {
+	var raws []json.RawMessage
+	if err := json.Unmarshal(b, &raws); err != nil {
 		// Loud, not silent: a corrupt/truncated store must not vanish quietly
 		// (the next write would overwrite it, making the loss permanent). We
 		// still start empty — there is nothing safe to recover — but the
@@ -759,15 +781,21 @@ func (s *siteCacheStore) load() {
 	// legacy scope_hosts allowlist (trimmed to [host]; rewritten at once so
 	// the other tenants' domains do not linger on disk until an unrelated
 	// write), a non-normalized host (a :port, a trailing dot, upper case), a
-	// duplicate host, or a generation reissued below.
-	rewrite, dropped := false, 0
-	for _, e := range arr {
-		norm, err := s.normalizeEntry(e)
+	// duplicate host, or a generation reissued below. Rows this build cannot
+	// load are kept verbatim (s.frozen), so the rewrite never loses one.
+	rewrite := false
+	for _, raw := range raws {
+		var e SiteCacheEntry
+		err := json.Unmarshal(raw, &e)
+		var norm SiteCacheEntry
+		if err == nil {
+			norm, err = s.normalizeEntry(e)
+		}
 		if err != nil {
-			// Loud, not silent: a hand-edit typo or a recipe this build no longer
-			// knows would otherwise drop a policy with no trace.
-			logging.Logf("[webdetector][site-cache] dropping stored policy for %q on load: %v (path=%s)", e.Host, err, s.path)
-			dropped++
+			// Loud, not silent — and kept: a recipe from a newer build (a
+			// downgrade) or a hand-edit typo must not be deleted by this build.
+			logging.Logf("[webdetector][site-cache] cannot load stored policy for %q: %v — kept in the file as is, not served (path=%s)", e.Host, err, s.path)
+			s.frozen = append(s.frozen, append(json.RawMessage(nil), raw...))
 			continue
 		}
 		if norm.Host != e.Host || !sameStrings(norm.ScopeHosts, e.ScopeHosts) {
@@ -796,43 +824,22 @@ func (s *siteCacheStore) load() {
 		s.entries[norm.Host] = norm
 	}
 
-	// Reissue a generation the edge cannot render exactly (>= 1e14: only a
-	// hand edit), and one that a covering wildcard shares. Before generations
-	// were unique store-wide, every policy started at 0, so an exact host and
-	// its wildcard (or two nested wildcards) could share a value — the same
-	// key space for that host, so a `remove` served the exact policy's old
-	// objects under the wildcard. A reissue only costs that policy's cache
-	// (refilled as MISSes).
-	var wilds []SiteCacheEntry
-	for _, e := range s.entries {
-		if strings.HasPrefix(e.Host, "*.") {
-			wilds = append(wilds, e)
-		}
-	}
+	// Reissue every generation outside [siteCacheMinGeneration,
+	// siteCacheMaxGeneration): a legacy per-policy counter (an exact host and
+	// its wildcard may both sit at 0 — one key space for that host — and an
+	// earlier value may be one a purge retired), or one the edge cannot render
+	// exactly. All of them, not one side of a collision: the objects under
+	// such a key can belong to either policy. It costs each such policy one
+	// cache refill, once (the file is rewritten).
 	for h, e := range s.entries {
-		reissue := e.Generation >= siteCacheMaxGeneration
-		for _, w := range wilds {
-			if w.Host != h && w.Generation == e.Generation && strings.HasSuffix(h, w.Host[1:]) {
-				reissue = true
-				break
-			}
+		if e.Generation >= siteCacheMinGeneration && e.Generation < siteCacheMaxGeneration {
+			continue
 		}
-		if reissue {
-			old := e.Generation
-			e.Generation = s.nextGenerationLocked()
-			s.entries[h] = e
-			rewrite = true
-			logging.Logf("[webdetector][site-cache] reissued generation %d for %q on load (out of range, or shared with a covering wildcard) (path=%s)", old, h, s.path)
-		}
-	}
-
-	if rewrite && dropped > 0 {
-		// Rewriting now would delete the dropped rows from disk (a recipe
-		// this build does not know may be valid for the build it came from).
-		// The normalization stays in memory and reaches disk with the next
-		// change, as before.
-		logging.Logf("[webdetector][site-cache] not rewriting the normalized store on load: %d stored policies could not be loaded and are kept on disk until the next change (path=%s)", dropped, s.path)
-		return
+		old := e.Generation
+		e.Generation = s.nextGenerationLocked()
+		s.entries[h] = e
+		rewrite = true
+		logging.Logf("[webdetector][site-cache] reissued generation %d for %q on load (a legacy or out-of-range value) (path=%s)", old, h, s.path)
 	}
 	if rewrite {
 		if err := s.saveLocked(); err != nil {
@@ -863,7 +870,14 @@ func (s *siteCacheStore) saveLocked() error {
 		arr = append(arr, e)
 	}
 	sort.Slice(arr, func(i, j int) bool { return arr[i].Host < arr[j].Host })
-	b, err := json.MarshalIndent(arr, "", "  ")
+	rows := make([]any, 0, len(arr)+len(s.frozen))
+	for _, e := range arr {
+		rows = append(rows, e)
+	}
+	for _, raw := range s.frozen {
+		rows = append(rows, raw) // rows this build cannot load, verbatim (see frozen)
+	}
+	b, err := json.MarshalIndent(rows, "", "  ")
 	if err != nil {
 		return err
 	}

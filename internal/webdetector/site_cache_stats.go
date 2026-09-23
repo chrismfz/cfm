@@ -171,7 +171,8 @@ func (e *Engine) armedCacheKeys() map[string]struct{} {
 // SiteCacheStatsHost returns one vhost's cache stats row. `host` may be a
 // concrete sub-host of a wildcard-armed vhost — it resolves to the policy key
 // the edge counts it under (siteCacheStore.StatsKeyFor, the Go mirror of
-// policy_key_for: its exact policy, else the most specific armed wildcard).
+// policy_key_for: its exact policy, else the most specific wildcard in the
+// feed — nothing when that one, or the exact policy, is an opt-out).
 // ok=false if the edge counts nothing for it (unarmed, an opt-out, out of the
 // caller's scope) or has not reported counts yet. It used to walk every
 // covering key until one held counts, which could hand back a broader

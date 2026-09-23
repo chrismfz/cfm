@@ -4191,8 +4191,8 @@ func (e *Engine) SiteCacheHasAny() bool {
 }
 
 // SiteCachePolicyFeed is the /nginx/cache/config bridge feed: armed vhosts
-// plus the opt-out rows of all-off exact hosts under an armed wildcard (see
-// siteCacheStore.PolicyFeed).
+// plus the opt-out rows of all-off entries (exact hosts or narrower
+// wildcards) under a broader armed wildcard (see siteCacheStore.PolicyFeed).
 func (e *Engine) SiteCachePolicyFeed() []CachePolicyRow {
 	if e == nil || e.siteCache == nil {
 		return nil

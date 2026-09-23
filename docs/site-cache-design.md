@@ -453,7 +453,8 @@ expect no measurable delta.
 New `siteCacheStore` in `internal/webdetector/site_cache.go`, JSON at
 `/var/lib/cfm/webdetector_site_cache.json` (knob `SITE_CACHE_STORE_PATH`),
 write-through source of truth with atomic save — same mechanics as
-`http3_overrides_store.go`. One entry per
+`http3_overrides_store.go` — that keeps a stored row it cannot load verbatim
+(forward compatibility, below). One entry per
 vhost, holding **independent per-tier sub-policies** so a vhost can run static
 and micro together:
 
@@ -517,20 +518,23 @@ two ways to stop caching differ under an armed wildcard:
 - **remove** (CLI `remove`/`rm`; API `remove`) deletes the entry: the host is
   uncached unless an armed wildcard covers it, which then applies.
 
-Re-arming an entry (all-off → a tier on, or the static tier off → on) issues a
-fresh generation: nothing was served from the old key space while it was off,
-and a vhost is often turned off BECAUSE something wrong got cached (a per-user
-asset, §14), so turning it back on must not serve those objects again. A micro
-tier toggled while static stays armed keeps the generation (a new one would
-also drop the static cache).
+Re-arming a tier (any tier going from off to on) issues a fresh generation: a
+tier is often turned off BECAUSE something wrong got cached (a per-user asset
+or page, §14), and its zone may still hold — and, through `use_stale`, serve —
+those objects, so turning it back on must not reach them. Both tiers share the
+generation, so re-arming one also starts the other from an empty cache (a
+refill, never a wrong answer). Turning a tier off, or any other config
+change, keeps it.
 
-Stores written before generations were unique counted every policy from 0, so
-an exact host and its covering wildcard (or nested wildcards) could share a
-generation — the same key space for that host. On load, the narrower policy of
-such a pair gets a fresh generation (and so does a value the edge cannot render
-exactly, ≥ 1e14), and the file is rewritten — unless a stored row could not be
-loaded (e.g. a recipe from a newer build), in which case nothing is rewritten
-at load, so that row stays on disk.
+Stores written before generations were wall-clock ms counted every policy from
+0, so an exact host and its covering wildcard could share one (one key space
+for that host, whose objects may belong to either policy) and a value could be
+one a purge had retired. On load, EVERY generation below 1e12 (a legacy
+counter) or at/above 1e14 (not exactly renderable at the edge) is reissued —
+one cache refill per such policy, once — and the file is rewritten. A stored
+row this build cannot load (e.g. a recipe from a newer build, after a
+downgrade) is kept in the file verbatim through that rewrite and every later
+save; it is neither served nor editable by this build.
 
 Because an all-off entry changes what a covering wildcard does, `set` creates
 a NEW entry all-off only when it turns both tiers off explicitly; a `set` that
@@ -941,8 +945,8 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      truth (a stored but all-off policy is not armed). A by-host query resolves
      a concrete sub-host to the key the edge counts it under
      (`siteCacheStore.StatsKeyFor`, the Go mirror of `policy_key_for`: its exact
-     policy — an all-off one counts nothing, it is an opt-out — else the most
-     specific armed wildcard) so a `*.suffix`-armed vhost is drillable; a scoped
+     policy, else the most specific wildcard in the feed — nothing when that
+     one is an opt-out) so a `*.suffix`-armed vhost is drillable; a scoped
      caller resolves only to keys inside its own scope, so not to a wildcard its
      scope does not literally hold (that row aggregates every tenant under the
      pattern; see §9 for a scope that holds `*.x`).

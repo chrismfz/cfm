@@ -313,7 +313,7 @@ func TestSiteCacheStore_ScopeHostsTrimmedToHost(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "site_cache.json")
-	raw := `[{"host":"alice.com","scope_hosts":["alice.com","bob.com","carol.com"],"generation":7,"static":{"enabled":false},"micro":{"enabled":true,"recipe":"micro_safe"}}]`
+	raw := `[{"host":"alice.com","scope_hosts":["alice.com","bob.com","carol.com"],"generation":1758585600007,"static":{"enabled":false},"micro":{"enabled":true,"recipe":"micro_safe"}}]`
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -321,8 +321,8 @@ func TestSiteCacheStore_ScopeHostsTrimmedToHost(t *testing.T) {
 	if !ok || len(e.ScopeHosts) != 1 || e.ScopeHosts[0] != "alice.com" {
 		t.Fatalf("legacy scope_hosts not trimmed on load: ok=%v %v", ok, e.ScopeHosts)
 	}
-	if e.Generation != 7 {
-		t.Fatalf("load changed the stored generation: %d", e.Generation)
+	if e.Generation != 1758585600007 {
+		t.Fatalf("load changed a current-format stored generation: %d", e.Generation)
 	}
 }
 
@@ -554,17 +554,17 @@ func TestSiteCacheStore_PortHandling(t *testing.T) {
 	// rewritten normalized.
 	path := filepath.Join(t.TempDir(), "site_cache.json")
 	raw := `[
-	 {"host":"a.com:443","generation":9000,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
-	 {"host":"A.com","generation":5,"static":{"enabled":false},"micro":{"enabled":true,"recipe":"micro_safe"}},
-	 {"host":"b.com","generation":7,"scope_hosts":["b.com","secret.com"],"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}
+	 {"host":"a.com:443","generation":1758585609000,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"A.com","generation":1758585600005,"static":{"enabled":false},"micro":{"enabled":true,"recipe":"micro_safe"}},
+	 {"host":"b.com","generation":1758585600007,"scope_hosts":["b.com","secret.com"],"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}
 	]`
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s2 := newSiteCacheStore(path)
 	e, ok := s2.Get("a.com")
-	if !ok || e.Generation != 9000 || !e.Static.Enabled {
-		t.Fatalf("duplicate resolution: ok=%v %+v (want the gen-9000 row)", ok, e)
+	if !ok || e.Generation != 1758585609000 || !e.Static.Enabled {
+		t.Fatalf("duplicate resolution: ok=%v %+v (want the higher-generation row)", ok, e)
 	}
 	if len(s2.List()) != 2 {
 		t.Fatalf("want 2 entries, got %d", len(s2.List()))
@@ -578,7 +578,7 @@ func TestSiteCacheStore_PortHandling(t *testing.T) {
 			t.Fatalf("store not rewritten normalized on load; still holds %s:\n%s", leftover, b)
 		}
 	}
-	if p, ok := s2.Purge("a.com"); !ok || p.Generation <= 9000 {
+	if p, ok := s2.Purge("a.com"); !ok || p.Generation <= 1758585609000 {
 		t.Fatalf("purge after load: %+v", p)
 	}
 }
@@ -615,9 +615,10 @@ func TestSiteCacheStore_GenerationsUniqueStoreWide(t *testing.T) {
 	}
 }
 
-// Re-arming issues a fresh generation: a vhost is often turned off BECAUSE
-// something wrong got cached, so turning it back on must not serve the pre-off
-// objects (the static zone keeps them for days). A plain config change keeps it.
+// Re-arming (any tier off→on) issues a fresh generation: a tier is often turned
+// off BECAUSE something wrong got cached, so turning it back on must not serve
+// the pre-off objects (the static zone keeps them for days; micro serves stale
+// through use_stale). A plain config change, or turning a tier off, keeps it.
 func TestSiteCacheStore_RearmIssuesFreshGeneration(t *testing.T) {
 	s := newSiteCacheTestStore(t)
 	on := func(r string) *SiteCacheTierPatch {
@@ -640,14 +641,18 @@ func TestSiteCacheStore_RearmIssuesFreshGeneration(t *testing.T) {
 		t.Fatal("a TTL change changed the generation")
 	}
 	apply(SiteCachePatch{Micro: off})
-	apply(SiteCachePatch{Micro: on("micro_safe")})
 	if gen() != g0 {
-		t.Fatal("micro off→on with static armed throughout changed the generation (it would purge the static cache)")
+		t.Fatal("turning a tier off changed the generation")
+	}
+	apply(SiteCachePatch{Micro: on("micro_safe")})
+	gm := gen()
+	if gm == g0 {
+		t.Fatal("micro off→on kept the generation: use_stale could serve the pre-off pages again")
 	}
 	apply(SiteCachePatch{Static: off})
 	apply(SiteCachePatch{Static: on("static_lean")})
 	g1 := gen()
-	if g1 == g0 {
+	if g1 == gm {
 		t.Fatal("static off→on kept the generation: the pre-off static objects would be HITs again")
 	}
 	apply(SiteCachePatch{Static: off, Micro: off}) // `off`
@@ -695,22 +700,25 @@ func writeSiteCacheStoreFile(t *testing.T, raw string) string {
 }
 
 // Load: duplicates keep the higher generation in either order; a legacy
-// scope_hosts list alone triggers the rewrite; a normalized file is never
-// rewritten; a row this build cannot load blocks the rewrite (it stays on disk).
+// scope_hosts list alone triggers the rewrite (a longer list or a same-length
+// different one); a normalized file is never rewritten; a row this build
+// cannot load is kept verbatim through the rewrite and every later save.
 func TestSiteCacheStore_LoadRewriteRules(t *testing.T) {
 	// reversed order: the lower generation comes first
 	path := writeSiteCacheStoreFile(t, `[
-	 {"host":"A.com","generation":5,"static":{"enabled":false},"micro":{"enabled":true,"recipe":"micro_safe"}},
-	 {"host":"a.com","generation":9000,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`)
-	if e, _ := newSiteCacheStore(path).Get("a.com"); e.Generation != 9000 {
-		t.Fatalf("dedupe kept gen %d, want 9000", e.Generation)
+	 {"host":"A.com","generation":1758585600005,"static":{"enabled":false},"micro":{"enabled":true,"recipe":"micro_safe"}},
+	 {"host":"a.com","generation":1758585609000,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`)
+	if e, _ := newSiteCacheStore(path).Get("a.com"); e.Generation != 1758585609000 {
+		t.Fatalf("dedupe kept gen %d, want the higher one", e.Generation)
 	}
 
-	// scope_hosts alone
-	path = writeSiteCacheStoreFile(t, `[{"host":"b.com","generation":7,"scope_hosts":["b.com","secret.com"],"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`)
-	newSiteCacheStore(path)
-	if b, _ := os.ReadFile(path); strings.Contains(string(b), "secret.com") {
-		t.Fatalf("a legacy scope_hosts list alone did not rewrite the file:\n%s", b)
+	// scope_hosts alone (current-format generations, so nothing else changes)
+	for _, scope := range []string{`["b.com","secret.com"]`, `["secret.com"]`} {
+		path = writeSiteCacheStoreFile(t, `[{"host":"b.com","generation":1758585600007,"scope_hosts":`+scope+`,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`)
+		newSiteCacheStore(path)
+		if b, _ := os.ReadFile(path); strings.Contains(string(b), "secret.com") {
+			t.Fatalf("scope_hosts %s alone did not rewrite the file:\n%s", scope, b)
+		}
 	}
 
 	// no churn: a store the daemon wrote is left byte-for-byte alone
@@ -728,43 +736,74 @@ func TestSiteCacheStore_LoadRewriteRules(t *testing.T) {
 		t.Fatal("loading a normalized store rewrote it")
 	}
 
-	// a row this build cannot load: no rewrite, the row survives on disk
+	// a row this build cannot load: the rewrite still happens (the legacy
+	// scope list leaves the disk), and the row survives it and later saves
 	path = writeSiteCacheStoreFile(t, `[
-	 {"host":"d.com","generation":7,"scope_hosts":["d.com","secret.com"],"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
-	 {"host":"e.com","generation":8,"static":{"enabled":true,"recipe":"recipe_from_a_newer_build"},"micro":{"enabled":false}}]`)
+	 {"host":"d.com","generation":1758585600007,"scope_hosts":["d.com","secret.com"],"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"e.com","generation":1758585600008,"static":{"enabled":true,"recipe":"recipe_from_a_newer_build"},"micro":{"enabled":false}}]`)
 	s2 := newSiteCacheStore(path)
-	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "recipe_from_a_newer_build") {
-		t.Fatal("the load-time rewrite deleted a row this build could not load")
+	check := func(when string) {
+		t.Helper()
+		b, _ := os.ReadFile(path)
+		if !strings.Contains(string(b), "recipe_from_a_newer_build") {
+			t.Fatalf("%s: a row this build could not load was deleted:\n%s", when, b)
+		}
+		if strings.Contains(string(b), "secret.com") {
+			t.Fatalf("%s: the legacy scope list is still on disk", when)
+		}
 	}
-	if e, _ := s2.Get("d.com"); len(e.ScopeHosts) != 1 {
-		t.Fatalf("scope_hosts not trimmed in memory: %v", e.ScopeHosts)
+	check("load")
+	if _, ok := s2.Get("e.com"); ok {
+		t.Fatal("an unloadable row is served")
+	}
+	if _, err := s2.Apply(SiteCachePatch{Host: "f.com", Static: &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("static_lean")}}, false); err != nil {
+		t.Fatal(err)
+	}
+	check("a later save")
+	if got := len(newSiteCacheStore(path).List()); got != 2 {
+		t.Fatalf("reload after the saves: %d entries, want 2 (d.com, f.com)", got)
 	}
 }
 
-// Legacy stores counted generations per policy from 0, so an exact host and
-// its covering wildcard (or nested wildcards) could share one — the same key
-// space for that host. Load reissues the narrower one, and any value the edge
-// cannot render exactly.
-func TestSiteCacheStore_LoadReissuesCollidingGenerations(t *testing.T) {
+// Legacy stores counted generations per policy from 0: an exact host and its
+// covering wildcard could share one (one key space for that host, whose
+// objects may belong to EITHER policy), and an earlier value may be one a
+// purge retired. Load reissues every such value — both sides — and any value
+// the edge cannot render exactly; a current-format value is kept.
+func TestSiteCacheStore_LoadReissuesLegacyGenerations(t *testing.T) {
 	path := writeSiteCacheStoreFile(t, `[
 	 {"host":"*.example.com","generation":0,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
 	 {"host":"*.shop.example.com","generation":0,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
-	 {"host":"a.example.com","generation":0,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
-	 {"host":"other.com","generation":0,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"a.example.com","generation":1,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"current.com","generation":1758585600123,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
 	 {"host":"big.com","generation":123456789012345678,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`)
 	s := newSiteCacheStore(path)
-	g := func(h string) int64 { e, _ := s.Get(h); return e.Generation }
-	if g("*.example.com") != 0 || g("other.com") != 0 {
-		t.Fatal("a generation no covering wildcard shares was reissued")
+	seen := map[int64]string{}
+	for _, e := range s.List() {
+		if e.Host == "current.com" {
+			if e.Generation != 1758585600123 {
+				t.Fatalf("a current-format generation was reissued: %d", e.Generation)
+			}
+		} else if e.Generation < siteCacheMinGeneration || e.Generation >= siteCacheMaxGeneration {
+			t.Fatalf("%s kept legacy/out-of-range generation %d", e.Host, e.Generation)
+		}
+		if other, dup := seen[e.Generation]; dup {
+			t.Fatalf("%s and %s share generation %d after load", e.Host, other, e.Generation)
+		}
+		seen[e.Generation] = e.Host
 	}
-	if g("*.shop.example.com") == 0 || g("a.example.com") == 0 || g("*.shop.example.com") == g("a.example.com") {
-		t.Fatalf("colliding generations not reissued uniquely: shop=%d a=%d", g("*.shop.example.com"), g("a.example.com"))
-	}
-	if b := g("big.com"); b >= siteCacheMaxGeneration {
-		t.Fatalf("an out-of-range generation was kept: %d", b)
-	}
-	if next, _ := s.Purge("other.com"); next.Generation >= siteCacheMaxGeneration {
+	if next, _ := s.Purge("current.com"); next.Generation >= siteCacheMaxGeneration {
 		t.Fatalf("the high-water mark followed the out-of-range value: %d", next.Generation)
+	}
+	// persisted: a restart does not reissue again
+	before := map[string]int64{}
+	for _, e := range s.List() {
+		before[e.Host] = e.Generation
+	}
+	for _, e := range newSiteCacheStore(path).List() {
+		if before[e.Host] != e.Generation {
+			t.Fatalf("%s reissued again on the next load: %d → %d", e.Host, before[e.Host], e.Generation)
+		}
 	}
 }
 
@@ -776,6 +815,16 @@ func TestSiteCacheStore_NormalizeIsIdempotent(t *testing.T) {
 		h, ok := s.normalize(in)
 		if !ok || h != "a.com" {
 			t.Fatalf("normalize(%q) = %q, %v", in, h, ok)
+		}
+		if h2, _ := s.normalize(h); h2 != h {
+			t.Fatalf("normalize not a fixed point on %q: %q → %q", in, h, h2)
+		}
+	}
+	// inner whitespace / control characters are never a host (trimming them
+	// would make normalize non-idempotent)
+	for _, in := range []string{"a.com .", "a.com :80", "a.com\t.", "a .com", "a.com\x00", "a.com\u00a0."} {
+		if h, ok := s.normalize(in); ok {
+			t.Fatalf("normalize(%q) accepted %q", in, h)
 		}
 	}
 	if _, err := s.Apply(SiteCachePatch{Host: "a.com", StrictCookies: boolPtr(true),

@@ -90,10 +90,10 @@ back-filled here — see the git/PR history for that period.
   is now the wall clock in milliseconds, past every generation the store has
   issued, so a new value is never one already in use (across vhosts too; the
   one residual — a clock stepped back across a restart — is in
-  docs/site-cache-design.md §6). Existing generations are kept, except that a
-  vhost sharing one with a wildcard that covers it (every policy used to start
-  at 0) gets a fresh one on the first start of this version — its cache
-  refills once. A purge still covers one policy: a host that goes back under
+  docs/site-cache-design.md §6). Every generation from an older store (they
+  started at 0, so a vhost and its wildcard could share one) is reissued on the
+  first start of this version: each armed vhost's cache refills once. A purge
+  still covers one policy: a host that goes back under
   an admin's `*.suffix` wildcard (its own policy removed) finds the wildcard's
   cache for it again, which only a purge of the wildcard clears (§10).
 - **Site Cache: `set` changes only what you pass.** `cfm webtop site-cache set
@@ -124,6 +124,10 @@ back-filled here — see the git/PR history for that period.
   `*.shop.example.com` both armed, `x.shop.example.com` got the broader
   `*.example.com` policy (the feed was alphabetical and the edge took the first
   match). The daemon and the edge now both put the longest pattern first.
+- **Site Cache: a stored policy this build cannot read is kept.** A row the
+  daemon cannot load (a recipe from a newer build, after a downgrade) used to
+  be deleted from the store file at the next change. It is now kept verbatim
+  (and not served) until a build that knows it loads it.
 - **Site Cache: a host with a `:port` is rejected.** The edge always ignored the
   port (a stored `a.com:443` acted as `a.com`), so the daemon's view of such a
   policy disagreed with what the edge did. A stored one is normalized to the
