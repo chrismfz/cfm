@@ -31,16 +31,29 @@ local _now = 1000.0
 local logs = 0
 _G.ngx = { now = function() return _now end, log = function() logs = logs + 1 end, WARN = 1 }
 
--- Faithful-enough shdict stub (values stored directly; incr with init).
+-- Faithful-enough shdict stub (values stored directly; incr without init on
+-- a missing key is "not found", as OpenResty's).
 local function new_dict()
   local store = {}
   return {
     get    = function(_, k) return store[k] end,
     set    = function(_, k, v, _ttl) store[k] = v end,
-    incr   = function(_, k, v, init) store[k] = (store[k] or init or 0) + v; return store[k] end,
+    add    = function(_, k, v, _ttl)
+      if store[k] ~= nil then return false, "exists" end
+      store[k] = v; return true
+    end,
+    incr   = function(_, k, v, init)
+      if store[k] == nil then
+        if init == nil then return nil, "not found" end
+        store[k] = init
+      end
+      store[k] = store[k] + v; return store[k]
+    end,
     delete = function(_, k) store[k] = nil end,
   }
 end
+-- The extracted chunk reads cfm_shdict through the module's `shd` local.
+_G.shd = require "cfm_shdict"
 
 local loader = assert(load(block .. "\nreturn should_skip_connect, record_connect_failure, record_connect_success"))
 local should_skip_connect, record_connect_failure, record_connect_success = loader()

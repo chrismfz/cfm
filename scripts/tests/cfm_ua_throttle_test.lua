@@ -29,18 +29,24 @@ end
 local WINDOW = math.max(1, math.floor(BOX_BURST / BOX_RATE))
 local LIMIT  = BOX_BURST
 
--- Stub shared dict: incr models a window-keyed counter; add models the log dedup.
+-- Stub shared dict with OpenResty's semantics: incr without init on a missing
+-- key is "not found" (cfm_shdict then adds it), add refuses an existing key.
+-- add creates a window counter and models the log dedup.
 local store, incr_fail
 local function reset_store() store, incr_fail = {}, false end
 reset_store()
 local throttle_dict = {
   incr = function(_, k, v, init, _ttl)
     if incr_fail then return nil, "no memory" end
-    store[k] = (store[k] or init or 0) + v
+    if store[k] == nil then
+      if init == nil then return nil, "not found" end
+      store[k] = init
+    end
+    store[k] = store[k] + v
     return store[k]
   end,
   add = function(_, k, val, _ttl)
-    if store[k] ~= nil then return false end
+    if store[k] ~= nil then return false, "exists" end
     store[k] = val; return true
   end,
 }

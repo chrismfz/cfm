@@ -1426,7 +1426,8 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
      life): about K²/2³³ odds per node for K counters, ~13% at 5000 vhosts ×
      7 statuses. Both reviewers' benchmarks hit it (one counter of 35 000
      lost); a colliding pair counted 998 and 999 of 1000 that way, exactly
-     1000 each after the fix. It used to scan `get_keys(8000)` — a KEY bound — over keys that
+     1000 each after the fix. (Since then every edge counter goes through the
+     same helper, `cfm_shdict.lua`.) It used to scan `get_keys(8000)` — a KEY bound — over keys that
      grew with the host (the slot doubles past a 52-byte key: the 4m dict
      held ~32 000 short counters, ~16 000 of 53-180 bytes, ~8 000 for a
      253-byte host), which pushed

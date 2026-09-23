@@ -45,6 +45,7 @@ _G.ngx = {
   shared = { cfm_decisions = dict },
 }
 
+package.path = "configs/lua/?.lua;" .. package.path -- cfm_rules requires cfm_shdict
 local rules = dofile("configs/lua/cfm_rules.lua")
 rules.init({})
 

@@ -62,6 +62,7 @@
 -- request must NEVER be affected.
 
 local _M = {}
+local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
 
 local SOCK_PATH    = "/run/cfm/ingest.sock"
 local CONNECT_MS   = 50
@@ -101,7 +102,7 @@ end
 local function record_connect_failure(err)
   local dict = ngx.shared.cfm_metrics
   if not dict then return end
-  local fails = dict:incr(retry_key("fail_count"), 1, 0) or 1
+  local fails = shd.incr(dict, retry_key("fail_count"), 1) or 1
   local backoff = RETRY_MIN_SECS * (2 ^ math.min(fails-1, 6))
   if backoff > RETRY_MAX_SECS then backoff = RETRY_MAX_SECS end
   dict:set(retry_key("retry_after"), ngx.now() + backoff, backoff + 1)

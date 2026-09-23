@@ -652,11 +652,16 @@ because of that. Hard-won points:
 - **`shdict:incr(key, n, init)` loses counters on a crc32 collision**
   (lua-nginx-module 0.10.26, verified on nginx 1.24; the fleet's OpenResty /
   Angie builds unchecked): the other key reads nil, or both count wrong, for
-  the dict's life (~13% odds per node at 35 000 counters). `cfm_cache_log.lua`
-  uses `incr` → `add` → `incr` instead. Seven other edge call sites still use
-  the init form (cfm.lua waf_insp, cfm_decision breaker, cfm_fppolicy budget,
-  cfm_pcw, cfm_rules rate counters, cfm_ua_emergency) — a follow-up; don't add
-  new ones.
+  the dict's life (~13% odds per node at 35 000 counters; per-IP rate counters
+  at ~100k keys hit it routinely). Every edge counter goes through
+  `cfm_shdict.incr(dict, key, n, ttl)`: `incr` without init, then `add` with the
+  TTL, then `incr` again. That covers cfm_cache_log, cfm.lua waf_insp, the
+  cfm_decision breaker, the cfm_fppolicy budget, cfm_pcw, the cfm_rules rate
+  counters, cfm_ua_emergency and log-cfm. It works whatever the module version.
+  `cfm_shdict_test.lua` fails a new direct `incr` call with an init argument
+  (`d:incr`, `d.incr`, `d["incr"]`, in the modules and the confs' inline Lua;
+  an alias such as `local f = d.incr` is not seen), and requires the helper to
+  be bound as `local shd`.
 - **A shared dict's size change resets it on reload** (a same-size reload keeps
   it); key counters on a fixed-size digest so capacity is a fixed number of
   counters (the slab slot doubles past a 52-byte key).

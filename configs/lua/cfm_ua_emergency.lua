@@ -30,6 +30,7 @@
 local _M = {}
 
 local cjson = require "cjson.safe"
+local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
 
 local PATH = "/var/lib/cfm/ua_emergency.json"
 local REFRESH_INTERVAL_SEC = 3
@@ -300,8 +301,8 @@ end
 -- box-wide."
 --
 -- Implemented as a LOCK-FREE fixed-window counter (audit F22): each request does
--- ONE atomic shdict:incr — no per-UA spin-lock, no read-modify-write, no
--- get/set/delete. This matters precisely under the bot wave the throttle exists
+-- ONE atomic shdict:incr (a window's first hit also an add, via cfm_shdict) —
+-- no per-UA spin-lock, no read-modify-write, no get/set/delete. This matters precisely under the bot wave the throttle exists
 -- for: thousands of req/s of the SAME UA previously thundered on one per-UA 50ms
 -- lock (each loser spinning up to 10x ngx.sleep(1ms)) and did ~3-4 shdict writes
 -- per request. One incr replaces all of it.
@@ -315,7 +316,7 @@ end
 -- seconds == BOX_RATE long-run (10/s) with a BOX_BURST head (20 in one window).
 -- A fixed window can admit up to ~2x LIMIT across a window boundary; for a coarse
 -- emergency cap that is acceptable. The key embeds the window index, so each
--- window is a fresh key that self-expires via incr's init_ttl (no scan/delete),
+-- window is a fresh key that self-expires via the TTL it is created with (no scan/delete),
 -- bounding live keys to ~2 per UA.
 local BOX_RATE  = 10.0                              -- requests/sec, long-run
 local BOX_BURST = 20                                -- requests allowed within one window
@@ -361,11 +362,11 @@ function _M.throttle(normalized_ua)
   local win = math.floor(now / WINDOW)
   local key = "ua_emerg|" .. normalized_ua .. "|" .. win
 
-  -- One atomic increment: no lock, no read-modify-write. init=0 so a fresh
-  -- window key starts at 0 then +1; init_ttl (2x the window) is applied only
-  -- when the key is created, so the key ages out on its own once the window has
-  -- passed — no scan, no delete, ~2 live keys per UA (current + previous).
-  local count, err = _SH:incr(key, 1, 0, WINDOW * 2)
+  -- Atomic increments: no lock, no read-modify-write. A fresh window key
+  -- starts at 1; its TTL (2x the window) is applied only when the key is
+  -- created, so the key ages out on its own once the window has passed — no
+  -- scan, no delete, ~2 live keys per UA (current + previous).
+  local count, err = shd.incr(_SH, key, 1, WINDOW * 2)
   if not count then
     -- incr failed (shdict full and forcible eviction failed): the counter can't
     -- be maintained. Mirror the internal-error policy — fail-open by default so

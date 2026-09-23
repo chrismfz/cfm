@@ -232,6 +232,20 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **Edge counters no longer lose counts on a hash collision.**
+  - The cause: lua-nginx-module 0.10.26 drops or mixes counts when two
+    shared-dict keys share a crc32 hash and the counter is made with
+    `incr(key, n, init)`. Busy nodes with many per-IP keys hit it routinely.
+  - What was affected: WAF inspection stats, the decision circuit breaker,
+    the fingerprint-policy RPC budget, the post-clearance cadence counter,
+    traffic-rule and UA-emergency rate limits, and the log-socket backoff.
+    Rate limits could undercount, and the breaker or budget could be off by
+    a collision's worth.
+  - The fix: every edge counter now goes through one helper, `cfm_shdict`,
+    that avoids that path. Windows and TTLs work as before. A test fails a
+    new direct call in the old form.
+  - A counter already miscounted keeps its wrong value until its key expires.
+    An edge reload keeps the shared dicts; restart the edge to start clean.
 - **A mass unblock no longer runs fail2ban and imunify360 once per IP.** A
   batch of pending unblocks from cfm-web now checks for csf, fail2ban and
   imunify360 once and runs each tool once per batch where it can:

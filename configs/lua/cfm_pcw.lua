@@ -17,6 +17,7 @@
 -- observable. (docs/challenge-score-b2.md §2.)
 
 local _M = { _VERSION = "1" }
+local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
 
 -- Burn-in STARTING constants (tune from the [cfm_pcw] lines; NOT config knobs).
 local WINDOW_SEC = 60   -- fixed rate window
@@ -81,10 +82,10 @@ end
 function _M.observe(dict, keyid, method, accept, dest, purpose)
   if not dict or not keyid or keyid == "" then return nil end
   if not is_nav(method, accept, dest, purpose) then return nil end
-  -- Fixed-window nav counter. incr initialises to 0 (+1) with a WINDOW_SEC TTL on
-  -- the first nav; the TTL is NOT refreshed by later incrs, so the window resets
+  -- Fixed-window nav counter. The first nav creates it at 1 with a WINDOW_SEC
+  -- TTL; the TTL is NOT refreshed by later incrs, so the window resets
   -- WINDOW_SEC after its first nav — a true fixed window, self-cleaning.
-  local n = dict:incr("pcw|c|" .. keyid, 1, 0, WINDOW_SEC)
+  local n = shd.incr(dict, "pcw|c|" .. keyid, 1, WINDOW_SEC)
   if not n then return nil end -- dict full / error → skip silently (never throw)
   local v = verdict(n)
   if not v then return nil end

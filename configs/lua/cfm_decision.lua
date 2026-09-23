@@ -32,6 +32,7 @@
 --             token_err     function() -> err|nil   (for the token-missing log line)
 
 local cjson = require "cjson.safe"
+local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
 
 local lower = string.lower
 local function esc(s) return ngx.escape_uri(s or "") end
@@ -58,7 +59,7 @@ local function esc(s) return ngx.escape_uri(s or "") end
 --   * The failure count is CONSECUTIVE — any success resets it — so on a busy
 --     healthy node an occasional timeout among many successes never accumulates;
 --     only an unbroken run of BREAKER_FAIL_THRESHOLD failures (a real outage)
---     trips. A fixed-window init_ttl (from the first failure) backstops a stalled partial count.
+--     trips. A fixed-window TTL (from the first failure) backstops a stalled partial count.
 --   * NO single-flight probe lock and NO presence-based re-arm (both raced /
 --     mis-fired: a lock deadlocked get()'s own token-rotation retry; a
 --     presence-based re-arm let a lone stray timeout re-open on ONE blip). Once
@@ -271,7 +272,7 @@ function Client:breaker_note(kind, err_class)
   -- timeout during a quiet recovery can never re-open on one blip. On a
   -- persistent hang the post-cooldown probes simply re-accumulate to 3 (a few
   -- slow requests per cooldown — still bounded and far below the un-broken cliff).
-  local n = SH:incr(BRK_FAILS, 1, 0, BREAKER_FAIL_WINDOW_SEC)
+  local n = shd.incr(SH, BRK_FAILS, 1, BREAKER_FAIL_WINDOW_SEC)
   if n and n >= BREAKER_FAIL_THRESHOLD then
     SH:set(BRK_UNTIL, ngx.now() + BREAKER_COOLDOWN_SEC, BREAKER_OPEN_TTL_SEC)
     SH:delete(BRK_FAILS)   -- reset so the next trip needs a fresh 3-consecutive run
