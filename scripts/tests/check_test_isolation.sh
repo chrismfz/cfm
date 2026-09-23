@@ -21,11 +21,14 @@
 # arm needs each watched directory to exist and be writable by the user running
 # the tests, so that a regressing test's write SUCCEEDS and shows up here
 # instead of failing silently; then it records what is in them. verify fails on
-# anything added, changed or removed since. A directory arm can't watch fails
-# it, with the one-time command to create it: a guard that cannot observe must
-# not report OK (CLAUDE.md §5). arm never creates them itself — an empty
-# /etc/cfm changes where the cfm CLI looks for its config on that machine, so
-# that is the operator's call. CI creates them (sudo) and then seeds them like a
+# anything added, changed or removed since — content, mode or ownership. A
+# directory arm can't watch fails it: a guard that cannot observe must not
+# report OK (CLAUDE.md §5). A MISSING one gets the one-time command to create
+# it; arm never creates them itself, because an empty /etc/cfm changes where
+# the cfm CLI looks for its config on that machine. An EXISTING one it can't
+# write is left alone: re-owning it would hand a CFM node's live state (auth
+# db, tokens, the Lua the edge loads) to a non-root account — run as root in a
+# mount namespace, or on a host without CFM, instead. CI creates them (sudo) and then seeds them like a
 # packaged node (ci_seed_cfm_dirs.sh), so a test that writes only to a file
 # that already exists shows up too. On a CFM node the running daemon writes to
 # these directories as well, and its writes show up in verify: run the suite
@@ -48,15 +51,23 @@ done
 # removed again still changes its directory's mtime. -H follows a watched
 # directory that is itself a symlink (e.g. /var/lib/cfm on another volume);
 # without it find lists only the link and never looks inside.
-snapshot() { find -H "${DIRS[@]}" -printf '%p\t%y\t%m\t%s\t%T@\n' | LC_ALL=C sort; }
+snapshot() { find -H "${DIRS[@]}" -printf '%p\t%y\t%m\t%u:%g\t%s\t%T@\n' | LC_ALL=C sort; }
 
 case "${1:-}" in
 arm)
+  missing=()
   for d in "${DIRS[@]}"; do
+    [ -e "$d" ] || { missing+=("$d"); continue; }
     if [ ! -d "$d" ] || [ ! -w "$d" ]; then
-      fail "cannot watch $d: it must exist and be writable by $(id -un), or a test's write there fails silently and this guard sees nothing. Create it once: sudo install -d -o \"\$(id -u)\" -g \"\$(id -g)\" ${DIRS[*]}"
+      # Never suggest re-owning it: on a CFM node that hands the live state to
+      # this account (install -d on an existing dir re-owns it and resets its
+      # mode).
+      fail "cannot watch $d: it exists but $(id -un) can't write to it, so a test's write there would fail silently and this guard would see nothing. Do NOT change its owner or mode — on a CFM host it holds live state. Run the suite as root inside a mount namespace, or on a host without CFM."
     fi
   done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    fail "cannot watch ${missing[*]}: missing, so a test's write there would fail silently for a non-root user and this guard would see nothing. On a host WITHOUT CFM, create them once: sudo install -d -o \"\$(id -u)\" -g \"\$(id -g)\" ${missing[*]}"
+  fi
   snapshot >"$SNAPSHOT" || fail "cannot read ${DIRS[*]} — refusing to report OK"
   echo "OK: watching ${DIRS[*]} ($(wc -l <"$SNAPSHOT" | tr -d ' ') entries); run the Go tests, then: $0 verify"
   ;;

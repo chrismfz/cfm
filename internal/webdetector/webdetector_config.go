@@ -19,13 +19,15 @@ var (
 )
 
 // SetDefaultDirsForTest points every store and log path a Config leaves empty
-// at dir, for tests in OTHER packages that build an Engine (this package's own
-// tests are redirected once, in TestMain), and restores the production defaults
-// at cleanup. t is anything with Cleanup, so this file needn't import testing.
-func SetDefaultDirsForTest(t interface{ Cleanup(func()) }, dir string) {
+// at dir and returns a func that restores the previous dirs. For tests in OTHER
+// packages that build an Engine (this package's own tests are redirected once,
+// in TestMain): call it from that package's TestMain, so no test there can
+// reach the live defaults, and per test (t.Cleanup(restore)) for a fresh store
+// each. Not safe while tests run in parallel.
+func SetDefaultDirsForTest(dir string) (restore func()) {
 	prevState, prevLog := defaultStateDir, defaultLogDir
 	defaultStateDir, defaultLogDir = dir, dir
-	t.Cleanup(func() { defaultStateDir, defaultLogDir = prevState, prevLog })
+	return func() { defaultStateDir, defaultLogDir = prevState, prevLog }
 }
 
 func defaultStatePath(name string) string { return filepath.Join(defaultStateDir, name) }

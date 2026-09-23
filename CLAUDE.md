@@ -268,8 +268,9 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
 
   Now each such default is a var the tests point at a temp dir:
   - `webdetector` `defaultStateDir`/`defaultLogDir` (via `TestMain`, and
-    `SetDefaultDirsForTest` for tests in other packages that build an Engine;
-    the detectors register no longer keeps a second copy of the defaults);
+    `SetDefaultDirsForTest` from the `TestMain` of another package whose tests
+    build an Engine, as apiserver does; the detectors register no longer keeps
+    a second copy of the store defaults);
   - the `kernsec` rollback snapshot paths;
   - the `sslcollector` `defaultCacheDir`;
   - the `notify` and `detectorscfg` `systemConfigPath` (via
@@ -279,12 +280,20 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   (`core.DefaultState`). A new default path goes through the same kind of
   var, and `TestFillDefaultsPathsFollowTheRedirectableDirs` fails a
   webdetector store added as a literal. `check_test_isolation.sh` (`arm`
-  before `go test`, `verify` after) is the net. In CI the four dirs are
-  first created writable for the runner and seeded like a packaged node
-  (`ci_seed_cfm_dirs.sh`: conffiles, Lua, logs), so a regressing write
-  succeeds and shows, including one that only rewrites a file that exists. It
-  watches only CFM's own dirs; a test reaching `/etc/default/grub` or
-  `/etc/sysctl.d` is outside it. To find a writer, run the suite in a mount
+  before `go test`, `verify` after) is the net: it flags any change to
+  content, mode or ownership. The ingest socket, for one, used to re-own the
+  live `/run/cfm` for a test's temp socket. In CI the four dirs are first
+  created writable for the runner and seeded like a packaged node
+  (`ci_seed_cfm_dirs.sh`: conffiles, Lua, logs, runtime-state placeholders),
+  so a regressing write succeeds and shows, including one that only rewrites a
+  file that exists. Two blind spots:
+  - it watches only CFM's own dirs, so a test reaching `/etc/default/grub` or
+    `/etc/sysctl.d` is outside it;
+  - the CI runner isn't root, so tests that skip unless run as root (the lsm
+    enable path, the nft integration test) never run under it there.
+
+  Never "fix" an unwritable watched dir by re-owning it: on a CFM host that
+  hands the live state to that account. To find a writer, run the suite in a mount
   namespace with an overlay on `/etc`, `/var` and `/run` and a tmpfs over the
   CFM dirs (seed them for the exists-only class), then look at what landed
   there. That is how these were found, without touching the host.

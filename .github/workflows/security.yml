@@ -94,11 +94,13 @@ jobs:
         run: sudo install -d -o "$(id -u)" -g "$(id -g)" /var/lib/cfm /run/cfm /etc/cfm /var/log/cfm
       - name: Seed them like a packaged node (conffiles, Lua, logs)
         run: ./scripts/tests/ci_seed_cfm_dirs.sh
-      - run: ./scripts/tests/check_test_isolation.sh arm
+      - id: arm
+        run: ./scripts/tests/check_test_isolation.sh arm
       - run: go test -race ./...
-      # Also on a red run: a failing test can still have written the live dirs.
+      # Also on a red test run (a failing test can still have written the live
+      # dirs), but only once arm has recorded them.
       - name: Fail if the Go tests wrote CFM's live system dirs
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.arm.outcome == 'success' }}
         run: ./scripts/tests/check_test_isolation.sh verify
 
   # CHANGELOG hygiene — a separate, tiny job (own checkout so it can diff the PR
