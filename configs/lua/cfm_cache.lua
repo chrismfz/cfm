@@ -595,6 +595,11 @@ local MICRO_AUTH_PREFIX = {
 -- generic framework pattern) and `*_sid`. Redundant-but-harmless with the exact
 -- _session names above.
 local MICRO_AUTH_SUFFIX = { "_session", "_sid" }
+-- Names a list above would catch that are known NOT to be sessions: WooCommerce
+-- Order Attribution (default since 8.5) sets sbjs_session client-side on every
+-- page and never reads it server-side — it would make every returning shopper
+-- bypass. A per-vhost auth_cookies entry still wins.
+local MICRO_AUTH_EXEMPT = { ["sbjs_session"] = true }
 -- The __Host- / __Secure- cookie prefixes (RFC 6265bis) are stripped before
 -- matching, so __Host-PHPSESSID is PHPSESSID.
 local COOKIE_NAME_PREFIXES = { "__host-", "__secure-" }
@@ -711,7 +716,8 @@ local function micro_cookie_verdict(cookie_header, strict, extra_auth)
         local name = cookie_name(pair)
         if name and name ~= "" then
             local lname = cookie_key(name)
-            if name_matches(lname, MICRO_AUTH_EXACT, MICRO_AUTH_PREFIX, MICRO_AUTH_SUFFIX, MICRO_AUTH_CONTAINS)
+            if (not MICRO_AUTH_EXEMPT[lname]
+                and name_matches(lname, MICRO_AUTH_EXACT, MICRO_AUTH_PREFIX, MICRO_AUTH_SUFFIX, MICRO_AUTH_CONTAINS))
                or (extra_auth and extra_auth[lname]) then
                 return false, "auth:" .. name:sub(1, 64)
             end
@@ -758,9 +764,14 @@ local function micro_path_blocked(uri)
 end
 
 -- micro_args_blocked: a WordPress cron spawn (ALTERNATE_WP_CRON sends the
--- visitor through ?doing_wp_cron=<ts>) runs the cron in that request.
+-- visitor through ?doing_wp_cron=<ts>) runs the cron in that request; the
+-- WordPress REST ?_envelope moves the response headers into the body, so a
+-- session token handed out in a header (Cart-Token) would reach a stored
+-- body past the response-header rail.
 local function micro_args_blocked(args)
-    return type(args) == "string" and args:lower():find("doing_wp_cron", 1, true) ~= nil
+    if type(args) ~= "string" then return false end
+    local a = args:lower()
+    return a:find("doing_wp_cron", 1, true) ~= nil or a:find("_envelope", 1, true) ~= nil
 end
 
 -- micro_decision: PURE. Given the vhost policy + request facets, return
@@ -965,6 +976,17 @@ end
 -- nginx could not store and micro_mark_ttl says to remember. A fetch that
 -- looked storable but was not stored (a waiter whose lock wait timed out) is
 -- never marked. Never raises into the caller (the conf pcall's it too).
+-- session_token_header: the first NON-EMPTY of the session-token response
+-- headers the micro proxy_no_cache reads (nginx treats "" as false there, and
+-- a Lua `or` would stop at an empty first one).
+local function session_token_header(v)
+    local ct = v.upstream_http_cart_token
+    if ct ~= nil and ct ~= "" then return ct end
+    local ws = v.upstream_http_woocommerce_session
+    if ws ~= nil and ws ~= "" then return ws end
+    return nil
+end
+
 function _M.micro_note()
     local v = ngx.var
     local st = v.upstream_cache_status
@@ -974,8 +996,7 @@ function _M.micro_note()
     if not dict then return end
     local ttl = micro_mark_ttl(st, v.upstream_status, v.upstream_http_set_cookie,
                                v.cfm_cc_nostore, v.cfm_xae_nocache, v.upstream_http_vary,
-                               v.upstream_http_x_accel_buffering,
-                               v.upstream_http_cart_token or v.upstream_http_woocommerce_session)
+                               v.upstream_http_x_accel_buffering, session_token_header(v))
     if ttl then dict:set(micro_mark_key(), true, ttl) end
 end
 

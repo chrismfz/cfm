@@ -295,6 +295,10 @@ for _, c in ipairs({ "__Host-PHPSESSID=1", "__Secure-laravel_session=1", "SESS0a
   check(anon(c, false) == false, "auth/variant cookie → bypass: " .. c)
 end
 check(anon("__Host-foo=1", false) == true, "a __Host- prefixed non-session cookie stays anonymous")
+check(anon("sbjs_session=pgs%3D2; sbjs_current=typ%3Dtypein", false) == true,
+      "WooCommerce Order Attribution's sbjs_session is not a session (exempt from the _session suffix)")
+check(anon("sbjs_session=1", false, { [cache._cookie_key("sbjs_session")] = true }) == false,
+      "a per-vhost auth_cookies entry still wins over the exemption")
 -- consent / age-gate cookies read server-side: never anonymous, strict or not
 for _, c in ipairs({ "cookie_notice_accepted=true", "hu-consent=x", "viewed_cookie_policy=yes",
                      "moove_gdpr_popup=x", "cmplz_marketing=allow", "age_gate=99", "age_gate_failed=1" }) do
@@ -575,6 +579,8 @@ do
   end
   ok, _, why = d({ uri = "/", args = "Doing_WP_Cron=1758585600.12" })
   check(not ok and why == "path", "?doing_wp_cron → bypass:path")
+  ok, _, why = d({ uri = "/wp-json/wc/store/v1/cart", args = "_envelope=1" })
+  check(not ok and why == "path", "?_envelope (REST headers moved into the body) → bypass:path")
   ok = d({ uri = "/", args = "p=2" })
   check(ok, "an ordinary query string stays cacheable")
   for _, h in ipairs({ "cpanel.example.com", "WHM.example.com", "webmail.example.com:443",
@@ -654,7 +660,7 @@ local function log_micro(cache_status, status, set_cookie, cc, xae, vary, xab, c
   ngx.var.upstream_status = status; ngx.var.upstream_http_set_cookie = set_cookie
   ngx.var.cfm_cc_nostore = cc or ""; ngx.var.cfm_xae_nocache = xae or ""
   ngx.var.upstream_http_vary = vary; ngx.var.upstream_http_x_accel_buffering = xab
-  ngx.var.upstream_http_cart_token = cart
+  ngx.var.upstream_http_cart_token = cart; ngx.var.upstream_http_woocommerce_session = nil
   cache.micro_note()
 end
 _micro_enforce = true
@@ -732,6 +738,17 @@ cache.observe()
 check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:method", 1, true),
       "a POST to a marked key reports bypass:method, not uncacheable")
 ngx.var.http_x_cfm_cache_debug = nil
+
+-- an empty Cart-Token does not hide a woocommerce-session token (nginx reads ""
+-- as false on proxy_no_cache; the Lua mirror must too)
+_uncacheable.data = {}; _uncacheable.sets = 0
+micro_req("m.com", "/wcs"); ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.upstream_cache_status = "MISS"
+ngx.var.upstream_status = "200"; ngx.var.upstream_http_set_cookie = nil; ngx.var.cfm_cc_nostore = ""
+ngx.var.cfm_xae_nocache = ""; ngx.var.upstream_http_vary = nil; ngx.var.upstream_http_x_accel_buffering = nil
+ngx.var.upstream_http_cart_token = ""; ngx.var.upstream_http_woocommerce_session = "sess-x"
+cache.micro_note()
+check(_uncacheable.sets == 1, "an empty Cart-Token plus a woocommerce-session token is remembered")
+ngx.var.upstream_http_cart_token = nil; ngx.var.upstream_http_woocommerce_session = nil
 
 -- a 5xx refresh keeps the stale copy in play: nothing is marked; a cold 5xx
 -- is marked only for the lock timeout

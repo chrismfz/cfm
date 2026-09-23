@@ -86,8 +86,9 @@ back-filled here — see the git/PR history for that period.
     checkout answers carry no cache headers before WooCommerce 10.6, so one
     customer's cart, address and token would have been everyone's —
     `WooCommerce-Session`, `X-WP-Nonce`, `X-Api-Key`, `X-Auth-Token`,
-    `X-Access-Token`) and any answer that hands out such a token (the
-    token-less cart request a headless client starts with), partial-page
+    `X-Access-Token`) and any answer that hands out such a token in a header
+    (the token-less cart request a headless client starts with; `?_envelope`,
+    which moves it into the body, is not micro-cached), partial-page
     requests (`X-Requested-With`, `X-PJAX`,
     `HX-Request`, `Turbo-Frame`, `X-Inertia` — a stored fragment would be
     everyone's page; Android in-app browsers send `X-Requested-With` on every
