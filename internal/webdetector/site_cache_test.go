@@ -867,6 +867,27 @@ func TestSiteCacheStore_FrozenHostGuards(t *testing.T) {
 	}
 }
 
+// A failed save rolls the frozen rows back too: the off that would have
+// replaced a host's unloadable row leaves it in place when nothing was saved.
+func TestSiteCacheStore_FrozenRollbackOnSaveFailure(t *testing.T) {
+	path := writeSiteCacheStoreFile(t, `[
+	 {"host":"a.com","generation":1758585600001,"static":{"enabled":true,"recipe":"recipe_from_a_newer_build"},"micro":{"enabled":false}}]`)
+	s := newSiteCacheStore(path)
+	if err := os.Mkdir(path+".tmp", 0o700); err != nil { // the atomic write's temp file cannot be created
+		t.Fatal(err)
+	}
+	off := &SiteCacheTierPatch{Enabled: boolPtr(false)}
+	if _, err := s.Apply(SiteCachePatch{Host: "a.com", Static: off, Micro: off}, false); err == nil {
+		t.Fatal("the save was expected to fail")
+	}
+	if got := s.FrozenHosts(); len(got) != 1 || got[0] != "a.com" {
+		t.Fatalf("frozen rows not rolled back: %v", got)
+	}
+	if _, ok := s.Get("a.com"); ok {
+		t.Fatal("the failed write left a loaded entry")
+	}
+}
+
 // Hand-edited duplicates — a loadable and an unloadable row for one host: the
 // loaded one is served and listed, the host is NOT reported unloadable (it is
 // not opted out), and the next write for it drops the unloadable row.

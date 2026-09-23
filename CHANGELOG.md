@@ -131,7 +131,8 @@ back-filled here — see the git/PR history for that period.
   build, after a downgrade) used to be deleted from the store file at the next
   change, and its vhost then fell back to any covering `*.suffix` wildcard. It
   is now kept in the file and not served, and its vhost is treated as opted
-  out (a wildcard row: every sub-host under it) until a build that can read
+  out (a wildcard row: every sub-host under it without a more specific
+  policy) until a build that can read
   the row loads it, or `remove` deletes it. `list` names such vhosts under
   `unloadable`, `get`/`purge` say why there is none, and a `set` that would
   turn caching on for one is refused (it would have dropped the stored

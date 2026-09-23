@@ -412,7 +412,8 @@ func (s *siteCacheStore) normalizeEntry(in SiteCacheEntry) (SiteCacheEntry, erro
 
 // Set upserts a vhost's WHOLE cache policy (a full replace of the tiers and
 // cookie settings). TESTS ONLY: the API uses the merging Apply, and Set skips
-// Apply's input rules (no :port, no implicit all-off new entry). CreatedAt is
+// Apply's input rules (no :port, no implicit all-off new entry, no arming a
+// host whose only stored row this build cannot load). CreatedAt is
 // preserved on an existing host, and so is Generation, except that re-arming a
 // tier issues a new one (see SiteCacheEntry.Generation). Returns the stored
 // entry.
@@ -521,10 +522,11 @@ func (s *siteCacheStore) setLocked(in SiteCacheEntry) (SiteCacheEntry, error) {
 	}
 	norm.UpdatedAt = now
 	s.entries[norm.Host] = norm
-	// A write REPLACES any stored row of this host this build could not load
-	// (see frozen): a host never has both, so what the feed serves, what list
-	// shows and what the next build loads always agree. (Apply lets only an
-	// explicit off reach here for such a host.)
+	// A set (Apply/Set) REPLACES any stored row of this host this build could
+	// not load (see frozen), so after it the host has only this row and what
+	// the feed serves, what list shows and what the next build loads agree.
+	// (Apply lets only an explicit off reach here for a host whose only row is
+	// such a one. A purge keeps them: it does not come through here.)
 	prevFrozen := s.frozen
 	s.frozen = s.frozenWithoutLocked(norm.Host)
 	if err := s.saveLocked(); err != nil {
@@ -773,7 +775,7 @@ func (s *siteCacheStore) hasFrozenLocked(h string) bool {
 // FrozenHosts returns the sorted, de-duplicated hosts of the stored rows this
 // build cannot load (see frozen) and that have no loaded entry — each treated
 // as an opt-out at the edge. (A host with both exists only after a hand edit,
-// until its next write; its loaded entry is what the edge uses.)
+// until its next set; its loaded entry is what the edge uses.)
 func (s *siteCacheStore) FrozenHosts() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -936,7 +938,7 @@ func (s *siteCacheStore) load() {
 			// save): a newer build's policy (a downgrade) or a hand-edit typo
 			// must not be deleted by this build.
 			fh, _ := s.normalize(e.Host)
-			logging.Logf("[webdetector][site-cache] cannot load stored policy for %q: %v — kept in the file, not served (the host is treated as opted out) (path=%s)", e.Host, err, s.path)
+			logging.Logf("[webdetector][site-cache] cannot load stored policy for %q: %v — kept in the file, not served; unless the host also has a readable row, it is treated as opted out (path=%s)", e.Host, err, s.path)
 			s.frozen = append(s.frozen, siteCacheFrozenRow{host: fh, raw: append(json.RawMessage(nil), raw...)})
 			if e.Generation > s.genHWM && e.Generation < siteCacheMaxGeneration {
 				s.genHWM = e.Generation

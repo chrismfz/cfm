@@ -208,7 +208,8 @@ func TestSiteCacheStats_WildcardDrilldown(t *testing.T) {
 }
 
 // list names the hosts of stored policies this build cannot load (they are not
-// rows, and the edge opts them out), scope-filtered; get explains the 404.
+// rows, and the edge opts them out), scope-filtered; get and purge explain the
+// 404; another tenant's is a plain 403.
 func TestSiteCacheAPI_ListShowsUnloadableHosts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "site_cache.json")
 	raw := `[
@@ -239,13 +240,11 @@ func TestSiteCacheAPI_ListShowsUnloadableHosts(t *testing.T) {
 		t.Fatalf("admin list: %+v", out)
 	}
 	for _, ctx := range []context.Context{adminCtx(), scopedCtx("mysite.com")} {
-		for _, path := range []string{"/api/v1/site-cache/get?host=mysite.com"} {
-			rr := doRequest(mux, ctx, http.MethodGet, path, nil)
-			if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "cannot load") {
-				t.Fatalf("get of an unloadable host: %d %s", rr.Code, rr.Body.String())
-			}
+		rr := doRequest(mux, ctx, http.MethodGet, "/api/v1/site-cache/get?host=mysite.com", nil)
+		if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "cannot load") {
+			t.Fatalf("get of an unloadable host: %d %s", rr.Code, rr.Body.String())
 		}
-		rr := doRequest(mux, ctx, http.MethodPost, "/api/v1/site-cache/purge?host=mysite.com", nil)
+		rr = doRequest(mux, ctx, http.MethodPost, "/api/v1/site-cache/purge?host=mysite.com", nil)
 		if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "cannot load") {
 			t.Fatalf("purge of an unloadable host: %d %s", rr.Code, rr.Body.String())
 		}
