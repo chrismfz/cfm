@@ -3,17 +3,20 @@
 // fail2ban probe. Primary path is `fail2ban-client banned` (0.11+),
 // which dumps every jail with its banned entries in one call; on older
 // versions we fall back to `status` + `status <jail>`. Entries can be
-// plain IPs or CIDRs, so matching goes through query.matchesEntry.
+// plain IPs, CIDRs or ranges, so matching is containment-aware.
 package locate
 
 import (
 	"context"
+	"sort"
 	"strings"
+
+	"cfm/internal/ipquery"
 )
 
 // searchFail2Ban returns (locations, "") on success or (nil, why) when
 // fail2ban isn't available.
-func searchFail2Ban(ctx context.Context, q *query) ([]Location, string) {
+func searchFail2Ban(ctx context.Context, qs []*query) ([][]Location, string) {
 	if !binaryExists("fail2ban-client") {
 		return nil, "not installed"
 	}
@@ -23,7 +26,7 @@ func searchFail2Ban(ctx context.Context, q *query) ([]Location, string) {
 
 	if out, err := runOut(ctx, "fail2ban-client", "banned"); err == nil {
 		if jails, ok := parseF2BBannedDump(string(out)); ok {
-			return matchF2BJails(jails, q), ""
+			return matchF2BJails(jails, qs), ""
 		}
 	}
 
@@ -40,21 +43,22 @@ func searchFail2Ban(ctx context.Context, q *query) ([]Location, string) {
 		}
 		jails[jail] = parseF2BBannedLine(string(jout))
 	}
-	return matchF2BJails(jails, q), ""
+	return matchF2BJails(jails, qs), ""
 }
 
-func matchF2BJails(jails map[string][]string, q *query) []Location {
-	var out []Location
-	for jail, entries := range jails {
-		for _, e := range entries {
-			if q.matchesEntry(e) {
-				out = append(out, Location{
-					Source: "fail2ban", List: jail, Action: ActionBlock, Match: e,
-				})
-			}
+func matchF2BJails(jails map[string][]string, qs []*query) [][]Location {
+	names := make([]string, 0, len(jails))
+	for jail := range jails {
+		names = append(names, jail)
+	}
+	sort.Strings(names)
+	idx := ipquery.NewIndex[Location]()
+	for _, jail := range names {
+		for _, e := range jails[jail] {
+			idx.Add(e, Location{Source: "fail2ban", List: jail, Action: ActionBlock, Match: e})
 		}
 	}
-	return out
+	return matchAll(idx, qs)
 }
 
 // parseF2BBannedDump parses the output of `fail2ban-client banned`,

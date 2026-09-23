@@ -21,8 +21,6 @@ package locate
 
 import (
 	"context"
-	"fmt"
-	"net"
 	"strings"
 	"sync"
 	"time"
@@ -67,194 +65,159 @@ type Options struct {
 // query holds the parsed search argument (plain IP or CIDR).
 type query struct {
 	raw string
-	ip  net.IP     // set when raw is a plain IP
-	net *net.IPNet // set when raw is a CIDR
+	ipquery.Query
 }
 
 func parseQuery(arg string) (*query, error) {
 	arg = strings.TrimSpace(arg)
-	if strings.Contains(arg, "/") {
-		_, n, err := net.ParseCIDR(arg)
-		if err != nil {
-			return nil, fmt.Errorf("invalid CIDR %q", arg)
-		}
-		return &query{raw: arg, net: n}, nil
+	q, err := ipquery.ParseQuery(arg)
+	if err != nil {
+		return nil, err
 	}
-	ip := net.ParseIP(arg)
-	if ip == nil {
-		return nil, fmt.Errorf("invalid IP %q", arg)
-	}
-	return &query{raw: arg, ip: ip}, nil
+	return &query{raw: arg, Query: q}, nil
 }
 
-// matchesEntry reports whether a stored entry (plain IP, CIDR, or
-// "from-to" range) matches the query, containment-aware in both
-// directions.
-func (q *query) matchesEntry(entry string) bool {
-	entry = strings.TrimSpace(entry)
-	if entry == "" {
-		return false
+// matchAll matches every query against a source's entries.
+func matchAll(idx *ipquery.Index[Location], qs []*query) [][]Location {
+	out := make([][]Location, len(qs))
+	for i, q := range qs {
+		out[i] = idx.Match(q.Query)
 	}
-
-	// Range "a-b" (nft interval style). Only treated as a range when both
-	// halves parse as IPs, so IPv6 colons or junk never misfire.
-	if i := strings.Index(entry, "-"); i > 0 {
-		from := net.ParseIP(strings.TrimSpace(entry[:i]))
-		to := net.ParseIP(strings.TrimSpace(entry[i+1:]))
-		if from != nil && to != nil {
-			if q.ip != nil {
-				return ipInRange(q.ip, from, to)
-			}
-			// CIDR query: overlap if either range end is inside the net
-			// or the net's base is inside the range.
-			return q.net.Contains(from) || q.net.Contains(to) || ipInRange(q.net.IP, from, to)
-		}
-	}
-
-	// CIDR entry.
-	if strings.Contains(entry, "/") {
-		_, en, err := net.ParseCIDR(entry)
-		if err != nil {
-			return false
-		}
-		if q.ip != nil {
-			return en.Contains(q.ip)
-		}
-		return netsOverlap(q.net, en)
-	}
-
-	// Plain IP entry.
-	eip := net.ParseIP(entry)
-	if eip == nil {
-		return false
-	}
-	if q.ip != nil {
-		return q.ip.Equal(eip)
-	}
-	return q.net.Contains(eip)
-}
-
-func ipInRange(ip, from, to net.IP) bool {
-	ip16, f16, t16 := ip.To16(), from.To16(), to.To16()
-	if ip16 == nil || f16 == nil || t16 == nil {
-		return false
-	}
-	return bytesLE(f16, ip16) && bytesLE(ip16, t16)
-}
-
-func bytesLE(a, b net.IP) bool {
-	for i := range a {
-		if a[i] != b[i] {
-			return a[i] < b[i]
-		}
-	}
-	return true
-}
-
-func netsOverlap(a, b *net.IPNet) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	if (a.IP.To4() != nil) != (b.IP.To4() != nil) {
-		return false
-	}
-	return a.Contains(b.IP) || b.Contains(a.IP)
+	return out
 }
 
 // Find probes every available source in parallel and aggregates hits.
 // It never returns a partial-failure error: per-source problems land in
 // Result.Skipped. The only error case is an unparsable query.
 func Find(ctx context.Context, arg string, opts Options) (*Result, error) {
-	q, err := parseQuery(arg)
+	res, err := FindMany(ctx, []string{arg}, opts)
 	if err != nil {
 		return nil, err
 	}
+	return res[arg], nil
+}
 
-	res := &Result{Query: q.raw, Skipped: map[string]string{}}
-	var mu sync.Mutex
-	add := func(locs ...Location) {
-		mu.Lock()
-		res.Locations = append(res.Locations, locs...)
-		mu.Unlock()
+// FindMany is Find for many IPs/CIDRs: each source is read once — the nft
+// table and its sets, cfm.deny, the csf files, fail2ban's ban list,
+// imunify360's local list — and matched against every query, where Find per
+// query read them all each time. Results are keyed by the argument as given;
+// an unparsable argument is an error for the whole call.
+func FindMany(ctx context.Context, args []string, opts Options) (map[string]*Result, error) {
+	var qs []*query
+	out := make(map[string]*Result, len(args))
+	byArg := map[string]int{}
+	for _, a := range args {
+		if _, dup := byArg[a]; dup {
+			continue
+		}
+		q, err := parseQuery(a)
+		if err != nil {
+			return nil, err
+		}
+		byArg[a] = len(qs)
+		qs = append(qs, q)
+		out[a] = &Result{Query: q.raw, Skipped: map[string]string{}}
 	}
-	skip := func(source, why string) {
-		mu.Lock()
-		res.Skipped[source] = why
-		mu.Unlock()
+	if len(qs) == 0 {
+		return out, nil
 	}
 
+	// Each source answers for every query: locations parallel to qs, or why
+	// it couldn't be probed.
+	type answer struct {
+		locs    [][]Location
+		why     string   // the source couldn't be probed
+		partial string   // probed, but not all of it (locs stand)
+		skip    []string // per query, where only some couldn't be answered
+	}
+	sources := []string{"nft", "cfm.deny", "csf", "fail2ban", "imunify360"}
+	answers := make([]answer, len(sources))
 	var wg sync.WaitGroup
-	run := func(fn func()) {
+	run := func(i int, fn func() answer) {
 		wg.Add(1)
-		go func() { defer wg.Done(); fn() }()
+		go func() { defer wg.Done(); answers[i] = fn() }()
 	}
 
-	// nft — reuse ipquery (already containment- and feed-aware).
+	// nft — ipquery is containment- and feed-aware.
 	if opts.BE != nil {
-		run(func() {
-			hits, err := ipquery.Find(opts.BE, q.raw)
-			if err != nil {
-				skip("nft", trimErr(err))
-				return
+		run(0, func() answer {
+			raws := make([]string, len(qs))
+			for i, q := range qs {
+				raws[i] = q.raw
 			}
-			for _, h := range hits {
-				add(Location{
-					Source: "nft", List: h.Set, Action: h.Action,
-					Match: h.Match, Feed: h.Feed,
-				})
+			hits, err := ipquery.FindMany(ctx, opts.BE, raws)
+			if err != nil && hits == nil {
+				return answer{why: trimErr(err)}
 			}
+			why := ""
+			if err != nil { // ran out of time part-way: what was read stands
+				why = "incomplete: " + trimErr(err)
+			}
+			locs := make([][]Location, len(qs))
+			for i, q := range qs {
+				for _, h := range hits[q.raw] {
+					locs[i] = append(locs[i], Location{
+						Source: "nft", List: h.Set, Action: h.Action,
+						Match: h.Match, Feed: h.Feed,
+					})
+				}
+			}
+			return answer{locs: locs, partial: why}
 		})
 	} else {
-		res.Skipped["nft"] = "no firewall backend"
+		answers[0].why = "no firewall backend"
 	}
 
 	// cfm.deny
 	if opts.ConfigDir != "" {
-		run(func() {
-			locs, err := searchCFMDeny(opts.ConfigDir, q)
+		run(1, func() answer {
+			locs, err := searchCFMDeny(opts.ConfigDir, qs)
 			if err != nil {
-				skip("cfm.deny", trimErr(err))
-				return
+				return answer{why: trimErr(err)}
 			}
-			add(locs...)
+			return answer{locs: locs}
 		})
 	} else {
-		res.Skipped["cfm.deny"] = "no config dir"
+		answers[1].why = "no config dir"
 	}
 
 	// csf (file-based; works even when the csf service is stopped,
 	// since csf.deny content is what csf would enforce).
-	run(func() {
-		locs, why := searchCSF(opts, q)
-		if why != "" {
-			skip("csf", why)
-			return
-		}
-		add(locs...)
+	run(2, func() answer {
+		locs, why := searchCSF(opts, qs)
+		return answer{locs: locs, why: why}
 	})
 
 	// fail2ban
-	run(func() {
-		locs, why := searchFail2Ban(ctx, q)
-		if why != "" {
-			skip("fail2ban", why)
-			return
-		}
-		add(locs...)
+	run(3, func() answer {
+		locs, why := searchFail2Ban(ctx, qs)
+		return answer{locs: locs, why: why}
 	})
 
 	// imunify360
-	run(func() {
-		locs, why := searchImunify(ctx, q)
-		if why != "" {
-			skip("imunify360", why)
-			return
-		}
-		add(locs...)
+	run(4, func() answer {
+		locs, skip, why := searchImunify(ctx, qs)
+		return answer{locs: locs, skip: skip, why: why}
 	})
 
 	wg.Wait()
-	return res, nil
+	for a, i := range byArg {
+		r := out[a]
+		for s, ans := range answers {
+			switch {
+			case ans.why != "":
+				r.Skipped[sources[s]] = ans.why
+			case ans.partial != "":
+				r.Skipped[sources[s]] = ans.partial
+			case i < len(ans.skip) && ans.skip[i] != "":
+				r.Skipped[sources[s]] = ans.skip[i]
+			}
+			if i < len(ans.locs) {
+				r.Locations = append(r.Locations, ans.locs[i]...)
+			}
+		}
+	}
+	return out, nil
 }
 
 func trimErr(err error) string {

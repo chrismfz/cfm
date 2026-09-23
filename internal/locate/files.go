@@ -16,13 +16,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/ipquery"
 )
 
 // ---------------------------------------------------------------- cfm.deny
 
 // searchCFMDeny scans <cfgDir>/cfm.deny. Same path constraints as
 // unblock.removeFromFile, minus the write.
-func searchCFMDeny(cfgDir string, q *query) ([]Location, error) {
+func searchCFMDeny(cfgDir string, qs []*query) ([][]Location, error) {
 	base := filepath.Clean(cfgDir)
 	path := filepath.Clean(filepath.Join(base, "cfm.deny"))
 	if path != base && !strings.HasPrefix(path, base+string(os.PathSeparator)) {
@@ -37,7 +39,9 @@ func searchCFMDeny(cfgDir string, q *query) ([]Location, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return scanListFile(f, "cfm.deny", "cfm.deny", ActionBlock, q), nil
+	idx := ipquery.NewIndex[Location]()
+	scanListFile(f, "cfm.deny", "cfm.deny", ActionBlock, idx)
+	return matchAll(idx, qs), nil
 }
 
 // listScanner returns a line scanner with a 1MB token limit: the default
@@ -49,10 +53,9 @@ func listScanner(r io.Reader) *bufio.Scanner {
 	return sc
 }
 
-// scanListFile handles the common "<ip-or-cidr> [# comment]" format used
-// by cfm.deny, csf.deny and csf.allow.
-func scanListFile(r io.Reader, source, list, action string, q *query) []Location {
-	var out []Location
+// scanListFile adds the entries of a file in the common "<ip-or-cidr>
+// [# comment]" format used by cfm.deny, csf.deny and csf.allow.
+func scanListFile(r io.Reader, source, list, action string, idx *ipquery.Index[Location]) {
 	sc := listScanner(r)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -73,15 +76,13 @@ func scanListFile(r io.Reader, source, list, action string, q *query) []Location
 		if strings.Contains(entry, "|") {
 			entry = extractCSFAdvanced(entry)
 		}
-		if entry == "" || !q.matchesEntry(entry) {
-			continue
+		if entry != "" {
+			idx.Add(entry, Location{
+				Source: source, List: list, Action: action,
+				Match: entry, Reason: reason,
+			})
 		}
-		out = append(out, Location{
-			Source: source, List: list, Action: action,
-			Match: entry, Reason: reason,
-		})
 	}
-	return out
 }
 
 // extractCSFAdvanced pulls the first s=/d= IP (or CIDR) out of a csf
@@ -112,7 +113,7 @@ func looksLikeAddr(s string) bool {
 
 // searchCSF probes csf's static and temp list files. Returns
 // (locations, "") on success or (nil, why) when csf isn't present.
-func searchCSF(opts Options, q *query) ([]Location, string) {
+func searchCSF(opts Options, qs []*query) ([][]Location, string) {
 	etc := opts.CSFDir
 	if etc == "" {
 		etc = "/etc/csf"
@@ -125,7 +126,7 @@ func searchCSF(opts Options, q *query) ([]Location, string) {
 		return nil, "not installed"
 	}
 
-	var out []Location
+	idx := ipquery.NewIndex[Location]()
 	static := []struct {
 		file   string
 		action string
@@ -139,7 +140,7 @@ func searchCSF(opts Options, q *query) ([]Location, string) {
 		if err != nil {
 			continue
 		}
-		out = append(out, scanListFile(f, "csf", s.file, s.action, q)...)
+		scanListFile(f, "csf", s.file, s.action, idx)
 		f.Close()
 	}
 
@@ -156,18 +157,17 @@ func searchCSF(opts Options, q *query) ([]Location, string) {
 		if err != nil {
 			continue
 		}
-		out = append(out, scanCSFTempFile(f, t.file, t.action, q)...)
+		scanCSFTempFile(f, t.file, t.action, idx)
 		f.Close()
 	}
-	return out, ""
+	return matchAll(idx, qs), ""
 }
 
-// scanCSFTempFile parses csf temp list lines. The format is
+// scanCSFTempFile adds the entries of a csf temp list file. The format is
 // pipe-separated (timestamp|ip|port|inout|ttl|comment in current csf);
 // to stay robust across versions we locate the IP field by parsing and
 // take the last field as the comment.
-func scanCSFTempFile(r io.Reader, list, action string, q *query) []Location {
-	var out []Location
+func scanCSFTempFile(r io.Reader, list, action string, idx *ipquery.Index[Location]) {
 	sc := listScanner(r)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -183,7 +183,7 @@ func scanCSFTempFile(r io.Reader, list, action string, q *query) []Location {
 				break
 			}
 		}
-		if entry == "" || !q.matchesEntry(entry) {
+		if entry == "" {
 			continue
 		}
 		reason := strings.TrimSpace(fields[len(fields)-1])
@@ -200,10 +200,9 @@ func scanCSFTempFile(r io.Reader, list, action string, q *query) []Location {
 				reason = "since " + when
 			}
 		}
-		out = append(out, Location{
+		idx.Add(entry, Location{
 			Source: "csf", List: list, Action: action,
 			Match: entry, Reason: reason,
 		})
 	}
-	return out
 }

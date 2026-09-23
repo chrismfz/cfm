@@ -191,7 +191,8 @@ func intervalContains(elems []nftables.SetElement, key []byte) bool {
 }
 
 // ListSetElementsRaw returns all elements of a named set as strings.
-// For host sets: IP strings. For interval/CIDR sets: CIDR notation strings.
+// For host sets: IP strings. For interval sets: a CIDR per range, or
+// "first-last" for a range that isn't one prefix.
 func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -204,7 +205,7 @@ func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nftlib ListSetElementsRaw %s: %w", setName, err)
 	}
-	return elemsToStrings(elems), nil
+	return elemsToStrings(elems, set.Interval), nil
 }
 
 // ListSetElementsTimed returns set elements paired with their remaining TTL.
@@ -221,7 +222,7 @@ func (b *Backend) ListSetElementsTimed(setName string) ([]firewall.SetElementTim
 	if err != nil {
 		return nil, fmt.Errorf("nftlib ListSetElementsTimed %s: %w", setName, err)
 	}
-	return elemsToTimed(elems), nil
+	return elemsToTimed(elems, set.Interval), nil
 }
 
 // ── Table/set dump methods (text formatting via nft subprocess) ──────────────
@@ -240,15 +241,31 @@ func (b *Backend) ListTableJSON(family, table string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nftlib ListTableJSON %s %s: %w", family, table, err)
 	}
+	// set_info describes the named sets with their key type — what `nft list
+	// table` lists as sets. It leaves out meters (the anonymous sets a rule's
+	// meter creates, e.g. syn_v4 or pps_v4: every recently seen source, not a
+	// list anyone keeps), maps, and concatenations flagged as such (one nft
+	// created shows its key type as "ipv4_addr . inet_service"). "sets" names
+	// every set.
+	type setInfo struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
 	names := make([]string, 0, len(sets))
+	info := make([]setInfo, 0, len(sets))
 	for _, s := range sets {
 		names = append(names, s.Name)
+		if !s.Anonymous && !s.IsMap && !s.Concatenation {
+			info = append(info, setInfo{Name: s.Name, Type: s.KeyType.Name})
+		}
 	}
 	sort.Strings(names)
+	sort.Slice(info, func(i, j int) bool { return info[i].Name < info[j].Name })
 	return json.MarshalIndent(map[string]any{
-		"family": "inet",
-		"table":  cfmTableName,
-		"sets":   names,
+		"family":   "inet",
+		"table":    cfmTableName,
+		"sets":     names,
+		"set_info": info,
 	}, "", "  ")
 }
 
