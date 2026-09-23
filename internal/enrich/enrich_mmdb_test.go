@@ -354,3 +354,25 @@ func TestASNNumber(t *testing.T) {
 		}
 	}
 }
+
+// RefreshNow picks up a changed database immediately, even right after a
+// lookup-driven check armed the statEvery rate limit.
+func TestRefreshNowBypassesTheRateLimit(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-time.Hour)
+	writeMMDB(t, dir, "GeoLite2-ASN.mmdb", buildMMDB("GeoLite2-ASN", asnRecord(6799, "A")), base)
+	e, _ := New(dir)
+	defer e.Close()
+	e.refreshIfChanged() // arms the rate limit
+	writeMMDB(t, dir, "GeoLite2-ASN.mmdb", buildMMDB("GeoLite2-ASN", asnRecord(3329, "B")), base.Add(time.Minute))
+	e.refreshIfChanged()
+	if got := e.LookupGeoFast("94.68.42.127").ASN; got != 6799 {
+		t.Fatalf("setup: a rate-limited refresh must not reopen, ASN=%d", got)
+	}
+	e.RefreshNow()
+	if got := e.LookupGeoFast("94.68.42.127").ASN; got != 3329 {
+		t.Fatalf("RefreshNow did not pick up the new database: ASN=%d", got)
+	}
+	var nilE *Enricher
+	nilE.RefreshNow() // must not panic
+}

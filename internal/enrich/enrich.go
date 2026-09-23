@@ -460,6 +460,18 @@ func (e *Enricher) HasCountry() bool {
 	return e.cityDB != nil
 }
 
+// RefreshNow checks the database files for a change immediately, bypassing
+// the statEvery rate limit, and swaps in any newer file (same safe swap as the
+// lookup-driven refresh). For tests, and for a caller that has just installed
+// a database and wants it read now rather than on a later cache miss.
+func (e *Enricher) RefreshNow() {
+	if e == nil {
+		return
+	}
+	e.statChk.Store(0)
+	e.refreshIfChanged()
+}
+
 // monoStart anchors statChk to the monotonic clock (see refreshIfChanged).
 var monoStart = time.Now()
 
