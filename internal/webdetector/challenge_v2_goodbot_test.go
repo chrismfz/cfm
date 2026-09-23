@@ -2,6 +2,7 @@ package webdetector
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -50,10 +51,12 @@ func TestVerify_V2GateWaivesAVerifiedGoodBot(t *testing.T) {
 	setV2HostArmed(t, func(host string) bool { return host == armedHost })
 	var calls atomic.Int32
 	var askedPTR atomic.Value
+	const waiverDelay = 60 * time.Millisecond // stands in for the inline forward-confirm
 	setV2GoodBot(t, func(_ context.Context, ip, ptr string) string {
 		calls.Add(1)
 		askedPTR.Store(ptr)
 		if strings.HasPrefix(ip, "66.249.") {
+			time.Sleep(waiverDelay)
 			return "google"
 		}
 		return ""
@@ -86,6 +89,9 @@ func TestVerify_V2GateWaivesAVerifiedGoodBot(t *testing.T) {
 	}
 	if !strings.Contains(s.HumanitySuffix(), " v2=vhost v2_waived=google") {
 		t.Errorf("solve line does not show the waiver: %q", s.HumanitySuffix())
+	}
+	if s.VerifyMS < waiverDelay.Milliseconds() {
+		t.Errorf("ms= must include the waiver's forward-confirm: VerifyMS=%d", s.VerifyMS)
 	}
 	if got, _ := askedPTR.Load().(string); got != "ppp.otenet.gr" {
 		t.Errorf("the waiver was not given the solve's resolved PTR: %q", got)
@@ -315,6 +321,35 @@ func TestGoodBotState_VerifiedBeforeReject(t *testing.T) {
 	}
 	if time.Since(start) > time.Second {
 		t.Fatalf("a cancelled wait must return promptly")
+	}
+}
+
+// A forward lookup that finds no such name is an ANSWER (the claimed crawler
+// name doesn't exist — the natural spoof, x.googlebot.com), so the verdict is
+// a cacheable negative; only a lookup that failed to complete is transient.
+func TestForwardConfirmsWith(t *testing.T) {
+	ctx := context.Background()
+	answer := func(addrs []string, err error) func(context.Context, string) ([]string, error) {
+		return func(context.Context, string) ([]string, error) { return addrs, err }
+	}
+	for _, c := range []struct {
+		name      string
+		lookup    func(context.Context, string) ([]string, error)
+		ip        string
+		matched   bool
+		transient bool
+	}{
+		{"match", answer([]string{"66.249.81.200"}, nil), "66.249.81.200", true, false},
+		{"ipv6 spelling", answer([]string{"2001:4860:4801:0010:0000:0000:0000:0001"}, nil), "2001:4860:4801:10::1", true, false},
+		{"wrong ip", answer([]string{"66.249.81.1"}, nil), "66.249.81.200", false, false},
+		{"nxdomain", answer(nil, &net.DNSError{Err: "no such host", Name: "x.googlebot.com", IsNotFound: true}), "66.249.81.200", false, false},
+		{"timeout", answer(nil, &net.DNSError{Err: "i/o timeout", Name: "x.googlebot.com", IsTimeout: true}), "66.249.81.200", false, true},
+		{"servfail", answer(nil, &net.DNSError{Err: "server misbehaving", Name: "x.googlebot.com", IsTemporary: true}), "66.249.81.200", false, true},
+	} {
+		matched, err := forwardConfirmsWith(ctx, c.lookup, "x.googlebot.com", c.ip)
+		if matched != c.matched || (err != nil) != c.transient {
+			t.Errorf("%s: matched=%v err=%v, want matched=%v transient=%v", c.name, matched, err, c.matched, c.transient)
+		}
 	}
 }
 

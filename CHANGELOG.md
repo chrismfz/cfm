@@ -36,7 +36,14 @@ back-filled here — see the git/PR history for that period.
   a solve about to be rejected whose reverse DNS is already known and ends
   in a crawler's domain. The solve line and history row say
   `v2_waived=<name>`. **Enforcement change** for geo/vhost `challenge_v2`
-  arms only; `CHALLENGE_GOODBOT_EXEMPT = 0` restores the old behaviour.
+  arms only. `CHALLENGE_GOODBOT_EXEMPT = 0` turns the waiver off, but that
+  knob also makes verified crawlers get challenged again at all.
+- **A spoofed crawler reverse-DNS name is now remembered as "not a crawler".**
+  When an IP's reverse DNS claims a crawler name that doesn't exist (e.g.
+  `x.googlebot.com`, the natural spoof), the check treated the failed lookup
+  as a temporary DNS error and cached nothing, so every later request from
+  that IP repeated it. It is now cached as a negative for 5 minutes, as a
+  name that resolves to the wrong IP already was.
 
 ### Fixed
 - **The ChallengeV2 geo check at verify now reads the current GeoLite2

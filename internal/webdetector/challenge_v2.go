@@ -79,9 +79,12 @@ package webdetector
 //   - An FCrDNS-verified good bot is WAIVED at the gate (v2_waived=<name>),
 //     under the same CHALLENGE_GOODBOT_EXEMPT that exempts it from the
 //     challenge at decision time — and ONLY under the grains that exemption
-//     already softens (challengeV2Waivable: geo, vhost). It reaches the gate
-//     there only when no verdict existed when the challenge was served — the
-//     norm for Google-Read-Aloud's rotating first-seen IPs — so the waiver
+//     already softens (challengeV2Waivable: geo, vhost). It typically reaches
+//     the gate there because no verdict existed when the challenge was served
+//     — the norm for Google-Read-Aloud's rotating first-seen IPs (a challenge
+//     source that is never softened, e.g. a plain WAF challenge tier, is the
+//     other way in; the waiver then just restores an unarmed host's
+//     outcome) — so the waiver
 //     may forward-confirm inline, bounded (verifiedBeforeReject): only for a
 //     solve about to be rejected, and only when the solve's PTR is already
 //     known and ends in a crawler's domain, so the lookup goes to the

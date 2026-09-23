@@ -50,10 +50,11 @@ package webdetector
 // The simulate APIs use verifiedSync (inline reverse lookup + forward-confirm
 // under their own slot bound, bounded wait), and the ChallengeV2 verify gate
 // uses it for an inline forward-confirm before a reject (verifiedBeforeReject)
-// — never the decision hot path, which stays cache-only. Note the hot path's first sight of a crawler IP costs it
-// more than one request: the enrich PTR itself is fetched async, so request 1
-// has no PTR (nothing to verify), request 2 kicks the forward-confirm, and the
-// verdict is there from request 3 or so.
+// — never the decision hot path, which stays cache-only. Note the hot path's
+// first sight of a crawler IP costs it more than one request: the enrich PTR
+// itself is fetched async, so request 1 has no PTR (nothing to verify),
+// request 2 kicks the forward-confirm, and the verdict is there from request 3
+// or so.
 
 import (
 	"context"
@@ -141,8 +142,8 @@ func newBridgeGoodBotState() *bridgeGoodBotState {
 // cacheable=false means the result is inconclusive (a transient resolver error)
 // and must NOT be cached — mirroring the enrich layer's choice not to cache
 // negative PTR results, so a DNS blip does not challenge a real crawler for the
-// negative TTL. A clean non-match (resolved but wrong IP → spoofed) is a real,
-// cacheable negative.
+// negative TTL. A clean non-match (resolved but wrong IP, or a name that does
+// not exist → spoofed) is a real, cacheable negative.
 func verifyGoodBotIP(ptr, ip string) (name string, cacheable bool) {
 	nm, host, ok := goodBotSuffixName(ptr)
 	if !ok {
@@ -304,10 +305,10 @@ const (
 // verifiedSync is the INLINE variant of verified(): same cache, same verifier —
 // but it runs the reverse lookup AND the forward-confirm inline (DNS-bound,
 // seconds at worst) so an operator's "test this rule" gets a definitive answer
-// now instead of "not yet". It is bounded by its OWN small
-// semaphore (goodBotSyncMaxInflight) plus ctx / verifiedSyncMaxWait, so a burst
-// of simulate calls (the endpoint is reachable by scoped tokens) can neither
-// fan out resolver work nor take the hot path's verify slots. ptrFn reports
+// now instead of "not yet". It is bounded by its OWN small semaphore
+// (goodBotSyncMaxInflight) plus ctx / verifiedSyncMaxWait, so a burst of
+// simulate calls (the endpoint is reachable by scoped tokens) can neither fan
+// out resolver work nor take the hot path's verify slots. ptrFn reports
 // whether the reverse lookup COMPLETED (ok=false → resolver failure), so a
 // crawler behind a DNS blip is "inconclusive", never "not a crawler"; a
 // completed empty answer (no PTR) IS definitive. A stale positive is
@@ -320,7 +321,10 @@ const (
 // (TrafficRuleSimulateForAPI, the challenge-access simulate) and the ChallengeV2
 // verify gate, for a solve it is about to reject (verifiedBeforeReject). They
 // share syncSem, so neither can take the hot path's slots; a burst of one can
-// only make the other's answer "inconclusive" / no waiver. The verify gate
+// only make the other's answer "inconclusive" / no waiver. The pool is
+// node-wide, so that includes a scoped tenant's simulate calls starving the
+// waiver on another tenant's armed vhost — accepted: it degrades to the
+// pre-waiver reject (retry-able), never to a wrong pass. The verify gate
 // passes an already-known PTR, so for it only the forward-confirm runs.
 func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn func() (ptr string, ok bool), now time.Time) (name, inconclusive string) {
 	if s == nil || ip == "" {

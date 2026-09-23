@@ -465,8 +465,9 @@ already opened.
         `google-proxy-*.google.com`, AS15169, fp `c41a0f3f`/`ba6b4aad`) is
         Google-Read-Aloud. It scores 140 (`sw_renderer,touch_lie,no_input`)
         and WOULD have been rejected — 73 solves from 48 rotating IPs on
-        19 vhosts fleet-wide, 2026-09-16..23, every scored one at 140 (psixokinisi.gr, smart-tech.gr,
-        e-vafeiadis.gr, vitolighting.com, diora.gr, lantides.gr, karol.gr, …).
+        19 vhosts fleet-wide, 2026-09-16..23, every scored one at 140
+        (psixokinisi.gr, smart-tech.gr, e-vafeiadis.gr, vitolighting.com,
+        diora.gr, lantides.gr, karol.gr, …).
         The D5 gate now WAIVES an FCrDNS-verified good bot under the existing
         `CHALLENGE_GOODBOT_EXEMPT` (solve line/history `v2_waived=<name>`),
         under a geo or vhost arm only — exactly the challenges the decision
@@ -483,9 +484,11 @@ already opened.
         PTR, and never into a zone the client controls). Accepted residual:
         "google" covers Google's user-driven fetchers, so a client routed
         through one passes a geo/vhost Rung 1 — the same trust the decision
-        exemption already extends. Adversarial review (2 SHOULD-FIX folded
-        in): the first cut waived every grain and reverse-resolved unknown
-        PTRs inline.
+        exemption already extends. Two adversarial reviews folded in: the
+        first cut waived every grain and reverse-resolved unknown PTRs
+        inline; and an NXDOMAIN forward-confirm (the natural spoof,
+        `x.googlebot.com`) was treated as transient and never cached — now a
+        cacheable negative.
 
 **Deliberately BACKLOG (not next, do not start):** surface-throttle +
 gate-before-origin (Track-1 Phase 2), PoW-difficulty knob, JA4/JA4H edge

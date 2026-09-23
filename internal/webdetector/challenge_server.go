@@ -878,8 +878,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// A verified good bot is waived, not rejected, under the
 				// grains whose challenge the decision path would have skipped
 				// for it (geo, vhost — challengeV2Waivable): the SAME FCrDNS
-				// verdict and CHALLENGE_GOODBOT_EXEMPT knob. It only got here
-				// because no verdict existed when the challenge was served
+				// verdict and CHALLENGE_GOODBOT_EXEMPT knob. It typically got
+				// here because no verdict existed when the challenge was served
 				// (e.g. Google-Read-Aloud's rotating, first-seen fetcher IPs,
 				// which score sw_renderer,touch_lie,no_input = 140), so this
 				// may forward-confirm inline — bounded, and only on this
