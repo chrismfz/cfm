@@ -20,6 +20,12 @@ import (
 // `nft -f -` runs.
 func fakeNFTSets(t *testing.T, v4JSON, v6JSON string, failWrites int) (logPath string) {
 	t.Helper()
+	return fakeNFTHostSets(t, "block_v4", "block_v6", v4JSON, v6JSON, failWrites)
+}
+
+// fakeNFTHostSets is fakeNFTSets for the host sets set4/set6.
+func fakeNFTHostSets(t *testing.T, set4, set6, v4JSON, v6JSON string, failWrites int) (logPath string) {
+	t.Helper()
 	dir := t.TempDir()
 	logPath = filepath.Join(dir, "nft.log")
 	for name, body := range map[string]string{"v4.json": v4JSON, "v6.json": v6JSON, "fails": fmt.Sprint(failWrites)} {
@@ -31,8 +37,8 @@ func fakeNFTSets(t *testing.T, v4JSON, v6JSON string, failWrites int) (logPath s
 d=%[1]q
 echo "ARGS $*" >> "$d/nft.log"
 case "$*" in
-"-j list set inet cfm block_v4") cat "$d/v4.json"; exit 0;;
-"-j list set inet cfm block_v6") cat "$d/v6.json"; exit 0;;
+"-j list set inet cfm %[2]s") cat "$d/v4.json"; exit 0;;
+"-j list set inet cfm %[3]s") cat "$d/v6.json"; exit 0;;
 "-f -")
 	in=$(cat); printf '%%s\n' "$in" >> "$d/nft.log"
 	n=$(cat "$d/fails")
@@ -48,7 +54,7 @@ case "$*" in
 	exit 0;;
 esac
 exit 0
-`, dir)
+`, dir, set4, set6)
 	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(script), 0o700); err != nil { // #nosec G306 -- test helper must be executable
 		t.Fatal(err)
 	}
@@ -281,5 +287,40 @@ func TestRemoveBlockBatch_ReadErrorAndLargeDelete(t *testing.T) {
 	got := readFile(t, log)
 	if strings.Count(got, "ARGS -f -") != 1 || strings.Count(got, "delete element inet cfm block_v4 {") != 3 {
 		t.Errorf("want one run with 3 delete statements (chunks of %d):\n%.400s", blockBatchStmtElems, got)
+	}
+}
+
+// AddAllowBatch writes the allow sets, never the block sets, and never
+// shortens an allow: a permanent one is kept, a shorter one extended.
+func TestAddAllowBatch_AllowSetsNeverShortened(t *testing.T) {
+	log := fakeNFTHostSets(t, "allow_v4", "allow_v6",
+		setJSON("allow_v4",
+			`"198.51.100.8"`, // permanent: keep
+			`{"elem":{"val":"198.51.100.7","timeout":600,"expires":60}}`), // 1m left: extend
+		setJSON("allow_v6"), 0)
+	res, err := New().AddAllowBatch([]firewall.BlockEntry{
+		{IP: net.ParseIP("198.51.100.8"), TTL: 4 * time.Hour},
+		{IP: net.ParseIP("198.51.100.7"), TTL: 4 * time.Hour},
+		{IP: net.ParseIP("198.51.100.9"), TTL: 4 * time.Hour},
+		{IP: net.ParseIP("2001:db8::1"), TTL: 4 * time.Hour},
+	})
+	if err != nil {
+		t.Fatalf("AddAllowBatch: %v", err)
+	}
+	if res != (firewall.BlockBatchResult{Added: 2, Extended: 1, Kept: 1}) {
+		t.Errorf("result = %+v", res)
+	}
+	got := readFile(t, log)
+	for _, want := range []string{
+		"delete element inet cfm allow_v4 { 198.51.100.7 }",
+		"create element inet cfm allow_v4 { 198.51.100.7 timeout 4h, 198.51.100.9 timeout 4h }",
+		"create element inet cfm allow_v6 { 2001:db8::1 timeout 4h }",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("script lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "block_v") || strings.Contains(got, "198.51.100.8 ") {
+		t.Errorf("touched a block set or the permanent allow:\n%s", got)
 	}
 }

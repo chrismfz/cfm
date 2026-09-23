@@ -3,11 +3,31 @@ package unblock
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"testing"
 
 	"cfm/internal/firewall"
 )
+
+// TestMain runs the package's tests with an empty PATH: an unblock runs csf,
+// fail2ban-client, imunify360-agent and systemctl when it finds them, and a
+// test must never reach the host's own. fakeTools puts fakes on it.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "cfm-unblock-path-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("PATH", dir); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 // ensureCounter records the backend calls an unblock makes.
 type ensureCounter struct {
@@ -29,7 +49,6 @@ func (c *ensureCounter) ListTableTextNoDNS(string, string) (string, error) {
 // no base ruleset, and EnsureBase costs dozens of nft processes (10-70s on
 // busy nodes), which used to run twice per unblock.
 func TestDo_NoEnsureBase(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()) // never run a real csf/fail2ban/imunify here
 	be := &ensureCounter{}
 	res, err := Do(context.Background(), net.ParseIP("198.51.100.1"), Options{BE: be})
 	if err != nil {

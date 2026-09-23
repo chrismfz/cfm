@@ -85,6 +85,9 @@ type Backend interface {
 	ListBlocks() ([]BlockedEntry, error)
 	ListAllows() ([]BlockedEntry, error)
 	AddAllow(ip net.IP, ttl *time.Duration) error
+	// AddAllowBatch is AddBlockBatch for the allow sets: it only adds or
+	// extends an allow, never shortens one (AddAllow replaces it).
+	AddAllowBatch(entries []BlockEntry) (BlockBatchResult, error)
 	RemoveAllow(ip net.IP) error
 
 	// NEW: CIDR subnets (manual)

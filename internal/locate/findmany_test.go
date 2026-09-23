@@ -43,6 +43,7 @@ func sources(locs []Location) string {
 // Many queries read each source once, and each gets its own answer — the
 // nft one from an nftlib backend too, where Find used to find nothing.
 func TestFindMany_ReadsEachSourceOnce(t *testing.T) {
+	withCSF(t, true)
 	cfg := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cfg, "cfm.deny"), []byte("8.8.0.0/16 # bulk\n1.1.1.1\n"), 0o600); err != nil {
 		t.Fatal(err)
