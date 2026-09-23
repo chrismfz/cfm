@@ -1695,9 +1695,11 @@ ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
 if CFG.log_allows or CFG.debug then
   log_route(ngx.INFO, "allow ip=" .. ip .. " host=" .. host .. " pass=" .. ngx.var.cfm_pass .. cache_flag)
 end
--- Site Cache Tier B (Phase B3b): plain-allow path. Same micro gate as the Step 2b
--- clearance fast-path — no-op unless MICRO_CACHE_ENFORCE is armed. ngx.exec to the
--- @cfm_micro_<n>s bucket is the last thing here (it never returns).
+-- Site Cache Tier B (Phase B3b): plain-allow path — the ONLY micro-cache entry
+-- (the Step 2b clearance fast-path is deferred, see there). A no-op unless
+-- MICRO_CACHE_ENFORCE is armed and this request matched the HTTPS `location /`
+-- (the $cfm_micro_conf sentinel). ngx.exec to the @cfm_micro_<n>s bucket is the
+-- last thing here (it never returns).
 local micro_target = micro_cache_target()
 if micro_target then return ngx.exec(micro_target) end
 

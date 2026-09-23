@@ -47,6 +47,36 @@ back-filled here — see the git/PR history for that period.
   rejects are unchanged.
 
 ### Changed
+- **Site Cache micro-cache (Tier B) is ready to be turned on, one node at a
+  time.** `MICRO_CACHE_ENFORCE` still defaults to `0`; before setting it to
+  `1` on a node, run the on-box checklist in `docs/site-cache-design.md` §5.7.
+  What changed in the micro-cache itself:
+  - A micro-cached page lives for its TTL bucket (1–60 s), never longer. The
+    origin's `Cache-Control: max-age`, `Expires` and `X-Accel-Expires` used to
+    set how long it stayed (a `max-age=3600` page for an hour). Its
+    "do not store" signals still apply: `Cache-Control` `private`, `no-store`
+    or `no-cache`, `X-Accel-Expires: 0`, `Set-Cookie`, `Vary: *`.
+  - A page that can't be cached (it sets a cookie, is private, or isn't a 200)
+    is remembered for 60 s and served straight from the origin. Before,
+    concurrent visitors of such a page queued on the cache lock, up to 5 s
+    each (measured: 8 concurrent visitors of a 1 s page took 1–6 s; once the
+    page is remembered, 1 s each).
+  - An expired page is refreshed by the visitor who finds it expired, not in
+    the background. A background refresh that could not be stored (the page
+    now sets a cookie, went private or 404) left the old copy being served
+    for as long as visitors kept coming.
+  - Never micro-cached: `Range` requests, `Accept: text/event-stream` (live
+    streams), `/wp-admin`, `/administrator/`, `/admin/`, `/sysadmin/`, any
+    `.php` URL, `?doing_wp_cron`, and panel hosts (`cpanel.`, `whm.`,
+    `webmail.`, `webdisk.`, `mail.`, `autodiscover.`, `autoconfig.`,
+    `cpcalendars.`, `cpcontacts.`), even under an armed `*.domain` wildcard.
+  - Micro-cache is used only from the main `location /` of the HTTPS server,
+    so PHP scripts and large downloads keep streaming unbuffered. A node whose
+    live edge conf predates this release (no `set $cfm_micro_conf "1"`) never
+    micro-caches, whatever `MICRO_CACHE_ENFORCE` says.
+- **Static caching (Tier A) skips panel hosts too:** a `*.domain` wildcard
+  policy no longer caches static files on `cpanel.`, `webmail.` and the other
+  panel/service hosts above.
 - **ChallengeV2 no longer rejects verified crawlers such as Google Read
   Aloud.** Under an armed `challenge_v2`, a failing humanity score gets no
   clearance. Google's Read Aloud fetcher (PTR `google-proxy-*.google.com`)
@@ -91,6 +121,11 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **A micro-cache TTL in minutes is no longer read as seconds.** The edge read
+  only the digits of a stored TTL, so `--micro-ttl 1m` used the 1 s bucket; it
+  now uses 60 s (anything above 60 s uses the 60 s bucket).
+- **A Site Cache error in the response header phase can no longer fail the
+  response.** The edge called the `X-CFM-Cache` stamp without a `pcall`.
 - **Site Cache: invalid hosts and cookie names are rejected, not stored.** A
   policy host must be a DNS-style name (labels of `[a-z0-9_-]`, ≤ 63 characters,
   ≤ 253 in all; an internationalized name in its `xn--` form) or `*.` over one
@@ -380,6 +415,12 @@ back-filled here — see the git/PR history for that period.
   edge reads until its workers are reloaded.
 
 ### Security
+- **The `X-CFM-Cache` debug header is only answered for trusted sources.**
+  Any client sending `X-CFM-Cache-Debug` could read a vhost's cache policy,
+  purge generation and HIT/MISS verdict. It is now stamped only for requests
+  from the box itself, its own IPs or `IGNORE_NETS` — run the check on the box
+  (`curl --resolve <host>:9043:127.0.0.1 …`, see `docs/site-cache-design.md`
+  §5.7).
 - **Site Cache: a tenant can no longer see another tenant's domain list, or
   an admin wildcard's cache counts through its own vhost.** A scoped (cPanel)
   token that created a policy stored its WHOLE vhost allowlist as the entry's

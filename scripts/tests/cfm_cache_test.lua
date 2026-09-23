@@ -17,6 +17,20 @@ package.loaded["cfm_bridge_cfg"] = { get = function()
   return { site_cache = _site_cache_on, micro_cache_enforce = _micro_enforce }
 end }
 
+-- Trusted-source predicate for the debug stamp (cfm_selfip). Default trusted so
+-- the observe assertions below run; flipped for the gate test.
+local _self_ok = true
+package.loaded["cfm_selfip"] = { is_self_origin = function() return _self_ok end }
+
+-- A lua_shared_dict stand-in (get/set with a TTL, no expiry needed here).
+local function new_dict()
+  local d = { data = {}, sets = 0, last_ttl = nil }
+  function d:get(k) return self.data[k] end
+  function d:set(k, v, ttl) self.data[k] = v; self.sets = self.sets + 1; self.last_ttl = ttl; return true end
+  return d
+end
+local _uncacheable = new_dict()
+
 local _header = {}
 local _now = 0            -- mutable clock (0 keeps schedule_refresh a no-op)
 local _timer_calls = 0   -- counts async-refresh schedules
@@ -24,6 +38,8 @@ _G.ngx = {
   now       = function() return _now end,
   timer     = { at = function() _timer_calls = _timer_calls + 1; return true end },
   log       = function() end,
+  md5       = function(s) return "md5:" .. s end,
+  shared    = { cfm_cache_uncacheable = _uncacheable },
   WARN      = 1,
   ERR       = 2,
   var       = { host = "" },
@@ -215,6 +231,16 @@ check(cache._micro_bucket(nil) == 1, "nil → smallest bucket")
 check(cache._micro_bucket("") == 1, "empty string → smallest bucket")
 check(cache._micro_bucket("junk") == 1, "unparseable → smallest bucket")
 check(cache._micro_bucket("30 s") == 30, "TTL with spaces parses")
+-- units, as the daemon's parseCacheTTL accepts them (s/m/h/d): "1m" used to read
+-- as 1s because only the digits were parsed
+check(cache._micro_bucket("1m") == 60, "1m → 60s (minutes, not 1s)")
+check(cache._micro_bucket("2h") == 60, "2h clamps to the largest bucket")
+check(cache._micro_bucket("1d") == 60, "1d clamps to the largest bucket")
+check(cache._micro_bucket("90s") == 60, "90s clamps to the largest bucket")
+check(cache._micro_bucket("5S") == 5, "upper-case unit parses")
+check(cache._micro_bucket("7x") == 1, "unknown unit → smallest bucket")
+check(cache._micro_bucket("1.5s") == 1, "fractional → unparseable → smallest bucket")
+check(cache._micro_bucket("10s5") == 1, "trailing junk → smallest bucket")
 check(cache._micro_zone_name(1) == "cfm_micro_1s", "zone name for 1s")
 check(cache._micro_zone_name("7s") == "cfm_micro_5s", "zone name snaps 7s → 5s bucket")
 check(cache._micro_zone_name(60) == "cfm_micro_60s", "zone name for 60s")
@@ -259,7 +285,9 @@ check(anon("myapp_sess=1", false, { ["myapp_sess"] = true }) == false, "per-vhos
 
 -- ── Tier B micro-cache: full request decision ─────────────────────────────────
 local function armed(ttl) return { micro = { on = true, ttl = ttl }, strict_cookies = false } end
-local function dec(pol, m, u, c, a) return cache._micro_decision(pol, m, u, c, a) end
+local function dec(pol, m, u, c, a)
+  return cache._micro_decision(pol, { method = m, uri = u, cookie = c, auth = a })
+end
 do
   local ok1, bkt1, r1 = dec(armed("5s"), "GET", "/", nil)
   check(ok1 == true and bkt1 == 5 and r1 == "ok", "armed GET, no cookie → would-cache at 5s bucket")
@@ -330,6 +358,7 @@ local function reset_gate_vars()
   ngx.var.cfm_cache_skip = "1"; ngx.var.cfm_cache_gen = "0"
   ngx.var.scheme = "https"; ngx.var.request_method = "GET"; ngx.var.uri = "/"
   ngx.var.http_cookie = nil; ngx.var.http_authorization = nil
+  ngx.var.cfm_micro_conf = "1"   -- the HTTPS `location /` sentinel
 end
 _site_cache_on = true
 
@@ -433,6 +462,200 @@ check(cache.policy_key_for("y.example.com") == "*.example.com", "the broader wil
 reset_cache_vars(); ngx.var.host = "x.shop.example.com"
 cache.static_gate()
 check(ngx.var.cfm_cache_skip == "1", "a wildcard opt-out: static_gate leaves its sub-hosts uncached")
+
+-- ── PR-3: request rails (range / event-stream / admin & script paths / panel) ──
+do
+  local function d(r) r.method = r.method or "GET"; return cache._micro_decision(armed("5s"), r) end
+  local ok, _, why = d({ uri = "/", range = "bytes=0-99" })
+  check(not ok and why == "range", "a Range request → bypass:range")
+  ok, _, why = d({ uri = "/", accept = "Text/Event-Stream" })
+  check(not ok and why == "event-stream", "Accept: text/event-stream (any case) → bypass:event-stream")
+  ok = d({ uri = "/", accept = "text/html,application/xhtml+xml" })
+  check(ok, "an ordinary Accept stays cacheable")
+  for _, u in ipairs({ "/wp-admin/", "/WP-Admin/edit.php", "/wp-login.php", "/xmlrpc.php",
+                       "/wp-cron.php", "/index.php", "/a/B.PHP", "/administrator/index",
+                       "/admin/x", "/sysadmin/", "/acctxfer_x" }) do
+    ok, _, why = d({ uri = u })
+    check(not ok and why == "path", "path rail bypasses " .. u)
+  end
+  for _, u in ipairs({ "/", "/about/", "/index.php/2024/post", "/php/", "/administration-news" }) do
+    ok = d({ uri = u })
+    check(ok, "path rail leaves " .. u .. " cacheable")
+  end
+  ok, _, why = d({ uri = "/", args = "Doing_WP_Cron=1758585600.12" })
+  check(not ok and why == "path", "?doing_wp_cron → bypass:path")
+  ok = d({ uri = "/", args = "p=2" })
+  check(ok, "an ordinary query string stays cacheable")
+  for _, h in ipairs({ "cpanel.example.com", "WHM.example.com", "webmail.example.com:443",
+                       "webdisk.example.com", "mail.example.com", "autodiscover.example.com",
+                       "autoconfig.example.com", "cpcalendars.example.com", "cpcontacts.example.com" }) do
+    ok, _, why = d({ uri = "/", host = h })
+    check(not ok and why == "panel", "panel rail bypasses " .. h)
+  end
+  for _, h in ipairs({ "www.example.com", "cpanelx.example.com", "example.com", "shop.mail-example.com" }) do
+    ok = d({ uri = "/", host = h })
+    check(ok, "panel rail leaves " .. h .. " cacheable")
+  end
+  ok, _, why = d({ method = "POST", uri = "/", range = "bytes=0-1" })
+  check(why == "method", "the method rail is still reported first")
+end
+
+-- ── PR-3: micro_storable mirrors the micro location's store rails ─────────────
+do
+  local S = cache._micro_storable
+  check(S("200", nil, "", "", nil) == true, "a plain 200 is storable")
+  check(S("200", "", "", "", "Accept-Encoding") == true, "Vary: Accept-Encoding is storable")
+  check(S("404", nil, "", "", nil) == false, "a 404 is not storable")
+  check(S("502, 200", nil, "", "", nil) == false, "a retried status list is not storable (like the only-200 map)")
+  check(S(nil, nil, "", "", nil) == false, "no upstream status is not storable")
+  check(S("200", "a=b", "", "", nil) == false, "Set-Cookie is not storable")
+  check(S("200", nil, "1", "", nil) == false, "$cfm_cc_nostore=1 is not storable")
+  check(S("200", nil, "", "1", nil) == false, "$cfm_xae_nocache=1 is not storable")
+  check(S("200", nil, "", "", "*") == false, "Vary: * is not storable")
+  check(S("200", nil, "", "", string.rep("a", 129)) == false, "a Vary longer than nginx stores is not storable")
+end
+
+-- ── PR-3: remember-uncacheable, the conf sentinel, the panel rail ─────────────
+cache._rebuild_cache({
+  { host = "m.com", gen = 7, micro = { on = true, recipe = "micro_safe", ttl = "5s" } },
+  { host = "*.example.org", gen = 8,
+    static = { on = true, recipe = "static_lean", ttl = "1h" },
+    micro = { on = true, recipe = "micro_safe", ttl = "10s" } },
+})
+local function micro_req(host, uri)
+  reset_gate_vars(); ngx.var.host = host; ngx.var.request_uri = uri or "/"
+  ngx.var.uri = uri or "/"; ngx.var.server_addr = "192.0.2.1"; ngx.var.cf_xfp = "https"
+  ngx.var.cfm_micro_conf = "1"; ngx.var.args = nil; ngx.var.http_range = nil; ngx.var.http_accept = nil
+end
+local function log_micro(cache_status, status, set_cookie, cc, xae, vary)
+  ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.upstream_cache_status = cache_status
+  ngx.var.upstream_status = status; ngx.var.upstream_http_set_cookie = set_cookie
+  ngx.var.cfm_cc_nostore = cc or ""; ngx.var.cfm_xae_nocache = xae or ""
+  ngx.var.upstream_http_vary = vary
+  cache.micro_note()
+end
+_micro_enforce = true
+
+-- the conf sentinel: no "1" → never routes (an older conf, or not location /)
+micro_req("m.com"); ngx.var.cfm_micro_conf = nil
+check(cache.micro_gate() == nil, "no $cfm_micro_conf sentinel → micro_gate never routes")
+micro_req("m.com"); ngx.var.cfm_micro_conf = ""
+check(cache.micro_gate() == nil, "an empty sentinel → never routes")
+micro_req("m.com")
+check(cache.micro_gate() == "@cfm_micro_5s", "sentinel \"1\" → routes (control)")
+
+-- a storable fetch leaves no mark; the next request still routes
+_uncacheable.data = {}; _uncacheable.sets = 0
+micro_req("m.com", "/page")
+log_micro("MISS", "200", nil, "", "", nil)
+check(_uncacheable.sets == 0, "a storable MISS is not marked")
+micro_req("m.com", "/page")
+check(cache.micro_gate() == "@cfm_micro_5s", "an unmarked key routes to micro")
+
+-- each uncacheable reason marks the key; the next request skips micro
+local reasons = {
+  { "404", nil, "", "", nil, "a 404" },
+  { "200", "wp_woocommerce_session_x=1", "", "", nil, "a Set-Cookie" },
+  { "200", nil, "1", "", nil, "Cache-Control private/no-store/no-cache" },
+  { "200", nil, "", "1", nil, "X-Accel-Expires: 0" },
+  { "200", nil, "", "", "*", "Vary: *" },
+}
+for i, rr in ipairs(reasons) do
+  _uncacheable.data = {}
+  local uri = "/r" .. i
+  micro_req("m.com", uri)
+  log_micro("MISS", rr[1], rr[2], rr[3], rr[4], rr[5])
+  check(_uncacheable.last_ttl == 60, rr[6] .. ": marked for 60s")
+  micro_req("m.com", uri)
+  check(cache.micro_gate() == nil, rr[6] .. ": the marked key skips micro")
+  check(ngx.var.cfm_cache_skip == "1", rr[6] .. ": the skip leaves the bypass gate closed")
+  micro_req("m.com", uri .. "?other")
+  check(cache.micro_gate() == "@cfm_micro_5s", rr[6] .. ": another URL of the vhost still routes")
+end
+
+-- the mark is per cache identity: the same path on another address/host routes
+_uncacheable.data = {}
+micro_req("m.com", "/x"); log_micro("MISS", "404")
+micro_req("m.com", "/x"); ngx.var.server_addr = "192.0.2.2"
+check(cache.micro_gate() == "@cfm_micro_5s", "a mark on one destination IP does not skip another")
+
+-- only a real fetch (MISS / EXPIRED) of a micro request marks
+_uncacheable.data = {}; _uncacheable.sets = 0
+micro_req("m.com", "/y")
+for _, st in ipairs({ "HIT", "STALE", "UPDATING", "BYPASS", "", nil }) do log_micro(st, "404") end
+check(_uncacheable.sets == 0, "HIT/STALE/UPDATING/BYPASS/none never mark")
+log_micro("EXPIRED", "404")
+check(_uncacheable.sets == 1, "an EXPIRED refetch that is not storable marks")
+_uncacheable.sets = 0
+ngx.var.cfm_upstream = "cfm_apache"; ngx.var.upstream_cache_status = "MISS"; ngx.var.upstream_status = "404"
+cache.micro_note()
+check(_uncacheable.sets == 0, "a request no micro location served is never marked")
+
+-- the debug stamp names the skip
+_uncacheable.data = {}
+micro_req("m.com", "/z"); log_micro("MISS", "200", "a=b")
+micro_req("m.com", "/z"); ngx.var.http_x_cfm_cache_debug = "1"
+for k in pairs(_header) do _header[k] = nil end
+cache.observe()
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:uncacheable", 1, true),
+      "observe names a remembered-uncacheable key: " .. tostring(_header["X-CFM-Cache"]))
+
+-- no dict (an older conf) → nothing is remembered, micro still routes
+ngx.shared.cfm_cache_uncacheable = nil
+micro_req("m.com", "/nodict"); log_micro("MISS", "404")
+micro_req("m.com", "/nodict")
+check(cache.micro_gate() == "@cfm_micro_5s", "without the dict the gate routes (nothing remembered)")
+ngx.shared.cfm_cache_uncacheable = _uncacheable
+
+-- the panel rail under an armed wildcard: neither tier caches a panel host
+micro_req("cpanel.example.org")
+check(cache.micro_gate() == nil, "micro never routes a panel host under an armed wildcard")
+micro_req("www.example.org")
+check(cache.micro_gate() == "@cfm_micro_10s", "the wildcard's ordinary sub-host routes (control)")
+reset_cache_vars(); ngx.var.host = "webmail.example.org"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "1", "static_gate never caches a panel host under an armed wildcard")
+reset_cache_vars(); ngx.var.host = "www.example.org"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "0", "static_gate caches the wildcard's ordinary sub-host (control)")
+_micro_enforce = false
+
+-- ── PR-3: the debug stamp needs a trusted source, not just the header ─────────
+for k in pairs(_header) do _header[k] = nil end
+ngx.var.http_x_cfm_cache_debug = "1"; ngx.var.host = "m.com"
+_self_ok = false
+cache.observe()
+check(_header["X-CFM-Cache"] == nil, "an untrusted source gets no debug stamp even with the header")
+_self_ok = true
+cache.observe()
+check(_header["X-CFM-Cache"] ~= nil, "a trusted source gets the stamp (control)")
+ngx.var.http_x_cfm_cache_debug = nil
+
+-- ── PR-3: fail closed without cfm_panel_hosts / cfm_selfip ────────────────────
+do
+  package.loaded["cfm_cache"] = nil
+  local saved_ph, saved_si = package.loaded["cfm_panel_hosts"], package.loaded["cfm_selfip"]
+  package.loaded["cfm_panel_hosts"] = nil; package.loaded["cfm_selfip"] = nil
+  package.preload["cfm_panel_hosts"] = function() error("missing") end
+  package.preload["cfm_selfip"] = function() error("missing") end
+  local c2 = require("cfm_cache")
+  c2._rebuild_cache({ { host = "m.com", gen = 1,
+    static = { on = true, recipe = "static_lean" }, micro = { on = true, recipe = "micro_safe", ttl = "5s" } } })
+  _micro_enforce = true
+  micro_req("m.com")
+  check(c2.micro_gate() == nil, "no cfm_panel_hosts → micro routes nothing (fail closed)")
+  reset_cache_vars(); ngx.var.host = "m.com"
+  c2.static_gate()
+  check(ngx.var.cfm_cache_skip == "1", "no cfm_panel_hosts → static caches nothing (fail closed)")
+  for k in pairs(_header) do _header[k] = nil end
+  ngx.var.http_x_cfm_cache_debug = "1"
+  c2.observe()
+  check(_header["X-CFM-Cache"] == nil, "no cfm_selfip → no debug stamp")
+  ngx.var.http_x_cfm_cache_debug = nil
+  _micro_enforce = false
+  package.preload["cfm_panel_hosts"] = nil; package.preload["cfm_selfip"] = nil
+  package.loaded["cfm_panel_hosts"] = saved_ph; package.loaded["cfm_selfip"] = saved_si
+end
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
