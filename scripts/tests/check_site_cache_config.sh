@@ -60,7 +60,7 @@ cd "$(dirname "$0")/../.."
 ORT=configs/openresty.conf
 ANG=configs/angie.conf
 fail=0
-declare -A ncache_of=() clocs_of=()
+declare -A ncache_of=() nstatic_of=() clocs_of=()
 err() { echo "❌ [site-cache-config] $*" >&2; fail=1; }
 
 for f in "$ORT" "$ANG"; do
@@ -97,7 +97,11 @@ for f in "$ORT" "$ANG"; do
   # and header names are): a statement that mentions $cfm_req_auth may only be
   # its map (map $http_authorization $cfm_req_auth) or a cache predicate; the
   # same for $cfm_cache_non200 (its map $upstream_status); $cfm_cache_skip may
-  # only be `set … "1"` or a cache predicate. Both maps hold EXACTLY their two
+  # only be `set … "1"` or a cache predicate. Known, adversarial-only gaps
+  # (tracked for the guard-hardening follow-up): a regex named capture of a
+  # guarded name, a Lua long-string index, a *_by_lua string-form directive,
+  # and an identically mis-indented closing brace in both micro blocks (the
+  # section (f) extractor works by indentation). Both maps hold EXACTLY their two
   # entries. proxy_ignore_headers never lists Set-Cookie / Vary / Cache-Control
   # and proxy_cache_methods never lists a non-GET/HEAD method (quoted or not).
   # Scope: the two reference confs. Files they include are not scanned (today
@@ -123,13 +127,13 @@ for f in "$ORT" "$ANG"; do
           if (ch == "}") { LD--; if (LD == 0) { LUA = 0; out = out " }"; prev = "}"; i++; continue } LT = LT ch; i++; continue }
           LT = LT ch; i++; continue
         }
-        if (Q != "") { if (ch == "\\" && i < n) { out = out ch mask(substr(s, i + 1, 1)); i += 2; continue } if (ch == Q) { Q = ""; out = out ch; prev = ch } else out = out mask(ch); i++; continue }
+        if (Q != "") { if (ch == "\\" && i < n) { out = out ch mask(substr(s, i + 1, 1)); CUR = CUR "x"; i += 2; continue } if (ch == Q) { Q = ""; out = out ch; prev = ch } else { out = out mask(ch); CUR = CUR ch } i++; continue }
         if (VB) { out = out mask(ch); if (ch == "}") VB = 0; i++; continue }
         if (ch == "\\" && i < n) { out = out ch mask(substr(s, i + 1, 1)); CUR = CUR "x"; i += 2; prev = "x"; continue }
         if ((ch == "\"" || ch == "\047") && prev ~ /[[:space:];{}]/) { Q = ch; out = out ch; prev = ch; i++; continue }
         if (ch == "#" && prev ~ /[[:space:];{}]/) break
         if (ch == "{" && prev == "$") { VB = 1; out = out mask(ch); prev = "x"; i++; continue }
-        if (ch == "{") { if (CUR ~ /_by_lua_block[[:space:]]*$/) { LUA = 1; LD = 1 } CUR = ""; out = out ch; prev = ch; i++; continue }
+        if (ch == "{") { if (CUR ~ /^[[:space:]]*[a-z_]+_by_lua_block([[:space:]]+[$][^[:space:]]*)?[[:space:]]*$/) { LUA = 1; LD = 1 } CUR = ""; out = out ch; prev = ch; i++; continue }
         if (ch == ";" || ch == "}") { CUR = ""; out = out ch; prev = ch; i++; continue }
         CUR = CUR ch; out = out ch; prev = ch; i++
       }
@@ -159,6 +163,7 @@ for f in "$ORT" "$ANG"; do
       st = (body ~ (A "proxy_cache[[:space:]]+cfm_static[[:space:]]*;"))
       mi = (body ~ (A "proxy_cache[[:space:]]+cfm_micro_[0-9]+s[[:space:]]*;"))
       if (!st && !mi) m = m " unknown-cache-zone(only-cfm_static-or-cfm_micro_Ns)"
+      if (st) nstatic++
       # Bypass-by-default: serve AND store gated on $cfm_cache_skip.
       if (body !~ (A "proxy_cache_bypass[[:space:]]+[$]cfm_cache_skip[[:space:];]")) m = m " proxy_cache_bypass-$cfm_cache_skip"
       if (body !~ (A "proxy_no_cache[[:space:]]+[$]cfm_cache_skip[[:space:];]"))     m = m " proxy_no_cache-$cfm_cache_skip"
@@ -247,7 +252,9 @@ for f in "$ORT" "$ANG"; do
       ct = cnt(all, A "proxy_cache[[:space:]]+[^[:space:];]+[[:space:]]*;") - cnt(all, A "proxy_cache[[:space:]]+off[[:space:]]*;")
       if (ct != cache_toks) print "ERR " cache_toks " proxy_cache directives sit in checked cache locations but the file has " ct " — one outside any location (server/http level) is inherited UNGATED by location /."
       if (ncache == 0) print "ERR no cache location found at all — this gate must verify something."
+      if (nstatic == 0) print "ERR no proxy_cache cfm_static location — did Tier A activation get removed? (this gate must verify something)"
       print "NCACHE " ncache + 0
+      print "NSTATIC " nstatic + 0
 
       # Rail maps: exactly their two entries (one extra key re-opens the leak).
       mapcheck("^[[:space:]]*map[[:space:]]+[$]http_authorization[[:space:]]+[$]cfm_req_auth[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"\" \"\";", "$http_authorization → $cfm_req_auth")
@@ -278,8 +285,9 @@ for f in "$ORT" "$ANG"; do
     }
   ' "$f")
   ncache_of["$f"]=$(sed -n 's/^NCACHE //p' <<< "$parsed")
+  nstatic_of["$f"]=$(sed -n 's/^NSTATIC //p' <<< "$parsed")
   clocs_of["$f"]=$(sed -n 's/^CLOC //p' <<< "$parsed" | sort)
-  parsed=$(grep -Ev '^(NCACHE|CLOC) ' <<< "$parsed" || true)
+  parsed=$(grep -Ev '^(NCACHE|NSTATIC|CLOC) ' <<< "$parsed" || true)
   if [ -n "$parsed" ]; then
     while IFS= read -r line; do
       err "$f: ${line#ERR }"
@@ -290,13 +298,10 @@ for f in "$ORT" "$ANG"; do
   if ! grep -Eq '^[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/cfm_static[[:space:]]' "$f"; then
     err "$f: no 'proxy_cache_path .../cfm_static' zone declared — Tier A config missing?"
   fi
-  # The other anchors (a cfm_static cache location, the bypass / no_cache /
-  # only-200 predicates, both rail maps, the per-server $cfm_cache_skip "1")
-  # are enforced statement-aware in section (a), which also fails when it finds
-  # no cache location at all.
-  if ! grep -Eq '(^|[;{}[:space:]])proxy_cache[[:space:]]+cfm_static[[:space:]]*;' "$f"; then
-    err "$f: no 'proxy_cache cfm_static;' anywhere — did Tier A activation get removed? (this gate must verify something)"
-  fi
+  # The other anchors (at least one cfm_static cache location, the bypass /
+  # no_cache / only-200 predicates, both rail maps, the per-server
+  # $cfm_cache_skip "1") are enforced statement-aware in section (a), counted
+  # by the parser, so a commented-out directive never satisfies them.
 
   # ── (b2) Tier B micro-cache zones (Phase B1): all six TTL buckets declared ───
   # Each zone's dir must exist before `-t` (the daemon + installers provision all
@@ -324,7 +329,7 @@ done
 # location (any zone; whitespace-normalised, sorted) per conf; diff them. Comparing counts alone would pass a refactor
 # that added a cache to one path in openresty and a DIFFERENT path in angie —
 # the exact drift this guard exists to stop.
-ort_n=$(grep -Ec '^[[:space:]]*proxy_cache[[:space:]]+cfm_static[[:space:]]*;' "$ORT" || true)
+ort_n=${nstatic_of[$ORT]:-?}
 if [ "${clocs_of[$ORT]:-x}" != "${clocs_of[$ANG]:-y}" ]; then
   err "openresty.conf and angie.conf cache DIFFERENT locations (${ncache_of[$ORT]:-?} vs ${ncache_of[$ANG]:-?}; every zone compared, not merely a count); the two edges must cache the same paths. Divergence:"
   diff <(printf '%s\n' "${clocs_of[$ORT]}") <(printf '%s\n' "${clocs_of[$ANG]}") 2>/dev/null | sed 's/^/       /' >&2 || true

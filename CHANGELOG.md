@@ -99,9 +99,10 @@ back-filled here — see the git/PR history for that period.
   - pins both rail maps to exactly their two entries. The only-200 map was
     never pinned before, so an added `"404" ""` would have started storing
     404s unnoticed;
-  - lets nothing else write `$cfm_req_auth`, `$cfm_cache_non200` or
-    `$cfm_cache_skip`: no `set`, `geo`, `split_clients` or other map, no
-    inline Lua, in any letter case;
+  - rejects the usual ways of writing `$cfm_req_auth`, `$cfm_cache_non200` or
+    `$cfm_cache_skip` anywhere else: `set`, `set_by_lua_block`, `geo`,
+    `split_clients`, another map, or an inline-Lua assignment, in any letter
+    case;
   - requires `set $cfm_cache_skip "1"` in every server block that holds a cache
     location;
   - compares the cache locations of the two confs across every zone.
