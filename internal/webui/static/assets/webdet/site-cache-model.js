@@ -515,7 +515,7 @@ export function debugCurl(host, path = "/", taken = []) {
   let h = canonHost(host);
   if (isWildcard(h)) {
     const suffix = h.slice(2);
-    const own = new Set((taken || []).map((t) => canonHost(t)));
+    const own = new Set((taken || []).map((t) => canonHost(t)).filter((t) => t.endsWith(`.${suffix}`)));
     const labels = ["www", "cfm-check"];
     for (let i = 2; labels.length < 2 + own.size; i += 1) labels.push(`cfm-check${i}`);
     h = labels.map((l) => `${l}.${suffix}`).find((c) => !own.has(c));

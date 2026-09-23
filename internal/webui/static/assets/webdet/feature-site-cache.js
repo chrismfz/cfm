@@ -235,10 +235,12 @@ export const siteCacheMixin = {
         this.scLoadError = "";
         this.scLoaded = true;
       } catch (err) {
+        if (seq !== this.scRefreshSeq) return; // superseded: a newer read decides
         // Keep the last list rather than showing "no policies" on a failed read.
         this.scLoadError = `Could not load the policies: ${this.formatApiError(err)}`;
       }
       const stats = await statsP;
+      if (seq !== this.scRefreshSeq) return;
       if (stats) this.scStats = stats;
       if (!this.scLoadError) this.resyncSCEdit();
       this.adoptSCScopedPolicy();
@@ -489,6 +491,8 @@ export const siteCacheMixin = {
       } else if (!cover) after = isWildcard(host) ? `${who} are then not cached.` : `${host} is then not cached.`;
       else if (isOptOut(coverEntry)) after = `${who} then ${verb} ${cover}, an opt-out: not cached.`;
       else after = `${who} then ${verb} ${cover} and ${isWildcard(host) ? "are" : "is"} served from that wildcard's cache (purge ${cover} if that holds something wrong).`;
+      // A scoped list may miss a narrower operator wildcard, which would win.
+      if (cover && this.isScoped) after += " (A narrower wildcard policy of the server operator, not shown here, would take precedence.)";
       if (!window.confirm(`Delete the policy for ${host}? ${after} Adding a policy for it again starts from an empty cache.`)) return;
       return this.runSCAction("Remove", async () => {
         await this.postJSON(`v1/site-cache/remove?host=${encodeURIComponent(host)}`, {});
