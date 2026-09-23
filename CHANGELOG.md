@@ -17,6 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Bulk block ("Block selected" in cfm-admin, `POST /api/v1/firewall/block/batch`)
+  is now one firewall transaction instead of two `nft` processes per IP.** A
+  256-IP request cost ~512 `nft` processes on the exec engine (up to ~1,024
+  when the IPs were already blocked).
+  It now costs three (one read per address family, one write), and one netlink
+  transaction on nftlib; 5,000 addresses take under 0.1s on either engine. A
+  write is retried from a fresh read if the block set changed meanwhile, never
+  split into one call per IP. It only adds or extends a block: an IP already
+  blocked permanently, or for longer, keeps that block (a TTL'd bulk block used
+  to shorten it); the response now says how many were `added`, `extended` and
+  `kept`, and cfm-admin reports the kept ones. The request is one transaction,
+  so if it fails every IP in it is reported failed (the error once, at the top
+  of the response) and stays selected for retry. `0.0.0.0`/`::` are now
+  skipped as `unspecified` rather than reported blocked. The new
+  `AddBlockBatch` backend call behind it is the building block for faster
+  fleet blocklist propagation.
+
 ### Fixed
 - **The ChallengeV2 geo check at verify now reads the current GeoLite2
   database.** When a country/ASN policy is armed at `challenge_v2`, verify
@@ -177,24 +195,6 @@ back-filled here — see the git/PR history for that period.
 
   Log and corpus only: no tell, weight or threshold changed, and nothing
   scores on network identity.
-
-### Changed
-- **Bulk block ("Block selected" in cfm-admin, `POST /api/v1/firewall/block/batch`)
-  is now one firewall transaction instead of two `nft` processes per IP.** A
-  256-IP request cost ~512 `nft` processes on the exec engine (up to ~1,024
-  when the IPs were already blocked).
-  It now costs three (one read per address family, one write), and one netlink
-  transaction on nftlib; 5,000 addresses take under 0.1s on either engine. A
-  write is retried from a fresh read if the block set changed meanwhile, never
-  split into one call per IP. It only adds or extends a block: an IP already
-  blocked permanently, or for longer, keeps that block (a TTL'd bulk block used
-  to shorten it); the response now says how many were `added`, `extended` and
-  `kept`, and cfm-admin reports the kept ones. The request is one transaction,
-  so if it fails every IP in it is reported failed (the error once, at the top
-  of the response) and stays selected for retry. `0.0.0.0`/`::` are now
-  skipped as `unspecified` rather than reported blocked. The new
-  `AddBlockBatch` backend call behind it is the building block for faster
-  fleet blocklist propagation.
 
 ### Fixed
 - **Leniency `MATCH_COUNTRY` now matches any ISO country code.** It compared
