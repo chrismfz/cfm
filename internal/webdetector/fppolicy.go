@@ -38,6 +38,7 @@ package webdetector
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -86,7 +87,22 @@ type fpPolicyState struct {
 	// check (GeoPolicyActionForIP). Wired from the engine's enricher; nil
 	// means geo policies simply can't influence verify (fail-open).
 	geoResolver func(ip string) (string, uint64)
+	// geoSources reports which geo lookups the wired resolver can answer
+	// right now (ASN database loaded, City database loaded); nil with a
+	// non-nil resolver means "assume both". See SetFingerprintPolicyGeo.
+	geoSources func() (asn, country bool)
+	// resolverKnown: an engine has declared this process's enrichment state
+	// (SetFingerprintPolicyGeoResolver has run, nil or not). Until then a nil
+	// resolver means "not built yet", not "enrichment off" — the first pull
+	// can land before the first engine build — so nothing is warned.
+	resolverKnown bool
+	// geoWarn is the geo-degradation warning last logged ("" = none), so the
+	// every-60s pull logs it only when it CHANGES, not every minute.
+	geoWarn string
 }
+
+// fpPolicyLogf is logging.Logf, swappable so tests can read the warnings.
+var fpPolicyLogf = logging.Logf
 
 var fpPolicies = fpPolicyState{enabled: true}
 
@@ -152,6 +168,7 @@ func SetFingerprintPolicies(ps []FingerprintPolicy) {
 	fpPolicies.byASN = byASN
 	fpPolicies.lastSet = time.Now()
 	fpPolicies.lastSize = total
+	geoLine := noteGeoDegradationLocked()
 	fpPolicies.mu.Unlock()
 
 	if dropped > 0 {
@@ -160,6 +177,9 @@ func SetFingerprintPolicies(ps []FingerprintPolicy) {
 	if changed {
 		logging.Logf("[fppolicy] policy set updated: %d armed (%d tls, %d country, %d asn)",
 			total, len(byID), len(byCountry), len(byASN))
+	}
+	if geoLine != "" {
+		fpPolicyLogf("%s", geoLine)
 	}
 }
 
@@ -177,7 +197,11 @@ func ConfigureFingerprintPolicyEnforcement(enabled bool, allowIDs []string) {
 	fpPolicies.mu.Lock()
 	fpPolicies.enabled = enabled
 	fpPolicies.allow = allow
+	geoLine := noteGeoDegradationLocked()
 	fpPolicies.mu.Unlock()
+	if geoLine != "" {
+		fpPolicyLogf("%s", geoLine)
+	}
 }
 
 // FingerprintPolicyForID returns the armed action for a fingerprint id, or ""
@@ -205,15 +229,151 @@ func FingerprintPolicyForID(id string) string {
 }
 
 // SetFingerprintPolicyGeoResolver wires the IP→(countryISO, asn) resolver the
-// VERIFY-side geo check uses (GeoPolicyActionForIP). NewEngine calls it on
-// every engine build (i.e. on every reload): with the enricher's cached lookup
-// when that engine has one, with nil when it doesn't — so the gate always
-// follows the CURRENT config. nil disables the verify-side check (fail-open —
-// the decision-path floor still works from its own inputs).
+// VERIFY-side geo check uses (GeoPolicyActionForIP), with its databases
+// assumed complete. Production wires through SetFingerprintPolicyGeo, which
+// also says which databases are loaded; this form is for tests and callers
+// with no enricher to ask.
 func SetFingerprintPolicyGeoResolver(fn func(ip string) (string, uint64)) {
+	SetFingerprintPolicyGeo(fn, nil)
+}
+
+// SetFingerprintPolicyGeo wires the verify-side geo resolver together with
+// sources, which reports which lookups it can answer right now (ASN database
+// loaded, City database loaded). NewEngine calls it on every engine build
+// (i.e. on every reload): with the enricher's lookup and database state when
+// that engine has one, with (nil, nil) when it doesn't — so the gate always
+// follows the CURRENT config. A nil resolver disables the verify-side check
+// (fail-open — the decision-path floor still works from its own inputs); a
+// nil sources with a resolver means "assume both databases". sources is
+// called under the store's lock: it must be cheap and must not call back into
+// this package.
+func SetFingerprintPolicyGeo(resolver func(ip string) (string, uint64), sources func() (asn, country bool)) {
 	fpPolicies.mu.Lock()
-	fpPolicies.geoResolver = fn
+	fpPolicies.geoResolver = resolver
+	fpPolicies.geoSources = sources
+	fpPolicies.resolverKnown = true
+	geoLine := noteGeoDegradationLocked()
 	fpPolicies.mu.Unlock()
+	if geoLine != "" {
+		fpPolicyLogf("%s", geoLine)
+	}
+}
+
+// geoPolicyCountsLocked counts the live armed policies a missing geo lookup
+// degrades: ASN policies (any tier) and country challenge_v2 policies. Caller
+// holds mu.
+func geoPolicyCountsLocked() (asn, countryV2 int) {
+	for _, p := range fpPolicies.byASN {
+		if geoPolicyLive(p, true) != "" {
+			asn++
+		}
+	}
+	for _, p := range fpPolicies.byCountry {
+		if geoPolicyLive(p, true) == "challenge_v2" {
+			countryV2++
+		}
+	}
+	return asn, countryV2
+}
+
+// geoDegradationLocked says what armed geo policies CANNOT do on this node, or
+// "" when nothing armed is degraded. Two causes are detected, both leaving a
+// geo lookup the policies need unanswerable:
+//   - web-detector enrichment off ([webdetector] ENRICH = 0): NewEngine wires
+//     no resolver and the decision bridge has no enricher;
+//   - enrichment on but a GeoLite2 database not loaded (the default ENRICH
+//     with no MaxMind download yet): enrich.New never fails, it just answers
+//     no ASN / no country — so this is the likelier of the two in practice.
+//
+// Then:
+//   - with no ASN, an ASN policy — any tier — never matches: the ASN comes
+//     only from the local GeoLite2 lookup, on the decision path and at verify
+//     alike;
+//   - with no country, a country challenge_v2 policy still challenges (from
+//     the country the edge sends) but gets no Rung-1 check at verify: it acts
+//     as plain challenge, and its solves carry no v2= grain.
+//
+// Both are the designed fail-open, but silent: nothing else says an armed
+// policy is not doing what cfm-web shows. A country challenge policy is not
+// counted — it works whenever the edge sends the client's country, which this
+// node cannot see from here (without edge geo it never matches either; the
+// v2 line says so). Caller holds mu.
+func geoDegradationLocked() string {
+	if !fpPolicies.enabled || !fpPolicies.resolverKnown {
+		return ""
+	}
+	var cause, remedy string
+	hasASN, hasCountry := false, false
+	switch {
+	case fpPolicies.geoResolver == nil:
+		cause = "web-detector enrichment is off ([webdetector] ENRICH = 0)"
+		remedy = "Set ENRICH = 1 in [webdetector]"
+	case fpPolicies.geoSources == nil:
+		return "" // databases not reported: assumed complete
+	default:
+		hasASN, hasCountry = fpPolicies.geoSources()
+		switch {
+		case !hasASN && !hasCountry:
+			cause = "no GeoLite2 database is loaded (GeoLite2-ASN.mmdb, GeoLite2-City.mmdb)"
+		case !hasASN:
+			cause = "the GeoLite2-ASN database is not loaded"
+		case !hasCountry:
+			cause = "the GeoLite2-City database is not loaded"
+		default:
+			return ""
+		}
+		remedy = "Install the missing database (the MaxMind updater writes /var/lib/cfm/maxmind)"
+	}
+	asn, v2 := geoPolicyCountsLocked()
+	var parts []string
+	if asn > 0 && !hasASN {
+		parts = append(parts, fmt.Sprintf("%d armed ASN %s cannot match (the ASN comes only from the local GeoLite2 lookup)", asn, policies(asn)))
+	}
+	if v2 > 0 && !hasCountry {
+		verb := "act"
+		if v2 == 1 {
+			verb = "acts"
+		}
+		parts = append(parts, fmt.Sprintf("%d armed country challenge_v2 %s %s as plain challenge (no Rung-1 check at verify; the challenge itself also needs the edge to send the client's country)", v2, policies(v2), verb))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return cause + ": " + strings.Join(parts, "; ") + ". " + remedy + ", or disarm them in cfm-web."
+}
+
+func policies(n int) string {
+	if n == 1 {
+		return "policy"
+	}
+	return "policies"
+}
+
+// noteGeoDegradationLocked recomputes the degradation and returns the line to
+// log when it CHANGED since the last one logged ("" = nothing new). Caller
+// holds mu for writing and logs the line after unlocking. Two setters racing
+// (the policy pull and a reload) can print their lines out of order; the
+// stored state is still right and the next change re-logs it.
+func noteGeoDegradationLocked() string {
+	msg := geoDegradationLocked()
+	if msg == fpPolicies.geoWarn {
+		return ""
+	}
+	fpPolicies.geoWarn = msg
+	if msg != "" {
+		return "[fppolicy] WARNING: " + msg
+	}
+	// Cleared: say why, so the line is never a false "all good".
+	var why string
+	switch asn, v2 := geoPolicyCountsLocked(); {
+	case !fpPolicies.enabled:
+		why = "FP_POLICY = 0: no policy is enforced"
+	case asn == 0 && v2 == 0:
+		why = "the degraded policies were disarmed or expired"
+	default:
+		why = "the geo lookups they need are available again"
+	}
+	return "[fppolicy] armed geo policies are no longer degraded (" + why + ")"
 }
 
 // geoPolicyLive re-checks expiry at lookup time (same contract as
@@ -263,8 +423,8 @@ func GeoPolicyAction(country string, asnFn func() uint64) string {
 
 // GeoPolicyActionForIP resolves an IP's country/ASN via the wired resolver
 // and returns the armed action (""). Verify-side use (the Rung-1 v2 gate on
-// solves) — off the request hot path, so the resolver's cached-or-async
-// lookup cost is fine.
+// solves). NewEngine wires a live mmdb read (microseconds, no DNS), the same
+// source as the solve line's cc=/asn=.
 func GeoPolicyActionForIP(ip string) string {
 	fpPolicies.mu.RLock()
 	resolver := fpPolicies.geoResolver

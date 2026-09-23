@@ -116,25 +116,37 @@ func (lp *leniencyPolicy) matchesIP(ipStr string, enr *enrich.Enricher) (bool, s
 	if lp == nil || enr == nil || ipStr == "" {
 		return false, ""
 	}
+	return lp.matchGeo(enr.LookupGeoFast(ipStr)) // Country/ASN only; avoid blocking PTR rDNS
+}
 
-	r := enr.LookupGeoFast(ipStr) // matches on Country/ASN only; avoid blocking PTR rDNS
-
-	// Country match — supports both ISO codes ("GR") and full names ("Greece")
-	if len(lp.Countries) > 0 && r.Country != "" {
-		countryUpper := strings.ToUpper(r.Country)
+// matchGeo matches one resolved geo record against the policy.
+//
+// Country: a MATCH_COUNTRY token may be an ISO code ("GR") or an English name
+// ("GREECE"). It is matched against the record's ISO code FIRST. It used to go
+// through the record's English NAME only, and that failed two ways: an ISO
+// code whose country is missing from countryNameToISO (only ~50 are listed —
+// "EE", "LT", "LU", …) never matched at all, and the name itself differs by
+// database and release — IPLocate (and MaxMind from ~2023 to 2026-02) says
+// "The Netherlands", current MaxMind "Netherlands" — so "NL" and "NETHERLANDS"
+// both missed there. Tokens split on spaces too, so a multi-word name
+// ("UNITED KINGDOM") can never match: ISO codes are the reliable form.
+func (lp *leniencyPolicy) matchGeo(r enrich.Result) (bool, string) {
+	if lp == nil {
+		return false, ""
+	}
+	iso := strings.ToUpper(strings.TrimSpace(r.CountryISO))
+	name := strings.ToUpper(strings.TrimSpace(r.Country))
+	if len(lp.Countries) > 0 && (iso != "" || name != "") {
 		for _, c := range lp.Countries {
-			// Direct match: config="GREECE" matches enricher="Greece"
-			if c == countryUpper {
-				return true, "country=" + c
+			switch {
+			case iso != "" && c == iso: // "GR" == record ISO
+			case name != "" && c == name: // "GREECE" == record name
+			case iso != "" && countryNameToISO[c] == iso: // "NETHERLANDS" → NL, whatever the db names it
+			case name != "" && countryNameToISO[name] == c: // record name → ISO (e.g. its ISO field was empty)
+			default:
+				continue
 			}
-			// ISO→name: config="GR" matches enricher="Greece"
-			if iso, ok := countryNameToISO[countryUpper]; ok && iso == c {
-				return true, "country=" + c
-			}
-			// Name→ISO: config="GREECE" matches enricher="GR" (if enricher returns ISO)
-			if iso, ok := countryNameToISO[c]; ok && iso == countryUpper {
-				return true, "country=" + c
-			}
+			return true, "country=" + c
 		}
 	}
 
@@ -151,7 +163,9 @@ func (lp *leniencyPolicy) matchesIP(ipStr string, enr *enrich.Enricher) (bool, s
 	return false, ""
 }
 
-// countryNameToISO maps enricher full names → ISO-2 codes.
+// countryNameToISO maps English country names → ISO-2 codes, so a
+// MATCH_COUNTRY written as a name ("GREECE") still matches. ISO codes need no
+// entry: they are compared to the record's ISO code directly (matchGeo).
 var countryNameToISO = map[string]string{
 	"GREECE":               "GR",
 	"CYPRUS":               "CY",

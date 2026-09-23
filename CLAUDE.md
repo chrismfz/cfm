@@ -472,7 +472,12 @@ atomic for that reason. Real GeoLite2 files can't be committed, but
 `internal/enrich/mmdb_testutil_test.go` generates spec-valid `.mmdb` files at
 test time — use it rather than assuming mmdb code is untestable
 (`TestHotSwapNeverReadsAClosedReader` reproduces the crash on the old code
-within 2s).
+within 2s). Two schemas land under the GeoLite2 file names — MaxMind's and,
+without a MaxMind account, IPLocate's flat one — and both readers (the Go
+enricher's `geodb.go`, the edge's `cfm_geo.lua`) must read both: for a long
+time neither read IPLocate's, and the node silently had no geo at all. Measure
+a third-party schema on the REAL file, never from its CSV docs: IPLocate's
+`asn` is a string, and a typed-`uint` decode failed the whole record.
 
 ### Traffic classifier / fingerprint reputation ("evidence ledger") — shadow-first signals, operator-armed enforcement
 New Sep 2026. The node convicts a **fingerprint** (TLS/JA4, e.g. `c28caa00`) and
@@ -510,10 +515,10 @@ REPORTED — mv/hc/dm/dpr/raf corpus-only and scored by nothing, ptr/tch/key
 also the no_input amplifier's inputs; absent keys = not reported, never a
 fabricated zero; since 2026-09-22 every solve AND reject line also carries
 `cc=`/`asn=`/`asn_name=`/`ptr=`, resolved once at verify — country/ASN from a
-live mmdb read (the cached record can be a day stale), PTR cached-or-async —
-NOT the values the `v2=geo` arm check matched (it reads the cached record, so
-after an mmdb update a `v2=geo` line's `cc=` can sit outside the armed set:
-that is the gate lagging, a real FP mechanism, not a render bug);
+live mmdb read (the cached record can be a day stale), PTR cached-or-async;
+the `v2=geo` arm check reads the same live database (it used to read the
+cached record, and after an mmdb update a `v2=geo` line's `cc=` could sit
+outside the armed set — seen now, that is a bug);
 top-level `ptr=` is reverse DNS, NOT `sig=ptr:` — and a reject writes its own
 `challenge_v2_reject` history row, never `challenge_solved`, so
 `detection_history type=challenge_v2_reject node="all"` is the FP-hunting

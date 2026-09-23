@@ -15,6 +15,7 @@ require (
 	github.com/miekg/dns v1.1.73
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/oschwald/geoip2-golang v1.13.0
+	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sync v0.23.0
@@ -47,7 +48,6 @@ require (
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/nsf/termbox-go v1.1.2 // indirect
-	github.com/oschwald/maxminddb-golang v1.13.1 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pquerna/otp v1.5.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect

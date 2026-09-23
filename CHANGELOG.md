@@ -17,6 +17,23 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **The ChallengeV2 geo check at verify now reads the current GeoLite2
+  database.** When a country/ASN policy is armed at `challenge_v2`, verify
+  checks whether the solving client falls under it. That check went through
+  the enrichment cache, whose entries survive a database update for up to 24h
+  (or hold an empty answer if cached before the database loaded). So after an
+  update it could reject a client the current database places outside the
+  armed set — with a `v2=geo` line whose `cc=` contradicted it — or let
+  through one it now places inside. It now reads the database directly
+  (microseconds, no DNS), the same source as the `cc=`/`asn=` on the line.
+  **Enforcement change** for armed geo `challenge_v2` policies only; nothing
+  changes where none is armed. Not changed: whether to serve the challenge at
+  all is still decided from the edge's own copy of the database, which the
+  edge reads until its workers are reloaded.
+
+## 2026.09.22
+
 ### Security
 - **WAF: WordPress core page-template traversal, CVE-2026-87902 (critical,
   4.7.0–7.1.1).** Unauthenticated `pagename` traversal makes WordPress include a
@@ -37,6 +54,26 @@ back-filled here — see the git/PR history for that period.
   cannot be updated.
 
 ### Added
+- **A warning when armed country/ASN policies can't fully work on a node.**
+  Country/ASN policies need the node's GeoLite2 lookups. When a lookup is
+  missing, an armed ASN policy (any tier) never matches, and a country
+  `challenge_v2` policy acts as a plain challenge — it still challenges from
+  the country the edge sends, but a failing solve is not rejected. That is the
+  designed fail-open, but nothing said so: cfm-web showed the policies armed.
+  Two causes are detected:
+  - web-detector enrichment off (`[webdetector] ENRICH = 0`);
+  - enrichment on (the default) but the GeoLite2 ASN or City database not
+    loaded, e.g. before the first MaxMind download. This is the likelier one.
+  The main log now says which cause, with the counts and what to do:
+  `[fppolicy] WARNING: the GeoLite2-ASN database is not loaded: 2 armed ASN
+  policies cannot match …. Install the missing database (the MaxMind updater
+  writes /var/lib/cfm/maxmind), or disarm them in cfm-web.` It is logged once
+  when the situation starts or changes, not on every 60s policy pull. When it
+  clears, one line says why: `[fppolicy] armed geo policies are no longer
+  degraded (the geo lookups they need are available again | the degraded
+  policies were disarmed or expired | FP_POLICY = 0: no policy is enforced)`.
+  Fingerprint policies and country `challenge` policies are never warned about;
+  those work from the edge. No enforcement change.
 - **Site Cache — Tier B micro-cache stats labelling (Phase B3c).** Micro-cache
   hits are now counted under their own `cfm_micro` zone total instead of being
   folded into `cfm_static`: the edge `log_by_lua` labels each cache verdict by
@@ -160,6 +197,42 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **Leniency `MATCH_COUNTRY` now matches any ISO country code.** It compared
+  the configured value against the client's country NAME, through a built-in
+  table of ~50 names. So an ISO code for a country outside that table (`EE`,
+  `LT`, `LU`, …) never matched, and where the database names the Netherlands
+  "The Netherlands" (IPLocate, and MaxMind releases from ~2023 to Feb 2026)
+  neither did `NL` or `NETHERLANDS`. The client's ISO code is now compared
+  first; single-word English names keep working. Prefer ISO codes: a
+  multi-word name ("United Kingdom") never matched, since spaces separate
+  tokens. Nodes whose `MATCH_COUNTRY` lists such a code start applying
+  the softer leniency block to those clients; the shipped `GR,CY` is
+  unaffected.
+- **Nodes without a MaxMind account had no country or ASN anywhere.** When
+  `MAXMIND_ACCOUNT_ID` / `MAXMIND_LICENSE_KEY` are not set, the MaxMind updater
+  downloads IPLocate's free databases and installs them as
+  `GeoLite2-ASN.mmdb` / `GeoLite2-City.mmdb`. But their records use a different
+  (flat) schema, and neither reader could use them:
+  - the daemon's GeoIP library refused the files outright, so the enricher
+    loaded no database at all — no ASN, no country for detectors, WAF
+    history, challenge `cc=`/`asn=`, traffic and geo policies;
+  - the edge's `cfm_geo.lua` read only MaxMind's `country.iso_code`, so every
+    lookup returned an empty country as a VALID answer, cached like a real
+    "no country".
+  Both now read either schema. Verified against the real IPLocate files: the
+  daemon resolves e.g. `94.68.42.127` to AS6799 / GR / Greece, and a real
+  OpenResty with `lua-resty-maxminddb` returns GR / US / AU where it returned
+  "" before. City names stay empty on IPLocate, which has none. A database
+  that fails to load is now logged once (`[enrich] WARNING: cannot load geo
+  database …`) instead of silently.
+  **Behaviour change on IPLocate nodes:** settings that silently did nothing
+  there start to apply after the upgrade — country traffic rules (edge and
+  bridge), armed country/ASN policies, country/ASN leniency, and solver-farm
+  country concentration. MaxMind nodes are unaffected. That covers every edge
+  node in the fleet today: their WAF events all carry an ASN and a country,
+  which an IPLocate node could not produce. A node can still end up on
+  IPLocate even with a MaxMind key: if its first MaxMind download fails, the
+  updater installs IPLocate's files instead. No configuration change.
 - **Turning web-detector enrichment off no longer leaves country/ASN
   `challenge_v2` policies enforced at verify.** On every reload the web
   detector is rebuilt, and each rebuild wired the verify-side geo lookup
@@ -325,8 +398,6 @@ back-filled here — see the git/PR history for that period.
   every `cfm dnat on`, which leaves a brief window of a second or two. It can take a minute, because nftlib's
   `EnsureBase` is slow on a large ruleset. Don't use `cfm dnat off` first:
   that leaves :80/:443 un-redirected for that whole time.
-
-## 2026.09.22
 
 ### Fixed
 - **False "agent is down" alerts from nodes on the nftlib firewall backend.**

@@ -658,21 +658,32 @@ func NewEngine(cfg Config) *Engine {
 
 	// Geo resolver for the verify-side challenge_v2 gate (policy-kinds slice):
 	// lets GeoPolicyActionForIP map a solving client's IP to country/ASN.
-	// Cached-or-async — a cold IP resolves on a later solve attempt (fail-open).
+	// A LIVE mmdb read (LookupGeoFast: microseconds, no DNS) — the same source
+	// the solve line's cc=/asn= come from, so the gate and the line agree.
+	// "Live" = the database the enricher has loaded: a newer file is swapped
+	// in by the refresh that Lookup cache misses drive (at most statEvery,
+	// 5 min, behind on any node seeing traffic). It
+	// used to read through the enricher's cache, whose HITS an mmdb refresh does
+	// not purge: a record up to cacheTTL (24h) stale — a v2=geo reject of a
+	// client the current database places outside the armed set — or empty
+	// when cached before the mmdb loaded. (A miss already read live.)
 	// Set on EVERY engine build and cleared when this one has no enricher,
 	// like the solve enricher below: the factory rebuilds the engine on each
 	// reload, and a reload that turns enrichment off (ENRICH = 0 — enrich.New
 	// itself never fails) must not leave the verify gate enforcing geo
 	// policies through the PREVIOUS engine's enricher, which that closure also
 	// kept alive.
+	// The sources half tells the policy store which databases are loaded, so
+	// it can warn when armed ASN / country challenge_v2 policies cannot work
+	// here (fppolicy.go geoDegradationLocked).
 	if e.enr != nil {
 		enr := e.enr
-		SetFingerprintPolicyGeoResolver(func(ip string) (string, uint64) {
-			r := enr.LookupCachedOrAsync(ip)
+		SetFingerprintPolicyGeo(func(ip string) (string, uint64) {
+			r := enr.LookupGeoFast(ip)
 			return r.CountryISO, uint64(r.ASN)
-		})
+		}, func() (bool, bool) { return enr.HasASN(), enr.HasCountry() })
 	} else {
-		SetFingerprintPolicyGeoResolver(nil)
+		SetFingerprintPolicyGeo(nil, nil)
 	}
 
 	// Network identity for every solve and Rung-1 reject (challenge_geo.go):

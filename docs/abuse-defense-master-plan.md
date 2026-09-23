@@ -280,7 +280,11 @@ already opened.
         `would_enforce` logonly WARN noise there (no enforcement — the panel
         probe is block-tier only); country hit wins over ASN hit at lookup;
         cold IPs (enrich cache miss) fail open for up to the 90s edge
-        decision-cache window.
+        decision-cache window; without the node's GeoLite2 lookups
+        (`[webdetector] ENRICH = 0`, or the ASN / City database not loaded)
+        an ASN policy never matches and a country `challenge_v2` acts as
+        plain challenge (fail-open) — the node logs `[fppolicy] WARNING: …`
+        naming the cause, with the counts, once per change (2026-09-22).
       - [x] **ChallengeV2 arm surfaces — DONE 2026-09-22 (slices A-D all
         shipped): v2 as an on-demand tier from WAF rules / vhost control /
         traffic rules / scoped customers.** Insight that makes this cheap: challenge_v2 is
@@ -445,13 +449,18 @@ already opened.
         `sw_renderer`+`outer_zero` (=100) case readable was bot-shaped (AWS
         EC2, and c28caa00 bursts on vhosts the independent solver-farm
         detector convicted); no weight change was warranted.
-      - OPEN (enforcement): the verify-side geo arm check
-        (`GeoPolicyActionForIP`) matches the enricher's CACHED record — up to
-        24h stale after an mmdb update, empty if cached before the mmdb
-        loaded — while the solve line now shows the live identity. A
-        `v2=geo` reject whose `cc=` is outside the armed set is that lag
-        biting. Switching the gate to a live mmdb read is an enforcement
-        change, left out of #1462 on purpose.
+      - DONE 2026-09-23 (enforcement): the verify-side geo arm check
+        (`GeoPolicyActionForIP`) matched through the enricher's cache — a hit
+        up to 24h stale after an mmdb update, or empty if cached before the
+        mmdb loaded — while the solve line showed the live identity. It now
+        reads the same live mmdb (`LookupGeoFast`), so gate and line agree.
+        Not changed, and a separate lag: the decision-path FLOOR takes the
+        country from the edge first (`cfm_geo.lua`, which opens the mmdb once
+        per worker and never reopens it, plus a 90s shared-dict cache), so a
+        country floor can follow the OLD database until the edge workers are
+        reloaded; the enricher's cache is used there only for ASN and when
+        the edge sends no country. Either way verify now acts on the current
+        database (a floored-but-no-longer-armed client just gets plain PoW).
       - OPEN, decide before arming ad-running vhosts: Google's proxy (PTR
         `google-proxy-*.google.com`, AS15169, fp `c41a0f3f`) scores 140
         (`sw_renderer,touch_lie,no_input`) and WOULD be rejected — seen in
