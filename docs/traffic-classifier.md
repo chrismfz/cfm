@@ -826,8 +826,8 @@ device-claim group; as an independent opener it was also 0 for every F row):
   floors still gate a finding). The subnet-spread track still covers the vhost,
   and so do the Rung-1 tells, which read the page's own report. A policy can no
   longer be armed on a Cloudflare egress fingerprint, which was never a
-  client's anyway, and anyone who relays through Cloudflare carries no
-  fingerprint, as before carried only Cloudflare's.
+  client's anyway. Anyone who relays through Cloudflare now carries no
+  fingerprint; before, they carried Cloudflare's, never their own.
 - **TLS-inspecting middleboxes are not rare.** Human Chrome and Firefox UAs
   (improv.gr, fcs.com.gr, webmail.deyadoxatou.gr) arrive over OpenSSL-shaped
   lists with CCM, ARIA or DHE suites that no browser offers: antivirus or
