@@ -17,13 +17,32 @@ package.loaded["cfm_bridge_cfg"] = { get = function()
   return { site_cache = _site_cache_on, micro_cache_enforce = _micro_enforce }
 end }
 
+-- Trusted-source predicate for the debug stamp (cfm_selfip). Default trusted so
+-- the observe assertions below run; flipped for the gate test.
+local _self_ok = true
+package.loaded["cfm_selfip"] = { is_self_origin = function() return _self_ok end }
+
+-- A lua_shared_dict stand-in (get/set with a TTL, no expiry needed here).
+local function new_dict()
+  local d = { data = {}, sets = 0, last_ttl = nil }
+  function d:get(k) return self.data[k] end
+  function d:set(k, v, ttl) self.data[k] = v; self.sets = self.sets + 1; self.last_ttl = ttl; return true end
+  return d
+end
+local _uncacheable = new_dict()
+
 local _header = {}
 local _now = 0            -- mutable clock (0 keeps schedule_refresh a no-op)
 local _timer_calls = 0   -- counts async-refresh schedules
+local _internal = false  -- ngx.req.is_internal()
 _G.ngx = {
+  config    = { nginx_version = 1025003 },
+  req       = { is_internal = function() return _internal end },
   now       = function() return _now end,
   timer     = { at = function() _timer_calls = _timer_calls + 1; return true end },
   log       = function() end,
+  md5       = function(s) return "md5:" .. s end,
+  shared    = { cfm_cache_uncacheable = _uncacheable },
   WARN      = 1,
   ERR       = 2,
   var       = { host = "" },
@@ -215,6 +234,17 @@ check(cache._micro_bucket(nil) == 1, "nil → smallest bucket")
 check(cache._micro_bucket("") == 1, "empty string → smallest bucket")
 check(cache._micro_bucket("junk") == 1, "unparseable → smallest bucket")
 check(cache._micro_bucket("30 s") == 30, "TTL with spaces parses")
+-- units, as the daemon's parseCacheTTL accepts them (s/m/h/d): "1m" used to read
+-- as 1s because only the digits were parsed
+check(cache._micro_bucket("1m") == 60, "1m → 60s (minutes, not 1s)")
+check(cache._micro_bucket("2h") == 60, "2h clamps to the largest bucket")
+check(cache._micro_bucket("1d") == 60, "1d clamps to the largest bucket")
+check(cache._micro_bucket("90s") == 60, "90s clamps to the largest bucket")
+check(cache._micro_bucket("5S") == 5, "upper-case unit parses")
+check(cache._micro_bucket("7x") == 1, "unknown unit → smallest bucket")
+check(cache._micro_bucket("1.5s") == 1, "fractional → unparseable → smallest bucket")
+check(cache._micro_bucket("10s5") == 1, "trailing junk → smallest bucket")
+check(cache._micro_bucket("+5s") == 5, "a leading + (the daemon's Atoi accepts it) parses")
 check(cache._micro_zone_name(1) == "cfm_micro_1s", "zone name for 1s")
 check(cache._micro_zone_name("7s") == "cfm_micro_5s", "zone name snaps 7s → 5s bucket")
 check(cache._micro_zone_name(60) == "cfm_micro_60s", "zone name for 60s")
@@ -246,7 +276,7 @@ check(anon("_myapp_session=rails") == false, "*_session suffix (Rails) → bypas
 check(anon("_ga=1; _gat_gtag_UA_123=1", true) == true, "strict: _gat* analytics is ignore-listed → anonymous")
 check(anon("_dc_gtm_UA-1=1", true) == true, "strict: _dc_gtm_* (GTM) is ignore-listed → anonymous")
 -- value that itself contains '=' must not fabricate a phantom auth name
-check(anon("token=aGVsbG8=d29ybGQ=") == true, "cookie value with '=' does not create a phantom name → anonymous")
+check(anon("blob=PHPSESSID=d29ybGQ=") == true, "cookie value with '=' does not create a phantom name → anonymous")
 check(anon("a=1; PHPSESSID=x; b=2") == false, "auth cookie detected mid-list")
 -- strict mode
 check(anon("_ga=1", true) == true, "strict: ignore-listed analytics cookie stays anonymous")
@@ -256,10 +286,95 @@ check(why("randomapp=1", true) == "strict:randomapp", "strict bypass names the o
 check(anon("randomapp=1", false) == true, "non-strict: an unknown cookie stays anonymous")
 -- per-vhost extra auth cookie names
 check(anon("myapp_sess=1", false, { ["myapp_sess"] = true }) == false, "per-vhost auth_cookies → bypass")
+-- more app sessions (PR-3) and the __Host- / __Secure- prefixes
+for _, c in ipairs({ "__Host-PHPSESSID=1", "__Secure-laravel_session=1", "SESS0a1b2c=1",
+                     "SSESSff=1", "wp_edd_session_x=1", "edd_items_in_cart=1", "OCSESSID=1",
+                     "frontend=1", "mage-cache-sessid=1", "private_content_version=1",
+                     "MoodleSession=1", "app_sid=1", "token=1", "wmc_current_currency=EUR",
+                     "wp-wpml_current_language=el" }) do
+  check(anon(c, false) == false, "auth/variant cookie → bypass: " .. c)
+end
+check(anon("__Host-foo=1", false) == true, "a __Host- prefixed non-session cookie stays anonymous")
+check(anon("sbjs_session=pgs%3D2; sbjs_current=typ%3Dtypein", false) == true,
+      "WooCommerce Order Attribution's sbjs_session is not a session (exempt from the _session suffix)")
+check(anon("sbjs_session=1", false, { [cache._cookie_key("sbjs_session")] = true }) == false,
+      "a per-vhost auth_cookies entry still wins over the exemption")
+-- consent / age-gate cookies read server-side: never anonymous, strict or not
+for _, c in ipairs({ "cookie_notice_accepted=true", "hu-consent=x", "viewed_cookie_policy=yes",
+                     "moove_gdpr_popup=x", "cmplz_marketing=allow", "age_gate=99", "age_gate_failed=1" }) do
+  check(anon(c, false) == false and anon(c, true) == false, "consent / age-gate cookie → bypass: " .. c)
+end
+-- CookieYes legacy sets its checkbox cookies for every visitor on the first view
+-- (viewed_cookie_policy is what marks consent), so they alone stay anonymous
+check(anon("cookielawinfo-checkbox-necessary=yes; cookielawinfo-checkbox-analytics=no", false) == true,
+      "CookieYes checkbox cookies alone stay anonymous (set before any consent)")
+-- CSRF cookies whose token the page renders, whatever the framework names them
+for _, c in ipairs({ "_csrf=abc", "csrftoken=abc", "csrfToken=abc", "csrf_cookie_name=x",
+                     "YII_CSRF_TOKEN=x", "my_xsrf=1" }) do
+  check(anon(c, false) == false, "CSRF cookie → bypass: " .. c)
+end
+-- WordPress core: the comment form pre-fills from comment_author_*, and
+-- wp-postpass_* unlocks a password-protected post
+for _, c in ipairs({ "comment_author_abc=Alice", "comment_author_email_abc=a%40x", "wp-postpass_abc=x" }) do
+  check(anon(c, false) == false, "WordPress core per-visitor cookie → bypass: " .. c)
+end
+check(anon("euconsent-v2=CO", true) == true, "strict: the TCF consent string stays ignore-listed (read client-side)")
+-- a name as PHP / Rack read it: "." / " " / "[" → "_", percent-decoded
+for _, c in ipairs({ "wordpress.logged.in_abc=1", "ci.session=x", "laravel.session=x",
+                     "wordpress logged in_abc=1", "wordpress%5Flogged%5Fin_abc=1",
+                     "__Host-wordpress.logged.in_x=1", "connect.sid=1", ".AspNetCore.Session=1",
+                     "ASP.NET_SessionId=1", "PHPSESSID[x]=1" }) do
+  check(anon(c, false) == false, "session cookie in an app-equivalent spelling → bypass: " .. c)
+end
+check(anon("my_app=1", false, { [cache._cookie_key("my.app")] = true }) == false,
+      "a per-vhost auth cookie matches its app-equivalent spelling")
+check(anon("_ga=GA1.2.3; _gid=x", true) == true, "strict: analytics cookies stay ignore-listed after normalisation")
+-- older PHP URL-decoded names ("+" = space, a NUL ends the name)
+for _, c in ipairs({ "wordpress+logged+in_abc=1", "ci+session=x", "PHPSESSID%00x=1", "laravel_session%00=1",
+                     "+PHPSESSID=1", "%20PHPSESSID=1", "+wordpress_logged_in_x=1", "%20%20ci_session=x" }) do
+  check(anon(c, false) == false, "old-PHP spelling of a session cookie → bypass: " .. c)
+end
+check(anon("a%2Bb=1", false) == true, "an encoded + stays a plain name character (anonymous)")
+-- names: no '=' / empty / spaces-only pairs
+check(anon("PHPSESSID", false) == false, "a bare name without '=' is still a name")
+check(anon("=v; ;   ", false) == true, "empty and blank pairs are skipped")
+check(anon("  PHPSESSID  =x", false) == false, "outer spaces around a name are trimmed")
+-- client input is parsed in linear time (a backtracking pattern here pinned a
+-- worker for minutes on a run of spaces) and a huge header is not micro-cached
+do
+  -- ~1.2 KB inputs: enough for a cubic/quadratic pattern to take seconds
+  -- (and fail here, rather than hang the suite), instant when linear
+  local t0 = os.clock()
+  local samples = {
+    string.rep(" ", 1200) .. "b",
+    "a" .. string.rep(" ", 1200) .. "b=1",
+    "x;" .. string.rep(" ", 1200) .. "b",
+    string.rep("a ", 600) .. "=1",
+    string.rep("; ", 600),
+    string.rep("%41", 400),
+  }
+  for _ = 1, 5 do
+    for _, c in ipairs(samples) do
+      cache._micro_cookie(c, true)   -- strict: returns at the first unlisted pair
+      cache._micro_cookie(c, false)  -- non-strict: walks every pair
+    end
+  end
+  local dt = os.clock() - t0
+  check(dt < 0.25, string.format("adversarial cookie headers parse in linear time (%.3fs)", dt))
+  local t1 = os.clock()
+  cache._micro_cookie("a" .. string.rep(" ", 8000) .. "b=1", true)
+  check(os.clock() - t1 < 0.1, "an 8 KB run of spaces (just under the cap) parses at once")
+  local oka, whya = cache._micro_cookie("wordpress_logged_in_" .. string.rep("x", 300) .. "=1", false)
+  check(oka == false and #whya <= #"auth:" + 64, "the bypass reason clips a long cookie name")
+  local okc, whyc = cache._micro_cookie(string.rep("a", 9000) .. "=1", false)
+  check(okc == false and whyc == "cookie-size", "a Cookie header over 8 KB → bypass:cookie-size")
+end
 
 -- ── Tier B micro-cache: full request decision ─────────────────────────────────
 local function armed(ttl) return { micro = { on = true, ttl = ttl }, strict_cookies = false } end
-local function dec(pol, m, u, c, a) return cache._micro_decision(pol, m, u, c, a) end
+local function dec(pol, m, u, c, a)
+  return cache._micro_decision(pol, { method = m, uri = u, cookie = c, auth = a })
+end
 do
   local ok1, bkt1, r1 = dec(armed("5s"), "GET", "/", nil)
   check(ok1 == true and bkt1 == 5 and r1 == "ok", "armed GET, no cookie → would-cache at 5s bucket")
@@ -300,6 +415,7 @@ check(cache._has_micro() == true, "has_micro true (fixture arms micro on myip.gr
 _site_cache_on = true
 ngx.var.http_x_cfm_cache_debug = "1"
 ngx.var.request_method = "GET"; ngx.var.uri = "/"; ngx.var.http_cookie = nil
+ngx.var.cfm_micro_conf = "1"   -- a request in the HTTPS `location /`
 for k in pairs(_header) do _header[k] = nil end
 ngx.var.host = "myip.gr"
 cache.observe()
@@ -330,6 +446,7 @@ local function reset_gate_vars()
   ngx.var.cfm_cache_skip = "1"; ngx.var.cfm_cache_gen = "0"
   ngx.var.scheme = "https"; ngx.var.request_method = "GET"; ngx.var.uri = "/"
   ngx.var.http_cookie = nil; ngx.var.http_authorization = nil
+  ngx.var.cfm_micro_conf = "1"   -- the HTTPS `location /` sentinel
 end
 _site_cache_on = true
 
@@ -433,6 +550,358 @@ check(cache.policy_key_for("y.example.com") == "*.example.com", "the broader wil
 reset_cache_vars(); ngx.var.host = "x.shop.example.com"
 cache.static_gate()
 check(ngx.var.cfm_cache_skip == "1", "a wildcard opt-out: static_gate leaves its sub-hosts uncached")
+
+-- ── PR-3: request rails (range / event-stream / admin & script paths / panel) ──
+do
+  local function d(r) r.method = r.method or "GET"; return cache._micro_decision(armed("5s"), r) end
+  local ok, _, why = d({ uri = "/", range = "bytes=0-99" })
+  check(not ok and why == "range", "a Range request → bypass:range")
+  ok, _, why = d({ uri = "/", accept = "Text/Event-Stream" })
+  check(not ok and why == "event-stream", "Accept: text/event-stream (any case) → bypass:event-stream")
+  ok = d({ uri = "/", accept = "text/html,application/xhtml+xml" })
+  check(ok, "an ordinary Accept stays cacheable")
+  ok, _, why = d({ uri = "/", fragment = true })
+  check(not ok and why == "fragment", "a partial-page request (X-Requested-With etc.) → bypass:fragment")
+  ok, _, why = d({ uri = "/", cred_header = true })
+  check(not ok and why == "credential-header", "a credential-style request header → bypass:credential-header")
+  for _, u in ipairs({ "/wp-admin/", "/WP-Admin/edit.php", "/wp-login.php", "/xmlrpc.php",
+                       "/wp-cron.php", "/index.php", "/a/B.PHP", "/administrator/index",
+                       "/admin/x", "/sysadmin/", "/acctxfer_x", "/x.phtml", "/x.php7",
+                       "/X.PHP5", "/x.phar", "/x.pht", "/wp-login.php/", "/index.php/checkout/cart",
+                       "/index.php/2024/post", "/___proxy_subdomain_cpanel/x" }) do
+    ok, _, why = d({ uri = u })
+    check(not ok and why == "path", "path rail bypasses " .. u)
+  end
+  for _, u in ipairs({ "/", "/about/", "/php/", "/administration-news", "/v1.photos/",
+                       "/a.phpx", "/phtml/", "/x.ph" }) do
+    ok = d({ uri = u })
+    check(ok, "path rail leaves " .. u .. " cacheable")
+  end
+  ok, _, why = d({ uri = "/", args = "Doing_WP_Cron=1758585600.12" })
+  check(not ok and why == "path", "?doing_wp_cron → bypass:path")
+  ok, _, why = d({ uri = "/wp-json/wc/store/v1/cart", args = "_envelope=1" })
+  check(not ok and why == "path", "?_envelope (REST headers moved into the body) → bypass:path")
+  ok = d({ uri = "/", args = "p=2" })
+  check(ok, "an ordinary query string stays cacheable")
+  for _, h in ipairs({ "cpanel.example.com", "WHM.example.com", "webmail.example.com:443",
+                       "webdisk.example.com", "mail.example.com", "autodiscover.example.com",
+                       "autoconfig.example.com", "cpcalendars.example.com", "cpcontacts.example.com" }) do
+    ok, _, why = d({ uri = "/", host = h })
+    check(not ok and why == "panel", "panel rail bypasses " .. h)
+  end
+  for _, h in ipairs({ "www.example.com", "cpanelx.example.com", "example.com", "shop.mail-example.com" }) do
+    ok = d({ uri = "/", host = h })
+    check(ok, "panel rail leaves " .. h .. " cacheable")
+  end
+  ok, _, why = d({ method = "POST", uri = "/", range = "bytes=0-1" })
+  check(why == "method", "the method rail is still reported first")
+end
+
+-- ── PR-3: micro_storable mirrors the micro location's store rails ─────────────
+do
+  local S = cache._micro_storable
+  check(S("200", nil, "", "", nil) == true, "a plain 200 is storable")
+  check(S("200", "", "", "", "Accept-Encoding") == true, "Vary: Accept-Encoding is storable")
+  check(S("404", nil, "", "", nil) == false, "a 404 is not storable")
+  check(S("502, 200", nil, "", "", nil) == false, "a retried status list is not storable (like the only-200 map)")
+  check(S(nil, nil, "", "", nil) == false, "no upstream status is not storable")
+  check(S("200", "a=b", "", "", nil) == false, "Set-Cookie is not storable")
+  check(S("200", nil, "1", "", nil) == false, "$cfm_cc_nostore=1 is not storable")
+  check(S("200", nil, "", "1", nil) == false, "$cfm_xae_nocache=1 is not storable")
+  check(S("200", nil, "", "", "*") == false, "Vary: * is not storable")
+  check(S("200", nil, "", "", string.rep("a", 129)) == false, "a Vary longer than nginx stores is not storable")
+  check(S("200", nil, "", "", "Accept-Encoding, *") == false, "a * inside a Vary list is not storable")
+end
+
+-- ── PR-3: micro_mark_ttl — which fetches are remembered, and for how long ─────
+do
+  local T = cache._micro_mark_ttl
+  check(T("MISS", "404") == 60, "MISS 404 → 60s")
+  check(T("EXPIRED", "404") == 240, "EXPIRED 404 → 240s (outlives the largest zone inactive)")
+  check(T("MISS", "200", "a=b") == 60, "MISS Set-Cookie → 60s")
+  check(T("EXPIRED", "200", nil, "1") == 240, "EXPIRED private → 240s")
+  for _, code in ipairs({ "401", "403", "410", "301", "302" }) do
+    check(T("EXPIRED", code) == 240, "EXPIRED " .. code .. " (the page changed) marks")
+  end
+  for _, code in ipairs({ "500", "502", "503", "504", "508" }) do
+    check(T("EXPIRED", code) == nil, "EXPIRED " .. code .. " never marks (the stale copy absorbs it)")
+    check(T("MISS", code) == 5, "MISS " .. code .. " marks only for the lock timeout (5s)")
+  end
+  for _, code in ipairs({ "400", "405", "406", "408", "411", "413", "414", "429", "431" }) do
+    check(T("EXPIRED", code) == nil, "EXPIRED request-level " .. code .. " never marks")
+    check(T("MISS", code) == 5, "MISS request-level " .. code .. " marks only for 5s")
+  end
+  check(T("MISS", "502, 404") == 60, "a retried fetch is judged by its LAST answer")
+  check(T("MISS", "404, 503") == 5, "a retried fetch ending in 5xx: the short mark")
+  check(T("MISS", "200 : 404") == 60, "an internal-redirect status list is judged by its last entry")
+  check(T("MISS", "200", nil, "", "", nil, "No") == 60, "X-Accel-Buffering: no (any case) → not storable → marks")
+  check(T("MISS", "200", nil, "", "", nil, "yes") == nil, "X-Accel-Buffering: yes stays storable")
+  check(T("MISS", "200", nil, "", "", nil, nil, "jwt.t_abc") == 60, "a response handing out a Cart-Token is not storable → marks")
+  check(cache._micro_storable("200", nil, "", "", nil, nil, "jwt.t_abc") == false, "micro_storable: a session-token response header is not storable")
+  check(T("MISS", "200") == nil, "a storable MISS is not marked")
+  check(T("HIT", "404") == nil and T("STALE", "404") == nil and T("UPDATING", "404") == nil, "no fetch → no mark")
+  check(T("MISS", nil) == nil and T("MISS", "-") == nil, "no upstream answer → no mark")
+end
+
+-- ── PR-3: remember-uncacheable, the conf sentinel, the panel rail ─────────────
+cache._rebuild_cache({
+  { host = "m.com", gen = 7, micro = { on = true, recipe = "micro_safe", ttl = "5s" } },
+  { host = "*.example.org", gen = 8,
+    static = { on = true, recipe = "static_lean", ttl = "1h" },
+    micro = { on = true, recipe = "micro_safe", ttl = "10s" } },
+})
+local function micro_req(host, uri)
+  reset_gate_vars(); ngx.var.host = host; ngx.var.request_uri = uri or "/"
+  ngx.var.uri = uri or "/"; ngx.var.server_addr = "192.0.2.1"; ngx.var.cf_xfp = "https"
+  ngx.var.cfm_micro_conf = "1"; ngx.var.args = nil; ngx.var.http_range = nil; ngx.var.http_accept = nil
+end
+local function log_micro(cache_status, status, set_cookie, cc, xae, vary, xab, cart)
+  ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.upstream_cache_status = cache_status
+  ngx.var.upstream_status = status; ngx.var.upstream_http_set_cookie = set_cookie
+  ngx.var.cfm_cc_nostore = cc or ""; ngx.var.cfm_xae_nocache = xae or ""
+  ngx.var.upstream_http_vary = vary; ngx.var.upstream_http_x_accel_buffering = xab
+  ngx.var.upstream_http_cart_token = cart; ngx.var.upstream_http_woocommerce_session = nil
+  cache.micro_note()
+end
+_micro_enforce = true
+
+-- the conf sentinel: no "1" → never routes (an older conf, or not location /)
+micro_req("m.com"); ngx.var.cfm_micro_conf = nil
+check(cache.micro_gate() == nil, "no $cfm_micro_conf sentinel → micro_gate never routes")
+micro_req("m.com"); ngx.var.cfm_micro_conf = ""
+check(cache.micro_gate() == nil, "an empty sentinel → never routes")
+micro_req("m.com")
+check(cache.micro_gate() == "@cfm_micro_5s", "sentinel \"1\" → routes (control)")
+for _, h in ipairs({ "http_x_requested_with", "http_x_pjax", "http_hx_request", "http_turbo_frame", "http_x_inertia" }) do
+  micro_req("m.com"); ngx.var[h] = "1"
+  check(cache.micro_gate() == nil, "a partial-page request header never routes: " .. h)
+  ngx.var[h] = ""
+  check(cache.micro_gate() == nil, "an EMPTY partial-page request header never routes either: " .. h)
+  ngx.var[h] = nil
+end
+for _, h in ipairs({ "http_cart_token", "http_woocommerce_session", "http_x_wp_nonce",
+                     "http_x_api_key", "http_x_auth_token", "http_x_access_token" }) do
+  micro_req("m.com"); ngx.var[h] = ""
+  check(cache.micro_gate() == nil, "a credential-style request header (even empty) never routes: " .. h)
+  ngx.var[h] = nil
+end
+micro_req("m.com"); ngx.var.http_x_requested_with = ""; ngx.var.http_hx_request = "true"
+check(cache.micro_gate() == nil, "an empty earlier header cannot mask a later one")
+ngx.var.http_x_requested_with = nil; ngx.var.http_hx_request = nil
+
+-- a storable fetch leaves no mark; the next request still routes
+_uncacheable.data = {}; _uncacheable.sets = 0
+micro_req("m.com", "/page")
+log_micro("MISS", "200", nil, "", "", nil)
+check(_uncacheable.sets == 0, "a storable MISS is not marked")
+micro_req("m.com", "/page")
+check(cache.micro_gate() == "@cfm_micro_5s", "an unmarked key routes to micro")
+
+-- each uncacheable reason marks the key; the next request skips micro
+local reasons = {
+  { "404", nil, "", "", nil, "a 404" },
+  { "200", "wp_woocommerce_session_x=1", "", "", nil, "a Set-Cookie" },
+  { "200", nil, "1", "", nil, "Cache-Control private/no-store/no-cache" },
+  { "200", nil, "", "1", nil, "X-Accel-Expires: 0" },
+  { "200", nil, "", "", "*", "Vary: *" },
+  { "200", nil, "", "", nil, "X-Accel-Buffering: no", "no" },
+  { "200", nil, "", "", nil, "a Cart-Token response header", nil, "jwt.t_abc" },
+}
+for i, rr in ipairs(reasons) do
+  _uncacheable.data = {}; _uncacheable.last_ttl = nil
+  local uri = "/r" .. i
+  micro_req("m.com", uri)
+  log_micro("MISS", rr[1], rr[2], rr[3], rr[4], rr[5], rr[7], rr[8])
+  check(_uncacheable.last_ttl == 60, rr[6] .. ": marked for 60s")
+  micro_req("m.com", uri)
+  check(cache.micro_gate() == nil, rr[6] .. ": the marked key skips micro")
+  check(ngx.var.cfm_cache_skip == "1", rr[6] .. ": the skip leaves the bypass gate closed")
+  micro_req("m.com", uri .. "?other")
+  check(cache.micro_gate() == "@cfm_micro_5s", rr[6] .. ": another URL of the vhost still routes")
+end
+
+-- the mark is per cache identity: the same path on another address/host routes
+_uncacheable.data = {}
+micro_req("m.com", "/x"); log_micro("MISS", "404")
+micro_req("m.com", "/x"); ngx.var.server_addr = "192.0.2.2"
+check(cache.micro_gate() == "@cfm_micro_5s", "a mark on one destination IP does not skip another")
+micro_req("www.example.org", "/x")
+check(cache.micro_gate() == "@cfm_micro_10s", "a mark on one host does not skip another host's same path")
+micro_req("m.com", "/x"); ngx.var.cf_xfp = "http"
+check(cache.micro_gate() == "@cfm_micro_5s", "a mark does not cross the scheme the origin is told")
+micro_req("m.com", "/x")
+check(cache.micro_gate() == nil, "the marked identity itself is skipped (control)")
+-- a marked key still reports the request rail that applies first
+micro_req("m.com", "/x"); ngx.var.request_method = "POST"; ngx.var.http_x_cfm_cache_debug = "1"
+for k in pairs(_header) do _header[k] = nil end
+cache.observe()
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:method", 1, true),
+      "a POST to a marked key reports bypass:method, not uncacheable")
+ngx.var.http_x_cfm_cache_debug = nil
+
+-- an empty Cart-Token does not hide a woocommerce-session token (nginx reads ""
+-- as false on proxy_no_cache; the Lua mirror must too)
+_uncacheable.data = {}; _uncacheable.sets = 0
+micro_req("m.com", "/wcs"); ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.upstream_cache_status = "MISS"
+ngx.var.upstream_status = "200"; ngx.var.upstream_http_set_cookie = nil; ngx.var.cfm_cc_nostore = ""
+ngx.var.cfm_xae_nocache = ""; ngx.var.upstream_http_vary = nil; ngx.var.upstream_http_x_accel_buffering = nil
+ngx.var.upstream_http_cart_token = ""; ngx.var.upstream_http_woocommerce_session = "sess-x"
+cache.micro_note()
+check(_uncacheable.sets == 1, "an empty Cart-Token plus a woocommerce-session token is remembered")
+ngx.var.upstream_http_cart_token = nil; ngx.var.upstream_http_woocommerce_session = nil
+
+-- a 5xx refresh keeps the stale copy in play: nothing is marked; a cold 5xx
+-- is marked only for the lock timeout
+_uncacheable.data = {}; _uncacheable.sets = 0
+micro_req("m.com", "/busy"); log_micro("EXPIRED", "503"); log_micro("EXPIRED", "429")
+check(_uncacheable.sets == 0, "EXPIRED 5xx and a 429 never mark")
+log_micro("MISS", "502")
+check(_uncacheable.sets == 1 and _uncacheable.last_ttl == 5, "a cold (MISS) 5xx marks for 5s")
+log_micro("EXPIRED", "404")
+check(_uncacheable.last_ttl == 240, "an EXPIRED page-changed refresh marks for the long TTL")
+
+-- an internal redirect never routes (the sentinel would survive it)
+micro_req("m.com", "/int"); _internal = true
+check(cache.micro_gate() == nil, "an internal redirect → micro_gate nil")
+_internal = false
+
+-- only a real fetch (MISS / EXPIRED) of a micro request marks
+_uncacheable.data = {}; _uncacheable.sets = 0
+micro_req("m.com", "/y")
+for _, st in ipairs({ "HIT", "STALE", "UPDATING", "BYPASS", "", nil }) do log_micro(st, "404") end
+check(_uncacheable.sets == 0, "HIT/STALE/UPDATING/BYPASS/none never mark")
+log_micro("EXPIRED", "404")
+check(_uncacheable.sets == 1, "an EXPIRED refetch that is not storable marks")
+_uncacheable.sets = 0
+ngx.var.cfm_upstream = "cfm_apache"; ngx.var.upstream_cache_status = "MISS"; ngx.var.upstream_status = "404"
+cache.micro_note()
+check(_uncacheable.sets == 0, "a request no micro location served is never marked")
+
+-- the debug stamp names the skip
+_uncacheable.data = {}
+micro_req("m.com", "/z"); log_micro("MISS", "200", "a=b")
+micro_req("m.com", "/z"); ngx.var.http_x_cfm_cache_debug = "1"
+for k in pairs(_header) do _header[k] = nil end
+cache.observe()
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:uncacheable", 1, true),
+      "observe names a remembered-uncacheable key: " .. tostring(_header["X-CFM-Cache"]))
+
+-- no dict (an older conf) → nothing is remembered, micro still routes
+ngx.shared.cfm_cache_uncacheable = nil
+micro_req("m.com", "/nodict"); log_micro("MISS", "404")
+micro_req("m.com", "/nodict")
+check(cache.micro_gate() == "@cfm_micro_5s", "without the dict the gate routes (nothing remembered)")
+ngx.shared.cfm_cache_uncacheable = _uncacheable
+
+-- the debug stamp names an internal redirect and an old nginx core, like the gate
+micro_req("m.com", "/int2"); ngx.var.http_x_cfm_cache_debug = "1"; _internal = true
+ngx.var.cfm_upstream = "cfm_apache"
+for k in pairs(_header) do _header[k] = nil end
+cache.observe()
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:location", 1, true),
+      "observe reports bypass:location on an internal redirect")
+ngx.var.cfm_upstream = "cfm_apache_micro"
+for k in pairs(_header) do _header[k] = nil end
+cache.observe()
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=would/5s", 1, true),
+      "a response the micro location served (itself internal) still reads would/")
+_internal = false; ngx.var.cfm_upstream = nil; ngx.var.http_x_cfm_cache_debug = nil
+
+-- the debug stamp names a location without the sentinel
+micro_req("m.com", "/loc"); ngx.var.cfm_micro_conf = ""; ngx.var.http_x_cfm_cache_debug = "1"
+for k in pairs(_header) do _header[k] = nil end
+cache.observe()
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:location", 1, true),
+      "observe reports bypass:location outside `location /`")
+ngx.var.http_x_cfm_cache_debug = nil
+
+-- an unarmed host never reads the sentinel (no warn noise, no extra work)
+do
+  local backing, reads = ngx.var, {}
+  ngx.var = setmetatable({}, { __index = function(_, k) reads[k] = (reads[k] or 0) + 1; return backing[k] end,
+                               __newindex = backing })
+  backing.host = "unarmed.example"; backing.scheme = "https"
+  check(cache.micro_gate() == nil, "unarmed host → nil")
+  check(reads.cfm_micro_conf == nil, "an unarmed host's request never reads $cfm_micro_conf")
+  ngx.var = backing
+end
+
+-- the panel rail under an armed wildcard: neither tier caches a panel host
+micro_req("cpanel.example.org")
+check(cache.micro_gate() == nil, "micro never routes a panel host under an armed wildcard")
+micro_req("www.example.org")
+check(cache.micro_gate() == "@cfm_micro_10s", "the wildcard's ordinary sub-host routes (control)")
+reset_cache_vars(); ngx.var.host = "webmail.example.org"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "1", "static_gate never caches a panel host under an armed wildcard")
+reset_cache_vars(); ngx.var.host = "autodiscover.example.org"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "1", "static_gate never caches a cache-only service host (autodiscover)")
+reset_cache_vars(); ngx.var.host = "www.example.org"
+cache.static_gate()
+check(ngx.var.cfm_cache_skip == "0", "static_gate caches the wildcard's ordinary sub-host (control)")
+_micro_enforce = false
+
+-- ── PR-3: the debug stamp needs a trusted source, not just the header ─────────
+for k in pairs(_header) do _header[k] = nil end
+ngx.var.http_x_cfm_cache_debug = "1"; ngx.var.host = "m.com"
+_self_ok = false
+cache.observe()
+check(_header["X-CFM-Cache"] == nil, "an untrusted source gets no debug stamp even with the header")
+_self_ok = true
+cache.observe()
+check(_header["X-CFM-Cache"] ~= nil, "a trusted source gets the stamp (control)")
+ngx.var.http_x_cfm_cache_debug = nil
+
+-- ── PR-3: fail closed without cfm_panel_hosts / cfm_selfip ────────────────────
+do
+  package.loaded["cfm_cache"] = nil
+  local saved_ph, saved_si = package.loaded["cfm_panel_hosts"], package.loaded["cfm_selfip"]
+  package.loaded["cfm_panel_hosts"] = nil; package.loaded["cfm_selfip"] = nil
+  package.preload["cfm_panel_hosts"] = function() error("missing") end
+  package.preload["cfm_selfip"] = function() error("missing") end
+  local c2 = require("cfm_cache")
+  c2._rebuild_cache({ { host = "m.com", gen = 1,
+    static = { on = true, recipe = "static_lean" }, micro = { on = true, recipe = "micro_safe", ttl = "5s" } } })
+  _micro_enforce = true
+  micro_req("m.com")
+  check(c2.micro_gate() == nil, "no cfm_panel_hosts → micro routes nothing (fail closed)")
+  reset_cache_vars(); ngx.var.host = "m.com"
+  c2.static_gate()
+  check(ngx.var.cfm_cache_skip == "1", "no cfm_panel_hosts → static caches nothing (fail closed)")
+  for k in pairs(_header) do _header[k] = nil end
+  ngx.var.http_x_cfm_cache_debug = "1"
+  c2.observe()
+  check(_header["X-CFM-Cache"] == nil, "no cfm_selfip → no debug stamp")
+  ngx.var.http_x_cfm_cache_debug = nil
+  _micro_enforce = false
+  package.preload["cfm_panel_hosts"] = nil; package.preload["cfm_selfip"] = nil
+  package.loaded["cfm_panel_hosts"] = saved_ph; package.loaded["cfm_selfip"] = saved_si
+end
+
+-- ── PR-3: an nginx core that does not join repeated headers never routes ──────
+do
+  package.loaded["cfm_cache"] = nil
+  ngx.config.nginx_version = 1021004
+  local c3 = require("cfm_cache")
+  c3._rebuild_cache({ { host = "m.com", gen = 1, micro = { on = true, recipe = "micro_safe", ttl = "5s" } } })
+  _micro_enforce = true
+  micro_req("m.com")
+  check(c3.micro_gate() == nil, "nginx < 1.23 → micro_gate never routes")
+  ngx.var.http_x_cfm_cache_debug = "1"
+  for k in pairs(_header) do _header[k] = nil end
+  c3.observe()
+  check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=bypass:nginx-version", 1, true),
+        "observe reports bypass:nginx-version on an old core")
+  ngx.var.http_x_cfm_cache_debug = nil
+  package.loaded["cfm_cache"] = nil
+  ngx.config.nginx_version = 1025003
+  local c4 = require("cfm_cache")
+  c4._rebuild_cache({ { host = "m.com", gen = 1, micro = { on = true, recipe = "micro_safe", ttl = "5s" } } })
+  micro_req("m.com")
+  check(c4.micro_gate() == "@cfm_micro_5s", "nginx 1.25 → routes (control)")
+  _micro_enforce = false
+end
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")

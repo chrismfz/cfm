@@ -47,6 +47,87 @@ back-filled here — see the git/PR history for that period.
   rejects are unchanged.
 
 ### Changed
+- **Site Cache micro-cache (Tier B) is ready to be turned on, one node at a
+  time.** `MICRO_CACHE_ENFORCE` still defaults to `0`; before setting it to
+  `1` on a node, run the on-box checklist in `docs/site-cache-design.md` §5.7.
+  What changed in the micro-cache itself:
+  - A micro-cached page is fresh for its TTL bucket (1–60 s), never longer.
+    The origin's `Cache-Control: max-age`, `Expires` and `X-Accel-Expires`
+    used to set how long it stayed (a `max-age=3600` page for an hour). The
+    origin's shared-cache "do not store" signals still apply: `Cache-Control`
+    `private`, `no-store`, `no-cache` or `s-maxage=0`, `X-Accel-Expires: 0`,
+    `Set-Cookie`, `Vary: *`; an absolute `X-Accel-Expires: @<time>`, which
+    would otherwise have set the TTL, now also means "not stored". `max-age=0`
+    alone deliberately does not stop it: the common `.htaccess` recipes (WP
+    Rocket, H5BP) send it on every HTML page for browsers.
+  - A page that can't be cached (it sets a cookie, is private, or isn't a 200)
+    is remembered and served straight from the origin: for 60 s, or 240 s when
+    a cached page changed that way, so its old copy is gone before the next
+    try. Before, concurrent visitors of such a page queued on the cache lock,
+    up to 5 s each (measured: 8 concurrent visitors of a 1 s page took 1–6 s;
+    once the page is remembered, 1 s each). An origin error (5xx) or a
+    request-level 4xx (400, 406, 429, …) never switches off a cached page, and
+    on a page with no cached copy it is remembered for 5 s only.
+  - When the origin fails (a 500/502/503/504 answer, a connection error or a
+    timeout) the stale copy is served, to every visitor including the one
+    whose refresh failed, for as long as the origin keeps failing. Measured:
+    10 clients on a hot page whose origin answers 503 all got 200, with 4
+    origin hits. To show a maintenance page instead, purge the vhost. Other
+    5xx (CloudLinux's 508) reach only the visitor whose refresh got them.
+  - An expired page is refreshed by the visitor who finds it expired, not in
+    the background. A background refresh that could not be stored (the page
+    now sets a cookie, went private or 404) left the old copy being served
+    for as long as visitors kept coming.
+  - Never micro-cached: `Range` requests, `Accept: text/event-stream` (live
+    streams), `/wp-admin`, `/administrator/`, `/admin/`, `/sysadmin/`, PHP
+    script paths (`.php`, `.php7`, `.phtml`, …, including `/index.php/…`),
+    `?doing_wp_cron`, requests carrying a credential in a header
+    (`Cart-Token` — WooCommerce's headless Store API session, whose cart and
+    checkout answers carry no cache headers before WooCommerce 10.6, so one
+    customer's cart, address and token would have been everyone's —
+    `WooCommerce-Session`, `X-WP-Nonce`, `X-Api-Key`, `X-Auth-Token`,
+    `X-Access-Token`) and any answer that hands out such a token in a header
+    (the token-less cart request a headless client starts with; `?_envelope`,
+    which moves it into the body, is not micro-cached), partial-page
+    requests (`X-Requested-With`, `X-PJAX`,
+    `HX-Request`, `Turbo-Frame`, `X-Inertia` — a stored fragment would be
+    everyone's page; Android in-app browsers send `X-Requested-With` on every
+    request, so their visitors are not micro-cached), a `Cookie` header over
+    8 KB, and panel hosts (`cpanel.`, `whm.`, `webmail.`,
+    `webdisk.`, `mail.`, `autodiscover.`, `autoconfig.`, `cpcalendars.`,
+    `cpcontacts.`) whether armed by a `*.domain` wildcard or by name.
+  - More app session cookies keep a visitor off the cache: Drupal `SESS…`,
+    Magento, OpenCart, Moodle, Easy Digital Downloads, `…_sid`, `token`,
+    `auth`, CSRF cookies whose token the page shows (any name containing
+    `csrf` or `xsrf`), WPML
+    language and WooCommerce currency-switcher cookies. A cookie
+    name is compared the way the app reads it, so a session cookie no longer
+    slips past as `wordpress.logged.in_…`, `ci+session`, `ci%2Esession` or
+    `__Host-PHPSESSID` (PHP turns `.` and spaces into `_`; older PHP also
+    URL-decodes names).
+  - A micro-cached request never forwards a client's own client-IP, geo or
+    TLS-hint headers (`CF-IPCountry` — which WooCommerce geolocation reads
+    first — `Client-IP`, a forged `X-Forwarded-For` prefix, `CF-Visitor`, …):
+    Cloudflare's pass only from Cloudflare, `X-Forwarded-For` is the real
+    client alone, the rest are dropped. A visitor could otherwise have stored
+    the page for a country or IP of its choosing for everyone.
+  - Consent and age-gate cookies read server-side (Cookie Notice, CookieYes
+    legacy's `viewed_cookie_policy`, Moove GDPR, Complianz, Age Gate) keep a
+    visitor off the cache: one
+    visitor's consent — the tracking scripts it enables — or age check would
+    otherwise have been everyone's. A site's own such cookie goes in the
+    vhost's `auth_cookies`.
+  - A request body is never forwarded from a micro-cached request: a GET that
+    carries one (the WordPress REST API reads a JSON body even on GET) could
+    otherwise have stored a page shaped by that body for every visitor.
+  - Micro-cache is used only from the main `location /` of the HTTPS server,
+    so PHP scripts and large downloads keep streaming unbuffered. A node whose
+    live edge conf predates this release (no `set $cfm_micro_conf "1"`), or
+    whose nginx core is older than 1.23, never micro-caches, whatever
+    `MICRO_CACHE_ENFORCE` says.
+- **Static caching (Tier A) skips panel hosts too:** a policy that covers
+  `cpanel.`, `webmail.` or another panel/service host above — by name or
+  through a `*.domain` wildcard — no longer caches static files there.
 - **ChallengeV2 no longer rejects verified crawlers such as Google Read
   Aloud.** Under an armed `challenge_v2`, a failing humanity score gets no
   clearance. Google's Read Aloud fetcher (PTR `google-proxy-*.google.com`)
@@ -91,6 +172,14 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **Site Cache refuses an auth cookie name the edge could never match** —
+  one starting with `[` (PHP reads it as a nameless array) or a bare
+  `__Host-` / `__Secure-` prefix — instead of storing a rule that never fires.
+- **A micro-cache TTL in minutes is no longer read as seconds.** The edge read
+  only the digits of a stored TTL, so `--micro-ttl 1m` used the 1 s bucket; it
+  now uses 60 s (anything above 60 s uses the 60 s bucket).
+- **A Site Cache error in the response header phase can no longer fail the
+  response.** The edge called the `X-CFM-Cache` stamp without a `pcall`.
 - **Site Cache: invalid hosts and cookie names are rejected, not stored.** A
   policy host must be a DNS-style name (labels of `[a-z0-9_-]`, ≤ 63 characters,
   ≤ 253 in all; an internationalized name in its `xn--` form) or `*.` over one
@@ -380,6 +469,13 @@ back-filled here — see the git/PR history for that period.
   edge reads until its workers are reloaded.
 
 ### Security
+- **The `X-CFM-Cache` debug header is only answered for trusted sources.**
+  Any client sending `X-CFM-Cache-Debug` could read a vhost's cache policy,
+  purge generation and HIT/MISS verdict. It is now stamped only for requests
+  from the box itself (loopback / link-local), its own IPs or `IGNORE_IPS` /
+  `IGNORE_NETS` — run the check on the box against the edge's :9043 listener
+  (`curl --resolve <host>:9043:<vhost-ip> …`, see `docs/site-cache-design.md`
+  §5.7).
 - **Site Cache: a tenant can no longer see another tenant's domain list, or
   an admin wildcard's cache counts through its own vhost.** A scoped (cPanel)
   token that created a policy stored its WHOLE vhost allowlist as the entry's

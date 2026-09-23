@@ -444,21 +444,31 @@ func normalizeCookieNames(in []string) ([]string, error) {
 	return out, nil
 }
 
-// siteCacheCookieNameError rejects a cookie name the edge can never match:
-// micro_cookie_verdict splits the Cookie header on ";" and takes each name up
-// to "=" or ASCII whitespace, so a name holding one of those never equals a
-// request cookie's name. A control character or other whitespace is rejected
-// too (never part of a real cookie name). Anything else is matchable — ",", quotes, brackets (PHP
-// array cookies: cart[id]) — and accepted, even though RFC 6265 would not
-// call it a token. At most 256 bytes.
+// siteCacheCookieNameError rejects a cookie name the edge can never match, or
+// that is not a real cookie name: micro_cookie_verdict splits the Cookie
+// header on ";" and takes each name up to "=" (outer whitespace trimmed), so
+// "=" and ";" can never be part of one; whitespace and control characters are
+// never part of a real cookie name. The edge then compares names the way the
+// app reads them (cfm_cache.lua cookie_key: "a[b]" is a, a __Host- /
+// __Secure- prefix is stripped, …), so a name that is nothing but such a
+// prefix, or starts with "[", normalises to nothing and is rejected too.
+// Anything else is matchable — ",", quotes, brackets (PHP array cookies:
+// cart[id]) — and accepted, even though RFC 6265 would not call it a token.
+// At most 256 bytes.
 func siteCacheCookieNameError(c string) error {
 	if len(c) > 256 {
 		return errors.New("longer than 256 bytes")
 	}
 	for _, r := range c {
 		if r <= ' ' || r == 0x7f || unicode.IsSpace(r) || r == '=' || r == ';' {
-			return fmt.Errorf("invalid character %q (the edge reads a cookie name up to \"=\" or whitespace, so a name with whitespace, \"=\", \";\" or a control character never matches)", r)
+			return fmt.Errorf("invalid character %q (a cookie name never holds whitespace, \"=\", \";\" or a control character)", r)
 		}
+	}
+	if l := strings.ToLower(c); l == "__host-" || l == "__secure-" {
+		return errors.New("only a __Host- / __Secure- prefix (the edge strips it, leaving no name)")
+	}
+	if strings.HasPrefix(c, "[") {
+		return errors.New(`starts with "[" (read as an array with no name)`)
 	}
 	return nil
 }

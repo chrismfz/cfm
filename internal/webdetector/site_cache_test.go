@@ -1229,8 +1229,8 @@ func TestSiteCacheAuthCookieValidation(t *testing.T) {
 	s := newSiteCacheTestStore(t)
 	on := &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("micro_safe")}
 	// Anything the edge can match is accepted — the edge takes a cookie's name
-	// up to "=" or whitespace in a ";"-split pair — incl. names RFC 6265 would
-	// not call a token (PHP array cookies, commas, quotes, UTF-8).
+	// up to "=" in a ";"-split pair — incl. names RFC 6265 would not call a
+	// token (PHP array cookies, commas, quotes, UTF-8).
 	ok := []string{"wp_session", "PHPSESSID", "my-app.sid", "a!#$%&'*+-.^_`|~b", "cart[id]", "a,b", `"quoted"`, "ünicode", strings.Repeat("c", 256)}
 	e, err := s.Apply(SiteCachePatch{Host: "a.com", Micro: on, AuthCookies: &ok}, false)
 	if err != nil || len(e.AuthCookies) != len(ok) {
@@ -1238,7 +1238,7 @@ func TestSiteCacheAuthCookieValidation(t *testing.T) {
 	}
 	for _, bad := range [][]string{
 		{"has space"}, {"a=b"}, {"a;b"}, {"tab\tname"}, {"ctl\x01"}, {"nbsp\u00a0x"},
-		{strings.Repeat("c", 257)},
+		{strings.Repeat("c", 257)}, {"__Host-"}, {"__secure-"}, {"[x]"},
 	} {
 		if _, err := s.Apply(SiteCachePatch{Host: "a.com", AuthCookies: &bad}, false); err == nil {
 			t.Errorf("cookie names %q accepted", bad)
