@@ -560,6 +560,10 @@ local MICRO_AUTH_EXACT = {
     ["moodlesession"] = true,     -- Moodle
     ["edd_items_in_cart"] = true, -- Easy Digital Downloads
     ["sid"] = true, ["token"] = true, ["auth"] = true,
+    -- CSRF cookies whose token the page renders (Yii2 / Express csurf _csrf,
+    -- Django csrftoken, CakePHP csrfToken): a stored page would hand one
+    -- visitor's token to the next, whose first form POST then fails
+    ["_csrf"] = true, ["csrftoken"] = true,
     -- a page that varies on a language / currency cookie without Vary
     ["wp-wpml_current_language"] = true, ["_icl_current_language"] = true,
     ["wmc_current_currency"] = true, ["woocs_current_currency"] = true,
@@ -567,13 +571,13 @@ local MICRO_AUTH_EXACT = {
     -- consent / age-gate cookies the plugin reads SERVER-side (no Set-Cookie on
     -- the GETs that carry them, no Vary): Cookie Notice prints the consented
     -- scripts only when cookie_notice_accepted / hu-consent says so, CookieYes
-    -- legacy on viewed_cookie_policy + cookielawinfo-checkbox-*, Moove GDPR on
-    -- moove_gdpr_popup, Complianz on cmplz_*, Age Gate (PHP mode) swaps the
-    -- page for the gate on age_gate. A stored copy would hand one visitor's
-    -- consent (or age) to everyone.
+    -- legacy when viewed_cookie_policy is set (its cookielawinfo-checkbox-*
+    -- are set for every visitor on the first view, so they are not listed),
+    -- Moove GDPR on moove_gdpr_popup, Complianz on cmplz_* (prefix below), Age
+    -- Gate (PHP mode) on age_gate / age_gate_failed (prefix below). A stored
+    -- copy would hand one visitor's consent (or age) to everyone.
     ["cookie_notice_accepted"] = true, ["hu-consent"] = true,
     ["viewed_cookie_policy"] = true, ["moove_gdpr_popup"] = true,
-    ["age_gate"] = true,
     -- mainstream non-PHP stacks
     ["jsessionid"] = true,        -- Java / Tomcat / JSP
     ["asp.net_sessionid"] = true, -- classic ASP.NET
@@ -583,7 +587,7 @@ local MICRO_AUTH_EXACT = {
 local MICRO_AUTH_PREFIX = {
     "wordpress_logged_in_", "wordpress_sec_", "wp-postpass_", "comment_author_",
     "woocommerce_", "wp_woocommerce_session_", "wp_edd_session_", "prestashop-",
-    "horde_", "mage-", "cookielawinfo-checkbox-", "cmplz_",
+    "horde_", "mage-", "cmplz_", "age_gate",
     "sess", "ssess",              -- Drupal SESS<hash> / SSESS<hash>, and any sess*
     ".aspnetcore.",               -- ASP.NET Core session/antiforgery/auth
 }
@@ -755,7 +759,8 @@ end
 --
 -- r is a table of request facets: method, uri (the path), args, host, cookie,
 -- auth (Authorization), range (Range), accept (Accept), fragment (truthy when
--- a partial-page request header is present). Besides the rails
+-- a partial-page request header is present), cred_header (truthy when a
+-- credential-style request header is present). Besides the rails
 -- below, it bypasses:
 --   * a Range request — nginx strips Range upstream when caching and fetches
 --     the whole page; micro is for plain page loads;
@@ -765,6 +770,12 @@ end
 --     Turbo-Frame or X-Inertia present) — apps answer those with a fragment,
 --     usually without Vary, and a stored fragment would be every visitor's
 --     page for the bucket TTL;
+--   * a credential in a request header other than Authorization (r.cred_header:
+--     Cart-Token — the WooCommerce Store API's headless session, whose cart /
+--     checkout GETs carry no Cache-Control before WooCommerce 10.6 —,
+--     WooCommerce-Session (WooGraphQL), X-WP-Nonce, X-Api-Key, X-Auth-Token,
+--     X-Access-Token): the answer belongs to that client (one customer's cart,
+--     address and token would be everyone's);
 --   * a panel / webmail / service host (panel_host).
 --
 -- auth_header is the request's Authorization value. Any non-empty value means
@@ -795,6 +806,9 @@ local function micro_decision(pol, r)
     end
     if r.fragment then
         return false, nil, "fragment"
+    end
+    if r.cred_header then
+        return false, nil, "credential-header"
     end
     if micro_path_blocked(r.uri) or micro_args_blocked(r.args) then
         return false, nil, "path"
@@ -965,6 +979,9 @@ local function micro_verdict(p)
         fragment = v.http_x_requested_with ~= nil or v.http_x_pjax ~= nil
             or v.http_hx_request ~= nil or v.http_turbo_frame ~= nil
             or v.http_x_inertia ~= nil,
+        cred_header = v.http_cart_token ~= nil or v.http_woocommerce_session ~= nil
+            or v.http_x_wp_nonce ~= nil or v.http_x_api_key ~= nil
+            or v.http_x_auth_token ~= nil or v.http_x_access_token ~= nil,
     })
     if ok and uncacheable_marked() then return false, nil, "uncacheable" end
     return ok, bucket, why

@@ -297,9 +297,16 @@ end
 check(anon("__Host-foo=1", false) == true, "a __Host- prefixed non-session cookie stays anonymous")
 -- consent / age-gate cookies read server-side: never anonymous, strict or not
 for _, c in ipairs({ "cookie_notice_accepted=true", "hu-consent=x", "viewed_cookie_policy=yes",
-                     "cookielawinfo-checkbox-analytics=yes", "moove_gdpr_popup=x", "cmplz_marketing=allow",
-                     "age_gate=99" }) do
+                     "moove_gdpr_popup=x", "cmplz_marketing=allow", "age_gate=99", "age_gate_failed=1" }) do
   check(anon(c, false) == false and anon(c, true) == false, "consent / age-gate cookie → bypass: " .. c)
+end
+-- CookieYes legacy sets its checkbox cookies for every visitor on the first view
+-- (viewed_cookie_policy is what marks consent), so they alone stay anonymous
+check(anon("cookielawinfo-checkbox-necessary=yes; cookielawinfo-checkbox-analytics=no", false) == true,
+      "CookieYes checkbox cookies alone stay anonymous (set before any consent)")
+-- CSRF cookies whose token the page renders
+for _, c in ipairs({ "_csrf=abc", "csrftoken=abc", "csrfToken=abc" }) do
+  check(anon(c, false) == false, "CSRF cookie → bypass: " .. c)
 end
 check(anon("euconsent-v2=CO", true) == true, "strict: the TCF consent string stays ignore-listed (read client-side)")
 -- a name as PHP / Rack read it: "." / " " / "[" → "_", percent-decoded
@@ -545,6 +552,8 @@ do
   check(ok, "an ordinary Accept stays cacheable")
   ok, _, why = d({ uri = "/", fragment = true })
   check(not ok and why == "fragment", "a partial-page request (X-Requested-With etc.) → bypass:fragment")
+  ok, _, why = d({ uri = "/", cred_header = true })
+  check(not ok and why == "credential-header", "a credential-style request header → bypass:credential-header")
   for _, u in ipairs({ "/wp-admin/", "/WP-Admin/edit.php", "/wp-login.php", "/xmlrpc.php",
                        "/wp-cron.php", "/index.php", "/a/B.PHP", "/administrator/index",
                        "/admin/x", "/sysadmin/", "/acctxfer_x", "/x.phtml", "/x.php7",
@@ -653,6 +662,12 @@ for _, h in ipairs({ "http_x_requested_with", "http_x_pjax", "http_hx_request", 
   check(cache.micro_gate() == nil, "a partial-page request header never routes: " .. h)
   ngx.var[h] = ""
   check(cache.micro_gate() == nil, "an EMPTY partial-page request header never routes either: " .. h)
+  ngx.var[h] = nil
+end
+for _, h in ipairs({ "http_cart_token", "http_woocommerce_session", "http_x_wp_nonce",
+                     "http_x_api_key", "http_x_auth_token", "http_x_access_token" }) do
+  micro_req("m.com"); ngx.var[h] = ""
+  check(cache.micro_gate() == nil, "a credential-style request header (even empty) never routes: " .. h)
   ngx.var[h] = nil
 end
 micro_req("m.com"); ngx.var.http_x_requested_with = ""; ngx.var.http_hx_request = "true"

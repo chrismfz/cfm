@@ -58,10 +58,12 @@
 #       refuses the internal requests they make, so this is defence in depth),
 #       and buffering is never turned off in it nor at server/http level
 #       (which it would inherit).
-#     * every @cfm_micro_<n>s location sends X-Forwarded-For $remote_addr,
+#     * every @cfm_micro_<n>s location sends X-Forwarded-For, X-Real-IP and
+#       CF-Connecting-IP as $remote_addr (once each),
 #       CF-IPCountry / CF-Visitor only via the trusted-peer maps (pinned
 #       exactly) and drops the Client-IP family, X-Country-Code, HTTPS,
-#       X-Arr-Ssl, Surrogate-Capability, Proxy, Content-Type, Content-Encoding.
+#       X-Arr-Ssl, X-Proto, CloudFront-Forwarded-Proto, Surrogate-Capability,
+#       Proxy, Content-Type, Content-Encoding.
 #     * every @cfm_micro_<n>s location caches into a cfm_micro_<n>s zone, sets
 #       $cfm_upstream "cfm_apache_micro", and never forwards a request body
 #       (proxy_pass_request_body off + Content-Length ""): a body on a GET is
@@ -204,7 +206,7 @@ for f in "$ORT" "$ANG"; do
       }
       if (ne != nw || !ok1 || !ok2 || !ok3) print "ERR the " name " map must hold EXACTLY: " want1 " and " want2 (want3 != "" ? " and " want3 : "") " — got:" got
     }
-    function check_loc(   m, nz, lb, i, nh, H, st, mi, ns, lh, zn, hn, nh2, H2) {
+    function check_loc(   m, nz, lb, i, nh, H, st, mi, ns, lh, zn, hn, nh2, H2, nh3, H3) {
       # The Tier B sentinel: only `location /` may carry it (see the header).
       lh = body; sub(/^\n/, "", lh); sub(/\n.*$/, "", lh); gsub(/[[:space:]]+/, " ", lh); sub(/^ /, "", lh); sub(/ $/, "", lh)
       ns = cnt(body, A "set[[:space:]]+[$]cfm_micro_conf[[:space:]]+\"1\"[[:space:]]*;")
@@ -299,10 +301,12 @@ for f in "$ORT" "$ANG"; do
       # X-Forwarded-For is the real client alone, CF-IPCountry / CF-Visitor come
       # from the trusted-peer maps, the rest are dropped — each set once.
       if (mi) {
-        if (body !~ (A "proxy_set_header[[:space:]]+X-Forwarded-For[[:space:]]+[$]remote_addr[[:space:]]*;") || cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?x-forwarded-for[\"\047]?[[:space:]]") != 1) m = m " micro-X-Forwarded-For-must-be-$remote_addr-once"
+        nh3 = split("X-Forwarded-For X-Real-IP CF-Connecting-IP", H3, " ")
+        for (i = 1; i <= nh3; i++)
+          if (body !~ (A "proxy_set_header[[:space:]]+" H3[i] "[[:space:]]+[$]remote_addr[[:space:]]*;") || cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?" tolower(H3[i]) "[\"\047]?[[:space:]]") != 1) m = m " micro-" H3[i] "-must-be-$remote_addr-once"
         if (body !~ (A "proxy_set_header[[:space:]]+CF-IPCountry[[:space:]]+[$]cfm_cf_ipcountry[[:space:]]*;") || cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?cf-ipcountry[\"\047]?[[:space:]]") != 1) m = m " micro-CF-IPCountry-must-be-$cfm_cf_ipcountry-once"
         if (body !~ (A "proxy_set_header[[:space:]]+CF-Visitor[[:space:]]+[$]cfm_cf_visitor[[:space:]]*;") || cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?cf-visitor[\"\047]?[[:space:]]") != 1) m = m " micro-CF-Visitor-must-be-$cfm_cf_visitor-once"
-        nh2 = split("True-Client-IP Client-IP X-Client-IP X-Cluster-Client-IP Fastly-Client-IP X-Originating-IP X-ProxyUser-Ip X-Forwarded X-Country-Code HTTPS X-Arr-Ssl Surrogate-Capability Proxy Content-Type Content-Encoding", H2, " ")
+        nh2 = split("True-Client-IP Client-IP X-Client-IP X-Cluster-Client-IP Fastly-Client-IP X-Originating-IP X-ProxyUser-Ip X-Forwarded X-Country-Code HTTPS X-Arr-Ssl X-Proto CloudFront-Forwarded-Proto Surrogate-Capability Proxy Content-Type Content-Encoding", H2, " ")
         for (i = 1; i <= nh2; i++) {
           if (body !~ (A "proxy_set_header[[:space:]]+" H2[i] "[[:space:]]+\"\"[[:space:]]*;")) m = m " micro-" H2[i] "-not-dropped"
           else if (cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?" tolower(H2[i]) "[\"\047]?[[:space:]]") != 1) m = m " micro-" H2[i] "-set-more-than-once"

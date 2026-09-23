@@ -81,7 +81,12 @@ back-filled here — see the git/PR history for that period.
   - Never micro-cached: `Range` requests, `Accept: text/event-stream` (live
     streams), `/wp-admin`, `/administrator/`, `/admin/`, `/sysadmin/`, PHP
     script paths (`.php`, `.php7`, `.phtml`, …, including `/index.php/…`),
-    `?doing_wp_cron`, partial-page requests (`X-Requested-With`, `X-PJAX`,
+    `?doing_wp_cron`, requests carrying a credential in a header
+    (`Cart-Token` — WooCommerce's headless Store API session, whose cart and
+    checkout answers carry no cache headers before WooCommerce 10.6, so one
+    customer's cart, address and token would have been everyone's —
+    `WooCommerce-Session`, `X-WP-Nonce`, `X-Api-Key`, `X-Auth-Token`,
+    `X-Access-Token`), partial-page requests (`X-Requested-With`, `X-PJAX`,
     `HX-Request`, `Turbo-Frame`, `X-Inertia` — a stored fragment would be
     everyone's page; Android in-app browsers send `X-Requested-With` on every
     request, so their visitors are not micro-cached), a `Cookie` header over
@@ -90,7 +95,8 @@ back-filled here — see the git/PR history for that period.
     `cpcontacts.`) whether armed by a `*.domain` wildcard or by name.
   - More app session cookies keep a visitor off the cache: Drupal `SESS…`,
     Magento, OpenCart, Moodle, Easy Digital Downloads, `…_sid`, `token`,
-    `auth`, WPML language and WooCommerce currency-switcher cookies. A cookie
+    `auth`, CSRF cookies whose token the page shows (`_csrf`, `csrftoken`), WPML
+    language and WooCommerce currency-switcher cookies. A cookie
     name is compared the way the app reads it, so a session cookie no longer
     slips past as `wordpress.logged.in_…`, `ci+session`, `ci%2Esession` or
     `__Host-PHPSESSID` (PHP turns `.` and spaces into `_`; older PHP also
@@ -102,7 +108,8 @@ back-filled here — see the git/PR history for that period.
     client alone, the rest are dropped. A visitor could otherwise have stored
     the page for a country or IP of its choosing for everyone.
   - Consent and age-gate cookies read server-side (Cookie Notice, CookieYes
-    legacy, Moove GDPR, Complianz, Age Gate) keep a visitor off the cache: one
+    legacy's `viewed_cookie_policy`, Moove GDPR, Complianz, Age Gate) keep a
+    visitor off the cache: one
     visitor's consent — the tracking scripts it enables — or age check would
     otherwise have been everyone's. A site's own such cookie goes in the
     vhost's `auth_cookies`.
