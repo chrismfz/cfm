@@ -289,7 +289,7 @@ type ThrottleConfig struct {
 // throttleModeWarned holds the unrecognised THROTTLE_MODE values already
 // warned about: cfm.conf is parsed per request on some paths (nftlib block
 // reports, panelauth, the cfm-admin embed-cookie check), and a warning per
-// parse would flood the journal.
+// parse would flood the daemon's stderr (/var/log/cfm/cfm-error.log).
 var throttleModeWarned sync.Map
 
 type PortscanConfig struct {

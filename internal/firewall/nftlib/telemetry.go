@@ -111,6 +111,9 @@ func (b *Backend) DumpThrottledIPs() {
 }
 
 func (b *Backend) dumpThrottledIPsNative() {
+	b.abMu.Lock()
+	defer b.abMu.Unlock()
+
 	uniq4 := map[string]struct{}{}
 	uniq6 := map[string]struct{}{}
 
@@ -227,7 +230,7 @@ func (b *Backend) getSetIPStrings(setName string) []string {
 	return ips
 }
 
-// autoBlockAction is nftlib's BlockAction: uses b.AddBlock (native netlink, no subprocess).
+// autoBlockAction is nftlib's BlockAction (native netlink, no subprocess).
 func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConfig) error {
 	if reason == "" {
 		reason = "Auto-block"
@@ -290,18 +293,27 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 		// AddBlockBatch, not AddBlock: AddBlock replaces the element, so a
 		// ttl autoblock of an address blocked permanently (cfm.deny, a
 		// port-scan or manual block) turned it into a timed one.
+		set := setBlockV6
+		if parsedIP.To4() != nil { // a v4-mapped address is blocked as IPv4
+			set = setBlockV4
+		}
 		res, err := b.AddBlockBatch([]firewall.BlockEntry{{IP: parsedIP, TTL: time.Duration(ttl) * time.Second}})
 		if err != nil {
+			logging.Logf("[autoblock] %s %s -> %s ttl=%ds failed: %v", fam, logIP, set, ttl, err)
 			return err
 		}
 		b.lastAutoBlockAt[ip] = time.Now()
-		if res.Added+res.Extended == 0 {
-			logging.Logf("[autoblock] %s %s already in block_%s for at least ttl=%ds; kept (reason=%s)",
-				fam, logIP, fam, ttl, reason)
+		switch {
+		case res.Kept > 0:
+			logging.Logf("[autoblock] %s %s already in %s for at least ttl=%ds; kept (reason=%s)",
+				fam, logIP, set, ttl, reason)
+			return nil
+		case res.Added+res.Extended == 0:
+			logging.Logf("[autoblock] %s %s not blockable (unspecified address); skipped (reason=%s)", fam, logIP, reason)
 			return nil
 		}
-		logging.Logf("[autoblock] %s %s -> block_%s ttl=%ds (hits>=%d in %ds) reason=%s",
-			fam, logIP, fam, ttl, tc.Hits, tc.WindowSec, reason)
+		logging.Logf("[autoblock] %s %s -> %s ttl=%ds (hits>=%d in %ds) reason=%s",
+			fam, logIP, set, ttl, tc.Hits, tc.WindowSec, reason)
 		_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
 		b.emitAutoBlockNotify(ip, fam, "ttl", reason, ttl, tc.Hits, tc.WindowSec)
 		return nil
@@ -468,6 +480,9 @@ func (b *Backend) LoadPortScanner() {
 }
 
 func (b *Backend) loadPortScannerOnce() {
+	b.abMu.Lock()
+	defer b.abMu.Unlock()
+
 	// Do NOT call EnsureBase on every tick. EnsureBase's cost is its CLI part
 	// (applyBaseInputRules: ~60 `nft` processes then, one or two now), and
 	// running it every ~20s here was the driver of the nftlib EnsureBase-duration

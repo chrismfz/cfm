@@ -148,11 +148,13 @@ func authAutoblockApply(be firewall.Backend, ip net.IP, mode string, ttl *time.D
 		return authBlockDone
 	case "ttl":
 		res, err := be.AddBlockBatch([]firewall.BlockEntry{{IP: ip, TTL: *ttl}})
-		if err != nil {
+		switch {
+		case err != nil:
 			return authBlockFailed
-		}
-		if res.Added+res.Extended == 0 {
+		case res.Kept > 0:
 			return authBlockKept
+		case res.Added+res.Extended == 0: // not blockable (unspecified address)
+			return authBlockFailed
 		}
 		return authBlockDone
 	}

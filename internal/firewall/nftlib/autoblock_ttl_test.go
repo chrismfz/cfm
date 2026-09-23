@@ -22,7 +22,7 @@ func (r *recReporter) ReportBlock(ip, _, source, mode string, ttl int) error {
 	return nil
 }
 func (r *recReporter) ReportLenient(string, string, string, string, int) error { return nil }
-func (r *recReporter) ReportUnblock(string, string, string) error               { return nil }
+func (r *recReporter) ReportUnblock(string, string, string) error              { return nil }
 
 // A ttl autoblock never shortens a block: AddBlock replaced the element, so
 // over an address already blocked permanently (cfm.deny, a port-scan or
@@ -67,5 +67,14 @@ func TestAutoBlockTTL_KeepsPermanentBlock(t *testing.T) {
 	}
 	if len(rep.blocks) != 1 || rep.blocks[0] != "198.51.100.9 autoblock ttl 86400" {
 		t.Errorf("reports = %v, want one ttl report for the new block", rep.blocks)
+	}
+
+	// An unspecified source (a DHCP discover flood is 0.0.0.0) is not
+	// blockable: nothing written, nothing reported.
+	if err := b.autoBlockAction("0.0.0.0", "v4", "Packet flood (pps)", tc); err != nil {
+		t.Fatalf("autoBlockAction(0.0.0.0): %v", err)
+	}
+	if len(f.batches) != 1 || len(rep.blocks) != 1 {
+		t.Errorf("blocked or reported 0.0.0.0: %d writes, reports %v", len(f.batches), rep.blocks)
 	}
 }

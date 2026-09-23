@@ -131,6 +131,9 @@ func (b *Backend) dumpFloodCountersOnce() {
 // DumpThrottledIPs prints current IPs present in throttled sets (v4/v6),
 // χωρίς full table dump. Διαβάζει ΜΟΝΟ τα στοχευμένα throttling sets.
 func (b *Backend) DumpThrottledIPs() {
+	b.abMu.Lock()
+	defer b.abMu.Unlock()
+
 	// --- helpers ---
 
 	// Στοχευμένο dump ενός set σε []string IPs (αγνοεί self IPs).
@@ -464,18 +467,27 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 		if parsedIP == nil {
 			return fmt.Errorf("autoBlockAction: invalid IP %q", ip)
 		}
+		set := "block_v6"
+		if parsedIP.To4() != nil { // a v4-mapped address is blocked as IPv4
+			set = "block_v4"
+		}
 		res, err := b.AddBlockBatch([]firewall.BlockEntry{{IP: parsedIP, TTL: time.Duration(ttl) * time.Second}})
 		if err != nil {
+			logging.Logf("[autoblock] %s %s -> %s ttl=%ds failed: %v", fam, logIP, set, ttl, err)
 			return err
 		}
 		b.lastAutoBlockAt[ip] = time.Now()
-		if res.Added+res.Extended == 0 {
-			logging.Logf("[autoblock] %s %s already in block_%s for at least ttl=%ds; kept (reason=%s)",
-				fam, logIP, fam, ttl, reason)
+		switch {
+		case res.Kept > 0:
+			logging.Logf("[autoblock] %s %s already in %s for at least ttl=%ds; kept (reason=%s)",
+				fam, logIP, set, ttl, reason)
+			return nil
+		case res.Added+res.Extended == 0:
+			logging.Logf("[autoblock] %s %s not blockable (unspecified address); skipped (reason=%s)", fam, logIP, reason)
 			return nil
 		}
-		logging.Logf("[autoblock] %s %s -> block_%s ttl=%ds (hits>=%d in %ds) reason=%s",
-			fam, logIP, fam, ttl, tc.Hits, tc.WindowSec, reason)
+		logging.Logf("[autoblock] %s %s -> %s ttl=%ds (hits>=%d in %ds) reason=%s",
+			fam, logIP, set, ttl, tc.Hits, tc.WindowSec, reason)
 		_ = b.ReportBlock(ip, comment, "autoblock", "ttl", ttl)
 		b.emitAutoBlockNotify(ip, fam, "ttl", reason, ttl, tc.Hits, tc.WindowSec)
 		return nil
@@ -682,6 +694,9 @@ func (b *Backend) LoadPortScanner() {
 // - harvest ps_pairs_*, μετρά distinct dports ανά IP
 // - φτιάχνει reason και καλεί autoBlockEval() με reuse του throttle tc
 func (b *Backend) loadPortScannerOnce() {
+	b.abMu.Lock()
+	defer b.abMu.Unlock()
+
 	// σιγουρέψου ότι υπάρχει η βάση
 	if !b.tableExists() {
 		if err := b.EnsureBase(); err != nil {

@@ -93,23 +93,37 @@ back-filled here — see the git/PR history for that period.
   brute-force autoblock (`cfm_auth_brute`) follows the same mode and was
   permanent too. On 2026-09-21 a home connection that tripped the IMAPS
   port-flood limit (`portflood_993_tcp`) was banned for good. An unrecognised
-  mode now means `ttl` (`THROTTLE_TTL`, default 24h), with one
-  `config: warning: THROTTLE_MODE ...` line per process on stderr (the
-  journal); the reference config says `"ttl"`. **Takes effect on upgrade** for
+  mode now means `ttl` (`THROTTLE_TTL`, default 24h), with a
+  `config: warning: THROTTLE_MODE ...` line once per process — in
+  `/var/log/cfm/cfm-error.log` (the daemon's stderr), and on the terminal for
+  each `cfm` CLI command; the reference config says `"ttl"`. **Takes effect on upgrade** for
   every node whose `/etc/cfm/cfm.conf` still has the typo (a locally edited
   conffile is kept); an explicit `"permanent"`, or no `THROTTLE_MODE` at all,
-  keeps permanent bans. Port-scan autoblocks follow `PS_MODE` and are
-  unchanged. Bans already made stay where they are and can be unblocked as
+  keeps permanent bans. Port-scan autoblocks follow `PS_MODE`, not this
+  setting. Bans already made stay where they are and can be unblocked as
   usual: in `cfm.deny` as `# autoblock: <reason>` with a flood reason such as
   `portflood_993_tcp`, `connlimit_…`, `SYN flood` or `Packet flood (pps)`, and
   on cfm-web's blacklist (source `api`, description starting with that
   reason) — clearing `cfm.deny` alone does not lift those.
-- **A ttl autoblock no longer shortens an existing block.** A throttle or
-  login brute-force autoblock in `ttl` mode of an address already blocked
-  permanently — from `cfm.deny`, a port-scan block or a manual `cfm block` —
-  replaced the permanent block with a 24h one, on both firewall engines, and
-  reported the 24h block to the API. It now keeps the longer block, and
-  reports and notifies only a block it actually added or extended.
+- **A ttl autoblock no longer shortens an existing block.** A throttle,
+  port-scan (`PS_MODE = "ttl"`) or cfm-admin login brute-force autoblock of
+  an address already blocked permanently — from `cfm.deny`, a port-scan
+  block or a manual `cfm block` — re-added it with the TTL and reported the
+  timed block to the API, which made cfm-web's permanent row for it a timed
+  one. In the kernel the permanent block became timed too: always for the
+  login autoblock on the `nft` engine (it removes and re-adds), otherwise on
+  kernels that update an existing element's timeout (seen on 6.18; the EL8
+  4.18 kernels are not verified). These autoblocks now keep the longer block
+  and log, report and notify only a block they added or extended. Other
+  timed blocks (the detector sinks such as `waf_security` and ssh, the
+  challenge escalation) still replace an existing block; that is a separate
+  fix.
+- **The throttle check and the port scanner could corrupt the autoblock
+  state, or crash the daemon, when they ran at the same time — on both
+  engines.** They run in separate goroutines started together every tick and
+  shared the autoblock evaluator's maps with no lock; overlapping writes are
+  a data race, and Go aborts the process on `concurrent map writes`. They
+  now take turns.
 - **The flood protections (SYN/PPS/new-connection rate, connlimit, portflood,
   bad TCP flags) could stop applying to TCP/UDP when ICMP rate limiting is on
   (`ICMP_RATE_LIMIT`, 20 in the reference config), on both engines.** The

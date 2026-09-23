@@ -93,6 +93,12 @@ type Backend struct {
 
 	// ab evaluates the sliding-window auto-block algorithm.
 	ab *autoblock.Evaluator
+	// abMu serialises ab, its Reasons and the debounce maps: the flood dump
+	// (throttle) and the port scanner run in separate goroutines, started
+	// together every tick, and both drive the one Evaluator — which is not
+	// goroutine-safe — so they could write its maps at once ("concurrent map
+	// writes" is fatal).
+	abMu sync.Mutex
 
 	// last tracks previous flood counter packet counts for delta logging.
 	last map[string]uint64

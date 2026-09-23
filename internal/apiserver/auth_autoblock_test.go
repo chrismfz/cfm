@@ -20,9 +20,12 @@ func (b *authBlockBackend) AddBlockBatch(entries []firewall.BlockEntry) (firewal
 	var r firewall.BlockBatchResult
 	for _, e := range entries {
 		b.batches = append(b.batches, e)
-		if e.IP.String() == b.permanent {
+		switch {
+		case e.IP.IsUnspecified():
+			r.Skipped++
+		case e.IP.String() == b.permanent:
 			r.Kept++
-		} else {
+		default:
 			r.Added++
 		}
 	}
@@ -52,10 +55,14 @@ func TestAuthAutoblockApply_TTLNeverShortens(t *testing.T) {
 		t.Errorf("batches = %+v, want two 24h entries", be.batches)
 	}
 
+	if got := authAutoblockApply(be, net.ParseIP("0.0.0.0"), "ttl", &ttl); got != authBlockFailed {
+		t.Errorf("ttl block of 0.0.0.0 = %q, want %q", got, authBlockFailed)
+	}
+
 	if got := authAutoblockApply(be, net.ParseIP("198.51.100.8"), "permanent", nil); got != authBlockDone || len(be.adds) != 1 || be.adds[0] != nil {
 		t.Errorf("permanent = %q with adds %v, want one permanent AddBlock", got, be.adds)
 	}
-	if got := authAutoblockApply(be, net.ParseIP("198.51.100.10"), "dryrun", nil); got != authBlockDone || len(be.adds) != 1 || len(be.batches) != 2 {
+	if got := authAutoblockApply(be, net.ParseIP("198.51.100.10"), "dryrun", nil); got != authBlockDone || len(be.adds) != 1 || len(be.batches) != 3 {
 		t.Errorf("dryrun = %q and added something", got)
 	}
 }

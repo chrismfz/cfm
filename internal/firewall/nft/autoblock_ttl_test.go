@@ -19,7 +19,7 @@ func (r *recReporter) ReportBlock(ip, _, source, mode string, ttl int) error {
 	return nil
 }
 func (r *recReporter) ReportLenient(string, string, string, string, int) error { return nil }
-func (r *recReporter) ReportUnblock(string, string, string) error               { return nil }
+func (r *recReporter) ReportUnblock(string, string, string) error              { return nil }
 
 // fakeNFTAutoblock is an `nft` that holds no allow/ignore entries and
 // answers `-j list set inet cfm block_v4` from v4JSON, logging every call.
@@ -79,5 +79,15 @@ func TestAutoBlockTTL_KeepsPermanentBlock(t *testing.T) {
 	}
 	if len(rep.blocks) != 1 || rep.blocks[0] != "198.51.100.9 autoblock ttl 86400" {
 		t.Errorf("reports = %v, want one ttl report for the new block", rep.blocks)
+	}
+
+	// An unspecified source (a DHCP discover flood is 0.0.0.0) is not
+	// blockable: nothing written, nothing reported.
+	before := strings.Count(readFile(t, log), "ARGS -f -")
+	if err := b.autoBlockAction("0.0.0.0", "v4", "Packet flood (pps)", tc); err != nil {
+		t.Fatalf("autoBlockAction(0.0.0.0): %v", err)
+	}
+	if strings.Count(readFile(t, log), "ARGS -f -") != before || len(rep.blocks) != 1 {
+		t.Errorf("blocked or reported 0.0.0.0: reports %v", rep.blocks)
 	}
 }
