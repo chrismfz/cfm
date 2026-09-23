@@ -53,7 +53,7 @@
 #       the named locations would 500, one in a passthrough would buffer it);
 #       that server also sets the default `set $cfm_micro_conf "";` at server
 #       level; its `location /` has no rewrite / try_files / error_page and
-#       neither it nor its server has a rewrite_by_lua* (a `rewrite … last` or
+#       neither it, its server nor http level has a rewrite_by_lua* (a `rewrite … last` or
 #       ngx.req.set_uri(…, true) would carry the sentinel into another location
 #       without making the request internal), and buffering is never turned
 #       off in it nor at server/http level (which it would inherit).
@@ -67,6 +67,8 @@
 #       next probe of a page that stopped being cacheable).
 #     * proxy_cache_convert_head is never turned off, anywhere (the key has no
 #       method: a body-less HEAD entry would be served to GETs).
+#     * every cache location sends `Host $host` exactly once (the vhost the
+#       origin answers as must be the key's host).
 #     * the conf includes exactly its known files, by full path (a new include
 #       could carry a second copy of a rail map, which this scan would not see).
 #   How: the conf is lexed like nginx (quotes, escapes, ${var}, # comments),
@@ -203,7 +205,7 @@ for f in "$ORT" "$ANG"; do
         sentinels += ns
         if (lh != "location / {" || ns != 1) print "ERR location@line" locline " (" lh "): set $cfm_micro_conf \"1\" belongs once in `location /` only — anywhere else micro-cache would take over a location it must not buffer."
         if (lh == "location / {" && insrv) srv_sentinel = 1
-        if (body ~ (A "(rewrite|try_files|error_page)[[:space:]]")) print "ERR location@line" locline " (" lh "): the location carrying the $cfm_micro_conf sentinel has a rewrite / try_files / error_page — it would carry the sentinel into the location it redirects to."
+        if (body ~ (A "(rewrite|try_files|error_page)[[:space:]]")) print "ERR location@line" locline " (" lh "): the location carrying the $cfm_micro_conf sentinel has a rewrite / try_files / error_page — `rewrite … last` would carry the sentinel into another location without making the request internal (the others are internal redirects micro_gate refuses); keep it redirect-free."
         if (body ~ (A "proxy_buffering[[:space:]]+[\"\047]?off[\"\047]?[[:space:]]*;")) print "ERR location@line" locline " (" lh "): the location carrying the $cfm_micro_conf sentinel turns buffering off — it streams, and micro would buffer it."
         if (body ~ (A "rewrite_by_lua[a-z_]*[[:space:]]")) print "ERR location@line" locline " (" lh "): the location carrying the $cfm_micro_conf sentinel has a rewrite_by_lua* — ngx.req.set_uri(…, true) would carry the sentinel into another location."
       }
@@ -245,6 +247,9 @@ for f in "$ORT" "$ANG"; do
       # set exactly once (a second proxy_set_header for the same name, in any
       # case or quoted, is sent as a second header and undoes the pin).
       lb = tolower(body)
+      # Host is the vhost the origin answers as: $host, the host of the key, once.
+      if (body !~ (A "proxy_set_header[[:space:]]+Host[[:space:]]+[$]host[[:space:]]*;")) m = m " Host-not-$host(the-origin-would-answer-another-vhost-under-this-key)"
+      else if (cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?host[\"\047]?[[:space:]]") != 1) m = m " Host-set-more-than-once"
       if (body !~ (A "proxy_set_header[[:space:]]+X-Forwarded-Host[[:space:]]+[$]host[[:space:]]*;")) m = m " X-Forwarded-Host-not-pinned-to-$host"
       else if (cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?x-forwarded-host[\"\047]?[[:space:]]") != 1) m = m " X-Forwarded-Host-set-more-than-once"
       nh = split("X-Forwarded-Server X-Forwarded-Port X-Forwarded-Scheme X-Forwarded-Protocol X-Forwarded-Prefix X-Forwarded-Ssl X-Forwarded-Uri X-Forwarded-Path X-Host X-Original-Host X-Original-URL X-Original-Uri X-Rewrite-URL Forwarded Front-End-Https X-Url-Scheme X-Scheme X-HTTP-Method-Override X-HTTP-Method X-Method-Override", H, " ")
@@ -311,6 +316,7 @@ for f in "$ORT" "$ANG"; do
         if (insrv && D == srvD + 1 && ls ~ /^[[:space:]]*set[[:space:]]+[$]cfm_cache_skip[[:space:]]+"1"[[:space:]]*;/) srv_set = 1
         if (insrv && !loc && D == srvD + 1 && ls ~ /^[[:space:]]*set[[:space:]]+[$]cfm_micro_conf[[:space:]]+""[[:space:]]*;[[:space:]]*$/) { srv_mdef++; mdefs++ }
         if (insrv && !loc && ls ~ /^[[:space:]]*rewrite_by_lua[a-z_]*[[:space:]]/) srv_rwlua++
+        if (!insrv && !loc && ls ~ /^[[:space:]]*rewrite_by_lua[a-z_]*[[:space:]]/) http_rwlua++
         if (ls ~ /^[[:space:]]*log_by_lua[a-z_]*[[:space:]]/ && (D != 1 || insrv || loc)) print "ERR line " SL[k] ": a log_by_lua* below http level overrides the http-level one — the Tier B remember-uncacheable hook (cfm_cache.micro_note) and the cache stats would stop for it."
         if (!loc && ls ~ /^[[:space:]]*proxy_buffering[[:space:]]+["\047]?off["\047]?[[:space:]]*;/) print "ERR line " SL[k] ": proxy_buffering off at " (insrv ? "server" : "http") " level — `location /` (the Tier B entry) inherits it and would stream; turn buffering off per location."
         if (!loc && s ~ /^[[:space:]]*location[[:space:]]/) { loc = 1; body = "\n"; locline = SL[k]; nloc++; d = 0; seen = 0 }
@@ -346,6 +352,7 @@ for f in "$ORT" "$ANG"; do
       mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_cache_control[[:space:]]+[$]cfm_cc_nostore[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~*(private|no-store|no-cache|s-maxage=0*(?:[^0-9]|$))\" \"1\";", "$upstream_http_cache_control → $cfm_cc_nostore (micro: private/no-store/no-cache/s-maxage=0 never stored)", "volatile;")
       mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_x_accel_expires[[:space:]]+[$]cfm_xae_nocache[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^(?:0+|@.*)$\" \"1\";", "$upstream_http_x_accel_expires → $cfm_xae_nocache (micro: X-Accel-Expires 0 / @… never stored)", "volatile;")
       if (!micro_seen) print "ERR no @cfm_micro_<n>s cache location found — the Tier B checks must verify something."
+      if (micro_seen && http_rwlua) print "ERR an http-level rewrite_by_lua* — inherited by the `location /` of the micro server, its ngx.req.set_uri(…, true) would carry the $cfm_micro_conf sentinel into another location."
       if (!sentinels) print "ERR no set $cfm_micro_conf \"1\" sentinel found — Tier B would never route."
       nm1 = 0; nm2 = 0; nm3 = 0; nm4 = 0; nmc = 0; nme = 0; nign = 0
       for (k = 1; k <= K; k++) {

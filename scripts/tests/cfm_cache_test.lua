@@ -295,6 +295,16 @@ for _, c in ipairs({ "__Host-PHPSESSID=1", "__Secure-laravel_session=1", "SESS0a
   check(anon(c, false) == false, "auth/variant cookie → bypass: " .. c)
 end
 check(anon("__Host-foo=1", false) == true, "a __Host- prefixed non-session cookie stays anonymous")
+-- a name as PHP / Rack read it: "." / " " / "[" → "_", percent-decoded
+for _, c in ipairs({ "wordpress.logged.in_abc=1", "ci.session=x", "laravel.session=x",
+                     "wordpress logged in_abc=1", "wordpress%5Flogged%5Fin_abc=1",
+                     "__Host-wordpress.logged.in_x=1", "connect.sid=1", ".AspNetCore.Session=1",
+                     "ASP.NET_SessionId=1", "PHPSESSID[x]=1" }) do
+  check(anon(c, false) == false, "session cookie in an app-equivalent spelling → bypass: " .. c)
+end
+check(anon("my_app=1", false, { [cache._cookie_key("my.app")] = true }) == false,
+      "a per-vhost auth cookie matches its app-equivalent spelling")
+check(anon("_ga=GA1.2.3; _gid=x", true) == true, "strict: analytics cookies stay ignore-listed after normalisation")
 
 -- ── Tier B micro-cache: full request decision ─────────────────────────────────
 local function armed(ttl) return { micro = { on = true, ttl = ttl }, strict_cookies = false } end
@@ -486,6 +496,8 @@ do
   check(not ok and why == "event-stream", "Accept: text/event-stream (any case) → bypass:event-stream")
   ok = d({ uri = "/", accept = "text/html,application/xhtml+xml" })
   check(ok, "an ordinary Accept stays cacheable")
+  ok, _, why = d({ uri = "/", fragment = "XMLHttpRequest" })
+  check(not ok and why == "fragment", "a partial-page request (X-Requested-With etc.) → bypass:fragment")
   for _, u in ipairs({ "/wp-admin/", "/WP-Admin/edit.php", "/wp-login.php", "/xmlrpc.php",
                        "/wp-cron.php", "/index.php", "/a/B.PHP", "/administrator/index",
                        "/admin/x", "/sysadmin/", "/acctxfer_x", "/x.phtml", "/x.php7",
@@ -589,6 +601,11 @@ micro_req("m.com"); ngx.var.cfm_micro_conf = ""
 check(cache.micro_gate() == nil, "an empty sentinel → never routes")
 micro_req("m.com")
 check(cache.micro_gate() == "@cfm_micro_5s", "sentinel \"1\" → routes (control)")
+for _, h in ipairs({ "http_x_requested_with", "http_x_pjax", "http_hx_request", "http_turbo_frame", "http_x_inertia" }) do
+  micro_req("m.com"); ngx.var[h] = "1"
+  check(cache.micro_gate() == nil, "a partial-page request header never routes: " .. h)
+  ngx.var[h] = nil
+end
 
 -- a storable fetch leaves no mark; the next request still routes
 _uncacheable.data = {}; _uncacheable.sets = 0

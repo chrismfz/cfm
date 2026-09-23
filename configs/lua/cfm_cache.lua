@@ -596,6 +596,39 @@ local MICRO_IGNORE_PREFIX = {
     "cookielawinfo-", "__cmp", "_hj",
 }
 
+-- cookie_key: a cookie name as the app sees it, so a session cookie cannot be
+-- smuggled past the lists in a form the app still reads: PHP (and Rack)
+-- percent-decode a name, PHP reads "a[b]" as the array a, and turns " ", "."
+-- and a lone "[" into "_" when it builds $_COOKIE (wordpress.logged.in_x is
+-- wordpress_logged_in_x to WordPress); lowercased; a __Host- / __Secure-
+-- prefix stripped. The lists are normalised the same way at load
+-- (connect.sid and .aspnetcore. still match).
+local function cookie_key(name)
+    local n = name:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+    local b = n:find("[", 1, true)
+    if b and n:find("]", b, true) then n = n:sub(1, b - 1) end
+    n = n:lower():gsub("[ %.%[]", "_")
+    for _, cp in ipairs(COOKIE_NAME_PREFIXES) do
+        if n:sub(1, #cp) == cp then return n:sub(#cp + 1) end
+    end
+    return n
+end
+local function norm_set(t)
+    local out = {}
+    for k, v in pairs(t) do out[cookie_key(k)] = v end
+    return out
+end
+local function norm_list(t)
+    local out = {}
+    for i, v in ipairs(t) do out[i] = cookie_key(v) end
+    return out
+end
+MICRO_AUTH_EXACT    = norm_set(MICRO_AUTH_EXACT)
+MICRO_AUTH_PREFIX   = norm_list(MICRO_AUTH_PREFIX)
+MICRO_AUTH_SUFFIX   = norm_list(MICRO_AUTH_SUFFIX)
+MICRO_IGNORE_EXACT  = norm_set(MICRO_IGNORE_EXACT)
+MICRO_IGNORE_PREFIX = norm_list(MICRO_IGNORE_PREFIX)
+
 local function name_matches(lname, exact, prefixes, suffixes)
     if exact[lname] then return true end
     for _, p in ipairs(prefixes) do
@@ -612,18 +645,17 @@ end
 -- micro_cookie_verdict: classify a request's Cookie header. Returns
 -- (anonymous:bool, reason:string|nil). Anonymous (cacheable) when no auth cookie
 -- is present and — under strict — every cookie name is ignore-listed. Cookies
--- are split on ';' FIRST, then the name taken before the first '=', so a value
--- that itself contains '=' (base64/JWT) can never fabricate a phantom name.
--- extra_auth is an optional {lowername=true} set of per-vhost auth cookies.
+-- are split on ';' FIRST, then the name taken before the first '=' (inner
+-- spaces included, outer ones trimmed), so a value that itself contains '='
+-- (base64/JWT) can never fabricate a phantom name; the name is then compared
+-- as cookie_key() sees it. extra_auth is an optional {cookie_key=true} set of
+-- per-vhost auth cookies.
 local function micro_cookie_verdict(cookie_header, strict, extra_auth)
     if not cookie_header or cookie_header == "" then return true, nil end
     for pair in cookie_header:gmatch("[^;]+") do
-        local name = pair:match("^%s*([^=%s]+)")
-        if name then
-            local lname = name:lower()
-            for _, cp in ipairs(COOKIE_NAME_PREFIXES) do
-                if lname:sub(1, #cp) == cp then lname = lname:sub(#cp + 1); break end
-            end
+        local name = pair:match("^%s*([^=]-)%s*=") or pair:match("^%s*(.-)%s*$")
+        if name and name ~= "" then
+            local lname = cookie_key(name)
             if name_matches(lname, MICRO_AUTH_EXACT, MICRO_AUTH_PREFIX, MICRO_AUTH_SUFFIX)
                or (extra_auth and extra_auth[lname]) then
                 return false, "auth:" .. name
@@ -681,12 +713,17 @@ end
 -- greppable token for the observe header and a future stat key.
 --
 -- r is a table of request facets: method, uri (the path), args, host, cookie,
--- auth (Authorization), range (Range), accept (Accept). Besides the rails
+-- auth (Authorization), range (Range), accept (Accept), fragment (the first
+-- partial-page request header present). Besides the rails
 -- below, it bypasses:
 --   * a Range request — nginx strips Range upstream when caching and fetches
 --     the whole page; micro is for plain page loads;
 --   * Accept: text/event-stream — a micro location buffers the response, so a
 --     Server-Sent-Events stream would be held back until it ends;
+--   * a partial-page request (r.fragment: X-Requested-With, X-PJAX, HX-Request,
+--     Turbo-Frame or X-Inertia present) — apps answer those with a fragment,
+--     usually without Vary, and a stored fragment would be every visitor's
+--     page for the bucket TTL;
 --   * a panel / webmail / service host (panel_host).
 --
 -- auth_header is the request's Authorization value. Any non-empty value means
@@ -715,6 +752,9 @@ local function micro_decision(pol, r)
     if type(r.accept) == "string" and r.accept:lower():find("text/event-stream", 1, true) then
         return false, nil, "event-stream"
     end
+    if type(r.fragment) == "string" and r.fragment ~= "" then
+        return false, nil, "fragment"
+    end
     if micro_path_blocked(r.uri) or micro_args_blocked(r.args) then
         return false, nil, "path"
     end
@@ -725,7 +765,7 @@ local function micro_decision(pol, r)
     if type(pol.auth_cookies) == "table" then
         extra = {}
         for _, nm in ipairs(pol.auth_cookies) do
-            if type(nm) == "string" then extra[nm:lower()] = true end
+            if type(nm) == "string" then extra[cookie_key(nm)] = true end
         end
     end
     local anon, why = micro_cookie_verdict(r.cookie, pol.strict_cookies, extra)
@@ -871,6 +911,8 @@ local function micro_verdict(p)
         method = v.request_method, uri = v.uri, args = v.args, host = v.host,
         cookie = v.http_cookie, auth = v.http_authorization,
         range = v.http_range, accept = v.http_accept,
+        fragment = v.http_x_requested_with or v.http_x_pjax or v.http_hx_request
+            or v.http_turbo_frame or v.http_x_inertia,
     })
     if ok and uncacheable_marked() then return false, nil, "uncacheable" end
     return ok, bucket, why
@@ -1012,9 +1054,9 @@ end
 --   * an internal redirect: a redirect to a named location (error_page … =
 --     @x, ngx.exec("@x")) keeps the sentinel variable in the target location.
 --     (A redirect to a URI re-runs the server-level "" default; `rewrite …
---     last` and ngx.req.set_uri(…, true) keep it without making the request
---     internal — check_site_cache_config.sh forbids those in `location /` and
---     at its server level.)
+--     last` in `location /` and ngx.req.set_uri(…, true) keep it without making
+--     the request internal — check_site_cache_config.sh forbids rewrite in
+--     `location /` and rewrite_by_lua* in it and at server / http level.)
 --   * nginx core older than 1.23: it exposes only the FIRST of several
 --     Cache-Control headers in $upstream_http_cache_control, so a `private` on
 --     a second line would not reach $cfm_cc_nostore.
@@ -1053,6 +1095,7 @@ _M._has_any            = function() return _cache.has_any end
 _M._micro_bucket       = micro_bucket_seconds
 _M._micro_zone_name    = micro_zone_name
 _M._micro_cookie       = micro_cookie_verdict
+_M._cookie_key         = cookie_key
 _M._micro_decision     = micro_decision
 _M._micro_storable     = micro_storable
 _M._micro_mark_ttl     = micro_mark_ttl
