@@ -83,6 +83,21 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **Throttle autoblocks are 24h blocks, not permanent ones, with the reference
+  config.** The reference `cfm.conf` set `THROTTLE_MODE = "tlt"`, and an
+  unrecognised mode fell back to `permanent`, so every throttle autoblock
+  (`THROTTLE_SOURCES`: syn, portflood, pps, new, icmp, connlimit) was a
+  permanent ban — written to `cfm.deny` and reported to the API. On 2026-09-21
+  a home connection that tripped the IMAPS port-flood limit (`portflood_993_tcp`)
+  was banned for good. An unrecognised mode now means `ttl` (`THROTTLE_TTL`,
+  default 24h) and logs `config: warning: THROTTLE_MODE ...` at startup; the
+  reference config says `"ttl"`. **Takes effect on upgrade** for every node
+  whose `/etc/cfm/cfm.conf` still has the typo (the conffile is not replaced);
+  an explicit `"permanent"` keeps permanent bans. Port-scan autoblocks follow
+  `PS_MODE` and are unchanged. Bans already made stay in `cfm.deny`: the
+  throttle ones read `# autoblock: <reason>` with a flood reason such as
+  `portflood_993_tcp`, `connlimit_…`, `SYN flood` or `Packet flood (pps)`, and
+  can be unblocked as usual.
 - **The flood protections (SYN/PPS/new-connection rate, connlimit, portflood,
   bad TCP flags) could stop applying to TCP/UDP when ICMP rate limiting is on
   (`ICMP_RATE_LIMIT`, 20 in the reference config), on both engines.** The

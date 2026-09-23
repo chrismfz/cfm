@@ -389,12 +389,18 @@ func (c *Config) SetDefaults() {
 	}
 	// Editions: no hard default; user may choose ASN or City or both
 
-	c.Throttle.Mode = strings.ToLower(c.Throttle.Mode)
+	// An unrecognised mode means a bounded block, not a permanent one. It
+	// used to fall back to "permanent", and the reference cfm.conf shipped
+	// THROTTLE_MODE = "tlt" (for "ttl"), so every throttle autoblock (syn,
+	// portflood, connlimit, …) was a permanent ban, written to cfm.deny and
+	// reported to the API.
+	c.Throttle.Mode = strings.ToLower(strings.TrimSpace(c.Throttle.Mode))
 	switch c.Throttle.Mode {
 	case "permanent", "ttl", "dryrun", "alert":
 		// ok
 	default:
-		c.Throttle.Mode = "permanent"
+		log.Printf("config: warning: THROTTLE_MODE %q is not one of permanent|ttl|dryrun|alert; using \"ttl\" (THROTTLE_TTL)", c.Throttle.Mode)
+		c.Throttle.Mode = "ttl"
 	}
 	if c.Throttle.TTLSeconds == 0 {
 		c.Throttle.TTLSeconds = 24 * 3600
