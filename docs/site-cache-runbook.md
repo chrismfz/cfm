@@ -26,19 +26,26 @@ Caching is bypass-by-default. What is never cached, whatever a policy says
   - a response with `Set-Cookie`, or with `Cache-Control: private` / `no-store`;
   - a non-200 response;
   - panel and webmail hosts;
-  - script paths (`.php` and the like; Tier A's extension list never matches
-    one).
+  - methods other than GET/HEAD;
+  - script paths (`.php` and the like, so `wp-login.php` too; Tier A's
+    extension list never matches one).
 - **Tier B only:** anything else that marks the request as belonging to one
   visitor:
   - session cookies;
   - credential headers;
   - partial-page requests;
-  - admin, login and transfer paths;
-  - methods other than GET/HEAD.
+  - the admin and transfer paths (`/wp-admin`, `/administrator/`, `/admin/`,
+    `/sysadmin/`, `/acctxfer`, cPanel's proxy-subdomain paths).
 
-  **Tier A does not read request cookies or the path.** A `.css` under
-  `/wp-admin/` requested with a login cookie is cached like any other asset.
-  Tier A relies on the origin's response headers for anything per-user.
+  A login page at a path that is neither (`/login`, `/user/login`) is
+  micro-cached when the request is anonymous. The pages behind the login are
+  not, as long as their session cookie is on the auth list (built in, or added
+  with `--auth-cookies`).
+
+  **Tier A does not read request cookies, and looks at the path only for its
+  extension.** A `.css` under `/wp-admin/` requested with a login cookie is
+  cached like any other asset. Tier A relies on the origin's response headers
+  for anything per-user.
 
 ## 2. Knobs (`[webdetector]` in `/etc/cfm/detectors.conf`)
 
@@ -55,8 +62,10 @@ To change a switch, edit and save `detectors.conf`; nothing needs reloading.
 - `systemctl reload cfm` is not needed for this: it restarts the daemon.
 
 To see the current values, use:
-- the MCP tool `detectors_config` (merged view) or `GET /api/v1/detectors/config`
-  for what `detectors.conf` says;
+- the MCP tool `detectors_config` with `merged=true`, or
+  `GET /api/v1/detectors/config?view=merged`, for the effective values
+  (`detectors.conf` plus any `detectors.d/*.conf` overlay). A key that is not
+  set anywhere has its default: `SITE_CACHE` 1, `MICRO_CACHE_ENFORCE` 0.
 - `cfm_bridge_config.lua` itself, or the daemon's
   `cfm_bridge_config.lua written … site_cache=… micro_cache_enforce=…` log line,
   for what the edge was handed.
@@ -116,12 +125,15 @@ X-CFM-Cache: observe opt-out gen=<n>
 ```
 
 - `static=` and `micro=` appear only for a tier that is on.
-- An opt-out row (`off <host>`) shows `observe opt-out gen=<n>`.
+- An opt-out row (`off <host>`) under a broader armed wildcard shows
+  `observe opt-out gen=<n>` (plus `status=BYPASS` on a static asset).
 - **No header at all** means one of these:
   - `SITE_CACHE = 0`;
   - the request did not come from a trusted source;
   - the worker has no policy for the host yet (none of its own and no
     covering wildcard, or the next feed poll has not happened);
+  - the host is opted out and no armed wildcard covers it. The feed leaves such
+    a row out, since there is nothing to opt out of;
   - it went to the :9080 listener (the stamp is HTTPS only).
 
 - `status=` is the nginx cache verdict for a request that went through a cache
@@ -175,7 +187,8 @@ cfm webtop site-cache stats [host]      # also: MCP site_cache_stats, GET /api/v
   reload keeps them, unless it changes the stats dict's size. This view is
   empty until the next push after:
   - a daemon restart;
-  - any saved change to `detectors.conf`, because each reload builds a fresh
+  - any save of `detectors.conf` or a `detectors.d/*.conf` overlay (the daemon
+    watches the files' modification time), because each reload builds a fresh
     view. Right after flipping `MICRO_CACHE_ENFORCE`, for example, expect "No
     cache stats yet" for up to a minute.
 - **What is counted.** A 200 or 304 response that went through a cache
@@ -238,23 +251,31 @@ If anything wrong was cached, also purge the affected vhost, or `purge --all`.
 
 ## 8. Incident: something wrong is being served
 
+Keep this order.
+
 1. Set `SITE_CACHE = 0` in `detectors.conf` and save. Caching stops on the
    node within about 15 s, and no policy is lost.
-2. Run `cfm webtop site-cache purge --all` **before** setting it back to `1`.
-   Restoring the switch resumes each vhost's cache as it was, including
-   anything cached before the switch-off.
-3. Set `SITE_CACHE = 1`, wait about 15 s, then **reload the edge proxy**
-   (`openresty -t && systemctl reload openresty`, or `angie -t && systemctl
-   reload angie`).
-   - While the switch was off, the workers stopped polling the policy feed.
-     So they still hold the generations from before the purge, and each would
-     keep serving the old objects until its next poll, up to about 60 s.
-   - A reload starts fresh workers that cache nothing until they have read the
-     feed with the new generations.
+2. Run `cfm webtop site-cache purge --all`.
+3. **Reload the edge proxy while the switch is still `0`**:
+   `openresty -t && systemctl reload openresty`, or
+   `angie -t && systemctl reload angie`.
+4. Set `SITE_CACHE = 1` and save.
+
+Why the reload, and why before step 4:
+- While the switch is off, the workers do not poll the policy feed. Each one
+  keeps the generations it had before the purge.
+- If the switch came back on first, each old worker would pick up the new
+  switch value within about 10 s. It would then serve the pre-purge objects
+  again until its next poll, up to about 60 s after its last one.
+- A worker started by the reload has an empty table. It caches nothing until
+  its first poll, which it makes on the first request after step 4, and that
+  poll brings the new generations.
 
 For one bad vhost, you don't need the switch:
 1. `purge <host>` first. After a `remove`, a purge returns 404.
 2. Then `off <host>` if it should stay uncached.
+3. Both reach each worker on its next poll, up to about 60 s later. To apply
+   them at once, reload the edge proxy.
 
 If the bad objects were stored under a covering wildcard's key, purge the
 wildcard too (§6).
@@ -264,7 +285,7 @@ wildcard too (§6).
 | Change | Reaches the edge |
 |---|---|
 | `SITE_CACHE` / `MICRO_CACHE_ENFORCE` (save `detectors.conf`) | ~15 s (~5 s for the daemon, then ~10 s for the edge), no reload |
-| Policy set / off / remove / purge | ≤ ~60 s per worker (next feed poll). There is no poll while `SITE_CACHE = 0`. |
+| Policy set / off / remove / purge | ≤ ~60 s per worker (next feed poll), or at once with an edge reload. There is no poll while `SITE_CACHE = 0`. |
 | Stats | pushed ~every 60 s |
 
 ## 10. Disk and housekeeping
@@ -297,8 +318,8 @@ wildcard too (§6).
 - The Site Cache tools don't show the switch state (`SITE_CACHE`,
   `MICRO_CACHE_ENFORCE`). Read it with `detectors_config` or
   `GET /api/v1/detectors/config` (§2).
-- While `SITE_CACHE = 0` the edge does not read the policy feed, so policy
-  changes and purges wait for the switch, and turning it back on needs an edge
-  reload to apply a purge at once (§8).
+- While `SITE_CACHE = 0` the edge does not read the policy feed. Policy
+  changes and purges wait for the switch, and applying a purge before
+  restoring it needs an edge reload while it is still off (§8).
 - A cleared visitor (holding a `cfm_clearance` cookie) is not micro-cached.
   The Step 2b fast path is not a micro entry yet (`site-cache-design.md` §5.5).

@@ -22,8 +22,9 @@ local ok, mod = pcall(require, "cfm_cache")
 check(ok, "cfm_cache loads without ngx: " .. tostring(mod))
 check(ok and type(mod) == "table", "cfm_cache returns its module table")
 if ok and type(mod) == "table" then
-  for _, fn in ipairs({ "observe", "static_gate", "micro_gate", "policy_for",
-                        "policy_key_for", "maybe_flush_stats" }) do
+  -- every entry point the confs and cfm.lua call, plus policy_for
+  for _, fn in ipairs({ "observe", "static_gate", "micro_gate", "micro_note",
+                        "policy_for", "policy_key_for", "maybe_flush_stats" }) do
     check(type(mod[fn]) == "function", "cfm_cache exports " .. fn)
   end
 end

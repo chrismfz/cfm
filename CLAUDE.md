@@ -647,12 +647,16 @@ because of that. Hard-won points:
   counters (the slab slot doubles past a 52-byte key).
 - **The never-cache rules differ by tier. Don't document them as one list.**
   Both tiers: Authorization, `Set-Cookie`/private/no-store, non-200,
-  panel/webmail hosts, script paths. Tier A reads no request cookie and no
-  path; session cookies, credential headers and admin paths are Tier B only.
+  panel/webmail hosts, GET/HEAD only, script paths. Tier A reads no request
+  cookie and looks at the path only for its extension; session cookies,
+  credential headers and admin paths are Tier B only.
 - **`SITE_CACHE = 0` freezes each worker's policy table.** There is no feed
   poll while it is off, so a purge or policy change reaches a worker only on
   its first poll after the switch is restored, up to ~60 s later. The incident
-  procedure is: purge, restore, reload the edge (runbook §8).
+  procedure is: purge, reload the edge WHILE the switch is still 0, then
+  restore it (runbook §8). Reloading after the restore leaves a window: an old
+  worker re-reads the switch within ~10 s and serves the old generation until
+  it next polls.
 - **`detectors.conf` edits apply without a reload.** The manager polls the file.
   The daemon has no SIGHUP handler, so `systemctl reload cfm` restarts it
   (systemd `Restart=always`). A config reload also builds a new webdetector

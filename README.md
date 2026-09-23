@@ -999,14 +999,15 @@ Never cached, whatever a policy says (design §4):
   - `Set-Cookie` / private / no-store responses;
   - non-200s;
   - panel and webmail hosts;
+  - methods other than GET/HEAD;
   - script paths.
 - **Tier B only:**
   - session-cookie and credential-header requests;
   - partial-page requests;
-  - admin, login and transfer paths.
+  - admin and transfer paths.
 
-Tier A reads neither request cookies nor the path. It relies on the origin's
-response headers for anything per-user.
+Tier A reads no request cookie, and looks at the path only for its extension.
+It relies on the origin's response headers for anything per-user.
 
 `[webdetector]` knobs: `SITE_CACHE = 1` (node kill switch, not an opt-in),
 `MICRO_CACHE_ENFORCE = 0` (the Tier B opt-in), `SITE_CACHE_STORE_PATH`.

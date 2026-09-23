@@ -8,8 +8,8 @@ stats, purge, turning Tier B on, incidents — is
 - **Built:** the per-vhost store + API + CLI with scope checks
   (`internal/webdetector/site_cache*.go`); the edge feed and decision module
   (`configs/lua/cfm_cache.lua`); the `SITE_CACHE` kill switch; **Tier A**
-  (static assets) live for armed vhosts; **Tier B** (micro-cache of HTML)
-  built with the full §4 rails and in **dry run** until a node sets
+  (static assets) live for armed vhosts; **Tier B** (micro-cache of anonymous
+  pages, HTML or not) built with the full §4 rails and in **dry run** until a node sets
   `MICRO_CACHE_ENFORCE = 1` (after §5.7); purge (generation bump); per-vhost
   stats (§11); the read-only MCP tools `site_cache_status` /
   `site_cache_stats`; the audit log; cache-dir provisioning; the CI guard
@@ -22,7 +22,7 @@ stats, purge, turning Tier B on, incidents — is
 
 The feature lets an operator (and a scoped cPanel user, for their own domains,
 through the API) turn caching **on per vhost** — static-asset cache and/or
-short micro-cache of HTML — pick a TTL, **purge** (global or per-vhost), and
+short micro-cache of anonymous pages — pick a TTL, **purge** (global or per-vhost), and
 see per-vhost state and effectiveness. Managed from the API and the CLI
 (`cfm webtop site-cache …`), read through MCP; the cfm-admin page is planned
 (§7.3).
@@ -46,7 +46,7 @@ invariants, in priority order:
    default-*off* master would just be a redundant second opt-in. It is not what
    makes the feature safe; the empty per-vhost store is. `SITE_CACHE = 0` is the
    panic button: it stops caching on the node (`cfm_cache.lua` gates, stamp and
-   stats push off, mirrored to the edge like `FP_POLICY`) within ~10 s — per
+   stats push off, mirrored to the edge like `FP_POLICY`) within ~15 s of saving `detectors.conf` — per
    node, from its own `detectors.conf` — **without** disarming any vhost, so
    re-arming is instant.
 2. **Arming a vhost is the single opt-in — exact-host.** `myip.gr` and
@@ -146,9 +146,14 @@ Two tiers, one management model.
   `css/js/map/woff/woff2/ttf/eot/png/jpg/jpeg/gif/webp/ico` by extension, in
   the existing static-asset location that already skips the heavy `cfm.lua`,
   on both the HTTP and HTTPS servers. Low risk because assets are rarely
-  per-user, and nginx itself never stores a `Set-Cookie` or `private` answer.
-  Tier A reads no request cookie and no path, so that is all it relies on
-  (§4 residuals).
+  per-user. Its rails:
+  - nginx itself never stores a `Set-Cookie` or `private` answer;
+  - only a 200 is stored;
+  - a request with `Authorization` is never served or stored;
+  - panel and webmail hosts are skipped.
+
+  It reads no request cookie and looks at the path only for its extension, so
+  per-user safety rests on the origin's response headers (§4 residuals).
 - **Tier B — micro-cache of anonymous pages** (high risk — this is what broke
   before). Any anonymous GET/HEAD through the HTTPS `location /`, HTML or not.
   Very short TTL, hard gated (§4), and in dry run until
@@ -658,7 +663,7 @@ the edge access log (`ucache=` and `up=cfm_apache_micro` vs `up=cfm_apache`).
 9. **Error log clean:** no `cfm_cache` / Lua errors and no `using
    uninitialized variable` warnings in the edge error log (a debug request of
    yours that the edge itself rejects with a 400 logs one; that is not it).
-10. **Roll back** at any point: `MICRO_CACHE_ENFORCE = 0` (~10 s), and
+10. **Roll back** at any point: `MICRO_CACHE_ENFORCE = 0` (~15 s after the save), and
     `cfm webtop site-cache purge <host>` if something wrong got cached — also
     to show a maintenance / 5xx page instead of the last good copy (a failing
     origin keeps the stale copy served), and for an entry stuck stale after a
@@ -744,8 +749,11 @@ also starts the other from an empty cache (a refill, never a wrong answer). A
 FIRST micro enable (no stored recipe) has no old micro objects to hide and
 keeps the static cache. Turning a tier off, or any other config change, keeps
 it. The same reasoning applies to the `SITE_CACHE = 0` panic button, which
-keeps every generation: purge before setting it back to 1 if you pulled it
-because something wrong got cached.
+keeps every generation. If you pulled it because something wrong got cached:
+purge, reload the edge proxy while the switch is still `0`, then set it back
+to 1 (runbook §8). While the switch is `0` no worker polls the feed, so an old
+worker would otherwise serve the pre-purge generation again after the restore,
+until its next poll.
 
 Stores written before generations were wall-clock ms counted every policy from
 0, so an exact host and its covering wildcard could share one (one key space
@@ -1000,6 +1008,9 @@ scoped-allowed (own host); purge-all = admin-only.
 - **Latency:** a purge is only the new generation in the store; each edge
   worker applies it on its next feed poll, within about 60 s (the poll is
   triggered by traffic). Until then that worker still serves the old objects.
+  An edge reload applies it at once: a fresh worker caches nothing until its
+  first poll. While `SITE_CACHE = 0` no worker polls at all (runbook §8 has
+  the incident order).
 - **Disk:** the old objects stay on disk until `inactive` (static: 7 d) or the
   zone's LRU (`max_size`, static 10 GB) removes them — unreachable, not
   served.
@@ -1062,7 +1073,8 @@ the latest row per key — only for a key armed at that moment, only the known
 statuses, at most one row per stored policy — and prunes the rows of keys
 disarmed since, every 5 minutes. The counts are absolute since the edge last
 restarted, so a daemon restart only empties the view until the next push.
-So does any saved change to `detectors.conf`: each config reload builds a new
+So does any save of `detectors.conf` or a `detectors.d/*.conf` overlay (the
+daemon watches the modification time): each config reload builds a new
 webdetector `Engine`, and with it a new, empty store.
 This store is what the API and MCP read, so scoping is enforced daemon-side.
 
@@ -1106,8 +1118,8 @@ built); `SITE_CACHE = 0` stops the push.
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `SITE_CACHE` | `1` (ON) | node-wide **kill switch** (not an opt-in — the per-vhost store arms vhosts); `0` = no caching, no stamp, no stats push on this node within ~10 s, policies kept. Published via `webdetector_bridge_config.go` → `cfm_bridge_config.lua` (read by `cfm_bridge_cfg.lua`, absent = on) |
-| `MICRO_CACHE_ENFORCE` | `0` (OFF) | Tier B **opt-in**: `0` = dry run (the debug stamp shows the verdict, nothing HTML is cached), `1` = armed anonymous HTML is served from its micro bucket. Set per node only after §5.7. Same publication path (absent = off) |
+| `SITE_CACHE` | `1` (ON) | node-wide **kill switch** (not an opt-in — the per-vhost store arms vhosts); `0` = no caching, no stamp, no stats push on this node within ~15 s of saving `detectors.conf`, policies kept. Published via `webdetector_bridge_config.go` → `cfm_bridge_config.lua` (read by `cfm_bridge_cfg.lua`, absent = on) |
+| `MICRO_CACHE_ENFORCE` | `0` (OFF) | Tier B **opt-in**: `0` = dry run (the debug stamp shows the verdict, nothing is micro-cached), `1` = an armed, anonymous, cacheable GET/HEAD through the HTTPS `location /` (HTML or not) is served from its micro bucket. Set per node only after §5.7. Same publication path (absent = off) |
 | `SITE_CACHE_STORE_PATH` | `/var/lib/cfm/webdetector_site_cache.json` | the per-vhost store (§6) |
 
 The defaults are pinned by `webdetector_bridge_config_test.go` (code, the
@@ -1140,7 +1152,9 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
    `proxy_cache_bypass $cfm_cache_skip $cfm_req_auth;` and
    `proxy_no_cache $cfm_cache_skip $cfm_cache_non200 $cfm_req_auth;` (plus the
    Tier B no-store rails on micro). `$cfm_cache_skip` defaults to `"1"` in
-   every server with a cache location, and only `cfm_cache.lua` may write it.
+   every server with a cache location, and nothing in the confs may write it
+   (today only `cfm_cache.lua` does; the guard does not scan other Lua
+   modules).
    The guard also pins, per cache location:
    - buffering on;
    - the whole cache key;

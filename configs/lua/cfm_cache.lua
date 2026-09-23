@@ -51,7 +51,9 @@
 -- never blocks the request path; a per-worker flag dedupes in-flight refreshes.
 -- Fixed 60s poll (no env, no knob — CFM is config-file driven, not env-driven).
 -- No nginx reload needed. Bridge unreachable → keep the LAST KNOWN policy
--- (fail-safe: a stale table, never a missing gate).
+-- (the gates keep running on it; a disarm or purge waits for the bridge to
+-- answer again, or for an edge reload, whose fresh workers cache nothing
+-- until their first poll succeeds).
 
 local cjson = require "cjson.safe"
 local bcfg  = require "cfm_bridge_cfg"   -- master SITE_CACHE gate (~10s TTL)

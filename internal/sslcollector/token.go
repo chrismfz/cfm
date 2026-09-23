@@ -434,13 +434,14 @@ type WebdetectorBridgeConfig struct {
 	// the per-vhost policy store (default empty) is what arms a vhost, so nothing
 	// caches until one is armed regardless of this flag. false stops Site Cache on
 	// this node's edge (no feed poll, no cache gate, no stamp, no stats push;
-	// the log phase still counts) so an operator can kill its caching in ~10s
-	// without disarming vhosts.
+	// the log phase still counts) so an operator can kill its caching ~10s
+	// after this file is written (~15s from saving detectors.conf) without
+	// disarming vhosts.
 	SiteCache bool
 	// MicroCacheEnforce mirrors [webdetector] MICRO_CACHE_ENFORCE to the edge —
-	// the Tier B (micro-cache of anonymous HTML) ENFORCE gate. Default OFF: unlike
+	// the Tier B (micro-cache of anonymous pages) ENFORCE gate. Default OFF: unlike
 	// SiteCache this is an explicit OPT-IN, so a binary/config upgrade never turns
-	// HTML micro-caching on by itself even for a vhost whose micro tier is armed
+	// page micro-caching on by itself even for a vhost whose micro tier is armed
 	// (the CLAUDE.md §6 "adding X silently arms it" lesson). While false, Tier B
 	// runs in DRY-RUN — the X-CFM-Cache observe header still shows the would-cache
 	// verdict, but cfm.lua's micro gate never ngx.exec's to a cache location, so

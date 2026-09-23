@@ -70,12 +70,13 @@ back-filled here — see the git/PR history for that period.
     `/wp-admin/` fetched with a login cookie is cached like any other asset.
     The session-cookie and admin-path rules are micro-tier only. The README
     and the runbook now list the never-cache rules per tier.
-  - **After pulling `SITE_CACHE` for an incident:** purge, set it back to `1`,
-    then reload the edge proxy. While the switch is `0` the workers do not
-    read the policy feed, so without the reload each one keeps serving the
-    pre-purge objects for up to ~60 s.
+  - **After pulling `SITE_CACHE` for an incident:** purge, reload the edge
+    proxy while the switch is still `0`, and only then set it back to `1`.
+    While the switch is `0` the workers do not read the policy feed.
+    Restored without the reload, or before it, each worker serves the
+    pre-purge objects again until its next poll, up to ~60 s.
   - **`detectors.conf` edits apply by themselves** in about 15 s. Don't
-    `systemctl reload cfm` for them: that restarts the daemon. Any change to
+    `systemctl reload cfm` for them: that restarts the daemon. Any save of
     `detectors.conf` also empties the stats view until the next push.
 
   The release checklist's Lua load smoke test could never pass under plain
