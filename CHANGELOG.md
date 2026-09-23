@@ -143,8 +143,9 @@ back-filled here — see the git/PR history for that period.
 
 ### Changed
 - **Bulk block ("Block selected" in cfm-admin, `POST /api/v1/firewall/block/batch`)
-  is now one firewall transaction instead of up to three `nft` processes per
-  IP.** A 256-IP request cost up to ~770 `nft` processes on the exec engine.
+  is now one firewall transaction instead of two `nft` processes per IP.** A
+  256-IP request cost ~512 `nft` processes on the exec engine (up to ~1,024
+  when the IPs were already blocked).
   It now costs three (one read per address family, one write), and one netlink
   transaction on nftlib; 5,000 addresses take under 0.1s on either engine. A
   write is retried from a fresh read if the block set changed meanwhile, never

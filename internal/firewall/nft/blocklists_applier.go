@@ -218,8 +218,6 @@ func (b *Backend) ListSetElementsTimed(setName string) ([]firewall.SetElementTim
 	return out, nil
 }
 
-// parseExpires accepts the nft JSON forms for an element's remaining TTL:
-// numeric seconds, or duration-like strings ("30s", "5m"). Returns 0 on miss.
 // elemExpires is an element's remaining time. nft prints expires in whole
 // seconds, so an element with a timeout in its last second shows
 // "expires": 0 (or none) — which must not read as "no timeout", i.e.
@@ -232,6 +230,8 @@ func elemExpires(elem map[string]any) time.Duration {
 	return left
 }
 
+// parseExpires accepts the nft JSON forms for an element's remaining TTL:
+// numeric seconds, or duration-like strings ("30s", "5m"). Returns 0 on miss.
 func parseExpires(v any) time.Duration {
 	switch x := v.(type) {
 	case float64:

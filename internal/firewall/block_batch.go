@@ -7,9 +7,9 @@ import (
 
 // Batched host blocks: many addresses in one kernel transaction.
 //
-// AddBlock costs up to three `nft` processes per address on the exec backend
-// (RemoveBlock, add, a retry) and one netlink transaction per address on
-// nftlib. That is fine for one autoblock, but a batch — a fleet blocklist
+// AddBlock costs two `nft` processes per address on the exec backend
+// (RemoveBlock, add; four when the add hits an existing element and retries)
+// and one netlink transaction per address on nftlib. That is fine for one autoblock, but a batch — a fleet blocklist
 // delta, a bulk API call — would fork per address. AddBlockBatch instead reads
 // each block set once and writes the whole batch in one transaction (exec: one
 // `nft -f -` run; nftlib: one per 1000 addresses): a few kernel round trips for

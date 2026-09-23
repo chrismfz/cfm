@@ -34,9 +34,17 @@ case "$*" in
 "-j list set inet cfm block_v4") cat "$d/v4.json"; exit 0;;
 "-j list set inet cfm block_v6") cat "$d/v6.json"; exit 0;;
 "-f -")
-	cat >> "$d/nft.log"
+	in=$(cat); printf '%%s\n' "$in" >> "$d/nft.log"
 	n=$(cat "$d/fails")
-	if [ "$n" -gt 0 ]; then echo $((n-1)) > "$d/fails"; echo "Error: Could not process rule: No such file or directory" >&2; exit 1; fi
+	if [ "$n" -gt 0 ]; then
+		echo $((n-1)) > "$d/fails"
+		# nft's real shape: location, the failing statement, a caret line
+		# (the tests' first statement names its first address at columns 36-47).
+		echo "/dev/stdin:1:36-47: Error: Could not process rule: No such file or directory" >&2
+		printf '%%s\n' "$in" | head -1 >&2
+		echo "                                   ^^^^^^^^^^^^" >&2
+		exit 1
+	fi
 	exit 0;;
 esac
 exit 0
@@ -133,8 +141,8 @@ func TestAddBlockBatch_RetriesNeverPerAddress(t *testing.T) {
 	if err == nil {
 		t.Fatal("want an error once every attempt fails")
 	}
-	if !strings.Contains(err.Error(), "Error: Could not process rule") || len(err.Error()) > 400 {
-		t.Errorf("error = %q, want nft's own error line, trimmed", err)
+	if !strings.Contains(err.Error(), "Error: Could not process rule: No such file or directory (at 198.51.100.1)") || len(err.Error()) > 400 {
+		t.Errorf("error = %q, want nft's own error line naming the element, trimmed", err)
 	}
 	got := readFile(t, log)
 	if n := strings.Count(got, "ARGS "); n != 2*blockBatchAttempts {
@@ -155,5 +163,30 @@ func TestAddBlockBatch_LastSecondIsNotPermanent(t *testing.T) {
 	}
 	if got := readFile(t, log); !strings.Contains(got, "198.51.100.9 timeout 6h") {
 		t.Errorf("the block was not rewritten:\n%s", got)
+	}
+}
+
+// nft prefixes its error with the input location and follows it with the
+// whole statement and a caret line; the error must be the "Error:" text plus
+// the element the columns point at — never the caret line. (Captured from nft
+// 1.0.9.)
+func TestNFTFirstError(t *testing.T) {
+	exists := "/dev/stdin:1:57-64: Error: Could not process rule: File exists\n" +
+		"create element inet cfm block_v4 { 10.0.0.1 timeout 1h, 10.0.0.7 timeout 1h }\n" +
+		"                                                        ^^^^^^^^\n"
+	missing := "/dev/stdin:1:36-43: Error: Could not process rule: No such file or directory\n" +
+		"delete element inet cfm block_v4 { 10.0.0.9 }\n" +
+		"                                   ^^^^^^^^\n"
+	fallback := fmt.Errorf("exit status 2")
+	for _, tc := range []struct{ out, want string }{
+		{exists, "Error: Could not process rule: File exists (at 10.0.0.7)"},
+		{missing, "Error: Could not process rule: No such file or directory (at 10.0.0.9)"},
+		{"/dev/stdin:1:900-910: Error: odd\nshort\n", "Error: odd"}, // columns out of range
+		{"Error: no location\n", "Error: no location"},
+		{"nothing useful\n   ^^^\n", "exit status 2"},
+	} {
+		if got := nftFirstError(tc.out, fallback); got != tc.want {
+			t.Errorf("nftFirstError(%q) = %q, want %q", tc.out, got, tc.want)
+		}
 	}
 }

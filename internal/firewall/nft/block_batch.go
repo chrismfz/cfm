@@ -4,8 +4,8 @@ package nft
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"cfm/internal/firewall"
@@ -21,8 +21,9 @@ const blockBatchAttempts = 3
 
 // AddBlockBatch blocks many host addresses in one `nft -f -` transaction,
 // after one `nft -j list set` per address family: three nft processes per
-// attempt at most, whatever the batch size, where AddBlock forks up to three
-// per address. It only adds or extends, never shortens
+// attempt at most, whatever the batch size, where AddBlock forks two per
+// address (four when it hits an existing element). It only adds or extends,
+// never shortens
 // (firewall.PlanBlockBatch).
 //
 // Between the read and the write another writer (an autoblock, another API
@@ -37,7 +38,10 @@ const blockBatchAttempts = 3
 //
 // An aborted write is retried from a fresh read, which plans around the
 // change, up to blockBatchAttempts times. It never falls back to one nft
-// process per address.
+// process per address. A writer that keeps landing the same addresses in
+// every window (e.g. an autoblocker banning the IPs an operator is
+// bulk-blocking) can exhaust the attempts; the call then fails cleanly, having
+// never shortened a block, and the caller can simply retry.
 func (b *Backend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
 	v4, v6, skipped := firewall.SplitBlockEntries(entries)
 	res := firewall.BlockBatchResult{Skipped: skipped}
@@ -57,24 +61,70 @@ func (b *Backend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBa
 		if err == nil {
 			return res.Add(planned), nil
 		}
-		lastErr = errors.New(nftFirstError(r.Stdout+r.Stderr, err))
+		lastErr = &nftBatchError{msg: nftFirstError(r.Stdout+r.Stderr, err), err: err}
 	}
-	return res, fmt.Errorf("nft block batch (%d v4, %d v6): %w", len(v4), len(v6), lastErr)
+	return res, fmt.Errorf("nft block batch (%d v4, %d v6), %d attempts: %w", len(v4), len(v6), blockBatchAttempts, lastErr)
 }
 
-// nftFirstError is nft's own "Error: …" line, or the command error: nft
-// follows it with the whole failing statement and a caret line, which for a
-// batch is thousands of addresses.
+// nftBatchError carries nft's own error line as its message and the command
+// error (exit status, timeout) as its cause.
+type nftBatchError struct {
+	msg string
+	err error
+}
+
+func (e *nftBatchError) Error() string { return e.msg }
+func (e *nftBatchError) Unwrap() error { return e.err }
+
+// nftFirstError is nft's "Error: …" line, naming the element it points at, or
+// the command error when nft printed none. nft reports a script error as
+//
+//	/dev/stdin:1:57-64: Error: Could not process rule: File exists
+//	create element inet cfm block_v4 { 10.0.0.1 timeout 1h, 10.0.0.7 timeout 1h }
+//	                                                        ^^^^^^^^
+//
+// — the input location, the whole failing statement (for a batch, up to a
+// thousand addresses) and a caret line. The columns of the location pick the
+// offending element out of the statement.
 func nftFirstError(out string, err error) string {
-	for _, line := range strings.Split(out, "\n") {
-		if line = strings.TrimSpace(line); strings.HasPrefix(line, "Error:") {
-			if len(line) > 300 {
-				line = line[:300] + "…"
-			}
-			return line
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		j := strings.Index(line, "Error:")
+		if j < 0 {
+			continue
 		}
+		msg := strings.TrimSpace(line[j:])
+		if i+1 < len(lines) {
+			if at := nftErrorSpan(line[:j], lines[i+1]); at != "" {
+				msg += " (at " + at + ")"
+			}
+		}
+		if len(msg) > 300 {
+			msg = msg[:300] + "…"
+		}
+		return msg
 	}
 	return err.Error()
+}
+
+// nftErrorSpan returns the text of stmt that the location prefix
+// "<file>:<line>:<first>-<last>: " points at (1-based, inclusive columns), or
+// "" if the prefix doesn't parse or the columns fall outside stmt.
+func nftErrorSpan(prefix, stmt string) string {
+	parts := strings.Split(strings.TrimSpace(prefix), ":")
+	if len(parts) < 3 {
+		return ""
+	}
+	first, last, ok := strings.Cut(parts[len(parts)-2], "-")
+	if !ok {
+		return ""
+	}
+	c1, err1 := strconv.Atoi(first)
+	c2, err2 := strconv.Atoi(last)
+	if err1 != nil || err2 != nil || c1 < 1 || c2 < c1 || c2 > len(stmt) {
+		return ""
+	}
+	return strings.TrimSpace(stmt[c1-1 : c2])
 }
 
 // blockBatchScript reads the block sets and renders the one-transaction
