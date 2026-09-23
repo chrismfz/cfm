@@ -17,6 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **A ChallengeV2 reject now says why a crawler wasn't let through.** When a
+  client whose reverse DNS claims a crawler (e.g. `google-proxy-….google.com`)
+  is still rejected, its `result=v2_reject` line ends with
+  `v2_waiver_miss=<reason>`, and its `challenge_v2_reject` history row
+  carries `v2_waiver_miss`:
+  - `grain`: the arm is a fingerprint policy or a `challenge_v2` traffic/WAF
+    rule, which are never waived;
+  - `mark`: the vhost or country/ASN arm would have allowed it, but a
+    `challenge_v2` traffic/WAF rule also covers this client;
+  - `off`: `CHALLENGE_GOODBOT_EXEMPT = 0`;
+  - `spoofed`: the name doesn't resolve back to the IP;
+  - `timeout`: the check couldn't run in time;
+  - `transient`: DNS failure.
+
+  Without it a real Google fetcher the check couldn't confirm looked exactly
+  like an impostor. A reject with no `ptr=` at all has no reason either: the
+  reverse DNS wasn't known yet at verify, which does not mean the client isn't
+  a crawler. Log and history only; nothing is decided differently. Other
+  rejects are unchanged.
+
 ### Changed
 - **ChallengeV2 no longer rejects verified crawlers such as Google Read
   Aloud.** Under an armed `challenge_v2`, a failing humanity score gets no

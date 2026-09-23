@@ -488,7 +488,10 @@ already opened.
         first cut waived every grain and reverse-resolved unknown PTRs
         inline; and an NXDOMAIN forward-confirm (the natural spoof,
         `x.googlebot.com`) was treated as transient and never cached — now a
-        cacheable negative.
+        cacheable negative. Follow-up the same day: a reject whose PTR claims
+        a crawler carries `v2_waiver_miss=<grain|mark|off|spoofed|timeout|transient>`
+        (line + `challenge_v2_reject` row), so a Read-Aloud the gate could not
+        confirm is distinguishable from an impostor.
 
 **Deliberately BACKLOG (not next, do not start):** surface-throttle +
 gate-before-origin (Track-1 Phase 2), PoW-difficulty knob, JA4/JA4H edge

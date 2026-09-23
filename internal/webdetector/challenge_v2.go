@@ -79,7 +79,7 @@ package webdetector
 //   - An FCrDNS-verified good bot is WAIVED at the gate (v2_waived=<name>),
 //     under the same CHALLENGE_GOODBOT_EXEMPT that exempts it from the
 //     challenge at decision time — and ONLY under the grains that exemption
-//     already softens (challengeV2Waivable: geo, vhost). It typically reaches
+//     already softens (challengeV2WaiverBar: geo, vhost). It typically reaches
 //     the gate there because no verdict existed when the challenge was served
 //     — the norm for Google-Read-Aloud's rotating first-seen IPs (a challenge
 //     source that is never softened, e.g. a plain WAF challenge tier, is the
@@ -97,7 +97,8 @@ package webdetector
 //     never softens those for good bots, and traffic rules deliberately
 //     distrust the generic "google" name (verifiedBotForRules). A verify that
 //     can't complete (slots busy, resolver down, PTR not resolved yet)
-//     rejects as before (retry-able, D5c).
+//     rejects as before (retry-able, D5c); a reject whose PTR claims a
+//     crawler says why with v2_waiver_miss=<reason> (v2Waiver*).
 
 import (
 	"context"
@@ -202,11 +203,11 @@ type challengeV2State struct {
 	// arm is NOT rejected when the client is a verified crawler, the same
 	// exemption CHALLENGE_GOODBOT_EXEMPT already grants at decision time.
 	// Called ONLY on the reject path, for a waivable grain
-	// (challengeV2Waivable), where it may block (bounded) on an inline
+	// (challengeV2WaiverBar), where it may block (bounded) on an inline
 	// forward-confirm. Wired from NewEngine to the bridge's verdict cache
 	// (verifiedBeforeReject); nil = no waiver (exemption off, or pre-wire) —
 	// the gate then rejects as it always did.
-	goodBot func(ctx context.Context, ip, ptr string) string
+	goodBot func(ctx context.Context, ip, ptr string) (name, miss string)
 }
 
 var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore}
@@ -337,25 +338,46 @@ func SetChallengeV2HostArmed(fn func(host string) bool) {
 // rejecting (see goodBot on challengeV2State). Same lifecycle as
 // SetChallengeV2HostArmed: set from NewEngine on every engine build, nil when
 // CHALLENGE_GOODBOT_EXEMPT is off.
-func SetChallengeV2GoodBot(fn func(ctx context.Context, ip, ptr string) string) {
+func SetChallengeV2GoodBot(fn func(ctx context.Context, ip, ptr string) (name, miss string)) {
 	challengeV2.mu.Lock()
 	challengeV2.goodBot = fn
 	challengeV2.mu.Unlock()
 }
 
 // challengeV2GoodBot returns the verified good-bot name that waives a
-// rejection for ip, or "" (unwired, unknown, or not a verified bot). ptr is the
-// solve's PTR as already resolved ("" = not known yet). May block (bounded):
-// call it only for a solve about to be rejected.
-func challengeV2GoodBot(ctx context.Context, ip, ptr string) string {
+// rejection for ip, or "" (unwired, unknown, or not a verified bot) with the
+// reason a crawler-looking PTR still got no waiver (v2Waiver*; "" when there
+// is nothing to explain). ptr is the solve's PTR as already resolved ("" = not
+// known yet). May block (bounded): call it only for a solve about to be
+// rejected.
+func challengeV2GoodBot(ctx context.Context, ip, ptr string) (name, miss string) {
 	challengeV2.mu.RLock()
 	fn := challengeV2.goodBot
 	challengeV2.mu.RUnlock()
-	if fn == nil || ip == "" {
-		return ""
+	if fn == nil {
+		return "", v2WaiverOff
+	}
+	if ip == "" {
+		return "", ""
 	}
 	return fn(ctx, ip, ptr)
 }
+
+// Why a failing solve from a crawler-looking client (a PTR with a good-bot
+// suffix) was rejected rather than waived — the reject line's v2_waiver_miss=
+// and its history row's v2_waiver_miss. Without it such a reject reads the
+// same as a spoof: a Read-Aloud IP the gate could not confirm in time looks
+// exactly like an impostor claiming google.com. (A reject with no ptr= at all
+// carries none either: the PTR wasn't known at verify, so nothing claimed a
+// crawler — that is NOT evidence the client isn't one.)
+const (
+	v2WaiverGrain     = "grain"     // the arm itself (v2=fp / v2=mark) is never waived
+	v2WaiverMark      = "mark"      // a geo/vhost arm, but a traffic-rule/WAF mark covers the client too
+	v2WaiverOff       = "off"       // CHALLENGE_GOODBOT_EXEMPT = 0 (no waiver wired)
+	v2WaiverSpoofed   = "spoofed"   // the PTR's forward-confirm did not match: not the crawler it claims
+	v2WaiverTimeout   = "timeout"   // no verify slot in time, or the client gave up
+	v2WaiverTransient = "transient" // the resolver failed; nothing was cached
+)
 
 // challengeV2HostArmed answers "does a v2 vhost arm cover this host" for the
 // verify gate. false when unwired or host is empty (fail-open — D5a: teeth
@@ -415,20 +437,24 @@ func challengeV2ArmGrain(fpID, ip, host string) string {
 	return ""
 }
 
-// challengeV2Waivable reports whether a failing solve under grain may be waived
-// for a verified good bot: only under the grains whose challenge the decision
-// path's good-bot exemption already skips (goodBotDowngrade softens the geo
-// floor and the vhost challenge), and only when no traffic-rule / WAF mark
-// covers the same client too. challengeV2ArmGrain returns the FIRST grain
-// that covers the solve (fp, geo, vhost, mark), so a geo or vhost answer
+// challengeV2WaiverBar says whether a failing solve under grain may be waived
+// for a verified good bot: "" when it may, else why not. Waivable are only the
+// grains whose challenge the decision path's good-bot exemption already skips
+// (goodBotDowngrade softens the geo floor and the vhost challenge), and only
+// when no traffic-rule / WAF mark covers the same client too (v2WaiverMark);
+// any other grain is v2WaiverGrain. challengeV2ArmGrain returns the FIRST
+// grain that covers the solve (fp, geo, vhost, mark), so a geo or vhost answer
 // already rules out a fingerprint policy; the mark is checked here because it
 // comes last.
-func challengeV2Waivable(grain, ip, host string) bool {
+func challengeV2WaiverBar(grain, ip, host string) string {
 	switch grain {
 	case v2GrainGeo, v2GrainVhost:
-		return !challengeV2Marked(ip, host)
+		if challengeV2Marked(ip, host) {
+			return v2WaiverMark
+		}
+		return ""
 	}
-	return false
+	return v2WaiverGrain
 }
 
 // ConfigureChallengeV2 applies the [webdetector] knobs; called on every
@@ -746,4 +772,27 @@ func (s ChallengeSolve) HumanitySuffix() string {
 		out += " v2_waived=" + s.V2Waived
 	}
 	return out
+}
+
+// WaiverMissSuffix renders " v2_waiver_miss=<reason>" for a rejected solve
+// whose crawler-looking client was not waived (V2WaiverMiss), else "". It
+// rides at the END of the reject line, after the geo fields, so no field a
+// parser already reads moves.
+func (s ChallengeSolve) WaiverMissSuffix() string {
+	if s.V2WaiverMiss == "" {
+		return ""
+	}
+	return " v2_waiver_miss=" + s.V2WaiverMiss
+}
+
+// RejectLine is the result=v2_reject line for cfm.challenges.log. sig= rides
+// it: the rejected solve is exactly the population the corpus exists to
+// characterise, and it is deliberately not published/hooked as solved (it
+// cleared nothing), so this line and the challenge_v2_reject history row are
+// its only records — without sig= every armed-and-rejected client would be
+// missing from the very data used to tune the tells. The geo fields and then
+// v2_waiver_miss ride at the END, so no field a parser already reads moves.
+func (s ChallengeSolve) RejectLine() string {
+	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s%s",
+		s.IP, s.Host, s.URI, s.HumanityScore, s.HumanityTells, s.SignalSuffix(), s.V2Grain, s.TLSFingerprintOrDash(), s.UA, s.GeoSuffix(), s.WaiverMissSuffix())
 }
