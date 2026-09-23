@@ -32,6 +32,8 @@ back-filled here — see the git/PR history for that period.
     reveal the operator's fleet policy.
   - Detector challenges now record their rule (e.g. `CHALLENGE_ERR_RATIO`) on
     the bridge entry, so `reason=` on the solve line is no longer empty for them.
+  - A manual vhost challenge now always shows as `src=vhost:manual`. The free
+    text typed when arming it stays in the audit line.
 - **Switch a challenged vhost between v1 and v2 from cfm-admin.**
   - Web Detector → *Suspicious + challenged vhosts*: every challenged row has
     a tier button. A manual challenge switches `→ v2` / `→ v1` in place, and
@@ -46,6 +48,10 @@ back-filled here — see the git/PR history for that period.
     in-place switch (`409` when no manual challenge is active). It is audited
     as `challenge_vhost_manual_rung`, and scoped tokens may use it on their own
     vhosts.
+  - The most specific manual arm now sets the tier: a `www.` host with its own
+    v1 arm stays v1 even when its apex is armed v2. Before, the apex's v2
+    applied, so switching the `www` arm to v1 said "done" while v2 stayed in
+    force.
 - **`would_v2` lines say who the client is.** They now carry `cc=`, `asn=`,
   `provider=`, `ptr=`, `ua_family=`, `ua_bot=1` (the UA calls itself a bot —
   not verified) and `src=`. The `abuse_shadow` MCP tool gains a `humanity`

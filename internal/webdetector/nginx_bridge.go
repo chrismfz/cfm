@@ -945,6 +945,9 @@ func (b *NginxBridge) ChallengeIP(ip string, ttl time.Duration) {
 // CHALLENGE_ERR_RATIO) on the in-process entry. The reason stays daemon-side
 // (the edge message is unchanged): it is what a later solve's provenance
 // (src=ip:<reason>, challengeSources) and the solved hook's reason= read back.
+// An empty reason on a still-active challenge entry KEEPS the reason it has
+// (a reason-less refresh, e.g. the section sink re-challenging an IP the
+// webdetector just challenged with its own reason, must not erase it).
 func (b *NginxBridge) ChallengeIPWithReason(ip string, ttl time.Duration, reason string) {
 	if !b.cfg.Enabled {
 		return
@@ -959,8 +962,13 @@ func (b *NginxBridge) ChallengeIPWithReason(ip string, ttl time.Duration, reason
 		ttl = b.cfg.DefaultTTL
 	}
 
+	now := time.Now()
+	reason = strings.TrimSpace(reason)
 	b.mu.Lock()
-	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: time.Now().Add(ttl), Reason: strings.TrimSpace(reason)}
+	if cur, ok := b.ipState[ip]; ok && reason == "" && cur.Action == "challenge" && cur.Expires.After(now) {
+		reason = cur.Reason
+	}
+	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: reason}
 	b.mu.Unlock()
 
 	b.post("/nginx/ip", nginxIPMsg{IP: ip, Action: "challenge", TTLSec: int(ttl.Seconds())})

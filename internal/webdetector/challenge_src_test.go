@@ -18,7 +18,10 @@ func resetChallengeRuleNotes(t *testing.T) {
 	t.Helper()
 	reset := func() {
 		challengeRuleNotes.mu.Lock()
-		challengeRuleNotes.m = map[string]challengeRuleNote{}
+		challengeRuleNotes.m = map[string]time.Time{}
+		challengeRuleNotes.vals = map[string]string{}
+		challengeRuleNotes.fullWarn = false
+		challengeRuleNotes.lastSweep = time.Time{}
 		challengeRuleNotes.mu.Unlock()
 	}
 	reset()
@@ -32,7 +35,7 @@ func TestChallengeSourcesVocabulary(t *testing.T) {
 	ip, host := "203.0.113.40", "shop.gr"
 	future := time.Now().Add(time.Hour)
 
-	if got := b.challengeSources("", ip, host); len(got) != 0 {
+	if got := b.challengeSources("", ip, host, "", 0); len(got) != 0 {
 		t.Fatalf("nothing covers the client: got %v", got)
 	}
 
@@ -41,31 +44,31 @@ func TestChallengeSourcesVocabulary(t *testing.T) {
 	b.mu.Lock()
 	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: future, Reason: "WAF_XSS", WAFRuleID: 302}
 	b.mu.Unlock()
-	if got := b.challengeSources("", ip, host); strings.Join(got, ",") != "waf:302" {
+	if got := b.challengeSources("", ip, host, "", 0); strings.Join(got, ",") != "waf:302" {
 		t.Fatalf("waf entry: got %v", got)
 	}
 	b.mu.Lock()
 	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: future, Reason: "CHALLENGE_ERR_RATIO"}
 	b.mu.Unlock()
-	if got := b.challengeSources("", ip, host); strings.Join(got, ",") != "ip:CHALLENGE_ERR_RATIO" {
+	if got := b.challengeSources("", ip, host, "", 0); strings.Join(got, ",") != "ip:CHALLENGE_ERR_RATIO" {
 		t.Fatalf("detector entry: got %v", got)
 	}
 	b.mu.Lock()
 	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: future}
 	b.mu.Unlock()
-	if got := b.challengeSources("", ip, host); strings.Join(got, ",") != "ip" {
+	if got := b.challengeSources("", ip, host, "", 0); strings.Join(got, ",") != "ip" {
 		t.Fatalf("reason-less entry: got %v", got)
 	}
 	b.mu.Lock()
 	b.ipState[ip] = bridgeIPEntry{Action: "block", Expires: future, Reason: "x"}
 	b.mu.Unlock()
-	if got := b.challengeSources("", ip, host); len(got) != 0 {
+	if got := b.challengeSources("", ip, host, "", 0); len(got) != 0 {
 		t.Fatalf("a block is not a challenge source: got %v", got)
 	}
 	b.mu.Lock()
 	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: time.Now().Add(-time.Second), Reason: "stale"}
 	b.mu.Unlock()
-	if got := b.challengeSources("", ip, host); len(got) != 0 {
+	if got := b.challengeSources("", ip, host, "", 0); len(got) != 0 {
 		t.Fatalf("an expired entry is not a source: got %v", got)
 	}
 
@@ -75,13 +78,13 @@ func TestChallengeSourcesVocabulary(t *testing.T) {
 	b.vhState["*.farm.gr"] = bridgeVhostEntry{Action: "challenge", Expires: future, Reason: "manual"}
 	b.vhState["edge.gr"] = bridgeVhostEntry{Action: "challenge", Expires: future}
 	b.mu.Unlock()
-	if got := b.challengeSources("", ip, host); strings.Join(got, ",") != "vhost:suspicious_vhost" {
+	if got := b.challengeSources("", ip, host, "", 0); strings.Join(got, ",") != "vhost:suspicious_vhost" {
 		t.Fatalf("exact vhost: got %v", got)
 	}
-	if got := b.challengeSources("", ip, "www.farm.gr"); strings.Join(got, ",") != "vhost:manual" {
+	if got := b.challengeSources("", ip, "www.farm.gr", "", 0); strings.Join(got, ",") != "vhost:manual" {
 		t.Fatalf("wildcard vhost: got %v", got)
 	}
-	if got := b.challengeSources("", ip, "edge.gr"); strings.Join(got, ",") != "vhost" {
+	if got := b.challengeSources("", ip, "edge.gr", "", 0); strings.Join(got, ",") != "vhost" {
 		t.Fatalf("reason-less vhost entry: got %v", got)
 	}
 
@@ -98,13 +101,22 @@ func TestChallengeSourcesVocabulary(t *testing.T) {
 	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: future, WAFRuleID: 201}
 	b.mu.Unlock()
 	want := "waf:201,vhost:suspicious_vhost,rule:r_checkout,fp,geo"
-	if got := strings.Join(b.challengeSources(id, ip, host), ","); got != want {
-		t.Fatalf("all sources: got %q, want %q", got, want)
+	if got := strings.Join(b.challengeSources(id, ip, host, "", 0), ","); got != want {
+		t.Fatalf("all sources (resolver fallback): got %q, want %q", got, want)
+	}
+	// With the solve's own resolved identity the geo token follows IT, not a
+	// second lookup: a GR solve is not geo-covered even though the resolver
+	// (a later, hot-swapped database, say) would now answer CN.
+	if got := strings.Join(b.challengeSources(id, ip, host, "GR", 6799), ","); strings.Contains(got, "geo") {
+		t.Fatalf("geo must follow the resolved identity: %q", got)
+	}
+	if got := strings.Join(b.challengeSources(id, ip, host, "CN", 4134), ","); got != want {
+		t.Fatalf("resolved CN: got %q, want %q", got, want)
 	}
 
 	// A deny fingerprint is not a CHALLENGE source (it never reaches verify).
 	SetFingerprintPolicies([]FingerprintPolicy{{ID: id, Action: "deny"}})
-	if got := strings.Join(b.challengeSources(id, ip, host), ","); strings.Contains(got, "fp") {
+	if got := strings.Join(b.challengeSources(id, ip, host, "", 0), ","); strings.Contains(got, "fp") {
 		t.Fatalf("deny fp listed as a challenge source: %q", got)
 	}
 }
@@ -114,7 +126,7 @@ func TestChallengeSourcesNilBridgeStillReadsPolicies(t *testing.T) {
 	resetChallengeRuleNotes(t)
 	var b *NginxBridge
 	noteRuleChallenge("203.0.113.41", "shop.gr", "r1")
-	if got := strings.Join(b.challengeSources("", "203.0.113.41", "shop.gr"), ","); got != "rule:r1" {
+	if got := strings.Join(b.challengeSources("", "203.0.113.41", "shop.gr", "", 0), ","); got != "rule:r1" {
 		t.Fatalf("nil bridge: got %q", got)
 	}
 }
@@ -249,7 +261,7 @@ func TestRuleChallengeNoteExpiryAndCap(t *testing.T) {
 	resetChallengeRuleNotes(t)
 	noteRuleChallenge("203.0.113.60", "shop.gr", "r1")
 	challengeRuleNotes.mu.Lock()
-	challengeRuleNotes.m["203.0.113.60|shop.gr"] = challengeRuleNote{ruleID: "r1", expires: time.Now().Add(-time.Second)}
+	challengeRuleNotes.m["203.0.113.60|shop.gr"] = time.Now().Add(-time.Second)
 	challengeRuleNotes.mu.Unlock()
 	if got := ruleChallengeNote("203.0.113.60", "shop.gr"); got != "" {
 		t.Fatalf("expired note answered %q", got)
@@ -257,7 +269,9 @@ func TestRuleChallengeNoteExpiryAndCap(t *testing.T) {
 
 	challengeRuleNotes.mu.Lock()
 	for i := 0; i < challengeV2MarkMaxKeys; i++ {
-		challengeRuleNotes.m[time.Duration(i).String()+"|h"] = challengeRuleNote{ruleID: "x", expires: time.Now().Add(time.Hour)}
+		k := time.Duration(i).String() + "|h"
+		challengeRuleNotes.m[k] = time.Now().Add(time.Hour)
+		challengeRuleNotes.vals[k] = "x"
 	}
 	challengeRuleNotes.mu.Unlock()
 	noteRuleChallenge("203.0.113.61", "shop.gr", "r2")
@@ -265,10 +279,66 @@ func TestRuleChallengeNoteExpiryAndCap(t *testing.T) {
 		t.Fatalf("over the cap a new note must be dropped, got %q", got)
 	}
 	challengeRuleNotes.mu.RLock()
-	n := len(challengeRuleNotes.m)
+	n, warned := len(challengeRuleNotes.m), challengeRuleNotes.fullWarn
 	challengeRuleNotes.mu.RUnlock()
 	if n > challengeV2MarkMaxKeys {
 		t.Fatalf("store grew past the cap: %d", n)
+	}
+	if !warned {
+		t.Fatalf("saturation must be logged once, like the mark store")
+	}
+}
+
+// Under cap pressure the note store sweeps at most once per sweepEvery: a
+// store full of LIVE notes frees nothing on a sweep, so a per-new-pair O(n)
+// pass under the write lock would only stall the decision path.
+func TestRuleChallengeNoteSweepIsThrottled(t *testing.T) {
+	resetChallengeRuleNotes(t)
+	now := time.Now()
+	challengeRuleNotes.mu.Lock()
+	for i := 0; i < challengeV2MarkMaxKeys; i++ {
+		k := time.Duration(i).String() + "|h"
+		challengeRuleNotes.m[k] = now.Add(-time.Second) // all expired
+		challengeRuleNotes.vals[k] = "x"
+	}
+	challengeRuleNotes.lastSweep = now // a sweep "just ran"
+	challengeRuleNotes.mu.Unlock()
+
+	challengeRuleNotes.put("a|h", "r", now)
+	if _, ok := challengeRuleNotes.get("a|h", now); ok {
+		t.Fatalf("within sweepEvery the newcomer must be dropped without a sweep")
+	}
+	challengeRuleNotes.put("a|h", "r", now.Add(2*time.Second))
+	if id, ok := challengeRuleNotes.get("a|h", now.Add(2*time.Second)); !ok || id != "r" {
+		t.Fatalf("after sweepEvery the sweep must free the expired entries: %q %v", id, ok)
+	}
+	challengeRuleNotes.mu.RLock()
+	n, nv := len(challengeRuleNotes.m), len(challengeRuleNotes.vals)
+	challengeRuleNotes.mu.RUnlock()
+	if n != 1 || nv != 1 {
+		t.Fatalf("sweep must clear both maps: m=%d vals=%d", n, nv)
+	}
+}
+
+// A same-rule refresh with most of its TTL left is skipped (RLock only); a
+// DIFFERENT rule, or a note near expiry, is written.
+func TestRuleChallengeNoteRefreshSkip(t *testing.T) {
+	resetChallengeRuleNotes(t)
+	now := time.Now()
+	challengeRuleNotes.put("b|h", "r1", now)
+	exp1 := challengeRuleNotes.m["b|h"]
+	challengeRuleNotes.put("b|h", "r1", now.Add(10*time.Second))
+	if !challengeRuleNotes.m["b|h"].Equal(exp1) {
+		t.Fatalf("a fresh same-rule note must not be rewritten")
+	}
+	challengeRuleNotes.put("b|h", "r2", now.Add(10*time.Second))
+	if id, _ := challengeRuleNotes.get("b|h", now.Add(11*time.Second)); id != "r2" {
+		t.Fatalf("a different rule must replace the note, got %q", id)
+	}
+	later := now.Add(challengeV2MarkTTL - 30*time.Second)
+	challengeRuleNotes.put("b|h", "r2", later)
+	if !challengeRuleNotes.m["b|h"].After(later.Add(challengeV2MarkTTL - time.Second)) {
+		t.Fatalf("a note near expiry must be refreshed")
 	}
 }
 
@@ -281,6 +351,17 @@ func TestChallengeIPWithReasonRecordsReason(t *testing.T) {
 	b.ChallengeIP("203.0.113.71", time.Minute)
 	if got := b.GetReason("203.0.113.71"); got != "" {
 		t.Fatalf("plain ChallengeIP must stay reason-less, got %q", got)
+	}
+	// A reason-less refresh of an active challenge keeps the reason it has
+	// (the section sink re-challenging an IP the webdetector just challenged).
+	b.ChallengeIP("203.0.113.70", time.Minute)
+	if got := b.GetReason("203.0.113.70"); got != "CHALLENGE_ERR_RATIO" {
+		t.Fatalf("reason-less refresh erased the reason: %q", got)
+	}
+	// A new reason replaces it.
+	b.ChallengeIPWithReason("203.0.113.70", time.Minute, "web_404_flood")
+	if got := b.GetReason("203.0.113.70"); got != "web_404_flood" {
+		t.Fatalf("new reason: %q", got)
 	}
 }
 

@@ -36,7 +36,6 @@ package webdetector
 import (
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -84,56 +83,36 @@ func srcReasonToken(s string) string {
 // marks are gate teeth, these notes are telemetry only, and a note must
 // never be able to arm anything. Bounded and fail-open: over the cap a new
 // note is dropped (the solve then simply lacks rule:<id>).
-type challengeRuleNoteStore struct {
-	mu sync.RWMutex
-	m  map[string]challengeRuleNote
+//
+// A pairTTLStore (pair_ttl_store.go) holding the rule id. Unlike the marks it
+// runs on EVERY decision a plain challenge rule matches, so it skips same-rule
+// refreshes that still have most of their TTL (minRefresh — the common case
+// takes only the RLock) and sweeps at most once a second under cap pressure
+// (sweepEvery — a store full of LIVE notes frees nothing on a sweep, and an
+// O(n) pass per new pair under the write lock would stall the decision path).
+var challengeRuleNotes = pairTTLStore[string]{
+	m:          map[string]time.Time{},
+	vals:       map[string]string{},
+	ttl:        challengeV2MarkTTL,
+	maxKeys:    challengeV2MarkMaxKeys,
+	minRefresh: time.Minute,
+	sweepEvery: time.Second,
+	fullMsg:    "[challenge] traffic-rule challenge note store full (%d) — new solves lose src=rule:<id> until pressure drops",
 }
-
-type challengeRuleNote struct {
-	ruleID  string
-	expires time.Time
-}
-
-var challengeRuleNotes = challengeRuleNoteStore{m: map[string]challengeRuleNote{}}
 
 // noteRuleChallenge records that traffic rule ruleID challenged (ip, host).
 func noteRuleChallenge(ip, host, ruleID string) {
-	key := challengeV2MarkKey(ip, host)
-	if key == "" || strings.TrimSpace(ruleID) == "" {
+	if strings.TrimSpace(ruleID) == "" {
 		return
 	}
-	now := time.Now()
-	s := &challengeRuleNotes
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.m[key]; !exists && len(s.m) >= challengeV2MarkMaxKeys {
-		for k, n := range s.m { // expiry sweep, only on pressure
-			if now.After(n.expires) {
-				delete(s.m, k)
-			}
-		}
-		if len(s.m) >= challengeV2MarkMaxKeys {
-			return
-		}
-	}
-	s.m[key] = challengeRuleNote{ruleID: ruleID, expires: now.Add(challengeV2MarkTTL)}
+	challengeRuleNotes.put(challengeV2MarkKey(ip, host), ruleID, time.Now())
 }
 
 // ruleChallengeNote returns the traffic rule that recently challenged
 // (ip, host), or "".
 func ruleChallengeNote(ip, host string) string {
-	key := challengeV2MarkKey(ip, host)
-	if key == "" {
-		return ""
-	}
-	s := &challengeRuleNotes
-	s.mu.RLock()
-	n, ok := s.m[key]
-	s.mu.RUnlock()
-	if !ok || time.Now().After(n.expires) {
-		return ""
-	}
-	return n.ruleID
+	id, _ := challengeRuleNotes.get(challengeV2MarkKey(ip, host), time.Now())
+	return id
 }
 
 // ── The snapshot ────────────────────────────────────────────────────────────
@@ -142,7 +121,13 @@ func ruleChallengeNote(ip, host string) string {
 // in a fixed order (per-IP, vhost, rule, fp, geo) so equal situations always
 // render the same string. See the file header for the vocabulary. Read-only:
 // it takes the bridge's RLock once and never mutates any store.
-func (b *NginxBridge) challengeSources(fpID, ip, host string) []string {
+//
+// country/asn are the solve's network identity as ALREADY resolved at verify
+// (ChallengeSolve.resolveGeo): the geo token is evaluated on them, so it costs
+// no second mmdb read and can never disagree with the cc=/asn= fields on the
+// same line across a database hot-swap. Only when neither was resolved does
+// it fall back to its own lookup (GeoPolicyActionForIP).
+func (b *NginxBridge) challengeSources(fpID, ip, host, country string, asn uint) []string {
 	var out []string
 	now := time.Now()
 	if b != nil {
@@ -172,7 +157,13 @@ func (b *NginxBridge) challengeSources(fpID, ip, host string) []string {
 	if a := FingerprintPolicyForID(fpID); a == "challenge" || a == "challenge_v2" {
 		out = append(out, srcFP)
 	}
-	if GeoPolicyActionForIP(ip) != "" {
+	geo := ""
+	if country != "" || asn != 0 {
+		geo = GeoPolicyAction(country, func() uint64 { return uint64(asn) })
+	} else {
+		geo = GeoPolicyActionForIP(ip)
+	}
+	if geo != "" {
 		out = append(out, srcGeo)
 	}
 	return out

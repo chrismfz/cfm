@@ -842,7 +842,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// Provenance, once, BEFORE the gate and before releaseSolvedIP clears
 		// the per-IP entry it reads — so a reject carries it too.
 		if s.bridge != nil {
-			solve.Src = s.bridge.challengeSources(fp.ID, ipStr, host)
+			solve.Src = s.bridge.challengeSources(fp.ID, ipStr, host, solve.CountryISO, solve.ASN)
 			solve.SrcResolved = true
 		}
 

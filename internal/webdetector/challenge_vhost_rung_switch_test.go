@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -139,5 +140,89 @@ func TestHandleChallengeVhostRung_JSONBodyAndAudit(t *testing.T) {
 	p := evs[0].Payload
 	if p["from"] != "v1" || p["rung"] != "v2" || p["actor"] != "scoped" {
 		t.Fatalf("audit payload: %v", p)
+	}
+}
+
+// ── Review folds ─────────────────────────────────────────────────────────────
+
+// The most specific arm wins for the verify-side tier, including a PLAIN one:
+// a www host with its own v1 arm is v1 even under a v2 apex, so re-tiering
+// the www arm reports exactly what the gate will enforce.
+func TestManualChallengeRung_MostSpecificArmWins(t *testing.T) {
+	e := newTestEngineForChallengeHandlers()
+	e.manualChal.set("example.com", time.Hour, "manual", "v2")
+	e.manualChal.set("www.example.com", time.Hour, "manual", "")
+	if got := e.manualChallengeRung("www.example.com"); got != "" {
+		t.Fatalf("www's own v1 arm must win over the v2 apex, got %q", got)
+	}
+	if got := e.manualChallengeRung("example.com"); got != "v2" {
+		t.Fatalf("apex: %q", got)
+	}
+	// Re-tiering www changes www — and the gate follows.
+	rr, body := rungReq(t, e, httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/rung?host=www.example.com&rung=v2", nil))
+	if rr.Code != http.StatusOK || body["host"] != "www.example.com" || body["changed"] != true {
+		t.Fatalf("www re-tier: %d %v", rr.Code, body)
+	}
+	if e.manualChallengeRung("www.example.com") != "v2" {
+		t.Fatalf("gate did not follow the www re-tier")
+	}
+	rr, body = rungReq(t, e, httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/rung?host=www.example.com&rung=v1", nil))
+	if rr.Code != http.StatusOK || e.manualChallengeRung("www.example.com") != "" {
+		t.Fatalf("www back to v1 must be what the gate enforces: %d %v gate=%q", rr.Code, body, e.manualChallengeRung("www.example.com"))
+	}
+}
+
+// A scoped token holding only www.example.com must not re-tier the APEX arm
+// that covers it (fail-closed 403, nothing changed).
+func TestHandleChallengeVhostRung_ScopeChecksTheResolvedTarget(t *testing.T) {
+	e := newTestEngineForChallengeHandlers()
+	e.manualChal.set("tenant-a.example.com", time.Hour, "manual", "v2") // apex of www.tenant-a.example.com
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/rung?host=www.tenant-a.example.com&rung=v1", nil)
+	req = req.WithContext(context.WithValue(req.Context(), CtxScopeKey{}, map[string]struct{}{"www.tenant-a.example.com": {}}))
+	if rr, _ := rungReq(t, e, req); rr.Code != http.StatusForbidden {
+		t.Fatalf("re-tier of an out-of-scope apex: %d, want 403", rr.Code)
+	}
+	if e.manualChallengeRung("tenant-a.example.com") != "v2" {
+		t.Fatalf("a refused re-tier changed the apex arm")
+	}
+}
+
+// Switching to the tier already set is a no-op: 200, changed=false, and no
+// audit row — the trail records only real changes.
+func TestHandleChallengeVhostRung_NoOpWritesNoAudit(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := NewHistoryStore(filepath.Join(dir, "history.sqlite"), 30, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("NewHistoryStore: %v", err)
+	}
+	t.Cleanup(hs.Close)
+	e := &Engine{history: hs}
+	e.manualChal.init("")
+	e.manualChal.set("shop.gr", time.Hour, "manual", "v2")
+	rr, body := rungReq(t, e, httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/rung?host=shop.gr&rung=v2", nil))
+	if rr.Code != http.StatusOK || body["changed"] != false || body["from"] != "v2" {
+		t.Fatalf("no-op: %d %v", rr.Code, body)
+	}
+	if evs, _ := hs.QueryEvents("shop.gr", "", "challenge_vhost_manual_rung", 5); len(evs) != 0 {
+		t.Fatalf("a no-op wrote %d audit rows", len(evs))
+	}
+}
+
+// A manual arm reaches the bridge with the fixed reason "manual", never the
+// caller's free text: that is what src=vhost:<reason> reads, and a tenant
+// typing "suspicious_vhost" must not pass for an auto challenge.
+func TestManualChallengeBridgeReasonIsFixed(t *testing.T) {
+	b := NewNginxBridge(t.TempDir()+"/no-edge.sock", "tok", time.Minute, time.Minute)
+	e := &Engine{nginxBridge: b}
+	e.manualChal.init("")
+	e.ManualChallengeVhost("shop.gr", time.Hour, "suspicious_vhost", "v2")
+	b.mu.RLock()
+	got := b.vhState["shop.gr"].Reason
+	b.mu.RUnlock()
+	if got != "manual" {
+		t.Fatalf("bridge reason = %q, want manual", got)
+	}
+	if ok, _, reason := e.manualChal.active("shop.gr"); !ok || reason != "suspicious_vhost" {
+		t.Fatalf("the operator's text must stay in the manual store: %v %q", ok, reason)
 	}
 }
