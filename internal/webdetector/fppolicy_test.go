@@ -425,6 +425,7 @@ func TestVerifyGeoGateReadsTheDatabaseLive(t *testing.T) {
 	if e.enr == nil {
 		t.Fatal("engine built without its enricher")
 	}
+	t.Cleanup(e.enr.Close)
 	if got := e.enr.Lookup(ip).CountryISO; got != "GR" { // warms the 24h cache
 		t.Fatalf("setup: Lookup = %q, want GR", got)
 	}

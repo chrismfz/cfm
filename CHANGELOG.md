@@ -25,11 +25,12 @@ back-filled here — see the git/PR history for that period.
   (or hold an empty answer if cached before the database loaded). So after an
   update it could reject a client the current database places outside the
   armed set — with a `v2=geo` line whose `cc=` contradicted it — or let
-  through one it now places inside. It now reads the database directly (a
-  microsecond, no DNS), the same source as the `cc=`/`asn=` on the line.
+  through one it now places inside. It now reads the database directly
+  (microseconds, no DNS), the same source as the `cc=`/`asn=` on the line.
   **Enforcement change** for armed geo `challenge_v2` policies only; nothing
-  changes where none is armed. The decision-path challenge floor still reads
-  through the cache.
+  changes where none is armed. Not changed: whether to serve the challenge at
+  all is still decided from the edge's own copy of the database, which the
+  edge reads until its workers are reloaded.
 
 ## 2026.09.22
 

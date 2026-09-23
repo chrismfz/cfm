@@ -454,10 +454,13 @@ already opened.
         up to 24h stale after an mmdb update, or empty if cached before the
         mmdb loaded — while the solve line showed the live identity. It now
         reads the same live mmdb (`LookupGeoFast`), so gate and line agree.
-        The decision-path floor (`handleDecision`) still reads through the
-        cache (its per-request hot path); a client whose geo changed in an
-        update is floored per the old record for up to 24h — the same lag
-        class, not changed here.
+        Not changed, and a separate lag: the decision-path FLOOR takes the
+        country from the edge first (`cfm_geo.lua`, which opens the mmdb once
+        per worker and never reopens it, plus a 90s shared-dict cache), so a
+        country floor can follow the OLD database until the edge workers are
+        reloaded; the enricher's cache is used there only for ASN and when
+        the edge sends no country. Either way verify now acts on the current
+        database (a floored-but-no-longer-armed client just gets plain PoW).
       - OPEN, decide before arming ad-running vhosts: Google's proxy (PTR
         `google-proxy-*.google.com`, AS15169, fp `c41a0f3f`) scores 140
         (`sw_renderer,touch_lie,no_input`) and WOULD be rejected — seen in

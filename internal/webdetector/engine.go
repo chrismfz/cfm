@@ -659,7 +659,10 @@ func NewEngine(cfg Config) *Engine {
 	// Geo resolver for the verify-side challenge_v2 gate (policy-kinds slice):
 	// lets GeoPolicyActionForIP map a solving client's IP to country/ASN.
 	// A LIVE mmdb read (LookupGeoFast: microseconds, no DNS) — the same source
-	// the solve line's cc=/asn= come from, so the gate and the line agree. It
+	// the solve line's cc=/asn= come from, so the gate and the line agree.
+	// "Live" = the database the enricher has loaded: a newer file is swapped
+	// in by the refresh that Lookup cache misses drive (at most statEvery,
+	// 5 min, behind on any node seeing traffic). It
 	// used to read through the enricher's cache, whose HITS an mmdb refresh does
 	// not purge: a record up to cacheTTL (24h) stale — a v2=geo reject of a
 	// client the current database places outside the armed set — or empty

@@ -14,9 +14,15 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
-	"testing"
 	"time"
 )
+
+// TB is the part of testing.TB Write needs — declared here so this package
+// does not import "testing" itself (it is meant for _test files only).
+type TB interface {
+	Helper()
+	Fatal(args ...any)
+}
 
 // Value is anything Build can serialise: string, Uint16/32/64, Map, []string.
 type Value interface{}
@@ -163,7 +169,7 @@ func IPLocateCountryRecord(cc, name string) Map {
 
 // Write installs db at dir/name atomically (temp file + rename, like
 // geoipupdate) and stamps it with mtime, so a hot reload sees a change.
-func Write(t testing.TB, dir, name string, db []byte, mtime time.Time) {
+func Write(t TB, dir, name string, db []byte, mtime time.Time) {
 	t.Helper()
 	tmp, err := os.CreateTemp(dir, name+".tmp*")
 	if err != nil {
