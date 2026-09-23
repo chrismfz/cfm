@@ -10,7 +10,7 @@ import (
 	"cfm/internal/logging"
 )
 
-var proxmoxState, _ = core.LoadState("")
+var proxmoxState = core.DefaultState()
 
 func init() {
 	meta.Register(meta.DetectorMeta{

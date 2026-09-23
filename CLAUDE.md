@@ -70,7 +70,9 @@ locally before you push; a green diff that fails one of these wastes a round-tri
 ```bash
 go vet ./...
 go build ./...
+./scripts/tests/check_test_isolation.sh arm      # record CFM's system dirs before the Go tests (see §5)
 go test -race ./...
+./scripts/tests/check_test_isolation.sh verify   # fail if the Go tests wrote any of them
 make lua
 make test-lua
 make test-js                                     # node --test on internal/webui/static/assets/**/*.test.{js,cjs}
@@ -252,6 +254,51 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   ripgrep next to luajit, and every rg-using script hard-fails when `rg` is
   absent. Apply the same rule to any new guardrail: `|| true` may swallow "no
   matches", never "no tool".
+- **Tests never touch CFM's live system paths.** A test that builds an engine,
+  store or collector from a sparse config gets the production defaults, and
+  they used to be literals: the suite wrote the LIVE files on any machine it
+  ran on as root. It replaced the operator's manual challenges, added a WAF
+  exclude, appended to the notifier history, and left a kernsec rollback
+  snapshot of TEST boot args that the host's first real apply then kept
+  instead of writing its own. The notifier tests also fell back to the
+  packaged `/etc/cfm/notify.conf` and SAVED over it, and the detectors-config
+  code prefers the live `/etc/cfm/detectors.conf` over any cfgDir. CI never
+  saw it: the runner isn't root, so the writes failed silently and the tests
+  passed.
+
+  Now each such default is a var the tests point at a temp dir:
+  - `webdetector` `defaultStateDir`/`defaultLogDir` (via `TestMain`, and
+    `SetDefaultDirsForTest` from the `TestMain` of another package whose tests
+    build an Engine, as apiserver does; the detectors register no longer keeps
+    a second copy of the store defaults);
+  - the `kernsec` rollback snapshot paths;
+  - the `sslcollector` `defaultCacheDir`;
+  - the `nft` `selfIPsLuaPath` (EnsureBase rewrites the edge's self-IP list;
+    this one was caught by the guard in CI, in a test added the same day);
+  - the `notify` and `detectorscfg` `systemConfigPath` (via
+    `SetSystemConfigPathForTest` from the apiserver `TestMain`).
+
+  The detectors' init-time states no longer create `detectors.state.d`
+  (`core.DefaultState`). A new default path goes through the same kind of
+  var, and `TestFillDefaultsPathsFollowTheRedirectableDirs` fails a
+  webdetector store added as a literal. `check_test_isolation.sh` (`arm`
+  before `go test`, `verify` after) is the net: it flags any change to
+  content, mode or ownership. The ingest socket, for one, used to re-own the
+  live `/run/cfm` for a test's temp socket. In CI the four dirs are first
+  created writable for the runner and seeded like a packaged node
+  (`ci_seed_cfm_dirs.sh`: conffiles, Lua, logs, runtime-state placeholders),
+  so a regressing write succeeds and shows, including one that only rewrites a
+  file that exists. Two blind spots:
+  - it watches only CFM's own dirs, so a test reaching `/etc/default/grub` or
+    `/etc/sysctl.d` is outside it;
+  - the CI runner isn't root, so tests that skip unless run as root (the lsm
+    enable path, the nft integration test) never run under it there.
+
+  Never "fix" an unwritable watched dir by re-owning it: on a CFM host that
+  hands the live state to that account. To find a writer, run the suite in a mount
+  namespace with an overlay on `/etc`, `/var` and `/run` and a tmpfs over the
+  CFM dirs (seed them for the exists-only class), then look at what landed
+  there. That is how these were found, without touching the host.
 - **Match surrounding style.** Go packages are small and single-purpose;
   keep new code in the right package rather than widening `main.go`.
 - **`detectors.conf` scalar readers now tolerate an inline `;`/`#` comment.**

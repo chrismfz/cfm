@@ -11,7 +11,7 @@ import (
 )
 
 // shared state for detectors
-var cpanelState, _ = core.LoadState("")
+var cpanelState = core.DefaultState()
 
 func init() {
 	meta.Register(meta.DetectorMeta{

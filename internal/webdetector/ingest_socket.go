@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -130,10 +131,15 @@ func (s *IngestSocket) Serve(ctx context.Context, e *Engine) error {
 	// Ensure the parent directory exists (tmpfs under systemd is wiped on boot).
 	// 0750 root:cfm — workers (cfm group) traverse in to reach the socket, no
 	// other user needs access. main.go normally does the Chmod+Chown at daemon
-	// start; this is a defensive fallback if webdetector comes up first.
-	_ = os.MkdirAll("/run/cfm", 0o750)
-	if gid := sslcollector.CfmGroupID(); gid > 0 {
-		_ = os.Chown("/run/cfm", 0, gid)
+	// start; this is a defensive fallback if webdetector comes up first. Only
+	// for the socket's own default directory: a socket elsewhere (a test's temp
+	// dir) must neither create nor re-own the live /run/cfm, and chowning some
+	// other parent (say /tmp) to root:cfm would be worse.
+	if runDir := filepath.Dir(DefaultIngestSockPath); filepath.Dir(s.sockPath) == runDir {
+		_ = os.MkdirAll(runDir, 0o750)
+		if gid := sslcollector.CfmGroupID(); gid > 0 {
+			_ = os.Chown(runDir, 0, gid)
+		}
 	}
 
 	// Remove any stale socket file from a previous run.

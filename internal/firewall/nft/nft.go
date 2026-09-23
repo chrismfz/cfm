@@ -30,10 +30,15 @@ import (
 	"time"
 )
 
+// selfIPsLuaPath is the edge's snapshot of this server's own IPs (the Lua
+// local-origin bypass reads it). A var, not a const, so a test binary can point
+// it at a temp dir: EnsureBase refreshes it, and a test driving EnsureBase
+// through a fake runner otherwise rewrote the LIVE file with test data.
+var selfIPsLuaPath = "/var/lib/cfm/lua/cfm_self_ips.lua"
+
 const (
-	tableName      = "cfm"
-	family         = "inet"
-	selfIPsLuaPath = "/var/lib/cfm/lua/cfm_self_ips.lua"
+	tableName = "cfm"
+	family    = "inet"
 
 	// Retired per-IP challenge DNAT set names — referenced only by the
 	// one-shot legacy cleanup in EnsureBase.
@@ -124,6 +129,12 @@ type Backend struct {
 	portScanRunning bool
 
 	// autoblock evaluator and per-IP debounce maps (moved from package-level vars).
+	// abMu serialises ab, its Reasons and the debounce maps: the flood dump
+	// (throttle) and the port scanner run in separate goroutines, started
+	// together every tick, and both drive the one Evaluator — which is not
+	// goroutine-safe — so they could write its maps at once ("concurrent map
+	// writes" is fatal).
+	abMu            sync.Mutex
 	ab              *autoblock.Evaluator
 	lastAutoBlockAt map[string]time.Time
 	lastIgnoredAt   map[string]time.Time

@@ -31,6 +31,17 @@ func sanitize(name string) string {
 	return safeFileRe.ReplaceAllString(name, "_")
 }
 
+// DefaultState returns the dir-mode State for DefaultStateDir WITHOUT touching
+// the filesystem. The detectors' shared states are package-level vars, built at
+// package init, and building them with LoadState ran its MkdirAll in every
+// binary importing the package — test binaries included, so the suite created
+// the live /var/lib/cfm/detectors.state.d on any machine it ran on as root.
+// Nothing needs the directory before the first position is saved: Put creates
+// it (0700, as LoadState would), and Get on a missing directory is a miss.
+func DefaultState() *State {
+	return &State{dir: DefaultStateDir}
+}
+
 // LoadState ensures the directory exists and returns a dir-mode State.
 // If path == "", it uses DefaultStateDir.
 func LoadState(path string) (*State, error) {

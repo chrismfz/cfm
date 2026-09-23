@@ -20,6 +20,11 @@ func newScopeTestServer(t *testing.T) (*TokenStore, http.Handler) {
 	RegisterTokenEndpoint(mux, store)
 	RegisterTokenManagementEndpoints(mux, store)
 
+	// A fresh temp dir per test for every store this engine defaults (WAF /
+	// challenge excludes, manual challenges, …): the in-scope exclude test
+	// below persists an exclude for mysite.com. TestMain already keeps them
+	// off the live /var/lib/cfm; this keeps tests from seeing each other's.
+	t.Cleanup(webdet.SetDefaultDirsForTest(t.TempDir()))
 	e := webdet.NewEngine(webdet.Config{
 		TrafficRulesStorePath: filepath.Join(t.TempDir(), "rules.json"),
 	})

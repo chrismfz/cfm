@@ -793,13 +793,17 @@ func init() {
 			UnderAttackFPCoverageMin:  kvFlt(kv, "UNDER_ATTACK_FP_COVERAGE_MIN", 0.60),
 			UnderAttackFPCollisionMax: kvFlt(kv, "UNDER_ATTACK_FP_COLLISION_MAX", 0.005),
 
-			ChallengeExcludeStorePath: kvStrClean(kv, "CHALLENGE_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_challenge_excludes.json"),
-			WAFExcludeStorePath:       kvStrClean(kv, "WAF_EXCLUDE_STORE_PATH", "/var/lib/cfm/webdetector_waf_excludes.json"),
-			ChallengeManualStorePath:  kvStrClean(kv, "CHALLENGE_MANUAL_STORE_PATH", "/var/lib/cfm/webdetector_manual_challenges.json"),
-			ChallengeAccessStorePath:  kvStrClean(kv, "CHALLENGE_ACCESS_STORE_PATH", "/var/lib/cfm/webdetector_challenge_access.json"),
-			SiteCacheStorePath:        kvStrClean(kv, "SITE_CACHE_STORE_PATH", "/var/lib/cfm/webdetector_site_cache.json"),
+			// Store paths default to "" so webdetector.FillDefaults supplies
+			// them: ONE copy of the defaults (not a second list here that can
+			// drift), and one that a test binary can redirect away from the
+			// live /var/lib/cfm (see webdetector.SetDefaultDirsForTest).
+			ChallengeExcludeStorePath: kvStrClean(kv, "CHALLENGE_EXCLUDE_STORE_PATH", ""),
+			WAFExcludeStorePath:       kvStrClean(kv, "WAF_EXCLUDE_STORE_PATH", ""),
+			ChallengeManualStorePath:  kvStrClean(kv, "CHALLENGE_MANUAL_STORE_PATH", ""),
+			ChallengeAccessStorePath:  kvStrClean(kv, "CHALLENGE_ACCESS_STORE_PATH", ""),
+			SiteCacheStorePath:        kvStrClean(kv, "SITE_CACHE_STORE_PATH", ""),
 			HistoryEnabled:            kvBool(kv, "HISTORY_ENABLED", true),
-			HistoryDBPath:             kvStrClean(kv, "HISTORY_DB_PATH", "/var/lib/cfm/webdetector-history.db"),
+			HistoryDBPath:             kvStrClean(kv, "HISTORY_DB_PATH", ""),
 			HistoryRetentionDays:      kvInt(kv, "HISTORY_RETENTION_DAYS", 30),
 			HistoryMaxRows:            kvInt(kv, "HISTORY_MAX_ROWS", 1000000),
 			HistoryPruneEvery:         kvDur(kv, "HISTORY_PRUNE_EVERY", time.Hour),
