@@ -20,9 +20,9 @@ type BlockAction func(ip, fam, reason string, tc cfgpkg.ThrottleConfig) error
 // Evaluator tracks per-IP hit counts within a sliding window and fires a
 // BlockAction when an IP exceeds the configured threshold.
 //
-// NOT goroutine-safe. Callers serialise access with their own overlap guards
-// (the same mutex that prevents concurrent DumpFloodCounters / LoadPortScanner
-// goroutines from running simultaneously).
+// NOT goroutine-safe. The backends drive one Evaluator from two goroutines
+// (the flood dump's throttle pass and the port scanner) and serialise them
+// with their abMu.
 type Evaluator struct {
 	thV4Hits  map[string][]time.Time
 	thV6Hits  map[string][]time.Time
