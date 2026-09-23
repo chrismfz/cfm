@@ -187,9 +187,12 @@ func imunifyIncomplete(raw []byte, items []imunifyItem) string {
 	return strings.Join(why, "; ")
 }
 
-// imunifyCountryEntries counts the entries that block or allow a country
-// (imunify's "ip-list local … --by-type country"): no address, and a
-// country or a type of "country".
+// imunifyCountryEntries counts the entries without an address that block or
+// allow a country (imunify's "ip-list local … --by-type country"): a type of
+// "country", or no address key at all and a country. An IP entry carries its
+// address's country too, so an entry with an address key (even an empty one)
+// needs the type: an IP entry whose address didn't read must count as
+// unreadable, never as a country.
 func imunifyCountryEntries(arr []any) int {
 	n := 0
 	for _, e := range arr {
@@ -197,19 +200,20 @@ func imunifyCountryEntries(arr []any) int {
 		if !ok {
 			continue
 		}
-		var addr, country bool
+		var addrKey, addr, country, typed bool
 		for k, v := range m {
 			switch strings.ToLower(k) {
 			case "ip", "network_address":
+				addrKey = true
 				addr = addr || (v != nil && v != "")
 			case "country":
-				country = country || (v != nil && v != "")
+				country = v != nil && v != ""
 			case "type":
 				t, _ := v.(string)
-				country = country || strings.EqualFold(t, "country")
+				typed = strings.EqualFold(t, "country")
 			}
 		}
-		if !addr && country {
+		if !addr && (typed || !addrKey && country) {
 			n++
 		}
 	}

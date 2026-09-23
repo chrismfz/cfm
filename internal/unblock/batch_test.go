@@ -192,8 +192,8 @@ func TestDoMany_ImunifyUnreadableListDeletesBlindly(t *testing.T) {
 	}
 }
 
-// A list at the cap may be missing entries: the IPs it didn't show are
-// deleted blindly, as before.
+// A list at the cap may be missing entries: an IP is deleted blindly from
+// drop and captcha wherever the list didn't show it, as before.
 func TestDoMany_ImunifyCappedListDeletesUnseen(t *testing.T) {
 	var entries []string
 	for i := 0; i < 10000; i++ {
@@ -211,7 +211,7 @@ func TestDoMany_ImunifyCappedListDeletesUnseen(t *testing.T) {
 	for _, want := range []string{
 		"delete --purpose drop 172.16.0.1 198.51.100.7|",
 		"delete --purpose drop 2001:db8::/64|",
-		"delete --purpose captcha 198.51.100.7|",
+		"delete --purpose captcha 172.16.0.1 198.51.100.7|",
 		"delete --purpose captcha 2001:db8::/64",
 	} {
 		if !strings.Contains(got, want) {
@@ -247,7 +247,9 @@ func TestRemoveFromFileMany(t *testing.T) {
 	}
 }
 
-// feedBackend lists one feed host set and records the allow batch.
+// feedBackend lists one feed's two host sets (v4 and v6), holding feed, and
+// records the allow batch. Like nft, it rejects a lookup of an address of
+// the other family.
 type feedBackend struct {
 	firewall.Backend
 	feed    []string
@@ -256,10 +258,31 @@ type feedBackend struct {
 }
 
 func (b *feedBackend) ListTableTextNoDNS(string, string) (string, error) {
-	return "table inet cfm {\n\tset block_ext_v4_hosts_MYBLOCK {\n\t\ttype ipv4_addr\n\t}\n}\n", nil
+	return "table inet cfm {\n\tset block_ext_v4_hosts_MYBLOCK {\n\t\ttype ipv4_addr\n\t}\n" +
+		"\tset block_ext_v6_hosts_MYBLOCK {\n\t\ttype ipv6_addr\n\t}\n}\n", nil
 }
-func (b *feedBackend) ListSetElementsRaw(string) ([]string, error) { return b.feed, nil }
-func (b *feedBackend) RemoveBlockBatch([]net.IP) error             { return nil }
+func (b *feedBackend) ListSetElementsRaw(set string) ([]string, error) {
+	var out []string
+	for _, e := range b.feed {
+		if (net.ParseIP(e).To4() != nil) == strings.Contains(set, "_v4_") {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+func (b *feedBackend) HasElem(set, elem string) (bool, error) {
+	if (net.ParseIP(elem).To4() != nil) != strings.Contains(set, "_v4_") {
+		return false, fmt.Errorf("nft get element %s{%s}: exit status 1: Error: Could not resolve hostname: Address family for hostname not supported\nget element inet cfm %s { %s }\n                              ^^^", set, elem, set, elem)
+	}
+	for _, e := range b.feed {
+		if e == elem {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+func (b *feedBackend) RemoveBlockBatch([]net.IP) error { return nil }
+func (b *feedBackend) RemoveBlock(net.IP) error        { return nil }
 func (b *feedBackend) AddAllowBatch(e []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
 	b.batches++
 	b.allowed = append(b.allowed, e...)
@@ -355,8 +378,8 @@ func TestDoMany_ImunifySplashscreen(t *testing.T) {
 }
 
 // A list that says it holds more than it returned (max_count), or has an
-// entry it couldn't read, may be missing the IP: unseen IPs are deleted
-// blindly from drop and captcha.
+// entry it couldn't read, may be missing entries: an IP is deleted blindly
+// from drop and captcha wherever the list didn't show it, as Do always did.
 func TestDoMany_ImunifyIncompleteListDeletesUnseen(t *testing.T) {
 	for name, list := range map[string]string{
 		"max_count":         `echo '{"items":[{"ip":"10.0.0.1","netmask":4294967295,"purpose":"drop"}],"max_count":7}'`,
@@ -367,7 +390,7 @@ func TestDoMany_ImunifyIncompleteListDeletesUnseen(t *testing.T) {
 			calls := fakeTools(t, map[string]string{"imunify360-agent": `case "$*" in *" list "*) ` + list + `;; esac`})
 			res := DoMany(context.Background(), ips("10.0.0.1", "10.0.0.2"), Options{})
 			got := strings.Join(calls(), "|")
-			for _, want := range []string{"delete --purpose drop 10.0.0.1 10.0.0.2|", "delete --purpose captcha 10.0.0.2"} {
+			for _, want := range []string{"delete --purpose drop 10.0.0.1 10.0.0.2|", "delete --purpose captcha 10.0.0.1 10.0.0.2"} {
 				if !strings.Contains(got, want) {
 					t.Errorf("runs %q lack %q", got, want)
 				}
@@ -547,7 +570,7 @@ func TestDoMany_FeedSetUnreadable(t *testing.T) {
 		t.Errorf("198.51.100.1 (probed, not held) feed steps = %+v", s)
 	}
 	for _, ip := range []string{"198.51.100.2", "198.51.100.3"} {
-		if s := stepsOf(res[ip], SrcFeeds); len(s) != 1 || s[0].Action != ActionError || !strings.Contains(s[0].Err, "block_ext_v4_hosts_MYBLOCK: nft get element: timed out") {
+		if s := stepsOf(res[ip], SrcFeeds); len(s) != 1 || s[0].Action != ActionError || s[0].Err != "nft get element: timed out" {
 			t.Errorf("%s feed steps = %+v", ip, s)
 		}
 	}
@@ -575,5 +598,49 @@ func TestDoMany_FeedAllowBatchFallsBackPerEntry(t *testing.T) {
 	res := DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2", "198.51.100.3"), Options{BE: be, TempWhitelist: true})
 	if !res["198.51.100.1"].Whitelisted || res["198.51.100.2"].Whitelisted || res["198.51.100.3"].Whitelisted {
 		t.Errorf("whitelisted: %v %v %v; want only the first", res["198.51.100.1"].Whitelisted, res["198.51.100.2"].Whitelisted, res["198.51.100.3"].Whitelisted)
+	}
+}
+
+// Each feed set is asked only about IPs of its own family — nft rejects the
+// other one, and that answer used to read as "not checked" — so a one-IP
+// unblock, and a mixed batch whose sets can't be read whole, check cleanly.
+func TestDoMany_FeedSetsAskedOnlyTheirFamily(t *testing.T) {
+	fakeTools(t, map[string]string{})
+	be := &feedBackend{feed: []string{"198.51.100.1", "2001:db8::1"}}
+	for _, batch := range [][]net.IP{ips("198.51.100.1"), ips("2001:db8::2")} {
+		for ip, r := range DoMany(context.Background(), batch, Options{BE: be}) {
+			if s := stepsOf(r, SrcFeeds); ip == "198.51.100.1" && (len(s) != 1 || s[0].Action != ActionChecked) || ip != "198.51.100.1" && len(s) != 0 {
+				t.Errorf("%s feed steps = %+v", ip, s)
+			}
+		}
+	}
+
+	ub := &unreadableFeedBackend{feedBackend: feedBackend{feed: []string{"198.51.100.3", "2001:db8::1"}}}
+	ub.holds = "2001:db8::1"
+	res := DoMany(context.Background(), ips("198.51.100.1", "2001:db8::1", "198.51.100.3", "2001:db8::2"), Options{BE: ub})
+	for ip, r := range res {
+		if s := stepsOf(r, SrcFeeds); len(s) > 0 && s[len(s)-1].Action == ActionError {
+			t.Errorf("%s feed steps = %+v, want no unchecked set", ip, s)
+		}
+	}
+	if r := res["2001:db8::1"]; len(r.FromFeeds) != 1 {
+		t.Errorf("2001:db8::1 feeds %v", r.FromFeeds)
+	}
+}
+
+// noTableBackend has no inet cfm table: nothing there can block.
+type noTableBackend struct{ feedBackend }
+
+func (b *noTableBackend) ListTableTextNoDNS(string, string) (string, error) {
+	return "", fmt.Errorf("nft list table inet cfm: exit status 1: Error: No such file or directory\nlist table inet cfm\n^^^")
+}
+
+func TestDoMany_NoTableNoFeedError(t *testing.T) {
+	fakeTools(t, map[string]string{})
+	res := DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2"), Options{BE: &noTableBackend{}})
+	for ip, r := range res {
+		if s := stepsOf(r, SrcFeeds); len(s) != 0 {
+			t.Errorf("%s feed steps = %+v, want none", ip, s)
+		}
 	}
 }

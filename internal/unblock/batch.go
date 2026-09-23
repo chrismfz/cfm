@@ -4,6 +4,7 @@ package unblock
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"cfm/internal/firewall"
@@ -46,8 +48,8 @@ const graceComment = "CFM auto-unblock"
 //     so it isn't limited to the IPs banned right now);
 //   - imunify360's local list is read once and only IPs on its drop, captcha
 //     or splashscreen list are deleted, many per run (when the list couldn't
-//     be read, or may be missing entries, the IPs it didn't show are deleted
-//     blindly from drop and captcha, as before);
+//     be read, or may be missing entries, an IP is deleted blindly from drop
+//     and captcha wherever the list didn't show it, as before);
 //   - the feed-origin IPs are allowed in one batch that never shortens an
 //     existing allow (AddAllowBatch).
 //
@@ -278,9 +280,11 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 
 // feedsBlockingMany returns, per IP, the feed keys whose per-feed HOST sets
 // hold it, and the sets it couldn't check for it (why). One terse table
-// listing discovers the sets; one IP is probed with HasElem per set (constant
-// time on exec nft), more read each set once — and when a set can't be read
-// whole, are probed one by one until a probe fails too.
+// listing discovers the sets. Each set is asked only about the IPs of its
+// address family (nft rejects the other one): one IP with HasElem (a point
+// lookup on exec nft), more by reading the set once — read again once if
+// that fails, then asked IP by IP until a lookup fails too. A table or set
+// that isn't there holds nothing.
 func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[string][]string) {
 	out, unchecked = map[string][]string{}, map[string][]string{}
 	if be == nil || len(ips) == 0 {
@@ -291,8 +295,10 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 		"allow_ext_v6_hosts_", "block_ext_v6_hosts_",
 	)
 	if err != nil {
-		for _, ip := range ips {
-			unchecked[ip.String()] = []string{"listing the feed sets: " + err.Error()}
+		if !nftMissing(err) {
+			for _, ip := range ips {
+				unchecked[ip.String()] = []string{"listing the feed sets: " + firstLine(err.Error())}
+			}
 		}
 		return out, unchecked
 	}
@@ -311,12 +317,15 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 		}
 		seen[ip][fk] = true
 	}
-	probe := func(s string) {
-		for i, ip := range ips {
+	probe := func(s string, fam []net.IP) {
+		for i, ip := range fam {
 			ok, err := be.HasElem(s, ip.String())
+			if err != nil && nftMissing(err) {
+				return // the set is gone: it holds nothing
+			}
 			if err != nil {
-				for _, rest := range ips[i:] {
-					unchecked[rest.String()] = append(unchecked[rest.String()], s+": "+err.Error())
+				for _, rest := range fam[i:] {
+					unchecked[rest.String()] = append(unchecked[rest.String()], firstLine(err.Error()))
 				}
 				return
 			}
@@ -326,13 +335,25 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 		}
 	}
 	for _, s := range sets {
-		if len(ips) == 1 {
-			probe(s)
+		v4 := strings.Contains(s, "_v4_")
+		var fam []net.IP
+		for _, ip := range ips {
+			if (ip.To4() != nil) == v4 {
+				fam = append(fam, ip)
+			}
+		}
+		if len(fam) <= 1 {
+			probe(s, fam)
 			continue
 		}
 		elems, err := be.ListSetElementsRaw(s)
+		if err != nil && !nftMissing(err) {
+			elems, err = be.ListSetElementsRaw(s)
+		}
 		if err != nil {
-			probe(s)
+			if !nftMissing(err) {
+				probe(s, fam)
+			}
 			continue
 		}
 		for _, e := range elems {
@@ -348,6 +369,19 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 		sort.Strings(out[ip])
 	}
 	return out, unchecked
+}
+
+// nftMissing reports an error that says the table, set or element isn't
+// there (ENOENT, on both engines).
+func nftMissing(err error) bool {
+	return errors.Is(err, syscall.ENOENT) || strings.Contains(strings.ToLower(err.Error()), "no such file or directory")
+}
+
+// firstLine is s up to its first newline: nft follows its error with the
+// command and a caret line.
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(s, "\n")
+	return strings.TrimSpace(line)
 }
 
 // removeFromFileMany drops the lines of cfgDir/filename that list one of ips
@@ -472,8 +506,9 @@ func imunifyUnblockMany(ctx context.Context, list []net.IP, out map[string]*Resu
 		}
 		return covering.Match(q)
 	}
-	// Without the whole list an IP it didn't show may still be listed: it is
-	// deleted blindly from drop and captcha, as Do always did.
+	// Without the whole list an IP may be listed where it didn't show: it is
+	// deleted blindly from drop and captcha wherever it didn't, as Do always
+	// did.
 	blind := err != nil || incomplete != ""
 	for _, ip := range list {
 		r := out[ip.String()]
@@ -510,7 +545,8 @@ func imunifyUnblockMany(ctx context.Context, list []net.IP, out map[string]*Resu
 					for _, e := range listed[purpose][k] {
 						g.add(e.Entry, ip)
 					}
-				case blind && purpose != "splashscreen" && !isListed(ip):
+				case blind && purpose != "splashscreen":
+					// Not seen on this list: past what was read, maybe.
 					g.add(k, ip)
 				}
 			}

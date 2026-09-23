@@ -16,9 +16,10 @@ import (
 // unblockPart bounds the requests of one unblock.DoMany. A mass unblock is
 // split into even parts of at most this many, each confirmed as soon as it is
 // done, so cfm-web sees progress and a restart mid-way loses one part, not the
-// whole batch. Even parts keep each one of a split batch past 250 requests —
-// far past the batch size up to which every IP gets imunify's white grace
-// entry — so where the split falls never changes who gets it.
+// whole batch. Even parts keep each part of a split batch at 250 requests or
+// more — far past the batch size (in distinct IPs) up to which every IP gets
+// imunify's white grace entry — so where the split falls doesn't change who
+// gets it, short of a part made mostly of repeated or invalid IPs.
 const unblockPart = 500
 
 // ProcessUnblocks unblocks a batch of pending requests — one unblock.DoMany

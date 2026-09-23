@@ -145,7 +145,9 @@ func TestImunifyIncomplete(t *testing.T) {
 		`{"items":[{"ip":"10.0.0.1","purpose":"drop"}],"max_count":3}`:                                        "it holds 3 entries, 1 returned",
 		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"purpose":"drop"}]}`:                                   "1 of its entries unreadable",
 		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":"10.0.0.2"}]}`:                                    "1 of its entries unreadable",
-		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":null,"country":{"code":"CN"},"purpose":"drop"}]}`: "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":null,"country":{"code":"CN"},"purpose":"drop"}]}`: "1 of its entries unreadable",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"country":{"code":"CN"},"purpose":"drop"}]}`:           "",
+		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"ip":null,"type":"country","purpose":"drop"}]}`:        "",
 		`{"items":[{"ip":"10.0.0.1","purpose":"drop"},{"type":"country","purpose":"white"}]}`:                 "",
 		`{"items":[{"network_address":167772161,"netmask":4294967295,"purpose":"drop"}]}`:                     "",
 	} {

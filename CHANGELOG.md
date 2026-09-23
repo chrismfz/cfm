@@ -181,13 +181,14 @@ back-filled here — see the git/PR history for that period.
   fails is retried one entry per run). When the list can't be read, or may be
   missing entries (10 000 read, fewer returned than it says it holds, or
   entries it couldn't parse — country entries don't count, and a warning on
-  stderr doesn't make it unreadable), the IPs it didn't show are deleted
-  blindly from drop and captcha, as before. `cfm.deny` is rewritten once, the feed sets
-  are read once, and the block sets are written in one batch (per IP if that
-  batch fails). A feed set that can't be read whole is probed IP by IP, and an
-  IP it couldn't check gets an error step instead of passing for unblocked. A
-  batch of more than 500 requests runs in even parts, each confirmed to
-  cfm-web as soon as it is done. It used to run every step per IP — up to three
+  stderr doesn't make it unreadable), an IP is deleted blindly from drop and
+  captcha wherever the list didn't show it, as before. `cfm.deny` is
+  rewritten once, the feed sets are read once, and the block sets are
+  written in one batch (per IP if that batch fails). A feed set that can't be
+  read whole is probed IP by IP, and an IP it couldn't check gets an error
+  step instead of passing for unblocked. A batch of more than 500 requests
+  runs in even parts, each confirmed to cfm-web as soon as it is done. It
+  used to run every step per IP — up to three
   `imunify360-agent` runs (about a second each) and a `fail2ban-client` run
   per IP on the nodes that have them, plus up to four `systemctl` checks per
   IP just to find imunify missing. `cfm unblock` and `/unblock` go through the
