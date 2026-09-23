@@ -241,10 +241,11 @@ func (b *Backend) ListTableJSON(family, table string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nftlib ListTableJSON %s %s: %w", family, table, err)
 	}
-	// set_info describes the named sets of plain keys, with the key type —
-	// what `nft list table` lists as sets. It leaves out meters (the anonymous
-	// sets a rule's meter creates, e.g. syn_v4 or pps_v4: every recently seen
-	// source, not a list anyone keeps), maps and concatenations. "sets" names
+	// set_info describes the named sets with their key type — what `nft list
+	// table` lists as sets. It leaves out meters (the anonymous sets a rule's
+	// meter creates, e.g. syn_v4 or pps_v4: every recently seen source, not a
+	// list anyone keeps), maps, and concatenations flagged as such (one nft
+	// created shows its key type as "ipv4_addr . inet_service"). "sets" names
 	// every set.
 	type setInfo struct {
 		Name string `json:"name"`

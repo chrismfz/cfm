@@ -214,10 +214,11 @@ func (x *Index[T]) Match(q Query) []T {
 // every set of the family for each one. Results are keyed by the argument as
 // given; an argument that is not an IP or CIDR is an error. When ctx ends
 // between two set dumps, FindMany returns what the sets read so far hold,
-// with an error saying how far it got.
+// with an error saying how far it got; the block and allow sets are read
+// first, so those are the answers a slow lookup keeps.
 //
 // It reads both backends' JSON: the nft backend's `nft -j` output
-// ({"nftables":[…]}) and nftlib's own ({"sets":[…]} for the table,
+// ({"nftables":[…]}) and nftlib's own ({"set_info":[…]} for the table,
 // {"elements":[…]} for a set). Find read only the first, so on nftlib nodes it
 // found nothing.
 func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[string][]Hit, error) {
@@ -243,11 +244,14 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 	if err != nil {
 		return nil, fmt.Errorf("cannot read nftables table inet cfm (maybe needs sudo?): %v\n%s", err, string(tblOut))
 	}
-	sets := cfmSets(tblOut)
-	for i, sd := range sets {
-		if !fams[sd.family] {
-			continue
+	var sets []setDesc
+	for _, sd := range cfmSets(tblOut) {
+		if fams[sd.family] {
+			sets = append(sets, sd)
 		}
+	}
+	sort.SliceStable(sets, func(i, j int) bool { return sets[i].action != "MATCH" && sets[j].action == "MATCH" })
+	for i, sd := range sets {
 		if err := ctx.Err(); err != nil {
 			return out, fmt.Errorf("stopped at set %d of %d: %w", i+1, len(sets), err)
 		}
@@ -274,8 +278,8 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 
 var addrType = map[string]string{"v4": "ipv4_addr", "v6": "ipv6_addr"}
 
-// cfmSets lists the table's classifiable address sets, in table order, from
-// either backend's table JSON: nft's {"nftables":[{"set":{…}}]} or nftlib's
+// cfmSets lists the table's classifiable address sets from either backend's
+// table JSON: nft's {"nftables":[{"set":{…}}]} or nftlib's
 // "set_info" (which, like nft's listing, leaves out meters). A set counts
 // when its name classifies and its key type is an address of the name's
 // family; a concatenated type (an array in nft's JSON) is not.

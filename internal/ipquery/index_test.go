@@ -162,7 +162,7 @@ func TestFindMany_ContextEndsBetweenSets(t *testing.T) {
 	calls := 0
 	wrapped := &cancelAfter{fakeBE: be, n: 1, cancel: cancel, calls: &calls}
 	res, err := FindMany(ctx, wrapped, []string{"10.1.2.3", "198.51.100.9"})
-	if err == nil || !strings.Contains(err.Error(), "of 3") {
+	if err == nil || !strings.Contains(err.Error(), "set 2 of 2") {
 		t.Fatalf("err = %v, want a partial-read error", err)
 	}
 	if calls != 1 || len(res["10.1.2.3"]) != 1 || len(res["198.51.100.9"]) != 0 {
@@ -184,6 +184,34 @@ func (c *cancelAfter) ListSetJSON(fam, table, set string) ([]byte, error) {
 		c.cancel()
 	}
 	return c.fakeBE.ListSetJSON(fam, table, set)
+}
+
+// Block and allow sets are read before the others, so a lookup that runs out
+// of time keeps those answers.
+func TestFindMany_BlockAndAllowSetsFirst(t *testing.T) {
+	var order []string
+	be := &orderBE{fakeBE: &fakeBE{
+		table: []byte(`{"set_info":[{"name":"th_syn_v4","type":"ipv4_addr"},{"name":"self_v4","type":"ipv4_addr"},` +
+			`{"name":"allow_v4","type":"ipv4_addr"},{"name":"block_ext_v4_hosts_X","type":"ipv4_addr"}]}`),
+		sets:   map[string]string{"th_syn_v4": `{}`, "self_v4": `{}`, "allow_v4": `{}`, "block_ext_v4_hosts_X": `{}`},
+		listed: map[string]int{},
+	}, order: &order}
+	if _, err := FindMany(context.Background(), be, []string{"10.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"allow_v4", "block_ext_v4_hosts_X", "th_syn_v4", "self_v4"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("read order %v, want %v", order, want)
+	}
+}
+
+type orderBE struct {
+	*fakeBE
+	order *[]string
+}
+
+func (o *orderBE) ListSetJSON(fam, table, set string) ([]byte, error) {
+	*o.order = append(*o.order, set)
+	return o.fakeBE.ListSetJSON(fam, table, set)
 }
 
 func TestIndex_ZeroValue(t *testing.T) {

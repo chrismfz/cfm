@@ -51,17 +51,35 @@ func searchImunify(ctx context.Context, qs []*query) (locs [][]Location, skip []
 		return nil, nil, "service not active"
 	}
 
-	byIP := func(q *query) ([]Location, string) {
+	// byIP asks --by-ip; unreadable reports output that isn't JSON (runOut
+	// returns stderr with stdout, so a warning on stderr is enough).
+	byIP := func(q *query) (l []Location, why string, unreadable bool) {
 		out, err := runOut(ctx, "imunify360-agent", "ip-list", "local", "list", "--by-ip", q.raw, "--json")
-		if err != nil {
-			return nil, "query failed: " + trimOut(out)
+		switch {
+		case ctx.Err() != nil:
+			return nil, "no time left to ask --by-ip", false
+		case err != nil:
+			return nil, "query failed: " + trimOut(out), false
 		}
-		return matchImunifyItems(parseImunifyList(out), []*query{q})[0], ""
+		items := parseImunifyList(out)
+		if items == nil {
+			return nil, "unreadable output: " + trimOut(out), true
+		}
+		return matchImunifyItems(items, []*query{q})[0], "", false
 	}
 	if len(qs) == 1 {
-		l, why := byIP(qs[0])
-		if why != "" || len(l) > 0 || qs[0].IsCIDR {
+		// A miss (or an unreadable answer) for a plain IP goes on to the list.
+		l, why, unreadable := byIP(qs[0])
+		if (why != "" && !unreadable) || len(l) > 0 || qs[0].IsCIDR {
 			return [][]Location{l}, nil, why
+		}
+		if unreadable {
+			if out, err := runOut(ctx, "imunify360-agent", "ip-list", "local", "list", "--limit", strconv.Itoa(imunifyListCap), "--json"); err == nil {
+				if items := parseImunifyList(out); items != nil {
+					return matchImunifyItems(items, qs), nil, ""
+				}
+			}
+			return nil, nil, why
 		}
 	}
 
@@ -87,12 +105,12 @@ func searchImunify(ctx context.Context, qs []*query) (locs [][]Location, skip []
 	skip = make([]string, len(qs))
 	for i, q := range qs {
 		if ctx.Err() != nil {
-			skip[i] = fmt.Sprintf("local list over %d entries; no time left to ask --by-ip", imunifyListCap)
+			skip[i] = fmt.Sprintf("local list has %d+ entries; no time left to ask --by-ip", imunifyListCap)
 			continue
 		}
-		l, why := byIP(q)
+		l, why, _ := byIP(q)
 		if why != "" {
-			skip[i] = why
+			skip[i] = fmt.Sprintf("local list has %d+ entries; --by-ip: %s", imunifyListCap, why)
 			continue
 		}
 		seen := map[Location]bool{}

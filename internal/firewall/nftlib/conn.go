@@ -212,12 +212,16 @@ func keyToIP(key []byte) net.IP {
 	return nil
 }
 
-// rangeString renders the addresses first..last (inclusive) as one address,
-// a CIDR when they are exactly one prefix, else "first-last".
+// rangeString renders the addresses first..last (inclusive): one address as
+// itself (as nft lists it), a CIDR when they are exactly one prefix, else
+// "first-last".
 func rangeString(first, last []byte) string {
 	a, b := keyToIP(first), keyToIP(last)
 	if a == nil || len(first) != len(last) {
 		return ""
+	}
+	if bytes.Equal(first, last) {
+		return a.String()
 	}
 	if len(first) == 4 {
 		s, l := uint64(binary.BigEndian.Uint32(first)), uint64(binary.BigEndian.Uint32(last))

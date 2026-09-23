@@ -125,7 +125,7 @@ func FindMany(ctx context.Context, args []string, opts Options) (map[string]*Res
 	// Each source answers for every query: locations parallel to qs, or why
 	// it couldn't be probed.
 	type answer struct {
-		locs [][]Location
+		locs    [][]Location
 		why     string   // the source couldn't be probed
 		partial string   // probed, but not all of it (locs stand)
 		skip    []string // per query, where only some couldn't be answered

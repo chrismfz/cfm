@@ -2,9 +2,9 @@
 package ipquery
 
 import (
-	"context"
 	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/firewall"
+	"context"
 	"fmt"
 	"net"
 	"os"
