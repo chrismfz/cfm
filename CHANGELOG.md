@@ -88,13 +88,23 @@ back-filled here — see the git/PR history for that period.
   - pins the whole cache key;
   - fails if `proxy_ignore_headers` lists `Vary` or `Cache-Control`, or if
     `proxy_cache_methods` lists POST;
-  - lexes the conf like nginx and matches every rail as a directive at the
-    start of a statement, so comment text, a Lua `--` comment or a quoted value
-    no longer satisfies a check, and a one-line location is checked like any
-    other;
+  - lexes the conf like nginx (inline `*_by_lua_block` bodies as Lua) and
+    assembles real statements, then matches every rail as a directive at the
+    start of a statement. So comment text, a Lua comment or a quoted value no
+    longer satisfies a check, and a one-line location, a directive wrapped
+    over several lines, or `{` on the next line is checked like any other;
   - fails if the number of locations it parsed, or of cache locations it
     checked, differs from what the file contains. This also catches a
-    `proxy_cache` outside any location, such as at server level.
+    `proxy_cache` outside any location, such as at server level;
+  - pins both rail maps to exactly their two entries. The only-200 map was
+    never pinned before, so an added `"404" ""` would have started storing
+    404s unnoticed;
+  - lets nothing else write `$cfm_req_auth`, `$cfm_cache_non200` or
+    `$cfm_cache_skip`: no `set`, `geo`, `split_clients` or other map, no
+    inline Lua, in any letter case;
+  - requires `set $cfm_cache_skip "1"` in every server block that holds a cache
+    location;
+  - compares the cache locations of the two confs across every zone.
 
   The edge still cannot see an origin that answers `200` differently by client
   IP (`Require ip`, IP Blocker), by `Referer`, or by `User-Agent` / `Accept` /

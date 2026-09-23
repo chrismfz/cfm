@@ -13,9 +13,9 @@
 #
 #   both confs (openresty.conf, angie.conf)
 #     * the cfm_static cache zone is declared (proxy_cache_path .../cfm_static).
-#     * $cfm_cache_skip is declared and DEFAULTS TO "1" (bypass); the conf never
-#       sets it to anything else, nor assigns it from inline Lua (the flip only
-#       ever comes from cfm_cache.lua).
+#     * $cfm_cache_skip DEFAULTS TO "1" (bypass) in EVERY server that holds a
+#       cache location, and nothing else in the conf may write it (the flip
+#       only ever comes from cfm_cache.lua).
 #     * EVERY location that activates `proxy_cache cfm_static;` (or a
 #       cfm_micro_<n>s bucket) ALSO carries `proxy_cache_bypass $cfm_cache_skip
 #       $cfm_req_auth;` AND `proxy_no_cache $cfm_cache_skip $cfm_cache_non200
@@ -23,31 +23,28 @@
 #       and the credentialed-request rail — plus buffering ON (nginx stores
 #       nothing off it), the whole key
 #       `g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri`, the
-#       per-tier proxy_cache_lock_timeout (1s static, 5s micro), and the
+#       lock on with its per-tier timeout (1s static, 5s micro), and the
 #       forwarded-header pins (X-Forwarded-Host = $host, the rest dropped; each
-#       set exactly once), with the lock itself on. Any other cache zone is
-#       rejected. The conf is lexed like nginx (quotes, escapes, # comments) and
-#       split into statements, and every rail must match a DIRECTIVE at a
-#       statement start — comment text, a Lua -- comment or a quoted value never
-#       satisfies one, and a one-line location or { on the next line is parsed
-#       like any other. Every location statement must be parsed and every
-#       proxy_cache directive must sit in a checked cache location (a
-#       mis-parse fails, never skips).
-#     * `map $http_authorization $cfm_req_auth` is the only writer of
-#       $cfm_req_auth (no other map, set, set_by_lua or inline-Lua assignment,
-#       in any letter case) and holds exactly `default "1"` and `"" ""` (so
-#       `Authorization: 0`, which a raw predicate reads as false, still counts,
-#       and no extra key can exempt a credential).
-#     * the only-200 rail: a `map $upstream_status $cfm_cache_non200` block is
-#       defined AND fed into proxy_no_cache, so a 3xx/4xx/5xx is NEVER stored
-#       whatever the origin sends (a cached 30x once broke webmail/cPanel/SSO).
+#       set exactly once). Any other cache zone is rejected.
+#     * `map $http_authorization $cfm_req_auth` and `map $upstream_status
+#       $cfm_cache_non200` each hold EXACTLY their two entries, and nothing else
+#       writes either variable (so `Authorization: 0`, which a raw predicate
+#       reads as false, still counts; no extra key can exempt a credential or
+#       store a 404/301).
 #     * Set-Cookie, Vary and Cache-Control are never added to
 #       proxy_ignore_headers (nginx must keep NOT caching a response that sets a
 #       cookie or says private/no-store, and must keep one copy per Vary
 #       variant), and proxy_cache_methods never lists a non-GET/HEAD method.
+#   How: the conf is lexed like nginx (quotes, escapes, ${var}, # comments),
+#   inline *_by_lua_block bodies are lexed as Lua and kept out of the checks,
+#   and the text is assembled into real statements — so every rail must match
+#   a DIRECTIVE at a statement start, and a one-line location, { on the next
+#   line or a directive wrapped over lines is parsed like any other. Every
+#   location and every proxy_cache statement must be accounted for, so a
+#   mis-parse fails, never skips. Section (a) documents the details.
 #   parity
-#     * both confs activate proxy_cache on the same number of locations (a cache
-#       location added to one edge but not the other is a drift bug).
+#     * both confs cache the same locations (every zone), declare the same
+#       micro zones, and carry byte-identical @cfm_micro_<n>s blocks.
 #
 # Like check_origin_ka_config.sh, this does NOT replace live validation (the
 # release checklist + a two-vhost box test) — it just stops the trivial
@@ -63,59 +60,101 @@ cd "$(dirname "$0")/../.."
 ORT=configs/openresty.conf
 ANG=configs/angie.conf
 fail=0
+declare -A ncache_of=() clocs_of=()
 err() { echo "❌ [site-cache-config] $*" >&2; fail=1; }
 
 for f in "$ORT" "$ANG"; do
   [ -f "$f" ] || { err "$f: missing — cannot verify Site Cache config."; continue; }
 
   # ── (a) statement-aware checks (the real regression guard) ──────────────────
-  # The conf is parsed the way nginx lexes it, then split into STATEMENTS:
-  #   * per line, a quote opens only at a token start (line start or after
-  #     whitespace ; { } ( , = [); inside quotes a backslash escapes the next
-  #     character and ; { } are MASKED, so they never act as a statement or
-  #     block boundary (a regex location such as "^/a{2}$" is one token);
-  #   * outside quotes a # at a token start begins a comment to end of line;
-  #   * every ; ends a statement and every { / } is its own boundary, so each
-  #     directive starts a statement no matter how lines are laid out (a
-  #     one-line location, two directives on a line, { on the next line).
-  # Every rail below must match a DIRECTIVE at a statement start, so comment
-  # text, a Lua -- comment or a quoted value can never satisfy one (all three
-  # used to pass by mutation). Brace depth then delimits each top-level
-  # location; any location holding a proxy_cache (other than off) is checked.
-  # Backstops, counted as statement-start tokens over the WHOLE file:
-  #   * location tokens == locations parsed (a nested or swallowed location);
-  #   * proxy_cache tokens == those inside checked cache locations (one at
-  #     server/http level is inherited ungated by location /).
-  # Also enforced here, token-based and case-insensitive where nginx is
-  # (variable names and header names): $cfm_req_auth has exactly one writer,
-  # its map, holding exactly default "1" and "" ""; $cfm_cache_skip is only
-  # ever set to "1" in the conf; proxy_ignore_headers never lists Set-Cookie,
-  # Vary or Cache-Control; proxy_cache_methods never lists a non-GET/HEAD one.
-  # Inline Lua is lexed by the same rules; a Lua quirk (a # length operator at
-  # a token start, a brace in a -- comment) can only remove text or unbalance
-  # braces, which surfaces as a missing rail or a count mismatch, never a pass.
+  # The conf is lexed the way nginx reads it and assembled into real
+  # STATEMENTS (one directive or block boundary each, however it is laid out
+  # over lines):
+  #   * nginx text: a quote opens only at a token start (line start, or after
+  #     whitespace ; { }) and may span lines; inside quotes and after a
+  #     backslash the characters ; { } are MASKED so they never act as a
+  #     boundary (a regex location such as "^/a{2}$" is one token); ${var} is a
+  #     variable, not a block; a # at a token start outside quotes is a comment.
+  #   * a *_by_lua_block body is lexed with LUA rules (-- and --[[ ]] comments,
+  #     short and [[long]] strings, # is the length operator) and is kept OUT of
+  #     the statement stream: only its closing } takes part in brace depth. So
+  #     Lua code, Lua comments and Lua strings can neither satisfy a rail nor
+  #     unbalance a location. Inline Lua must not reference the guarded
+  #     variables at all ($cfm_cache_skip / $cfm_req_auth / $cfm_cache_non200:
+  #     the cache-on flip lives in cfm_cache.lua, never inline).
+  # Every rail must then match a DIRECTIVE at a statement start, so comment
+  # text or a quoted value never satisfies one; a one-line location, { on the
+  # next line and a directive wrapped over several lines parse like anything
+  # else. Brace depth delimits each top-level location; any location holding a
+  # proxy_cache (other than off) is checked. Backstops, counted as statement-
+  # start tokens over the whole file:
+  #   * location statements == locations parsed (a nested or swallowed one);
+  #   * proxy_cache statements == those inside checked cache locations (one at
+  #     server/http level is inherited ungated by location /);
+  #   * every server block holding a cache location sets $cfm_cache_skip "1"
+  #     at server level (bypass-by-default is per server).
+  # Writers are whitelisted, token-based and case-insensitive (nginx variable
+  # and header names are): a statement that mentions $cfm_req_auth may only be
+  # its map (map $http_authorization $cfm_req_auth) or a cache predicate; the
+  # same for $cfm_cache_non200 (its map $upstream_status); $cfm_cache_skip may
+  # only be `set … "1"` or a cache predicate. Both maps hold EXACTLY their two
+  # entries. proxy_ignore_headers never lists Set-Cookie / Vary / Cache-Control
+  # and proxy_cache_methods never lists a non-GET/HEAD method (quoted or not).
+  # Scope: the two reference confs. Files they include are not scanned (today
+  # only data files and configs/cfm-panel-listeners.conf.in, which carries no
+  # cache directive and none of the guarded variables).
   parsed=$(awk '
+    function rep(c, n,   r) { r = ""; while (n-- > 0) r = r c; return r }
     function mask(c) { if (c == ";") return "\001"; if (c == "{") return "\002"; if (c == "}") return "\003"; return c }
-    function strip(s,   i, n, ch, q, prev, out) {
-      q = ""; prev = " "; out = ""; n = length(s)
-      for (i = 1; i <= n; i++) {
+    function lexline(s,   i, n, ch, out, prev) {
+      out = ""; prev = " "; n = length(s); i = 1; LQ = ""
+      while (i <= n) {
         ch = substr(s, i, 1)
-        if (ch == "\\" && i < n) { out = out ch mask(substr(s, i + 1, 1)); i++; prev = "x"; continue }
-        if (q != "") {
-          if (ch == q) { q = ""; out = out ch; prev = ch; continue }
-          out = out mask(ch); continue
+        if (LUA) {
+          if (LC != "") { j = index(substr(s, i), LC); if (j == 0) { i = n + 1; continue } i += j - 1 + length(LC); LC = ""; continue }
+          if (LQ != "") { LT = LT ch; if (ch == "\\") { LT = LT substr(s, i + 1, 1); i += 2; continue } if (ch == LQ) LQ = ""; i++; continue }
+          if (substr(s, i, 2) == "--") {
+            if (match(substr(s, i + 2), /^\[=*\[/)) { LC = "]" rep("=", RLENGTH - 2) "]"; i += 2 + RLENGTH; continue }
+            i = n + 1; continue
+          }
+          if (ch == "[" && match(substr(s, i), /^\[=*\[/)) { LC = "]" rep("=", RLENGTH - 2) "]"; i += RLENGTH; continue }
+          if (ch == "\"" || ch == "\047") { LQ = ch; LT = LT ch; i++; continue }
+          if (ch == "{") { LD++; LT = LT ch; i++; continue }
+          if (ch == "}") { LD--; if (LD == 0) { LUA = 0; out = out " }"; prev = "}"; i++; continue } LT = LT ch; i++; continue }
+          LT = LT ch; i++; continue
         }
-        if ((ch == "\"" || ch == "\047") && prev ~ /[[:space:];{}(,=[]/) { q = ch; out = out ch; prev = ch; continue }
+        if (Q != "") { if (ch == "\\" && i < n) { out = out ch mask(substr(s, i + 1, 1)); i += 2; continue } if (ch == Q) { Q = ""; out = out ch; prev = ch } else out = out mask(ch); i++; continue }
+        if (VB) { out = out mask(ch); if (ch == "}") VB = 0; i++; continue }
+        if (ch == "\\" && i < n) { out = out ch mask(substr(s, i + 1, 1)); CUR = CUR "x"; i += 2; prev = "x"; continue }
+        if ((ch == "\"" || ch == "\047") && prev ~ /[[:space:];{}]/) { Q = ch; out = out ch; prev = ch; i++; continue }
         if (ch == "#" && prev ~ /[[:space:];{}]/) break
-        out = out ch; prev = ch
+        if (ch == "{" && prev == "$") { VB = 1; out = out mask(ch); prev = "x"; i++; continue }
+        if (ch == "{") { if (CUR ~ /_by_lua_block[[:space:]]*$/) { LUA = 1; LD = 1 } CUR = ""; out = out ch; prev = ch; i++; continue }
+        if (ch == ";" || ch == "}") { CUR = ""; out = out ch; prev = ch; i++; continue }
+        CUR = CUR ch; out = out ch; prev = ch; i++
       }
+      CUR = CUR " "; LT = LT "\n"
       return out
     }
+    function emit(s, l) { K++; ST[K] = s; SL[K] = l }
     function cnt(str, re,   n) { n = 0; while (match(str, re)) { n++; str = substr(str, RSTART + RLENGTH) } return n }
+    function mapcheck(hdr_re, want1, want2, name,   k, mk, e, ne, ok1, ok2, got) {
+      mk = 0
+      for (k = 1; k <= K; k++) if (tolower(ST[k]) ~ hdr_re) { mk = k; break }
+      if (!mk) { print "ERR no " name " map — the rail the cache predicates key on is undefined."; return }
+      ne = 0; ok1 = 0; ok2 = 0; got = ""
+      for (k = mk + 1; k <= K; k++) {
+        e = ST[k]; if (e ~ /^[[:space:]]*[}][[:space:]]*$/) break
+        gsub(/[[:space:]]+/, " ", e); sub(/^ /, "", e); sub(/ $/, "", e)
+        ne++; got = got "|" e
+        if (e == want1) ok1 = 1; else if (e == want2) ok2 = 1
+      }
+      if (ne != 2 || !ok1 || !ok2) print "ERR the " name " map must hold EXACTLY: " want1 " and " want2 " — got:" got
+    }
     function check_loc(   m, nz, lb, i, nh, H, st, mi) {
       nz = cnt(body, A "proxy_cache[[:space:]]+[^[:space:];]+[[:space:]]*;") - cnt(body, A "proxy_cache[[:space:]]+off[[:space:]]*;")
       if (nz <= 0) return
-      ncache++; cache_toks += nz; m = ""
+      ncache++; cache_toks += nz; m = ""; if (insrv) srv_cache = 1
       if (nz != 1) m = m " more-than-one-proxy_cache"
       st = (body ~ (A "proxy_cache[[:space:]]+cfm_static[[:space:]]*;"))
       mi = (body ~ (A "proxy_cache[[:space:]]+cfm_micro_[0-9]+s[[:space:]]*;"))
@@ -146,14 +185,14 @@ for f in "$ORT" "$ANG"; do
       # Forwarded headers an app may build URLs or routes from are not in the
       # key: X-Forwarded-Host is pinned to $host and the rest are dropped, each
       # set exactly once (a second proxy_set_header for the same name, in any
-      # case, is sent as a second header and undoes the pin).
+      # case or quoted, is sent as a second header and undoes the pin).
       lb = tolower(body)
       if (body !~ (A "proxy_set_header[[:space:]]+X-Forwarded-Host[[:space:]]+[$]host[[:space:]]*;")) m = m " X-Forwarded-Host-not-pinned-to-$host"
-      else if (cnt(lb, A "proxy_set_header[[:space:]]+x-forwarded-host[[:space:]]") != 1) m = m " X-Forwarded-Host-set-more-than-once"
+      else if (cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?x-forwarded-host[\"\047]?[[:space:]]") != 1) m = m " X-Forwarded-Host-set-more-than-once"
       nh = split("X-Forwarded-Server X-Forwarded-Port X-Forwarded-Scheme X-Forwarded-Protocol X-Forwarded-Prefix X-Forwarded-Ssl X-Forwarded-Uri X-Forwarded-Path X-Host X-Original-Host X-Original-URL X-Original-Uri X-Rewrite-URL Forwarded Front-End-Https X-Url-Scheme X-Scheme X-HTTP-Method-Override X-HTTP-Method X-Method-Override", H, " ")
       for (i = 1; i <= nh; i++) {
         if (body !~ (A "proxy_set_header[[:space:]]+" H[i] "[[:space:]]+\"\"[[:space:]]*;")) m = m " " H[i] "-not-dropped"
-        else if (cnt(lb, A "proxy_set_header[[:space:]]+" tolower(H[i]) "[[:space:]]") != 1) m = m " " H[i] "-set-more-than-once"
+        else if (cnt(lb, A "proxy_set_header[[:space:]]+[\"\047]?" tolower(H[i]) "[\"\047]?[[:space:]]") != 1) m = m " " H[i] "-set-more-than-once"
       }
       # A cache location MUST buffer: nginx writes to proxy_cache only on the
       # buffered upstream path (buffering off = silently caches NOTHING).
@@ -166,27 +205,41 @@ for f in "$ORT" "$ANG"; do
       # nginx 500s (the pcall around the gate cannot catch that).
       if (mi && body !~ (A "internal[[:space:]]*;")) m = m " missing-internal(micro-location-directly-reachable)"
       if (mi && body !~ (A "access_by_lua_block[[:space:]]*[{]")) m = m " missing-access-override(cfm.lua-re-entry-redirect-loop-500)"
+      hdr = body; sub(/^\n/, "", hdr); sub(/\n.*$/, "", hdr); gsub(/[[:space:]]+/, " ", hdr); sub(/^ /, "", hdr); print "CLOC " hdr
       if (m != "") print "ERR cache location@line" locline ":" m " — a proxy_cache location is missing a required rail (no bypass gate → unconditional caching; buffering off → nginx silently caches NOTHING)."
     }
     BEGIN { A = "\n[[:space:]]*" }
     {
-      ln = strip($0)
+      ln = lexline($0)
       gsub(/;/, ";\n", ln); gsub(/[{]/, "{\n", ln); gsub(/[}]/, "\n}\n", ln)
       np = split(ln, P, "\n")
-      for (j = 1; j <= np; j++) if (P[j] !~ /^[[:space:]]*$/) { K++; ST[K] = P[j]; SL[K] = NR }
+      for (jj = 1; jj <= np; jj++) {
+        p = P[jj]; if (p ~ /^[[:space:]]*$/) continue
+        if (p ~ /^[[:space:]]*[}][[:space:]]*$/) { if (pend != "") emit(pend, pl); emit(p, NR); pend = ""; continue }
+        if (pend == "") { pend = p; pl = NR } else pend = pend " " p
+        if (pend ~ /[;{][[:space:]]*$/) { emit(pend, pl); pend = "" }
+      }
     }
     END {
+      if (pend != "") emit(pend, pl)
+      if (LUA) print "ERR a *_by_lua_block never closes — the Lua lexer lost track, so nothing after it was checked."
       all = "\n"
       for (k = 1; k <= K; k++) all = all ST[k] "\n"
+      D = 0
       for (k = 1; k <= K; k++) {
-        s = ST[k]
+        s = ST[k]; ls = tolower(s)
+        isopen = (s ~ /[{][[:space:]]*$/); isclose = (s ~ /^[[:space:]]*[}][[:space:]]*$/)
+        if (!insrv && !loc && isopen && ls ~ /^[[:space:]]*server[[:space:]]*[{][[:space:]]*$/) { insrv = 1; srvD = D; srv_set = 0; srv_cache = 0; srvline = SL[k] }
+        if (insrv && D == srvD + 1 && ls ~ /^[[:space:]]*set[[:space:]]+[$]cfm_cache_skip[[:space:]]+"1"[[:space:]]*;/) srv_set = 1
         if (!loc && s ~ /^[[:space:]]*location[[:space:]]/) { loc = 1; body = "\n"; locline = SL[k]; nloc++; d = 0; seen = 0 }
         if (loc) {
           body = body s "\n"
-          if (s ~ /[{][[:space:]]*$/) { d++; seen = 1 }
-          if (s ~ /^[[:space:]]*[}][[:space:]]*$/) d--
+          if (isopen) { d++; seen = 1 }
+          if (isclose) d--
           if (seen && d <= 0) { check_loc(); loc = 0; body = "" }
         }
+        if (isopen) D++
+        if (isclose) { D--; if (insrv && D == srvD) { if (srv_cache && !srv_set) print "ERR the server block opened at line " srvline " has a cache location but no server-level set $cfm_cache_skip \"1\" — bypass-by-default is lost for every vhost on it."; insrv = 0 } }
       }
       if (loc) print "ERR a location opened at line " locline " never closes — the parser lost track of braces, so nothing after it was checked."
       lt = cnt(all, A "location[[:space:]]")
@@ -194,44 +247,39 @@ for f in "$ORT" "$ANG"; do
       ct = cnt(all, A "proxy_cache[[:space:]]+[^[:space:];]+[[:space:]]*;") - cnt(all, A "proxy_cache[[:space:]]+off[[:space:]]*;")
       if (ct != cache_toks) print "ERR " cache_toks " proxy_cache directives sit in checked cache locations but the file has " ct " — one outside any location (server/http level) is inherited UNGATED by location /."
       if (ncache == 0) print "ERR no cache location found at all — this gate must verify something."
+      print "NCACHE " ncache + 0
 
-      # Credentialed-request rail. nginx variable names are case-insensitive,
-      # so every writer check runs on the lower-cased text.
-      la = tolower(all)
-      nmaps = cnt(la, A "map[[:space:]]+[^[:space:]]+[[:space:]]+[$]cfm_req_auth[[:space:]]*[{]")
-      # a directive whose FIRST argument is $cfm_req_auth writes it (set,
-      # set_by_lua*, perl_set, js_set, auth_request_set …); a map reading it is not.
-      nwr = cnt(la, A "[a-z_]+[[:space:]]+[$]cfm_req_auth([[:space:];{]|$)") - cnt(la, A "map[[:space:]]+[$]cfm_req_auth[[:space:]]")
-      nlua = cnt(la, "ngx[.]var[.]cfm_req_auth[[:space:]]*=[^=]") + cnt(la, "ngx[.]var[[][\"\047]cfm_req_auth[\"\047][]][[:space:]]*=[^=]")
-      mk = 0
-      for (k = 1; k <= K; k++) if (tolower(ST[k]) ~ /^[[:space:]]*map[[:space:]]+[$]http_authorization[[:space:]]+[$]cfm_req_auth([[:space:]{]|$)/) { mk = k; break }
-      if (!mk) print "ERR no map $http_authorization $cfm_req_auth { … } — the credentialed-request rail the cache predicates key on is undefined."
-      else {
-        k = mk; if (ST[k] !~ /[{][[:space:]]*$/) k++
-        ne = 0; okd = 0; oke = 0; got = ""
-        for (k = k + 1; k <= K; k++) {
-          e = ST[k]; if (e ~ /^[[:space:]]*[}][[:space:]]*$/) break
-          gsub(/[[:space:]]+/, " ", e); sub(/^ /, "", e); sub(/ $/, "", e)
-          ne++; got = got "|" e
-          if (e == "default \"1\";") okd = 1; else if (e == "\"\" \"\";") oke = 1
-        }
-        if (ne != 2 || !okd || !oke) print "ERR $cfm_req_auth map must hold EXACTLY: default \"1\" (any Authorization → bypass) and \"\" \"\" (none) — got:" got
-      }
-      if (nmaps != 1) print "ERR $cfm_req_auth is written by " nmaps " maps — it must have exactly one (map $http_authorization $cfm_req_auth)."
-      if (nwr > 0) print "ERR $cfm_req_auth is written by " nwr " other directive(s) (set / set_by_lua / …) — the credentialed-request rail must come only from its map."
-      if (nlua > 0) print "ERR inline Lua assigns ngx.var.cfm_req_auth — the credentialed-request rail must come only from its map."
-
-      # $cfm_cache_skip: the conf only ever declares the bypass default "1"; the
-      # flip to "0" comes ONLY from cfm_cache.lua (static_gate / micro_gate).
+      # Rail maps: exactly their two entries (one extra key re-opens the leak).
+      mapcheck("^[[:space:]]*map[[:space:]]+[$]http_authorization[[:space:]]+[$]cfm_req_auth[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"\" \"\";", "$http_authorization → $cfm_req_auth")
+      mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_status[[:space:]]+[$]cfm_cache_non200[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"200\" \"\";", "$upstream_status → $cfm_cache_non200 (only-200)")
+      nm1 = 0; nm2 = 0
       for (k = 1; k <= K; k++) {
-        e = tolower(ST[k])
-        if (e ~ /^[[:space:]]*set[[:space:]]+[$]cfm_cache_skip[[:space:]]/ && e !~ /^[[:space:]]*set[[:space:]]+[$]cfm_cache_skip[[:space:]]+"1"[[:space:]]*;/) print "ERR line " SL[k] ": $cfm_cache_skip is set to something other than \"1\" — the cache-on flip must come ONLY from cfm_cache.lua, never the conf."
-        if (e ~ /^[[:space:]]*proxy_ignore_headers[[:space:]]/ && e ~ /[[:space:]](set-cookie|vary|cache-control)([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_ignore_headers lists Set-Cookie, Vary or Cache-Control — nginx would then store a response that sets a cookie or says private/no-store, or one Vary variant for everyone. Ignoring Cache-Control needs a replacement rail and a guard update in the same change."
-        if (e ~ /^[[:space:]]*proxy_cache_methods[[:space:]]/ && e ~ /[[:space:]](post|put|patch|delete)([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_cache_methods lists a non-GET/HEAD method — a cached POST/PUT result would be served to every client."
+        u = tolower(ST[k]); gsub(/\002/, "{", u); gsub(/\003/, "}", u); gsub(/\001/, ";", u)
+        fw = u; sub(/^[[:space:]]*/, "", fw); sub(/[^a-z0-9_].*$/, "", fw)
+        pred = (fw == "proxy_cache_bypass" || fw == "proxy_no_cache")
+        # Writers whitelist: nginx variable names are case-insensitive, ${x} and
+        # a quoted "$x" are the same variable.
+        if (u ~ /[$][{]?cfm_req_auth([^a-z0-9_]|$)/) {
+          if (u ~ /^[[:space:]]*map[[:space:]]+[$]http_authorization[[:space:]]+[$]cfm_req_auth[[:space:]]*[{][[:space:]]*$/) nm1++
+          else if (!pred) print "ERR line " SL[k] ": $cfm_req_auth appears in a " fw " statement — only its map and the cache predicates may reference it (another writer can override the credentialed-request rail)."
+        }
+        if (u ~ /[$][{]?cfm_cache_non200([^a-z0-9_]|$)/) {
+          if (u ~ /^[[:space:]]*map[[:space:]]+[$]upstream_status[[:space:]]+[$]cfm_cache_non200[[:space:]]*[{][[:space:]]*$/) nm2++
+          else if (fw != "proxy_no_cache") print "ERR line " SL[k] ": $cfm_cache_non200 appears in a " fw " statement — only its map and proxy_no_cache may reference it (another writer can re-open non-200 storage)."
+        }
+        if (u ~ /[$][{]?cfm_cache_skip([^a-z0-9_]|$)/ && !pred && u !~ /^[[:space:]]*set[[:space:]]+[$]cfm_cache_skip[[:space:]]+"1"[[:space:]]*;[[:space:]]*$/) print "ERR line " SL[k] ": $cfm_cache_skip appears in a " fw " statement — the conf may only set it to \"1\" (the cache-on flip comes ONLY from cfm_cache.lua)."
+        if (fw == "proxy_ignore_headers" && u ~ /[[:space:]]["\047]?(set-cookie|vary|cache-control)["\047]?([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_ignore_headers lists Set-Cookie, Vary or Cache-Control — nginx would then store a response that sets a cookie or says private/no-store, or one Vary variant for everyone. Ignoring Cache-Control needs a replacement rail and a guard update in the same change."
+        if (fw == "proxy_cache_methods" && u ~ /[[:space:]]["\047]?(post|put|patch|delete)["\047]?([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_cache_methods lists a non-GET/HEAD method — a cached POST/PUT result would be served to every client."
       }
-      if (cnt(la, "ngx[.]var[.]cfm_cache_skip[[:space:]]*=[^=]") > 0) print "ERR inline Lua assigns ngx.var.cfm_cache_skip — the flip must come ONLY from cfm_cache.lua."
+      if (nm1 != 1) print "ERR $cfm_req_auth is written by " nm1 " copies of its map — it must have exactly one."
+      if (nm2 != 1) print "ERR $cfm_cache_non200 is written by " nm2 " copies of its map — it must have exactly one."
+      lt2 = tolower(LT)
+      if (lt2 ~ /cfm_req_auth|cfm_cache_skip|cfm_cache_non200/) print "ERR inline Lua references $cfm_req_auth / $cfm_cache_skip / $cfm_cache_non200 — the cache rails must come only from the conf maps and cfm_cache.lua."
     }
   ' "$f")
+  ncache_of["$f"]=$(sed -n 's/^NCACHE //p' <<< "$parsed")
+  clocs_of["$f"]=$(sed -n 's/^CLOC //p' <<< "$parsed" | sort)
+  parsed=$(grep -Ev '^(NCACHE|CLOC) ' <<< "$parsed" || true)
   if [ -n "$parsed" ]; then
     while IFS= read -r line; do
       err "$f: ${line#ERR }"
@@ -242,24 +290,12 @@ for f in "$ORT" "$ANG"; do
   if ! grep -Eq '^[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/cfm_static[[:space:]]' "$f"; then
     err "$f: no 'proxy_cache_path .../cfm_static' zone declared — Tier A config missing?"
   fi
-  if ! grep -Eq '^[[:space:]]*set[[:space:]]+\$cfm_cache_skip[[:space:]]+"1";' "$f"; then
-    err "$f: \$cfm_cache_skip is not declared with its bypass-by-default value \"1\"."
-  fi
-  if ! grep -Eq '^[[:space:]]*proxy_cache[[:space:]]+cfm_static[[:space:]]*;' "$f"; then
+  # The other anchors (a cfm_static cache location, the bypass / no_cache /
+  # only-200 predicates, both rail maps, the per-server $cfm_cache_skip "1")
+  # are enforced statement-aware in section (a), which also fails when it finds
+  # no cache location at all.
+  if ! grep -Eq '(^|[;{}[:space:]])proxy_cache[[:space:]]+cfm_static[[:space:]]*;' "$f"; then
     err "$f: no 'proxy_cache cfm_static;' anywhere — did Tier A activation get removed? (this gate must verify something)"
-  fi
-  if ! grep -Eq '^[[:space:]]*proxy_cache_bypass[[:space:]]+\$cfm_cache_skip[[:space:];]' "$f"; then
-    err "$f: no 'proxy_cache_bypass \$cfm_cache_skip;' directive anywhere — bypass-by-default gate missing."
-  fi
-  if ! grep -Eq '^[[:space:]]*proxy_no_cache[[:space:]]+\$cfm_cache_skip[[:space:];]' "$f"; then
-    err "$f: no 'proxy_no_cache \$cfm_cache_skip …;' directive anywhere — bypass-by-default gate missing."
-  fi
-  # 200-only rail: the map must be defined AND referenced by proxy_no_cache.
-  if ! grep -Eq '^[[:space:]]*map[[:space:]]+\$upstream_status[[:space:]]+\$cfm_cache_non200[[:space:]]*\{' "$f"; then
-    err "$f: no 'map \$upstream_status \$cfm_cache_non200 { … }' block — the 200-only rail is undefined (a 3xx/4xx/5xx could be cached)."
-  fi
-  if ! grep -Eq '^[[:space:]]*proxy_no_cache[[:space:]]+\$cfm_cache_skip[[:space:]]+\$cfm_cache_non200' "$f"; then
-    err "$f: \$cfm_cache_non200 is never fed into a proxy_no_cache directive — non-200 responses could be stored."
   fi
 
   # ── (b2) Tier B micro-cache zones (Phase B1): all six TTL buckets declared ───
@@ -284,34 +320,14 @@ for f in "$ORT" "$ANG"; do
 done
 
 # ── (d) parity: both edges cache the SAME locations (not just the same count) ──
-# Emit each cache location's own `location …{` header line (whitespace-normalised,
-# sorted) per conf and diff them. Comparing counts alone would pass a refactor
+# Section (a)'s statement parser emits the header of every checked cache
+# location (any zone; whitespace-normalised, sorted) per conf; diff them. Comparing counts alone would pass a refactor
 # that added a cache to one path in openresty and a DIFFERENT path in angie —
 # the exact drift this guard exists to stop.
-cache_locs() {
-  awk '
-    !loc && /^[[:space:]]*location[[:space:]].*\{/ {
-      loc=1; body=$0 "\n"; first=$0
-      t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d=o-c
-      next
-    }
-    loc {
-      body=body $0 "\n"
-      t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d+=o-c
-      if (d<=0) {
-        if (body ~ /proxy_cache[[:space:]]+cfm_static[[:space:]]*;/) {
-          gsub(/^[[:space:]]+/,"",first); print first
-        }
-        loc=0; body=""
-      }
-    }
-  ' "$1" | sort
-}
 ort_n=$(grep -Ec '^[[:space:]]*proxy_cache[[:space:]]+cfm_static[[:space:]]*;' "$ORT" || true)
-ang_n=$(grep -Ec '^[[:space:]]*proxy_cache[[:space:]]+cfm_static[[:space:]]*;' "$ANG" || true)
-if ! diff <(cache_locs "$ORT") <(cache_locs "$ANG") >/dev/null 2>&1; then
-  err "openresty.conf and angie.conf cache DIFFERENT locations (not merely a count mismatch); the two edges must cache the same paths. Divergence:"
-  diff <(cache_locs "$ORT") <(cache_locs "$ANG") 2>/dev/null | sed 's/^/       /' >&2 || true
+if [ "${clocs_of[$ORT]:-x}" != "${clocs_of[$ANG]:-y}" ]; then
+  err "openresty.conf and angie.conf cache DIFFERENT locations (${ncache_of[$ORT]:-?} vs ${ncache_of[$ANG]:-?}; every zone compared, not merely a count); the two edges must cache the same paths. Divergence:"
+  diff <(printf '%s\n' "${clocs_of[$ORT]}") <(printf '%s\n' "${clocs_of[$ANG]}") 2>/dev/null | sed 's/^/       /' >&2 || true
 fi
 
 # ── (e) micro-zone parity: the six cfm_micro_<n>s declarations must be BYTE-for-
@@ -333,18 +349,20 @@ fi
 # in both; this diffs the BODIES so a per-bucket drift in proxy_cache_valid, the
 # cache key ($cfm_cache_gen prefix), or any rail between angie and openresty is
 # caught — both edges are ngx.exec targets B3b routes to and must cache the same
-# way. Brace-depth capture tolerates any (future) nested block in a location.
+# way. A block is captured by INDENTATION (it ends at the first line that is its
+# header's own indent + "}"), not by raw brace counting, which a brace inside a
+# Lua comment or string in the block would throw off. Section (a) separately
+# checks the rails of each block; this is the byte-for-byte parity layer.
 micro_blocks() {
   awk '
     !loc && /^[[:space:]]*location[[:space:]]+@cfm_micro_[0-9]+s[[:space:]]*\{/ {
-      loc=1; buf=$0 "\n"
-      t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d=o-c; next
+      loc=1; buf=$0 "\n"; ind=$0; sub(/[^[:space:]].*$/, "", ind); next
     }
     loc {
       buf=buf $0 "\n"
-      t=$0; o=gsub(/\{/,"",t); u=$0; c=gsub(/\}/,"",u); d+=o-c
-      if (d<=0) { printf "%s", buf; loc=0; buf="" }
+      if ($0 == ind "}") { printf "%s", buf; loc=0; buf="" }
     }
+    END { if (loc) print "UNTERMINATED micro block" }
   ' "$1"
 }
 if ! diff <(micro_blocks "$ORT") <(micro_blocks "$ANG") >/dev/null 2>&1; then
