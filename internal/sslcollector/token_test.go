@@ -112,8 +112,8 @@ func TestWriteWebdetectorBridgeConfigContent(t *testing.T) {
 	if !strings.Contains(got, "site_cache = false,") {
 		t.Fatalf("expected site_cache = false (unset field), got: %q", got)
 	}
-	// MicroCacheEnforce unset → renders false (the Tier B enforce gate is opt-in;
-	// its default-off lives in manager.go's kvBool, the writer renders faithfully).
+	// MicroCacheEnforce unset → renders false: the writer renders the struct
+	// faithfully; the default (on) lives in webdetectorBridgeConfig's kvBool.
 	if !strings.Contains(got, "micro_cache_enforce = false,") {
 		t.Fatalf("expected micro_cache_enforce = false (unset field), got: %q", got)
 	}

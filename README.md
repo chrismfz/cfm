@@ -989,9 +989,10 @@ cPanel, so every rail is absolute):
   1 h fallback.
 - **Tier B — micro-cache of anonymous pages** (1–60 s buckets): any anonymous
   GET/HEAD through the HTTPS `location /`, HTML or not, after the WAF /
-  challenge / bridge decisions (cfm.lua Step 4). A **dry run** until the node
-  sets `MICRO_CACHE_ENFORCE = 1` — do that only after the on-box checklist in
-  [`docs/site-cache-design.md`](docs/site-cache-design.md) §5.7.
+  challenge / bridge decisions (cfm.lua Step 4). Live for an armed vhost
+  (`MICRO_CACHE_ENFORCE = 1`, the default since 2026-09-23; `0` is a node-wide
+  dry run). Before arming it on a new kind of app, run the checklist in
+  [`docs/site-cache-design.md`](docs/site-cache-design.md) §5.7 on it.
 
 Never cached, whatever a policy says (design §4):
 - **Both tiers:**
@@ -1010,7 +1011,7 @@ Tier A reads no request cookie, and looks at the path only for its extension.
 It relies on the origin's response headers for anything per-user.
 
 `[webdetector]` knobs: `SITE_CACHE = 1` (node kill switch, not an opt-in),
-`MICRO_CACHE_ENFORCE = 0` (the Tier B opt-in), `SITE_CACHE_STORE_PATH`.
+`MICRO_CACHE_ENFORCE = 1` (Tier B kill switch, `0` = dry run), `SITE_CACHE_STORE_PATH`.
 Manage with the cfm-admin **Site cache** page (Rules & engine: policies,
 recipes, the debug-stamp command, hit counts), `cfm webtop site-cache …` (§14)
 or `/api/v1/site-cache/*` (§15); a scoped cPanel token manages its own vhosts
@@ -1638,7 +1639,7 @@ cfm webtop rules simulate --host example.com --ua "facebookexternalhit/1.1" --pa
 cfm webtop site-cache list
 cfm webtop site-cache get <vhost>
 cfm webtop site-cache set <vhost> --static static_lean                  # Tier A
-cfm webtop site-cache set <vhost> --micro micro_safe --micro-ttl 5s     # Tier B (dry run until MICRO_CACHE_ENFORCE = 1)
+cfm webtop site-cache set <vhost> --micro micro_safe --micro-ttl 5s     # Tier B (a dry run where MICRO_CACHE_ENFORCE = 0)
 cfm webtop site-cache off <vhost>        # opt-out (also under an armed *.suffix)
 cfm webtop site-cache remove <vhost>     # delete the policy
 cfm webtop site-cache purge <vhost>      # or: purge --all (admin)

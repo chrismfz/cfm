@@ -9,8 +9,9 @@ stats, purge, turning Tier B on, incidents — is
   (`internal/webdetector/site_cache*.go`); the edge feed and decision module
   (`configs/lua/cfm_cache.lua`); the `SITE_CACHE` kill switch; **Tier A**
   (static assets) live for armed vhosts; **Tier B** (micro-cache of anonymous
-  pages, HTML or not) built with the full §4 rails and in **dry run** until a node sets
-  `MICRO_CACHE_ENFORCE = 1` (after §5.7); purge (generation bump); per-vhost
+  pages, HTML or not) built with the full §4 rails, enforced for an armed vhost
+  (`MICRO_CACHE_ENFORCE = 1`, the default since 2026-09-23 after §5.7 passed on
+  a live vhost; it shipped as a dry run until then); purge (generation bump); per-vhost
   stats (§11); the read-only MCP tools `site_cache_status` /
   `site_cache_stats`; the audit log; cache-dir provisioning; the CI guard
   (§13); the cfm-admin **Site cache** page with its recipe catalog (§7.3, §8).
@@ -156,8 +157,8 @@ Two tiers, one management model.
   per-user safety rests on the origin's response headers (§4 residuals).
 - **Tier B — micro-cache of anonymous pages** (high risk — this is what broke
   before). Any anonymous GET/HEAD through the HTTPS `location /`, HTML or not.
-  Very short TTL, hard gated (§4), and in dry run until
-  `MICRO_CACHE_ENFORCE = 1`. Absorbs bursts on heavy pages (the `myip.gr`
+  Very short TTL, hard gated (§4); a dry run on a node that sets
+  `MICRO_CACHE_ENFORCE = 0`. Absorbs bursts on heavy pages (the `myip.gr`
   case).
 
 A vhost may enable **Tier A, Tier B, or both** (per decision).
@@ -607,10 +608,14 @@ cached is history: §14 item 2.)
 
 ---
 
-### 5.7 Tier B enforce readiness — on-box checklist (before `MICRO_CACHE_ENFORCE = 1`)
+### 5.7 Tier B readiness — on-box checklist (a node's first micro vhost, or a new kind of app)
 
-`MICRO_CACHE_ENFORCE` stays `0` (the default) on a node until this has passed
-there, one test vhost first (a WordPress site you control). Who never takes
+`MICRO_CACHE_ENFORCE` shipped `0` until this passed on a live vhost
+(infected.gr, a WordPress blog on virgo, 2026-09-23); it has defaulted to `1`
+since, so arming a vhost's micro tier is what turns it on. Run this on a node's
+first micro vhost (a site you control), and steps 5–7 again before arming a
+new kind of app (a shop, a membership site): arm it `--strict-cookies`, or set
+the node to `0` while you check (runbook §7). Who never takes
 the micro path: requests from loopback, the box's own IPs, `IGNORE_IPS` /
 `IGNORE_NETS` and RFC 1918 peers (they bypass `cfm.lua` at Step 0a), the
 verified-crawler prefixes of `challenge_waf_bypass.conf` (`$cfm_bypass_ip`,
@@ -641,9 +646,10 @@ the edge access log (`ucache=` and `up=cfm_apache_micro` vs `up=cfm_apache`).
    `bypass:auth:…`; `/wp-login.php` or `/?doing_wp_cron=1` → `bypass:path`;
    `-H 'Range: bytes=0-10'` → `bypass:range`; `webmail.<domain>` (if armed by a
    wildcard) → `bypass:panel`.
-4. **Enforce on the node:** `MICRO_CACHE_ENFORCE = 1` in `[webdetector]`; the
-   daemon applies an edited `detectors.conf` on its own within a few seconds
-   (it polls the file) and the edge picks it up ~10 s later (no proxy reload).
+4. **Enforce on the node:** `MICRO_CACHE_ENFORCE = 1` in `[webdetector]` (the
+   default; only a node checking in dry run sets it back); the daemon applies
+   an edited `detectors.conf` on its own within a few seconds (it polls the
+   file) and the edge picks it up ~10 s later (no proxy reload).
 5. **From the outside client**, request a plain page three times: the access
    log shows `ucache="MISS"` then `"HIT"`, `up=cfm_apache_micro`. After the
    next stats push (~60 s) `cfm webtop site-cache stats <host>` counts the
@@ -1182,7 +1188,7 @@ built); `SITE_CACHE = 0` stops the push.
 | Knob | Default | Meaning |
 |---|---|---|
 | `SITE_CACHE` | `1` (ON) | node-wide **kill switch** (not an opt-in — the per-vhost store arms vhosts); `0` = no caching, no stamp, no stats push on this node within ~15 s of saving `detectors.conf`, policies kept. Published via `webdetector_bridge_config.go` → `cfm_bridge_config.lua` (read by `cfm_bridge_cfg.lua`, absent = on) |
-| `MICRO_CACHE_ENFORCE` | `0` (OFF) | Tier B **opt-in**: `0` = dry run (the debug stamp shows the verdict, nothing is micro-cached), `1` = an armed, anonymous, cacheable GET/HEAD through the HTTPS `location /` (HTML or not) is served from its micro bucket. Set per node only after §5.7. Same publication path (absent = off) |
+| `MICRO_CACHE_ENFORCE` | `1` (ON; `0` until 2026-09-23) | Tier B **kill switch**: `1` = an armed, anonymous, cacheable GET/HEAD through the HTTPS `location /` (HTML or not) is served from its micro bucket, `0` = a dry run on this node (the debug stamp shows the verdict, nothing is micro-cached, no vhost disarmed). Arming a vhost's micro tier is the opt-in (§5.7 before a new kind of app). Same publication path; the edge reads an absent field as off (fail-safe: the daemon always writes it) |
 | `SITE_CACHE_STORE_PATH` | `/var/lib/cfm/webdetector_site_cache.json` | the per-vhost store (§6) |
 
 The defaults are pinned by `webdetector_bridge_config_test.go` (code, the

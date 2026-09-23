@@ -17,7 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **The Site Cache micro tier is enforced by default.** `MICRO_CACHE_ENFORCE`
+  now defaults to `1`; it was `0` (a dry run) until it passed the on-box
+  checklist on a live WordPress vhost.
+  - Nothing changes on a vhost whose micro tier is not armed, and no vhost is
+    armed by default. Arming a vhost's micro tier (page, CLI or API) now
+    serves its anonymous pages from cache at once.
+  - A node that does not set the key follows the new default. A node whose
+    `detectors.conf` sets `MICRO_CACHE_ENFORCE = 0` keeps its dry run.
+  - `MICRO_CACHE_ENFORCE = 0` is now the node-wide kill switch for the micro
+    tier: a dry run, with every policy kept.
+  - Before arming micro on a new kind of app (a shop, a membership site), arm
+    it with `--strict-cookies`, or set the node to `0`, and check its
+    logged-in and cart pages with the debug stamp (runbook §7).
 
 ## 2026.09.23
 

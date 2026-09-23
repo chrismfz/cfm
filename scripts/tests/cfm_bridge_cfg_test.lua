@@ -115,14 +115,15 @@ cfg = bc.get()
 check(cfg.panel_waf_mode == nil, "old daemon file: panel_waf_mode nil → resolver defaults enforce")
 check(cfg.panel_decision_mode == nil, "old daemon file: panel_decision_mode nil → resolver defaults enforce")
 
--- 4c) Site Cache gates. SITE_CACHE is a kill switch — absent (old daemon)
---     → on; MICRO_CACHE_ENFORCE is an opt-in — absent → off. Only an explicit
---     value flips either (the daemon writes both, from detectors.conf).
+-- 4c) Site Cache gates. SITE_CACHE absent (old daemon) → on. MICRO_CACHE_ENFORCE
+--     defaults ON in the daemon, which always writes the field, so an absent
+--     field is a file the edge cannot trust → off (dry run, fail-safe). Only an
+--     explicit value flips either (the daemon writes both, from detectors.conf).
 expire()
 fixture = "return { clearance_refresh = true }"
 cfg = bc.get()
 check(cfg.site_cache == true, "old daemon file: site_cache absent → defaults true (kill switch)")
-check(cfg.micro_cache_enforce == false, "old daemon file: micro_cache_enforce absent → defaults false (opt-in)")
+check(cfg.micro_cache_enforce == false, "old daemon file: micro_cache_enforce absent → defaults false (fail-safe)")
 expire()
 fixture = "return { clearance_refresh = true, site_cache = false, micro_cache_enforce = true }"
 cfg = bc.get()

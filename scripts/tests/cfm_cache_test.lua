@@ -12,7 +12,7 @@ package.loaded["cjson.safe"] = { decode = function() return nil end }
 -- Master SITE_CACHE gate stub (cfm_bridge_cfg). Default ON so the lookup/observe
 -- assertions below exercise the real path; flipped to false for the gate test.
 local _site_cache_on = true
-local _micro_enforce = false   -- Tier B enforce gate (opt-in; default dry-run)
+local _micro_enforce = false   -- Tier B enforce gate (each case sets it; starts in dry run)
 package.loaded["cfm_bridge_cfg"] = { get = function()
   return { site_cache = _site_cache_on, micro_cache_enforce = _micro_enforce }
 end }
