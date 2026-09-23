@@ -106,6 +106,11 @@ back-filled here — see the git/PR history for that period.
     `find -delete` never follows a link. The probe now also checks the second
     directory level, which the old one missed. A healthy worker-owned tree is
     left untouched.
+    - After a purge, an edge that was only reloaded logs harmless
+      `[crit] unlink() … (2: No such file or directory)` lines as the old index
+      entries age out. They never cause a 5xx.
+    - Restarting the edge instead of reloading it ends them; the helper says so
+      when it purges.
   - `check_site_cache_config.sh` now fails when the dirs the daemon or the
     helper provision differ from the confs' `proxy_cache_path` dirs. A zone
     added to only one of them would otherwise fail `-t` on deploy.

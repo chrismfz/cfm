@@ -23,6 +23,10 @@
 #     the cache is disposable. A recursive chmod/chgrp run as root over a tree
 #     the worker can write to is avoided on purpose: the worker could race it
 #     with symlinks. A healthy worker-owned tree is never touched.
+#     After a purge a RELOADED edge still indexes the deleted files in its
+#     keys_zone; as those entries age out nginx logs harmless
+#     `[crit] unlink() ... failed (2: No such file or directory)` lines (never
+#     a 5xx). A RESTART of the edge rebuilds the index from disk and ends them.
 #     Not detected (accepted): a root-owned cache FILE inside healthy dirs
 #     (only if workers once ran as root after cfm created the dirs); it ages
 #     out under the zone's inactive= eviction.
@@ -70,7 +74,7 @@ for n in $CFM_CACHE_DIRS; do
             \( ! -group cfm -o \( ! -user cfm ! -perm -g=rwx \) \) \
             -print -quit 2>/dev/null | grep -q .; then
         find "$d" -mindepth 1 -delete 2>/dev/null || true
-        echo "cfm-cache-dirs: purged an unhealthy cache tree under $d (a level dir the cfm workers cannot use; nginx refills it)"
+        echo "cfm-cache-dirs: purged an unhealthy cache tree under $d (a level dir the cfm workers cannot use; nginx refills it). Restart (not reload) the edge to drop the stale cache index, or expect harmless [crit] unlink() ENOENT lines as old entries age out."
     fi
     if [ ! -d "$d" ] || [ "$(stat -L -c '%U:%G %a' "$d" 2>/dev/null)" != "root:cfm 770" ]; then
         echo "cfm-cache-dirs: $d is not root:cfm 0770" >&2
