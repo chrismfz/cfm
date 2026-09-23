@@ -3,11 +3,13 @@
 package nftlib
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"math/big"
 	"math/bits"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -210,56 +212,83 @@ func keyToIP(key []byte) net.IP {
 	return nil
 }
 
-// keysToCIDR reconstructs a CIDR string from an interval set element pair.
-// startKey is the network address; endKey is broadcastPlusOne (the IntervalEnd
-// marker stored by the kernel).
-func keysToCIDR(startKey, endKey []byte) string {
-	startIP := keyToIP(startKey)
-	if startIP == nil || len(startKey) != len(endKey) {
+// rangeString renders the addresses first..last (inclusive) as one address,
+// a CIDR when they are exactly one prefix, else "first-last".
+func rangeString(first, last []byte) string {
+	a, b := keyToIP(first), keyToIP(last)
+	if a == nil || len(first) != len(last) {
 		return ""
 	}
-	totalBits := len(startKey) * 8
-	var prefix int
-
-	if totalBits == 32 {
-		s := binary.BigEndian.Uint32(startKey)
-		e := binary.BigEndian.Uint32(endKey)
-		if e <= s {
-			prefix = 32
-		} else {
-			// range = 2^(32 - prefix), so prefix = 32 - trailingZeros(range)
-			prefix = 32 - bits.TrailingZeros32(e-s)
+	if len(first) == 4 {
+		s, l := uint64(binary.BigEndian.Uint32(first)), uint64(binary.BigEndian.Uint32(last))
+		if n := l - s + 1; l >= s && n&(n-1) == 0 && s&(n-1) == 0 {
+			return (&net.IPNet{IP: a, Mask: net.CIDRMask(32-bits.TrailingZeros64(n), 32)}).String()
 		}
 	} else {
-		sInt := new(big.Int).SetBytes(startKey)
-		eInt := new(big.Int).SetBytes(endKey)
-		rng := new(big.Int).Sub(eInt, sInt)
-		if rng.Sign() <= 0 {
-			prefix = 128
-		} else {
-			prefix = 128 - int(rng.TrailingZeroBits())
+		s, l := new(big.Int).SetBytes(first), new(big.Int).SetBytes(last)
+		n := new(big.Int).Add(new(big.Int).Sub(l, s), big.NewInt(1))
+		if tz := int(n.TrailingZeroBits()); n.Sign() > 0 && n.BitLen()-1 == tz && (s.Sign() == 0 || int(s.TrailingZeroBits()) >= tz) {
+			return (&net.IPNet{IP: a, Mask: net.CIDRMask(128-tz, 128)}).String()
 		}
 	}
+	return a.String() + "-" + b.String()
+}
 
-	mask := net.CIDRMask(prefix, totalBits)
-	cidr := &net.IPNet{IP: startIP.Mask(mask), Mask: mask}
-	return cidr.String()
+// intervalRange is one range of an interval set: its start element (which
+// carries the timeout) and its last address.
+type intervalRange struct {
+	start nftables.SetElement
+	last  []byte
+}
+
+// intervalRanges pairs an interval set's elements into ranges. The kernel
+// stores a range as a start element and an end element keyed one past its
+// last address, and a range running to the top of the address space
+// (224.0.0.0/3 in a bogon feed, ::/0) has no end element. The elements are
+// walked in key order, each start closed by the end that follows it. They
+// used to be paired by index — the n-th start with the n-th end — so one
+// range without an end shifted every range after it, and a set holding only
+// such ranges read as plain addresses.
+func intervalRanges(elems []nftables.SetElement) []intervalRange {
+	sorted := append([]nftables.SetElement(nil), elems...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if c := bytes.Compare(sorted[i].Key, sorted[j].Key); c != 0 {
+			return c < 0
+		}
+		// Adjacent ranges share a key: the end closes the lower one first.
+		return sorted[i].IntervalEnd && !sorted[j].IntervalEnd
+	})
+	var out []intervalRange
+	for i, e := range sorted {
+		if e.IntervalEnd {
+			continue
+		}
+		last := bytes.Repeat([]byte{0xff}, len(e.Key)) // no end: to the top
+		if i+1 < len(sorted) && len(sorted[i+1].Key) == len(e.Key) && bytes.Compare(sorted[i+1].Key, e.Key) > 0 {
+			last = keyMinusOne(sorted[i+1].Key) // the end, or (malformed) the next start
+		}
+		out = append(out, intervalRange{start: e, last: last})
+	}
+	return out
+}
+
+func keyMinusOne(key []byte) []byte {
+	out := append([]byte(nil), key...)
+	for i := len(out) - 1; i >= 0; i-- {
+		out[i]--
+		if out[i] != 0xff {
+			break
+		}
+	}
+	return out
 }
 
 // elemsToTimed converts kernel set elements to (string, expires) pairs,
-// preserving the per-element TTL reported by netlink. For interval sets the
-// timeout is taken from the start element of each (start, end) pair.
-func elemsToTimed(elems []nftables.SetElement) []firewall.SetElementTimed {
-	var starts, ends []nftables.SetElement
-	for _, e := range elems {
-		if e.IntervalEnd {
-			ends = append(ends, e)
-		} else {
-			starts = append(starts, e)
-		}
-	}
-
-	if len(ends) == 0 {
+// preserving the per-element TTL reported by netlink: addresses for a plain
+// set, ranges (see intervalRanges, rangeString) for an interval set, with
+// the start element's timeout.
+func elemsToTimed(elems []nftables.SetElement, interval bool) []firewall.SetElementTimed {
+	if !interval {
 		out := make([]firewall.SetElementTimed, 0, len(elems))
 		for _, e := range elems {
 			if ip := keyToIP(e.Key); ip != nil {
@@ -268,11 +297,10 @@ func elemsToTimed(elems []nftables.SetElement) []firewall.SetElementTimed {
 		}
 		return out
 	}
-
-	out := make([]firewall.SetElementTimed, 0, len(starts))
-	for i := 0; i < len(starts) && i < len(ends); i++ {
-		if s := keysToCIDR(starts[i].Key, ends[i].Key); s != "" {
-			out = append(out, firewall.SetElementTimed{Elem: s, Expires: elemExpires(starts[i])})
+	var out []firewall.SetElementTimed
+	for _, r := range intervalRanges(elems) {
+		if s := rangeString(r.start.Key, r.last); s != "" {
+			out = append(out, firewall.SetElementTimed{Elem: s, Expires: elemExpires(r.start)})
 		}
 	}
 	return out
@@ -288,36 +316,13 @@ func elemExpires(e nftables.SetElement) time.Duration {
 	return e.Expires
 }
 
-// elemsToStrings converts kernel set elements to IP or CIDR strings.
-// For interval sets, start/end pairs are reconstructed into CIDR notation.
-func elemsToStrings(elems []nftables.SetElement) []string {
-	// Partition into starts and interval-end markers.
-	var starts, ends [][]byte
-	for _, e := range elems {
-		if e.IntervalEnd {
-			ends = append(ends, e.Key)
-		} else {
-			starts = append(starts, e.Key)
-		}
-	}
-
-	// No interval-end markers: plain host-IP set.
-	if len(ends) == 0 {
-		var out []string
-		for _, e := range elems {
-			if ip := keyToIP(e.Key); ip != nil {
-				out = append(out, ip.String())
-			}
-		}
-		return out
-	}
-
-	// Interval set: pair starts and ends (kernel returns them sorted by key).
-	var out []string
-	for i := 0; i < len(starts) && i < len(ends); i++ {
-		if s := keysToCIDR(starts[i], ends[i]); s != "" {
-			out = append(out, s)
-		}
+// elemsToStrings converts kernel set elements to strings: addresses for a
+// plain set, ranges (see intervalRanges, rangeString) for an interval set.
+func elemsToStrings(elems []nftables.SetElement, interval bool) []string {
+	timed := elemsToTimed(elems, interval)
+	out := make([]string, len(timed))
+	for i, t := range timed {
+		out[i] = t.Elem
 	}
 	return out
 }

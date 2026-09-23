@@ -83,6 +83,29 @@ back-filled here — see the git/PR history for that period.
   fleet blocklist propagation.
 
 ### Fixed
+- **"Where is this IP blocked" found nothing in nftables on `nftlib` nodes,
+  and missed some entries on `nft` nodes.** `cfm which`, the unblock
+  "found on" report sent to cfm-web, `cfm unblock` and the `/search` API read
+  the firewall sets only in the `nft -j` JSON shape; the nftlib engine's own
+  dump has another shape, so no set was ever found there. On the `nft`
+  engine, a CIDR added with a timeout (`{"elem":{"val":{"prefix":…}}}`) and an
+  address range were skipped. Both shapes and all element forms are read
+  now; on nftlib, meters (`syn_v4`, `pps_v4`, … — every recently seen source)
+  are not reported as matches, as on `nft`. A batch of pending unblocks from
+  cfm-web is also searched in one pass — the firewall table and each set,
+  `cfm.deny`, the csf files, fail2ban's and imunify360's lists read once, in
+  30s for the batch (a set dump already running is let finish) — where every
+  IP re-read every source (up to 15s per IP), so a mass unblock ran
+  thousands of `nft`, `fail2ban-client` and `imunify360-agent` processes
+  before removing anything.
+- **nftlib misread interval sets holding a range to the top of the address
+  space.** Reading a CIDR set back paired the n-th range start with the n-th
+  range end, and a range running to the last address (224.0.0.0/3 or
+  240.0.0.0/4 in a bogon feed, `ff00::/8`, `0.0.0.0/0`) has no end: every
+  range after it was shifted, and a set holding only such ranges read as
+  plain addresses. Ranges are now read in address order, and a range that
+  isn't one prefix is written `first-last` instead of a wrong CIDR. This is
+  what `cfm which`, `/search` and the unblock report read on nftlib.
 - **Throttle autoblocks are 24h blocks, not permanent ones, with the reference
   config.** The reference `cfm.conf` set `THROTTLE_MODE = "tlt"`, and an
   unrecognised mode fell back to `permanent`, so every throttle autoblock

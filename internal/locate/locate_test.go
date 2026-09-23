@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"cfm/internal/ipquery"
 )
 
 func mustQuery(t *testing.T, arg string) *query {
@@ -46,7 +48,9 @@ func TestMatchesEntry(t *testing.T) {
 	}
 	for _, c := range cases {
 		q := mustQuery(t, c.arg)
-		if got := q.matchesEntry(c.entry); got != c.want {
+		idx := ipquery.NewIndex[Location]()
+		idx.Add(c.entry, Location{Match: c.entry})
+		if got := len(idx.Match(q.Query)) > 0; got != c.want {
 			t.Errorf("matchesEntry(arg=%s, entry=%s) = %v, want %v", c.arg, c.entry, got, c.want)
 		}
 	}
@@ -60,6 +64,13 @@ func TestParseQueryRejectsJunk(t *testing.T) {
 	}
 }
 
+// scanOne scans content as a list file and matches one query against it.
+func scanOne(content string, q *query) []Location {
+	idx := ipquery.NewIndex[Location]()
+	scanListFile(strings.NewReader(content), "csf", "csf.deny", ActionBlock, idx)
+	return matchAll(idx, []*query{q})[0]
+}
+
 func TestScanListFile(t *testing.T) {
 	content := `# CSF deny file
 1.2.3.4 # lfd: (smtpauth) Failed SMTP AUTH login
@@ -68,7 +79,7 @@ func TestScanListFile(t *testing.T) {
 tcp|in|d=22|s=9.9.9.9 # advanced rule
 `
 	q := mustQuery(t, "1.2.3.4")
-	locs := scanListFile(strings.NewReader(content), "csf", "csf.deny", ActionBlock, q)
+	locs := scanOne(content, q)
 	if len(locs) != 1 {
 		t.Fatalf("want 1 hit, got %d: %+v", len(locs), locs)
 	}
@@ -78,21 +89,21 @@ tcp|in|d=22|s=9.9.9.9 # advanced rule
 
 	// subnet containment
 	q = mustQuery(t, "10.20.30.40")
-	locs = scanListFile(strings.NewReader(content), "csf", "csf.deny", ActionBlock, q)
+	locs = scanOne(content, q)
 	if len(locs) != 1 || locs[0].Match != "10.0.0.0/8" {
 		t.Fatalf("subnet containment failed: %+v", locs)
 	}
 
 	// csf advanced syntax
 	q = mustQuery(t, "9.9.9.9")
-	locs = scanListFile(strings.NewReader(content), "csf", "csf.deny", ActionBlock, q)
+	locs = scanOne(content, q)
 	if len(locs) != 1 || locs[0].Match != "9.9.9.9" {
 		t.Fatalf("advanced-syntax match failed: %+v", locs)
 	}
 
 	// CIDR query finds hosts inside it
 	q = mustQuery(t, "5.6.7.0/24")
-	locs = scanListFile(strings.NewReader(content), "csf", "csf.deny", ActionBlock, q)
+	locs = scanOne(content, q)
 	if len(locs) != 1 || locs[0].Match != "5.6.7.8" {
 		t.Fatalf("cidr-query match failed: %+v", locs)
 	}
@@ -103,7 +114,9 @@ func TestScanCSFTempFile(t *testing.T) {
 1781097785|4.3.2.1|80|in|600|manual temp ban
 `
 	q := mustQuery(t, "1.2.3.4")
-	locs := scanCSFTempFile(strings.NewReader(content), "csf.tempban", ActionBlock, q)
+	idx := ipquery.NewIndex[Location]()
+	scanCSFTempFile(strings.NewReader(content), "csf.tempban", ActionBlock, idx)
+	locs := matchAll(idx, []*query{q})[0]
 	if len(locs) != 1 {
 		t.Fatalf("want 1 hit, got %d: %+v", len(locs), locs)
 	}
@@ -123,16 +136,17 @@ func TestSearchCSFFromDirs(t *testing.T) {
 	}
 
 	q := mustQuery(t, "1.2.3.4")
-	locs, why := searchCSF(Options{CSFDir: etc, CSFDataDir: data}, q)
+	all, why := searchCSF(Options{CSFDir: etc, CSFDataDir: data}, []*query{q})
 	if why != "" {
 		t.Fatalf("unexpected skip: %s", why)
 	}
+	locs := all[0]
 	if len(locs) != 2 {
 		t.Fatalf("want 2 hits (deny subnet + tempban), got %d: %+v", len(locs), locs)
 	}
 
 	// missing dir = not installed
-	if _, why := searchCSF(Options{CSFDir: filepath.Join(etc, "nope")}, q); why != "not installed" {
+	if _, why := searchCSF(Options{CSFDir: filepath.Join(etc, "nope")}, []*query{q}); why != "not installed" {
 		t.Errorf("want 'not installed', got %q", why)
 	}
 }
@@ -142,17 +156,17 @@ func TestSearchCFMDeny(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "cfm.deny"), []byte("# comment\n8.8.0.0/16 # bulk\n1.1.1.1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	locs, err := searchCFMDeny(dir, mustQuery(t, "8.8.4.4"))
+	all, err := searchCFMDeny(dir, []*query{mustQuery(t, "8.8.4.4")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(locs) != 1 || locs[0].Match != "8.8.0.0/16" || locs[0].Source != "cfm.deny" {
-		t.Fatalf("unexpected: %+v", locs)
+	if locs := all[0]; len(locs) != 1 || locs[0].Match != "8.8.0.0/16" || locs[0].Source != "cfm.deny" {
+		t.Fatalf("unexpected: %+v", all)
 	}
 	// absent file is not an error
-	locs, err = searchCFMDeny(t.TempDir(), mustQuery(t, "8.8.4.4"))
-	if err != nil || locs != nil {
-		t.Fatalf("absent file: locs=%v err=%v", locs, err)
+	all, err = searchCFMDeny(t.TempDir(), []*query{mustQuery(t, "8.8.4.4")})
+	if err != nil || all != nil {
+		t.Fatalf("absent file: locs=%v err=%v", all, err)
 	}
 }
 
@@ -170,7 +184,7 @@ func TestParseF2BBannedDump(t *testing.T) {
 	}
 
 	// matching incl. subnet containment
-	locs := matchF2BJails(jails, mustQuery(t, "10.0.0.7"))
+	locs := matchF2BJails(jails, []*query{mustQuery(t, "10.0.0.7")})[0]
 	if len(locs) != 1 || locs[0].List != "sshd" || locs[0].Match != "10.0.0.0/24" {
 		t.Errorf("match: %+v", locs)
 	}
@@ -203,7 +217,7 @@ func TestScanListFileLongLine(t *testing.T) {
 	long := strings.Repeat("x", 80*1024)
 	content := long + "\n1.2.3.4 # after the long line\n"
 	q := mustQuery(t, "1.2.3.4")
-	locs := scanListFile(strings.NewReader(content), "csf", "csf.deny", ActionBlock, q)
+	locs := scanOne(content, q)
 	if len(locs) != 1 {
 		t.Fatalf("entry after long line was lost: %+v", locs)
 	}
@@ -234,7 +248,7 @@ func TestParseImunifyList(t *testing.T) {
 		t.Fatalf("items = %d", len(items))
 	}
 
-	locs := matchImunifyItems(items, mustQuery(t, "1.2.3.4"))
+	locs := matchImunifyItems(items, []*query{mustQuery(t, "1.2.3.4")})[0]
 	if len(locs) != 1 || locs[0].Action != ActionBlock || locs[0].List != "drop (BLACK)" {
 		t.Fatalf("drop match: %+v", locs)
 	}
@@ -243,7 +257,7 @@ func TestParseImunifyList(t *testing.T) {
 	}
 
 	// netmask containment → GRAY challenge
-	locs = matchImunifyItems(items, mustQuery(t, "10.9.8.7"))
+	locs = matchImunifyItems(items, []*query{mustQuery(t, "10.9.8.7")})[0]
 	if len(locs) != 1 || locs[0].Action != ActionChallenge || locs[0].Match != "10.0.0.0/8" {
 		t.Fatalf("captcha match: %+v", locs)
 	}

@@ -66,7 +66,7 @@ func (b *Backend) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBa
 			if err != nil {
 				return res, fmt.Errorf("nftlib AddBlockBatch read %s: %w", f.name, err)
 			}
-			plan := firewall.PlanBlockBatch(f.want, elemsToTimed(elems))
+			plan := firewall.PlanBlockBatch(f.want, elemsToTimed(elems, f.set.Interval))
 			planned = planned.Add(plan.Result())
 			for _, w := range plan.Writes {
 				writes = append(writes, blockWrite{set: f.set, PlannedBlock: w})
