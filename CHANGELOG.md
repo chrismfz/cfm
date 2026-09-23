@@ -83,15 +83,18 @@ back-filled here — see the git/PR history for that period.
     script paths (`.php`, `.php7`, `.phtml`, …, including `/index.php/…`),
     `?doing_wp_cron`, partial-page requests (`X-Requested-With`, `X-PJAX`,
     `HX-Request`, `Turbo-Frame`, `X-Inertia` — a stored fragment would be
-    everyone's page), and panel hosts (`cpanel.`, `whm.`, `webmail.`,
+    everyone's page; Android in-app browsers send `X-Requested-With` on every
+    request, so their visitors are not micro-cached), a `Cookie` header over
+    8 KB, and panel hosts (`cpanel.`, `whm.`, `webmail.`,
     `webdisk.`, `mail.`, `autodiscover.`, `autoconfig.`, `cpcalendars.`,
     `cpcontacts.`) whether armed by a `*.domain` wildcard or by name.
   - More app session cookies keep a visitor off the cache: Drupal `SESS…`,
     Magento, OpenCart, Moodle, Easy Digital Downloads, `…_sid`, `token`,
     `auth`, WPML language and WooCommerce currency-switcher cookies. A cookie
     name is compared the way the app reads it, so a session cookie no longer
-    slips past as `wordpress.logged.in_…`, `ci%2Esession` or
-    `__Host-PHPSESSID` (PHP turns `.` and spaces into `_`).
+    slips past as `wordpress.logged.in_…`, `ci+session`, `ci%2Esession` or
+    `__Host-PHPSESSID` (PHP turns `.` and spaces into `_`; older PHP also
+    URL-decodes names).
   - Micro-cache is used only from the main `location /` of the HTTPS server,
     so PHP scripts and large downloads keep streaming unbuffered. A node whose
     live edge conf predates this release (no `set $cfm_micro_conf "1"`), or

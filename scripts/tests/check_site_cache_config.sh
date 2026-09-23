@@ -53,10 +53,11 @@
 #       the named locations would 500, one in a passthrough would buffer it);
 #       that server also sets the default `set $cfm_micro_conf "";` at server
 #       level; its `location /` has no rewrite / try_files / error_page and
-#       neither it, its server nor http level has a rewrite_by_lua* (a `rewrite … last` or
-#       ngx.req.set_uri(…, true) would carry the sentinel into another location
-#       without making the request internal), and buffering is never turned
-#       off in it nor at server/http level (which it would inherit).
+#       neither it, its server nor http level has a rewrite_by_lua* (each of
+#       them carries the sentinel into another location; cfm_cache.lua already
+#       refuses the internal requests they make, so this is defence in depth),
+#       and buffering is never turned off in it nor at server/http level
+#       (which it would inherit).
 #     * every @cfm_micro_<n>s location caches into a cfm_micro_<n>s zone and
 #       sets $cfm_upstream "cfm_apache_micro"; the only log_by_lua is the
 #       http-level one and it still calls cfm_cache.micro_note (remember-
@@ -205,9 +206,9 @@ for f in "$ORT" "$ANG"; do
         sentinels += ns
         if (lh != "location / {" || ns != 1) print "ERR location@line" locline " (" lh "): set $cfm_micro_conf \"1\" belongs once in `location /` only — anywhere else micro-cache would take over a location it must not buffer."
         if (lh == "location / {" && insrv) srv_sentinel = 1
-        if (body ~ (A "(rewrite|try_files|error_page)[[:space:]]")) print "ERR location@line" locline " (" lh "): the location carrying the $cfm_micro_conf sentinel has a rewrite / try_files / error_page — `rewrite … last` would carry the sentinel into another location without making the request internal (the others are internal redirects micro_gate refuses); keep it redirect-free."
+        if (body ~ (A "(rewrite|try_files|error_page)[[:space:]]")) print "ERR location@line" locline " (" lh "): the location carrying the $cfm_micro_conf sentinel has a rewrite / try_files / error_page — each carries the sentinel into another location (micro_gate refuses the internal request that results, but keep location / redirect-free)."
         if (body ~ (A "proxy_buffering[[:space:]]+[\"\047]?off[\"\047]?[[:space:]]*;")) print "ERR location@line" locline " (" lh "): the location carrying the $cfm_micro_conf sentinel turns buffering off — it streams, and micro would buffer it."
-        if (body ~ (A "rewrite_by_lua[a-z_]*[[:space:]]")) print "ERR location@line" locline " (" lh "): the location carrying the $cfm_micro_conf sentinel has a rewrite_by_lua* — ngx.req.set_uri(…, true) would carry the sentinel into another location."
+        if (body ~ (A "rewrite_by_lua(_block|_file)?([[:space:]]|[{])")) print "ERR location@line" locline " (" lh "): the location carrying the $cfm_micro_conf sentinel has a rewrite_by_lua* — ngx.req.set_uri(…, true) would carry the sentinel into another location."
       }
       if (lh ~ /^location @cfm_micro_/ && body !~ (A "proxy_cache[[:space:]]+cfm_micro_[0-9]+s[[:space:]]*;")) print "ERR location@line" locline " (" lh "): a Tier B bucket location must cache into its cfm_micro_<n>s zone — cfm_cache.lua routes HTML here."
       nz = cnt(body, A "proxy_cache[[:space:]]+[^[:space:];]+[[:space:]]*;") - cnt(body, A "proxy_cache[[:space:]]+off[[:space:]]*;")
@@ -315,9 +316,9 @@ for f in "$ORT" "$ANG"; do
         if (!insrv && !loc && isopen && ls ~ /^[[:space:]]*server[[:space:]]*[{][[:space:]]*$/) { insrv = 1; srvD = D; srv_set = 0; srv_cache = 0; srv_micro = 0; srv_sentinel = 0; srv_mdef = 0; srv_rwlua = 0; srvline = SL[k] }
         if (insrv && D == srvD + 1 && ls ~ /^[[:space:]]*set[[:space:]]+[$]cfm_cache_skip[[:space:]]+"1"[[:space:]]*;/) srv_set = 1
         if (insrv && !loc && D == srvD + 1 && ls ~ /^[[:space:]]*set[[:space:]]+[$]cfm_micro_conf[[:space:]]+""[[:space:]]*;[[:space:]]*$/) { srv_mdef++; mdefs++ }
-        if (insrv && !loc && ls ~ /^[[:space:]]*rewrite_by_lua[a-z_]*[[:space:]]/) srv_rwlua++
-        if (!insrv && !loc && ls ~ /^[[:space:]]*rewrite_by_lua[a-z_]*[[:space:]]/) http_rwlua++
-        if (ls ~ /^[[:space:]]*log_by_lua[a-z_]*[[:space:]]/ && (D != 1 || insrv || loc)) print "ERR line " SL[k] ": a log_by_lua* below http level overrides the http-level one — the Tier B remember-uncacheable hook (cfm_cache.micro_note) and the cache stats would stop for it."
+        if (insrv && !loc && ls ~ /^[[:space:]]*rewrite_by_lua(_block|_file)?([[:space:]]|[{])/) srv_rwlua++
+        if (!insrv && !loc && ls ~ /^[[:space:]]*rewrite_by_lua(_block|_file)?([[:space:]]|[{])/) http_rwlua++
+        if (ls ~ /^[[:space:]]*log_by_lua(_block|_file)?([[:space:]]|[{])/ && (D != 1 || insrv || loc)) print "ERR line " SL[k] ": a log_by_lua* below http level overrides the http-level one — the Tier B remember-uncacheable hook (cfm_cache.micro_note) and the cache stats would stop for it."
         if (!loc && ls ~ /^[[:space:]]*proxy_buffering[[:space:]]+["\047]?off["\047]?[[:space:]]*;/) print "ERR line " SL[k] ": proxy_buffering off at " (insrv ? "server" : "http") " level — `location /` (the Tier B entry) inherits it and would stream; turn buffering off per location."
         if (!loc && s ~ /^[[:space:]]*location[[:space:]]/) { loc = 1; body = "\n"; locline = SL[k]; nloc++; d = 0; seen = 0 }
         if (loc) {

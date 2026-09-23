@@ -305,6 +305,40 @@ end
 check(anon("my_app=1", false, { [cache._cookie_key("my.app")] = true }) == false,
       "a per-vhost auth cookie matches its app-equivalent spelling")
 check(anon("_ga=GA1.2.3; _gid=x", true) == true, "strict: analytics cookies stay ignore-listed after normalisation")
+-- older PHP URL-decoded names ("+" = space, a NUL ends the name)
+for _, c in ipairs({ "wordpress+logged+in_abc=1", "ci+session=x", "PHPSESSID%00x=1", "laravel_session%00=1" }) do
+  check(anon(c, false) == false, "old-PHP spelling of a session cookie → bypass: " .. c)
+end
+check(anon("a%2Bb=1", false) == true, "an encoded + stays a plain name character (anonymous)")
+-- names: no '=' / empty / spaces-only pairs
+check(anon("PHPSESSID", false) == false, "a bare name without '=' is still a name")
+check(anon("=v; ;   ", false) == true, "empty and blank pairs are skipped")
+check(anon("  PHPSESSID  =x", false) == false, "outer spaces around a name are trimmed")
+-- client input is parsed in linear time (a backtracking pattern here pinned a
+-- worker for minutes on a run of spaces) and a huge header is not micro-cached
+do
+  -- ~1.2 KB inputs: enough for a cubic/quadratic pattern to take seconds
+  -- (and fail here, rather than hang the suite), instant when linear
+  local t0 = os.clock()
+  local samples = {
+    string.rep(" ", 1200) .. "b",
+    "a" .. string.rep(" ", 1200) .. "b=1",
+    "x;" .. string.rep(" ", 1200) .. "b",
+    string.rep("a ", 600) .. "=1",
+    string.rep("; ", 600),
+    string.rep("%41", 400),
+  }
+  for _ = 1, 5 do
+    for _, c in ipairs(samples) do cache._micro_cookie(c, true) end
+  end
+  local dt = os.clock() - t0
+  check(dt < 0.25, string.format("adversarial cookie headers parse in linear time (%.3fs)", dt))
+  local t1 = os.clock()
+  cache._micro_cookie("a" .. string.rep(" ", 8000) .. "b=1", true)
+  check(os.clock() - t1 < 0.1, "an 8 KB run of spaces (just under the cap) parses at once")
+  local okc, whyc = cache._micro_cookie(string.rep("a", 9000) .. "=1", false)
+  check(okc == false and whyc == "cookie-size", "a Cookie header over 8 KB → bypass:cookie-size")
+end
 
 -- ── Tier B micro-cache: full request decision ─────────────────────────────────
 local function armed(ttl) return { micro = { on = true, ttl = ttl }, strict_cookies = false } end
@@ -496,7 +530,7 @@ do
   check(not ok and why == "event-stream", "Accept: text/event-stream (any case) → bypass:event-stream")
   ok = d({ uri = "/", accept = "text/html,application/xhtml+xml" })
   check(ok, "an ordinary Accept stays cacheable")
-  ok, _, why = d({ uri = "/", fragment = "XMLHttpRequest" })
+  ok, _, why = d({ uri = "/", fragment = true })
   check(not ok and why == "fragment", "a partial-page request (X-Requested-With etc.) → bypass:fragment")
   for _, u in ipairs({ "/wp-admin/", "/WP-Admin/edit.php", "/wp-login.php", "/xmlrpc.php",
                        "/wp-cron.php", "/index.php", "/a/B.PHP", "/administrator/index",
@@ -604,8 +638,13 @@ check(cache.micro_gate() == "@cfm_micro_5s", "sentinel \"1\" → routes (control
 for _, h in ipairs({ "http_x_requested_with", "http_x_pjax", "http_hx_request", "http_turbo_frame", "http_x_inertia" }) do
   micro_req("m.com"); ngx.var[h] = "1"
   check(cache.micro_gate() == nil, "a partial-page request header never routes: " .. h)
+  ngx.var[h] = ""
+  check(cache.micro_gate() == nil, "an EMPTY partial-page request header never routes either: " .. h)
   ngx.var[h] = nil
 end
+micro_req("m.com"); ngx.var.http_x_requested_with = ""; ngx.var.http_hx_request = "true"
+check(cache.micro_gate() == nil, "an empty earlier header cannot mask a later one")
+ngx.var.http_x_requested_with = nil; ngx.var.http_hx_request = nil
 
 -- a storable fetch leaves no mark; the next request still routes
 _uncacheable.data = {}; _uncacheable.sets = 0

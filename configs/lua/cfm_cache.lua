@@ -597,17 +597,27 @@ local MICRO_IGNORE_PREFIX = {
 }
 
 -- cookie_key: a cookie name as the app sees it, so a session cookie cannot be
--- smuggled past the lists in a form the app still reads: PHP (and Rack)
--- percent-decode a name, PHP reads "a[b]" as the array a, and turns " ", "."
--- and a lone "[" into "_" when it builds $_COOKIE (wordpress.logged.in_x is
--- wordpress_logged_in_x to WordPress); lowercased; a __Host- / __Secure-
--- prefix stripped. The lists are normalised the same way at load
--- (connect.sid and .aspnetcore. still match).
+-- smuggled past the lists in a form the app still reads. PHP reads "a[b]" as
+-- the array a and turns " ", "." and a lone "[" into "_" when it builds
+-- $_COOKIE (wordpress.logged.in_x is wordpress_logged_in_x to WordPress);
+-- PHP before 7.2.34 / 7.3.23 / 7.4.11 (still served as EOL MultiPHP
+-- versions) also URL-decoded the name first ("+" is a space, %xx a byte, and
+-- a NUL ends it), and Rack decodes %xx. Current PHP does not decode, so
+-- decoding here only ever over-includes (a cache miss). Then lowercased and a
+-- __Host- / __Secure- prefix stripped. The lists are normalised the same way
+-- at load (connect.sid and .aspnetcore. still match). Linear: plain finds and
+-- single-class gsubs only (the name comes from the client).
+local function hex_byte(h) return string.char(tonumber(h, 16)) end
 local function cookie_key(name)
-    local n = name:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+    local n = name
+    if n:find("+", 1, true) then n = n:gsub("%+", " ") end
+    if n:find("%", 1, true) then n = n:gsub("%%(%x%x)", hex_byte) end
+    local z = n:find("\0", 1, true)
+    if z then n = n:sub(1, z - 1) end
     local b = n:find("[", 1, true)
     if b and n:find("]", b, true) then n = n:sub(1, b - 1) end
-    n = n:lower():gsub("[ %.%[]", "_")
+    n = n:lower()
+    if n:find("[ %.%[]") then n = n:gsub("[ %.%[]", "_") end
     for _, cp in ipairs(COOKIE_NAME_PREFIXES) do
         if n:sub(1, #cp) == cp then return n:sub(#cp + 1) end
     end
@@ -649,11 +659,26 @@ end
 -- spaces included, outer ones trimmed), so a value that itself contains '='
 -- (base64/JWT) can never fabricate a phantom name; the name is then compared
 -- as cookie_key() sees it. extra_auth is an optional {cookie_key=true} set of
--- per-vhost auth cookies.
+-- per-vhost auth cookies. The header is client input of up to 64 KB, so
+-- everything here is linear (plain finds; no pattern that backtracks — an
+-- anchored "%s*…-%s*=" form was cubic in a run of spaces and could pin a
+-- worker for minutes), and a header over MICRO_COOKIE_MAX bytes is simply not
+-- micro-cached.
+local MICRO_COOKIE_MAX = 8192
+local function cookie_name(pair)
+    local eq = pair:find("=", 1, true)
+    local raw = eq and pair:sub(1, eq - 1) or pair
+    local s = raw:find("%S")
+    if not s then return nil end
+    local e = #raw
+    while e > s and raw:find("^%s", e) do e = e - 1 end
+    return raw:sub(s, e)
+end
 local function micro_cookie_verdict(cookie_header, strict, extra_auth)
     if not cookie_header or cookie_header == "" then return true, nil end
+    if #cookie_header > MICRO_COOKIE_MAX then return false, "cookie-size" end
     for pair in cookie_header:gmatch("[^;]+") do
-        local name = pair:match("^%s*([^=]-)%s*=") or pair:match("^%s*(.-)%s*$")
+        local name = cookie_name(pair)
         if name and name ~= "" then
             local lname = cookie_key(name)
             if name_matches(lname, MICRO_AUTH_EXACT, MICRO_AUTH_PREFIX, MICRO_AUTH_SUFFIX)
@@ -713,8 +738,8 @@ end
 -- greppable token for the observe header and a future stat key.
 --
 -- r is a table of request facets: method, uri (the path), args, host, cookie,
--- auth (Authorization), range (Range), accept (Accept), fragment (the first
--- partial-page request header present). Besides the rails
+-- auth (Authorization), range (Range), accept (Accept), fragment (truthy when
+-- a partial-page request header is present). Besides the rails
 -- below, it bypasses:
 --   * a Range request — nginx strips Range upstream when caching and fetches
 --     the whole page; micro is for plain page loads;
@@ -752,7 +777,7 @@ local function micro_decision(pol, r)
     if type(r.accept) == "string" and r.accept:lower():find("text/event-stream", 1, true) then
         return false, nil, "event-stream"
     end
-    if type(r.fragment) == "string" and r.fragment ~= "" then
+    if r.fragment then
         return false, nil, "fragment"
     end
     if micro_path_blocked(r.uri) or micro_args_blocked(r.args) then
@@ -911,8 +936,11 @@ local function micro_verdict(p)
         method = v.request_method, uri = v.uri, args = v.args, host = v.host,
         cookie = v.http_cookie, auth = v.http_authorization,
         range = v.http_range, accept = v.http_accept,
-        fragment = v.http_x_requested_with or v.http_x_pjax or v.http_hx_request
-            or v.http_turbo_frame or v.http_x_inertia,
+        -- present counts, empty or not (an empty header is still "set" to the
+        -- app, and a Lua `or` chain would stop at "")
+        fragment = v.http_x_requested_with ~= nil or v.http_x_pjax ~= nil
+            or v.http_hx_request ~= nil or v.http_turbo_frame ~= nil
+            or v.http_x_inertia ~= nil,
     })
     if ok and uncacheable_marked() then return false, nil, "uncacheable" end
     return ok, bucket, why
@@ -1051,12 +1079,14 @@ end
 --     live conf — one without the origin Cache-Control / X-Accel-Expires rails
 --     and with background updates on — lacks it, so newer Lua never routes
 --     into its locations.
---   * an internal redirect: a redirect to a named location (error_page … =
---     @x, ngx.exec("@x")) keeps the sentinel variable in the target location.
---     (A redirect to a URI re-runs the server-level "" default; `rewrite …
---     last` in `location /` and ngx.req.set_uri(…, true) keep it without making
---     the request internal — check_site_cache_config.sh forbids rewrite in
---     `location /` and rewrite_by_lua* in it and at server / http level.)
+--   * an internal redirect: the sentinel variable survives a redirect to a
+--     named location (error_page … = @x, ngx.exec("@x")), a `rewrite … last`
+--     and ngx.req.set_uri(…, true) into the target location, and all of them
+--     make the request internal (verified), so this check refuses them. (A
+--     redirect to a URI also re-runs the server-level "" default.)
+--     check_site_cache_config.sh additionally keeps `location /` free of
+--     rewrite / try_files / error_page and of rewrite_by_lua* (in it, at its
+--     server and at http level).
 --   * nginx core older than 1.23: it exposes only the FIRST of several
 --     Cache-Control headers in $upstream_http_cache_control, so a `private` on
 --     a second line would not reach $cfm_cc_nostore.
