@@ -375,8 +375,52 @@ if ! diff <(micro_blocks "$ORT") <(micro_blocks "$ANG") >/dev/null 2>&1; then
   diff <(micro_blocks "$ORT") <(micro_blocks "$ANG") 2>/dev/null | sed 's/^/       /' >&2 || true
 fi
 
+# ── (g) cache-dir provisioning parity: the dirs the confs cache into must be
+# exactly the dirs that get provisioned. They are created in two places — the
+# daemon (cmd/cfm/site_cache_dirs.go, every start) and the packaging/installer
+# helper (scripts/cfm-cache-dirs.sh, before any `-t`) — and a zone whose dir is
+# missing fails `-t` with [emerg] (the packaged conf is then not deployed), so
+# the three lists must never drift. Each extraction must also find something:
+# an empty list means the anchor moved, which fails rather than compares empty.
+conf_dirs() {
+  grep -E '^[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/' "$1" \
+    | sed -E 's#^[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/([^[:space:]/]+).*#\1#' | sort -u
+}
+HELPER=scripts/cfm-cache-dirs.sh
+GODIRS=cmd/cfm/site_cache_dirs.go
+helper_dirs=$( { sed -n 's/^CFM_CACHE_DIRS="\(.*\)"$/\1/p' "$HELPER" 2>/dev/null || true; } | tr ' ' '\n' | sed '/^$/d' | sort -u)
+go_dirs=$(awk '/^var siteCacheDirNames = \[\]string\{/ { in_=1; next } in_ && /^\}/ { in_=0 } in_' "$GODIRS" 2>/dev/null | sed -n 's/^[[:space:]]*"\([^"]*\)",[[:space:]]*$/\1/p' | sort -u)
+ort_dirs=$(conf_dirs "$ORT"); ang_dirs=$(conf_dirs "$ANG")
+[ -n "$helper_dirs" ] || err "$HELPER: no CFM_CACHE_DIRS=\"…\" list found — cannot verify the provisioned cache dirs."
+# Pin what the lists are relative to, and that they are the ONLY source: every
+# proxy_cache_path (any path) must be an unquoted /var/cache/nginx/<name>, both
+# provisioners must use /var/cache/nginx as their root, the helper must assign
+# its list exactly once and loop over it.
+for f in "$ORT" "$ANG"; do
+  bad_paths=$(grep -nE '^[[:space:]]*proxy_cache_path[[:space:]]' "$f" | grep -vE '^[0-9]+:[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/[A-Za-z0-9_]+[[:space:]]' || true)
+  [ -z "$bad_paths" ] || err "$f: a proxy_cache_path is not an unquoted /var/cache/nginx/<name> — nothing provisions its dir, so -t fails with [emerg]: $(tr '\n' ' ' <<< "$bad_paths")"
+done
+[ "$(grep -v '^[[:space:]]*#' "$HELPER" 2>/dev/null | grep -c 'CFM_CACHE_DIRS=' || true)" = "1" ] || err "$HELPER: CFM_CACHE_DIRS must be assigned exactly once (the parity check reads that one line)."
+grep -Eq '^ROOT=\$\{1:-/var/cache/nginx\}$' "$HELPER" || err "$HELPER: ROOT must default to /var/cache/nginx (ROOT=\${1:-/var/cache/nginx})."
+grep -Eq '^for n in \$CFM_CACHE_DIRS; do$' "$HELPER" || err "$HELPER: the provisioning loop must iterate \$CFM_CACHE_DIRS (for n in \$CFM_CACHE_DIRS; do)."
+grep -Eq '^const siteCacheRoot = "/var/cache/nginx"$' "$GODIRS" || err "$GODIRS: siteCacheRoot must be \"/var/cache/nginx\"."
+[ -n "$go_dirs" ] || err "$GODIRS: no siteCacheDirNames list found — cannot verify the daemon's cache dirs."
+[ -n "$ort_dirs" ] || err "$ORT: no proxy_cache_path under /var/cache/nginx found."
+if [ "$helper_dirs" != "$ort_dirs" ]; then
+  err "$HELPER provisions a different set of cache dirs than $ORT caches into (a missing one fails -t with [emerg]). Divergence:"
+  diff <(printf '%s\n' "$ort_dirs") <(printf '%s\n' "$helper_dirs") 2>/dev/null | sed 's/^/       /' >&2 || true
+fi
+if [ "$go_dirs" != "$ort_dirs" ]; then
+  err "$GODIRS (daemon) provisions a different set of cache dirs than $ORT caches into. Divergence:"
+  diff <(printf '%s\n' "$ort_dirs") <(printf '%s\n' "$go_dirs") 2>/dev/null | sed 's/^/       /' >&2 || true
+fi
+if [ "$ang_dirs" != "$ort_dirs" ]; then
+  err "$ANG and $ORT cache into different dirs. Divergence:"
+  diff <(printf '%s\n' "$ort_dirs") <(printf '%s\n' "$ang_dirs") 2>/dev/null | sed 's/^/       /' >&2 || true
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "[site-cache-config] FAILED — see errors above (invariant: caching is bypass-by-default; the gate must come from Lua)." >&2
   exit 1
 fi
-echo "[site-cache-config] OK: cfm_static zone declared, Tier B micro buckets {1,2,5,10,30,60}s (zone + internal @cfm_micro_<n>s location) declared in both confs, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered + (micro) internal, only-200 rail (\$cfm_cache_non200) enforced, request-identity rails (\$cfm_req_auth bypass + map, full g\$cfm_cache_gen|\$server_addr|\$scheme|\$cf_xfp:// key, per-tier lock_timeout, forwarded headers pinned) on every cache location, every location + every proxy_cache directive accounted for, Set-Cookie/Vary/Cache-Control never ignored, GET/HEAD-only cache methods, openresty↔angie parity ($ort_n static locations)."
+echo "[site-cache-config] OK: cfm_static zone declared, Tier B micro buckets {1,2,5,10,30,60}s (zone + internal @cfm_micro_<n>s location) declared in both confs, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered + (micro) internal, only-200 rail (\$cfm_cache_non200) enforced, request-identity rails (\$cfm_req_auth bypass + map, full g\$cfm_cache_gen|\$server_addr|\$scheme|\$cf_xfp:// key, per-tier lock_timeout, forwarded headers pinned) on every cache location, every location + every proxy_cache directive accounted for, cache dirs provisioned by the daemon and cfm-cache-dirs.sh == the proxy_cache_path dirs, Set-Cookie/Vary/Cache-Control never ignored, GET/HEAD-only cache methods, openresty↔angie parity ($ort_n static locations)."

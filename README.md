@@ -945,7 +945,8 @@ they differ in a few practical places:
 | Core packages | `openresty`, `openresty-openssl3`, `openresty-opm` | `angie`, `angie-module-lua` (pulls `angie-module-ndk`) |
 | Extra resty libs | Fetched at install time via `opm get` (`lua-resty-http`, `lua-resty-string`, `lua-resty-maxminddb`) | Bundled in `angie-module-lua` except `lua-resty-maxminddb`, which the script `git clone`s into `/etc/angie/lualib/resty/` |
 | Self-signed fallback cert | `/var/lib/cfm/certs/selfsigned/` | `/var/lib/cfm/certs/selfsigned/` |
-| Temp / cache dir chown | Inherited from OpenResty package (usually fine) | Explicit chown of `/var/lib/cfm/nginx/*` and `/var/log/angie/` to `cfm:cfm` (the Angie package creates log dirs as `angie:angie` by default), plus `/var/cache/nginx/cfm_{static,micro}` to `root:cfm` (Site Cache, matching the daemon) |
+| Temp dir chown | Explicit `cfm:cfm 0700` for `/var/lib/cfm/nginx/{client_body_temp,proxy_temp}` | Explicit chown of `/var/lib/cfm/nginx/*` and `/var/log/angie/` to `cfm:cfm` (the Angie package creates log dirs as `angie:angie` by default) |
+| Site Cache dirs | `/var/cache/nginx` (traversable, created 0755) with `cfm_static` + `cfm_micro_{1,2,5,10,30,60}s` as `root:cfm 0770`, created (and an unusable tree purged) by `scripts/cfm-cache-dirs.sh` before `-t` — the same helper the `.deb`/`.rpm` scripts run | same |
 | Config validation before deploy | `openresty -t -p <prefix> -c <src>` before copy | `angie -t -p /etc/angie -c <src>` before copy |
 | Idempotent (safe to re-run) | Yes | Yes |
 | Touches the other backend | No | No — both can coexist on disk, only one may run at a time (port collision on `:9080`/`:9043`) |
