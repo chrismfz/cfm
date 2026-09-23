@@ -207,15 +207,27 @@ func (b *Backend) ListSetElementsTimed(setName string) ([]firewall.SetElementTim
 						val = strings.TrimSpace(toStr(inner["prefix"]))
 					}
 					if val != "" {
-						out = append(out, firewall.SetElementTimed{Elem: val, Expires: parseExpires(inner["expires"])})
+						out = append(out, firewall.SetElementTimed{Elem: val, Expires: elemExpires(inner)})
 					}
 				} else if val := strings.TrimSpace(toStr(v["elem"])); val != "" {
-					out = append(out, firewall.SetElementTimed{Elem: val, Expires: parseExpires(v["expires"])})
+					out = append(out, firewall.SetElementTimed{Elem: val, Expires: elemExpires(v)})
 				}
 			}
 		}
 	}
 	return out, nil
+}
+
+// elemExpires is an element's remaining time. nft prints expires in whole
+// seconds, so an element with a timeout in its last second shows
+// "expires": 0 (or none) — which must not read as "no timeout", i.e.
+// permanent: it is about to go.
+func elemExpires(elem map[string]any) time.Duration {
+	left := parseExpires(elem["expires"])
+	if left == 0 && parseExpires(elem["timeout"]) > 0 {
+		return time.Millisecond
+	}
+	return left
 }
 
 // parseExpires accepts the nft JSON forms for an element's remaining TTL:
