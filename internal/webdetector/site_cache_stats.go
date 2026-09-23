@@ -39,10 +39,9 @@ func newSiteCacheStatsStore() *siteCacheStatsStore {
 // of which the policy store holds at most maxSiteCacheEntries (the cap used to
 // be 4096, so past that some armed vhosts never got a row), and counts only
 // the fixed set of cache statuses (cfm_cache_log.lua VALID) — any other key is
-// dropped, not stored. maxSiteCacheHostLen is the DNS name limit.
+// dropped, not stored; a key longer than maxSiteCacheHostLen too.
 const (
 	maxSiteCacheStatsHosts = maxSiteCacheEntries
-	maxSiteCacheHostLen    = 253
 	siteCacheStatsPruneGap = 5 * time.Minute
 )
 
@@ -85,8 +84,9 @@ func (s *siteCacheStatsStore) Upsert(host string, counts map[string]int) {
 // maybePrune drops, at most once per siteCacheStatsPruneGap, the rows of keys
 // armed() no longer holds. The edge dict keeps a vhost's counts until an edge
 // reload, and the read paths already hide unarmed rows, but without this the
-// rows of every policy ever armed stayed in memory until a daemon restart.
-// armed is called only when a prune is due.
+// rows of every policy ever armed stayed in memory until a daemon restart. It
+// runs on every pushed row and on the list read (so also once the edge stops
+// pushing); armed is called only when a prune is due.
 func (s *siteCacheStatsStore) maybePrune(now time.Time, armed func() map[string]struct{}) int {
 	s.mu.Lock()
 	if now.Sub(s.lastPrune) < siteCacheStatsPruneGap {
@@ -116,11 +116,13 @@ func (e *Engine) ingestSiteCacheStats(host string, counts map[string]int) {
 	if e == nil || e.siteCacheStats == nil || e.siteCache == nil {
 		return
 	}
+	// Prune first: once the last policy is disarmed every pushed row is
+	// rejected below, and the stale rows must still go.
+	e.siteCacheStats.maybePrune(time.Now(), e.armedCacheKeys)
 	if !e.siteCache.ArmedKey(host) {
 		return
 	}
 	e.siteCacheStats.Upsert(host, counts)
-	e.siteCacheStats.maybePrune(time.Now(), e.armedCacheKeys)
 }
 
 // Get returns a copy of one host's counts (nil if never seen).
@@ -266,6 +268,7 @@ func (e *Engine) SiteCacheStatsAll() []SiteCacheStatsRow {
 	if e == nil || e.siteCacheStats == nil {
 		return nil
 	}
+	e.siteCacheStats.maybePrune(time.Now(), e.armedCacheKeys) // also when the edge stopped pushing (SITE_CACHE=0)
 	armed := e.armedCacheKeys()
 	hosts := e.siteCacheStats.Hosts()
 	out := make([]SiteCacheStatsRow, 0, len(hosts))

@@ -1221,14 +1221,17 @@ func TestSiteCacheStore_InvalidStoredHost(t *testing.T) {
 func TestSiteCacheAuthCookieValidation(t *testing.T) {
 	s := newSiteCacheTestStore(t)
 	on := &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("micro_safe")}
-	ok := []string{"wp_session", "PHPSESSID", "my-app.sid", "a!#$%&'*+-.^_`|~b"}
+	// Anything the edge can match is accepted — the edge takes a cookie's name
+	// up to "=" or whitespace in a ";"-split pair — incl. names RFC 6265 would
+	// not call a token (PHP array cookies, commas, quotes, UTF-8).
+	ok := []string{"wp_session", "PHPSESSID", "my-app.sid", "a!#$%&'*+-.^_`|~b", "cart[id]", "a,b", `"quoted"`, "ünicode", strings.Repeat("c", 256)}
 	e, err := s.Apply(SiteCachePatch{Host: "a.com", Micro: on, AuthCookies: &ok}, false)
 	if err != nil || len(e.AuthCookies) != len(ok) {
 		t.Fatalf("valid cookie names: %v %v", err, e.AuthCookies)
 	}
 	for _, bad := range [][]string{
-		{"has space"}, {"a=b"}, {"a;b"}, {"a,b"}, {`"quoted"`}, {"tab\tname"}, {"ünicode"},
-		{strings.Repeat("c", 129)},
+		{"has space"}, {"a=b"}, {"a;b"}, {"tab\tname"}, {"ctl\x01"}, {"nbsp\u00a0x"},
+		{strings.Repeat("c", 257)},
 	} {
 		if _, err := s.Apply(SiteCachePatch{Host: "a.com", AuthCookies: &bad}, false); err == nil {
 			t.Errorf("cookie names %q accepted", bad)
@@ -1262,5 +1265,36 @@ func TestSiteCacheAuditLine(t *testing.T) {
 	got = formatSiteCacheAudit(r.WithContext(scopedCtx(many...)), "remove", "h1.com\n[fake] x", "denied", "")
 	if !strings.Contains(got, `actor=scoped:h1.com,h2.com,h3.com,h4.com,h5.com,…(+2)`) || strings.Contains(got, "\n") {
 		t.Fatalf("scoped line (capped actor, no raw newline): %s", got)
+	}
+	// a caller-supplied field is bounded (a host can be ~1 MiB of header)
+	got = formatSiteCacheAudit(r.WithContext(adminCtx()), "remove", strings.Repeat("h", 100000), "notfound", strings.Repeat("d", 100000))
+	if len(got) > 2000 || !strings.Contains(got, "(+99744 bytes)") || !strings.Contains(got, "(+99488 bytes)") {
+		t.Fatalf("audit fields not clipped: %d bytes: %.200s", len(got), got)
+	}
+}
+
+// A stored opt-out whose host this build rejects but nginx can still serve (a
+// label ending in "-") keeps opting that host out: the frozen row fails
+// closed, it does not hand the host to a covering admin wildcard.
+func TestSiteCacheStore_FrozenInvalidHostStillOptsOut(t *testing.T) {
+	path := writeSiteCacheStoreFile(t, `[
+	 {"host":"*.example.com","generation":1758585600001,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"foo-.example.com","generation":1758585600002,"static":{"enabled":false,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"a b.example.com","generation":1758585600003,"static":{"enabled":false},"micro":{"enabled":false}}]`)
+	s := newSiteCacheStore(path)
+	var optOut bool
+	for _, r := range s.PolicyFeed() {
+		if r.Host == "foo-.example.com" && r.Static == nil && r.Micro == nil {
+			optOut = true
+		}
+		if strings.Contains(r.Host, " ") {
+			t.Fatalf("an edge-unmatchable host reached the feed: %q", r.Host)
+		}
+	}
+	if !optOut {
+		t.Fatalf("the frozen invalid-host opt-out is gone from the feed: %+v", s.PolicyFeed())
+	}
+	if key, ok := s.StatsKeyFor("foo-.example.com"); ok {
+		t.Fatalf("an opted-out host resolved to %q", key)
 	}
 }

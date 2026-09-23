@@ -39,9 +39,9 @@ import (
 type siteCacheListResponse struct {
 	Rows []SiteCacheEntry `json:"rows"`
 	// Unloadable lists the hosts of stored policies this build cannot load (a
-	// newer build's recipe or field, after a downgrade) that have no row in
-	// Rows: the edge treats each as OPTED OUT (never cached), not as "no
-	// entry". Scope-filtered like Rows.
+	// newer build's recipe or field after a downgrade, or a host this version
+	// no longer accepts) that have no row in Rows: the edge treats each as
+	// OPTED OUT (never cached), not as "no entry". Scope-filtered like Rows.
 	Unloadable []string `json:"unloadable,omitempty"`
 }
 
@@ -194,7 +194,7 @@ func (e *Engine) handleSiteCacheRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no cache policy for host"})
 		return
 	}
-	logSiteCacheAudit(r, "remove", host, "ok", "")
+	logSiteCacheAudit(r, "remove", siteCacheCanonHost(host), "ok", "")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -242,9 +242,12 @@ func (e *Engine) handleSiteCachePurge(w http.ResponseWriter, r *http.Request) {
 }
 
 // logSiteCacheAudit writes the Site Cache lifecycle trail to cfm.log: every
-// set / remove / purge / purge-all — and every refused one (out of scope,
-// admin-only, invalid) — with WHO (admin, or the scoped token's vhosts), from
-// where and what resulted. A policy decides what the edge caches, a scoped
+// authenticated set / remove / purge / purge-all that names a host (or all) —
+// including those refused for scope, admin-only or validation — with WHO
+// (admin, or the scoped token's vhosts), from where and what resulted. Not
+// logged: unauthenticated calls (no identity to record) and bodies that fail
+// before naming a host (invalid JSON, no host). result=notfound is also what
+// a failed save of a remove/purge reports (the store logs the failure itself). A policy decides what the edge caches, a scoped
 // tenant may change its own, and an opt-out or an edit of a `*.x` pattern a
 // token's scope holds changes what an admin wildcard does, so each change
 // must be reconstructable afterwards (the exclude/clam precedent). The CLI
@@ -260,7 +263,13 @@ func formatSiteCacheAudit(r *http.Request, action, host, result, detail string) 
 	if scope := vhostScopeFromContext(r.Context()); scope != nil {
 		hosts := make([]string, 0, len(scope))
 		for h := range scope {
-			hosts = append(hosts, h)
+			// a scope host is admin-minted, but keep it one field anyway
+			hosts = append(hosts, strings.Map(func(r rune) rune {
+				if r <= ' ' || r == '"' || r == 0x7f {
+					return '_'
+				}
+				return r
+			}, h))
 		}
 		sort.Strings(hosts)
 		if len(hosts) > 5 { // a large token scope must not balloon every line
@@ -268,11 +277,20 @@ func formatSiteCacheAudit(r *http.Request, action, host, result, detail string) 
 		}
 		actor = "scoped:" + strings.Join(hosts, ",")
 	}
-	line := fmt.Sprintf("[site_cache] action=%s host=%q result=%s actor=%s remote=%s", action, host, result, actor, r.RemoteAddr)
+	line := fmt.Sprintf("[site_cache] action=%s host=%q result=%s actor=%s remote=%s", action, siteCacheAuditClip(host, 256), result, actor, r.RemoteAddr)
 	if detail != "" {
-		line += fmt.Sprintf(" detail=%q", detail)
+		line += fmt.Sprintf(" detail=%q", siteCacheAuditClip(detail, 512))
 	}
 	return line
+}
+
+// siteCacheAuditClip bounds a caller-supplied audit field: a request can carry
+// a host of up to the header limit (~1 MiB), and a scoped token may repeat it.
+func siteCacheAuditClip(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + fmt.Sprintf("…(+%d bytes)", len(s)-max)
 }
 
 // siteCacheAuditState summarises a stored policy for the audit line.
@@ -296,9 +314,15 @@ func siteCacheAuditState(e SiteCacheEntry) string {
 func (e *Engine) siteCacheNoPolicyMsg(host string) string {
 	if h := siteCacheCanonHost(host); h != "" {
 		for _, f := range e.SiteCacheFrozenHosts() {
-			if f == h {
-				return siteCacheUnloadableMsg + "; remove it, turn it off (which replaces it), or upgrade"
+			if f != h {
+				continue
 			}
+			if siteCacheHostError(h) != nil {
+				// `off` would be rejected (an invalid host for a new policy),
+				// and a newer build would not read it either.
+				return siteCacheUnloadableMsg + "; its host is not valid in this version: remove it"
+			}
+			return siteCacheUnloadableMsg + "; remove it, turn it off (which replaces it), or upgrade"
 		}
 	}
 	return "no cache policy for host"

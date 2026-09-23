@@ -397,3 +397,64 @@ func TestNginxBridge_CacheStatsPushIsOneHookEvent(t *testing.T) {
 		t.Fatalf("delivered %d rows, want %d (the cap)", got, maxSiteCacheEntries)
 	}
 }
+
+// Only the canonical policy key is a stats key: "a.com:1", "a.com." … would
+// each take a row of the cap.
+func TestSiteCacheStats_ArmedKeyCanonicalOnly(t *testing.T) {
+	e, _ := newSiteCacheAPITestEngine(t)
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "armed.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	for _, k := range []string{"armed.com:1", "armed.com.", "armed.com:8080"} {
+		e.ingestSiteCacheStats(k, map[string]int{"HIT": 1})
+	}
+	e.ingestSiteCacheStats("ARMED.com", map[string]int{"HIT": 2}) // case only: the same key
+	if h := e.siteCacheStats.Hosts(); len(h) != 1 || h["armed.com"]["HIT"] != 2 {
+		t.Fatalf("stored %v, want only armed.com", h)
+	}
+}
+
+// Stale rows go even when no armed row arrives any more (the last policy was
+// disarmed, or the edge stopped pushing): every pushed row and every list read
+// runs the due prune.
+func TestSiteCacheStats_PruneWithoutArmedRows(t *testing.T) {
+	e, _ := newSiteCacheAPITestEngine(t)
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "a.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	e.ingestSiteCacheStats("a.com", map[string]int{"HIT": 1})
+	e.siteCache.Remove("a.com")
+	due := func() {
+		e.siteCacheStats.mu.Lock()
+		e.siteCacheStats.lastPrune = time.Now().Add(-2 * siteCacheStatsPruneGap)
+		e.siteCacheStats.mu.Unlock()
+	}
+	due()
+	e.ingestSiteCacheStats("a.com", map[string]int{"HIT": 5}) // rejected, but prunes
+	if n := len(e.siteCacheStats.Hosts()); n != 0 {
+		t.Fatalf("%d stale rows after a push of only unarmed rows", n)
+	}
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "b.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	e.ingestSiteCacheStats("b.com", map[string]int{"HIT": 1})
+	e.siteCache.Remove("b.com")
+	due()
+	_ = e.SiteCacheStatsAll() // no push at all: the read prunes
+	if n := len(e.siteCacheStats.Hosts()); n != 0 {
+		t.Fatalf("%d stale rows after a read", n)
+	}
+}
+
+// One panicking row does not drop the rest of its push.
+func TestNginxBridge_CacheStatsRowPanicIsolated(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	var got []string
+	b.SetCacheStatsHook(func(host string, counts map[string]int) {
+		if host == "boom.com" {
+			panic("row")
+		}
+		got = append(got, host)
+	})
+	req := httptest.NewRequest(http.MethodPost, "/nginx/cache/stats", strings.NewReader(`{"rows":[
+	 {"host":"a.com","counts":{"HIT":1}},{"host":"boom.com","counts":{"HIT":1}},{"host":"c.com","counts":{"HIT":1}}]}`))
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleCacheStats(httptest.NewRecorder(), req) // no dispatcher: runs inline
+	if strings.Join(got, ",") != "a.com,c.com" {
+		t.Fatalf("delivered %v, want a.com,c.com", got)
+	}
+}

@@ -59,9 +59,12 @@ function _M.snapshot_vhosts()
   local d = ngx.shared.cfm_cache_stats
   if not d then return {} end
   local out = {}
-  -- 0 would warn + cap at 1024. Each armed vhost uses ~ (#statuses) keys, so
-  -- 8000 covers ~1000+ armed vhosts; beyond that a vhost is simply not reported
-  -- (absent), never reported with wrong (partial) counts.
+  -- 0 would warn + cap at 1024. A KEY bound, not a vhost bound: each armed
+  -- vhost uses up to #statuses keys and the budget also holds zone/throttle
+  -- keys and the stale keys of disarmed vhosts, so past roughly 1000-2600
+  -- armed vhosts some vhosts are left out — and a cut can fall inside one
+  -- vhost's keys, pushing it with PARTIAL counts (docs/site-cache-design.md
+  -- §11 "Bounds").
   local keys = d:get_keys(8000)
   for _, k in ipairs(keys) do
     local h, st = k:match("^cache:vhost:(.+):status:([A-Z]+)$")

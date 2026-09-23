@@ -19,8 +19,9 @@ back-filled here — see the git/PR history for that period.
 
 ### Added
 - **Site Cache changes are now in `cfm.log`.** Every set / remove / purge /
-  purge-all of a Site Cache policy — and every refused one (another tenant's
-  vhost, an invalid host, a non-admin purge-all) — writes one
+  purge-all of a Site Cache policy by an authenticated caller — including the
+  refused ones (another tenant's vhost, an invalid host or cookie name, a
+  non-admin purge-all) — writes one
   `[site_cache] action=… host=… result=… actor=admin|scoped:<vhosts> remote=…`
   line, with the resulting tiers and generation on a set. A policy decides
   what the edge caches and a cPanel user may change their own, so every
@@ -94,18 +95,23 @@ back-filled here — see the git/PR history for that period.
   policy host must be a DNS-style name (labels of `[a-z0-9_-]`, ≤ 63 characters,
   ≤ 253 in all; an internationalized name in its `xn--` form) or `*.` over one
   with at least two labels — `*.com` would have armed every `.com` vhost on the
-  node. `auth_cookies` must be cookie-name tokens: a name with a space, `=`,
-  `;` or `,` could never match at the edge, so the bypass it promised silently
-  never fired. More than 32 names is now an error; the extra ones used to be
-  dropped silently. A stored policy with a host that no longer validates is
-  kept and not served (listed as unloadable); `remove <host>` deletes it.
-- **Site Cache stats: every armed vhost gets stats, and stale rows go away.**
+  node. An `auth_cookies` name with whitespace, `=`, `;` or a control
+  character could never match at the edge (it reads a cookie's name up to `=`
+  or whitespace), so the bypass it promised silently never fired: it is now an
+  error, and so are more than 32 names (the extra ones used to be dropped
+  silently). A stored policy that fails these rules is kept but not served
+  (listed as unloadable), and its vhost stays opted out rather than falling
+  to a covering wildcard; `remove <host>` deletes it.
+- **Site Cache stats: no rows lost in the daemon, and stale rows go away.**
   A stats push of more than a few thousand rows could overflow the daemon's
-  hook queue and lose rows, and pushes were capped at 4096 vhosts while a
-  node can hold 5000 policies. A push is now handled as one event, capped at
-  the policy limit. The daemon now keeps rows only for vhosts that are
-  armed, only the known cache statuses, and drops the rows of disarmed
-  vhosts within 5 minutes (they used to stay in memory until a restart).
+  hook queue and lose rows, and the daemon took at most 4096 vhosts per push
+  while a node can hold 5000 policies. A push is now handled as one event,
+  capped at the policy limit. The daemon now keeps rows only for vhosts that
+  are armed, only the known cache statuses, and drops the rows of disarmed
+  vhosts within about 5 minutes (they used to stay in memory until a
+  restart). Not changed yet: the edge reads at most 8000 stats keys per push,
+  so on a node with more than ~1000 armed vhosts some can still be missing
+  from a push, or pushed with partial counts.
 - **Site Cache: a purge can no longer be undone by removing and re-adding a
   vhost.** The purge generation (part of the cache key) restarted at 0 for a
   re-added vhost, so objects cached under an earlier generation — static

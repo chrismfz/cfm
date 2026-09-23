@@ -4177,7 +4177,8 @@ func (e *Engine) SiteCacheGet(host string) (SiteCacheEntry, bool) {
 }
 
 // SiteCacheFrozenHosts lists the hosts of stored policies this build cannot
-// load (each treated as an opt-out at the edge; see siteCacheStore.frozen).
+// load — a newer build's, or with a host this version no longer accepts —
+// each treated as an opt-out at the edge (see siteCacheStore.frozen).
 func (e *Engine) SiteCacheFrozenHosts() []string {
 	if e == nil || e.siteCache == nil {
 		return nil

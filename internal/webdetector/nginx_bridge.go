@@ -2710,9 +2710,10 @@ func (b *NginxBridge) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	// Cap body size — armed vhosts are few and each row is a small map, so a
-	// legit push is tiny; this ceiling only stops a compromised edge streaming
-	// a huge array.
+	// Cap body size — each row is a small map and the edge reads at most 8000
+	// stats keys per push (cfm_cache_log.lua snapshot_vhosts), so a legit push
+	// stays far below this; the ceiling only stops a compromised edge
+	// streaming a huge array.
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 
 	var msg nginxCacheStatsMsg
@@ -2731,7 +2732,16 @@ func (b *NginxBridge) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		fn := b.OnCacheStats
 		b.dispatchHook(func() {
 			for i := range rows {
-				fn(rows[i].Host, rows[i].Counts)
+				// Per row: one panicking row must not drop the rest of the
+				// push (the drainer recovers per event, and this is one).
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							logging.Logf("[nginx_bridge] cache stats hook panic on %q: %v", rows[i].Host, r)
+						}
+					}()
+					fn(rows[i].Host, rows[i].Counts)
+				}()
 			}
 		})
 	}
