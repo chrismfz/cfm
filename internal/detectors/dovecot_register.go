@@ -12,7 +12,7 @@ import (
 )
 
 // shared state for detectors
-var dovecotState, _ = core.LoadState("")
+var dovecotState = core.DefaultState()
 
 // dovecot_auth source candidates for srcresolve (first = historical default).
 // File candidates mirror the old guessMailLog() order (syslog mail logs — the

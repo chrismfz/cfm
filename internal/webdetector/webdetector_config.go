@@ -2,9 +2,34 @@
 package webdetector
 
 import (
+	"path/filepath"
 	"strings"
 	"time"
 )
+
+// defaultStateDir and defaultLogDir are where FillDefaults puts every store and
+// log path a Config leaves empty. They are vars so a test binary can point them
+// at a temp dir before any Engine is built: tests build engines from sparse
+// Configs, and with literal defaults every one of them read and wrote the LIVE
+// stores — a test run as root on a CFM node replaced the operator's manual
+// challenges and WAF excludes with test data. Production never changes them.
+var (
+	defaultStateDir = "/var/lib/cfm"
+	defaultLogDir   = "/var/log/cfm"
+)
+
+// SetDefaultDirsForTest points every store and log path a Config leaves empty
+// at dir, for tests in OTHER packages that build an Engine (this package's own
+// tests are redirected once, in TestMain), and restores the production defaults
+// at cleanup. t is anything with Cleanup, so this file needn't import testing.
+func SetDefaultDirsForTest(t interface{ Cleanup(func()) }, dir string) {
+	prevState, prevLog := defaultStateDir, defaultLogDir
+	defaultStateDir, defaultLogDir = dir, dir
+	t.Cleanup(func() { defaultStateDir, defaultLogDir = prevState, prevLog })
+}
+
+func defaultStatePath(name string) string { return filepath.Join(defaultStateDir, name) }
+func defaultLogPath(name string) string   { return filepath.Join(defaultLogDir, name) }
 
 type IPScoreRule struct {
 	Action   string
@@ -376,43 +401,43 @@ func (c *Config) FillDefaults() {
 		c.APIListen = "127.0.0.1:9070"
 	}
 	if c.ChallengeExcludeStorePath == "" {
-		c.ChallengeExcludeStorePath = "/var/lib/cfm/webdetector_challenge_excludes.json"
+		c.ChallengeExcludeStorePath = defaultStatePath("webdetector_challenge_excludes.json")
 	}
 	if c.WAFExcludeStorePath == "" {
-		c.WAFExcludeStorePath = "/var/lib/cfm/webdetector_waf_excludes.json"
+		c.WAFExcludeStorePath = defaultStatePath("webdetector_waf_excludes.json")
 	}
 	if c.ChallengeManualStorePath == "" {
-		c.ChallengeManualStorePath = "/var/lib/cfm/webdetector_manual_challenges.json"
+		c.ChallengeManualStorePath = defaultStatePath("webdetector_manual_challenges.json")
 	}
 	if c.ClamScanOverrideStorePath == "" {
-		c.ClamScanOverrideStorePath = "/var/lib/cfm/webdetector_clam_overrides.json"
+		c.ClamScanOverrideStorePath = defaultStatePath("webdetector_clam_overrides.json")
 	}
 	if c.ClamModeOverrideStorePath == "" {
-		c.ClamModeOverrideStorePath = "/var/lib/cfm/webdetector_clam_mode_overrides.json"
+		c.ClamModeOverrideStorePath = defaultStatePath("webdetector_clam_mode_overrides.json")
 	}
 	if c.ClamSigIgnoreStorePath == "" {
-		c.ClamSigIgnoreStorePath = "/var/lib/cfm/webdetector_clam_sigignore.json"
+		c.ClamSigIgnoreStorePath = defaultStatePath("webdetector_clam_sigignore.json")
 	}
 	if c.HTTP3OverridesStorePath == "" {
-		c.HTTP3OverridesStorePath = "/var/lib/cfm/webdetector_http3_overrides.json"
+		c.HTTP3OverridesStorePath = defaultStatePath("webdetector_http3_overrides.json")
 	}
 	if c.TrafficRulesStorePath == "" {
-		c.TrafficRulesStorePath = "/var/lib/cfm/webdetector_traffic_rules.json"
+		c.TrafficRulesStorePath = defaultStatePath("webdetector_traffic_rules.json")
 	}
 	if c.ChallengeAccessStorePath == "" {
-		c.ChallengeAccessStorePath = "/var/lib/cfm/webdetector_challenge_access.json"
+		c.ChallengeAccessStorePath = defaultStatePath("webdetector_challenge_access.json")
 	}
 	if c.SiteCacheStorePath == "" {
-		c.SiteCacheStorePath = "/var/lib/cfm/webdetector_site_cache.json"
+		c.SiteCacheStorePath = defaultStatePath("webdetector_site_cache.json")
 	}
 	if c.UAEmergencyStorePath == "" {
-		c.UAEmergencyStorePath = "/var/lib/cfm/ua_emergency.json"
+		c.UAEmergencyStorePath = defaultStatePath("ua_emergency.json")
 	}
 	if c.UAEmergencyAuditLog == "" {
-		c.UAEmergencyAuditLog = "/var/log/cfm/ua_emergency.log"
+		c.UAEmergencyAuditLog = defaultLogPath("ua_emergency.log")
 	}
 	if c.HistoryDBPath == "" {
-		c.HistoryDBPath = "/var/lib/cfm/webdetector-history.db"
+		c.HistoryDBPath = defaultStatePath("webdetector-history.db")
 	}
 	if c.HistoryPruneEvery <= 0 {
 		c.HistoryPruneEvery = time.Hour
@@ -426,7 +451,7 @@ func (c *Config) FillDefaults() {
 	// Default: write per-request challenge access lines to a separate file.
 	// This keeps cfm.challenges.log focused on higher-level [challenge] events.
 	if c.ChallengeAccessLogPath == "" {
-		c.ChallengeAccessLogPath = "/var/log/cfm/challenge.access.log"
+		c.ChallengeAccessLogPath = defaultLogPath("challenge.access.log")
 	}
 	if c.ChallengeCooldown <= 0 {
 		c.ChallengeCooldown = 10 * time.Minute

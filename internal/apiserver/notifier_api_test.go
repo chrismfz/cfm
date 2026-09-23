@@ -233,7 +233,9 @@ channels = ops
 func TestNotifierTestEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	cfg := notify.AdminConfig{
-		Notifier: notify.AdminNotifierConfig{Enabled: true},
+		// The test send appends to the notifier history: keep it in the temp
+		// dir, not the default live /var/lib/cfm/notify.log.jsonl.
+		Notifier: notify.AdminNotifierConfig{Enabled: true, JSONLPath: filepath.Join(dir, "notify.log.jsonl")},
 		Channels: []notify.AdminChannelConfig{
 			{ID: "missing-bin", Type: "sendmail", Enabled: true, Path: "/definitely/missing/sendmail", To: []string{"ops@example.test"}},
 		},

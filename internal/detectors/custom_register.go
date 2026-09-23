@@ -14,7 +14,7 @@ import (
 	"cfm/internal/logging"
 )
 
-var customState, _ = core.LoadState("")
+var customState = core.DefaultState()
 
 type customRuleTarget uint8
 

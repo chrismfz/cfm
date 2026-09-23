@@ -70,7 +70,9 @@ locally before you push; a green diff that fails one of these wastes a round-tri
 ```bash
 go vet ./...
 go build ./...
+./scripts/tests/check_test_isolation.sh arm      # record CFM's system dirs before the Go tests (see §5)
 go test -race ./...
+./scripts/tests/check_test_isolation.sh verify   # fail if the Go tests wrote any of them
 make lua
 make test-lua
 make test-js                                     # node --test on internal/webui/static/assets/**/*.test.{js,cjs}
@@ -252,6 +254,27 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   ripgrep next to luajit, and every rg-using script hard-fails when `rg` is
   absent. Apply the same rule to any new guardrail: `|| true` may swallow "no
   matches", never "no tool".
+- **Tests never touch CFM's live system paths.** A test that builds an engine,
+  store or collector from a sparse config gets the production defaults, and
+  they used to be literals: the suite wrote the LIVE `/var/lib/cfm` files on
+  any machine it ran on as root. It replaced the operator's manual challenges,
+  added a WAF exclude, appended to the notifier history, and left a kernsec
+  rollback snapshot of TEST boot args that the host's first real apply then
+  kept instead of writing its own. CI never saw it: the runner isn't root, so
+  the writes failed silently and the tests passed. Now each such default is a
+  var the package's `TestMain` points at a temp dir (`webdetector`
+  `defaultStateDir`/`defaultLogDir` — `SetDefaultDirsForTest` for tests in
+  other packages that build an Engine — `kernsec` rollback snapshot paths,
+  `sslcollector` `defaultCacheDir`), and the detectors' init-time states no
+  longer create `detectors.state.d` (`core.DefaultState`). A new default path
+  goes through the same var, and `TestFillDefaultsPathsFollowTheRedirectableDirs`
+  fails a webdetector store added as a literal. `check_test_isolation.sh`
+  (`arm` before `go test`, `verify` after; CI first creates the four dirs
+  writable for the runner, so a regressing write succeeds and shows) catches
+  the rest. To find a writer, run the suite in a mount namespace with an
+  overlay on `/etc`, `/var` and `/run` and a tmpfs over the CFM dirs, then
+  look at what landed there. That is how these were found, without touching
+  the host.
 - **Match surrounding style.** Go packages are small and single-purpose;
   keep new code in the right package rather than widening `main.go`.
 - **`detectors.conf` scalar readers now tolerate an inline `;`/`#` comment.**

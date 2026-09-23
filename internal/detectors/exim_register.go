@@ -13,7 +13,7 @@ import (
 )
 
 // Shared state for Exim detectors
-var eximState, _ = core.LoadState("")
+var eximState = core.DefaultState()
 
 // applyEximLogPlan applies planEximLogSource's outcome (source_report.go —
 // shared with the dry-run source-resolution report; per design doc §3a exim

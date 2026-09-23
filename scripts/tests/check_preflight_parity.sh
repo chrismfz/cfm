@@ -13,7 +13,8 @@
 #
 # The check: every command CI runs (a `run:` step of security.yml) must appear
 # in BOTH copies, and neither copy may list a command CI does not run. Setup
-# steps (go version, go mod tidy, the apt-get install) are skipped explicitly;
+# steps (go version, go mod tidy, the apt-get install, the `sudo install -d`
+# of CFM's system dirs) are skipped explicitly;
 # any other new `run:` form fails until it is listed in both copies (or added
 # to the skip list here, with a reason).
 set -euo pipefail
@@ -56,8 +57,10 @@ sed -n 's/^[[:space:]]*\(-[[:space:]]*\)\{0,1\}run:[[:space:]]*//p' "$WORKFLOW" 
 if g "$tmp/blocks" -E '^[|>][+-]?$' "$tmp/ci.raw"; then
   fail "$WORKFLOW has a multi-line run: block — this guard only reads one-line run: steps; split it or extend the guard"
 fi
-# Setup steps, not gates: nothing a contributor runs as a check.
-g "$tmp/ci.f" -vE '^(go version|go mod tidy|sudo apt-get .*)$' "$tmp/ci.raw" || :
+# Setup steps, not gates: nothing a contributor runs as a check. `sudo install
+# -d` creates CFM's system dirs writable for the CI runner, which the
+# test-isolation guard needs; locally, its `arm` creates them (or says how).
+g "$tmp/ci.f" -vE '^(go version|go mod tidy|sudo apt-get .*|sudo install -d .*)$' "$tmp/ci.raw" || :
 sort -u "$tmp/ci.f" >"$tmp/ci"
 [ -s "$tmp/ci" ] || fail "extracted no CI commands from $WORKFLOW — refusing to report OK"
 

@@ -13,7 +13,7 @@ import (
 	"cfm/internal/logging"
 )
 
-var mysqlState, _ = core.LoadState("")
+var mysqlState = core.DefaultState()
 
 var (
 	pendingGovCfg   mysql.GovernorConfig

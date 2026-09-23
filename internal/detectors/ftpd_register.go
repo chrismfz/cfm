@@ -17,7 +17,7 @@ import (
 )
 
 // shared state for detectors
-var ftpdState, _ = core.LoadState("")
+var ftpdState = core.DefaultState()
 
 /*
 Autodetect strategy
