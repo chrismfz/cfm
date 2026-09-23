@@ -54,9 +54,10 @@ func (b *Backend) ruleExistsCLI(chain, needle string) bool {
 	return strings.Contains(norm(text), norm(needle))
 }
 
-// chainTextCLI is `nft list chain inet cfm <chain>`.
+// chainTextCLI is `nft list chain inet cfm <chain>`. It gets the CLI write
+// timeout: on a node with large feed sets one nft process takes seconds.
 func (b *Backend) chainTextCLI(chain string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), nftlibCLITimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "nft", "list", "chain", "inet", cfmTableName, chain) // #nosec G204
 	var stdout, stderr bytes.Buffer

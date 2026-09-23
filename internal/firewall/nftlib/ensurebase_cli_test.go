@@ -18,8 +18,9 @@ func fakeNFTChain(t *testing.T, chain string, failScripts int) (logPath string) 
 }
 
 // fakeNFTChainOpts is fakeNFTChain with a mode: "readfail" fails every chain
-// read; "commitfail" makes a failing -f run still commit its rules to the
-// chain first (as nft killed at its timeout after the kernel committed).
+// read, "rereadfail" every read after the first; "commitfail" makes a failing
+// -f run still commit its rules to the chain first (as nft killed at its
+// timeout after the kernel committed).
 func fakeNFTChainOpts(t *testing.T, chain string, failScripts int, mode string) (logPath string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -36,7 +37,8 @@ mode=$(cat "$d/mode")
 case "$*" in
 "list chain inet cfm input")
 	if [ "$mode" = readfail ]; then echo "Error: timed out" >&2; exit 1; fi
-	cat "$d/chain"; exit 0;;
+	if [ "$mode" = rereadfail ] && [ -e "$d/read1" ]; then echo "Error: timed out" >&2; exit 1; fi
+	touch "$d/read1"; cat "$d/chain"; exit 0;;
 "-f -")
 	in=$(cat); printf 'SCRIPT %%s\n' "$in" >> "$d/nft.log"
 	n=$(cat "$d/fails")
@@ -73,7 +75,7 @@ func readNFTLog(t *testing.T, p string) string {
 // node with large feed sets — ~70s per EnsureBase in production.
 func TestApplyBaseInputRules_OneReadOneWrite(t *testing.T) {
 	log := fakeNFTChain(t, "table inet cfm {\n\tchain input {\n\t\ttype filter hook input priority -50; policy accept;\n\t}\n}\n", 0)
-	(&Backend{}).applyBaseInputRules()
+	_ = (&Backend{}).applyBaseInputRules(false)
 	got := readNFTLog(t, log)
 	if n := strings.Count(got, "ARGS "); n != 2 {
 		t.Fatalf("%d nft processes, want 2 (one read, one write):\n%s", n, got)
@@ -99,7 +101,7 @@ func TestApplyBaseInputRules_OneReadOneWrite(t *testing.T) {
 		full += "\t\t" + strings.TrimPrefix(st, "add rule inet cfm input ") + "\n"
 	}
 	log = fakeNFTChain(t, full+"\t}\n}\n", 0)
-	(&Backend{}).applyBaseInputRules()
+	_ = (&Backend{}).applyBaseInputRules(false)
 	if got := readNFTLog(t, log); strings.Count(got, "ARGS ") != 1 || strings.Contains(got, "ARGS -f -") {
 		t.Errorf("want the one read and no write when every rule is present:\n%s", got)
 	}
@@ -109,7 +111,7 @@ func TestApplyBaseInputRules_OneReadOneWrite(t *testing.T) {
 func allBaseRules(t *testing.T) []string {
 	t.Helper()
 	log := fakeNFTChain(t, "", 0)
-	(&Backend{}).applyBaseInputRules()
+	_ = (&Backend{}).applyBaseInputRules(false)
 	var out []string
 	for _, line := range strings.Split(readNFTLog(t, log), "\n") {
 		line = strings.TrimSuffix(strings.TrimPrefix(line, "SCRIPT "), ";") // nftExec ends the script with ";"
@@ -126,7 +128,7 @@ func allBaseRules(t *testing.T) []string {
 // can't keep the others out (as before, each rule was its own run).
 func TestApplyBaseInputRules_FallsBackPerStatement(t *testing.T) {
 	log := fakeNFTChain(t, "", 1)
-	(&Backend{}).applyBaseInputRules()
+	_ = (&Backend{}).applyBaseInputRules(false)
 	got := readNFTLog(t, log)
 	if n := strings.Count(got, "ARGS -f -"); n != 1+31 {
 		t.Errorf("%d nft -f runs, want the failed script + 31 single statements", n)
@@ -164,9 +166,31 @@ func TestSelfSetElems(t *testing.T) {
 // for an empty one — that would add every rule a second time.
 func TestApplyBaseInputRules_UnreadChainWritesNothing(t *testing.T) {
 	log := fakeNFTChainOpts(t, "", 0, "readfail")
-	(&Backend{}).applyBaseInputRules()
-	if got := readNFTLog(t, log); strings.Contains(got, "ARGS -f -") {
-		t.Errorf("wrote rules without knowing the chain:\n%s", got)
+	err := (&Backend{}).applyBaseInputRules(false)
+	if got := readNFTLog(t, log); strings.Contains(got, "ARGS -f -") || err == nil {
+		t.Errorf("err=%v; want an error and no write without knowing the chain:\n%s", err, got)
+	}
+
+	// Unless EnsureBase just created the chain: it is empty, and leaving it so
+	// would leave the node without its allow/block rules.
+	log = fakeNFTChainOpts(t, "", 0, "readfail")
+	if err := (&Backend{}).applyBaseInputRules(true); err != nil {
+		t.Fatalf("applyBaseInputRules on a new chain: %v", err)
+	}
+	if got := readNFTLog(t, log); strings.Count(got, "ARGS -f -") != 1 || !strings.Contains(got, `iif "lo" accept`) {
+		t.Errorf("want the rules written to the new chain in one run:\n%.300s", got)
+	}
+}
+
+// A failed run whose chain can't be re-read is reported, not retried blind.
+func TestApplyBaseInputRules_FailedRunUnreadChainReports(t *testing.T) {
+	log := fakeNFTChainOpts(t, "", 1, "rereadfail")
+	err := (&Backend{}).applyBaseInputRules(false)
+	if err == nil || !strings.Contains(err.Error(), "can't re-read") {
+		t.Errorf("err = %v, want the failed run and the failed re-read reported", err)
+	}
+	if n := strings.Count(readNFTLog(t, log), "ARGS -f -"); n != 1 {
+		t.Errorf("%d nft -f runs, want just the failed one", n)
 	}
 }
 
@@ -174,7 +198,7 @@ func TestApplyBaseInputRules_UnreadChainWritesNothing(t *testing.T) {
 // replayed statement by statement: the fallback re-reads the chain first.
 func TestApplyBaseInputRules_FallbackRereadsTheChain(t *testing.T) {
 	log := fakeNFTChainOpts(t, "", 1, "commitfail")
-	(&Backend{}).applyBaseInputRules()
+	_ = (&Backend{}).applyBaseInputRules(false)
 	got := readNFTLog(t, log)
 	if n := strings.Count(got, "ARGS -f -"); n != 1 {
 		t.Errorf("%d nft -f runs, want just the one that committed (no replay):\n%.300s", n, got)

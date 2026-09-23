@@ -25,14 +25,22 @@ func (b *Backend) EnsureBase() (err error) {
 	// Split the timing so the self-test can tell contention (lock_wait) from
 	// slow kernel round-trips (nl_work) from the nft CLI part (cli_work).
 	var lockWait, nlWork, cliWork time.Duration
+	var rulesErr error // base input rules left incomplete; not fatal, but recorded
 	defer func() {
 		st := "ok"
 		if err != nil {
 			st = "fail"
 		}
-		b.recordEnsureBase(lockWait, nlWork, cliWork, err)
+		recErr := err
+		if recErr == nil {
+			recErr = rulesErr
+		}
+		b.recordEnsureBase(lockWait, nlWork, cliWork, recErr)
 		extra := fmt.Sprintf("lock_wait=%s nl_work=%s cli_work=%s",
 			lockWait.Round(time.Millisecond), nlWork.Round(time.Millisecond), cliWork.Round(time.Millisecond))
+		if rulesErr != nil {
+			extra += fmt.Sprintf(" base_rules_err=%q", rulesErr.Error())
+		}
 		b.logPhase("EnsureBase", st, time.Since(start), err, extra)
 	}()
 	// Baseline lock_wait immediately before Lock (not from `start`) so it measures
@@ -72,7 +80,9 @@ func (b *Backend) EnsureBase() (err error) {
 	// it — would fail. The priority differs whenever this process has no
 	// config (a one-shot `cfm dnat on`, which builds its backend without one)
 	// or NFT_INPUT_PRIORITY changed after the chain was created.
-	if cur := b.existingInputChain(); cur == nil {
+	cur := b.existingInputChain()
+	newChain := cur == nil
+	if cur == nil {
 		b.conn.AddChain(&nftables.Chain{
 			Table:    table,
 			Name:     "input",
@@ -183,7 +193,7 @@ func (b *Backend) EnsureBase() (err error) {
 
 	// Install base input chain rules (idempotent).
 	cliStart := time.Now()
-	b.applyBaseInputRules()
+	rulesErr = b.applyBaseInputRules(newChain)
 	cliWork = time.Since(cliStart)
 
 	return nil
@@ -241,7 +251,9 @@ func selfSetElems(local []string) (v4, v6 []string) {
 // applyBaseInputRules installs all permanent set-matching rules in the input chain.
 // Each rule is added only if it is not already present (idempotent): one read
 // of the chain, then the missing rules in one nft run (baseRulesScript).
-func (b *Backend) applyBaseInputRules() {
+// newChain says the chain was created by this EnsureBase, so it holds no rules
+// yet. The error says the rules may be incomplete; they are best effort.
+func (b *Backend) applyBaseInputRules(newChain bool) error {
 	var ins, adds []string
 	insertRule := func(expr string) { ins = append(ins, expr) }
 	addRule := func(expr string) { adds = append(adds, expr) }
@@ -325,36 +337,56 @@ func (b *Backend) applyBaseInputRules() {
 	addRule("jump flood")
 
 	// Rules are only ever added, so an unread chain must not be taken for an
-	// empty one: that would add every rule a second time. The chain exists
-	// (EnsureBase ensured it); the next EnsureBase installs what is missing.
+	// empty one — that would add every rule a second time — unless this
+	// EnsureBase just created it: then it is empty, and leaving it so would
+	// leave the node without its allow/block rules.
 	chain, err := b.chainTextCLI("input")
-	if err != nil {
-		logging.Logf("[nftlib] base input rules: can't read the input chain, leaving it as is: %v", err)
-		return
+	if err != nil && !newChain {
+		err = fmt.Errorf("can't read the input chain, left as is: %w", err)
+		logging.Logf("[nftlib] base input rules: %v", err)
+		return err
 	}
 	stmts := baseRulesScript(chain, ins, adds)
 	if len(stmts) == 0 {
-		return
+		return nil
 	}
 	err = b.nftExec(strings.Join(stmts, "\n"))
 	if err == nil {
-		return
+		return nil
 	}
 	// Best effort, as before: a statement nft refuses mustn't keep the others
 	// out. Re-read first — the run may have committed before failing (e.g.
 	// killed at its timeout), and running the statements again would
 	// duplicate them.
-	if chain, err2 := b.chainTextCLI("input"); err2 == nil {
-		stmts2 := baseRulesScript(chain, ins, adds)
-		msg := err.Error()
-		if len(msg) > 300 {
-			msg = msg[:300] + "…"
-		}
-		logging.Logf("[nftlib] base input rules: one nft run of %d statements failed, applying %d one by one: %s", len(stmts), len(stmts2), msg)
-		for _, st := range stmts2 {
-			_ = b.nftExec(st)
+	runErr := fmt.Errorf("one nft run of %d statements failed: %s", len(stmts), errTail(err, 300))
+	chain, err = b.chainTextCLI("input")
+	if err != nil {
+		err = fmt.Errorf("%v; can't re-read the input chain, left as is: %w", runErr, err)
+		logging.Logf("[nftlib] base input rules: %v", err)
+		return err
+	}
+	stmts = baseRulesScript(chain, ins, adds)
+	logging.Logf("[nftlib] base input rules: %v; applying %d one by one", runErr, len(stmts))
+	failed := 0
+	for _, st := range stmts {
+		if b.nftExec(st) != nil {
+			failed++
 		}
 	}
+	if failed > 0 {
+		return fmt.Errorf("%v; %d of %d single statements failed too", runErr, failed, len(stmts))
+	}
+	return nil
+}
+
+// errTail is the end of err's message, where nft's own reason is (nftExec
+// quotes the whole script before it), cut to at most n bytes.
+func errTail(err error, n int) string {
+	s := err.Error()
+	if len(s) > n {
+		s = "…" + s[len(s)-n:]
+	}
+	return s
 }
 
 // baseRulesScript returns the statements that install the rules the input

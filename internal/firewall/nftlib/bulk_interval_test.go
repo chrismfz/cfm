@@ -74,12 +74,19 @@ func TestReplaceSetFlushAdd_LargeIntervalSetArrivesWhole(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var msgs []netlink.Message
+			var perBatch []int // NEWSETELEM messages in each transaction
 			b := nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
+				if !isBatch(req) {
+					return nil, io.EOF
+				}
+				n := 0
 				for _, m := range req {
 					if nftMsgType(m) == unix.NFT_MSG_NEWSETELEM {
 						msgs = append(msgs, m)
+						n++
 					}
 				}
+				perBatch = append(perBatch, n)
 				return nil, io.EOF
 			})
 			b.namedSets[tc.name] = &nftables.Set{Name: tc.name, KeyType: tc.key, Interval: true, HasTimeout: true,
@@ -102,6 +109,33 @@ func TestReplaceSetFlushAdd_LargeIntervalSetArrivesWhole(t *testing.T) {
 			if total != 2*tc.n {
 				t.Errorf("%d elements arrived, want %d (%d start/end pairs)", total, 2*tc.n, tc.n)
 			}
+			// The flush is its own transaction (ENOTEMPTY otherwise), then one
+			// transaction per batch: many in one would overflow the socket
+			// buffer on a large feed ("message too long").
+			if len(perBatch) < 2 || perBatch[0] != 0 {
+				t.Fatalf("transactions carried %v NEWSETELEM messages, want the flush alone first", perBatch)
+			}
+			for i, n := range perBatch[1:] {
+				if n != 1 {
+					t.Errorf("transaction %d carried %d NEWSETELEM messages, want 1", i+1, n)
+				}
+			}
 		})
+	}
+}
+
+// A bare address bound for an interval set is written as its /32 or /128: a
+// lone start element would be an interval open to the top of the address
+// space. A host set keeps one element per address.
+func TestParseElems_BareAddressInIntervalSet(t *testing.T) {
+	iv := &nftables.Set{Interval: true}
+	for _, ip := range []string{"198.51.100.7", "2001:db8::7"} {
+		got := parseElems(iv, []string{ip}, nil)
+		if len(got) != 2 || got[0].IntervalEnd || !got[1].IntervalEnd {
+			t.Errorf("%s in an interval set: %+v, want a start and its end", ip, got)
+		}
+	}
+	if got := parseElems(&nftables.Set{}, []string{"198.51.100.7"}, nil); len(got) != 1 || got[0].IntervalEnd {
+		t.Errorf("host set: %+v, want one element", got)
 	}
 }

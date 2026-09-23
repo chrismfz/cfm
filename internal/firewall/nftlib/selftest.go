@@ -19,7 +19,7 @@ type ebSample struct {
 	at       time.Time
 	lockWait time.Duration // time to acquire b.mu (contention)
 	nlWork   time.Duration // netlink add+flush under b.mu (kernel round-trip)
-	cliWork  time.Duration // applyBaseInputRules (nft CLI: one chain read, at most one write)
+	cliWork  time.Duration // applyBaseInputRules (nft CLI: a chain read, one write if rules are missing)
 	err      error
 }
 
