@@ -226,8 +226,8 @@ IP_HOST         = 0      ; (intended 25) WAF_IP_HOST (602) — bare-IP-Host scan
 ; edge-`challenge` (rule 501, a human solves it in the browser); it must never
 ; become a persistent nft ban here.
 AUTH_BURST      = 0      ; WAF_AUTH_BURST (501/502/510-512) — edge-challenge only
-SUPERGLOBAL     = 0      ; WAF_SUPERGLOBAL (318, logonly) — observe-only
-BAD_UTF8        = 0      ; WAF_BAD_UTF8 (611, logonly) — observe-only
+SUPERGLOBAL     = 0      ; WAF_SUPERGLOBAL (318, challenge_v2) — edge-challenge only
+BAD_UTF8        = 0      ; WAF_BAD_UTF8 (611, disabled) — off (FP-only, 2026-09-23)
 
 ; Per-RULE overrides (by numeric rule id) win over the family default above.
 ; For rules that behave differently from their family — tighten the ones that

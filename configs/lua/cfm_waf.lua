@@ -94,7 +94,7 @@ local CFG = {
   rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
   rule_sqli_blind_lexical = "block", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted challenge→block 2026-08-23 after expanded fleet burn-in; prior 188/188 TP, 0 FP review (docs/waf.md)
   rule_sqli_union_variant = "challenge_v2",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; promoted logonly→challenge 2026-08-23, challenge→challenge_v2 2026-09-23 (pure sqlmap-style attack traffic; solves get the Rung-1 humanity gate) — docs/waf.md
-  rule_superglobal_override = "logonly", -- request param KEY named like a PHP superglobal (_GET/_SERVER/GLOBALS/…) = variable poisoning; observe-only pending FP review
+  rule_superglobal_override = "challenge_v2", -- request param KEY named like a PHP superglobal (_GET/_SERVER/GLOBALS/…) = variable poisoning; promoted logonly→challenge_v2 2026-09-23 (attack-only — a WHMCS logout probe was the only 30d hit, 0 FP; a real user's solve still passes)
 
   -- ── Safer rollout / audit-first rules ─────────────────────────────────────
   rule_php_wrappers      = "block",      -- php:// phar:// data:// zip:// expect:// glob:// (args/body only; edge-block + autoblock-armed since 2026-07-18)
@@ -202,7 +202,7 @@ local CFG = {
 
   -- [top-10] XXE + CRLF + HTTP request smuggling
   rule_xxe              = "challenge_v2",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
-  rule_crlf_injection   = "logonly",    -- CRLF / HTTP response-splitting in args or body.
+  rule_crlf_injection   = "challenge_v2", -- CRLF / HTTP response-splitting in args or body.
                                         -- content-type/content-length are the FP-prone, low-impact tags:
                                         -- they appear legitimately in request BODIES (multipart part
                                         -- headers; page-builder/API/oEmbed save payloads embedding HTTP
@@ -211,8 +211,12 @@ local CFG = {
                                         -- detect_crlf_injection scopes content-type/content-length (raw AND
                                         -- URL-encoded) to the ARGS surface for ALL requests (generalises the
                                         -- old multipart-only carve-out); Set-Cookie/Location stay
-                                        -- full-surface. Kept at logonly pending a fresh burn-in before
-                                        -- promoting back to challenge (CLAUDE.md logonly->challenge->block).
+                                        -- full-surface. Promoted logonly→challenge_v2 2026-09-23: the
+                                        -- body-FP tags are already args-scoped, and the one remaining
+                                        -- full-surface body case (a contact form tripping CRLF_LOCATION)
+                                        -- is a HUMAN who solves the challenge and passes — absence never
+                                        -- convicts — so v2 challenges the attack shape at no cost to that
+                                        -- user, while a headless response-splitter that solves is scored.
   rule_http_smuggling   = "challenge_v2", -- HTTP verb embedded in body / querystring (smuggling)
                                        -- (request-smuggling primitive; never benign)
 
@@ -311,10 +315,16 @@ local CFG = {
   rule_range_abuse       = "logonly",   -- Apache Killer (CVE-2011-3192) style multi-range floods,
                                         -- oversized Range: values, legacy Request-Range: header,
                                         -- duplicate Range: headers (slowhttp / smuggling fingerprints)
-  rule_bad_utf8          = "logonly",   -- malformed UTF-8 in args+body (overlong / surrogate /
-                                        -- truncated multibyte). Encoding-bypass primitive — overlong
-                                        -- sequences encode "." / "/" / "<" in extra bytes that
-                                        -- substring matchers miss. Port of Coraza validateUtf8Encoding.
+  rule_bad_utf8          = "disabled",  -- malformed UTF-8 in args+body (overlong / surrogate /
+                                        -- truncated multibyte). DISABLED by default 2026-09-23: a
+                                        -- fleet review found it FP-only — 2 hits/30d, both false
+                                        -- positives (a zort.me URL-shortener form), on top of the
+                                        -- 772 historical FPs on Greek WordPress sites (docs/waf.md
+                                        -- FP case 3) and zero true positives. The detector + its
+                                        -- regression tests are kept (the FP lessons are documented
+                                        -- there); an operator who wants it back sets
+                                        -- rule_bad_utf8 = "challenge_v2" in cfm_waf_config.lua.
+                                        -- `disabled` skips the per-request UTF-8 walk entirely.
 
   -- ── Phase 1 — W4 polyglot upload (logonly rollout) ───────────────────────
   -- Source: docs/waf.md "Detector phases" §Phase 1 (W4). Distinct from rule

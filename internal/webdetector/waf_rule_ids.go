@@ -66,7 +66,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 301, Name: "rule_sqli", ReasonFamily: "WAF_SQLI", DefaultMode: "block"},
 	{ID: 309, Name: "rule_sqli_blind_lexical", ReasonFamily: "WAF_SQLI_LEXICAL", DefaultMode: "block"},
 	{ID: 319, Name: "rule_sqli_union_variant", ReasonFamily: "WAF_SQLI_UNION_VARIANT", DefaultMode: "challenge_v2"},
-	{ID: 318, Name: "rule_superglobal_override", ReasonFamily: "WAF_SUPERGLOBAL", DefaultMode: "logonly"},
+	{ID: 318, Name: "rule_superglobal_override", ReasonFamily: "WAF_SUPERGLOBAL", DefaultMode: "challenge_v2"},
 	{ID: 302, Name: "rule_xss", ReasonFamily: "WAF_XSS", DefaultMode: "challenge_v2"},
 	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "challenge_v2"},
 	{ID: 304, Name: "rule_b64_injection", ReasonFamily: "WAF_B64_INJECT", DefaultMode: "challenge_v2"},
@@ -137,13 +137,13 @@ var wafRuleIDs = []WAFRule{
 	{ID: 602, Name: "rule_ip_host", ReasonFamily: "WAF_IP_HOST", DefaultMode: "challenge_v2"},
 	{ID: 603, Name: "rule_header_vulns", ReasonFamily: "WAF_HEADER_VULN", DefaultMode: "challenge_v2"},
 	{ID: 604, Name: "rule_content_type_anomaly", ReasonFamily: "WAF_CT_ANOMALY", DefaultMode: "challenge_v2"},
-	{ID: 605, Name: "rule_crlf_injection", ReasonFamily: "WAF_CRLF", DefaultMode: "logonly"},
+	{ID: 605, Name: "rule_crlf_injection", ReasonFamily: "WAF_CRLF", DefaultMode: "challenge_v2"},
 	{ID: 606, Name: "rule_http_smuggling", ReasonFamily: "WAF_HTTP_SMUGGLING", DefaultMode: "challenge_v2"},
 	{ID: 607, Name: "rule_exploit_methods", ReasonFamily: "WAF_EXPLOIT_METHOD", DefaultMode: "challenge_v2"},
 	{ID: 608, Name: "rule_smuggling_cl", ReasonFamily: "WAF_HTTP_SMUGGLING", DefaultMode: "challenge_v2"},
 	{ID: 609, Name: "rule_header_flood", ReasonFamily: "WAF_HEADER_FLOOD", DefaultMode: "challenge_v2"},
 	{ID: 610, Name: "rule_range_abuse", ReasonFamily: "WAF_RANGE_ABUSE", DefaultMode: "logonly"},
-	{ID: 611, Name: "rule_bad_utf8", ReasonFamily: "WAF_BAD_UTF8", DefaultMode: "logonly"},
+	{ID: 611, Name: "rule_bad_utf8", ReasonFamily: "WAF_BAD_UTF8", DefaultMode: "disabled"},
 	// Fetch-metadata missing (headless / automation "Sec-Fetch tell") — Track-2
 	// Stage 1b. logonly SHADOW: no edge-block rule, so its WAF_FETCH_METADATA
 	// family stays un-armed in waf_security (WAFFamilyHasBlockRule == false).

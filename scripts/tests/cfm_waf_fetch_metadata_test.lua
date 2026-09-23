@@ -149,6 +149,15 @@ end
 clean(at("/robots.txt", CHROME), "/robots.txt is a header-poor legit fetch — exempt")
 clean(at("/.well-known/acme-challenge/tokenXYZ", CHROME), "/.well-known/ (ACME/DCV) is exempt")
 clean(at("/.well-known/security.txt", CHROME), "/.well-known/security.txt is exempt")
+-- 612 hygiene 2026-09-23: IAB ad-verification files (ads.txt/app-ads.txt
+-- crawlers) and feed endpoints (RSS pollers) are header-poor legit fetches.
+clean(at("/ads.txt", CHROME), "/ads.txt (ad-verification crawlers) is exempt")
+clean(at("/app-ads.txt", CHROME), "/app-ads.txt is exempt")
+clean(at("/feed/", CHROME), "/feed/ (RSS poller) is exempt")
+clean(at("/feed", CHROME), "/feed (no trailing slash) is exempt")
+clean(at("/comments/feed/", CHROME), "a nested WP feed path is exempt")
+-- Control: a path merely CONTAINING 'feed' (not a /feed segment) still trips.
+fires(at("/feedback-form/", CHROME), "a non-feed path containing 'feed' still trips the tell")
 -- Control: a normal page path is still measured (the carve-out is path-scoped,
 -- NOT a blanket disable of the tell).
 fires(at("/product/asimenio-dachtylidi/", CHROME), "a normal page path still trips the tell")
@@ -167,6 +176,28 @@ clean(req("GET", "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible;
 clean(req("GET", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " ..
                  "(KHTML, like Gecko; GeedoShopProductFinder) Chrome/142.0.0.0 Safari/537.36"),
       "GeedoShopProductFinder self-declares (named token) — kept out of the shadow")
+
+-- 612 hygiene 2026-09-23: the four bots added to CRAWLER_UA_TOKENS. Each carries
+-- a Chrome/ token yet self-declares, so it would trip the tell without the name.
+clean(req("GET", "Mozilla/5.0 (compatible; BitSightBot/1.0; +https://www.bitsight.com) " ..
+                 "Chrome/120.0.0.0 Safari/537.36"), "BitSightBot self-declares (named token)")
+clean(req("GET", "Mozilla/5.0 (compatible; iAskBot/1.0; +https://iask.ai) Chrome/120.0.0.0"),
+      "iAskBot self-declares (named token)")
+clean(req("GET", "Mozilla/5.0 (compatible; Aranet-SearchBot/1.0) Chrome/120.0.0.0 Safari/537.36"),
+      "Aranet-SearchBot self-declares (named token)")
+clean(req("GET", "WP Rocket/Preload Chrome/120.0.0.0"), "WP Rocket preload fetcher (named token)")
+
+-- 612 hygiene 2026-09-23: Viber's link-preview fetcher — a header-poor nav with
+-- a FIXED stale build UA and no self-identifying token (the largest benign pool
+-- in the tell). Suppressed on the exact build; sound only because 612 is logonly.
+clean(req("GET", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " ..
+                 "(KHTML, like Gecko) Chrome/108.0.5359.98 Safari/537.36"),
+      "Viber preview (fixed Chrome/108.0.5359.98 build) is suppressed")
+-- Control: a DIFFERENT Chrome build with the same header-poor shape still trips
+-- (the suppress is keyed on the exact Viber build, not 'any Chrome 108').
+fires(req("GET", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " ..
+                 "(KHTML, like Gecko) Chrome/108.0.5359.125 Safari/537.36"),
+      "a different Chrome/108 build still trips the tell (Viber key is exact-build)")
 
 -- ── In-app browsers (IN_APP_UA_TOKENS): recorded under their OWN tag ─────────
 -- TikTok's in-app browser is a real Chromium WebView carrying a person, but the
