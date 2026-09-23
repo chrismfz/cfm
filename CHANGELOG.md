@@ -37,8 +37,10 @@ back-filled here — see the git/PR history for that period.
     unchanged. The records already in cfm-web stay. A fingerprint policy armed
     on `ba6b4aad` / `fd4fd84d` stops matching — check before upgrading.
   - Trade-off: on a Cloudflare-fronted vhost the solver-farm detector's two
-    fingerprint tracks see nothing now; its subnet-spread track (no
-    fingerprint) still covers it, as do the Rung-1 tells.
+    fingerprint tracks now see only the solves that reach the origin directly
+    (and those fill the cross-host share denominator on their own); its
+    subnet-spread track (no fingerprint) still covers the vhost, as do the
+    Rung-1 tells.
 
 ## 2026.09.23
 
