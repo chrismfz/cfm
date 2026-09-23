@@ -1135,8 +1135,12 @@ local function is_machine_style_endpoint(uri)
   if has(u, "/transaction-payment-created") then return true end
   if has(u, "/payments_methods_endpoint") then return true end
 
-  -- Generic machine endpoints
-  if has(u, "/webhook")    then return true end
+  -- Generic machine endpoints. `webhook` matches anywhere in the path, not only
+  -- as a leading segment: gateway plugins name the receiver after themselves
+  -- (`/includes/payments/viva/viva_webhook.php`, `stripe-webhook.php`), and the
+  -- old `/webhook` prefix left Viva Wallet's webhooks challenged — which a
+  -- server-to-server POST can never solve (FP 2026-09-22, rule 201).
+  if has(u, "webhook")     then return true end
   if has(u, "/callback")   then return true end
   if has(u, "/oauth")      then return true end
   if has(u, "/auth/token") then return true end
@@ -1148,21 +1152,16 @@ local function is_machine_style_endpoint(uri)
   if has(u, "/.well-known/openid-configuration") then return true end
   if has(u, "/.well-known/jwks.json")		then return true end
   if has(u, "/sso/") 				then return true end
-  if has(u, "/stripe/webhook") 			then return true end
   if has(u, "/paypal/ipn") 			then return true end
   if has(u, "/adyen/") 				then return true end
-  if has(u, "/checkout/webhook") 		then return true end
   if has(u, "/payment/callback")		then return true end
-  if has(u, "/github/webhook") 			then return true end
-  if has(u, "/gitlab/webhook") 			then return true end
   if has(u, "/bitbucket-hook") 			then return true end
-  if has(u, "/slack/webhook") 			then return true end
-  if has(u, "/telegram/webhook") 		then return true end
   if has(u, "/rest/") 				then return true end
   if has(u, "/graphql") 			then return true end
   if has(u, "/wp-json/") 			then return true end
   if has(u, "/wc-api/") 			then return true end
-  if has(u, "/?wc-api=") 			then return true end
+  -- (The query form `?wc-api=` is is_wc_api_callback's: this helper only sees
+  -- the path.)
   if has(u, "/mobile-api/")			then return true end
   if has(u, "/client-api/")			then return true end
   if has(u, "/public-api/")			then return true end
@@ -1171,6 +1170,23 @@ local function is_machine_style_endpoint(uri)
   if has(u, "/jobs")				then return true end
 
   return false
+end
+
+-- WooCommerce's legacy API route: gateways build their server-to-server
+-- callback URL from home_url() as `?wc-api=<Gateway>` — `/?wc-api=…`, a
+-- subdirectory home `/shop/?wc-api=…`, or `/index.php?wc-api=…` (Viva Wallet,
+-- PayPal Standard, …); the pretty form `/wc-api/<Gateway>/` is a path and sits
+-- in the list above. The key is a QUERY arg, which is_machine_style_endpoint
+-- can't see (it gets the decoded path only), so the `/?wc-api=` entry that used
+-- to sit there never matched anything and every such webhook was scored like a
+-- browser (FP 2026-09-22: Viva's no-UA webhooks challenged on rule 201).
+-- Scoped to the paths WordPress routes it from, so `?wc-api=1` appended to an
+-- arbitrary probe path does not relax that path's scoring.
+local function is_wc_api_callback(ul, args)
+  if not (ul == "" or ul:sub(-1) == "/" or ul:sub(-10) == "/index.php") then return false end
+  local a = lower(args or "")
+  local v = a:match("^wc%-api=([^&]*)") or a:match("&wc%-api=([^&]*)")
+  return v ~= nil and v ~= ""
 end
 
 
@@ -1354,6 +1370,20 @@ end
 -- (task=connector) AND the cmd value is a pristine, single elFinder verb.
 -- A real injection through cmd= still carries a metacharacter, a path, or a
 -- non-verb shell word, none of which match here, so it is still flagged.
+--
+-- The WordPress "File Manager" plugin (wp-file-manager) is elFinder too, driven
+-- through its admin-ajax action instead of task=connector:
+-- `/wp-admin/admin-ajax.php?action=mk_file_folder_manager&_wpnonce=…&cmd=rm`
+-- (FP 2026-08/09: a site admin challenged on every delete / new folder). That
+-- marker counts only on admin-ajax.php itself — the query `action` is not what
+-- admin-ajax dispatches on when a body field overrides it (docs/waf.md FP case
+-- 6), so it is no routing proof, but the carve-out needs none: it only ever
+-- lets a PRISTINE single verb through, which carries no payload on any handler.
+local function is_wp_file_manager_ajax(a, uri)
+  return lower(uri or ""):sub(-24) == "/wp-admin/admin-ajax.php"
+     and arg_value(a, "action") == "mk_file_folder_manager"
+end
+
 local ELFINDER_VERBS = {
   open = true, file = true, tree = true, parents = true, ls = true,
   tmb = true, size = true, dim = true, mkdir = true, mkfile = true,
@@ -1362,15 +1392,18 @@ local ELFINDER_VERBS = {
   info = true, resize = true, netmount = true, url = true, callback = true,
   chmod = true, zipdl = true, abort = true, editor = true,
 }
-local function is_elfinder_verb(a, v)
+local function is_elfinder_verb(a, v, uri)
   -- Require the verb to be exact AND `task` to be a real query parameter
   -- equal to "connector" (not the substring "task=connector" buried inside
-  -- another param's value — a key-precise check, per review).
+  -- another param's value — a key-precise check, per review), or the
+  -- WP File Manager admin-ajax action (same key-precise check).
   if not v or ELFINDER_VERBS[v] ~= true then return false end
-  return arg_value(a, "task") == "connector"
+  return arg_value(a, "task") == "connector" or is_wp_file_manager_ajax(a, uri)
 end
 
-function _M.detect_cmd_param_key(args, _na)
+-- `uri` (the decoded path) is optional; only the WP File Manager elFinder
+-- carve-out reads it.
+function _M.detect_cmd_param_key(args, _na, uri)
   local a = _na or normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
@@ -1400,7 +1433,7 @@ function _M.detect_cmd_param_key(args, _na)
   end
   if key("cmd") then
     local v = arg_value(a, "cmd")
-    if value_looks_shelly(v) and not is_elfinder_verb(a, v) then return "CMD_CMD" end
+    if value_looks_shelly(v) and not is_elfinder_verb(a, v, uri) then return "CMD_CMD" end
   end
   if key("command") then
     local v = arg_value(a, "command")
@@ -1667,6 +1700,152 @@ local function _is_akeeba_restore_endpoint(uri)
 end
 _M.is_akeeba_restore_endpoint = _is_akeeba_restore_endpoint
 
+-- Joomla 5.4+ automated core updates. The Joomla.org update server (UA
+-- "Joomla.org Automated Updates Server") drives the SAME extraction script
+-- through the site's FRONT controller — Joomla's index.php does
+--     if (!empty($_GET['jautoupdate']) && is_file(…/com_joomlaupdate/update.php)) {
+--         require_once …/com_joomlaupdate/extract.php; die(); }
+-- and extract.php reads only $_REQUEST['password'|'instance'|'task'], where
+-- `instance` is base64(serialize(ZIPExtraction)) — a genuine object marker. So
+-- rule 329 blocked it and the WAF_RCE autoblock fleet-banned the update server
+-- (FP 2026-09-21, ardas.gr). The Akeeba carve-out above keys on the admin-side
+-- extract.php path; here that would not do: every Joomla request is
+-- /index.php, and `?jautoupdate=1` is attacker-appendable (WordPress ignores
+-- it and hands the body to its plugins). So the discriminator is the PAYLOAD:
+-- every parameter must be one extract.php reads, `task` one of its three
+-- verbs, the other values free of any object marker, and every object in
+-- `instance` a class extract.php itself allows (its unserialize() passes
+-- allowed_classes = [ZIPExtraction, stdClass]) — no gadget chain on any other
+-- app, where ZIPExtraction doesn't even exist. Whatever it can't vouch for (a
+-- body the WAF only saw part of, a non-form body, a value that doesn't decode,
+-- a marker it can't parse) falls through to the detector, which runs as before.
+local JOOMLA_AUTOUPDATE_PARAMS = { jautoupdate = true, password = true, instance = true, task = true }
+local JOOMLA_AUTOUPDATE_TASKS  = { startExtract = true, stepExtract = true, finalizeUpdate = true }
+local JOOMLA_EXTRACT_CLASSES   = { zipextraction = true, stdclass = true }
+
+-- application/x-www-form-urlencoded decode, as PHP does it for $_GET/$_POST:
+-- `+` is a space, %XX a byte, a malformed % stays literal.
+local function _form_unescape(s)
+  s = s:gsub("%+", " ")
+  return (s:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
+end
+
+-- Appends each `k=v` pair of a form-encoded string to out as { key, value }.
+local function _form_pairs(s, out)
+  for part in s:gmatch("[^&]+") do
+    local k, v = part:match("^([^=]*)=(.*)$")
+    if not k then k, v = part, "" end
+    out[#out + 1] = { _form_unescape(k), _form_unescape(v) }
+  end
+  return out
+end
+
+-- Any O:/C: object, E: enum (PHP 8.1) or r:/R: reference marker in a
+-- serialized string, either case, ANYWHERE (string contents included). These
+-- are the deserialization-gadget entry points; a value that carries none is
+-- inert to unserialize().
+local function _has_serialized_gadget(s)
+  s = lower(s or "")
+  for i in s:gmatch("()[oceCRr]:%d") do
+    if s:match('^[ocer]:%d+:"', i) or s:match('^[rR]:%d+;', i) then return true end
+  end
+  return false
+end
+
+-- True when every object / custom-object marker in the serialized string s
+-- (O:N:"Class" or C:N:"Class", either case, ANYWHERE — string contents too)
+-- names a class in `allowed`. The name is read as PHP reads it — exactly N
+-- bytes, then a closing quote — and a marker it can't parse that way
+-- (O:+4:"X", a length that overruns) fails. An E:/r:/R: marker (enum,
+-- reference) never appears in a ZIPExtraction blob, so any of those disqualify.
+local function _serialized_objects_only(s, allowed)
+  if s:match("[Ee]:%d+:\"") or s:match("[rR]:%d+;") then return false end
+  for i in s:gmatch("()[OoCc]:[%d+%-]") do
+    local n, q = s:match('^[OoCc]:(%d+):"()', i)
+    n = tonumber(n)
+    if not n then return false end
+    local name = s:sub(q, q + n - 1)
+    if #name ~= n or s:sub(q + n, q + n) ~= '"' or not allowed[lower(name)] then return false end
+  end
+  return true
+end
+
+-- A non-instance allowlisted value (password / jautoupdate) must carry no
+-- serialized gadget at all — RAW or base64'd. detect_php_object_injection is
+-- not enough: its base64 branch only decodes a candidate that STARTS with a
+-- base64'd `O:`/`C:` (the `Tzo`/`Qzo` prefix), so an object nested one byte
+-- into an array (`a:1:{s:1:"a";O:4:"Evil":…}`) base64'd slips past it — and the
+-- carve-out would then wave the whole request, instance blob included, past
+-- rule 329's block (review round 2). So decode the WHOLE canonical-base64
+-- value and scan all of it, the same decode PHP's base64_decode would get.
+local function _param_carries_object(v)
+  if v == "" then return false end
+  if _has_serialized_gadget(v) then return true end
+  if #v % 4 == 0 and v:match("^[%w%+/]*=?=?$") then
+    local dec = ngx.decode_base64(v)
+    if dec and _has_serialized_gadget(dec) then return true end
+  end
+  return false
+end
+
+function _M.is_joomla_autoupdate_request(uri, args, body, headers)
+  local a = args or ""
+  if not has(a, "jautoupdate") then return false end
+  if (uri or ""):sub(-10) ~= "/index.php" then return false end
+  local b = body or ""
+  headers = headers or {}
+  local raw_cl = headers["content-length"] or headers["Content-Length"]
+  if type(raw_cl) == "table" then return false end   -- nginx 400s this anyway
+  local cl = tonumber(header_string(raw_cl))
+  if b ~= "" or (cl and cl > 0) then
+    -- The WAF reads a capped prefix of the body: a value cut short could hide a
+    -- class past the cap, so only a body seen WHOLE qualifies — and only a form
+    -- body, which is what PHP parses into $_POST and all this parser reads.
+    if cl ~= #b then return false end
+    local ct = lower(header_string(headers["content-type"] or headers["Content-Type"]))
+    if not has(ct, "application/x-www-form-urlencoded") then return false end
+  end
+  local query, form = _form_pairs(a, {}), _form_pairs(b, {})
+  local routed = false
+  for _, kv in ipairs(query) do
+    -- Joomla routes on $_GET only; PHP keeps the last duplicate.
+    if kv[1] == "jautoupdate" then routed = (kv[2] ~= "" and kv[2] ~= "0") end
+  end
+  if not routed then return false end
+  -- Exactly one copy of each parameter across query and body: extract.php's
+  -- requests never repeat one, so there is no "which copy does PHP use" to get
+  -- wrong. A key PHP would rewrite (a NUL, a leading space, `.`, `[`) is not
+  -- an exact allowlisted name, so it disqualifies the request too.
+  local seen, has_task = {}, false
+  for _, list in ipairs({ query, form }) do
+    for _, kv in ipairs(list) do
+      local k, v = kv[1], kv[2]
+      if not JOOMLA_AUTOUPDATE_PARAMS[k] or seen[k] then return false end
+      seen[k] = true
+      if k == "instance" then
+        -- Canonical base64 only (padding at the very end), so what we decode is
+        -- what PHP decodes: nginx's decoder stops at the first `=`, while PHP's
+        -- non-strict base64_decode() skips it and carries on — `b64(clean)=b64(gadget)`
+        -- would show us only the clean half. PHP also skips whitespace and any
+        -- stray byte; those fail this match instead of being decoded differently.
+        if #v % 4 ~= 0 or not v:match("^[%w%+/]*=?=?$") then return false end
+        local dec = ngx.decode_base64(v)
+        if not dec or not _serialized_objects_only(dec, JOOMLA_EXTRACT_CLASSES) then return false end
+      elseif k == "task" then
+        -- Exact-matched to extract.php's three verbs; no room for a payload.
+        if not JOOMLA_AUTOUPDATE_TASKS[v] then return false end
+        has_task = true
+      else
+        -- password / jautoupdate: must carry no serialized gadget, raw or
+        -- base64'd (a WordPress plugin that unserialize()s the param is the
+        -- threat; ZIPExtraction doesn't exist there).
+        if _param_carries_object(v) then return false end
+      end
+    end
+  end
+  return has_task
+end
+
 -- [R2] Unauthenticated PHP object injection (deserialization -> RCE). Closes the
 -- 153-site object-injection exposure (kirki/jet-engine/woodmart/
 -- better-search-replace/fusion …) WITHOUT a per-plugin endpoint list: a PHP
@@ -1727,7 +1906,7 @@ end
 --   Headers:      no Accept=+1, no Referer on non-root URI=+1
 --   URI target:   sensitive file (.env/.git/wp-config)=+4,
 --                 credential/backup artifact (*.sql, passwords.txt)=+3
-function _M.detect_bad_ua_scored(headers, uri, method)
+function _M.detect_bad_ua_scored(headers, uri, method, args)
   headers = headers or {}
   local ua  = header_string(headers["user-agent"] or headers["User-Agent"])
   local ual = lower(ua)
@@ -1790,7 +1969,7 @@ function _M.detect_bad_ua_scored(headers, uri, method)
   -- so defer them to after this early-exit to avoid wasting CPU on normal requests.
   if score == 0 then return 0, nil end
 
-  local machine_style = is_machine_style_endpoint(ul)
+  local machine_style = is_machine_style_endpoint(ul) or is_wc_api_callback(ul, args)
   local ref = lower(headers["referer"] or headers["Referer"] or "")
 
   -- Signal 2: HEAD method (+1) - cheap existence probe used by scanners

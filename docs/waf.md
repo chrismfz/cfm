@@ -689,6 +689,104 @@ PHP-upload carve-out: it is only safe when the target endpoint enforces its own
 auth and standing down the body-PHP scanners there grants nothing an
 already-authorized user couldn't do by design.
 
+### FP case 8 — `WAF_BAD_UA` (201) challenging payment-gateway webhooks
+
+**Shape:** a steady `challenge` stream (rule 201, reason
+`WAF_BAD_UA:UA_EMPTY+NO_ACCEPT+NO_REFERER:score=4`) on rigel from 2026-09-22
+~14:50 UTC: Viva Wallet (`mail.notify.viva.com`, 51.138.37.238 /
+20.54.89.16) POSTing `application/json` with no User-Agent, Accept or Referer
+to three shops — `eloop.gr/includes/payments/viva/viva_webhook.php`,
+`mountain-house.gr` and `megashopgr.gr` at `/index.php?wc-api=wc_vivawallet&vivawallet=webhook`.
+Every webhook got the 303-to-challenge and then a 403; ~440 payment
+notifications in the first day. A server-to-server POST can never solve a
+challenge, so the tier made no difference: challenge == block here.
+
+**Root cause:** the 201 scorer drops its two browser-behaviour penalties
+(NO_ACCEPT, NO_REFERER) on machine-style endpoints (`is_machine_style_endpoint`),
+a list that exists for exactly these routes — but two of its entries could
+never match them. The detector gets the decoded PATH only (`ngx.var.uri`), so
+the `/?wc-api=` entry — WooCommerce's legacy API route, where gateways built
+from `home_url()` receive callbacks — matched nothing, ever. And `/webhook`
+required a leading slash, missing a receiver named after its gateway
+(`viva_webhook.php`).
+
+**Fix (in code):** `webhook` matches anywhere in the path (the per-provider
+`/stripe/webhook`, `/github/webhook`, … entries it subsumes were removed), and
+`is_wc_api_callback` reads the QUERY for a non-empty `wc-api` key — only on the
+paths WordPress routes it from (`…/` and `…/index.php`), so `?wc-api=1`
+appended to an arbitrary probe path relaxes nothing. What machine-style
+suppresses is small: the two +1 header penalties. The empty-UA +2, the
+sensitive-file +4 (`/.env`, `/.git/`, …), the score-99 scanner identities and
+every other rule still apply. Fleet check before the change: in 30 days the
+score=4 bucket held ~15 non-Viva hits across all nodes (HNAP1, vpnsvc,
+test-cgi, a Hikvision SDK PUT, no-UA comment spam) — none on a path the new
+patterns match, all pinned as negatives in
+`scripts/tests/cfm_waf_bad_ua_machine_endpoint_test.lua`.
+
+### FP case 9 — `WAF_RCE:PHP_OBJECT_INJECTION:BASE64` (329) on Joomla automated updates
+
+**Shape:** a `block` on `POST /index.php?jautoupdate=1`, UA
+`Joomla.org Automated Updates Server`, from 52.14.131.139 (AWS), on
+ardas.gr (2026-09-21). WAF_RCE is autoblock-armed, so the update server was
+nft-banned and pushed to the fleet blacklist for 7 days — no Joomla site on
+the fleet could be auto-updated.
+
+**Root cause:** Joomla 5.4+ automated core updates drive the extraction script
+through the FRONT controller. Joomla's `index.php` does
+`if (!empty($_GET['jautoupdate']) && is_file(…/update.php)) { require_once …/com_joomlaupdate/extract.php; die(); }`,
+and `extract.php` reads only `$_REQUEST['password' | 'instance' | 'task']`,
+where `instance` is `base64(serialize(ZIPExtraction))` — a genuine object
+marker. The Akeeba carve-out (FP 2026-07-17) keys on the admin-side
+`com_joomlaupdate/extract.php` path; this is the same script through
+`/index.php`.
+
+**Fix (in code), keyed on the payload, not the route.** A path key would open
+rule 329 for the whole site (every Joomla request is `/index.php`), and
+`?jautoupdate=1` alone is attacker-appendable (WordPress ignores it and hands
+the body to its plugins). `is_joomla_autoupdate_request` passes a request only
+when ALL hold: `…/index.php` with a non-empty `jautoupdate` in the query
+(Joomla's own `!empty()`, last duplicate wins); every query/body parameter is
+one `extract.php` reads, each exactly once; `task` is one of its three verbs
+(`startExtract`, `stepExtract`, `finalizeUpdate`); the other values
+(`password`, `jautoupdate`) carry no serialized gadget — an object/enum/
+reference marker in the raw value **or** in its full base64 decode (a WordPress
+plugin that `unserialize()`s the param is the threat, and a gadget nested one
+byte inside an array base64s to something the base detector's prefix-gated scan
+misses); and every object in the fully decoded `instance` (form-decoded, then
+base64) is a class `extract.php` itself allows — its `unserialize()` passes
+`allowed_classes = [ZIPExtraction, stdClass]`, and an `E:` enum or `r:`/`R:`
+reference (never in a real blob) disqualifies. Every class is checked, not the
+first: on WordPress a `ZIPExtraction` with a nested gadget object would still
+instantiate the gadget. The decode has to match PHP's, so the
+check reads each class name by its length prefix as PHP does, and takes only
+canonical base64 — nginx's decoder stops at the first `=` while PHP's
+non-strict `base64_decode()` skips it and carries on, so `b64(clean)=b64(gadget)`
+would otherwise show the WAF the clean half only. Whatever it can't vouch for
+falls through to the detector as before: a body the WAF only saw part of
+(Content-Length ≠ the body it read — the WAF reads a capped prefix), a
+non-form body, a repeated parameter, a key PHP would rewrite (NUL, leading
+space, `.`, `[`), a value that does not decode, a marker it can't parse
+strictly. Tests:
+`scripts/tests/cfm_waf_object_injection_joomla_autoupdate_test.lua`.
+
+### FP case 10 — `WAF_CMD_PARAM:CMD_CMD` (310) on WP File Manager
+
+**Shape:** `challenge` on
+`/wp-admin/admin-ajax.php?action=mk_file_folder_manager&_wpnonce=…&cmd=rm` (and
+`cmd=mkdir`) from a site admin on glaveris.gr, referer
+`admin.php?page=wp_file_manager` — every delete / new folder in the plugin.
+
+**Root cause:** the WordPress "File Manager" plugin (wp-file-manager) is
+elFinder, whose verbs `rm` / `mkdir` / `ls` / `chmod` collide with shell
+command names. The existing elFinder carve-out recognised only Joomla's
+`task=connector`.
+
+**Fix (in code):** the same carve-out accepts the plugin's admin-ajax action —
+only on `…/wp-admin/admin-ajax.php`, and still only for a PRISTINE single
+elFinder verb. The query `action` is not routing proof (a body field overrides
+it, case 6), but the carve-out needs none: a bare verb carries no payload on
+any handler, while a metacharacter, a path or a non-verb word fires as before.
+
 ### Structural anti-patterns to check during rule review
 
 A short list. Every one of these surfaced as a real FP above; reading

@@ -17,6 +17,32 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **Payment-gateway webhooks are no longer challenged by WAF rule 201.**
+  - Viva Wallet's webhooks carry no User-Agent, Accept or Referer. Rule 201
+    scored them 4 and served them a challenge, which a server-to-server POST
+    can never solve.
+  - Since 2026-09-22, three shops on rigel have received no payment
+    notifications.
+  - The rule already relaxes these checks on machine endpoints, but two
+    patterns never matched:
+    - the WooCommerce `?wc-api=` route: the rule only sees the path, not the
+      query string;
+    - a receiver named after its gateway (`viva_webhook.php`).
+  - Both now match. Empty-UA probes elsewhere still score as before.
+- **Joomla 5.4+ automated core updates are no longer blocked by WAF rule 329.**
+  - The Joomla.org update server's `POST index.php?jautoupdate=1` carries a
+    serialized `ZIPExtraction` object, so rule 329 blocked it.
+  - The block also banned the update server's IP across the fleet.
+  - The exception is keyed on the payload, not the URL. Every parameter must
+    be one Joomla's extraction script reads, and every serialized class must be
+    one that script accepts. Adding `?jautoupdate=1` to an attack gains
+    nothing.
+  - After deploying, remove 52.14.131.139 from the fleet blacklist.
+- **WP File Manager no longer challenges site admins (WAF rule 310).** The
+  plugin's `cmd=rm` / `cmd=mkdir` on its own admin-ajax action is now treated
+  like the existing Joomla file-manager exception: only a bare file-manager
+  command is allowed, on `admin-ajax.php` only.
 ### Changed
 - **The Site Cache micro tier is enforced by default.** `MICRO_CACHE_ENFORCE`
   now defaults to `1`; it was `0` (a dry run) until it passed the on-box
