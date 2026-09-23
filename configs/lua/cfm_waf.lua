@@ -80,7 +80,7 @@ local CFG = {
                                        -- Family WAF_TRAVERSAL: autoblock held (403 only).
                                        -- Web edge only — the panel gate passes no raw_uri.
   rule_rce             = "block",      -- strong RCE / shell / jndi markers
-  rule_exploit_methods = "challenge",  -- TRACE/TRACK/CONNECT etc
+  rule_exploit_methods = "challenge_v2",  -- TRACE/TRACK/CONNECT etc
   rule_xss             = "challenge_v2", -- cheap reflected-XSS style patterns.
                                        -- Promoted challenge→challenge_v2
                                        -- 2026-09-22 (operator decision, same
@@ -105,16 +105,16 @@ local CFG = {
                                          --  challenge→challenge_v2 2026-09-23: the one challenge
                                          --  rule where headless scanners were seen SOLVING —
                                          --  their solves now face the Rung-1 humanity gate)
-  rule_ctrl_chars        = "challenge",  -- suspicious ASCII control chars in args/body
+  rule_ctrl_chars        = "challenge_v2",  -- suspicious ASCII control chars in args/body
                                          -- (promoted from logonly: detector already excludes
                                          --  multipart/binary CTs; 0 hits over 6 weeks ×
                                          --  5 servers — no legit traffic produces these bytes)
-  rule_php_webshell_body = "challenge",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
-  rule_b64_injection     = "challenge",  -- POST-body base64 decode heuristic scanner
+  rule_php_webshell_body = "challenge_v2",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
+  rule_b64_injection     = "challenge_v2",  -- POST-body base64 decode heuristic scanner
 
   -- ── Auth / brute / XML-RPC ────────────────────────────────────────────────
-  rule_auth_burst         = "challenge", -- generic login endpoint burst
-  rule_auth_wp_checks     = "challenge", -- HEAD wp-login (qualified/repeated), no UA+Referer POST wp-login
+  rule_auth_burst         = "challenge_v2", -- generic login endpoint burst
+  rule_auth_wp_checks     = "challenge_v2", -- HEAD wp-login (qualified/repeated), no UA+Referer POST wp-login
                                          -- rollout: start this rule in "logonly" to baseline HEAD noise,
                                          -- then promote to "challenge" after validating logs.
   rule_xmlrpc_multicall   = "block", -- system.multicall in XML-RPC body
@@ -122,18 +122,18 @@ local CFG = {
   rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
 
   -- ── Audit / payload rules ─────────────────────────────────────────────────
-  rule_cmd_params       = "challenge",   -- suspicious parameter keys: exec= passthru= shell_exec= eval= assert= system= cmd= command=
+  rule_cmd_params       = "challenge_v2",   -- suspicious parameter keys: exec= passthru= shell_exec= eval= assert= system= cmd= command=
                                          -- (cmd=/system=/command= are now value-aware: fires only
                                          --  when value contains shell metachars or known shell tokens —
                                          --  see detect_cmd_param_key in cfm_waf_detectors.lua)
-  rule_cmd_payload      = "challenge", -- fallback/default mode for payload-y separators/tokens in args
+  rule_cmd_payload      = "challenge_v2", -- fallback/default mode for payload-y separators/tokens in args
                                        -- (every emitted tag has an explicit override below; this value
                                        --  is the safety net for any new tag added to detect_cmd_payload)
   rule_debug_toggles    = "challenge_v2", -- xdebug, trace, debug, stacktrace
                                        -- (promoted from logonly: narrow value-equality match —
                                        --  debug=1|true, trace=1|true, etc. — 0 hits in 6 weeks;
                                        --  challenge→challenge_v2 2026-09-23: only scanners fire it)
-  rule_serialize        = "challenge", -- PHP serialized object markers
+  rule_serialize        = "challenge_v2", -- PHP serialized object markers
                                        -- (promoted from logonly: serialized blobs in URL args are
                                        --  insecure-deserialization probes; legit apps carry these
                                        --  in cookies/POST bodies, not URL args — 0 hits in 6 weeks)
@@ -144,12 +144,12 @@ local CFG = {
 
   -- Per-tag override modes for cmd payloads.
   -- Empty/nil means: fall back to rule_cmd_payload.
-  rule_cmd_payload_semi_cmd  = "challenge",         -- PAY_SEMI_CMD
-  rule_cmd_payload_pipe_wget = "challenge",         -- PAY_PIPE_WGET
-  rule_cmd_payload_pipe_curl = "challenge",         -- PAY_PIPE_CURL
-  rule_cmd_payload_pipe_bash = "challenge",         -- PAY_PIPE_BASH
-  rule_cmd_payload_pipe_sh   = "challenge",         -- PAY_PIPE_SH
-  rule_cmd_payload_backtick  = "challenge",       -- PAY_BACKTICK
+  rule_cmd_payload_semi_cmd  = "challenge_v2",         -- PAY_SEMI_CMD
+  rule_cmd_payload_pipe_wget = "challenge_v2",         -- PAY_PIPE_WGET
+  rule_cmd_payload_pipe_curl = "challenge_v2",         -- PAY_PIPE_CURL
+  rule_cmd_payload_pipe_bash = "challenge_v2",         -- PAY_PIPE_BASH
+  rule_cmd_payload_pipe_sh   = "challenge_v2",         -- PAY_PIPE_SH
+  rule_cmd_payload_backtick  = "challenge_v2",       -- PAY_BACKTICK
                                                   -- (promoted from logonly: detector already
                                                   --  suppresses backticks in q/s/term/search/query
                                                   --  free-text params and only fires when the backtick
@@ -160,13 +160,18 @@ local CFG = {
   --          nginx_waf (MIT).  Promote individually after watching logs.
 
   -- [top-6]  Header vulnerability bundle
-  rule_bad_ua           = "challenge",  -- mixed-mode: normal scored hits challenge; score >= 99 hard-blocks
-  rule_shellshock       = "challenge",  -- Shellshock CVE-2014-6271 () { pattern in headers (CGI env vars)
-  rule_header_vulns     = "challenge",  -- httpoxy (Proxy:), CVE-2017-7269 (Lock-Token:/If:),
+  rule_bad_ua           = "challenge_v2",  -- mixed-mode: scored hits (4-98) challenge_v2; score >= 99 still hard-blocks.
+                                       -- v2 (2026-09-23): a JS-capable headless browser hiding behind an
+                                       -- empty/library UA solves a v1 challenge and passes — v2 scores that
+                                       -- solve. A real user's UA never trips the scored tier, and a non-JS
+                                       -- script never solves either way, so v2 adds no FP (webhooks are
+                                       -- suppressed pre-score by the machine-style endpoint list).
+  rule_shellshock       = "challenge_v2",  -- Shellshock CVE-2014-6271 () { pattern in headers (CGI env vars)
+  rule_header_vulns     = "challenge_v2",  -- httpoxy (Proxy:), CVE-2017-7269 (Lock-Token:/If:),
                                       -- CVE-2025-24813 (Tomcat PUT /session + Content-Range)
 
   -- [top-7]  Content-Type validation
-  rule_content_type_anomaly = "challenge",  -- non-standard charset bypass; malformed multipart boundary
+  rule_content_type_anomaly = "challenge_v2",  -- non-standard charset bypass; malformed multipart boundary
                                             -- (all observed hits POST `/` against webmail / MX hosts
                                             --  with non-string CT — never legitimate browser traffic)
 
@@ -191,12 +196,12 @@ local CFG = {
                                          --  scanners only; solves get the Rung-1 humanity gate)
 
   -- [top-9]  SSRF + JS prototype pollution
-  rule_ssrf             = "challenge", -- SSRF protocol schemes (file://, gopher://, …) + IP obfuscation
+  rule_ssrf             = "challenge_v2", -- SSRF protocol schemes (file://, gopher://, …) + IP obfuscation
                                        -- (no legitimate browser/HTTP client sends these schemes)
-  rule_js_proto         = "challenge",  -- JS __proto__ / constructor.prototype pollution
+  rule_js_proto         = "challenge_v2",  -- JS __proto__ / constructor.prototype pollution
 
   -- [top-10] XXE + CRLF + HTTP request smuggling
-  rule_xxe              = "challenge",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
+  rule_xxe              = "challenge_v2",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
   rule_crlf_injection   = "logonly",    -- CRLF / HTTP response-splitting in args or body.
                                         -- content-type/content-length are the FP-prone, low-impact tags:
                                         -- they appear legitimately in request BODIES (multipart part
@@ -208,7 +213,7 @@ local CFG = {
                                         -- old multipart-only carve-out); Set-Cookie/Location stay
                                         -- full-surface. Kept at logonly pending a fresh burn-in before
                                         -- promoting back to challenge (CLAUDE.md logonly->challenge->block).
-  rule_http_smuggling   = "challenge", -- HTTP verb embedded in body / querystring (smuggling)
+  rule_http_smuggling   = "challenge_v2", -- HTTP verb embedded in body / querystring (smuggling)
                                        -- (request-smuggling primitive; never benign)
 
   -- [CVE] Named-vulnerability detectors (family WAF_CVE, IDs 10000+; see
@@ -239,8 +244,8 @@ local CFG = {
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
   rule_upload_content     = "block",  -- webshell bytes / PHP tags inside uploaded file content
   rule_upload_archive_php = "block",  -- PHP webshell compressed inside an uploaded .zip (ZIP entry name scan). Scoped to Joomla asset uploads (option=com_ + task=asset.upload), where a php-bearing zip is never legitimate → safe to block.
-  rule_script_obfuscation = "challenge",  -- raw POST-body PHP/JS obfuscation scorer
-  rule_upload_obfuscation = "challenge",  -- multipart uploaded file content obfuscation scorer
+  rule_script_obfuscation = "challenge_v2",  -- raw POST-body PHP/JS obfuscation scorer
+  rule_upload_obfuscation = "challenge_v2",  -- multipart uploaded file content obfuscation scorer
 
   -- ── Phase 1 — webshell delivery + reverse shell (logonly rollout) ─────────
   -- Sources: docs/waf.md "Detector phases" §Phase 1 / §Phase 2 / §Phase 5 (B5).
@@ -250,22 +255,22 @@ local CFG = {
   -- client already holding a valid clearance cookie a rule-410 challenge is
   -- converted to block (post_clearance_action) — the challenge tier is only
   -- "recoverable" for as-yet-uncleared clients.
-  rule_webshell_path    = "challenge", -- URI basename matches a generic/ambiguous webshell name (shell.php, x.php, adminer.php, alfa.php, …)
+  rule_webshell_path    = "challenge_v2", -- URI basename matches a generic/ambiguous webshell name (shell.php, x.php, adminer.php, alfa.php, …)
   rule_webshell_path_known = "block",  -- URI basename matches a proper-noun webshell (c99.php, r57.php, wso.php, b374k.php, …) — near-zero legit use
-  rule_reverse_shell    = "challenge", -- bash -i >& /dev/tcp/, python -c 'import socket', socat tcp-connect …
+  rule_reverse_shell    = "challenge_v2", -- bash -i >& /dev/tcp/, python -c 'import socket', socat tcp-connect …
                                        -- (post-exploit primitive; no legitimate request shape)
-  rule_webshell_ping    = "challenge", -- POST + empty UA + CL:0 + URI ends in .php — webshell C2 fingerprint
+  rule_webshell_ping    = "challenge_v2", -- POST + empty UA + CL:0 + URI ends in .php — webshell C2 fingerprint
                                        -- (narrow 4-signal AND-match; no legit traffic fits all four)
 
   -- ── Phase 2 — post-exploitation / RCE markers (logonly rollout) ───────────
   -- Sources: docs/waf.md "Detector phases" §Phase 2 (R2/R3/R4). All three
   -- emit family WAF_RCE so they share high-risk post-clearance routing.
   -- C1 (Log4Shell) is NOT here — already covered by detect_rce (rule 320).
-  rule_persistence       = "challenge", -- crontab -e, /etc/cron.d/, [Unit] ExecStart= …
+  rule_persistence       = "challenge_v2", -- crontab -e, /etc/cron.d/, [Unit] ExecStart= …
                                         -- (post-exploit; never appears in legitimate HTTP)
-  rule_rootkit_artifacts = "challenge", -- LD_PRELOAD=, /etc/ld.so.preload, insmod /tmp/
+  rule_rootkit_artifacts = "challenge_v2", -- LD_PRELOAD=, /etc/ld.so.preload, insmod /tmp/
                                         -- (kernel/loader artifacts; not part of any web request)
-  rule_lolbin            = "challenge", -- certutil -urlcache -split, bitsadmin /transfer, -EncodedCommand
+  rule_lolbin            = "challenge_v2", -- certutil -urlcache -split, bitsadmin /transfer, -EncodedCommand
                                         -- (LOLBin command-line fragments; web traffic doesn't carry these)
 
   -- ── Phase 3 — known-CVE fingerprints (logonly rollout) ───────────────────
@@ -274,7 +279,7 @@ local CFG = {
   -- rule_rce (320) already catches the bare "${jndi:" Log4Shell marker;
   -- rule_log4shell (328) extends C1 with evasion variants (${lower:j}…,
   -- ${env:X:-j}…, ${${::-j}…) that defeat substring matching on rule 320.
-  rule_java_deserialize  = "challenge", -- rO0AB base64 prefix / 0xACED0005 magic / aced0005 hex
+  rule_java_deserialize  = "challenge_v2", -- rO0AB base64 prefix / 0xACED0005 magic / aced0005 hex
                                         -- (Java-serialization-specific marker; not in legit web traffic)
   rule_log4shell         = "logonly",   -- ${lower:j}…, ${env:X:-j}…, ${${::-j}${::-n}…, ${base64:…}
                                         -- (Log4Shell JNDI-lookup evasion forms not caught by rule 320)
@@ -283,10 +288,10 @@ local CFG = {
   -- Sources: docs/waf.md "Detector phases" §Phase 4. X1 covers tunnel/paste
   -- service hostnames; X2 covers coinminer tool/pool fingerprints (the
   -- stratum scheme is already folded into rule 701 per audit row 16).
-  rule_c2_tunnel         = "challenge", -- pastebin.com/raw/, webhook.site, ngrok.io, transfer.sh, …
+  rule_c2_tunnel         = "challenge_v2", -- pastebin.com/raw/, webhook.site, ngrok.io, transfer.sh, …
                                         -- (observed: POSTs to /wp-admin/admin-ajax.php from
                                         --  Tencent ASN referencing raw.githubusercontent.com)
-  rule_coinminer         = "challenge", -- xmrig --url, pool.minexmr.com, supportxmr.com, nicehash, …
+  rule_coinminer         = "challenge_v2", -- xmrig --url, pool.minexmr.com, supportxmr.com, nicehash, …
                                         -- (miner CLI / pool URLs; not part of legitimate HTTP)
 
   -- ── Phase 5 — behavioural / combined-signal (logonly rollout) ────────────
@@ -294,7 +299,7 @@ local CFG = {
   -- as a tightening of rule 607 (status row 18); B5 was shipped earlier
   -- (rule 411). What's left: B1 (HTTP smuggling header pairs), B3 (long
   -- URL segments), B4 (oversized header bag).
-  rule_smuggling_cl      = "challenge", -- Content-Length + Transfer-Encoding both present, multi-CL, malformed CL
+  rule_smuggling_cl      = "challenge_v2", -- Content-Length + Transfer-Encoding both present, multi-CL, malformed CL
                                         -- (RFC-violating header combos used for request smuggling)
   rule_long_path_segment = "challenge", -- single URL path segment ≥ 800 bytes (Greek/CJK
                                         -- slug-safe; observed abuse is base64 stuffing >1 KB)
@@ -318,7 +323,7 @@ local CFG = {
   -- image-typed / image-extension part for PHP/ASP/JSP/script openers.
   -- Same family WAF_UPLOAD_CONTENT (high-risk) so post-clearance routing
   -- is correct when promoted.
-  rule_polyglot_upload   = "challenge", -- image CT/ext + <?php/<%/<jsp:/<script in first 64 bytes
+  rule_polyglot_upload   = "challenge_v2", -- image CT/ext + <?php/<%/<jsp:/<script in first 64 bytes
                                         -- (polyglot image upload; legit images never contain these openers)
 
   -- ── PHP dropper / canary family (421-425) ────────────────────────────────
@@ -344,7 +349,7 @@ local CFG = {
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
   rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
   rule_php_numeric_xor_obfuscation = "logonly", -- phpfuck: a long tight [0-9().^] run with a paren/^/dot storm — arbitrary PHP built for a restricted-charset eval() sink (e.g. vBulletin runMaths / CVE-2026-61511). Best-effort visibility only; STAYS logonly (a block companion was removed for FP-banning spaced math posts).
-  rule_php_encoded_opener         = "challenge", -- encoded `<?php` opener — JS `\x` hex-escape form only (`\x3c\x3fphp`).
+  rule_php_encoded_opener         = "challenge_v2", -- encoded `<?php` opener — JS `\x` hex-escape form only (`\x3c\x3fphp`).
                                                  -- Audit F16 REMOVED the URL (`%3C%3Fphp`), HTML-entity (`&lt;?php`) and
                                                  --  JS-unicode (`<…`) forms: they are the normal on-wire encodings of
                                                  --  legit content (a form body is url-encoded in its entirety; editors
@@ -356,7 +361,7 @@ local CFG = {
                                                  --  unwraps it — so 404 never sees a bare hex opener; 437 is its only coverage
                                                  --  for a MARKERLESS hex opener, attack-shaped with ~zero FP. `challenge`
                                                  --  preserves+replays the POST. (logonly→challenge 2026-06-25; narrowed F16.)
-  rule_php_encoded_opener_b64     = "challenge", -- encoded `<?php` opener — base64 form (`PD9waHA` at a base64 value boundary).
+  rule_php_encoded_opener_b64     = "challenge_v2", -- encoded `<?php` opener — base64 form (`PD9waHA` at a base64 value boundary).
                                                  -- Split out of rule 437 into its own id (438) on 2026-07-02 so its hit
                                                  --  stream is observable separately from the FP-prone URL form above. Unlike
                                                  --  URL-encoding, a browser NEVER base64-encodes a form field, and the match

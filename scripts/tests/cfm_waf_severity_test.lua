@@ -1572,32 +1572,40 @@ do
   package.loaded["cfm_waf_util"] = nil
   local fresh_waf = require("cfm_waf")
   local snap = fresh_waf.get_config()
-  local must_be_challenge = {
-    "rule_ctrl_chars",
-    "rule_serialize",
-    "rule_cmd_payload_backtick",
-    "rule_cmd_payload",  -- fallback default, kept aligned with sub-rules
-    "rule_ssrf",
-  }
-  for _, name in ipairs(must_be_challenge) do
-    check(snap[name] == "challenge",
-          "71: " .. name .. " ships as 'challenge' (got " .. tostring(snap[name]) .. ")")
+  -- Every challenge-tier rule serves the same page, so as of 2026-09-23 the
+  -- whole tier is challenge_v2 (the solve is scored for headless evidence at
+  -- verify; a real user's solve still passes — absence never convicts). ONLY
+  -- ONE rule stays at plain "challenge", and this is the invariant the sweep
+  -- must preserve in BOTH directions:
+  --   * rule_long_path_segment (102): a rendering crawler (Googlebot executes
+  --     JS, follows long URLs) can trip it AND solve; a WAF-rule mark is not
+  --     good-bot-waived, so v2 would reject it — a silent de-indexing FP. The
+  --     length heuristic is FP-prone and wants a narrowing fix before it moves.
+  -- (rule_bad_ua (201) is NOT held: a JS-capable headless browser hiding behind
+  --  an empty/library UA solves a v1 challenge and passes; v2 scores it. A real
+  --  user's UA never trips the scored tier, so no FP.)
+  local challenge_ok = { rule_long_path_segment = true }
+  for name, mode in pairs(snap) do
+    if name:sub(1, 5) == "rule_" and mode == "challenge" then
+      check(challenge_ok[name] == true,
+            "71: " .. name .. " is at plain 'challenge' — the whole tier is challenge_v2 now; " ..
+            "add it to challenge_ok with a reason if that is deliberate")
+    end
   end
-  -- challenge_v2: same page, solve scored for headless evidence at verify.
-  -- rule_xss (302) since 2026-09-22; 602/319/321/801/609 since 2026-09-23
-  -- (batch 1 — scanner-only challenge rules, docs/waf.md WAF hunt).
+  -- Spot-check that representative rules did land at challenge_v2 (guards a
+  -- snapshot that somehow reports nothing at "challenge" for the wrong reason).
   local must_be_challenge_v2 = {
-    "rule_xss",
-    "rule_ip_host",
-    "rule_sqli_union_variant",
-    "rule_proxy_header_sqli",
-    "rule_debug_toggles",
-    "rule_header_flood",
+    "rule_xss", "rule_ip_host", "rule_sqli_union_variant", "rule_proxy_header_sqli",
+    "rule_debug_toggles", "rule_header_flood", "rule_ssrf", "rule_js_proto",
+    "rule_ctrl_chars", "rule_serialize", "rule_c2_tunnel", "rule_auth_burst",
+    "rule_php_webshell_body", "rule_cmd_params", "rule_cmd_payload", "rule_bad_ua",
   }
   for _, name in ipairs(must_be_challenge_v2) do
     check(snap[name] == "challenge_v2",
           "71: " .. name .. " ships as 'challenge_v2' (got " .. tostring(snap[name]) .. ")")
   end
+  -- The one held rule stays plain challenge.
+  check(snap["rule_long_path_segment"] == "challenge", "71: rule_long_path_segment held at challenge (Googlebot FP)")
   local must_be_block = {
     "rule_traversal",  -- promoted challenge→block 2026-09-05 (clean 6-server FP review, docs/waf.md)
     "rule_sqli_blind_lexical",

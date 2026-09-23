@@ -58,7 +58,8 @@ local function clean(ctx, label)
   check(hit ~= true, label .. " — must NOT fire (got hit=" .. tostring(hit) .. ")")
 end
 
--- ── F05: backtick command substitution (rule 317, challenge) ────────────────
+-- ── F05: backtick command substitution (rule 317; pinned to challenge here to
+--        exercise the scorer — shipped default is challenge_v2 since 2026-09-23) ─
 set_only({ rule_cmd_payload_backtick = "challenge" })
 
 local BT = "WAF_CMD_PAYLOAD:PAY_BACKTICK"

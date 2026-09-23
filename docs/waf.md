@@ -53,12 +53,24 @@ humanity score earns **no clearance** (`result=v2_reject`, retry-able — see
 `challenge_v2.go` D5). Semantics to know:
 
 - **Set per rule** via `/etc/cfm/cfm_waf_config.lua`
-  (`return { rule_<name> = "challenge_v2" }`). One rule ships at this tier by
-  default: **`rule_xss` (302)** — promoted challenge→challenge_v2 on
-  2026-09-22, the day the tier landed (operator decision): XSS probes like
-  `?q=<script>alert('XSS')</script>` are a favourite scanner smoke test, so
-  their solvers face the humanity gate. Revert per fleet with
-  `rule_xss = "challenge"` in `cfm_waf_config.lua`.
+  (`return { rule_<name> = "challenge_v2" }`). Since **2026-09-23 the entire
+  challenge tier ships at `challenge_v2`** — every rule whose built-in default
+  was `challenge` now defaults to `challenge_v2` (`rule_xss` (302) led on
+  2026-09-22). The rationale is uniform: a v1 challenge is a paper wall against
+  a JS-capable bot (it solves the PoW and passes), while v2 scores the solve for
+  headless evidence at verify and costs a real human nothing (absence never
+  convicts). **One rule is deliberately held at plain `challenge`:**
+  **`rule_long_path_segment` (102)** — a rendering search crawler (Googlebot
+  runs JS, follows long URLs) can trip it and would be wrongly rejected, since a
+  WAF-rule mark is not good-bot-waived (a silent de-index risk; the length
+  heuristic is FP-prone — see FP case 1 — and wants a narrowing fix before it
+  can move). (`rule_bad_ua` (201) IS in the sweep: a JS-capable headless browser
+  hiding behind an empty/library UA solves a v1 challenge and passes, and v2
+  scores it; a real user's UA never trips the scored tier and a non-JS script
+  never solves, so there is no added FP, and score ≥ 99 still hard-blocks.)
+  Revert any rule per fleet with `rule_<name> = "challenge"` in
+  `cfm_waf_config.lua`; watch `detection_history type=challenge_v2_reject` for a
+  rule that rejects legitimate solvers.
 - On the wire and in the bridge the decision stays plain `challenge` (edge
   vocabulary); autoblock (`waf_security`) is untouched — it feeds on
   `action=block` pushes only, and a `challenge_v2` push is not one.
