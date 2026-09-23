@@ -814,8 +814,15 @@ device-claim group; as an independent opener it was also 0 for every F row):
   ≠ `$remote_addr`, the same unforgeable test the confs use for
   `X-Forwarded-Proto`). So the verify stamp, the fingerprint-policy lookups and
   the WAF-hit attribution all treat such a request as "no fingerprint" instead
-  of charging the proxy's handshake to the client. The record `ba6b4aad` already
-  holds in cfm-web stays; it just stops growing.
+  of charging the proxy's handshake to the client (live check on mars: a
+  `ba6b4aad` solve on toolpoint.gr logged `peer=` a Cloudflare address and
+  `xfp_trust=1`, the same test). The cfm-web records for `ba6b4aad` and
+  `fd4fd84d` (the same Cloudflare handshake, curves named differently) stay.
+  **Trade-off:** on a Cloudflare-fronted vhost the solver-farm detector's two
+  fingerprint tracks (per-host concentration, cross-host) now see nothing; the
+  subnet-spread track still covers it, and so do the Rung-1 tells, which read
+  the page's own report. A policy can no longer be armed on a Cloudflare egress
+  fingerprint, which was never a client's anyway.
 - **TLS-inspecting middleboxes are not rare.** Human Chrome and Firefox UAs
   (improv.gr, fcs.com.gr, webmail.deyadoxatou.gr) arrive over OpenSSL-shaped
   lists with CCM, ARIA or DHE suites that no browser offers: antivirus or

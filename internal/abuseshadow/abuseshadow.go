@@ -309,7 +309,8 @@ type ChalScoreSummary struct {
 // chalFP is one anchoring fingerprint's challenge_score footprint. `convicted` is
 // true when any line for it carried farmfp>0 — i.e. the fingerprint was, at least
 // once, a CONVICTED solver-farm fp while scoring (the strongest tell). fp "(none)"
-// groups the lines with no X-CFM-TLS stamp.
+// groups the lines with no X-CFM-TLS stamp: older edge, plain HTTP, or a vhost
+// behind Cloudflare (the edge sends no fingerprint for a trusted-proxy relay).
 type chalFP struct {
 	FP          string  `json:"fp"`
 	Lines       int     `json:"lines"`
@@ -481,7 +482,7 @@ func Summarize(lines []string) Summary {
 				}
 				fpKey := e.FP
 				if fpKey == "" {
-					fpKey = "(none)" // no X-CFM-TLS stamp on the scored solves
+					fpKey = "(none)" // no X-CFM-TLS stamp (old edge / plain HTTP / behind Cloudflare)
 				}
 				a := csByFP[fpKey]
 				if a == nil {

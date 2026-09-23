@@ -114,7 +114,8 @@ func IsSolverFarm(host string) bool { return solverFarmMarks.active(host) }
 // convicted as farming. Call it wherever the vhost is marked, passing the
 // finding's RESOLVED fingerprint (cross-host preferred over per-host). Same
 // cadence / TTL / no-unmark contract as MarkSolverFarm; an empty fingerprint is
-// a no-op (older edge or plain-HTTP — no X-CFM-TLS stamp).
+// a no-op (older edge, plain-HTTP or relayed by a trusted proxy — no X-CFM-TLS
+// stamp).
 func MarkSolverFarmFingerprint(fp string, ttl time.Duration) { solverFarmFPMarks.mark(fp, ttl) }
 
 // IsSolverFarmFingerprint reports whether fp currently carries a live conviction.

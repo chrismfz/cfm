@@ -1445,8 +1445,8 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
           -- clear (only /__cfm_verify does) and so would be client-SPOOFABLE. value()
           -- is unspoofable and charset/length-bounded; Go parses it to the canonical
           -- fp id. Step 0c (the fingerprint-policy lookup) already computed the
-          -- tuple and stashed it in ngx.ctx.cfm_tlsfp_raw (false = plain-HTTP/
-          -- none), so reuse it and rebuild only when the stash is absent (Step 0c
+          -- tuple and stashed it in ngx.ctx.cfm_tlsfp_raw (false = plain-HTTP,
+          -- a trusted-proxy relay, or none), so reuse it and rebuild only when the stash is absent (Step 0c
           -- pcall failed, or skipped entirely under FP_POLICY=0 — WAF-hit fp
           -- attribution keeps working either way, paid only on WAF-hit
           -- requests). pcall-guarded (like the /__cfm_verify stamp) so a

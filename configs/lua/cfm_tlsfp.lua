@@ -98,10 +98,11 @@ end
 --
 -- Measured 2026-09-23 (docs/traffic-classifier.md, "UA ↔ TLS coherence tell"):
 -- every visitor of a Cloudflare-proxied vhost shared one fingerprint
--- (`ba6b4aad`) whatever their browser. The solver-farm detector groups by
--- fingerprint, so that fingerprint picked up a farm verdict, 7 000+ WAF blocks
--- and would_deny rows that belong to the proxy. An armed policy on it would have
--- hit every visitor of those vhosts.
+-- (`ba6b4aad`, and `fd4fd84d` on an edge whose OpenSSL names the curves
+-- differently) whatever their browser. The solver-farm detector groups by
+-- fingerprint, so that fingerprint picked up a farm verdict, and 7 000+ real WAF
+-- blocks and would_deny rows from those visitors were charged to it. An armed
+-- policy on it would have hit every visitor of those vhosts.
 --
 -- Same test the confs use for X-Forwarded-Proto (angie.conf/openresty.conf):
 -- the realip module rewrites $remote_addr ONLY when the peer
@@ -115,7 +116,6 @@ local function via_trusted_proxy()
   if peer == nil or addr == nil or peer == "" or addr == "" then return false end
   return peer ~= addr
 end
-M.via_trusted_proxy = via_trusted_proxy
 
 -- value returns the versioned tuple, or nil when there is nothing to describe:
 -- a plain-HTTP request has no handshake, and a request relayed by a trusted
