@@ -46,7 +46,7 @@ func registerSiteCacheStatus(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "site_cache_status",
-		Description: "Site Cache per-vhost opt-in status: the vhosts that have edge caching ARMED and, per vhost, the static/micro tier + recipe/TTL and the current purge generation. Answers 'is caching on for this site, and how?'. Caching is bypass-by-default — a vhost absent from this list is NOT cached. Read-only view of the same policy list the `cfm webtop site-cache` CLI manages.",
+		Description: "Site Cache per-vhost policies: per stored vhost (exact host or `*.suffix` wildcard), the static/micro tier + recipe/TTL, enabled or not, and the current purge generation. Answers 'is caching on for this site, and how?'. Caching is bypass-by-default. A vhost is cached when its own entry has a tier enabled, or — with NO entry of its own — when an armed `*.suffix` wildcard in this list covers it. An exact entry with both tiers off is an explicit opt-out: never cached, even under an armed wildcard. Read-only view of the same policy list the `cfm webtop site-cache` CLI manages.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		return dispatchJSON(ctx, d, "/api/v1/site-cache/list", nil)
 	})

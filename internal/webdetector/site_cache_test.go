@@ -120,7 +120,7 @@ func TestSiteCacheStore_GenerationAndCreatedAtNotClientSettable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	if got.Generation == seeded || got.Generation < int(before.UnixMilli()) || got.Generation > int(time.Now().UnixMilli()) {
+	if got.Generation == seeded || got.Generation < before.UnixMilli() || got.Generation > time.Now().UnixMilli() {
 		t.Fatalf("generation %d is not the server's wall clock (client seeded %d)", got.Generation, seeded)
 	}
 	if got.CreatedAt.Before(before) {
@@ -157,7 +157,7 @@ func TestSiteCacheStore_PurgeAll(t *testing.T) {
 	_, _ = s.Set(SiteCacheEntry{Host: "a.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})
 	_, _ = s.Set(SiteCacheEntry{Host: "b.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
 
-	before := map[string]int{}
+	before := map[string]int64{}
 	for _, h := range []string{"a.com", "b.com"} {
 		e, _ := s.Get(h)
 		before[h] = e.Generation
@@ -242,8 +242,8 @@ func TestSiteCacheStore_PolicyFeed(t *testing.T) {
 // into HITs, undoing the purge. Exercised inside one millisecond on purpose.
 func TestSiteCacheStore_GenerationNeverReused(t *testing.T) {
 	s := newSiteCacheTestStore(t)
-	seen := map[int]bool{}
-	note := func(g int, what string) {
+	seen := map[int64]bool{}
+	note := func(g int64, what string) {
 		t.Helper()
 		if seen[g] {
 			t.Fatalf("%s reused generation %d", what, g)
@@ -273,8 +273,8 @@ func TestSiteCacheStore_GenerationNeverReused(t *testing.T) {
 // host whose clock ran fast) is still never re-issued.
 func TestSiteCacheStore_GenerationPastStoredValueAfterReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "site_cache.json")
-	future := int(time.Now().Add(24 * time.Hour).UnixMilli())
-	raw := `[{"host":"a.com","generation":` + strconv.Itoa(future) + `,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`
+	future := time.Now().Add(24 * time.Hour).UnixMilli()
+	raw := `[{"host":"a.com","generation":` + strconv.FormatInt(future, 10) + `,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}]`
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -498,6 +498,123 @@ func TestSiteCacheStore_StatsKeyFor(t *testing.T) {
 	}
 }
 
+// A NEW entry that ends up all-off is an opt-out (it stops a covering armed
+// wildcard from caching the host), so it is created only when the patch turns
+// BOTH tiers off explicitly — never as a side effect of staging a TTL.
+func TestSiteCacheStore_ApplyNewAllOffOnlyWhenExplicit(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	for _, tc := range []struct {
+		name string
+		p    SiteCachePatch
+	}{
+		{"ttl only", SiteCachePatch{Host: "a.com", Micro: &SiteCacheTierPatch{TTL: strPtr("30s")}}},
+		{"cookie only", SiteCachePatch{Host: "a.com", StrictCookies: boolPtr(true)}},
+		{"host only", SiteCachePatch{Host: "a.com"}},
+		{"one tier off", SiteCachePatch{Host: "a.com", Static: &SiteCacheTierPatch{Enabled: boolPtr(false)}}},
+	} {
+		if _, err := s.Apply(tc.p, false); err == nil {
+			t.Errorf("%s: a new all-off entry was created implicitly", tc.name)
+		}
+	}
+	if _, ok := s.Get("a.com"); ok {
+		t.Fatal("a rejected patch created an entry")
+	}
+	off := &SiteCacheTierPatch{Enabled: boolPtr(false)}
+	e, err := s.Apply(SiteCachePatch{Host: "a.com", Static: off, Micro: off}, true)
+	if err != nil {
+		t.Fatalf("explicit opt-out rejected: %v", err)
+	}
+	if e.Static.Enabled || e.Micro.Enabled || e.Generation <= 0 {
+		t.Fatalf("opt-out entry = %+v", e)
+	}
+	// An EXISTING armed entry may be turned all-off by any patch.
+	on := &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("static_lean")}
+	if _, err := s.Apply(SiteCachePatch{Host: "b.com", Static: on}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Apply(SiteCachePatch{Host: "b.com", Static: off}, false); err != nil {
+		t.Fatalf("turning an existing tier off: %v", err)
+	}
+}
+
+// The edge strips a :port from both the request Host and the feed's hosts, so
+// the store keys on the bare host too; a NEW policy with a port is rejected.
+func TestSiteCacheStore_PortHandling(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	on := &SiteCacheTierPatch{Enabled: boolPtr(true), Recipe: strPtr("static_lean")}
+	if _, err := s.Apply(SiteCachePatch{Host: "a.com:443", Static: on}, false); err == nil {
+		t.Fatal("a host with a port was accepted")
+	}
+	if _, err := s.Apply(SiteCachePatch{Host: "*.example.com:8080", Static: on}, false); err == nil {
+		t.Fatal("a wildcard with a port was accepted")
+	}
+
+	// Loading: a stored port is stripped (it always acted as the bare host at
+	// the edge), a duplicate keeps the higher generation, and the file is
+	// rewritten normalized.
+	path := filepath.Join(t.TempDir(), "site_cache.json")
+	raw := `[
+	 {"host":"a.com:443","generation":9000,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"A.com","generation":5,"static":{"enabled":false},"micro":{"enabled":true,"recipe":"micro_safe"}},
+	 {"host":"b.com","generation":7,"scope_hosts":["b.com","secret.com"],"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}}
+	]`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s2 := newSiteCacheStore(path)
+	e, ok := s2.Get("a.com")
+	if !ok || e.Generation != 9000 || !e.Static.Enabled {
+		t.Fatalf("duplicate resolution: ok=%v %+v (want the gen-9000 row)", ok, e)
+	}
+	if len(s2.List()) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(s2.List()))
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leftover := range []string{"secret.com", "a.com:443", `"A.com"`} {
+		if strings.Contains(string(b), leftover) {
+			t.Fatalf("store not rewritten normalized on load; still holds %s:\n%s", leftover, b)
+		}
+	}
+	if p, ok := s2.Purge("a.com"); !ok || p.Generation <= 9000 {
+		t.Fatalf("purge after load: %+v", p)
+	}
+}
+
+// Generations are unique across the WHOLE store, so an exact host's fresh
+// policy never shares a value — and so a key space — with its covering
+// wildcard, even when both are created within one millisecond.
+func TestSiteCacheStore_GenerationsUniqueStoreWide(t *testing.T) {
+	s := newSiteCacheTestStore(t)
+	seen := map[int64]string{}
+	on := SiteCacheTier{Enabled: true, Recipe: "static_lean"}
+	for i := 0; i < 200; i++ {
+		h := "h" + strconv.Itoa(i) + ".example.com"
+		if i == 0 {
+			h = "*.example.com"
+		}
+		e, err := s.Set(SiteCacheEntry{Host: h, Static: on})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if other, dup := seen[e.Generation]; dup {
+			t.Fatalf("%s and %s share generation %d", h, other, e.Generation)
+		}
+		seen[e.Generation] = h
+	}
+	if n := s.PurgeAll(); n != 200 {
+		t.Fatalf("purge-all: %d", n)
+	}
+	for _, e := range s.List() {
+		if other, dup := seen[e.Generation]; dup {
+			t.Fatalf("purge-all reissued %d (%s) for %s", e.Generation, other, e.Host)
+		}
+		seen[e.Generation] = e.Host
+	}
+}
+
 func TestParseCacheTTL(t *testing.T) {
 	ok := []string{"1s", "30s", "5m", "1h", "7d", "30d"}
 	for _, v := range ok {
@@ -593,8 +710,8 @@ func TestSiteCacheAPI_SetMergesAndStampsHostOnly(t *testing.T) {
 func TestSiteCacheAPI_ScopedListFiltered(t *testing.T) {
 	e, mux := newSiteCacheAPITestEngine(t)
 	// Seed two tenants directly through the engine (admin path).
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "mysite.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "other.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "mysite.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "other.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})
 
 	rr := doRequest(mux, scopedCtx("mysite.com"), http.MethodGet, "/api/v1/site-cache/list", nil)
 	if rr.Code != http.StatusOK {
@@ -619,7 +736,7 @@ func TestSiteCacheAPI_ScopedListFiltered(t *testing.T) {
 
 func TestSiteCacheAPI_ScopedGetRemovePurgeOutOfScope(t *testing.T) {
 	e, mux := newSiteCacheAPITestEngine(t)
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "other.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "other.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})
 
 	for _, tc := range []struct {
 		name, method, path string
@@ -639,7 +756,7 @@ func TestSiteCacheAPI_ScopedGetRemovePurgeOutOfScope(t *testing.T) {
 
 func TestSiteCacheAPI_PurgeAllAdminOnly(t *testing.T) {
 	e, mux := newSiteCacheAPITestEngine(t)
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "mysite.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "mysite.com", Micro: SiteCacheTier{Enabled: true, Recipe: "micro_safe"}})
 
 	// Scoped may NOT purge-all, even with a vhost in scope.
 	rr := doRequest(mux, scopedCtx("mysite.com"), http.MethodPost, "/api/v1/site-cache/purge?all=1", nil)

@@ -638,7 +638,9 @@ function _M.observe()
     if not dbg or dbg == "" then return end
     local p = _M.policy_for(ngx.var.host)
     if p then
-        local lbl = "observe " .. label_for(p)
+        -- An opt-out row (no armed tier) is labelled as such, not left as a
+        -- bare "gen=N" that reads like a malformed policy.
+        local lbl = "observe " .. (policy_armed(p) and "" or "opt-out ") .. label_for(p)
         -- Now that Tier A caches, surface the actual verdict too (HIT / MISS /
         -- BYPASS / EXPIRED / …) — debug-gated, so ordinary clients never see it.
         local st = ngx.var.upstream_cache_status

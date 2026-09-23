@@ -90,8 +90,8 @@ func TestSiteCacheStatsRow(t *testing.T) {
 
 func seedStats(e *Engine) {
 	// Stats are shown only for CURRENTLY-armed vhosts, so arm them too.
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "mysite.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "other.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "mysite.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "other.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
 	e.siteCacheStats.Upsert("mysite.com", map[string]int{"HIT": 9, "MISS": 1, "total": 10})
 	e.siteCacheStats.Upsert("other.com", map[string]int{"HIT": 1, "MISS": 9, "total": 10})
 }
@@ -166,7 +166,7 @@ func TestSiteCacheStatsAPI_NoScopeFailsClosed(t *testing.T) {
 // edge dict keeps stale counts until reload, so the armed policy set is truth.
 func TestSiteCacheStats_UnarmedDropsOut(t *testing.T) {
 	e, _ := newSiteCacheAPITestEngine(t)
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "gone.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "gone.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
 	e.siteCacheStats.Upsert("gone.com", map[string]int{"HIT": 5, "MISS": 5, "total": 10})
 
 	if rows := e.SiteCacheStatsAll(); len(rows) != 1 {
@@ -185,7 +185,7 @@ func TestSiteCacheStats_UnarmedDropsOut(t *testing.T) {
 // A concrete sub-host of a wildcard-armed vhost must resolve to the pattern row.
 func TestSiteCacheStats_WildcardDrilldown(t *testing.T) {
 	e, _ := newSiteCacheAPITestEngine(t)
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "*.cdn.example.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "*.cdn.example.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
 	// The edge keys stats under the pattern (policy_key_for folds sub-hosts).
 	e.siteCacheStats.Upsert("*.cdn.example.com", map[string]int{"HIT": 3, "MISS": 1, "total": 4})
 
@@ -209,7 +209,7 @@ func TestSiteCacheStats_WildcardDrilldown(t *testing.T) {
 // pattern, other tenants' included.
 func TestSiteCacheStatsAPI_ScopedDrilldownNeverResolvesForeignWildcard(t *testing.T) {
 	e, mux := newSiteCacheAPITestEngine(t)
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "*.example.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "*.example.com", Static: SiteCacheTier{Enabled: true, Recipe: "static_lean"}})
 	e.siteCacheStats.Upsert("*.example.com", map[string]int{"HIT": 70, "MISS": 30, "total": 100})
 
 	rr := doRequest(mux, scopedCtx("a.example.com"), http.MethodGet, "/api/v1/site-cache/stats?host=a.example.com", nil)
@@ -241,10 +241,10 @@ func TestSiteCacheStatsAPI_ScopedDrilldownNeverResolvesForeignWildcard(t *testin
 func TestSiteCacheStats_DrilldownMirrorsEdgeKey(t *testing.T) {
 	e, _ := newSiteCacheAPITestEngine(t)
 	on := SiteCacheTier{Enabled: true, Recipe: "static_lean"}
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "*.example.com", Static: on})
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "*.shop.example.com", Static: on})
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "new.example.com", Static: on})
-	_, _ = e.SiteCacheSet(SiteCacheEntry{Host: "optout.example.com", Static: SiteCacheTier{Recipe: "static_lean"}})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "*.example.com", Static: on})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "*.shop.example.com", Static: on})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "new.example.com", Static: on})
+	_, _ = e.siteCache.Set(SiteCacheEntry{Host: "optout.example.com", Static: SiteCacheTier{Recipe: "static_lean"}})
 	e.siteCacheStats.Upsert("*.example.com", map[string]int{"HIT": 1, "total": 1})
 	e.siteCacheStats.Upsert("optout.example.com", map[string]int{"HIT": 5, "total": 5}) // stale, from when it was armed
 

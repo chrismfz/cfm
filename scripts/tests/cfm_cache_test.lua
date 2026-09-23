@@ -406,6 +406,18 @@ _micro_enforce = false
 reset_cache_vars(); ngx.var.host = "big.gen"
 cache.static_gate()
 check(ngx.var.cfm_cache_gen == "1758585600123", "a millisecond generation renders exactly (no 1.7e+12)")
+-- the debug header names an opt-out row as such (not a bare "gen=N")
+for k in pairs(_header) do _header[k] = nil end
+ngx.var.http_x_cfm_cache_debug = "1"
+ngx.var.host = "tenant.example.com"
+cache.observe()
+check(_header["X-CFM-Cache"] == "observe opt-out gen=30", "observe labels an opt-out row: " .. tostring(_header["X-CFM-Cache"]))
+for k in pairs(_header) do _header[k] = nil end
+ngx.var.host = "a.example.com"
+cache.observe()
+check(_header["X-CFM-Cache"] ~= nil and not _header["X-CFM-Cache"]:find("opt-out", 1, true),
+      "an armed (wildcard) policy is not labelled opt-out")
+ngx.var.http_x_cfm_cache_debug = nil
 ngx.var.scheme = nil; ngx.var.request_method = nil; ngx.var.uri = nil; ngx.var.http_cookie = nil
 ngx.var.http_authorization = nil
 

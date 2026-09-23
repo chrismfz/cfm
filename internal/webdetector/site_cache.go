@@ -9,14 +9,17 @@
 //
 // Semantics (opt-in, like http3OverrideStore — NOT like the exclude stores):
 //   - The global default for every vhost is "NO caching".
-//   - A host appears here only when an operator (or a scoped cPanel user, for
-//     their own domain) turned caching on.
+//   - A host appears here when an operator (or a scoped cPanel user, for their
+//     own domain) configured it: with at least one tier on, or with both tiers
+//     off — an explicit opt-out, which matters when an armed "*.suffix"
+//     wildcard covers the host (the exact entry wins, so it caches nothing).
+//     A host with NO entry follows the covering armed wildcard, if any.
 //   - Two INDEPENDENT tiers per host — a static-asset cache and a micro-cache
 //     of HTML — each with its own recipe + TTL, so a vhost can run one or both.
 //   - Exact host by default (e.g. "myip.gr" and "www.myip.gr" are two entries);
 //     a "*.suffix" wildcard is the only pattern class allowed, mirroring
-//     http3OverrideStore, so a scoped user manages exact hosts and the Lua data
-//     path (later phase) can always match what is stored.
+//     http3OverrideStore, so the edge matcher (cfm_hostmatch.lua) can always
+//     match what is stored.
 //
 // SAFETY: enabling a tier here records INTENT only. The absolute never-cache
 // rails (auth cookies, Set-Cookie responses, redirects, panel/webmail hosts,
@@ -60,9 +63,9 @@ const (
 	cacheTierMicro
 )
 
-// Recipe vocabularies (docs §8). Kept intentionally small in Phase 1; the edge
-// (Lua) will enforce Lua↔Go parity on these names in a later phase, so treat
-// this list as the source of truth when that lands.
+// Recipe vocabularies (docs §8). This list is the source of truth for the
+// recipe names; the edge reads only the TTL (it does not interpret the recipe
+// name yet).
 var staticCacheRecipes = map[string]struct{}{
 	"static_lean":       {},
 	"static_aggressive": {},
@@ -87,8 +90,10 @@ func cacheRecipeAllowed(recipe string, kind cacheTierKind) bool {
 	return false
 }
 
-// SiteCacheTier is one caching tier's per-vhost policy. A disabled tier with no
-// recipe/ttl is a valid "off" state (staging a config before arming it).
+// SiteCacheTier is one caching tier's per-vhost policy. A disabled tier keeps
+// its recipe/ttl, so it can be re-armed as it was. An entry with BOTH tiers
+// off is an explicit opt-out (see the file header), so a new entry may be
+// created all-off only on purpose (Apply).
 type SiteCacheTier struct {
 	Enabled bool   `json:"enabled"`
 	Recipe  string `json:"recipe,omitempty"` // one of the tier's recipe vocabulary
@@ -110,15 +115,25 @@ type SiteCacheEntry struct {
 	ScopeHosts []string `json:"scope_hosts,omitempty"`
 	// Generation is folded into the edge cache key; a Purge replaces it so old
 	// keys become unreachable and age out — a config change never touches it.
-	// It must NEVER repeat for a host: a remove + re-add, or a store reset, that
-	// reused an old value would make that value's still-on-disk objects (static
-	// entries live 7 days, and may carry a year of origin max-age) HITs again,
-	// undoing an earlier purge. So a new or purged generation is the wall clock
-	// in MILLISECONDS, bumped past the previous value (see
-	// nextGenerationLocked). Milliseconds, not nanoseconds: the edge renders it
-	// with Lua tostring (%.14g), which is exact only below 1e14 — ms stays there
-	// until the year 5138; ns would render as "1.7e+18" and collide.
-	Generation int           `json:"generation"`
+	// A value must NEVER be issued twice: a remove + re-add that reused an old
+	// value (it used to restart at 0) made that value's still-on-disk objects
+	// (static entries live 7 days, and may carry a year of origin max-age) HITs
+	// again, undoing an earlier purge. So a new or purged generation is the
+	// wall clock in MILLISECONDS, bumped past every generation the store has
+	// issued or loaded (nextGenerationLocked) — unique across the whole store,
+	// so an exact host's fresh policy never lands on its covering wildcard's
+	// key space either. Milliseconds, not nanoseconds: the edge renders it with
+	// Lua tostring (%.14g), exact only below 1e14 — ms stays there until the
+	// year 5138; ns would render as "1.7e+18" and collide.
+	//
+	// A purge covers ONE policy key. The edge keys a request on the generation
+	// of the policy that MATCHED it, so a host that moves back under a covering
+	// "*.suffix" wildcard (its exact policy removed, a narrower wildcard
+	// removed) finds that wildcard's own cached objects for it again — served
+	// within the wildcard's TTL, like any object of that policy, and cleared
+	// only by purging the wildcard. A purge of the host's former exact policy
+	// never reached them.
+	Generation int64         `json:"generation"`
 	Static     SiteCacheTier `json:"static"`
 	Micro      SiteCacheTier `json:"micro"`
 	// StrictCookies inverts the cookie-bypass logic to "bypass on ANY cookie not
@@ -136,21 +151,26 @@ type siteCacheStore struct {
 	mu      sync.RWMutex
 	path    string
 	entries map[string]SiteCacheEntry // key = normalized host
-	// lastGen is the highest generation this process issued or loaded per host,
-	// kept after a Remove, so a host removed and re-added within the same
-	// millisecond still gets a new value (nextGenerationLocked). In memory only:
-	// across a restart the wall clock has moved on.
-	lastGen map[string]int
+	// genHWM is the highest generation this store issued or loaded, for ANY
+	// host (nextGenerationLocked issues past it). It survives a Remove, so a
+	// host removed and re-added within one millisecond still gets a new value.
+	// In memory only: after a restart it is rebuilt from the stored entries,
+	// so a REMOVED host's last value is forgotten. That can repeat only if the
+	// clock stepped back (a VM restore, a boot before NTP sync) past a value
+	// issued before the restart AND a new generation then lands on exactly
+	// that millisecond.
+	genHWM int64
 }
 
 // SiteCacheTierPatch and SiteCachePatch are the MERGE form of a set request
 // (POST /api/v1/site-cache/set): a nil field keeps what is stored, so a client
 // that changes one knob — a TTL — cannot silently reset the others (the cookie
-// safety settings, the other tier). The set used to REPLACE the whole policy,
-// and the CLI sends only the flags given, so retuning a micro TTL dropped
-// strict_cookies / auth_cookies and disabled the static tier. An explicit
-// value is applied: enabled=false, strict_cookies=false, and an EMPTY
-// auth_cookies list (which clears it; JSON null keeps it).
+// safety settings, the other tier). The set used to REPLACE the whole policy
+// with what the request carried, and the CLI built that from the flags given,
+// so `set X --micro micro_safe --micro-ttl 30s` disabled the static tier and
+// dropped strict_cookies / auth_cookies. An explicit value is applied:
+// enabled=false, strict_cookies=false, ttl="", and an EMPTY auth_cookies list
+// (which clears it; JSON null keeps it).
 type SiteCacheTierPatch struct {
 	Enabled *bool   `json:"enabled,omitempty"`
 	Recipe  *string `json:"recipe,omitempty"`
@@ -184,18 +204,25 @@ func newSiteCacheStore(path string) *siteCacheStore {
 	s := &siteCacheStore{
 		path:    strings.TrimSpace(path),
 		entries: make(map[string]SiteCacheEntry),
-		lastGen: make(map[string]int),
 	}
 	s.load()
 	return s
 }
 
-// normalize lowercases the host, strips a trailing dot, and accepts only exact
-// hosts and "*.suffix" wildcards — same rule class as http3OverrideStore so the
-// later Lua data path can always match what is stored.
+// normalize lowercases the host, strips a trailing dot and a ":port", and
+// accepts only exact hosts and "*.suffix" wildcards — the same key and rule
+// class as the edge (cfm_hostmatch.lua normalize_host / is_supported_pattern),
+// which strips the port too: a stored "a.com:443" always acted as "a.com"
+// there, so keeping the port here made the opt-out rows and StatsKeyFor
+// disagree with the edge. (A NEW policy with a port is rejected in Apply; this
+// strip keeps loading, and every lookup, edge-faithful.) An IPv6 literal is
+// rejected ("[").
 func (s *siteCacheStore) normalize(host string) (string, bool) {
 	h := strings.ToLower(strings.TrimSpace(host))
 	h = strings.TrimSuffix(h, ".")
+	if i := strings.IndexByte(h, ':'); i >= 0 {
+		h = h[:i]
+	}
 	if h == "" {
 		return "", false
 	}
@@ -322,9 +349,11 @@ func (s *siteCacheStore) normalizeEntry(in SiteCacheEntry) (SiteCacheEntry, erro
 	return r, nil
 }
 
-// Set upserts a vhost's cache policy. Generation and CreatedAt are preserved on
-// an existing host (a config change never bumps the purge generation — only
-// Purge does). Returns the stored entry.
+// Set upserts a vhost's WHOLE cache policy (a full replace of the tiers and
+// cookie settings; the API uses the merging Apply — Set remains for tests and
+// in-process callers). Generation and CreatedAt are preserved on an existing
+// host (a config change never bumps the purge generation — only Purge does).
+// Returns the stored entry.
 //
 // On save failure the in-memory map is rolled back so the daemon's view matches
 // disk (a restart must not silently gain or lose a policy).
@@ -339,7 +368,15 @@ func (s *siteCacheStore) Set(in SiteCacheEntry) (SiteCacheEntry, error) {
 // two concurrent edits cannot lose each other. scoped marks a scoped (tenant)
 // caller: on a NEW entry it records the opt-in attribution (ScopeHosts =
 // [Host]); an existing entry keeps its original attribution either way.
+//
+// A NEW entry that would end up all-off is created only when the patch turns
+// BOTH tiers off explicitly: it is an opt-out, which silently stops a covering
+// armed wildcard from caching the host, so it must never be a side effect of
+// staging a TTL or a cookie setting for a host not configured yet.
 func (s *siteCacheStore) Apply(p SiteCachePatch, scoped bool) (SiteCacheEntry, error) {
+	if strings.Contains(p.Host, ":") {
+		return SiteCacheEntry{}, errors.New("host must not include a port (the edge keys policies on the bare host)")
+	}
 	h, ok := s.normalize(p.Host)
 	if !ok {
 		return SiteCacheEntry{}, errors.New("invalid or unsupported host (exact host or *.suffix only)")
@@ -358,10 +395,20 @@ func (s *siteCacheStore) Apply(p SiteCachePatch, scoped bool) (SiteCacheEntry, e
 	if p.AuthCookies != nil {
 		merged.AuthCookies = append([]string(nil), (*p.AuthCookies)...)
 	}
+	if !existed && !merged.Static.Enabled && !merged.Micro.Enabled &&
+		!(siteCacheTierPatchOff(p.Static) && siteCacheTierPatchOff(p.Micro)) {
+		return SiteCacheEntry{}, errors.New("new policy enables no tier: enable static and/or micro with a recipe, or set BOTH tiers off explicitly for an opt-out")
+	}
 	if !existed && scoped {
 		merged.ScopeHosts = []string{h}
 	}
 	return s.setLocked(merged)
+}
+
+// siteCacheTierPatchOff reports whether a tier patch explicitly turns the tier
+// off.
+func siteCacheTierPatchOff(t *SiteCacheTierPatch) bool {
+	return t != nil && t.Enabled != nil && !*t.Enabled
 }
 
 func (s *siteCacheStore) setLocked(in SiteCacheEntry) (SiteCacheEntry, error) {
@@ -387,7 +434,7 @@ func (s *siteCacheStore) setLocked(in SiteCacheEntry) (SiteCacheEntry, error) {
 		// policy gets a generation this host has never used (a remove + re-add
 		// must not bring the old one's cached objects back).
 		norm.CreatedAt = now
-		norm.Generation = s.nextGenerationLocked(norm.Host, 0)
+		norm.Generation = s.nextGenerationLocked()
 	}
 	norm.UpdatedAt = now
 	s.entries[norm.Host] = norm
@@ -403,8 +450,10 @@ func (s *siteCacheStore) setLocked(in SiteCacheEntry) (SiteCacheEntry, error) {
 	return norm, nil
 }
 
-// Remove turns caching OFF for a vhost (deletes its policy). Returns true if a
-// row was removed.
+// Remove deletes a vhost's policy. Returns true if a row was removed. The host
+// is then uncached unless an armed "*.suffix" wildcard covers it — use an
+// all-off entry (an opt-out, what the CLI's `off` sets) to keep it uncached
+// there too.
 func (s *siteCacheStore) Remove(host string) bool {
 	h, ok := s.normalize(host)
 	if !ok {
@@ -416,7 +465,6 @@ func (s *siteCacheStore) Remove(host string) bool {
 	if !existed {
 		return false
 	}
-	s.noteGenerationLocked(h, prev.Generation)
 	delete(s.entries, h)
 	if err := s.saveLocked(); err != nil {
 		s.entries[h] = prev
@@ -440,7 +488,7 @@ func (s *siteCacheStore) Purge(host string) (SiteCacheEntry, bool) {
 		return SiteCacheEntry{}, false
 	}
 	prev := e
-	e.Generation = s.nextGenerationLocked(h, e.Generation)
+	e.Generation = s.nextGenerationLocked()
 	e.UpdatedAt = time.Now().UTC()
 	s.entries[h] = e
 	if err := s.saveLocked(); err != nil {
@@ -462,7 +510,7 @@ func (s *siteCacheStore) PurgeAll() int {
 	now := time.Now().UTC()
 	for h, e := range s.entries {
 		prev[h] = e
-		e.Generation = s.nextGenerationLocked(h, e.Generation)
+		e.Generation = s.nextGenerationLocked()
 		e.UpdatedAt = now
 		s.entries[h] = e
 	}
@@ -476,26 +524,18 @@ func (s *siteCacheStore) PurgeAll() int {
 	return len(prev)
 }
 
-// nextGenerationLocked returns a generation host has never used: the wall clock
-// in milliseconds, bumped past floor (the value being replaced) and past the
-// last generation this process issued or saw for host. Caller holds s.mu.
-func (s *siteCacheStore) nextGenerationLocked(host string, floor int) int {
-	g := int(time.Now().UnixMilli())
-	if g <= floor {
-		g = floor + 1
+// nextGenerationLocked returns a generation the store has never issued or
+// loaded: the wall clock in milliseconds, bumped past genHWM (so values are
+// unique store-wide and strictly increasing; a purge-all of N hosts within one
+// millisecond runs up to N ms ahead of the clock, which is harmless). Caller
+// holds s.mu.
+func (s *siteCacheStore) nextGenerationLocked() int64 {
+	g := time.Now().UnixMilli()
+	if g <= s.genHWM {
+		g = s.genHWM + 1
 	}
-	if last, ok := s.lastGen[host]; ok && g <= last {
-		g = last + 1
-	}
-	s.lastGen[host] = g
+	s.genHWM = g
 	return g
-}
-
-// noteGenerationLocked records a generation as used for host. Caller holds s.mu.
-func (s *siteCacheStore) noteGenerationLocked(host string, g int) {
-	if last, ok := s.lastGen[host]; !ok || g > last {
-		s.lastGen[host] = g
-	}
 }
 
 func (s *siteCacheStore) Get(host string) (SiteCacheEntry, bool) {
@@ -522,8 +562,8 @@ func (s *siteCacheStore) List() []SiteCacheEntry {
 	return out
 }
 
-// HasAny reports whether any vhost has at least one ENABLED tier — the cheap
-// gate the edge (later phase) uses to skip its lookup entirely.
+// HasAny reports whether any vhost has at least one ENABLED tier. (The edge
+// computes its own has_any from the feed; this is kept for tests.)
 func (s *siteCacheStore) HasAny() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -552,7 +592,7 @@ type CacheTierRow struct {
 // scope_hosts — the edge does not need them.
 type CachePolicyRow struct {
 	Host          string        `json:"host"`
-	Generation    int           `json:"gen"`
+	Generation    int64         `json:"gen"`
 	Static        *CacheTierRow `json:"static,omitempty"`
 	Micro         *CacheTierRow `json:"micro,omitempty"`
 	StrictCookies bool          `json:"strict_cookies,omitempty"`
@@ -678,6 +718,11 @@ func (s *siteCacheStore) load() {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// rewrite: the file holds something the store now normalizes away — a
+	// legacy scope_hosts allowlist (trimmed to [host]; rewritten at once so
+	// the other tenants' domains do not linger on disk until an unrelated
+	// write), a host with a :port, or a duplicate host.
+	rewrite := false
 	for _, e := range arr {
 		norm, err := s.normalizeEntry(e)
 		if err != nil {
@@ -686,14 +731,35 @@ func (s *siteCacheStore) load() {
 			logging.Logf("[webdetector][site-cache] dropping stored policy for %q on load: %v (path=%s)", e.Host, err, s.path)
 			continue
 		}
+		if len(norm.ScopeHosts) != len(e.ScopeHosts) || strings.Contains(e.Host, ":") {
+			rewrite = true
+		}
 		if norm.CreatedAt.IsZero() {
 			norm.CreatedAt = time.Now().UTC()
 		}
 		if norm.UpdatedAt.IsZero() {
 			norm.UpdatedAt = norm.CreatedAt
 		}
-		s.noteGenerationLocked(norm.Host, norm.Generation)
+		if norm.Generation > s.genHWM {
+			s.genHWM = norm.Generation
+		}
+		if prev, dup := s.entries[norm.Host]; dup {
+			// Two stored rows for one host (a hand edit, "A.com" + "a.com", or
+			// a host with and without a port). Keep the one with the higher
+			// generation: serving the lower one would bring back objects a
+			// purge had retired.
+			rewrite = true
+			logging.Logf("[webdetector][site-cache] duplicate stored policy for %q on load; keeping the one with the higher generation (path=%s)", norm.Host, s.path)
+			if prev.Generation >= norm.Generation {
+				continue
+			}
+		}
 		s.entries[norm.Host] = norm
+	}
+	if rewrite {
+		if err := s.saveLocked(); err != nil {
+			logging.Logf("[webdetector][site-cache] failed to rewrite the normalized store on load: %v (path=%s)", err, s.path)
+		}
 	}
 }
 

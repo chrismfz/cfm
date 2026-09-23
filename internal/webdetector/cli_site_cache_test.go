@@ -3,6 +3,8 @@ package webdetector
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -61,5 +63,59 @@ func TestParseSiteCacheSetFlags(t *testing.T) {
 				t.Fatalf("err = %v, want it to mention %q", err, tc.err)
 			}
 		})
+	}
+}
+
+// `off` must leave the vhost uncached even under an admin's armed wildcard: it
+// keeps an all-off entry (an opt-out row in the feed). `remove` deletes the
+// entry, and the vhost then follows the wildcard. (`off` used to delete, which
+// left the host cached — and deleted an opt-out, turning caching back ON.)
+func TestSiteCacheCLI_OffKeepsOptOutRemoveDeletes(t *testing.T) {
+	e, mux := newSiteCacheAPITestEngine(t)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r.WithContext(adminCtx()))
+	}))
+	defer ts.Close()
+	on := SiteCacheTier{Enabled: true, Recipe: "static_lean"}
+	if _, err := e.siteCache.Set(SiteCacheEntry{Host: "*.example.com", Static: on}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.siteCache.Set(SiteCacheEntry{Host: "a.example.com", Static: on}); err != nil {
+		t.Fatal(err)
+	}
+	feedHas := func(host string) (CachePolicyRow, bool) {
+		for _, r := range e.SiteCachePolicyFeed() {
+			if r.Host == host {
+				return r, true
+			}
+		}
+		return CachePolicyRow{}, false
+	}
+
+	for _, verb := range []string{"off", "disable"} {
+		if err := runSiteCacheWebTop(ts.URL, []string{verb, "a.example.com"}); err != nil {
+			t.Fatalf("%s: %v", verb, err)
+		}
+		row, ok := feedHas("a.example.com")
+		if !ok || row.Static != nil || row.Micro != nil {
+			t.Fatalf("%s: want an opt-out row for a.example.com, got ok=%v %+v", verb, ok, row)
+		}
+	}
+	// `off` on a host with no entry at all creates the opt-out.
+	if err := runSiteCacheWebTop(ts.URL, []string{"off", "b.example.com"}); err != nil {
+		t.Fatalf("off new host: %v", err)
+	}
+	if _, ok := feedHas("b.example.com"); !ok {
+		t.Fatal("off on a new host under an armed wildcard did not opt it out")
+	}
+
+	if err := runSiteCacheWebTop(ts.URL, []string{"remove", "a.example.com"}); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, ok := e.SiteCacheGet("a.example.com"); ok {
+		t.Fatal("remove kept the entry")
+	}
+	if key, ok := e.siteCache.StatsKeyFor("a.example.com"); !ok || key != "*.example.com" {
+		t.Fatalf("after remove the host must follow the wildcard: %q %v", key, ok)
 	}
 }

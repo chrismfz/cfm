@@ -4138,13 +4138,6 @@ func (e *Engine) HTTP3OverrideHasAny() bool {
 // here are the OPT-IN list (static and/or micro tier), fed to the edge on
 // /nginx/cache/config — see site_cache.go and docs/site-cache-design.md.
 
-func (e *Engine) SiteCacheSet(in SiteCacheEntry) (SiteCacheEntry, error) {
-	if e == nil || e.siteCache == nil {
-		return SiteCacheEntry{}, errors.New("site cache unavailable")
-	}
-	return e.siteCache.Set(in)
-}
-
 // SiteCacheApply merges a patch onto a vhost's stored policy (the /set API).
 // scoped marks a scoped (tenant) caller, recorded on a new entry's audit trail.
 func (e *Engine) SiteCacheApply(p SiteCachePatch, scoped bool) (SiteCacheEntry, error) {

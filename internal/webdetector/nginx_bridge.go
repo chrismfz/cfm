@@ -149,11 +149,12 @@ type NginxBridge struct {
 	// configs/lua/cfm_h3_config.lua and http3_overrides_store.go.
 	ListHTTP3Hosts func() []string
 
-	// ListCachePolicy returns the per-vhost Site Cache policy feed — only
-	// vhosts with at least one enabled tier appear. The Lua worker polls this
-	// via /nginx/cache/config to refresh its per-worker cache. PHASE 2 is
-	// observe-only: the edge merely stamps an X-CFM-Cache header, nothing is
-	// cached. See configs/lua/cfm_cache.lua and site_cache.go.
+	// ListCachePolicy returns the per-vhost Site Cache policy feed: every vhost
+	// with an enabled tier, plus an opt-out row (no tier) for an all-off exact
+	// host that an armed wildcard covers (siteCacheStore.PolicyFeed). The Lua
+	// worker polls this via /nginx/cache/config to refresh its per-worker
+	// cache, which gates the edge's proxy_cache locations. See
+	// configs/lua/cfm_cache.lua and site_cache.go.
 	ListCachePolicy func() []CachePolicyRow
 
 	// RuleDecision evaluates dynamic traffic rules for the current request
@@ -2603,14 +2604,12 @@ func (b *NginxBridge) handleHTTP3Config(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(map[string]any{"hosts": hosts})
 }
 
-// handleCacheConfig returns the per-vhost Site Cache policy feed (only vhosts
-// with an enabled tier). Polled by configs/lua/cfm_cache.lua every ~60s. The
-// body is marshalled to a buffer and sent with an explicit Content-Length so
-// the minimal Lua cosocket reader is never handed a chunked-encoded body (the
-// same requirement the clam-override handlers document).
-//
-// PHASE 2 is observe-only: the edge stamps an X-CFM-Cache header from this feed
-// but does NOT cache anything (no proxy_cache is wired yet).
+// handleCacheConfig returns the per-vhost Site Cache policy feed (armed vhosts
+// plus opt-out rows — see ListCachePolicy). Polled by configs/lua/cfm_cache.lua
+// every ~60s; it drives the edge's per-vhost cache gates. The body is
+// marshalled to a buffer and sent with an explicit Content-Length so the
+// minimal Lua cosocket reader is never handed a chunked-encoded body (the same
+// requirement the clam-override handlers document).
 func (b *NginxBridge) handleCacheConfig(w http.ResponseWriter, r *http.Request) {
 	if !b.checkToken(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)

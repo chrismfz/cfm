@@ -15,8 +15,10 @@
 // Endpoints:
 //   GET  /api/v1/site-cache/list                 — policies (scope-filtered)
 //   GET  /api/v1/site-cache/get?host=            — one vhost's policy
-//   POST /api/v1/site-cache/set                  — merge-upsert (body = SiteCachePatch)
-//   POST /api/v1/site-cache/remove?host=         — turn caching OFF for a vhost
+//   POST /api/v1/site-cache/set                  — merge-upsert (body = SiteCachePatch);
+//                                                  both tiers off = an explicit opt-out
+//   POST /api/v1/site-cache/remove?host=         — DELETE a vhost's policy (the host
+//                                                  then follows a covering *.suffix)
 //   POST /api/v1/site-cache/purge?host= | ?all=1 — bump generation (all=admin)
 
 package webdetector
@@ -96,11 +98,14 @@ func (e *Engine) handleSiteCacheGet(w http.ResponseWriter, r *http.Request) {
 // POST /api/v1/site-cache/set  (merge-upsert; host carried in the JSON body)
 //
 // The body is a SiteCachePatch: only the fields present are changed, the rest
-// of the stored policy is kept (a new host starts all-off). So `{"host":"x",
-// "micro":{"ttl":"30s"}}` retunes one TTL without touching the static tier or
-// the cookie settings. A full SiteCacheEntry body is still accepted and acts
-// as a full replace of every field it carries (generation/created_at/
-// scope_hosts are ignored: server-managed).
+// of the stored policy is kept. So `{"host":"x","micro":{"ttl":"30s"}}` retunes
+// one TTL without touching the static tier or the cookie settings. A NEW host
+// must enable a tier, or turn BOTH off explicitly (an opt-out — see Apply).
+// Clearing takes an explicit value: `"strict_cookies":false`,
+// `"auth_cookies":[]`, `"ttl":""`. A SiteCacheEntry as returned by get is
+// accepted too, but its omitempty fields drop exactly those values, so posting
+// an edited entry back cannot clear them (it keeps them — the safe direction).
+// generation / created_at / scope_hosts in a body are ignored: server-managed.
 func (e *Engine) handleSiteCacheSet(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		writeJSON(w, http.StatusServiceUnavailable, siteCacheResultResponse{Error: "engine unavailable"})
@@ -137,6 +142,11 @@ func (e *Engine) handleSiteCacheSet(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/v1/site-cache/remove?host=<host>
+//
+// DELETES the vhost's policy. With no entry the host is uncached — unless an
+// armed "*.suffix" wildcard covers it, which then applies (its cache for the
+// host included). To keep a host uncached under a wildcard, set BOTH tiers off
+// instead: that stored opt-out is what the CLI's `off` does.
 func (e *Engine) handleSiteCacheRemove(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "engine unavailable"})

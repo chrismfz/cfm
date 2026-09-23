@@ -151,10 +151,8 @@ func siteCacheStatsRow(host string, c map[string]int) SiteCacheStatsRow {
 // stats are keyed under. The stats read paths filter on it because the edge
 // dict retains a vhost's counts after it is unarmed (no TTL until an edge
 // reload), so the policy store is the source of truth for what is still live.
-// A stored but all-off policy is NOT armed: it used to count, so a staged or
-// disabled vhost kept showing its old counts as live — and an all-off exact
-// host under an armed wildcard (an opt-out) would shadow the wildcard in a
-// drill-down.
+// A stored but all-off policy (an opt-out) is NOT armed: it used to count, so
+// a vhost turned off kept showing its old counts as live.
 func (e *Engine) armedCacheKeys() map[string]struct{} {
 	if e == nil || e.siteCache == nil {
 		return nil
@@ -184,7 +182,9 @@ func (e *Engine) armedCacheKeys() map[string]struct{} {
 // caller resolves only to a policy key inside it. A "*.suffix" key aggregates
 // EVERY sub-host under the pattern — other tenants' vhosts included — so a
 // tenant asking about its own a.example.com must not be handed the counts of
-// an admin's *.example.com (it used to be).
+// an admin's *.example.com (it used to be). The scope match is literal, as on
+// every site-cache endpoint: a token whose scope holds "*.example.com" itself
+// (a cPanel wildcard subdomain the account owns) does see that key.
 func (e *Engine) SiteCacheStatsHost(host string, scope map[string]struct{}) (SiteCacheStatsRow, bool) {
 	if e == nil || e.siteCacheStats == nil || e.siteCache == nil {
 		return SiteCacheStatsRow{}, false
@@ -230,9 +230,9 @@ type siteCacheStatsResponse struct {
 //
 // Scope model identical to the other site-cache handlers: admin/loopback sees
 // all; a scoped (cPanel) token sees only its own vhosts (a ?host= outside the
-// allowlist is 403, a ?host= drill-down resolves only to in-scope policy keys —
-// never an admin's wildcard — and the unfiltered list is filtered to the
-// caller's hosts).
+// allowlist is 403, a ?host= drill-down resolves only to policy keys in the
+// token's scope — so not to a wildcard the scope does not literally hold — and
+// the unfiltered list is filtered to the caller's hosts).
 func (e *Engine) handleSiteCacheStats(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		writeJSON(w, http.StatusOK, siteCacheStatsResponse{Rows: nil})
