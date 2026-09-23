@@ -186,6 +186,13 @@ export const siteCacheMixin = {
     scCacheOff() {
       return Boolean(this.scSwitches && !this.scSwitches.siteCache);
     },
+    // The cookie check the confirm dialogs ask about. A scoped user cannot run
+    // the debug stamp (it answers only the box and the operator's own IPs).
+    scCookieCheckText() {
+      return this.isScoped
+        ? "Is your site's login / cart cookie on the auth list (the editor's auth cookies), or strict cookies on? Otherwise ask the server operator to check it first."
+        : "Checked with the debug stamp that its logged-in and cart pages bypass (runbook §7)?";
+    },
     // Who serves an armed micro tier from cache, for the confirm dialogs.
     scMicroNodeText() {
       if (this.scMicroMode !== "enforced") return "This page cannot tell whether this node enforces the micro tier; if it does";
@@ -398,7 +405,7 @@ export const siteCacheMixin = {
       if (wasOn) return true;
       return window.confirm(
         `${this.scMicroNodeText}: anonymous pages of ${patch.host} will be served from cache for ` +
-        `${microBucketSeconds(patch.micro.ttl || "")} s. Checked the debug stamp on its logged-in and cart pages first?`);
+        `${microBucketSeconds(patch.micro.ttl || "")} s. ${this.scCookieCheckText}`);
     },
     async saveSC() {
       if (!this.canSaveSC) return;
@@ -547,7 +554,7 @@ export const siteCacheMixin = {
     confirmSCRecipeMicro(rows) {
       const micro = rows.some(({ patch }) => patch.micro && patch.micro.enabled);
       if (!micro || this.scMicroMode === "dryrun") return true;
-      return window.confirm(`${this.scMicroNodeText}: the anonymous pages of these vhosts will be served from cache at once. Checked their session cookies are on the auth list? Continue?`);
+      return window.confirm(`${this.scMicroNodeText}: the anonymous pages of these vhosts will be served from cache at once. ${this.scCookieCheckText} Continue?`);
     },
     scPatchSummary(p) {
       const parts = [];

@@ -15,8 +15,9 @@ Two tiers, both off for every vhost until one is armed:
 | **A: static** | Files ending in `.css .js .map .woff .woff2 .ttf .eot .png .jpg .jpeg .gif .webp .ico`, on :9080 and :9043 | the static-asset locations, zone `cfm_static` (10 GB, `inactive=7d`) | the origin's `Cache-Control` / `Expires`, **1 h fallback**. The stored static recipe and TTL are labels only. |
 | **B: micro** | Anonymous GET/HEAD responses through the HTTPS `location /`: HTML pages, but also anything else served there (REST JSON, feeds, svg…). It runs on the plain-allow path, after the WAF, challenge and bridge decisions. | internal `@cfm_micro_<n>s` locations, one zone per bucket | the vhost's micro TTL snapped to 1 / 2 / 5 / 10 / 30 / 60 s (empty = 1 s, above 60 s = 60 s). The origin's cache headers are ignored except for their "do not store" signals. |
 
-Tier B is a **dry run** until `MICRO_CACHE_ENFORCE = 1` on the node. Until
-then it only reports what it would cache.
+Tier B serves an armed vhost's anonymous pages from cache while
+`MICRO_CACHE_ENFORCE = 1`, the default since 2026-09-23. At `0` it is a dry
+run on the whole node: it only reports what it would cache.
 
 Caching is bypass-by-default. What is never cached, whatever a policy says
 (`site-cache-design.md` §4 has the full list), differs by tier:
@@ -53,7 +54,7 @@ Caching is bypass-by-default. What is never cached, whatever a policy says
 | Knob | Default | Effect |
 |---|---|---|
 | `SITE_CACHE` | `1` | The node-wide kill switch. It is not an opt-in: the per-vhost store arms vhosts. `0` stops caching, stamping and the stats push on this node within about 15 s, and leaves every policy as it is. While it is `0` the edge also stops reading the policy feed (see §8 before turning it back on). |
-| `MICRO_CACHE_ENFORCE` | `0` | The Tier B opt-in. `0` is the dry run; `1` serves armed, anonymous, cacheable responses from the micro buckets. Set it only after the on-box checklist in `site-cache-design.md` §5.7 has passed on this node. |
+| `MICRO_CACHE_ENFORCE` | `1` | The Tier B kill switch (the default was `0` until 2026-09-23). `1` serves armed, anonymous, cacheable responses from the micro buckets; `0` is a dry run on this node, and leaves every policy as it is. Arming a vhost's micro tier is the opt-in (§7). |
 | `SITE_CACHE_STORE_PATH` | `/var/lib/cfm/webdetector_site_cache.json` | The per-vhost policy store (file mode 0600). |
 
 To change a switch, edit and save `detectors.conf`; nothing needs reloading.
@@ -71,7 +72,7 @@ To see the current values, use:
 - the MCP tool `detectors_config` with `merged=true`, or
   `GET /api/v1/detectors/config?view=merged`, for the effective values
   (`detectors.conf` plus any `detectors.d/*.conf` overlay). A key that is not
-  set anywhere has its default: `SITE_CACHE` 1, `MICRO_CACHE_ENFORCE` 0.
+  set anywhere has its default: `SITE_CACHE` 1, `MICRO_CACHE_ENFORCE` 1.
 - `cfm_bridge_config.lua` itself, or the daemon's
   `cfm_bridge_config.lua written … site_cache=… micro_cache_enforce=…` log line,
   for what the edge was handed.
@@ -247,22 +248,40 @@ cfm webtop site-cache purge --all           # every vhost (admin only)
   returns 404. Purge first. A policy added again later starts on a new
   generation anyway.
 
-## 7. Turning Tier B on (per node)
+## 7. Arming Tier B on a vhost
 
-1. Arm micro on the vhosts you want (`--micro … --micro-ttl …`). Leave the node
-   in dry run.
-2. Watch the debug stamp on real pages: logged-in pages, carts, forms, and
-   pages that should be personalised must say `microcache=bypass:<reason>`.
-   Add app session cookies with `--auth-cookies` where needed.
-3. Run the on-box checklist in `site-cache-design.md` §5.7 on this node.
-4. Set `MICRO_CACHE_ENFORCE = 1` in `detectors.conf` and save. It takes
-   effect within about 15 s, with no reload.
-5. Check that access-log lines with `ucache="HIT"` and `up=cfm_apache_micro`
-   show up. The stats view restarts empty on the config change, so give the
-   rows a minute or two to move.
+`MICRO_CACHE_ENFORCE = 1` is the default, so arming a vhost's micro tier
+serves its anonymous pages from cache at once. What keeps a logged-in page out
+of the cache is the cookie rail, so for a kind of app this node has not
+micro-cached before (a shop, a membership site, anything with its own session
+cookie), find its session cookies first:
 
-To roll back, set `MICRO_CACHE_ENFORCE = 0` (dry run again within about 15 s).
-If anything wrong was cached, also purge the affected vhost, or `purge --all`.
+1. Arm it strict: `cfm webtop site-cache set <host> --micro micro_safe
+   --micro-ttl 5s --strict-cookies`. Any cookie not on the ignore list
+   (analytics, consent, `cfm_*`) now bypasses, so no visitor holding a session
+   is served from cache while you check.
+2. Log in to the app in a browser and read its cookies. From the box, send each
+   one on its own with the debug stamp (§4) on a logged-in page and a cart
+   page (`-H 'Cookie: <name>=<value>'`):
+   - `bypass:auth:<name>`: the rail knows it as a session cookie;
+   - `bypass:strict:<name>`: it bypasses only because of strict mode. If it is
+     a session cookie, add it with `--auth-cookies`, then check it again;
+   - no bypass reason: an analytics or consent cookie on the ignore list.
+3. When every session cookie shows `auth:`, drop strict
+   (`--no-strict-cookies`), or keep it for this vhost (less cache, nothing to
+   maintain).
+4. From an outside client, run steps 5–7 of the on-box checklist in
+   `site-cache-design.md` §5.7: anonymous MISS then HIT, a logged-in visitor
+   never served a cached page, anonymous HITs again after logout. Check that
+   access-log lines with `ucache="HIT"` and `up=cfm_apache_micro` show up.
+
+The debug stamp works whatever `MICRO_CACHE_ENFORCE` says; steps 4's MISS/HIT
+checks need it at `1`. `MICRO_CACHE_ENFORCE = 0` is the node-wide dry run: it
+stops the micro tier on every vhost of this node, not only the one you check.
+
+To roll back one vhost, `cfm webtop site-cache set <host> --micro off`; the
+whole node, `MICRO_CACHE_ENFORCE = 0` (dry run again within about 15 s). If
+anything wrong was cached, also purge the affected vhost, or `purge --all`.
 
 ## 8. Incident: something wrong is being served
 

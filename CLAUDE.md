@@ -621,10 +621,20 @@ because of that. Hard-won points:
   `$arg_*` variable SHADOWS the real value (a `map` for the whole http block),
   so a stray `map … $http_authorization` would silently turn the
   credentialed-request rail off — the guard refuses every such writer.
-- **Tier B is an opt-in, dry run by default.** `MICRO_CACHE_ENFORCE = 0` ships;
-  never flip that default. A node turns it on only after the on-box checklist
-  in design §5.7. Micro is entered ONLY at cfm.lua's Step 4 (after WAF,
-  challenge, bridge decisions) — `cfm_micro_entry_structure_test.lua` pins it.
+- **Tier B: arming a vhost's micro tier is the opt-in.** `MICRO_CACHE_ENFORCE`
+  shipped `0` (dry run) through burn-in, and has defaulted to `1` since
+  2026-09-23. That day the design §5.7 checklist passed on a live WordPress
+  vhost (infected.gr on virgo): anonymous MISS → HIT → EXPIRED at the bucket,
+  a logged-in user always bypassed, and logout went back to HITs. No other node
+  had a micro-armed vhost, so the flip armed nothing already there. The knob is
+  now a kill switch like `SITE_CACHE` (`0` = node-wide dry run, no vhost
+  disarmed). What guards a tenant is the per-vhost arm: the page confirms it,
+  and before arming micro on a new kind of app (a shop, a membership site)
+  follow runbook §7 (arm it `--strict-cookies`, find its session cookies with
+  the debug stamp, then §5.7 steps 5–7). The edge reader still treats an ABSENT
+  field as off (fail-safe; every file the daemon writes carries it). Micro
+  is entered ONLY at cfm.lua's Step 4 (after WAF, challenge, bridge decisions);
+  `cfm_micro_entry_structure_test.lua` pins it.
 - **Tier A's static recipe/TTL are labels.** The static locations follow the
   origin's Cache-Control/Expires with a 1 h fallback; don't document or promise
   a static TTL the edge doesn't apply. Micro TTL snaps to MICRO_BUCKETS

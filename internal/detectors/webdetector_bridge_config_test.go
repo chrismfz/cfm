@@ -9,28 +9,29 @@ import (
 	"cfm/internal/sslcollector"
 )
 
-// The Site Cache gates published to the edge: SITE_CACHE is a kill switch that
-// defaults ON (the per-vhost policy store is what arms a vhost), and
-// MICRO_CACHE_ENFORCE is an opt-in that defaults OFF (an upgrade must never
-// start caching HTML on its own — CLAUDE.md §6). A default flipped here would
-// ship to every node that does not set the key.
+// The Site Cache gates published to the edge: SITE_CACHE and
+// MICRO_CACHE_ENFORCE are kill switches that default ON. The per-vhost policy
+// store is what arms a vhost, one tier at a time; MICRO_CACHE_ENFORCE = 0 is
+// the node-wide dry run for the micro tier. A default flipped here ships to
+// every node that does not set the key (CLAUDE.md §6).
 func TestWebdetectorBridgeConfig_SiteCacheDefaults(t *testing.T) {
 	cfg := webdetectorBridgeConfig(map[string]string{}, map[string]string{})
 	if !cfg.SiteCache {
 		t.Error("SITE_CACHE unset → SiteCache false; want true (kill switch, default on)")
 	}
-	if cfg.MicroCacheEnforce {
-		t.Error("MICRO_CACHE_ENFORCE unset → MicroCacheEnforce true; want false (opt-in, default off)")
+	if !cfg.MicroCacheEnforce {
+		t.Error("MICRO_CACHE_ENFORCE unset → MicroCacheEnforce false; want true (kill switch, default on)")
 	}
 	for _, c := range []struct {
 		kv          map[string]string
 		site, micro bool
 	}{
-		{map[string]string{"SITE_CACHE": "0"}, false, false},
-		{map[string]string{"SITE_CACHE": "0 ; panic button"}, false, false},
+		{map[string]string{"SITE_CACHE": "0"}, false, true},
+		{map[string]string{"SITE_CACHE": "0 ; panic button"}, false, true},
+		{map[string]string{"MICRO_CACHE_ENFORCE": "0"}, true, false},
+		{map[string]string{"MICRO_CACHE_ENFORCE": "0 # dry run on this node"}, true, false},
 		{map[string]string{"MICRO_CACHE_ENFORCE": "1"}, true, true},
-		{map[string]string{"MICRO_CACHE_ENFORCE": "1 # after burn-in"}, true, true},
-		{map[string]string{"SITE_CACHE": "0", "MICRO_CACHE_ENFORCE": "1"}, false, true},
+		{map[string]string{"SITE_CACHE": "0", "MICRO_CACHE_ENFORCE": "0"}, false, false},
 	} {
 		got := webdetectorBridgeConfig(map[string]string{}, c.kv)
 		if got.SiteCache != c.site || got.MicroCacheEnforce != c.micro {
@@ -83,12 +84,12 @@ func TestReferenceDetectorsConf_SiteCacheKnobs(t *testing.T) {
 	if !kvBool(wd, "SITE_CACHE", false) {
 		t.Error("reference detectors.conf: SITE_CACHE is not written as 1")
 	}
-	if kvBool(wd, "MICRO_CACHE_ENFORCE", true) {
-		t.Error("reference detectors.conf: MICRO_CACHE_ENFORCE is not written as 0")
+	if !kvBool(wd, "MICRO_CACHE_ENFORCE", false) {
+		t.Error("reference detectors.conf: MICRO_CACHE_ENFORCE is not written as 1")
 	}
 	cfg := webdetectorBridgeConfig(secs.Global, wd)
-	if !cfg.SiteCache || cfg.MicroCacheEnforce {
-		t.Fatalf("reference detectors.conf → site_cache=%v micro_cache_enforce=%v, want true/false", cfg.SiteCache, cfg.MicroCacheEnforce)
+	if !cfg.SiteCache || !cfg.MicroCacheEnforce {
+		t.Fatalf("reference detectors.conf → site_cache=%v micro_cache_enforce=%v, want true/true", cfg.SiteCache, cfg.MicroCacheEnforce)
 	}
 	out := filepath.Join(t.TempDir(), "cfm_bridge_config.lua")
 	if err := sslcollector.WriteWebdetectorBridgeConfig(out, cfg, 0); err != nil {
@@ -98,7 +99,7 @@ func TestReferenceDetectorsConf_SiteCacheKnobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"site_cache = true,", "micro_cache_enforce = false,"} {
+	for _, want := range []string{"site_cache = true,", "micro_cache_enforce = true,"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("rendered cfm_bridge_config.lua lacks %q:\n%s", want, b)
 		}

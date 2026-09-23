@@ -11,8 +11,12 @@ import (
 // sections of detectors.conf: each knob's default lives HERE, and the Lua
 // reader (cfm_bridge_cfg.lua) applies the same default to an absent field.
 // Split out of Manager start so the defaults are unit-tested
-// (webdetector_bridge_config_test.go) — SITE_CACHE on, MICRO_CACHE_ENFORCE
-// off are the ones an upgrade must never flip.
+// (webdetector_bridge_config_test.go), SITE_CACHE and MICRO_CACHE_ENFORCE
+// among them. One deliberate asymmetry: the Lua reader keeps
+// micro_cache_enforce OFF for an absent field. Every file the daemon writes
+// carries it, so the field is absent only in a file from an older daemon, or
+// when there is no readable file (never written: the base detectors.conf has
+// no [webdetector]); then the edge stays in dry run.
 func webdetectorBridgeConfig(global, wdKV map[string]string) sslcollector.WebdetectorBridgeConfig {
 	cfg := sslcollector.WebdetectorBridgeConfig{
 		ClearanceRefresh: kvBool(wdKV, "CHALLENGE_COOKIE_REFRESH", true),
@@ -59,13 +63,13 @@ func webdetectorBridgeConfig(global, wdKV map[string]string) sslcollector.Webdet
 		// without disarming any vhost, so re-arming is instant.
 		SiteCache: kvBool(wdKV, "SITE_CACHE", true),
 		// Tier B micro-cache ENFORCE gate (anonymous-page micro-caching).
-		// Default OFF — an explicit opt-in, NOT a second kill switch: an
-		// upgrade must never start caching pages on its own, even for a vhost whose
-		// micro tier is armed (CLAUDE.md §6 "adding X silently arms it").
-		// While off, cfm.lua's micro gate stays in DRY-RUN (verdict on the
-		// observe header, no ngx.exec, nothing stored); the operator sets
-		// MICRO_CACHE_ENFORCE=1 to activate after burn-in.
-		MicroCacheEnforce: kvBool(wdKV, "MICRO_CACHE_ENFORCE", false),
+		// Default ON since 2026-09-23, after the design §5.7 checklist passed
+		// on a live WordPress vhost (virgo): like SITE_CACHE it is a kill
+		// switch, and arming a vhost's micro tier is the opt-in (the store is
+		// empty by default). MICRO_CACHE_ENFORCE=0 puts this node's micro tier
+		// in DRY-RUN (verdict on the observe header, no ngx.exec, nothing
+		// stored) without disarming any vhost.
+		MicroCacheEnforce: kvBool(wdKV, "MICRO_CACHE_ENFORCE", true),
 	}
 	// Guard nonsense values; the Lua side re-guards but keep the
 	// published file sane. Idle must stay below Apache's
