@@ -369,3 +369,41 @@ func TestRemoveBlockBatch_RetriesThenReports(t *testing.T) {
 		t.Errorf("%d transactions, want %d (no per-address fallback)", len(f.batches), blockBatchAttempts)
 	}
 }
+
+// More than setWriteChunk deletes go in one transaction per chunk; a block
+// set that can't be read fails the batch before any write.
+func TestRemoveBlockBatch_ChunksAndReadError(t *testing.T) {
+	var ips []net.IP
+	var dump []wireElem
+	for i := 0; i < 2500; i++ {
+		ip := net.IPv4(10, 5, byte(i/250), byte(i%250+1))
+		ips = append(ips, ip)
+		dump = append(dump, wireElem{key: ip})
+	}
+	f := &batchFake{dump: map[string][]wireElem{setBlockV4: dump}}
+	if err := f.backend(t).RemoveBlockBatch(ips); err != nil {
+		t.Fatalf("RemoveBlockBatch: %v", err)
+	}
+	var sizes []int
+	for _, batch := range f.batches {
+		dels, _, _ := elemsOf(t, batch)
+		sizes = append(sizes, len(dels[setBlockV4]))
+	}
+	if len(sizes) != 3 || sizes[0] != setWriteChunk || sizes[2] != 500 {
+		t.Errorf("transactions deleted %v, want [1000 1000 500]", sizes)
+	}
+
+	var wrote bool
+	b := nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
+		if isBatch(req) {
+			wrote = true
+			return nil, io.EOF
+		}
+		return nil, unix.EIO
+	})
+	b.namedSets[setBlockV4] = &nftables.Set{Name: setBlockV4, KeyType: nftables.TypeIPAddr, HasTimeout: true,
+		Table: &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}}
+	if err := b.RemoveBlockBatch([]net.IP{net.ParseIP("10.0.0.1")}); err == nil || wrote {
+		t.Fatalf("err=%v wrote=%v; want a read error and no write", err, wrote)
+	}
+}

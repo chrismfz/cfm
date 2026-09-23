@@ -38,22 +38,25 @@ back-filled here — see the git/PR history for that period.
 ### Fixed
 - **Unblocks no longer run `EnsureBase`, which made them take minutes and,
   on nftlib, skip the imunify/fail2ban cleanup.** Every unblock rebuilt the
-  base ruleset, which an unblock never needs: twice per IP from the cfm-web
-  unblock queue, once from `/unblock`. That costs dozens of `nft` processes: measured 9-14s
+  base ruleset (`EnsureBase`), which an unblock never needs: twice per IP from
+  the cfm-web unblock queue, once from `/unblock`. That costs dozens of `nft` processes: measured 9-14s
   per call on busy exec nodes and ~70s on an nftlib node, so one IP took up to
   ~2.5 minutes there, and `/unblock`'s 30s background cleanup ran out before
   it reached csf, fail2ban and imunify (`context deadline exceeded` in
   `[unblock.step]`), leaving the IP in those lists. A mass unblock also held
-  the agent's work loop for minutes per IP. The CLI `cfm unblock` still runs
-  it once.
+  the agent's work loop for minutes per IP. The CLI `cfm unblock` now runs it
+  only when the exec engine finds no `inet cfm` table.
 - **Batch unblock deletes only the IPs the block sets hold.** Deleting an IP
   the set doesn't hold fails the whole transaction, and most IPs of a
   fleet-wide unblock aren't blocked on any one node. On the exec engine that
   sent every IP through a separate `nft` process; on nftlib the batch removed
   nothing and logged `batch nft remove error: ... no such file or directory`
   on every unblock. It now reads each block set once and deletes the present
-  IPs in one transaction (retried from a fresh read if the set changed), so
-  3,000 IPs take ~50ms on either engine.
+  IPs in one transaction (nftlib: one per 1,000), retried from a fresh read if
+  the set changed. The batch step now costs a read of the block sets, so it
+  grows with their size, not the request's: ~50ms with today's few-thousand
+  entry sets on either engine, for 3,000 IPs. Each IP still goes through its
+  own cleanup (csf, fail2ban, imunify, WAF) afterwards.
 - **The ChallengeV2 geo check at verify now reads the current GeoLite2
   database.** When a country/ASN policy is armed at `challenge_v2`, verify
   checks whether the solving client falls under it. That check went through

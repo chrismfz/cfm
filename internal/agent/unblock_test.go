@@ -30,6 +30,7 @@ func (b *unblockBackend) ListTableTextNoDNS(string, string) (string, error) {
 // IP (and unblock.Do ran it again): 2x 10-70s on busy nodes, per IP, on the
 // agent's work loop.
 func TestProcessUnblockRequest_NoEnsureBase(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // never run a real csf/fail2ban/imunify here
 	var confirmed atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/unblock-confirm") {

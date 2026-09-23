@@ -29,6 +29,7 @@ func (c *ensureCounter) ListTableTextNoDNS(string, string) (string, error) {
 // no base ruleset, and EnsureBase costs dozens of nft processes (10-70s on
 // busy nodes), which used to run twice per unblock.
 func TestDo_NoEnsureBase(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // never run a real csf/fail2ban/imunify here
 	be := &ensureCounter{}
 	res, err := Do(context.Background(), net.ParseIP("198.51.100.1"), Options{BE: be})
 	if err != nil {

@@ -118,8 +118,9 @@ func Do(ctx context.Context, ip net.IP, opts Options) (*Result, error) {
 
 	// 1) nft remove. No EnsureBase: removing needs no base ruleset (without one
 	// there is nothing to remove), and EnsureBase runs dozens of nft processes
-	// — 10-70s on busy nodes, which ran twice per unblock and used up the
-	// /unblock cleanup's 30s budget before csf/fail2ban/imunify ran.
+	// — 10-70s on busy nodes. It ran here and again in the agent's unblock
+	// (twice per IP), and here it used up the /unblock cleanup's 30s budget
+	// before csf/fail2ban/imunify ran.
 	if opts.BE != nil {
 		t1 := time.Now()
 		if err := opts.BE.RemoveBlock(ip); err != nil {

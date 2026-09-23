@@ -256,3 +256,30 @@ func TestRemoveBlockBatch_RetriesNeverPerAddress(t *testing.T) {
 		t.Errorf("%d nft processes, want %d (list + write per attempt) — no per-address fallback", n, 2*blockBatchAttempts)
 	}
 }
+
+// A block set it can't read fails the batch before any write; a delete of
+// more than blockBatchStmtElems addresses is split into statements of the
+// same one-run script.
+func TestRemoveBlockBatch_ReadErrorAndLargeDelete(t *testing.T) {
+	log := fakeNFTSets(t, setJSON("block_v4", `"198.51.100.1"`), "not json", 0)
+	err := New().RemoveBlockBatch([]net.IP{net.ParseIP("198.51.100.1"), net.ParseIP("2001:db8::1")})
+	if err == nil || strings.Contains(readFile(t, log), "ARGS -f -") {
+		t.Fatalf("err=%v; want a read error and no write", err)
+	}
+
+	var elems []string
+	var ips []net.IP
+	for i := 0; i < 2500; i++ {
+		ip := net.IPv4(10, 5, byte(i/250), byte(i%250+1))
+		ips = append(ips, ip)
+		elems = append(elems, fmt.Sprintf("%q", ip.String()))
+	}
+	log = fakeNFTSets(t, setJSON("block_v4", elems...), setJSON("block_v6"), 0)
+	if err := New().RemoveBlockBatch(ips); err != nil {
+		t.Fatalf("RemoveBlockBatch: %v", err)
+	}
+	got := readFile(t, log)
+	if strings.Count(got, "ARGS -f -") != 1 || strings.Count(got, "delete element inet cfm block_v4 {") != 3 {
+		t.Errorf("want one run with 3 delete statements (chunks of %d):\n%.400s", blockBatchStmtElems, got)
+	}
+}
