@@ -610,8 +610,9 @@ set/remove/purge = scoped-allowed (own host); purge-all = admin-only.
   (`g<gen>|<server IP>|<listener scheme>|<scheme told to origin>://<host><uri>`). Purge = `generation++` in the store →
   new key space → old entries age out under `inactive`. No filesystem walking,
   no `proxy_cache_purge` (commercial) dependency, works on both OpenResty and
-  Angie. (A future per-URL purge has to cover one key per server IP the vhost
-  answers on, since the destination IP is in the key.)
+  Angie. (A future per-URL purge has to cover every key variant the URL can
+  be stored under: each server IP the vhost answers on × listener scheme ×
+  scheme told to the origin, since all three are in the key.)
 - **Surfaces:** `POST /api/v1/site-cache/purge?host=` (per-vhost; admin or the
   owning scoped user) and `?all=1` (global; admin). CLI `purge <host>` /
   `purge --all`. cfm-admin per-row **Purge** + top **Purge all**.

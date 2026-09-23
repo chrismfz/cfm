@@ -88,8 +88,10 @@ back-filled here — see the git/PR history for that period.
   - pins the whole cache key;
   - fails if `proxy_ignore_headers` lists `Vary` or `Cache-Control`, or if
     `proxy_cache_methods` lists POST;
-  - strips comments by the nginx lexer rule before matching, so commented-out
-    directive text no longer satisfies a check;
+  - lexes the conf like nginx and matches every rail as a directive at the
+    start of a statement, so comment text, a Lua `--` comment or a quoted value
+    no longer satisfies a check, and a one-line location is checked like any
+    other;
   - fails if the number of locations it parsed, or of cache locations it
     checked, differs from what the file contains. This also catches a
     `proxy_cache` outside any location, such as at server level.
