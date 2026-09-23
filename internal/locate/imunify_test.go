@@ -87,7 +87,7 @@ func TestSearchImunify_CappedListAsksEachQuery(t *testing.T) {
 func TestImunifyEntryString(t *testing.T) {
 	for _, c := range []struct {
 		ip      string
-		netmask int
+		netmask int64
 		want    string
 	}{
 		{"198.51.100.1", 4294967295, "198.51.100.1"},
@@ -96,7 +96,10 @@ func TestImunifyEntryString(t *testing.T) {
 		{"198.51.100.0", 24, "198.51.100.0/24"}, // a length, as some outputs give it
 		{"198.51.100.1", 32, "198.51.100.1"},
 		{"2001:db8:1:2::/64", -1, "2001:db8:1:2::/64"},
-		{"198.51.100.1", 12345, "198.51.100.1"}, // not a mask
+		{"198.51.100.1", 12345, "198.51.100.1"},    // not a mask
+		{"198.51.100.1", 64, "198.51.100.1"},       // past IPv4's width
+		{"2001:db8::1", 4294967295, "2001:db8::1"}, // an IPv4 mask on an IPv6 address
+		{"2001:db8:1:2::", 64, "2001:db8:1:2::/64"},
 	} {
 		if got := imunifyEntryString(c.ip, c.netmask); got != c.want {
 			t.Errorf("imunifyEntryString(%q, %d) = %q, want %q", c.ip, c.netmask, got, c.want)
@@ -112,5 +115,21 @@ func TestImunifyEntryString(t *testing.T) {
 	}
 	if len(locs[1]) != 1 || locs[1][0].Match != "2001:db8:1:2::/64" {
 		t.Errorf("IPv6 /64 entry: %+v", locs[1])
+	}
+}
+
+// An object without an "items" array is unreadable, not an empty list: read
+// as empty, it would say that imunify lists nothing, and an unblock would
+// skip the deletes.
+func TestParseImunifyList_ObjectWithoutItems(t *testing.T) {
+	for _, raw := range []string{`{"result":"error","messages":["x"]}`, `{"items":null}`, `{"items":{}}`, `"items"`} {
+		if items := parseImunifyList([]byte(raw)); items != nil {
+			t.Errorf("%s parsed as %+v, want unreadable", raw, items)
+		}
+	}
+	for _, raw := range []string{`{"items":[]}`, `{"Items":[]}`, `[]`} {
+		if items := parseImunifyList([]byte(raw)); items == nil {
+			t.Errorf("%s read as unreadable, want an empty list", raw)
+		}
 	}
 }

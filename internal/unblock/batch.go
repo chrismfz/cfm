@@ -16,13 +16,15 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
+	"cfm/internal/ipquery"
 	"cfm/internal/locate"
 )
 
 // graceBatchMax is the largest batch whose every IP gets the imunify white
 // grace entry (the customer-unblock case). Adding one is one
-// imunify360-agent run per IP (about a second; the CLI takes one IP per add),
-// so a mass unblock adds it only for the IPs imunify itself was blocking.
+// imunify360-agent run per IP (about a second; adding several in one run is
+// undocumented and unverified), so a mass unblock adds it only for the IPs
+// imunify itself was blocking.
 const graceBatchMax = 20
 
 // toolArgsPerRun bounds the IPs passed to one fail2ban-client unban or
@@ -84,8 +86,9 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 	if opts.BE != nil {
 		t1 := time.Now()
 		// One IP, or a batch that failed (e.g. a block set missing, or the set
-		// changing under every attempt): per IP, which tolerates an IP or a set
-		// that isn't there.
+		// changing under every attempt): per IP. Both engines take an IP a set
+		// doesn't hold as removed; a missing set is removed on exec nft and an
+		// error on nftlib, for the IPs of that family only.
 		errs := map[string]error{}
 		if len(list) == 1 || opts.BE.RemoveBlockBatch(list) != nil {
 			for _, ip := range list {
@@ -365,38 +368,61 @@ func fail2banUnbanMany(ctx context.Context, list []net.IP, out map[string]*Resul
 // graceBatchMax, only to the IPs imunify itself was blocking.
 //
 // imunify lists an IPv6 address only as its /64, so an IPv6 IP is cleared by
-// deleting the /64 entry that holds it.
+// deleting the /64 entry that holds it, and IPs sharing a /64 share its
+// delete and its grace entry. An IPv6 IP gets the grace entry only when
+// imunify was blocking its /64: whitelisting the /64 otherwise would allow
+// the whole network.
 func imunifyUnblockMany(ctx context.Context, list []net.IP, out map[string]*Result, opts Options) {
 	entries, capped, err := locate.ImunifyLocalList(ctx)
 	// listed[purpose][key] = the entry as imunify lists it (key: imunifyKey).
-	listed := map[string]map[string]string{"drop": {}, "captcha": {}}
+	listed := map[string]map[string]string{"drop": {}, "captcha": {}, "white": {}}
+	// Drop/captcha networks wider than an IP's key: never deleted (that would
+	// unblock the whole network), but imunify blocks the IPs they hold.
+	covering := ipquery.NewIndex[locate.ImunifyEntry]()
 	for _, e := range entries {
-		if k := imunifyEntryKey(e.Entry); k != "" && listed[e.Purpose] != nil {
+		if listed[e.Purpose] == nil {
+			continue
+		}
+		if k := imunifyEntryKey(e.Entry); k != "" {
 			listed[e.Purpose][k] = e.Entry
+		} else if e.Purpose != "white" {
+			covering.Add(e.Entry, e)
 		}
 	}
 	isListed := func(ip net.IP) bool {
 		k := imunifyKey(ip)
 		return listed["drop"][k] != "" || listed["captcha"][k] != ""
 	}
+	coveredBy := func(ip net.IP) []locate.ImunifyEntry {
+		q, err := ipquery.ParseQuery(ip.String())
+		if err != nil {
+			return nil
+		}
+		return covering.Match(q)
+	}
 	// Without the list, or past its cap, an IP it didn't show may still be
 	// listed: delete it blindly, as Do always did.
 	blind := err != nil || capped
 	for _, ip := range list {
-		switch {
+		r := out[ip.String()]
+		switch covers := coveredBy(ip); {
 		case err != nil:
-			addStep(out[ip.String()], Step{Source: SrcImunify, Action: ActionChecked, Detail: "local list unreadable (" + err.Error() + "); deleting blindly"})
+			addStep(r, Step{Source: SrcImunify, Action: ActionChecked, Detail: "local list unreadable (" + err.Error() + "); deleting blindly"})
 		case capped && !isListed(ip):
-			addStep(out[ip.String()], Step{Source: SrcImunify, Action: ActionChecked, Detail: fmt.Sprintf("not in the first %d entries of the local list; deleting blindly", len(entries))})
-		case !blind && !isListed(ip):
-			addStep(out[ip.String()], Step{Source: SrcImunify, Action: ActionNotFound, Detail: "not in the local drop/captcha list"})
+			addStep(r, Step{Source: SrcImunify, Action: ActionChecked, Detail: fmt.Sprintf("not in the first %d entries of the local list; deleting blindly", len(entries))})
+		case isListed(ip):
+			// Deleted below; the run is its step.
+		case len(covers) > 0:
+			addStep(r, Step{Source: SrcImunify, Action: ActionNotFound,
+				Detail: fmt.Sprintf("no entry of its own on the local drop/captcha list; the covering %s (%s) is left alone — deleting it would unblock the whole network", covers[0].Entry, covers[0].Purpose)})
+		default:
+			addStep(r, Step{Source: SrcImunify, Action: ActionNotFound, Detail: "not in the local drop/captcha list"})
 		}
 	}
 	for _, purpose := range []string{"drop", "captcha"} {
 		// One address family per run.
 		for _, v4 := range []bool{true, false} {
-			var ips []net.IP
-			var args []string
+			var g argGroups
 			for _, ip := range list {
 				if (ip.To4() != nil) != v4 {
 					continue
@@ -404,43 +430,56 @@ func imunifyUnblockMany(ctx context.Context, list []net.IP, out map[string]*Resu
 				k := imunifyKey(ip)
 				switch {
 				case listed[purpose][k] != "":
-					args = append(args, listed[purpose][k])
+					g.add(listed[purpose][k], ip)
 				case blind && !isListed(ip):
-					args = append(args, k)
-				default:
-					continue
+					g.add(k, ip)
 				}
-				ips = append(ips, ip)
 			}
-			runArgsForChunks(ctx, ips, args, toolArgsPerRun, out, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", purpose)
+			runGroups(ctx, g, toolArgsPerRun, out, SrcImunify, "imunify360-agent", "ip-list", "local", "delete", "--purpose", purpose)
 		}
 	}
 
 	// White grace entry: always when ImunifyWhiteTTL is set (manual-unblock
 	// grace window), otherwise only for feeds-origin blocks.
+	graceAll := opts.ImunifyWhiteTTL != nil && *opts.ImunifyWhiteTTL > 0
 	whiteTTL := opts.AllowTTL
-	if opts.ImunifyWhiteTTL != nil && *opts.ImunifyWhiteTTL > 0 {
+	if graceAll {
 		whiteTTL = opts.ImunifyWhiteTTL
 	}
+	var grace argGroups
 	for _, ip := range list {
-		k := ip.String()
-		r := out[k]
-		if len(r.FromFeeds) == 0 && (opts.ImunifyWhiteTTL == nil || *opts.ImunifyWhiteTTL <= 0) {
+		r := out[ip.String()]
+		if len(r.FromFeeds) == 0 && !graceAll {
 			continue
 		}
-		if len(list) > graceBatchMax && !isListed(ip) {
+		k := imunifyKey(ip)
+		blocked := isListed(ip) || len(coveredBy(ip)) > 0
+		switch {
+		case listed["white"][k] != "":
+			// An operator's entry, maybe permanent: an add would replace it
+			// with a timed one.
+			addStep(r, Step{Source: SrcImunify, Action: ActionChecked, Detail: "no white grace entry: already on the local white list as " + listed["white"][k]})
+		case ip.To4() == nil && !blocked:
 			addStep(r, Step{Source: SrcImunify, Action: ActionChecked,
-				Detail: fmt.Sprintf("no white grace entry: batch of %d IPs (grace goes to every IP of up to %d, else only to IPs imunify listed)", len(list), graceBatchMax)})
-			continue
+				Detail: fmt.Sprintf("no white grace entry: imunify takes IPv6 only as a /64 and wasn't seen blocking %s; whitelisting it would allow the whole network", k)})
+		case len(list) > graceBatchMax && !blocked:
+			addStep(r, Step{Source: SrcImunify, Action: ActionChecked,
+				Detail: fmt.Sprintf("no white grace entry: batch of %d IPs (grace goes to every IP of up to %d, else only to IPs imunify was seen blocking)", len(list), graceBatchMax)})
+		default:
+			grace.add(k, ip)
 		}
-		// imunify takes an IPv6 address only as its /64.
-		whiteArgs := []string{"ip-list", "local", "add", "--purpose", "white", "--comment", "CFM auto-unblock", imunifyKey(ip)}
+	}
+	for i, k := range grace.args {
+		whiteArgs := []string{"ip-list", "local", "add", "--purpose", "white", "--comment", "CFM auto-unblock", k}
 		// imunify defaults to a PERMANENT entry; bound it
 		// (--expiration wants an absolute unix timestamp).
 		if whiteTTL != nil && *whiteTTL > 0 {
 			whiteArgs = append(whiteArgs, "--expiration", strconv.FormatInt(time.Now().Add(*whiteTTL).Unix(), 10))
 		}
-		runCmd(ctx, r, SrcImunify, "imunify360-agent", whiteArgs...)
+		step := runTool(ctx, SrcImunify, "imunify360-agent", whiteArgs...)
+		for _, ip := range grace.ips[i] {
+			addStep(out[ip.String()], step)
+		}
 	}
 }
 
@@ -476,24 +515,57 @@ func imunifyEntryKey(entry string) string {
 	return ""
 }
 
+// argGroups is a tool's per-target arguments, each with the IPs it clears
+// (the IPv6 IPs of one /64 share one), in first-seen order.
+type argGroups struct {
+	args []string
+	ips  [][]net.IP
+	pos  map[string]int
+}
+
+func (g *argGroups) add(arg string, ip net.IP) {
+	if i, ok := g.pos[arg]; ok {
+		g.ips[i] = append(g.ips[i], ip)
+		return
+	}
+	if g.pos == nil {
+		g.pos = map[string]int{}
+	}
+	g.pos[arg] = len(g.args)
+	g.args = append(g.args, arg)
+	g.ips = append(g.ips, []net.IP{ip})
+}
+
 // runForChunks runs name args… ip… for targets, per IPs per run, and
 // records each run on the IPs it named.
 func runForChunks(ctx context.Context, targets []net.IP, per int, out map[string]*Result, src Source, name string, args ...string) {
-	var ipArgs []string
+	var g argGroups
 	for _, ip := range targets {
-		ipArgs = append(ipArgs, ip.String())
+		g.add(ip.String(), ip)
 	}
-	runArgsForChunks(ctx, targets, ipArgs, per, out, src, name, args...)
+	runGroups(ctx, g, per, out, src, name, args...)
 }
 
-// runArgsForChunks is runForChunks with each IP's argument given (ipArgs,
-// parallel to targets).
-func runArgsForChunks(ctx context.Context, targets []net.IP, ipArgs []string, per int, out map[string]*Result, src Source, name string, args ...string) {
-	for i := 0; i < len(targets); i += per {
-		j := min(i+per, len(targets))
-		argv := append(append([]string(nil), args...), ipArgs[i:j]...)
+// runGroups runs name args… arg… for g's arguments, per arguments per run,
+// and records each run on the IPs its arguments clear; the step of a run for
+// several IPs says so.
+func runGroups(ctx context.Context, g argGroups, per int, out map[string]*Result, src Source, name string, args ...string) {
+	for i := 0; i < len(g.args); i += per {
+		j := min(i+per, len(g.args))
+		argv := append(append([]string(nil), args...), g.args[i:j]...)
 		step := runTool(ctx, src, name, argv...)
-		for _, ip := range targets[i:j] {
+		var ips []net.IP
+		for _, group := range g.ips[i:j] {
+			ips = append(ips, group...)
+		}
+		if len(ips) > 1 {
+			detail := fmt.Sprintf("one run for %d IPs", len(ips))
+			if step.Detail != "" {
+				detail += ": " + step.Detail
+			}
+			step.Detail = detail
+		}
+		for _, ip := range ips {
 			addStep(out[ip.String()], step)
 		}
 	}

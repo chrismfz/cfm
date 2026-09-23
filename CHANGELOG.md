@@ -188,15 +188,23 @@ back-filled here — see the git/PR history for that period.
   now read imunify's list too. The imunify360 white "grace" entry (1h, stops
   imunify re-greylisting a customer just unblocked) still goes to every IP of
   a batch of up to 20; a larger batch — a mass unblock — adds it only for the
-  IPs imunify itself was blocking, since each add is one `imunify360-agent`
-  run. An IPv6 IP is cleared, and given its grace entry, as the /64 imunify
-  lists IPv6 addresses as; it used to be passed as the address, and imunify
-  keeps IPv6 entries only as /64s.
-- **Where-is-this-IP-blocked never found an IPv4 entry of imunify360's.**
-  `cfm which`, `/search` and the unblock report read imunify's `netmask` as a
-  prefix length, but imunify reports the mask itself (4294967295 for one IPv4
-  address), so every IPv4 entry read as `address/4294967295` and matched
-  nothing; only IPv6 /64 entries were ever reported. It is now read as the mask.
+  IPs imunify itself was blocking (on their own entry or by a covering
+  network), since each add is one `imunify360-agent` run. The grace entry now
+  skips an IP already on imunify's white list, where an add could turn an
+  operator's permanent entry into a 1h one. An IPv6 IP is cleared as the /64
+  imunify lists IPv6 addresses as (IPs of one /64 share its delete); it used
+  to be passed as the address, and imunify keeps IPv6 entries only as /64s.
+  It gets the grace entry only when imunify was blocking its /64, since the
+  entry would allow the whole /64. An IP blocked only by a wider imunify
+  network entry (say a /24) keeps that entry — deleting it would unblock the
+  whole network — and the unblock report now says so.
+- **Where-is-this-IP-blocked never found a single-address IPv4 entry of
+  imunify360's.** `cfm which`, `/search` and the unblock report read
+  imunify's `netmask` as a prefix length, but imunify reports the mask itself
+  (4294967295 for one IPv4 address), so every such entry read as
+  `address/4294967295` and matched nothing; only network entries, which
+  imunify writes as `address/length`, were reported. It is now read as the
+  mask.
 - **Unblocking an IP a feed blocks no longer shortens a permanent allow.** The
   unblock allows a feed-blocked IP for a while (4h from cfm-web, 24h from
   `/unblock`, 1h from `cfm unblock`) so the feed doesn't block it again before

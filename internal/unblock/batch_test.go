@@ -14,8 +14,8 @@ import (
 )
 
 // fakeTools puts the named scripts (and a systemctl that says every unit is
-// active) first in PATH; each appends its argv to <dir>/calls. body is the
-// script's text after that line.
+// active) alone on PATH, so no real tool is ever reached; each appends its
+// argv to <dir>/calls. body is the script's text after that line.
 func fakeTools(t *testing.T, tools map[string]string) (calls func() []string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -26,7 +26,7 @@ func fakeTools(t *testing.T, tools map[string]string) (calls func() []string) {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", dir)
 	return func() []string {
 		b, _ := os.ReadFile(filepath.Join(dir, "calls")) // #nosec G304 -- test temp file
 		var out []string
@@ -66,7 +66,7 @@ func TestDoMany_Fail2BanOneRun(t *testing.T) {
 	if got := calls(); len(got) != 1 || got[0] != "fail2ban-client unban 198.51.100.1 198.51.100.2 2001:db8::1" {
 		t.Fatalf("fail2ban-client runs = %q", got)
 	}
-	if s := stepsOf(res["198.51.100.2"], SrcFail2Ban); len(s) != 1 || s[0].Action != ActionChecked {
+	if s := stepsOf(res["198.51.100.2"], SrcFail2Ban); len(s) != 1 || s[0].Action != ActionChecked || s[0].Detail != "one run for 3 IPs" {
 		t.Errorf("198.51.100.2 fail2ban steps = %+v", s)
 	}
 }
@@ -76,21 +76,25 @@ func imunifyList(entries ...string) string {
 }
 
 // imunify's list is read once; only listed IPs are deleted, many per run and
-// one address family per run — an IPv6 IP by the /64 imunify lists it as —
-// and in a small batch every IP gets the white grace entry, as Do always gave
-// it. The entries are in imunify's own shape: netmask is the mask
-// (4294967295 for one IPv4 address), not a prefix length.
+// one address family per run — an IPv6 IP by the /64 imunify lists it as, one
+// delete for the IPs of one /64 — and in a small batch every IP gets the white
+// grace entry, as Do always gave it, except an IP already on the white list
+// (an operator's entry isn't replaced by a timed one) and an IPv6 IP whose /64
+// imunify wasn't blocking (the entry would allow the whole /64). The entries
+// are in imunify's own shape: netmask is the mask (4294967295 for one IPv4
+// address), not a prefix length.
 func TestDoMany_ImunifySmallBatch(t *testing.T) {
 	calls := fakeTools(t, map[string]string{
 		"imunify360-agent": `case "$*" in *" list "*) ` + imunifyList(
 			`{"ip":"198.51.100.1","netmask":4294967295,"purpose":"drop"}`,
 			`{"ip":"198.51.100.2","netmask":4294967295,"purpose":"captcha"}`,
-			`{"ip":"198.51.100.0","netmask":4294967040,"purpose":"drop"}`,
+			`{"ip":"198.51.100.0/24","netmask":4294967040,"purpose":"drop"}`,
 			`{"ip":"2001:db8:1:2::/64","netmask":340282366920938463444927863358058659840,"purpose":"drop"}`,
 			`{"ip":"198.51.100.9","netmask":4294967295,"purpose":"white"}`) + `;; esac`,
 	})
 	grace := time.Hour
-	res := DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2", "198.51.100.3", "2001:db8:1:2::7"), Options{ImunifyWhiteTTL: &grace})
+	res := DoMany(context.Background(), ips("198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.9",
+		"2001:db8:1:2::7", "2001:db8:1:2::8", "2001:db8:9::1"), Options{ImunifyWhiteTTL: &grace})
 	got := calls()
 	want := []string{
 		"imunify360-agent ip-list local list --limit 10000 --json",
@@ -106,16 +110,31 @@ func TestDoMany_ImunifySmallBatch(t *testing.T) {
 			t.Errorf("white add %d = %q", i, got[4+i])
 		}
 	}
-	if s := stepsOf(res["198.51.100.3"], SrcImunify); len(s) != 2 || s[0].Action != ActionNotFound {
-		t.Errorf("198.51.100.3 (only in a /24) imunify steps = %+v, want not_found then the white add", s)
+	if s := stepsOf(res["198.51.100.3"], SrcImunify); len(s) != 2 || s[0].Action != ActionNotFound ||
+		!strings.Contains(s[0].Detail, "covering 198.51.100.0/24 (drop) is left alone") {
+		t.Errorf("198.51.100.3 (only in a /24) imunify steps = %+v, want not_found (the /24 stays) then the white add", s)
+	}
+	if s := stepsOf(res["198.51.100.9"], SrcImunify); len(s) != 2 || !strings.Contains(s[1].Detail, "already on the local white list as 198.51.100.9") {
+		t.Errorf("198.51.100.9 (white) imunify steps = %+v, want no add", s)
+	}
+	for _, ip := range []string{"2001:db8:1:2::7", "2001:db8:1:2::8"} {
+		if s := stepsOf(res[ip], SrcImunify); len(s) != 2 || s[0].Detail != "one run for 2 IPs" || s[0].Action != ActionChecked {
+			t.Errorf("%s imunify steps = %+v, want the shared /64 delete and grace entry", ip, s)
+		}
+	}
+	if s := stepsOf(res["2001:db8:9::1"], SrcImunify); len(s) != 2 || !strings.Contains(s[1].Detail, "would allow the whole network") {
+		t.Errorf("2001:db8:9::1 (its /64 not blocked) imunify steps = %+v, want no grace", s)
 	}
 }
 
 // A mass unblock adds the white grace entry only for the IPs imunify itself
-// was blocking: an add is one imunify360-agent run per IP.
+// was blocking — on its own entry or by a covering network: an add is one
+// imunify360-agent run per IP.
 func TestDoMany_ImunifyLargeBatchGraceOnlyForListed(t *testing.T) {
 	calls := fakeTools(t, map[string]string{
-		"imunify360-agent": `case "$*" in *" list "*) ` + imunifyList(`{"ip":"10.0.0.5","netmask":4294967295,"purpose":"drop"}`) + `;; esac`,
+		"imunify360-agent": `case "$*" in *" list "*) ` + imunifyList(
+			`{"ip":"10.0.0.5","netmask":4294967295,"purpose":"drop"}`,
+			`{"ip":"10.0.0.16/30","netmask":4294967292,"purpose":"captcha"}`) + `;; esac`,
 	})
 	var batch []net.IP
 	for i := 1; i <= graceBatchMax+5; i++ {
@@ -123,23 +142,53 @@ func TestDoMany_ImunifyLargeBatchGraceOnlyForListed(t *testing.T) {
 	}
 	grace := time.Hour
 	res := DoMany(context.Background(), batch, Options{ImunifyWhiteTTL: &grace})
-	var adds, deletes int
+	var adds []string
+	var deletes int
 	for _, c := range calls() {
-		switch {
+		switch f := strings.Fields(c); {
 		case strings.Contains(c, " add "):
-			adds++
-			if !strings.Contains(c, " 10.0.0.5 ") {
-				t.Errorf("white grace for an IP imunify wasn't blocking: %q", c)
-			}
+			adds = append(adds, f[len(f)-3])
 		case strings.Contains(c, " delete "):
 			deletes++
+			if c != "imunify360-agent ip-list local delete --purpose drop 10.0.0.5" {
+				t.Errorf("delete %q", c)
+			}
 		}
 	}
-	if adds != 1 || deletes != 1 {
-		t.Errorf("%d white adds, %d deletes; want one of each (10.0.0.5)", adds, deletes)
+	if strings.Join(adds, " ") != "10.0.0.5 10.0.0.16 10.0.0.17 10.0.0.18 10.0.0.19" || deletes != 1 {
+		t.Errorf("white adds %v, %d deletes; want adds for the IPs imunify blocked and one delete", adds, deletes)
 	}
 	if s := stepsOf(res["10.0.0.9"], SrcImunify); len(s) != 2 || !strings.Contains(s[1].Detail, "no white grace entry") {
 		t.Errorf("10.0.0.9 imunify steps = %+v, want not-listed + no-grace", s)
+	}
+}
+
+// A list that isn't one (here an object without "items") is unreadable, not
+// empty: every IP is deleted blindly, as before, and an IPv6 IP gets no grace
+// entry, since imunify wasn't seen blocking its /64.
+func TestDoMany_ImunifyUnreadableListDeletesBlindly(t *testing.T) {
+	calls := fakeTools(t, map[string]string{
+		"imunify360-agent": `case "$*" in *" list "*) echo '{"result":"error"}';; esac`,
+	})
+	grace := time.Hour
+	res := DoMany(context.Background(), ips("198.51.100.1", "2001:db8::1"), Options{ImunifyWhiteTTL: &grace})
+	got := strings.Join(calls(), "|")
+	for _, want := range []string{
+		"delete --purpose drop 198.51.100.1|",
+		"delete --purpose drop 2001:db8::/64|",
+		"delete --purpose captcha 198.51.100.1|",
+		"delete --purpose captcha 2001:db8::/64|",
+		"add --purpose white --comment CFM auto-unblock 198.51.100.1 --expiration ",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("runs %q lack %q", got, want)
+		}
+	}
+	if strings.Count(got, " add ") != 1 {
+		t.Errorf("runs %q: want one white add (the IPv4 IP)", got)
+	}
+	if s := stepsOf(res["2001:db8::1"], SrcImunify); len(s) != 4 || !strings.Contains(s[0].Detail, "local list unreadable") {
+		t.Errorf("2001:db8::1 imunify steps = %+v", s)
 	}
 }
 
@@ -157,7 +206,7 @@ func TestDoMany_ImunifyCappedListDeletesUnseen(t *testing.T) {
 	calls := fakeTools(t, map[string]string{
 		"imunify360-agent": fmt.Sprintf(`case "$*" in *" list "*) while IFS= read -r l; do echo "$l"; done < %q;; esac`, filepath.Join(dir, "list.json")),
 	})
-	DoMany(context.Background(), ips("172.16.0.1", "198.51.100.7", "2001:db8::9"), Options{})
+	DoMany(context.Background(), ips("172.16.0.1", "198.51.100.7", "2001:db8::9", "2001:db8::a"), Options{})
 	got := strings.Join(calls(), "|")
 	for _, want := range []string{
 		"delete --purpose drop 172.16.0.1 198.51.100.7|",

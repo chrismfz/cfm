@@ -72,12 +72,15 @@ type Options struct {
 	Reporter      reporting.Reporter // optional: για ReportUnblock/Block
 	ReportWhy     string             // π.χ. "cli" ή "agent"
 	SendAPI       bool               // αν θέλουμε να γίνει report/unblock
-	Fail2BanUnban bool
-	// ImunifyWhiteTTL, when set, adds an imunify white entry on EVERY
-	// unblock (not just feeds-origin ones) with this TTL. This is the
-	// grace window that stops imunify's own engine from re-greylisting
-	// the visitor seconds after we cleared them — without it, a user
-	// bounced by imunify GRAY can loop: unblock → re-greylist → unblock.
+	Fail2BanUnban bool               // unused: fail2ban is cleared whenever it is installed and active
+	// ImunifyWhiteTTL, when set, adds an imunify white entry with this TTL
+	// on every unblock (not just feeds-origin ones), except for an IP already
+	// on imunify's white list, an IPv6 IP whose /64 imunify wasn't blocking,
+	// and, in a batch larger than graceBatchMax, an IP imunify wasn't blocking
+	// (imunifyUnblockMany). This is the grace window that stops imunify's own
+	// engine from re-greylisting the visitor seconds after we cleared them —
+	// without it, a user bounced by imunify GRAY can loop: unblock →
+	// re-greylist → unblock.
 	ImunifyWhiteTTL *time.Duration
 	// WAF, when set, also clears the OpenResty/Lua WAF planes for the IP
 	// (webdetector challenge/block + per-IP shared-dict caches) as part of a

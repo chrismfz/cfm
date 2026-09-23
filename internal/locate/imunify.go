@@ -130,7 +130,9 @@ func searchImunify(ctx context.Context, qs []*query) (locs [][]Location, skip []
 }
 
 // imunifyArray is the list's entries: the "items" array (any key case) or a
-// bare top-level array. ok is false for output that isn't JSON.
+// bare top-level array. ok is false for output that isn't JSON, or an object
+// without an "items" array — read as an empty list, it would say that nothing
+// is listed.
 func imunifyArray(raw []byte) (arr []any, ok bool) {
 	var root any
 	if err := json.Unmarshal(raw, &root); err != nil {
@@ -138,16 +140,16 @@ func imunifyArray(raw []byte) (arr []any, ok bool) {
 	}
 	switch v := root.(type) {
 	case []any:
-		arr = v
+		return v, true
 	case map[string]any:
 		for k, val := range v {
 			if strings.EqualFold(k, "items") {
-				arr, _ = val.([]any)
-				break
+				arr, ok = val.([]any)
+				return arr, ok
 			}
 		}
 	}
-	return arr, true
+	return nil, false
 }
 
 // imunifyListLen counts the list's entries, usable or not — what the cap
@@ -182,39 +184,35 @@ func ImunifyLocalList(ctx context.Context) (entries []ImunifyEntry, capped bool,
 }
 
 // imunifyEntryString renders a list entry as an address or a CIDR. imunify
-// writes a network as "addr/len" in ip (IPv6 only as a /64), and reports
+// writes a network as "addr/len" in ip (IPv6 only as a /64) and reports
 // netmask as the mask itself — 4294967295 for one IPv4 address — not as its
-// length; a netmask from 1 to 128 is taken as a length. It was always taken as
-// a length, so every IPv4 entry read as "addr/4294967295", which parses as
-// nothing: no IPv4 entry of imunify's was ever found.
-func imunifyEntryString(ip string, netmask int) string {
+// length; a netmask up to the family's width (32 or 128) is taken as a
+// length. It was always taken as a length, so a single-address IPv4 entry read
+// as "addr/4294967295", which parses as nothing: those entries were never
+// found (network entries, written "addr/len", were).
+func imunifyEntryString(ip string, netmask int64) string {
 	ip = strings.TrimSpace(ip)
 	if ip == "" || strings.Contains(ip, "/") {
-		return ip
-	}
-	var plen int
-	switch {
-	case netmask >= 1 && netmask <= 128:
-		plen = netmask
-	case netmask > 128 && netmask <= math.MaxUint32:
-		m := uint32(netmask)
-		plen = bits.OnesCount32(m)
-		if m != ^uint32(0)<<(32-plen) {
-			return ip // not a mask: the address alone
-		}
-	default:
 		return ip
 	}
 	a := net.ParseIP(ip)
 	if a == nil {
 		return ip
 	}
-	full := 128
+	full := int64(128)
 	if a.To4() != nil {
 		full = 32
 	}
-	if plen >= full {
-		return ip
+	plen := netmask
+	if full == 32 && netmask > 32 && netmask <= math.MaxUint32 {
+		m := uint32(netmask)
+		plen = int64(bits.OnesCount32(m))
+		if m != ^uint32(0)<<(32-plen) {
+			return ip // not a mask: the address alone
+		}
+	}
+	if plen < 1 || plen >= full {
+		return ip // the address alone, or not a mask of its family
 	}
 	return fmt.Sprintf("%s/%d", ip, plen)
 }
@@ -223,7 +221,7 @@ func imunifyEntryString(ip string, netmask int) string {
 // key normalization.
 type imunifyItem struct {
 	IP         string
-	Netmask    int
+	Netmask    int64
 	Purpose    string
 	Comment    string
 	Expiration int64
@@ -270,7 +268,7 @@ func parseImunifyList(raw []byte) []imunifyItem {
 		}
 		it := imunifyItem{
 			IP:         str("ip"),
-			Netmask:    int(num("netmask")),
+			Netmask:    num("netmask"),
 			Purpose:    strings.ToLower(str("purpose")),
 			Comment:    str("comment"),
 			Expiration: num("expiration"),
