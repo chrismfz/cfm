@@ -74,7 +74,10 @@ func mkdirAllTraversable(dir string) {
 		}
 	}
 	for i := len(missing) - 1; i >= 0; i-- {
-		_ = os.Mkdir(missing[i], 0o755)
-		_ = os.Chmod(missing[i], 0o755)
+		// chmod only what this call created: a component that appeared
+		// meanwhile (EEXIST) belongs to someone else and keeps its mode.
+		if os.Mkdir(missing[i], 0o755) == nil {
+			_ = os.Chmod(missing[i], 0o755)
+		}
 	}
 }

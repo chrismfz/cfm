@@ -40,8 +40,9 @@
 #
 # Usage: cfm-cache-dirs.sh [ROOT]   (ROOT defaults to /var/cache/nginx; the
 # argument is for local testing against a scratch tree).
-# Exit status: 0 when every dir exists with the expected owner/mode at the end,
-# 1 otherwise (callers in package scripts ignore it; installers report it).
+# Exit status: 0 when every dir exists with the expected owner/mode and no
+# unusable cache tree is left at the end, 1 otherwise (callers in package
+# scripts only warn; installers report it).
 
 ROOT=${1:-/var/cache/nginx}
 CFM_CACHE_DIRS="cfm_static cfm_micro_1s cfm_micro_2s cfm_micro_5s cfm_micro_10s cfm_micro_30s cfm_micro_60s"
@@ -60,6 +61,13 @@ else
     chmod 0755 "$ROOT" 2>/dev/null || true
 fi
 
+# unusable: a level dir (depth 1 or 2) the cfm workers cannot use.
+unusable() {
+    find "$1" -mindepth 1 -maxdepth 2 -type d \
+        \( ! -group cfm -o \( ! -user cfm ! -perm -g=rwx \) \) \
+        -print -quit 2>/dev/null | grep -q .
+}
+
 rc=0
 for n in $CFM_CACHE_DIRS; do
     d="$ROOT/$n"
@@ -70,13 +78,16 @@ for n in $CFM_CACHE_DIRS; do
         continue
     fi
     chown root:cfm "$d" 2>/dev/null || true
-    if [ -d "$d" ] && [ ! -L "$d" ] && find "$d" -mindepth 1 -maxdepth 2 -type d \
-            \( ! -group cfm -o \( ! -user cfm ! -perm -g=rwx \) \) \
-            -print -quit 2>/dev/null | grep -q .; then
-        if find "$d" -mindepth 1 -delete 2>/dev/null; then
-            echo "cfm-cache-dirs: purged an unhealthy cache tree under $d (a level dir the cfm workers cannot use; nginx refills it). Restart (not reload) the edge to drop the stale cache index, or expect harmless [crit] unlink() ENOENT lines as old entries age out."
+    if [ -d "$d" ] && [ ! -L "$d" ] && unusable "$d"; then
+        # find exits non-zero whenever an entry vanishes mid-walk (a live
+        # edge evicts and renames temp files constantly), so its status says
+        # nothing about the result: re-probe instead.
+        find "$d" -mindepth 1 -delete 2>/dev/null || true
+        if unusable "$d"; then
+            echo "cfm-cache-dirs: purge of $d is incomplete — a level dir the cfm workers cannot use is still there; the next run probes again." >&2
+            rc=1
         else
-            echo "cfm-cache-dirs: purge of $d was incomplete (entries the workers were writing remain); the next run probes again. Restart (not reload) the edge afterwards." >&2
+            echo "cfm-cache-dirs: purged an unhealthy cache tree under $d (a level dir the cfm workers cannot use; nginx refills it). Restart (not reload) the edge to drop the stale cache index, or expect harmless [crit] unlink() ENOENT lines as old entries age out."
         fi
     fi
     if [ ! -d "$d" ] || [ "$(stat -L -c '%U:%G %a' "$d" 2>/dev/null)" != "root:cfm 770" ]; then
