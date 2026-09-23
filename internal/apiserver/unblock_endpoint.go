@@ -33,7 +33,7 @@ var unblockDo = unblock.Do
 //
 // Manual IP unblock is admin-only: it removes the IP from every blocking plane
 // (nft, cfm.deny, csf, fail2ban, imunify360, OpenResty/Lua WAF), allows it in
-// nft for 24h when a feed blocks it and gives it a 1h imunify360 white grace
+// nft for 24h when a feed lists it and gives it a 1h imunify360 white grace
 // entry (unblock.DoMany says when not). That is a host-wide state change with
 // no per-vhost meaning, so a scoped (cPanel/DA) token must
 // never reach it — otherwise a tenant could unblock and whitelist any IP on

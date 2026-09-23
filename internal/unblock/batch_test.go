@@ -681,6 +681,7 @@ func TestNFTMissing(t *testing.T) {
 		"nft: error while loading shared libraries: libnftables.so.1: cannot open shared object file: No such file or directory": false,
 		"fork/exec /usr/sbin/nft: no such file or directory":                                                                     false,
 		"nft -j list set: timed out": false,
+		"nftlib HasElem block_ext_v4_hosts_x: receiveAckAware: netlink receive: no such file or directory": true,
 	} {
 		if got := nftMissing(fmt.Errorf("%s", msg)); got != want {
 			t.Errorf("nftMissing(%q) = %v, want %v", msg, got, want)

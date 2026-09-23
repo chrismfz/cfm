@@ -286,8 +286,8 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 // listing discovers the sets. Each set is asked only about the IPs of its
 // address family (nft rejects the other one): one IP with HasElem (a point
 // lookup on exec nft), more by reading the set once — read again once if
-// that fails, then asked IP by IP until a lookup fails too. A table or set
-// that isn't there holds nothing.
+// that fails other than by timing out, then asked IP by IP until a lookup
+// fails too. A table or set that isn't there holds nothing.
 func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[string][]string) {
 	out, unchecked = map[string][]string{}, map[string][]string{}
 	if be == nil || len(ips) == 0 {
@@ -335,7 +335,10 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 		}
 	}
 	for _, s := range sets {
-		_, v4 := feedKeyFromSet(s)
+		fk, v4 := feedKeyFromSet(s)
+		if fk == "" {
+			continue // not a feed's set: no key after the prefix
+		}
 		var fam []net.IP
 		for _, ip := range ips {
 			if (ip.To4() != nil) == v4 {
@@ -372,9 +375,10 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 }
 
 // nftMissing reports an error that says the table, set or element isn't
-// there: nft's own "No such file or directory", or ENOENT from netlink. A
-// missing nft binary or library reads "no such file or directory" too, and
-// must stay an error.
+// there: nft's own "No such file or directory", or ENOENT from netlink —
+// wrapped, or only as text (google/nftables formats a set read's error with
+// %v). A missing nft binary or library reads "no such file or directory"
+// too, and must stay an error.
 func nftMissing(err error) bool {
 	var pe *fs.PathError
 	s := err.Error()
@@ -382,6 +386,7 @@ func nftMissing(err error) bool {
 		return false
 	}
 	return errors.Is(err, syscall.ENOENT) ||
+		strings.Contains(s, "netlink receive: no such file or directory") ||
 		strings.Contains(s, "Error: No such file or directory") ||
 		strings.Contains(s, "Could not process rule: No such file or directory")
 }
