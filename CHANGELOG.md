@@ -133,9 +133,10 @@ back-filled here — see the git/PR history for that period.
   is now kept in the file and not served, and its vhost is treated as opted
   out (a wildcard row: every sub-host under it) until a build that can read
   the row loads it, or `remove` deletes it. `list` names such vhosts under
-  `unloadable`, `get` says why it has none, and a `set` that would turn
-  caching on for one is refused (it would have dropped the stored policy's
-  cookie settings); `off` still works.
+  `unloadable`, `get`/`purge` say why there is none, and a `set` that would
+  turn caching on for one is refused (it would have dropped the stored
+  policy's cookie settings). `off` still works and replaces that policy for
+  good (a later upgrade finds the opt-out, not the old policy).
 - **Site Cache: a host with a `:port` is rejected.** The edge always ignored the
   port (a stored `a.com:443` acted as `a.com`), so the daemon's view of such a
   policy disagreed with what the edge did. A stored one is normalized to the

@@ -853,6 +853,40 @@ func TestSiteCacheStore_FrozenHostGuards(t *testing.T) {
 	if e.Generation <= future {
 		t.Fatalf("new generation %d is not past the frozen row's %d", e.Generation, future)
 	}
+	// The off REPLACED the unloadable row (a host never has both): it is gone
+	// from the file and from FrozenHosts, and arming now merges onto the
+	// stored opt-out — the guard is not bypassed, there is nothing left to lose.
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "recipe_from_a_newer_build") {
+		t.Fatalf("off did not replace the unloadable row:\n%s", b)
+	}
+	if got := s.FrozenHosts(); len(got) != 0 {
+		t.Fatalf("FrozenHosts after off = %v", got)
+	}
+	if _, err := s.Apply(SiteCachePatch{Host: "a.com", Micro: on}, false); err != nil {
+		t.Fatalf("arming after off: %v", err)
+	}
+}
+
+// Hand-edited duplicates — a loadable and an unloadable row for one host: the
+// loaded one is served and listed, the host is NOT reported unloadable (it is
+// not opted out), and the next write for it drops the unloadable row.
+func TestSiteCacheStore_FrozenAndLoadedSameHost(t *testing.T) {
+	path := writeSiteCacheStoreFile(t, `[
+	 {"host":"a.com","generation":1758585600001,"static":{"enabled":true,"recipe":"static_lean"},"micro":{"enabled":false}},
+	 {"host":"a.com","generation":1758585600002,"static":{"enabled":true,"recipe":"recipe_from_a_newer_build"},"micro":{"enabled":false}}]`)
+	s := newSiteCacheStore(path)
+	if got := s.FrozenHosts(); len(got) != 0 {
+		t.Fatalf("a host with a loaded row reported unloadable: %v", got)
+	}
+	if key, ok := s.StatsKeyFor("a.com"); !ok || key != "a.com" {
+		t.Fatalf("the loaded row is not what the edge uses: %q %v", key, ok)
+	}
+	if _, err := s.Apply(SiteCachePatch{Host: "a.com", Static: &SiteCacheTierPatch{TTL: strPtr("7d")}}, false); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "recipe_from_a_newer_build") {
+		t.Fatal("a write for the host kept its unloadable duplicate")
+	}
 }
 
 // A tier's recipe cannot be cleared (a disabled tier keeps it, which is how a

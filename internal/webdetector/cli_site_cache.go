@@ -130,8 +130,8 @@ func runSiteCacheList(baseURL string) error {
 		return fmt.Errorf("site-cache list: server returned non-JSON (%d bytes): %q", len(body), strings.TrimSpace(string(body)))
 	}
 	if len(payload.Unloadable) > 0 {
-		fmt.Printf("! %d stored polic(y/ies) this build cannot load — treated as OPTED OUT (never cached); see the daemon log, 'remove' them or upgrade: %s\n",
-			len(payload.Unloadable), strings.Join(payload.Unloadable, ", "))
+		fmt.Printf("! stored policies this build cannot load (e.g. from a newer version; see the daemon log) — treated as OPTED OUT, never cached; 'remove' or 'off' replaces one, an upgrade reads it again: %s\n",
+			strings.Join(payload.Unloadable, ", "))
 	}
 	if len(payload.Rows) == 0 {
 		fmt.Println("No vhosts configured for caching. Default is OFF.")
@@ -251,7 +251,7 @@ func runSiteCacheOff(baseURL, host string) error {
 	if e.CreatedAt.Equal(e.UpdatedAt) {
 		// A brand-new entry: `off` used to 404 on a host with no policy, so
 		// say what happened — a typo would otherwise pass unnoticed.
-		note = " No policy existed for it; an opt-out was stored."
+		note = " It had no policy this build can read; an opt-out was stored (replacing any stored policy this build could not load)."
 	}
 	fmt.Printf("✓ caching OFF for %s: both tiers off, and a broader armed *.suffix wildcard no longer caches %s either ('remove' deletes the policy instead).%s\n", e.Host, what, note)
 	return nil

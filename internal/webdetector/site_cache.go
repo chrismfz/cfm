@@ -96,7 +96,9 @@ func cacheRecipeAllowed(recipe string, kind cacheTierKind) bool {
 // SiteCacheTier is one caching tier's per-vhost policy. A disabled tier keeps
 // its recipe/ttl, so it can be re-armed as it was. An entry with BOTH tiers
 // off is an explicit opt-out (see the file header), so a new entry may be
-// created all-off only on purpose (Apply).
+// created all-off only on purpose (Apply). As on SiteCacheEntry, a NEW field
+// must be `omitempty` with its zero value meaning the old behaviour (an
+// unknown nested field freezes the whole row on an older build).
 type SiteCacheTier struct {
 	Enabled bool   `json:"enabled"`
 	Recipe  string `json:"recipe,omitempty"` // one of the tier's recipe vocabulary
@@ -217,7 +219,8 @@ type siteCacheFrozenRow struct {
 // so `set X --micro micro_safe --micro-ttl 30s` disabled the static tier and
 // dropped strict_cookies / auth_cookies. An explicit value is applied:
 // enabled=false, strict_cookies=false, ttl="", and an EMPTY auth_cookies list
-// (which clears it; JSON null keeps it).
+// (which clears it; JSON null keeps it). A recipe cannot be cleared (see
+// Apply).
 type SiteCacheTierPatch struct {
 	Enabled *bool   `json:"enabled,omitempty"`
 	Recipe  *string `json:"recipe,omitempty"`
@@ -445,7 +448,7 @@ func (s *siteCacheStore) Apply(p SiteCachePatch, scoped bool) (SiteCacheEntry, e
 			// A disabled tier keeps its recipe on purpose: it is how a later
 			// re-enable knows the tier may have cached something (and must
 			// start from a fresh generation — see SiteCacheEntry.Generation).
-			return SiteCacheEntry{}, errors.New("a tier's recipe cannot be cleared: disable the tier instead")
+			return SiteCacheEntry{}, errors.New("a tier's recipe cannot be empty (to turn a tier off, set enabled=false; its recipe is kept)")
 		}
 	}
 	s.mu.Lock()
@@ -457,8 +460,9 @@ func (s *siteCacheStore) Apply(p SiteCachePatch, scoped bool) (SiteCacheEntry, e
 			(p.Micro != nil && p.Micro.Enabled != nil && *p.Micro.Enabled)) {
 			// The host has a stored policy this build cannot load: merging onto
 			// an empty one would silently drop that policy's settings (its
-			// cookie rails first). Only an explicit off is allowed.
-			return SiteCacheEntry{}, errors.New("this host has a stored policy this build cannot load (see the daemon log; it is treated as opted out): remove it first, or upgrade")
+			// cookie rails first). Only an explicit off is allowed — it
+			// replaces that policy (setLocked), which the caller asked for.
+			return SiteCacheEntry{}, errors.New(siteCacheUnloadableMsg + "; turning caching on for it is refused — remove it first (or turn it off, which replaces it), or upgrade")
 		}
 	}
 	applySiteCacheTierPatch(&merged.Static, p.Static)
@@ -517,16 +521,42 @@ func (s *siteCacheStore) setLocked(in SiteCacheEntry) (SiteCacheEntry, error) {
 	}
 	norm.UpdatedAt = now
 	s.entries[norm.Host] = norm
+	// A write REPLACES any stored row of this host this build could not load
+	// (see frozen): a host never has both, so what the feed serves, what list
+	// shows and what the next build loads always agree. (Apply lets only an
+	// explicit off reach here for such a host.)
+	prevFrozen := s.frozen
+	s.frozen = s.frozenWithoutLocked(norm.Host)
 	if err := s.saveLocked(); err != nil {
 		if existed {
 			s.entries[norm.Host] = prev
 		} else {
 			delete(s.entries, norm.Host)
 		}
+		s.frozen = prevFrozen
 		logging.Logf("[webdetector][site-cache] failed to persist policy for %q (rollback): %v (path=%s)", norm.Host, err, s.path)
 		return SiteCacheEntry{}, err
 	}
+	if len(s.frozen) != len(prevFrozen) {
+		logging.Logf("[webdetector][site-cache] the new policy for %q replaced a stored policy this build could not load (path=%s)", norm.Host, s.path)
+	}
 	return norm, nil
+}
+
+// frozenWithoutLocked returns s.frozen minus the rows of host h (a new slice
+// when any is dropped, so a caller can roll back to the old one). Caller holds
+// s.mu.
+func (s *siteCacheStore) frozenWithoutLocked(h string) []siteCacheFrozenRow {
+	if !s.hasFrozenLocked(h) {
+		return s.frozen
+	}
+	kept := make([]siteCacheFrozenRow, 0, len(s.frozen))
+	for _, f := range s.frozen {
+		if f.host != h {
+			kept = append(kept, f)
+		}
+	}
+	return kept
 }
 
 // Remove deletes a vhost's policy — and any stored row for that host this
@@ -543,12 +573,7 @@ func (s *siteCacheStore) Remove(host string) bool {
 	defer s.mu.Unlock()
 	prev, existed := s.entries[h]
 	prevFrozen := s.frozen
-	kept := make([]siteCacheFrozenRow, 0, len(s.frozen))
-	for _, f := range s.frozen {
-		if f.host != h {
-			kept = append(kept, f)
-		}
-	}
+	kept := s.frozenWithoutLocked(h)
 	if !existed && len(kept) == len(s.frozen) {
 		return false
 	}
@@ -746,14 +771,17 @@ func (s *siteCacheStore) hasFrozenLocked(h string) bool {
 }
 
 // FrozenHosts returns the sorted, de-duplicated hosts of the stored rows this
-// build cannot load (see frozen) — each treated as an opt-out at the edge.
+// build cannot load (see frozen) and that have no loaded entry — each treated
+// as an opt-out at the edge. (A host with both exists only after a hand edit,
+// until its next write; its loaded entry is what the edge uses.)
 func (s *siteCacheStore) FrozenHosts() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	seen := map[string]struct{}{}
 	var out []string
 	for _, f := range s.frozen {
-		if _, dup := seen[f.host]; f.host != "" && !dup {
+		_, live := s.entries[f.host] // a loaded row of the host wins (feedEntriesLocked)
+		if _, dup := seen[f.host]; f.host != "" && !dup && !live {
 			seen[f.host] = struct{}{}
 			out = append(out, f.host)
 		}
@@ -761,6 +789,10 @@ func (s *siteCacheStore) FrozenHosts() []string {
 	sort.Strings(out)
 	return out
 }
+
+// siteCacheUnloadableMsg is the API's explanation for a host whose stored
+// policy this build cannot load.
+const siteCacheUnloadableMsg = "this host has a stored policy this build cannot load (e.g. from a newer version; the node's daemon log has the details): it is treated as opted out, never cached"
 
 // feedEntriesLocked is what the feed (and StatsKeyFor) is computed over: the
 // loaded entries, plus an all-off stand-in for the host of each frozen row

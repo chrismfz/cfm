@@ -2,6 +2,7 @@
 package webdetector
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -219,21 +220,40 @@ func TestSiteCacheAPI_ListShowsUnloadableHosts(t *testing.T) {
 	e := NewEngine(Config{SiteCacheStorePath: path})
 	mux := http.NewServeMux()
 	e.RegisterHTTP(mux)
-	var out siteCacheListResponse
-	rr := doRequest(mux, scopedCtx("mysite.com"), http.MethodGet, "/api/v1/site-cache/list", nil)
-	_ = json.Unmarshal(rr.Body.Bytes(), &out)
-	if len(out.Rows) != 0 || len(out.Unloadable) != 1 || out.Unloadable[0] != "mysite.com" {
+	list := func(ctx context.Context) siteCacheListResponse {
+		t.Helper()
+		rr := doRequest(mux, ctx, http.MethodGet, "/api/v1/site-cache/list", nil)
+		var out siteCacheListResponse
+		if rr.Code != http.StatusOK {
+			t.Fatalf("list: %d %s", rr.Code, rr.Body.String())
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if out := list(scopedCtx("mysite.com")); len(out.Rows) != 0 || len(out.Unloadable) != 1 || out.Unloadable[0] != "mysite.com" {
 		t.Fatalf("scoped list: %+v", out)
 	}
-	rr = doRequest(mux, adminCtx(), http.MethodGet, "/api/v1/site-cache/list", nil)
-	out = siteCacheListResponse{}
-	_ = json.Unmarshal(rr.Body.Bytes(), &out)
-	if len(out.Unloadable) != 2 {
+	if out := list(adminCtx()); len(out.Unloadable) != 2 {
 		t.Fatalf("admin list: %+v", out)
 	}
-	rr = doRequest(mux, adminCtx(), http.MethodGet, "/api/v1/site-cache/get?host=mysite.com", nil)
-	if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "cannot load") {
-		t.Fatalf("get of an unloadable host: %d %s", rr.Code, rr.Body.String())
+	for _, ctx := range []context.Context{adminCtx(), scopedCtx("mysite.com")} {
+		for _, path := range []string{"/api/v1/site-cache/get?host=mysite.com"} {
+			rr := doRequest(mux, ctx, http.MethodGet, path, nil)
+			if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "cannot load") {
+				t.Fatalf("get of an unloadable host: %d %s", rr.Code, rr.Body.String())
+			}
+		}
+		rr := doRequest(mux, ctx, http.MethodPost, "/api/v1/site-cache/purge?host=mysite.com", nil)
+		if rr.Code != http.StatusNotFound || !strings.Contains(rr.Body.String(), "cannot load") {
+			t.Fatalf("purge of an unloadable host: %d %s", rr.Code, rr.Body.String())
+		}
+	}
+	// an out-of-scope unloadable host is a plain 403, no explanation
+	rr := doRequest(mux, scopedCtx("mysite.com"), http.MethodGet, "/api/v1/site-cache/get?host=other.com", nil)
+	if rr.Code != http.StatusForbidden || strings.Contains(rr.Body.String(), "cannot load") {
+		t.Fatalf("scoped get of another tenant's unloadable host: %d %s", rr.Code, rr.Body.String())
 	}
 }
 

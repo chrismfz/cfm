@@ -13,7 +13,9 @@
 //     admin-only.
 //
 // Endpoints:
-//   GET  /api/v1/site-cache/list                 — policies (scope-filtered)
+//   GET  /api/v1/site-cache/list                 — policies (scope-filtered), plus
+//                                                  `unloadable`: hosts whose stored
+//                                                  policy this build cannot load
 //   GET  /api/v1/site-cache/get?host=            — one vhost's policy
 //   POST /api/v1/site-cache/set                  — merge-upsert (body = SiteCachePatch);
 //                                                  both tiers off = an explicit opt-out
@@ -33,9 +35,9 @@ import (
 type siteCacheListResponse struct {
 	Rows []SiteCacheEntry `json:"rows"`
 	// Unloadable lists the hosts of stored policies this build cannot load (a
-	// newer build's recipe or field, after a downgrade): they are not in Rows,
-	// and the edge treats each as OPTED OUT (never cached), not as "no entry".
-	// Scope-filtered like Rows.
+	// newer build's recipe or field, after a downgrade) that have no row in
+	// Rows: the edge treats each as OPTED OUT (never cached), not as "no
+	// entry". Scope-filtered like Rows.
 	Unloadable []string `json:"unloadable,omitempty"`
 }
 
@@ -102,16 +104,7 @@ func (e *Engine) handleSiteCacheGet(w http.ResponseWriter, r *http.Request) {
 	}
 	entry, ok := e.SiteCacheGet(host)
 	if !ok {
-		msg := "no cache policy for host"
-		if h, valid := e.siteCache.normalize(host); valid && e.siteCache != nil {
-			for _, f := range e.SiteCacheFrozenHosts() {
-				if f == h {
-					msg = "this host has a stored policy this build cannot load (see the daemon log): it is treated as opted out (never cached); remove it, or upgrade"
-					break
-				}
-			}
-		}
-		writeJSON(w, http.StatusNotFound, siteCacheResultResponse{Error: msg})
+		writeJSON(w, http.StatusNotFound, siteCacheResultResponse{Error: e.siteCacheNoPolicyMsg(host)})
 		return
 	}
 	writeJSON(w, http.StatusOK, siteCacheResultResponse{Entry: &entry})
@@ -225,10 +218,26 @@ func (e *Engine) handleSiteCachePurge(w http.ResponseWriter, r *http.Request) {
 	}
 	entry, ok := e.SiteCachePurge(host)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no cache policy for host"})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": e.siteCacheNoPolicyMsg(host)})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "generation": entry.Generation})
+}
+
+// siteCacheNoPolicyMsg explains a 404 for host: plainly "no policy", or — when
+// the host's stored policy is one this build cannot load — why it has none.
+// Callers have already scope-checked host.
+func (e *Engine) siteCacheNoPolicyMsg(host string) string {
+	if e.siteCache != nil {
+		if h, ok := e.siteCache.normalize(host); ok {
+			for _, f := range e.SiteCacheFrozenHosts() {
+				if f == h {
+					return siteCacheUnloadableMsg + "; remove it, turn it off (which replaces it), or upgrade"
+				}
+			}
+		}
+	}
+	return "no cache policy for host"
 }
 
 // isTruthyParam treats 1/true/yes/on (case-insensitive) as true.

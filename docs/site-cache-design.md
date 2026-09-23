@@ -543,12 +543,15 @@ safety setting must not be ignored), or a malformed hand edit — are kept in th
 file as stored (re-indented) through that rewrite and every later save, and
 never served. They FAIL CLOSED: the host of such a row is treated as an opt-out
 (a frozen wildcard opts out every sub-host under it), so a covering armed
-wildcard does not start caching it; a LOADED row of the same host wins over it.
-`list` names them under `unloadable` (scope-filtered), `get` says why it has no
-row, and `remove` deletes them. A `set` that would arm such a host is refused
-(merging onto an empty policy would drop the stored one's cookie settings);
-an explicit off is allowed. A purge does not reach them (so after a re-upgrade
-such a row returns with the generation it had). Because any unknown field
+wildcard does not start caching it. `list` names them under `unloadable`
+(scope-filtered), and `get`/`purge` say why there is no row. A `set` that would
+arm such a host is refused (merging onto an empty policy would drop the stored
+one's cookie settings); `remove` deletes it, and an explicit off REPLACES it —
+any write for a host replaces its unloadable rows in the same save, so a host
+never has both, and a later upgrade then finds the replacement, not the old
+policy. A purge does not reach an unloadable row (after a re-upgrade it returns
+with the generation it had). (A loadable and an unloadable row for one host —
+a hand edit — serve the loadable one until its next write.) Because any unknown field
 freezes a row, a NEW field must be `omitempty` with its zero value meaning the
 old behaviour — or a downgrade to a build that lacks it uncaches every vhost.
 
