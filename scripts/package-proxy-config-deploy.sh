@@ -562,9 +562,10 @@ process_engine() {
     # Every staged sidecar the staged main config names must be in the list:
     # a missing one means the list is incomplete (e.g. the dump write hit a
     # full disk - the engine ignores that and still exits 0), and a guard
-    # that cannot see must fail.
+    # that cannot see must fail. A commented-out include is not read, so
+    # comments don't count.
     for pe_name in $CFM_SIDECARS; do
-        grep -qF "$pe_stage/$pe_name" "$pe_stage/main.conf" || continue
+        sed 's/#.*//' "$pe_stage/main.conf" | grep -qF "$pe_stage/$pe_name" || continue
         if ! grep -qxF "# configuration file $pe_stage/$pe_name:" "$pe_stage/.dump"; then
             echo "WARNING: CFM proxy config: $pe_engine -T did not list $pe_stage/$pe_name; cannot confirm the test read the new sidecars; $pe_unchanged"
             cleanup_proxy_deploy
@@ -731,8 +732,8 @@ if ! ensure_fallback_cert_if_missing; then
     echo "WARNING: CFM proxy config: failed to create fallback self-signed certs; config tests may fail"
 fi
 
-# (After the line above: check_package_proxy_config_deploy.sh loads only what
-# precedes it, and must not inherit these traps.)
+# (check_package_proxy_config_deploy.sh loads only the definitions, up to the
+# first top-level call, and must not inherit these traps.)
 CFM_STAGE_DIR=""
 trap cleanup_on_exit EXIT
 # Ignore further signals from here on, so none cuts the exit trap short.

@@ -760,6 +760,11 @@ $G"
 nx_case comment deploy "# operators on plain nginx: include /etc/nginx/trusted_proxies.conf; instead
 include @L@/trusted_proxies.conf;  # trailing comment
 $G"
+# A commented-out sidecar include is not read, so it isn't in -T's list: that
+# must not count as "the list is incomplete".
+nx_case commented-listeners deploy "include @L@/trusted_proxies.conf;
+$G
+# include @L@/cfm-panel-listeners.conf;"
 nx_case tab deploy "include	@L@/trusted_proxies.conf;
 $G"
 nx_case relative deploy "include trusted_proxies.conf;
@@ -927,9 +932,10 @@ PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$pkg" FAKE_OPENRESTY_ARGS="$tmp/or-pid2.ar
 #     stays held.
 if command -v flock >/dev/null 2>&1; then
   lk="$tmp/deploy.lock"
-  ( flock 8; sleep 5 ) 8>"$lk" &
+  ( flock 8; : >"$lk.held"; exec sleep 30 ) 8>"$lk" &
   holder=$!
-  sleep 0.5
+  i=0; while [ ! -e "$lk.held" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -e "$lk.held" ] || { echo "FAIL: lock holder never took the lock" >&2; kill "$holder" 2>/dev/null; exit 1; }
   if sh -c '. "$1"; acquire_deploy_lock "$2" 1' sh "$tmp/functions.sh" "$lk"; then
     echo "FAIL: the lock must not be taken while another run holds it" >&2; kill "$holder" 2>/dev/null; exit 1
   fi
