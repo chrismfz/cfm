@@ -220,10 +220,11 @@ stage_sidecars() {
     return 0
 }
 
-# include_targets FILE: the path of every `include` directive, one per line.
+# include_targets FILE: the path of every `include` directive, one per line,
+# wherever it sits on the line (`server { include X; }` included).
 include_targets() {
-    sed -n 's/^[[:space:]]*include[[:space:]][[:space:]]*\([^;]*\);.*/\1/p' "$1" \
-        | sed 's/[[:space:]]*$//'
+    grep -oE '(^|[[:space:];{}])include[[:space:]]+[^;]+;' "$1" \
+        | sed 's/^.*include[[:space:]]*//; s/[[:space:]]*;$//'
 }
 
 # stage_main_config SRC STAGE LIVE_DIR: copy the packaged main config to
@@ -247,10 +248,12 @@ stage_main_config() {
         echo "WARNING: CFM proxy config: failed to stage $smc_src"
         return 1
     fi
-    # Every include of a sidecar (by any path) must now read the staged copy.
+    # Every include of a sidecar (by any path) must now read the staged copy:
+    # the rewritten absolute path, or a bare relative name (a relative include
+    # resolves against the -c file's dir, i.e. the stage).
     for smc_name in $CFM_SIDECARS; do
         if include_targets "$smc_stage/main.conf" | grep -F "$smc_name" \
-            | grep -vqxF "$smc_stage/$smc_name"; then
+            | grep -vxF -e "$smc_stage/$smc_name" -e "$smc_name" | grep -q .; then
             echo "WARNING: CFM proxy config: $smc_src includes $smc_name in a form this helper cannot redirect; not deploying untested sidecars"
             return 1
         fi
@@ -268,7 +271,10 @@ stage_main_config() {
 # `include *.conf` glob never sees them.
 CFM_COMMIT_LIVE=""   # live sidecar dir of the commit in progress
 CFM_COMMIT_MAIN=""   # live main config of the commit in progress
+CFM_COMMIT_BACKUP="" # the .cfm-prepkg backup this commit made (removed on rollback)
 CFM_COMMITTING=0     # 1 while renames are under way (the trap rolls back)
+CFM_RESTORE_FAILED=0 # 1 if a rollback could not put a sidecar back
+CFM_KEEP_OLD=""      # sidecars whose .cfm-old copy cleanup must NOT remove
 
 commit_files() {
     cf_stage=$1
@@ -308,6 +314,7 @@ commit_files() {
             commit_cleanup
             return 1
         fi
+        CFM_COMMIT_BACKUP=$cf_backup
         echo "CFM proxy config: backed up $cf_dst to $cf_backup"
     fi
 
@@ -325,6 +332,7 @@ commit_files() {
         return 1
     fi
     CFM_COMMITTING=0
+    CFM_COMMIT_BACKUP=""   # a real deploy keeps its backup, as before
     commit_cleanup
     echo "CFM proxy config: deployed $cf_dst"
     return 0
@@ -334,21 +342,38 @@ main_temp() {
     printf '%s/.%s.cfm-new.%s\n' "$(dirname "$1")" "$(basename "$1")" "$$"
 }
 
-# commit_rollback: put back each sidecar this commit replaced (or remove one
-# that did not exist), then clean up.
+# commit_rollback: put back each sidecar this commit actually renamed in (its
+# .cfm-new temp is gone), or remove one that did not exist before; then clean
+# up. If the main config was already renamed in too (a signal between that
+# rename and the end of commit_files), the commit is complete: keep it.
 commit_rollback() {
+    if [ -n "$CFM_COMMIT_MAIN" ] && [ ! -e "$(main_temp "$CFM_COMMIT_MAIN")" ]; then
+        CFM_COMMITTING=0
+        CFM_COMMIT_BACKUP=""
+        commit_cleanup
+        return 0
+    fi
     for cr_name in $CFM_SIDECARS; do
         cr_live=$CFM_COMMIT_LIVE/$cr_name
+        [ -e "$CFM_COMMIT_LIVE/.$cr_name.cfm-new.$$" ] && continue   # never renamed in
         if [ -e "$CFM_COMMIT_LIVE/.$cr_name.cfm-old.$$" ] || [ -L "$CFM_COMMIT_LIVE/.$cr_name.cfm-old.$$" ]; then
             if ! mv -f "$CFM_COMMIT_LIVE/.$cr_name.cfm-old.$$" "$cr_live"; then
-                # Keep the only good copy under a name cleanup never removes.
-                mv -f "$CFM_COMMIT_LIVE/.$cr_name.cfm-old.$$" "$cr_live.cfm-restore-failed.$$" 2>/dev/null
-                echo "WARNING: CFM proxy config: could not restore $cr_live; the previous copy is $cr_live.cfm-restore-failed.$$ - put it back before reloading the edge"
+                # Keep the only good copy under a name cleanup never removes;
+                # if even that rename fails, leave it where it is and exempt it.
+                cr_kept=$cr_live.cfm-restore-failed.$$
+                if ! mv -f "$CFM_COMMIT_LIVE/.$cr_name.cfm-old.$$" "$cr_kept" 2>/dev/null; then
+                    cr_kept=$CFM_COMMIT_LIVE/.$cr_name.cfm-old.$$
+                    CFM_KEEP_OLD="$CFM_KEEP_OLD $cr_name"
+                fi
+                CFM_RESTORE_FAILED=1
+                echo "WARNING: CFM proxy config: could not restore $cr_live; the previous copy is $cr_kept - put it back before reloading the edge"
             fi
-        elif [ -e "$CFM_COMMIT_LIVE/.$cr_name.cfm-absent.$$" ] && [ ! -e "$CFM_COMMIT_LIVE/.$cr_name.cfm-new.$$" ]; then
+        elif [ -e "$CFM_COMMIT_LIVE/.$cr_name.cfm-absent.$$" ]; then
             rm -f "$cr_live"
         fi
     done
+    [ -n "$CFM_COMMIT_BACKUP" ] && rm -f "$CFM_COMMIT_BACKUP"
+    CFM_COMMIT_BACKUP=""
     CFM_COMMITTING=0
     commit_cleanup
 }
@@ -358,8 +383,11 @@ commit_rollback() {
 commit_cleanup() {
     [ -n "$CFM_COMMIT_LIVE" ] || return 0
     for cc_name in $CFM_SIDECARS; do
-        rm -f "$CFM_COMMIT_LIVE/.$cc_name.cfm-new.$$" "$CFM_COMMIT_LIVE/.$cc_name.cfm-absent.$$" \
-            "$CFM_COMMIT_LIVE/.$cc_name.cfm-old.$$"
+        rm -f "$CFM_COMMIT_LIVE/.$cc_name.cfm-new.$$" "$CFM_COMMIT_LIVE/.$cc_name.cfm-absent.$$"
+        case " $CFM_KEEP_OLD " in
+            *" $cc_name "*) ;;   # the only good copy of a sidecar: keep it
+            *) rm -f "$CFM_COMMIT_LIVE/.$cc_name.cfm-old.$$" ;;
+        esac
     done
     [ -n "$CFM_COMMIT_MAIN" ] && rm -f "$(main_temp "$CFM_COMMIT_MAIN")"
     CFM_COMMIT_LIVE=""
@@ -375,20 +403,6 @@ cleanup_proxy_deploy() {
     fi
     [ -n "$CFM_STAGE_DIR" ] && rm -rf "$CFM_STAGE_DIR"
     CFM_STAGE_DIR=""
-}
-
-# stage_parent: an absolute dir for the staging dir. nginx resolves a relative
-# `-c` against its compiled prefix, not the cwd, and a path with whitespace or
-# sed metacharacters would not survive the include rewrite: fall back to /tmp.
-stage_parent() {
-    case "${TMPDIR:-}" in
-        /*) ;;
-        *) echo /tmp; return 0 ;;
-    esac
-    case "$TMPDIR" in
-        *[!A-Za-z0-9/._-]*) echo /tmp ;;
-        *) echo "$TMPDIR" ;;
-    esac
 }
 
 ensure_fallback_cert_if_missing() {
@@ -452,7 +466,11 @@ process_engine() {
         echo "WARNING: CFM proxy config: packaged $pe_engine config missing: $pe_main_src; $pe_unchanged"
         return 0
     fi
-    if ! CFM_STAGE_DIR=$(mktemp -d "$(stage_parent)/cfm-proxy-stage.XXXXXX"); then
+    # Stage inside the live dir itself (a dot-dir, so an `include *.conf` glob
+    # never reaches it): no dependency on /tmp or TMPDIR, which may be full or
+    # missing on the host, and nothing is written outside the engine's own dir.
+    if ! mkdir -p "$pe_sidecar_dir" \
+        || ! CFM_STAGE_DIR=$(mktemp -d "$pe_sidecar_dir/.cfm-proxy-stage.XXXXXX"); then
         CFM_STAGE_DIR=""
         echo "WARNING: CFM proxy config: $pe_engine: cannot create a staging dir; $pe_unchanged"
         return 0
@@ -480,6 +498,8 @@ process_engine() {
 
     if commit_files "$pe_stage" "$pe_sidecar_dir" "$pe_main_src" "$pe_main_dst"; then
         set_engine_state "$pe_engine" 1 "$pe_active" 1
+    elif [ "$CFM_RESTORE_FAILED" -eq 1 ]; then
+        echo "WARNING: CFM proxy config: $pe_engine: deploy failed and a sidecar could not be restored (see above); fix it before reloading $pe_engine"
     else
         echo "WARNING: CFM proxy config: $pe_engine: $pe_unchanged"
     fi

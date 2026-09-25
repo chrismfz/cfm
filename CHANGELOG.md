@@ -51,9 +51,12 @@ back-filled here — see the git/PR history for that period.
   that test failed, or the main config couldn't be installed, the new sidecars
   stayed live next to the old main config, and the edge's next restart could
   fail on them. Now the new sidecars and a copy of the packaged main config
-  that includes them are tested in a staging dir. Only after the test passes
-  are the files written next to the live ones and renamed in. A failed run,
-  or one interrupted before those renames, leaves the live dir as it was.
+  that includes them are tested in a staging dir (a hidden dir inside the
+  engine's own config dir, so a full or missing `/tmp` doesn't matter). Only
+  after the test passes are the files written next to the live ones and
+  renamed in. If a rename fails, or the run is interrupted during them, the
+  sidecars already swapped are put back. A failed run leaves the live dir as
+  it was. A successful one gives the same files, modes and owners as before.
 - **Skroutz's AWS crawler IPs were missing from the bypass list.** Its own
   network was covered through its ASN (AS202042), but its published feed lists
   plain strings under `ipv4`/`ipv6`, a shape the generator skipped. The feed

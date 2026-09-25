@@ -13,10 +13,9 @@ command -v rg >/dev/null 2>&1 || {
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-# The helper stages under $TMPDIR; keep that inside $tmp so a leftover stage
-# dir is visible to the test and never touches the host's /tmp.
-export TMPDIR="$tmp/stage-tmp"
-mkdir -p "$TMPDIR"
+# The helper stages inside the engine's own config dir, never under TMPDIR:
+# point TMPDIR at a directory that does not exist to prove it.
+export TMPDIR="$tmp/no-such-tmpdir"
 
 configs="$tmp/configs"
 openresty_conf="$tmp/openresty-conf"
@@ -45,8 +44,7 @@ cat >"$configs/cfm-panel-listeners.conf.in" <<'CONF'
 # Install path: @LISTENER_DEST@
 CONF
 
-cat >"$bin_dir/fake-openresty" <<'EOF_FAKE'
-#!/bin/sh
+cat >"$bin_dir/check-includes.sh" <<'EOF_CI'
 # A real engine test reads every included file: fail if an absolute include is
 # missing or marked BROKEN, and record what the staged main included.
 check_includes() {
@@ -56,6 +54,11 @@ check_includes() {
     ! grep -q BROKEN "$inc" || exit 1
   done
 }
+EOF_CI
+
+cat >"$bin_dir/fake-openresty" <<'EOF_FAKE'
+#!/bin/sh
+. "$(dirname "$0")/check-includes.sh"
 {
   printf '%s\n' "$*"
 } >> "$FAKE_OPENRESTY_ARGS"
@@ -68,15 +71,7 @@ chmod 0755 "$bin_dir/fake-openresty"
 
 cat >"$bin_dir/fake-angie" <<'EOF_FAKE'
 #!/bin/sh
-# A real engine test reads every included file: fail if an absolute include is
-# missing or marked BROKEN, and record what the staged main included.
-check_includes() {
-  sed -n 's/^[[:space:]]*include[[:space:]]*\(\/[^;]*\);.*/\1/p' "$1" | while read -r inc; do
-    printf 'include %s\n' "$inc" >> "$2"
-    [ -f "$inc" ] || exit 1
-    ! grep -q BROKEN "$inc" || exit 1
-  done
-}
+. "$(dirname "$0")/check-includes.sh"
 {
   printf '%s\n' "$*"
 } >> "$FAKE_ANGIE_ARGS"
@@ -136,6 +131,17 @@ real_mv=$(command -v mv)
 cat >"$bin_dir/mv" <<EOF_MV
 #!/bin/sh
 for last do :; done
+# FAKE_MV_FAIL_FROM: fail a rename whose SOURCE contains it (only when the
+# target is a live name, i.e. not *.cfm-restore-failed.*, unless
+# FAKE_MV_FAIL_KEEP is also set).
+if [ -n "\${FAKE_MV_FAIL_FROM:-}" ]; then
+  for a do
+    case "\$a" in *"\$FAKE_MV_FAIL_FROM"*)
+      [ "\$a" = "\$last" ] && continue
+      case "\$last" in *.cfm-restore-failed.*) [ -n "\${FAKE_MV_FAIL_KEEP:-}" ] && exit 1 ;; *) exit 1 ;; esac ;;
+    esac
+  done
+fi
 if [ -n "\${FAKE_MV_FAIL:-}" ]; then
   case "\$last" in
     *"\$FAKE_MV_FAIL")
@@ -154,15 +160,20 @@ chmod 0755 "$bin_dir/mv"
 real_install=$(command -v install)
 cat >"$bin_dir/install" <<EOF_INSTALL
 #!/bin/sh
-out=""
-while [ "\$#" -gt 0 ]; do
-  case "\$1" in
-    -o|-g) shift 2; continue ;;
+# FAKE_INSTALL_FAIL: fail an install whose target contains it.
+for last do :; done
+if [ -n "\${FAKE_INSTALL_FAIL:-}" ]; then
+  case "\$last" in *"\$FAKE_INSTALL_FAIL"*) exit 1 ;; esac
+fi
+n=\$#
+while [ "\$n" -gt 0 ]; do
+  a=\$1; shift; n=\$((n - 1))
+  case "\$a" in
+    -o|-g) shift; n=\$((n - 1)) ;;
+    *) set -- "\$@" "\$a" ;;
   esac
-  out="\$out \$(printf '%s' "\$1" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")"
-  shift
 done
-eval "exec $real_install \$out"
+exec $real_install "\$@"
 EOF_INSTALL
 chmod 0755 "$bin_dir/install"
 
@@ -215,13 +226,13 @@ active_angie_output=$(
     "$openresty_conf"
 )
 
-if ! printf '%s\n' "$active_angie_output" | rg -q 'CFM proxy config: testing Angie config with: .*/fake-angie -t -c .*/cfm-proxy-stage\.[^/]+/main\.conf \(packaged .*/configs/angie\.conf \+ new sidecars\)'; then
+if ! printf '%s\n' "$active_angie_output" | rg -q 'CFM proxy config: testing Angie config with: .*/fake-angie -t -c .*/\.cfm-proxy-stage\.[^/]+/main\.conf \(packaged .*/configs/angie\.conf \+ new sidecars\)'; then
   echo "FAIL: expected Angie main config test command in output" >&2
   printf '%s\n' "$active_angie_output" >&2
   exit 1
 fi
 
-if ! printf '%s\n' "$active_angie_output" | rg -q 'CFM proxy config: testing OpenResty config with: .*/fake-openresty -t -c .*/cfm-proxy-stage\.[^/]+/main\.conf \(packaged .*/configs/openresty\.conf \+ new sidecars\)'; then
+if ! printf '%s\n' "$active_angie_output" | rg -q 'CFM proxy config: testing OpenResty config with: .*/fake-openresty -t -c .*/\.cfm-proxy-stage\.[^/]+/main\.conf \(packaged .*/configs/openresty\.conf \+ new sidecars\)'; then
   echo "FAIL: expected OpenResty main config test command in output" >&2
   printf '%s\n' "$active_angie_output" >&2
   exit 1
@@ -266,13 +277,15 @@ fi
 for eng in openresty angie; do
   actual_args="$(cat "$tmp/$eng.args")"
   case "$actual_args" in
-    "-t -c "*/cfm-proxy-stage.*/main.conf) ;;
+    "-t -c "*/.cfm-proxy-stage.*/main.conf) ;;
     *) echo "FAIL: expected fake $eng args '-t -c <stage>/main.conf', got '$actual_args'" >&2; exit 1 ;;
   esac
 done
-if ls -d "${TMPDIR:-/tmp}"/cfm-proxy-stage.* 2>/dev/null | rg -q .; then
-  echo "FAIL: staging dirs left behind:" >&2; ls -d "${TMPDIR:-/tmp}"/cfm-proxy-stage.* >&2; exit 1
-fi
+for d in "$angie_conf" "$openresty_conf"; do
+  if ls -A "$d" | rg -q 'cfm-proxy-stage'; then
+    echo "FAIL: staging dir left behind in $d:" >&2; ls -A "$d" >&2; exit 1
+  fi
+done
 
 combined_output="$active_angie_output"
 if printf '%s\n' "$combined_output" | rg -q -- '-c .*((trusted_proxies|challenge_waf_bypass)\.conf|cfm-panel-listeners\.conf)'; then
@@ -459,7 +472,7 @@ seed_live() {
 
 snapshot() { (cd "$1" && for f in $(ls -A | sort); do printf '%s:' "$f"; cksum <"$f"; done); }
 
-run_or() { # PKG LIVE [FAIL]   (env: FAKE_MV_FAIL, TMPDIR)
+run_or() { # PKG LIVE [FAIL]   (env: FAKE_MV_FAIL, FAKE_INSTALL_FAIL)
   PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$1" \
   FAKE_OPENRESTY_ARGS="$tmp/or-$(basename "$2").args" \
   FAKE_OPENRESTY_FAIL="${3:-0}" \
@@ -480,9 +493,9 @@ assert_untouched "$live" "$before" "broken new sidecar"
 printf '%s\n' "$out" | rg -q 'config test failed; leaving existing sidecars and nginx\.conf unchanged' \
   || { echo "FAIL: broken sidecar must be reported" >&2; printf '%s\n' "$out" >&2; exit 1; }
 # ...and the test really read the NEW sidecars from the stage, not the live ones.
-rg -q "include .*/cfm-proxy-stage\.[^/]+/challenge_waf_bypass\.conf" "$tmp/or-live-broken.args.includes" \
+rg -q "include .*/\.cfm-proxy-stage\.[^/]+/challenge_waf_bypass\.conf" "$tmp/or-live-broken.args.includes" \
   || { echo "FAIL: the engine test must read the staged sidecars" >&2; cat "$tmp/or-live-broken.args.includes" >&2; exit 1; }
-if rg -q "include $live/" "$tmp/or-live-broken.args.includes"; then
+if rg -q "^include $live/[a-z_-]+\\.conf\$" "$tmp/or-live-broken.args.includes"; then
   echo "FAIL: the engine test read a LIVE sidecar" >&2; exit 1
 fi
 
@@ -529,15 +542,16 @@ cmp -s "$live/challenge_waf_bypass.conf" "$pkg/challenge_waf_bypass.conf" || { e
 cmp -s "$live/nginx.conf" "$pkg/openresty.conf" || { echo "FAIL: new main config not live" >&2; exit 1; }
 rg -q "Install path: $live/cfm-panel-listeners\.conf" "$live/cfm-panel-listeners.conf" \
   || { echo "FAIL: listener header must name the live path" >&2; cat "$live/cfm-panel-listeners.conf" >&2; exit 1; }
-if ls -A "$live" | rg -q 'cfm-new'; then echo "FAIL: temp files left in $live" >&2; ls -A "$live" >&2; exit 1; fi
-if ls -A "$TMPDIR" | rg -q 'cfm-proxy-stage'; then echo "FAIL: stage dirs left in $TMPDIR" >&2; ls -A "$TMPDIR" >&2; exit 1; fi
+got=$(ls -A "$live" | sed 's/\.cfm-prepkg\.[0-9]*$/.cfm-prepkg.TS/' | sort | tr '\n' ' ')
+want="cfm-panel-listeners.conf challenge_waf_bypass.conf nginx.conf nginx.conf.cfm-prepkg.TS trusted_proxies.conf "
+[ "$got" = "$want" ] || { echo "FAIL: after a deploy the live dir must hold exactly: $want; got: $got" >&2; exit 1; }
 
 # 7. The staged main is the packaged one with ONLY the sidecar include paths
 #    moved (a tab-separated include is redirected too).
 pkg="$tmp/pkg-same"; live="$tmp/live-same"
 mk_pkg "$pkg" "$live"; sed -i "s|    include $live/trusted_proxies.conf;|    include\t$live/trusted_proxies.conf;|" "$pkg/openresty.conf"
 seed_live "$live"
-st=$(mktemp -d); CFM_CONFIG_DIR="$pkg" sh -c '. "$1"; stage_main_config "$2" "$3" "$4"' sh "$tmp/functions.sh" "$pkg/openresty.conf" "$st" "$live" \
+st=$(mktemp -d "$tmp/st.XXXXXX"); CFM_CONFIG_DIR="$pkg" sh -c '. "$1"; stage_main_config "$2" "$3" "$4"' sh "$tmp/functions.sh" "$pkg/openresty.conf" "$st" "$live" \
   || { echo "FAIL: a tab-separated include must be redirected, not refused" >&2; exit 1; }
 diff <(sed "s|$live/|STAGE/|" "$pkg/openresty.conf") <(sed "s|$st/|STAGE/|" "$st/main.conf") >/dev/null \
   || { echo "FAIL: staged main differs from the packaged one beyond the include paths" >&2; diff "$pkg/openresty.conf" "$st/main.conf" >&2; exit 1; }
@@ -546,39 +560,87 @@ rm -rf "$st"
 # 8. The main-config rename fails after the sidecars went in -> the sidecars
 #    are put back (and one that did not exist before is removed again).
 pkg="$tmp/pkg-mainmv"; live="$tmp/live-mainmv"
-mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live" | rg -v 'cfm-prepkg')
+mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live")
 out=$(FAKE_MV_FAIL=/nginx.conf FAKE_MV_ONCE="$tmp/mv-once-8" run_or "$pkg" "$live")
-[ "$(snapshot "$live" | rg -v 'cfm-prepkg')" = "$before" ] || { echo "FAIL: failed main rename must roll the sidecars back" >&2; ls -la "$live" >&2; printf '%s\n' "$out" >&2; exit 1; }
+[ "$(snapshot "$live")" = "$before" ] || { echo "FAIL: failed main rename must roll the sidecars back" >&2; ls -la "$live" >&2; printf '%s\n' "$out" >&2; exit 1; }
 printf '%s\n' "$out" | rg -q 'failed to deploy .*nginx\.conf; restoring the previous sidecars' || { echo "FAIL: failed main rename must be reported" >&2; printf '%s\n' "$out" >&2; exit 1; }
 
 # 9. The 2nd sidecar rename fails -> the 1st is put back.
 pkg="$tmp/pkg-sidemv"; live="$tmp/live-sidemv"
-mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live" | rg -v 'cfm-prepkg')
+mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live")
 FAKE_MV_FAIL=/challenge_waf_bypass.conf FAKE_MV_ONCE="$tmp/mv-once-9" run_or "$pkg" "$live" >/dev/null
-[ "$(snapshot "$live" | rg -v 'cfm-prepkg')" = "$before" ] || { echo "FAIL: failed sidecar rename must roll the earlier ones back" >&2; ls -la "$live" >&2; exit 1; }
+[ "$(snapshot "$live")" = "$before" ] || { echo "FAIL: failed sidecar rename must roll the earlier ones back" >&2; ls -la "$live" >&2; exit 1; }
 
-# 9b. ...and if putting one back fails too, its previous copy is kept under a
-#     name cleanup never removes, and the operator is told where it is.
+# 9b. ...and if putting a renamed-in sidecar back fails too, its previous copy
+#     is kept under a name cleanup never removes, and the operator is told.
+#     (The 3rd rename fails; restoring the 2nd, challenge_waf_bypass.conf, fails.)
 pkg="$tmp/pkg-norestore"; live="$tmp/live-norestore"
 mk_pkg "$pkg" "$live"; seed_live "$live"
-out=$(FAKE_MV_FAIL=/challenge_waf_bypass.conf run_or "$pkg" "$live")
+out=$(FAKE_MV_FAIL=/cfm-panel-listeners.conf FAKE_MV_ONCE="$tmp/mv-once-9b" \
+      FAKE_MV_FAIL_FROM=.challenge_waf_bypass.conf.cfm-old run_or "$pkg" "$live")
 kept=$(ls "$live" | rg 'challenge_waf_bypass\.conf\.cfm-restore-failed\.' || true)
 [ -n "$kept" ] && [ "$(cat "$live/$kept")" = "OLD bypass" ] || { echo "FAIL: an unrestorable sidecar's previous copy must be kept" >&2; ls -la "$live" >&2; exit 1; }
 printf '%s\n' "$out" | rg -q "previous copy is .*$kept" || { echo "FAIL: the kept copy must be named in the warning" >&2; printf '%s\n' "$out" >&2; exit 1; }
+printf '%s\n' "$out" | rg -q 'a sidecar could not be restored' || { echo "FAIL: the summary must not claim the sidecars were left unchanged" >&2; printf '%s\n' "$out" >&2; exit 1; }
+if printf '%s\n' "$out" | rg -q 'leaving existing sidecars'; then echo "FAIL: false 'leaving existing sidecars' after a failed restore" >&2; exit 1; fi
+[ "$(cat "$live/trusted_proxies.conf")" = "OLD trusted" ] || { echo "FAIL: the restorable sidecar must still be put back" >&2; exit 1; }
 
-# 10. A relative or whitespace TMPDIR falls back to /tmp: the deploy still
-#     works, and the exit trap never touches a path split out of TMPDIR.
-for bad in "relative-dir" "$tmp/with space"; do
-  mkdir -p "$tmp/with space" "$tmp/with"
-  : >"$tmp/with/canary"
-  pkg="$tmp/pkg-tmpdir"; live="$tmp/live-tmpdir"; rm -rf "$pkg" "$live"
-  mk_pkg "$pkg" "$live"; seed_live "$live"
-  (cd "$tmp" && TMPDIR="$bad" PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$pkg" FAKE_OPENRESTY_ARGS="$tmp/or-tmpdir.args" \
-    sh -c '. "$1"; trap cleanup_proxy_deploy EXIT; process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
-    "$tmp/functions.sh" "$bin_dir/fake-openresty" "$pkg/openresty.conf" "$live/nginx.conf" "$live" >/dev/null 2>&1)
-  cmp -s "$live/nginx.conf" "$pkg/openresty.conf" || { echo "FAIL: TMPDIR='$bad' must fall back to /tmp and still deploy" >&2; exit 1; }
-  [ -f "$tmp/with/canary" ] || { echo "FAIL: TMPDIR='$bad' made the exit trap delete an unrelated dir" >&2; exit 1; }
+# 9d. A sidecar whose rename failed was never renamed in (live still holds its
+#     previous version): it is not "restored", so a failing restore of it can't
+#     produce a false "could not restore" alarm.
+pkg="$tmp/pkg-notin"; live="$tmp/live-notin"
+mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live")
+out=$(FAKE_MV_FAIL=/challenge_waf_bypass.conf FAKE_MV_ONCE="$tmp/mv-once-9d" \
+      FAKE_MV_FAIL_FROM=.challenge_waf_bypass.conf.cfm-old run_or "$pkg" "$live")
+assert_untouched "$live" "$before" "sidecar that was never renamed in"
+if printf '%s\n' "$out" | rg -q 'could not restore'; then echo "FAIL: false 'could not restore' for a sidecar never renamed in" >&2; printf '%s\n' "$out" >&2; exit 1; fi
+
+# 9c. ...and if even keeping it under that name fails, the .cfm-old copy stays
+#     (cleanup must not delete the only good copy) and is the one named.
+pkg="$tmp/pkg-keepold"; live="$tmp/live-keepold"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+out=$(FAKE_MV_FAIL=/cfm-panel-listeners.conf FAKE_MV_ONCE="$tmp/mv-once-9c" \
+      FAKE_MV_FAIL_FROM=.challenge_waf_bypass.conf.cfm-old FAKE_MV_FAIL_KEEP=1 run_or "$pkg" "$live")
+kept=$(ls -A "$live" | rg '^\.challenge_waf_bypass\.conf\.cfm-old\.' || true)
+[ -n "$kept" ] && [ "$(cat "$live/$kept")" = "OLD bypass" ] || { echo "FAIL: cleanup deleted the only good copy" >&2; ls -la "$live" >&2; exit 1; }
+printf '%s\n' "$out" | rg -q "previous copy is .*$kept" || { echo "FAIL: the kept .cfm-old copy must be named" >&2; printf '%s\n' "$out" >&2; exit 1; }
+
+# 10. The main-config temp can't be written after the sidecar temps were ->
+#     live dir byte-identical, no temp / marker / backup / stage left.
+pkg="$tmp/pkg-maintmp"; live="$tmp/live-maintmp"
+mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live")
+FAKE_INSTALL_FAIL=/.nginx.conf.cfm-new run_or "$pkg" "$live" >/dev/null
+assert_untouched "$live" "$before" "main temp write failed after the sidecar temps"
+
+# 11. An include of a sidecar mid-line (`server { include X; }`) in a form the
+#     rewrite skips is still caught by the redirect check.
+pkg="$tmp/pkg-midline"; live="$tmp/live-midline"
+mk_pkg "$pkg" "$live"
+sed -i "s|    include $live/cfm-panel-listeners.conf;|    server { include $live/./cfm-panel-listeners.conf; }|" "$pkg/openresty.conf"
+seed_live "$live"; before=$(snapshot "$live")
+out=$(run_or "$pkg" "$live")
+assert_untouched "$live" "$before" "mid-line unredirectable include"
+printf '%s\n' "$out" | rg -q 'cannot redirect' || { echo "FAIL: a mid-line unredirectable include must be refused" >&2; printf '%s\n' "$out" >&2; exit 1; }
+
+# 12. A signal that lands after the main config was renamed in (commit done,
+#     flag not yet cleared) must NOT roll the sidecars back under the new main.
+live="$tmp/live-latesig"; mkdir -p "$live"
+printf '%s\n' NEW >"$live/trusted_proxies.conf"; printf '%s\n' NEW >"$live/challenge_waf_bypass.conf"
+printf '%s\n' NEW >"$live/cfm-panel-listeners.conf"; printf '%s\n' NEWMAIN >"$live/nginx.conf"
+sh -c '. "$1"
+  for n in $CFM_SIDECARS; do printf "%s\n" OLD >"$2/.$n.cfm-old.$$"; done
+  CFM_COMMIT_LIVE=$2; CFM_COMMIT_MAIN=$2/nginx.conf; CFM_COMMITTING=1
+  cleanup_proxy_deploy' sh "$tmp/functions.sh" "$live"
+for n in trusted_proxies.conf challenge_waf_bypass.conf cfm-panel-listeners.conf; do
+  [ "$(cat "$live/$n")" = NEW ] || { echo "FAIL: a completed commit was rolled back ($n)" >&2; exit 1; }
 done
-if ls -d /tmp/cfm-proxy-stage.* 2>/dev/null | rg -q .; then echo "FAIL: /tmp stage dir left behind" >&2; exit 1; fi
+if ls -A "$live" | rg -q 'cfm-old'; then echo "FAIL: backups left after a completed commit" >&2; ls -A "$live" >&2; exit 1; fi
+
+# 13. A failed commit removes the .cfm-prepkg backup it made (the live dir is
+#     exactly as it was), while a successful one keeps it (case 6).
+pkg="$tmp/pkg-nobak"; live="$tmp/live-nobak"
+mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live")
+FAKE_MV_FAIL=/nginx.conf FAKE_MV_ONCE="$tmp/mv-once-13" run_or "$pkg" "$live" >/dev/null
+assert_untouched "$live" "$before" "rolled-back commit (incl. its backup)"
 
 echo "OK: package proxy deploy helper tests only the main engine configs, with the new sidecars staged; a failed run leaves the live dir untouched"
