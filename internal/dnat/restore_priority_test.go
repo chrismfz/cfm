@@ -135,3 +135,17 @@ func TestRestoreOnStartup_PriorityReapplySkips(t *testing.T) {
 		}
 	})
 }
+
+// `cfm dnat on --priority X` with X != cfm.conf warns that a restart, reboot or
+// failsafe recovery will put cfm.conf's value back.
+func TestPriorityOverrideWarning(t *testing.T) {
+	if w := priorityOverrideWarning(-101, -101); w != "" {
+		t.Fatalf("same as cfm.conf: want no warning, got %q", w)
+	}
+	w := priorityOverrideWarning(-101, -99)
+	for _, want := range []string{"-101", "(-99)", "restarts", "reboots", "failsafe", "NFT_DNAT_PRIORITY = -101"} {
+		if !strings.Contains(w, want) {
+			t.Fatalf("warning %q lacks %q", w, want)
+		}
+	}
+}

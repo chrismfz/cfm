@@ -79,7 +79,10 @@ back-filled here — see the git/PR history for that period.
   `cfm.conf` sets when it differs, keeping its current ports and bypass
   entries, and logs `re-applied: NFT_DNAT_PRIORITY X (was Y)`. It leaves the
   chain alone when `cfm.conf` wasn't applied (a parse error): the -99 fallback
-  must not undo the operator's choice.
+  must not undo the operator's choice. `cfm.conf` is the one place the
+  priority persists: `cfm dnat on --priority X` with X different from it now
+  warns that X lasts only until the next restart (as it already did across a
+  reboot or a failsafe recovery). No node runs with such an override today.
 - **A package upgrade no longer leaves an untested edge config live.** The
   upgrade wrote the sidecars (`trusted_proxies.conf`,
   `challenge_waf_bypass.conf`, `cfm-panel-listeners.conf`) into the live

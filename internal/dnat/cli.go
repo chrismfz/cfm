@@ -379,6 +379,9 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		}
 		LogTransition(ScopeWeb, "ON", "manual", "")
 		fmt.Printf("DNAT: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n", effPrio, *httpPort, *httpsPort)
+		if w := priorityOverrideWarning(effPrio, clampNFTPriority(defPrio)); w != "" {
+			fmt.Fprintln(os.Stderr, w)
+		}
 		// DNATOn installs the scoped `ct status dnat` accepts internally; report
 		// them the way `cfm dnat cpanel on` reports its scoped accepts so the
 		// operator can confirm the listener ports were opened without needing
@@ -496,6 +499,8 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	fmt.Println("    Imunify/WebShield-first fallback mode. Imunify at -100 can DNAT matched traffic first; CFM catches the rest.")
 	fmt.Println("  priority -101:")
 	fmt.Println("    CFM-first mode. CFM catches web traffic before Imunify/WebShield.")
+	fmt.Println("  To keep a priority, set NFT_DNAT_PRIORITY in cfm.conf: a restart, reboot or failsafe")
+	fmt.Println("  recovery re-installs DNAT at that value (a --priority lasts until then).")
 	fmt.Println("  cfm dnat off")
 
 	worker := detectWorkerUser()
@@ -946,4 +951,17 @@ func panelOnHelp() {
 	fmt.Fprintln(os.Stdout, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
 	fmt.Fprintln(os.Stdout, "Challenge behavior: ON always applies forced challenge mode.")
 	fmt.Fprintln(os.Stdout, "Examples: --mode direct-cpsrvd, mode=direct-cpsrvd, --priority -101, priority=-101")
+}
+
+// priorityOverrideWarning: a --priority that differs from cfm.conf's
+// NFT_DNAT_PRIORITY holds only until the daemon next installs the chain on its
+// own - a restart (RestoreOnStartup re-applies cfm.conf's priority), a reboot or
+// a failsafe recovery. cfm.conf is the one place the choice persists.
+func priorityOverrideWarning(applied, configured int) string {
+	if applied == configured {
+		return ""
+	}
+	return fmt.Sprintf("WARNING: priority %d differs from cfm.conf's NFT_DNAT_PRIORITY (%d): it holds only until cfm restarts, "+
+		"the host reboots or the failsafe re-installs DNAT, which all apply cfm.conf's value. "+
+		"To keep %d, set NFT_DNAT_PRIORITY = %d in cfm.conf.", applied, configured, applied, applied)
 }
