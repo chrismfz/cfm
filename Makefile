@@ -413,8 +413,10 @@ changelog:
 # instead of whatever was last committed by hand. Run FIRST by `release`
 # (before deb/rpm copy configs/ into the package); also available standalone.
 #
-# Never blocks a release: the generator is fail-safe (exit 2 = refused to
-# write, last-good file kept; exit 1 = some feeds failed, the rest written), so
+# Never blocks a release: the generator is fail-safe and runs --strict here
+# (each feed is retried; if one still fails, NOTHING is written — a partial
+# list would silently drop that feed's ranges, e.g. every DuckDuckBot IP — and
+# the last-good file ships; exit 2 = refused as too small/large, same), so
 # only a warning is printed. What DOES block is the offline validator
 # (bypass_list_test.py, what check_bypass_list.sh runs in CI) failing on the
 # file about to be packaged; it runs with the same >= 3.8 interpreter, since it
@@ -437,10 +439,10 @@ bypass-list: ## Refresh challenge_waf_bypass.conf from the crawler/CDN feeds
 	  echo "⏭️  BYPASS_REFRESH=0 — keeping the committed challenge_waf_bypass.conf"; \
 	else \
 	  echo "🌐 Refreshing challenge_waf_bypass.conf ($$PY)..."; \
-	  "$$PY" scripts/build_bypass_list.py; rc=$$?; \
+	  "$$PY" scripts/build_bypass_list.py --strict; rc=$$?; \
 	  case "$$rc" in \
 	    0) echo "✅ bypass list refreshed." ;; \
-	    1) echo "⚠️  some bypass feeds failed — wrote the list from the ones that answered." ;; \
+	    3) echo "⚠️  a bypass feed failed (after retries) — keeping the last-good file, not a partial one." ;; \
 	    *) echo "⚠️  bypass refresh refused (exit $$rc) — keeping the last-good file." ;; \
 	  esac; \
 	fi; \

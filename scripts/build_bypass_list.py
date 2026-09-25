@@ -22,6 +22,8 @@ import json
 import os
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -109,18 +111,34 @@ def eprint(*args: Any) -> None:
     print(*args, file=sys.stderr)
 
 
+FETCH_ATTEMPTS = 3               # a transient reset must not drop a whole source
+FETCH_BACKOFF_S = 2.0            # 2s, then 4s between attempts
+
+
+def _fetch(url: str, accept: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                charset = resp.headers.get_content_charset() or "utf-8"
+                return resp.read().decode(charset, errors="replace")
+        except urllib.error.HTTPError as exc:
+            # A 4xx is an answer (moved, gone, forbidden), not a transient fault.
+            if exc.code < 500 or attempt == FETCH_ATTEMPTS:
+                raise
+        except (urllib.error.URLError, OSError):
+            if attempt == FETCH_ATTEMPTS:
+                raise
+        time.sleep(FETCH_BACKOFF_S * attempt)
+    raise AssertionError("unreachable")
+
+
 def fetch_text(url: str) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/plain, */*;q=0.8"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        charset = resp.headers.get_content_charset() or "utf-8"
-        return resp.read().decode(charset, errors="replace")
+    return _fetch(url, "text/plain, */*;q=0.8")
 
 
 def fetch_json(url: str) -> Any:
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json, */*;q=0.8"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        charset = resp.headers.get_content_charset() or "utf-8"
-        return json.loads(resp.read().decode(charset))
+    return json.loads(_fetch(url, "application/json, */*;q=0.8"))
 
 
 def normalize_prefix(value: str) -> str | None:
@@ -165,12 +183,25 @@ def normalize_prefix(value: str) -> str | None:
 
 KNOWN_PREFIX_KEYS = {"ipv4prefix", "ipv6prefix", "prefix", "cidr", "network", "netblock", "range"}
 
+# Keys whose value is a bare LIST of prefix strings, e.g. Skroutz's
+# {"ipv4": ["185.6.76.0/22", ...], "ipv6": [...]}. The walker used to recurse
+# into such a list and drop every string (it only kept strings held by a
+# KNOWN_PREFIX_KEYS key), so that feed silently contributed 0 prefixes.
+KNOWN_PREFIX_LIST_KEYS = {"ipv4", "ipv6"}
+
 
 def walk_for_prefixes(obj: Any) -> Iterable[str]:
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if str(k).lower() in KNOWN_PREFIX_KEYS and isinstance(v, str):
+            key = str(k).lower()
+            if key in KNOWN_PREFIX_KEYS and isinstance(v, str):
                 yield v
+            elif key in KNOWN_PREFIX_LIST_KEYS and isinstance(v, list):
+                for item in v:
+                    if isinstance(item, str):
+                        yield item
+                    else:
+                        yield from walk_for_prefixes(item)
             else:
                 yield from walk_for_prefixes(v)
     elif isinstance(obj, list):
@@ -198,7 +229,7 @@ def load_json_feed(name: str, kind: str, url: str) -> SourceResult:
     doc = fetch_json(url)
     prefixes = collect_prefixes(walk_for_prefixes(doc.get("prefixes", doc)))
     return SourceResult(name=name, kind=kind, origin=url, prefixes=prefixes,
-                        meta={"creationTime": doc.get("creationTime", "unknown")})
+                        meta={"creationTime": doc.get("creationTime", doc.get("last_modified", "unknown"))})
 
 
 def load_txt(name: str, url: str) -> SourceResult:
@@ -348,6 +379,9 @@ def render_output(results: list[SourceResult], output: str, union: set[str]) -> 
 def main() -> int:
     p = argparse.ArgumentParser(description="Build challenge_waf_bypass.conf")
     p.add_argument("output", nargs="?", default=DEFAULT_OUTPUT, help="Output file path")
+    p.add_argument("--strict", action="store_true",
+                   help="write nothing (exit 3, existing file kept) if ANY source failed; "
+                        "used by `make release` so a feed outage can't drop that feed's ranges")
     args = p.parse_args()
 
     results: list[SourceResult] = []
@@ -375,6 +409,9 @@ def main() -> int:
     empty = [r.name for r in results if not r.prefixes]
     if empty:
         eprint("WARNING: zero prefixes from:", ", ".join(empty))
+    if errors and args.strict:
+        eprint(f"ERROR: {len(errors)} source(s) failed and --strict is set; keeping existing file at {args.output}")
+        return 3
     if errors:
         eprint(f"WARNING: {len(errors)} source(s) failed, continuing with {len(results)} that succeeded")
 

@@ -137,9 +137,94 @@ def test_committed_file() -> None:
     print(f"  committed file: {total} prefixes, all bounded & canonical")
 
 
+# ── 1e. walk_for_prefixes: every feed shape we consume ───────────────────────
+def test_walk_for_prefixes() -> None:
+    def walk(doc):
+        return blp.collect_prefixes(blp.walk_for_prefixes(doc.get("prefixes", doc)))
+    # Google / Bing: list of {ipv4Prefix|ipv6Prefix: "..."} objects.
+    google = {"creationTime": "x", "prefixes": [{"ipv4Prefix": "66.249.64.0/27"},
+                                                {"ipv6Prefix": "2001:4860:4801:10::/64"}]}
+    check(walk(google) == {"66.249.64.0/27", "2001:4860:4801:10::/64"},
+          f"google shape: got {sorted(walk(google))}")
+    # Skroutz: bare string lists under ipv4 / ipv6 (was silently 0 prefixes).
+    skroutz = {"ipv4": ["185.6.76.0/22", "3.73.204.153/32"], "ipv6": ["2a03:e40::/32"],
+               "last_modified": "2025-12-10T08:31:15Z"}
+    check(walk(skroutz) == {"185.6.76.0/22", "3.73.204.153/32", "2a03:e40::/32"},
+          f"skroutz shape: got {sorted(walk(skroutz))}")
+    # The same bounds still apply to list-held strings.
+    bad = {"ipv4": ["0.0.0.0/0", "10.0.0.0/8", "1.0.0.0/8", "not-an-ip"], "ipv6": ["::/0"]}
+    check(walk(bad) == set(), f"list-held over-broad/private must be dropped: got {sorted(walk(bad))}")
+    # A string outside any known key is still ignored (no free-text scraping).
+    check(walk({"note": "8.8.8.0/24", "hosts": ["8.8.4.0/24"]}) == set(),
+          "strings under unknown keys must be ignored")
+
+
+# ── 1f. fetch retry + --strict (a feed outage must not drop its ranges) ─────
+def test_retry_and_strict() -> None:
+    import io
+    import urllib.error
+
+    class _Resp(io.BytesIO):
+        headers = type("H", (), {"get_content_charset": staticmethod(lambda: "utf-8")})()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    calls = {"n": 0}
+    def flaky(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError(ConnectionResetError(104, "reset"))
+        return _Resp(b"8.8.8.0/24\n")
+
+    real_urlopen, real_backoff = blp.urllib.request.urlopen, blp.FETCH_BACKOFF_S
+    blp.urllib.request.urlopen, blp.FETCH_BACKOFF_S = flaky, 0
+    try:
+        check(blp.fetch_text("https://feed.invalid/x") == "8.8.8.0/24\n" and calls["n"] == 2,
+              f"a transient reset must be retried (calls={calls['n']})")
+
+        def gone(req, timeout=None):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(req.full_url, 404, "gone", {}, None)
+        calls["n"] = 0
+        blp.urllib.request.urlopen = gone
+        try:
+            blp.fetch_text("https://feed.invalid/x")
+            check(False, "a 404 must raise")
+        except urllib.error.HTTPError:
+            check(calls["n"] == 1, f"a 4xx must not be retried (calls={calls['n']})")
+    finally:
+        blp.urllib.request.urlopen, blp.FETCH_BACKOFF_S = real_urlopen, real_backoff
+
+    # --strict: one failing source => nothing written, exit 3, existing file intact.
+    good = [f"{a}.{b}.0.0/24" for a in (8, 9) for b in range(80)]  # 160 public /24s
+    def fake_load(spec):
+        if spec == "bad":
+            raise OSError("reset")
+        return [blp.SourceResult(name=spec, kind="txt", origin="x", prefixes=set(good))]
+    real_load, real_sources, real_argv = blp.load_source, blp.SOURCES, sys.argv
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "bypass.conf")
+        with open(out, "w") as fh:
+            fh.write("# last-good\n")
+        blp.load_source, blp.SOURCES = fake_load, ["ok", "bad"]
+        try:
+            sys.argv = ["build_bypass_list.py", "--strict", out]
+            rc = blp.main()
+            with open(out) as fh:
+                kept = fh.read() == "# last-good\n"
+            check(rc == 3 and kept, f"--strict with a failed source: rc={rc}, file kept={kept}")
+            sys.argv = ["build_bypass_list.py", out]
+            rc = blp.main()
+            check(rc == 1 and blp.count_existing_prefixes(out) == len(good),
+                  f"non-strict with a failed source writes the rest (rc={rc})")
+        finally:
+            blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
+
+
 def main() -> int:
     for fn in (test_normalize_prefix, test_thresholds, test_oneline,
-               test_render_no_injection, test_committed_file):
+               test_render_no_injection, test_walk_for_prefixes, test_retry_and_strict,
+               test_committed_file):
         fn()
     if _failures:
         print(f"\nbypass_list_test: {len(_failures)} FAILURE(S)")

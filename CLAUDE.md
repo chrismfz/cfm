@@ -769,8 +769,9 @@ make sync       # rsyncs today's .deb/.rpm (+ checksums) to the remote repo
 objects — needs `clang` + `libbpf-dev` on the build host. `bypass-list` runs
 first: it re-fetches `configs/challenge_waf_bypass.conf` (crawler + CDN ranges:
 Google, Bing, QUIC.cloud, ...) with `scripts/build_bypass_list.py` so every
-package ships fresh ranges. The generator is fail-safe (a refused or partial
-fetch keeps the last-good file and only warns); the offline validator
+package ships fresh ranges. The generator is fail-safe and runs `--strict`
+there (feeds are retried; if one still fails, or the result is out of bounds,
+the last-good file ships and it only warns — never a partial list); the offline validator
 (`bypass_list_test.py`, what `check_bypass_list.sh` runs in CI) failing does
 stop the release. It needs Python >= 3.8
 (the newest `python3.x` on PATH is used; EL8's `python3` is 3.6).

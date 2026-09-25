@@ -24,9 +24,18 @@ back-filled here — see the git/PR history for that period.
     hand; the shipped copy dated from 2026-03-27. A new `make bypass-list`
     target re-fetches it, runs first in `make release`, and the release commit
     now carries it next to `CHANGELOG.md`. The first refresh adds ~300 ranges.
-  - A failed or suspicious fetch never blocks a release: the generator keeps
-    the last-good file and the target only warns. The offline validator still
-    has to pass. `BYPASS_REFRESH=0` skips the fetch on an offline build host.
+  - A failed or suspicious fetch never blocks a release: each feed is retried,
+    and if one still fails the release keeps the last-good file instead of
+    writing a partial one (a single DuckDuckGo connection reset would otherwise
+    have shipped a list without its 486 DuckDuckBot ranges). The offline
+    validator still has to pass. `BYPASS_REFRESH=0` skips the fetch on an
+    offline build host.
+
+### Fixed
+- **Skroutz's crawler ranges were never in the bypass list.** Its feed lists
+  plain strings under `ipv4`/`ipv6`, a shape the generator skipped, so it
+  contributed 0 prefixes on every run and Skroutz's crawler was challenged
+  like any client. It now contributes its 8 ranges.
 
 ### Fixed
 - **TLS fingerprint: a request relayed by Cloudflare no longer carries
