@@ -936,8 +936,9 @@ if command -v flock >/dev/null 2>&1; then
   holder=$!
   i=0; while [ ! -e "$lk.held" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
   [ -e "$lk.held" ] || { echo "FAIL: lock holder never took the lock" >&2; kill "$holder" 2>/dev/null; exit 1; }
-  if sh -c '. "$1"; acquire_deploy_lock "$2" 1' sh "$tmp/functions.sh" "$lk"; then
-    echo "FAIL: the lock must not be taken while another run holds it" >&2; kill "$holder" 2>/dev/null; exit 1
+  rc=0; sh -c '. "$1"; acquire_deploy_lock "$2" 1' sh "$tmp/functions.sh" "$lk" || rc=$?
+  if [ "$rc" != 1 ]; then
+    echo "FAIL: the lock must not be taken while another run holds it (rc=$rc, want 1)" >&2; kill "$holder" 2>/dev/null; exit 1
   fi
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
   sh -c '. "$1"; acquire_deploy_lock "$2" 1' sh "$tmp/functions.sh" "$lk" \
@@ -947,11 +948,35 @@ fi
 # 27. A lock file that cannot be opened: carry on without the lock. exec is a
 #     special builtin, so a bare failed "exec 9>" would exit dash right there.
 if command -v flock >/dev/null 2>&1; then
-  out=$(sh -c '. "$1"; acquire_deploy_lock "$2" 1; echo still-running' sh "$tmp/functions.sh" "$tmp/functions.sh/no.lock" 2>&1) || true
+  out=$(sh -c '. "$1"; acquire_deploy_lock "$2" 1; echo "still-running rc=$?"' sh "$tmp/functions.sh" "$tmp/functions.sh/no.lock" 2>&1) || true
   case "$out" in
-    *still-running*) ;;
+    *"still-running rc=2"*) ;;
     *) echo "FAIL: an unopenable lock file must not end the run: $out" >&2; exit 1 ;;
   esac
 fi
+
+# 28. The default lock is in a root-only dir, never world-writable /run/lock
+#     (any user could hold it to block every upgrade, or plant a symlink).
+rg -q '^CFM_DEPLOY_LOCK=\$\{CFM_DEPLOY_LOCK:-/run/cfm-proxy-config-deploy\.lock\}$' scripts/package-proxy-config-deploy.sh \
+  || { echo "FAIL: the default deploy lock must be /run/cfm-proxy-config-deploy.lock" >&2; exit 1; }
+
+# 29. A rollback puts back the very file (same inode, so hard links, xattrs
+#     and the SELinux label survive), not a copy of it.
+pkg="$tmp/pkg-inode"; live="$tmp/live-inode"
+mk_pkg "$pkg" "$live"; seed_live "$live"; ln "$live/trusted_proxies.conf" "$tmp/inode-other-link"
+ino=$(stat -c %i "$live/trusted_proxies.conf"); before=$(snapshot "$live")
+FAKE_MV_FAIL=/nginx.conf FAKE_MV_ONCE="$tmp/mv-once-29" run_or "$pkg" "$live" >/dev/null
+assert_untouched "$live" "$before" "rollback (inode case)"
+[ "$(stat -c %i "$live/trusted_proxies.conf")" = "$ino" ] && [ "$(stat -c %h "$live/trusted_proxies.conf")" = 2 ] \
+  || { echo "FAIL: a rollback must restore the original file (inode $ino, 2 links), not a copy" >&2; stat "$live/trusted_proxies.conf" >&2; exit 1; }
+
+# 30. A live dir whose path has a sed-special & still deploys (the stage path
+#     is the sed replacement). (A space can't work either way: nginx splits an
+#     unquoted include on it.)
+pkg="$tmp/pkg-amp"; live="$tmp/live&amp"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+out=$(run_or "$pkg" "$live")
+cmp -s "$live/trusted_proxies.conf" "$pkg/trusted_proxies.conf" && cmp -s "$live/nginx.conf" "$pkg/openresty.conf" \
+  || { echo "FAIL: a live dir with & in its path must deploy" >&2; printf '%s\n' "$out" >&2; exit 1; }
 
 echo "OK: package proxy deploy helper tests only the main engine configs, with the new sidecars staged; a failed run leaves the live dir untouched"

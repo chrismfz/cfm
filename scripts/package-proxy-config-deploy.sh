@@ -232,13 +232,14 @@ stage_main_config() {
     smc_live=$3
 
     smc_live_re=$(printf '%s\n' "$smc_live" | sed 's/[][\.*^$|]/\\&/g')
-    smc_sed=""
+    smc_stage_rep=$(printf '%s\n' "$smc_stage" | sed 's/[\&|]/\\&/g')
+    # One -e per sidecar, as separate arguments (a path with a space stays whole).
+    set --
     for smc_name in $CFM_SIDECARS; do
         smc_name_re=$(printf '%s\n' "$smc_name" | sed 's/[.]/\\./g')
-        smc_sed="$smc_sed -e s|$smc_live_re/$smc_name_re;|$smc_stage/$smc_name;|g"
+        set -- "$@" -e "s|$smc_live_re/$smc_name_re;|$smc_stage_rep/$smc_name;|g"
     done
-    # shellcheck disable=SC2086 # word-split on purpose: one -e per sidecar
-    if ! sed $smc_sed "$smc_src" > "$smc_stage/main.conf"; then
+    if ! sed "$@" "$smc_src" > "$smc_stage/main.conf"; then
         echo "WARNING: CFM proxy config: failed to stage $smc_src"
         return 1
     fi
@@ -314,7 +315,11 @@ commit_files() {
             return 1
         fi
         if [ -e "$cf_live/$cf_name" ] || [ -L "$cf_live/$cf_name" ]; then
-            cp -pP "$cf_live/$cf_name" "$cf_live/.$cf_name.cfm-old.$$" || { commit_cleanup; return 1; }
+            # A hard link, not a copy: a rollback then puts back the very
+            # file (inode, links, xattrs/SELinux label), not a lookalike.
+            ln -P "$cf_live/$cf_name" "$cf_live/.$cf_name.cfm-old.$$" 2>/dev/null \
+                || cp -pP "$cf_live/$cf_name" "$cf_live/.$cf_name.cfm-old.$$" \
+                || { commit_cleanup; return 1; }
         else
             : > "$cf_live/.$cf_name.cfm-absent.$$" || { commit_cleanup; return 1; }
         fi
@@ -429,14 +434,18 @@ cleanup_proxy_deploy() {
 # acquire_deploy_lock LOCKFILE SECONDS: serialise runs of this helper (the
 # postinst and, say, a manual run): the stale-leftover sweep and the commit
 # of one run must never overlap another's. Without flock, carry on as before.
+# Returns 1 if another run held it for SECONDS, 2 if it could not be opened
+# (the caller warns and carries on unserialised). The lock lives in a
+# root-only dir (/run), never in world-writable /run/lock, where any user
+# could hold it to block every upgrade's deploy, or plant a symlink.
 acquire_deploy_lock() {
     command -v flock >/dev/null 2>&1 || return 0
     mkdir -p "$(dirname "$1")" 2>/dev/null
     # exec is a special builtin: a failed redirection on it exits dash
     # outright (no "|| return"), so first check the file can be opened.
-    ( : >>"$1" ) 2>/dev/null || return 0
-    exec 9>>"$1" || return 0
-    flock -w "$2" 9
+    ( : >>"$1" ) 2>/dev/null || return 2
+    exec 9>>"$1" || return 2
+    flock -w "$2" 9 || return 1
 }
 
 # Exit trap: a second signal (another Ctrl-C) must not cut the rollback short.
@@ -723,10 +732,17 @@ validate_logrotate_config() {
 }
 
 deploy_logrotate_config
-if ! acquire_deploy_lock "${CFM_DEPLOY_LOCK:-/run/lock/cfm-proxy-config-deploy.lock}" 300; then
-    echo "WARNING: CFM proxy config: another run of this helper holds the lock for 5 minutes; not deploying edge configs this time"
-    exit 0
-fi
+CFM_DEPLOY_LOCK=${CFM_DEPLOY_LOCK:-/run/cfm-proxy-config-deploy.lock}
+acquire_deploy_lock "$CFM_DEPLOY_LOCK" 300
+case $? in
+    1)
+        echo "WARNING: CFM proxy config: another run of this helper has held $CFM_DEPLOY_LOCK for 5 minutes; not deploying edge configs this time"
+        exit 0
+        ;;
+    2)
+        echo "WARNING: CFM proxy config: cannot open the lock $CFM_DEPLOY_LOCK; carrying on without it"
+        ;;
+esac
 
 if ! ensure_fallback_cert_if_missing; then
     echo "WARNING: CFM proxy config: failed to create fallback self-signed certs; config tests may fail"

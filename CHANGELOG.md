@@ -59,7 +59,15 @@ back-filled here — see the git/PR history for that period.
   it was. A successful one gives the same files, modes and owners as before.
   In the rare case that putting a sidecar back fails too, the upgrade says so
   and names the file holding the previous copy (fix it before reloading the
-  edge).
+  edge). The upgrade now also deploys nothing, with a warning, when:
+  - the engine has no `-T` option;
+  - `-T` shows the test read a live sidecar rather than the new one (an
+    include form the helper doesn't redirect);
+  - another run of the helper holds its lock
+    (`/run/cfm-proxy-config-deploy.lock`) for 5 minutes.
+  As before, a packaged main config that fails the test leaves the old one
+  live, and with it the old `trusted_proxies.conf` and bypass ranges, until
+  the test passes.
 - **Skroutz's AWS crawler IPs were missing from the bypass list.** Its own
   network was covered through its ASN (AS202042), but its published feed lists
   plain strings under `ipv4`/`ipv6`, a shape the generator skipped. The feed
