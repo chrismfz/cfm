@@ -57,6 +57,9 @@ back-filled here — see the git/PR history for that period.
   renamed in. If a rename fails, or the run is interrupted during them, the
   sidecars already swapped are put back. A failed run leaves the live dir as
   it was. A successful one gives the same files, modes and owners as before.
+  In the rare case that putting a sidecar back fails too, the upgrade says so
+  and names the file holding the previous copy (fix it before reloading the
+  edge).
 - **Skroutz's AWS crawler IPs were missing from the bypass list.** Its own
   network was covered through its ASN (AS202042), but its published feed lists
   plain strings under `ipv4`/`ipv6`, a shape the generator skipped. The feed
