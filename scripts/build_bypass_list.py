@@ -96,6 +96,18 @@ SOURCES = [
     "json:https://duckduckgo.com/duckduckbot.json",
     "json:https://openai.com/gptbot.json",
     "json:https://openai.com/searchbot.json",
+    # QUIC.cloud stays, on purpose (decided 2026-09-26, re-check before removing).
+    # Its nodes fetch sites that use the LiteSpeed Cache plugin, as `qcbot/1.0
+    # (+http://quic.cloud/bot.html)`, for page optimization (critical CSS etc.):
+    # static CSS/JS/images only, measured on orion (kavoukistools, myhappykids,
+    # neon, thegreenoffice). Removed, a site under a vhost-wide challenge would
+    # serve qcbot the challenge page and its optimization would silently fail.
+    # This IP list is the only reliable identity for qcbot: the nodes are rented
+    # Hetzner/OVH servers with generic PTRs (no FCrDNS-verifiable name) and anyone
+    # can send the UA, so an ua=/asn= exclude rule would not be safe. It fetches
+    # its own customers' sites, not URLs anyone chooses (rule below). Do NOT add
+    # QUIC.cloud to trusted_proxies.conf: it passes a client-supplied
+    # CF-Connecting-IP through, so its visitors keep the QUIC.cloud node's IP.
     "txt:https://www.quic.cloud/ips?ln",
     "json:https://developer.skroutz.gr/ip_ranges.json",
     "json:https://search.developer.apple.com/applebot.json",  # Applebot (Siri / Spotlight crawler)
