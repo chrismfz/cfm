@@ -38,10 +38,11 @@ back-filled here — see the git/PR history for that period.
   bucket** next to 10 s and 30 s (the edge already had it).
 
 ### Fixed
-- **Skroutz's crawler ranges were never in the bypass list.** Its feed lists
-  plain strings under `ipv4`/`ipv6`, a shape the generator skipped, so it
-  contributed 0 prefixes on every run and Skroutz's crawler was challenged
-  like any client. It now contributes its 8 ranges.
+- **Skroutz's AWS crawler IPs were missing from the bypass list.** Its own
+  network was covered through its ASN (AS202042), but its published feed lists
+  plain strings under `ipv4`/`ipv6`, a shape the generator skipped. The feed
+  contributed 0 prefixes on every run, so the 6 AWS addresses it lists (EU
+  regions) were challenged like any client. They are now in the list.
 - **TLS fingerprint: a request relayed by Cloudflare no longer carries
   Cloudflare's handshake as the client's fingerprint.**
   - On a vhost behind Cloudflare the edge sees Cloudflare's TLS, not the
