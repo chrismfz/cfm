@@ -17,6 +17,30 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **WAF virtual patch for the Elementor 4.3.0 / 4.3.1 CSRF (rule 10018,
+  fixed upstream in 4.3.2).**
+  - The bug, read from the 4.3.1 → 4.3.2 plugin diff: Elementor's events proxy
+    switched off WordPress's REST nonce check whenever the URL merely
+    *contained* `elementor/v1/events/`. So `/wp-json/wp/v2/users/1?x=elementor/v1/events/`
+    (or any other REST call) ran without a nonce. A logged-in editor or admin
+    who opened a hostile page could be made to act on their own site with
+    their permissions.
+  - The edge now returns 403 when that marker is in the URL but the REST
+    route WordPress actually resolves is not Elementor's events proxy. That is
+    the same condition 4.3.2 checks. It covers every method: a cross-site
+    top-level GET with `?_method=POST` is the likely carrier. It protects
+    sites that have not upgraded yet, and it is harmless on patched or
+    non-Elementor sites. Elementor's own proxy calls are not affected
+    (pretty, subdirectory, `/index.php/` and `?rest_route=` forms).
+  - No nft ban and no alert (`RULE_10018 = 0` by default, in code): the
+    request comes from the *victim's* browser, so a ban would lock the
+    customer's own admin out. Hits are logged in `cfm.waf.log` as
+    `WAF_CVE:ELEMENTOR_4_3_2:ELEMENTOR:<URI_MARKER|ROUTE_OVERRIDE|BODY_UNSEEN>`.
+    Setting `RULE_10018 = 1` in `[waf_security]` arms it anyway.
+  - Still upgrade to Elementor 4.3.2. The rule is a safety net, not a
+    replacement for the fix.
+
 ### Fixed
 - **TLS fingerprint: a request relayed by Cloudflare no longer carries
   Cloudflare's handshake as the client's fingerprint.**

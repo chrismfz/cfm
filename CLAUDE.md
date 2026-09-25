@@ -452,7 +452,11 @@ points:
   nft-ban *and* alert on Slack/mail — an un-armed family is dropped by `wafsec`
   before the sink, so `CVE = 0` would notify nothing. The family is
   heterogeneous (many CVEs, varying FP confidence), so a **lower-confidence CVE
-  rule ships with a per-rule `RULE_<id> = 0`** (hold the rule, not the family);
+  rule ships with a per-rule `RULE_<id> = 0`** (hold the rule, not the family —
+  in code, `heldAutoblockRules`, when every node must get the hold: a reference
+  `detectors.conf` line never reaches a node whose live config predates it; rule
+  10018, the Elementor 4.3.1 CSRF, is held there because its source IP is the
+  victim, and like 101/103 it runs after every armed block rule);
   `DRY_RUN = 1` gives a watch-first burn-in. `TestWAFSecurityFamilyCoverage`
   asserts `WAF_CVE` defaults to `1`. (As of 2026-07-18 `WAF_WEBSHELL` is also
   armed by default; exempt a benign `/c99.php` scanner with `ALLOW_UA_CONTAINS`/

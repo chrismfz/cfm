@@ -67,6 +67,21 @@ var heldAutoblockFamilies = map[string]struct{}{
 	"WAF_TRAVERSAL": {}, // rules 101 (block since 2026-09-05) + 103 (2026-09-22); held for burn-in (~2 300 scanner IPs/week)
 }
 
+// heldAutoblockRules holds single rule ids inside an ARMED family: the code
+// default of a per-rule `RULE_<id>` override, so a node whose detectors.conf
+// predates the rule does not inherit the family's arming. The operator's own
+// `RULE_<id> = N` still wins. Use it when a block-tier rule's hit does not
+// identify an attacker to ban.
+//
+// 10018 (Elementor 4.3.0/4.3.1 REST nonce bypass, WAF_CVE): the request is a
+// CSRF, so its source IP is the VICTIM — the site's own logged-in editor or
+// admin, whose browser was steered cross-site. The edge 403 already defeats it;
+// a 6h ban would only lock that customer out of every site on the node. The
+// hit stays visible in cfm.waf.log / waf_rule_detail.
+var heldAutoblockRules = map[string]int{
+	"10018": 0,
+}
+
 func wafSecurityFamilies(kv KV) map[string]int {
 	families := map[string]int{}
 	for _, fam := range webdetector.WAFReasonFamilies() {
@@ -81,6 +96,29 @@ func wafSecurityFamilies(kv KV) map[string]int {
 		families[fam] = kvInt(kv, key, def)
 	}
 	return families
+}
+
+// wafSecurityRuleOverrides builds the per-rule-id thresholds: the code holds in
+// heldAutoblockRules, then any RULE_<id> = N key (the parser keeps arbitrary
+// keys, uppercased), which wins over both the hold and the family default.
+func wafSecurityRuleOverrides(kv KV) map[string]int {
+	overrides := map[string]int{}
+	for id, n := range heldAutoblockRules {
+		overrides[id] = n
+	}
+	for k, v := range kv {
+		if !strings.HasPrefix(k, "RULE_") {
+			continue
+		}
+		id := strings.TrimSpace(strings.TrimPrefix(k, "RULE_"))
+		if id == "" {
+			continue
+		}
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			overrides[id] = n
+		}
+	}
+	return overrides
 }
 
 // wafSecurityDefaultsTemplate is the [waf_security] block a fresh
@@ -119,21 +157,7 @@ func init() {
 
 		families := wafSecurityFamilies(kv)
 
-		// Per-rule-id overrides: any RULE_<id> = N key (parser keeps arbitrary
-		// keys, uppercased) wins over the family default for that rule id.
-		overrides := map[string]int{}
-		for k, v := range kv {
-			if !strings.HasPrefix(k, "RULE_") {
-				continue
-			}
-			id := strings.TrimSpace(strings.TrimPrefix(k, "RULE_"))
-			if id == "" {
-				continue
-			}
-			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-				overrides[id] = n
-			}
-		}
+		overrides := wafSecurityRuleOverrides(kv)
 
 		cfg := wafsec.Config{
 			Every:           kvDur(kv, "EVERY", defEvery),

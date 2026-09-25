@@ -3379,6 +3379,134 @@ function _M.detect_cve_gravity_smtp(uri, args, cookie)
   return "MOCK_DATA"
 end
 
+-- [CVE] Elementor 4.3.0 / 4.3.1 REST nonce bypass → CSRF (fixed in 4.3.2,
+-- vendor advisory 2026-09-25; no CVE id assigned yet). Rule 10018.
+--
+-- Source: the vendor diff, from the wordpress.org 4.3.1 and 4.3.2 ZIPs —
+-- core/common/modules/events-manager/rest-api/events-proxy-rest-api.php. The
+-- Mixpanel events proxy hooks `rest_authentication_errors` at priority 0 and
+-- returns `true` for "its own routes", which skips core's cookie-auth nonce
+-- check (rest_cookie_check_errors) while leaving the cookie user logged in.
+-- 4.3.1 decided "own route" with
+--     strpos( $_SERVER['REQUEST_URI'], 'elementor/v1/events/' ) !== false
+-- i.e. the marker ANYWHERE in the raw request target, so a request to any other
+-- REST route (`/wp-json/wp/v2/users?x=elementor/v1/events/`) ran with no nonce:
+-- a logged-in visitor's browser can be driven cross-site to act with their
+-- capabilities. 4.3.2 checks the resolved route instead:
+--     0 === strpos( $wp->query_vars['rest_route'], '/elementor/v1/events/' )
+--
+-- This mirrors that fix at the edge. Hit = the literal marker is in the raw
+-- request target (exactly what strpos saw — case-sensitive, undecoded; an
+-- encoded or case-changed marker never tripped 4.3.1) AND the route WordPress
+-- resolves is not the events proxy. WordPress takes `rest_route` from $_POST,
+-- then $_GET, then the permalink rewrite of the path (class-wp.php), so:
+--   * any `rest_route` in the query string or a form POST body must name the
+--     events route (Elementor's own plain-permalink call does), else
+--     ROUTE_OVERRIDE — that includes an override riding on a genuine
+--     `/wp-json/elementor/v1/events/...` path;
+--   * with no `rest_route` param the path is the route: the marker must sit
+--     right after the FIRST `/wp-json` segment (root, subdir, multisite and
+--     /index.php/ installs), or after the path's only leading segment (a root
+--     install with a custom rest_url_prefix), else URI_MARKER;
+--   * a form POST whose body the WAF did not see whole (past waf_body_max_len,
+--     or not read) could hide an override past the window: BODY_UNSEEN.
+-- Key matching copies PHP's variable-name mangling (`.`, space and `[` become
+-- `_`, NUL ends the name), over-inclusively and case-insensitively, and `;` is
+-- also a pair separator (arg_separator.input may include it): an ambiguous key
+-- is treated as an override. All methods — core honours `?_method=POST` and
+-- X-HTTP-Method-Override, and WordPress cookies are SameSite=Lax by default, so
+-- a top-level cross-site GET is the likeliest carrier.
+--
+-- Not gated on the logged-in cookie: without one the request is inert (nothing
+-- to borrow), but it is also never legitimate. Residual FP: a non-REST URL that
+-- quotes an events-proxy URL in a parameter; a subdirectory install with a
+-- custom REST prefix (the editor's Mixpanel telemetry — not the editor — 403s).
+-- `raw_uri` is nil for the panel gate (no WordPress there), which keeps this
+-- rule inert on :2083/:2087/:2096.
+local ELEMENTOR_EVENTS_MARKER = "elementor/v1/events/"
+local ELEMENTOR_EVENTS_ROUTE  = "/elementor/v1/events/"
+
+-- True when a raw (still encoded) request key registers in PHP as something
+-- WordPress could read as `rest_route`, and whether it is an array/odd key.
+local function _el_rest_route_key(k)
+  k = lower(_form_unescape(k)):gsub("%z.*$", ""):gsub("^%s+", "")
+  if k:gsub("[%.%s%[]", "_"):sub(1, 10) ~= "rest_route" then return false end
+  return true, k:find("[", 1, true) ~= nil or #k ~= 10
+end
+
+-- Scans form-encoded pairs; returns seen (a rest_route key present) and bad
+-- (one of them does not name the events route exactly as PHP decodes it).
+local function _el_scan_form(s, seen, bad)
+  for part in s:gmatch("[^&;]+") do
+    local k, v = part:match("^([^=]*)=(.*)$")
+    if not k then k, v = part, "" end
+    local rr, odd = _el_rest_route_key(k)
+    if rr then
+      seen = true
+      local val = _form_unescape(v)
+      if odd or val:sub(1, #ELEMENTOR_EVENTS_ROUTE) ~= ELEMENTOR_EVENTS_ROUTE then bad = true end
+    end
+  end
+  return seen, bad
+end
+
+function _M.detect_cve_elementor_events_nonce_bypass(method, body, headers, raw_uri)
+  if not raw_uri or not raw_uri:find(ELEMENTOR_EVENTS_MARKER, 1, true) then return nil end
+
+  local q = raw_uri:find("?", 1, true)
+  local path  = q and raw_uri:sub(1, q - 1) or raw_uri
+  local query = q and raw_uri:sub(q + 1) or ""
+
+  local seen, bad = _el_scan_form(query, false, false)
+
+  -- $_POST exists only for a POST with a form body; nothing else feeds rest_route.
+  local unseen = false
+  if method == "post" then
+    local ct = lower(header_string(headers and (headers["Content-Type"] or headers["content-type"])) or "")
+    local b = body or ""
+    if has(ct, "application/x-www-form-urlencoded") then
+      seen, bad = _el_scan_form(b, seen, bad)
+    elseif has(ct, "multipart/form-data") then
+      -- Every part's field name (a `name=`, never `filename=`), quoted or bare;
+      -- the value is the first line after the part headers.
+      local lb, pos = lower(b), 1
+      while true do
+        local _, e = lb:find("[^%w_]name%s*=%s*", pos)
+        if not e then break end
+        pos = e + 1
+        local name = b:match('^"([^"\r\n]*)', pos) or b:match("^'([^'\r\n]*)", pos)
+                     or b:match("^([^;%s]*)", pos)
+        local rr, odd = _el_rest_route_key(name or "")
+        if rr then
+          seen = true
+          local _, he = b:find("\r?\n\r?\n", pos)
+          local v = he and b:match("^[^\r\n]*", he + 1)
+          if odd or not v or v:sub(1, #ELEMENTOR_EVENTS_ROUTE) ~= ELEMENTOR_EVENTS_ROUTE then bad = true end
+        end
+      end
+    end
+    if has(ct, "application/x-www-form-urlencoded") or has(ct, "multipart/form-data") then
+      local cl = tonumber(header_string(headers and (headers["Content-Length"] or headers["content-length"])) or "")
+      unseen = (cl ~= nil and cl > #b) or (cl == nil and b == "")
+    end
+  end
+
+  if bad then return "ROUTE_OVERRIDE" end
+  if unseen then return "BODY_UNSEEN" end
+  if seen then return nil end -- the plain-permalink form of Elementor's own call
+
+  -- Pretty permalink: the route is the path after the first `/wp-json/`.
+  local p = path:find(ELEMENTOR_EVENTS_MARKER, 1, true)
+  if p and p > 1 and path:sub(p - 1, p - 1) == "/" then
+    local before = path:sub(1, p - 2)
+    if (before:sub(-8) == "/wp-json" and not before:find("/wp-json/", 1, true))
+       or before:find("^/[^/]+$") then
+      return nil
+    end
+  end
+  return "URI_MARKER"
+end
+
 -- [top-10c] HTTP request smuggling – verb embedded in args / body.
 -- Source: uusec http-request-smuggling.lua.
 -- Attackers embed a second HTTP request line inside a parameter value to inject

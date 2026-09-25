@@ -177,6 +177,11 @@ var wafRuleIDs = []WAFRule{
 	// 10017: CVE-2026-87902, WordPress core page-template traversal — a
 	// `pagename` query var (GET or POST) carrying a `..` segment. Armed.
 	{ID: 10017, Name: "rule_cve_wp_pagename_traversal", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	// 10018: Elementor 4.3.0/4.3.1 REST nonce bypass (CSRF, fixed in 4.3.2; no
+	// CVE id yet) — the `elementor/v1/events/` marker in the raw request target
+	// while the resolved REST route is something else. Edge block; autoblock
+	// held per rule (heldAutoblockRules), since the source IP is the victim's.
+	{ID: 10018, Name: "rule_cve_elementor_events_nonce_bypass", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

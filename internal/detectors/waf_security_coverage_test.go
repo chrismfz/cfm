@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -120,5 +121,43 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	}
 	if over["WAF_WEBSHELL"] != 3 {
 		t.Errorf("WEBSHELL=3 override not applied: got %d", over["WAF_WEBSHELL"])
+	}
+}
+
+// TestWAFSecurityHeldRules pins the per-rule autoblock holds: each held id is a
+// real block-tier rule of an ARMED family (otherwise the hold is meaningless),
+// a detectors.conf that never mentions it gets the hold, and the operator's own
+// RULE_<id> key still wins.
+func TestWAFSecurityHeldRules(t *testing.T) {
+	cov := wafSecurityFamilies(KV{})
+	for id, n := range heldAutoblockRules {
+		num, err := strconv.Atoi(id)
+		if err != nil {
+			t.Fatalf("held rule id %q is not numeric", id)
+		}
+		r, ok := webdetector.WAFRuleByID(num)
+		if !ok {
+			t.Errorf("held rule %s is not in the WAF registry — drop the hold", id)
+			continue
+		}
+		if r.DefaultMode != "block" {
+			t.Errorf("held rule %s defaults to %q, not block — it cannot autoblock, drop the hold", id, r.DefaultMode)
+		}
+		if cov[r.ReasonFamily] != 1 {
+			t.Errorf("held rule %s's family %s is not armed — hold the family instead", id, r.ReasonFamily)
+		}
+		if got := wafSecurityRuleOverrides(KV{})[id]; got != n {
+			t.Errorf("fresh config: rule %s override = %d, want the hold %d", id, got, n)
+		}
+	}
+	// 10018 (Elementor REST nonce bypass): a CSRF's source IP is the victim.
+	if n, held := heldAutoblockRules["10018"]; !held || n != 0 {
+		t.Errorf("rule 10018 must be held at 0 (CSRF source IP is the victim), got %d held=%v", n, held)
+	}
+	if got := wafSecurityRuleOverrides(KV{"RULE_10018": "1"})["10018"]; got != 1 {
+		t.Errorf("RULE_10018 = 1 must arm the held rule, got %d", got)
+	}
+	if got := wafSecurityRuleOverrides(KV{"RULE_437": "0"}); got["437"] != 0 || got["10018"] != 0 {
+		t.Errorf("an unrelated RULE_ key must keep the holds and add its own: %v", got)
 	}
 }

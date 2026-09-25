@@ -102,6 +102,17 @@ produce.
   for the high-confidence ones. This is the inverse of the old "family opt-in"
   stance: arm the family, hold the doubtful rules.
 
+- **Held in code, not only in config:** a per-rule `RULE_<id>` override in the
+  reference `detectors.conf` does not reach a node whose live config predates
+  the rule — it inherits the armed family. When a rule must be held on every
+  node, put its id in `heldAutoblockRules` (`waf_security_register.go`), the
+  code default of the per-rule overrides (the operator's own `RULE_<id>` still
+  wins; `TestWAFSecurityHeldRules` pins it). Rule 10018 is held there: its hits
+  come from CSRF *victims*. A held block-tier rule must also run **after every
+  armed block rule** in `cfm_waf.lua` — `record()` gives the headline (the only
+  hit pushed to autoblock) to the first block hit, so an early held rule would
+  strip an armed rule's ban from a request that trips both.
+
 - **Watch-first burn-in without real bans:** `DRY_RUN = 1` in `[waf_security]`
   still emits the Slack/mail alerts (`Extra["enforcement"]="dryrun"`) but skips
   the nft ban. Flip it off once the stats look clean.
@@ -155,7 +166,7 @@ entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
 (`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
 hosting mix changes.
 
-Sixteen implemented; the rest are WordPress/Joomla candidates awaiting a
+Seventeen implemented; the rest are WordPress/Joomla candidates awaiting a
 validated exact request shape:
 
 | Product / CVE | Status |
@@ -176,6 +187,7 @@ validated exact request shape:
 | SP Page Builder (Joomla, `CVE-2026-48908`) | ✅ **implemented** (rule 10014) — `com_sppagebuilder` + `task=asset.upload*` (uploadCustomIcon/uploadImage/uploadFont) unauth arbitrary upload→RCE ("ANTONKILL"). Runs before rules 401/414 for CVE attribution; keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content), reusing the hardened upload detectors. Body-budget caveat: a php entry past `waf_body_max_len` is ClamAV's backstop |
 | Elementor Pro Forms (`CVE-2026-32475`) | ✅ **implemented** (rule 10016) — Elementor Pro <4.2.2 File Upload field: `validation()` `return`s (vs `continue`) on an empty (`UPLOAD_ERR_NO_FILE`) first part, skipping the extension blocklist for a following `.php` part that `process_field()` still moves into public `wp-content/uploads/elementor/forms/`. POST `admin-ajax.php` `action=elementor_pro_forms_send_form` (nopriv) + a php-exec upload filename — the surviving file *extension* is the vuln (`process_field()` keeps `pathinfo($name, EXTENSION)`), so a content leg is intentionally omitted (it would mis-attribute benign php-text field pastes / non-PHP payloads; raw php content is already covered by the armed generic rule 402). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). The generic rule 401 already blocks the straightforward `.php` upload fleet-wide; this rule adds CVE attribution. Note: id **10015 is skipped** (the removed vBulletin rule below) |
 | WordPress **core** page-template traversal (`CVE-2026-87902`, GHSA-7hp8-65ch-5whp) | ✅ **implemented** (rule 10017, + rule 103) — WordPress 4.7.0–7.1.1 (fixed 7.1.2 and every branch back to 4.7.37): `get_page_template()` builds `page-{$pagename}.php` from the url-decoded `pagename` query var without the `..` check, so a readable local `.php` outside the theme is included (RCE with `pearcmd.php` when `register_argc_argv=On`; needs a top-level `page-*` theme dir — Twenty Twelve/Fourteen, Neve, Hestia, Sydney). Source: the WordPress advisory + Wordfence entry (operator-supplied; no public PoC at release). **10017** fires on a `pagename` value — query string, urlencoded or multipart POST (WP reads `$_POST` first), keys decoded, every duplicate checked — holding a `..` segment; a real pagename is a slug path, never one. Armed: 6h ban + `WAF/CVE-2026-87902` alert. The pretty-permalink route (the path itself becomes `pagename`) was **invisible** to the WAF: `ctx.uri` is `ngx.var.uri`, already decoded and dot-segment-resolved by nginx, while the origin gets the raw path. **Rule 103** (`rule_traversal_raw_path`, `WAF_TRAVERSAL`, block) closes that blind spot generically from `ctx.raw_uri` — named as traversal, not as this CVE, because it also catches every other raw-path sweep; the family's autoblock is held, so it is a 403 without an alert. Web edge only (the panel gate passes no `raw_uri`). |
+| Elementor 4.3.0 / 4.3.1 REST nonce bypass → CSRF (vendor advisory 2026-09-25, fixed 4.3.2; **no CVE id yet**) | ✅ **implemented** (rule 10018) — source: the wordpress.org 4.3.1/4.3.2 ZIP diff (`core/common/modules/events-manager/rest-api/events-proxy-rest-api.php`). The events proxy's `rest_authentication_errors` filter returned `true` (skipping core's cookie-auth nonce check) whenever the raw `REQUEST_URI` *contained* `elementor/v1/events/`; 4.3.2 checks the resolved `rest_route`. Fires when the literal marker is in the raw request target (`ctx.raw_uri`, so web edge only) but the resolved route — `$_POST`/`$_GET` `rest_route` (PHP name mangling copied), else the path after the first `/wp-json/` (or a root install's only leading segment) — is not `/elementor/v1/events/`: tags `URI_MARKER` / `ROUTE_OVERRIDE`, and `BODY_UNSEEN` for a form POST the WAF did not see whole. All methods (`?_method=` override + SameSite=Lax cookies make a top-level GET the likely carrier). Reason `WAF_CVE:ELEMENTOR_4_3_2:ELEMENTOR:<TAG>` → notifier falls back to `WAF/CVE`; rename the segment to `CVE_YYYY_NNNN` once an id is assigned. **Autoblock held in code** (`heldAutoblockRules`, `RULE_10018 = 0`): a CSRF request's source IP is the victim, so it runs after every armed block rule (like 101/103) to avoid shadowing their bans |
 | vBulletin (`CVE-2026-61511`) | ⛔ **block rule REMOVED** (was rule 10015) — see the "Removed" note below. Only a **logonly** technique-level phpfuck detector (rule 439, `WAF_BACKDOOR`) remains; there is no CVE-attributed block/ban for this vector. |
 | WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
 

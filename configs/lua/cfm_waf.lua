@@ -243,6 +243,7 @@ local CFG = {
   rule_cve_sppagebuilder_upload = "block", -- CVE-2026-48908: Joomla SP Page Builder (com_sppagebuilder) asset.upload* (uploadCustomIcon/uploadImage/uploadFont) — unauth arbitrary file upload->RCE ("ANTONKILL", actively exploited 2026-07). Runs before rules 401/414 for CVE attribution. Keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content); reuses the hardened upload detectors. Near-zero FP (a legit icon/image/font upload never carries PHP). Body-budget caveat: a php entry past waf_body_max_len is ClamAV's backstop.
   rule_cve_wp_pagename_traversal = "block", -- CVE-2026-87902 (GHSA-7hp8-65ch-5whp): WordPress core 4.7.0–7.1.1 unauth page-template path traversal. get_page_template() builds page-{$pagename}.php from the url-decoded `pagename` query var without the `..` check, so a readable local .php outside the theme gets included (RCE via pearcmd.php when register_argc_argv=On). Fires on a `pagename` value (query string, urlencoded or multipart POST — WP reads $_POST first) holding a `..` segment; a real pagename is a slug path and never does (near-zero FP). The pretty-permalink route (path -> pagename) is rule 103. Armed like every WAF_CVE block rule: 6h ban + WAF/CVE-2026-87902 alert.
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
+  rule_cve_elementor_events_nonce_bypass = "block", -- Elementor 4.3.0/4.3.1 REST nonce bypass -> CSRF (fixed 4.3.2, vendor advisory 2026-09-25, no CVE id yet). The events-proxy rest_authentication_errors filter skipped core's REST nonce check whenever the raw REQUEST_URI merely CONTAINED "elementor/v1/events/", so any other REST route with the marker in its query string ran nonce-less on a logged-in victim's cookies. Fires when that literal marker is in the raw request target but the route WordPress resolves ($_POST/$_GET rest_route, else the path after the first /wp-json/) is not /elementor/v1/events/ — exactly the condition 4.3.2 fixes. Near-zero FP: Elementor's own proxy calls always resolve to the route. Block, but autoblock HELD (RULE_10018 = 0 in code): a CSRF request comes from the VICTIM's browser, so a ban would lock the site's own admin out. Runs after every armed block rule so it never shadows their ban.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -647,6 +648,7 @@ local RULE_IDS = {
   -- vBulletin runMaths CVE-2026-61511 block rule — see WAF_CVE.md "Removed".
   rule_cve_elementor_pro_form_upload = 10016,
   rule_cve_wp_pagename_traversal = 10017,
+  rule_cve_elementor_events_nonce_bypass = 10018,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -759,8 +761,8 @@ function _M.check(ctx)
   local headers = ctx.headers or {}
   local body    = ctx.body    or ""
   local cookie  = ctx.cookie  or ""
-  -- The RAW $request_uri (undecoded, dot segments intact) — only rule 103
-  -- reads it. nil when the caller does not pass it (the panel gate).
+  -- The RAW $request_uri (undecoded, dot segments intact) — read by rules 103
+  -- and 10018 only. nil when the caller does not pass it (the panel gate).
   local raw_uri = ctx.raw_uri
   -- skip_rule_ids: optional set { [rule_id] = true } of IDs to suppress.
   -- Populated by cfm.lua from the per-vhost waf-excludes snapshot when the
@@ -2198,6 +2200,23 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_numeric_xor_obfuscation) then goto done end
+      end
+    end
+  end
+
+  -- ── Elementor 4.3.0/4.3.1 REST nonce bypass (rule 10018) — held, so late ──
+  -- Block-tier, but its autoblock is HELD per rule (waf_security_register.go:
+  -- the source IP of a CSRF is the victim's browser). Like the traversal steps
+  -- below it runs after every ARMED block-tier rule, so a request that also
+  -- carries an armed payload keeps that rule's headline, ban and alert. Cheap:
+  -- one plain find on the raw request target unless the marker is present.
+  do
+    local mode = rule_mode(CFG.rule_cve_elementor_events_nonce_bypass, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_elementor_events_nonce_bypass(m_lower, body, headers, raw_uri)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:ELEMENTOR_4_3_2:ELEMENTOR:" .. tag, ttl, mode, RULE_IDS.rule_cve_elementor_events_nonce_bypass) then goto done end
       end
     end
   end
