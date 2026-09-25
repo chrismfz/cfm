@@ -56,15 +56,16 @@ MAX_PREFIXES_PER_SOURCE = 10000  # a single feed emitting more than this is susp
 MAX_PREFIXES_TOTAL = 50000       # runaway-output backstop
 MIN_PREFIXES_TOTAL = 100         # sanity floor: a healthy run yields thousands
 MAX_SHRINK_FRACTION = 0.5        # abort if the new list is < 50% of the existing one
-# Abort if the covered ADDRESS SPACE grows by more than its own size (2x), plus
-# a small slack. The count caps can't see a poisoned feed that serves a few
-# hundred public /16s: +300 prefixes, but ~100x the space bypassing WAF +
-# challenge. The baseline leaves out the single largest existing prefix: one
-# prefix dominates each family (136.122.0.0/16 is over half the ~121k IPv4
-# addresses; Skroutz's 2a03:e40::/32 is ~99.998% of the IPv6 /64s), and a
-# baseline that counted it would let a poisoned feed add another prefix that
-# size unnoticed. A genuinely larger list (a new source) is a reviewed manual
-# run with --allow-growth.
+# Abort if the covered ADDRESS SPACE grows by more than the existing space
+# minus its single largest prefix (times factor - 1), plus a small slack.
+# The count caps can't see a poisoned feed that serves a few hundred public
+# /16s: +300 prefixes, but ~100x the space bypassing WAF + challenge. The
+# largest prefix is left out because one prefix dominates each family
+# (136.122.0.0/16 is over half the ~120k IPv4 addresses; Skroutz's
+# 2a03:e40::/32 is ~99.99998% of the IPv6 /64s): counting it would let a
+# poisoned feed add another prefix that size unnoticed. Overlaps are merged
+# first (address_space). A genuinely larger list (a new source) is a reviewed
+# manual run with --allow-growth.
 MAX_SPACE_GROWTH_FACTOR = 2.0
 SPACE_GROWTH_SLACK_V4 = 1 << 12          # addresses (a /20)
 SPACE_GROWTH_SLACK_V6 = 1 << 16          # /64s (a /48)
@@ -152,6 +153,7 @@ def _fetch(url: str, accept: str) -> str:
             transient = exc.code >= 500 or exc.code in RETRY_HTTP_4XX
             if not transient or attempt == FETCH_ATTEMPTS:
                 raise
+            exc.close()  # release the connection before sleeping
         except (urllib.error.URLError, OSError, http.client.HTTPException):
             # HTTPException covers IncompleteRead: a body cut short mid-transfer.
             if attempt == FETCH_ATTEMPTS:
@@ -326,11 +328,6 @@ def oneline(value: Any, maxlen: int = 200) -> str:
     return s[:maxlen]
 
 
-def count_existing_prefixes(path: str) -> int:
-    """Count ``<cidr> 1;`` data lines in an existing output file (0 if absent)."""
-    return len(existing_prefixes(path))
-
-
 def _space(net: ipaddress.IPv4Network | ipaddress.IPv6Network) -> int:
     """IPv4 addresses, or IPv6 /64s, covered by one network."""
     if net.version == 4:
@@ -484,9 +481,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Build challenge_waf_bypass.conf")
     p.add_argument("output", nargs="?", default=DEFAULT_OUTPUT, help="Output file path")
     p.add_argument("--strict", action="store_true",
-                   help="write nothing (exit 3, existing file kept) if ANY source failed or "
-                        "returned no prefixes; used by `make release` so a feed outage can't "
-                        "drop that feed's ranges")
+                   help="write nothing (exit 3, existing file kept) if ANY source failed, "
+                        "returned no prefixes, or (for a source of 10+ prefixes) shrank to "
+                        "under half its previous count; used by `make release` so a feed "
+                        "outage can't drop that feed's ranges")
     p.add_argument("--allow-growth", action="store_true",
                    help="skip the address-space growth guard (a reviewed manual run that adds a source)")
     args = p.parse_args()

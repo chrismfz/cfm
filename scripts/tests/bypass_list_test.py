@@ -23,6 +23,8 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO, "scripts"))
+# No scripts/__pycache__: the deb/rpm copy scripts/ into the package.
+sys.dont_write_bytecode = True
 
 import build_bypass_list as blp  # noqa: E402
 
@@ -114,6 +116,7 @@ def test_committed_file() -> None:
         return
     np = blp.normalize_prefix
     total = 0
+    cidrs: list[str] = []
     with open(CONF) as fh:
         for ln, line in enumerate(fh, 1):
             s = line.strip()
@@ -123,6 +126,7 @@ def test_committed_file() -> None:
             if not s.endswith(" 1;"):
                 continue
             cidr = s[:-3].strip()
+            cidrs.append(cidr)
             total += 1
             norm = np(cidr)
             check(norm is not None,
@@ -134,6 +138,10 @@ def test_committed_file() -> None:
           f"{CONF}: only {total} prefixes (< MIN_PREFIXES_TOTAL={blp.MIN_PREFIXES_TOTAL})")
     check(total <= blp.MAX_PREFIXES_TOTAL,
           f"{CONF}: {total} prefixes (> MAX_PREFIXES_TOTAL={blp.MAX_PREFIXES_TOTAL})")
+    # The growth guard reads the file with its own parser; it must see exactly
+    # what this validator saw.
+    check(blp.existing_prefixes(CONF) == cidrs,
+          "the growth guard's reader (existing_prefixes) disagrees with the validator's parse")
     print(f"  committed file: {total} prefixes, all bounded & canonical")
 
 
@@ -237,7 +245,7 @@ def test_retry_and_strict() -> None:
             check(rc == 3 and kept, f"--strict with a failed source: rc={rc}, file kept={kept}")
             sys.argv = ["build_bypass_list.py", out]
             rc = blp.main()
-            check(rc == 1 and blp.count_existing_prefixes(out) == len(good),
+            check(rc == 1 and len(blp.existing_prefixes(out)) == len(good),
                   f"non-strict with a failed source writes the rest (rc={rc})")
         finally:
             blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
@@ -351,13 +359,10 @@ def test_space_growth() -> None:
             check(rc == 2 and kept, f"poisoned run through main(): rc={rc}, file kept={kept}")
             sys.argv = ["build_bypass_list.py", "--strict", "--allow-growth", out]
             rc = blp.main()
-            check(rc == 0 and blp.count_existing_prefixes(out) == len(poisoned),
+            check(rc == 0 and len(blp.existing_prefixes(out)) == len(poisoned),
                   f"--allow-growth writes the larger list (rc={rc})")
         finally:
             blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
-    # The committed file must round-trip through the reader the guard uses.
-    check(len(blp.existing_prefixes(CONF)) == blp.count_existing_prefixes(CONF),
-          "existing_prefixes and count_existing_prefixes disagree on the committed file")
 
 
 def main() -> int:

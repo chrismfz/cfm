@@ -270,7 +270,7 @@ deb: build
 
 	@rsync -a --delete --exclude "lua/" "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
 	@rsync -a --delete "$(CONFIG_DIR)/lua/" "$(PKGROOT)/var/lib/cfm/lua/"
-	@rsync -a --delete "$(SCRIPTS_DIR)/" "$(PKGROOT)/usr/share/cfm/scripts/"
+	@rsync -a --delete --exclude "__pycache__/" "$(SCRIPTS_DIR)/" "$(PKGROOT)/usr/share/cfm/scripts/"
 	@rsync -a --delete "$(PLUGINS_DIR)/" "$(PKGROOT)/usr/share/cfm/plugins/"
 	# executables
 	@chmod 0755 "$(PKGROOT)/DEBIAN/postinst" "$(PKGROOT)/DEBIAN/prerm" "$(PKGROOT)/DEBIAN/postrm" 2>/dev/null || true
@@ -316,7 +316,7 @@ stage-pkgroot: build
 	@rsync -a --delete --exclude "lua/" "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
 	@rsync -a --delete "$(CONFIG_DIR)/lua/" "$(PKGROOT)/var/lib/cfm/lua/"
 	@mkdir -p $(PKGROOT)/usr/share/cfm/scripts
-	@rsync -a --delete "$(SCRIPTS_DIR)/" "$(PKGROOT)/usr/share/cfm/scripts/"
+	@rsync -a --delete --exclude "__pycache__/" "$(SCRIPTS_DIR)/" "$(PKGROOT)/usr/share/cfm/scripts/"
 	@mkdir -p $(PKGROOT)/usr/share/cfm/plugins
 	@rsync -a --delete "$(PLUGINS_DIR)/" "$(PKGROOT)/usr/share/cfm/plugins/"
 
@@ -417,7 +417,7 @@ changelog:
 # (each feed is retried; if one still fails, NOTHING is written — a partial
 # list would silently drop that feed's ranges, e.g. every DuckDuckBot IP — and
 # the last-good file ships; exit 2 = refused as too small, too large, or an
-# address space that more than doubled — a poisoned feed — same), so
+# address-space jump past the growth guard — a poisoned feed — same), so
 # only a warning is printed. What DOES block is the offline validator
 # (bypass_list_test.py, what check_bypass_list.sh runs in CI) failing on the
 # file about to be packaged, or no Python >= 3.9 to run it (a guardrail that
@@ -446,27 +446,22 @@ bypass-list: ## Refresh challenge_waf_bypass.conf from the crawler/CDN feeds
 	  echo "⏭️  BYPASS_REFRESH=0 — packaging challenge_waf_bypass.conf as-is (not refreshed, not validated)"; \
 	  exit 0; \
 	fi; \
-	PY=""; \
-	for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 python3; do \
-	  if command -v "$$c" >/dev/null 2>&1 && "$$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then PY="$$c"; break; fi; \
-	done; \
-	if [ -z "$$PY" ]; then \
-	  echo "❌ no Python >= 3.9 on PATH — cannot refresh or validate challenge_waf_bypass.conf."; \
+	PY="$$(./scripts/tests/check_bypass_list.sh --which-python)" || { \
 	  echo "   Install one (EL8: dnf install python39), or run with BYPASS_REFRESH=0 to package it unchecked."; \
 	  exit 1; \
-	fi; \
+	}; \
 	echo "🌐 Refreshing challenge_waf_bypass.conf ($$PY)..."; \
 	TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout --foreground $(BYPASS_TIMEOUT)"; \
-	$$TO "$$PY" scripts/build_bypass_list.py --strict; rc=$$?; \
+	PYTHONDONTWRITEBYTECODE=1 $$TO "$$PY" scripts/build_bypass_list.py --strict; rc=$$?; \
 	case "$$rc" in \
 	  0) echo "✅ bypass list refreshed." ;; \
 	  1) echo "⚠️  bypass refresh: no feed answered (network?) or the generator crashed — keeping the last-good file." ;; \
-	  2) echo "⚠️  bypass refresh refused: too few/many prefixes, or the address space grew past the guard (poisoned feed? a reviewed manual run can pass --allow-growth) — keeping the last-good file." ;; \
+	  2) echo "⚠️  bypass refresh refused: too few/many prefixes, or the address space grew past the growth guard (poisoned feed? a reviewed manual run can pass --allow-growth) — keeping the last-good file." ;; \
 	  3) echo "⚠️  bypass refresh: a feed failed, came back empty or shrank by over half — keeping the last-good file, not a partial one (a reviewed manual run without --strict accepts a real drop)." ;; \
 	  124) echo "⚠️  bypass refresh timed out after $(BYPASS_TIMEOUT)s — keeping the last-good file." ;; \
 	  *) echo "⚠️  bypass refresh failed (exit $$rc) — keeping the last-good file." ;; \
 	esac; \
-	rm -f configs/.challenge_waf_bypass.*.tmp; \
+	rm -f configs/.challenge_waf_bypass.*.tmp; rm -rf scripts/__pycache__ scripts/tests/__pycache__; \
 	if [ "$$rc" != 0 ]; then \
 	  echo "   ⚠️  The shipped list is still the one $$(sed -n 's/^# Generated at: \(.\{10\}\).*/\1/p' configs/challenge_waf_bypass.conf | head -n1). If this repeats every release, fix the feed (scripts/build_bypass_list.py SOURCES)."; \
 	fi; \
@@ -489,7 +484,9 @@ release: bypass-list bpf deb rpm
 	if [ "$(BYPASS_REFRESH)" != "0" ]; then REL_FILES="$$REL_FILES configs/challenge_waf_bypass.conf"; fi; \
 	if git rev-parse --git-dir >/dev/null 2>&1 && [ -n "$$(git status --porcelain -- $$REL_FILES)" ]; then \
 	  echo "📝 Committing $$REL_FILES (only) for $(REL_DATE)..."; \
-	  if git commit -q -m "release: stamp $(REL_DATE) changelog + refresh bypass list" -- $$REL_FILES; then \
+	  MSG="changelog: stamp $(REL_DATE) release"; \
+	  if [ -n "$$(git status --porcelain -- configs/challenge_waf_bypass.conf)" ] && [ "$(BYPASS_REFRESH)" != "0" ]; then MSG="$$MSG + refresh bypass list"; fi; \
+	  if git commit -q -m "$$MSG" -- $$REL_FILES; then \
 	    branch="$$(git rev-parse --abbrev-ref HEAD)"; \
 	    if [ "$$branch" = "HEAD" ]; then \
 	      echo "⚠️  detached HEAD — $$REL_FILES committed locally, not pushed."; \

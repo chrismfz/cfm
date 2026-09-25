@@ -88,6 +88,8 @@ fi
 if [ -d "%{projectroot}/scripts" ]; then
   rm -rf "%{buildroot}%{_datadir}/cfm/scripts"
   cp -a "%{projectroot}/scripts" "%{buildroot}%{_datadir}/cfm/scripts"
+  # A Python bytecode cache in the source tree is a build-host artifact.
+  find "%{buildroot}%{_datadir}/cfm/scripts" -name __pycache__ -type d -prune -exec rm -rf {} +
 fi
 # canonicalize Lua runtime payload permissions in the package payload itself
 if [ -d "%{buildroot}/var/lib/cfm/lua" ]; then

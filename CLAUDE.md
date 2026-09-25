@@ -770,9 +770,10 @@ objects — needs `clang` + `libbpf-dev` on the build host. `bypass-list` runs
 first: it re-fetches `configs/challenge_waf_bypass.conf` (crawler + CDN ranges:
 Google, Bing, QUIC.cloud, ...) with `scripts/build_bypass_list.py` so every
 package ships fresh ranges. The generator is fail-safe and runs `--strict`
-there (feeds are retried; if one still fails, comes back empty or shrinks by
-over half, the result is out of bounds, or the covered address space grows by
-more than its own size — a poisoned feed — the last-good file ships and it
+there (feeds are retried; if one still fails, comes back empty or — a feed of
+10+ ranges — shrinks by over half, the result is out of bounds, or the covered
+address space grows by more than the existing space minus its largest range
+plus a /20 / /48 — a poisoned feed — the last-good file ships and it
 warns with that file's date: never a partial list; the fetch is capped by
 `BYPASS_TIMEOUT`, 300 s). The
 offline validator (`bypass_list_test.py`, what `check_bypass_list.sh` runs in
