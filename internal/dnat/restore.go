@@ -38,6 +38,7 @@ func RestoreOnStartup(ctx context.Context, scope DNATScope, backend firewall.Bac
 
 	deadline := time.Now().Add(waitTotal)
 	var lastReason string
+	first := true
 	for {
 		// Re-read intent each tick. The polling window is up to
 		// ~60s during which the operator can run `cfm dnat off` to
@@ -51,11 +52,15 @@ func RestoreOnStartup(ctx context.Context, scope DNATScope, backend firewall.Bac
 		}
 		on, _ := scopeStatus(scope, backend)
 		if on {
-			if scope == ScopeWeb {
+			// Only a chain the previous run left in place (on at the first
+			// check): one that came up while we waited was installed now, by
+			// the operator (`cfm dnat on --priority X`) or the failsafe.
+			if scope == ScopeWeb && first {
 				reapplyWebPriorityIfChanged(backend)
 			}
 			return
 		}
+		first = false
 		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		ok, reason := probeEdgeHealthy(probeCtx, scope, ports)
 		cancel()
@@ -80,6 +85,10 @@ func RestoreOnStartup(ctx context.Context, scope DNATScope, backend firewall.Bac
 	}
 }
 
+// minNATChainPriority: nft rejects a nat base chain at this priority or below
+// ("Chains of type "nat" must have a priority value above -200").
+const minNATChainPriority = -200
+
 // reapplyWebPriorityIfChanged re-installs a web DNAT chain that the previous
 // run left in place (the nft table outlives a daemon restart) when its hook
 // priority differs from cfm.conf's NFT_DNAT_PRIORITY. Without it, changing the
@@ -91,10 +100,6 @@ func RestoreOnStartup(ctx context.Context, scope DNATScope, backend firewall.Bac
 // applied cfm.conf: with no config (cfm.conf failed to parse) the backend
 // falls back to -99, and re-applying that would silently undo the operator's
 // choice. The chain's current ports are kept: only the priority changes.
-// minNATChainPriority: nft rejects a nat base chain at this priority or below
-// ("Chains of type "nat" must have a priority value above -200").
-const minNATChainPriority = -200
-
 func reapplyWebPriorityIfChanged(backend firewall.Backend) {
 	pr, ok := backend.(firewall.DNATPriorityReporter)
 	if !ok {
