@@ -17,6 +17,8 @@ validator on a single rule set (no drift — CLAUDE.md §5).
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
@@ -366,10 +368,20 @@ def test_space_growth() -> None:
 
 
 def main() -> int:
+    # The generator tests feed it bad feeds on purpose (a reset, an empty or
+    # shrunk feed, a poisoned one) and its refusals print ERROR lines. On a
+    # pass they are noise that reads like a broken release (`make release`
+    # runs this), so each test's output is kept only if that test failed.
     for fn in (test_normalize_prefix, test_thresholds, test_oneline,
                test_render_no_injection, test_walk_for_prefixes, test_retry_and_strict,
-               test_source_shrink, test_space_growth, test_committed_file):
-        fn()
+               test_source_shrink, test_space_growth):
+        before = len(_failures)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            fn()
+        if len(_failures) > before:
+            sys.stdout.write(buf.getvalue())
+    test_committed_file()
     if _failures:
         print(f"\nbypass_list_test: {len(_failures)} FAILURE(S)")
         return 1
