@@ -150,32 +150,13 @@ print_proxy_config_summary() {
     fi
 }
 
-install_file() {
-    if_src=$1
-    if_dst=$2
-
-    if [ ! -f "$if_src" ]; then
-        echo "WARNING: CFM proxy config: packaged file missing: $if_src"
-        return 1
-    fi
-
-    if_dst_dir=$(dirname "$if_dst")
-    if ! mkdir -p "$if_dst_dir"; then
-        echo "WARNING: CFM proxy config: failed to create directory: $if_dst_dir"
-        return 1
-    fi
-
-    if ! install -m 0644 -o root -g root "$if_src" "$if_dst"; then
-        echo "WARNING: CFM proxy config: failed to install $if_dst"
-        return 1
-    fi
-
-    return 0
-}
-
+# render_listener_config ENGINE DST [LIVE_DEST]: render the listener template
+# to DST. LIVE_DEST (default DST) is the install path written into its header,
+# so a staged copy renders byte-identical to the one that goes live.
 render_listener_config() {
     rlc_engine=$1
     rlc_dst=$2
+    rlc_live_dest=${3:-$2}
     rlc_template=$CFM_CONFIG_DIR/cfm-panel-listeners.conf.in
 
     if [ ! -f "$rlc_template" ]; then
@@ -192,7 +173,7 @@ render_listener_config() {
 
     if ! sed \
         -e "s|@ENGINE@|$rlc_engine|g" \
-        -e "s|@LISTENER_DEST@|$rlc_dst|g" \
+        -e "s|@LISTENER_DEST@|$rlc_live_dest|g" \
         "$rlc_template" > "$rlc_tmp"; then
         rm -f "$rlc_tmp"
         echo "WARNING: CFM proxy config: failed to render $rlc_dst"
@@ -209,57 +190,268 @@ render_listener_config() {
     return 0
 }
 
-prepare_sidecars() {
-    ps_engine=$1
-    ps_conf_dir=$2
+# The sidecars the main config includes from the engine's live config dir.
+CFM_SIDECARS="trusted_proxies.conf challenge_waf_bypass.conf cfm-panel-listeners.conf"
 
-    ps_sidecar_src=$CFM_CONFIG_DIR/trusted_proxies.conf
-    ps_sidecar_dst=$ps_conf_dir/trusted_proxies.conf
-    install_file "$ps_sidecar_src" "$ps_sidecar_dst" || return 1
+# The live dir is never changed until the engine has tested the NEW main config
+# with the NEW sidecars. They used to be written into it first, so a failed
+# test (or a failed main-config deploy) left untested sidecars live next to the
+# OLD main config, and the edge's next restart could fail on them.
+#
+# stage_sidecars ENGINE STAGE LIVE_DIR: build every new sidecar in STAGE.
+stage_sidecars() {
+    ss_engine=$1
+    ss_stage=$2
+    ss_live=$3
 
-    ps_sidecar_src=$CFM_CONFIG_DIR/challenge_waf_bypass.conf
-    ps_sidecar_dst=$ps_conf_dir/challenge_waf_bypass.conf
-    install_file "$ps_sidecar_src" "$ps_sidecar_dst" || return 1
-
-    ps_sidecar_dst=$ps_conf_dir/cfm-panel-listeners.conf
-    render_listener_config "$ps_engine" "$ps_sidecar_dst" || return 1
-
+    for ss_name in $CFM_SIDECARS; do
+        if [ "$ss_name" = cfm-panel-listeners.conf ]; then
+            # Rendered, not shipped; its header names the LIVE path so the
+            # staged copy is byte-identical to the one that goes live.
+            render_listener_config "$ss_engine" "$ss_stage/$ss_name" "$ss_live/$ss_name" || return 1
+            continue
+        fi
+        if [ ! -f "$CFM_CONFIG_DIR/$ss_name" ]; then
+            echo "WARNING: CFM proxy config: packaged file missing: $CFM_CONFIG_DIR/$ss_name"
+            return 1
+        fi
+        cp "$CFM_CONFIG_DIR/$ss_name" "$ss_stage/$ss_name" || return 1
+    done
     return 0
 }
 
-deploy_main_config() {
-    dmc_engine=$1
-    dmc_src=$2
-    dmc_dst=$3
+# stage_main_config SRC STAGE LIVE_DIR: copy the packaged main config to
+# STAGE/main.conf with each `include LIVE_DIR/<sidecar>;` pointed at STAGE, so
+# the engine test reads the new sidecars without them being live. Whether it
+# really did is checked afterwards from the engine's own list of the files it
+# read (tested_live_sidecars), not by parsing includes here: the engine
+# resolves globs, relative paths, comments and multi-line includes itself.
+stage_main_config() {
+    smc_src=$1
+    smc_stage=$2
+    smc_live=$3
 
-    if [ ! -f "$dmc_src" ]; then
-        echo "WARNING: CFM proxy config: packaged $dmc_engine config missing: $dmc_src"
+    smc_live_re=$(printf '%s\n' "$smc_live" | sed 's/[][\.*^$|]/\\&/g')
+    smc_stage_rep=$(printf '%s\n' "$smc_stage" | sed 's/[\&|]/\\&/g')
+    # One -e per sidecar, as separate arguments (a path with a space stays whole).
+    set --
+    for smc_name in $CFM_SIDECARS; do
+        smc_name_re=$(printf '%s\n' "$smc_name" | sed 's/[.]/\\./g')
+        set -- "$@" -e "s|$smc_live_re/$smc_name_re;|$smc_stage_rep/$smc_name;|g"
+    done
+    if ! sed "$@" "$smc_src" > "$smc_stage/main.conf"; then
+        echo "WARNING: CFM proxy config: failed to stage $smc_src"
+        return 1
+    fi
+    return 0
+}
+
+# tested_live_sidecars DUMP STAGE: from an engine's `-T` output, print every
+# file it read whose name is a sidecar's but which is not the staged copy
+# (a live or other copy the test read instead of the new one). Empty = the
+# test read only staged sidecars.
+tested_live_sidecars() {
+    sed -n 's/^# configuration file \(.*\):$/\1/p' "$1" | while IFS= read -r tls_path; do
+        for tls_name in $CFM_SIDECARS; do
+            [ "${tls_path##*/}" = "$tls_name" ] || continue
+            [ "$tls_path" = "$2/$tls_name" ] || printf '%s\n' "$tls_path"
+        done
+    done
+}
+
+# The tested files go live in one step, commit_files. Each is first written
+# next to its live one as .NAME.cfm-new.PID (and each live sidecar copied to
+# .NAME.cfm-old.PID, or marked .NAME.cfm-absent.PID); a failure there leaves
+# the live dir untouched. Then they are renamed in (sidecars, then the main
+# config: same directory, so each swap is atomic), and if a rename fails, or
+# the run is killed during them, the sidecars already renamed are put back.
+# The temp names start with a dot and don't end in .conf, so an
+# `include *.conf` glob never sees them.
+CFM_COMMIT_LIVE=""   # live sidecar dir of the commit in progress
+CFM_COMMIT_MAIN_TMP="" # its temp (.NAME.cfm-new.PID) next to it
+CFM_COMMIT_BACKUP="" # the .cfm-prepkg backup this commit made (removed on rollback)
+CFM_COMMITTING=0     # 1 while renames are under way (the trap rolls back)
+CFM_RESTORE_FAILED=0 # 1 if a rollback could not put a sidecar back
+CFM_KEEP_OLD=""      # sidecars whose .cfm-old copy cleanup must NOT remove
+
+commit_files() {
+    cf_stage=$1
+    cf_live=$2
+    cf_src=$3
+    cf_dst=$4
+
+    CFM_COMMIT_LIVE=$cf_live
+    cf_dst_dir=$(dirname "$cf_dst")
+    CFM_COMMIT_MAIN_TMP=$cf_dst_dir/.$(basename "$cf_dst").cfm-new.$$
+    CFM_RESTORE_FAILED=0
+    CFM_KEEP_OLD=""
+    if ! mkdir -p "$cf_live" "$cf_dst_dir"; then
+        echo "WARNING: CFM proxy config: failed to create $cf_live / $cf_dst_dir"
         return 1
     fi
 
-    dmc_dst_dir=$(dirname "$dmc_dst")
-    if ! mkdir -p "$dmc_dst_dir"; then
-        echo "WARNING: CFM proxy config: failed to create directory: $dmc_dst_dir"
+    # A .cfm-old left by an earlier run killed hard under the SAME PID may be
+    # the only good copy of that sidecar: check them all before creating
+    # anything, keep every one, and don't deploy.
+    cf_stale=""
+    for cf_name in $CFM_SIDECARS; do
+        if [ -e "$cf_live/.$cf_name.cfm-old.$$" ] || [ -L "$cf_live/.$cf_name.cfm-old.$$" ]; then
+            cf_stale="$cf_stale $cf_name"
+        fi
+    done
+    if [ -n "$cf_stale" ]; then
+        for cf_name in $cf_stale; do
+            echo "WARNING: CFM proxy config: $cf_live/.$cf_name.cfm-old.$$ already exists (from an interrupted earlier run?); check it, then remove it"
+        done
+        CFM_KEEP_OLD=$cf_stale   # cleanup must not remove any of them
+        commit_cleanup
         return 1
     fi
 
-    if [ -f "$dmc_dst" ]; then
-        dmc_backup=$dmc_dst.cfm-prepkg.$(date +%Y%m%d%H%M%S)
-        if cp -a "$dmc_dst" "$dmc_backup"; then
-            echo "CFM proxy config: backed up $dmc_dst to $dmc_backup"
+    for cf_name in $CFM_SIDECARS; do
+        if ! install -m 0644 -o root -g root "$cf_stage/$cf_name" "$cf_live/.$cf_name.cfm-new.$$"; then
+            echo "WARNING: CFM proxy config: failed to write $cf_live/.$cf_name.cfm-new.$$"
+            commit_cleanup
+            return 1
+        fi
+        if [ -e "$cf_live/$cf_name" ] || [ -L "$cf_live/$cf_name" ]; then
+            # A hard link, not a copy: a rollback then puts back the very
+            # file (inode, links, xattrs/SELinux label), not a lookalike.
+            ln -P "$cf_live/$cf_name" "$cf_live/.$cf_name.cfm-old.$$" 2>/dev/null \
+                || cp -pP "$cf_live/$cf_name" "$cf_live/.$cf_name.cfm-old.$$" \
+                || { commit_cleanup; return 1; }
         else
-            echo "WARNING: CFM proxy config: failed to back up $dmc_dst; leaving existing $(basename "$dmc_dst") unchanged"
+            : > "$cf_live/.$cf_name.cfm-absent.$$" || { commit_cleanup; return 1; }
+        fi
+    done
+    if ! install -m 0644 -o root -g root "$cf_src" "$CFM_COMMIT_MAIN_TMP"; then
+        echo "WARNING: CFM proxy config: failed to write the new config next to $cf_dst"
+        commit_cleanup
+        return 1
+    fi
+    cf_backup=""
+    if [ -f "$cf_dst" ]; then
+        cf_backup=$cf_dst.cfm-prepkg.$(date +%Y%m%d%H%M%S)
+        # Recorded BEFORE the copy: a signal right after cp returns must still
+        # find (and remove) it.
+        CFM_COMMIT_BACKUP=$cf_backup
+        if ! cp -a "$cf_dst" "$cf_backup"; then
+            echo "WARNING: CFM proxy config: failed to back up $cf_dst"
+            commit_cleanup
             return 1
         fi
     fi
 
-    if install -m 0644 -o root -g root "$dmc_src" "$dmc_dst"; then
-        echo "CFM proxy config: deployed $dmc_dst"
+    CFM_COMMITTING=1
+    for cf_name in $CFM_SIDECARS; do
+        if ! mv -f "$cf_live/.$cf_name.cfm-new.$$" "$cf_live/$cf_name"; then
+            echo "WARNING: CFM proxy config: failed to install $cf_live/$cf_name; restoring the previous sidecars"
+            commit_rollback
+            return 1
+        fi
+    done
+    if ! mv -f "$CFM_COMMIT_MAIN_TMP" "$cf_dst"; then
+        echo "WARNING: CFM proxy config: failed to deploy $cf_dst; restoring the previous sidecars"
+        commit_rollback
+        return 1
+    fi
+    CFM_COMMIT_BACKUP=""   # a real deploy keeps its backup, as before
+    CFM_COMMITTING=0
+    commit_cleanup
+    [ -n "$cf_backup" ] && echo "CFM proxy config: backed up $cf_dst to $cf_backup"
+    echo "CFM proxy config: deployed $cf_dst"
+    return 0
+}
+
+# commit_rollback: put back each sidecar this commit actually renamed in (its
+# .cfm-new temp is gone), or remove one that did not exist before; then clean
+# up. If the main config was already renamed in too (a signal between that
+# rename and the end of commit_files), the commit is complete: keep it.
+commit_rollback() {
+    if [ -n "$CFM_COMMIT_MAIN_TMP" ] && [ ! -e "$CFM_COMMIT_MAIN_TMP" ]; then
+        CFM_COMMITTING=0
+        CFM_COMMIT_BACKUP=""
+        commit_cleanup
         return 0
     fi
+    for cr_name in $CFM_SIDECARS; do
+        cr_live=$CFM_COMMIT_LIVE/$cr_name
+        [ -e "$CFM_COMMIT_LIVE/.$cr_name.cfm-new.$$" ] && continue   # never renamed in
+        if [ -e "$CFM_COMMIT_LIVE/.$cr_name.cfm-old.$$" ] || [ -L "$CFM_COMMIT_LIVE/.$cr_name.cfm-old.$$" ]; then
+            if ! mv -f "$CFM_COMMIT_LIVE/.$cr_name.cfm-old.$$" "$cr_live"; then
+                # Keep the only good copy under a name cleanup never removes;
+                # if even that rename fails, leave it where it is and exempt it.
+                cr_kept=$cr_live.cfm-restore-failed.$$
+                if ! mv -f "$CFM_COMMIT_LIVE/.$cr_name.cfm-old.$$" "$cr_kept" 2>/dev/null; then
+                    cr_kept=$CFM_COMMIT_LIVE/.$cr_name.cfm-old.$$
+                    CFM_KEEP_OLD="$CFM_KEEP_OLD $cr_name"
+                fi
+                CFM_RESTORE_FAILED=1
+                echo "WARNING: CFM proxy config: could not restore $cr_live; the previous copy is $cr_kept - put it back before reloading the edge"
+            fi
+        elif [ -e "$CFM_COMMIT_LIVE/.$cr_name.cfm-absent.$$" ]; then
+            rm -f "$cr_live"
+        fi
+    done
+    CFM_COMMITTING=0
+    commit_cleanup
+}
 
-    echo "WARNING: CFM proxy config: failed to deploy $dmc_dst"
-    return 1
+# commit_cleanup: remove this run's temp, marker and backup files. (A backup
+# that could not be restored was already moved to a kept name.) The main
+# config's .cfm-prepkg backup is removed too unless the commit completed
+# (commit_files clears CFM_COMMIT_BACKUP then): a run that deployed nothing -
+# a failure, or a signal before the renames - leaves no new file behind.
+commit_cleanup() {
+    [ -n "$CFM_COMMIT_BACKUP" ] && rm -f "$CFM_COMMIT_BACKUP"
+    CFM_COMMIT_BACKUP=""
+    [ -n "$CFM_COMMIT_LIVE" ] || return 0
+    for cc_name in $CFM_SIDECARS; do
+        rm -f "$CFM_COMMIT_LIVE/.$cc_name.cfm-new.$$" "$CFM_COMMIT_LIVE/.$cc_name.cfm-absent.$$"
+        case " $CFM_KEEP_OLD " in
+            *" $cc_name "*) ;;   # the only good copy of a sidecar: keep it
+            *) rm -f "$CFM_COMMIT_LIVE/.$cc_name.cfm-old.$$" ;;
+        esac
+    done
+    [ -n "$CFM_COMMIT_MAIN_TMP" ] && rm -f "$CFM_COMMIT_MAIN_TMP"
+    CFM_COMMIT_LIVE=""
+    CFM_COMMIT_MAIN_TMP=""
+}
+
+# Roll back a commit cut short, and remove the staging dir. Called directly
+# between steps, and from the exit trap (cleanup_on_exit).
+cleanup_proxy_deploy() {
+    if [ "$CFM_COMMITTING" -eq 1 ]; then
+        commit_rollback
+    else
+        commit_cleanup
+    fi
+    [ -n "$CFM_STAGE_DIR" ] && rm -rf "$CFM_STAGE_DIR"
+    CFM_STAGE_DIR=""
+    return 0
+}
+
+# acquire_deploy_lock LOCKFILE SECONDS: serialise runs of this helper (the
+# postinst and, say, a manual run): the stale-leftover sweep and the commit
+# of one run must never overlap another's. Without flock, carry on as before.
+# Returns 1 if another run held it for SECONDS, 2 if it could not be opened
+# (the caller warns and carries on unserialised). The lock lives in a
+# root-only dir (/run), never in world-writable /run/lock, where any user
+# could hold it to block every upgrade's deploy, or plant a symlink.
+acquire_deploy_lock() {
+    command -v flock >/dev/null 2>&1 || return 0
+    mkdir -p "$(dirname "$1")" 2>/dev/null
+    # exec is a special builtin: a failed redirection on it exits dash
+    # outright (no "|| return"), so first check the file can be opened.
+    ( : >>"$1" ) 2>/dev/null || return 2
+    exec 9>>"$1" || return 2
+    flock -w "$2" 9 || return 1
+}
+
+# Exit trap: a second signal (another Ctrl-C) must not cut the rollback short.
+cleanup_on_exit() {
+    trap '' HUP INT TERM PIPE
+    cleanup_proxy_deploy
 }
 
 ensure_fallback_cert_if_missing() {
@@ -318,24 +510,87 @@ process_engine() {
     echo "CFM proxy config: $pe_engine detected at $pe_bin"
     report_service_status "$pe_engine" "$pe_unit"
 
-    if ! prepare_sidecars "$pe_engine" "$pe_sidecar_dir"; then
-        echo "WARNING: CFM proxy config: $pe_engine sidecar deployment failed; leaving existing $(basename "$pe_main_dst") unchanged"
+    pe_unchanged="leaving existing sidecars and $(basename "$pe_main_dst") unchanged"
+    if [ ! -f "$pe_main_src" ]; then
+        echo "WARNING: CFM proxy config: packaged $pe_engine config missing: $pe_main_src; $pe_unchanged"
+        return 0
+    fi
+    # A run killed hard (SIGKILL: no trap) can leave a stage dir, .cfm-new
+    # temps or .cfm-absent markers here; none holds anything but packaged
+    # data or nothing. (.cfm-old /
+    # .cfm-restore-failed copies are never touched: one may be the only good
+    # copy of a sidecar.)
+    rm -rf "$pe_sidecar_dir"/.cfm-proxy-stage.* 2>/dev/null
+    rm -f "$pe_sidecar_dir"/.*.cfm-new.* "$pe_sidecar_dir"/.*.cfm-absent.* \
+        "$(dirname "$pe_main_dst")"/.*.cfm-new.* 2>/dev/null
+
+    # Stage inside the live dir itself (a dot-dir, so an `include *.conf` glob
+    # never reaches it): no dependency on /tmp or TMPDIR, which may be full or
+    # missing on the host, and nothing is written outside the engine's own dir.
+    if ! mkdir -p "$pe_sidecar_dir" \
+        || ! CFM_STAGE_DIR=$(mktemp -d "$pe_sidecar_dir/.cfm-proxy-stage.XXXXXX"); then
+        CFM_STAGE_DIR=""
+        echo "WARNING: CFM proxy config: $pe_engine: cannot create a staging dir; $pe_unchanged"
+        return 0
+    fi
+    pe_stage=$CFM_STAGE_DIR
+
+    if ! stage_sidecars "$pe_engine" "$pe_stage" "$pe_sidecar_dir" \
+        || ! stage_main_config "$pe_main_src" "$pe_stage" "$pe_sidecar_dir"; then
+        echo "WARNING: CFM proxy config: $pe_engine sidecar staging failed; $pe_unchanged"
+        cleanup_proxy_deploy
         return 0
     fi
 
-    # Only test the engine's packaged main config with -c. Sidecar includes are
-    # validated transitively through that main config; they are not valid
-    # standalone nginx/OpenResty/Angie configs.
-    echo "CFM proxy config: testing $pe_engine config with: $pe_bin -t -c $pe_main_src"
-    if "$pe_bin" -t -c "$pe_main_src"; then
-        echo "CFM proxy config: $pe_engine config test passed"
-        if deploy_main_config "$pe_engine" "$pe_main_src" "$pe_main_dst"; then
-            set_engine_state "$pe_engine" 1 "$pe_active" 1
-        fi
-    else
-        echo "WARNING: CFM proxy config: $pe_engine config test failed; command failed: $pe_bin -t -c $pe_main_src"
-        echo "WARNING: CFM proxy config: $pe_engine config test failed; leaving existing $(basename "$pe_main_dst") unchanged"
+    # -T (nginx >= 1.9.2, every Angie) is what proves which files were read.
+    if ! "$pe_bin" -h 2>&1 | grep -q -- '-T'; then
+        echo "WARNING: CFM proxy config: $pe_bin has no -T option (engine too old); cannot test the new sidecars safely; $pe_unchanged"
+        cleanup_proxy_deploy
+        return 0
     fi
+
+    # Test the packaged main config, staged so its sidecar includes read the
+    # NEW sidecars. -T is -t plus a dump that names every file the engine
+    # read ("# configuration file PATH:"); the dump goes to a file, the
+    # engine's verdict to the terminal as before. Sidecars are never tested
+    # with -c on their own: they are not valid standalone configs.
+    echo "CFM proxy config: testing $pe_engine config with: $pe_bin -T -c $pe_stage/main.conf (packaged $pe_main_src + new sidecars)"
+    if ! "$pe_bin" -T -c "$pe_stage/main.conf" > "$pe_stage/.dump"; then
+        echo "WARNING: CFM proxy config: $pe_engine config test failed; command failed: $pe_bin -T -c $pe_stage/main.conf"
+        echo "WARNING: CFM proxy config: (that staged dir is removed now; its main.conf is $pe_main_src with the sidecar includes moved - same line numbers - and its sidecars are the packaged ones in $CFM_CONFIG_DIR, cfm-panel-listeners.conf rendered from cfm-panel-listeners.conf.in)"
+        echo "WARNING: CFM proxy config: $pe_engine config test failed; $pe_unchanged"
+        cleanup_proxy_deploy
+        return 0
+    fi
+    pe_live_read=$(tested_live_sidecars "$pe_stage/.dump" "$pe_stage")
+    if [ -n "$pe_live_read" ]; then
+        echo "WARNING: CFM proxy config: $pe_engine config test read a sidecar other than the new one ($(printf '%s' "$pe_live_read" | tr '\n' ' ')); $pe_main_src includes it in a form this helper does not redirect; $pe_unchanged"
+        cleanup_proxy_deploy
+        return 0
+    fi
+    # Every staged sidecar the staged main config names must be in the list:
+    # a missing one means the list is incomplete (e.g. the dump write hit a
+    # full disk - the engine ignores that and still exits 0), and a guard
+    # that cannot see must fail. A commented-out include is not read, so
+    # comments don't count.
+    for pe_name in $CFM_SIDECARS; do
+        sed 's/#.*//' "$pe_stage/main.conf" | grep -qF "$pe_stage/$pe_name" || continue
+        if ! grep -qxF "# configuration file $pe_stage/$pe_name:" "$pe_stage/.dump"; then
+            echo "WARNING: CFM proxy config: $pe_engine -T did not list $pe_stage/$pe_name; cannot confirm the test read the new sidecars; $pe_unchanged"
+            cleanup_proxy_deploy
+            return 0
+        fi
+    done
+    echo "CFM proxy config: $pe_engine config test passed"
+
+    if commit_files "$pe_stage" "$pe_sidecar_dir" "$pe_main_src" "$pe_main_dst"; then
+        set_engine_state "$pe_engine" 1 "$pe_active" 1
+    elif [ "$CFM_RESTORE_FAILED" -eq 1 ]; then
+        echo "WARNING: CFM proxy config: $pe_engine: deploy failed and a sidecar could not be restored (see above); fix it before reloading $pe_engine"
+    else
+        echo "WARNING: CFM proxy config: $pe_engine: $pe_unchanged"
+    fi
+    cleanup_proxy_deploy
 
     return 0
 }
@@ -477,9 +732,32 @@ validate_logrotate_config() {
 }
 
 deploy_logrotate_config
+CFM_DEPLOY_LOCK=${CFM_DEPLOY_LOCK:-/run/cfm-proxy-config-deploy.lock}
+acquire_deploy_lock "$CFM_DEPLOY_LOCK" 300
+case $? in
+    1)
+        echo "WARNING: CFM proxy config: another run of this helper has held $CFM_DEPLOY_LOCK for 5 minutes; not deploying edge configs this time"
+        exit 0
+        ;;
+    2)
+        echo "WARNING: CFM proxy config: cannot open the lock $CFM_DEPLOY_LOCK; carrying on without it"
+        ;;
+esac
+
 if ! ensure_fallback_cert_if_missing; then
     echo "WARNING: CFM proxy config: failed to create fallback self-signed certs; config tests may fail"
 fi
+
+# (check_package_proxy_config_deploy.sh loads only the definitions, up to the
+# first top-level call, and must not inherit these traps.)
+CFM_STAGE_DIR=""
+trap cleanup_on_exit EXIT
+# Ignore further signals from here on, so none cuts the exit trap short.
+trap "trap '' HUP INT TERM PIPE; exit 1" HUP INT TERM
+# A closed stdout (e.g. \`apt-get upgrade | tee\` and tee died) must not kill
+# the run mid-commit without a rollback: ignore SIGPIPE, a failed echo is
+# harmless.
+trap '' PIPE
 
 ANGIE_BIN=$(find_first_executable angie /usr/sbin/angie /sbin/angie || true)
 if [ -n "$ANGIE_BIN" ]; then

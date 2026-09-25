@@ -44,6 +44,30 @@ back-filled here — see the git/PR history for that period.
   bucket** next to 10 s and 30 s (the edge already had it).
 
 ### Fixed
+- **A package upgrade no longer leaves an untested edge config live.** The
+  upgrade wrote the sidecars (`trusted_proxies.conf`,
+  `challenge_waf_bypass.conf`, `cfm-panel-listeners.conf`) into the live
+  Angie/OpenResty dir before `angie -t` / `openresty -t` tested them. When
+  that test failed, or the main config couldn't be installed, the new sidecars
+  stayed live next to the old main config, and the edge's next restart could
+  fail on them. Now the new sidecars and a copy of the packaged main config
+  that includes them are tested in a staging dir (a hidden dir inside the
+  engine's own config dir, so a full or missing `/tmp` doesn't matter). Only
+  after the test passes are the files written next to the live ones and
+  renamed in. If a rename fails, or the run is interrupted during them, the
+  sidecars already swapped are put back. A failed run leaves the live dir as
+  it was. A successful one gives the same files, modes and owners as before.
+  In the rare case that putting a sidecar back fails too, the upgrade says so
+  and names the file holding the previous copy (fix it before reloading the
+  edge). The upgrade now also deploys nothing, with a warning, when:
+  - the engine has no `-T` option;
+  - `-T` shows the test read a live sidecar rather than the new one (an
+    include form the helper doesn't redirect);
+  - another run of the helper holds its lock
+    (`/run/cfm-proxy-config-deploy.lock`) for 5 minutes.
+  As before, a packaged main config that fails the test leaves the old one
+  live, and with it the old `trusted_proxies.conf` and bypass ranges, until
+  the test passes.
 - **Skroutz's AWS crawler IPs were missing from the bypass list.** Its own
   network was covered through its ASN (AS202042), but its published feed lists
   plain strings under `ipv4`/`ipv6`, a shape the generator skipped. The feed
