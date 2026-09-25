@@ -69,6 +69,7 @@ EOF_FD
 cat >"$bin_dir/fake-openresty" <<'EOF_FAKE'
 #!/bin/sh
 . "$(dirname "$0")/fake-dump.sh"
+[ "$1" = "-h" ] && { echo "  -T            : test configuration, dump it and exit"; exit 0; }
 printf '%s\n' "$*" >> "$FAKE_OPENRESTY_ARGS"
 [ "$1" = "-T" ] && [ "$2" = "-c" ] && [ -f "$3" ] || exit 1
 fake_dump "$3" "$FAKE_OPENRESTY_ARGS.includes" || exit 1
@@ -80,11 +81,27 @@ chmod 0755 "$bin_dir/fake-openresty"
 cat >"$bin_dir/fake-angie" <<'EOF_FAKE'
 #!/bin/sh
 . "$(dirname "$0")/fake-dump.sh"
+[ "$1" = "-h" ] && { echo "  -T            : test configuration, dump it and exit"; exit 0; }
 printf '%s\n' "$*" >> "$FAKE_ANGIE_ARGS"
 [ "$1" = "-T" ] && [ "$2" = "-c" ] && [ -f "$3" ] || exit 1
 fake_dump "$3" "$FAKE_ANGIE_ARGS.includes" || exit 1
 EOF_FAKE
 chmod 0755 "$bin_dir/fake-angie"
+
+# An engine that passes the test but prints no file list (a dump write that
+# failed silently, e.g. on a full disk), and one too old to have -T.
+cat >"$bin_dir/fake-nolist" <<'EOF_FAKE'
+#!/bin/sh
+[ "$1" = "-h" ] && { echo "  -T            : test configuration, dump it and exit"; exit 0; }
+exit 0
+EOF_FAKE
+cat >"$bin_dir/fake-old" <<'EOF_FAKE'
+#!/bin/sh
+[ "$1" = "-h" ] && { echo "  -t            : test configuration and exit"; exit 0; }
+[ "$1" = "-t" ] && exit 0
+echo "nginx: invalid option: \"$1\"" >&2; exit 1
+EOF_FAKE
+chmod 0755 "$bin_dir/fake-nolist" "$bin_dir/fake-old"
 
 # A REAL nginx (CI installs it): the one engine whose include resolution the
 # helper's `-T` check must agree with. Wrapped so it logs to stderr and uses a
@@ -225,8 +242,12 @@ chmod 0755 "$bin_dir/install"
 # touching system Angie/OpenResty paths. The helper's top-level
 # `deploy_logrotate_config` call is dropped too: run as root it would deploy
 # the packaged logrotate config onto the live system (CLAUDE.md §5).
-awk '/^if ! ensure_fallback_cert_if_missing/{exit} {print}' scripts/package-proxy-config-deploy.sh \
-  | grep -v '^deploy_logrotate_config$' >"$tmp/functions.sh"
+# Only the definitions: cut at the first top-level statement, so sourcing
+# functions.sh never runs the live logrotate deploy or takes the live lock.
+awk '/^deploy_logrotate_config$/{exit} {print}' scripts/package-proxy-config-deploy.sh >"$tmp/functions.sh"
+if rg -q '^(if |trap |acquire_deploy_lock |process_engine |(ensure_fallback_cert_if_missing|deploy_logrotate_config|print_proxy_config_summary)$)' "$tmp/functions.sh"; then
+  echo "FAIL: functions.sh runs top-level statements; the cut point moved" >&2; exit 1
+fi
 rg -q '^deploy_logrotate_config$' "$tmp/functions.sh" && { echo "FAIL: functions.sh still calls deploy_logrotate_config" >&2; exit 1; }
 
 # The fallback cert, via the function: running the whole script here would
@@ -670,7 +691,7 @@ printf '%s\n' NEW >"$live/trusted_proxies.conf"; printf '%s\n' NEW >"$live/chall
 printf '%s\n' NEW >"$live/cfm-panel-listeners.conf"; printf '%s\n' NEWMAIN >"$live/nginx.conf"
 sh -c '. "$1"
   for n in $CFM_SIDECARS; do printf "%s\n" OLD >"$2/.$n.cfm-old.$$"; done
-  CFM_COMMIT_LIVE=$2; CFM_COMMIT_MAIN=$2/nginx.conf; CFM_COMMIT_MAIN_TMP=$2/.nginx.conf.cfm-new.$$; CFM_COMMITTING=1
+  CFM_COMMIT_LIVE=$2; CFM_COMMIT_MAIN_TMP=$2/.nginx.conf.cfm-new.$$; CFM_COMMITTING=1
   cleanup_proxy_deploy' sh "$tmp/functions.sh" "$live"
 for n in trusted_proxies.conf challenge_waf_bypass.conf cfm-panel-listeners.conf; do
   [ "$(cat "$live/$n")" = NEW ] || { echo "FAIL: a completed commit was rolled back ($n)" >&2; exit 1; }
@@ -703,7 +724,9 @@ done
 #     copies; if it read a live one (glob in the live dir, //, ./, a form the
 #     rewrite skips), nothing is deployed. The engine resolves the includes;
 #     the helper only reads its -T file list.
-#     Sidecars valid for nginx: a comment, a geo list, a comment.
+#     Sidecars valid for nginx: a comment, a geo list, a comment. (No test
+#     config has a server{} block: as root, nginx -t would then create
+#     /var/lib/nginx/* temp dirs on the host.)
 nx_case() { # NAME EXPECT(deploy|refuse) <http{} body, @L@ = live dir>
   nx_pkg="$tmp/nx-pkg-$1"; nx_live="$tmp/nx-live-$1"; rm -rf "$nx_pkg" "$nx_live"
   mkdir -p "$nx_pkg" "$nx_live"
@@ -714,6 +737,7 @@ nx_case() { # NAME EXPECT(deploy|refuse) <http{} body, @L@ = live dir>
   printf '%s\n' '# OLD trusted' >"$nx_live/trusted_proxies.conf"
   printf '%s\n' '198.51.100.1/32 1;' >"$nx_live/challenge_waf_bypass.conf"
   printf '%s\n' 'OLD main' >"$nx_live/nginx.conf"
+  printf '%s\n' '# OLD listeners' >"$nx_live/cfm-panel-listeners.conf"
   nx_before=$(snapshot "$nx_live")
   nx_out=$(PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$nx_pkg" \
     sh -c '. "$1"; process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
@@ -749,6 +773,14 @@ $G"
 nx_case twoline-live deploy "include
     @L@/trusted_proxies.conf;
 $G"
+nx_case bypass-live refuse "include @L@/trusted_proxies.conf;
+geo \$cfm_x {
+    default 0;
+    include @L@//challenge_waf_bypass.conf;
+}"
+nx_case listeners-live refuse "include @L@/trusted_proxies.conf;
+$G
+include @L@/./cfm-panel-listeners.conf;"
 nx_case semicolon-include refuse "include @L@/trusted_proxies.conf;include @L@/../nx-live-semicolon-include/trusted_proxies.conf;
 $G"
 # A broken NEW sidecar: the real engine rejects it; live dir unchanged.
@@ -763,12 +795,12 @@ PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$nx_pkg" sh -c '. "$1"; process_engine Ope
 [ "$(snapshot "$nx_live")" = "$nx_before" ] || { echo "FAIL: real nginx: a broken new sidecar must leave the live dir unchanged" >&2; exit 1; }
 
 # The script's own trap lines (not a copy), for the signal cases below.
-# Exactly the EXIT trap line and the signal trap line after it: anything else
+# Exactly the EXIT trap, the signal trap and the PIPE-ignore lines: anything else
 # in the extract (e.g. the rest of the script, if a line changed shape) must
 # never be eval'd here - it would run the real deploy.
-TRAPS=$(awk '/^trap cleanup_on_exit EXIT$/{f=1} f&&!/^#/{print; n++} f&&n==2{exit}' scripts/package-proxy-config-deploy.sh)
-printf '%s\n' "$TRAPS" | awk 'NR==1&&$0!="trap cleanup_on_exit EXIT"{bad=1} NR==2&&$0!~/^trap .* HUP INT TERM$/{bad=1} END{exit (bad||NR!=2)}' \
-  || { echo "FAIL: could not find the script's two trap lines (not eval'ing anything else):" >&2; printf '%s\n' "$TRAPS" >&2; exit 1; }
+TRAPS=$(awk '/^trap cleanup_on_exit EXIT$/{f=1} f&&!/^#/{print; n++} f&&n==3{exit}' scripts/package-proxy-config-deploy.sh)
+printf '%s\n' "$TRAPS" | awk 'NR==1&&$0!="trap cleanup_on_exit EXIT"{bad=1} NR==2&&$0!~/^trap .* HUP INT TERM$/{bad=1} NR==3&&$0!="trap '"''"' PIPE"{bad=1} END{exit (bad||NR!=3)}' \
+  || { echo "FAIL: could not find the script's three trap lines (not eval'ing anything else):" >&2; printf '%s\n' "$TRAPS" >&2; exit 1; }
 
 # 16. A TERM during the renames rolls back (the exit trap, as in the script),
 #     and a second TERM while the rollback runs doesn't cut it short (the shim
@@ -826,8 +858,12 @@ if ls -A "$liveB" | rg -q 'cfm-old|cfm-new|cfm-absent'; then echo "FAIL: the fir
 #     TERM during the NEXT engine still stops the run (only the exit trap
 #     ignores signals).
 armed=$(TRAPS="$TRAPS" sh -c '. "$1"; eval "$TRAPS"; cleanup_proxy_deploy; trap' sh "$tmp/functions.sh")
-printf '%s\n' "$armed" | rg -q "exit 1.*TERM|TERM.*exit 1|SIGTERM" \
-  || { echo "FAIL: signals must stay armed after a direct cleanup; got: $armed" >&2; exit 1; }
+for sig in HUP INT TERM; do
+  # the trap line FOR this signal (dash: "... TERM", bash: "... SIGTERM") must
+  # carry the exit-1 handler, not '' (ignored)
+  printf '%s\n' "$armed" | rg -q "exit 1'? (SIG)?$sig\$" \
+    || { echo "FAIL: the $sig trap must stay armed after a direct cleanup; got: $armed" >&2; exit 1; }
+done
 
 # 21. Two engines, the first with a failed restore, the second failing
 #     harmlessly: the second must say "leaving existing sidecars", not repeat
@@ -859,5 +895,57 @@ kept=$(ls -A "$live" | rg '^\.trusted_proxies\.conf\.cfm-old\.' || true)
 [ -n "$kept" ] && [ "$(cat "$live/$kept")" = precious ] || { echo "FAIL: a same-PID .cfm-old copy must be kept" >&2; ls -A "$live" >&2; exit 1; }
 [ "$(cat "$live/trusted_proxies.conf")" = "OLD trusted" ] || { echo "FAIL: a same-PID .cfm-old copy must block the deploy" >&2; exit 1; }
 printf '%s\n' "$out" | rg -q 'already exists \(from an interrupted earlier run' || { echo "FAIL: the same-PID refusal must be explained" >&2; printf '%s\n' "$out" >&2; exit 1; }
+
+# 23. An engine that passes but lists no files (a dump write that failed
+#     silently), or lists only some: nothing deployed - the guard can't see.
+pkg="$tmp/pkg-nolist"; live="$tmp/live-nolist"
+mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live")
+out=$(PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$pkg" sh -c '. "$1"; process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
+  "$tmp/functions.sh" "$bin_dir/fake-nolist" "$pkg/openresty.conf" "$live/nginx.conf" "$live" 2>&1)
+assert_untouched "$live" "$before" "engine that listed no files"
+printf '%s\n' "$out" | rg -q 'did not list .*; cannot confirm' || { echo "FAIL: a missing file list must be reported" >&2; printf '%s\n' "$out" >&2; exit 1; }
+
+# 24. An engine without -T (too old): nothing deployed, said plainly.
+pkg="$tmp/pkg-old"; live="$tmp/live-old"
+mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live")
+out=$(PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$pkg" sh -c '. "$1"; process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
+  "$tmp/functions.sh" "$bin_dir/fake-old" "$pkg/openresty.conf" "$live/nginx.conf" "$live" 2>&1)
+assert_untouched "$live" "$before" "engine without -T"
+printf '%s\n' "$out" | rg -q 'has no -T option' || { echo "FAIL: an engine without -T must be reported" >&2; printf '%s\n' "$out" >&2; exit 1; }
+
+# 25. Same-PID .cfm-old copies for SEVERAL sidecars: all kept (not only the
+#     first one found).
+pkg="$tmp/pkg-pid2"; live="$tmp/live-pid2"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$pkg" FAKE_OPENRESTY_ARGS="$tmp/or-pid2.args" \
+  sh -c '. "$1"; for n in trusted_proxies.conf challenge_waf_bypass.conf; do printf "%s\n" "precious $n" >"$5/.$n.cfm-old.$$"; done
+    process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
+  "$tmp/functions.sh" "$bin_dir/fake-openresty" "$pkg/openresty.conf" "$live/nginx.conf" "$live" >/dev/null 2>&1
+[ "$(ls -A "$live" | rg -c '\.cfm-old\.')" = 2 ] || { echo "FAIL: every same-PID .cfm-old copy must be kept" >&2; ls -A "$live" >&2; exit 1; }
+
+# 26. The run lock: a second run waits, and gives up (no deploy) if the lock
+#     stays held.
+if command -v flock >/dev/null 2>&1; then
+  lk="$tmp/deploy.lock"
+  ( flock 8; sleep 5 ) 8>"$lk" &
+  holder=$!
+  sleep 0.5
+  if sh -c '. "$1"; acquire_deploy_lock "$2" 1' sh "$tmp/functions.sh" "$lk"; then
+    echo "FAIL: the lock must not be taken while another run holds it" >&2; kill "$holder" 2>/dev/null; exit 1
+  fi
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null || true
+  sh -c '. "$1"; acquire_deploy_lock "$2" 1' sh "$tmp/functions.sh" "$lk" \
+    || { echo "FAIL: a free lock must be taken" >&2; exit 1; }
+fi
+
+# 27. A lock file that cannot be opened: carry on without the lock. exec is a
+#     special builtin, so a bare failed "exec 9>" would exit dash right there.
+if command -v flock >/dev/null 2>&1; then
+  out=$(sh -c '. "$1"; acquire_deploy_lock "$2" 1; echo still-running' sh "$tmp/functions.sh" "$tmp/functions.sh/no.lock" 2>&1) || true
+  case "$out" in
+    *still-running*) ;;
+    *) echo "FAIL: an unopenable lock file must not end the run: $out" >&2; exit 1 ;;
+  esac
+fi
 
 echo "OK: package proxy deploy helper tests only the main engine configs, with the new sidecars staged; a failed run leaves the live dir untouched"

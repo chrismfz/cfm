@@ -289,17 +289,27 @@ commit_files() {
         return 1
     fi
 
+    # A .cfm-old left by an earlier run killed hard under the SAME PID may be
+    # the only good copy of that sidecar: check them all before creating
+    # anything, keep every one, and don't deploy.
+    cf_stale=""
+    for cf_name in $CFM_SIDECARS; do
+        if [ -e "$cf_live/.$cf_name.cfm-old.$$" ] || [ -L "$cf_live/.$cf_name.cfm-old.$$" ]; then
+            cf_stale="$cf_stale $cf_name"
+        fi
+    done
+    if [ -n "$cf_stale" ]; then
+        for cf_name in $cf_stale; do
+            echo "WARNING: CFM proxy config: $cf_live/.$cf_name.cfm-old.$$ already exists (from an interrupted earlier run?); check it, then remove it"
+        done
+        CFM_KEEP_OLD=$cf_stale   # cleanup must not remove any of them
+        commit_cleanup
+        return 1
+    fi
+
     for cf_name in $CFM_SIDECARS; do
         if ! install -m 0644 -o root -g root "$cf_stage/$cf_name" "$cf_live/.$cf_name.cfm-new.$$"; then
             echo "WARNING: CFM proxy config: failed to write $cf_live/.$cf_name.cfm-new.$$"
-            commit_cleanup
-            return 1
-        fi
-        if [ -e "$cf_live/.$cf_name.cfm-old.$$" ] || [ -L "$cf_live/.$cf_name.cfm-old.$$" ]; then
-            # Left by an earlier run killed hard under the same PID: maybe the
-            # only good copy of that sidecar. Don't overwrite it, don't deploy.
-            echo "WARNING: CFM proxy config: $cf_live/.$cf_name.cfm-old.$$ already exists (from an interrupted earlier run?); check it, then remove it"
-            CFM_KEEP_OLD="$CFM_KEEP_OLD $cf_name"   # cleanup must not remove it
             commit_cleanup
             return 1
         fi
@@ -416,9 +426,22 @@ cleanup_proxy_deploy() {
     return 0
 }
 
+# acquire_deploy_lock LOCKFILE SECONDS: serialise runs of this helper (the
+# postinst and, say, a manual run): the stale-leftover sweep and the commit
+# of one run must never overlap another's. Without flock, carry on as before.
+acquire_deploy_lock() {
+    command -v flock >/dev/null 2>&1 || return 0
+    mkdir -p "$(dirname "$1")" 2>/dev/null
+    # exec is a special builtin: a failed redirection on it exits dash
+    # outright (no "|| return"), so first check the file can be opened.
+    ( : >>"$1" ) 2>/dev/null || return 0
+    exec 9>>"$1" || return 0
+    flock -w "$2" 9
+}
+
 # Exit trap: a second signal (another Ctrl-C) must not cut the rollback short.
 cleanup_on_exit() {
-    trap '' HUP INT TERM
+    trap '' HUP INT TERM PIPE
     cleanup_proxy_deploy
 }
 
@@ -510,6 +533,13 @@ process_engine() {
         return 0
     fi
 
+    # -T (nginx >= 1.9.2, every Angie) is what proves which files were read.
+    if ! "$pe_bin" -h 2>&1 | grep -q -- '-T'; then
+        echo "WARNING: CFM proxy config: $pe_bin has no -T option (engine too old); cannot test the new sidecars safely; $pe_unchanged"
+        cleanup_proxy_deploy
+        return 0
+    fi
+
     # Test the packaged main config, staged so its sidecar includes read the
     # NEW sidecars. -T is -t plus a dump that names every file the engine
     # read ("# configuration file PATH:"); the dump goes to a file, the
@@ -529,11 +559,18 @@ process_engine() {
         cleanup_proxy_deploy
         return 0
     fi
-    if ! grep -q '^# configuration file ' "$pe_stage/.dump"; then
-        echo "WARNING: CFM proxy config: $pe_engine -T printed no file list; cannot confirm the test read the new sidecars; $pe_unchanged"
-        cleanup_proxy_deploy
-        return 0
-    fi
+    # Every staged sidecar the staged main config names must be in the list:
+    # a missing one means the list is incomplete (e.g. the dump write hit a
+    # full disk - the engine ignores that and still exits 0), and a guard
+    # that cannot see must fail.
+    for pe_name in $CFM_SIDECARS; do
+        grep -qF "$pe_stage/$pe_name" "$pe_stage/main.conf" || continue
+        if ! grep -qxF "# configuration file $pe_stage/$pe_name:" "$pe_stage/.dump"; then
+            echo "WARNING: CFM proxy config: $pe_engine -T did not list $pe_stage/$pe_name; cannot confirm the test read the new sidecars; $pe_unchanged"
+            cleanup_proxy_deploy
+            return 0
+        fi
+    done
     echo "CFM proxy config: $pe_engine config test passed"
 
     if commit_files "$pe_stage" "$pe_sidecar_dir" "$pe_main_src" "$pe_main_dst"; then
@@ -685,6 +722,11 @@ validate_logrotate_config() {
 }
 
 deploy_logrotate_config
+if ! acquire_deploy_lock "${CFM_DEPLOY_LOCK:-/run/lock/cfm-proxy-config-deploy.lock}" 300; then
+    echo "WARNING: CFM proxy config: another run of this helper holds the lock for 5 minutes; not deploying edge configs this time"
+    exit 0
+fi
+
 if ! ensure_fallback_cert_if_missing; then
     echo "WARNING: CFM proxy config: failed to create fallback self-signed certs; config tests may fail"
 fi
@@ -694,7 +736,11 @@ fi
 CFM_STAGE_DIR=""
 trap cleanup_on_exit EXIT
 # Ignore further signals from here on, so none cuts the exit trap short.
-trap "trap '' HUP INT TERM; exit 1" HUP INT TERM
+trap "trap '' HUP INT TERM PIPE; exit 1" HUP INT TERM
+# A closed stdout (e.g. \`apt-get upgrade | tee\` and tee died) must not kill
+# the run mid-commit without a rollback: ignore SIGPIPE, a failed echo is
+# harmless.
+trap '' PIPE
 
 ANGIE_BIN=$(find_first_executable angie /usr/sbin/angie /sbin/angie || true)
 if [ -n "$ANGIE_BIN" ]; then
