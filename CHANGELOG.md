@@ -70,6 +70,16 @@ back-filled here — see the git/PR history for that period.
   bucket** next to 10 s and 30 s (the edge already had it).
 
 ### Fixed
+- **A changed `NFT_DNAT_PRIORITY` now takes effect on a cfm restart.**
+  The web DNAT table (`inet cfm_redirect`) outlives a restart of the daemon,
+  and the startup restore stopped as soon as it saw DNAT on, so the old hook
+  priority stayed until `cfm dnat off; cfm dnat on`. That is how orion kept
+  Imunify's WebShield ahead of CFM after `NFT_DNAT_PRIORITY = -101` and a
+  restart. On startup the daemon now re-installs the chain at the priority
+  `cfm.conf` sets when it differs, keeping its current ports and bypass
+  entries, and logs `re-applied: NFT_DNAT_PRIORITY X (was Y)`. It leaves the
+  chain alone when `cfm.conf` wasn't applied (a parse error): the -99 fallback
+  must not undo the operator's choice.
 - **A package upgrade no longer leaves an untested edge config live.** The
   upgrade wrote the sidecars (`trusted_proxies.conf`,
   `challenge_waf_bypass.conf`, `cfm-panel-listeners.conf`) into the live

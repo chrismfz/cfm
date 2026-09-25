@@ -147,6 +147,7 @@ type Backend struct {
 }
 
 var _ firewall.Backend = (*Backend)(nil)
+var _ firewall.DNATPriorityReporter = (*Backend)(nil)
 
 // GetEnricher returns the enrichment engine (if enabled).
 func (b *Backend) GetEnricher() *enrichpkg.Enricher {

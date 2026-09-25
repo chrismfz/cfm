@@ -51,6 +51,9 @@ func RestoreOnStartup(ctx context.Context, scope DNATScope, backend firewall.Bac
 		}
 		on, _ := scopeStatus(scope, backend)
 		if on {
+			if scope == ScopeWeb {
+				reapplyWebPriorityIfChanged(backend)
+			}
 			return
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -75,6 +78,47 @@ func RestoreOnStartup(ctx context.Context, scope DNATScope, backend firewall.Bac
 		case <-time.After(step):
 		}
 	}
+}
+
+// reapplyWebPriorityIfChanged re-installs a web DNAT chain that the previous
+// run left in place (the nft table outlives a daemon restart) when its hook
+// priority differs from cfm.conf's NFT_DNAT_PRIORITY. Without it, changing the
+// priority and restarting cfm kept the old one (the restore saw DNAT on and
+// stopped), and only `cfm dnat off; cfm dnat on` applied it. A hook priority
+// can't change in place; DNATOn rebuilds the table, with the bypass entries.
+//
+// It leaves the chain alone unless the backend's priority came from an
+// applied cfm.conf: with no config (cfm.conf failed to parse) the backend
+// falls back to -99, and re-applying that would silently undo the operator's
+// choice. The chain's current ports are kept: only the priority changes.
+func reapplyWebPriorityIfChanged(backend firewall.Backend) {
+	pr, ok := backend.(firewall.DNATPriorityReporter)
+	if !ok {
+		return
+	}
+	want, fromConfig := pr.ConfiguredDNATPriority()
+	if !fromConfig {
+		return
+	}
+	want = clampNFTPriority(want)
+	show, err := backend.DNATShow(DefaultFamily, DefaultTable)
+	if err != nil {
+		return
+	}
+	have, ok := parseDNATChainPriority(show)
+	if !ok || have == want {
+		return
+	}
+	httpPort, httpsPort := currentWebDNATPorts(backend)
+	if err := backend.DNATOn(DefaultFamily, DefaultTable, httpPort, httpsPort); err != nil {
+		state := "ON"
+		if on, _ := scopeStatus(ScopeWeb, backend); !on {
+			state = "OFF"
+		}
+		LogTransition(ScopeWeb, state, "startup", fmt.Sprintf("re-apply NFT_DNAT_PRIORITY %d (was %d) failed: %v", want, have, err))
+		return
+	}
+	LogTransition(ScopeWeb, "ON", "startup", fmt.Sprintf("re-applied: NFT_DNAT_PRIORITY %d (was %d)", want, have))
 }
 
 func scopeStatus(scope DNATScope, backend firewall.Backend) (bool, error) {
