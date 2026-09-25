@@ -76,8 +76,10 @@ back-filled here — see the git/PR history for that period.
   priority stayed until `cfm dnat off; cfm dnat on`. That is how orion kept
   Imunify's WebShield ahead of CFM after `NFT_DNAT_PRIORITY = -101` and a
   restart. On startup the daemon now re-installs the chain at the priority
-  `cfm.conf` sets when it differs, keeping its current ports and bypass
-  entries, and logs `re-applied: NFT_DNAT_PRIORITY X (was Y)`. It leaves the
+  `cfm.conf` sets when it differs (a rebuild of a few milliseconds, as any
+  `cfm dnat on`), keeping its current ports and re-reading the bypass file,
+  and logs `re-applied: NFT_DNAT_PRIORITY X (was Y)`. A value nft refuses for a
+  nat chain (-200 or below) keeps the installed chain, with a log line. It leaves the
   chain alone when `cfm.conf` wasn't applied (a parse error): the -99 fallback
   must not undo the operator's choice. `cfm.conf` is the one place the
   priority persists: `cfm dnat on --priority X` with X different from it now

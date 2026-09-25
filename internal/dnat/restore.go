@@ -91,6 +91,10 @@ func RestoreOnStartup(ctx context.Context, scope DNATScope, backend firewall.Bac
 // applied cfm.conf: with no config (cfm.conf failed to parse) the backend
 // falls back to -99, and re-applying that would silently undo the operator's
 // choice. The chain's current ports are kept: only the priority changes.
+// minNATChainPriority: nft rejects a nat base chain at this priority or below
+// ("Chains of type "nat" must have a priority value above -200").
+const minNATChainPriority = -200
+
 func reapplyWebPriorityIfChanged(backend firewall.Backend) {
 	pr, ok := backend.(firewall.DNATPriorityReporter)
 	if !ok {
@@ -101,6 +105,13 @@ func reapplyWebPriorityIfChanged(backend firewall.Backend) {
 		return
 	}
 	want = clampNFTPriority(want)
+	if want <= minNATChainPriority {
+		// nft refuses a nat chain at -200 or below. The nft backend deletes
+		// the table before adding the new one, so trying would leave web
+		// DNAT off; keep the working chain and say why.
+		LogTransition(ScopeWeb, "ON", "startup", fmt.Sprintf("kept the installed chain: NFT_DNAT_PRIORITY %d is not a valid nat priority (must be above %d)", want, minNATChainPriority))
+		return
+	}
 	show, err := backend.DNATShow(DefaultFamily, DefaultTable)
 	if err != nil {
 		return

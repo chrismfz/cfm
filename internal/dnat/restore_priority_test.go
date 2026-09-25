@@ -86,6 +86,8 @@ func TestRestoreOnStartup_ReappliesChangedWebDNATPriority(t *testing.T) {
 		{name: "already at the configured priority", installed: "dstnat - 1", want: -101, fromConfig: true},
 		{name: "no applied cfm.conf: -99 is only the fallback", installed: "dstnat - 1", want: -99, fromConfig: false},
 		{name: "unreadable installed priority", installed: "bogus", want: -101, fromConfig: true},
+		{name: "cfm.conf priority nft rejects for nat (-200): keep the chain", installed: "dstnat + 1", want: -200, fromConfig: true,
+			wantOn: 0, wantState: "ON", wantReason: "not a valid nat priority"},
 		{name: "re-apply fails and leaves DNAT off", installed: "dstnat + 1", want: -101, fromConfig: true,
 			onErr: errors.New("nft: boom"), wantOn: 1, wantState: "OFF", wantReason: "failed: nft: boom"},
 	}
@@ -98,6 +100,12 @@ func TestRestoreOnStartup_ReappliesChangedWebDNATPriority(t *testing.T) {
 				t.Fatalf("DNATOn calls = %v, want %d", be.onCalls, tc.wantOn)
 			}
 			lt := GetLastTransition(ScopeWeb)
+			if tc.wantOn == 0 && tc.wantReason != "" {
+				if lt.State != tc.wantState || !strings.Contains(lt.Reason, tc.wantReason) {
+					t.Fatalf("transition = %+v, want state %s reason containing %q", lt, tc.wantState, tc.wantReason)
+				}
+				return
+			}
 			if tc.wantOn == 0 {
 				if lt.Action != "" {
 					t.Fatalf("unexpected transition %+v", lt)
