@@ -423,13 +423,18 @@ changelog:
 # file about to be packaged, or no Python >= 3.9 to run it (a guardrail that
 # cannot run must fail, CLAUDE.md §5). The generator and validator need 3.9
 # (str.removeprefix; EL8's python3 is 3.6), so the newest python3.x on PATH is
-# used. BYPASS_REFRESH=0 skips both, for an offline build.
+# used. BYPASS_REFRESH=0 skips both, for an offline build — and then the
+# release commit leaves the file out, so an unvalidated local edit is never
+# committed. BYPASS_TIMEOUT (default 300 s) caps the fetch: 14 feeds x 3
+# attempts x 30 s could otherwise hold a release ~20 min on a host whose
+# outbound traffic is silently dropped.
 #
 # Ordering: deb and stage-pkgroot copy configs/ into the package, so under
 # `make -j release` they must wait for the refresh. The order-only
 # prerequisite below applies only when `release` is a goal, so a plain
 # `make deb` never hits the network.
 BYPASS_REFRESH ?= 1
+BYPASS_TIMEOUT ?= 300
 ifneq ($(filter release,$(MAKECMDGOALS)),)
 deb stage-pkgroot: | bypass-list
 endif
@@ -450,13 +455,21 @@ bypass-list: ## Refresh challenge_waf_bypass.conf from the crawler/CDN feeds
 	  exit 1; \
 	fi; \
 	echo "🌐 Refreshing challenge_waf_bypass.conf ($$PY)..."; \
-	"$$PY" scripts/build_bypass_list.py --strict; rc=$$?; \
+	TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout $(BYPASS_TIMEOUT)"; \
+	$$TO "$$PY" scripts/build_bypass_list.py --strict; rc=$$?; \
 	case "$$rc" in \
 	  0) echo "✅ bypass list refreshed." ;; \
-	  3) echo "⚠️  a bypass feed failed or came back empty (after retries) — keeping the last-good file, not a partial one." ;; \
-	  *) echo "⚠️  bypass refresh refused (exit $$rc: too small, too large, or the address space grew >2x) — keeping the last-good file." ;; \
+	  1) echo "⚠️  bypass refresh: no feed answered (network?) or the generator crashed — keeping the last-good file." ;; \
+	  2) echo "⚠️  bypass refresh refused: too few/many prefixes, or the address space grew past the guard (poisoned feed? a reviewed manual run can pass --allow-growth) — keeping the last-good file." ;; \
+	  3) echo "⚠️  bypass refresh: a feed failed, came back empty or shrank by over half — keeping the last-good file, not a partial one." ;; \
+	  124) echo "⚠️  bypass refresh timed out after $(BYPASS_TIMEOUT)s — keeping the last-good file." ;; \
+	  *) echo "⚠️  bypass refresh failed (exit $$rc) — keeping the last-good file." ;; \
 	esac; \
-	"$$PY" scripts/tests/bypass_list_test.py || { echo "❌ challenge_waf_bypass.conf failed validation — not packaging it"; exit 1; }
+	rm -f configs/.challenge_waf_bypass.*.tmp; \
+	if [ "$$rc" != 0 ]; then \
+	  echo "   ⚠️  The shipped list is still the one $$(sed -n 's/^# Generated at: \(.\{10\}\).*/\1/p' configs/challenge_waf_bypass.conf | head -n1). If this repeats every release, fix the feed (scripts/build_bypass_list.py SOURCES)."; \
+	fi; \
+	BYPASS_PYTHON="$$PY" ./scripts/tests/check_bypass_list.sh || { echo "❌ challenge_waf_bypass.conf failed validation — not packaging it"; exit 1; }
 
 # release flow: (0) `bypass-list` refreshes configs/challenge_waf_bypass.conf
 # before deb/rpm package it; (1) stamp CHANGELOG for today's UTC date; (2)
@@ -471,7 +484,8 @@ bypass-list: ## Refresh challenge_waf_bypass.conf from the crawler/CDN feeds
 release: bypass-list bpf deb rpm
 	@scripts/stamp-changelog.sh $(REL_DATE)
 	@set -uo pipefail; \
-	REL_FILES="CHANGELOG.md configs/challenge_waf_bypass.conf"; \
+	REL_FILES="CHANGELOG.md"; \
+	if [ "$(BYPASS_REFRESH)" != "0" ]; then REL_FILES="$$REL_FILES configs/challenge_waf_bypass.conf"; fi; \
 	if git rev-parse --git-dir >/dev/null 2>&1 && [ -n "$$(git status --porcelain -- $$REL_FILES)" ]; then \
 	  echo "📝 Committing $$REL_FILES (only) for $(REL_DATE)..."; \
 	  if git commit -q -m "release: stamp $(REL_DATE) changelog + refresh bypass list" -- $$REL_FILES; then \

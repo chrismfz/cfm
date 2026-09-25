@@ -25,14 +25,18 @@ back-filled here — see the git/PR history for that period.
     target re-fetches it, runs first in `make release`, and the release commit
     now carries it next to `CHANGELOG.md`.
   - A failed, empty or suspicious fetch never blocks a release; the last-good
-    file ships instead. Each feed is retried, and a feed that still fails or
-    comes back empty keeps the whole old list rather than a partial one (a
-    single DuckDuckGo connection reset would otherwise have shipped a list
-    without its 486 DuckDuckBot ranges). A run whose covered address space
-    more than doubles is refused as a likely poisoned feed.
+    file ships instead, and the release log says how old it is. Each feed is
+    retried (network errors, 5xx, 408/429, a body cut short). A feed that
+    still fails, comes back empty or shrinks to under half its previous count
+    keeps the whole old list rather than a partial one (a single DuckDuckGo
+    connection reset would otherwise have shipped a list without its 486
+    DuckDuckBot ranges). A run that grows the covered address space by more
+    than its own size is refused as a likely poisoned feed. The fetch is
+    capped at 5 minutes (`BYPASS_TIMEOUT`).
   - What does block: the offline validator failing, or no Python >= 3.9 on the
     build host to run it (EL8: `dnf install python39`). `BYPASS_REFRESH=0`
-    skips the refresh and the check on an offline build host.
+    skips the refresh and the check on an offline build host, and then the
+    release commit leaves the list out.
 - **The bypass list now also covers Applebot** (Siri / Spotlight crawler).
 - **cfm-admin Site Cache: the "Near-static pages" recipe offers a 60 s
   bucket** next to 10 s and 30 s (the edge already had it).

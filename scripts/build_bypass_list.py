@@ -17,6 +17,7 @@ that would shrink the list too far is refused (the existing file is kept).
 from __future__ import annotations
 
 import argparse
+import http.client
 import ipaddress
 import json
 import os
@@ -55,14 +56,22 @@ MAX_PREFIXES_PER_SOURCE = 10000  # a single feed emitting more than this is susp
 MAX_PREFIXES_TOTAL = 50000       # runaway-output backstop
 MIN_PREFIXES_TOTAL = 100         # sanity floor: a healthy run yields thousands
 MAX_SHRINK_FRACTION = 0.5        # abort if the new list is < 50% of the existing one
-# Abort if the covered ADDRESS SPACE more than doubles (plus one /16 IPv4 / one
-# /32 IPv6 of slack). The count caps can't see a poisoned feed that serves a
-# few hundred public /16s: +300 prefixes, but ~100x the space bypassing WAF +
-# challenge. The shipped list covers ~160k IPv4 addresses; a genuinely larger
-# list (a new source) is a reviewed manual run with --allow-growth.
+# Abort if the covered ADDRESS SPACE grows by more than its own size (2x), plus
+# a small slack. The count caps can't see a poisoned feed that serves a few
+# hundred public /16s: +300 prefixes, but ~100x the space bypassing WAF +
+# challenge. The baseline leaves out the single largest existing prefix: one
+# prefix dominates each family (136.122.0.0/16 is over half the ~121k IPv4
+# addresses; Skroutz's 2a03:e40::/32 is ~99.998% of the IPv6 /64s), and a
+# baseline that counted it would let a poisoned feed add another prefix that
+# size unnoticed. A genuinely larger list (a new source) is a reviewed manual
+# run with --allow-growth.
 MAX_SPACE_GROWTH_FACTOR = 2.0
-SPACE_GROWTH_SLACK_V4 = 1 << 16          # addresses
-SPACE_GROWTH_SLACK_V6 = 1 << 32          # /64s
+SPACE_GROWTH_SLACK_V4 = 1 << 12          # addresses (a /20)
+SPACE_GROWTH_SLACK_V6 = 1 << 16          # /64s (a /48)
+# --strict also refuses a source that shrank below half its previous count (a
+# body truncated without a Content-Length still parses as a shorter list).
+MAX_SOURCE_SHRINK_FRACTION = 0.5
+MIN_SOURCE_COUNT_FOR_SHRINK = 10         # tiny feeds legitimately swing by a few
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SOURCES — edit this list to add/remove bypass sources.
@@ -128,6 +137,7 @@ def eprint(*args: Any) -> None:
 
 FETCH_ATTEMPTS = 3               # a transient reset must not drop a whole source
 FETCH_BACKOFF_S = 2.0            # 2s, then 4s between attempts
+RETRY_HTTP_4XX = {408, 425, 429}  # timeout / too early / rate-limited: transient, retry
 
 
 def _fetch(url: str, accept: str) -> str:
@@ -138,10 +148,12 @@ def _fetch(url: str, accept: str) -> str:
                 charset = resp.headers.get_content_charset() or "utf-8"
                 return resp.read().decode(charset, errors="replace")
         except urllib.error.HTTPError as exc:
-            # A 4xx is an answer (moved, gone, forbidden), not a transient fault.
-            if exc.code < 500 or attempt == FETCH_ATTEMPTS:
+            # Any other 4xx is an answer (moved, gone, forbidden), not a transient fault.
+            transient = exc.code >= 500 or exc.code in RETRY_HTTP_4XX
+            if not transient or attempt == FETCH_ATTEMPTS:
                 raise
-        except (urllib.error.URLError, OSError):
+        except (urllib.error.URLError, OSError, http.client.HTTPException):
+            # HTTPException covers IncompleteRead: a body cut short mid-transfer.
             if attempt == FETCH_ATTEMPTS:
                 raise
         time.sleep(FETCH_BACKOFF_S * attempt)
@@ -316,26 +328,30 @@ def oneline(value: Any, maxlen: int = 200) -> str:
 
 def count_existing_prefixes(path: str) -> int:
     """Count ``<cidr> 1;`` data lines in an existing output file (0 if absent)."""
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return sum(
-                1 for line in fh
-                if (s := line.strip()) and not s.startswith("#") and s.endswith(" 1;")
-            )
-    except OSError:
-        return 0
+    return len(existing_prefixes(path))
 
 
-def address_space(prefixes: Iterable[str]) -> tuple[int, int]:
-    """(IPv4 addresses, IPv6 /64s) covered by the prefixes."""
-    v4 = v6 = 0
+def _space(net: ipaddress.IPv4Network | ipaddress.IPv6Network) -> int:
+    """IPv4 addresses, or IPv6 /64s, covered by one network."""
+    if net.version == 4:
+        return net.num_addresses
+    return 1 << (64 - net.prefixlen) if net.prefixlen <= 64 else 1
+
+
+def address_space(prefixes: Iterable[str], drop_largest: bool = False) -> tuple[int, int]:
+    """(IPv4 addresses, IPv6 /64s) covered by the prefixes; with drop_largest,
+    without the single largest prefix of each family."""
+    sizes: dict[int, list[int]] = {4: [], 6: []}
     for p in prefixes:
         net = ipaddress.ip_network(p, strict=False)
-        if net.version == 4:
-            v4 += net.num_addresses
-        else:
-            v6 += 1 << (64 - net.prefixlen) if net.prefixlen <= 64 else 1
-    return v4, v6
+        sizes[net.version].append(_space(net))
+    out = []
+    for fam in (4, 6):
+        total = sum(sizes[fam])
+        if drop_largest and sizes[fam]:
+            total -= max(sizes[fam])
+        out.append(total)
+    return out[0], out[1]
 
 
 def existing_prefixes(path: str) -> list[str]:
@@ -349,14 +365,50 @@ def existing_prefixes(path: str) -> list[str]:
 
 
 def check_space_growth(new: Iterable[str], existing: Iterable[str]) -> str | None:
-    """Return an abort reason if the covered address space grew suspiciously."""
+    """Return an abort reason if the covered address space grew suspiciously:
+    by more than (factor - 1) x the existing space without its largest prefix,
+    plus the slack. No existing file = nothing to compare."""
+    existing = list(existing)
+    if not existing:
+        return None
     n4, n6 = address_space(new)
     e4, e6 = address_space(existing)
-    if e4 and n4 > e4 * MAX_SPACE_GROWTH_FACTOR + SPACE_GROWTH_SLACK_V4:
-        return f"IPv4 space grew from {e4} to {n4} addresses (> {MAX_SPACE_GROWTH_FACTOR}x; poisoned feed?)"
-    if e6 and n6 > e6 * MAX_SPACE_GROWTH_FACTOR + SPACE_GROWTH_SLACK_V6:
-        return f"IPv6 space grew from {e6} to {n6} /64s (> {MAX_SPACE_GROWTH_FACTOR}x; poisoned feed?)"
+    b4, b6 = address_space(existing, drop_largest=True)
+    allow4 = b4 * (MAX_SPACE_GROWTH_FACTOR - 1) + SPACE_GROWTH_SLACK_V4
+    allow6 = b6 * (MAX_SPACE_GROWTH_FACTOR - 1) + SPACE_GROWTH_SLACK_V6
+    if n4 - e4 > allow4:
+        return f"IPv4 space grew by {n4 - e4} addresses (from {e4}; allowed {int(allow4)}; poisoned feed?)"
+    if n6 - e6 > allow6:
+        return f"IPv6 space grew by {n6 - e6} /64s (from {e6}; allowed {int(allow6)}; poisoned feed?)"
     return None
+
+
+def existing_source_counts(path: str) -> dict[str, int]:
+    """Per-source prefix counts from the ``# source: <name>  (<kind>, <n> prefixes)``
+    header lines of an existing output file."""
+    counts: dict[str, int] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.startswith("# source: "):
+                    continue
+                name, _, rest = line[len("# source: "):].partition("  (")
+                num = rest.rsplit(", ", 1)[-1].split(" ", 1)[0]
+                if num.isdigit():
+                    counts[name.strip()] = int(num)
+    except OSError:
+        pass
+    return counts
+
+
+def shrunk_sources(results: list[SourceResult], previous: dict[str, int]) -> list[str]:
+    """Sources that answered with less than half their previous count."""
+    out = []
+    for res in results:
+        before = previous.get(res.name, 0)
+        if before >= MIN_SOURCE_COUNT_FOR_SHRINK and len(res.prefixes) < before * MAX_SOURCE_SHRINK_FRACTION:
+            out.append(f"{res.name} {before}->{len(res.prefixes)}")
+    return out
 
 
 def check_thresholds(new_count: int, existing_count: int) -> str | None:
@@ -462,9 +514,12 @@ def main() -> int:
         eprint("WARNING: zero prefixes from:", ", ".join(empty))
     # An empty answer (HTTP 200 with a maintenance page or a changed JSON shape)
     # drops that feed's ranges just like an exception does.
-    if (errors or empty) and args.strict:
-        eprint(f"ERROR: {len(errors)} source(s) failed and {len(empty)} returned no prefixes, "
-               f"--strict is set; keeping existing file at {args.output}")
+    shrunk = shrunk_sources(results, existing_source_counts(args.output)) if args.strict else []
+    if shrunk:
+        eprint("WARNING: shrank to under half their previous count:", ", ".join(shrunk))
+    if (errors or empty or shrunk) and args.strict:
+        eprint(f"ERROR: {len(errors)} source(s) failed, {len(empty)} returned no prefixes, "
+               f"{len(shrunk)} shrank by over half; --strict is set; keeping existing file at {args.output}")
         return 3
     if errors:
         eprint(f"WARNING: {len(errors)} source(s) failed, continuing with {len(results)} that succeeded")
@@ -474,9 +529,10 @@ def main() -> int:
         union.update(res.prefixes)
 
     # Fail-safe: never replace a good list with a suspiciously small/large one.
-    reason = check_thresholds(len(union), count_existing_prefixes(args.output))
+    existing = existing_prefixes(args.output)
+    reason = check_thresholds(len(union), len(existing))
     if reason is None and not args.allow_growth:
-        reason = check_space_growth(union, existing_prefixes(args.output))
+        reason = check_space_growth(union, existing)
     if reason is not None:
         eprint(f"ERROR: refusing to write ({reason}); keeping existing file at {args.output}")
         return 2

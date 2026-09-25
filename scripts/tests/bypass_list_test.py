@@ -192,6 +192,28 @@ def test_retry_and_strict() -> None:
             check(False, "a 404 must raise")
         except urllib.error.HTTPError:
             check(calls["n"] == 1, f"a 4xx must not be retried (calls={calls['n']})")
+        # 429 / 408 are transient: retried.
+        for code in (429, 408):
+            calls["n"] = 0
+            def limited(req, timeout=None, code=code):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise urllib.error.HTTPError(req.full_url, code, "slow down", {}, None)
+                return _Resp(b"8.8.8.0/24\n")
+            blp.urllib.request.urlopen = limited
+            check(blp.fetch_text("https://feed.invalid/x") == "8.8.8.0/24\n" and calls["n"] == 2,
+                  f"HTTP {code} must be retried (calls={calls['n']})")
+        # A body cut short mid-transfer (IncompleteRead) is retried.
+        import http.client
+        calls["n"] = 0
+        def truncated(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise http.client.IncompleteRead(b"8.8.8.0/2", 100)
+            return _Resp(b"8.8.8.0/24\n")
+        blp.urllib.request.urlopen = truncated
+        check(blp.fetch_text("https://feed.invalid/x") == "8.8.8.0/24\n" and calls["n"] == 2,
+              f"IncompleteRead must be retried (calls={calls['n']})")
     finally:
         blp.urllib.request.urlopen, blp.FETCH_BACKOFF_S = real_urlopen, real_backoff
 
@@ -240,22 +262,68 @@ def test_retry_and_strict() -> None:
             blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
 
 
+# ── 1f2. --strict per-source shrink (a truncated feed parses as a shorter list) ─
+def test_source_shrink() -> None:
+    good = [f"8.{a}.{b}.0/24" for a in range(2) for b in range(100)]   # 200 /24s
+    real_load, real_sources, real_argv = blp.load_source, blp.SOURCES, sys.argv
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "bypass.conf")
+        blp.render_output([blp.SourceResult(name="feed", kind="txt", origin="x", prefixes=set(good)),
+                           blp.SourceResult(name="small", kind="txt", origin="x", prefixes={"9.9.9.0/24"} | {f"9.9.{i}.0/24" for i in range(1, 4)})],
+                          out, set(good) | {"9.9.9.0/24"})
+        check(blp.existing_source_counts(out) == {"feed": 200, "small": 4},
+              f"header counts must round-trip: {blp.existing_source_counts(out)}")
+        with open(out) as fh:
+            before = fh.read()
+
+        def cut(spec):   # 'feed' returns 60 of its 200 prefixes
+            return [blp.SourceResult(name=spec, kind="txt", origin="x",
+                                     prefixes=set(good[:60]) if spec == "feed" else {"9.9.9.0/24"})]
+        blp.load_source, blp.SOURCES = cut, ["feed", "small"]
+        try:
+            sys.argv = ["build_bypass_list.py", "--strict", out]
+            rc = blp.main()
+            with open(out) as fh:
+                kept = fh.read() == before
+            check(rc == 3 and kept, f"--strict with a source cut to under half: rc={rc}, kept={kept}")
+            # 'small' went 4 -> 1, but tiny feeds are below MIN_SOURCE_COUNT_FOR_SHRINK.
+            check(blp.shrunk_sources(cut("small"), {"small": 4}) == [],
+                  "a tiny feed's swing must not count as a shrink")
+        finally:
+            blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
+
+
 # ── 1g. address-space growth guard (a poisoned feed of public /16s) ─────────
 def test_space_growth() -> None:
     base = [f"8.{b}.0.0/24" for b in range(200)]           # 51 200 addresses
-    check(blp.check_space_growth(base, base) is None, "same list must pass")
-    check(blp.check_space_growth(base + ["9.9.9.0/24"], base) is None, "small growth must pass")
-    check(blp.check_space_growth(base + ["9.1.0.0/16"], base) is None,
-          "one /16 of growth is within the slack")
+    g = blp.check_space_growth
+    check(g(base, base) is None, "same list must pass")
+    check(g(base + ["9.9.9.0/24"], base) is None, "small growth must pass")
+    # Allowed growth = existing space without its largest prefix, plus the slack.
+    allow4 = (51_200 - 256) + blp.SPACE_GROWTH_SLACK_V4
+    fill = allow4 // 256                                     # whole /24s that still fit
+    check(g(base + [f"9.{b}.0.0/24" for b in range(fill)], base) is None,
+          "growth up to the allowance must pass")
+    check(g(base + [f"9.{b}.0.0/24" for b in range(fill + 1)], base) is not None,
+          "one /24 past the allowance must be refused")
+    check(g(base + ["9.1.0.0/16"], base) is not None,
+          "a new /16 (more than the whole baseline) must be refused")
+    # The slack is what lets a tiny list grow at all.
+    tiny = ["8.8.8.0/24"]
+    check(g(tiny + ["9.9.0.0/20"], tiny) is None, "a /20 of growth fits the slack on a tiny list")
+    check(g(tiny + ["9.9.0.0/19"], tiny) is not None, "a /19 does not")
+    # One dominant prefix must not inflate the allowance (Skroutz's /32 is ~all
+    # of the IPv6 space): adding another prefix that size is refused.
+    v6 = ["2a03:e40::/32"] + [f"2001:db8:{i:x}::/48" for i in range(4)]
+    check(g(base + v6, base + v6) is None, "unchanged IPv6 must pass")
+    check(g(base + v6 + ["2a04::/32"], base + v6) is not None,
+          "a second /32 next to a dominant /32 must be refused")
+    check(g(base + v6 + ["2001:db8:ff::/48"], base + v6) is None,
+          "one more /48 is within the allowance")
+    check(g(base + [f"{a}.{b}.0.0/16" for a in (11, 12) for b in range(10)], []) is None,
+          "no existing file: nothing to compare")
     poisoned = base + [f"{a}.{b}.0.0/16" for a in (11, 12) for b in range(10)]
-    check(blp.check_space_growth(poisoned, base) is not None,
-          "twenty added /16s (+25x the space, only +20 prefixes) must be refused")
-    check(blp.check_space_growth(base + ["2a03:e40::/32"], base + ["2a03:e40::/32"]) is None,
-          "unchanged IPv6 must pass")
-    check(blp.check_space_growth(base + ["2a03:e40::/32", "2a04::/32", "2a05::/32", "2a06::/32"],
-                                 base + ["2a03:e40::/32"]) is not None,
-          "quadrupled IPv6 space (> 2x + one /32 of slack) must be refused")
-    check(blp.check_space_growth(poisoned, []) is None, "no existing file: nothing to compare")
+
     # main() applies it: a poisoned run is refused (exit 2) and the file kept,
     # and --allow-growth (a reviewed manual run) lets it through.
     def poisoned_load(spec):
@@ -288,7 +356,7 @@ def test_space_growth() -> None:
 def main() -> int:
     for fn in (test_normalize_prefix, test_thresholds, test_oneline,
                test_render_no_injection, test_walk_for_prefixes, test_retry_and_strict,
-               test_space_growth, test_committed_file):
+               test_source_shrink, test_space_growth, test_committed_file):
         fn()
     if _failures:
         print(f"\nbypass_list_test: {len(_failures)} FAILURE(S)")
