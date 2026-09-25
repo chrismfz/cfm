@@ -41,7 +41,7 @@ service_is_installed() {
         return 1
     fi
 
-    systemctl list-unit-files "$sii_unit" --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$sii_unit"
+    systemctl list-unit-files "$sii_unit" --no-legend 2>/dev/null | awk '{print $1}' | grep -x "$sii_unit" >/dev/null
 }
 
 service_is_active() {
@@ -360,7 +360,42 @@ commit_files() {
     commit_cleanup
     [ -n "$cf_backup" ] && echo "CFM proxy config: backed up $cf_dst to $cf_backup"
     echo "CFM proxy config: deployed $cf_dst"
+    prune_prepkg_backups "$cf_dst" "${CFM_PREPKG_KEEP:-10}"
     return 0
+}
+
+# is_prepkg_backup DST FILE: FILE is one of the backups commit_files makes,
+# DST.cfm-prepkg.<YYYYmmddHHMMSS>, as a regular file (not a symlink).
+is_prepkg_backup() {
+    ipb_ts=${2#"$1".cfm-prepkg.}
+    case "$ipb_ts" in
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+        *) return 1 ;;
+    esac
+    [ -f "$2" ] && [ ! -L "$2" ]
+}
+
+# prune_prepkg_backups DST KEEP: after a successful deploy, keep only the KEEP
+# newest DST.cfm-prepkg.<timestamp> backups. Every upgrade adds one and nothing
+# removed them (a node upgraded since May had ~90). The timestamp sorts in
+# time order, and so does the glob. Only that exact name form is touched, never
+# a hand-made copy; KEEP=0 (CFM_PREPKG_KEEP=0) keeps them all.
+prune_prepkg_backups() {
+    case "$2" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$2" -ge 1 ] || return 0
+    ppb_n=0
+    for ppb_f in "$1".cfm-prepkg.*; do
+        is_prepkg_backup "$1" "$ppb_f" && ppb_n=$((ppb_n + 1))
+    done
+    ppb_drop=$((ppb_n - $2))
+    [ "$ppb_drop" -gt 0 ] || return 0
+    ppb_removed=0
+    for ppb_f in "$1".cfm-prepkg.*; do
+        [ "$ppb_removed" -lt "$ppb_drop" ] || break
+        is_prepkg_backup "$1" "$ppb_f" || continue
+        rm -f "$ppb_f" && ppb_removed=$((ppb_removed + 1))
+    done
+    echo "CFM proxy config: removed $ppb_removed old backup(s) of $1, keeping the newest $2 (CFM_PREPKG_KEEP)"
 }
 
 # commit_rollback: put back each sidecar this commit actually renamed in (its
@@ -543,7 +578,7 @@ process_engine() {
     fi
 
     # -T (nginx >= 1.9.2, every Angie) is what proves which files were read.
-    if ! "$pe_bin" -h 2>&1 | grep -q -- '-T'; then
+    if ! "$pe_bin" -h 2>&1 | grep -- '-T' >/dev/null; then
         echo "WARNING: CFM proxy config: $pe_bin has no -T option (engine too old); cannot test the new sidecars safely; $pe_unchanged"
         cleanup_proxy_deploy
         return 0
@@ -574,7 +609,7 @@ process_engine() {
     # that cannot see must fail. A commented-out include is not read, so
     # comments don't count.
     for pe_name in $CFM_SIDECARS; do
-        sed 's/#.*//' "$pe_stage/main.conf" | grep -qF "$pe_stage/$pe_name" || continue
+        sed 's/#.*//' "$pe_stage/main.conf" | grep -F "$pe_stage/$pe_name" >/dev/null || continue
         if ! grep -qxF "# configuration file $pe_stage/$pe_name:" "$pe_stage/.dump"; then
             echo "WARNING: CFM proxy config: $pe_engine -T did not list $pe_stage/$pe_name; cannot confirm the test read the new sidecars; $pe_unchanged"
             cleanup_proxy_deploy

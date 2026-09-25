@@ -979,4 +979,60 @@ out=$(run_or "$pkg" "$live")
 cmp -s "$live/trusted_proxies.conf" "$pkg/trusted_proxies.conf" && cmp -s "$live/nginx.conf" "$pkg/openresty.conf" \
   || { echo "FAIL: a live dir with & in its path must deploy" >&2; printf '%s\n' "$out" >&2; exit 1; }
 
+# 31. The real script ignores SIGPIPE, and its children inherit that: a reader
+#     that stops early (grep -q) made the writer print "Broken pipe" instead of
+#     exiting quietly (seen on a live upgrade: `sed: couldn't write N items to
+#     stdout: Broken pipe`). A large main config, the include near the top, the
+#     real engine, SIGPIPE ignored as in the script: no such noise.
+pp_pkg="$tmp/pp-pkg"; pp_live="$tmp/pp-live"; rm -rf "$pp_pkg" "$pp_live"; mkdir -p "$pp_pkg" "$pp_live"
+{
+  printf 'events {}\nhttp {\ninclude %s/trusted_proxies.conf;\ngeo $cfm_x {\n    default 0;\n    include %s/challenge_waf_bypass.conf;\n}\ninclude %s/cfm-panel-listeners.conf;\n' "$pp_live" "$pp_live" "$pp_live"
+  i=0; while [ "$i" -lt 60000 ]; do printf '    # padding line %s\n' "$i"; i=$((i + 1)); done
+  printf '}\n'
+} >"$pp_pkg/openresty.conf"
+printf '%s\n' '# new trusted' >"$pp_pkg/trusted_proxies.conf"; printf '%s\n' '192.0.2.1/32 1;' >"$pp_pkg/challenge_waf_bypass.conf"
+cp "$configs/cfm-panel-listeners.conf.in" "$pp_pkg/"
+pp_out=$(PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$pp_pkg" \
+  sh -c 'trap "" PIPE; . "$1"; process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
+  "$tmp/functions.sh" "$bin_dir/real-nginx" "$pp_pkg/openresty.conf" "$pp_live/nginx.conf" "$pp_live" 2>&1)
+cmp -s "$pp_live/nginx.conf" "$pp_pkg/openresty.conf" || { echo "FAIL: the large-config deploy must succeed" >&2; printf '%s\n' "$pp_out" >&2; exit 1; }
+if printf '%s\n' "$pp_out" | rg -qi 'broken pipe|couldn.t write|write error'; then
+  echo "FAIL: a deploy with SIGPIPE ignored printed broken-pipe noise:" >&2; printf '%s\n' "$pp_out" | rg -i 'broken pipe|couldn.t write|write error' >&2; exit 1
+fi
+
+# 32. Old .cfm-prepkg backups are pruned after a successful deploy: the newest
+#     CFM_PREPKG_KEEP (default 10) stay, counting the one this run made; a name
+#     that isn't exactly NAME.cfm-prepkg.<14 digits>, or a symlink, is never touched.
+pkg="$tmp/pkg-prune"; live="$tmp/live-prune"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+i=1; while [ "$i" -le 13 ]; do printf 'old %s\n' "$i" >"$live/nginx.conf.cfm-prepkg.202601$(printf '%02d' "$i")120000"; i=$((i + 1)); done
+printf 'mine\n' >"$live/nginx.conf.cfm-prepkg.manual"
+printf 'short\n' >"$live/nginx.conf.cfm-prepkg.2026"
+ln -s /nonexistent "$live/nginx.conf.cfm-prepkg.20250101000000"
+out=$(run_or "$pkg" "$live")
+kept=$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$' || true)
+[ "$kept" = 11 ] || { echo "FAIL: prune must keep 10 backups (+ the untouched symlink = 11 matching names), got $kept" >&2; ls -A "$live" >&2; exit 1; }
+for gone in 01 02 03 04; do
+  [ ! -e "$live/nginx.conf.cfm-prepkg.202601${gone}120000" ] || { echo "FAIL: the oldest backups must go (202601${gone})" >&2; exit 1; }
+done
+[ -e "$live/nginx.conf.cfm-prepkg.20260105120000" ] || { echo "FAIL: the 9 newest old backups must stay" >&2; ls -A "$live" >&2; exit 1; }
+[ -f "$live/nginx.conf.cfm-prepkg.manual" ] && [ -f "$live/nginx.conf.cfm-prepkg.2026" ] && [ -L "$live/nginx.conf.cfm-prepkg.20250101000000" ] \
+  || { echo "FAIL: a hand-made copy, a short name or a symlink must never be pruned" >&2; ls -A "$live" >&2; exit 1; }
+printf '%s\n' "$out" | rg -q 'removed 4 old backup\(s\)' || { echo "FAIL: the prune must be reported" >&2; printf '%s\n' "$out" >&2; exit 1; }
+
+# 33. CFM_PREPKG_KEEP=0 keeps every backup.
+pkg="$tmp/pkg-keepall"; live="$tmp/live-keepall"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+i=1; while [ "$i" -le 13 ]; do : >"$live/nginx.conf.cfm-prepkg.202601$(printf '%02d' "$i")120000"; i=$((i + 1)); done
+CFM_PREPKG_KEEP=0 run_or "$pkg" "$live" >/dev/null
+[ "$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$')" = 14 ] || { echo "FAIL: CFM_PREPKG_KEEP=0 must keep all backups" >&2; ls -A "$live" >&2; exit 1; }
+
+# 34. A failed deploy prunes nothing (the live dir stays exactly as it was).
+pkg="$tmp/pkg-noprune"; live="$tmp/live-noprune"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+i=1; while [ "$i" -le 13 ]; do : >"$live/nginx.conf.cfm-prepkg.202601$(printf '%02d' "$i")120000"; i=$((i + 1)); done
+before=$(snapshot "$live")
+run_or "$pkg" "$live" 1 >/dev/null
+assert_untouched "$live" "$before" "failed deploy with old backups"
+
 echo "OK: package proxy deploy helper tests only the main engine configs, with the new sidecars staged; a failed run leaves the live dir untouched"
