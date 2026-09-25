@@ -129,6 +129,9 @@ def test_main() -> None:
 
         rc, log = run_main(out, api())
         check(rc == 0 and read(out) == first and "unchanged" in log, "unchanged ranges leave the file (and its date) alone")
+        doc = api(); doc["result"]["etag"] = "def"
+        rc, _ = run_main(out, doc)
+        check(rc == 0 and read(out) == first, "an etag-only change leaves the file alone (no release commit)")
 
         with open(out, "w", encoding="utf-8") as fh:
             fh.write("# Example only\n" + "".join(f"set_real_ip_from {p};\n" for p in V4 + V6))
@@ -145,6 +148,11 @@ def test_main() -> None:
             rc, _ = run_main(out, **kw)
             check(rc == want and read(out) == first, f"{name}: exit {want}, existing file kept (got {rc})")
         check(not [f for f in os.listdir(d) if f.endswith(".tmp")], "no temp file left")
+
+        with open(out, "a", encoding="utf-8") as fh:
+            fh.write("set_real_ip_from unix:;\nset_real_ip_from not-a-net;\n")
+        rc, _ = run_main(out, api())
+        check(rc == 0 and "set_real_ip_from unix:;" not in read(out), "unparseable lines in the existing file don't crash it; the rewrite drops them")
 
         rc, log = run_main(out, api(v4=V4 + ["8.0.0.0/12", "9.0.0.0/12"]), force=True)
         check(rc == 0 and "+ 8.0.0.0/12" in log and "8.0.0.0/12" in tp.existing_prefixes(out),
