@@ -44,8 +44,11 @@ jobs:
       # violation sat in the tree — a guardrail reporting success for months
       # without ever running. Those scripts now refuse to run without it; this
       # step is what makes them able to.
-      - name: Install luajit + ripgrep (CI check dependencies)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends luajit ripgrep
+      # nginx: check_package_proxy_config_deploy.sh runs the package-upgrade
+      # helper's staged `-T` test against a REAL nginx (unprivileged, scratch
+      # prefix; the service is never used).
+      - name: Install luajit + ripgrep + nginx (CI check dependencies)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends luajit ripgrep nginx
       - name: Enforce CLI transport guardrail
         run: ./scripts/tests/check_cli_transport.sh
       - name: Enforce Lua clearance module load check

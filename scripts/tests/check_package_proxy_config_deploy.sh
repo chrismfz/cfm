@@ -44,32 +44,34 @@ cat >"$configs/cfm-panel-listeners.conf.in" <<'CONF'
 # Install path: @LISTENER_DEST@
 CONF
 
-cat >"$bin_dir/check-includes.sh" <<'EOF_CI'
-# A real engine test reads every included file: fail if one is missing or
-# marked BROKEN, and record the path it read. Includes are found the way the
-# helper finds them (comments dropped, lines joined, anywhere on a line), and
-# a relative include resolves against the -c file's dir, as nginx does.
-check_includes() {
-  ci_dir=$(dirname "$1")
-  sed -E 's/(^|[[:space:];{}])#.*$/\1/' "$1" | tr '\n' ' ' \
-    | grep -oE '\binclude[[:space:]]+[^;]+;' \
-    | sed -E 's/^include[[:space:]]+//; s/[[:space:]]*;$//' | while read -r inc; do
-    case "$inc" in /*) ;; *) inc=$ci_dir/$inc ;; esac
-    printf 'include %s\n' "$inc" >> "$2"
-    [ -f "$inc" ] || exit 1
-    ! grep -q BROKEN "$inc" || exit 1
+# Fake engines: -T = test + print "# configuration file PATH:" for the main
+# config and each file it includes (one simple `include PATH;` per line,
+# relative to the -c file's dir, globs expanded), failing on a missing file or
+# one marked BROKEN. The include FORMS a real engine resolves (globs in the
+# live dir, //, ./, comments, two-line includes...) are tested against a REAL
+# nginx further down, not against this.
+cat >"$bin_dir/fake-dump.sh" <<'EOF_FD'
+fake_dump() { # MAIN RECORD
+  fd_dir=$(dirname "$1")
+  printf '# configuration file %s:\n' "$1"
+  sed -n 's/^[[:space:]]*include[[:space:]][[:space:]]*\([^;]*\);.*$/\1/p' "$1" | while read -r inc; do
+    case "$inc" in /*) ;; *) inc=$fd_dir/$inc ;; esac
+    for f in $inc; do
+      printf 'include %s\n' "$f" >> "$2"
+      [ -f "$f" ] || exit 1
+      ! grep -q BROKEN "$f" || exit 1
+      printf '# configuration file %s:\n' "$f"
+    done
   done
 }
-EOF_CI
+EOF_FD
 
 cat >"$bin_dir/fake-openresty" <<'EOF_FAKE'
 #!/bin/sh
-. "$(dirname "$0")/check-includes.sh"
-{
-  printf '%s\n' "$*"
-} >> "$FAKE_OPENRESTY_ARGS"
-[ "$1" = "-t" ] && [ "$2" = "-c" ] && [ -f "$3" ] || exit 1
-( check_includes "$3" "$FAKE_OPENRESTY_ARGS.includes" ) || exit 1
+. "$(dirname "$0")/fake-dump.sh"
+printf '%s\n' "$*" >> "$FAKE_OPENRESTY_ARGS"
+[ "$1" = "-T" ] && [ "$2" = "-c" ] && [ -f "$3" ] || exit 1
+fake_dump "$3" "$FAKE_OPENRESTY_ARGS.includes" || exit 1
 [ "${FAKE_OPENRESTY_FAIL:-0}" = "1" ] && exit 1
 exit 0
 EOF_FAKE
@@ -77,14 +79,25 @@ chmod 0755 "$bin_dir/fake-openresty"
 
 cat >"$bin_dir/fake-angie" <<'EOF_FAKE'
 #!/bin/sh
-. "$(dirname "$0")/check-includes.sh"
-{
-  printf '%s\n' "$*"
-} >> "$FAKE_ANGIE_ARGS"
-[ "$1" = "-t" ] && [ "$2" = "-c" ] && [ -f "$3" ] || exit 1
-( check_includes "$3" "$FAKE_ANGIE_ARGS.includes" ) || exit 1
+. "$(dirname "$0")/fake-dump.sh"
+printf '%s\n' "$*" >> "$FAKE_ANGIE_ARGS"
+[ "$1" = "-T" ] && [ "$2" = "-c" ] && [ -f "$3" ] || exit 1
+fake_dump "$3" "$FAKE_ANGIE_ARGS.includes" || exit 1
 EOF_FAKE
 chmod 0755 "$bin_dir/fake-angie"
+
+# A REAL nginx (CI installs it): the one engine whose include resolution the
+# helper's `-T` check must agree with. Wrapped so it logs to stderr and uses a
+# scratch prefix and pid path (Ubuntu's build compiles in /run/nginx.pid,
+# which -t opens), so it runs unprivileged and touches nothing on the host.
+# A guardrail that cannot run its matcher must FAIL (CLAUDE.md §5).
+command -v nginx >/dev/null 2>&1 || { echo "FAIL: nginx is required by $(basename "$0") (CI: apt-get install nginx)" >&2; exit 1; }
+mkdir -p "$tmp/nginx-prefix/logs"
+cat >"$bin_dir/real-nginx" <<EOF_RN
+#!/bin/sh
+exec $(command -v nginx) -e stderr -p "$tmp/nginx-prefix" -g "pid $tmp/nginx-prefix/nginx.pid;" "\$@"
+EOF_RN
+chmod 0755 "$bin_dir/real-nginx"
 
 cat >"$bin_dir/systemctl" <<'EOF_SYSTEMCTL'
 #!/bin/sh
@@ -264,13 +277,13 @@ active_angie_output=$(
     "$openresty_conf"
 )
 
-if ! printf '%s\n' "$active_angie_output" | rg -q 'CFM proxy config: testing Angie config with: .*/fake-angie -t -c .*/\.cfm-proxy-stage\.[^/]+/main\.conf \(packaged .*/configs/angie\.conf \+ new sidecars\)'; then
+if ! printf '%s\n' "$active_angie_output" | rg -q 'CFM proxy config: testing Angie config with: .*/fake-angie -T -c .*/\.cfm-proxy-stage\.[^/]+/main\.conf \(packaged .*/configs/angie\.conf \+ new sidecars\)'; then
   echo "FAIL: expected Angie main config test command in output" >&2
   printf '%s\n' "$active_angie_output" >&2
   exit 1
 fi
 
-if ! printf '%s\n' "$active_angie_output" | rg -q 'CFM proxy config: testing OpenResty config with: .*/fake-openresty -t -c .*/\.cfm-proxy-stage\.[^/]+/main\.conf \(packaged .*/configs/openresty\.conf \+ new sidecars\)'; then
+if ! printf '%s\n' "$active_angie_output" | rg -q 'CFM proxy config: testing OpenResty config with: .*/fake-openresty -T -c .*/\.cfm-proxy-stage\.[^/]+/main\.conf \(packaged .*/configs/openresty\.conf \+ new sidecars\)'; then
   echo "FAIL: expected OpenResty main config test command in output" >&2
   printf '%s\n' "$active_angie_output" >&2
   exit 1
@@ -315,8 +328,8 @@ fi
 for eng in openresty angie; do
   actual_args="$(cat "$tmp/$eng.args")"
   case "$actual_args" in
-    "-t -c "*/.cfm-proxy-stage.*/main.conf) ;;
-    *) echo "FAIL: expected fake $eng args '-t -c <stage>/main.conf', got '$actual_args'" >&2; exit 1 ;;
+    "-T -c "*/.cfm-proxy-stage.*/main.conf) ;;
+    *) echo "FAIL: expected fake $eng args '-T -c <stage>/main.conf', got '$actual_args'" >&2; exit 1 ;;
   esac
 done
 for d in "$angie_conf" "$openresty_conf"; do
@@ -567,7 +580,7 @@ mk_pkg "$pkg" "$live"; sed -i "s|include $live/trusted_proxies.conf;|include $li
 seed_live "$live"; before=$(snapshot "$live")
 out=$(run_or "$pkg" "$live")
 assert_untouched "$live" "$before" "unredirectable include"
-printf '%s\n' "$out" | rg -q 'cannot redirect; not deploying untested sidecars' \
+printf '%s\n' "$out" | rg -q 'test read a sidecar other than the new one' \
   || { echo "FAIL: an unredirectable include must be refused" >&2; printf '%s\n' "$out" >&2; exit 1; }
 
 # 6. Success -> new sidecars and main live, byte-identical to the package, the
@@ -650,16 +663,6 @@ mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live")
 FAKE_INSTALL_FAIL=/.nginx.conf.cfm-new run_or "$pkg" "$live" >/dev/null
 assert_untouched "$live" "$before" "main temp write failed after the sidecar temps"
 
-# 11. An include of a sidecar mid-line (`server { include X; }`) in a form the
-#     rewrite skips is still caught by the redirect check.
-pkg="$tmp/pkg-midline"; live="$tmp/live-midline"
-mk_pkg "$pkg" "$live"
-sed -i "s|    include $live/cfm-panel-listeners.conf;|    server { include $live/./cfm-panel-listeners.conf; }|" "$pkg/openresty.conf"
-seed_live "$live"; before=$(snapshot "$live")
-out=$(run_or "$pkg" "$live")
-assert_untouched "$live" "$before" "mid-line unredirectable include"
-printf '%s\n' "$out" | rg -q 'cannot redirect' || { echo "FAIL: a mid-line unredirectable include must be refused" >&2; printf '%s\n' "$out" >&2; exit 1; }
-
 # 12. A signal that lands after the main config was renamed in (commit done,
 #     flag not yet cleared) must NOT roll the sidecars back under the new main.
 live="$tmp/live-latesig"; mkdir -p "$live"
@@ -682,49 +685,90 @@ FAKE_MV_FAIL=/nginx.conf FAKE_MV_ONCE="$tmp/mv-once-13" run_or "$pkg" "$live" >/
 assert_untouched "$live" "$before" "rolled-back commit (incl. its backup)"
 
 # 14. The SHIPPED configs stage cleanly: exactly their three sidecar includes
-#     move, nothing else (a CI guard against a config change that would make
-#     every node silently refuse to deploy).
+#     move, nothing else.
 for e in angie:/etc/angie openresty:/usr/local/openresty/nginx/conf; do
   n=${e%%:*}; d=${e#*:}
   st=$(mktemp -d "$tmp/real.XXXXXX")
   sh -c '. "$1"; stage_main_config "$2" "$3" "$4"' sh "$tmp/functions.sh" "configs/$n.conf" "$st" "$d" \
-    || { echo "FAIL: shipped configs/$n.conf must stage cleanly" >&2; exit 1; }
-  got=$(sh -c '. "$1"; include_targets "$2"' sh "$tmp/functions.sh" "$st/main.conf" | sed "s|$st|STAGE|" | tr '\n' ' ')
-  want="$d/mime.types STAGE/trusted_proxies.conf STAGE/challenge_waf_bypass.conf STAGE/cfm-panel-listeners.conf "
-  [ "$got" = "$want" ] || { echo "FAIL: configs/$n.conf staged includes: got '$got', want '$want'" >&2; exit 1; }
+    || { echo "FAIL: shipped configs/$n.conf must stage" >&2; exit 1; }
+  [ "$(diff "configs/$n.conf" "$st/main.conf" | rg -c '^>')" = 3 ] \
+    || { echo "FAIL: staging configs/$n.conf must change exactly 3 lines" >&2; diff "configs/$n.conf" "$st/main.conf" >&2; exit 1; }
   diff <(sed "s#$d/\(trusted_proxies\|challenge_waf_bypass\|cfm-panel-listeners\)\.conf;#STAGE/\1.conf;#" "configs/$n.conf") \
        <(sed "s|$st/|STAGE/|" "$st/main.conf") >/dev/null \
     || { echo "FAIL: staged configs/$n.conf differs beyond the sidecar includes" >&2; exit 1; }
 done
 
-# 15. Include forms: a comment that mentions a sidecar is ignored; `;include`
-#     with no space, a two-line include and a glob matching a sidecar are all
-#     seen (the glob is refused: it would read the live copy).
-stage_case() { # LIVE <main.conf body>  -> exit status of stage_main_config
-  pkg="$tmp/pkg-form"; rm -rf "$pkg"; mkdir -p "$pkg"; printf '%s\n' "$2" >"$pkg/openresty.conf"
-  st=$(mktemp -d "$tmp/form.XXXXXX")
-  sh -c '. "$1"; stage_main_config "$2" "$3" "$4" >/dev/null' sh "$tmp/functions.sh" "$pkg/openresty.conf" "$st" "$1"
+# 15. With a REAL nginx: whatever form the packaged main includes a sidecar
+#     in, the deploy happens only if the engine test read the NEW (staged)
+#     copies; if it read a live one (glob in the live dir, //, ./, a form the
+#     rewrite skips), nothing is deployed. The engine resolves the includes;
+#     the helper only reads its -T file list.
+#     Sidecars valid for nginx: a comment, a geo list, a comment.
+nx_case() { # NAME EXPECT(deploy|refuse) <http{} body, @L@ = live dir>
+  nx_pkg="$tmp/nx-pkg-$1"; nx_live="$tmp/nx-live-$1"; rm -rf "$nx_pkg" "$nx_live"
+  mkdir -p "$nx_pkg" "$nx_live"
+  printf 'events {}\nhttp {\n%s\n}\n' "$(printf '%s\n' "$3" | sed "s|@L@|$nx_live|g")" >"$nx_pkg/openresty.conf"
+  printf '%s\n' '# new trusted' >"$nx_pkg/trusted_proxies.conf"
+  printf '%s\n' '192.0.2.1/32 1;' >"$nx_pkg/challenge_waf_bypass.conf"
+  cp "$configs/cfm-panel-listeners.conf.in" "$nx_pkg/"
+  printf '%s\n' '# OLD trusted' >"$nx_live/trusted_proxies.conf"
+  printf '%s\n' '198.51.100.1/32 1;' >"$nx_live/challenge_waf_bypass.conf"
+  printf '%s\n' 'OLD main' >"$nx_live/nginx.conf"
+  nx_before=$(snapshot "$nx_live")
+  nx_out=$(PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$nx_pkg" \
+    sh -c '. "$1"; process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
+    "$tmp/functions.sh" "$bin_dir/real-nginx" "$nx_pkg/openresty.conf" "$nx_live/nginx.conf" "$nx_live" 2>&1)
+  if [ "$2" = deploy ]; then
+    cmp -s "$nx_live/nginx.conf" "$nx_pkg/openresty.conf" && cmp -s "$nx_live/trusted_proxies.conf" "$nx_pkg/trusted_proxies.conf" \
+      || { echo "FAIL: real nginx, $1: expected a deploy" >&2; printf '%s\n' "$nx_out" >&2; exit 1; }
+  else
+    [ "$(snapshot "$nx_live")" = "$nx_before" ] || { echo "FAIL: real nginx, $1: the live dir changed" >&2; printf '%s\n' "$nx_out" >&2; exit 1; }
+    printf '%s\n' "$nx_out" | rg -q 'test read a sidecar other than the new one' \
+      || { echo "FAIL: real nginx, $1: expected 'read a sidecar other than the new one'" >&2; printf '%s\n' "$nx_out" >&2; exit 1; }
+  fi
 }
-L=/srv/live
-stage_case $L "http {
-    # operators on plain nginx: include /etc/nginx/trusted_proxies.conf; instead
-    include $L/trusted_proxies.conf;
-}" || { echo "FAIL: a comment mentioning a sidecar must not block the deploy" >&2; exit 1; }
-stage_case $L "http { include $L/mime.types;include /other/trusted_proxies.conf; }" \
-  && { echo "FAIL: an include right after ';' must be seen" >&2; exit 1; }
-stage_case $L "http { include
-      /other/trusted_proxies.conf; }" \
-  && { echo "FAIL: a two-line include must be seen" >&2; exit 1; }
-stage_case $L "http { include $L/*.conf; }" \
-  && { echo "FAIL: a glob matching a sidecar must be refused" >&2; exit 1; }
-stage_case $L "http { include $L/trusted_*.conf; }" \
-  && { echo "FAIL: a partial glob matching a sidecar must be refused" >&2; exit 1; }
-stage_case $L "http { include /etc/nginx/conf.d/*.conf; include $L/trusted_proxies.conf; }" \
-  || { echo "FAIL: a glob elsewhere is fine when it can't be a live sidecar" >&2; exit 1; }
-stage_case /etc/nginx/includes "http { include /etc/nginx/includes/trusted_proxies.conf; }" \
-  || { echo "FAIL: a live dir whose path contains 'include' must still stage" >&2; exit 1; }
-stage_case $L "http { include trusted_proxies.conf; }" \
-  || { echo "FAIL: a bare relative sidecar include resolves to the stage and is fine" >&2; exit 1; }
+G='geo $cfm_x {
+    default 0;
+    include @L@/challenge_waf_bypass.conf;
+}'
+nx_case plain deploy "include @L@/trusted_proxies.conf;
+$G"
+nx_case comment deploy "# operators on plain nginx: include /etc/nginx/trusted_proxies.conf; instead
+include @L@/trusted_proxies.conf;  # trailing comment
+$G"
+nx_case tab deploy "include	@L@/trusted_proxies.conf;
+$G"
+nx_case relative deploy "include trusted_proxies.conf;
+$G"
+nx_case glob-live refuse "include @L@/*_proxies.conf;
+$G"
+nx_case double-slash refuse "include @L@//trusted_proxies.conf;
+$G"
+nx_case dot-slash refuse "include @L@/./trusted_proxies.conf;
+$G"
+nx_case twoline-live deploy "include
+    @L@/trusted_proxies.conf;
+$G"
+nx_case semicolon-include refuse "include @L@/trusted_proxies.conf;include @L@/../nx-live-semicolon-include/trusted_proxies.conf;
+$G"
+# A broken NEW sidecar: the real engine rejects it; live dir unchanged.
+nx_pkg="$tmp/nx-pkg-broken"; nx_live="$tmp/nx-live-broken"; rm -rf "$nx_pkg" "$nx_live"; mkdir -p "$nx_pkg" "$nx_live"
+printf 'events {}\nhttp {\ninclude %s/trusted_proxies.conf;\n%s\n}\n' "$nx_live" "$(printf '%s\n' "$G" | sed "s|@L@|$nx_live|g")" >"$nx_pkg/openresty.conf"
+printf '%s\n' 'this_is_not_a_directive;' >"$nx_pkg/trusted_proxies.conf"
+printf '%s\n' '192.0.2.1/32 1;' >"$nx_pkg/challenge_waf_bypass.conf"; cp "$configs/cfm-panel-listeners.conf.in" "$nx_pkg/"
+printf '%s\n' '# OLD trusted' >"$nx_live/trusted_proxies.conf"; printf '%s\n' '198.51.100.1/32 1;' >"$nx_live/challenge_waf_bypass.conf"
+nx_before=$(snapshot "$nx_live")
+PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$nx_pkg" sh -c '. "$1"; process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
+  "$tmp/functions.sh" "$bin_dir/real-nginx" "$nx_pkg/openresty.conf" "$nx_live/nginx.conf" "$nx_live" >/dev/null 2>&1
+[ "$(snapshot "$nx_live")" = "$nx_before" ] || { echo "FAIL: real nginx: a broken new sidecar must leave the live dir unchanged" >&2; exit 1; }
+
+# The script's own trap lines (not a copy), for the signal cases below.
+# Exactly the EXIT trap line and the signal trap line after it: anything else
+# in the extract (e.g. the rest of the script, if a line changed shape) must
+# never be eval'd here - it would run the real deploy.
+TRAPS=$(awk '/^trap cleanup_on_exit EXIT$/{f=1} f&&!/^#/{print; n++} f&&n==2{exit}' scripts/package-proxy-config-deploy.sh)
+printf '%s\n' "$TRAPS" | awk 'NR==1&&$0!="trap cleanup_on_exit EXIT"{bad=1} NR==2&&$0!~/^trap .* HUP INT TERM$/{bad=1} END{exit (bad||NR!=2)}' \
+  || { echo "FAIL: could not find the script's two trap lines (not eval'ing anything else):" >&2; printf '%s\n' "$TRAPS" >&2; exit 1; }
 
 # 16. A TERM during the renames rolls back (the exit trap, as in the script),
 #     and a second TERM while the rollback runs doesn't cut it short (the shim
@@ -733,7 +777,7 @@ pkg="$tmp/pkg-term"; live="$tmp/live-term"
 mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live")
 PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$pkg" FAKE_OPENRESTY_ARGS="$tmp/or-term.args" \
   FAKE_MV_KILL_AFTER=/challenge_waf_bypass.conf \
-  sh -c '. "$1"; trap cleanup_proxy_deploy EXIT; trap "exit 1" HUP INT TERM
+  TRAPS="$TRAPS" sh -c '. "$1"; eval "$TRAPS"
     process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
   "$tmp/functions.sh" "$bin_dir/fake-openresty" "$pkg/openresty.conf" "$live/nginx.conf" "$live" >/dev/null 2>&1 || true   # the helper exits 1 on TERM, as the script does
 assert_untouched "$live" "$before" "TERM during the renames"
@@ -744,7 +788,7 @@ pkg="$tmp/pkg-termbak"; live="$tmp/live-termbak"
 mk_pkg "$pkg" "$live"; seed_live "$live"; before=$(snapshot "$live")
 PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$pkg" FAKE_OPENRESTY_ARGS="$tmp/or-termbak.args" \
   FAKE_CP_KILL_AFTER=.cfm-prepkg. \
-  sh -c '. "$1"; trap cleanup_proxy_deploy EXIT; trap "exit 1" HUP INT TERM
+  TRAPS="$TRAPS" sh -c '. "$1"; eval "$TRAPS"
     process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
   "$tmp/functions.sh" "$bin_dir/fake-openresty" "$pkg/openresty.conf" "$live/nginx.conf" "$live" >/dev/null 2>&1 || true   # the helper exits 1 on TERM, as the script does
 assert_untouched "$live" "$before" "TERM between the backup and the renames"
@@ -755,9 +799,11 @@ assert_untouched "$live" "$before" "TERM between the backup and the renames"
 pkg="$tmp/pkg-stale"; live="$tmp/live-stale"
 mk_pkg "$pkg" "$live"; seed_live "$live"
 mkdir -p "$live/.cfm-proxy-stage.OLD1"; : >"$live/.cfm-proxy-stage.OLD1/main.conf"
-: >"$live/.trusted_proxies.conf.cfm-new.99999"; printf '%s\n' keep >"$live/.trusted_proxies.conf.cfm-old.99999"
+: >"$live/.trusted_proxies.conf.cfm-new.99999"; : >"$live/.cfm-panel-listeners.conf.cfm-absent.99999"
+printf '%s\n' keep >"$live/.trusted_proxies.conf.cfm-old.99999"
 run_or "$pkg" "$live" >/dev/null
 [ ! -e "$live/.cfm-proxy-stage.OLD1" ] && [ ! -e "$live/.trusted_proxies.conf.cfm-new.99999" ] \
+  && [ ! -e "$live/.cfm-panel-listeners.conf.cfm-absent.99999" ] \
   || { echo "FAIL: a hard-killed run's stage dir / temps must be cleared" >&2; ls -A "$live" >&2; exit 1; }
 [ "$(cat "$live/.trusted_proxies.conf.cfm-old.99999")" = keep ] || { echo "FAIL: a .cfm-old copy must never be removed by the stale sweep" >&2; exit 1; }
 
@@ -775,5 +821,43 @@ out=$(PATH="$bin_dir:$PATH" FAKE_OPENRESTY_ARGS="$tmp/or-two.args" \
 cmp -s "$liveB/nginx.conf" "$pkgB/openresty.conf" || { echo "FAIL: the second engine must deploy" >&2; printf '%s\n' "$out" >&2; exit 1; }
 if ls -A "$liveB" | rg -q 'cfm-old|cfm-new|cfm-absent'; then echo "FAIL: the first engine's state leaked into the second's cleanup" >&2; ls -A "$liveB" >&2; exit 1; fi
 [ "$(printf '%s\n' "$out" | rg -c 'a sidecar could not be restored')" = 1 ] || { echo "FAIL: exactly one engine may report a failed restore" >&2; printf '%s\n' "$out" >&2; exit 1; }
+
+# 20. A direct cleanup (between engines) leaves the signal traps armed: a
+#     TERM during the NEXT engine still stops the run (only the exit trap
+#     ignores signals).
+armed=$(TRAPS="$TRAPS" sh -c '. "$1"; eval "$TRAPS"; cleanup_proxy_deploy; trap' sh "$tmp/functions.sh")
+printf '%s\n' "$armed" | rg -q "exit 1.*TERM|TERM.*exit 1|SIGTERM" \
+  || { echo "FAIL: signals must stay armed after a direct cleanup; got: $armed" >&2; exit 1; }
+
+# 21. Two engines, the first with a failed restore, the second failing
+#     harmlessly: the second must say "leaving existing sidecars", not repeat
+#     the first one's "could not be restored".
+pkgA="$tmp/pkg-r21A"; liveA="$tmp/live-r21A"; pkgB="$tmp/pkg-r21B"; liveB="$tmp/live-r21B"
+mk_pkg "$pkgA" "$liveA"; seed_live "$liveA"; mk_pkg "$pkgB" "$liveB"; seed_live "$liveB"
+out=$(PATH="$bin_dir:$PATH" FAKE_OPENRESTY_ARGS="$tmp/or-21.args" \
+  FAKE_MV_FAIL=/cfm-panel-listeners.conf FAKE_MV_ONCE="$tmp/mv-once-21" \
+  FAKE_MV_FAIL_FROM="$liveA/.challenge_waf_bypass.conf.cfm-old" \
+  FAKE_INSTALL_FAIL="$liveB/.nginx.conf.cfm-new" \
+  sh -c '. "$1"
+    CFM_CONFIG_DIR=$4; process_engine OpenResty "$2" "$4/openresty.conf" "$3/nginx.conf" "$3" openresty.service x
+    echo ===B===
+    CFM_CONFIG_DIR=$6; process_engine OpenResty "$2" "$6/openresty.conf" "$5/nginx.conf" "$5" openresty.service x' sh \
+  "$tmp/functions.sh" "$bin_dir/fake-openresty" "$liveA" "$pkgA" "$liveB" "$pkgB" 2>&1)
+outB=${out#*===B===}
+printf '%s\n' "$outB" | rg -q 'leaving existing sidecars' && ! printf '%s\n' "$outB" | rg -q 'could not be restored' \
+  || { echo "FAIL: the second engine's message must not inherit the first one's failed restore" >&2; printf '%s\n' "$out" >&2; exit 1; }
+
+# 22. A .cfm-old copy left by an earlier hard-killed run under the SAME PID is
+#     never overwritten: the deploy is refused and the file kept.
+pkg="$tmp/pkg-pid"; live="$tmp/live-pid"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+out=$(PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$pkg" FAKE_OPENRESTY_ARGS="$tmp/or-pid.args" \
+  sh -c '. "$1"; printf "%s\n" precious >"$5/.trusted_proxies.conf.cfm-old.$$"
+    process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
+  "$tmp/functions.sh" "$bin_dir/fake-openresty" "$pkg/openresty.conf" "$live/nginx.conf" "$live" 2>&1)
+kept=$(ls -A "$live" | rg '^\.trusted_proxies\.conf\.cfm-old\.' || true)
+[ -n "$kept" ] && [ "$(cat "$live/$kept")" = precious ] || { echo "FAIL: a same-PID .cfm-old copy must be kept" >&2; ls -A "$live" >&2; exit 1; }
+[ "$(cat "$live/trusted_proxies.conf")" = "OLD trusted" ] || { echo "FAIL: a same-PID .cfm-old copy must block the deploy" >&2; exit 1; }
+printf '%s\n' "$out" | rg -q 'already exists \(from an interrupted earlier run' || { echo "FAIL: the same-PID refusal must be explained" >&2; printf '%s\n' "$out" >&2; exit 1; }
 
 echo "OK: package proxy deploy helper tests only the main engine configs, with the new sidecars staged; a failed run leaves the live dir untouched"
