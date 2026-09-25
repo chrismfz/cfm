@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.25
+
 ### Changed
 - **`make release` also refreshes the Cloudflare ranges in
   `trusted_proxies.conf`.**
