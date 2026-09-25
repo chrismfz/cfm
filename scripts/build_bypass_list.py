@@ -80,6 +80,14 @@ SOURCES = [
     "json:https://openai.com/searchbot.json",
     "txt:https://www.quic.cloud/ips?ln",
     "json:https://developer.skroutz.gr/ip_ranges.json",
+    # Search / assistant fetchers with an official published list.
+    "json:https://search.developer.apple.com/applebot.json",      # Applebot (Siri / Spotlight)
+    "json:https://openai.com/chatgpt-user.json",                 # ChatGPT-User: a user asked ChatGPT to open the page
+    # Callers whose requests must never meet a challenge page:
+    "txt:https://stripe.com/files/ips/ips_webhooks.txt",         # Stripe webhooks (a challenged one = an unpaid-looking order)
+    "txt:https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt", # UptimeRobot (a challenge reads as "site down")
+    "txt:https://my.pingdom.com/probes/ipv4",                    # Pingdom probes
+    "txt:https://my.pingdom.com/probes/ipv6",
 
 ]
 

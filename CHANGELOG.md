@@ -30,6 +30,12 @@ back-filled here — see the git/PR history for that period.
     have shipped a list without its 486 DuckDuckBot ranges). The offline
     validator still has to pass. `BYPASS_REFRESH=0` skips the fetch on an
     offline build host.
+- **The bypass list now also covers Applebot, ChatGPT-User, Stripe webhooks,
+  UptimeRobot and Pingdom** (official published lists). A challenge page on a
+  Stripe webhook leaves a paid order looking unpaid, and on an uptime monitor
+  it reads as "site down". 3728 ranges in total, up from 2743.
+- **cfm-admin Site Cache: the "Near-static pages" recipe offers a 60 s
+  bucket** next to 10 s and 30 s (the edge already had it).
 
 ### Fixed
 - **Skroutz's crawler ranges were never in the bypass list.** Its feed lists
