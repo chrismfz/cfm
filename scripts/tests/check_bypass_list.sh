@@ -41,4 +41,7 @@ if [ "${1:-}" = "--which-python" ]; then
 fi
 
 "$PY" scripts/tests/bypass_list_test.py
-echo "[bypass-list] OK: challenge_waf_bypass.conf validated and generator safety-logic tests passed."
+# The edge's trusted_proxies.conf (Cloudflare ranges, build_trusted_proxies.py)
+# shares the generator's fetcher and address-space measure, so it is checked here.
+"$PY" scripts/tests/trusted_proxies_test.py
+echo "[bypass-list] OK: challenge_waf_bypass.conf + trusted_proxies.conf validated and generator safety-logic tests passed."

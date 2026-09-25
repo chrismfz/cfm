@@ -437,7 +437,7 @@ changelog:
 BYPASS_REFRESH ?= 1
 BYPASS_TIMEOUT ?= 300
 ifneq ($(filter release,$(MAKECMDGOALS)),)
-deb stage-pkgroot: | bypass-list
+deb stage-pkgroot: | bypass-list trusted-proxies
 endif
 .PHONY: bypass-list
 bypass-list: ## Refresh challenge_waf_bypass.conf from the crawler/CDN feeds
@@ -467,9 +467,39 @@ bypass-list: ## Refresh challenge_waf_bypass.conf from the crawler/CDN feeds
 	fi; \
 	BYPASS_PYTHON="$$PY" ./scripts/tests/check_bypass_list.sh || { echo "❌ challenge_waf_bypass.conf failed validation — not packaging it"; exit 1; }
 
-# release flow: (0) `bypass-list` refreshes configs/challenge_waf_bypass.conf
-# before deb/rpm package it; (1) stamp CHANGELOG for today's UTC date; (2)
-# commit & push ONLY CHANGELOG.md + that bypass list — never the whole tree,
+# Refresh configs/trusted_proxies.conf (the Cloudflare ranges the edge trusts
+# to name the client via CF-Connecting-IP) from Cloudflare's API, the same way:
+# fail-safe (a failed fetch, a malformed answer, a count out of bounds or the
+# address space doubling/halving, or a range count halving, keeps the last-good file, with a warning), and
+# unchanged ranges leave the file untouched. BYPASS_REFRESH=0 skips it too (one
+# switch for "no network refresh"). check_bypass_list.sh validates both
+# generated files; it is re-run here so the refreshed one is what gets
+# validated before packaging.
+.PHONY: trusted-proxies
+trusted-proxies: ## Refresh trusted_proxies.conf from Cloudflare's published ranges
+	@set -u; \
+	if [ "$(BYPASS_REFRESH)" = "0" ]; then \
+	  echo "⏭️  BYPASS_REFRESH=0 — packaging trusted_proxies.conf as-is (not refreshed)"; \
+	  exit 0; \
+	fi; \
+	PY="$$(./scripts/tests/check_bypass_list.sh --which-python)" || exit 1; \
+	echo "🌐 Refreshing trusted_proxies.conf from Cloudflare ($$PY)..."; \
+	TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout --foreground 120"; \
+	PYTHONDONTWRITEBYTECODE=1 $$TO "$$PY" scripts/build_trusted_proxies.py; rc=$$?; \
+	case "$$rc" in \
+	  0) echo "✅ trusted_proxies.conf up to date." ;; \
+	  1) echo "⚠️  trusted_proxies refresh: no JSON answer from Cloudflare's API (network? captive portal?) — keeping the last-good file." ;; \
+	  2) echo "⚠️  trusted_proxies refresh refused: an unusable range in the answer, a count out of bounds or halved, or the address space doubled/halved — keeping the last-good file. If Cloudflare really changed that much: review the answer, then run scripts/build_trusted_proxies.py --force (it skips only the halving/doubling guards)." ;; \
+	  124) echo "⚠️  trusted_proxies refresh timed out — keeping the last-good file." ;; \
+	  *) echo "⚠️  trusted_proxies refresh failed (exit $$rc) — keeping the last-good file." ;; \
+	esac; \
+	rm -f configs/.trusted_proxies.*.tmp; rm -rf scripts/__pycache__ scripts/tests/__pycache__; \
+	vout="$$(BYPASS_PYTHON="$$PY" ./scripts/tests/check_bypass_list.sh 2>&1)" || { printf '%s\n' "$$vout"; echo "❌ trusted_proxies.conf / bypass list failed validation — not packaging them"; exit 1; }
+
+# release flow: (0) `bypass-list` and `trusted-proxies` refresh
+# configs/challenge_waf_bypass.conf and configs/trusted_proxies.conf before
+# deb/rpm package them; (1) stamp CHANGELOG for today's UTC date; (2)
+# commit & push ONLY CHANGELOG.md + those two lists — never the whole tree,
 # since a release host usually has built binaries / compiled BPF objects sitting
 # in the working dir that must not be committed; (3) create + publish a tag-only GitHub release (title +
 # CHANGELOG notes, NO .deb/.rpm assets; packages ship via `make sync`). Steps 2 and 3
@@ -477,15 +507,16 @@ bypass-list: ## Refresh challenge_waf_bypass.conf from the crawler/CDN feeds
 # inside them: a comment without a trailing backslash ends the segment, so the
 # shell vars (DEB_FILE/RPM_FILE/REPO/NOTES_FILE) set above it silently vanish and the rest
 # runs without `set -e`. (That exact trap masked a broken gh-release publish.)
-release: bypass-list bpf deb rpm
+release: bypass-list trusted-proxies bpf deb rpm
 	@scripts/stamp-changelog.sh $(REL_DATE)
 	@set -uo pipefail; \
 	REL_FILES="CHANGELOG.md"; \
-	if [ "$(BYPASS_REFRESH)" != "0" ]; then REL_FILES="$$REL_FILES configs/challenge_waf_bypass.conf"; fi; \
+	if [ "$(BYPASS_REFRESH)" != "0" ]; then REL_FILES="$$REL_FILES configs/challenge_waf_bypass.conf configs/trusted_proxies.conf"; fi; \
 	if git rev-parse --git-dir >/dev/null 2>&1 && [ -n "$$(git status --porcelain -- $$REL_FILES)" ]; then \
 	  echo "📝 Committing $$REL_FILES (only) for $(REL_DATE)..."; \
 	  MSG="changelog: stamp $(REL_DATE) release"; \
 	  if [ -n "$$(git status --porcelain -- configs/challenge_waf_bypass.conf)" ] && [ "$(BYPASS_REFRESH)" != "0" ]; then MSG="$$MSG + refresh bypass list"; fi; \
+	  if [ -n "$$(git status --porcelain -- configs/trusted_proxies.conf)" ] && [ "$(BYPASS_REFRESH)" != "0" ]; then MSG="$$MSG + refresh Cloudflare trusted_proxies"; fi; \
 	  if git commit -q -m "$$MSG" -- $$REL_FILES; then \
 	    branch="$$(git rev-parse --abbrev-ref HEAD)"; \
 	    if [ "$$branch" = "HEAD" ]; then \

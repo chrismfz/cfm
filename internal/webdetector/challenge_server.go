@@ -1623,66 +1623,18 @@ func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status in
 	)
 }
 
-// Cloudflare IP ranges (keep in sync with nginx trusted_proxies.conf).
-// Source: https://www.cloudflare.com/ips/
-var cloudflareNets []*net.IPNet
-var cloudflareNetsOnce sync.Once
-
-func initCloudflareNets() {
-	cidrs := []string{
-		"173.245.48.0/20",
-		"103.21.244.0/22",
-		"103.22.200.0/22",
-		"103.31.4.0/22",
-		"141.101.64.0/18",
-		"108.162.192.0/18",
-		"190.93.240.0/20",
-		"188.114.96.0/20",
-		"197.234.240.0/22",
-		"198.41.128.0/17",
-		"162.158.0.0/15",
-		"104.16.0.0/13",
-		"104.24.0.0/14",
-		"172.64.0.0/13",
-		"131.0.72.0/22",
-		// IPv6
-		"2400:cb00::/32",
-		"2606:4700::/32",
-		"2803:f800::/32",
-		"2405:b500::/32",
-		"2405:8100::/32",
-		"2a06:98c0::/29",
-		"2c0f:f248::/32",
-	}
-	for _, c := range cidrs {
-		_, n, err := net.ParseCIDR(c)
-		if err == nil && n != nil {
-			cloudflareNets = append(cloudflareNets, n)
-		}
-	}
-}
-
-func isCloudflareIP(ip net.IP) bool {
-	if ip == nil {
-		return false
-	}
-	cloudflareNetsOnce.Do(initCloudflareNets)
-	for _, n := range cloudflareNets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
+// isTrustedProxyPeer: may this direct peer set the client-IP headers? Only the
+// local edge may: the challenge server listens on localhost
+// (CHALLENGE_HTTP_LISTEN=127.0.0.1:9098) and the edge proxies to it, so the
+// peer is loopback or, on a split setup, a private address. Cloudflare never
+// connects here (it connects to the edge, which already resolved the client
+// from CF-Connecting-IP via trusted_proxies.conf), so there is no Cloudflare
+// list here - it was a second copy of trusted_proxies.conf that could drift.
 func isTrustedProxyPeer(peer net.IP) bool {
 	if peer == nil {
 		return false
 	}
-	if peer.IsLoopback() || peer.IsPrivate() || peer.IsLinkLocalUnicast() {
-		return true
-	}
-	return isCloudflareIP(peer)
+	return peer.IsLoopback() || peer.IsPrivate() || peer.IsLinkLocalUnicast()
 }
 
 func clientIP(r *http.Request) net.IP {
