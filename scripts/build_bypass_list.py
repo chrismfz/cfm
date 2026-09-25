@@ -55,6 +55,14 @@ MAX_PREFIXES_PER_SOURCE = 10000  # a single feed emitting more than this is susp
 MAX_PREFIXES_TOTAL = 50000       # runaway-output backstop
 MIN_PREFIXES_TOTAL = 100         # sanity floor: a healthy run yields thousands
 MAX_SHRINK_FRACTION = 0.5        # abort if the new list is < 50% of the existing one
+# Abort if the covered ADDRESS SPACE more than doubles (plus one /16 IPv4 / one
+# /32 IPv6 of slack). The count caps can't see a poisoned feed that serves a
+# few hundred public /16s: +300 prefixes, but ~100x the space bypassing WAF +
+# challenge. The shipped list covers ~160k IPv4 addresses; a genuinely larger
+# list (a new source) is a reviewed manual run with --allow-growth.
+MAX_SPACE_GROWTH_FACTOR = 2.0
+SPACE_GROWTH_SLACK_V4 = 1 << 16          # addresses
+SPACE_GROWTH_SLACK_V6 = 1 << 32          # /64s
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SOURCES — edit this list to add/remove bypass sources.
@@ -80,14 +88,13 @@ SOURCES = [
     "json:https://openai.com/searchbot.json",
     "txt:https://www.quic.cloud/ips?ln",
     "json:https://developer.skroutz.gr/ip_ranges.json",
-    # Search / assistant fetchers with an official published list.
-    "json:https://search.developer.apple.com/applebot.json",      # Applebot (Siri / Spotlight)
-    "json:https://openai.com/chatgpt-user.json",                 # ChatGPT-User: a user asked ChatGPT to open the page
-    # Callers whose requests must never meet a challenge page:
-    "txt:https://stripe.com/files/ips/ips_webhooks.txt",         # Stripe webhooks (a challenged one = an unpaid-looking order)
-    "txt:https://uptimerobot.com/inc/files/ips/IPv4andIPv6.txt", # UptimeRobot (a challenge reads as "site down")
-    "txt:https://my.pingdom.com/probes/ipv4",                    # Pingdom probes
-    "txt:https://my.pingdom.com/probes/ipv6",
+    "json:https://search.developer.apple.com/applebot.json",  # Applebot (Siri / Spotlight crawler)
+    # NEVER add a service whose target URL anyone can choose: a bypass skips
+    # the WAF too (cfm.lua Step 0), so it becomes a free WAF-bypass proxy.
+    # Rejected for that reason: ChatGPT-User (fetches any URL a user types),
+    # Stripe webhooks, UptimeRobot / Pingdom (anyone can register a webhook or
+    # monitor aimed at https://victim/?id=<payload>). Such callers need a
+    # path-scoped exclude, not an IP bypass.
 
 ]
 
@@ -319,6 +326,39 @@ def count_existing_prefixes(path: str) -> int:
         return 0
 
 
+def address_space(prefixes: Iterable[str]) -> tuple[int, int]:
+    """(IPv4 addresses, IPv6 /64s) covered by the prefixes."""
+    v4 = v6 = 0
+    for p in prefixes:
+        net = ipaddress.ip_network(p, strict=False)
+        if net.version == 4:
+            v4 += net.num_addresses
+        else:
+            v6 += 1 << (64 - net.prefixlen) if net.prefixlen <= 64 else 1
+    return v4, v6
+
+
+def existing_prefixes(path: str) -> list[str]:
+    """The ``<cidr>`` of each ``<cidr> 1;`` data line in an existing output file."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return [s[:-2].strip() for line in fh
+                    if (s := line.strip()) and not s.startswith("#") and s.endswith(" 1;")]
+    except OSError:
+        return []
+
+
+def check_space_growth(new: Iterable[str], existing: Iterable[str]) -> str | None:
+    """Return an abort reason if the covered address space grew suspiciously."""
+    n4, n6 = address_space(new)
+    e4, e6 = address_space(existing)
+    if e4 and n4 > e4 * MAX_SPACE_GROWTH_FACTOR + SPACE_GROWTH_SLACK_V4:
+        return f"IPv4 space grew from {e4} to {n4} addresses (> {MAX_SPACE_GROWTH_FACTOR}x; poisoned feed?)"
+    if e6 and n6 > e6 * MAX_SPACE_GROWTH_FACTOR + SPACE_GROWTH_SLACK_V6:
+        return f"IPv6 space grew from {e6} to {n6} /64s (> {MAX_SPACE_GROWTH_FACTOR}x; poisoned feed?)"
+    return None
+
+
 def check_thresholds(new_count: int, existing_count: int) -> str | None:
     """Return an abort reason if the new list is unsafe to write, else None.
 
@@ -388,8 +428,11 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Build challenge_waf_bypass.conf")
     p.add_argument("output", nargs="?", default=DEFAULT_OUTPUT, help="Output file path")
     p.add_argument("--strict", action="store_true",
-                   help="write nothing (exit 3, existing file kept) if ANY source failed; "
-                        "used by `make release` so a feed outage can't drop that feed's ranges")
+                   help="write nothing (exit 3, existing file kept) if ANY source failed or "
+                        "returned no prefixes; used by `make release` so a feed outage can't "
+                        "drop that feed's ranges")
+    p.add_argument("--allow-growth", action="store_true",
+                   help="skip the address-space growth guard (a reviewed manual run that adds a source)")
     args = p.parse_args()
 
     results: list[SourceResult] = []
@@ -417,8 +460,11 @@ def main() -> int:
     empty = [r.name for r in results if not r.prefixes]
     if empty:
         eprint("WARNING: zero prefixes from:", ", ".join(empty))
-    if errors and args.strict:
-        eprint(f"ERROR: {len(errors)} source(s) failed and --strict is set; keeping existing file at {args.output}")
+    # An empty answer (HTTP 200 with a maintenance page or a changed JSON shape)
+    # drops that feed's ranges just like an exception does.
+    if (errors or empty) and args.strict:
+        eprint(f"ERROR: {len(errors)} source(s) failed and {len(empty)} returned no prefixes, "
+               f"--strict is set; keeping existing file at {args.output}")
         return 3
     if errors:
         eprint(f"WARNING: {len(errors)} source(s) failed, continuing with {len(results)} that succeeded")
@@ -429,6 +475,8 @@ def main() -> int:
 
     # Fail-safe: never replace a good list with a suspiciously small/large one.
     reason = check_thresholds(len(union), count_existing_prefixes(args.output))
+    if reason is None and not args.allow_growth:
+        reason = check_space_growth(union, existing_prefixes(args.output))
     if reason is not None:
         eprint(f"ERROR: refusing to write ({reason}); keeping existing file at {args.output}")
         return 2

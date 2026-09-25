@@ -997,7 +997,7 @@ a recipe changes only the tier it names:
 |---|---|---|
 | Cache static assets | static on, `static_lean` | the usual first step |
 | Burst shield (micro-cache 1 s) | micro on, `micro_safe`, `1s` | heavy pages / bursts (`myip.gr`) |
-| Near-static pages | micro on, `micro_aggressive`, `10s` or `30s` | pages that rarely change |
+| Near-static pages | micro on, `micro_aggressive`, `10s`, `30s` or `60s` | pages that rarely change |
 | Static assets + burst shield | both of the above | |
 | Never cache this host (opt-out) | both tiers off | a sub-host under an armed wildcard |
 

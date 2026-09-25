@@ -416,36 +416,46 @@ changelog:
 # Never blocks a release: the generator is fail-safe and runs --strict here
 # (each feed is retried; if one still fails, NOTHING is written — a partial
 # list would silently drop that feed's ranges, e.g. every DuckDuckBot IP — and
-# the last-good file ships; exit 2 = refused as too small/large, same), so
+# the last-good file ships; exit 2 = refused as too small, too large, or an
+# address space that more than doubled — a poisoned feed — same), so
 # only a warning is printed. What DOES block is the offline validator
 # (bypass_list_test.py, what check_bypass_list.sh runs in CI) failing on the
-# file about to be packaged; it runs with the same >= 3.8 interpreter, since it
-# imports the generator. Offline
-# builds: BYPASS_REFRESH=0 skips the fetch. The script needs Python >= 3.8
-# (EL8's python3 is 3.6), so the newest python3.x on PATH is used.
+# file about to be packaged, or no Python >= 3.9 to run it (a guardrail that
+# cannot run must fail, CLAUDE.md §5). The generator and validator need 3.9
+# (str.removeprefix; EL8's python3 is 3.6), so the newest python3.x on PATH is
+# used. BYPASS_REFRESH=0 skips both, for an offline build.
+#
+# Ordering: deb and stage-pkgroot copy configs/ into the package, so under
+# `make -j release` they must wait for the refresh. The order-only
+# prerequisite below applies only when `release` is a goal, so a plain
+# `make deb` never hits the network.
 BYPASS_REFRESH ?= 1
+ifneq ($(filter release,$(MAKECMDGOALS)),)
+deb stage-pkgroot: | bypass-list
+endif
 .PHONY: bypass-list
 bypass-list: ## Refresh challenge_waf_bypass.conf from the crawler/CDN feeds
 	@set -u; \
-	PY=""; \
-	for c in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3; do \
-	  if command -v "$$c" >/dev/null 2>&1 && "$$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' 2>/dev/null; then PY="$$c"; break; fi; \
-	done; \
-	if [ -z "$$PY" ]; then \
-	  echo "⚠️  no Python >= 3.8 found — keeping the committed (CI-validated) challenge_waf_bypass.conf"; \
+	if [ "$(BYPASS_REFRESH)" = "0" ]; then \
+	  echo "⏭️  BYPASS_REFRESH=0 — packaging challenge_waf_bypass.conf as-is (not refreshed, not validated)"; \
 	  exit 0; \
 	fi; \
-	if [ "$(BYPASS_REFRESH)" = "0" ]; then \
-	  echo "⏭️  BYPASS_REFRESH=0 — keeping the committed challenge_waf_bypass.conf"; \
-	else \
-	  echo "🌐 Refreshing challenge_waf_bypass.conf ($$PY)..."; \
-	  "$$PY" scripts/build_bypass_list.py --strict; rc=$$?; \
-	  case "$$rc" in \
-	    0) echo "✅ bypass list refreshed." ;; \
-	    3) echo "⚠️  a bypass feed failed (after retries) — keeping the last-good file, not a partial one." ;; \
-	    *) echo "⚠️  bypass refresh refused (exit $$rc) — keeping the last-good file." ;; \
-	  esac; \
+	PY=""; \
+	for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 python3; do \
+	  if command -v "$$c" >/dev/null 2>&1 && "$$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then PY="$$c"; break; fi; \
+	done; \
+	if [ -z "$$PY" ]; then \
+	  echo "❌ no Python >= 3.9 on PATH — cannot refresh or validate challenge_waf_bypass.conf."; \
+	  echo "   Install one (EL8: dnf install python39), or run with BYPASS_REFRESH=0 to package it unchecked."; \
+	  exit 1; \
 	fi; \
+	echo "🌐 Refreshing challenge_waf_bypass.conf ($$PY)..."; \
+	"$$PY" scripts/build_bypass_list.py --strict; rc=$$?; \
+	case "$$rc" in \
+	  0) echo "✅ bypass list refreshed." ;; \
+	  3) echo "⚠️  a bypass feed failed or came back empty (after retries) — keeping the last-good file, not a partial one." ;; \
+	  *) echo "⚠️  bypass refresh refused (exit $$rc: too small, too large, or the address space grew >2x) — keeping the last-good file." ;; \
+	esac; \
 	"$$PY" scripts/tests/bypass_list_test.py || { echo "❌ challenge_waf_bypass.conf failed validation — not packaging it"; exit 1; }
 
 # release flow: (0) `bypass-list` refreshes configs/challenge_waf_bypass.conf

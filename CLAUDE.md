@@ -770,12 +770,16 @@ objects — needs `clang` + `libbpf-dev` on the build host. `bypass-list` runs
 first: it re-fetches `configs/challenge_waf_bypass.conf` (crawler + CDN ranges:
 Google, Bing, QUIC.cloud, ...) with `scripts/build_bypass_list.py` so every
 package ships fresh ranges. The generator is fail-safe and runs `--strict`
-there (feeds are retried; if one still fails, or the result is out of bounds,
-the last-good file ships and it only warns — never a partial list); the offline validator
-(`bypass_list_test.py`, what `check_bypass_list.sh` runs in CI) failing does
-stop the release. It needs Python >= 3.8
-(the newest `python3.x` on PATH is used; EL8's `python3` is 3.6).
-`BYPASS_REFRESH=0` skips the fetch for an offline build. It also stamps + commits/pushes
+there (feeds are retried; if one still fails or comes back empty, the result
+is out of bounds, or the covered address space more than doubles — a poisoned
+feed — the last-good file ships and it only warns: never a partial list). The
+offline validator (`bypass_list_test.py`, what `check_bypass_list.sh` runs in
+CI) failing does stop the release, and so does having no Python >= 3.9 to run
+it (the newest `python3.x` on PATH is used; EL8's `python3` is 3.6).
+`BYPASS_REFRESH=0` skips both for an offline build. **Never add a source
+whose target URL anyone can choose** (ChatGPT-User, Stripe webhooks, uptime
+monitors): a bypass skips the WAF too (`cfm.lua` Step 0), so that source
+becomes a free WAF-bypass proxy; such callers need a path-scoped exclude. It also stamps + commits/pushes
 `CHANGELOG.md` and cuts a **tag-only GitHub release** (title + that day's
 CHANGELOG section as notes, via `scripts/release-notes.sh`) — **no `.deb`/`.rpm`
 attached**, since packages are distributed by `make sync` to the apt/yum repo.

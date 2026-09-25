@@ -220,11 +220,75 @@ def test_retry_and_strict() -> None:
         finally:
             blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
 
+    # --strict: a source that answers with NO prefixes (a 200 maintenance page,
+    # a changed JSON shape) drops its ranges just like an exception does.
+    def empty_load(spec):
+        return [blp.SourceResult(name=spec, kind="txt", origin="x",
+                                 prefixes=set() if spec == "empty" else set(good))]
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "bypass.conf")
+        with open(out, "w") as fh:
+            fh.write("# last-good\n")
+        blp.load_source, blp.SOURCES = empty_load, ["ok", "empty"]
+        try:
+            sys.argv = ["build_bypass_list.py", "--strict", out]
+            rc = blp.main()
+            with open(out) as fh:
+                kept = fh.read() == "# last-good\n"
+            check(rc == 3 and kept, f"--strict with an empty source: rc={rc}, file kept={kept}")
+        finally:
+            blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
+
+
+# ── 1g. address-space growth guard (a poisoned feed of public /16s) ─────────
+def test_space_growth() -> None:
+    base = [f"8.{b}.0.0/24" for b in range(200)]           # 51 200 addresses
+    check(blp.check_space_growth(base, base) is None, "same list must pass")
+    check(blp.check_space_growth(base + ["9.9.9.0/24"], base) is None, "small growth must pass")
+    check(blp.check_space_growth(base + ["9.1.0.0/16"], base) is None,
+          "one /16 of growth is within the slack")
+    poisoned = base + [f"{a}.{b}.0.0/16" for a in (11, 12) for b in range(10)]
+    check(blp.check_space_growth(poisoned, base) is not None,
+          "twenty added /16s (+25x the space, only +20 prefixes) must be refused")
+    check(blp.check_space_growth(base + ["2a03:e40::/32"], base + ["2a03:e40::/32"]) is None,
+          "unchanged IPv6 must pass")
+    check(blp.check_space_growth(base + ["2a03:e40::/32", "2a04::/32", "2a05::/32", "2a06::/32"],
+                                 base + ["2a03:e40::/32"]) is not None,
+          "quadrupled IPv6 space (> 2x + one /32 of slack) must be refused")
+    check(blp.check_space_growth(poisoned, []) is None, "no existing file: nothing to compare")
+    # main() applies it: a poisoned run is refused (exit 2) and the file kept,
+    # and --allow-growth (a reviewed manual run) lets it through.
+    def poisoned_load(spec):
+        return [blp.SourceResult(name=spec, kind="txt", origin="x", prefixes=set(poisoned))]
+    real_load, real_sources, real_argv = blp.load_source, blp.SOURCES, sys.argv
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "bypass.conf")
+        blp.render_output([blp.SourceResult(name="seed", kind="txt", origin="x", prefixes=set(base))],
+                          out, set(base))
+        with open(out) as fh:
+            before = fh.read()
+        blp.load_source, blp.SOURCES = poisoned_load, ["feed"]
+        try:
+            sys.argv = ["build_bypass_list.py", "--strict", out]
+            rc = blp.main()
+            with open(out) as fh:
+                kept = fh.read() == before
+            check(rc == 2 and kept, f"poisoned run through main(): rc={rc}, file kept={kept}")
+            sys.argv = ["build_bypass_list.py", "--strict", "--allow-growth", out]
+            rc = blp.main()
+            check(rc == 0 and blp.count_existing_prefixes(out) == len(poisoned),
+                  f"--allow-growth writes the larger list (rc={rc})")
+        finally:
+            blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
+    # The committed file must round-trip through the reader the guard uses.
+    check(len(blp.existing_prefixes(CONF)) == blp.count_existing_prefixes(CONF),
+          "existing_prefixes and count_existing_prefixes disagree on the committed file")
+
 
 def main() -> int:
     for fn in (test_normalize_prefix, test_thresholds, test_oneline,
                test_render_no_injection, test_walk_for_prefixes, test_retry_and_strict,
-               test_committed_file):
+               test_space_growth, test_committed_file):
         fn()
     if _failures:
         print(f"\nbypass_list_test: {len(_failures)} FAILURE(S)")
