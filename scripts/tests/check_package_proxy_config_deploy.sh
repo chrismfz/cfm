@@ -1009,7 +1009,8 @@ i=1; while [ "$i" -le 13 ]; do printf 'old %s\n' "$i" >"$live/nginx.conf.cfm-pre
 printf 'mine\n' >"$live/nginx.conf.cfm-prepkg.manual"
 printf 'short\n' >"$live/nginx.conf.cfm-prepkg.2026"
 ln -s /nonexistent "$live/nginx.conf.cfm-prepkg.20250101000000"
-out=$(run_or "$pkg" "$live")
+rc=0; out=$(run_or "$pkg" "$live") || rc=$?
+[ "$rc" = 0 ] || { echo "FAIL: prune: the helper died (rc=$rc)" >&2; printf '%s\n' "$out" >&2; exit 1; }
 kept=$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$' || true)
 [ "$kept" = 11 ] || { echo "FAIL: prune must keep 10 backups (+ the untouched symlink = 11 matching names), got $kept" >&2; ls -A "$live" >&2; exit 1; }
 for gone in 01 02 03 04; do
@@ -1026,6 +1027,29 @@ mk_pkg "$pkg" "$live"; seed_live "$live"
 i=1; while [ "$i" -le 13 ]; do : >"$live/nginx.conf.cfm-prepkg.202601$(printf '%02d' "$i")120000"; i=$((i + 1)); done
 CFM_PREPKG_KEEP=0 run_or "$pkg" "$live" >/dev/null
 [ "$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$')" = 14 ] || { echo "FAIL: CFM_PREPKG_KEEP=0 must keep all backups" >&2; ls -A "$live" >&2; exit 1; }
+
+# 33b. A leading-zero CFM_PREPKG_KEEP is decimal (shell arithmetic reads 08 as
+#      octal and dies mid-run), and the backup this run made is never pruned,
+#      even when older backups carry later timestamps (a clock that was ahead).
+for kv in 08:8 010:10; do
+  k=${kv%%:*}; want=${kv#*:}
+  pkg="$tmp/pkg-keep$k"; live="$tmp/live-keep$k"
+  mk_pkg "$pkg" "$live"; seed_live "$live"
+  i=1; while [ "$i" -le 13 ]; do : >"$live/nginx.conf.cfm-prepkg.202601$(printf '%02d' "$i")120000"; i=$((i + 1)); done
+  rc=0; out=$(CFM_PREPKG_KEEP=$k run_or "$pkg" "$live") || rc=$?
+  [ "$rc" = 0 ] || { echo "FAIL: CFM_PREPKG_KEEP=$k: the helper died (rc=$rc)" >&2; printf '%s\n' "$out" >&2; exit 1; }
+  cmp -s "$live/nginx.conf" "$pkg/openresty.conf" || { echo "FAIL: CFM_PREPKG_KEEP=$k must not break the deploy" >&2; printf '%s\n' "$out" >&2; exit 1; }
+  got=$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$')
+  [ "$got" = "$want" ] || { echo "FAIL: CFM_PREPKG_KEEP=$k must keep $want backups (decimal), got $got" >&2; exit 1; }
+done
+pkg="$tmp/pkg-skew"; live="$tmp/live-skew"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+i=1; while [ "$i" -le 12 ]; do : >"$live/nginx.conf.cfm-prepkg.2099$(printf '%02d' "$i")01000000"; i=$((i + 1)); done
+rc=0; out=$(run_or "$pkg" "$live") || rc=$?
+[ "$rc" = 0 ] || { echo "FAIL: skewed clocks: the helper died (rc=$rc)" >&2; printf '%s\n' "$out" >&2; exit 1; }
+cur=$(printf '%s\n' "$out" | sed -n 's/.*backed up .* to \(.*\)$/\1/p' | head -n1)
+[ -n "$cur" ] && [ -f "$cur" ] || { echo "FAIL: the backup this run made must survive the prune (got '$cur')" >&2; printf '%s\n' "$out" >&2; ls -A "$live" >&2; exit 1; }
+[ "$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$')" = 10 ] || { echo "FAIL: skewed clocks: still 10 backups kept" >&2; ls -A "$live" >&2; exit 1; }
 
 # 34. A failed deploy prunes nothing (the live dir stays exactly as it was).
 pkg="$tmp/pkg-noprune"; live="$tmp/live-noprune"

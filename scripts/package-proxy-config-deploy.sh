@@ -360,7 +360,7 @@ commit_files() {
     commit_cleanup
     [ -n "$cf_backup" ] && echo "CFM proxy config: backed up $cf_dst to $cf_backup"
     echo "CFM proxy config: deployed $cf_dst"
-    prune_prepkg_backups "$cf_dst" "${CFM_PREPKG_KEEP:-10}"
+    prune_prepkg_backups "$cf_dst" "${CFM_PREPKG_KEEP:-10}" "$cf_backup"
     return 0
 }
 
@@ -375,27 +375,31 @@ is_prepkg_backup() {
     [ -f "$2" ] && [ ! -L "$2" ]
 }
 
-# prune_prepkg_backups DST KEEP: after a successful deploy, keep only the KEEP
-# newest DST.cfm-prepkg.<timestamp> backups. Every upgrade adds one and nothing
-# removed them (a node upgraded since May had ~90). The timestamp sorts in
-# time order, and so does the glob. Only that exact name form is touched, never
-# a hand-made copy; KEEP=0 (CFM_PREPKG_KEEP=0) keeps them all.
+# prune_prepkg_backups DST KEEP [CURRENT]: after a successful deploy, keep only
+# the KEEP newest DST.cfm-prepkg.<timestamp> backups. Every upgrade adds one and
+# nothing removed them (a node upgraded since May had ~90). The timestamp sorts
+# in time order, and so does the glob. Only that exact name form is touched,
+# never a hand-made copy; KEEP=0 (CFM_PREPKG_KEEP=0) keeps them all. CURRENT, the
+# backup this run just made, is never removed, even when older backups carry
+# later timestamps (a clock that was ahead, a timezone change).
 prune_prepkg_backups() {
     case "$2" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$2" -ge 1 ] || return 0
+    ppb_keep=${2#"${2%%[!0]*}"}   # drop leading zeros: shell arithmetic reads 08 as octal
+    [ -n "$ppb_keep" ] || return 0
     ppb_n=0
     for ppb_f in "$1".cfm-prepkg.*; do
         is_prepkg_backup "$1" "$ppb_f" && ppb_n=$((ppb_n + 1))
     done
-    ppb_drop=$((ppb_n - $2))
+    ppb_drop=$((ppb_n - ppb_keep))
     [ "$ppb_drop" -gt 0 ] || return 0
     ppb_removed=0
     for ppb_f in "$1".cfm-prepkg.*; do
         [ "$ppb_removed" -lt "$ppb_drop" ] || break
+        [ "$ppb_f" = "${3:-}" ] && continue
         is_prepkg_backup "$1" "$ppb_f" || continue
         rm -f "$ppb_f" && ppb_removed=$((ppb_removed + 1))
     done
-    echo "CFM proxy config: removed $ppb_removed old backup(s) of $1, keeping the newest $2 (CFM_PREPKG_KEEP)"
+    echo "CFM proxy config: removed $ppb_removed old backup(s) of $1, keeping the newest $ppb_keep (CFM_PREPKG_KEEP)"
 }
 
 # commit_rollback: put back each sidecar this commit actually renamed in (its
