@@ -28,14 +28,16 @@ relevant output and stop (don't keep going past a hard failure).
    `proxy_ssl_session_reuse off` on every 443 origin location)
 14. `./scripts/tests/check_shared_lua_layout.sh`
 15. `./scripts/tests/check_package_lua_delivery.sh`
-16. `./scripts/tests/check_rpm_spec_macros.sh`
-17. `./scripts/tests/check_site_cache_config.sh` (Site Cache bypass-by-default:
+16. `./scripts/tests/check_package_proxy_config_deploy.sh` (the package upgrade tests
+   new edge sidecars staged; a failed run leaves the live dir untouched)
+17. `./scripts/tests/check_rpm_spec_macros.sh`
+18. `./scripts/tests/check_site_cache_config.sh` (Site Cache bypass-by-default:
    every `proxy_cache` location gated on `$cfm_cache_skip`)
-18. `./scripts/tests/stamp_changelog_test.sh`
-19. `./scripts/tests/release_notes_test.sh`
-20. `./scripts/tests/check_preflight_parity.sh` (this list and the CLAUDE.md §3
+19. `./scripts/tests/stamp_changelog_test.sh`
+20. `./scripts/tests/release_notes_test.sh`
+21. `./scripts/tests/check_preflight_parity.sh` (this list and the CLAUDE.md §3
    block == the commands `security.yml` runs)
-21. `./scripts/tests/check_changelog_entry.sh` (CHANGELOG structure; the per-PR
+22. `./scripts/tests/check_changelog_entry.sh` (CHANGELOG structure; the per-PR
    "code changed → needs a `[Unreleased]` entry" leg only runs in CI)
 
 Keep this list in sync with `security.yml`. It drifted twice — once silently

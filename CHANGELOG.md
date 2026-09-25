@@ -44,6 +44,16 @@ back-filled here — see the git/PR history for that period.
   bucket** next to 10 s and 30 s (the edge already had it).
 
 ### Fixed
+- **A package upgrade no longer leaves an untested edge config live.** The
+  upgrade wrote the sidecars (`trusted_proxies.conf`,
+  `challenge_waf_bypass.conf`, `cfm-panel-listeners.conf`) into the live
+  Angie/OpenResty dir before `angie -t` / `openresty -t` tested them. When
+  that test failed, or the main config couldn't be installed, the new sidecars
+  stayed live next to the old main config, and the edge's next restart could
+  fail on them. Now the new sidecars and a copy of the packaged main config
+  that includes them are tested in a staging dir. Only after the test passes
+  are the files written next to the live ones and renamed in. A failed run,
+  or one interrupted before those renames, leaves the live dir as it was.
 - **Skroutz's AWS crawler IPs were missing from the bypass list.** Its own
   network was covered through its ASN (AS202042), but its published feed lists
   plain strings under `ipv4`/`ipv6`, a shape the generator skipped. The feed

@@ -60,6 +60,8 @@ jobs:
         run: ./scripts/tests/check_shared_lua_layout.sh
       - name: Enforce package Lua delivery invariants
         run: ./scripts/tests/check_package_lua_delivery.sh
+      - name: Package proxy-config deploy stages + tests sidecars, never leaves a failed run live
+        run: ./scripts/tests/check_package_proxy_config_deploy.sh
       - name: Reject unescaped RPM macros in spec comments; require build-dated top %changelog
         run: ./scripts/tests/check_rpm_spec_macros.sh
       - name: Enforce Site Cache bypass-by-default config invariant
