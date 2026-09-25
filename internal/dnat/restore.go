@@ -129,7 +129,9 @@ func reapplyWebPriorityIfChanged(backend firewall.Backend) {
 		LogTransition(ScopeWeb, state, "startup", fmt.Sprintf("re-apply NFT_DNAT_PRIORITY %d (was %d) failed: %v", want, have, err))
 		return
 	}
-	LogTransition(ScopeWeb, "ON", "startup", fmt.Sprintf("re-applied: NFT_DNAT_PRIORITY %d (was %d)", want, have))
+	// Say why: the old priority may have been a `cfm dnat on --priority`
+	// override, which never persists (cfm.conf is where the choice lives).
+	LogTransition(ScopeWeb, "ON", "startup", fmt.Sprintf("re-applied: NFT_DNAT_PRIORITY %d (was %d); cfm.conf is where the priority persists, a `cfm dnat on --priority` override lasts until the next restart", want, have))
 }
 
 func scopeStatus(scope DNATScope, backend firewall.Backend) (bool, error) {
