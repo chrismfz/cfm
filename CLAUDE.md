@@ -78,7 +78,7 @@ make test-lua
 make test-js                                     # node --test on internal/webui/static/assets/**/*.test.{js,cjs}
 ./scripts/tests/check_cli_transport.sh          # CLI transport guardrail (see §5; needs ripgrep)
 ./scripts/tests/check_cfm_clearance_require.sh   # Lua clearance module load check
-./scripts/tests/check_bypass_list.sh             # challenge_waf_bypass.conf bounds + generator tests
+./scripts/tests/check_bypass_list.sh             # challenge_waf_bypass.conf + trusted_proxies.conf bounds + generator tests
 ./scripts/tests/check_logrotate_coverage.sh      # every CFM log path is rotated (see §5)
 ./scripts/tests/check_origin_ka_config.sh        # origin-keepalive 443 SNI-safety: keepalive 0 (OpenResty) + proxy_ssl_session_reuse off
 ./scripts/tests/check_shared_lua_layout.sh       # installer CFM_LUA_MANIFEST == configs/lua/*.lua (see §5)
@@ -784,7 +784,13 @@ it (the newest `python3.x` on PATH is used; EL8's `python3` is 3.6).
 then leaves the list out. **Never add a source
 whose target URL anyone can choose** (ChatGPT-User, Stripe webhooks, uptime
 monitors): a bypass skips the WAF too (`cfm.lua` Step 0), so that source
-becomes a free WAF-bypass proxy; such callers need a path-scoped exclude. It also stamps + commits/pushes
+becomes a free WAF-bypass proxy; such callers need a path-scoped exclude.
+`trusted-proxies` then refreshes `configs/trusted_proxies.conf` (the Cloudflare
+ranges the edge trusts to name the client via `CF-Connecting-IP`) from
+Cloudflare's API with `scripts/build_trusted_proxies.py`, under the same
+fail-safe rules and `BYPASS_REFRESH` switch; CI validates it with the bypass
+list. It is Cloudflare-only on purpose: a proxy that passes a client-supplied
+`CF-Connecting-IP` through (QUIC.cloud does) must never be added to it. It also stamps + commits/pushes
 `CHANGELOG.md` and cuts a **tag-only GitHub release** (title + that day's
 CHANGELOG section as notes, via `scripts/release-notes.sh`) — **no `.deb`/`.rpm`
 attached**, since packages are distributed by `make sync` to the apt/yum repo.
@@ -804,8 +810,9 @@ it by hand either:
    Removed**. Keep entries operator-facing (what changed, why it matters) — not
    "fixed typo".
 2. **`make release` commits & pushes it for you** — but **only** `CHANGELOG.md`
-   and the refreshed `configs/challenge_waf_bypass.conf` (path-scoped
-   `git commit -- <those two>`), never the whole tree, so built
+   and the refreshed `configs/challenge_waf_bypass.conf` and
+   `configs/trusted_proxies.conf` (path-scoped `git commit -- <those>`),
+   never the whole tree, so built
    binaries / compiled BPF objects sitting in a release host's working dir are
    never swept into the commit. A failed commit/push warns but never aborts an
    otherwise-good release. (Standalone `make changelog` still only edits the
