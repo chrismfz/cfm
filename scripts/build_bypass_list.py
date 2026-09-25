@@ -340,16 +340,20 @@ def _space(net: ipaddress.IPv4Network | ipaddress.IPv6Network) -> int:
 
 def address_space(prefixes: Iterable[str], drop_largest: bool = False) -> tuple[int, int]:
     """(IPv4 addresses, IPv6 /64s) covered by the prefixes; with drop_largest,
-    without the single largest prefix of each family."""
-    sizes: dict[int, list[int]] = {4: [], 6: []}
+    without the single largest prefix of each family. Overlaps are merged
+    first (collapse_addresses): a feed that lists a range AND its
+    more-specifics (AS202042 announces 2a03:e40::/32 and a /48 inside it)
+    adds no space, and must not be counted as growth."""
+    nets: dict[int, list] = {4: [], 6: []}
     for p in prefixes:
         net = ipaddress.ip_network(p, strict=False)
-        sizes[net.version].append(_space(net))
+        nets[net.version].append(net)
     out = []
     for fam in (4, 6):
-        total = sum(sizes[fam])
-        if drop_largest and sizes[fam]:
-            total -= max(sizes[fam])
+        sizes = [_space(n) for n in ipaddress.collapse_addresses(nets[fam])]
+        total = sum(sizes)
+        if drop_largest and sizes:
+            total -= max(sizes)
         out.append(total)
     return out[0], out[1]
 

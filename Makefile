@@ -427,7 +427,8 @@ changelog:
 # release commit leaves the file out, so an unvalidated local edit is never
 # committed. BYPASS_TIMEOUT (default 300 s) caps the fetch: 14 feeds x 3
 # attempts x 30 s could otherwise hold a release ~20 min on a host whose
-# outbound traffic is silently dropped.
+# outbound traffic is silently dropped. --foreground keeps Ctrl-C working
+# (without it timeout moves python out of the terminal's process group).
 #
 # Ordering: deb and stage-pkgroot copy configs/ into the package, so under
 # `make -j release` they must wait for the refresh. The order-only
@@ -455,13 +456,13 @@ bypass-list: ## Refresh challenge_waf_bypass.conf from the crawler/CDN feeds
 	  exit 1; \
 	fi; \
 	echo "🌐 Refreshing challenge_waf_bypass.conf ($$PY)..."; \
-	TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout $(BYPASS_TIMEOUT)"; \
+	TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout --foreground $(BYPASS_TIMEOUT)"; \
 	$$TO "$$PY" scripts/build_bypass_list.py --strict; rc=$$?; \
 	case "$$rc" in \
 	  0) echo "✅ bypass list refreshed." ;; \
 	  1) echo "⚠️  bypass refresh: no feed answered (network?) or the generator crashed — keeping the last-good file." ;; \
 	  2) echo "⚠️  bypass refresh refused: too few/many prefixes, or the address space grew past the guard (poisoned feed? a reviewed manual run can pass --allow-growth) — keeping the last-good file." ;; \
-	  3) echo "⚠️  bypass refresh: a feed failed, came back empty or shrank by over half — keeping the last-good file, not a partial one." ;; \
+	  3) echo "⚠️  bypass refresh: a feed failed, came back empty or shrank by over half — keeping the last-good file, not a partial one (a reviewed manual run without --strict accepts a real drop)." ;; \
 	  124) echo "⚠️  bypass refresh timed out after $(BYPASS_TIMEOUT)s — keeping the last-good file." ;; \
 	  *) echo "⚠️  bypass refresh failed (exit $$rc) — keeping the last-good file." ;; \
 	esac; \

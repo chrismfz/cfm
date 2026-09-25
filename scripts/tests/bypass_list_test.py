@@ -320,6 +320,13 @@ def test_space_growth() -> None:
           "a second /32 next to a dominant /32 must be refused")
     check(g(base + v6 + ["2001:db8:ff::/48"], base + v6) is None,
           "one more /48 is within the allowance")
+    # More-specifics inside an existing prefix add no space (a feed that splits
+    # its /32 into /48 announcements must not be refused forever).
+    split = [f"2a03:e40:{i:x}::/48" for i in range(1, 9)]
+    check(g(base + v6 + split, base + v6) is None,
+          "/48s inside an existing /32 are not growth")
+    check(blp.address_space(["2a03:e40::/32", "2a03:e40:46::/48"]) == blp.address_space(["2a03:e40::/32"]),
+          "overlapping prefixes must be counted once")
     check(g(base + [f"{a}.{b}.0.0/16" for a in (11, 12) for b in range(10)], []) is None,
           "no existing file: nothing to compare")
     poisoned = base + [f"{a}.{b}.0.0/16" for a in (11, 12) for b in range(10)]
