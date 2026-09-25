@@ -1497,7 +1497,11 @@ ss -tnp | grep <cdn-edge-ip>
 Pick who fronts web traffic — the two stacks cannot both do it for the same
 packet:
 
-- **CFM-first:** `cfm dnat on --priority -101`. CFM DNATs 80/443 before
+- **CFM-first:** set `NFT_DNAT_PRIORITY = -101` in `/etc/cfm/cfm.conf`, then
+  `cfm dnat on` (or restart cfm, which re-installs the chain at the new
+  priority). A bare `cfm dnat on --priority -101` works too but lasts only
+  until the next restart, reboot or failsafe recovery, which all apply
+  cfm.conf's value. CFM DNATs 80/443 before
   Imunify's chain at -100; ALL traffic (including CDN-sourced) flows through
   openresty → full logging/WAF/challenge, with the real client IP restored
   from `CF-Connecting-IP`. Trade-off: WebShield effectively stops seeing web

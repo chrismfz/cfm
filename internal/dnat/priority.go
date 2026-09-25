@@ -40,18 +40,26 @@ func configDir() string {
 // env-var read (getenvInt("NFT_DNAT_PRIORITY", …)) could not observe it. An
 // explicit --priority flag still overrides this (it is the flag's default).
 func ConfiguredWebDNATPriority() int {
+	p, _ := configuredWebDNATPriority()
+	return p
+}
+
+// configuredWebDNATPriority is ConfiguredWebDNATPriority plus whether cfm.conf
+// was actually read (false: no config dir, unreadable or unparsable file, so
+// the value is only the -99 fallback, not the operator's).
+func configuredWebDNATPriority() (int, bool) {
 	dir := configDir()
 	if dir == "" {
-		return NFTDNATPriority
+		return NFTDNATPriority, false
 	}
 	f, err := os.Open(filepath.Join(dir, "cfm.conf"))
 	if err != nil {
-		return NFTDNATPriority
+		return NFTDNATPriority, false
 	}
 	defer f.Close()
 	cfg, err := config.ParseCFMConf(f)
 	if err != nil || cfg == nil {
-		return NFTDNATPriority
+		return NFTDNATPriority, false
 	}
 	// ParseCFMConf runs SetDefaults()+Validate() internally, which map an
 	// absent/zero NFT_DNAT_PRIORITY to -99 and clamp any present value to
@@ -59,9 +67,9 @@ func ConfiguredWebDNATPriority() int {
 	// would use, never 0. The ==0 guard is belt-and-suspenders against a future
 	// change to that normalization.
 	if cfg.NFT.DNATPriority == 0 {
-		return NFTDNATPriority
+		return NFTDNATPriority, true
 	}
-	return cfg.NFT.DNATPriority
+	return cfg.NFT.DNATPriority, true
 }
 
 // clampNFTPriority bounds a priority to nftables' accepted range, matching the

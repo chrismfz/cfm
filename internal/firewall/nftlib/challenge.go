@@ -870,6 +870,11 @@ func getenvInt(key string, def int) int {
 	return int(n)
 }
 
+// ConfiguredDNATPriority implements firewall.DNATPriorityReporter.
+func (b *Backend) ConfiguredDNATPriority() (int, bool) {
+	return b.dnatPriority(), b != nil && b.cfg != nil
+}
+
 func (b *Backend) dnatPriority() int {
 	prio := -99
 	if b != nil && b.cfg != nil && b.cfg.NFT.DNATPriority != 0 {

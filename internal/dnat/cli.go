@@ -366,6 +366,12 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		// exactly what gets installed (the backend clamps too; an unclamped echo of
 		// an out-of-range --priority would misreport the real chain priority).
 		effPrio := clampNFTPriority(*priority)
+		// nft refuses a nat chain at -200 or below, and the nft backend deletes
+		// the live table before adding the new one: refuse before touching it.
+		if effPrio <= minNATChainPriority {
+			fmt.Fprintf(os.Stderr, "dnat on failed: priority %d is not a valid nat priority (must be above %d); nothing changed\n", effPrio, minNATChainPriority)
+			return 2
+		}
 		if err := os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(effPrio)); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat on failed:", err)
 			return 1
@@ -379,6 +385,10 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		}
 		LogTransition(ScopeWeb, "ON", "manual", "")
 		fmt.Printf("DNAT: ON  (priority %d, tcp/80->:%d, tcp+udp/443->:%d)\n", effPrio, *httpPort, *httpsPort)
+		confPrio, confOK := configuredWebDNATPriority()
+		if w := priorityOverrideWarning(effPrio, clampNFTPriority(confPrio), confOK); w != "" {
+			fmt.Fprintln(os.Stderr, w)
+		}
 		// DNATOn installs the scoped `ct status dnat` accepts internally; report
 		// them the way `cfm dnat cpanel on` reports its scoped accepts so the
 		// operator can confirm the listener ports were opened without needing
@@ -496,6 +506,8 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	fmt.Println("    Imunify/WebShield-first fallback mode. Imunify at -100 can DNAT matched traffic first; CFM catches the rest.")
 	fmt.Println("  priority -101:")
 	fmt.Println("    CFM-first mode. CFM catches web traffic before Imunify/WebShield.")
+	fmt.Println("  To keep a priority, set NFT_DNAT_PRIORITY in cfm.conf: a restart, reboot or failsafe")
+	fmt.Println("  recovery re-installs DNAT at that value (a --priority lasts until then).")
 	fmt.Println("  cfm dnat off")
 
 	worker := detectWorkerUser()
@@ -946,4 +958,29 @@ func panelOnHelp() {
 	fmt.Fprintln(os.Stdout, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
 	fmt.Fprintln(os.Stdout, "Challenge behavior: ON always applies forced challenge mode.")
 	fmt.Fprintln(os.Stdout, "Examples: --mode direct-cpsrvd, mode=direct-cpsrvd, --priority -101, priority=-101")
+}
+
+// priorityOverrideWarning: a --priority that differs from cfm.conf's
+// NFT_DNAT_PRIORITY holds only until the daemon next installs the chain on its
+// own - a restart (RestoreOnStartup re-applies cfm.conf's priority), a reboot or
+// a failsafe recovery. cfm.conf is the one place the choice persists.
+func priorityOverrideWarning(applied, configured int, configRead bool) string {
+	if !configRead {
+		// The daemon can't read it either, so it leaves the chain alone on a
+		// restart; a reboot or failsafe recovery would use the -99 fallback.
+		return fmt.Sprintf("WARNING: cfm.conf could not be read, so NFT_DNAT_PRIORITY is not verified; "+
+			"fix cfm.conf and set NFT_DNAT_PRIORITY = %d there to keep priority %d.", applied, applied)
+	}
+	if applied == configured {
+		return ""
+	}
+	if applied == 0 {
+		// cfm.conf maps 0 to the -99 default, so 0 can't be kept there.
+		return fmt.Sprintf("WARNING: priority 0 differs from cfm.conf's NFT_DNAT_PRIORITY (%d) and can't be kept: "+
+			"cfm.conf reads 0 as the -99 default, so a restart, reboot or failsafe recovery applies %d. "+
+			"The nearest value cfm.conf keeps is -1 or 1.", configured, configured)
+	}
+	return fmt.Sprintf("WARNING: priority %d differs from cfm.conf's NFT_DNAT_PRIORITY (%d): it holds only until cfm restarts, "+
+		"the host reboots or the failsafe re-installs DNAT, which all apply cfm.conf's value. "+
+		"To keep %d, set NFT_DNAT_PRIORITY = %d in cfm.conf.", applied, configured, applied, applied)
 }

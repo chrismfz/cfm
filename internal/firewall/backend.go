@@ -35,6 +35,16 @@ type CapabilityReporter interface {
 	Capabilities() Capabilities
 }
 
+// DNATPriorityReporter reports the web DNAT prerouting priority DNATOn would
+// install, and whether it came from an applied cfm.conf (false: no config
+// applied, so it is the -99 / NFT_DNAT_PRIORITY-env fallback, not the
+// operator's choice). The daemon's startup restore uses it to re-apply a
+// changed NFT_DNAT_PRIORITY to a web DNAT chain left installed by the
+// previous run, whose hook priority can't change in place.
+type DNATPriorityReporter interface {
+	ConfiguredDNATPriority() (priority int, fromConfig bool)
+}
+
 // Phase 2 backend operation ownership matrix (roadmap-aligned):
 // - nftlib-owned operations:
 //   - Lifecycle/list primitives: EnsureBase, ResetTable, List* + table/set dump helpers.

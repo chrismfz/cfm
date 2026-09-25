@@ -34,6 +34,7 @@ type extFeedData struct {
 // Compile-time: nftlib.Backend must satisfy firewall.Backend.
 // Build fails here — not at runtime — if any method is missing.
 var _ firewall.Backend = (*Backend)(nil)
+var _ firewall.DNATPriorityReporter = (*Backend)(nil)
 
 const (
 	cfmTableName = "cfm"
