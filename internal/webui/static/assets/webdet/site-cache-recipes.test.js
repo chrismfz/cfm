@@ -49,7 +49,8 @@ test("near_static carries the chosen bucket", () => {
   const vars = scRecipeVarsDefaults(rcp, { vhosts: "news.example.com" });
   assert.equal(vars.ttl, "10s");
   assert.equal(scRecipeBuild(rcp, { ...vars, ttl: "30s" })[0].micro.ttl, "30s");
-  assert.match(scRecipeErrors(rcp, { ...vars, ttl: "45s" }).join(" "), /pick one of 10s, 30s/);
+  assert.equal(scRecipeBuild(rcp, { ...vars, ttl: "60s" })[0].micro.ttl, "60s");
+  assert.match(scRecipeErrors(rcp, { ...vars, ttl: "45s" }).join(" "), /pick one of 10s, 30s, 60s/);
 });
 
 test("errors: required vhosts, an invalid host, a host out of scope", () => {

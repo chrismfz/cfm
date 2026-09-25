@@ -765,8 +765,25 @@ make release    # builds bin/cfm, then the .deb and .rpm; also stamps CHANGELOG 
 make sync       # rsyncs today's .deb/.rpm (+ checksums) to the remote repo
 ```
 
-`make release` runs `bpf deb rpm`, so it also regenerates BPF objects — needs
-`clang` + `libbpf-dev` on the build host. It also stamps + commits/pushes
+`make release` runs `bypass-list bpf deb rpm`, so it also regenerates BPF
+objects — needs `clang` + `libbpf-dev` on the build host. `bypass-list` runs
+first: it re-fetches `configs/challenge_waf_bypass.conf` (crawler + CDN ranges:
+Google, Bing, QUIC.cloud, ...) with `scripts/build_bypass_list.py` so every
+package ships fresh ranges. The generator is fail-safe and runs `--strict`
+there (feeds are retried; if one still fails, comes back empty or — a feed of
+10+ ranges — shrinks by over half, the result is out of bounds, or the covered
+address space grows by more than the existing space minus its largest range
+plus a /20 / /48 — a poisoned feed — the last-good file ships and it
+warns with that file's date: never a partial list; the fetch is capped by
+`BYPASS_TIMEOUT`, 300 s). The
+offline validator (`bypass_list_test.py`, what `check_bypass_list.sh` runs in
+CI) failing does stop the release, and so does having no Python >= 3.9 to run
+it (the newest `python3.x` on PATH is used; EL8's `python3` is 3.6).
+`BYPASS_REFRESH=0` skips both for an offline build, and the release commit
+then leaves the list out. **Never add a source
+whose target URL anyone can choose** (ChatGPT-User, Stripe webhooks, uptime
+monitors): a bypass skips the WAF too (`cfm.lua` Step 0), so that source
+becomes a free WAF-bypass proxy; such callers need a path-scoped exclude. It also stamps + commits/pushes
 `CHANGELOG.md` and cuts a **tag-only GitHub release** (title + that day's
 CHANGELOG section as notes, via `scripts/release-notes.sh`) — **no `.deb`/`.rpm`
 attached**, since packages are distributed by `make sync` to the apt/yum repo.
@@ -786,7 +803,8 @@ it by hand either:
    Removed**. Keep entries operator-facing (what changed, why it matters) — not
    "fixed typo".
 2. **`make release` commits & pushes it for you** — but **only** `CHANGELOG.md`
-   (path-scoped `git commit -- CHANGELOG.md`), never the whole tree, so built
+   and the refreshed `configs/challenge_waf_bypass.conf` (path-scoped
+   `git commit -- <those two>`), never the whole tree, so built
    binaries / compiled BPF objects sitting in a release host's working dir are
    never swept into the commit. A failed commit/push warns but never aborts an
    otherwise-good release. (Standalone `make changelog` still only edits the

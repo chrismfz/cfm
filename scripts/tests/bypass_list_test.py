@@ -23,6 +23,8 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO, "scripts"))
+# No scripts/__pycache__: the deb/rpm copy scripts/ into the package.
+sys.dont_write_bytecode = True
 
 import build_bypass_list as blp  # noqa: E402
 
@@ -114,6 +116,7 @@ def test_committed_file() -> None:
         return
     np = blp.normalize_prefix
     total = 0
+    cidrs: list[str] = []
     with open(CONF) as fh:
         for ln, line in enumerate(fh, 1):
             s = line.strip()
@@ -123,6 +126,7 @@ def test_committed_file() -> None:
             if not s.endswith(" 1;"):
                 continue
             cidr = s[:-3].strip()
+            cidrs.append(cidr)
             total += 1
             norm = np(cidr)
             check(norm is not None,
@@ -134,12 +138,237 @@ def test_committed_file() -> None:
           f"{CONF}: only {total} prefixes (< MIN_PREFIXES_TOTAL={blp.MIN_PREFIXES_TOTAL})")
     check(total <= blp.MAX_PREFIXES_TOTAL,
           f"{CONF}: {total} prefixes (> MAX_PREFIXES_TOTAL={blp.MAX_PREFIXES_TOTAL})")
+    # The growth guard reads the file with its own parser; it must see exactly
+    # what this validator saw.
+    check(blp.existing_prefixes(CONF) == cidrs,
+          "the growth guard's reader (existing_prefixes) disagrees with the validator's parse")
     print(f"  committed file: {total} prefixes, all bounded & canonical")
+
+
+# ── 1e. walk_for_prefixes: every feed shape we consume ───────────────────────
+def test_walk_for_prefixes() -> None:
+    def walk(doc):
+        return blp.collect_prefixes(blp.walk_for_prefixes(doc.get("prefixes", doc)))
+    # Google / Bing: list of {ipv4Prefix|ipv6Prefix: "..."} objects.
+    google = {"creationTime": "x", "prefixes": [{"ipv4Prefix": "66.249.64.0/27"},
+                                                {"ipv6Prefix": "2001:4860:4801:10::/64"}]}
+    check(walk(google) == {"66.249.64.0/27", "2001:4860:4801:10::/64"},
+          f"google shape: got {sorted(walk(google))}")
+    # Skroutz: bare string lists under ipv4 / ipv6 (was silently 0 prefixes).
+    skroutz = {"ipv4": ["185.6.76.0/22", "3.73.204.153/32"], "ipv6": ["2a03:e40::/32"],
+               "last_modified": "2025-12-10T08:31:15Z"}
+    check(walk(skroutz) == {"185.6.76.0/22", "3.73.204.153/32", "2a03:e40::/32"},
+          f"skroutz shape: got {sorted(walk(skroutz))}")
+    # The same bounds still apply to list-held strings.
+    bad = {"ipv4": ["0.0.0.0/0", "10.0.0.0/8", "1.0.0.0/8", "not-an-ip"], "ipv6": ["::/0"]}
+    check(walk(bad) == set(), f"list-held over-broad/private must be dropped: got {sorted(walk(bad))}")
+    # A string outside any known key is still ignored (no free-text scraping).
+    check(walk({"note": "8.8.8.0/24", "hosts": ["8.8.4.0/24"]}) == set(),
+          "strings under unknown keys must be ignored")
+
+
+# ── 1f. fetch retry + --strict (a feed outage must not drop its ranges) ─────
+def test_retry_and_strict() -> None:
+    import io
+    import urllib.error
+
+    class _Resp(io.BytesIO):
+        headers = type("H", (), {"get_content_charset": staticmethod(lambda: "utf-8")})()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    calls = {"n": 0}
+    def flaky(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError(ConnectionResetError(104, "reset"))
+        return _Resp(b"8.8.8.0/24\n")
+
+    real_urlopen, real_backoff = blp.urllib.request.urlopen, blp.FETCH_BACKOFF_S
+    blp.urllib.request.urlopen, blp.FETCH_BACKOFF_S = flaky, 0
+    try:
+        check(blp.fetch_text("https://feed.invalid/x") == "8.8.8.0/24\n" and calls["n"] == 2,
+              f"a transient reset must be retried (calls={calls['n']})")
+
+        def gone(req, timeout=None):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(req.full_url, 404, "gone", {}, None)
+        calls["n"] = 0
+        blp.urllib.request.urlopen = gone
+        try:
+            blp.fetch_text("https://feed.invalid/x")
+            check(False, "a 404 must raise")
+        except urllib.error.HTTPError:
+            check(calls["n"] == 1, f"a 4xx must not be retried (calls={calls['n']})")
+        # 429 / 408 are transient: retried.
+        for code in (429, 408):
+            calls["n"] = 0
+            def limited(req, timeout=None, code=code):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise urllib.error.HTTPError(req.full_url, code, "slow down", {}, None)
+                return _Resp(b"8.8.8.0/24\n")
+            blp.urllib.request.urlopen = limited
+            check(blp.fetch_text("https://feed.invalid/x") == "8.8.8.0/24\n" and calls["n"] == 2,
+                  f"HTTP {code} must be retried (calls={calls['n']})")
+        # A body cut short mid-transfer (IncompleteRead) is retried.
+        import http.client
+        calls["n"] = 0
+        def truncated(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise http.client.IncompleteRead(b"8.8.8.0/2", 100)
+            return _Resp(b"8.8.8.0/24\n")
+        blp.urllib.request.urlopen = truncated
+        check(blp.fetch_text("https://feed.invalid/x") == "8.8.8.0/24\n" and calls["n"] == 2,
+              f"IncompleteRead must be retried (calls={calls['n']})")
+    finally:
+        blp.urllib.request.urlopen, blp.FETCH_BACKOFF_S = real_urlopen, real_backoff
+
+    # --strict: one failing source => nothing written, exit 3, existing file intact.
+    good = [f"{a}.{b}.0.0/24" for a in (8, 9) for b in range(80)]  # 160 public /24s
+    def fake_load(spec):
+        if spec == "bad":
+            raise OSError("reset")
+        return [blp.SourceResult(name=spec, kind="txt", origin="x", prefixes=set(good))]
+    real_load, real_sources, real_argv = blp.load_source, blp.SOURCES, sys.argv
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "bypass.conf")
+        with open(out, "w") as fh:
+            fh.write("# last-good\n")
+        blp.load_source, blp.SOURCES = fake_load, ["ok", "bad"]
+        try:
+            sys.argv = ["build_bypass_list.py", "--strict", out]
+            rc = blp.main()
+            with open(out) as fh:
+                kept = fh.read() == "# last-good\n"
+            check(rc == 3 and kept, f"--strict with a failed source: rc={rc}, file kept={kept}")
+            sys.argv = ["build_bypass_list.py", out]
+            rc = blp.main()
+            check(rc == 1 and len(blp.existing_prefixes(out)) == len(good),
+                  f"non-strict with a failed source writes the rest (rc={rc})")
+        finally:
+            blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
+
+    # --strict: a source that answers with NO prefixes (a 200 maintenance page,
+    # a changed JSON shape) drops its ranges just like an exception does.
+    def empty_load(spec):
+        return [blp.SourceResult(name=spec, kind="txt", origin="x",
+                                 prefixes=set() if spec == "empty" else set(good))]
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "bypass.conf")
+        with open(out, "w") as fh:
+            fh.write("# last-good\n")
+        blp.load_source, blp.SOURCES = empty_load, ["ok", "empty"]
+        try:
+            sys.argv = ["build_bypass_list.py", "--strict", out]
+            rc = blp.main()
+            with open(out) as fh:
+                kept = fh.read() == "# last-good\n"
+            check(rc == 3 and kept, f"--strict with an empty source: rc={rc}, file kept={kept}")
+        finally:
+            blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
+
+
+# ── 1f2. --strict per-source shrink (a truncated feed parses as a shorter list) ─
+def test_source_shrink() -> None:
+    good = [f"8.{a}.{b}.0/24" for a in range(2) for b in range(100)]   # 200 /24s
+    real_load, real_sources, real_argv = blp.load_source, blp.SOURCES, sys.argv
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "bypass.conf")
+        blp.render_output([blp.SourceResult(name="feed", kind="txt", origin="x", prefixes=set(good)),
+                           blp.SourceResult(name="small", kind="txt", origin="x", prefixes={"9.9.9.0/24"} | {f"9.9.{i}.0/24" for i in range(1, 4)})],
+                          out, set(good) | {"9.9.9.0/24"})
+        check(blp.existing_source_counts(out) == {"feed": 200, "small": 4},
+              f"header counts must round-trip: {blp.existing_source_counts(out)}")
+        with open(out) as fh:
+            before = fh.read()
+
+        def cut(spec):   # 'feed' returns 60 of its 200 prefixes
+            return [blp.SourceResult(name=spec, kind="txt", origin="x",
+                                     prefixes=set(good[:60]) if spec == "feed" else {"9.9.9.0/24"})]
+        blp.load_source, blp.SOURCES = cut, ["feed", "small"]
+        try:
+            sys.argv = ["build_bypass_list.py", "--strict", out]
+            rc = blp.main()
+            with open(out) as fh:
+                kept = fh.read() == before
+            check(rc == 3 and kept, f"--strict with a source cut to under half: rc={rc}, kept={kept}")
+            # 'small' went 4 -> 1, but tiny feeds are below MIN_SOURCE_COUNT_FOR_SHRINK.
+            check(blp.shrunk_sources(cut("small"), {"small": 4}) == [],
+                  "a tiny feed's swing must not count as a shrink")
+        finally:
+            blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
+
+
+# ── 1g. address-space growth guard (a poisoned feed of public /16s) ─────────
+def test_space_growth() -> None:
+    base = [f"8.{b}.0.0/24" for b in range(200)]           # 51 200 addresses
+    g = blp.check_space_growth
+    check(g(base, base) is None, "same list must pass")
+    check(g(base + ["9.9.9.0/24"], base) is None, "small growth must pass")
+    # Allowed growth = existing space without its largest prefix, plus the slack.
+    allow4 = (51_200 - 256) + blp.SPACE_GROWTH_SLACK_V4
+    fill = allow4 // 256                                     # whole /24s that still fit
+    check(g(base + [f"9.{b}.0.0/24" for b in range(fill)], base) is None,
+          "growth up to the allowance must pass")
+    check(g(base + [f"9.{b}.0.0/24" for b in range(fill + 1)], base) is not None,
+          "one /24 past the allowance must be refused")
+    check(g(base + ["9.1.0.0/16"], base) is not None,
+          "a new /16 (more than the whole baseline) must be refused")
+    # The slack is what lets a tiny list grow at all.
+    tiny = ["8.8.8.0/24"]
+    check(g(tiny + ["9.9.0.0/20"], tiny) is None, "a /20 of growth fits the slack on a tiny list")
+    check(g(tiny + ["9.9.0.0/19"], tiny) is not None, "a /19 does not")
+    # One dominant prefix must not inflate the allowance (Skroutz's /32 is ~all
+    # of the IPv6 space): adding another prefix that size is refused.
+    v6 = ["2a03:e40::/32"] + [f"2001:db8:{i:x}::/48" for i in range(4)]
+    check(g(base + v6, base + v6) is None, "unchanged IPv6 must pass")
+    check(g(base + v6 + ["2a04::/32"], base + v6) is not None,
+          "a second /32 next to a dominant /32 must be refused")
+    check(g(base + v6 + ["2001:db8:ff::/48"], base + v6) is None,
+          "one more /48 is within the allowance")
+    # More-specifics inside an existing prefix add no space (a feed that splits
+    # its /32 into /48 announcements must not be refused forever).
+    split = [f"2a03:e40:{i:x}::/48" for i in range(1, 9)]
+    check(g(base + v6 + split, base + v6) is None,
+          "/48s inside an existing /32 are not growth")
+    check(blp.address_space(["2a03:e40::/32", "2a03:e40:46::/48"]) == blp.address_space(["2a03:e40::/32"]),
+          "overlapping prefixes must be counted once")
+    check(g(base + [f"{a}.{b}.0.0/16" for a in (11, 12) for b in range(10)], []) is None,
+          "no existing file: nothing to compare")
+    poisoned = base + [f"{a}.{b}.0.0/16" for a in (11, 12) for b in range(10)]
+
+    # main() applies it: a poisoned run is refused (exit 2) and the file kept,
+    # and --allow-growth (a reviewed manual run) lets it through.
+    def poisoned_load(spec):
+        return [blp.SourceResult(name=spec, kind="txt", origin="x", prefixes=set(poisoned))]
+    real_load, real_sources, real_argv = blp.load_source, blp.SOURCES, sys.argv
+    with tempfile.TemporaryDirectory() as td:
+        out = os.path.join(td, "bypass.conf")
+        blp.render_output([blp.SourceResult(name="seed", kind="txt", origin="x", prefixes=set(base))],
+                          out, set(base))
+        with open(out) as fh:
+            before = fh.read()
+        blp.load_source, blp.SOURCES = poisoned_load, ["feed"]
+        try:
+            sys.argv = ["build_bypass_list.py", "--strict", out]
+            rc = blp.main()
+            with open(out) as fh:
+                kept = fh.read() == before
+            check(rc == 2 and kept, f"poisoned run through main(): rc={rc}, file kept={kept}")
+            sys.argv = ["build_bypass_list.py", "--strict", "--allow-growth", out]
+            rc = blp.main()
+            check(rc == 0 and len(blp.existing_prefixes(out)) == len(poisoned),
+                  f"--allow-growth writes the larger list (rc={rc})")
+        finally:
+            blp.load_source, blp.SOURCES, sys.argv = real_load, real_sources, real_argv
 
 
 def main() -> int:
     for fn in (test_normalize_prefix, test_thresholds, test_oneline,
-               test_render_no_injection, test_committed_file):
+               test_render_no_injection, test_walk_for_prefixes, test_retry_and_strict,
+               test_source_shrink, test_space_growth, test_committed_file):
         fn()
     if _failures:
         print(f"\nbypass_list_test: {len(_failures)} FAILURE(S)")
