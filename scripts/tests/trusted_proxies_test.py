@@ -38,6 +38,13 @@ V4 = ["173.245.48.0/20", "103.21.244.0/22", "104.16.0.0/13", "172.64.0.0/13", "1
 V6 = ["2400:cb00::/32", "2606:4700::/32", "2a06:98c0::/29"]
 
 
+# Cloudflare's real IPv4 list (2026-09), and its 5 biggest ranges.
+REAL4 = ["173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "141.101.64.0/18",
+         "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22", "198.41.128.0/17",
+         "162.158.0.0/15", "104.16.0.0/13", "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22"]
+BIG4 = ["104.16.0.0/13", "172.64.0.0/13", "104.24.0.0/14", "162.158.0.0/15", "198.41.128.0/17"]
+
+
 def api(v4=None, v6=None, **over):
     doc = {"success": True, "result": {"ipv4_cidrs": list(V4 if v4 is None else v4),
                                        "ipv6_cidrs": list(V6 if v6 is None else v6),
@@ -51,6 +58,8 @@ def test_normalize_prefix() -> None:
     for bad in ["0.0.0.0/0", "::/0", "10.0.0.0/8", "192.168.0.0/16", "127.0.0.0/8",
                 "169.254.0.0/16", "224.0.0.0/4", "100.64.0.0/10", "203.0.113.0/24",
                 "8.0.0.0/8", "104.0.0.0/11", "2400::/16", "2a06:9800::/27",
+                "100.64.0.0/12", "100.100.0.0/16",   # CGNAT (Tailscale): not is_private
+                "::ffff:104.16.0.0/109", "2002:6810::/32", "2001:0:6810::/48",  # v4-mapped, 6to4, Teredo
                 "173.245.48.1/20",           # host bits set: not what the API sends
                 "1.2.3.4",                   # no prefix length
                 "1.2.3.0/24; include /etc/passwd", "1.2.3.0/24\n", "", None, 42, ["1.2.3.0/24"]]:
@@ -92,6 +101,12 @@ def test_guards() -> None:
     check(tp.check_space(base + ["2c0f:f000::/28"], base) is not None, "IPv6 space doubling is refused")
     check(tp.check_space([p for p in base if p not in ("104.16.0.0/13", "172.64.0.0/13")], base) is not None,
           "IPv4 space halving (partial answer) is refused")
+    # A partial answer keeping only the big ranges: space barely moves, count halves.
+    real4, big4 = REAL4, BIG4
+    check(tp.check_space(big4 + V6, real4 + V6) is None, "(the space guard alone can't see it)")
+    check(tp.check_shrink(big4, V6, real4 + V6) is not None, "a count that halves (only the big ranges kept) is refused")
+    check(tp.check_shrink(real4[:-1], V6, real4 + V6) is None, "one range dropped passes")
+    check(tp.check_shrink(real4, V6[:1], real4 + V6) is not None, "an IPv6 count that halves is refused")
 
 
 def run_main(output: str, doc=None, exc: Exception | None = None, force: bool = False) -> tuple[int, str]:
@@ -141,6 +156,7 @@ def test_main() -> None:
 
         for name, kw, want in [
             ("fetch error", {"exc": OSError("down")}, 1),
+            ("not JSON", {"exc": __import__("json").JSONDecodeError("Expecting value", "<html>", 0)}, 1),
             ("bad answer", {"doc": api(success=False)}, 2),
             ("too few", {"doc": api(v6=V6[:1])}, 2),
             ("space jump", {"doc": api(v4=V4 + ["8.0.0.0/12", "9.0.0.0/12"])}, 2),
@@ -148,6 +164,14 @@ def test_main() -> None:
             rc, _ = run_main(out, **kw)
             check(rc == want and read(out) == first, f"{name}: exit {want}, existing file kept (got {rc})")
         check(not [f for f in os.listdir(d) if f.endswith(".tmp")], "no temp file left")
+
+        # End to end: a partial answer keeping only the 5 big IPv4 ranges of the
+        # real 15 is refused by main(), not just by check_shrink().
+        real = os.path.join(d, "real.conf")
+        rc, _ = run_main(real, api(v4=REAL4))
+        kept = read(real)
+        rc, _ = run_main(real, api(v4=BIG4))
+        check(rc == 2 and read(real) == kept, f"main refuses a partial answer (count halved), file kept (got {rc})")
 
         with open(out, "a", encoding="utf-8") as fh:
             fh.write("set_real_ip_from unix:;\nset_real_ip_from not-a-net;\n")

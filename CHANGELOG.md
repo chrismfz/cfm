@@ -27,11 +27,13 @@ back-filled here — see the git/PR history for that period.
     its own.
   - A new `scripts/build_trusted_proxies.py` (`make trusted-proxies`) reads
     `api.cloudflare.com/client/v4/ips`. It is fail-safe like the bypass list:
-    a failed fetch, a malformed answer, a count out of bounds or the address
-    space doubling or halving keeps the last-good file with a warning.
+    a failed fetch, a malformed answer, a count out of bounds or halved, or
+    the address space doubling or halving keeps the last-good file with a
+    warning.
     Unchanged ranges leave the file untouched. `BYPASS_REFRESH=0` skips it too.
   - CI now validates the committed file: only `set_real_ip_from` lines with
-    public ranges no broader than /12 (IPv4) or /28 (IPv6). A hand edit that
+    global unicast ranges (no private, CGNAT `100.64/10` or IPv4-in-IPv6
+    ranges) no broader than /12 (IPv4) or /28 (IPv6). A hand edit that
     trusted a catch-all or private range would let anyone in it pick the IP
     the WAF, challenge and blocks see.
   - Cloudflare only. QUIC.cloud passes a client-supplied `CF-Connecting-IP`

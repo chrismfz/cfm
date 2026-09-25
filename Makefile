@@ -470,7 +470,7 @@ bypass-list: ## Refresh challenge_waf_bypass.conf from the crawler/CDN feeds
 # Refresh configs/trusted_proxies.conf (the Cloudflare ranges the edge trusts
 # to name the client via CF-Connecting-IP) from Cloudflare's API, the same way:
 # fail-safe (a failed fetch, a malformed answer, a count out of bounds or the
-# address space doubling/halving keeps the last-good file, with a warning), and
+# address space doubling/halving, or a range count halving, keeps the last-good file, with a warning), and
 # unchanged ranges leave the file untouched. BYPASS_REFRESH=0 skips it too (one
 # switch for "no network refresh"). check_bypass_list.sh validates both
 # generated files; it is re-run here so the refreshed one is what gets
@@ -488,8 +488,8 @@ trusted-proxies: ## Refresh trusted_proxies.conf from Cloudflare's published ran
 	PYTHONDONTWRITEBYTECODE=1 $$TO "$$PY" scripts/build_trusted_proxies.py; rc=$$?; \
 	case "$$rc" in \
 	  0) echo "✅ trusted_proxies.conf up to date." ;; \
-	  1) echo "⚠️  trusted_proxies refresh: Cloudflare's API did not answer (network?) — keeping the last-good file." ;; \
-	  2) echo "⚠️  trusted_proxies refresh refused: malformed answer, count out of bounds, or the address space doubled/halved — keeping the last-good file (a real Cloudflare change: review it, then run scripts/build_trusted_proxies.py --force)." ;; \
+	  1) echo "⚠️  trusted_proxies refresh: no JSON answer from Cloudflare's API (network? captive portal?) — keeping the last-good file." ;; \
+	  2) echo "⚠️  trusted_proxies refresh refused: an unusable range in the answer, a count out of bounds or halved, or the address space doubled/halved — keeping the last-good file. If Cloudflare really changed that much: review the answer, then run scripts/build_trusted_proxies.py --force (it skips only the halving/doubling guards)." ;; \
 	  124) echo "⚠️  trusted_proxies refresh timed out — keeping the last-good file." ;; \
 	  *) echo "⚠️  trusted_proxies refresh failed (exit $$rc) — keeping the last-good file." ;; \
 	esac; \

@@ -10,8 +10,9 @@ Every range here is trusted to name the client: the edge takes the client IP
 from CF-Connecting-IP when the peer is in it (real_ip_header CF-Connecting-IP).
 A poisoned or overbroad range would let anyone in it pick the IP the WAF,
 challenge and blocks see, so the input is bounded like the bypass list's
-(public CIDRs only, no range broader than /12 v4 // /28 v6, count bounds, a
-shrink and an address-space growth guard), the write is atomic, and a refused
+(global unicast CIDRs only: no private, CGNAT or IPv4-in-IPv6 ranges, none
+broader than /12 v4 // /28 v6; count bounds, a count-shrink guard and an
+address-space guard), the write is atomic, and a refused
 run keeps the existing file. `scripts/tests/check_bypass_list.sh` re-validates
 the committed file in CI.
 
@@ -20,13 +21,14 @@ client can also set (QUIC.cloud passes a client-supplied CF-Connecting-IP
 through), and one real_ip_header serves them all, so adding them needs a
 per-proxy design, not a feed here.
 
-Exit: 0 written (or unchanged), 1 fetch failed, 2 refused (bounds/guards).
+Exit: 0 written (or unchanged), 1 fetch failed or not JSON, 2 refused (bounds/guards).
 """
 
 from __future__ import annotations
 
 import argparse
 import ipaddress
+import json
 import os
 import sys
 import tempfile
@@ -76,8 +78,15 @@ def normalize_prefix(value: Any) -> str | None:
     except ValueError:
         return None
     if (net.is_unspecified or net.is_loopback or net.is_link_local
-            or net.is_multicast or net.is_reserved or net.is_private):
+            or net.is_multicast or net.is_reserved or net.is_private
+            or not net.is_global):  # is_global also excludes CGNAT 100.64/10
         return None
+    # v4-mapped / 6to4 / Teredo carry an IPv4 address inside IPv6; Python only
+    # counts some of them non-global, and not on every version (3.9 on EL).
+    if net.version == 6:
+        a = net.network_address
+        if a.ipv4_mapped is not None or a.sixtofour is not None or a.teredo is not None:
+            return None
     min_len = MIN_IPV4_PREFIXLEN if net.version == 4 else MIN_IPV6_PREFIXLEN
     if net.prefixlen < min_len:
         return None
@@ -114,6 +123,19 @@ def check_counts(v4: list[str], v6: list[str]) -> str | None:
         return f"{len(v4)} IPv4 ranges (want {MIN_IPV4_COUNT}..{MAX_PER_FAMILY})"
     if not MIN_IPV6_COUNT <= len(v6) <= MAX_PER_FAMILY:
         return f"{len(v6)} IPv6 ranges (want {MIN_IPV6_COUNT}..{MAX_PER_FAMILY})"
+    return None
+
+
+def check_shrink(v4: list[str], v6: list[str], existing: Iterable[str]) -> str | None:
+    """Refuse a per-family COUNT that fell below half of the existing file's:
+    a partial answer that keeps only the big ranges barely moves the address
+    space (the /13s dominate it) but drops most of Cloudflare's edges, whose
+    visitors would then all share a Cloudflare IP."""
+    old4 = [p for p in existing if ":" not in p]
+    old6 = [p for p in existing if ":" in p]
+    for fam, n, e in ((4, len(v4), len(old4)), (6, len(v6), len(old6))):
+        if e and n < e * MIN_SPACE_SHRINK_FACTOR:
+            return f"IPv{fam} ranges fell from {e} to {n} (partial answer?)"
     return None
 
 
@@ -218,11 +240,15 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Build trusted_proxies.conf from Cloudflare's ranges")
     p.add_argument("output", nargs="?", default=DEFAULT_OUTPUT, help="Output file path")
     p.add_argument("--force", action="store_true",
-                   help="skip the address-space guard (a reviewed manual run after a real Cloudflare change)")
+                   help="skip the shrink and address-space guards (a reviewed manual run after a real Cloudflare change)")
     args = p.parse_args()
 
     try:
         v4, v6, etag = parse_api(blp.fetch_json(SOURCE_URL))
+    except json.JSONDecodeError as exc:  # a ValueError: catch it first
+        blp.eprint(f"ERROR: {SOURCE_URL} did not answer JSON (captive portal, error page?): {exc}; "
+                   f"keeping existing file at {args.output}")
+        return 1
     except ValueError as exc:
         blp.eprint(f"ERROR: refusing Cloudflare's answer ({exc}); keeping existing file at {args.output}")
         return 2
@@ -232,6 +258,8 @@ def main() -> int:
 
     existing = existing_prefixes(args.output)
     reason = check_counts(v4, v6)
+    if reason is None and not args.force:
+        reason = check_shrink(v4, v6, existing)
     if reason is None and not args.force:
         reason = check_space(v4 + v6, existing)
     if reason is not None:
