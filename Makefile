@@ -408,34 +408,74 @@ GH := gh
 changelog:
 	@scripts/stamp-changelog.sh $(REL_DATE)
 
-# release flow: (1) stamp CHANGELOG for today's UTC date; (2) commit & push
-# ONLY CHANGELOG.md — never the whole tree, since a release host usually has
-# built binaries / compiled BPF objects sitting in the working dir that must
-# not be committed; (3) create + publish a tag-only GitHub release (title +
+# Refresh configs/challenge_waf_bypass.conf (crawler + CDN ranges: Google, Bing,
+# QUIC.cloud, ...) from the live feeds, so every package ships fresh ranges
+# instead of whatever was last committed by hand. Run FIRST by `release`
+# (before deb/rpm copy configs/ into the package); also available standalone.
+#
+# Never blocks a release: the generator is fail-safe (exit 2 = refused to
+# write, last-good file kept; exit 1 = some feeds failed, the rest written), so
+# only a warning is printed. What DOES block is the offline validator
+# (bypass_list_test.py, what check_bypass_list.sh runs in CI) failing on the
+# file about to be packaged; it runs with the same >= 3.8 interpreter, since it
+# imports the generator. Offline
+# builds: BYPASS_REFRESH=0 skips the fetch. The script needs Python >= 3.8
+# (EL8's python3 is 3.6), so the newest python3.x on PATH is used.
+BYPASS_REFRESH ?= 1
+.PHONY: bypass-list
+bypass-list: ## Refresh challenge_waf_bypass.conf from the crawler/CDN feeds
+	@set -u; \
+	PY=""; \
+	for c in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3; do \
+	  if command -v "$$c" >/dev/null 2>&1 && "$$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' 2>/dev/null; then PY="$$c"; break; fi; \
+	done; \
+	if [ -z "$$PY" ]; then \
+	  echo "⚠️  no Python >= 3.8 found — keeping the committed (CI-validated) challenge_waf_bypass.conf"; \
+	  exit 0; \
+	fi; \
+	if [ "$(BYPASS_REFRESH)" = "0" ]; then \
+	  echo "⏭️  BYPASS_REFRESH=0 — keeping the committed challenge_waf_bypass.conf"; \
+	else \
+	  echo "🌐 Refreshing challenge_waf_bypass.conf ($$PY)..."; \
+	  "$$PY" scripts/build_bypass_list.py; rc=$$?; \
+	  case "$$rc" in \
+	    0) echo "✅ bypass list refreshed." ;; \
+	    1) echo "⚠️  some bypass feeds failed — wrote the list from the ones that answered." ;; \
+	    *) echo "⚠️  bypass refresh refused (exit $$rc) — keeping the last-good file." ;; \
+	  esac; \
+	fi; \
+	"$$PY" scripts/tests/bypass_list_test.py || { echo "❌ challenge_waf_bypass.conf failed validation — not packaging it"; exit 1; }
+
+# release flow: (0) `bypass-list` refreshes configs/challenge_waf_bypass.conf
+# before deb/rpm package it; (1) stamp CHANGELOG for today's UTC date; (2)
+# commit & push ONLY CHANGELOG.md + that bypass list — never the whole tree,
+# since a release host usually has built binaries / compiled BPF objects sitting
+# in the working dir that must not be committed; (3) create + publish a tag-only GitHub release (title +
 # CHANGELOG notes, NO .deb/.rpm assets; packages ship via `make sync`). Steps 2 and 3
 # are each ONE self-contained shell segment — do NOT add a bare `#` comment line
 # inside them: a comment without a trailing backslash ends the segment, so the
 # shell vars (DEB_FILE/RPM_FILE/REPO/NOTES_FILE) set above it silently vanish and the rest
 # runs without `set -e`. (That exact trap masked a broken gh-release publish.)
-release: bpf deb rpm
+release: bypass-list bpf deb rpm
 	@scripts/stamp-changelog.sh $(REL_DATE)
 	@set -uo pipefail; \
-	if git rev-parse --git-dir >/dev/null 2>&1 && [ -n "$$(git status --porcelain -- CHANGELOG.md)" ]; then \
-	  echo "📝 Committing CHANGELOG.md (only) for $(REL_DATE)..."; \
-	  if git commit -q -m "changelog: stamp $(REL_DATE) release" -- CHANGELOG.md; then \
+	REL_FILES="CHANGELOG.md configs/challenge_waf_bypass.conf"; \
+	if git rev-parse --git-dir >/dev/null 2>&1 && [ -n "$$(git status --porcelain -- $$REL_FILES)" ]; then \
+	  echo "📝 Committing $$REL_FILES (only) for $(REL_DATE)..."; \
+	  if git commit -q -m "release: stamp $(REL_DATE) changelog + refresh bypass list" -- $$REL_FILES; then \
 	    branch="$$(git rev-parse --abbrev-ref HEAD)"; \
 	    if [ "$$branch" = "HEAD" ]; then \
-	      echo "⚠️  detached HEAD — CHANGELOG committed locally, not pushed."; \
+	      echo "⚠️  detached HEAD — $$REL_FILES committed locally, not pushed."; \
 	    elif git push origin "HEAD:$$branch"; then \
-	      echo "✅ CHANGELOG committed & pushed to $$branch."; \
+	      echo "✅ $$REL_FILES committed & pushed to $$branch."; \
 	    else \
 	      echo "⚠️  push failed — commit is local; run: git push origin HEAD:$$branch"; \
 	    fi; \
 	  else \
-	    echo "⚠️  git commit failed — CHANGELOG stamped but not committed."; \
+	    echo "⚠️  git commit failed — $$REL_FILES updated but not committed."; \
 	  fi; \
 	else \
-	  echo "📝 CHANGELOG.md unchanged since HEAD — nothing to commit."; \
+	  echo "📝 $$REL_FILES unchanged since HEAD — nothing to commit."; \
 	fi
 	@set -euo pipefail; \
 	echo "🔐 Checking GitHub auth..."; \
