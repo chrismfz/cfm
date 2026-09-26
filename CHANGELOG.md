@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.26
+
 ### Security
 - **The cfm-web blocklist feeds are now pulled with the node's `AUTH_TOKEN`.**
   `/blacklist.txt` and `/whitelist.txt` (the `MYBLOCK` / `MYALLOW` lines in
