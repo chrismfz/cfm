@@ -31,7 +31,7 @@ type FingerprintPolicyRow struct {
 }
 
 func (c *APIClient) FetchFingerprintPolicies(ctx context.Context) ([]FingerprintPolicyRow, error) {
-	u := strings.TrimRight(c.BaseURL, "/") + "/api/fingerprint-policies/fetch"
+	u := c.endpoint("/api/fingerprint-policies/fetch")
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {

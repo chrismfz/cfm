@@ -32,8 +32,21 @@ func (c *APIClient) http() *http.Client {
 	return &http.Client{Timeout: 10 * time.Second}
 }
 
+// endpoint joins API_URL and path. A schemeless API_URL means https, as the
+// heartbeat runner's normalize and the feed fetcher (blocklists.APIAuth) do;
+// any explicit scheme, whatever its case, is kept. The block/unblock reporter is built
+// straight from cfm.conf, and without this its calls (and their Token) never
+// reached cfm-web while the heartbeat did.
+func (c *APIClient) endpoint(path string) string {
+	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+	if base != "" && !strings.Contains(base, "://") {
+		base = "https://" + base
+	}
+	return base + path
+}
+
 func (c *APIClient) doPOST(path string, form url.Values) ([]byte, error) {
-	u := strings.TrimRight(c.BaseURL, "/") + path
+	u := c.endpoint(path)
 	req, err := http.NewRequest("POST", u, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("doPOST build request: %w", err)
@@ -122,7 +135,7 @@ type PendingUnblock struct {
 }
 
 func (c *APIClient) FetchPendingUnblocks() ([]PendingUnblock, error) {
-	u := strings.TrimRight(c.BaseURL, "/") + "/api/blocklist/pending-unblocks"
+	u := c.endpoint("/api/blocklist/pending-unblocks")
 	//logging.LogfAPI("[api] → GET %s", u)
 
 	req, err := http.NewRequest("GET", u, nil)
@@ -161,7 +174,7 @@ func (c *APIClient) FetchPendingUnblocks() ([]PendingUnblock, error) {
 // and notifications can show WHERE the IP was actually blocked on this
 // server (nft set, csf file, fail2ban jail, imunify list) and why.
 func (c *APIClient) ConfirmUnblock(id int, ip string, success bool, found *locate.Result) error {
-	u := strings.TrimRight(c.BaseURL, "/") + "/api/blocklist/unblock-confirm"
+	u := c.endpoint("/api/blocklist/unblock-confirm")
 
 	body := map[string]any{"id": id, "ip": ip, "success": success}
 	if host, err := os.Hostname(); err == nil && host != "" {
@@ -209,7 +222,7 @@ type HeartbeatRequest struct {
 }
 
 func (c *APIClient) SendHeartbeat(ctx context.Context, version, userAgent string, hb HeartbeatRequest) (int, time.Duration, error) {
-	u := strings.TrimRight(c.BaseURL, "/") + "/api/agent/heartbeat"
+	u := c.endpoint("/api/agent/heartbeat")
 
 	body, err := json.Marshal(hb)
 	if err != nil {

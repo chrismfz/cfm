@@ -47,6 +47,14 @@ back-filled here — see the git/PR history for that period.
   lists are refreshing, and refreshing authenticated.
 
 ### Fixed
+- **Block / unblock reports reach cfm-web with a schemeless `API_URL`.** The
+  heartbeat, unblock, file-sync and fingerprint-policy loops already treated
+  `API_URL = cfm.example.org` as `https://cfm.example.org`, but the reporter
+  behind `/api/blocklist/report`, `/report-lenient` and `/unblock` (the daemon's
+  autoblocks and `cfm block` / `cfm unblock`) built its URL from the raw value
+  and failed every call. Every cfm-web call now resolves `API_URL` the same
+  way. A test drives each of them against a stub server and checks that it
+  sends the node's `Token:`.
 - **A package upgrade no longer prints `sed: couldn't write … Broken pipe`, and
   prunes its old edge-config backups.** The deploy helper ignores SIGPIPE, which
   its child processes inherit, so a `sed | grep -q` pipeline printed a harmless

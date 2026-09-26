@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 type FileUpdatesRequest struct {
@@ -22,7 +21,7 @@ func (c *APIClient) GetUpdates(paths []string) ([]ConfigUpdate, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	u := strings.TrimRight(c.BaseURL, "/") + "/api/agent/get-updates"
+	u := c.endpoint("/api/agent/get-updates")
 	body, _ := json.Marshal(FileUpdatesRequest{Files: paths})
 
 	req, err := http.NewRequest("POST", u, bytes.NewReader(body))
@@ -52,7 +51,7 @@ func (c *APIClient) GetUpdates(paths []string) ([]ConfigUpdate, error) {
 }
 
 func (c *APIClient) ListTrackedFiles() (map[string]string, error) {
-	u := strings.TrimRight(c.BaseURL, "/") + "/api/agent/list-files"
+	u := c.endpoint("/api/agent/list-files")
 
 	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
