@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,5 +214,33 @@ func TestClamavHookSentinelRE(t *testing.T) {
 				t.Errorf("captured %q want %q", m[1], tc.wantVal)
 			}
 		})
+	}
+}
+
+// The block/allow callers key valueFlags as "--ttl" / "-r"; the split must
+// attach the value whatever spelling the caller or the operator uses.
+func TestSplitFlagsAndPositionalsValueFlagSpellings(t *testing.T) {
+	for _, keys := range []map[string]bool{
+		{"--ttl": true, "-r": true},
+		{"ttl": true, "r": true},
+	} {
+		for _, args := range [][]string{
+			{"192.0.2.77", "-r", "why", "--ttl", "10m"},
+			{"-ttl", "10m", "192.0.2.77", "--r", "why"},
+		} {
+			flags, pos := SplitFlagsAndPositionals(args, keys)
+			if len(pos) != 1 || pos[0] != "192.0.2.77" {
+				t.Fatalf("keys=%v args=%v: positionals %v, want only the IP", keys, args, pos)
+			}
+			fs := flag.NewFlagSet("block", flag.ContinueOnError)
+			r := fs.String("r", "", "")
+			ttl := fs.String("ttl", "", "")
+			if err := fs.Parse(flags); err != nil {
+				t.Fatalf("parse %v: %v", flags, err)
+			}
+			if *r != "why" || *ttl != "10m" {
+				t.Fatalf("keys=%v args=%v: r=%q ttl=%q, want why / 10m", keys, args, *r, *ttl)
+			}
+		}
 	}
 }

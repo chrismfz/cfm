@@ -17,7 +17,15 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **`cfm block … --ttl` and `cfm allow … --ttl` no longer turn into PERMANENT
+  entries, and `cfm block -r REASON` keeps its reason.** The CLI's flag splitter
+  never attached a value to `--ttl` / `-r` (it compared the argument without its
+  dashes against keys written with them), so `cfm block IP -r why --ttl 10m`
+  blocked IP permanently with reason `--ttl`: written to `cfm.deny` and reported
+  to cfm-web as permanent (so the fleet would pull it too). Check `cfm.deny` for
+  lines ending `# --ttl` or `# -r` from earlier manual blocks, and remove any
+  that were meant to expire (`cfm unblock IP`).
 
 ## 2026.09.26
 
