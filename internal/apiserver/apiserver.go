@@ -200,6 +200,7 @@ func Start(
 	RegisterFirewallList(m, be)
 	RegisterFirewallCounters(m, be) // read-only nft named-counter view (rule match volume)
 	RegisterFirewallSelfTest(m, be) // read-only nftlib self-diagnostics
+	RegisterFirewallFeeds(m)        // read-only cfm.blocklists feed state
 	RegisterNetfilterPath(m, cfg)   // read-only host-wide hook order and NAT conflicts
 	RegisterSearch(m, be, cfgDir)   // read-only multi-source IP lookup
 

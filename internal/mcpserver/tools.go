@@ -53,6 +53,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerFirewallBlocks(srv, d)
 	registerFirewallCounters(srv, d)
 	registerFirewallSelfTest(srv, d)
+	registerBlocklistFeeds(srv, d)
 	registerNetfilterPath(srv, d)
 	registerIPLocate(srv, d)
 	registerDetectorsStatus(srv, d)
@@ -1200,6 +1201,16 @@ func registerFirewallSelfTest(srv *mcp.Server, d Deps) {
 		Description: "nftlib firewall self-diagnostics (read-only): the recent EnsureBase calls with their time split into lock_wait_ms (contention on the backend mutex), nl_work_ms (netlink add+flush — kernel round-trip time) and cli_work_ms (the `nft` CLI part: a read of the input chain, plus one write when base rules are missing), the worst call in the window, and the latest per-set feed writes (elems, dur, error; self_v4/self_v6 too, which EnsureBase refreshes); plus `netlink`, which covers every netlink call the backend makes (reads like the heartbeat's DNAT probe and batch writes, not just EnsureBase; the nft CLI calls some paths make are not included): each call runs on its own socket, and READS carry a deadline (op_timeout_ms) so a stuck read fails and releases the backend lock instead of holding it forever — writes carry none, because the kernel may still commit a batch a deadline would report as failed. timeouts>0 means a read got no answer for that long; slow_recent/last_timeout name the call (GetRules, Flush, …) and when; errors also counts routine not-found lookups, so watch timeouts, not errors. Use to root-cause an nftlib node whose EnsureBase duration climbs over a run (rising lock_wait ⇒ contention from a slow/failed feed write; rising nl_work ⇒ the kernel side slowing down), a node whose firewall operations stall (netlink.timeouts), or a feed that never applies (a large set write erroring with 'message too long'). `available:false` on the exec-nft backend (it doesn't record this).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		return dispatchJSON(ctx, d, "/api/v1/firewall/selftest", nil)
+	})
+}
+
+func registerBlocklistFeeds(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "blocklist_feeds",
+		Description: "The node's EXTERNAL blocklist feeds (cfm.blocklists: cfm-web's MYBLOCK/MYALLOW lists plus third-party lists like Spamhaus DROP) and whether each is actually refreshing: per feed its name, type (BLOCK/ALLOW/IGNORE), URL (query redacted), interval, last_fetch, last_ok (last successful download), last_apply (last write to nft: when the content changed, or the forced re-apply of unchanged content every 6h), last_http status, last_error, and last_v4/last_v6 entry counts; plus `failing` (feeds whose last attempt errored). `api_origin` marks a feed on the cfm.conf API_URL host, which the node pulls with its AUTH_TOKEN; `token_sent` says the last fetch really carried it (the token itself is never shown). api_origin reflects the CURRENT credential and token_sent the LAST fetch, so api_origin=true with token_sent=false means the feed has not been fetched yet (last_fetch zero), API_URL/AUTH_TOKEN changed since that fetch (the token goes out from the next one, up to one interval later), or token_rejected is set (the retry went out without it). `token_rejected` (with cfm-web's reason, e.g. 'Invalid token' / 'IP address mismatch' / a usage limit) means cfm-web REFUSED the node's AUTH_TOKEN and the list was pulled again without it — it still refreshes only through the IP-only fallback, so fix the token (cfm-web Tokens: value, IP pin, usage limit) before that fallback is turned off. The top-level `token_rejected` counts such feeds (they do NOT count in `failing` while the retry succeeds); a `last_error` starting 'retried without token:' means the retry failed too. A cfm-web feed with api_origin=false is on a different host, scheme or port than API_URL and so pulls without the token, relying on cfm-web's IP-only fallback; its 401/403 error says 'no Token sent' and why. URL query and userinfo are redacted in url and last_error; a key embedded in the URL PATH is not. Answers 'are the fleet blocklists still updating, and are the cfm-web feeds authenticated?'. Read-only; the entries themselves are in firewall_blocks.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
+		return dispatchJSON(ctx, d, "/api/v1/firewall/feeds", nil)
 	})
 }
 
