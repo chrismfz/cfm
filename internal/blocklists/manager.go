@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -57,9 +58,12 @@ type runner struct {
 	// Wire view of the last fetch, for Status (so an operator can see a
 	// cfm-web feed pull succeeding WITH a token). Written by the fetch
 	// goroutine under Manager.mu, like lastFetch/lastErr are read.
-	lastOK        time.Time
-	lastHTTP      int
-	tokenSent     bool
+	lastOK    time.Time
+	lastHTTP  int
+	tokenSent bool
+	// tokenRejected: cfm-web refused the token on the last fetch (the body
+	// says why); the fetch was retried without it.
+	tokenRejected string
 	lastAppliedAt time.Time // lastApply mirrored under mu for Status (lastApply itself is lock-free)
 
 	// lastHash is the sha256 of the last content we successfully applied for this
@@ -229,10 +233,20 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 	auth := m.auth
 	m.mu.Unlock()
 	res, meta, err := fetchAndParse(ctx, m.client, r.feed, auth)
+	// A refused token must not stop the lists while cfm-web still allows its
+	// IP-only fallback for feeds: retry once without it, and report the
+	// refusal (token_rejected) so the credential gets fixed before cfm-web
+	// turns the fallback off. The header path never falls back to the IP.
+	var tokenRejected string
+	if err != nil && meta.TokenSent && (meta.HTTPStatus == http.StatusUnauthorized || meta.HTTPStatus == http.StatusForbidden) {
+		tokenRejected = redactErr(err, r.feed.URL).Error()
+		res, meta, err = fetchAndParse(ctx, m.client, r.feed, APIAuth{})
+	}
 	err = redactErr(err, r.feed.URL)
 	m.mu.Lock()
 	r.lastFetch = time.Now()
 	r.lastErr = err
+	r.tokenRejected = tokenRejected
 	r.lastHTTP, r.tokenSent = meta.HTTPStatus, meta.TokenSent
 	if err == nil && res != nil {
 		r.lastOK = r.lastFetch
@@ -316,6 +330,10 @@ type FeedStatus struct {
 	// with AUTH_TOKEN. TokenSent: the last fetch actually carried it.
 	APIOrigin bool `json:"api_origin"`
 	TokenSent bool `json:"token_sent"`
+	// TokenRejected: cfm-web refused AUTH_TOKEN on the last fetch (its reason,
+	// e.g. "Invalid token" / "IP address mismatch"); the list was then pulled
+	// without it through cfm-web's IP-only fallback, which will stop working.
+	TokenRejected string `json:"token_rejected,omitempty"`
 }
 
 // Status returns every running feed, sorted by name.
@@ -325,17 +343,18 @@ func (m *Manager) Status() []FeedStatus {
 	out := make([]FeedStatus, 0, len(m.runs))
 	for name, r := range m.runs {
 		fs := FeedStatus{
-			Name:      name,
-			Type:      r.feed.Type.String(),
-			URL:       redactURL(r.feed.URL),
-			Interval:  r.interval,
-			LastFetch: r.lastFetch,
-			LastOK:    r.lastOK,
-			LastApply: r.lastAppliedAt,
-			LastHTTP:  r.lastHTTP,
-			LastV4:    r.lastV4,
-			LastV6:    r.lastV6,
-			TokenSent: r.tokenSent,
+			Name:          name,
+			Type:          r.feed.Type.String(),
+			URL:           redactURL(r.feed.URL),
+			Interval:      r.interval,
+			LastFetch:     r.lastFetch,
+			LastOK:        r.lastOK,
+			LastApply:     r.lastAppliedAt,
+			LastHTTP:      r.lastHTTP,
+			LastV4:        r.lastV4,
+			LastV6:        r.lastV6,
+			TokenSent:     r.tokenSent,
+			TokenRejected: r.tokenRejected,
 		}
 		if u, err := url.Parse(r.feed.URL); err == nil {
 			fs.APIOrigin = m.auth.tokenFor(u) != ""
@@ -387,8 +406,12 @@ func redactErr(err error, feedURL string) error {
 	if feedURL != "" {
 		msg = strings.ReplaceAll(msg, feedURL, redactURL(feedURL))
 	}
+	// Any other URL in the text (a malformed redirect Location, …).
+	msg = queryInText.ReplaceAllString(msg, "?REDACTED")
 	return errors.New(msg)
 }
+
+var queryInText = regexp.MustCompile(`\?[^\s"'?]+`)
 
 // The daemon's running manager, for the read-only status endpoint (the
 // apiserver has no other handle on it). nil until the daemon registers one.

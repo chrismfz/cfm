@@ -20,8 +20,8 @@ func (a APIAuth) base() *url.URL {
 	if raw == "" {
 		return nil
 	}
-	// Same normalisation as the agent client (internal/agent normalize): a
-	// schemeless API_URL means https, or every other cfm-web call would work
+	// Equivalent, for http/https, to the agent client's normalisation
+	// (internal/agent normalize): a schemeless API_URL means https, or every other cfm-web call would work
 	// while the feeds silently went tokenless.
 	if !strings.Contains(raw, "://") {
 		raw = "https://" + raw
@@ -72,8 +72,10 @@ func (a APIAuth) tokenFor(target *url.URL) string {
 func (a APIAuth) mismatch(target *url.URL) string {
 	b := a.base()
 	switch {
-	case strings.TrimSpace(a.Token) == "" || b == nil:
-		return "no API_URL/AUTH_TOKEN configured"
+	case strings.TrimSpace(a.Token) == "":
+		return "no AUTH_TOKEN configured"
+	case b == nil:
+		return "API_URL is empty or unparseable"
 	case a.tokenFor(target) != "":
 		return ""
 	case strings.EqualFold(b.Hostname(), target.Hostname()):
@@ -81,6 +83,18 @@ func (a APIAuth) mismatch(target *url.URL) string {
 	default:
 		return fmt.Sprintf("only feeds on the API_URL host %q get the token", b.Host)
 	}
+}
+
+// looksLikeAPIFeed limits the "no Token sent" hint to feeds that plausibly
+// are cfm-web's (the API_URL hostname, or its /blacklist.txt|/whitelist.txt
+// under another name such as an IP), so a third party's own 401/403 never
+// suggests handing it the token.
+func (a APIAuth) looksLikeAPIFeed(target *url.URL) bool {
+	if b := a.base(); b != nil && strings.EqualFold(b.Hostname(), target.Hostname()) {
+		return true
+	}
+	p := strings.ToLower(target.Path)
+	return strings.HasSuffix(p, "/blacklist.txt") || strings.HasSuffix(p, "/whitelist.txt")
 }
 
 func effPort(u *url.URL, scheme string) string {

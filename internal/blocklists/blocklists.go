@@ -200,10 +200,16 @@ func fetchAndParse(ctx context.Context, client *http.Client, f Feed, auth APIAut
 		return &FetchResult{}, meta, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			if req.Header.Get("Token") == "" && auth.Token != "" {
-				return nil, meta, fmt.Errorf("http %d (no Token sent: %s)", resp.StatusCode, auth.mismatch(req.URL))
+		if meta.TokenSent {
+			// cfm-web explains a refused token in the body ("Invalid token",
+			// "IP address mismatch", a usage limit): surface it, clipped.
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+			if msg := strings.TrimSpace(string(b)); msg != "" {
+				return nil, meta, fmt.Errorf("http %d: %s", resp.StatusCode, msg)
 			}
+		} else if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) &&
+			auth.Token != "" && auth.looksLikeAPIFeed(req.URL) {
+			return nil, meta, fmt.Errorf("http %d (no Token sent: %s)", resp.StatusCode, auth.mismatch(req.URL))
 		}
 		return nil, meta, fmt.Errorf("http %d", resp.StatusCode)
 	}

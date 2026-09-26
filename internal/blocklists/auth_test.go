@@ -2,6 +2,7 @@ package blocklists
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -163,5 +164,57 @@ func TestStatusRedactsURLInLastError(t *testing.T) {
 		if strings.Contains(st[0].LastErr, leak) || strings.Contains(st[0].URL, leak) {
 			t.Errorf("status leaks %q: url=%q err=%q", leak, st[0].URL, st[0].LastErr)
 		}
+	}
+}
+
+// cfm-web answers a refused token on the header path only (it never falls back
+// to the IP there): the node must keep its lists by retrying without the token
+// while the IP fallback exists, and say why the token was refused.
+func TestManagerRetriesWithoutRejectedToken(t *testing.T) {
+	var calls, withToken int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Header.Get("Token") != "" {
+			withToken++
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"IP address mismatch"}`))
+			return
+		}
+		_, _ = w.Write([]byte("1.2.3.4\n"))
+	}))
+	defer ts.Close()
+	m := NewManager(applierFunc(func(context.Context, Feed, *FetchResult) error { return nil }))
+	m.SetAPIAuth(ts.URL, "stale")
+	r := &runner{feed: Feed{Name: "MYBLOCK", URL: ts.URL + "/blacklist.txt"}}
+	m.runs["MYBLOCK"] = r
+	m.fetchOnce(context.Background(), r)
+	if calls != 2 || withToken != 1 {
+		t.Fatalf("want one tokened try then one retry without, got calls=%d withToken=%d", calls, withToken)
+	}
+	st := m.Status()[0]
+	if st.LastErr != "" || st.LastV4 != 1 || st.TokenSent {
+		t.Fatalf("retry should have refreshed the list without the token: %+v", st)
+	}
+	if !strings.Contains(st.TokenRejected, "IP address mismatch") || !strings.Contains(st.TokenRejected, "403") {
+		t.Fatalf("token_rejected should carry cfm-web's reason, got %q", st.TokenRejected)
+	}
+}
+
+func TestNoTokenHintForThirdPartyFeed(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer ts.Close()
+	_, err := FetchAndParseAuth(context.Background(), nil, Feed{URL: ts.URL + "/drop.txt"},
+		APIAuth{BaseURL: "https://cfm.example", Token: "x"})
+	if err == nil || strings.Contains(err.Error(), "Token") {
+		t.Fatalf("a third party's 403 must not mention the token, got %v", err)
+	}
+}
+
+func TestRedactErrStripsAnyQuery(t *testing.T) {
+	err := redactErr(errors.New(`Get "https://a/x": failed to parse Location header "https://b/y?key=SECRET x": bad`), "https://a/x")
+	if strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("query leaked: %v", err)
 	}
 }

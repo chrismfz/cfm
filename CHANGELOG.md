@@ -28,16 +28,21 @@ back-filled here — see the git/PR history for that period.
   `API_URL` is https; a schemeless `API_URL` means https, as for every other
   agent call), and is dropped if a
   redirect leaves that origin, so third-party feeds (Spamhaus, FireHOL, …) never
-  see it. A 401/403 from a feed on another host names the mismatch
-  (`no Token sent: …` with the reason). Upgrade the whole
-  fleet before cfm-web turns the fallback off.
+  see it. If cfm-web REFUSES the token (unknown, pinned to another IP, usage
+  limit reached — note each feed pull now counts against a limited token), the
+  node retries once without it so its lists keep refreshing while cfm-web still
+  allows the fallback, and `blocklist_feeds` shows `token_rejected` with
+  cfm-web's reason: fix that token before the fallback is turned off. A 401/403
+  from a cfm-web-looking feed (the API_URL host, or a `/blacklist.txt` /
+  `/whitelist.txt` elsewhere) that got no token says why (`no Token sent: …`).
+  Upgrade the whole fleet before cfm-web turns the fallback off.
 
 ### Added
 - **MCP `blocklist_feeds` + `GET /api/v1/firewall/feeds`** (admin-only): each
   `cfm.blocklists` feed's type, URL (query and userinfo redacted, in errors
   too), interval, last fetch /
   last success / last apply, last HTTP status and error, IPv4/IPv6 counts,
-  `failing` total, and `api_origin` / `token_sent` — so
+  `failing` total, and `api_origin` / `token_sent` / `token_rejected` — so
   `node_call node="all" tool="blocklist_feeds"` shows whether every node's
   lists are refreshing, and refreshing authenticated.
 
