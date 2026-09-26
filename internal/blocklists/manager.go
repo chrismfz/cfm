@@ -3,10 +3,12 @@ package blocklists
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -227,6 +229,7 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 	auth := m.auth
 	m.mu.Unlock()
 	res, meta, err := fetchAndParse(ctx, m.client, r.feed, auth)
+	err = redactErr(err, r.feed.URL)
 	m.mu.Lock()
 	r.lastFetch = time.Now()
 	r.lastErr = err
@@ -367,6 +370,24 @@ func redactURL(raw string) string {
 	}
 	u.Fragment = ""
 	return u.String()
+}
+
+// redactErr keeps a feed's query/userinfo out of the stored error: net/http's
+// *url.Error embeds the request URL (password stripped, query and username
+// kept), and Status serves that error over the API and MCP.
+func redactErr(err error, feedURL string) error {
+	if err == nil {
+		return nil
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		ue.URL = redactURL(ue.URL)
+	}
+	msg := err.Error()
+	if feedURL != "" {
+		msg = strings.ReplaceAll(msg, feedURL, redactURL(feedURL))
+	}
+	return errors.New(msg)
 }
 
 // The daemon's running manager, for the read-only status endpoint (the

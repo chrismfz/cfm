@@ -202,7 +202,7 @@ func fetchAndParse(ctx context.Context, client *http.Client, f Feed, auth APIAut
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			if req.Header.Get("Token") == "" && auth.Token != "" {
-				return nil, meta, fmt.Errorf("http %d (no Token sent: feed host %q is not the API_URL host %q)", resp.StatusCode, req.URL.Host, auth.host())
+				return nil, meta, fmt.Errorf("http %d (no Token sent: %s)", resp.StatusCode, auth.mismatch(req.URL))
 			}
 		}
 		return nil, meta, fmt.Errorf("http %d", resp.StatusCode)

@@ -1,6 +1,7 @@
 package blocklists
 
 import (
+	"fmt"
 	"net/url"
 	"strings"
 )
@@ -15,10 +16,17 @@ type APIAuth struct {
 }
 
 func (a APIAuth) base() *url.URL {
-	if strings.TrimSpace(a.BaseURL) == "" {
+	raw := strings.TrimSpace(a.BaseURL)
+	if raw == "" {
 		return nil
 	}
-	u, err := url.Parse(strings.TrimSpace(a.BaseURL))
+	// Same normalisation as the agent client (internal/agent normalize): a
+	// schemeless API_URL means https, or every other cfm-web call would work
+	// while the feeds silently went tokenless.
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return nil
 	}
@@ -58,6 +66,21 @@ func (a APIAuth) tokenFor(target *url.URL) string {
 		}
 	}
 	return tok
+}
+
+// mismatch explains why target gets no token ("" when it would get one).
+func (a APIAuth) mismatch(target *url.URL) string {
+	b := a.base()
+	switch {
+	case strings.TrimSpace(a.Token) == "" || b == nil:
+		return "no API_URL/AUTH_TOKEN configured"
+	case a.tokenFor(target) != "":
+		return ""
+	case strings.EqualFold(b.Hostname(), target.Hostname()):
+		return fmt.Sprintf("feed %s://%s differs from API_URL %s://%s in scheme or port", target.Scheme, target.Host, b.Scheme, b.Host)
+	default:
+		return fmt.Sprintf("only feeds on the API_URL host %q get the token", b.Host)
+	}
 }
 
 func effPort(u *url.URL, scheme string) string {

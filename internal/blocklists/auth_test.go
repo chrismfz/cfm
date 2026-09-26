@@ -119,3 +119,49 @@ func TestManagerUsesAPIAuth(t *testing.T) {
 		t.Fatalf("manager fetch sent Token %q", got)
 	}
 }
+
+func TestAPIAuthSchemelessMeansHTTPS(t *testing.T) {
+	a := APIAuth{BaseURL: "cfm.myip.gr", Token: "sekrit"}
+	u, _ := url.Parse("https://cfm.myip.gr/blacklist.txt")
+	if a.tokenFor(u) == "" {
+		t.Fatalf("schemeless API_URL must match its https feeds, as the agent client does")
+	}
+	h, _ := url.Parse("http://cfm.myip.gr/blacklist.txt")
+	if a.tokenFor(h) != "" {
+		t.Fatalf("schemeless API_URL is https: an http feed must not get the token")
+	}
+}
+
+func TestAPIAuthMismatchReason(t *testing.T) {
+	a := APIAuth{BaseURL: "https://cfm.myip.gr", Token: "sekrit"}
+	for raw, want := range map[string]string{
+		"http://cfm.myip.gr/blacklist.txt":  "scheme or port",
+		"https://cfm.myip.gr:8443/x":        "scheme or port",
+		"https://www.spamhaus.org/drop.txt": `only feeds on the API_URL host "cfm.myip.gr"`,
+		"https://cfm.myip.gr/blacklist.txt": "",
+	} {
+		u, _ := url.Parse(raw)
+		got := a.mismatch(u)
+		if (want == "" && got != "") || !strings.Contains(got, want) {
+			t.Errorf("mismatch(%s) = %q, want containing %q", raw, got, want)
+		}
+	}
+}
+
+func TestStatusRedactsURLInLastError(t *testing.T) {
+	m := NewManager(applierFunc(func(context.Context, Feed, *FetchResult) error { return nil }))
+	// Port 1 on loopback: connection refused, so the error is a *url.Error
+	// carrying the request URL.
+	r := &runner{feed: Feed{Name: "EXT", URL: "http://bob@127.0.0.1:1/list.txt?key=APIKEY123"}}
+	m.runs["EXT"] = r
+	m.fetchOnce(context.Background(), r)
+	st := m.Status()
+	if len(st) != 1 || st[0].LastErr == "" {
+		t.Fatalf("want one failing feed, got %+v", st)
+	}
+	for _, leak := range []string{"APIKEY123", "bob"} {
+		if strings.Contains(st[0].LastErr, leak) || strings.Contains(st[0].URL, leak) {
+			t.Errorf("status leaks %q: url=%q err=%q", leak, st[0].URL, st[0].LastErr)
+		}
+	}
+}
