@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"sync"
 	"time"
@@ -31,6 +32,7 @@ type Manager struct {
 	mu      sync.Mutex
 	client  *http.Client
 	applier Applier
+	auth    APIAuth // cfm-web credential for feeds on the API_URL origin; guarded by mu
 
 	feeds map[string]Feed
 	runs  map[string]*runner
@@ -49,6 +51,14 @@ type runner struct {
 	lastV4    int
 	lastV6    int
 	interval  time.Duration
+
+	// Wire view of the last fetch, for Status (so an operator can see a
+	// cfm-web feed pull succeeding WITH a token). Written by the fetch
+	// goroutine under Manager.mu, like lastFetch/lastErr are read.
+	lastOK        time.Time
+	lastHTTP      int
+	tokenSent     bool
+	lastAppliedAt time.Time // lastApply mirrored under mu for Status (lastApply itself is lock-free)
 
 	// lastHash is the sha256 of the last content we successfully applied for this
 	// feed; haveHash guards the first fetch. lastApply is when that apply
@@ -90,6 +100,14 @@ func NewManager(applier Applier) *Manager {
 		feeds:   map[string]Feed{},
 		runs:    map[string]*runner{},
 	}
+}
+
+// SetAPIAuth installs (or, on a config reload, replaces) the cfm-web
+// credential. It applies from each feed's next fetch.
+func (m *Manager) SetAPIAuth(baseURL, token string) {
+	m.mu.Lock()
+	m.auth = APIAuth{BaseURL: baseURL, Token: token}
+	m.mu.Unlock()
 }
 
 func (m *Manager) Start(ctx context.Context) {
@@ -205,14 +223,22 @@ func (m *Manager) stopOneLocked(name string) {
 }
 
 func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
-	// Χρησιμοποιούμε τη δική σου ρουτίνα: FetchAndParse(ctx, client, Feed)
-	res, err := FetchAndParse(ctx, m.client, r.feed)
+	m.mu.Lock()
+	auth := m.auth
+	m.mu.Unlock()
+	res, meta, err := fetchAndParse(ctx, m.client, r.feed, auth)
+	m.mu.Lock()
 	r.lastFetch = time.Now()
 	r.lastErr = err
+	r.lastHTTP, r.tokenSent = meta.HTTPStatus, meta.TokenSent
+	if err == nil && res != nil {
+		r.lastOK = r.lastFetch
+		r.lastV4, r.lastV6 = len(res.V4), len(res.V6)
+	}
+	m.mu.Unlock()
 	if err != nil || res == nil {
 		return
 	}
-	r.lastV4, r.lastV6 = len(res.V4), len(res.V6)
 
 	// Skip the (potentially very large) re-apply when the fetched content is
 	// identical to what we last applied for this feed. A feed is re-fetched on
@@ -231,12 +257,17 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 	}
 
 	if err := m.applier.ApplyFeed(ctx, r.feed, res); err != nil {
+		m.mu.Lock()
 		r.lastErr = fmt.Errorf("apply feed %q: %w", r.feed.Name, err)
+		m.mu.Unlock()
 		return
 	}
 	r.lastHash, r.haveHash = h, true
 	r.lastApply = time.Now() // start the resync clock at apply completion
+	m.mu.Lock()
+	r.lastAppliedAt = r.lastApply
 	r.lastErr = nil
+	m.mu.Unlock()
 }
 
 // hashResult returns a content hash of a fetched feed that is independent of the
@@ -263,32 +294,98 @@ func hashResult(res *FetchResult) [32]byte {
 	return out
 }
 
-// Προαιρετικό: για μελλοντικό `cfm status` να δείχνει κατάσταση feeds
+// FeedStatus is one feed's runtime state, served by GET /api/v1/firewall/feeds
+// (MCP `blocklist_feeds`). URL has its query and userinfo removed: a feed URL
+// may carry an API key (?key=…) and this view is not a secrets view.
 type FeedStatus struct {
 	Name      string        `json:"name"`
+	Type      string        `json:"type"`
+	URL       string        `json:"url"`
 	Interval  time.Duration `json:"interval"`
 	LastFetch time.Time     `json:"last_fetch"`
+	LastOK    time.Time     `json:"last_ok,omitempty"`
+	LastApply time.Time     `json:"last_apply,omitempty"`
+	LastHTTP  int           `json:"last_http,omitempty"`
 	LastErr   string        `json:"last_error,omitempty"`
 	LastV4    int           `json:"last_v4"`
 	LastV6    int           `json:"last_v6"`
+	// APIOrigin: the feed is on the cfm.conf API_URL origin, so it is pulled
+	// with AUTH_TOKEN. TokenSent: the last fetch actually carried it.
+	APIOrigin bool `json:"api_origin"`
+	TokenSent bool `json:"token_sent"`
 }
 
+// Status returns every running feed, sorted by name.
 func (m *Manager) Status() []FeedStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var out []FeedStatus
+	out := make([]FeedStatus, 0, len(m.runs))
 	for name, r := range m.runs {
 		fs := FeedStatus{
 			Name:      name,
+			Type:      r.feed.Type.String(),
+			URL:       redactURL(r.feed.URL),
 			Interval:  r.interval,
 			LastFetch: r.lastFetch,
+			LastOK:    r.lastOK,
+			LastApply: r.lastAppliedAt,
+			LastHTTP:  r.lastHTTP,
 			LastV4:    r.lastV4,
 			LastV6:    r.lastV6,
+			TokenSent: r.tokenSent,
+		}
+		if u, err := url.Parse(r.feed.URL); err == nil {
+			fs.APIOrigin = m.auth.tokenFor(u) != ""
 		}
 		if r.lastErr != nil {
 			fs.LastErr = r.lastErr.Error()
 		}
 		out = append(out, fs)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// APIHost is the API_URL host the token is scoped to ("" when unset).
+func (m *Manager) APIHost() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.auth.Token == "" {
+		return ""
+	}
+	return m.auth.host()
+}
+
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "(unparseable)"
+	}
+	u.User = nil
+	if u.RawQuery != "" {
+		u.RawQuery = "REDACTED"
+	}
+	u.Fragment = ""
+	return u.String()
+}
+
+// The daemon's running manager, for the read-only status endpoint (the
+// apiserver has no other handle on it). nil until the daemon registers one.
+var (
+	activeMu sync.Mutex
+	active   *Manager
+)
+
+// SetActive registers the daemon's manager for ActiveManager.
+func SetActive(m *Manager) {
+	activeMu.Lock()
+	active = m
+	activeMu.Unlock()
+}
+
+// ActiveManager returns the registered manager, or nil.
+func ActiveManager() *Manager {
+	activeMu.Lock()
+	defer activeMu.Unlock()
+	return active
 }

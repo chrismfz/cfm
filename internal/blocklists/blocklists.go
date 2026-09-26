@@ -134,26 +134,78 @@ type FetchResult struct {
 
 // FetchAndParse κατεβάζει και επιστρέφει IPs/CIDRs (v4/v6) από ένα feed,
 // υποστηρίζοντας gzip/zip και "θορυβώδη" formats με σχόλια/στήλες.
+//
+// Χωρίς token: για feeds τρίτων. Για τα feeds του cfm-web βλ. FetchAndParseAuth.
 func FetchAndParse(ctx context.Context, client *http.Client, f Feed) (*FetchResult, error) {
+	return FetchAndParseAuth(ctx, client, f, APIAuth{})
+}
+
+// FetchAndParseAuth is FetchAndParse, plus the cfm-web `Token:` header when the
+// feed lives on the configured API_URL origin (see APIAuth.tokenFor). cfm-web
+// used to authenticate these header-less pulls by source IP alone; that
+// fallback is being retired, so the node must present its AUTH_TOKEN like
+// every other agent call does.
+func FetchAndParseAuth(ctx context.Context, client *http.Client, f Feed, auth APIAuth) (*FetchResult, error) {
+	res, _, err := fetchAndParse(ctx, client, f, auth)
+	return res, err
+}
+
+// fetchMeta is what a fetch observed on the wire, for Manager.Status.
+type fetchMeta struct {
+	TokenSent  bool
+	HTTPStatus int // 0 = no response (DNS/TLS/timeout)
+}
+
+func fetchAndParse(ctx context.Context, client *http.Client, f Feed, auth APIAuth) (*FetchResult, fetchMeta, error) {
+	var meta fetchMeta
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
 	req, err := http.NewRequestWithContext(ctx, "GET", f.URL, nil)
 	if err != nil {
-		return nil, err
+		return nil, meta, err
+	}
+	if tok := auth.tokenFor(req.URL); tok != "" {
+		req.Header.Set("Token", tok)
+		meta.TokenSent = true
+		req.Header.Set("X-Agent-Version", "CFM-Agent-Go")
+		// Go strips only Authorization/Cookie/WWW-Authenticate on a
+		// cross-host redirect; a custom header is forwarded as-is. Never
+		// let a redirect carry the token off the cfm-web origin.
+		c := *client
+		prev := client.CheckRedirect
+		c.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+			if auth.tokenFor(r.URL) == "" {
+				r.Header.Del("Token")
+			}
+			if prev != nil {
+				return prev(r, via)
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		}
+		client = &c
 	}
 	// Μπορούμε να προσθέσουμε ETag/If-Modified-Since αργότερα (cache).
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, meta, err
 	}
 	defer resp.Body.Close()
+	meta.HTTPStatus = resp.StatusCode
 	if resp.StatusCode == http.StatusNotModified {
 		// handled by caller (χρειάζεται cache-aware design)
-		return &FetchResult{}, nil
+		return &FetchResult{}, meta, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("http %d", resp.StatusCode)
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			if req.Header.Get("Token") == "" && auth.Token != "" {
+				return nil, meta, fmt.Errorf("http %d (no Token sent: feed host %q is not the API_URL host %q)", resp.StatusCode, req.URL.Host, auth.host())
+			}
+		}
+		return nil, meta, fmt.Errorf("http %d", resp.StatusCode)
 	}
 
 	var body []byte
@@ -162,22 +214,22 @@ func FetchAndParse(ctx context.Context, client *http.Client, f Feed) (*FetchResu
 	if isGzip(ctype, f.URL) {
 		gr, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			return nil, err
+			return nil, meta, err
 		}
 		defer gr.Close()
 		body, err = io.ReadAll(gr)
 		if err != nil {
-			return nil, err
+			return nil, meta, err
 		}
 	} else if isZip(ctype, f.URL) {
 		// Πρέπει να κατεβάσουμε first σε buffer για zip reader
 		raw, err := io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, err
+			return nil, meta, err
 		}
 		zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
 		if err != nil {
-			return nil, err
+			return nil, meta, err
 		}
 		// Περιμένουμε ένα text entry. Πάρε το πρώτο text-like.
 		var found io.ReadCloser
@@ -194,23 +246,23 @@ func FetchAndParse(ctx context.Context, client *http.Client, f Feed) (*FetchResu
 			break
 		}
 		if found == nil {
-			return nil, errors.New("zip: no file entry")
+			return nil, meta, errors.New("zip: no file entry")
 		}
 		defer found.Close()
 		body, err = io.ReadAll(found)
 		if err != nil {
-			return nil, err
+			return nil, meta, err
 		}
 	} else {
 		var err error
 		body, err = io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, err
+			return nil, meta, err
 		}
 	}
 
 	v4, v6 := ExtractIPs(bytes.NewReader(body), f.Max)
-	return &FetchResult{V4: v4, V6: v6}, nil
+	return &FetchResult{V4: v4, V6: v6}, meta, nil
 }
 
 func isGzip(contentType, url string) bool {

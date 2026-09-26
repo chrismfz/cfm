@@ -53,6 +53,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerFirewallBlocks(srv, d)
 	registerFirewallCounters(srv, d)
 	registerFirewallSelfTest(srv, d)
+	registerBlocklistFeeds(srv, d)
 	registerNetfilterPath(srv, d)
 	registerIPLocate(srv, d)
 	registerDetectorsStatus(srv, d)
@@ -1200,6 +1201,16 @@ func registerFirewallSelfTest(srv *mcp.Server, d Deps) {
 		Description: "nftlib firewall self-diagnostics (read-only): the recent EnsureBase calls with their time split into lock_wait_ms (contention on the backend mutex), nl_work_ms (netlink add+flush — kernel round-trip time) and cli_work_ms (the `nft` CLI part: a read of the input chain, plus one write when base rules are missing), the worst call in the window, and the latest per-set feed writes (elems, dur, error; self_v4/self_v6 too, which EnsureBase refreshes); plus `netlink`, which covers every netlink call the backend makes (reads like the heartbeat's DNAT probe and batch writes, not just EnsureBase; the nft CLI calls some paths make are not included): each call runs on its own socket, and READS carry a deadline (op_timeout_ms) so a stuck read fails and releases the backend lock instead of holding it forever — writes carry none, because the kernel may still commit a batch a deadline would report as failed. timeouts>0 means a read got no answer for that long; slow_recent/last_timeout name the call (GetRules, Flush, …) and when; errors also counts routine not-found lookups, so watch timeouts, not errors. Use to root-cause an nftlib node whose EnsureBase duration climbs over a run (rising lock_wait ⇒ contention from a slow/failed feed write; rising nl_work ⇒ the kernel side slowing down), a node whose firewall operations stall (netlink.timeouts), or a feed that never applies (a large set write erroring with 'message too long'). `available:false` on the exec-nft backend (it doesn't record this).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
 		return dispatchJSON(ctx, d, "/api/v1/firewall/selftest", nil)
+	})
+}
+
+func registerBlocklistFeeds(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "blocklist_feeds",
+		Description: "The node's EXTERNAL blocklist feeds (cfm.blocklists: cfm-web's MYBLOCK/MYALLOW lists plus third-party lists like Spamhaus DROP) and whether each is actually refreshing: per feed its name, type (BLOCK/ALLOW/IGNORE), URL (query redacted), interval, last_fetch, last_ok (last successful download), last_apply (last time the content changed and was written to nft — an unchanged feed is not re-applied for up to 6h), last_http status, last_error, and last_v4/last_v6 entry counts; plus `failing` (feeds whose last attempt errored). `api_origin` marks a feed on the cfm.conf API_URL host, which the node pulls with its AUTH_TOKEN; `token_sent` says the last fetch really carried it (the token itself is never shown). An api_origin feed with token_sent=false, or a 401/403 whose error says 'no Token sent', means the feed URL's host differs from API_URL and the pull relies on cfm-web's IP-only fallback. Answers 'are the fleet blocklists still updating, and are the cfm-web feeds authenticated?'. Read-only; the entries themselves are in firewall_blocks.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
+		return dispatchJSON(ctx, d, "/api/v1/firewall/feeds", nil)
 	})
 }
 

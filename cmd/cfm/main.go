@@ -808,6 +808,7 @@ func runDaemon(args []string) {
 	)
 
 	blMgr = blocklists.NewManager(blocklists.ApplierFunc(be.ApplyFeed))
+	blocklists.SetActive(blMgr) // read by GET /api/v1/firewall/feeds
 
 	// Start scheduler
 	blMgr.Start(context.Background())
@@ -1343,6 +1344,11 @@ func runDaemon(args []string) {
 
 		if cfg.API.URL != "" && cfg.API.AuthToken != "" {
 			be.SetReporter(&agentpkg.APIClient{BaseURL: cfg.API.URL, Token: cfg.API.AuthToken})
+		}
+		// Feeds on the API_URL origin (/blacklist.txt, /whitelist.txt) carry
+		// AUTH_TOKEN too; cfm-web is retiring its IP-only fallback.
+		if blMgr != nil {
+			blMgr.SetAPIAuth(cfg.API.URL, cfg.API.AuthToken)
 		}
 		smtpLc.ApplyConfig(ctx, &cfg.SMTPBlock)
 

@@ -692,6 +692,19 @@ func TestFirewallSelfTestDispatches(t *testing.T) {
 	}
 }
 
+func TestBlocklistFeedsDispatches(t *testing.T) {
+	fd := &fakeDispatch{body: []byte(`{"ok":true,"available":true,"count":1,"feeds":[{"name":"MYBLOCK","token_sent":true}]}`)}
+	ts := newTestServer(t, fd)
+	_, body := mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"blocklist_feeds","arguments":{}}}`)
+	if fd.lastPath != "/api/v1/firewall/feeds" {
+		t.Errorf("blocklist_feeds dispatched to %q, want /api/v1/firewall/feeds", fd.lastPath)
+	}
+	if !strings.Contains(body, "MYBLOCK") {
+		t.Errorf("blocklist_feeds result missing payload: %s", body)
+	}
+}
+
 func TestDetectorsConfigDispatches(t *testing.T) {
 	fd := &fakeDispatch{body: []byte(`{"config":{"global":{},"core":[{"name":"challenge_cookie_discard","kind":"core","enabled":true,"keys":{"MIN_SOLVES":"3","BLOCK":"24h"},"raw_lines":["MIN_SOLVES = 3"]},{"name":"ssh","kind":"core","enabled":true,"keys":{"TOKEN_IP":"10"}}],"advanced":[{"name":"webdetector","kind":"advanced","enabled":true,"keys":{"HUMANITY_MIN_OBS":"100","CHALLENGE_TOKEN":"SUPERSECRET_HMAC_abc123","OPENRESTY_TOKEN":"SOCKET_BEARER_xyz789"},"raw_lines":["CHALLENGE_TOKEN = SUPERSECRET_HMAC_abc123","OPENRESTY_TOKEN = SOCKET_BEARER_xyz789"]}],"examples":[{"id":"ex1","title":"t","section":"webdetector","kind":"advanced","preview":"CHALLENGE_TOKEN = SUPERSECRET_HMAC_abc123","keys":{"CHALLENGE_TOKEN":"SUPERSECRET_HMAC_abc123"}}]},"path":"/etc/cfm/detectors.conf","exists":true,"overlay_files":["/etc/cfm/detectors.d/local.conf"]}`)}
 	ts := newTestServer(t, fd)

@@ -17,6 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **The cfm-web blocklist feeds are now pulled with the node's `AUTH_TOKEN`.**
+  `/blacklist.txt` and `/whitelist.txt` (the `MYBLOCK` / `MYALLOW` lines in
+  `cfm.blocklists`) were the only cfm-web calls the node made without a
+  `Token:` header; cfm-web authenticated them by source IP alone, a fallback
+  any process on the node's IP could also use and which cfm-web is retiring.
+  The token is sent ONLY to a feed on the `API_URL` origin (same host and
+  port; never over plain http when `API_URL` is https), and is dropped if a
+  redirect leaves that origin, so third-party feeds (Spamhaus, FireHOL, …) never
+  see it. A 401/403 from a feed on another host names the mismatch
+  (`no Token sent: feed host … is not the API_URL host …`). Upgrade the whole
+  fleet before cfm-web turns the fallback off.
+
+### Added
+- **MCP `blocklist_feeds` + `GET /api/v1/firewall/feeds`** (admin-only): each
+  `cfm.blocklists` feed's type, URL (query redacted), interval, last fetch /
+  last success / last apply, last HTTP status and error, IPv4/IPv6 counts,
+  `failing` total, and `api_origin` / `token_sent` — so
+  `node_call node="all" tool="blocklist_feeds"` shows whether every node's
+  lists are refreshing, and refreshing authenticated.
+
 ### Fixed
 - **A package upgrade no longer prints `sed: couldn't write … Broken pipe`, and
   prunes its old edge-config backups.** The deploy helper ignores SIGPIPE, which
