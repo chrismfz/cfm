@@ -284,7 +284,17 @@ func AppendUniqueLine(dir, filename, line string) error {
 }
 
 // SplitFlagsAndPositionals separates flag args from positional args.
+// valueFlags names the flags that take a value, in any spelling ("ttl",
+// "-ttl" or "--ttl" all mean the same flag, as for the flag package). The
+// lookup used to strip the dashes from the argument but not from the keys, so
+// with the callers' "--ttl" / "-r" keys no value was ever attached: `cfm block
+// IP -r why --ttl 10m` parsed reason "--ttl" and NO TTL — a permanent block,
+// persisted to cfm.deny and reported to cfm-web as permanent.
 func SplitFlagsAndPositionals(args []string, valueFlags map[string]bool) (flagArgs []string, posArgs []string) {
+	takesValue := make(map[string]bool, len(valueFlags))
+	for k, v := range valueFlags {
+		takesValue[strings.TrimLeft(k, "-")] = v
+	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if strings.HasPrefix(a, "-") {
@@ -294,7 +304,7 @@ func SplitFlagsAndPositionals(args []string, valueFlags map[string]bool) (flagAr
 				continue
 			}
 			flagArgs = append(flagArgs, name)
-			if valueFlags[strings.TrimLeft(name, "-")] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			if takesValue[strings.TrimLeft(name, "-")] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				flagArgs = append(flagArgs, args[i+1])
 				i++
 			}
