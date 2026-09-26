@@ -241,6 +241,9 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 	if err != nil && meta.TokenSent && (meta.HTTPStatus == http.StatusUnauthorized || meta.HTTPStatus == http.StatusForbidden) {
 		tokenRejected = redactErr(err, r.feed.URL).Error()
 		res, meta, err = fetchAndParse(ctx, m.client, r.feed, APIAuth{})
+		if err != nil {
+			err = fmt.Errorf("retried without token: %w", err)
+		}
 	}
 	err = redactErr(err, r.feed.URL)
 	m.mu.Lock()

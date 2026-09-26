@@ -218,3 +218,68 @@ func TestRedactErrStripsAnyQuery(t *testing.T) {
 		t.Fatalf("query leaked: %v", err)
 	}
 }
+
+// Once cfm-web drops the fallback, the retry fails too: last_error must say a
+// retry happened and why it failed; and a later accepted token clears the flag.
+func TestRejectedTokenRetryFailsThenRecovers(t *testing.T) {
+	accept := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Header.Get("Token") == "":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("{\"message\":\n  \"Token required\"}"))
+		case !accept:
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"Invalid token"}`))
+		default:
+			_, _ = w.Write([]byte("1.2.3.4\n"))
+		}
+	}))
+	defer ts.Close()
+	m := NewManager(applierFunc(func(context.Context, Feed, *FetchResult) error { return nil }))
+	m.SetAPIAuth(ts.URL, "stale")
+	r := &runner{feed: Feed{Name: "MYBLOCK", URL: ts.URL + "/blacklist.txt"}}
+	m.runs["MYBLOCK"] = r
+
+	m.fetchOnce(context.Background(), r)
+	st := m.Status()[0]
+	if !strings.HasPrefix(st.LastErr, "retried without token: http 401") || !strings.Contains(st.LastErr, `"Token required"}`) {
+		t.Fatalf("failed retry should be named, with cfm-web's reason on one line: %q", st.LastErr)
+	}
+	if !strings.Contains(st.TokenRejected, "Invalid token") {
+		t.Fatalf("token_rejected = %q", st.TokenRejected)
+	}
+
+	accept = true
+	m.fetchOnce(context.Background(), r)
+	st = m.Status()[0]
+	if st.TokenRejected != "" || st.LastErr != "" || !st.TokenSent {
+		t.Fatalf("an accepted token should clear the rejection: %+v", st)
+	}
+}
+
+// A redirect off the API origin drops the token; that host's 403 is not
+// cfm-web refusing it.
+func TestRedirectedRefusalIsNotTokenRejected(t *testing.T) {
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer other.Close()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Another HOST (not just another port of 127.0.0.1).
+		http.Redirect(w, r, strings.Replace(other.URL, "127.0.0.1", "localhost", 1)+"/x.txt", http.StatusFound)
+	}))
+	defer api.Close()
+	m := NewManager(applierFunc(func(context.Context, Feed, *FetchResult) error { return nil }))
+	m.SetAPIAuth(api.URL, "sekrit")
+	r := &runner{feed: Feed{Name: "R", URL: api.URL + "/blacklist.txt"}}
+	m.runs["R"] = r
+	m.fetchOnce(context.Background(), r)
+	st := m.Status()[0]
+	if st.TokenRejected != "" || st.TokenSent {
+		t.Fatalf("a redirected host's 403 must not read as a token refusal: %+v", st)
+	}
+	if strings.Contains(st.LastErr, "Token") {
+		t.Fatalf("a redirected third party's 403 must not mention the token: %q", st.LastErr)
+	}
+}

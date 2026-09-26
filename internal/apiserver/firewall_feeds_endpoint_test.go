@@ -49,7 +49,7 @@ func TestFirewallFeeds_ReportsTokenAndRedacts(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	for _, want := range []string{`"token_sent":true`, `"api_origin":true`, `"last_http":200`, `"failing":0`, `/blacklist.txt?REDACTED`, `"type":"BLOCK"`} {
+	for _, want := range []string{`"token_sent":true`, `"api_origin":true`, `"last_http":200`, `"failing":0`, `"token_rejected":0`, `/blacklist.txt?REDACTED`, `"type":"BLOCK"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %s in %s", want, body)
 		}

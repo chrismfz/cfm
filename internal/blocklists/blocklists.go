@@ -195,21 +195,36 @@ func fetchAndParse(ctx context.Context, client *http.Client, f Feed, auth APIAut
 	}
 	defer resp.Body.Close()
 	meta.HTTPStatus = resp.StatusCode
+	// What the FINAL hop carried: a redirect off the API origin drops the
+	// token, and that host's answer must not read as cfm-web's verdict on it.
+	if resp.Request != nil {
+		meta.TokenSent = resp.Request.Header.Get("Token") != ""
+	}
 	if resp.StatusCode == http.StatusNotModified {
 		// handled by caller (χρειάζεται cache-aware design)
 		return &FetchResult{}, meta, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if meta.TokenSent {
-			// cfm-web explains a refused token in the body ("Invalid token",
-			// "IP address mismatch", a usage limit): surface it, clipped.
+		authErr := resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden
+		// cfm-web explains an auth refusal in the body ("Invalid token", "IP
+		// address mismatch", "Token required", a usage limit): surface it,
+		// clipped and on one line.
+		body := ""
+		if authErr || meta.TokenSent {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
-			if msg := strings.TrimSpace(string(b)); msg != "" {
-				return nil, meta, fmt.Errorf("http %d: %s", resp.StatusCode, msg)
+			body = strings.Join(strings.Fields(string(b)), " ")
+		}
+		final := req.URL
+		if resp.Request != nil && resp.Request.URL != nil {
+			final = resp.Request.URL // the host that actually answered
+		}
+		if !meta.TokenSent && authErr && auth.Token != "" && auth.looksLikeAPIFeed(final) {
+			if why := auth.mismatch(final); why != "" {
+				return nil, meta, fmt.Errorf("http %d (no Token sent: %s)", resp.StatusCode, why)
 			}
-		} else if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) &&
-			auth.Token != "" && auth.looksLikeAPIFeed(req.URL) {
-			return nil, meta, fmt.Errorf("http %d (no Token sent: %s)", resp.StatusCode, auth.mismatch(req.URL))
+		}
+		if body != "" {
+			return nil, meta, fmt.Errorf("http %d: %s", resp.StatusCode, body)
 		}
 		return nil, meta, fmt.Errorf("http %d", resp.StatusCode)
 	}

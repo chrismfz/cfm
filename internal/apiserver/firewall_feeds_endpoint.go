@@ -44,10 +44,13 @@ func makeFirewallFeedsHandler(get func() *blocklists.Manager) http.HandlerFunc {
 			return
 		}
 		feeds := mgr.Status()
-		failing := 0
+		failing, rejected := 0, 0
 		for _, f := range feeds {
 			if f.LastErr != "" {
 				failing++
+			}
+			if f.TokenRejected != "" {
+				rejected++
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -56,7 +59,10 @@ func makeFirewallFeedsHandler(get func() *blocklists.Manager) http.HandlerFunc {
 			"api_host":  mgr.APIHost(),
 			"count":     len(feeds),
 			"failing":   failing,
-			"feeds":     feeds,
+			// Feeds cfm-web refused the token on (retried without it): they
+			// break once cfm-web drops its IP-only fallback, even if failing=0.
+			"token_rejected": rejected,
+			"feeds":          feeds,
 		})
 	}
 }
