@@ -379,27 +379,33 @@ is_prepkg_backup() {
 # the KEEP newest DST.cfm-prepkg.<timestamp> backups. Every upgrade adds one and
 # nothing removed them (a node upgraded since May had ~90). The timestamp sorts
 # in time order, and so does the glob. Only that exact name form is touched,
-# never a hand-made copy; KEEP=0 (CFM_PREPKG_KEEP=0) keeps them all. CURRENT, the
+# never a hand-made copy; KEEP=0 (CFM_PREPKG_KEEP=0), or any value of 10 or more
+# digits, keeps them all. CURRENT, the
 # backup this run just made, is never removed, even when older backups carry
 # later timestamps (a clock that was ahead, a timezone change).
 prune_prepkg_backups() {
+    ppb_dst=$1
+    ppb_cur=${3:-}
     case "$2" in ''|*[!0-9]*) return 0 ;; esac
     ppb_keep=${2#"${2%%[!0]*}"}   # drop leading zeros: shell arithmetic reads 08 as octal
     [ -n "$ppb_keep" ] || return 0
-    ppb_n=0
-    for ppb_f in "$1".cfm-prepkg.*; do
-        is_prepkg_backup "$1" "$ppb_f" && ppb_n=$((ppb_n + 1))
+    # 10+ digits means "keep them all": no arithmetic on it (bash wraps a
+    # 20-digit value to a negative number, dash aborts on it).
+    case "$ppb_keep" in ??????????*) return 0 ;; esac
+    # One listing for both the count and the removal.
+    set --
+    for ppb_f in "$ppb_dst".cfm-prepkg.*; do
+        is_prepkg_backup "$ppb_dst" "$ppb_f" && set -- "$@" "$ppb_f"
     done
-    ppb_drop=$((ppb_n - ppb_keep))
+    ppb_drop=$(($# - ppb_keep))
     [ "$ppb_drop" -gt 0 ] || return 0
     ppb_removed=0
-    for ppb_f in "$1".cfm-prepkg.*; do
+    for ppb_f in "$@"; do
         [ "$ppb_removed" -lt "$ppb_drop" ] || break
-        [ "$ppb_f" = "${3:-}" ] && continue
-        is_prepkg_backup "$1" "$ppb_f" || continue
+        [ "$ppb_f" = "$ppb_cur" ] && continue
         rm -f "$ppb_f" && ppb_removed=$((ppb_removed + 1))
     done
-    echo "CFM proxy config: removed $ppb_removed old backup(s) of $1, keeping the newest $ppb_keep (CFM_PREPKG_KEEP)"
+    echo "CFM proxy config: removed $ppb_removed old backup(s) of $ppb_dst, keeping the newest $ppb_keep (CFM_PREPKG_KEEP)"
 }
 
 # commit_rollback: put back each sidecar this commit actually renamed in (its

@@ -1009,15 +1009,19 @@ i=1; while [ "$i" -le 13 ]; do printf 'old %s\n' "$i" >"$live/nginx.conf.cfm-pre
 printf 'mine\n' >"$live/nginx.conf.cfm-prepkg.manual"
 printf 'short\n' >"$live/nginx.conf.cfm-prepkg.2026"
 ln -s /nonexistent "$live/nginx.conf.cfm-prepkg.20250101000000"
+printf 'target\n' >"$tmp/prune-link-target"; ln -s "$tmp/prune-link-target" "$live/nginx.conf.cfm-prepkg.20250102000000"
+printf 'x\n' >"$live/nginx.conf.cfm-prepkg.20250103000000x"; printf 'bak\n' >"$live/nginx.conf.cfm-prepkg.20250104000000.bak"
 rc=0; out=$(run_or "$pkg" "$live") || rc=$?
 [ "$rc" = 0 ] || { echo "FAIL: prune: the helper died (rc=$rc)" >&2; printf '%s\n' "$out" >&2; exit 1; }
 kept=$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$' || true)
-[ "$kept" = 11 ] || { echo "FAIL: prune must keep 10 backups (+ the untouched symlink = 11 matching names), got $kept" >&2; ls -A "$live" >&2; exit 1; }
+[ "$kept" = 12 ] || { echo "FAIL: prune must keep 10 backups (+ the 2 untouched symlinks = 12 matching names), got $kept" >&2; ls -A "$live" >&2; exit 1; }
 for gone in 01 02 03 04; do
   [ ! -e "$live/nginx.conf.cfm-prepkg.202601${gone}120000" ] || { echo "FAIL: the oldest backups must go (202601${gone})" >&2; exit 1; }
 done
 [ -e "$live/nginx.conf.cfm-prepkg.20260105120000" ] || { echo "FAIL: the 9 newest old backups must stay" >&2; ls -A "$live" >&2; exit 1; }
 [ -f "$live/nginx.conf.cfm-prepkg.manual" ] && [ -f "$live/nginx.conf.cfm-prepkg.2026" ] && [ -L "$live/nginx.conf.cfm-prepkg.20250101000000" ] \
+  && [ -L "$live/nginx.conf.cfm-prepkg.20250102000000" ] && [ -f "$tmp/prune-link-target" ] \
+  && [ -f "$live/nginx.conf.cfm-prepkg.20250103000000x" ] && [ -f "$live/nginx.conf.cfm-prepkg.20250104000000.bak" ] \
   || { echo "FAIL: a hand-made copy, a short name or a symlink must never be pruned" >&2; ls -A "$live" >&2; exit 1; }
 printf '%s\n' "$out" | rg -q 'removed 4 old backup\(s\)' || { echo "FAIL: the prune must be reported" >&2; printf '%s\n' "$out" >&2; exit 1; }
 
@@ -1031,7 +1035,7 @@ CFM_PREPKG_KEEP=0 run_or "$pkg" "$live" >/dev/null
 # 33b. A leading-zero CFM_PREPKG_KEEP is decimal (shell arithmetic reads 08 as
 #      octal and dies mid-run), and the backup this run made is never pruned,
 #      even when older backups carry later timestamps (a clock that was ahead).
-for kv in 08:8 010:10; do
+for kv in 08:8 010:10 18446744073709551615:14 99999999999999999999:14; do
   k=${kv%%:*}; want=${kv#*:}
   pkg="$tmp/pkg-keep$k"; live="$tmp/live-keep$k"
   mk_pkg "$pkg" "$live"; seed_live "$live"
