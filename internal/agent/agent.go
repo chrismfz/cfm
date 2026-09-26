@@ -255,7 +255,7 @@ func normalize(c Config) Config {
 	if c.UserAgent == "" {
 		c.UserAgent = "cfm"
 	}
-	if c.BaseURL != "" && !strings.HasPrefix(c.BaseURL, "http://") && !strings.HasPrefix(c.BaseURL, "https://") {
+	if c.BaseURL != "" && !strings.Contains(c.BaseURL, "://") {
 		c.BaseURL = "https://" + c.BaseURL
 	}
 	return c

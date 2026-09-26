@@ -71,6 +71,7 @@ func TestAPIClientEndpointSchemeless(t *testing.T) {
 		"http://cfm.example.org/":  "http://cfm.example.org/api/x",
 		"https://cfm.example.org":  "https://cfm.example.org/api/x",
 		"https://cfm.example.org/": "https://cfm.example.org/api/x",
+		"HTTPS://cfm.example.org":  "HTTPS://cfm.example.org/api/x",
 	}
 	for base, want := range cases {
 		if got := (&APIClient{BaseURL: base}).endpoint("/api/x"); got != want {

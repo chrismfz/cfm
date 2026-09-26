@@ -33,12 +33,13 @@ func (c *APIClient) http() *http.Client {
 }
 
 // endpoint joins API_URL and path. A schemeless API_URL means https, as the
-// heartbeat runner's normalize does: the block/unblock reporter is built
+// heartbeat runner's normalize and the feed fetcher (blocklists.APIAuth) do;
+// any explicit scheme, whatever its case, is kept. The block/unblock reporter is built
 // straight from cfm.conf, and without this its calls (and their Token) never
 // reached cfm-web while the heartbeat did.
 func (c *APIClient) endpoint(path string) string {
 	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
-	if base != "" && !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+	if base != "" && !strings.Contains(base, "://") {
 		base = "https://" + base
 	}
 	return base + path
