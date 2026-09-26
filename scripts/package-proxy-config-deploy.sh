@@ -41,7 +41,7 @@ service_is_installed() {
         return 1
     fi
 
-    systemctl list-unit-files "$sii_unit" --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$sii_unit"
+    systemctl list-unit-files "$sii_unit" --no-legend 2>/dev/null | awk '{print $1}' | grep -x "$sii_unit" >/dev/null
 }
 
 service_is_active() {
@@ -360,7 +360,59 @@ commit_files() {
     commit_cleanup
     [ -n "$cf_backup" ] && echo "CFM proxy config: backed up $cf_dst to $cf_backup"
     echo "CFM proxy config: deployed $cf_dst"
+    prune_prepkg_backups "$cf_dst" "${CFM_PREPKG_KEEP:-10}" "$cf_backup"
     return 0
+}
+
+# is_prepkg_backup DST FILE: FILE is one of the backups commit_files makes,
+# DST.cfm-prepkg.<YYYYmmddHHMMSS>, as a regular file (not a symlink).
+is_prepkg_backup() {
+    ipb_ts=${2#"$1".cfm-prepkg.}
+    case "$ipb_ts" in
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+        *) return 1 ;;
+    esac
+    [ -f "$2" ] && [ ! -L "$2" ]
+}
+
+# prune_prepkg_backups DST KEEP [CURRENT]: after a successful deploy, keep only
+# the KEEP newest DST.cfm-prepkg.<timestamp> backups. Every upgrade adds one and
+# nothing removed them (a node upgraded since May had ~90). The timestamp sorts
+# in time order, and so does the glob. Only that exact name form is touched,
+# never a hand-made copy; KEEP=0 (CFM_PREPKG_KEEP=0), or any value of 10 or more
+# digits, keeps them all. CURRENT, the
+# backup this run just made, is never removed, even when older backups carry
+# later timestamps (a clock that was ahead, a timezone change).
+prune_prepkg_backups() {
+    ppb_dst=$1
+    ppb_cur=${3:-}
+    case "$2" in ''|*[!0-9]*) return 0 ;; esac
+    ppb_keep=${2#"${2%%[!0]*}"}   # drop leading zeros: shell arithmetic reads 08 as octal
+    [ -n "$ppb_keep" ] || return 0
+    # 10+ digits means "keep them all": no arithmetic on it (bash wraps a
+    # 20-digit value to a negative number, dash aborts on it).
+    case "$ppb_keep" in ??????????*) return 0 ;; esac
+    # One listing for both the count and the removal.
+    set --
+    for ppb_f in "$ppb_dst".cfm-prepkg.*; do
+        is_prepkg_backup "$ppb_dst" "$ppb_f" && set -- "$@" "$ppb_f"
+    done
+    ppb_drop=$(($# - ppb_keep))
+    [ "$ppb_drop" -gt 0 ] || return 0
+    # Bound the ATTEMPTS, not the successes: an old backup that can't be
+    # removed (immutable, EPERM) must not make a newer one go in its place.
+    ppb_tried=0
+    ppb_removed=0
+    for ppb_f in "$@"; do
+        [ "$ppb_tried" -lt "$ppb_drop" ] || break
+        [ "$ppb_f" = "$ppb_cur" ] && continue
+        ppb_tried=$((ppb_tried + 1))
+        rm -f "$ppb_f" 2>/dev/null && ppb_removed=$((ppb_removed + 1))
+    done
+    echo "CFM proxy config: removed $ppb_removed old backup(s) of $ppb_dst, keeping the newest $ppb_keep (CFM_PREPKG_KEEP)"
+    if [ "$ppb_removed" -lt "$ppb_tried" ]; then
+        echo "WARNING: CFM proxy config: could not remove $((ppb_tried - ppb_removed)) old backup(s) of $ppb_dst"
+    fi
 }
 
 # commit_rollback: put back each sidecar this commit actually renamed in (its
@@ -543,7 +595,7 @@ process_engine() {
     fi
 
     # -T (nginx >= 1.9.2, every Angie) is what proves which files were read.
-    if ! "$pe_bin" -h 2>&1 | grep -q -- '-T'; then
+    if ! "$pe_bin" -h 2>&1 | grep -- '-T' >/dev/null; then
         echo "WARNING: CFM proxy config: $pe_bin has no -T option (engine too old); cannot test the new sidecars safely; $pe_unchanged"
         cleanup_proxy_deploy
         return 0
@@ -574,7 +626,7 @@ process_engine() {
     # that cannot see must fail. A commented-out include is not read, so
     # comments don't count.
     for pe_name in $CFM_SIDECARS; do
-        sed 's/#.*//' "$pe_stage/main.conf" | grep -qF "$pe_stage/$pe_name" || continue
+        sed 's/#.*//' "$pe_stage/main.conf" | grep -F "$pe_stage/$pe_name" >/dev/null || continue
         if ! grep -qxF "# configuration file $pe_stage/$pe_name:" "$pe_stage/.dump"; then
             echo "WARNING: CFM proxy config: $pe_engine -T did not list $pe_stage/$pe_name; cannot confirm the test read the new sidecars; $pe_unchanged"
             cleanup_proxy_deploy

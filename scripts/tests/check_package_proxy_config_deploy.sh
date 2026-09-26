@@ -237,6 +237,16 @@ done
 exec $real_install "\$@"
 EOF_INSTALL
 chmod 0755 "$bin_dir/install"
+real_rm=$(command -v rm)
+cat >"$bin_dir/rm" <<EOF_RM
+#!/bin/sh
+# FAKE_RM_FAIL: refuse to remove a path containing it (an immutable file).
+if [ -n "\${FAKE_RM_FAIL:-}" ]; then
+  for a do case "\$a" in *"\$FAKE_RM_FAIL"*) echo "rm: cannot remove '\$a': Operation not permitted" >&2; exit 1 ;; esac; done
+fi
+exec $real_rm "\$@"
+EOF_RM
+chmod 0755 "$bin_dir/rm"
 
 # Load only helper functions so this test can pass temp destinations without
 # touching system Angie/OpenResty paths. The helper's top-level
@@ -978,5 +988,102 @@ mk_pkg "$pkg" "$live"; seed_live "$live"
 out=$(run_or "$pkg" "$live")
 cmp -s "$live/trusted_proxies.conf" "$pkg/trusted_proxies.conf" && cmp -s "$live/nginx.conf" "$pkg/openresty.conf" \
   || { echo "FAIL: a live dir with & in its path must deploy" >&2; printf '%s\n' "$out" >&2; exit 1; }
+
+# 31. The real script ignores SIGPIPE, and its children inherit that: a reader
+#     that stops early (grep -q) made the writer print "Broken pipe" instead of
+#     exiting quietly (seen on a live upgrade: `sed: couldn't write N items to
+#     stdout: Broken pipe`). A large main config, the include near the top, the
+#     real engine, SIGPIPE ignored as in the script: no such noise.
+pp_pkg="$tmp/pp-pkg"; pp_live="$tmp/pp-live"; rm -rf "$pp_pkg" "$pp_live"; mkdir -p "$pp_pkg" "$pp_live"
+{
+  printf 'events {}\nhttp {\ninclude %s/trusted_proxies.conf;\ngeo $cfm_x {\n    default 0;\n    include %s/challenge_waf_bypass.conf;\n}\ninclude %s/cfm-panel-listeners.conf;\n' "$pp_live" "$pp_live" "$pp_live"
+  i=0; while [ "$i" -lt 60000 ]; do printf '    # padding line %s\n' "$i"; i=$((i + 1)); done
+  printf '}\n'
+} >"$pp_pkg/openresty.conf"
+printf '%s\n' '# new trusted' >"$pp_pkg/trusted_proxies.conf"; printf '%s\n' '192.0.2.1/32 1;' >"$pp_pkg/challenge_waf_bypass.conf"
+cp "$configs/cfm-panel-listeners.conf.in" "$pp_pkg/"
+pp_out=$(PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$pp_pkg" \
+  sh -c 'trap "" PIPE; . "$1"; process_engine OpenResty "$2" "$3" "$4" "$5" openresty.service x' sh \
+  "$tmp/functions.sh" "$bin_dir/real-nginx" "$pp_pkg/openresty.conf" "$pp_live/nginx.conf" "$pp_live" 2>&1)
+cmp -s "$pp_live/nginx.conf" "$pp_pkg/openresty.conf" || { echo "FAIL: the large-config deploy must succeed" >&2; printf '%s\n' "$pp_out" >&2; exit 1; }
+if printf '%s\n' "$pp_out" | rg -qi 'broken pipe|couldn.t write|write error'; then
+  echo "FAIL: a deploy with SIGPIPE ignored printed broken-pipe noise:" >&2; printf '%s\n' "$pp_out" | rg -i 'broken pipe|couldn.t write|write error' >&2; exit 1
+fi
+
+# 32. Old .cfm-prepkg backups are pruned after a successful deploy: the newest
+#     CFM_PREPKG_KEEP (default 10) stay, counting the one this run made; a name
+#     that isn't exactly NAME.cfm-prepkg.<14 digits>, or a symlink, is never touched.
+pkg="$tmp/pkg-prune"; live="$tmp/live-prune"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+i=1; while [ "$i" -le 13 ]; do printf 'old %s\n' "$i" >"$live/nginx.conf.cfm-prepkg.202601$(printf '%02d' "$i")120000"; i=$((i + 1)); done
+printf 'mine\n' >"$live/nginx.conf.cfm-prepkg.manual"
+printf 'short\n' >"$live/nginx.conf.cfm-prepkg.2026"
+ln -s /nonexistent "$live/nginx.conf.cfm-prepkg.20250101000000"
+printf 'target\n' >"$tmp/prune-link-target"; ln -s "$tmp/prune-link-target" "$live/nginx.conf.cfm-prepkg.20250102000000"
+printf 'x\n' >"$live/nginx.conf.cfm-prepkg.20250103000000x"; printf 'bak\n' >"$live/nginx.conf.cfm-prepkg.20250104000000.bak"
+rc=0; out=$(run_or "$pkg" "$live") || rc=$?
+[ "$rc" = 0 ] || { echo "FAIL: prune: the helper died (rc=$rc)" >&2; printf '%s\n' "$out" >&2; exit 1; }
+kept=$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$' || true)
+[ "$kept" = 12 ] || { echo "FAIL: prune must keep 10 backups (+ the 2 untouched symlinks = 12 matching names), got $kept" >&2; ls -A "$live" >&2; exit 1; }
+for gone in 01 02 03 04; do
+  [ ! -e "$live/nginx.conf.cfm-prepkg.202601${gone}120000" ] || { echo "FAIL: the oldest backups must go (202601${gone})" >&2; exit 1; }
+done
+[ -e "$live/nginx.conf.cfm-prepkg.20260105120000" ] || { echo "FAIL: the 9 newest old backups must stay" >&2; ls -A "$live" >&2; exit 1; }
+[ -f "$live/nginx.conf.cfm-prepkg.manual" ] && [ -f "$live/nginx.conf.cfm-prepkg.2026" ] && [ -L "$live/nginx.conf.cfm-prepkg.20250101000000" ] \
+  && [ -L "$live/nginx.conf.cfm-prepkg.20250102000000" ] && [ -f "$tmp/prune-link-target" ] \
+  && [ -f "$live/nginx.conf.cfm-prepkg.20250103000000x" ] && [ -f "$live/nginx.conf.cfm-prepkg.20250104000000.bak" ] \
+  || { echo "FAIL: a hand-made copy, a short name or a symlink must never be pruned" >&2; ls -A "$live" >&2; exit 1; }
+printf '%s\n' "$out" | rg -q 'removed 4 old backup\(s\)' || { echo "FAIL: the prune must be reported" >&2; printf '%s\n' "$out" >&2; exit 1; }
+
+# 33. CFM_PREPKG_KEEP=0 keeps every backup.
+pkg="$tmp/pkg-keepall"; live="$tmp/live-keepall"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+i=1; while [ "$i" -le 13 ]; do : >"$live/nginx.conf.cfm-prepkg.202601$(printf '%02d' "$i")120000"; i=$((i + 1)); done
+CFM_PREPKG_KEEP=0 run_or "$pkg" "$live" >/dev/null
+[ "$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$')" = 14 ] || { echo "FAIL: CFM_PREPKG_KEEP=0 must keep all backups" >&2; ls -A "$live" >&2; exit 1; }
+
+# 33b. A leading-zero CFM_PREPKG_KEEP is decimal (shell arithmetic reads 08 as
+#      octal and dies mid-run), and the backup this run made is never pruned,
+#      even when older backups carry later timestamps (a clock that was ahead).
+for kv in 08:8 010:10 18446744073709551615:14 99999999999999999999:14; do
+  k=${kv%%:*}; want=${kv#*:}
+  pkg="$tmp/pkg-keep$k"; live="$tmp/live-keep$k"
+  mk_pkg "$pkg" "$live"; seed_live "$live"
+  i=1; while [ "$i" -le 13 ]; do : >"$live/nginx.conf.cfm-prepkg.202601$(printf '%02d' "$i")120000"; i=$((i + 1)); done
+  rc=0; out=$(CFM_PREPKG_KEEP=$k run_or "$pkg" "$live") || rc=$?
+  [ "$rc" = 0 ] || { echo "FAIL: CFM_PREPKG_KEEP=$k: the helper died (rc=$rc)" >&2; printf '%s\n' "$out" >&2; exit 1; }
+  cmp -s "$live/nginx.conf" "$pkg/openresty.conf" || { echo "FAIL: CFM_PREPKG_KEEP=$k must not break the deploy" >&2; printf '%s\n' "$out" >&2; exit 1; }
+  got=$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$')
+  [ "$got" = "$want" ] || { echo "FAIL: CFM_PREPKG_KEEP=$k must keep $want backups (decimal), got $got" >&2; exit 1; }
+done
+pkg="$tmp/pkg-skew"; live="$tmp/live-skew"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+i=1; while [ "$i" -le 12 ]; do : >"$live/nginx.conf.cfm-prepkg.2099$(printf '%02d' "$i")01000000"; i=$((i + 1)); done
+rc=0; out=$(run_or "$pkg" "$live") || rc=$?
+[ "$rc" = 0 ] || { echo "FAIL: skewed clocks: the helper died (rc=$rc)" >&2; printf '%s\n' "$out" >&2; exit 1; }
+cur=$(printf '%s\n' "$out" | sed -n 's/.*backed up .* to \(.*\)$/\1/p' | head -n1)
+[ -n "$cur" ] && [ -f "$cur" ] || { echo "FAIL: the backup this run made must survive the prune (got '$cur')" >&2; printf '%s\n' "$out" >&2; ls -A "$live" >&2; exit 1; }
+[ "$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$')" = 10 ] || { echo "FAIL: skewed clocks: still 10 backups kept" >&2; ls -A "$live" >&2; exit 1; }
+
+# 33c. An old backup that can't be removed is left, and no NEWER one is removed
+#      in its place; the failure is reported.
+pkg="$tmp/pkg-rmfail"; live="$tmp/live-rmfail"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+i=1; while [ "$i" -le 13 ]; do : >"$live/nginx.conf.cfm-prepkg.202601$(printf '%02d' "$i")120000"; i=$((i + 1)); done
+rc=0; out=$(FAKE_RM_FAIL=.cfm-prepkg.20260101120000 run_or "$pkg" "$live") || rc=$?
+[ "$rc" = 0 ] || { echo "FAIL: rm failure: the helper died (rc=$rc)" >&2; printf '%s\n' "$out" >&2; exit 1; }
+[ -e "$live/nginx.conf.cfm-prepkg.20260101120000" ] || { echo "FAIL: the unremovable backup is still there" >&2; exit 1; }
+[ ! -e "$live/nginx.conf.cfm-prepkg.20260104120000" ] && [ -e "$live/nginx.conf.cfm-prepkg.20260105120000" ] \
+  || { echo "FAIL: an unremovable old backup must not make a newer one go in its place" >&2; ls -A "$live" >&2; exit 1; }
+printf '%s\n' "$out" | rg -q 'removed 3 old backup' && printf '%s\n' "$out" | rg -q 'could not remove 1 old backup' \
+  || { echo "FAIL: the prune must report 3 removed and 1 failed" >&2; printf '%s\n' "$out" >&2; exit 1; }
+
+# 34. A failed deploy prunes nothing (the live dir stays exactly as it was).
+pkg="$tmp/pkg-noprune"; live="$tmp/live-noprune"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+i=1; while [ "$i" -le 13 ]; do : >"$live/nginx.conf.cfm-prepkg.202601$(printf '%02d' "$i")120000"; i=$((i + 1)); done
+before=$(snapshot "$live")
+run_or "$pkg" "$live" 1 >/dev/null
+assert_untouched "$live" "$before" "failed deploy with old backups"
 
 echo "OK: package proxy deploy helper tests only the main engine configs, with the new sidecars staged; a failed run leaves the live dir untouched"
