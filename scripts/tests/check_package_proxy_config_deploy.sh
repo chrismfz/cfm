@@ -237,6 +237,16 @@ done
 exec $real_install "\$@"
 EOF_INSTALL
 chmod 0755 "$bin_dir/install"
+real_rm=$(command -v rm)
+cat >"$bin_dir/rm" <<EOF_RM
+#!/bin/sh
+# FAKE_RM_FAIL: refuse to remove a path containing it (an immutable file).
+if [ -n "\${FAKE_RM_FAIL:-}" ]; then
+  for a do case "\$a" in *"\$FAKE_RM_FAIL"*) echo "rm: cannot remove '\$a': Operation not permitted" >&2; exit 1 ;; esac; done
+fi
+exec $real_rm "\$@"
+EOF_RM
+chmod 0755 "$bin_dir/rm"
 
 # Load only helper functions so this test can pass temp destinations without
 # touching system Angie/OpenResty paths. The helper's top-level
@@ -1054,6 +1064,19 @@ rc=0; out=$(run_or "$pkg" "$live") || rc=$?
 cur=$(printf '%s\n' "$out" | sed -n 's/.*backed up .* to \(.*\)$/\1/p' | head -n1)
 [ -n "$cur" ] && [ -f "$cur" ] || { echo "FAIL: the backup this run made must survive the prune (got '$cur')" >&2; printf '%s\n' "$out" >&2; ls -A "$live" >&2; exit 1; }
 [ "$(ls -A "$live" | rg -c '^nginx\.conf\.cfm-prepkg\.[0-9]{14}$')" = 10 ] || { echo "FAIL: skewed clocks: still 10 backups kept" >&2; ls -A "$live" >&2; exit 1; }
+
+# 33c. An old backup that can't be removed is left, and no NEWER one is removed
+#      in its place; the failure is reported.
+pkg="$tmp/pkg-rmfail"; live="$tmp/live-rmfail"
+mk_pkg "$pkg" "$live"; seed_live "$live"
+i=1; while [ "$i" -le 13 ]; do : >"$live/nginx.conf.cfm-prepkg.202601$(printf '%02d' "$i")120000"; i=$((i + 1)); done
+rc=0; out=$(FAKE_RM_FAIL=.cfm-prepkg.20260101120000 run_or "$pkg" "$live") || rc=$?
+[ "$rc" = 0 ] || { echo "FAIL: rm failure: the helper died (rc=$rc)" >&2; printf '%s\n' "$out" >&2; exit 1; }
+[ -e "$live/nginx.conf.cfm-prepkg.20260101120000" ] || { echo "FAIL: the unremovable backup is still there" >&2; exit 1; }
+[ ! -e "$live/nginx.conf.cfm-prepkg.20260104120000" ] && [ -e "$live/nginx.conf.cfm-prepkg.20260105120000" ] \
+  || { echo "FAIL: an unremovable old backup must not make a newer one go in its place" >&2; ls -A "$live" >&2; exit 1; }
+printf '%s\n' "$out" | rg -q 'removed 3 old backup' && printf '%s\n' "$out" | rg -q 'could not remove 1 old backup' \
+  || { echo "FAIL: the prune must report 3 removed and 1 failed" >&2; printf '%s\n' "$out" >&2; exit 1; }
 
 # 34. A failed deploy prunes nothing (the live dir stays exactly as it was).
 pkg="$tmp/pkg-noprune"; live="$tmp/live-noprune"

@@ -24,9 +24,11 @@ back-filled here — see the git/PR history for that period.
   but alarming write error; the readers now consume their whole input. Each
   upgrade also left an `angie.conf` / `nginx.conf` `.cfm-prepkg.<timestamp>`
   backup that nothing removed (a node upgraded since May had ~90). After a
-  successful deploy the newest 10 are kept (`CFM_PREPKG_KEEP`, `0` keeps them
-  all); a hand-made copy or any other name is never touched, and a failed
-  deploy removes nothing.
+  successful deploy the newest 10 are kept (`CFM_PREPKG_KEEP`; `0`, or any
+  value of 10 or more digits, keeps them all); the backup the run just made, a
+  hand-made copy or any other name is never touched, a backup that can't be
+  removed is reported rather than replaced by a newer one, and a failed deploy
+  removes nothing.
 
 ## 2026.09.25
 

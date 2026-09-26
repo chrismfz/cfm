@@ -399,13 +399,20 @@ prune_prepkg_backups() {
     done
     ppb_drop=$(($# - ppb_keep))
     [ "$ppb_drop" -gt 0 ] || return 0
+    # Bound the ATTEMPTS, not the successes: an old backup that can't be
+    # removed (immutable, EPERM) must not make a newer one go in its place.
+    ppb_tried=0
     ppb_removed=0
     for ppb_f in "$@"; do
-        [ "$ppb_removed" -lt "$ppb_drop" ] || break
+        [ "$ppb_tried" -lt "$ppb_drop" ] || break
         [ "$ppb_f" = "$ppb_cur" ] && continue
-        rm -f "$ppb_f" && ppb_removed=$((ppb_removed + 1))
+        ppb_tried=$((ppb_tried + 1))
+        rm -f "$ppb_f" 2>/dev/null && ppb_removed=$((ppb_removed + 1))
     done
     echo "CFM proxy config: removed $ppb_removed old backup(s) of $ppb_dst, keeping the newest $ppb_keep (CFM_PREPKG_KEEP)"
+    if [ "$ppb_removed" -lt "$ppb_tried" ]; then
+        echo "WARNING: CFM proxy config: could not remove $((ppb_tried - ppb_removed)) old backup(s) of $ppb_dst"
+    fi
 }
 
 # commit_rollback: put back each sidecar this commit actually renamed in (its
