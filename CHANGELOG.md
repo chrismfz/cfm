@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.28
+
 ### Fixed
 - **cPanel File Manager: Save and Upload no longer fail on `cpanel.<domain>`.**
   On the proxy subdomain (`cpanel.` / `whm.` / `webmail.` over 443), the
@@ -41,8 +45,6 @@ back-filled here — see the git/PR history for that period.
   multi-line `$this->db\n    ->exec(` chain included), so neither a comment
   nor `$i-->system(` can hide a real call. A global `exec(` / `@exec(` / `\exec(`
   still counts.
-
-## 2026.09.28
 
 ### Changed
 - **A traffic rule can now list up to 64 countries (was 20).** A geo fence such
