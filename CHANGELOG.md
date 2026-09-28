@@ -17,7 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **cPanel File Manager: Save and Upload no longer fail on `cpanel.<domain>`.**
+  On the proxy subdomain (`cpanel.` / `whm.` / `webmail.` over 443), the
+  editor's Save was blocked by WAF rule 404, and the user saw "Your login
+  session has expired". Uploads of `.php` files were blocked by rules 402/401 with a 403.
+  cPanel's own API, SSO and transfer endpoints (`/cpsess<N>/json-api/…`,
+  `/cpsess<N>/execute/…`, …) now pass straight to cPanel there. The panel
+  ports (2083/2087/2096) already did this, and both now use the same list.
+  cPanel still authenticates every one of those requests.
+- **WAF rule 404 (PHP webshell body) no longer fires on method calls.** A PDO
+  `$db->exec(…)`, `Foo::system(…)`, `$this->assert(…)` or a `function exec(`
+  declaration was scored as the shell builtin, so ordinary PHP classes
+  posted as a body (code editors, snippet plugins) were blocked. A real
+  global `exec(` / `@exec(` / `\exec(` still counts.
 
 ## 2026.09.28
 

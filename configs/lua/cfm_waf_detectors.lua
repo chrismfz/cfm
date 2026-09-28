@@ -469,10 +469,28 @@ function _M.detect_php_webshell_body(body, headers)
     score = score + 2
   end
 
+  -- A call to the GLOBAL function `name(`. A method / static call
+  -- (`$pdo->exec(`, `$x?->exec(`, `Foo::exec(`) or a declaration
+  -- (`function exec(`) is not the shell builtin: PDO / SQLite3 ->exec() and
+  -- PHPUnit ->assert() are everyday code, and before this check saving an
+  -- ordinary PDO class through the cPanel File Manager editor scored
+  -- <?php(+2) + exec(+3) = 5 and was blocked as RAW_EXEC (orion, 2026-09-28).
+  -- The `@` suppressor (`@exec(`) is still a global call. The look-behind is
+  -- a bounded 64-byte window (never a copy of the whole prefix: a body of
+  -- thousands of `->exec(` would otherwise cost O(n^2)); a longer gap than
+  -- that reads as a global call, i.e. fails closed.
   local function has_php_callable(name)
-    if s:find("%f[%a_]" .. name .. "%s*%(") then return true end
-    if s:find("@%s*" .. name .. "%s*%(") then return true end
-    return false
+    local init = 1
+    while true do
+      local i, j = s:find("%f[%a_]" .. name .. "%s*%(", init)
+      if not i then return false end
+      local before = s:sub(i > 64 and i - 64 or 1, i - 1):match("(%S*)%s*$") or ""
+      local tail2  = before:sub(-2)
+      if tail2 ~= "->" and tail2 ~= "::" and not before:find("%f[%a_]function$") then
+        return true
+      end
+      init = j + 1
+    end
   end
 
   -- Dynamic include / require — matches only when the include's argument

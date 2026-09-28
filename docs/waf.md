@@ -807,6 +807,37 @@ elFinder verb. The query `action` is not routing proof (a body field overrides
 it, case 6), but the carve-out needs none: a bare verb carries no payload on
 any handler, while a metacharacter, a path or a non-verb word fires as before.
 
+### FP case 11 — cPanel File Manager save / upload on `cpanel.X:443` (404 / 402 / 401)
+
+**Shape:** orion, 2026-09-28, account paparazi on `cpanel.zenogroup.gr`. The
+File Manager editor's **Save Changes** (`POST /cpsess<N>/json-api/cpanel`,
+form-urlencoded, the PHP source file as the body) got 403 from rule 404
+`WAF_PHP_WEBSHELL_BODY:RAW_EXEC`: `challenge_v2` by default, turned into
+`block` by `post_clearance_action` because the client held a clearance and
+the family is high-risk. The editor reports the 403 as "Your login session has
+expired", and cPanel's `access_log` has no save request at all. Uploading
+`.php` files (`/cpsess<N>/execute/Fileman/upload_files`) got 403 from 402
+`UPLOAD_PHP_TAG` and 401 `UPLOAD_FNAME`. After a fresh login, the same save
+got a `challenge_v2` 303, which an XHR cannot solve.
+
+**Root causes and fixes (in code):**
+
+1. *Detector:* `has_php_callable` matched `$this->db->exec(` (PDO) as the
+   global `exec()`. `<?php` (+2) plus exec (+3) reached the threshold of 5. A method or
+   static call (`->name(`, `?->name(`, `::name(`) or a declaration
+   (`function name(`) is no longer counted. The global builtin, `@exec(` and
+   `\exec(` still are (severity test 67b).
+2. *Edge parity:* the panel listeners (2083/2087/2096) always passed cPanel's
+   authenticated API / SSO / transfer endpoints straight through
+   (`cfm_panel.lua` step 1). The proxy subdomain on 80/443 ran the full WAF and
+   the vhost challenge on the same request. `cfm.lua` Step 0a2 now passes
+   them through for `cpanel.` / `whm.` / `webmail.` hosts, using the same matcher
+   (`cfm_panel_hosts.is_panel_api_or_sso`, the single source for both edges).
+   This skips the WAF and the challenge only: cpsrvd still authenticates every
+   one of these requests, and kernel IP blocks still apply. It trusts the Host
+   prefix: a docroot vhost named `cpanel.*`/`whm.*`/`webmail.*` would lose WAF
+   inspection on those API-shaped paths.
+
 ### Structural anti-patterns to check during rule review
 
 A short list. Every one of these surfaced as a real FP above; reading
@@ -1370,6 +1401,10 @@ Kill switch: `CFM_WAF_STATS_ENABLE=0` disables hit-rate counters + flushing.
   ├─ \.(css|js|woff2?|ttf|eot|png|jpe?g|gif|webp|ico|map)$         → bypass cfm.lua, proxy to origin
   └─ everything else                                               ↓
 [ access_by_lua: cfm.lua ]
+  ├─ Step 0a1 /.well-known/            → origin (no WAF, no challenge)
+  ├─ Step 0a2 cpanel./whm./webmail. + cPanel API/SSO path
+  │            (cfm_panel_hosts.is_panel_api_or_sso, same as the panel ports)
+  │                                    → origin (no WAF, no challenge)
   ├─ POST resume handling
   ├─ Step 1   validate cfm_clearance → clearance_allow (no return yet)
   ├─ Step 2   run WAF (always, regardless of clearance)
@@ -1385,7 +1420,7 @@ Kill switch: `CFM_WAF_STATS_ENABLE=0` disables hit-rate counters + flushing.
 
 Key invariants:
 
-1. **WAF runs even with valid clearance** for any request that reaches `cfm.lua`. No dynamic payload reaches origin without inspection.
+1. **WAF runs even with valid clearance** for any request that reaches `cfm.lua`. No dynamic payload reaches origin without inspection — except the two Step 0 carve-outs above (`/.well-known/`, and the cPanel API endpoints on a panel proxy host, which cpsrvd authenticates itself; FP case 11).
 2. **Post-clearance challenge cannot loop.** Conversion happens before the action switch; the `challenge` branch in the WAF hit handler is unreachable when `clearance_allow=true`.
 3. **POST replays are safe.** A resumed POST (`cfm_resumed_post`) is treated like any cleared client — `clearance_allow` keys on `clearance_ok` alone. A *cleared* replay runs the WAF (block-tier blocks; a challenge-tier hit is risk-downgraded by `post_clearance_action`) and then fast-paths to origin at Step 2b, so the stashed save is not lost. An *uncleared* replay that re-triggers a challenge still hits the `block_replayed` safety net (Step 2 challenge branch + Step 3) — the loop it exists to stop.
 4. **CFM control endpoints bypass `cfm.lua`.** `/__cfm_challenge`, `/__cfm_verify` are exact-match nginx locations — no WAF, no challenge, no origin.

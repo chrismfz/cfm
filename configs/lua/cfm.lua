@@ -1225,6 +1225,39 @@ do
   end
 end
 
+-- ── Step 0a2: cPanel proxy-subdomain API passthrough (panel-port parity) ─────
+-- cpanel.X / whm.X / webmail.X on 80/443 are Apache proxy subdomains in front
+-- of cpsrvd — the same panel the 2083/2087/2096 listeners front. Those
+-- listeners pass cPanel's API / SSO / transfer endpoints straight through
+-- (cfm_panel.lua step 1: no challenge, no WAF), because cpsrvd authenticates
+-- every one of them itself (/cpsess<N>/ token bound to the session cookie, API
+-- token, SSO assertion). Here the same request used to meet the full web WAF
+-- and the vhost challenge. On orion (2026-09-28) the File Manager editor's
+-- save (POST /cpsess<N>/json-api/cpanel, a PHP source file as the body) and
+-- its upload (/cpsess<N>/execute/Fileman/upload_files) got 403 from rules
+-- 404/402/401 and a challenge 303, which the editor reports as "Your login
+-- session has expired". This passes them through the same way, from the same
+-- matcher (cfm_panel_hosts.is_panel_api_or_sso), so both routes treat the
+-- request the same way.
+--
+-- Scope and trade-off: this is a WAF/challenge skip, not an auth bypass —
+-- cpsrvd still rejects a request without a valid session or token — and it
+-- is limited to the cPanel proxy prefixes (cpanel/whm/webmail; not mail./
+-- webdisk.). The Host header picks the prefix, so this assumes those names
+-- are cPanel proxy subdomains (they are reserved when proxysubdomains is on).
+-- A host with one of these prefixes that is really a docroot vhost would lose
+-- WAF inspection on these API-shaped paths. kernel (nft) IP blocks still
+-- apply. The module missing (upgrade lag) → no passthrough (the old behaviour).
+do
+  if panel_hosts and panel_hosts.is_panel_api_or_sso and panel_hosts.is_proxy_panel_host
+     and panel_hosts.is_proxy_panel_host(host) and panel_hosts.is_panel_api_or_sso(uri) then
+    ngx.header["X-CFM-Bypass"] = "panel-api"
+    log_route(ngx.INFO, "bypass=panel-api host=" .. host .. " uri=" .. uri)
+    ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+    return
+  end
+end
+
 -- ── Step 0b: Box-wide UA emergency rules ─────────────────────────────────────
 -- Operators install these via the bot-top control surface. Matches happen
 -- on the normalized User-Agent only (one bucket per UA across all vhosts).

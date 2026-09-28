@@ -980,7 +980,18 @@ local function is_exempt_path(uri)
         or starts_with(uri, "/.well-known/")
 end
 
-local function is_panel_api_or_sso(uri)
+-- Canonical panel-subdomain prefixes + the API/SSO passthrough matcher, shared
+-- with cfm.lua (single source, no drift). nil on upgrade lag → fall back to
+-- the inline copies below.
+local ok_panel_hosts, panel_hosts_mod = pcall(require, "cfm_panel_hosts")
+if not ok_panel_hosts then panel_hosts_mod = nil end
+
+-- Upgrade-lag fallback ONLY: cfm_panel_hosts.is_panel_api_or_sso is the
+-- source of truth (cfm.lua Step 0a2 uses it for cpanel./whm./webmail.:443).
+-- cfm_panel_hosts_test.lua pins this copy to the module over a URI corpus, so
+-- an edit to one without the other fails `make test-lua`.
+-- BEGIN legacy_is_panel_api_or_sso
+local function legacy_is_panel_api_or_sso(uri)
     return starts_with(uri, "/json-api/")
         or uri == "/json-api/cpanel"
         or starts_with(uri, "/json-api/cpanel/")
@@ -1009,6 +1020,10 @@ local function is_panel_api_or_sso(uri)
         or starts_with(uri, "/cgi/transfer")
         or starts_with(uri, "/cgi/live_tail_log")
 end
+-- END legacy_is_panel_api_or_sso
+
+local is_panel_api_or_sso = (panel_hosts_mod and panel_hosts_mod.is_panel_api_or_sso)
+    or legacy_is_panel_api_or_sso
 
 local function is_human_entry_uri(uri)
     return uri == "/"
@@ -1021,11 +1036,6 @@ local function is_human_entry_uri(uri)
         or uri == "/webmail"
         or uri == "/webmail/"
 end
-
--- Canonical panel-subdomain prefixes (shared with cfm.lua — single source,
--- no drift). nil on upgrade lag → fall back to the old inline list.
-local ok_panel_hosts, panel_hosts_mod = pcall(require, "cfm_panel_hosts")
-if not ok_panel_hosts then panel_hosts_mod = nil end
 
 local function has_panel_prefix(host)
     if panel_hosts_mod then return panel_hosts_mod.has_panel_prefix(host) end

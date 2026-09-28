@@ -338,6 +338,12 @@ and easy to regress. Before changing it, read
 - Separately, cPanel **account transfers** (DNAT/rsync `/acctxfer*`,
   WHM live-transfer) need challenge/WAF bypass and generous timeouts —
   several incidents traced to hangs around these endpoints.
+- **One list for cPanel's own API/SSO/transfer endpoints, on both edges:**
+  `cfm_panel_hosts.is_panel_api_or_sso`. The panel listeners (2083/2087/2096)
+  and the proxy subdomains on 443 (`cpanel.`/`whm.`/`webmail.`, `cfm.lua` Step
+  0a2) both pass these endpoints through with no challenge and no WAF. Before
+  2026-09-28 only the ports did, so `cpanel.X` 403'd File Manager saves and
+  uploads (docs/waf.md FP case 11). Change the list there, never in a copy.
 
 ### WAF false positives — never "done"
 The WAF needs continuous tuning against real apps. Recurring offenders:
