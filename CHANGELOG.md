@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.28
+
 ### Changed
 - **A traffic rule can now list up to 64 countries (was 20).** A geo fence such
   as "block everything outside Europe" needs ~50 codes, so it had to be split
