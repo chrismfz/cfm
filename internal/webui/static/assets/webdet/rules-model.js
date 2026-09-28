@@ -11,7 +11,7 @@
 // ── Server limits (traffic_rules.go consts) ────────────────────────────────
 export const LIMITS = Object.freeze({
   vhostsPerRule: 32,
-  countriesPerRule: 20,
+  countriesPerRule: 64,
   patternsPerField: 20,
   noteLen: 256,
   priorityMin: 1,
@@ -1375,7 +1375,9 @@ export function validateRecipeVars(rcp, vars) {
     const raw = String(vars?.[v.key] ?? "").trim();
     if (v.required && !raw) errors.push(`${v.label} is required.`);
     if (v.type === "countries") {
-      for (const cc of csvSplit(raw)) if (!/^[A-Za-z]{2}$/.test(cc)) errors.push(`"${cc}" is not a 2-letter country code.`);
+      const ccs = csvSplit(raw);
+      if (ccs.length > LIMITS.countriesPerRule) errors.push(`Too many countries (max ${LIMITS.countriesPerRule}).`);
+      for (const cc of ccs) if (!/^[A-Za-z]{2}$/.test(cc)) errors.push(`"${cc}" is not a 2-letter country code.`);
     }
     if (v.type === "vhosts" && csvSplit(raw).length > LIMITS.vhostsPerRule) errors.push(`Too many vhosts (max ${LIMITS.vhostsPerRule}).`);
     if (v.type === "ips") {

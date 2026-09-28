@@ -17,6 +17,13 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **A traffic rule can now list up to 64 countries (was 20).** A geo fence such
+  as "block everything outside Europe" needs ~50 codes, so it had to be split
+  across several rules, and the cfm-admin rule editor refused it with "Too many
+  countries (max 20)". The cap applies to both "from" and "outside" country
+  lists; the geo-fence recipe form now checks it too, before saving.
+
 ### Fixed
 - **`cfm block … --ttl` and `cfm allow … --ttl` no longer turn into PERMANENT
   entries, and `cfm block -r REASON` keeps its reason.** The CLI's flag splitter

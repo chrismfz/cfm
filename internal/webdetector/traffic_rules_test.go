@@ -388,6 +388,56 @@ func TestTrafficRuleCountryNotIn(t *testing.T) {
 	}
 }
 
+// TestTrafficRuleCountryLimit: a whole-continent fence ("allow only Europe",
+// ~50 codes) must fit in ONE rule; one past the cap is refused for both
+// country fields. rules-model.js LIMITS.countriesPerRule mirrors the cap.
+func TestTrafficRuleCountryLimit(t *testing.T) {
+	codes := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = string([]byte{byte('A' + i/26), byte('A' + i%26)})
+		}
+		return out
+	}
+	if maxCountriesPerRule < 50 {
+		t.Fatalf("maxCountriesPerRule = %d, want >= 50 (a Europe-wide fence is ~50 codes)", maxCountriesPerRule)
+	}
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	r, err := s.Add(TrafficRule{
+		Enabled: true,
+		Scope:   TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:   TrafficRuleMatch{CountryNotIn: codes(maxCountriesPerRule)},
+		Action:  TrafficRuleAction{Type: TrafficActionBlock},
+	})
+	if err != nil {
+		t.Fatalf("add at the cap: %v", err)
+	}
+	if len(r.Match.CountryNotIn) != maxCountriesPerRule {
+		t.Fatalf("persisted %d codes, want %d", len(r.Match.CountryNotIn), maxCountriesPerRule)
+	}
+	last := r.Match.CountryNotIn[maxCountriesPerRule-1]
+	for _, tc := range []struct {
+		cc   string
+		want bool
+	}{{"AA", false}, {last, false}, {"ZZ", true}} {
+		if got := s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET", Country: tc.cc}).Matched; got != tc.want {
+			t.Fatalf("country=%q matched=%v want=%v", tc.cc, got, tc.want)
+		}
+	}
+	for _, m := range []TrafficRuleMatch{
+		{CountryNotIn: codes(maxCountriesPerRule + 1)},
+		{CountryIn: codes(maxCountriesPerRule + 1)},
+	} {
+		if _, err := s.Add(TrafficRule{
+			Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+			Match:  m,
+			Action: TrafficRuleAction{Type: TrafficActionBlock},
+		}); err == nil || !strings.Contains(err.Error(), "too many values") {
+			t.Fatalf("expected %d countries to be rejected, got err=%v", maxCountriesPerRule+1, err)
+		}
+	}
+}
+
 // TestTrafficRuleIPAny: IPv4/IPv6 CIDR + bare-address matching, canonical
 // storage, and the fail-closed behaviour for a missing/invalid client IP.
 func TestTrafficRuleIPAny(t *testing.T) {

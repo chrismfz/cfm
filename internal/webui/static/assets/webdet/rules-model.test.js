@@ -287,6 +287,17 @@ test("validateRecipeVars: required + country shape", () => {
   assert.ok(validateRecipeVars(rcp, { vhosts: "a.com", countries: "GR", ips: many }).some((e) => /too many entries/.test(e)));
 });
 
+test("country cap: a Europe-wide fence fits one rule, one past the cap is refused", () => {
+  assert.ok(LIMITS.countriesPerRule >= 50, "a Europe-wide fence is ~50 codes");
+  const codes = (n) => Array.from({ length: n }, (_, i) => String.fromCharCode(65 + Math.floor(i / 26), 65 + (i % 26))).join(", ");
+  const form = (n) => emptyForm({ actionType: "block", vhosts: "a.com", countries: codes(n), countriesMode: "not_in" });
+  assert.equal(validateRuleForm(form(LIMITS.countriesPerRule)).errors.filter((e) => /Too many countries/.test(e)).length, 0);
+  assert.ok(validateRuleForm(form(LIMITS.countriesPerRule + 1)).errors.some((e) => /Too many countries/.test(e)));
+  const rcp = recipe("geo_fence");
+  assert.equal(validateRecipeVars(rcp, { vhosts: "a.com", countries: codes(LIMITS.countriesPerRule) }).filter((e) => /Too many countries/.test(e)).length, 0);
+  assert.ok(validateRecipeVars(rcp, { vhosts: "a.com", countries: codes(LIMITS.countriesPerRule + 1) }).some((e) => /Too many countries/.test(e)));
+});
+
 test("static tables are consistent", () => {
   assert.deepEqual(ACTIONS.map((a) => a.key), ["allow", "block", "challenge", "challenge_v2", "throttle"]);
   // Every action key must have a priority band (suggestPriority depends on it).

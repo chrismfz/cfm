@@ -35,7 +35,12 @@ const (
 const (
 	maxRulesGlobal      = 500
 	maxVhostsPerRule    = 32
-	maxCountriesPerRule = 20
+	// maxCountriesPerRule bounds country_in / country_not_in. 64 fits a
+	// whole-continent fence ("allow only Europe" is ~50 codes with the
+	// microstates and territories) with headroom; matching is a linear scan
+	// in ruleMatchFilters, which stays trivial at this size. rules-model.js
+	// LIMITS.countriesPerRule mirrors it.
+	maxCountriesPerRule = 64
 	maxPatternsPerField = 20
 	maxRuleNoteLen      = 256
 	defaultRulePriority = 1000
