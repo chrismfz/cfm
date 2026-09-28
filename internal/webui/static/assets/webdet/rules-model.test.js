@@ -1,6 +1,7 @@
 // node --test internal/webui/static/assets/webdet/rules-model.test.js
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   ACTIONS,
   BOT_GROUPS,
@@ -285,6 +286,29 @@ test("validateRecipeVars: required + country shape", () => {
   assert.ok(validateRecipeVars(rcp, { vhosts: "a.com", countries: "Greece" }).some((e) => /not a 2-letter/.test(e)));
   const many = Array.from({ length: LIMITS.patternsPerField + 1 }, (_, i) => `203.0.${i}.0/24`).join(", ");
   assert.ok(validateRecipeVars(rcp, { vhosts: "a.com", countries: "GR", ips: many }).some((e) => /too many entries/.test(e)));
+});
+
+test("country cap: a Europe-wide fence fits one rule, one past the cap is refused", () => {
+  // Pinned to the daemon's const, so the mirror cannot drift.
+  const go = readFileSync(new URL("../../../../../internal/webdetector/traffic_rules.go", import.meta.url), "utf8");
+  const m = /^\s*maxCountriesPerRule\s*=\s*(\d+)\s*$/m.exec(go);
+  assert.ok(m, "no maxCountriesPerRule in traffic_rules.go");
+  assert.equal(LIMITS.countriesPerRule, Number(m[1]), "LIMITS.countriesPerRule must equal traffic_rules.go maxCountriesPerRule");
+  assert.ok(LIMITS.countriesPerRule >= 50, "a Europe-wide fence is ~50 codes");
+  const codes = (n) => Array.from({ length: n }, (_, i) => String.fromCharCode(65 + Math.floor(i / 26), 65 + (i % 26))).join(", ");
+  const form = (n) => emptyForm({ actionType: "block", vhosts: "a.com", countries: codes(n), countriesMode: "not_in" });
+  assert.equal(validateRuleForm(form(LIMITS.countriesPerRule)).errors.filter((e) => /Too many countries/.test(e)).length, 0);
+  assert.ok(validateRuleForm(form(LIMITS.countriesPerRule + 1)).errors.some((e) => /Too many countries/.test(e)));
+  const rcp = recipe("geo_fence");
+  assert.equal(validateRecipeVars(rcp, { vhosts: "a.com", countries: codes(LIMITS.countriesPerRule) }).filter((e) => /Too many countries/.test(e)).length, 0);
+  assert.ok(validateRecipeVars(rcp, { vhosts: "a.com", countries: codes(LIMITS.countriesPerRule + 1) }).some((e) => /Too many countries/.test(e)));
+  // At the cap the recipe note keeps its "ENABLE after testing" reminder.
+  const rules = rcp.build({ vhosts: "a.com", countries: codes(LIMITS.countriesPerRule) });
+  const fence = rules.filter((r) => (r.match.country_not_in || []).length);
+  assert.equal(fence.length, 1);
+  assert.ok(byteLen(fence[0].note) <= LIMITS.noteLen, "note fits");
+  assert.match(fence[0].note, /ENABLE after testing$/, `note keeps its reminder: ${fence[0].note}`);
+  assert.match(fence[0].note, /\+56 more/, "the list is shortened, not cut mid-way");
 });
 
 test("static tables are consistent", () => {

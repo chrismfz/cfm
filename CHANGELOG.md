@@ -17,7 +17,25 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **A traffic rule can now list up to 64 countries (was 20).** A geo fence such
+  as "block everything outside Europe" needs ~50 codes, so it had to be split
+  across several rules, and the cfm-admin rule editor refused it with "Too many
+  countries (max 20)". The cap applies to both "from" and "outside" country
+  lists, and to Challenge Access entries too (they share the rule match). The
+  geo-fence recipe form checks it before saving, recipe notes and
+  `cfm webtop rules` shorten a long country list (`rules get <id>` shows it
+  whole). **Before rolling a node back to 2026.09.26 or older, split any rule
+  or Challenge Access entry with more than 20 countries**: those builds drop
+  it on load and erase it from disk on the next rule save.
+
 ### Fixed
+- **A stored traffic rule or Challenge Access entry that this cfm build
+  rejects is no longer deleted.** Load used to drop it silently, and the next
+  save erased it from disk. That could happen to a rule written by a newer cfm
+  with a value past this build's cap. Such a rule is now kept on disk verbatim, listed
+  disabled and unsupported, and never enforced (as rules with unknown fields
+  already were); the daemon log names it and why.
 - **`cfm block … --ttl` and `cfm allow … --ttl` no longer turn into PERMANENT
   entries, and `cfm block -r REASON` keeps its reason.** The CLI's flag splitter
   never attached a value to `--ttl` / `-r` (it compared the argument without its

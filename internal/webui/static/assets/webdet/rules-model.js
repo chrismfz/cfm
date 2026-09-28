@@ -11,7 +11,7 @@
 // ── Server limits (traffic_rules.go consts) ────────────────────────────────
 export const LIMITS = Object.freeze({
   vhostsPerRule: 32,
-  countriesPerRule: 20,
+  countriesPerRule: 64,
   patternsPerField: 20,
   noteLen: 256,
   priorityMin: 1,
@@ -789,7 +789,9 @@ function hostsVar(vars, key, fallback) {
   return hs.length ? hs : fallback.slice();
 }
 // shortList keeps a recipe note under LIMITS.noteLen when the operator pastes
-// a long path list: the first few entries, then a count.
+// a long path or country list: the first few entries, then a count. (A
+// Europe-wide fence is ~50 codes; spelled out it would push the note's
+// "ENABLE after testing" tail past the cap, where clampNote cuts it.)
 function shortList(items, max = 3) {
   const xs = (items || []).map(String);
   return xs.length > max ? `${xs.slice(0, max).join(", ")} +${xs.length - max} more` : xs.join(", ");
@@ -968,7 +970,7 @@ export const RECIPES = Object.freeze([
       if (ips.length) {
         out.push(rule(k, { enabled: true, priority: 15, vhosts, match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass the fence" }));
       }
-      out.push(rule(k, { enabled: false, priority: 900, vhosts, match: { country_not_in: cc }, action: { type: "block" }, text: `block everyone outside ${cc.join(", ")} — ENABLE after testing` }));
+      out.push(rule(k, { enabled: false, priority: 900, vhosts, match: { country_not_in: cc }, action: { type: "block" }, text: `block everyone outside ${shortList(cc, 8)} — ENABLE after testing` }));
       return out;
     },
   },
@@ -991,7 +993,7 @@ export const RECIPES = Object.freeze([
       const act = vars?.action === "block" ? "block" : "challenge";
       const k = "geo_fence_admin";
       return [
-        rule(k, { enabled: false, priority: act === "block" ? 310 : 250, vhosts, match: { country_not_in: cc, path_any: paths }, action: { type: act }, text: `${act} the admin paths for visitors outside ${cc.join(", ")}` }),
+        rule(k, { enabled: false, priority: act === "block" ? 310 : 250, vhosts, match: { country_not_in: cc, path_any: paths }, action: { type: act }, text: `${act} the admin paths for visitors outside ${shortList(cc, 8)}` }),
       ];
     },
   },
@@ -1208,8 +1210,8 @@ export const RECIPES = Object.freeze([
       // against the 32-vhost limit, so their union must never travel in one rule.
       if (ips.length) out.push(rule(k, { enabled: true, priority: 15, vhosts: svc, match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass (service subdomains)" }));
       if (ips.length && web.length) out.push(rule(k, { enabled: true, priority: 16, vhosts: web, match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass (browser panel subdomains)" }));
-      if (web.length) out.push(rule(k, { enabled: false, priority: 252, vhosts: web, match: { country_not_in: cc }, action: { type: "challenge" }, text: `challenge the browser panel subdomains outside ${cc.join(", ")} — ENABLE after testing` }));
-      out.push(rule(k, { enabled: false, priority: 312, vhosts: svc, match: { country_not_in: cc }, action: { type: "block" }, text: `block DAV / autodiscover subdomains outside ${cc.join(", ")} — ENABLE after testing` }));
+      if (web.length) out.push(rule(k, { enabled: false, priority: 252, vhosts: web, match: { country_not_in: cc }, action: { type: "challenge" }, text: `challenge the browser panel subdomains outside ${shortList(cc, 8)} — ENABLE after testing` }));
+      out.push(rule(k, { enabled: false, priority: 312, vhosts: svc, match: { country_not_in: cc }, action: { type: "block" }, text: `block DAV / autodiscover subdomains outside ${shortList(cc, 8)} — ENABLE after testing` }));
       return out;
     },
   },
@@ -1249,7 +1251,7 @@ export const RECIPES = Object.freeze([
         vhosts,
         match: outside ? { country_not_in: cc, path_any: paths } : { country_in: cc, path_any: paths },
         action: { type: "challenge" },
-        text: `challenge visitors ${outside ? "outside" : "from"} ${cc.join(", ")}${paths.length ? " on " + shortList(paths) : ""} — ENABLE after testing`,
+        text: `challenge visitors ${outside ? "outside" : "from"} ${shortList(cc, 8)}${paths.length ? " on " + shortList(paths) : ""} — ENABLE after testing`,
       }));
       return out;
     },
@@ -1306,7 +1308,7 @@ export const RECIPES = Object.freeze([
       const k = "lock_dev_sites";
       const out = [];
       if (ips.length) out.push(rule(k, { enabled: true, priority: 15, vhosts, match: { ip_any: ips }, action: { type: "allow" }, text: "office / monitoring ranges always pass" }));
-      out.push(rule(k, { enabled: false, priority: 255, vhosts, match: { country_not_in: cc }, action: { type: "challenge" }, text: `challenge everyone outside ${cc.join(", ")} on the dev site — ENABLE after testing` }));
+      out.push(rule(k, { enabled: false, priority: 255, vhosts, match: { country_not_in: cc }, action: { type: "challenge" }, text: `challenge everyone outside ${shortList(cc, 8)} on the dev site — ENABLE after testing` }));
       return out;
     },
   },
@@ -1375,7 +1377,9 @@ export function validateRecipeVars(rcp, vars) {
     const raw = String(vars?.[v.key] ?? "").trim();
     if (v.required && !raw) errors.push(`${v.label} is required.`);
     if (v.type === "countries") {
-      for (const cc of csvSplit(raw)) if (!/^[A-Za-z]{2}$/.test(cc)) errors.push(`"${cc}" is not a 2-letter country code.`);
+      const ccs = csvSplit(raw);
+      if (ccs.length > LIMITS.countriesPerRule) errors.push(`Too many countries (max ${LIMITS.countriesPerRule}).`);
+      for (const cc of ccs) if (!/^[A-Za-z]{2}$/.test(cc)) errors.push(`"${cc}" is not a 2-letter country code.`);
     }
     if (v.type === "vhosts" && csvSplit(raw).length > LIMITS.vhostsPerRule) errors.push(`Too many vhosts (max ${LIMITS.vhostsPerRule}).`);
     if (v.type === "ips") {

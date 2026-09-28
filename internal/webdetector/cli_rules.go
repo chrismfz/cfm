@@ -303,13 +303,23 @@ func runRulesSimulate(baseURL string, in TrafficRuleEvalInput) error {
 	return nil
 }
 
+// rulesShortList keeps one list line readable when a rule carries a long
+// list (a Europe-wide fence is ~50 country codes): the first max entries,
+// then a count. `cfm webtop rules get <id>` prints the full rule.
+func rulesShortList(xs []string, max int) string {
+	if len(xs) <= max {
+		return strings.Join(xs, ",")
+	}
+	return fmt.Sprintf("%s,+%d more", strings.Join(xs[:max], ","), len(xs)-max)
+}
+
 func rulesMatchSummary(m TrafficRuleMatch) string {
 	parts := []string{}
 	if len(m.CountryIn) > 0 {
-		parts = append(parts, "cc="+strings.Join(m.CountryIn, ","))
+		parts = append(parts, "cc="+rulesShortList(m.CountryIn, 8))
 	}
 	if len(m.CountryNotIn) > 0 {
-		parts = append(parts, "cc!="+strings.Join(m.CountryNotIn, ","))
+		parts = append(parts, "cc!="+rulesShortList(m.CountryNotIn, 8))
 	}
 	if len(m.IPAny) > 0 {
 		parts = append(parts, "ip="+strings.Join(m.IPAny, ","))

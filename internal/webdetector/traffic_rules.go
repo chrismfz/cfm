@@ -32,10 +32,16 @@ const (
 	TrafficActionThrottle    = "throttle"
 )
 
+// maxCountriesPerRule bounds country_in / country_not_in. 64 fits a
+// whole-continent fence ("allow only Europe" is ~50 codes with the microstates
+// and territories) with headroom; matching is a linear scan in
+// ruleMatchFilters, which stays trivial at this size. normalizeMatch is shared,
+// so the cap also applies to Challenge Access entries. rules-model.js
+// LIMITS.countriesPerRule mirrors it (rules-model.test.js reads it from here).
 const (
 	maxRulesGlobal      = 500
 	maxVhostsPerRule    = 32
-	maxCountriesPerRule = 20
+	maxCountriesPerRule = 64
 	maxPatternsPerField = 20
 	maxRuleNoteLen      = 256
 	defaultRulePriority = 1000
@@ -1007,15 +1013,22 @@ func (s *trafficRuleStore) load() {
 		}
 		norm, err := normalizeTrafficRule(*e, false)
 		if err != nil {
-			if unknown && e.ID != "" {
+			if e.ID != "" {
 				// The freeze-verbatim net must also hold when normalize
-				// itself rejects the rule — an unknown ACTION VALUE from a
-				// newer cfm (first case: challenge_v2 on an older binary)
-				// fails normalize, and dropping here would erase the rule
-				// from disk on the next save. Keep the disabled, unsupported
+				// itself rejects the rule, with or without unknown keys: an
+				// unknown ACTION VALUE from a newer cfm (first case:
+				// challenge_v2 on an older binary), or a value past a cap a
+				// newer cfm raised (a 64-country fence read by a build
+				// capped lower). Dropping here would erase the rule from
+				// disk on the next save. Keep the disabled, unsupported
 				// placeholder; evaluation skips disabled rules, Update()
 				// refuses Unsupported ones, saveLocked writes the frozen
 				// original bytes.
+				if !unknown {
+					log.Printf("[webdet][rules] rule %s fails validation in this cfm build (%v); kept on disk verbatim, not enforced, not editable here (upgrade cfm, or delete it)", e.ID, err)
+					e.Enabled = false
+					e.Unsupported = true
+				}
 				if e.CreatedAt.IsZero() {
 					e.CreatedAt = time.Now().UTC()
 				}
