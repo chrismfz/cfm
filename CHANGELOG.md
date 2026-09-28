@@ -25,12 +25,20 @@ back-filled here — see the git/PR history for that period.
   cPanel's own API, SSO and transfer endpoints (`/cpsess<N>/json-api/…`,
   `/cpsess<N>/execute/…`, …) now pass straight to cPanel there. The panel
   ports (2083/2087/2096) already did this, and both now use the same list.
-  cPanel still authenticates every one of those requests.
+  cPanel still authenticates every one of those requests. It only applies on a
+  cPanel node with proxy subdomains on and "allow users to override proxy
+  subdomains" off (`proxysubdomains=1`, `proxysubdomainsoverride=0`). Only
+  there does every `cpanel.*` host really reach cPanel. Everywhere else
+  (DirectAdmin, or cPanel's default override on) nothing changes. UA
+  emergency rules and fingerprint `deny` still apply.
 - **WAF rule 404 (PHP webshell body) no longer fires on method calls.** A PDO
   `$db->exec(…)`, `Foo::system(…)`, `$this->assert(…)` or a `function exec(`
   declaration was scored as the shell builtin, so ordinary PHP classes
-  posted as a body (code editors, snippet plugins) were blocked. A real
-  global `exec(` / `@exec(` / `\exec(` still counts.
+  posted as a body (code editors, snippet plugins) were blocked. Only a
+  `->` / `::` / `function` directly in front of the name is exempt (and only
+  after an operand), so neither a comment nor `$i-->system(` can hide a real
+  call. A global `exec(` / `@exec(` / `\exec(`
+  still counts.
 
 ## 2026.09.28
 

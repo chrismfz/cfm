@@ -108,6 +108,9 @@ local function run(opts)
   }
   _G.ngx = ngx
   install_fakes()
+  -- The api/sso passthrough list lives in cfm_panel_hosts (no inline copy in
+  -- cfm_panel.lua). Load the real module; its absence fails closed.
+  package.loaded["cfm_panel_hosts"] = dofile((panel_path:gsub("cfm_panel%.lua$", "cfm_panel_hosts.lua")))
   assert(loadfile(panel_path))()
   package.preload["cfm_decision"] = nil
   package.loaded["cfm_waf"] = nil

@@ -823,20 +823,47 @@ got a `challenge_v2` 303, which an XHR cannot solve.
 **Root causes and fixes (in code):**
 
 1. *Detector:* `has_php_callable` matched `$this->db->exec(` (PDO) as the
-   global `exec()`. `<?php` (+2) plus exec (+3) reached the threshold of 5. A method or
-   static call (`->name(`, `?->name(`, `::name(`) or a declaration
-   (`function name(`) is no longer counted. The global builtin, `@exec(` and
-   `\exec(` still are (severity test 67b).
+   global `exec()`. `<?php` (+2) plus exec (+3) reached the threshold of 5. A
+   call with `->` / `?->` / `::` directly in front of the name, with an
+   operand (identifier char, `)`, `]`, `}`) directly in front of that, is no
+   longer counted. Neither is a declaration (`function name(` / `function
+   &name(` on one line). The exemption is **adjacency only**. Two reviews of
+   the first versions showed why. Allowing whitespace let a comment steer it:
+   `<?php //->\nsystem($_GET[c]);` scored 4 and passed. Without the operand
+   check, `$i-->system(` (PHP: `($i--) > system(…)`) passed. So
+   `$db -> exec(` and a declaration split across lines still count (fail
+   closed). The
+   global builtin, `@exec(` and `\exec(` still count. The reason tag
+   (`RAW_SYSTEM_GET`, …) names only a call that scored (severity test 67b).
 2. *Edge parity:* the panel listeners (2083/2087/2096) always passed cPanel's
    authenticated API / SSO / transfer endpoints straight through
    (`cfm_panel.lua` step 1). The proxy subdomain on 80/443 ran the full WAF and
-   the vhost challenge on the same request. `cfm.lua` Step 0a2 now passes
-   them through for `cpanel.` / `whm.` / `webmail.` hosts, using the same matcher
-   (`cfm_panel_hosts.is_panel_api_or_sso`, the single source for both edges).
-   This skips the WAF and the challenge only: cpsrvd still authenticates every
-   one of these requests, and kernel IP blocks still apply. It trusts the Host
-   prefix: a docroot vhost named `cpanel.*`/`whm.*`/`webmail.*` would lose WAF
-   inspection on those API-shaped paths.
+   the vhost challenge on the same request. `cfm.lua` Step 0d now passes them
+   through with the same matcher (`cfm_panel_hosts.is_panel_api_or_sso`, the
+   single source for both edges, no inline copy), under three gates:
+   - the host is `cpanel.` / `whm.` / `webmail.` (not `mail.` / `webdisk.`);
+   - the node is cPanel with `proxysubdomains=1` **and**
+     `proxysubdomainsoverride=0` in `/var/cpanel/cpanel.config`
+     (`cfm_panel_hosts.proxy_hosts_reach_panel`, re-read every 60 s per
+     worker; unreadable or absent = off). Only then does every such Host reach
+     cpsrvd: cPanel's catch-all proxy vhost (`ServerAlias cpanel.* whm.*
+     webmail.* …`) takes them, and no tenant can own a real `webmail.x`
+     subdomain (the override, cPanel default 1, allows exactly that).
+     Elsewhere (DirectAdmin, proxy subdomains off, override on) a
+     `Host: cpanel.x` can reach a docroot or the default vhost, and the skip
+     would be a WAF bypass. On such nodes Step 0d stays off; fix 1 still
+     covers the PDO-save false positive there;
+   - the path matches the list.
+
+   It runs after Step 0b (UA emergency) and Step 0c (fingerprint `deny`), so
+   those operator-armed denies still apply. It also runs after the POST
+   resume, so a resumed save is replayed with its body. The panel ports'
+   copy of the list is gone: `cfm_panel.lua` uses the module, and without it
+   passes nothing through (fail closed; ERR logged at most once a minute). It skips the WAF, the challenge and
+   the Step 3 per-IP L7 decision, as the panel ports do. cpsrvd still
+   authenticates every request, and kernel (nft) blocks still apply.
+   Residual: a domain whose own vhost has a wildcard `*.example.com` alias
+   ahead of the proxy vhost would send `cpanel.example.com` to its docroot.
 
 ### Structural anti-patterns to check during rule review
 
@@ -1402,10 +1429,11 @@ Kill switch: `CFM_WAF_STATS_ENABLE=0` disables hit-rate counters + flushing.
   └─ everything else                                               ↓
 [ access_by_lua: cfm.lua ]
   ├─ Step 0a1 /.well-known/            → origin (no WAF, no challenge)
-  ├─ Step 0a2 cpanel./whm./webmail. + cPanel API/SSO path
+  ├─ Step 0b/0c UA emergency, fingerprint deny
+  ├─ POST resume
+  ├─ Step 0d  cpanel./whm./webmail. + proxy subdomains reach cpsrvd + cPanel API/SSO path
   │            (cfm_panel_hosts.is_panel_api_or_sso, same as the panel ports)
   │                                    → origin (no WAF, no challenge)
-  ├─ POST resume handling
   ├─ Step 1   validate cfm_clearance → clearance_allow (no return yet)
   ├─ Step 2   run WAF (always, regardless of clearance)
   │            ├─ block            → exit 403

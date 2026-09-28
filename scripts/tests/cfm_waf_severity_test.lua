@@ -1344,11 +1344,14 @@ do
   check(body404("file_charset=utf-8&page=" .. urlenc('<?php $this->db->exec("UPDATE t SET x=1");')) == false,
         "67b: url-encoded editor save with ->exec( is not RAW_EXEC")
   check(body404('<?php $db?->exec("x");') == false, "67b: ?->exec( is not RAW_EXEC")
-  check(body404('<?php $db -> exec ("x");') == false, "67b: spaced -> exec ( is not RAW_EXEC")
   check(body404('<?php Runner::system("x");') == false, "67b: ::system( is not RAW_SYSTEM")
   check(body404('<?php $this->assert(true);') == false, "67b: ->assert( is not RAW_ASSERT")
   check(body404('<?php class P { public function exec($q) { return 1; } }') == false,
         "67b: function exec( declaration is not RAW_EXEC")
+  check(body404('<?php class P { public function &exec($q) { return $q; } }') == false,
+        "67b: function &exec( declaration is not RAW_EXEC")
+  check(body404('<?php $r = $a[0]->exec("x"); $s = f()->system("y"); ${"o"}->exec("z");') == false,
+        "67b: ]-> )-> }-> are method calls")
 
   -- Positives: the global builtin still fires, even next to a method call.
   local hit, reason = body404('<?php exec("id");')
@@ -1363,6 +1366,30 @@ do
   hit, reason = body404('<?php $pdo->exec("x"); system($_GET["c"]);')
   check(hit == true and reason == "WAF_PHP_WEBSHELL_BODY:RAW_SYSTEM_GET",
         "67b: ->exec( plus global system($_GET) still fires")
+
+  -- The exemption is adjacency only: a comment ending in `->` / `::` /
+  -- `function` right before a REAL call must not hide it (review finding).
+  for _, b in ipairs({
+    "<?php //->\nsystem($_GET['c']);",
+    "<?php #::\nexec($_POST['c']);",
+    "<?php //function\nsystem($_GET['c']);",
+    "<?php // $x->\nsystem($_GET['c']);",
+    "<?php /* -> */ system($_GET['c']);",
+    "<?php $db -> exec ($_GET['c']);",      -- spaced: fails closed
+    "<?php $i=0; $i-->system($_GET['c']);", -- `($i--) > system(`: no operand before ->
+    "<?php $i-->exec($_POST['c']);",
+    "<?php $i?-->system($_GET['c']);",
+    "<?php //->system(1);\n system($_GET['c']);",  -- a later real call still scores
+  }) do
+    check(body404(b) == true, "67b: adjacency-only exemption still fires on " .. b:gsub("\n", "\\n"))
+  end
+  check(body404("file_charset=utf-8&page=" .. urlenc("<?php //->\nsystem($_GET['c']);")) == true,
+        "67b: url-encoded comment steer still fires")
+
+  -- The tag names the call that scored, not a method call with the same name.
+  hit, reason = body404('<?php $svc->system($_GET["x"]); exec($c);')
+  check(hit == true and reason == "WAF_PHP_WEBSHELL_BODY:RAW_EXEC",
+        "67b: ->system( + $_GET does not tag RAW_SYSTEM_GET when only exec( scored")
 end
 
 -- ── Test for regression: rule 402 upload_content path doesn't crash ────────

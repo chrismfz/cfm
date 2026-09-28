@@ -475,22 +475,47 @@ function _M.detect_php_webshell_body(body, headers)
   -- PHPUnit ->assert() are everyday code, and before this check saving an
   -- ordinary PDO class through the cPanel File Manager editor scored
   -- <?php(+2) + exec(+3) = 5 and was blocked as RAW_EXEC (orion, 2026-09-28).
-  -- The `@` suppressor (`@exec(`) is still a global call. The look-behind is
-  -- a bounded 64-byte window (never a copy of the whole prefix: a body of
-  -- thousands of `->exec(` would otherwise cost O(n^2)); a longer gap than
-  -- that reads as a global call, i.e. fails closed.
+  --
+  -- The exemption is ADJACENCY only:
+  --   * `->` / `?->` / `::` immediately before the name, AND an operand right
+  --     before that operator (identifier char, `)`, `]`, `}`). Without the
+  --     operand check `$i-->system(` (PHP: `($i--) > system(...)`) looked
+  --     like a method call and hid a real one;
+  --   * `function` (optionally `&`) + spaces/tabs on the SAME line.
+  -- Tolerating whitespace or a newline would let a comment steer it:
+  -- `//->\nsystem(` or `//function\nsystem(` would skip a real call. So
+  -- `$db -> exec(` and a declaration split across lines count as global calls
+  -- (fail closed). `@exec(` / `\exec(` stay global calls.
+  -- The look-behind is a bounded 24-byte window, the pattern is built once
+  -- per name, and the answer is memoized for the tag phase below.
+  local callable_memo = {}
   local function has_php_callable(name)
-    local init = 1
+    local memo = callable_memo[name]
+    if memo ~= nil then return memo end
+    local pat = "%f[%a_]" .. name .. "%s*%("
+    local found, init = false, 1
     while true do
-      local i, j = s:find("%f[%a_]" .. name .. "%s*%(", init)
-      if not i then return false end
-      local before = s:sub(i > 64 and i - 64 or 1, i - 1):match("(%S*)%s*$") or ""
-      local tail2  = before:sub(-2)
-      if tail2 ~= "->" and tail2 ~= "::" and not before:find("%f[%a_]function$") then
-        return true
+      local i, j = s:find(pat, init)
+      if not i then break end
+      local pre = s:sub(i > 24 and i - 24 or 1, i - 1)
+      local exempt = false
+      local op = pre:sub(-2)
+      if op == "->" or op == "::" then
+        local k = #pre - 2
+        if op == "->" and pre:sub(k, k) == "?" then k = k - 1 end
+        exempt = k >= 1 and pre:sub(k, k):find("^[%w_%)%]}]") ~= nil
+      else
+        exempt = pre:find("%f[%a_]function[ \t]+$") ~= nil
+              or pre:find("%f[%a_]function[ \t]*&[ \t]*$") ~= nil
+      end
+      if not exempt then
+        found = true
+        break
       end
       init = j + 1
     end
+    callable_memo[name] = found
+    return found
   end
 
   -- Dynamic include / require — matches only when the include's argument
@@ -562,9 +587,13 @@ function _M.detect_php_webshell_body(body, headers)
   -- want to know *which* shell hit, not just that something did.
   if ws_tag then return "RAW_WS_" .. ws_tag end
 
-  if s:find("<?php.-@?eval%s*%(") and s:find("%$_post") then return "RAW_EVAL_POST" end
-  if s:find("<?php.-@?system%s*%(") and s:find("%$_get") then return "RAW_SYSTEM_GET" end
-  if s:find("<?php.-@?passthru%s*%(") and s:find("%$_request") then return "RAW_PASSTHRU_REQUEST" end
+  -- The tags name the call that scored: has_php_callable, never a raw pattern
+  -- that would also match a method call (`$svc->system(` + `$_GET` must not
+  -- read RAW_SYSTEM_GET when only a global exec( scored).
+  local php_open = has(s, "<?php")
+  if php_open and has_php_callable("eval")     and has(s, "$_post")    then return "RAW_EVAL_POST" end
+  if php_open and has_php_callable("system")   and has(s, "$_get")     then return "RAW_SYSTEM_GET" end
+  if php_open and has_php_callable("passthru") and has(s, "$_request") then return "RAW_PASSTHRU_REQUEST" end
 
   if has_php_callable("eval")       then return "RAW_EVAL" end
   if has_php_callable("assert")     then return "RAW_ASSERT" end

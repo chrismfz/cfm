@@ -981,49 +981,33 @@ local function is_exempt_path(uri)
 end
 
 -- Canonical panel-subdomain prefixes + the API/SSO passthrough matcher, shared
--- with cfm.lua (single source, no drift). nil on upgrade lag → fall back to
--- the inline copies below.
+-- with cfm.lua (single source, no drift). nil on upgrade lag → has_panel_prefix
+-- falls back to its old inline list below.
 local ok_panel_hosts, panel_hosts_mod = pcall(require, "cfm_panel_hosts")
+local panel_hosts_err = (not ok_panel_hosts) and tostring(panel_hosts_mod) or "no is_panel_api_or_sso"
 if not ok_panel_hosts then panel_hosts_mod = nil end
 
--- Upgrade-lag fallback ONLY: cfm_panel_hosts.is_panel_api_or_sso is the
--- source of truth (cfm.lua Step 0a2 uses it for cpanel./whm./webmail.:443).
--- cfm_panel_hosts_test.lua pins this copy to the module over a URI corpus, so
--- an edit to one without the other fails `make test-lua`.
--- BEGIN legacy_is_panel_api_or_sso
-local function legacy_is_panel_api_or_sso(uri)
-    return starts_with(uri, "/json-api/")
-        or uri == "/json-api/cpanel"
-        or starts_with(uri, "/json-api/cpanel/")
-        or starts_with(uri, "/execute/")
-        or starts_with(uri, "/xml-api/")
-        or starts_with(uri, "/cpanelwebcall")
-        or starts_with(uri, "/openid_connect/")
-        or uri:match("^/cpsess%d+/json%-api/")
-        or uri:match("^/cpsess%d+/execute/")
-        or uri:match("^/cpsess%d+/xml%-api/")
-        or uri:match("^/cpsess%d+/login/")
-        or uri:match("^/cpsess%d+/websocket/")
-        or uri == "/session"
-        or starts_with(uri, "/session/")
-        or uri == "/xfercpanel"
-        or uri == "/xfercpsess"
-        or uri == "/api"
-        or starts_with(uri, "/api/")
-        -- WHM live-transfer file / rsync streams. cPanel's transfer tool
-        -- pulls account archives and tunnels rsync over these endpoints
-        -- on port 2087; routing them through the challenge layer breaks
-        -- the binary stream with a 300s upstream timeout, which the
-        -- receiving side reports as `failed to read up to 64 KB from a
-        -- file handle ... Is a directory`.
-        or starts_with(uri, "/acctxfer")
-        or starts_with(uri, "/cgi/transfer")
-        or starts_with(uri, "/cgi/live_tail_log")
+-- Step 1 passthrough matcher: cfm_panel_hosts.is_panel_api_or_sso, the list
+-- cfm.lua Step 0d also applies to cpanel./whm./webmail. on 80/443. There is
+-- deliberately no inline copy (CLAUDE.md §5). The module ships in the same
+-- package-owned /var/lib/cfm/lua set as this file. If it cannot load, no path
+-- is passed through, the panel WAF and challenge still run (fail closed), and
+-- the load error is logged.
+local is_panel_api_or_sso
+if panel_hosts_mod and panel_hosts_mod.is_panel_api_or_sso then
+    is_panel_api_or_sso = panel_hosts_mod.is_panel_api_or_sso
+else
+    is_panel_api_or_sso = function(_)
+        -- At most one line per minute per node. This chunk re-runs per request
+        -- (access_by_lua_file), so a Lua-local flag would not hold.
+        local sh = ngx.shared.cfm_decisions
+        if not sh or sh:add("panel_hosts_missing_logged", 1, 60) then
+            ngx.log(ngx.ERR, "[cfm_panel] cfm_panel_hosts unavailable (", panel_hosts_err,
+                "); cPanel API/SSO passthrough disabled")
+        end
+        return false
+    end
 end
--- END legacy_is_panel_api_or_sso
-
-local is_panel_api_or_sso = (panel_hosts_mod and panel_hosts_mod.is_panel_api_or_sso)
-    or legacy_is_panel_api_or_sso
 
 local function is_human_entry_uri(uri)
     return uri == "/"
