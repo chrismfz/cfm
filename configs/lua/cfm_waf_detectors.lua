@@ -477,10 +477,13 @@ function _M.detect_php_webshell_body(body, headers)
   -- <?php(+2) + exec(+3) = 5 and was blocked as RAW_EXEC (orion, 2026-09-28).
   --
   -- The exemption is ADJACENCY only:
-  --   * `->` / `?->` / `::` immediately before the name, AND an operand right
-  --     before that operator (identifier char, `)`, `]`, `}`). Without the
-  --     operand check `$i-->system(` (PHP: `($i--) > system(...)`) looked
-  --     like a method call and hid a real one;
+  --   * `->` / `?->` immediately before the name, unless the `-` belongs to
+  --     `--`: `$i-->system(` is PHP's `($i--) > system(...)`, a real call.
+  --     Whitespace BEFORE the arrow is fine (the PSR-12 fluent chain
+  --     `$this->db\n    ->exec(`): an arrow glued to the name is member access
+  --     whatever precedes it;
+  --   * `::` immediately before the name with an operand (identifier char,
+  --     `)`, `]`, `}`) immediately before that;
   --   * `function` (optionally `&`) + spaces/tabs on the SAME line.
   -- Tolerating whitespace or a newline would let a comment steer it:
   -- `//->\nsystem(` or `//function\nsystem(` would skip a real call. So
@@ -500,9 +503,12 @@ function _M.detect_php_webshell_body(body, headers)
       local pre = s:sub(i > 24 and i - 24 or 1, i - 1)
       local exempt = false
       local op = pre:sub(-2)
-      if op == "->" or op == "::" then
+      if op == "->" then
         local k = #pre - 2
-        if op == "->" and pre:sub(k, k) == "?" then k = k - 1 end
+        if pre:sub(k, k) == "?" then k = k - 1 end
+        exempt = pre:sub(k, k) ~= "-"
+      elseif op == "::" then
+        local k = #pre - 2
         exempt = k >= 1 and pre:sub(k, k):find("^[%w_%)%]}]") ~= nil
       else
         exempt = pre:find("%f[%a_]function[ \t]+$") ~= nil

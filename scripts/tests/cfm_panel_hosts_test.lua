@@ -33,7 +33,9 @@ for _, h in ipairs({ "cpanel.example.gr", "whm.example.gr", "webmail.example.gr"
 end
 for _, h in ipairs({ "mail.example.gr", "webdisk.example.gr", "example.gr",
                      "mycpanel.example.gr", "www.cpanel.example.gr", "cpanel",
-                     "", "cpanelx.example.gr" }) do
+                     "", "cpanelx.example.gr",
+                     -- two labels: only a tenant's own domain is named like that
+                     "webmail.gr", "cpanel.gr", "cpanel.gr.", "cpanel..gr", "cpanel." }) do
   check(ph.is_proxy_panel_host(h) == false, "not a proxy host: " .. h)
 end
 check(ph.is_proxy_panel_host(nil) == false, "nil host is not a proxy host")
@@ -104,6 +106,53 @@ do
   ph._reset_proxy_cfg()
 end
 
+-- ── shared dict: one worker reads, the others read the dict ──────────────────
+do
+  local store = {}
+  local sh = {
+    get = function(_, k) return store[k] end,
+    set = function(_, k, v) store[k] = v; return true end,
+  }
+  local tmp = os.tmpname()
+  local f = assert(io.open(tmp, "w")); f:write("proxysubdomains=1\nproxysubdomainsoverride=0\n"); f:close()
+  ph.CPANEL_CONFIG = tmp
+  ph._reset_proxy_cfg()
+  check(ph.proxy_hosts_reach_panel(1000, sh) == true, "shared dict: first read from the file")
+  check(store["cfm_cpanel_proxy_reach"] == 1, "shared dict: answer published for the other workers")
+  -- Another worker (fresh module cache) with the file gone reads the dict.
+  os.remove(tmp)
+  ph._reset_proxy_cfg()
+  check(ph.proxy_hosts_reach_panel(1000, sh) == true, "shared dict: another worker reads the dict, not the file")
+  store = {}
+  ph._reset_proxy_cfg()
+  check(ph.proxy_hosts_reach_panel(1000, sh) == false, "shared dict expired + file gone → off")
+  check(store["cfm_cpanel_proxy_reach"] == 0, "shared dict: off is published too")
+  ph.CPANEL_CONFIG = "/var/cpanel/cpanel.config"
+  ph._reset_proxy_cfg()
+end
+
+-- ── Step 0d host + path gates: the vectors the Go engine also runs ────────────
+do
+  local n = 0
+  for line in io.lines("scripts/tests/fixtures/panel_session_api.txt") do
+    if line ~= "" and line:sub(1, 1) ~= "#" then
+      local host, path, want = line:match("^([^\t]*)\t([^\t]*)\t([^\t]*)$")
+      check(host ~= nil, "malformed vector: " .. line)
+      if host then
+        local got = ph.is_proxy_panel_host(host) and ph.is_session_api(path)
+        check(got == (want == "yes"), string.format("vector %s %s → %s", host, path, want))
+        n = n + 1
+      end
+    end
+  end
+  check(n >= 20, "shared vectors read (" .. n .. ")")
+  -- is_session_api is a subset of the panel ports' list.
+  for _, k in ipairs(ph.SESSION_KINDS) do
+    local u = "/cpsess1/" .. k .. "/x"
+    check(ph.is_session_api(u) and ph.is_panel_api_or_sso(u), "session kind is on the ports' list: " .. k)
+  end
+end
+
 -- ── cfm_panel.lua uses the module, with no inline copy ───────────────────────
 do
   local src = read("configs/lua/cfm_panel.lua")
@@ -132,14 +181,24 @@ do
     check(clr and s0d < clr, "Step 0d runs before clearance validation")
     check(waf and s0d < waf, "Step 0d runs before the inline WAF")
     local stop = src:find("\nend\n", s0d, true) or #src
-    local body = src:sub(s0d, stop)
+    local body = src:sub(s0d, stop + 4)
     for _, gate in ipairs({
       "panel_hosts.is_proxy_panel_host(host)",
-      "panel_hosts.is_panel_api_or_sso(uri)",
-      "panel_hosts.proxy_hosts_reach_panel()",
+      "panel_hosts.is_session_api(uri)",
+      "panel_hosts.proxy_hosts_reach_panel(nil, SH)",
     }) do
       check(body:find(gate, 1, true) ~= nil, "Step 0d requires " .. gate)
     end
+    -- The web edge passes the /cpsess<N>/ subset only, never the ports' full list.
+    check(body:find("is_panel_api_or_sso(uri)", 1, true) == nil,
+          "Step 0d must not pass the ports' full api/sso list on the web edge")
+    -- The action: origin upstream, origin pass, and an immediate return.
+    local cond_end = body:find(" then\n", 1, true)
+    local action = cond_end and body:sub(cond_end) or ""
+    check(action:find('ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)\n  return\nend', 1, true) ~= nil,
+          "Step 0d routes to the origin and returns at once")
+    check(action:find("cfm_challenge", 1, true) == nil and action:find("cfm_block", 1, true) == nil,
+          "Step 0d never routes to the challenge or block upstream")
   end
 end
 

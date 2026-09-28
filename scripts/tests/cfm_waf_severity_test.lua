@@ -1352,6 +1352,11 @@ do
         "67b: function &exec( declaration is not RAW_EXEC")
   check(body404('<?php $r = $a[0]->exec("x"); $s = f()->system("y"); ${"o"}->exec("z");') == false,
         "67b: ]-> )-> }-> are method calls")
+  -- PSR-12 fluent chain: whitespace / a newline BEFORE the arrow.
+  check(body404("<?php\nclass A { function run() { return $this->db\n    ->exec($sql); } }") == false,
+        "67b: multi-line fluent chain ->exec( is not RAW_EXEC")
+  check(body404("<?php $pdo\n  ?->exec('x'); $q = $b ->exec('y');") == false,
+        "67b: spaced / newline before -> and ?-> are method calls")
 
   -- Positives: the global builtin still fires, even next to a method call.
   local hit, reason = body404('<?php exec("id");')

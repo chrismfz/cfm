@@ -1317,12 +1317,19 @@ uri    = ngx.var.uri          or uri
 -- save (POST /cpsess<N>/json-api/cpanel, a PHP source file as the body) and
 -- its upload (/cpsess<N>/execute/Fileman/upload_files) got 403 from rules
 -- 404/402/401 and a challenge 303, which the editor reports as "Your login
--- session has expired". This passes them through from the same matcher
--- (cfm_panel_hosts.is_panel_api_or_sso), so both routes agree.
+-- session has expired". This passes them through with the panel ports' own
+-- matcher module (cfm_panel_hosts).
 --
 -- Three gates, all required:
---   * is_proxy_panel_host: cpanel./whm./webmail. only (not mail./webdisk.);
---   * is_panel_api_or_sso(uri);
+--   * is_proxy_panel_host: cpanel./whm./webmail. only (not mail./webdisk.),
+--     on a name of at least three labels (a two-label `webmail.gr` can only
+--     be a tenant's own domain);
+--   * is_session_api(uri): only the /cpsess<N>/{json-api,execute,xml-api,
+--     login,websocket}/ subset of the ports' is_panel_api_or_sso list, which
+--     is all of cPanel's own UI traffic. The rest of that list (/api/,
+--     /session, /execute/, /json-api/ …) are ordinary app route names: if a
+--     Host ever did not really reach cpsrvd, they would hand a docroot app's
+--     routes to it without the WAF. Token API clients use :2083/:2087;
 --   * proxy_hosts_reach_panel: cPanel with proxysubdomains=1 AND
 --     proxysubdomainsoverride=0. Only then does EVERY such Host reach cpsrvd
 --     (catch-all proxy vhost, and no tenant can own a real `webmail.x`
@@ -1335,15 +1342,16 @@ uri    = ngx.var.uri          or uri
 -- (step 2f) — an XHR cannot solve a challenge. AFTER the POST resume, so a
 -- resumed save on an API path is replayed with its body, not passed through
 -- as the bodyless GET carrier.
--- Skipped for these paths: WAF, clearance, the Step 3 per-IP L7 decision (as
--- on the panel ports). Kernel (nft) blocks still apply.
+-- Skipped for these paths, as on the panel ports: the WAF, clearance, and
+-- Step 3, i.e. traffic rules (block/throttle/challenge) and the daemon's
+-- per-IP L7 decision. Kernel (nft) blocks, including autoblock, still apply.
 -- Residual: a domain whose own vhost carries a wildcard alias (*.example.com)
 -- ahead of cPanel's proxy vhost would send cpanel.example.com to its docroot.
 -- The module missing (upgrade lag) → no passthrough (the old behaviour).
-if panel_hosts and panel_hosts.is_panel_api_or_sso and panel_hosts.is_proxy_panel_host
+if panel_hosts and panel_hosts.is_session_api and panel_hosts.is_proxy_panel_host
    and panel_hosts.proxy_hosts_reach_panel
-   and panel_hosts.is_proxy_panel_host(host) and panel_hosts.is_panel_api_or_sso(uri)
-   and panel_hosts.proxy_hosts_reach_panel() then
+   and panel_hosts.is_proxy_panel_host(host) and panel_hosts.is_session_api(uri)
+   and panel_hosts.proxy_hosts_reach_panel(nil, SH) then
   ngx.header["X-CFM-Bypass"] = "panel-api"
   log_route(ngx.INFO, "bypass=panel-api host=" .. host .. " uri=" .. uri)
   ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)

@@ -823,45 +823,61 @@ got a `challenge_v2` 303, which an XHR cannot solve.
 **Root causes and fixes (in code):**
 
 1. *Detector:* `has_php_callable` matched `$this->db->exec(` (PDO) as the
-   global `exec()`. `<?php` (+2) plus exec (+3) reached the threshold of 5. A
-   call with `->` / `?->` / `::` directly in front of the name, with an
-   operand (identifier char, `)`, `]`, `}`) directly in front of that, is no
-   longer counted. Neither is a declaration (`function name(` / `function
-   &name(` on one line). The exemption is **adjacency only**. Two reviews of
-   the first versions showed why. Allowing whitespace let a comment steer it:
-   `<?php //->\nsystem($_GET[c]);` scored 4 and passed. Without the operand
-   check, `$i-->system(` (PHP: `($i--) > system(…)`) passed. So
-   `$db -> exec(` and a declaration split across lines still count (fail
-   closed). The
-   global builtin, `@exec(` and `\exec(` still count. The reason tag
+   global `exec()`. `<?php` (+2) plus exec (+3) reached the threshold of 5.
+   These are no longer counted:
+   - `->name(` / `?->name(` with the arrow glued to the name, and whitespace
+     or a newline allowed before the arrow (the PSR-12 fluent chain
+     `$this->db\n    ->exec(`), unless the `-` belongs to `--`;
+   - `::name(` with an operand (identifier char, `)`, `]`, `}`) directly
+     before;
+   - a declaration `function name(` / `function &name(` on one line.
+
+   Three review passes shaped this. A whitespace-tolerant first version let a
+   comment steer it: `<?php //->\nsystem($_GET[c]);` scored 4 and passed. The
+   next version let `$i-->system(` through (PHP: `($i--) > system(…)`). So the
+   arrow must touch the name, and `-->` counts. `$db -> exec(` (space after
+   the arrow) and a declaration split across lines still count (fail closed).
+   The global builtin, `@exec(` and `\exec(` still count, and the reason tag
    (`RAW_SYSTEM_GET`, …) names only a call that scored (severity test 67b).
 2. *Edge parity:* the panel listeners (2083/2087/2096) always passed cPanel's
    authenticated API / SSO / transfer endpoints straight through
-   (`cfm_panel.lua` step 1). The proxy subdomain on 80/443 ran the full WAF and
-   the vhost challenge on the same request. `cfm.lua` Step 0d now passes them
-   through with the same matcher (`cfm_panel_hosts.is_panel_api_or_sso`, the
-   single source for both edges, no inline copy), under three gates:
-   - the host is `cpanel.` / `whm.` / `webmail.` (not `mail.` / `webdisk.`);
-   - the node is cPanel with `proxysubdomains=1` **and**
+   (`cfm_panel.lua` step 1, `cfm_panel_hosts.is_panel_api_or_sso`, now the
+   single copy of that list). The proxy subdomain on 80/443 ran the full WAF
+   and the vhost challenge on the same request. `cfm.lua` Step 0d now passes
+   them straight to origin, under three gates:
+   - **host:** `cpanel.` / `whm.` / `webmail.` (not `mail.` / `webdisk.`), on
+     a name of at least three labels. A two-label `webmail.gr` can only be a
+     tenant's own domain, and that vhost comes before cPanel's proxy vhost.
+   - **path:** only the `/cpsess<N>/{json-api,execute,xml-api,login,websocket}/`
+     subset of the ports' list (`is_session_api`). That subset is all of
+     cPanel's own UI traffic, and `/cpsess<digits>/` is cPanel's alone. The rest
+     of the list (`/api/`, `/session`, `/execute/`, `/json-api/`) are ordinary
+     app route names. Token API clients use `:2083`/`:2087`, where the full
+     list still applies.
+   - **node:** cPanel with `proxysubdomains=1` **and**
      `proxysubdomainsoverride=0` in `/var/cpanel/cpanel.config`
-     (`cfm_panel_hosts.proxy_hosts_reach_panel`, re-read every 60 s per
-     worker; unreadable or absent = off). Only then does every such Host reach
-     cpsrvd: cPanel's catch-all proxy vhost (`ServerAlias cpanel.* whm.*
-     webmail.* …`) takes them, and no tenant can own a real `webmail.x`
-     subdomain (the override, cPanel default 1, allows exactly that).
-     Elsewhere (DirectAdmin, proxy subdomains off, override on) a
-     `Host: cpanel.x` can reach a docroot or the default vhost, and the skip
-     would be a WAF bypass. On such nodes Step 0d stays off; fix 1 still
-     covers the PDO-save false positive there;
-   - the path matches the list.
+     (`proxy_hosts_reach_panel`; one worker reads it per 60 s into the
+     `cfm_decisions` dict; unreadable or absent = off). Only then does every
+     such Host reach cpsrvd: cPanel's catch-all proxy vhost (`ServerAlias
+     cpanel.* whm.* webmail.* …`, bound on every IP) takes it, and no tenant
+     can own a real `webmail.x` subdomain. The override, cPanel default 1,
+     allows exactly that. Elsewhere (DirectAdmin, proxy subdomains off,
+     override on) Step 0d stays off. Fix 1 still covers the PDO save there.
 
    It runs after Step 0b (UA emergency) and Step 0c (fingerprint `deny`), so
    those operator-armed denies still apply. It also runs after the POST
-   resume, so a resumed save is replayed with its body. The panel ports'
-   copy of the list is gone: `cfm_panel.lua` uses the module, and without it
-   passes nothing through (fail closed; ERR logged at most once a minute). It skips the WAF, the challenge and
-   the Step 3 per-IP L7 decision, as the panel ports do. cpsrvd still
-   authenticates every request, and kernel (nft) blocks still apply.
+   resume, so a resumed save is replayed with its body. Like the panel ports,
+   it **skips the WAF, the challenge and Step 3**, so traffic rules
+   (block/throttle/challenge) and the daemon's per-IP L7 decision do not
+   apply to these paths on the web edge either. cpsrvd still authenticates
+   every request, and kernel (nft) blocks, autoblock included, still apply.
+   The decision engine mirrors the host+path gates
+   (`isPanelSessionAPIChallengeExempt` in `engine.go` ingest; shared vectors
+   in `scripts/tests/fixtures/panel_session_api.txt`), so File Manager
+   traffic does not score its user's IP as a scanner.
+   `cfm_panel.lua` without the module passes nothing through (fail closed; ERR
+   at most once a minute). A worker holding an older copy re-loads the one
+   on disk.
    Residual: a domain whose own vhost has a wildcard `*.example.com` alias
    ahead of the proxy vhost would send `cpanel.example.com` to its docroot.
 
@@ -1431,8 +1447,8 @@ Kill switch: `CFM_WAF_STATS_ENABLE=0` disables hit-rate counters + flushing.
   ├─ Step 0a1 /.well-known/            → origin (no WAF, no challenge)
   ├─ Step 0b/0c UA emergency, fingerprint deny
   ├─ POST resume
-  ├─ Step 0d  cpanel./whm./webmail. + proxy subdomains reach cpsrvd + cPanel API/SSO path
-  │            (cfm_panel_hosts.is_panel_api_or_sso, same as the panel ports)
+  ├─ Step 0d  cpanel./whm./webmail. + proxy subdomains reach cpsrvd + /cpsess<N>/ API path
+  │            (cfm_panel_hosts.is_session_api, a subset of the panel ports' list)
   │                                    → origin (no WAF, no challenge)
   ├─ Step 1   validate cfm_clearance → clearance_allow (no return yet)
   ├─ Step 2   run WAF (always, regardless of clearance)

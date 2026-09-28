@@ -14,8 +14,9 @@
 -- request path. cfm_cache.lua has no fallback list: without this module it
 -- caches nothing (fail closed).
 --
--- It also owns the cPanel API/SSO passthrough matcher (is_panel_api_or_sso)
--- and its web-edge gates (is_proxy_panel_host, proxy_hosts_reach_panel). Those
+-- It also owns the cPanel API/SSO passthrough matcher (is_panel_api_or_sso,
+-- whose /cpsess<N>/ subset is_session_api is what the web edge passes) and
+-- the web-edge gates (is_proxy_panel_host, proxy_hosts_reach_panel). Those
 -- have NO inline copy anywhere: without this module, cfm_panel.lua passes no
 -- API path through and cfm.lua skips Step 0d. That fails closed: the WAF and
 -- challenge still run.
@@ -51,11 +52,15 @@ _M.PROXY_PREFIXES = { "cpanel", "whm", "webmail" }
 local proxy_set = {}
 for _, p in ipairs(_M.PROXY_PREFIXES) do proxy_set[p] = true end
 
--- is_proxy_panel_host("cpanel.example.com") → true.
+-- is_proxy_panel_host("cpanel.example.com") → true. At least THREE labels:
+-- a proxy subdomain always sits on a domain (cpanel.example.gr), while a
+-- two-label name (`webmail.gr`) can only be a tenant's own domain, and that
+-- vhost comes before cPanel's catch-all proxy vhost in Apache's order.
 function _M.is_proxy_panel_host(host)
   local h = (host or ""):lower()
-  local label = h:match("^([^%.]+)%.")
-  return label ~= nil and proxy_set[label] == true
+  local label, rest = h:match("^([^%.]+)%.(.+)$")
+  if not label or proxy_set[label] ~= true then return false end
+  return rest:find("[^%.]%.[^%.]") ~= nil
 end
 
 -- proxy_hosts_reach_panel() — on this node, does Apache route EVERY
@@ -72,18 +77,14 @@ end
 -- web-edge passthrough would be a WAF bypass into that site, so it stays off.
 -- Fail closed: an unreadable/missing file or an absent key reads as off
 -- (an absent override key is cPanel's default, 1). Re-read at most once per
--- PROXY_CFG_TTL seconds per worker (module state survives requests via
--- package.loaded); the file is 0644 root on cPanel.
+-- PROXY_CFG_TTL seconds, by one worker when a shared dict is passed (module
+-- state survives requests via package.loaded). The file is 0644 root on cPanel.
 _M.CPANEL_CONFIG = "/var/cpanel/cpanel.config"
 _M.PROXY_CFG_TTL = 60
 
 local proxy_cfg = { at = nil, on = false }
 
-function _M.proxy_hosts_reach_panel(now)
-  now = now or ((ngx and ngx.now) and ngx.now()) or os.time()
-  if proxy_cfg.at and now - proxy_cfg.at < _M.PROXY_CFG_TTL then
-    return proxy_cfg.on
-  end
+local function read_proxy_cfg()
   local proxy, override
   local f = io.open(_M.CPANEL_CONFIG, "r")
   if f then
@@ -95,7 +96,25 @@ function _M.proxy_hosts_reach_panel(now)
     end
     f:close()
   end
-  local on = (proxy == "1" and override == "0")
+  return proxy == "1" and override == "0"
+end
+
+-- sh (optional): a shared dict. When given, one worker reads the file per
+-- TTL and the others read the dict, so there is no per-worker blocking read.
+function _M.proxy_hosts_reach_panel(now, sh)
+  now = now or ((ngx and ngx.now) and ngx.now()) or os.time()
+  if proxy_cfg.at and now - proxy_cfg.at < _M.PROXY_CFG_TTL then
+    return proxy_cfg.on
+  end
+  local on
+  if sh then
+    local v = sh:get("cfm_cpanel_proxy_reach")
+    if v ~= nil then on = (v == 1) end
+  end
+  if on == nil then
+    on = read_proxy_cfg()
+    if sh then sh:set("cfm_cpanel_proxy_reach", on and 1 or 0, _M.PROXY_CFG_TTL) end
+  end
   proxy_cfg.at, proxy_cfg.on = now, on
   return on
 end
@@ -105,6 +124,25 @@ function _M._reset_proxy_cfg() proxy_cfg.at, proxy_cfg.on = nil, false end
 
 local function starts_with(s, p)
   return s and p and s:sub(1, #p) == p
+end
+
+-- is_session_api(uri) — the /cpsess<N>/ session-token subset: the API, login
+-- and websocket calls cPanel's own UI makes (File Manager save/upload, …).
+-- It is the ONLY part the web edge passes through (cfm.lua Step 0d). The rest
+-- of is_panel_api_or_sso (/api/, /session, /execute/, /json-api/ …) are
+-- ordinary app route names; a Host that did not really reach cpsrvd would
+-- hand those to a docroot app without the WAF. A `/cpsess<digits>/` path is
+-- cPanel's alone.
+local SESSION_KINDS = { "json-api", "execute", "xml-api", "login", "websocket" }
+_M.SESSION_KINDS = SESSION_KINDS
+
+function _M.is_session_api(uri)
+  local kind = (uri or ""):match("^/cpsess%d+/([%a%-]+)/")
+  if not kind then return false end
+  for _, k in ipairs(SESSION_KINDS) do
+    if kind == k then return true end
+  end
+  return false
 end
 
 -- is_panel_api_or_sso(uri) — cPanel/WHM/webmail API, SSO and transfer
@@ -127,11 +165,7 @@ function _M.is_panel_api_or_sso(uri)
       or starts_with(uri, "/xml-api/")
       or starts_with(uri, "/cpanelwebcall")
       or starts_with(uri, "/openid_connect/")
-      or uri:match("^/cpsess%d+/json%-api/") ~= nil
-      or uri:match("^/cpsess%d+/execute/") ~= nil
-      or uri:match("^/cpsess%d+/xml%-api/") ~= nil
-      or uri:match("^/cpsess%d+/login/") ~= nil
-      or uri:match("^/cpsess%d+/websocket/") ~= nil
+      or _M.is_session_api(uri)
       or uri == "/session"
       or starts_with(uri, "/session/")
       or uri == "/xfercpanel"

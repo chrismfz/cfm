@@ -338,18 +338,20 @@ and easy to regress. Before changing it, read
 - Separately, cPanel **account transfers** (DNAT/rsync `/acctxfer*`,
   WHM live-transfer) need challenge/WAF bypass and generous timeouts —
   several incidents traced to hangs around these endpoints.
-- **One list for cPanel's own API/SSO/transfer endpoints, on both edges:**
-  `cfm_panel_hosts.is_panel_api_or_sso`. The panel listeners (2083/2087/2096)
-  and the proxy subdomains on 443 (`cpanel.`/`whm.`/`webmail.`, `cfm.lua` Step
-  0d) both pass these endpoints through with no challenge and no WAF. Before
-  2026-09-28 only the ports did, so `cpanel.X` 403'd File Manager saves and
-  uploads (docs/waf.md FP case 11). Change the list there, never in a copy.
-  Step 0d trusts the Host prefix only because it also requires
-  `proxysubdomains=1` and `proxysubdomainsoverride=0`
-  (`proxy_hosts_reach_panel`). Together those mean every `cpanel.*` Host
-  reaches cpsrvd: cPanel's catch-all proxy vhost takes it, and no tenant can
-  own a real `webmail.x`. Never drop that gate: without it a spoofed
-  `Host: cpanel.x` bypasses the WAF into a docroot or the default vhost.
+- **One list for cPanel's own API/SSO/transfer endpoints:**
+  `cfm_panel_hosts.is_panel_api_or_sso` (panel listeners 2083/2087/2096). The
+  proxy subdomains on 443 (`cpanel.`/`whm.`/`webmail.`, `cfm.lua` Step 0d) pass
+  only its `/cpsess<N>/` subset (`is_session_api`), because `/api/`,
+  `/session` and the like are ordinary app route names. Before 2026-09-28
+  only the ports passed anything through, so `cpanel.X` 403'd File Manager
+  saves and uploads (docs/waf.md FP case 11). Change the list there, never in
+  a copy. Step 0d trusts the Host prefix only because it also requires
+  `proxysubdomains=1` + `proxysubdomainsoverride=0` (`proxy_hosts_reach_panel`)
+  and a name of at least three labels. Together those mean every such Host
+  reaches cpsrvd. Never drop those gates: without them a spoofed
+  `Host: cpanel.x` bypasses the WAF into a docroot. The Go decision engine
+  mirrors the host+path gates (`isPanelSessionAPIChallengeExempt`), pinned by
+  `scripts/tests/fixtures/panel_session_api.txt`.
 
 ### WAF false positives — never "done"
 The WAF needs continuous tuning against real apps. Recurring offenders:

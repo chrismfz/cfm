@@ -22,22 +22,24 @@ back-filled here — see the git/PR history for that period.
   On the proxy subdomain (`cpanel.` / `whm.` / `webmail.` over 443), the
   editor's Save was blocked by WAF rule 404, and the user saw "Your login
   session has expired". Uploads of `.php` files were blocked by rules 402/401 with a 403.
-  cPanel's own API, SSO and transfer endpoints (`/cpsess<N>/json-api/…`,
-  `/cpsess<N>/execute/…`, …) now pass straight to cPanel there. The panel
-  ports (2083/2087/2096) already did this, and both now use the same list.
-  cPanel still authenticates every one of those requests. It only applies on a
-  cPanel node with proxy subdomains on and "allow users to override proxy
-  subdomains" off (`proxysubdomains=1`, `proxysubdomainsoverride=0`). Only
-  there does every `cpanel.*` host really reach cPanel. Everywhere else
-  (DirectAdmin, or cPanel's default override on) nothing changes. UA
-  emergency rules and fingerprint `deny` still apply.
+  cPanel's own session API calls (`/cpsess<N>/json-api/…`,
+  `/cpsess<N>/execute/…`, …) now pass straight to cPanel there, as the panel
+  ports (2083/2087/2096) already did. cPanel still authenticates every one of
+  them. This only applies on a cPanel node with proxy subdomains on and
+  "allow users to override proxy subdomains" off (`proxysubdomains=1`,
+  `proxysubdomainsoverride=0`), where every `cpanel.*` host really reaches
+  cPanel. Everywhere else (DirectAdmin, or cPanel's default override on)
+  nothing changes. **On those paths, traffic rules and the per-IP L7
+  decision no longer apply on 443, the same as on the panel ports.** UA
+  emergency rules, fingerprint `deny` and nft/autoblock bans still do. Those
+  requests also no longer count toward the user's per-IP challenge score.
 - **WAF rule 404 (PHP webshell body) no longer fires on method calls.** A PDO
   `$db->exec(…)`, `Foo::system(…)`, `$this->assert(…)` or a `function exec(`
   declaration was scored as the shell builtin, so ordinary PHP classes
   posted as a body (code editors, snippet plugins) were blocked. Only a
-  `->` / `::` / `function` directly in front of the name is exempt (and only
-  after an operand), so neither a comment nor `$i-->system(` can hide a real
-  call. A global `exec(` / `@exec(` / `\exec(`
+  `->` / `::` / `function` directly in front of the name is exempt (a
+  multi-line `$this->db\n    ->exec(` chain included), so neither a comment
+  nor `$i-->system(` can hide a real call. A global `exec(` / `@exec(` / `\exec(`
   still counts.
 
 ## 2026.09.28
