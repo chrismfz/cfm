@@ -47,3 +47,13 @@ webmail.gr	/cpsess1/json-api/cpanel	no
 cpanel.gr	/cpsess1/execute/X	no
 cpanel.gr.	/cpsess1/execute/X	no
 cpanel..gr	/cpsess1/execute/X	no
+# Case-insensitive on both sides (the engine's log parser lowercases URIs).
+cpanel.example.gr	/CPSESS1/JSON-API/cpanel	yes
+cpanel.example.gr	/cpsess1/EXECUTE/Fileman/list_files	yes
+# Prefix + a public suffix is a tenant's own registrable domain, not a proxy.
+cpanel.com.gr	/cpsess1/json-api/cpanel	no
+whm.co.uk	/cpsess1/json-api/cpanel	no
+webmail.net.gr	/cpsess1/json-api/cpanel	no
+cpanel.foo.com.gr	/cpsess1/json-api/cpanel	yes
+webmail.x.co.uk	/cpsess1/execute/X	yes
+cpanel.com.example	/cpsess1/json-api/cpanel	yes

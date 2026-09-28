@@ -52,15 +52,34 @@ _M.PROXY_PREFIXES = { "cpanel", "whm", "webmail" }
 local proxy_set = {}
 for _, p in ipairs(_M.PROXY_PREFIXES) do proxy_set[p] = true end
 
--- is_proxy_panel_host("cpanel.example.com") → true. At least THREE labels:
--- a proxy subdomain always sits on a domain (cpanel.example.gr), while a
--- two-label name (`webmail.gr`) can only be a tenant's own domain, and that
+-- SECOND_LEVEL_LABELS: the second-level names ccTLD registries sell under
+-- (com.gr, co.uk, com.au, …). Under one of them a tenant's OWN registrable
+-- domain has three labels (`cpanel.com.gr`, `webmail.co.uk`).
+_M.SECOND_LEVEL_LABELS = { "com", "net", "org", "edu", "gov", "co", "ac", "or", "ne", "go", "mil", "nom", "gen", "biz", "info" }
+
+local sld_set = {}
+for _, l in ipairs(_M.SECOND_LEVEL_LABELS) do sld_set[l] = true end
+
+-- is_proxy_panel_host("cpanel.example.com") → true. The part after the prefix
+-- must be a domain that is NOT itself a bare public suffix. A proxy subdomain
+-- always sits on a registrable domain (cpanel.example.gr,
+-- cpanel.example.com.gr). A name that is prefix + suffix (`webmail.gr`,
+-- `cpanel.com.gr`, `whm.co.uk`) can only be a tenant's OWN domain, and that
 -- vhost comes before cPanel's catch-all proxy vhost in Apache's order.
+-- Rule: at least three labels, and exactly three only if the middle label is
+-- not a second-level name under a two-letter ccTLD. This is a heuristic, not
+-- the Public Suffix List. Residual: a tenant domain named like
+-- `cpanel.<3rd-level-suffix>`.
 function _M.is_proxy_panel_host(host)
   local h = (host or ""):lower()
-  local label, rest = h:match("^([^%.]+)%.(.+)$")
-  if not label or proxy_set[label] ~= true then return false end
-  return rest:find("[^%.]%.[^%.]") ~= nil
+  local labels = {}
+  for l in (h .. "."):gmatch("([^%.]*)%.") do labels[#labels + 1] = l end
+  if #labels < 3 or proxy_set[labels[1]] ~= true then return false end
+  for i = 1, #labels do
+    if labels[i] == "" then return false end -- empty label / trailing dot
+  end
+  if #labels == 3 and sld_set[labels[2]] and #labels[3] == 2 then return false end
+  return true
 end
 
 -- proxy_hosts_reach_panel() — on this node, does Apache route EVERY
@@ -101,21 +120,32 @@ end
 
 -- sh (optional): a shared dict. When given, one worker reads the file per
 -- TTL and the others read the dict, so there is no per-worker blocking read.
+-- The dict value carries the time of the file read ("1|<t>" / "0|<t>"), and a
+-- worker trusts it only until <t> + TTL. So a cpanel.config change reaches
+-- every worker within one TTL, not two stacked ones.
 function _M.proxy_hosts_reach_panel(now, sh)
   now = now or ((ngx and ngx.now) and ngx.now()) or os.time()
   if proxy_cfg.at and now - proxy_cfg.at < _M.PROXY_CFG_TTL then
     return proxy_cfg.on
   end
-  local on
+  local on, read_at
   if sh then
     local v = sh:get("cfm_cpanel_proxy_reach")
-    if v ~= nil then on = (v == 1) end
+    if type(v) == "string" then
+      local bit, t = v:match("^([01])|([%d%.]+)$")
+      t = tonumber(t)
+      if bit and t and now - t < _M.PROXY_CFG_TTL and t <= now then
+        on, read_at = (bit == "1"), t
+      end
+    end
   end
   if on == nil then
-    on = read_proxy_cfg()
-    if sh then sh:set("cfm_cpanel_proxy_reach", on and 1 or 0, _M.PROXY_CFG_TTL) end
+    on, read_at = read_proxy_cfg(), now
+    if sh then
+      sh:set("cfm_cpanel_proxy_reach", (on and "1|" or "0|") .. tostring(now), _M.PROXY_CFG_TTL)
+    end
   end
-  proxy_cfg.at, proxy_cfg.on = now, on
+  proxy_cfg.at, proxy_cfg.on = read_at, on
   return on
 end
 
@@ -136,8 +166,11 @@ end
 local SESSION_KINDS = { "json-api", "execute", "xml-api", "login", "websocket" }
 _M.SESSION_KINDS = SESSION_KINDS
 
+-- Case-insensitive: the Go decision engine sees only a lowercased URI (its
+-- log parser lowercases), so both sides must agree on that. Under Step 0d's
+-- gates the request reaches cpsrvd, which rejects a bogus-case path itself.
 function _M.is_session_api(uri)
-  local kind = (uri or ""):match("^/cpsess%d+/([%a%-]+)/")
+  local kind = (uri or ""):lower():match("^/cpsess%d+/([%a%-]+)/")
   if not kind then return false end
   for _, k in ipairs(SESSION_KINDS) do
     if kind == k then return true end

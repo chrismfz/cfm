@@ -845,11 +845,16 @@ got a `challenge_v2` 303, which an XHR cannot solve.
    single copy of that list). The proxy subdomain on 80/443 ran the full WAF
    and the vhost challenge on the same request. `cfm.lua` Step 0d now passes
    them straight to origin, under three gates:
-   - **host:** `cpanel.` / `whm.` / `webmail.` (not `mail.` / `webdisk.`), on
-     a name of at least three labels. A two-label `webmail.gr` can only be a
-     tenant's own domain, and that vhost comes before cPanel's proxy vhost.
+   - **host:** `cpanel.` / `whm.` / `webmail.` (not `mail.` / `webdisk.`) on
+     a registrable domain: at least three labels, and exactly three only if
+     the middle one is not a second-level name under a two-letter ccTLD. A
+     name that is prefix + public suffix (`webmail.gr`, `cpanel.com.gr`,
+     `whm.co.uk`) can only be a tenant's own domain, and that vhost comes
+     before cPanel's proxy vhost. This is a heuristic list
+     (`SECOND_LEVEL_LABELS`), not the Public Suffix List.
    - **path:** only the `/cpsess<N>/{json-api,execute,xml-api,login,websocket}/`
-     subset of the ports' list (`is_session_api`). That subset is all of
+     subset of the ports' list (`is_session_api`, case-insensitive, because the
+     Go engine only sees lowercased URIs). That subset is all of
      cPanel's own UI traffic, and `/cpsess<digits>/` is cPanel's alone. The rest
      of the list (`/api/`, `/session`, `/execute/`, `/json-api/`) are ordinary
      app route names. Token API clients use `:2083`/`:2087`, where the full
@@ -857,7 +862,8 @@ got a `challenge_v2` 303, which an XHR cannot solve.
    - **node:** cPanel with `proxysubdomains=1` **and**
      `proxysubdomainsoverride=0` in `/var/cpanel/cpanel.config`
      (`proxy_hosts_reach_panel`; one worker reads it per 60 s into the
-     `cfm_decisions` dict; unreadable or absent = off). Only then does every
+     `cfm_decisions` dict, stamped with the read time, so a change reaches
+     every worker within 60 s; unreadable or absent = off). Only then does every
      such Host reach cpsrvd: cPanel's catch-all proxy vhost (`ServerAlias
      cpanel.* whm.* webmail.* …`, bound on every IP) takes it, and no tenant
      can own a real `webmail.x` subdomain. The override, cPanel default 1,
@@ -871,13 +877,18 @@ got a `challenge_v2` 303, which an XHR cannot solve.
    (block/throttle/challenge) and the daemon's per-IP L7 decision do not
    apply to these paths on the web edge either. cpsrvd still authenticates
    every request, and kernel (nft) blocks, autoblock included, still apply.
-   The decision engine mirrors the host+path gates
-   (`isPanelSessionAPIChallengeExempt` in `engine.go` ingest; shared vectors
-   in `scripts/tests/fixtures/panel_session_api.txt`), so File Manager
-   traffic does not score its user's IP as a scanner.
+   The decision engine mirrors all three gates (`panel_session_api.go`, applied
+   in `engine.go` ingest after the access ring, so `edge_access_tail` still
+   shows these requests), so File Manager traffic does not score its user's
+   IP as a scanner. The node-config gate matters on this side too: without
+   it, a spoofed `Host: cpanel.x` on a node where the edge does NOT pass
+   these paths would hide a flood from the engine. Parity is pinned twice:
+   the Go test reads the three lists out of `cfm_panel_hosts.lua`, and both
+   sides run the vectors in `scripts/tests/fixtures/panel_session_api.txt`.
    `cfm_panel.lua` without the module passes nothing through (fail closed; ERR
-   at most once a minute). A worker holding an older copy re-loads the one
-   on disk.
+   at most once a minute). A worker still holding an older copy (the
+   post-upgrade edge reload failed) re-loads the file on disk, at most once
+   a minute.
    Residual: a domain whose own vhost has a wildcard `*.example.com` alias
    ahead of the proxy vhost would send `cpanel.example.com` to its docroot.
 

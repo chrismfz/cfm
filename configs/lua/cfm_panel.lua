@@ -986,11 +986,17 @@ end
 local ok_panel_hosts, panel_hosts_mod = pcall(require, "cfm_panel_hosts")
 -- Deploy skew: a worker that already holds an OLDER cfm_panel_hosts in
 -- package.loaded (it served web traffic before the package upgrade replaced
--- the files) would lack is_panel_api_or_sso. Drop it and load the file on
--- disk once, instead of failing the panel API closed until the next reload.
-if ok_panel_hosts and type(panel_hosts_mod) == "table" and not panel_hosts_mod.is_panel_api_or_sso then
-    package.loaded["cfm_panel_hosts"] = nil
-    ok_panel_hosts, panel_hosts_mod = pcall(require, "cfm_panel_hosts")
+-- the files, and the post-upgrade edge reload did not happen) lacks the newest
+-- export (is_session_api). Drop it and load the file on disk instead of
+-- failing the panel API closed until a reload. This chunk re-runs per request,
+-- so the retry is throttled to once a minute per node: if the file on disk is
+-- old too, we don't re-read it on every request.
+if ok_panel_hosts and type(panel_hosts_mod) == "table" and not panel_hosts_mod.is_session_api then
+    local shr = ngx.shared.cfm_decisions
+    if not shr or shr:add("panel_hosts_rerequire", 1, 60) then
+        package.loaded["cfm_panel_hosts"] = nil
+        ok_panel_hosts, panel_hosts_mod = pcall(require, "cfm_panel_hosts")
+    end
 end
 local panel_hosts_err = (not ok_panel_hosts) and tostring(panel_hosts_mod) or "no is_panel_api_or_sso"
 if not ok_panel_hosts then panel_hosts_mod = nil end

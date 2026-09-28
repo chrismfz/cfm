@@ -1414,19 +1414,21 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	if isWellKnownChallengeExempt(rec.URI) {
 		return
 	}
-	// cPanel's own session API on a proxy subdomain (File Manager save/upload,
-	// every XHR the cPanel UI makes) — the edge passes it straight to cpsrvd
-	// (cfm.lua Step 0d), so it must not feed the per-IP scoring either: a user
-	// working in File Manager fires many unique /cpsess<N>/execute/... paths
-	// at high rate and would trip the scanner heuristics against their own IP.
-	if isPanelSessionAPIChallengeExempt(host, rec.URI) {
-		return
-	}
-
 	// Retain the raw request in the access ring for edge_access_tail triage.
 	// Own mutex, off the engine lock; bounded + truncated in newAccessEntry.
 	if e.accessRing != nil {
 		e.accessRing.add(newAccessEntry(rec))
+	}
+
+	// cPanel's own session API on a proxy subdomain (File Manager save/upload,
+	// every XHR the cPanel UI makes). The edge passes it straight to cpsrvd
+	// (cfm.lua Step 0d), so it must not feed the per-IP scoring either: a user
+	// working in File Manager fires many unique /cpsess<N>/execute/... paths at
+	// a high rate and would trip the scanner heuristics against their own IP.
+	// It stays in the access ring above for triage. Gated on the same node
+	// config as the edge (panel_session_api.go).
+	if isPanelSessionAPIChallengeExempt(host, rec.URI) && panelProxyHostsReachPanel(time.Now()) {
+		return
 	}
 
 	t := tsToTime(rec.TS)
@@ -3723,67 +3725,6 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 		}
 	}
 	return false
-}
-
-// panelProxyPrefixes / panelSessionKinds mirror cfm_panel_hosts.lua
-// (PROXY_PREFIXES, SESSION_KINDS). Parity is pinned by the shared vectors in
-// scripts/tests/fixtures/panel_session_api.txt, which both
-// panel_session_api_test.go and cfm_panel_hosts_test.lua run.
-var (
-	panelProxyPrefixes = map[string]bool{"cpanel": true, "whm": true, "webmail": true}
-	panelSessionKinds  = map[string]bool{"json-api": true, "execute": true, "xml-api": true, "login": true, "websocket": true}
-)
-
-// isPanelSessionAPIChallengeExempt reports whether a request is cPanel's own
-// session API on a cPanel proxy subdomain: host cpanel./whm./webmail. with at
-// least three labels, path /cpsess<digits>/{json-api,execute,xml-api,login,
-// websocket}/…. It is the decision-side mirror of cfm.lua Step 0d (CLAUDE.md
-// §6: a path-based challenge exemption needs both sides). cpsrvd
-// authenticates each of these requests itself.
-//
-// The edge additionally requires proxysubdomains=1 and
-// proxysubdomainsoverride=0; this side does not. On a node without them the
-// edge still inspects these requests, and only their per-IP scoring is
-// skipped. A spoofed Host gains nothing there beyond not being scored for
-// those requests, and the WAF still sees them.
-//
-// Like isWellKnownChallengeExempt, this sees the RAW request target: the query
-// string is stripped, and any `%` or `..` refuses the exemption (the edge
-// matched nginx-decoded input).
-func isPanelSessionAPIChallengeExempt(host, p string) bool {
-	h := strings.ToLower(strings.TrimSpace(host))
-	dot := strings.IndexByte(h, '.')
-	if dot <= 0 || !panelProxyPrefixes[h[:dot]] {
-		return false
-	}
-	rest := h[dot+1:]
-	if i := strings.IndexByte(rest, '.'); i <= 0 || i >= len(rest)-1 || strings.Contains(rest, "..") {
-		return false
-	}
-	if i := strings.IndexByte(p, '?'); i >= 0 {
-		p = p[:i]
-	}
-	lp := strings.ToLower(p)
-	if strings.Contains(lp, "%") || strings.Contains(lp, "..") {
-		return false
-	}
-	if !strings.HasPrefix(lp, "/cpsess") {
-		return false
-	}
-	lp = lp[len("/cpsess"):]
-	n := 0
-	for n < len(lp) && lp[n] >= '0' && lp[n] <= '9' {
-		n++
-	}
-	if n == 0 || n >= len(lp) || lp[n] != '/' {
-		return false
-	}
-	lp = lp[n+1:]
-	slash := strings.IndexByte(lp, '/')
-	if slash <= 0 {
-		return false
-	}
-	return panelSessionKinds[lp[:slash]]
 }
 
 // isWellKnownChallengeExempt reports whether a request path is in the reserved

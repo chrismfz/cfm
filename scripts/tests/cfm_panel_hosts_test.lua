@@ -118,7 +118,7 @@ do
   ph.CPANEL_CONFIG = tmp
   ph._reset_proxy_cfg()
   check(ph.proxy_hosts_reach_panel(1000, sh) == true, "shared dict: first read from the file")
-  check(store["cfm_cpanel_proxy_reach"] == 1, "shared dict: answer published for the other workers")
+  check(store["cfm_cpanel_proxy_reach"] == "1|1000", "shared dict: answer + read time published for the other workers")
   -- Another worker (fresh module cache) with the file gone reads the dict.
   os.remove(tmp)
   ph._reset_proxy_cfg()
@@ -126,7 +126,17 @@ do
   store = {}
   ph._reset_proxy_cfg()
   check(ph.proxy_hosts_reach_panel(1000, sh) == false, "shared dict expired + file gone → off")
-  check(store["cfm_cpanel_proxy_reach"] == 0, "shared dict: off is published too")
+  check(store["cfm_cpanel_proxy_reach"] == "0|1000", "shared dict: off is published too")
+  -- No stacked TTLs: a worker reading a 50 s old dict value trusts it only
+  -- for the remaining 10 s, then reads the file itself.
+  local g = assert(io.open(tmp, "w")); g:write("proxysubdomains=1\nproxysubdomainsoverride=0\n"); g:close()
+  store = { cfm_cpanel_proxy_reach = "0|1000" }
+  ph._reset_proxy_cfg()
+  check(ph.proxy_hosts_reach_panel(1050, sh) == false, "stacked TTL: dict value still fresh at +50 s")
+  check(ph.proxy_hosts_reach_panel(1059, sh) == false, "stacked TTL: cached until the dict value's own expiry")
+  store = { cfm_cpanel_proxy_reach = "0|1000" } -- nginx may still hold an expired-by-age value
+  check(ph.proxy_hosts_reach_panel(1060, sh) == true, "stacked TTL: re-read at read time + TTL, not +2×TTL")
+  os.remove(tmp)
   ph.CPANEL_CONFIG = "/var/cpanel/cpanel.config"
   ph._reset_proxy_cfg()
 end

@@ -347,10 +347,12 @@ and easy to regress. Before changing it, read
   saves and uploads (docs/waf.md FP case 11). Change the list there, never in
   a copy. Step 0d trusts the Host prefix only because it also requires
   `proxysubdomains=1` + `proxysubdomainsoverride=0` (`proxy_hosts_reach_panel`)
-  and a name of at least three labels. Together those mean every such Host
-  reaches cpsrvd. Never drop those gates: without them a spoofed
+  and a registrable-domain host (prefix + public suffix such as
+  `cpanel.com.gr` is a tenant's own domain). Together those mean every such
+  Host reaches cpsrvd. Never drop those gates: without them a spoofed
   `Host: cpanel.x` bypasses the WAF into a docroot. The Go decision engine
-  mirrors the host+path gates (`isPanelSessionAPIChallengeExempt`), pinned by
+  mirrors all three (`panel_session_api.go`). Its test reads the lists out of
+  the `.lua` file, and both sides run
   `scripts/tests/fixtures/panel_session_api.txt`.
 
 ### WAF false positives — never "done"
