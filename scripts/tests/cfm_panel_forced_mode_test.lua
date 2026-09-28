@@ -57,7 +57,22 @@ local function run_case(c)
   ngx.actions = actions
   ngx.var.cookie_cfm_ok = ((";"..ngx.var.http_cookie):match(";%s*cfm_ok=([^;]+)")) or ""
   _G.ngx = ngx
+  -- The api/sso passthrough list lives in cfm_panel_hosts (no inline copy in
+  -- cfm_panel.lua). Load the real module; its absence fails closed.
+  local real_hosts = (panel_path:gsub("cfm_panel%.lua$", "cfm_panel_hosts.lua"))
+  if c.no_panel_hosts then
+    package.loaded["cfm_panel_hosts"] = nil
+    package.preload["cfm_panel_hosts"] = function() error("missing") end
+  elseif c.stale_panel_hosts then
+    -- An older module already in package.loaded (no is_panel_api_or_sso);
+    -- the file "on disk" (preload) is the new one.
+    package.loaded["cfm_panel_hosts"] = { has_panel_prefix = function() return false end }
+    package.preload["cfm_panel_hosts"] = function() return dofile(real_hosts) end
+  else
+    package.loaded["cfm_panel_hosts"] = dofile((panel_path:gsub("cfm_panel%.lua$", "cfm_panel_hosts.lua")))
+  end
   assert(loadfile(panel_path))()
+  package.preload["cfm_panel_hosts"] = nil
   -- last_action: most recent redirect/exit captured (nil if none).
   return ngx, actions[#actions]
 end
@@ -67,6 +82,21 @@ local function assert_eq(a,b,m) if a~=b then error((m or "assert")..": got="..to
 for _,u in ipairs({"/json-api/create_user_session","/json-api/listaccts","/json-api/batch","/execute/SomeModule/function","/xml-api/listaccts","/cpanelwebcall","/openid_connect/cpanelid","/cpsess1234567890/login/abc","/cpsess1234567890/json-api/listaccts","/api","/api/","/acctxfer","/acctxferstream","/acctxfer//home2/cpmove-foo/cpmove-foo.tar.gz.part00001","/acctxferrsync/foo","/cgi/transferinfo.cgi","/cgi/transferversion.cgi","/cgi/live_tail_log.cgi"}) do
   local ngx = run_case({uri=u, ua="-"})
   assert_eq(ngx.var.cfm_upstream, "cfm_panel_passthrough", "API/SSO should passthrough: "..u)
+end
+
+-- Deploy skew: an older cfm_panel_hosts in package.loaded is dropped and the
+-- file on disk loaded, so the API keeps passing through.
+do
+  local ngxs = run_case({uri="/cpsess1/json-api/cpanel", ua="-", stale_panel_hosts=true})
+  assert_eq(ngxs.var.cfm_upstream, "cfm_panel_passthrough", "stale module is re-loaded from disk")
+end
+
+-- cfm_panel_hosts missing: no inline copy of the list, so nothing is passed
+-- through (fail closed); the request continues into the normal panel flow.
+do
+  local ngxm = run_case({uri="/json-api/listaccts", ua="-", no_panel_hosts=true})
+  assert(ngxm.var.cfm_upstream ~= "cfm_panel_passthrough",
+         "without cfm_panel_hosts the API path must not be passed through")
 end
 
 local _, r1 = run_case({uri="/", host="cpanel.example.com", ua="Mozilla/5.0"})

@@ -1414,11 +1414,21 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	if isWellKnownChallengeExempt(rec.URI) {
 		return
 	}
-
 	// Retain the raw request in the access ring for edge_access_tail triage.
 	// Own mutex, off the engine lock; bounded + truncated in newAccessEntry.
 	if e.accessRing != nil {
 		e.accessRing.add(newAccessEntry(rec))
+	}
+
+	// cPanel's own session API on a proxy subdomain (File Manager save/upload,
+	// every XHR the cPanel UI makes). The edge passes it straight to cpsrvd
+	// (cfm.lua Step 0d), so it must not feed the per-IP scoring either: a user
+	// working in File Manager fires many unique /cpsess<N>/execute/... paths at
+	// a high rate and would trip the scanner heuristics against their own IP.
+	// It stays in the access ring above for triage. Gated on the same node
+	// config as the edge (panel_session_api.go).
+	if isPanelSessionAPIChallengeExempt(host, rec.URI) && panelProxyHostsReachPanel(time.Now()) {
+		return
 	}
 
 	t := tsToTime(rec.TS)

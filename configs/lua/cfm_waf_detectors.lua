@@ -469,10 +469,59 @@ function _M.detect_php_webshell_body(body, headers)
     score = score + 2
   end
 
+  -- A call to the GLOBAL function `name(`. A method / static call
+  -- (`$pdo->exec(`, `$x?->exec(`, `Foo::exec(`) or a declaration
+  -- (`function exec(`) is not the shell builtin: PDO / SQLite3 ->exec() and
+  -- PHPUnit ->assert() are everyday code, and before this check saving an
+  -- ordinary PDO class through the cPanel File Manager editor scored
+  -- <?php(+2) + exec(+3) = 5 and was blocked as RAW_EXEC (orion, 2026-09-28).
+  --
+  -- The exemption is ADJACENCY only:
+  --   * `->` / `?->` immediately before the name, unless the `-` belongs to
+  --     `--`: `$i-->system(` is PHP's `($i--) > system(...)`, a real call.
+  --     Whitespace BEFORE the arrow is fine (the PSR-12 fluent chain
+  --     `$this->db\n    ->exec(`): an arrow glued to the name is member access
+  --     whatever precedes it;
+  --   * `::` immediately before the name with an operand (identifier char,
+  --     `)`, `]`, `}`) immediately before that;
+  --   * `function` (optionally `&`) + spaces/tabs on the SAME line.
+  -- Tolerating whitespace or a newline would let a comment steer it:
+  -- `//->\nsystem(` or `//function\nsystem(` would skip a real call. So
+  -- `$db -> exec(` and a declaration split across lines count as global calls
+  -- (fail closed). `@exec(` / `\exec(` stay global calls.
+  -- The look-behind is a bounded 24-byte window, the pattern is built once
+  -- per name, and the answer is memoized for the tag phase below.
+  local callable_memo = {}
   local function has_php_callable(name)
-    if s:find("%f[%a_]" .. name .. "%s*%(") then return true end
-    if s:find("@%s*" .. name .. "%s*%(") then return true end
-    return false
+    local memo = callable_memo[name]
+    if memo ~= nil then return memo end
+    local pat = "%f[%a_]" .. name .. "%s*%("
+    local found, init = false, 1
+    while true do
+      local i, j = s:find(pat, init)
+      if not i then break end
+      local pre = s:sub(i > 24 and i - 24 or 1, i - 1)
+      local exempt = false
+      local op = pre:sub(-2)
+      if op == "->" then
+        local k = #pre - 2
+        if pre:sub(k, k) == "?" then k = k - 1 end
+        exempt = pre:sub(k, k) ~= "-"
+      elseif op == "::" then
+        local k = #pre - 2
+        exempt = k >= 1 and pre:sub(k, k):find("^[%w_%)%]}]") ~= nil
+      else
+        exempt = pre:find("%f[%a_]function[ \t]+$") ~= nil
+              or pre:find("%f[%a_]function[ \t]*&[ \t]*$") ~= nil
+      end
+      if not exempt then
+        found = true
+        break
+      end
+      init = j + 1
+    end
+    callable_memo[name] = found
+    return found
   end
 
   -- Dynamic include / require — matches only when the include's argument
@@ -544,9 +593,13 @@ function _M.detect_php_webshell_body(body, headers)
   -- want to know *which* shell hit, not just that something did.
   if ws_tag then return "RAW_WS_" .. ws_tag end
 
-  if s:find("<?php.-@?eval%s*%(") and s:find("%$_post") then return "RAW_EVAL_POST" end
-  if s:find("<?php.-@?system%s*%(") and s:find("%$_get") then return "RAW_SYSTEM_GET" end
-  if s:find("<?php.-@?passthru%s*%(") and s:find("%$_request") then return "RAW_PASSTHRU_REQUEST" end
+  -- The tags name the call that scored: has_php_callable, never a raw pattern
+  -- that would also match a method call (`$svc->system(` + `$_GET` must not
+  -- read RAW_SYSTEM_GET when only a global exec( scored).
+  local php_open = has(s, "<?php")
+  if php_open and has_php_callable("eval")     and has(s, "$_post")    then return "RAW_EVAL_POST" end
+  if php_open and has_php_callable("system")   and has(s, "$_get")     then return "RAW_SYSTEM_GET" end
+  if php_open and has_php_callable("passthru") and has(s, "$_request") then return "RAW_PASSTHRU_REQUEST" end
 
   if has_php_callable("eval")       then return "RAW_EVAL" end
   if has_php_callable("assert")     then return "RAW_ASSERT" end

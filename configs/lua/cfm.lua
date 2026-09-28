@@ -1306,6 +1306,58 @@ try_apply_post_resume(ip, host)
 method = ngx.req.get_method() or method
 uri    = ngx.var.uri          or uri
 
+-- ── Step 0d: cPanel proxy-subdomain API passthrough (panel-port parity) ─────
+-- cpanel.X / whm.X / webmail.X on 80/443 are Apache proxy subdomains in front
+-- of cpsrvd, the same panel the 2083/2087/2096 listeners front. Those
+-- listeners pass cPanel's API / SSO / transfer endpoints straight through
+-- (cfm_panel.lua step 1: no challenge, no WAF), because cpsrvd authenticates
+-- every one of them itself (/cpsess<N>/ token bound to the session cookie, API
+-- token, SSO assertion). Here the same request used to meet the full web WAF
+-- and the vhost challenge. On orion (2026-09-28) the File Manager editor's
+-- save (POST /cpsess<N>/json-api/cpanel, a PHP source file as the body) and
+-- its upload (/cpsess<N>/execute/Fileman/upload_files) got 403 from rules
+-- 404/402/401 and a challenge 303, which the editor reports as "Your login
+-- session has expired". This passes them through with the panel ports' own
+-- matcher module (cfm_panel_hosts).
+--
+-- Three gates, all required:
+--   * is_proxy_panel_host: cpanel./whm./webmail. only (not mail./webdisk.),
+--     on a name of at least three labels (a two-label `webmail.gr` can only
+--     be a tenant's own domain);
+--   * is_session_api(uri): only the /cpsess<N>/{json-api,execute,xml-api,
+--     login,websocket}/ subset of the ports' is_panel_api_or_sso list, which
+--     is all of cPanel's own UI traffic. The rest of that list (/api/,
+--     /session, /execute/, /json-api/ …) are ordinary app route names: if a
+--     Host ever did not really reach cpsrvd, they would hand a docroot app's
+--     routes to it without the WAF. Token API clients use :2083/:2087;
+--   * proxy_hosts_reach_panel: cPanel with proxysubdomains=1 AND
+--     proxysubdomainsoverride=0. Only then does EVERY such Host reach cpsrvd
+--     (catch-all proxy vhost, and no tenant can own a real `webmail.x`
+--     subdomain). Anywhere else (DirectAdmin, proxy subdomains off, override
+--     on, the cPanel default) a `Host: cpanel.x` can land on a docroot or the
+--     default vhost, and this step would be a WAF bypass into that site.
+-- Placement: AFTER Step 0b (UA emergency block/throttle) and Step 0c
+-- (fingerprint `deny`), so explicit operator-armed denies still bite; a
+-- challenge-tier fingerprint is observe-only here, as on the panel ports
+-- (step 2f) — an XHR cannot solve a challenge. AFTER the POST resume, so a
+-- resumed save on an API path is replayed with its body, not passed through
+-- as the bodyless GET carrier.
+-- Skipped for these paths, as on the panel ports: the WAF, clearance, and
+-- Step 3, i.e. traffic rules (block/throttle/challenge) and the daemon's
+-- per-IP L7 decision. Kernel (nft) blocks, including autoblock, still apply.
+-- Residual: a domain whose own vhost carries a wildcard alias (*.example.com)
+-- ahead of cPanel's proxy vhost would send cpanel.example.com to its docroot.
+-- The module missing (upgrade lag) → no passthrough (the old behaviour).
+if panel_hosts and panel_hosts.is_session_api and panel_hosts.is_proxy_panel_host
+   and panel_hosts.proxy_hosts_reach_panel
+   and panel_hosts.is_proxy_panel_host(host) and panel_hosts.is_session_api(uri)
+   and panel_hosts.proxy_hosts_reach_panel(nil, SH) then
+  ngx.header["X-CFM-Bypass"] = "panel-api"
+  log_route(ngx.INFO, "bypass=panel-api host=" .. host .. " uri=" .. uri)
+  ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+  return
+end
+
 -- ── Step 1: Validate clearance (do NOT allow yet — WAF runs first) ──────────
 -- cfm_clearance proves the client passed the challenge gate. It does not
 -- prove the payload is safe, so the allow-to-origin is deferred until after

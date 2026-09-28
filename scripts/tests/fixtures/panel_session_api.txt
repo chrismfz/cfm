@@ -1,0 +1,59 @@
+# Shared vectors for the cPanel session-API exemption, on both sides.
+# One case per line, TAB-separated: <host>	<path>	<expected yes|no>.
+# Read by two tests, so the decision engine cannot drift from the edge:
+#   scripts/tests/cfm_panel_hosts_test.lua: is_proxy_panel_host(host) and
+#     is_session_api(path), the edge's Step 0d host + path gates (cfm.lua);
+#   internal/webdetector/panel_session_api_test.go: isPanelSessionAPIChallengeExempt,
+#     which keeps these requests out of the per-IP challenge scoring (engine.go ingest).
+# Only paths both sides see the same way belong here (no query string, no
+# percent-encoding: the edge gets nginx-decoded input, the engine the raw one;
+# the Go test adds its own cases for those).
+#
+# The File Manager requests from the 2026-09-28 orion incident.
+cpanel.zenogroup.gr	/cpsess4305700936/json-api/cpanel	yes
+cpanel.zenogroup.gr	/cpsess4305700936/execute/Fileman/upload_files	yes
+cpanel.zenogroup.gr	/cpsess4305700936/execute/Fileman/save_file_content	yes
+# Every session kind, on every proxy prefix.
+whm.example.gr	/cpsess1/json-api/listaccts	yes
+whm.example.gr	/cpsess1/xml-api/version	yes
+webmail.example.gr	/cpsess1/execute/Email/list_pops	yes
+cpanel.example.gr	/cpsess1/login/	yes
+cpanel.example.gr	/cpsess1/websocket/Shell	yes
+cpanel.sub.example.co.uk	/cpsess99/json-api/cpanel	yes
+CPANEL.Example.GR	/cpsess1/json-api/cpanel	yes
+# Session UI pages are not API calls: the vhost challenge and WAF still apply.
+cpanel.example.gr	/cpsess1/frontend/jupiter/filemanager/index.html	no
+cpanel.example.gr	/cpsess1/download	no
+# The token is digits only, and the path is anchored.
+cpanel.example.gr	/cpsessX/json-api/cpanel	no
+cpanel.example.gr	/cpsess/json-api/cpanel	no
+cpanel.example.gr	/x/cpsess1/json-api/cpanel	no
+cpanel.example.gr	/cpsess1/json-apix/cpanel	no
+cpanel.example.gr	/cpsess1/json-api	no
+# The rest of the panel ports' list is NOT passed on the web edge.
+cpanel.example.gr	/json-api/cpanel	no
+cpanel.example.gr	/execute/Email/list_pops	no
+cpanel.example.gr	/api/v1/x	no
+cpanel.example.gr	/session	no
+whm.example.gr	/acctxfer/x	no
+# Not a proxy host.
+mail.example.gr	/cpsess1/json-api/cpanel	no
+webdisk.example.gr	/cpsess1/json-api/cpanel	no
+example.gr	/cpsess1/json-api/cpanel	no
+mycpanel.example.gr	/cpsess1/json-api/cpanel	no
+www.cpanel.example.gr	/cpsess1/json-api/cpanel	no
+# Two labels: only a tenant's own domain can be named like that.
+webmail.gr	/cpsess1/json-api/cpanel	no
+cpanel.gr	/cpsess1/execute/X	no
+cpanel.gr.	/cpsess1/execute/X	no
+cpanel..gr	/cpsess1/execute/X	no
+# Case-insensitive on both sides (the engine's log parser lowercases URIs).
+cpanel.example.gr	/CPSESS1/JSON-API/cpanel	yes
+cpanel.example.gr	/cpsess1/EXECUTE/Fileman/list_files	yes
+# Prefix + a public suffix is a tenant's own registrable domain, not a proxy.
+cpanel.com.gr	/cpsess1/json-api/cpanel	no
+whm.co.uk	/cpsess1/json-api/cpanel	no
+webmail.net.gr	/cpsess1/json-api/cpanel	no
+cpanel.foo.com.gr	/cpsess1/json-api/cpanel	yes
+webmail.x.co.uk	/cpsess1/execute/X	yes
+cpanel.com.example	/cpsess1/json-api/cpanel	yes

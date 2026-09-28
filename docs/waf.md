@@ -807,6 +807,91 @@ elFinder verb. The query `action` is not routing proof (a body field overrides
 it, case 6), but the carve-out needs none: a bare verb carries no payload on
 any handler, while a metacharacter, a path or a non-verb word fires as before.
 
+### FP case 11 — cPanel File Manager save / upload on `cpanel.X:443` (404 / 402 / 401)
+
+**Shape:** orion, 2026-09-28, account paparazi on `cpanel.zenogroup.gr`. The
+File Manager editor's **Save Changes** (`POST /cpsess<N>/json-api/cpanel`,
+form-urlencoded, the PHP source file as the body) got 403 from rule 404
+`WAF_PHP_WEBSHELL_BODY:RAW_EXEC`: `challenge_v2` by default, turned into
+`block` by `post_clearance_action` because the client held a clearance and
+the family is high-risk. The editor reports the 403 as "Your login session has
+expired", and cPanel's `access_log` has no save request at all. Uploading
+`.php` files (`/cpsess<N>/execute/Fileman/upload_files`) got 403 from 402
+`UPLOAD_PHP_TAG` and 401 `UPLOAD_FNAME`. After a fresh login, the same save
+got a `challenge_v2` 303, which an XHR cannot solve.
+
+**Root causes and fixes (in code):**
+
+1. *Detector:* `has_php_callable` matched `$this->db->exec(` (PDO) as the
+   global `exec()`. `<?php` (+2) plus exec (+3) reached the threshold of 5.
+   These are no longer counted:
+   - `->name(` / `?->name(` with the arrow glued to the name, and whitespace
+     or a newline allowed before the arrow (the PSR-12 fluent chain
+     `$this->db\n    ->exec(`), unless the `-` belongs to `--`;
+   - `::name(` with an operand (identifier char, `)`, `]`, `}`) directly
+     before;
+   - a declaration `function name(` / `function &name(` on one line.
+
+   Three review passes shaped this. A whitespace-tolerant first version let a
+   comment steer it: `<?php //->\nsystem($_GET[c]);` scored 4 and passed. The
+   next version let `$i-->system(` through (PHP: `($i--) > system(…)`). So the
+   arrow must touch the name, and `-->` counts. `$db -> exec(` (space after
+   the arrow) and a declaration split across lines still count (fail closed).
+   The global builtin, `@exec(` and `\exec(` still count, and the reason tag
+   (`RAW_SYSTEM_GET`, …) names only a call that scored (severity test 67b).
+2. *Edge parity:* the panel listeners (2083/2087/2096) always passed cPanel's
+   authenticated API / SSO / transfer endpoints straight through
+   (`cfm_panel.lua` step 1, `cfm_panel_hosts.is_panel_api_or_sso`, now the
+   single copy of that list). The proxy subdomain on 80/443 ran the full WAF
+   and the vhost challenge on the same request. `cfm.lua` Step 0d now passes
+   them straight to origin, under three gates:
+   - **host:** `cpanel.` / `whm.` / `webmail.` (not `mail.` / `webdisk.`) on
+     a registrable domain: at least three labels, and exactly three only if
+     the middle one is not a second-level name under a two-letter ccTLD. A
+     name that is prefix + public suffix (`webmail.gr`, `cpanel.com.gr`,
+     `whm.co.uk`) can only be a tenant's own domain, and that vhost comes
+     before cPanel's proxy vhost. This is a heuristic list
+     (`SECOND_LEVEL_LABELS`), not the Public Suffix List.
+   - **path:** only the `/cpsess<N>/{json-api,execute,xml-api,login,websocket}/`
+     subset of the ports' list (`is_session_api`, case-insensitive, because the
+     Go engine only sees lowercased URIs). That subset is all of
+     cPanel's own UI traffic, and `/cpsess<digits>/` is cPanel's alone. The rest
+     of the list (`/api/`, `/session`, `/execute/`, `/json-api/`) are ordinary
+     app route names. Token API clients use `:2083`/`:2087`, where the full
+     list still applies.
+   - **node:** cPanel with `proxysubdomains=1` **and**
+     `proxysubdomainsoverride=0` in `/var/cpanel/cpanel.config`
+     (`proxy_hosts_reach_panel`; one worker reads it per 60 s into the
+     `cfm_decisions` dict, stamped with the read time, so a change reaches
+     every worker within 60 s; unreadable or absent = off). Only then does every
+     such Host reach cpsrvd: cPanel's catch-all proxy vhost (`ServerAlias
+     cpanel.* whm.* webmail.* …`, bound on every IP) takes it, and no tenant
+     can own a real `webmail.x` subdomain. The override, cPanel default 1,
+     allows exactly that. Elsewhere (DirectAdmin, proxy subdomains off,
+     override on) Step 0d stays off. Fix 1 still covers the PDO save there.
+
+   It runs after Step 0b (UA emergency) and Step 0c (fingerprint `deny`), so
+   those operator-armed denies still apply. It also runs after the POST
+   resume, so a resumed save is replayed with its body. Like the panel ports,
+   it **skips the WAF, the challenge and Step 3**, so traffic rules
+   (block/throttle/challenge) and the daemon's per-IP L7 decision do not
+   apply to these paths on the web edge either. cpsrvd still authenticates
+   every request, and kernel (nft) blocks, autoblock included, still apply.
+   The decision engine mirrors all three gates (`panel_session_api.go`, applied
+   in `engine.go` ingest after the access ring, so `edge_access_tail` still
+   shows these requests), so File Manager traffic does not score its user's
+   IP as a scanner. The node-config gate matters on this side too: without
+   it, a spoofed `Host: cpanel.x` on a node where the edge does NOT pass
+   these paths would hide a flood from the engine. Parity is pinned twice:
+   the Go test reads the three lists out of `cfm_panel_hosts.lua`, and both
+   sides run the vectors in `scripts/tests/fixtures/panel_session_api.txt`.
+   `cfm_panel.lua` without the module passes nothing through (fail closed; ERR
+   at most once a minute). A worker still holding an older copy (the
+   post-upgrade edge reload failed) re-loads the file on disk, at most once
+   a minute.
+   Residual: a domain whose own vhost has a wildcard `*.example.com` alias
+   ahead of the proxy vhost would send `cpanel.example.com` to its docroot.
+
 ### Structural anti-patterns to check during rule review
 
 A short list. Every one of these surfaced as a real FP above; reading
@@ -1370,7 +1455,12 @@ Kill switch: `CFM_WAF_STATS_ENABLE=0` disables hit-rate counters + flushing.
   ├─ \.(css|js|woff2?|ttf|eot|png|jpe?g|gif|webp|ico|map)$         → bypass cfm.lua, proxy to origin
   └─ everything else                                               ↓
 [ access_by_lua: cfm.lua ]
-  ├─ POST resume handling
+  ├─ Step 0a1 /.well-known/            → origin (no WAF, no challenge)
+  ├─ Step 0b/0c UA emergency, fingerprint deny
+  ├─ POST resume
+  ├─ Step 0d  cpanel./whm./webmail. + proxy subdomains reach cpsrvd + /cpsess<N>/ API path
+  │            (cfm_panel_hosts.is_session_api, a subset of the panel ports' list)
+  │                                    → origin (no WAF, no challenge)
   ├─ Step 1   validate cfm_clearance → clearance_allow (no return yet)
   ├─ Step 2   run WAF (always, regardless of clearance)
   │            ├─ block            → exit 403
@@ -1385,7 +1475,7 @@ Kill switch: `CFM_WAF_STATS_ENABLE=0` disables hit-rate counters + flushing.
 
 Key invariants:
 
-1. **WAF runs even with valid clearance** for any request that reaches `cfm.lua`. No dynamic payload reaches origin without inspection.
+1. **WAF runs even with valid clearance** for any request that reaches `cfm.lua`. No dynamic payload reaches origin without inspection — except the two Step 0 carve-outs above (`/.well-known/`, and the cPanel API endpoints on a panel proxy host, which cpsrvd authenticates itself; FP case 11).
 2. **Post-clearance challenge cannot loop.** Conversion happens before the action switch; the `challenge` branch in the WAF hit handler is unreachable when `clearance_allow=true`.
 3. **POST replays are safe.** A resumed POST (`cfm_resumed_post`) is treated like any cleared client — `clearance_allow` keys on `clearance_ok` alone. A *cleared* replay runs the WAF (block-tier blocks; a challenge-tier hit is risk-downgraded by `post_clearance_action`) and then fast-paths to origin at Step 2b, so the stashed save is not lost. An *uncleared* replay that re-triggers a challenge still hits the `block_replayed` safety net (Step 2 challenge branch + Step 3) — the loop it exists to stop.
 4. **CFM control endpoints bypass `cfm.lua`.** `/__cfm_challenge`, `/__cfm_verify` are exact-match nginx locations — no WAF, no challenge, no origin.
