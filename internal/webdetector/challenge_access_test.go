@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -358,5 +359,34 @@ func TestChallengeAccessScopeFilter(t *testing.T) {
 	out := scopeFilterChallengeAccess(entries, req)
 	if len(out) != 1 || out[0].ID != "a" {
 		t.Fatalf("scope filter = %+v, want only tenant-a", out)
+	}
+}
+
+// TestChallengeAccessLoad_OverCapFrozen: an entry with only known keys that
+// this build rejects (a list past a cap a newer cfm raised) is kept verbatim,
+// disabled and unsupported, never dropped and erased on the next save.
+func TestChallengeAccessLoad_OverCapFrozen(t *testing.T) {
+	codes := make([]string, maxCountriesPerRule+1)
+	for i := range codes {
+		codes[i] = `"` + string([]byte{byte('A' + i/26), byte('A' + i%26)}) + `"`
+	}
+	path := filepath.Join(t.TempDir(), "challenge_access.json")
+	data := `[{"id":"ca_wide","enabled":true,"scope":{"vhosts":["example.com"]},
+	  "match":{"country_in":[` + strings.Join(codes, ",") + `]}}]`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s := newChallengeAccessStore(path)
+	e, ok := s.Get("ca_wide")
+	if !ok || e.Enabled || !e.Unsupported {
+		t.Fatalf("over-cap entry must load disabled+unsupported: ok=%v %+v", ok, e)
+	}
+	mustAddCA(t, s, []string{"example.com"}, caMatch(TrafficRuleMatch{CountryIn: []string{"GR"}}))
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(b), `"ca_wide"`) || !strings.Contains(string(b), codes[len(codes)-1]) {
+		t.Fatalf("over-cap entry was erased by the next save:\n%s", b)
 	}
 }

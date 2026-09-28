@@ -938,3 +938,56 @@ func TestJSStringHelpersUnescape(t *testing.T) {
 		t.Errorf("jsStringList = %q, want %q (a ']' inside a class must not end the list)", got, want)
 	}
 }
+
+// TestTrafficRuleLoad_OverCapFrozen: a rule with only KNOWN keys that this
+// build still rejects — the case a raised cap creates when an older binary
+// (or a later lower cap) reads it — must not be dropped on load, or the next
+// save would erase it from disk. It is kept disabled+unsupported, never
+// evaluated, and written back verbatim.
+func TestTrafficRuleLoad_OverCapFrozen(t *testing.T) {
+	codes := make([]string, maxCountriesPerRule+1)
+	for i := range codes {
+		codes[i] = `"` + string([]byte{byte('A' + i/26), byte('A' + i%26)}) + `"`
+	}
+	path := filepath.Join(t.TempDir(), "rules.json")
+	data := `[{"id":"r_wide","enabled":true,"priority":900,"scope":{"vhosts":["example.com"]},
+	  "match":{"country_not_in":[` + strings.Join(codes, ",") + `]},"action":{"type":"block"}}]`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s := newTrafficRuleStore(path)
+	r, ok := s.Get("r_wide")
+	if !ok || r.Enabled || !r.Unsupported {
+		t.Fatalf("over-cap rule must load disabled+unsupported: ok=%v %+v", ok, r)
+	}
+	if res := s.Simulate(TrafficRuleEvalInput{Host: "example.com", Path: "/", Method: "GET", Country: "ZZ"}); res.Matched || res.DisabledMatch != nil {
+		t.Fatalf("over-cap rule must never be evaluated: %+v", res)
+	}
+	if _, err := s.Add(TrafficRule{
+		Enabled: true, Priority: 500,
+		Scope:  TrafficRuleScope{Vhosts: []string{"example.com"}},
+		Match:  TrafficRuleMatch{Methods: []string{"POST"}},
+		Action: TrafficRuleAction{Type: TrafficActionChallenge},
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(b), `"r_wide"`) || !strings.Contains(string(b), codes[len(codes)-1]) {
+		t.Fatalf("over-cap rule was erased by the next save:\n%s", b)
+	}
+}
+
+// TestRulesMatchSummaryShortensCountries: `cfm webtop rules` keeps a
+// Europe-wide fence on one readable line; `rules get` shows the full list.
+func TestRulesMatchSummaryShortensCountries(t *testing.T) {
+	got := rulesMatchSummary(TrafficRuleMatch{CountryNotIn: []string{"AD", "AL", "AT", "BE", "BG", "CH", "CY", "CZ", "DE", "DK"}})
+	if got != "cc!=AD,AL,AT,BE,BG,CH,CY,CZ,+2 more" {
+		t.Fatalf("summary = %q", got)
+	}
+	if got := rulesMatchSummary(TrafficRuleMatch{CountryIn: []string{"GR", "CY"}}); got != "cc=GR,CY" {
+		t.Fatalf("short list must print whole, got %q", got)
+	}
+}

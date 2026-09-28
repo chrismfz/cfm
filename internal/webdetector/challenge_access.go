@@ -503,6 +503,21 @@ func (s *challengeAccessStore) load() {
 		}
 		norm, err := normalizeChallengeAccess(*e, false)
 		if err != nil {
+			// Same net for an entry with only known keys that this build
+			// still rejects — e.g. a value past a cap a newer cfm raised (a
+			// 64-country list read by a build capped lower). Dropping it here
+			// would erase it from disk on the next save; keep it verbatim,
+			// disabled and unsupported instead.
+			log.Printf("[webdet][challenge-access] entry %s fails validation in this cfm build (%v); kept on disk verbatim, not enforced, not editable here (upgrade cfm, or delete it)", strings.TrimSpace(e.ID), err)
+			stub := *e
+			stub.ID = strings.TrimSpace(stub.ID)
+			stub.Enabled = false
+			stub.Unsupported = true
+			if stub.CreatedAt.IsZero() {
+				stub.CreatedAt = time.Now().UTC()
+			}
+			s.entries[stub.ID] = stub
+			s.frozen[stub.ID] = append(json.RawMessage(nil), raw...)
 			continue
 		}
 		if norm.CreatedAt.IsZero() {
