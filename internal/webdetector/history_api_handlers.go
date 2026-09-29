@@ -54,6 +54,12 @@ var scopedRedactedPayloadKeys = map[string]struct{}{
 	// redactScopedHistoryRows: any one of them re-derives the grain.
 	"v2": {},
 	"ms": {},
+	// The solver_farm address sample — the sixth entry: on a cross-host
+	// finding it spans every vhost the fingerprint dominates, other tenants'
+	// visitors. Generic names, withheld on EVERY row type: a future
+	// tenant-facing row that needs an "ips" list must use another key.
+	"ips":       {},
+	"good_bots": {},
 }
 
 // scopedRedactedPayloadPrefix strips every v2_* key (v2_via, v2_waived,
@@ -85,7 +91,7 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // (scopedRedactedPayloadKeys) from history rows before they leave the endpoint
 // for a SCOPED (cPanel) caller. Admin callers see the rows untouched.
 //
-// Five entries today (the last is a family of keys). The first is payload.sig — the ChallengeV2 Rung-1 device readings
+// Six entries today (the fifth and sixth are families of keys). The first is payload.sig — the ChallengeV2 Rung-1 device readings
 // (hardwareConcurrency, deviceMemory, devicePixelRatio, pointer/touch/key
 // counts) collected by CFM's own challenge page. A tenant could measure the
 // same things from their own site's JS, so this is not a secret; it is
@@ -149,6 +155,22 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // challenge_v2_reject rows from scoped callers altogether would close it, at
 // the cost of the tenant's own false-reject view — an operator decision, not
 // made here.
+//
+// The sixth is the solver_farm address sample: payload.ips and the good_bots
+// map keyed by those addresses. A solver_farm row is written for ONE vhost
+// (its Host, which scopeCheckHost lets that vhost's tenant query), but on a
+// cross-host finding (tracks containing cross_host) the sample is drawn from
+// the convicted fingerprint's addresses on EVERY vhost it dominates, up to
+// 128 (solverfarm.Finding.IPs, xh.ipSample): visitors of OTHER tenants'
+// vhosts — and a fingerprint is a population, so a real browser sharing the
+// coarse TLS bucket can be among them. That crossed the tenant boundary. A
+// per-host finding's sample is the tenant's own solvers, but the keys go
+// whole: one rule, and a row reads the same whichever track convicted it.
+// The counts stay (distinct_ips / distinct_subnets / distinct_countries,
+// hosts, host_share): on a cross-host row they are aggregates, numbers with
+// no identity. So does the fingerprint id: evidence, not operator policy,
+// and the tenant sees tls_fp on its own solve rows anyway. The fleet store
+// pulls these rows with an admin token, so ingestion is unchanged.
 //
 // The payload map is copied rather than edited so the caller's own map is
 // never mutated, but note the LIMIT of that: the slice element is reassigned
