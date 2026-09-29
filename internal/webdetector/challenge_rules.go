@@ -1610,6 +1610,10 @@ if doChallenge {
                         logging.LogfCHALLENGES("[challenge][vhost] action=auto_on host=%s reason=uniqpaths_short uniqPaths=%d on=%d off=%d ttl=%s",
                             host, uniq, on, off, ttl.String())
                     }
+                    // This cycle skips the rest of the host (the scorer, the
+                    // config list, Under-Attack): freeze their notes rather than
+                    // let them lapse while their challenge is still live.
+                    e.nginxBridge.TouchVhostAutoSources(host, e.autoSourceNoteTTL())
                     // vhost-wide challenge overrides need for per-IP enumeration
                     continue
                 }

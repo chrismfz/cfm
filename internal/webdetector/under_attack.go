@@ -476,10 +476,19 @@ func (e *Engine) emitUnderAttack(now time.Time, host string, on bool, row Suspic
 	// behaviour (the I3+ action ladder it will gate does not exist); it will gate
 	// that ladder via Extra["enforcement"]="dryrun" (see below). It does NOT gate
 	// the v2 tier — that is CHALLENGE_V2_AUTO_VHOST's `under_attack`.
-	// tier= is the vhost's ChallengeV2 tier as of the transition: entering
+	// tier= is the vhost's ChallengeV2 tier AFTER the transition: entering
 	// UNDER_ATTACK puts an automatic vhost challenge at v2 when under_attack
 	// is in CHALLENGE_V2_AUTO_VHOST (challenge_v2_auto.go) — the one thing
-	// the state changes today, so the line says whether it did.
+	// the state changes today, so the line says whether it did. The source
+	// note is updated here, before the tier is read (the tick re-notes it on
+	// every later cycle), so the line and the gate agree from this moment.
+	if e.nginxBridge != nil {
+		if on {
+			e.nginxBridge.NoteVhostAutoSource(host, autoV2UnderAttack, e.autoSourceNoteTTL())
+		} else {
+			e.nginxBridge.DropVhostAutoSource(host, autoV2UnderAttack)
+		}
+	}
 	logging.LogfCHALLENGES("[challenge][vhost] under_attack=%v host=%s mode=%s dryrun=%v tier=%s %s", on, host, mode, e.cfg.UnderAttackDryRun, rungOrV1(e.challengeV2VhostTier(host).Rung), evidence)
 
 	e.appendHistory(HistoryEvent{

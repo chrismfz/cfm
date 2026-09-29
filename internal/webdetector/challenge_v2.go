@@ -449,9 +449,9 @@ const (
 // only an RLock and never deletes — reading a mark neither consumes nor
 // rewrites it, so the eager read cannot starve the gate below. The vhost
 // grain (challengeV2VhostTier) takes the manual store's mutex (as it always
-// did), one bridge RLock (the same vhost-entry read the src= snapshot does)
-// and one pin-store RLock; the Under-Attack tracker's exclusive lock only
-// when a vhost challenge covers the host and under_attack is armed. The geo grain costs nothing at all until
+// did), one bridge RLock (the same vhost-entry read the src= snapshot does,
+// plus the tick's automatic-source notes — Under-Attack is one of them) and
+// one pin-store RLock. The geo grain costs nothing at all until
 // a country/ASN policy exists (GeoPolicyActionForIP returns immediately on an
 // empty policy set); once one does, it is one live mmdb read per solve
 // (microseconds, no DNS).

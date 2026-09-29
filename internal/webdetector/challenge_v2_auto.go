@@ -36,7 +36,7 @@ package webdetector
 // snapshot reads, vhostEntryLocked): suspicious_vhost, uniqpaths_short,
 // vhost_config and under_attack (the Under-Attack state as the tick evaluates
 // it, operator override included). Each is re-noted on every cycle it is
-// active with a short TTL (autoSourceNoteTTL) and dropped the cycle it turns
+// active with a short TTL (autoSourceNoteTTL, 2–10 min) and dropped the cycle it turns
 // off, so the tier ends with the source or the vhost challenge, whichever
 // goes first — no missed transition can leave a stale v2 — and a forced
 // `attack on` on a host no vhost challenge covers arms nothing. The entry's
@@ -132,9 +132,12 @@ type vhostV2Tier struct {
 	// Pin is the host's tier pin ("v1" / "v2") when one exists, reported even
 	// when a manual arm outranks it, so a surface can show it is parked there.
 	// PinActor is who set it ("admin" / "scoped" / "" internal) — a scoped
-	// caller may change only a pin a scoped caller set.
-	Pin      string
-	PinActor string
+	// caller may change only a pin a scoped caller set — and ApexPinActor who
+	// set the apex's pin for a www. host ("" when none): a scoped caller may
+	// not pin a www. host over an operator's apex pin either.
+	Pin          string
+	PinActor     string
+	ApexPinActor string
 }
 
 // pinLockedFor reports whether the host's pin is out of reach for a caller
@@ -142,7 +145,11 @@ type vhostV2Tier struct {
 // refuses with 403 — the surfaces say so up front instead of offering a
 // control that always fails).
 func (t vhostV2Tier) pinLockedFor(scope map[string]struct{}) bool {
-	return scope != nil && t.Pin != "" && t.PinActor != actorFromScope(scope)
+	if scope == nil {
+		return false
+	}
+	me := actorFromScope(scope)
+	return (t.Pin != "" && t.PinActor != me) || (t.ApexPinActor != "" && t.ApexPinActor != me)
 }
 
 // challengeV2VhostTier is the ONE vhost-tier resolver (see the file header).
@@ -164,8 +171,17 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 	if e == nil || host == "" {
 		return t
 	}
-	pin, _ := e.tierPins.covering(host, time.Now())
+	now := time.Now()
+	pin, _ := e.tierPins.covering(host, now)
 	t.Pin, t.PinActor = pin.Rung, pin.Actor
+	if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" {
+		if ap, on := e.tierPins.covering(apex, now); on == apex {
+			t.ApexPinActor = ap.Actor
+			if t.ApexPinActor == "" {
+				t.ApexPinActor = "-" // an internal pin still locks a scoped caller out
+			}
+		}
+	}
 	manual := false
 	if target := e.manualRungTarget(host); target != "" {
 		manual = true
@@ -226,15 +242,16 @@ func (e *Engine) autoV2Trigger(host string) string {
 }
 
 // autoSourceNoteTTL is how long one tick's note of an active automatic source
-// lives: a few ticks (so a slow cycle never flaps the tier), bounded to
-// [30s, 5m] (so a source the tick stops seeing lapses quickly).
+// lives: 10 ticks, at least 2 minutes (so a tick slowed by a log backlog in
+// the very flood this is for never drops the tier to v1 between re-notes) and
+// at most 10 (so a source the tick stops seeing lapses soon).
 func (e *Engine) autoSourceNoteTTL() time.Duration {
-	ttl := 6 * e.cfg.Every
-	if ttl < 30*time.Second {
-		ttl = 30 * time.Second
+	ttl := 10 * e.cfg.Every
+	if ttl < 2*time.Minute {
+		ttl = 2 * time.Minute
 	}
-	if ttl > 5*time.Minute {
-		ttl = 5 * time.Minute
+	if ttl > 10*time.Minute {
+		ttl = 10 * time.Minute
 	}
 	return ttl
 }
@@ -244,10 +261,11 @@ func (e *Engine) autoSourceNoteTTL() time.Duration {
 // so equal situations always resolve the same way.
 var autoSourceOrder = [...]string{autoV2UnderAttack, autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig}
 
-// vhostAutoSources returns the live automatic sources noted for host — on
-// the host's own key or the key of the vhost entry covering it — provided a
-// live vhost-wide CHALLENGE entry covers host (the one vhost matcher,
-// vhostEntryKeyLocked); ok=false when none does. One RLock.
+// vhostAutoSources returns the live automatic sources noted for host — by
+// host itself, by its apex for a www. host (the bridge's apex→www expansion),
+// or on the key of the vhost entry covering it — provided a live vhost-wide
+// CHALLENGE entry covers host (the one vhost matcher, vhostEntryKeyLocked);
+// ok=false when none does. One RLock.
 func (b *NginxBridge) vhostAutoSources(host string) (sources []string, ok bool) {
 	if b == nil || host == "" {
 		return nil, false
@@ -259,12 +277,18 @@ func (b *NginxBridge) vhostAutoSources(host string) (sources []string, ok bool) 
 	if !found || h.Action != "challenge" {
 		return nil, false
 	}
+	writers := []string{host}
+	if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" {
+		writers = append(writers, apex)
+	}
+	if key != host {
+		writers = append(writers, key)
+	}
 	for _, src := range autoSourceOrder {
-		if exp, live := b.vhAuto[host][src]; live && exp.After(now) {
-			sources = append(sources, src)
-		} else if key != host {
-			if exp, live := b.vhAuto[key][src]; live && exp.After(now) {
+		for _, w := range writers {
+			if exp, live := b.vhAuto[w][src]; live && exp.After(now) {
 				sources = append(sources, src)
+				break
 			}
 		}
 	}
@@ -365,23 +389,35 @@ func (s *tierPinStore) apply(host, rung string, ttl time.Duration, actor string,
 	if s.pins == nil { // a zero store (an Engine built without NewEngine) stays usable
 		s.pins = make(map[string]tierPin)
 	}
-	cover, coverHost := tierPin{}, ""
-	if p, ok := s.getLocked(host, now); ok {
-		cover, coverHost = p, host
-	} else if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
-		if p, ok := s.getLocked(apex, now); ok {
-			cover, coverHost = p, apex
-		}
+	own, hasOwn := s.getLocked(host, now)
+	apexPin, apexHost, hasApex := tierPin{}, "", false
+	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
+		apexPin, hasApex = s.getLocked(apex, now)
+		apexHost = apex
 	}
 	target = host
-	if rung == "" && coverHost != "" {
-		target = coverHost
+	if rung == "" && !hasOwn && hasApex {
+		target = apexHost // clearing acts on the pin that covers host
 	}
 	if allowTarget != nil && !allowTarget(target) {
 		return target, "", false, "the pin covering " + host + " is on " + target + ", which is not in scope"
 	}
-	if protect != nil && coverHost != "" && protect(cover) {
-		return target, cover.Rung, false, "the tier on " + coverHost + " was pinned by the operator — ask them to change it"
+	if protect != nil {
+		// The pin being changed must be the caller's to change; and a new
+		// pin on a www. host must not shadow a protected apex pin — nor may
+		// an existing www. pin be refreshed over one set later.
+		refused := ""
+		switch {
+		case target == host && hasOwn && protect(own):
+			refused = host
+		case target == apexHost && hasApex && protect(apexPin):
+			refused = apexHost
+		case rung != "" && hasApex && protect(apexPin):
+			refused = apexHost
+		}
+		if refused != "" {
+			return target, "", false, "the tier on " + refused + " was pinned by the operator — ask them to change it"
+		}
 	}
 	cur, has := s.getLocked(target, now)
 	if has {

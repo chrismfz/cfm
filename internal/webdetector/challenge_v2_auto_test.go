@@ -291,6 +291,29 @@ func TestChallengeV2VhostTier_SourceNotes(t *testing.T) {
 	if tier := e.challengeV2VhostTier("both.gr"); tier != (vhostV2Tier{}) {
 		t.Fatalf("after clear: %+v", tier)
 	}
+	// Notes are keyed on the writer: a www. host's own cycle dropping its
+	// (absent) note never erases what the apex noted — the reader resolves
+	// www→apex.
+	setVhostEntry(e, "apex.gr", "")
+	setVhostEntry(e, "www.apex.gr", "")
+	b.NoteVhostAutoSource("apex.gr", autoV2UniqPathsShort, time.Hour)
+	b.DropVhostAutoSource("www.apex.gr", autoV2UniqPathsShort)
+	if tier := e.challengeV2VhostTier("www.apex.gr"); tier.Rung != "v2" || tier.Trigger != autoV2UniqPathsShort {
+		t.Fatalf("www cycle erased the apex note: %+v", tier)
+	}
+	// Touch extends live notes only, adds none.
+	b.mu.Lock()
+	b.vhAuto["apex.gr"][autoV2UniqPathsShort] = time.Now().Add(time.Second)
+	b.mu.Unlock()
+	b.TouchVhostAutoSources("apex.gr", time.Hour)
+	b.mu.RLock()
+	exp := b.vhAuto["apex.gr"][autoV2UniqPathsShort]
+	_, added := b.vhAuto["apex.gr"][autoV2SuspiciousVhost]
+	b.mu.RUnlock()
+	if time.Until(exp) < 30*time.Minute || added {
+		t.Fatalf("touch: exp in %v, added=%v", time.Until(exp), added)
+	}
+
 	// A note with no live entry arms nothing (the tier ends with the entry).
 	b.NoteVhostAutoSource("ghost.gr", autoV2UniqPathsShort, time.Hour)
 	if tier := e.challengeV2VhostTier("ghost.gr"); tier != (vhostV2Tier{}) {
@@ -499,10 +522,28 @@ func TestHandleChallengeVhostTier(t *testing.T) {
 		t.Fatalf("operator pin was altered by a scoped call: %+v %v", p, ok)
 	}
 	e.SetChallengeTierPinAs("example.com", "v1", 0, "admin")
-	shadow := scopedAddReq("/api/v1/challenge/vhost/tier?host=www.example.com&rung=v2")
-	shadow = shadow.WithContext(context.WithValue(shadow.Context(), CtxScopeKey{}, map[string]struct{}{"www.example.com": {}, "example.com": {}}))
-	if rr, _ := tierReq(t, e, shadow); rr.Code != http.StatusForbidden {
+	both := func(qs string) *http.Request {
+		r := scopedAddReq("/api/v1/challenge/vhost/tier?" + qs)
+		return r.WithContext(context.WithValue(r.Context(), CtxScopeKey{}, map[string]struct{}{"www.example.com": {}, "example.com": {}}))
+	}
+	if rr, _ := tierReq(t, e, both("host=www.example.com&rung=v2")); rr.Code != http.StatusForbidden {
 		t.Fatalf("scoped www pin shadowing an operator apex pin: %d", rr.Code)
+	}
+	// Nor may a www. pin the tenant set EARLIER be refreshed over an
+	// operator's apex pin set since — but the tenant may still remove it.
+	e.SetChallengeTierPinAs("example.com", "", 0, "admin")
+	if rr, _ := tierReq(t, e, both("host=www.example.com&rung=v1")); rr.Code != http.StatusOK {
+		t.Fatalf("tenant www pin with no operator apex pin: %d", rr.Code)
+	}
+	e.SetChallengeTierPinAs("example.com", "v2", 0, "admin")
+	if rr, _ := tierReq(t, e, both("host=www.example.com&rung=v1")); rr.Code != http.StatusForbidden {
+		t.Fatalf("tenant www pin refreshed over an operator apex pin: %d", rr.Code)
+	}
+	if tier := e.challengeV2VhostTier("www.example.com"); !tier.pinLockedFor(map[string]struct{}{"www.example.com": {}}) {
+		t.Fatalf("www under an operator apex pin must read as locked for the tenant: %+v", tier)
+	}
+	if rr, _ := tierReq(t, e, both("host=www.example.com&rung=auto")); rr.Code != http.StatusOK {
+		t.Fatalf("tenant removing its own www pin: %d", rr.Code)
 	}
 
 	// GET lists pins, admin only.
@@ -659,5 +700,21 @@ func TestEmitIPChallenges_NotesAutoSourcesForAutoV2(t *testing.T) {
 	e.emitIPChallenges(time.Now(), make(chan core.Alert, 16))
 	if tier := e.challengeV2VhostTier(host); tier.Rung != "" || tier.Source != tierSourceManual {
 		t.Fatalf("scorer off must drop the note: %+v", tier)
+	}
+}
+
+// The UNDER_ATTACK transition updates its source note before it logs tier=,
+// so the line and the gate agree from that moment (not a tick later).
+func TestEmitUnderAttack_NotesBeforeLogging(t *testing.T) {
+	e := newAutoV2TestEngine(t, autoV2UnderAttack)
+	setVhostEntry(e, "ua.gr", "")
+	out := make(chan core.Alert, 4)
+	e.emitUnderAttack(time.Now(), "ua.gr", true, SuspiciousRow{Host: "ua.gr"}, 20, "test", "auto", out)
+	if tier := e.challengeV2VhostTier("ua.gr"); tier.Rung != "v2" || tier.Trigger != autoV2UnderAttack {
+		t.Fatalf("entering UNDER_ATTACK: %+v", tier)
+	}
+	e.emitUnderAttack(time.Now(), "ua.gr", false, SuspiciousRow{Host: "ua.gr"}, 0, "test", "auto", out)
+	if tier := e.challengeV2VhostTier("ua.gr"); tier.Rung != "" {
+		t.Fatalf("leaving UNDER_ATTACK: %+v", tier)
 	}
 }

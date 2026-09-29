@@ -69,13 +69,13 @@ type NginxBridge struct {
 	mu      sync.RWMutex
 	ipState map[string]bridgeIPEntry    // ip   → current decision
 	vhState map[string]bridgeVhostEntry // host → current decision
-	// vhAuto: host (keyed like vhState) → AUTOMATIC vhost-challenge source
-	// (suspicious_vhost / uniqpaths_short / vhost_config) → expiry. The tick
-	// notes every source that is active, independently of the single sticky
-	// Reason on the vhState entry (which a manual arm or the config list
-	// relabels), so the auto-v2 resolver (challenge_v2_auto.go) sees the
-	// real automatic sources, each with its own lifetime. Cleared with the
-	// entry; guarded by mu like vhState.
+	// vhAuto: writer host → AUTOMATIC vhost-challenge source (under_attack /
+	// suspicious_vhost / uniqpaths_short / vhost_config) → expiry. The tick
+	// re-notes every source that is active, each cycle, independently of the
+	// single sticky Reason on the vhState entry (which a manual arm or the
+	// config list relabels), so the auto-v2 resolver (challenge_v2_auto.go)
+	// sees the real automatic sources. Cleared with the entry; guarded by mu
+	// like vhState.
 	vhAuto         map[string]map[string]time.Time
 	okState        map[okStateKey]time.Time // (ip,host,scope) → solved-ok expiry (bypasses matching vhost challenge)
 	bypassFunc     func(string) bool        // set once at startup; no lock needed (written before serving starts)
@@ -2932,40 +2932,78 @@ func (b *NginxBridge) vhostEntryKeyLocked(host string, now time.Time) (string, b
 }
 
 // NoteVhostAutoSource records that automatic vhost-challenge source (e.g.
-// suspicious_vhost) is active on host for ttl — for host and its bridge
-// variants, keyed like the vhState entries it accompanies. The tick calls it
-// on every cycle the source is active, so the note lives exactly as long as
-// the source keeps being refreshed (bounded by ttl once it stops).
+// suspicious_vhost) is active on host for ttl. Keyed on the WRITER host only
+// — the reader resolves a www. host to its apex's notes too, as the bridge
+// expands an apex challenge to www — so a www. host's own tick iteration can
+// never erase what its apex's iteration noted. The tick re-notes it on every
+// cycle the source is active, so the note lives exactly as long as it keeps
+// being refreshed (bounded by ttl once it stops).
 func (b *NginxBridge) NoteVhostAutoSource(host, source string, ttl time.Duration) {
 	if b == nil || !b.cfg.Enabled || source == "" || ttl <= 0 {
 		return
 	}
+	host = normalizeHost(host)
+	if host == "" {
+		return
+	}
 	exp := time.Now().Add(ttl)
 	b.mu.Lock()
-	for _, h := range vhostVariantsForBridge(host) {
-		srcs := b.vhAuto[h]
-		if srcs == nil {
-			srcs = make(map[string]time.Time, 2)
-			b.vhAuto[h] = srcs
-		}
-		srcs[source] = exp
+	srcs := b.vhAuto[host]
+	if srcs == nil {
+		srcs = make(map[string]time.Time, 2)
+		b.vhAuto[host] = srcs
 	}
+	srcs[source] = exp
 	b.mu.Unlock()
 }
 
-// DropVhostAutoSource forgets an automatic source on host (and its variants)
-// the moment the tick sees it turn off.
+// DropVhostAutoSource forgets an automatic source host noted, the moment the
+// tick sees it turn off. The common case — nothing to drop — takes only the
+// RLock (the tick calls this for every candidate host every cycle).
 func (b *NginxBridge) DropVhostAutoSource(host, source string) {
 	if b == nil || source == "" {
 		return
 	}
+	host = normalizeHost(host)
+	b.mu.RLock()
+	_, has := b.vhAuto[host][source]
+	b.mu.RUnlock()
+	if !has {
+		return
+	}
 	b.mu.Lock()
-	for _, h := range vhostVariantsForBridge(host) {
-		if srcs := b.vhAuto[h]; srcs != nil {
-			delete(srcs, source)
-			if len(srcs) == 0 {
-				delete(b.vhAuto, h)
-			}
+	if srcs := b.vhAuto[host]; srcs != nil {
+		delete(srcs, source)
+		if len(srcs) == 0 {
+			delete(b.vhAuto, host)
+		}
+	}
+	b.mu.Unlock()
+}
+
+// TouchVhostAutoSources extends every live note host has to at least ttl
+// from now, without adding any: for a tick cycle that deliberately skips
+// evaluating the host's other sources (the uniqpaths branch `continue`s
+// before the scorer and Under-Attack run), so their notes are frozen for as
+// long as that branch holds rather than lapsing while their challenge is
+// still live.
+func (b *NginxBridge) TouchVhostAutoSources(host string, ttl time.Duration) {
+	if b == nil || ttl <= 0 {
+		return
+	}
+	host = normalizeHost(host)
+	b.mu.RLock()
+	n := len(b.vhAuto[host])
+	b.mu.RUnlock()
+	if n == 0 {
+		return
+	}
+	now := time.Now()
+	exp := now.Add(ttl)
+	b.mu.Lock()
+	for src, e := range b.vhAuto[host] {
+		if e.After(now) && e.Before(exp) {
+			b.vhAuto[host][src] = exp
 		}
 	}
 	b.mu.Unlock()

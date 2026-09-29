@@ -904,10 +904,15 @@ read for arming. Instead the tick NOTES each active automatic source on the
 entry (`NoteVhostAutoSource`: `under_attack` — the state as the tick
 evaluates it, operator `attack on` included — `suspicious_vhost`,
 `uniqpaths_short`, `vhost_config`), re-noting it EVERY cycle it is active
-with a short TTL (6 ticks, 30 s–5 min) and dropping it the cycle it turns
+with a short TTL (10 ticks, 2–10 min — a tick slowed by a flood's log
+backlog must not drop the tier between re-notes) and dropping it the cycle it turns
 off. A cycle that never reaches the host (an exclude/ignore `continue`, a
 host that left the candidate set, a stalled tick) just stops re-noting, and
-the source lapses: no missed transition can leave a stale v2. Notes die with
+the source lapses: no missed transition can leave a stale v2. (The one
+deliberate skip — the uniqpaths branch, which bypasses the scorer and
+Under-Attack for as long as it holds — freezes the other notes instead.)
+Notes are keyed on the host that wrote them and read www→apex, so a `www.`
+host's own cycle can never erase what its apex noted. Notes die with
 their entry, so a forced `attack on` on a host nothing challenges arms
 nothing. The first ARMED noted source wins (strongest first: under_attack,
 suspicious_vhost, uniqpaths_short, vhost_config). One bridge RLock at
