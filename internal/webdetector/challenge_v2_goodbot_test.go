@@ -222,7 +222,7 @@ func TestChallengeV2WaiverBar(t *testing.T) {
 	MarkChallengeV2(ip, host)
 	for _, grain := range []string{v2GrainGeo, v2GrainVhost} {
 		if got := challengeV2WaiverBar(grain, ip, host, "web"); got != v2WaiverMark {
-			t.Errorf("grain %q with a traffic-rule/WAF mark on top = %q, want mark", grain, got)
+			t.Errorf("grain %q with a traffic-rule mark on top = %q, want mark", grain, got)
 		}
 	}
 	if got := challengeV2WaiverBar(v2GrainVhost, ip, "other.example.com", "web"); got != "" {

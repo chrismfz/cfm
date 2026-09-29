@@ -215,51 +215,86 @@ func TestChallengeV2IPMark_GrainAndWaiverAreWebScopeOnly(t *testing.T) {
 		t.Fatalf("waiver bar on a panel verify = %q, want waivable", got)
 	}
 
-	// A traffic-rule mark stays exact (ip,host).
+	// A traffic-rule mark stays exact (ip,host), and web-scope too.
 	MarkChallengeV2("203.0.113.82", "shop.example")
 	if !challengeV2MarkCovers("203.0.113.82", "shop.example", "web") ||
 		challengeV2MarkCovers("203.0.113.82", "other.example", "web") {
 		t.Fatalf("traffic-rule mark scope changed")
 	}
+	if challengeV2MarkCovers("203.0.113.82", "shop.example", "panel:2083") {
+		t.Fatalf("a web traffic-rule mark armed a panel-scope verify on the same host")
+	}
+	if challengeV2MarkCovers("203.0.113.80", "tenant-b.example", "") {
+		t.Fatalf("an unknown scope must read as unarmed")
+	}
 }
 
-// End to end: a v2-tier WAF push for host A, then a failing solve on host B.
-// Before 2026-09-29 the B solve passed at v1 and got a clearance (the fleet
-// case: 602 on a bare server IP, then webdriver + software GL, hs=190, on a
-// tenant vhost). Now it is rejected; a clean solve on B still passes; and the
-// same failing solve through a panel-scope verify is unarmed, as before.
+// End to end: a v2-tier WAF push (host A = a bare server IP, like rule 602),
+// then solves on a sibling vhost B and on a panel port. Before 2026-09-29 the
+// failing B solve passed at v1, got a clearance, and released the IP's WAF
+// decision on every host; a panel-scope solve released it too.
 func TestVerify_WAFV2PushArmsSiblingVhostButNotPanel(t *testing.T) {
-	base, capt := startVerifyServer(t)
 	b := NewNginxBridge("/tmp/cfm-test-wafv2e2e.sock", "tok", time.Minute, time.Minute)
+	base, capt := startVerifyServerWithBridge(t, b)
 	const (
 		ip = "203.0.113.90"
 		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	)
-	if code := postIPPush(t, b, `{"ip":"`+ip+`","action":"challenge_v2","host":"84.54.49.44","uri":"/","reason":"WAF_IP_HOST","waf_rule_id":602,"ttl_sec":600}`); code != http.StatusOK {
-		t.Fatalf("push rejected: %d", code)
+	push := func() {
+		t.Helper()
+		if code := postIPPush(t, b, `{"ip":"`+ip+`","action":"challenge_v2","host":"84.54.49.44","uri":"/","reason":"WAF_IP_HOST","waf_rule_id":602,"ttl_sec":600}`); code != http.StatusOK {
+			t.Fatalf("push rejected: %d", code)
+		}
+	}
+	decided := func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		_, ok := b.ipState[ip]
+		return ok
 	}
 	failing := `{"v":1,"wd":true,"glr":"Google SwiftShader","ptr":0,"tch":0,"key":0}`
+	panel := map[string]string{"X-CFM-Panel-Port": "2083", "X-Forwarded-Port": "2083"}
+	push()
 
-	resp := postVerify(t, base, ip, "tenant.example.gr", ua, failing)
+	// 1. Panel port: the WAF mark does not arm it (the failing solve passes,
+	// unarmed, as before) — and it must not release the web decision.
+	resp := postVerifyHdr(t, base, ip, "tenant.example.gr", ua, failing, panel)
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatalf("panel-scope verify was armed by a WAF mark: X-CFM-V2=%q", resp.Header.Get("X-CFM-V2"))
+	}
+	if solved, rejects := capt.counts(); solved != 1 || rejects != 0 {
+		t.Fatalf("panel solve: solved=%d rejects=%d, want 1/0", solved, rejects)
+	}
+	if s := capt.solved[0]; s.V2Grain != "" || s.HumanityScore < defaultV2FailScore {
+		t.Fatalf("panel solve: grain=%q hs=%d, want unarmed with a failing score", s.V2Grain, s.HumanityScore)
+	}
+	if !decided() {
+		t.Fatalf("a panel-scope solve released the IP's web WAF decision")
+	}
+
+	// 2. Sibling web vhost, failing solve: rejected under the mark grain, and
+	// nothing released.
+	resp = postVerify(t, base, ip, "tenant.example.gr", ua, failing)
 	if resp.StatusCode != http.StatusForbidden || resp.Header.Get("X-CFM-V2") != "reject" {
 		t.Fatalf("failing solve on a sibling vhost: status=%d X-CFM-V2=%q, want 403 + reject",
 			resp.StatusCode, resp.Header.Get("X-CFM-V2"))
 	}
-	if _, rejects := capt.counts(); rejects != 1 || capt.rejects[0].V2Grain != v2GrainMark {
-		t.Fatalf("reject not recorded under the mark grain: rejects=%d %+v", rejects, capt.rejects)
+	if solved, rejects := capt.counts(); solved != 1 || rejects != 1 || capt.rejects[0].V2Grain != v2GrainMark {
+		t.Fatalf("sibling reject: solved=%d rejects=%d %+v", solved, rejects, capt.rejects)
+	}
+	if !decided() {
+		t.Fatalf("a rejected solve released the IP's WAF decision")
 	}
 
+	// 3. Sibling web vhost, clean solve: passes under the arm and releases.
 	resp = postVerify(t, base, ip, "tenant.example.gr", ua, `{"v":1,"wd":false,"ptr":9,"tch":0,"key":1}`)
 	if resp.StatusCode == http.StatusForbidden {
 		t.Fatalf("clean solve on the sibling vhost was refused: X-CFM-V2=%q", resp.Header.Get("X-CFM-V2"))
 	}
-
-	panel := map[string]string{"X-CFM-Panel-Port": "2083", "X-Forwarded-Port": "2083"}
-	resp = postVerifyHdr(t, base, ip, "tenant.example.gr", ua, failing, panel)
-	if resp.StatusCode == http.StatusForbidden {
-		t.Fatalf("panel-scope verify was armed by a web WAF mark: X-CFM-V2=%q", resp.Header.Get("X-CFM-V2"))
+	if solved, _ := capt.counts(); solved != 2 || capt.solved[1].V2Grain != v2GrainMark || capt.solved[1].HumanityScore != 0 {
+		t.Fatalf("clean sibling solve: solved=%d %+v, want the 2nd solve armed (mark) and clean", solved, capt.solved)
 	}
-	if _, rejects := capt.counts(); rejects != 1 {
-		t.Fatalf("panel-scope solve was rejected: rejects=%d", rejects)
+	if decided() {
+		t.Fatalf("a web-scope solve did not release the IP's decision")
 	}
 }

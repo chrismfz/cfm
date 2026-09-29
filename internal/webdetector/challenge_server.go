@@ -749,6 +749,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 
 		ipStr = ip.String()
 		next := normalizeChallengeNext(r.URL.Query().Get("next"))
+		// "web", or "panel:<port>" for the panel ports' human-entry challenge:
+		// read once, for the v2 arm below, the release and the clearance.
+		scope := clearanceScope(r)
 
 		// Require cookie + HMAC token
 		c, err := r.Cookie("cfm_chal")
@@ -821,7 +824,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// Resolve the D5a arm ONCE, for every scored solve — the gate
 			// below consumes this same answer, and the solve line renders it,
 			// so "did the teeth cover this solve" cannot be read two ways.
-			v2Grain, v2Via = challengeV2ArmGrainVia(fp.ID, ipStr, host, clearanceScope(r))
+			v2Grain, v2Via = challengeV2ArmGrainVia(fp.ID, ipStr, host, scope)
 		}
 
 		solve := ChallengeSolve{
@@ -898,7 +901,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// a v2-tier VHOST arm covering the solve's host (arm-surfaces
 			// slice A), or a transient rung mark written when a v2-tier
 			// traffic rule (slice B, per ip+host) or WAF rule (slice C, per
-			// IP, web scope only) challenged the client. Each lookup is fail-open when unwired/absent. Same D5
+			// IP) challenged the client — web-scope verifies only. Each lookup is fail-open when unwired/absent. Same D5
 			// semantics either way; the gate inputs are edge-authoritative —
 			// see HONEST LIMITS in challenge_v2.go. The grain also rides the
 			// solve line, so a passed-under-arm solve is greppable too.
@@ -915,7 +918,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// may forward-confirm inline — bounded, and only on this
 				// about-to-reject path. The solve then takes the normal
 				// solved path, marked v2_waived=<name>.
-				bot, miss := "", challengeV2WaiverBar(v2Grain, solve.IP, solve.Host, clearanceScope(r))
+				bot, miss := "", challengeV2WaiverBar(v2Grain, solve.IP, solve.Host, scope)
 				if miss == "" {
 					bot, miss = challengeV2GoodBot(r.Context(), solve.IP, solve.PTR)
 				}
@@ -983,7 +986,16 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// and never blocks on the firewall backend (see releaseSolvedIP) — that
 		// blocking call was leaving the clearance cookie below unset and looping
 		// the browser. The clearance cookie is set right after, unconditionally.
-		s.releaseSolvedIP(ipStr)
+		//
+		// WEB scope only. The release deletes the IP's per-IP bridge decision
+		// (ipState, every host), which only the web edge serves: the panel ports
+		// enforce its block tier only, and their human-entry challenge rides the
+		// per-scope clearance cookie. A panel solve releasing it let a client
+		// clear a WAF challenge — or a block — that the web edge set, through a
+		// challenge the WAF's v2 rung does not arm (web-scope only by doctrine).
+		if scope == "web" {
+			s.releaseSolvedIP(ipStr)
+		}
 
 		// 4) Set solved cookie so OpenResty can fast-path without re-query/cache loops.
 		// Secure should follow the *original* scheme (OpenResty terminates TLS),
@@ -991,7 +1003,6 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		secure := trustedForwardedProto(r) == "https"
 
 		ttl := s.cookieTTL()
-		scope := clearanceScope(r)
 		exp := time.Now().UTC().Add(ttl)
 		clearanceVal := issueClearanceToken(ipStr, host, scope, exp)
 		http.SetCookie(w, &http.Cookie{

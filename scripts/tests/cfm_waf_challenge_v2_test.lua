@@ -3,7 +3,7 @@
 -- challenge_v2 is a challenge-TIER mode: at the edge it serves the same
 -- challenge page as "challenge" (cfm.lua's else-branch), but the ip_push
 -- carries the verbatim "challenge_v2", which the daemon records as a
--- per-(ip,host) rung mark — a solve from that pair failing the passive
+-- per-IP rung mark — a solve from that IP on any web host failing the passive
 -- humanity score then earns no clearance (challenge_v2.go D5). This file
 -- covers the cfm_waf.lua half of the contract:
 --   * set_rule / rule_mode accept "challenge_v2";
@@ -173,9 +173,11 @@ end
 -- ── 7: should_push — challenge_v2 is its own cooldown tier, keyed per host ───
 -- A plain-challenge push must not consume the window for a later v2 push of
 -- the same family (and vice versa): the v2 push is what writes the rung mark
--- daemon-side, so suppressing it would silently downgrade the rung. And because
--- the mark is per-(ip,host), a v2 push on a SECOND host within the window must
--- still go out — else that host would verify at v1 (the multi-host gap).
+-- daemon-side, so suppressing it would silently downgrade the rung. A v2 push
+-- on a SECOND host within the window still goes out (the key includes the
+-- host). That closed the multi-host gap while the mark was per (ip,host); since
+-- 2026-09-29 the mark is per IP, and the per-host push only adds a per-host
+-- record (cfm_waf.lua should_push).
 do
   -- Fake dict with real ngx.shared semantics (cfm_shdict.incr uses incr-then-add):
   -- incr on a missing key is "not found"; add refuses an existing key.

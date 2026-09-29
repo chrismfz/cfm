@@ -55,7 +55,11 @@ cfm.lua serves that challenge on every web host the IP visits, so the rung
 covers every web host too. Until 2026-09-29 it was per (ip,host), and a client
 could solve the same challenge on a sibling vhost at v1 and keep the
 clearance. It is read for web-scope verifies only; the panel ports' own
-human-entry challenge is not armed by it. Semantics to know:
+human-entry challenge is not armed by it. A passing web solve releases the
+IP's decision on every host (as before); a panel-port solve releases nothing,
+so it cannot lift a WAF challenge the web edge set. A WAF mark also withholds
+the good-bot waiver on every web host of the IP for its 15 minutes (a WAF
+challenge never softens for bots). Semantics to know:
 
 - **Set per rule** via `/etc/cfm/cfm_waf_config.lua`
   (`return { rule_<name> = "challenge_v2" }`). Since **2026-09-23 the entire

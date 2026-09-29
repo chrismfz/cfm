@@ -80,9 +80,13 @@ back-filled here — see the git/PR history for that period.
   this live: a Google Cloud scanner tripped rule 602 on a bare server IP,
   then passed on a tenant site with webdriver and a software renderer. The v2
   intent now follows the IP, like the challenge does. A real visitor sees no
-  difference: the same page, and a human solve passes either way. The
-  panel-port login challenge is unaffected. Traffic-rule `challenge_v2` stays
-  per site, which is how that challenge is served.
+  difference: the same page, and a human solve passes either way. Solving
+  the panel-port login challenge (`:2083` etc.) no longer lifts the IP's web
+  challenges: it used to, which was the same hole through another door. For
+  15 minutes after a WAF `challenge_v2` hit, a verified crawler from that IP
+  is not waived on any site of the node (it used to be only the one site).
+  Traffic-rule `challenge_v2` stays per site, which is how that challenge is
+  served.
 
 ## 2026.09.28
 

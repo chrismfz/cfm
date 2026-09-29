@@ -24,10 +24,10 @@ package webdetector
 //                    traffic rule with action challenge_v2 at decision time
 //                    (its challenge is that request's host's), per IP for a
 //                    WAF rule set to "challenge_v2" via its ip_push (its
-//                    decision challenges the IP on every web host; web scope
-//                    only) — same edge-authoritative ip/host inputs as the
-//                    decision and verify paths; everyone else is scored
-//                    shadow/log-only.
+//                    decision challenges the IP on every web host); either is
+//                    read for web-scope verifies only — same
+//                    edge-authoritative ip/host inputs as the decision and
+//                    verify paths; everyone else is scored shadow/log-only.
 //   (b) ABSENCE    — a solve can fail ONLY on positive headless evidence
 //                    (webdriver true, a software renderer, a self-contradicting
 //                    report). A missing payload (old cached page, blocked JS,
@@ -299,9 +299,18 @@ func ConfigureChallengeV2HWTells(on bool) {
 //     challenge on host B at v1 and kept the clearance. Seen on the fleet: a
 //     Google Cloud scanner tripped 602 on a bare server IP, then solved on a
 //     tenant vhost with webdriver + a software renderer (hs=190), and was not
-//     rejected. The per-IP mark is web scope only (challengeV2MarkCovers): the
-//     panel ports never serve that decision, and v2 arms stay off the panel
-//     human-entry verify.
+//     rejected. (A passing solve then also released the IP's decision on
+//     every host — releaseSolvedIP.)
+//
+// Both writers mark WEB challenges, so the mark grain is read for web-scope
+// verifies only (challengeV2MarkCovers): the panel ports never serve the WAF
+// decision, and their human-entry challenge is armed by neither writer. A
+// panel-scope solve also releases nothing (challenge_server.go), so it cannot
+// lift a WAF challenge the web edge set.
+//
+// Don't make a passing solve consume a mark. After a solve on host B, a re-hit
+// on host A is challenged inline, but should_push's cooldown suppresses the
+// re-push, so only the surviving mark keeps that host-A solve at v2.
 //
 // Bounded and fail-open: over the cap a new mark is dropped after an expiry
 // sweep (the client then faces a plain v1 challenge — never an error),
@@ -390,14 +399,15 @@ func challengeV2IPMarked(ip string) bool {
 	return ok
 }
 
-// challengeV2MarkCovers is the mark grain as the verify gate sees it: a
-// traffic-rule mark on exactly (ip, host), or — for a web-scope verify only —
-// a WAF mark on ip. scope is clearanceScope(r): "web" or "panel:<port>".
+// challengeV2MarkCovers is the mark grain as the verify gate sees it: for a
+// web-scope verify, a traffic-rule mark on exactly (ip, host) or a WAF mark on
+// ip; never for a panel-scope one. scope is clearanceScope(r): "web" or
+// "panel:<port>" (anything else is not web, so unarmed — fail-open, D5a).
 func challengeV2MarkCovers(ip, host, scope string) bool {
-	if challengeV2Marked(ip, host) {
-		return true
+	if scope != "web" {
+		return false
 	}
-	return scope == "web" && challengeV2IPMarked(ip)
+	return challengeV2Marked(ip, host) || challengeV2IPMarked(ip)
 }
 
 // challengeV2HostTierHook returns the currently wired vhost-tier hook.
@@ -485,7 +495,7 @@ const (
 	v2GrainFP    = "fp"    // an armed challenge_v2 fingerprint policy
 	v2GrainGeo   = "geo"   // a fleet-armed country/ASN policy covering the IP
 	v2GrainVhost = "vhost" // a v2-tier vhost challenge on the host (manual arm, or automatic via CHALLENGE_V2_AUTO_VHOST / a tier pin)
-	v2GrainMark  = "mark"  // a per-(ip,host) rung mark (traffic rule / WAF rule)
+	v2GrainMark  = "mark"  // a rung mark: per (ip,host) from a traffic rule, per IP from a WAF rule (web scope)
 )
 
 // challengeV2ArmGrainVia answers D5a's "is this solve covered by an
