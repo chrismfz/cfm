@@ -281,68 +281,16 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 
 			// Hook solved logging into detectors layer (adds enrichment + lets us emit "expired" elsewhere).
 			webdet.SetChallengeSolvedHook(func(s webdet.ChallengeSolve) {
-				ip, host, uri, diff := s.IP, s.Host, s.URI, s.Diff
-				// Network identity was resolved ONCE at verify and rides on the
-				// solve. It renders twice here: as cc=/asn=/asn_name=/ptr=
-				// key=value fields (s.GeoSuffix), and as the free-text
-				// " - (AS…, Country)" tail this line has always ended with
-				// (s.LegacyGeoTail), kept byte-for-byte for tooling that reads
-				// it. Both come from the same fields as the history row, so
-				// none of the three can disagree — which a second lookup here,
-				// as this hook used to do, could not promise.
-				// src= (the challenge provenance snapshot) sits right after
-				// the geo fields, as on the challenge server's own fallback
-				// line; the legacy free-text tail stays last.
-				suffix := s.LegacyGeoTail()
-
 				// Look up WAF/detector reason + rule id BEFORE bridge.ClearIP()
 				// deletes the entry. The hook is called before ClearIP in
 				// challenge_server.go, so this is safe.
 				reason := ""
 				wafRuleID := 0
 				if b := w.eng.NginxBridge(); b != nil {
-					reason = b.GetReason(ip)
-					wafRuleID = b.GetWAFRuleID(ip)
+					reason = b.GetReason(s.IP)
+					wafRuleID = b.GetWAFRuleID(s.IP)
 				}
-				reasonPart := ""
-				if reason != "" {
-					reasonPart = " reason=" + reason
-				}
-				ridPart := ""
-				if wafRuleID > 0 {
-					ridPart = fmt.Sprintf(" waf_rule_id=%d", wafRuleID)
-				}
-
-				// A self-contradictory UA is worth grepping for on its own.
-				uaBad := ""
-				if s.UAImpossible {
-					uaBad = " ua_impossible=" + s.UAReason
-				}
-
-				// ms= stays the server-side verify time it has always been, so
-				// existing log tooling keeps parsing. solve_ms= is the new,
-				// actually-meaningful number: issue → submit wall clock. It
-				// prints "-" rather than a number when unknown (clock step
-				// between issue and verify), so a reader never mistakes a
-				// sentinel for a measurement.
-				solveMS := "-"
-				if ms, ok := s.SolveLatencyMS(); ok {
-					solveMS = strconv.FormatInt(ms, 10)
-				}
-
-				// tls_fp= is the id of the client's TLS ClientHello, the one
-				// signal on this line the client did not author. The full tuple
-				// behind it is written once per distinct fingerprint as a
-				// "first_seen" line, so `grep tls_fp=<id>` finds both the
-				// dictionary entry and every solve that used it. "-" means the
-				// edge supplied none (older edge config, plain HTTP, or the
-				// legacy DNAT path) — never a parse failure. Rendered through
-				// ChallengeSolve.TLSFingerprintOrDash so this and the challenge
-				// server's own fallback line cannot disagree.
-				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s%s%s%s",
-					ip, host, uri, s.VerifyMS, solveMS, diff, s.TLSFingerprintOrDash(), s.UAFamilyOrDash(), s.UA, s.HumanitySuffix(), uaBad, reasonPart, ridPart, s.GeoSuffix(), s.SrcSuffix(), suffix,
-				)
+				logging.LogfCHALLENGES("%s", challengeSolvedLine(s, reason, wafRuleID))
 
 				// Record solve in challenge API store (best-effort)
 				w.eng.RecordChallengeSolved(s)
@@ -1215,4 +1163,54 @@ func challengeV2AutoVhost(kv KV) []string {
 	}
 	armed, _, _ = webdet.ParseChallengeV2AutoVhost(webdet.DefaultChallengeV2AutoVhost)
 	return armed
+}
+
+// challengeSolvedLine renders the result=solved line the solved hook writes,
+// given the bridge's reason / WAF rule id for the IP (read before the release
+// clears them). A pure function so its field order is testable.
+//
+// Network identity was resolved ONCE at verify and rides on the solve. It
+// renders twice here: as cc=/asn=/asn_name=/ptr= key=value fields
+// (s.GeoSuffix), and as the free-text " - (AS…, Country)" tail this line has
+// always ended with (s.LegacyGeoTail), kept byte-for-byte for tooling that
+// reads it. Both come from the same fields as the history row, so none of the
+// three can disagree — which a second lookup here, as this hook used to do,
+// could not promise. src= (the challenge provenance snapshot) and then scope=
+// sit right after the geo fields, as on the challenge server's own fallback
+// line (ChallengeSolve.SolvedLine); the legacy free-text tail stays last.
+//
+// ms= stays the server-side verify time it has always been, so existing log
+// tooling keeps parsing. solve_ms= is the actually-meaningful number: issue →
+// submit wall clock. It prints "-" rather than a number when unknown (clock
+// step between issue and verify), so a reader never mistakes a sentinel for a
+// measurement.
+//
+// tls_fp= is the id of the client's TLS ClientHello, the one signal on this
+// line the client did not author. The full tuple behind it is written once per
+// distinct fingerprint as a "first_seen" line, so `grep tls_fp=<id>` finds both
+// the dictionary entry and every solve that used it. "-" means the edge
+// supplied none (older edge config, plain HTTP, or the legacy DNAT path) —
+// never a parse failure. Rendered through ChallengeSolve.TLSFingerprintOrDash
+// so this and the challenge server's own fallback line cannot disagree.
+func challengeSolvedLine(s webdet.ChallengeSolve, reason string, wafRuleID int) string {
+	reasonPart := ""
+	if reason != "" {
+		reasonPart = " reason=" + reason
+	}
+	ridPart := ""
+	if wafRuleID > 0 {
+		ridPart = fmt.Sprintf(" waf_rule_id=%d", wafRuleID)
+	}
+	// A self-contradictory UA is worth grepping for on its own.
+	uaBad := ""
+	if s.UAImpossible {
+		uaBad = " ua_impossible=" + s.UAReason
+	}
+	solveMS := "-"
+	if ms, ok := s.SolveLatencyMS(); ok {
+		solveMS = strconv.FormatInt(ms, 10)
+	}
+	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s%s%s%s%s",
+		s.IP, s.Host, s.URI, s.VerifyMS, solveMS, s.Diff, s.TLSFingerprintOrDash(), s.UAFamilyOrDash(), s.UA,
+		s.HumanitySuffix(), uaBad, reasonPart, ridPart, s.GeoSuffix(), s.SrcSuffix(), s.ScopeSuffix(), s.LegacyGeoTail())
 }

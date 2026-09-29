@@ -920,6 +920,7 @@ func (e *Engine) RecordChallengeV2Reject(s ChallengeSolve) {
 //	hs_nopayload no parseable humanity body arrived (see the doc below)
 //	tells        which tells fired, comma-joined
 //	v2           the arm grain covering the solve, absent when unarmed
+//	v2_via       (v2=vhost) what put the vhost at v2: manual / pin / auto:<source>
 //	v2_waived    (solved) the verified good bot a failing solve was waived for
 //	v2_waiver_miss (reject) why a crawler-looking client was not waived
 //	sig          the readings as reported, same numbers and rounding as
@@ -939,12 +940,14 @@ func (e *Engine) RecordChallengeV2Reject(s ChallengeSolve) {
 // more precise of the two; don't "align" them by making it lossier.
 //
 // The client's network identity (country / country_iso / asn / asn_name /
-// ptr, resolved once at verify) is added last, each key only when resolved —
+// ptr, resolved once at verify) is added next, each key only when resolved —
 // see addGeoPayload. Note payload.ptr is the client's reverse DNS; the
 // humanity pointer-event count is sig.ptr, one level down.
 //
 // src is the challenge provenance snapshot (challenge_src.go), the same
 // value as the log lines' src= field; absent when it was never resolved.
+// scope is the surface the solve was verified on (web / panel:<port>), the
+// lines' scope= field; absent when unset.
 func (s ChallengeSolve) historyPayload() map[string]interface{} {
 	payload := map[string]interface{}{"uri": s.URI, "diff": s.Diff, "ms": s.VerifyMS}
 	if s.UA != "" {
@@ -986,6 +989,9 @@ func (s ChallengeSolve) historyPayload() map[string]interface{} {
 	s.addGeoPayload(payload)
 	if v := s.SrcValue(); v != "" {
 		payload["src"] = v
+	}
+	if s.Scope != "" {
+		payload["scope"] = s.Scope
 	}
 	return payload
 }

@@ -185,12 +185,13 @@ func TestVerify_V2RejectSaysWhyACrawlerWasNotWaived(t *testing.T) {
 			t.Fatalf("%s on %s: no reject recorded", ip, host)
 		}
 		r := capt.rejects[before]
-		// The line as logged ends with the PTR and then the reason, so no
-		// field a parser already reads moves.
+		// The line as logged ends with the PTR, then the reason, then the
+		// verify scope, so no field a parser already reads moves.
 		wantTail := " ptr=" + r.PTR
 		if want != "" {
 			wantTail += " v2_waiver_miss=" + want
 		}
+		wantTail += " scope=web"
 		if line := r.RejectLine(); r.V2WaiverMiss != want || !strings.HasSuffix(line, wantTail) {
 			t.Fatalf("%s on %s: v2_waiver_miss=%q, line %q; want %q ending %q", ip, host, r.V2WaiverMiss, line, want, wantTail)
 		}

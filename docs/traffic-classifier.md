@@ -1054,7 +1054,8 @@ carries `tier=` so the log says whether entering the state armed v2.
 **What armed it — `v2_via=`.** `src=` can't say (it reads the entry's
 sticky reason), so every `v2=vhost` solve and reject line — and the
 `challenge_solved` / `challenge_v2_reject` rows (`payload.v2_via`) — carries
-`v2_via=manual|pin|auto:<source>` right after `v2=`. The FP-hunting query
+`v2_via=manual|pin|auto:<source>` (right after `v2=` on the solve line,
+after `src=` on the reject line). The FP-hunting query
 for the auto arm is `detection_history type=challenge_v2_reject` filtered on
 `v2_via` starting `auto:`. The grain stays `v2=vhost`, so the
 good-bot waiver applies exactly as for a manual v2 arm, and `src=` says
@@ -1117,8 +1118,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   path only). Only under a geo or vhost arm, the grains the decision-time
   exemption already softens; a fingerprint policy or a traffic-rule/WAF mark
   stays strict. The history row carries it as `v2_waived`. The mirror image
-  on a `result=v2_reject` line is `v2_waiver_miss=<why not>`, last on the
-  line and only when the client's PTR claims a crawler: `grain` (the arm is a
+  on a `result=v2_reject` line is `v2_waiver_miss=<why not>`, after the geo
+  fields and only when the client's PTR claims a crawler: `grain` (the arm is a
   fingerprint policy or a mark — never waived), `mark` (a geo/vhost arm, but
   a mark covers the client too), `off` (`CHALLENGE_GOODBOT_EXEMPT = 0`),
   `spoofed` (the forward-confirm didn't match), `timeout` (no verify slot in
@@ -1138,11 +1139,12 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   built by the same payload builder as `challenge_solved`, so the two
   populations compare field for field — `detection_history
   type=challenge_v2_reject node="all"` is the fleet FP-hunting query. Every
-  solve and reject line also carries `cc=`/`asn=`/`asn_name=`/`ptr=` — at the
-  end of the reject line (only `v2_waiver_miss=` follows them) and of the
-  fallback solved writer, and just before
-  the legacy ` - (AS…, Country)` tail on the hook-written solved line, which
-  stays last for tooling that reads it. That is the client's network
+  solve and reject line also carries `cc=`/`asn=`/`asn_name=`/`ptr=` — after
+  the fields older parsers read: on the reject line followed by
+  `v2_waiver_miss=`, `src=`, `v2_via=` and `scope=`, on the fallback solved
+  line by `src=` and `scope=`, and on the hook-written solved line by `src=`,
+  `scope=` and the legacy ` - (AS…, Country)` tail, which stays last for
+  tooling that reads it. That is the client's network
   identity, resolved ONCE at verify without ever blocking it: country/ASN from
   a live mmdb read (the enricher's cached record can be up to a day stale),
   PTR from the cached-or-async path. Each key is absent when unresolved — and
@@ -1169,7 +1171,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   abuse-shadow parser: `cc=` `asn=` `provider=` `ptr=` `ua_family=` `ua_bot=1`
   (the UA self-declares a bot — unverified) and `src=`. The `abuse_shadow` MCP
   tool aggregates them in its `humanity` section (`by_src_kind`, `by_src`,
-  `by_fp`, `by_provider`, `by_ptr_domain`, …).
+  `by_fp`, `by_provider`, `by_ptr_domain`, `by_scope`, …). Since 2026-09-29
+  `scope=` rides last (see below).
 - **`src=` — challenge provenance** (`challenge_src.go`, 2026-09-23): a
   snapshot, taken at verify, of every source covering (ip, host) then —
   `waf:<rule id>`, `ip:<detector rule>`, `vhost:<manual|vhost_config|suspicious_vhost|uniqpaths_short>`,
@@ -1182,6 +1185,17 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   cover this solve". It exists to size a new v2 arm (e.g. auto vhost
   challenge at v2) from real would-rejects before turning it on — which is
   how the auto-v2 default above was sized.
+- **`scope=` — the verify surface** (2026-09-29): `web`, or `panel:<port>`
+  for a panel port's human-entry challenge (`clearanceScope`, resolved once at
+  verify). It is last on the reject and would_v2 lines, and after `src=` on the
+  solve line (before only the hook line's legacy free-text tail). It is also
+  `payload.scope` on both rows, stripped for scoped callers (a `panel:2087`
+  on a tenant's row would name a WHM user: operator data). It matters
+  because the rung marks count only on a web-scope verify (`v2=mark` can never
+  appear beside `scope=panel:…`), and only a web-scope solve releases the IP's
+  bridge decision, so without it a panel solve reads exactly like a web one.
+  Absent = a line or row from a daemon that predates it. The `abuse_shadow`
+  `humanity` section counts it as `by_scope`. LOG-ONLY.
 - **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls
   into cfm-web's `fingerprints` ledger as another per-client tell. The
   `challenge_solved` row carries `hs`, `tells`, `v2` (the arm grain),

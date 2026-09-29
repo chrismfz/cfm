@@ -76,7 +76,7 @@ type Entry struct {
 	// Humanity (ChallengeV2 Rung 1) would_v2 metrics
 	// (internal/webdetector/challenge_server.go): a solve that WOULD have been
 	// rejected had a challenge_v2 arm covered it. hs/tells are always present;
-	// the context keys (ptr/ua_family/ua_bot/src, plus cc/asn/provider above)
+	// the context keys (ptr/ua_family/ua_bot/src/scope, plus cc/asn/provider above)
 	// ride only on lines from daemons that write them — an older line simply
 	// lacks them. Zero/empty when the line is a different signal.
 	HS       int    `json:"hs,omitempty"`        // humanity score
@@ -85,6 +85,7 @@ type Entry struct {
 	UAFamily string `json:"ua_family,omitempty"` // uaplausible family ("-" → "")
 	UABot    bool   `json:"ua_bot,omitempty"`    // the UA SELF-DECLARES a bot (unverified)
 	Src      string `json:"src,omitempty"`       // challenge provenance snapshot ("-" = none covered)
+	Scope    string `json:"scope,omitempty"`     // verify surface: web / panel:<port>
 }
 
 // Parse extracts an Entry from one log line. Returns ok=false for a line that
@@ -177,6 +178,8 @@ func Parse(line string) (Entry, bool) {
 			e.UABot = v == "1"
 		case "src":
 			e.Src = v // "-" kept: it means "resolved, none covered", not absent
+		case "scope":
+			e.Scope = v
 		}
 	}
 	if !got || e.Signal == "" {
@@ -257,8 +260,8 @@ type Summary struct {
 	ChallengeScore *ChalScoreSummary `json:"challenge_score,omitempty"`
 
 	// Humanity would_v2 breakdown — the solves ChallengeV2 Rung 1 WOULD have
-	// rejected had an arm covered them, split by what challenged them (src) and
-	// who they are. This is the sizing view for any new v2 arm: e.g. how many
+	// rejected had an arm covered them, split by what challenged them (src),
+	// where they solved (scope) and who they are. This is the sizing view for any new v2 arm: e.g. how many
 	// would-rejects an auto-vhost v2 arm would add (by_src_kind "vhost") and
 	// who they are (by_provider / by_ptr_domain / ua_bot). Omitted when no
 	// would_v2 line fired in the window. See HumanitySummary.
@@ -283,6 +286,7 @@ type HumanitySummary struct {
 	ByProvider    []kv `json:"by_provider"`
 	ByCountry     []kv `json:"by_country"`
 	ByPTRDomain   []kv `json:"by_ptr_domain"` // last two PTR labels; "(none)" = context line without a PTR
+	ByScope       []kv `json:"by_scope"`      // verify surface: web / panel:<port>; "(unknown)" = line predates scope=
 }
 
 // ChalScoreSummary is the per-IP challenge_score signal's dedicated view. The
@@ -378,6 +382,7 @@ func Summarize(lines []string) Summary {
 	humProvider := map[string]int{}
 	humCountry := map[string]int{}
 	humPTR := map[string]int{}
+	humScope := map[string]int{}
 
 	for _, ln := range lines {
 		e, ok := Parse(ln)
@@ -563,6 +568,11 @@ func Summarize(lines []string) Summary {
 			if e.Src != "" {
 				humPTR[ptrDomain(e.PTR)]++
 			}
+			if e.Scope != "" {
+				humScope[e.Scope]++
+			} else {
+				humScope["(unknown)"]++
+			}
 		}
 		switch e.Verdict {
 		case "would_challenge":
@@ -603,6 +613,7 @@ func Summarize(lines []string) Summary {
 		hum.ByProvider = topKV(humProvider, 20)
 		hum.ByCountry = topKV(humCountry, 20)
 		hum.ByPTRDomain = topKV(humPTR, 20)
+		hum.ByScope = topKV(humScope, 10)
 		s.Humanity = &hum
 	}
 	s.UniqueHosts = len(hosts)

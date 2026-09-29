@@ -228,7 +228,7 @@ func TestHistoryEventsRedactsPTRForScopedCallers(t *testing.T) {
 			Type: "challenge_v2_reject", Host: "shop.example.com", IP: "203.0.113.30",
 			Payload: map[string]interface{}{
 				"ptr": "ppp.otenet.gr", "country": "Greece", "country_iso": "GR",
-				"asn": 6799, "asn_name": "OTEnet S.A.", "hs": 130,
+				"asn": 6799, "asn_name": "OTEnet S.A.", "hs": 130, "scope": "panel:2083",
 			},
 		}}
 	}
@@ -237,6 +237,10 @@ func TestHistoryEventsRedactsPTRForScopedCallers(t *testing.T) {
 	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(scopedCtx("shop.example.com")), scoped)
 	if _, present := scoped[0].Payload["ptr"]; present {
 		t.Errorf("ptr must not cross the scoped boundary")
+	}
+	// panel:2087 on a tenant's row would name a WHM (operator/reseller) user.
+	if _, present := scoped[0].Payload["scope"]; present {
+		t.Errorf("scope must not cross the scoped boundary")
 	}
 	// enrich=1 already hands country/ASN to scoped callers: not a new category.
 	for _, k := range []string{"country", "country_iso", "asn", "asn_name", "hs"} {
@@ -247,8 +251,8 @@ func TestHistoryEventsRedactsPTRForScopedCallers(t *testing.T) {
 
 	admin := row()
 	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(adminCtx()), admin)
-	if admin[0].Payload["ptr"] != "ppp.otenet.gr" {
-		t.Errorf("admin must still receive ptr")
+	if admin[0].Payload["ptr"] != "ppp.otenet.gr" || admin[0].Payload["scope"] != "panel:2083" {
+		t.Errorf("admin must still receive ptr and scope")
 	}
 }
 

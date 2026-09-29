@@ -515,6 +515,16 @@ type ChallengeSolve struct {
 	// it never decides anything.
 	Src         []string
 	SrcResolved bool
+	// Scope is the surface the solve was verified on: "web", or
+	// "panel:<port>" for a panel port's human-entry challenge (clearanceScope,
+	// read once at verify). The same value decides whether a rung mark covers
+	// the solve and whether a passing solve releases the IP's bridge decision
+	// (web only); this field only records it, so a panel solve no longer reads
+	// exactly like a web one. Rendered as scope= on the solve and reject lines
+	// (ScopeSuffix) and on the would_v2 line (ShadowContextSuffix), and as
+	// payload.scope on the history rows; "" (a literal that never went through
+	// verify) renders nothing.
+	Scope string
 	// V2Waived is the FCrDNS-verified good bot whose verdict waived a FAILING
 	// solve under an arm ("" = not waived): the D5 gate let it through instead
 	// of rejecting (challengeV2GoodBot). Rendered as v2_waived=<name>.
@@ -571,6 +581,35 @@ func (s ChallengeSolve) SolveLatencyMS() (int64, bool) {
 		return 0, false
 	}
 	return s.SolveMS, true
+}
+
+// ScopeSuffix renders " scope=<web|panel:port>" (Scope) for a [challenge]
+// line about the solve, "" when unset. It rides after every field a parser
+// already reads — after src= (and v2_via= on the reject line); on the
+// solved-hook line only the legacy free-text tail follows it.
+func (s ChallengeSolve) ScopeSuffix() string {
+	if s.Scope == "" {
+		return ""
+	}
+	return " scope=" + logToken(s.Scope)
+}
+
+// SolvedLine is the result=solved line the challenge server writes itself
+// when no solved hook is installed (the detectors layer's hook writes its own,
+// with the bridge reason and the legacy geo tail). It mirrors the hook
+// writer's rendering so the two agree: solve_ms goes through SolveLatencyMS()
+// with a "-" sentinel (a raw %d would log solve_ms=0 for an
+// unknown/clock-stepped solve and read as an instantaneous,
+// maximally-suspicious one), and ua= carries the raw UA so a ua_family=- row
+// is still interpretable.
+func (s ChallengeSolve) SolvedLine() string {
+	solveMS := "-"
+	if ms, ok := s.SolveLatencyMS(); ok {
+		solveMS = strconv.FormatInt(ms, 10)
+	}
+	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s",
+		s.IP, s.Host, s.URI, s.VerifyMS, solveMS, s.Diff, s.TLSFingerprintOrDash(), s.UAFamilyOrDash(), s.UA,
+		s.HumanitySuffix(), s.GeoSuffix(), s.SrcSuffix(), s.ScopeSuffix())
 }
 
 // ChallengeSolvedHook lets the detectors layer log solved/expired in a unified way.
@@ -853,6 +892,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			sig:               hsSig.sigFields(),
 			V2Grain:           v2Grain,
 			V2Via:             v2Via,
+			Scope:             scope,
 		}
 		// Network identity, once, before the gate below — so a rejected solve
 		// carries it too. Never blocks verify: country/ASN are a live mmdb
@@ -962,30 +1002,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		if challengeSolvedHook != nil {
 			challengeSolvedHook(solve)
 		} else {
-			// Mirror the hook writer's rendering so the two solve-line writers agree:
-			// solve_ms goes through SolveLatencyMS() with a "-" sentinel (a raw %d
-			// would log solve_ms=0 for an unknown/clock-stepped solve and read as an
-			// instantaneous, maximally-suspicious one), and ua= carries the raw UA so
-			// a ua_family=- row is still interpretable.
-			solveMS := "-"
-			if ms, ok := solve.SolveLatencyMS(); ok {
-				solveMS = strconv.FormatInt(ms, 10)
-			}
-			logging.LogfCHALLENGES(
-				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s",
-				solve.IP,
-				solve.Host,
-				solve.URI,
-				solve.VerifyMS,
-				solveMS,
-				solve.Diff,
-				solve.TLSFingerprintOrDash(),
-				solve.UAFamilyOrDash(),
-				solve.UA,
-				solve.HumanitySuffix(),
-				solve.GeoSuffix(),
-				solve.SrcSuffix(),
-			)
+			logging.LogfCHALLENGES("%s", solve.SolvedLine())
 		}
 
 		// Release the solved IP. In edge/OpenResty mode this only clears the bridge

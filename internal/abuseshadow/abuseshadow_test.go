@@ -369,9 +369,9 @@ func TestSummarizePerSignalRanking(t *testing.T) {
 // count as "(unknown)", never as "none covered".
 func TestSummarizeHumanityWouldV2(t *testing.T) {
 	lines := []string{
-		"2026-09-23 06:01:23 [abuse-shadow] signal=humanity host=a.gr ip=66.102.9.230 hs=140 tells=sw_renderer,touch_lie,no_input fp=c41a0f3f verdict=would_v2 cc=US asn=15169 provider=google ptr=rate-limited-proxy-66-102-9-230.google.com ua_family=Chrome src=vhost:suspicious_vhost",
-		"2026-09-23 06:02:00 [abuse-shadow] signal=humanity host=a.gr ip=216.73.217.117 hs=190 tells=webdriver,sw_renderer,no_input fp=c28caa00 verdict=would_v2 cc=US asn=16509 provider=amazon-aws ua_family=Chrome ua_bot=1 src=vhost:suspicious_vhost,ip:CHALLENGE_ERR_RATIO",
-		"2026-09-23 06:03:00 [abuse-shadow] signal=humanity host=b.gr ip=48.47.30.107 hs=130 tells=sw_renderer,outer_zero,no_input fp=c28caa00 verdict=would_v2 ua_family=Chrome src=waf:302",
+		"2026-09-23 06:01:23 [abuse-shadow] signal=humanity host=a.gr ip=66.102.9.230 hs=140 tells=sw_renderer,touch_lie,no_input fp=c41a0f3f verdict=would_v2 cc=US asn=15169 provider=google ptr=rate-limited-proxy-66-102-9-230.google.com ua_family=Chrome src=vhost:suspicious_vhost scope=web",
+		"2026-09-23 06:02:00 [abuse-shadow] signal=humanity host=a.gr ip=216.73.217.117 hs=190 tells=webdriver,sw_renderer,no_input fp=c28caa00 verdict=would_v2 cc=US asn=16509 provider=amazon-aws ua_family=Chrome ua_bot=1 src=vhost:suspicious_vhost,ip:CHALLENGE_ERR_RATIO scope=web",
+		"2026-09-23 06:03:00 [abuse-shadow] signal=humanity host=b.gr ip=48.47.30.107 hs=130 tells=sw_renderer,outer_zero,no_input fp=c28caa00 verdict=would_v2 ua_family=Chrome src=waf:302 scope=panel:2083",
 		"2026-09-23 06:04:00 [abuse-shadow] signal=humanity host=b.gr ip=48.47.30.108 hs=130 tells=sw_renderer,outer_zero,no_input fp=- verdict=would_v2 ua_family=- src=-",
 		// Pre-context line (older daemon): no src=.
 		"2026-09-22 06:04:00 [abuse-shadow] signal=humanity host=c.gr ip=198.51.100.1 hs=100 tells=webdriver fp=95070673 verdict=would_v2",
@@ -409,6 +409,10 @@ func TestSummarizeHumanityWouldV2(t *testing.T) {
 	}
 	if get(h.ByProvider, "amazon-aws") != 1 || get(h.ByProvider, "google") != 1 {
 		t.Fatalf("by_provider: %+v", h.ByProvider)
+	}
+	// Two lines predate scope= (no key): "(unknown)", never a guessed "web".
+	if get(h.ByScope, "web") != 2 || get(h.ByScope, "panel:2083") != 1 || get(h.ByScope, "(unknown)") != 2 {
+		t.Fatalf("by_scope: %+v", h.ByScope)
 	}
 	// PTR grouping covers attributable lines only; no PTR → "(none)".
 	if get(h.ByPTRDomain, "google.com") != 1 || get(h.ByPTRDomain, "(none)") != 3 {

@@ -44,9 +44,10 @@ type historyEventView struct {
 // sees on this surface. The ONE list — docs/endpoint_scope_inventory.md mirrors
 // it; redactScopedHistoryRows explains each entry.
 var scopedRedactedPayloadKeys = map[string]struct{}{
-	"sig": {},
-	"ptr": {},
-	"src": {},
+	"sig":   {},
+	"ptr":   {},
+	"src":   {},
+	"scope": {},
 }
 
 // hasScopedRedactedKey reports whether a payload carries any key in
@@ -64,7 +65,7 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // (scopedRedactedPayloadKeys) from history rows before they leave the endpoint
 // for a SCOPED (cPanel) caller. Admin callers see the rows untouched.
 //
-// Three keys today. The first is payload.sig — the ChallengeV2 Rung-1 device readings
+// Four keys today. The first is payload.sig — the ChallengeV2 Rung-1 device readings
 // (hardwareConcurrency, deviceMemory, devicePixelRatio, pointer/touch/key
 // counts) collected by CFM's own challenge page. A tenant could measure the
 // same things from their own site's JS, so this is not a secret; it is
@@ -94,6 +95,12 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // admin-armed fingerprint or country/ASN policy covers this visitor, and
 // `rule:<id>` names an operator traffic rule. Closed by default for the same
 // reason as sig; the sizing readout it exists for is admin/MCP.
+//
+// The fourth is payload.scope — the surface the solve was verified on (web /
+// panel:<port>). On a tenant's row a `panel:2087` says the visitor IP used
+// WHM through the tenant's hostname: in practice the operator's or a
+// reseller's admin address, not tenant data. Closed by default like the
+// others; telling panel solves apart is an admin/MCP readout.
 //
 // The payload map is copied rather than edited so the caller's own map is
 // never mutated, but note the LIMIT of that: the slice element is reassigned
