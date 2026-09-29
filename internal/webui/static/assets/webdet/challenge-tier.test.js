@@ -139,6 +139,12 @@ test("a manual v2 arm over an automatic v2 drops to v1 in one click: re-tier + p
   const locked = { ...s, rung_pin_locked: true };
   assert.equal(tierSwitchRequests("a.gr", locked, "v1").length, 1);
   assert.match(tierButtonTitle(locked, "a.gr"), /stay at v2/);
+  // An existing pin already decides the automatic tier: no companion pin
+  // (it would replace e.g. an operator's standing v2 pin with one that
+  // expires with the arm).
+  const pinned = { ...s, rung_pin: "v2" };
+  assert.equal(tierSwitchRequests("a.gr", pinned, "v1").length, 1);
+  assert.match(tierButtonTitle(pinned, "a.gr"), /v2 pin holds/);
   // No automatic v2 underneath: one call.
   assert.equal(tierSwitchRequests("a.gr", { ...s, rung_auto: "" }, "v1").length, 1);
 });

@@ -80,7 +80,10 @@ export function tierSwitchRequest(host, s, to) {
 // an automatic source also holds it there (rung_auto "v2") — the switch then
 // pins the automatic tier to v1 as well, when the caller may.
 export function tierAlsoPinsV1(s, to) {
-  return Boolean(s && to === "v1" && !tierSwitchIsPin(s) && s.rung_auto === "v2" && !s.rung_pin_locked);
+  // Never over an existing pin: a pin already decides the automatic tier (an
+  // operator's standing v2 pin must not be replaced by a companion that
+  // expires with the arm — change that pin explicitly instead).
+  return Boolean(s && to === "v1" && !tierSwitchIsPin(s) && s.rung_auto === "v2" && !s.rung_pin_locked && !s.rung_pin);
 }
 
 // companionPinTTL: the v1 pin that accompanies a manual v2→v1 switch lives as
@@ -164,7 +167,9 @@ export function tierButtonTitle(s, host) {
       return "Switch this manual challenge to plain v1 AND pin the automatic tier to v1 for as long as the arm lasts — an automatic source also holds it at v2 (keeps the arm's expiry)";
     }
     if (to === "v1" && s.rung_auto === "v2") {
-      return "Switch this manual challenge to v1 — solves stay at v2 while the automatic source holds it (the pin is the operator's)";
+      return s.rung_pin
+        ? `Switch this manual challenge to v1 — solves stay at v2 while the ${s.rung_pin} pin holds the automatic tier (change or remove that pin separately)`
+        : "Switch this manual challenge to v1 — solves stay at v2 while the automatic source holds it (the pin is the operator's)";
     }
     return to === "v1"
       ? "Switch this manual challenge back to plain v1 (keeps its expiry)"

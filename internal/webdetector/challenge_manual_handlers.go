@@ -664,8 +664,8 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 	// writes no row) is still live and still carries a tier: report it as
 	// auto-active, or the pages drop the host — and its "→ v1 (pin)"
 	// emergency control — while its solves are held to v2.
-	if !autoActive && (tier.Source == tierSourceAuto || tier.Source == tierSourcePin) {
-		autoActive = true
+	if !autoActive && tier.Trigger != "" && tier.Trigger != autoV2UnderAttack {
+		autoActive = true // a real automatic challenge (not a bare under_attack note)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"host":          host,

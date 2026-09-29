@@ -1265,8 +1265,14 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 e.nginxBridge.ChallengeVhostWithReason(pat, vttl, "vhost_config")
                 // The auto-v2 source for it too — the list is pushed for every
                 // listed host, candidate or not (a quiet listed apex still has
-                // its www. challenged through the expansion).
-                e.nginxBridge.NoteVhostAutoSource(pat, autoV2VhostConfig, e.autoSourceNoteTTL())
+                // its www. challenged through the expansion). Concrete hosts
+                // only: the resolver reads notes by host (and www→apex), so a
+                // pattern key would only make the pattern's own list row claim
+                // a tier no matching host gets; wildcard-matched hosts are
+                // noted as the tick evaluates them.
+                if !strings.Contains(pat, "*") {
+                    e.nginxBridge.NoteVhostAutoSource(pat, autoV2VhostConfig, e.autoSourceNoteTTL())
+                }
             }
         }
 
