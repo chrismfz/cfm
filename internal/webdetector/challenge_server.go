@@ -28,8 +28,14 @@ import (
 )
 
 const (
-	verifyPath    = "/__cfm_verify" // new preferred endpoint
-	verifyPathOld = "/verify"       // legacy (keep during rollout)
+	// verifyPath is the ONLY verify route. The legacy "/verify" alias was
+	// removed 2026-09-29: nothing posted to it any more, and on the web
+	// listener it was reached through cfm.lua's generic challenge proxy, which
+	// does not clear or re-stamp the verify inputs (X-CFM-Panel-Port /
+	// X-Forwarded-Port / X-CFM-TLS / X-Forwarded-Host) the way the exact
+	// `location = /__cfm_verify` blocks do — so a client could choose its own
+	// scope and fingerprint there.
+	verifyPath    = "/__cfm_verify"
 	challengePath = "/__cfm_challenge"
 )
 
@@ -251,7 +257,7 @@ func (s *ChallengeServer) wrapAccessLog(next http.Handler) http.Handler {
 		if path == "" {
 			path = "/"
 		}
-		if sw.status >= 400 || path == verifyPath || path == verifyPathOld {
+		if sw.status >= 400 || path == verifyPath {
 			ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))
 			if ip == "" {
 				ip = strings.TrimSpace(r.Header.Get("X-Real-IP"))
@@ -733,7 +739,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			http.Error(w, "missing forwarded host", http.StatusBadRequest)
 			return
 		}
-		if r.URL.Path == verifyPath || r.URL.Path == verifyPathOld || r.URL.Path == challengePath {
+		if r.URL.Path == verifyPath || r.URL.Path == challengePath {
 			if strings.HasPrefix(clearanceScope(r), "panel:") && normalizeForwardedPort(r.Header.Get("X-Forwarded-Port")) == "" {
 				http.Error(w, "missing forwarded port", http.StatusBadRequest)
 				return
@@ -1048,12 +1054,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 
 	}
 
-	// New endpoint + legacy alias.
 	mux.HandleFunc(verifyPath, verifyHandler)
-	mux.HandleFunc(verifyPathOld, verifyHandler)
 
 	// --- CATCH-ALL: handle any path ---
-	// Important: register after /hello,/healthz,/verify.
+	// Important: register after /hello,/healthz,/__cfm_verify.
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 
@@ -1123,7 +1127,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			return
 		}
 		// let existing endpoints win (ServeMux does this anyway)
-		if r.URL.Path == "/hello" || r.URL.Path == "/healthz" || r.URL.Path == verifyPath || r.URL.Path == verifyPathOld {
+		if r.URL.Path == "/hello" || r.URL.Path == "/healthz" || r.URL.Path == verifyPath {
 			http.NotFound(w, r)
 			return
 		}

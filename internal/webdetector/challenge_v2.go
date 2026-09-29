@@ -90,12 +90,14 @@ package webdetector
 //   - The verify's SCOPE (clearanceScope: X-CFM-Panel-Port / X-Forwarded-Port)
 //     is edge-authoritative the same way: the panel listeners stamp their
 //     port and, since 2026-09-29, the web /__cfm_verify locations clear both
-//     headers. It decides whether a rung mark counts (web only) and whether a
-//     solve releases the IP's bridge decision (web only). Residual, on a
-//     deployed web conf predating that clear: a client claiming a panel port
-//     skips the mark grain, but only earns a panel-scope cookie and releases
-//     nothing — telemetry noise (the solve reads unarmed), not a way past a
-//     web challenge.
+//     headers, and the legacy "/verify" alias (reachable through cfm.lua's
+//     generic challenge proxy, which clears none of them) is gone. It decides
+//     whether a rung mark counts (web only) and whether a solve releases the
+//     IP's bridge decision (web only). Residual, on a deployed web conf
+//     predating that clear: a client claiming a panel port skips the mark
+//     grain, but only earns a panel-scope cookie and releases nothing —
+//     telemetry noise (the solve reads unarmed), not a way past a web
+//     challenge.
 //   - An FCrDNS-verified good bot is WAIVED at the gate (v2_waived=<name>),
 //     under the same CHALLENGE_GOODBOT_EXEMPT that exempts it from the
 //     challenge at decision time — and ONLY under the grains that exemption
@@ -317,6 +319,12 @@ func ConfigureChallengeV2HWTells(on bool) {
 // panel-scope solve also releases nothing (challenge_server.go), so it cannot
 // lift a WAF challenge the web edge set.
 //
+// A WAF mark arms EVERY web-scope solve from the IP for its 15 minutes — also
+// one that answers a challenge the WAF did not impose (a v1 vhost or rule
+// challenge, the fingerprint floor), or comes after the IP's decision was
+// released or expired. So `v2=mark` beside `src=vhost:…` is expected, not a
+// bug. Humans pay nothing for it (D5b).
+//
 // Don't make a passing solve consume a mark. After a solve on host B, a re-hit
 // on host A is challenged inline, but should_push's cooldown suppresses the
 // re-push, so only the surviving mark keeps that host-A solve at v2.
@@ -346,7 +354,7 @@ var challengeV2Marks = pairTTLStore[struct{}]{
 	m:       map[string]time.Time{},
 	ttl:     challengeV2MarkTTL,
 	maxKeys: challengeV2MarkMaxKeys,
-	fullMsg: "[challenge_v2] per-(ip,host) mark store full (%d) — new v2 marks degrade to plain challenge until pressure drops",
+	fullMsg: "[challenge_v2] per-(ip,host) traffic-rule mark store full (%d) — new traffic-rule v2 marks degrade to plain challenge until pressure drops",
 }
 
 // challengeV2MarkKey canonicalizes the (ip, host) pair into the store key.

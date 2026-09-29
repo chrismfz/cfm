@@ -62,7 +62,10 @@ so it cannot lift a WAF challenge the web edge set. The scope comes from
 the web `/__cfm_verify` locations clear them, so a client cannot claim a panel
 scope on the web listener (`TestVerifyLocations_*` pins both). A WAF mark also withholds
 the good-bot waiver on every web host of the IP for its 15 minutes (a WAF
-challenge never softens for bots). Semantics to know:
+challenge never softens for bots), and it arms every web solve from that IP
+in that window — also one that answers a challenge the WAF did not impose —
+so `v2=mark` beside `src=vhost:…` is expected. The legacy `/verify` alias is
+gone (it bypassed the verify location's header clears). Semantics to know:
 
 - **Set per rule** via `/etc/cfm/cfm_waf_config.lua`
   (`return { rule_<name> = "challenge_v2" }`). Since **2026-09-23 the entire

@@ -330,3 +330,35 @@ func TestVerify_WAFMarkBarsTheWaiverOnWebScopeOnly(t *testing.T) {
 		t.Fatalf("solved=%d rejects=%d %+v, want the panel solve waived under the vhost grain", solved, rejects, capt.solved)
 	}
 }
+
+// The legacy "/verify" alias is gone: on the web listener it was reached
+// through cfm.lua's generic challenge proxy, which does not clear the verify
+// inputs, so a client could claim a panel scope (and a fingerprint) there. A
+// genuine, fully solved POST to it must not be treated as a verify at all.
+func TestVerify_LegacyVerifyAliasIsNotAVerifyRoute(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test-wafv2legacy.sock", "tok", time.Minute, time.Minute)
+	base, capt := startVerifyServerWithBridge(t, b)
+	const (
+		ip = "203.0.113.91"
+		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	)
+	if code := postIPPush(t, b, `{"ip":"`+ip+`","action":"challenge_v2","host":"shop.example","reason":"WAF_XSS","waf_rule_id":302,"ttl_sec":600}`); code != http.StatusOK {
+		t.Fatalf("push rejected: %d", code)
+	}
+	panel := map[string]string{"X-CFM-Panel-Port": "2083", "X-Forwarded-Port": "2083"}
+	resp := postVerifyAt(t, base, "/verify", ip, "shop.example", ua, `{"v":1,"wd":true,"glr":"Google SwiftShader","ptr":0,"tch":0,"key":0}`, panel)
+	for _, c := range resp.Cookies() {
+		if strings.HasPrefix(c.Name, "cfm_clearance") && c.MaxAge > 0 {
+			t.Fatalf("POST /verify issued a clearance cookie %q", c.Name)
+		}
+	}
+	if solved, rejects := capt.counts(); solved != 0 || rejects != 0 {
+		t.Fatalf("POST /verify reached the verify handler: solved=%d rejects=%d", solved, rejects)
+	}
+	b.mu.Lock()
+	_, ok := b.ipState[ip]
+	b.mu.Unlock()
+	if !ok {
+		t.Fatalf("POST /verify released the IP's WAF decision")
+	}
+}

@@ -86,9 +86,10 @@ back-filled here — see the git/PR history for that period.
   panel login challenge itself is no longer put at v2 by a mark (it could be,
   for the same site), and the edge's web verify now clears the panel-port
   headers so a client cannot claim to be on a panel port (`openresty.conf` /
-  `angie.conf`, deployed with the package). For
-  15 minutes after a WAF `challenge_v2` hit, a verified crawler from that IP
-  is not waived on any site of the node (it used to be only the one site).
+  `angie.conf`, deployed with the package); the old `/verify` alias, which
+  skipped that clear, is removed. For 15 minutes after a WAF `challenge_v2`
+  hit, a verified crawler from that IP is not waived on any web site of the
+  node (it used to be only the one site).
   Traffic-rule `challenge_v2` stays per site, which is how that challenge is
   served.
 
