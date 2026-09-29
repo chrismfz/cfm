@@ -1711,8 +1711,9 @@ func tierDescription(rung, source, trigger, pin string) string {
 //
 // Pins the tier of AUTOMATIC challenges on a vhost: v1 = never v2 here (the
 // emergency "drop it back to v1"), v2 = always v2, auto = remove the pin so
-// CHALLENGE_V2_AUTO_VHOST decides. A manual arm keeps its own tier (switch it
-// with the cfm-admin tier button or /api/v1/challenge/vhost/rung).
+// CHALLENGE_V2_AUTO_VHOST decides. A manual arm at v2 stays v2 (switch it with
+// the cfm-admin tier button or /api/v1/challenge/vhost/rung); one at v1 never
+// downgrades an automatic v2.
 func runChallengeTier(baseURL string, args []string) error {
 	base := strings.TrimRight(baseURL, "/")
 	if len(args) == 0 || args[0] == "list" {

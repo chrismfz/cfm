@@ -107,7 +107,8 @@ Automatic vhost challenges run at v2 when their source is in
 `CHALLENGE_V2_AUTO_VHOST`. A pin overrides that per vhost: `v1` is the
 emergency drop-back, `v2` forces the tier, `auto` removes the pin. Optional
 `ttl` (none = until cleared; scoped tokens are capped at 24h). The response's
-`tier` is the effective result (a manual arm keeps its own tier).
+`tier` is the effective result (a manual arm at v2 stays v2; one at v1 never
+downgrades an automatic v2).
 
 ```bash
 HOST="example.com"

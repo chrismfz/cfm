@@ -13,8 +13,9 @@ import (
 )
 
 // Auto-v2: an AUTOMATIC vhost challenge runs at the v2 tier when its source is
-// in CHALLENGE_V2_AUTO_VHOST, a per-host tier pin overrides that, and a manual
-// arm keeps its own tier — all through the one resolver the verify gate reads.
+// in CHALLENGE_V2_AUTO_VHOST, a per-host tier pin overrides that, a manual v2
+// arm is v2 and a manual v1 arm never downgrades — all through the one
+// resolver the verify gate reads.
 
 func newAutoV2TestEngine(t *testing.T, armed ...string) *Engine {
 	t.Helper()
@@ -35,20 +36,31 @@ func setVhostEntry(e *Engine, host, reason string) {
 }
 
 func TestParseChallengeV2AutoVhost(t *testing.T) {
-	armed, unknown := ParseChallengeV2AutoVhost(DefaultChallengeV2AutoVhost)
-	if strings.Join(armed, ",") != "suspicious_vhost,uniqpaths_short,under_attack" || len(unknown) != 0 {
-		t.Fatalf("default: armed=%v unknown=%v", armed, unknown)
+	armed, unknown, off := ParseChallengeV2AutoVhost(DefaultChallengeV2AutoVhost)
+	if strings.Join(armed, ",") != "suspicious_vhost,uniqpaths_short,under_attack" || len(unknown) != 0 || off {
+		t.Fatalf("default: armed=%v unknown=%v off=%v", armed, unknown, off)
 	}
-	for _, off := range []string{"off", "none", "0", "-", "", "  OFF "} {
-		if armed, unknown := ParseChallengeV2AutoVhost(off); len(armed) != 0 || len(unknown) != 0 {
-			t.Fatalf("%q must arm nothing: %v %v", off, armed, unknown)
+	for _, v := range []string{"off", "none", "0", "-", "  OFF ", "no", `"off"`} {
+		if armed, unknown, off := ParseChallengeV2AutoVhost(v); len(armed) != 0 || len(unknown) != 0 || !off {
+			t.Fatalf("%q must be an explicit off: %v %v %v", v, armed, unknown, off)
 		}
 	}
+	// A blank value arms nothing but is NOT an explicit off (the register
+	// then keeps the default).
+	if armed, _, off := ParseChallengeV2AutoVhost(""); len(armed) != 0 || off {
+		t.Fatalf("blank: %v off=%v", armed, off)
+	}
 	// `off` anywhere is an explicit "no" — never a quiet partial arm.
-	if armed, _ := ParseChallengeV2AutoVhost("off,under_attack"); len(armed) != 0 {
+	if armed, _, off := ParseChallengeV2AutoVhost("off,under_attack"); len(armed) != 0 || !off {
 		t.Fatalf("off must win over other sources: %v", armed)
 	}
-	armed, unknown = ParseChallengeV2AutoVhost("Vhost_Config, suspicious_vhost suspicious_vhost,manual,bogus")
+	// on / 1 / default = the shipped set.
+	for _, v := range []string{"on", "1", "default"} {
+		if armed, _, _ := ParseChallengeV2AutoVhost(v); strings.Join(armed, ",") != DefaultChallengeV2AutoVhost {
+			t.Fatalf("%q must mean the default: %v", v, armed)
+		}
+	}
+	armed, unknown, _ = ParseChallengeV2AutoVhost("Vhost_Config, suspicious_vhost suspicious_vhost,manual,bogus")
 	if strings.Join(armed, ",") != "vhost_config,suspicious_vhost" {
 		t.Fatalf("case/dedupe: armed=%v", armed)
 	}
@@ -136,11 +148,22 @@ func TestChallengeV2VhostTier_PinAndManualPrecedence(t *testing.T) {
 		t.Fatalf("pin without a challenge must not arm: %+v", tier)
 	}
 
-	// A manual arm keeps its own tier over the knob AND the pin.
+	// A tier-less (v1) manual arm never DOWNGRADES an automatic v2: here the
+	// operator's v2 pin keeps applying — the scoped panic-button bypass the
+	// second review found. (A manual arm relabels the bridge entry "manual";
+	// the scorer's own state is what still names the automatic source.)
+	e.vhostUnderAttack = map[string]bool{"listed.gr": true}
 	e.ManualChallengeVhost("listed.gr", time.Hour, "manual", "")
-	if tier := e.challengeV2VhostTier("listed.gr"); tier.Rung != "" || tier.Source != tierSourceManual || tier.Pin != "v2" {
-		t.Fatalf("manual v1 must beat a v2 pin: %+v", tier)
+	setVhostEntry(e, "listed.gr", "manual")
+	if tier := e.challengeV2VhostTier("listed.gr"); tier.Rung != "v2" || tier.Source != tierSourcePin || tier.Trigger != "suspicious_vhost" {
+		t.Fatalf("manual v1 must not beat a v2 pin: %+v", tier)
 	}
+	// ...but with no automatic source behind it, the manual v1 arm is v1.
+	e.vhostUnderAttack = map[string]bool{}
+	if tier := e.challengeV2VhostTier("listed.gr"); tier.Rung != "" || tier.Source != tierSourceManual || tier.Pin != "v2" {
+		t.Fatalf("manual v1 alone: %+v", tier)
+	}
+	// A manual v2 arm beats a v1 pin.
 	e.ManualChallengeVhost("shop.gr", time.Hour, "manual", "v2")
 	if tier := e.challengeV2VhostTier("shop.gr"); tier.Rung != "v2" || tier.Source != tierSourceManual {
 		t.Fatalf("manual v2 must beat a v1 pin: %+v", tier)
@@ -152,6 +175,42 @@ func TestChallengeV2VhostTier_PinAndManualPrecedence(t *testing.T) {
 	setVhostEntry(e, "listed.gr", "vhost_config") // the manual clear dropped the bridge entry
 	if tier := e.challengeV2VhostTier("listed.gr"); tier.Rung != "" || tier.Source != tierSourceAuto || tier.Pin != "" {
 		t.Fatalf("cleared pin: %+v", tier)
+	}
+}
+
+func TestChallengeV2VhostTier_ManualV1NeverDowngrades(t *testing.T) {
+	e := newAutoV2TestEngine(t, autoV2SuspiciousVhost, autoV2UnderAttack)
+	e.attack = newUnderAttackTracker()
+	e.vhostUnderAttack = map[string]bool{"busy.gr": true}
+	// A tier-less "Challenge" click on an auto-v2 host relabels the entry.
+	e.ManualChallengeVhost("busy.gr", time.Hour, "cfm-admin-ui", "")
+	setVhostEntry(e, "busy.gr", "manual")
+	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "v2" || tier.Source != tierSourceAuto || tier.Trigger != "suspicious_vhost" {
+		t.Fatalf("manual v1 over auto-v2: %+v", tier)
+	}
+	// ...and the www variant through the apex scorer state.
+	setVhostEntry(e, "www.busy.gr", "manual")
+	if tier := e.challengeV2VhostTier("www.busy.gr"); tier.Rung != "v2" {
+		t.Fatalf("www of an auto-v2 apex under a manual arm: %+v", tier)
+	}
+	// Under attack: v2 even over a manual v1 arm.
+	e.vhostUnderAttack = map[string]bool{}
+	e.SetVhostAttackOverride("busy.gr", true, time.Now(), 0)
+	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "v2" || tier.Trigger != autoV2UnderAttack {
+		t.Fatalf("manual v1 under attack: %+v", tier)
+	}
+	// The way down is a v1 pin.
+	e.SetChallengeTierPinAs("busy.gr", "v1", 0, "admin")
+	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "" || tier.Source != tierSourceManual {
+		t.Fatalf("v1 pin under a manual v1 arm: %+v", tier)
+	}
+
+	// A CHALLENGE_VHOST-listed host the scorer ALSO flags is labelled
+	// vhost_config at the bridge; the scorer's state still arms it.
+	e.vhostUnderAttack = map[string]bool{"listed.gr": true}
+	setVhostEntry(e, "listed.gr", "vhost_config")
+	if tier := e.challengeV2VhostTier("listed.gr"); tier.Rung != "v2" || tier.Trigger != "suspicious_vhost" {
+		t.Fatalf("config-listed + suspicious: %+v", tier)
 	}
 }
 
@@ -210,20 +269,28 @@ func TestChallengeV2VhostTier_UnderAttackArms(t *testing.T) {
 func TestTierPinStore_ApplyIsAtomicAndSweeps(t *testing.T) {
 	var s tierPinStore
 	s.init("")
-	if prev, changed := s.apply("a.gr", "v1", 0, "admin"); prev != "" || !changed {
+	if _, prev, changed, _ := s.apply("a.gr", "v1", 0, "admin", nil, nil); prev != "" || !changed {
 		t.Fatalf("first pin: %q %v", prev, changed)
 	}
-	if prev, changed := s.apply("a.gr", "v1", 0, "admin"); prev != "v1" || changed {
+	if _, prev, changed, _ := s.apply("a.gr", "v1", 0, "admin", nil, nil); prev != "v1" || changed {
 		t.Fatalf("same pin must be a no-op: %q %v", prev, changed)
 	}
-	if _, changed := s.apply("none.gr", "", 0, ""); changed {
+	if _, _, changed, _ := s.apply("none.gr", "", 0, "", nil, nil); changed {
 		t.Fatalf("clearing an absent pin must be a no-op")
+	}
+	// Clearing a www. host acts on the apex pin covering it; the guards see
+	// THAT pin, inside the same lock as the write.
+	if target, _, changed, refusal := s.apply("www.a.gr", "", 0, "scoped", nil, func(p tierPin) bool { return p.Actor != "scoped" }); changed || refusal == "" || target != "a.gr" {
+		t.Fatalf("protected apex pin: target=%q changed=%v refusal=%q", target, changed, refusal)
+	}
+	if _, _, changed, refusal := s.apply("www.a.gr", "", 0, "admin", func(h string) bool { return h != "a.gr" }, nil); changed || refusal == "" {
+		t.Fatalf("out-of-scope clear target must be refused: %v %q", changed, refusal)
 	}
 	// An expired pin is dropped from the map on the next write.
 	s.mu.Lock()
 	s.pins["old.gr"] = tierPin{Rung: "v1", ExpiresAt: time.Now().Add(-time.Minute)}
 	s.mu.Unlock()
-	s.apply("b.gr", "v2", 0, "admin")
+	s.apply("b.gr", "v2", 0, "admin", nil, nil)
 	s.mu.RLock()
 	_, stale := s.pins["old.gr"]
 	s.mu.RUnlock()
@@ -240,10 +307,10 @@ func TestTierPinStore_PersistsAndExpires(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pins.json")
 	var s tierPinStore
 	s.init(path)
-	s.set("a.gr", "v1", 0, "admin")
-	s.set("b.gr", "v2", time.Hour, "scoped")
-	s.set("gone.gr", "v2", time.Hour, "admin")
-	s.clear("gone.gr")
+	s.apply("a.gr", "v1", 0, "admin", nil, nil)
+	s.apply("b.gr", "v2", time.Hour, "scoped", nil, nil)
+	s.apply("gone.gr", "v2", time.Hour, "admin", nil, nil)
+	s.apply("gone.gr", "", 0, "admin", nil, nil)
 
 	var r tierPinStore
 	r.init(path)

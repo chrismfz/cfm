@@ -508,7 +508,8 @@ already opened.
         sized from the week's `src=` corpus before shipping (36% of
         convicted-farm solves fail, ~0.06% of likely humans). A per-vhost
         tier pin (`v1`/`v2`/`auto` — API, CLI, cfm-admin) overrides the knob;
-        a manual arm keeps its own tier; one resolver
+        a manual v2 arm stays v2 and a manual v1 arm never downgrades an
+        automatic v2 (a scoped-bypass review finding); one resolver
         (`challengeV2VhostTier`) serves the gate and every surface. NEXT on
         this line: a Rung-2 "confirm you're human" fallback for a Rung-1
         reject under the vhost/geo grains only — it turns the deterministic

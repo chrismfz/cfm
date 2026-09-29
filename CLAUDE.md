@@ -619,9 +619,11 @@ persisted with the challenge — or, since 2026-09-29, an AUTOMATIC vhost
 challenge whose source is in `CHALLENGE_V2_AUTO_VHOST`, default
 `suspicious_vhost,uniqpaths_short,under_attack` (a D5 amendment: TTL'd by
 the challenge, sized from the `src=` corpus first), overridable per vhost by
-a persisted tier pin `v1|v2|auto`; ONE resolver, `challengeV2VhostTier`,
-serves the gate and every surface — never read the manual rung alone for
-"is this vhost v2"), and a per-(ip,host) rung mark with two writers — a
+a persisted tier pin `v1|v2|auto`; a manual v1 arm never downgrades an
+automatic v2 — that was a scoped bypass of an operator's v2 pin; ONE
+resolver, `challengeV2VhostTier`, serves the gate and every surface — never
+read the manual rung alone for "is this vhost v2"), and a per-(ip,host)
+rung mark with two writers — a
 traffic rule with action `challenge_v2` at decision time (slice B:
 rules-model.js and traffic_rules.go changed in the same PR, per the
 Simulate rule) and a WAF rule set to `"challenge_v2"` in cfm_waf_config.lua

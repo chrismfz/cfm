@@ -876,21 +876,32 @@ Of the 4 human-labelled fails, 2 carry `webdriver` (automation on a Greek
 line); the other 2 are `sw_renderer,outer_zero` on real input (`mv` 729 /
 341) — software-rendered machines, the known RDP/VDI residual. ~0.06%. The
 false reject is deterministic per device (a retry fails the same way), so
-what bounds it is the challenge's own TTL: an automatic challenge lapses and
-the host is unchallenged again. That is why the manual arm, the config list
-and the fingerprint/geo policies — all long-lived — are NOT in the default.
+what bounds it is the automatic challenge's LIFETIME — while the scorer keeps
+the vhost suspicious (plus holddown) or Under-Attack holds. That is not a
+fixed TTL: a vhost suspicious for days is at v2 for days, and the v1 pin is
+the per-vhost way out. The config list (permanent by nature) is therefore
+opt-in, and the fingerprint/geo policies stay explicit operator arms.
 
 **One resolver** (`challengeV2VhostTier`) answers "what tier is this vhost
 at", for the verify gate AND every surface (vhost list/status, controls
 rows, CLI):
 
-1. a manual arm covering the host → its own tier (beats all automation);
-2. no automatic source covering the host → no vhost tier;
+1. a manual arm at v2 → v2;
+2. no automatic source covering the host → the manual arm's v1, or no tier;
 3. a **tier pin** on the host (or its apex, for `www.`) → the pinned tier;
 4. the knob: v2 iff the covering source is armed.
 
-The automatic source is the live bridge vhost entry's reason — the SAME
-entry and matcher `src=vhost:<reason>` reads (`vhostEntryLocked`). Under-Attack
+A manual arm at v1 never DOWNGRADES what 3/4 give: a tier-less "Challenge"
+click or a tenant's panic-button arm must not switch off an auto-v2,
+Under-Attack or operator-pinned-v2 vhost (a review finding: it was a scoped
+bypass of an operator's v2 pin). The way down is a v1 pin.
+
+The automatic source needs a live bridge vhost entry — the SAME entry and
+matcher `src=vhost:<reason>` reads (`vhostEntryLocked`). Its reason names the
+source, except where the entry's single sticky reason hides it: a manual arm
+and a `CHALLENGE_VHOST` list match both relabel the entry, so the resolver
+then reads the scorer's own vhost state (`suspicious_vhost` /
+`uniqpaths_short`) instead. Under-Attack
 (`VhostAttackState`, incl. an operator `attack on`) only re-names that
 source: with no live vhost challenge it arms nothing, so the tier always
 ends with the vhost challenge. The UNDER_ATTACK transition line carries

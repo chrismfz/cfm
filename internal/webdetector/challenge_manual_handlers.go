@@ -304,9 +304,10 @@ func (e *Engine) handleChallengeVhostRung(w http.ResponseWriter, r *http.Request
 // Pins the tier of AUTOMATIC vhost challenges on host (challenge_v2_auto.go):
 // v1 = never v2 here, whatever CHALLENGE_V2_AUTO_VHOST says (the "drop it back
 // to v1" control); v2 = always v2 here; auto = remove the pin (the knob
-// decides again). It never creates, extends or clears a challenge, and a
-// MANUAL arm keeps its own tier (switch that with vhost/rung) — the response's
-// `tier` is the effective result either way. ttl is optional (none = until
+// decides again). It never creates, extends or clears a challenge; a MANUAL
+// arm at v2 stays v2 (switch that with vhost/rung), and one at v1 never
+// downgrades what the pin/knob give — the response's `tier` is the effective
+// result either way. ttl is optional (none = until
 // cleared). Scoped tokens: own vhosts only (and, clearing a www. host, the
 // apex pin that covers it); their pins are capped at scopedMaxChallengeTTL,
 // so a tenant can never park a permanent tier; and a pin the operator set
@@ -408,27 +409,25 @@ func (e *Engine) handleChallengeVhostTier(w http.ResponseWriter, r *http.Request
 		ttl = scopedMaxChallengeTTL
 		capped = true
 	}
-	target := host
-	cover, coverHost := e.tierPins.covering(host, time.Now())
-	if rung == "" && coverHost != "" {
-		// Clearing acts on the pin that COVERS host — its own, else the
-		// apex's for a www. host — and a scoped token must hold that host
-		// too (fail-closed, as in vhost/rung).
-		target = coverHost
-		if !vhostAllowed(target, scope) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "the pin covering " + host + " is on " + target + ", which is not in scope"})
-			return
-		}
+	// The scope check on the pin a clear acts on (the covering one — the
+	// host's own, else its apex's for a www. host), and the operator-pin
+	// guard, run INSIDE the store's write lock (tierPinStore.apply), so a pin
+	// that changes between check and write can never slip past either. An
+	// operator's pin is the operator's decision: a scoped token may not
+	// replace it, clear it, or shadow an apex one with its own www. pin (its
+	// 24h cap would otherwise silently end a standing operator pin); its own
+	// earlier pins it may change freely.
+	actor := actorFromScope(scope)
+	var protect func(tierPin) bool
+	if scope != nil {
+		protect = func(p tierPin) bool { return p.Actor != actor }
 	}
-	// An operator's pin is the operator's decision: a scoped token may not
-	// replace it, clear it, or shadow an apex one with its own www. pin
-	// (its 24h cap would otherwise silently end a standing operator pin).
-	// Its own earlier pins it may change freely.
-	if scope != nil && coverHost != "" && cover.Actor != actorFromScope(scope) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "the tier on " + coverHost + " was pinned by the operator — ask them to change it"})
+	target, prev, changed, refusal := e.setChallengeTierPin(host, rung, ttl, actor,
+		func(t string) bool { return vhostAllowed(t, scope) }, protect)
+	if refusal != "" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": refusal})
 		return
 	}
-	prev, changed := e.SetChallengeTierPinAs(target, rung, ttl, actorFromScope(scope))
 	pin, _ := e.tierPins.get(target)
 	tier := e.challengeV2VhostTier(host)
 	resp := map[string]interface{}{

@@ -25,11 +25,14 @@ back-filled here — see the git/PR history for that period.
   passes sees no difference. Sized on last week's traffic before shipping:
   36% of the solves from known solver-farm fingerprints would fail, against
   ~0.06% of likely humans (software-rendered RDP/VDI machines). A rejected
-  visitor can retry, and the challenge lapses with the automatic challenge's
-  own TTL. New `[webdetector] CHALLENGE_V2_AUTO_VHOST` lists the sources
-  (default `suspicious_vhost,uniqpaths_short,under_attack`; add
-  `vhost_config` for the `CHALLENGE_VHOST` list; `off` = none). Manual
-  challenges keep the tier they were armed with.
+  visitor can retry. The strict tier lasts as long as the automatic challenge
+  does, which is as long as the vhost stays suspicious. New `[webdetector]
+  CHALLENGE_V2_AUTO_VHOST` lists the sources (default
+  `suspicious_vhost,uniqpaths_short,under_attack`; add `vhost_config` for the
+  `CHALLENGE_VHOST` list). Only an explicit `off` disables it; a blank or
+  mistyped value keeps the default and is logged. A manual challenge at v2
+  stays v2, and a manual one at v1 does not downgrade an automatic v2 (use a
+  v1 pin for that).
 - **Under-Attack Mode now changes one thing:** while a vhost challenge is live
   on a vhost in UNDER_ATTACK (including an operator `attack on`), it runs at
   the v2 tier; the transition log line says so (`tier=`). The rest of

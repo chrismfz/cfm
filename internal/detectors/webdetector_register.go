@@ -1195,14 +1195,24 @@ func resolveChallengeCookieLife(global, kv map[string]string) time.Duration {
 }
 
 // challengeV2AutoVhost parses [webdetector] CHALLENGE_V2_AUTO_VHOST: the
-// automatic vhost-challenge sources that run at the ChallengeV2 tier
-// (webdet.DefaultChallengeV2AutoVhost when the key is absent or empty;
-// `off` arms none). Unknown tokens are logged and ignored — they never arm.
+// automatic vhost-challenge sources that run at the ChallengeV2 tier. Only an
+// explicit `off` arms none: an absent, blank ("" / `; comment`) or
+// all-unknown value (e.g. a typo) falls back to the shipped default and says
+// so, because silently disarming the node is the dangerous direction.
 func challengeV2AutoVhost(kv KV) []string {
-	armed, unknown := webdet.ParseChallengeV2AutoVhost(kvStrClean(kv, "CHALLENGE_V2_AUTO_VHOST", webdet.DefaultChallengeV2AutoVhost))
+	raw := kvStrClean(kv, "CHALLENGE_V2_AUTO_VHOST", webdet.DefaultChallengeV2AutoVhost)
+	armed, unknown, off := webdet.ParseChallengeV2AutoVhost(raw)
 	if len(unknown) > 0 {
 		logging.Logf("[webdetector] CHALLENGE_V2_AUTO_VHOST: ignoring unknown source(s) %s (valid: suspicious_vhost, uniqpaths_short, vhost_config, under_attack, off)",
 			strings.Join(unknown, ","))
 	}
+	if off || len(armed) > 0 {
+		return armed
+	}
+	if strings.TrimSpace(raw) != "" || len(unknown) > 0 {
+		logging.Logf("[webdetector] CHALLENGE_V2_AUTO_VHOST=%q arms nothing — using the default %s (write `off` to disable)",
+			raw, webdet.DefaultChallengeV2AutoVhost)
+	}
+	armed, _, _ = webdet.ParseChallengeV2AutoVhost(webdet.DefaultChallengeV2AutoVhost)
 	return armed
 }

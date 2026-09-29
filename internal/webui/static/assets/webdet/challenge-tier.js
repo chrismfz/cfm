@@ -23,6 +23,13 @@ function isManual(s) {
   return Boolean(s && (s.manual_active || s.rung_source === "manual"));
 }
 
+// tierSwitchIsPin: whether the switch for this host is a PIN (an automatic
+// challenge) rather than an in-place re-tier of a manual arm. The ONE
+// manual-vs-pin matcher — tierSwitchRequest and every label use it.
+export function tierSwitchIsPin(s) {
+  return !isManual(s);
+}
+
 // tierSwitchTarget: the tier a one-click switch would move this host to, or
 // "" when nothing challenges it (a pin alone changes nothing to switch), or
 // for a wildcard row (e.g. a CHALLENGE_VHOST `*.example.com` entry): the
@@ -31,14 +38,18 @@ function isManual(s) {
 // row's host to get that check.
 export function tierSwitchTarget(s, host) {
   if (!s) return "";
-  if (!(s.manual_active || s.auto_active || s.rung_source)) return "";
   if (String(host || "").includes("*")) return "";
+  if (isManual(s)) return effectiveTier(s) === "v2" ? "v1" : "v2";
+  // A pin only acts on an AUTOMATIC source the daemon can see
+  // (rung_source auto|pin): a row the store calls auto-active but whose
+  // tier resolved to no source would take a pin that changes nothing.
+  if (s.rung_source !== "auto" && s.rung_source !== "pin") return "";
   return effectiveTier(s) === "v2" ? "v1" : "v2";
 }
 
 // tierSwitchRequest: the API call that switches host to `to`.
 export function tierSwitchRequest(host, s, to) {
-  if (isManual(s)) return { path: "v1/challenge/vhost/rung", body: { host, rung: to } };
+  if (!tierSwitchIsPin(s)) return { path: "v1/challenge/vhost/rung", body: { host, rung: to } };
   return { path: "v1/challenge/vhost/tier", body: { host, rung: to } };
 }
 
@@ -94,6 +105,6 @@ export function tierButtonTitle(s, host) {
       : "Switch this manual challenge to v2: solves must also pass the passive humanity check (keeps its expiry)";
   }
   return to === "v1"
-    ? "Pin this vhost's automatic challenges to plain v1 (the emergency drop-back): stays until you unpin it"
-    : "Pin this vhost's automatic challenges to v2: solves must also pass the passive humanity check; stays until you unpin it";
+    ? "Pin this vhost's automatic challenges to plain v1 (the emergency drop-back): stays until you unpin it (a customer's pin expires after 24h)"
+    : "Pin this vhost's automatic challenges to v2: solves must also pass the passive humanity check; stays until you unpin it (a customer's pin expires after 24h)";
 }

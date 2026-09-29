@@ -5,6 +5,7 @@
 import {
   effectiveTier,
   tierPinned,
+  tierSwitchIsPin,
   tierSwitchRequest,
   tierSwitchTarget,
   tierTitle,
@@ -355,8 +356,7 @@ export const controlsMixin = {
       return tierSwitchTarget(this.panicStatus || {}, this.panicHost);
     },
     panicSwitchIsPin() {
-      const s = this.panicStatus || {};
-      return Boolean(this.panicSwitchTarget()) && !s.manual_active && s.rung_source !== "manual";
+      return Boolean(this.panicSwitchTarget()) && tierSwitchIsPin(this.panicStatus || {});
     },
     panicTierPinned() {
       return tierPinned(this.panicStatus || {});
@@ -372,8 +372,8 @@ export const controlsMixin = {
         const label = to === "v2" ? "strict (v2)" : "standard (v1)";
         this.panicMsg = req.path.endsWith("/rung")
           ? `Challenge on ${res?.host || host} switched to ${label} — expiry unchanged`
-          : `Automatic challenges on ${res?.host || host} pinned to ${label} — until you unpin` +
-            (res?.ttl_capped ? " (customer pins are limited to 24h)" : "");
+          : `Automatic challenges on ${res?.host || host} pinned to ${label} — ` +
+            (res?.ttl_capped ? "for 24h (the customer pin limit)" : "until you unpin");
         await this.refreshPanicStatus();
       } catch (err) {
         this.panicMsg = `Tier switch failed for ${host}: ${err}`;

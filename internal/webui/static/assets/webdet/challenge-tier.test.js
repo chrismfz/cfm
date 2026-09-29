@@ -6,6 +6,7 @@ import {
   tierButtonLabel,
   tierPinned,
   tierSuffix,
+  tierSwitchIsPin,
   tierSwitchRequest,
   tierSwitchTarget,
   tierTitle,
@@ -43,6 +44,15 @@ test("a wildcard row gets no tier button (the daemon refuses wildcard pins and v
   assert.equal(tierButtonLabel(autoV2, "*.example.com"), "");
   assert.equal(tierSwitchTarget(manualV1, "*.example.com"), "");
   assert.equal(tierSwitchTarget(autoV2, "shop.example.com"), "v1");
+});
+
+test("no pin button when the daemon resolved no automatic source", () => {
+  // The store says auto-active, but the resolver saw no source (e.g. the
+  // bridge entry already lapsed): a pin would change nothing.
+  assert.equal(tierSwitchTarget({ auto_active: true, rung: "", rung_source: "" }), "");
+  assert.equal(tierSwitchTarget({ auto_active: true, rung_source: "pin", rung_pin: "v1" }), "v2");
+  assert.ok(tierSwitchIsPin(autoV2));
+  assert.ok(!tierSwitchIsPin(manualV1));
 });
 
 test("nothing to switch when nothing challenges the host", () => {
