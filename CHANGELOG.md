@@ -18,6 +18,15 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Changed
+- **A `challenge_v2` WAF hit is now logged once per IP and rule family per
+  minute, whichever site it hits, like every other tier.** Since the v2 rung
+  follows the IP to every website, one push arms them all. The earlier
+  one-push-per-site key only added records. A scanner that trips the same
+  v2 rule on several sites within a minute now leaves one `cfm.waf.log`
+  record and one history row, not one per site (up to 16). The
+  `push_v2_host_cap` setting is gone; a value left in `cfm_waf_config.lua` is
+  ignored. The challenge and its v2 scoring are unchanged. Ships in the edge
+  Lua; a reload of OpenResty/Angie picks it up.
 - **Automatic vhost challenges now run at ChallengeV2 (strict) by default.**
   When the scorer challenges a vhost (`suspicious_vhost`, `uniqpaths_short`)
   or a vhost goes UNDER_ATTACK, a solve must also pass the passive humanity

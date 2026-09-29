@@ -11,7 +11,7 @@
 -- Public API:
 --   _M.enabled() -> bool
 --   _M.check(ctx) -> hit(bool), reason(string), ttl_sec(int), action(string)
---   _M.should_push(shdict, ip, reason, action, host) -> bool
+--   _M.should_push(shdict, ip, reason, action) -> bool
 --
 -- ctx fields expected from caller:
 --   uri, args, method, host, ip, peer, cf_ip, cookie, shdict, headers, body
@@ -21,7 +21,6 @@ local _M = {}
 -- Sub-modules. _M.init() chains init() into both.
 local util = require("cfm_waf_util")
 local det  = require("cfm_waf_detectors")
-local shd  = require("cfm_shdict")
 
 -- Util helpers used inline by _M.check below.
 local lower         = util.lower
@@ -419,14 +418,6 @@ local CFG = {
   -- still collapsing rapid multi-vector bursts from a true attacker.
   block_ttl_sec     = 10,
   push_cooldown_sec = 60,
-  -- Max distinct hosts a single IP may open a challenge_v2 push for per family
-  -- per push_cooldown_sec window. challenge_v2 keys the Host in (see
-  -- should_push: since the daemon's mark became per IP on 2026-09-29 this only
-  -- buys a per-host record), but $host is client-chosen, so this caps the
-  -- per-(ip,family) push/RPC volume a Host-rotating flood can generate — past
-  -- it, hits collapse to the family window. 16 covers a real multi-vhost
-  -- scanner; the IP is already marked by its first push.
-  push_v2_host_cap  = 16,
 
   -- Body scan budget, keyed by request Content-Type. The merged args+body
   -- string fed to body-aware rules (traversal/rce/xss/sqli/php-wrappers/
@@ -2302,7 +2293,7 @@ local PUSH_KEY_KEEPS_TAG = {
   WAF_FETCH_METADATA = true,
 }
 
-function _M.should_push(shdict, ip, reason, action, host)
+function _M.should_push(shdict, ip, reason, action)
   if not shdict or not ip or ip == "" then return true end
   -- Dedup on (ip, reason FAMILY, action tier).
   --   * FAMILY (the part before the first ":", the same identity
@@ -2339,35 +2330,14 @@ function _M.should_push(shdict, ip, reason, action, host)
     -- per-IP flood still collapses to at most two pushes per window.
     key_reason = (reason and reason:match("^[^:]+:[^:]+")) or fam
   end
-  -- challenge_v2 keys the HOST in as well. It was added when the daemon's v2
-  -- rung mark was per (ip,host): a family+action+ip key dropped the mark for
-  -- every host after the first within the cooldown. Since 2026-09-29 the mark
-  -- is per IP (handleIPPush → MarkChallengeV2IP), so one push arms every host,
-  -- and the per-host key now only buys a cfm.waf.log / history record per host
-  -- (at most push_v2_host_cap extra pushes per window) — a candidate for a
-  -- simplifying follow-up under the release checklist. But $host is
-  -- CLIENT-chosen (a catch-all server_name accepts any Host), so an unbounded
-  -- per-host key would re-open the F31 flood: one ip_push RPC + cfm.waf.log line
-  -- per Host an attacker rotates, unbounded, for the host-independent rules
-  -- (319/321/801/609). So cap distinct hosts per (ip, family) per window: the
-  -- first push_v2_host_cap hosts each push+mark, then hits collapse to the
-  -- family window (one more push, then dedup). Marks past the cap are dropped
-  -- (fail-open to v1) — the same posture as the mark store's own cap. This also
-  -- bounds shared-dict key growth to cap+2 per (ip, family). Other tiers stay
-  -- host-agnostic: v1/logonly write no mark, and block feeds the per-IP
-  -- autoblock (family-keyed, threshold 1) which a per-host key would over-notify.
-  if action == "challenge_v2" then
-    local perhost = "wafpush|" .. key_reason .. "|challenge_v2|" .. ip .. "|" .. (host or "")
-    if shdict:get(perhost) ~= nil then return false end  -- this host already pushed this window
-    local budget = "wafpushv2n|" .. key_reason .. "|" .. ip
-    local n = shd.incr(shdict, budget, 1, CFG.push_cooldown_sec)
-    if not n or n <= (CFG.push_v2_host_cap or 16) then
-      shdict:add(perhost, 1, CFG.push_cooldown_sec)
-      return true
-    end
-    -- Over the per-window host budget: dedup on the family window like v1.
-    return shdict:add("wafpush|" .. key_reason .. "|challenge_v2|" .. ip, 1, CFG.push_cooldown_sec) == true
-  end
+  -- challenge_v2 is its own action tier, like the others, so a plain-challenge
+  -- window never masks the push that writes the daemon's rung mark. It is
+  -- host-agnostic like every tier. The mark is per IP (handleIPPush ->
+  -- MarkChallengeV2IP), so the first push arms every web host of the IP. The
+  -- key carried the Host from 2026-09-23, while the mark was per (ip,host) and
+  -- a family-keyed window dropped it for every host after the first; a
+  -- push_v2_host_cap budget bounded it, because $host is client-chosen. Both
+  -- went once the mark became per IP.
   local k  = "wafpush|" .. key_reason .. "|" .. (action or "na") .. "|" .. ip
   local ok = shdict:add(k, 1, CFG.push_cooldown_sec)
   return ok == true
