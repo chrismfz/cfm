@@ -826,3 +826,29 @@ func TestChallengeV2VhostTier_AutoRungUnderManualV2(t *testing.T) {
 		t.Fatalf("a v1 pin clears AutoRung (manual v2 still decides): %+v", tier)
 	}
 }
+
+// www. inherits its apex's sources only while the apex itself is challenged,
+// and never while the www. host's own automatic challenge is suppressed.
+func TestVhostAutoSources_WWWInheritanceNeedsALiveApexChallenge(t *testing.T) {
+	e := newAutoV2TestEngine(t, autoV2UnderAttack, autoV2SuspiciousVhost)
+	b := e.nginxBridge
+	// A forced Under-Attack on an UNCHALLENGED apex; www has its own
+	// (tenant, v1) challenge.
+	noteSource(e, "ex.gr", autoV2UnderAttack)
+	e.ManualChallengeVhost("www.ex.gr", time.Hour, "panic-button", "")
+	setVhostEntry(e, "www.ex.gr", "manual")
+	if tier := e.challengeV2VhostTier("www.ex.gr"); tier.Rung != "" {
+		t.Fatalf("www inherited an unchallenged apex's under_attack: %+v", tier)
+	}
+	// Once the apex is challenged, the inheritance applies.
+	setVhostEntry(e, "ex.gr", "")
+	if tier := e.challengeV2VhostTier("www.ex.gr"); tier.Rung != "v2" {
+		t.Fatalf("www under a challenged, attacked apex: %+v", tier)
+	}
+	// An excluded www. (suppressed) inherits nothing, even with the apex's
+	// challenge recreating its entry.
+	b.SuppressVhostAutoSources("www.ex.gr", time.Hour)
+	if tier := e.challengeV2VhostTier("www.ex.gr"); tier.Rung != "" {
+		t.Fatalf("suppressed www inherited the apex: %+v", tier)
+	}
+}

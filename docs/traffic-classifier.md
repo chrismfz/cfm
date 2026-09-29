@@ -915,7 +915,10 @@ default, carries the tier then). Suppressing the automatic challenge under
 a kept manual arm (exclude/ignore) drops the host's notes at once, and an
 operator `attack off` drops the under_attack note at once.
 Notes are keyed on the host that wrote them and read www→apex, so a `www.`
-host's own cycle can never erase what its apex noted. Notes die with
+host's own cycle can never erase what its apex noted — but a `www.` host
+inherits only while the apex itself has a live challenge, and never while
+its own automatic challenge is suppressed (exclude / ignore / host bypass
+set a marker that blocks the inheritance). Notes die with
 their entry, so a forced `attack on` on a host nothing challenges arms
 nothing. The first ARMED noted source wins (strongest first: under_attack,
 suspicious_vhost, uniqpaths_short, vhost_config). One bridge RLock at

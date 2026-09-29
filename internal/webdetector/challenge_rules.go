@@ -1375,6 +1375,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 }
                 if e.nginxBridge != nil {
                     e.nginxBridge.ClearVhost(host, "host_bypass")
+                    // Suppressed from automatic challenges: no automatic tier here,
+                    // and (for a www. host) none inherited from the apex either.
+                    e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
                 }
                 if e.cfg.ChallengeNotify {
                     a := core.Alert{
@@ -1390,6 +1393,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         }
         if e.nginxBridge != nil {
             e.nginxBridge.ClearVhost(host, "host_bypass")
+            // Suppressed from automatic challenges: no automatic tier here,
+            // and (for a www. host) none inherited from the apex either.
+            e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
         }
         // Challenge fully cleared for this host → drop any UNDER_ATTACK state
         // (I1). This suppress path continues before the main under-attack hook.
@@ -1463,6 +1469,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         }
         if e.nginxBridge != nil {
             e.nginxBridge.ClearVhost(host, "excluded")
+            // Suppressed from automatic challenges: no automatic tier here,
+            // and (for a www. host) none inherited from the apex either.
+            e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
         }
         if e.cfg.UnderAttack {
             e.deescalateUnderAttack(now, host, "challenge suppressed (excluded)", out)
@@ -1502,6 +1511,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                         }
                         if e.nginxBridge != nil {
                             e.nginxBridge.ClearVhost(host, "ignored")
+                            // Suppressed from automatic challenges: no automatic tier here,
+                            // and (for a www. host) none inherited from the apex either.
+                            e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
                         }
                         if e.cfg.UnderAttack {
                             e.deescalateUnderAttack(now, host, "challenge suppressed (ignored)", out)

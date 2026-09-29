@@ -352,11 +352,16 @@ func (b *NginxBridge) vhostAutoSources(host string) (sources []string, ok bool) 
 	}
 	writers := []string{host}
 	// A www. host inherits its apex's notes (the bridge expands an apex
-	// challenge to www) — unless the automatic challenge is suppressed on
-	// the www. host itself (an exclude/ignore under a kept manual arm).
+	// challenge to www) — only while the APEX itself has a live challenge
+	// (an apex note with no apex challenge, e.g. a forced Under-Attack on an
+	// unchallenged apex, must not arm a separately challenged www.), and
+	// not while the automatic challenge is suppressed on the www. host
+	// itself (an exclude / ignore / host bypass).
 	if exp, sup := b.vhAuto[host][autoSourceSuppressed]; !sup || !exp.After(now) {
 		if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" {
-			writers = append(writers, apex)
+			if ah, live := b.vhState[apex]; live && ah.Action == "challenge" && ah.Expires.After(now) {
+				writers = append(writers, apex)
+			}
 		}
 	}
 	for _, src := range autoSourceOrder {
