@@ -352,7 +352,7 @@ export const controlsMixin = {
     // an automatic challenge by pinning it (v1/challenge/vhost/tier — "→
     // Standard (v1)" is the emergency drop-back from an auto-v2 tier).
     panicSwitchTarget() {
-      return tierSwitchTarget(this.panicStatus || {});
+      return tierSwitchTarget(this.panicStatus || {}, this.panicHost);
     },
     panicSwitchIsPin() {
       const s = this.panicStatus || {};

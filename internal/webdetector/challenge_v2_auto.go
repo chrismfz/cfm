@@ -26,8 +26,9 @@ package webdetector
 // The automatic sources are the live bridge vhost entry's reason (the SAME
 // entry and matcher the solve's src= snapshot reads — vhostEntryLocked) and
 // the Under-Attack state (VhostAttackState, which includes an operator's
-// forced-on override). Under-Attack is reachable only from a challenged vhost,
-// so it never arms a host nothing challenges.
+// forced-on override) — which only ever re-names a live vhost challenge's
+// source: a forced `attack on` on a host no vhost challenge covers arms
+// nothing, so the tier always ends with the vhost challenge.
 //
 // The grain stays "vhost" (v2=vhost on the solve line): the good-bot waiver
 // applies exactly as for a manual v2 arm, and the src= field already names
@@ -61,16 +62,22 @@ const (
 // deterministic false reject would stop being bounded.
 const DefaultChallengeV2AutoVhost = autoV2SuspiciousVhost + "," + autoV2UniqPathsShort + "," + autoV2UnderAttack
 
-// ParseChallengeV2AutoVhost parses the CHALLENGE_V2_AUTO_VHOST list. off /
-// none / 0 / - (or an empty value) arm nothing. Unknown tokens are returned
-// separately so the caller can log them; they never arm anything.
+// ParseChallengeV2AutoVhost parses the CHALLENGE_V2_AUTO_VHOST list. `off`
+// (or none / 0 / -) anywhere in the list arms NOTHING — it is an explicit
+// "no", so `off,under_attack` is off, never a quiet under_attack. Unknown
+// tokens are returned separately so the caller can log them; they never arm
+// anything. (The register passes the shipped default for an absent or EMPTY
+// key, like every other knob — write `off` to disable.)
 func ParseChallengeV2AutoVhost(s string) (armed []string, unknown []string) {
 	seen := map[string]bool{}
+	off := false
 	for _, tok := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
 		tok = strings.ToLower(strings.TrimSpace(tok))
 		switch tok {
-		case "", "off", "none", "0", "-":
+		case "":
 			continue
+		case "off", "none", "0", "-":
+			off = true
 		case autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig, autoV2UnderAttack:
 			if !seen[tok] {
 				seen[tok] = true
@@ -79,6 +86,9 @@ func ParseChallengeV2AutoVhost(s string) (armed []string, unknown []string) {
 		default:
 			unknown = append(unknown, tok)
 		}
+	}
+	if off {
+		return nil, unknown
 	}
 	return armed, unknown
 }
@@ -104,12 +114,19 @@ type vhostV2Tier struct {
 }
 
 // challengeV2VhostTier is the ONE vhost-tier resolver (see the file header).
+//
+// Cost: it runs on EVERY scored solve (challengeV2ArmGrain's vhost grain), so
+// no exclusive lock is taken on the common path beyond the manual store's,
+// which the manual tier always took: the bridge entry is one RLock (the same
+// read the src= snapshot does), the pin store one RLock, and the Under-Attack
+// tracker (an exclusive lock) is consulted ONLY when a vhost challenge covers
+// the host and under_attack is in the armed set.
 func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 	var t vhostV2Tier
 	if e == nil || host == "" {
 		return t
 	}
-	pin, _ := e.tierPins.covering(host)
+	pin, _ := e.tierPins.covering(host, time.Now())
 	t.Pin = pin.Rung
 	if target := e.manualRungTarget(host); target != "" {
 		t.Rung = e.manualChal.rung(target)
@@ -135,28 +152,30 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 	return t
 }
 
-// autoV2Trigger names the automatic source covering host, preferring
-// Under-Attack when it is armed (the stronger statement: the challenge is
-// being defeated) and otherwise the live bridge entry's reason. "" when no
-// automatic source covers host — including when the only entry is a manual
-// arm's (reason "manual"), which the caller has already handled.
+// autoV2Trigger names the automatic source covering host: "" unless a live
+// automatic vhost challenge covers it (a bridge entry whose reason is not a
+// manual arm's). Under-Attack only ever RE-NAMES that source — when
+// under_attack is armed and the host is under attack, the trigger is
+// under_attack (the stronger statement: the challenge is being defeated).
+// It never arms on its own: an operator `attack on` with no vhost challenge
+// (UA can be forced on a host nothing challenges) arms nothing, and the tier
+// ends with the vhost challenge, never later — the TTL bound in the file
+// header.
 func (e *Engine) autoV2Trigger(host string) string {
-	ua := e.underAttackCovering(host)
-	if ua && e.autoV2Armed[autoV2UnderAttack] {
+	if e.nginxBridge == nil {
+		return ""
+	}
+	reason, ok := e.nginxBridge.vhostChallengeReason(host)
+	if !ok || reason == "manual" {
+		return ""
+	}
+	if e.autoV2Armed[autoV2UnderAttack] && e.underAttackCovering(host) {
 		return autoV2UnderAttack
 	}
-	if e.nginxBridge != nil {
-		if reason, ok := e.nginxBridge.vhostChallengeReason(host); ok && reason != "manual" {
-			if reason == "" {
-				reason = srcVhost // edge-pushed entry: no source named, never armed
-			}
-			return reason
-		}
+	if reason == "" {
+		return srcVhost // edge-pushed entry: no source named, never armed
 	}
-	if ua {
-		return autoV2UnderAttack
-	}
-	return ""
+	return reason
 }
 
 // underAttackCovering reports Under-Attack on host, or on its apex for a www.
@@ -212,8 +231,11 @@ type tierPinPersist struct {
 	Actor     string    `json:"actor,omitempty"`
 }
 
+// tierPinStore: an RWMutex so the per-solve read (covering) never takes an
+// exclusive lock. Expired pins are dropped on every write (and on load), so
+// the map holds at most the pins set since the last write plus the live ones.
 type tierPinStore struct {
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	pins map[string]tierPin
 	path string // "" = in-memory only
 }
@@ -228,81 +250,95 @@ func (s *tierPinStore) init(path string) {
 	s.load()
 }
 
-// get returns host's own live pin (exact key).
-func (s *tierPinStore) get(host string) (tierPin, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// getLocked returns host's own live pin (caller holds s.mu, R or W).
+func (s *tierPinStore) getLocked(host string, now time.Time) (tierPin, bool) {
 	p, ok := s.pins[host]
-	if !ok || !p.live(time.Now()) {
+	if !ok || !p.live(now) {
 		return tierPin{}, false
 	}
 	return p, true
 }
 
-// target is the host whose pin covers host: host itself when pinned, else its
-// apex for a www. host, else "". The one resolver for reading and clearing.
-func (s *tierPinStore) target(host string) string {
-	if _, ok := s.get(host); ok {
-		return host
-	}
-	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
-		if _, ok := s.get(apex); ok {
-			return apex
-		}
-	}
-	return ""
+// get returns host's own live pin (exact key).
+func (s *tierPinStore) get(host string) (tierPin, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.getLocked(host, time.Now())
 }
 
-// covering returns the pin covering host (see target).
-func (s *tierPinStore) covering(host string) (tierPin, string) {
-	if t := s.target(host); t != "" {
-		p, _ := s.get(t)
-		return p, t
+// covering returns the pin covering host and the host it is set on: host's
+// own, else its apex's for a www. host (the manual tier's resolution). One
+// RLock. The ONE resolver for reading, clearing and the scoped guard.
+func (s *tierPinStore) covering(host string, now time.Time) (tierPin, string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if p, ok := s.getLocked(host, now); ok {
+		return p, host
+	}
+	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
+		if p, ok := s.getLocked(apex, now); ok {
+			return p, apex
+		}
 	}
 	return tierPin{}, ""
 }
 
-// set pins host to rung ("v1" | "v2"); ttl <= 0 = no expiry. Returns the
-// previous live rung ("" when none).
-func (s *tierPinStore) set(host, rung string, ttl time.Duration, actor string) (prev string) {
+// apply pins host to rung ("v1" | "v2"; ttl <= 0 = no expiry) or clears its
+// pin (rung ""), atomically: the previous live rung, whether anything changed
+// (re-pinning the same rung with no expiry on either side is a no-op), and the
+// write, all under one lock — so two concurrent requests can never both
+// record the same transition.
+func (s *tierPinStore) apply(host, rung string, ttl time.Duration, actor string) (prev string, changed bool) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.pins == nil { // a zero store (an Engine built without NewEngine) stays usable
 		s.pins = make(map[string]tierPin)
 	}
-	if old, ok := s.pins[host]; ok && old.live(now) {
-		prev = old.Rung
+	cur, has := s.getLocked(host, now)
+	if has {
+		prev = cur.Rung
 	}
-	p := tierPin{Rung: rung, SetAt: now, Actor: actor}
-	if ttl > 0 {
-		p.ExpiresAt = now.Add(ttl)
+	switch {
+	case rung == "" && !has:
+		return prev, false
+	case rung != "" && has && cur.Rung == rung && ttl <= 0 && cur.ExpiresAt.IsZero():
+		return prev, false
 	}
-	s.pins[host] = p
+	for h, p := range s.pins { // drop expired pins on every write
+		if !p.live(now) {
+			delete(s.pins, h)
+		}
+	}
+	if rung == "" {
+		delete(s.pins, host)
+	} else {
+		p := tierPin{Rung: rung, SetAt: now, Actor: actor}
+		if ttl > 0 {
+			p.ExpiresAt = now.Add(ttl)
+		}
+		s.pins[host] = p
+	}
 	s.saveLocked()
+	return prev, true
+}
+
+// set / clear are apply's two halves (kept for tests and readability).
+func (s *tierPinStore) set(host, rung string, ttl time.Duration, actor string) string {
+	prev, _ := s.apply(host, rung, ttl, actor)
 	return prev
 }
 
-// clear removes host's pin; returns the rung it had ("" when none was live).
 func (s *tierPinStore) clear(host string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	old, ok := s.pins[host]
-	delete(s.pins, host)
-	if ok {
-		s.saveLocked()
-	}
-	if ok && old.live(time.Now()) {
-		return old.Rung
-	}
-	return ""
+	prev, _ := s.apply(host, "", 0, "")
+	return prev
 }
 
 // snapshot returns the live pins.
 func (s *tierPinStore) snapshot() map[string]tierPin {
 	now := time.Now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	out := make(map[string]tierPin, len(s.pins))
 	for h, p := range s.pins {
 		if p.live(now) {
@@ -343,7 +379,7 @@ func (s *tierPinStore) load() {
 	}
 }
 
-// saveLocked atomically writes the live pins (caller holds s.mu). Failure is
+// saveLocked atomically writes the live pins (caller holds s.mu for writing). Failure is
 // logged, never fatal — mirrors manualChalState.saveLocked.
 func (s *tierPinStore) saveLocked() {
 	if s.path == "" {
@@ -384,20 +420,13 @@ func (s *tierPinStore) saveLocked() {
 // SetChallengeTierPinAs pins target's automatic-challenge tier (rung "v1" |
 // "v2", ttl <= 0 = until cleared), or clears the pin (rung ""), recording the
 // actor. Returns the previous pin rung and whether anything changed; a no-op
-// (same rung, no new expiry) writes no audit row, log line or state file.
-// Nothing reaches the edge: the tier is read live at verify.
+// (same rung, no expiry either side) writes no audit row, log line or state
+// file. The check and the write are one atomic store operation. Nothing
+// reaches the edge: the tier is read live at verify.
 func (e *Engine) SetChallengeTierPinAs(target, rung string, ttl time.Duration, actor string) (prev string, changed bool) {
-	cur, has := e.tierPins.get(target)
-	if rung == "" {
-		if !has {
-			return "", false
-		}
-		prev = e.tierPins.clear(target)
-	} else {
-		if has && cur.Rung == rung && ttl <= 0 && cur.ExpiresAt.IsZero() {
-			return cur.Rung, false
-		}
-		prev = e.tierPins.set(target, rung, ttl, actor)
+	prev, changed = e.tierPins.apply(target, rung, ttl, actor)
+	if !changed {
+		return prev, false
 	}
 	to, from := rungOrAuto(rung), rungOrAuto(prev)
 	logging.LogfCHALLENGES(

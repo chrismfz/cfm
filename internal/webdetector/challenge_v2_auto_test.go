@@ -44,6 +44,10 @@ func TestParseChallengeV2AutoVhost(t *testing.T) {
 			t.Fatalf("%q must arm nothing: %v %v", off, armed, unknown)
 		}
 	}
+	// `off` anywhere is an explicit "no" — never a quiet partial arm.
+	if armed, _ := ParseChallengeV2AutoVhost("off,under_attack"); len(armed) != 0 {
+		t.Fatalf("off must win over other sources: %v", armed)
+	}
 	armed, unknown = ParseChallengeV2AutoVhost("Vhost_Config, suspicious_vhost suspicious_vhost,manual,bogus")
 	if strings.Join(armed, ",") != "vhost_config,suspicious_vhost" {
 		t.Fatalf("case/dedupe: armed=%v", armed)
@@ -175,6 +179,20 @@ func TestChallengeV2VhostTier_UnderAttackArms(t *testing.T) {
 	}
 	e.SetChallengeTierPinAs("hit.gr", "", 0, "admin")
 
+	// A forced `attack on` with NO vhost challenge arms nothing: the tier
+	// must end with the vhost challenge, never outlive it.
+	e.SetVhostAttackOverride("forced.gr", true, time.Now(), 0)
+	if tier := e.challengeV2VhostTier("forced.gr"); tier != (vhostV2Tier{}) {
+		t.Fatalf("under-attack without a vhost challenge must not arm: %+v", tier)
+	}
+	// Nor after the vhost challenge clears while the state lingers.
+	e.nginxBridge.mu.Lock()
+	delete(e.nginxBridge.vhState, "www.hit.gr")
+	e.nginxBridge.mu.Unlock()
+	if tier := e.challengeV2VhostTier("www.hit.gr"); tier.Rung != "" || tier.Source != "" {
+		t.Fatalf("cleared vhost challenge under attack: %+v", tier)
+	}
+
 	// under_attack not in the set: the state alone does not arm, the bridge
 	// source is reported instead.
 	e.autoV2Armed = map[string]bool{}
@@ -186,6 +204,35 @@ func TestChallengeV2VhostTier_UnderAttackArms(t *testing.T) {
 	e.SetVhostAttackOverride("hit.gr", false, time.Now(), 0)
 	if tier := e.challengeV2VhostTier("hit.gr"); tier.Rung != "" || tier.Trigger != "vhost_config" {
 		t.Fatalf("attack off: %+v", tier)
+	}
+}
+
+func TestTierPinStore_ApplyIsAtomicAndSweeps(t *testing.T) {
+	var s tierPinStore
+	s.init("")
+	if prev, changed := s.apply("a.gr", "v1", 0, "admin"); prev != "" || !changed {
+		t.Fatalf("first pin: %q %v", prev, changed)
+	}
+	if prev, changed := s.apply("a.gr", "v1", 0, "admin"); prev != "v1" || changed {
+		t.Fatalf("same pin must be a no-op: %q %v", prev, changed)
+	}
+	if _, changed := s.apply("none.gr", "", 0, ""); changed {
+		t.Fatalf("clearing an absent pin must be a no-op")
+	}
+	// An expired pin is dropped from the map on the next write.
+	s.mu.Lock()
+	s.pins["old.gr"] = tierPin{Rung: "v1", ExpiresAt: time.Now().Add(-time.Minute)}
+	s.mu.Unlock()
+	s.apply("b.gr", "v2", 0, "admin")
+	s.mu.RLock()
+	_, stale := s.pins["old.gr"]
+	s.mu.RUnlock()
+	if stale {
+		t.Fatalf("expired pin survived a write")
+	}
+	// covering: own pin, else the apex's for www.
+	if p, on := s.covering("www.a.gr", time.Now()); p.Rung != "v1" || on != "a.gr" {
+		t.Fatalf("apex covering: %+v %q", p, on)
 	}
 }
 
@@ -294,6 +341,24 @@ func TestHandleChallengeVhostTier(t *testing.T) {
 	}
 	if _, ok := e.tierPins.get("example.com"); !ok {
 		t.Fatalf("the apex pin was cleared through an out-of-scope www")
+	}
+
+	// An operator's pin is not the tenant's to replace, clear, or shadow
+	// with a www. pin of its own.
+	e.SetChallengeTierPinAs("tenant-a.example.com", "v2", 0, "admin")
+	for _, qs := range []string{"rung=v1", "rung=auto"} {
+		if rr, _ := tierReq(t, e, scopedAddReq("/api/v1/challenge/vhost/tier?host=tenant-a.example.com&"+qs)); rr.Code != http.StatusForbidden {
+			t.Fatalf("scoped %s over an operator pin: %d", qs, rr.Code)
+		}
+	}
+	if p, ok := e.tierPins.get("tenant-a.example.com"); !ok || p.Rung != "v2" || p.Actor != "admin" || !p.ExpiresAt.IsZero() {
+		t.Fatalf("operator pin was altered by a scoped call: %+v %v", p, ok)
+	}
+	e.SetChallengeTierPinAs("example.com", "v1", 0, "admin")
+	shadow := scopedAddReq("/api/v1/challenge/vhost/tier?host=www.example.com&rung=v2")
+	shadow = shadow.WithContext(context.WithValue(shadow.Context(), CtxScopeKey{}, map[string]struct{}{"www.example.com": {}, "example.com": {}}))
+	if rr, _ := tierReq(t, e, shadow); rr.Code != http.StatusForbidden {
+		t.Fatalf("scoped www pin shadowing an operator apex pin: %d", rr.Code)
 	}
 
 	// GET lists pins, admin only.

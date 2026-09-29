@@ -24,10 +24,15 @@ function isManual(s) {
 }
 
 // tierSwitchTarget: the tier a one-click switch would move this host to, or
-// "" when nothing challenges it (a pin alone changes nothing to switch).
-export function tierSwitchTarget(s) {
+// "" when nothing challenges it (a pin alone changes nothing to switch), or
+// for a wildcard row (e.g. a CHALLENGE_VHOST `*.example.com` entry): the
+// daemon refuses both a wildcard pin and a wildcard v2 arm (the verify-side
+// lookup is exact + www only), so the button would always fail. Pass the
+// row's host to get that check.
+export function tierSwitchTarget(s, host) {
   if (!s) return "";
   if (!(s.manual_active || s.auto_active || s.rung_source)) return "";
+  if (String(host || "").includes("*")) return "";
   return effectiveTier(s) === "v2" ? "v1" : "v2";
 }
 
@@ -74,14 +79,14 @@ export function tierTitle(s) {
 }
 
 // tierButtonLabel / tierButtonTitle: the switch button beside the pill.
-export function tierButtonLabel(s) {
-  const to = tierSwitchTarget(s);
+export function tierButtonLabel(s, host) {
+  const to = tierSwitchTarget(s, host);
   if (!to) return "";
   return isManual(s) ? `→ ${to}` : `→ ${to} (pin)`;
 }
 
-export function tierButtonTitle(s) {
-  const to = tierSwitchTarget(s);
+export function tierButtonTitle(s, host) {
+  const to = tierSwitchTarget(s, host);
   if (!to) return "";
   if (isManual(s)) {
     return to === "v1"

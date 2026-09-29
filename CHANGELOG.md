@@ -30,9 +30,11 @@ back-filled here — see the git/PR history for that period.
   (default `suspicious_vhost,uniqpaths_short,under_attack`; add
   `vhost_config` for the `CHALLENGE_VHOST` list; `off` = none). Manual
   challenges keep the tier they were armed with.
-- **Under-Attack Mode now changes one thing:** a vhost in UNDER_ATTACK
-  (including an operator `attack on`) gets the v2 tier. The rest of Under-Attack
-  stays detect-only.
+- **Under-Attack Mode now changes one thing:** while a vhost challenge is live
+  on a vhost in UNDER_ATTACK (including an operator `attack on`), it runs at
+  the v2 tier; the transition log line says so (`tier=`). The rest of
+  Under-Attack stays detect-only, and `UNDER_ATTACK_DRYRUN` does not gate the
+  tier — take `under_attack` out of `CHALLENGE_V2_AUTO_VHOST` for that.
 
 ### Added
 - **Switch a vhost's automatic challenge back to v1 (or forward to v2).**
@@ -42,7 +44,8 @@ back-filled here — see the git/PR history for that period.
   Emergency challenge card. `v1` is the emergency drop-back, `auto` hands the
   vhost back to the node default. A pin never starts or extends a challenge,
   survives restarts, and is audited (`challenge_vhost_tier_pin`). Customers
-  can pin their own vhosts, for at most 24h.
+  can pin their own vhosts, for at most 24h, and cannot change a pin the
+  operator set.
 - **The effective tier is visible everywhere.** The vhost list and status,
   `cfm webtop challenge` (new TIER column), `challenge status` and the
   cfm-admin pills now show the tier the verify gate actually enforces and why

@@ -405,9 +405,12 @@ const (
 	v2WaiverTransient = "transient" // the resolver failed; nothing was cached
 )
 
-// challengeV2HostArmed answers "does a v2 vhost arm cover this host" for the
-// verify gate. false when unwired or host is empty (fail-open — D5a: teeth
-// only where an operator explicitly armed).
+// challengeV2HostArmed answers "is this host's vhost challenge at the v2
+// tier" for the verify gate — a manual v2 arm, or an automatic challenge the
+// CHALLENGE_V2_AUTO_VHOST node default (or a tier pin) puts at v2; NewEngine
+// wires it to challengeV2VhostTier (challenge_v2_auto.go). false when unwired
+// or host is empty (fail-open — D5a: teeth only under an arm, operator-set or
+// the operator's node default per the 2026-09-29 amendment).
 func challengeV2HostArmed(host string) bool {
 	challengeV2.mu.RLock()
 	fn := challengeV2.hostArmed
@@ -423,7 +426,7 @@ func challengeV2HostArmed(host string) bool {
 const (
 	v2GrainFP    = "fp"    // an armed challenge_v2 fingerprint policy
 	v2GrainGeo   = "geo"   // a fleet-armed country/ASN policy covering the IP
-	v2GrainVhost = "vhost" // a v2-tier manual vhost challenge on the host
+	v2GrainVhost = "vhost" // a v2-tier vhost challenge on the host (manual arm, or automatic via CHALLENGE_V2_AUTO_VHOST / a tier pin)
 	v2GrainMark  = "mark"  // a per-(ip,host) rung mark (traffic rule / WAF rule)
 )
 
@@ -442,10 +445,13 @@ const (
 // added to close.
 //
 // Cost, since this now runs on the COMMON path and not just a failing solve:
-// the fingerprint, vhost and mark grains are map reads, and challengeV2Marked
-// takes only an RLock and never deletes — no exclusive lock reaches the solve
-// hot path, and reading a mark neither consumes nor rewrites it, so the eager
-// read cannot starve the gate below. The geo grain costs nothing at all until
+// the fingerprint and mark grains are map reads, and challengeV2Marked takes
+// only an RLock and never deletes — reading a mark neither consumes nor
+// rewrites it, so the eager read cannot starve the gate below. The vhost
+// grain (challengeV2VhostTier) takes the manual store's mutex (as it always
+// did), one bridge RLock (the same vhost-entry read the src= snapshot does)
+// and one pin-store RLock; the Under-Attack tracker's exclusive lock only
+// when a vhost challenge covers the host and under_attack is armed. The geo grain costs nothing at all until
 // a country/ASN policy exists (GeoPolicyActionForIP returns immediately on an
 // empty policy set); once one does, it is one live mmdb read per solve
 // (microseconds, no DNS).

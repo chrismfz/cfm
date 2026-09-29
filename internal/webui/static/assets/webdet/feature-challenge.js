@@ -190,20 +190,20 @@ export const challengeMixin = {
     //    the tier back to CHALLENGE_V2_AUTO_VHOST. A pin never creates or
     //    extends a challenge.
     challengeTierTarget(host) {
-      return tierSwitchTarget(this.activeChallengeByHost[host] || {});
+      return tierSwitchTarget(this.activeChallengeByHost[host] || {}, host);
     },
     challengeTierButtonLabel(host) {
-      return tierButtonLabel(this.activeChallengeByHost[host] || {});
+      return tierButtonLabel(this.activeChallengeByHost[host] || {}, host);
     },
     challengeTierButtonTitle(host) {
-      return tierButtonTitle(this.activeChallengeByHost[host] || {});
+      return tierButtonTitle(this.activeChallengeByHost[host] || {}, host);
     },
     challengeTierPinned(host) {
       return tierPinned(this.activeChallengeByHost[host] || {});
     },
     async toggleChallengeTier(host) {
       const s = this.activeChallengeByHost[host] || {};
-      const to = tierSwitchTarget(s);
+      const to = tierSwitchTarget(s, host);
       if (!host || !to) return;
       const req = tierSwitchRequest(host, s, to);
       try {

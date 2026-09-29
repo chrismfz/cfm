@@ -38,6 +38,13 @@ test("an automatic challenge switches by PIN, a manual arm in place", () => {
   assert.deepEqual(tierUnpinRequest("a.gr"), { path: "v1/challenge/vhost/tier", body: { host: "a.gr", rung: "auto" } });
 });
 
+test("a wildcard row gets no tier button (the daemon refuses wildcard pins and v2 arms)", () => {
+  assert.equal(tierSwitchTarget(autoV2, "*.example.com"), "");
+  assert.equal(tierButtonLabel(autoV2, "*.example.com"), "");
+  assert.equal(tierSwitchTarget(manualV1, "*.example.com"), "");
+  assert.equal(tierSwitchTarget(autoV2, "shop.example.com"), "v1");
+});
+
 test("nothing to switch when nothing challenges the host", () => {
   assert.equal(tierSwitchTarget({}), "");
   assert.equal(tierSwitchTarget(null), "");

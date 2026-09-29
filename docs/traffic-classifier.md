@@ -890,9 +890,11 @@ rows, CLI):
 4. the knob: v2 iff the covering source is armed.
 
 The automatic source is the live bridge vhost entry's reason — the SAME
-entry and matcher `src=vhost:<reason>` reads (`vhostEntryLocked`) — or
-Under-Attack (`VhostAttackState`, incl. an operator `attack on`), which is
-reachable only from a challenged vhost. The grain stays `v2=vhost`, so the
+entry and matcher `src=vhost:<reason>` reads (`vhostEntryLocked`). Under-Attack
+(`VhostAttackState`, incl. an operator `attack on`) only re-names that
+source: with no live vhost challenge it arms nothing, so the tier always
+ends with the vhost challenge. The UNDER_ATTACK transition line carries
+`tier=` so the log says whether entering the state armed v2. The grain stays `v2=vhost`, so the
 good-bot waiver applies exactly as for a manual v2 arm, and `src=` says
 which vhost source covered the solve.
 
@@ -903,7 +905,8 @@ tier <vhost> v1|v2|auto`, the cfm-admin "→ v1 (pin)" / "↺ auto" buttons):
 challenge and does nothing while no automatic challenge covers the host.
 Persisted (`webdetector_challenge_tier_pins.json`), because every config
 reload restarts the daemon and a lost v1 pin would silently re-arm the host.
-Scoped tokens may pin their own vhosts, TTL-capped at 24h. Audited as
+Scoped tokens may pin their own vhosts, TTL-capped at 24h, and may not
+replace, clear or shadow a pin the operator set. Audited as
 `challenge_vhost_tier_pin` (`from`/`rung`/`actor`, a no-op writes nothing).
 
 **Under-Attack's first consequence.** I1 stays detect-only for its action

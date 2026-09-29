@@ -309,7 +309,8 @@ func (e *Engine) handleChallengeVhostRung(w http.ResponseWriter, r *http.Request
 // `tier` is the effective result either way. ttl is optional (none = until
 // cleared). Scoped tokens: own vhosts only (and, clearing a www. host, the
 // apex pin that covers it); their pins are capped at scopedMaxChallengeTTL,
-// so a tenant can never park a permanent tier.
+// so a tenant can never park a permanent tier; and a pin the operator set
+// (actor != scoped) covering the host is theirs to keep — 403.
 func (e *Engine) handleChallengeVhostTier(w http.ResponseWriter, r *http.Request) {
 	scope := vhostScopeFromContext(r.Context())
 	if r.Method == http.MethodGet {
@@ -408,17 +409,24 @@ func (e *Engine) handleChallengeVhostTier(w http.ResponseWriter, r *http.Request
 		capped = true
 	}
 	target := host
-	if rung == "" {
+	cover, coverHost := e.tierPins.covering(host, time.Now())
+	if rung == "" && coverHost != "" {
 		// Clearing acts on the pin that COVERS host — its own, else the
 		// apex's for a www. host — and a scoped token must hold that host
 		// too (fail-closed, as in vhost/rung).
-		if t := e.tierPins.target(host); t != "" {
-			target = t
-		}
-		if target != host && !vhostAllowed(target, scope) {
+		target = coverHost
+		if !vhostAllowed(target, scope) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "the pin covering " + host + " is on " + target + ", which is not in scope"})
 			return
 		}
+	}
+	// An operator's pin is the operator's decision: a scoped token may not
+	// replace it, clear it, or shadow an apex one with its own www. pin
+	// (its 24h cap would otherwise silently end a standing operator pin).
+	// Its own earlier pins it may change freely.
+	if scope != nil && coverHost != "" && cover.Actor != actorFromScope(scope) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "the tier on " + coverHost + " was pinned by the operator — ask them to change it"})
+		return
 	}
 	prev, changed := e.SetChallengeTierPinAs(target, rung, ttl, actorFromScope(scope))
 	pin, _ := e.tierPins.get(target)

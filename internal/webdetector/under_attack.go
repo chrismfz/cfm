@@ -472,10 +472,15 @@ func (e *Engine) emitUnderAttack(now time.Time, host string, on bool, row Suspic
 		typ, kind, action = "vhost_under_attack_on", "WEB/VHOST_UNDER_ATTACK_ON", "attack_on"
 	}
 
-	// dryrun is logged for operator visibility of the posture. In I1 it does not
-	// change behaviour (there is no enforcement yet); it will gate the enforcement
-	// ladder in later increments via Extra["enforcement"]="dryrun" (see below).
-	logging.LogfCHALLENGES("[challenge][vhost] under_attack=%v host=%s mode=%s dryrun=%v %s", on, host, mode, e.cfg.UnderAttackDryRun, evidence)
+	// dryrun is logged for operator visibility of the posture. It does not change
+	// behaviour (the I3+ action ladder it will gate does not exist); it will gate
+	// that ladder via Extra["enforcement"]="dryrun" (see below). It does NOT gate
+	// the v2 tier — that is CHALLENGE_V2_AUTO_VHOST's `under_attack`.
+	// tier= is the vhost's ChallengeV2 tier as of the transition: entering
+	// UNDER_ATTACK puts an automatic vhost challenge at v2 when under_attack
+	// is in CHALLENGE_V2_AUTO_VHOST (challenge_v2_auto.go) — the one thing
+	// the state changes today, so the line says whether it did.
+	logging.LogfCHALLENGES("[challenge][vhost] under_attack=%v host=%s mode=%s dryrun=%v tier=%s %s", on, host, mode, e.cfg.UnderAttackDryRun, rungOrV1(e.challengeV2VhostTier(host).Rung), evidence)
 
 	e.appendHistory(HistoryEvent{
 		TsUnix: now.Unix(),
