@@ -199,8 +199,10 @@ does it a handful of times an hour, not fifty times in three minutes, and the
 `MIN_SOLVES = 8` threshold sits above the natural gap measured at 5 in the
 offline corpus. The detector still ships alert-only (`BLOCK` unset); this is the
 evidence that would justify `BLOCK = "dryrun"` and then a TTL block, in that
-order. *(Live since then: the operator runs `BLOCK = 24h` fleet-wide — master
-plan §3 row 4; the shipped default is still unset.)*
+order. *(Live since then: the operator runs `BLOCK = 24h` on every web node
+that runs the detector — 6 of 7; `server.speedhost.gr` has no
+`[challenge_cookie_discard]` section — master plan §3 row 4; the shipped
+default is still unset.)*
 
 ## 6. TLS fingerprint ↔ UA coherence (log-first since 2026-07-28)
 
@@ -423,8 +425,9 @@ reaching the challenge server directly). A coverage metric should still exclude
 plain-HTTP panel ports.
 
 *Answered 2026-09-23 from the solve corpus (`docs/traffic-classifier.md`,
-"UA ↔ TLS coherence tell"): front proxies and middleboxes carried 33% of human
-solves; the id is NOT stable across edge OpenSSL builds — the same Chrome
+"UA ↔ TLS coherence tell"): a front proxy's handshake carried 33% of human
+solves (since 2026-09-23 a trusted-proxy peer yields no fingerprint), and
+TLS-inspecting middleboxes are not rare; the id is NOT stable across edge OpenSSL builds — the same Chrome
 stack hashes to `c28caa00` or `95070673` depending on how the node's OpenSSL
 names the post-quantum group, `X25519MLKEM768` or `0x11ec` (the same group).
 The list below is kept as the questions that were asked.*
@@ -465,9 +468,10 @@ two signals box the adversary in from opposite sides; neither does that alone.
 
 This section records a design worked out in discussion, so the reasoning is not
 lost. *(2026-09-29: §8.2 shipped as ChallengeV2 Rung 1 — `ptr`/`tch`/`key`/`mv`
-in `sig=` — and the automatic v2 arm with Rung 1 matches §8.4's trigger and
-gate; §8.3 leg 1 is a candidate, leg 2 and §8.4's visible puzzle are dropped;
-master plan §5.)* **As first written, nothing here was built or measured**; the numbers to justify each
+in `sig=`. The automatic v2 arm (`suspicious_vhost` / `uniqpaths_short` /
+`under_attack`) plays §8.4's vhost-level trigger role without §8.3 leg 2, and
+the Rung-1 score is the per-request gate. §8.3 leg 1 is a candidate; leg 2 and
+§8.4's visible puzzle are dropped; master plan §5.)* **As first written, nothing here was built or measured**; the numbers to justify each
 threshold do not exist until the evidence signal in §8.2 has run. Treat every
 "human vs farm" claim below as a hypothesis to confirm against real logs, the
 same discipline §5/§6 impose.

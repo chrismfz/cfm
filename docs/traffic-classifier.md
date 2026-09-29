@@ -323,7 +323,10 @@ scores say *who*: soft rung = **harden PoW** (16→20 + expiry scaling) *or* a
 better than PoW — PoW is pure CPU a farm solves trivially); hard rung = **403 /
 tarpit / nft drop** (Open Question #1, leaning 403 for residential mercy); vhost
 lane = surface-throttle / gate-before-origin / crawler-rate. Manual challenge
-stays an operator tool throughout.
+stays an operator tool throughout. *(Status 2026-09-29, master plan §5: the
+harden rung is frozen behind a faster in-page solver; the drag/puzzle and the
+crawler-rate lane are dropped; surface-throttle / gate-before-origin are
+frozen until a Class-2 flood; the deny shape is E3's `403`.)*
 
 ### Track-1 shadow fusion — the concrete build (grounded 2026-08-27)
 
@@ -431,13 +434,16 @@ collapse onto, so a blanket 403 on it hits innocents — collateral from the sam
 farm's IP is NOT fine is when it runs that exact build). So:
 
 - **Fingerprint unique-enough to the farm** (seen only in farm-shaped traffic,
-  ideally corroborated by **JA4H** as a second axis) → **deny (403) outright**,
-  residential or datacenter. It is the guilty unit.
+  ideally corroborated by **JA4H** as a second axis — *dropped 2026-09-29
+  with the edge module*) → **deny (403) outright**, residential or datacenter.
+  It is the guilty unit.
 - **Shared browser bucket** (`c28caa00`) → do NOT blanket-deny. Use a **harder
   *interactive* challenge** (ChallengeV2 drag/puzzle — beats the headless farm the
   PoW couldn't, and self-targets legit shared-bucket users), and/or narrow the
   deny to `(fp × JA4H)` or `(fp × farm-context)`, and/or IP-ban only the
-  *datacenter* members while harder-challenging the rest.
+  *datacenter* members while harder-challenging the rest. *(As built: the
+  harder challenge is the passive ChallengeV2 Rung 1; the drag/puzzle and
+  `(fp × JA4H)` were dropped 2026-09-29.)*
 
 ### The fingerprint-anchored seed
 
@@ -457,6 +463,9 @@ farm's IP is NOT fine is when it runs that exact build). So:
   the live magnitudes (rate_outlier carries weight; challenge_score cannot alone).
 
 ### B3 open items
+
+*(B3 was dropped 2026-09-29, superseded by E3 — master plan §5. The items
+below are kept as design context.)*
 
 - The fingerprint→IP mapping is only as complete as the captured sample (bounded,
   accumulates), so a farm's long residential tail is never fully enumerated — the
@@ -739,8 +748,9 @@ legitimately report it.
   the change. It has a real GPU and plausible hardware (hc 12, dm 16). What
   differs is either shared with humans (dpr 1, lagging Chrome, 60 Hz rAF) or
   an ABSENCE (0% pointer movement vs 30% of humans), which D5b forbids from
-  convicting. The levers are Rung 2 or a non-rung one; not a fingerprint
-  policy, because `c28caa00` carries humans too.
+  convicting. No Rung-1 lever reaches it, and not a fingerprint policy,
+  because `c28caa00` carries humans too; `cfm_pcw` did not see this shape
+  either (master plan E4 read, 2026-09-29).
 - **Client-authored:** a farm can fix these values once they bite, the
   standing D5b cost-lever residual.
 - **Where they bite:** only under a v2 arm (D5a), but that already includes
@@ -1095,7 +1105,8 @@ replace, clear or shadow a pin the operator set (the status read carries
 
 **Under-Attack's first consequence.** I1 stays detect-only for its action
 ladder; the v2 tier is the one thing UNDER_ATTACK now changes. Caveat from
-the same week: `vhost_under_attack_on` never fired fleet-wide, although
+the same week: `vhost_under_attack_on` never fired fleet-wide (still none on
+2026-09-29), although
 farms solved ~25 000 challenges — entry leg 3 needs the origin to be
 erroring (≥50%), and a farm that doesn't break the site never trips it. So
 `under_attack` is the rare, strong trigger; `suspicious_vhost` is the one
@@ -1103,11 +1114,23 @@ that carries the volume.
 
 **Not solved by this.** ~52% of convicted-farm solves score `hs=0` (the
 95070673 hc=8 pool, c28caa00 on real GPUs): no Rung-1 arm catches them.
-Those need fingerprint policy or Rung 2. The Rung-2 "confirm you're human"
-step also answers the deterministic-FP residual above (the 2 rejected
+Their lever is the operator fingerprint / geo policy; `cfm_pcw` did not see
+them (they solve once per IP), and the Rung-2 step below acts only on a
+reject, which an `hs=0` solve never is. The Rung-2 "confirm you're human"
+step answers the deterministic-FP residual above (the 2 rejected
 humans moved the mouse; 0 of 9 954 failing farm solves did) — with the
 honest limit that a CDP click is trusted and the accessible keyboard path
 has no trajectory, so it is an escape hatch for humans, not a wall.
+
+**Who the deterministic-FP residual is (first read, 2026-09-29, before the
+release).** In a week of `would_v2` lines the likely-human would-rejects under
+the automatic sources are Windows **Chrome/109** — the last Chrome for Windows
+7/8.1 — on 2-4 cores with a software renderer AND no window size, exactly
+`hs=100`, with real pointer input (a Serres school, a Nova line, one in
+Bulgaria). The farm half of that bucket is Linux Chrome/154 at hc 640 with no
+movement. Real input (≥ 5 pointer events, ≥ 100 px) marked 1 of 2 861 failing
+solves in the `sig` corpus — the human — and no farm solve. The mitigation is
+an operator decision recorded in the master plan (E4, READ 2026-09-29).
 
 #### Observability contract (shadow-first; reuses existing logs — no new log, per CLAUDE.md §5)
 
@@ -1249,7 +1272,7 @@ readout discipline as the `challenge_score` B-slice burn-in.
 from real traffic. Two honest caveats
 that reshape the signal table above: the server-side fp is **JA3-grade** (nginx exposes
 ciphers/curves/ALPN/proto, **not** the extension list a true JA4 hashes) — a real JA4
-needs an edge module and is **deferred** (dropped 2026-09-29, master plan §5); and the JA4↔UA *coherence tell* is
+needs an edge module and was **deferred**, and is now dropped (2026-09-29, master plan §5); and the JA4↔UA *coherence tell* is
 **not** same-day wiring — it waits on a derivation pass over this corpus (Step 2), never
 a hand-written per-UA fp table (the codebase forbids that by convention:
 `internal/tlsfp`, `internal/uaplausible`). Slice 1 adds no new log/event and no
@@ -1294,8 +1317,10 @@ Class-2 burst.
 - [x] Confirm verified-crawler + datacenter substrate exists (reuse path found).
 - [ ] Operator: apply the shadow config block above on the 7 web nodes.
       *(2026-09-29: done on 6 — `cfm.abuse_shadow.log` is live there;
-      `server.speedhost.gr`'s is empty, so its shadow lines, `would_v2`
-      included, are missing from every fleet readout.)*
+      `server.speedhost.gr`'s is empty — its `[webdetector]` has no
+      `ABUSE_SHADOW` (default off), so set `ABUSE_SHADOW = 1` there; until
+      then its shadow lines, `would_v2` included, are missing from every
+      fleet readout.)*
 - [ ] Capture query-cardinality/repeat live during the next Class-2 burst
       (`edge_access_tail`) to fix that weight.
 
@@ -1429,7 +1454,8 @@ rules with rate limits do it.)*
 
 *(Status 2026-09-29: 1 answered by E3 — a clean `403`; 3 answered — the
 `challenge_score` lines ride `cfm.abuse_shadow.log`; 5 moot — the crawler lane
-is dropped. 2 and 4 stay open.)*
+is dropped; 4 moot — the `IPSignals` routing it asks about is dropped. Only 2
+stays open.)*
 
 1. **Deny shape**: clean `403` vs tarpit (delayed-empty, steals attacker
    concurrency, hides detection)? Leaning `403` for residential-proxy FP mercy.

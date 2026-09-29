@@ -2,10 +2,10 @@
 
 > **▶ PLAN OF RECORD: `docs/abuse-defense-master-plan.md`** (2026-09-18). The
 > phased plan in §10 below is **FROZEN** as design context. E3 shipped
-> ChallengeV2 Rung 1 and closed without the rest (operator review
-> 2026-09-29, master plan §5): the B3 seed map, the T2 edge-deny channel and
-> the daemon seeds are **dropped**; the T1 harden rung is **frozen** until a
-> faster in-page PoW solver lands. `challenge_score` stays as evidence
+> ChallengeV2 Rung 1 (2026-09-22) without the rest, and the operator review of
+> 2026-09-29 (master plan §5) settled it: the B3 seed map, the T2 edge-deny
+> channel and the daemon seeds are **dropped**; the T1 harden rung is
+> **frozen** until a faster in-page PoW solver lands. `challenge_score` stays as evidence
 > (`would_deny` → ledger).
 >
 > **Status:** WORKING NOTES (design, pre-code). The per-client half of the
@@ -214,7 +214,8 @@ logs.
 
 1. **Deny shape**: 403 vs tarpit vs nft drop (shared with the master plan).
    **Answered by E3:** a clean `403` (fingerprint policy `deny`).
-2. **Client subject**: pure IP (simplest) vs `(IP, vhost)` (fairer multi-tenant)
+2. **Client subject** *(moot 2026-09-29: the T-band code is dropped or
+   frozen)*: pure IP (simplest) vs `(IP, vhost)` (fairer multi-tenant)
    vs `/24` rollup (solver farms). Lean **IP-primary + a `/24` density feature**.
 3. **Aggregation site**: the hybrid seed-map (recommended) vs pure edge-Lua.
    **Moot:** the seed map is dropped (2026-09-29).
@@ -222,7 +223,8 @@ logs.
    `would_deny` capture folds into the existing `abuse_shadow.log` (grep surface)
    + `detection_history` (durable, fleet-pullable). A dedicated `[cfm_challenge_score]`
    writer remains an option only if the edge-tell side ever needs its own.
-5. **Dual signals**: retire `cookie_discard` / `solver_farm` alerts once the score
+5. **Dual signals** *(moot 2026-09-29: the score never leads — its promotion
+   is dropped)*: retire `cookie_discard` / `solver_farm` alerts once the score
    leads, or keep as belt-and-suspenders?
 
 ## 10. Phased plan
@@ -271,6 +273,8 @@ logs.
     the shadow will show whether a coarse TLS bucket (`c28caa00`) lights up legit
     shared-bucket solvers, the exact signal that decides whether a fingerprint may
     be enforced bare or only with JA4H corroboration / an interactive challenge.
+    *(2026-09-29: JA4H dropped; the interactive answer as built is the passive
+    ChallengeV2 Rung 1 under an operator arm.)*
   - **Stage 1b — edge-Lua tells.** The two signals only the edge sees —
     post-clearance silence (tripwire) + Sec-Fetch — plus the hybrid seed map, per
     the architecture in §3. Follows the challenge-waf-release-checklist. Sliced:

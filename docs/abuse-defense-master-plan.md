@@ -68,13 +68,13 @@ reviewed PR.
 |---|---|---|---|---|---|
 | 1 | `solver_farm` (subnet-spread + fp-concentration + cross-host) | `internal/detectors/solverfarm` | alert/notify + feeds ledger | 3 farm convictions, clean guards | **KEEP — proven.** The ledger spine. |
 | 2 | WAF-hit fp attribution (`waf_hit`, handshake `cfm_tlsfp`) | `cfm.lua` + `RecordWAFTrigger` | shadow evidence → ledger | 5.8k blocks attributed on one fp; exposed the fake-AI-UA corpus | **KEEP — proven.** (It fed E2, dropped 2026-09-29, §5.) |
-| 3 | `challenge_score` (Stage 1a + farm-fp spine) + durable `would_deny` | `challenge_score*.go` | shadow → ledger source #2 | thin alone; strong once fp-anchored | **KEEP as evidence**; per-IP promotion rides E3, not standalone. |
+| 3 | `challenge_score` (Stage 1a + farm-fp spine) + durable `would_deny` | `challenge_score*.go` | shadow → ledger source #2 | thin alone; strong once fp-anchored | **KEEP as evidence.** Its per-IP promotion (a T1 v2 arm, the T2 deny, the B3 seed) was dropped 2026-09-29, §5. |
 | 4 | `cookie_discard` re-solve | `internal/detectors/cookiediscard` | **ENFORCING** (operator `BLOCK=24h`) | works | **KEEP.** Already the ≥99 rung. |
 | 5 | `abuse_shadow` rate_outlier (Signal C) | `abuse_shadow.go` | shadow | populated, dominant grain-A signal | **KEEP as evidence** (Track-1 fusion input). |
 | 6 | `abuse_shadow` facet / cost / dc_fraction / fused | `abuse_shadow_{facet,cost,dcfrac,fused}.go` | shadow | thin; no Class-2 flood observed since built | **KEEP-FROZEN**: no new sub-signals, no weight-tuning PRs until the next real Class-2 flood provides data. Review then, with §4-D3 criteria. |
-| 7 | WAF rule 612 `WAF_FETCH_METADATA` (Sec-Fetch tell) | `cfm_waf.lua` | logonly | fires as designed | **KEEP logonly**; E3 seed input. Not promoted alone. |
+| 7 | WAF rule 612 `WAF_FETCH_METADATA` (Sec-Fetch tell) | `cfm_waf.lua` | logonly | fires as designed | **KEEP logonly** (evidence). Not promoted alone. |
 | 8 | `cfm_pcw` post-clearance nav cadence (B2) | `configs/lua/cfm_pcw.lua` | log-only, **and it fires** | 2 episodes in the live window (rigel, `santorinitours.org`): two separate IPs each reaching 60 navs/60s post-clearance, both `would_deny`. **`rate_outlier` did NOT flag either** — that vhost appears in its output only under `dc_fraction` (50 reqs / 50 distinct DC IPs, the DISTRIBUTED shape). Different shape, not covered elsewhere. | **KEEP — retire REVERSED 2026-09-22.** It was proposed for retirement on "fed no decision in its lifetime", which is trivially true of every log-only signal and was never evidence. A fleet-wide check before deleting it found it alive and non-redundant. It is also the only sensor for the exact failure mode ChallengeV2 exists to address (a farm that SOLVES, then pulls pages). **Exit contract (D3), finally set:** its starting constants (`T1`=30, `T2`=60 navs/60s) were never tuned from real lines — tune them from the `[cfm_pcw]` lines and re-review by 2026-10-20 with promote / keep-as-evidence / retire. Known FP risk, unchanged and untested: the key is per-(ip,host), not per-browser, so a shared egress (CGNAT) could pool real users — neither observed episode has that shape. |
-| 9 | `under_attack` I1 state machine + notify | `under_attack.go` | detect-only (DRYRUN) | alarm value real ("challenge defeated" as an alert) | **KEEP as the alarm.** I1b read-surfaces shipped (`state` field, cfm-admin badge, `cfm webtop attack on\|off`, `POST /api/v1/challenge/vhost/attack`). Since 2026-09-29 it also puts a vhost's automatic challenge at v2 (`CHALLENGE_V2_AUTO_VHOST`), but entry leg 3 (≥50% origin errors) has never fired fleet-wide, so that link is dormant until an operator `attack on`; the RT-baseline entry leg (frozen, `docs/under-attack-mode.md`) is the designed fix. |
+| 9 | `under_attack` I1 state machine + notify | `under_attack.go` | detect-only (DRYRUN) | alarm value real ("challenge defeated" as an alert) | **KEEP as the alarm.** I1b read-surfaces shipped (`state` field, cfm-admin badge, `cfm webtop attack on\|off`, `POST /api/v1/challenge/vhost/attack`). Since 2026-09-29 it also puts a vhost's automatic challenge at v2 (`CHALLENGE_V2_AUTO_VHOST`), but UNDER_ATTACK has never been entered fleet-wide (no `vhost_under_attack_on` row on any node; leg 3 needs ≥50% origin errors), so that link is dormant until an operator `attack on`. The RT-baseline clause of leg 3 (frozen, `docs/under-attack-mode.md`) would widen it to slow origins only. |
 | 10 | `under_attack` campaign fingerprinter I2 | `under_attack_fingerprint.go` | shadow | no consumer; I3–I5 never built | **FROZEN — operator-ratified 2026-09-22.** Code STAYS as-is (this is a freeze, not a retire: unlike `cfm_pcw` its mechanism is sound, it simply has no consumer). No new predicates, no weight tuning, no sub-signals, no I3–I5. E1–E3 superseded its enforcement path; revisit ONLY if the draft-rule idea (I3) is deliberately picked up, and then with a §4-D3 exit contract. |
 | 11 | `ua_family=` solve-log corpus | `challenge_server.go` | log-first | builds the fp↔UA corpus | **KEEP.** The JA4↔UA coherence tell it was kept for was measured 2026-09-23 and **NOT adopted**: 0 extra farm catch over `mobile_hw_lie`, and the broad forms hit humans (docs/traffic-classifier.md, "UA ↔ TLS coherence tell"). |
 | 12 | Humanity scorer / would_v2 Rung-1 | `challenge_v2.go` | **BUILT + ENFORCING** since 2026-09-19 (E3) | positive-only tells; `hs=`/`tells=`/`sig=`/`v2=` per solve | **KEEP.** Teeth only under an operator arm (D5a). The knobs are `CHALLENGE_V2_PASSIVE`/`_FAIL_SCORE`/`_DEBUG`/`_HW_TELLS` (a kill switch for the corpus-measured device-claim tells, 2026-09-23)/`_AUTO_VHOST` (the automatic vhost challenges that run at v2, 2026-09-29 — D5 amendment) — the old `HUMANITY_MIN_OBS`/`MINORITY_PCT` keys were never read by any code and are still orphans in live `/etc/cfm/detectors.conf`: **operator cleanup, still outstanding.** |
@@ -171,13 +171,13 @@ already opened.
       CLOSED 2026-09-29 as manual-only** *(cfm-web).* The operator-clicked
       bulk block below is the whole of E1; the scheduled auto-run for
       `verdict=farm` is **DROPPED** (operator decision): datacenter members
-      are ~11% of a farm's footprint and ChallengeV2 covers the rest, so
-      automation buys little for a standing risk. A bulk "Block all block-safe"
-      action on Explain Fingerprint driving the existing `FingerprintIpBlocker`
-      guards (datacenter-only per D1, TTL'd via the fleet blacklist, good_bot
-      exempt, critical-infra refused, never-downgrade). Ships operator-clicked
-      first; a scheduled auto-run for `verdict=farm` is a separate opt-in PR
-      after the click flow proves clean.
+      are a minority of a farm's footprint (~11% of `c28caa00`'s, ~20% of
+      `95070673`'s), so automation buys little for a standing risk. The
+      bulk "Block all block-safe" action on Explain Fingerprint drives the
+      existing `FingerprintIpBlocker` guards (datacenter-only per D1, TTL'd
+      via the fleet blacklist, good_bot exempt, critical-infra refused,
+      never-downgrade). *(As first planned, an auto-run was to follow as a
+      separate opt-in PR once the click flow proved clean.)*
       - [x] Drill-down control slice — **DONE 2026-09-20** (cfm-web, operator
         decision: "more manual control BEFORE any risky automation"). The IP
         section's Top networks / Top countries chips (and row Network cells)
@@ -198,22 +198,26 @@ already opened.
       the per-request fingerprint match + ChallengeV2 catches every fresh
       residential exit on first contact with no standing ban and no
       reassignment collateral.
-- **E2 — Fake-crawler autoblock — DROPPED 2026-09-29** (operator). The idea:
-      a UA claiming a known crawler whose IP fails FCrDNS is autoblocked via
-      the detector-sink rails. Dropped because:
-      (1) FCrDNS cannot verify several families it named. The node's good-bot
-      table (`goodBotPTRSuffixes`) has no AI crawler at all, and those are
-      verified, where at all, by published IP ranges rather than reverse DNS —
-      so a REAL GPTBot or PerplexityBot "fails" and would be banned;
-      (2) the fakes are already handled: they get no good-bot exemption, so
-      the WAF and the challenge treat them like anyone else, and the corpus
-      that motivated E2 (scanners cycling AI-crawler UAs — on `95070673` the
-      WAF hits come mostly from Google Cloud) is blocked by the rules it
-      trips. A ban would mostly save edge CPU;
-      (3) under D1 any such ban must be datacenter-only anyway, which leaves
-      little to automate for a new standing false-positive risk.
-      What stays is the telemetry: a v2 reject whose PTR claims a crawler
-      carries `v2_waiver_miss=spoofed`.
+- [ ] ~~**E2 — Fake-crawler autoblock**~~ — **DROPPED 2026-09-29**
+      (operator). The idea: a UA claiming a known crawler whose IP fails
+      FCrDNS is autoblocked via the detector-sink rails. Dropped because:
+      - FCrDNS cannot verify several families it named. The node's good-bot
+        table (`goodBotPTRSuffixes`) has none of ClaudeBot, GPTBot /
+        OAI-SearchBot or PerplexityBot (its only AI crawler is Meta's
+        `meta-externalagent`, via `.fbsv.net`); those are verified, where at
+        all, by published IP ranges rather than reverse DNS — so a REAL one
+        "fails" and would be banned.
+      - The fakes are already handled: they get no good-bot exemption, so the
+        WAF and the challenge treat them like anyone else, and the corpus that
+        motivated E2 (scanners cycling AI-crawler UAs — on `c28caa00` and
+        `95070673` alike the WAF hits come mostly from Google Cloud) is
+        blocked by the rules it trips. A ban would mostly save edge CPU.
+      - Under D1 any such ban must be datacenter-only anyway, which leaves
+        little to automate for a new standing false-positive risk.
+
+      No marker replaces it: `v2_waiver_miss=spoofed` is PTR-based (a PTR in
+      the good-bot table that fails forward-confirm), so it does not cover a
+      crawler claimed by UA only.
 - [x] **E3 — Phase C minimal + ChallengeV2 Rung 1 with teeth — DONE
       2026-09-22** *(both repos; the keystone).* Every slice below shipped:
       policy fetch, node pull + edge enforcement, panel-port consult, Rung 1,
@@ -276,9 +280,11 @@ already opened.
         signal-aware farm can fabricate a clean one — Rung 1 catches standard
         automation stacks and raises per-exit cost (a stripped body shows as
         `hs=-`, so evasion is visible). A farm running real browsers on real
-        hardware scores clean by construction; that population is the
-        post-clearance cadence's job (`cfm_pcw`, §3 row 8), not a harder
-        challenge — the visible puzzle was dropped 2026-09-29 (§5). Teeth are
+        hardware scores clean by construction, and no node lever reaches it
+        today: `cfm_pcw` only sees a post-clearance burst, which a farm solving
+        once per IP does not make (E4 read, 2026-09-29), so the operator
+        fingerprint / geo policy is its lever. A harder check was not the
+        answer — the visible puzzle was dropped 2026-09-29 (§5). Teeth are
         web/edge-path-only; the per-IP challenge-DNAT (whose clients authored
         their own `X-CFM-TLS`) is retired, so verify is edge-only and the
         header is edge-stamped.
@@ -565,34 +571,77 @@ already opened.
         rejected under the auto-v2 or WAF-mark arms make it next; none, and it
         waits.
 
+      - READ 2026-09-29 (E4 burn-in, first pass; `detection_history`,
+        `cfm.challenges.log`, `cfm.abuse_shadow.log`, 7 web nodes):
+        - **Live rejects, 2026-09-23..29: 1 361**, 1 350 under the armed US
+          country policy (`v2=geo`) and 11 under a mark. **0 human-labelled**
+          (GR/CY consumer ISP, no bot UA), **0 with pointer movement.** The
+          shape: US residential exits (Comcast, Verizon, Cablevision) on
+          `95070673` / `c28caa00`, software renderer / webdriver / no window,
+          a fifth at hc 640. The marks: a "Plesk screenshot bot" under a
+          traffic-rule mark and WAF 302/602 scanners. No `v2=vhost`,
+          `v2_via` or `scope` yet: auto-v2 and `scope=` are not released
+          (the nodes run 2026.09.28).
+        - **Auto-v2 would reject humans.** Sized from `would_v2` (7 826 lines
+          on 6 nodes; `server.speedhost.gr` has `ABUSE_SHADOW` off): 5 on
+          GR/CY consumer ISPs, 2 of them webdriver. The others, per their solve
+          lines, are Windows **Chrome/109** (the last Chrome for Windows
+          7/8.1) on 2-4 cores / 2-4 GB with a software renderer AND no window
+          size — exactly `hs=100` — and REAL pointer input: a Serres school
+          (`sch.gr`, 41 events / 714 px) and a Nova line (7 / 729 px) on
+          mathematica.gr, one in Bulgaria (74 / 3 149 px) on vitolighting.com,
+          plus a no-input one on techking.gr. The farm half of the same
+          `hs=100` bucket is Linux Chrome/154 at hc 640 with no movement. A
+          retry re-scores the same machine, so under an automatic vhost
+          challenge they are walled off. In the 11 125-line `sig` corpus real
+          input (≥ 5 pointer events and ≥ 100 px) was present on 1 of 2 861
+          failing solves — that human — and on no farm solve.
+          **Decision pending (operator)** before the release that carries
+          auto-v2: the Rung-2 confirm fallback first; or real input
+          exculpates a solve that has no certain tell (webdriver / headless
+          UA); or auto-v2 ships `off` until the fallback exists.
+        - **`cfm_pcw`:** 3 episodes in the short windows the live edge error
+          logs hold (rigel ×2, mars ×1 a scanner), none from the `hs=0`
+          farms (§5 candidate 2).
+
 **Candidates, in order (operator review, 2026-09-29):**
 
 1. **E4's measurement** — the false-positive burn-in of the auto-v2 and
    WAF-mark v2 arms (`challenge_v2_reject` by `v2` / `v2_via` / `src` /
    `scope`, humans labelled as in the hardware-tells corpus) and the farm
    solve-rate. It also lifts D4.
-2. **The `cfm_pcw` exit review, by 2026-10-20** (§3 row 8). It is the lever
-   for farms that run real browsers on real hardware and score `hs=0`: they
-   solve, then pull pages, and `cfm_pcw` is the only sensor for that.
+2. **The `cfm_pcw` exit review, by 2026-10-20** (§3 row 8). It is the only
+   sensor for the solve-then-pull shape. The 2026-09-29 read found 3
+   episodes fleet-wide in the edge error logs' short windows (rigel ×2, the
+   known ones; mars ×1, a scanner) and none from the `hs=0` farms, which
+   solve once per IP and pull a few pages. The review needs a longer window
+   than the live edge logs hold, and B3 — its only designed consumer — is
+   dropped, so a "promote" outcome must name its actuator.
 3. **Humanity context on farm alerts** — the `solver_farm` / `cookie_discard`
    alert carries the cluster's `hs` / `tells` distribution
    (`docs/roadmaps/challenge-engine.md` §8.3 leg 1). Alert text only.
 4. **The Rung-2 confirm fallback** (E4 note above), priority from item 1.
 5. **A `CHALLENGE_V2_ENFORCE` kill switch.** v2 bites fleet-wide by default
-   now (the WAF challenge tier, the automatic vhost challenges), and the only
-   incident lever, `CHALLENGE_V2_PASSIVE = 0`, also switches the telemetry
-   off. The switch turns rejects into `would_v2` and keeps `hs` / `sig`.
+   now (the WAF challenge tier, the automatic vhost challenges), and no
+   single switch stops the rejects while keeping the telemetry:
+   `CHALLENGE_V2_PASSIVE = 0` drops `hs` / `sig`, and a sky-high
+   `CHALLENGE_V2_FAIL_SCORE` drops the would-fail visibility (per-arm levers
+   exist: `CHALLENGE_V2_AUTO_VHOST = off`, v1 pins, a WAF rule back at
+   `challenge`, `FP_POLICY = 0`). ENFORCE would turn rejects into `would_v2`
+   and keep both.
 6. **A faster in-page PoW solver.** One `await crypto.subtle.digest` per
-   candidate is behind the 26-59 s solve tail
-   (`docs/roadmaps/challenge-engine.md`); farms solve natively or in a real
-   browser either way, so the gain goes to humans on phones. A page change:
+   candidate taxes every solve ~4x (`docs/roadmaps/challenge-engine.md` §1),
+   felt most by weak devices (26.3 s / 59.4 s seen, §5 there). Honest
+   latency drops; a real-browser farm gains the same speed-up, and it is
+   the precondition for the `harden` rung (below). A page change:
    `docs/challenge-waf-release-checklist.md`.
 
 **Config decisions after E4:** `vhost_config` in `CHALLENGE_V2_AUTO_VHOST`
-(measured 0 of 780 likely humans would fail, `docs/traffic-classifier.md`
-"Auto-v2"); `solver_farm` `WINDOW` 60s → 120s (measured to catch the
-AS398781 swarm; check the notification volume first); the orphan
-`HUMANITY_*` / `MINORITY_PCT` keys (§3 row 12).
+(measured 0 of 780 likely-human solves would fail, `docs/traffic-classifier.md`
+"Auto-v2"); the shipped `solver_farm` defaults (`WINDOW` 60s catches the
+AS398781 swarm only at 120s AND lowered thresholds, 16/20 against the
+shipped 40/40 — the live web nodes already run 180s / 15 / 15); the orphan
+`HUMANITY_*` keys (§3 row 12).
 
 **Frozen, with a condition (not next, do not start):**
 - Track-1 surface-throttle + gate-before-origin, and the frozen shadow
@@ -602,8 +651,8 @@ AS398781 swarm; check the notification volume first); the orphan
   Raising a flagged vhost's difficulty costs a farm per solve and a human
   once, but with today's solver it costs an honest client far more than a
   native solver, so it waits for the faster solver and a measurement.
-- under_attack I3–I5 and the RT-baseline entry leg: only if I3 is picked up
-  (§3 row 10).
+- under_attack I3–I5 and the RT-baseline clause of leg 3: only if I3 is
+  picked up (§3 row 10).
 - Rung-mark store eviction: only if `[challenge_v2] … mark store full`
   shows up live.
 - The measured-not-adopted tells (UA ↔ TLS, `deviceMemory`, `Edge/1xx`,
@@ -612,9 +661,10 @@ AS398781 swarm; check the notification volume first); the orphan
 
 **Dropped 2026-09-29 (operator; don't re-propose without new data):**
 - E2 fake-crawler autoblock and E1's auto-run (above).
-- **Rung-2 visible PUZZLE.** CAPTCHA farms solve puzzles cheaply, the cost
-  lands on every challenged human and on accessibility, and the farms it
-  would target (real browsers, `hs=0`) are `cfm_pcw`'s job.
+- **Rung-2 visible PUZZLE.** CAPTCHA farms solve puzzles cheaply, and the
+  cost lands on every challenged human and on accessibility. The farms it
+  would target (real browsers, `hs=0`) are left to the operator
+  fingerprint / geo policy (see E3's honest limits).
 - **JA4/JA4H edge module.** It needs an nginx module we don't build for
   OpenResty/Angie; the coarse fingerprint with the policy and v2 covers the
   need.

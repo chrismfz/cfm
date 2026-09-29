@@ -74,8 +74,10 @@ const (
 	// SHADOW ONLY: a coarse TLS bucket (e.g. c28caa00) is shared by legit clients,
 	// so this WILL light up some innocent shared-bucket solvers — which is exactly
 	// what the shadow measures before any enforcement keys on the fingerprint
-	// (the deny of a coarse bucket needs JA4H corroboration / an interactive
-	// challenge, never a bare per-IP anchor — see the B3 design).
+	// (a coarse bucket is never denied bare: the one enforcement path is the
+	// operator-armed fingerprint policy, whose challenge_v2 tier is the
+	// interactive answer — docs/abuse-defense-master-plan.md §5; JA4H and the
+	// B3 seed map were dropped 2026-09-29).
 
 	// chalScoreFastMS: an issue→submit gap below this is "too fast" — native/GPU
 	// territory, under the PoW+HTML+RTT budget an honest browser normally needs. But

@@ -21,8 +21,9 @@
 surfacing (I1b) landed — the RT-baseline clause (§3 leg 3) is still open, and
 frozen with the rest (master plan §3 row 10). Since 2026-09-29 a vhost in
 UNDER_ATTACK runs its automatic challenge at the v2 tier
-(`CHALLENGE_V2_AUTO_VHOST`); leg 3 has never fired fleet-wide, so in practice
-only an operator `attack on` reaches it.** Siblings:
+(`CHALLENGE_V2_AUTO_VHOST`); UNDER_ATTACK has never been entered fleet-wide
+(leg 3 needs ≥50% origin errors), so in practice only an operator `attack on`
+reaches it.** Siblings:
 `docs/webdetector-refactor.md` (entity signals), `docs/roadmaps/challenge-engine.md`
 §4 (actuators: harden/throttle) + §8 (level-2 gate), `docs/waf-autoblock-design.md`
 (the two-knob detect/persist split this reuses), `internal/webdetector/traffic_rules.go`
