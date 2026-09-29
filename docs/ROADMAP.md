@@ -167,13 +167,14 @@ that can drift" rule.
 - **State (short):** the evidence pipeline is built and proven — three shadow
   sources feed cfm-web's durable fingerprint ledger, which has convicted live
   solver farms (`c28caa00`, `95070673`) with block-safe IP intelligence. The
-  missing piece is the action channel; the master plan's E1–E3 checklist is
-  the only live to-do list (datacenter-member TTL ban → fake-crawler autoblock
-  → Phase C policy fetch + ChallengeV2 Rung 1 with teeth).
+  action channel shipped with E3 (2026-09-22: policy fetch + ChallengeV2
+  Rung 1 with teeth); E1 closed manual-only and E2 was dropped (2026-09-29).
+  The master plan's §5 is the only live to-do list: E4's measurement first,
+  then the candidates listed there.
 - **Standing decisions** (master plan §4): residential members of a
   fingerprint are never auto-banned (ChallengeV2 is the residential path);
   deny on a bare fingerprint only when farm-unique; every shadow burn-in gets
-  an exit contract; sensor freeze until E1–E3 ship.
+  an exit contract; sensor freeze until E4's measurement.
 - **Design detail:** node side `docs/traffic-classifier.md` (grains, ladder,
   ChallengeV2 rungs) · per-IP score `docs/challenge-score.md` · central ledger
   `cfm-web:docs/fingerprint-reputation.md` · under-attack state machine

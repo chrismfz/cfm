@@ -17,8 +17,13 @@
 > "Auto-v2"). The I2 freeze is untouched; `UNDER_ATTACK_DRYRUN` still governs
 > only the unbuilt I3+ ladder.
 
-**Status: I0 shipped; I1 (detector + state + notify, detect-only) landed —
-surfacing (I1b) + the RT-baseline clause (§3 leg 3) still open.** Siblings:
+**Status: I0 shipped; I1 (detector + state + notify, detect-only) and its
+surfacing (I1b) landed — the RT-baseline clause (§3 leg 3) is still open, and
+frozen with the rest (master plan §3 row 10). Since 2026-09-29 a vhost in
+UNDER_ATTACK runs its automatic challenge at the v2 tier
+(`CHALLENGE_V2_AUTO_VHOST`); UNDER_ATTACK has never been entered fleet-wide
+(leg 3 needs ≥50% origin errors), so in practice only an operator `attack on`
+reaches it.** Siblings:
 `docs/webdetector-refactor.md` (entity signals), `docs/roadmaps/challenge-engine.md`
 §4 (actuators: harden/throttle) + §8 (level-2 gate), `docs/waf-autoblock-design.md`
 (the two-knob detect/persist split this reuses), `internal/webdetector/traffic_rules.go`
@@ -261,10 +266,11 @@ DRYRUN=1 stops after 6.0. Everything below is TTL'd and vhost-scoped.
   exclude/ignore — does not have its under-attack legs (re)evaluated, so it can
   neither newly-enter nor exit UNDER_ATTACK via those ticks (it holds its last
   state — conservative: over-alert, never a false "resolved"). Closing that needs
-  the hook reachable from every challenge branch. **Still open (I1b):** the read
+  the hook reachable from every challenge branch. **I1b — landed:** the read
   surfaces — `state` field on `cfm webtop`, `/api/v1/challenge/vhosts`, MCP
   `challenge_vhosts`/`host_drilldown`, and the cfm-admin badge — plus the
-  `cfm webtop attack on|off` CLI wiring onto `SetVhostAttackOverride`.
+  `cfm webtop attack on|off` CLI wiring onto `SetVhostAttackOverride`
+  (CHANGELOG, "Under-Attack Mode (I1b)").
 - **I2** — fingerprinter in the abuse-shadow harness: candidate predicates +
   coverage/collision logged, nothing enforced. Validate on e-athlos live.
   **Landed** (`under_attack_fingerprint.go`, shadow-only): rolling per-vhost

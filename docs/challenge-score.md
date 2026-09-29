@@ -1,9 +1,12 @@
 # Challenge-abuse score (per-client) — design notes
 
 > **▶ PLAN OF RECORD: `docs/abuse-defense-master-plan.md`** (2026-09-18). The
-> phased plan in §10 below is **FROZEN** as design context; next steps (the
-> B3 seed map, T-band enforcement, ChallengeV2 Rung 1) are sequenced only by
-> the master plan's E3.
+> phased plan in §10 below is **FROZEN** as design context. E3 shipped
+> ChallengeV2 Rung 1 (2026-09-22) without the rest, and the operator review of
+> 2026-09-29 (master plan §5) settled it: the B3 seed map, the T2 edge-deny
+> channel and the daemon seeds are **dropped**; the T1 harden rung is
+> **frozen** until a faster in-page PoW solver lands. `challenge_score` stays as evidence
+> (`would_deny` → ledger).
 >
 > **Status:** WORKING NOTES (design, pre-code). The per-client half of the
 > traffic-classifier convergence — **Track 2**. Targets the *challenge-defeat*
@@ -125,7 +128,8 @@ shared with the vhost lane:
   today hardcoded 16; the knob is Phase A groundwork). ⚠️ `n=20` already loses
   ~⅓ of mobile clients to **expiry** — so the challenge expiry window MUST scale
   with `n` in the same change, or we self-DoS.
-  - **ChallengeV2 (interactive: drag-image / puzzle)** is the stronger soft rung
+  - **ChallengeV2 (interactive: drag-image / puzzle)** *(as built, ChallengeV2 is
+    the passive Rung 1; the visible puzzle was dropped 2026-09-29)* is the stronger soft rung
     *specifically against headless*: PoW is pure CPU (a farm solves it trivially),
     while a drag/puzzle needs real interaction/rendering. Prefer ChallengeV2 over
     PoW-harden for the solver-farm class; keep PoW-harden for cost-based hardening.
@@ -209,14 +213,18 @@ logs.
 ## 9. Open questions (resolve before T-band code)
 
 1. **Deny shape**: 403 vs tarpit vs nft drop (shared with the master plan).
-2. **Client subject**: pure IP (simplest) vs `(IP, vhost)` (fairer multi-tenant)
+   **Answered by E3:** a clean `403` (fingerprint policy `deny`).
+2. **Client subject** *(moot 2026-09-29: the T-band code is dropped or
+   frozen)*: pure IP (simplest) vs `(IP, vhost)` (fairer multi-tenant)
    vs `/24` rollup (solver farms). Lean **IP-primary + a `/24` density feature**.
 3. **Aggregation site**: the hybrid seed-map (recommended) vs pure edge-Lua.
+   **Moot:** the seed map is dropped (2026-09-29).
 4. **Burn-in log** — **RESOLVED (see §8, as-built):** no new log/schema — the
    `would_deny` capture folds into the existing `abuse_shadow.log` (grep surface)
    + `detection_history` (durable, fleet-pullable). A dedicated `[cfm_challenge_score]`
    writer remains an option only if the edge-tell side ever needs its own.
-5. **Dual signals**: retire `cookie_discard` / `solver_farm` alerts once the score
+5. **Dual signals** *(moot 2026-09-29: the score never leads — its promotion
+   is dropped)*: retire `cookie_discard` / `solver_farm` alerts once the score
    leads, or keep as belt-and-suspenders?
 
 ## 10. Phased plan
@@ -265,6 +273,8 @@ logs.
     the shadow will show whether a coarse TLS bucket (`c28caa00`) lights up legit
     shared-bucket solvers, the exact signal that decides whether a fingerprint may
     be enforced bare or only with JA4H corroboration / an interactive challenge.
+    *(2026-09-29: JA4H dropped; the interactive answer as built is the passive
+    ChallengeV2 Rung 1 under an operator arm.)*
   - **Stage 1b — edge-Lua tells.** The two signals only the edge sees —
     post-clearance silence (tripwire) + Sec-Fetch — plus the hybrid seed map, per
     the architecture in §3. Follows the challenge-waf-release-checklist. Sliced:
@@ -302,16 +312,19 @@ logs.
       dedicated bounded `cfm_pcw` dict, config toggle
       (`detectors.conf [webdetector] POST_CLEARANCE_CADENCE = 0`, published to the
       edge on the 10s bridge TTL, no proxy reload). Feeds the seed map.
-    - **B3 — hybrid seed map (last).** Daemon publishes the Stage-1a score +
+    - **B3 — hybrid seed map (last)** *(dropped 2026-09-29, superseded by E3)*.
+      Daemon publishes the Stage-1a score +
       `cookie_discard`/`solver_farm` as a per-IP seed the edge reads (the
       `root:cfm 0640` token-file pattern); edge fuses seed + edge tells into one
       decayed per-IP score. The convergence piece.
-- **Stage 2 — T1 harden:** wire the soft rung (POWN knob **Phase A manual** first
+- **Stage 2 — T1 harden** *(frozen 2026-09-29 until a faster in-page solver
+  lands; master plan §5)*: wire the soft rung (POWN knob **Phase A manual** first
   — `CHALLENGE_POWN` + per-vhost + expiry scaling + cfm-admin button; then
   **Phase B auto governor** from `IsSolverFarm` / challenged / suspicious), and/or
   ChallengeV2.
 - **Stage 3 — T2 deny:** the edge-deny (403) channel, after burn-in shows a clean
-  would-deny set.
+  would-deny set. *(Dropped 2026-09-29: the operator-armed fingerprint policy
+  (E3) is the one deny path; master plan §5.)*
 
 **Standalone building blocks (value on their own, feed this score):**
 - **POWN difficulty knob** (Phase A manual) — also the I3 "harden" groundwork.

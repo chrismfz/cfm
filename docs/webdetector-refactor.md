@@ -3,7 +3,7 @@
 > **▶ HISTORICAL CONTEXT — plan of record is `docs/abuse-defense-master-plan.md`**
 > (2026-09-18). This doc's increments I0–I3 shipped as the `abuse_shadow`
 > signals; I4–I7 were never built and are superseded by the master plan
-> (Signal B/D sit in its backlog). Kept for the FP minefield analysis (§4/§4a)
+> (Signal B/D were dropped from it on 2026-09-29). Kept for the FP minefield analysis (§4/§4a)
 > and the two-abuse-classes evidence (§4b), which remain correct.
 
 **Status: HISTORICAL HANDOFF DOC (was: living).** This is the anchor for a multi-PR effort to make
@@ -274,7 +274,8 @@ only the first:
 flag a vhost whose live traffic's country/ASN entropy is wildly inconsistent
 with its baseline audience (a Greek shop does not normally get coordinated hits
 from Ethio Telecom + Pakistan Telecom + Jordan Data). Per-vhost, distributed-shape
-detector; complements the uniqIP path. Backlog.
+detector; complements the uniqIP path. Backlog. *(Dropped 2026-09-29 with
+Signal B — master plan §5.)*
 
 **Takeaway for scope:** don't sell Signal C as "the" abuse detector. It targets
 the concentrated shape. The distributed shape is (a) already partly covered by
@@ -325,10 +326,12 @@ watch them accumulate from the gateway. Contract:
   `node_call node="all"` (no gateway change — passthrough). Admin-only, read-only.
 - [ ] **I4** — Signal B (enumeration) shadow. *(I5 as originally written said
   "Signal C (rate outlier)" — but Signal C shipped in I2 above; the open items
-  here are Signal B and the Signal D idea in §4b, both in the master plan's
-  do-not-start backlog.)*
+  here were Signal B and the Signal D idea in §4b, both dropped 2026-09-29 —
+  master plan §5.)*
 - [ ] **I6** — promote whatever the data justifies to per-IP/subnet challenge.
-- [ ] **I7** — smarter vhost-wide arm on concentration signals.
+  *(Frozen with the Track-1 shadow signals until the next Class-2 flood.)*
+- [ ] **I7** — smarter vhost-wide arm on concentration signals. *(Superseded
+  2026-09-29: the automatic vhost challenges run at v2 — master plan §5.)*
 
 ### Deferred to the enforcement-promotion follow-up (from the I2 review)
 - **Throttle-map reaper.** `vhostSuppressLoggedAt` gains a per-`(host,ip)` key

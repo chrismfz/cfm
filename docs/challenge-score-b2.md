@@ -133,6 +133,8 @@ burn-in that sizes naive-navigation cadence. The daemon's log-driven `rate_outli
 still sees such clients (all requests are in the access log); B2's role is the
 edge-local per-cleared-identity accumulator, not an evasion-proof detector.
 
-B3 (the hybrid seed map) later fuses this edge accumulator with the daemon seed
+B3 (the hybrid seed map) was to fuse this edge accumulator with the daemon seed
 (Stage-1a `challenge_score` + B1 `WAF_FETCH_METADATA` + `cookie_discard` +
-`solver_farm`) into one edge-local per-client score.
+`solver_farm`) into one edge-local per-client score. *(B3 was dropped
+2026-09-29, superseded by E3 — so a `cfm_pcw` promote must name its own
+actuator; master plan §5 candidate 2.)*

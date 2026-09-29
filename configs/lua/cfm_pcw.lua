@@ -75,8 +75,9 @@ end
 -- this is a per-IP-per-host counter, NOT per-browser: the clearance cookie is not a
 -- per-browser identity, so a shared egress (CGNAT / office NAT) where many real
 -- users are cleared for the SAME host still pools into one counter — a known FP
--- class this shadow measures and that B3 must handle NAT-aware before it ever gates
--- traffic (docs/challenge-score-b2.md §6). Keying by host (not IP alone) at least
+-- class this shadow measures and that any consumer must handle NAT-aware before it
+-- ever gates traffic (docs/challenge-score-b2.md §6; B3, the designed one, was
+-- dropped 2026-09-29). Keying by host (not IP alone) at least
 -- stops cross-host aggregation and matches the "one client hammering one host"
 -- scraper shape.
 function _M.observe(dict, keyid, method, accept, dest, purpose)
