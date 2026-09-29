@@ -1483,8 +1483,8 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- (an under-report: a
       -- challenged POST left no cfm.waf.log record, no waf_trigger history
       -- and no ipState decision), and for challenge_v2 the push is
-      -- load-bearing: it is what writes the per-(ip,host) rung mark the
-      -- verify gate keys on, so a body-carried payload must not dodge it.
+      -- load-bearing: it is what writes the (per-IP) rung mark the verify
+      -- gate keys on, so a body-carried payload must not dodge it.
       local function push_and_log_waf_hit()
         if waf.should_push and waf.should_push(SH, ip, reason, waf_action, p_host) then
           -- Forensic fields (UA / Referer / Content-Type) are always
@@ -1542,7 +1542,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       else -- challenge tier: "challenge" or "challenge_v2" (only reachable when
            -- clearance_allow == false). Both rungs serve the SAME challenge
            -- page here — the v2 rung difference bites at verify, keyed on the
-           -- per-(ip,host) mark the ip_push below records daemon-side.
+           -- per-IP mark the ip_push below records daemon-side.
         if ngx.ctx.cfm_resumed_post then
           ngx.header["X-CFM-Action"] = "block_replayed"
           ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""

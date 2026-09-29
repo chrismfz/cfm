@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +14,9 @@ import (
 // action="challenge_v2" must
 //   - store a plain "challenge" IP decision (the edge wire vocabulary cfm.lua
 //     Step 3 enforces — an unknown action there falls through to allow);
-//   - record the per-(ip,host) rung mark the verify D5 gate ORs in;
+//   - record the rung mark the verify D5 gate ORs in — PER IP, like the
+//     ipState decision it rides with (cfm.lua serves that challenge on every
+//     web host the IP visits), and read for web-scope verifies only;
 //   - hand the VERBATIM "challenge_v2" to OnTrigger, so cfm.waf.log, the
 //     waf_trigger history row and the WAFHitEvent carry the real tier (and
 //     wafsec's action=="block" filter keeps autoblock un-keyed on it).
@@ -50,11 +53,24 @@ func TestWAFPushChallengeV2_StoresChallengeAndMarks(t *testing.T) {
 	if entry.Action != "challenge" {
 		t.Fatalf("ipState action = %q, want the wire-normalized %q", entry.Action, "challenge")
 	}
-	if !challengeV2Marked("203.0.113.61", "shop.example") {
-		t.Fatalf("challenge_v2 push did not record the (ip,host) rung mark")
+	// The decision is per IP, so the rung covers every web host of the IP —
+	// including a sibling vhost the push did not name, where the client can
+	// solve the same WAF-imposed challenge (2026-09-29: until then the mark
+	// was per (ip,host) and that solve passed at v1).
+	if !challengeV2MarkCovers("203.0.113.61", "shop.example", "web") {
+		t.Fatalf("challenge_v2 push did not arm the rung on the host it named")
 	}
-	if challengeV2Marked("203.0.113.61", "other.example") {
-		t.Fatalf("rung mark leaked to a host the push did not name")
+	if !challengeV2MarkCovers("203.0.113.61", "other.example", "web") {
+		t.Fatalf("challenge_v2 push did not arm the rung on a sibling web host of the IP")
+	}
+	if challengeV2MarkCovers("203.0.113.61", "other.example", "panel:2083") {
+		t.Fatalf("a WAF mark must not reach a panel-scope verify")
+	}
+	if challengeV2MarkCovers("203.0.113.99", "shop.example", "web") {
+		t.Fatalf("rung mark leaked to an IP the push did not name")
+	}
+	if challengeV2Marked("203.0.113.61", "shop.example") {
+		t.Fatalf("the WAF writer must not write the traffic-rule (ip,host) store")
 	}
 	if gotAction != "challenge_v2" || gotReason != "WAF_XSS" {
 		t.Fatalf("OnTrigger got (action=%q, reason=%q), want the verbatim (challenge_v2, WAF_XSS)", gotAction, gotReason)
@@ -83,7 +99,9 @@ func TestChallengeV2Mark_HostNormalizationConverges(t *testing.T) {
 	}
 }
 
-func TestWAFPushChallengeV2_EmptyHostDegradesToPlainChallenge(t *testing.T) {
+// The mark is keyed by IP alone, so a push without a host still arms the rung
+// (it used to degrade to plain v1: an (ip,host) mark had nothing to key on).
+func TestWAFPushChallengeV2_HostlessPushStillMarksTheIP(t *testing.T) {
 	resetChallengeV2Marks(t)
 	b := NewNginxBridge("/tmp/cfm-test-wafv2b.sock", "tok", time.Minute, time.Minute)
 
@@ -94,14 +112,11 @@ func TestWAFPushChallengeV2_EmptyHostDegradesToPlainChallenge(t *testing.T) {
 	b.mu.Lock()
 	entry, ok := b.ipState["203.0.113.62"]
 	b.mu.Unlock()
-	challengeV2Marks.mu.Lock()
-	markCount := len(challengeV2Marks.m)
-	challengeV2Marks.mu.Unlock()
 	if !ok || entry.Action != "challenge" {
 		t.Fatalf("hostless v2 push must still challenge the IP (ok=%v action=%q)", ok, entry.Action)
 	}
-	if markCount != 0 {
-		t.Fatalf("hostless v2 push must not write a rung mark (fail-open to v1), got %d marks", markCount)
+	if !challengeV2MarkCovers("203.0.113.62", "any.example", "web") {
+		t.Fatalf("hostless v2 push must arm the rung for the IP")
 	}
 }
 
@@ -129,8 +144,9 @@ func TestWAFPushBatchChallengeV2_SameMapping(t *testing.T) {
 	if !ok || entry.Action != "challenge" {
 		t.Fatalf("batch v2 push: ipState (ok=%v action=%q), want challenge", ok, entry.Action)
 	}
-	if !challengeV2Marked("203.0.113.63", "blog.example") {
-		t.Fatalf("batch v2 push did not record the rung mark")
+	if !challengeV2MarkCovers("203.0.113.63", "blog.example", "web") ||
+		!challengeV2MarkCovers("203.0.113.63", "other.example", "web") {
+		t.Fatalf("batch v2 push did not arm the rung for the IP")
 	}
 	if gotAction != "challenge_v2" {
 		t.Fatalf("batch OnTrigger action = %q, want verbatim challenge_v2", gotAction)
@@ -173,5 +189,176 @@ func TestRecordWAFTriggerChallengeV2_EventCarriesTierAndWafsecFilterDrops(t *tes
 	// every event whose Action != "block".
 	if got[0].Action != "challenge_v2" {
 		t.Fatalf("WAFHitEvent action = %q, want challenge_v2", got[0].Action)
+	}
+}
+
+// The grain resolver and the waiver bar see a WAF (per-IP) mark on a web-scope
+// verify only; a traffic-rule (ip,host) mark keeps its exact-pair scope.
+func TestChallengeV2IPMark_GrainAndWaiverAreWebScopeOnly(t *testing.T) {
+	resetChallengeV2Marks(t)
+	MarkChallengeV2IP(" 203.0.113.80 ")
+
+	if g, _ := challengeV2ArmGrainVia("", "203.0.113.80", "tenant-b.example", "web"); g != v2GrainMark {
+		t.Fatalf("web verify on a sibling host: grain=%q, want %q", g, v2GrainMark)
+	}
+	if g, _ := challengeV2ArmGrainVia("", "203.0.113.80", "tenant-b.example", "panel:2083"); g != "" {
+		t.Fatalf("panel verify: grain=%q, want unarmed", g)
+	}
+	if g, _ := challengeV2ArmGrainVia("", "203.0.113.81", "tenant-b.example", "web"); g != "" {
+		t.Fatalf("unmarked IP: grain=%q, want unarmed", g)
+	}
+	// A geo/vhost arm is not good-bot-waivable while a WAF mark covers the
+	// client: that challenge came from the WAF, which never softens for bots.
+	if got := challengeV2WaiverBar(v2GrainVhost, "203.0.113.80", "tenant-b.example", "web"); got != v2WaiverMark {
+		t.Fatalf("waiver bar under a WAF mark = %q, want %q", got, v2WaiverMark)
+	}
+	if got := challengeV2WaiverBar(v2GrainVhost, "203.0.113.80", "tenant-b.example", "panel:2083"); got != "" {
+		t.Fatalf("waiver bar on a panel verify = %q, want waivable", got)
+	}
+
+	// A traffic-rule mark stays exact (ip,host), and web-scope too.
+	MarkChallengeV2("203.0.113.82", "shop.example")
+	if !challengeV2MarkCovers("203.0.113.82", "shop.example", "web") ||
+		challengeV2MarkCovers("203.0.113.82", "other.example", "web") {
+		t.Fatalf("traffic-rule mark scope changed")
+	}
+	if challengeV2MarkCovers("203.0.113.82", "shop.example", "panel:2083") {
+		t.Fatalf("a web traffic-rule mark armed a panel-scope verify on the same host")
+	}
+	if challengeV2MarkCovers("203.0.113.80", "tenant-b.example", "") {
+		t.Fatalf("an unknown scope must read as unarmed")
+	}
+}
+
+// End to end: a v2-tier WAF push (host A = a bare server IP, like rule 602),
+// then solves on a sibling vhost B and on a panel port. Before 2026-09-29 the
+// failing B solve passed at v1, got a clearance, and released the IP's WAF
+// decision on every host; a panel-scope solve released it too.
+func TestVerify_WAFV2PushArmsSiblingVhostButNotPanel(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test-wafv2e2e.sock", "tok", time.Minute, time.Minute)
+	base, capt := startVerifyServerWithBridge(t, b)
+	const (
+		ip = "203.0.113.90"
+		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	)
+	push := func() {
+		t.Helper()
+		if code := postIPPush(t, b, `{"ip":"`+ip+`","action":"challenge_v2","host":"84.54.49.44","uri":"/","reason":"WAF_IP_HOST","waf_rule_id":602,"ttl_sec":600}`); code != http.StatusOK {
+			t.Fatalf("push rejected: %d", code)
+		}
+	}
+	decided := func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		_, ok := b.ipState[ip]
+		return ok
+	}
+	failing := `{"v":1,"wd":true,"glr":"Google SwiftShader","ptr":0,"tch":0,"key":0}`
+	panel := map[string]string{"X-CFM-Panel-Port": "2083", "X-Forwarded-Port": "2083"}
+	push()
+
+	// 1. Panel port: the WAF mark does not arm it (the failing solve passes,
+	// unarmed, as before) — and it must not release the web decision.
+	resp := postVerifyHdr(t, base, ip, "tenant.example.gr", ua, failing, panel)
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatalf("panel-scope verify was armed by a WAF mark: X-CFM-V2=%q", resp.Header.Get("X-CFM-V2"))
+	}
+	if solved, rejects := capt.counts(); solved != 1 || rejects != 0 {
+		t.Fatalf("panel solve: solved=%d rejects=%d, want 1/0", solved, rejects)
+	}
+	if s := capt.solved[0]; s.V2Grain != "" || s.HumanityScore < defaultV2FailScore {
+		t.Fatalf("panel solve: grain=%q hs=%d, want unarmed with a failing score", s.V2Grain, s.HumanityScore)
+	}
+	if !decided() {
+		t.Fatalf("a panel-scope solve released the IP's web WAF decision")
+	}
+
+	// 2. Sibling web vhost, failing solve: rejected under the mark grain, and
+	// nothing released.
+	resp = postVerify(t, base, ip, "tenant.example.gr", ua, failing)
+	if resp.StatusCode != http.StatusForbidden || resp.Header.Get("X-CFM-V2") != "reject" {
+		t.Fatalf("failing solve on a sibling vhost: status=%d X-CFM-V2=%q, want 403 + reject",
+			resp.StatusCode, resp.Header.Get("X-CFM-V2"))
+	}
+	if solved, rejects := capt.counts(); solved != 1 || rejects != 1 || capt.rejects[0].V2Grain != v2GrainMark {
+		t.Fatalf("sibling reject: solved=%d rejects=%d %+v", solved, rejects, capt.rejects)
+	}
+	if !decided() {
+		t.Fatalf("a rejected solve released the IP's WAF decision")
+	}
+
+	// 3. Sibling web vhost, clean solve: passes under the arm and releases.
+	resp = postVerify(t, base, ip, "tenant.example.gr", ua, `{"v":1,"wd":false,"ptr":9,"tch":0,"key":1}`)
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatalf("clean solve on the sibling vhost was refused: X-CFM-V2=%q", resp.Header.Get("X-CFM-V2"))
+	}
+	if solved, _ := capt.counts(); solved != 2 || capt.solved[1].V2Grain != v2GrainMark || capt.solved[1].HumanityScore != 0 {
+		t.Fatalf("clean sibling solve: solved=%d %+v, want the 2nd solve armed (mark) and clean", solved, capt.solved)
+	}
+	if decided() {
+		t.Fatalf("a web-scope solve did not release the IP's decision")
+	}
+}
+
+// The waiver bar reads the verify's scope too: under a vhost arm, a verified
+// good bot whose IP carries a WAF mark is not waived on a web-scope verify
+// (the WAF challenge never softens for bots), but the mark does not reach a
+// panel-scope verify, where the same vhost-armed solve is waived as before.
+func TestVerify_WAFMarkBarsTheWaiverOnWebScopeOnly(t *testing.T) {
+	base, capt := startVerifyServer(t)
+	const (
+		host      = "shop.example.com"
+		readAloud = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36 (compatible; Google-Read-Aloud; +https://support.google.com/webmasters/answer/1061943)"
+		failing   = `{"v":1,"wd":true,"ptr":0,"tch":0,"key":0}`
+	)
+	setV2HostArmed(t, func(h string) bool { return h == host })
+	setV2GoodBot(t, func(_ context.Context, ip, _ string) (string, string) { return "google", "" })
+	MarkChallengeV2IP("66.249.81.230")
+
+	resp := postVerify(t, base, "66.249.81.230", host, readAloud, failing)
+	if resp.StatusCode != http.StatusForbidden || resp.Header.Get("X-CFM-V2") != "reject" {
+		t.Fatalf("web scope: status=%d X-CFM-V2=%q, want 403 + reject (the WAF mark bars the waiver)",
+			resp.StatusCode, resp.Header.Get("X-CFM-V2"))
+	}
+	panel := map[string]string{"X-CFM-Panel-Port": "2083", "X-Forwarded-Port": "2083"}
+	resp = postVerifyHdr(t, base, "66.249.81.230", host, readAloud, failing, panel)
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatalf("panel scope: the WAF mark barred the waiver: X-CFM-V2=%q", resp.Header.Get("X-CFM-V2"))
+	}
+	solved, rejects := capt.counts()
+	if solved != 1 || rejects != 1 || capt.solved[0].V2Waived != "google" || capt.solved[0].V2Grain != v2GrainVhost {
+		t.Fatalf("solved=%d rejects=%d %+v, want the panel solve waived under the vhost grain", solved, rejects, capt.solved)
+	}
+}
+
+// The legacy "/verify" alias is gone: on the web listener it was reached
+// through cfm.lua's generic challenge proxy, which does not clear the verify
+// inputs, so a client could claim a panel scope (and a fingerprint) there. A
+// genuine, fully solved POST to it must not be treated as a verify at all.
+func TestVerify_LegacyVerifyAliasIsNotAVerifyRoute(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test-wafv2legacy.sock", "tok", time.Minute, time.Minute)
+	base, capt := startVerifyServerWithBridge(t, b)
+	const (
+		ip = "203.0.113.91"
+		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	)
+	if code := postIPPush(t, b, `{"ip":"`+ip+`","action":"challenge_v2","host":"shop.example","reason":"WAF_XSS","waf_rule_id":302,"ttl_sec":600}`); code != http.StatusOK {
+		t.Fatalf("push rejected: %d", code)
+	}
+	panel := map[string]string{"X-CFM-Panel-Port": "2083", "X-Forwarded-Port": "2083"}
+	resp := postVerifyAt(t, base, "/verify", ip, "shop.example", ua, `{"v":1,"wd":true,"glr":"Google SwiftShader","ptr":0,"tch":0,"key":0}`, panel)
+	for _, c := range resp.Cookies() {
+		if strings.HasPrefix(c.Name, "cfm_clearance") && c.MaxAge > 0 {
+			t.Fatalf("POST /verify issued a clearance cookie %q", c.Name)
+		}
+	}
+	if solved, rejects := capt.counts(); solved != 0 || rejects != 0 {
+		t.Fatalf("POST /verify reached the verify handler: solved=%d rejects=%d", solved, rejects)
+	}
+	b.mu.Lock()
+	_, ok := b.ipState[ip]
+	b.mu.Unlock()
+	if !ok {
+		t.Fatalf("POST /verify released the IP's WAF decision")
 	}
 }

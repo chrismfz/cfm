@@ -70,6 +70,28 @@ back-filled here — see the git/PR history for that period.
   over 150 hours the fleet's only 603 hits were one Nextcloud client's
   deletes. Rule 603 still catches httpoxy (`Proxy:`) and the Tomcat
   CVE-2025-24813 partial `PUT`. (docs/waf.md FP case 12)
+- **A WAF `challenge_v2` now applies on every site the client visits, not
+  only the one that tripped the rule.** A WAF hit challenges the client's IP
+  on every site of the node, but the stricter v2 check (the solve must not
+  look like a headless browser) was recorded only for the site where the rule
+  fired. A bot could solve the same challenge on a sibling site at the old v1
+  level, get a clearance there, and lift the IP's WAF challenge everywhere:
+  a successful solve clears the per-IP decision. The post-deploy review found
+  this live: a Google Cloud scanner tripped rule 602 on a bare server IP,
+  then passed on a tenant site with webdriver and a software renderer. The v2
+  intent now follows the IP, like the challenge does. A real visitor sees no
+  difference: the same page, and a human solve passes either way. Solving
+  the panel-port login challenge (`:2083` etc.) no longer lifts the IP's web
+  challenges: it used to, which was the same hole through another door. The
+  panel login challenge itself is no longer put at v2 by a mark (it could be,
+  for the same site), and the edge's web verify now clears the panel-port
+  headers so a client cannot claim to be on a panel port (`openresty.conf` /
+  `angie.conf`, deployed with the package); the old `/verify` alias, which
+  skipped that clear, is removed. For 15 minutes after a WAF `challenge_v2`
+  hit, a verified crawler from that IP is not waived on any web site of the
+  node (it used to be only the one site).
+  Traffic-rule `challenge_v2` stays per site, which is how that challenge is
+  served.
 
 ## 2026.09.28
 

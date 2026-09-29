@@ -384,6 +384,22 @@ already opened.
           resume path included. Version-skew hazard documented in
           docs/waf.md: an OLDER edge maps the unknown mode to `disabled` —
           upgrade before setting the tier.
+          **Amended 2026-09-29 — the WAF mark is per IP.** The push stores
+          a per-IP ipState decision that cfm.lua serves on every web host,
+          but the mark was per (ip,host), so a client that tripped a v2
+          rule on host A solved the same challenge on host B at v1 and kept
+          the clearance. The post-deploy review found one on the fleet: a
+          Google Cloud scanner tripped 602 on a bare server IP, then passed
+          on a tenant vhost with webdriver + SwiftShader (hs=190). The WAF
+          writer now records a per-IP mark (`challengeV2IPMarks`), read for
+          web-scope verifies only; the panel human-entry verify stays
+          unarmed by it. Traffic-rule marks stay per (ip,host): that
+          challenge is served per request. A human pays nothing (D5b), and
+          the per-IP challenge was already there. Review catch folded in:
+          every passing verify released the IP's per-IP decision, panel
+          solves included, so a bot could solve the (unarmed) panel
+          challenge and lift the web WAF challenge; only a web-scope solve
+          releases now. The mark grain is web-scope for both writers.
         - [x] **D — scoped customer self-arm — DONE 2026-09-22** (cPanel
           "panic button"). The scoped WRITE path itself predated this
           slice (slice A: `challenge/vhost/add|remove` take scoped tokens,

@@ -7,11 +7,12 @@ import (
 	"cfm/internal/logging"
 )
 
-// pairTTLStore is the ONE bounded, TTL'd, per-(ip,host) store behind both the
-// ChallengeV2 rung marks (gate teeth, challengeV2Marks) and the traffic-rule
-// challenge notes (telemetry, challengeRuleNotes) — one implementation, so a
-// fix to the sweep, the cap or the once-per-episode warning reaches both.
-// Keys come from challengeV2MarkKey.
+// pairTTLStore is the ONE bounded, TTL'd store behind the ChallengeV2 rung
+// marks (gate teeth: challengeV2Marks per (ip,host), challengeV2IPMarks per
+// IP) and the traffic-rule challenge notes (telemetry, challengeRuleNotes) —
+// one implementation, so a fix to the sweep, the cap or the once-per-episode
+// warning reaches all of them. Pair keys come from challengeV2MarkKey; the
+// per-IP store keys on the trimmed IP.
 //
 // Bounded and fail-open: at maxKeys a NEW key is dropped after an expiry
 // sweep (never an error); existing keys keep refreshing. Reads take only the

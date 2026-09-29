@@ -732,7 +732,7 @@ legitimately report it.
   standing D5b cost-lever residual.
 - **Where they bite:** only under a v2 arm (D5a), but that already includes
   every WAF challenge-tier rule, which is `challenge_v2` by default. Those
-  per-(ip,host) marks are strict (no good-bot waiver), so the tells take
+  WAF marks (per IP since 2026-09-29) are strict (no good-bot waiver), so the tells take
   effect fleet-wide on upgrade. H was not sampled from WAF-mark traffic
   specifically. Elsewhere the tells show on the `would_v2` line; re-run this
   measurement on the `would_v2` / `src=` data before arming v2 anywhere new.

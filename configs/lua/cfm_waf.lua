@@ -45,8 +45,9 @@ local CFG = {
   --   "challenge"    -> send to challenge server
   --   "challenge_v2" -> same challenge page as "challenge" at the edge; the
   --                     rung difference bites at VERIFY: the push records a
-  --                     per-(ip,host) v2 mark daemon-side, and a solve that
-  --                     fails the passive humanity score earns no clearance
+  --                     per-IP v2 mark daemon-side, and a solve on any web
+  --                     host that fails the passive humanity score earns no
+  --                     clearance
   --                     (see challenge_v2.go D5). Set per rule via
   --                     cfm_waf_config.lua; rule_xss ships at this tier
   --                     (the one default, see its entry below).
@@ -418,12 +419,13 @@ local CFG = {
   -- still collapsing rapid multi-vector bursts from a true attacker.
   block_ttl_sec     = 10,
   push_cooldown_sec = 60,
-  -- Max distinct hosts a single IP may open a challenge_v2 push+mark for per
-  -- family per push_cooldown_sec window. challenge_v2 keys the Host in (each
-  -- host needs its own rung mark), but $host is client-chosen, so this caps the
+  -- Max distinct hosts a single IP may open a challenge_v2 push for per family
+  -- per push_cooldown_sec window. challenge_v2 keys the Host in (see
+  -- should_push: since the daemon's mark became per IP on 2026-09-29 this only
+  -- buys a per-host record), but $host is client-chosen, so this caps the
   -- per-(ip,family) push/RPC volume a Host-rotating flood can generate — past
-  -- it, hits collapse to the family window (see should_push). 16 covers a real
-  -- multi-vhost scanner worth marking; a flood beyond it drops marks (→ v1).
+  -- it, hits collapse to the family window. 16 covers a real multi-vhost
+  -- scanner; the IP is already marked by its first push.
   push_v2_host_cap  = 16,
 
   -- Body scan budget, keyed by request Content-Type. The merged args+body
@@ -2337,10 +2339,13 @@ function _M.should_push(shdict, ip, reason, action, host)
     -- per-IP flood still collapses to at most two pushes per window.
     key_reason = (reason and reason:match("^[^:]+:[^:]+")) or fam
   end
-  -- challenge_v2 keys the HOST in as well: the push is what records the
-  -- per-(ip,host) v2 rung mark daemon-side (handleIPPush → MarkChallengeV2),
-  -- so a family+action+ip key would drop the mark for every host after the
-  -- first within the cooldown, and those hosts would verify at v1. But $host is
+  -- challenge_v2 keys the HOST in as well. It was added when the daemon's v2
+  -- rung mark was per (ip,host): a family+action+ip key dropped the mark for
+  -- every host after the first within the cooldown. Since 2026-09-29 the mark
+  -- is per IP (handleIPPush → MarkChallengeV2IP), so one push arms every host,
+  -- and the per-host key now only buys a cfm.waf.log / history record per host
+  -- (at most push_v2_host_cap extra pushes per window) — a candidate for a
+  -- simplifying follow-up under the release checklist. But $host is
   -- CLIENT-chosen (a catch-all server_name accepts any Host), so an unbounded
   -- per-host key would re-open the F31 flood: one ip_push RPC + cfm.waf.log line
   -- per Host an attacker rotates, unbounded, for the host-independent rules

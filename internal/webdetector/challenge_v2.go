@@ -19,13 +19,15 @@ package webdetector
 //                    node knob CHALLENGE_V2_AUTO_VHOST arms, overridable per
 //                    host by a tier pin — challenge_v2_auto.go; TTL'd by the
 //                    challenge itself, disarmable per vhost and node-wide), or a
-//                    per-(ip,host) mark a v2-tier source wrote when it
-//                    challenged the client (challengeV2Marked; writers: a
-//                    traffic rule with action challenge_v2 at decision time,
-//                    and a WAF rule set to "challenge_v2" via its ip_push —
-//                    same edge-authoritative ip/host inputs as the decision
-//                    and verify paths); everyone else is scored
-//                    shadow/log-only.
+//                    rung mark a v2-tier source wrote when it challenged the
+//                    client (challengeV2MarkCovers): per (ip,host) for a
+//                    traffic rule with action challenge_v2 at decision time
+//                    (its challenge is that request's host's), per IP for a
+//                    WAF rule set to "challenge_v2" via its ip_push (its
+//                    decision challenges the IP on every web host); either is
+//                    read for web-scope verifies only — same
+//                    edge-authoritative ip/host inputs as the decision and
+//                    verify paths; everyone else is scored shadow/log-only.
 //   (b) ABSENCE    — a solve can fail ONLY on positive headless evidence
 //                    (webdriver true, a software renderer, a self-contradicting
 //                    report). A missing payload (old cached page, blocked JS,
@@ -85,6 +87,17 @@ package webdetector
 //     cfm.lua; (b) an operator who re-binds CHALLENGE_HTTP_LISTEN off
 //     localhost re-opens the direct-client path and with it every
 //     client-authored-header caveat — don't.
+//   - The verify's SCOPE (clearanceScope: X-CFM-Panel-Port / X-Forwarded-Port)
+//     is edge-authoritative the same way: the panel listeners stamp their
+//     port and, since 2026-09-29, the web /__cfm_verify locations clear both
+//     headers, and the legacy "/verify" alias (reachable through cfm.lua's
+//     generic challenge proxy, which clears none of them) is gone. It decides
+//     whether a rung mark counts (web only) and whether a solve releases the
+//     IP's bridge decision (web only). Residual, on a deployed web conf
+//     predating that clear: a client claiming a panel port skips the mark
+//     grain, but only earns a panel-scope cookie and releases nothing —
+//     telemetry noise (the solve reads unarmed), not a way past a web
+//     challenge.
 //   - An FCrDNS-verified good bot is WAIVED at the gate (v2_waived=<name>),
 //     under the same CHALLENGE_GOODBOT_EXEMPT that exempts it from the
 //     challenge at decision time — and ONLY under the grains that exemption
@@ -275,7 +288,7 @@ func ConfigureChallengeV2HWTells(on bool) {
 	challengeV2.mu.Unlock()
 }
 
-// ── Per-(ip,host) ChallengeV2 marks (arm-surfaces slice B) ──────────────────
+// ── ChallengeV2 rung marks (arm-surfaces slices B and C) ───────────────────
 //
 // Some v2-tier arm sources are TRANSIENT: a traffic rule with action
 // challenge_v2 matches one request's attributes (path/UA/country/…) at
@@ -283,13 +296,42 @@ func ConfigureChallengeV2HWTells(on bool) {
 // payload at the edge (slice C: the ip_push carries the verbatim tier and
 // handleIPPush records the mark) — the verify handler cannot re-evaluate
 // either later (the verify POST has none of the original request's
-// attributes). So the challenging path records the v2 intent per (client IP,
-// host) here, and the verify gate ORs the mark in next to the
-// fingerprint/geo/vhost grains. The
-// key is EXACT (ip, host): the verify POST rides the same origin the
-// challenged page was served on. Bounded and fail-open: over the cap a new
-// mark is dropped after an expiry sweep (the client then faces a plain v1
-// challenge — never an error), matching D5a's "teeth only where armed".
+// attributes). So the challenging path records the v2 intent here, and the
+// verify gate ORs the mark in next to the fingerprint/geo/vhost grains.
+//
+// A mark has the SCOPE of the challenge its writer imposed:
+//   - traffic rule → per (ip, host) (challengeV2Marks). The rule is evaluated
+//     per request, so its challenge is served on that request's host; the
+//     verify POST rides the same origin.
+//   - WAF rule → per IP (challengeV2IPMarks). handleIPPush stores an ipState
+//     decision keyed by IP alone, and cfm.lua Step 3 serves it on EVERY web
+//     host the IP visits. Until 2026-09-29 this mark was per (ip, host) too, so
+//     a client that tripped the rule on host A solved the same WAF-imposed
+//     challenge on host B at v1 and kept the clearance. Seen on the fleet: a
+//     Google Cloud scanner tripped 602 on a bare server IP, then solved on a
+//     tenant vhost with webdriver + a software renderer (hs=190), and was not
+//     rejected. (A passing solve then also released the IP's decision on
+//     every host — releaseSolvedIP.)
+//
+// Both writers mark WEB challenges, so the mark grain is read for web-scope
+// verifies only (challengeV2MarkCovers): the panel ports never serve the WAF
+// decision, and their human-entry challenge is armed by neither writer. A
+// panel-scope solve also releases nothing (challenge_server.go), so it cannot
+// lift a WAF challenge the web edge set.
+//
+// A WAF mark arms EVERY web-scope solve from the IP for its 15 minutes — also
+// one that answers a challenge the WAF did not impose (a v1 vhost or rule
+// challenge, the fingerprint floor), or comes after the IP's decision was
+// released or expired. So `v2=mark` beside `src=vhost:…` is expected, not a
+// bug. Humans pay nothing for it (D5b).
+//
+// Don't make a passing solve consume a mark. After a solve on host B, a re-hit
+// on host A is challenged inline, but should_push's cooldown suppresses the
+// re-push, so only the surviving mark keeps that host-A solve at v2.
+//
+// Bounded and fail-open: over the cap a new mark is dropped after an expiry
+// sweep (the client then faces a plain v1 challenge — never an error),
+// matching D5a's "teeth only where armed".
 const (
 	// challengeV2MarkTTL comfortably covers page load + the solve retry
 	// backoff. Re-marking differs per writer: a v2-tier TRAFFIC RULE re-marks
@@ -312,7 +354,7 @@ var challengeV2Marks = pairTTLStore[struct{}]{
 	m:       map[string]time.Time{},
 	ttl:     challengeV2MarkTTL,
 	maxKeys: challengeV2MarkMaxKeys,
-	fullMsg: "[challenge_v2] per-(ip,host) mark store full (%d) — new v2 marks degrade to plain challenge until pressure drops",
+	fullMsg: "[challenge_v2] per-(ip,host) traffic-rule mark store full (%d) — new traffic-rule v2 marks degrade to plain challenge until pressure drops",
 }
 
 // challengeV2MarkKey canonicalizes the (ip, host) pair into the store key.
@@ -349,6 +391,40 @@ func MarkChallengeV2(ip, host string) {
 func challengeV2Marked(ip, host string) bool {
 	_, ok := challengeV2Marks.get(challengeV2MarkKey(ip, host), time.Now())
 	return ok
+}
+
+// challengeV2IPMarks holds the WAF writer's per-IP marks (see the section
+// comment above). Same store type and knobs as challengeV2Marks, its own cap.
+var challengeV2IPMarks = pairTTLStore[struct{}]{
+	m:       map[string]time.Time{},
+	ttl:     challengeV2MarkTTL,
+	maxKeys: challengeV2MarkMaxKeys,
+	fullMsg: "[challenge_v2] per-IP WAF mark store full (%d) — new WAF v2 marks degrade to plain challenge until pressure drops",
+}
+
+// MarkChallengeV2IP records that a v2-tier WAF rule challenged ip (on every
+// web host — the ipState decision's scope). Over the cap a new mark is dropped
+// (fail-open to a plain v1 challenge), logged once per saturation episode.
+func MarkChallengeV2IP(ip string) {
+	challengeV2IPMarks.put(strings.TrimSpace(ip), struct{}{}, time.Now())
+}
+
+// challengeV2IPMarked reports whether a live per-IP WAF mark covers ip.
+// RLock only, no delete — same reasoning as challengeV2Marked.
+func challengeV2IPMarked(ip string) bool {
+	_, ok := challengeV2IPMarks.get(strings.TrimSpace(ip), time.Now())
+	return ok
+}
+
+// challengeV2MarkCovers is the mark grain as the verify gate sees it: for a
+// web-scope verify, a traffic-rule mark on exactly (ip, host) or a WAF mark on
+// ip; never for a panel-scope one. scope is clearanceScope(r): "web" or
+// "panel:<port>" (anything else is not web, so unarmed — fail-open, D5a).
+func challengeV2MarkCovers(ip, host, scope string) bool {
+	if scope != "web" {
+		return false
+	}
+	return challengeV2Marked(ip, host) || challengeV2IPMarked(ip)
 }
 
 // challengeV2HostTierHook returns the currently wired vhost-tier hook.
@@ -436,7 +512,7 @@ const (
 	v2GrainFP    = "fp"    // an armed challenge_v2 fingerprint policy
 	v2GrainGeo   = "geo"   // a fleet-armed country/ASN policy covering the IP
 	v2GrainVhost = "vhost" // a v2-tier vhost challenge on the host (manual arm, or automatic via CHALLENGE_V2_AUTO_VHOST / a tier pin)
-	v2GrainMark  = "mark"  // a per-(ip,host) rung mark (traffic rule / WAF rule)
+	v2GrainMark  = "mark"  // a rung mark: per (ip,host) from a traffic rule, per IP from a WAF rule (web scope)
 )
 
 // challengeV2ArmGrainVia answers D5a's "is this solve covered by an
@@ -467,7 +543,10 @@ const (
 //
 // For the vhost grain it also returns what put the host at v2 (v2_via) —
 // from the SAME tier resolution, so the two can never disagree on one solve.
-func challengeV2ArmGrainVia(fpID, ip, host string) (grain, via string) {
+//
+// scope is clearanceScope(r) of the verify ("web" or "panel:<port>"); it
+// decides whether a per-IP WAF mark counts (challengeV2MarkCovers).
+func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 	if FingerprintPolicyForID(fpID) == "challenge_v2" {
 		return v2GrainFP, ""
 	}
@@ -477,7 +556,7 @@ func challengeV2ArmGrainVia(fpID, ip, host string) (grain, via string) {
 	if armed, v := challengeV2HostArmedVia(host); armed {
 		return v2GrainVhost, v
 	}
-	if challengeV2Marked(ip, host) {
+	if challengeV2MarkCovers(ip, host, scope) {
 		return v2GrainMark, ""
 	}
 	return "", ""
@@ -492,10 +571,10 @@ func challengeV2ArmGrainVia(fpID, ip, host string) (grain, via string) {
 // grain that covers the solve (fp, geo, vhost, mark), so a geo or vhost answer
 // already rules out a fingerprint policy; the mark is checked here because it
 // comes last.
-func challengeV2WaiverBar(grain, ip, host string) string {
+func challengeV2WaiverBar(grain, ip, host, scope string) string {
 	switch grain {
 	case v2GrainGeo, v2GrainVhost:
-		if challengeV2Marked(ip, host) {
+		if challengeV2MarkCovers(ip, host, scope) {
 			return v2WaiverMark
 		}
 		return ""

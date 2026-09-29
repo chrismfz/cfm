@@ -48,9 +48,24 @@ disabled (0) < logonly (1) < challenge (2) < challenge_v2 (3) < block (4)
 `challenge_v2` is a challenge-tier mode with verify-time teeth. At the edge it
 serves the **same** challenge page as `challenge`; the difference is that the
 `ip_push` carries the verbatim `challenge_v2`, the daemon records a
-per-(ip,host) rung mark, and a solve from that pair failing the passive
-humanity score earns **no clearance** (`result=v2_reject`, retry-able — see
-`challenge_v2.go` D5). Semantics to know:
+**per-IP** rung mark, and a solve from that IP failing the passive humanity
+score earns **no clearance** (`result=v2_reject`, retry-able — see
+`challenge_v2.go` D5). The mark is per IP because the pushed decision is:
+cfm.lua serves that challenge on every web host the IP visits, so the rung
+covers every web host too. Until 2026-09-29 it was per (ip,host), and a client
+could solve the same challenge on a sibling vhost at v1 and keep the
+clearance. It is read for web-scope verifies only; the panel ports' own
+human-entry challenge is not armed by it. A passing web solve releases the
+IP's decision on every host (as before); a panel-port solve releases nothing,
+so it cannot lift a WAF challenge the web edge set. The scope comes from
+`X-CFM-Panel-Port` / `X-Forwarded-Port`: the panel listeners stamp them and
+the web `/__cfm_verify` locations clear them, so a client cannot claim a panel
+scope on the web listener (`TestVerifyLocations_*` pins both). A WAF mark also withholds
+the good-bot waiver on every web host of the IP for its 15 minutes (a WAF
+challenge never softens for bots), and it arms every web solve from that IP
+in that window — also one that answers a challenge the WAF did not impose —
+so `v2=mark` beside `src=vhost:…` is expected. The legacy `/verify` alias is
+gone (it bypassed the verify location's header clears). Semantics to know:
 
 - **Set per rule** via `/etc/cfm/cfm_waf_config.lua`
   (`return { rule_<name> = "challenge_v2" }`). Since **2026-09-23 the entire
@@ -87,12 +102,13 @@ humanity score earns **no clearance** (`result=v2_reject`, retry-able — see
   `CHALLENGE_V2_PASSIVE`** — with the rung disabled the whole suffix is
   suppressed, so if the line carries no `hs=` either, stop: nothing else is
   wrong. If `hs=` IS there the rung is on and the mark is what is missing;
-  three causes, cheapest first: a push without a host (nothing to key the mark
-  on); a solve later than `challengeV2MarkTTL` (15m); or the per-(ip,host)
-  mark store hitting its cap and failing open — that one is silent except for
-  a single `[challenge_v2] per-(ip,host) mark store full` line in the daemon
-  log per episode, and a storm is exactly when it happens, so grep for it
-  before concluding the push was wrong. `hs=0` is a PASS: the score is positive-evidence-only, so 0 means
+  three causes, cheapest first: a panel-scope verify (`:2083`/`:2087`/`:2096`
+  — the WAF mark is web-scope only, by design); a solve later than
+  `challengeV2MarkTTL` (15m); or the per-IP WAF mark store hitting its cap and
+  failing open — that one is silent except for a single `[challenge_v2]
+  per-IP WAF mark store full` line in the daemon log per episode, and a storm
+  is exactly when it happens, so grep for it before concluding the push was
+  wrong. `hs=0` is a PASS: the score is positive-evidence-only, so 0 means
   "no headless tell fired", not "humanity proved" — a real browser is expected
   to score 0 and keep its clearance. A bite logs `result=v2_reject`.
 - Post-clearance conversion treats it exactly like `challenge` (cleared

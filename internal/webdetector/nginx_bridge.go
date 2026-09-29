@@ -2132,20 +2132,20 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 
 	// challenge_v2 is a WAF-rule push (cfm_waf.lua slice C): on the wire and in
 	// ipState the decision stays plain "challenge" (the edge vocabulary cfm.lua
-	// Step 3 enforces), while the v2 intent is recorded as a per-(ip,host) rung
-	// mark the verify D5 gate ORs in. Only the web edge pushes /nginx/ip
-	// (cfm_panel.lua never does), so there is no panel-scope leak to gate here.
-	// A push without a host cannot be marked — it degrades to a plain v1
-	// challenge (fail-open, same doctrine as the mark store's cap pressure).
+	// Step 3 enforces), while the v2 intent is recorded as a rung mark the
+	// verify D5 gate ORs in. The mark is PER IP, like the ipState decision
+	// below: cfm.lua serves that challenge on every web host the IP visits, so
+	// a per-(ip,host) mark let the client solve it at v1 on a sibling vhost
+	// (challenge_v2.go, "ChallengeV2 rung marks"). The gate reads it for web-
+	// scope verifies only. Only the web edge pushes /nginx/ip (cfm_panel.lua
+	// never does). The push's host is not needed for the mark.
 	// The OnTrigger hook below still receives the verbatim "challenge_v2" so
 	// cfm.waf.log / waf_trigger history / WAFHitEvent carry the real tier
 	// (wafsec feeds on action=="block" only, so autoblock stays un-keyed).
 	storeAction := msg.Action
 	if msg.Action == "challenge_v2" {
 		storeAction = "challenge"
-		if msg.Host != "" {
-			MarkChallengeV2(msg.IP, msg.Host)
-		}
+		MarkChallengeV2IP(msg.IP)
 	}
 
 	// logonly is a "dry-run audit" action:
@@ -2480,14 +2480,12 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			msg.Method = strings.ToLower(strings.TrimSpace(msg.Method))
 
 			// Same challenge_v2 handling as handleIPPush: store plain
-			// "challenge", record the per-(ip,host) rung mark, keep the
-			// verbatim tier for OnTrigger.
+			// "challenge", record the per-IP rung mark, keep the verbatim
+			// tier for OnTrigger.
 			storeAction := msg.Action
 			if msg.Action == "challenge_v2" {
 				storeAction = "challenge"
-				if msg.Host != "" {
-					MarkChallengeV2(msg.IP, msg.Host)
-				}
+				MarkChallengeV2IP(msg.IP)
 			}
 
 			if msg.Action != "logonly" {

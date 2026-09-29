@@ -318,6 +318,20 @@ func startVerifyServerWithBridge(t *testing.T, bridge *NginxBridge) (string, *ve
 // (ip, ua, cookie), and a PoW solved at the configured difficulty.
 func postVerify(t *testing.T, base, clientIP, host, ua, body string) *http.Response {
 	t.Helper()
+	return postVerifyHdr(t, base, clientIP, host, ua, body, nil)
+}
+
+// postVerifyHdr is postVerify with extra request headers (e.g. the panel-scope
+// X-CFM-Panel-Port / X-Forwarded-Port pair).
+func postVerifyHdr(t *testing.T, base, clientIP, host, ua, body string, hdr map[string]string) *http.Response {
+	t.Helper()
+	return postVerifyAt(t, base, verifyPath, clientIP, host, ua, body, hdr)
+}
+
+// postVerifyAt is postVerifyHdr against an arbitrary path — for proving a
+// path is NOT a verify route.
+func postVerifyAt(t *testing.T, base, path, clientIP, host, ua, body string, hdr map[string]string) *http.Response {
+	t.Helper()
 	cookie := randomCookieValue()
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
@@ -340,7 +354,7 @@ func postVerify(t *testing.T, base, clientIP, host, ua, body string) *http.Respo
 		t.Fatal("could not solve the PoW")
 	}
 
-	req, _ := http.NewRequest(http.MethodPost, base+verifyPath+"?next=/", strings.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, base+path+"?next=/", strings.NewReader(body))
 	req.Header.Set("User-Agent", ua)
 	req.Header.Set("X-Real-IP", clientIP)
 	req.Header.Set("X-Forwarded-Host", host)
@@ -348,6 +362,9 @@ func postVerify(t *testing.T, base, clientIP, host, ua, body string) *http.Respo
 	req.Header.Set("X-CFM-Pow", powTok)
 	req.Header.Set("X-CFM-Sol", sol)
 	req.AddCookie(&http.Cookie{Name: "cfm_chal", Value: cookie})
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
 
 	client := &http.Client{
 		Timeout:       10 * time.Second,

@@ -28,8 +28,14 @@ import (
 )
 
 const (
-	verifyPath    = "/__cfm_verify" // new preferred endpoint
-	verifyPathOld = "/verify"       // legacy (keep during rollout)
+	// verifyPath is the ONLY verify route. The legacy "/verify" alias was
+	// removed 2026-09-29: nothing posted to it any more, and on the web
+	// listener it was reached through cfm.lua's generic challenge proxy, which
+	// does not clear or re-stamp the verify inputs (X-CFM-Panel-Port /
+	// X-Forwarded-Port / X-CFM-TLS / X-Forwarded-Host) the way the exact
+	// `location = /__cfm_verify` blocks do — so a client could choose its own
+	// scope and fingerprint there.
+	verifyPath    = "/__cfm_verify"
 	challengePath = "/__cfm_challenge"
 )
 
@@ -251,7 +257,7 @@ func (s *ChallengeServer) wrapAccessLog(next http.Handler) http.Handler {
 		if path == "" {
 			path = "/"
 		}
-		if sw.status >= 400 || path == verifyPath || path == verifyPathOld {
+		if sw.status >= 400 || path == verifyPath {
 			ip := strings.TrimSpace(r.Header.Get("CF-Connecting-IP"))
 			if ip == "" {
 				ip = strings.TrimSpace(r.Header.Get("X-Real-IP"))
@@ -733,7 +739,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			http.Error(w, "missing forwarded host", http.StatusBadRequest)
 			return
 		}
-		if r.URL.Path == verifyPath || r.URL.Path == verifyPathOld || r.URL.Path == challengePath {
+		if r.URL.Path == verifyPath || r.URL.Path == challengePath {
 			if strings.HasPrefix(clearanceScope(r), "panel:") && normalizeForwardedPort(r.Header.Get("X-Forwarded-Port")) == "" {
 				http.Error(w, "missing forwarded port", http.StatusBadRequest)
 				return
@@ -749,6 +755,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 
 		ipStr = ip.String()
 		next := normalizeChallengeNext(r.URL.Query().Get("next"))
+		// "web", or "panel:<port>" for the panel ports' human-entry challenge:
+		// read once, for the v2 arm below, the release and the clearance.
+		scope := clearanceScope(r)
 
 		// Require cookie + HMAC token
 		c, err := r.Cookie("cfm_chal")
@@ -821,7 +830,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// Resolve the D5a arm ONCE, for every scored solve — the gate
 			// below consumes this same answer, and the solve line renders it,
 			// so "did the teeth cover this solve" cannot be read two ways.
-			v2Grain, v2Via = challengeV2ArmGrainVia(fp.ID, ipStr, host)
+			v2Grain, v2Via = challengeV2ArmGrainVia(fp.ID, ipStr, host, scope)
 		}
 
 		solve := ChallengeSolve{
@@ -896,9 +905,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// the solve's TLS fingerprint (the original gate), a fleet-armed
 			// country/ASN policy covering the client IP (policy-kinds slice),
 			// a v2-tier VHOST arm covering the solve's host (arm-surfaces
-			// slice A), or a transient per-(ip,host) mark written when a
-			// v2-tier traffic rule (slice B) or WAF rule (slice C) challenged
-			// this pair. Each lookup is fail-open when unwired/absent. Same D5
+			// slice A), or a transient rung mark written when a v2-tier
+			// traffic rule (slice B, per ip+host) or WAF rule (slice C, per
+			// IP) challenged the client — web-scope verifies only. Each lookup is fail-open when unwired/absent. Same D5
 			// semantics either way; the gate inputs are edge-authoritative —
 			// see HONEST LIMITS in challenge_v2.go. The grain also rides the
 			// solve line, so a passed-under-arm solve is greppable too.
@@ -915,7 +924,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// may forward-confirm inline — bounded, and only on this
 				// about-to-reject path. The solve then takes the normal
 				// solved path, marked v2_waived=<name>.
-				bot, miss := "", challengeV2WaiverBar(v2Grain, solve.IP, solve.Host)
+				bot, miss := "", challengeV2WaiverBar(v2Grain, solve.IP, solve.Host, scope)
 				if miss == "" {
 					bot, miss = challengeV2GoodBot(r.Context(), solve.IP, solve.PTR)
 				}
@@ -983,7 +992,16 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// and never blocks on the firewall backend (see releaseSolvedIP) — that
 		// blocking call was leaving the clearance cookie below unset and looping
 		// the browser. The clearance cookie is set right after, unconditionally.
-		s.releaseSolvedIP(ipStr)
+		//
+		// WEB scope only. The release deletes the IP's per-IP bridge decision
+		// (ipState, every host), which only the web edge serves: the panel ports
+		// enforce its block tier only, and their human-entry challenge rides the
+		// per-scope clearance cookie. A panel solve releasing it let a client
+		// clear a WAF challenge — or a block — that the web edge set, through a
+		// challenge the WAF's v2 rung does not arm (web-scope only by doctrine).
+		if scope == "web" {
+			s.releaseSolvedIP(ipStr)
+		}
 
 		// 4) Set solved cookie so OpenResty can fast-path without re-query/cache loops.
 		// Secure should follow the *original* scheme (OpenResty terminates TLS),
@@ -991,7 +1009,6 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		secure := trustedForwardedProto(r) == "https"
 
 		ttl := s.cookieTTL()
-		scope := clearanceScope(r)
 		exp := time.Now().UTC().Add(ttl)
 		clearanceVal := issueClearanceToken(ipStr, host, scope, exp)
 		http.SetCookie(w, &http.Cookie{
@@ -1037,12 +1054,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 
 	}
 
-	// New endpoint + legacy alias.
 	mux.HandleFunc(verifyPath, verifyHandler)
-	mux.HandleFunc(verifyPathOld, verifyHandler)
 
 	// --- CATCH-ALL: handle any path ---
-	// Important: register after /hello,/healthz,/verify.
+	// Important: register after /hello,/healthz,/__cfm_verify.
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 
@@ -1112,7 +1127,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			return
 		}
 		// let existing endpoints win (ServeMux does this anyway)
-		if r.URL.Path == "/hello" || r.URL.Path == "/healthz" || r.URL.Path == verifyPath || r.URL.Path == verifyPathOld {
+		if r.URL.Path == "/hello" || r.URL.Path == "/healthz" || r.URL.Path == verifyPath {
 			http.NotFound(w, r)
 			return
 		}
