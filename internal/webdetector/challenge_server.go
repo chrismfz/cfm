@@ -821,7 +821,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// Resolve the D5a arm ONCE, for every scored solve — the gate
 			// below consumes this same answer, and the solve line renders it,
 			// so "did the teeth cover this solve" cannot be read two ways.
-			v2Grain, v2Via = challengeV2ArmGrainVia(fp.ID, ipStr, host)
+			v2Grain, v2Via = challengeV2ArmGrainVia(fp.ID, ipStr, host, clearanceScope(r))
 		}
 
 		solve := ChallengeSolve{
@@ -896,9 +896,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// the solve's TLS fingerprint (the original gate), a fleet-armed
 			// country/ASN policy covering the client IP (policy-kinds slice),
 			// a v2-tier VHOST arm covering the solve's host (arm-surfaces
-			// slice A), or a transient per-(ip,host) mark written when a
-			// v2-tier traffic rule (slice B) or WAF rule (slice C) challenged
-			// this pair. Each lookup is fail-open when unwired/absent. Same D5
+			// slice A), or a transient rung mark written when a v2-tier
+			// traffic rule (slice B, per ip+host) or WAF rule (slice C, per
+			// IP, web scope only) challenged the client. Each lookup is fail-open when unwired/absent. Same D5
 			// semantics either way; the gate inputs are edge-authoritative —
 			// see HONEST LIMITS in challenge_v2.go. The grain also rides the
 			// solve line, so a passed-under-arm solve is greppable too.
@@ -915,7 +915,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// may forward-confirm inline — bounded, and only on this
 				// about-to-reject path. The solve then takes the normal
 				// solved path, marked v2_waived=<name>.
-				bot, miss := "", challengeV2WaiverBar(v2Grain, solve.IP, solve.Host)
+				bot, miss := "", challengeV2WaiverBar(v2Grain, solve.IP, solve.Host, clearanceScope(r))
 				if miss == "" {
 					bot, miss = challengeV2GoodBot(r.Context(), solve.IP, solve.PTR)
 				}

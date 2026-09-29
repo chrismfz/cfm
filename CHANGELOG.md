@@ -70,6 +70,19 @@ back-filled here — see the git/PR history for that period.
   over 150 hours the fleet's only 603 hits were one Nextcloud client's
   deletes. Rule 603 still catches httpoxy (`Proxy:`) and the Tomcat
   CVE-2025-24813 partial `PUT`. (docs/waf.md FP case 12)
+- **A WAF `challenge_v2` now applies on every site the client visits, not
+  only the one that tripped the rule.** A WAF hit challenges the client's IP
+  on every site of the node, but the stricter v2 check (the solve must not
+  look like a headless browser) was recorded only for the site where the rule
+  fired. A bot could solve the same challenge on a sibling site at the old v1
+  level, get a clearance there, and lift the IP's WAF challenge everywhere:
+  a successful solve clears the per-IP decision. The post-deploy review found
+  this live: a Google Cloud scanner tripped rule 602 on a bare server IP,
+  then passed on a tenant site with webdriver and a software renderer. The v2
+  intent now follows the IP, like the challenge does. A real visitor sees no
+  difference: the same page, and a human solve passes either way. The
+  panel-port login challenge is unaffected. Traffic-rule `challenge_v2` stays
+  per site, which is how that challenge is served.
 
 ## 2026.09.28
 

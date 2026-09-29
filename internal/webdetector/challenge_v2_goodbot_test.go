@@ -215,17 +215,17 @@ func TestChallengeV2WaiverBar(t *testing.T) {
 	for grain, want := range map[string]string{
 		v2GrainGeo: "", v2GrainVhost: "", v2GrainFP: v2WaiverGrain, v2GrainMark: v2WaiverGrain, "": v2WaiverGrain,
 	} {
-		if got := challengeV2WaiverBar(grain, ip, host); got != want {
+		if got := challengeV2WaiverBar(grain, ip, host, "web"); got != want {
 			t.Errorf("challengeV2WaiverBar(%q) = %q, want %q", grain, got, want)
 		}
 	}
 	MarkChallengeV2(ip, host)
 	for _, grain := range []string{v2GrainGeo, v2GrainVhost} {
-		if got := challengeV2WaiverBar(grain, ip, host); got != v2WaiverMark {
+		if got := challengeV2WaiverBar(grain, ip, host, "web"); got != v2WaiverMark {
 			t.Errorf("grain %q with a traffic-rule/WAF mark on top = %q, want mark", grain, got)
 		}
 	}
-	if got := challengeV2WaiverBar(v2GrainVhost, ip, "other.example.com"); got != "" {
+	if got := challengeV2WaiverBar(v2GrainVhost, ip, "other.example.com", "web"); got != "" {
 		t.Errorf("a mark on another host must not affect this one, got %q", got)
 	}
 }

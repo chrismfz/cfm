@@ -23,7 +23,7 @@ func challengeV2HostArmed(host string) bool {
 }
 
 func challengeV2ArmGrain(fpID, ip, host string) string {
-	grain, _ := challengeV2ArmGrainVia(fpID, ip, host)
+	grain, _ := challengeV2ArmGrainVia(fpID, ip, host, "web")
 	return grain
 }
 

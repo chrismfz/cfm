@@ -624,13 +624,15 @@ automatic v2 — that was a scoped bypass of an operator's v2 pin; ONE
 resolver, `challengeV2VhostTier`, serves the gate and every surface — never
 read the manual rung alone for "is this vhost v2"; a `v2=vhost` line/row
 carries `v2_via=manual|pin|auto:<source>` — src= cannot say, it reads the
-bridge entry's sticky reason), and a per-(ip,host)
-rung mark with two writers — a
-traffic rule with action `challenge_v2` at decision time (slice B:
+bridge entry's sticky reason), and a rung mark with two writers, each
+scoped like the challenge it imposed — a
+traffic rule with action `challenge_v2` at decision time, per (ip,host) (slice B:
 rules-model.js and traffic_rules.go changed in the same PR, per the
-Simulate rule) and a WAF rule set to `"challenge_v2"` in cfm_waf_config.lua
-(slice C: severity challenge < challenge_v2 < block, only block
-short-circuits; handleIPPush records the mark; `rule_xss` 302 ships at
+Simulate rule) and a WAF rule set to `"challenge_v2"` in cfm_waf_config.lua,
+per IP and read for web-scope verifies only (slice C: severity challenge <
+challenge_v2 < block, only block short-circuits; handleIPPush records the
+mark; its ipState decision is per IP, so until 2026-09-29, when the mark was
+per (ip,host), a client solved the same challenge at v1 on a sibling vhost; `rule_xss` 302 ships at
 challenge_v2 by default since 2026-09-22, and
 `TestWAFRuleIDs_DefaultModeLuaParity` now pins every Go DefaultMode to the
 Lua CFG default). Either way the wire/ipState

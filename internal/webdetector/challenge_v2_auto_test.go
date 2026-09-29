@@ -680,7 +680,7 @@ func TestNewEngineWiresAutoV2(t *testing.T) {
 	if !challengeV2HostArmed("auto.gr") {
 		t.Fatalf("NewEngine did not arm v2 for an armed automatic source")
 	}
-	if grain, via := challengeV2ArmGrainVia("", "203.0.113.9", "auto.gr"); grain != v2GrainVhost || via != "auto:suspicious_vhost" {
+	if grain, via := challengeV2ArmGrainVia("", "203.0.113.9", "auto.gr", "web"); grain != v2GrainVhost || via != "auto:suspicious_vhost" {
 		t.Fatalf("NewEngine did not wire the tier+via hook: %q %q", grain, via)
 	}
 	e.SetChallengeTierPinAs("auto.gr", "v1", 0, "admin")
