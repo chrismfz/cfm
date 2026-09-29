@@ -1,5 +1,8 @@
 # Traffic classifier — living design notes
 
+> **▶ WHERE WE ARE: `docs/abuse-defense-progress.md`** — the current picture,
+> fleet state and every measurement read.
+>
 > **▶ PLAN OF RECORD: `docs/abuse-defense-master-plan.md`** (2026-09-18). The
 > phase/plan checklists embedded below ("Plan (measure-first)", Phase 0–2) are
 > **FROZEN** — kept as design context, no longer the to-do list. What happens

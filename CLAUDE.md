@@ -670,7 +670,8 @@ residual, all documented in the HONEST LIMITS block of `challenge_v2.go`; Rung 2
 "confirm you're human" fallback for a Rung-1 reject (a candidate, not built, after the real-input rescue above
 and its trajectory corpus) — the visible puzzle was dropped 2026-09-29, and a farm running real browsers
 (`hs=0`) is the operator fingerprint / geo policy's job, not a harder check (master plan §5, E3's honest
-limits; `cfm_pcw` fired on none of them in the 2026-09-29 read). **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
+limits; `cfm_pcw` fired on none of them in the 2026-09-29 read). **Where we are: `docs/abuse-defense-progress.md`**
+(the measurement journal — read it first). **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
 the ONE roadmap/decision log; the other docs' phase checklists are frozen). Design
 hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`
 (central). See also `docs/challenge-score.md`, `docs/roadmaps/challenge-engine.md` §8.1.
@@ -780,6 +781,7 @@ because of that. Hard-won points:
 | `what's_wrong` root-cause engine (contract + roadmap) | `docs/whats-wrong-rootcause.md` |
 | Challenge engine design (PoW/solver/TLS-fp) | `docs/roadmaps/challenge-engine.md` |
 | Abuse defense (challenge / classifier / fingerprint) — **PLAN OF RECORD** | `docs/abuse-defense-master-plan.md` (the one roadmap + decision log, both repos) |
+| Abuse defense — **progress journal** (start here: current picture, fleet state, weekly reads) | `docs/abuse-defense-progress.md` |
 | Traffic classifier / fingerprint evidence ledger (node side) — design hub | `docs/traffic-classifier.md` (node design: evidence grains + actuator ladder + ChallengeV2 rung) · per-IP score `docs/challenge-score.md` · central store in **cfm-web** (`cfm-web:docs/fingerprint-reputation.md`) |
 | Web detector abuse-targeting refactor (living) | `docs/webdetector-refactor.md` |
 | Under-Attack Mode (design: escalation state + campaign fingerprinter) | `docs/under-attack-mode.md` |

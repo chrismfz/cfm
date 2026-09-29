@@ -643,6 +643,10 @@ already opened.
           3. **Then** the Rung-2 confirm fallback (candidate 4). Its click
              offset and approach path are measured the same way before they
              decide anything.
+
+          Weekly reads from 2026-10-06 are recorded in
+          `docs/abuse-defense-progress.md`, not here; this plan keeps the
+          decisions they lead to.
         - **`cfm_pcw`:** 3 episodes in the short windows the live edge error
           logs hold (rigel ×2, mars ×1 a scanner), none from the `hs=0`
           farms (§5 candidate 2).
@@ -738,6 +742,7 @@ shipped 40/40 — the live web nodes already run 180s / 15 / 15); the orphan
 | Role | Doc |
 |---|---|
 | **Plan of record (this file)** | `docs/abuse-defense-master-plan.md` |
+| **Progress journal** — the current picture, fleet state and every measurement read (start here) | `docs/abuse-defense-progress.md` |
 | Node-side design detail (grains, ladder, ChallengeV2 rungs) — roadmap sections frozen | `docs/traffic-classifier.md` |
 | Central ledger as-built (schema, ingestors, Phase C checklist) | `cfm-web:docs/fingerprint-reputation.md` |
 | Track-2 per-IP score design detail — plan section frozen | `docs/challenge-score.md` |
