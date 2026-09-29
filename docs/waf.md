@@ -898,11 +898,13 @@ got a `challenge_v2` 303, which an XHR cannot solve.
 Nextcloud desktop client (`mirall/34.0.4`) deleting synced files sends
 `DELETE /remote.php/dav/files/<user>/<file>` with an `If:` header, the RFC
 4918 conditional (an ETag or lock-token list). Rule 603 flagged the mere
-presence of `If:` as CVE-2017-7269 and pushed a per-IP `challenge_v2`. A sync
-client cannot solve a challenge, so the delete failed. For the decision TTL
-the owner also got a challenge on every site they visited from that IP.
-Over 150 h those deletes were the **only** 603 hits on the fleet: 16 hits,
-all this client, and no attack.
+presence of `If:` as CVE-2017-7269 and pushed a `challenge_v2`. A sync client
+cannot solve a challenge, so the delete failed. The pushed decision is per IP,
+so any request from that IP to a site on the node was also challenged unless
+it already held a clearance cookie for that site. That lasted until ten
+minutes after the client's last retry (`default_ttl_sec = 600`; each retry
+re-pushed after `push_cooldown_sec`). Over 150 h those deletes were the
+**only** 603 hits on the fleet: 16 hits, all this client, and no attack.
 
 **Root cause:** `detect_header_vulns` treated `If:` and `Lock-Token:` as
 attack indicators. Both are ordinary WebDAV headers. Nextcloud, ownCloud,
@@ -915,9 +917,15 @@ DELETE / PUT / MOVE / UNLOCK. The CVE they stood for is an IIS 6.0
 narrowed check keyed on the exploit's shape (a long tagged-list `<http…` with a
 non-ASCII payload). It was rejected: the signature would be written from
 memory rather than the public PoC, and it would guard a server type we don't
-have. Rule 603 keeps httpoxy (`Proxy:`) and CVE-2025-24813 (Tomcat partial
-`PUT …/session` + `Content-Range`), which no browser or WebDAV client sends.
-Test: `scripts/tests/cfm_waf_header_vulns_test.lua`.
+have. Rule 603 keeps httpoxy (`Proxy:`, which no browser or WebDAV client
+sends) and CVE-2025-24813 (Tomcat partial `PUT …/session` + `Content-Range`;
+it keys on that path, so it can only catch a WebDAV partial PUT of a file
+literally named `session`). Apache's own `If:` bug (mod_dav,
+CVE-2006-20001, fixed upstream in httpd 2.4.55) is not a reason to keep the
+presence check: an httpd update fixes it, and the check also blocks every
+WebDAV client.
+Test: `scripts/tests/cfm_waf_header_vulns_test.lua` (rule 603 alone, plus the
+live DELETE under the shipped defaults).
 
 ### Structural anti-patterns to check during rule review
 

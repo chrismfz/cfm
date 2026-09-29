@@ -93,6 +93,21 @@ fires(req("PUT", "/app/session", { ["If"] = "(x)", ["content-range"] = "bytes 0-
 clean(req("PUT", "/app/session", {}), "PUT /session without Content-Range")
 clean(req("PUT", DAV .. "session", { ["If"] = "(x)" }), "WebDAV PUT to a file named session, no Content-Range")
 
+-- ── The live requests under the SHIPPED defaults (every rule at its tier) ────
+-- Above, rule 603 runs alone; here nothing else in the WAF may pick up the slack.
+for k, v in pairs(snap) do
+  if k:sub(1, 5) == "rule_" then waf.set_rule(k, v) end
+end
+clean(req("DELETE", DAV .. "protasi_stadio_A_kollises.docx",
+          { ["If"] = '(["a1b2c3d4e5f6"])', ["Accept"] = "*/*" }),
+      "defaults: the live Nextcloud DELETE")
+clean(req("UNLOCK", DAV .. "a.docx",
+          { ["Lock-Token"] = "<opaquelocktoken:a515cfa4-5da4-22e1-f5b5-00a0451e6bf7>",
+            ["User-Agent"] = "Microsoft-WebDAV-MiniRedir/10.0.19045", ["Accept"] = "*/*" }),
+      "defaults: Windows mini-redirector UNLOCK")
+fires(req("GET", "/index.php", { ["Proxy"] = "http://203.0.113.9:8080", ["Accept"] = "*/*" }),
+      "defaults: httpoxy still fires", "WAF_HEADER_VULN:HEADER_HTTPOXY")
+
 if fails > 0 then
   io.stderr:write(("cfm_waf header-vulns tests: %d FAILED\n"):format(fails))
   os.exit(1)

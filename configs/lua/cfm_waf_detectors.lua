@@ -2176,7 +2176,8 @@ end
 -- Sources: uusec header-vulnerability.lua + cve-2025-24813.lua.
 --   * Proxy:     – httpoxy: CGI/FastCGI sees HTTP_PROXY env var, can redirect outbound traffic.
 --   * PUT /…/session + Content-Range – CVE-2025-24813: Tomcat partial PUT RCE (March 2025).
--- Pure header presence checks: no browser or WebDAV client sends either.
+-- No browser or WebDAV client sends `Proxy:`. The Tomcat check keys on method
+-- + path + header, so it only fires for a partial PUT to a file named `session`.
 --
 -- `If:` / `Lock-Token:` (HEADER_IF_WEBDAV / HEADER_LOCK_TOKEN, CVE-2017-7269)
 -- were REMOVED 2026-09-29. Both are ordinary RFC 4918 WebDAV headers: every
