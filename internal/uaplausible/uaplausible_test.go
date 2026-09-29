@@ -73,6 +73,14 @@ func TestImpossibleUAs(t *testing.T) {
 			reason: "chrome_reduced_build_with_patch",
 		},
 		{
+			// Legacy (EdgeHTML) Edge never shipped beside Chrome/80+: its last
+			// build, Edge 18, carries Chrome/70. The live string from four
+			// Google Cloud IPs (fleet, 2026-09-29).
+			name:   "legacy Edge token on a modern Chrome",
+			ua:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.60 Safari/537.36 Edge/12.246",
+			reason: "legacy_edge_on_modern_chrome",
+		},
+		{
 			name:   "two platforms at once",
 			ua:     "Mozilla/5.0 (Windows NT 10.0; Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
 			reason: "multiple_platform_tokens",
@@ -116,6 +124,11 @@ func TestPlausibleUAsAreNotFlagged(t *testing.T) {
 		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6045.214 Safari/537.36",
 		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/66.0.3359.819 Safari/537.36",
 		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
+		// The real EdgeHTML pairings, seen in the fleet's WAF data 2026-09-29:
+		// stale, not impossible.
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36 Edge/16.16299",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.102 Safari/537.36 Edge/18.19577",
 		"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0",
 		"Mozilla/5.0 (iPhone; CPU iPhone OS 26_5_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/150.0.7871.113 Mobile/15E148 Safari/604.1",
 		"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
@@ -303,5 +316,48 @@ func TestReasonJoinsStably(t *testing.T) {
 	}
 	if Check("Mozilla/5.0 (compatible; crawler)").Reason() != "" {
 		t.Error("Reason() must be empty for a plausible UA")
+	}
+}
+
+// LegacyEdgeOnModernChrome is also a ChallengeV2 tell (ua_lie), so its edges
+// are pinned here. The "real" rows are the genuine EdgeHTML pairings seen in
+// the fleet's WAF data on 2026-09-29; stale, not impossible, so they pass.
+func TestLegacyEdgeOnModernChrome(t *testing.T) {
+	const pre = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+	cases := []struct {
+		ua   string
+		want bool
+	}{
+		{pre + "Chrome/125.0.6422.60 Safari/537.36 Edge/12.246", true}, // the live scanner string
+		{pre + "Chrome/80.0.3987.0 Safari/537.36 Edge/18.19041", true}, // at the bound
+		{pre + "Chrome/150.0.0.0 Safari/537.36 Edge/16.16299", true},
+		{pre + "Chrome/42.0.2311.135 Safari/537.36 Edge/12.246", false},   // real Edge 12
+		{pre + "Chrome/58.0.3029.110 Safari/537.36 Edge/16.16299", false}, // real Edge 16
+		{pre + "Chrome/70.0.3538.102 Safari/537.36 Edge/18.19577", false}, // real Edge 18
+		{pre + "Chrome/79.0.3945.0 Safari/537.36 Edge/18.19041", false},   // below the bound
+		{pre + "Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0", false},     // Chromium Edge: Edg/
+		{pre + "Chrome/125.0.0.0 Safari/537.36 Edge/11.0", false},         // not an EdgeHTML major
+		{pre + "Chrome/125.0.0.0 Safari/537.36 Edge/19.0", false},
+		{pre + "Chrome/125.0.0.0 Safari/537.36 MicrosoftEdge/12.0", false}, // no word boundary
+		{pre + "Edge/120.0.2210.91", false},                                // no Chrome/: its own shape, unmeasured
+		{pre + "Safari/537.36 Edge/12.246", false},                         // no Chrome/ token at all
+		{pre + "Chrome/125.0.0.0 Safari/537.36 Edge/12", true},             // bare major, no build
+		{"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/125.0.0.0 Safari/537.36 Edge/12.246", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := LegacyEdgeOnModernChrome(c.ua); got != c.want {
+			t.Errorf("LegacyEdgeOnModernChrome(%q) = %v, want %v", c.ua, got, c.want)
+		}
+		// Check and the exported matcher are one rule: they must agree.
+		has := false
+		for _, r := range Check(c.ua).Reasons {
+			if r == "legacy_edge_on_modern_chrome" {
+				has = true
+			}
+		}
+		if has != c.want {
+			t.Errorf("Check(%q) legacy_edge_on_modern_chrome = %v, want %v", c.ua, has, c.want)
+		}
 	}
 }

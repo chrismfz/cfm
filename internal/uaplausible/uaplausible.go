@@ -7,6 +7,8 @@
 //
 // Every rule below was derived from, and validated against, real traffic
 // captured on a production edge: 314,589 requests, 4,878 distinct UA strings.
+// (legacy_edge_on_modern_chrome, added 2026-09-29, was measured on the fleet's
+// own WAF and challenge logs instead — see LegacyEdgeOnModernChrome.)
 // The rules flag 64.5% of those distinct strings but only 2.22% of the requests,
 // and every flagged string was inspected. The gap between those two figures is
 // itself the finding — one generator mints a fresh version string per request,
@@ -59,6 +61,11 @@ var (
 	reFirefoxTok  = regexp.MustCompile(`\bFirefox/(\d+)`)
 	reCriOSTok    = regexp.MustCompile(`\bCriOS/(\d+)`)
 	reSafariVer   = regexp.MustCompile(`\bVersion/(\d+)[\d.]*\s+(?:Mobile/\S+\s+)?Safari\b`)
+	// Legacy (EdgeHTML) Edge's product token, e.g. "Edge/18.19577". The
+	// leading word boundary keeps out "MicrosoftEdge/"; the trailing one takes
+	// the major whether or not a build follows. Chromium Edge writes "Edg/";
+	// EdgA/ and EdgiOS/ differ too.
+	reLegacyEdgeTok = regexp.MustCompile(`\bEdge/(\d+)\b`)
 
 	rePlatformTokens = []*regexp.Regexp{
 		regexp.MustCompile(`\bWindows NT\b`),
@@ -181,9 +188,12 @@ func Check(ua string) Verdict {
 	// strength of that upstream version alone.
 	//
 	// If a fork ever does land here, the cost is bounded by design: this verdict
-	// is corroboration, never a threshold. It reaches a log tag, a history field
-	// and a counted column on two detectors' alerts — nothing blocks, throttles
-	// or challenges on it. Hold the offending rule rather than the package.
+	// is corroboration, never a threshold. It reaches a log tag, a history field,
+	// a counted column on two detectors' alerts and +30 on the shadow
+	// challenge_score (chalScoreWUAImp) — nothing blocks, throttles or
+	// challenges on it. (One rule is also read on its own by the ChallengeV2
+	// scorer — LegacyEdgeOnModernChrome, below — and even there it can never
+	// fail a solve alone.) Hold the offending rule rather than the package.
 	if parts := chromeVersionParts(chrome); len(parts) == 3 {
 		minor, build, patch := parts[0], parts[1], parts[2]
 		// The fourth component is the patch. Across every Chrome version string
@@ -214,6 +224,9 @@ func Check(ua string) Verdict {
 			v.Reasons = append(v.Reasons, "chrome_reduced_build_with_patch")
 		}
 	}
+	if legacyEdgeOnModernChrome(ua, chrome) {
+		v.Reasons = append(v.Reasons, "legacy_edge_on_modern_chrome")
+	}
 	// A UA declares exactly one platform. Counted inside the leading
 	// parenthetical only — see rePlatformGroup.
 	if countPlatformTokens(platformGroup(ua)) > 1 {
@@ -222,6 +235,51 @@ func Check(ua string) Verdict {
 
 	v.Impossible = len(v.Reasons) > 0
 	return v
+}
+
+// The EdgeHTML majors (Edge 12 in 2015 to Edge 18, the last), and the lowest
+// Chrome major none of them ever paired with its Edge/ token (Edge 18 carries
+// Chrome/70; 80 leaves margin at no cost).
+const (
+	legacyEdgeMinMajor  = 12
+	legacyEdgeMaxMajor  = 18
+	legacyEdgeMinChrome = 80
+)
+
+// LegacyEdgeOnModernChrome reports the one rule of this package that the
+// ChallengeV2 humanity scorer also reads on its own (tell ua_lie; one matcher,
+// so the verdict and the tell cannot drift).
+//
+// EdgeHTML, the Edge before Chromium (majors 12-18, 2015-2020), sent an
+// `Edge/<major>` product token next to a Chrome/ compatibility token frozen
+// in its own era: Chrome/42 on Edge 12 up to Chrome/70 on Edge 18. Chromium
+// Edge writes `Edg/` instead. So an `Edge/12`-`Edge/18` token beside Chrome/80
+// or later is neither browser. The Chrome bound is 80, not 71: margin over
+// the last real pairing costs nothing.
+//
+// Measured 2026-09-29 on the fleet (docs/traffic-classifier.md, "ua_lie").
+// In WAF hits carrying an Edge/ token (240 h, 7 nodes), the real legacy
+// shapes — Chrome/42 + Edge/12, Chrome/58 + Edge/16, Chrome/70 + Edge/18 —
+// are present and pass. The one string this flags,
+// "Chrome/125.0.6422.60 Safari/537.36 Edge/12.246", came from four Google
+// Cloud IPs probing bare server IPs and webmail./cpanel. logins. It is also
+// the only Edge/1x string among ~10 days of challenge solves. An Edge/1xx
+// token with no Chrome/ token (a separate fake shape seen in the same data)
+// is deliberately left to its own measurement.
+func LegacyEdgeOnModernChrome(ua string) bool {
+	return legacyEdgeOnModernChrome(ua, reChromeTok.FindStringSubmatch(ua))
+}
+
+func legacyEdgeOnModernChrome(ua string, chrome []string) bool {
+	if chrome == nil || atoi(chrome[1]) < legacyEdgeMinChrome {
+		return false
+	}
+	m := reLegacyEdgeTok.FindStringSubmatch(ua)
+	if m == nil {
+		return false
+	}
+	major := atoi(m[1])
+	return major >= legacyEdgeMinMajor && major <= legacyEdgeMaxMajor
 }
 
 // platformGroup returns the leading parenthetical, or "" when the UA has none

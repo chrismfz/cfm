@@ -133,6 +133,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cfm/internal/uaplausible"
 )
 
 // humanitySignals is the JSON body the challenge page posts with the verify.
@@ -217,18 +219,29 @@ const (
 	tellMobileHWLie = 50 // UA claims a phone/tablet but hardwareConcurrency >= mobileHWLieMinCores — humans' mobiles report 4-10: 0/1 217 human, 42% of farm
 	tellMacHWLie    = 50 // UA claims a Mac but hardwareConcurrency >= macHWLieMinCores — no Mac reports that many threads
 
+	// The UA contradicts ITSELF: a legacy (EdgeHTML) Edge/12-18 token beside
+	// Chrome/80+, a pairing no browser ever shipped
+	// (uaplausible.LegacyEdgeOnModernChrome — the same matcher the verdict
+	// uses). Measured 2026-09-29 (docs/traffic-classifier.md, "ua_lie"): every
+	// such UA on the fleet, in WAF hits and in ~10 days of challenge solves, was
+	// one Google Cloud scanner that solved at hs 0/70/90 and passed. A device
+	// claim like the three above, so a UA switcher set to that string still
+	// needs independent evidence to fail. UA-borne: scored with or without a
+	// payload.
+	tellUALie = 50
+
 	mobileHWLieMinCores = 16
 	macHWLieMinCores    = 64
 )
 
-// THE DEVICE-CLAIM GROUP. touch_lie, mobile_hw_lie and mac_hw_lie all say one
-// thing — "this is not the device the UA claims" — and one spoof trips several
-// at once (DevTools phone emulation or a UA switcher on a 16-thread desktop
-// reports zero touch points AND desktop core counts). Summed, a single exotic
-// setup would reject on ONE fact, which D5b forbids. So every member that
-// fires is still LISTED in tells (the log shows what was seen), but the group
-// adds only its STRONGEST weight to hs, once. A rejection therefore needs
-// evidence from outside the group. In the corpus every farm solve caught
+// THE DEVICE-CLAIM GROUP. touch_lie, mobile_hw_lie, mac_hw_lie and ua_lie all
+// say one thing — "this is not the device/browser the UA claims" — and one
+// spoof trips several at once (DevTools phone emulation or a UA switcher on a
+// 16-thread desktop reports zero touch points AND desktop core counts). Summed,
+// a single exotic setup would reject on ONE fact, which D5b forbids. So every
+// member that fires is still LISTED in tells (the log shows what was seen), but
+// the group adds only its STRONGEST weight to hs, once. A rejection therefore
+// needs evidence from outside the group. In the corpus every farm solve caught
 // through the group also carried sw_renderer, so grouping cost no catch rate.
 //
 // A core count is only a contradiction where it is IMPOSSIBLE for the claimed
@@ -257,8 +270,8 @@ type challengeV2State struct {
 	// burn-in flag — the tells were measured before shipping — kept because
 	// they bite fleet-wide the moment the binary lands (every WAF
 	// challenge-tier rule is challenge_v2 by default, and those marks are
-	// strict). Off, the two tells are not evaluated (touch_lie is
-	// unaffected). Read in the same snapshot as the other knobs.
+	// strict). Off, the two tells are not evaluated (touch_lie and ua_lie
+	// are unaffected). Read in the same snapshot as the other knobs.
 	hwTells bool
 	// hostTier answers "is this host's vhost tier v2" plus what put it there
 	// (manual / pin / auto:<source>, rendered as v2_via=), from ONE
@@ -719,8 +732,8 @@ var softwareRendererMarks = []string{
 }
 
 // scoreHumanity is the pure Rung-1 scorer. sig may be nil (no payload): only
-// the UA-borne opener can then fire, and an all-absent report scores 0 — the
-// D5b invariant the tests pin.
+// the UA-borne tells (headless_ua, ua_lie) can then fire, and an all-absent
+// report scores 0 — the D5b invariant the tests pin.
 func scoreHumanity(sig *humanitySignals, ua string) (hs int, tells []string) {
 	return scoreHumanityOpts(sig, ua, true)
 }
@@ -745,6 +758,10 @@ func scoreHumanityOpts(sig *humanitySignals, ua string, hwTells bool) (hs int, t
 	// family-classify HeadlessChrome; here the token is positive evidence.
 	if strings.Contains(ua, "HeadlessChrome") || strings.Contains(ua, "PhantomJS") {
 		add("headless_ua", tellHeadlessUA)
+	}
+	// UA-borne device-claim member (see THE DEVICE-CLAIM GROUP).
+	if uaplausible.LegacyEdgeOnModernChrome(ua) {
+		claim("ua_lie", tellUALie)
 	}
 
 	if sig != nil {
@@ -777,14 +794,16 @@ func scoreHumanityOpts(sig *humanitySignals, ua string, hwTells bool) (hs int, t
 				claim("mac_hw_lie", tellMacHWLie)
 			}
 		}
-		hs += claimMax
-		// Amplifier ONLY (D5b): zero interaction can be a keyboard-less kiosk or
-		// a fast tab-switch — it never opens a score, it only corroborates one.
-		if hs > 0 &&
-			sig.PTR != nil && sig.TCH != nil && sig.KEY != nil &&
-			*sig.PTR == 0 && *sig.TCH == 0 && *sig.KEY == 0 {
-			add("no_input", ampNoInput)
-		}
+	}
+	// The group adds its strongest member once — after the payload members,
+	// and outside the payload block because ua_lie needs no payload.
+	hs += claimMax
+	// Amplifier ONLY (D5b): zero interaction can be a keyboard-less kiosk or
+	// a fast tab-switch — it never opens a score, it only corroborates one.
+	if sig != nil && hs > 0 &&
+		sig.PTR != nil && sig.TCH != nil && sig.KEY != nil &&
+		*sig.PTR == 0 && *sig.TCH == 0 && *sig.KEY == 0 {
+		add("no_input", ampNoInput)
 	}
 	return hs, tells
 }

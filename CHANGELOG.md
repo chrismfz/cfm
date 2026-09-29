@@ -57,6 +57,19 @@ back-filled here — see the git/PR history for that period.
   of offering to arm what is already armed. Every strict solve and rejection
   under a vhost tier says what armed it: `v2_via=manual|pin|auto:<source>` on
   the `cfm.challenges.log` line and `v2_via` on the history row.
+- **ChallengeV2 now catches a user agent no browser ever sent: an old Edge
+  token on a modern Chrome.** The Edge before Chromium (versions 12-18) was
+  retired years ago and always paired its `Edge/` token with Chrome 70 or
+  older. So a UA with `Edge/12`-`Edge/18` next to Chrome 80+ is a forgery.
+  On the fleet, every such UA came from one Google Cloud scanner. It probes
+  bare server IPs and `webmail.` / `cpanel.` login pages, and it was solving
+  v2-armed challenges and passing. The new tell `ua_lie` counts like the
+  other "claims to be a device it isn't" tells, so it never rejects anyone on
+  its own. Where v2 is armed, it now rejects the scanner's two variants that
+  also show a software renderer or no visible window. Its third variant sends
+  a clean report and still passes. The same UA is also now flagged in the
+  `ua_impossible=` field of solve lines and history, and in the cfm-admin
+  "impossible" pill. Real old Edge browsers are not affected.
 
 ### Fixed
 - **WAF rule 603 no longer challenges WebDAV sync clients.** It treated the
