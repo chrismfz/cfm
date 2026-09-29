@@ -25,6 +25,20 @@ func TestScopeSuffix_RendersTheVerifyScope(t *testing.T) {
 	}
 }
 
+// The challenge server's own result=solved line (no hook installed): scope=
+// follows the geo fields and src=.
+func TestSolvedLine_ScopeFollowsGeoAndSrc(t *testing.T) {
+	s := ChallengeSolve{IP: "203.0.113.40", Host: "h", URI: "/", Diff: 16, UA: "Mozilla/5.0",
+		CountryISO: "GR", ASN: 6799, ASNName: "OTEnet S.A.", SrcResolved: true, Scope: "web"}
+	line := s.SolvedLine()
+	if !strings.HasPrefix(line, "[challenge] ip=203.0.113.40 host=h uri=/ result=solved ms=0 solve_ms=- diff=16 tls_fp=- ua_family=- ") {
+		t.Fatalf("head: %q", line)
+	}
+	if !strings.HasSuffix(line, ` cc=GR asn=6799 asn_name="OTEnet S.A." src=- scope=web`) {
+		t.Fatalf("tail: %q", line)
+	}
+}
+
 func TestScope_RidesLastOnTheRejectLineAndInTheHistoryRow(t *testing.T) {
 	s := ChallengeSolve{IP: "1.2.3.4", Host: "h", HumanityScored: true, HumanityScore: 100,
 		V2Grain: "vhost", V2Via: "manual", SrcResolved: true, Src: []string{"vhost:manual"}, Scope: "panel:2083"}
@@ -37,14 +51,23 @@ func TestScope_RidesLastOnTheRejectLineAndInTheHistoryRow(t *testing.T) {
 	if _, ok := (ChallengeSolve{}).historyPayload()["scope"]; ok {
 		t.Fatal("an unset scope must not persist")
 	}
+	// Not a humanity key: a row written with the rung off carries it too.
+	if got := (ChallengeSolve{Scope: "web"}).historyPayload()["scope"]; got != "web" {
+		t.Fatalf("unscored solve lost scope: %v", got)
+	}
 }
 
 func TestScope_OnTheShadowLineRoundTripsThroughTheParser(t *testing.T) {
 	s := ChallengeSolve{UAFamily: "Chrome", SrcResolved: true, Src: []string{"waf:302"}, Scope: "panel:2083"}
 	line := "2026-09-29 10:00:00 [abuse-shadow] signal=humanity host=h ip=1.2.3.4 hs=130 tells=webdriver fp=- verdict=would_v2" + s.ShadowContextSuffix()
 	e, ok := abuseshadow.Parse(line)
-	if !ok || e.Src != "waf:302" || e.Scope != "panel:2083" {
+	if !ok || e.Src != "waf:302" || e.Scope != "panel:2083" || !strings.HasSuffix(line, " src=waf:302 scope=panel:2083") {
 		t.Fatalf("parsed %+v from %q", e, line)
+	}
+	// The common case renders too: a web-scope would_v2 line is not "(unknown)".
+	s.Scope = "web"
+	if got := s.ShadowContextSuffix(); !strings.HasSuffix(got, " src=waf:302 scope=web") {
+		t.Fatalf("web scope: %q", got)
 	}
 	// A value that is not a plain token renders invalid, like ptr=.
 	if got := (ChallengeSolve{Scope: "a b"}).ShadowContextSuffix(); !strings.HasSuffix(got, " scope=invalid") {

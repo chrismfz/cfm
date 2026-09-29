@@ -1189,7 +1189,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   for a panel port's human-entry challenge (`clearanceScope`, resolved once at
   verify). It is last on the reject and would_v2 lines, and after `src=` on the
   solve line (before only the hook line's legacy free-text tail). It is also
-  `payload.scope` on both rows, not stripped for scoped callers. It matters
+  `payload.scope` on both rows, stripped for scoped callers (a `panel:2087`
+  on a tenant's row would name a WHM user: operator data). It matters
   because the rung marks count only on a web-scope verify (`v2=mark` can never
   appear beside `scope=panel:…`), and only a web-scope solve releases the IP's
   bridge decision, so without it a panel solve reads exactly like a web one.

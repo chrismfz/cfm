@@ -238,9 +238,12 @@ func TestHistoryEventsRedactsPTRForScopedCallers(t *testing.T) {
 	if _, present := scoped[0].Payload["ptr"]; present {
 		t.Errorf("ptr must not cross the scoped boundary")
 	}
+	// panel:2087 on a tenant's row would name a WHM (operator/reseller) user.
+	if _, present := scoped[0].Payload["scope"]; present {
+		t.Errorf("scope must not cross the scoped boundary")
+	}
 	// enrich=1 already hands country/ASN to scoped callers: not a new category.
-	// scope is the visitor's own verify surface, not operator policy.
-	for _, k := range []string{"country", "country_iso", "asn", "asn_name", "hs", "scope"} {
+	for _, k := range []string{"country", "country_iso", "asn", "asn_name", "hs"} {
 		if _, present := scoped[0].Payload[k]; !present {
 			t.Errorf("scoped caller lost %q", k)
 		}
@@ -248,8 +251,8 @@ func TestHistoryEventsRedactsPTRForScopedCallers(t *testing.T) {
 
 	admin := row()
 	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(adminCtx()), admin)
-	if admin[0].Payload["ptr"] != "ppp.otenet.gr" {
-		t.Errorf("admin must still receive ptr")
+	if admin[0].Payload["ptr"] != "ppp.otenet.gr" || admin[0].Payload["scope"] != "panel:2083" {
+		t.Errorf("admin must still receive ptr and scope")
 	}
 }
 

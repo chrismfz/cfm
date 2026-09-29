@@ -594,6 +594,24 @@ func (s ChallengeSolve) ScopeSuffix() string {
 	return " scope=" + logToken(s.Scope)
 }
 
+// SolvedLine is the result=solved line the challenge server writes itself
+// when no solved hook is installed (the detectors layer's hook writes its own,
+// with the bridge reason and the legacy geo tail). It mirrors the hook
+// writer's rendering so the two agree: solve_ms goes through SolveLatencyMS()
+// with a "-" sentinel (a raw %d would log solve_ms=0 for an
+// unknown/clock-stepped solve and read as an instantaneous,
+// maximally-suspicious one), and ua= carries the raw UA so a ua_family=- row
+// is still interpretable.
+func (s ChallengeSolve) SolvedLine() string {
+	solveMS := "-"
+	if ms, ok := s.SolveLatencyMS(); ok {
+		solveMS = strconv.FormatInt(ms, 10)
+	}
+	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s",
+		s.IP, s.Host, s.URI, s.VerifyMS, solveMS, s.Diff, s.TLSFingerprintOrDash(), s.UAFamilyOrDash(), s.UA,
+		s.HumanitySuffix(), s.GeoSuffix(), s.SrcSuffix(), s.ScopeSuffix())
+}
+
 // ChallengeSolvedHook lets the detectors layer log solved/expired in a unified way.
 // It is optional; if unset, ChallengeServer will log a minimal solved line.
 // tlsFingerprintHeader is the request header the edge stamps with the client's
@@ -984,31 +1002,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		if challengeSolvedHook != nil {
 			challengeSolvedHook(solve)
 		} else {
-			// Mirror the hook writer's rendering so the two solve-line writers agree:
-			// solve_ms goes through SolveLatencyMS() with a "-" sentinel (a raw %d
-			// would log solve_ms=0 for an unknown/clock-stepped solve and read as an
-			// instantaneous, maximally-suspicious one), and ua= carries the raw UA so
-			// a ua_family=- row is still interpretable.
-			solveMS := "-"
-			if ms, ok := solve.SolveLatencyMS(); ok {
-				solveMS = strconv.FormatInt(ms, 10)
-			}
-			logging.LogfCHALLENGES(
-				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s",
-				solve.IP,
-				solve.Host,
-				solve.URI,
-				solve.VerifyMS,
-				solveMS,
-				solve.Diff,
-				solve.TLSFingerprintOrDash(),
-				solve.UAFamilyOrDash(),
-				solve.UA,
-				solve.HumanitySuffix(),
-				solve.GeoSuffix(),
-				solve.SrcSuffix(),
-				solve.ScopeSuffix(),
-			)
+			logging.LogfCHALLENGES("%s", solve.SolvedLine())
 		}
 
 		// Release the solved IP. In edge/OpenResty mode this only clears the bridge

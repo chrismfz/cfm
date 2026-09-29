@@ -44,7 +44,7 @@ back-filled here — see the git/PR history for that period.
   solve, `v2_reject` and `would_v2` line carries `scope=web` or
   `scope=panel:<port>` (the cPanel/WHM/webmail ports' own challenge). The
   `challenge_solved` / `challenge_v2_reject` history rows carry it as
-  `scope`, and the `abuse_shadow` MCP tool splits the would-rejects by it
+  `scope` (admin/MCP only; stripped for cPanel users), and the `abuse_shadow` MCP tool splits the would-rejects by it
   (`by_scope`). Until now a panel-port solve looked exactly like a website
   solve, although the WAF and traffic-rule v2 marks and the release of the
   IP's challenge apply to website solves only. Log-only: nothing decides on it.

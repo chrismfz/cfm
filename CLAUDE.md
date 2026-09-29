@@ -602,7 +602,7 @@ query; since 2026-09-23 solve / reject / would_v2 lines and both rows carry
 (`waf:<id>`/`ip:<rule>`/`vhost:<reason>`/`rule:<id>`/`fp`/`geo`, `challenge_src.go`),
 log-only, never an arm, stripped for scoped callers — and the `abuse_shadow` MCP
 tool's `humanity` section sizes a new v2 arm from it; since 2026-09-29 they also
-carry `scope=` (`web` / `panel:<port>`, the verify surface, log-only, NOT
+carry `scope=` (`web` / `panel:<port>`, the verify surface, log-only,
 stripped for scoped callers; the marks and the IP release are web-only, so it
 is how a panel solve is told apart); payload `ptr` is stripped from scoped history rows like `sig`, but as
 defence in depth only — drilldown/analyze-host already show scoped callers a
