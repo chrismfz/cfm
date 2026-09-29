@@ -439,7 +439,7 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   `ALLOW_UA_CONTAINS`/`ALLOW_NETS` or hold rule 413 with `RULE_413 = 0` rather
   than un-arming the family. Arming a *newly* block-promoted family is still a
   deliberate opt-in decision, after its own burn-in.
-- **The Lua edge de-dups pushes per `(ip, reason)`** within `push_cooldown`
+- **The Lua edge de-dups pushes per `(ip, reason family, action tier)`** within `push_cooldown`
   (`cfm_waf.lua should_push`). Harmless at threshold 1 (first hit is what
   counts), but an accumulate threshold (e.g. 40) counts distinct cooldown
   windows, not raw hits — retune when Phase 2 turns on challenge-tier families.

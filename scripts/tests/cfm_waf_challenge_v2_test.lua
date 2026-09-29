@@ -179,20 +179,23 @@ end
 -- means a client rotating the Host header cannot multiply pushes.
 do
   -- Fake dict with real ngx.shared :add semantics (refuses an existing key).
-  local store = {}
+  -- The TTL is recorded: the key must EXPIRE with the cooldown, or the next
+  -- window never re-pushes and the 15-minute mark lapses to v1.
+  local store, ttls = {}, {}
   local sh = {
-    add = function(_, k, v, _ttl)
+    add = function(_, k, v, ttl)
       if store[k] ~= nil then return false, "exists" end
-      store[k] = v
+      store[k], ttls[k] = v, ttl
       return true
     end,
-    get = function(_, k) return store[k] end,
   }
   local IP = "203.0.113.99"
   check(waf.should_push(sh, IP, "WAF_XSS", "challenge") == true,     "7: first challenge push goes out")
   check(waf.should_push(sh, IP, "WAF_XSS", "challenge_v2") == true,  "7: v2 push not masked by the challenge window")
   check(waf.should_push(sh, IP, "WAF_XSS", "challenge_v2") == false, "7: second v2 push in the window deduped")
   check(store["wafpush|WAF_XSS|challenge_v2|" .. IP] ~= nil,         "7: v2 cooldown key is (family, v2 tier, ip)")
+  check(ttls["wafpush|WAF_XSS|challenge_v2|" .. IP] == waf.get_config().push_cooldown_sec,
+    "7: v2 cooldown key expires with push_cooldown_sec (got " .. tostring(ttls["wafpush|WAF_XSS|challenge_v2|" .. IP]) .. ")")
   local n = 0
   for _ in pairs(store) do n = n + 1 end
   check(n == 2, "7: one key per (family, tier, ip), no per-host or budget keys (got " .. n .. ")")
