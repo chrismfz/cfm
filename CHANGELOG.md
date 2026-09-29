@@ -40,6 +40,14 @@ back-filled here — see the git/PR history for that period.
   tier — take `under_attack` out of `CHALLENGE_V2_AUTO_VHOST` for that.
 
 ### Added
+- **Challenge solves now say which surface they were solved on.** Every
+  solve, `v2_reject` and `would_v2` line ends with `scope=web` or
+  `scope=panel:<port>` (the cPanel/WHM/webmail ports' own challenge). The
+  `challenge_solved` / `challenge_v2_reject` history rows carry it as
+  `scope`, and the `abuse_shadow` MCP tool splits the would-rejects by it
+  (`by_scope`). Until now a panel-port solve looked exactly like a website
+  solve, although the WAF and traffic-rule v2 marks and the release of the
+  IP's challenge apply to website solves only. Log-only: nothing decides on it.
 - **Switch a vhost's automatic challenge back to v1 (or forward to v2).**
   A per-vhost tier pin: `cfm webtop challenge tier <vhost> v1|v2|auto
   [--ttl 24h]`, `POST /api/v1/challenge/vhost/tier`, and in cfm-admin the

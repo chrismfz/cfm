@@ -85,6 +85,7 @@ type Entry struct {
 	UAFamily string `json:"ua_family,omitempty"` // uaplausible family ("-" → "")
 	UABot    bool   `json:"ua_bot,omitempty"`    // the UA SELF-DECLARES a bot (unverified)
 	Src      string `json:"src,omitempty"`       // challenge provenance snapshot ("-" = none covered)
+	Scope    string `json:"scope,omitempty"`     // verify surface: web / panel:<port>
 }
 
 // Parse extracts an Entry from one log line. Returns ok=false for a line that
@@ -177,6 +178,8 @@ func Parse(line string) (Entry, bool) {
 			e.UABot = v == "1"
 		case "src":
 			e.Src = v // "-" kept: it means "resolved, none covered", not absent
+		case "scope":
+			e.Scope = v
 		}
 	}
 	if !got || e.Signal == "" {
@@ -283,6 +286,11 @@ type HumanitySummary struct {
 	ByProvider    []kv `json:"by_provider"`
 	ByCountry     []kv `json:"by_country"`
 	ByPTRDomain   []kv `json:"by_ptr_domain"` // last two PTR labels; "(none)" = context line without a PTR
+	// ByScope splits the lines by the surface the solve was verified on:
+	// "web", or "panel:<port>" for a panel port's human-entry challenge,
+	// where the WAF / traffic-rule marks never arm. "(unknown)" = a line
+	// from a daemon that predates scope=.
+	ByScope []kv `json:"by_scope"`
 }
 
 // ChalScoreSummary is the per-IP challenge_score signal's dedicated view. The
@@ -378,6 +386,7 @@ func Summarize(lines []string) Summary {
 	humProvider := map[string]int{}
 	humCountry := map[string]int{}
 	humPTR := map[string]int{}
+	humScope := map[string]int{}
 
 	for _, ln := range lines {
 		e, ok := Parse(ln)
@@ -563,6 +572,11 @@ func Summarize(lines []string) Summary {
 			if e.Src != "" {
 				humPTR[ptrDomain(e.PTR)]++
 			}
+			if e.Scope != "" {
+				humScope[e.Scope]++
+			} else {
+				humScope["(unknown)"]++
+			}
 		}
 		switch e.Verdict {
 		case "would_challenge":
@@ -603,6 +617,7 @@ func Summarize(lines []string) Summary {
 		hum.ByProvider = topKV(humProvider, 20)
 		hum.ByCountry = topKV(humCountry, 20)
 		hum.ByPTRDomain = topKV(humPTR, 20)
+		hum.ByScope = topKV(humScope, 10)
 		s.Humanity = &hum
 	}
 	s.UniqueHosts = len(hosts)

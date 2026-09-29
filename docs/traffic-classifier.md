@@ -1169,7 +1169,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   abuse-shadow parser: `cc=` `asn=` `provider=` `ptr=` `ua_family=` `ua_bot=1`
   (the UA self-declares a bot — unverified) and `src=`. The `abuse_shadow` MCP
   tool aggregates them in its `humanity` section (`by_src_kind`, `by_src`,
-  `by_fp`, `by_provider`, `by_ptr_domain`, …).
+  `by_fp`, `by_provider`, `by_ptr_domain`, `by_scope`, …). Since 2026-09-29
+  `scope=` rides last (see below).
 - **`src=` — challenge provenance** (`challenge_src.go`, 2026-09-23): a
   snapshot, taken at verify, of every source covering (ip, host) then —
   `waf:<rule id>`, `ip:<detector rule>`, `vhost:<manual|vhost_config|suspicious_vhost|uniqpaths_short>`,
@@ -1182,6 +1183,16 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   cover this solve". It exists to size a new v2 arm (e.g. auto vhost
   challenge at v2) from real would-rejects before turning it on — which is
   how the auto-v2 default above was sized.
+- **`scope=` — the verify surface** (2026-09-29): `web`, or `panel:<port>`
+  for a panel port's human-entry challenge (`clearanceScope`, resolved once at
+  verify). It is last on the reject and would_v2 lines, and after `src=` on the
+  solve line (before only the hook line's legacy free-text tail). It is also
+  `payload.scope` on both rows, not stripped for scoped callers. It matters
+  because the rung marks count only on a web-scope verify (`v2=mark` can never
+  appear beside `scope=panel:…`), and only a web-scope solve releases the IP's
+  bridge decision, so without it a panel solve reads exactly like a web one.
+  Absent = a line or row from a daemon that predates it. The `abuse_shadow`
+  `humanity` section counts it as `by_scope`. LOG-ONLY.
 - **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls
   into cfm-web's `fingerprints` ledger as another per-client tell. The
   `challenge_solved` row carries `hs`, `tells`, `v2` (the arm grain),

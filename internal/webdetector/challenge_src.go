@@ -206,7 +206,8 @@ func (s ChallengeSolve) SrcSuffix() string {
 // a PTR that is not a plain token renders as ptr=invalid rather than
 // quoted. ua_bot=1 means the UA SELF-DECLARES a bot (isBotUA) — unverified,
 // the same substring test the vhost bot_ratio uses. Each key is emitted only
-// when known (absent never zero, as on the solve line); src is last.
+// when known (absent never zero, as on the solve line); src, then scope, are
+// last.
 func (s ChallengeSolve) ShadowContextSuffix() string {
 	var b strings.Builder
 	if s.CountryISO != "" {
@@ -231,6 +232,10 @@ func (s ChallengeSolve) ShadowContextSuffix() string {
 		b.WriteString(" ua_bot=1")
 	}
 	b.WriteString(s.SrcSuffix())
+	if s.Scope != "" {
+		b.WriteString(" scope=")
+		b.WriteString(shadowToken(s.Scope))
+	}
 	return b.String()
 }
 

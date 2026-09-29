@@ -515,6 +515,15 @@ type ChallengeSolve struct {
 	// it never decides anything.
 	Src         []string
 	SrcResolved bool
+	// Scope is the surface the solve was verified on: "web", or
+	// "panel:<port>" for a panel port's human-entry challenge (clearanceScope,
+	// read once at verify). It decides whether a rung mark covers the solve
+	// and whether a passing solve releases the IP's bridge decision (web
+	// only), so without it a panel solve reads exactly like a web one.
+	// Rendered as scope= (ScopeSuffix) on the solve, reject and would_v2
+	// lines, and as payload.scope on the history rows; "" (a literal that
+	// never went through verify) renders nothing. Log-only.
+	Scope string
 	// V2Waived is the FCrDNS-verified good bot whose verdict waived a FAILING
 	// solve under an arm ("" = not waived): the D5 gate let it through instead
 	// of rejecting (challengeV2GoodBot). Rendered as v2_waived=<name>.
@@ -571,6 +580,17 @@ func (s ChallengeSolve) SolveLatencyMS() (int64, bool) {
 		return 0, false
 	}
 	return s.SolveMS, true
+}
+
+// ScopeSuffix renders " scope=<web|panel:port>" (Scope) for a line about the
+// solve, "" when unset. It rides right after src= on every line (on the
+// solved-hook line, before only its legacy free-text tail), so no field a
+// parser already reads moves.
+func (s ChallengeSolve) ScopeSuffix() string {
+	if s.Scope == "" {
+		return ""
+	}
+	return " scope=" + logToken(s.Scope)
 }
 
 // ChallengeSolvedHook lets the detectors layer log solved/expired in a unified way.
@@ -853,6 +873,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			sig:               hsSig.sigFields(),
 			V2Grain:           v2Grain,
 			V2Via:             v2Via,
+			Scope:             scope,
 		}
 		// Network identity, once, before the gate below — so a rejected solve
 		// carries it too. Never blocks verify: country/ASN are a live mmdb
@@ -972,7 +993,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				solveMS = strconv.FormatInt(ms, 10)
 			}
 			logging.LogfCHALLENGES(
-				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s",
+				"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s",
 				solve.IP,
 				solve.Host,
 				solve.URI,
@@ -985,6 +1006,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				solve.HumanitySuffix(),
 				solve.GeoSuffix(),
 				solve.SrcSuffix(),
+				solve.ScopeSuffix(),
 			)
 		}
 

@@ -290,9 +290,10 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 				// it. Both come from the same fields as the history row, so
 				// none of the three can disagree — which a second lookup here,
 				// as this hook used to do, could not promise.
-				// src= (the challenge provenance snapshot) sits right after
-				// the geo fields, as on the challenge server's own fallback
-				// line; the legacy free-text tail stays last.
+				// src= (the challenge provenance snapshot) and then scope=
+				// sit right after the geo fields, as on the challenge
+				// server's own fallback line; the legacy free-text tail
+				// stays last.
 				suffix := s.LegacyGeoTail()
 
 				// Look up WAF/detector reason + rule id BEFORE bridge.ClearIP()
@@ -340,8 +341,8 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 				// ChallengeSolve.TLSFingerprintOrDash so this and the challenge
 				// server's own fallback line cannot disagree.
 				logging.LogfCHALLENGES(
-					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s%s%s%s",
-					ip, host, uri, s.VerifyMS, solveMS, diff, s.TLSFingerprintOrDash(), s.UAFamilyOrDash(), s.UA, s.HumanitySuffix(), uaBad, reasonPart, ridPart, s.GeoSuffix(), s.SrcSuffix(), suffix,
+					"[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s%s%s%s%s",
+					ip, host, uri, s.VerifyMS, solveMS, diff, s.TLSFingerprintOrDash(), s.UAFamilyOrDash(), s.UA, s.HumanitySuffix(), uaBad, reasonPart, ridPart, s.GeoSuffix(), s.SrcSuffix(), s.ScopeSuffix(), suffix,
 				)
 
 				// Record solve in challenge API store (best-effort)

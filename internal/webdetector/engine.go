@@ -945,6 +945,8 @@ func (e *Engine) RecordChallengeV2Reject(s ChallengeSolve) {
 //
 // src is the challenge provenance snapshot (challenge_src.go), the same
 // value as the log lines' src= field; absent when it was never resolved.
+// scope is the surface the solve was verified on (web / panel:<port>), the
+// lines' scope= field; absent when unset.
 func (s ChallengeSolve) historyPayload() map[string]interface{} {
 	payload := map[string]interface{}{"uri": s.URI, "diff": s.Diff, "ms": s.VerifyMS}
 	if s.UA != "" {
@@ -986,6 +988,9 @@ func (s ChallengeSolve) historyPayload() map[string]interface{} {
 	s.addGeoPayload(payload)
 	if v := s.SrcValue(); v != "" {
 		payload["src"] = v
+	}
+	if s.Scope != "" {
+		payload["scope"] = s.Scope
 	}
 	return payload
 }
