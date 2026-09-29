@@ -218,7 +218,7 @@ func TestHistoryEventsRedactsSigForScopedCallers(t *testing.T) {
 	if _, present := rows[0].Payload["sig"]; present {
 		t.Errorf("sig must not cross the scoped boundary, got %v", rows[0].Payload["sig"])
 	}
-	for _, k := range []string{"ua", "hs", "v2"} {
+	for _, k := range []string{"ua", "hs"} {
 		if _, present := rows[0].Payload[k]; !present {
 			t.Errorf("scoped caller lost %q, which it always had", k)
 		}

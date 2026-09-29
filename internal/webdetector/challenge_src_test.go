@@ -390,6 +390,39 @@ func TestHistoryEventsRedactsSrcForScopedCallers(t *testing.T) {
 	}
 }
 
+// payload.v2 names the arm grain, and fp / geo are operator fleet policy (the
+// reason src is stripped): the whole key stays out of a scoped caller's rows —
+// dropping only fp/geo would make their absence the tell — while the
+// tenant-actionable v2 keys and everything else stay, and admin sees it all.
+func TestHistoryEventsRedactsV2GrainForScopedCallers(t *testing.T) {
+	for _, grain := range []string{"fp", "geo", "vhost", "mark"} {
+		row := func() []HistoryEvent {
+			return []HistoryEvent{{
+				Type: "challenge_v2_reject", Host: "shop.example.com", IP: "203.0.113.32",
+				Payload: map[string]interface{}{
+					"v2": grain, "v2_via": "auto:suspicious_vhost", "v2_waiver_miss": "grain",
+					"hs": 100, "tells": "sw_renderer,outer_zero", "tls_fp": "c28caa00",
+				},
+			}}
+		}
+		scoped := row()
+		redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(scopedCtx("shop.example.com")), scoped)
+		if _, present := scoped[0].Payload["v2"]; present {
+			t.Errorf("v2=%s must not cross the scoped boundary", grain)
+		}
+		for _, k := range []string{"v2_via", "v2_waiver_miss", "hs", "tells", "tls_fp"} {
+			if _, present := scoped[0].Payload[k]; !present {
+				t.Errorf("v2=%s: scoped caller lost %q", grain, k)
+			}
+		}
+		admin := row()
+		redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(adminCtx()), admin)
+		if admin[0].Payload["v2"] != grain {
+			t.Errorf("admin must still receive v2=%s", grain)
+		}
+	}
+}
+
 // End to end through the real verify handler: the provenance snapshot must be
 // taken BEFORE the solve releases the per-IP entry it reads (releaseSolvedIP →
 // ClearIP), or every per-IP source would read as src=-.

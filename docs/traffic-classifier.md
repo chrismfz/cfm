@@ -1296,7 +1296,9 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   legacy-Edge UA since 2026-09-29). Grepping `hs=-` and querying
   `hs_nopayload` therefore return different populations — use the row.
   `payload.sig` is admin-only (stripped for scoped callers,
-  `docs/endpoint_scope_inventory.md`); the rest of the payload is unchanged.
+  `docs/endpoint_scope_inventory.md`), and so, since 2026-09-29, is
+  `payload.v2`: `v2=fp` / `v2=geo` name operator policy, as `src` does. The
+  rest of the payload is unchanged.
   `challenge_solved` is the highest-volume row type, so these keys add ~50-80
   bytes each and the history DB grows accordingly at unchanged retention (it
   is bounded by row count, not bytes) — see the CHANGELOG storage note.

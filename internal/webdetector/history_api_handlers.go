@@ -48,6 +48,7 @@ var scopedRedactedPayloadKeys = map[string]struct{}{
 	"ptr":   {},
 	"src":   {},
 	"scope": {},
+	"v2":    {},
 }
 
 // hasScopedRedactedKey reports whether a payload carries any key in
@@ -65,7 +66,7 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // (scopedRedactedPayloadKeys) from history rows before they leave the endpoint
 // for a SCOPED (cPanel) caller. Admin callers see the rows untouched.
 //
-// Four keys today. The first is payload.sig — the ChallengeV2 Rung-1 device readings
+// Five keys today. The first is payload.sig — the ChallengeV2 Rung-1 device readings
 // (hardwareConcurrency, deviceMemory, devicePixelRatio, pointer/touch/key
 // counts) collected by CFM's own challenge page. A tenant could measure the
 // same things from their own site's JS, so this is not a secret; it is
@@ -101,6 +102,19 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // WHM through the tenant's hostname: in practice the operator's or a
 // reseller's admin address, not tenant data. Closed by default like the
 // others; telling panel solves apart is an admin/MCP readout.
+//
+// The fifth is payload.v2 — the ChallengeV2 arm grain on challenge_solved and
+// challenge_v2_reject rows (fp / geo / vhost / mark). Two of its four values
+// are the same operator fleet policy src is stripped for: v2=fp and v2=geo
+// say an admin-armed fingerprint or country/ASN policy covered this visitor.
+// Dropping only those values would leave their absence on a reject row as
+// the tell, so the key goes whole. The tenant loses little: its own vhost's
+// tier is on the challenge status surfaces, and v2_via (manual / pin /
+// auto:<source>, written only for v2=vhost) stays. The inference a reject row
+// allows by existing at all ("some arm covered this visitor") is the same
+// residual src stripping leaves; v2_waiver_miss=grain narrows it to "a
+// fingerprint policy or a mark" and stays, as the one reason a tenant can act
+// on for a crawler-looking reject.
 //
 // The payload map is copied rather than edited so the caller's own map is
 // never mutated, but note the LIMIT of that: the slice element is reassigned

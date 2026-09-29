@@ -576,7 +576,9 @@ is built** (2026-09-19, `challenge_v2.go` + the challenge-page passive
 collectors, guardrails D5): every solve is scored on positive-only headless
 evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
 `v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
-so a passed-under-arm solve is greppable, not mistaken for a plain v1 one;
+so a passed-under-arm solve is greppable, not mistaken for a plain v1 one
+(`payload.v2` is stripped for scoped callers since 2026-09-29: fp/geo are
+operator policy, like `src`);
 `sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` (+ since 2026-09-29
 the trajectory readings `ut,co,st,dj,mj,pd`; the input counts are trusted
 events only) is the report AS REPORTED — dm/dpr/raf and the trajectory
