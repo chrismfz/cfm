@@ -495,6 +495,13 @@ type ChallengeSolve struct {
 	// under an arm is otherwise byte-identical to a plain v1 solve, which reads
 	// as "the tier never fired" (D5d).
 	V2Grain string
+	// V2Via, for V2Grain "vhost" only, names what put the vhost tier at v2:
+	// "manual" (a manual v2 arm), "pin" (an operator tier pin) or
+	// "auto:<source>" (CHALLENGE_V2_AUTO_VHOST — suspicious_vhost,
+	// uniqpaths_short, vhost_config, under_attack). src= cannot answer this:
+	// it reads the bridge entry's single sticky reason, which a manual arm or
+	// the config list relabels. Rendered as v2_via= next to v2=.
+	V2Via string
 	// Src is the challenge provenance snapshot taken at verify: every source
 	// covering (ip, host) then (challengeSources, challenge_src.go), in a
 	// fixed order. SrcResolved says the snapshot ran (a bridge was wired);
@@ -800,7 +807,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// empty report (only UA-borne openers can fire) — absence never
 		// convicts (D5b).
 		v2On, v2Fail, v2Debug, v2Shadow, v2HW := challengeV2SettingsAll()
-		hs, hsTells, hsNoPayload, v2Grain := 0, "", false, ""
+		hs, hsTells, hsNoPayload, v2Grain, v2Via := 0, "", false, "", ""
 		var hsSig *humanitySignals
 		if v2On {
 			sig := parseHumanityBody(humanityBody)
@@ -814,7 +821,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// Resolve the D5a arm ONCE, for every scored solve — the gate
 			// below consumes this same answer, and the solve line renders it,
 			// so "did the teeth cover this solve" cannot be read two ways.
-			v2Grain = challengeV2ArmGrain(fp.ID, ipStr, host)
+			v2Grain, v2Via = challengeV2ArmGrainVia(fp.ID, ipStr, host)
 		}
 
 		solve := ChallengeSolve{
@@ -836,6 +843,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			HumanityNoPayload: hsNoPayload,
 			sig:               hsSig.sigFields(),
 			V2Grain:           v2Grain,
+			V2Via:             v2Via,
 		}
 		// Network identity, once, before the gate below — so a rejected solve
 		// carries it too. Never blocks verify: country/ASN are a live mmdb
@@ -884,7 +892,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// abuse-shadow line (rides the ABUSE_SHADOW master via
 		// ConfigureChallengeV2), clearance unaffected.
 		if v2On && hs >= v2Fail {
-			// v2Grain is the ANY-grain arm resolved above (challengeV2ArmGrain):
+			// v2Grain is the ANY-grain arm resolved above (challengeV2ArmGrainVia):
 			// the solve's TLS fingerprint (the original gate), a fleet-armed
 			// country/ASN policy covering the client IP (policy-kinds slice),
 			// a v2-tier VHOST arm covering the solve's host (arm-surfaces

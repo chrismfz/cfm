@@ -42,7 +42,7 @@ type manualChalEntry struct {
 	// (ChallengeV2 Rung 1 — the SERVE is identical, but at VERIFY a failing
 	// humanity score earns no clearance; master plan "arm surfaces" slice A).
 	// The rung changes nothing at the edge; it is consulted only by the
-	// verify gate via challengeV2HostArmed.
+	// verify gate via challengeV2HostArmedVia.
 	Rung string
 }
 
@@ -286,7 +286,7 @@ const defaultManualChallengeTTL = 30 * time.Minute
 // TTL — pushed to the edge immediately via the bridge.
 //
 // rung "" = plain challenge; "v2" = ChallengeV2 (same serve, but at verify a
-// failing humanity score earns no clearance — see challengeV2HostArmed). The
+// failing humanity score earns no clearance — see challengeV2HostArmedVia). The
 // rung never reaches the bridge: enforcement of the tier lives entirely at
 // verify, which is reachable only through the edge proxy (the challenge
 // server binds localhost; the per-IP challenge-DNAT is retired).
@@ -356,13 +356,16 @@ func (e *Engine) manualChallengeVhostRecord(host string, ttl time.Duration, reas
 // changed, as resolved by manualRungTarget (the caller scope-checks THAT host,
 // not only the one it was asked about). Returns the previous rung, the expiry,
 // whether anything changed, and ok=false when target has no active manual
-// challenge (an AUTO challenge has no tier of its own — arm a manual one to
-// pick a tier). A no-op switch (already at rung) writes no audit row, no log
-// line and no state file: the trail records only real changes.
+// challenge (an automatic challenge's tier is a tier pin's job —
+// setChallengeTierPin / vhost/tier). A no-op switch (already at rung) writes
+// no audit row, no log line and no state file: the trail records only real
+// changes.
 //
 // Nothing reaches the edge: the serve is identical for both tiers and the
-// verify gate reads the rung live (challengeV2HostArmed), so the switch takes
-// effect on the very next solve.
+// verify gate reads the rung live (challengeV2HostArmedVia), so the switch takes
+// effect on the very next solve — as the manual arm's tier: a switch to v1
+// does not lift an automatic v2 covering the host (challengeV2VhostTier; a
+// v1 pin does).
 func (e *Engine) SetManualChallengeRungAs(target, rung, actor string) (prev string, expires time.Time, changed, ok bool) {
 	active, exp, _ := e.manualChal.active(target)
 	if !active {
@@ -451,26 +454,10 @@ func (e *Engine) manualChallengeCovering(host string) (bool, time.Time, string) 
 	return false, time.Time{}, ""
 }
 
-// manualChallengeRung returns the tier ("v2" or "") of the manual challenge
-// covering host, with the SAME resolution as manualChallengeCovering: the
-// host's own active arm first, else the apex's for a www. host — a v2 arm on
-// "example.com" gates "www.example.com" solves too (the bridge installs
-// entries for both). The MOST SPECIFIC arm wins, including a plain one: a www
-// host with its own v1 arm is v1 even under a v2 apex. (This used to skip an
-// exact arm whose rung was "" and fall through to the apex, so re-tiering the
-// www arm to v1 answered 200 while the gate kept enforcing v2 — review
-// finding.) "" when nothing v2-armed covers host.
-func (e *Engine) manualChallengeRung(host string) string {
-	if target := e.manualRungTarget(host); target != "" {
-		return e.manualChal.rung(target)
-	}
-	return ""
-}
-
 // manualRungTarget is the host whose manual arm covers host (manualChallenge-
 // Covering's resolution): host itself when it has an active arm, else its
-// apex for a www. host, else "". The ONE resolver for both reading the tier
-// (manualChallengeRung) and changing it (SetManualChallengeRungAs).
+// apex for a www. host, else "". The ONE resolver for both reading the manual
+// arm's tier (challengeV2VhostTier) and changing it (SetManualChallengeRungAs).
 func (e *Engine) manualRungTarget(host string) string {
 	if ok, _, _ := e.manualChal.active(host); ok {
 		return host

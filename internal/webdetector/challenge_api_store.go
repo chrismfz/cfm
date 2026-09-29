@@ -27,12 +27,30 @@ type ChallengeVhostState struct {
 	// reader still has to gate the remaining time on Mode=="manual".
 	TTLSec int `json:"ttl_sec,omitempty"`
 
-	// Rung is the tier of an active MANUAL challenge on this host: "v2"
-	// (ChallengeV2 — humanity-gated verify) or omitted for plain challenge /
-	// auto rows. Decorated at render time from the engine's manual store (the
-	// one source of truth for the rung), never stored here — a stored copy
-	// could drift from what the verify gate actually consults.
-	Rung string `json:"rung,omitempty"`
+	// Rung is the host's EFFECTIVE vhost tier: "v2" (ChallengeV2 —
+	// humanity-gated verify) or omitted for v1. RungSource says who set it
+	// (manual = the manual arm's own tier; pin = an operator tier pin on an
+	// automatic challenge; auto = CHALLENGE_V2_AUTO_VHOST), RungTrigger names
+	// the automatic source covering the host (suspicious_vhost,
+	// uniqpaths_short, vhost_config, under_attack), and RungPin is the host's
+	// tier pin ("v1"/"v2") when one exists, even while a manual arm outranks
+	// it. All four are decorated at render time from challengeV2VhostTier —
+	// the resolver the verify gate itself consults — never stored here: a
+	// stored copy could drift from what the gate enforces.
+	Rung        string `json:"rung,omitempty"`
+	RungSource  string `json:"rung_source,omitempty"`
+	RungTrigger string `json:"rung_trigger,omitempty"`
+	RungPin     string `json:"rung_pin,omitempty"`
+	// RungAuto: the tier the automatic side (pin / knob) gives on its own —
+	// "v2" means switching a manual v2 arm to v1 would still leave v2.
+	RungAuto string `json:"rung_auto,omitempty"`
+	// RungPinLocked: the pin was set by the operator and the CALLER is a
+	// scoped token, which may not change it (set per request, scoped reads
+	// only).
+	RungPinLocked bool `json:"rung_pin_locked,omitempty"`
+	// RungUnpinLocked: the CALLER (a scoped token) may not clear the covering
+	// pin — not its pin, or set on an apex outside its scope.
+	RungUnpinLocked bool `json:"rung_unpin_locked,omitempty"`
 
 	Score     float64  `json:"score"`
 	OnThresh  float64  `json:"on_threshold"`

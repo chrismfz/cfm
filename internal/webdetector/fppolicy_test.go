@@ -211,12 +211,12 @@ func TestNewEngineRewiresTheGeoResolverOnEveryBuild(t *testing.T) {
 	// PTR-resolving enricher.
 	prevSolve := challengeSolveEnricher.Load()
 	challengeV2.mu.RLock()
-	prevHostArmed := challengeV2.hostArmed
+	prevHostTier := challengeV2.hostTier
 	challengeV2.mu.RUnlock()
 	t.Cleanup(func() {
 		SetFingerprintPolicyGeoResolver(nil)
 		challengeSolveEnricher.Store(prevSolve)
-		SetChallengeV2HostArmed(prevHostArmed)
+		SetChallengeV2HostTier(prevHostTier)
 	})
 	SetFingerprintPolicies([]FingerprintPolicy{{ID: "GR", Kind: "country", Action: "challenge_v2"}})
 
@@ -384,11 +384,11 @@ func TestNewEngineWithoutGeoLiteDatabasesWarns(t *testing.T) {
 	lines := captureGeoWarnings(t)
 	prevSolve := challengeSolveEnricher.Load()
 	challengeV2.mu.RLock()
-	prevHostArmed := challengeV2.hostArmed
+	prevHostTier := challengeV2.hostTier
 	challengeV2.mu.RUnlock()
 	t.Cleanup(func() {
 		challengeSolveEnricher.Store(prevSolve)
-		SetChallengeV2HostArmed(prevHostArmed)
+		SetChallengeV2HostTier(prevHostTier)
 	})
 	SetFingerprintPolicies([]FingerprintPolicy{{ID: "6799", Kind: "asn", Action: "challenge"}})
 	_ = NewEngine(Config{Every: time.Second, Window: time.Minute, UseEnrich: true, EnrichDirs: []string{t.TempDir()}})
@@ -405,11 +405,11 @@ func TestVerifyGeoGateReadsTheDatabaseLive(t *testing.T) {
 	captureGeoWarnings(t) // isolates the resolver + policy state
 	prevSolve := challengeSolveEnricher.Load()
 	challengeV2.mu.RLock()
-	prevHostArmed := challengeV2.hostArmed
+	prevHostTier := challengeV2.hostTier
 	challengeV2.mu.RUnlock()
 	t.Cleanup(func() {
 		challengeSolveEnricher.Store(prevSolve)
-		SetChallengeV2HostArmed(prevHostArmed)
+		SetChallengeV2HostTier(prevHostTier)
 	})
 
 	const ip = "10.20.30.40" // non-routable: the enricher does no reverse DNS

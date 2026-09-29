@@ -854,6 +854,122 @@ Build the stack classes from the data by cipher list, restrict to UAs with
 nothing appended, exclude vhost-bound (front-proxy) lists, and keep it in the
 device-claim group.
 
+#### Auto-v2 — automatic vhost challenges at the v2 tier (2026-09-29)
+
+Until now the vhost grain was armed only by a MANUAL arm at `rung=v2`. Since
+2026-09-29 an **automatic** vhost challenge runs at v2 too, when its source
+is in `[webdetector] CHALLENGE_V2_AUTO_VHOST` (default
+`suspicious_vhost,uniqpaths_short,under_attack`; `vhost_config` is opt-in,
+`off` arms none). Code: `challenge_v2_auto.go`.
+
+**Measured first (D3 exit contract).** The week after the hardware tells
+shipped (2026-09-23 → 09-29, 7 nodes, `src=` on every solve) sized the arm
+from the solves it would have covered:
+
+| `src=` | solves | would fail | likely humans (fail) | convicted-farm (fail) |
+|---|---|---|---|---|
+| `vhost:suspicious_vhost` | 28 524 | 8 207 | 3 395 (4) | 21 054 (7 625, 36%) |
+| `vhost:vhost_config` | 1 650 | 523 | 780 (0) | 394 (388) |
+| `vhost:uniqpaths_short` | 126 | 64 | 33 (0) | 31 (18) |
+
+Of the 4 human-labelled fails, 2 carry `webdriver` (automation on a Greek
+line); the other 2 are `sw_renderer,outer_zero` on real input (`mv` 729 /
+341) — software-rendered machines, the known RDP/VDI residual. ~0.06%. The
+false reject is deterministic per device (a retry fails the same way), so
+what bounds it is the automatic challenge's LIFETIME — while the scorer keeps
+the vhost suspicious (plus holddown) or Under-Attack holds. That is not a
+fixed TTL: a vhost suspicious for days is at v2 for days, and the v1 pin is
+the per-vhost way out. The config list (permanent by nature) is therefore
+opt-in, and the fingerprint/geo policies stay explicit operator arms.
+
+**One resolver** (`challengeV2VhostTier`) answers "what tier is this vhost
+at", for the verify gate AND every surface (vhost list/status, controls
+rows, CLI):
+
+1. a manual arm at v2 → v2;
+2. no automatic source covering the host → the manual arm's v1, or no tier;
+3. a **tier pin** on the host (or its apex, for `www.`) → the pinned tier;
+4. the knob: v2 iff the covering source is armed.
+
+A manual arm at v1 never DOWNGRADES what 3/4 give: a tier-less "Challenge"
+click or a tenant's panic-button arm must not switch off an auto-v2,
+Under-Attack or operator-pinned-v2 vhost (a review finding: it was a scoped
+bypass of an operator's v2 pin). The way down is a v1 pin.
+
+The automatic source needs a live bridge vhost entry — the SAME entry and
+matcher `src=vhost:<reason>` reads (`vhostEntryLocked`). The entry's single
+sticky reason can't name it (a manual arm and a `CHALLENGE_VHOST` list match
+both relabel it, and it can outlive the source that wrote it), so it is never
+read for arming. Instead the tick NOTES each active automatic source on the
+entry (`NoteVhostAutoSource`: `under_attack` — the state as the tick
+evaluates it, operator `attack on` included — `suspicious_vhost`,
+`uniqpaths_short`, `vhost_config`), re-noting it EVERY cycle it is active
+with a short TTL (10 ticks, 2–10 min — a tick slowed by a flood's log
+backlog must not drop the tier between re-notes) and dropping it the cycle it turns
+off. A cycle that never reaches the host (an exclude/ignore `continue`, a
+host that left the candidate set, a stalled tick) just stops re-noting, and
+the source lapses: no missed transition can leave a stale v2 — an
+unevaluated source is never kept alive, including while the uniqpaths
+branch skips the scorer and Under-Attack (uniqpaths_short, armed by
+default, carries the tier then). An operator `attack off` drops the
+under_attack note at once.
+Notes are keyed on the host that wrote them and read www→apex, so a `www.`
+host's own cycle can never erase what its apex noted — but a `www.` host
+inherits only while the apex itself has a live challenge. A host suppressed
+from automatic challenges (host bypass, a Challenge exclude, the ignore
+list) has no automatic tier at all — own or inherited — asked at READ time
+(`hostAutoSuppressed`), so it holds however quiet the host is; a manual arm
+on it keeps its own tier. Notes die with
+their entry, so a forced `attack on` on a host nothing challenges arms
+nothing. The first ARMED noted source wins (strongest first: under_attack,
+suspicious_vhost, uniqpaths_short, vhost_config). One bridge RLock at
+verify — no scorer or Under-Attack lock. The UNDER_ATTACK transition line
+carries `tier=` so the log says whether entering the state armed v2.
+
+**What armed it — `v2_via=`.** `src=` can't say (it reads the entry's
+sticky reason), so every `v2=vhost` solve and reject line — and the
+`challenge_solved` / `challenge_v2_reject` rows (`payload.v2_via`) — carries
+`v2_via=manual|pin|auto:<source>` right after `v2=`. The FP-hunting query
+for the auto arm is `detection_history type=challenge_v2_reject` filtered on
+`v2_via` starting `auto:`. The grain stays `v2=vhost`, so the
+good-bot waiver applies exactly as for a manual v2 arm, and `src=` says
+which vhost source covered the solve.
+
+**Tier pins** (`POST /api/v1/challenge/vhost/tier`, `cfm webtop challenge
+tier <vhost> v1|v2|auto`, the cfm-admin "→ v1 (pin)" / "↺ auto" buttons):
+`v1` is the emergency drop-back, `v2` arms a source the knob leaves at v1,
+`auto` hands the tier back to the knob. A pin never creates or extends a
+challenge and does nothing while no automatic challenge covers the host.
+Persisted (`webdetector_challenge_tier_pins.json`), because every config
+reload restarts the daemon and a lost v1 pin would silently re-arm the host;
+and one store per state file is shared across Engine rebuilds, so a pin
+written in a reload's window lands where the new Engine's gate reads. In the
+same window the gate answers through the previous Engine until the new one's
+first tick has noted its sources (its bridge starts empty), so a config
+reload never drops an auto-v2 host to v1. A host whose automatic challenge
+the store never records (`uniqpaths_short`) still reads `auto_active` on the
+status read, so its pin control is there when it is needed.
+Scoped tokens may pin their own vhosts, TTL-capped at 24h, and may not
+replace, clear or shadow a pin the operator set (the status read carries
+`rung_pin_locked` so their page hides controls that would 403). Audited as
+`challenge_vhost_tier_pin` (`from`/`rung`/`actor`, a no-op writes nothing).
+
+**Under-Attack's first consequence.** I1 stays detect-only for its action
+ladder; the v2 tier is the one thing UNDER_ATTACK now changes. Caveat from
+the same week: `vhost_under_attack_on` never fired fleet-wide, although
+farms solved ~25 000 challenges — entry leg 3 needs the origin to be
+erroring (≥50%), and a farm that doesn't break the site never trips it. So
+`under_attack` is the rare, strong trigger; `suspicious_vhost` is the one
+that carries the volume.
+
+**Not solved by this.** ~52% of convicted-farm solves score `hs=0` (the
+95070673 hc=8 pool, c28caa00 on real GPUs): no Rung-1 arm catches them.
+Those need fingerprint policy or Rung 2. The Rung-2 "confirm you're human"
+step also answers the deterministic-FP residual above (the 2 rejected
+humans moved the mouse; 0 of 9 954 failing farm solves did) — with the
+honest limit that a CDP click is trusted and the accessible keyboard path
+has no trajectory, so it is an escape hatch for humans, not a wall.
+
 #### Observability contract (shadow-first; reuses existing logs — no new log, per CLAUDE.md §5)
 
 Rung-1 writes the SAME surfaces `challenge_score` uses (open-question #4
@@ -864,7 +980,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `ua_impossible=`): add `hs=<humanity_score>`, `tells=<fired,comma,list>`,
   `fp=<tlsfp>` — the raw grep surface for "which solve, and why" — plus
   `v2=<grain>` naming the arm that covered the solve (`fp` / `geo` / `vhost` /
-  `mark`), absent when unarmed. The grain is what separates "the tier is live
+  `mark`), absent when unarmed, and for `v2=vhost` also `v2_via=manual|pin|auto:<source>`
+  (what put the vhost at v2 — "Auto-v2" above). The grain is what separates "the tier is live
   and this solve passed it" from "the tier never fired": without it a clean
   armed solve reads exactly like a plain v1 one. `grep 'v2='` is the burn-in
   question "is my newly-armed tier actually covering traffic?"; `grep
@@ -938,7 +1055,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   is a snapshot, not the one decision that served the page: several sources
   can be listed. LOG-ONLY — `v2=` stays the one answer to "did the teeth
   cover this solve". It exists to size a new v2 arm (e.g. auto vhost
-  challenge at v2) from real would-rejects before turning it on.
+  challenge at v2) from real would-rejects before turning it on — which is
+  how the auto-v2 default above was sized.
 - **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls
   into cfm-web's `fingerprints` ledger as another per-client tell. The
   `challenge_solved` row carries `hs`, `tells`, `v2` (the arm grain),

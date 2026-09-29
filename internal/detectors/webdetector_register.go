@@ -803,6 +803,8 @@ func init() {
 			ChallengeExcludeStorePath: kvStrClean(kv, "CHALLENGE_EXCLUDE_STORE_PATH", ""),
 			WAFExcludeStorePath:       kvStrClean(kv, "WAF_EXCLUDE_STORE_PATH", ""),
 			ChallengeManualStorePath:  kvStrClean(kv, "CHALLENGE_MANUAL_STORE_PATH", ""),
+			ChallengeTierPinStorePath: kvStrClean(kv, "CHALLENGE_TIER_PIN_STORE_PATH", ""),
+			ChallengeV2AutoVhost:      challengeV2AutoVhost(kv),
 			ChallengeAccessStorePath:  kvStrClean(kv, "CHALLENGE_ACCESS_STORE_PATH", ""),
 			SiteCacheStorePath:        kvStrClean(kv, "SITE_CACHE_STORE_PATH", ""),
 			HistoryEnabled:            kvBool(kv, "HISTORY_ENABLED", true),
@@ -1190,4 +1192,27 @@ func resolveChallengeCookieLife(global, kv map[string]string) time.Duration {
 		return 60 * time.Minute
 	}
 	return life
+}
+
+// challengeV2AutoVhost parses [webdetector] CHALLENGE_V2_AUTO_VHOST: the
+// automatic vhost-challenge sources that run at the ChallengeV2 tier. Only an
+// explicit `off` arms none: an absent, blank ("" / `; comment`) or
+// all-unknown value (e.g. a typo) falls back to the shipped default and says
+// so, because silently disarming the node is the dangerous direction.
+func challengeV2AutoVhost(kv KV) []string {
+	raw := kvStrClean(kv, "CHALLENGE_V2_AUTO_VHOST", webdet.DefaultChallengeV2AutoVhost)
+	armed, unknown, off := webdet.ParseChallengeV2AutoVhost(raw)
+	if len(unknown) > 0 {
+		logging.Logf("[webdetector] CHALLENGE_V2_AUTO_VHOST: ignoring unknown source(s) %s (valid: %s, off)",
+			strings.Join(unknown, ","), strings.Join(webdet.ChallengeV2AutoVhostSources(), ", "))
+	}
+	if off || len(armed) > 0 {
+		return armed
+	}
+	if strings.TrimSpace(raw) != "" || len(unknown) > 0 {
+		logging.Logf("[webdetector] CHALLENGE_V2_AUTO_VHOST=%q arms nothing — using the default %s (write `off` to disable)",
+			raw, webdet.DefaultChallengeV2AutoVhost)
+	}
+	armed, _, _ = webdet.ParseChallengeV2AutoVhost(webdet.DefaultChallengeV2AutoVhost)
+	return armed
 }

@@ -30,6 +30,15 @@ type webdetVhostControlRow struct {
 	UnderAttack           bool `json:"under_attack"`
 	UnderAttackToggleable bool `json:"under_attack_toggleable"`
 
+	// ChallengeRung is the vhost's effective ChallengeV2 tier ("v2" or "")
+	// with what decided it (manual / pin / auto) and the automatic source —
+	// challengeV2VhostTier, the verify gate's own resolver — so an
+	// under-attack row can show it is already strict instead of offering to
+	// arm what the node default already armed.
+	ChallengeRung        string `json:"challenge_rung,omitempty"`
+	ChallengeRungSource  string `json:"challenge_rung_source,omitempty"`
+	ChallengeRungTrigger string `json:"challenge_rung_trigger,omitempty"`
+
 	// ClamAV upload-scan (async, notify-only). Effective state is
 	// globallyEnabled && (scanDefault XOR override). ClamEnabled is that
 	// resolved decision; ClamOverridePresent says an EXACT per-vhost override
@@ -147,6 +156,7 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 
 		// Under-Attack override state (reflects a just-issued force immediately).
 		underAttack, _, _ := e.VhostAttackState(host)
+		tier := e.challengeV2VhostTier(host)
 
 		rows = append(rows, webdetVhostControlRow{
 			Host:                    host,
@@ -167,6 +177,9 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 			ClamModeOverridePresent: clamModePresent,
 			UnderAttack:             underAttack,
 			UnderAttackToggleable:   e.cfg.UnderAttack,
+			ChallengeRung:           tier.Rung,
+			ChallengeRungSource:     tier.Source,
+			ChallengeRungTrigger:    tier.Trigger,
 		})
 	}
 

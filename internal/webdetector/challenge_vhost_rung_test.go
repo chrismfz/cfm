@@ -11,6 +11,17 @@ import (
 	"time"
 )
 
+// manualChallengeRung is the tier ("v2" or "") of the manual arm covering host
+// (manualRungTarget's resolution) — a TEST helper for the manual store alone.
+// Production never asks this question: "what tier is this vhost at" is
+// challengeV2VhostTier's, which a manual v1 arm does not decide on its own.
+func (e *Engine) manualChallengeRung(host string) string {
+	if target := e.manualRungTarget(host); target != "" {
+		return e.manualChal.rung(target)
+	}
+	return ""
+}
+
 // Per-vhost ChallengeV2 (arm-surfaces slice A): the manual vhost challenge
 // carries a rung ("" plain / "v2"), persisted across restarts, settable via
 // the add API/CLI, surfaced in the status API, and consulted by the verify
@@ -121,7 +132,8 @@ func TestHandleChallengeVhostAdd_Rung(t *testing.T) {
 
 func TestChallengeV2HostArmed_ApexCoversWWWAndWiring(t *testing.T) {
 	e := newTestEngineForChallengeHandlers()
-	SetChallengeV2HostArmed(func(host string) bool { return e.manualChallengeRung(host) == "v2" })
+	// The production resolver (a manual-only engine: no bridge, no notes).
+	SetChallengeV2HostArmed(func(host string) bool { return e.challengeV2VhostTier(host).Rung == "v2" })
 	t.Cleanup(func() { SetChallengeV2HostArmed(nil) })
 
 	// Unarmed / plain-challenge hosts never gate.
@@ -153,6 +165,7 @@ func TestChallengeV2HostArmed_ApexCoversWWWAndWiring(t *testing.T) {
 // sibling test above wires its own closure, so deleting the NewEngine line
 // would leave the suite green while the teeth silently vanish).
 func TestNewEngineWiresChallengeV2HostArmed(t *testing.T) {
+	SetChallengeV2HostTier(nil) // no previous engine's hook to answer through
 	t.Cleanup(func() { SetChallengeV2HostArmed(nil) })
 	// Isolated store path: FillDefaults would otherwise point manualChal at
 	// the REAL /var/lib/cfm snapshot — on a root-run test host this would

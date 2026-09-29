@@ -66,12 +66,20 @@ type NginxBridge struct {
 	client *http.Client
 	// started bool
 
-	mu             sync.RWMutex
-	ipState        map[string]bridgeIPEntry    // ip   → current decision
-	vhState        map[string]bridgeVhostEntry // host → current decision
-	okState        map[okStateKey]time.Time    // (ip,host,scope) → solved-ok expiry (bypasses matching vhost challenge)
-	bypassFunc     func(string) bool           // set once at startup; no lock needed (written before serving starts)
-	hostBypassFunc func(string) bool           // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
+	mu      sync.RWMutex
+	ipState map[string]bridgeIPEntry    // ip   → current decision
+	vhState map[string]bridgeVhostEntry // host → current decision
+	// vhAuto: writer host → AUTOMATIC vhost-challenge source (under_attack /
+	// suspicious_vhost / uniqpaths_short / vhost_config) → expiry. The tick
+	// re-notes every source that is active, each cycle, independently of the
+	// single sticky Reason on the vhState entry (which a manual arm or the
+	// config list relabels), so the auto-v2 resolver (challenge_v2_auto.go)
+	// sees the real automatic sources. Cleared with the entry; guarded by mu
+	// like vhState.
+	vhAuto         map[string]map[string]time.Time
+	okState        map[okStateKey]time.Time // (ip,host,scope) → solved-ok expiry (bypasses matching vhost challenge)
+	bypassFunc     func(string) bool        // set once at startup; no lock needed (written before serving starts)
+	hostBypassFunc func(string) bool        // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
 	stats          bridgeStatsState
 
 	// goodBotExempt: when set (CHALLENGE_GOODBOT_EXEMPT, default on), a would-be
@@ -908,6 +916,7 @@ func NewNginxBridge(sockPath, token string, defaultTTL, okIPTTL time.Duration) *
 		},
 		ipState: make(map[string]bridgeIPEntry),
 		vhState: make(map[string]bridgeVhostEntry),
+		vhAuto:  make(map[string]map[string]time.Time),
 		okState: make(map[okStateKey]time.Time),
 		stats: bridgeStatsState{
 			timeoutByMinute: make(map[int64]int64),
@@ -1286,6 +1295,7 @@ func (b *NginxBridge) ClearVhost(host, reason string) {
 			wasSet = true
 			delete(b.vhState, host)
 		}
+		delete(b.vhAuto, host)
 		b.mu.Unlock()
 
 		if wasSet {
@@ -1434,6 +1444,17 @@ func (b *NginxBridge) RunExpireLoop(ctx context.Context) {
 			for h, e := range b.vhState {
 				if e.Expires.Before(now) {
 					delete(b.vhState, h)
+					delete(b.vhAuto, h) // notes never outlive their entry
+				}
+			}
+			for h, srcs := range b.vhAuto {
+				for src, exp := range srcs {
+					if exp.Before(now) {
+						delete(srcs, src)
+					}
+				}
+				if len(srcs) == 0 {
+					delete(b.vhAuto, h)
 				}
 			}
 			for ip, exp := range b.okState {
@@ -2232,6 +2253,7 @@ func (b *NginxBridge) handleVhostClear(w http.ResponseWriter, r *http.Request) {
 
 	b.mu.Lock()
 	delete(b.vhState, msg.Host)
+	delete(b.vhAuto, msg.Host)
 	b.mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)
@@ -2900,6 +2922,59 @@ func (b *NginxBridge) vhostEntryLocked(host string, now time.Time) (bridgeVhostE
 		}
 	}
 	return bridgeVhostEntry{}, false
+}
+
+// NoteVhostAutoSource records that automatic vhost-challenge source (e.g.
+// suspicious_vhost) is active on host for ttl. Keyed on the WRITER host only
+// — the reader resolves a www. host to its apex's notes too, as the bridge
+// expands an apex challenge to www — so a www. host's own tick iteration can
+// never erase what its apex's iteration noted. The tick re-notes it on every
+// cycle the source is active, so the note lives exactly as long as it keeps
+// being refreshed (bounded by ttl once it stops).
+func (b *NginxBridge) NoteVhostAutoSource(host, source string, ttl time.Duration) {
+	if b == nil || !b.cfg.Enabled || source == "" || ttl <= 0 {
+		return
+	}
+	host = normalizeHost(host)
+	if host == "" {
+		return
+	}
+	exp := time.Now().Add(ttl)
+	b.mu.Lock()
+	if b.vhAuto == nil {
+		b.vhAuto = make(map[string]map[string]time.Time)
+	}
+	srcs := b.vhAuto[host]
+	if srcs == nil {
+		srcs = make(map[string]time.Time, 2)
+		b.vhAuto[host] = srcs
+	}
+	srcs[source] = exp
+	b.mu.Unlock()
+}
+
+// DropVhostAutoSource forgets an automatic source host noted, the moment the
+// tick sees it turn off. The common case — nothing to drop — takes only the
+// RLock (the tick calls this for every candidate host every cycle).
+func (b *NginxBridge) DropVhostAutoSource(host, source string) {
+	if b == nil || source == "" {
+		return
+	}
+	host = normalizeHost(host)
+	b.mu.RLock()
+	_, has := b.vhAuto[host][source]
+	b.mu.RUnlock()
+	if !has {
+		return
+	}
+	b.mu.Lock()
+	if srcs := b.vhAuto[host]; srcs != nil {
+		delete(srcs, source)
+		if len(srcs) == 0 {
+			delete(b.vhAuto, host)
+		}
+	}
+	b.mu.Unlock()
 }
 
 // GetIPDecision returns the current action and reason for an IP from the

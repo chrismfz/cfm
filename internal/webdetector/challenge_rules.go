@@ -1263,6 +1263,16 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 // list every reconcile — NOT a human action. (Was mislabelled
                 // "manual", which read as an operator having clicked it.)
                 e.nginxBridge.ChallengeVhostWithReason(pat, vttl, "vhost_config")
+                // The auto-v2 source for it too — the list is pushed for every
+                // listed host, candidate or not (a quiet listed apex still has
+                // its www. challenged through the expansion). Concrete hosts
+                // only: the resolver reads notes by host (and www→apex), so a
+                // pattern key would only make the pattern's own list row claim
+                // a tier no matching host gets; wildcard-matched hosts are
+                // noted as the tick evaluates them.
+                if !strings.Contains(pat, "*") {
+                    e.nginxBridge.NoteVhostAutoSource(pat, autoV2VhostConfig, e.autoSourceNoteTTL())
+                }
             }
         }
 
@@ -1576,6 +1586,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 } else if cur && shouldOff {
                     e.vhostUniqPathsActive[host] = false
                     e.vhostUniqPathsLastChange[host] = now
+                    if e.nginxBridge != nil {
+                        e.nginxBridge.DropVhostAutoSource(host, autoV2UniqPathsShort)
+                    }
                 } else if cur {
                     doChallenge = true // keep refreshing TTL while active
                 }
@@ -1600,10 +1613,20 @@ if doChallenge {
         }
     }
                     e.nginxBridge.ChallengeVhostWithReason(host, ttl, "uniqpaths_short")
+                    // The auto-v2 resolver's view of this source: re-noted every
+                    // cycle it is active, short-lived (challenge_v2_auto.go).
+                    e.nginxBridge.NoteVhostAutoSource(host, autoV2UniqPathsShort, e.autoSourceNoteTTL())
                     if doLogOn && e.cfg.ChallengeLog {
                         logging.LogfCHALLENGES("[challenge][vhost] action=auto_on host=%s reason=uniqpaths_short uniqPaths=%d on=%d off=%d ttl=%s",
                             host, uniq, on, off, ttl.String())
                     }
+                    // This cycle skips the rest of the host (the scorer, the
+                    // config list, Under-Attack), so their notes are not
+                    // re-noted and lapse within autoSourceNoteTTL: an
+                    // unevaluated source is not kept alive (the safe direction
+                    // for a human; with the default knob uniqpaths_short is
+                    // armed itself). An operator `attack off` drops the
+                    // under_attack note at once regardless.
                     // vhost-wide challenge overrides need for per-IP enumeration
                     continue
                 }
@@ -1926,6 +1949,29 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
 
             effective := manual || autoActive
 
+            // The auto-v2 resolver's view of this host's AUTOMATIC sources
+            // (challenge_v2_auto.go): RE-NOTED on every cycle a source is
+            // active, with a short TTL (autoSourceNoteTTL), independently of
+            // the bridge entry's single Reason (which a manual arm or the
+            // config list relabels). A cycle that does not reach this point
+            // for the host — an exclude/ignore `continue`, a host that left
+            // the candidate set, a stalled tick — simply stops re-noting, and
+            // the source lapses within the TTL: no transition can leave a
+            // stale v2 behind. The drops just make "off" immediate.
+            if e.nginxBridge != nil {
+                noteTTL := e.autoSourceNoteTTL()
+                if autoActive {
+                    e.nginxBridge.NoteVhostAutoSource(host, autoV2SuspiciousVhost, noteTTL)
+                } else {
+                    e.nginxBridge.DropVhostAutoSource(host, autoV2SuspiciousVhost)
+                }
+                if haveVhostManual && hostMatchAny(host, e.cfg.ChallengeVHost) {
+                    e.nginxBridge.NoteVhostAutoSource(host, autoV2VhostConfig, noteTTL)
+                } else {
+                    e.nginxBridge.DropVhostAutoSource(host, autoV2VhostConfig)
+                }
+            }
+
             // Under-Attack Mode (I1): escalate a CHALLENGED vhost whose challenge
             // is being defeated (solver farm) to UNDER_ATTACK, detect-only. Runs
             // before the !effective early-out so a lingering state de-escalates
@@ -1940,6 +1986,19 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
                     }
                 }
                 e.evalUnderAttack(now, host, effective, uaRow, out)
+                // Under-Attack as an auto-v2 source, re-noted each cycle the
+                // state is evaluated ON (so a cycle that skips this host lets
+                // it lapse, like every other source — see above).
+                // Not gated on this host's own `effective`: a www. host under its
+                // apex's challenge (or a wildcard arm) is challenged too, and
+                // the resolver arms nothing without a live bridge entry anyway.
+                if e.nginxBridge != nil {
+                    if on, _, _ := e.VhostAttackState(host); on {
+                        e.nginxBridge.NoteVhostAutoSource(host, autoV2UnderAttack, e.autoSourceNoteTTL())
+                    } else {
+                        e.nginxBridge.DropVhostAutoSource(host, autoV2UnderAttack)
+                    }
+                }
             }
 
             if !effective {

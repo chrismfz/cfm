@@ -77,6 +77,15 @@ func (e *Engine) deriveVhostStateForHost(host string, now time.Time) string {
 	return e.deriveVhostState(&cv, now)
 }
 
+// decorateTier stamps the resolved vhost tier onto a row (render-time only).
+func (v *ChallengeVhostState) decorateTier(t vhostV2Tier) {
+	v.Rung = t.Rung
+	v.RungSource = t.Source
+	v.RungTrigger = t.Trigger
+	v.RungPin = t.Pin
+	v.RungAuto = t.AutoRung
+}
+
 func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {
 	if !RequireAdmin(w, r) {
 		return
@@ -106,9 +115,9 @@ func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {
 		rows[i].CostPressure = CostShadowPressure(rows[i].Host)
 		rows[i].DCFraction = DCFracShadowPercent(rows[i].Host)
 		rows[i].State = e.deriveVhostState(&rows[i], now)
-		// Rung rides from the manual store (the verify gate's source), not the
-		// row — see ChallengeVhostState.Rung.
-		rows[i].Rung = e.manualChallengeRung(rows[i].Host)
+		// The tier rides from the gate's own resolver, not the row — see
+		// ChallengeVhostState.Rung.
+		rows[i].decorateTier(e.challengeV2VhostTier(rows[i].Host))
 	}
 	writeJSON(w, http.StatusOK, rows)
 }
@@ -170,7 +179,11 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 	v.CostPressure = CostShadowPressure(v.Host)
 	v.DCFraction = DCFracShadowPercent(v.Host)
 	v.State = e.deriveVhostState(&v, now)
-	v.Rung = e.manualChallengeRung(v.Host)
+	tier := e.challengeV2VhostTierForScope(v.Host)
+	v.decorateTier(tier)
+	scope := vhostScopeFromContext(r.Context())
+	v.RungPinLocked = tier.pinLockedFor(scope)
+	v.RungUnpinLocked = tier.unpinLockedFor(scope)
 	writeJSON(w, http.StatusOK, v)
 }
 

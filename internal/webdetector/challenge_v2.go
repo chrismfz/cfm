@@ -14,7 +14,11 @@ package webdetector
 //                    operator-armed `challenge_v2` on SOME grain: the client's
 //                    fingerprint (FingerprintPolicyForID), a fleet-armed
 //                    country/ASN policy (GeoPolicyActionForIP), a v2-tier
-//                    manual vhost challenge (challengeV2HostArmed), or a
+//                    vhost challenge (challengeV2HostArmedVia: a manual arm's
+//                    own tier, or an AUTOMATIC challenge whose source the
+//                    node knob CHALLENGE_V2_AUTO_VHOST arms, overridable per
+//                    host by a tier pin — challenge_v2_auto.go; TTL'd by the
+//                    challenge itself, disarmable per vhost and node-wide), or a
 //                    per-(ip,host) mark a v2-tier source wrote when it
 //                    challenged the client (challengeV2Marked; writers: a
 //                    traffic rule with action challenge_v2 at decision time,
@@ -50,6 +54,9 @@ package webdetector
 //   CHALLENGE_V2_DEBUG      (default 0) X-CFM-HS response header
 //   CHALLENGE_V2_HW_TELLS   (default 1) kill switch for mobile_hw_lie / mac_hw_lie
 //                           (ConfigureChallengeV2HWTells)
+//   CHALLENGE_V2_AUTO_VHOST (default suspicious_vhost,uniqpaths_short,under_attack)
+//                           the automatic vhost challenges that run at the v2
+//                           tier (engine config; challenge_v2_auto.go)
 //
 // HONEST LIMITS (documented residuals, not oversights):
 //   - The report is CLIENT-authored. A signal-aware farm can strip the body
@@ -240,11 +247,12 @@ type challengeV2State struct {
 	// strict). Off, the two tells are not evaluated (touch_lie is
 	// unaffected). Read in the same snapshot as the other knobs.
 	hwTells bool
-	// hostArmed reports whether a v2-tier VHOST arm covers this host (the
-	// engine's manual challenge store, apex→www expansion included — arm
-	// surfaces slice A). Wired at engine start; nil = no vhost arms (tests /
+	// hostTier answers "is this host's vhost tier v2" plus what put it there
+	// (manual / pin / auto:<source>, rendered as v2_via=), from ONE
+	// resolution — NewEngine wires challengeV2GateTier (challenge_v2_auto.go:
+	// a manual v2 arm, else the automatic side). nil = no vhost arms (tests /
 	// pre-wire), fail-open like the geo resolver.
-	hostArmed func(host string) bool
+	hostTier func(host string) (armed bool, via string)
 	// goodBot names the FCrDNS-verified good bot behind a solving IP ("" =
 	// none/unknown), for the waiver in the D5 gate: a failing solve under an
 	// arm is NOT rejected when the client is a verified crawler, the same
@@ -343,19 +351,26 @@ func challengeV2Marked(ip, host string) bool {
 	return ok
 }
 
-// SetChallengeV2HostArmed wires the per-vhost v2 lookup the verify gate ORs
-// in (see the D5 gate in challenge_server.go). Same lifecycle as
-// SetFingerprintPolicyGeo: set from NewEngine on every engine build,
-// so it always points at the current engine.
-func SetChallengeV2HostArmed(fn func(host string) bool) {
+// challengeV2HostTierHook returns the currently wired vhost-tier hook.
+func challengeV2HostTierHook() func(string) (bool, string) {
+	challengeV2.mu.RLock()
+	defer challengeV2.mu.RUnlock()
+	return challengeV2.hostTier
+}
+
+// SetChallengeV2HostTier wires the per-vhost v2 lookup the verify gate ORs in
+// (see the D5 gate in challenge_server.go), with the v2_via answer from the
+// same resolution. Same lifecycle as SetFingerprintPolicyGeo: set from
+// NewEngine on every engine build, so it always points at the current engine.
+func SetChallengeV2HostTier(fn func(host string) (bool, string)) {
 	challengeV2.mu.Lock()
-	challengeV2.hostArmed = fn
+	challengeV2.hostTier = fn
 	challengeV2.mu.Unlock()
 }
 
 // SetChallengeV2GoodBot wires the good-bot waiver the D5 gate consults before
 // rejecting (see goodBot on challengeV2State). Same lifecycle as
-// SetChallengeV2HostArmed: set from NewEngine on every engine build, nil when
+// SetChallengeV2HostTier: set from NewEngine on every engine build, nil when
 // CHALLENGE_GOODBOT_EXEMPT is off.
 func SetChallengeV2GoodBot(fn func(ctx context.Context, ip, ptr string) (name, miss string)) {
 	challengeV2.mu.Lock()
@@ -398,17 +413,21 @@ const (
 	v2WaiverTransient = "transient" // the resolver failed; nothing was cached
 )
 
-// challengeV2HostArmed answers "does a v2 vhost arm cover this host" for the
-// verify gate. false when unwired or host is empty (fail-open — D5a: teeth
-// only where an operator explicitly armed).
-func challengeV2HostArmed(host string) bool {
+// challengeV2HostArmedVia answers "is this host's vhost challenge at the v2
+// tier" for the verify gate — a manual v2 arm, or an automatic challenge the
+// CHALLENGE_V2_AUTO_VHOST node default (or a tier pin) puts at v2 — and what
+// put it there (v2_via), from ONE resolution; NewEngine wires it to
+// challengeV2VhostTier (challenge_v2_auto.go). false when unwired or host is
+// empty (fail-open — D5a: teeth only under an arm, operator-set or the
+// operator's node default per the 2026-09-29 amendment).
+func challengeV2HostArmedVia(host string) (bool, string) {
 	challengeV2.mu.RLock()
-	fn := challengeV2.hostArmed
+	tierFn := challengeV2.hostTier
 	challengeV2.mu.RUnlock()
-	if fn == nil || host == "" {
-		return false
+	if tierFn == nil || host == "" {
+		return false, ""
 	}
-	return fn(host)
+	return tierFn(host)
 }
 
 // Arm-grain names. They are a grep surface (`v2=` on the solve line), so keep
@@ -416,11 +435,11 @@ func challengeV2HostArmed(host string) bool {
 const (
 	v2GrainFP    = "fp"    // an armed challenge_v2 fingerprint policy
 	v2GrainGeo   = "geo"   // a fleet-armed country/ASN policy covering the IP
-	v2GrainVhost = "vhost" // a v2-tier manual vhost challenge on the host
+	v2GrainVhost = "vhost" // a v2-tier vhost challenge on the host (manual arm, or automatic via CHALLENGE_V2_AUTO_VHOST / a tier pin)
 	v2GrainMark  = "mark"  // a per-(ip,host) rung mark (traffic rule / WAF rule)
 )
 
-// challengeV2ArmGrain answers D5a's "is this solve covered by an
+// challengeV2ArmGrainVia answers D5a's "is this solve covered by an
 // operator-armed challenge_v2?" and NAMES the grain that armed it. It is the
 // single evaluation of the OR the verify gate applies (challenge_server.go),
 // so the teeth and the log line can never disagree about whether a solve was
@@ -435,25 +454,33 @@ const (
 // added to close.
 //
 // Cost, since this now runs on the COMMON path and not just a failing solve:
-// the fingerprint, vhost and mark grains are map reads, and challengeV2Marked
-// takes only an RLock and never deletes — no exclusive lock reaches the solve
-// hot path, and reading a mark neither consumes nor rewrites it, so the eager
-// read cannot starve the gate below. The geo grain costs nothing at all until
+// the fingerprint and mark grains are map reads, and challengeV2Marked takes
+// only an RLock and never deletes — reading a mark neither consumes nor
+// rewrites it, so the eager read cannot starve the gate below. The vhost
+// grain (challengeV2VhostTier) takes the manual store's mutex (as it always
+// did), one bridge RLock (the same vhost-entry read the src= snapshot does,
+// plus the tick's automatic-source notes — Under-Attack is one of them) and
+// one pin-store RLock. The geo grain costs nothing at all until
 // a country/ASN policy exists (GeoPolicyActionForIP returns immediately on an
 // empty policy set); once one does, it is one live mmdb read per solve
 // (microseconds, no DNS).
-func challengeV2ArmGrain(fpID, ip, host string) string {
-	switch {
-	case FingerprintPolicyForID(fpID) == "challenge_v2":
-		return v2GrainFP
-	case GeoPolicyActionForIP(ip) == "challenge_v2":
-		return v2GrainGeo
-	case challengeV2HostArmed(host):
-		return v2GrainVhost
-	case challengeV2Marked(ip, host):
-		return v2GrainMark
+//
+// For the vhost grain it also returns what put the host at v2 (v2_via) —
+// from the SAME tier resolution, so the two can never disagree on one solve.
+func challengeV2ArmGrainVia(fpID, ip, host string) (grain, via string) {
+	if FingerprintPolicyForID(fpID) == "challenge_v2" {
+		return v2GrainFP, ""
 	}
-	return ""
+	if GeoPolicyActionForIP(ip) == "challenge_v2" {
+		return v2GrainGeo, ""
+	}
+	if armed, v := challengeV2HostArmedVia(host); armed {
+		return v2GrainVhost, v
+	}
+	if challengeV2Marked(ip, host) {
+		return v2GrainMark, ""
+	}
+	return "", ""
 }
 
 // challengeV2WaiverBar says whether a failing solve under grain may be waived
@@ -461,7 +488,7 @@ func challengeV2ArmGrain(fpID, ip, host string) string {
 // grains whose challenge the decision path's good-bot exemption already skips
 // (goodBotDowngrade softens the geo floor and the vhost challenge), and only
 // when no traffic-rule / WAF mark covers the same client too (v2WaiverMark);
-// any other grain is v2WaiverGrain. challengeV2ArmGrain returns the FIRST
+// any other grain is v2WaiverGrain. challengeV2ArmGrainVia returns the FIRST
 // grain that covers the solve (fp, geo, vhost, mark), so a geo or vhost answer
 // already rules out a fingerprint policy; the mark is checked here because it
 // comes last.
@@ -833,6 +860,9 @@ func (s ChallengeSolve) HumanitySuffix() string {
 	out += s.SignalSuffix()
 	if s.V2Grain != "" {
 		out += " v2=" + s.V2Grain
+		if s.V2Via != "" {
+			out += " v2_via=" + s.V2Via
+		}
 	}
 	if s.V2Waived != "" {
 		out += " v2_waived=" + s.V2Waived
@@ -857,9 +887,13 @@ func (s ChallengeSolve) WaiverMissSuffix() string {
 // cleared nothing), so this line and the challenge_v2_reject history row are
 // its only records — without sig= every armed-and-rejected client would be
 // missing from the very data used to tune the tells. The geo fields, then
-// v2_waiver_miss, then src= ride at the END, so no field a parser already
-// reads moves.
+// v2_waiver_miss, then src=, then v2_via ride at the END, so no field a
+// parser already reads moves.
 func (s ChallengeSolve) RejectLine() string {
-	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s%s%s",
-		s.IP, s.Host, s.URI, s.HumanityScore, s.HumanityTells, s.SignalSuffix(), s.V2Grain, s.TLSFingerprintOrDash(), s.UA, s.GeoSuffix(), s.WaiverMissSuffix(), s.SrcSuffix())
+	via := ""
+	if s.V2Via != "" {
+		via = " v2_via=" + s.V2Via
+	}
+	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s%s%s%s",
+		s.IP, s.Host, s.URI, s.HumanityScore, s.HumanityTells, s.SignalSuffix(), s.V2Grain, s.TLSFingerprintOrDash(), s.UA, s.GeoSuffix(), s.WaiverMissSuffix(), s.SrcSuffix(), via)
 }

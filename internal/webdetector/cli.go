@@ -94,6 +94,8 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop challenge add <H> [--ttl 30m] [--rung v2]  # manually challenge a vhost (v2 = humanity-gated verify)")
 	fmt.Println("  cfm webtop challenge remove <H>           # remove manual challenge")
 	fmt.Println("  cfm webtop challenge status <H>           # check challenge status")
+	fmt.Println("  cfm webtop challenge tier [list]          # tier pins on automatic challenges")
+	fmt.Println("  cfm webtop challenge tier <H> v1|v2|auto [--ttl 24h]  # pin an automatic challenge's tier (v1 = emergency drop back)")
 	fmt.Println("  cfm webtop challenge exclude list")
 	fmt.Println("  cfm webtop challenge exclude add <host|path> [--type host|path]")
 	fmt.Println("  cfm webtop challenge exclude remove <host|path> [--type host|path]")
@@ -1160,6 +1162,20 @@ type chalVhost struct {
 	QueryCardinality int       `json:"query_cardinality"` // live abuse_shadow facet distinct-URL count
 	CostPressure     int       `json:"cost_pressure"`     // live abuse_shadow 5xx-pressure percent
 	DCFraction       int       `json:"dc_fraction"`       // live abuse_shadow unverified-datacenter percent
+	Rung             string    `json:"rung"`              // effective vhost tier: "v2" or "" (v1)
+	RungSource       string    `json:"rung_source"`       // manual|pin|auto
+	RungTrigger      string    `json:"rung_trigger"`      // automatic source covering the host
+	RungPin          string    `json:"rung_pin"`          // tier pin (v1|v2), when one exists
+}
+
+// chalTierCol renders the effective vhost tier for the list: v1 / v2, with
+// "/pin" when an operator tier pin decides it.
+func chalTierCol(h chalVhost) string {
+	rung, source := h.Rung, h.RungSource
+	if source == tierSourcePin {
+		return rungOrV1(rung) + "/pin"
+	}
+	return rungOrV1(rung)
 }
 
 // appendFlag joins a flag token onto a comma-separated reasons string.
@@ -1240,6 +1256,9 @@ func runChallengeWebTop(baseURL string, args []string) error {
 	if len(args) > 0 && args[0] == "status" { //
 		return runChallengeStatus(baseURL, args[1:]) //
 	} //
+	if len(args) > 0 && args[0] == "tier" {
+		return runChallengeTier(baseURL, args[1:])
+	}
 	if len(args) > 0 && args[0] == "exclude" {
 		return runChallengeExclude(baseURL, args[1:])
 	}
@@ -1305,8 +1324,8 @@ func runChallengeWebTop(baseURL string, args []string) error {
 		if state == "" {
 			state = "-"
 		}
-		fmt.Printf("VHOST: %s  state=%s status=%s mode=%s since=%s ttl=%s left=%s score=%.2f uniqIP=%d rps=%.2f action=%s\n",
-			vh.Host, state, vh.Status, vh.Mode, vh.Since, ttl, left, vh.Score, vh.UniqIP, vh.RPS, vh.LastAction)
+		fmt.Printf("VHOST: %s  state=%s status=%s mode=%s tier=%s since=%s ttl=%s left=%s score=%.2f uniqIP=%d rps=%.2f action=%s\n",
+			vh.Host, state, vh.Status, vh.Mode, chalTierCol(vh), vh.Since, ttl, left, vh.Score, vh.UniqIP, vh.RPS, vh.LastAction)
 		if len(vh.Reasons) > 0 {
 			fmt.Printf("Reasons: %s\n", strings.Join(vh.Reasons, ","))
 		}
@@ -1347,8 +1366,8 @@ func runChallengeWebTop(baseURL string, args []string) error {
 		return err
 	}
 
-	fmt.Printf("%-35s %-6s %-6s %5s %6s %9s %10s  %s\n",
-		"HOST", "MODE", "STAT", "SCORE", "UNIQ", "TTL", "LEFT", "REASONS")
+	fmt.Printf("%-35s %-6s %-6s %-6s %5s %6s %9s %10s  %s\n",
+		"HOST", "MODE", "STAT", "TIER", "SCORE", "UNIQ", "TTL", "LEFT", "REASONS")
 	for _, h := range vhs {
 		rs := ""
 		if len(h.Reasons) > 0 {
@@ -1377,8 +1396,8 @@ func runChallengeWebTop(baseURL string, args []string) error {
 			rs = appendFlag(rs, fmt.Sprintf("dc=%d%%", h.DCFraction))
 		}
 		ttl, left := chalTTLCols(h)
-		fmt.Printf("%-35s %-6s %-6s %5.2f %6d %9s %10s  %s\n",
-			h.Host, h.Mode, chalStatCol(h), h.Score, h.UniqIP, ttl, left, rs)
+		fmt.Printf("%-35s %-6s %-6s %-6s %5.2f %6d %9s %10s  %s\n",
+			h.Host, h.Mode, chalStatCol(h), chalTierCol(h), h.Score, h.UniqIP, ttl, left, rs)
 	}
 	return nil
 }
@@ -1576,6 +1595,19 @@ func runChallengeAdd(baseURL string, args []string) error {
 
 	fmt.Printf("✓ Challenge active for %s  ttl=%s  expires=%s  reason=%s  rung=%v\n",
 		result["host"], result["ttl"], result["expires_at"], result["reason"], result["rung"])
+	// A manual v1 arm does not downgrade an automatic v2: say what the solves
+	// are actually held to when it differs from the arm's own rung.
+	if tier, ok := result["tier"].(map[string]interface{}); ok {
+		if eff, _ := tier["rung"].(string); eff != "" && eff != fmt.Sprint(result["rung"]) {
+			src, _ := tier["source"].(string)
+			trig, _ := tier["trigger"].(string)
+			fmt.Printf("  effective tier: %s (%s", eff, src)
+			if trig != "" {
+				fmt.Printf(": %s", trig)
+			}
+			fmt.Println(") — `cfm webtop challenge tier <vhost> v1` pins the automatic tier down")
+		}
+	}
 	return nil
 }
 
@@ -1648,6 +1680,153 @@ func runChallengeStatus(baseURL string, args []string) error {
 	} else {
 		fmt.Println("  auto:    inactive")
 	}
+	rung, _ := result["rung"].(string)
+	source, _ := result["rung_source"].(string)
+	trigger, _ := result["rung_trigger"].(string)
+	pin, _ := result["rung_pin"].(string)
+	fmt.Printf("  tier:    %s\n", tierDescription(rung, source, trigger, pin))
+	return nil
+}
+
+// tierDescription explains the effective vhost tier in one line: what it is,
+// what decided it, and a parked pin a manual arm (or no challenge) outranks.
+func tierDescription(rung, source, trigger, pin string) string {
+	rung = rungOrV1(rung)
+	var d string
+	switch source {
+	case tierSourceManual:
+		d = rung + " (manual arm)"
+	case tierSourcePin:
+		d = rung + " (pinned; automatic source: " + trigger + ")"
+	case tierSourceAuto:
+		d = rung + " (automatic: " + trigger + ", CHALLENGE_V2_AUTO_VHOST)"
+	default:
+		d = "- (no vhost challenge)"
+	}
+	if pin != "" && source != tierSourcePin {
+		d += "  pin=" + pin + " (inactive: applies to automatic challenges only)"
+	}
+	return d
+}
+
+// runChallengeTier handles:
+//
+//	cfm webtop challenge tier                         → list tier pins
+//	cfm webtop challenge tier <vhost> v1|v2|auto [--ttl 24h]
+//
+// Pins the tier of AUTOMATIC challenges on a vhost: v1 = never v2 here (the
+// emergency "drop it back to v1"), v2 = always v2, auto = remove the pin so
+// CHALLENGE_V2_AUTO_VHOST decides. A manual arm at v2 stays v2 (switch it with
+// the cfm-admin tier button or /api/v1/challenge/vhost/rung); one at v1 never
+// downgrades an automatic v2.
+func runChallengeTier(baseURL string, args []string) error {
+	base := strings.TrimRight(baseURL, "/")
+	if len(args) == 0 || args[0] == "list" {
+		resp, err := clihttp.Get(base + "/api/v1/challenge/vhost/tier")
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return httpStatusErr(resp)
+		}
+		var out struct {
+			Pins []struct {
+				Host      string    `json:"host"`
+				Rung      string    `json:"rung"`
+				ExpiresAt time.Time `json:"expires_at"`
+				Actor     string    `json:"actor"`
+			} `json:"pins"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return err
+		}
+		if len(out.Pins) == 0 {
+			fmt.Println("No tier pins: automatic vhost challenges follow CHALLENGE_V2_AUTO_VHOST.")
+		} else {
+			fmt.Printf("%-35s %-4s %-20s %s\n", "HOST", "PIN", "EXPIRES", "ACTOR")
+			for _, p := range out.Pins {
+				exp := "never"
+				if !p.ExpiresAt.IsZero() {
+					exp = p.ExpiresAt.UTC().Format("2006-01-02 15:04Z")
+				}
+				actor := p.Actor
+				if actor == "" {
+					actor = "-"
+				}
+				fmt.Printf("%-35s %-4s %-20s %s\n", p.Host, p.Rung, exp, actor)
+			}
+		}
+		fmt.Println("\nUsage: cfm webtop challenge tier <vhost> v1|v2|auto [--ttl 24h]")
+		return nil
+	}
+	if len(args) < 2 {
+		return fmt.Errorf("usage: cfm webtop challenge tier <vhost> v1|v2|auto [--ttl 24h]")
+	}
+	host, rung, ttl := args[0], args[1], ""
+	for i := 2; i < len(args); i++ {
+		switch {
+		case args[i] == "--ttl" || args[i] == "-t":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--ttl requires a value")
+			}
+			ttl = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--ttl="):
+			ttl = strings.TrimPrefix(args[i], "--ttl=")
+		default:
+			return fmt.Errorf("unknown argument %q (usage: cfm webtop challenge tier <vhost> v1|v2|auto [--ttl 24h])", args[i])
+		}
+	}
+	if ttl != "" && strings.EqualFold(strings.TrimSpace(rung), "auto") {
+		return fmt.Errorf("--ttl applies to a v1/v2 pin, not to auto (which removes the pin)")
+	}
+	u := fmt.Sprintf("%s/api/v1/challenge/vhost/tier?host=%s&rung=%s&ttl=%s",
+		base, url.QueryEscape(host), url.QueryEscape(rung), url.QueryEscape(ttl))
+	resp, err := clihttp.Post(u, "application/json", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return httpStatusErr(resp) // carries the API's {"error": ...} body
+	}
+	var result struct {
+		Error     string    `json:"error"`
+		Host      string    `json:"host"`
+		Pin       string    `json:"pin"`
+		From      string    `json:"from"`
+		Changed   bool      `json:"changed"`
+		ExpiresAt time.Time `json:"expires_at"`
+		TTLCapped bool      `json:"ttl_capped"`
+		Tier      struct {
+			Rung    string `json:"rung"`
+			Source  string `json:"source"`
+			Trigger string `json:"trigger"`
+		} `json:"tier"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	if result.Error != "" {
+		return fmt.Errorf("challenge tier error: %s", result.Error)
+	}
+	switch {
+	case !result.Changed && result.Pin == "auto":
+		fmt.Printf("= %s has no tier pin (unchanged)\n", result.Host)
+	case !result.Changed:
+		fmt.Printf("= %s already pinned %s (unchanged)\n", result.Host, result.Pin)
+	default:
+		fmt.Printf("✓ %s tier pin %s → %s", result.Host, result.From, result.Pin)
+		if !result.ExpiresAt.IsZero() {
+			fmt.Printf("  expires=%s", result.ExpiresAt.UTC().Format(time.RFC3339))
+		}
+		if result.TTLCapped {
+			fmt.Print(" (capped)")
+		}
+		fmt.Println()
+	}
+	fmt.Printf("  %s now: %s\n", host, tierDescription(result.Tier.Rung, result.Tier.Source, result.Tier.Trigger, ""))
 	return nil
 }
 

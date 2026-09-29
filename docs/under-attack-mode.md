@@ -9,6 +9,13 @@
 > signals, and I3–I5 are NOT to be built; the master plan's E1–E3 superseded
 > that enforcement path. Revisit only if the draft-rule idea (I3) is
 > deliberately picked up, and then with a §4-D3 exit contract.
+>
+> **2026-09-29 — one consequence, outside the ladder:** while a vhost is
+> UNDER_ATTACK (incl. an operator `attack on`) its challenge runs at the
+> ChallengeV2 tier — `under_attack` in `[webdetector] CHALLENGE_V2_AUTO_VHOST`,
+> default on, pin v1 per vhost to opt out (`docs/traffic-classifier.md`
+> "Auto-v2"). The I2 freeze is untouched; `UNDER_ATTACK_DRYRUN` still governs
+> only the unbuilt I3+ ladder.
 
 **Status: I0 shipped; I1 (detector + state + notify, detect-only) landed —
 surfacing (I1b) + the RT-baseline clause (§3 leg 3) still open.** Siblings:

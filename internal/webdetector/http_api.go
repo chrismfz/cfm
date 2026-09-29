@@ -93,6 +93,7 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/challenge/vhost/add", requirePOST(e.handleChallengeVhostAdd)},
 		{"/api/v1/challenge/vhost/remove", requirePOST(e.handleChallengeVhostRemove)},
 		{"/api/v1/challenge/vhost/rung", requirePOST(e.handleChallengeVhostRung)}, // switch an armed manual challenge v1<->v2, keeping its expiry
+		{"/api/v1/challenge/vhost/tier", e.handleChallengeVhostTier},              // POST: pin an automatic challenge's tier (v1|v2|auto); GET: list pins (admin)
 		{"/api/v1/challenge/vhost/status", e.handleChallengeVhostStatus},
 		{"/api/v1/challenge/vhost/attack", requirePOST(e.handleChallengeVhostAttack)}, // ?host=&on=1|0 (under-attack override)
 		{"/api/v1/challenge/exclude/list", e.handleChallengeExcludeList},
