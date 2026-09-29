@@ -892,6 +892,33 @@ got a `challenge_v2` 303, which an XHR cannot solve.
    Residual: a domain whose own vhost has a wildcard `*.example.com` alias
    ahead of the proxy vhost would send `cpanel.example.com` to its docroot.
 
+### FP case 12 — `WAF_HEADER_VULN:HEADER_IF_WEBDAV` (603) on WebDAV sync clients
+
+**Shape:** earth, 2026-09-23 → 29, `cloud.nexon.gr` (Nextcloud). The
+Nextcloud desktop client (`mirall/34.0.4`) deleting synced files sends
+`DELETE /remote.php/dav/files/<user>/<file>` with an `If:` header, the RFC
+4918 conditional (an ETag or lock-token list). Rule 603 flagged the mere
+presence of `If:` as CVE-2017-7269 and pushed a per-IP `challenge_v2`. A sync
+client cannot solve a challenge, so the delete failed. For the decision TTL
+the owner also got a challenge on every site they visited from that IP.
+Over 150 h those deletes were the **only** 603 hits on the fleet: 16 hits,
+all this client, and no attack.
+
+**Root cause:** `detect_header_vulns` treated `If:` and `Lock-Token:` as
+attack indicators. Both are ordinary WebDAV headers. Nextcloud, ownCloud,
+Office, the Windows mini-redirector, macOS Finder and davfs2 send them on
+DELETE / PUT / MOVE / UNLOCK. The CVE they stood for is an IIS 6.0
+`ScStoragePathFromUrl` overflow, and no node runs IIS.
+
+**Fix (2026-09-29):** the `If:` and `Lock-Token:` checks (tags
+`HEADER_IF_WEBDAV`, `HEADER_LOCK_TOKEN`) were removed. The alternative was a
+narrowed check keyed on the exploit's shape (a long tagged-list `<http…` with a
+non-ASCII payload). It was rejected: the signature would be written from
+memory rather than the public PoC, and it would guard a server type we don't
+have. Rule 603 keeps httpoxy (`Proxy:`) and CVE-2025-24813 (Tomcat partial
+`PUT …/session` + `Content-Range`), which no browser or WebDAV client sends.
+Test: `scripts/tests/cfm_waf_header_vulns_test.lua`.
+
 ### Structural anti-patterns to check during rule review
 
 A short list. Every one of these surfaced as a real FP above; reading
@@ -1991,7 +2018,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 17 | PHP serialize | `O:N:"`/`C:N:"` plain & URL-encoded | `cfm_waf_detectors.lua:1090` |
 | 18 | Bad UA (scored) | INSTANT tool UAs + 6-signal score (UA / method / headers / URI risk) | `cfm_waf_detectors.lua:1123` |
 | 19 | Shellshock | `() {` in any header value (URL-decode once) | `cfm_waf_detectors.lua:1315` |
-| 20 | Header vulns | `Proxy`, `Lock-Token`, `If`, CVE-2025-24813 | `cfm_waf_detectors.lua:1342` |
+| 20 | Header vulns | `Proxy` (httpoxy), CVE-2025-24813; `Lock-Token` / `If` removed 2026-09-29 (FP case 12) | `cfm_waf_detectors.lua` `detect_header_vulns` |
 | 21 | CT anomaly | Charset bypass (IBM037 etc.), boundary count, non-string CT | `cfm_waf_detectors.lua:1384` |
 | 22 | Proxy header SQLi | `'` in XFF / X-Real-IP / Client-IP | `cfm_waf_detectors.lua:1445` |
 | 23 | SSRF proto | `file://`, `gopher://`, `dict://`, `ldap[s]://`, `tftp://`, `stratum+*://`, `sftp/ftp://` + octal/hex/dword IP in `://` ctx | `cfm_waf_detectors.lua:1476` |

@@ -2175,22 +2175,22 @@ end
 -- [top-6c] Header presence vulnerability checks.
 -- Sources: uusec header-vulnerability.lua + cve-2025-24813.lua.
 --   * Proxy:     – httpoxy: CGI/FastCGI sees HTTP_PROXY env var, can redirect outbound traffic.
---   * Lock-Token: / If: – CVE-2017-7269: IIS 6.0 WebDAV ScStoragePathFromUrl overflow.
 --   * PUT /…/session + Content-Range – CVE-2025-24813: Tomcat partial PUT RCE (March 2025).
--- All are pure header presence checks – zero FP on normal browser traffic.
+-- Pure header presence checks: no browser or WebDAV client sends either.
+--
+-- `If:` / `Lock-Token:` (HEADER_IF_WEBDAV / HEADER_LOCK_TOKEN, CVE-2017-7269)
+-- were REMOVED 2026-09-29. Both are ordinary RFC 4918 WebDAV headers: every
+-- Nextcloud / ownCloud / Office / OS WebDAV client sends them on DELETE, PUT,
+-- MOVE and UNLOCK, and a sync client cannot solve a challenge. The CVE is an
+-- IIS 6.0 overflow, and no node runs IIS. Over 150 h the fleet's only hits
+-- were one Nextcloud client's deletes (docs/waf.md FP case 12). Don't
+-- re-add a presence check; a signature for that CVE would need its public PoC
+-- (CLAUDE.md: never write a CVE signature from memory) and a target to guard.
 function _M.detect_header_vulns(headers, uri, method)
   headers = headers or {}
 
   if headers["proxy"] or headers["Proxy"] then
     return "HEADER_HTTPOXY"
-  end
-
-  if headers["lock-token"] or headers["Lock-Token"] then
-    return "HEADER_LOCK_TOKEN"
-  end
-
-  if headers["if"] or headers["If"] then
-    return "HEADER_IF_WEBDAV"
   end
 
   -- CVE-2025-24813: PUT request to a path ending in /session with Content-Range

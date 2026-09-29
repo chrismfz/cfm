@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **WAF rule 603 no longer challenges WebDAV sync clients.** It treated the
+  mere presence of an `If:` or `Lock-Token:` header as the IIS 6.0 exploit
+  CVE-2017-7269. Both are ordinary WebDAV headers that Nextcloud, ownCloud,
+  Office and OS file managers send when they delete, save, move or unlock a
+  file. A sync client can't solve a challenge, so its sync broke. For about
+  ten minutes, everything else from the same IP was challenged too. Those
+  two checks are removed. No node runs IIS, and over 150 hours the fleet's
+  only 603 hits were one Nextcloud client's deletes. Rule 603 still catches
+  httpoxy (`Proxy:`) and the Tomcat CVE-2025-24813 partial `PUT`.
+  (docs/waf.md FP case 12)
+
 ### Changed
 - **Automatic vhost challenges now run at ChallengeV2 (strict) by default.**
   When the scorer challenges a vhost (`suspicious_vhost`, `uniqpaths_short`)

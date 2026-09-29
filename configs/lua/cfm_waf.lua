@@ -167,8 +167,8 @@ local CFG = {
                                        -- script never solves either way, so v2 adds no FP (webhooks are
                                        -- suppressed pre-score by the machine-style endpoint list).
   rule_shellshock       = "challenge_v2",  -- Shellshock CVE-2014-6271 () { pattern in headers (CGI env vars)
-  rule_header_vulns     = "challenge_v2",  -- httpoxy (Proxy:), CVE-2017-7269 (Lock-Token:/If:),
-                                      -- CVE-2025-24813 (Tomcat PUT /session + Content-Range)
+  rule_header_vulns     = "challenge_v2",  -- httpoxy (Proxy:), CVE-2025-24813 (Tomcat PUT
+                                      -- /session + Content-Range); If:/Lock-Token: removed (FP case 12)
 
   -- [top-7]  Content-Type validation
   rule_content_type_anomaly = "challenge_v2",  -- non-standard charset bypass; malformed multipart boundary
@@ -936,7 +936,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 2) Header vulnerabilities (httpoxy / CVE-2017-7269 / CVE-2025-24813) ─
+  -- ── 2) Header vulnerabilities (httpoxy / CVE-2025-24813) ─────────────────
   do
     local mode = rule_mode(CFG.rule_header_vulns, "logonly")
     if mode ~= "disabled" then
