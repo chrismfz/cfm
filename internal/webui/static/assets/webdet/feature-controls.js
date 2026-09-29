@@ -320,8 +320,14 @@ export const controlsMixin = {
         return `Challenge ACTIVE (${rung}) until ${until}`;
       }
       if (s.auto_active || s.rung_source) {
-        const why = tierPinned(s) ? "pinned" : `automatic: ${s.rung_trigger || "?"}`;
-        return `Auto-challenge active (scorer-driven), ${rung} — ${why}; arming makes it manual.`;
+        const src = {
+          suspicious_vhost: "the traffic scorer",
+          uniqpaths_short: "the unique-paths burst detector",
+          vhost_config: "the CHALLENGE_VHOST list",
+          under_attack: "Under-Attack Mode",
+        }[s.rung_trigger] || "an automatic source";
+        const why = tierPinned(s) ? `pinned; source: ${src}` : `from ${src}`;
+        return `Automatic challenge active (${rung} — ${why}); arming makes it manual.`;
       }
       if (s.rung_pin) return `No challenge active. A ${s.rung_pin} tier pin is parked here for automatic challenges.`;
       return "No manual challenge active.";

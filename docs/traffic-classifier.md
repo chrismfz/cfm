@@ -908,9 +908,12 @@ with a short TTL (10 ticks, 2–10 min — a tick slowed by a flood's log
 backlog must not drop the tier between re-notes) and dropping it the cycle it turns
 off. A cycle that never reaches the host (an exclude/ignore `continue`, a
 host that left the candidate set, a stalled tick) just stops re-noting, and
-the source lapses: no missed transition can leave a stale v2. (The one
-deliberate skip — the uniqpaths branch, which bypasses the scorer and
-Under-Attack for as long as it holds — freezes the other notes instead.)
+the source lapses: no missed transition can leave a stale v2 — an
+unevaluated source is never kept alive, including while the uniqpaths
+branch skips the scorer and Under-Attack (uniqpaths_short, armed by
+default, carries the tier then). Suppressing the automatic challenge under
+a kept manual arm (exclude/ignore) drops the host's notes at once, and an
+operator `attack off` drops the under_attack note at once.
 Notes are keyed on the host that wrote them and read www→apex, so a `www.`
 host's own cycle can never erase what its apex noted. Notes die with
 their entry, so a forced `attack on` on a host nothing challenges arms

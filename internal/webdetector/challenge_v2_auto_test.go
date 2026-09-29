@@ -303,17 +303,12 @@ func TestChallengeV2VhostTier_SourceNotes(t *testing.T) {
 	if tier := e.challengeV2VhostTier("www.apex.gr"); tier.Rung != "v2" || tier.Trigger != autoV2UniqPathsShort {
 		t.Fatalf("www cycle erased the apex note: %+v", tier)
 	}
-	// Touch extends live notes only, adds none.
-	b.mu.Lock()
-	b.vhAuto["apex.gr"][autoV2UniqPathsShort] = time.Now().Add(time.Second)
-	b.mu.Unlock()
-	b.TouchVhostAutoSources("apex.gr", time.Hour)
-	b.mu.RLock()
-	exp := b.vhAuto["apex.gr"][autoV2UniqPathsShort]
-	_, added := b.vhAuto["apex.gr"][autoV2SuspiciousVhost]
-	b.mu.RUnlock()
-	if time.Until(exp) < 30*time.Minute || added {
-		t.Fatalf("touch: exp in %v, added=%v", time.Until(exp), added)
+	// Suppressing the automatic challenge (exclude/ignore under a kept manual
+	// arm) forgets every note the host wrote at once.
+	b.NoteVhostAutoSource("apex.gr", autoV2SuspiciousVhost, time.Hour)
+	b.DropAllVhostAutoSources("apex.gr")
+	if tier := e.challengeV2VhostTier("apex.gr"); tier != (vhostV2Tier{}) {
+		t.Fatalf("after DropAll: %+v", tier)
 	}
 
 	// A note with no live entry arms nothing (the tier ends with the entry).
@@ -738,5 +733,27 @@ func TestEmitUnderAttack_NotesBeforeLogging(t *testing.T) {
 	e.emitUnderAttack(time.Now(), "ua.gr", false, SuspiciousRow{Host: "ua.gr"}, 0, "test", "auto", out)
 	if tier := e.challengeV2VhostTier("ua.gr"); tier.Rung != "" {
 		t.Fatalf("leaving UNDER_ATTACK: %+v", tier)
+	}
+}
+
+// Excluding a host from automatic challenges while a manual v1 arm keeps it
+// challenged drops its automatic notes the same cycle: the tier is the
+// manual arm's own from then on, not v2 until the notes lapse.
+func TestEmitIPChallenges_ExcludeDropsAutoNotes(t *testing.T) {
+	e := newTickTestEngine(t)
+	e.autoV2Armed = map[string]bool{autoV2SuspiciousVhost: true}
+	host := "excl.gr"
+	e.ManualChallengeVhost(host, time.Hour, "manual", "")
+	noteSource(e, host, autoV2SuspiciousVhost)
+	if tier := e.challengeV2VhostTier(host); tier.Rung != "v2" {
+		t.Fatalf("precondition: manual v1 under an armed source is v2: %+v", tier)
+	}
+	if !e.challengeExcludes.Add("host", host, map[string]struct{}{host: {}}) {
+		t.Fatal("add exclude failed")
+	}
+	e.vhostUnderAttack[host] = true // a live candidate
+	e.emitIPChallenges(time.Now(), make(chan core.Alert, 16))
+	if tier := e.challengeV2VhostTier(host); tier.Rung != "" || tier.Source != tierSourceManual {
+		t.Fatalf("exclude must drop the automatic notes: %+v", tier)
 	}
 }

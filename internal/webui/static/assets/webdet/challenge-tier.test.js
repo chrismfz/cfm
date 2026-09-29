@@ -64,6 +64,9 @@ test("a customer sees no pin controls on the operator's pin", () => {
   assert.equal(tierSwitchTarget(apexOutOfScope, "www.a.gr"), "v2");
   assert.ok(!tierUnpinnable(apexOutOfScope));
   assert.ok(tierUnpinnable(pinnedV1));
+  // A parked pin (no automatic challenge now) is still removable.
+  assert.ok(tierUnpinnable({ rung_pin: "v1" }));
+  assert.ok(!tierUnpinnable({}));
   assert.match(tierTitle(locked), /server operator/);
 });
 

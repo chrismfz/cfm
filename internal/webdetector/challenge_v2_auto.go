@@ -142,9 +142,9 @@ const (
 type vhostV2Tier struct {
 	Rung   string // "v2", or "" (v1 / no vhost tier)
 	Source string // tierSourceManual | tierSourcePin | tierSourceAuto | "" (nothing covers the host)
-	// Trigger is the automatic source covering the host (suspicious_vhost,
-	// uniqpaths_short, vhost_config, under_attack, or "vhost" for an entry the
-	// edge pushed without a reason). Empty for a manual tier or no source.
+	// Trigger is the automatic source covering the host — one the tick noted:
+	// suspicious_vhost, uniqpaths_short, vhost_config or under_attack. Empty
+	// when no automatic source covers it.
 	Trigger string
 	// Pin is the host's tier pin ("v1" / "v2") when one exists, reported even
 	// when a manual arm outranks it, so a surface can show it is parked there.
@@ -195,8 +195,9 @@ func (t vhostV2Tier) unpinLockedFor(scope map[string]struct{}) bool {
 // Cost: it runs on EVERY scored solve (challengeV2ArmGrain's vhost grain). The
 // only exclusive lock is the manual store's mutex, taken as the manual tier
 // always took it (manualRungTarget: the host, then the apex; then the rung).
-// Beyond that: one pin-store RLock and one bridge RLock (the same vhost-entry
-// read the src= snapshot does, plus the noted sources). Under-Attack costs
+// Beyond that: a pin-store RLock (two for a www. host: its own pin and its
+// apex's) and one bridge RLock (the same vhost-entry read the src= snapshot
+// does, plus the noted sources). Under-Attack costs
 // nothing here — it is a note like every other source.
 func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 	var t vhostV2Tier

@@ -2981,14 +2981,11 @@ func (b *NginxBridge) DropVhostAutoSource(host, source string) {
 	b.mu.Unlock()
 }
 
-// TouchVhostAutoSources extends every live note host has to at least ttl
-// from now, without adding any: for a tick cycle that deliberately skips
-// evaluating the host's other sources (the uniqpaths branch `continue`s
-// before the scorer and Under-Attack run), so their notes are frozen for as
-// long as that branch holds rather than lapsing while their challenge is
-// still live.
-func (b *NginxBridge) TouchVhostAutoSources(host string, ttl time.Duration) {
-	if b == nil || ttl <= 0 {
+// DropAllVhostAutoSources forgets every automatic source host noted — when
+// the automatic challenge is suppressed (an exclude or ignore) while a manual
+// arm keeps the entry alive.
+func (b *NginxBridge) DropAllVhostAutoSources(host string) {
+	if b == nil {
 		return
 	}
 	host = normalizeHost(host)
@@ -2998,14 +2995,8 @@ func (b *NginxBridge) TouchVhostAutoSources(host string, ttl time.Duration) {
 	if n == 0 {
 		return
 	}
-	now := time.Now()
-	exp := now.Add(ttl)
 	b.mu.Lock()
-	for src, e := range b.vhAuto[host] {
-		if e.After(now) && e.Before(exp) {
-			b.vhAuto[host][src] = exp
-		}
-	}
+	delete(b.vhAuto, host)
 	b.mu.Unlock()
 }
 

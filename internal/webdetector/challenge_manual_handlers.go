@@ -207,6 +207,38 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// tierRequest is the host/rung(/ttl) request vhost/rung and vhost/tier share.
+type tierRequest struct {
+	Host string `json:"host"`
+	Rung string `json:"rung"`
+	TTL  string `json:"ttl"`
+}
+
+// decodeTierRequest reads a tierRequest from the query, overridden field by
+// field by a JSON body (bounded; an empty body is fine). On a bad body it
+// writes the 400 and returns ok=false. The ONE decoder for both endpoints.
+func decodeTierRequest(w http.ResponseWriter, r *http.Request) (tierRequest, bool) {
+	q := r.URL.Query()
+	req := tierRequest{Host: q.Get("host"), Rung: q.Get("rung"), TTL: q.Get("ttl")}
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		var body tierRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			return req, false
+		}
+		if body.Host != "" {
+			req.Host = body.Host
+		}
+		if body.Rung != "" {
+			req.Rung = body.Rung
+		}
+		if body.TTL != "" {
+			req.TTL = body.TTL
+		}
+	}
+	return req, true
+}
+
 // POST /api/v1/challenge/vhost/rung
 // Body: { "host": "example.gr", "rung": "v2" }   (also ?host=&rung=)
 //
@@ -225,27 +257,9 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 // Scope: same as vhost/add (vhostAllowed, fail-closed) — challenge-tier either
 // way, so a scoped token may re-tier its own vhost's arm.
 func (e *Engine) handleChallengeVhostRung(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Host string `json:"host"`
-		Rung string `json:"rung"`
-	}
-	req.Host = r.URL.Query().Get("host")
-	req.Rung = r.URL.Query().Get("rung")
-	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
-		var body struct {
-			Host string `json:"host"`
-			Rung string `json:"rung"`
-		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
-			return
-		}
-		if body.Host != "" {
-			req.Host = body.Host
-		}
-		if body.Rung != "" {
-			req.Rung = body.Rung
-		}
+	req, ok := decodeTierRequest(w, r)
+	if !ok {
+		return
 	}
 	host := normalizeHost(req.Host)
 	if host == "" {
@@ -350,33 +364,9 @@ func (e *Engine) handleChallengeVhostTier(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use GET or POST"})
 		return
 	}
-	var req struct {
-		Host string `json:"host"`
-		Rung string `json:"rung"`
-		TTL  string `json:"ttl"`
-	}
-	req.Host = r.URL.Query().Get("host")
-	req.Rung = r.URL.Query().Get("rung")
-	req.TTL = r.URL.Query().Get("ttl")
-	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
-		var body struct {
-			Host string `json:"host"`
-			Rung string `json:"rung"`
-			TTL  string `json:"ttl"`
-		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
-			return
-		}
-		if body.Host != "" {
-			req.Host = body.Host
-		}
-		if body.Rung != "" {
-			req.Rung = body.Rung
-		}
-		if body.TTL != "" {
-			req.TTL = body.TTL
-		}
+	req, ok := decodeTierRequest(w, r)
+	if !ok {
+		return
 	}
 	host := normalizeHost(req.Host)
 	if host == "" {

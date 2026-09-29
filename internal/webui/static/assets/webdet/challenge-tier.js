@@ -71,11 +71,14 @@ export function tierPinned(s) {
   return Boolean(s && s.rung_source === "pin");
 }
 
-// tierUnpinnable: the "↺ auto" control — a pin decides the tier and the
-// caller may clear it (rung_unpin_locked: a customer looking at the
-// operator's pin, or at an apex pin outside its scope).
+// tierUnpinnable: the "↺ auto" control — a pin exists (deciding the tier
+// now, or parked: no automatic challenge right now, or outranked by a manual
+// v2 arm — it would silently decide the NEXT automatic challenge, so it must
+// be removable from here too) and the caller may clear it
+// (rung_unpin_locked: a customer looking at the operator's pin, or at an
+// apex pin outside its scope).
 export function tierUnpinnable(s) {
-  return tierPinned(s) && !s.rung_unpin_locked;
+  return Boolean(s && (s.rung_pin || s.rung_source === "pin")) && !s.rung_unpin_locked;
 }
 
 // tierSuffix: the short tag the mode pill carries (" · v2", " · v1 pinned").

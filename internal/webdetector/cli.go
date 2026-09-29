@@ -5,7 +5,6 @@ import (
 	"cfm/internal/clihttp"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -1785,16 +1784,7 @@ func runChallengeTier(baseURL string, args []string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// The API's own refusals carry a JSON {"error": ...}; anything else
-		// (a proxy/auth page) is reported with its HTTP status.
-		buf, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		var e struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(buf, &e) == nil && e.Error != "" {
-			return fmt.Errorf("challenge tier error: %s", e.Error)
-		}
-		return fmt.Errorf("challenge tier: http %s: %s", resp.Status, strings.TrimSpace(string(buf)))
+		return httpStatusErr(resp) // carries the API's {"error": ...} body
 	}
 	var result struct {
 		Error     string    `json:"error"`

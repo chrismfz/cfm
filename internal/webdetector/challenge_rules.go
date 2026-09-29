@@ -317,6 +317,10 @@ func (e *Engine) keepManualOverSuppression(host, kind string, now time.Time, ips
     if e.nginxBridge == nil {
         return
     }
+    // The operator suppressed the AUTOMATIC challenge; only the manual arm
+    // stays. Its automatic-source notes go now (not when their TTL lapses),
+    // so the host's tier is the manual arm's own from this cycle on.
+    e.nginxBridge.DropAllVhostAutoSources(host)
     selfOK, selfExp, _ := e.manualChallengeCovering(host)
     if !selfOK {
         return
@@ -1611,14 +1615,12 @@ if doChallenge {
                             host, uniq, on, off, ttl.String())
                     }
                     // This cycle skips the rest of the host (the scorer, the
-                    // config list, Under-Attack): freeze their notes rather than
-                    // let them lapse while their challenge is still live — but
-                    // never an under_attack note the state no longer backs
-                    // (an operator `attack off`, an expired forced-on).
-                    if on, _, _ := e.VhostAttackState(host); !on {
-                        e.nginxBridge.DropVhostAutoSource(host, autoV2UnderAttack)
-                    }
-                    e.nginxBridge.TouchVhostAutoSources(host, e.autoSourceNoteTTL())
+                    // config list, Under-Attack), so their notes are not
+                    // re-noted and lapse within autoSourceNoteTTL: an
+                    // unevaluated source is not kept alive (the safe direction
+                    // for a human; with the default knob uniqpaths_short is
+                    // armed itself). An operator `attack off` drops the
+                    // under_attack note at once regardless.
                     // vhost-wide challenge overrides need for per-IP enumeration
                     continue
                 }
