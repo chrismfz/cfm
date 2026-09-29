@@ -971,6 +971,9 @@ func init() {
 		// Kill switch for the corpus-measured device-claim tells
 		// (mobile_hw_lie / mac_hw_lie); default on.
 		webdet.ConfigureChallengeV2HWTells(kvBool(kv, "CHALLENGE_V2_HW_TELLS", true))
+		// Kill switch for the real-input rescue of a failing armed solve;
+		// default on.
+		webdet.ConfigureChallengeV2InputRescue(kvBool(kv, "CHALLENGE_V2_INPUT_RESCUE", true))
 
 		engine := webdet.NewEngine(cfg)
 

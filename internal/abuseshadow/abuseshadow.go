@@ -76,7 +76,7 @@ type Entry struct {
 	// Humanity (ChallengeV2 Rung 1) would_v2 metrics
 	// (internal/webdetector/challenge_server.go): a solve that WOULD have been
 	// rejected had a challenge_v2 arm covered it. hs/tells are always present;
-	// the context keys (ptr/ua_family/ua_bot/src/scope, plus cc/asn/provider above)
+	// the context keys (ptr/ua_family/ua_bot/v2_rescued/src/scope, plus cc/asn/provider above)
 	// ride only on lines from daemons that write them — an older line simply
 	// lacks them. Zero/empty when the line is a different signal.
 	HS       int    `json:"hs,omitempty"`        // humanity score
@@ -283,13 +283,15 @@ type Summary struct {
 // rescued says how many of them an armed gate would still have let through
 // (real pointer input and no certain tell). The by_* breakdowns count every
 // line, rescued or not; rescued is 0 on lines from daemons predating it.
+// Lines − rescued is an UPPER bound on what an arm would reject: under a geo
+// or vhost arm the good-bot waiver clears verified crawlers too.
 type HumanitySummary struct {
 	Lines         int  `json:"lines"`
 	DistinctIPs   int  `json:"distinct_ips"`
 	DistinctHosts int  `json:"distinct_hosts"`
 	WithContext   int  `json:"with_context"` // lines carrying src= (attributable)
 	UABot         int  `json:"ua_bot"`       // lines whose UA self-declares a bot (unverified)
-	Rescued       int  `json:"rescued"`      // lines with v2_rescued=input: an armed gate would clear them (lines − rescued = walled)
+	Rescued       int  `json:"rescued"`      // lines with v2_rescued=input: an armed gate would clear them (lines − rescued is an upper bound on the rejects)
 	BySrcKind     []kv `json:"by_src_kind"`  // per line, each distinct kind once: waf/ip/vhost/rule/fp/geo, "-" none, "(unknown)" no src=
 	BySrc         []kv `json:"by_src"`       // full tokens, e.g. vhost:suspicious_vhost, waf:302
 	ByFP          []kv `json:"by_fp"`

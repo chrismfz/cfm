@@ -56,10 +56,12 @@ back-filled here — see the git/PR history for that period.
   (fingerprint, country/ASN, vhost, traffic-rule/WAF). No failing solve from a
   known farm moved the pointer that much. Such a solve logs
   `v2_rescued=input` with its failing `hs=`/`tells=`, and the history row
-  carries `v2_rescued`. On an unarmed vhost the `would_v2` line carries it, so
-  the `abuse_shadow` MCP tool's `humanity.rescued` shows how many would-be
-  rejects a new arm would let through. A bot that fakes pointer events also
-  passes: the page cannot tell real events from injected ones.
+  carries `v2_rescued`. For an unarmed solve, the `would_v2` line carries it
+  instead, so the `abuse_shadow` MCP tool's `humanity.rescued` shows how many
+  would-be rejects a new arm would let through. The counts come from the
+  page's script, so a bot that reports or injects pointer movement also
+  passes. New `[webdetector] CHALLENGE_V2_INPUT_RESCUE` (default `1`) turns
+  the rescue off without a release.
 - **Under-Attack Mode now changes one thing:** while a vhost challenge is live
   on a vhost in UNDER_ATTACK (including an operator `attack on`), it runs at
   the v2 tier; the transition log line says so (`tier=`). The rest of

@@ -529,11 +529,13 @@ type ChallengeSolve struct {
 	// solve under an arm ("" = not waived): the D5 gate let it through instead
 	// of rejecting (challengeV2GoodBot). Rendered as v2_waived=<name>.
 	V2Waived string
-	// V2Rescued names what rescued a FAILING solve ("" = not rescued): today
-	// only "input" — real pointer input and no certain tell
-	// (challengeV2InputRescue). Under an arm the solve takes the solved path
-	// instead of a reject; unarmed, the would_v2 line carries it. Rendered as
-	// v2_rescued=<what>.
+	// V2Rescued names what rescues a FAILING score ("" = nothing): today only
+	// "input" — real pointer input and no certain tell
+	// (challengeV2InputRescue). Set for armed and unarmed solves alike, but
+	// rendered as v2_rescued=<what> only where it means something: under an
+	// arm (V2Grain set) on the solve line and history row — the solve took
+	// the solved path instead of a reject — and on the unarmed would_v2
+	// shadow line, where an arm WOULD have let it through.
 	V2Rescued string
 	// V2WaiverMiss is why a REJECTED solve from a crawler-looking client (a
 	// PTR with a good-bot suffix) was not waived: grain / mark / off /
@@ -860,7 +862,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// "scored clean, passed"). An absent/malformed payload scores like an
 		// empty report (only UA-borne openers can fire) — absence never
 		// convicts (D5b).
-		v2On, v2Fail, v2Debug, v2Shadow, v2HW := challengeV2SettingsAll()
+		v2On, v2Fail, v2Debug, v2Shadow, v2HW, v2Rescue := challengeV2SettingsAll()
 		hs, hsTells, hsNoPayload, v2Grain, v2Via := 0, "", false, "", ""
 		var hsSig *humanitySignals
 		if v2On {
@@ -931,8 +933,11 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			})
 		}
 
-		// D5 gate — teeth ONLY for an operator-armed challenge_v2 fingerprint:
-		// a failing score there means the PoW solve earns NO clearance. The 403
+		// D5 gate — teeth ONLY under an arm (v2Grain: an operator-armed
+		// fingerprint or country/ASN policy, a v2 vhost tier, or a rung mark):
+		// a failing score there means the PoW solve earns NO clearance —
+		// unless the rescue or the good-bot waiver lets it through, each
+		// marked on the solve line. The 403
 		// carries `X-CFM-V2: reject` so the page can tell a Rung-1 reject from
 		// any other verify 403 and apply its bounded backoff to the right case;
 		// its error path then reloads into a fresh challenge — retry-able by
@@ -943,29 +948,44 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// -pass finding). The rejected solve is deliberately NOT published/
 		// hooked as a solved event (it cleared nothing); it is recorded by
 		// its own log line and the reject hook's challenge_v2_reject history
-		// row instead. Everyone else: a would-fail score is shadow — one
+		// row instead. Unarmed: a would-fail score is shadow — one
 		// abuse-shadow line (rides the ABUSE_SHADOW master via
 		// ConfigureChallengeV2), clearance unaffected.
+		//
+		// v2Grain is the ANY-grain arm resolved above (challengeV2ArmGrainVia):
+		// the solve's TLS fingerprint (the original gate), a fleet-armed
+		// country/ASN policy covering the client IP (policy-kinds slice),
+		// a v2-tier VHOST arm covering the solve's host (arm-surfaces
+		// slice A), or a transient rung mark written when a v2-tier
+		// traffic rule (slice B, per ip+host) or WAF rule (slice C, per
+		// IP) challenged the client — web-scope verifies only. Each lookup is
+		// fail-open when unwired/absent. Same D5 semantics either way; the gate
+		// inputs are edge-authoritative — see HONEST LIMITS in challenge_v2.go.
+		// The grain also rides the solve line, so a passed-under-arm solve is
+		// greppable too.
 		if v2On && hs >= v2Fail {
 			// Real input rescues a failing score that has no certain tell
-			// (challengeV2InputRescue, operator decision 2026-09-29): under an
-			// arm the solve takes the solved path marked v2_rescued=input,
-			// before any waiver lookup; unarmed, the would_v2 line carries the
-			// same marker, so the rescue stays measurable either way.
-			if challengeV2InputRescue(hsSig, hsTells) {
+			// (challengeV2InputRescue, operator decision 2026-09-29; kill
+			// switch CHALLENGE_V2_INPUT_RESCUE). Decided before the waiver
+			// lookup, for armed and unarmed solves alike: armed, the solve
+			// takes the solved path marked v2_rescued=input; unarmed, the
+			// would_v2 line carries the marker, so a would-be arm is sized
+			// net of it.
+			if v2Rescue && challengeV2InputRescue(hsSig, hsTells) {
 				solve.V2Rescued = v2RescuedInput
 			}
-			// v2Grain is the ANY-grain arm resolved above (challengeV2ArmGrainVia):
-			// the solve's TLS fingerprint (the original gate), a fleet-armed
-			// country/ASN policy covering the client IP (policy-kinds slice),
-			// a v2-tier VHOST arm covering the solve's host (arm-surfaces
-			// slice A), or a transient rung mark written when a v2-tier
-			// traffic rule (slice B, per ip+host) or WAF rule (slice C, per
-			// IP) challenged the client — web-scope verifies only. Each lookup is fail-open when unwired/absent. Same D5
-			// semantics either way; the gate inputs are edge-authoritative —
-			// see HONEST LIMITS in challenge_v2.go. The grain also rides the
-			// solve line, so a passed-under-arm solve is greppable too.
-			if v2Grain != "" && solve.V2Rescued == "" {
+			switch {
+			case v2Grain == "":
+				// Unarmed: shadow only. An armed solve never writes a
+				// would_v2 line — it is decided below, not "would" anything.
+				if v2Shadow {
+					logging.LogfABUSESHADOW(
+						"[abuse-shadow] signal=humanity host=%s ip=%s hs=%d tells=%s fp=%s verdict=would_v2%s",
+						solve.Host, solve.IP, hs, hsTells, solve.TLSFingerprintOrDash(), solve.ShadowContextSuffix())
+				}
+			case solve.V2Rescued != "":
+				// Armed and rescued: the normal solved path below.
+			default:
 				// A verified good bot is waived, not rejected, under the
 				// grains whose challenge the decision path would have skipped
 				// for it (geo, vhost — challengeV2WaiverBar): the SAME FCrDNS
@@ -1004,10 +1024,6 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 					http.Error(w, "verification failed", http.StatusForbidden)
 					return
 				}
-			} else if v2Grain == "" && v2Shadow {
-				logging.LogfABUSESHADOW(
-					"[abuse-shadow] signal=humanity host=%s ip=%s hs=%d tells=%s fp=%s verdict=would_v2%s",
-					solve.Host, solve.IP, hs, hsTells, solve.TLSFingerprintOrDash(), solve.ShadowContextSuffix())
 			}
 		}
 

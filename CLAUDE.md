@@ -618,11 +618,12 @@ PTR inline — bounded, reject path only; a reject whose PTR claims a crawler
 carries `v2_waiver_miss=<grain|mark|off|spoofed|timeout|transient>`, or it
 would read like a spoof) — and except, under EVERY grain, a failing score with
 real pointer input (sig ptr >= 5 AND mv >= 100) and no certain tell
-(webdriver / headless UA): `v2_rescued=input` on the solve line/history and
-on the unarmed would_v2 line (2026-09-29, E4: Windows Chrome/109 PCs score
-exactly 100 with a software renderer and no window size, and a retry cannot
-change that; a CDP-dispatched pointer event is trusted — the confirm
-fallback's residual too) — at the EDGE `challenge_v2`
+(webdriver / headless UA): `v2_rescued=input` on an armed solve's line/history
+row and on the unarmed would_v2 line, never on an unarmed solve line (2026-09-29,
+E4: Windows Chrome/109 PCs score exactly 100 with a software renderer and no
+window size, and a retry cannot change that; the counts are client-authored —
+posted or script-/CDP-injected movement passes too, the confirm fallback's
+residual as well; kill switch `CHALLENGE_V2_INPUT_RESCUE`) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
 enforced at verify, not at serve). The verify gate ORs four arm grains:
 fingerprint policy, geo policy, a per-vhost v2 tier (a `rung=v2` MANUAL

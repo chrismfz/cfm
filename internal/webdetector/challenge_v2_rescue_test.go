@@ -37,11 +37,15 @@ func TestChallengeV2InputRescue(t *testing.T) {
 		{"headless UA", &humanitySignals{PTR: i(41), MV: f(714)}, "headless_ua", false},
 		// Absent is never input (D5b's mirror image: absence neither
 		// convicts nor exculpates).
-		{"no payload", nil, "headless_ua", false},
+		{"no payload", nil, "", false},
 		{"ptr absent", &humanitySignals{MV: f(714)}, "sw_renderer,outer_zero", false},
 		{"mv absent", &humanitySignals{PTR: i(41)}, "sw_renderer,outer_zero", false},
 		// A tell name that merely CONTAINS a certain one is not it.
 		{"substring is not a tell", &humanitySignals{PTR: i(41), MV: f(714)}, "sw_renderer,not_webdriver", true},
+		// The bar is read off the value sig= shows (one decimal), so the log
+		// line alone explains the decision: 99.96 renders mv:100.
+		{"mv rounds up to the bar", &humanitySignals{PTR: i(5), MV: f(99.96)}, "sw_renderer,outer_zero", true},
+		{"mv rounds below the bar", &humanitySignals{PTR: i(5), MV: f(99.94)}, "sw_renderer,outer_zero", false},
 	}
 	for _, c := range cases {
 		if got := challengeV2InputRescue(c.sig, c.tells); got != c.want {
@@ -106,11 +110,18 @@ func TestVerify_V2GateRescuesRealInput(t *testing.T) {
 		t.Fatalf("the good-bot waiver ran for a rescued solve: calls=%d", waiverCalls.Load())
 	}
 
-	// Every grain: a rung mark (a WAF challenge_v2 hit) rescues the same way —
-	// the question is whether a person is at the controls, not who armed it.
-	MarkChallengeV2("203.0.113.21", markHost)
-	if resp = postVerify(t, base, "203.0.113.21", markHost, win7, moved); resp.StatusCode != http.StatusSeeOther {
-		t.Fatalf("a rescued solve under a mark: status=%d, want 303", resp.StatusCode)
+	// The mark grain too — a WAF challenge_v2 hit (per IP) and a traffic
+	// rule at challenge_v2 (per ip+host): the question is whether a person
+	// is at the controls, not who armed it.
+	MarkChallengeV2IP("203.0.113.21")
+	MarkChallengeV2("203.0.113.27", markHost)
+	for _, ip := range []string{"203.0.113.21", "203.0.113.27"} {
+		if resp = postVerify(t, base, ip, markHost, win7, moved); resp.StatusCode != http.StatusSeeOther {
+			t.Fatalf("%s: a rescued solve under a mark: status=%d, want 303", ip, resp.StatusCode)
+		}
+		if s := capt.solved[len(capt.solved)-1]; s.V2Grain != v2GrainMark || s.V2Rescued != v2RescuedInput {
+			t.Fatalf("%s: grain=%q rescued=%q, want mark/input", ip, s.V2Grain, s.V2Rescued)
+		}
 	}
 
 	// Same machine, no input → rejected, as before.
@@ -125,12 +136,12 @@ func TestVerify_V2GateRescuesRealInput(t *testing.T) {
 	}
 	headless := strings.Replace(win7, "Chrome/", "HeadlessChrome/", 1)
 	resp = postVerify(t, base, "203.0.113.24", armedHost, headless, `{"v":1,"wd":false,"ptr":41,"mv":714,"tch":0,"key":0}`)
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("headless UA with input: status=%d, want 403", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden || resp.Header.Get("X-CFM-V2") != "reject" {
+		t.Fatalf("headless UA with input: status=%d X-CFM-V2=%q, want 403 + reject", resp.StatusCode, resp.Header.Get("X-CFM-V2"))
 	}
 	solved, rejects = capt.counts()
-	if solved != 2 || rejects != 3 {
-		t.Fatalf("solved=%d rejects=%d, want 2/3", solved, rejects)
+	if solved != 3 || rejects != 3 {
+		t.Fatalf("solved=%d rejects=%d, want 3/3", solved, rejects)
 	}
 	for _, r := range capt.rejects {
 		if r.V2Rescued != "" {
@@ -138,13 +149,25 @@ func TestVerify_V2GateRescuesRealInput(t *testing.T) {
 		}
 	}
 
-	// Unarmed: the rescue is recorded on the solve (it rides the would_v2
-	// shadow line), and the solve clears as any unarmed solve does.
+	// Unarmed: the would-be rescue is decided (it rides the would_v2 shadow
+	// line), but the solve line and history row don't carry it — nothing had
+	// to let an unarmed solve through, and v2_rescued there means exactly
+	// that, like v2_waived.
 	if resp = postVerify(t, base, "203.0.113.25", "blog.example.gr", win7, moved); resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("unarmed rescued solve: status=%d", resp.StatusCode)
 	}
 	if s := capt.solved[len(capt.solved)-1]; s.V2Rescued != v2RescuedInput || s.V2Grain != "" {
 		t.Fatalf("unarmed solve: rescued=%q grain=%q, want input/unarmed", s.V2Rescued, s.V2Grain)
+	} else {
+		if strings.Contains(s.HumanitySuffix(), "v2_rescued") {
+			t.Errorf("an unarmed solve line carries v2_rescued: %q", s.HumanitySuffix())
+		}
+		if _, ok := s.historyPayload()["v2_rescued"]; ok {
+			t.Error("an unarmed history row carries v2_rescued")
+		}
+		if !strings.Contains(s.ShadowContextSuffix(), " v2_rescued=input") {
+			t.Errorf("the would_v2 line lost the marker: %q", s.ShadowContextSuffix())
+		}
 	}
 	// A passing score is never "rescued" — there was nothing to rescue it from.
 	if resp = postVerify(t, base, "203.0.113.26", armedHost, win7, `{"v":1,"wd":false,"ptr":41,"mv":714,"tch":0,"key":0}`); resp.StatusCode != http.StatusSeeOther {
@@ -183,5 +206,35 @@ func TestV2Rescued_Surfaces(t *testing.T) {
 	}
 	if strings.Contains((ChallengeSolve{}).ShadowContextSuffix(), "v2_rescued") {
 		t.Fatal("an unrescued shadow line must not carry the key")
+	}
+}
+
+// CHALLENGE_V2_INPUT_RESCUE = 0 takes the rescue away: a failing armed solve
+// with real input is rejected exactly as before the rescue existed, and no
+// surface carries v2_rescued — the would_v2 marker included.
+func TestVerify_InputRescueKillSwitch(t *testing.T) {
+	base, capt := startVerifyServer(t)
+	const (
+		armedHost = "mathematica.example.gr"
+		win7      = "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
+		moved     = `{"v":1,"wd":false,"glr":"Google SwiftShader","ow":0,"oh":0,"tch":0,"key":0,"ptr":41,"mv":714}`
+	)
+	setV2HostArmed(t, func(host string) bool { return host == armedHost })
+	ConfigureChallengeV2InputRescue(false)
+	t.Cleanup(func() { ConfigureChallengeV2InputRescue(true) })
+
+	resp := postVerify(t, base, "203.0.113.30", armedHost, win7, moved)
+	if resp.StatusCode != http.StatusForbidden || resp.Header.Get("X-CFM-V2") != "reject" {
+		t.Fatalf("rescue off: status=%d X-CFM-V2=%q, want 403 + reject", resp.StatusCode, resp.Header.Get("X-CFM-V2"))
+	}
+	if resp = postVerify(t, base, "203.0.113.31", "blog.example.gr", win7, moved); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("unarmed: status=%d", resp.StatusCode)
+	}
+	solved, rejects := capt.counts()
+	if solved != 1 || rejects != 1 || capt.rejects[0].V2Rescued != "" || capt.solved[0].V2Rescued != "" {
+		t.Fatalf("rescue off: solved=%d rejects=%d rescued=%q/%q", solved, rejects, capt.rejects[0].V2Rescued, capt.solved[0].V2Rescued)
+	}
+	if _, _, _, _, _, on := challengeV2SettingsAll(); on {
+		t.Fatal("the snapshot does not carry the switch")
 	}
 }

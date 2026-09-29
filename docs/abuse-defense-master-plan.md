@@ -162,11 +162,15 @@ D3/D4 are the process fix.
   *Amendment (operator, 2026-09-29, E4):* (c) had a hole a retry cannot
   close: a machine whose renderer and window make it fail scores the same on
   every retry. So real pointer input RESCUES a failing score with no certain
-  tell (webdriver / headless UA) — under every grain, marked
-  `v2_rescued=input` (§5, E4). The input readings are client-authored, so
-  this trades the D5b-style residual (a farm that injects trusted pointer
-  events passes) for no wall; the trajectory readings that could tighten it
-  are measured first.
+  tell (webdriver / headless UA) — under every grain, the operator's
+  fingerprint policy included (a fingerprint is a population, and these
+  machines share coarse TLS buckets), marked `v2_rescued=input` (§5, E4;
+  kill switch `CHALLENGE_V2_INPUT_RESCUE`). The input readings are
+  client-authored, so this trades the D5b-style residual (a farm that posts
+  or injects pointer movement passes) for no wall for anyone who moves a
+  pointer; a keyboard-only or touch user on such a machine is still walled
+  until the confirm fallback. The trajectory readings that could tighten the
+  rescue are measured first.
 
 ## 5. Enforcement roadmap — the only live checklist
 
@@ -579,7 +583,8 @@ already opened.
         rejected under the auto-v2 or WAF-mark arms make it next; none, and it
         waits. E4 found them, and the operator put the real-input rescue
         first (below): it clears the humans who moved the mouse with no
-        extra step, and the fallback stays for the ones who did not.
+        extra step, so the RDP/VDI case above is the rescue's now, and the
+        fallback is for the humans who did not move a pointer.
 
       - READ 2026-09-29 (E4 burn-in, first pass; `detection_history`,
         `cfm.challenges.log`, `cfm.abuse_shadow.log`, 7 web nodes):
@@ -618,7 +623,10 @@ already opened.
              above measured with. The humans auto-v2 would reject clear them
              (41 / 714, 7 / 729, 74 / 3 149), and no failing farm solve in
              the corpus did. They are deliberately low. The honest limit:
-             CDP-dispatched pointer events are trusted ones.
+             the counts are client-authored (a bot can post any numbers, the
+             page counts script-dispatched events too, and CDP-dispatched
+             pointer events are trusted ones anyway). Kill switch:
+             `CHALLENGE_V2_INPUT_RESCUE = 0`.
           2. **Next, log-only:** trajectory readings on the page (untrusted
              events, coalesced events, path straightness, inter-event timing
              jitter, the largest jump) in `sig=`. They are the corpus that
