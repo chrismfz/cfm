@@ -167,9 +167,9 @@ type humanitySignals struct {
 	OW  *int   `json:"ow"`  // window.outerWidth
 	OH  *int   `json:"oh"`  // window.outerHeight
 	MTP *int   `json:"mtp"` // navigator.maxTouchPoints
-	PTR *int   `json:"ptr"` // pointer-move events observed while solving
-	TCH *int   `json:"tch"` // touchstart events observed
-	KEY *int   `json:"key"` // keydown events observed
+	PTR *int   `json:"ptr"` // TRUSTED pointer-move events observed while solving (script-dispatched ones go to UT)
+	TCH *int   `json:"tch"` // trusted touchstart events observed
+	KEY *int   `json:"key"` // trusted keydown events observed
 	// The five below are RETAINED readings: logged verbatim (sig= on the
 	// solve line, payload.sig on the history row) to build the corpus from
 	// real traffic, so a tell is written from measured distributions rather
@@ -182,11 +182,22 @@ type humanitySignals struct {
 	// absent on every Firefox then read as a reported 0.0, which is exactly
 	// the absence/zero confusion the pointer convention above exists to
 	// prevent, and which these tells depend on (an ABSENT hc is never a lie).
-	MV  *float64 `json:"mv"`  // accumulated |pointer movement| in px (page always sends it; 0 = really no movement)
+	MV  *float64 `json:"mv"`  // accumulated |movementX|+|movementY| of trusted events, px (page always sends it; 0 = no trusted movement)
 	HC  *int     `json:"hc"`  // hardwareConcurrency
 	DM  *float64 `json:"dm"`  // deviceMemory — Chrome-only, genuinely absent on Firefox/Safari
 	DPR *float64 `json:"dpr"` // devicePixelRatio
 	RAF *float64 `json:"raf"` // avg requestAnimationFrame delta ms; absent when <8 frames elapsed before submit
+	// Trajectory readings (2026-09-29, E4 step 2): the pointer PATH behind the
+	// ptr/mv counts, retained like the five above and scored by NOTHING —
+	// the corpus that would tighten the real-input rescue, measured before
+	// any of it decides anything. Each is absent until the events that
+	// define it happened (see the page's collector), never a fabricated zero.
+	UT *int     `json:"ut"` // untrusted (script-dispatched) pointer-move events — excluded from ptr/mv and the rest
+	CO *int     `json:"co"` // coalesced samples behind the delivered events; absent without getCoalescedEvents
+	ST *float64 `json:"st"` // straightness: net displacement / path length (1 = one straight line); needs a path
+	DJ *float64 `json:"dj"` // inter-event timing jitter: coefficient of variation of the gaps; needs 3 gaps
+	MJ *float64 `json:"mj"` // the largest single-event |movementX|+|movementY|, px
+	PD *float64 `json:"pd"` // ms from the first pointer-move event to the last; needs 2 events
 }
 
 // Bounds for the retained readings. These exist for DIGIT SANITY only — a
@@ -206,8 +217,8 @@ type humanitySignals struct {
 // JSON has no NaN/Inf literal (such a body fails to parse and scores as no
 // payload), so these comparisons cannot be defeated by a non-number.
 const (
-	sigMaxInt      = 1_000_000 // ptr/tch/key/hc
-	sigMaxReading  = 1e9       // mv/dm/dpr/raf magnitude ceiling
+	sigMaxInt      = 1_000_000 // ptr/tch/key/hc/ut/co
+	sigMaxReading  = 1e9       // mv/dm/dpr/raf/st/dj/mj/pd magnitude ceiling
 	sigMinPositive = 1e-6      // below this a positive is not a reading
 	sigMaxDecimals = 6         // fallback precision when display rounding would hit zero
 	sigMVDecimals  = 1         // mv's display precision — also what the rescue compares
@@ -640,15 +651,15 @@ func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 // Kill switch: CHALLENGE_V2_INPUT_RESCUE = 0 (challengeV2State.inputRescue).
 //
 // HONEST LIMIT: ptr/mv are client-authored like every reading. A bot can post
-// any counts, the page counts script-dispatched events too, and a pointer
-// event a farm dispatches through CDP is a trusted one anyway. A farm that
-// learns this can fake movement — the same residual the Rung-2 confirm
-// fallback has. The thresholds are the simplest rule the corpus supports; the
-// trajectory readings planned next are the corpus that would tighten it,
-// measured first, never written from memory. The comparison is on the values
+// any counts, and a pointer event a farm dispatches through CDP is a trusted
+// one (the page counts trusted events only; script-dispatched ones go to ut).
+// A farm that learns this can fake movement — the same residual the Rung-2
+// confirm fallback has. The thresholds are the simplest rule the corpus
+// supports; the trajectory readings (ut/co/st/dj/mj/pd) are the corpus that
+// would tighten it, measured first, never written from memory. The comparison is on the values
 // as sig= shows them (sigRound), so the log line alone explains the decision.
 const (
-	rescueMinPointerEvents = 5   // sig.ptr: pointer-move events seen while solving
+	rescueMinPointerEvents = 5   // sig.ptr: trusted pointer-move events seen while solving
 	rescueMinMovePx        = 100 // sig.mv: accumulated |movementX|+|movementY|
 	v2RescuedInput         = "input"
 )
@@ -807,6 +818,12 @@ func (s *humanitySignals) sanitize() {
 	dropFloat(&s.DM)
 	dropFloat(&s.DPR)
 	dropFloat(&s.RAF)
+	dropInt(&s.UT)
+	dropInt(&s.CO)
+	dropFloat(&s.ST)
+	dropFloat(&s.DJ)
+	dropFloat(&s.MJ)
+	dropFloat(&s.PD)
 }
 
 // uaClaimsMobile reports whether the UA presents itself as a touch device —
@@ -950,9 +967,10 @@ type sigField struct {
 	val float64
 }
 
-// sigFields returns the retained readings in ONE fixed order — behavioural
-// first (the operational question is "did this client do anything?"), then
-// environment — already rounded. Absent readings are omitted entirely: a key
+// sigFields returns the retained readings in ONE fixed order — the input
+// counts first (the operational question is "did this client do anything?"),
+// then environment, then the trajectory readings (appended in 2026-09) —
+// already rounded. Absent readings are omitted entirely: a key
 // that is not there was not reported, and no consumer has to guess whether a
 // 0 meant "none" or "unknown". Nil receiver / nil payload yields nothing.
 func (s *humanitySignals) sigFields() []sigField {
@@ -980,6 +998,16 @@ func (s *humanitySignals) sigFields() []sigField {
 	addFloat("dm", s.DM, 2) // 0.25 / 0.5 / 1 / 2 / 4 / 8 GiB buckets
 	addFloat("dpr", s.DPR, 2)
 	addFloat("raf", s.RAF, 1)
+	// Trajectory readings, after the original eight so a reader matching
+	// the old keys by name or prefix still does. st/dj are ratios (2
+	// decimals); mj is movement like mv (1 decimal); pd is milliseconds
+	// (whole, with sigRound's no-false-zero fallback for a sub-ms span).
+	addInt("ut", s.UT)
+	addInt("co", s.CO)
+	addFloat("st", s.ST, 2)
+	addFloat("dj", s.DJ, 2)
+	addFloat("mj", s.MJ, 1)
+	addFloat("pd", s.PD, 0)
 	return out
 }
 
@@ -987,7 +1015,8 @@ func (s *humanitySignals) sigFields() []sigField {
 // — the Rung-1 report as REPORTED, before any scoring. Empty when nothing was
 // retained, so a no-payload solve adds no field.
 //
-// Precisely: dm/dpr/raf are scored by NOTHING — they are corpus only,
+// Precisely: dm/dpr/raf and the trajectory readings (ut/co/st/dj/mj/pd) are
+// scored by NOTHING — they are corpus only,
 // logged so a future tell can be written from measured distributions instead
 // of from memory. hc feeds mobile_hw_lie / mac_hw_lie (written exactly that
 // way, from this corpus), ptr/tch/key feed the no_input amplifier (only

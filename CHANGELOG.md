@@ -59,9 +59,19 @@ back-filled here — see the git/PR history for that period.
   carries `v2_rescued`. For an unarmed solve, the `would_v2` line carries it
   instead, so the `abuse_shadow` MCP tool's `humanity.rescued` shows how many
   would-be rejects a new arm would let through. The counts come from the
-  page's script, so a bot that reports or injects pointer movement also
-  passes. New `[webdetector] CHALLENGE_V2_INPUT_RESCUE` (default `1`) turns
+  page's script, so a bot that reports pointer movement in its request, or
+  injects it through browser automation, also passes (movement dispatched
+  from page script does not count; see the trajectory entry). New `[webdetector] CHALLENGE_V2_INPUT_RESCUE` (default `1`) turns
   the rescue off without a release.
+- **The challenge page counts only real input events.** Pointer moves, key
+  presses and touches that the page's own JavaScript dispatches
+  (`isTrusted` false) no longer count toward `ptr`/`mv`/`key`/`tch`. A
+  person's input is always trusted, and a browser without `isTrusted`
+  still counts everything. So five script-dispatched moves no longer earn
+  the real-input rescue above. And a client whose only "input" came from
+  script now reports none, so the passive check's `no_input` amplifier (+30)
+  can join a score that other signals already opened. Browser automation
+  (CDP) produces trusted events and still counts.
 - **Under-Attack Mode now changes one thing:** while a vhost challenge is live
   on a vhost in UNDER_ATTACK (including an operator `attack on`), it runs at
   the v2 tier; the transition log line says so (`tier=`). The rest of
@@ -69,6 +79,22 @@ back-filled here — see the git/PR history for that period.
   tier — take `under_attack` out of `CHALLENGE_V2_AUTO_VHOST` for that.
 
 ### Added
+- **The challenge page now records how the pointer moved, for measurement
+  only.** Every scored solve's `sig=` (and the history row's `sig`) gains six
+  readings after the existing ones:
+  - `ut`: script-dispatched pointer events (see the Changed entry: they no
+    longer count as input);
+  - `co`: coalesced samples;
+  - `st`: path straightness (1 = one straight line);
+  - `dj`: timing jitter between events;
+  - `mj`: the largest single jump in px;
+  - `pd`: movement duration in ms.
+
+  Nothing scores them yet. They are the data for tightening the new
+  "real input rescues a failing solve" rule before it changes anything. A
+  reading is absent until the pointer events that define it happen. The
+  change is on the daemon-served challenge page only, with no edge or Lua
+  change.
 - **Challenge solves now say which surface they were solved on.** Every
   solve, `v2_reject` and `would_v2` line carries `scope=web` or
   `scope=panel:<port>` (the cPanel/WHM/webmail ports' own challenge). The

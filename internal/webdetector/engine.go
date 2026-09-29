@@ -927,7 +927,7 @@ func (e *Engine) RecordChallengeV2Reject(s ChallengeSolve) {
 //	sig          the readings as reported, same numbers and rounding as
 //	             the solve line's sig= field
 //
-// dm/dpr/raf are scored by nothing — corpus, so a future tell can be
+// dm/dpr/raf and ut/co/st/dj/mj/pd are scored by nothing — corpus, so a future tell can be
 // written from measured distributions instead of from memory; hc feeds the
 // mobile_hw_lie / mac_hw_lie tells written that way; ptr/tch/key additionally
 // feed the no_input amplifier, ptr+mv the real-input rescue (v2_rescued), and
