@@ -1295,7 +1295,7 @@ func (b *NginxBridge) ClearVhost(host, reason string) {
 			wasSet = true
 			delete(b.vhState, host)
 		}
-		delete(b.vhAuto, host)
+		b.dropAutoNotesLocked(host)
 		b.mu.Unlock()
 
 		if wasSet {
@@ -1444,7 +1444,7 @@ func (b *NginxBridge) RunExpireLoop(ctx context.Context) {
 			for h, e := range b.vhState {
 				if e.Expires.Before(now) {
 					delete(b.vhState, h)
-					delete(b.vhAuto, h) // notes never outlive their entry
+					b.dropAutoNotesLocked(h) // notes never outlive their entry
 				}
 			}
 			for h, srcs := range b.vhAuto {
@@ -2253,7 +2253,7 @@ func (b *NginxBridge) handleVhostClear(w http.ResponseWriter, r *http.Request) {
 
 	b.mu.Lock()
 	delete(b.vhState, msg.Host)
-	delete(b.vhAuto, msg.Host)
+	b.dropAutoNotesLocked(msg.Host)
 	b.mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)
@@ -2975,6 +2975,22 @@ func (b *NginxBridge) DropVhostAutoSource(host, source string) {
 		}
 	}
 	b.mu.Unlock()
+}
+
+// dropAutoNotesLocked forgets host's automatic-source notes with its entry,
+// but KEEPS a live suppression marker: the marker is about the host's own
+// suppression (an exclude / ignore / bypass), not about the entry, and an
+// apex push can recreate the www. entry the same cycle. Caller holds mu.
+func (b *NginxBridge) dropAutoNotesLocked(host string) {
+	srcs := b.vhAuto[host]
+	if srcs == nil {
+		return
+	}
+	if exp, ok := srcs[autoSourceSuppressed]; ok && exp.After(time.Now()) {
+		b.vhAuto[host] = map[string]time.Time{autoSourceSuppressed: exp}
+		return
+	}
+	delete(b.vhAuto, host)
 }
 
 // SuppressVhostAutoSources forgets every automatic source host noted and, for

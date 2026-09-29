@@ -852,3 +852,27 @@ func TestVhostAutoSources_WWWInheritanceNeedsALiveApexChallenge(t *testing.T) {
 		t.Fatalf("suppressed www inherited the apex: %+v", tier)
 	}
 }
+
+// A clear (entry gone, apex push about to recreate it) keeps the host's
+// suppression marker; only the notes go. And the note TTL always outlives
+// the tick interval.
+func TestAutoNotes_ClearKeepsSuppressionAndTTLOutlivesTick(t *testing.T) {
+	e := newAutoV2TestEngine(t, autoV2SuspiciousVhost)
+	b := e.nginxBridge
+	setVhostEntry(e, "ig.gr", "")
+	setVhostEntry(e, "www.ig.gr", "")
+	noteSource(e, "ig.gr", autoV2SuspiciousVhost)
+	b.SuppressVhostAutoSources("www.ig.gr", time.Hour)
+	b.ClearVhost("www.ig.gr", "ignored")
+	setVhostEntry(e, "www.ig.gr", "") // the apex's push recreates it
+	if tier := e.challengeV2VhostTier("www.ig.gr"); tier.Rung != "" {
+		t.Fatalf("clear wiped the suppression marker; www inherited the apex: %+v", tier)
+	}
+
+	for _, every := range []time.Duration{time.Second, 5 * time.Second, time.Minute, 15 * time.Minute} {
+		e.cfg.Every = every
+		if ttl := e.autoSourceNoteTTL(); ttl <= every {
+			t.Fatalf("EVERY=%v: note TTL %v does not outlive a tick", every, ttl)
+		}
+	}
+}

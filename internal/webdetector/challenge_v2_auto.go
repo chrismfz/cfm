@@ -319,7 +319,9 @@ func (e *Engine) autoV2Trigger(host string) string {
 // autoSourceNoteTTL is how long one tick's note of an active automatic source
 // lives: 10 ticks, at least 2 minutes (so a tick slowed by a log backlog in
 // the very flood this is for never drops the tier to v1 between re-notes) and
-// at most 10 (so a source the tick stops seeing lapses soon).
+// normally at most 10 (so a source the tick stops seeing lapses soon) — but
+// always at least 3 ticks, so even a node with a long EVERY never lets an
+// active source lapse between two re-notes.
 func (e *Engine) autoSourceNoteTTL() time.Duration {
 	ttl := 10 * e.cfg.Every
 	if ttl < 2*time.Minute {
@@ -327,6 +329,9 @@ func (e *Engine) autoSourceNoteTTL() time.Duration {
 	}
 	if ttl > 10*time.Minute {
 		ttl = 10 * time.Minute
+	}
+	if floor := 3 * e.cfg.Every; ttl < floor {
+		ttl = floor
 	}
 	return ttl
 }
