@@ -768,7 +768,8 @@ at three scores:
     Chrome/42 + Edge/12, 2 Chrome/58 + Edge/16, and 3 Chrome/70 + Edge/18.
     These are stale browsers, not impossible ones, the `uaplausible` line.
   - 29 were a separate fake shape, `… Edge/119|120.x` with no Chrome/ token.
-    It is left for its own measurement.
+    It was measured separately and not adopted (see "`Edge/1xx` with no
+    Chrome/ token" below).
 
 **Effect.** With the tell, the two corroborated variants fail — where a v2
 arm covers the solve (D5a; elsewhere they show as `would_v2`):
@@ -787,6 +788,79 @@ that `ua_lie` + `outer_zero` alone (90) still passes; `ua_lie` +
 `sw_renderer` already makes. Tests:
 `internal/uaplausible` (`TestLegacyEdgeOnModernChrome`) and
 `challenge_v2_ualie_test.go` (the three logged variants).
+
+#### `deviceMemory` tells (2026-09-29) — measured, NOT adopted
+
+Prompted by the `ua_lie` scanner's clean-report variant: it reports `dm:32`,
+and Chrome was believed to cap `navigator.deviceMemory` at 8. If that held, a
+Chrome UA above 8 would catch the one variant `ua_lie` leaves passing.
+
+**Corpus.** The challenge logs of the 7 edge nodes (live + rotated), every
+line with a `dm:` reading: 11 125 lines (10 884 solves, 241 `v2_reject`),
+the newest ≤ 2 000 per node, ~1-7 days deep depending on the node.
+**H** (likely human) is labelled as for the hardware tells: GR/CY source,
+consumer ISP, no bot token. H holds 1 932 solves from 1 364 IPs on 203 vhosts.
+Everything else (9 193) is **not** a farm label, just "not H".
+
+**The premise is false for desktop Chrome.** Current desktop Chrome reports
+above 8. 823 of 1 387 human desktop-Chrome solves (59%) reported 16 or 32:
+569 × 16 and 219 × 32 on Windows. So `dm:32` does not set the scanner apart.
+Human Android Chrome never exceeded 8 (544 solves: 8 / 4 / 2).
+
+**Narrower shapes that were 0 in H, and why none was adopted:**
+
+| Shape | H | not-H | Would newly fail |
+|---|---|---|---|
+| phone/tablet UA with `dm ≥ 16` | 0 / 545 mobile | 2 352 | 7 |
+| Firefox UA reporting `dm` at all (a Blink-only API) | 0 | 88 | 0 |
+| Windows UA with `dm ≤ 1` | 0 | 612 | 0 |
+| `dm` not a power of two (6, 12, 20, 24) | 0 | 49 | 17 |
+
+"Would newly fail" counts a 50-point member of the device-claim group, as
+`ua_lie` is.
+- **Mobile `dm ≥ 16` duplicates `mobile_hw_lie`.** 2 342 of the 2 352 already
+  score ≥ 100 (`mobile_hw_lie` + `sw_renderer`), the same population and the
+  same outcome as `webkit_lie` above.
+- **The Firefox and Windows-`dm ≤ 1` hits are single facts.**
+  - Firefox: 86 of the 88 score 0. They are one fingerprint (`95070673`) on
+    87 residential IPs.
+  - Windows `dm ≤ 1`: all 612 score 0. 611 are one UA (`Chrome/118.0.0.0`) on
+    `19877aeb`, across 606 residential IPs.
+  - Under D5b a single fact never rejects, so a tell changes nothing for
+    either. Their lever is a fingerprint policy, not a Rung-1 tell.
+- **An iOS UA reporting `dm` hit a human.** The one H match of "non-Blink UA
+  reporting `dm`" was the Google app on an iPhone (`GSA/435`, OTEnet). That
+  rules out the iOS part, like `webkit_lie`.
+
+So at best ~24 of 9 193 non-H solves (0.26%) would newly fail, for a new
+member that a browser change could turn against humans. Not worth it. Revisit
+only if a farm that solves at volume carries one of these shapes **together
+with** evidence from outside the group.
+
+#### `Edge/1xx` with no Chrome/ token (2026-09-29) — measured, NOT adopted
+
+The second fake shape from the `ua_lie` corpus: a Chromium-era `Edge/<major>`
+token (`Edge/100`, `117`, `120`) with no Chrome/ token. Real Chromium Edge
+writes `Edg/` beside a Chrome/ token. The UA contradicts itself, so it is a
+`uaplausible` candidate.
+
+**It never reaches a challenge.**
+- **Challenge logs (7 nodes, all rotations, ~10 days):** every `Edge/1`
+  token was the Chrome/125 + `Edge/12.246` scanner. No challenge line
+  carried the no-Chrome shape.
+- **WAF log (same reach):** 387 events carried an `Edge/1` token. 23 were
+  this shape:
+  - 12 × `… Edge/120.0.2210.91` (Windows), 4 × `… Edge/100.0.0.0`
+    (Mac/Linux) and 1 × `Edge/117.0`;
+  - 23 distinct IPs;
+  - 22 were rule 512 (`xmlrpc.php` burst, **block**, `WAF_AUTH_BURST` is
+    autoblock-armed) and 1 was rule 410 on `/adminer.php`.
+
+`uaplausible.Check` is read only at challenge verify (the solve's
+`ua_impossible` label on its line and history row, and the +30 shadow
+`challenge_score`). A rule for a
+shape that is already blocked at the edge and never solves would change
+nothing. Revisit if it starts solving challenges.
 
 #### UA ↔ TLS coherence tell (2026-09-23) — measured, NOT adopted
 
