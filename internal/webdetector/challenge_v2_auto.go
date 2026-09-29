@@ -69,6 +69,12 @@ const (
 	autoV2UnderAttack     = "under_attack"
 )
 
+// ChallengeV2AutoVhostSources lists every valid CHALLENGE_V2_AUTO_VHOST
+// source — the ONE list (the parser and operator-facing hints use it).
+func ChallengeV2AutoVhostSources() []string {
+	return []string{autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig, autoV2UnderAttack}
+}
+
 // DefaultChallengeV2AutoVhost is the shipped CHALLENGE_V2_AUTO_VHOST: the two
 // score-driven challenges and Under-Attack. vhost_config (the operator's own
 // always-on list) is opt-in — it can be long-lived, which is exactly where a
@@ -102,16 +108,27 @@ func ParseChallengeV2AutoVhost(s string) (armed []string, unknown []string, off 
 			for _, d := range strings.Split(DefaultChallengeV2AutoVhost, ",") {
 				add(d)
 			}
-		case autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig, autoV2UnderAttack:
-			add(tok)
 		default:
-			unknown = append(unknown, tok)
+			if validAutoV2Source(tok) {
+				add(tok)
+			} else {
+				unknown = append(unknown, tok)
+			}
 		}
 	}
 	if off {
 		return nil, unknown, true
 	}
 	return armed, unknown, false
+}
+
+func validAutoV2Source(tok string) bool {
+	for _, s := range ChallengeV2AutoVhostSources() {
+		if tok == s {
+			return true
+		}
+	}
+	return false
 }
 
 // Tier sources, as reported by the read surfaces (rung_source).
@@ -137,6 +154,8 @@ type vhostV2Tier struct {
 	// not pin a www. host over an operator's apex pin either.
 	Pin          string
 	PinActor     string
+	PinHost      string // the host the covering pin is set on (host, or its apex)
+	PinOnApex    bool   // the covering pin is the apex's, not host's own
 	ApexPinActor string
 }
 
@@ -149,7 +168,20 @@ func (t vhostV2Tier) pinLockedFor(scope map[string]struct{}) bool {
 		return false
 	}
 	me := actorFromScope(scope)
-	return (t.Pin != "" && t.PinActor != me) || (t.ApexPinActor != "" && t.ApexPinActor != me)
+	// Mirrors tierPinStore.apply's refusals for a NEW pin on host: host's own
+	// pin must be the caller's, and so must an apex pin it would shadow.
+	ownPin := t.Pin != "" && !t.PinOnApex
+	return (ownPin && t.PinActor != me) || (t.ApexPinActor != "" && t.ApexPinActor != me)
+}
+
+// unpinLockedFor reports whether clearing the covering pin is out of reach for
+// a caller with this scope: not its pin, or set on a host (the apex of a www.
+// host) outside its scope — the API refuses either (403).
+func (t vhostV2Tier) unpinLockedFor(scope map[string]struct{}) bool {
+	if scope == nil || t.Pin == "" {
+		return false
+	}
+	return t.PinActor != actorFromScope(scope) || !vhostAllowed(t.PinHost, scope)
 }
 
 // challengeV2VhostTier is the ONE vhost-tier resolver (see the file header).
@@ -172,8 +204,9 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 		return t
 	}
 	now := time.Now()
-	pin, _ := e.tierPins.covering(host, now)
-	t.Pin, t.PinActor = pin.Rung, pin.Actor
+	pin, pinHost := e.tierPins.covering(host, now)
+	t.Pin, t.PinActor, t.PinHost = pin.Rung, pin.Actor, pinHost
+	t.PinOnApex = pinHost != "" && pinHost != host
 	if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" {
 		if ap, on := e.tierPins.covering(apex, now); on == apex {
 			t.ApexPinActor = ap.Actor
@@ -198,17 +231,20 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 		return t
 	}
 	t.Trigger = trigger
-	src, v2 := tierSourceAuto, e.autoV2Armed[trigger]
-	if pin.Rung != "" {
-		src, v2 = tierSourcePin, pin.Rung == "v2"
-	}
 	switch {
-	case v2:
-		t.Rung, t.Source = "v2", src
+	case pin.Rung != "":
+		// The pin decides — including a v1 pin that is the only thing
+		// keeping a manual-v1 host with an armed trigger off v2.
+		t.Source = tierSourcePin
+		if pin.Rung == "v2" {
+			t.Rung = "v2"
+		}
+	case e.autoV2Armed[trigger]:
+		t.Rung, t.Source = "v2", tierSourceAuto
 	case manual:
 		t.Source = tierSourceManual
 	default:
-		t.Source = src
+		t.Source = tierSourceAuto
 	}
 	return t
 }

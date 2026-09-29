@@ -45,6 +45,9 @@ type ChallengeVhostState struct {
 	// scoped token, which may not change it (set per request, scoped reads
 	// only).
 	RungPinLocked bool `json:"rung_pin_locked,omitempty"`
+	// RungUnpinLocked: the CALLER (a scoped token) may not clear the covering
+	// pin — not its pin, or set on an apex outside its scope.
+	RungUnpinLocked bool `json:"rung_unpin_locked,omitempty"`
 
 	Score     float64  `json:"score"`
 	OnThresh  float64  `json:"on_threshold"`

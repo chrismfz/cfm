@@ -66,6 +66,7 @@ export const challengeMixin = {
           rung_trigger: String(row.rung_trigger || ""),
           rung_pin: String(row.rung_pin || ""),
           rung_pin_locked: Boolean(row.rung_pin_locked),
+          rung_unpin_locked: Boolean(row.rung_unpin_locked),
         };
       }
       return byHost;
@@ -126,6 +127,7 @@ export const challengeMixin = {
           rung_trigger: String(status.rung_trigger || ""),
           rung_pin: String(status.rung_pin || ""),
           rung_pin_locked: Boolean(status.rung_pin_locked),
+          rung_unpin_locked: Boolean(status.rung_unpin_locked),
           reason: status.reason,
           expires_at: status.expires_at,
           auto_since: status.auto_since,

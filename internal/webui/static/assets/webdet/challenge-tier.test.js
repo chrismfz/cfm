@@ -55,9 +55,14 @@ test("a manual v1 arm under an automatic v2 drops back by PIN, not by re-tiering
 });
 
 test("a customer sees no pin controls on the operator's pin", () => {
-  const locked = { ...pinnedV1, rung_pin_locked: true };
+  const locked = { ...pinnedV1, rung_pin_locked: true, rung_unpin_locked: true };
   assert.equal(tierSwitchTarget(locked, "a.gr"), "");
   assert.ok(!tierUnpinnable(locked));
+  // A www-only tenant under its OWN apex pin (apex out of its scope): it may
+  // set a www pin, not clear the apex's.
+  const apexOutOfScope = { ...pinnedV1, rung_unpin_locked: true };
+  assert.equal(tierSwitchTarget(apexOutOfScope, "www.a.gr"), "v2");
+  assert.ok(!tierUnpinnable(apexOutOfScope));
   assert.ok(tierUnpinnable(pinnedV1));
   assert.match(tierTitle(locked), /server operator/);
 });

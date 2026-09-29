@@ -1203,8 +1203,8 @@ func challengeV2AutoVhost(kv KV) []string {
 	raw := kvStrClean(kv, "CHALLENGE_V2_AUTO_VHOST", webdet.DefaultChallengeV2AutoVhost)
 	armed, unknown, off := webdet.ParseChallengeV2AutoVhost(raw)
 	if len(unknown) > 0 {
-		logging.Logf("[webdetector] CHALLENGE_V2_AUTO_VHOST: ignoring unknown source(s) %s (valid: suspicious_vhost, uniqpaths_short, vhost_config, under_attack, off)",
-			strings.Join(unknown, ","))
+		logging.Logf("[webdetector] CHALLENGE_V2_AUTO_VHOST: ignoring unknown source(s) %s (valid: %s, off)",
+			strings.Join(unknown, ","), strings.Join(webdet.ChallengeV2AutoVhostSources(), ", "))
 	}
 	if off || len(armed) > 0 {
 		return armed

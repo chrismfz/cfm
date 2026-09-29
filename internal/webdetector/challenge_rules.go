@@ -1612,7 +1612,12 @@ if doChallenge {
                     }
                     // This cycle skips the rest of the host (the scorer, the
                     // config list, Under-Attack): freeze their notes rather than
-                    // let them lapse while their challenge is still live.
+                    // let them lapse while their challenge is still live — but
+                    // never an under_attack note the state no longer backs
+                    // (an operator `attack off`, an expired forced-on).
+                    if on, _, _ := e.VhostAttackState(host); !on {
+                        e.nginxBridge.DropVhostAutoSource(host, autoV2UnderAttack)
+                    }
                     e.nginxBridge.TouchVhostAutoSources(host, e.autoSourceNoteTTL())
                     // vhost-wide challenge overrides need for per-IP enumeration
                     continue

@@ -180,7 +180,9 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 	v.State = e.deriveVhostState(&v, now)
 	tier := e.challengeV2VhostTier(v.Host)
 	v.decorateTier(tier)
-	v.RungPinLocked = tier.pinLockedFor(vhostScopeFromContext(r.Context()))
+	scope := vhostScopeFromContext(r.Context())
+	v.RungPinLocked = tier.pinLockedFor(scope)
+	v.RungUnpinLocked = tier.unpinLockedFor(scope)
 	writeJSON(w, http.StatusOK, v)
 }
 

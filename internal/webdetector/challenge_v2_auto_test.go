@@ -244,9 +244,11 @@ func TestChallengeV2VhostTier_ManualV1NeverDowngrades(t *testing.T) {
 	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "v2" || tier.Trigger != autoV2UnderAttack {
 		t.Fatalf("manual v1 under attack: %+v", tier)
 	}
-	// The way down is a v1 pin.
+	// The way down is a v1 pin — and the surfaces say it is the PIN holding
+	// the host at v1 (not the manual arm), so it is never mistaken for
+	// inactive and cleared.
 	e.SetChallengeTierPinAs("busy.gr", "v1", 0, "admin")
-	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "" || tier.Source != tierSourceManual {
+	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "" || tier.Source != tierSourcePin {
 		t.Fatalf("v1 pin under a manual v1 arm: %+v", tier)
 	}
 }
@@ -346,6 +348,15 @@ func TestChallengeV2VhostTier_UnderAttackArms(t *testing.T) {
 	if tier := e.challengeV2VhostTier("forced.gr"); tier != (vhostV2Tier{}) {
 		t.Fatalf("under-attack without a vhost challenge must not arm: %+v", tier)
 	}
+
+	// `attack off` drops the note at once, not on the next tick.
+	e.attack = newUnderAttackTracker()
+	e.cfg.UnderAttackHolddown = time.Minute
+	e.SetVhostAttackOverride("hit.gr", false, time.Now(), 0)
+	if tier := e.challengeV2VhostTier("hit.gr"); tier.Trigger == autoV2UnderAttack {
+		t.Fatalf("attack off left the under_attack note: %+v", tier)
+	}
+	noteSource(e, "hit.gr", autoV2UnderAttack)
 
 	// under_attack not in the set: the state alone does not arm, the other
 	// noted source is reported instead (strongest-first order: UA listed
@@ -542,6 +553,17 @@ func TestHandleChallengeVhostTier(t *testing.T) {
 	if tier := e.challengeV2VhostTier("www.example.com"); !tier.pinLockedFor(map[string]struct{}{"www.example.com": {}}) {
 		t.Fatalf("www under an operator apex pin must read as locked for the tenant: %+v", tier)
 	}
+	// A www-only tenant under a TENANT apex pin: may set its own www pin,
+	// may not clear the apex's (out of its scope).
+	e.SetChallengeTierPinAs("www.example.com", "", 0, "admin")
+	e.SetChallengeTierPinAs("example.com", "v1", time.Hour, "scoped")
+	wwwOnly := map[string]struct{}{"www.example.com": {}}
+	tier := e.challengeV2VhostTier("www.example.com")
+	if tier.pinLockedFor(wwwOnly) || !tier.unpinLockedFor(wwwOnly) || !tier.PinOnApex {
+		t.Fatalf("www-only tenant under a tenant apex pin: %+v", tier)
+	}
+	e.SetChallengeTierPinAs("example.com", "v2", 0, "admin")
+	e.SetChallengeTierPinAs("www.example.com", "v1", time.Hour, "scoped") // the tenant's own, for the next step
 	if rr, _ := tierReq(t, e, both("host=www.example.com&rung=auto")); rr.Code != http.StatusOK {
 		t.Fatalf("tenant removing its own www pin: %d", rr.Code)
 	}

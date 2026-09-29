@@ -72,9 +72,10 @@ export function tierPinned(s) {
 }
 
 // tierUnpinnable: the "↺ auto" control — a pin decides the tier and the
-// caller may change it (not a customer looking at the operator's pin).
+// caller may clear it (rung_unpin_locked: a customer looking at the
+// operator's pin, or at an apex pin outside its scope).
 export function tierUnpinnable(s) {
-  return tierPinned(s) && !s.rung_pin_locked;
+  return tierPinned(s) && !s.rung_unpin_locked;
 }
 
 // tierSuffix: the short tag the mode pill carries (" · v2", " · v1 pinned").

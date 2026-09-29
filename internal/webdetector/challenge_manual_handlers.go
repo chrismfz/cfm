@@ -393,20 +393,22 @@ func (e *Engine) handleChallengeVhostTier(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tier pins are not supported on wildcard hosts — pin the concrete vhost(s)"})
 		return
 	}
+	// v1/v2 spellings are normalizeRung's (the one alias list, shared with
+	// vhost/add and vhost/rung); "auto" (remove the pin) is this endpoint's own.
 	var rung string
-	switch strings.ToLower(strings.TrimSpace(req.Rung)) {
-	case "v1", "challenge":
-		rung = "v1"
-	case "v2", "challenge_v2":
-		rung = "v2"
-	case "auto", "clear", "default":
-		rung = ""
+	switch r := strings.ToLower(strings.TrimSpace(req.Rung)); r {
 	case "":
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing rung (use v1, v2 or auto)"})
 		return
+	case "auto", "clear", "default":
+		rung = ""
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rung: " + req.Rung + " (use v1, v2 or auto)"})
-		return
+		n, ok := normalizeRung(r)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rung: " + req.Rung + " (use v1, v2 or auto)"})
+			return
+		}
+		rung = rungOrV1(n)
 	}
 	var ttl time.Duration
 	if t := strings.TrimSpace(req.TTL); t != "" && rung != "" {
@@ -676,9 +678,10 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"rung_pin":     tier.Pin,
 		// true when the caller is a scoped token and the operator set the
 		// pin: the tenant's surfaces hide the pin controls (the write 403s).
-		"rung_pin_locked": tier.pinLockedFor(vhostScopeFromContext(r.Context())),
-		"auto_active":     autoActive,
-		"auto_since":      autoSince,
+		"rung_pin_locked":   tier.pinLockedFor(vhostScopeFromContext(r.Context())),
+		"rung_unpin_locked": tier.unpinLockedFor(vhostScopeFromContext(r.Context())),
+		"auto_active":       autoActive,
+		"auto_since":        autoSince,
 		// Scoped tokens reach the vhost list only through this endpoint, so the
 		// farm mark, the shadow outlier count, the facet cardinality, the cost
 		// pressure, the datacenter fraction and the escalation state have to ride
