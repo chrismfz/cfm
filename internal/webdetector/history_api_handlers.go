@@ -41,27 +41,40 @@ type historyEventView struct {
 }
 
 // scopedRedactedPayloadKeys are the history payload keys a scoped caller never
-// sees on this surface. The ONE list — docs/endpoint_scope_inventory.md mirrors
+// sees on this surface, and scopedRedactedPayloadPrefix the one key family
+// stripped by prefix. The ONE list — docs/endpoint_scope_inventory.md mirrors
 // it; redactScopedHistoryRows explains each entry.
 var scopedRedactedPayloadKeys = map[string]struct{}{
 	"sig":   {},
 	"ptr":   {},
 	"src":   {},
 	"scope": {},
-	// The ChallengeV2 arm family — see the fifth entry in
-	// redactScopedHistoryRows: any one kept member re-derives the grain.
-	"v2":             {},
-	"v2_via":         {},
-	"v2_waived":      {},
-	"v2_rescued":     {},
-	"v2_waiver_miss": {},
+	// The ChallengeV2 arm family (with scopedRedactedPayloadPrefix) and the
+	// verify time that times a waiver — the fifth entry in
+	// redactScopedHistoryRows: any one of them re-derives the grain.
+	"v2": {},
+	"ms": {},
 }
 
-// hasScopedRedactedKey reports whether a payload carries any key in
-// scopedRedactedPayloadKeys, so rows without one are passed through uncopied.
+// scopedRedactedPayloadPrefix strips every v2_* key (v2_via, v2_waived,
+// v2_rescued, v2_waiver_miss, and any added later) by construction, so a new
+// member of the family cannot cross the boundary by being left off a list.
+const scopedRedactedPayloadPrefix = "v2_"
+
+// isScopedRedactedKey reports whether a payload key is withheld from scoped
+// callers: listed in scopedRedactedPayloadKeys or in the v2_* family.
+func isScopedRedactedKey(k string) bool {
+	if _, ok := scopedRedactedPayloadKeys[k]; ok {
+		return true
+	}
+	return strings.HasPrefix(k, scopedRedactedPayloadPrefix)
+}
+
+// hasScopedRedactedKey reports whether a payload carries any withheld key, so
+// rows without one are passed through uncopied.
 func hasScopedRedactedKey(p map[string]interface{}) bool {
-	for k := range scopedRedactedPayloadKeys {
-		if _, present := p[k]; present {
+	for k := range p {
+		if isScopedRedactedKey(k) {
 			return true
 		}
 	}
@@ -110,8 +123,9 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // others; telling panel solves apart is an admin/MCP readout.
 //
 // The fifth is the ChallengeV2 arm family on challenge_solved and
-// challenge_v2_reject rows: v2 (the grain: fp / geo / vhost / mark), v2_via,
-// v2_waived, v2_rescued and v2_waiver_miss. v2=fp and v2=geo are the same
+// challenge_v2_reject rows: v2 (the grain: fp / geo / vhost / mark) and every
+// v2_* key (v2_via, v2_waived, v2_rescued, v2_waiver_miss — by prefix), plus
+// ms, the server verify time. v2=fp and v2=geo are the same
 // operator fleet policy src is stripped for: an admin-armed fingerprint or
 // country/ASN policy covered this visitor. The whole family goes because
 // each member narrows the grain: v2_via is written only for vhost, a waiver
@@ -120,11 +134,21 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // was an exact v2=geo, and with enrich=1 the row's country/ASN then named
 // the armed country (the 2026-09-29 review of the first cut, which stripped
 // v2 alone). Dropping only fp/geo values would make their absence the tell
-// for the same reason. The tenant loses little: its own vhost's tier is on
-// the challenge status surfaces. The residual: a challenge_v2_reject row
-// still says, by existing, that SOME arm covered the visitor, and a cluster
-// of rejects sharing one tls_fp across many IPs hints at a fingerprint
-// policy; neither names the grain.
+// for the same reason. ms goes with them because it times the waiver: it is
+// re-measured after the inline good-bot forward-confirm, which runs only
+// under geo/vhost, so a waived solve's ms is tens of milliseconds against
+// ~0 everywhere else — "waived" again, by the clock (the second review of
+// the cut). The tenant loses a tooltip line (cfm-admin's "Server verify
+// time") and its own vhost's tier is on the challenge status surfaces. The
+// residual is AGGREGATE, not per row: a challenge_v2_reject row still says,
+// by existing, that SOME arm covered the visitor, so on a vhost the tenant
+// knows is not at v2 its rejects are fp / geo / mark, and if they cluster on
+// one country across many fingerprints they point at a country policy (with
+// today's armed US policy, they would all say US); a cluster sharing one
+// tls_fp across many IPs points at a fingerprint policy. Hiding
+// challenge_v2_reject rows from scoped callers altogether would close it, at
+// the cost of the tenant's own false-reject view — an operator decision, not
+// made here.
 //
 // The payload map is copied rather than edited so the caller's own map is
 // never mutated, but note the LIMIT of that: the slice element is reassigned
@@ -144,7 +168,7 @@ func redactScopedHistoryRows(r *http.Request, rows []HistoryEvent) {
 		}
 		clean := make(map[string]interface{}, len(rows[i].Payload))
 		for k, v := range rows[i].Payload {
-			if _, redacted := scopedRedactedPayloadKeys[k]; redacted {
+			if isScopedRedactedKey(k) {
 				continue
 			}
 			clean[k] = v

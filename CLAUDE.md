@@ -577,10 +577,11 @@ collectors, guardrails D5): every solve is scored on positive-only headless
 evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
 `v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
 so a passed-under-arm solve is greppable, not mistaken for a plain v1 one
-(the whole `v2`/`v2_*` payload family is stripped for scoped callers since
-2026-09-29: fp/geo are operator policy, like `src`, and every other member —
-`v2_via`, a waiver, a rescue — narrows the grain; stripping `v2` alone left
-`v2_waived` without `v2_via` an exact `v2=geo`);
+(the whole `v2`/`v2_*` payload family, by prefix, and `ms` are stripped for
+scoped callers since 2026-09-29: fp/geo are operator policy, like `src`, and
+every other member — `v2_via`, a waiver, a rescue, and `ms`, which times the
+waiver's inline forward-confirm — narrows the grain; stripping `v2` alone
+left `v2_waived` without `v2_via` an exact `v2=geo`);
 `sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` (+ since 2026-09-29
 the trajectory readings `ut,co,st,dj,mj,pd`; the input counts are trusted
 events only) is the report AS REPORTED — dm/dpr/raf and the trajectory

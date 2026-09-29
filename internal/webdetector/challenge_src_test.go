@@ -395,9 +395,14 @@ func TestHistoryEventsRedactsSrcForScopedCallers(t *testing.T) {
 // fp / geo are operator fleet policy (the reason src is stripped), and every
 // family member narrows the grain: v2_via exists only for vhost, a waiver
 // (v2_waived, a non-"grain" v2_waiver_miss) only under geo/vhost, v2_rescued
-// only under an arm. Regression anchor: the first cut stripped v2 alone, and
-// "v2_waived without v2_via" was an exact v2=geo. The rows are built by the
-// real payload builder, from combinations production emits.
+// only under an arm — and ms (the server verify time) is re-measured after
+// the waiver's inline forward-confirm, so it times a waiver. Regression
+// anchors: the first cut stripped v2 alone, and "v2_waived without v2_via"
+// was an exact v2=geo; the second left ms, and a waived solve's ~40 ms
+// against ~0 said "waived" by the clock. The rows are built by the real
+// payload builder, from combinations production emits, with production-like
+// verify times, and an UNARMED failing solve is in the comparison (telling
+// armed from unarmed plus knowing one's own vhost tier is enough).
 func TestHistoryEventsRedactsV2GrainForScopedCallers(t *testing.T) {
 	base := ChallengeSolve{
 		IP: "66.249.81.200", Host: "shop.example.com", URI: "/", UA: "Mozilla/5.0",
@@ -411,15 +416,17 @@ func TestHistoryEventsRedactsV2GrainForScopedCallers(t *testing.T) {
 	}
 	with := func(f func(*ChallengeSolve)) ChallengeSolve { s := base; f(&s); return s }
 
-	// Solved: a waived good bot under geo vs vhost, and a rescued solve under
-	// every grain, must all look the same to a tenant.
+	// Solved: an unarmed failing solve, a waived good bot under geo vs vhost
+	// (ms includes the inline forward-confirm), and a rescued solve under
+	// every grain must all look the same to a tenant.
 	solved := []ChallengeSolve{
-		with(func(s *ChallengeSolve) { s.V2Grain, s.V2Waived = v2GrainGeo, "google" }),
+		with(func(s *ChallengeSolve) { s.VerifyMS = 1 }),
+		with(func(s *ChallengeSolve) { s.V2Grain, s.V2Waived, s.VerifyMS = v2GrainGeo, "google", 42 }),
 		with(func(s *ChallengeSolve) {
-			s.V2Grain, s.V2Via, s.V2Waived = v2GrainVhost, "auto:suspicious_vhost", "google"
+			s.V2Grain, s.V2Via, s.V2Waived, s.VerifyMS = v2GrainVhost, "auto:suspicious_vhost", "google", 38
 		}),
-		with(func(s *ChallengeSolve) { s.V2Grain, s.V2Rescued = v2GrainFP, v2RescuedInput }),
-		with(func(s *ChallengeSolve) { s.V2Grain, s.V2Rescued = v2GrainMark, v2RescuedInput }),
+		with(func(s *ChallengeSolve) { s.V2Grain, s.V2Rescued, s.VerifyMS = v2GrainFP, v2RescuedInput, 1 }),
+		with(func(s *ChallengeSolve) { s.V2Grain, s.V2Rescued, s.VerifyMS = v2GrainMark, v2RescuedInput, 0 }),
 	}
 	// Rejects: every grain, with the waiver-miss reason it really gets.
 	rejects := []ChallengeSolve{
@@ -433,12 +440,12 @@ func TestHistoryEventsRedactsV2GrainForScopedCallers(t *testing.T) {
 		for i, s := range set {
 			got := scopedPayload(typ, s)
 			for k := range got {
-				if strings.HasPrefix(k, "v2") {
-					t.Errorf("%s #%d (grain %s): %s crossed the scoped boundary", typ, i, s.V2Grain, k)
+				if strings.HasPrefix(k, "v2") || k == "ms" {
+					t.Errorf("%s #%d (grain %q): %s crossed the scoped boundary", typ, i, s.V2Grain, k)
 				}
 			}
 			if fmt.Sprint(got) != want {
-				t.Errorf("%s: grain %s is distinguishable from grain %s for a tenant:\n%v\n%v", typ, s.V2Grain, set[0].V2Grain, got, want)
+				t.Errorf("%s: grain %q is distinguishable from grain %q for a tenant:\n%v\n%v", typ, s.V2Grain, set[0].V2Grain, got, want)
 			}
 			// The rest of the row stays.
 			for _, k := range []string{"hs", "tells", "tls_fp", "country_iso", "asn"} {
@@ -449,10 +456,16 @@ func TestHistoryEventsRedactsV2GrainForScopedCallers(t *testing.T) {
 		}
 	}
 	// Admin sees the whole family.
-	rows := []HistoryEvent{{Type: "challenge_solved", Payload: solved[1].historyPayload()}}
+	rows := []HistoryEvent{{Type: "challenge_solved", Payload: solved[2].historyPayload()}}
 	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(adminCtx()), rows)
-	if p := rows[0].Payload; p["v2"] != v2GrainVhost || p["v2_via"] != "auto:suspicious_vhost" || p["v2_waived"] != "google" {
-		t.Errorf("admin must still receive the v2 family: %v", p)
+	if p := rows[0].Payload; p["v2"] != v2GrainVhost || p["v2_via"] != "auto:suspicious_vhost" || p["v2_waived"] != "google" || p["ms"] == nil {
+		t.Errorf("admin must still receive the v2 family and ms: %v", p)
+	}
+	// A v2_* key added later is withheld by construction (the prefix rule).
+	later := []HistoryEvent{{Type: "challenge_solved", Payload: map[string]interface{}{"v2_future": "x", "hs": 0}}}
+	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(scopedCtx("shop.example.com")), later)
+	if _, present := later[0].Payload["v2_future"]; present {
+		t.Error("a new v2_* key crossed the scoped boundary")
 	}
 }
 
