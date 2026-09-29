@@ -280,8 +280,9 @@ already opened.
         40 each PASS alone; no-input is an amplifier that never opens — D5b),
         logged as `hs=`/`tells=`/`sig=`/`v2=` on the solve line and as
         `hs`/`tells`/`sig`/`v2`/`hs_nopayload` on the durable
-        `challenge_solved` history row (2026-09-22; `payload.sig` is stripped
-        for scoped callers — see docs/endpoint_scope_inventory.md). Armed `challenge_v2` fp +
+        `challenge_solved` history row (2026-09-22; `payload.sig`, and since
+        2026-09-29 the `v2` / `v2_*` keys, are stripped for scoped callers —
+        see docs/endpoint_scope_inventory.md). Armed `challenge_v2` fp +
         failing score ⇒ `result=v2_reject`, 403, no clearance — the page
         reloads into a fresh challenge (D5c). Everyone else: shadow
         `signal=humanity verdict=would_v2` (rides ABUSE_SHADOW). Knobs
@@ -642,6 +643,10 @@ already opened.
           3. **Then** the Rung-2 confirm fallback (candidate 4). Its click
              offset and approach path are measured the same way before they
              decide anything.
+
+          Weekly reads from 2026-10-06 are recorded in
+          `docs/abuse-defense-progress.md`, not here; this plan keeps the
+          decisions they lead to.
         - **`cfm_pcw`:** 3 episodes in the short windows the live edge error
           logs hold (rigel ×2, mars ×1 a scanner), none from the `hs=0`
           farms (§5 candidate 2).
@@ -737,6 +742,7 @@ shipped 40/40 — the live web nodes already run 180s / 15 / 15); the orphan
 | Role | Doc |
 |---|---|
 | **Plan of record (this file)** | `docs/abuse-defense-master-plan.md` |
+| **Progress journal** — the current picture, fleet state and every measurement read (start here) | `docs/abuse-defense-progress.md` |
 | Node-side design detail (grains, ladder, ChallengeV2 rungs) — roadmap sections frozen | `docs/traffic-classifier.md` |
 | Central ledger as-built (schema, ingestors, Phase C checklist) | `cfm-web:docs/fingerprint-reputation.md` |
 | Track-2 per-IP score design detail — plan section frozen | `docs/challenge-score.md` |

@@ -17,6 +17,24 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **cPanel users no longer see which ChallengeV2 arm covered a visitor.** The
+  history rows a scoped (cPanel) token reads (`/api/v1/webdet/history/events`)
+  no longer carry the `v2` key, any `v2_*` key (`v2_via`, `v2_waived`,
+  `v2_rescued`, `v2_waiver_miss`) or the server verify time `ms`.
+  - `v2=fp` or `v2=geo` meant an operator-armed fingerprint or country/ASN
+    policy covered the visitor. That is operator policy, which is why
+    `payload.src` was already withheld.
+  - Every other key in the family narrows the answer. For example, a
+    let-through good bot with no `v2_via` could only be `geo`, and the row's
+    country then named the armed country. So the whole family goes.
+  - `ms` goes too: it includes the good-bot check that runs only under
+    `geo`/`vhost`, so a slow `ms` also said "let through". cfm-admin's
+    "Server verify time" tooltip line is gone for cPanel users.
+
+  Admin and MCP reads are unchanged, and scoped rows keep `hs`, `tells`, the
+  country/ASN and the rest.
+
 ### Changed
 - **A `challenge_v2` WAF hit is now logged once per IP and rule family per
   minute, whichever site it hits, like every other tier.** Since the v2 rung

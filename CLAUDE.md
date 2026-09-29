@@ -576,7 +576,12 @@ is built** (2026-09-19, `challenge_v2.go` + the challenge-page passive
 collectors, guardrails D5): every solve is scored on positive-only headless
 evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
 `v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
-so a passed-under-arm solve is greppable, not mistaken for a plain v1 one;
+so a passed-under-arm solve is greppable, not mistaken for a plain v1 one
+(the whole `v2`/`v2_*` payload family, by prefix, and `ms` are stripped for
+scoped callers since 2026-09-29: fp/geo are operator policy, like `src`, and
+every other member — `v2_via`, a waiver, a rescue, and `ms`, which times the
+waiver's inline forward-confirm — narrows the grain; stripping `v2` alone
+left `v2_waived` without `v2_via` an exact `v2=geo`);
 `sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` (+ since 2026-09-29
 the trajectory readings `ut,co,st,dj,mj,pd`; the input counts are trusted
 events only) is the report AS REPORTED — dm/dpr/raf and the trajectory
@@ -666,7 +671,8 @@ residual, all documented in the HONEST LIMITS block of `challenge_v2.go`; Rung 2
 "confirm you're human" fallback for a Rung-1 reject (a candidate, not built, after the real-input rescue above
 and its trajectory corpus) — the visible puzzle was dropped 2026-09-29, and a farm running real browsers
 (`hs=0`) is the operator fingerprint / geo policy's job, not a harder check (master plan §5, E3's honest
-limits; `cfm_pcw` fired on none of them in the 2026-09-29 read). **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
+limits; `cfm_pcw` fired on none of them in the 2026-09-29 read). **Where we are: `docs/abuse-defense-progress.md`**
+(the measurement journal — read it first). **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
 the ONE roadmap/decision log; the other docs' phase checklists are frozen). Design
 hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`
 (central). See also `docs/challenge-score.md`, `docs/roadmaps/challenge-engine.md` §8.1.
@@ -776,6 +782,7 @@ because of that. Hard-won points:
 | `what's_wrong` root-cause engine (contract + roadmap) | `docs/whats-wrong-rootcause.md` |
 | Challenge engine design (PoW/solver/TLS-fp) | `docs/roadmaps/challenge-engine.md` |
 | Abuse defense (challenge / classifier / fingerprint) — **PLAN OF RECORD** | `docs/abuse-defense-master-plan.md` (the one roadmap + decision log, both repos) |
+| Abuse defense — **progress journal** (start here: current picture, fleet state, weekly reads) | `docs/abuse-defense-progress.md` |
 | Traffic classifier / fingerprint evidence ledger (node side) — design hub | `docs/traffic-classifier.md` (node design: evidence grains + actuator ladder + ChallengeV2 rung) · per-IP score `docs/challenge-score.md` · central store in **cfm-web** (`cfm-web:docs/fingerprint-reputation.md`) |
 | Web detector abuse-targeting refactor (living) | `docs/webdetector-refactor.md` |
 | Under-Attack Mode (design: escalation state + campaign fingerprinter) | `docs/under-attack-mode.md` |

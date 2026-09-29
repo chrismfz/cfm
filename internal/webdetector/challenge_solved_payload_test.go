@@ -203,7 +203,8 @@ func TestRecordChallengeSolved_PersistsRawSignals(t *testing.T) {
 // payload.sig is per-visitor device-fingerprint material CFM's own challenge
 // page collected. Scoped-vs-admin is a hard boundary and this is a NEW
 // category of data on that surface, so it must not reach a scoped (cPanel)
-// caller — while everything the scoped surface already carried stays.
+// caller — while the rest of the row stays (the v2 family is stripped too;
+// TestHistoryEventsRedactsV2GrainForScopedCallers pins that).
 func TestHistoryEventsRedactsSigForScopedCallers(t *testing.T) {
 	rows := []HistoryEvent{{
 		Type: "challenge_solved", Host: "shop.example.com", IP: "203.0.113.30",
@@ -218,7 +219,7 @@ func TestHistoryEventsRedactsSigForScopedCallers(t *testing.T) {
 	if _, present := rows[0].Payload["sig"]; present {
 		t.Errorf("sig must not cross the scoped boundary, got %v", rows[0].Payload["sig"])
 	}
-	for _, k := range []string{"ua", "hs", "v2"} {
+	for _, k := range []string{"ua", "hs"} {
 		if _, present := rows[0].Payload[k]; !present {
 			t.Errorf("scoped caller lost %q, which it always had", k)
 		}
