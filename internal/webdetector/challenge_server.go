@@ -821,10 +821,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// Resolve the D5a arm ONCE, for every scored solve — the gate
 			// below consumes this same answer, and the solve line renders it,
 			// so "did the teeth cover this solve" cannot be read two ways.
-			v2Grain = challengeV2ArmGrain(fp.ID, ipStr, host)
-			if v2Grain == v2GrainVhost {
-				v2Via = challengeV2HostVia(host)
-			}
+			v2Grain, v2Via = challengeV2ArmGrainVia(fp.ID, ipStr, host)
 		}
 
 		solve := ChallengeSolve{

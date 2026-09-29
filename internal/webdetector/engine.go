@@ -727,10 +727,10 @@ func NewEngine(cfg Config) *Engine {
 	// (challengeV2VhostTier — a manual arm's own tier, else an automatic
 	// challenge's: a tier pin, else CHALLENGE_V2_AUTO_VHOST) puts solves on
 	// that host (and its www variant) through the Rung-1 humanity check.
-	SetChallengeV2HostArmed(func(host string) bool {
-		return e.challengeV2VhostTier(host).Rung == "v2"
+	SetChallengeV2HostTier(func(host string) (bool, string) {
+		t := e.challengeV2VhostTier(host)
+		return t.Rung == "v2", t.via()
 	})
-	SetChallengeV2HostVia(e.challengeV2VhostVia)
 
 	// Good-bot waiver for the same verify gate: an FCrDNS-verified crawler is
 	// not rejected by Rung 1, under the SAME knob (CHALLENGE_GOODBOT_EXEMPT)

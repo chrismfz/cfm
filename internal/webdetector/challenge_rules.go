@@ -1956,6 +1956,9 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
             // stale v2 behind. The drops just make "off" immediate.
             if e.nginxBridge != nil {
                 noteTTL := e.autoSourceNoteTTL()
+                // Evaluated unsuppressed this cycle: an exclude/ignore that
+                // was lifted stops blocking the apex's sources right away.
+                e.nginxBridge.DropVhostAutoSource(host, autoSourceSuppressed)
                 if autoActive {
                     e.nginxBridge.NoteVhostAutoSource(host, autoV2SuspiciousVhost, noteTTL)
                 } else {

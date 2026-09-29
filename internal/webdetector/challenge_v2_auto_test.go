@@ -481,7 +481,7 @@ func TestHandleChallengeVhostTier(t *testing.T) {
 	if tier := body["tier"].(map[string]any); tier["rung"] != "v1" || tier["source"] != "pin" || tier["trigger"] != "suspicious_vhost" {
 		t.Fatalf("effective tier after pin: %v", tier)
 	}
-	if challengeV2HostArmedVia(e, "shop.gr") {
+	if tierArmedFor(e, "shop.gr") {
 		t.Fatalf("v1 pin must disarm the gate")
 	}
 	// Same pin again: no-op, no audit.
@@ -492,7 +492,7 @@ func TestHandleChallengeVhostTier(t *testing.T) {
 	if rr, body := post("host=shop.gr&rung=auto"); rr.Code != http.StatusOK || body["pin"] != "auto" || body["from"] != "v1" {
 		t.Fatalf("clear pin: %d %v", rr.Code, body)
 	}
-	if !challengeV2HostArmedVia(e, "shop.gr") {
+	if !tierArmedFor(e, "shop.gr") {
 		t.Fatalf("clearing the pin must re-arm via the knob")
 	}
 	// A ttl expires the pin.
@@ -559,7 +559,7 @@ func TestHandleChallengeVhostTier(t *testing.T) {
 	if rr, _ := tierReq(t, e, both("host=www.example.com&rung=v1")); rr.Code != http.StatusForbidden {
 		t.Fatalf("tenant www pin refreshed over an operator apex pin: %d", rr.Code)
 	}
-	if tier := e.challengeV2VhostTier("www.example.com"); !tier.pinLockedFor(map[string]struct{}{"www.example.com": {}}) {
+	if tier := e.challengeV2VhostTierForScope("www.example.com"); !tier.pinLockedFor(map[string]struct{}{"www.example.com": {}}) {
 		t.Fatalf("www under an operator apex pin must read as locked for the tenant: %+v", tier)
 	}
 	// A www-only tenant under a TENANT apex pin: may set its own www pin,
@@ -567,7 +567,7 @@ func TestHandleChallengeVhostTier(t *testing.T) {
 	e.SetChallengeTierPinAs("www.example.com", "", 0, "admin")
 	e.SetChallengeTierPinAs("example.com", "v1", time.Hour, "scoped")
 	wwwOnly := map[string]struct{}{"www.example.com": {}}
-	tier := e.challengeV2VhostTier("www.example.com")
+	tier := e.challengeV2VhostTierForScope("www.example.com")
 	if tier.pinLockedFor(wwwOnly) || !tier.unpinLockedFor(wwwOnly) || !tier.PinOnApex {
 		t.Fatalf("www-only tenant under a tenant apex pin: %+v", tier)
 	}
@@ -589,9 +589,9 @@ func TestHandleChallengeVhostTier(t *testing.T) {
 	}
 }
 
-// challengeV2HostArmedVia answers the gate question for e without touching the
+// tierArmedFor answers the gate question for e without touching the
 // package-level hook other tests may have installed.
-func challengeV2HostArmedVia(e *Engine, host string) bool {
+func tierArmedFor(e *Engine, host string) bool {
 	return e.challengeV2VhostTier(host).Rung == "v2"
 }
 
@@ -652,7 +652,7 @@ func TestChallengeVhostStatus_ReportsAutoTier(t *testing.T) {
 // PRODUCTION wiring: NewEngine hooks the package-level verify gate to the
 // resolver, with the knob and pin store it was built with.
 func TestNewEngineWiresAutoV2(t *testing.T) {
-	t.Cleanup(func() { SetChallengeV2HostArmed(nil); SetChallengeV2HostVia(nil) })
+	t.Cleanup(func() { SetChallengeV2HostArmed(nil) })
 	dir := t.TempDir()
 	e := NewEngine(Config{
 		Every:                     time.Second,
@@ -665,8 +665,8 @@ func TestNewEngineWiresAutoV2(t *testing.T) {
 	if !challengeV2HostArmed("auto.gr") {
 		t.Fatalf("NewEngine did not arm v2 for an armed automatic source")
 	}
-	if via := challengeV2HostVia("auto.gr"); via != "auto:suspicious_vhost" {
-		t.Fatalf("NewEngine did not wire v2_via: %q", via)
+	if grain, via := challengeV2ArmGrainVia("", "203.0.113.9", "auto.gr"); grain != v2GrainVhost || via != "auto:suspicious_vhost" {
+		t.Fatalf("NewEngine did not wire the tier+via hook: %q %q", grain, via)
 	}
 	e.SetChallengeTierPinAs("auto.gr", "v1", 0, "admin")
 	if challengeV2HostArmed("auto.gr") {
@@ -782,8 +782,8 @@ func TestV2ViaRendering(t *testing.T) {
 	if got := s.HumanitySuffix(); !strings.Contains(got, " v2=vhost v2_via=auto:suspicious_vhost") {
 		t.Fatalf("solve line: %q", got)
 	}
-	if got := s.RejectLine(); !strings.Contains(got, " v2=vhost v2_via=auto:suspicious_vhost ") {
-		t.Fatalf("reject line: %q", got)
+	if got := s.RejectLine(); !strings.Contains(got, " v2=vhost tls_fp=") || !strings.HasSuffix(got, " v2_via=auto:suspicious_vhost") {
+		t.Fatalf("reject line (v2= keeps its neighbour; v2_via rides at the end): %q", got)
 	}
 	s.V2Grain, s.V2Via = v2GrainGeo, ""
 	if got := s.HumanitySuffix(); strings.Contains(got, "v2_via") {

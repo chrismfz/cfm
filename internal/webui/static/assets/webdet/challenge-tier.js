@@ -15,6 +15,20 @@
 // expiry kept); an automatic challenge is PINNED (v1/challenge/vhost/tier) —
 // "→ v1" is the emergency drop-back, "auto" hands the tier back to the knob.
 
+// TIER_SOURCE_LABELS: the automatic sources (Go: ChallengeV2AutoVhostSources,
+// challenge_v2_auto.go — pinned by challenge-tier.test.js) and how the page
+// names them.
+export const TIER_SOURCE_LABELS = {
+  suspicious_vhost: "the traffic scorer",
+  uniqpaths_short: "the unique-paths burst detector",
+  vhost_config: "the CHALLENGE_VHOST list",
+  under_attack: "Under-Attack Mode",
+};
+
+export function tierSourceLabel(trigger) {
+  return TIER_SOURCE_LABELS[trigger] || "an automatic source";
+}
+
 export function effectiveTier(s) {
   return s && s.rung === "v2" ? "v2" : "v1";
 }

@@ -660,7 +660,7 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	tier := e.challengeV2VhostTier(host)
+	tier := e.challengeV2VhostTierForScope(host)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"host":          host,
 		"manual_active": active,

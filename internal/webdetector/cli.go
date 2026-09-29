@@ -1175,13 +1175,10 @@ func chalTierCol(h chalVhost) string {
 }
 
 func tierText(rung, source string) string {
-	if rung == "" {
-		rung = "v1"
-	}
 	if source == tierSourcePin {
-		return rung + "/pin"
+		return rungOrV1(rung) + "/pin"
 	}
-	return rung
+	return rungOrV1(rung)
 }
 
 // appendFlag joins a flag token onto a comma-separated reasons string.
@@ -1697,9 +1694,7 @@ func runChallengeStatus(baseURL string, args []string) error {
 // tierDescription explains the effective vhost tier in one line: what it is,
 // what decided it, and a parked pin a manual arm (or no challenge) outranks.
 func tierDescription(rung, source, trigger, pin string) string {
-	if rung == "" {
-		rung = "v1"
-	}
+	rung = rungOrV1(rung)
 	var d string
 	switch source {
 	case tierSourceManual:
@@ -1834,11 +1829,7 @@ func runChallengeTier(baseURL string, args []string) error {
 		}
 		fmt.Println()
 	}
-	rungNow := result.Tier.Rung
-	if rungNow == "v1" {
-		rungNow = ""
-	}
-	fmt.Printf("  %s now: %s\n", host, tierDescription(rungNow, result.Tier.Source, result.Tier.Trigger, ""))
+	fmt.Printf("  %s now: %s\n", host, tierDescription(result.Tier.Rung, result.Tier.Source, result.Tier.Trigger, ""))
 	return nil
 }
 

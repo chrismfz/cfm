@@ -2941,6 +2941,9 @@ func (b *NginxBridge) NoteVhostAutoSource(host, source string, ttl time.Duration
 	}
 	exp := time.Now().Add(ttl)
 	b.mu.Lock()
+	if b.vhAuto == nil {
+		b.vhAuto = make(map[string]map[string]time.Time)
+	}
 	srcs := b.vhAuto[host]
 	if srcs == nil {
 		srcs = make(map[string]time.Time, 2)
@@ -2980,7 +2983,7 @@ func (b *NginxBridge) DropVhostAutoSource(host, source string) {
 // while a manual arm keeps the entry alive. Re-applied every cycle the
 // suppression holds.
 func (b *NginxBridge) SuppressVhostAutoSources(host string, ttl time.Duration) {
-	if b == nil || ttl <= 0 {
+	if b == nil || !b.cfg.Enabled || ttl <= 0 {
 		return
 	}
 	host = normalizeHost(host)
@@ -2988,6 +2991,9 @@ func (b *NginxBridge) SuppressVhostAutoSources(host string, ttl time.Duration) {
 		return
 	}
 	b.mu.Lock()
+	if b.vhAuto == nil {
+		b.vhAuto = make(map[string]map[string]time.Time)
+	}
 	b.vhAuto[host] = map[string]time.Time{autoSourceSuppressed: time.Now().Add(ttl)}
 	b.mu.Unlock()
 }

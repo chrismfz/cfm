@@ -160,6 +160,22 @@ type vhostV2Tier struct {
 	ApexPinActor string
 }
 
+// challengeV2VhostTierForScope is challengeV2VhostTier for a READ SURFACE
+// that reports pin locks: it also fills ApexPinActor (one more pin RLock for
+// a www. host), which the per-solve gate never needs.
+func (e *Engine) challengeV2VhostTierForScope(host string) vhostV2Tier {
+	t := e.challengeV2VhostTier(host)
+	if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" {
+		if ap, on := e.tierPins.covering(apex, time.Now()); on == apex {
+			t.ApexPinActor = ap.Actor
+			if t.ApexPinActor == "" {
+				t.ApexPinActor = "-" // an internal pin still locks a scoped caller out
+			}
+		}
+	}
+	return t
+}
+
 // pinLockedFor reports whether the host's pin is out of reach for a caller
 // with this scope: a scoped caller may not change an operator's pin (the API
 // refuses with 403 — the surfaces say so up front instead of offering a
@@ -196,7 +212,7 @@ func (t vhostV2Tier) unpinLockedFor(scope map[string]struct{}) bool {
 // Cost: it runs on EVERY scored solve (challengeV2ArmGrain's vhost grain). The
 // only exclusive lock is the manual store's mutex, taken as the manual tier
 // always took it (manualRungTarget: the host, then the apex; then the rung).
-// Beyond that: a pin-store RLock (two for a www. host: its own pin and its
+// Beyond that: one pin-store RLock (covering: the host's pin, else its
 // apex's) and one bridge RLock (the same vhost-entry read the src= snapshot
 // does, plus the noted sources). Under-Attack costs
 // nothing here — it is a note like every other source.
@@ -209,14 +225,6 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 	pin, pinHost := e.tierPins.covering(host, now)
 	t.Pin, t.PinActor, t.PinHost = pin.Rung, pin.Actor, pinHost
 	t.PinOnApex = pinHost != "" && pinHost != host
-	if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" {
-		if ap, on := e.tierPins.covering(apex, now); on == apex {
-			t.ApexPinActor = ap.Actor
-			if t.ApexPinActor == "" {
-				t.ApexPinActor = "-" // an internal pin still locks a scoped caller out
-			}
-		}
-	}
 	manual := false
 	if target := e.manualRungTarget(host); target != "" {
 		manual = true
@@ -255,7 +263,10 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 // "pin", "auto:<source>" — or "" when the tier is not v2. The v2_via= field
 // on a v2=vhost solve line and history row.
 func (e *Engine) challengeV2VhostVia(host string) string {
-	t := e.challengeV2VhostTier(host)
+	return e.challengeV2VhostTier(host).via()
+}
+
+func (t vhostV2Tier) via() string {
 	if t.Rung != "v2" {
 		return ""
 	}
@@ -385,6 +396,14 @@ type tierPinStore struct {
 	mu   sync.RWMutex
 	pins map[string]tierPin
 	path string // "" = in-memory only
+
+	// File writes happen OUTSIDE mu (a slow disk must never hold the lock
+	// every solve's covering() RLock waits on): apply snapshots under mu,
+	// then saves under saveMu, skipping a snapshot older than one already
+	// written (gen), so the file always ends at the newest state.
+	gen      uint64
+	saveMu   sync.Mutex
+	savedGen uint64
 }
 
 func (p tierPin) live(now time.Time) bool {
@@ -443,7 +462,21 @@ func (s *tierPinStore) apply(host, rung string, ttl time.Duration, actor string,
 	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string) {
 	now := time.Now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	target, prev, changed, refusal = s.applyLocked(now, host, rung, ttl, actor, allowTarget, protect)
+	if !changed {
+		s.mu.Unlock()
+		return target, prev, changed, refusal
+	}
+	s.gen++
+	gen, snap := s.gen, s.persistSnapshotLocked(now)
+	s.mu.Unlock()
+	s.save(gen, snap) // file I/O outside mu
+	return target, prev, true, ""
+}
+
+// applyLocked is apply's decision and in-memory write (caller holds mu).
+func (s *tierPinStore) applyLocked(now time.Time, host, rung string, ttl time.Duration, actor string,
+	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string) {
 	if s.pins == nil { // a zero store (an Engine built without NewEngine) stays usable
 		s.pins = make(map[string]tierPin)
 	}
@@ -501,7 +534,6 @@ func (s *tierPinStore) apply(host, rung string, ttl time.Duration, actor string,
 		}
 		s.pins[target] = p
 	}
-	s.saveLocked()
 	return target, prev, true, ""
 }
 
@@ -553,13 +585,9 @@ func (s *tierPinStore) load() {
 	}
 }
 
-// saveLocked atomically writes the live pins (caller holds s.mu for writing). Failure is
-// logged, never fatal — mirrors manualChalState.saveLocked.
-func (s *tierPinStore) saveLocked() {
-	if s.path == "" {
-		return
-	}
-	now := time.Now()
+// persistSnapshotLocked returns the live pins in their on-disk shape (caller
+// holds mu).
+func (s *tierPinStore) persistSnapshotLocked(now time.Time) []tierPinPersist {
 	arr := make([]tierPinPersist, 0, len(s.pins))
 	for h, p := range s.pins {
 		if !p.live(now) {
@@ -573,6 +601,21 @@ func (s *tierPinStore) saveLocked() {
 		arr = append(arr, row)
 	}
 	sort.Slice(arr, func(i, j int) bool { return arr[i].Host < arr[j].Host })
+	return arr
+}
+
+// save atomically writes snapshot gen, unless a newer one was already
+// written. Called WITHOUT mu. Failure is logged, never fatal — mirrors
+// manualChalState.saveLocked.
+func (s *tierPinStore) save(gen uint64, arr []tierPinPersist) {
+	if s.path == "" {
+		return
+	}
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	if gen <= s.savedGen {
+		return
+	}
 	b, err := json.MarshalIndent(arr, "", "  ")
 	if err != nil {
 		logging.Logf("[challenge][vhost] tier pin marshal failed: %v", err)
@@ -592,6 +635,7 @@ func (s *tierPinStore) saveLocked() {
 		return
 	}
 	_ = os.Chmod(s.path, 0o600)
+	s.savedGen = gen
 }
 
 // ── Engine surface ──────────────────────────────────────────────────────────

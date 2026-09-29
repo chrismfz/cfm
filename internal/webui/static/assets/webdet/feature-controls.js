@@ -8,6 +8,7 @@ import {
   tierSwitchIsPin,
   tierUnpinnable,
   tierSwitchRequest,
+  tierSourceLabel,
   tierSwitchTarget,
   tierTitle,
   tierUnpinRequest,
@@ -320,12 +321,7 @@ export const controlsMixin = {
         return `Challenge ACTIVE (${rung}) until ${until}`;
       }
       if (s.auto_active || s.rung_source) {
-        const src = {
-          suspicious_vhost: "the traffic scorer",
-          uniqpaths_short: "the unique-paths burst detector",
-          vhost_config: "the CHALLENGE_VHOST list",
-          under_attack: "Under-Attack Mode",
-        }[s.rung_trigger] || "an automatic source";
+        const src = tierSourceLabel(s.rung_trigger);
         const why = tierPinned(s) ? `pinned; source: ${src}` : `from ${src}`;
         return `Automatic challenge active (${rung} — ${why}); arming makes it manual.`;
       }
@@ -426,10 +422,11 @@ export const controlsMixin = {
       this.panicHost = host;
       try {
         const st = await this.fetchJSONSafe(`v1/challenge/vhost/status?host=${encodeURIComponent(host)}`, null);
-        if (st && effectiveTier(st) === "v2") {
-          // Already strict — automatic (CHALLENGE_V2_AUTO_VHOST, e.g. under
-          // attack), pinned or manual. Nothing to arm.
-          this.panicMsg = `${host} is already on strict (v2) — ${tierTitle(st)}`;
+        if (st && st.manual_active && st.rung_source === "manual" && effectiveTier(st) === "v2") {
+          // Already a manual strict arm. (An AUTOMATIC v2 is not: it ends with
+          // its source, and this click asks for a strict arm that lasts the
+          // Emergency card's duration — so it arms one below.)
+          this.panicMsg = `${host} already has a strict (v2) manual challenge`;
         } else if (st && st.manual_active) {
           await this.postJSON("v1/challenge/vhost/rung", { host, rung: "v2" });
           this.panicMsg = `Challenge on ${host} switched to strict (v2) — expiry unchanged`;
