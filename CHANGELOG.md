@@ -34,6 +34,15 @@ back-filled here — see the git/PR history for that period.
 
   Admin and MCP reads are unchanged, and scoped rows keep `hs`, `tells`, the
   country/ASN and the rest.
+- **cPanel users no longer see other tenants' visitor IPs on solver-farm
+  rows.** A `solver_farm` history row is written for one site. When the
+  finding was cross-host, though, its `ips` sample was drawn from the
+  fingerprint's addresses on every site it dominates, which included visitors
+  of other customers' sites. Real browsers can be among them, since a fingerprint is a
+  population. Scoped (cPanel) reads of `/api/v1/webdet/history/events` no
+  longer carry `ips` or the `good_bots` map keyed by them, on any
+  `solver_farm` row. The counts and the fingerprint stay. Admin reads, MCP
+  and the fleet reputation store's pull are unchanged.
 
 ### Changed
 - **A `challenge_v2` WAF hit is now logged once per IP and rule family per

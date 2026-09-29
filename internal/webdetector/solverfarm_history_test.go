@@ -1,8 +1,12 @@
 package webdetector
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"cfm/internal/detectors/solverfarm"
 )
 
 // goodBotsFor builds the sparse {ip: name} good-bot map that RecordSolverFarmFinding
@@ -161,5 +165,54 @@ func TestGoodBotsFor_FileBudgetCapsConfirms(t *testing.T) {
 	}
 	if len(out) != 2 {
 		t.Fatalf("only the 2 budgeted IPs are tagged, got %d: %v", len(out), out)
+	}
+}
+
+// A cross-host finding's ips are the fingerprint's NODE-WIDE sample — other
+// tenants' visitors — on a row the finding's vhost tenant can query. They and
+// the good_bots map keyed by them must not reach a scoped caller; the counts,
+// the fingerprint and the rest of the row stay, and admin (the fleet store's
+// pull) sees everything.
+func TestHistoryEventsRedactsSolverFarmIPsForScopedCallers(t *testing.T) {
+	e := newSolveTestEngine(t)
+	e.RecordSolverFarmFinding(solverfarm.Finding{
+		When: time.Now(), Host: "shop.example.com", Fingerprint: "95070673",
+		Tracks: "subnet_spread+cross_host", Solves: 40, DistinctIPs: 3, Subnets: 3, Countries: 2,
+		HostShare: 0.8, Hosts: 5, SolvesPerIP: 13.3,
+		IPs: []string{"198.51.100.7", "203.0.113.8", "192.0.2.9"},
+	})
+	rows, err := e.history.QueryEvents("", "", "solver_farm", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("QueryEvents: %d rows, err=%v", len(rows), err)
+	}
+	// The recorder writes good_bots only when an enricher resolves a crawler;
+	// add one so the stripping of the whole sample is exercised.
+	rows[0].Payload["good_bots"] = map[string]interface{}{"192.0.2.9": "google"}
+	if _, ok := rows[0].Payload["ips"]; !ok {
+		t.Fatal("fixture: the recorder wrote no ips")
+	}
+	admin := []HistoryEvent{{Type: rows[0].Type, Host: rows[0].Host, Payload: map[string]interface{}{}}}
+	for k, v := range rows[0].Payload {
+		admin[0].Payload[k] = v
+	}
+
+	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(scopedCtx("shop.example.com")), rows)
+	for _, k := range []string{"ips", "good_bots"} {
+		if _, present := rows[0].Payload[k]; present {
+			t.Errorf("%s must not cross the scoped boundary", k)
+		}
+	}
+	for _, k := range []string{"fingerprint", "tracks", "solves", "solves_per_ip", "distinct_ips", "distinct_subnets", "distinct_countries", "hosts", "host_share"} {
+		if _, present := rows[0].Payload[k]; !present {
+			t.Errorf("scoped caller lost %q", k)
+		}
+	}
+
+	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(adminCtx()), admin)
+	if _, ok := admin[0].Payload["ips"]; !ok {
+		t.Error("admin (the fleet store's pull) must still receive ips")
+	}
+	if _, ok := admin[0].Payload["good_bots"]; !ok {
+		t.Error("admin must still receive good_bots")
 	}
 }

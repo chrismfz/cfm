@@ -42,6 +42,7 @@
   | #1528 | **Real-input rescue** (`v2_rescued=input`; kill switch `CHALLENGE_V2_INPUT_RESCUE`) |
   | #1529 | **Trajectory readings** (`ut co st dj mj pd` in `sig=`) and trusted-only input |
   | scoped-v2 PR | The `v2` / `v2_*` history keys hidden from cPanel users |
+  | solver_farm PR | The `solver_farm` IP sample (`ips`, `good_bots`) hidden from cPanel users (a cross-host sample held other tenants' visitors) |
 
 - **What bites today (2026.09.28):** operator-armed fingerprint / country-ASN
   policies from cfm-web (a US country policy is armed), the WAF challenge
