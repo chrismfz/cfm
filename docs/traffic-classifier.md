@@ -3,7 +3,9 @@
 > **▶ PLAN OF RECORD: `docs/abuse-defense-master-plan.md`** (2026-09-18). The
 > phase/plan checklists embedded below ("Plan (measure-first)", Phase 0–2) are
 > **FROZEN** — kept as design context, no longer the to-do list. What happens
-> next lives only in the master plan (E1–E3 + standing decisions D1–D4).
+> next lives only in the master plan (§5 — E4's measurement, then its ordered
+> candidates; the frozen and dropped lists after the 2026-09-29 operator
+> review — and the standing decisions D1–D5).
 >
 > **⭐ SINGLE SOURCE OF TRUTH (node side).** Canonical node-side entry point for
 > the Traffic Classifier / Fingerprint Reputation work: the fingerprint evidence
@@ -461,15 +463,22 @@ farm's IP is NOT fine is when it runs that exact build). So:
   seed must **degrade gracefully**: fingerprint-DENY/interactive-challenge for
   un-captured IPs sharing the fp, IP-ban for captured *datacenter* members.
 - **JA4H as the uniqueness corroborator** is what makes "deny the bucket" safe —
-  prioritise it for any fingerprint-DENY of a coarse TLS bucket.
+  prioritise it for any fingerprint-DENY of a coarse TLS bucket. *(Dropped
+  2026-09-29 with the JA4/JA4H edge module, master plan §5; D2's
+  farm-unique bar stands without it.)*
 - Thickening the spine with more conviction sources (WAF-block, abuse_shadow →
   fingerprint) needs the **attribution prerequisite**: the 2026-09-11 read caught a
   WAF scanner (Google Cloud, `WAF_TRAVERSAL`/`WAF_SQLI`/`WAF_PHP_WRAPPER` across
   spoofed bot UAs) whose `waf_*` events carry **no `tls_fp`** — carrying the
   edge-stamped `X-CFM-TLS` onto WAF findings is the first task there. See
-  `cfm-web:docs/fingerprint-reputation.md §10`.
+  `cfm-web:docs/fingerprint-reputation.md §10`. *(Done: WAF hits carry the
+  handshake-derived `cfm_tlsfp`, master plan §3 row 2.)*
 
 ## Fingerprint evidence ledger — node → UI + cfm-web (2026-09-11)
+
+*(Status 2026-09-29: the node-side per-fingerprint rollup and its
+cfm-admin/TUI view below were never built and are dropped — cfm-web's central
+ledger does this job; master plan §5.)*
 
 The signals today are scattered: `abuse_shadow` per vhost, `challenge_score` /
 `cookie_discard` per IP, `solver_farm` per fingerprint, WAF hits per request — on
@@ -559,7 +568,7 @@ observe → Challenge (PoW) → ChallengeV2 (interactive) → Deny
 "unsure" posture (a stronger tier than the current auto-challenge) or operator
 **force**; per-fingerprint **`challenge_v2`** policy action in cfm-web
 (`fingerprint_policies` gains it alongside observe/challenge/deny); per-IP at the
-`challenge_score` T1 rung.
+`challenge_score` T1 rung *(dropped 2026-09-29, master plan §5)*.
 
 **The honest hard part is the front-end, not the logic** — and it must be staged:
 - **V2a — invisible interaction proof** (first): require genuine pointer/touch/
@@ -569,6 +578,9 @@ observe → Challenge (PoW) → ChallengeV2 (interactive) → Deny
 - **V2b — visible puzzle** (only if V2a is beaten): a rendered drag/rotate puzzle
   **with an accessible fallback** (keyboard/screen-reader — a pure drag-puzzle
   locks out disabled users: wrong, and a legal risk). Reserved for the hardest tier.
+  *(Dropped 2026-09-29, master plan §5: CAPTCHA farms solve puzzles cheaply,
+  and the real-browser farms it would target are `cfm_pcw`'s job. What stays a
+  candidate is the Rung-2 CONFIRM fallback for a Rung-1 reject.)*
 
 Self-hosted (CFM's ethos — no third-party CAPTCHA), edge-local like the PoW
 challenge (the cleared path skips the daemon decision), so it goes through
@@ -614,7 +626,8 @@ be produced by the real client stack, per request, on every rotating exit.
   per-client tell). No user-visible change. **Go here first.**
 - **Rung 2 (v2b) — interactive**: a genuine pointer/drag/touch gesture (accessible
   fallback, never a pure drag-puzzle), only for the tail Rung-1 scores
-  likely-headless AND high-risk.
+  likely-headless AND high-risk. *(2026-09-29: only the confirm fallback for a
+  Rung-1 reject remains a candidate; the puzzle is dropped.)*
 - **deny** — farm-UNIQUE fingerprint / confirmed datacenter only (unchanged).
 
 #### Rung-1 signals → which headless-tell each catches
@@ -625,14 +638,14 @@ convicts.** Some are **positive-only** (fire → suspect; absent → proves noth
 | Layer | Signal | Headless-tell it catches | Weight | Trips legit (FP) |
 |---|---|---|---|---|
 | **Transport** (server-observed, unspoofable from JS; already stamped) | **JA4 (TLS) ↔ UA** | UA claims Chrome N but the ClientHello JA4 isn't that browser's (curl-impersonate, Go/Node, old Chrome) | ★★★★★ | measured 2026-09-23: NOT rare — front proxies (33% of human solves), AV/corporate inspection, iOS in-app browsers; not adopted, see "UA ↔ TLS coherence tell" below |
-| | **JA4H (HTTP/2)** — roadmap 2nd axis | h2 SETTINGS / header + pseudo-header order don't match the claimed browser | ★★★★★ | ~0 |
+| | **JA4H (HTTP/2)** — roadmap 2nd axis | h2 SETTINGS / header + pseudo-header order don't match the claimed browser | ★★★★★ | ~0; dropped 2026-09-29 (needs an edge module we don't build) |
 | **Environment / render** (JS probe; costly to fake per-request at scale) | **WebGL UNMASKED_RENDERER** | SwiftShader / llvmpipe / Mesa software renderer = headless/VM | ★★★★ | RDP/VDI/GPU-blocklisted reals → confidence, not gate |
-| | **Canvas / audio hash** | software-render buckets; also session stability | ★★★ | Brave/Tor randomize → reals |
+| | **Canvas / audio hash** | software-render buckets; also session stability | ★★★ | Brave/Tor randomize → reals; dropped 2026-09-29 (fingerprinting the tenants' visitors: a consent question) |
 | | **Screen / viewport coherence** | mobile UA + desktop DPR/screen; `outerHeight=0` | ★★★ | unusual-but-real setups |
-| | **hardwareConcurrency / deviceMemory / languages / plugins / fonts / timezone** | headless defaults; mobile UA + 32 cores; empty `languages`; tz vs Accept-Language mismatch | ★★ | locale-quirky reals; corroboration only |
+| | **hardwareConcurrency / deviceMemory / languages / plugins / fonts / timezone** | headless defaults; mobile UA + 32 cores; empty `languages`; tz vs Accept-Language mismatch | ★★ | locale-quirky reals; corroboration only. hc is in (the hardware tells), deviceMemory measured and not adopted; only tz ↔ Accept-Language stays a candidate, after E4 |
 | **Behavioral** (passive; noisy → score only) | **Touch ↔ UA** | mobile UA but `pointerType=mouse` / no touch / constant pressure | ★★★★ | low |
-| | **Pointer entropy** | no motion before solve, or scripted linear / identical-`dt` vs human jitter | ★★★ | keyboard-only / touch users → absence ≠ bot |
-| | **deviceorientation / devicemotion** | "phone" UA but zero/static sensor events | ★★★ | meaningful only when UA claims mobile (iOS needs a permission gesture) |
+| | **Pointer entropy** | no motion before solve, or scripted linear / identical-`dt` vs human jitter | ★★★ | keyboard-only / touch users → absence ≠ bot; the input a Rung-2 confirm fallback would read |
+| | **deviceorientation / devicemotion** | "phone" UA but zero/static sensor events | ★★★ | meaningful only when UA claims mobile (iOS needs a permission gesture); dropped 2026-09-29 |
 | | **rAF cadence / interaction latency** | cadence far from a real refresh; solve with zero input events / robotic timing | ★★ | throttled tabs; fast users |
 | **Positive-only** | **`navigator.webdriver` / CDP artifacts** | `true`; missing `window.chrome`; headless UA leaks | (positive) | `false` proves nothing (trivially spoofed) |
 
@@ -1236,7 +1249,7 @@ readout discipline as the `challenge_score` B-slice burn-in.
 from real traffic. Two honest caveats
 that reshape the signal table above: the server-side fp is **JA3-grade** (nginx exposes
 ciphers/curves/ALPN/proto, **not** the extension list a true JA4 hashes) — a real JA4
-needs an edge module and is **deferred** (backlog); and the JA4↔UA *coherence tell* is
+needs an edge module and is **deferred** (dropped 2026-09-29, master plan §5); and the JA4↔UA *coherence tell* is
 **not** same-day wiring — it waits on a derivation pass over this corpus (Step 2), never
 a hand-written per-UA fp table (the codebase forbids that by convention:
 `internal/tlsfp`, `internal/uaplausible`). Slice 1 adds no new log/event and no
@@ -1280,6 +1293,9 @@ Class-2 burst.
 - [x] Fleet audit → three-class model + separation table (this doc).
 - [x] Confirm verified-crawler + datacenter substrate exists (reuse path found).
 - [ ] Operator: apply the shadow config block above on the 7 web nodes.
+      *(2026-09-29: done on 6 — `cfm.abuse_shadow.log` is live there;
+      `server.speedhost.gr`'s is empty, so its shadow lines, `would_v2`
+      included, are missing from every fleet readout.)*
 - [ ] Capture query-cardinality/repeat live during the next Class-2 burst
       (`edge_access_tail`) to fix that weight.
 
@@ -1367,7 +1383,8 @@ Class-2 burst.
 - [ ] Add missing per-client features: header-coherence, solve-latency; route
       cookie_discard / solver_farm / abuse_shadow as contributors into
       `IPSignals.Score` / `SuspiciousRow.Score` (they stop being independent
-      actuators; alerts stay during burn-in).
+      actuators; alerts stay during burn-in). *(Superseded by E3, dropped
+      2026-09-29 — master plan §5.)*
 - [x] **DONE (PR #1377) — self-baseline (robust-z) primitive.**
       `internal/webdetector/vhost_baseline.go`: a bounded per-`(vhost,feature)`
       recency ring → modified robust-z (median/MAD, so the spike we hunt does not
@@ -1388,6 +1405,11 @@ Class-2 burst.
       no new config; weights are in-code burn-in constants.
 
 ### Phase 2 — actuation ladder (under_attack I3)
+
+*(Status 2026-09-29, master plan §5: surface-throttle and gate-before-origin
+are FROZEN until the next real Class-2 flood; the harden-PoW rung is FROZEN
+until a faster in-page solver lands; the crawler lane is DROPPED — traffic
+rules with rate limits do it.)*
 - [ ] **Surface-throttle**: add a URI-pattern-keyed counter (mirror
       `cfm_rules`/`cfm_ua_emergency` `SH:incr`) + config `(vhost,endpoint)→rate`
       + an IP-independent aggregate cap. Emit from vhost posture — needs a new
@@ -1404,6 +1426,10 @@ Class-2 burst.
 ---
 
 ## Open questions (to resolve before Phase 2 code)
+
+*(Status 2026-09-29: 1 answered by E3 — a clean `403`; 3 answered — the
+`challenge_score` lines ride `cfm.abuse_shadow.log`; 5 moot — the crawler lane
+is dropped. 2 and 4 stay open.)*
 
 1. **Deny shape**: clean `403` vs tarpit (delayed-empty, steals attacker
    concurrency, hides detection)? Leaning `403` for residential-proxy FP mercy.

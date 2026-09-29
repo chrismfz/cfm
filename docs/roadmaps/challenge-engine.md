@@ -3,6 +3,12 @@
 Status: **open**. Written 2026-07-28, from measurements taken against a live
 distributed solver farm on a production edge.
 
+> **Status 2026-09-29 (operator review, `docs/abuse-defense-master-plan.md` §5):**
+> §1's solver fix is a candidate; §2 per-vhost difficulty / `ACTION = harden`
+> is frozen until it lands; the §6 single-fingerprint rule hypotheses and the
+> §7 edge module are dropped; §8.2 shipped as ChallengeV2 Rung 1; §8.3 leg 1
+> is a candidate, leg 2 is dropped; §8.4's visible puzzle is dropped.
+
 Bots now complete the whole cookie + JS + PoW flow correctly. "Solved" is no
 longer evidence of a human, so the challenge engine needs work in two separate
 directions: making the proof cost something again, and acting on the farms the
@@ -101,7 +107,8 @@ is in the config comments and in `solverfarm.Action`. Summary:
   down; the narrow form is a UA-cluster traffic rule, which a farm evades by
   randomising a header.
 - **`harden`** (raise the vhost's PoW difficulty while flagged) is the one worth
-  building, and it is blocked on §1 and §2.
+  building, and it is blocked on §1 and §2 (frozen until §1's solver lands,
+  2026-09-29).
 - **`throttle`** (rate-limit challenge *issuance* for a flagged vhost) is the
   fallback: independent of IP and UA so it cannot be evaded, but it delays
   legitimate visitors during an attack.
@@ -192,7 +199,8 @@ does it a handful of times an hour, not fifty times in three minutes, and the
 `MIN_SOLVES = 8` threshold sits above the natural gap measured at 5 in the
 offline corpus. The detector still ships alert-only (`BLOCK` unset); this is the
 evidence that would justify `BLOCK = "dryrun"` and then a TTL block, in that
-order.
+order. *(Live since then: the operator runs `BLOCK = 24h` fleet-wide — master
+plan §3 row 4; the shipped default is still unset.)*
 
 ## 6. TLS fingerprint ↔ UA coherence (log-first since 2026-07-28)
 
@@ -314,7 +322,8 @@ stack claiming seven Chrome versions from cloud ranges is a scraper library, not
 a browser. The candidate rule is therefore not `grease=false` alone but a
 **conjunction** — no GREASE *and* one of {no ALPN/HTTP-1.1-only, datacenter ASN,
 UA-version spread across one fingerprint}. Measure each leg separately before
-combining them.
+combining them. *(Not pursued: rules on single TLS fingerprints were dropped
+2026-09-29 — the operator fingerprint policy is the lever; master plan §5.)*
 
 **The resolution is also better than the first 23 minutes suggested.** Ten
 distinct fingerprints appeared, and they separate cleanly *between* engine
@@ -413,6 +422,13 @@ panel ports (2082/2086/2095) have no handshake to fingerprint, and a `-` on a
 reaching the challenge server directly). A coverage metric should still exclude
 plain-HTTP panel ports.
 
+*Answered 2026-09-23 from the solve corpus (`docs/traffic-classifier.md`,
+"UA ↔ TLS coherence tell"): front proxies and middleboxes carried 33% of human
+solves; the id is NOT stable across edge OpenSSL builds — the same Chrome
+stack hashes to `c28caa00` or `95070673` depending on how the node's OpenSSL
+names the post-quantum group, `X25519MLKEM768` or `0x11ec` (the same group).
+The list below is kept as the questions that were asked.*
+
 Still open, and still to be answered from the log rather than assumed:
 
 - how much of the fleet reaches the edge through a TLS-terminating middlebox
@@ -436,6 +452,8 @@ Chromium build from another and what a real JA3/JA4 hashes. Every Chromium-famil
 browser therefore lands on one id. Raising the resolution means a module or a
 patched edge, and that is a much bigger commitment than this was — take it only
 if a week of `grease`/group data proves the coarse signal insufficient.
+*(Dropped 2026-09-29: the coarse fingerprint with the policy and v2 covers the
+need; master plan §5.)*
 
 **Why it is worth doing anyway, even against uTLS.** A farm can mimic any
 fingerprint with uTLS — but not while running real headless Chrome, which is what
@@ -446,7 +464,10 @@ two signals box the adversary in from opposite sides; neither does that alone.
 ## 8. Level-2 humanity gate (proposed — design, not built)
 
 This section records a design worked out in discussion, so the reasoning is not
-lost. **Nothing here is built or measured yet**; the numbers to justify each
+lost. *(2026-09-29: §8.2 shipped as ChallengeV2 Rung 1 — `ptr`/`tch`/`key`/`mv`
+in `sig=` — and the automatic v2 arm with Rung 1 matches §8.4's trigger and
+gate; §8.3 leg 1 is a candidate, leg 2 and §8.4's visible puzzle are dropped;
+master plan §5.)* **As first written, nothing here was built or measured**; the numbers to justify each
 threshold do not exist until the evidence signal in §8.2 has run. Treat every
 "human vs farm" claim below as a hypothesis to confirm against real logs, the
 same discipline §5/§6 impose.

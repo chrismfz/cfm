@@ -68,9 +68,13 @@ package webdetector
 //     deliberately patched) and raises the farm's per-exit engineering cost —
 //     it is a cost lever, not cryptographic proof of humanity. A stripped
 //     body is at least VISIBLE (hs=- on the solve line, vs hs=0 for a scored
-//     clean one), so evasion shows up in the burn-in data. If a farm adapts,
-//     the escalation is Rung 2 (visible interactive check, accessible), per
-//     the ladder.
+//     clean one), so evasion shows up in the burn-in data. A farm that
+//     adapts, or runs real browsers on real hardware, scores clean by
+//     construction: the lever there is its post-clearance behaviour
+//     (cfm_pcw) and operator arms, not a harder check — the visible puzzle
+//     was dropped 2026-09-29 (docs/abuse-defense-master-plan.md §5), and the
+//     Rung-2 "confirm you're human" candidate is a fallback for a Rung-1
+//     REJECT only.
 //   - The armed gate's inputs (X-CFM-TLS for the fingerprint grain, the
 //     verify host for the vhost grain) are trustworthy because verify is
 //     reachable ONLY through the edge proxy: the challenge server binds
