@@ -87,6 +87,15 @@ package webdetector
 //     cfm.lua; (b) an operator who re-binds CHALLENGE_HTTP_LISTEN off
 //     localhost re-opens the direct-client path and with it every
 //     client-authored-header caveat — don't.
+//   - The verify's SCOPE (clearanceScope: X-CFM-Panel-Port / X-Forwarded-Port)
+//     is edge-authoritative the same way: the panel listeners stamp their
+//     port and, since 2026-09-29, the web /__cfm_verify locations clear both
+//     headers. It decides whether a rung mark counts (web only) and whether a
+//     solve releases the IP's bridge decision (web only). Residual, on a
+//     deployed web conf predating that clear: a client claiming a panel port
+//     skips the mark grain, but only earns a panel-scope cookie and releases
+//     nothing — telemetry noise (the solve reads unarmed), not a way past a
+//     web challenge.
 //   - An FCrDNS-verified good bot is WAIVED at the gate (v2_waived=<name>),
 //     under the same CHALLENGE_GOODBOT_EXEMPT that exempts it from the
 //     challenge at decision time — and ONLY under the grains that exemption

@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -296,5 +297,36 @@ func TestVerify_WAFV2PushArmsSiblingVhostButNotPanel(t *testing.T) {
 	}
 	if decided() {
 		t.Fatalf("a web-scope solve did not release the IP's decision")
+	}
+}
+
+// The waiver bar reads the verify's scope too: under a vhost arm, a verified
+// good bot whose IP carries a WAF mark is not waived on a web-scope verify
+// (the WAF challenge never softens for bots), but the mark does not reach a
+// panel-scope verify, where the same vhost-armed solve is waived as before.
+func TestVerify_WAFMarkBarsTheWaiverOnWebScopeOnly(t *testing.T) {
+	base, capt := startVerifyServer(t)
+	const (
+		host      = "shop.example.com"
+		readAloud = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36 (compatible; Google-Read-Aloud; +https://support.google.com/webmasters/answer/1061943)"
+		failing   = `{"v":1,"wd":true,"ptr":0,"tch":0,"key":0}`
+	)
+	setV2HostArmed(t, func(h string) bool { return h == host })
+	setV2GoodBot(t, func(_ context.Context, ip, _ string) (string, string) { return "google", "" })
+	MarkChallengeV2IP("66.249.81.230")
+
+	resp := postVerify(t, base, "66.249.81.230", host, readAloud, failing)
+	if resp.StatusCode != http.StatusForbidden || resp.Header.Get("X-CFM-V2") != "reject" {
+		t.Fatalf("web scope: status=%d X-CFM-V2=%q, want 403 + reject (the WAF mark bars the waiver)",
+			resp.StatusCode, resp.Header.Get("X-CFM-V2"))
+	}
+	panel := map[string]string{"X-CFM-Panel-Port": "2083", "X-Forwarded-Port": "2083"}
+	resp = postVerifyHdr(t, base, "66.249.81.230", host, readAloud, failing, panel)
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatalf("panel scope: the WAF mark barred the waiver: X-CFM-V2=%q", resp.Header.Get("X-CFM-V2"))
+	}
+	solved, rejects := capt.counts()
+	if solved != 1 || rejects != 1 || capt.solved[0].V2Waived != "google" || capt.solved[0].V2Grain != v2GrainVhost {
+		t.Fatalf("solved=%d rejects=%d %+v, want the panel solve waived under the vhost grain", solved, rejects, capt.solved)
 	}
 }

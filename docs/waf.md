@@ -57,7 +57,10 @@ could solve the same challenge on a sibling vhost at v1 and keep the
 clearance. It is read for web-scope verifies only; the panel ports' own
 human-entry challenge is not armed by it. A passing web solve releases the
 IP's decision on every host (as before); a panel-port solve releases nothing,
-so it cannot lift a WAF challenge the web edge set. A WAF mark also withholds
+so it cannot lift a WAF challenge the web edge set. The scope comes from
+`X-CFM-Panel-Port` / `X-Forwarded-Port`: the panel listeners stamp them and
+the web `/__cfm_verify` locations clear them, so a client cannot claim a panel
+scope on the web listener (`TestVerifyLocations_*` pins both). A WAF mark also withholds
 the good-bot waiver on every web host of the IP for its 15 minutes (a WAF
 challenge never softens for bots). Semantics to know:
 

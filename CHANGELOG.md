@@ -82,7 +82,11 @@ back-filled here — see the git/PR history for that period.
   intent now follows the IP, like the challenge does. A real visitor sees no
   difference: the same page, and a human solve passes either way. Solving
   the panel-port login challenge (`:2083` etc.) no longer lifts the IP's web
-  challenges: it used to, which was the same hole through another door. For
+  challenges: it used to, which was the same hole through another door. The
+  panel login challenge itself is no longer put at v2 by a mark (it could be,
+  for the same site), and the edge's web verify now clears the panel-port
+  headers so a client cannot claim to be on a panel port (`openresty.conf` /
+  `angie.conf`, deployed with the package). For
   15 minutes after a WAF `challenge_v2` hit, a verified crawler from that IP
   is not waived on any site of the node (it used to be only the one site).
   Traffic-rule `challenge_v2` stays per site, which is how that challenge is

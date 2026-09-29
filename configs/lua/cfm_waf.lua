@@ -419,12 +419,13 @@ local CFG = {
   -- still collapsing rapid multi-vector bursts from a true attacker.
   block_ttl_sec     = 10,
   push_cooldown_sec = 60,
-  -- Max distinct hosts a single IP may open a challenge_v2 push+mark for per
-  -- family per push_cooldown_sec window. challenge_v2 keys the Host in (each
-  -- host needs its own rung mark), but $host is client-chosen, so this caps the
+  -- Max distinct hosts a single IP may open a challenge_v2 push for per family
+  -- per push_cooldown_sec window. challenge_v2 keys the Host in (see
+  -- should_push: since the daemon's mark became per IP on 2026-09-29 this only
+  -- buys a per-host record), but $host is client-chosen, so this caps the
   -- per-(ip,family) push/RPC volume a Host-rotating flood can generate — past
-  -- it, hits collapse to the family window (see should_push). 16 covers a real
-  -- multi-vhost scanner worth marking; a flood beyond it drops marks (→ v1).
+  -- it, hits collapse to the family window. 16 covers a real multi-vhost
+  -- scanner; the IP is already marked by its first push.
   push_v2_host_cap  = 16,
 
   -- Body scan budget, keyed by request Content-Type. The merged args+body
