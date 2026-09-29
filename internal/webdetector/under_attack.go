@@ -566,9 +566,10 @@ func (e *Engine) SetVhostAttackOverride(host string, on bool, now time.Time, ttl
 		st.suppressUntil = now.Add(e.cfg.UnderAttackHolddown)
 	}
 	t.mu.Unlock()
-	// `attack off` always wins — at the v2 tier too, from this moment: drop
-	// the under_attack auto-v2 source note (challenge_v2_auto.go) now rather
-	// than on the next tick that happens to evaluate the host.
+	// `attack off` always wins — at the v2 tier too: drop the under_attack
+	// auto-v2 source note (challenge_v2_auto.go) now rather than on the next
+	// tick that evaluates the host. A tick that read the state just before
+	// this can still re-note it once; its next cycle drops it (≤ one Every).
 	if !on && e.nginxBridge != nil {
 		e.nginxBridge.DropVhostAutoSource(host, autoV2UnderAttack)
 	}

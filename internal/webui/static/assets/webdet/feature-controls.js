@@ -347,7 +347,10 @@ export const controlsMixin = {
         });
         const rung = res?.rung === "v2" ? "strict (v2)" : "standard";
         this.panicMsg = `Challenge armed on ${host} (${rung}, ${res?.ttl || this.panicTTL})` +
-          (res?.ttl_capped ? " — requested duration was capped to the 24h customer limit" : "");
+          (res?.ttl_capped ? " — requested duration was capped to the 24h customer limit" : "") +
+          (res?.tier?.rung && res.tier.rung !== res?.rung
+            ? ` — solves are still held to ${res.tier.rung}: an automatic ${res.tier.trigger || "source"} covers it`
+            : "");
         await this.refreshPanicStatus();
       } catch (err) {
         this.panicMsg = `Arm failed for ${host}: ${err}`;

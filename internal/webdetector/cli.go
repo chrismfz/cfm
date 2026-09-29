@@ -1601,6 +1601,19 @@ func runChallengeAdd(baseURL string, args []string) error {
 
 	fmt.Printf("✓ Challenge active for %s  ttl=%s  expires=%s  reason=%s  rung=%v\n",
 		result["host"], result["ttl"], result["expires_at"], result["reason"], result["rung"])
+	// A manual v1 arm does not downgrade an automatic v2: say what the solves
+	// are actually held to when it differs from the arm's own rung.
+	if tier, ok := result["tier"].(map[string]interface{}); ok {
+		if eff, _ := tier["rung"].(string); eff != "" && eff != fmt.Sprint(result["rung"]) {
+			src, _ := tier["source"].(string)
+			trig, _ := tier["trigger"].(string)
+			fmt.Printf("  effective tier: %s (%s", eff, src)
+			if trig != "" {
+				fmt.Printf(": %s", trig)
+			}
+			fmt.Println(") — `cfm webtop challenge tier <vhost> v1` pins the automatic tier down")
+		}
+	}
 	return nil
 }
 

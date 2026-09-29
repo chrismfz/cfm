@@ -44,8 +44,9 @@ package webdetector
 // never read for arming.
 //
 // The grain stays "vhost" (v2=vhost on the solve line): the good-bot waiver
-// applies exactly as for a manual v2 arm, and the src= field already names
-// which vhost source covered the solve.
+// applies exactly as for a manual v2 arm. What put the tier at v2 rides next
+// to it as v2_via=manual|pin|auto:<source> (line and history row) — src=
+// cannot say, it reads the entry's sticky reason.
 
 import (
 	"encoding/json"
@@ -250,6 +251,20 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 	return t
 }
 
+// challengeV2VhostVia names what put host's vhost tier at v2 — "manual",
+// "pin", "auto:<source>" — or "" when the tier is not v2. The v2_via= field
+// on a v2=vhost solve line and history row.
+func (e *Engine) challengeV2VhostVia(host string) string {
+	t := e.challengeV2VhostTier(host)
+	if t.Rung != "v2" {
+		return ""
+	}
+	if t.Source == tierSourceAuto {
+		return tierSourceAuto + ":" + t.Trigger
+	}
+	return t.Source
+}
+
 // autoV2Trigger names the automatic source covering host, or "" when none
 // does: the first ARMED source among those the tick has noted on the live
 // vhost challenge covering host, else the first noted one (reported,
@@ -298,11 +313,15 @@ func (e *Engine) autoSourceNoteTTL() time.Duration {
 // so equal situations always resolve the same way.
 var autoSourceOrder = [...]string{autoV2UnderAttack, autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig}
 
+// autoSourceSuppressed is the marker note that blocks a www. host from
+// inheriting its apex's sources while the host's own automatic challenge is
+// suppressed. Not a source: never in autoSourceOrder, never armed.
+const autoSourceSuppressed = "-suppressed"
+
 // vhostAutoSources returns the live automatic sources noted for host — by
-// host itself, by its apex for a www. host (the bridge's apex→www expansion),
-// or on the key of the vhost entry covering it — provided a live vhost-wide
-// CHALLENGE entry covers host (the one vhost matcher, vhostEntryKeyLocked);
-// ok=false when none does. One RLock.
+// host itself, or by its apex for a www. host (the bridge's apex→www
+// expansion) — provided a live vhost-wide CHALLENGE entry covers host (the
+// one vhost matcher, vhostEntryLocked); ok=false when none does. One RLock.
 func (b *NginxBridge) vhostAutoSources(host string) (sources []string, ok bool) {
 	if b == nil || host == "" {
 		return nil, false
@@ -310,16 +329,18 @@ func (b *NginxBridge) vhostAutoSources(host string) (sources []string, ok bool) 
 	now := time.Now()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	key, h, found := b.vhostEntryKeyLocked(host, now)
+	h, found := b.vhostEntryLocked(host, now)
 	if !found || h.Action != "challenge" {
 		return nil, false
 	}
 	writers := []string{host}
-	if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" {
-		writers = append(writers, apex)
-	}
-	if key != host {
-		writers = append(writers, key)
+	// A www. host inherits its apex's notes (the bridge expands an apex
+	// challenge to www) — unless the automatic challenge is suppressed on
+	// the www. host itself (an exclude/ignore under a kept manual arm).
+	if exp, sup := b.vhAuto[host][autoSourceSuppressed]; !sup || !exp.After(now) {
+		if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" {
+			writers = append(writers, apex)
+		}
 	}
 	for _, src := range autoSourceOrder {
 		for _, w := range writers {
@@ -350,11 +371,11 @@ type tierPin struct {
 }
 
 type tierPinPersist struct {
-	Host      string    `json:"host"`
-	Rung      string    `json:"rung"`
-	ExpiresAt time.Time `json:"expires_at,omitempty"`
-	SetAt     time.Time `json:"set_at"`
-	Actor     string    `json:"actor,omitempty"`
+	Host      string     `json:"host"`
+	Rung      string     `json:"rung"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"` // absent = until cleared
+	SetAt     time.Time  `json:"set_at"`
+	Actor     string     `json:"actor,omitempty"`
 }
 
 // tierPinStore: an RWMutex so the per-solve read (covering) never takes an
@@ -517,7 +538,10 @@ func (s *tierPinStore) load() {
 	n := 0
 	for _, e := range arr {
 		h := normalizeHost(e.Host)
-		p := tierPin{Rung: e.Rung, ExpiresAt: e.ExpiresAt, SetAt: e.SetAt, Actor: e.Actor}
+		p := tierPin{Rung: e.Rung, SetAt: e.SetAt, Actor: e.Actor}
+		if e.ExpiresAt != nil {
+			p.ExpiresAt = *e.ExpiresAt
+		}
 		if h == "" || (p.Rung != "v1" && p.Rung != "v2") || !p.live(now) {
 			continue
 		}
@@ -541,7 +565,12 @@ func (s *tierPinStore) saveLocked() {
 		if !p.live(now) {
 			continue
 		}
-		arr = append(arr, tierPinPersist{Host: h, Rung: p.Rung, ExpiresAt: p.ExpiresAt, SetAt: p.SetAt, Actor: p.Actor})
+		row := tierPinPersist{Host: h, Rung: p.Rung, SetAt: p.SetAt, Actor: p.Actor}
+		if !p.ExpiresAt.IsZero() {
+			exp := p.ExpiresAt
+			row.ExpiresAt = &exp
+		}
+		arr = append(arr, row)
 	}
 	sort.Slice(arr, func(i, j int) bool { return arr[i].Host < arr[j].Host })
 	b, err := json.MarshalIndent(arr, "", "  ")

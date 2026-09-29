@@ -356,13 +356,16 @@ func (e *Engine) manualChallengeVhostRecord(host string, ttl time.Duration, reas
 // changed, as resolved by manualRungTarget (the caller scope-checks THAT host,
 // not only the one it was asked about). Returns the previous rung, the expiry,
 // whether anything changed, and ok=false when target has no active manual
-// challenge (an AUTO challenge has no tier of its own — arm a manual one to
-// pick a tier). A no-op switch (already at rung) writes no audit row, no log
-// line and no state file: the trail records only real changes.
+// challenge (an automatic challenge's tier is a tier pin's job —
+// setChallengeTierPin / vhost/tier). A no-op switch (already at rung) writes
+// no audit row, no log line and no state file: the trail records only real
+// changes.
 //
 // Nothing reaches the edge: the serve is identical for both tiers and the
 // verify gate reads the rung live (challengeV2HostArmed), so the switch takes
-// effect on the very next solve.
+// effect on the very next solve — as the manual arm's tier: a switch to v1
+// does not lift an automatic v2 covering the host (challengeV2VhostTier; a
+// v1 pin does).
 func (e *Engine) SetManualChallengeRungAs(target, rung, actor string) (prev string, expires time.Time, changed, ok bool) {
 	active, exp, _ := e.manualChal.active(target)
 	if !active {

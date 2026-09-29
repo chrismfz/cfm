@@ -141,10 +141,16 @@ func TestChallengeV2VhostTier_KnobArmsAutomaticSources(t *testing.T) {
 	if tier := e.challengeV2VhostTier("gone.gr"); tier != (vhostV2Tier{}) {
 		t.Fatalf("manual bridge entry without a manual arm: %+v", tier)
 	}
-	// A wildcard entry is matched through the one vhost matcher.
-	setVhostEntry(e, "*.wild.gr", "suspicious_vhost")
+	// A wildcard entry is matched through the one vhost matcher; the notes
+	// are the concrete host's (the tick notes the hosts it evaluates, never a
+	// pattern key).
+	setVhostEntry(e, "*.wild.gr", "")
+	if tier := e.challengeV2VhostTier("a.wild.gr"); tier != (vhostV2Tier{}) {
+		t.Fatalf("wildcard entry with no note: %+v", tier)
+	}
+	noteSource(e, "a.wild.gr", autoV2SuspiciousVhost)
 	if tier := e.challengeV2VhostTier("a.wild.gr"); tier.Rung != "v2" {
-		t.Fatalf("wildcard entry: %+v", tier)
+		t.Fatalf("wildcard entry, noted host: %+v", tier)
 	}
 
 	// Knob off: every automatic source is v1.
@@ -304,11 +310,19 @@ func TestChallengeV2VhostTier_SourceNotes(t *testing.T) {
 		t.Fatalf("www cycle erased the apex note: %+v", tier)
 	}
 	// Suppressing the automatic challenge (exclude/ignore under a kept manual
-	// arm) forgets every note the host wrote at once.
+	// arm) forgets every note the host wrote at once — and a suppressed www.
+	// host stops inheriting its apex's.
 	b.NoteVhostAutoSource("apex.gr", autoV2SuspiciousVhost, time.Hour)
-	b.DropAllVhostAutoSources("apex.gr")
+	b.SuppressVhostAutoSources("www.apex.gr", time.Hour)
+	if tier := e.challengeV2VhostTier("www.apex.gr"); tier != (vhostV2Tier{}) {
+		t.Fatalf("suppressed www still inherits its apex: %+v", tier)
+	}
+	if tier := e.challengeV2VhostTier("apex.gr"); tier.Rung != "v2" {
+		t.Fatalf("the apex's own sources must be untouched: %+v", tier)
+	}
+	b.SuppressVhostAutoSources("apex.gr", time.Hour)
 	if tier := e.challengeV2VhostTier("apex.gr"); tier != (vhostV2Tier{}) {
-		t.Fatalf("after DropAll: %+v", tier)
+		t.Fatalf("after suppress: %+v", tier)
 	}
 
 	// A note with no live entry arms nothing (the tier ends with the entry).
@@ -638,7 +652,7 @@ func TestChallengeVhostStatus_ReportsAutoTier(t *testing.T) {
 // PRODUCTION wiring: NewEngine hooks the package-level verify gate to the
 // resolver, with the knob and pin store it was built with.
 func TestNewEngineWiresAutoV2(t *testing.T) {
-	t.Cleanup(func() { SetChallengeV2HostArmed(nil) })
+	t.Cleanup(func() { SetChallengeV2HostArmed(nil); SetChallengeV2HostVia(nil) })
 	dir := t.TempDir()
 	e := NewEngine(Config{
 		Every:                     time.Second,
@@ -650,6 +664,9 @@ func TestNewEngineWiresAutoV2(t *testing.T) {
 	setVhostEntry(e, "auto.gr", "suspicious_vhost")
 	if !challengeV2HostArmed("auto.gr") {
 		t.Fatalf("NewEngine did not arm v2 for an armed automatic source")
+	}
+	if via := challengeV2HostVia("auto.gr"); via != "auto:suspicious_vhost" {
+		t.Fatalf("NewEngine did not wire v2_via: %q", via)
 	}
 	e.SetChallengeTierPinAs("auto.gr", "v1", 0, "admin")
 	if challengeV2HostArmed("auto.gr") {
@@ -755,5 +772,39 @@ func TestEmitIPChallenges_ExcludeDropsAutoNotes(t *testing.T) {
 	e.emitIPChallenges(time.Now(), make(chan core.Alert, 16))
 	if tier := e.challengeV2VhostTier(host); tier.Rung != "" || tier.Source != tierSourceManual {
 		t.Fatalf("exclude must drop the automatic notes: %+v", tier)
+	}
+}
+
+// v2_via= names what put a v2=vhost solve at v2 — on the solve line, the
+// reject line and the history row — because src= cannot (sticky reason).
+func TestV2ViaRendering(t *testing.T) {
+	s := ChallengeSolve{HumanityScored: true, HumanityScore: 130, HumanityTells: "sw_renderer,outer_zero,no_input", V2Grain: v2GrainVhost, V2Via: "auto:suspicious_vhost"}
+	if got := s.HumanitySuffix(); !strings.Contains(got, " v2=vhost v2_via=auto:suspicious_vhost") {
+		t.Fatalf("solve line: %q", got)
+	}
+	if got := s.RejectLine(); !strings.Contains(got, " v2=vhost v2_via=auto:suspicious_vhost ") {
+		t.Fatalf("reject line: %q", got)
+	}
+	s.V2Grain, s.V2Via = v2GrainGeo, ""
+	if got := s.HumanitySuffix(); strings.Contains(got, "v2_via") {
+		t.Fatalf("v2_via on a non-vhost grain: %q", got)
+	}
+
+	e := newAutoV2TestEngine(t, autoV2SuspiciousVhost)
+	setVhostEntry(e, "via.gr", "suspicious_vhost")
+	if via := e.challengeV2VhostVia("via.gr"); via != "auto:suspicious_vhost" {
+		t.Fatalf("auto via: %q", via)
+	}
+	e.SetChallengeTierPinAs("via.gr", "v2", 0, "admin")
+	if via := e.challengeV2VhostVia("via.gr"); via != "pin" {
+		t.Fatalf("pin via: %q", via)
+	}
+	e.SetChallengeTierPinAs("via.gr", "v1", 0, "admin")
+	if via := e.challengeV2VhostVia("via.gr"); via != "" {
+		t.Fatalf("a v1 tier has no via: %q", via)
+	}
+	e.ManualChallengeVhost("via.gr", time.Hour, "manual", "v2")
+	if via := e.challengeV2VhostVia("via.gr"); via != "manual" {
+		t.Fatalf("manual via: %q", via)
 	}
 }

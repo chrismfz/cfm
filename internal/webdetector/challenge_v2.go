@@ -252,6 +252,10 @@ type challengeV2State struct {
 	// surfaces slice A). Wired at engine start; nil = no vhost arms (tests /
 	// pre-wire), fail-open like the geo resolver.
 	hostArmed func(host string) bool
+	// hostVia names what put the host's vhost tier at v2 (manual / pin /
+	// auto:<source>) — rendered as v2_via= on a v2=vhost solve (engine-wired
+	// with hostArmed; challenge_v2_auto.go).
+	hostVia func(host string) string
 	// goodBot names the FCrDNS-verified good bot behind a solving IP ("" =
 	// none/unknown), for the waiver in the D5 gate: a failing solve under an
 	// arm is NOT rejected when the client is a verified crawler, the same
@@ -358,6 +362,25 @@ func SetChallengeV2HostArmed(fn func(host string) bool) {
 	challengeV2.mu.Lock()
 	challengeV2.hostArmed = fn
 	challengeV2.mu.Unlock()
+}
+
+// SetChallengeV2HostVia wires the v2_via= lookup for a v2=vhost solve (same
+// lifecycle as SetChallengeV2HostArmed; nil = the field is omitted).
+func SetChallengeV2HostVia(fn func(host string) string) {
+	challengeV2.mu.Lock()
+	challengeV2.hostVia = fn
+	challengeV2.mu.Unlock()
+}
+
+// challengeV2HostVia answers what put host's vhost tier at v2 ("" unwired).
+func challengeV2HostVia(host string) string {
+	challengeV2.mu.RLock()
+	fn := challengeV2.hostVia
+	challengeV2.mu.RUnlock()
+	if fn == nil || host == "" {
+		return ""
+	}
+	return fn(host)
 }
 
 // SetChallengeV2GoodBot wires the good-bot waiver the D5 gate consults before
@@ -846,6 +869,9 @@ func (s ChallengeSolve) HumanitySuffix() string {
 	out += s.SignalSuffix()
 	if s.V2Grain != "" {
 		out += " v2=" + s.V2Grain
+		if s.V2Via != "" {
+			out += " v2_via=" + s.V2Via
+		}
 	}
 	if s.V2Waived != "" {
 		out += " v2_waived=" + s.V2Waived
@@ -873,6 +899,10 @@ func (s ChallengeSolve) WaiverMissSuffix() string {
 // v2_waiver_miss, then src= ride at the END, so no field a parser already
 // reads moves.
 func (s ChallengeSolve) RejectLine() string {
-	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s%s%s",
-		s.IP, s.Host, s.URI, s.HumanityScore, s.HumanityTells, s.SignalSuffix(), s.V2Grain, s.TLSFingerprintOrDash(), s.UA, s.GeoSuffix(), s.WaiverMissSuffix(), s.SrcSuffix())
+	via := ""
+	if s.V2Via != "" {
+		via = " v2_via=" + s.V2Via
+	}
+	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_reject hs=%d tells=%s%s v2=%s%s tls_fp=%s ua=%q%s%s%s",
+		s.IP, s.Host, s.URI, s.HumanityScore, s.HumanityTells, s.SignalSuffix(), s.V2Grain, via, s.TLSFingerprintOrDash(), s.UA, s.GeoSuffix(), s.WaiverMissSuffix(), s.SrcSuffix())
 }

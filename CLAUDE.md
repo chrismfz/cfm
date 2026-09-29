@@ -622,7 +622,9 @@ the challenge, sized from the `src=` corpus first), overridable per vhost by
 a persisted tier pin `v1|v2|auto`; a manual v1 arm never downgrades an
 automatic v2 — that was a scoped bypass of an operator's v2 pin; ONE
 resolver, `challengeV2VhostTier`, serves the gate and every surface — never
-read the manual rung alone for "is this vhost v2"), and a per-(ip,host)
+read the manual rung alone for "is this vhost v2"; a `v2=vhost` line/row
+carries `v2_via=manual|pin|auto:<source>` — src= cannot say, it reads the
+bridge entry's sticky reason), and a per-(ip,host)
 rung mark with two writers — a
 traffic rule with action `challenge_v2` at decision time (slice B:
 rules-model.js and traffic_rules.go changed in the same PR, per the

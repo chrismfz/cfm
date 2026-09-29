@@ -132,7 +132,8 @@ func TestHandleChallengeVhostAdd_Rung(t *testing.T) {
 
 func TestChallengeV2HostArmed_ApexCoversWWWAndWiring(t *testing.T) {
 	e := newTestEngineForChallengeHandlers()
-	SetChallengeV2HostArmed(func(host string) bool { return e.manualChallengeRung(host) == "v2" })
+	// The production resolver (a manual-only engine: no bridge, no notes).
+	SetChallengeV2HostArmed(func(host string) bool { return e.challengeV2VhostTier(host).Rung == "v2" })
 	t.Cleanup(func() { SetChallengeV2HostArmed(nil) })
 
 	// Unarmed / plain-challenge hosts never gate.

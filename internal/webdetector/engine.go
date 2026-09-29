@@ -730,6 +730,7 @@ func NewEngine(cfg Config) *Engine {
 	SetChallengeV2HostArmed(func(host string) bool {
 		return e.challengeV2VhostTier(host).Rung == "v2"
 	})
+	SetChallengeV2HostVia(e.challengeV2VhostVia)
 
 	// Good-bot waiver for the same verify gate: an FCrDNS-verified crawler is
 	// not rejected by Rung 1, under the SAME knob (CHALLENGE_GOODBOT_EXEMPT)
@@ -952,6 +953,9 @@ func (s ChallengeSolve) historyPayload() map[string]interface{} {
 		}
 		if s.V2Grain != "" {
 			payload["v2"] = s.V2Grain
+			if s.V2Via != "" {
+				payload["v2_via"] = s.V2Via
+			}
 		}
 		if s.V2Waived != "" {
 			payload["v2_waived"] = s.V2Waived

@@ -318,9 +318,11 @@ func (e *Engine) keepManualOverSuppression(host, kind string, now time.Time, ips
         return
     }
     // The operator suppressed the AUTOMATIC challenge; only the manual arm
-    // stays. Its automatic-source notes go now (not when their TTL lapses),
-    // so the host's tier is the manual arm's own from this cycle on.
-    e.nginxBridge.DropAllVhostAutoSources(host)
+    // stays. Its automatic-source notes go now (not when their TTL lapses) —
+    // and a www. host stops inheriting its apex's for as long as the
+    // suppression holds — so the tier is the manual arm's own from this
+    // cycle on.
+    e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
     selfOK, selfExp, _ := e.manualChallengeCovering(host)
     if !selfOK {
         return

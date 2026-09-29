@@ -920,7 +920,14 @@ their entry, so a forced `attack on` on a host nothing challenges arms
 nothing. The first ARMED noted source wins (strongest first: under_attack,
 suspicious_vhost, uniqpaths_short, vhost_config). One bridge RLock at
 verify — no scorer or Under-Attack lock. The UNDER_ATTACK transition line
-carries `tier=` so the log says whether entering the state armed v2. The grain stays `v2=vhost`, so the
+carries `tier=` so the log says whether entering the state armed v2.
+
+**What armed it — `v2_via=`.** `src=` can't say (it reads the entry's
+sticky reason), so every `v2=vhost` solve and reject line — and the
+`challenge_solved` / `challenge_v2_reject` rows (`payload.v2_via`) — carries
+`v2_via=manual|pin|auto:<source>` right after `v2=`. The FP-hunting query
+for the auto arm is `detection_history type=challenge_v2_reject` filtered on
+`v2_via` starting `auto:`. The grain stays `v2=vhost`, so the
 good-bot waiver applies exactly as for a manual v2 arm, and `src=` says
 which vhost source covered the solve.
 
@@ -962,7 +969,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `ua_impossible=`): add `hs=<humanity_score>`, `tells=<fired,comma,list>`,
   `fp=<tlsfp>` — the raw grep surface for "which solve, and why" — plus
   `v2=<grain>` naming the arm that covered the solve (`fp` / `geo` / `vhost` /
-  `mark`), absent when unarmed. The grain is what separates "the tier is live
+  `mark`), absent when unarmed, and for `v2=vhost` also `v2_via=manual|pin|auto:<source>`
+  (what put the vhost at v2 — "Auto-v2" above). The grain is what separates "the tier is live
   and this solve passed it" from "the tier never fired": without it a clean
   armed solve reads exactly like a plain v1 one. `grep 'v2='` is the burn-in
   question "is my newly-armed tier actually covering traffic?"; `grep

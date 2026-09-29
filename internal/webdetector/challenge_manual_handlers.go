@@ -39,6 +39,10 @@ type chalVhostAddResponse struct {
 	// fields always carry the EFFECTIVE values, so a capped arm is visible,
 	// never silent.
 	TTLCapped bool `json:"ttl_capped,omitempty"`
+	// Tier is the host's EFFECTIVE tier after the arm (challengeV2VhostTier):
+	// a manual arm at v1 does not downgrade an automatic v2, so "rung":"v1"
+	// alone could read as the tier the solves are held to when it is not.
+	Tier map[string]string `json:"tier"`
 }
 
 // sanitizeAuditReason bounds the free-text reason a caller may attach to a
@@ -196,6 +200,7 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 
 	e.ManualChallengeVhostAs(req.Host, ttl, req.Reason, rung, actorFromScope(scope))
 
+	tier := e.challengeV2VhostTier(req.Host)
 	writeJSON(w, http.StatusOK, chalVhostAddResponse{
 		Host:      req.Host,
 		Status:    "active",
@@ -204,7 +209,13 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		Reason:    req.Reason,
 		Rung:      rungOrV1(rung),
 		TTLCapped: ttlCapped,
+		Tier:      tierJSON(tier),
 	})
+}
+
+// tierJSON is the effective-tier block the tier-changing endpoints return.
+func tierJSON(t vhostV2Tier) map[string]string {
+	return map[string]string{"rung": rungOrV1(t.Rung), "source": t.Source, "trigger": t.Trigger}
 }
 
 // tierRequest is the host/rung(/ttl) request vhost/rung and vhost/tier share.
@@ -316,11 +327,7 @@ func (e *Engine) handleChallengeVhostRung(w http.ResponseWriter, r *http.Request
 		"from":       rungOrV1(prev),
 		"changed":    changed,
 		"expires_at": expires,
-		"tier": map[string]string{
-			"rung":    rungOrV1(tier.Rung),
-			"source":  tier.Source,
-			"trigger": tier.Trigger,
-		},
+		"tier":       tierJSON(tier),
 	})
 }
 
@@ -346,15 +353,20 @@ func (e *Engine) handleChallengeVhostTier(w http.ResponseWriter, r *http.Request
 			return
 		}
 		type pinRow struct {
-			Host      string    `json:"host"`
-			Rung      string    `json:"rung"`
-			ExpiresAt time.Time `json:"expires_at,omitempty"`
-			SetAt     time.Time `json:"set_at"`
-			Actor     string    `json:"actor,omitempty"`
+			Host      string     `json:"host"`
+			Rung      string     `json:"rung"`
+			ExpiresAt *time.Time `json:"expires_at,omitempty"` // absent = until cleared
+			SetAt     time.Time  `json:"set_at"`
+			Actor     string     `json:"actor,omitempty"`
 		}
 		rows := []pinRow{}
 		for h, p := range e.ChallengeTierPins() {
-			rows = append(rows, pinRow{Host: h, Rung: p.Rung, ExpiresAt: p.ExpiresAt, SetAt: p.SetAt, Actor: p.Actor})
+			row := pinRow{Host: h, Rung: p.Rung, SetAt: p.SetAt, Actor: p.Actor}
+			if !p.ExpiresAt.IsZero() {
+				exp := p.ExpiresAt
+				row.ExpiresAt = &exp
+			}
+			rows = append(rows, row)
 		}
 		sort.Slice(rows, func(i, j int) bool { return rows[i].Host < rows[j].Host })
 		writeJSON(w, http.StatusOK, map[string]interface{}{"pins": rows})
@@ -386,14 +398,14 @@ func (e *Engine) handleChallengeVhostTier(w http.ResponseWriter, r *http.Request
 	// v1/v2 spellings are normalizeRung's (the one alias list, shared with
 	// vhost/add and vhost/rung); "auto" (remove the pin) is this endpoint's own.
 	var rung string
-	switch r := strings.ToLower(strings.TrimSpace(req.Rung)); r {
+	switch v := strings.ToLower(strings.TrimSpace(req.Rung)); v {
 	case "":
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing rung (use v1, v2 or auto)"})
 		return
 	case "auto", "clear", "default":
 		rung = ""
 	default:
-		n, ok := normalizeRung(r)
+		n, ok := normalizeRung(v)
 		if !ok {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rung: " + req.Rung + " (use v1, v2 or auto)"})
 			return
@@ -444,11 +456,7 @@ func (e *Engine) handleChallengeVhostTier(w http.ResponseWriter, r *http.Request
 		// manual arm outranks any pin, and a pin does nothing while no
 		// automatic challenge covers the host — say so rather than let a
 		// caller assume the pin took effect.
-		"tier": map[string]string{
-			"rung":    rungOrV1(tier.Rung),
-			"source":  tier.Source,
-			"trigger": tier.Trigger,
-		},
+		"tier": tierJSON(tier),
 	}
 	if !pin.ExpiresAt.IsZero() {
 		resp["expires_at"] = pin.ExpiresAt

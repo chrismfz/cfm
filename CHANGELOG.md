@@ -54,7 +54,9 @@ back-filled here — see the git/PR history for that period.
   cfm-admin pills now show the tier the verify gate actually enforces and why
   (`rung_source` = manual / pin / auto, `rung_trigger` = the automatic
   source). Under-attack rows on the controls page show "strict v2 ✓" instead
-  of offering to arm what is already armed.
+  of offering to arm what is already armed. Every strict solve and rejection
+  under a vhost tier says what armed it: `v2_via=manual|pin|auto:<source>` on
+  the `cfm.challenges.log` line and `v2_via` on the history row.
 
 ## 2026.09.28
 

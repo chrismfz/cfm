@@ -2899,18 +2899,11 @@ func (b *NginxBridge) checkToken(r *http.Request) bool {
 // provenance (challengeSources) both read through it, so "which vhost entry
 // covers this host" cannot be answered two ways. Caller holds b.mu (R or W).
 func (b *NginxBridge) vhostEntryLocked(host string, now time.Time) (bridgeVhostEntry, bool) {
-	_, e, ok := b.vhostEntryKeyLocked(host, now)
-	return e, ok
-}
-
-// vhostEntryKeyLocked is vhostEntryLocked plus the key (host or pattern) of
-// the entry it matched — what the per-entry side tables (vhAuto) are keyed on.
-func (b *NginxBridge) vhostEntryKeyLocked(host string, now time.Time) (string, bridgeVhostEntry, bool) {
 	if h, ok := b.vhState[host]; ok && h.Expires.After(now) {
-		return host, h, true
+		return h, true
 	}
 	if host == "" {
-		return "", bridgeVhostEntry{}, false
+		return bridgeVhostEntry{}, false
 	}
 	for pat, e := range b.vhState {
 		if !e.Expires.After(now) {
@@ -2919,16 +2912,16 @@ func (b *NginxBridge) vhostEntryKeyLocked(host string, now time.Time) (string, b
 		if len(pat) > 2 && pat[:2] == "*." {
 			suf := pat[1:] // ".example.com"
 			if len(host) > len(suf) && host[len(host)-len(suf):] == suf {
-				return pat, e, true
+				return e, true
 			}
 		} else if strings.HasSuffix(pat, ".*") {
 			base := pat[:len(pat)-2] // "cpanel"
 			if base != "" && strings.HasPrefix(host, base+".") {
-				return pat, e, true
+				return e, true
 			}
 		}
 	}
-	return "", bridgeVhostEntry{}, false
+	return bridgeVhostEntry{}, false
 }
 
 // NoteVhostAutoSource records that automatic vhost-challenge source (e.g.
@@ -2981,22 +2974,21 @@ func (b *NginxBridge) DropVhostAutoSource(host, source string) {
 	b.mu.Unlock()
 }
 
-// DropAllVhostAutoSources forgets every automatic source host noted — when
-// the automatic challenge is suppressed (an exclude or ignore) while a manual
-// arm keeps the entry alive.
-func (b *NginxBridge) DropAllVhostAutoSources(host string) {
-	if b == nil {
+// SuppressVhostAutoSources forgets every automatic source host noted and, for
+// ttl, stops host inheriting its apex's (the marker autoSourceSuppressed) —
+// when the automatic challenge is suppressed on host (an exclude or ignore)
+// while a manual arm keeps the entry alive. Re-applied every cycle the
+// suppression holds.
+func (b *NginxBridge) SuppressVhostAutoSources(host string, ttl time.Duration) {
+	if b == nil || ttl <= 0 {
 		return
 	}
 	host = normalizeHost(host)
-	b.mu.RLock()
-	n := len(b.vhAuto[host])
-	b.mu.RUnlock()
-	if n == 0 {
+	if host == "" {
 		return
 	}
 	b.mu.Lock()
-	delete(b.vhAuto, host)
+	b.vhAuto[host] = map[string]time.Time{autoSourceSuppressed: time.Now().Add(ttl)}
 	b.mu.Unlock()
 }
 
