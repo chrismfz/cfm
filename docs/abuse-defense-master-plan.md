@@ -167,7 +167,7 @@ D3/D4 are the process fix.
   machines share coarse TLS buckets), marked `v2_rescued=input` (§5, E4;
   kill switch `CHALLENGE_V2_INPUT_RESCUE`). The input readings are
   client-authored, so this trades the D5b-style residual (a farm that posts
-  or injects pointer movement passes) for no wall for anyone who moves a
+  pointer movement, or injects it through browser automation, passes) for no wall for anyone who moves a
   pointer; a keyboard-only or touch user on such a machine is still walled
   until the confirm fallback. The trajectory readings that could tighten the
   rescue are measured first.
@@ -633,9 +633,12 @@ already opened.
              largest single-event jump) and `pd` (movement duration). They are
              scored by nothing: the corpus that would tighten the rescue is
              read before any of it decides anything. The one change to an
-             input: `ptr`/`mv` (and so the rescue and `no_input`) now count
-             only trusted events — a script-dispatched event is never a
-             person's, and `ut` counts those instead.
+             input: `ptr`/`mv`/`tch`/`key` (and so the rescue and `no_input`)
+             now count only trusted events — a script-dispatched event is
+             never a person's (untrusted pointer moves are tallied in `ut`).
+             One consequence: a client whose only "input" was dispatched
+             from script now reports none, so `no_input` (+30) can join an
+             already-open score.
           3. **Then** the Rung-2 confirm fallback (candidate 4). Its click
              offset and approach path are measured the same way before they
              decide anything.
@@ -661,7 +664,7 @@ already opened.
    (`docs/roadmaps/challenge-engine.md` §8.3 leg 1). Alert text only.
 4. **The Rung-2 confirm fallback** (E4 note above). Order decided
    2026-09-29: the real-input rescue (shipped, `v2_rescued=input`), then the
-   log-only trajectory readings, then the confirm step. It is for the
+   log-only trajectory readings (shipped), then the confirm step. It is for the
    rejected humans who did not move a pointer (keyboard, touch-less kiosk).
 5. **A `CHALLENGE_V2_ENFORCE` kill switch.** v2 bites fleet-wide by default
    now (the WAF challenge tier, the automatic vhost challenges), and no

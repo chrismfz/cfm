@@ -1198,19 +1198,24 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   path behind `ptr`/`mv`, so the rescue can be tightened from measured
   distributions (master plan E4, step 2):
   - `ut`: untrusted (script-dispatched) pointer-move events. They are
-    excluded from `ptr`/`mv` and every other reading, so the rescue and
+    excluded from `ptr`/`mv` and every other reading, and untrusted keys and
+    touches are not counted in `key`/`tch` either, so the rescue and
     `no_input` see trusted input only;
   - `co`: coalesced samples behind the delivered events (absent where the
     browser lacks `getCoalescedEvents`);
-  - `st`: straightness, net displacement over path length (1 = one straight
-    line; needs a path);
+  - `st`: straightness, net `clientX/Y` displacement over path length (1 =
+    one straight line; needs a path);
   - `dj`: inter-event timing jitter, the coefficient of variation of the gaps
     (needs 3 gaps);
-  - `mj`: the largest single-event movement, px;
+  - `mj`: the largest single-event `|movementX|+|movementY|` (the same basis
+    as `mv`), px;
   - `pd`: ms from the first pointer-move event to the last (needs 2 events).
 
-  A CDP-dispatched event is trusted and coalesces like a real one, so none of
-  these is a tell on its own; that is what the corpus is for.
+  The page sends them raw and the daemon rounds them (`sigRound`), so a tiny
+  real value is never posted as 0. A CDP-dispatched event is trusted, and
+  how it coalesces, how straight and how regular it is are exactly what the
+  corpus has to show, so none of these is a tell yet. The path mixes every
+  pointer (no `pointerId` split), so a pinch or a pen lands in one path.
   `result=v2_reject` lines carry `sig=` too.
   A rejected solve is never published as a solved event (it cleared nothing);
   since 2026-09-22 it writes its own `challenge_v2_reject` history row instead,

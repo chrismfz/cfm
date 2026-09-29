@@ -577,9 +577,10 @@ collectors, guardrails D5): every solve is scored on positive-only headless
 evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
 `v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
 so a passed-under-arm solve is greppable, not mistaken for a plain v1 one;
-`sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` (+ since 2026-09-29 the
-trajectory readings `ut,co,st,dj,mj,pd`) is the report AS
-REPORTED — dm/dpr/raf and the trajectory readings corpus-only and scored by nothing, ptr+mv decide
+`sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` (+ since 2026-09-29
+the trajectory readings `ut,co,st,dj,mj,pd`; the input counts are trusted
+events only) is the report AS REPORTED — dm/dpr/raf and the trajectory
+readings corpus-only and scored by nothing, ptr+mv decide
 the real-input rescue below (it only ever clears), hc feeds the
 corpus-measured mobile_hw_lie/mac_hw_lie tells (2026-09-23,
 `docs/traffic-classifier.md` "Rung-1 hardware tells"; scored as ONE
