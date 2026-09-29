@@ -29,7 +29,7 @@ func (e *Engine) SetChallengeTierPinAs(host, rung string, ttl time.Duration, act
 func newAutoV2TestEngine(t *testing.T, armed ...string) *Engine {
 	t.Helper()
 	e := newTestEngineForChallengeHandlers()
-	e.tierPins.init("")
+	e.tierPins = sharedTierPinStore("")
 	e.nginxBridge = NewNginxBridge("/tmp/cfm-test-autov2.sock", "tok", time.Minute, time.Minute)
 	e.autoV2Armed = map[string]bool{}
 	for _, a := range armed {
@@ -309,21 +309,31 @@ func TestChallengeV2VhostTier_SourceNotes(t *testing.T) {
 	if tier := e.challengeV2VhostTier("www.apex.gr"); tier.Rung != "v2" || tier.Trigger != autoV2UniqPathsShort {
 		t.Fatalf("www cycle erased the apex note: %+v", tier)
 	}
-	// Suppressing the automatic challenge (exclude/ignore under a kept manual
-	// arm) forgets every note the host wrote at once — and a suppressed www.
-	// host stops inheriting its apex's.
-	b.NoteVhostAutoSource("apex.gr", autoV2SuspiciousVhost, time.Hour)
-	b.SuppressVhostAutoSources("www.apex.gr", time.Hour)
+	// A host suppressed from automatic challenges — by the ignore list, a
+	// host bypass or a Challenge exclude, asked at READ time — has no
+	// automatic tier: neither its own notes nor (www.) its apex's, however
+	// quiet it is.
+	e.cfg.ChallengeVHostIgnore = []string{"www.apex.gr"}
 	if tier := e.challengeV2VhostTier("www.apex.gr"); tier != (vhostV2Tier{}) {
-		t.Fatalf("suppressed www still inherits its apex: %+v", tier)
+		t.Fatalf("ignored www still inherits its apex: %+v", tier)
 	}
 	if tier := e.challengeV2VhostTier("apex.gr"); tier.Rung != "v2" {
 		t.Fatalf("the apex's own sources must be untouched: %+v", tier)
 	}
-	b.SuppressVhostAutoSources("apex.gr", time.Hour)
+	e.cfg.ChallengeVHostIgnore = nil
+	e.cfg.ChallengeHostBypass = []string{"apex.gr"}
 	if tier := e.challengeV2VhostTier("apex.gr"); tier != (vhostV2Tier{}) {
-		t.Fatalf("after suppress: %+v", tier)
+		t.Fatalf("bypassed host: %+v", tier)
 	}
+	e.cfg.ChallengeHostBypass = nil
+	e.challengeExcludes = newExcludeStore(filepath.Join(t.TempDir(), "ex.json"))
+	if !e.challengeExcludes.Add("host", "apex.gr", nil) {
+		t.Fatal("add exclude failed")
+	}
+	if tier := e.challengeV2VhostTier("apex.gr"); tier != (vhostV2Tier{}) {
+		t.Fatalf("excluded host: %+v", tier)
+	}
+	e.challengeExcludes = nil
 
 	// A note with no live entry arms nothing (the tier ends with the entry).
 	b.NoteVhostAutoSource("ghost.gr", autoV2UniqPathsShort, time.Hour)
@@ -387,8 +397,7 @@ func TestChallengeV2VhostTier_UnderAttackArms(t *testing.T) {
 }
 
 func TestTierPinStore_ApplyIsAtomicAndSweeps(t *testing.T) {
-	var s tierPinStore
-	s.init("")
+	s := sharedTierPinStore("")
 	if _, prev, changed, _ := s.apply("a.gr", "v1", 0, "admin", nil, nil); prev != "" || !changed {
 		t.Fatalf("first pin: %q %v", prev, changed)
 	}
@@ -425,14 +434,14 @@ func TestTierPinStore_ApplyIsAtomicAndSweeps(t *testing.T) {
 
 func TestTierPinStore_PersistsAndExpires(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pins.json")
-	var s tierPinStore
+	s := &tierPinStore{}
 	s.init(path)
 	s.apply("a.gr", "v1", 0, "admin", nil, nil)
 	s.apply("b.gr", "v2", time.Hour, "scoped", nil, nil)
 	s.apply("gone.gr", "v2", time.Hour, "admin", nil, nil)
 	s.apply("gone.gr", "", 0, "admin", nil, nil)
 
-	var r tierPinStore
+	r := &tierPinStore{}
 	r.init(path)
 	if p, ok := r.get("a.gr"); !ok || p.Rung != "v1" || !p.ExpiresAt.IsZero() || p.Actor != "admin" {
 		t.Fatalf("a.gr after reload: %+v %v", p, ok)
@@ -451,7 +460,7 @@ func TestTierPinStore_PersistsAndExpires(t *testing.T) {
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var x tierPinStore
+	x := &tierPinStore{}
 	x.init(path)
 	if snap := x.snapshot(); len(snap) != 1 || snap["ok.gr"].Rung != "v2" {
 		t.Fatalf("load must keep only live, valid, normalized pins: %+v", snap)
@@ -684,6 +693,13 @@ func TestNewEngineWiresAutoV2(t *testing.T) {
 	if challengeV2HostArmed("auto.gr") {
 		t.Fatalf("the v1 pin was lost across an engine rebuild")
 	}
+	// A pin written through the OLD engine after the new one was built (the
+	// reload window, before the API moves over) reaches the new engine's
+	// gate: one store per state file.
+	e.SetChallengeTierPinAs("auto.gr", "", 0, "admin")
+	if !challengeV2HostArmed("auto.gr") {
+		t.Fatalf("clearing the pin through the old engine did not reach the new one")
+	}
 }
 
 // The REAL tick writes the source notes: an active scorer challenge is noted
@@ -845,30 +861,18 @@ func TestVhostAutoSources_WWWInheritanceNeedsALiveApexChallenge(t *testing.T) {
 	if tier := e.challengeV2VhostTier("www.ex.gr"); tier.Rung != "v2" {
 		t.Fatalf("www under a challenged, attacked apex: %+v", tier)
 	}
-	// An excluded www. (suppressed) inherits nothing, even with the apex's
-	// challenge recreating its entry.
-	b.SuppressVhostAutoSources("www.ex.gr", time.Hour)
+	// An ignored www. inherits nothing, even with the apex's challenge
+	// recreating its entry.
+	e.cfg.ChallengeVHostIgnore = []string{"www.ex.gr"}
 	if tier := e.challengeV2VhostTier("www.ex.gr"); tier.Rung != "" {
-		t.Fatalf("suppressed www inherited the apex: %+v", tier)
+		t.Fatalf("ignored www inherited the apex: %+v", tier)
 	}
+	_ = b
 }
 
-// A clear (entry gone, apex push about to recreate it) keeps the host's
-// suppression marker; only the notes go. And the note TTL always outlives
-// the tick interval.
-func TestAutoNotes_ClearKeepsSuppressionAndTTLOutlivesTick(t *testing.T) {
+// The note TTL always outlives the tick interval.
+func TestAutoNotes_TTLOutlivesTick(t *testing.T) {
 	e := newAutoV2TestEngine(t, autoV2SuspiciousVhost)
-	b := e.nginxBridge
-	setVhostEntry(e, "ig.gr", "")
-	setVhostEntry(e, "www.ig.gr", "")
-	noteSource(e, "ig.gr", autoV2SuspiciousVhost)
-	b.SuppressVhostAutoSources("www.ig.gr", time.Hour)
-	b.ClearVhost("www.ig.gr", "ignored")
-	setVhostEntry(e, "www.ig.gr", "") // the apex's push recreates it
-	if tier := e.challengeV2VhostTier("www.ig.gr"); tier.Rung != "" {
-		t.Fatalf("clear wiped the suppression marker; www inherited the apex: %+v", tier)
-	}
-
 	for _, every := range []time.Duration{time.Second, 5 * time.Second, time.Minute, 15 * time.Minute} {
 		e.cfg.Every = every
 		if ttl := e.autoSourceNoteTTL(); ttl <= every {

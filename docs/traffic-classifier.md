@@ -911,14 +911,15 @@ host that left the candidate set, a stalled tick) just stops re-noting, and
 the source lapses: no missed transition can leave a stale v2 — an
 unevaluated source is never kept alive, including while the uniqpaths
 branch skips the scorer and Under-Attack (uniqpaths_short, armed by
-default, carries the tier then). Suppressing the automatic challenge under
-a kept manual arm (exclude/ignore) drops the host's notes at once, and an
-operator `attack off` drops the under_attack note at once.
+default, carries the tier then). An operator `attack off` drops the
+under_attack note at once.
 Notes are keyed on the host that wrote them and read www→apex, so a `www.`
 host's own cycle can never erase what its apex noted — but a `www.` host
-inherits only while the apex itself has a live challenge, and never while
-its own automatic challenge is suppressed (exclude / ignore / host bypass
-set a marker that blocks the inheritance). Notes die with
+inherits only while the apex itself has a live challenge. A host suppressed
+from automatic challenges (host bypass, a Challenge exclude, the ignore
+list) has no automatic tier at all — own or inherited — asked at READ time
+(`hostAutoSuppressed`), so it holds however quiet the host is; a manual arm
+on it keeps its own tier. Notes die with
 their entry, so a forced `attack on` on a host nothing challenges arms
 nothing. The first ARMED noted source wins (strongest first: under_attack,
 suspicious_vhost, uniqpaths_short, vhost_config). One bridge RLock at
@@ -940,7 +941,9 @@ tier <vhost> v1|v2|auto`, the cfm-admin "→ v1 (pin)" / "↺ auto" buttons):
 `auto` hands the tier back to the knob. A pin never creates or extends a
 challenge and does nothing while no automatic challenge covers the host.
 Persisted (`webdetector_challenge_tier_pins.json`), because every config
-reload restarts the daemon and a lost v1 pin would silently re-arm the host.
+reload restarts the daemon and a lost v1 pin would silently re-arm the host;
+and one store per state file is shared across Engine rebuilds, so a pin
+written in a reload's window lands where the new Engine's gate reads.
 Scoped tokens may pin their own vhosts, TTL-capped at 24h, and may not
 replace, clear or shadow a pin the operator set (the status read carries
 `rung_pin_locked` so their page hides controls that would 403). Audited as

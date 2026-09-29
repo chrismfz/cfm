@@ -317,12 +317,6 @@ func (e *Engine) keepManualOverSuppression(host, kind string, now time.Time, ips
     if e.nginxBridge == nil {
         return
     }
-    // The operator suppressed the AUTOMATIC challenge; only the manual arm
-    // stays. Its automatic-source notes go now (not when their TTL lapses) —
-    // and a www. host stops inheriting its apex's for as long as the
-    // suppression holds — so the tier is the manual arm's own from this
-    // cycle on.
-    e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
     selfOK, selfExp, _ := e.manualChallengeCovering(host)
     if !selfOK {
         return
@@ -1390,9 +1384,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         }
         if e.nginxBridge != nil {
             e.nginxBridge.ClearVhost(host, "host_bypass")
-            // Suppressed from automatic challenges: no automatic tier here,
-            // and (for a www. host) none inherited from the apex either.
-            e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
         }
         // Challenge fully cleared for this host → drop any UNDER_ATTACK state
         // (I1). This suppress path continues before the main under-attack hook.
@@ -1466,9 +1457,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         }
         if e.nginxBridge != nil {
             e.nginxBridge.ClearVhost(host, "excluded")
-            // Suppressed from automatic challenges: no automatic tier here,
-            // and (for a www. host) none inherited from the apex either.
-            e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
         }
         if e.cfg.UnderAttack {
             e.deescalateUnderAttack(now, host, "challenge suppressed (excluded)", out)
@@ -1488,12 +1476,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                     }
                     e.keepManualOverSuppression(host, "ignore", now, ips)
                     continue
-                }
-                // Suppressed from automatic challenges — re-applied EVERY cycle
-                // the ignore holds (the marker is short-lived): no automatic
-                // tier here, and (for a www. host) none inherited from the apex.
-                if e.nginxBridge != nil {
-                    e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
                 }
                 // If auto-state is currently ON, turn it off and emit OFF (reason=ignored).
                 if haveVhostAuto {
@@ -1968,9 +1950,6 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
             // stale v2 behind. The drops just make "off" immediate.
             if e.nginxBridge != nil {
                 noteTTL := e.autoSourceNoteTTL()
-                // Evaluated unsuppressed this cycle: an exclude/ignore that
-                // was lifted stops blocking the apex's sources right away.
-                e.nginxBridge.DropVhostAutoSource(host, autoSourceSuppressed)
                 if autoActive {
                     e.nginxBridge.NoteVhostAutoSource(host, autoV2SuspiciousVhost, noteTTL)
                 } else {

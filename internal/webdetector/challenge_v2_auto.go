@@ -31,6 +31,10 @@ package webdetector
 // click or a tenant's panic-button arm must not switch off an auto-v2,
 // Under-Attack or operator-pinned-v2 vhost. Down is a v1 pin.
 //
+// A host suppressed from automatic challenges (host bypass, a Challenge
+// exclude, the ignore list — hostAutoSuppressed, asked at read time) has no
+// automatic source at all.
+//
 // The automatic sources are the ones the tick NOTES on the live bridge vhost
 // entry (NoteVhostAutoSource — the SAME entry and matcher the solve's src=
 // snapshot reads, vhostEntryLocked): suspicious_vhost, uniqpaths_short,
@@ -298,7 +302,7 @@ func (t vhostV2Tier) via() string {
 // autoSourceNoteTTL once it is not, so the tier can never outlive either the
 // vhost challenge or the source.
 func (e *Engine) autoV2Trigger(host string) string {
-	if e.nginxBridge == nil {
+	if e.nginxBridge == nil || e.hostAutoSuppressed(host) {
 		return ""
 	}
 	sources, ok := e.nginxBridge.vhostAutoSources(host)
@@ -314,6 +318,21 @@ func (e *Engine) autoV2Trigger(host string) string {
 		return sources[0]
 	}
 	return ""
+}
+
+// hostAutoSuppressed reports whether host is suppressed from AUTOMATIC
+// vhost challenges — CHALLENGE_HOST_BYPASS, a Challenge exclude, or
+// CHALLENGE_VHOST_IGNORE: the same predicates the tick applies. Asked at read
+// time, so it holds however quiet the host is and however the tick's control
+// flow reaches it: an excluded host has no automatic tier — neither its own
+// notes nor, for a www. host, its apex's — and a manual arm on it keeps its
+// own tier. Cheap: config globs and the exclude store's RLock'd match (which
+// short-circuits when no exclude exists).
+func (e *Engine) hostAutoSuppressed(host string) bool {
+	if e.hostBypassed(host) || e.hostChallengeExcluded(host) {
+		return true
+	}
+	return len(e.cfg.ChallengeVHostIgnore) > 0 && hostMatchAny(host, e.cfg.ChallengeVHostIgnore)
 }
 
 // autoSourceNoteTTL is how long one tick's note of an active automatic source
@@ -336,11 +355,6 @@ func (e *Engine) autoSourceNoteTTL() time.Duration {
 	return ttl
 }
 
-// autoSourceSuppressed is the marker note that blocks a www. host from
-// inheriting its apex's sources while the host's own automatic challenge is
-// suppressed. Not a source: never in autoSourceOrder, never armed.
-const autoSourceSuppressed = "-suppressed"
-
 // vhostAutoSources returns the live automatic sources noted for host — by
 // host itself, or by its apex for a www. host (the bridge's apex→www
 // expansion) — provided a live vhost-wide CHALLENGE entry covers host (the
@@ -360,14 +374,12 @@ func (b *NginxBridge) vhostAutoSources(host string) (sources []string, ok bool) 
 	// A www. host inherits its apex's notes (the bridge expands an apex
 	// challenge to www) — only while the APEX itself has a live challenge
 	// (an apex note with no apex challenge, e.g. a forced Under-Attack on an
-	// unchallenged apex, must not arm a separately challenged www.), and
-	// not while the automatic challenge is suppressed on the www. host
-	// itself (an exclude / ignore / host bypass).
-	if exp, sup := b.vhAuto[host][autoSourceSuppressed]; !sup || !exp.After(now) {
-		if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" {
-			if ah, live := b.vhState[apex]; live && ah.Action == "challenge" && ah.Expires.After(now) {
-				writers = append(writers, apex)
-			}
+	// unchallenged apex, must not arm a separately challenged www.). A www.
+	// host excluded from automatic challenges is the resolver's to refuse
+	// (autoV2Trigger → hostAutoSuppressed).
+	if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" {
+		if ah, live := b.vhState[apex]; live && ah.Action == "challenge" && ah.Expires.After(now) {
+			writers = append(writers, apex)
 		}
 	}
 	for _, src := range autoSourceOrder {
@@ -423,6 +435,36 @@ type tierPinStore struct {
 	savedGen uint64
 }
 
+// tierPinStores shares ONE store per state file across Engine rebuilds: a
+// config reload builds the new Engine (loading the file) before the API moves
+// over to it, so a pin written through the old Engine in between must land in
+// the store the new one reads — or the emergency v1 pin would answer 200 and
+// never take effect, then be overwritten by the new Engine's next save.
+var tierPinStores = struct {
+	sync.Mutex
+	m map[string]*tierPinStore
+}{m: map[string]*tierPinStore{}}
+
+// sharedTierPinStore returns the process-wide store for path (loading it on
+// first use); "" is a private in-memory store.
+func sharedTierPinStore(path string) *tierPinStore {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		s := &tierPinStore{}
+		s.init("")
+		return s
+	}
+	tierPinStores.Lock()
+	defer tierPinStores.Unlock()
+	if s, ok := tierPinStores.m[path]; ok {
+		return s
+	}
+	s := &tierPinStore{}
+	s.init(path)
+	tierPinStores.m[path] = s
+	return s
+}
+
 func (p tierPin) live(now time.Time) bool {
 	return p.Rung != "" && (p.ExpiresAt.IsZero() || now.Before(p.ExpiresAt))
 }
@@ -444,6 +486,9 @@ func (s *tierPinStore) getLocked(host string, now time.Time) (tierPin, bool) {
 
 // get returns host's own live pin (exact key).
 func (s *tierPinStore) get(host string) (tierPin, bool) {
+	if s == nil {
+		return tierPin{}, false
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.getLocked(host, time.Now())
@@ -453,6 +498,9 @@ func (s *tierPinStore) get(host string) (tierPin, bool) {
 // own, else its apex's for a www. host (the manual tier's resolution). One
 // RLock. The read-side resolver (apply repeats it inside its write lock).
 func (s *tierPinStore) covering(host string, now time.Time) (tierPin, string) {
+	if s == nil {
+		return tierPin{}, ""
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if p, ok := s.getLocked(host, now); ok {
@@ -477,6 +525,9 @@ func (s *tierPinStore) covering(host string, now time.Time) (tierPin, string) {
 // changed, and a non-empty refusal.
 func (s *tierPinStore) apply(host, rung string, ttl time.Duration, actor string,
 	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string) {
+	if s == nil {
+		return host, "", false, "tier pins are unavailable"
+	}
 	now := time.Now()
 	s.mu.Lock()
 	target, prev, changed, refusal = s.applyLocked(now, host, rung, ttl, actor, allowTarget, protect)
@@ -556,6 +607,9 @@ func (s *tierPinStore) applyLocked(now time.Time, host, rung string, ttl time.Du
 
 // snapshot returns the live pins.
 func (s *tierPinStore) snapshot() map[string]tierPin {
+	if s == nil {
+		return map[string]tierPin{}
+	}
 	now := time.Now()
 	s.mu.RLock()
 	defer s.mu.RUnlock()

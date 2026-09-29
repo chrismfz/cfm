@@ -410,7 +410,7 @@ type Engine struct {
 	// tierPins: per-host tier pins for AUTOMATIC vhost challenges, and
 	// autoV2Armed: the CHALLENGE_V2_AUTO_VHOST source set — both read by the
 	// one vhost-tier resolver (challengeV2VhostTier, challenge_v2_auto.go).
-	tierPins    tierPinStore
+	tierPins    *tierPinStore
 	autoV2Armed map[string]bool
 
 	// bypassFunc: covers IGNORE_IPS / IGNORE_NETS — skip emit entirely for these IPs.
@@ -574,7 +574,7 @@ func NewEngine(cfg Config) *Engine {
 	// challenges from disk (filtering expired); restoreManualChallenges below
 	// re-pushes the survivors to the bridge once it is wired.
 	e.manualChal.init(cfg.ChallengeManualStorePath)
-	e.tierPins.init(cfg.ChallengeTierPinStorePath)
+	e.tierPins = sharedTierPinStore(cfg.ChallengeTierPinStorePath)
 	e.autoV2Armed = make(map[string]bool, len(cfg.ChallengeV2AutoVhost))
 	for _, src := range cfg.ChallengeV2AutoVhost {
 		e.autoV2Armed[src] = true
