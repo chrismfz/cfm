@@ -50,7 +50,8 @@ serves the **same** challenge page as `challenge`; the difference is that the
 `ip_push` carries the verbatim `challenge_v2`, the daemon records a
 **per-IP** rung mark, and a solve from that IP failing the passive humanity
 score earns **no clearance** (`result=v2_reject`, retry-able — see
-`challenge_v2.go` D5). The mark is per IP because the pushed decision is:
+`challenge_v2.go` D5), unless the client moved a pointer and no certain tell
+fired (webdriver / headless UA): real input rescues it, `v2_rescued=input`. The mark is per IP because the pushed decision is:
 cfm.lua serves that challenge on every web host the IP visits, so the rung
 covers every web host too. Until 2026-09-29 it was per (ip,host), and a client
 could solve the same challenge on a sibling vhost at v1 and keep the
@@ -116,7 +117,10 @@ gone (it bypassed the verify location's header clears). Semantics to know:
   is exactly when it happens, so grep for it before concluding the push was
   wrong. `hs=0` is a PASS: the score is positive-evidence-only, so 0 means
   "no headless tell fired", not "humanity proved" — a real browser is expected
-  to score 0 and keep its clearance. A bite logs `result=v2_reject`.
+  to score 0 and keep its clearance. A bite logs `result=v2_reject`; a failing
+  solve let through because the client moved a pointer logs `result=solved`
+  with its failing `hs=`/`tells=` and `v2=mark v2_rescued=input` (kill switch
+  `CHALLENGE_V2_INPUT_RESCUE`).
 - Post-clearance conversion treats it exactly like `challenge` (cleared
   clients are never re-challenged on either rung).
 - The panel-port gate (`cfm_panel.lua`) enforces block-tier hits only, so a

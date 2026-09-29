@@ -199,14 +199,16 @@ func (s ChallengeSolve) SrcSuffix() string {
 // (a Google fetcher, a self-declared AI crawler, a farm exit, an auto vhost
 // challenge vs a WAF rule) without joining against cfm.challenges.log:
 //
-//	cc=GR asn=16509 provider=amazon-aws ptr=x.example ua_family=Chrome ua_bot=1 src=vhost:suspicious_vhost scope=web
+//	cc=GR asn=16509 provider=amazon-aws ptr=x.example ua_family=Chrome ua_bot=1 v2_rescued=input src=vhost:suspicious_vhost scope=web
 //
 // The abuse-shadow parser splits on spaces (abuseshadow.Parse, "every value
 // is space-free"), so only space-free values ride here: no asn_name, no raw
 // UA. provider is DatacenterClass (canonicalised space-free at the source);
 // a PTR that is not a plain token renders as ptr=invalid rather than
 // quoted. ua_bot=1 means the UA SELF-DECLARES a bot (isBotUA) — unverified,
-// the same substring test the vhost bot_ratio uses. Each key is emitted only
+// the same substring test the vhost bot_ratio uses. v2_rescued=input says an
+// arm would NOT have rejected this failing score after all (real pointer
+// input, no certain tell — challengeV2InputRescue). Each key is emitted only
 // when known (absent never zero, as on the solve line); src, then scope, are
 // last.
 func (s ChallengeSolve) ShadowContextSuffix() string {
@@ -231,6 +233,10 @@ func (s ChallengeSolve) ShadowContextSuffix() string {
 	b.WriteString(s.UAFamilyOrDash())
 	if isBotUA(s.UA) {
 		b.WriteString(" ua_bot=1")
+	}
+	if s.V2Rescued != "" {
+		b.WriteString(" v2_rescued=")
+		b.WriteString(shadowToken(s.V2Rescued))
 	}
 	b.WriteString(s.SrcSuffix())
 	if s.Scope != "" {

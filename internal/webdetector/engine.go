@@ -922,15 +922,16 @@ func (e *Engine) RecordChallengeV2Reject(s ChallengeSolve) {
 //	v2           the arm grain covering the solve, absent when unarmed
 //	v2_via       (v2=vhost) what put the vhost at v2: manual / pin / auto:<source>
 //	v2_waived    (solved) the verified good bot a failing solve was waived for
+//	v2_rescued   (solved, under an arm) what let a failing solve through: input
 //	v2_waiver_miss (reject) why a crawler-looking client was not waived
 //	sig          the readings as reported, same numbers and rounding as
 //	             the solve line's sig= field
 //
-// mv/dm/dpr/raf are scored by nothing — corpus, so a future tell can be
+// dm/dpr/raf are scored by nothing — corpus, so a future tell can be
 // written from measured distributions instead of from memory; hc feeds the
-// mobile_hw_lie / mac_hw_lie tells written that way;
-// ptr/tch/key additionally feed the no_input amplifier, and recording
-// them is what makes it auditable. An individual signal the browser did
+// mobile_hw_lie / mac_hw_lie tells written that way; ptr/tch/key additionally
+// feed the no_input amplifier, ptr+mv the real-input rescue (v2_rescued), and
+// recording them is what makes both auditable. An individual signal the browser did
 // not report is simply not a key — never a fabricated zero (D5b).
 //
 // hs_nopayload is NOT merely the durable spelling of the log's "hs=-":
@@ -978,6 +979,9 @@ func (s ChallengeSolve) historyPayload() map[string]interface{} {
 		}
 		if s.V2Waived != "" {
 			payload["v2_waived"] = s.V2Waived
+		}
+		if s.V2Rescued != "" && s.V2Grain != "" {
+			payload["v2_rescued"] = s.V2Rescued
 		}
 		if s.V2WaiverMiss != "" {
 			payload["v2_waiver_miss"] = s.V2WaiverMiss

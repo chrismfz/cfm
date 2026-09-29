@@ -44,11 +44,15 @@ package webdetector
 //                    reported them, and v2=<grain> naming the arm whenever
 //                    one covers the solve (HumanitySuffix, both writers):
 //                    an armed solve that PASSES must not read like a plain v1
-//                    one, or a live tier looks like a forgotten one. A reject
-//                    logs result=v2_reject (naming the grain), a would-fail
-//                    unarmed solve emits signal=humanity verdict=would_v2 to
-//                    the abuse shadow log, and CHALLENGE_V2_DEBUG=1 adds an
-//                    X-CFM-HS response header for DevTools-level inspection.
+//                    one, or a live tier looks like a forgotten one. A failing
+//                    armed solve let through says why (v2_waived=<bot>,
+//                    v2_rescued=input) with its failing hs=/tells= intact. A
+//                    reject logs result=v2_reject (naming the grain), a
+//                    would-fail unarmed solve emits signal=humanity
+//                    verdict=would_v2 to the abuse shadow log (with
+//                    v2_rescued=input when an arm would have let it through),
+//                    and CHALLENGE_V2_DEBUG=1 adds an X-CFM-HS response
+//                    header for DevTools-level inspection.
 //
 // Knobs ([webdetector], applied per reload by ConfigureChallengeV2):
 //   CHALLENGE_V2_PASSIVE    (default 1) master for scoring + the armed gate
@@ -56,6 +60,8 @@ package webdetector
 //   CHALLENGE_V2_DEBUG      (default 0) X-CFM-HS response header
 //   CHALLENGE_V2_HW_TELLS   (default 1) kill switch for mobile_hw_lie / mac_hw_lie
 //                           (ConfigureChallengeV2HWTells)
+//   CHALLENGE_V2_INPUT_RESCUE (default 1) kill switch for the real-input
+//                           rescue (ConfigureChallengeV2InputRescue)
 //   CHALLENGE_V2_AUTO_VHOST (default suspicious_vhost,uniqpaths_short,under_attack)
 //                           the automatic vhost challenges that run at the v2
 //                           tier (engine config; challenge_v2_auto.go)
@@ -125,6 +131,15 @@ package webdetector
 //     can't complete (slots busy, resolver down, PTR not resolved yet)
 //     rejects as before (retry-able, D5c); a reject whose PTR claims a
 //     crawler says why with v2_waiver_miss=<reason> (v2Waiver*).
+//   - Real pointer input RESCUES a failing score that has no certain tell
+//     (v2_rescued=input, challengeV2InputRescue), under every grain — unlike
+//     the good-bot waiver, whose question (is this a verified crawler?) the
+//     decision path answers per grain, this one (is a person at the
+//     controls?) is the question the rung itself asks. It exists because a
+//     retry cannot change a Windows 7 PC's renderer (D5c). The readings are
+//     client-authored: a farm that dispatches pointer events through CDP
+//     gets trusted ones and is rescued — the same residual the Rung-2
+//     confirm fallback carries, accepted over walling the humans out.
 
 import (
 	"context"
@@ -159,8 +174,10 @@ type humanitySignals struct {
 	// solve line, payload.sig on the history row) to build the corpus from
 	// real traffic, so a tell is written from measured distributions rather
 	// than from memory. Since 2026-09-23 HC feeds two tells written from that
-	// corpus (mobile_hw_lie, mac_hw_lie — see the weights below); mv/dm/dpr/raf
-	// are still scored by nothing. They
+	// corpus (mobile_hw_lie, mac_hw_lie — see the weights below), and since
+	// 2026-09-29 MV (with PTR) decides the real-input rescue
+	// (challengeV2InputRescue) — never a tell: it can only clear a failing
+	// score, never add to one. dm/dpr/raf are still scored by nothing. They
 	// were pointer-less and silently discarded until 2026-09-22 — a `dm`
 	// absent on every Firefox then read as a reported 0.0, which is exactly
 	// the absence/zero confusion the pointer convention above exists to
@@ -193,6 +210,7 @@ const (
 	sigMaxReading  = 1e9       // mv/dm/dpr/raf magnitude ceiling
 	sigMinPositive = 1e-6      // below this a positive is not a reading
 	sigMaxDecimals = 6         // fallback precision when display rounding would hit zero
+	sigMVDecimals  = 1         // mv's display precision — also what the rescue compares
 )
 
 // The verify body bound is maxVerifyBodyBytes (challenge_server.go, 1 KB) —
@@ -205,6 +223,14 @@ const (
 // or touch_lie alone (50) can be an exotic-but-real setup. Only certain
 // evidence (webdriver, a Headless UA token) or a corroborated combination
 // crosses the default 100.
+// The certain tells' names, shared by the scorer and the real-input rescue
+// (which never clears either), so a rename cannot leave the rescue matching
+// a name the scorer no longer writes.
+const (
+	tellNameWebdriver  = "webdriver"
+	tellNameHeadlessUA = "headless_ua"
+)
+
 const (
 	tellWebdriver  = 100 // navigator.webdriver === true: the standard says automation
 	tellHeadlessUA = 100 // the UA itself declares HeadlessChrome/PhantomJS
@@ -277,6 +303,13 @@ type challengeV2State struct {
 	// strict). Off, the two tells are not evaluated (touch_lie and ua_lie
 	// are unaffected). Read in the same snapshot as the other knobs.
 	hwTells bool
+	// inputRescue gates the real-input rescue (challengeV2InputRescue):
+	// CHALLENGE_V2_INPUT_RESCUE, default on. A kill switch — the rescue is
+	// the one path that lets a FAILING score through every arm, so an
+	// operator who sees farms learn it can take it away without a release.
+	// Off, a failing armed solve is rejected (or waived) exactly as before
+	// the rescue existed, and no surface carries v2_rescued.
+	inputRescue bool
 	// hostTier answers "is this host's vhost tier v2" plus what put it there
 	// (manual / pin / auto:<source>, rendered as v2_via=), from ONE
 	// resolution — NewEngine wires challengeV2GateTier (challenge_v2_auto.go:
@@ -295,13 +328,21 @@ type challengeV2State struct {
 	goodBot func(ctx context.Context, ip, ptr string) (name, miss string)
 }
 
-var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true}
+var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true, inputRescue: true}
 
 // ConfigureChallengeV2HWTells applies [webdetector] CHALLENGE_V2_HW_TELLS
 // (every reload; see challengeV2State.hwTells).
 func ConfigureChallengeV2HWTells(on bool) {
 	challengeV2.mu.Lock()
 	challengeV2.hwTells = on
+	challengeV2.mu.Unlock()
+}
+
+// ConfigureChallengeV2InputRescue applies [webdetector]
+// CHALLENGE_V2_INPUT_RESCUE (every reload; see challengeV2State.inputRescue).
+func ConfigureChallengeV2InputRescue(on bool) {
+	challengeV2.mu.Lock()
+	challengeV2.inputRescue = on
 	challengeV2.mu.Unlock()
 }
 
@@ -579,6 +620,55 @@ func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 	return "", ""
 }
 
+// ── Real-input rescue (operator decision, 2026-09-29) ──────────────────────
+//
+// A failing score is RESCUED — never rejected, under any arm, the operator's
+// fingerprint policy included — when the payload reports real pointer input
+// and no CERTAIN tell fired. The first E4 read
+// (docs/abuse-defense-master-plan.md §5, E4) found who the automatic v2 arm
+// would reject: Windows Chrome/109 (the last Chrome for Windows 7/8.1) on old
+// hardware, reporting a software renderer AND no window size — exactly the
+// fail score — while the person moved the mouse (41 events / 714 px, 7 / 729,
+// 74 / 3 149, from their solve lines). A retry re-scores the same machine, so
+// without this they are walled off, which D5c forbids. In the 11 125-line sig
+// corpus such input marked 1 of 2 861 failing solves (the first of those
+// three) and no farm solve. A fingerprint policy is not exempt: a fingerprint
+// is a population, and these machines share coarse TLS buckets.
+//
+// The certain tells (webdriver, a HeadlessChrome/PhantomJS UA token) are never
+// rescued: each fails alone because the browser declares its own automation.
+// Kill switch: CHALLENGE_V2_INPUT_RESCUE = 0 (challengeV2State.inputRescue).
+//
+// HONEST LIMIT: ptr/mv are client-authored like every reading. A bot can post
+// any counts, the page counts script-dispatched events too, and a pointer
+// event a farm dispatches through CDP is a trusted one anyway. A farm that
+// learns this can fake movement — the same residual the Rung-2 confirm
+// fallback has. The thresholds are the simplest rule the corpus supports; the
+// trajectory readings planned next are the corpus that would tighten it,
+// measured first, never written from memory. The comparison is on the values
+// as sig= shows them (sigRound), so the log line alone explains the decision.
+const (
+	rescueMinPointerEvents = 5   // sig.ptr: pointer-move events seen while solving
+	rescueMinMovePx        = 100 // sig.mv: accumulated |movementX|+|movementY|
+	v2RescuedInput         = "input"
+)
+
+// challengeV2InputRescue reports whether a failing solve is rescued by real
+// pointer input: at least rescueMinPointerEvents events covering
+// rescueMinMovePx, and none of the certain tells in tells (the solve's
+// comma-joined list). An absent reading never rescues.
+func challengeV2InputRescue(sig *humanitySignals, tells string) bool {
+	if sig == nil || sig.PTR == nil || sig.MV == nil {
+		return false
+	}
+	for _, t := range strings.Split(tells, ",") {
+		if t == tellNameWebdriver || t == tellNameHeadlessUA {
+			return false
+		}
+	}
+	return *sig.PTR >= rescueMinPointerEvents && sigRound(*sig.MV, sigMVDecimals) >= rescueMinMovePx
+}
+
 // challengeV2WaiverBar says whether a failing solve under grain may be waived
 // for a verified good bot: "" when it may, else why not. Waivable are only the
 // grains whose challenge the decision path's good-bot exemption already skips
@@ -614,17 +704,19 @@ func ConfigureChallengeV2(enabled bool, failScore int, debug, shadowLines bool) 
 }
 
 func challengeV2Settings() (enabled bool, failScore int, debug, shadowLines bool) {
-	enabled, failScore, debug, shadowLines, _ = challengeV2SettingsAll()
+	enabled, failScore, debug, shadowLines, _, _ = challengeV2SettingsAll()
 	return
 }
 
-// challengeV2SettingsAll is challengeV2Settings plus the hwTells kill switch,
-// all from ONE snapshot — the verify path reads it once so a reload racing a
-// solve can never score it with a mix of old and new knobs.
-func challengeV2SettingsAll() (enabled bool, failScore int, debug, shadowLines, hwTells bool) {
+// challengeV2SettingsAll is challengeV2Settings plus the hwTells and
+// inputRescue kill switches, all from ONE snapshot — the verify path reads it
+// once so a reload racing a solve can never score it with a mix of old and
+// new knobs.
+func challengeV2SettingsAll() (enabled bool, failScore int, debug, shadowLines, hwTells, inputRescue bool) {
 	challengeV2.mu.RLock()
 	defer challengeV2.mu.RUnlock()
-	return challengeV2.enabled, challengeV2.failScore, challengeV2.debug, challengeV2.shadowLines, challengeV2.hwTells
+	return challengeV2.enabled, challengeV2.failScore, challengeV2.debug, challengeV2.shadowLines,
+		challengeV2.hwTells, challengeV2.inputRescue
 }
 
 // readVerifyBody consumes and closes the verify request body under the
@@ -680,6 +772,8 @@ func parseHumanityBody(b []byte) *humanitySignals {
 // amplifier, which needs all three REPORTED and exactly 0: dropping only ever
 // produces absent (never a fabricated zero — D5b), and a count failing these
 // bounds is non-zero anyway, so it already failed `== 0` before the drop.
+// PTR and MV also decide the real-input rescue, which needs both REPORTED:
+// a drop only ever withholds a rescue, never grants one.
 // HC feeds mobile_hw_lie / mac_hw_lie (>= 16 / >= 64): a negative count could
 // not reach either bar, and an over-bound one (> sigMaxInt) is dropped to
 // absent, so it escapes both — a knowing residual, NOT closed by clamping:
@@ -761,7 +855,7 @@ func scoreHumanityOpts(sig *humanitySignals, ua string, hwTells bool) (hs int, t
 	// UA-borne opener: needs no payload. uaplausible deliberately declines to
 	// family-classify HeadlessChrome; here the token is positive evidence.
 	if strings.Contains(ua, "HeadlessChrome") || strings.Contains(ua, "PhantomJS") {
-		add("headless_ua", tellHeadlessUA)
+		add(tellNameHeadlessUA, tellHeadlessUA)
 	}
 	// UA-borne device-claim member (see THE DEVICE-CLAIM GROUP).
 	if uaplausible.LegacyEdgeOnModernChrome(ua) {
@@ -770,7 +864,7 @@ func scoreHumanityOpts(sig *humanitySignals, ua string, hwTells bool) (hs int, t
 
 	if sig != nil {
 		if sig.WD != nil && *sig.WD {
-			add("webdriver", tellWebdriver)
+			add(tellNameWebdriver, tellWebdriver)
 		}
 		if glr := strings.ToLower(sig.GLR); glr != "" {
 			for _, m := range softwareRendererMarks {
@@ -881,7 +975,7 @@ func (s *humanitySignals) sigFields() []sigField {
 	addInt("key", s.KEY)
 	// mv keeps one decimal: movementX/Y is fractional on HiDPI / fractional
 	// display scaling, so a genuine small drag really can total 0.5px.
-	addFloat("mv", s.MV, 1)
+	addFloat("mv", s.MV, sigMVDecimals)
 	addInt("hc", s.HC)
 	addFloat("dm", s.DM, 2) // 0.25 / 0.5 / 1 / 2 / 4 / 8 GiB buckets
 	addFloat("dpr", s.DPR, 2)
@@ -893,12 +987,13 @@ func (s *humanitySignals) sigFields() []sigField {
 // — the Rung-1 report as REPORTED, before any scoring. Empty when nothing was
 // retained, so a no-payload solve adds no field.
 //
-// Precisely: mv/dm/dpr/raf are scored by NOTHING — they are corpus only,
+// Precisely: dm/dpr/raf are scored by NOTHING — they are corpus only,
 // logged so a future tell can be written from measured distributions instead
 // of from memory. hc feeds mobile_hw_lie / mac_hw_lie (written exactly that
-// way, from this corpus), and ptr/tch/key feed the no_input amplifier (only
-// as an all-three-zero combination); logging them is what makes those tells
-// auditable rather than opaque. Either way the line shows the raw
+// way, from this corpus), ptr/tch/key feed the no_input amplifier (only
+// as an all-three-zero combination), and ptr+mv decide the real-input rescue
+// (challengeV2InputRescue, which only ever clears); logging them is what makes
+// those decisions auditable rather than opaque. Either way the line shows the raw
 // reading, never a scored derivative — and "the client never moved the mouse"
 // is answerable from the log at all, which it was not: mv was parsed and
 // thrown away despite a comment claiming it was recorded.
@@ -931,8 +1026,9 @@ func (s ChallengeSolve) signalMap() map[string]any {
 
 // HumanitySuffix renders the Rung-1 fields for a solve log line, in order:
 // " hs=N", " tells=a,b" when any fired, " sig=..." with the raw reported
-// signals (SignalSuffix), and " v2=<grain>" when the solve was covered by an
-// operator-armed challenge_v2. Empty unless the scorer actually ran
+// signals (SignalSuffix), " v2=<grain>" (+ " v2_via=") when the solve was
+// covered by an operator-armed challenge_v2, and — for a failing armed solve
+// let through — " v2_waived=<bot>" or " v2_rescued=input". Empty unless the scorer actually ran
 // (HumanityScored), so a disabled rung leaves pre-Rung-1 log tooling an
 // unchanged line and an UNSCORED solve can never claim a score; " hs=-" when NO
 // payload arrived and nothing fired, so "scored clean" (hs=0) and "reported
@@ -968,6 +1064,12 @@ func (s ChallengeSolve) HumanitySuffix() string {
 	}
 	if s.V2Waived != "" {
 		out += " v2_waived=" + s.V2Waived
+	}
+	// Only under an arm: there it names what let a failing score through.
+	// An unarmed solve had nothing to be let through; its would-be rescue
+	// rides the would_v2 shadow line instead (ShadowContextSuffix).
+	if s.V2Rescued != "" && s.V2Grain != "" {
+		out += " v2_rescued=" + s.V2Rescued
 	}
 	return out
 }

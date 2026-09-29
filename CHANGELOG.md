@@ -45,6 +45,23 @@ back-filled here — see the git/PR history for that period.
   mistyped value keeps the default and is logged. A manual challenge at v2
   stays v2, and a manual one at v1 does not downgrade an automatic v2 (use a
   v1 pin for that).
+- **A visitor who moves the mouse is no longer rejected by ChallengeV2 unless
+  the browser admits to automation.** Some old Windows 7/8.1 PCs (Chrome 109,
+  software graphics, no reported window size) fail the passive check on every
+  try. Last week's traffic had schools and home lines among them, and they
+  would have been locked out of any vhost the automatic challenge made strict.
+  Now a failing solve passes when the page saw at least 5 pointer movements
+  covering at least 100 px, unless the browser reports `navigator.webdriver`
+  or a HeadlessChrome/PhantomJS user agent. This applies under every v2 arm
+  (fingerprint, country/ASN, vhost, traffic-rule/WAF). No failing solve from a
+  known farm moved the pointer that much. Such a solve logs
+  `v2_rescued=input` with its failing `hs=`/`tells=`, and the history row
+  carries `v2_rescued`. For an unarmed solve, the `would_v2` line carries it
+  instead, so the `abuse_shadow` MCP tool's `humanity.rescued` shows how many
+  would-be rejects a new arm would let through. The counts come from the
+  page's script, so a bot that reports or injects pointer movement also
+  passes. New `[webdetector] CHALLENGE_V2_INPUT_RESCUE` (default `1`) turns
+  the rescue off without a release.
 - **Under-Attack Mode now changes one thing:** while a vhost challenge is live
   on a vhost in UNDER_ATTACK (including an operator `attack on`), it runs at
   the v2 tier; the transition log line says so (`tier=`). The rest of

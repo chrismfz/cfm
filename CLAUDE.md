@@ -578,7 +578,8 @@ evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
 `v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
 so a passed-under-arm solve is greppable, not mistaken for a plain v1 one;
 `sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` is the report AS
-REPORTED — mv/dm/dpr/raf corpus-only and scored by nothing, hc feeds the
+REPORTED — dm/dpr/raf corpus-only and scored by nothing, ptr+mv decide
+the real-input rescue below (it only ever clears), hc feeds the
 corpus-measured mobile_hw_lie/mac_hw_lie tells (2026-09-23,
 `docs/traffic-classifier.md` "Rung-1 hardware tells"; scored as ONE
 device-claim group (its max, once) with touch_lie and the UA-borne ua_lie
@@ -615,7 +616,14 @@ rule/WAF marks stay strict), waived under `CHALLENGE_GOODBOT_EXEMPT`
 from rotating first-seen IPs, so the gate forward-confirms a crawler-looking
 PTR inline — bounded, reject path only; a reject whose PTR claims a crawler
 carries `v2_waiver_miss=<grain|mark|off|spoofed|timeout|transient>`, or it
-would read like a spoof) — at the EDGE `challenge_v2`
+would read like a spoof) — and except, under EVERY grain, a failing score with
+real pointer input (sig ptr >= 5 AND mv >= 100) and no certain tell
+(webdriver / headless UA): `v2_rescued=input` on an armed solve's line/history
+row and on the unarmed would_v2 line, never on an unarmed solve line (2026-09-29,
+E4: Windows Chrome/109 PCs score exactly 100 with a software renderer and no
+window size, and a retry cannot change that; the counts are client-authored —
+posted or script-/CDP-injected movement passes too, the confirm fallback's
+residual as well; kill switch `CHALLENGE_V2_INPUT_RESCUE`) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
 enforced at verify, not at serve). The verify gate ORs four arm grains:
 fingerprint policy, geo policy, a per-vhost v2 tier (a `rung=v2` MANUAL
@@ -652,8 +660,10 @@ edge (localhost listener; the per-IP challenge-DNAT is RETIRED per
 verify host) are edge-authoritative on current confs; the client-authored
 humanity report remains spoofable by a signal-aware farm — deliberate D5b
 residual, all documented in the HONEST LIMITS block of `challenge_v2.go`; Rung 2 is narrowed to a
-"confirm you're human" fallback for a Rung-1 reject (a candidate, not built) — the visible puzzle was dropped
-2026-09-29, and a farm running real browsers is `cfm_pcw`'s job, not a harder check (master plan §5). **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
+"confirm you're human" fallback for a Rung-1 reject (a candidate, not built, after the real-input rescue above
+and its trajectory corpus) — the visible puzzle was dropped 2026-09-29, and a farm running real browsers
+(`hs=0`) is the operator fingerprint / geo policy's job, not a harder check (master plan §5, E3's honest
+limits; `cfm_pcw` fired on none of them in the 2026-09-29 read). **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
 the ONE roadmap/decision log; the other docs' phase checklists are frozen). Design
 hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`
 (central). See also `docs/challenge-score.md`, `docs/roadmaps/challenge-engine.md` §8.1.

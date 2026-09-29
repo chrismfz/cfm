@@ -371,7 +371,7 @@ func TestSummarizeHumanityWouldV2(t *testing.T) {
 	lines := []string{
 		"2026-09-23 06:01:23 [abuse-shadow] signal=humanity host=a.gr ip=66.102.9.230 hs=140 tells=sw_renderer,touch_lie,no_input fp=c41a0f3f verdict=would_v2 cc=US asn=15169 provider=google ptr=rate-limited-proxy-66-102-9-230.google.com ua_family=Chrome src=vhost:suspicious_vhost scope=web",
 		"2026-09-23 06:02:00 [abuse-shadow] signal=humanity host=a.gr ip=216.73.217.117 hs=190 tells=webdriver,sw_renderer,no_input fp=c28caa00 verdict=would_v2 cc=US asn=16509 provider=amazon-aws ua_family=Chrome ua_bot=1 src=vhost:suspicious_vhost,ip:CHALLENGE_ERR_RATIO scope=web",
-		"2026-09-23 06:03:00 [abuse-shadow] signal=humanity host=b.gr ip=48.47.30.107 hs=130 tells=sw_renderer,outer_zero,no_input fp=c28caa00 verdict=would_v2 ua_family=Chrome src=waf:302 scope=panel:2083",
+		"2026-09-23 06:03:00 [abuse-shadow] signal=humanity host=b.gr ip=48.47.30.107 hs=100 tells=sw_renderer,outer_zero fp=c28caa00 verdict=would_v2 ua_family=Chrome v2_rescued=input src=waf:302 scope=panel:2083",
 		"2026-09-23 06:04:00 [abuse-shadow] signal=humanity host=b.gr ip=48.47.30.108 hs=130 tells=sw_renderer,outer_zero,no_input fp=- verdict=would_v2 ua_family=- src=-",
 		// Pre-context line (older daemon): no src=.
 		"2026-09-22 06:04:00 [abuse-shadow] signal=humanity host=c.gr ip=198.51.100.1 hs=100 tells=webdriver fp=95070673 verdict=would_v2",
@@ -388,6 +388,14 @@ func TestSummarizeHumanityWouldV2(t *testing.T) {
 	}
 	if h.WithContext != 4 || h.UABot != 1 {
 		t.Fatalf("with_context=%d ua_bot=%d", h.WithContext, h.UABot)
+	}
+	// The rescued line is still a would_v2 line (its SCORE failed) and counts
+	// in every breakdown; rescued says an armed gate would have cleared it.
+	if h.Rescued != 1 {
+		t.Fatalf("rescued=%d, want 1", h.Rescued)
+	}
+	if e, ok := Parse(lines[2]); !ok || e.Rescued != "input" || e.Src != "waf:302" {
+		t.Fatalf("v2_rescued parse: ok=%v %+v", ok, e)
 	}
 	get := func(list []kv, k string) int {
 		for _, e := range list {

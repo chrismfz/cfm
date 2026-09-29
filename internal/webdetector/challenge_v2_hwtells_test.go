@@ -202,7 +202,7 @@ func TestHWTells_KillSwitch(t *testing.T) {
 
 	ConfigureChallengeV2HWTells(false)
 	t.Cleanup(func() { ConfigureChallengeV2HWTells(true) })
-	if _, _, _, _, hw := challengeV2SettingsAll(); hw {
+	if _, _, _, _, hw, _ := challengeV2SettingsAll(); hw {
 		t.Fatalf("the knob must reach the settings snapshot")
 	}
 }
