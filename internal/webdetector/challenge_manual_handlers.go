@@ -674,8 +674,11 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"rung_source":  tier.Source,
 		"rung_trigger": tier.Trigger,
 		"rung_pin":     tier.Pin,
-		"auto_active":  autoActive,
-		"auto_since":   autoSince,
+		// true when the caller is a scoped token and the operator set the
+		// pin: the tenant's surfaces hide the pin controls (the write 403s).
+		"rung_pin_locked": tier.pinLockedFor(vhostScopeFromContext(r.Context())),
+		"auto_active":     autoActive,
+		"auto_since":      autoSince,
 		// Scoped tokens reach the vhost list only through this endpoint, so the
 		// farm mark, the shadow outlier count, the facet cardinality, the cost
 		// pressure, the datacenter fraction and the escalation state have to ride

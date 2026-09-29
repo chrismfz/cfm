@@ -11,6 +11,17 @@ import (
 	"time"
 )
 
+// manualChallengeRung is the tier ("v2" or "") of the manual arm covering host
+// (manualRungTarget's resolution) — a TEST helper for the manual store alone.
+// Production never asks this question: "what tier is this vhost at" is
+// challengeV2VhostTier's, which a manual v1 arm does not decide on its own.
+func (e *Engine) manualChallengeRung(host string) string {
+	if target := e.manualRungTarget(host); target != "" {
+		return e.manualChal.rung(target)
+	}
+	return ""
+}
+
 // Per-vhost ChallengeV2 (arm-surfaces slice A): the manual vhost challenge
 // carries a rung ("" plain / "v2"), persisted across restarts, settable via
 // the add API/CLI, surfaced in the status API, and consulted by the verify

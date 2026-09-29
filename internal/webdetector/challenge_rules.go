@@ -1603,9 +1603,9 @@ if doChallenge {
         }
     }
                     e.nginxBridge.ChallengeVhostWithReason(host, ttl, "uniqpaths_short")
-                    // The auto-v2 resolver's view of this source, with the same
-                    // lifetime as the challenge it accompanies (challenge_v2_auto.go).
-                    e.nginxBridge.NoteVhostAutoSource(host, autoV2UniqPathsShort, ttl)
+                    // The auto-v2 resolver's view of this source: re-noted every
+                    // cycle it is active, short-lived (challenge_v2_auto.go).
+                    e.nginxBridge.NoteVhostAutoSource(host, autoV2UniqPathsShort, e.autoSourceNoteTTL())
                     if doLogOn && e.cfg.ChallengeLog {
                         logging.LogfCHALLENGES("[challenge][vhost] action=auto_on host=%s reason=uniqpaths_short uniqPaths=%d on=%d off=%d ttl=%s",
                             host, uniq, on, off, ttl.String())
@@ -1933,24 +1933,23 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
             effective := manual || autoActive
 
             // The auto-v2 resolver's view of this host's AUTOMATIC sources
-            // (challenge_v2_auto.go). Noted every cycle a source is active,
-            // dropped the cycle it is not — independently of the bridge
-            // entry's single Reason, which a manual arm or the config list
-            // relabels. The TTL is the one the auto challenge itself is
-            // pushed with, so a host that falls out of the candidate set
-            // loses the note when its challenge would lapse too.
+            // (challenge_v2_auto.go): RE-NOTED on every cycle a source is
+            // active, with a short TTL (autoSourceNoteTTL), independently of
+            // the bridge entry's single Reason (which a manual arm or the
+            // config list relabels). A cycle that does not reach this point
+            // for the host — an exclude/ignore `continue`, a host that left
+            // the candidate set, a stalled tick — simply stops re-noting, and
+            // the source lapses within the TTL: no transition can leave a
+            // stale v2 behind. The drops just make "off" immediate.
             if e.nginxBridge != nil {
-                autoTTL := 60 * time.Minute
-                if e.cfg.ChallengeSuspiciousHolddown > 0 {
-                    autoTTL = e.cfg.ChallengeSuspiciousHolddown + (2 * time.Minute)
-                }
+                noteTTL := e.autoSourceNoteTTL()
                 if autoActive {
-                    e.nginxBridge.NoteVhostAutoSource(host, autoV2SuspiciousVhost, autoTTL)
+                    e.nginxBridge.NoteVhostAutoSource(host, autoV2SuspiciousVhost, noteTTL)
                 } else {
                     e.nginxBridge.DropVhostAutoSource(host, autoV2SuspiciousVhost)
                 }
                 if haveVhostManual && hostMatchAny(host, e.cfg.ChallengeVHost) {
-                    e.nginxBridge.NoteVhostAutoSource(host, autoV2VhostConfig, autoTTL)
+                    e.nginxBridge.NoteVhostAutoSource(host, autoV2VhostConfig, noteTTL)
                 } else {
                     e.nginxBridge.DropVhostAutoSource(host, autoV2VhostConfig)
                 }
@@ -1970,6 +1969,16 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
                     }
                 }
                 e.evalUnderAttack(now, host, effective, uaRow, out)
+                // Under-Attack as an auto-v2 source, re-noted each cycle the
+                // state is evaluated ON (so a cycle that skips this host lets
+                // it lapse, like every other source — see above).
+                if e.nginxBridge != nil {
+                    if on, _, _ := e.VhostAttackState(host); on && effective {
+                        e.nginxBridge.NoteVhostAutoSource(host, autoV2UnderAttack, e.autoSourceNoteTTL())
+                    } else {
+                        e.nginxBridge.DropVhostAutoSource(host, autoV2UnderAttack)
+                    }
+                }
             }
 
             if !effective {

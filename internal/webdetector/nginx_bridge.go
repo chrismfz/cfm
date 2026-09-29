@@ -1444,6 +1444,7 @@ func (b *NginxBridge) RunExpireLoop(ctx context.Context) {
 			for h, e := range b.vhState {
 				if e.Expires.Before(now) {
 					delete(b.vhState, h)
+					delete(b.vhAuto, h) // notes never outlive their entry
 				}
 			}
 			for h, srcs := range b.vhAuto {

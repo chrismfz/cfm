@@ -31,13 +31,17 @@ package webdetector
 // click or a tenant's panic-button arm must not switch off an auto-v2,
 // Under-Attack or operator-pinned-v2 vhost. Down is a v1 pin.
 //
-// The automatic sources are the ones the tick notes on the live bridge vhost
+// The automatic sources are the ones the tick NOTES on the live bridge vhost
 // entry (NoteVhostAutoSource — the SAME entry and matcher the solve's src=
-// snapshot reads, vhostEntryLocked; each source with its own lifetime) and
-// the Under-Attack state (VhostAttackState, which includes an operator's
-// forced-on override) — which only ever re-names a live vhost challenge's
-// source: a forced `attack on` on a host no vhost challenge covers arms
-// nothing, so the tier always ends with the vhost challenge.
+// snapshot reads, vhostEntryLocked): suspicious_vhost, uniqpaths_short,
+// vhost_config and under_attack (the Under-Attack state as the tick evaluates
+// it, operator override included). Each is re-noted on every cycle it is
+// active with a short TTL (autoSourceNoteTTL) and dropped the cycle it turns
+// off, so the tier ends with the source or the vhost challenge, whichever
+// goes first — no missed transition can leave a stale v2 — and a forced
+// `attack on` on a host no vhost challenge covers arms nothing. The entry's
+// single sticky Reason (which a manual arm or the config list relabels) is
+// never read for arming.
 //
 // The grain stays "vhost" (v2=vhost on the solve line): the good-bot waiver
 // applies exactly as for a manual v2 arm, and the src= field already names
@@ -127,7 +131,18 @@ type vhostV2Tier struct {
 	Trigger string
 	// Pin is the host's tier pin ("v1" / "v2") when one exists, reported even
 	// when a manual arm outranks it, so a surface can show it is parked there.
-	Pin string
+	// PinActor is who set it ("admin" / "scoped" / "" internal) — a scoped
+	// caller may change only a pin a scoped caller set.
+	Pin      string
+	PinActor string
+}
+
+// pinLockedFor reports whether the host's pin is out of reach for a caller
+// with this scope: a scoped caller may not change an operator's pin (the API
+// refuses with 403 — the surfaces say so up front instead of offering a
+// control that always fails).
+func (t vhostV2Tier) pinLockedFor(scope map[string]struct{}) bool {
+	return scope != nil && t.Pin != "" && t.PinActor != actorFromScope(scope)
 }
 
 // challengeV2VhostTier is the ONE vhost-tier resolver (see the file header).
@@ -138,19 +153,19 @@ type vhostV2Tier struct {
 // operator-pinned-v2 vhost — the way down is a v1 pin or the manual arm's own
 // v2→v1 switch on a host no automatic source covers.
 //
-// Cost: it runs on EVERY scored solve (challengeV2ArmGrain's vhost grain), so
-// it takes no new exclusive lock beyond one: the manual store's mutex (the
-// manual tier always took it), one pin-store RLock and one bridge RLock (the
-// same vhost-entry read the src= snapshot does, plus the noted sources). The
-// Under-Attack tracker's lock only when a vhost challenge covers the host and
-// under_attack is armed.
+// Cost: it runs on EVERY scored solve (challengeV2ArmGrain's vhost grain). The
+// only exclusive lock is the manual store's mutex, taken as the manual tier
+// always took it (manualRungTarget: the host, then the apex; then the rung).
+// Beyond that: one pin-store RLock and one bridge RLock (the same vhost-entry
+// read the src= snapshot does, plus the noted sources). Under-Attack costs
+// nothing here — it is a note like every other source.
 func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 	var t vhostV2Tier
 	if e == nil || host == "" {
 		return t
 	}
 	pin, _ := e.tierPins.covering(host, time.Now())
-	t.Pin = pin.Rung
+	t.Pin, t.PinActor = pin.Rung, pin.Actor
 	manual := false
 	if target := e.manualRungTarget(host); target != "" {
 		manual = true
@@ -183,29 +198,21 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 }
 
 // autoV2Trigger names the automatic source covering host, or "" when none
-// does. It needs a live vhost challenge on the host (a bridge entry): with
-// none, nothing is automatic about the host — so an operator `attack on` on a
-// host nothing challenges arms nothing, and the tier always ends with the
-// vhost challenge.
-//
-// Then, strongest first: Under-Attack when it is armed (the challenge is being
-// defeated); else the first ARMED source among the automatic sources the tick
-// noted on the entry (vhAuto: suspicious_vhost, uniqpaths_short, vhost_config
-// — each noted while active and with its own lifetime, so the entry's single
-// sticky Reason, which a manual arm or the config list relabels, can neither
-// hide an armed source nor keep a stale one); else the first noted source
-// (reported, unarmed); else the entry's own reason ("vhost" for an edge-pushed
-// entry without one, never armed; "" for a manual arm's).
+// does: the first ARMED source among those the tick has noted on the live
+// vhost challenge covering host, else the first noted one (reported,
+// unarmed). With no live vhost challenge, or no live note, there is no
+// automatic source — the entry's own sticky Reason is never used to arm (it
+// can outlive the source that wrote it). Every source, Under-Attack included,
+// is re-noted by the tick on each cycle it is active and lapses within
+// autoSourceNoteTTL once it is not, so the tier can never outlive either the
+// vhost challenge or the source.
 func (e *Engine) autoV2Trigger(host string) string {
 	if e.nginxBridge == nil {
 		return ""
 	}
-	reason, sources, ok := e.nginxBridge.vhostAutoSources(host)
+	sources, ok := e.nginxBridge.vhostAutoSources(host)
 	if !ok {
 		return ""
-	}
-	if e.autoV2Armed[autoV2UnderAttack] && e.underAttackCovering(host) {
-		return autoV2UnderAttack
 	}
 	for _, src := range sources {
 		if e.autoV2Armed[src] {
@@ -215,55 +222,53 @@ func (e *Engine) autoV2Trigger(host string) string {
 	if len(sources) > 0 {
 		return sources[0]
 	}
-	switch reason {
-	case "manual":
-		return ""
-	case "":
-		return srcVhost // edge-pushed entry: no source named, never armed
-	}
-	return reason
+	return ""
 }
 
-// underAttackCovering reports Under-Attack on host, or on its apex for a www.
-// host (the apex/www resolution the manual tier uses too).
-func (e *Engine) underAttackCovering(host string) bool {
-	if on, _, _ := e.VhostAttackState(host); on {
-		return true
+// autoSourceNoteTTL is how long one tick's note of an active automatic source
+// lives: a few ticks (so a slow cycle never flaps the tier), bounded to
+// [30s, 5m] (so a source the tick stops seeing lapses quickly).
+func (e *Engine) autoSourceNoteTTL() time.Duration {
+	ttl := 6 * e.cfg.Every
+	if ttl < 30*time.Second {
+		ttl = 30 * time.Second
 	}
-	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
-		on, _, _ := e.VhostAttackState(apex)
-		return on
+	if ttl > 5*time.Minute {
+		ttl = 5 * time.Minute
 	}
-	return false
+	return ttl
 }
 
 // autoSourceOrder is the order vhostAutoSources reports noted sources in —
-// fixed, so equal situations always resolve the same way.
-var autoSourceOrder = [...]string{autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig}
+// strongest first (Under-Attack: the challenge is being defeated) and fixed,
+// so equal situations always resolve the same way.
+var autoSourceOrder = [...]string{autoV2UnderAttack, autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig}
 
-// vhostAutoSources returns, for the live vhost-wide CHALLENGE entry covering
-// host (the one vhost matcher, vhostEntryKeyLocked), its reason and the
-// automatic sources the tick has noted on it and that are still live. One
-// RLock.
-func (b *NginxBridge) vhostAutoSources(host string) (reason string, sources []string, ok bool) {
+// vhostAutoSources returns the live automatic sources noted for host — on
+// the host's own key or the key of the vhost entry covering it — provided a
+// live vhost-wide CHALLENGE entry covers host (the one vhost matcher,
+// vhostEntryKeyLocked); ok=false when none does. One RLock.
+func (b *NginxBridge) vhostAutoSources(host string) (sources []string, ok bool) {
 	if b == nil || host == "" {
-		return "", nil, false
+		return nil, false
 	}
 	now := time.Now()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	key, h, found := b.vhostEntryKeyLocked(host, now)
 	if !found || h.Action != "challenge" {
-		return "", nil, false
+		return nil, false
 	}
-	if noted := b.vhAuto[key]; len(noted) > 0 {
-		for _, src := range autoSourceOrder {
-			if exp, live := noted[src]; live && exp.After(now) {
+	for _, src := range autoSourceOrder {
+		if exp, live := b.vhAuto[host][src]; live && exp.After(now) {
+			sources = append(sources, src)
+		} else if key != host {
+			if exp, live := b.vhAuto[key][src]; live && exp.After(now) {
 				sources = append(sources, src)
 			}
 		}
 	}
-	return strings.TrimSpace(h.Reason), sources, true
+	return sources, true
 }
 
 // ── Tier pins ───────────────────────────────────────────────────────────────
@@ -489,20 +494,13 @@ func (s *tierPinStore) saveLocked() {
 
 // ── Engine surface ──────────────────────────────────────────────────────────
 
-// SetChallengeTierPinAs pins host's automatic-challenge tier (rung "v1" |
-// "v2", ttl <= 0 = until cleared), or clears the pin covering it (rung ""),
-// recording the actor — the unguarded (operator/internal) entry point.
-// Returns the host acted on, the previous pin rung and whether anything
-// changed; a no-op writes no audit row, log line or state file. Nothing
-// reaches the edge: the tier is read live at verify.
-func (e *Engine) SetChallengeTierPinAs(host, rung string, ttl time.Duration, actor string) (target, prev string, changed bool) {
-	target, prev, changed, _ = e.setChallengeTierPin(host, rung, ttl, actor, nil, nil)
-	return target, prev, changed
-}
-
-// setChallengeTierPin is SetChallengeTierPinAs with the API handler's guards
-// (see tierPinStore.apply), evaluated in the same critical section as the
-// write.
+// setChallengeTierPin pins host's automatic-challenge tier (rung "v1" | "v2",
+// ttl <= 0 = until cleared), or clears the pin covering it (rung ""),
+// recording the actor, with the API handler's guards (tierPinStore.apply)
+// evaluated in the same critical section as the write. Returns the host acted
+// on, the previous pin rung, whether anything changed, and a refusal. A no-op
+// writes no audit row, log line or state file. Nothing reaches the edge: the
+// tier is read live at verify.
 func (e *Engine) setChallengeTierPin(host, rung string, ttl time.Duration, actor string,
 	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string) {
 	target, prev, changed, refusal = e.tierPins.apply(host, rung, ttl, actor, allowTarget, protect)

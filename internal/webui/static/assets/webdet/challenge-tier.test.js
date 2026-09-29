@@ -11,6 +11,7 @@ import {
   tierSwitchTarget,
   tierTitle,
   tierUnpinRequest,
+  tierUnpinnable,
 } from "./challenge-tier.js";
 
 const autoV2 = { auto_active: true, rung: "v2", rung_source: "auto", rung_trigger: "suspicious_vhost" };
@@ -51,6 +52,14 @@ test("a manual v1 arm under an automatic v2 drops back by PIN, not by re-tiering
   assert.equal(tierSwitchTarget(s, "a.gr"), "v1");
   assert.deepEqual(tierSwitchRequest("a.gr", s, "v1"), { path: "v1/challenge/vhost/tier", body: { host: "a.gr", rung: "v1" } });
   assert.equal(tierButtonLabel(s, "a.gr"), "→ v1 (pin)");
+});
+
+test("a customer sees no pin controls on the operator's pin", () => {
+  const locked = { ...pinnedV1, rung_pin_locked: true };
+  assert.equal(tierSwitchTarget(locked, "a.gr"), "");
+  assert.ok(!tierUnpinnable(locked));
+  assert.ok(tierUnpinnable(pinnedV1));
+  assert.match(tierTitle(locked), /server operator/);
 });
 
 test("no pin button when the daemon resolved no automatic source", () => {

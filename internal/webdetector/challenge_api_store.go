@@ -41,6 +41,10 @@ type ChallengeVhostState struct {
 	RungSource  string `json:"rung_source,omitempty"`
 	RungTrigger string `json:"rung_trigger,omitempty"`
 	RungPin     string `json:"rung_pin,omitempty"`
+	// RungPinLocked: the pin was set by the operator and the CALLER is a
+	// scoped token, which may not change it (set per request, scoped reads
+	// only).
+	RungPinLocked bool `json:"rung_pin_locked,omitempty"`
 
 	Score     float64  `json:"score"`
 	OnThresh  float64  `json:"on_threshold"`

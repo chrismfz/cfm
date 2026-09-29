@@ -51,6 +51,8 @@ export function tierSwitchTarget(s, host) {
   // (rung_source auto|pin): a row the store calls auto-active but whose
   // tier resolved to no source would take a pin that changes nothing.
   if (s.rung_source !== "auto" && s.rung_source !== "pin") return "";
+  // The operator's pin, seen by a customer token: the write would 403.
+  if (s.rung_pin_locked) return "";
   return effectiveTier(s) === "v2" ? "v1" : "v2";
 }
 
@@ -67,6 +69,12 @@ export function tierUnpinRequest(host) {
 
 export function tierPinned(s) {
   return Boolean(s && s.rung_source === "pin");
+}
+
+// tierUnpinnable: the "↺ auto" control — a pin decides the tier and the
+// caller may change it (not a customer looking at the operator's pin).
+export function tierUnpinnable(s) {
+  return tierPinned(s) && !s.rung_pin_locked;
 }
 
 // tierSuffix: the short tag the mode pill carries (" · v2", " · v1 pinned").
@@ -92,6 +100,7 @@ export function tierTitle(s) {
       (effectiveTier(s) === "v2" ? "" : " — not armed");
   }
   let out = `Tier ${t} — ${why}`;
+  if (s.rung_pin_locked) out += ". The pin was set by the server operator — ask them to change it.";
   if (s.rung_pin && s.rung_source !== "pin") out += `. A ${s.rung_pin} pin is parked here (applies to automatic challenges only).`;
   return out;
 }

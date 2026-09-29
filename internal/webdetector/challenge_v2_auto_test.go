@@ -14,6 +14,13 @@ import (
 	core "cfm/internal/detectors/core"
 )
 
+// SetChallengeTierPinAs is the unguarded pin write the tests use (the API
+// handler calls setChallengeTierPin with its scope/operator guards).
+func (e *Engine) SetChallengeTierPinAs(host, rung string, ttl time.Duration, actor string) (target, prev string, changed bool) {
+	target, prev, changed, _ = e.setChallengeTierPin(host, rung, ttl, actor, nil, nil)
+	return target, prev, changed
+}
+
 // Auto-v2: an AUTOMATIC vhost challenge runs at the v2 tier when its source is
 // in CHALLENGE_V2_AUTO_VHOST, a per-host tier pin overrides that, a manual v2
 // arm is v2 and a manual v1 arm never downgrades — all through the one
@@ -31,10 +38,36 @@ func newAutoV2TestEngine(t *testing.T, armed ...string) *Engine {
 	return e
 }
 
+// setVhostEntry installs a live vhost challenge entry. When reason names an
+// automatic source it also notes that source on the entry, as the tick does
+// every cycle the source is active (only noted sources can arm).
 func setVhostEntry(e *Engine, host, reason string) {
 	e.nginxBridge.mu.Lock()
 	e.nginxBridge.vhState[host] = bridgeVhostEntry{Action: "challenge", Expires: time.Now().Add(time.Hour), Reason: reason}
 	e.nginxBridge.mu.Unlock()
+	switch reason {
+	case autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig:
+		noteSource(e, host, reason)
+	}
+}
+
+// noteSource writes a live source note directly (independent of whether the
+// bridge has a socket, unlike NoteVhostAutoSource).
+func noteSource(e *Engine, host, src string) {
+	b := e.nginxBridge
+	b.mu.Lock()
+	if b.vhAuto[host] == nil {
+		b.vhAuto[host] = map[string]time.Time{}
+	}
+	b.vhAuto[host][src] = time.Now().Add(time.Hour)
+	b.mu.Unlock()
+}
+
+func dropSource(e *Engine, host, src string) {
+	b := e.nginxBridge
+	b.mu.Lock()
+	delete(b.vhAuto[host], src)
+	b.mu.Unlock()
 }
 
 func TestParseChallengeV2AutoVhost(t *testing.T) {
@@ -91,10 +124,16 @@ func TestChallengeV2VhostTier_KnobArmsAutomaticSources(t *testing.T) {
 	if tier := e.challengeV2VhostTier("listed.gr"); tier.Rung != "" || tier.Source != tierSourceAuto || tier.Trigger != "vhost_config" {
 		t.Fatalf("unarmed source must stay v1: %+v", tier)
 	}
-	// An entry the edge pushed without a reason names no source and never arms.
+	// An entry with no noted source — edge-pushed, or whose source the tick
+	// stopped noting — is not automatic: its sticky Reason never arms.
 	setVhostEntry(e, "edge.gr", "")
-	if tier := e.challengeV2VhostTier("edge.gr"); tier.Rung != "" || tier.Trigger != "vhost" {
+	if tier := e.challengeV2VhostTier("edge.gr"); tier != (vhostV2Tier{}) {
 		t.Fatalf("reason-less entry: %+v", tier)
+	}
+	setVhostEntry(e, "stale.gr", "suspicious_vhost")
+	dropSource(e, "stale.gr", autoV2SuspiciousVhost)
+	if tier := e.challengeV2VhostTier("stale.gr"); tier != (vhostV2Tier{}) {
+		t.Fatalf("sticky reason without a live note must not arm: %+v", tier)
 	}
 	// A bridge entry left by a manual arm is not an automatic source once
 	// the manual arm itself is gone.
@@ -183,7 +222,6 @@ func TestChallengeV2VhostTier_PinAndManualPrecedence(t *testing.T) {
 
 func TestChallengeV2VhostTier_ManualV1NeverDowngrades(t *testing.T) {
 	e := newAutoV2TestEngine(t, autoV2SuspiciousVhost, autoV2UnderAttack)
-	e.attack = newUnderAttackTracker()
 	// A tier-less "Challenge" click on an auto-v2 host relabels the entry
 	// "manual"; the tick keeps noting the scorer's source on it.
 	e.nginxBridge.NoteVhostAutoSource("busy.gr", autoV2SuspiciousVhost, time.Hour)
@@ -202,7 +240,7 @@ func TestChallengeV2VhostTier_ManualV1NeverDowngrades(t *testing.T) {
 	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "" || tier.Source != tierSourceManual {
 		t.Fatalf("manual v1 alone after the source dropped: %+v", tier)
 	}
-	e.SetVhostAttackOverride("busy.gr", true, time.Now(), 0)
+	noteSource(e, "busy.gr", autoV2UnderAttack)
 	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "v2" || tier.Trigger != autoV2UnderAttack {
 		t.Fatalf("manual v1 under attack: %+v", tier)
 	}
@@ -262,20 +300,15 @@ func TestChallengeV2VhostTier_SourceNotes(t *testing.T) {
 
 func TestChallengeV2VhostTier_UnderAttackArms(t *testing.T) {
 	e := newAutoV2TestEngine(t, autoV2UnderAttack)
-	e.attack = newUnderAttackTracker()
 	setVhostEntry(e, "hit.gr", "vhost_config") // not in the set on its own
 
 	if tier := e.challengeV2VhostTier("hit.gr"); tier.Rung != "" {
 		t.Fatalf("before under-attack: %+v", tier)
 	}
-	e.SetVhostAttackOverride("hit.gr", true, time.Now(), 0)
+	// The tick notes under_attack each cycle it evaluates the state ON.
+	noteSource(e, "hit.gr", autoV2UnderAttack)
 	if tier := e.challengeV2VhostTier("hit.gr"); tier.Rung != "v2" || tier.Trigger != autoV2UnderAttack {
 		t.Fatalf("under-attack must arm v2: %+v", tier)
-	}
-	// Covers the www variant of an under-attack apex.
-	setVhostEntry(e, "www.hit.gr", "vhost_config")
-	if tier := e.challengeV2VhostTier("www.hit.gr"); tier.Rung != "v2" {
-		t.Fatalf("under-attack apex must cover www: %+v", tier)
 	}
 	// An operator's v1 pin still wins (the emergency "drop it back").
 	e.SetChallengeTierPinAs("hit.gr", "v1", 0, "admin")
@@ -286,27 +319,25 @@ func TestChallengeV2VhostTier_UnderAttackArms(t *testing.T) {
 
 	// A forced `attack on` with NO vhost challenge arms nothing: the tier
 	// must end with the vhost challenge, never outlive it.
-	e.SetVhostAttackOverride("forced.gr", true, time.Now(), 0)
+	noteSource(e, "forced.gr", autoV2UnderAttack)
 	if tier := e.challengeV2VhostTier("forced.gr"); tier != (vhostV2Tier{}) {
 		t.Fatalf("under-attack without a vhost challenge must not arm: %+v", tier)
 	}
-	// Nor after the vhost challenge clears while the state lingers.
-	e.nginxBridge.mu.Lock()
-	delete(e.nginxBridge.vhState, "www.hit.gr")
-	e.nginxBridge.mu.Unlock()
-	if tier := e.challengeV2VhostTier("www.hit.gr"); tier.Rung != "" || tier.Source != "" {
-		t.Fatalf("cleared vhost challenge under attack: %+v", tier)
-	}
 
-	// under_attack not in the set: the state alone does not arm, the bridge
-	// source is reported instead.
+	// under_attack not in the set: the state alone does not arm, the other
+	// noted source is reported instead (strongest-first order: UA listed
+	// first, but only an ARMED source wins).
 	e.autoV2Armed = map[string]bool{}
-	if tier := e.challengeV2VhostTier("hit.gr"); tier.Rung != "" || tier.Trigger != "vhost_config" {
+	if tier := e.challengeV2VhostTier("hit.gr"); tier.Rung != "" || tier.Trigger != autoV2UnderAttack {
 		t.Fatalf("under_attack unarmed: %+v", tier)
 	}
-	// Forced off: back to the bridge source.
+	e.autoV2Armed = map[string]bool{autoV2VhostConfig: true}
+	if tier := e.challengeV2VhostTier("hit.gr"); tier.Rung != "v2" || tier.Trigger != autoV2VhostConfig {
+		t.Fatalf("armed vhost_config beside unarmed under_attack: %+v", tier)
+	}
+	// The state leaves (the tick stops noting it): back to the other source.
 	e.autoV2Armed = map[string]bool{autoV2UnderAttack: true}
-	e.SetVhostAttackOverride("hit.gr", false, time.Now(), 0)
+	dropSource(e, "hit.gr", autoV2UnderAttack)
 	if tier := e.challengeV2VhostTier("hit.gr"); tier.Rung != "" || tier.Trigger != "vhost_config" {
 		t.Fatalf("attack off: %+v", tier)
 	}
@@ -516,6 +547,28 @@ func TestChallengeVhostStatus_ReportsAutoTier(t *testing.T) {
 		t.Fatalf("status after v1 pin: %v", st)
 	}
 
+	// A scoped caller is told when the pin is the operator's (its write
+	// would 403); an admin, or a tenant's own pin, is not locked.
+	status := func(r *http.Request) map[string]any {
+		rr := httptest.NewRecorder()
+		e.handleChallengeVhostStatus(rr, r)
+		var m map[string]any
+		_ = json.Unmarshal(rr.Body.Bytes(), &m)
+		return m
+	}
+	setVhostEntry(e, "tenant-a.example.com", "suspicious_vhost")
+	e.SetChallengeTierPinAs("tenant-a.example.com", "v2", 0, "admin")
+	if m := status(scopedAddReq("/api/v1/challenge/vhost/status?host=tenant-a.example.com")); m["rung_pin_locked"] != true {
+		t.Fatalf("scoped view of an operator pin must be locked: %v", m)
+	}
+	if m := status(httptest.NewRequest(http.MethodGet, "/api/v1/challenge/vhost/status?host=tenant-a.example.com", nil)); m["rung_pin_locked"] != false {
+		t.Fatalf("admin view must not be locked: %v", m)
+	}
+	e.SetChallengeTierPinAs("tenant-a.example.com", "v1", time.Hour, "scoped")
+	if m := status(scopedAddReq("/api/v1/challenge/vhost/status?host=tenant-a.example.com")); m["rung_pin_locked"] != false {
+		t.Fatalf("a tenant's own pin must not be locked for it: %v", m)
+	}
+
 	var row ChallengeVhostState
 	row.decorateTier(e.challengeV2VhostTier("busy.gr"))
 	b, _ := json.Marshal(row)
@@ -579,6 +632,24 @@ func TestEmitIPChallenges_NotesAutoSourcesForAutoV2(t *testing.T) {
 	e.emitIPChallenges(time.Now(), make(chan core.Alert, 16))
 	if tier := e.challengeV2VhostTier(host); tier.Rung != "v2" || tier.Trigger != autoV2SuspiciousVhost {
 		t.Fatalf("manual v1 arm hid the scorer source: %+v", tier)
+	}
+
+	// Under-Attack forced on: the tick evaluates it and notes under_attack,
+	// the strongest source (armed here alongside suspicious_vhost).
+	e.cfg.UnderAttack = true
+	e.cfg.UnderAttackHolddown = 30 * time.Minute
+	e.attack = newUnderAttackTracker()
+	e.autoV2Armed[autoV2UnderAttack] = true
+	e.SetVhostAttackOverride(host, true, time.Now(), 0)
+	e.emitIPChallenges(time.Now(), make(chan core.Alert, 16))
+	if tier := e.challengeV2VhostTier(host); tier.Rung != "v2" || tier.Trigger != autoV2UnderAttack {
+		t.Fatalf("tick did not note under_attack: %+v", tier)
+	}
+	// Forced off: the next cycle drops it.
+	e.SetVhostAttackOverride(host, false, time.Now(), 0)
+	e.emitIPChallenges(time.Now(), make(chan core.Alert, 16))
+	if tier := e.challengeV2VhostTier(host); tier.Trigger == autoV2UnderAttack {
+		t.Fatalf("under_attack note survived attack off: %+v", tier)
 	}
 
 	// The scorer turns off (no holddown left, empty long window → score 0):

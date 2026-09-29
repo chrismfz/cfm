@@ -6,6 +6,7 @@ import {
   effectiveTier,
   tierPinned,
   tierSwitchIsPin,
+  tierUnpinnable,
   tierSwitchRequest,
   tierSwitchTarget,
   tierTitle,
@@ -359,7 +360,7 @@ export const controlsMixin = {
       return Boolean(this.panicSwitchTarget()) && tierSwitchIsPin(this.panicStatus || {});
     },
     panicTierPinned() {
-      return tierPinned(this.panicStatus || {});
+      return tierUnpinnable(this.panicStatus || {});
     },
     async panicSwitchTier() {
       const host = String(this.panicHost || "").trim();

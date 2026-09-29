@@ -178,7 +178,9 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 	v.CostPressure = CostShadowPressure(v.Host)
 	v.DCFraction = DCFracShadowPercent(v.Host)
 	v.State = e.deriveVhostState(&v, now)
-	v.decorateTier(e.challengeV2VhostTier(v.Host))
+	tier := e.challengeV2VhostTier(v.Host)
+	v.decorateTier(tier)
+	v.RungPinLocked = tier.pinLockedFor(vhostScopeFromContext(r.Context()))
 	writeJSON(w, http.StatusOK, v)
 }
 

@@ -451,26 +451,10 @@ func (e *Engine) manualChallengeCovering(host string) (bool, time.Time, string) 
 	return false, time.Time{}, ""
 }
 
-// manualChallengeRung returns the tier ("v2" or "") of the manual challenge
-// covering host, with the SAME resolution as manualChallengeCovering: the
-// host's own active arm first, else the apex's for a www. host — a v2 arm on
-// "example.com" gates "www.example.com" solves too (the bridge installs
-// entries for both). The MOST SPECIFIC arm wins, including a plain one: a www
-// host with its own v1 arm is v1 even under a v2 apex. (This used to skip an
-// exact arm whose rung was "" and fall through to the apex, so re-tiering the
-// www arm to v1 answered 200 while the gate kept enforcing v2 — review
-// finding.) "" when nothing v2-armed covers host.
-func (e *Engine) manualChallengeRung(host string) string {
-	if target := e.manualRungTarget(host); target != "" {
-		return e.manualChal.rung(target)
-	}
-	return ""
-}
-
 // manualRungTarget is the host whose manual arm covers host (manualChallenge-
 // Covering's resolution): host itself when it has an active arm, else its
-// apex for a www. host, else "". The ONE resolver for both reading the tier
-// (manualChallengeRung) and changing it (SetManualChallengeRungAs).
+// apex for a www. host, else "". The ONE resolver for both reading the manual
+// arm's tier (challengeV2VhostTier) and changing it (SetManualChallengeRungAs).
 func (e *Engine) manualRungTarget(host string) string {
 	if ok, _, _ := e.manualChal.active(host); ok {
 		return host

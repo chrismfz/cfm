@@ -899,15 +899,20 @@ bypass of an operator's v2 pin). The way down is a v1 pin.
 The automatic source needs a live bridge vhost entry — the SAME entry and
 matcher `src=vhost:<reason>` reads (`vhostEntryLocked`). The entry's single
 sticky reason can't name it (a manual arm and a `CHALLENGE_VHOST` list match
-both relabel the entry), so the tick NOTES every active automatic source on
-the entry (`NoteVhostAutoSource`: `suspicious_vhost`, `uniqpaths_short`,
-`vhost_config`), each with the lifetime of the challenge it accompanies, and
-drops it the cycle the source turns off; the first ARMED noted source wins.
-One bridge RLock at verify, no scorer lock. Under-Attack
-(`VhostAttackState`, incl. an operator `attack on`) only re-names that
-source: with no live vhost challenge it arms nothing, so the tier always
-ends with the vhost challenge. The UNDER_ATTACK transition line carries
-`tier=` so the log says whether entering the state armed v2. The grain stays `v2=vhost`, so the
+both relabel it, and it can outlive the source that wrote it), so it is never
+read for arming. Instead the tick NOTES each active automatic source on the
+entry (`NoteVhostAutoSource`: `under_attack` — the state as the tick
+evaluates it, operator `attack on` included — `suspicious_vhost`,
+`uniqpaths_short`, `vhost_config`), re-noting it EVERY cycle it is active
+with a short TTL (6 ticks, 30 s–5 min) and dropping it the cycle it turns
+off. A cycle that never reaches the host (an exclude/ignore `continue`, a
+host that left the candidate set, a stalled tick) just stops re-noting, and
+the source lapses: no missed transition can leave a stale v2. Notes die with
+their entry, so a forced `attack on` on a host nothing challenges arms
+nothing. The first ARMED noted source wins (strongest first: under_attack,
+suspicious_vhost, uniqpaths_short, vhost_config). One bridge RLock at
+verify — no scorer or Under-Attack lock. The UNDER_ATTACK transition line
+carries `tier=` so the log says whether entering the state armed v2. The grain stays `v2=vhost`, so the
 good-bot waiver applies exactly as for a manual v2 arm, and `src=` says
 which vhost source covered the solve.
 
@@ -919,7 +924,8 @@ challenge and does nothing while no automatic challenge covers the host.
 Persisted (`webdetector_challenge_tier_pins.json`), because every config
 reload restarts the daemon and a lost v1 pin would silently re-arm the host.
 Scoped tokens may pin their own vhosts, TTL-capped at 24h, and may not
-replace, clear or shadow a pin the operator set. Audited as
+replace, clear or shadow a pin the operator set (the status read carries
+`rung_pin_locked` so their page hides controls that would 403). Audited as
 `challenge_vhost_tier_pin` (`from`/`rung`/`actor`, a no-op writes nothing).
 
 **Under-Attack's first consequence.** I1 stays detect-only for its action

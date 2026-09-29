@@ -5,12 +5,12 @@
 import {
   tierButtonLabel,
   tierButtonTitle,
-  tierPinned,
   tierSuffix,
   tierSwitchRequest,
   tierSwitchTarget,
   tierTitle,
   tierUnpinRequest,
+  tierUnpinnable,
 } from "./challenge-tier.js";
 
 export const challengeMixin = {
@@ -65,6 +65,7 @@ export const challengeMixin = {
           rung_source: String(row.rung_source || ""),
           rung_trigger: String(row.rung_trigger || ""),
           rung_pin: String(row.rung_pin || ""),
+          rung_pin_locked: Boolean(row.rung_pin_locked),
         };
       }
       return byHost;
@@ -124,6 +125,7 @@ export const challengeMixin = {
           rung_source: String(status.rung_source || ""),
           rung_trigger: String(status.rung_trigger || ""),
           rung_pin: String(status.rung_pin || ""),
+          rung_pin_locked: Boolean(status.rung_pin_locked),
           reason: status.reason,
           expires_at: status.expires_at,
           auto_since: status.auto_since,
@@ -199,7 +201,7 @@ export const challengeMixin = {
       return tierButtonTitle(this.activeChallengeByHost[host] || {}, host);
     },
     challengeTierPinned(host) {
-      return tierPinned(this.activeChallengeByHost[host] || {});
+      return tierUnpinnable(this.activeChallengeByHost[host] || {});
     },
     async toggleChallengeTier(host) {
       const s = this.activeChallengeByHost[host] || {};
