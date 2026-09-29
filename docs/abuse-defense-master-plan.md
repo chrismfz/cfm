@@ -623,14 +623,19 @@ already opened.
              above measured with. The humans auto-v2 would reject clear them
              (41 / 714, 7 / 729, 74 / 3 149), and no failing farm solve in
              the corpus did. They are deliberately low. The honest limit:
-             the counts are client-authored (a bot can post any numbers, the
-             page counts script-dispatched events too, and CDP-dispatched
-             pointer events are trusted ones anyway). Kill switch:
+             the counts are client-authored (a bot can post any numbers, and
+             CDP-dispatched pointer events are trusted ones; since step 2 the
+             page counts trusted events only). Kill switch:
              `CHALLENGE_V2_INPUT_RESCUE = 0`.
-          2. **Next, log-only:** trajectory readings on the page (untrusted
-             events, coalesced events, path straightness, inter-event timing
-             jitter, the largest jump) in `sig=`. They are the corpus that
-             would tighten the rescue before any of it scores.
+          2. **Shipped, log-only:** trajectory readings on the page in
+             `sig=`: `ut` (untrusted events), `co` (coalesced samples), `st`
+             (path straightness), `dj` (inter-event timing jitter), `mj` (the
+             largest single-event jump) and `pd` (movement duration). They are
+             scored by nothing: the corpus that would tighten the rescue is
+             read before any of it decides anything. The one change to an
+             input: `ptr`/`mv` (and so the rescue and `no_input`) now count
+             only trusted events — a script-dispatched event is never a
+             person's, and `ut` counts those instead.
           3. **Then** the Rung-2 confirm fallback (candidate 4). Its click
              offset and approach path are measured the same way before they
              decide anything.

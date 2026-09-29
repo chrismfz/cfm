@@ -2239,10 +2239,43 @@ func challengeHTML() string {
       if (ex) HS.glr = String(gl.getParameter(ex.UNMASKED_RENDERER_WEBGL) || '').slice(0, 128);
     }
   } catch (e) {}
+  // Trajectory readings (2026-09-29, E4 β2): CORPUS ONLY, scored by nothing.
+  // They describe the pointer path the ptr/mv counts summarise, so the
+  // real-input rescue can later be tightened from measured distributions:
+  // ut = untrusted (script-dispatched) events, excluded from everything
+  // else; co = coalesced samples behind
+  // the delivered events, st = straightness (net displacement / path length),
+  // dj = inter-event timing jitter (coefficient of variation), mj = the
+  // largest single-event movement, pd = ms from the first event to the last.
+  // Each is reported only once the events that define it happened (st needs
+  // a path, dj three intervals), and co only where the browser has the API.
+  var TR = { n: 0, ut: 0, co: 0, cok: false, mj: 0, fx: 0, fy: 0, ft: 0,
+             lx: 0, ly: 0, lt: 0, path: 0, dn: 0, ds: 0, ds2: 0 };
   try {
     window.addEventListener('pointermove', function (ev) {
+      // A script-dispatched event is never a person's: counted apart (ut),
+      // never as input — ptr/mv and every reading below are trusted events
+      // only. (A CDP-dispatched event IS trusted; that residual stays.)
+      if (ev.isTrusted === false) { TR.ut++; return; }
       HS.ptr++;
-      HS.mv += Math.abs(ev.movementX || 0) + Math.abs(ev.movementY || 0);
+      var dmv = Math.abs(ev.movementX || 0) + Math.abs(ev.movementY || 0);
+      HS.mv += dmv;
+      try {
+        if (typeof ev.getCoalescedEvents === 'function') {
+          TR.cok = true;
+          TR.co += ev.getCoalescedEvents().length;
+        }
+        if (dmv > TR.mj) TR.mj = dmv;
+        var x = ev.clientX, y = ev.clientY, t = ev.timeStamp;
+        if (TR.n === 0) {
+          TR.fx = x; TR.fy = y; TR.ft = t;
+        } else {
+          TR.path += Math.sqrt((x - TR.lx) * (x - TR.lx) + (y - TR.ly) * (y - TR.ly));
+          var dt = t - TR.lt;
+          if (dt >= 0) { TR.dn++; TR.ds += dt; TR.ds2 += dt * dt; }
+        }
+        TR.n++; TR.lx = x; TR.ly = y; TR.lt = t;
+      } catch (e) {}
     }, { passive: true });
     window.addEventListener('touchstart', function () { HS.tch++; }, { passive: true });
     window.addEventListener('keydown', function () { HS.key++; }, { passive: true });
@@ -2256,7 +2289,27 @@ func challengeHTML() string {
     };
     requestAnimationFrame(rafStep);
   } catch (e) {}
+  function r2(v){ return Math.round(v * 100) / 100; }
   function hsBody(){
+    try {
+      if (TR.n > 0 || TR.ut > 0) HS.ut = TR.ut;
+      if (TR.n > 0) {
+        HS.mj = r2(TR.mj);
+        if (TR.cok) HS.co = TR.co;
+      }
+      if (TR.n > 1) {
+        HS.pd = Math.round(TR.lt - TR.ft);
+        if (TR.path > 0) {
+          var nx = TR.lx - TR.fx, ny = TR.ly - TR.fy;
+          HS.st = r2(Math.sqrt(nx * nx + ny * ny) / TR.path);
+        }
+      }
+      if (TR.dn >= 3 && TR.ds > 0) {
+        var mean = TR.ds / TR.dn;
+        var vr = TR.ds2 / TR.dn - mean * mean;
+        HS.dj = r2(Math.sqrt(vr > 0 ? vr : 0) / mean);
+      }
+    } catch (e) {}
     try { return JSON.stringify(HS); } catch (e) { return ""; }
   }
 

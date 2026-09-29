@@ -187,6 +187,17 @@ type humanitySignals struct {
 	DM  *float64 `json:"dm"`  // deviceMemory — Chrome-only, genuinely absent on Firefox/Safari
 	DPR *float64 `json:"dpr"` // devicePixelRatio
 	RAF *float64 `json:"raf"` // avg requestAnimationFrame delta ms; absent when <8 frames elapsed before submit
+	// Trajectory readings (2026-09-29, E4 β2): the pointer PATH behind the
+	// ptr/mv counts, retained like the five above and scored by NOTHING —
+	// the corpus that would tighten the real-input rescue, measured before
+	// any of it decides anything. Each is absent until the events that
+	// define it happened (see the page's collector), never a fabricated zero.
+	UT *int     `json:"ut"` // untrusted (script-dispatched) pointer-move events — excluded from ptr/mv and the rest
+	CO *int     `json:"co"` // coalesced samples behind the delivered events; absent without getCoalescedEvents
+	ST *float64 `json:"st"` // straightness: net displacement / path length (1 = one straight line); needs a path
+	DJ *float64 `json:"dj"` // inter-event timing jitter: coefficient of variation of the gaps; needs 3 gaps
+	MJ *float64 `json:"mj"` // the largest single-event |movementX|+|movementY|, px
+	PD *float64 `json:"pd"` // ms from the first pointer-move event to the last; needs 2 events
 }
 
 // Bounds for the retained readings. These exist for DIGIT SANITY only — a
@@ -640,8 +651,8 @@ func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 // Kill switch: CHALLENGE_V2_INPUT_RESCUE = 0 (challengeV2State.inputRescue).
 //
 // HONEST LIMIT: ptr/mv are client-authored like every reading. A bot can post
-// any counts, the page counts script-dispatched events too, and a pointer
-// event a farm dispatches through CDP is a trusted one anyway. A farm that
+// any counts, and a pointer event a farm dispatches through CDP is a trusted
+// one (the page counts trusted events only; script-dispatched ones go to ut). A farm that
 // learns this can fake movement — the same residual the Rung-2 confirm
 // fallback has. The thresholds are the simplest rule the corpus supports; the
 // trajectory readings planned next are the corpus that would tighten it,
@@ -807,6 +818,12 @@ func (s *humanitySignals) sanitize() {
 	dropFloat(&s.DM)
 	dropFloat(&s.DPR)
 	dropFloat(&s.RAF)
+	dropInt(&s.UT)
+	dropInt(&s.CO)
+	dropFloat(&s.ST)
+	dropFloat(&s.DJ)
+	dropFloat(&s.MJ)
+	dropFloat(&s.PD)
 }
 
 // uaClaimsMobile reports whether the UA presents itself as a touch device —
@@ -980,6 +997,15 @@ func (s *humanitySignals) sigFields() []sigField {
 	addFloat("dm", s.DM, 2) // 0.25 / 0.5 / 1 / 2 / 4 / 8 GiB buckets
 	addFloat("dpr", s.DPR, 2)
 	addFloat("raf", s.RAF, 1)
+	// Trajectory readings, after the original eight so a reader keyed on
+	// the old prefix still matches. st/dj are ratios (2 decimals); mj is
+	// movement like mv (1 decimal); pd is whole milliseconds.
+	addInt("ut", s.UT)
+	addInt("co", s.CO)
+	addFloat("st", s.ST, 2)
+	addFloat("dj", s.DJ, 2)
+	addFloat("mj", s.MJ, 1)
+	addFloat("pd", s.PD, 0)
 	return out
 }
 

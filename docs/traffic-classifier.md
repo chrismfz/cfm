@@ -1139,11 +1139,11 @@ mitigation (master plan E4, READ 2026-09-29): **real input rescues**. A failing
 score with those readings (≥ 5 events, ≥ 100 px) and no certain tell
 (webdriver, headless UA) takes the solved path under every grain, marked
 `v2_rescued=input` (`challengeV2InputRescue`; kill switch
-`CHALLENGE_V2_INPUT_RESCUE`). Trajectory readings come next, log-only, then
-the confirm fallback for the humans who did not move a pointer. The honest
-limit: the counts are client-authored — a bot can post any numbers, the page
-counts script-dispatched events too, and a CDP-dispatched pointer event is a
-trusted one anyway.
+`CHALLENGE_V2_INPUT_RESCUE`). Trajectory readings followed, log-only (and the
+page now counts trusted events only), then the confirm fallback for the
+humans who did not move a pointer. The honest limit: the counts are
+client-authored — a bot can post any numbers, and a CDP-dispatched pointer
+event is a trusted one.
 
 #### Observability contract (shadow-first; reuses existing logs — no new log, per CLAUDE.md §5)
 
@@ -1187,12 +1187,31 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `abuse_shadow`'s `humanity.rescued` says how many of a would-be arm's
   rejects it would clear. Finally `sig=` carries the report AS REPORTED —
   `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
-  `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
-  browser did not report. `dm`/`dpr`/`raf` are scored by nothing; `hc` feeds
+  `hc`, `dm`, `dpr`, `raf`, then (since 2026-09-29) the trajectory readings
+  `ut`/`co`/`st`/`dj`/`mj`/`pd` — in that fixed order, omitting any signal the
+  browser did not report. `dm`/`dpr`/`raf` and the trajectory readings are
+  scored by nothing; `hc` feeds
   `mobile_hw_lie`/`mac_hw_lie` ("Rung-1 hardware tells" above);
   `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, and
   `ptr`+`mv` decide the real-input rescue (which only ever clears), so logging
-  them makes both auditable. `result=v2_reject` lines carry `sig=` too.
+  them makes both auditable. The trajectory readings describe the pointer
+  path behind `ptr`/`mv`, so the rescue can be tightened from measured
+  distributions (master plan E4, step 2):
+  - `ut`: untrusted (script-dispatched) pointer-move events. They are
+    excluded from `ptr`/`mv` and every other reading, so the rescue and
+    `no_input` see trusted input only;
+  - `co`: coalesced samples behind the delivered events (absent where the
+    browser lacks `getCoalescedEvents`);
+  - `st`: straightness, net displacement over path length (1 = one straight
+    line; needs a path);
+  - `dj`: inter-event timing jitter, the coefficient of variation of the gaps
+    (needs 3 gaps);
+  - `mj`: the largest single-event movement, px;
+  - `pd`: ms from the first pointer-move event to the last (needs 2 events).
+
+  A CDP-dispatched event is trusted and coalesces like a real one, so none of
+  these is a tell on its own; that is what the corpus is for.
+  `result=v2_reject` lines carry `sig=` too.
   A rejected solve is never published as a solved event (it cleared nothing);
   since 2026-09-22 it writes its own `challenge_v2_reject` history row instead,
   built by the same payload builder as `challenge_solved`, so the two

@@ -577,8 +577,9 @@ collectors, guardrails D5): every solve is scored on positive-only headless
 evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
 `v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
 so a passed-under-arm solve is greppable, not mistaken for a plain v1 one;
-`sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` is the report AS
-REPORTED — dm/dpr/raf corpus-only and scored by nothing, ptr+mv decide
+`sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` (+ since 2026-09-29 the
+trajectory readings `ut,co,st,dj,mj,pd`) is the report AS
+REPORTED — dm/dpr/raf and the trajectory readings corpus-only and scored by nothing, ptr+mv decide
 the real-input rescue below (it only ever clears), hc feeds the
 corpus-measured mobile_hw_lie/mac_hw_lie tells (2026-09-23,
 `docs/traffic-classifier.md` "Rung-1 hardware tells"; scored as ONE
@@ -622,7 +623,8 @@ real pointer input (sig ptr >= 5 AND mv >= 100) and no certain tell
 row and on the unarmed would_v2 line, never on an unarmed solve line (2026-09-29,
 E4: Windows Chrome/109 PCs score exactly 100 with a software renderer and no
 window size, and a retry cannot change that; the counts are client-authored —
-posted or script-/CDP-injected movement passes too, the confirm fallback's
+posted or CDP-injected movement passes too (the page counts trusted events
+only; script-dispatched ones go to `ut`), the confirm fallback's
 residual as well; kill switch `CHALLENGE_V2_INPUT_RESCUE`) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
 enforced at verify, not at serve). The verify gate ORs four arm grains:

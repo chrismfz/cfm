@@ -69,6 +69,22 @@ back-filled here — see the git/PR history for that period.
   tier — take `under_attack` out of `CHALLENGE_V2_AUTO_VHOST` for that.
 
 ### Added
+- **The challenge page now records how the pointer moved, for measurement
+  only.** Every scored solve's `sig=` (and the history row's `sig`) gains six
+  readings after the existing ones:
+  - `ut`: script-dispatched pointer events, which are no longer counted as
+    pointer input (so they can't earn the rescue above);
+  - `co`: coalesced samples;
+  - `st`: path straightness (1 = one straight line);
+  - `dj`: timing jitter between events;
+  - `mj`: the largest single jump in px;
+  - `pd`: movement duration in ms.
+
+  Nothing scores them yet. They are the data for tightening the new
+  "real input rescues a failing solve" rule before it changes anything. A
+  reading is absent until the pointer events that define it happen. The
+  change is on the daemon-served challenge page only, with no edge or Lua
+  change.
 - **Challenge solves now say which surface they were solved on.** Every
   solve, `v2_reject` and `would_v2` line carries `scope=web` or
   `scope=panel:<port>` (the cPanel/WHM/webmail ports' own challenge). The
