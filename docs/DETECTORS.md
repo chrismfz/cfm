@@ -448,9 +448,13 @@ own (Brave by default, Cromite, ungoogled-chromium) are indistinguishable from
 plain Chrome here by construction and pass on that upstream version alone.
 
 If one ever does land here, the cost is bounded by design: **this verdict is
-corroboration, never a threshold.** It reaches a log tag, a history field and a
-counted column on two detectors' alerts — nothing blocks, throttles or challenges
-on it. The fix is to hold the offending rule, not the package.
+corroboration, never a threshold.** It reaches a log tag, a history field, a
+counted column on two detectors' alerts and +30 on the shadow `challenge_score` —
+nothing blocks, throttles or challenges on it. The fix is to hold the offending rule, not the package. **One exception
+(2026-09-29):** the rule `legacy_edge_on_modern_chrome` (an EdgeHTML `Edge/12`-`18`
+token beside Chrome/80+) is also read on its own by the ChallengeV2 scorer, as
+the tell `ua_lie` (50, in the device-claim group). Even there it can never fail
+a solve alone; see `docs/traffic-classifier.md`, "ua_lie".
 
 It is checked on every challenge solve and surfaced three ways:
 

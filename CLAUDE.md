@@ -581,8 +581,10 @@ so a passed-under-arm solve is greppable, not mistaken for a plain v1 one;
 REPORTED — mv/dm/dpr/raf corpus-only and scored by nothing, hc feeds the
 corpus-measured mobile_hw_lie/mac_hw_lie tells (2026-09-23,
 `docs/traffic-classifier.md` "Rung-1 hardware tells"; scored as ONE
-device-claim group with touch_lie — its max, once — so a single spoofed
-device never rejects alone; no core-count tell for a Windows/Linux UA — an
+device-claim group (its max, once) with touch_lie and the UA-borne ua_lie
+(a legacy Edge/12-18 token beside Chrome/80+, 2026-09-29: the one
+uaplausible rule the scorer reads, not under the kill switch below), so a
+single spoofed device never rejects alone; no core-count tell for a Windows/Linux UA — an
 RDS/VDI host is indistinguishable from a farm box; kill switch
 `CHALLENGE_V2_HW_TELLS`), ptr/tch/key
 also the no_input amplifier's inputs; absent keys = not reported, never a

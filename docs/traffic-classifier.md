@@ -667,12 +667,12 @@ counts only where it is IMPOSSIBLE for the claimed device:
 | `mobile_hw_lie` | phone/tablet UA **and** `hardwareConcurrency ≥ 16` (human mobiles report 4-10) | 0 / 1 217 mobile | 42.3% | 50 |
 | `mac_hw_lie` | Mac UA **and** `hardwareConcurrency ≥ 64` (human Macs in H topped out at 16) | 0 / 37 Mac | 15% | 50 |
 
-**The device-claim group.** `touch_lie`, `mobile_hw_lie` and `mac_hw_lie` all
-say "this is not the device the UA claims", and one spoof trips several at
-once: DevTools phone emulation or a UA switcher on a 16-thread desktop fires
+**The device-claim group.** `touch_lie`, `mobile_hw_lie`, `mac_hw_lie` and,
+since 2026-09-29, the UA-borne `ua_lie` (see "ua_lie" below) all say "this is
+not the device the UA claims", and one spoof trips several at once: DevTools phone emulation or a UA switcher on a 16-thread desktop fires
 both `touch_lie` and `mobile_hw_lie`. Summed, ONE exotic setup would reject,
 which D5b forbids. So each member that fires is LISTED in `tells=`, but the
-group adds only its strongest weight to `hs`, once. All three weigh 50, so
+group adds only its strongest weight to `hs`, once. All of them weigh 50, so
 Google-Read-Aloud still scores exactly 140. A rejection needs independent
 evidence from outside the group; in the corpus every farm solve caught
 through it also carried `sw_renderer`.
@@ -736,6 +736,57 @@ legitimately report it.
   effect fleet-wide on upgrade. H was not sampled from WAF-mark traffic
   specifically. Elsewhere the tells show on the `would_v2` line; re-run this
   measurement on the `would_v2` / `src=` data before arming v2 anywhere new.
+
+#### `ua_lie` — a legacy Edge token on a modern Chrome (2026-09-29) — adopted
+
+**What it is.** EdgeHTML, the Edge before Chromium (majors 12-18), sent an
+`Edge/<major>` token beside a Chrome/ compatibility token frozen in its own
+era: Chrome/42 on Edge 12 up to Chrome/70 on Edge 18. Chromium Edge writes
+`Edg/`. So `Edge/12`-`Edge/18` beside Chrome/80+ is neither browser. It is a
+`uaplausible` rule (`legacy_edge_on_modern_chrome`). The scorer reads the same
+matcher (`LegacyEdgeOnModernChrome`) as the device-claim member `ua_lie`
+(50, the group's max once). It is UA-borne, so it is scored even without a
+payload.
+
+**Why.** The post-deploy review of the WAF `challenge_v2` sweep found one
+scanner solving v2-armed challenges and passing. Its UA is
+`… Chrome/125.0.6422.60 Safari/537.36 Edge/12.246`. It comes from four Google
+Cloud IPs (104.197.69.115, 34.72.176.129, 34.122.147.229, 34.123.170.104) and
+probes bare server IPs (rule 602) and `webmail.` / `cpanel.` logins. It passed
+at three scores:
+- hs 90: `sw_renderer,no_input`;
+- hs 70: `outer_zero,no_input`;
+- hs 0: a clean report (hc 16, dm 32, zero input).
+
+**Corpus** (2026-09-29, 7 nodes):
+- **Every challenge-log line carrying an `Edge/1` token, ~10 days (~590 000
+  lines scanned).** Each one was that scanner. No other client, human or bot,
+  solved with such a token.
+- **WAF hits with an `Edge/1` token, 240 h (1 491 events, 207 sampled).**
+  - 156 were the scanner string.
+  - The real EdgeHTML pairings were present and are **not** flagged: 17
+    Chrome/42 + Edge/12, 2 Chrome/58 + Edge/16, and 3 Chrome/70 + Edge/18.
+    These are stale browsers, not impossible ones, the `uaplausible` line.
+  - 29 were a separate fake shape, `… Edge/119|120.x` with no Chrome/ token.
+    It is left for its own measurement.
+
+**Effect.** With the tell, the two corroborated variants fail — where a v2
+arm covers the solve (D5a; elsewhere they show as `would_v2`):
+- `ua_lie` + `sw_renderer` + `no_input` = 140;
+- `ua_lie` + `outer_zero` + `no_input` = 120.
+
+The clean-report variant scores 50 + 30 = 80 and still passes. This is
+deliberate: D5b forbids rejecting on one fact, and a UA switcher set to this
+string is one fact. That variant is a documented residual. The bound is
+Chrome/80, not 71: margin over the last real pairing, at no cost. It is not
+under `CHALLENGE_V2_HW_TELLS` (that switch gates the core-count tells), and it
+has no switch of its own: it cannot fail a solve alone, and in ~590 000
+challenge-log lines it fired on nothing but that scanner. The weight is set so
+that `ua_lie` + `outer_zero` alone (90) still passes; `ua_lie` +
+`sw_renderer` (110) is the same two-fact rejection `mac_hw_lie` +
+`sw_renderer` already makes. Tests:
+`internal/uaplausible` (`TestLegacyEdgeOnModernChrome`) and
+`challenge_v2_ualie_test.go` (the three logged variants).
 
 #### UA ↔ TLS coherence tell (2026-09-23) — measured, NOT adopted
 
@@ -1066,7 +1117,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   MORE precise of the two surfaces, not a rename of the log's `hs=-`: the log
   collapses to `hs=-` only when the score is also 0, so a HeadlessChrome UA
   that strips the body logs `hs=100 tells=headless_ua` while the row carries
-  `hs:100` AND `hs_nopayload:true`. Grepping `hs=-` and querying
+  `hs:100` AND `hs_nopayload:true` (likewise `hs=50 tells=ua_lie` for the
+  legacy-Edge UA since 2026-09-29). Grepping `hs=-` and querying
   `hs_nopayload` therefore return different populations — use the row.
   `payload.sig` is admin-only (stripped for scoped callers,
   `docs/endpoint_scope_inventory.md`); the rest of the payload is unchanged.
