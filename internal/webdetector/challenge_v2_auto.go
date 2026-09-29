@@ -31,8 +31,9 @@ package webdetector
 // click or a tenant's panic-button arm must not switch off an auto-v2,
 // Under-Attack or operator-pinned-v2 vhost. Down is a v1 pin.
 //
-// The automatic sources are the live bridge vhost entry's reason (the SAME
-// entry and matcher the solve's src= snapshot reads — vhostEntryLocked) and
+// The automatic sources are the ones the tick notes on the live bridge vhost
+// entry (NoteVhostAutoSource — the SAME entry and matcher the solve's src=
+// snapshot reads, vhostEntryLocked; each source with its own lifetime) and
 // the Under-Attack state (VhostAttackState, which includes an operator's
 // forced-on override) — which only ever re-names a live vhost challenge's
 // source: a forced `attack on` on a host no vhost challenge covers arms
@@ -138,11 +139,11 @@ type vhostV2Tier struct {
 // v2→v1 switch on a host no automatic source covers.
 //
 // Cost: it runs on EVERY scored solve (challengeV2ArmGrain's vhost grain), so
-// the common path takes no new exclusive lock: the manual store's mutex (the
+// it takes no new exclusive lock beyond one: the manual store's mutex (the
 // manual tier always took it), one pin-store RLock and one bridge RLock (the
-// same vhost-entry read the src= snapshot does). The Under-Attack tracker and
-// the scorer's vhost state (both exclusive locks) are consulted only when a
-// vhost challenge covers the host AND they could change the answer.
+// same vhost-entry read the src= snapshot does, plus the noted sources). The
+// Under-Attack tracker's lock only when a vhost challenge covers the host and
+// under_attack is armed.
 func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 	var t vhostV2Tier
 	if e == nil || host == "" {
@@ -188,28 +189,31 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 // vhost challenge.
 //
 // Then, strongest first: Under-Attack when it is armed (the challenge is being
-// defeated); the entry's own reason when it is an armed automatic source (the
-// fast path — no further lock); else the scorer's live vhost state, because
-// the entry's single reason can hide it (a manual arm and a CHALLENGE_VHOST
-// list match both relabel the entry, and the reason is sticky); else the
-// entry's reason as reported ("vhost" for an edge-pushed entry without one,
-// never armed), and "" for a manual arm's entry.
+// defeated); else the first ARMED source among the automatic sources the tick
+// noted on the entry (vhAuto: suspicious_vhost, uniqpaths_short, vhost_config
+// — each noted while active and with its own lifetime, so the entry's single
+// sticky Reason, which a manual arm or the config list relabels, can neither
+// hide an armed source nor keep a stale one); else the first noted source
+// (reported, unarmed); else the entry's own reason ("vhost" for an edge-pushed
+// entry without one, never armed; "" for a manual arm's).
 func (e *Engine) autoV2Trigger(host string) string {
 	if e.nginxBridge == nil {
 		return ""
 	}
-	reason, ok := e.nginxBridge.vhostChallengeReason(host)
+	reason, sources, ok := e.nginxBridge.vhostAutoSources(host)
 	if !ok {
 		return ""
 	}
 	if e.autoV2Armed[autoV2UnderAttack] && e.underAttackCovering(host) {
 		return autoV2UnderAttack
 	}
-	if reason != "manual" && reason != "" && e.autoV2Armed[reason] {
-		return reason
+	for _, src := range sources {
+		if e.autoV2Armed[src] {
+			return src
+		}
 	}
-	if sc := e.scorerVhostTrigger(host); sc != "" {
-		return sc
+	if len(sources) > 0 {
+		return sources[0]
 	}
 	switch reason {
 	case "manual":
@@ -218,33 +222,6 @@ func (e *Engine) autoV2Trigger(host string) string {
 		return srcVhost // edge-pushed entry: no source named, never armed
 	}
 	return reason
-}
-
-// scorerVhostTrigger reports the scorer's own live vhost challenge state for
-// host (or its apex, for a www. host — the bridge's apex→www expansion):
-// suspicious_vhost or uniqpaths_short, "" when neither is on. Reads the
-// tick's state maps under vhostMu, which the tick holds only per host.
-func (e *Engine) scorerVhostTrigger(host string) string {
-	if e.vhostUnderAttack == nil && e.vhostUniqPathsActive == nil {
-		return ""
-	}
-	hosts := []string{host}
-	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
-		hosts = append(hosts, apex)
-	}
-	e.vhostMu.Lock()
-	defer e.vhostMu.Unlock()
-	for _, h := range hosts {
-		if e.vhostUnderAttack[h] {
-			return autoV2SuspiciousVhost
-		}
-	}
-	for _, h := range hosts {
-		if e.vhostUniqPathsActive[h] {
-			return autoV2UniqPathsShort
-		}
-	}
-	return ""
 }
 
 // underAttackCovering reports Under-Attack on host, or on its apex for a www.
@@ -260,19 +237,33 @@ func (e *Engine) underAttackCovering(host string) bool {
 	return false
 }
 
-// vhostChallengeReason returns the reason of the live vhost-wide CHALLENGE
-// entry covering host, through the one vhost matcher (vhostEntryLocked).
-func (b *NginxBridge) vhostChallengeReason(host string) (string, bool) {
+// autoSourceOrder is the order vhostAutoSources reports noted sources in —
+// fixed, so equal situations always resolve the same way.
+var autoSourceOrder = [...]string{autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig}
+
+// vhostAutoSources returns, for the live vhost-wide CHALLENGE entry covering
+// host (the one vhost matcher, vhostEntryKeyLocked), its reason and the
+// automatic sources the tick has noted on it and that are still live. One
+// RLock.
+func (b *NginxBridge) vhostAutoSources(host string) (reason string, sources []string, ok bool) {
 	if b == nil || host == "" {
-		return "", false
+		return "", nil, false
 	}
+	now := time.Now()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	h, ok := b.vhostEntryLocked(host, time.Now())
-	if !ok || h.Action != "challenge" {
-		return "", false
+	key, h, found := b.vhostEntryKeyLocked(host, now)
+	if !found || h.Action != "challenge" {
+		return "", nil, false
 	}
-	return strings.TrimSpace(h.Reason), true
+	if noted := b.vhAuto[key]; len(noted) > 0 {
+		for _, src := range autoSourceOrder {
+			if exp, live := noted[src]; live && exp.After(now) {
+				sources = append(sources, src)
+			}
+		}
+	}
+	return strings.TrimSpace(h.Reason), sources, true
 }
 
 // ── Tier pins ───────────────────────────────────────────────────────────────

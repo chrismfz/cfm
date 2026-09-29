@@ -215,8 +215,11 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 // a fresh TTL). "Covering" is manualRungTarget: the host's own arm, else its
 // apex for a www. host — the same arm the verify gate reads — and the scope
 // check covers that target too. Switching to the current tier is a no-op
-// (changed=false, no audit row). 409 when no manual challenge is active: an auto challenge has
-// no tier of its own — arm a manual one (vhost/add with rung) to pick one.
+// (changed=false, no audit row). 409 when no manual challenge is active — an
+// automatic challenge's tier is a tier pin's job (vhost/tier). The response's
+// `tier` is the host's EFFECTIVE tier after the switch: a manual arm switched
+// to v1 stays v2 while an automatic v2 covers the host (a manual v1 arm never
+// downgrades — challenge_v2_auto.go).
 // rung is REQUIRED here: on vhost/add an absent rung means "preserve", so a
 // missing one on the endpoint whose only job is changing it is a caller bug.
 // Scope: same as vhost/add (vhostAllowed, fail-closed) — challenge-tier either
@@ -272,7 +275,7 @@ func (e *Engine) handleChallengeVhostRung(w http.ResponseWriter, r *http.Request
 	target := e.manualRungTarget(host)
 	if target == "" {
 		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "no active manual challenge on " + host + " — an auto challenge has no tier of its own; arm a manual one (challenge/vhost/add with rung) to pick a tier",
+			"error": "no active manual challenge on " + host + " — an automatic challenge's tier is set with a tier pin (challenge/vhost/tier rung=v1|v2|auto)",
 		})
 		return
 	}
@@ -288,12 +291,22 @@ func (e *Engine) handleChallengeVhostRung(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "the manual challenge on " + target + " expired"})
 		return
 	}
+	// The EFFECTIVE tier after the switch: a manual arm switched to v1 on a
+	// host an automatic v2 also covers stays v2 (a manual v1 arm never
+	// downgrades — challenge_v2_auto.go). Say so, rather than let "rung":"v1"
+	// read as done; the way down there is a v1 pin.
+	tier := e.challengeV2VhostTier(host)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"host":       target,
 		"rung":       rungOrV1(rung),
 		"from":       rungOrV1(prev),
 		"changed":    changed,
 		"expires_at": expires,
+		"tier": map[string]string{
+			"rung":    rungOrV1(tier.Rung),
+			"source":  tier.Source,
+			"trigger": tier.Trigger,
+		},
 	})
 }
 

@@ -19,8 +19,15 @@ export function effectiveTier(s) {
   return s && s.rung === "v2" ? "v2" : "v1";
 }
 
+// isManual: the tier is DECIDED by a manual arm (rung_source "manual"), so a
+// switch re-tiers that arm. manual_active alone is not enough: a manual v1 arm
+// under an automatic v2 resolves to rung_source auto/pin, and re-tiering the
+// arm (already v1) would change nothing — the way down there is a v1 pin.
+// Rows from a daemon without rung_source fall back to manual_active.
 function isManual(s) {
-  return Boolean(s && (s.manual_active || s.rung_source === "manual"));
+  if (!s) return false;
+  if (s.rung_source) return s.rung_source === "manual";
+  return Boolean(s.manual_active);
 }
 
 // tierSwitchIsPin: whether the switch for this host is a PIN (an automatic

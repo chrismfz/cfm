@@ -371,7 +371,10 @@ export const controlsMixin = {
         const res = await this.postJSON(req.path, req.body);
         const label = to === "v2" ? "strict (v2)" : "standard (v1)";
         this.panicMsg = req.path.endsWith("/rung")
-          ? `Challenge on ${res?.host || host} switched to ${label} — expiry unchanged`
+          ? `Challenge on ${res?.host || host} switched to ${label} — expiry unchanged` +
+            (res?.tier?.rung && res.tier.rung !== to
+              ? ` (still ${res.tier.rung}: an automatic ${res.tier.trigger || "source"} covers it — switch again to pin v1)`
+              : "")
           : `Automatic challenges on ${res?.host || host} pinned to ${label} — ` +
             (res?.ttl_capped ? "for 24h (the customer pin limit)" : "until you unpin");
         await this.refreshPanicStatus();

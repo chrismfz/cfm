@@ -1773,6 +1773,9 @@ func runChallengeTier(baseURL string, args []string) error {
 			return fmt.Errorf("unknown argument %q (usage: cfm webtop challenge tier <vhost> v1|v2|auto [--ttl 24h])", args[i])
 		}
 	}
+	if ttl != "" && strings.EqualFold(strings.TrimSpace(rung), "auto") {
+		return fmt.Errorf("--ttl applies to a v1/v2 pin, not to auto (which removes the pin)")
+	}
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/tier?host=%s&rung=%s&ttl=%s",
 		base, url.QueryEscape(host), url.QueryEscape(rung), url.QueryEscape(ttl))
 	resp, err := clihttp.Post(u, "application/json", nil)
@@ -1800,9 +1803,12 @@ func runChallengeTier(baseURL string, args []string) error {
 	if result.Error != "" {
 		return fmt.Errorf("challenge tier error: %s", result.Error)
 	}
-	if !result.Changed {
+	switch {
+	case !result.Changed && result.Pin == "auto":
+		fmt.Printf("= %s has no tier pin (unchanged)\n", result.Host)
+	case !result.Changed:
 		fmt.Printf("= %s already pinned %s (unchanged)\n", result.Host, result.Pin)
-	} else {
+	default:
 		fmt.Printf("✓ %s tier pin %s → %s", result.Host, result.From, result.Pin)
 		if !result.ExpiresAt.IsZero() {
 			fmt.Printf("  expires=%s", result.ExpiresAt.UTC().Format(time.RFC3339))

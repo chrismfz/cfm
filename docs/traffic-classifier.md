@@ -897,11 +897,13 @@ Under-Attack or operator-pinned-v2 vhost (a review finding: it was a scoped
 bypass of an operator's v2 pin). The way down is a v1 pin.
 
 The automatic source needs a live bridge vhost entry — the SAME entry and
-matcher `src=vhost:<reason>` reads (`vhostEntryLocked`). Its reason names the
-source, except where the entry's single sticky reason hides it: a manual arm
-and a `CHALLENGE_VHOST` list match both relabel the entry, so the resolver
-then reads the scorer's own vhost state (`suspicious_vhost` /
-`uniqpaths_short`) instead. Under-Attack
+matcher `src=vhost:<reason>` reads (`vhostEntryLocked`). The entry's single
+sticky reason can't name it (a manual arm and a `CHALLENGE_VHOST` list match
+both relabel the entry), so the tick NOTES every active automatic source on
+the entry (`NoteVhostAutoSource`: `suspicious_vhost`, `uniqpaths_short`,
+`vhost_config`), each with the lifetime of the challenge it accompanies, and
+drops it the cycle the source turns off; the first ARMED noted source wins.
+One bridge RLock at verify, no scorer lock. Under-Attack
 (`VhostAttackState`, incl. an operator `attack on`) only re-names that
 source: with no live vhost challenge it arms nothing, so the tier always
 ends with the vhost challenge. The UNDER_ATTACK transition line carries

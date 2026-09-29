@@ -1576,6 +1576,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 } else if cur && shouldOff {
                     e.vhostUniqPathsActive[host] = false
                     e.vhostUniqPathsLastChange[host] = now
+                    if e.nginxBridge != nil {
+                        e.nginxBridge.DropVhostAutoSource(host, autoV2UniqPathsShort)
+                    }
                 } else if cur {
                     doChallenge = true // keep refreshing TTL while active
                 }
@@ -1600,6 +1603,9 @@ if doChallenge {
         }
     }
                     e.nginxBridge.ChallengeVhostWithReason(host, ttl, "uniqpaths_short")
+                    // The auto-v2 resolver's view of this source, with the same
+                    // lifetime as the challenge it accompanies (challenge_v2_auto.go).
+                    e.nginxBridge.NoteVhostAutoSource(host, autoV2UniqPathsShort, ttl)
                     if doLogOn && e.cfg.ChallengeLog {
                         logging.LogfCHALLENGES("[challenge][vhost] action=auto_on host=%s reason=uniqpaths_short uniqPaths=%d on=%d off=%d ttl=%s",
                             host, uniq, on, off, ttl.String())
@@ -1925,6 +1931,30 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
             }
 
             effective := manual || autoActive
+
+            // The auto-v2 resolver's view of this host's AUTOMATIC sources
+            // (challenge_v2_auto.go). Noted every cycle a source is active,
+            // dropped the cycle it is not — independently of the bridge
+            // entry's single Reason, which a manual arm or the config list
+            // relabels. The TTL is the one the auto challenge itself is
+            // pushed with, so a host that falls out of the candidate set
+            // loses the note when its challenge would lapse too.
+            if e.nginxBridge != nil {
+                autoTTL := 60 * time.Minute
+                if e.cfg.ChallengeSuspiciousHolddown > 0 {
+                    autoTTL = e.cfg.ChallengeSuspiciousHolddown + (2 * time.Minute)
+                }
+                if autoActive {
+                    e.nginxBridge.NoteVhostAutoSource(host, autoV2SuspiciousVhost, autoTTL)
+                } else {
+                    e.nginxBridge.DropVhostAutoSource(host, autoV2SuspiciousVhost)
+                }
+                if haveVhostManual && hostMatchAny(host, e.cfg.ChallengeVHost) {
+                    e.nginxBridge.NoteVhostAutoSource(host, autoV2VhostConfig, autoTTL)
+                } else {
+                    e.nginxBridge.DropVhostAutoSource(host, autoV2VhostConfig)
+                }
+            }
 
             // Under-Attack Mode (I1): escalate a CHALLENGED vhost whose challenge
             // is being defeated (solver farm) to UNDER_ATTACK, detect-only. Runs

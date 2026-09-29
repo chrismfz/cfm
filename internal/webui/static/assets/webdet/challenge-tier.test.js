@@ -46,6 +46,13 @@ test("a wildcard row gets no tier button (the daemon refuses wildcard pins and v
   assert.equal(tierSwitchTarget(autoV2, "shop.example.com"), "v1");
 });
 
+test("a manual v1 arm under an automatic v2 drops back by PIN, not by re-tiering the arm", () => {
+  const s = { manual_active: true, auto_active: true, rung: "v2", rung_source: "auto", rung_trigger: "suspicious_vhost" };
+  assert.equal(tierSwitchTarget(s, "a.gr"), "v1");
+  assert.deepEqual(tierSwitchRequest("a.gr", s, "v1"), { path: "v1/challenge/vhost/tier", body: { host: "a.gr", rung: "v1" } });
+  assert.equal(tierButtonLabel(s, "a.gr"), "→ v1 (pin)");
+});
+
 test("no pin button when the daemon resolved no automatic source", () => {
   // The store says auto-active, but the resolver saw no source (e.g. the
   // bridge entry already lapsed): a pin would change nothing.

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "cfm/internal/detectors/core"
 )
 
 // Auto-v2: an AUTOMATIC vhost challenge runs at the v2 tier when its source is
@@ -151,15 +153,15 @@ func TestChallengeV2VhostTier_PinAndManualPrecedence(t *testing.T) {
 	// A tier-less (v1) manual arm never DOWNGRADES an automatic v2: here the
 	// operator's v2 pin keeps applying — the scoped panic-button bypass the
 	// second review found. (A manual arm relabels the bridge entry "manual";
-	// the scorer's own state is what still names the automatic source.)
-	e.vhostUnderAttack = map[string]bool{"listed.gr": true}
+	// the source the tick noted on it still names the automatic challenge.)
+	e.nginxBridge.NoteVhostAutoSource("listed.gr", autoV2VhostConfig, time.Hour)
 	e.ManualChallengeVhost("listed.gr", time.Hour, "manual", "")
 	setVhostEntry(e, "listed.gr", "manual")
-	if tier := e.challengeV2VhostTier("listed.gr"); tier.Rung != "v2" || tier.Source != tierSourcePin || tier.Trigger != "suspicious_vhost" {
+	if tier := e.challengeV2VhostTier("listed.gr"); tier.Rung != "v2" || tier.Source != tierSourcePin || tier.Trigger != "vhost_config" {
 		t.Fatalf("manual v1 must not beat a v2 pin: %+v", tier)
 	}
 	// ...but with no automatic source behind it, the manual v1 arm is v1.
-	e.vhostUnderAttack = map[string]bool{}
+	e.nginxBridge.DropVhostAutoSource("listed.gr", autoV2VhostConfig)
 	if tier := e.challengeV2VhostTier("listed.gr"); tier.Rung != "" || tier.Source != tierSourceManual || tier.Pin != "v2" {
 		t.Fatalf("manual v1 alone: %+v", tier)
 	}
@@ -173,6 +175,7 @@ func TestChallengeV2VhostTier_PinAndManualPrecedence(t *testing.T) {
 	e.SetChallengeTierPinAs("listed.gr", "", 0, "admin")
 	e.ClearManualChallengeVhost("listed.gr")
 	setVhostEntry(e, "listed.gr", "vhost_config") // the manual clear dropped the bridge entry
+	e.nginxBridge.NoteVhostAutoSource("listed.gr", autoV2VhostConfig, time.Hour)
 	if tier := e.challengeV2VhostTier("listed.gr"); tier.Rung != "" || tier.Source != tierSourceAuto || tier.Pin != "" {
 		t.Fatalf("cleared pin: %+v", tier)
 	}
@@ -181,20 +184,24 @@ func TestChallengeV2VhostTier_PinAndManualPrecedence(t *testing.T) {
 func TestChallengeV2VhostTier_ManualV1NeverDowngrades(t *testing.T) {
 	e := newAutoV2TestEngine(t, autoV2SuspiciousVhost, autoV2UnderAttack)
 	e.attack = newUnderAttackTracker()
-	e.vhostUnderAttack = map[string]bool{"busy.gr": true}
-	// A tier-less "Challenge" click on an auto-v2 host relabels the entry.
+	// A tier-less "Challenge" click on an auto-v2 host relabels the entry
+	// "manual"; the tick keeps noting the scorer's source on it.
+	e.nginxBridge.NoteVhostAutoSource("busy.gr", autoV2SuspiciousVhost, time.Hour)
 	e.ManualChallengeVhost("busy.gr", time.Hour, "cfm-admin-ui", "")
 	setVhostEntry(e, "busy.gr", "manual")
 	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "v2" || tier.Source != tierSourceAuto || tier.Trigger != "suspicious_vhost" {
 		t.Fatalf("manual v1 over auto-v2: %+v", tier)
 	}
-	// ...and the www variant through the apex scorer state.
+	// ...and the www variant (the note is written for the bridge variants).
 	setVhostEntry(e, "www.busy.gr", "manual")
 	if tier := e.challengeV2VhostTier("www.busy.gr"); tier.Rung != "v2" {
 		t.Fatalf("www of an auto-v2 apex under a manual arm: %+v", tier)
 	}
-	// Under attack: v2 even over a manual v1 arm.
-	e.vhostUnderAttack = map[string]bool{}
+	// Under attack: v2 even over a manual v1 arm with no scorer source.
+	e.nginxBridge.DropVhostAutoSource("busy.gr", autoV2SuspiciousVhost)
+	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "" || tier.Source != tierSourceManual {
+		t.Fatalf("manual v1 alone after the source dropped: %+v", tier)
+	}
 	e.SetVhostAttackOverride("busy.gr", true, time.Now(), 0)
 	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "v2" || tier.Trigger != autoV2UnderAttack {
 		t.Fatalf("manual v1 under attack: %+v", tier)
@@ -204,13 +211,52 @@ func TestChallengeV2VhostTier_ManualV1NeverDowngrades(t *testing.T) {
 	if tier := e.challengeV2VhostTier("busy.gr"); tier.Rung != "" || tier.Source != tierSourceManual {
 		t.Fatalf("v1 pin under a manual v1 arm: %+v", tier)
 	}
+}
 
-	// A CHALLENGE_VHOST-listed host the scorer ALSO flags is labelled
-	// vhost_config at the bridge; the scorer's state still arms it.
-	e.vhostUnderAttack = map[string]bool{"listed.gr": true}
-	setVhostEntry(e, "listed.gr", "vhost_config")
-	if tier := e.challengeV2VhostTier("listed.gr"); tier.Rung != "v2" || tier.Trigger != "suspicious_vhost" {
-		t.Fatalf("config-listed + suspicious: %+v", tier)
+// The tick's source notes, not the entry's single sticky Reason, name the
+// automatic source: the first ARMED one wins, a dropped or expired note is
+// gone, and a clear takes the notes with the entry.
+func TestChallengeV2VhostTier_SourceNotes(t *testing.T) {
+	e := newAutoV2TestEngine(t, autoV2UniqPathsShort)
+	b := e.nginxBridge
+
+	// A CHALLENGE_VHOST-listed host the scorer ALSO flags: labelled
+	// vhost_config (unarmed); the armed uniqpaths note is found anyway,
+	// ahead of the unarmed suspicious one.
+	setVhostEntry(e, "both.gr", "vhost_config")
+	b.NoteVhostAutoSource("both.gr", autoV2SuspiciousVhost, time.Hour)
+	b.NoteVhostAutoSource("both.gr", autoV2UniqPathsShort, time.Hour)
+	b.NoteVhostAutoSource("both.gr", autoV2VhostConfig, time.Hour)
+	if tier := e.challengeV2VhostTier("both.gr"); tier.Rung != "v2" || tier.Trigger != autoV2UniqPathsShort {
+		t.Fatalf("first armed noted source: %+v", tier)
+	}
+	// Source off → dropped: back to the first noted (unarmed) source.
+	b.DropVhostAutoSource("both.gr", autoV2UniqPathsShort)
+	if tier := e.challengeV2VhostTier("both.gr"); tier.Rung != "" || tier.Trigger != autoV2SuspiciousVhost {
+		t.Fatalf("after drop: %+v", tier)
+	}
+	// An expired note is ignored even before the sweep removes it.
+	b.mu.Lock()
+	b.vhAuto["both.gr"][autoV2UniqPathsShort] = time.Now().Add(-time.Second)
+	b.mu.Unlock()
+	if tier := e.challengeV2VhostTier("both.gr"); tier.Trigger == autoV2UniqPathsShort {
+		t.Fatalf("expired note used: %+v", tier)
+	}
+	// ClearVhost takes the notes with the entry.
+	b.ClearVhost("both.gr", "test")
+	b.mu.RLock()
+	_, left := b.vhAuto["both.gr"]
+	b.mu.RUnlock()
+	if left {
+		t.Fatalf("ClearVhost left the source notes behind")
+	}
+	if tier := e.challengeV2VhostTier("both.gr"); tier != (vhostV2Tier{}) {
+		t.Fatalf("after clear: %+v", tier)
+	}
+	// A note with no live entry arms nothing (the tier ends with the entry).
+	b.NoteVhostAutoSource("ghost.gr", autoV2UniqPathsShort, time.Hour)
+	if tier := e.challengeV2VhostTier("ghost.gr"); tier != (vhostV2Tier{}) {
+		t.Fatalf("note without an entry: %+v", tier)
 	}
 }
 
@@ -509,5 +555,38 @@ func TestNewEngineWiresAutoV2(t *testing.T) {
 	setVhostEntry(e2, "auto.gr", "suspicious_vhost")
 	if challengeV2HostArmed("auto.gr") {
 		t.Fatalf("the v1 pin was lost across an engine rebuild")
+	}
+}
+
+// The REAL tick writes the source notes: an active scorer challenge is noted
+// (auto-v2), survives a manual v1 arm relabelling the entry, and is dropped
+// on the cycle the scorer turns it off.
+func TestEmitIPChallenges_NotesAutoSourcesForAutoV2(t *testing.T) {
+	e := newTickTestEngine(t)
+	e.autoV2Armed = map[string]bool{autoV2SuspiciousVhost: true}
+	e.cfg.ChallengeSuspiciousHolddown = 10 * time.Minute
+	host := "tick.gr"
+	e.vhostUnderAttack[host] = true
+	e.vhostLastChange[host] = time.Now() // inside the holddown → stays ON
+
+	e.emitIPChallenges(time.Now(), make(chan core.Alert, 16))
+	if tier := e.challengeV2VhostTier(host); tier.Rung != "v2" || tier.Trigger != autoV2SuspiciousVhost {
+		t.Fatalf("tick did not note the scorer source: %+v", tier)
+	}
+
+	// A tier-less manual arm relabels the entry; the next tick keeps the note.
+	e.ManualChallengeVhost(host, time.Hour, "manual", "")
+	e.emitIPChallenges(time.Now(), make(chan core.Alert, 16))
+	if tier := e.challengeV2VhostTier(host); tier.Rung != "v2" || tier.Trigger != autoV2SuspiciousVhost {
+		t.Fatalf("manual v1 arm hid the scorer source: %+v", tier)
+	}
+
+	// The scorer turns off (no holddown left, empty long window → score 0):
+	// the note goes the same cycle; the manual v1 arm is what remains.
+	e.longwin = NewLongWindow(10*time.Minute, time.Minute, nil)
+	e.vhostLastChange[host] = time.Now().Add(-time.Hour)
+	e.emitIPChallenges(time.Now(), make(chan core.Alert, 16))
+	if tier := e.challengeV2VhostTier(host); tier.Rung != "" || tier.Source != tierSourceManual {
+		t.Fatalf("scorer off must drop the note: %+v", tier)
 	}
 }

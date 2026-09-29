@@ -209,7 +209,10 @@ export const challengeMixin = {
       try {
         const res = await this.postJSON(req.path, req.body);
         if (req.path.endsWith("/rung")) {
-          this.actionMsg = `Challenge on ${res?.host || host} switched ${res?.from || "?"} → ${res?.rung || to} (expiry kept)`;
+          this.actionMsg = `Challenge on ${res?.host || host} switched ${res?.from || "?"} → ${res?.rung || to} (expiry kept)` +
+            (res?.tier?.rung && res.tier.rung !== (res?.rung || to)
+              ? ` — still ${res.tier.rung}: an automatic ${res.tier.trigger || "source"} covers it (pin v1 to drop it)`
+              : "");
         } else {
           this.actionMsg = `Automatic challenges on ${res?.host || host} pinned to ${res?.pin || to}` +
             (res?.tier?.rung ? ` — effective tier now ${res.tier.rung}` : "") +
