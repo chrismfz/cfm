@@ -86,6 +86,11 @@ type Entry struct {
 	UABot    bool   `json:"ua_bot,omitempty"`    // the UA SELF-DECLARES a bot (unverified)
 	Src      string `json:"src,omitempty"`       // challenge provenance snapshot ("-" = none covered)
 	Scope    string `json:"scope,omitempty"`     // verify surface: web / panel:<port>
+	// Rescued names what would clear this failing score under an arm (today
+	// only "input": real pointer input and no certain tell —
+	// challengeV2InputRescue). The line still reads would_v2 (the SCORE
+	// fails); an armed gate would let the solve through instead.
+	Rescued string `json:"v2_rescued,omitempty"`
 }
 
 // Parse extracts an Entry from one log line. Returns ok=false for a line that
@@ -180,6 +185,8 @@ func Parse(line string) (Entry, bool) {
 			e.Src = v // "-" kept: it means "resolved, none covered", not absent
 		case "scope":
 			e.Scope = v
+		case "v2_rescued":
+			e.Rescued = v
 		}
 	}
 	if !got || e.Signal == "" {
@@ -272,13 +279,17 @@ type Summary struct {
 // Everything here is shadow: an unarmed solve that would have failed was
 // cleared as usual. Lines written before the context keys existed carry no
 // src= and count as "(unknown)" in by_src_kind — with_context says how many
-// lines could be attributed at all.
+// lines could be attributed at all. A would_v2 line means the SCORE failed;
+// rescued says how many of them an armed gate would still have let through
+// (real pointer input and no certain tell). The by_* breakdowns count every
+// line, rescued or not; rescued is 0 on lines from daemons predating it.
 type HumanitySummary struct {
 	Lines         int  `json:"lines"`
 	DistinctIPs   int  `json:"distinct_ips"`
 	DistinctHosts int  `json:"distinct_hosts"`
 	WithContext   int  `json:"with_context"` // lines carrying src= (attributable)
 	UABot         int  `json:"ua_bot"`       // lines whose UA self-declares a bot (unverified)
+	Rescued       int  `json:"rescued"`      // lines with v2_rescued=input: an armed gate would clear them (lines − rescued = walled)
 	BySrcKind     []kv `json:"by_src_kind"`  // per line, each distinct kind once: waf/ip/vhost/rule/fp/geo, "-" none, "(unknown)" no src=
 	BySrc         []kv `json:"by_src"`       // full tokens, e.g. vhost:suspicious_vhost, waf:302
 	ByFP          []kv `json:"by_fp"`
@@ -529,6 +540,9 @@ func Summarize(lines []string) Summary {
 			}
 			if e.UABot {
 				hum.UABot++
+			}
+			if e.Rescued != "" {
+				hum.Rescued++
 			}
 			fpKey := e.FP
 			if fpKey == "" {

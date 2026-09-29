@@ -232,6 +232,10 @@ func (s ChallengeSolve) ShadowContextSuffix() string {
 	if isBotUA(s.UA) {
 		b.WriteString(" ua_bot=1")
 	}
+	if s.V2Rescued != "" {
+		b.WriteString(" v2_rescued=")
+		b.WriteString(shadowToken(s.V2Rescued))
+	}
 	b.WriteString(s.SrcSuffix())
 	if s.Scope != "" {
 		b.WriteString(" scope=")

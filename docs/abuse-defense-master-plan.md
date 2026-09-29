@@ -159,6 +159,14 @@ D3/D4 are the process fix.
   Rung-2 **confirm** fallback (a visible "confirm you're human" step with an
   accessible path, §5 candidates), not a visible puzzle — the puzzle was
   dropped (§5, "Dropped").
+  *Amendment (operator, 2026-09-29, E4):* (c) had a hole a retry cannot
+  close: a machine whose renderer and window make it fail scores the same on
+  every retry. So real pointer input RESCUES a failing score with no certain
+  tell (webdriver / headless UA) — under every grain, marked
+  `v2_rescued=input` (§5, E4). The input readings are client-authored, so
+  this trades the D5b-style residual (a farm that injects trusted pointer
+  events passes) for no wall; the trajectory readings that could tighten it
+  are measured first.
 
 ## 5. Enforcement roadmap — the only live checklist
 
@@ -569,7 +577,9 @@ already opened.
         click is trusted and the accessible keyboard path has no trajectory.
         Its priority is set by E4's false-positive numbers (below): humans
         rejected under the auto-v2 or WAF-mark arms make it next; none, and it
-        waits.
+        waits. E4 found them, and the operator put the real-input rescue
+        first (below): it clears the humans who moved the mouse with no
+        extra step, and the fallback stays for the ones who did not.
 
       - READ 2026-09-29 (E4 burn-in, first pass; `detection_history`,
         `cfm.challenges.log`, `cfm.abuse_shadow.log`, 7 web nodes):
@@ -596,10 +606,26 @@ already opened.
           challenge they are walled off. In the 11 125-line `sig` corpus real
           input (≥ 5 pointer events and ≥ 100 px) was present on 1 of 2 861
           failing solves — that human — and on no farm solve.
-          **Decision pending (operator)** before the release that carries
-          auto-v2: the Rung-2 confirm fallback first; or real input
-          exculpates a solve that has no certain tell (webdriver / headless
-          UA); or auto-v2 ships `off` until the fallback exists.
+          **Decided (operator, 2026-09-29): real input first, then the
+          confirm fallback.**
+          1. **Shipped, before the release that carries auto-v2:** a failing
+             score with ≥ 5 pointer events covering ≥ 100 px and no certain
+             tell (webdriver / headless UA) is RESCUED under every grain
+             (`challengeV2InputRescue`). It takes the solved path, and the
+             solve line and history row carry `v2_rescued=input`. Unarmed,
+             the `would_v2` line carries the same marker, and `abuse_shadow`
+             counts `humanity.rescued`. The bars are the ones the read
+             above measured with. The humans auto-v2 would reject clear them
+             (41 / 714, 7 / 729, 74 / 3 149), and no failing farm solve in
+             the corpus did. They are deliberately low. The honest limit:
+             CDP-dispatched pointer events are trusted ones.
+          2. **Next, log-only:** trajectory readings on the page (untrusted
+             events, coalesced events, path straightness, inter-event timing
+             jitter, the largest jump) in `sig=`. They are the corpus that
+             would tighten the rescue before any of it scores.
+          3. **Then** the Rung-2 confirm fallback (candidate 4). Its click
+             offset and approach path are measured the same way before they
+             decide anything.
         - **`cfm_pcw`:** 3 episodes in the short windows the live edge error
           logs hold (rigel ×2, mars ×1 a scanner), none from the `hs=0`
           farms (§5 candidate 2).
@@ -620,7 +646,10 @@ already opened.
 3. **Humanity context on farm alerts** — the `solver_farm` / `cookie_discard`
    alert carries the cluster's `hs` / `tells` distribution
    (`docs/roadmaps/challenge-engine.md` §8.3 leg 1). Alert text only.
-4. **The Rung-2 confirm fallback** (E4 note above), priority from item 1.
+4. **The Rung-2 confirm fallback** (E4 note above). Order decided
+   2026-09-29: the real-input rescue (shipped, `v2_rescued=input`), then the
+   log-only trajectory readings, then the confirm step. It is for the
+   rejected humans who did not move a pointer (keyboard, touch-less kiosk).
 5. **A `CHALLENGE_V2_ENFORCE` kill switch.** v2 bites fleet-wide by default
    now (the WAF challenge tier, the automatic vhost challenges), and no
    single switch stops the rejects while keeping the telemetry:

@@ -578,7 +578,8 @@ evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
 `v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
 so a passed-under-arm solve is greppable, not mistaken for a plain v1 one;
 `sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` is the report AS
-REPORTED — mv/dm/dpr/raf corpus-only and scored by nothing, hc feeds the
+REPORTED — dm/dpr/raf corpus-only and scored by nothing, ptr+mv decide
+the real-input rescue below (it only ever clears), hc feeds the
 corpus-measured mobile_hw_lie/mac_hw_lie tells (2026-09-23,
 `docs/traffic-classifier.md` "Rung-1 hardware tells"; scored as ONE
 device-claim group (its max, once) with touch_lie and the UA-borne ua_lie
@@ -615,7 +616,13 @@ rule/WAF marks stay strict), waived under `CHALLENGE_GOODBOT_EXEMPT`
 from rotating first-seen IPs, so the gate forward-confirms a crawler-looking
 PTR inline — bounded, reject path only; a reject whose PTR claims a crawler
 carries `v2_waiver_miss=<grain|mark|off|spoofed|timeout|transient>`, or it
-would read like a spoof) — at the EDGE `challenge_v2`
+would read like a spoof) — and except, under EVERY grain, a failing score with
+real pointer input (sig ptr >= 5 AND mv >= 100) and no certain tell
+(webdriver / headless UA): `v2_rescued=input` on the solve line/history and
+on the unarmed would_v2 line (2026-09-29, E4: Windows Chrome/109 PCs score
+exactly 100 with a software renderer and no window size, and a retry cannot
+change that; a CDP-dispatched pointer event is trusted — the confirm
+fallback's residual too) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
 enforced at verify, not at serve). The verify gate ORs four arm grains:
 fingerprint policy, geo policy, a per-vhost v2 tier (a `rung=v2` MANUAL

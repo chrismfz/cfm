@@ -1129,8 +1129,14 @@ the automatic sources are Windows **Chrome/109** — the last Chrome for Windows
 `hs=100`, with real pointer input (a Serres school, a Nova line, one in
 Bulgaria). The farm half of that bucket is Linux Chrome/154 at hc 640 with no
 movement. Real input (≥ 5 pointer events, ≥ 100 px) marked 1 of 2 861 failing
-solves in the `sig` corpus — the human — and no farm solve. The mitigation is
-an operator decision recorded in the master plan (E4, READ 2026-09-29).
+solves in the `sig` corpus — the human — and no farm solve. The operator's
+mitigation (master plan E4, READ 2026-09-29): **real input rescues**. A failing
+score with those readings (≥ 5 events, ≥ 100 px) and no certain tell
+(webdriver, headless UA) takes the solved path under every grain, marked
+`v2_rescued=input` (`challengeV2InputRescue`). Trajectory readings come next,
+log-only, then the confirm fallback for the humans who did not move a pointer.
+The honest limit is the confirm step's: a CDP-dispatched pointer event is a
+trusted one.
 
 #### Observability contract (shadow-first; reuses existing logs — no new log, per CLAUDE.md §5)
 
@@ -1163,13 +1169,21 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   couldn't confirm reads exactly like an impostor; the `challenge_v2_reject`
   row carries it as `v2_waiver_miss`. A reject with no `ptr=` has no reason
   either — the PTR wasn't known at verify — and that is NOT evidence the
-  client isn't a crawler. Finally `sig=` carries the report AS REPORTED —
+  client isn't a crawler. `grep v2_rescued=` (since 2026-09-29) is "which
+  failing solves did real pointer input let through": under ANY grain, a
+  failing score with no certain tell and `sig=` reporting ≥ 5 pointer events
+  covering ≥ 100 px ("Who the deterministic-FP residual is" above). It is
+  written after `v2_waived=`, with the failing `hs=`/`tells=` intact, and the history
+  row carries `v2_rescued`. An unarmed failing solve's `would_v2` line carries
+  it too, so `abuse_shadow`'s `humanity.rescued` says how many of a would-be
+  arm's rejects it would clear. Finally `sig=` carries the report AS REPORTED —
   `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
   `hc`, `dm`, `dpr`, `raf` — in that fixed order, omitting any signal the
-  browser did not report. `mv`/`dm`/`dpr`/`raf` are scored by nothing; `hc` feeds
+  browser did not report. `dm`/`dpr`/`raf` are scored by nothing; `hc` feeds
   `mobile_hw_lie`/`mac_hw_lie` ("Rung-1 hardware tells" above);
-  `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, so logging
-  them makes that tell auditable. `result=v2_reject` lines carry `sig=` too.
+  `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, and
+  `ptr`+`mv` decide the real-input rescue (which only ever clears), so logging
+  them makes both auditable. `result=v2_reject` lines carry `sig=` too.
   A rejected solve is never published as a solved event (it cleared nothing);
   since 2026-09-22 it writes its own `challenge_v2_reject` history row instead,
   built by the same payload builder as `challenge_solved`, so the two

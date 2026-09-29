@@ -529,6 +529,12 @@ type ChallengeSolve struct {
 	// solve under an arm ("" = not waived): the D5 gate let it through instead
 	// of rejecting (challengeV2GoodBot). Rendered as v2_waived=<name>.
 	V2Waived string
+	// V2Rescued names what rescued a FAILING solve ("" = not rescued): today
+	// only "input" — real pointer input and no certain tell
+	// (challengeV2InputRescue). Under an arm the solve takes the solved path
+	// instead of a reject; unarmed, the would_v2 line carries it. Rendered as
+	// v2_rescued=<what>.
+	V2Rescued string
 	// V2WaiverMiss is why a REJECTED solve from a crawler-looking client (a
 	// PTR with a good-bot suffix) was not waived: grain / mark / off /
 	// spoofed / timeout / transient (v2Waiver*); "" for everyone else.
@@ -941,6 +947,14 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// abuse-shadow line (rides the ABUSE_SHADOW master via
 		// ConfigureChallengeV2), clearance unaffected.
 		if v2On && hs >= v2Fail {
+			// Real input rescues a failing score that has no certain tell
+			// (challengeV2InputRescue, operator decision 2026-09-29): under an
+			// arm the solve takes the solved path marked v2_rescued=input,
+			// before any waiver lookup; unarmed, the would_v2 line carries the
+			// same marker, so the rescue stays measurable either way.
+			if challengeV2InputRescue(hsSig, hsTells) {
+				solve.V2Rescued = v2RescuedInput
+			}
 			// v2Grain is the ANY-grain arm resolved above (challengeV2ArmGrainVia):
 			// the solve's TLS fingerprint (the original gate), a fleet-armed
 			// country/ASN policy covering the client IP (policy-kinds slice),
@@ -951,7 +965,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			// semantics either way; the gate inputs are edge-authoritative —
 			// see HONEST LIMITS in challenge_v2.go. The grain also rides the
 			// solve line, so a passed-under-arm solve is greppable too.
-			if v2Grain != "" {
+			if v2Grain != "" && solve.V2Rescued == "" {
 				// A verified good bot is waived, not rejected, under the
 				// grains whose challenge the decision path would have skipped
 				// for it (geo, vhost — challengeV2WaiverBar): the SAME FCrDNS
@@ -990,7 +1004,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 					http.Error(w, "verification failed", http.StatusForbidden)
 					return
 				}
-			} else if v2Shadow {
+			} else if v2Grain == "" && v2Shadow {
 				logging.LogfABUSESHADOW(
 					"[abuse-shadow] signal=humanity host=%s ip=%s hs=%d tells=%s fp=%s verdict=would_v2%s",
 					solve.Host, solve.IP, hs, hsTells, solve.TLSFingerprintOrDash(), solve.ShadowContextSuffix())

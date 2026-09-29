@@ -125,6 +125,15 @@ package webdetector
 //     can't complete (slots busy, resolver down, PTR not resolved yet)
 //     rejects as before (retry-able, D5c); a reject whose PTR claims a
 //     crawler says why with v2_waiver_miss=<reason> (v2Waiver*).
+//   - Real pointer input RESCUES a failing score that has no certain tell
+//     (v2_rescued=input, challengeV2InputRescue), under every grain — unlike
+//     the good-bot waiver, whose question (is this a verified crawler?) the
+//     decision path answers per grain, this one (is a person at the
+//     controls?) is the question the rung itself asks. It exists because a
+//     retry cannot change a Windows 7 PC's renderer (D5c). The readings are
+//     client-authored: a farm that dispatches pointer events through CDP
+//     gets trusted ones and is rescued — the same residual the Rung-2
+//     confirm fallback carries, accepted over walling the humans out.
 
 import (
 	"context"
@@ -159,8 +168,10 @@ type humanitySignals struct {
 	// solve line, payload.sig on the history row) to build the corpus from
 	// real traffic, so a tell is written from measured distributions rather
 	// than from memory. Since 2026-09-23 HC feeds two tells written from that
-	// corpus (mobile_hw_lie, mac_hw_lie — see the weights below); mv/dm/dpr/raf
-	// are still scored by nothing. They
+	// corpus (mobile_hw_lie, mac_hw_lie — see the weights below), and since
+	// 2026-09-29 MV (with PTR) decides the real-input rescue
+	// (challengeV2InputRescue) — never a tell: it can only clear a failing
+	// score, never add to one. dm/dpr/raf are still scored by nothing. They
 	// were pointer-less and silently discarded until 2026-09-22 — a `dm`
 	// absent on every Firefox then read as a reported 0.0, which is exactly
 	// the absence/zero confusion the pointer convention above exists to
@@ -579,6 +590,49 @@ func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 	return "", ""
 }
 
+// ── Real-input rescue (operator decision, 2026-09-29) ──────────────────────
+//
+// A failing score is RESCUED — never rejected, under any arm — when the
+// payload reports real pointer input and no CERTAIN tell fired. The first E4
+// read (docs/abuse-defense-master-plan.md §5, E4) found who the automatic v2
+// arm would reject: Windows Chrome/109 (the last Chrome for Windows 7/8.1) on
+// old hardware, reporting a software renderer AND no window size — exactly the
+// fail score — while the person moved the mouse (41 events / 714 px, 7 / 729,
+// 74 / 3 149). A retry re-scores the same machine, so without this they are
+// walled off, which D5c forbids. In the 11 125-line sig corpus real input
+// marked 1 of 2 861 failing solves — that human — and no farm solve.
+//
+// The certain tells (webdriver, a HeadlessChrome/PhantomJS UA token) are never
+// rescued: each fails alone because the browser declares its own automation.
+//
+// HONEST LIMIT: ptr/mv are client-authored like every reading, and a pointer
+// event a farm dispatches through CDP is a trusted one. A farm that learns
+// this can inject movement — the same residual the Rung-2 confirm fallback
+// has. The thresholds are the simplest rule the corpus supports; the
+// trajectory readings planned next are the corpus that would tighten it,
+// measured first, never written from memory.
+const (
+	rescueMinPointerEvents = 5   // sig.ptr: pointer-move events seen while solving
+	rescueMinMovePx        = 100 // sig.mv: accumulated |movementX|+|movementY|
+	v2RescuedInput         = "input"
+)
+
+// challengeV2InputRescue reports whether a failing solve is rescued by real
+// pointer input: at least rescueMinPointerEvents events covering
+// rescueMinMovePx, and none of the certain tells in tells (the solve's
+// comma-joined list). An absent reading never rescues.
+func challengeV2InputRescue(sig *humanitySignals, tells string) bool {
+	if sig == nil || sig.PTR == nil || sig.MV == nil {
+		return false
+	}
+	for _, t := range strings.Split(tells, ",") {
+		if t == "webdriver" || t == "headless_ua" {
+			return false
+		}
+	}
+	return *sig.PTR >= rescueMinPointerEvents && *sig.MV >= rescueMinMovePx
+}
+
 // challengeV2WaiverBar says whether a failing solve under grain may be waived
 // for a verified good bot: "" when it may, else why not. Waivable are only the
 // grains whose challenge the decision path's good-bot exemption already skips
@@ -680,6 +734,8 @@ func parseHumanityBody(b []byte) *humanitySignals {
 // amplifier, which needs all three REPORTED and exactly 0: dropping only ever
 // produces absent (never a fabricated zero — D5b), and a count failing these
 // bounds is non-zero anyway, so it already failed `== 0` before the drop.
+// PTR and MV also decide the real-input rescue, which needs both REPORTED:
+// a drop only ever withholds a rescue, never grants one.
 // HC feeds mobile_hw_lie / mac_hw_lie (>= 16 / >= 64): a negative count could
 // not reach either bar, and an over-bound one (> sigMaxInt) is dropped to
 // absent, so it escapes both — a knowing residual, NOT closed by clamping:
@@ -893,12 +949,13 @@ func (s *humanitySignals) sigFields() []sigField {
 // — the Rung-1 report as REPORTED, before any scoring. Empty when nothing was
 // retained, so a no-payload solve adds no field.
 //
-// Precisely: mv/dm/dpr/raf are scored by NOTHING — they are corpus only,
+// Precisely: dm/dpr/raf are scored by NOTHING — they are corpus only,
 // logged so a future tell can be written from measured distributions instead
 // of from memory. hc feeds mobile_hw_lie / mac_hw_lie (written exactly that
-// way, from this corpus), and ptr/tch/key feed the no_input amplifier (only
-// as an all-three-zero combination); logging them is what makes those tells
-// auditable rather than opaque. Either way the line shows the raw
+// way, from this corpus), ptr/tch/key feed the no_input amplifier (only
+// as an all-three-zero combination), and ptr+mv decide the real-input rescue
+// (challengeV2InputRescue, which only ever clears); logging them is what makes
+// those decisions auditable rather than opaque. Either way the line shows the raw
 // reading, never a scored derivative — and "the client never moved the mouse"
 // is answerable from the log at all, which it was not: mv was parsed and
 // thrown away despite a comment claiming it was recorded.
@@ -968,6 +1025,9 @@ func (s ChallengeSolve) HumanitySuffix() string {
 	}
 	if s.V2Waived != "" {
 		out += " v2_waived=" + s.V2Waived
+	}
+	if s.V2Rescued != "" {
+		out += " v2_rescued=" + s.V2Rescued
 	}
 	return out
 }
