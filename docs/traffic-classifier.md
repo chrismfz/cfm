@@ -1054,7 +1054,8 @@ carries `tier=` so the log says whether entering the state armed v2.
 **What armed it — `v2_via=`.** `src=` can't say (it reads the entry's
 sticky reason), so every `v2=vhost` solve and reject line — and the
 `challenge_solved` / `challenge_v2_reject` rows (`payload.v2_via`) — carries
-`v2_via=manual|pin|auto:<source>` right after `v2=`. The FP-hunting query
+`v2_via=manual|pin|auto:<source>` (right after `v2=` on the solve line,
+after `src=` on the reject line). The FP-hunting query
 for the auto arm is `detection_history type=challenge_v2_reject` filtered on
 `v2_via` starting `auto:`. The grain stays `v2=vhost`, so the
 good-bot waiver applies exactly as for a manual v2 arm, and `src=` says
@@ -1117,8 +1118,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   path only). Only under a geo or vhost arm, the grains the decision-time
   exemption already softens; a fingerprint policy or a traffic-rule/WAF mark
   stays strict. The history row carries it as `v2_waived`. The mirror image
-  on a `result=v2_reject` line is `v2_waiver_miss=<why not>`, last on the
-  line and only when the client's PTR claims a crawler: `grain` (the arm is a
+  on a `result=v2_reject` line is `v2_waiver_miss=<why not>`, after the geo
+  fields and only when the client's PTR claims a crawler: `grain` (the arm is a
   fingerprint policy or a mark — never waived), `mark` (a geo/vhost arm, but
   a mark covers the client too), `off` (`CHALLENGE_GOODBOT_EXEMPT = 0`),
   `spoofed` (the forward-confirm didn't match), `timeout` (no verify slot in
@@ -1138,11 +1139,12 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   built by the same payload builder as `challenge_solved`, so the two
   populations compare field for field — `detection_history
   type=challenge_v2_reject node="all"` is the fleet FP-hunting query. Every
-  solve and reject line also carries `cc=`/`asn=`/`asn_name=`/`ptr=` — at the
-  end of the reject line (only `v2_waiver_miss=` follows them) and of the
-  fallback solved writer, and just before
-  the legacy ` - (AS…, Country)` tail on the hook-written solved line, which
-  stays last for tooling that reads it. That is the client's network
+  solve and reject line also carries `cc=`/`asn=`/`asn_name=`/`ptr=` — after
+  the fields older parsers read: on the reject line followed by
+  `v2_waiver_miss=`, `src=`, `v2_via=` and `scope=`, on the fallback solved
+  line by `src=` and `scope=`, and on the hook-written solved line by `src=`,
+  `scope=` and the legacy ` - (AS…, Country)` tail, which stays last for
+  tooling that reads it. That is the client's network
   identity, resolved ONCE at verify without ever blocking it: country/ASN from
   a live mmdb read (the enricher's cached record can be up to a day stale),
   PTR from the cached-or-async path. Each key is absent when unresolved — and

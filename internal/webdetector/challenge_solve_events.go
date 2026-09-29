@@ -26,7 +26,7 @@ func (s ChallengeSolve) InputEvent() core.InputEvent {
 		Source:      "challenge",
 		Reason:      "CHALLENGE_SOLVED",
 		Signal:      s.UAReason,
-		Scope:       s.Host,
+		Scope:       s.Host, // the aggregation key (the vhost), not s.Scope (the verify surface)
 		SrcIP:       s.IP,
 		Path:        s.URI,
 		UserAgent:   s.UA,

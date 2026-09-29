@@ -162,7 +162,8 @@ func TestSrcValueAbsentVersusNone(t *testing.T) {
 	if _, ok := (ChallengeSolve{}).historyPayload()["src"]; ok {
 		t.Fatalf("unresolved solve must not persist src")
 	}
-	// The reject line carries it at the END.
+	// The reject line carries it after the geo fields (here, with no v2_via or
+	// scope set, at the end).
 	rej := ChallengeSolve{IP: "1.2.3.4", Host: "h", HumanityScored: true, HumanityScore: 100, V2Grain: "vhost", SrcResolved: true, Src: []string{"vhost:manual"}}
 	if !strings.HasSuffix(rej.RejectLine(), " src=vhost:manual") {
 		t.Fatalf("reject line: %q", rej.RejectLine())

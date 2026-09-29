@@ -517,12 +517,13 @@ type ChallengeSolve struct {
 	SrcResolved bool
 	// Scope is the surface the solve was verified on: "web", or
 	// "panel:<port>" for a panel port's human-entry challenge (clearanceScope,
-	// read once at verify). It decides whether a rung mark covers the solve
-	// and whether a passing solve releases the IP's bridge decision (web
-	// only), so without it a panel solve reads exactly like a web one.
-	// Rendered as scope= (ScopeSuffix) on the solve, reject and would_v2
-	// lines, and as payload.scope on the history rows; "" (a literal that
-	// never went through verify) renders nothing. Log-only.
+	// read once at verify). The same value decides whether a rung mark covers
+	// the solve and whether a passing solve releases the IP's bridge decision
+	// (web only); this field only records it, so a panel solve no longer reads
+	// exactly like a web one. Rendered as scope= on the solve and reject lines
+	// (ScopeSuffix) and on the would_v2 line (ShadowContextSuffix), and as
+	// payload.scope on the history rows; "" (a literal that never went through
+	// verify) renders nothing.
 	Scope string
 	// V2Waived is the FCrDNS-verified good bot whose verdict waived a FAILING
 	// solve under an arm ("" = not waived): the D5 gate let it through instead
@@ -582,10 +583,10 @@ func (s ChallengeSolve) SolveLatencyMS() (int64, bool) {
 	return s.SolveMS, true
 }
 
-// ScopeSuffix renders " scope=<web|panel:port>" (Scope) for a line about the
-// solve, "" when unset. It rides right after src= on every line (on the
-// solved-hook line, before only its legacy free-text tail), so no field a
-// parser already reads moves.
+// ScopeSuffix renders " scope=<web|panel:port>" (Scope) for a [challenge]
+// line about the solve, "" when unset. It rides after every field a parser
+// already reads — after src= (and v2_via= on the reject line); on the
+// solved-hook line only the legacy free-text tail follows it.
 func (s ChallengeSolve) ScopeSuffix() string {
 	if s.Scope == "" {
 		return ""

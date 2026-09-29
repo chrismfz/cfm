@@ -183,8 +183,9 @@ func (s ChallengeSolve) SrcValue() string {
 }
 
 // SrcSuffix renders " src=<value>" for a [challenge] / [abuse-shadow] line,
-// or "" when unresolved. Every writer appends it at the END of its line, so
-// no field an existing parser reads moves.
+// or "" when unresolved. Every writer appends it after the fields existing
+// parsers read (only v2_via=, scope= and the hook line's legacy tail follow
+// it), so none of them moves.
 func (s ChallengeSolve) SrcSuffix() string {
 	v := s.SrcValue()
 	if v == "" {
@@ -198,7 +199,7 @@ func (s ChallengeSolve) SrcSuffix() string {
 // (a Google fetcher, a self-declared AI crawler, a farm exit, an auto vhost
 // challenge vs a WAF rule) without joining against cfm.challenges.log:
 //
-//	cc=GR asn=16509 provider=amazon-aws ptr=x.example ua_family=Chrome ua_bot=1 src=vhost:suspicious_vhost
+//	cc=GR asn=16509 provider=amazon-aws ptr=x.example ua_family=Chrome ua_bot=1 src=vhost:suspicious_vhost scope=web
 //
 // The abuse-shadow parser splits on spaces (abuseshadow.Parse, "every value
 // is space-free"), so only space-free values ride here: no asn_name, no raw

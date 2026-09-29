@@ -400,6 +400,9 @@ already opened.
           solves included, so a bot could solve the (unarmed) panel
           challenge and lift the web WAF challenge; only a web-scope solve
           releases now. The mark grain is web-scope for both writers.
+          Follow-up the same day: solve / reject / would_v2 lines and both
+          history rows carry `scope=` (web / panel:<port>), so a panel
+          solve is told apart from a web one (log-only).
         - [x] **D — scoped customer self-arm — DONE 2026-09-22** (cPanel
           "panic button"). The scoped WRITE path itself predated this
           slice (slice A: `challenge/vhost/add|remove` take scoped tokens,

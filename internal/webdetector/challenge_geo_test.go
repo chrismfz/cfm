@@ -228,7 +228,7 @@ func TestHistoryEventsRedactsPTRForScopedCallers(t *testing.T) {
 			Type: "challenge_v2_reject", Host: "shop.example.com", IP: "203.0.113.30",
 			Payload: map[string]interface{}{
 				"ptr": "ppp.otenet.gr", "country": "Greece", "country_iso": "GR",
-				"asn": 6799, "asn_name": "OTEnet S.A.", "hs": 130,
+				"asn": 6799, "asn_name": "OTEnet S.A.", "hs": 130, "scope": "panel:2083",
 			},
 		}}
 	}
@@ -239,7 +239,8 @@ func TestHistoryEventsRedactsPTRForScopedCallers(t *testing.T) {
 		t.Errorf("ptr must not cross the scoped boundary")
 	}
 	// enrich=1 already hands country/ASN to scoped callers: not a new category.
-	for _, k := range []string{"country", "country_iso", "asn", "asn_name", "hs"} {
+	// scope is the visitor's own verify surface, not operator policy.
+	for _, k := range []string{"country", "country_iso", "asn", "asn_name", "hs", "scope"} {
 		if _, present := scoped[0].Payload[k]; !present {
 			t.Errorf("scoped caller lost %q", k)
 		}

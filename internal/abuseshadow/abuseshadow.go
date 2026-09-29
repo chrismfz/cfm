@@ -76,7 +76,7 @@ type Entry struct {
 	// Humanity (ChallengeV2 Rung 1) would_v2 metrics
 	// (internal/webdetector/challenge_server.go): a solve that WOULD have been
 	// rejected had a challenge_v2 arm covered it. hs/tells are always present;
-	// the context keys (ptr/ua_family/ua_bot/src, plus cc/asn/provider above)
+	// the context keys (ptr/ua_family/ua_bot/src/scope, plus cc/asn/provider above)
 	// ride only on lines from daemons that write them — an older line simply
 	// lacks them. Zero/empty when the line is a different signal.
 	HS       int    `json:"hs,omitempty"`        // humanity score
@@ -260,8 +260,8 @@ type Summary struct {
 	ChallengeScore *ChalScoreSummary `json:"challenge_score,omitempty"`
 
 	// Humanity would_v2 breakdown — the solves ChallengeV2 Rung 1 WOULD have
-	// rejected had an arm covered them, split by what challenged them (src) and
-	// who they are. This is the sizing view for any new v2 arm: e.g. how many
+	// rejected had an arm covered them, split by what challenged them (src),
+	// where they solved (scope) and who they are. This is the sizing view for any new v2 arm: e.g. how many
 	// would-rejects an auto-vhost v2 arm would add (by_src_kind "vhost") and
 	// who they are (by_provider / by_ptr_domain / ua_bot). Omitted when no
 	// would_v2 line fired in the window. See HumanitySummary.
@@ -286,11 +286,7 @@ type HumanitySummary struct {
 	ByProvider    []kv `json:"by_provider"`
 	ByCountry     []kv `json:"by_country"`
 	ByPTRDomain   []kv `json:"by_ptr_domain"` // last two PTR labels; "(none)" = context line without a PTR
-	// ByScope splits the lines by the surface the solve was verified on:
-	// "web", or "panel:<port>" for a panel port's human-entry challenge,
-	// where the WAF / traffic-rule marks never arm. "(unknown)" = a line
-	// from a daemon that predates scope=.
-	ByScope []kv `json:"by_scope"`
+	ByScope       []kv `json:"by_scope"`      // verify surface: web / panel:<port>; "(unknown)" = line predates scope=
 }
 
 // ChalScoreSummary is the per-IP challenge_score signal's dedicated view. The

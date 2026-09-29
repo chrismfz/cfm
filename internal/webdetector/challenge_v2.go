@@ -970,8 +970,8 @@ func (s ChallengeSolve) HumanitySuffix() string {
 
 // WaiverMissSuffix renders " v2_waiver_miss=<reason>" for a rejected solve
 // whose crawler-looking client was not waived (V2WaiverMiss), else "". It
-// rides at the END of the reject line, after the geo fields, so no field a
-// parser already reads moves.
+// rides after the geo fields of the reject line (src=, v2_via= and scope=
+// follow it), so no field a parser already reads moves.
 func (s ChallengeSolve) WaiverMissSuffix() string {
 	if s.V2WaiverMiss == "" {
 		return ""

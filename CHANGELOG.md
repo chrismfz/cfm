@@ -41,7 +41,7 @@ back-filled here — see the git/PR history for that period.
 
 ### Added
 - **Challenge solves now say which surface they were solved on.** Every
-  solve, `v2_reject` and `would_v2` line ends with `scope=web` or
+  solve, `v2_reject` and `would_v2` line carries `scope=web` or
   `scope=panel:<port>` (the cPanel/WHM/webmail ports' own challenge). The
   `challenge_solved` / `challenge_v2_reject` history rows carry it as
   `scope`, and the `abuse_shadow` MCP tool splits the would-rejects by it
