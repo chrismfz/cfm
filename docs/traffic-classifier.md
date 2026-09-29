@@ -943,7 +943,12 @@ challenge and does nothing while no automatic challenge covers the host.
 Persisted (`webdetector_challenge_tier_pins.json`), because every config
 reload restarts the daemon and a lost v1 pin would silently re-arm the host;
 and one store per state file is shared across Engine rebuilds, so a pin
-written in a reload's window lands where the new Engine's gate reads.
+written in a reload's window lands where the new Engine's gate reads. In the
+same window the gate answers through the previous Engine until the new one's
+first tick has noted its sources (its bridge starts empty), so a config
+reload never drops an auto-v2 host to v1. A host whose automatic challenge
+the store never records (`uniqpaths_short`) still reads `auto_active` on the
+status read, so its pin control is there when it is needed.
 Scoped tokens may pin their own vhosts, TTL-capped at 24h, and may not
 replace, clear or shadow a pin the operator set (the status read carries
 `rung_pin_locked` so their page hides controls that would 403). Audited as

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	core "cfm/internal/detectors/core"
@@ -412,6 +413,10 @@ type Engine struct {
 	// one vhost-tier resolver (challengeV2VhostTier, challenge_v2_auto.go).
 	tierPins    *tierPinStore
 	autoV2Armed map[string]bool
+	// gatePrev: the verify gate's previous vhost-tier hook (the engine this
+	// one replaces), answered through until this engine's first vhost tick
+	// has populated its own bridge — see NewEngine.
+	gatePrev atomic.Pointer[func(string) (bool, string)]
 
 	// bypassFunc: covers IGNORE_IPS / IGNORE_NETS — skip emit entirely for these IPs.
 	// Set once at startup via SetBypassFunc (no lock needed).
@@ -727,7 +732,21 @@ func NewEngine(cfg Config) *Engine {
 	// (challengeV2VhostTier — a manual arm's own tier, else an automatic
 	// challenge's: a tier pin, else CHALLENGE_V2_AUTO_VHOST) puts solves on
 	// that host (and its www variant) through the Rung-1 humanity check.
-	SetChallengeV2HostTier(e.challengeV2GateTier)
+	// The previous engine's bridge still holds the live automatic sources
+	// until this engine's first tick notes its own; answering from this
+	// engine's still-empty bridge in between would drop every auto-v2 host
+	// to v1 on each config reload. So the gate answers through the previous
+	// hook until then (a manual v2 arm is loaded from disk and the pin store
+	// is shared, so the previous engine gives the same answer for those).
+	if prev := challengeV2HostTierHook(); prev != nil {
+		e.gatePrev.Store(&prev)
+	}
+	SetChallengeV2HostTier(func(host string) (bool, string) {
+		if p := e.gatePrev.Load(); p != nil {
+			return (*p)(host)
+		}
+		return e.challengeV2GateTier(host)
+	})
 
 	// Good-bot waiver for the same verify gate: an FCrDNS-verified crawler is
 	// not rejected by Rung 1, under the SAME knob (CHALLENGE_GOODBOT_EXEMPT)
@@ -1295,6 +1314,7 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 
 	// Emit challenge-worthy IP alerts (before blocks)
 	e.emitIPChallenges(now, out)
+	e.gatePrev.Store(nil) // this engine's bridge now carries the sources
 
 	// Emit block-worthy IP alerts (picked up by autosink blocker).
 	e.emitIPBlocks(now, out)

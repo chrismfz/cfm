@@ -247,13 +247,11 @@ type challengeV2State struct {
 	// strict). Off, the two tells are not evaluated (touch_lie is
 	// unaffected). Read in the same snapshot as the other knobs.
 	hwTells bool
-	// hostArmed reports whether a v2-tier VHOST arm covers this host (the
-	// engine's manual challenge store, apex→www expansion included — arm
-	// surfaces slice A). Wired at engine start; nil = no vhost arms (tests /
-	// pre-wire), fail-open like the geo resolver.
 	// hostTier answers "is this host's vhost tier v2" plus what put it there
 	// (manual / pin / auto:<source>, rendered as v2_via=), from ONE
-	// resolution — NewEngine wires challengeV2VhostTier (challenge_v2_auto.go).
+	// resolution — NewEngine wires challengeV2GateTier (challenge_v2_auto.go:
+	// a manual v2 arm, else the automatic side). nil = no vhost arms (tests /
+	// pre-wire), fail-open like the geo resolver.
 	hostTier func(host string) (armed bool, via string)
 	// goodBot names the FCrDNS-verified good bot behind a solving IP ("" =
 	// none/unknown), for the waiver in the D5 gate: a failing solve under an
@@ -353,6 +351,13 @@ func challengeV2Marked(ip, host string) bool {
 	return ok
 }
 
+// challengeV2HostTierHook returns the currently wired vhost-tier hook.
+func challengeV2HostTierHook() func(string) (bool, string) {
+	challengeV2.mu.RLock()
+	defer challengeV2.mu.RUnlock()
+	return challengeV2.hostTier
+}
+
 // SetChallengeV2HostTier wires the per-vhost v2 lookup the verify gate ORs in
 // (see the D5 gate in challenge_server.go), with the v2_via answer from the
 // same resolution. Same lifecycle as SetFingerprintPolicyGeo: set from
@@ -365,7 +370,7 @@ func SetChallengeV2HostTier(fn func(host string) (bool, string)) {
 
 // SetChallengeV2GoodBot wires the good-bot waiver the D5 gate consults before
 // rejecting (see goodBot on challengeV2State). Same lifecycle as
-// SetChallengeV2HostArmed: set from NewEngine on every engine build, nil when
+// SetChallengeV2HostTier: set from NewEngine on every engine build, nil when
 // CHALLENGE_GOODBOT_EXEMPT is off.
 func SetChallengeV2GoodBot(fn func(ctx context.Context, ip, ptr string) (name, miss string)) {
 	challengeV2.mu.Lock()

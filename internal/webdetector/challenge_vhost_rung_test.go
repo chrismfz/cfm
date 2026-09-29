@@ -165,6 +165,7 @@ func TestChallengeV2HostArmed_ApexCoversWWWAndWiring(t *testing.T) {
 // sibling test above wires its own closure, so deleting the NewEngine line
 // would leave the suite green while the teeth silently vanish).
 func TestNewEngineWiresChallengeV2HostArmed(t *testing.T) {
+	SetChallengeV2HostTier(nil) // no previous engine's hook to answer through
 	t.Cleanup(func() { SetChallengeV2HostArmed(nil) })
 	// Isolated store path: FillDefaults would otherwise point manualChal at
 	// the REAL /var/lib/cfm snapshot — on a root-run test host this would

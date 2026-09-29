@@ -1263,6 +1263,10 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 // list every reconcile — NOT a human action. (Was mislabelled
                 // "manual", which read as an operator having clicked it.)
                 e.nginxBridge.ChallengeVhostWithReason(pat, vttl, "vhost_config")
+                // The auto-v2 source for it too — the list is pushed for every
+                // listed host, candidate or not (a quiet listed apex still has
+                // its www. challenged through the expansion).
+                e.nginxBridge.NoteVhostAutoSource(pat, autoV2VhostConfig, e.autoSourceNoteTTL())
             }
         }
 

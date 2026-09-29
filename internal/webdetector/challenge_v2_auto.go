@@ -231,19 +231,31 @@ func (t vhostV2Tier) unpinLockedFor(scope map[string]struct{}) bool {
 // does, plus the noted sources). Under-Attack costs
 // nothing here — it is a note like every other source.
 func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
-	var t vhostV2Tier
 	if e == nil || host == "" {
-		return t
+		return vhostV2Tier{}
 	}
+	manual, manualV2 := e.manualTierOf(host)
+	return e.challengeV2VhostTierWith(host, manual, manualV2)
+}
+
+// manualTierOf: whether a manual arm covers host, and whether it is at v2 —
+// ONE manual-store resolution (manualRungTarget, then the rung).
+func (e *Engine) manualTierOf(host string) (manual, manualV2 bool) {
+	if target := e.manualRungTarget(host); target != "" {
+		return true, e.manualChal.rung(target) == "v2"
+	}
+	return false, false
+}
+
+// challengeV2VhostTierWith is challengeV2VhostTier with the manual side
+// already resolved (the gate's fast path passes it in, so the manual store is
+// consulted once per solve).
+func (e *Engine) challengeV2VhostTierWith(host string, manual, manualV2 bool) vhostV2Tier {
+	var t vhostV2Tier
 	now := time.Now()
 	pin, pinHost := e.tierPins.covering(host, now)
 	t.Pin, t.PinActor, t.PinHost = pin.Rung, pin.Actor, pinHost
 	t.PinOnApex = pinHost != "" && pinHost != host
-	manual, manualV2 := false, false
-	if target := e.manualRungTarget(host); target != "" {
-		manual = true
-		manualV2 = e.manualChal.rung(target) == "v2"
-	}
 	trigger := e.autoV2Trigger(host)
 	if trigger != "" {
 		t.Trigger = trigger
@@ -284,10 +296,14 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 // without the automatic side (whose AutoRung/Pin fields only the read
 // surfaces need). Otherwise it is challengeV2VhostTier's answer.
 func (e *Engine) challengeV2GateTier(host string) (bool, string) {
-	if target := e.manualRungTarget(host); target != "" && e.manualChal.rung(target) == "v2" {
+	if host == "" {
+		return false, ""
+	}
+	manual, manualV2 := e.manualTierOf(host)
+	if manualV2 {
 		return true, tierSourceManual
 	}
-	t := e.challengeV2VhostTier(host)
+	t := e.challengeV2VhostTierWith(host, manual, false)
 	return t.Rung == "v2", t.via()
 }
 
@@ -314,17 +330,20 @@ func (t vhostV2Tier) via() string {
 // autoSourceNoteTTL once it is not, so the tier can never outlive either the
 // vhost challenge or the source.
 func (e *Engine) autoV2Trigger(host string) string {
-	if e.nginxBridge == nil || e.hostAutoSuppressed(host) {
+	if e.nginxBridge == nil {
 		return ""
 	}
-	inheritApex := true
-	if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" && e.hostAutoSuppressed(apex) {
-		inheritApex = false // a suppressed apex's lingering notes arm nothing
+	own, apexSrcs, apex, ok := e.nginxBridge.vhostAutoSources(host)
+	if !ok || (len(own) == 0 && len(apexSrcs) == 0) {
+		return "" // the common case: no note — no suppression lookup at all
 	}
-	sources, ok := e.nginxBridge.vhostAutoSources(host, inheritApex)
-	if !ok {
+	if e.hostAutoSuppressed(host) {
 		return ""
 	}
+	if len(apexSrcs) > 0 && e.hostAutoSuppressed(apex) {
+		apexSrcs = nil // a suppressed apex's lingering notes arm nothing
+	}
+	sources := mergeAutoSources(own, apexSrcs)
 	for _, src := range sources {
 		if e.autoV2Armed[src] {
 			return src
@@ -334,6 +353,27 @@ func (e *Engine) autoV2Trigger(host string) string {
 		return sources[0]
 	}
 	return ""
+}
+
+// mergeAutoSources unions two noted-source lists into autoSourceOrder.
+func mergeAutoSources(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	in := map[string]bool{}
+	for _, s := range a {
+		in[s] = true
+	}
+	for _, s := range b {
+		in[s] = true
+	}
+	var out []string
+	for _, s := range autoSourceOrder {
+		if in[s] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // hostAutoSuppressed reports whether host is suppressed from AUTOMATIC
@@ -371,42 +411,46 @@ func (e *Engine) autoSourceNoteTTL() time.Duration {
 	return ttl
 }
 
-// vhostAutoSources returns the live automatic sources noted for host — by
-// host itself, or by its apex for a www. host (the bridge's apex→www
-// expansion) — provided a live vhost-wide CHALLENGE entry covers host (the
-// one vhost matcher, vhostEntryLocked); ok=false when none does. One RLock.
-func (b *NginxBridge) vhostAutoSources(host string, inheritApex bool) (sources []string, ok bool) {
+// vhostAutoSources returns the live automatic sources noted by host itself
+// and — for a www. host whose apex has a live challenge of its own (the
+// bridge's apex→www expansion) — by the apex, separately, so the engine can
+// apply the apex's suppression; ok=false when no live vhost-wide CHALLENGE
+// entry covers host (the one vhost matcher, vhostEntryLocked). An apex note
+// with no apex challenge (e.g. a forced Under-Attack on an unchallenged apex)
+// never reaches a separately challenged www. One RLock.
+func (b *NginxBridge) vhostAutoSources(host string) (own, apexSrcs []string, apex string, ok bool) {
 	if b == nil || host == "" {
-		return nil, false
+		return nil, nil, "", false
 	}
 	now := time.Now()
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	h, found := b.vhostEntryLocked(host, now)
 	if !found || h.Action != "challenge" {
-		return nil, false
+		return nil, nil, "", false
 	}
-	writers := []string{host}
-	// A www. host inherits its apex's notes (the bridge expands an apex
-	// challenge to www) — only while the APEX itself has a live challenge
-	// (an apex note with no apex challenge, e.g. a forced Under-Attack on an
-	// unchallenged apex, must not arm a separately challenged www.). A www.
-	// host excluded from automatic challenges is the resolver's to refuse
-	// (autoV2Trigger → hostAutoSuppressed).
-	if apex, cut := strings.CutPrefix(host, "www."); inheritApex && cut && apex != "" {
-		if ah, live := b.vhState[apex]; live && ah.Action == "challenge" && ah.Expires.After(now) {
-			writers = append(writers, apex)
+	own = liveNotesLocked(b.vhAuto[host], now)
+	if a, cut := strings.CutPrefix(host, "www."); cut && a != "" {
+		if ah, live := b.vhState[a]; live && ah.Action == "challenge" && ah.Expires.After(now) {
+			apex = a
+			apexSrcs = liveNotesLocked(b.vhAuto[a], now)
 		}
 	}
+	return own, apexSrcs, apex, true
+}
+
+// liveNotesLocked lists the live notes of one writer, in autoSourceOrder.
+func liveNotesLocked(notes map[string]time.Time, now time.Time) []string {
+	if len(notes) == 0 {
+		return nil
+	}
+	var out []string
 	for _, src := range autoSourceOrder {
-		for _, w := range writers {
-			if exp, live := b.vhAuto[w][src]; live && exp.After(now) {
-				sources = append(sources, src)
-				break
-			}
+		if exp, live := notes[src]; live && exp.After(now) {
+			out = append(out, src)
 		}
 	}
-	return sources, true
+	return out
 }
 
 // ── Tier pins ───────────────────────────────────────────────────────────────
@@ -534,16 +578,6 @@ func (s *tierPinStore) getLocked(host string, now time.Time) (tierPin, bool) {
 	return p, true
 }
 
-// get returns host's own live pin (exact key).
-func (s *tierPinStore) get(host string) (tierPin, bool) {
-	if s == nil {
-		return tierPin{}, false
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.getLocked(host, time.Now())
-}
-
 // covering returns the pin covering host and the host it is set on: host's
 // own, else its apex's for a www. host (the manual tier's resolution). One
 // RLock. The read-side resolver (apply repeats it inside its write lock).
@@ -564,24 +598,18 @@ func (s *tierPinStore) covering(host string, now time.Time) (tierPin, string) {
 	return tierPin{}, ""
 }
 
-// apply pins host to rung ("v1" | "v2"; ttl <= 0 = no expiry) or clears the
-// pin covering host (rung ""), atomically — the covering lookup, the guards,
-// the no-op test and the write are ONE critical section, so two concurrent
-// requests can never both record the same transition, nor can a guard pass on
-// a pin that changes before the write. Clearing acts on the covering pin (the
-// host's own, else its apex's for www.); allowTarget (nil = allow) vets that
-// host; protect (nil = none) refuses when it returns true for the covering
-// pin. Returns the host acted on, the previous rung there, whether anything
-// changed, and a non-empty refusal.
-func (s *tierPinStore) apply(host, rung string, ttl time.Duration, actor string,
-	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string) {
-	target, prev, changed, refusal, _ = s.applyPin(host, rung, ttl, actor, allowTarget, protect)
-	return
-}
-
-// applyPin is apply that also returns the pin now on target (zero when none)
-// — read in the same critical section, so a caller reports the expiry of ITS
+// applyPin pins host to rung ("v1" | "v2"; ttl <= 0 = no expiry) or clears
+// the pin covering host (rung ""), atomically — the covering lookup, the
+// guards, the no-op test and the write are ONE critical section, so two
+// concurrent requests can never both record the same transition, nor can a
+// guard pass on a pin that changes before the write. Clearing acts on the
+// covering pin (the host's own, else its apex's for www.); allowTarget (nil =
+// allow) vets that host; protect (nil = none) refuses when it returns true
+// for the covering pin. Returns the host acted on, the previous rung there,
+// whether anything changed, a non-empty refusal, and the pin now on target —
+// read in the same critical section, so a caller reports the expiry of ITS
 // write, not a concurrent one's.
+
 func (s *tierPinStore) applyPin(host, rung string, ttl time.Duration, actor string,
 	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string, now tierPin) {
 	if s == nil {
@@ -772,21 +800,13 @@ func (s *tierPinStore) save(gen uint64, arr []tierPinPersist) {
 
 // ── Engine surface ──────────────────────────────────────────────────────────
 
-// setChallengeTierPin pins host's automatic-challenge tier (rung "v1" | "v2",
-// ttl <= 0 = until cleared), or clears the pin covering it (rung ""),
-// recording the actor, with the API handler's guards (tierPinStore.apply)
+// setChallengeTierPinGet pins host's automatic-challenge tier (rung "v1" |
+// "v2", ttl <= 0 = until cleared), or clears the pin covering it (rung ""),
+// recording the actor, with the API handler's guards (tierPinStore.applyPin)
 // evaluated in the same critical section as the write. Returns the host acted
-// on, the previous pin rung, whether anything changed, and a refusal. A no-op
-// writes no audit row, log line or state file. Nothing reaches the edge: the
-// tier is read live at verify.
-func (e *Engine) setChallengeTierPin(host, rung string, ttl time.Duration, actor string,
-	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string) {
-	target, prev, changed, refusal, _ = e.setChallengeTierPinGet(host, rung, ttl, actor, allowTarget, protect)
-	return
-}
-
-// setChallengeTierPinGet is setChallengeTierPin plus the pin now on target,
-// from the same critical section as the write.
+// on, the previous pin rung, whether anything changed, a refusal, and the pin
+// now on target. A no-op writes no audit row, log line or state file. Nothing
+// reaches the edge: the tier is read live at verify.
 func (e *Engine) setChallengeTierPinGet(host, rung string, ttl time.Duration, actor string,
 	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string, pin tierPin) {
 	target, prev, changed, refusal, pin = e.tierPins.applyPin(host, rung, ttl, actor, allowTarget, protect)

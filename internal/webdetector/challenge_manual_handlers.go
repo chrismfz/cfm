@@ -660,6 +660,13 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 	}
 
 	tier := e.challengeV2VhostTierForScope(host)
+	// An automatic vhost challenge the store never records (uniqpaths_short
+	// writes no row) is still live and still carries a tier: report it as
+	// auto-active, or the pages drop the host — and its "→ v1 (pin)"
+	// emergency control — while its solves are held to v2.
+	if !autoActive && (tier.Source == tierSourceAuto || tier.Source == tierSourcePin) {
+		autoActive = true
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"host":          host,
 		"manual_active": active,

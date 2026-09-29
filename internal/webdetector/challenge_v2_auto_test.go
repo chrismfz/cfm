@@ -618,6 +618,11 @@ func TestChallengeVhostStatus_ReportsAutoTier(t *testing.T) {
 	if st["rung"] != "v2" || st["rung_source"] != "auto" || st["rung_trigger"] != "suspicious_vhost" || st["rung_pin"] != "" {
 		t.Fatalf("status tier fields: %v", st)
 	}
+	// No store row (uniqpaths_short writes none) — still auto-active, or the
+	// pages would drop the host and its "→ v1 (pin)" control.
+	if st["auto_active"] != true {
+		t.Fatalf("an automatic challenge without a store row must read auto_active: %v", st)
+	}
 
 	e.SetChallengeTierPinAs("busy.gr", "v1", 0, "admin")
 	rr = httptest.NewRecorder()
@@ -661,6 +666,7 @@ func TestChallengeVhostStatus_ReportsAutoTier(t *testing.T) {
 // PRODUCTION wiring: NewEngine hooks the package-level verify gate to the
 // resolver, with the knob and pin store it was built with.
 func TestNewEngineWiresAutoV2(t *testing.T) {
+	SetChallengeV2HostTier(nil) // no previous engine's hook to answer through
 	t.Cleanup(func() { SetChallengeV2HostArmed(nil) })
 	dir := t.TempDir()
 	e := NewEngine(Config{
@@ -699,6 +705,20 @@ func TestNewEngineWiresAutoV2(t *testing.T) {
 	e.SetChallengeTierPinAs("auto.gr", "", 0, "admin")
 	if !challengeV2HostArmed("auto.gr") {
 		t.Fatalf("clearing the pin through the old engine did not reach the new one")
+	}
+
+	// Reload window: until e2's first vhost tick, the gate answers through
+	// e's hook — e2's bridge is still empty in production, and answering from
+	// it would drop every auto-v2 host to v1 on each reload.
+	e2.nginxBridge.mu.Lock()
+	delete(e2.nginxBridge.vhState, "auto.gr")
+	e2.nginxBridge.mu.Unlock()
+	if !challengeV2HostArmed("auto.gr") {
+		t.Fatalf("before its first tick the new engine must answer through the previous hook")
+	}
+	e2.gatePrev.Store(nil) // what e2's first emitIPChallenges does
+	if challengeV2HostArmed("auto.gr") {
+		t.Fatalf("after its first tick the new engine must answer from its own bridge")
 	}
 }
 
