@@ -659,8 +659,10 @@ edge (localhost listener; the per-IP challenge-DNAT is RETIRED per
 verify host) are edge-authoritative on current confs; the client-authored
 humanity report remains spoofable by a signal-aware farm — deliberate D5b
 residual, all documented in the HONEST LIMITS block of `challenge_v2.go`; Rung 2 is narrowed to a
-"confirm you're human" fallback for a Rung-1 reject (a candidate, not built) — the visible puzzle was dropped
-2026-09-29, and a farm running real browsers is `cfm_pcw`'s job, not a harder check (master plan §5). **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
+"confirm you're human" fallback for a Rung-1 reject (a candidate, not built, after the real-input rescue above
+and its trajectory corpus) — the visible puzzle was dropped 2026-09-29, and a farm running real browsers
+(`hs=0`) is the operator fingerprint / geo policy's job, not a harder check (master plan §5, E3's honest
+limits; `cfm_pcw` fired on none of them in the 2026-09-29 read). **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
 the ONE roadmap/decision log; the other docs' phase checklists are frozen). Design
 hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`
 (central). See also `docs/challenge-score.md`, `docs/roadmaps/challenge-engine.md` §8.1.
