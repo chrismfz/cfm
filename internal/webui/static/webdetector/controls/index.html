@@ -50,11 +50,12 @@
             <option value="24h">24 hours</option>
           </select>
           <button class="btn-danger" @click="panicArm" :disabled="loading">🚨 Arm challenge</button>
-          <button class="btn-quiet" @click="panicSwitchTier" v-if="panicSwitchTarget()" :disabled="loading" :title="'Switch the ACTIVE challenge on this vhost to ' + (panicSwitchTarget() === 'v2' ? 'strict (v2)' : 'standard (v1)') + ' without re-arming it — the expiry stays as it is'">{{ panicSwitchTarget() === 'v2' ? 'Switch to Strict (v2)' : 'Switch to Standard (v1)' }}</button>
+          <button class="btn-quiet" @click="panicSwitchTier" v-if="panicSwitchTarget()" :disabled="loading" :title="panicSwitchIsPin() ? 'Pin this vhost\'s AUTOMATIC challenges to ' + (panicSwitchTarget() === 'v2' ? 'strict (v2)' : 'standard (v1)') + ' — stays until you unpin it (customer pins last 24h)' : 'Switch the ACTIVE challenge on this vhost to ' + (panicSwitchTarget() === 'v2' ? 'strict (v2)' : 'standard (v1)') + ' without re-arming it — the expiry stays as it is'">{{ (panicSwitchTarget() === 'v2' ? 'Switch to Strict (v2)' : 'Switch to Standard (v1)') + (panicSwitchIsPin() ? ' · pin' : '') }}</button>
+          <button class="btn-quiet" @click="panicUnpin" v-if="panicTierPinned()" :disabled="loading" title="Remove the tier pin: the node default (CHALLENGE_V2_AUTO_VHOST) decides this vhost's automatic tier again">↺ Unpin (auto)</button>
           <button class="btn-quiet" @click="panicDisarm" :disabled="loading || !(panicStatus && panicStatus.manual_active)">Disarm</button>
         </div>
         <p class="statusline" v-if="panicMsg">{{ panicMsg }}</p>
-        <p class="muted" v-if="panicStatus">{{ panicStatusLine() }}</p>
+        <p class="muted" v-if="panicStatus" :title="panicStatusTitle()">{{ panicStatusLine() }}</p>
       </section>
 
       <!-- 1. Security Overview -->
@@ -156,7 +157,8 @@
                 </td>
                 <td>
                   <button :class="row.under_attack ? 'btn-danger' : 'btn-quiet'" @click="toggleUnderAttack(row)" :disabled="loading || !row.under_attack_toggleable" :title="underAttackButtonTitle(row)">{{ row.under_attack ? '🚨 UNDER ATTACK' : 'AUTO' }}</button>
-                  <button class="btn-danger btn-sm" v-if="row.under_attack" @click="quickStrict(row.host)" :disabled="loading" :title="'Under attack = the plain challenge is being solved. Arm a strict (v2) challenge on this vhost for ' + panicTTL + ' (or switch its existing manual arm to v2, keeping the expiry). Status and Disarm in the Emergency challenge card above.'">→ Strict v2</button>
+                  <button class="btn-quiet btn-sm" v-if="row.under_attack && row.challenge_rung === 'v2'" @click="selectPanicHost(row.host)" :disabled="loading" :title="rowTierTitle(row)">strict v2 ✓</button>
+                  <button class="btn-danger btn-sm" v-if="row.under_attack && row.challenge_rung !== 'v2'" @click="quickStrict(row.host)" :disabled="loading" :title="'Under attack = the plain challenge is being solved. Arm a strict (v2) challenge on this vhost for ' + panicTTL + ' (or switch its existing manual arm to v2, keeping the expiry). Status and Disarm in the Emergency challenge card above.'">→ Strict v2</button>
                 </td>
                 <td>
                   <button :class="vhostControlEnabled(row, 'waf') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading || !vhostControlToggleable(row, 'waf')" :title="vhostControlButtonTitle(row, 'waf')">{{ vhostControlButtonLabel(row, 'waf') }}</button>

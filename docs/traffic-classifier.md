@@ -854,6 +854,74 @@ Build the stack classes from the data by cipher list, restrict to UAs with
 nothing appended, exclude vhost-bound (front-proxy) lists, and keep it in the
 device-claim group.
 
+#### Auto-v2 — automatic vhost challenges at the v2 tier (2026-09-29)
+
+Until now the vhost grain was armed only by a MANUAL arm at `rung=v2`. Since
+2026-09-29 an **automatic** vhost challenge runs at v2 too, when its source
+is in `[webdetector] CHALLENGE_V2_AUTO_VHOST` (default
+`suspicious_vhost,uniqpaths_short,under_attack`; `vhost_config` is opt-in,
+`off` arms none). Code: `challenge_v2_auto.go`.
+
+**Measured first (D3 exit contract).** The week after the hardware tells
+shipped (2026-09-23 → 09-29, 7 nodes, `src=` on every solve) sized the arm
+from the solves it would have covered:
+
+| `src=` | solves | would fail | likely humans (fail) | convicted-farm (fail) |
+|---|---|---|---|---|
+| `vhost:suspicious_vhost` | 28 524 | 8 207 | 3 395 (4) | 21 054 (7 625, 36%) |
+| `vhost:vhost_config` | 1 650 | 523 | 780 (0) | 394 (388) |
+| `vhost:uniqpaths_short` | 126 | 64 | 33 (0) | 31 (18) |
+
+Of the 4 human-labelled fails, 2 carry `webdriver` (automation on a Greek
+line); the other 2 are `sw_renderer,outer_zero` on real input (`mv` 729 /
+341) — software-rendered machines, the known RDP/VDI residual. ~0.06%. The
+false reject is deterministic per device (a retry fails the same way), so
+what bounds it is the challenge's own TTL: an automatic challenge lapses and
+the host is unchallenged again. That is why the manual arm, the config list
+and the fingerprint/geo policies — all long-lived — are NOT in the default.
+
+**One resolver** (`challengeV2VhostTier`) answers "what tier is this vhost
+at", for the verify gate AND every surface (vhost list/status, controls
+rows, CLI):
+
+1. a manual arm covering the host → its own tier (beats all automation);
+2. no automatic source covering the host → no vhost tier;
+3. a **tier pin** on the host (or its apex, for `www.`) → the pinned tier;
+4. the knob: v2 iff the covering source is armed.
+
+The automatic source is the live bridge vhost entry's reason — the SAME
+entry and matcher `src=vhost:<reason>` reads (`vhostEntryLocked`) — or
+Under-Attack (`VhostAttackState`, incl. an operator `attack on`), which is
+reachable only from a challenged vhost. The grain stays `v2=vhost`, so the
+good-bot waiver applies exactly as for a manual v2 arm, and `src=` says
+which vhost source covered the solve.
+
+**Tier pins** (`POST /api/v1/challenge/vhost/tier`, `cfm webtop challenge
+tier <vhost> v1|v2|auto`, the cfm-admin "→ v1 (pin)" / "↺ auto" buttons):
+`v1` is the emergency drop-back, `v2` arms a source the knob leaves at v1,
+`auto` hands the tier back to the knob. A pin never creates or extends a
+challenge and does nothing while no automatic challenge covers the host.
+Persisted (`webdetector_challenge_tier_pins.json`), because every config
+reload restarts the daemon and a lost v1 pin would silently re-arm the host.
+Scoped tokens may pin their own vhosts, TTL-capped at 24h. Audited as
+`challenge_vhost_tier_pin` (`from`/`rung`/`actor`, a no-op writes nothing).
+
+**Under-Attack's first consequence.** I1 stays detect-only for its action
+ladder; the v2 tier is the one thing UNDER_ATTACK now changes. Caveat from
+the same week: `vhost_under_attack_on` never fired fleet-wide, although
+farms solved ~25 000 challenges — entry leg 3 needs the origin to be
+erroring (≥50%), and a farm that doesn't break the site never trips it. So
+`under_attack` is the rare, strong trigger; `suspicious_vhost` is the one
+that carries the volume.
+
+**Not solved by this.** ~52% of convicted-farm solves score `hs=0` (the
+95070673 hc=8 pool, c28caa00 on real GPUs): no Rung-1 arm catches them.
+Those need fingerprint policy or Rung 2. The Rung-2 "confirm you're human"
+step also answers the deterministic-FP residual above (the 2 rejected
+humans moved the mouse; 0 of 9 954 failing farm solves did) — with the
+honest limit that a CDP click is trusted and the accessible keyboard path
+has no trajectory, so it is an escape hatch for humans, not a wall.
+
 #### Observability contract (shadow-first; reuses existing logs — no new log, per CLAUDE.md §5)
 
 Rung-1 writes the SAME surfaces `challenge_score` uses (open-question #4
@@ -938,7 +1006,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   is a snapshot, not the one decision that served the page: several sources
   can be listed. LOG-ONLY — `v2=` stays the one answer to "did the teeth
   cover this solve". It exists to size a new v2 arm (e.g. auto vhost
-  challenge at v2) from real would-rejects before turning it on.
+  challenge at v2) from real would-rejects before turning it on — which is
+  how the auto-v2 default above was sized.
 - **`detection_history`** (durable, fleet-pullable): fingerprint-anchored, rolls
   into cfm-web's `fingerprints` ledger as another per-client tell. The
   `challenge_solved` row carries `hs`, `tells`, `v2` (the arm grain),

@@ -17,7 +17,38 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **Automatic vhost challenges now run at ChallengeV2 (strict) by default.**
+  When the scorer challenges a vhost (`suspicious_vhost`, `uniqpaths_short`)
+  or a vhost goes UNDER_ATTACK, a solve must also pass the passive humanity
+  check to get clearance. It is the same challenge page, so a real visitor who
+  passes sees no difference. Sized on last week's traffic before shipping:
+  36% of the solves from known solver-farm fingerprints would fail, against
+  ~0.06% of likely humans (software-rendered RDP/VDI machines). A rejected
+  visitor can retry, and the challenge lapses with the automatic challenge's
+  own TTL. New `[webdetector] CHALLENGE_V2_AUTO_VHOST` lists the sources
+  (default `suspicious_vhost,uniqpaths_short,under_attack`; add
+  `vhost_config` for the `CHALLENGE_VHOST` list; `off` = none). Manual
+  challenges keep the tier they were armed with.
+- **Under-Attack Mode now changes one thing:** a vhost in UNDER_ATTACK
+  (including an operator `attack on`) gets the v2 tier. The rest of Under-Attack
+  stays detect-only.
+
+### Added
+- **Switch a vhost's automatic challenge back to v1 (or forward to v2).**
+  A per-vhost tier pin: `cfm webtop challenge tier <vhost> v1|v2|auto
+  [--ttl 24h]`, `POST /api/v1/challenge/vhost/tier`, and in cfm-admin the
+  "→ v1 (pin)" / "↺ auto" buttons on the challenged-vhosts card and the
+  Emergency challenge card. `v1` is the emergency drop-back, `auto` hands the
+  vhost back to the node default. A pin never starts or extends a challenge,
+  survives restarts, and is audited (`challenge_vhost_tier_pin`). Customers
+  can pin their own vhosts, for at most 24h.
+- **The effective tier is visible everywhere.** The vhost list and status,
+  `cfm webtop challenge` (new TIER column), `challenge status` and the
+  cfm-admin pills now show the tier the verify gate actually enforces and why
+  (`rung_source` = manual / pin / auto, `rung_trigger` = the automatic
+  source). Under-attack rows on the controls page show "strict v2 ✓" instead
+  of offering to arm what is already armed.
 
 ## 2026.09.28
 

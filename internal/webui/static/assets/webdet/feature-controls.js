@@ -2,6 +2,15 @@
 // per-vhost security overview. Traffic rules and API tokens live on their own
 // pages (feature-rules.js, feature-tokens.js).
 
+import {
+  effectiveTier,
+  tierPinned,
+  tierSwitchRequest,
+  tierSwitchTarget,
+  tierTitle,
+  tierUnpinRequest,
+} from "./challenge-tier.js";
+
 export const controlsMixin = {
   data() {
     return {
@@ -303,13 +312,20 @@ export const controlsMixin = {
     panicStatusLine() {
       const s = this.panicStatus;
       if (!s) return "";
+      const rung = effectiveTier(s) === "v2" ? "strict (v2)" : "standard (v1)";
       if (s.manual_active) {
-        const rung = s.rung === "v2" ? "strict (v2)" : "standard";
         const until = s.expires_at ? new Date(s.expires_at).toLocaleString() : "?";
         return `Challenge ACTIVE (${rung}) until ${until}`;
       }
-      if (s.auto_active) return "Auto-challenge active (scorer-driven); arming makes it manual.";
+      if (s.auto_active || s.rung_source) {
+        const why = tierPinned(s) ? "pinned" : `automatic: ${s.rung_trigger || "?"}`;
+        return `Auto-challenge active (scorer-driven), ${rung} — ${why}; arming makes it manual.`;
+      }
+      if (s.rung_pin) return `No challenge active. A ${s.rung_pin} tier pin is parked here for automatic challenges.`;
       return "No manual challenge active.";
+    },
+    panicStatusTitle() {
+      return tierTitle(this.panicStatus || {});
     },
     async panicArm() {
       const host = String(this.panicHost || "").trim();
@@ -330,26 +346,62 @@ export const controlsMixin = {
         console.error("[cfm-admin] panic arm failed", host, err);
       }
     },
-    // Switch the tier of the ACTIVE manual arm on the selected host in place
-    // (v1/challenge/vhost/rung): expiry and reason are kept, unlike re-arming.
+    // Switch the tier of the challenge on the selected host from its
+    // EFFECTIVE tier (challenge-tier.js): a manual arm in place
+    // (v1/challenge/vhost/rung — expiry and reason kept, unlike re-arming),
+    // an automatic challenge by pinning it (v1/challenge/vhost/tier — "→
+    // Standard (v1)" is the emergency drop-back from an auto-v2 tier).
     panicSwitchTarget() {
-      const s = this.panicStatus;
-      if (!s || !s.manual_active) return "";
-      return s.rung === "v2" ? "v1" : "v2";
+      return tierSwitchTarget(this.panicStatus || {});
+    },
+    panicSwitchIsPin() {
+      const s = this.panicStatus || {};
+      return Boolean(this.panicSwitchTarget()) && !s.manual_active && s.rung_source !== "manual";
+    },
+    panicTierPinned() {
+      return tierPinned(this.panicStatus || {});
     },
     async panicSwitchTier() {
       const host = String(this.panicHost || "").trim();
+      const s = this.panicStatus || {};
       const to = this.panicSwitchTarget();
       if (!host || !to) return;
+      const req = tierSwitchRequest(host, s, to);
       try {
-        const res = await this.postJSON("v1/challenge/vhost/rung", { host, rung: to });
-        const label = res?.rung === "v2" ? "strict (v2)" : "standard (v1)";
-        this.panicMsg = `Challenge on ${res?.host || host} switched to ${label} — expiry unchanged`;
+        const res = await this.postJSON(req.path, req.body);
+        const label = to === "v2" ? "strict (v2)" : "standard (v1)";
+        this.panicMsg = req.path.endsWith("/rung")
+          ? `Challenge on ${res?.host || host} switched to ${label} — expiry unchanged`
+          : `Automatic challenges on ${res?.host || host} pinned to ${label} — until you unpin` +
+            (res?.ttl_capped ? " (customer pins are limited to 24h)" : "");
         await this.refreshPanicStatus();
       } catch (err) {
         this.panicMsg = `Tier switch failed for ${host}: ${err}`;
         console.error("[cfm-admin] panic tier switch failed", host, err);
       }
+    },
+    async panicUnpin() {
+      const host = String(this.panicHost || "").trim();
+      if (!host) return;
+      const req = tierUnpinRequest(host);
+      try {
+        await this.postJSON(req.path, req.body);
+        this.panicMsg = `Tier pin removed on ${host} — the node default (CHALLENGE_V2_AUTO_VHOST) decides again`;
+        await this.refreshPanicStatus();
+      } catch (err) {
+        this.panicMsg = `Unpin failed for ${host}: ${err}`;
+        console.error("[cfm-admin] panic unpin failed", host, err);
+      }
+    },
+    // A row's challenge is already strict (v2): point the Emergency card at
+    // it, where its status and the switch back to v1 live.
+    async selectPanicHost(host) {
+      this.panicHost = String(host || "").trim();
+      await this.refreshPanicStatus();
+    },
+    rowTierTitle(row) {
+      return tierTitle({ rung: row?.challenge_rung, rung_source: row?.challenge_rung_source, rung_trigger: row?.challenge_rung_trigger }) +
+        " — click to manage it in the Emergency challenge card above.";
     },
     // One-click "Strict v2" from a table row (e.g. a vhost the Under-Attack
     // alarm flagged): re-tiers an existing manual arm in place, else arms a
@@ -361,13 +413,13 @@ export const controlsMixin = {
       this.panicHost = host;
       try {
         const st = await this.fetchJSONSafe(`v1/challenge/vhost/status?host=${encodeURIComponent(host)}`, null);
-        if (st && st.manual_active) {
-          if (st.rung === "v2") {
-            this.panicMsg = `${host} is already on strict (v2)`;
-          } else {
-            await this.postJSON("v1/challenge/vhost/rung", { host, rung: "v2" });
-            this.panicMsg = `Challenge on ${host} switched to strict (v2) — expiry unchanged`;
-          }
+        if (st && effectiveTier(st) === "v2") {
+          // Already strict — automatic (CHALLENGE_V2_AUTO_VHOST, e.g. under
+          // attack), pinned or manual. Nothing to arm.
+          this.panicMsg = `${host} is already on strict (v2) — ${tierTitle(st)}`;
+        } else if (st && st.manual_active) {
+          await this.postJSON("v1/challenge/vhost/rung", { host, rung: "v2" });
+          this.panicMsg = `Challenge on ${host} switched to strict (v2) — expiry unchanged`;
         } else {
           const res = await this.postJSON("v1/challenge/vhost/add", {
             host, ttl: this.panicTTL, rung: "v2", reason: "panic-button",

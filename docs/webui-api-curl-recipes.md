@@ -94,11 +94,27 @@ curl -sS -X POST \
 ### Switch an armed manual challenge between v1 and v2
 
 Keeps the arm's expiry and reason. `409` when only an auto challenge is active
-(it has no tier of its own — arm a manual one with `vhost/add` + `rung`).
+— switch that with a tier pin (next recipe).
 
 ```bash
 HOST="example.com"
 curl -sS -X POST "$CFM_API/api/v1/challenge/vhost/rung?host=${HOST}&rung=v2" | jq .
+```
+
+### Pin an automatic challenge's tier (v1 / v2 / auto)
+
+Automatic vhost challenges run at v2 when their source is in
+`CHALLENGE_V2_AUTO_VHOST`. A pin overrides that per vhost: `v1` is the
+emergency drop-back, `v2` forces the tier, `auto` removes the pin. Optional
+`ttl` (none = until cleared; scoped tokens are capped at 24h). The response's
+`tier` is the effective result (a manual arm keeps its own tier).
+
+```bash
+HOST="example.com"
+curl -sS -X POST "$CFM_API/api/v1/challenge/vhost/tier?host=${HOST}&rung=v1" | jq .
+curl -sS -X POST "$CFM_API/api/v1/challenge/vhost/tier?host=${HOST}&rung=auto" | jq .
+curl -sS "$CFM_API/api/v1/challenge/vhost/tier" | jq .          # list pins (admin)
+curl -sS "$CFM_API/api/v1/challenge/vhost/status?host=${HOST}" | jq '{rung, rung_source, rung_trigger, rung_pin}'
 ```
 
 ### Manual challenge OFF

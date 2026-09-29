@@ -349,6 +349,16 @@ type Config struct {
 	// challenges are score-driven and self-restore, so they need no on-disk
 	// state; only the manual, operator-intended ones do.
 	ChallengeManualStorePath  string        // CHALLENGE_MANUAL_STORE_PATH
+	// ChallengeTierPinStorePath persists per-host tier pins for automatic
+	// vhost challenges (challenge_v2_auto.go), so a restart never re-arms a
+	// host an operator pinned to v1.
+	ChallengeTierPinStorePath string // CHALLENGE_TIER_PIN_STORE_PATH
+	// ChallengeV2AutoVhost is the parsed CHALLENGE_V2_AUTO_VHOST: the
+	// automatic vhost-challenge sources whose challenge runs at the v2 tier
+	// (suspicious_vhost, uniqpaths_short, vhost_config, under_attack). Empty
+	// = none (the zero Config arms nothing; the register supplies the
+	// shipped default).
+	ChallengeV2AutoVhost []string
 	ClamScanOverrideStorePath string        // CLAM_SCAN_OVERRIDE_STORE_PATH (per-vhost ClamAV upload-scan opt-out)
 	ClamModeOverrideStorePath string        // CLAM_MODE_OVERRIDE_STORE_PATH (per-vhost async/inline mode flip)
 	ClamSigIgnoreStorePath    string        // CLAM_SIGIGNORE_STORE_PATH (per-signature ClamAV excludes, global + per-vhost)
@@ -410,6 +420,9 @@ func (c *Config) FillDefaults() {
 	}
 	if c.ChallengeManualStorePath == "" {
 		c.ChallengeManualStorePath = defaultStatePath("webdetector_manual_challenges.json")
+	}
+	if c.ChallengeTierPinStorePath == "" {
+		c.ChallengeTierPinStorePath = defaultStatePath("webdetector_challenge_tier_pins.json")
 	}
 	if c.ClamScanOverrideStorePath == "" {
 		c.ClamScanOverrideStorePath = defaultStatePath("webdetector_clam_overrides.json")

@@ -613,9 +613,15 @@ carries `v2_waiver_miss=<grain|mark|off|spoofed|timeout|transient>`, or it
 would read like a spoof) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
 enforced at verify, not at serve). The verify gate ORs four arm grains:
-fingerprint policy, geo policy, a per-vhost `rung=v2` on the MANUAL vhost
-challenge (arm-surfaces slice A: API/CLI/cfm-admin Tier picker; persisted
-with the challenge), and a per-(ip,host) rung mark with two writers — a
+fingerprint policy, geo policy, a per-vhost v2 tier (a `rung=v2` MANUAL
+vhost challenge — arm-surfaces slice A: API/CLI/cfm-admin Tier picker;
+persisted with the challenge — or, since 2026-09-29, an AUTOMATIC vhost
+challenge whose source is in `CHALLENGE_V2_AUTO_VHOST`, default
+`suspicious_vhost,uniqpaths_short,under_attack` (a D5 amendment: TTL'd by
+the challenge, sized from the `src=` corpus first), overridable per vhost by
+a persisted tier pin `v1|v2|auto`; ONE resolver, `challengeV2VhostTier`,
+serves the gate and every surface — never read the manual rung alone for
+"is this vhost v2"), and a per-(ip,host) rung mark with two writers — a
 traffic rule with action `challenge_v2` at decision time (slice B:
 rules-model.js and traffic_rules.go changed in the same PR, per the
 Simulate rule) and a WAF rule set to `"challenge_v2"` in cfm_waf_config.lua

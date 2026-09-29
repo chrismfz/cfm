@@ -2,6 +2,17 @@
 // TTL picker state, and every Challenge/Unchallenge button handler. Defined
 // once here — previously duplicated across page copies.
 
+import {
+  tierButtonLabel,
+  tierButtonTitle,
+  tierPinned,
+  tierSuffix,
+  tierSwitchRequest,
+  tierSwitchTarget,
+  tierTitle,
+  tierUnpinRequest,
+} from "./challenge-tier.js";
+
 export const challengeMixin = {
   data() {
     return {
@@ -44,12 +55,16 @@ export const challengeMixin = {
           auto_active: mode === "auto" || mode === "manual+auto",
           mode,
           state: String(row.state || ""),
-          // ChallengeV2 tier of the covering manual challenge ("v2" or "");
-          // decorated by the daemon from its manual store (the verify gate's
-          // own source). Shown in the mode pill so the operator can SEE a
-          // host is v2-armed before clicking a Challenge button whose picker
-          // would explicitly re-tier it (third-review observation).
+          // The host's EFFECTIVE ChallengeV2 tier ("v2" or "") and what
+          // decided it (manual arm / operator pin / CHALLENGE_V2_AUTO_VHOST),
+          // decorated by the daemon from the verify gate's own resolver.
+          // Shown in the mode pill so the operator can SEE a host is v2 —
+          // including an automatic challenge — before clicking a Challenge
+          // button whose picker would explicitly re-tier it.
           rung: String(row.rung || ""),
+          rung_source: String(row.rung_source || ""),
+          rung_trigger: String(row.rung_trigger || ""),
+          rung_pin: String(row.rung_pin || ""),
         };
       }
       return byHost;
@@ -63,11 +78,14 @@ export const challengeMixin = {
     },
     challengeModeLabel(host) {
       const s = this.activeChallengeByHost[host] || {};
-      const v2 = s.rung === "v2" ? " · v2" : "";
-      if (s.manual_active && s.auto_active) return "manual+auto" + v2;
-      if (s.manual_active) return "manual" + v2;
-      if (s.auto_active) return "auto" + v2;
+      const tier = tierSuffix(s);
+      if (s.manual_active && s.auto_active) return "manual+auto" + tier;
+      if (s.manual_active) return "manual" + tier;
+      if (s.auto_active) return "auto" + tier;
       return "";
+    },
+    challengeModeTitle(host) {
+      return tierTitle(this.activeChallengeByHost[host] || {});
     },
     // Under-Attack Mode (I1b): true when the vhost has been escalated above
     // CHALLENGED (the challenge is being defeated, or an operator forced it).
@@ -101,7 +119,11 @@ export const challengeMixin = {
           manual_active: manualActive,
           auto_active: autoActive,
           state: String(status.state || ""),
-          rung: String(status.rung || ""), // v2 tier rides the scoped status too
+          // the resolved tier rides the scoped status too
+          rung: String(status.rung || ""),
+          rung_source: String(status.rung_source || ""),
+          rung_trigger: String(status.rung_trigger || ""),
+          rung_pin: String(status.rung_pin || ""),
           reason: status.reason,
           expires_at: status.expires_at,
           auto_since: status.auto_since,
@@ -158,53 +180,58 @@ export const challengeMixin = {
         console.error("[cfm-admin] manual challenge failed", err);
       }
     },
-    // Tier switch for a vhost that is ALREADY challenged (v1 <-> v2):
+    // Tier switch for a vhost that is ALREADY challenged (v1 <-> v2), from
+    // the EFFECTIVE tier (challenge-tier.js):
     //  - a manual arm is re-tiered in place via v1/challenge/vhost/rung, which
     //    keeps its expiry and reason (a re-arm through vhost/add would reset
     //    both);
-    //  - an auto-only challenge has no tier of its own, so "→ v2" arms a
-    //    MANUAL v2 challenge for the page's TTL on top of it (it then outlives
-    //    the scorer until it expires or is disarmed — the label says so).
+    //  - an automatic challenge is PINNED via v1/challenge/vhost/tier — "→ v1"
+    //    is the emergency drop-back from an auto-v2 tier, and "↺ auto" hands
+    //    the tier back to CHALLENGE_V2_AUTO_VHOST. A pin never creates or
+    //    extends a challenge.
     challengeTierTarget(host) {
-      const s = this.activeChallengeByHost[host] || {};
-      if (s.manual_active) return s.rung === "v2" ? "v1" : "v2";
-      if (s.auto_active) return "v2";
-      return "";
+      return tierSwitchTarget(this.activeChallengeByHost[host] || {});
     },
     challengeTierButtonLabel(host) {
-      const s = this.activeChallengeByHost[host] || {};
-      const to = this.challengeTierTarget(host);
-      if (!to) return "";
-      return s.manual_active ? `→ ${to}` : "→ v2 (manual)";
+      return tierButtonLabel(this.activeChallengeByHost[host] || {});
     },
     challengeTierButtonTitle(host) {
-      const s = this.activeChallengeByHost[host] || {};
-      if (s.manual_active) {
-        return s.rung === "v2"
-          ? "Switch this manual challenge back to plain v1 (keeps its expiry)"
-          : "Switch this manual challenge to v2: solves must also pass the passive humanity check (keeps its expiry)";
-      }
-      return `Auto challenges have no tier: arm a MANUAL v2 challenge for ${this.challengeTTLLabel} on top of the auto one`;
+      return tierButtonTitle(this.activeChallengeByHost[host] || {});
+    },
+    challengeTierPinned(host) {
+      return tierPinned(this.activeChallengeByHost[host] || {});
     },
     async toggleChallengeTier(host) {
-      const to = this.challengeTierTarget(host);
-      if (!host || !to) return;
       const s = this.activeChallengeByHost[host] || {};
+      const to = tierSwitchTarget(s);
+      if (!host || !to) return;
+      const req = tierSwitchRequest(host, s, to);
       try {
-        if (s.manual_active) {
-          const res = await this.postJSON("v1/challenge/vhost/rung", { host, rung: to });
+        const res = await this.postJSON(req.path, req.body);
+        if (req.path.endsWith("/rung")) {
           this.actionMsg = `Challenge on ${res?.host || host} switched ${res?.from || "?"} → ${res?.rung || to} (expiry kept)`;
         } else {
-          const res = await this.postJSON("v1/challenge/vhost/add", {
-            host, ttl: this.challengeTTL, rung: to, reason: "cfm-admin-ui-tier",
-          });
-          this.actionMsg = `Manual ${res?.rung || to} challenge armed on ${host} for ${res?.ttl || this.challengeTTLLabel}` +
+          this.actionMsg = `Automatic challenges on ${res?.host || host} pinned to ${res?.pin || to}` +
+            (res?.tier?.rung ? ` — effective tier now ${res.tier.rung}` : "") +
             (res?.ttl_capped ? " (capped to the 24h customer limit)" : "");
         }
         await this.refreshChallengeVhosts();
       } catch (err) {
         this.actionMsg = `Tier switch failed for ${host}: ${err}`;
         console.error("[cfm-admin] challenge tier switch failed", host, err);
+      }
+    },
+    async unpinChallengeTier(host) {
+      if (!host) return;
+      const req = tierUnpinRequest(host);
+      try {
+        const res = await this.postJSON(req.path, req.body);
+        this.actionMsg = `Tier pin removed on ${res?.host || host} — CHALLENGE_V2_AUTO_VHOST decides` +
+          (res?.tier?.rung ? ` (now ${res.tier.rung})` : "");
+        await this.refreshChallengeVhosts();
+      } catch (err) {
+        this.actionMsg = `Unpin failed for ${host}: ${err}`;
+        console.error("[cfm-admin] challenge tier unpin failed", host, err);
       }
     },
     async manualUnchallenge(host) {

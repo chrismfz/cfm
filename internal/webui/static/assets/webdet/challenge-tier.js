@@ -1,0 +1,94 @@
+// Challenge tier (v1 / v2) helpers shared by the challenge and controls pages.
+//
+// `s` is a vhost challenge status as the daemon reports it — the per-host
+// status endpoint (v1/challenge/vhost/status) or a row of v1/challenge/vhosts:
+//   { manual_active, auto_active, rung, rung_source, rung_trigger, rung_pin }
+// rung / rung_source / rung_trigger / rung_pin come from the SAME resolver the
+// verify gate enforces (challengeV2VhostTier, challenge_v2_auto.go), so the
+// page shows exactly the tier the solves are held to:
+//   rung_source "manual" = a manual arm's own tier
+//               "pin"    = an operator tier pin on an automatic challenge
+//               "auto"   = CHALLENGE_V2_AUTO_VHOST (rung_trigger names the
+//                          source: suspicious_vhost, uniqpaths_short,
+//                          vhost_config, under_attack)
+// Switching: a manual arm is re-tiered in place (v1/challenge/vhost/rung,
+// expiry kept); an automatic challenge is PINNED (v1/challenge/vhost/tier) —
+// "→ v1" is the emergency drop-back, "auto" hands the tier back to the knob.
+
+export function effectiveTier(s) {
+  return s && s.rung === "v2" ? "v2" : "v1";
+}
+
+function isManual(s) {
+  return Boolean(s && (s.manual_active || s.rung_source === "manual"));
+}
+
+// tierSwitchTarget: the tier a one-click switch would move this host to, or
+// "" when nothing challenges it (a pin alone changes nothing to switch).
+export function tierSwitchTarget(s) {
+  if (!s) return "";
+  if (!(s.manual_active || s.auto_active || s.rung_source)) return "";
+  return effectiveTier(s) === "v2" ? "v1" : "v2";
+}
+
+// tierSwitchRequest: the API call that switches host to `to`.
+export function tierSwitchRequest(host, s, to) {
+  if (isManual(s)) return { path: "v1/challenge/vhost/rung", body: { host, rung: to } };
+  return { path: "v1/challenge/vhost/tier", body: { host, rung: to } };
+}
+
+// tierUnpinRequest: hands an automatic challenge's tier back to the knob.
+export function tierUnpinRequest(host) {
+  return { path: "v1/challenge/vhost/tier", body: { host, rung: "auto" } };
+}
+
+export function tierPinned(s) {
+  return Boolean(s && s.rung_source === "pin");
+}
+
+// tierSuffix: the short tag the mode pill carries (" · v2", " · v1 pinned").
+// A plain automatic v1 adds nothing, as before auto-v2 existed.
+export function tierSuffix(s) {
+  if (!s) return "";
+  const t = effectiveTier(s);
+  if (tierPinned(s)) return ` · ${t} pinned`;
+  return t === "v2" ? " · v2" : "";
+}
+
+// tierTitle: the hover text explaining the tier and what decided it.
+export function tierTitle(s) {
+  if (!s || !s.rung_source) return "";
+  const t = effectiveTier(s) === "v2"
+    ? "v2 (solves must also pass the passive humanity check)"
+    : "v1 (plain challenge)";
+  let why;
+  switch (s.rung_source) {
+    case "manual": why = "set on the manual challenge"; break;
+    case "pin": why = `pinned by an operator (automatic source: ${s.rung_trigger || "?"})`; break;
+    default: why = `automatic: ${s.rung_trigger || "?"} is in CHALLENGE_V2_AUTO_VHOST` +
+      (effectiveTier(s) === "v2" ? "" : " — not armed");
+  }
+  let out = `Tier ${t} — ${why}`;
+  if (s.rung_pin && s.rung_source !== "pin") out += `. A ${s.rung_pin} pin is parked here (applies to automatic challenges only).`;
+  return out;
+}
+
+// tierButtonLabel / tierButtonTitle: the switch button beside the pill.
+export function tierButtonLabel(s) {
+  const to = tierSwitchTarget(s);
+  if (!to) return "";
+  return isManual(s) ? `→ ${to}` : `→ ${to} (pin)`;
+}
+
+export function tierButtonTitle(s) {
+  const to = tierSwitchTarget(s);
+  if (!to) return "";
+  if (isManual(s)) {
+    return to === "v1"
+      ? "Switch this manual challenge back to plain v1 (keeps its expiry)"
+      : "Switch this manual challenge to v2: solves must also pass the passive humanity check (keeps its expiry)";
+  }
+  return to === "v1"
+    ? "Pin this vhost's automatic challenges to plain v1 (the emergency drop-back): stays until you unpin it"
+    : "Pin this vhost's automatic challenges to v2: solves must also pass the passive humanity check; stays until you unpin it";
+}

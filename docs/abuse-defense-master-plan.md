@@ -77,7 +77,7 @@ reviewed PR.
 | 9 | `under_attack` I1 state machine + notify | `under_attack.go` | detect-only (DRYRUN) | alarm value real ("challenge defeated" as an alert) | **KEEP as the alarm.** I1b read-surfaces optional. |
 | 10 | `under_attack` campaign fingerprinter I2 | `under_attack_fingerprint.go` | shadow | no consumer; I3–I5 never built | **FROZEN — operator-ratified 2026-09-22.** Code STAYS as-is (this is a freeze, not a retire: unlike `cfm_pcw` its mechanism is sound, it simply has no consumer). No new predicates, no weight tuning, no sub-signals, no I3–I5. E1–E3 superseded its enforcement path; revisit ONLY if the draft-rule idea (I3) is deliberately picked up, and then with a §4-D3 exit contract. |
 | 11 | `ua_family=` solve-log corpus | `challenge_server.go` | log-first | builds the fp↔UA corpus | **KEEP.** Feeds E2. The JA4↔UA coherence tell it was kept for was measured 2026-09-23 and **NOT adopted**: 0 extra farm catch over `mobile_hw_lie`, and the broad forms hit humans (docs/traffic-classifier.md, "UA ↔ TLS coherence tell"). |
-| 12 | Humanity scorer / would_v2 Rung-1 | `challenge_v2.go` | **BUILT + ENFORCING** since 2026-09-19 (E3) | positive-only tells; `hs=`/`tells=`/`sig=`/`v2=` per solve | **KEEP.** Teeth only under an operator arm (D5a). The knobs are `CHALLENGE_V2_PASSIVE`/`_FAIL_SCORE`/`_DEBUG`/`_HW_TELLS` (the last a kill switch for the corpus-measured device-claim tells, 2026-09-23) — the old `HUMANITY_MIN_OBS`/`MINORITY_PCT` keys were never read by any code and are still orphans in live `/etc/cfm/detectors.conf`: **operator cleanup, still outstanding.** |
+| 12 | Humanity scorer / would_v2 Rung-1 | `challenge_v2.go` | **BUILT + ENFORCING** since 2026-09-19 (E3) | positive-only tells; `hs=`/`tells=`/`sig=`/`v2=` per solve | **KEEP.** Teeth only under an operator arm (D5a). The knobs are `CHALLENGE_V2_PASSIVE`/`_FAIL_SCORE`/`_DEBUG`/`_HW_TELLS` (a kill switch for the corpus-measured device-claim tells, 2026-09-23)/`_AUTO_VHOST` (the automatic vhost challenges that run at v2, 2026-09-29 — D5 amendment) — the old `HUMANITY_MIN_OBS`/`MINORITY_PCT` keys were never read by any code and are still orphans in live `/etc/cfm/detectors.conf`: **operator cleanup, still outstanding.** |
 
 Fleet-config cleanup that falls out of the table: remove the orphan
 `HUMANITY_*`/`MINORITY_PCT` keys (row 12); leave `UNDER_ATTACK*`,
@@ -143,6 +143,15 @@ D3/D4 are the process fix.
   one, or a live tier looks like a forgotten one (added 2026-09-22 after
   exactly that confusion in the field). With a shadow burn-in + measured FP
   rate (D3 exit contract) before teeth are trusted.
+  *Amendment (operator, 2026-09-29):* (a)'s "explicitly armed" now also
+  covers a shipped node default — `CHALLENGE_V2_AUTO_VHOST` arms v2 on the
+  AUTOMATIC vhost challenges (`suspicious_vhost`, `uniqpaths_short`,
+  `under_attack`). It meets (a)'s other terms: TTL'd by the automatic
+  challenge itself, disarmable per vhost (tier pin `v1`) and node-wide
+  (`off`), and it shipped only after its would-reject population was
+  measured (36% of convicted-farm solves, ~0.06% of likely humans;
+  `docs/traffic-classifier.md` "Auto-v2"). Long-lived arms (manual,
+  `vhost_config`, fp/geo policy) stay explicit operator choices.
 
 ## 5. Enforcement roadmap — the only live checklist
 
@@ -493,10 +502,25 @@ already opened.
         (line + `challenge_v2_reject` row), so a Read-Aloud the gate could not
         confirm is distinguishable from an impostor.
 
+      - DONE 2026-09-29 (auto-v2): the automatic vhost challenges run at
+        v2 by default — `CHALLENGE_V2_AUTO_VHOST =
+        suspicious_vhost,uniqpaths_short,under_attack` (D5 amendment in §4),
+        sized from the week's `src=` corpus before shipping (36% of
+        convicted-farm solves fail, ~0.06% of likely humans). A per-vhost
+        tier pin (`v1`/`v2`/`auto` — API, CLI, cfm-admin) overrides the knob;
+        a manual arm keeps its own tier; one resolver
+        (`challengeV2VhostTier`) serves the gate and every surface. NEXT on
+        this line: a Rung-2 "confirm you're human" fallback for a Rung-1
+        reject under the vhost/geo grains only — it turns the deterministic
+        RDP/VDI false reject into friction (the rejected humans moved the
+        mouse; no failing farm solve did), with the honest limit that a CDP
+        click is trusted and the accessible keyboard path has no trajectory.
+
 **Deliberately BACKLOG (not next, do not start):** surface-throttle +
 gate-before-origin (Track-1 Phase 2), PoW-difficulty knob, JA4/JA4H edge
 module, crawler rate-lane, geo-plausibility actions, Signal B/D enumeration,
-Rung-2 visible puzzle (only if Rung 1 is beaten), under_attack I3–I5.
+Rung-2 visible PUZZLE (only if Rung 1 is beaten — distinct from the Rung-2
+confirm fallback above), under_attack I3–I5.
 
 ## 6. Doc map (after the 2026-09-18 consolidation)
 

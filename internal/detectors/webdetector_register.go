@@ -803,6 +803,8 @@ func init() {
 			ChallengeExcludeStorePath: kvStrClean(kv, "CHALLENGE_EXCLUDE_STORE_PATH", ""),
 			WAFExcludeStorePath:       kvStrClean(kv, "WAF_EXCLUDE_STORE_PATH", ""),
 			ChallengeManualStorePath:  kvStrClean(kv, "CHALLENGE_MANUAL_STORE_PATH", ""),
+			ChallengeTierPinStorePath: kvStrClean(kv, "CHALLENGE_TIER_PIN_STORE_PATH", ""),
+			ChallengeV2AutoVhost:      challengeV2AutoVhost(kv),
 			ChallengeAccessStorePath:  kvStrClean(kv, "CHALLENGE_ACCESS_STORE_PATH", ""),
 			SiteCacheStorePath:        kvStrClean(kv, "SITE_CACHE_STORE_PATH", ""),
 			HistoryEnabled:            kvBool(kv, "HISTORY_ENABLED", true),
@@ -1190,4 +1192,17 @@ func resolveChallengeCookieLife(global, kv map[string]string) time.Duration {
 		return 60 * time.Minute
 	}
 	return life
+}
+
+// challengeV2AutoVhost parses [webdetector] CHALLENGE_V2_AUTO_VHOST: the
+// automatic vhost-challenge sources that run at the ChallengeV2 tier
+// (webdet.DefaultChallengeV2AutoVhost when the key is absent or empty;
+// `off` arms none). Unknown tokens are logged and ignored — they never arm.
+func challengeV2AutoVhost(kv KV) []string {
+	armed, unknown := webdet.ParseChallengeV2AutoVhost(kvStrClean(kv, "CHALLENGE_V2_AUTO_VHOST", webdet.DefaultChallengeV2AutoVhost))
+	if len(unknown) > 0 {
+		logging.Logf("[webdetector] CHALLENGE_V2_AUTO_VHOST: ignoring unknown source(s) %s (valid: suspicious_vhost, uniqpaths_short, vhost_config, under_attack, off)",
+			strings.Join(unknown, ","))
+	}
+	return armed
 }

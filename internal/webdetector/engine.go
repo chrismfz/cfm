@@ -407,6 +407,12 @@ type Engine struct {
 	nginxBridge *NginxBridge // always set (edge mode is the only mode)
 	manualChal  manualChalState
 
+	// tierPins: per-host tier pins for AUTOMATIC vhost challenges, and
+	// autoV2Armed: the CHALLENGE_V2_AUTO_VHOST source set — both read by the
+	// one vhost-tier resolver (challengeV2VhostTier, challenge_v2_auto.go).
+	tierPins    tierPinStore
+	autoV2Armed map[string]bool
+
 	// bypassFunc: covers IGNORE_IPS / IGNORE_NETS — skip emit entirely for these IPs.
 	// Set once at startup via SetBypassFunc (no lock needed).
 	bypassFunc func(string) bool
@@ -568,6 +574,11 @@ func NewEngine(cfg Config) *Engine {
 	// challenges from disk (filtering expired); restoreManualChallenges below
 	// re-pushes the survivors to the bridge once it is wired.
 	e.manualChal.init(cfg.ChallengeManualStorePath)
+	e.tierPins.init(cfg.ChallengeTierPinStorePath)
+	e.autoV2Armed = make(map[string]bool, len(cfg.ChallengeV2AutoVhost))
+	for _, src := range cfg.ChallengeV2AutoVhost {
+		e.autoV2Armed[src] = true
+	}
 
 	// Edge (OpenResty/Angie) decision bridge — always on. Edge mode is the
 	// only mode (docs/edge-unification-plan.md Phase 1); the old OPENRESTY_MODE
@@ -712,11 +723,12 @@ func NewEngine(cfg Config) *Engine {
 		SetChallengeSolveEnricher(nil)
 	}
 
-	// Vhost-arm lookup for the same verify gate (arm-surfaces slice A): a
-	// manual vhost challenge armed at rung v2 makes solves on that host (and
-	// its www variant) pass through the Rung-1 humanity check.
+	// Vhost-arm lookup for the same verify gate: the resolved vhost tier
+	// (challengeV2VhostTier — a manual arm's own tier, else an automatic
+	// challenge's: a tier pin, else CHALLENGE_V2_AUTO_VHOST) puts solves on
+	// that host (and its www variant) through the Rung-1 humanity check.
 	SetChallengeV2HostArmed(func(host string) bool {
-		return e.manualChallengeRung(host) == "v2"
+		return e.challengeV2VhostTier(host).Rung == "v2"
 	})
 
 	// Good-bot waiver for the same verify gate: an FCrDNS-verified crawler is

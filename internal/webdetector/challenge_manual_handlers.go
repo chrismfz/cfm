@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -296,6 +297,164 @@ func (e *Engine) handleChallengeVhostRung(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// POST /api/v1/challenge/vhost/tier
+// Body: { "host": "example.gr", "rung": "v1" | "v2" | "auto", "ttl": "24h" }
+// Also accepts query params. GET lists the live pins (admin only).
+//
+// Pins the tier of AUTOMATIC vhost challenges on host (challenge_v2_auto.go):
+// v1 = never v2 here, whatever CHALLENGE_V2_AUTO_VHOST says (the "drop it back
+// to v1" control); v2 = always v2 here; auto = remove the pin (the knob
+// decides again). It never creates, extends or clears a challenge, and a
+// MANUAL arm keeps its own tier (switch that with vhost/rung) — the response's
+// `tier` is the effective result either way. ttl is optional (none = until
+// cleared). Scoped tokens: own vhosts only (and, clearing a www. host, the
+// apex pin that covers it); their pins are capped at scopedMaxChallengeTTL,
+// so a tenant can never park a permanent tier.
+func (e *Engine) handleChallengeVhostTier(w http.ResponseWriter, r *http.Request) {
+	scope := vhostScopeFromContext(r.Context())
+	if r.Method == http.MethodGet {
+		if !RequireAdmin(w, r) {
+			return
+		}
+		type pinRow struct {
+			Host      string    `json:"host"`
+			Rung      string    `json:"rung"`
+			ExpiresAt time.Time `json:"expires_at,omitempty"`
+			SetAt     time.Time `json:"set_at"`
+			Actor     string    `json:"actor,omitempty"`
+		}
+		rows := []pinRow{}
+		for h, p := range e.ChallengeTierPins() {
+			rows = append(rows, pinRow{Host: h, Rung: p.Rung, ExpiresAt: p.ExpiresAt, SetAt: p.SetAt, Actor: p.Actor})
+		}
+		sort.Slice(rows, func(i, j int) bool { return rows[i].Host < rows[j].Host })
+		writeJSON(w, http.StatusOK, map[string]interface{}{"pins": rows})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use GET or POST"})
+		return
+	}
+	var req struct {
+		Host string `json:"host"`
+		Rung string `json:"rung"`
+		TTL  string `json:"ttl"`
+	}
+	req.Host = r.URL.Query().Get("host")
+	req.Rung = r.URL.Query().Get("rung")
+	req.TTL = r.URL.Query().Get("ttl")
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		var body struct {
+			Host string `json:"host"`
+			Rung string `json:"rung"`
+			TTL  string `json:"ttl"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+		if body.Host != "" {
+			req.Host = body.Host
+		}
+		if body.Rung != "" {
+			req.Rung = body.Rung
+		}
+		if body.TTL != "" {
+			req.TTL = body.TTL
+		}
+	}
+	host := normalizeHost(req.Host)
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+		return
+	}
+	if !vhostAllowed(host, scope) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+		return
+	}
+	// The verify-side lookup is exact + www→apex only (like the manual tier),
+	// so a wildcard pin would claim a tier it never applies.
+	if strings.Contains(host, "*") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tier pins are not supported on wildcard hosts — pin the concrete vhost(s)"})
+		return
+	}
+	var rung string
+	switch strings.ToLower(strings.TrimSpace(req.Rung)) {
+	case "v1", "challenge":
+		rung = "v1"
+	case "v2", "challenge_v2":
+		rung = "v2"
+	case "auto", "clear", "default":
+		rung = ""
+	case "":
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing rung (use v1, v2 or auto)"})
+		return
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rung: " + req.Rung + " (use v1, v2 or auto)"})
+		return
+	}
+	var ttl time.Duration
+	if t := strings.TrimSpace(req.TTL); t != "" && rung != "" {
+		d, err := time.ParseDuration(t)
+		if err != nil || d <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid ttl: " + req.TTL})
+			return
+		}
+		ttl = d
+	}
+	capped := false
+	if scope != nil && rung != "" && (ttl <= 0 || ttl > scopedMaxChallengeTTL) {
+		ttl = scopedMaxChallengeTTL
+		capped = true
+	}
+	target := host
+	if rung == "" {
+		// Clearing acts on the pin that COVERS host — its own, else the
+		// apex's for a www. host — and a scoped token must hold that host
+		// too (fail-closed, as in vhost/rung).
+		if t := e.tierPins.target(host); t != "" {
+			target = t
+		}
+		if target != host && !vhostAllowed(target, scope) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "the pin covering " + host + " is on " + target + ", which is not in scope"})
+			return
+		}
+	}
+	prev, changed := e.SetChallengeTierPinAs(target, rung, ttl, actorFromScope(scope))
+	pin, _ := e.tierPins.get(target)
+	tier := e.challengeV2VhostTier(host)
+	resp := map[string]interface{}{
+		"host":    target,
+		"pin":     rungOrAuto(rung),
+		"from":    rungOrAuto(prev),
+		"changed": changed,
+		// The EFFECTIVE tier of the requested host after the change: a
+		// manual arm outranks any pin, and a pin does nothing while no
+		// automatic challenge covers the host — say so rather than let a
+		// caller assume the pin took effect.
+		"tier": map[string]string{
+			"rung":    rungOrV1(tier.Rung),
+			"source":  tier.Source,
+			"trigger": tier.Trigger,
+		},
+	}
+	if !pin.ExpiresAt.IsZero() {
+		resp["expires_at"] = pin.ExpiresAt
+	}
+	if capped {
+		resp["ttl_capped"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// rungOrAuto renders a pin value for API/logs: "" (no pin) reads as "auto".
+func rungOrAuto(rung string) string {
+	if rung == "" {
+		return "auto"
+	}
+	return rung
+}
+
 // POST /api/v1/challenge/vhost/remove
 // Body: { "host": "example.gr" }
 // Also accepts: ?host=example.gr
@@ -481,17 +640,22 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	tier := e.challengeV2VhostTier(host)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"host":          host,
 		"manual_active": active,
 		"expires_at":    expiresAt,
 		"reason":        reason,
-		// The tier of the covering manual challenge ("v2" or "" for plain).
+		// The host's effective vhost tier ("v2" or "" for v1) and where it
+		// comes from — challengeV2VhostTier, the verify gate's own resolver.
 		// This is the ONE vhost surface scoped tokens can read, so a customer
-		// who armed v2 on their own vhost can see it (review finding).
-		"rung":        e.manualChallengeRung(host),
-		"auto_active": autoActive,
-		"auto_since":  autoSince,
+		// can see (and switch) the tier on their own vhost (review finding).
+		"rung":         tier.Rung,
+		"rung_source":  tier.Source,
+		"rung_trigger": tier.Trigger,
+		"rung_pin":     tier.Pin,
+		"auto_active":  autoActive,
+		"auto_since":   autoSince,
 		// Scoped tokens reach the vhost list only through this endpoint, so the
 		// farm mark, the shadow outlier count, the facet cardinality, the cost
 		// pressure, the datacenter fraction and the escalation state have to ride

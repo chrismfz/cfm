@@ -14,7 +14,11 @@ package webdetector
 //                    operator-armed `challenge_v2` on SOME grain: the client's
 //                    fingerprint (FingerprintPolicyForID), a fleet-armed
 //                    country/ASN policy (GeoPolicyActionForIP), a v2-tier
-//                    manual vhost challenge (challengeV2HostArmed), or a
+//                    vhost challenge (challengeV2HostArmed: a manual arm's
+//                    own tier, or an AUTOMATIC challenge whose source the
+//                    node knob CHALLENGE_V2_AUTO_VHOST arms, overridable per
+//                    host by a tier pin — challenge_v2_auto.go; TTL'd by the
+//                    challenge itself, disarmable per vhost and node-wide), or a
 //                    per-(ip,host) mark a v2-tier source wrote when it
 //                    challenged the client (challengeV2Marked; writers: a
 //                    traffic rule with action challenge_v2 at decision time,
@@ -50,6 +54,9 @@ package webdetector
 //   CHALLENGE_V2_DEBUG      (default 0) X-CFM-HS response header
 //   CHALLENGE_V2_HW_TELLS   (default 1) kill switch for mobile_hw_lie / mac_hw_lie
 //                           (ConfigureChallengeV2HWTells)
+//   CHALLENGE_V2_AUTO_VHOST (default suspicious_vhost,uniqpaths_short,under_attack)
+//                           the automatic vhost challenges that run at the v2
+//                           tier (engine config; challenge_v2_auto.go)
 //
 // HONEST LIMITS (documented residuals, not oversights):
 //   - The report is CLIENT-authored. A signal-aware farm can strip the body
