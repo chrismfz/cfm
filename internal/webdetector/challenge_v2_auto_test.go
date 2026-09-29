@@ -880,3 +880,55 @@ func TestAutoNotes_TTLOutlivesTick(t *testing.T) {
 		}
 	}
 }
+
+// Review folds: a www. host never inherits a SUPPRESSED apex's lingering
+// notes; a forced `attack on` arms at once; the handler reports the expiry of
+// its own write; a shared store follows a hand edit of the file; the gate
+// answers a manual v2 arm without the automatic side.
+func TestAutoV2_ReviewFoldsFifteen(t *testing.T) {
+	e := newAutoV2TestEngine(t, autoV2SuspiciousVhost, autoV2UnderAttack)
+	setVhostEntry(e, "sup.gr", "suspicious_vhost")
+	setVhostEntry(e, "www.sup.gr", "")
+	if tier := e.challengeV2VhostTier("www.sup.gr"); tier.Rung != "v2" {
+		t.Fatalf("precondition: www inherits the apex: %+v", tier)
+	}
+	e.cfg.ChallengeVHostIgnore = []string{"sup.gr"}
+	if tier := e.challengeV2VhostTier("www.sup.gr"); tier.Rung != "" {
+		t.Fatalf("www inherited a suppressed apex's lingering note: %+v", tier)
+	}
+	e.cfg.ChallengeVHostIgnore = nil
+
+	e.attack = newUnderAttackTracker()
+	setVhostEntry(e, "atk.gr", "")
+	e.SetVhostAttackOverride("atk.gr", true, time.Now(), 0)
+	if tier := e.challengeV2VhostTier("atk.gr"); tier.Rung != "v2" || tier.Trigger != autoV2UnderAttack {
+		t.Fatalf("attack on must arm at once: %+v", tier)
+	}
+
+	rr, body := tierReq(t, e, httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/tier?host=exp.gr&rung=v1&ttl=1h", nil))
+	if rr.Code != http.StatusOK || body["expires_at"] == nil {
+		t.Fatalf("pin with ttl: %d %v", rr.Code, body)
+	}
+
+	if armed, via := e.challengeV2GateTier("atk.gr"); !armed || via != "auto:under_attack" {
+		t.Fatalf("gate: %v %q", armed, via)
+	}
+	e.ManualChallengeVhost("man.gr", time.Hour, "manual", "v2")
+	if armed, via := e.challengeV2GateTier("man.gr"); !armed || via != "manual" {
+		t.Fatalf("gate fast path: %v %q", armed, via)
+	}
+
+	path := filepath.Join(t.TempDir(), "pins.json")
+	s1 := sharedTierPinStore(path)
+	s1.apply("hand.gr", "v1", 0, "admin", nil, nil)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	s2 := sharedTierPinStore(path) // a rebuilt Engine picks the store up
+	if s2 != s1 {
+		t.Fatalf("the store must be shared per path")
+	}
+	if _, ok := s2.get("hand.gr"); ok {
+		t.Fatalf("a hand-deleted pin file was not picked up on reload")
+	}
+}

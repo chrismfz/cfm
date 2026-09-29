@@ -126,10 +126,14 @@ test("the page labels exactly the Go automatic sources", () => {
 
 test("a manual v2 arm over an automatic v2 drops to v1 in one click: re-tier + pin", () => {
   const s = { manual_active: true, rung: "v2", rung_source: "manual", rung_auto: "v2", rung_trigger: "under_attack" };
-  assert.deepEqual(tierSwitchRequests("a.gr", s, "v1"), [
+  const now = Date.parse("2026-09-29T10:00:00Z");
+  const armed = { ...s, expires_at: "2026-09-29T11:00:00Z" };
+  assert.deepEqual(tierSwitchRequests("a.gr", armed, "v1", now), [
     { path: "v1/challenge/vhost/rung", body: { host: "a.gr", rung: "v1" } },
-    { path: "v1/challenge/vhost/tier", body: { host: "a.gr", rung: "v1" } },
+    // the companion pin lasts as long as the arm — never a permanent opt-out
+    { path: "v1/challenge/vhost/tier", body: { host: "a.gr", rung: "v1", ttl: "3600s" } },
   ]);
+  assert.equal(tierSwitchRequests("a.gr", s, "v1", now)[1].body.ttl, "24h"); // unknown expiry
   assert.match(tierButtonTitle(s, "a.gr"), /AND pin/);
   // A customer who may not pin gets only the re-tier, and is told v2 stays.
   const locked = { ...s, rung_pin_locked: true };

@@ -134,7 +134,7 @@ func ParseChallengeV2AutoVhost(s string) (armed []string, unknown []string, off 
 }
 
 func validAutoV2Source(tok string) bool {
-	for _, s := range ChallengeV2AutoVhostSources() {
+	for _, s := range autoSourceOrder {
 		if tok == s {
 			return true
 		}
@@ -279,6 +279,18 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 	return t
 }
 
+// challengeV2GateTier is the verify gate's question — "is host's vhost tier
+// v2, and what put it there" — with a fast path: a manual v2 arm decides
+// without the automatic side (whose AutoRung/Pin fields only the read
+// surfaces need). Otherwise it is challengeV2VhostTier's answer.
+func (e *Engine) challengeV2GateTier(host string) (bool, string) {
+	if target := e.manualRungTarget(host); target != "" && e.manualChal.rung(target) == "v2" {
+		return true, tierSourceManual
+	}
+	t := e.challengeV2VhostTier(host)
+	return t.Rung == "v2", t.via()
+}
+
 // via names what put the tier at v2 — "manual", "pin", "auto:<source>" — or
 // "" when it is not v2: the v2_via= field on a v2=vhost solve line and
 // history row.
@@ -305,7 +317,11 @@ func (e *Engine) autoV2Trigger(host string) string {
 	if e.nginxBridge == nil || e.hostAutoSuppressed(host) {
 		return ""
 	}
-	sources, ok := e.nginxBridge.vhostAutoSources(host)
+	inheritApex := true
+	if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" && e.hostAutoSuppressed(apex) {
+		inheritApex = false // a suppressed apex's lingering notes arm nothing
+	}
+	sources, ok := e.nginxBridge.vhostAutoSources(host, inheritApex)
 	if !ok {
 		return ""
 	}
@@ -359,7 +375,7 @@ func (e *Engine) autoSourceNoteTTL() time.Duration {
 // host itself, or by its apex for a www. host (the bridge's apex→www
 // expansion) — provided a live vhost-wide CHALLENGE entry covers host (the
 // one vhost matcher, vhostEntryLocked); ok=false when none does. One RLock.
-func (b *NginxBridge) vhostAutoSources(host string) (sources []string, ok bool) {
+func (b *NginxBridge) vhostAutoSources(host string, inheritApex bool) (sources []string, ok bool) {
 	if b == nil || host == "" {
 		return nil, false
 	}
@@ -377,7 +393,7 @@ func (b *NginxBridge) vhostAutoSources(host string) (sources []string, ok bool) 
 	// unchallenged apex, must not arm a separately challenged www.). A www.
 	// host excluded from automatic challenges is the resolver's to refuse
 	// (autoV2Trigger → hostAutoSuppressed).
-	if apex, cut := strings.CutPrefix(host, "www."); cut && apex != "" {
+	if apex, cut := strings.CutPrefix(host, "www."); inheritApex && cut && apex != "" {
 		if ah, live := b.vhState[apex]; live && ah.Action == "challenge" && ah.Expires.After(now) {
 			writers = append(writers, apex)
 		}
@@ -433,6 +449,7 @@ type tierPinStore struct {
 	gen      uint64
 	saveMu   sync.Mutex
 	savedGen uint64
+	fileMod  time.Time // mtime of the file as last loaded or saved by us
 }
 
 // tierPinStores shares ONE store per state file across Engine rebuilds: a
@@ -457,6 +474,7 @@ func sharedTierPinStore(path string) *tierPinStore {
 	tierPinStores.Lock()
 	defer tierPinStores.Unlock()
 	if s, ok := tierPinStores.m[path]; ok {
+		s.reloadIfChanged() // an operator's hand edit / delete is picked up on reload
 		return s
 	}
 	s := &tierPinStore{}
@@ -473,6 +491,38 @@ func (s *tierPinStore) init(path string) {
 	s.pins = make(map[string]tierPin)
 	s.path = strings.TrimSpace(path)
 	s.load()
+	s.fileMod = s.statMod()
+}
+
+func (s *tierPinStore) statMod() time.Time {
+	if s.path == "" {
+		return time.Time{}
+	}
+	if fi, err := os.Stat(s.path); err == nil {
+		return fi.ModTime()
+	}
+	return time.Time{}
+}
+
+// reloadIfChanged re-reads the state file when something other than this
+// store changed (or removed) it since it last loaded or saved — so a shared
+// store picked up by a rebuilt Engine follows an operator's hand edit.
+func (s *tierPinStore) reloadIfChanged() {
+	if s.path == "" {
+		return
+	}
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	mod := s.statMod()
+	if mod.Equal(s.fileMod) {
+		return
+	}
+	s.mu.Lock()
+	s.pins = make(map[string]tierPin)
+	s.load()
+	s.mu.Unlock()
+	s.fileMod = mod
+	logging.Logf("[challenge][vhost] tier pin file changed on disk; reloaded %s", s.path)
 }
 
 // getLocked returns host's own live pin (caller holds s.mu, R or W).
@@ -525,21 +575,31 @@ func (s *tierPinStore) covering(host string, now time.Time) (tierPin, string) {
 // changed, and a non-empty refusal.
 func (s *tierPinStore) apply(host, rung string, ttl time.Duration, actor string,
 	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string) {
+	target, prev, changed, refusal, _ = s.applyPin(host, rung, ttl, actor, allowTarget, protect)
+	return
+}
+
+// applyPin is apply that also returns the pin now on target (zero when none)
+// — read in the same critical section, so a caller reports the expiry of ITS
+// write, not a concurrent one's.
+func (s *tierPinStore) applyPin(host, rung string, ttl time.Duration, actor string,
+	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string, now tierPin) {
 	if s == nil {
-		return host, "", false, "tier pins are unavailable"
+		return host, "", false, "tier pins are unavailable", tierPin{}
 	}
-	now := time.Now()
+	t := time.Now()
 	s.mu.Lock()
-	target, prev, changed, refusal = s.applyLocked(now, host, rung, ttl, actor, allowTarget, protect)
+	target, prev, changed, refusal = s.applyLocked(t, host, rung, ttl, actor, allowTarget, protect)
+	now, _ = s.getLocked(target, t)
 	if !changed {
 		s.mu.Unlock()
-		return target, prev, changed, refusal
+		return target, prev, changed, refusal, now
 	}
 	s.gen++
-	gen, snap := s.gen, s.persistSnapshotLocked(now)
+	gen, snap := s.gen, s.persistSnapshotLocked(t)
 	s.mu.Unlock()
 	s.save(gen, snap) // file I/O outside mu
-	return target, prev, true, ""
+	return target, prev, true, "", now
 }
 
 // applyLocked is apply's decision and in-memory write (caller holds mu).
@@ -707,6 +767,7 @@ func (s *tierPinStore) save(gen uint64, arr []tierPinPersist) {
 	}
 	_ = os.Chmod(s.path, 0o600)
 	s.savedGen = gen
+	s.fileMod = s.statMod()
 }
 
 // ── Engine surface ──────────────────────────────────────────────────────────
@@ -720,9 +781,17 @@ func (s *tierPinStore) save(gen uint64, arr []tierPinPersist) {
 // tier is read live at verify.
 func (e *Engine) setChallengeTierPin(host, rung string, ttl time.Duration, actor string,
 	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string) {
-	target, prev, changed, refusal = e.tierPins.apply(host, rung, ttl, actor, allowTarget, protect)
+	target, prev, changed, refusal, _ = e.setChallengeTierPinGet(host, rung, ttl, actor, allowTarget, protect)
+	return
+}
+
+// setChallengeTierPinGet is setChallengeTierPin plus the pin now on target,
+// from the same critical section as the write.
+func (e *Engine) setChallengeTierPinGet(host, rung string, ttl time.Duration, actor string,
+	allowTarget func(string) bool, protect func(tierPin) bool) (target, prev string, changed bool, refusal string, pin tierPin) {
+	target, prev, changed, refusal, pin = e.tierPins.applyPin(host, rung, ttl, actor, allowTarget, protect)
 	if !changed {
-		return target, prev, false, refusal
+		return target, prev, false, refusal, pin
 	}
 	to, from := rungOrAuto(rung), rungOrAuto(prev)
 	logging.LogfCHALLENGES(
@@ -737,7 +806,7 @@ func (e *Engine) setChallengeTierPin(host, rung string, ttl time.Duration, actor
 		payload["actor"] = actor
 	}
 	e.appendHistory(HistoryEvent{TsUnix: time.Now().Unix(), Type: "challenge_vhost_tier_pin", Host: target, Mode: "manual", Payload: payload})
-	return target, prev, true, ""
+	return target, prev, true, "", pin
 }
 
 func pinTTLText(ttl time.Duration) string {

@@ -439,13 +439,12 @@ func (e *Engine) handleChallengeVhostTier(w http.ResponseWriter, r *http.Request
 	if scope != nil {
 		protect = func(p tierPin) bool { return p.Actor != actor }
 	}
-	target, prev, changed, refusal := e.setChallengeTierPin(host, rung, ttl, actor,
+	target, prev, changed, refusal, pin := e.setChallengeTierPinGet(host, rung, ttl, actor,
 		func(t string) bool { return vhostAllowed(t, scope) }, protect)
 	if refusal != "" {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": refusal})
 		return
 	}
-	pin, _ := e.tierPins.get(target)
 	tier := e.challengeV2VhostTier(host)
 	resp := map[string]interface{}{
 		"host":    target,

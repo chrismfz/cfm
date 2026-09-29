@@ -68,6 +68,8 @@ export const challengeMixin = {
           rung_auto: String(row.rung_auto || ""),
           rung_pin_locked: Boolean(row.rung_pin_locked),
           rung_unpin_locked: Boolean(row.rung_unpin_locked),
+          // the manual arm's expiry: a companion v1 pin lasts as long
+          expires_at: mode.startsWith("manual") ? row.expires_at : undefined,
         };
       }
       return byHost;

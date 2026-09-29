@@ -1171,10 +1171,7 @@ type chalVhost struct {
 // chalTierCol renders the effective vhost tier for the list: v1 / v2, with
 // "/pin" when an operator tier pin decides it.
 func chalTierCol(h chalVhost) string {
-	return tierText(h.Rung, h.RungSource)
-}
-
-func tierText(rung, source string) string {
+	rung, source := h.Rung, h.RungSource
 	if source == tierSourcePin {
 		return rungOrV1(rung) + "/pin"
 	}

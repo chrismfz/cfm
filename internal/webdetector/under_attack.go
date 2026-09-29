@@ -573,8 +573,15 @@ func (e *Engine) SetVhostAttackOverride(host string, on bool, now time.Time, ttl
 	// This is host's OWN note: a www. host also inherits its apex's while
 	// the apex is challenged (its challenge IS the apex's) — `attack off`
 	// on the apex is what ends that.
-	if !on && e.nginxBridge != nil {
-		e.nginxBridge.DropVhostAutoSource(host, autoV2UnderAttack)
+	if e.nginxBridge != nil {
+		if on {
+			// Forced on: noted now too (the resolver arms nothing without a
+			// live vhost challenge), so the surfaces and the gate agree at
+			// once instead of on the next tick that evaluates the host.
+			e.nginxBridge.NoteVhostAutoSource(host, autoV2UnderAttack, e.autoSourceNoteTTL())
+		} else {
+			e.nginxBridge.DropVhostAutoSource(host, autoV2UnderAttack)
+		}
 	}
 }
 

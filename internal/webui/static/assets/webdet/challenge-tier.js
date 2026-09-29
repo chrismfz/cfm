@@ -83,10 +83,22 @@ export function tierAlsoPinsV1(s, to) {
   return Boolean(s && to === "v1" && !tierSwitchIsPin(s) && s.rung_auto === "v2" && !s.rung_pin_locked);
 }
 
+// companionPinTTL: the v1 pin that accompanies a manual v2→v1 switch lives as
+// long as the manual arm it accompanies (never a forgotten permanent opt-out
+// of the node default); 24h when the arm's expiry is unknown.
+export function companionPinTTL(s, nowMs = Date.now()) {
+  const exp = s && s.expires_at ? Date.parse(s.expires_at) : NaN;
+  if (!Number.isFinite(exp)) return "24h";
+  const secs = Math.ceil((exp - nowMs) / 1000);
+  return `${Math.max(secs, 60)}s`;
+}
+
 // tierSwitchRequests: every call the one-click switch makes, in order.
-export function tierSwitchRequests(host, s, to) {
+export function tierSwitchRequests(host, s, to, nowMs = Date.now()) {
   const reqs = [tierSwitchRequest(host, s, to)];
-  if (tierAlsoPinsV1(s, to)) reqs.push({ path: "v1/challenge/vhost/tier", body: { host, rung: "v1" } });
+  if (tierAlsoPinsV1(s, to)) {
+    reqs.push({ path: "v1/challenge/vhost/tier", body: { host, rung: "v1", ttl: companionPinTTL(s, nowMs) } });
+  }
   return reqs;
 }
 
@@ -149,7 +161,7 @@ export function tierButtonTitle(s, host) {
   if (!to) return "";
   if (isManual(s)) {
     if (tierAlsoPinsV1(s, to)) {
-      return "Switch this manual challenge to plain v1 AND pin the automatic tier to v1 — an automatic source also holds it at v2 (keeps the arm's expiry)";
+      return "Switch this manual challenge to plain v1 AND pin the automatic tier to v1 for as long as the arm lasts — an automatic source also holds it at v2 (keeps the arm's expiry)";
     }
     if (to === "v1" && s.rung_auto === "v2") {
       return "Switch this manual challenge to v1 — solves stay at v2 while the automatic source holds it (the pin is the operator's)";
