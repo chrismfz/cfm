@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   TIER_SOURCE_LABELS,
+  tierButtonTitle,
   effectiveTier,
   tierSourceLabel,
   tierButtonLabel,
@@ -11,6 +12,7 @@ import {
   tierSuffix,
   tierSwitchIsPin,
   tierSwitchRequest,
+  tierSwitchRequests,
   tierSwitchTarget,
   tierTitle,
   tierUnpinRequest,
@@ -119,4 +121,19 @@ test("the page labels exactly the Go automatic sources", () => {
   });
   assert.deepEqual([...values].sort(), Object.keys(TIER_SOURCE_LABELS).sort());
   assert.equal(tierSourceLabel("nope"), "an automatic source");
+});
+
+test("a manual v2 arm over an automatic v2 drops to v1 in one click: re-tier + pin", () => {
+  const s = { manual_active: true, rung: "v2", rung_source: "manual", rung_auto: "v2", rung_trigger: "under_attack" };
+  assert.deepEqual(tierSwitchRequests("a.gr", s, "v1"), [
+    { path: "v1/challenge/vhost/rung", body: { host: "a.gr", rung: "v1" } },
+    { path: "v1/challenge/vhost/tier", body: { host: "a.gr", rung: "v1" } },
+  ]);
+  assert.match(tierButtonTitle(s, "a.gr"), /AND pin/);
+  // A customer who may not pin gets only the re-tier, and is told v2 stays.
+  const locked = { ...s, rung_pin_locked: true };
+  assert.equal(tierSwitchRequests("a.gr", locked, "v1").length, 1);
+  assert.match(tierButtonTitle(locked, "a.gr"), /stay at v2/);
+  // No automatic v2 underneath: one call.
+  assert.equal(tierSwitchRequests("a.gr", { ...s, rung_auto: "" }, "v1").length, 1);
 });

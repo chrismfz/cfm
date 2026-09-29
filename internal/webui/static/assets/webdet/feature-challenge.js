@@ -6,7 +6,7 @@ import {
   tierButtonLabel,
   tierButtonTitle,
   tierSuffix,
-  tierSwitchRequest,
+  tierSwitchRequests,
   tierSwitchTarget,
   tierTitle,
   tierUnpinRequest,
@@ -65,6 +65,7 @@ export const challengeMixin = {
           rung_source: String(row.rung_source || ""),
           rung_trigger: String(row.rung_trigger || ""),
           rung_pin: String(row.rung_pin || ""),
+          rung_auto: String(row.rung_auto || ""),
           rung_pin_locked: Boolean(row.rung_pin_locked),
           rung_unpin_locked: Boolean(row.rung_unpin_locked),
         };
@@ -126,6 +127,7 @@ export const challengeMixin = {
           rung_source: String(status.rung_source || ""),
           rung_trigger: String(status.rung_trigger || ""),
           rung_pin: String(status.rung_pin || ""),
+          rung_auto: String(status.rung_auto || ""),
           rung_pin_locked: Boolean(status.rung_pin_locked),
           rung_unpin_locked: Boolean(status.rung_unpin_locked),
           reason: status.reason,
@@ -209,10 +211,15 @@ export const challengeMixin = {
       const s = this.activeChallengeByHost[host] || {};
       const to = tierSwitchTarget(s, host);
       if (!host || !to) return;
-      const req = tierSwitchRequest(host, s, to);
+      const reqs = tierSwitchRequests(host, s, to);
+      const req = reqs[0];
       try {
-        const res = await this.postJSON(req.path, req.body);
-        if (req.path.endsWith("/rung")) {
+        let res = await this.postJSON(req.path, req.body);
+        for (const more of reqs.slice(1)) res = await this.postJSON(more.path, more.body);
+        if (reqs.length > 1) {
+          this.actionMsg = `Challenge on ${host} switched to v1 and its automatic tier pinned to v1` +
+            (res?.tier?.rung ? ` — effective tier now ${res.tier.rung}` : "");
+        } else if (req.path.endsWith("/rung")) {
           this.actionMsg = `Challenge on ${res?.host || host} switched ${res?.from || "?"} → ${res?.rung || to} (expiry kept)` +
             (res?.tier?.rung && res.tier.rung !== (res?.rung || to)
               ? ` — still ${res.tier.rung}: an automatic ${res.tier.trigger || "source"} covers it (pin v1 to drop it)`

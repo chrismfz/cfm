@@ -158,6 +158,10 @@ type vhostV2Tier struct {
 	PinHost      string // the host the covering pin is set on (host, or its apex)
 	PinOnApex    bool   // the covering pin is the apex's, not host's own
 	ApexPinActor string
+	// AutoRung is the tier the AUTOMATIC side (pin / knob) gives on its own
+	// ("v2" or ""), reported even when a manual v2 arm decides — so a surface
+	// can tell that switching that arm to v1 would leave the host at v2.
+	AutoRung string
 }
 
 // challengeV2VhostTierForScope is challengeV2VhostTier for a READ SURFACE
@@ -225,22 +229,28 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 	pin, pinHost := e.tierPins.covering(host, now)
 	t.Pin, t.PinActor, t.PinHost = pin.Rung, pin.Actor, pinHost
 	t.PinOnApex = pinHost != "" && pinHost != host
-	manual := false
+	manual, manualV2 := false, false
 	if target := e.manualRungTarget(host); target != "" {
 		manual = true
-		if e.manualChal.rung(target) == "v2" {
-			t.Rung, t.Source = "v2", tierSourceManual
-			return t
-		}
+		manualV2 = e.manualChal.rung(target) == "v2"
 	}
 	trigger := e.autoV2Trigger(host)
+	if trigger != "" {
+		t.Trigger = trigger
+		if (pin.Rung == "" && e.autoV2Armed[trigger]) || pin.Rung == "v2" {
+			t.AutoRung = "v2"
+		}
+	}
+	if manualV2 {
+		t.Rung, t.Source = "v2", tierSourceManual
+		return t
+	}
 	if trigger == "" {
 		if manual {
 			t.Source = tierSourceManual
 		}
 		return t
 	}
-	t.Trigger = trigger
 	switch {
 	case pin.Rung != "":
 		// The pin decides — including a v1 pin that is the only thing
@@ -259,13 +269,9 @@ func (e *Engine) challengeV2VhostTier(host string) vhostV2Tier {
 	return t
 }
 
-// challengeV2VhostVia names what put host's vhost tier at v2 — "manual",
-// "pin", "auto:<source>" — or "" when the tier is not v2. The v2_via= field
-// on a v2=vhost solve line and history row.
-func (e *Engine) challengeV2VhostVia(host string) string {
-	return e.challengeV2VhostTier(host).via()
-}
-
+// via names what put the tier at v2 — "manual", "pin", "auto:<source>" — or
+// "" when it is not v2: the v2_via= field on a v2=vhost solve line and
+// history row.
 func (t vhostV2Tier) via() string {
 	if t.Rung != "v2" {
 		return ""

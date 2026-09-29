@@ -76,6 +76,20 @@ export function tierSwitchRequest(host, s, to) {
   return { path: "v1/challenge/vhost/tier", body: { host, rung: to } };
 }
 
+// tierAlsoPinsV1: switching a manual v2 arm to v1 leaves the host at v2 when
+// an automatic source also holds it there (rung_auto "v2") — the switch then
+// pins the automatic tier to v1 as well, when the caller may.
+export function tierAlsoPinsV1(s, to) {
+  return Boolean(s && to === "v1" && !tierSwitchIsPin(s) && s.rung_auto === "v2" && !s.rung_pin_locked);
+}
+
+// tierSwitchRequests: every call the one-click switch makes, in order.
+export function tierSwitchRequests(host, s, to) {
+  const reqs = [tierSwitchRequest(host, s, to)];
+  if (tierAlsoPinsV1(s, to)) reqs.push({ path: "v1/challenge/vhost/tier", body: { host, rung: "v1" } });
+  return reqs;
+}
+
 // tierUnpinRequest: hands an automatic challenge's tier back to the knob.
 export function tierUnpinRequest(host) {
   return { path: "v1/challenge/vhost/tier", body: { host, rung: "auto" } };
@@ -134,6 +148,12 @@ export function tierButtonTitle(s, host) {
   const to = tierSwitchTarget(s, host);
   if (!to) return "";
   if (isManual(s)) {
+    if (tierAlsoPinsV1(s, to)) {
+      return "Switch this manual challenge to plain v1 AND pin the automatic tier to v1 — an automatic source also holds it at v2 (keeps the arm's expiry)";
+    }
+    if (to === "v1" && s.rung_auto === "v2") {
+      return "Switch this manual challenge to v1 — solves stay at v2 while the automatic source holds it (the pin is the operator's)";
+    }
     return to === "v1"
       ? "Switch this manual challenge back to plain v1 (keeps its expiry)"
       : "Switch this manual challenge to v2: solves must also pass the passive humanity check (keeps its expiry)";

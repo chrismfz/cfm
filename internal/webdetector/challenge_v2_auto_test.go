@@ -792,19 +792,37 @@ func TestV2ViaRendering(t *testing.T) {
 
 	e := newAutoV2TestEngine(t, autoV2SuspiciousVhost)
 	setVhostEntry(e, "via.gr", "suspicious_vhost")
-	if via := e.challengeV2VhostVia("via.gr"); via != "auto:suspicious_vhost" {
+	if via := e.challengeV2VhostTier("via.gr").via(); via != "auto:suspicious_vhost" {
 		t.Fatalf("auto via: %q", via)
 	}
 	e.SetChallengeTierPinAs("via.gr", "v2", 0, "admin")
-	if via := e.challengeV2VhostVia("via.gr"); via != "pin" {
+	if via := e.challengeV2VhostTier("via.gr").via(); via != "pin" {
 		t.Fatalf("pin via: %q", via)
 	}
 	e.SetChallengeTierPinAs("via.gr", "v1", 0, "admin")
-	if via := e.challengeV2VhostVia("via.gr"); via != "" {
+	if via := e.challengeV2VhostTier("via.gr").via(); via != "" {
 		t.Fatalf("a v1 tier has no via: %q", via)
 	}
 	e.ManualChallengeVhost("via.gr", time.Hour, "manual", "v2")
-	if via := e.challengeV2VhostVia("via.gr"); via != "manual" {
+	if via := e.challengeV2VhostTier("via.gr").via(); via != "manual" {
 		t.Fatalf("manual via: %q", via)
+	}
+}
+
+// A manual v2 arm decides, but the surfaces still learn that the automatic
+// side would hold the host at v2 on its own (AutoRung), so a switch to v1 can
+// pin the automatic tier too.
+func TestChallengeV2VhostTier_AutoRungUnderManualV2(t *testing.T) {
+	e := newAutoV2TestEngine(t, autoV2UnderAttack)
+	setVhostEntry(e, "m.gr", "")
+	noteSource(e, "m.gr", autoV2UnderAttack)
+	e.ManualChallengeVhost("m.gr", time.Hour, "manual", "v2")
+	tier := e.challengeV2VhostTier("m.gr")
+	if tier.Rung != "v2" || tier.Source != tierSourceManual || tier.AutoRung != "v2" || tier.Trigger != autoV2UnderAttack {
+		t.Fatalf("manual v2 over auto v2: %+v", tier)
+	}
+	e.SetChallengeTierPinAs("m.gr", "v1", 0, "admin")
+	if tier := e.challengeV2VhostTier("m.gr"); tier.AutoRung != "" || tier.Rung != "v2" {
+		t.Fatalf("a v1 pin clears AutoRung (manual v2 still decides): %+v", tier)
 	}
 }

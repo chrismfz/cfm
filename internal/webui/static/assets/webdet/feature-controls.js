@@ -7,7 +7,7 @@ import {
   tierPinned,
   tierSwitchIsPin,
   tierUnpinnable,
-  tierSwitchRequest,
+  tierSwitchRequests,
   tierSourceLabel,
   tierSwitchTarget,
   tierTitle,
@@ -372,11 +372,15 @@ export const controlsMixin = {
       const s = this.panicStatus || {};
       const to = this.panicSwitchTarget();
       if (!host || !to) return;
-      const req = tierSwitchRequest(host, s, to);
+      const reqs = tierSwitchRequests(host, s, to);
+      const req = reqs[0];
       try {
-        const res = await this.postJSON(req.path, req.body);
+        let res = await this.postJSON(req.path, req.body);
+        for (const more of reqs.slice(1)) res = await this.postJSON(more.path, more.body);
         const label = to === "v2" ? "strict (v2)" : "standard (v1)";
-        this.panicMsg = req.path.endsWith("/rung")
+        this.panicMsg = reqs.length > 1
+          ? `Challenge on ${host} switched to ${label} and its automatic tier pinned to v1 — expiry unchanged`
+          : req.path.endsWith("/rung")
           ? `Challenge on ${res?.host || host} switched to ${label} — expiry unchanged` +
             (res?.tier?.rung && res.tier.rung !== to
               ? ` (still ${res.tier.rung}: an automatic ${res.tier.trigger || "source"} covers it — switch again to pin v1)`

@@ -674,6 +674,7 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"rung_source":  tier.Source,
 		"rung_trigger": tier.Trigger,
 		"rung_pin":     tier.Pin,
+		"rung_auto":    tier.AutoRung,
 		// true when the caller is a scoped token and the operator set the
 		// pin: the tenant's surfaces hide the pin controls (the write 403s).
 		"rung_pin_locked":   tier.pinLockedFor(vhostScopeFromContext(r.Context())),

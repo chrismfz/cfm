@@ -26,10 +26,10 @@ func setV2GoodBot(t *testing.T, fn func(ctx context.Context, ip, ptr string) (st
 func setV2HostArmed(t *testing.T, fn func(host string) bool) {
 	t.Helper()
 	challengeV2.mu.RLock()
-	prev := challengeV2.hostArmed
+	prev := challengeV2.hostTier
 	challengeV2.mu.RUnlock()
 	SetChallengeV2HostArmed(fn)
-	t.Cleanup(func() { SetChallengeV2HostArmed(prev) })
+	t.Cleanup(func() { SetChallengeV2HostTier(prev) })
 }
 
 // An FCrDNS-verified good bot is waived at the D5 gate instead of rejected —
@@ -237,11 +237,11 @@ func TestNewEngineWiresTheV2GoodBotWaiver(t *testing.T) {
 	setV2GoodBot(t, nil) // restores the previous waiver afterwards
 	prevSolve := challengeSolveEnricher.Load()
 	challengeV2.mu.RLock()
-	prevHostArmed := challengeV2.hostArmed
+	prevHostTier := challengeV2.hostTier
 	challengeV2.mu.RUnlock()
 	t.Cleanup(func() {
 		challengeSolveEnricher.Store(prevSolve)
-		SetChallengeV2HostArmed(prevHostArmed)
+		SetChallengeV2HostTier(prevHostTier)
 	})
 	const (
 		cachedIP = "66.249.81.200"

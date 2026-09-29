@@ -41,6 +41,9 @@ type ChallengeVhostState struct {
 	RungSource  string `json:"rung_source,omitempty"`
 	RungTrigger string `json:"rung_trigger,omitempty"`
 	RungPin     string `json:"rung_pin,omitempty"`
+	// RungAuto: the tier the automatic side (pin / knob) gives on its own —
+	// "v2" means switching a manual v2 arm to v1 would still leave v2.
+	RungAuto string `json:"rung_auto,omitempty"`
 	// RungPinLocked: the pin was set by the operator and the CALLER is a
 	// scoped token, which may not change it (set per request, scoped reads
 	// only).

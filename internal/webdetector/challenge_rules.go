@@ -1988,8 +1988,11 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
                 // Under-Attack as an auto-v2 source, re-noted each cycle the
                 // state is evaluated ON (so a cycle that skips this host lets
                 // it lapse, like every other source — see above).
+                // Not gated on this host's own `effective`: a www. host under its
+                // apex's challenge (or a wildcard arm) is challenged too, and
+                // the resolver arms nothing without a live bridge entry anyway.
                 if e.nginxBridge != nil {
-                    if on, _, _ := e.VhostAttackState(host); on && effective {
+                    if on, _, _ := e.VhostAttackState(host); on {
                         e.nginxBridge.NoteVhostAutoSource(host, autoV2UnderAttack, e.autoSourceNoteTTL())
                     } else {
                         e.nginxBridge.DropVhostAutoSource(host, autoV2UnderAttack)

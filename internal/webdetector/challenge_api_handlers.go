@@ -83,6 +83,7 @@ func (v *ChallengeVhostState) decorateTier(t vhostV2Tier) {
 	v.RungSource = t.Source
 	v.RungTrigger = t.Trigger
 	v.RungPin = t.Pin
+	v.RungAuto = t.AutoRung
 }
 
 func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {

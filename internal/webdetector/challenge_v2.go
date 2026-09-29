@@ -251,10 +251,9 @@ type challengeV2State struct {
 	// engine's manual challenge store, apex→www expansion included — arm
 	// surfaces slice A). Wired at engine start; nil = no vhost arms (tests /
 	// pre-wire), fail-open like the geo resolver.
-	hostArmed func(host string) bool
-	// hostTier is hostArmed plus what put the host at v2 (manual / pin /
-	// auto:<source>, rendered as v2_via=), from ONE resolution — the engine
-	// wires it (challenge_v2_auto.go); when set it replaces hostArmed.
+	// hostTier answers "is this host's vhost tier v2" plus what put it there
+	// (manual / pin / auto:<source>, rendered as v2_via=), from ONE
+	// resolution — NewEngine wires challengeV2VhostTier (challenge_v2_auto.go).
 	hostTier func(host string) (armed bool, via string)
 	// goodBot names the FCrDNS-verified good bot behind a solving IP ("" =
 	// none/unknown), for the waiver in the D5 gate: a failing solve under an
@@ -358,20 +357,21 @@ func challengeV2Marked(ip, host string) bool {
 // in (see the D5 gate in challenge_server.go). Same lifecycle as
 // SetFingerprintPolicyGeo: set from NewEngine on every engine build,
 // so it always points at the current engine.
+// It is SetChallengeV2HostTier without a v2_via answer (a convenience for
+// tests that wire a bare predicate); there is ONE hook underneath.
 func SetChallengeV2HostArmed(fn func(host string) bool) {
-	challengeV2.mu.Lock()
-	challengeV2.hostArmed = fn
-	challengeV2.hostTier = nil
-	challengeV2.mu.Unlock()
+	if fn == nil {
+		SetChallengeV2HostTier(nil)
+		return
+	}
+	SetChallengeV2HostTier(func(host string) (bool, string) { return fn(host), "" })
 }
 
-// SetChallengeV2HostTier is SetChallengeV2HostArmed with the v2_via answer
-// from the same resolution (NewEngine wires this one). Setting either hook
-// clears the other.
+// SetChallengeV2HostTier wires the vhost-tier lookup the verify gate ORs in,
+// with the v2_via answer from the same resolution (NewEngine wires this).
 func SetChallengeV2HostTier(fn func(host string) (bool, string)) {
 	challengeV2.mu.Lock()
 	challengeV2.hostTier = fn
-	challengeV2.hostArmed = nil
 	challengeV2.mu.Unlock()
 }
 
@@ -435,18 +435,12 @@ func challengeV2HostArmed(host string) bool {
 // resolution ("" via when the hook gives none).
 func challengeV2HostArmedVia(host string) (bool, string) {
 	challengeV2.mu.RLock()
-	tierFn, armedFn := challengeV2.hostTier, challengeV2.hostArmed
+	tierFn := challengeV2.hostTier
 	challengeV2.mu.RUnlock()
-	if host == "" {
+	if tierFn == nil || host == "" {
 		return false, ""
 	}
-	if tierFn != nil {
-		return tierFn(host)
-	}
-	if armedFn != nil {
-		return armedFn(host), ""
-	}
-	return false, ""
+	return tierFn(host)
 }
 
 // Arm-grain names. They are a grep surface (`v2=` on the solve line), so keep
