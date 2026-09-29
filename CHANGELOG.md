@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.29
+
 ### Security
 - **cPanel users no longer see which ChallengeV2 arm covered a visitor.** The
   history rows a scoped (cPanel) token reads (`/api/v1/webdet/history/events`)
