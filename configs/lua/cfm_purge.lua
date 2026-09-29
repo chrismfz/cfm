@@ -175,8 +175,8 @@ function _M.purge_ip(ip)
       -- "stuck behind a challenge" state, so it must be cleared on unblock.
       if parts[2] == ip then plane = "panel" end
     elseif prefix == "wafpush" then
-      -- cfm_waf.lua writes wafpush|<reason>|<ip>: the IP is the LAST field,
-      -- not field 2 (reason can itself be arbitrary text).
+      -- cfm_waf.lua writes wafpush|<family>[:<tag>]|<action>|<ip>: the IP
+      -- is the LAST field, not field 2.
       if parts[#parts] == ip then plane = "wafpush" end
     elseif prefix == "tr" then
       if strip_tr_suffix(parts[#parts]) == ip then plane = "throttle" end

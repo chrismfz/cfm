@@ -89,6 +89,12 @@ gone (it bypassed the verify location's header clears). Semantics to know:
 - On the wire and in the bridge the decision stays plain `challenge` (edge
   vocabulary); autoblock (`waf_security`) is untouched — it feeds on
   `action=block` pushes only, and a `challenge_v2` push is not one.
+- **One push per IP and family per minute, on any host** (`should_push`), as
+  for every tier. The mark is per IP, so the first push covers every web host
+  of the IP. A scanner that trips the same v2 rule on several vhosts within
+  the 60 s window leaves one `cfm.waf.log` record and one `waf_trigger` row.
+  From 2026-09-23 until the mark became per IP, the key also carried the
+  Host (one push per vhost, capped by `push_v2_host_cap` = 16); both are gone.
 - **Reading it in the logs.** `cfm.waf.log` carries the verbatim
   `"action":"challenge_v2"` (the hit), and the matching solve in
   `cfm.challenges.log` carries `hs=<score>` plus `v2=mark` — the rung mark is
