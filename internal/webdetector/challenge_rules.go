@@ -1375,9 +1375,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 }
                 if e.nginxBridge != nil {
                     e.nginxBridge.ClearVhost(host, "host_bypass")
-                    // Suppressed from automatic challenges: no automatic tier here,
-                    // and (for a www. host) none inherited from the apex either.
-                    e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
                 }
                 if e.cfg.ChallengeNotify {
                     a := core.Alert{
@@ -1492,6 +1489,12 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                     e.keepManualOverSuppression(host, "ignore", now, ips)
                     continue
                 }
+                // Suppressed from automatic challenges — re-applied EVERY cycle
+                // the ignore holds (the marker is short-lived): no automatic
+                // tier here, and (for a www. host) none inherited from the apex.
+                if e.nginxBridge != nil {
+                    e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
+                }
                 // If auto-state is currently ON, turn it off and emit OFF (reason=ignored).
                 if haveVhostAuto {
                     wasOn := false
@@ -1511,9 +1514,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                         }
                         if e.nginxBridge != nil {
                             e.nginxBridge.ClearVhost(host, "ignored")
-                            // Suppressed from automatic challenges: no automatic tier here,
-                            // and (for a www. host) none inherited from the apex either.
-                            e.nginxBridge.SuppressVhostAutoSources(host, e.autoSourceNoteTTL())
                         }
                         if e.cfg.UnderAttack {
                             e.deescalateUnderAttack(now, host, "challenge suppressed (ignored)", out)

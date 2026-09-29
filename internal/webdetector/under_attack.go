@@ -570,6 +570,9 @@ func (e *Engine) SetVhostAttackOverride(host string, on bool, now time.Time, ttl
 	// auto-v2 source note (challenge_v2_auto.go) now rather than on the next
 	// tick that evaluates the host. A tick that read the state just before
 	// this can still re-note it once; its next cycle drops it (≤ one Every).
+	// This is host's OWN note: a www. host also inherits its apex's while
+	// the apex is challenged (its challenge IS the apex's) — `attack off`
+	// on the apex is what ends that.
 	if !on && e.nginxBridge != nil {
 		e.nginxBridge.DropVhostAutoSource(host, autoV2UnderAttack)
 	}

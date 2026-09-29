@@ -374,9 +374,11 @@ export const controlsMixin = {
       if (!host || !to) return;
       const reqs = tierSwitchRequests(host, s, to);
       const req = reqs[0];
+      let done = 0;
       try {
         let res = await this.postJSON(req.path, req.body);
-        for (const more of reqs.slice(1)) res = await this.postJSON(more.path, more.body);
+        done++;
+        for (const more of reqs.slice(1)) { res = await this.postJSON(more.path, more.body); done++; }
         const label = to === "v2" ? "strict (v2)" : "standard (v1)";
         this.panicMsg = reqs.length > 1
           ? `Challenge on ${host} switched to ${label} and its automatic tier pinned to v1 — expiry unchanged`
@@ -389,8 +391,12 @@ export const controlsMixin = {
             (res?.ttl_capped ? "for 24h (the customer pin limit)" : "until you unpin");
         await this.refreshPanicStatus();
       } catch (err) {
-        this.panicMsg = `Tier switch failed for ${host}: ${err}`;
+        // Not atomic: say what already applied, and re-read the real state.
+        this.panicMsg = done > 0
+          ? `Challenge on ${host} switched to ${to}, but pinning its automatic tier failed: ${err}`
+          : `Tier switch failed for ${host}: ${err}`;
         console.error("[cfm-admin] panic tier switch failed", host, err);
+        try { await this.refreshPanicStatus(); } catch (_) { /* best effort */ }
       }
     },
     async panicUnpin() {

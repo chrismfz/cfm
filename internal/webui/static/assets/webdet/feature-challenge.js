@@ -213,9 +213,11 @@ export const challengeMixin = {
       if (!host || !to) return;
       const reqs = tierSwitchRequests(host, s, to);
       const req = reqs[0];
+      let done = 0;
       try {
         let res = await this.postJSON(req.path, req.body);
-        for (const more of reqs.slice(1)) res = await this.postJSON(more.path, more.body);
+        done++;
+        for (const more of reqs.slice(1)) { res = await this.postJSON(more.path, more.body); done++; }
         if (reqs.length > 1) {
           this.actionMsg = `Challenge on ${host} switched to v1 and its automatic tier pinned to v1` +
             (res?.tier?.rung ? ` — effective tier now ${res.tier.rung}` : "");
@@ -231,8 +233,13 @@ export const challengeMixin = {
         }
         await this.refreshChallengeVhosts();
       } catch (err) {
-        this.actionMsg = `Tier switch failed for ${host}: ${err}`;
+        // The two-step switch is not atomic: say what already applied, and
+        // re-read the real state rather than leave a stale row to retry from.
+        this.actionMsg = done > 0
+          ? `Challenge on ${host} switched to ${to}, but pinning its automatic tier failed: ${err}`
+          : `Tier switch failed for ${host}: ${err}`;
         console.error("[cfm-admin] challenge tier switch failed", host, err);
+        try { await this.refreshChallengeVhosts(); } catch (_) { /* best effort */ }
       }
     },
     async unpinChallengeTier(host) {

@@ -42,7 +42,7 @@ type manualChalEntry struct {
 	// (ChallengeV2 Rung 1 — the SERVE is identical, but at VERIFY a failing
 	// humanity score earns no clearance; master plan "arm surfaces" slice A).
 	// The rung changes nothing at the edge; it is consulted only by the
-	// verify gate via challengeV2HostArmed.
+	// verify gate via challengeV2HostArmedVia.
 	Rung string
 }
 
@@ -286,7 +286,7 @@ const defaultManualChallengeTTL = 30 * time.Minute
 // TTL — pushed to the edge immediately via the bridge.
 //
 // rung "" = plain challenge; "v2" = ChallengeV2 (same serve, but at verify a
-// failing humanity score earns no clearance — see challengeV2HostArmed). The
+// failing humanity score earns no clearance — see challengeV2HostArmedVia). The
 // rung never reaches the bridge: enforcement of the tier lives entirely at
 // verify, which is reachable only through the edge proxy (the challenge
 // server binds localhost; the per-IP challenge-DNAT is retired).
@@ -362,7 +362,7 @@ func (e *Engine) manualChallengeVhostRecord(host string, ttl time.Duration, reas
 // changes.
 //
 // Nothing reaches the edge: the serve is identical for both tiers and the
-// verify gate reads the rung live (challengeV2HostArmed), so the switch takes
+// verify gate reads the rung live (challengeV2HostArmedVia), so the switch takes
 // effect on the very next solve — as the manual arm's tier: a switch to v1
 // does not lift an automatic v2 covering the host (challengeV2VhostTier; a
 // v1 pin does).

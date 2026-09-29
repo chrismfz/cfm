@@ -892,7 +892,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// abuse-shadow line (rides the ABUSE_SHADOW master via
 		// ConfigureChallengeV2), clearance unaffected.
 		if v2On && hs >= v2Fail {
-			// v2Grain is the ANY-grain arm resolved above (challengeV2ArmGrain):
+			// v2Grain is the ANY-grain arm resolved above (challengeV2ArmGrainVia):
 			// the solve's TLS fingerprint (the original gate), a fleet-armed
 			// country/ASN policy covering the client IP (policy-kinds slice),
 			// a v2-tier VHOST arm covering the solve's host (arm-surfaces

@@ -111,9 +111,10 @@ test("the title names what decided the tier", () => {
 
 test("the page labels exactly the Go automatic sources", () => {
   const go = readFileSync(new URL("../../../../webdetector/challenge_v2_auto.go", import.meta.url), "utf8");
-  const fn = go.slice(go.indexOf("func ChallengeV2AutoVhostSources()"));
-  const body = fn.slice(0, fn.indexOf("\n}\n"));
+  const decl = go.slice(go.indexOf("var autoSourceOrder = [...]string{"));
+  const body = decl.slice(0, decl.indexOf("}"));
   const consts = [...body.matchAll(/autoV2\w+/g)].map((m) => m[0]);
+  assert.ok(consts.length > 0, "autoSourceOrder not found");
   const values = consts.map((c) => {
     const m = go.match(new RegExp(c + String.raw`\s*=\s*"([^"]+)"`));
     assert.ok(m, `constant ${c} not found`);

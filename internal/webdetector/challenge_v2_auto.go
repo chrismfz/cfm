@@ -16,7 +16,7 @@ package webdetector
 // back to v1 (or forward to v2).
 //
 // The ONE resolver is challengeV2VhostTier: the verify gate
-// (challengeV2HostArmed, wired in NewEngine) and every read surface (the vhost
+// (challengeV2HostArmedVia, wired in NewEngine) and every read surface (the vhost
 // list, the per-host status, the CLI) answer "what tier is this vhost at"
 // through it, so the teeth and the UI can never disagree. Precedence:
 //
@@ -70,10 +70,16 @@ const (
 	autoV2UnderAttack     = "under_attack"
 )
 
+// autoSourceOrder is the ONE list of automatic sources: every valid
+// CHALLENGE_V2_AUTO_VHOST token, in the order vhostAutoSources reports noted
+// ones — strongest first (Under-Attack: the challenge is being defeated) and
+// fixed, so equal situations always resolve the same way.
+var autoSourceOrder = [...]string{autoV2UnderAttack, autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig}
+
 // ChallengeV2AutoVhostSources lists every valid CHALLENGE_V2_AUTO_VHOST
-// source — the ONE list (the parser and operator-facing hints use it).
+// source (autoSourceOrder — the parser and operator-facing hints use it).
 func ChallengeV2AutoVhostSources() []string {
-	return []string{autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig, autoV2UnderAttack}
+	return append([]string(nil), autoSourceOrder[:]...)
 }
 
 // DefaultChallengeV2AutoVhost is the shipped CHALLENGE_V2_AUTO_VHOST: the two
@@ -213,7 +219,7 @@ func (t vhostV2Tier) unpinLockedFor(scope map[string]struct{}) bool {
 // operator-pinned-v2 vhost — the way down is a v1 pin or the manual arm's own
 // v2→v1 switch on a host no automatic source covers.
 //
-// Cost: it runs on EVERY scored solve (challengeV2ArmGrain's vhost grain). The
+// Cost: it runs on EVERY scored solve (challengeV2ArmGrainVia's vhost grain). The
 // only exclusive lock is the manual store's mutex, taken as the manual tier
 // always took it (manualRungTarget: the host, then the apex; then the rung).
 // Beyond that: one pin-store RLock (covering: the host's pin, else its
@@ -324,11 +330,6 @@ func (e *Engine) autoSourceNoteTTL() time.Duration {
 	}
 	return ttl
 }
-
-// autoSourceOrder is the order vhostAutoSources reports noted sources in —
-// strongest first (Under-Attack: the challenge is being defeated) and fixed,
-// so equal situations always resolve the same way.
-var autoSourceOrder = [...]string{autoV2UnderAttack, autoV2SuspiciousVhost, autoV2UniqPathsShort, autoV2VhostConfig}
 
 // autoSourceSuppressed is the marker note that blocks a www. host from
 // inheriting its apex's sources while the host's own automatic challenge is
