@@ -281,8 +281,8 @@ already opened.
         logged as `hs=`/`tells=`/`sig=`/`v2=` on the solve line and as
         `hs`/`tells`/`sig`/`v2`/`hs_nopayload` on the durable
         `challenge_solved` history row (2026-09-22; `payload.sig`, and since
-        2026-09-29 `payload.v2`, are stripped for scoped callers — see
-        docs/endpoint_scope_inventory.md). Armed `challenge_v2` fp +
+        2026-09-29 the `v2` / `v2_*` keys, are stripped for scoped callers —
+        see docs/endpoint_scope_inventory.md). Armed `challenge_v2` fp +
         failing score ⇒ `result=v2_reject`, 403, no clearance — the page
         reloads into a fresh challenge (D5c). Everyone else: shadow
         `signal=humanity verdict=would_v2` (rides ABUSE_SHADOW). Knobs

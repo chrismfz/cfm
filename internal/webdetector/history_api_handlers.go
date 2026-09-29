@@ -48,7 +48,13 @@ var scopedRedactedPayloadKeys = map[string]struct{}{
 	"ptr":   {},
 	"src":   {},
 	"scope": {},
-	"v2":    {},
+	// The ChallengeV2 arm family — see the fifth entry in
+	// redactScopedHistoryRows: any one kept member re-derives the grain.
+	"v2":             {},
+	"v2_via":         {},
+	"v2_waived":      {},
+	"v2_rescued":     {},
+	"v2_waiver_miss": {},
 }
 
 // hasScopedRedactedKey reports whether a payload carries any key in
@@ -66,7 +72,7 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // (scopedRedactedPayloadKeys) from history rows before they leave the endpoint
 // for a SCOPED (cPanel) caller. Admin callers see the rows untouched.
 //
-// Five keys today. The first is payload.sig — the ChallengeV2 Rung-1 device readings
+// Five entries today (the last is a family of keys). The first is payload.sig — the ChallengeV2 Rung-1 device readings
 // (hardwareConcurrency, deviceMemory, devicePixelRatio, pointer/touch/key
 // counts) collected by CFM's own challenge page. A tenant could measure the
 // same things from their own site's JS, so this is not a secret; it is
@@ -103,18 +109,22 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // reseller's admin address, not tenant data. Closed by default like the
 // others; telling panel solves apart is an admin/MCP readout.
 //
-// The fifth is payload.v2 — the ChallengeV2 arm grain on challenge_solved and
-// challenge_v2_reject rows (fp / geo / vhost / mark). Two of its four values
-// are the same operator fleet policy src is stripped for: v2=fp and v2=geo
-// say an admin-armed fingerprint or country/ASN policy covered this visitor.
-// Dropping only those values would leave their absence on a reject row as
-// the tell, so the key goes whole. The tenant loses little: its own vhost's
-// tier is on the challenge status surfaces, and v2_via (manual / pin /
-// auto:<source>, written only for v2=vhost) stays. The inference a reject row
-// allows by existing at all ("some arm covered this visitor") is the same
-// residual src stripping leaves; v2_waiver_miss=grain narrows it to "a
-// fingerprint policy or a mark" and stays, as the one reason a tenant can act
-// on for a crawler-looking reject.
+// The fifth is the ChallengeV2 arm family on challenge_solved and
+// challenge_v2_reject rows: v2 (the grain: fp / geo / vhost / mark), v2_via,
+// v2_waived, v2_rescued and v2_waiver_miss. v2=fp and v2=geo are the same
+// operator fleet policy src is stripped for: an admin-armed fingerprint or
+// country/ASN policy covered this visitor. The whole family goes because
+// each member narrows the grain: v2_via is written only for vhost, a waiver
+// (v2_waived, or any v2_waiver_miss but "grain") only happens under geo or
+// vhost, and v2_rescued only under an arm — so "v2_waived without v2_via"
+// was an exact v2=geo, and with enrich=1 the row's country/ASN then named
+// the armed country (the 2026-09-29 review of the first cut, which stripped
+// v2 alone). Dropping only fp/geo values would make their absence the tell
+// for the same reason. The tenant loses little: its own vhost's tier is on
+// the challenge status surfaces. The residual: a challenge_v2_reject row
+// still says, by existing, that SOME arm covered the visitor, and a cluster
+// of rejects sharing one tls_fp across many IPs hints at a fingerprint
+// policy; neither names the grain.
 //
 // The payload map is copied rather than edited so the caller's own map is
 // never mutated, but note the LIMIT of that: the slice element is reassigned

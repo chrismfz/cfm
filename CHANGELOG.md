@@ -20,13 +20,17 @@ back-filled here — see the git/PR history for that period.
 ### Security
 - **cPanel users no longer see which ChallengeV2 arm covered a visitor.** The
   history rows a scoped (cPanel) token reads (`/api/v1/webdet/history/events`)
-  no longer carry `payload.v2`. Its `fp` and `geo` values said that an
-  operator-armed fingerprint or country/ASN policy covered the visitor, which
-  is operator policy. It is the same reason `payload.src` was already
-  withheld. The whole key goes, because dropping only those two values
-  would make their absence the tell. Admin and MCP reads are unchanged, and
-  scoped rows keep `hs`, `tells`, `v2_via`, `v2_waived`, `v2_rescued` and
-  `v2_waiver_miss`.
+  no longer carry the `v2` key or any `v2_*` key (`v2_via`, `v2_waived`,
+  `v2_rescued`, `v2_waiver_miss`).
+  - `v2=fp` or `v2=geo` meant an operator-armed fingerprint or country/ASN
+    policy covered the visitor. That is operator policy, which is why
+    `payload.src` was already withheld.
+  - Every other key in the family narrows the answer. For example, a
+    let-through good bot with no `v2_via` could only be `geo`, and the row's
+    country then named the armed country. So the whole family goes.
+
+  Admin and MCP reads are unchanged, and scoped rows keep `hs`, `tells`, the
+  country/ASN and the rest.
 
 ### Changed
 - **A `challenge_v2` WAF hit is now logged once per IP and rule family per

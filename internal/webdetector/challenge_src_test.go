@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -390,36 +391,68 @@ func TestHistoryEventsRedactsSrcForScopedCallers(t *testing.T) {
 	}
 }
 
-// payload.v2 names the arm grain, and fp / geo are operator fleet policy (the
-// reason src is stripped): the whole key stays out of a scoped caller's rows —
-// dropping only fp/geo would make their absence the tell — while the
-// tenant-actionable v2 keys and everything else stay, and admin sees it all.
+// The ChallengeV2 arm family must not let a scoped caller tell the grain.
+// fp / geo are operator fleet policy (the reason src is stripped), and every
+// family member narrows the grain: v2_via exists only for vhost, a waiver
+// (v2_waived, a non-"grain" v2_waiver_miss) only under geo/vhost, v2_rescued
+// only under an arm. Regression anchor: the first cut stripped v2 alone, and
+// "v2_waived without v2_via" was an exact v2=geo. The rows are built by the
+// real payload builder, from combinations production emits.
 func TestHistoryEventsRedactsV2GrainForScopedCallers(t *testing.T) {
-	for _, grain := range []string{"fp", "geo", "vhost", "mark"} {
-		row := func() []HistoryEvent {
-			return []HistoryEvent{{
-				Type: "challenge_v2_reject", Host: "shop.example.com", IP: "203.0.113.32",
-				Payload: map[string]interface{}{
-					"v2": grain, "v2_via": "auto:suspicious_vhost", "v2_waiver_miss": "grain",
-					"hs": 100, "tells": "sw_renderer,outer_zero", "tls_fp": "c28caa00",
-				},
-			}}
-		}
-		scoped := row()
-		redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(scopedCtx("shop.example.com")), scoped)
-		if _, present := scoped[0].Payload["v2"]; present {
-			t.Errorf("v2=%s must not cross the scoped boundary", grain)
-		}
-		for _, k := range []string{"v2_via", "v2_waiver_miss", "hs", "tells", "tls_fp"} {
-			if _, present := scoped[0].Payload[k]; !present {
-				t.Errorf("v2=%s: scoped caller lost %q", grain, k)
+	base := ChallengeSolve{
+		IP: "66.249.81.200", Host: "shop.example.com", URI: "/", UA: "Mozilla/5.0",
+		HumanityScored: true, HumanityScore: 140, HumanityTells: "sw_renderer,touch_lie,no_input",
+		TLSFP: "c41a0f3f", CountryISO: "US", ASN: 15169,
+	}
+	scopedPayload := func(typ string, s ChallengeSolve) map[string]interface{} {
+		rows := []HistoryEvent{{Type: typ, Host: s.Host, IP: s.IP, Payload: s.historyPayload()}}
+		redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(scopedCtx("shop.example.com")), rows)
+		return rows[0].Payload
+	}
+	with := func(f func(*ChallengeSolve)) ChallengeSolve { s := base; f(&s); return s }
+
+	// Solved: a waived good bot under geo vs vhost, and a rescued solve under
+	// every grain, must all look the same to a tenant.
+	solved := []ChallengeSolve{
+		with(func(s *ChallengeSolve) { s.V2Grain, s.V2Waived = v2GrainGeo, "google" }),
+		with(func(s *ChallengeSolve) {
+			s.V2Grain, s.V2Via, s.V2Waived = v2GrainVhost, "auto:suspicious_vhost", "google"
+		}),
+		with(func(s *ChallengeSolve) { s.V2Grain, s.V2Rescued = v2GrainFP, v2RescuedInput }),
+		with(func(s *ChallengeSolve) { s.V2Grain, s.V2Rescued = v2GrainMark, v2RescuedInput }),
+	}
+	// Rejects: every grain, with the waiver-miss reason it really gets.
+	rejects := []ChallengeSolve{
+		with(func(s *ChallengeSolve) { s.V2Grain, s.V2WaiverMiss = v2GrainFP, v2WaiverGrain }),
+		with(func(s *ChallengeSolve) { s.V2Grain, s.V2WaiverMiss = v2GrainMark, v2WaiverGrain }),
+		with(func(s *ChallengeSolve) { s.V2Grain, s.V2WaiverMiss = v2GrainGeo, v2WaiverSpoofed }),
+		with(func(s *ChallengeSolve) { s.V2Grain, s.V2Via, s.V2WaiverMiss = v2GrainVhost, "pin", v2WaiverSpoofed }),
+	}
+	for typ, set := range map[string][]ChallengeSolve{"challenge_solved": solved, "challenge_v2_reject": rejects} {
+		want := fmt.Sprint(scopedPayload(typ, set[0]))
+		for i, s := range set {
+			got := scopedPayload(typ, s)
+			for k := range got {
+				if strings.HasPrefix(k, "v2") {
+					t.Errorf("%s #%d (grain %s): %s crossed the scoped boundary", typ, i, s.V2Grain, k)
+				}
+			}
+			if fmt.Sprint(got) != want {
+				t.Errorf("%s: grain %s is distinguishable from grain %s for a tenant:\n%v\n%v", typ, s.V2Grain, set[0].V2Grain, got, want)
+			}
+			// The rest of the row stays.
+			for _, k := range []string{"hs", "tells", "tls_fp", "country_iso", "asn"} {
+				if _, present := got[k]; !present {
+					t.Errorf("%s (grain %s): scoped caller lost %q", typ, s.V2Grain, k)
+				}
 			}
 		}
-		admin := row()
-		redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(adminCtx()), admin)
-		if admin[0].Payload["v2"] != grain {
-			t.Errorf("admin must still receive v2=%s", grain)
-		}
+	}
+	// Admin sees the whole family.
+	rows := []HistoryEvent{{Type: "challenge_solved", Payload: solved[1].historyPayload()}}
+	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(adminCtx()), rows)
+	if p := rows[0].Payload; p["v2"] != v2GrainVhost || p["v2_via"] != "auto:suspicious_vhost" || p["v2_waived"] != "google" {
+		t.Errorf("admin must still receive the v2 family: %v", p)
 	}
 }
 
