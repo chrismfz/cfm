@@ -793,39 +793,56 @@ func (m *manager) stopAll() {
 // [webdetector] one (baseWD), else the one in the package's pre-upgrade
 // snapshot of detectors.conf (hostsecrets.PreUpgradePath): the file as it
 // was before the package could replace it with the stock one, read with the
-// same parser. The snapshot is removed once both tokens are stored.
+// same parser. The snapshot is consumed per key: a token taken over from it
+// is dropped from it once stored (the file goes when none is left), so a
+// later rotation can never bring it back.
 func resolveHostTokens(baseWD KV) (challenge, bridge string) {
 	snapWD, snapFound := KV(nil), false
 	if ss, err := ReadSectionsFile(hostsecrets.PreUpgradePath()); err == nil {
 		snapWD, snapFound = ss.ByName["webdetector"], true
 	}
-	stored := true
+	pending := map[string]string{} // snapshot tokens not stored yet
 	resolve := func(key string) string {
-		legacy := kvStrClean(baseWD, key, "")
+		legacy, fromSnap := kvStrClean(baseWD, key, ""), false
 		if !hostsecrets.Usable(legacy) {
-			legacy = kvStrClean(snapWD, key, "")
+			if sslcollector.IsStrongToken(legacy) {
+				if _, seen := tokenUnusableLogged.LoadOrStore(key, true); !seen {
+					logging.Logf("[detectors] %s in detectors.conf is ignored: the config cleaner would alter it (surrounding quotes or an inline comment), so it cannot run as written", key)
+				}
+			}
+			if v := kvStrClean(snapWD, key, ""); hostsecrets.Usable(v) {
+				legacy, fromSnap = v, true
+			}
 		}
 		tok, src, err := hostsecrets.Resolve(key, legacy)
 		if tok == "" {
 			logging.Logf("[detectors] %s generation failed: %v", key, err)
-			stored = false
+			if fromSnap {
+				pending[key] = legacy
+			}
 			return ""
 		}
-		stored = stored && err == nil
-		logTokenSource(key, src, err)
+		if fromSnap && err != nil {
+			pending[key] = legacy
+		}
+		logTokenSource(key, src, fromSnap, err)
 		return tok
 	}
 	challenge = resolve(hostsecrets.ChallengeToken)
 	bridge = resolve(hostsecrets.BridgeToken)
-	if snapFound && stored {
-		if err := hostsecrets.RemovePreUpgrade(); err != nil {
-			logging.Logf("[detectors] could not remove %s: %v", hostsecrets.PreUpgradePath(), err)
-		} else {
-			logging.Logf("[detectors] tokens taken over from the pre-upgrade snapshot; %s removed", hostsecrets.PreUpgradePath())
+	if snapFound {
+		if err := hostsecrets.KeepPreUpgrade(pending); err != nil {
+			logging.Logf("[detectors] could not update %s: %v", hostsecrets.PreUpgradePath(), err)
+		} else if len(pending) == 0 {
+			logging.Logf("[detectors] pre-upgrade snapshot consumed; %s removed", hostsecrets.PreUpgradePath())
 		}
 	}
 	return challenge, bridge
 }
+
+// tokenUnusableLogged remembers, per token, that the "strong but not usable"
+// warning was logged (once per process, like the hint below).
+var tokenUnusableLogged sync.Map
 
 // tokenFromConfLogged remembers, per token, that the "taken from
 // detectors.conf" hint was logged: a reload happens on every config save and
@@ -833,10 +850,14 @@ func resolveHostTokens(baseWD KV) (challenge, bridge string) {
 var tokenFromConfLogged sync.Map
 
 // logTokenSource logs where a [webdetector] token came from when it is worth
-// knowing: generated, still set in detectors.conf (once per process), or not
-// persisted. A token read from the store is the steady state: silent.
-func logTokenSource(key, source string, err error) {
+// knowing: generated, taken from the pre-upgrade snapshot, still set in
+// detectors.conf (once per process), or not persisted. A token read from the store is the steady state: silent.
+func logTokenSource(key, source string, fromSnapshot bool, err error) {
 	switch {
+	case fromSnapshot && err == nil:
+		logging.Logf("[detectors] %s taken over from the pre-upgrade snapshot and stored in %s", key, hostsecrets.Path(key))
+	case fromSnapshot:
+		logging.Logf("[detectors] %s from the pre-upgrade snapshot could not be stored in %s: %v — running with it; retried each reload", key, hostsecrets.Path(key), err)
 	case errors.Is(err, hostsecrets.ErrStoreUnreadable):
 		logging.Logf("[detectors] %s: %v — keeping the running token (source=%s) and leaving the store alone; retried each reload", key, err, source)
 	case err != nil && source == hostsecrets.SourceConf:

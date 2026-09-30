@@ -159,6 +159,10 @@ func TestDebianPreinstStopsOnlyAnOldDaemon(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(tmp, "bin", "systemctl"), []byte(stub), 0o755); err != nil {
 				t.Fatal(err)
 			}
+			runs := filepath.Join(tmp, "runs")
+			if err := os.WriteFile(filepath.Join(tmp, "bin", "systemd-run"), []byte("#!/bin/sh\nfor a; do echo \"$a\"; done >> "+runs+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
 			cmd := exec.Command("sh", preinst, tc.arg, "2026.09.01-1")
 			cmd.Env = append(os.Environ(),
 				"PATH="+filepath.Join(tmp, "bin")+":"+os.Getenv("PATH"),
@@ -171,6 +175,15 @@ func TestDebianPreinstStopsOnlyAnOldDaemon(t *testing.T) {
 			got, _ := os.ReadFile(calls)
 			if stopped := strings.Contains(string(got), "stop cfm.service"); stopped != tc.stop {
 				t.Fatalf("stopped = %v, want %v (systemctl calls: %q)", stopped, tc.stop, got)
+			}
+			// A stop always arms the safety start, guarded so that it can
+			// only ever start the NEW binary.
+			timer, _ := os.ReadFile(runs)
+			if armed := strings.Contains(string(timer), "--on-active=120"); armed != tc.stop {
+				t.Fatalf("safety start armed = %v, want %v (systemd-run args: %q)", armed, tc.stop, timer)
+			}
+			if tc.stop && !strings.Contains(string(timer), "grep -q -a -F /var/lib/cfm/secrets "+bin+" && systemctl start cfm.service") {
+				t.Fatalf("safety start is not guarded by the new-binary check: %q", timer)
 			}
 		})
 	}

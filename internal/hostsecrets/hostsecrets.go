@@ -23,9 +23,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
+	"cfm/internal/detconf"
 	"cfm/internal/sslcollector"
 )
 
@@ -89,13 +91,13 @@ func Read(key string) (string, bool) {
 }
 
 // Usable reports whether v can be a token: strong (sslcollector.IsStrongToken)
-// and free of the characters the detectors.conf value cleaner treats as
-// syntax (quotes, ';' / '#' comments, a leading '//' comment). The daemon
-// re-reads the resolved value through that cleaner, so a value it would
-// change would run as a DIFFERENT secret than the one mirrored to the edge
-// (cfm_bridge_token.lua), or as none at all.
+// and unchanged by the detectors.conf value cleaner (detconf.CleanValue:
+// inline comments, surrounding quotes). The daemon re-reads the resolved
+// value through that cleaner, so a value it would change would run as a
+// DIFFERENT secret than the one mirrored to the edge (cfm_bridge_token.lua),
+// or as none at all. Every value the old binary could run end to end passes.
 func Usable(v string) bool {
-	return sslcollector.IsStrongToken(v) && !strings.ContainsAny(v, `"';#`) && !strings.HasPrefix(v, "//")
+	return sslcollector.IsStrongToken(v) && detconf.CleanValue(v) == v
 }
 
 var (
@@ -227,8 +229,35 @@ func RemovePreUpgrade() error {
 	return nil
 }
 
+// KeepPreUpgrade rewrites the pre-upgrade snapshot down to the tokens in vals
+// (key → value, each Usable) that could not be stored yet, so a token already
+// taken over can never be taken from it again, e.g. after a rotation. With
+// vals empty it removes the snapshot.
+func KeepPreUpgrade(vals map[string]string) error {
+	if len(vals) == 0 {
+		return RemovePreUpgrade()
+	}
+	keys := make([]string, 0, len(vals))
+	for k := range vals {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString("[webdetector]\n")
+	for _, k := range keys {
+		fmt.Fprintf(&b, "%s = %s\n", k, vals[k])
+	}
+	return writeFile(PreUpgradePath(), b.String())
+}
+
 // write stores value atomically: a temp file in Dir (0600), then rename.
 func write(key, value string) error {
+	return writeFile(Path(key), value+"\n")
+}
+
+// writeFile writes content to path (in Dir) atomically: a temp file in Dir
+// (0600), then rename.
+func writeFile(path, content string) error {
 	if err := ensureDir(); err != nil {
 		return err
 	}
@@ -236,7 +265,7 @@ func write(key, value string) error {
 	if err := os.Chmod(Dir, 0o700); err != nil {
 		return fmt.Errorf("hostsecrets: chmod %s: %w", Dir, err)
 	}
-	f, err := os.CreateTemp(Dir, "."+strings.ToLower(key)+".tmp-*")
+	f, err := os.CreateTemp(Dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("hostsecrets: temp file: %w", err)
 	}
@@ -246,7 +275,7 @@ func write(key, value string) error {
 		_ = f.Close()
 		return fmt.Errorf("hostsecrets: chmod temp: %w", err)
 	}
-	if _, err := f.WriteString(value + "\n"); err != nil {
+	if _, err := f.WriteString(content); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("hostsecrets: write temp: %w", err)
 	}
@@ -257,8 +286,8 @@ func write(key, value string) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("hostsecrets: close temp: %w", err)
 	}
-	if err := os.Rename(tmp, Path(key)); err != nil {
-		return fmt.Errorf("hostsecrets: rename into %s: %w", Path(key), err)
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("hostsecrets: rename into %s: %w", path, err)
 	}
 	return nil
 }

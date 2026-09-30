@@ -141,19 +141,21 @@ replaces a placeholder in place, but appends a MISSING line at the end of the
 file, where it can land in another section and loop the daemon through a
 reload every few seconds, and an EMPTY line makes its regex overwrite the line
 after it. An overlay value is ignored, and a weak one (`placeholder`, under 32
-characters) too, as is one the config cleaner would alter (quotes, `;`/`#`,
-a leading `//`). Before it can replace the conffile, the package snapshots
+characters) too, as is one the config cleaner would alter (surrounding
+quotes, an inline comment; logged). Before it can replace the conffile, the package snapshots
 it to `/var/lib/cfm/secrets/detectors.conf.pre-upgrade` (the token-seed block
 in the Debian `preinst` and the RPM pre scriptlet). The daemon reads the
 tokens from the snapshot with the same parser (a usable value there beats
-the store, as one in the base file does), stores them and deletes the
-snapshot. So taking the package's `detectors.conf` at upgrade, or moving the
+the store, as one in the base file does) and stores them; each token is
+dropped from the snapshot once stored, and the file goes when none is left. So taking the package's `detectors.conf` at upgrade, or moving the
 `.rpmnew` over it, keeps the tokens. On Debian the preinst also stops a
 running OLD daemon (one whose binary predates the store) before the unpack:
 it would otherwise regenerate the stock placeholder in `detectors.conf` and
-rotate both tokens. A rollback to such a binary still rotates them once. To
+rotate both tokens; a one-shot timer starts the new daemon 2 minutes later
+if `postinst` has not yet (apt batch, conffile prompt, interrupted run). A
+rollback to such a binary still rotates them once. To
 rotate: set the value in the base to `placeholder` (if set), delete the
-store file, restart; any restored copy of `detectors.conf` that still holds
+store file (and `detectors.conf.pre-upgrade`, if present), restart; any restored copy of `detectors.conf` that still holds
 a token brings that token back. Every other `[webdetector]` knob
 (`OPENRESTY_SOCK`, `LOG_PATH`, thresholds, …) is overlay-tunable as normal. Verify the
 merged result with `cfm detectors-srcresolve` and the cfm-admin "Source

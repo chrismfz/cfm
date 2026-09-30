@@ -99,3 +99,45 @@ func TestUsableTokensSurviveTheConfigCleaner(t *testing.T) {
 		}
 	}
 }
+
+// The snapshot is consumed per key: when one token cannot be stored yet, the
+// other, already taken over, is dropped from the snapshot, so rotating it
+// (placeholder, delete its store file) cannot bring the old value back.
+func TestResolveHostTokensConsumesTheSnapshotPerKey(t *testing.T) {
+	dir := useHostSecretsDir(t)
+	writeSnapshot(t, dir, "[webdetector]\nCHALLENGE_TOKEN = "+hostTokA+"\nOPENRESTY_TOKEN = "+hostTokB+"\n")
+	// OPENRESTY_TOKEN's store cannot be written (a directory in its place).
+	if err := os.Mkdir(hostsecrets.Path(hostsecrets.BridgeToken), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	base := wdSection(t, "[webdetector]\nCHALLENGE_TOKEN = placeholder\nOPENRESTY_TOKEN = placeholder\n")
+	if chal, bridge := resolveHostTokens(base); chal != hostTokA || bridge != hostTokB {
+		t.Fatalf("resolveHostTokens = (%q, %q), want the snapshot's (A, B)", chal, bridge)
+	}
+	snap, err := ReadSectionsFile(hostsecrets.PreUpgradePath())
+	if err != nil {
+		t.Fatalf("snapshot gone while OPENRESTY_TOKEN is not stored: %v", err)
+	}
+	if got := snap.ByName["webdetector"]; len(got) != 1 || got["OPENRESTY_TOKEN"] != hostTokB {
+		t.Fatalf("snapshot [webdetector] = %v, want only the unstored OPENRESTY_TOKEN", got)
+	}
+
+	// Rotate CHALLENGE_TOKEN: delete its store file, reload.
+	if err := os.Remove(hostsecrets.Path(hostsecrets.ChallengeToken)); err != nil {
+		t.Fatal(err)
+	}
+	if chal, _ := resolveHostTokens(base); chal == hostTokA || chal == "" {
+		t.Fatalf("rotation brought the snapshot's CHALLENGE_TOKEN back: %q", chal)
+	}
+
+	// Once OPENRESTY_TOKEN can be stored, the snapshot goes.
+	if err := os.Remove(hostsecrets.Path(hostsecrets.BridgeToken)); err != nil {
+		t.Fatal(err)
+	}
+	if _, bridge := resolveHostTokens(base); bridge != hostTokB {
+		t.Fatalf("OPENRESTY_TOKEN = %q, want the snapshot's B", bridge)
+	}
+	if _, err := os.Stat(hostsecrets.PreUpgradePath()); !os.IsNotExist(err) {
+		t.Fatalf("snapshot not removed once every token was stored (err %v)", err)
+	}
+}

@@ -42,13 +42,19 @@ back-filled here — see the git/PR history for that period.
   - **Debian, first upgrade to this version only:** the old daemon is stopped
     before the unpack; `postinst` starts the new one as usual. The old daemon
     would otherwise turn the stock placeholder back into a new token within
-    seconds, re-challenging every visitor.
+    seconds, re-challenging every visitor. If `postinst` has not run 2 minutes
+    later (an apt batch, a waiting conffile prompt, an interrupted upgrade), a
+    one-shot timer starts the new daemon.
   - **A rollback to an older version rotates both tokens once** (every visitor
     is re-challenged): the older binary generates its own into
     `detectors.conf`. Rolling forward again keeps that token.
   - To rotate a token, set its value to `placeholder` (if set), delete its
-    store file, and restart. A token set in `detectors.conf` always wins, so a
-    restored backup copy of `detectors.conf` brings its token back.
+    store file (and `detectors.conf.pre-upgrade` beside it, if present), and
+    restart. A token set in `detectors.conf` always wins, so a restored backup
+    copy of `detectors.conf` brings its token back.
+  - A token the config cleaner would alter (wrapped in quotes, or followed by
+    an inline comment) is ignored with a warning, since it could not run as
+    written.
   - `cfm health` reports the token the daemon actually uses.
   - The token step (and `cfm_bridge_config.lua`) now also runs when
     `[webdetector]` exists only in a `detectors.d/` overlay.

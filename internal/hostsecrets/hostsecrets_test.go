@@ -285,7 +285,9 @@ func TestResolveUnreadableStoreKeepsTheRunningToken(t *testing.T) {
 }
 
 func TestUsable(t *testing.T) {
-	for _, v := range []string{strongA, "A-Za-z0-9._~+/=:" + strongA} {
+	// A quote INSIDE a token (never closed, so nothing is cut) ran end to
+	// end on the old daemon and must keep working.
+	for _, v := range []string{strongA, "A-Za-z0-9._~+/=:" + strongA, strongA[:8] + `"` + strongA[8:], strongA[:8] + "'" + strongA[8:20] + "#" + strongA[20:], strongA + "//x"} {
 		if !Usable(v) {
 			t.Errorf("Usable(%q) = false, want true", v)
 		}

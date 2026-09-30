@@ -221,9 +221,10 @@ is copied into the store, so the migration is "set the value back to
 placeholder whenever, nothing breaks" (no cookie is invalidated). The package's
 pre-install scriptlets (Debian `preinst`, RPM pre) snapshot the old file into
 the store dir before a conffile prompt or a moved `.rpmnew` can replace it;
-the daemon takes the tokens from that snapshot with the real parser, then
-deletes it. The Debian preinst also stops a running pre-store daemon, which
-would otherwise regenerate the stock placeholder in place.
+the daemon takes the tokens from that snapshot with the real parser, one key
+at a time, then deletes it. The Debian preinst also stops a running
+pre-store daemon, which would otherwise regenerate the stock placeholder in
+place (a one-shot timer starts the new one if configure is delayed).
 `cfm health` reads the same resolution (`hostsecrets.Effective`).
 
 ---
