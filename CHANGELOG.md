@@ -26,12 +26,16 @@ back-filled here — see the git/PR history for that period.
   - Each token is now generated once into `/var/lib/cfm/secrets/`
     (`challenge_token`, `openresty_token`; root only). CFM never writes
     `detectors.conf`.
-  - The stock file ships no token lines.
+  - The stock file ships the two lines **empty**. Keep them that way rather
+    than deleting them: an older binary after a rollback fills an empty line
+    in place, but would append a missing one to whatever section is last.
   - **Nothing changes on upgrade:** a strong token already in
     `detectors.conf` still wins and is copied into the store on the next start.
-    After that the line can be deleted without invalidating any visitor's
+    After that the value can be emptied without invalidating any visitor's
     challenge cookie.
-  - To rotate a token, remove its line (if set), delete its store file, and
+  - On Debian, if you take the package's `detectors.conf` at upgrade, the
+    daemon migrates the tokens from `detectors.conf.dpkg-old`.
+  - To rotate a token, empty its value (if set), delete its store file, and
     restart.
   - `cfm status` / `cfm health` report the token the daemon actually uses.
   - The token step (and `cfm_bridge_config.lua`) now also runs when

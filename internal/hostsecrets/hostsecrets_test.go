@@ -167,3 +167,31 @@ func TestEffective(t *testing.T) {
 		t.Errorf("strong legacy: Effective = %q, want the legacy value (it wins)", got)
 	}
 }
+
+// A store restored or copied with loose modes is tightened when it is only
+// read: the secrets must never stay world-readable.
+func TestResolveTightensALooseExistingStore(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path(ChallengeToken), []byte(strongA+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(Path(ChallengeToken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tok, src, err := Resolve(ChallengeToken, "")
+	if err != nil || tok != strongA || src != SourceStore {
+		t.Fatalf("Resolve = (%q, %q, %v), want the stored strongA", tok, src, err)
+	}
+	if fi, _ := os.Stat(Path(ChallengeToken)); fi.Mode().Perm() != 0o600 {
+		t.Errorf("store file mode = %v, want 0600", fi.Mode().Perm())
+	}
+	if di, _ := os.Stat(dir); di.Mode().Perm() != 0o700 {
+		t.Errorf("store dir mode = %v, want 0700", di.Mode().Perm())
+	}
+}

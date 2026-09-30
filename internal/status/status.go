@@ -4,11 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"cfm/internal/detectors"
+	edgediag "cfm/internal/diagnostics/edge"
 	"cfm/internal/dnat"
 	"cfm/internal/enrich"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/setinventory"
-	"cfm/internal/hostsecrets"
 	"cfm/internal/ipquery"
 	"context"
 	"encoding/json"
@@ -639,7 +639,6 @@ type luaTokenProbe struct {
 
 var (
 	luaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+("(\\.|[^"\\])*")\s*$`)
-	badTokenRe  = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$`)
 )
 
 var (
@@ -731,15 +730,7 @@ func resolveLuaToken(paths []string) luaTokenProbe {
 }
 
 func isStrongToken(tok string) bool {
-	if len(tok) < 32 || strings.TrimSpace(tok) != tok || badTokenRe.MatchString(tok) {
-		return false
-	}
-	for i := 0; i < len(tok); i++ {
-		if tok[i] < 0x21 || tok[i] > 0x7e {
-			return false
-		}
-	}
-	return true
+	return edgediag.IsStrongToken(tok)
 }
 
 func tokenHealth(t luaTokenProbe) string {
@@ -836,18 +827,11 @@ func resolveDetectorsConfigPath() string {
 // config — base detectors.conf + detectors.d overlays — for overlay-tunable
 // knobs like OPENRESTY_SOCK, so the probe matches what the daemon runs (a
 // base-only read false-alarms when such a key moved into an overlay). NOTE:
-// this is NOT the right source for CHALLENGE_TOKEN / OPENRESTY_TOKEN — those
-// are base-owned (the daemon ignores overlay overrides, see the manager token
-// block); read them base-only (readBaseDetectorSectionKV).
+// this is NOT the right source for CHALLENGE_TOKEN / OPENRESTY_TOKEN — the
+// daemon reads those from the BASE file or the per-host store and ignores
+// overlays (see readChallengeTokenProbe / edgediag.ReadChallengeTokenProbe).
 func readDetectorSectionKV(path, section string) map[string]string {
 	return sectionKV(detectors.ReadLayeredFile, path, section)
-}
-
-// readBaseDetectorSectionKV reads a section from the BASE conffile only — for
-// the base-owned token keys, so a probe reports the token the daemon actually
-// uses rather than an overlay override the daemon ignores.
-func readBaseDetectorSectionKV(path, section string) map[string]string {
-	return sectionKV(detectors.ReadSectionsFile, path, section)
 }
 
 func sectionKV(read func(string) (detectors.Sections, error), path, section string) map[string]string {
@@ -869,18 +853,10 @@ func readBridgeTokenProbe() luaTokenProbe {
 }
 
 func readChallengeTokenProbe() luaTokenProbe {
-	tok := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN"))
-	if tok != "" {
-		return luaTokenProbe{Token: tok, Present: true, Valid: isStrongToken(tok)}
-	}
-	// The daemon runs a strong BASE detectors.conf value (overlay overrides are
-	// ignored), else the per-host store (hostsecrets): report the same one.
-	kv := readBaseDetectorSectionKV(resolveDetectorsConfigPath(), "webdetector")
-	legacy := strings.Trim(strings.TrimSpace(stripInlineComment(kv["CHALLENGE_TOKEN"])), `"'`)
-	if clean := hostsecrets.Effective(hostsecrets.ChallengeToken, legacy); clean != "" {
-		return luaTokenProbe{Token: clean, Present: true, Valid: isStrongToken(clean)}
-	}
-	return luaTokenProbe{}
+	// One resolution for every probe (cfm status, cfm health, healthmodel):
+	// the edge diagnostics copy, which mirrors what the daemon runs.
+	p := edgediag.ReadChallengeTokenProbe(resolveDetectorsConfigPath())
+	return luaTokenProbe{Token: p.Token, Present: p.Present, Valid: p.Valid}
 }
 
 func pathExists(path string) bool {

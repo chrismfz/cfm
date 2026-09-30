@@ -213,9 +213,12 @@ per-host secrets generated INTO the conffile — the last blocker to a
 byte-identical file. `internal/hostsecrets` now generates each once per host
 into `/var/lib/cfm/secrets/` (root, dir `0700`, files `0600`; only the daemon
 reads them, the edge keeps reading the `cfm_bridge_token.lua` mirror) and
-never writes `detectors.conf`. The stock file ships no token lines. A strong
-base-conffile value still wins and is copied into the store, so the migration
-is "delete the line whenever, nothing breaks" (no cookie is invalidated).
+never writes `detectors.conf`. The stock file ships the two keys EMPTY (kept
+so an older binary after a rollback fills them in place instead of appending
+them to whatever section is last). A strong base-conffile value still wins and
+is copied into the store, so the migration is "empty the value whenever,
+nothing breaks" (no cookie is invalidated); a Debian upgrade that takes the
+package's file migrates from `detectors.conf.dpkg-old`.
 `cfm status` / `cfm health` read the same resolution (`hostsecrets.Effective`).
 
 ---

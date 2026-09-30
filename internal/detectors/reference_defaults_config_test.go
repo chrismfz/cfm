@@ -51,10 +51,16 @@ func TestReferenceConfigMatchesRuntimeDefaults(t *testing.T) {
 	}
 
 	// The per-host tokens are generated into /var/lib/cfm/secrets
-	// (hostsecrets), never shipped: a stock line would be a weak placeholder
-	// the daemon ignores, and a real value would be one secret for the fleet.
+	// (hostsecrets), never shipped: a real value would be one secret for the
+	// fleet. The key line itself stays, EMPTY, inside [webdetector]: an older
+	// binary after a rollback fills an empty line in place, but appends a
+	// missing one at the end of the file, into whatever section is last, and
+	// then rewrites it on every reload (the 2026-10-01 speedhost loop).
 	for _, key := range []string{"CHALLENGE_TOKEN", "OPENRESTY_TOKEN"} {
-		if v, ok := wd[key]; ok {
+		v, ok := wd[key]
+		if !ok {
+			t.Errorf("[webdetector] %s line is missing from stock; keep it, empty (rollback safety)", key)
+		} else if strings.TrimSpace(v) != "" {
 			t.Errorf("[webdetector] %s = %q is set in stock; per-host tokens are generated, never shipped", key, v)
 		}
 	}

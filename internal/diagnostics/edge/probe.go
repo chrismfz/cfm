@@ -18,6 +18,7 @@ import (
 
 	"cfm/internal/detconf"
 	"cfm/internal/hostsecrets"
+	"cfm/internal/sslcollector"
 )
 
 type LuaTokenProbe struct {
@@ -44,7 +45,6 @@ func (p BridgeRuntimeProbe) Summary() string {
 const CanonicalBridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 
 var luaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+("(\\.|[^"\\])*")\s*$`)
-var badTokenRe = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$`)
 
 func ResolveLuaToken(paths []string) LuaTokenProbe {
 	for _, p := range paths {
@@ -71,16 +71,12 @@ func ReadLuaToken(path string) LuaTokenProbe {
 	}
 	return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
 }
+
+// IsStrongToken is the daemon's own rule (sslcollector.IsStrongToken, which
+// decides rotation and hostsecrets resolution), plus: a probe reports a token
+// with surrounding whitespace as weak rather than trimming it.
 func IsStrongToken(tok string) bool {
-	if len(tok) < 32 || strings.TrimSpace(tok) != tok || badTokenRe.MatchString(tok) {
-		return false
-	}
-	for i := 0; i < len(tok); i++ {
-		if tok[i] < 0x21 || tok[i] > 0x7e {
-			return false
-		}
-	}
-	return true
+	return strings.TrimSpace(tok) == tok && sslcollector.IsStrongToken(tok)
 }
 func TokenHealth(t LuaTokenProbe) string {
 	if !t.Present {

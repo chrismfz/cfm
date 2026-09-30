@@ -9,7 +9,7 @@
 // under Dir, generated once per host and never shared across the fleet.
 //
 // A strong value still set in detectors.conf wins and is copied into the
-// store. Deleting the line afterwards keeps the same secret, so no visitor's
+// store. Emptying the line afterwards keeps the same secret, so no visitor's
 // challenge cookie is invalidated by the migration.
 package hostsecrets
 
@@ -76,7 +76,7 @@ func Effective(key, legacy string) string {
 // from:
 //
 //  1. SourceConf: legacy, a strong value still set in detectors.conf. It is
-//     copied into the store (when the store differs), so removing the line
+//     copied into the store (when the store differs), so emptying the line
 //     later keeps the same secret.
 //  2. SourceStore: the stored value, when strong.
 //  3. SourceGenerated: a new random 48-hex value, stored.
@@ -90,19 +90,33 @@ func Resolve(key, legacy string) (secret, source string, err error) {
 	if sslcollector.IsStrongToken(legacy) {
 		if cur, ok := Read(key); !ok || cur != legacy {
 			err = write(key, legacy)
+		} else {
+			tighten(key)
 		}
 		return legacy, SourceConf, err
 	}
 	if cur, ok := Read(key); ok && sslcollector.IsStrongToken(cur) {
+		tighten(key)
 		return cur, SourceStore, nil
 	}
-	// An empty cfgPath makes the sslcollector helper generate only; it never
-	// patches a config file.
-	gen, gerr := sslcollector.ValidateOrGenerateTokenKey("", key, "")
+	gen, gerr := sslcollector.GenerateToken()
 	if gerr != nil {
 		return "", "", gerr
 	}
 	return gen, SourceGenerated, write(key, gen)
+}
+
+// tighten re-applies the store's modes (dir 0700, file 0600) when an existing
+// store is only read: one restored from a backup or copied with a default
+// umask would otherwise stay readable to every local user, who could then
+// forge challenge cookies or call the bridge socket API. Best effort: a
+// failure here does not stop the daemon using the secret.
+func tighten(key string) {
+	for path, want := range map[string]os.FileMode{Dir: 0o700, Path(key): 0o600} {
+		if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink == 0 && fi.Mode().Perm()&^want != 0 {
+			_ = os.Chmod(path, want)
+		}
+	}
 }
 
 // write stores value atomically: a temp file in Dir (0600), then rename.
