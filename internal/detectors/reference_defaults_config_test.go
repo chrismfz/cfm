@@ -1,0 +1,107 @@
+package detectors
+
+import (
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestReferenceConfigMatchesRuntimeDefaults pins stock values in
+// configs/detectors.conf that must equal what a node runs when its conffile
+// predates the key (the Go default), or that must ship in their safe state.
+//
+// A node whose detectors.conf was seeded before a key existed runs the Go
+// default; a node seeded later runs the stock value. When the two differ, the
+// same release behaves differently per node depending on install date, and
+// nothing reports it. Each value below was found drifting on 2026-09-30:
+//
+//   - HISTORY_RETENTION_DAYS shipped 7 while the code default is 30;
+//   - HISTORY_PRUNE_EVERY shipped "1", which is not a Go duration, so every
+//     node silently fell back to the 1h default (the absurd fallback below
+//     makes that fail instead of pass);
+//   - [mysql_governor] shipped MODE = enforce with another server's tenant
+//     rules, so a fresh install would kill queries under rules written for a
+//     different fleet; the code default and the section's own header say
+//     monitor;
+//   - [global] IGNORE_IPS/IGNORE_NETS carried a per-host example address. These
+//     lists also feed the edge self-origin bypass (cfm_selfip.lua: the WHOLE CFM
+//     stack, WAF included, is skipped for them), so every entry must parse and
+//     must stay private, loopback or our own network.
+func TestReferenceConfigMatchesRuntimeDefaults(t *testing.T) {
+	path := filepath.Join("..", "..", "configs", "detectors.conf")
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("detectors.conf not found at %s: %v", path, err)
+	}
+	secs, err := ReadSectionsFile(path)
+	if err != nil {
+		t.Fatalf("ReadSectionsFile: %v", err)
+	}
+
+	wd := secs.ByName["webdetector"]
+	if got := kvInt(wd, "HISTORY_RETENTION_DAYS", -1); got != 30 {
+		t.Errorf("[webdetector] HISTORY_RETENTION_DAYS = %d, want 30 (the Go default in webdetector_register.go)", got)
+	}
+	if got := kvDur(wd, "HISTORY_PRUNE_EVERY", 999*time.Hour); got != time.Hour {
+		t.Errorf("[webdetector] HISTORY_PRUNE_EVERY = %s, want 1h (a value that fails to parse reads as the fallback)", got)
+	}
+
+	gov, ok := secs.ByName["mysql_governor"]
+	if !ok {
+		t.Fatal("[mysql_governor] section missing from detectors.conf")
+	}
+	if got := kvStrClean(gov, "MODE", ""); got != "monitor" {
+		t.Errorf("[mysql_governor] MODE = %q, want monitor: enforce is a per-host decision, never a shipped default", got)
+	}
+	for _, key := range []string{"QUERY_RULES", "CONN_RULES"} {
+		for _, line := range kvLines(gov, key) {
+			user := strings.TrimSpace(strings.SplitN(line, ":", 2)[0])
+			if !strings.Contains(user, "*") {
+				t.Errorf("[mysql_governor] %s ships a rule for the exact user %q; stock carries wildcard rules only (per-tenant rules are per host)", key, user)
+			}
+		}
+	}
+
+	g := secs.Global
+	for _, tok := range splitIgnoreList(kvStrClean(g, "IGNORE_IPS", "")) {
+		ip := net.ParseIP(tok)
+		if ip == nil {
+			t.Errorf("[global] IGNORE_IPS entry %q is not an IP; the parser would drop it silently", tok)
+			continue
+		}
+		if !ip.IsLoopback() {
+			t.Errorf("[global] IGNORE_IPS entry %q is not loopback; a single host here bypasses the whole CFM stack on every node (networks belong in IGNORE_NETS)", tok)
+		}
+	}
+	ownNet := mustCIDR(t, "84.54.49.0/24")
+	for _, tok := range splitIgnoreList(kvStrClean(g, "IGNORE_NETS", "")) {
+		ip, n, err := net.ParseCIDR(tok)
+		if err != nil {
+			t.Errorf("[global] IGNORE_NETS entry %q is not a CIDR; the parser would drop it silently", tok)
+			continue
+		}
+		if n.String() != tok {
+			t.Errorf("[global] IGNORE_NETS entry %q is not a network address (means %s)", tok, n)
+		}
+		if !ip.IsPrivate() && !ip.IsLoopback() && n.String() != ownNet.String() {
+			t.Errorf("[global] IGNORE_NETS entry %q is neither private nor our own network", tok)
+		}
+	}
+}
+
+func splitIgnoreList(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == ';'
+	})
+}
+
+func mustCIDR(t *testing.T, s string) *net.IPNet {
+	t.Helper()
+	_, n, err := net.ParseCIDR(s)
+	if err != nil {
+		t.Fatalf("ParseCIDR(%q): %v", s, err)
+	}
+	return n
+}

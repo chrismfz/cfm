@@ -199,7 +199,7 @@ Typical defaults below are representative from the shipped template and should b
 | `ftpd` | FTP auth failures | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `BLOCK=permanent` |
 | `cpanel` | cPanel auth/root login anomalies | `AUTHFAIL_IP`, `AUTHFAIL_USER`, `ROOT_IP`, `BLOCK` | `WINDOW=10m`, `BLOCK=1h` |
 | `mysql` | MySQL/MariaDB auth failures / scans | `LOG_PATH`, `DENIED_IP`, `DENIED_USER`, `ROOT_IP`, `SCAN_IP`, `BLOCK` | `WINDOW=10m`, `LOG_PATH=auto`, `BLOCK=permanent` |
-| `mysql_governor` | Processlist pressure, long query, conn cap enforcement | `MODE`, `POLL_EVERY`, `QUERY_RULES`, `CONN_RULES`, kill limits | `MODE=enforce`, `POLL_EVERY=5s` |
+| `mysql_governor` | Processlist pressure, long query, conn cap enforcement | `MODE`, `POLL_EVERY`, `QUERY_RULES`, `CONN_RULES`, kill limits | `MODE=monitor` (set `enforce` per host), `POLL_EVERY=5s` |
 | `exim_security` | Exim security/auth/reject patterns | `LOG_PATH` (auto-resolved; self-disables without exim), `REJECT_LOG_PATH`, per-rule thresholds, `BLOCK` | `WINDOW=30m`, `BLOCK=12h` |
 | `exim_relays` | Exim relay/throughput abuse | `LOG_PATH` (auto-resolved; self-disables without exim), `LOCAL_USER_MAX`, `AUTH_*`, `UNAUTH_IP_MAX`, `BLOCK` | `WINDOW=15m`, `BLOCK=dryrun` |
 | `exim_queues` | Exim queue growth/frozen queue pressure | `QUEUE_TOTAL_MAX`, `QUEUE_FROZEN_MAX`, `COOLDOWN` | `EVERY=60s`, alerting focus; also publishes the queue count to the health snapshot (`cfm health` / dashboard Mail queue tile) via `internal/mailq` |

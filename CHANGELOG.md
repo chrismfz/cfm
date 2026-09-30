@@ -17,6 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Reference `detectors.conf`: four stock values now match what nodes
+  actually run.** A node whose `detectors.conf` predates a key runs the code
+  default. A node seeded later ran the stock value, so the same release
+  behaved differently depending on install date. This only affects nodes that
+  adopt the new stock file; existing `/etc/cfm/detectors.conf` files keep
+  their own values.
+  - `HISTORY_RETENTION_DAYS` 7 → 30, the code default.
+  - `HISTORY_PRUNE_EVERY` `1` → `1h`. `1` is not a valid duration, so every
+    node was already falling back to 1h.
+  - `[mysql_governor]` now ships in `MODE = monitor`. It shipped `enforce`
+    with another server's tenant rules (`mathemat_db`, `mediains_*`), so a
+    fresh install would kill queries under rules written for a different
+    fleet. Per-tenant rules and `enforce` are a per-host decision.
+  - `[global] IGNORE_IPS`/`IGNORE_NETS` are now loopback, the RFC1918 ranges
+    and our own `84.54.49.0/24`, replacing a per-host example IP and an
+    unaligned Docker range. These lists also skip the whole edge stack for
+    those sources, WAF included.
+
+  A new test pins each of these.
+
 ### Fixed
 - **A challenge no longer sends a second open tab to the site's homepage.**
   With two pages opened at once (e.g. two wp-admin products with ctrl+click),

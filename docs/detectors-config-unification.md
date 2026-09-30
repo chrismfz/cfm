@@ -283,8 +283,10 @@ by nature → overlay forever.
 `OPENRESTY_MODE`, `API_LISTEN`, `CHALLENGE_HTTPS_LISTEN` (present on most
 servers, absent from stock); webdetector folder mode
 (`MODE=folder`/`LOG_DIR`/`GLOB`/`RECURSIVE` — live on saf); `IP403WAF_COUNT`
-(orion). Normalize stock `IGNORE_NETS` `172.17.0.1/16` → `172.17.0.0/16`
-(host bit set — copied verbatim to most of the fleet).
+(orion). Stock `IGNORE_NETS` `172.17.0.1/16` (host bit set — copied verbatim
+to most of the fleet) was replaced on 2026-09-30 by the RFC1918 ranges plus our
+own `84.54.49.0/24`; `reference_defaults_config_test.go` rejects an entry that
+is not a network address.
 
 ---
 
