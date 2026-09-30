@@ -175,7 +175,7 @@ func normalizeChallengeNext(raw string) string {
 // verifyRejects throttles logVerifyReject (and the loop breaker's own log
 // line) to one line per (ip, reason) a minute. clearedRedirects is the
 // challenge page's loop breaker: a second cleared redirect for the same (ip,
-// scope, host, next) within 10 s serves the page instead. Both use the
+// scope, host) within 10 s serves the page instead. Both use the
 // package's one bounded TTL store.
 var (
 	verifyRejects = pairTTLStore[struct{}]{
@@ -194,16 +194,11 @@ var (
 	}
 )
 
-// firstSighting records key and reports whether it was new, i.e. not seen in
-// the store's TTL. A key the store cannot record (full) reads as seen: the
-// caller then takes its conservative branch (no log line, serve the page).
+// firstSighting records key and reports whether it was new (no live entry),
+// atomically. A key the full store cannot record reads as seen: the caller
+// then takes its conservative branch (no log line, serve the page).
 func firstSighting(st *pairTTLStore[struct{}], key string, now time.Time) bool {
-	if _, ok := st.get(key, now); ok {
-		return false
-	}
-	st.put(key, struct{}{}, now)
-	_, ok := st.get(key, now)
-	return ok
+	return st.putIfAbsent(key, struct{}{}, now)
 }
 
 // logVerifyReject writes the early verify 403s (cookie / token / PoW) to the
@@ -454,7 +449,10 @@ const (
 	maxVerifyBodyBytes  = 1 << 10 // 1KB
 	maxUALen            = 256
 	maxHostLen          = 253
-	maxNextLen          = 2048
+	// 4096: a challenged POST's next carries the original URI plus cfm_rt,
+	// and 2048 turned a long admin/ajax URI into "/" (the homepage, the stash
+	// never replayed). Escaped, 4096 stays under maxHeaderBytesTight.
+	maxNextLen          = 4096
 	maxHeaderBytesTight = 16 << 10 // 16KB (challenge server only)
 
 	// ---- challenge server self-protection ----
@@ -1310,9 +1308,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		if host, scope := trustedForwardedHost(r), clearanceScope(r); r.URL.Path == challengePath && host != "" {
 			if c, err := r.Cookie(clearanceCookieName(scope)); err == nil &&
 				verifyClearanceToken(c.Value, ip.String(), host, scope, time.Now()) {
-				sum := sha256.Sum256([]byte(next))
-				key := ip.String() + "|" + scope + "|" + host + "|" + hex.EncodeToString(sum[:8])
-				if firstSighting(&clearedRedirects, key, time.Now()) {
+				// Keyed without next: the edge's bounce comes back with next
+				// rebuilt from the request URI (a different string for the
+				// same target), which a next-keyed breaker would miss.
+				if firstSighting(&clearedRedirects, ip.String()+"|"+scope+"|"+host, time.Now()) {
 					w.Header().Set("Cache-Control", "no-store")
 					http.Redirect(w, r, next, http.StatusSeeOther) // 303
 					return
@@ -1324,7 +1323,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			}
 		}
 
-		// cookie challenge: set ONLY if missing (prevents token mismatch loops)
+		// cfm_chal: a NEW value only when missing (a new value would break the
+		// token of every other open challenge page: mismatch loops).
 		// The VALUE is kept when present (open tabs share it; their tokens and
 		// PoW are bound to it), but every page re-sets it with a full MaxAge:
 		// since a solve no longer expires it, a page reusing a cookie close to
@@ -2518,7 +2518,7 @@ func challengeHTML() string {
         credentials: "include"
       }).then(function(res){
         if (res.redirected) {
-          try { sessionStorage.removeItem('cfm_v2r'); } catch (e) {}
+          try { sessionStorage.removeItem('cfm_v2r'); sessionStorage.removeItem('cfm_vf'); } catch (e) {}
           window.location = res.url; return;
         }
         // Rung-1 v2_reject ONLY (marked by the X-CFM-V2 header — any other
@@ -2550,15 +2550,31 @@ func challengeHTML() string {
           }
         }
         var v2wait = v2rej ? Math.min(1200 * Math.pow(2, v2n), 30000) : 1200;
-        // Retry through the challenge server, never the site root with a next
-        // parameter: another tab may have solved meanwhile, and a cleared
-        // browser then gets the site's homepage (which ignores next). /__cfm_challenge sends a cleared
-        // client straight to next and serves a fresh challenge otherwise. Not
-        // "next" itself either: for an uncleared client whose next carries a
-        // waiting POST (cfm_rt), the edge would replay it uncleared and 403 it.
-        setTimeout(function(){
-          window.location = "/__cfm_challenge?next=" + encodeURIComponent(next);
-        }, v2wait);
+        // Where to retry. Through the challenge server first, never the site
+        // root with a next parameter: another tab may have solved meanwhile,
+        // and a cleared browser then gets the site's homepage (which ignores
+        // next). /__cfm_challenge sends a cleared client straight to next and
+        // serves a fresh challenge otherwise. After 3 failed verifies in a row
+        // (not v2 rejects: those keep their own backoff), go through the EDGE
+        // to next instead, so a challenge that has since lapsed lets the user
+        // through rather than looping here forever. That target drops cfm_rt:
+        // an uncleared replay of a waiting POST would only be refused.
+        var vfn = 0;
+        if (!v2rej) {
+          try {
+            var vfs = (sessionStorage.getItem('cfm_vf') || '').split('|');
+            if (Date.now() - (parseInt(vfs[1] || '0', 10) || 0) < 120000) vfn = parseInt(vfs[0] || '0', 10) || 0;
+          } catch (e) {}
+          vfn++;
+          try { sessionStorage.setItem('cfm_vf', vfn + '|' + Date.now()); } catch (e) {}
+        }
+        var target = "/__cfm_challenge?next=" + encodeURIComponent(next);
+        if (vfn >= 3 && typeof next === "string" && next.charAt(0) === "/" &&
+            next.charAt(1) !== "/" && next.indexOf("\\") < 0) {
+          target = next.replace(/([?&])cfm_rt=[^&#]*&?/, "$1").replace(/[?&]$/, "") || "/";
+          try { sessionStorage.removeItem('cfm_vf'); } catch (e) {}
+        }
+        setTimeout(function(){ window.location = target; }, v2wait);
       }).catch(function(){
         setTimeout(function(){ location.reload(); }, 1200);
       });

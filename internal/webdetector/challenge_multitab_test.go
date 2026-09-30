@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -240,6 +242,57 @@ func TestFirstSighting_WindowAndFullStore(t *testing.T) {
 	// the caller takes its conservative branch (no log line, serve the page).
 	if firstSighting(&st, "c", t0.Add(2*time.Minute)) {
 		t.Fatal("a key the full store cannot record must read as seen")
+	}
+}
+
+// putIfAbsent is one atomic test-and-set: racing callers on one key, exactly
+// one wins (the breaker and the log throttle must not both fire twice).
+func TestPairTTLStore_PutIfAbsentIsAtomic(t *testing.T) {
+	st := pairTTLStore[struct{}]{m: map[string]time.Time{}, ttl: time.Minute, maxKeys: 16, fullMsg: "full %d"}
+	now := time.Now()
+	var wins int32
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if st.putIfAbsent("k", struct{}{}, now) {
+				atomic.AddInt32(&wins, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("%d winners, want exactly 1", wins)
+	}
+}
+
+// A challenged POST's next is the original URI plus cfm_rt: a long admin/ajax
+// URI must survive normalization, or the client lands on "/" (the homepage)
+// and the stash is never replayed.
+func TestNormalizeChallengeNext_KeepsALongResumeTarget(t *testing.T) {
+	next := "/wp-admin/admin-ajax.php?action=x&data=" + strings.Repeat("a", 2500) + "&cfm_rt=tok"
+	if got := normalizeChallengeNext(next); got != next {
+		t.Fatalf("a %d-byte resume target was not kept (got %d bytes)", len(next), len(got))
+	}
+	if got := normalizeChallengeNext("/" + strings.Repeat("a", maxNextLen+1)); got != "/" {
+		t.Fatal("over maxNextLen must still fall back to /")
+	}
+}
+
+// After 3 failed verifies in a row the page retries through the EDGE, to next
+// without cfm_rt, so a lapsed challenge lets the user through.
+func TestChallengePage_RetryFallsBackToTheEdgeAfterRepeatedFailures(t *testing.T) {
+	html := challengeHTML()
+	for _, want := range []string{
+		`sessionStorage.getItem('cfm_vf')`,
+		`if (vfn >= 3 &&`,
+		`next.replace(/([?&])cfm_rt=[^&#]*&?/, "$1")`,
+		`next.indexOf("\\") < 0`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("challenge page lacks %q", want)
+		}
 	}
 }
 

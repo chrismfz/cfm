@@ -29,9 +29,10 @@ back-filled here — see the git/PR history for that period.
   already-cleared browser straight to the page it wanted. A challenged form
   save (POST) is sent there too instead of to `/?next=`, so a second tab
   saving at the same moment no longer lands on the homepage and loses the
-  save. The edge also replays a stored save only for a browser that has
-  passed the challenge. Before, one that hadn't could trigger the replay
-  early and lose the save to a 403.
+  save. After three failed attempts in a row, the page retries through the
+  site itself, so a challenge that has since been lifted lets the user
+  through instead of looping. A long target address (over 2 KB, e.g. an
+  admin-ajax save) is no longer cut back to the homepage.
 - **Failed challenge verifications are now logged.** A missing cookie, bad
   token or bad proof-of-work used to answer 403 with no trace. Each now
   writes a `verify_reject` line to the challenges log, at most once a minute
