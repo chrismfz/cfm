@@ -26,17 +26,20 @@ back-filled here — see the git/PR history for that period.
   - Each token is now generated once into `/var/lib/cfm/secrets/`
     (`challenge_token`, `openresty_token`; root only). CFM never writes
     `detectors.conf`.
-  - The stock file ships the two lines **empty**. Keep them that way rather
-    than deleting them: an older binary after a rollback fills an empty line
-    in place, but would append a missing one to whatever section is last.
+  - The stock file ships the two lines as `placeholder`. Keep them that way:
+    never delete them or leave them empty. After a rollback, an older binary
+    replaces a placeholder in place. It appends a missing line to whatever
+    section is last, and an empty line makes it overwrite the line after it.
   - **Nothing changes on upgrade:** a strong token already in
     `detectors.conf` still wins and is copied into the store on the next start.
-    After that the value can be emptied without invalidating any visitor's
-    challenge cookie.
-  - On Debian, if you take the package's `detectors.conf` at upgrade, the
-    daemon migrates the tokens from `detectors.conf.dpkg-old`.
-  - To rotate a token, empty its value (if set), delete its store file, and
-    restart.
+    After that the value can be set back to `placeholder` without invalidating
+    any visitor's challenge cookie.
+  - The package also copies the tokens into the store before it can replace
+    `detectors.conf` (Debian `preinst`, RPM pre-install scriptlet). Taking the
+    package's `detectors.conf` at upgrade, or moving the `.rpmnew` over it
+    later, keeps the same tokens.
+  - To rotate a token, set its value to `placeholder` (if set), delete its
+    store file, and restart.
   - `cfm status` / `cfm health` report the token the daemon actually uses.
   - The token step (and `cfm_bridge_config.lua`) now also runs when
     `[webdetector]` exists only in a `detectors.d/` overlay.

@@ -9,8 +9,10 @@
 // under Dir, generated once per host and never shared across the fleet.
 //
 // A strong value still set in detectors.conf wins and is copied into the
-// store. Emptying the line afterwards keeps the same secret, so no visitor's
-// challenge cookie is invalidated by the migration.
+// store. Setting the line back to a placeholder afterwards keeps the same
+// secret, so no visitor's challenge cookie is invalidated by the migration.
+// The package also copies the values in before it can replace the conffile
+// (the token-seed block of the Debian preinst and the RPM pre scriptlet).
 package hostsecrets
 
 import (
@@ -18,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"cfm/internal/sslcollector"
 )
@@ -57,16 +60,36 @@ func Read(key string) (string, bool) {
 	return v, v != ""
 }
 
+// generated remembers, per key, a token this process generated but may not
+// have been able to store. Without it an unwritable store would yield a new
+// token on every Resolve, i.e. on every reload (each config save, each
+// tailed-log rotation), invalidating every challenge cookie each time.
+var generated sync.Map
+
+// pick is the one precedence rule, shared by Resolve and Effective so the
+// probes can never drift from the daemon: a strong legacy detectors.conf
+// value, else a strong stored value, else a token this process generated.
+// ok is false when none applies.
+func pick(key, legacy string) (value, source string, ok bool) {
+	if sslcollector.IsStrongToken(legacy) {
+		return legacy, SourceConf, true
+	}
+	if cur, found := Read(key); found && sslcollector.IsStrongToken(cur) {
+		return cur, SourceStore, true
+	}
+	if v, found := generated.Load(key); found {
+		return v.(string), SourceGenerated, true
+	}
+	return "", "", false
+}
+
 // Effective is the value the daemon runs with for key, for read-only probes
-// (cfm status, cfm health): a strong legacy detectors.conf value, else the
-// stored value, else the legacy value as given (so a probe can still report
-// a weak one). It never generates or writes.
+// (cfm status, cfm health), by the same precedence as Resolve. When nothing
+// strong applies it returns the legacy value as given (possibly weak or
+// empty), so a probe reports weak/missing. It never generates or writes.
 func Effective(key, legacy string) string {
 	legacy = strings.TrimSpace(legacy)
-	if sslcollector.IsStrongToken(legacy) {
-		return legacy
-	}
-	if v, ok := Read(key); ok {
+	if v, _, ok := pick(key, legacy); ok {
 		return v
 	}
 	return legacy
@@ -76,34 +99,33 @@ func Effective(key, legacy string) string {
 // from:
 //
 //  1. SourceConf: legacy, a strong value still set in detectors.conf. It is
-//     copied into the store (when the store differs), so emptying the line
-//     later keeps the same secret.
+//     copied into the store (when the store differs), so setting the line
+//     back to a placeholder later keeps the same secret.
 //  2. SourceStore: the stored value, when strong.
-//  3. SourceGenerated: a new random 48-hex value, stored.
+//  3. SourceGenerated: a new random 48-hex value (the same one for the rest
+//     of this process), stored.
 //
 // A weak legacy value (a placeholder, too short, not Lua-safe) is ignored, as
 // is a weak stored one. The secret is always returned. A non-nil error means
-// storing it failed: the daemon still runs with it, but a restart that finds
-// no strong value generates another one.
+// storing it failed: the daemon keeps running with it (and retries storing it
+// on each reload), but a restart generates another one.
 func Resolve(key, legacy string) (secret, source string, err error) {
 	legacy = strings.TrimSpace(legacy)
-	if sslcollector.IsStrongToken(legacy) {
-		if cur, ok := Read(key); !ok || cur != legacy {
-			err = write(key, legacy)
-		} else {
-			tighten(key)
+	value, source, ok := pick(key, legacy)
+	if !ok {
+		gen, gerr := sslcollector.GenerateToken()
+		if gerr != nil {
+			return "", "", gerr
 		}
-		return legacy, SourceConf, err
+		actual, _ := generated.LoadOrStore(key, gen)
+		value, source = actual.(string), SourceGenerated
 	}
-	if cur, ok := Read(key); ok && sslcollector.IsStrongToken(cur) {
+	if cur, found := Read(key); !found || cur != value {
+		err = write(key, value)
+	} else {
 		tighten(key)
-		return cur, SourceStore, nil
 	}
-	gen, gerr := sslcollector.GenerateToken()
-	if gerr != nil {
-		return "", "", gerr
-	}
-	return gen, SourceGenerated, write(key, gen)
+	return value, source, err
 }
 
 // tighten re-applies the store's modes (dir 0700, file 0600) when an existing

@@ -21,8 +21,15 @@ func useTempDir(t *testing.T) string {
 	t.Helper()
 	old := Dir
 	Dir = filepath.Join(t.TempDir(), "secrets")
-	t.Cleanup(func() { Dir = old })
+	forgetGenerated()
+	t.Cleanup(func() { Dir = old; forgetGenerated() })
 	return Dir
+}
+
+// forgetGenerated drops the per-process generated tokens, so each test starts
+// like a fresh daemon.
+func forgetGenerated() {
+	generated.Range(func(k, _ any) bool { generated.Delete(k); return true })
 }
 
 func stored(t *testing.T, key string) string {
@@ -193,5 +200,27 @@ func TestResolveTightensALooseExistingStore(t *testing.T) {
 	}
 	if di, _ := os.Stat(dir); di.Mode().Perm() != 0o700 {
 		t.Errorf("store dir mode = %v, want 0700", di.Mode().Perm())
+	}
+}
+
+// An unwritable store must not rotate the token on every Resolve (every
+// reload): the generated value is kept for the life of the process.
+func TestResolveUnwritableStoreKeepsOneTokenPerProcess(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.WriteFile(dir, []byte("not a dir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := Resolve(ChallengeToken, "")
+	if err == nil || first == "" {
+		t.Fatalf("Resolve = (%q, %v), want a token and a store error", first, err)
+	}
+	for i := 0; i < 3; i++ {
+		again, src, _ := Resolve(ChallengeToken, "")
+		if again != first || src != SourceGenerated {
+			t.Fatalf("reload %d: Resolve = (%q, %q), want the same generated token %q", i, again, src, first)
+		}
+	}
+	if got := Effective(ChallengeToken, ""); got != first {
+		t.Fatalf("Effective = %q, want the token the daemon runs (%q)", got, first)
 	}
 }

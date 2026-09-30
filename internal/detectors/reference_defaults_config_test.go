@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"cfm/internal/sslcollector"
 )
 
 // TestReferenceConfigMatchesRuntimeDefaults pins stock values in
@@ -52,16 +54,21 @@ func TestReferenceConfigMatchesRuntimeDefaults(t *testing.T) {
 
 	// The per-host tokens are generated into /var/lib/cfm/secrets
 	// (hostsecrets), never shipped: a real value would be one secret for the
-	// fleet. The key line itself stays, EMPTY, inside [webdetector]: an older
-	// binary after a rollback fills an empty line in place, but appends a
-	// missing one at the end of the file, into whatever section is last, and
-	// then rewrites it on every reload (the 2026-10-01 speedhost loop).
+	// fleet. The key line stays inside [webdetector] with a WEAK placeholder,
+	// which the daemon ignores and an older binary (after a rollback) replaces
+	// in place. A MISSING line is appended by that binary at the end of the
+	// file, into whatever section is last (the 2026-10-01 speedhost reload
+	// loop); an EMPTY one is worse: its `KEY\s*=\s*` regex runs across the
+	// newline and overwrites the next line, leaving the key empty.
 	for _, key := range []string{"CHALLENGE_TOKEN", "OPENRESTY_TOKEN"} {
 		v, ok := wd[key]
-		if !ok {
-			t.Errorf("[webdetector] %s line is missing from stock; keep it, empty (rollback safety)", key)
-		} else if strings.TrimSpace(v) != "" {
-			t.Errorf("[webdetector] %s = %q is set in stock; per-host tokens are generated, never shipped", key, v)
+		switch {
+		case !ok:
+			t.Errorf("[webdetector] %s line is missing from stock; keep it as placeholder (rollback safety)", key)
+		case strings.TrimSpace(v) == "":
+			t.Errorf("[webdetector] %s is empty in stock; an older binary mangles an empty line, keep placeholder", key)
+		case sslcollector.IsStrongToken(v):
+			t.Errorf("[webdetector] %s = %q is a real token in stock; per-host tokens are generated, never shipped", key, v)
 		}
 	}
 

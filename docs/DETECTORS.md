@@ -134,16 +134,19 @@ generated once per host into `/var/lib/cfm/secrets/` (`challenge_token`,
 `openresty_token`; root, `0600`) and are never written into `detectors.conf`,
 so the conffile can stay identical to the packaged one and upgrades update it
 instead of leaving a `.rpmnew`. A strong value still set in the **base**
-`detectors.conf` wins and is copied into the store (the value can then be
-emptied without invalidating visitors' challenge cookies). Keep the key line
-itself, empty: an older binary after a rollback fills an empty line in place,
-but appends a missing one at the end of the file, where it can land in another
-section and loop the daemon through a reload every few seconds. An overlay
-value is ignored, and a weak one (`placeholder`, under 32 characters) too. On
-Debian, taking the package's `detectors.conf` at upgrade leaves the old one as
-`detectors.conf.dpkg-old`; while the store is empty the daemon migrates the
-token from there. To rotate: empty the value in the base (if set), delete the
-store file, restart. Every other `[webdetector]` knob
+`detectors.conf` wins and is copied into the store (the value can then be set
+back to `placeholder` without invalidating visitors' challenge cookies). Keep
+the key line itself, as `placeholder`: an older binary after a rollback
+replaces a placeholder in place, but appends a MISSING line at the end of the
+file, where it can land in another section and loop the daemon through a
+reload every few seconds, and an EMPTY line makes its regex overwrite the line
+after it. An overlay value is ignored, and a weak one (`placeholder`, under 32
+characters) too. The package copies a strong value into the store before it
+can replace the conffile (the token-seed block in the Debian `preinst` and the
+RPM pre scriptlet; it never overwrites a store file), so taking the package's
+`detectors.conf` at upgrade, or moving the `.rpmnew` over it, keeps the
+tokens. To rotate: set the value in the base to `placeholder` (if set), delete
+the store file, restart. Every other `[webdetector]` knob
 (`OPENRESTY_SOCK`, `LOG_PATH`, thresholds, …) is overlay-tunable as normal. Verify the
 merged result with `cfm detectors-srcresolve` and the cfm-admin "Source
 resolution" card. `config_drift` computes `missing_sections`/`missing_keys`

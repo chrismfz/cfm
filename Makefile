@@ -273,7 +273,7 @@ deb: build
 	@rsync -a --delete --exclude "__pycache__/" "$(SCRIPTS_DIR)/" "$(PKGROOT)/usr/share/cfm/scripts/"
 	@rsync -a --delete "$(PLUGINS_DIR)/" "$(PKGROOT)/usr/share/cfm/plugins/"
 	# executables
-	@chmod 0755 "$(PKGROOT)/DEBIAN/postinst" "$(PKGROOT)/DEBIAN/prerm" "$(PKGROOT)/DEBIAN/postrm" 2>/dev/null || true
+	@chmod 0755 "$(PKGROOT)/DEBIAN/preinst" "$(PKGROOT)/DEBIAN/postinst" "$(PKGROOT)/DEBIAN/prerm" "$(PKGROOT)/DEBIAN/postrm" 2>/dev/null || true
 
 	# build artifact -> build/deb/
 	@fakeroot dpkg-deb --build "$(PKGROOT)" "$(OUTDIR)/cfm_$(VERSION)-1_$(ARCH).deb"

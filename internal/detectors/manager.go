@@ -386,20 +386,18 @@ func (m *manager) maybeReload(parent context.Context) {
 	}
 	if wdKV, ok := secs.ByName["webdetector"]; ok {
 		// F2: CHALLENGE_TOKEN
-		legacy, from := legacyToken(m.opts.CfgPath, baseWD, hostsecrets.ChallengeToken)
-		if tok, src, err := hostsecrets.Resolve(hostsecrets.ChallengeToken, legacy); tok == "" {
+		if tok, src, err := hostsecrets.Resolve(hostsecrets.ChallengeToken, kvStrClean(baseWD, "CHALLENGE_TOKEN", "")); tok == "" {
 			logging.Logf("[detectors] CHALLENGE_TOKEN generation failed: %v", err)
 		} else {
-			logTokenSource(hostsecrets.ChallengeToken, src, from, err)
+			logTokenSource(hostsecrets.ChallengeToken, src, err)
 			wdKV["CHALLENGE_TOKEN"] = tok // pin runtime to the resolved token
 		}
 
 		// F4: OPENRESTY_TOKEN — also writes cfm_bridge_token.lua for cfm.lua
-		legacy, from = legacyToken(m.opts.CfgPath, baseWD, hostsecrets.BridgeToken)
-		if newTok, src, err := hostsecrets.Resolve(hostsecrets.BridgeToken, legacy); newTok == "" {
+		if newTok, src, err := hostsecrets.Resolve(hostsecrets.BridgeToken, kvStrClean(baseWD, "OPENRESTY_TOKEN", "")); newTok == "" {
 			logging.Logf("[detectors] OPENRESTY_TOKEN generation failed: %v", err)
 		} else {
-			logTokenSource(hostsecrets.BridgeToken, src, from, err)
+			logTokenSource(hostsecrets.BridgeToken, src, err)
 			wdKV["OPENRESTY_TOKEN"] = newTok // pin runtime to the resolved token
 			cfmGID := sslcollector.CfmGroupID()
 			const bridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
@@ -795,51 +793,25 @@ func (m *manager) stopAll() {
 	}
 }
 
-// legacyToken is the detectors.conf value hostsecrets.Resolve should see for
-// a [webdetector] token, and the file it came from: the BASE [webdetector]
-// value, or, when that is not a strong token and the store is still empty,
-// the one in <cfgPath>.dpkg-old. dpkg leaves that file when an operator takes
-// the package's detectors.conf at upgrade (it asks before postinst restarts
-// the daemon), and the new stock file carries no token. Without this the
-// first start would find no token anywhere and generate new ones: every
-// visitor re-challenged, the edge's bridge token changed. RPM keeps the
-// modified file (noreplace) and restarts the daemon in %post, so the store is
-// filled before an operator can move a .rpmnew into place.
-func legacyToken(cfgPath string, baseWD KV, key string) (value, from string) {
-	v := kvStrClean(baseWD, key, "")
-	if sslcollector.IsStrongToken(v) {
-		return v, "detectors.conf"
-	}
-	if _, ok := hostsecrets.Read(key); ok || cfgPath == "" {
-		return v, "detectors.conf"
-	}
-	if old, err := ReadSectionsFile(cfgPath + ".dpkg-old"); err == nil {
-		if ov := kvStrClean(old.ByName["webdetector"], key, ""); sslcollector.IsStrongToken(ov) {
-			return ov, "detectors.conf.dpkg-old"
-		}
-	}
-	return v, "detectors.conf"
-}
-
-// tokenFromConfLogged remembers, per token and source file, that the "taken
-// from detectors.conf" hint was logged: a reload happens on every config save
-// and tailed-log rotation, and the hint is the same every time.
+// tokenFromConfLogged remembers, per token, that the "taken from
+// detectors.conf" hint was logged: a reload happens on every config save and
+// tailed-log rotation, and the hint is the same every time.
 var tokenFromConfLogged sync.Map
 
 // logTokenSource logs where a [webdetector] token came from when it is worth
 // knowing: generated, still set in detectors.conf (once per process), or not
 // persisted. A token read from the store is the steady state: silent.
-func logTokenSource(key, source, from string, err error) {
+func logTokenSource(key, source string, err error) {
 	switch {
 	case err != nil && source == hostsecrets.SourceConf:
-		logging.Logf("[detectors] %s from %s could not be copied into %s: %v — it keeps working while the %s value stays", key, from, hostsecrets.Path(key), err, from)
+		logging.Logf("[detectors] %s from detectors.conf could not be copied into %s: %v — it keeps working while the detectors.conf value stays", key, hostsecrets.Path(key), err)
 	case err != nil:
-		logging.Logf("[detectors] %s source=%s NOT stored in %s: %v — a restart generates a new one", key, source, hostsecrets.Path(key), err)
+		logging.Logf("[detectors] %s source=%s NOT stored in %s: %v — kept for this process (retried each reload); a restart generates a new one", key, source, hostsecrets.Path(key), err)
 	case source == hostsecrets.SourceGenerated:
 		logging.Logf("[detectors] %s generated and stored in %s", key, hostsecrets.Path(key))
 	case source == hostsecrets.SourceConf:
-		if _, seen := tokenFromConfLogged.LoadOrStore(key+"|"+from, true); !seen {
-			logging.Logf("[detectors] %s taken from %s and kept in %s; the detectors.conf value can be emptied", key, from, hostsecrets.Path(key))
+		if _, seen := tokenFromConfLogged.LoadOrStore(key, true); !seen {
+			logging.Logf("[detectors] %s taken from detectors.conf and kept in %s; the detectors.conf value can be set back to placeholder", key, hostsecrets.Path(key))
 		}
 	}
 }

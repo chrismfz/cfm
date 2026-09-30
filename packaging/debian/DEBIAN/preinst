@@ -1,0 +1,45 @@
+#!/bin/sh
+set -e
+
+# >>> cfm-token-seed
+# Copy the per-host [webdetector] CHALLENGE_TOKEN / OPENRESTY_TOKEN from the
+# CURRENT detectors.conf into the token store (/var/lib/cfm/secrets) before
+# this package can replace that conffile: Debian may install the packaged
+# file at the operator's choice, and on RPM an operator may later move the
+# .rpmnew over it. The daemon also copies them on its first start, but only
+# while the old file is still in place, and only if it is running. Acts only
+# when a store file is absent, never overwrites one, never fails the install.
+# The same block is in packaging/debian/DEBIAN/preinst and in the rpm spec
+# pre scriptlet; internal/hostsecrets/package_seed_test.go keeps the two
+# identical and runs it.
+cfm_seed_conf=${CFM_SEED_CONF:-/etc/cfm/detectors.conf}
+cfm_seed_dir=${CFM_SEED_DIR:-/var/lib/cfm/secrets}
+if [ -f "$cfm_seed_conf" ]; then
+    for cfm_seed_key in CHALLENGE_TOKEN OPENRESTY_TOKEN; do
+        cfm_seed_file="$cfm_seed_dir/$(echo "$cfm_seed_key" | tr 'A-Z' 'a-z')"
+        [ -e "$cfm_seed_file" ] && continue
+        (
+            umask 077
+            mkdir -p "$cfm_seed_dir" && chmod 0700 "$cfm_seed_dir" &&
+            LC_ALL=C awk -v key="$cfm_seed_key" -v out="$cfm_seed_file.seed" '
+                { line = $0; sub(/^[ \t]+/, "", line); sub(/[ \t\r]+$/, "", line) }
+                line ~ /^\[.*\]$/ { sec = substr(line, 2, length(line) - 2); gsub(/^[ \t]+|[ \t]+$/, "", sec); next }
+                sec == "webdetector" && toupper(line) ~ ("^" key "[ \t]*=") {
+                    v = substr(line, index(line, "=") + 1)
+                    sub(/[;#].*$/, "", v)
+                    gsub(/^[ \t"\047]+|[ \t"\047]+$/, "", v)
+                    val = v
+                }
+                END {
+                    bad = "^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$"
+                    if (length(val) < 32 || tolower(val) ~ bad || val !~ /^[!-~]+$/) exit 1
+                    print val > out
+                }' "$cfm_seed_conf" &&
+            mv -f "$cfm_seed_file.seed" "$cfm_seed_file"
+        ) || rm -f "$cfm_seed_file.seed"
+    done
+fi
+unset cfm_seed_conf cfm_seed_dir cfm_seed_key cfm_seed_file
+# <<< cfm-token-seed
+
+exit 0
