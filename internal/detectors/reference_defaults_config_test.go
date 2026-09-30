@@ -29,7 +29,9 @@ import (
 //   - [global] IGNORE_IPS/IGNORE_NETS carried a per-host example address. These
 //     lists also feed the edge self-origin bypass (cfm_selfip.lua: the WHOLE CFM
 //     stack, WAF included, is skipped for them), so every entry must parse and
-//     must stay private, loopback or our own network.
+//     must stay private, loopback or our own network;
+//   - CHALLENGE_EXCLUDE_FILE was documented under [webdetector], where the
+//     manager never reads it (it reads [global]).
 func TestReferenceConfigMatchesRuntimeDefaults(t *testing.T) {
 	path := filepath.Join("..", "..", "configs", "detectors.conf")
 	if _, err := os.Stat(path); err != nil {
@@ -65,6 +67,16 @@ func TestReferenceConfigMatchesRuntimeDefaults(t *testing.T) {
 	}
 
 	g := secs.Global
+	// manager.go reads CHALLENGE_EXCLUDE_FILE from [global] only. Stock used
+	// to document it under [webdetector], where it is silently ignored and
+	// works only while the value equals the built-in default path.
+	if got := kvStrClean(g, "CHALLENGE_EXCLUDE_FILE", ""); got != "/etc/cfm/webdetector_challenge_exclude.txt" {
+		t.Errorf("[global] CHALLENGE_EXCLUDE_FILE = %q, want the default path; the manager reads it from [global] only", got)
+	}
+	if _, ok := wd["CHALLENGE_EXCLUDE_FILE"]; ok {
+		t.Error("[webdetector] CHALLENGE_EXCLUDE_FILE is set; nothing reads it there (manager.go reads [global])")
+	}
+
 	for _, tok := range splitIgnoreList(kvStrClean(g, "IGNORE_IPS", "")) {
 		ip := net.ParseIP(tok)
 		if ip == nil {

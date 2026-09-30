@@ -8,7 +8,7 @@
 #
 # Activation
 #   This file is loaded automatically when it exists at the path configured by
-#   CHALLENGE_EXCLUDE_FILE in detectors.conf (default
+#   CHALLENGE_EXCLUDE_FILE in detectors.conf [global] (default
 #   /etc/cfm/webdetector_challenge_exclude.txt). There is no on/off knob —
 #   delete the file (or empty it) to disable, edit it to update. Changes are
 #   picked up on the next detectors reload.

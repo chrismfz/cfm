@@ -18,7 +18,7 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Changed
-- **Reference `detectors.conf`: four stock values now match what nodes
+- **Reference `detectors.conf`: five stock values now match what nodes
   actually run.** A node whose `detectors.conf` predates a key runs the code
   default. A node seeded later ran the stock value, so the same release
   behaved differently depending on install date. This only affects nodes that
@@ -35,6 +35,10 @@ back-filled here — see the git/PR history for that period.
     and our own `84.54.49.0/24`, replacing a per-host example IP and an
     unaligned Docker range. These lists also skip the whole edge stack for
     those sources, WAF included.
+  - `CHALLENGE_EXCLUDE_FILE` moved from `[webdetector]` to `[global]`, the
+    only place the daemon reads it. Under `[webdetector]` it was ignored and
+    worked only because the value equals the default path. Its comment no
+    longer says the file takes IPs/CIDRs: rules match UA / ASN / PTR / host.
 
   A new test pins each of these.
 
