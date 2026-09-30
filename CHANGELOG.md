@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Changed
+- **A `detectors.conf` without the ssh_auth / `/tmp` keys now runs the
+  shipped behaviour.** Nodes whose conffile predates these keys ran laxer
+  built-in values than a newer install. They now match the reference config.
+  - `[ssh_auth]` without `AUTHFAIL_IP` / `AUTHFAIL_USER` / `DDOS_IP` counts
+    8 failures instead of 25 / 15 / 30.
+  - `[ssh_auth]` without `BLOCK` / `BLOCK_COOLDOWN` now blocks permanently
+    (30m cooldown) instead of only alerting.
+  - `[health]` without `TMP_PCT` / `TMP_CLEAN_OLDER` now alerts when `/tmp`
+    reaches 85% and deletes regular files older than 12h.
+
+  **Behaviour change on upgrade** for any node whose sections lack these
+  keys: SSH brute-force sources start getting permanent nft bans, and `/tmp`
+  cleanup turns on. A section that sets a key keeps its value. To keep the old
+  behaviour, set `BLOCK = no` in `[ssh_auth]` and `TMP_PCT = 0` in
+  `[health]`.
 - **Reference `detectors.conf`: five stock values now match what nodes
   actually run.** A node whose `detectors.conf` predates a key runs the code
   default. A node seeded later ran the stock value, so the same release

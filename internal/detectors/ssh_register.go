@@ -22,6 +22,17 @@ var (
 	sshLogFiles     = []string{"/var/log/secure", "/var/log/auth.log"}
 )
 
+// ssh_auth thresholds a section runs with when it omits the key. They must
+// equal the stock configs/detectors.conf [ssh_auth] values, so a node seeded
+// before a key existed behaves like one seeded after it
+// (reference_defaults_config_test.go). The section's BLOCK / BLOCK_COOLDOWN
+// defaults live in sectionBlockDefaults (manager.go).
+const (
+	sshDefaultAuthFailIP   = 8
+	sshDefaultAuthFailUser = 8
+	sshDefaultDDOSIP       = 8
+)
+
 func init() {
 	meta.Register(meta.DetectorMeta{
 		TypeKey:          "ssh_auth",
@@ -66,9 +77,9 @@ func init() {
 			Cooldown:    kvDur(kv, "COOLDOWN", defCooldown),
 			SampleLimit: kvInt(kv, "SAMPLE_LIMIT", 10),
 
-			AuthFailPerIP:   kvInt(kv, "AUTHFAIL_IP", 25),
-			AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", 15),
-			DDOSPerIP:       kvInt(kv, "DDOS_IP", 30),
+			AuthFailPerIP:   kvInt(kv, "AUTHFAIL_IP", sshDefaultAuthFailIP),
+			AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", sshDefaultAuthFailUser),
+			DDOSPerIP:       kvInt(kv, "DDOS_IP", sshDefaultDDOSIP),
 
 			UseEnrich:  useEnrich,
 			UsePTR:     usePTR,

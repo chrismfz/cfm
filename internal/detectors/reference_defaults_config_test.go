@@ -66,6 +66,38 @@ func TestReferenceConfigMatchesRuntimeDefaults(t *testing.T) {
 		}
 	}
 
+	ssh := secs.ByName["ssh_auth"]
+	for key, want := range map[string]int{
+		"AUTHFAIL_IP":   sshDefaultAuthFailIP,
+		"AUTHFAIL_USER": sshDefaultAuthFailUser,
+		"DDOS_IP":       sshDefaultDDOSIP,
+	} {
+		if got := kvInt(ssh, key, -1); got != want {
+			t.Errorf("[ssh_auth] %s = %d in stock, code default is %d; a node without the key runs the code default", key, got, want)
+		}
+	}
+	// Every per-type BLOCK default must reproduce the stock section's policy.
+	for typ := range sectionBlockDefaults {
+		kv, ok := secs.ByName[typ]
+		if !ok {
+			t.Errorf("[%s] has a sectionBlockDefaults entry but no stock section", typ)
+			continue
+		}
+		stockPol := parseBlockPolicy(kv)
+		codePol := sectionBlockPolicy(typ, KV{})
+		if stockPol != codePol {
+			t.Errorf("[%s] stock BLOCK policy %+v != code default %+v (sectionBlockDefaults)", typ, stockPol, codePol)
+		}
+	}
+
+	health := secs.ByName["health"]
+	if got := kvInt(health, "TMP_PCT", -1); got != healthDefaultTmpPct {
+		t.Errorf("[health] TMP_PCT = %d in stock, code default is %d", got, healthDefaultTmpPct)
+	}
+	if got := kvDur(health, "TMP_CLEAN_OLDER", 999*time.Hour); got != healthDefaultTmpCleanOlder {
+		t.Errorf("[health] TMP_CLEAN_OLDER = %s in stock, code default is %s", got, healthDefaultTmpCleanOlder)
+	}
+
 	g := secs.Global
 	// manager.go reads CHALLENGE_EXCLUDE_FILE from [global] only. Stock used
 	// to document it under [webdetector], where it is silently ignored and

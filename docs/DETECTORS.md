@@ -194,7 +194,7 @@ Typical defaults below are representative from the shipped template and should b
 | Detector key | What it detects | Key knobs | Typical defaults |
 |---|---|---|---|
 | `cfm_endpoints` | CFM login/token/API abuse stages; built in and active even without the config file | `STAGE1/2/3_THRESHOLD`, `STAGE2_CHALLENGE_TTL`, `BLOCK`, IP/network allowlists | `EVERY=2s`, `WINDOW=2m`, `BLOCK=15m` |
-| `ssh_auth` | SSH auth failures / brute-force | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `DDOS_IP`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `BLOCK=permanent` |
+| `ssh_auth` | SSH auth failures / brute-force | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `DDOS_IP`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `AUTHFAIL_IP`/`AUTHFAIL_USER`/`DDOS_IP=8`, `BLOCK=permanent`, `BLOCK_COOLDOWN=30m` (also what a section without those keys runs) |
 | `dovecot_auth` | Dovecot auth abuse | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `BLOCK=permanent` |
 | `ftpd` | FTP auth failures | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `BLOCK=permanent` |
 | `cpanel` | cPanel auth/root login anomalies | `AUTHFAIL_IP`, `AUTHFAIL_USER`, `ROOT_IP`, `BLOCK` | `WINDOW=10m`, `BLOCK=1h` |
@@ -208,7 +208,7 @@ Typical defaults below are representative from the shipped template and should b
 | `postfix_queues` | Postfix queue saturation | `TOTAL_CMD`, `LIST_CMD` (auto: host mailq, or `docker exec` into a discovered postfix container; self-disables without postfix), queue thresholds | `EVERY=60s`, alerting focus; also publishes the queue count to the health snapshot (`cfm health` / dashboard Mail queue tile) via `internal/mailq` |
 | `modsec` | ModSecurity denial bursts per IP | `LOG_PATH`, `MODSEC_IP`, `BLOCK` | `WINDOW=15m`, `BLOCK=permanent` |
 | `outbound` | outbound abuse sentinel (per-uid SMTP/scan/HTTP bursts) | `OUTBOUND_*` thresholds, allow users/groups, dedupe | `WINDOW=60s`, alerting focus |
-| `health` | host health anomalies (CPU/RAM/disk/temp/net spikes) | `% thresholds`, spike multipliers, watch lists | `EVERY=20s`, mostly alerting |
+| `health` | host health anomalies (CPU/RAM/disk/temp/net spikes) | `% thresholds`, spike multipliers, watch lists, `TMP_PCT`/`TMP_CLEAN_OLDER` | `EVERY=20s`, mostly alerting; `/tmp` at `TMP_PCT=85`% alerts and deletes regular files older than `TMP_CLEAN_OLDER=12h` (`TMP_PCT=0` turns it off) |
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
 | `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=60s`, `MIN_SUBNETS=40`, **alert-only** |
 | `challenge_cookie_discard` | clients that re-solve the challenge while still holding valid clearance | `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `MAX_TRACKED_IPS`, allowlists, `BLOCK` | `EVERY=30s`, `WINDOW=10m`, `MIN_SOLVES=8`, **alert-only unless `BLOCK` is set** |
