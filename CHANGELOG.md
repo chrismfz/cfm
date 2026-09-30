@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.09.30
+
 ### Changed
 - **A `detectors.conf` without the ssh_auth / `/tmp` keys now runs the
   shipped behaviour.** Nodes whose conffile predates these keys ran laxer
