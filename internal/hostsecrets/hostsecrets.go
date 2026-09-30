@@ -8,15 +8,19 @@
 // beside it and new stock knobs never arrived. They now live one file each
 // under Dir, generated once per host and never shared across the fleet.
 //
-// A strong value still set in detectors.conf wins and is copied into the
+// A usable value still set in detectors.conf wins and is copied into the
 // store. Setting the line back to a placeholder afterwards keeps the same
 // secret, so no visitor's challenge cookie is invalidated by the migration.
-// The package also copies the values in before it can replace the conffile
-// (the token-seed block of the Debian preinst and the RPM pre scriptlet).
+// The package snapshots detectors.conf into Dir before it can replace the
+// conffile (PreUpgradePath; the token-seed block of the Debian preinst and the
+// RPM pre scriptlet), and the daemon reads the tokens from that snapshot with
+// the real parser.
 package hostsecrets
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,54 +46,101 @@ const (
 	SourceConf      = "detectors.conf"
 	SourceStore     = "store"
 	SourceGenerated = "generated"
+	// SourceRunning: the store could not be read, so the process keeps the
+	// value it already runs rather than generating a new one.
+	SourceRunning = "running"
 )
+
+// ErrStoreUnreadable wraps a store read error other than "absent". Resolve
+// then never writes the store: it may hold a good secret.
+var ErrStoreUnreadable = errors.New("hostsecrets: store unreadable")
 
 // Path is the store file for key: Dir/<lowercased key>.
 func Path(key string) string {
 	return filepath.Join(Dir, strings.ToLower(key))
 }
 
+// PreUpgradePath is the copy of /etc/cfm/detectors.conf the package's
+// pre-install scriptlet takes before it can replace the conffile. The daemon
+// reads the tokens from it once (the detectors manager), then removes it.
+func PreUpgradePath() string {
+	return filepath.Join(Dir, "detectors.conf.pre-upgrade")
+}
+
+// readStore returns the stored value for key, trimmed; "" with a nil error
+// when the file is absent or empty, a non-nil error for anything else (EACCES,
+// EIO, EMFILE, a directory in its place).
+func readStore(key string) (string, error) {
+	b, err := os.ReadFile(Path(key)) // #nosec G304 -- fixed daemon-internal path
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
 // Read returns the stored value for key, trimmed. ok is false when the file
 // is absent, unreadable or empty. It does not judge strength.
 func Read(key string) (string, bool) {
-	b, err := os.ReadFile(Path(key)) // #nosec G304 -- fixed daemon-internal path
-	if err != nil {
-		return "", false
-	}
-	v := strings.TrimSpace(string(b))
-	return v, v != ""
+	v, err := readStore(key)
+	return v, err == nil && v != ""
 }
 
-// generated remembers, per key, a token this process generated but may not
-// have been able to store. Without it an unwritable store would yield a new
-// token on every Resolve, i.e. on every reload (each config save, each
-// tailed-log rotation), invalidating every challenge cookie each time.
-var generated sync.Map
+// Usable reports whether v can be a token: strong (sslcollector.IsStrongToken)
+// and free of the characters the detectors.conf value cleaner treats as
+// syntax (quotes, ';' / '#' comments, a leading '//' comment). The daemon
+// re-reads the resolved value through that cleaner, so a value it would
+// change would run as a DIFFERENT secret than the one mirrored to the edge
+// (cfm_bridge_token.lua), or as none at all.
+func Usable(v string) bool {
+	return sslcollector.IsStrongToken(v) && !strings.ContainsAny(v, `"';#`) && !strings.HasPrefix(v, "//")
+}
 
-// pick is the one precedence rule, shared by Resolve and Effective so the
-// probes can never drift from the daemon: a strong legacy detectors.conf
-// value, else a strong stored value, else a token this process generated.
-// ok is false when none applies.
-func pick(key, legacy string) (value, source string, ok bool) {
-	if sslcollector.IsStrongToken(legacy) {
+var (
+	// unstored holds, per key, a token this process generated but could not
+	// store. Without it an unwritable store would yield a new token on every
+	// Resolve, i.e. on every reload (each config save, each tailed-log
+	// rotation), invalidating every challenge cookie each time. It is dropped
+	// once a value is stored, so it can never bring back a replaced token.
+	unstored sync.Map
+	// running holds, per key, the value Resolve last returned: what this
+	// process runs while the store cannot be read.
+	running sync.Map
+)
+
+// choose is the one precedence rule, shared by Resolve and Effective so the
+// probes can never drift from the daemon: a usable legacy detectors.conf
+// value, else a usable stored value, else (store unreadable) the value this
+// process already runs, else a token this process generated but could not
+// store. ok is false when none applies.
+func choose(key, legacy, cur string, readErr error) (value, source string, ok bool) {
+	if Usable(legacy) {
 		return legacy, SourceConf, true
 	}
-	if cur, found := Read(key); found && sslcollector.IsStrongToken(cur) {
+	if readErr == nil && Usable(cur) {
 		return cur, SourceStore, true
 	}
-	if v, found := generated.Load(key); found {
+	if readErr != nil {
+		if v, found := running.Load(key); found {
+			return v.(string), SourceRunning, true
+		}
+	}
+	if v, found := unstored.Load(key); found {
 		return v.(string), SourceGenerated, true
 	}
 	return "", "", false
 }
 
 // Effective is the value the daemon runs with for key, for read-only probes
-// (cfm status, cfm health), by the same precedence as Resolve. When nothing
-// strong applies it returns the legacy value as given (possibly weak or
-// empty), so a probe reports weak/missing. It never generates or writes.
+// (cfm health), by the same precedence as Resolve. When nothing usable
+// applies it returns the legacy value as given (possibly weak or empty), so a
+// probe reports weak/missing. It never generates or writes.
 func Effective(key, legacy string) string {
 	legacy = strings.TrimSpace(legacy)
-	if v, _, ok := pick(key, legacy); ok {
+	cur, readErr := readStore(key)
+	if v, _, ok := choose(key, legacy, cur, readErr); ok {
 		return v
 	}
 	return legacy
@@ -98,33 +149,46 @@ func Effective(key, legacy string) string {
 // Resolve returns the secret the daemon runs with for key, and where it came
 // from:
 //
-//  1. SourceConf: legacy, a strong value still set in detectors.conf. It is
-//     copied into the store (when the store differs), so setting the line
-//     back to a placeholder later keeps the same secret.
-//  2. SourceStore: the stored value, when strong.
-//  3. SourceGenerated: a new random 48-hex value (the same one for the rest
-//     of this process), stored.
+//  1. SourceConf: legacy, a usable value still set in detectors.conf (or in
+//     the package's pre-upgrade snapshot of it). It is copied into the store
+//     (when the store differs), so setting the line back to a placeholder
+//     later keeps the same secret.
+//  2. SourceStore: the stored value, when usable.
+//  3. SourceRunning: the store cannot be read (ErrStoreUnreadable); the value
+//     this process already runs is kept and the store is left alone.
+//  4. SourceGenerated: a new random 48-hex value, stored. Until it is stored
+//     it is kept for the rest of this process.
 //
-// A weak legacy value (a placeholder, too short, not Lua-safe) is ignored, as
-// is a weak stored one. The secret is always returned. A non-nil error means
-// storing it failed: the daemon keeps running with it (and retries storing it
-// on each reload), but a restart generates another one.
+// A weak legacy value (a placeholder, too short, not Lua-safe, see Usable) is
+// ignored, as is a weak stored one, which is replaced. The secret is always
+// returned. A non-nil error means it was not stored: the daemon keeps running
+// with it and retries on each reload.
 func Resolve(key, legacy string) (secret, source string, err error) {
 	legacy = strings.TrimSpace(legacy)
-	value, source, ok := pick(key, legacy)
+	cur, readErr := readStore(key)
+	value, source, ok := choose(key, legacy, cur, readErr)
 	if !ok {
 		gen, gerr := sslcollector.GenerateToken()
 		if gerr != nil {
 			return "", "", gerr
 		}
-		actual, _ := generated.LoadOrStore(key, gen)
+		actual, _ := unstored.LoadOrStore(key, gen)
 		value, source = actual.(string), SourceGenerated
 	}
-	if cur, found := Read(key); !found || cur != value {
+	switch {
+	case readErr != nil && source != SourceConf:
+		// Never overwrite a store that may hold a good secret; a later
+		// reload reads it again.
+		err = fmt.Errorf("%w: %s: %v", ErrStoreUnreadable, Path(key), readErr)
+	case readErr != nil || cur != value:
 		err = write(key, value)
-	} else {
+	default:
 		tighten(key)
 	}
+	if err == nil {
+		unstored.Delete(key)
+	}
+	running.Store(key, value)
 	return value, source, err
 }
 
@@ -141,12 +205,34 @@ func tighten(key string) {
 	}
 }
 
-// write stores value atomically: a temp file in Dir (0600), then rename.
-func write(key, value string) error {
-	if err := os.MkdirAll(Dir, 0o700); err != nil {
+// ensureDir creates Dir (0700). Its parent, /var/lib/cfm, is created 0755 if
+// missing, never 0700: the edge workers (user cfm) must reach
+// /var/lib/cfm/lua through it.
+func ensureDir() error {
+	if err := os.MkdirAll(filepath.Dir(Dir), 0o755); err != nil {
+		return fmt.Errorf("hostsecrets: mkdir %s: %w", filepath.Dir(Dir), err)
+	}
+	if err := os.Mkdir(Dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return fmt.Errorf("hostsecrets: mkdir %s: %w", Dir, err)
 	}
-	// MkdirAll leaves an existing dir's mode alone; tighten it.
+	return nil
+}
+
+// RemovePreUpgrade removes the package's pre-upgrade snapshot once the
+// daemon has taken the tokens from it. Absent is not an error.
+func RemovePreUpgrade() error {
+	if err := os.Remove(PreUpgradePath()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// write stores value atomically: a temp file in Dir (0600), then rename.
+func write(key, value string) error {
+	if err := ensureDir(); err != nil {
+		return err
+	}
+	// Mkdir leaves an existing dir's mode alone; tighten it.
 	if err := os.Chmod(Dir, 0o700); err != nil {
 		return fmt.Errorf("hostsecrets: chmod %s: %w", Dir, err)
 	}

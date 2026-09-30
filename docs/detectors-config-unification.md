@@ -208,7 +208,7 @@ Audit cleanup folded in: 5 servers put `AUTHFAIL_IP`/`AUTHFAIL_USER`/`DDOS_IP`
 dead lines (someone believed they set softer thresholds for GR; they set
 nothing). Validation should warn on unknown keys in `.leniency` sections.
 
-**Tokens (landed 2026-10-01).** `CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` were
+**Tokens (landed 2026-09-30).** `CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` were
 per-host secrets generated INTO the conffile — the last blocker to a
 byte-identical file. `internal/hostsecrets` now generates each once per host
 into `/var/lib/cfm/secrets/` (root, dir `0700`, files `0600`; only the daemon
@@ -219,9 +219,12 @@ instead of appending them to whatever section is last; an empty value is worse,
 its regex overwrites the next line). A strong base-conffile value still wins and
 is copied into the store, so the migration is "set the value back to
 placeholder whenever, nothing breaks" (no cookie is invalidated). The package's
-pre-install scriptlets (Debian `preinst`, RPM pre) seed the store from the old
-file before a conffile prompt or a moved `.rpmnew` can replace it.
-`cfm status` / `cfm health` read the same resolution (`hostsecrets.Effective`).
+pre-install scriptlets (Debian `preinst`, RPM pre) snapshot the old file into
+the store dir before a conffile prompt or a moved `.rpmnew` can replace it;
+the daemon takes the tokens from that snapshot with the real parser, then
+deletes it. The Debian preinst also stops a running pre-store daemon, which
+would otherwise regenerate the stock placeholder in place.
+`cfm health` reads the same resolution (`hostsecrets.Effective`).
 
 ---
 

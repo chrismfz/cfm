@@ -422,7 +422,7 @@ func printBridgeInterceptorStatus_unused(backend firewall.Backend) {
 		sockProbe.Category,
 		sockProbe.ErrorText,
 	)
-	fmt.Printf("  %-24s %s\n", "challenge token (CHALLENGE_TOKEN):", tokenHealth(cfmToken))
+	fmt.Printf("  %-24s %s\n", "sslcollector token (cfm_token.lua):", tokenHealth(cfmToken))
 	fmt.Printf("  %-24s %s\n", "edge bridge token (OPENRESTY_TOKEN):", tokenHealth(bridgeToken))
 	fmt.Printf("  %-24s %s\n", "bridge socket auth:", bridgeRuntime.summary())
 	fmt.Printf("  %-24s socket=%s source=%s token_src=%s mode=%s\n",
@@ -651,53 +651,6 @@ var (
 	detectorsConfigPath = "/etc/cfm/detectors.conf"
 )
 
-type challengeFlowReadiness struct {
-	Status string
-	Code   string
-	Reason string
-}
-
-func probeChallengeFlowReadiness() challengeFlowReadiness {
-	listenAddr := strings.TrimSpace(os.Getenv("CHALLENGE_HTTP_LISTEN"))
-	if listenAddr == "" {
-		listenAddr = "127.0.0.1:9098"
-	}
-	if !strings.Contains(listenAddr, ":") {
-		listenAddr = "127.0.0.1:" + listenAddr
-	}
-	challengeToken := readChallengeTokenProbe()
-	bridgeToken := readBridgeTokenProbe()
-	cfg := resolveBridgeRuntimeConfig()
-
-	if _, err := tcpDialTimeout("tcp", listenAddr, 1200*time.Millisecond); err != nil {
-		return challengeFlowReadiness{Status: "FAIL", Code: "challenge_listener_unreachable", Reason: shortErr(err)}
-	}
-	st, err := socketStat(cfg.SocketPath)
-	if err != nil || st.Mode()&os.ModeSocket == 0 {
-		return challengeFlowReadiness{Status: "FAIL", Code: "bridge_socket_unreachable", Reason: cfg.DisplaySocketPath}
-	}
-	if !challengeToken.Present || !bridgeToken.Present {
-		return challengeFlowReadiness{Status: "FAIL", Code: "token_missing", Reason: "challenge/bridge token missing"}
-	}
-	if !challengeToken.Valid || !bridgeToken.Valid {
-		return challengeFlowReadiness{Status: "FAIL", Code: "token_weak", Reason: "challenge/bridge token weak"}
-	}
-	httpStatus, _, probeErr := bridgeSocketProbe(cfg.SocketPath, bridgeToken.Token)
-	if probeErr != nil {
-		if errors.Is(probeErr, context.DeadlineExceeded) || strings.Contains(strings.ToLower(probeErr.Error()), "timeout") {
-			return challengeFlowReadiness{Status: "WARN", Code: "decision_path_timeout", Reason: "partial_ok: listener/socket/token present but bridge probe timed out"}
-		}
-		return challengeFlowReadiness{Status: "FAIL", Code: "decision_path_connect_fail", Reason: shortErr(probeErr)}
-	}
-	if httpStatus == http.StatusUnauthorized || httpStatus == http.StatusForbidden {
-		return challengeFlowReadiness{Status: "FAIL", Code: "bridge_auth_fail", Reason: "bridge rejected token"}
-	}
-	if httpStatus != http.StatusOK {
-		return challengeFlowReadiness{Status: "WARN", Code: "decision_path_unexpected_status", Reason: fmt.Sprintf("partial_ok: bridge http %d", httpStatus)}
-	}
-	return challengeFlowReadiness{Status: "OK", Code: "ok", Reason: "challenge flow ready"}
-}
-
 func readLuaToken(path string) luaTokenProbe {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -829,7 +782,7 @@ func resolveDetectorsConfigPath() string {
 // base-only read false-alarms when such a key moved into an overlay). NOTE:
 // this is NOT the right source for CHALLENGE_TOKEN / OPENRESTY_TOKEN — the
 // daemon reads those from the BASE file or the per-host store and ignores
-// overlays (see readChallengeTokenProbe / edgediag.ReadChallengeTokenProbe).
+// overlays (see edgediag.ReadChallengeTokenProbe).
 func readDetectorSectionKV(path, section string) map[string]string {
 	return sectionKV(detectors.ReadLayeredFile, path, section)
 }
@@ -850,13 +803,6 @@ func sectionKV(read func(string) (detectors.Sections, error), path, section stri
 
 func readBridgeTokenProbe() luaTokenProbe {
 	return readLuaToken(canonicalBridgeTokenPath)
-}
-
-func readChallengeTokenProbe() luaTokenProbe {
-	// One resolution for every probe (cfm status, cfm health, healthmodel):
-	// the edge diagnostics copy, which mirrors what the daemon runs.
-	p := edgediag.ReadChallengeTokenProbe(resolveDetectorsConfigPath())
-	return luaTokenProbe{Token: p.Token, Present: p.Present, Valid: p.Valid}
 }
 
 func pathExists(path string) bool {

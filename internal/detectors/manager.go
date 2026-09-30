@@ -11,6 +11,7 @@ import (
 	webdet "cfm/internal/webdetector"
 	"context"
 	"encoding/binary"
+	"errors"
 	"hash/fnv"
 	"os"
 	"sort"
@@ -368,36 +369,29 @@ func (m *manager) maybeReload(parent context.Context) {
 
 	// ── Per-host tokens for [webdetector] ──────────────────────────────────────
 	// CHALLENGE_TOKEN signs browser challenge HMACs. OPENRESTY_TOKEN
-	// authenticates Lua→Go socket calls. Each is resolved by hostsecrets: a
-	// strong value still set in the BASE detectors.conf wins (and is copied
-	// into /var/lib/cfm/secrets), else the stored value, else a new random one
-	// is generated and stored. Nothing is ever written into detectors.conf:
-	// that is what kept the conffile "modified" on every node, so upgrades
-	// could not update it and left a .rpmnew behind.
+	// authenticates Lua→Go socket calls. Both are resolved by
+	// resolveHostTokens (hostsecrets): nothing is ever written into
+	// detectors.conf, which is what kept the conffile "modified" on every
+	// node, so upgrades could not update it and left a .rpmnew behind.
 	// The legacy value is read from the BASE section only. An overlay token is
 	// ignored, as before: the runtime is pinned to the resolved value, which
 	// stays in lockstep with the cfm_bridge_token.lua written below. Every
 	// OTHER [webdetector] knob uses the merged wdKV. The block runs whenever
 	// the merged config has [webdetector], so an overlay-only [webdetector]
 	// also gets its tokens and cfm_bridge_config.lua.
-	baseWD := KV(nil)
-	if bs, berr := ReadSectionsFile(m.opts.CfgPath); berr == nil {
-		baseWD = bs.ByName["webdetector"]
-	}
 	if wdKV, ok := secs.ByName["webdetector"]; ok {
+		baseWD := KV(nil)
+		if bs, berr := ReadSectionsFile(m.opts.CfgPath); berr == nil {
+			baseWD = bs.ByName["webdetector"]
+		}
+		chalTok, newTok := resolveHostTokens(baseWD)
 		// F2: CHALLENGE_TOKEN
-		if tok, src, err := hostsecrets.Resolve(hostsecrets.ChallengeToken, kvStrClean(baseWD, "CHALLENGE_TOKEN", "")); tok == "" {
-			logging.Logf("[detectors] CHALLENGE_TOKEN generation failed: %v", err)
-		} else {
-			logTokenSource(hostsecrets.ChallengeToken, src, err)
-			wdKV["CHALLENGE_TOKEN"] = tok // pin runtime to the resolved token
+		if chalTok != "" {
+			wdKV["CHALLENGE_TOKEN"] = chalTok // pin runtime to the resolved token
 		}
 
 		// F4: OPENRESTY_TOKEN — also writes cfm_bridge_token.lua for cfm.lua
-		if newTok, src, err := hostsecrets.Resolve(hostsecrets.BridgeToken, kvStrClean(baseWD, "OPENRESTY_TOKEN", "")); newTok == "" {
-			logging.Logf("[detectors] OPENRESTY_TOKEN generation failed: %v", err)
-		} else {
-			logTokenSource(hostsecrets.BridgeToken, src, err)
+		if newTok != "" {
 			wdKV["OPENRESTY_TOKEN"] = newTok // pin runtime to the resolved token
 			cfmGID := sslcollector.CfmGroupID()
 			const bridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
@@ -793,6 +787,46 @@ func (m *manager) stopAll() {
 	}
 }
 
+// resolveHostTokens returns the CHALLENGE_TOKEN and OPENRESTY_TOKEN the
+// daemon runs with ("" only if one cannot even be generated), resolved by
+// hostsecrets, and logs where each came from. The legacy value is the base
+// [webdetector] one (baseWD), else the one in the package's pre-upgrade
+// snapshot of detectors.conf (hostsecrets.PreUpgradePath): the file as it
+// was before the package could replace it with the stock one, read with the
+// same parser. The snapshot is removed once both tokens are stored.
+func resolveHostTokens(baseWD KV) (challenge, bridge string) {
+	snapWD, snapFound := KV(nil), false
+	if ss, err := ReadSectionsFile(hostsecrets.PreUpgradePath()); err == nil {
+		snapWD, snapFound = ss.ByName["webdetector"], true
+	}
+	stored := true
+	resolve := func(key string) string {
+		legacy := kvStrClean(baseWD, key, "")
+		if !hostsecrets.Usable(legacy) {
+			legacy = kvStrClean(snapWD, key, "")
+		}
+		tok, src, err := hostsecrets.Resolve(key, legacy)
+		if tok == "" {
+			logging.Logf("[detectors] %s generation failed: %v", key, err)
+			stored = false
+			return ""
+		}
+		stored = stored && err == nil
+		logTokenSource(key, src, err)
+		return tok
+	}
+	challenge = resolve(hostsecrets.ChallengeToken)
+	bridge = resolve(hostsecrets.BridgeToken)
+	if snapFound && stored {
+		if err := hostsecrets.RemovePreUpgrade(); err != nil {
+			logging.Logf("[detectors] could not remove %s: %v", hostsecrets.PreUpgradePath(), err)
+		} else {
+			logging.Logf("[detectors] tokens taken over from the pre-upgrade snapshot; %s removed", hostsecrets.PreUpgradePath())
+		}
+	}
+	return challenge, bridge
+}
+
 // tokenFromConfLogged remembers, per token, that the "taken from
 // detectors.conf" hint was logged: a reload happens on every config save and
 // tailed-log rotation, and the hint is the same every time.
@@ -803,6 +837,8 @@ var tokenFromConfLogged sync.Map
 // persisted. A token read from the store is the steady state: silent.
 func logTokenSource(key, source string, err error) {
 	switch {
+	case errors.Is(err, hostsecrets.ErrStoreUnreadable):
+		logging.Logf("[detectors] %s: %v — keeping the running token (source=%s) and leaving the store alone; retried each reload", key, err, source)
 	case err != nil && source == hostsecrets.SourceConf:
 		logging.Logf("[detectors] %s from detectors.conf could not be copied into %s: %v — it keeps working while the detectors.conf value stays", key, hostsecrets.Path(key), err)
 	case err != nil:

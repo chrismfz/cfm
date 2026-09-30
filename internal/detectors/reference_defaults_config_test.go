@@ -57,7 +57,7 @@ func TestReferenceConfigMatchesRuntimeDefaults(t *testing.T) {
 	// fleet. The key line stays inside [webdetector] with a WEAK placeholder,
 	// which the daemon ignores and an older binary (after a rollback) replaces
 	// in place. A MISSING line is appended by that binary at the end of the
-	// file, into whatever section is last (the 2026-10-01 speedhost reload
+	// file, into whatever section is last (the 2026-09-30 speedhost reload
 	// loop); an EMPTY one is worse: its `KEY\s*=\s*` regex runs across the
 	// newline and overwrites the next line, leaving the key empty.
 	for _, key := range []string{"CHALLENGE_TOKEN", "OPENRESTY_TOKEN"} {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"cfm/internal/detectorscfg"
+	"cfm/internal/hostsecrets"
 	"cfm/internal/notify"
 	"cfm/internal/webdetector"
 )
@@ -17,7 +18,9 @@ import (
 // under test fall back to them — or, for detectors.conf, prefer them — over the
 // test's own cfgDir: the notifier tests saved over the operator's live config.
 // It also points the webdetector store/log defaults at the temp dir, so a test
-// that builds an Engine can never reach /var/lib/cfm.
+// that builds an Engine can never reach /var/lib/cfm, and the per-host token
+// store (hostsecrets.Dir): the health snapshot's challenge-token probe reads
+// it.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "cfm-apiserver-test-")
 	if err != nil {
@@ -27,6 +30,7 @@ func TestMain(m *testing.M) {
 	restoreNotify := notify.SetSystemConfigPathForTest(filepath.Join(dir, "absent", "notify.conf"))
 	restoreDetectors := detectorscfg.SetSystemConfigPathForTest(filepath.Join(dir, "absent", "detectors.conf"))
 	restoreWebdet := webdetector.SetDefaultDirsForTest(filepath.Join(dir, "webdetector"))
+	hostsecrets.Dir = filepath.Join(dir, "secrets")
 	code := m.Run()
 	restoreNotify()
 	restoreDetectors()

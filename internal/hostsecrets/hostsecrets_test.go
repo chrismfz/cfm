@@ -1,10 +1,12 @@
 package hostsecrets
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -26,10 +28,12 @@ func useTempDir(t *testing.T) string {
 	return Dir
 }
 
-// forgetGenerated drops the per-process generated tokens, so each test starts
+// forgetGenerated drops the per-process token caches, so each test starts
 // like a fresh daemon.
 func forgetGenerated() {
-	generated.Range(func(k, _ any) bool { generated.Delete(k); return true })
+	for _, m := range []*sync.Map{&unstored, &running} {
+		m.Range(func(k, _ any) bool { m.Delete(k); return true })
+	}
 }
 
 func stored(t *testing.T, key string) string {
@@ -215,9 +219,133 @@ func TestResolveUnwritableStoreKeepsOneTokenPerProcess(t *testing.T) {
 		t.Fatalf("Resolve = (%q, %v), want a token and a store error", first, err)
 	}
 	for i := 0; i < 3; i++ {
+		// (Dir is a file, so the store reads as unreadable: SourceRunning.)
 		again, src, _ := Resolve(ChallengeToken, "")
-		if again != first || src != SourceGenerated {
+		if again != first || src != SourceRunning {
 			t.Fatalf("reload %d: Resolve = (%q, %q), want the same generated token %q", i, again, src, first)
+		}
+	}
+	if got := Effective(ChallengeToken, ""); got != first {
+		t.Fatalf("Effective = %q, want the token the daemon runs (%q)", got, first)
+	}
+}
+
+// A reload between "delete the store file" and the restart of the documented
+// rotation must not bring a replaced token back: the per-process cache only
+// holds a token that could not be stored.
+func TestResolveNeverRevivesAReplacedToken(t *testing.T) {
+	useTempDir(t)
+	g, _, err := Resolve(ChallengeToken, "placeholder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Resolve(ChallengeToken, strongA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(Path(ChallengeToken)); err != nil {
+		t.Fatal(err)
+	}
+	tok, src, err := Resolve(ChallengeToken, "placeholder")
+	if err != nil || src != SourceGenerated || tok == g || tok == strongA {
+		t.Fatalf("after rotation: Resolve = (%q, %q, %v), want a NEW generated token", tok, src, err)
+	}
+}
+
+// A store that exists but cannot be read (EACCES, EIO, EMFILE; here a
+// directory in its place) must neither rotate the running token nor be
+// overwritten: it may hold the good secret.
+func TestResolveUnreadableStoreKeepsTheRunningToken(t *testing.T) {
+	useTempDir(t)
+	if _, _, err := Resolve(BridgeToken, strongA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(Path(BridgeToken)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(Path(BridgeToken), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tok, src, err := Resolve(BridgeToken, "placeholder")
+	if !errors.Is(err, ErrStoreUnreadable) || tok != strongA || src != SourceRunning {
+		t.Fatalf("unreadable store: Resolve = (%q, %q, %v), want the running strongA and ErrStoreUnreadable", tok, src, err)
+	}
+	if fi, err := os.Stat(Path(BridgeToken)); err != nil || !fi.IsDir() {
+		t.Fatalf("the unreadable store was replaced (err %v)", err)
+	}
+
+	// A fresh process (nothing running yet) still gets a token, unstored.
+	forgetGenerated()
+	tok, src, err = Resolve(BridgeToken, "")
+	if !errors.Is(err, ErrStoreUnreadable) || src != SourceGenerated || !hex48.MatchString(tok) {
+		t.Fatalf("fresh process: Resolve = (%q, %q, %v), want a generated token and ErrStoreUnreadable", tok, src, err)
+	}
+	if again, _, _ := Resolve(BridgeToken, ""); again != tok {
+		t.Fatalf("reload rotated the token: %q then %q", tok, again)
+	}
+}
+
+func TestUsable(t *testing.T) {
+	for _, v := range []string{strongA, "A-Za-z0-9._~+/=:" + strongA} {
+		if !Usable(v) {
+			t.Errorf("Usable(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "placeholder", strongA[:31], `"` + strongA + `"`, "'" + strongA, strongA + ";x", strongA + "#x", "//" + strongA, strongA + " x"} {
+		if Usable(v) {
+			t.Errorf("Usable(%q) = true, want false", v)
+		}
+	}
+}
+
+// A hand-written store value the config cleaner would alter is not used: it
+// would run as a different secret than the one mirrored to the edge.
+func TestResolveReplacesAStoreValueTheCleanerWouldAlter(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path(ChallengeToken), []byte(`"`+strongA+`"`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tok, src, err := Resolve(ChallengeToken, "")
+	if err != nil || src != SourceGenerated || !hex48.MatchString(tok) {
+		t.Fatalf("Resolve = (%q, %q, %v), want a generated token replacing the quoted one", tok, src, err)
+	}
+}
+
+// The store's parent (/var/lib/cfm) is created 0755 when missing, never 0700:
+// the edge workers reach /var/lib/cfm/lua through it.
+func TestResolveCreatesAMissingParentWorldTraversable(t *testing.T) {
+	old := Dir
+	parent := filepath.Join(t.TempDir(), "lib", "cfm")
+	Dir = filepath.Join(parent, "secrets")
+	forgetGenerated()
+	t.Cleanup(func() { Dir = old; forgetGenerated() })
+	if _, _, err := Resolve(ChallengeToken, ""); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(parent); err != nil || fi.Mode().Perm()&0o055 != 0o055 {
+		t.Fatalf("parent mode = %v (err %v), want group/other r-x", fi.Mode().Perm(), err)
+	}
+}
+
+// An absent store that cannot be created (here under /proc, where mkdir fails
+// even for root) keeps one generated token for the life of the process.
+func TestResolveUncreatableStoreKeepsOneGeneratedToken(t *testing.T) {
+	old := Dir
+	Dir = "/proc/self/cfm-hostsecrets-test/secrets"
+	forgetGenerated()
+	t.Cleanup(func() { Dir = old; forgetGenerated() })
+	if _, err := os.Stat("/proc/self"); err != nil {
+		t.Skip("no /proc")
+	}
+	first, src, err := Resolve(ChallengeToken, "")
+	if err == nil || src != SourceGenerated || !hex48.MatchString(first) {
+		t.Fatalf("Resolve = (%q, %q, %v), want a generated token and a store error", first, src, err)
+	}
+	for i := 0; i < 3; i++ {
+		if again, src, _ := Resolve(ChallengeToken, ""); again != first || src != SourceGenerated {
+			t.Fatalf("reload %d: Resolve = (%q, %q), want the same generated token", i, again, src)
 		}
 	}
 	if got := Effective(ChallengeToken, ""); got != first {

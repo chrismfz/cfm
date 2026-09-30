@@ -1,45 +1,50 @@
 #!/bin/sh
 set -e
 
+# An OLD daemon (one without the token store: its binary does not know
+# /var/lib/cfm/secrets) keeps running through the upgrade, since prerm stops
+# cfm only on remove. It regenerates a placeholder token IN detectors.conf
+# within seconds of seeing one, so if dpkg installs the packaged
+# detectors.conf (the operator's choice at the conffile prompt, or
+# --force-confnew), it would rotate both tokens (every visitor re-challenged)
+# and leave the conffile "modified" again. Stop it before the unpack; postinst
+# restarts cfm. Once the installed binary knows the store this never fires.
+cfm_old_bin=${CFM_PREINST_BIN:-/usr/bin/cfm}
+if [ "$1" = "upgrade" ] && [ -f "$cfm_old_bin" ] && ! grep -q -a -F /var/lib/cfm/secrets "$cfm_old_bin"; then
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet cfm.service; then
+        systemctl stop cfm.service || true
+    fi
+fi
+unset cfm_old_bin
+
 # >>> cfm-token-seed
-# Copy the per-host [webdetector] CHALLENGE_TOKEN / OPENRESTY_TOKEN from the
-# CURRENT detectors.conf into the token store (/var/lib/cfm/secrets) before
-# this package can replace that conffile: Debian may install the packaged
-# file at the operator's choice, and on RPM an operator may later move the
-# .rpmnew over it. The daemon also copies them on its first start, but only
-# while the old file is still in place, and only if it is running. Acts only
-# when a store file is absent, never overwrites one, never fails the install.
-# The same block is in packaging/debian/DEBIAN/preinst and in the rpm spec
-# pre scriptlet; internal/hostsecrets/package_seed_test.go keeps the two
-# identical and runs it.
+# Snapshot the CURRENT detectors.conf into the token store dir
+# (/var/lib/cfm/secrets/detectors.conf.pre-upgrade, root 0600) before this
+# package can replace that conffile: Debian may install the packaged file at
+# the operator's choice, and on RPM an operator may later move the .rpmnew
+# over it. The per-host [webdetector] CHALLENGE_TOKEN / OPENRESTY_TOKEN in it
+# are what the node runs today; the daemon reads them from the snapshot with
+# its own parser (a usable value there beats the store, as one in
+# detectors.conf does), stores them and removes the snapshot. An existing
+# snapshot is kept: it predates this one. Creates /var/lib/cfm 0755 if
+# missing (the edge workers must reach /var/lib/cfm/lua), never fails the
+# install. The same block is in packaging/debian/DEBIAN/preinst and in the
+# rpm spec pre scriptlet; internal/hostsecrets/package_seed_test.go keeps the
+# two identical and runs it.
 cfm_seed_conf=${CFM_SEED_CONF:-/etc/cfm/detectors.conf}
 cfm_seed_dir=${CFM_SEED_DIR:-/var/lib/cfm/secrets}
-if [ -f "$cfm_seed_conf" ]; then
-    for cfm_seed_key in CHALLENGE_TOKEN OPENRESTY_TOKEN; do
-        cfm_seed_file="$cfm_seed_dir/$(echo "$cfm_seed_key" | tr 'A-Z' 'a-z')"
-        [ -e "$cfm_seed_file" ] && continue
-        (
-            umask 077
-            mkdir -p "$cfm_seed_dir" && chmod 0700 "$cfm_seed_dir" &&
-            LC_ALL=C awk -v key="$cfm_seed_key" -v out="$cfm_seed_file.seed" '
-                { line = $0; sub(/^[ \t]+/, "", line); sub(/[ \t\r]+$/, "", line) }
-                line ~ /^\[.*\]$/ { sec = substr(line, 2, length(line) - 2); gsub(/^[ \t]+|[ \t]+$/, "", sec); next }
-                sec == "webdetector" && toupper(line) ~ ("^" key "[ \t]*=") {
-                    v = substr(line, index(line, "=") + 1)
-                    sub(/[;#].*$/, "", v)
-                    gsub(/^[ \t"\047]+|[ \t"\047]+$/, "", v)
-                    val = v
-                }
-                END {
-                    bad = "^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$"
-                    if (length(val) < 32 || tolower(val) ~ bad || val !~ /^[!-~]+$/) exit 1
-                    print val > out
-                }' "$cfm_seed_conf" &&
-            mv -f "$cfm_seed_file.seed" "$cfm_seed_file"
-        ) || rm -f "$cfm_seed_file.seed"
-    done
+cfm_seed_snap="$cfm_seed_dir/detectors.conf.pre-upgrade"
+if [ -f "$cfm_seed_conf" ] && [ ! -e "$cfm_seed_snap" ]; then
+    cfm_seed_parent=$(dirname "$cfm_seed_dir")
+    (
+        { [ -d "$cfm_seed_parent" ] || mkdir -p -m 0755 "$cfm_seed_parent"; } &&
+        umask 077 &&
+        mkdir -p "$cfm_seed_dir" && chmod 0700 "$cfm_seed_dir" &&
+        cp "$cfm_seed_conf" "$cfm_seed_snap.tmp" &&
+        mv -f "$cfm_seed_snap.tmp" "$cfm_seed_snap"
+    ) || rm -f "$cfm_seed_snap.tmp"
 fi
-unset cfm_seed_conf cfm_seed_dir cfm_seed_key cfm_seed_file
+unset cfm_seed_conf cfm_seed_dir cfm_seed_snap cfm_seed_parent
 # <<< cfm-token-seed
 
 exit 0
