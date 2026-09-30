@@ -9,13 +9,18 @@ import (
 
 // pairTTLStore is the ONE bounded, TTL'd store behind the ChallengeV2 rung
 // marks (gate teeth: challengeV2Marks per (ip,host), challengeV2IPMarks per
-// IP) and the traffic-rule challenge notes (telemetry, challengeRuleNotes) —
-// one implementation, so a fix to the sweep, the cap or the once-per-episode
-// warning reaches all of them. Pair keys come from challengeV2MarkKey; the
-// per-IP store keys on the trimmed IP.
+// IP), the traffic-rule challenge notes (telemetry, challengeRuleNotes), the
+// challenge server's verify_reject log throttle (verifyRejects) and its
+// cleared-redirect loop breaker (clearedRedirects) — one implementation, so a
+// fix to the sweep, the cap or the once-per-episode warning reaches all of
+// them. Pair keys come from challengeV2MarkKey; the per-IP store keys on the
+// trimmed IP.
 //
-// Bounded and fail-open: at maxKeys a NEW key is dropped after an expiry
-// sweep (never an error); existing keys keep refreshing. Reads take only the
+// Bounded: at maxKeys a NEW key is dropped after an expiry sweep (never an
+// error); existing keys keep refreshing. What a dropped key means is the
+// caller's: put is fail-open (the mark / note is simply not recorded), while
+// putIfAbsent reports false, which the throttle and the breaker read as
+// "seen" (no log line; serve the challenge page instead of redirecting). Reads take only the
 // RLock and never delete — an expired key answers "absent" and is left for
 // the write-pressure sweep, which is what bounds the store.
 //
@@ -57,26 +62,63 @@ func (s *pairTTLStore[V]) put(key string, v V, now time.Time) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.m[key]; !exists && len(s.m) >= s.maxKeys {
-		if s.sweepEvery == 0 || now.Sub(s.lastSweep) >= s.sweepEvery {
-			s.lastSweep = now
-			for k, exp := range s.m { // expiry sweep, only on pressure
-				if now.After(exp) {
-					delete(s.m, k)
-					if s.vals != nil {
-						delete(s.vals, k)
-					}
+	if !s.roomForLocked(key, now) {
+		return // fail-open: the newcomer is simply not recorded
+	}
+	s.storeLocked(key, v, now)
+}
+
+// putIfAbsent records v for key only when key has no live entry, atomically
+// (one write lock: two callers racing on the same key cannot both win). It
+// reports whether it recorded. false = already live, or a newcomer the full
+// store could not take.
+func (s *pairTTLStore[V]) putIfAbsent(key string, v V, now time.Time) bool {
+	if key == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if exp, ok := s.m[key]; ok && now.Before(exp) {
+		return false
+	}
+	if !s.roomForLocked(key, now) {
+		return false
+	}
+	s.storeLocked(key, v, now)
+	return true
+}
+
+// roomForLocked reports whether key can be stored: it exists already, or the
+// store is under cap (after at most one expiry sweep per sweepEvery). Warns
+// once per saturation episode. Caller holds the write lock.
+func (s *pairTTLStore[V]) roomForLocked(key string, now time.Time) bool {
+	if _, exists := s.m[key]; exists || len(s.m) < s.maxKeys {
+		return true
+	}
+	if s.sweepEvery == 0 || now.Sub(s.lastSweep) >= s.sweepEvery {
+		s.lastSweep = now
+		for k, exp := range s.m { // expiry sweep, only on pressure
+			if now.After(exp) {
+				delete(s.m, k)
+				if s.vals != nil {
+					delete(s.vals, k)
 				}
 			}
 		}
-		if len(s.m) >= s.maxKeys {
-			if !s.fullWarn {
-				s.fullWarn = true
-				logging.Logf(s.fullMsg, s.maxKeys)
-			}
-			return // fail-open: the newcomer is simply not recorded
-		}
 	}
+	if len(s.m) >= s.maxKeys {
+		if !s.fullWarn {
+			s.fullWarn = true
+			logging.Logf(s.fullMsg, s.maxKeys)
+		}
+		return false
+	}
+	return true
+}
+
+// storeLocked writes key and re-arms the full warning. Caller holds the write
+// lock and has checked roomForLocked.
+func (s *pairTTLStore[V]) storeLocked(key string, v V, now time.Time) {
 	s.m[key] = now.Add(s.ttl)
 	if s.vals != nil {
 		s.vals[key] = v

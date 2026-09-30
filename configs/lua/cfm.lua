@@ -1558,7 +1558,11 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
           push_and_log_waf_hit()
           ngx.header["X-CFM-Action"] = "challenge_resume"
           ngx.header["Cache-Control"] = "no-store"
-          return ngx.redirect("/?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
+          -- /__cfm_challenge, never "/?next=": a sibling tab may clear this
+          -- browser before the redirect is followed, and "/" would then pass
+          -- to the site's homepage and drop the stashed POST. The challenge
+          -- server sends a cleared client straight to next (the cfm_rt resume).
+          return ngx.redirect("/__cfm_challenge?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
         end
         -- Both rungs present to the CLIENT as a plain challenge: echoing
         -- "challenge_v2" here would hand a signal-aware solver farm the
@@ -1713,7 +1717,8 @@ if ip_action == "challenge" or vh_action == "challenge" or rule_action == "chall
   local rtok, rerr = store_post_resume(ip, host, ngx.var.request_uri or uri, method)
   if rtok then
     ngx.header["X-CFM-Action"] = "challenge_resume"; ngx.header["Cache-Control"] = "no-store"
-    return ngx.redirect("/?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
+    -- /__cfm_challenge, not "/?next=" (see the Step 2 challenge_resume redirect).
+    return ngx.redirect("/__cfm_challenge?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
   end
   ngx.header["X-CFM-Action"] = "challenge"
   ngx.var.cfm_upstream = "cfm_challenge"; ngx.var.cfm_pass = "http://cfm_challenge"

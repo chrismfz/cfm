@@ -115,6 +115,14 @@ func newChallengeAccessLogger(path string) *challengeAccessLogger {
 	return &challengeAccessLogger{path: p}
 }
 
+// normalizeChallengeNext returns a same-origin path to send the client to
+// after the challenge, or "/" when raw is not one. The result feeds both the
+// verify 303's Location and the challenge page's JS, so it must never name
+// another site: "//evil.com", "/\\evil.com" and a path hiding a control
+// character (browsers strip tab/newline, so "/\t/evil.com" is "//evil.com")
+// are refused. Before this, a crafted
+// /__cfm_challenge?next=//evil.com sent a real user to evil.com right after
+// they solved.
 func normalizeChallengeNext(raw string) string {
 	next := strings.TrimSpace(raw)
 	if next == "" {
@@ -134,7 +142,7 @@ func normalizeChallengeNext(raw string) string {
 		if strings.HasPrefix(next, "%2f") || strings.HasPrefix(next, "%2F") {
 			next = decodeOnce(next)
 		}
-		if !strings.HasPrefix(next, "/") {
+		if !strings.HasPrefix(next, "/") || !isSameOriginPath(next) {
 			return "/"
 		}
 		u, err := url.ParseRequestURI(next)
@@ -156,12 +164,73 @@ func normalizeChallengeNext(raw string) string {
 			u.RawQuery = q.Encode()
 			next = u.RequestURI()
 		}
-		if len(next) > maxNextLen {
+		if len(next) > maxNextLen || !isSameOriginPath(next) {
 			return "/"
 		}
 		return next
 	}
 	return "/"
+}
+
+// verifyRejects throttles logVerifyReject (and the loop breaker's own log
+// line) to one line per (ip, reason) a minute. clearedRedirects is the
+// challenge page's loop breaker: a second cleared redirect for the same (ip,
+// scope, host, canonical next) within 10 s serves the page instead. Both use the
+// package's one bounded TTL store through putIfAbsent: a key the full store
+// cannot record reads as seen, so both then take their conservative branch
+// (no log line, serve the page).
+var (
+	verifyRejects = pairTTLStore[struct{}]{
+		m:          map[string]time.Time{},
+		ttl:        time.Minute,
+		maxKeys:    4096,
+		sweepEvery: 5 * time.Second,
+		fullMsg:    "[challenge] verify_reject log throttle full (%d): further verify_reject lines are dropped until pressure drops",
+	}
+	clearedRedirects = pairTTLStore[struct{}]{
+		m:          map[string]time.Time{},
+		ttl:        10 * time.Second,
+		maxKeys:    4096,
+		sweepEvery: 2 * time.Second,
+		fullMsg:    "[challenge] cleared-redirect breaker store full (%d): cleared clients get the challenge page until pressure drops",
+	}
+)
+
+// logVerifyReject writes the early verify 403s (cookie / token / PoW) to the
+// challenges log. They used to answer 403 silently, and the challenge page's
+// retry then hid them: a second tab that lost its cfm_chal cookie left no
+// trace at all (ligaapola.gr on mars, 2026-09-30).
+func logVerifyReject(ip, host, reason, next, ua string) {
+	if !verifyRejects.putIfAbsent(ip+"|"+reason, struct{}{}, time.Now()) {
+		return
+	}
+	logging.LogfCHALLENGES("[challenge] verify_reject ip=%s host=%s reason=%s next=%q ua=%q",
+		ip, truncateForLog(host, 120), reason, truncateForLog(next, 220), truncateForLog(ua, 200))
+}
+
+// isSameOriginPath reports whether p (already starting with "/") stays on this
+// origin when a browser resolves it: its second character is not "/" (a
+// network-path reference), its path holds no "\\" (browsers read it as "/"),
+// and it holds no control character.
+func isSameOriginPath(p string) bool {
+	if len(p) > 1 && (p[1] == '/' || p[1] == '\\') {
+		return false
+	}
+	// http.Redirect path.Clean()s the path AFTER this check, so a backslash
+	// anywhere in it can end up second: "/./\\evil.com" -> "/\\evil.com".
+	pathPart := p
+	if i := strings.IndexByte(pathPart, '?'); i >= 0 {
+		pathPart = pathPart[:i]
+	}
+	if strings.ContainsRune(pathPart, '\\') {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if p[i] < 0x20 || p[i] == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func nestedChallengeTarget(raw string) bool {
@@ -372,11 +441,15 @@ func maybeListenV6LoopbackFromV4Loopback(addr string) (string, bool) {
 }
 
 const (
-	maxVerifyBodyBytes  = 1 << 10 // 1KB
-	maxUALen            = 256
-	maxHostLen          = 253
-	maxNextLen          = 2048
-	maxHeaderBytesTight = 16 << 10 // 16KB (challenge server only)
+	maxVerifyBodyBytes = 1 << 10 // 1KB
+	maxUALen           = 256
+	maxHostLen         = 253
+	// 4096: a challenged POST's next carries the original URI plus cfm_rt,
+	// and 2048 turned a long admin/ajax URI into "/" (the homepage, the stash
+	// never replayed). The page's verify URL carries it escaped (up to ~3x),
+	// next to the site's cookies, hence maxHeaderBytesTight's 32 KB.
+	maxNextLen          = 4096
+	maxHeaderBytesTight = 32 << 10 // 32KB (challenge server only; the edge allows 64k)
 
 	// ---- challenge server self-protection ----
 	// /verify is the expensive endpoint (token + PoW verify). Keep it tight.
@@ -809,6 +882,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// Require cookie + HMAC token
 		c, err := r.Cookie("cfm_chal")
 		if err != nil || strings.TrimSpace(c.Value) == "" {
+			logVerifyReject(ipStr, host, "missing_cookie", next, r.UserAgent())
 			http.Error(w, "missing cookie", http.StatusForbidden)
 			return
 		}
@@ -816,10 +890,12 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// Expect token in header (sent by JS)
 		tok := strings.TrimSpace(r.Header.Get("X-CFM-Token"))
 		if tok == "" {
+			logVerifyReject(ipStr, host, "missing_token", next, r.UserAgent())
 			http.Error(w, "missing token", http.StatusForbidden)
 			return
 		}
 		if !verifyToken(tok, ip.String(), r.UserAgent(), c.Value) {
+			logVerifyReject(ipStr, host, "bad_token", next, r.UserAgent())
 			http.Error(w, "bad token", http.StatusForbidden)
 			return
 		}
@@ -828,12 +904,14 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		powTok := strings.TrimSpace(r.Header.Get("X-CFM-Pow"))
 		sol := strings.TrimSpace(r.Header.Get("X-CFM-Sol"))
 		if powTok == "" || sol == "" {
+			logVerifyReject(ipStr, host, "missing_pow", next, r.UserAgent())
 			http.Error(w, "missing pow", http.StatusForbidden)
 			return
 		}
 
 		cfg := defaultPowConfig()
 		if !cfg.Enabled {
+			logVerifyReject(ipStr, host, "pow_disabled", next, r.UserAgent())
 			http.Error(w, "pow disabled", http.StatusForbidden)
 			return
 		}
@@ -846,6 +924,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		verifyAt := time.Now().UTC()
 		issuedAt, diff, nonce16, ok := verifyPowChallenge(powSecretKey(), powTok, bind, cfg, verifyAt)
 		if !ok || !verifyPowSolution(nonce16, bind, sol, diff) {
+			logVerifyReject(ipStr, host, "bad_pow", next, r.UserAgent())
 			http.Error(w, "bad pow", http.StatusForbidden)
 			return
 		}
@@ -1081,13 +1160,13 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			SameSite: http.SameSiteLaxMode,
 		})
 
-		// Optional: expire the challenge cookie to reduce confusion/churn.
-		http.SetCookie(w, &http.Cookie{
-			Name:   "cfm_chal",
-			Value:  "",
-			Path:   "/",
-			MaxAge: -1,
-		})
+		// cfm_chal is deliberately NOT expired here. Every challenge page open
+		// in this browser shares it (it is set only when missing), and each
+		// page's token and PoW are bound to it. Expiring it on the first solve
+		// made every OTHER open tab's verify fail with "missing cookie": two
+		// wp-admin products opened with ctrl+click, the slower tab lost its
+		// target (ligaapola.gr on mars, 2026-09-30). It expires on its own
+		// (MaxAge 300) and binds nothing beyond this browser + UA + IP.
 
 		// Give nft/conntrack a tiny moment; helps avoid browser redirect loops on keep-alives.
 		time.Sleep(500 * time.Millisecond)
@@ -1205,25 +1284,71 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			return
 		}
 
-		// If already solved (cookie present + token valid), release and redirect.
-		next = normalizeChallengeNext(r.URL.Query().Get("next"))
+		// Already cleared (another tab solved while this one was loading or
+		// verifying): send the client straight to next instead of serving a
+		// fresh challenge. The page's own retry lands here (JS below), so a
+		// tab whose verify failed because a sibling tab won still reaches its
+		// target, a waiting POST (cfm_rt) included (the edge replays it on
+		// arrival; for a cleared client it lands). The clearance is checked exactly as the
+		// edge checks it: same token, bound to this IP, host and scope (the web
+		// location stamps the host and clears the panel headers, as verify's
+		// does). If the edge disagrees anyway (e.g. a bridge-token rotation
+		// window: this side re-reads the secret, the edge caches it for ~10s),
+		// it challenges next again and the client comes straight back here.
+		// The breaker then serves the page instead of bouncing the client
+		// into ERR_TOO_MANY_REDIRECTS and the page rate limit's firewall ban.
+		// Only on /__cfm_challenge itself: that location stamps the host and
+		// the scope headers. A challenge the edge proxies through
+		// `location /` carries the client's X-Forwarded-Host / port headers,
+		// which must not pick the host or scope this check uses.
+		if host, scope := trustedForwardedHost(r), clearanceScope(r); r.URL.Path == challengePath && host != "" {
+			if c, err := r.Cookie(clearanceCookieName(scope)); err == nil &&
+				verifyClearanceToken(c.Value, ip.String(), host, scope, time.Now()) {
+				// Keyed on next in a CANONICAL form (decoded path + sorted,
+				// re-encoded query), not the raw string: the edge's bounce comes
+				// back with next rebuilt from the request URI (differently
+				// escaped, same target), which a raw-string key would miss.
+				// Per target, so a second tab going to another page (even
+				// post.php with another ?post=) is not mistaken for a loop.
+				canon := next
+				if u, err := url.ParseRequestURI(next); err == nil {
+					canon = u.Path + "?" + u.Query().Encode()
+				}
+				sum := sha256.Sum256([]byte(canon))
+				key := ip.String() + "|" + scope + "|" + host + "|" + hex.EncodeToString(sum[:8])
+				if clearedRedirects.putIfAbsent(key, struct{}{}, time.Now()) {
+					w.Header().Set("Cache-Control", "no-store")
+					http.Redirect(w, r, next, http.StatusSeeOther) // 303
+					return
+				}
+				if verifyRejects.putIfAbsent(ip.String()+"|cleared_redirect_loop", struct{}{}, time.Now()) {
+					logging.LogfCHALLENGES("[challenge] cleared_redirect_loop ip=%s host=%s scope=%s next=%q note=serving_page",
+						ip.String(), truncateForLog(host, 120), scope, truncateForLog(next, 220))
+				}
+			}
+		}
 
-		// cookie challenge: set ONLY if missing (prevents token mismatch loops)
+		// cfm_chal: a NEW value only when missing (a new value would break the
+		// token of every other open challenge page: mismatch loops).
+		// The VALUE is kept when present (open tabs share it; their tokens and
+		// PoW are bound to it), but every page re-sets it with a full MaxAge:
+		// since a solve no longer expires it, a page reusing a cookie close to
+		// its 300 s end would otherwise lose it in the middle of the PoW.
 		cookieVal := ""
 		if c, err := r.Cookie("cfm_chal"); err == nil && strings.TrimSpace(c.Value) != "" {
 			cookieVal = c.Value
 		} else {
 			cookieVal = randomCookieValue()
-			http.SetCookie(w, &http.Cookie{
-				Name:     "cfm_chal",
-				Value:    cookieVal,
-				Path:     "/",
-				MaxAge:   300,
-				HttpOnly: false, // JS reads it
-				Secure:   (r.TLS != nil),
-				SameSite: http.SameSiteLaxMode,
-			})
 		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     "cfm_chal",
+			Value:    cookieVal,
+			Path:     "/",
+			MaxAge:   300,
+			HttpOnly: false, // JS reads it
+			Secure:   (r.TLS != nil),
+			SameSite: http.SameSiteLaxMode,
+		})
 
 		// Render challenge page (JS calls /verify with token)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1758,11 +1883,12 @@ func (s *ChallengeServer) shouldIgnoreIP(ip net.IP) bool {
 }
 
 // autoSolveAndRelease:
-// - removes challenge state (nft set) + adds OK cooldown (if supported)
-// - clears bridge IP (OpenResty mode)
-// - sets cfm_ok cookie
-// - expires cfm_chal cookie (best-effort)
-// - redirects to next
+//   - removes challenge state (nft set) + adds OK cooldown (if supported)
+//   - clears bridge IP (OpenResty mode)
+//   - sets cfm_ok cookie
+//   - keeps cfm_chal (another open tab may still verify with it; it expires on
+//     its own)
+//   - redirects to next
 func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Request, ip net.IP, host, next, reason string) {
 	ipStr := ""
 	if ip != nil {
@@ -1808,13 +1934,8 @@ func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Req
 		SameSite: http.SameSiteLaxMode,
 	})
 
-	// Expire challenge cookie (avoid churn)
-	http.SetCookie(w, &http.Cookie{
-		Name:   "cfm_chal",
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
-	})
+	// cfm_chal is kept, as in the verify path: another tab's challenge page
+	// may still be verifying with it.
 
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Connection", "close")
@@ -2185,6 +2306,47 @@ func challengeHTML() string {
   var next = %s;
   var difficulty = %d;
 
+  var cfmSession = {
+    get: function(k){ try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+    set: function(k, v){ try { sessionStorage.setItem(k, v); } catch (e) {} },
+    del: function(k){ try { sessionStorage.removeItem(k); } catch (e) {} }
+  };
+
+  // BEGIN cfmRetryTarget (run in node by TestChallengePage_RetryTargetLogic)
+  // Where a failed verify retries. Through the challenge server, never the
+  // site root with a next parameter: another tab may have solved meanwhile,
+  // and a cleared browser then gets the site's homepage (which ignores next).
+  // /__cfm_challenge sends a cleared client straight to next and serves a
+  // fresh challenge otherwise. After 3 failed verifies IN A ROW for this same
+  // next (a v2 reject resets the count: those keep their own backoff), go
+  // through the EDGE to next instead, cfm_rt kept: a challenge that has since
+  // lifted then lets the user through, and a waiting POST is replayed. If the
+  // client is still challenged, the edge consumes the waiting POST and refuses
+  // it (block_replayed): that save is lost, as it effectively was before (a
+  // client failing verify for good never saved).
+  function cfmRetryTarget(next, v2rej, store, now) {
+    var n = 0;
+    if (v2rej) {
+      store.del('cfm_vf');
+    } else {
+      var p = (store.get('cfm_vf') || '').split('|');
+      var seenNext = p.slice(2).join('|');
+      if (seenNext === next && now - (parseInt(p[1] || '0', 10) || 0) < 120000) {
+        n = parseInt(p[0] || '0', 10) || 0;
+      }
+      n++;
+      store.set('cfm_vf', n + '|' + now + '|' + next);
+    }
+    // next is the server-normalized same-origin path (normalizeChallengeNext,
+    // the ONE matcher); no second copy of that check here.
+    if (n >= 3) {
+      store.del('cfm_vf');
+      return next;
+    }
+    return "/__cfm_challenge?next=" + encodeURIComponent(next);
+  }
+  // END cfmRetryTarget
+
   // WebCrypto (crypto.subtle) requires a secure context in modern browsers.
   // If we were reached over plain HTTP, auto-upgrade to HTTPS to avoid
   // infinite reload loops (PoW would fail on insecure context).
@@ -2402,7 +2564,8 @@ func challengeHTML() string {
         credentials: "include"
       }).then(function(res){
         if (res.redirected) {
-          try { sessionStorage.removeItem('cfm_v2r'); } catch (e) {}
+          cfmSession.del('cfm_v2r');
+          cfmSession.del('cfm_vf');
           window.location = res.url; return;
         }
         // Rung-1 v2_reject ONLY (marked by the X-CFM-V2 header — any other
@@ -2418,13 +2581,11 @@ func challengeHTML() string {
         try { v2rej = (res.status === 403 && res.headers.get('X-CFM-V2') === 'reject'); } catch (e) {}
         var v2n = 0;
         if (v2rej) {
-          try {
-            var v2s = (sessionStorage.getItem('cfm_v2r') || '').split('|');
-            var v2ts = parseInt(v2s[1] || '0', 10) || 0;
-            if (Date.now() - v2ts < 120000) v2n = parseInt(v2s[0] || '0', 10) || 0;
-          } catch (e) {}
+          var v2s = (cfmSession.get('cfm_v2r') || '').split('|');
+          var v2ts = parseInt(v2s[1] || '0', 10) || 0;
+          if (Date.now() - v2ts < 120000) v2n = parseInt(v2s[0] || '0', 10) || 0;
           v2n++;
-          try { sessionStorage.setItem('cfm_v2r', v2n + '|' + Date.now()); } catch (e) {}
+          cfmSession.set('cfm_v2r', v2n + '|' + Date.now());
           if (v2n >= 6) {
             try {
               var m = document.querySelector('.muted');
@@ -2434,7 +2595,8 @@ func challengeHTML() string {
           }
         }
         var v2wait = v2rej ? Math.min(1200 * Math.pow(2, v2n), 30000) : 1200;
-        setTimeout(function(){ window.location = "/?next="+encodeURIComponent(next); }, v2wait);
+        var target = cfmRetryTarget(next, v2rej, cfmSession, Date.now());
+        setTimeout(function(){ window.location = target; }, v2wait);
       }).catch(function(){
         setTimeout(function(){ location.reload(); }, 1200);
       });
