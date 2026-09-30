@@ -175,8 +175,10 @@ func normalizeChallengeNext(raw string) string {
 // verifyRejects throttles logVerifyReject (and the loop breaker's own log
 // line) to one line per (ip, reason) a minute. clearedRedirects is the
 // challenge page's loop breaker: a second cleared redirect for the same (ip,
-// scope, host) within 10 s serves the page instead. Both use the
-// package's one bounded TTL store.
+// scope, host, next path) within 10 s serves the page instead. Both use the
+// package's one bounded TTL store through putIfAbsent: a key the full store
+// cannot record reads as seen, so both then take their conservative branch
+// (no log line, serve the page).
 var (
 	verifyRejects = pairTTLStore[struct{}]{
 		m:          map[string]time.Time{},
@@ -194,19 +196,12 @@ var (
 	}
 )
 
-// firstSighting records key and reports whether it was new (no live entry),
-// atomically. A key the full store cannot record reads as seen: the caller
-// then takes its conservative branch (no log line, serve the page).
-func firstSighting(st *pairTTLStore[struct{}], key string, now time.Time) bool {
-	return st.putIfAbsent(key, struct{}{}, now)
-}
-
 // logVerifyReject writes the early verify 403s (cookie / token / PoW) to the
 // challenges log. They used to answer 403 silently, and the challenge page's
 // retry then hid them: a second tab that lost its cfm_chal cookie left no
 // trace at all (ligaapola.gr on mars, 2026-09-30).
 func logVerifyReject(ip, host, reason, next, ua string) {
-	if !firstSighting(&verifyRejects, ip+"|"+reason, time.Now()) {
+	if !verifyRejects.putIfAbsent(ip+"|"+reason, struct{}{}, time.Now()) {
 		return
 	}
 	logging.LogfCHALLENGES("[challenge] verify_reject ip=%s host=%s reason=%s next=%s ua=%q",
@@ -446,14 +441,15 @@ func maybeListenV6LoopbackFromV4Loopback(addr string) (string, bool) {
 }
 
 const (
-	maxVerifyBodyBytes  = 1 << 10 // 1KB
-	maxUALen            = 256
-	maxHostLen          = 253
+	maxVerifyBodyBytes = 1 << 10 // 1KB
+	maxUALen           = 256
+	maxHostLen         = 253
 	// 4096: a challenged POST's next carries the original URI plus cfm_rt,
 	// and 2048 turned a long admin/ajax URI into "/" (the homepage, the stash
-	// never replayed). Escaped, 4096 stays under maxHeaderBytesTight.
+	// never replayed). The page's verify URL carries it escaped (up to ~3x),
+	// next to the site's cookies, hence maxHeaderBytesTight's 32 KB.
 	maxNextLen          = 4096
-	maxHeaderBytesTight = 16 << 10 // 16KB (challenge server only)
+	maxHeaderBytesTight = 32 << 10 // 32KB (challenge server only; the edge allows 64k)
 
 	// ---- challenge server self-protection ----
 	// /verify is the expensive endpoint (token + PoW verify). Keep it tight.
@@ -1308,15 +1304,23 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		if host, scope := trustedForwardedHost(r), clearanceScope(r); r.URL.Path == challengePath && host != "" {
 			if c, err := r.Cookie(clearanceCookieName(scope)); err == nil &&
 				verifyClearanceToken(c.Value, ip.String(), host, scope, time.Now()) {
-				// Keyed without next: the edge's bounce comes back with next
-				// rebuilt from the request URI (a different string for the
-				// same target), which a next-keyed breaker would miss.
-				if firstSighting(&clearedRedirects, ip.String()+"|"+scope+"|"+host, time.Now()) {
+				// Keyed on next's DECODED path, not the next string: the edge's
+				// bounce comes back with next rebuilt from the request URI (a
+				// differently escaped string, same path), which a next-keyed
+				// breaker would miss. Per path, so a second tab going to
+				// another page is not mistaken for a loop.
+				nextPath := next
+				if u, err := url.ParseRequestURI(next); err == nil {
+					nextPath = u.Path
+				}
+				sum := sha256.Sum256([]byte(nextPath))
+				key := ip.String() + "|" + scope + "|" + host + "|" + hex.EncodeToString(sum[:8])
+				if clearedRedirects.putIfAbsent(key, struct{}{}, time.Now()) {
 					w.Header().Set("Cache-Control", "no-store")
 					http.Redirect(w, r, next, http.StatusSeeOther) // 303
 					return
 				}
-				if firstSighting(&verifyRejects, ip.String()+"|cleared_redirect_loop", time.Now()) {
+				if verifyRejects.putIfAbsent(ip.String()+"|cleared_redirect_loop", struct{}{}, time.Now()) {
 					logging.LogfCHALLENGES("[challenge] cleared_redirect_loop ip=%s host=%s scope=%s next=%s note=serving_page",
 						ip.String(), truncateForLog(host, 120), scope, truncateForLog(next, 220))
 				}
@@ -1878,12 +1882,12 @@ func (s *ChallengeServer) shouldIgnoreIP(ip net.IP) bool {
 }
 
 // autoSolveAndRelease:
-// - removes challenge state (nft set) + adds OK cooldown (if supported)
-// - clears bridge IP (OpenResty mode)
-// - sets cfm_ok cookie
-// - keeps cfm_chal (another open tab may still verify with it; it expires on
-//   its own)
-// - redirects to next
+//   - removes challenge state (nft set) + adds OK cooldown (if supported)
+//   - clears bridge IP (OpenResty mode)
+//   - sets cfm_ok cookie
+//   - keeps cfm_chal (another open tab may still verify with it; it expires on
+//     its own)
+//   - redirects to next
 func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Request, ip net.IP, host, next, reason string) {
 	ipStr := ""
 	if ip != nil {
@@ -2301,6 +2305,43 @@ func challengeHTML() string {
   var next = %s;
   var difficulty = %d;
 
+  var cfmSession = {
+    get: function(k){ try { return sessionStorage.getItem(k); } catch (e) { return null; } },
+    set: function(k, v){ try { sessionStorage.setItem(k, v); } catch (e) {} },
+    del: function(k){ try { sessionStorage.removeItem(k); } catch (e) {} }
+  };
+
+  // BEGIN cfmRetryTarget (run in node by TestChallengePage_RetryTargetLogic)
+  // Where a failed verify retries. Through the challenge server, never the
+  // site root with a next parameter: another tab may have solved meanwhile,
+  // and a cleared browser then gets the site's homepage (which ignores next).
+  // /__cfm_challenge sends a cleared client straight to next and serves a
+  // fresh challenge otherwise. After 3 failed verifies IN A ROW for this same
+  // next (a v2 reject resets the count: those keep their own backoff), go
+  // through the EDGE to next instead, cfm_rt kept: a challenge that has since
+  // lifted then lets the user through, and a waiting POST is replayed.
+  function cfmRetryTarget(next, v2rej, store, now) {
+    var n = 0;
+    if (v2rej) {
+      store.del('cfm_vf');
+    } else {
+      var p = (store.get('cfm_vf') || '').split('|');
+      var seenNext = p.slice(2).join('|');
+      if (seenNext === next && now - (parseInt(p[1] || '0', 10) || 0) < 120000) {
+        n = parseInt(p[0] || '0', 10) || 0;
+      }
+      n++;
+      store.set('cfm_vf', n + '|' + now + '|' + next);
+    }
+    if (n >= 3 && typeof next === "string" && next.charAt(0) === "/" &&
+        next.charAt(1) !== "/" && next.indexOf("\\") < 0) {
+      store.del('cfm_vf');
+      return next;
+    }
+    return "/__cfm_challenge?next=" + encodeURIComponent(next);
+  }
+  // END cfmRetryTarget
+
   // WebCrypto (crypto.subtle) requires a secure context in modern browsers.
   // If we were reached over plain HTTP, auto-upgrade to HTTPS to avoid
   // infinite reload loops (PoW would fail on insecure context).
@@ -2518,7 +2559,8 @@ func challengeHTML() string {
         credentials: "include"
       }).then(function(res){
         if (res.redirected) {
-          try { sessionStorage.removeItem('cfm_v2r'); sessionStorage.removeItem('cfm_vf'); } catch (e) {}
+          try { sessionStorage.removeItem('cfm_v2r'); } catch (e) {}
+          cfmSession.del('cfm_vf');
           window.location = res.url; return;
         }
         // Rung-1 v2_reject ONLY (marked by the X-CFM-V2 header — any other
@@ -2550,30 +2592,7 @@ func challengeHTML() string {
           }
         }
         var v2wait = v2rej ? Math.min(1200 * Math.pow(2, v2n), 30000) : 1200;
-        // Where to retry. Through the challenge server first, never the site
-        // root with a next parameter: another tab may have solved meanwhile,
-        // and a cleared browser then gets the site's homepage (which ignores
-        // next). /__cfm_challenge sends a cleared client straight to next and
-        // serves a fresh challenge otherwise. After 3 failed verifies in a row
-        // (not v2 rejects: those keep their own backoff), go through the EDGE
-        // to next instead, so a challenge that has since lapsed lets the user
-        // through rather than looping here forever. That target drops cfm_rt:
-        // an uncleared replay of a waiting POST would only be refused.
-        var vfn = 0;
-        if (!v2rej) {
-          try {
-            var vfs = (sessionStorage.getItem('cfm_vf') || '').split('|');
-            if (Date.now() - (parseInt(vfs[1] || '0', 10) || 0) < 120000) vfn = parseInt(vfs[0] || '0', 10) || 0;
-          } catch (e) {}
-          vfn++;
-          try { sessionStorage.setItem('cfm_vf', vfn + '|' + Date.now()); } catch (e) {}
-        }
-        var target = "/__cfm_challenge?next=" + encodeURIComponent(next);
-        if (vfn >= 3 && typeof next === "string" && next.charAt(0) === "/" &&
-            next.charAt(1) !== "/" && next.indexOf("\\") < 0) {
-          target = next.replace(/([?&])cfm_rt=[^&#]*&?/, "$1").replace(/[?&]$/, "") || "/";
-          try { sessionStorage.removeItem('cfm_vf'); } catch (e) {}
-        }
+        var target = cfmRetryTarget(next, v2rej, cfmSession, Date.now());
         setTimeout(function(){ window.location = target; }, v2wait);
       }).catch(function(){
         setTimeout(function(){ location.reload(); }, 1200);

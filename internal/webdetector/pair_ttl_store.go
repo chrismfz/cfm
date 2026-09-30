@@ -9,13 +9,18 @@ import (
 
 // pairTTLStore is the ONE bounded, TTL'd store behind the ChallengeV2 rung
 // marks (gate teeth: challengeV2Marks per (ip,host), challengeV2IPMarks per
-// IP) and the traffic-rule challenge notes (telemetry, challengeRuleNotes) —
-// one implementation, so a fix to the sweep, the cap or the once-per-episode
-// warning reaches all of them. Pair keys come from challengeV2MarkKey; the
-// per-IP store keys on the trimmed IP.
+// IP), the traffic-rule challenge notes (telemetry, challengeRuleNotes), the
+// challenge server's verify_reject log throttle (verifyRejects) and its
+// cleared-redirect loop breaker (clearedRedirects) — one implementation, so a
+// fix to the sweep, the cap or the once-per-episode warning reaches all of
+// them. Pair keys come from challengeV2MarkKey; the per-IP store keys on the
+// trimmed IP.
 //
-// Bounded and fail-open: at maxKeys a NEW key is dropped after an expiry
-// sweep (never an error); existing keys keep refreshing. Reads take only the
+// Bounded: at maxKeys a NEW key is dropped after an expiry sweep (never an
+// error); existing keys keep refreshing. What a dropped key means is the
+// caller's: put is fail-open (the mark / note is simply not recorded), while
+// putIfAbsent reports false, which the throttle and the breaker read as
+// "seen" (no log line; serve the challenge page instead of redirecting). Reads take only the
 // RLock and never delete — an expired key answers "absent" and is left for
 // the write-pressure sweep, which is what bounds the store.
 //

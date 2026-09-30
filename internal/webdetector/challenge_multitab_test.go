@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -228,19 +229,20 @@ func TestNormalizeChallengeNext_RefusesOtherOrigins(t *testing.T) {
 	}
 }
 
-func TestFirstSighting_WindowAndFullStore(t *testing.T) {
+func TestPutIfAbsent_WindowAndFullStore(t *testing.T) {
 	st := pairTTLStore[struct{}]{m: map[string]time.Time{}, ttl: time.Minute, maxKeys: 2, fullMsg: "full %d"}
 	t0 := time.Unix(1000, 0)
-	if !firstSighting(&st, "a", t0) || firstSighting(&st, "a", t0.Add(59*time.Second)) {
+	add := func(k string, at time.Time) bool { return st.putIfAbsent(k, struct{}{}, at) }
+	if !add("a", t0) || add("a", t0.Add(59*time.Second)) {
 		t.Fatal("a first sighting is new, a repeat within the TTL is not")
 	}
-	if !firstSighting(&st, "a", t0.Add(2*time.Minute)) {
+	if !add("a", t0.Add(2*time.Minute)) {
 		t.Fatal("after the TTL the key is new again")
 	}
-	firstSighting(&st, "b", t0.Add(2*time.Minute))
+	add("b", t0.Add(2*time.Minute))
 	// Full of live keys: a newcomer cannot be recorded and reads as seen, so
 	// the caller takes its conservative branch (no log line, serve the page).
-	if firstSighting(&st, "c", t0.Add(2*time.Minute)) {
+	if add("c", t0.Add(2*time.Minute)) {
 		t.Fatal("a key the full store cannot record must read as seen")
 	}
 }
@@ -280,19 +282,106 @@ func TestNormalizeChallengeNext_KeepsALongResumeTarget(t *testing.T) {
 	}
 }
 
-// After 3 failed verifies in a row the page retries through the EDGE, to next
-// without cfm_rt, so a lapsed challenge lets the user through.
-func TestChallengePage_RetryFallsBackToTheEdgeAfterRepeatedFailures(t *testing.T) {
+// The retry logic runs for real in node: extracted from the page between its
+// markers and exercised with a fake sessionStorage. Skipped without node
+// (CI has it: make test-js).
+func TestChallengePage_RetryTargetLogic(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
 	html := challengeHTML()
-	for _, want := range []string{
-		`sessionStorage.getItem('cfm_vf')`,
-		`if (vfn >= 3 &&`,
-		`next.replace(/([?&])cfm_rt=[^&#]*&?/, "$1")`,
-		`next.indexOf("\\") < 0`,
-	} {
-		if !strings.Contains(html, want) {
-			t.Errorf("challenge page lacks %q", want)
+	begin := strings.Index(html, "// BEGIN cfmRetryTarget")
+	end := strings.Index(html, "// END cfmRetryTarget")
+	if begin < 0 || end < 0 {
+		t.Fatal("cfmRetryTarget markers not found in the challenge page")
+	}
+	fn := html[begin:end]
+	script := fn + `
+const assert = require("assert");
+function mem() { const m = {}; return { get: k => (k in m ? m[k] : null), set: (k, v) => { m[k] = v; }, del: k => { delete m[k]; }, m }; }
+const next = "/wp-admin/post.php?post=66091&action=edit&cfm_rt=T";
+const via = "/__cfm_challenge?next=" + encodeURIComponent(next);
+
+// 1-2 failures: through the challenge server; the 3rd in a row: the edge, cfm_rt KEPT.
+let s = mem(), t0 = 1000000;
+assert.strictEqual(cfmRetryTarget(next, false, s, t0), via);
+assert.strictEqual(cfmRetryTarget(next, false, s, t0 + 1000), via);
+assert.strictEqual(cfmRetryTarget(next, false, s, t0 + 2000), next);
+// ...and the count starts over after the fallback.
+assert.strictEqual(cfmRetryTarget(next, false, s, t0 + 3000), via);
+
+// A different next does not inherit the count (a new challenge in the same tab).
+s = mem();
+cfmRetryTarget(next, false, s, t0); cfmRetryTarget(next, false, s, t0 + 1);
+assert.strictEqual(cfmRetryTarget("/other", false, s, t0 + 2), "/__cfm_challenge?next=%2Fother");
+
+// A v2 reject resets it: the failures must be in a row.
+s = mem();
+cfmRetryTarget(next, false, s, t0); cfmRetryTarget(next, false, s, t0 + 1);
+assert.strictEqual(cfmRetryTarget(next, true, s, t0 + 2), via);
+assert.strictEqual(cfmRetryTarget(next, false, s, t0 + 3), via);
+
+// The count expires after 2 minutes of quiet.
+s = mem();
+cfmRetryTarget(next, false, s, t0); cfmRetryTarget(next, false, s, t0 + 1);
+assert.strictEqual(cfmRetryTarget(next, false, s, t0 + 120001), via);
+
+// A next with a "|" is compared whole.
+s = mem();
+const pipe = "/a|b?x=1";
+cfmRetryTarget(pipe, false, s, t0); cfmRetryTarget(pipe, false, s, t0 + 1);
+assert.strictEqual(cfmRetryTarget(pipe, false, s, t0 + 2), pipe);
+
+// Never another origin, whatever the count.
+for (const bad of ["//evil.com/x", "/\\evil.com", "https://evil.com/"]) {
+  s = mem();
+  for (let i = 0; i < 5; i++) {
+    const got = cfmRetryTarget(bad, false, s, t0 + i);
+    assert.ok(got.startsWith("/__cfm_challenge?next="), bad + " -> " + got);
+  }
+}
+// No usable sessionStorage (private mode: the page's cfmSession wrapper then
+// reads null and drops writes): every retry goes through the challenge server.
+const none = { get: () => null, set: () => {}, del: () => {} };
+for (let i = 0; i < 5; i++) assert.strictEqual(cfmRetryTarget(next, false, none, t0 + i), via);
+console.log("ok");
+`
+	out, err := exec.Command(node, "-e", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
+
+// Keyed on next's decoded path: another page from the same browser within the
+// window is not a loop, while the edge's bounce (next rebuilt, same path) is.
+func TestChallengePage_BreakerIsPerPath(t *testing.T) {
+	useClearanceBridgeToken(t, unitTestBridgeSecret)
+	base, _ := startVerifyServer(t)
+	resetThrottleStores(t)
+	const ip, host = "203.0.113.82", "shop.example.com"
+	get := func(rawNextQuery string) int {
+		req, _ := http.NewRequest(http.MethodGet, base+challengePath+"?next="+rawNextQuery, nil)
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
+		req.Header.Set("X-Real-IP", ip)
+		req.Header.Set("X-Forwarded-Host", host)
+		req.AddCookie(&http.Cookie{Name: "cfm_clearance", Value: issueClearanceToken(ip, host, "web", time.Now().Add(time.Hour))})
+		resp, err := noFollow().Do(req)
+		if err != nil {
+			t.Fatal(err)
 		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if c := get(url.QueryEscape("/προϊόν/ένα?x=1")); c != http.StatusSeeOther {
+		t.Fatalf("first cleared visit: %d, want 303", c)
+	}
+	if c := get(url.QueryEscape("/wp-admin/post.php?post=2")); c != http.StatusSeeOther {
+		t.Fatalf("another page within the window: %d, want 303 (not a loop)", c)
+	}
+	// The bounce: same path, rebuilt (percent-encoded) and with another query.
+	if c := get(url.QueryEscape("/%CF%80%CF%81%CE%BF%CF%8A%CF%8C%CE%BD/%CE%AD%CE%BD%CE%B1?x=2")); c != http.StatusOK {
+		t.Fatalf("same path back within the window: %d, want the page (loop broken)", c)
 	}
 }
 
