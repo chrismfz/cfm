@@ -602,7 +602,7 @@ func (m *manager) maybeReload(parent context.Context) {
 		//go RunPeriodicWithState(ctx, det, m.opts.Sink, m.state)
 
 		// per-section blocking policy + wrapped sink
-		pol := parseBlockPolicy(kv)
+		pol := sectionBlockPolicy(secName, kv)
 
 		// NEW: global/per-section challenge cooldown (suppresses re-challenge spam)
 		// [global] CHALLENGE_COOLDOWN=30m
@@ -837,4 +837,35 @@ func parseBlockPolicy(kv KV) blockPolicy {
 		p.Cooldown = cd
 	}
 	return p
+}
+
+// sectionBlockDefaults is the BLOCK / BLOCK_COOLDOWN a detector TYPE runs with
+// when its section omits the key. Types not listed keep the framework default
+// (BLOCK = no, BLOCK_COOLDOWN = 15m). A listed value must equal the stock
+// configs/detectors.conf: a node whose conffile predates the key runs this
+// value, a node seeded later runs the stock one, and the two must not differ
+// (reference_defaults_config_test.go pins it).
+var sectionBlockDefaults = map[string]KV{
+	"ssh_auth": {"BLOCK": "permanent", "BLOCK_COOLDOWN": "30m"},
+}
+
+// sectionBlockPolicy is parseBlockPolicy with the section type's defaults
+// filled in for keys the section does not set. A key that is present wins,
+// even when empty (BLOCK = "" still means no blocking).
+func sectionBlockPolicy(section string, kv KV) blockPolicy {
+	typ, _ := SplitTypeInstance(section)
+	def, ok := sectionBlockDefaults[typ]
+	if !ok {
+		return parseBlockPolicy(kv)
+	}
+	merged := make(KV, len(kv)+len(def))
+	for k, v := range kv {
+		merged[k] = v
+	}
+	for k, v := range def {
+		if _, set := merged[k]; !set {
+			merged[k] = v
+		}
+	}
+	return parseBlockPolicy(merged)
 }

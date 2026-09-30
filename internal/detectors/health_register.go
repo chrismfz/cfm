@@ -10,6 +10,16 @@ import (
 	// "cfm/internal/logging"
 )
 
+// /tmp watch defaults: alert, and delete regular files older than
+// healthDefaultTmpCleanOlder, once /tmp reaches healthDefaultTmpPct percent.
+// They must equal the stock configs/detectors.conf [health] values
+// (reference_defaults_config_test.go). TMP_PCT = 0 in a section turns the
+// watch off.
+const (
+	healthDefaultTmpPct        = 85
+	healthDefaultTmpCleanOlder = 12 * time.Hour
+)
+
 func init() {
 	meta.Register(meta.DetectorMeta{
 		TypeKey:          "health",
@@ -46,7 +56,7 @@ func init() {
 			CpuLoadPct:  kvInt(kv, "CPU_LOAD_PCT", 120),
 			RamUsedPct:  kvInt(kv, "RAM_USED_PCT", 90),
 			DiskRootPct: kvInt(kv, "DISK_ROOT_PCT", 90),
-			TmpUsedPct:  kvInt(kv, "TMP_PCT", 0),
+			TmpUsedPct:  kvInt(kv, "TMP_PCT", healthDefaultTmpPct),
 
 			ConnTotalSpikeX: kvFlt(kv, "CONN_TOTAL_SPIKE", 3.0),
 			ConnEstSpikeX:   kvFlt(kv, "CONN_EST_SPIKE", 3.0),
@@ -80,7 +90,7 @@ func init() {
 			UsePTR:         ptrOn,
 			EnrichDirs:     dirs,
 
-			TmpCleanOlder: kvDur(kv, "TMP_CLEAN_OLDER", 0),
+			TmpCleanOlder: kvDur(kv, "TMP_CLEAN_OLDER", healthDefaultTmpCleanOlder),
 		}
 
 		d := health.New(cfg)
