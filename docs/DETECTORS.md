@@ -129,13 +129,15 @@ alone is applied (base-only start, loudly logged) rather than degrading to
 builtin-only protection (which stays reserved for the base file itself being
 unreadable).
 
-**Not overridable via overlay:** the auto-managed tokens `CHALLENGE_TOKEN` and
-`OPENRESTY_TOKEN` are **base-owned** — the daemon generates/persists them into
-the base `detectors.conf` and pins the runtime to the base value, ignoring an
-overlay override (an overlay value would otherwise be re-healed into the base
-every reload, an endless rotate loop, and would desync the `cfm_bridge_token.lua`
-the daemon writes). Set these in the base file if you set them at all; PR6 moves
-their generation out of the conffile entirely. Every other `[webdetector]` knob
+**Per-host tokens, not config:** `CHALLENGE_TOKEN` and `OPENRESTY_TOKEN` are
+generated once per host into `/var/lib/cfm/secrets/` (`challenge_token`,
+`openresty_token`; root, `0600`) and are never written into `detectors.conf`,
+so the conffile can stay identical to the packaged one and upgrades update it
+instead of leaving a `.rpmnew`. A strong value still set in the **base**
+`detectors.conf` wins and is copied into the store (the line can then be
+removed without invalidating visitors' challenge cookies). An overlay value is
+ignored, and a weak one (`placeholder`, under 32 characters) too. To rotate:
+remove the line from the base (if set), delete the store file, restart. Every other `[webdetector]` knob
 (`OPENRESTY_SOCK`, `LOG_PATH`, thresholds, …) is overlay-tunable as normal. Verify the
 merged result with `cfm detectors-srcresolve` and the cfm-admin "Source
 resolution" card. `config_drift` computes `missing_sections`/`missing_keys`

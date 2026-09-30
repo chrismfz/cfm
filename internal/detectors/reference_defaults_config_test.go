@@ -50,6 +50,15 @@ func TestReferenceConfigMatchesRuntimeDefaults(t *testing.T) {
 		t.Errorf("[webdetector] HISTORY_PRUNE_EVERY = %s, want 1h (a value that fails to parse reads as the fallback)", got)
 	}
 
+	// The per-host tokens are generated into /var/lib/cfm/secrets
+	// (hostsecrets), never shipped: a stock line would be a weak placeholder
+	// the daemon ignores, and a real value would be one secret for the fleet.
+	for _, key := range []string{"CHALLENGE_TOKEN", "OPENRESTY_TOKEN"} {
+		if v, ok := wd[key]; ok {
+			t.Errorf("[webdetector] %s = %q is set in stock; per-host tokens are generated, never shipped", key, v)
+		}
+	}
+
 	gov, ok := secs.ByName["mysql_governor"]
 	if !ok {
 		t.Fatal("[mysql_governor] section missing from detectors.conf")

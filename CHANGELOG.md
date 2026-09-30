@@ -17,7 +17,34 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **`CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` now live in
+  `/var/lib/cfm/secrets/`, not in `detectors.conf`.** The daemon used to
+  generate these per-host tokens into `/etc/cfm/detectors.conf`. That left the
+  conffile "modified" on every node, so upgrades never updated it and left a
+  `.rpmnew` / `.dpkg-dist` behind with the new stock settings in it.
+  - Each token is now generated once into `/var/lib/cfm/secrets/`
+    (`challenge_token`, `openresty_token`; root only). CFM never writes
+    `detectors.conf`.
+  - The stock file ships no token lines.
+  - **Nothing changes on upgrade:** a strong token already in
+    `detectors.conf` still wins and is copied into the store on the next start.
+    After that the line can be deleted without invalidating any visitor's
+    challenge cookie.
+  - To rotate a token, remove its line (if set), delete its store file, and
+    restart.
+  - `cfm status` / `cfm health` report the token the daemon actually uses.
+  - The token step (and `cfm_bridge_config.lua`) now also runs when
+    `[webdetector]` exists only in a `detectors.d/` overlay.
+
+### Fixed
+- **A `detectors.conf` whose tokens sat outside `[webdetector]` no longer
+  reloads every 5 seconds.** The old generator appended a missing token to the
+  end of the file, which could put it in another section. After that the
+  daemon never found it in `[webdetector]`, wrote a new value on every reload,
+  and the rewrite triggered the next reload. The token changed every 5s and
+  the detector layer kept restarting. server.speedhost.gr was in this loop
+  (2026-10-01). Tokens are no longer written into `detectors.conf` at all.
 
 ## 2026.09.30
 

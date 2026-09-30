@@ -278,6 +278,9 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
     this one was caught by the guard in CI, in a test added the same day);
   - the `notify` and `detectorscfg` `systemConfigPath` (via
     `SetSystemConfigPathForTest` from the apiserver `TestMain`).
+  - the `hostsecrets` `Dir` (`/var/lib/cfm/secrets`, the per-host
+    CHALLENGE_TOKEN / OPENRESTY_TOKEN store; a test that resolves a token sets
+    it to a temp dir first).
 
   The detectors' init-time states no longer create `detectors.state.d`
   (`core.DefaultState`). A new default path goes through the same kind of

@@ -69,7 +69,8 @@ type Config struct {
 	APIListen string // "127.0.0.1:9070" etc.
 
 	// Challenge token used to sign/verify browser challenge tokens.
-	// Source: [webdetector] CHALLENGE_TOKEN in detectors.conf.
+	// Source: [webdetector] CHALLENGE_TOKEN, resolved by the detectors manager
+	// through internal/hostsecrets (detectors.conf, else /var/lib/cfm/secrets).
 	ChallengeToken string
 
 	// Challenge server listener (plain HTTP; the edge proxies to it as the

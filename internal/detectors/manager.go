@@ -5,6 +5,7 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectorstatus"
 	"cfm/internal/enrich"
+	"cfm/internal/hostsecrets"
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
 	webdet "cfm/internal/webdetector"
@@ -365,54 +366,39 @@ func (m *manager) maybeReload(parent context.Context) {
 	}
 	m.stopAll()
 
-	// ── Token auto-generation for [webdetector] ───────────────────────────────
-	// CHALLENGE_TOKEN signs browser challenge HMACs.  OPENRESTY_TOKEN authenticates
-	// Lua→Go socket calls.  Both are rotated to a 48-hex-char random value if
-	// absent, too short (<32 chars), or a known placeholder.  The new value is
-	// written back to detectors.conf and into the in-memory KV so the detector
-	// starts with the correct token on the very first load.
-	// Tokens are BASE-owned: ValidateOrGenerateTokenKey persists into cfgPath
-	// (the base detectors.conf). Read the current values from the BASE
-	// [webdetector] — NOT the merged base+overlay view we run on — because the
-	// value read must be the value the generator rewrites. A weak/empty
-	// CHALLENGE_TOKEN/OPENRESTY_TOKEN supplied by an OVERLAY would otherwise be
-	// "healed" into the base on every reload while the merged read keeps
-	// returning the overlay's value: an endless regenerate → rewrite-base →
-	// re-challenge loop. Gating on the BASE section also preserves the
-	// pre-layering behaviour (this ran only when the base had [webdetector]), so
-	// an overlay-only [webdetector] never triggers a blind token append into a
-	// base that lacks the section. Overriding these two keys from an overlay is
-	// intentionally unsupported (PR6 moves generation out of the conffile); the
-	// runtime is pinned to the base-managed token so it stays in lockstep with
-	// the cfm_bridge_token.lua written below. Every OTHER [webdetector] knob
-	// below still uses the merged wdKV.
-	baseWD, baseHasWD := KV(nil), false
+	// ── Per-host tokens for [webdetector] ──────────────────────────────────────
+	// CHALLENGE_TOKEN signs browser challenge HMACs. OPENRESTY_TOKEN
+	// authenticates Lua→Go socket calls. Each is resolved by hostsecrets: a
+	// strong value still set in the BASE detectors.conf wins (and is copied
+	// into /var/lib/cfm/secrets), else the stored value, else a new random one
+	// is generated and stored. Nothing is ever written into detectors.conf:
+	// that is what kept the conffile "modified" on every node, so upgrades
+	// could not update it and left a .rpmnew behind.
+	// The legacy value is read from the BASE section only. An overlay token is
+	// ignored, as before: the runtime is pinned to the resolved value, which
+	// stays in lockstep with the cfm_bridge_token.lua written below. Every
+	// OTHER [webdetector] knob uses the merged wdKV. The block runs whenever
+	// the merged config has [webdetector], so an overlay-only [webdetector]
+	// also gets its tokens and cfm_bridge_config.lua.
+	baseWD := KV(nil)
 	if bs, berr := ReadSectionsFile(m.opts.CfgPath); berr == nil {
-		baseWD, baseHasWD = bs.ByName["webdetector"]
+		baseWD = bs.ByName["webdetector"]
 	}
-	if wdKV, ok := secs.ByName["webdetector"]; ok && baseHasWD {
-		cfgPath := m.opts.CfgPath // absolute path to detectors.conf
-
-		// F2: CHALLENGE_TOKEN (value read from BASE, generator writes BASE)
-		chalTok := kvStrClean(baseWD, "CHALLENGE_TOKEN", "")
-		if newTok, err := sslcollector.ValidateOrGenerateTokenKey(cfgPath, "CHALLENGE_TOKEN", chalTok); err != nil {
+	if wdKV, ok := secs.ByName["webdetector"]; ok {
+		// F2: CHALLENGE_TOKEN
+		if tok, src, err := hostsecrets.Resolve(hostsecrets.ChallengeToken, kvStrClean(baseWD, "CHALLENGE_TOKEN", "")); tok == "" {
 			logging.Logf("[detectors] CHALLENGE_TOKEN generation failed: %v", err)
 		} else {
-			if newTok != chalTok {
-				logging.Logf("[detectors] CHALLENGE_TOKEN was weak — rotated and persisted to %s", cfgPath)
-			}
-			wdKV["CHALLENGE_TOKEN"] = newTok // pin runtime to the base-managed token
+			logTokenSource(hostsecrets.ChallengeToken, src, err)
+			wdKV["CHALLENGE_TOKEN"] = tok // pin runtime to the resolved token
 		}
 
 		// F4: OPENRESTY_TOKEN — also writes cfm_bridge_token.lua for cfm.lua
-		bridgeTok := kvStrClean(baseWD, "OPENRESTY_TOKEN", "")
-		if newTok, err := sslcollector.ValidateOrGenerateTokenKey(cfgPath, "OPENRESTY_TOKEN", bridgeTok); err != nil {
+		if newTok, src, err := hostsecrets.Resolve(hostsecrets.BridgeToken, kvStrClean(baseWD, "OPENRESTY_TOKEN", "")); newTok == "" {
 			logging.Logf("[detectors] OPENRESTY_TOKEN generation failed: %v", err)
 		} else {
-			if newTok != bridgeTok {
-				logging.Logf("[detectors] OPENRESTY_TOKEN was weak — rotated and persisted to %s", cfgPath)
-			}
-			wdKV["OPENRESTY_TOKEN"] = newTok // pin runtime to the base-managed token
+			logTokenSource(hostsecrets.BridgeToken, src, err)
+			wdKV["OPENRESTY_TOKEN"] = newTok // pin runtime to the resolved token
 			cfmGID := sslcollector.CfmGroupID()
 			const bridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 			if err := sslcollector.WriteLuaTokenWithMkdir(bridgeTokenPath, newTok, cfmGID); err != nil {
@@ -804,6 +790,20 @@ func (m *manager) stopAll() {
 
 	if wasRunning {
 		logging.Logf("[detectors] all stopped")
+	}
+}
+
+// logTokenSource logs where a [webdetector] token came from when it is worth
+// knowing: generated, or still set in detectors.conf (the line can go now), or
+// not persisted. A token read from the store is the steady state: silent.
+func logTokenSource(key, source string, err error) {
+	switch {
+	case err != nil:
+		logging.Logf("[detectors] %s source=%s NOT stored in %s: %v — a restart generates a new one", key, source, hostsecrets.Path(key), err)
+	case source == hostsecrets.SourceGenerated:
+		logging.Logf("[detectors] %s generated and stored in %s", key, hostsecrets.Path(key))
+	case source == hostsecrets.SourceConf:
+		logging.Logf("[detectors] %s taken from detectors.conf and kept in %s; the detectors.conf line can be removed", key, hostsecrets.Path(key))
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"cfm/internal/hostsecrets"
 )
 
 func TestReadBridgeTokenProbeRequiresCanonicalFile(t *testing.T) {
@@ -27,5 +29,42 @@ func TestReadLuaTokenDecodesCanonicalWriterEscapes(t *testing.T) {
 	got := ReadLuaToken(path)
 	if !got.Present || !got.Valid || got.Token != token {
 		t.Fatalf("ReadLuaToken() = %+v, want valid token %q", got, token)
+	}
+}
+
+// ReadChallengeTokenProbe reports the token the daemon runs: a strong base
+// detectors.conf value, else the per-host store (hostsecrets). A node whose
+// detectors.conf no longer carries the line must not read as "no token".
+func TestReadChallengeTokenProbeFallsBackToTheStore(t *testing.T) {
+	t.Setenv("CHALLENGE_TOKEN", "")
+	old := hostsecrets.Dir
+	hostsecrets.Dir = filepath.Join(t.TempDir(), "secrets")
+	t.Cleanup(func() { hostsecrets.Dir = old })
+
+	const stored = "0123456789abcdef0123456789abcdef0123456789abcdef"
+	if _, _, err := hostsecrets.Resolve(hostsecrets.ChallengeToken, stored); err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(t.TempDir(), "detectors.conf")
+	for name, body := range map[string]string{
+		"no line":          "[webdetector]\nENABLED = 1\n",
+		"placeholder line": "[webdetector]\nCHALLENGE_TOKEN = placeholder\n",
+		"no section":       "[global]\nENRICH = 1\n",
+	} {
+		if err := os.WriteFile(conf, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := ReadChallengeTokenProbe(conf)
+		if !got.Present || !got.Valid || got.Token != stored {
+			t.Errorf("%s: ReadChallengeTokenProbe = %+v, want the stored token", name, got)
+		}
+	}
+
+	const inConf = "fedcba9876543210fedcba9876543210fedcba9876543210"
+	if err := os.WriteFile(conf, []byte("[webdetector]\nCHALLENGE_TOKEN = "+inConf+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadChallengeTokenProbe(conf); got.Token != inConf {
+		t.Errorf("strong detectors.conf value: ReadChallengeTokenProbe = %+v, want it (it wins)", got)
 	}
 }

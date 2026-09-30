@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"cfm/internal/detconf"
+	"cfm/internal/hostsecrets"
 )
 
 type LuaTokenProbe struct {
@@ -120,20 +121,16 @@ func ReadChallengeTokenProbe(path string) LuaTokenProbe {
 	if tok := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN")); tok != "" {
 		return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
 	}
-	// CHALLENGE_TOKEN is BASE-owned: the daemon pins the runtime token to the
-	// base value and ignores any overlay override (see the manager token
-	// block), so probe the BASE section — a merged read would report an
-	// overlay token the daemon never uses.
-	base, err := detconf.ReadSectionsFile(path)
-	if err != nil {
-		return LuaTokenProbe{}
+	// The daemon runs a strong BASE detectors.conf value (it ignores any
+	// overlay override, see the manager token block), else the per-host store
+	// (hostsecrets). Probe the same: a merged read would report an overlay
+	// token the daemon never uses.
+	legacy := ""
+	if base, err := detconf.ReadSectionsFile(path); err == nil {
+		legacy = strings.Trim(strings.TrimSpace(stripInlineComment(base.ByName["webdetector"]["CHALLENGE_TOKEN"])), `"'`)
 	}
-	if kv, ok := base.ByName["webdetector"]; ok {
-		if v, ok := kv["CHALLENGE_TOKEN"]; ok {
-			if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
-				return LuaTokenProbe{Token: clean, Present: true, Valid: IsStrongToken(clean)}
-			}
-		}
+	if clean := hostsecrets.Effective(hostsecrets.ChallengeToken, legacy); clean != "" {
+		return LuaTokenProbe{Token: clean, Present: true, Valid: IsStrongToken(clean)}
 	}
 	return LuaTokenProbe{}
 }

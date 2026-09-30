@@ -8,6 +8,7 @@ import (
 	"cfm/internal/enrich"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/setinventory"
+	"cfm/internal/hostsecrets"
 	"cfm/internal/ipquery"
 	"context"
 	"encoding/json"
@@ -872,14 +873,12 @@ func readChallengeTokenProbe() luaTokenProbe {
 	if tok != "" {
 		return luaTokenProbe{Token: tok, Present: true, Valid: isStrongToken(tok)}
 	}
-	// CHALLENGE_TOKEN is base-owned (the daemon pins the runtime token to the
-	// base value and ignores overlay overrides), so probe the BASE section.
+	// The daemon runs a strong BASE detectors.conf value (overlay overrides are
+	// ignored), else the per-host store (hostsecrets): report the same one.
 	kv := readBaseDetectorSectionKV(resolveDetectorsConfigPath(), "webdetector")
-	if v, ok := kv["CHALLENGE_TOKEN"]; ok {
-		clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`)
-		if clean != "" {
-			return luaTokenProbe{Token: clean, Present: true, Valid: isStrongToken(clean)}
-		}
+	legacy := strings.Trim(strings.TrimSpace(stripInlineComment(kv["CHALLENGE_TOKEN"])), `"'`)
+	if clean := hostsecrets.Effective(hostsecrets.ChallengeToken, legacy); clean != "" {
+		return luaTokenProbe{Token: clean, Present: true, Valid: isStrongToken(clean)}
 	}
 	return luaTokenProbe{}
 }

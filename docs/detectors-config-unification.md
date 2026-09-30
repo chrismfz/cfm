@@ -208,13 +208,15 @@ Audit cleanup folded in: 5 servers put `AUTHFAIL_IP`/`AUTHFAIL_USER`/`DDOS_IP`
 dead lines (someone believed they set softer thresholds for GR; they set
 nothing). Validation should warn on unknown keys in `.leniency` sections.
 
-**Tokens.** `CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` are per-host secrets living
-in the conffile — the last blocker to a byte-identical file.
-`challenge_server.go` already generates an ephemeral fallback when the key is
-absent; make it **generate-once-and-persist** under `/var/lib/cfm/`
-(`root:cfm 0640`, same enforced ownership as the rendered Lua token files) so
-restarts keep cookies valid. Conffile value still wins where present
-(migration path: delete the key whenever, nothing breaks).
+**Tokens (landed 2026-10-01).** `CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` were
+per-host secrets generated INTO the conffile — the last blocker to a
+byte-identical file. `internal/hostsecrets` now generates each once per host
+into `/var/lib/cfm/secrets/` (root, dir `0700`, files `0600`; only the daemon
+reads them, the edge keeps reading the `cfm_bridge_token.lua` mirror) and
+never writes `detectors.conf`. The stock file ships no token lines. A strong
+base-conffile value still wins and is copied into the store, so the migration
+is "delete the line whenever, nothing breaks" (no cookie is invalidated).
+`cfm status` / `cfm health` read the same resolution (`hostsecrets.Effective`).
 
 ---
 
