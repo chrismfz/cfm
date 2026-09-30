@@ -183,7 +183,7 @@ do
     local s0b = src:find("-- ── Step 0b:", 1, true)
     local s0c = src:find("-- ── Step 0c", 1, true)
     local waf = src:find("-- ── Step 2: Inline WAF", 1, true)
-    local res = s0c and src:find("\ntry_apply_post_resume(ip, host)", s0c, true)
+    local res = s0c and src:find("try_apply_post_resume(ip, host)", s0c, true)
     local clr = src:find("-- ── Step 1: Validate clearance", 1, true)
     check(s0b and s0b < s0d, "Step 0d follows Step 0b (UA emergency still applies)")
     check(s0c and s0c < s0d, "Step 0d follows Step 0c (fingerprint deny still applies)")

@@ -1302,7 +1302,19 @@ if CFG.fp_policy then
 end
 
 -- ── POST resume ──────────────────────────────────────────────────────────────
-try_apply_post_resume(ip, host)
+-- Clearance is validated first (it depends on neither method nor URI), and a
+-- stashed POST is replayed ONLY for a cleared client. The resume consumes the
+-- stash, so replaying it for an uncleared client could only end in the
+-- block_replayed 403 and a lost save. That happens when a cfm_rt carrier is
+-- followed before the solve: a challenge page's retry, a second tab, or a
+-- clearance the daemon accepts but the edge does not (bridge-token rotation).
+-- Uncleared, the GET is challenged as usual, next keeps its cfm_rt, and the
+-- solve's 303 replays the stash while it is still live.
+local clearance_scope = "web"
+local clearance_cookie = ngx.var.cookie_cfm_clearance
+local clearance_ok, clearance_status = validate_clearance_token(clearance_cookie, ip, host, clearance_scope)
+if CFG.debug_headers then ngx.header["X-CFM-Clearance"] = clearance_status end
+if clearance_ok then try_apply_post_resume(ip, host) end
 method = ngx.req.get_method() or method
 uri    = ngx.var.uri          or uri
 
@@ -1364,10 +1376,6 @@ end
 -- WAF inspection in Step 2. The validation result is captured in
 -- `clearance_allow`, which the post-clearance WAF challenge converter (Step 2)
 -- and the Step 2b clearance fast-path read.
-local clearance_scope = "web"
-local clearance_cookie = ngx.var.cookie_cfm_clearance
-local clearance_ok, clearance_status = validate_clearance_token(clearance_cookie, ip, host, clearance_scope)
-if CFG.debug_headers then ngx.header["X-CFM-Clearance"] = clearance_status end
 -- A resumed POST (challenge replay) holding valid clearance is treated EXACTLY
 -- like any cleared client: the WAF still runs unconditionally in Step 2 (a solved
 -- challenge never authorises an exploit — a block-tier hit blocks, and
@@ -1376,8 +1384,9 @@ if CFG.debug_headers then ngx.header["X-CFM-Clearance"] = clearance_status end
 -- so the stashed save lands at origin. Keying on clearance_ok (NOT the former
 -- `and not ngx.ctx.cfm_resumed_post`) is the fix: that exclusion pushed a cleared
 -- replay past Step 2b into the Step 3 block_replayed guard and 403'd the save. The
--- block_replayed guards (Step 2 challenge branch + Step 3) now fire only for an
--- UNCLEARED replay — the loop they exist to stop.
+-- block_replayed guards (Step 2 challenge branch + Step 3) fire only for an
+-- UNCLEARED replay, which the POST-resume gate above no longer produces; they
+-- stay as defence in depth against the loop they exist to stop.
 local clearance_allow = clearance_ok
 
 -- ── Step 2: Inline WAF ───────────────────────────────────────────────────────
@@ -1558,7 +1567,11 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
           push_and_log_waf_hit()
           ngx.header["X-CFM-Action"] = "challenge_resume"
           ngx.header["Cache-Control"] = "no-store"
-          return ngx.redirect("/?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
+          -- /__cfm_challenge, never "/?next=": a sibling tab may clear this
+          -- browser before the redirect is followed, and "/" would then pass
+          -- to the site's homepage and drop the stashed POST. The challenge
+          -- server sends a cleared client straight to next (the cfm_rt resume).
+          return ngx.redirect("/__cfm_challenge?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
         end
         -- Both rungs present to the CLIENT as a plain challenge: echoing
         -- "challenge_v2" here would hand a signal-aware solver farm the
@@ -1713,7 +1726,8 @@ if ip_action == "challenge" or vh_action == "challenge" or rule_action == "chall
   local rtok, rerr = store_post_resume(ip, host, ngx.var.request_uri or uri, method)
   if rtok then
     ngx.header["X-CFM-Action"] = "challenge_resume"; ngx.header["Cache-Control"] = "no-store"
-    return ngx.redirect("/?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
+    -- /__cfm_challenge, not "/?next=" (see the Step 2 challenge_resume redirect).
+    return ngx.redirect("/__cfm_challenge?next=" .. esc(with_query_arg((ngx.var.request_uri or uri), "cfm_rt", rtok)), ngx.HTTP_SEE_OTHER)
   end
   ngx.header["X-CFM-Action"] = "challenge"
   ngx.var.cfm_upstream = "cfm_challenge"; ngx.var.cfm_pass = "http://cfm_challenge"

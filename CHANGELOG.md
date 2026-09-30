@@ -17,7 +17,33 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **A challenge no longer sends a second open tab to the site's homepage.**
+  With two pages opened at once (e.g. two wp-admin products with ctrl+click),
+  both got the challenge. The first solve deleted the challenge cookie that
+  every open challenge page shares, so the other tab's verification failed
+  silently. Its retry then went to `/?next=…`, which a browser that was
+  already cleared receives as the site's homepage (ligaapola.gr,
+  2026-09-30). The cookie now stays until it expires on its own (5 min). A
+  failed attempt retries through `/__cfm_challenge`, which sends an
+  already-cleared browser straight to the page it wanted. A challenged form
+  save (POST) is sent there too instead of to `/?next=`, so a second tab
+  saving at the same moment no longer lands on the homepage and loses the
+  save. The edge also replays a stored save only for a browser that has
+  passed the challenge. Before, one that hadn't could trigger the replay
+  early and lose the save to a 403.
+- **Failed challenge verifications are now logged.** A missing cookie, bad
+  token or bad proof-of-work used to answer 403 with no trace. Each now
+  writes a `verify_reject` line to the challenges log, at most once a minute
+  per IP and reason.
+
+### Security
+- **The challenge's `next` redirect can no longer point to another site.**
+  `next=//evil.com`, `next=/\evil.com` or `next=/./\evil.com` came out in
+  the redirect after a solve as a link to another site, so a crafted
+  challenge link took a real user to a foreign site right after they solved
+  it. Such values, and any carrying a backslash in the path or a control
+  character, now become `/`.
 
 ## 2026.09.29
 

@@ -73,6 +73,19 @@ check(gate:find("cfm_resumed_post%s+then%s+return%s+true") ~= nil,
   .. "(`if ngx.ctx.cfm_resumed_post then return true end`), not routed through the "
   .. "$http_content_length gate that reads nil on the resume carrier")
 
+-- ── #3: a stashed POST is replayed ONLY for a cleared client ─────────────────
+-- The resume consumes the stash, so an uncleared replay could only end in the
+-- block_replayed 403 and a lost save (a challenge page's retry, a second tab, a
+-- clearance the daemon accepts but the edge does not). Clearance is validated
+-- first and gates the resume.
+local gate = cfm:find("if clearance_ok then try_apply_post_resume(ip, host) end", 1, true)
+check(gate ~= nil, "try_apply_post_resume must run only under `if clearance_ok then`")
+local val = cfm:find("local clearance_ok, clearance_status = validate_clearance_token(", 1, true)
+check(val ~= nil and gate ~= nil and val < gate, "clearance must be validated before the POST resume")
+local _, uses = cfm:gsub("try_apply_post_resume%(ip, host%)", "")
+local _, defs = cfm:gsub("local function try_apply_post_resume%(ip, host%)", "")
+check(uses - defs == 1, "exactly one try_apply_post_resume call site (the gated one), found " .. (uses - defs))
+
 if fails > 0 then
   io.stderr:write(("cfm post-resume clearance tests: %d FAILED\n"):format(fails))
   os.exit(1)

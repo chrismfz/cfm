@@ -18,8 +18,14 @@ import (
 // block in conf, by brace depth.
 func verifyLocations(t *testing.T, conf string) []string {
 	t.Helper()
+	return exactLocations(t, conf, "/__cfm_verify")
+}
+
+// exactLocations returns the body of every `location = <path> { … }` block.
+func exactLocations(t *testing.T, conf, path string) []string {
+	t.Helper()
 	var out []string
-	const head = "location = /__cfm_verify {"
+	head := "location = " + path + " {"
 	for i := strings.Index(conf, head); i >= 0; {
 		body := i + len(head)
 		depth, j := 1, body
@@ -32,7 +38,7 @@ func verifyLocations(t *testing.T, conf string) []string {
 			}
 		}
 		if depth != 0 {
-			t.Fatalf("unterminated /__cfm_verify block at offset %d", i)
+			t.Fatalf("unterminated %s block at offset %d", path, i)
 		}
 		out = append(out, conf[body:j-1])
 		next := strings.Index(conf[j:], head)
@@ -77,6 +83,32 @@ func TestVerifyLocations_PanelListenersStampTheirPort(t *testing.T) {
 	for i, loc := range locs {
 		if !stamp.MatchString(loc) {
 			t.Errorf("panel /__cfm_verify #%d does not stamp X-CFM-Panel-Port", i+1)
+		}
+	}
+}
+
+// The challenge page's cleared-client redirect (challenge_server.go) reads the
+// host and scope like verify does, so the web /__cfm_challenge locations must
+// stamp X-Forwarded-Host and clear the panel-scope headers too. Otherwise a
+// client (or a proxy in front of it) picks the host or the scope the check
+// uses, and the check disagrees with the edge's.
+func TestChallengeLocations_WebListenersStampHostAndClearScope(t *testing.T) {
+	stampHost := regexp.MustCompile(`proxy_set_header\s+X-Forwarded-Host\s+\$host;`)
+	clearPanel := regexp.MustCompile(`proxy_set_header\s+X-CFM-Panel-Port\s+"";`)
+	clearPort := regexp.MustCompile(`proxy_set_header\s+X-Forwarded-Port\s+"";`)
+	for _, f := range []string{"../../configs/openresty.conf", "../../configs/angie.conf"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		locs := exactLocations(t, string(b), "/__cfm_challenge")
+		if len(locs) == 0 {
+			t.Fatalf("%s: no /__cfm_challenge location found", f)
+		}
+		for i, loc := range locs {
+			if !stampHost.MatchString(loc) || !clearPanel.MatchString(loc) || !clearPort.MatchString(loc) {
+				t.Errorf("%s: /__cfm_challenge #%d must stamp X-Forwarded-Host $host and clear X-CFM-Panel-Port / X-Forwarded-Port", f, i+1)
+			}
 		}
 	}
 }
