@@ -175,7 +175,7 @@ func normalizeChallengeNext(raw string) string {
 // verifyRejects throttles logVerifyReject (and the loop breaker's own log
 // line) to one line per (ip, reason) a minute. clearedRedirects is the
 // challenge page's loop breaker: a second cleared redirect for the same (ip,
-// scope, host, next path) within 10 s serves the page instead. Both use the
+// scope, host, canonical next) within 10 s serves the page instead. Both use the
 // package's one bounded TTL store through putIfAbsent: a key the full store
 // cannot record reads as seen, so both then take their conservative branch
 // (no log line, serve the page).
@@ -204,7 +204,7 @@ func logVerifyReject(ip, host, reason, next, ua string) {
 	if !verifyRejects.putIfAbsent(ip+"|"+reason, struct{}{}, time.Now()) {
 		return
 	}
-	logging.LogfCHALLENGES("[challenge] verify_reject ip=%s host=%s reason=%s next=%s ua=%q",
+	logging.LogfCHALLENGES("[challenge] verify_reject ip=%s host=%s reason=%s next=%q ua=%q",
 		ip, truncateForLog(host, 120), reason, truncateForLog(next, 220), truncateForLog(ua, 200))
 }
 
@@ -1288,8 +1288,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// verifying): send the client straight to next instead of serving a
 		// fresh challenge. The page's own retry lands here (JS below), so a
 		// tab whose verify failed because a sibling tab won still reaches its
-		// target, a waiting POST (cfm_rt) included, which the edge replays
-		// only for a cleared client. The clearance is checked exactly as the
+		// target, a waiting POST (cfm_rt) included (the edge replays it on
+		// arrival; for a cleared client it lands). The clearance is checked exactly as the
 		// edge checks it: same token, bound to this IP, host and scope (the web
 		// location stamps the host and clears the panel headers, as verify's
 		// does). If the edge disagrees anyway (e.g. a bridge-token rotation
@@ -1304,16 +1304,17 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		if host, scope := trustedForwardedHost(r), clearanceScope(r); r.URL.Path == challengePath && host != "" {
 			if c, err := r.Cookie(clearanceCookieName(scope)); err == nil &&
 				verifyClearanceToken(c.Value, ip.String(), host, scope, time.Now()) {
-				// Keyed on next's DECODED path, not the next string: the edge's
-				// bounce comes back with next rebuilt from the request URI (a
-				// differently escaped string, same path), which a next-keyed
-				// breaker would miss. Per path, so a second tab going to
-				// another page is not mistaken for a loop.
-				nextPath := next
+				// Keyed on next in a CANONICAL form (decoded path + sorted,
+				// re-encoded query), not the raw string: the edge's bounce comes
+				// back with next rebuilt from the request URI (differently
+				// escaped, same target), which a raw-string key would miss.
+				// Per target, so a second tab going to another page (even
+				// post.php with another ?post=) is not mistaken for a loop.
+				canon := next
 				if u, err := url.ParseRequestURI(next); err == nil {
-					nextPath = u.Path
+					canon = u.Path + "?" + u.Query().Encode()
 				}
-				sum := sha256.Sum256([]byte(nextPath))
+				sum := sha256.Sum256([]byte(canon))
 				key := ip.String() + "|" + scope + "|" + host + "|" + hex.EncodeToString(sum[:8])
 				if clearedRedirects.putIfAbsent(key, struct{}{}, time.Now()) {
 					w.Header().Set("Cache-Control", "no-store")
@@ -1321,7 +1322,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 					return
 				}
 				if verifyRejects.putIfAbsent(ip.String()+"|cleared_redirect_loop", struct{}{}, time.Now()) {
-					logging.LogfCHALLENGES("[challenge] cleared_redirect_loop ip=%s host=%s scope=%s next=%s note=serving_page",
+					logging.LogfCHALLENGES("[challenge] cleared_redirect_loop ip=%s host=%s scope=%s next=%q note=serving_page",
 						ip.String(), truncateForLog(host, 120), scope, truncateForLog(next, 220))
 				}
 			}
@@ -2319,7 +2320,10 @@ func challengeHTML() string {
   // fresh challenge otherwise. After 3 failed verifies IN A ROW for this same
   // next (a v2 reject resets the count: those keep their own backoff), go
   // through the EDGE to next instead, cfm_rt kept: a challenge that has since
-  // lifted then lets the user through, and a waiting POST is replayed.
+  // lifted then lets the user through, and a waiting POST is replayed. If the
+  // client is still challenged, the edge consumes the waiting POST and refuses
+  // it (block_replayed): that save is lost, as it effectively was before (a
+  // client failing verify for good never saved).
   function cfmRetryTarget(next, v2rej, store, now) {
     var n = 0;
     if (v2rej) {
@@ -2333,8 +2337,9 @@ func challengeHTML() string {
       n++;
       store.set('cfm_vf', n + '|' + now + '|' + next);
     }
-    if (n >= 3 && typeof next === "string" && next.charAt(0) === "/" &&
-        next.charAt(1) !== "/" && next.indexOf("\\") < 0) {
+    // next is the server-normalized same-origin path (normalizeChallengeNext,
+    // the ONE matcher); no second copy of that check here.
+    if (n >= 3) {
       store.del('cfm_vf');
       return next;
     }
@@ -2559,7 +2564,7 @@ func challengeHTML() string {
         credentials: "include"
       }).then(function(res){
         if (res.redirected) {
-          try { sessionStorage.removeItem('cfm_v2r'); } catch (e) {}
+          cfmSession.del('cfm_v2r');
           cfmSession.del('cfm_vf');
           window.location = res.url; return;
         }
@@ -2576,13 +2581,11 @@ func challengeHTML() string {
         try { v2rej = (res.status === 403 && res.headers.get('X-CFM-V2') === 'reject'); } catch (e) {}
         var v2n = 0;
         if (v2rej) {
-          try {
-            var v2s = (sessionStorage.getItem('cfm_v2r') || '').split('|');
-            var v2ts = parseInt(v2s[1] || '0', 10) || 0;
-            if (Date.now() - v2ts < 120000) v2n = parseInt(v2s[0] || '0', 10) || 0;
-          } catch (e) {}
+          var v2s = (cfmSession.get('cfm_v2r') || '').split('|');
+          var v2ts = parseInt(v2s[1] || '0', 10) || 0;
+          if (Date.now() - v2ts < 120000) v2n = parseInt(v2s[0] || '0', 10) || 0;
           v2n++;
-          try { sessionStorage.setItem('cfm_v2r', v2n + '|' + Date.now()); } catch (e) {}
+          cfmSession.set('cfm_v2r', v2n + '|' + Date.now());
           if (v2n >= 6) {
             try {
               var m = document.querySelector('.muted');
