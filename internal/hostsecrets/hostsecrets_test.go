@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -32,11 +31,7 @@ func useTempDir(t *testing.T) string {
 
 // forgetProcess drops the per-process token caches, so each test starts like
 // a fresh daemon.
-func forgetProcess() {
-	for _, m := range []*sync.Map{&unstored, &running} {
-		m.Range(func(k, _ any) bool { m.Delete(k); return true })
-	}
-}
+func forgetProcess() { forget() }
 
 func stored(key string) string {
 	v, _ := readStore(key)

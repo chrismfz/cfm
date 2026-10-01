@@ -12,8 +12,9 @@
 // missing (or holds no usable token): copied from detectors.conf when that
 // still carries a usable one, so a migrating node keeps its token and no
 // visitor's challenge cookie is invalidated, else generated. After that
-// detectors.conf is never consulted for it again. To rotate, delete the file
-// and restart.
+// detectors.conf is never consulted for it again. To rotate, set the
+// detectors.conf line to placeholder (a token still there would be copied
+// back), delete the file and restart.
 package hostsecrets
 
 import (
@@ -35,6 +36,24 @@ import (
 // tests can point it at a temp dir: a test must never write the live path
 // (CLAUDE.md §5).
 var Dir = "/var/lib/cfm/secrets"
+
+// SetDirForTest points Dir at dir and forgets this process's token caches,
+// for tests in other packages (from a TestMain, or per test); it returns a
+// restore func. A test must never touch the live store (CLAUDE.md §5), and a
+// cached token from an earlier test would otherwise leak into the next one.
+func SetDirForTest(dir string) (restore func()) {
+	old := Dir
+	Dir = dir
+	forget()
+	return func() { Dir = old; forget() }
+}
+
+// forget drops the per-process token caches.
+func forget() {
+	for _, m := range []*sync.Map{&unstored, &running} {
+		m.Range(func(k, _ any) bool { m.Delete(k); return true })
+	}
+}
 
 // The secrets this package manages, named after their legacy detectors.conf
 // keys ([webdetector] section).

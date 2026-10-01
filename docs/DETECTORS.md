@@ -148,7 +148,8 @@ an EMPTY line makes its regex overwrite the line after it. A token rotates
 once on a Debian upgrade where the package's `detectors.conf` is taken at the
 prompt (nothing left to copy), and on a rollback to an older binary, which
 runs its own token from `detectors.conf` until the next upgrade brings the
-stored one back. To rotate: delete the file, restart. A store that cannot be
+stored one back. To rotate: set the `detectors.conf` line to `placeholder`
+(a token still there would be copied back), delete the file, restart. A store that cannot be
 read is never overwritten; the daemon keeps the token it runs. `cfm health`
 resolves the same way. The store outlives package removal, like the rest of
 `/var/lib/cfm`. Every other `[webdetector]` knob

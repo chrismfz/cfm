@@ -801,7 +801,7 @@ func resolveHostTokens(confWD KV) (challenge, bridge string) {
 			return ""
 		}
 		logTokenSource(key, src, err)
-		if src != hostsecrets.SourceConf && sslcollector.IsStrongToken(legacy) && legacy != tok {
+		if src == hostsecrets.SourceStore && sslcollector.IsStrongToken(legacy) && legacy != tok {
 			if _, seen := tokenConfIgnoredLogged.LoadOrStore(key, true); !seen {
 				logging.Logf("[detectors] %s in detectors.conf is ignored: the token in %s is the one in use. To switch to the detectors.conf value, delete that file and restart; otherwise set the line to placeholder", key, hostsecrets.Path(key))
 			}

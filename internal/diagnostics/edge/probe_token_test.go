@@ -37,9 +37,7 @@ func TestReadLuaTokenDecodesCanonicalWriterEscapes(t *testing.T) {
 // detectors.conf no longer carries the line must not read as "no token".
 func TestReadChallengeTokenProbeFallsBackToTheStore(t *testing.T) {
 	t.Setenv("CHALLENGE_TOKEN", "")
-	old := hostsecrets.Dir
-	hostsecrets.Dir = filepath.Join(t.TempDir(), "secrets")
-	t.Cleanup(func() { hostsecrets.Dir = old })
+	t.Cleanup(hostsecrets.SetDirForTest(filepath.Join(t.TempDir(), "secrets")))
 
 	const stored = "0123456789abcdef0123456789abcdef0123456789abcdef"
 	if _, _, err := hostsecrets.Resolve(hostsecrets.ChallengeToken, stored); err != nil {
@@ -74,9 +72,7 @@ func TestReadChallengeTokenProbeFallsBackToTheStore(t *testing.T) {
 // when the base has no [webdetector] section, and not otherwise.
 func TestReadChallengeTokenProbeOverlayOnlyToken(t *testing.T) {
 	t.Setenv("CHALLENGE_TOKEN", "")
-	old := hostsecrets.Dir
-	hostsecrets.Dir = filepath.Join(t.TempDir(), "secrets")
-	t.Cleanup(func() { hostsecrets.Dir = old })
+	t.Cleanup(hostsecrets.SetDirForTest(filepath.Join(t.TempDir(), "secrets")))
 
 	dir := t.TempDir()
 	conf := filepath.Join(dir, "detectors.conf")

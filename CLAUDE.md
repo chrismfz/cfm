@@ -279,8 +279,9 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   - the `notify` and `detectorscfg` `systemConfigPath` (via
     `SetSystemConfigPathForTest` from the apiserver `TestMain`).
   - the `hostsecrets` `Dir` (`/var/lib/cfm/secrets`, the per-host
-    CHALLENGE_TOKEN / OPENRESTY_TOKEN store; a test that resolves a token sets
-    it to a temp dir first).
+    CHALLENGE_TOKEN / OPENRESTY_TOKEN store; via `SetDirForTest`, which also
+    clears the per-process token caches, from the `TestMain` of a package whose
+    tests reach the probe, or per test before resolving a token).
 
   The detectors' init-time states no longer create `detectors.state.d`
   (`core.DefaultState`). A new default path goes through the same kind of

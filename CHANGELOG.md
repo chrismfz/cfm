@@ -41,7 +41,8 @@ back-filled here — see the git/PR history for that period.
     token from `detectors.conf` until you upgrade again, when the stored one
     is back. A rotation re-challenges visitors who hold a clearance cookie
     (`CHALLENGE_COOKIE_LIFE`, 45 min stock) once.
-  - To rotate a token: delete its file and restart.
+  - To rotate a token: set its `detectors.conf` line to `placeholder` (a
+    token still there would be copied back), delete its file, and restart.
   - `cfm health` reports the stored token, i.e. the one the daemon uses.
   - The token step (and `cfm_bridge_config.lua`) now also runs when
     `[webdetector]` exists only in a `detectors.d/` overlay. A token set in an

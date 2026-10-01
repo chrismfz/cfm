@@ -30,11 +30,12 @@ func TestMain(m *testing.M) {
 	restoreNotify := notify.SetSystemConfigPathForTest(filepath.Join(dir, "absent", "notify.conf"))
 	restoreDetectors := detectorscfg.SetSystemConfigPathForTest(filepath.Join(dir, "absent", "detectors.conf"))
 	restoreWebdet := webdetector.SetDefaultDirsForTest(filepath.Join(dir, "webdetector"))
-	hostsecrets.Dir = filepath.Join(dir, "secrets")
+	restoreSecrets := hostsecrets.SetDirForTest(filepath.Join(dir, "secrets"))
 	code := m.Run()
 	restoreNotify()
 	restoreDetectors()
 	restoreWebdet()
+	restoreSecrets()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }

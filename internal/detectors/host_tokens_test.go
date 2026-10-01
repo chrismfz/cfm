@@ -18,9 +18,7 @@ const (
 // touch the live /var/lib/cfm/secrets (CLAUDE.md §5).
 func useHostSecretsDir(t *testing.T) {
 	t.Helper()
-	old := hostsecrets.Dir
-	hostsecrets.Dir = filepath.Join(t.TempDir(), "secrets")
-	t.Cleanup(func() { hostsecrets.Dir = old })
+	t.Cleanup(hostsecrets.SetDirForTest(filepath.Join(t.TempDir(), "secrets")))
 }
 
 func sections(t *testing.T, conf string) Sections {

@@ -17,8 +17,9 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	hostsecrets.Dir = dir
+	restore := hostsecrets.SetDirForTest(dir)
 	code := m.Run()
+	restore()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }
