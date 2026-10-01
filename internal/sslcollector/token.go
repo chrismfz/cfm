@@ -38,6 +38,27 @@ func tokenIsLuaSafe(s string) bool {
 	return true
 }
 
+// IsStrongToken reports whether tok is usable as-is: at least 32 characters,
+// not a known placeholder, and Lua-safe (tokenIsLuaSafe). ValidateOrGenerateToken
+// (cfm.conf SSLCOLLECTOR_SOCK_TOKEN) regenerates anything else;
+// internal/hostsecrets (the [webdetector] tokens, which also require
+// hostsecrets.Usable) skips it: a weak detectors.conf value is not copied, and
+// a weak token file is left alone and reported.
+func IsStrongToken(tok string) bool {
+	cur := strings.TrimSpace(tok)
+	return len(cur) >= 32 && !badTokens.MatchString(cur) && tokenIsLuaSafe(cur)
+}
+
+// GenerateToken returns a new random token: 24 bytes from crypto/rand as 48
+// lowercase hex characters (strong and Lua-safe by construction).
+func GenerateToken() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("sslcollector: token generation failed: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // ValidateOrGenerateToken returns current unchanged if it is strong (≥32 chars,
 // not a known placeholder). Otherwise it generates a new 48-hex-char token,
 // patches the SSLCOLLECTOR_SOCK_TOKEN line in cfgPath in place, and returns the
@@ -47,15 +68,14 @@ func tokenIsLuaSafe(s string) bool {
 // and the new token is still returned so the caller can update in-memory config.
 func ValidateOrGenerateToken(cfgPath, current string) (string, error) {
 	cur := strings.TrimSpace(current)
-	if len(cur) >= 32 && !badTokens.MatchString(cur) && tokenIsLuaSafe(cur) {
+	if IsStrongToken(cur) {
 		return cur, nil
 	}
 
-	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("sslcollector: token generation failed: %w", err)
+	token, err := GenerateToken()
+	if err != nil {
+		return "", err
 	}
-	token := hex.EncodeToString(b) // 48 hex chars
 
 	if cfgPath != "" {
 		// cfgPath is set at daemon startup from filepath.Join(cfgDir, "cfm.conf")
@@ -75,60 +95,6 @@ func ValidateOrGenerateToken(cfgPath, current string) (string, error) {
 			}
 			// #nosec G304 -- cfgPath is an absolute, daemon-internal config path
 			_ = os.WriteFile(cfgPath, []byte(updated), mode)
-		}
-	}
-
-	return token, nil
-}
-
-// ValidateOrGenerateTokenKey is the generic form of ValidateOrGenerateToken.
-// Instead of patching the fixed SSLCOLLECTOR_SOCK_TOKEN key it patches keyName
-// in cfgPath.  The function appends "keyName = <token>" if the key is not already
-// present, so it works for keys that are absent on first install.
-//
-// cfgPath may be empty; in that case the file-patch step is skipped (non-fatal)
-// and the new token is still returned so the caller can update in-memory config.
-func ValidateOrGenerateTokenKey(cfgPath, keyName, current string) (string, error) {
-	cur := strings.TrimSpace(current)
-	if len(cur) >= 32 && !badTokens.MatchString(cur) && tokenIsLuaSafe(cur) {
-		return cur, nil
-	}
-
-	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("sslcollector: token generation failed: %w", err)
-	}
-	token := hex.EncodeToString(b) // 48 hex chars
-
-	if cfgPath != "" {
-		// Require an absolute path as a sanity guard.
-		if !filepath.IsAbs(cfgPath) {
-			return token, fmt.Errorf("sslcollector: cfgPath must be absolute, got %q", cfgPath)
-		}
-		// Build a per-key regexp. keyName only contains [A-Z0-9_] so QuoteMeta is a no-op,
-		// but we use it anyway for correctness.
-		re := regexp.MustCompile(`(?mi)^(` + regexp.QuoteMeta(keyName) + `\s*=\s*).*$`)
-		// #nosec G304 -- cfgPath is daemon-internal, not derived from user input
-		if data, err := os.ReadFile(cfgPath); err == nil { // #nosec G304
-			info, statErr := os.Stat(cfgPath)
-			mode := os.FileMode(0640)
-			if statErr == nil {
-				mode = info.Mode()
-			}
-			var updated string
-			if re.Match(data) {
-				// Replace the existing key's value.
-				updated = re.ReplaceAllString(string(data), "${1}"+token)
-			} else {
-				// Key absent: append it so it persists across restarts.
-				s := string(data)
-				if len(s) > 0 && s[len(s)-1] != '\n' {
-					s += "\n"
-				}
-				updated = s + keyName + " = " + token + "\n"
-			}
-			// #nosec G304 -- cfgPath is an absolute, daemon-internal config path
-			_ = os.WriteFile(cfgPath, []byte(updated), mode) // #nosec G306 -- preserve existing permissions
 		}
 	}
 

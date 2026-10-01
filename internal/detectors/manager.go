@@ -5,11 +5,14 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectorstatus"
 	"cfm/internal/enrich"
+	"cfm/internal/hostsecrets"
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
 	webdet "cfm/internal/webdetector"
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"hash/fnv"
 	"os"
 	"sort"
@@ -365,54 +368,31 @@ func (m *manager) maybeReload(parent context.Context) {
 	}
 	m.stopAll()
 
-	// ── Token auto-generation for [webdetector] ───────────────────────────────
-	// CHALLENGE_TOKEN signs browser challenge HMACs.  OPENRESTY_TOKEN authenticates
-	// Lua→Go socket calls.  Both are rotated to a 48-hex-char random value if
-	// absent, too short (<32 chars), or a known placeholder.  The new value is
-	// written back to detectors.conf and into the in-memory KV so the detector
-	// starts with the correct token on the very first load.
-	// Tokens are BASE-owned: ValidateOrGenerateTokenKey persists into cfgPath
-	// (the base detectors.conf). Read the current values from the BASE
-	// [webdetector] — NOT the merged base+overlay view we run on — because the
-	// value read must be the value the generator rewrites. A weak/empty
-	// CHALLENGE_TOKEN/OPENRESTY_TOKEN supplied by an OVERLAY would otherwise be
-	// "healed" into the base on every reload while the merged read keeps
-	// returning the overlay's value: an endless regenerate → rewrite-base →
-	// re-challenge loop. Gating on the BASE section also preserves the
-	// pre-layering behaviour (this ran only when the base had [webdetector]), so
-	// an overlay-only [webdetector] never triggers a blind token append into a
-	// base that lacks the section. Overriding these two keys from an overlay is
-	// intentionally unsupported (PR6 moves generation out of the conffile); the
-	// runtime is pinned to the base-managed token so it stays in lockstep with
-	// the cfm_bridge_token.lua written below. Every OTHER [webdetector] knob
-	// below still uses the merged wdKV.
-	baseWD, baseHasWD := KV(nil), false
-	if bs, berr := ReadSectionsFile(m.opts.CfgPath); berr == nil {
-		baseWD, baseHasWD = bs.ByName["webdetector"]
-	}
-	if wdKV, ok := secs.ByName["webdetector"]; ok && baseHasWD {
-		cfgPath := m.opts.CfgPath // absolute path to detectors.conf
-
-		// F2: CHALLENGE_TOKEN (value read from BASE, generator writes BASE)
-		chalTok := kvStrClean(baseWD, "CHALLENGE_TOKEN", "")
-		if newTok, err := sslcollector.ValidateOrGenerateTokenKey(cfgPath, "CHALLENGE_TOKEN", chalTok); err != nil {
-			logging.Logf("[detectors] CHALLENGE_TOKEN generation failed: %v", err)
-		} else {
-			if newTok != chalTok {
-				logging.Logf("[detectors] CHALLENGE_TOKEN was weak — rotated and persisted to %s", cfgPath)
-			}
-			wdKV["CHALLENGE_TOKEN"] = newTok // pin runtime to the base-managed token
-		}
+	// ── Per-host tokens for [webdetector] ──────────────────────────────────────
+	// CHALLENGE_TOKEN signs browser challenge HMACs. OPENRESTY_TOKEN
+	// authenticates Lua→Go socket calls. Both live in /var/lib/cfm/secrets
+	// (resolveHostTokens → hostsecrets): created once, from detectors.conf
+	// when it still carries a usable token, else generated; never written
+	// into detectors.conf, which is what kept the conffile "modified" on
+	// every node, so upgrades could not update it and left a .rpmnew behind.
+	// The runtime is pinned to the resolved value, which stays in lockstep
+	// with the cfm_bridge_token.lua written below. Every OTHER [webdetector]
+	// knob uses the merged wdKV. The block runs whenever the merged config
+	// has [webdetector], so an overlay-only [webdetector] also gets its
+	// tokens and cfm_bridge_config.lua.
+	if wdKV, ok := secs.ByName["webdetector"]; ok {
+		base, baseErr := ReadSectionsFile(m.opts.CfgPath)
+		chalTok, newTok := resolveHostTokens(hostsecrets.ConfSection(base, baseErr, wdKV), baseErr == nil)
+		// Pin the runtime to the resolved tokens. "" (not even generation
+		// worked) must not leave the config value behind: a "placeholder"
+		// would become the challenge HMAC key; "" selects the ephemeral key,
+		// and an empty bridge token fails closed.
+		// F2: CHALLENGE_TOKEN
+		wdKV["CHALLENGE_TOKEN"] = chalTok
 
 		// F4: OPENRESTY_TOKEN — also writes cfm_bridge_token.lua for cfm.lua
-		bridgeTok := kvStrClean(baseWD, "OPENRESTY_TOKEN", "")
-		if newTok, err := sslcollector.ValidateOrGenerateTokenKey(cfgPath, "OPENRESTY_TOKEN", bridgeTok); err != nil {
-			logging.Logf("[detectors] OPENRESTY_TOKEN generation failed: %v", err)
-		} else {
-			if newTok != bridgeTok {
-				logging.Logf("[detectors] OPENRESTY_TOKEN was weak — rotated and persisted to %s", cfgPath)
-			}
-			wdKV["OPENRESTY_TOKEN"] = newTok // pin runtime to the base-managed token
+		wdKV["OPENRESTY_TOKEN"] = newTok
+		if newTok != "" {
 			cfmGID := sslcollector.CfmGroupID()
 			const bridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 			if err := sslcollector.WriteLuaTokenWithMkdir(bridgeTokenPath, newTok, cfmGID); err != nil {
@@ -439,6 +419,10 @@ func (m *manager) maybeReload(parent context.Context) {
 					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PanelFPPolicyMode, bridgeCfg.PostClearanceCadence, bridgeCfg.FPPolicy, bridgeCfg.SiteCache, bridgeCfg.MicroCacheEnforce)
 			}
 		}
+	} else {
+		// No [webdetector] any more: no token runs (health must not report
+		// the last one resolved).
+		hostsecrets.ForgetRunning()
 	}
 	// ─────────────────────────────────────────────────────────────────────────
 
@@ -804,6 +788,104 @@ func (m *manager) stopAll() {
 
 	if wasRunning {
 		logging.Logf("[detectors] all stopped")
+	}
+}
+
+// resolveHostTokens returns the CHALLENGE_TOKEN and OPENRESTY_TOKEN the
+// daemon runs with ("" only if one cannot even be generated), resolved by
+// hostsecrets (the store; when it has none, the detectors.conf value in
+// confWD, see hostsecrets.ConfSection, else a new token), and logs where each came
+// from. confKnown is false when the base detectors.conf could not be read.
+func resolveHostTokens(confWD KV, confKnown bool) (challenge, bridge string) {
+	resolve := func(key string) string {
+		legacy := kvStrClean(confWD, key, "")
+		if sslcollector.IsStrongToken(legacy) && !hostsecrets.Usable(legacy) {
+			if _, seen := tokenUnusableLogged.LoadOrStore(key, true); !seen {
+				logging.Logf("[detectors] %s in detectors.conf is not used: the config reader would change it (a quoted ';', '#' or ' //', or stray quotes), so it cannot run as written", key)
+			}
+		}
+		var tok, src string
+		var err error
+		if confKnown {
+			tok, src, err = hostsecrets.Resolve(key, legacy)
+		} else {
+			// The base detectors.conf could not be read (between the layered
+			// read and this one): never store a generated token now, or the
+			// node's own token could no longer be copied.
+			tok, src, err = hostsecrets.ResolveConfUnknown(key)
+		}
+		if tok == "" {
+			logging.Logf("[detectors] %s generation failed: %v", key, err)
+			return ""
+		}
+		logTokenSource(key, src, err)
+		if src == hostsecrets.SourceStore && hostsecrets.Usable(legacy) && legacy != tok {
+			// Once per distinct value: a later edit of the line logs again.
+			if prev, seen := tokenConfIgnoredLogged.Load(key); !seen || prev.(string) != legacy {
+				tokenConfIgnoredLogged.Store(key, legacy)
+				logging.Logf("[detectors] %s in detectors.conf is ignored: the token in %s is the one in use. To switch to the detectors.conf value, delete that file and restart; otherwise set the line to placeholder", key, hostsecrets.Path(key))
+			}
+		}
+		return tok
+	}
+	return resolve(hostsecrets.ChallengeToken), resolve(hostsecrets.BridgeToken)
+}
+
+// tokenConfIgnoredLogged / tokenFromConfLogged remember, per token, that the
+// hint was logged: a reload happens on every config save and tailed-log
+// rotation, and the hint is the same every time.
+var tokenConfIgnoredLogged, tokenFromConfLogged, tokenUnusableLogged sync.Map
+
+// storeFallback says what the daemon runs while the token file cannot be used.
+func storeFallback(source string) string {
+	switch source {
+	case hostsecrets.SourceRunning:
+		return "keeping the running token"
+	case hostsecrets.SourceConf:
+		return "running the detectors.conf token, not stored"
+	default:
+		return "running a generated token, not stored: a restart generates another"
+	}
+}
+
+// tokenErrLogged holds, per token, the last error logged, so a store
+// that stays unwritable logs it once, not on every reload. Cleared on success.
+var tokenErrLogged sync.Map
+
+// logTokenSource logs where a [webdetector] token came from when it is worth
+// knowing: generated, copied from detectors.conf (once per process), or not
+// stored. A token read from the store is the steady state: silent.
+func logTokenSource(key, source string, err error) {
+	var msg string
+	switch {
+	case errors.Is(err, hostsecrets.ErrConfUnknown):
+		msg = fmt.Sprintf("[detectors] %s: %v — running it for now; retried each reload", key, err)
+	case errors.Is(err, hostsecrets.ErrStoreChanged):
+		msg = fmt.Sprintf("[detectors] %s: %v (%s) — running the %s token until then", key, err, hostsecrets.Path(key), source)
+	case errors.Is(err, hostsecrets.ErrStoreUnusable), errors.Is(err, hostsecrets.ErrStoreUnreadable):
+		msg = fmt.Sprintf("[detectors] %s: %v — the file is left alone; %s; retried each reload", key, err, storeFallback(source))
+	case err != nil && source == hostsecrets.SourceConf:
+		msg = fmt.Sprintf("[detectors] %s from detectors.conf could not be copied into %s: %v — running with it; retried each reload", key, hostsecrets.Path(key), err)
+	case err != nil:
+		msg = fmt.Sprintf("[detectors] %s source=%s NOT stored in %s: %v — kept for this process (retried each reload); a restart generates a new one", key, source, hostsecrets.Path(key), err)
+	}
+	if msg != "" {
+		// Keyed on the error, not the message: the source shifts between
+		// reloads (generated/conf first, running after) for the same fault.
+		if prev, ok := tokenErrLogged.Load(key); !ok || prev.(string) != err.Error() {
+			tokenErrLogged.Store(key, err.Error())
+			logging.Logf("%s", msg)
+		}
+		return
+	}
+	tokenErrLogged.Delete(key)
+	switch source {
+	case hostsecrets.SourceGenerated:
+		logging.Logf("[detectors] %s generated and stored in %s", key, hostsecrets.Path(key))
+	case hostsecrets.SourceConf:
+		if _, seen := tokenFromConfLogged.LoadOrStore(key, true); !seen {
+			logging.Logf("[detectors] %s copied from detectors.conf into %s, which is now the one in use; the detectors.conf line can be set back to placeholder", key, hostsecrets.Path(key))
+		}
 	}
 }
 

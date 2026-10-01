@@ -239,8 +239,11 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			}()
 		}
 
-		// Challenge token source: detectors.conf [webdetector] CHALLENGE_TOKEN.
-		// If unset, challenge server logs a warning and falls back to legacy default.
+		// Challenge token: [webdetector] CHALLENGE_TOKEN, pinned by the manager
+		// to the hostsecrets resolution (the per-host store, created once from
+		// detectors.conf or generated). If unset ("" when even
+		// generation failed), the challenge server logs a warning and uses an
+		// ephemeral per-process key.
 		webdet.SetChallengeToken(w.cfg.ChallengeToken)
 
 		// Challenge server + nft redirect rules (ctx-bound)

@@ -208,13 +208,22 @@ Audit cleanup folded in: 5 servers put `AUTHFAIL_IP`/`AUTHFAIL_USER`/`DDOS_IP`
 dead lines (someone believed they set softer thresholds for GR; they set
 nothing). Validation should warn on unknown keys in `.leniency` sections.
 
-**Tokens.** `CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` are per-host secrets living
-in the conffile — the last blocker to a byte-identical file.
-`challenge_server.go` already generates an ephemeral fallback when the key is
-absent; make it **generate-once-and-persist** under `/var/lib/cfm/`
-(`root:cfm 0640`, same enforced ownership as the rendered Lua token files) so
-restarts keep cookies valid. Conffile value still wins where present
-(migration path: delete the key whenever, nothing breaks).
+**Tokens (PR 6, release after 2026.09.30).** `CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` were
+per-host secrets generated INTO the conffile — the last blocker to a
+byte-identical file. `internal/hostsecrets` keeps each in
+`/var/lib/cfm/secrets/` (root, dir `0700`, files `0600`; only the daemon reads
+them, the edge keeps reading the `cfm_bridge_token.lua` mirror) and never
+writes `detectors.conf`. The store is the source of truth: a token file is
+created once, copied from the conffile's value when it carries one (the
+base `[webdetector]`, or an overlay's when the base has none, as the old
+binary read it; the migration: no cookie is invalidated), else generated. The stock file ships
+the two keys as `placeholder` (kept so an older binary after a rollback
+replaces them in place instead of appending them to whatever section is
+last; an empty value is worse, its regex overwrites the next line). Taking
+the package's file at a Debian upgrade rotates the tokens once, and a
+rollback with the line at placeholder twice; that was judged cheaper than
+the pre-upgrade machinery avoiding it.
+`cfm health` reads the same resolution (`hostsecrets.Effective`).
 
 ---
 

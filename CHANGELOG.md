@@ -17,7 +17,59 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **`CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` now live in
+  `/var/lib/cfm/secrets/`, not in `detectors.conf`.** The daemon used to
+  generate these per-host tokens into `/etc/cfm/detectors.conf`. That left the
+  conffile "modified" on every node, so upgrades never updated it and left a
+  `.rpmnew` / `.dpkg-dist` behind with the new stock settings in it.
+  - Each token now lives in `/var/lib/cfm/secrets/` (`challenge_token`,
+    `openresty_token`; root only), and that file is the one in use. It is
+    created only when missing: copied from `detectors.conf` when that still
+    carries a token, else generated. CFM never writes `detectors.conf`.
+  - **Nothing changes on upgrade:** on its first start the new daemon copies
+    the node's current token from `detectors.conf`, so no visitor is
+    re-challenged. After that the `detectors.conf` value is no longer used
+    (logged once if it differs) and can be set back to `placeholder`.
+  - The stock file ships the two lines as `placeholder`. Keep them that way:
+    never delete them or leave them empty. After a rollback, an older binary
+    replaces a placeholder in place. It appends a missing line to whatever
+    section is last, and an empty line makes it overwrite the line after it.
+  - **When the token still rotates, by design:**
+    - once on a Debian upgrade where you take the package's `detectors.conf`
+      at the prompt: the old daemon, still running until `postinst` restarts
+      it, may write a new token into the fresh file, which the new daemon then
+      copies (set the line back to `placeholder` afterwards);
+    - on a rollback to an older version, if its `detectors.conf` line is at
+      `placeholder`: the older binary generates its own token there, and the
+      next upgrade goes back to the stored one (two rotations). While the line
+      still holds the token, a rollback changes nothing.
+
+    A rotation re-challenges visitors who hold a clearance cookie
+    (`CHALLENGE_COOKIE_LIFE`, 45 min stock) once.
+  - To rotate a token: set its `detectors.conf` line to `placeholder` (a
+    token still there would be copied back), delete its file, and restart.
+  - To set a specific token (e.g. one shared by nodes behind a load balancer),
+    write it into its file (root, `0600`) and restart; editing
+    `detectors.conf` no longer changes a stored token. A file that holds no
+    usable token (under 32 characters, quoted, a symlink) is never
+    overwritten (nor a symlink followed): CFM logs it and runs another token,
+    unstored, until you fix or delete it. An empty file is replaced.
+  - `cfm health` reports the stored token (inside the daemon: the one it
+    runs), and a token file that holds no usable token as missing.
+  - The token step (and `cfm_bridge_config.lua`) now also runs when
+    `[webdetector]` exists only in a `detectors.d/` overlay. A token set in an
+    overlay is copied when the base file has no `[webdetector]` section, as the
+    older binary ran it.
+
+### Fixed
+- **A `detectors.conf` whose tokens sat outside `[webdetector]` no longer
+  reloads every 5 seconds.** The old generator appended a missing token to the
+  end of the file, which could put it in another section. After that the
+  daemon never found it in `[webdetector]`, wrote a new value on every reload,
+  and the rewrite triggered the next reload. The token changed every 5s and
+  the detector layer kept restarting. server.speedhost.gr was in this loop
+  (2026-09-30). Tokens are no longer written into `detectors.conf` at all.
 
 ## 2026.09.30
 

@@ -3,7 +3,9 @@ package status
 import (
 	"bufio"
 	"bytes"
+	"cfm/internal/detconf"
 	"cfm/internal/detectors"
+	edgediag "cfm/internal/diagnostics/edge"
 	"cfm/internal/dnat"
 	"cfm/internal/enrich"
 	"cfm/internal/firewall"
@@ -638,65 +640,14 @@ type luaTokenProbe struct {
 
 var (
 	luaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+("(\\.|[^"\\])*")\s*$`)
-	badTokenRe  = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$`)
 )
 
 var (
 	canonicalBridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 	bridgeSocketProbe        = probeNginxBridgeSocket
 	socketStat               = os.Stat
-	tcpDialTimeout           = func(network, addr string, timeout time.Duration) (net.Conn, error) {
-		return net.DialTimeout(network, addr, timeout)
-	}
-	detectorsConfigPath = "/etc/cfm/detectors.conf"
+	detectorsConfigPath      = "/etc/cfm/detectors.conf"
 )
-
-type challengeFlowReadiness struct {
-	Status string
-	Code   string
-	Reason string
-}
-
-func probeChallengeFlowReadiness() challengeFlowReadiness {
-	listenAddr := strings.TrimSpace(os.Getenv("CHALLENGE_HTTP_LISTEN"))
-	if listenAddr == "" {
-		listenAddr = "127.0.0.1:9098"
-	}
-	if !strings.Contains(listenAddr, ":") {
-		listenAddr = "127.0.0.1:" + listenAddr
-	}
-	challengeToken := readChallengeTokenProbe()
-	bridgeToken := readBridgeTokenProbe()
-	cfg := resolveBridgeRuntimeConfig()
-
-	if _, err := tcpDialTimeout("tcp", listenAddr, 1200*time.Millisecond); err != nil {
-		return challengeFlowReadiness{Status: "FAIL", Code: "challenge_listener_unreachable", Reason: shortErr(err)}
-	}
-	st, err := socketStat(cfg.SocketPath)
-	if err != nil || st.Mode()&os.ModeSocket == 0 {
-		return challengeFlowReadiness{Status: "FAIL", Code: "bridge_socket_unreachable", Reason: cfg.DisplaySocketPath}
-	}
-	if !challengeToken.Present || !bridgeToken.Present {
-		return challengeFlowReadiness{Status: "FAIL", Code: "token_missing", Reason: "challenge/bridge token missing"}
-	}
-	if !challengeToken.Valid || !bridgeToken.Valid {
-		return challengeFlowReadiness{Status: "FAIL", Code: "token_weak", Reason: "challenge/bridge token weak"}
-	}
-	httpStatus, _, probeErr := bridgeSocketProbe(cfg.SocketPath, bridgeToken.Token)
-	if probeErr != nil {
-		if errors.Is(probeErr, context.DeadlineExceeded) || strings.Contains(strings.ToLower(probeErr.Error()), "timeout") {
-			return challengeFlowReadiness{Status: "WARN", Code: "decision_path_timeout", Reason: "partial_ok: listener/socket/token present but bridge probe timed out"}
-		}
-		return challengeFlowReadiness{Status: "FAIL", Code: "decision_path_connect_fail", Reason: shortErr(probeErr)}
-	}
-	if httpStatus == http.StatusUnauthorized || httpStatus == http.StatusForbidden {
-		return challengeFlowReadiness{Status: "FAIL", Code: "bridge_auth_fail", Reason: "bridge rejected token"}
-	}
-	if httpStatus != http.StatusOK {
-		return challengeFlowReadiness{Status: "WARN", Code: "decision_path_unexpected_status", Reason: fmt.Sprintf("partial_ok: bridge http %d", httpStatus)}
-	}
-	return challengeFlowReadiness{Status: "OK", Code: "ok", Reason: "challenge flow ready"}
-}
 
 func readLuaToken(path string) luaTokenProbe {
 	b, err := os.ReadFile(path)
@@ -730,15 +681,7 @@ func resolveLuaToken(paths []string) luaTokenProbe {
 }
 
 func isStrongToken(tok string) bool {
-	if len(tok) < 32 || strings.TrimSpace(tok) != tok || badTokenRe.MatchString(tok) {
-		return false
-	}
-	for i := 0; i < len(tok); i++ {
-		if tok[i] < 0x21 || tok[i] > 0x7e {
-			return false
-		}
-	}
-	return true
+	return edgediag.IsStrongToken(tok)
 }
 
 func tokenHealth(t luaTokenProbe) string {
@@ -813,7 +756,7 @@ func resolveBridgeRuntimeConfig() bridgeRuntimeConfig {
 
 	kv := readDetectorSectionKV(resolveDetectorsConfigPath(), "webdetector")
 	if v, ok := kv["OPENRESTY_SOCK"]; ok {
-		if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
+		if clean := detconf.CleanValue(v); clean != "" {
 			cfg.SocketPath = clean
 			cfg.SocketSource = "config"
 		}
@@ -835,18 +778,12 @@ func resolveDetectorsConfigPath() string {
 // config — base detectors.conf + detectors.d overlays — for overlay-tunable
 // knobs like OPENRESTY_SOCK, so the probe matches what the daemon runs (a
 // base-only read false-alarms when such a key moved into an overlay). NOTE:
-// this is NOT the right source for CHALLENGE_TOKEN / OPENRESTY_TOKEN — those
-// are base-owned (the daemon ignores overlay overrides, see the manager token
-// block); read them base-only (readBaseDetectorSectionKV).
+// this is NOT the right source for CHALLENGE_TOKEN / OPENRESTY_TOKEN — the
+// daemon runs the per-host store (hostsecrets), filled once from
+// detectors.conf (hostsecrets.ConfSection; see
+// edgediag.ReadChallengeTokenProbe).
 func readDetectorSectionKV(path, section string) map[string]string {
 	return sectionKV(detectors.ReadLayeredFile, path, section)
-}
-
-// readBaseDetectorSectionKV reads a section from the BASE conffile only — for
-// the base-owned token keys, so a probe reports the token the daemon actually
-// uses rather than an overlay override the daemon ignores.
-func readBaseDetectorSectionKV(path, section string) map[string]string {
-	return sectionKV(detectors.ReadSectionsFile, path, section)
 }
 
 func sectionKV(read func(string) (detectors.Sections, error), path, section string) map[string]string {
@@ -865,23 +802,6 @@ func sectionKV(read func(string) (detectors.Sections, error), path, section stri
 
 func readBridgeTokenProbe() luaTokenProbe {
 	return readLuaToken(canonicalBridgeTokenPath)
-}
-
-func readChallengeTokenProbe() luaTokenProbe {
-	tok := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN"))
-	if tok != "" {
-		return luaTokenProbe{Token: tok, Present: true, Valid: isStrongToken(tok)}
-	}
-	// CHALLENGE_TOKEN is base-owned (the daemon pins the runtime token to the
-	// base value and ignores overlay overrides), so probe the BASE section.
-	kv := readBaseDetectorSectionKV(resolveDetectorsConfigPath(), "webdetector")
-	if v, ok := kv["CHALLENGE_TOKEN"]; ok {
-		clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`)
-		if clean != "" {
-			return luaTokenProbe{Token: clean, Present: true, Valid: isStrongToken(clean)}
-		}
-	}
-	return luaTokenProbe{}
 }
 
 func pathExists(path string) bool {
@@ -1100,47 +1020,6 @@ func readSimpleKVConfig(path string) map[string]string {
 		out[k] = v
 	}
 	return out
-}
-
-func stripInlineComment(s string) string {
-	inQuote := false
-	var q rune
-	prevNonSpace := -1
-
-	for i, c := range s {
-		if c == '\'' || c == '"' {
-			if !inQuote {
-				inQuote = true
-				q = c
-			} else if q == c {
-				inQuote = false
-			}
-			if c != ' ' && c != '\t' {
-				prevNonSpace = i
-			}
-			continue
-		}
-		if inQuote {
-			if c != ' ' && c != '\t' {
-				prevNonSpace = i
-			}
-			continue
-		}
-		if c == ';' || c == '#' {
-			return strings.TrimSpace(s[:i])
-		}
-		if c == '/' && i+1 < len(s) && s[i+1] == '/' {
-			if prevNonSpace >= 0 && s[prevNonSpace] == ':' {
-				// probably URL
-			} else if i == 0 || s[i-1] == ' ' || s[i-1] == '\t' {
-				return strings.TrimSpace(s[:i])
-			}
-		}
-		if c != ' ' && c != '\t' {
-			prevNonSpace = i
-		}
-	}
-	return strings.TrimSpace(s)
 }
 
 // ---------------------------------------------------------------------------

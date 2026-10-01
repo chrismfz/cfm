@@ -751,8 +751,11 @@ var (
 	challengeEphemeralKeyOnce sync.Once
 )
 
-// SetChallengeToken configures the token secret from detectors.conf
-// ([webdetector] CHALLENGE_TOKEN).
+// SetChallengeToken configures the token secret: [webdetector]
+// CHALLENGE_TOKEN as the detectors manager resolved it (the per-host store in
+// /var/lib/cfm/secrets, created once from detectors.conf or generated, see
+// internal/hostsecrets). An empty token selects the ephemeral per-process
+// key.
 func SetChallengeToken(token string) {
 	challengeTokenMu.Lock()
 	challengeTokenOverride = strings.TrimSpace(token)
@@ -2024,7 +2027,9 @@ func secretKey() []byte {
 		return []byte(s)
 	}
 
-	// Fallback source: detectors.conf [webdetector] CHALLENGE_TOKEN.
+	// Fallback source: [webdetector] CHALLENGE_TOKEN as resolved by the
+	// detectors manager (/var/lib/cfm/secrets/challenge_token, see
+	// internal/hostsecrets).
 	challengeTokenMu.RLock()
 	tok := challengeTokenOverride
 	challengeTokenMu.RUnlock()
@@ -2045,7 +2050,7 @@ func secretKey() []byte {
 		challengeEphemeralKey = b
 	})
 	challengeTokenWarnOnce.Do(func() {
-		logging.LogfCHALLENGES("[challenge] WARNING: no CHALLENGE_TOKEN in detectors.conf and CFM_CHALLENGE_SECRET env not set; using ephemeral per-process secret (challenge cookies invalid after restart)")
+		logging.LogfCHALLENGES("[challenge] WARNING: no CHALLENGE_TOKEN (/var/lib/cfm/secrets/challenge_token could not be resolved, see the [detectors] log) and CFM_CHALLENGE_SECRET env not set; using ephemeral per-process secret (challenge cookies invalid after restart)")
 	})
 	return challengeEphemeralKey
 }

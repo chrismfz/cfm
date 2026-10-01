@@ -371,14 +371,17 @@ func TestValidateOrGenerateTokenRegeneratesLuaUnsafe(t *testing.T) {
 		t.Fatalf("regenerated token not strong+Lua-safe: %q", got)
 	}
 
-	// Same guard on the generic key variant (used for OPENRESTY_TOKEN, itself
-	// emitted to cfm_bridge_token.lua via %q — manager.go).
-	got2, err := ValidateOrGenerateTokenKey("", "OPENRESTY_TOKEN", bad)
-	if err != nil {
-		t.Fatalf("ValidateOrGenerateTokenKey: %v", err)
+	// The same guard decides for the [webdetector] tokens (hostsecrets), and
+	// GenerateToken's output must always pass it.
+	if IsStrongToken(bad) {
+		t.Fatalf("IsStrongToken accepted a Lua-unsafe token")
 	}
-	if got2 == bad || len(got2) < 32 || !tokenIsLuaSafe(got2) {
-		t.Fatalf("key variant did not regenerate a strong+Lua-safe token: %q", got2)
+	gen, err := GenerateToken()
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	if !IsStrongToken(gen) || len(gen) != 48 {
+		t.Fatalf("GenerateToken returned a token IsStrongToken rejects: %q", gen)
 	}
 }
 

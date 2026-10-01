@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"cfm/internal/detconf"
+	"cfm/internal/hostsecrets"
+	"cfm/internal/sslcollector"
 )
 
 type LuaTokenProbe struct {
@@ -43,7 +45,6 @@ func (p BridgeRuntimeProbe) Summary() string {
 const CanonicalBridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 
 var luaReturnRe = regexp.MustCompile(`(?m)^\s*return\s+("(\\.|[^"\\])*")\s*$`)
-var badTokenRe = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$`)
 
 func ResolveLuaToken(paths []string) LuaTokenProbe {
 	for _, p := range paths {
@@ -70,16 +71,12 @@ func ReadLuaToken(path string) LuaTokenProbe {
 	}
 	return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
 }
+
+// IsStrongToken is the daemon's own rule (sslcollector.IsStrongToken, which
+// decides rotation and hostsecrets resolution), plus: a probe reports a token
+// with surrounding whitespace as weak rather than trimming it.
 func IsStrongToken(tok string) bool {
-	if len(tok) < 32 || strings.TrimSpace(tok) != tok || badTokenRe.MatchString(tok) {
-		return false
-	}
-	for i := 0; i < len(tok); i++ {
-		if tok[i] < 0x21 || tok[i] > 0x7e {
-			return false
-		}
-	}
-	return true
+	return strings.TrimSpace(tok) == tok && sslcollector.IsStrongToken(tok)
 }
 func TokenHealth(t LuaTokenProbe) string {
 	if !t.Present {
@@ -100,7 +97,7 @@ func TokenHealth(t LuaTokenProbe) string {
 // once a key moved into an overlay and could drift from the daemon's semantics
 // (CLAUDE.md §5, "never keep a second copy that drifts"). Keys are uppercased
 // and surrounding quotes stripped by the parser; callers still strip any inline
-// ;/# comment (stripInlineComment). NOT for the base-owned token keys — see
+// ;/# comment (detconf.CleanValue). NOT for the token keys — see
 // ReadChallengeTokenProbe.
 func ReadDetectorSectionKV(path, section string) map[string]string {
 	out := map[string]string{}
@@ -117,23 +114,50 @@ func ReadDetectorSectionKV(path, section string) map[string]string {
 }
 
 func ReadChallengeTokenProbe(path string) LuaTokenProbe {
-	if tok := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN")); tok != "" {
-		return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
+	// CFM_CHALLENGE_SECRET in the environment beats the resolved token in
+	// the challenge server (secretKey), so it does here. CHALLENGE_TOKEN in
+	// the environment is this probe's override seam (tests); the daemon
+	// never reads it.
+	for _, env := range []string{"CFM_CHALLENGE_SECRET", "CHALLENGE_TOKEN"} {
+		if tok := strings.TrimSpace(os.Getenv(env)); tok != "" {
+			return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
+		}
 	}
-	// CHALLENGE_TOKEN is BASE-owned: the daemon pins the runtime token to the
-	// base value and ignores any overlay override (see the manager token
-	// block), so probe the BASE section — a merged read would report an
-	// overlay token the daemon never uses.
-	base, err := detconf.ReadSectionsFile(path)
-	if err != nil {
+	// In the daemon: the token it runs (no config parse), unless its file
+	// holds no usable token (Effective then reports none, to flag it).
+	if _, runs := hostsecrets.Running(hostsecrets.ChallengeToken); runs {
+		if tok := hostsecrets.Effective(hostsecrets.ChallengeToken, ""); tok != "" {
+			return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
+		}
 		return LuaTokenProbe{}
 	}
-	if kv, ok := base.ByName["webdetector"]; ok {
-		if v, ok := kv["CHALLENGE_TOKEN"]; ok {
-			if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
-				return LuaTokenProbe{Token: clean, Present: true, Valid: IsStrongToken(clean)}
-			}
+	// The daemon runs the stored token (hostsecrets); only while the store
+	// has none does it take the detectors.conf one, from the section
+	// hostsecrets.ConfSection picks. Probe the same, with the same cleaner.
+	// No [webdetector] in the effective config: the daemon resolves no token.
+	// A broken overlay: the daemon starts base-only (or keeps running), so
+	// fall back to the base file as it does.
+	base, baseErr := detconf.ReadSectionsFile(path)
+	merged, err := detconf.ReadLayeredFile(path)
+	if err != nil {
+		if baseErr != nil {
+			return LuaTokenProbe{}
 		}
+		merged = base
+	}
+	mergedWD, ok := merged.ByName["webdetector"]
+	if !ok {
+		// No [webdetector] here: the daemon resolves no token, unless it
+		// kept running one (a broken overlay on a hot reload keeps the old
+		// config), which only an in-daemon probe can see.
+		if tok, runs := hostsecrets.Running(hostsecrets.ChallengeToken); runs {
+			return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
+		}
+		return LuaTokenProbe{}
+	}
+	legacy := detconf.CleanValue(hostsecrets.ConfSection(base, baseErr, mergedWD)["CHALLENGE_TOKEN"])
+	if clean := hostsecrets.Effective(hostsecrets.ChallengeToken, legacy); clean != "" {
+		return LuaTokenProbe{Token: clean, Present: true, Valid: IsStrongToken(clean)}
 	}
 	return LuaTokenProbe{}
 }
@@ -157,7 +181,7 @@ func ResolveBridgeRuntimeConfigWithStat(path string, statFn func(string) (os.Fil
 	cfg := BridgeRuntimeConfig{Enabled: true, SocketPath: defaultSockPath, SocketSource: "fallback"}
 	kv := ReadDetectorSectionKV(path, "webdetector")
 	if v, ok := kv["OPENRESTY_SOCK"]; ok {
-		if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
+		if clean := detconf.CleanValue(v); clean != "" {
 			cfg.SocketPath = clean
 			cfg.SocketSource = "config"
 		}
@@ -182,46 +206,6 @@ func NormalizeRunPathForDisplay(path string) string {
 		return trim
 	}
 	return trim
-}
-
-func stripInlineComment(s string) string {
-	inQuote := false
-	var q rune
-	prevNonSpace := -1
-	for i, c := range s {
-		if c == '\'' || c == '"' {
-			if !inQuote {
-				inQuote = true
-				q = c
-			} else if q == c {
-				inQuote = false
-			}
-			if c != ' ' && c != '	' {
-				prevNonSpace = i
-			}
-			continue
-		}
-		if inQuote {
-			if c != ' ' && c != '	' {
-				prevNonSpace = i
-			}
-			continue
-		}
-		if c == ';' || c == '#' {
-			return strings.TrimSpace(s[:i])
-		}
-		if c == '/' && i+1 < len(s) && s[i+1] == '/' {
-			if prevNonSpace >= 0 && s[prevNonSpace] == ':' {
-				// probably URL
-			} else if i == 0 || s[i-1] == ' ' || s[i-1] == '	' {
-				return strings.TrimSpace(s[:i])
-			}
-		}
-		if c != ' ' && c != '	' {
-			prevNonSpace = i
-		}
-	}
-	return strings.TrimSpace(s)
 }
 
 func ProbeSSLCollector(path string, token LuaTokenProbe) SSLCollectorProbe {

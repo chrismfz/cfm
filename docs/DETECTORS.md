@@ -129,13 +129,38 @@ alone is applied (base-only start, loudly logged) rather than degrading to
 builtin-only protection (which stays reserved for the base file itself being
 unreadable).
 
-**Not overridable via overlay:** the auto-managed tokens `CHALLENGE_TOKEN` and
-`OPENRESTY_TOKEN` are **base-owned** — the daemon generates/persists them into
-the base `detectors.conf` and pins the runtime to the base value, ignoring an
-overlay override (an overlay value would otherwise be re-healed into the base
-every reload, an endless rotate loop, and would desync the `cfm_bridge_token.lua`
-the daemon writes). Set these in the base file if you set them at all; PR6 moves
-their generation out of the conffile entirely. Every other `[webdetector]` knob
+**Per-host tokens, not config:** `CHALLENGE_TOKEN` and `OPENRESTY_TOKEN` live
+in `/var/lib/cfm/secrets/` (`challenge_token`, `openresty_token`; root,
+`0600`), and that file is the one in use. They are never written into
+`detectors.conf`, so the conffile can stay identical to the packaged one and
+upgrades update it instead of leaving a `.rpmnew`. A token file is created
+only when missing: copied from `detectors.conf`
+when that still carries a usable token, so a migrating node keeps its token,
+else generated. The `detectors.conf` value is read where the old binary read
+it: the **base** `[webdetector]` when the base has one (an overlay token is
+ignored), the merged config when it has none. Once the file exists,
+`detectors.conf` is not consulted again (a differing value is logged once),
+and its lines can be set back to `placeholder`. Keep the key lines, as
+`placeholder`: an older binary after a rollback replaces a placeholder in
+place, but appends a MISSING line at the end of the file, where it can land in
+another section and loop the daemon through a reload every few seconds, and
+an EMPTY line makes its regex overwrite the line after it. A token rotates
+once on a Debian upgrade where the package's `detectors.conf` is taken at the
+prompt (the old daemon, running until `postinst` restarts it, may write a new
+token into the fresh file; the new daemon copies it). A rollback to an older binary rotates twice
+if the line is at `placeholder` (the older binary generates its own there;
+the next upgrade goes back to the stored one), and not at all while the line
+still holds the token. To rotate: set the `detectors.conf` line to `placeholder`
+(a token still there would be copied back), delete the file, restart. To set a
+specific token (e.g. one shared by nodes behind a load balancer), write it
+into the file (root, `0600`) and restart. A file holding no usable token is
+never overwritten (an empty one is replaced): it is logged, and another token
+runs, unstored, until the file is fixed or deleted; a symlink or other special file in its place is
+never followed nor replaced. A store that cannot be
+read is never overwritten; the daemon keeps the token it runs. `cfm health`
+reports the stored token (inside the daemon: the one it runs), and a token
+file that holds no usable token as missing. The store outlives package removal, like the rest of
+`/var/lib/cfm`. Every other `[webdetector]` knob
 (`OPENRESTY_SOCK`, `LOG_PATH`, thresholds, …) is overlay-tunable as normal. Verify the
 merged result with `cfm detectors-srcresolve` and the cfm-admin "Source
 resolution" card. `config_drift` computes `missing_sections`/`missing_keys`

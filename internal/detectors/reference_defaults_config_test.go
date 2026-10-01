@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"cfm/internal/sslcollector"
 )
 
 // TestReferenceConfigMatchesRuntimeDefaults pins stock values in
@@ -48,6 +50,26 @@ func TestReferenceConfigMatchesRuntimeDefaults(t *testing.T) {
 	}
 	if got := kvDur(wd, "HISTORY_PRUNE_EVERY", 999*time.Hour); got != time.Hour {
 		t.Errorf("[webdetector] HISTORY_PRUNE_EVERY = %s, want 1h (a value that fails to parse reads as the fallback)", got)
+	}
+
+	// The per-host tokens are generated into /var/lib/cfm/secrets
+	// (hostsecrets), never shipped: a real value would be one secret for the
+	// fleet. The key line stays inside [webdetector] with a WEAK placeholder,
+	// which the daemon ignores and an older binary (after a rollback) replaces
+	// in place. A MISSING line is appended by that binary at the end of the
+	// file, into whatever section is last (the 2026-09-30 speedhost reload
+	// loop); an EMPTY one is worse: its `KEY\s*=\s*` regex runs across the
+	// newline and overwrites the next line, leaving the key empty.
+	for _, key := range []string{"CHALLENGE_TOKEN", "OPENRESTY_TOKEN"} {
+		v, ok := wd[key]
+		switch {
+		case !ok:
+			t.Errorf("[webdetector] %s line is missing from stock; keep it as placeholder (rollback safety)", key)
+		case strings.TrimSpace(v) == "":
+			t.Errorf("[webdetector] %s is empty in stock; an older binary mangles an empty line, keep placeholder", key)
+		case sslcollector.IsStrongToken(v):
+			t.Errorf("[webdetector] %s = %q is a real token in stock; per-host tokens are generated, never shipped", key, v)
+		}
 	}
 
 	gov, ok := secs.ByName["mysql_governor"]
