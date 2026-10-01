@@ -616,6 +616,22 @@ func (m *manager) maybeReload(parent context.Context) {
 			}
 		}
 
+		// Same rules on the edge decision hot path (no DNS): without this a
+		// vhost-wide challenge is served to an asn/ua-excluded crawler (Meta's
+		// link-preview bots: no PTR, so the FCrDNS good-bot exemption can't
+		// verify them) — the file rules were only consulted by the log-driven
+		// per-IP emits.
+		type chalExcludeHotSetter interface {
+			SetChalExcludeHotFunc(func(host, ua string, asn, ptr func() string, rule string) (action, matched string, ok bool))
+		}
+		if hs, ok := det.(chalExcludeHotSetter); ok {
+			if secExclude != nil {
+				hs.SetChalExcludeHotFunc(secExclude.MatchNoDNS)
+			} else {
+				hs.SetChalExcludeHotFunc(nil)
+			}
+		}
+
 		// Wire the operator good-bot name resolver (forward-confirmed verify_fcrdns
 		// PTR rules → a block-exemption tag on solver-farm finding IPs). Same rules,
 		// same presence condition as the exclude matcher above.
