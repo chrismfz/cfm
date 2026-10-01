@@ -370,23 +370,19 @@ func (m *manager) maybeReload(parent context.Context) {
 
 	// ── Per-host tokens for [webdetector] ──────────────────────────────────────
 	// CHALLENGE_TOKEN signs browser challenge HMACs. OPENRESTY_TOKEN
-	// authenticates Lua→Go socket calls. Both are resolved by
-	// resolveHostTokens (hostsecrets): nothing is ever written into
-	// detectors.conf, which is what kept the conffile "modified" on every
-	// node, so upgrades could not update it and left a .rpmnew behind.
-	// The token value is read from the BASE [webdetector] when the base has
-	// one (an overlay token is ignored, as before), else from the merged
-	// config, where the old binary ran an overlay-only token as-is. The runtime is pinned to the resolved
-	// value, which stays in lockstep with the cfm_bridge_token.lua written
-	// below. Every OTHER [webdetector] knob uses the merged wdKV. The block
-	// runs whenever the merged config has [webdetector], so an overlay-only
-	// [webdetector] also gets its tokens and cfm_bridge_config.lua.
+	// authenticates Lua→Go socket calls. Both live in /var/lib/cfm/secrets
+	// (resolveHostTokens → hostsecrets): created once, from detectors.conf
+	// when it still carries a usable token, else generated; never written
+	// into detectors.conf, which is what kept the conffile "modified" on
+	// every node, so upgrades could not update it and left a .rpmnew behind.
+	// The runtime is pinned to the resolved value, which stays in lockstep
+	// with the cfm_bridge_token.lua written below. Every OTHER [webdetector]
+	// knob uses the merged wdKV. The block runs whenever the merged config
+	// has [webdetector], so an overlay-only [webdetector] also gets its
+	// tokens and cfm_bridge_config.lua.
 	if wdKV, ok := secs.ByName["webdetector"]; ok {
-		baseWD, baseHasWD := KV(nil), false
-		if bs, berr := ReadSectionsFile(m.opts.CfgPath); berr == nil {
-			baseWD, baseHasWD = bs.ByName["webdetector"]
-		}
-		chalTok, newTok := resolveHostTokens(baseWD, baseHasWD, wdKV)
+		base, baseErr := ReadSectionsFile(m.opts.CfgPath)
+		chalTok, newTok := resolveHostTokens(tokenConfSection(base, baseErr, wdKV))
 		// Pin the runtime to the resolved tokens. "" (not even generation
 		// worked) must not leave the config value behind: a "placeholder"
 		// would become the challenge HMAC key; "" selects the ephemeral key,
@@ -423,11 +419,6 @@ func (m *manager) maybeReload(parent context.Context) {
 					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PanelFPPolicyMode, bridgeCfg.PostClearanceCadence, bridgeCfg.FPPolicy, bridgeCfg.SiteCache, bridgeCfg.MicroCacheEnforce)
 			}
 		}
-	} else if err := hostsecrets.RemovePreUpgrade(); err != nil {
-		// No [webdetector]: nothing will ever take tokens from the package's
-		// pre-upgrade snapshot (a full copy of the old detectors.conf), and a
-		// leftover one would beat the store if the section came back later.
-		logging.Logf("[detectors] could not remove %s: %v", hostsecrets.PreUpgradePath(), err)
 	}
 	// ─────────────────────────────────────────────────────────────────────────
 
@@ -796,63 +787,65 @@ func (m *manager) stopAll() {
 	}
 }
 
+// tokenConfSection is where the detectors.conf token value is read, as the
+// old binary read it: the BASE [webdetector] section when the base has one
+// (an overlay token is ignored), the merged section (wdKV) only when the base
+// has none, where the old binary ran an overlay token as-is. nil when the
+// base cannot be read: an overlay token must never stand in for it. The value
+// matters only while the store has no token (the migration).
+func tokenConfSection(base Sections, baseErr error, wdKV KV) KV {
+	if baseErr != nil {
+		return nil
+	}
+	if b, ok := base.ByName["webdetector"]; ok {
+		return b
+	}
+	return wdKV
+}
+
 // resolveHostTokens returns the CHALLENGE_TOKEN and OPENRESTY_TOKEN the
 // daemon runs with ("" only if one cannot even be generated), resolved by
-// hostsecrets, and logs where each came from. The detectors.conf value is
-// read as the old binary did: from the BASE [webdetector] section when the
-// base has one (an overlay token is ignored), from the merged config (wdKV)
-// only when the base has no [webdetector] at all, where the old binary ran an
-// overlay token as-is. hostsecrets then falls back to the package's
-// pre-upgrade snapshot, the store, or a new token.
-func resolveHostTokens(baseWD KV, baseHasWD bool, wdKV KV) (challenge, bridge string) {
-	confWD := baseWD
-	if !baseHasWD {
-		confWD = wdKV
-	}
+// hostsecrets (the store; when it has none, the detectors.conf value in
+// confWD, see tokenConfSection, else a new token), and logs where each came
+// from.
+func resolveHostTokens(confWD KV) (challenge, bridge string) {
 	resolve := func(key string) string {
 		legacy := kvStrClean(confWD, key, "")
-		if !hostsecrets.Usable(legacy) && sslcollector.IsStrongToken(legacy) {
-			if _, seen := tokenUnusableLogged.LoadOrStore(key, true); !seen {
-				logging.Logf("[detectors] %s in detectors.conf is ignored: the config cleaner would alter it (surrounding quotes or an inline comment), so it cannot run as written", key)
-			}
-		}
 		tok, src, err := hostsecrets.Resolve(key, legacy)
 		if tok == "" {
 			logging.Logf("[detectors] %s generation failed: %v", key, err)
 			return ""
 		}
 		logTokenSource(key, src, err)
+		if src != hostsecrets.SourceConf && sslcollector.IsStrongToken(legacy) && legacy != tok {
+			if _, seen := tokenConfIgnoredLogged.LoadOrStore(key, true); !seen {
+				logging.Logf("[detectors] %s in detectors.conf is ignored: the token in %s is the one in use. To switch to the detectors.conf value, delete that file and restart; otherwise set the line to placeholder", key, hostsecrets.Path(key))
+			}
+		}
 		return tok
 	}
 	return resolve(hostsecrets.ChallengeToken), resolve(hostsecrets.BridgeToken)
 }
 
-// tokenUnusableLogged remembers, per token, that the "strong but not usable"
-// warning was logged (once per process, like the hint below).
-var tokenUnusableLogged sync.Map
+// tokenConfIgnoredLogged / tokenFromConfLogged remember, per token, that the
+// hint was logged: a reload happens on every config save and tailed-log
+// rotation, and the hint is the same every time.
+var tokenConfIgnoredLogged, tokenFromConfLogged sync.Map
 
 // tokenErrLogged holds, per token, the last error line logged, so a store
-// that stays unwritable (a reload on every config save and tailed-log
-// rotation) logs it once, not on every reload. Cleared on success.
+// that stays unwritable logs it once, not on every reload. Cleared on success.
 var tokenErrLogged sync.Map
 
-// tokenFromConfLogged remembers, per token, that the "taken from
-// detectors.conf" hint was logged: a reload happens on every config save and
-// tailed-log rotation, and the hint is the same every time.
-var tokenFromConfLogged sync.Map
-
 // logTokenSource logs where a [webdetector] token came from when it is worth
-// knowing: generated, taken from the pre-upgrade snapshot, still set in
-// detectors.conf (once per process), or not persisted. A token read from the store is the steady state: silent.
+// knowing: generated, copied from detectors.conf (once per process), or not
+// stored. A token read from the store is the steady state: silent.
 func logTokenSource(key, source string, err error) {
 	var msg string
 	switch {
-	case errors.Is(err, hostsecrets.ErrSnapshotNotUpdated):
-		msg = fmt.Sprintf("[detectors] %s stored (source=%s), but %v — remove that file before rotating this token", key, source, err)
 	case errors.Is(err, hostsecrets.ErrStoreUnreadable):
 		msg = fmt.Sprintf("[detectors] %s: %v — keeping the running token (source=%s) and leaving the store alone; retried each reload", key, err, source)
-	case err != nil && (source == hostsecrets.SourceConf || source == hostsecrets.SourceSnapshot):
-		msg = fmt.Sprintf("[detectors] %s from the %s could not be copied into %s: %v — running with it; retried each reload", key, source, hostsecrets.Path(key), err)
+	case err != nil && source == hostsecrets.SourceConf:
+		msg = fmt.Sprintf("[detectors] %s from detectors.conf could not be copied into %s: %v — running with it; retried each reload", key, hostsecrets.Path(key), err)
 	case err != nil:
 		msg = fmt.Sprintf("[detectors] %s source=%s NOT stored in %s: %v — kept for this process (retried each reload); a restart generates a new one", key, source, hostsecrets.Path(key), err)
 	}
@@ -867,11 +860,9 @@ func logTokenSource(key, source string, err error) {
 	switch source {
 	case hostsecrets.SourceGenerated:
 		logging.Logf("[detectors] %s generated and stored in %s", key, hostsecrets.Path(key))
-	case hostsecrets.SourceSnapshot:
-		logging.Logf("[detectors] %s taken over from the pre-upgrade snapshot and stored in %s", key, hostsecrets.Path(key))
 	case hostsecrets.SourceConf:
 		if _, seen := tokenFromConfLogged.LoadOrStore(key, true); !seen {
-			logging.Logf("[detectors] %s taken from detectors.conf and kept in %s; the detectors.conf value can be set back to placeholder", key, hostsecrets.Path(key))
+			logging.Logf("[detectors] %s copied from detectors.conf into %s, which is now the one in use; the detectors.conf line can be set back to placeholder", key, hostsecrets.Path(key))
 		}
 	}
 }

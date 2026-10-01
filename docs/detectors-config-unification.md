@@ -210,21 +210,17 @@ nothing). Validation should warn on unknown keys in `.leniency` sections.
 
 **Tokens (landed 2026-09-30).** `CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` were
 per-host secrets generated INTO the conffile — the last blocker to a
-byte-identical file. `internal/hostsecrets` now generates each once per host
-into `/var/lib/cfm/secrets/` (root, dir `0700`, files `0600`; only the daemon
-reads them, the edge keeps reading the `cfm_bridge_token.lua` mirror) and
-never writes `detectors.conf`. The stock file ships the two keys as
-`placeholder` (kept so an older binary after a rollback replaces them in place
-instead of appending them to whatever section is last; an empty value is worse,
-its regex overwrites the next line). A strong base-conffile value still wins and
-is copied into the store, so the migration is "set the value back to
-placeholder whenever, nothing breaks" (no cookie is invalidated). The package's
-pre-install scriptlets (Debian `preinst`, RPM pre) snapshot the old file into
-the store dir before a conffile prompt or a moved `.rpmnew` can replace it;
-the daemon takes the tokens from that snapshot with the real parser, one key
-at a time, then deletes it. The Debian preinst also stops a running
-pre-store daemon, which would otherwise regenerate the stock placeholder in
-place (a one-shot timer starts the new one if configure is delayed).
+byte-identical file. `internal/hostsecrets` keeps each in
+`/var/lib/cfm/secrets/` (root, dir `0700`, files `0600`; only the daemon reads
+them, the edge keeps reading the `cfm_bridge_token.lua` mirror) and never
+writes `detectors.conf`. The store is the source of truth: a token file is
+created once, copied from the base conffile's value when it carries one (the
+migration: no cookie is invalidated), else generated. The stock file ships
+the two keys as `placeholder` (kept so an older binary after a rollback
+replaces them in place instead of appending them to whatever section is
+last; an empty value is worse, its regex overwrites the next line). Taking
+the package's file at a Debian upgrade, or rolling back, rotates the tokens
+once; that was judged cheaper than the pre-upgrade machinery avoiding it.
 `cfm health` reads the same resolution (`hostsecrets.Effective`).
 
 ---

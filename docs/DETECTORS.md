@@ -129,37 +129,28 @@ alone is applied (base-only start, loudly logged) rather than degrading to
 builtin-only protection (which stays reserved for the base file itself being
 unreadable).
 
-**Per-host tokens, not config:** `CHALLENGE_TOKEN` and `OPENRESTY_TOKEN` are
-generated once per host into `/var/lib/cfm/secrets/` (`challenge_token`,
-`openresty_token`; root, `0600`) and are never written into `detectors.conf`,
-so the conffile can stay identical to the packaged one and upgrades update it
-instead of leaving a `.rpmnew`. A strong value still set in the **base**
-`detectors.conf` wins and is copied into the store (the value can then be set
-back to `placeholder` without invalidating visitors' challenge cookies). Keep
-the key line itself, as `placeholder`: an older binary after a rollback
-replaces a placeholder in place, but appends a MISSING line at the end of the
-file, where it can land in another section and loop the daemon through a
-reload every few seconds, and an EMPTY line makes its regex overwrite the line
-after it. An overlay value is ignored when the base has a `[webdetector]`
-section, and used only when it has none (as the old binary did). A weak value (`placeholder`, under 32 characters) is ignored, as is one the
-config cleaner would alter (surrounding quotes, an inline comment; logged). Before it can replace the conffile, the package snapshots
-it to `/var/lib/cfm/secrets/detectors.conf.pre-upgrade` (the token-seed block
-in the Debian `preinst` and the RPM pre scriptlet). The daemon reads the
-tokens from the snapshot with the same parser (a usable value there beats
-the store, as one in the base file does) and stores them; each token is
-dropped from the snapshot once stored, and the file goes when none is left
-(or at once when the config has no `[webdetector]`). `cfm health` resolves
-the same way. A Debian purge removes the store; an RPM erase keeps the tokens
-(like the rest of `/var/lib/cfm`) and drops only the snapshot. So taking the package's `detectors.conf` at upgrade, or moving the
-`.rpmnew` over it, keeps the tokens. On Debian the preinst also stops a
-running OLD daemon (one whose binary predates the store) before the unpack:
-it would otherwise regenerate the stock placeholder in `detectors.conf` and
-rotate both tokens; a one-shot timer starts the new daemon 2 minutes later
-if `postinst` has not yet (apt batch, conffile prompt, interrupted run). A
-rollback to such a binary still rotates them once. To
-rotate: set the value in the base to `placeholder` (if set), delete the
-store file (and `detectors.conf.pre-upgrade`, if present), restart; any restored copy of `detectors.conf` that still holds
-a token brings that token back. Every other `[webdetector]` knob
+**Per-host tokens, not config:** `CHALLENGE_TOKEN` and `OPENRESTY_TOKEN` live
+in `/var/lib/cfm/secrets/` (`challenge_token`, `openresty_token`; root,
+`0600`), and that file is the one in use. They are never written into
+`detectors.conf`, so the conffile can stay identical to the packaged one and
+upgrades update it instead of leaving a `.rpmnew`. A token file is created
+only when missing (or holding no usable token): copied from `detectors.conf`
+when that still carries a usable token, so a migrating node keeps its token,
+else generated. The `detectors.conf` value is read where the old binary read
+it: the **base** `[webdetector]` when the base has one (an overlay token is
+ignored), the merged config when it has none. Once the file exists,
+`detectors.conf` is not consulted again (a differing value is logged once),
+and its lines can be set back to `placeholder`. Keep the key lines, as
+`placeholder`: an older binary after a rollback replaces a placeholder in
+place, but appends a MISSING line at the end of the file, where it can land in
+another section and loop the daemon through a reload every few seconds, and
+an EMPTY line makes its regex overwrite the line after it. A token rotates
+once on a Debian upgrade where the package's `detectors.conf` is taken at the
+prompt (nothing left to copy), and on a rollback to an older binary, which
+runs its own token from `detectors.conf` until the next upgrade brings the
+stored one back. To rotate: delete the file, restart. A store that cannot be
+read is never overwritten; the daemon keeps the token it runs. `cfm health`
+resolves the same way. A Debian purge removes the store. Every other `[webdetector]` knob
 (`OPENRESTY_SOCK`, `LOG_PATH`, thresholds, …) is overlay-tunable as normal. Verify the
 merged result with `cfm detectors-srcresolve` and the cfm-admin "Source
 resolution" card. `config_drift` computes `missing_sections`/`missing_keys`

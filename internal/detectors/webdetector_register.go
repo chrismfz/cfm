@@ -240,8 +240,8 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 		}
 
 		// Challenge token: [webdetector] CHALLENGE_TOKEN, pinned by the manager
-		// to the hostsecrets resolution (detectors.conf, else the pre-upgrade
-		// snapshot, else the per-host store). If unset ("" when even
+		// to the hostsecrets resolution (the per-host store, created once from
+		// detectors.conf or generated). If unset ("" when even
 		// generation failed), the challenge server logs a warning and uses an
 		// ephemeral per-process key.
 		webdet.SetChallengeToken(w.cfg.ChallengeToken)

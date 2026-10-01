@@ -117,10 +117,11 @@ func ReadChallengeTokenProbe(path string) LuaTokenProbe {
 	if tok := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN")); tok != "" {
 		return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
 	}
-	// The daemon reads the token from the BASE [webdetector] when the base
-	// has one (an overlay token is ignored), else from the merged config;
-	// hostsecrets then falls back to the snapshot / store
-	// (detectors.resolveHostTokens). Probe the same, with the same cleaner.
+	// The daemon runs the stored token (hostsecrets); only while the store
+	// has none does it take the detectors.conf one, read from the BASE
+	// [webdetector] when the base has one (an overlay token is ignored), else
+	// from the merged config (detectors.tokenConfSection). Probe the same,
+	// with the same cleaner.
 	legacy := ""
 	if base, err := detconf.ReadSectionsFile(path); err == nil {
 		if wd, ok := base.ByName["webdetector"]; ok {

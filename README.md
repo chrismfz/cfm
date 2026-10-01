@@ -870,9 +870,10 @@ front-end is OpenResty or Angie.
 
 ### Webdetector bridge token file (`OPENRESTY_TOKEN`)
 
-`OPENRESTY_TOKEN` is generated once per host into
-`/var/lib/cfm/secrets/openresty_token` (a strong value still set in
-`detectors.conf [webdetector]` wins and is copied there). CFM mirrors it into
+`OPENRESTY_TOKEN` lives in `/var/lib/cfm/secrets/openresty_token`, created
+once per host (copied from a token still set in `detectors.conf
+[webdetector]` on the first start after the upgrade, else generated; delete
+the file and restart to rotate). CFM mirrors it into
 the bridge module at one fixed shared path:
 
 - `/var/lib/cfm/lua/cfm_bridge_token.lua`

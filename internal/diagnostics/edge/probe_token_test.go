@@ -32,8 +32,8 @@ func TestReadLuaTokenDecodesCanonicalWriterEscapes(t *testing.T) {
 	}
 }
 
-// ReadChallengeTokenProbe reports the token the daemon runs: a strong base
-// detectors.conf value, else the per-host store (hostsecrets). A node whose
+// ReadChallengeTokenProbe reports the token the daemon runs: the per-host
+// store (hostsecrets), whatever detectors.conf says. A node whose
 // detectors.conf no longer carries the line must not read as "no token".
 func TestReadChallengeTokenProbeFallsBackToTheStore(t *testing.T) {
 	t.Setenv("CHALLENGE_TOKEN", "")
@@ -64,13 +64,14 @@ func TestReadChallengeTokenProbeFallsBackToTheStore(t *testing.T) {
 	if err := os.WriteFile(conf, []byte("[webdetector]\nCHALLENGE_TOKEN = "+inConf+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := ReadChallengeTokenProbe(conf); got.Token != inConf {
-		t.Errorf("strong detectors.conf value: ReadChallengeTokenProbe = %+v, want it (it wins)", got)
+	if got := ReadChallengeTokenProbe(conf); got.Token != stored {
+		t.Errorf("strong detectors.conf value: ReadChallengeTokenProbe = %+v, want the stored token (the store wins)", got)
 	}
 }
 
-// Like the daemon, the probe takes a token set only in a detectors.d overlay
-// when the base has no [webdetector] section, and ignores it otherwise.
+// While the store is empty, the probe reports the detectors.conf token the
+// daemon would copy: like the daemon, one set only in a detectors.d overlay
+// when the base has no [webdetector] section, and not otherwise.
 func TestReadChallengeTokenProbeOverlayOnlyToken(t *testing.T) {
 	t.Setenv("CHALLENGE_TOKEN", "")
 	old := hostsecrets.Dir

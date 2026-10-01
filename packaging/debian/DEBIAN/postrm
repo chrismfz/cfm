@@ -1,8 +1,8 @@
 #!/bin/sh
 set -e
 
-# purge: drop the per-host token store (CHALLENGE_TOKEN / OPENRESTY_TOKEN and
-# any pre-upgrade snapshot of detectors.conf); a reinstall generates new ones.
+# purge: drop the per-host token store (CHALLENGE_TOKEN / OPENRESTY_TOKEN); a
+# reinstall generates new ones.
 if [ "$1" = "purge" ]; then
     rm -rf /var/lib/cfm/secrets
 fi

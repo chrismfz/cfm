@@ -423,7 +423,7 @@ func printBridgeInterceptorStatus_unused(backend firewall.Backend) {
 		sockProbe.Category,
 		sockProbe.ErrorText,
 	)
-	fmt.Printf("  %-24s %s\n", "sslcollector token (cfm_token.lua):", tokenHealth(cfmToken))
+	fmt.Printf("  %-24s %s\n", "challenge token (CHALLENGE_TOKEN):", tokenHealth(cfmToken))
 	fmt.Printf("  %-24s %s\n", "edge bridge token (OPENRESTY_TOKEN):", tokenHealth(bridgeToken))
 	fmt.Printf("  %-24s %s\n", "bridge socket auth:", bridgeRuntime.summary())
 	fmt.Printf("  %-24s socket=%s source=%s token_src=%s mode=%s\n",
@@ -646,10 +646,7 @@ var (
 	canonicalBridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 	bridgeSocketProbe        = probeNginxBridgeSocket
 	socketStat               = os.Stat
-	tcpDialTimeout           = func(network, addr string, timeout time.Duration) (net.Conn, error) {
-		return net.DialTimeout(network, addr, timeout)
-	}
-	detectorsConfigPath = "/etc/cfm/detectors.conf"
+	detectorsConfigPath      = "/etc/cfm/detectors.conf"
 )
 
 func readLuaToken(path string) luaTokenProbe {
@@ -782,9 +779,8 @@ func resolveDetectorsConfigPath() string {
 // knobs like OPENRESTY_SOCK, so the probe matches what the daemon runs (a
 // base-only read false-alarms when such a key moved into an overlay). NOTE:
 // this is NOT the right source for CHALLENGE_TOKEN / OPENRESTY_TOKEN — the
-// daemon reads those from the BASE [webdetector] when the base has one (else
-// the merged config), then the pre-upgrade snapshot and the per-host store
-// (see edgediag.ReadChallengeTokenProbe).
+// daemon runs the per-host store (hostsecrets), filled once from the BASE
+// [webdetector] (see edgediag.ReadChallengeTokenProbe).
 func readDetectorSectionKV(path, section string) map[string]string {
 	return sectionKV(detectors.ReadLayeredFile, path, section)
 }

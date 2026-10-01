@@ -48,36 +48,6 @@ if ! getent passwd cfm >/dev/null 2>&1; then
         cfm
 fi
 
-# >>> cfm-token-seed
-# Snapshot the CURRENT detectors.conf into the token store dir
-# (/var/lib/cfm/secrets/detectors.conf.pre-upgrade, root 0600) before this
-# package can replace that conffile: Debian may install the packaged file at
-# the operator's choice, and on RPM an operator may later move the .rpmnew
-# over it. The per-host [webdetector] CHALLENGE_TOKEN / OPENRESTY_TOKEN in it
-# are what the node runs today; the daemon reads them from the snapshot with
-# its own parser (a usable value there beats the store, as one in
-# detectors.conf does), stores them and removes the snapshot. An existing
-# snapshot is kept: it predates this one. Creates /var/lib/cfm 0755 if
-# missing (the edge workers must reach /var/lib/cfm/lua), never fails the
-# install. The same block is in packaging/debian/DEBIAN/preinst and in the
-# rpm spec pre scriptlet; internal/hostsecrets/package_seed_test.go keeps the
-# two identical and runs it.
-cfm_seed_conf=${CFM_SEED_CONF:-/etc/cfm/detectors.conf}
-cfm_seed_dir=${CFM_SEED_DIR:-/var/lib/cfm/secrets}
-cfm_seed_snap="$cfm_seed_dir/detectors.conf.pre-upgrade"
-if [ -f "$cfm_seed_conf" ] && [ ! -e "$cfm_seed_snap" ]; then
-    cfm_seed_parent=$(dirname "$cfm_seed_dir")
-    (
-        { [ -d "$cfm_seed_parent" ] || mkdir -p -m 0755 "$cfm_seed_parent"; } &&
-        umask 077 &&
-        mkdir -p "$cfm_seed_dir" && chmod 0700 "$cfm_seed_dir" &&
-        cp "$cfm_seed_conf" "$cfm_seed_snap.tmp" &&
-        mv -f "$cfm_seed_snap.tmp" "$cfm_seed_snap"
-    ) || rm -f "$cfm_seed_snap.tmp"
-fi
-unset cfm_seed_conf cfm_seed_dir cfm_seed_snap cfm_seed_parent
-# <<< cfm-token-seed
-
 %prep
 # nothing
 
@@ -335,13 +305,6 @@ fi
 
 %postun
 %systemd_postun_with_restart cfm.service
-# Erase (not upgrade): drop the token store's pre-upgrade snapshot, a full
-# copy of the old detectors.conf that nothing will consume any more and that
-# would outrank the store after a reinstall. The tokens themselves stay, like
-# the rest of /var/lib/cfm: RPM has no purge (the Debian purge removes them).
-if [ "$1" -eq 0 ]; then
-    rm -f /var/lib/cfm/secrets/detectors.conf.pre-upgrade
-fi
 
 %changelog
 * %{cfm_changelog_date} CFM Maintainers <maintainers@cfm.local> - %{version}-%{release}

@@ -23,42 +23,30 @@ back-filled here — see the git/PR history for that period.
   generate these per-host tokens into `/etc/cfm/detectors.conf`. That left the
   conffile "modified" on every node, so upgrades never updated it and left a
   `.rpmnew` / `.dpkg-dist` behind with the new stock settings in it.
-  - Each token is now generated once into `/var/lib/cfm/secrets/`
-    (`challenge_token`, `openresty_token`; root only). CFM never writes
-    `detectors.conf`.
+  - Each token now lives in `/var/lib/cfm/secrets/` (`challenge_token`,
+    `openresty_token`; root only), and that file is the one in use. It is
+    created only when missing: copied from `detectors.conf` when that still
+    carries a token, else generated. CFM never writes `detectors.conf`.
+  - **Nothing changes on upgrade:** on its first start the new daemon copies
+    the node's current token from `detectors.conf`, so no visitor is
+    re-challenged. After that the `detectors.conf` value is no longer used
+    (logged once if it differs) and can be set back to `placeholder`.
   - The stock file ships the two lines as `placeholder`. Keep them that way:
     never delete them or leave them empty. After a rollback, an older binary
     replaces a placeholder in place. It appends a missing line to whatever
     section is last, and an empty line makes it overwrite the line after it.
-  - **Nothing changes on upgrade:** a token already in `detectors.conf` still
-    wins and is copied into the store on the next start. After that the value
-    can be set back to `placeholder` without invalidating any visitor's
-    challenge cookie.
-  - Before it can replace `detectors.conf`, the package snapshots it into
-    `/var/lib/cfm/secrets/` (Debian `preinst`, RPM pre-install scriptlet). The
-    new daemon takes the tokens from that snapshot, then deletes it. Taking the
-    package's `detectors.conf` at upgrade, or moving the `.rpmnew` over it
-    later, keeps the same tokens.
-  - **Debian, first upgrade to this version only:** the old daemon is stopped
-    before the unpack; `postinst` starts the new one as usual. The old daemon
-    would otherwise turn the stock placeholder back into a new token within
-    seconds, re-challenging every visitor. If `postinst` has not run 2 minutes
-    later (an apt batch, a waiting conffile prompt, an interrupted upgrade), a
-    one-shot timer starts the new daemon.
-  - **A rollback to an older version rotates both tokens once** (every visitor
-    is re-challenged): the older binary generates its own into
-    `detectors.conf`. Rolling forward again keeps that token.
-  - To rotate a token, set its value to `placeholder` (if set), delete its
-    store file (and `detectors.conf.pre-upgrade` beside it, if present), and
-    restart. A token set in `detectors.conf` always wins, so a restored backup
-    copy of `detectors.conf` brings its token back.
-  - A token the config cleaner would alter (wrapped in quotes, or followed by
-    an inline comment) is ignored with a warning, since it could not run as
-    written.
+  - **Rotates once, by design:** (a) a Debian upgrade where you take the
+    package's `detectors.conf` at the prompt (the new daemon then finds no
+    token to copy), and (b) a rollback to an older version, which runs its own
+    token from `detectors.conf` until you upgrade again, when the stored one
+    is back. A rotation re-challenges visitors who hold a clearance cookie
+    (`CHALLENGE_COOKIE_LIFE`, 45 min stock) once.
+  - To rotate a token: delete its file and restart.
   - `cfm health` reports the token the daemon actually uses.
   - The token step (and `cfm_bridge_config.lua`) now also runs when
     `[webdetector]` exists only in a `detectors.d/` overlay. A token set in an
-    overlay still runs when the base file has no `[webdetector]` section.
+    overlay is copied when the base file has no `[webdetector]` section, as the
+    older binary ran it.
   - `apt purge cfm` removes `/var/lib/cfm/secrets/`.
 
 ### Fixed
@@ -69,9 +57,6 @@ back-filled here — see the git/PR history for that period.
   and the rewrite triggered the next reload. The token changed every 5s and
   the detector layer kept restarting. server.speedhost.gr was in this loop
   (2026-09-30). Tokens are no longer written into `detectors.conf` at all.
-- **`cfm status` labelled the sslcollector token as `CHALLENGE_TOKEN`.** The
-  line now reads "sslcollector token (cfm_token.lua)", which is what it
-  checks.
 
 ## 2026.09.30
 

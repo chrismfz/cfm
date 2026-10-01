@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,25 +16,14 @@ const (
 
 // useHostSecretsDir points the token store at a temp dir: a test must never
 // touch the live /var/lib/cfm/secrets (CLAUDE.md §5).
-func useHostSecretsDir(t *testing.T) string {
+func useHostSecretsDir(t *testing.T) {
 	t.Helper()
 	old := hostsecrets.Dir
 	hostsecrets.Dir = filepath.Join(t.TempDir(), "secrets")
 	t.Cleanup(func() { hostsecrets.Dir = old })
-	return hostsecrets.Dir
 }
 
-func writeSnapshot(t *testing.T, dir, conf string) {
-	t.Helper()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(hostsecrets.PreUpgradePath(), []byte(conf), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func wdSection(t *testing.T, conf string) KV {
+func sections(t *testing.T, conf string) Sections {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "detectors.conf")
 	if err := os.WriteFile(p, []byte(conf), 0o600); err != nil {
@@ -43,42 +33,43 @@ func wdSection(t *testing.T, conf string) KV {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s.ByName["webdetector"]
+	return s
 }
 
-// The package replaced detectors.conf with the stock one (placeholders)
-// before the new daemon started: the tokens come from the pre-upgrade
-// snapshot, beat a different (stale) store, and the snapshot is removed.
-func TestResolveHostTokensTakesOverThePreUpgradeSnapshot(t *testing.T) {
-	dir := useHostSecretsDir(t)
-	writeSnapshot(t, dir, "[webdetector]\nCHALLENGE_TOKEN = "+hostTokA+"\n; the shape an old binary left after mangling an empty line:\nOPENRESTY_TOKEN =\n"+hostTokB+"\n")
-	// A stale store from before a rollback.
-	if err := os.WriteFile(hostsecrets.Path(hostsecrets.ChallengeToken), []byte(hostTokB+"\n"), 0o600); err != nil {
-		t.Fatal(err)
+// The detectors.conf token is read where the old binary read it: the BASE
+// [webdetector] when the base has one (an overlay token is ignored), the
+// merged section only when it has none (the old binary ran an overlay token
+// as-is), nothing when the base cannot be read. So the migration copies the
+// token the node actually ran.
+func TestTokenConfSectionReadsWhereTheOldBinaryDid(t *testing.T) {
+	merged := KV{"CHALLENGE_TOKEN": hostTokB}
+	withWD := sections(t, "[webdetector]\nCHALLENGE_TOKEN = "+hostTokA+"\n")
+	if got := kvStrClean(tokenConfSection(withWD, nil, merged), "CHALLENGE_TOKEN", ""); got != hostTokA {
+		t.Errorf("base has [webdetector]: token = %q, want the base value", got)
 	}
-	base := wdSection(t, "[webdetector]\nCHALLENGE_TOKEN = placeholder\nOPENRESTY_TOKEN = placeholder\n")
-
-	chal, bridge := resolveHostTokens(base, true, base)
-	if chal != hostTokA || bridge != hostTokB {
-		t.Fatalf("resolveHostTokens = (%q, %q), want the snapshot's (A, B)", chal, bridge)
+	noWD := sections(t, "[global]\nENRICH = 1\n")
+	if got := kvStrClean(tokenConfSection(noWD, nil, merged), "CHALLENGE_TOKEN", ""); got != hostTokB {
+		t.Errorf("base has no [webdetector]: token = %q, want the merged (overlay) value", got)
 	}
-	if _, err := os.Stat(hostsecrets.PreUpgradePath()); !os.IsNotExist(err) {
-		t.Fatalf("snapshot not removed after the takeover (err %v)", err)
-	}
-	// The next reload runs the stored values.
-	if chal2, bridge2 := resolveHostTokens(base, true, base); chal2 != chal || bridge2 != bridge {
-		t.Fatalf("after the takeover: (%q, %q), want the same tokens from the store", chal2, bridge2)
+	if got := tokenConfSection(Sections{}, errors.New("read failed"), merged); got != nil {
+		t.Errorf("unreadable base: section = %v, want nil (an overlay token must not stand in)", got)
 	}
 }
 
-// A usable value in the live detectors.conf beats the snapshot.
-func TestResolveHostTokensLiveConfBeatsTheSnapshot(t *testing.T) {
-	dir := useHostSecretsDir(t)
-	writeSnapshot(t, dir, "[webdetector]\nCHALLENGE_TOKEN = "+hostTokA+"\n")
-	live := wdSection(t, "[webdetector]\nCHALLENGE_TOKEN = "+hostTokB+"\n")
-	chal, _ := resolveHostTokens(live, true, live)
-	if chal != hostTokB {
-		t.Fatalf("CHALLENGE_TOKEN = %q, want the live detectors.conf value", chal)
+// The migration end to end: the node's token is copied into an empty store,
+// then the store wins whatever detectors.conf says.
+func TestResolveHostTokensMigratesThenTheStoreWins(t *testing.T) {
+	useHostSecretsDir(t)
+	conf := KV{"CHALLENGE_TOKEN": hostTokA, "OPENRESTY_TOKEN": hostTokB}
+	if chal, bridge := resolveHostTokens(conf); chal != hostTokA || bridge != hostTokB {
+		t.Fatalf("migration: resolveHostTokens = (%q, %q), want the detectors.conf tokens", chal, bridge)
+	}
+	// The stock placeholder, or a different token (an older binary after a
+	// rollback writes its own), no longer matters.
+	for _, c := range []KV{{"CHALLENGE_TOKEN": "placeholder"}, {"CHALLENGE_TOKEN": hostTokB, "OPENRESTY_TOKEN": hostTokA}, nil} {
+		if chal, bridge := resolveHostTokens(c); chal != hostTokA || bridge != hostTokB {
+			t.Fatalf("conf %v: resolveHostTokens = (%q, %q), want the stored tokens", c, chal, bridge)
+		}
 	}
 }
 
@@ -87,7 +78,7 @@ func TestResolveHostTokensLiveConfBeatsTheSnapshot(t *testing.T) {
 // mirrored verbatim to cfm_bridge_token.lua, so the cleaner must not alter it.
 func TestUsableTokensSurviveTheConfigCleaner(t *testing.T) {
 	var samples []string
-	for _, c := range "!$%&()*+,-./:<=>?@[\\]^_`{|}~" {
+	for _, c := range "!$%&()*+,-./:<=>?@[\\]^_`{|}~\"';#" {
 		samples = append(samples, hostTokA+string(c)+hostTokB, string(c)+hostTokA, hostTokA+string(c))
 	}
 	samples = append(samples, hostTokA+"//"+hostTokB, hostTokA+"://x", "//"+hostTokA, `"`+hostTokA+`"`, "'"+hostTokA+"'")
@@ -98,69 +89,5 @@ func TestUsableTokensSurviveTheConfigCleaner(t *testing.T) {
 		if got := kvStrClean(KV{"K": v}, "K", ""); got != v {
 			t.Errorf("Usable(%q) but kvStrClean gives %q", v, got)
 		}
-	}
-}
-
-// The snapshot is consumed per key: when one token cannot be stored yet, the
-// other, already taken over, is dropped from the snapshot, so rotating it
-// (placeholder, delete its store file) cannot bring the old value back.
-func TestResolveHostTokensConsumesTheSnapshotPerKey(t *testing.T) {
-	dir := useHostSecretsDir(t)
-	writeSnapshot(t, dir, "[webdetector]\nCHALLENGE_TOKEN = "+hostTokA+"\nOPENRESTY_TOKEN = "+hostTokB+"\n")
-	// OPENRESTY_TOKEN's store cannot be written (a directory in its place).
-	if err := os.Mkdir(hostsecrets.Path(hostsecrets.BridgeToken), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	base := wdSection(t, "[webdetector]\nCHALLENGE_TOKEN = placeholder\nOPENRESTY_TOKEN = placeholder\n")
-	if chal, bridge := resolveHostTokens(base, true, base); chal != hostTokA || bridge != hostTokB {
-		t.Fatalf("resolveHostTokens = (%q, %q), want the snapshot's (A, B)", chal, bridge)
-	}
-	snap, err := ReadSectionsFile(hostsecrets.PreUpgradePath())
-	if err != nil {
-		t.Fatalf("snapshot gone while OPENRESTY_TOKEN is not stored: %v", err)
-	}
-	if got := snap.ByName["webdetector"]; len(got) != 1 || got["OPENRESTY_TOKEN"] != hostTokB {
-		t.Fatalf("snapshot [webdetector] = %v, want only the unstored OPENRESTY_TOKEN", got)
-	}
-
-	// Rotate CHALLENGE_TOKEN: delete its store file, reload.
-	if err := os.Remove(hostsecrets.Path(hostsecrets.ChallengeToken)); err != nil {
-		t.Fatal(err)
-	}
-	if chal, _ := resolveHostTokens(base, true, base); chal == hostTokA || chal == "" {
-		t.Fatalf("rotation brought the snapshot's CHALLENGE_TOKEN back: %q", chal)
-	}
-
-	// Once OPENRESTY_TOKEN can be stored, the snapshot goes.
-	if err := os.Remove(hostsecrets.Path(hostsecrets.BridgeToken)); err != nil {
-		t.Fatal(err)
-	}
-	if _, bridge := resolveHostTokens(base, true, base); bridge != hostTokB {
-		t.Fatalf("OPENRESTY_TOKEN = %q, want the snapshot's B", bridge)
-	}
-	if _, err := os.Stat(hostsecrets.PreUpgradePath()); !os.IsNotExist(err) {
-		t.Fatalf("snapshot not removed once every token was stored (err %v)", err)
-	}
-}
-
-// Overlay tokens are read as the old binary read them: used only when the
-// base has no [webdetector] section (it ran them as-is), ignored when it has
-// one (it pinned the runtime to the base value), so neither case rotates.
-func TestResolveHostTokensOverlayTokensAsTheOldBinary(t *testing.T) {
-	useHostSecretsDir(t)
-	merged := wdSection(t, "[webdetector]\nCHALLENGE_TOKEN = "+hostTokA+"\nOPENRESTY_TOKEN = "+hostTokB+"\n")
-	if chal, bridge := resolveHostTokens(nil, false, merged); chal != hostTokA || bridge != hostTokB {
-		t.Fatalf("no base [webdetector]: resolveHostTokens = (%q, %q), want the overlay's (A, B)", chal, bridge)
-	}
-
-	// The base has [webdetector] (the stock placeholder) and the store holds
-	// the node's token: an overlay token must not replace it.
-	useHostSecretsDir(t)
-	if _, _, err := hostsecrets.Resolve(hostsecrets.ChallengeToken, hostTokB); err != nil {
-		t.Fatal(err)
-	}
-	base := wdSection(t, "[webdetector]\nCHALLENGE_TOKEN = placeholder\n")
-	if chal, _ := resolveHostTokens(base, true, merged); chal != hostTokB {
-		t.Fatalf("base [webdetector]: CHALLENGE_TOKEN = %q, want the stored token (overlay ignored)", chal)
 	}
 }
