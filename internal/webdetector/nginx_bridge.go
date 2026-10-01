@@ -196,11 +196,14 @@ type NginxBridge struct {
 	// ChalExcludeHot is the operator challenge-exclude file
 	// (webdetector_challenge_exclude.txt) evaluated WITHOUT DNS
 	// (ChallengeExclude.MatchNoDNS): (host, ua, asn "AS<n>", cached ptr,
-	// rule name) → (action skip|skip_vhost_only, matched). A match downgrades
-	// a would-be challenge like goodBotDowngrade — never a block, never the
-	// WAF / traffic rules. nil when no exclude file is loaded. Set once at
-	// startup (SetChalExcludeHotFunc).
-	ChalExcludeHot func(host, ua, asn, ptr, rule string) (string, bool)
+	// rule name) → (action skip|skip_vhost_only, matched); asn / ptr are lazy.
+	// A match lifts the VHOST-WIDE challenge only — never a per-IP challenge,
+	// never a block, never the WAF / traffic rules. nil when no exclude file
+	// is loaded. Set once at startup (SetChalExcludeHotFunc).
+	ChalExcludeHot func(host, ua string, asn, ptr func() string, rule string) (string, bool)
+	// chalExcludeASNFn overrides the ASN source for ChalExcludeHot (tests
+	// only; nil = the enricher's mmdb read).
+	chalExcludeASNFn func(ip string) uint32
 
 	// Clam
 	clamMgr      clam.Enqueuer
@@ -2041,35 +2044,31 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Operator challenge-exclude file (ua/asn/host rules, no DNS). Before this
-	// the file was consulted only by the log-driven per-IP emits, so a
-	// vhost-wide challenge (auto suspicious_vhost / manual) was served to the
-	// very crawlers the file exempts — observed live 2026-10-01: Meta's
-	// meta-externalads / meta-webindexer / facebookexternalhit (AS32934, IPv6
-	// with no PTR, so the FCrDNS exemption above never verifies them) got the
-	// challenge page, and shared links previewed as "Just a moment…".
-	// skip_vhost_only lifts the vhost-wide challenge only; skip lifts a per-IP
-	// challenge too. Never softens a block.
-	if b.ChalExcludeHot != nil && ipAction != "block" &&
-		(ipAction == "challenge" || vhAction == "challenge") {
-		geo := lookupGeo()
-		asn := ""
-		if geo.ASN > 0 {
-			asn = fmt.Sprintf("AS%d", geo.ASN)
-		}
-		if vhAction == "challenge" {
-			if act, ok := b.ChalExcludeHot(host, ua, asn, geo.PTR, "CHALLENGE_VHOST"); ok {
-				vhAction = "allow"
-				if act == "skip" && ipAction == "challenge" {
-					ipAction = "allow"
-				}
+	// Operator challenge-exclude file (ua/asn/host rules, no DNS) against the
+	// VHOST-WIDE challenge. Before this the file was consulted only by the
+	// log-driven per-IP emits, so a vhost-wide challenge (auto suspicious_vhost
+	// / manual) was served to the very crawlers the file exempts — observed
+	// live 2026-10-01: Meta's meta-externalads / meta-webindexer /
+	// facebookexternalhit (AS32934, IPv6 with no PTR, so the FCrDNS exemption
+	// above never verifies them) got the challenge page, and shared links
+	// previewed as "Just a moment…".
+	// Only vhAction is lifted (skip and skip_vhost_only alike): a per-IP
+	// challenge in ipState may come from a WAF challenge-tier push or the geo
+	// policy floor, neither of which the exclude file has ever governed, and
+	// the log-driven per-IP emits already consult the file before they arm.
+	// ASN / PTR are resolved lazily, only for a rule whose cheaper conditions
+	// (host, UA) already passed: ASN from the mmdb (no async PTR dispatch),
+	// PTR from the enrich cache.
+	if b.ChalExcludeHot != nil && ipAction != "block" && vhAction == "challenge" {
+		asnFn := func() string {
+			if n := b.chalExcludeASN(ip); n > 0 {
+				return fmt.Sprintf("AS%d", n)
 			}
+			return ""
 		}
-		if ipAction == "challenge" {
-			// rule "" = not vhost-wide: only action=skip rules apply.
-			if _, ok := b.ChalExcludeHot(host, ua, asn, geo.PTR, ""); ok {
-				ipAction = "allow"
-			}
+		ptrFn := func() string { return lookupGeo().PTR }
+		if _, ok := b.ChalExcludeHot(host, ua, asnFn, ptrFn, "CHALLENGE_VHOST"); ok {
+			vhAction = "allow"
 		}
 	}
 
@@ -2131,6 +2130,21 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// chalExcludeASN is the request ASN for the challenge-exclude hot matcher: an
+// inline mmdb read (microseconds, no DNS, no async enrich dispatch).
+func (b *NginxBridge) chalExcludeASN(ip string) uint32 {
+	if b.chalExcludeASNFn != nil {
+		return b.chalExcludeASNFn(ip)
+	}
+	if b.enr == nil || ip == "" {
+		return 0
+	}
+	if f, ok := b.enr.(interface{ LookupGeoFast(string) enrich.Result }); ok {
+		return uint32(f.LookupGeoFast(ip).ASN)
+	}
+	return uint32(b.enr.LookupCachedOrAsync(ip).ASN)
 }
 
 // handleIPPush: cfm (or external tool) pushes a new IP decision.

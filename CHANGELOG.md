@@ -75,12 +75,20 @@ back-filled here — see the git/PR history for that period.
   Facebook / Messenger / WhatsApp then previewed as "Just a moment…" instead of
   showing the page title, image and description.
   - The decision bridge now checks the file's ua / asn / host rules against each
-    request's real User-Agent and ASN.
-  - `skip_vhost_only` lifts only the vhost-wide challenge. `skip` also lifts a
-    per-IP challenge.
-  - A block is never softened, and the WAF and traffic rules still apply.
-  - The check makes no DNS lookups, so a `verify_fcrdns=1` rule still applies
-    only through the log-driven path and the verified-crawler exemption.
+    request's real User-Agent and ASN, and lifts only the vhost-wide challenge
+    (with `skip` or `skip_vhost_only`).
+  - A per-IP challenge (a WAF challenge-tier hit, the geo policy floor) and a
+    block are never lifted, and the WAF and traffic rules still apply.
+  - The check makes no DNS lookups, so a `verify_fcrdns=1` rule never applies
+    there; verified crawlers are cleared by `CHALLENGE_GOODBOT_EXEMPT`.
+  - Because the check runs per request, a ua-only rule now lifts the vhost-wide
+    challenge for anyone sending that UA. The shipped rules all pair the UA with
+    an ASN or a PTR.
+- **An exclude rule's `asn=` without a wildcard now matches that ASN exactly,
+  and `host=` matches that host and its subdomains only.** Both used to be
+  substring matches. The shipped `asn=as714` (Apple) rule therefore also
+  exempted AS7140–AS7149, AS71400 and so on, and `host=shop.gr` also matched
+  `myshop.gr`. Use `*` / `?` for a deliberate pattern.
 - **A `detectors.conf` whose tokens sat outside `[webdetector]` no longer
   reloads every 5 seconds.** The old generator appended a missing token to the
   end of the file, which could put it in another section. After that the

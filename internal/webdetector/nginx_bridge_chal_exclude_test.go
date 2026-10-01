@@ -10,29 +10,31 @@ import (
 	"time"
 )
 
-// The operator challenge-exclude file is honoured at serve time: a request whose
-// UA matches an exclude rule is not served the vhost-wide challenge (Meta's
-// link-preview crawlers got "Just a moment…" on an auto suspicious_vhost
-// challenge, 2026-10-01). skip_vhost_only lifts only the vhost-wide challenge,
-// and a per-IP block is never softened.
+// The operator challenge-exclude file is honoured at serve time against the
+// VHOST-WIDE challenge: a request whose UA + ASN match an exclude rule is not
+// served it (Meta's link-preview crawlers got "Just a moment…" on an auto
+// suspicious_vhost challenge, 2026-10-01). A per-IP challenge (WAF push, geo
+// floor, log-driven emit) and a block are never lifted.
 func TestNginxBridgeChalExcludeHotDowngrade(t *testing.T) {
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
-	type call struct{ host, ua, rule string }
+	asnByIP := map[string]uint32{"2a03:2880:24ff:48::": 32934, "198.51.100.7": 16509}
+	asnLookups := 0
+	b.chalExcludeASNFn = func(ip string) uint32 { asnLookups++; return asnByIP[ip] }
+	type call struct{ host, ua, asn, rule string }
 	var calls []call
-	act := "skip"
-	b.ChalExcludeHot = func(host, ua, asn, ptr, rule string) (string, bool) {
-		calls = append(calls, call{host, ua, rule})
-		if !strings.Contains(strings.ToLower(ua), "meta-externalads") {
+	// Shaped like the shipped rule: asn=as32934; ua=*meta*; action=skip — the
+	// "AS<n>" string the bridge hands over is what the detectors matcher keys on.
+	b.ChalExcludeHot = func(host, ua string, asn, ptr func() string, rule string) (string, bool) {
+		if !strings.Contains(strings.ToLower(ua), "meta") {
+			calls = append(calls, call{host, ua, "", rule})
 			return "", false
 		}
-		if act == "skip_vhost_only" && rule != "CHALLENGE_VHOST" {
-			return "", false
-		}
-		return act, true
+		a := asn()
+		calls = append(calls, call{host, ua, a, rule})
+		return "skip", a == "AS32934"
 	}
 
-	const ip = "2a03:2880:24ff:48::"
-	decide := func(ua string) map[string]any {
+	decide := func(ip, ua string) map[string]any {
 		b.mu.Lock()
 		b.vhState["ligaapola.gr"] = bridgeVhostEntry{Action: "challenge", Expires: time.Now().Add(time.Minute)}
 		b.mu.Unlock()
@@ -45,38 +47,42 @@ func TestNginxBridgeChalExcludeHotDowngrade(t *testing.T) {
 		_ = json.Unmarshal(rr.Body.Bytes(), &payload)
 		return payload
 	}
+	const metaIP = "2a03:2880:24ff:48::"
 	meta := "meta-externalads/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)"
 
-	if got := decide(meta); got["vhost_action"] != "allow" || got["ip_action"] != "allow" {
+	if got := decide(metaIP, meta); got["vhost_action"] != "allow" || got["ip_action"] != "allow" {
 		t.Fatalf("excluded crawler must not be vhost-challenged, got %+v", got)
 	}
-	if len(calls) == 0 || calls[0].ua != meta || calls[0].rule != "CHALLENGE_VHOST" {
-		t.Fatalf("matcher not called with the request UA / vhost rule: %+v", calls)
+	if len(calls) != 1 || calls[0].ua != meta || calls[0].asn != "AS32934" || calls[0].rule != "CHALLENGE_VHOST" {
+		t.Fatalf("matcher not called once with the request UA / AS<n> / vhost rule: %+v", calls)
 	}
-	if got := decide("Mozilla/5.0 (Windows NT 10.0) Chrome/150"); got["vhost_action"] != "challenge" {
+	if got := decide("198.51.100.7", meta); got["vhost_action"] != "challenge" {
+		t.Fatalf("meta UA off the Meta ASN must stay challenged, got %+v", got)
+	}
+	asnLookups = 0
+	if got := decide(metaIP, "Mozilla/5.0 (Windows NT 10.0) Chrome/150"); got["vhost_action"] != "challenge" {
 		t.Fatalf("non-matching UA must stay challenged, got %+v", got)
 	}
+	if asnLookups != 0 {
+		t.Fatalf("ASN resolved for a request no rule could match (%d lookups)", asnLookups)
+	}
 
-	// Per-IP challenge: lifted by skip, NOT by skip_vhost_only.
+	// A per-IP challenge is NOT lifted (it may be a WAF challenge-tier push or
+	// the geo floor), only the vhost-wide one.
 	setIP := func(action string) {
 		b.mu.Lock()
-		b.ipState[ip] = bridgeIPEntry{Action: action, Expires: time.Now().Add(time.Minute)}
+		b.ipState[metaIP] = bridgeIPEntry{Action: action, Expires: time.Now().Add(time.Minute)}
 		b.mu.Unlock()
 	}
 	setIP("challenge")
-	if got := decide(meta); got["ip_action"] != "allow" || got["vhost_action"] != "allow" {
-		t.Fatalf("skip must lift a per-IP challenge too, got %+v", got)
-	}
-	act = "skip_vhost_only"
-	if got := decide(meta); got["ip_action"] != "challenge" || got["vhost_action"] != "allow" {
-		t.Fatalf("skip_vhost_only must lift only the vhost-wide challenge, got %+v", got)
+	if got := decide(metaIP, meta); got["ip_action"] != "challenge" || got["vhost_action"] != "allow" {
+		t.Fatalf("only the vhost-wide challenge may be lifted, got %+v", got)
 	}
 
 	// A block is never softened (and the matcher is not even consulted).
-	act = "skip"
 	setIP("block")
 	calls = nil
-	if got := decide(meta); got["ip_action"] != "block" {
+	if got := decide(metaIP, meta); got["ip_action"] != "block" {
 		t.Fatalf("exclude must not soften a block, got %+v", got)
 	}
 	if len(calls) != 0 {

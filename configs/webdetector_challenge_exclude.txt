@@ -42,11 +42,27 @@
 #                       skip_vhost_only → only suppress vhost-wide rules
 #                                          (CHALLENGE_VHOST, CHALLENGE_SUSPICIOUS_VHOST_SCORE)
 #
+# Where the rules apply
+#   1. The log-driven detector: a matching IP is never armed with a per-IP
+#      challenge (all rule kinds, FCrDNS included).
+#   2. Serve time, at the edge decision bridge: a matching REQUEST is not served
+#      a VHOST-WIDE challenge (auto suspicious_vhost / manual), with either
+#      action. This check makes no DNS lookups, so it uses ua / asn / host and
+#      a bare ptr= against the cached PTR only — a verify_fcrdns=1 rule never
+#      applies here (verified crawlers are cleared by CHALLENGE_GOODBOT_EXEMPT
+#      instead). It never lifts a per-IP challenge (e.g. a WAF challenge-tier
+#      hit) or a block, and the WAF still runs. Because it applies per request,
+#      a ua-only rule lifts the vhost-wide challenge for ANYONE sending that UA.
+#
 # Glob semantics
 #   '*' matches any run of characters (including the empty string). It is NOT
 #       a path separator — it freely crosses '/' inside UA strings.
 #   '?' matches exactly one character.
-#   A pattern with no '*' or '?' is treated as a substring match.
+#   A pattern with no '*' or '?':
+#     ua= / ptr=  → substring match;
+#     asn=        → EXACT match (asn=as714 is AS714 only, never AS7145);
+#     host=       → that host and its subdomains (host=shop.gr covers
+#                   www.shop.gr, never myshop.gr).
 #
 # Safety guidance
 #   - UA alone is trivially spoofable. Anyone can set User-Agent: AhrefsBot.

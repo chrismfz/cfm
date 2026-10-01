@@ -126,24 +126,6 @@ func allDigits(s string) bool {
 // Match returns (action, reason, true) when a rule matches.
 // ruleName is used to implement skip_vhost_only semantics.
 func (ce *ChallengeExclude) Match(ip, host, ua, asn, ptr, ruleName string) (string, string, bool) {
-    return ce.match(ip, host, ua, asn, ptr, ruleName, true)
-}
-
-// MatchNoDNS is Match for the edge decision hot path (one call per request): it
-// never touches DNS. A verify_fcrdns=1 ptr condition cannot be confirmed without
-// a forward lookup, so here it counts as a NON-match (fail-closed) — FCrDNS
-// crawlers are the bridge's good-bot exemption's job, which verifies them off
-// the hot path. ua / asn / host conditions and a bare (non-fcrdns) ptr against
-// the caller's cached PTR match exactly as in Match. This is what lets an
-// `asn=as32934; ua=*meta*` rule exempt Meta's link-preview crawlers (IPv6
-// 2a03:2880::/32, no PTR at all, so FCrDNS can never verify them) from a
-// vhost-wide challenge.
-func (ce *ChallengeExclude) MatchNoDNS(host, ua, asn, ptr, ruleName string) (string, bool) {
-    act, _, ok := ce.match("", host, ua, asn, ptr, ruleName, false)
-    return act, ok
-}
-
-func (ce *ChallengeExclude) match(ip, host, ua, asn, ptr, ruleName string, allowDNS bool) (string, string, bool) {
     if ce == nil || len(ce.rules) == 0 {
         return "", "", false
     }
@@ -166,7 +148,7 @@ func (ce *ChallengeExclude) match(ip, host, ua, asn, ptr, ruleName string, allow
 
         if r.host != "" {
             checks++
-            if globMatch(r.host, hostL) { matches++ }
+            if hostMatch(r.host, hostL) { matches++ }
         }
         if r.ua != "" {
             checks++
@@ -174,13 +156,13 @@ func (ce *ChallengeExclude) match(ip, host, ua, asn, ptr, ruleName string, allow
         }
         if r.asn != "" {
             checks++
-            if globMatch(r.asn, asnL) { matches++ }
+            if asnMatch(r.asn, asnL) { matches++ }
         }
         if r.ptr != "" {
             checks++
             if globMatch(r.ptr, ptrL) {
                 if r.verifyFcrdns {
-                    if allowDNS && forwardConfirmPTR(ip, ptrL) { matches++ }
+                    if forwardConfirmPTR(ip, ptrL) { matches++ }
                 } else {
                     matches++
                 }
@@ -203,6 +185,126 @@ func (ce *ChallengeExclude) match(ip, host, ua, asn, ptr, ruleName string, allow
         }
     }
     return "", "", false
+}
+
+// MatchNoDNS is Match for the edge decision hot path (one call per request on
+// a challenged vhost): it never touches DNS, and it resolves the request's ASN
+// and PTR only when a rule still needs them (asnFn / ptrFn are lazy, called at
+// most once each; either may be nil). Differences from Match:
+//   - a rule carrying verify_fcrdns=1 is SKIPPED outright — its FCrDNS check
+//     cannot run here, and in mode=any its other conditions would otherwise
+//     match on their own (a spoofed UA). FCrDNS crawlers are the bridge's
+//     good-bot exemption's job, which verifies them off the hot path;
+//   - a bare (non-fcrdns) ptr condition is checked against ptrFn, which the
+//     bridge serves from the enrich cache only.
+// This is what lets an `asn=as32934; ua=*meta*` rule exempt Meta's link-preview
+// crawlers (IPv6 2a03:2880::/32, no PTR at all, so FCrDNS can never verify
+// them) from a vhost-wide challenge.
+func (ce *ChallengeExclude) MatchNoDNS(host, ua string, asnFn, ptrFn func() string, ruleName string) (string, bool) {
+    if ce == nil || len(ce.rules) == 0 {
+        return "", false
+    }
+    hostL := strings.ToLower(strings.TrimSpace(host))
+    uaL := strings.ToLower(strings.TrimSpace(ua))
+    rn := strings.ToUpper(strings.TrimSpace(ruleName))
+    isVHostWide := rn == "CHALLENGE_VHOST" || rn == "CHALLENGE_SUSPICIOUS_VHOST_SCORE"
+
+    var asnL, ptrL string
+    asnDone, ptrDone := false, false
+    getASN := func() string {
+        if !asnDone {
+            asnDone = true
+            if asnFn != nil {
+                asnL = strings.ToLower(strings.TrimSpace(asnFn()))
+            }
+        }
+        return asnL
+    }
+    getPTR := func() string {
+        if !ptrDone {
+            ptrDone = true
+            if ptrFn != nil {
+                ptrL = strings.ToLower(strings.TrimSpace(ptrFn()))
+            }
+        }
+        return ptrL
+    }
+
+    for _, r := range ce.rules {
+        if r.verifyFcrdns {
+            continue
+        }
+        if r.action == "skip_vhost_only" && !isVHostWide {
+            continue
+        }
+        // Cheap, request-local conditions first; the ASN / PTR lookups run
+        // only if the rule is still undecided (mode=all: nothing failed yet;
+        // mode=any: nothing matched yet).
+        conds := []func() bool{}
+        if r.host != "" {
+            conds = append(conds, func() bool { return hostMatch(r.host, hostL) })
+        }
+        if r.ua != "" {
+            conds = append(conds, func() bool { return globMatch(r.ua, uaL) })
+        }
+        if r.asn != "" {
+            conds = append(conds, func() bool { return asnMatch(r.asn, getASN()) })
+        }
+        if r.ptr != "" {
+            conds = append(conds, func() bool { return globMatch(r.ptr, getPTR()) })
+        }
+        if len(conds) == 0 {
+            continue
+        }
+        ok := !r.modeAny
+        for _, c := range conds {
+            m := c()
+            if r.modeAny && m {
+                ok = true
+                break
+            }
+            if !r.modeAny && !m {
+                ok = false
+                break
+            }
+        }
+        if ok {
+            return r.action, true
+        }
+    }
+    return "", false
+}
+
+// asnMatch compares an asn rule against the request's "asNNN" value. A pattern
+// with no wildcard is an EXACT match: the generic substring fallback of
+// globMatch made `asn=as714` (Apple) also match AS7140–AS7149, AS71400… —
+// unrelated networks exempted from every challenge.
+func asnMatch(pattern, value string) bool {
+    pattern = strings.TrimSpace(strings.ToLower(pattern))
+    value = strings.TrimSpace(strings.ToLower(value))
+    if pattern == "" || value == "" {
+        return false
+    }
+    if !strings.ContainsAny(pattern, "*?") {
+        return pattern == value
+    }
+    return wildcardMatch(pattern, value)
+}
+
+// hostMatch compares a host rule against the request vhost. A pattern with no
+// wildcard matches that host and its subdomains (host=shop.gr covers
+// www.shop.gr), never an unrelated vhost that merely contains it (myshop.gr) —
+// the substring fallback of globMatch did.
+func hostMatch(pattern, value string) bool {
+    pattern = strings.TrimSpace(strings.ToLower(pattern))
+    value = strings.TrimSpace(strings.ToLower(value))
+    if pattern == "" || value == "" {
+        return false
+    }
+    if !strings.ContainsAny(pattern, "*?") {
+        return value == pattern || strings.HasSuffix(value, "."+pattern)
+    }
+    return wildcardMatch(pattern, value)
 }
 
 // globMatch is a small, case-insensitive glob matcher for '*' and '?'.
