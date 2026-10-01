@@ -3,6 +3,7 @@ package status
 import (
 	"bufio"
 	"bytes"
+	"cfm/internal/detconf"
 	"cfm/internal/detectors"
 	edgediag "cfm/internal/diagnostics/edge"
 	"cfm/internal/dnat"
@@ -758,7 +759,7 @@ func resolveBridgeRuntimeConfig() bridgeRuntimeConfig {
 
 	kv := readDetectorSectionKV(resolveDetectorsConfigPath(), "webdetector")
 	if v, ok := kv["OPENRESTY_SOCK"]; ok {
-		if clean := strings.Trim(strings.TrimSpace(stripInlineComment(v)), `"'`); clean != "" {
+		if clean := detconf.CleanValue(v); clean != "" {
 			cfg.SocketPath = clean
 			cfg.SocketSource = "config"
 		}
@@ -1021,47 +1022,6 @@ func readSimpleKVConfig(path string) map[string]string {
 		out[k] = v
 	}
 	return out
-}
-
-func stripInlineComment(s string) string {
-	inQuote := false
-	var q rune
-	prevNonSpace := -1
-
-	for i, c := range s {
-		if c == '\'' || c == '"' {
-			if !inQuote {
-				inQuote = true
-				q = c
-			} else if q == c {
-				inQuote = false
-			}
-			if c != ' ' && c != '\t' {
-				prevNonSpace = i
-			}
-			continue
-		}
-		if inQuote {
-			if c != ' ' && c != '\t' {
-				prevNonSpace = i
-			}
-			continue
-		}
-		if c == ';' || c == '#' {
-			return strings.TrimSpace(s[:i])
-		}
-		if c == '/' && i+1 < len(s) && s[i+1] == '/' {
-			if prevNonSpace >= 0 && s[prevNonSpace] == ':' {
-				// probably URL
-			} else if i == 0 || s[i-1] == ' ' || s[i-1] == '\t' {
-				return strings.TrimSpace(s[:i])
-			}
-		}
-		if c != ' ' && c != '\t' {
-			prevNonSpace = i
-		}
-	}
-	return strings.TrimSpace(s)
 }
 
 // ---------------------------------------------------------------------------

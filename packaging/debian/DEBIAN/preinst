@@ -12,14 +12,17 @@ set -e
 # Until postinst runs cfm is down (an apt batch configures after unpacking
 # everything, a conffile prompt waits, an interrupted run never configures),
 # so a one-shot timer starts it 2 minutes from now: only once the unpacked
-# binary is the NEW one (which never writes detectors.conf), and a no-op if
-# postinst already started it.
+# binary is the NEW one (which never writes detectors.conf). postinst cancels
+# it (cfm-upgrade-start.timer). The new binary is recognised by the store
+# path it carries: hostsecrets.Dir's literal, pinned by
+# internal/hostsecrets/package_seed_test.go.
 cfm_old_bin=${CFM_PREINST_BIN:-/usr/bin/cfm}
 if [ "$1" = "upgrade" ] && [ -f "$cfm_old_bin" ] && ! grep -q -a -F /var/lib/cfm/secrets "$cfm_old_bin"; then
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet cfm.service; then
         systemctl stop cfm.service || true
         if command -v systemd-run >/dev/null 2>&1; then
-            systemd-run --quiet --on-active=120 --timer-property=AccuracySec=5s \
+            systemctl reset-failed cfm-upgrade-start.timer cfm-upgrade-start.service >/dev/null 2>&1 || true
+            systemd-run --quiet --unit=cfm-upgrade-start --on-active=120 --timer-property=AccuracySec=5s \
                 /bin/sh -c "grep -q -a -F /var/lib/cfm/secrets $cfm_old_bin && systemctl start cfm.service" \
                 >/dev/null 2>&1 || true
         fi

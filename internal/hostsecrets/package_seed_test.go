@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -179,12 +180,57 @@ func TestDebianPreinstStopsOnlyAnOldDaemon(t *testing.T) {
 			// A stop always arms the safety start, guarded so that it can
 			// only ever start the NEW binary.
 			timer, _ := os.ReadFile(runs)
-			if armed := strings.Contains(string(timer), "--on-active=120"); armed != tc.stop {
+			if armed := strings.Contains(string(timer), "--on-active=120") && strings.Contains(string(timer), "--unit=cfm-upgrade-start"); armed != tc.stop {
 				t.Fatalf("safety start armed = %v, want %v (systemd-run args: %q)", armed, tc.stop, timer)
 			}
 			if tc.stop && !strings.Contains(string(timer), "grep -q -a -F /var/lib/cfm/secrets "+bin+" && systemctl start cfm.service") {
 				t.Fatalf("safety start is not guarded by the new-binary check: %q", timer)
 			}
 		})
+	}
+}
+
+// The Debian preinst tells an old daemon from a new one by grepping the
+// installed binary for the store path, and its safety start uses the same
+// check. That path reaches the binary as hostsecrets.Dir's string literal:
+// building it any other way (filepath.Join, a moved store) would make every
+// upgrade stop the NEW daemon and the safety start never fire. Pin both.
+func TestPreinstBinaryMarkerIsTheStoreLiteral(t *testing.T) {
+	src, err := os.ReadFile("hostsecrets.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^var Dir = "(/[^"]+)"$`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal(`hostsecrets.go must declare Dir as a plain string literal (var Dir = "/..."): the Debian preinst greps the binary for it`)
+	}
+	preinst, err := os.ReadFile(filepath.Join("..", "..", "packaging", "debian", "DEBIAN", "preinst"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(preinst), "grep -q -a -F "+string(m[1])+" "); n != 2 {
+		t.Fatalf("preinst greps the binary for %q %d times, want 2 (old-daemon check + safety start)", m[1], n)
+	}
+}
+
+// postinst cancels the preinst's safety start by the unit name it was armed
+// with, so the timer cannot restart a cfm an operator stops after upgrading.
+func TestPostinstCancelsTheSafetyStart(t *testing.T) {
+	dir := filepath.Join("..", "..", "packaging", "debian", "DEBIAN")
+	preinst, err := os.ReadFile(filepath.Join(dir, "preinst"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	postinst, err := os.ReadFile(filepath.Join(dir, "postinst"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(preinst), "--unit=cfm-upgrade-start ") {
+		t.Fatal("preinst must arm the safety start as unit cfm-upgrade-start")
+	}
+	p := string(postinst)
+	cancel, restart := strings.Index(p, "systemctl stop cfm-upgrade-start.timer"), strings.Index(p, "systemctl restart cfm.service")
+	if cancel < 0 || restart < 0 || cancel > restart {
+		t.Fatal("postinst must stop cfm-upgrade-start.timer before it restarts cfm")
 	}
 }

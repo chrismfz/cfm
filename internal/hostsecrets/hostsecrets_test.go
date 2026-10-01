@@ -38,7 +38,7 @@ func forgetGenerated() {
 
 func stored(t *testing.T, key string) string {
 	t.Helper()
-	v, _ := Read(key)
+	v, _ := readStore(key)
 	return v
 }
 
@@ -352,5 +352,56 @@ func TestResolveUncreatableStoreKeepsOneGeneratedToken(t *testing.T) {
 	}
 	if got := Effective(ChallengeToken, ""); got != first {
 		t.Fatalf("Effective = %q, want the token the daemon runs (%q)", got, first)
+	}
+}
+
+// The probes see the pre-upgrade snapshot as the daemon does: after the
+// package replaced detectors.conf (placeholder) and before the daemon took
+// the token over, Effective reports the snapshot's token, not "weak".
+func TestEffectiveSeesThePreUpgradeSnapshot(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(PreUpgradePath(), []byte("[webdetector]\nCHALLENGE_TOKEN = "+strongA+"\nOPENRESTY_TOKEN = "+strongB+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := Effective(ChallengeToken, "placeholder"); got != strongA {
+		t.Fatalf("Effective = %q, want the snapshot's token", got)
+	}
+	tok, src, err := Resolve(ChallengeToken, "placeholder")
+	if err != nil || tok != strongA || src != SourceSnapshot {
+		t.Fatalf("Resolve = (%q, %q, %v), want the snapshot's token", tok, src, err)
+	}
+	// CHALLENGE_TOKEN is dropped from the snapshot; OPENRESTY_TOKEN stays
+	// until it is stored, then the file goes.
+	if got := snapshotValue(ChallengeToken); got != "" {
+		t.Fatalf("CHALLENGE_TOKEN still in the snapshot: %q", got)
+	}
+	if got := snapshotValue(BridgeToken); got != strongB {
+		t.Fatalf("OPENRESTY_TOKEN dropped from the snapshot before it was stored: %q", got)
+	}
+	if _, _, err := Resolve(BridgeToken, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(PreUpgradePath()); !os.IsNotExist(err) {
+		t.Fatalf("snapshot not removed once every token was stored (err %v)", err)
+	}
+}
+
+// A snapshot without a usable token is removed by the first stored token.
+func TestResolveRemovesASnapshotWithoutTokens(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(PreUpgradePath(), []byte("[webdetector]\nCHALLENGE_TOKEN = placeholder\nENABLED = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Resolve(ChallengeToken, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(PreUpgradePath()); !os.IsNotExist(err) {
+		t.Fatalf("token-less snapshot kept (err %v)", err)
 	}
 }

@@ -57,7 +57,9 @@ back-filled here — see the git/PR history for that period.
     written.
   - `cfm health` reports the token the daemon actually uses.
   - The token step (and `cfm_bridge_config.lua`) now also runs when
-    `[webdetector]` exists only in a `detectors.d/` overlay.
+    `[webdetector]` exists only in a `detectors.d/` overlay. A token set in an
+    overlay still runs when the base file has none.
+  - `apt purge cfm` removes `/var/lib/cfm/secrets/`.
 
 ### Fixed
 - **A `detectors.conf` whose tokens sat outside `[webdetector]` no longer

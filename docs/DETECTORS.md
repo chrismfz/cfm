@@ -140,14 +140,17 @@ the key line itself, as `placeholder`: an older binary after a rollback
 replaces a placeholder in place, but appends a MISSING line at the end of the
 file, where it can land in another section and loop the daemon through a
 reload every few seconds, and an EMPTY line makes its regex overwrite the line
-after it. An overlay value is ignored, and a weak one (`placeholder`, under 32
-characters) too, as is one the config cleaner would alter (surrounding
-quotes, an inline comment; logged). Before it can replace the conffile, the package snapshots
+after it. A usable base value beats an overlay one; an overlay value counts
+only when the base has none (as the old binary ran an overlay-only token). A
+weak value (`placeholder`, under 32 characters) is ignored, as is one the
+config cleaner would alter (surrounding quotes, an inline comment; logged). Before it can replace the conffile, the package snapshots
 it to `/var/lib/cfm/secrets/detectors.conf.pre-upgrade` (the token-seed block
 in the Debian `preinst` and the RPM pre scriptlet). The daemon reads the
 tokens from the snapshot with the same parser (a usable value there beats
 the store, as one in the base file does) and stores them; each token is
-dropped from the snapshot once stored, and the file goes when none is left. So taking the package's `detectors.conf` at upgrade, or moving the
+dropped from the snapshot once stored, and the file goes when none is left
+(or at once when the config has no `[webdetector]`). `cfm health` resolves
+the same way. A Debian purge removes the store. So taking the package's `detectors.conf` at upgrade, or moving the
 `.rpmnew` over it, keeps the tokens. On Debian the preinst also stops a
 running OLD daemon (one whose binary predates the store) before the unpack:
 it would otherwise regenerate the stock placeholder in `detectors.conf` and

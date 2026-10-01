@@ -68,3 +68,28 @@ func TestReadChallengeTokenProbeFallsBackToTheStore(t *testing.T) {
 		t.Errorf("strong detectors.conf value: ReadChallengeTokenProbe = %+v, want it (it wins)", got)
 	}
 }
+
+// Like the daemon, the probe takes a token set only in a detectors.d overlay
+// when the base has no usable one.
+func TestReadChallengeTokenProbeOverlayOnlyToken(t *testing.T) {
+	t.Setenv("CHALLENGE_TOKEN", "")
+	old := hostsecrets.Dir
+	hostsecrets.Dir = filepath.Join(t.TempDir(), "secrets")
+	t.Cleanup(func() { hostsecrets.Dir = old })
+
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "detectors.conf")
+	const overlay = "0123456789abcdef0123456789abcdef0123456789abcdef"
+	if err := os.WriteFile(conf, []byte("[global]\nENRICH = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "detectors.d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "detectors.d", "50-web.conf"), []byte("[webdetector]\nCHALLENGE_TOKEN = "+overlay+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadChallengeTokenProbe(conf); got.Token != overlay || !got.Valid {
+		t.Fatalf("ReadChallengeTokenProbe = %+v, want the overlay token", got)
+	}
+}

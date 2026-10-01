@@ -147,6 +147,10 @@ fi
 
 # systemd reload/enable/start (cfm first, then edge proxies below)
 if command -v systemctl >/dev/null 2>&1; then
+    # The preinst's safety start (cfm-upgrade-start.timer, armed when it
+    # stopped an old daemon) is no longer needed: cancel it, so it cannot
+    # restart a cfm an operator stops after this upgrade.
+    systemctl stop cfm-upgrade-start.timer >/dev/null 2>&1 || true
     systemctl daemon-reload || true
     systemctl enable cfm.service || true
     systemctl restart cfm.service || true
