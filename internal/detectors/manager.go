@@ -419,6 +419,10 @@ func (m *manager) maybeReload(parent context.Context) {
 					bridgeConfigPath, bridgeCfg.ClearanceRefresh, bridgeCfg.OriginKeepalive, bridgeCfg.PanelWAFMode, bridgeCfg.PanelDecisionMode, bridgeCfg.PanelFPPolicyMode, bridgeCfg.PostClearanceCadence, bridgeCfg.FPPolicy, bridgeCfg.SiteCache, bridgeCfg.MicroCacheEnforce)
 			}
 		}
+	} else {
+		// No [webdetector] any more: no token runs (health must not report
+		// the last one resolved).
+		hostsecrets.ForgetRunning()
 	}
 	// ─────────────────────────────────────────────────────────────────────────
 
@@ -811,7 +815,9 @@ func resolveHostTokens(confWD KV, confKnown bool) (challenge, bridge string) {
 		}
 		logTokenSource(key, src, err)
 		if src == hostsecrets.SourceStore && hostsecrets.Usable(legacy) && legacy != tok {
-			if _, seen := tokenConfIgnoredLogged.LoadOrStore(key, true); !seen {
+			// Once per distinct value: a later edit of the line logs again.
+			if prev, seen := tokenConfIgnoredLogged.Load(key); !seen || prev.(string) != legacy {
+				tokenConfIgnoredLogged.Store(key, legacy)
 				logging.Logf("[detectors] %s in detectors.conf is ignored: the token in %s is the one in use. To switch to the detectors.conf value, delete that file and restart; otherwise set the line to placeholder", key, hostsecrets.Path(key))
 			}
 		}

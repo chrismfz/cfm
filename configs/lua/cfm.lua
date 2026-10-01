@@ -120,8 +120,9 @@ local bit = require "bit"
 -- accessor (cfm_bridge_cfg → cfm_filecache, 10s TTL / 2s missing-retry):
 -- the validity rule and freshness policy live in one module shared by every
 -- edge consumer. The token persists in /var/lib/cfm/secrets/openresty_token
--- and only rotates when that file is deleted (internal/hostsecrets), so 10s
--- staleness is safe.
+-- and changes only when the daemon resolves another one (that file deleted,
+-- replaced or unusable; see internal/hostsecrets), rarely, so 10s staleness
+-- is safe.
 local _bridge = require "cfm_bridge_cfg"
 
 local _bridge_token, _bridge_token_err

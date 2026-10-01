@@ -285,6 +285,11 @@ func Effective(key, legacy string) string {
 	return strings.TrimSpace(legacy)
 }
 
+// ForgetRunning drops this process's resolved tokens: the detectors manager
+// calls it when the config no longer has [webdetector], so no probe reports
+// a token nothing runs any more.
+func ForgetRunning() { forget() }
+
 // Running returns the token for key this process runs (the last Resolve), if
 // any: in the daemon, what the edge and the challenge server use right now.
 func Running(key string) (string, bool) {
@@ -476,7 +481,13 @@ func write(key, value string, replace bool) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("hostsecrets: close temp: %w", bare(err))
 	}
-	place := os.Rename
+	place := func(oldpath, newpath string) error {
+		// Replacing an empty file: unless it got content meanwhile.
+		if fi, err := os.Lstat(newpath); err == nil && (fi.Size() != 0 || !fi.Mode().IsRegular()) {
+			return ErrStoreChanged
+		}
+		return os.Rename(oldpath, newpath)
+	}
 	if !replace {
 		place = func(oldpath, newpath string) error {
 			err := os.Link(oldpath, newpath)
@@ -484,6 +495,9 @@ func write(key, value string, replace bool) error {
 				return ErrStoreChanged
 			}
 			if err != nil { // a filesystem without hard links
+				if _, lerr := os.Lstat(newpath); lerr == nil {
+					return ErrStoreChanged
+				}
 				return os.Rename(oldpath, newpath)
 			}
 			return nil

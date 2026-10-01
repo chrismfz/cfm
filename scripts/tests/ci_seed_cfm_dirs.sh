@@ -73,9 +73,11 @@ sed 's/$/\t-/' "$tmp/state" >>"$tmp/plan"
 # token at a loose mode, so a stray Resolve against the live path tightens or
 # rewrites it, and the guard sees it (an empty file would be replaced too,
 # but a usable one is what a node has).
-for f in challenge_token openresty_token; do
-  printf '/var/lib/cfm/secrets/%s\t=token\n' "$f" >>"$tmp/plan"
-done
+# The keys are the hostsecrets constants (the file is the lower-cased key).
+g "$tmp/secrets" -hoE '^[[:space:]]+[A-Za-z]+[[:space:]]+= "[A-Z_]+_TOKEN"' internal/hostsecrets/hostsecrets.go
+sed -E 's/.*"([A-Z_]+)"/\1/' "$tmp/secrets" | tr 'A-Z' 'a-z' | LC_ALL=C sort -u >"$tmp/secrets.files"
+[ -s "$tmp/secrets.files" ] || fail "found no token keys in internal/hostsecrets/hostsecrets.go — refusing to report OK"
+sed 's#^#/var/lib/cfm/secrets/#; s#$#\t=token#' "$tmp/secrets.files" >>"$tmp/plan"
 
 # ── phase 1: every destination must be absent — nothing is written otherwise ──
 dups=$(cut -f1 "$tmp/plan" | LC_ALL=C sort | uniq -d)

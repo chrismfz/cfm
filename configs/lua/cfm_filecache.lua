@@ -56,9 +56,9 @@
 --
 -- NOT for files that must be re-read with sub-second freshness. Every
 -- current consumer tolerates seconds of staleness: the bridge token is
--- persisted in /var/lib/cfm/secrets/openresty_token and only rotates when
--- that file is deleted (see internal/hostsecrets), and self-ips/ignore-nets
--- already had 30s TTLs by design.
+-- persisted in /var/lib/cfm/secrets/openresty_token and changes only when
+-- the daemon resolves another one (see internal/hostsecrets), rarely, and
+-- self-ips/ignore-nets already had 30s TTLs by design.
 
 local _M = { entries = {} }
 

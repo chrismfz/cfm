@@ -578,3 +578,35 @@ func TestReadStoreNeverOpensADevice(t *testing.T) {
 		t.Fatalf("readStore err = %v, want ErrStoreUnusable", err)
 	}
 }
+
+// Replacing an empty file never replaces one that got content meanwhile (an
+// operator who created it first, then wrote the token).
+func TestWriteReplaceOnlyAnEmptyFile(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path(ChallengeToken), []byte(strongB+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := write(ChallengeToken, strongA, true); !errors.Is(err, ErrStoreChanged) {
+		t.Fatalf("write err = %v, want ErrStoreChanged", err)
+	}
+	if got := stored(ChallengeToken); got != strongB {
+		t.Fatalf("store = %q, want the operator's token, untouched", got)
+	}
+}
+
+func TestForgetRunning(t *testing.T) {
+	useTempDir(t)
+	if _, _, err := Resolve(ChallengeToken, strongA); err != nil {
+		t.Fatal(err)
+	}
+	if _, runs := Running(ChallengeToken); !runs {
+		t.Fatal("Running = false after Resolve")
+	}
+	ForgetRunning()
+	if _, runs := Running(ChallengeToken); runs {
+		t.Fatal("Running = true after ForgetRunning")
+	}
+}
