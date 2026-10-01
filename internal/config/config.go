@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cfm/internal/secretkeys"
 )
 
 // Config is flat-by-category: one struct per logical area.
@@ -653,9 +655,12 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		key := strings.ToUpper(strings.TrimSpace(k))
 		raw := strings.TrimSpace(v)
 		val := stripInlineComment(raw)
-		if secretKey(key) && val != legacyStripInlineComment(raw) {
-			// Never the value: it is a secret.
-			log.Printf("config: warning: line %d: %s: an inline comment is cut from its value since 2026-10 (one space before '#' or '//' starts a comment); if that text is part of the secret, quote the value", lineNo, key)
+		if secretkeys.IsSecret(key) && len(val) < len(legacyStripInlineComment(raw)) {
+			// Once per key per process (the file is parsed on every
+			// reload, and by most CLI commands); never the value.
+			if _, seen := warnedCutSecret.LoadOrStore(key, true); !seen {
+				log.Printf("config: warning: %s (cfm.conf or cfm.api.conf, line %d): text after a one-space '#' or '//' is cut from its value since 2026-10; if it is part of the secret, quote the value (a changed AUTH_TOKEN also changes the keys derived from it, such as the MFA key)", key, lineNo)
+			}
 		}
 		val = trimQuotes(val)
 
@@ -1449,8 +1454,8 @@ func stripInlineComment(s string) string {
 
 // legacyStripInlineComment is the rule before 2026-10: a '#' or "//" is a
 // comment only after a space that itself follows a space or tab. Kept for a
-// value with a quote left open, and to tell which values the new rule reads
-// differently (ParseCFMConf warns for a secret).
+// value with a quote left open, and to tell a secret the new rule cuts
+// (ParseCFMConf warns).
 func legacyStripInlineComment(s string) string {
 	for i := 2; i < len(s); i++ {
 		if (s[i] == '#' || (s[i] == '/' && i+1 < len(s) && s[i+1] == '/')) &&
@@ -1461,16 +1466,8 @@ func legacyStripInlineComment(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// secretKey reports whether a cfm.conf key holds a credential, whose value
-// must never change silently.
-func secretKey(key string) bool {
-	for _, w := range []string{"TOKEN", "KEY", "SECRET", "PASS"} {
-		if strings.Contains(key, w) {
-			return true
-		}
-	}
-	return false
-}
+// warnedCutSecret holds the credential keys ParseCFMConf has warned about.
+var warnedCutSecret sync.Map
 
 func (c *SystemTweaksConfig) SetDefaults() {
 	if c.CTPerGB == 0 {

@@ -124,9 +124,11 @@ func TestStockConfigsValuesCarryNoComment(t *testing.T) {
 	}
 }
 
-// A credential the new rule reads differently is logged, without its value;
-// one it reads the same, or a non-secret key, is not.
+// A credential the new rule cuts shorter is logged once, without its value;
+// one it reads the same or longer (a quoted " #" kept), or a non-secret key,
+// is not.
 func TestParseCFMConfWarnsWhenASecretReadsDifferently(t *testing.T) {
+	warnedCutSecret.Range(func(k, _ any) bool { warnedCutSecret.Delete(k); return true })
 	var buf strings.Builder
 	old := log.Writer()
 	log.SetOutput(&buf)
@@ -134,15 +136,16 @@ func TestParseCFMConfWarnsWhenASecretReadsDifferently(t *testing.T) {
 
 	if _, err := ParseCFMConf(strings.NewReader(strings.Join([]string{
 		`AUTH_TOKEN = s3cr3tvalue #tail`,
-		`MCP_TOKEN = "quoted # kept"`,
+		`AUTH_TOKEN = s3cr3tvalue #again`,
+		`MCP_TOKEN = "quoted  # kept, longer than before"`,
 		`MAXMIND_LICENSE_KEY = abc  # two spaces: cut before too`,
 		`SYS_CT_MIN = "262144" # minimum entries`,
 	}, "\n"))); err != nil {
 		t.Fatal(err)
 	}
 	got := buf.String()
-	if !strings.Contains(got, "AUTH_TOKEN") {
-		t.Errorf("no warning for AUTH_TOKEN; log: %q", got)
+	if strings.Count(got, "config: warning: AUTH_TOKEN ") != 1 || strings.Count(got, "config: warning:") != 1 {
+		t.Errorf("want one warning for AUTH_TOKEN (once per key); log: %q", got)
 	}
 	for _, s := range []string{"s3cr3tvalue", "MCP_TOKEN", "MAXMIND_LICENSE_KEY", "SYS_CT_MIN"} {
 		if strings.Contains(got, s) {

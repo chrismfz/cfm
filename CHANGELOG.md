@@ -32,12 +32,14 @@ back-filled here — see the git/PR history for that period.
     contains ` #` or ` //`.
   - A quote opens only at the start of the value or after whitespace or
     one of `,:[{(`, and closes only before the end, whitespace, a comment
-    or one of `,:]})`, so a stray `"` or an apostrophe opens nothing. When
-    a value leaves a quote open, the old rule applies, so it never keeps
-    more comment text than before.
-  - A credential key (a name with `TOKEN`, `KEY`, `SECRET` or `PASS`)
-    whose value the new rule reads differently logs a warning, without the
-    value: quote it if the cut text was part of the secret.
+    or one of `,:]})`, so a stray `"` or an apostrophe inside a word opens
+    nothing. When a value leaves a quote open, the old rule applies, so it
+    never keeps more comment text than before.
+  - A credential (`AUTH_TOKEN`, `MCP_TOKEN`, `MAXMIND_LICENSE_KEY`, any key
+    `cfm debug` redacts) that the new rule cuts shorter logs a warning once,
+    without the value: quote it if the cut text was part of the secret. A
+    changed `AUTH_TOKEN` also changes the keys derived from it, such as the
+    MFA key when `AUTH_MFA_ENCRYPTION_KEY` is empty.
   - The stock `cfm.conf` has two lines with a one-space comment,
     `SYS_CT_MIN` and `SYS_CT_MAX`. Their values equal the defaults, so nothing changes unless you edited
     them; then your value now applies. On the nodes checked, those two are
@@ -109,6 +111,11 @@ back-filled here — see the git/PR history for that period.
     older binary ran it.
 
 ### Fixed
+- **`cfm debug` bundles and the MCP detectors-config view now redact
+  `MAXMIND_LICENSE_KEY` and `AUTH_MFA_ENCRYPTION_KEY`.** The secret-key
+  matcher knew `token`, `secret`, `password`, `hmac`, `api_key` and
+  `private_key`, but not `license_key` or `encryption_key`, so those two
+  values went into a debug bundle in clear.
 - **A `cfm.conf` value with two inline ` #` (or ` //`) no longer hangs the
   daemon and every `cfm` command.** For example `KEY = value #a #b`: the
   inline-comment scan kept finding the same ` #` and never returned, so the
