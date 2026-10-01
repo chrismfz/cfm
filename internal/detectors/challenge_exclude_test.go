@@ -59,3 +59,44 @@ func TestChallengeExclude_Match_AhrefsUARule(t *testing.T) {
 		t.Fatal("spoofed PTR should not match")
 	}
 }
+
+// MatchNoDNS (the edge decision hot path) honours ua/asn rules — the shipped
+// Meta rules must exempt Meta's link-preview crawlers, which come from IPv6 with
+// no PTR — and treats a verify_fcrdns ptr condition as a non-match (no DNS).
+func TestChallengeExclude_MatchNoDNS(t *testing.T) {
+	ce := &ChallengeExclude{}
+	for _, line := range []string{
+		"ptr=*.googlebot.com; verify_fcrdns=1; action=skip",
+		"asn=as32934; ua=*facebookexternalhit*; action=skip",
+		"asn=as32934; ua=*meta*;                action=skip",
+		"asn=as64500; action=skip_vhost_only",
+		"ptr=*.crawl.example; action=skip",
+	} {
+		ce.rules = append(ce.rules, parseChallengeExcludeRule(line))
+	}
+	cases := []struct {
+		name, ua, asn, ptr, rule string
+		want                     bool
+		act                      string
+	}{
+		{"meta-externalads", "meta-externalads/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)", "AS32934", "", "CHALLENGE_VHOST", true, "skip"},
+		{"meta-webindexer chrome", "Mozilla/5.0 (Macintosh) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-webindexer/1.1)", "AS32934", "", "", true, "skip"},
+		{"facebookexternalhit", "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)", "AS32934", "", "", true, "skip"},
+		{"meta UA off Meta ASN", "meta-externalads/1.1", "AS16509", "", "CHALLENGE_VHOST", false, ""},
+		{"meta UA, ASN unknown", "meta-externalads/1.1", "", "", "CHALLENGE_VHOST", false, ""},
+		{"fcrdns ptr never confirms without DNS", "Googlebot/2.1", "AS15169", "crawl-66-249-66-1.googlebot.com", "CHALLENGE_VHOST", false, ""},
+		{"bare ptr against cached ptr", "x", "", "a.crawl.example", "", true, "skip"},
+		{"skip_vhost_only on vhost rule", "x", "AS64500", "", "CHALLENGE_VHOST", true, "skip_vhost_only"},
+		{"skip_vhost_only not on per-IP", "x", "AS64500", "", "", false, ""},
+	}
+	for _, c := range cases {
+		act, ok := ce.MatchNoDNS("shop.gr", c.ua, c.asn, c.ptr, c.rule)
+		if ok != c.want || act != c.act {
+			t.Errorf("%s: MatchNoDNS = (%q, %v), want (%q, %v)", c.name, act, ok, c.act, c.want)
+		}
+	}
+	var nilCE *ChallengeExclude
+	if _, ok := nilCE.MatchNoDNS("h", "meta", "AS32934", "", ""); ok {
+		t.Error("nil ChallengeExclude must not match")
+	}
+}

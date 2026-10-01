@@ -126,6 +126,24 @@ func allDigits(s string) bool {
 // Match returns (action, reason, true) when a rule matches.
 // ruleName is used to implement skip_vhost_only semantics.
 func (ce *ChallengeExclude) Match(ip, host, ua, asn, ptr, ruleName string) (string, string, bool) {
+    return ce.match(ip, host, ua, asn, ptr, ruleName, true)
+}
+
+// MatchNoDNS is Match for the edge decision hot path (one call per request): it
+// never touches DNS. A verify_fcrdns=1 ptr condition cannot be confirmed without
+// a forward lookup, so here it counts as a NON-match (fail-closed) — FCrDNS
+// crawlers are the bridge's good-bot exemption's job, which verifies them off
+// the hot path. ua / asn / host conditions and a bare (non-fcrdns) ptr against
+// the caller's cached PTR match exactly as in Match. This is what lets an
+// `asn=as32934; ua=*meta*` rule exempt Meta's link-preview crawlers (IPv6
+// 2a03:2880::/32, no PTR at all, so FCrDNS can never verify them) from a
+// vhost-wide challenge.
+func (ce *ChallengeExclude) MatchNoDNS(host, ua, asn, ptr, ruleName string) (string, bool) {
+    act, _, ok := ce.match("", host, ua, asn, ptr, ruleName, false)
+    return act, ok
+}
+
+func (ce *ChallengeExclude) match(ip, host, ua, asn, ptr, ruleName string, allowDNS bool) (string, string, bool) {
     if ce == nil || len(ce.rules) == 0 {
         return "", "", false
     }
@@ -162,7 +180,7 @@ func (ce *ChallengeExclude) Match(ip, host, ua, asn, ptr, ruleName string) (stri
             checks++
             if globMatch(r.ptr, ptrL) {
                 if r.verifyFcrdns {
-                    if forwardConfirmPTR(ip, ptrL) { matches++ }
+                    if allowDNS && forwardConfirmPTR(ip, ptrL) { matches++ }
                 } else {
                     matches++
                 }

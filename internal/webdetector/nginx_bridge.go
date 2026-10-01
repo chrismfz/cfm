@@ -193,6 +193,15 @@ type NginxBridge struct {
 	// RuleNeedsVerifiedBot).
 	ChallengeAccessNeedsVerifiedBot func(host string) bool
 
+	// ChalExcludeHot is the operator challenge-exclude file
+	// (webdetector_challenge_exclude.txt) evaluated WITHOUT DNS
+	// (ChallengeExclude.MatchNoDNS): (host, ua, asn "AS<n>", cached ptr,
+	// rule name) → (action skip|skip_vhost_only, matched). A match downgrades
+	// a would-be challenge like goodBotDowngrade — never a block, never the
+	// WAF / traffic rules. nil when no exclude file is loaded. Set once at
+	// startup (SetChalExcludeHotFunc).
+	ChalExcludeHot func(host, ua, asn, ptr, rule string) (string, bool)
+
 	// Clam
 	clamMgr      clam.Enqueuer
 	clamPending  string
@@ -2028,6 +2037,38 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 			}
 			if vhAction == "challenge" {
 				vhAction = "allow"
+			}
+		}
+	}
+
+	// Operator challenge-exclude file (ua/asn/host rules, no DNS). Before this
+	// the file was consulted only by the log-driven per-IP emits, so a
+	// vhost-wide challenge (auto suspicious_vhost / manual) was served to the
+	// very crawlers the file exempts — observed live 2026-10-01: Meta's
+	// meta-externalads / meta-webindexer / facebookexternalhit (AS32934, IPv6
+	// with no PTR, so the FCrDNS exemption above never verifies them) got the
+	// challenge page, and shared links previewed as "Just a moment…".
+	// skip_vhost_only lifts the vhost-wide challenge only; skip lifts a per-IP
+	// challenge too. Never softens a block.
+	if b.ChalExcludeHot != nil && ipAction != "block" &&
+		(ipAction == "challenge" || vhAction == "challenge") {
+		geo := lookupGeo()
+		asn := ""
+		if geo.ASN > 0 {
+			asn = fmt.Sprintf("AS%d", geo.ASN)
+		}
+		if vhAction == "challenge" {
+			if act, ok := b.ChalExcludeHot(host, ua, asn, geo.PTR, "CHALLENGE_VHOST"); ok {
+				vhAction = "allow"
+				if act == "skip" && ipAction == "challenge" {
+					ipAction = "allow"
+				}
+			}
+		}
+		if ipAction == "challenge" {
+			// rule "" = not vhost-wide: only action=skip rules apply.
+			if _, ok := b.ChalExcludeHot(host, ua, asn, geo.PTR, ""); ok {
+				ipAction = "allow"
 			}
 		}
 	}

@@ -63,6 +63,24 @@ back-filled here — see the git/PR history for that period.
     older binary ran it.
 
 ### Fixed
+- **Meta's link-preview crawlers are no longer served the challenge page on a
+  vhost-wide challenge.** Rules in `webdetector_challenge_exclude.txt` (such as
+  the shipped `asn=as32934; ua=*meta*`) only stopped the log-driven detector
+  from challenging one IP. When the whole vhost was under a challenge
+  (`suspicious_vhost` or a manual one), the edge served the challenge to every
+  client without clearance, crawlers included. Meta's crawlers
+  (`meta-externalads`, `meta-webindexer`, `meta-externalagent`,
+  `facebookexternalhit`) come from IPv6 addresses with no reverse DNS, so the
+  verified-crawler exemption could never clear them either. Links shared on
+  Facebook / Messenger / WhatsApp then previewed as "Just a moment…" instead of
+  showing the page title, image and description.
+  - The decision bridge now checks the file's ua / asn / host rules against each
+    request's real User-Agent and ASN.
+  - `skip_vhost_only` lifts only the vhost-wide challenge. `skip` also lifts a
+    per-IP challenge.
+  - A block is never softened, and the WAF and traffic rules still apply.
+  - The check makes no DNS lookups, so a `verify_fcrdns=1` rule still applies
+    only through the log-driven path and the verified-crawler exemption.
 - **A `detectors.conf` whose tokens sat outside `[webdetector]` no longer
   reloads every 5 seconds.** The old generator appended a missing token to the
   end of the file, which could put it in another section. After that the

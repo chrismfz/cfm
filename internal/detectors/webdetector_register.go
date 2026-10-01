@@ -1109,6 +1109,18 @@ func (w *webdetectorWrapped) SetChalExcludeFunc(fn func(string, string, string, 
 	w.eng.SetChalExcludeFunc(fn)
 }
 
+// SetChalExcludeHotFunc forwards to the engine (the DNS-free challenge-exclude
+// matcher for the edge decision hot path). A named engine method, not promoted
+// through this wrapper — forwarded explicitly; the guard below fails the build
+// if it is dropped. Called from manager.go via interface assertion.
+func (w *webdetectorWrapped) SetChalExcludeHotFunc(fn func(host, ua, asn, ptr, rule string) (string, bool)) {
+	w.eng.SetChalExcludeHotFunc(fn)
+}
+
+var _ interface {
+	SetChalExcludeHotFunc(func(host, ua, asn, ptr, rule string) (string, bool))
+} = (*webdetectorWrapped)(nil)
+
 // SetChalGoodBotFunc forwards to the engine (the operator good-bot name resolver
 // for solver-farm finding tags). Like SetChalExcludeFunc, it is a named engine
 // field — NOT promoted through this wrapper — so it must be forwarded explicitly
