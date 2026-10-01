@@ -158,7 +158,8 @@ never overwritten (an empty one is replaced): it is logged, and another token
 runs, unstored, until the file is fixed or deleted; a symlink or other special file in its place is
 never followed nor replaced. A store that cannot be
 read is never overwritten; the daemon keeps the token it runs. `cfm health`
-reports the stored token, and a token file it cannot use as missing. The store outlives package removal, like the rest of
+reports the stored token (inside the daemon: the one it runs), and a token
+file that holds no usable token as missing. The store outlives package removal, like the rest of
 `/var/lib/cfm`. Every other `[webdetector]` knob
 (`OPENRESTY_SOCK`, `LOG_PATH`, thresholds, …) is overlay-tunable as normal. Verify the
 merged result with `cfm detectors-srcresolve` and the cfm-admin "Source

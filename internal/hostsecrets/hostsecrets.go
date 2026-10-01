@@ -285,10 +285,13 @@ func Effective(key, legacy string) string {
 	return strings.TrimSpace(legacy)
 }
 
-// ForgetRunning drops this process's resolved tokens: the detectors manager
-// calls it when the config no longer has [webdetector], so no probe reports
-// a token nothing runs any more.
-func ForgetRunning() { forget() }
+// ForgetRunning drops this process's running tokens (not a generated token
+// it could not store, which stays for the life of the process): the
+// detectors manager calls it when the config no longer has [webdetector], so
+// no probe reports a token nothing runs any more.
+func ForgetRunning() {
+	running.Range(func(k, _ any) bool { running.Delete(k); return true })
+}
 
 // Running returns the token for key this process runs (the last Resolve), if
 // any: in the daemon, what the edge and the challenge server use right now.
@@ -345,6 +348,11 @@ func resolve(key, legacy string, confKnown bool) (secret, source string, err err
 		readErr = nil
 	}
 	value, source, ok := choose(key, legacy, cur, readErr)
+	if v, runs := running.Load(key); replace && runs {
+		// Emptied under a running daemon (a truncating write gone wrong, a
+		// restore): put back the token it runs, rather than rotate.
+		value, source, ok = v.(string), SourceRunning, true
+	}
 	if !ok {
 		gen, gerr := sslcollector.GenerateToken()
 		if gerr != nil {
@@ -433,8 +441,11 @@ func ensureDir() error {
 	if err := os.Mkdir(Dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return fmt.Errorf("hostsecrets: mkdir %s: %w", Dir, err)
 	}
-	// Mkdir leaves an existing dir's mode and owner alone; tighten them.
-	return rootOnly(Dir, 0o700, true)
+	// Mkdir leaves an existing dir's mode and owner alone; tighten them, best
+	// effort as in tighten (a root_squash mount cannot be chowned, and must
+	// still hold the token).
+	_ = rootOnly(Dir, 0o700, true)
+	return nil
 }
 
 // bare drops the path from a file-operation error: write's temp file has a

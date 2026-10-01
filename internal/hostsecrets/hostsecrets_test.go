@@ -610,3 +610,34 @@ func TestForgetRunning(t *testing.T) {
 		t.Fatal("Running = true after ForgetRunning")
 	}
 }
+
+// A token file emptied under a running daemon gets the running token back,
+// never a new one (that would invalidate every clearance cookie).
+func TestResolveEmptiedFileGetsTheRunningTokenBack(t *testing.T) {
+	useTempDir(t)
+	if _, _, err := Resolve(ChallengeToken, strongA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path(ChallengeToken), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tok, src, err := Resolve(ChallengeToken, "placeholder")
+	if err != nil || tok != strongA || src != SourceRunning || stored(ChallengeToken) != strongA {
+		t.Fatalf("Resolve = (%q, %q, %v), store %q; want the running strongA written back", tok, src, err, stored(ChallengeToken))
+	}
+}
+
+// ForgetRunning keeps a generated token this process could not store: it is
+// promised for the life of the process.
+func TestForgetRunningKeepsAnUnstoredToken(t *testing.T) {
+	if _, err := os.Stat("/proc/self"); err != nil {
+		t.Skip("no /proc")
+	}
+	useTempDir(t)
+	Dir = "/proc/self/cfm-hostsecrets-test/secrets"
+	first, _, _ := Resolve(ChallengeToken, "")
+	ForgetRunning()
+	if again, _, _ := Resolve(ChallengeToken, ""); again != first {
+		t.Fatalf("after ForgetRunning: %q, want the same unstored token %q", again, first)
+	}
+}

@@ -799,6 +799,11 @@ func (m *manager) stopAll() {
 func resolveHostTokens(confWD KV, confKnown bool) (challenge, bridge string) {
 	resolve := func(key string) string {
 		legacy := kvStrClean(confWD, key, "")
+		if sslcollector.IsStrongToken(legacy) && !hostsecrets.Usable(legacy) {
+			if _, seen := tokenUnusableLogged.LoadOrStore(key, true); !seen {
+				logging.Logf("[detectors] %s in detectors.conf is not used: it carries a quoted ';', '#' or ' //', which the config reader cuts once the quotes are gone", key)
+			}
+		}
 		var tok, src string
 		var err error
 		if confKnown {
@@ -829,7 +834,7 @@ func resolveHostTokens(confWD KV, confKnown bool) (challenge, bridge string) {
 // tokenConfIgnoredLogged / tokenFromConfLogged remember, per token, that the
 // hint was logged: a reload happens on every config save and tailed-log
 // rotation, and the hint is the same every time.
-var tokenConfIgnoredLogged, tokenFromConfLogged sync.Map
+var tokenConfIgnoredLogged, tokenFromConfLogged, tokenUnusableLogged sync.Map
 
 // storeFallback says what the daemon runs while the token file cannot be used.
 func storeFallback(source string) string {

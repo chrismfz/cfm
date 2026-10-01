@@ -55,8 +55,8 @@ back-filled here — see the git/PR history for that period.
     usable token (under 32 characters, quoted, a symlink) is never
     overwritten (nor a symlink followed); an empty one is replaced:
     CFM logs it and runs another token, unstored, until you fix or delete it.
-  - `cfm health` reports the stored token, i.e. the one the daemon uses, and
-    a token file it cannot use (unreadable, unusable) as missing.
+  - `cfm health` reports the stored token (inside the daemon: the one it
+    runs), and a token file that holds no usable token as missing.
   - The token step (and `cfm_bridge_config.lua`) now also runs when
     `[webdetector]` exists only in a `detectors.d/` overlay. A token set in an
     overlay is copied when the base file has no `[webdetector]` section, as the

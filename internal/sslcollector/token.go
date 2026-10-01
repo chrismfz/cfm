@@ -39,10 +39,11 @@ func tokenIsLuaSafe(s string) bool {
 }
 
 // IsStrongToken reports whether tok is usable as-is: at least 32 characters,
-// not a known placeholder, and Lua-safe (tokenIsLuaSafe). Anything else is
-// regenerated: by ValidateOrGenerateToken (cfm.conf SSLCOLLECTOR_SOCK_TOKEN)
-// and by internal/hostsecrets (the [webdetector] tokens, which also require
-// hostsecrets.Usable).
+// not a known placeholder, and Lua-safe (tokenIsLuaSafe). ValidateOrGenerateToken
+// (cfm.conf SSLCOLLECTOR_SOCK_TOKEN) regenerates anything else;
+// internal/hostsecrets (the [webdetector] tokens, which also require
+// hostsecrets.Usable) skips it: a weak detectors.conf value is not copied, and
+// a weak token file is left alone and reported.
 func IsStrongToken(tok string) bool {
 	cur := strings.TrimSpace(tok)
 	return len(cur) >= 32 && !badTokens.MatchString(cur) && tokenIsLuaSafe(cur)
