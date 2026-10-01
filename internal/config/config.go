@@ -1402,27 +1402,31 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
-// κόβει inline σχόλια που ξεκινούν μετά από κενό: " # ..." ή " // ..."
-// (δεν πειράζει "http://..." γιατί απαιτούμε προηγούμενο space)
+// stripInlineComment cuts an inline comment: a '#' or "//" at the start of
+// the (trimmed) value or after a space or tab ("value # note", "value //
+// note", "KEY = # note" is empty). One that follows anything else ("a#b",
+// "http://x") is part of the value, and so is one inside quotes: a double
+// quote anywhere (JSON, a quoted list item; a backslash escapes the next
+// character there), a single quote at the start or after whitespace or ','
+// (so an apostrophe does not open one). Inside a quote left open nothing is
+// cut.
 func stripInlineComment(s string) string {
-	cut := func(txt, token string) string {
-		for from := 0; ; {
-			k := strings.Index(txt[from:], token)
-			if k < 0 {
-				return txt
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == '\\' && quote == '"' {
+				i++
+			} else if c == quote {
+				quote = 0
 			}
-			i := from + k
-			if i == 0 || txt[i-1] == ' ' || txt[i-1] == '\t' {
-				return strings.TrimSpace(txt[:i])
-			}
-			// βρες επόμενο (μετά από αυτό: το παλιό loop ξαναέβρισκε το ίδιο
-			// και κρεμούσε το parse σε τιμή με δύο " #")
-			from = i + len(token)
+		case c == '"' || (c == '\'' && (i == 0 || strings.IndexByte(" \t,", s[i-1]) >= 0)):
+			quote = c
+		case (c == '#' || strings.HasPrefix(s[i:], "//")) && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t'):
+			return strings.TrimSpace(s[:i])
 		}
 	}
-	// πρώτα " #", μετά " //"
-	s = cut(s, " #")
-	s = cut(s, " //")
 	return strings.TrimSpace(s)
 }
 
