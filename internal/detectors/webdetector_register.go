@@ -1113,12 +1113,12 @@ func (w *webdetectorWrapped) SetChalExcludeFunc(fn func(string, string, string, 
 // matcher for the edge decision hot path). A named engine method, not promoted
 // through this wrapper — forwarded explicitly; the guard below fails the build
 // if it is dropped. Called from manager.go via interface assertion.
-func (w *webdetectorWrapped) SetChalExcludeHotFunc(fn func(host, ua string, asn, ptr func() string, rule string) (string, bool)) {
+func (w *webdetectorWrapped) SetChalExcludeHotFunc(fn func(host, ua string, asn, ptr func() string, rule string) (action, matched string, ok bool)) {
 	w.eng.SetChalExcludeHotFunc(fn)
 }
 
 var _ interface {
-	SetChalExcludeHotFunc(func(host, ua string, asn, ptr func() string, rule string) (string, bool))
+	SetChalExcludeHotFunc(func(host, ua string, asn, ptr func() string, rule string) (action, matched string, ok bool))
 } = (*webdetectorWrapped)(nil)
 
 // SetChalGoodBotFunc forwards to the engine (the operator good-bot name resolver

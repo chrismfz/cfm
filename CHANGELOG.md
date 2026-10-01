@@ -64,31 +64,38 @@ back-filled here — see the git/PR history for that period.
 
 ### Fixed
 - **Meta's link-preview crawlers are no longer served the challenge page on a
-  vhost-wide challenge.** Rules in `webdetector_challenge_exclude.txt` (such as
-  the shipped `asn=as32934; ua=*meta*`) only stopped the log-driven detector
-  from challenging one IP. When the whole vhost was under a challenge
-  (`suspicious_vhost` or a manual one), the edge served the challenge to every
-  client without clearance, crawlers included. Meta's crawlers
-  (`meta-externalads`, `meta-webindexer`, `meta-externalagent`,
-  `facebookexternalhit`) come from IPv6 addresses with no reverse DNS, so the
-  verified-crawler exemption could never clear them either. Links shared on
-  Facebook / Messenger / WhatsApp then previewed as "Just a moment…" instead of
-  showing the page title, image and description.
+  vhost-wide challenge.** Under a vhost-wide challenge (`suspicious_vhost`,
+  `under_attack` or a manual one) the edge serves the challenge to every client
+  without clearance. Rules in `webdetector_challenge_exclude.txt` were checked
+  there only for IPs already seen on the vhost, and without the User-Agent, so
+  a rule with a `ua=` condition (such as the shipped `asn=as32934; ua=*meta*`)
+  never matched. Meta's crawlers (`meta-externalads`, `meta-webindexer`,
+  `meta-externalagent`, `facebookexternalhit`) come from IPv6 addresses with no
+  reverse DNS, so the verified-crawler exemption could never clear them either.
+  Links shared on Facebook / Messenger / WhatsApp then previewed as "Just a
+  moment…" instead of showing the page title, image and description.
   - The decision bridge now checks the file's ua / asn / host rules against each
     request's real User-Agent and ASN, and lifts only the vhost-wide challenge
     (with `skip` or `skip_vhost_only`).
   - A per-IP challenge (a WAF challenge-tier hit, the geo policy floor) and a
     block are never lifted, and the WAF and traffic rules still apply.
-  - The check makes no DNS lookups, so a `verify_fcrdns=1` rule never applies
-    there; verified crawlers are cleared by `CHALLENGE_GOODBOT_EXEMPT`.
-  - Because the check runs per request, a ua-only rule now lifts the vhost-wide
-    challenge for anyone sending that UA. The shipped rules all pair the UA with
-    an ASN or a PTR.
+  - The check makes no inline DNS lookups, so a rule whose `ptr=` needs
+    `verify_fcrdns=1` never applies there; verified crawlers are cleared by
+    `CHALLENGE_GOODBOT_EXEMPT`.
+  - Each lift is counted (`challenge_exclude_lifts` in the bridge stats) and
+    logged to the challenges log as `action=exclude_lift`, at most once per
+    host per minute.
+  - Because the check runs per request, a ua-only rule lifts the vhost-wide
+    challenge for anyone sending that UA, and an asn-only rule lifts it for
+    every request from that network, Under-Attack Mode included. The shipped
+    asn-only rules are Skroutz (`as202042`) and Apple (`as714`); review them if
+    that is more than you want.
 - **An exclude rule's `asn=` without a wildcard now matches that ASN exactly,
   and `host=` matches that host and its subdomains only.** Both used to be
   substring matches. The shipped `asn=as714` (Apple) rule therefore also
   exempted AS7140–AS7149, AS71400 and so on, and `host=shop.gr` also matched
-  `myshop.gr`. Use `*` / `?` for a deliberate pattern.
+  `myshop.gr`. `host=` also ignores a `:port` and a trailing dot. Use `*` / `?`
+  for a deliberate pattern.
 - **A `detectors.conf` whose tokens sat outside `[webdetector]` no longer
   reloads every 5 seconds.** The old generator appended a missing token to the
   end of the file, which could put it in another section. After that the

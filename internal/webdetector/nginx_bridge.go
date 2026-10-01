@@ -200,10 +200,16 @@ type NginxBridge struct {
 	// A match lifts the VHOST-WIDE challenge only — never a per-IP challenge,
 	// never a block, never the WAF / traffic rules. nil when no exclude file
 	// is loaded. Set once at startup (SetChalExcludeHotFunc).
-	ChalExcludeHot func(host, ua string, asn, ptr func() string, rule string) (string, bool)
+	ChalExcludeHot func(host, ua string, asn, ptr func() string, rule string) (action, matched string, ok bool)
 	// chalExcludeASNFn overrides the ASN source for ChalExcludeHot (tests
 	// only; nil = the enricher's mmdb read).
 	chalExcludeASNFn func(ip string) uint32
+	// chalExcludeLifts counts vhost-wide challenges lifted by ChalExcludeHot
+	// (BridgeStats.ChallengeExcludeLifts); chalExcludeLogAt rate-limits the
+	// per-host log line (chalExcludeLogMu; taken only on a lift).
+	chalExcludeLifts atomic.Int64
+	chalExcludeLogMu sync.Mutex
+	chalExcludeLogAt map[string]time.Time
 
 	// Clam
 	clamMgr      clam.Enqueuer
@@ -310,6 +316,11 @@ type BridgeStats struct {
 
 	ActiveIPs    int `json:"active_ips"`
 	ActiveVhosts int `json:"active_vhosts"`
+
+	// ChallengeExcludeLifts: decisions whose vhost-wide challenge was lifted
+	// by a webdetector_challenge_exclude.txt rule (ChalExcludeHot).
+	// Cumulative since bridge start.
+	ChallengeExcludeLifts int64 `json:"challenge_exclude_lifts"`
 
 	Timing BridgeTimingStats `json:"timing"`
 }
@@ -1378,6 +1389,8 @@ func (b *NginxBridge) snapshotBridgeStats(activeIPs, activeVhosts int) BridgeSta
 		LastPushAt:   b.stats.lastPushAt,
 		ActiveIPs:    activeIPs,
 		ActiveVhosts: activeVhosts,
+
+		ChallengeExcludeLifts: b.chalExcludeLifts.Load(),
 		Timing: BridgeTimingStats{
 			TotalP50Ms:     percentileDurationMsLocked(b.stats.totalDurations, 0.50),
 			TotalP95Ms:     percentileDurationMsLocked(b.stats.totalDurations, 0.95),
@@ -2044,31 +2057,41 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Operator challenge-exclude file (ua/asn/host rules, no DNS) against the
-	// VHOST-WIDE challenge. Before this the file was consulted only by the
-	// log-driven per-IP emits, so a vhost-wide challenge (auto suspicious_vhost
-	// / manual) was served to the very crawlers the file exempts — observed
-	// live 2026-10-01: Meta's meta-externalads / meta-webindexer /
+	// Operator challenge-exclude file (webdetector_challenge_exclude.txt)
+	// against the VHOST-WIDE challenge, per request. Before this, a vhost-wide
+	// challenge (auto suspicious_vhost / under_attack / manual) consulted the
+	// file only through BypassIPTemp for IPs already seen in the vhost's
+	// window, and with an EMPTY UA — so ua-gated rules never matched there.
+	// Observed live 2026-10-01: Meta's meta-externalads / meta-webindexer /
 	// facebookexternalhit (AS32934, IPv6 with no PTR, so the FCrDNS exemption
 	// above never verifies them) got the challenge page, and shared links
 	// previewed as "Just a moment…".
 	// Only vhAction is lifted (skip and skip_vhost_only alike): a per-IP
-	// challenge in ipState may come from a WAF challenge-tier push or the geo
-	// policy floor, neither of which the exclude file has ever governed, and
-	// the log-driven per-IP emits already consult the file before they arm.
-	// ASN / PTR are resolved lazily, only for a rule whose cheaper conditions
-	// (host, UA) already passed: ASN from the mmdb (no async PTR dispatch),
-	// PTR from the enrich cache.
+	// challenge in ipState can be a WAF challenge-tier push or the geo policy
+	// floor, which the file never governed, and the log-driven per-IP emits
+	// already consult the file before they arm. No inline DNS: ASN / PTR are
+	// resolved lazily, only for a rule whose host / UA conditions have not
+	// decided it — the ASN reuses this request's geo lookup if one already
+	// ran, else an inline mmdb read; the PTR comes from the enrich cache (a
+	// cache miss there warms it in the background, bounded by the enricher's
+	// async slots, and the rule simply does not match this request).
 	if b.ChalExcludeHot != nil && ipAction != "block" && vhAction == "challenge" {
 		asnFn := func() string {
-			if n := b.chalExcludeASN(ip); n > 0 {
+			var n uint32
+			if geoLoaded {
+				n = uint32(geoResult.ASN)
+			} else {
+				n = b.chalExcludeASN(ip)
+			}
+			if n > 0 {
 				return fmt.Sprintf("AS%d", n)
 			}
 			return ""
 		}
 		ptrFn := func() string { return lookupGeo().PTR }
-		if _, ok := b.ChalExcludeHot(host, ua, asnFn, ptrFn, "CHALLENGE_VHOST"); ok {
+		if _, rule, ok := b.ChalExcludeHot(host, ua, asnFn, ptrFn, "CHALLENGE_VHOST"); ok {
 			vhAction = "allow"
+			b.noteChalExcludeLift(host, ip, ua, rule, now)
 		}
 	}
 
@@ -2130,6 +2153,34 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// noteChalExcludeLift counts a vhost-wide challenge lifted by an exclude rule
+// and logs it to the challenges log at most once per host per minute, so an
+// operator can see why a client got through a vhost challenge.
+func (b *NginxBridge) noteChalExcludeLift(host, ip, ua, rule string, now time.Time) {
+	b.chalExcludeLifts.Add(1)
+	b.chalExcludeLogMu.Lock()
+	if b.chalExcludeLogAt == nil {
+		b.chalExcludeLogAt = make(map[string]time.Time)
+	}
+	last, seen := b.chalExcludeLogAt[host]
+	due := !seen || now.Sub(last) >= time.Minute
+	if due {
+		if len(b.chalExcludeLogAt) >= 4096 {
+			clear(b.chalExcludeLogAt)
+		}
+		b.chalExcludeLogAt[host] = now
+	}
+	b.chalExcludeLogMu.Unlock()
+	if !due {
+		return
+	}
+	if len(ua) > 160 {
+		ua = ua[:160] + "..."
+	}
+	logging.LogfCHALLENGES("[challenge][vhost] action=exclude_lift host=%s ip=%s ua=%q rule=%q note=vhost_challenge_lifted_by_exclude_file (per-host, 1/min)",
+		host, ip, ua, rule)
 }
 
 // chalExcludeASN is the request ASN for the challenge-exclude hot matcher: an

@@ -24,14 +24,14 @@ func TestNginxBridgeChalExcludeHotDowngrade(t *testing.T) {
 	var calls []call
 	// Shaped like the shipped rule: asn=as32934; ua=*meta*; action=skip — the
 	// "AS<n>" string the bridge hands over is what the detectors matcher keys on.
-	b.ChalExcludeHot = func(host, ua string, asn, ptr func() string, rule string) (string, bool) {
+	b.ChalExcludeHot = func(host, ua string, asn, ptr func() string, rule string) (string, string, bool) {
 		if !strings.Contains(strings.ToLower(ua), "meta") {
 			calls = append(calls, call{host, ua, "", rule})
-			return "", false
+			return "", "", false
 		}
 		a := asn()
 		calls = append(calls, call{host, ua, a, rule})
-		return "skip", a == "AS32934"
+		return "skip", "asn=as32934; ua=*meta*; action=skip", a == "AS32934"
 	}
 
 	decide := func(ip, ua string) map[string]any {
@@ -56,8 +56,14 @@ func TestNginxBridgeChalExcludeHotDowngrade(t *testing.T) {
 	if len(calls) != 1 || calls[0].ua != meta || calls[0].asn != "AS32934" || calls[0].rule != "CHALLENGE_VHOST" {
 		t.Fatalf("matcher not called once with the request UA / AS<n> / vhost rule: %+v", calls)
 	}
+	if n := b.snapshotBridgeStats(0, 0).ChallengeExcludeLifts; n != 1 {
+		t.Fatalf("ChallengeExcludeLifts = %d, want 1", n)
+	}
 	if got := decide("198.51.100.7", meta); got["vhost_action"] != "challenge" {
 		t.Fatalf("meta UA off the Meta ASN must stay challenged, got %+v", got)
+	}
+	if n := b.snapshotBridgeStats(0, 0).ChallengeExcludeLifts; n != 1 {
+		t.Fatalf("a non-lift counted: ChallengeExcludeLifts = %d, want 1", n)
 	}
 	asnLookups = 0
 	if got := decide(metaIP, "Mozilla/5.0 (Windows NT 10.0) Chrome/150"); got["vhost_action"] != "challenge" {

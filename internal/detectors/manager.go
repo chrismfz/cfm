@@ -622,7 +622,7 @@ func (m *manager) maybeReload(parent context.Context) {
 		// verify them) — the file rules were only consulted by the log-driven
 		// per-IP emits.
 		type chalExcludeHotSetter interface {
-			SetChalExcludeHotFunc(func(host, ua string, asn, ptr func() string, rule string) (string, bool))
+			SetChalExcludeHotFunc(func(host, ua string, asn, ptr func() string, rule string) (action, matched string, ok bool))
 		}
 		if hs, ok := det.(chalExcludeHotSetter); ok {
 			if secExclude != nil {

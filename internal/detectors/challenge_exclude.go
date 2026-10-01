@@ -22,7 +22,9 @@ import (
 //   - mode:   all | any   (default all)
 //   - verify_fcrdns=1: require forward-confirmed reverse DNS for ptr match
 //
-// Matching is case-insensitive. Values are glob patterns using '*' and '?'.
+// Matching is case-insensitive. Values are glob patterns using '*' and '?';
+// without a wildcard ua= / ptr= are substring matches, asn= is exact and host=
+// matches the host and its subdomains (asnMatch / hostMatch).
 type ChallengeExclude struct {
     rules []challengeExcludeRule
 }
@@ -123,156 +125,145 @@ func allDigits(s string) bool {
     return true
 }
 
-// Match returns (action, reason, true) when a rule matches.
+// Match returns (action, reason, true) when a rule matches. It is the
+// log-driven path (autoblock_sink, engine.isExcluded): asn / ptr are already
+// resolved, and a verify_fcrdns=1 ptr condition is forward-confirmed live.
 // ruleName is used to implement skip_vhost_only semantics.
 func (ce *ChallengeExclude) Match(ip, host, ua, asn, ptr, ruleName string) (string, string, bool) {
-    if ce == nil || len(ce.rules) == 0 {
+    lz := excludeLookup{
+        asnV: strings.ToLower(strings.TrimSpace(asn)), asnDone: true,
+        ptrV: strings.ToLower(strings.TrimSpace(ptr)), ptrDone: true,
+    }
+    r, ok := ce.eval(ip, host, ua, &lz, ruleName, false)
+    if !ok {
         return "", "", false
     }
-
-    hostL := strings.ToLower(strings.TrimSpace(host))
-    uaL := strings.ToLower(strings.TrimSpace(ua))
-    asnL := strings.ToLower(strings.TrimSpace(asn))
-    ptrL := strings.ToLower(strings.TrimSpace(ptr))
-    rn := strings.ToUpper(strings.TrimSpace(ruleName))
-
-    isVHostWide := rn == "CHALLENGE_VHOST" || rn == "CHALLENGE_SUSPICIOUS_VHOST_SCORE"
-
-    for _, r := range ce.rules {
-        if r.action == "skip_vhost_only" && !isVHostWide {
-            continue
-        }
-
-        checks := 0
-        matches := 0
-
-        if r.host != "" {
-            checks++
-            if hostMatch(r.host, hostL) { matches++ }
-        }
-        if r.ua != "" {
-            checks++
-            if globMatch(r.ua, uaL) { matches++ }
-        }
-        if r.asn != "" {
-            checks++
-            if asnMatch(r.asn, asnL) { matches++ }
-        }
-        if r.ptr != "" {
-            checks++
-            if globMatch(r.ptr, ptrL) {
-                if r.verifyFcrdns {
-                    if forwardConfirmPTR(ip, ptrL) { matches++ }
-                } else {
-                    matches++
-                }
-            }
-        }
-        if checks == 0 { continue }
-
-        ok := false
-        if r.modeAny {
-            ok = matches >= 1
-        } else {
-            ok = matches == checks
-        }
-        if ok {
-            why := r.raw
-           if len(why) > 160 {
-                why = why[:160] + "…"
-            }
-            return r.action, why, true
-        }
+    why := r.raw
+    if len(why) > 160 {
+        why = why[:160] + "…"
     }
-    return "", "", false
+    return r.action, why, true
 }
 
 // MatchNoDNS is Match for the edge decision hot path (one call per request on
-// a challenged vhost): it never touches DNS, and it resolves the request's ASN
-// and PTR only when a rule still needs them (asnFn / ptrFn are lazy, called at
-// most once each; either may be nil). Differences from Match:
-//   - a rule carrying verify_fcrdns=1 is SKIPPED outright — its FCrDNS check
-//     cannot run here, and in mode=any its other conditions would otherwise
-//     match on their own (a spoofed UA). FCrDNS crawlers are the bridge's
-//     good-bot exemption's job, which verifies them off the hot path;
-//   - a bare (non-fcrdns) ptr condition is checked against ptrFn, which the
-//     bridge serves from the enrich cache only.
+// a vhost under a vhost-wide challenge). Same rules, same evaluator, except:
+//   - no DNS, ever: a rule whose ptr condition needs verify_fcrdns=1 cannot be
+//     confirmed here, so the whole rule is skipped (in mode=any its other
+//     conditions would otherwise match on their own, e.g. a spoofed UA).
+//     FCrDNS crawlers are the bridge's good-bot exemption's job, verified off
+//     the hot path. verify_fcrdns on a rule WITHOUT ptr= changes nothing, as
+//     in Match;
+//   - asn / ptr are lazy (asnFn / ptrFn, each called at most once, only for a
+//     rule whose cheaper host / UA conditions have not already decided it;
+//     either may be nil). The bridge serves ptr from the enrich cache.
 // This is what lets an `asn=as32934; ua=*meta*` rule exempt Meta's link-preview
 // crawlers (IPv6 2a03:2880::/32, no PTR at all, so FCrDNS can never verify
 // them) from a vhost-wide challenge.
-func (ce *ChallengeExclude) MatchNoDNS(host, ua string, asnFn, ptrFn func() string, ruleName string) (string, bool) {
+// It returns the matched rule's action and its raw text (for the caller's log).
+func (ce *ChallengeExclude) MatchNoDNS(host, ua string, asnFn, ptrFn func() string, ruleName string) (action, rule string, ok bool) {
+    lz := excludeLookup{asnFn: asnFn, ptrFn: ptrFn}
+    r, ok := ce.eval("", host, ua, &lz, ruleName, true)
+    if !ok {
+        return "", "", false
+    }
+    return r.action, r.raw, true
+}
+
+// excludeLookup resolves a request's ASN / PTR at most once, on first use.
+type excludeLookup struct {
+    asnFn, ptrFn     func() string
+    asnV, ptrV       string
+    asnDone, ptrDone bool
+}
+
+// The values are normalised (trimmed, lower-cased) once and kept, so a file
+// with several asn= rules costs one lower-casing per request, not one per rule.
+func (l *excludeLookup) asn() string {
+    if !l.asnDone {
+        l.asnDone = true
+        if l.asnFn != nil {
+            l.asnV = l.asnFn()
+        }
+        l.asnV = strings.ToLower(strings.TrimSpace(l.asnV))
+    }
+    return l.asnV
+}
+
+func (l *excludeLookup) ptr() string {
+    if !l.ptrDone {
+        l.ptrDone = true
+        if l.ptrFn != nil {
+            l.ptrV = l.ptrFn()
+        }
+        l.ptrV = strings.ToLower(strings.TrimSpace(l.ptrV))
+    }
+    return l.ptrV
+}
+
+// eval is THE rule evaluator behind Match and MatchNoDNS (one copy, so the log
+// path and the serve path can never read the same file differently). It
+// checks host, ua, asn, ptr in that order and stops as soon as the rule is
+// decided (mode=all: first failed condition; mode=any: first match), so the
+// ASN / PTR lookups and any forward-confirm run only when they can matter.
+func (ce *ChallengeExclude) eval(ip, host, ua string, lz *excludeLookup, ruleName string, noDNS bool) (*challengeExcludeRule, bool) {
     if ce == nil || len(ce.rules) == 0 {
-        return "", false
+        return nil, false
     }
     hostL := strings.ToLower(strings.TrimSpace(host))
     uaL := strings.ToLower(strings.TrimSpace(ua))
     rn := strings.ToUpper(strings.TrimSpace(ruleName))
     isVHostWide := rn == "CHALLENGE_VHOST" || rn == "CHALLENGE_SUSPICIOUS_VHOST_SCORE"
 
-    var asnL, ptrL string
-    asnDone, ptrDone := false, false
-    getASN := func() string {
-        if !asnDone {
-            asnDone = true
-            if asnFn != nil {
-                asnL = strings.ToLower(strings.TrimSpace(asnFn()))
-            }
-        }
-        return asnL
-    }
-    getPTR := func() string {
-        if !ptrDone {
-            ptrDone = true
-            if ptrFn != nil {
-                ptrL = strings.ToLower(strings.TrimSpace(ptrFn()))
-            }
-        }
-        return ptrL
-    }
-
-    for _, r := range ce.rules {
-        if r.verifyFcrdns {
-            continue
-        }
+    for i := range ce.rules {
+        r := &ce.rules[i]
         if r.action == "skip_vhost_only" && !isVHostWide {
             continue
         }
-        // Cheap, request-local conditions first; the ASN / PTR lookups run
-        // only if the rule is still undecided (mode=all: nothing failed yet;
-        // mode=any: nothing matched yet).
-        conds := []func() bool{}
-        if r.host != "" {
-            conds = append(conds, func() bool { return hostMatch(r.host, hostL) })
-        }
-        if r.ua != "" {
-            conds = append(conds, func() bool { return globMatch(r.ua, uaL) })
-        }
-        if r.asn != "" {
-            conds = append(conds, func() bool { return asnMatch(r.asn, getASN()) })
-        }
-        if r.ptr != "" {
-            conds = append(conds, func() bool { return globMatch(r.ptr, getPTR()) })
-        }
-        if len(conds) == 0 {
+        if noDNS && r.ptr != "" && r.verifyFcrdns {
             continue
         }
-        ok := !r.modeAny
-        for _, c := range conds {
-            m := c()
-            if r.modeAny && m {
-                ok = true
-                break
+        checks := 0
+        matched, failed := false, false
+        // step records one condition's outcome and reports whether the rule
+        // is now decided.
+        step := func(m bool) bool {
+            checks++
+            if m {
+                matched = true
+            } else {
+                failed = true
             }
-            if !r.modeAny && !m {
-                ok = false
-                break
+            if r.modeAny {
+                return matched
             }
+            return failed
         }
-        if ok {
-            return r.action, true
+        decided := false
+        if r.host != "" {
+            decided = step(hostMatch(r.host, hostL))
+        }
+        if !decided && r.ua != "" {
+            decided = step(globMatch(r.ua, uaL))
+        }
+        if !decided && r.asn != "" {
+            decided = step(asnMatch(r.asn, lz.asn()))
+        }
+        if !decided && r.ptr != "" {
+            ptrL := lz.ptr()
+            m := globMatch(r.ptr, ptrL)
+            if m && r.verifyFcrdns {
+                m = forwardConfirmPTR(ip, ptrL)
+            }
+            step(m)
+        }
+        if checks == 0 {
+            continue
+        }
+        if (r.modeAny && matched) || (!r.modeAny && !failed) {
+            return r, true
         }
     }
-    return "", false
+    return nil, false
 }
 
 // asnMatch compares an asn rule against the request's "asNNN" value. A pattern
@@ -298,6 +289,12 @@ func asnMatch(pattern, value string) bool {
 func hostMatch(pattern, value string) bool {
     pattern = strings.TrimSpace(strings.ToLower(pattern))
     value = strings.TrimSpace(strings.ToLower(value))
+    if strings.IndexByte(value, ':') >= 0 {
+        if h, _, err := net.SplitHostPort(value); err == nil {
+            value = h
+        }
+    }
+    value = strings.TrimSuffix(value, ".")
     if pattern == "" || value == "" {
         return false
     }
@@ -311,7 +308,8 @@ func hostMatch(pattern, value string) bool {
 // '*' matches any sequence (including empty) of ANY characters — '/' is not
 // a separator here, since values are UA strings / hostnames, not paths.
 // '?' matches exactly one character. If the pattern contains no wildcards,
-// falls back to substring containment for convenience.
+// falls back to substring containment for convenience — used for ua= / ptr=;
+// asn= and host= go through asnMatch / hostMatch, which do not.
 func globMatch(pattern, value string) bool {
     pattern = strings.TrimSpace(strings.ToLower(pattern))
     value = strings.TrimSpace(strings.ToLower(value))
