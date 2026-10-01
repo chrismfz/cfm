@@ -44,6 +44,7 @@ func TestReadChallengeTokenProbeFallsBackToTheStore(t *testing.T) {
 	if _, _, err := hostsecrets.Resolve(hostsecrets.ChallengeToken, stored); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(hostsecrets.SetDirForTest(hostsecrets.Dir)) // forget the running token: probe like a CLI
 	conf := filepath.Join(t.TempDir(), "detectors.conf")
 	for name, body := range map[string]string{
 		"no line":          "[webdetector]\nENABLED = 1\n",
@@ -132,5 +133,23 @@ func TestReadChallengeTokenProbeBrokenOverlay(t *testing.T) {
 	}
 	if got := ReadChallengeTokenProbe(conf); got.Token != stored {
 		t.Fatalf("ReadChallengeTokenProbe = %+v, want the stored token", got)
+	}
+}
+
+// In the daemon, a config with no [webdetector] (a broken overlay on a hot
+// reload keeps the old config running) still reports the token it runs.
+func TestReadChallengeTokenProbeRunningTokenWithoutSection(t *testing.T) {
+	t.Setenv("CHALLENGE_TOKEN", "")
+	t.Cleanup(hostsecrets.SetDirForTest(filepath.Join(t.TempDir(), "secrets")))
+	const tok = "0123456789abcdef0123456789abcdef0123456789abcdef"
+	if _, _, err := hostsecrets.Resolve(hostsecrets.ChallengeToken, tok); err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(t.TempDir(), "detectors.conf")
+	if err := os.WriteFile(conf, []byte("[global]\nENRICH = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadChallengeTokenProbe(conf); got.Token != tok {
+		t.Fatalf("ReadChallengeTokenProbe = %+v, want the running token", got)
 	}
 }

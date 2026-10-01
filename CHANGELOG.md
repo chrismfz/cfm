@@ -50,9 +50,11 @@ back-filled here — see the git/PR history for that period.
   - To set a specific token (e.g. one shared by nodes behind a load balancer),
     write it into its file (root, `0600`) and restart; editing
     `detectors.conf` no longer changes a stored token. A file that holds no
-    usable token (empty, under 32 characters, quoted) is never overwritten:
+    usable token (empty, under 32 characters, quoted, a symlink) is never
+    overwritten (nor a symlink followed):
     CFM logs it and runs another token, unstored, until you fix or delete it.
-  - `cfm health` reports the stored token, i.e. the one the daemon uses.
+  - `cfm health` reports the stored token, i.e. the one the daemon uses, and
+    a token file it cannot use (unreadable, unusable) as missing.
   - The token step (and `cfm_bridge_config.lua`) now also runs when
     `[webdetector]` exists only in a `detectors.d/` overlay. A token set in an
     overlay is copied when the base file has no `[webdetector]` section, as the

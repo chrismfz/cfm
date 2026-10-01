@@ -25,14 +25,10 @@ func useTempDir(t *testing.T) string {
 	old, oldDelay := Dir, readRetryDelay
 	Dir = filepath.Join(t.TempDir(), "secrets")
 	readRetryDelay = time.Millisecond
-	forgetProcess()
-	t.Cleanup(func() { Dir, readRetryDelay = old, oldDelay; forgetProcess() })
+	forget()
+	t.Cleanup(func() { Dir, readRetryDelay = old, oldDelay; forget() })
 	return Dir
 }
-
-// forgetProcess drops the per-process token caches, so each test starts like
-// a fresh daemon.
-func forgetProcess() { forget() }
 
 func stored(key string) string {
 	v, _ := readStore(key)
@@ -83,7 +79,7 @@ func TestResolveGeneratesOnceThenReuses(t *testing.T) {
 	if err != nil || src != SourceGenerated || !hex48.MatchString(tok) {
 		t.Fatalf("first start: Resolve = (%q, %q, %v), want a generated 48-hex token", tok, src, err)
 	}
-	forgetProcess() // a restart
+	forget() // a restart
 	again, src2, err := Resolve(ChallengeToken, "")
 	if err != nil || again != tok || src2 != SourceStore {
 		t.Fatalf("restart: Resolve = (%q, %q, %v), want the same token from the store", again, src2, err)
@@ -149,9 +145,10 @@ func TestResolveNeverOverwritesAnUnusableStore(t *testing.T) {
 	}
 }
 
-// A symlink in place of a token file is never followed (the root daemon would
-// read, and mirror to the edge, whatever it points at): it is replaced by a
-// real file, and its target is left alone.
+// A symlink in place of a token file is never followed (the root daemon
+// would read, and mirror to the edge, whatever it points at), nor replaced
+// (it may be an operator's deliberate setup): it is reported, and a token
+// runs unstored until it is fixed.
 func TestResolveNeverFollowsASymlinkedStore(t *testing.T) {
 	dir := useTempDir(t)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -164,15 +161,40 @@ func TestResolveNeverFollowsASymlinkedStore(t *testing.T) {
 	if err := os.Symlink(target, Path(ChallengeToken)); err != nil {
 		t.Fatal(err)
 	}
-	tok, src, err := Resolve(ChallengeToken, "")
-	if err != nil || tok == strongB || src != SourceGenerated {
-		t.Fatalf("Resolve = (%q, %q, %v), want a generated token, not the link target", tok, src, err)
+	tok, _, err := Resolve(ChallengeToken, "")
+	if !errors.Is(err, ErrStoreUnusable) || tok == strongB || tok == "" {
+		t.Fatalf("Resolve = (%q, %v), want a token other than the link target and ErrStoreUnusable", tok, err)
 	}
-	if fi, err := os.Lstat(Path(ChallengeToken)); err != nil || !fi.Mode().IsRegular() {
-		t.Fatalf("token file is not a regular file after Resolve (err %v)", err)
+	if fi, err := os.Lstat(Path(ChallengeToken)); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the symlink was replaced (err %v)", err)
 	}
 	if b, _ := os.ReadFile(target); string(b) != strongB+"\n" {
 		t.Fatalf("the link target was changed: %q", b)
+	}
+}
+
+// A FIFO in place of a token file must not block the daemon's start (a
+// blocking open waits for a writer forever).
+func TestResolveDoesNotBlockOnAFIFO(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(Path(ChallengeToken), 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := Resolve(ChallengeToken, "")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrStoreUnusable) {
+			t.Fatalf("Resolve err = %v, want ErrStoreUnusable", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Resolve blocked on a FIFO")
 	}
 }
 
@@ -198,7 +220,7 @@ func TestResolveUnreadableStoreKeepsTheRunningToken(t *testing.T) {
 	}
 
 	// A fresh process gets a token, unstored, and keeps it across reloads.
-	forgetProcess()
+	forget()
 	tok, src, err = Resolve(BridgeToken, "")
 	if !errors.Is(err, ErrStoreUnreadable) || src != SourceGenerated || !hex48.MatchString(tok) {
 		t.Fatalf("fresh process: Resolve = (%q, %q, %v), want a generated token and ErrStoreUnreadable", tok, src, err)
@@ -256,7 +278,7 @@ func TestResolveUncreatableStoreKeepsOneGeneratedToken(t *testing.T) {
 	}
 	// The conf token is copied (and run) when nothing else applies, even if
 	// it cannot be stored.
-	forgetProcess()
+	forget()
 	if tok, src, err := Resolve(BridgeToken, strongA); err == nil || tok != strongA || src != SourceConf {
 		t.Fatalf("Resolve = (%q, %q, %v), want the conf token and a store error", tok, src, err)
 	}

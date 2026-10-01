@@ -208,7 +208,7 @@ Audit cleanup folded in: 5 servers put `AUTHFAIL_IP`/`AUTHFAIL_USER`/`DDOS_IP`
 dead lines (someone believed they set softer thresholds for GR; they set
 nothing). Validation should warn on unknown keys in `.leniency` sections.
 
-**Tokens (landed 2026-09-30).** `CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` were
+**Tokens (PR 6, release after 2026.09.30).** `CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` were
 per-host secrets generated INTO the conffile — the last blocker to a
 byte-identical file. `internal/hostsecrets` keeps each in
 `/var/lib/cfm/secrets/` (root, dir `0700`, files `0600`; only the daemon reads

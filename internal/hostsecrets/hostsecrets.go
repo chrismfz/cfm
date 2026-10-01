@@ -78,7 +78,7 @@ const (
 var ErrStoreUnreadable = errors.New("hostsecrets: store unreadable")
 
 // ErrStoreUnusable: the token file exists but holds no usable token (empty,
-// weak, or caught mid-write). It is never overwritten: it may be an operator's
+// weak, caught mid-write, or not a regular file). It is never overwritten: it may be an operator's
 // token being written, or one to fix. The process runs another token, unstored,
 // until the file is fixed or deleted.
 var ErrStoreUnusable = errors.New("hostsecrets: token file holds no usable token")
@@ -93,30 +93,39 @@ func Path(key string) string {
 	return filepath.Join(Dir, strings.ToLower(key))
 }
 
-// readStore returns the stored token for key. ("", nil) means there is none
-// to keep: the file is absent, or a symlink, which is never followed (the
-// root daemon would read whatever it points at) and is replaced by a real
-// file. An error means a file is there but gives no usable token: unreadable
-// (EACCES, EIO, a directory in its place) or ErrStoreUnusable (empty, weak,
-// or mid-write). Resolve never overwrites such a file.
+// readStore returns the stored token for key; ("", nil) when the file is
+// absent. An error means a file is there but gives no usable token, and
+// Resolve never overwrites it: unreadable (EACCES, EIO, a directory in its
+// place), or ErrStoreUnusable: empty, weak, mid-write, or not a regular file.
+// A symlink is never followed (the root daemon would read, and mirror to the
+// edge, whatever it points at) and a FIFO or device never opened blocking.
 func readStore(key string) (string, error) {
-	f, err := os.OpenFile(Path(key), os.O_RDONLY|syscall.O_NOFOLLOW, 0) // #nosec G304 -- fixed daemon-internal path
-	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ELOOP) {
+	f, err := os.OpenFile(Path(key), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) // #nosec G304 -- fixed daemon-internal path
+	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
+	}
+	if errors.Is(err, syscall.ELOOP) {
+		return "", fmt.Errorf("%w: a symlink, never followed", ErrStoreUnusable)
 	}
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
+	if fi, err := f.Stat(); err != nil {
+		return "", err
+	} else if fi.IsDir() {
+		return "", fmt.Errorf("%s is a directory", Path(key))
+	} else if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("%w: not a regular file (%v)", ErrStoreUnusable, fi.Mode().Type())
+	}
 	b, err := io.ReadAll(io.LimitReader(f, 4096))
 	if err != nil {
 		return "", err
 	}
-	v := strings.TrimSpace(string(b))
-	if !Usable(v) {
-		return "", ErrStoreUnusable
+	if v := strings.TrimSpace(string(b)); Usable(v) {
+		return v, nil
 	}
-	return v, nil
+	return "", ErrStoreUnusable
 }
 
 // Usable reports whether v can be a token: strong (sslcollector.IsStrongToken)
@@ -159,8 +168,7 @@ var (
 	running sync.Map
 )
 
-// choose is the one precedence rule, shared by Resolve and Effective: the
-// stored token; else, when the store cannot be used, the value this
+// choose is Resolve's precedence rule: the stored token; else, when the store cannot be used, the value this
 // process already runs; else a usable detectors.conf value (the node's token
 // before the migration); else a token this process generated but could not
 // store. ok is false when none applies.
@@ -182,33 +190,41 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 	return "", "", false
 }
 
-// Effective is the value the daemon runs with for key, for read-only probes
-// (cfm health), by the same precedence as Resolve. In the daemon it is the
-// token this process runs. A probe in its own process cannot see a token the
-// daemon holds only in memory (a store it could not write, or a file deleted
-// to rotate, before the restart). A token file that exists but cannot be used
-// yields "" (reported missing). When nothing usable applies it returns the
-// legacy value as given (possibly weak or empty), so a probe reports
-// weak/missing. It never generates or writes.
+// Effective is the token for key that read-only probes (cfm health) report:
+//
+//   - "" when a token file exists but cannot be used (unreadable, unusable):
+//     the probe flags it, even while the daemon runs another token, because
+//     a restart would not keep that one (the daemon logs why);
+//   - in the daemon, the token this process runs (the last Resolve), even
+//     while its file is deleted for a rotation not yet reloaded;
+//   - else the stored token; else a usable legacy (detectors.conf) value,
+//     the token the daemon would copy; else legacy as given (possibly weak or
+//     empty), so a probe reports weak/missing.
+//
+// A probe in its own process cannot see a token the daemon holds only in
+// memory. It never generates or writes.
 func Effective(key, legacy string) string {
 	cur, readErr := readStore(key)
 	if readErr != nil {
-		// A token file that cannot be used: report no token, so a probe
-		// flags it (the daemon logs why); a restart would not keep the
-		// token running now.
 		return ""
 	}
-	// In the daemon, the token this process runs (the last Resolve) is the
-	// answer, even while its file is being rotated (deleted, not yet
-	// reloaded). A separate probe process has none and resolves the store.
 	if v, found := running.Load(key); found {
 		return v.(string)
 	}
-	legacy = strings.TrimSpace(legacy)
-	if v, _, ok := choose(key, legacy, cur, readErr); ok {
-		return v
+	if cur != "" {
+		return cur
 	}
-	return legacy
+	return strings.TrimSpace(legacy)
+}
+
+// Running returns the token for key this process runs (the last Resolve), if
+// any: in the daemon, what the edge and the challenge server use right now.
+func Running(key string) (string, bool) {
+	v, found := running.Load(key)
+	if !found {
+		return "", false
+	}
+	return v.(string), true
 }
 
 // Resolve returns the secret the daemon runs with for key, and where it came
@@ -223,10 +239,9 @@ func Effective(key, legacy string) string {
 //  4. SourceGenerated: a new random 48-hex value, stored. Until it is stored
 //     it is kept for the rest of this process.
 //
-// A token file that exists but holds no usable token is never overwritten
-// (ErrStoreUnusable): the process runs a token as for an unreadable store.
-// A symlink in its place is never followed and is replaced. The secret is
-// always returned. A non-nil error means it was not stored: the
+// A token file that exists but holds no usable token (ErrStoreUnusable, a
+// symlink or FIFO included) is never overwritten: the process runs a token as
+// for an unreadable store. The secret is always returned. A non-nil error means it was not stored: the
 // daemon keeps running with it and retries on each reload.
 func Resolve(key, legacy string) (secret, source string, err error) {
 	return resolve(key, strings.TrimSpace(legacy), true)
@@ -264,7 +279,7 @@ func resolve(key, legacy string, confKnown bool) (secret, source string, err err
 	case errors.Is(readErr, ErrStoreUnusable):
 		// Never overwrite it: an operator's token being written, or one to
 		// fix. A later reload reads it again.
-		err = fmt.Errorf("%w: %s (fix it, or delete it to have one created)", ErrStoreUnusable, Path(key))
+		err = fmt.Errorf("%s: %w (fix it, or delete it to have one created)", Path(key), readErr)
 	case readErr != nil:
 		// Never overwrite a store that may hold a good secret; a later
 		// reload reads it again.

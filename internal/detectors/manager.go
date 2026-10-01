@@ -839,8 +839,10 @@ func logTokenSource(key, source string, err error) {
 		msg = fmt.Sprintf("[detectors] %s: %v — running it for now; retried each reload", key, err)
 	case errors.Is(err, hostsecrets.ErrStoreUnusable):
 		msg = fmt.Sprintf("[detectors] %s: %v — running a token from %s for now, NOT stored; a restart does not keep it", key, err, source)
+	case errors.Is(err, hostsecrets.ErrStoreUnreadable) && source == hostsecrets.SourceRunning:
+		msg = fmt.Sprintf("[detectors] %s: %v — keeping the running token and leaving the store alone; retried each reload", key, err)
 	case errors.Is(err, hostsecrets.ErrStoreUnreadable):
-		msg = fmt.Sprintf("[detectors] %s: %v — keeping the running token (source=%s) and leaving the store alone; retried each reload", key, err, source)
+		msg = fmt.Sprintf("[detectors] %s: %v — running a token from %s for now, NOT stored; a restart does not keep it; retried each reload", key, err, source)
 	case err != nil && source == hostsecrets.SourceConf:
 		msg = fmt.Sprintf("[detectors] %s from detectors.conf could not be copied into %s: %v — running with it; retried each reload", key, hostsecrets.Path(key), err)
 	case err != nil:

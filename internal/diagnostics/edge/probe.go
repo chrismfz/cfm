@@ -133,6 +133,12 @@ func ReadChallengeTokenProbe(path string) LuaTokenProbe {
 	}
 	mergedWD, ok := merged.ByName["webdetector"]
 	if !ok {
+		// No [webdetector] here: the daemon resolves no token, unless it
+		// kept running one (a broken overlay on a hot reload keeps the old
+		// config), which only an in-daemon probe can see.
+		if tok, runs := hostsecrets.Running(hostsecrets.ChallengeToken); runs {
+			return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
+		}
 		return LuaTokenProbe{}
 	}
 	legacy := detconf.CleanValue(hostsecrets.ConfSection(base, baseErr, mergedWD)["CHALLENGE_TOKEN"])

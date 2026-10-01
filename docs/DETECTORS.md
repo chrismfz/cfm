@@ -154,9 +154,10 @@ still holds the token. To rotate: set the `detectors.conf` line to `placeholder`
 specific token (e.g. one shared by nodes behind a load balancer), write it
 into the file (root, `0600`) and restart. A file holding no usable token is
 never overwritten: it is logged, and another token runs, unstored, until the
-file is fixed or deleted. A symlink in its place is never followed. A store that cannot be
+file is fixed or deleted; a symlink or other special file in its place is
+never followed nor replaced. A store that cannot be
 read is never overwritten; the daemon keeps the token it runs. `cfm health`
-resolves the same way. The store outlives package removal, like the rest of
+reports the stored token, and a token file it cannot use as missing. The store outlives package removal, like the rest of
 `/var/lib/cfm`. Every other `[webdetector]` knob
 (`OPENRESTY_SOCK`, `LOG_PATH`, thresholds, …) is overlay-tunable as normal. Verify the
 merged result with `cfm detectors-srcresolve` and the cfm-admin "Source
