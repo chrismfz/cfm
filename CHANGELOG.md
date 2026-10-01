@@ -53,8 +53,8 @@ back-filled here — see the git/PR history for that period.
     write it into its file (root, `0600`) and restart; editing
     `detectors.conf` no longer changes a stored token. A file that holds no
     usable token (under 32 characters, quoted, a symlink) is never
-    overwritten (nor a symlink followed); an empty one is replaced:
-    CFM logs it and runs another token, unstored, until you fix or delete it.
+    overwritten (nor a symlink followed): CFM logs it and runs another token,
+    unstored, until you fix or delete it. An empty file is replaced.
   - `cfm health` reports the stored token (inside the daemon: the one it
     runs), and a token file that holds no usable token as missing.
   - The token step (and `cfm_bridge_config.lua`) now also runs when

@@ -13,7 +13,8 @@
 // still carries a usable one, so a migrating node keeps its token and no
 // visitor's challenge cookie is invalidated, else generated. After that
 // detectors.conf is never consulted for it again. A file that exists but holds
-// no usable token is never overwritten (ErrStoreUnusable). To rotate, set the
+// no usable token is never overwritten (ErrStoreUnusable), except an empty
+// one, which is treated as absent (errEmpty). To rotate, set the
 // detectors.conf line to placeholder (a token still there would be copied
 // back), delete the file and restart.
 package hostsecrets
@@ -78,10 +79,12 @@ const (
 // then never writes the store: it may hold a good secret.
 var ErrStoreUnreadable = errors.New("hostsecrets: store unreadable")
 
-// ErrStoreUnusable: the token file exists but holds no usable token (empty,
-// weak, caught mid-write, or not a regular file). It is never overwritten: it may be an operator's
-// token being written, or one to fix. The process runs another token, unstored,
-// until the file is fixed or deleted.
+// ErrStoreUnusable: the token file exists but holds no usable token (weak, too
+// long, or not a regular file). It is never overwritten: it may be an
+// operator's token to fix. The process runs another token, unstored, until the
+// file is fixed or deleted. An empty file is the exception (errEmpty, which
+// wraps this error): after a short mid-write retry it is treated as absent
+// and replaced.
 var ErrStoreUnusable = errors.New("hostsecrets: token file holds no usable token")
 
 // ErrStoreChanged: a token file appeared while a new one was being stored
@@ -246,7 +249,8 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 // Effective is the token for key that read-only probes (cfm health) report:
 //
 //   - "" when the token file exists but holds no usable token
-//     (ErrStoreUnusable): the probe flags it, even while the daemon runs
+//     (ErrStoreUnusable; an empty file is treated as absent, as by Resolve):
+//     the probe flags it, even while the daemon runs
 //     another token, because a restart would not keep that one (the daemon
 //     logs why);
 //   - in the daemon, the token this process runs (the last Resolve), also
@@ -317,7 +321,9 @@ func Running(key string) (string, bool) {
 //
 // A token file that exists but holds no usable token (ErrStoreUnusable, a
 // symlink or FIFO included) is never overwritten: the process runs a token as
-// for an unreadable store. The secret is always returned. A non-nil error means it was not stored: the
+// for an unreadable store. An empty file is treated as absent and replaced
+// (with the running token, if any; see errEmpty). The secret is always
+// returned. A non-nil error means it was not stored: the
 // daemon keeps running with it and retries on each reload.
 func Resolve(key, legacy string) (secret, source string, err error) {
 	return resolve(key, strings.TrimSpace(legacy), true)

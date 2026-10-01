@@ -801,7 +801,7 @@ func resolveHostTokens(confWD KV, confKnown bool) (challenge, bridge string) {
 		legacy := kvStrClean(confWD, key, "")
 		if sslcollector.IsStrongToken(legacy) && !hostsecrets.Usable(legacy) {
 			if _, seen := tokenUnusableLogged.LoadOrStore(key, true); !seen {
-				logging.Logf("[detectors] %s in detectors.conf is not used: it carries a quoted ';', '#' or ' //', which the config reader cuts once the quotes are gone", key)
+				logging.Logf("[detectors] %s in detectors.conf is not used: the config reader would change it (a quoted ';', '#' or ' //', or stray quotes), so it cannot run as written", key)
 			}
 		}
 		var tok, src string
