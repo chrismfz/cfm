@@ -382,7 +382,7 @@ func (m *manager) maybeReload(parent context.Context) {
 	// tokens and cfm_bridge_config.lua.
 	if wdKV, ok := secs.ByName["webdetector"]; ok {
 		base, baseErr := ReadSectionsFile(m.opts.CfgPath)
-		chalTok, newTok := resolveHostTokens(tokenConfSection(base, baseErr, wdKV))
+		chalTok, newTok := resolveHostTokens(hostsecrets.ConfSection(base, baseErr, wdKV))
 		// Pin the runtime to the resolved tokens. "" (not even generation
 		// worked) must not leave the config value behind: a "placeholder"
 		// would become the challenge HMAC key; "" selects the ephemeral key,
@@ -787,26 +787,10 @@ func (m *manager) stopAll() {
 	}
 }
 
-// tokenConfSection is where the detectors.conf token value is read, as the
-// old binary read it: the BASE [webdetector] section when the base has one
-// (an overlay token is ignored), the merged section (wdKV) only when the base
-// has none, where the old binary ran an overlay token as-is. nil when the
-// base cannot be read: an overlay token must never stand in for it. The value
-// matters only while the store has no token (the migration).
-func tokenConfSection(base Sections, baseErr error, wdKV KV) KV {
-	if baseErr != nil {
-		return nil
-	}
-	if b, ok := base.ByName["webdetector"]; ok {
-		return b
-	}
-	return wdKV
-}
-
 // resolveHostTokens returns the CHALLENGE_TOKEN and OPENRESTY_TOKEN the
 // daemon runs with ("" only if one cannot even be generated), resolved by
 // hostsecrets (the store; when it has none, the detectors.conf value in
-// confWD, see tokenConfSection, else a new token), and logs where each came
+// confWD, see hostsecrets.ConfSection, else a new token), and logs where each came
 // from.
 func resolveHostTokens(confWD KV) (challenge, bridge string) {
 	resolve := func(key string) string {

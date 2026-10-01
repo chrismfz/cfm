@@ -150,7 +150,8 @@ prompt (nothing left to copy), and on a rollback to an older binary, which
 runs its own token from `detectors.conf` until the next upgrade brings the
 stored one back. To rotate: delete the file, restart. A store that cannot be
 read is never overwritten; the daemon keeps the token it runs. `cfm health`
-resolves the same way. A Debian purge removes the store. Every other `[webdetector]` knob
+resolves the same way. The store outlives package removal, like the rest of
+`/var/lib/cfm`. Every other `[webdetector]` knob
 (`OPENRESTY_SOCK`, `LOG_PATH`, thresholds, …) is overlay-tunable as normal. Verify the
 merged result with `cfm detectors-srcresolve` and the cfm-admin "Source
 resolution" card. `config_drift` computes `missing_sections`/`missing_keys`

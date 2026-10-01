@@ -41,17 +41,17 @@ func sections(t *testing.T, conf string) Sections {
 // merged section only when it has none (the old binary ran an overlay token
 // as-is), nothing when the base cannot be read. So the migration copies the
 // token the node actually ran.
-func TestTokenConfSectionReadsWhereTheOldBinaryDid(t *testing.T) {
+func TestConfSectionReadsWhereTheOldBinaryDid(t *testing.T) {
 	merged := KV{"CHALLENGE_TOKEN": hostTokB}
 	withWD := sections(t, "[webdetector]\nCHALLENGE_TOKEN = "+hostTokA+"\n")
-	if got := kvStrClean(tokenConfSection(withWD, nil, merged), "CHALLENGE_TOKEN", ""); got != hostTokA {
+	if got := kvStrClean(hostsecrets.ConfSection(withWD, nil, merged), "CHALLENGE_TOKEN", ""); got != hostTokA {
 		t.Errorf("base has [webdetector]: token = %q, want the base value", got)
 	}
 	noWD := sections(t, "[global]\nENRICH = 1\n")
-	if got := kvStrClean(tokenConfSection(noWD, nil, merged), "CHALLENGE_TOKEN", ""); got != hostTokB {
+	if got := kvStrClean(hostsecrets.ConfSection(noWD, nil, merged), "CHALLENGE_TOKEN", ""); got != hostTokB {
 		t.Errorf("base has no [webdetector]: token = %q, want the merged (overlay) value", got)
 	}
-	if got := tokenConfSection(Sections{}, errors.New("read failed"), merged); got != nil {
+	if got := hostsecrets.ConfSection(Sections{}, errors.New("read failed"), merged); got != nil {
 		t.Errorf("unreadable base: section = %v, want nil (an overlay token must not stand in)", got)
 	}
 }

@@ -1,12 +1,6 @@
 #!/bin/sh
 set -e
 
-# purge: drop the per-host token store (CHALLENGE_TOKEN / OPENRESTY_TOKEN); a
-# reinstall generates new ones.
-if [ "$1" = "purge" ]; then
-    rm -rf /var/lib/cfm/secrets
-fi
-
 # always reload daemon to drop unit if purged
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true

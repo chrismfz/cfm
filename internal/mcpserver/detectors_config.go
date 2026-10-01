@@ -21,8 +21,9 @@ package mcpserver
 // so it returns detectors.conf VERBATIM — including the two live secrets a
 // node's file may still carry: CHALLENGE_TOKEN (the browser-challenge HMAC
 // signing secret) and OPENRESTY_TOKEN (the edge↔daemon socket-API bearer).
-// They are now generated into /var/lib/cfm/secrets instead (hostsecrets), but
-// a legacy line in detectors.conf still wins there. Returning those over
+// They now live in /var/lib/cfm/secrets (hostsecrets), but a node's file keeps
+// the token it was migrated from (the same live secret) until the line is set
+// back to placeholder, and an older binary writes one there. Returning those over
 // the read-only MCP surface would break the boundary the whole MCP design rests
 // on ("an MCP leak is not an admin leak", MCP.md §3): an MCP-token holder could
 // forge challenge-clearance cookies or call the socket API. So this tool:

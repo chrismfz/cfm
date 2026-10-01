@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"cfm/internal/detconf"
@@ -84,6 +85,23 @@ func Usable(v string) bool {
 	return sslcollector.IsStrongToken(v) && detconf.CleanValue(v) == v
 }
 
+// ConfSection is where the detectors.conf token value is read, as the old
+// binary read it: the BASE [webdetector] section when the base has one (an
+// overlay token is ignored), the merged section only when the base has none
+// (the old binary ran an overlay token as-is), nil when the base cannot be
+// read (an overlay token must never stand in for it). One rule for the daemon
+// (the detectors manager) and the probes. The value matters only while the
+// store has no token: the migration.
+func ConfSection(base detconf.Sections, baseErr error, merged map[string]string) map[string]string {
+	if baseErr != nil {
+		return nil
+	}
+	if b, ok := base.ByName["webdetector"]; ok {
+		return b
+	}
+	return merged
+}
+
 // readRetryDelay spaces the retries of a failed first store read. A var so
 // tests can shorten it.
 var readRetryDelay = 50 * time.Millisecond
@@ -98,11 +116,11 @@ var (
 	running sync.Map
 )
 
-// choose is the one precedence rule, shared by Resolve and Effective so the
-// probes can never drift from the daemon: a usable stored value; else, when
-// the store cannot be read, the value this process already runs; else (store
-// empty) a usable detectors.conf value, else a token this process generated
-// but could not store. ok is false when none applies.
+// choose is the one precedence rule, shared by Resolve and Effective: a
+// usable stored value; else, when the store cannot be read, the value this
+// process already runs; else a usable detectors.conf value (the node's token
+// before the migration); else a token this process generated but could not
+// store. ok is false when none applies.
 func choose(key, legacy, cur string, readErr error) (value, source string, ok bool) {
 	if readErr == nil && Usable(cur) {
 		return cur, SourceStore, true
@@ -111,7 +129,8 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 		if v, found := running.Load(key); found {
 			return v.(string), SourceRunning, true
 		}
-	} else if Usable(legacy) {
+	}
+	if Usable(legacy) {
 		return legacy, SourceConf, true
 	}
 	if v, found := unstored.Load(key); found {
@@ -121,9 +140,11 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 }
 
 // Effective is the value the daemon runs with for key, for read-only probes
-// (cfm health), by the same precedence as Resolve. When nothing usable
-// applies it returns the legacy value as given (possibly weak or empty), so a
-// probe reports weak/missing. It never generates or writes.
+// (cfm health), by the same precedence as Resolve. A probe runs in its own
+// process, so it cannot see a token the daemon holds only in memory (a store
+// it could not write, or a file deleted to rotate, before the restart). When
+// nothing usable applies it returns the legacy value as given (possibly weak
+// or empty), so a probe reports weak/missing. It never generates or writes.
 func Effective(key, legacy string) string {
 	legacy = strings.TrimSpace(legacy)
 	cur, readErr := readStore(key)
@@ -140,7 +161,8 @@ func Effective(key, legacy string) string {
 //  2. SourceRunning: the store cannot be read (ErrStoreUnreadable); the value
 //     this process already runs is kept and the store is left alone.
 //  3. SourceConf: the store is empty and legacy, the detectors.conf value, is
-//     usable: it is copied into the store (the migration).
+//     usable: it is copied into the store (the migration). When the store
+//     cannot be read it is run without being stored.
 //  4. SourceGenerated: a new random 48-hex value, stored. Until it is stored
 //     it is kept for the rest of this process.
 //
@@ -185,15 +207,24 @@ func Resolve(key, legacy string) (secret, source string, err error) {
 	return value, source, err
 }
 
-// tighten re-applies the store's modes (dir 0700, file 0600) when an existing
-// store is only read: one restored from a backup or copied with a default
+// tighten re-applies the store's modes (dir 0700, file 0600) and root
+// ownership when an existing store is only read: one restored from a backup or copied with a default
 // umask would otherwise stay readable to every local user, who could then
 // forge challenge cookies or call the bridge socket API. Best effort: a
 // failure here does not stop the daemon using the secret.
 func tighten(key string) {
 	for path, want := range map[string]os.FileMode{Dir: 0o700, Path(key): 0o600} {
-		if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink == 0 && fi.Mode().Perm()&^want != 0 {
+		fi, err := os.Lstat(path)
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if fi.Mode().Perm()&^want != 0 {
 			_ = os.Chmod(path, want)
+		}
+		// Owned by another user (a restore as uid cfm), the mode alone
+		// protects nothing: the owner can read or replace the secret.
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && os.Geteuid() == 0 && (st.Uid != 0 || st.Gid != 0) {
+			_ = os.Lchown(path, 0, 0)
 		}
 	}
 }
@@ -249,6 +280,12 @@ func write(key, value string) error {
 	}
 	if err := os.Rename(tmp, Path(key)); err != nil {
 		return fmt.Errorf("hostsecrets: rename into %s: %w", Path(key), err)
+	}
+	// Make the new directory entry durable too: a migrated token lost to a
+	// power cut would be regenerated once the conf line is a placeholder.
+	if d, err := os.Open(Dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }

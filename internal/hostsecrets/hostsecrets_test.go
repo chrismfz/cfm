@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -299,6 +300,54 @@ func TestUsable(t *testing.T) {
 	for _, v := range []string{"", "placeholder", strongA[:31], `"` + strongA + `"`, "'" + strongA, strongA + ";x", strongA + "#x", "//" + strongA, strongA + " x"} {
 		if Usable(v) {
 			t.Errorf("Usable(%q) = true, want false", v)
+		}
+	}
+}
+
+// A migrating node whose store cannot be read at start keeps running its
+// detectors.conf token (unstored) instead of a throwaway one.
+func TestResolveUnreadableStoreRunsTheConfToken(t *testing.T) {
+	useTempDir(t)
+	if err := os.MkdirAll(Path(ChallengeToken), 0o700); err != nil { // EISDIR on read
+		t.Fatal(err)
+	}
+	tok, src, err := Resolve(ChallengeToken, strongA)
+	if !errors.Is(err, ErrStoreUnreadable) || tok != strongA || src != SourceConf {
+		t.Fatalf("Resolve = (%q, %q, %v), want the conf token, unstored", tok, src, err)
+	}
+	if fi, err := os.Stat(Path(ChallengeToken)); err != nil || !fi.IsDir() {
+		t.Fatalf("the unreadable store was replaced (err %v)", err)
+	}
+}
+
+// A store restored as another user is taken back to root: the mode alone
+// protects nothing from the file's owner.
+func TestResolveTightensForeignOwnership(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to chown")
+	}
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path(ChallengeToken), []byte(strongA+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{dir, Path(ChallengeToken)} {
+		if err := os.Lchown(p, 65534, 65534); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if tok, _, err := Resolve(ChallengeToken, ""); err != nil || tok != strongA {
+		t.Fatalf("Resolve = (%q, %v), want the stored token", tok, err)
+	}
+	for _, p := range []string{dir, Path(ChallengeToken)} {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st := fi.Sys().(*syscall.Stat_t); st.Uid != 0 || st.Gid != 0 {
+			t.Errorf("%s owner = %d:%d, want 0:0", p, st.Uid, st.Gid)
 		}
 	}
 }
