@@ -152,7 +152,9 @@ the next upgrade goes back to the stored one), and not at all while the line
 still holds the token. To rotate: set the `detectors.conf` line to `placeholder`
 (a token still there would be copied back), delete the file, restart. To set a
 specific token (e.g. one shared by nodes behind a load balancer), write it
-into the file (root, `0600`) and restart. A store that cannot be
+into the file (root, `0600`) and restart. A file holding no usable token is
+never overwritten: it is logged, and another token runs, unstored, until the
+file is fixed or deleted. A symlink in its place is never followed. A store that cannot be
 read is never overwritten; the daemon keeps the token it runs. `cfm health`
 resolves the same way. The store outlives package removal, like the rest of
 `/var/lib/cfm`. Every other `[webdetector]` knob

@@ -837,6 +837,8 @@ func logTokenSource(key, source string, err error) {
 	switch {
 	case errors.Is(err, hostsecrets.ErrConfUnknown):
 		msg = fmt.Sprintf("[detectors] %s: %v — running it for now; retried each reload", key, err)
+	case errors.Is(err, hostsecrets.ErrStoreUnusable):
+		msg = fmt.Sprintf("[detectors] %s: %v — running a token from %s for now, NOT stored; a restart does not keep it", key, err, source)
 	case errors.Is(err, hostsecrets.ErrStoreUnreadable):
 		msg = fmt.Sprintf("[detectors] %s: %v — keeping the running token (source=%s) and leaving the store alone; retried each reload", key, err, source)
 	case err != nil && source == hostsecrets.SourceConf:

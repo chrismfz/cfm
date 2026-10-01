@@ -123,17 +123,18 @@ func ReadChallengeTokenProbe(path string) LuaTokenProbe {
 	// No [webdetector] in the effective config: the daemon resolves no token.
 	// A broken overlay: the daemon starts base-only (or keeps running), so
 	// fall back to the base file as it does.
+	base, baseErr := detconf.ReadSectionsFile(path)
 	merged, err := detconf.ReadLayeredFile(path)
 	if err != nil {
-		if merged, err = detconf.ReadSectionsFile(path); err != nil {
+		if baseErr != nil {
 			return LuaTokenProbe{}
 		}
+		merged = base
 	}
 	mergedWD, ok := merged.ByName["webdetector"]
 	if !ok {
 		return LuaTokenProbe{}
 	}
-	base, baseErr := detconf.ReadSectionsFile(path)
 	legacy := detconf.CleanValue(hostsecrets.ConfSection(base, baseErr, mergedWD)["CHALLENGE_TOKEN"])
 	if clean := hostsecrets.Effective(hostsecrets.ChallengeToken, legacy); clean != "" {
 		return LuaTokenProbe{Token: clean, Present: true, Valid: IsStrongToken(clean)}

@@ -110,9 +110,11 @@ func TestResolveRotationByDeletingTheFile(t *testing.T) {
 	}
 }
 
-// A store file holding no usable token is replaced like an empty store: by
-// the detectors.conf token when usable, else a generated one.
-func TestResolveReplacesAnUnusableStore(t *testing.T) {
+// A token file that exists but holds no usable token (an operator's token
+// being written, a short or quoted one to fix, an empty file mid-write) is
+// never overwritten: the process runs the conf token, or a generated one,
+// unstored, and says so.
+func TestResolveNeverOverwritesAnUnusableStore(t *testing.T) {
 	for name, tc := range map[string]struct{ content, legacy, want string }{
 		"placeholder, conf token": {"placeholder\n", strongA, strongA},
 		"quoted, no conf token":   {`"` + strongA + `"` + "\n", "", ""},
@@ -128,8 +130,11 @@ func TestResolveReplacesAnUnusableStore(t *testing.T) {
 				t.Fatal(err)
 			}
 			tok, _, err := Resolve(ChallengeToken, tc.legacy)
-			if err != nil || stored(ChallengeToken) != tok {
-				t.Fatalf("Resolve = (%q, %v), store %q; want the new token stored", tok, err, stored(ChallengeToken))
+			if !errors.Is(err, ErrStoreUnusable) {
+				t.Fatalf("Resolve err = %v, want ErrStoreUnusable", err)
+			}
+			if b, _ := os.ReadFile(Path(ChallengeToken)); string(b) != tc.content {
+				t.Fatalf("token file rewritten to %q, want it untouched", b)
 			}
 			if tc.want != "" && tok != tc.want {
 				t.Fatalf("token = %q, want %q", tok, tc.want)
@@ -137,7 +142,37 @@ func TestResolveReplacesAnUnusableStore(t *testing.T) {
 			if tc.want == "" && !hex48.MatchString(tok) {
 				t.Fatalf("token = %q, want a generated one", tok)
 			}
+			if got := Effective(ChallengeToken, tc.legacy); got != "" {
+				t.Fatalf("Effective = %q, want \"\" (the probe flags the file)", got)
+			}
 		})
+	}
+}
+
+// A symlink in place of a token file is never followed (the root daemon would
+// read, and mirror to the edge, whatever it points at): it is replaced by a
+// real file, and its target is left alone.
+func TestResolveNeverFollowsASymlinkedStore(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "other-secret")
+	if err := os.WriteFile(target, []byte(strongB+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, Path(ChallengeToken)); err != nil {
+		t.Fatal(err)
+	}
+	tok, src, err := Resolve(ChallengeToken, "")
+	if err != nil || tok == strongB || src != SourceGenerated {
+		t.Fatalf("Resolve = (%q, %q, %v), want a generated token, not the link target", tok, src, err)
+	}
+	if fi, err := os.Lstat(Path(ChallengeToken)); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("token file is not a regular file after Resolve (err %v)", err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != strongB+"\n" {
+		t.Fatalf("the link target was changed: %q", b)
 	}
 }
 

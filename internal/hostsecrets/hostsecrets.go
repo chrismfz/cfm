@@ -20,6 +20,7 @@ package hostsecrets
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -76,6 +77,12 @@ const (
 // then never writes the store: it may hold a good secret.
 var ErrStoreUnreadable = errors.New("hostsecrets: store unreadable")
 
+// ErrStoreUnusable: the token file exists but holds no usable token (empty,
+// weak, or caught mid-write). It is never overwritten: it may be an operator's
+// token being written, or one to fix. The process runs another token, unstored,
+// until the file is fixed or deleted.
+var ErrStoreUnusable = errors.New("hostsecrets: token file holds no usable token")
+
 // ErrConfUnknown: the store is empty and detectors.conf could not be read
 // (ResolveConfUnknown), so a generated token is run but not stored: the
 // node's detectors.conf token may still be copied on a later reload.
@@ -86,18 +93,30 @@ func Path(key string) string {
 	return filepath.Join(Dir, strings.ToLower(key))
 }
 
-// readStore returns the stored value for key, trimmed; "" with a nil error
-// when the file is absent or empty, a non-nil error for anything else (EACCES,
-// EIO, EMFILE, a directory in its place).
+// readStore returns the stored token for key. ("", nil) means there is none
+// to keep: the file is absent, or a symlink, which is never followed (the
+// root daemon would read whatever it points at) and is replaced by a real
+// file. An error means a file is there but gives no usable token: unreadable
+// (EACCES, EIO, a directory in its place) or ErrStoreUnusable (empty, weak,
+// or mid-write). Resolve never overwrites such a file.
 func readStore(key string) (string, error) {
-	b, err := os.ReadFile(Path(key)) // #nosec G304 -- fixed daemon-internal path
-	if errors.Is(err, fs.ErrNotExist) {
+	f, err := os.OpenFile(Path(key), os.O_RDONLY|syscall.O_NOFOLLOW, 0) // #nosec G304 -- fixed daemon-internal path
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ELOOP) {
 		return "", nil
 	}
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(b)), nil
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(io.LimitReader(f, 4096))
+	if err != nil {
+		return "", err
+	}
+	v := strings.TrimSpace(string(b))
+	if !Usable(v) {
+		return "", ErrStoreUnusable
+	}
+	return v, nil
 }
 
 // Usable reports whether v can be a token: strong (sslcollector.IsStrongToken)
@@ -140,13 +159,13 @@ var (
 	running sync.Map
 )
 
-// choose is the one precedence rule, shared by Resolve and Effective: a
-// usable stored value; else, when the store cannot be read, the value this
+// choose is the one precedence rule, shared by Resolve and Effective: the
+// stored token; else, when the store cannot be used, the value this
 // process already runs; else a usable detectors.conf value (the node's token
 // before the migration); else a token this process generated but could not
 // store. ok is false when none applies.
 func choose(key, legacy, cur string, readErr error) (value, source string, ok bool) {
-	if readErr == nil && Usable(cur) {
+	if readErr == nil && cur != "" {
 		return cur, SourceStore, true
 	}
 	if readErr != nil {
@@ -167,10 +186,18 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 // (cfm health), by the same precedence as Resolve. In the daemon it is the
 // token this process runs. A probe in its own process cannot see a token the
 // daemon holds only in memory (a store it could not write, or a file deleted
-// to rotate, before the restart). When
-// nothing usable applies it returns the legacy value as given (possibly weak
-// or empty), so a probe reports weak/missing. It never generates or writes.
+// to rotate, before the restart). A token file that exists but cannot be used
+// yields "" (reported missing). When nothing usable applies it returns the
+// legacy value as given (possibly weak or empty), so a probe reports
+// weak/missing. It never generates or writes.
 func Effective(key, legacy string) string {
+	cur, readErr := readStore(key)
+	if readErr != nil {
+		// A token file that cannot be used: report no token, so a probe
+		// flags it (the daemon logs why); a restart would not keep the
+		// token running now.
+		return ""
+	}
 	// In the daemon, the token this process runs (the last Resolve) is the
 	// answer, even while its file is being rotated (deleted, not yet
 	// reloaded). A separate probe process has none and resolves the store.
@@ -178,7 +205,6 @@ func Effective(key, legacy string) string {
 		return v.(string)
 	}
 	legacy = strings.TrimSpace(legacy)
-	cur, readErr := readStore(key)
 	if v, _, ok := choose(key, legacy, cur, readErr); ok {
 		return v
 	}
@@ -197,8 +223,10 @@ func Effective(key, legacy string) string {
 //  4. SourceGenerated: a new random 48-hex value, stored. Until it is stored
 //     it is kept for the rest of this process.
 //
-// A stored value that is not usable is replaced like an empty store. The
-// secret is always returned. A non-nil error means it was not stored: the
+// A token file that exists but holds no usable token is never overwritten
+// (ErrStoreUnusable): the process runs a token as for an unreadable store.
+// A symlink in its place is never followed and is replaced. The secret is
+// always returned. A non-nil error means it was not stored: the
 // daemon keeps running with it and retries on each reload.
 func Resolve(key, legacy string) (secret, source string, err error) {
 	return resolve(key, strings.TrimSpace(legacy), true)
@@ -233,6 +261,10 @@ func resolve(key, legacy string, confKnown bool) (secret, source string, err err
 		value, source = actual.(string), SourceGenerated
 	}
 	switch {
+	case errors.Is(readErr, ErrStoreUnusable):
+		// Never overwrite it: an operator's token being written, or one to
+		// fix. A later reload reads it again.
+		err = fmt.Errorf("%w: %s (fix it, or delete it to have one created)", ErrStoreUnusable, Path(key))
 	case readErr != nil:
 		// Never overwrite a store that may hold a good secret; a later
 		// reload reads it again.
@@ -257,20 +289,29 @@ func resolve(key, legacy string, confKnown bool) (secret, source string, err err
 // forge challenge cookies or call the bridge socket API. Best effort: a
 // failure here does not stop the daemon using the secret.
 func tighten(key string) {
-	for path, want := range map[string]os.FileMode{Dir: 0o700, Path(key): 0o600} {
-		fi, err := os.Lstat(path)
-		if err != nil || fi.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		if fi.Mode().Perm()&^want != 0 {
-			_ = os.Chmod(path, want)
-		}
-		// Owned by another user (a restore as uid cfm), the mode alone
-		// protects nothing: the owner can read or replace the secret.
-		if st, ok := fi.Sys().(*syscall.Stat_t); ok && os.Geteuid() == 0 && (st.Uid != 0 || st.Gid != 0) {
-			_ = os.Lchown(path, 0, 0)
+	_ = rootOnly(Dir, 0o700)
+	_ = rootOnly(Path(key), 0o600)
+}
+
+// rootOnly takes path (never a symlink) to mode at most and, when running as
+// root, to root ownership: owned by another user (a restore as uid cfm), the
+// mode alone protects nothing, the owner can read or replace the secret.
+func rootOnly(path string, mode os.FileMode) error {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return err
+	}
+	if fi.Mode().Perm()&^mode != 0 {
+		if err := os.Chmod(path, mode); err != nil {
+			return fmt.Errorf("hostsecrets: chmod %s: %w", path, err)
 		}
 	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && os.Geteuid() == 0 && (st.Uid != 0 || st.Gid != 0) {
+		if err := os.Lchown(path, 0, 0); err != nil {
+			return fmt.Errorf("hostsecrets: chown %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // ensureDir creates Dir (0700). A missing parent (/var/lib/cfm) is created
@@ -290,17 +331,7 @@ func ensureDir() error {
 		return fmt.Errorf("hostsecrets: mkdir %s: %w", Dir, err)
 	}
 	// Mkdir leaves an existing dir's mode and owner alone; tighten them.
-	if err := os.Chmod(Dir, 0o700); err != nil {
-		return fmt.Errorf("hostsecrets: chmod %s: %w", Dir, err)
-	}
-	if fi, err := os.Lstat(Dir); err == nil && os.Geteuid() == 0 {
-		if st, ok := fi.Sys().(*syscall.Stat_t); ok && (st.Uid != 0 || st.Gid != 0) {
-			if err := os.Lchown(Dir, 0, 0); err != nil {
-				return fmt.Errorf("hostsecrets: chown %s: %w", Dir, err)
-			}
-		}
-	}
-	return nil
+	return rootOnly(Dir, 0o700)
 }
 
 // bare drops the path from a file-operation error: write's temp file has a
