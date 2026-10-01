@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.01
+
 ### Changed
 - **`cfm.conf` inline comments after a single space are cut, so the value
   before them applies.**
