@@ -849,6 +849,8 @@ func logTokenSource(key, source string, err error) {
 	switch {
 	case errors.Is(err, hostsecrets.ErrConfUnknown):
 		msg = fmt.Sprintf("[detectors] %s: %v — running it for now; retried each reload", key, err)
+	case errors.Is(err, hostsecrets.ErrStoreChanged):
+		msg = fmt.Sprintf("[detectors] %s: %v (%s) — running the %s token until then", key, err, hostsecrets.Path(key), source)
 	case errors.Is(err, hostsecrets.ErrStoreUnusable), errors.Is(err, hostsecrets.ErrStoreUnreadable):
 		msg = fmt.Sprintf("[detectors] %s: %v — the file is left alone; %s; retried each reload", key, err, storeFallback(source))
 	case err != nil && source == hostsecrets.SourceConf:

@@ -84,6 +84,10 @@ var ErrStoreUnreadable = errors.New("hostsecrets: store unreadable")
 // until the file is fixed or deleted.
 var ErrStoreUnusable = errors.New("hostsecrets: token file holds no usable token")
 
+// ErrStoreChanged: a token file appeared while a new one was being stored
+// (an operator writing one); it is left alone and read on the next reload.
+var ErrStoreChanged = errors.New("hostsecrets: a token file appeared meanwhile; left alone, read on the next reload")
+
 // ErrConfUnknown: the store is empty and detectors.conf could not be read
 // (ResolveConfUnknown), so a generated token is run but not stored: the
 // node's detectors.conf token may still be copied on a later reload.
@@ -100,10 +104,30 @@ const maxTokenFile = 4096
 // readStore returns the stored token for key; ("", nil) when the file is
 // absent. An error means a file is there but gives no usable token, and
 // Resolve never overwrites it: unreadable (EACCES, EIO, a directory in its
-// place), or ErrStoreUnusable: empty, weak, mid-write, or not a regular file.
-// A symlink is never followed (the root daemon would read, and mirror to the
-// edge, whatever it points at) and a FIFO or device never opened blocking.
+// place), or ErrStoreUnusable: weak, too long, or not a regular file. An
+// empty file is errEmpty (see there). A symlink is never followed (the root
+// daemon would read, and mirror to the edge, whatever it points at) and a
+// FIFO or device is never opened.
 func readStore(key string) (string, error) {
+	// Type first, without opening: opening a device node can have side
+	// effects, a FIFO blocks, a symlink would be followed.
+	fi, err := os.Lstat(Path(key))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case fi.Mode()&os.ModeSymlink != 0:
+		return "", fmt.Errorf("%w: a symlink, never followed", ErrStoreUnusable)
+	case fi.IsDir():
+		return "", fmt.Errorf("%s is a directory", Path(key))
+	case !fi.Mode().IsRegular():
+		return "", fmt.Errorf("%w: not a regular file (%v)", ErrStoreUnusable, fi.Mode().Type())
+	}
+	// O_NOFOLLOW / O_NONBLOCK and the fstat below cover a swap after the
+	// Lstat.
 	f, err := os.OpenFile(Path(key), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) // #nosec G304 -- fixed daemon-internal path
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
@@ -117,8 +141,6 @@ func readStore(key string) (string, error) {
 	defer func() { _ = f.Close() }()
 	if fi, err := f.Stat(); err != nil {
 		return "", err
-	} else if fi.IsDir() {
-		return "", fmt.Errorf("%s is a directory", Path(key))
 	} else if !fi.Mode().IsRegular() {
 		return "", fmt.Errorf("%w: not a regular file (%v)", ErrStoreUnusable, fi.Mode().Type())
 	}
@@ -139,6 +161,9 @@ func readStore(key string) (string, error) {
 }
 
 // errEmpty is ErrStoreUnusable for an empty file, which may be mid-write.
+// Once a short retry has passed it is treated as absent (and replaced): an
+// empty file can hold no one's token, and keeping it would make every
+// restart run a new unstored token.
 var errEmpty = fmt.Errorf("%w: empty", ErrStoreUnusable)
 
 // Usable reports whether v can be a token: strong (sslcollector.IsStrongToken)
@@ -238,6 +263,9 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 // only in memory.
 func Effective(key, legacy string) string {
 	cur, readErr := readStore(key)
+	if errors.Is(readErr, errEmpty) {
+		readErr = nil // treated as absent, as by Resolve
+	}
 	v, runs := running.Load(key)
 	switch {
 	case errors.Is(readErr, ErrStoreUnusable):
@@ -297,14 +325,19 @@ func ResolveConfUnknown(key string) (secret, source string, err error) {
 
 func resolve(key, legacy string, confKnown bool) (secret, source string, err error) {
 	cur, readErr := readStore(key)
-	if _, runs := running.Load(key); transient(readErr) && !runs {
+	if _, runs := running.Load(key); transient(readErr) && (!runs || errors.Is(readErr, errEmpty)) {
 		// Nothing running yet (daemon start): a transient error (EMFILE,
 		// EIO) would make this process run a throwaway token, then switch to
-		// the stored one on the next reload. Retry briefly first.
+		// the stored one on the next reload. An empty file may be an
+		// operator's token being written. Retry briefly first.
 		for i := 0; i < 3 && transient(readErr); i++ {
 			time.Sleep(readRetryDelay)
 			cur, readErr = readStore(key)
 		}
+	}
+	replace := errors.Is(readErr, errEmpty) // still empty: treat as absent
+	if replace {
+		readErr = nil
 	}
 	value, source, ok := choose(key, legacy, cur, readErr)
 	if !ok {
@@ -327,7 +360,7 @@ func resolve(key, legacy string, confKnown bool) (secret, source string, err err
 	case source == SourceGenerated && !confKnown:
 		err = ErrConfUnknown
 	case source != SourceStore:
-		err = write(key, value)
+		err = write(key, value, replace)
 	default:
 		tighten(key)
 	}
@@ -414,8 +447,11 @@ func bare(err error) error {
 	return err
 }
 
-// write stores value atomically: a temp file in Dir (0600), then rename.
-func write(key, value string) error {
+// write stores value atomically: a temp file in Dir (0600), then into place.
+// Unless replace (an empty file there), the file is created with a hard link,
+// which never replaces one that appeared meanwhile (ErrStoreChanged): an
+// existing token file is never overwritten.
+func write(key, value string, replace bool) error {
 	if err := ensureDir(); err != nil {
 		return err
 	}
@@ -440,7 +476,22 @@ func write(key, value string) error {
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("hostsecrets: close temp: %w", bare(err))
 	}
-	if err := os.Rename(tmp, Path(key)); err != nil {
+	place := os.Rename
+	if !replace {
+		place = func(oldpath, newpath string) error {
+			err := os.Link(oldpath, newpath)
+			if errors.Is(err, fs.ErrExist) {
+				return ErrStoreChanged
+			}
+			if err != nil { // a filesystem without hard links
+				return os.Rename(oldpath, newpath)
+			}
+			return nil
+		}
+	}
+	if err := place(tmp, Path(key)); errors.Is(err, ErrStoreChanged) {
+		return err
+	} else if err != nil {
 		return fmt.Errorf("hostsecrets: rename into %s: %w", Path(key), bare(err))
 	}
 	// Make the new directory entry durable too: a migrated token lost to a

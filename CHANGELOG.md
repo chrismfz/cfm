@@ -37,7 +37,9 @@ back-filled here — see the git/PR history for that period.
     section is last, and an empty line makes it overwrite the line after it.
   - **When the token still rotates, by design:**
     - once on a Debian upgrade where you take the package's `detectors.conf`
-      at the prompt (the new daemon then finds no token to copy);
+      at the prompt: the old daemon, still running until `postinst` restarts
+      it, may write a new token into the fresh file, which the new daemon then
+      copies (set the line back to `placeholder` afterwards);
     - on a rollback to an older version, if its `detectors.conf` line is at
       `placeholder`: the older binary generates its own token there, and the
       next upgrade goes back to the stored one (two rotations). While the line
@@ -50,8 +52,8 @@ back-filled here — see the git/PR history for that period.
   - To set a specific token (e.g. one shared by nodes behind a load balancer),
     write it into its file (root, `0600`) and restart; editing
     `detectors.conf` no longer changes a stored token. A file that holds no
-    usable token (empty, under 32 characters, quoted, a symlink) is never
-    overwritten (nor a symlink followed):
+    usable token (under 32 characters, quoted, a symlink) is never
+    overwritten (nor a symlink followed); an empty one is replaced:
     CFM logs it and runs another token, unstored, until you fix or delete it.
   - `cfm health` reports the stored token, i.e. the one the daemon uses, and
     a token file it cannot use (unreadable, unusable) as missing.

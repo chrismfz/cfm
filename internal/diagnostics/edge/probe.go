@@ -123,6 +123,14 @@ func ReadChallengeTokenProbe(path string) LuaTokenProbe {
 			return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
 		}
 	}
+	// In the daemon: the token it runs (no config parse), unless its file
+	// holds no usable token (Effective then reports none, to flag it).
+	if _, runs := hostsecrets.Running(hostsecrets.ChallengeToken); runs {
+		if tok := hostsecrets.Effective(hostsecrets.ChallengeToken, ""); tok != "" {
+			return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
+		}
+		return LuaTokenProbe{}
+	}
 	// The daemon runs the stored token (hostsecrets); only while the store
 	// has none does it take the detectors.conf one, from the section
 	// hostsecrets.ConfSection picks. Probe the same, with the same cleaner.

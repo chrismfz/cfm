@@ -106,16 +106,14 @@ func TestResolveRotationByDeletingTheFile(t *testing.T) {
 	}
 }
 
-// A token file that exists but holds no usable token (an operator's token
-// being written, a short or quoted one to fix, an empty file mid-write) is
-// never overwritten: the process runs the conf token, or a generated one,
+// A token file that exists but holds no usable token (a short or quoted one
+// to fix) is never overwritten: the process runs the conf token, or a generated one,
 // unstored, and says so.
 func TestResolveNeverOverwritesAnUnusableStore(t *testing.T) {
 	for name, tc := range map[string]struct{ content, legacy, want string }{
 		"placeholder, conf token": {"placeholder\n", strongA, strongA},
 		"quoted, no conf token":   {`"` + strongA + `"` + "\n", "", ""},
 		"short, conf placeholder": {"short\n", "placeholder", ""},
-		"empty file, conf token":  {"", strongB, strongB},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := useTempDir(t)
@@ -489,8 +487,8 @@ func TestWriteErrorIsStableAcrossReloads(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(Path(ChallengeToken), "x"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	e1 := write(ChallengeToken, strongA)
-	e2 := write(ChallengeToken, strongA)
+	e1 := write(ChallengeToken, strongA, true)
+	e2 := write(ChallengeToken, strongA, true)
 	if e1 == nil || e2 == nil || e1.Error() != e2.Error() || strings.Contains(e1.Error(), ".tmp-") {
 		t.Fatalf("write errors = %v / %v, want the same message without the temp file name", e1, e2)
 	}
@@ -518,5 +516,65 @@ func TestWriteTakesAForeignStoreDirBackToRoot(t *testing.T) {
 	}
 	if st := fi.Sys().(*syscall.Stat_t); st.Uid != 0 || st.Gid != 0 {
 		t.Fatalf("store dir owner = %d:%d, want 0:0", st.Uid, st.Gid)
+	}
+}
+
+// An empty token file (a truncated restore, a ">" redirect) holds no one's
+// token once the mid-write retry has passed: it is treated as absent and
+// replaced, so restarts do not each run a new unstored token.
+func TestResolveReplacesAnEmptyFile(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path(ChallengeToken), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := Effective(ChallengeToken, strongB); got != strongB {
+		t.Fatalf("Effective = %q, want the conf token that would be copied", got)
+	}
+	tok, src, err := Resolve(ChallengeToken, strongB)
+	if err != nil || tok != strongB || src != SourceConf || stored(ChallengeToken) != strongB {
+		t.Fatalf("Resolve = (%q, %q, %v), store %q; want the conf token stored", tok, src, err, stored(ChallengeToken))
+	}
+}
+
+// Creating the token file never replaces one that appeared meanwhile (an
+// operator writing a shared token between the read and the write).
+func TestWriteNeverReplacesAFileThatAppeared(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path(ChallengeToken), []byte(strongB+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := write(ChallengeToken, strongA, false); !errors.Is(err, ErrStoreChanged) {
+		t.Fatalf("write err = %v, want ErrStoreChanged", err)
+	}
+	if got := stored(ChallengeToken); got != strongB {
+		t.Fatalf("store = %q, want the file that appeared, untouched", got)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, ".*tmp-*")); len(left) > 0 {
+		t.Fatalf("temp file left behind: %v", left)
+	}
+}
+
+// A device node at the token path is never opened (opening one can have side
+// effects): its type is checked first.
+func TestReadStoreNeverOpensADevice(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to mknod")
+	}
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// /dev/null's numbers (1,3): harmless even if it were opened.
+	if err := syscall.Mknod(Path(ChallengeToken), syscall.S_IFCHR|0o600, 1<<8|3); err != nil {
+		t.Skipf("mknod: %v", err)
+	}
+	if _, err := readStore(ChallengeToken); !errors.Is(err, ErrStoreUnusable) {
+		t.Fatalf("readStore err = %v, want ErrStoreUnusable", err)
 	}
 }

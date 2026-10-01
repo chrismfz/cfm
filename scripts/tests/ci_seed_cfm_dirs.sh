@@ -69,10 +69,12 @@ g "$tmp/state.fn" -hoE 'defaultStatePath\("[A-Za-z0-9._-]+"\)' "${GO[@]}"
   LC_ALL=C sort -u >"$tmp/state"
 [ -s "$tmp/state" ] || fail "found no CFM runtime-state paths in the Go sources — refusing to report OK"
 sed 's/$/\t-/' "$tmp/state" >>"$tmp/plan"
-# The per-host token store (internal/hostsecrets): seeded so a test that
-# tightens, rewrites or deletes a live token file shows in the guard.
+# The per-host token store (internal/hostsecrets): seeded with a usable FAKE
+# token at a loose mode, so a stray Resolve against the live path tightens or
+# rewrites it, and the guard sees it (an empty file would be replaced too,
+# but a usable one is what a node has).
 for f in challenge_token openresty_token; do
-  printf '/var/lib/cfm/secrets/%s\t-\n' "$f" >>"$tmp/plan"
+  printf '/var/lib/cfm/secrets/%s\t=token\n' "$f" >>"$tmp/plan"
 done
 
 # ── phase 1: every destination must be absent — nothing is written otherwise ──
@@ -84,12 +86,14 @@ done <"$tmp/plan"
 
 # ── phase 2: write ────────────────────────────────────────────────────────────
 echo "2026-01-01 00:00:00 seeded by ci_seed_cfm_dirs.sh" >"$tmp/logline"
+echo "ci0seed0fake0token0not0a0secret0000000000000000" >"$tmp/token"
 : >"$tmp/empty"
 n=0
 while IFS=$'\t' read -r dst src; do
   case "$src" in
   -) src="$tmp/empty" ;;
   =log) src="$tmp/logline" ;;
+  =token) src="$tmp/token" ;;
   esac
   install -D -m 0644 "$src" "$dst"
   n=$((n + 1))

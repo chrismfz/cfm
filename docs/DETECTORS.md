@@ -146,15 +146,16 @@ place, but appends a MISSING line at the end of the file, where it can land in
 another section and loop the daemon through a reload every few seconds, and
 an EMPTY line makes its regex overwrite the line after it. A token rotates
 once on a Debian upgrade where the package's `detectors.conf` is taken at the
-prompt (nothing left to copy). A rollback to an older binary rotates twice
+prompt (the old daemon, running until `postinst` restarts it, may write a new
+token into the fresh file; the new daemon copies it). A rollback to an older binary rotates twice
 if the line is at `placeholder` (the older binary generates its own there;
 the next upgrade goes back to the stored one), and not at all while the line
 still holds the token. To rotate: set the `detectors.conf` line to `placeholder`
 (a token still there would be copied back), delete the file, restart. To set a
 specific token (e.g. one shared by nodes behind a load balancer), write it
 into the file (root, `0600`) and restart. A file holding no usable token is
-never overwritten: it is logged, and another token runs, unstored, until the
-file is fixed or deleted; a symlink or other special file in its place is
+never overwritten (an empty one is replaced): it is logged, and another token
+runs, unstored, until the file is fixed or deleted; a symlink or other special file in its place is
 never followed nor replaced. A store that cannot be
 read is never overwritten; the daemon keeps the token it runs. `cfm health`
 reports the stored token, and a token file it cannot use as missing. The store outlives package removal, like the rest of
