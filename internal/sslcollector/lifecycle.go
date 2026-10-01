@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/user"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -140,8 +141,10 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 	}
 	// Resolve the token before anything else (the store; when it has none,
 	// the cfm.conf value, else a new one).
+	enabled := cfg.Enabled
 	if cfg.Enabled {
-		legacy := cfg.Token
+		// Trimmed as Resolve trims it, so Report judges the value copied.
+		legacy := strings.TrimSpace(cfg.Token)
 		tok, src, err := hostsecrets.Resolve(hostsecrets.SSLCollectorToken, legacy)
 		if tok == "" {
 			// No token could be generated: keep serving the one this
@@ -158,8 +161,11 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 			}
 		}
 		if tok == "" {
-			// Never serve with the cfm.conf placeholder as the bearer.
+			// Never serve with the cfm.conf placeholder as the bearer: no
+			// server until a later apply resolves a token (ServeSock would
+			// refuse an empty one, and Tick would respawn it forever).
 			cfg.Token = ""
+			enabled = false
 		} else {
 			cfg.Token = tok
 			// Write (or refresh) cfm_token.lua whenever the token is confirmed good.
@@ -183,7 +189,7 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 		}
 	}
 
-	key := fmt.Sprintf("%t|%s|%s|%s|%d", cfg.Enabled, sp, cfg.Token, ttl, max)
+	key := fmt.Sprintf("%t|%s|%s|%s|%d", enabled, sp, cfg.Token, ttl, max)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -193,7 +199,7 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 		return
 	}
 
-	if !cfg.Enabled {
+	if !enabled {
 		if l.cancel != nil {
 			l.cancel()
 			l.cancel = nil

@@ -26,6 +26,8 @@ func TestSSLSockTokenPrefersTheEdgeCopy(t *testing.T) {
 	if _, _, err := hostsecrets.Resolve(hostsecrets.SSLCollectorToken, stored); err != nil {
 		t.Fatal(err)
 	}
+	// The CLI is its own process: no token running there, the file is read.
+	hostsecrets.ForgetRunning(hostsecrets.SSLCollectorToken)
 	if got := sslSockToken(lua, "placeholder"); got != stored {
 		t.Fatalf("no edge copy: got %q, want the stored token", got)
 	}

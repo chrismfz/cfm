@@ -26,7 +26,11 @@ func Report(key, confName, legacy, tok, source string, err error) []string {
 	var out []string
 	if IsStrongToken(legacy) && !UsableFor(key, legacy) {
 		if _, seen := reportUnusable.LoadOrStore(key, true); !seen {
-			out = append(out, fmt.Sprintf("%s in %s is not used: it cannot run as written (too long for a token file, or the config reader would change it: a quoted ';', '#' or ' //', or stray quotes)", key, confName))
+			why := "it is too long for a token file, or the config reader would change it (a quoted ';', '#' or ' //', or stray quotes)"
+			if key == SSLCollectorToken {
+				why = "it is too long for a token file" // the only reason UsableFor has for it
+			}
+			out = append(out, fmt.Sprintf("%s in %s is not used: %s, so it cannot run as written", key, confName, why))
 		}
 	}
 	var msg string
