@@ -651,8 +651,12 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			return nil, fmt.Errorf("config: invalid line %d: %q", lineNo, line)
 		}
 		key := strings.ToUpper(strings.TrimSpace(k))
-		val := strings.TrimSpace(v)
-		val = stripInlineComment(val)
+		raw := strings.TrimSpace(v)
+		val := stripInlineComment(raw)
+		if secretKey(key) && val != legacyStripInlineComment(raw) {
+			// Never the value: it is a secret.
+			log.Printf("config: warning: line %d: %s: an inline comment is cut from its value since 2026-10 (one space before '#' or '//' starts a comment); if that text is part of the secret, quote the value", lineNo, key)
+		}
 		val = trimQuotes(val)
 
 		switch key {
@@ -1408,39 +1412,64 @@ func clamp(v, lo, hi int) int {
 // stripInlineComment cuts an inline comment: a '#' or "//" after a space, a
 // tab or a closing quote ("value # note", "value // note", `"1"# on`). One
 // that follows anything else ("a#b", "http://x", a leading "#abc") is part of
-// the value, and so is one inside quotes: a double quote anywhere (JSON, a
-// quoted list item), a single quote only at the start (an apostrophe in a
-// value opens none). There is no escape character: the value is used as
-// written, quotes included, apart from one surrounding pair (trimQuotes).
+// the value, and so is one inside quotes (`"a # b"`, JSON, a quoted list
+// item). A quote opens only at the start of the value or after whitespace or
+// one of ",:[{(", and closes only before the end, whitespace, a comment or one
+// of ",:]})"; inside double quotes a backslash-quote does not close. So a
+// stray quote (`12"`, an apostrophe in "don't") opens or closes nothing.
 //
-// When a quote is left open, the quotes cannot be trusted, and the rule
-// before 2026-10 applies: a comment is cut only with two whitespace
-// characters in front (" #" after a space or tab). So a value never keeps
+// When a quote is left open the quotes cannot be trusted, and the rule before
+// 2026-10 applies (legacyStripInlineComment), so such a value never keeps
 // more comment text than it did then.
 func stripInlineComment(s string) string {
+	isComment := func(i int) bool {
+		return s[i] == '#' || (s[i] == '/' && i+1 < len(s) && s[i+1] == '/')
+	}
 	var quote byte
 	closed := -1 // index just past the last closing quote
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
 		case quote != 0:
-			if c == quote {
+			if c == quote && !(quote == '"' && s[i-1] == '\\') &&
+				(i+1 == len(s) || strings.IndexByte(" \t,:]})#/", s[i+1]) >= 0) {
 				quote, closed = 0, i+1
 			}
-		case c == '"' || (c == '\'' && i == 0):
+		case (c == '"' || c == '\'') && (i == 0 || strings.IndexByte(" \t,:[{(", s[i-1]) >= 0):
 			quote = c
-		case (c == '#' || strings.HasPrefix(s[i:], "//")) && i > 0 && (s[i-1] == ' ' || s[i-1] == '\t' || i == closed):
+		case isComment(i) && i > 0 && (s[i-1] == ' ' || s[i-1] == '\t' || i == closed):
 			return strings.TrimSpace(s[:i])
 		}
 	}
 	if quote != 0 {
-		for i := 2; i < len(s); i++ {
-			if (s[i] == '#' || strings.HasPrefix(s[i:], "//")) && s[i-1] == ' ' && (s[i-2] == ' ' || s[i-2] == '\t') {
-				return strings.TrimSpace(s[:i])
-			}
+		return legacyStripInlineComment(s)
+	}
+	return strings.TrimSpace(s)
+}
+
+// legacyStripInlineComment is the rule before 2026-10: a '#' or "//" is a
+// comment only after a space that itself follows a space or tab. Kept for a
+// value with a quote left open, and to tell which values the new rule reads
+// differently (ParseCFMConf warns for a secret).
+func legacyStripInlineComment(s string) string {
+	for i := 2; i < len(s); i++ {
+		if (s[i] == '#' || (s[i] == '/' && i+1 < len(s) && s[i+1] == '/')) &&
+			s[i-1] == ' ' && (s[i-2] == ' ' || s[i-2] == '\t') {
+			return strings.TrimSpace(s[:i])
 		}
 	}
 	return strings.TrimSpace(s)
+}
+
+// secretKey reports whether a cfm.conf key holds a credential, whose value
+// must never change silently.
+func secretKey(key string) bool {
+	for _, w := range []string{"TOKEN", "KEY", "SECRET", "PASS"} {
+		if strings.Contains(key, w) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *SystemTweaksConfig) SetDefaults() {

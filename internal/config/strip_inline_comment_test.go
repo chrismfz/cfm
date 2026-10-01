@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,16 +33,19 @@ func TestStripInlineComment(t *testing.T) {
 		`a#b`:                `a#b`,
 		`a//b`:               `a//b`,
 		// Inside quotes.
-		`"a # b" # note`:        `"a # b"`,
-		`'a // b'`:              `'a // b'`,
-		`"" # e.g. "alice,bob"`: `""`,
-		`{"a": "x #y"} # note`:  `{"a": "x #y"}`,
-		`"a", "b # c" # note`:   `"a", "b # c"`,
-		// No escapes, and an apostrophe opens no quote.
-		`"C:\dir\"  # note`:    `"C:\dir\"`,
+		`"a # b" # note`:         `"a # b"`,
+		`'a // b'`:               `'a // b'`,
+		`"" # e.g. "alice,bob"`:  `""`,
+		`{"a": "x #y"} # note`:   `{"a": "x #y"}`,
+		`"a", "b # c" # note`:    `"a", "b # c"`,
+		`x, 'y # z'`:             `x, 'y # z'`,
+		`{"a": "x\" #y"} # note`: `{"a": "x\" #y"}`,
+		// A stray quote opens or closes nothing.
 		`rock 'n roll  # note`: `rock 'n roll`,
 		`don't # note`:         `don't`,
-		`x, 'y # z'`:           `x, 'y`,
+		`12"  # was 15"`:       `12"`,
+		`'abc  # don't`:        `'abc`,
+		`"C:\dir\"  # note`:    `"C:\dir\"`,
 		// A quote left open: the old two-whitespace rule, no less.
 		`"unclosed # note`:  `"unclosed # note`,
 		`"unclosed  # note`: `"unclosed`,
@@ -117,5 +121,32 @@ func TestStockConfigsValuesCarryNoComment(t *testing.T) {
 			}
 		}
 		_ = f.Close()
+	}
+}
+
+// A credential the new rule reads differently is logged, without its value;
+// one it reads the same, or a non-secret key, is not.
+func TestParseCFMConfWarnsWhenASecretReadsDifferently(t *testing.T) {
+	var buf strings.Builder
+	old := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(old)
+
+	if _, err := ParseCFMConf(strings.NewReader(strings.Join([]string{
+		`AUTH_TOKEN = s3cr3tvalue #tail`,
+		`MCP_TOKEN = "quoted # kept"`,
+		`MAXMIND_LICENSE_KEY = abc  # two spaces: cut before too`,
+		`SYS_CT_MIN = "262144" # minimum entries`,
+	}, "\n"))); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "AUTH_TOKEN") {
+		t.Errorf("no warning for AUTH_TOKEN; log: %q", got)
+	}
+	for _, s := range []string{"s3cr3tvalue", "MCP_TOKEN", "MAXMIND_LICENSE_KEY", "SYS_CT_MIN"} {
+		if strings.Contains(got, s) {
+			t.Errorf("log mentions %q: %q", s, got)
+		}
 	}
 }
