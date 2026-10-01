@@ -134,7 +134,7 @@ in `/var/lib/cfm/secrets/` (`challenge_token`, `openresty_token`; root,
 `0600`), and that file is the one in use. They are never written into
 `detectors.conf`, so the conffile can stay identical to the packaged one and
 upgrades update it instead of leaving a `.rpmnew`. A token file is created
-only when missing (or holding no usable token): copied from `detectors.conf`
+only when missing: copied from `detectors.conf`
 when that still carries a usable token, so a migrating node keeps its token,
 else generated. The `detectors.conf` value is read where the old binary read
 it: the **base** `[webdetector]` when the base has one (an overlay token is

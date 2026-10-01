@@ -9,10 +9,11 @@
 // under Dir.
 //
 // The store is the source of truth. A token is created only when its file is
-// missing (or holds no usable token): copied from detectors.conf when that
+// missing: copied from detectors.conf when that
 // still carries a usable one, so a migrating node keeps its token and no
 // visitor's challenge cookie is invalidated, else generated. After that
-// detectors.conf is never consulted for it again. To rotate, set the
+// detectors.conf is never consulted for it again. A file that exists but holds
+// no usable token is never overwritten (ErrStoreUnusable). To rotate, set the
 // detectors.conf line to placeholder (a token still there would be copied
 // back), delete the file and restart.
 package hostsecrets
@@ -93,6 +94,9 @@ func Path(key string) string {
 	return filepath.Join(Dir, strings.ToLower(key))
 }
 
+// maxTokenFile caps a token file: a longer one is unusable, never truncated.
+const maxTokenFile = 4096
+
 // readStore returns the stored token for key; ("", nil) when the file is
 // absent. An error means a file is there but gives no usable token, and
 // Resolve never overwrites it: unreadable (EACCES, EIO, a directory in its
@@ -118,15 +122,24 @@ func readStore(key string) (string, error) {
 	} else if !fi.Mode().IsRegular() {
 		return "", fmt.Errorf("%w: not a regular file (%v)", ErrStoreUnusable, fi.Mode().Type())
 	}
-	b, err := io.ReadAll(io.LimitReader(f, 4096))
+	b, err := io.ReadAll(io.LimitReader(f, maxTokenFile+1))
 	if err != nil {
 		return "", err
+	}
+	if len(b) > maxTokenFile {
+		return "", fmt.Errorf("%w: over %d bytes", ErrStoreUnusable, maxTokenFile)
 	}
 	if v := strings.TrimSpace(string(b)); Usable(v) {
 		return v, nil
 	}
+	if strings.TrimSpace(string(b)) == "" {
+		return "", errEmpty
+	}
 	return "", ErrStoreUnusable
 }
+
+// errEmpty is ErrStoreUnusable for an empty file, which may be mid-write.
+var errEmpty = fmt.Errorf("%w: empty", ErrStoreUnusable)
 
 // Usable reports whether v can be a token: strong (sslcollector.IsStrongToken)
 // and unchanged by the detectors.conf value cleaner (detconf.CleanValue). The
@@ -152,6 +165,21 @@ func ConfSection(base detconf.Sections, baseErr error, merged map[string]string)
 		return b
 	}
 	return merged
+}
+
+// transient reports whether a store read error may clear by itself (fd
+// exhaustion, I/O, an empty file caught mid-write), so a retry is worth it. A
+// weak or special file, or a permission error, does not.
+func transient(err error) bool {
+	if errors.Is(err, errEmpty) { // an empty file may be mid-write
+		return true
+	}
+	for _, e := range []error{syscall.EMFILE, syscall.ENFILE, syscall.EIO, syscall.EINTR, syscall.EAGAIN} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
 }
 
 // readRetryDelay spaces the retries of a failed first store read. A var so
@@ -192,23 +220,35 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 
 // Effective is the token for key that read-only probes (cfm health) report:
 //
-//   - "" when a token file exists but cannot be used (unreadable, unusable):
-//     the probe flags it, even while the daemon runs another token, because
-//     a restart would not keep that one (the daemon logs why);
-//   - in the daemon, the token this process runs (the last Resolve), even
-//     while its file is deleted for a rotation not yet reloaded;
+//   - "" when the token file exists but holds no usable token
+//     (ErrStoreUnusable): the probe flags it, even while the daemon runs
+//     another token, because a restart would not keep that one (the daemon
+//     logs why);
+//   - in the daemon, the token this process runs (the last Resolve), also
+//     while its file is unreadable (EMFILE, EIO: the daemon logs it) or
+//     deleted for a rotation not yet reloaded; "" for an unreadable file
+//     when no token runs here (a separate probe process);
 //   - else the stored token; else a usable legacy (detectors.conf) value,
 //     the token the daemon would copy; else legacy as given (possibly weak or
 //     empty), so a probe reports weak/missing.
 //
-// A probe in its own process cannot see a token the daemon holds only in
-// memory. It never generates or writes.
+// It is written out rather than routed through choose (Resolve's rule): it
+// never generates, never writes, and reports an unusable file instead of
+// masking it. A probe in its own process cannot see a token the daemon holds
+// only in memory.
 func Effective(key, legacy string) string {
 	cur, readErr := readStore(key)
-	if readErr != nil {
+	v, runs := running.Load(key)
+	switch {
+	case errors.Is(readErr, ErrStoreUnusable):
 		return ""
-	}
-	if v, found := running.Load(key); found {
+	case readErr != nil && runs:
+		// Unreadable (possibly transient: EMFILE, EIO): the daemon keeps
+		// the token it runs, and logs the error.
+		return v.(string)
+	case readErr != nil:
+		return ""
+	case runs:
 		return v.(string)
 	}
 	if cur != "" {
@@ -257,11 +297,11 @@ func ResolveConfUnknown(key string) (secret, source string, err error) {
 
 func resolve(key, legacy string, confKnown bool) (secret, source string, err error) {
 	cur, readErr := readStore(key)
-	if _, runs := running.Load(key); readErr != nil && !runs {
+	if _, runs := running.Load(key); transient(readErr) && !runs {
 		// Nothing running yet (daemon start): a transient error (EMFILE,
 		// EIO) would make this process run a throwaway token, then switch to
 		// the stored one on the next reload. Retry briefly first.
-		for i := 0; i < 3 && readErr != nil; i++ {
+		for i := 0; i < 3 && transient(readErr); i++ {
 			time.Sleep(readRetryDelay)
 			cur, readErr = readStore(key)
 		}
@@ -304,15 +344,21 @@ func resolve(key, legacy string, confKnown bool) (secret, source string, err err
 // forge challenge cookies or call the bridge socket API. Best effort: a
 // failure here does not stop the daemon using the secret.
 func tighten(key string) {
-	_ = rootOnly(Dir, 0o700)
-	_ = rootOnly(Path(key), 0o600)
+	_ = rootOnly(Dir, 0o700, true)
+	_ = rootOnly(Path(key), 0o600, false)
 }
 
-// rootOnly takes path (never a symlink) to mode at most and, when running as
-// root, to root ownership: owned by another user (a restore as uid cfm), the
-// mode alone protects nothing, the owner can read or replace the secret.
-func rootOnly(path string, mode os.FileMode) error {
-	fi, err := os.Lstat(path)
+// rootOnly takes path to mode at most and, when running as root, to root
+// ownership: owned by another user (a restore as uid cfm), the mode alone
+// protects nothing, the owner can read or replace the secret. follow: the
+// store dir may be a symlink (moved to another volume), and it is its target
+// that holds the tokens; a token file is never a symlink worth following.
+func rootOnly(path string, mode os.FileMode, follow bool) error {
+	stat := os.Lstat
+	if follow {
+		stat = os.Stat
+	}
+	fi, err := stat(path)
 	if err != nil || fi.Mode()&os.ModeSymlink != 0 {
 		return err
 	}
@@ -321,8 +367,12 @@ func rootOnly(path string, mode os.FileMode) error {
 			return fmt.Errorf("hostsecrets: chmod %s: %w", path, err)
 		}
 	}
+	chown := os.Lchown
+	if follow {
+		chown = os.Chown
+	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok && os.Geteuid() == 0 && (st.Uid != 0 || st.Gid != 0) {
-		if err := os.Lchown(path, 0, 0); err != nil {
+		if err := chown(path, 0, 0); err != nil {
 			return fmt.Errorf("hostsecrets: chown %s: %w", path, err)
 		}
 	}
@@ -346,7 +396,7 @@ func ensureDir() error {
 		return fmt.Errorf("hostsecrets: mkdir %s: %w", Dir, err)
 	}
 	// Mkdir leaves an existing dir's mode and owner alone; tighten them.
-	return rootOnly(Dir, 0o700)
+	return rootOnly(Dir, 0o700, true)
 }
 
 // bare drops the path from a file-operation error: write's temp file has a

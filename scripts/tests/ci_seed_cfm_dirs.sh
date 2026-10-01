@@ -69,6 +69,11 @@ g "$tmp/state.fn" -hoE 'defaultStatePath\("[A-Za-z0-9._-]+"\)' "${GO[@]}"
   LC_ALL=C sort -u >"$tmp/state"
 [ -s "$tmp/state" ] || fail "found no CFM runtime-state paths in the Go sources — refusing to report OK"
 sed 's/$/\t-/' "$tmp/state" >>"$tmp/plan"
+# The per-host token store (internal/hostsecrets): seeded so a test that
+# tightens, rewrites or deletes a live token file shows in the guard.
+for f in challenge_token openresty_token; do
+  printf '/var/lib/cfm/secrets/%s\t-\n' "$f" >>"$tmp/plan"
+done
 
 # ── phase 1: every destination must be absent — nothing is written otherwise ──
 dups=$(cut -f1 "$tmp/plan" | LC_ALL=C sort | uniq -d)

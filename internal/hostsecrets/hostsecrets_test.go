@@ -218,6 +218,9 @@ func TestResolveUnreadableStoreKeepsTheRunningToken(t *testing.T) {
 	if fi, err := os.Stat(Path(BridgeToken)); err != nil || !fi.IsDir() {
 		t.Fatalf("the unreadable store was replaced (err %v)", err)
 	}
+	if got := Effective(BridgeToken, strongB); got != strongA {
+		t.Fatalf("Effective = %q, want the running strongA (the daemon logs the read error)", got)
+	}
 
 	// A fresh process gets a token, unstored, and keeps it across reloads.
 	forget()
@@ -230,29 +233,61 @@ func TestResolveUnreadableStoreKeepsTheRunningToken(t *testing.T) {
 	}
 }
 
-// A store read failing transiently at daemon start is retried, so the process
-// does not run a throwaway token and switch to the stored one on next reload.
+// A token file caught mid-write at daemon start (still empty) is retried, so
+// the process does not run a throwaway token; the operator's token is then
+// read, and the file is never overwritten.
 func TestResolveRetriesATransientFirstReadError(t *testing.T) {
 	dir := useTempDir(t)
 	readRetryDelay = 100 * time.Millisecond
-	if err := os.MkdirAll(Path(ChallengeToken), 0o700); err != nil { // EISDIR on read
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(Path(ChallengeToken), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		if err := os.Remove(Path(ChallengeToken)); err != nil {
-			done <- err
-			return
+		_, werr := f.WriteString(strongA + "\n")
+		if cerr := f.Close(); werr == nil {
+			werr = cerr
 		}
-		done <- os.WriteFile(filepath.Join(dir, "challenge_token"), []byte(strongA+"\n"), 0o600)
+		done <- werr
 	}()
 	tok, src, err := Resolve(ChallengeToken, "")
 	if gerr := <-done; gerr != nil {
 		t.Fatal(gerr)
 	}
 	if err != nil || tok != strongA || src != SourceStore {
-		t.Fatalf("Resolve = (%q, %q, %v), want the stored token after the retry", tok, src, err)
+		t.Fatalf("Resolve = (%q, %q, %v), want the written token after the retry", tok, src, err)
+	}
+}
+
+// A permanent error (a weak value, a directory) is not retried: no sleep at
+// every daemon start for nothing.
+func TestTransient(t *testing.T) {
+	for err, want := range map[error]bool{
+		errEmpty: true, syscall.EMFILE: true, syscall.EIO: true,
+		ErrStoreUnusable: false, syscall.EACCES: false, nil: false,
+	} {
+		if got := transient(err); got != want {
+			t.Errorf("transient(%v) = %v, want %v", err, got, want)
+		}
+	}
+}
+
+// A token file over the size cap is unusable, never truncated into a token.
+func TestReadStoreRejectsAnOversizedFile(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path(ChallengeToken), []byte(strings.Repeat("a", maxTokenFile+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readStore(ChallengeToken); !errors.Is(err, ErrStoreUnusable) {
+		t.Fatalf("readStore err = %v, want ErrStoreUnusable", err)
 	}
 }
 

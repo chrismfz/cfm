@@ -114,8 +114,14 @@ func ReadDetectorSectionKV(path, section string) map[string]string {
 }
 
 func ReadChallengeTokenProbe(path string) LuaTokenProbe {
-	if tok := strings.TrimSpace(os.Getenv("CHALLENGE_TOKEN")); tok != "" {
-		return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
+	// CFM_CHALLENGE_SECRET in the environment beats the resolved token in
+	// the challenge server (secretKey), so it does here. CHALLENGE_TOKEN in
+	// the environment is this probe's override seam (tests); the daemon
+	// never reads it.
+	for _, env := range []string{"CFM_CHALLENGE_SECRET", "CHALLENGE_TOKEN"} {
+		if tok := strings.TrimSpace(os.Getenv(env)); tok != "" {
+			return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
+		}
 	}
 	// The daemon runs the stored token (hostsecrets); only while the store
 	// has none does it take the detectors.conf one, from the section

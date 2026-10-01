@@ -825,7 +825,19 @@ func resolveHostTokens(confWD KV, confKnown bool) (challenge, bridge string) {
 // rotation, and the hint is the same every time.
 var tokenConfIgnoredLogged, tokenFromConfLogged sync.Map
 
-// tokenErrLogged holds, per token, the last error line logged, so a store
+// storeFallback says what the daemon runs while the token file cannot be used.
+func storeFallback(source string) string {
+	switch source {
+	case hostsecrets.SourceRunning:
+		return "keeping the running token"
+	case hostsecrets.SourceConf:
+		return "running the detectors.conf token, not stored"
+	default:
+		return "running a generated token, not stored: a restart generates another"
+	}
+}
+
+// tokenErrLogged holds, per token, the last error logged, so a store
 // that stays unwritable logs it once, not on every reload. Cleared on success.
 var tokenErrLogged sync.Map
 
@@ -837,20 +849,18 @@ func logTokenSource(key, source string, err error) {
 	switch {
 	case errors.Is(err, hostsecrets.ErrConfUnknown):
 		msg = fmt.Sprintf("[detectors] %s: %v — running it for now; retried each reload", key, err)
-	case errors.Is(err, hostsecrets.ErrStoreUnusable):
-		msg = fmt.Sprintf("[detectors] %s: %v — running a token from %s for now, NOT stored; a restart does not keep it", key, err, source)
-	case errors.Is(err, hostsecrets.ErrStoreUnreadable) && source == hostsecrets.SourceRunning:
-		msg = fmt.Sprintf("[detectors] %s: %v — keeping the running token and leaving the store alone; retried each reload", key, err)
-	case errors.Is(err, hostsecrets.ErrStoreUnreadable):
-		msg = fmt.Sprintf("[detectors] %s: %v — running a token from %s for now, NOT stored; a restart does not keep it; retried each reload", key, err, source)
+	case errors.Is(err, hostsecrets.ErrStoreUnusable), errors.Is(err, hostsecrets.ErrStoreUnreadable):
+		msg = fmt.Sprintf("[detectors] %s: %v — the file is left alone; %s; retried each reload", key, err, storeFallback(source))
 	case err != nil && source == hostsecrets.SourceConf:
 		msg = fmt.Sprintf("[detectors] %s from detectors.conf could not be copied into %s: %v — running with it; retried each reload", key, hostsecrets.Path(key), err)
 	case err != nil:
 		msg = fmt.Sprintf("[detectors] %s source=%s NOT stored in %s: %v — kept for this process (retried each reload); a restart generates a new one", key, source, hostsecrets.Path(key), err)
 	}
 	if msg != "" {
-		if prev, ok := tokenErrLogged.Load(key); !ok || prev.(string) != msg {
-			tokenErrLogged.Store(key, msg)
+		// Keyed on the error, not the message: the source shifts between
+		// reloads (generated/conf first, running after) for the same fault.
+		if prev, ok := tokenErrLogged.Load(key); !ok || prev.(string) != err.Error() {
+			tokenErrLogged.Store(key, err.Error())
 			logging.Logf("%s", msg)
 		}
 		return
