@@ -47,6 +47,9 @@ back-filled here — see the git/PR history for that period.
     (`CHALLENGE_COOKIE_LIFE`, 45 min stock) once.
   - To rotate a token: set its `detectors.conf` line to `placeholder` (a
     token still there would be copied back), delete its file, and restart.
+  - To set a specific token (e.g. one shared by nodes behind a load balancer),
+    write it into its file (root, `0600`) and restart; editing
+    `detectors.conf` no longer changes a stored token.
   - `cfm health` reports the stored token, i.e. the one the daemon uses.
   - The token step (and `cfm_bridge_config.lua`) now also runs when
     `[webdetector]` exists only in a `detectors.d/` overlay. A token set in an

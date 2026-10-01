@@ -289,9 +289,16 @@ func ensureDir() error {
 	if err := os.Mkdir(Dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return fmt.Errorf("hostsecrets: mkdir %s: %w", Dir, err)
 	}
-	// Mkdir leaves an existing dir's mode alone; tighten it.
+	// Mkdir leaves an existing dir's mode and owner alone; tighten them.
 	if err := os.Chmod(Dir, 0o700); err != nil {
 		return fmt.Errorf("hostsecrets: chmod %s: %w", Dir, err)
+	}
+	if fi, err := os.Lstat(Dir); err == nil && os.Geteuid() == 0 {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && (st.Uid != 0 || st.Gid != 0) {
+			if err := os.Lchown(Dir, 0, 0); err != nil {
+				return fmt.Errorf("hostsecrets: chown %s: %w", Dir, err)
+			}
+		}
 	}
 	return nil
 }

@@ -50,11 +50,12 @@ func TestResolveEmptyStoreCopiesTheConfToken(t *testing.T) {
 	if got := stored(ChallengeToken); got != strongA {
 		t.Fatalf("store = %q, want the detectors.conf token copied", got)
 	}
-	if fi, err := os.Stat(Path(ChallengeToken)); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("store file mode = %v (err %v), want 0600", fi.Mode().Perm(), err)
-	}
-	if di, err := os.Stat(dir); err != nil || di.Mode().Perm() != 0o700 {
-		t.Fatalf("store dir mode = %v (err %v), want 0700", di.Mode().Perm(), err)
+	for path, want := range map[string]os.FileMode{Path(ChallengeToken): 0o600, dir: 0o700} {
+		if fi, err := os.Stat(path); err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		} else if fi.Mode().Perm() != want {
+			t.Fatalf("%s mode = %v, want %v", path, fi.Mode().Perm(), want)
+		}
 	}
 	// Setting the line back to placeholder keeps the same secret.
 	if tok, src, _ := Resolve(ChallengeToken, "placeholder"); tok != strongA || src != SourceStore {
@@ -263,11 +264,12 @@ func TestResolveTightensALooseExistingStore(t *testing.T) {
 	if tok, src, err := Resolve(ChallengeToken, ""); err != nil || tok != strongA || src != SourceStore {
 		t.Fatalf("Resolve = (%q, %q, %v), want the stored strongA", tok, src, err)
 	}
-	if fi, _ := os.Stat(Path(ChallengeToken)); fi.Mode().Perm() != 0o600 {
-		t.Errorf("store file mode = %v, want 0600", fi.Mode().Perm())
-	}
-	if di, _ := os.Stat(dir); di.Mode().Perm() != 0o700 {
-		t.Errorf("store dir mode = %v, want 0700", di.Mode().Perm())
+	for path, want := range map[string]os.FileMode{Path(ChallengeToken): 0o600, dir: 0o700} {
+		if fi, err := os.Stat(path); err != nil {
+			t.Errorf("stat %s: %v", path, err)
+		} else if fi.Mode().Perm() != want {
+			t.Errorf("%s mode = %v, want %v", path, fi.Mode().Perm(), want)
+		}
 	}
 }
 
@@ -280,8 +282,10 @@ func TestResolveCreatesAMissingParent0701(t *testing.T) {
 	if _, _, err := Resolve(ChallengeToken, ""); err != nil {
 		t.Fatal(err)
 	}
-	if fi, err := os.Stat(parent); err != nil || fi.Mode().Perm() != 0o701 {
-		t.Fatalf("parent mode = %v (err %v), want 0701", fi.Mode().Perm(), err)
+	if fi, err := os.Stat(parent); err != nil {
+		t.Fatalf("stat parent: %v", err)
+	} else if fi.Mode().Perm() != 0o701 {
+		t.Fatalf("parent mode = %v, want 0701", fi.Mode().Perm())
 	}
 }
 
@@ -397,5 +401,30 @@ func TestWriteErrorIsStableAcrossReloads(t *testing.T) {
 	e2 := write(ChallengeToken, strongA)
 	if e1 == nil || e2 == nil || e1.Error() != e2.Error() || strings.Contains(e1.Error(), ".tmp-") {
 		t.Fatalf("write errors = %v / %v, want the same message without the temp file name", e1, e2)
+	}
+}
+
+// The write path takes a store dir owned by another user back to root too,
+// before it puts a new token in it.
+func TestWriteTakesAForeignStoreDirBackToRoot(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to chown")
+	}
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Lchown(dir, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Resolve(ChallengeToken, ""); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := fi.Sys().(*syscall.Stat_t); st.Uid != 0 || st.Gid != 0 {
+		t.Fatalf("store dir owner = %d:%d, want 0:0", st.Uid, st.Gid)
 	}
 }
