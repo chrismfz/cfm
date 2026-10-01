@@ -124,11 +124,13 @@ back-filled here — see the git/PR history for that period.
     In `SYS_CT_MIN = "262144" # minimum entries` the whole string was the
     value; it did not parse, and the built-in default applied with no
     warning. A bool such as `KEY = 1 # on` read as off.
-  - Now a `#` or `//` starts a comment when it follows a space or tab, or
-    starts the value (`KEY = # note` is empty, as `MCP_TOKEN = # set me`
-    should be). One that follows anything else (`http://…`, `a#b`) stays
-    part of the value, and so does one inside quotes (`"a # b"`, a JSON
-    string). Quote a value that really contains ` #` or ` //`.
+  - Now a `#` or `//` starts a comment when it follows a space, a tab or a
+    closing quote (`"1"# on`). A `#` that starts the value is a comment too
+    (`KEY = # note` is empty, as `MCP_TOKEN = # set me` should be); a
+    leading `//` is not, since a base64 key can start with it. One that
+    follows anything else (`http://…`, `a#b`) stays part of the value, and
+    so does one inside quotes (`"a # b"`, a JSON string, a quoted list
+    such as `"a # b, c"`). Quote a value that really contains ` #` or ` //`.
   - The stock `cfm.conf` has two such lines, `SYS_CT_MIN` and `SYS_CT_MAX`.
     Their values equal the defaults, so nothing changes unless you edited
     them; then your value now applies. On the nodes checked, those two are

@@ -1206,6 +1206,9 @@ func parseInt(s string) int {
 	return i
 }
 
+// splitCSV splits a cfm.conf list value. ParseCFMConf has already cut its
+// inline comment; cutting again per item, after trimQuotes, would cut a
+// " #" the operator quoted on purpose.
 func splitCSV(s string) []string {
 	if strings.TrimSpace(s) == "" {
 		return nil
@@ -1213,7 +1216,7 @@ func splitCSV(s string) []string {
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
+		p = trimQuotes(strings.TrimSpace(p))
 		if p != "" {
 			out = append(out, p)
 		}
@@ -1250,7 +1253,7 @@ func parseUint16CSV(s string) []uint16 {
 	parts := strings.Split(s, ",")
 	out := make([]uint16, 0, len(parts))
 	for _, p := range parts {
-		p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
+		p = trimQuotes(strings.TrimSpace(p))
 		if p == "" {
 			continue
 		}
@@ -1271,7 +1274,7 @@ func parseUint32CSV(s string) []uint32 {
 	parts := strings.Split(s, ",")
 	out := make([]uint32, 0, len(parts))
 	for _, p := range parts {
-		p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
+		p = trimQuotes(strings.TrimSpace(p))
 		if p == "" {
 			continue
 		}
@@ -1402,16 +1405,18 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
-// stripInlineComment cuts an inline comment: a '#' or "//" at the start of
-// the (trimmed) value or after a space or tab ("value # note", "value //
-// note", "KEY = # note" is empty). One that follows anything else ("a#b",
-// "http://x") is part of the value, and so is one inside quotes: a double
-// quote anywhere (JSON, a quoted list item; a backslash escapes the next
-// character there), a single quote at the start or after whitespace or ','
-// (so an apostrophe does not open one). Inside a quote left open nothing is
-// cut.
+// stripInlineComment cuts an inline comment: a '#' or "//" after a space or
+// tab, or right after a closed quote ("value # note", "value // note",
+// `"1"# on`), or a '#' starting the (trimmed) value ("KEY = # note" is
+// empty; a leading "//" is not cut, as a base64 key can start with it). One
+// that follows anything else ("a#b", "http://x") is part of the value, and so
+// is one inside quotes: a double quote anywhere (JSON, a quoted list item; a
+// backslash escapes the next character there), a single quote at the start
+// or after whitespace or ',' (so an apostrophe does not open one). Inside a
+// quote left open nothing is cut.
 func stripInlineComment(s string) string {
 	var quote byte
+	closed := -1 // index just past the last closing quote
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
@@ -1419,11 +1424,12 @@ func stripInlineComment(s string) string {
 			if c == '\\' && quote == '"' {
 				i++
 			} else if c == quote {
-				quote = 0
+				quote, closed = 0, i+1
 			}
 		case c == '"' || (c == '\'' && (i == 0 || strings.IndexByte(" \t,", s[i-1]) >= 0)):
 			quote = c
-		case (c == '#' || strings.HasPrefix(s[i:], "//")) && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t'):
+		case c == '#' && i == 0,
+			(c == '#' || strings.HasPrefix(s[i:], "//")) && i > 0 && (s[i-1] == ' ' || s[i-1] == '\t' || i == closed):
 			return strings.TrimSpace(s[:i])
 		}
 	}

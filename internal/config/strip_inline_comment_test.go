@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// An inline comment is a '#' or "//" after a space or tab (or starting the
-// value), outside quotes. Before 2026-10 the rule wanted TWO whitespace
+// An inline comment is a '#' or "//" after a space, a tab or a closed quote
+// (or a '#' starting the value), outside quotes. Before 2026-10 the rule wanted TWO whitespace
 // characters in front, so the usual `KEY = "262144" # note` kept the comment,
 // the value failed to parse and the default applied silently; a value with
 // two " #" hung the parser.
@@ -24,7 +24,9 @@ func TestStripInlineComment(t *testing.T) {
 		`a // note`:                  `a`,
 		`tok #a #b`:                  `tok`,
 		`# note`:                     ``,
-		`// note`:                    ``,
+		`//k3Jq+base64/key=`:         `//k3Jq+base64/key=`,
+		`"1"# on`:                    `"1"`,
+		`'x'//note`:                  `'x'`,
 		`http://h/p`:                 `http://h/p`,
 		`a#b`:                        `a#b`,
 		`a//b`:                       `a//b`,
@@ -62,6 +64,7 @@ func TestParseCFMConfInlineCommentValuesApply(t *testing.T) {
 		`THROTTLE_MODE = "dryrun" # watch first`,
 		`SSLCOLLECTOR_SOCK_ENABLE = 1 # on`,
 		`MCP_TOKEN = # set me`,
+		`THROTTLE_SOURCES = "a # b, c" # note`,
 	}, "\n")))
 	if err != nil {
 		t.Fatal(err)
@@ -74,6 +77,9 @@ func TestParseCFMConfInlineCommentValuesApply(t *testing.T) {
 	}
 	if !cfg.SSLCollectorSock.Enabled {
 		t.Error("SSLCOLLECTOR_SOCK_ENABLE = 1 # on parsed as disabled")
+	}
+	if got := strings.Join(cfg.Throttle.Sources, "|"); got != "a # b|c" {
+		t.Errorf("THROTTLE_SOURCES = %q, want the quoted \" #\" kept: a # b|c", got)
 	}
 	if cfg.API.MCPToken != "" {
 		t.Errorf("MCP_TOKEN = # set me parsed as %q, want empty", cfg.API.MCPToken)
