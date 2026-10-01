@@ -31,8 +31,14 @@ back-filled here — see the git/PR history for that period.
   - After that the `cfm.conf` line is not used and can be set back to
     `placeholder`, the new stock value. Keep the line.
   - To rotate: set the line to `placeholder`, delete the file, restart.
-  - `cfm sslcollector` commands read the token from the same file.
-  - If a token cannot even be generated, the socket stays down instead of
+  - `cfm ssl` / `cfm sslcollector` (and the cfm-admin "Rescan certs" button)
+    send the token the edge has, `/var/lib/cfm/lua/cfm_token.lua`, which the
+    daemon rewrites with the token it serves; the stored file is the
+    fallback.
+  - A `cfm.conf` token too long for a token file (4096 bytes or more) is not
+    copied: a new one is generated.
+  - If no token can be generated, the daemon keeps serving the one it
+    already runs. With none running, the socket stays down instead of
     serving with the `cfm.conf` placeholder as its bearer.
 - **`CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` now live in
   `/var/lib/cfm/secrets/`, not in `detectors.conf`.** The daemon used to
@@ -79,6 +85,10 @@ back-filled here — see the git/PR history for that period.
     older binary ran it.
 
 ### Fixed
+- **A `cfm.conf` value with two inline ` #` (or ` //`) no longer hangs the
+  daemon and every `cfm` command.** For example `KEY = value #a #b`: the
+  inline-comment scan kept finding the same ` #` and never returned, so the
+  config never finished loading. Which comments are cut is unchanged.
 - **A `detectors.conf` whose tokens sat outside `[webdetector]` no longer
   reloads every 5 seconds.** The old generator appended a missing token to the
   end of the file, which could put it in another section. After that the

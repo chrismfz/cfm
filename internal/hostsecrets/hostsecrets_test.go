@@ -631,7 +631,11 @@ func TestUsableForTheCfmConfToken(t *testing.T) {
 			t.Errorf("UsableFor(ChallengeToken, %q) = true, want false (the detectors.conf cleaner alters it)", v)
 		}
 	}
-	for _, v := range []string{"placeholder", strongA[:31], " " + strongA} {
+	if v := strings.Repeat("a1", maxTokenFile/2)[1:]; !UsableFor(SSLCollectorToken, v) {
+		t.Errorf("UsableFor(SSLCollectorToken, %d bytes) = false, want true: the file fits", len(v))
+	}
+	// The last one is too long for a token file: readStore would refuse the copy for good.
+	for _, v := range []string{"placeholder", strongA[:31], " " + strongA, strings.Repeat("a1", maxTokenFile/2)} {
 		if UsableFor(SSLCollectorToken, v) {
 			t.Errorf("UsableFor(SSLCollectorToken, %q) = true, want false", v)
 		}
@@ -643,6 +647,15 @@ func TestUsableForTheCfmConfToken(t *testing.T) {
 	}
 	if got := Report(SSLCollectorToken, "cfm.conf", strongA+";x", tok, src, err); len(got) != 1 || strings.Contains(got[0], "not used") {
 		t.Fatalf("Report = %q, want only the copied hint", got)
+	}
+	// The longest usable value is read back from its file.
+	long := strings.Repeat("a1", maxTokenFile/2)[1:]
+	if _, _, err := Resolve(BridgeToken, long); err != nil {
+		t.Fatal(err)
+	}
+	forget()
+	if tok, src, err := Resolve(BridgeToken, "placeholder"); err != nil || tok != long || src != SourceStore {
+		t.Fatalf("Resolve = (%d bytes, %q, %v); want the long token from the store", len(tok), src, err)
 	}
 }
 

@@ -39,6 +39,7 @@ import (
 	mmdb "cfm/internal/maxmindupdater"
 
 	"cfm/internal/detectors/mysql"
+	edgediag "cfm/internal/diagnostics/edge"
 	"cfm/internal/dnat"
 	"cfm/internal/hostsecrets"
 	"cfm/internal/sslcollector"
@@ -194,29 +195,30 @@ func apiAuthToken() string {
 }
 
 func sslSockDefaults() (string, string) {
-	dir := cfgDir()
-	if dir == "" {
-		return "/var/run/sslcollector.sock", ""
+	sock, legacy := "/var/run/sslcollector.sock", ""
+	if dir := cfgDir(); dir != "" {
+		if b, err := os.ReadFile(filepath.Join(dir, "cfm.conf")); err == nil {
+			if cfg, err := cli.LoadConfigWithAPIOverride(dir, b); err == nil && cfg != nil {
+				if s := strings.TrimSpace(cfg.SSLCollectorSock.SockPath); s != "" {
+					sock = s
+				}
+				legacy = cfg.SSLCollectorSock.Token
+			}
+		}
 	}
+	return sock, sslSockToken(sslcollector.SharedLuaTokenPath, legacy)
+}
 
-	b, err := os.ReadFile(filepath.Join(dir, "cfm.conf"))
-	if err != nil {
-		return "/var/run/sslcollector.sock", ""
+// sslSockToken is the token the CLI sends to the socket: the edge's copy
+// (cfm_token.lua at luaPath), which the daemon rewrites with the token it
+// serves on every config apply, so it matches that token even when it could
+// not be stored; else the store (hostsecrets.Effective), where the cfm.conf
+// value (legacy) matters only until it has been copied there.
+func sslSockToken(luaPath, legacy string) string {
+	if t := edgediag.ReadLuaToken(luaPath); t.Valid {
+		return t.Token
 	}
-
-	cfg, err := cli.LoadConfigWithAPIOverride(dir, b)
-	if err != nil || cfg == nil {
-		return "/var/run/sslcollector.sock", ""
-	}
-
-	sock := strings.TrimSpace(cfg.SSLCollectorSock.SockPath)
-	if sock == "" {
-		sock = "/var/run/sslcollector.sock"
-	}
-
-	// The daemon serves the per-host stored token (hostsecrets); the cfm.conf
-	// value matters only until it has been copied there.
-	return sock, hostsecrets.Effective(hostsecrets.SSLCollectorToken, cfg.SSLCollectorSock.Token)
+	return hostsecrets.Effective(hostsecrets.SSLCollectorToken, legacy)
 }
 
 func main() {

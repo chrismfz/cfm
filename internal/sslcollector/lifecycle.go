@@ -14,7 +14,9 @@ import (
 	"cfm/internal/logging"
 )
 
-const sharedLuaTokenPath = "/var/lib/cfm/lua/cfm_token.lua"
+// SharedLuaTokenPath is the edge's copy of the socket token (cfm_token.lua),
+// rewritten with the served token on every config apply.
+const SharedLuaTokenPath = "/var/lib/cfm/lua/cfm_token.lua"
 const sharedLuaConfigPath = "/var/lib/cfm/lua/cfm_sslcollector_config.lua"
 
 // Respawn backoff bounds for a socket server that keeps exiting unexpectedly
@@ -89,7 +91,7 @@ type SockLifecycle struct {
 func NewSockLifecycle(col *Collector) *SockLifecycle {
 	return &SockLifecycle{
 		col:           col,
-		luaTokenPath:  sharedLuaTokenPath,
+		luaTokenPath:  SharedLuaTokenPath,
 		luaConfigPath: sharedLuaConfigPath,
 	}
 }
@@ -142,21 +144,31 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 		legacy := cfg.Token
 		tok, src, err := hostsecrets.Resolve(hostsecrets.SSLCollectorToken, legacy)
 		if tok == "" {
-			logging.Logf("[sslcollector] token generation failed: %v", err)
-			// Never serve with the cfm.conf placeholder as the bearer.
-			cfg.Token = ""
+			// No token could be generated: keep serving the one this
+			// process runs, if any, rather than take the socket down.
+			if run, ok := hostsecrets.Running(hostsecrets.SSLCollectorToken); ok {
+				logging.Logf("[sslcollector] token generation failed: %v — keeping the running token", err)
+				tok = run
+			} else {
+				logging.Logf("[sslcollector] token generation failed: %v", err)
+			}
 		} else {
 			for _, line := range hostsecrets.Report(hostsecrets.SSLCollectorToken, "cfm.conf", legacy, tok, src, err) {
 				logging.Logf("[sslcollector] %s", line)
 			}
+		}
+		if tok == "" {
+			// Never serve with the cfm.conf placeholder as the bearer.
+			cfg.Token = ""
+		} else {
 			cfg.Token = tok
 			// Write (or refresh) cfm_token.lua whenever the token is confirmed good.
 			// WriteLuaToken is atomic (write-tmp + rename) so partial writes cannot
 			// leave the Lua file in a broken state.
 			gid := CfmGroupID()
 
-			if cfg.LuaTokenPath != "" && cfg.LuaTokenPath != sharedLuaTokenPath {
-				logging.Logf("[sslcollector] ignoring SSLCOLLECTOR_LUA_TOKEN_PATH=%s; using fixed shared path=%s", cfg.LuaTokenPath, sharedLuaTokenPath)
+			if cfg.LuaTokenPath != "" && cfg.LuaTokenPath != SharedLuaTokenPath {
+				logging.Logf("[sslcollector] ignoring SSLCOLLECTOR_LUA_TOKEN_PATH=%s; using fixed shared path=%s", cfg.LuaTokenPath, SharedLuaTokenPath)
 			}
 			if werr := WriteLuaTokenWithMkdir(l.luaTokenPath, tok, gid); werr != nil {
 				logging.Logf("[sslcollector] failed to write lua token path=%s: %v", l.luaTokenPath, werr)

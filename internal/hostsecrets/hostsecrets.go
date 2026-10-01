@@ -51,9 +51,9 @@ func SetDirForTest(dir string) (restore func()) {
 	return func() { Dir = old; forget() }
 }
 
-// forget drops the per-process token caches.
+// forget drops the per-process token caches and Report's dedupe state.
 func forget() {
-	for _, m := range []*sync.Map{&unstored, &running} {
+	for _, m := range []*sync.Map{&unstored, &running, &reportErr, &reportFromConf, &reportConfIgnored, &reportUnusable} {
 		m.Range(func(k, _ any) bool { m.Delete(k); return true })
 	}
 }
@@ -176,8 +176,8 @@ var errEmpty = fmt.Errorf("%w: empty", ErrStoreUnusable)
 // change would run as a DIFFERENT secret than the one mirrored to the edge
 // (cfm_bridge_token.lua), or as none at all.
 //
-// UsableFor applies it per key: the cfm.conf reader (SSLCollectorToken) keeps
-// ';', '#' and edge quotes verbatim, so there strength alone decides.
+// UsableFor applies it per key: for SSLCollectorToken (cfm.conf) strength
+// alone decides.
 func Usable(v string) bool {
 	return IsStrongToken(v) && detconf.CleanValue(v) == v
 }
@@ -250,7 +250,8 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 	return "", "", false
 }
 
-// Effective is the token for key that read-only probes (cfm health) report:
+// Effective is the token for key that read-only callers report or use (cfm
+// health, and `cfm ssl` when the edge copy has no token):
 //
 //   - "" when the token file exists but holds no usable token
 //     (ErrStoreUnusable; an empty file is treated as absent, as by Resolve):
@@ -293,12 +294,18 @@ func Effective(key, legacy string) string {
 	return strings.TrimSpace(legacy)
 }
 
-// UsableFor reports whether v can be the token for key. The detectors.conf
-// tokens must also survive that file's value cleaner (Usable); cfm.conf's
-// reader returns ';', '#' and edge quotes unchanged, and the old binary served
-// such a SSLCOLLECTOR_SOCK_TOKEN as-is, so strength alone decides for it (and
-// the value goes to the Lua mirror and the socket check verbatim).
+// UsableFor reports whether v can be the token for key. It must fit a token
+// file (one copied into a file readStore then refuses would never recover).
+// The detectors.conf tokens must also survive that file's value cleaner
+// (Usable). The cfm.conf value is used as the cfm.conf reader returns it (it
+// has already cut an inline comment and one pair of surrounding quotes; a ';'
+// or an embedded '#' stays), the value the old binary served, so strength
+// alone decides for SSLCOLLECTOR_SOCK_TOKEN (and the value goes to the Lua
+// mirror and the socket check verbatim).
 func UsableFor(key, v string) bool {
+	if len(v) >= maxTokenFile { // the file is v plus a newline
+		return false
+	}
 	if key == SSLCollectorToken {
 		return IsStrongToken(v) && strings.TrimSpace(v) == v
 	}
