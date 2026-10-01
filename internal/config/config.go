@@ -1405,15 +1405,18 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
-// stripInlineComment cuts an inline comment: a '#' or "//" after a space or
-// tab, or right after a closed quote ("value # note", "value // note",
-// `"1"# on`), or a '#' starting the (trimmed) value ("KEY = # note" is
-// empty; a leading "//" is not cut, as a base64 key can start with it). One
-// that follows anything else ("a#b", "http://x") is part of the value, and so
-// is one inside quotes: a double quote anywhere (JSON, a quoted list item; a
-// backslash escapes the next character there), a single quote at the start
-// or after whitespace or ',' (so an apostrophe does not open one). Inside a
-// quote left open nothing is cut.
+// stripInlineComment cuts an inline comment: a '#' or "//" after a space, a
+// tab or a closing quote ("value # note", "value // note", `"1"# on`). One
+// that follows anything else ("a#b", "http://x", a leading "#abc") is part of
+// the value, and so is one inside quotes: a double quote anywhere (JSON, a
+// quoted list item), a single quote only at the start (an apostrophe in a
+// value opens none). There is no escape character: the value is used as
+// written, quotes included, apart from one surrounding pair (trimQuotes).
+//
+// When a quote is left open, the quotes cannot be trusted, and the rule
+// before 2026-10 applies: a comment is cut only with two whitespace
+// characters in front (" #" after a space or tab). So a value never keeps
+// more comment text than it did then.
 func stripInlineComment(s string) string {
 	var quote byte
 	closed := -1 // index just past the last closing quote
@@ -1421,16 +1424,20 @@ func stripInlineComment(s string) string {
 		c := s[i]
 		switch {
 		case quote != 0:
-			if c == '\\' && quote == '"' {
-				i++
-			} else if c == quote {
+			if c == quote {
 				quote, closed = 0, i+1
 			}
-		case c == '"' || (c == '\'' && (i == 0 || strings.IndexByte(" \t,", s[i-1]) >= 0)):
+		case c == '"' || (c == '\'' && i == 0):
 			quote = c
-		case c == '#' && i == 0,
-			(c == '#' || strings.HasPrefix(s[i:], "//")) && i > 0 && (s[i-1] == ' ' || s[i-1] == '\t' || i == closed):
+		case (c == '#' || strings.HasPrefix(s[i:], "//")) && i > 0 && (s[i-1] == ' ' || s[i-1] == '\t' || i == closed):
 			return strings.TrimSpace(s[:i])
+		}
+	}
+	if quote != 0 {
+		for i := 2; i < len(s); i++ {
+			if (s[i] == '#' || strings.HasPrefix(s[i:], "//")) && s[i-1] == ' ' && (s[i-2] == ' ' || s[i-2] == '\t') {
+				return strings.TrimSpace(s[:i])
+			}
 		}
 	}
 	return strings.TrimSpace(s)

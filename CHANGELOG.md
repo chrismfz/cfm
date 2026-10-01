@@ -125,12 +125,14 @@ back-filled here — see the git/PR history for that period.
     value; it did not parse, and the built-in default applied with no
     warning. A bool such as `KEY = 1 # on` read as off.
   - Now a `#` or `//` starts a comment when it follows a space, a tab or a
-    closing quote (`"1"# on`). A `#` that starts the value is a comment too
-    (`KEY = # note` is empty, as `MCP_TOKEN = # set me` should be); a
-    leading `//` is not, since a base64 key can start with it. One that
-    follows anything else (`http://…`, `a#b`) stays part of the value, and
-    so does one inside quotes (`"a # b"`, a JSON string, a quoted list
-    such as `"a # b, c"`). Quote a value that really contains ` #` or ` //`.
+    closing quote (`"1"# on`). One that follows anything else stays part of
+    the value (`http://…`, `a#b`, a value starting with `#` or `//`, as a
+    raw or base64 key can), and so does one inside quotes (`"a # b"`, a JSON
+    string, a quoted list such as `"a # b, c"`). Quote a value that really
+    contains ` #` or ` //`.
+  - The new rule never keeps more comment text than the old one, apart
+    from text inside quotes. When a value leaves a quote open, the old rule
+    applies.
   - The stock `cfm.conf` has two such lines, `SYS_CT_MIN` and `SYS_CT_MAX`.
     Their values equal the defaults, so nothing changes unless you edited
     them; then your value now applies. On the nodes checked, those two are

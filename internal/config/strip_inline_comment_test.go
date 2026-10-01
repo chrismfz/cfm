@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// An inline comment is a '#' or "//" after a space, a tab or a closed quote
-// (or a '#' starting the value), outside quotes. Before 2026-10 the rule wanted TWO whitespace
+// An inline comment is a '#' or "//" after a space, a tab or a closed quote,
+// outside quotes. Before 2026-10 the rule wanted TWO whitespace
 // characters in front, so the usual `KEY = "262144" # note` kept the comment,
 // the value failed to parse and the default applied silently; a value with
 // two " #" hung the parser.
@@ -23,24 +23,31 @@ func TestStripInlineComment(t *testing.T) {
 		`x  # c`:                     `x`,
 		`a // note`:                  `a`,
 		`tok #a #b`:                  `tok`,
-		`# note`:                     ``,
-		`//k3Jq+base64/key=`:         `//k3Jq+base64/key=`,
 		`"1"# on`:                    `"1"`,
 		`'x'//note`:                  `'x'`,
-		`http://h/p`:                 `http://h/p`,
-		`a#b`:                        `a#b`,
-		`a//b`:                       `a//b`,
-		`"a # b" # note`:             `"a # b"`,
-		`'a // b'`:                   `'a // b'`,
-		`"" # e.g. "alice,bob"`:      `""`,
-		`{"a": "x #y"} # note`:       `{"a": "x #y"}`,
-		`"a\" # b" # note`:           `"a\" # b"`,
-		`"a", "b # c" # note`:        `"a", "b # c"`,
-		`x, 'y # z' # note`:          `x, 'y # z'`,
-		`don't # note`:               `don't`,
-		`"unclosed # note`:           `"unclosed # note`,
-		`plain`:                      `plain`,
-		``:                           ``,
+		// Part of the value: not after whitespace or a closing quote.
+		`#leading-key`:       `#leading-key`,
+		`//k3Jq+base64/key=`: `//k3Jq+base64/key=`,
+		`http://h/p`:         `http://h/p`,
+		`a#b`:                `a#b`,
+		`a//b`:               `a//b`,
+		// Inside quotes.
+		`"a # b" # note`:        `"a # b"`,
+		`'a // b'`:              `'a // b'`,
+		`"" # e.g. "alice,bob"`: `""`,
+		`{"a": "x #y"} # note`:  `{"a": "x #y"}`,
+		`"a", "b # c" # note`:   `"a", "b # c"`,
+		// No escapes, and an apostrophe opens no quote.
+		`"C:\dir\"  # note`:    `"C:\dir\"`,
+		`rock 'n roll  # note`: `rock 'n roll`,
+		`don't # note`:         `don't`,
+		`x, 'y # z'`:           `x, 'y`,
+		// A quote left open: the old two-whitespace rule, no less.
+		`"unclosed # note`:  `"unclosed # note`,
+		`"unclosed  # note`: `"unclosed`,
+		`5"  # note`:        `5"`,
+		`plain`:             `plain`,
+		``:                  ``,
 	}
 	for in, want := range cases {
 		done := make(chan string, 1)
@@ -63,7 +70,7 @@ func TestParseCFMConfInlineCommentValuesApply(t *testing.T) {
 		`SYS_CT_MAX = 20000000 // maximum entries`,
 		`THROTTLE_MODE = "dryrun" # watch first`,
 		`SSLCOLLECTOR_SOCK_ENABLE = 1 # on`,
-		`MCP_TOKEN = # set me`,
+		`MCP_TOKEN = #k9raw-key-not-a-comment`,
 		`THROTTLE_SOURCES = "a # b, c" # note`,
 	}, "\n")))
 	if err != nil {
@@ -81,8 +88,8 @@ func TestParseCFMConfInlineCommentValuesApply(t *testing.T) {
 	if got := strings.Join(cfg.Throttle.Sources, "|"); got != "a # b|c" {
 		t.Errorf("THROTTLE_SOURCES = %q, want the quoted \" #\" kept: a # b|c", got)
 	}
-	if cfg.API.MCPToken != "" {
-		t.Errorf("MCP_TOKEN = # set me parsed as %q, want empty", cfg.API.MCPToken)
+	if cfg.API.MCPToken != "#k9raw-key-not-a-comment" {
+		t.Errorf("MCP_TOKEN = %q, want a leading '#' kept (a secret may start with one)", cfg.API.MCPToken)
 	}
 }
 
