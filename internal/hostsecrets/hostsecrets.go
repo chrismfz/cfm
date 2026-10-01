@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"cfm/internal/detconf"
 	"cfm/internal/sslcollector"
@@ -100,6 +101,10 @@ func readStore(key string) (string, error) {
 func Usable(v string) bool {
 	return sslcollector.IsStrongToken(v) && detconf.CleanValue(v) == v
 }
+
+// readRetryDelay spaces the retries of a failed first store read. A var so
+// tests can shorten it.
+var readRetryDelay = 200 * time.Millisecond
 
 var (
 	// unstored holds, per key, a token this process generated but could not
@@ -219,6 +224,15 @@ func Effective(key, legacy string) string {
 func Resolve(key, legacy string) (secret, source string, err error) {
 	legacy = strings.TrimSpace(legacy)
 	cur, readErr := readStore(key)
+	if _, runs := running.Load(key); readErr != nil && !runs {
+		// Nothing running yet (daemon start): a transient error (EMFILE,
+		// EIO) would make this process run a throwaway token, then switch
+		// back to the stored one on the next reload. Retry briefly first.
+		for i := 0; i < 3 && readErr != nil; i++ {
+			time.Sleep(readRetryDelay)
+			cur, readErr = readStore(key)
+		}
+	}
 	value, source, ok := choose(key, legacy, snapshotValue(key), cur, readErr)
 	if !ok {
 		gen, gerr := sslcollector.GenerateToken()

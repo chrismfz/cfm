@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const (
@@ -21,10 +22,11 @@ var hex48 = regexp.MustCompile(`^[0-9a-f]{48}$`)
 // write the live /var/lib/cfm/secrets (CLAUDE.md §5).
 func useTempDir(t *testing.T) string {
 	t.Helper()
-	old := Dir
+	old, oldDelay := Dir, readRetryDelay
 	Dir = filepath.Join(t.TempDir(), "secrets")
+	readRetryDelay = time.Millisecond
 	forgetGenerated()
-	t.Cleanup(func() { Dir = old; forgetGenerated() })
+	t.Cleanup(func() { Dir, readRetryDelay = old, oldDelay; forgetGenerated() })
 	return Dir
 }
 
@@ -403,5 +405,32 @@ func TestResolveRemovesASnapshotWithoutTokens(t *testing.T) {
 	}
 	if _, err := os.Stat(PreUpgradePath()); !os.IsNotExist(err) {
 		t.Fatalf("token-less snapshot kept (err %v)", err)
+	}
+}
+
+// A store read that fails transiently at daemon start (nothing running yet)
+// is retried, so the process does not run a throwaway token and then switch
+// back to the stored one on the next reload.
+func TestResolveRetriesATransientFirstReadError(t *testing.T) {
+	dir := useTempDir(t)
+	readRetryDelay = 100 * time.Millisecond
+	if err := os.MkdirAll(Path(ChallengeToken), 0o700); err != nil { // EISDIR on read
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		if err := os.Remove(Path(ChallengeToken)); err != nil {
+			done <- err
+			return
+		}
+		done <- os.WriteFile(filepath.Join(dir, "challenge_token"), []byte(strongA+"\n"), 0o600)
+	}()
+	tok, src, err := Resolve(ChallengeToken, "")
+	if gerr := <-done; gerr != nil {
+		t.Fatal(gerr)
+	}
+	if err != nil || tok != strongA || src != SourceStore {
+		t.Fatalf("Resolve = (%q, %q, %v), want the stored token after the retry", tok, src, err)
 	}
 }

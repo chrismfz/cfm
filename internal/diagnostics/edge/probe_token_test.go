@@ -70,7 +70,7 @@ func TestReadChallengeTokenProbeFallsBackToTheStore(t *testing.T) {
 }
 
 // Like the daemon, the probe takes a token set only in a detectors.d overlay
-// when the base has no usable one.
+// when the base has no [webdetector] section, and ignores it otherwise.
 func TestReadChallengeTokenProbeOverlayOnlyToken(t *testing.T) {
 	t.Setenv("CHALLENGE_TOKEN", "")
 	old := hostsecrets.Dir
@@ -91,5 +91,13 @@ func TestReadChallengeTokenProbeOverlayOnlyToken(t *testing.T) {
 	}
 	if got := ReadChallengeTokenProbe(conf); got.Token != overlay || !got.Valid {
 		t.Fatalf("ReadChallengeTokenProbe = %+v, want the overlay token", got)
+	}
+
+	// With a base [webdetector] the overlay token is ignored, as by the daemon.
+	if err := os.WriteFile(conf, []byte("[webdetector]\nCHALLENGE_TOKEN = placeholder\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadChallengeTokenProbe(conf); got.Token == overlay {
+		t.Fatalf("ReadChallengeTokenProbe = %+v, want the overlay token ignored", got)
 	}
 }

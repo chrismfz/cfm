@@ -752,9 +752,10 @@ var (
 )
 
 // SetChallengeToken configures the token secret: [webdetector]
-// CHALLENGE_TOKEN as the detectors manager resolved it (a strong base
-// detectors.conf value, else the per-host store in /var/lib/cfm/secrets, see
-// internal/hostsecrets).
+// CHALLENGE_TOKEN as the detectors manager resolved it (a usable
+// detectors.conf value, else the package's pre-upgrade snapshot, else the
+// per-host store in /var/lib/cfm/secrets, see internal/hostsecrets). An
+// empty token selects the ephemeral per-process key.
 func SetChallengeToken(token string) {
 	challengeTokenMu.Lock()
 	challengeTokenOverride = strings.TrimSpace(token)

@@ -782,8 +782,9 @@ func resolveDetectorsConfigPath() string {
 // knobs like OPENRESTY_SOCK, so the probe matches what the daemon runs (a
 // base-only read false-alarms when such a key moved into an overlay). NOTE:
 // this is NOT the right source for CHALLENGE_TOKEN / OPENRESTY_TOKEN — the
-// daemon reads those from the BASE file or the per-host store and ignores
-// overlays (see edgediag.ReadChallengeTokenProbe).
+// daemon reads those from the BASE [webdetector] when the base has one (else
+// the merged config), then the pre-upgrade snapshot and the per-host store
+// (see edgediag.ReadChallengeTokenProbe).
 func readDetectorSectionKV(path, section string) map[string]string {
 	return sectionKV(detectors.ReadLayeredFile, path, section)
 }

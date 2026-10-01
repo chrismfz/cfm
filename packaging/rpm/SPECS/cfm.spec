@@ -335,6 +335,13 @@ fi
 
 %postun
 %systemd_postun_with_restart cfm.service
+# Erase (not upgrade): drop the token store's pre-upgrade snapshot, a full
+# copy of the old detectors.conf that nothing will consume any more and that
+# would outrank the store after a reinstall. The tokens themselves stay, like
+# the rest of /var/lib/cfm: RPM has no purge (the Debian purge removes them).
+if [ "$1" -eq 0 ]; then
+    rm -f /var/lib/cfm/secrets/detectors.conf.pre-upgrade
+fi
 
 %changelog
 * %{cfm_changelog_date} CFM Maintainers <maintainers@cfm.local> - %{version}-%{release}

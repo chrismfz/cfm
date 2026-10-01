@@ -374,26 +374,29 @@ func (m *manager) maybeReload(parent context.Context) {
 	// resolveHostTokens (hostsecrets): nothing is ever written into
 	// detectors.conf, which is what kept the conffile "modified" on every
 	// node, so upgrades could not update it and left a .rpmnew behind.
-	// A usable BASE value wins over an overlay one (the merged value counts
-	// only when the base has none). The runtime is pinned to the resolved
+	// The token value is read from the BASE [webdetector] when the base has
+	// one (an overlay token is ignored, as before), else from the merged
+	// config, where the old binary ran an overlay-only token as-is. The runtime is pinned to the resolved
 	// value, which stays in lockstep with the cfm_bridge_token.lua written
 	// below. Every OTHER [webdetector] knob uses the merged wdKV. The block
 	// runs whenever the merged config has [webdetector], so an overlay-only
 	// [webdetector] also gets its tokens and cfm_bridge_config.lua.
 	if wdKV, ok := secs.ByName["webdetector"]; ok {
-		baseWD := KV(nil)
+		baseWD, baseHasWD := KV(nil), false
 		if bs, berr := ReadSectionsFile(m.opts.CfgPath); berr == nil {
-			baseWD = bs.ByName["webdetector"]
+			baseWD, baseHasWD = bs.ByName["webdetector"]
 		}
-		chalTok, newTok := resolveHostTokens(baseWD, wdKV)
+		chalTok, newTok := resolveHostTokens(baseWD, baseHasWD, wdKV)
+		// Pin the runtime to the resolved tokens. "" (not even generation
+		// worked) must not leave the config value behind: a "placeholder"
+		// would become the challenge HMAC key; "" selects the ephemeral key,
+		// and an empty bridge token fails closed.
 		// F2: CHALLENGE_TOKEN
-		if chalTok != "" {
-			wdKV["CHALLENGE_TOKEN"] = chalTok // pin runtime to the resolved token
-		}
+		wdKV["CHALLENGE_TOKEN"] = chalTok
 
 		// F4: OPENRESTY_TOKEN — also writes cfm_bridge_token.lua for cfm.lua
+		wdKV["OPENRESTY_TOKEN"] = newTok
 		if newTok != "" {
-			wdKV["OPENRESTY_TOKEN"] = newTok // pin runtime to the resolved token
 			cfmGID := sslcollector.CfmGroupID()
 			const bridgeTokenPath = "/var/lib/cfm/lua/cfm_bridge_token.lua"
 			if err := sslcollector.WriteLuaTokenWithMkdir(bridgeTokenPath, newTok, cfmGID); err != nil {
@@ -795,21 +798,22 @@ func (m *manager) stopAll() {
 
 // resolveHostTokens returns the CHALLENGE_TOKEN and OPENRESTY_TOKEN the
 // daemon runs with ("" only if one cannot even be generated), resolved by
-// hostsecrets, and logs where each came from. The detectors.conf value is the
-// base [webdetector] one (baseWD) when usable, else the merged one (wdKV): a
-// token set only in a detectors.d overlay ran as-is on the old binary when the
-// base had no [webdetector], and must keep running. hostsecrets then falls
-// back to the package's pre-upgrade snapshot, the store, or a new token.
-func resolveHostTokens(baseWD, wdKV KV) (challenge, bridge string) {
+// hostsecrets, and logs where each came from. The detectors.conf value is
+// read as the old binary did: from the BASE [webdetector] section when the
+// base has one (an overlay token is ignored), from the merged config (wdKV)
+// only when the base has no [webdetector] at all, where the old binary ran an
+// overlay token as-is. hostsecrets then falls back to the package's
+// pre-upgrade snapshot, the store, or a new token.
+func resolveHostTokens(baseWD KV, baseHasWD bool, wdKV KV) (challenge, bridge string) {
+	confWD := baseWD
+	if !baseHasWD {
+		confWD = wdKV
+	}
 	resolve := func(key string) string {
-		legacy := kvStrClean(baseWD, key, "")
-		if !hostsecrets.Usable(legacy) {
-			if v := kvStrClean(wdKV, key, ""); hostsecrets.Usable(v) {
-				legacy = v
-			} else if sslcollector.IsStrongToken(legacy) || sslcollector.IsStrongToken(v) {
-				if _, seen := tokenUnusableLogged.LoadOrStore(key, true); !seen {
-					logging.Logf("[detectors] %s in detectors.conf is ignored: the config cleaner would alter it (surrounding quotes or an inline comment), so it cannot run as written", key)
-				}
+		legacy := kvStrClean(confWD, key, "")
+		if !hostsecrets.Usable(legacy) && sslcollector.IsStrongToken(legacy) {
+			if _, seen := tokenUnusableLogged.LoadOrStore(key, true); !seen {
+				logging.Logf("[detectors] %s in detectors.conf is ignored: the config cleaner would alter it (surrounding quotes or an inline comment), so it cannot run as written", key)
 			}
 		}
 		tok, src, err := hostsecrets.Resolve(key, legacy)
