@@ -382,7 +382,7 @@ func (m *manager) maybeReload(parent context.Context) {
 	// tokens and cfm_bridge_config.lua.
 	if wdKV, ok := secs.ByName["webdetector"]; ok {
 		base, baseErr := ReadSectionsFile(m.opts.CfgPath)
-		chalTok, newTok := resolveHostTokens(hostsecrets.ConfSection(base, baseErr, wdKV))
+		chalTok, newTok := resolveHostTokens(hostsecrets.ConfSection(base, baseErr, wdKV), baseErr == nil)
 		// Pin the runtime to the resolved tokens. "" (not even generation
 		// worked) must not leave the config value behind: a "placeholder"
 		// would become the challenge HMAC key; "" selects the ephemeral key,
@@ -791,17 +791,26 @@ func (m *manager) stopAll() {
 // daemon runs with ("" only if one cannot even be generated), resolved by
 // hostsecrets (the store; when it has none, the detectors.conf value in
 // confWD, see hostsecrets.ConfSection, else a new token), and logs where each came
-// from.
-func resolveHostTokens(confWD KV) (challenge, bridge string) {
+// from. confKnown is false when the base detectors.conf could not be read.
+func resolveHostTokens(confWD KV, confKnown bool) (challenge, bridge string) {
 	resolve := func(key string) string {
 		legacy := kvStrClean(confWD, key, "")
-		tok, src, err := hostsecrets.Resolve(key, legacy)
+		var tok, src string
+		var err error
+		if confKnown {
+			tok, src, err = hostsecrets.Resolve(key, legacy)
+		} else {
+			// The base detectors.conf could not be read (between the layered
+			// read and this one): never store a generated token now, or the
+			// node's own token could no longer be copied.
+			tok, src, err = hostsecrets.ResolveConfUnknown(key)
+		}
 		if tok == "" {
 			logging.Logf("[detectors] %s generation failed: %v", key, err)
 			return ""
 		}
 		logTokenSource(key, src, err)
-		if src == hostsecrets.SourceStore && sslcollector.IsStrongToken(legacy) && legacy != tok {
+		if src == hostsecrets.SourceStore && hostsecrets.Usable(legacy) && legacy != tok {
 			if _, seen := tokenConfIgnoredLogged.LoadOrStore(key, true); !seen {
 				logging.Logf("[detectors] %s in detectors.conf is ignored: the token in %s is the one in use. To switch to the detectors.conf value, delete that file and restart; otherwise set the line to placeholder", key, hostsecrets.Path(key))
 			}
@@ -826,6 +835,8 @@ var tokenErrLogged sync.Map
 func logTokenSource(key, source string, err error) {
 	var msg string
 	switch {
+	case errors.Is(err, hostsecrets.ErrConfUnknown):
+		msg = fmt.Sprintf("[detectors] %s: %v — running it for now; retried each reload", key, err)
 	case errors.Is(err, hostsecrets.ErrStoreUnreadable):
 		msg = fmt.Sprintf("[detectors] %s: %v — keeping the running token (source=%s) and leaving the store alone; retried each reload", key, err, source)
 	case err != nil && source == hostsecrets.SourceConf:

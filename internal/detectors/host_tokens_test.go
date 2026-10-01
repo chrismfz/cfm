@@ -59,13 +59,13 @@ func TestConfSectionReadsWhereTheOldBinaryDid(t *testing.T) {
 func TestResolveHostTokensMigratesThenTheStoreWins(t *testing.T) {
 	useHostSecretsDir(t)
 	conf := KV{"CHALLENGE_TOKEN": hostTokA, "OPENRESTY_TOKEN": hostTokB}
-	if chal, bridge := resolveHostTokens(conf); chal != hostTokA || bridge != hostTokB {
+	if chal, bridge := resolveHostTokens(conf, true); chal != hostTokA || bridge != hostTokB {
 		t.Fatalf("migration: resolveHostTokens = (%q, %q), want the detectors.conf tokens", chal, bridge)
 	}
 	// The stock placeholder, or a different token (an older binary after a
 	// rollback writes its own), no longer matters.
 	for _, c := range []KV{{"CHALLENGE_TOKEN": "placeholder"}, {"CHALLENGE_TOKEN": hostTokB, "OPENRESTY_TOKEN": hostTokA}, nil} {
-		if chal, bridge := resolveHostTokens(c); chal != hostTokA || bridge != hostTokB {
+		if chal, bridge := resolveHostTokens(c, true); chal != hostTokA || bridge != hostTokB {
 			t.Fatalf("conf %v: resolveHostTokens = (%q, %q), want the stored tokens", c, chal, bridge)
 		}
 	}
@@ -87,5 +87,22 @@ func TestUsableTokensSurviveTheConfigCleaner(t *testing.T) {
 		if got := kvStrClean(KV{"K": v}, "K", ""); got != v {
 			t.Errorf("Usable(%q) but kvStrClean gives %q", v, got)
 		}
+	}
+}
+
+// The base detectors.conf could not be read on the first start (store still
+// empty): a generated token is run but not stored, so the next reload still
+// copies the node's own token.
+func TestResolveHostTokensUnreadableConfNeverPinsAGeneratedToken(t *testing.T) {
+	useHostSecretsDir(t)
+	chal, _ := resolveHostTokens(nil, false)
+	if chal == "" || chal == hostTokA {
+		t.Fatalf("conf unknown: CHALLENGE_TOKEN = %q, want a running generated token", chal)
+	}
+	if _, err := os.Stat(hostsecrets.Path(hostsecrets.ChallengeToken)); !os.IsNotExist(err) {
+		t.Fatalf("a generated token was stored while detectors.conf was unreadable (err %v)", err)
+	}
+	if chal, _ := resolveHostTokens(KV{"CHALLENGE_TOKEN": hostTokA}, true); chal != hostTokA {
+		t.Fatalf("next reload: CHALLENGE_TOKEN = %q, want the node's detectors.conf token", chal)
 	}
 }

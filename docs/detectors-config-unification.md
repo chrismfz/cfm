@@ -219,8 +219,9 @@ migration: no cookie is invalidated), else generated. The stock file ships
 the two keys as `placeholder` (kept so an older binary after a rollback
 replaces them in place instead of appending them to whatever section is
 last; an empty value is worse, its regex overwrites the next line). Taking
-the package's file at a Debian upgrade, or rolling back, rotates the tokens
-once; that was judged cheaper than the pre-upgrade machinery avoiding it.
+the package's file at a Debian upgrade rotates the tokens once, and a
+rollback with the line at placeholder twice; that was judged cheaper than
+the pre-upgrade machinery avoiding it.
 `cfm health` reads the same resolution (`hostsecrets.Effective`).
 
 ---

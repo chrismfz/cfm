@@ -49,7 +49,7 @@ func kvLines(kv KV, key string) []string {
 	}
 	var out []string
 	for _, line := range strings.Split(raw, "\n") {
-		line = strings.TrimSpace(stripInlineComment(line))
+		line = strings.TrimSpace(detconf.StripInlineComment(line))
 		if line != "" {
 			out = append(out, line)
 		}

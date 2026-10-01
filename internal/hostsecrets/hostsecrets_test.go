@@ -346,3 +346,22 @@ func TestResolveTightensForeignOwnership(t *testing.T) {
 		}
 	}
 }
+
+// ResolveConfUnknown uses a stored token as usual, and never stores a
+// generated one (a later Resolve may still copy the node's conf token).
+func TestResolveConfUnknown(t *testing.T) {
+	useTempDir(t)
+	tok, src, err := ResolveConfUnknown(ChallengeToken)
+	if !errors.Is(err, ErrConfUnknown) || src != SourceGenerated || !hex48.MatchString(tok) {
+		t.Fatalf("empty store: ResolveConfUnknown = (%q, %q, %v), want an unstored generated token", tok, src, err)
+	}
+	if again, _, _ := ResolveConfUnknown(ChallengeToken); again != tok {
+		t.Fatalf("reload rotated the unstored token: %q then %q", tok, again)
+	}
+	if got, src, err := Resolve(ChallengeToken, strongA); err != nil || got != strongA || src != SourceConf {
+		t.Fatalf("conf readable again: Resolve = (%q, %q, %v), want the conf token copied", got, src, err)
+	}
+	if got, src, err := ResolveConfUnknown(ChallengeToken); err != nil || got != strongA || src != SourceStore {
+		t.Fatalf("stored: ResolveConfUnknown = (%q, %q, %v), want the stored token", got, src, err)
+	}
+}

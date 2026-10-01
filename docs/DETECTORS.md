@@ -146,9 +146,10 @@ place, but appends a MISSING line at the end of the file, where it can land in
 another section and loop the daemon through a reload every few seconds, and
 an EMPTY line makes its regex overwrite the line after it. A token rotates
 once on a Debian upgrade where the package's `detectors.conf` is taken at the
-prompt (nothing left to copy), and on a rollback to an older binary, which
-runs its own token from `detectors.conf` until the next upgrade brings the
-stored one back. To rotate: set the `detectors.conf` line to `placeholder`
+prompt (nothing left to copy). A rollback to an older binary rotates twice
+if the line is at `placeholder` (the older binary generates its own there;
+the next upgrade goes back to the stored one), and not at all while the line
+still holds the token. To rotate: set the `detectors.conf` line to `placeholder`
 (a token still there would be copied back), delete the file, restart. A store that cannot be
 read is never overwritten; the daemon keeps the token it runs. `cfm health`
 resolves the same way. The store outlives package removal, like the rest of

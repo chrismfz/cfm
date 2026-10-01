@@ -134,10 +134,6 @@ func RegisteredTypes() []string {
 	return out
 }
 
-// stripInlineComment drops an inline "; comment", "# comment" or " // comment"
-// outside quotes (detconf.StripInlineComment).
-func stripInlineComment(s string) string { return detconf.StripInlineComment(s) }
-
 // kvStrClean = kvStr + inline-comment stripping + quote trimming.
 func kvStrClean(kv KV, key, def string) string {
 	return detconf.CleanValue(kvStr(kv, key, def))
@@ -148,7 +144,7 @@ func kvStrClean(kv KV, key, def string) string {
 // parsing. It drops any inline "; comment" / "# comment" (a scalar value never
 // contains ';' or '#' legitimately) and strips surrounding quotes/space.
 //
-// It deliberately does NOT use stripInlineComment's quote-aware scan: the
+// It deliberately does NOT use detconf.StripInlineComment's quote-aware scan: the
 // section parser leaves an embedded quote when a *quoted* value carries an
 // inline comment (`EVERY = "20s" ; note` is stored as `20s" ; note`), and a
 // quote-aware scan would treat that stray quote as opening a string and never

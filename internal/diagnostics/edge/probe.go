@@ -120,16 +120,17 @@ func ReadChallengeTokenProbe(path string) LuaTokenProbe {
 	// The daemon runs the stored token (hostsecrets); only while the store
 	// has none does it take the detectors.conf one, from the section
 	// hostsecrets.ConfSection picks. Probe the same, with the same cleaner.
-	base, baseErr := detconf.ReadSectionsFile(path)
-	var merged map[string]string
-	if baseErr == nil {
-		if _, ok := base.ByName["webdetector"]; !ok {
-			if m, err := detconf.ReadLayeredFile(path); err == nil {
-				merged = m.ByName["webdetector"]
-			}
-		}
+	// No [webdetector] in the effective config: the daemon resolves no token.
+	merged, err := detconf.ReadLayeredFile(path)
+	if err != nil {
+		return LuaTokenProbe{}
 	}
-	legacy := detconf.CleanValue(hostsecrets.ConfSection(base, baseErr, merged)["CHALLENGE_TOKEN"])
+	mergedWD, ok := merged.ByName["webdetector"]
+	if !ok {
+		return LuaTokenProbe{}
+	}
+	base, baseErr := detconf.ReadSectionsFile(path)
+	legacy := detconf.CleanValue(hostsecrets.ConfSection(base, baseErr, mergedWD)["CHALLENGE_TOKEN"])
 	if clean := hostsecrets.Effective(hostsecrets.ChallengeToken, legacy); clean != "" {
 		return LuaTokenProbe{Token: clean, Present: true, Valid: IsStrongToken(clean)}
 	}

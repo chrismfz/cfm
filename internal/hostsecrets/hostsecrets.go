@@ -76,6 +76,11 @@ const (
 // then never writes the store: it may hold a good secret.
 var ErrStoreUnreadable = errors.New("hostsecrets: store unreadable")
 
+// ErrConfUnknown: the store is empty and detectors.conf could not be read
+// (ResolveConfUnknown), so a generated token is run but not stored: the
+// node's detectors.conf token may still be copied on a later reload.
+var ErrConfUnknown = errors.New("hostsecrets: detectors.conf unreadable, generated token not stored")
+
 // Path is the store file for key: Dir/<lowercased key>.
 func Path(key string) string {
 	return filepath.Join(Dir, strings.ToLower(key))
@@ -189,7 +194,18 @@ func Effective(key, legacy string) string {
 // secret is always returned. A non-nil error means it was not stored: the
 // daemon keeps running with it and retries on each reload.
 func Resolve(key, legacy string) (secret, source string, err error) {
-	legacy = strings.TrimSpace(legacy)
+	return resolve(key, strings.TrimSpace(legacy), true)
+}
+
+// ResolveConfUnknown is Resolve when detectors.conf could not be read: the
+// stored token is used as usual, but a token generated for an empty store is
+// not stored (ErrConfUnknown), so a later reload that reads detectors.conf can
+// still copy the node's token into the store.
+func ResolveConfUnknown(key string) (secret, source string, err error) {
+	return resolve(key, "", false)
+}
+
+func resolve(key, legacy string, confKnown bool) (secret, source string, err error) {
 	cur, readErr := readStore(key)
 	if _, runs := running.Load(key); readErr != nil && !runs {
 		// Nothing running yet (daemon start): a transient error (EMFILE,
@@ -214,6 +230,8 @@ func Resolve(key, legacy string) (secret, source string, err error) {
 		// Never overwrite a store that may hold a good secret; a later
 		// reload reads it again.
 		err = fmt.Errorf("%w: %s: %v", ErrStoreUnreadable, Path(key), readErr)
+	case source == SourceGenerated && !confKnown:
+		err = ErrConfUnknown
 	case source != SourceStore:
 		err = write(key, value)
 	default:

@@ -35,11 +35,15 @@ back-filled here — see the git/PR history for that period.
     never delete them or leave them empty. After a rollback, an older binary
     replaces a placeholder in place. It appends a missing line to whatever
     section is last, and an empty line makes it overwrite the line after it.
-  - **Rotates once, by design:** (a) a Debian upgrade where you take the
-    package's `detectors.conf` at the prompt (the new daemon then finds no
-    token to copy), and (b) a rollback to an older version, which runs its own
-    token from `detectors.conf` until you upgrade again, when the stored one
-    is back. A rotation re-challenges visitors who hold a clearance cookie
+  - **When the token still rotates, by design:**
+    - once on a Debian upgrade where you take the package's `detectors.conf`
+      at the prompt (the new daemon then finds no token to copy);
+    - on a rollback to an older version, if its `detectors.conf` line is at
+      `placeholder`: the older binary generates its own token there, and the
+      next upgrade goes back to the stored one (two rotations). While the line
+      still holds the token, a rollback changes nothing.
+
+    A rotation re-challenges visitors who hold a clearance cookie
     (`CHALLENGE_COOKIE_LIFE`, 45 min stock) once.
   - To rotate a token: set its `detectors.conf` line to `placeholder` (a
     token still there would be copied back), delete its file, and restart.

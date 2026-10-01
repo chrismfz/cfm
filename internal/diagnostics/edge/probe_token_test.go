@@ -47,7 +47,6 @@ func TestReadChallengeTokenProbeFallsBackToTheStore(t *testing.T) {
 	for name, body := range map[string]string{
 		"no line":          "[webdetector]\nENABLED = 1\n",
 		"placeholder line": "[webdetector]\nCHALLENGE_TOKEN = placeholder\n",
-		"no section":       "[global]\nENRICH = 1\n",
 	} {
 		if err := os.WriteFile(conf, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
@@ -56,6 +55,15 @@ func TestReadChallengeTokenProbeFallsBackToTheStore(t *testing.T) {
 		if !got.Present || !got.Valid || got.Token != stored {
 			t.Errorf("%s: ReadChallengeTokenProbe = %+v, want the stored token", name, got)
 		}
+	}
+
+	// No [webdetector] at all: the daemon resolves no token, so neither does
+	// the probe, whatever the store holds.
+	if err := os.WriteFile(conf, []byte("[global]\nENRICH = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadChallengeTokenProbe(conf); got.Present {
+		t.Errorf("no [webdetector]: ReadChallengeTokenProbe = %+v, want no token", got)
 	}
 
 	const inConf = "fedcba9876543210fedcba9876543210fedcba9876543210"
