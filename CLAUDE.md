@@ -279,7 +279,7 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   - the `notify` and `detectorscfg` `systemConfigPath` (via
     `SetSystemConfigPathForTest` from the apiserver `TestMain`).
   - the `hostsecrets` `Dir` (`/var/lib/cfm/secrets`, the per-host
-    CHALLENGE_TOKEN / OPENRESTY_TOKEN store; via `SetDirForTest`, which also
+    CHALLENGE_TOKEN / OPENRESTY_TOKEN / SSLCOLLECTOR_SOCK_TOKEN store; via `SetDirForTest`, which also
     clears the per-process token caches, from the `TestMain` of a package whose
     tests reach the probe, or per test before resolving a token).
 

@@ -3,20 +3,21 @@
 //
 // [webdetector] CHALLENGE_TOKEN (the browser-challenge HMAC key) and
 // OPENRESTY_TOKEN (the edge↔daemon socket bearer) used to be generated INTO
-// /etc/cfm/detectors.conf. That made the conffile "modified" on every node,
-// so no upgrade could update it: every release left a .rpmnew / .dpkg-dist
-// beside it and new stock knobs never arrived. They now live one file each
-// under Dir.
+// /etc/cfm/detectors.conf, and SSLCOLLECTOR_SOCK_TOKEN (the edge↔sslcollector
+// socket bearer) into /etc/cfm/cfm.conf. That made those conffiles "modified"
+// on every node, so no upgrade could update them: every release left a
+// .rpmnew / .dpkg-dist beside them and new stock knobs never arrived. They
+// now live one file each under Dir.
 //
 // The store is the source of truth. A token is created only when its file is
-// missing: copied from detectors.conf when that
-// still carries a usable one, so a migrating node keeps its token and no
-// visitor's challenge cookie is invalidated, else generated. After that
-// detectors.conf is never consulted for it again. A file that exists but holds
-// no usable token is never overwritten (ErrStoreUnusable), except an empty
-// one, which is treated as absent (errEmpty). To rotate, set the
-// detectors.conf line to placeholder (a token still there would be copied
-// back), delete the file and restart.
+// missing: copied from its config file (the legacy value) when that still
+// carries a usable one, so a migrating node keeps its token (no visitor's
+// challenge cookie is invalidated, no edge loses socket auth), else
+// generated. After that the config file is never consulted for it again. A
+// file that exists but holds no usable token is never overwritten
+// (ErrStoreUnusable), except an empty one, which is treated as absent
+// (errEmpty). To rotate, set the config line to placeholder (a token still
+// there would be copied back), delete the file and restart.
 package hostsecrets
 
 import (
@@ -32,7 +33,6 @@ import (
 	"time"
 
 	"cfm/internal/detconf"
-	"cfm/internal/sslcollector"
 )
 
 // Dir holds one file per secret, root-only (dir 0700, files 0600). A var so
@@ -51,24 +51,25 @@ func SetDirForTest(dir string) (restore func()) {
 	return func() { Dir = old; forget() }
 }
 
-// forget drops the per-process token caches.
+// forget drops the per-process token caches and Report's dedupe state.
 func forget() {
-	for _, m := range []*sync.Map{&unstored, &running} {
+	for _, m := range []*sync.Map{&unstored, &running, &reportErr, &reportFromConf, &reportConfIgnored, &reportUnusable} {
 		m.Range(func(k, _ any) bool { m.Delete(k); return true })
 	}
 }
 
-// The secrets this package manages, named after their legacy detectors.conf
-// keys ([webdetector] section).
+// The secrets this package manages, named after their legacy config keys
+// (the file is the lower-cased key).
 const (
-	ChallengeToken = "CHALLENGE_TOKEN"
-	BridgeToken    = "OPENRESTY_TOKEN"
+	ChallengeToken    = "CHALLENGE_TOKEN"         // detectors.conf [webdetector]
+	BridgeToken       = "OPENRESTY_TOKEN"         // detectors.conf [webdetector]
+	SSLCollectorToken = "SSLCOLLECTOR_SOCK_TOKEN" // cfm.conf
 )
 
 // Sources Resolve reports.
 const (
 	SourceStore     = "store"
-	SourceConf      = "detectors.conf" // copied into an empty store
+	SourceConf      = "config" // the legacy config-file value, copied into an empty store
 	SourceGenerated = "generated"
 	// SourceRunning: the store could not be read, so the process keeps the
 	// value it already runs rather than generating a new one.
@@ -91,10 +92,10 @@ var ErrStoreUnusable = errors.New("hostsecrets: token file holds no usable token
 // (an operator writing one); it is left alone and read on the next reload.
 var ErrStoreChanged = errors.New("hostsecrets: a token file appeared meanwhile; left alone, read on the next reload")
 
-// ErrConfUnknown: the store is empty and detectors.conf could not be read
+// ErrConfUnknown: the store is empty and the config file could not be read
 // (ResolveConfUnknown), so a generated token is run but not stored: the
-// node's detectors.conf token may still be copied on a later reload.
-var ErrConfUnknown = errors.New("hostsecrets: detectors.conf unreadable, generated token not stored")
+// node's config-file token may still be copied on a later reload.
+var ErrConfUnknown = errors.New("hostsecrets: config file unreadable, generated token not stored")
 
 // Path is the store file for key: Dir/<lowercased key>.
 func Path(key string) string {
@@ -154,7 +155,7 @@ func readStore(key string) (string, error) {
 	if len(b) > maxTokenFile {
 		return "", fmt.Errorf("%w: over %d bytes", ErrStoreUnusable, maxTokenFile)
 	}
-	if v := strings.TrimSpace(string(b)); Usable(v) {
+	if v := strings.TrimSpace(string(b)); UsableFor(key, v) {
 		return v, nil
 	}
 	if strings.TrimSpace(string(b)) == "" {
@@ -169,13 +170,16 @@ func readStore(key string) (string, error) {
 // restart run a new unstored token.
 var errEmpty = fmt.Errorf("%w: empty", ErrStoreUnusable)
 
-// Usable reports whether v can be a token: strong (sslcollector.IsStrongToken)
+// Usable reports whether v can be a token: strong (IsStrongToken)
 // and unchanged by the detectors.conf value cleaner (detconf.CleanValue). The
 // daemon re-reads the resolved value through that cleaner, so a value it would
 // change would run as a DIFFERENT secret than the one mirrored to the edge
 // (cfm_bridge_token.lua), or as none at all.
+//
+// UsableFor applies it per key: for SSLCollectorToken (cfm.conf) strength
+// alone decides.
 func Usable(v string) bool {
-	return sslcollector.IsStrongToken(v) && detconf.CleanValue(v) == v
+	return IsStrongToken(v) && detconf.CleanValue(v) == v
 }
 
 // ConfSection is where the detectors.conf token value is read, as the old
@@ -225,7 +229,7 @@ var (
 )
 
 // choose is Resolve's precedence rule: the stored token; else, when the store cannot be used, the value this
-// process already runs; else a usable detectors.conf value (the node's token
+// process already runs; else a usable legacy config value (the node's token
 // before the migration); else a token this process generated but could not
 // store. ok is false when none applies.
 func choose(key, legacy, cur string, readErr error) (value, source string, ok bool) {
@@ -237,7 +241,7 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 			return v.(string), SourceRunning, true
 		}
 	}
-	if Usable(legacy) {
+	if UsableFor(key, legacy) {
 		return legacy, SourceConf, true
 	}
 	if v, found := unstored.Load(key); found {
@@ -246,7 +250,8 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 	return "", "", false
 }
 
-// Effective is the token for key that read-only probes (cfm health) report:
+// Effective is the token for key that read-only callers report or use (cfm
+// health, and `cfm ssl` when the edge copy has no token):
 //
 //   - "" when the token file exists but holds no usable token
 //     (ErrStoreUnusable; an empty file is treated as absent, as by Resolve):
@@ -257,7 +262,7 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 //     while its file is unreadable (EMFILE, EIO: the daemon logs it) or
 //     deleted for a rotation not yet reloaded; "" for an unreadable file
 //     when no token runs here (a separate probe process);
-//   - else the stored token; else a usable legacy (detectors.conf) value,
+//   - else the stored token; else a usable legacy (config-file) value,
 //     the token the daemon would copy; else legacy as given (possibly weak or
 //     empty), so a probe reports weak/missing.
 //
@@ -289,12 +294,32 @@ func Effective(key, legacy string) string {
 	return strings.TrimSpace(legacy)
 }
 
+// UsableFor reports whether v can be the token for key. It must fit a token
+// file (one copied into a file readStore then refuses would never recover).
+// The detectors.conf tokens must also survive that file's value cleaner
+// (Usable). The cfm.conf value is used as the cfm.conf reader returns it (it
+// has already cut an inline comment and one pair of surrounding quotes; a ';'
+// or an embedded '#' stays), the value the old binary served, so strength
+// alone decides for SSLCOLLECTOR_SOCK_TOKEN (and the value goes to the Lua
+// mirror and the socket check verbatim).
+func UsableFor(key, v string) bool {
+	if len(v) >= maxTokenFile { // the file is v plus a newline
+		return false
+	}
+	if key == SSLCollectorToken {
+		return IsStrongToken(v) && strings.TrimSpace(v) == v
+	}
+	return Usable(v)
+}
+
 // ForgetRunning drops this process's running tokens (not a generated token
 // it could not store, which stays for the life of the process): the
 // detectors manager calls it when the config no longer has [webdetector], so
 // no probe reports a token nothing runs any more.
-func ForgetRunning() {
-	running.Range(func(k, _ any) bool { running.Delete(k); return true })
+func ForgetRunning(keys ...string) {
+	for _, k := range keys {
+		running.Delete(k)
+	}
 }
 
 // Running returns the token for key this process runs (the last Resolve), if
@@ -310,10 +335,10 @@ func Running(key string) (string, bool) {
 // Resolve returns the secret the daemon runs with for key, and where it came
 // from:
 //
-//  1. SourceStore: the stored value, when usable. detectors.conf is ignored.
+//  1. SourceStore: the stored value, when usable. The config file is ignored.
 //  2. SourceRunning: the store cannot be read (ErrStoreUnreadable); the value
 //     this process already runs is kept and the store is left alone.
-//  3. SourceConf: the store is empty and legacy, the detectors.conf value, is
+//  3. SourceConf: the store is empty and legacy, the config-file value, is
 //     usable: it is copied into the store (the migration). When the store
 //     cannot be read it is run without being stored.
 //  4. SourceGenerated: a new random 48-hex value, stored. Until it is stored
@@ -329,9 +354,9 @@ func Resolve(key, legacy string) (secret, source string, err error) {
 	return resolve(key, strings.TrimSpace(legacy), true)
 }
 
-// ResolveConfUnknown is Resolve when detectors.conf could not be read: the
+// ResolveConfUnknown is Resolve when the config file could not be read: the
 // stored token is used as usual, but a token generated for an empty store is
-// not stored (ErrConfUnknown), so a later reload that reads detectors.conf can
+// not stored (ErrConfUnknown), so a later reload that reads the config file can
 // still copy the node's token into the store.
 func ResolveConfUnknown(key string) (secret, source string, err error) {
 	return resolve(key, "", false)
@@ -360,7 +385,7 @@ func resolve(key, legacy string, confKnown bool) (secret, source string, err err
 		value, source, ok = v.(string), SourceRunning, true
 	}
 	if !ok {
-		gen, gerr := sslcollector.GenerateToken()
+		gen, gerr := GenerateToken()
 		if gerr != nil {
 			return "", "", gerr
 		}

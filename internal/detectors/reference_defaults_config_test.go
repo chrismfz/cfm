@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"cfm/internal/sslcollector"
+	"cfm/internal/hostsecrets"
 )
 
 // TestReferenceConfigMatchesRuntimeDefaults pins stock values in
@@ -67,7 +67,7 @@ func TestReferenceConfigMatchesRuntimeDefaults(t *testing.T) {
 			t.Errorf("[webdetector] %s line is missing from stock; keep it as placeholder (rollback safety)", key)
 		case strings.TrimSpace(v) == "":
 			t.Errorf("[webdetector] %s is empty in stock; an older binary mangles an empty line, keep placeholder", key)
-		case sslcollector.IsStrongToken(v):
+		case hostsecrets.IsStrongToken(v):
 			t.Errorf("[webdetector] %s = %q is a real token in stock; per-host tokens are generated, never shipped", key, v)
 		}
 	}

@@ -1090,12 +1090,12 @@ SSLCollector discovers TLS certificates from the filesystem (cPanel, Plesk, Dire
 ```ini
 SSLCOLLECTOR_SOCK_ENABLE  = 1
 SSLCOLLECTOR_SOCK_PATH    = /var/run/sslcollector.sock
-SSLCOLLECTOR_SOCK_TOKEN   = your_token_here       # auto-generated if weak or missing
+SSLCOLLECTOR_SOCK_TOKEN   = placeholder           # the token lives in /var/lib/cfm/secrets (below)
 # Token module is always written to /var/lib/cfm/lua/cfm_token.lua
 SSLCOLLECTOR_LUA_TOKEN_PATH = /var/lib/cfm/lua/cfm_token.lua
 ```
 
-**Token management** — on startup cfm validates `SSLCOLLECTOR_SOCK_TOKEN`. If the value is absent, shorter than 32 characters, or a known placeholder (e.g. `supersecret`), a new 48-character hex token is generated automatically, written back to `cfm.conf`, and mirrored to `/var/lib/cfm/lua/cfm_token.lua` (owned `root:cfm 0640`) for the edge proxy (OpenResty or Angie) to read. You never need to copy the token manually into Lua.
+**Token management** — the socket token lives in `/var/lib/cfm/secrets/sslcollector_sock_token` (root, `0600`), created once per host: copied from a `SSLCOLLECTOR_SOCK_TOKEN` still set in `cfm.conf` (32+ characters, on the first start after the upgrade), else a new 48-character hex token. After that the `cfm.conf` line is not used and stays `placeholder`, so `cfm.conf` can match the packaged file; the daemon never writes the token into it. The token is mirrored to `/var/lib/cfm/lua/cfm_token.lua` (owned `root:cfm 0640`) for the edge proxy (OpenResty or Angie) to read; you never need to copy it into Lua. To rotate: set the `cfm.conf` line to `placeholder`, delete the file, restart.
 
 **Socket permissions** — the socket is created as `root:cfm 0660`. The edge proxy's worker processes must run as the `cfm` user (set `user cfm;` in `nginx.conf` / `angie.conf`) to connect. The `cfm` user and group are created by the package installer; see [Manual install](#manual-install-from-source) if you are building from source.
 

@@ -6,14 +6,18 @@ import (
 	"os"
 	"os/user"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	cfgpkg "cfm/internal/config"
+	"cfm/internal/hostsecrets"
 	"cfm/internal/logging"
 )
 
-const sharedLuaTokenPath = "/var/lib/cfm/lua/cfm_token.lua"
+// SharedLuaTokenPath is the edge's copy of the socket token (cfm_token.lua),
+// rewritten with the served token on every config apply.
+const SharedLuaTokenPath = "/var/lib/cfm/lua/cfm_token.lua"
 const sharedLuaConfigPath = "/var/lib/cfm/lua/cfm_sslcollector_config.lua"
 
 // Respawn backoff bounds for a socket server that keeps exiting unexpectedly
@@ -57,8 +61,7 @@ func sockBackoff(fail int) time.Duration {
 // mutex guards every field below so the state machine is race-free regardless of
 // how many goroutines ever call in — audit F27/F28.
 type SockLifecycle struct {
-	col     *Collector
-	cfgPath string // path to cfm.conf, used by ValidateOrGenerateToken to patch the token in place
+	col *Collector
 
 	// Shared-Lua output paths. Default to the fixed sharedLua*Path consts in
 	// NewSockLifecycle; overridable so tests never write the LIVE token file that
@@ -86,12 +89,10 @@ type SockLifecycle struct {
 
 // NewSockLifecycle returns a ready-to-use SockLifecycle.
 // col is the shared Collector instance created once at daemon startup.
-// cfgPath is the path to cfm.conf; pass an empty string if not available.
-func NewSockLifecycle(col *Collector, cfgPath string) *SockLifecycle {
+func NewSockLifecycle(col *Collector) *SockLifecycle {
 	return &SockLifecycle{
 		col:           col,
-		cfgPath:       cfgPath,
-		luaTokenPath:  sharedLuaTokenPath,
+		luaTokenPath:  SharedLuaTokenPath,
 		luaConfigPath: sharedLuaConfigPath,
 	}
 }
@@ -111,9 +112,10 @@ func CfmGroupID() int {
 // ApplyConfig starts, stops, or restarts the socket server based on cfg.
 // Safe to call on every tick — it only acts when something relevant changed.
 //
-// On every call where the socket is enabled, the token is validated and a new
-// one is auto-generated if the existing value is absent or a known placeholder.
-// The new token is patched into cfm.conf (l.cfgPath) and written to
+// On every call where the socket is enabled, the token is resolved by
+// hostsecrets: the per-host store /var/lib/cfm/secrets/sslcollector_sock_token,
+// created once from the cfm.conf SSLCOLLECTOR_SOCK_TOKEN value (the migration)
+// or generated. cfm.conf is never written. The token is mirrored to
 // /var/lib/cfm/lua/cfm_token.lua so both OpenResty and Angie can read it.
 func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollectorSockConfig) {
 	// Fast exit after Stop() — don't do token I/O or (re)spawn a shut-down server.
@@ -137,24 +139,42 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 	if max <= 0 {
 		max = 50000
 	}
-	// Validate or rotate the token before anything else.
-	// ValidateOrGenerateToken is a no-op when the token is already strong.
+	// Resolve the token before anything else (the store; when it has none,
+	// the cfm.conf value, else a new one).
+	enabled := cfg.Enabled
 	if cfg.Enabled {
-		tok, err := ValidateOrGenerateToken(l.cfgPath, cfg.Token)
-		if err != nil {
-			logging.Logf("[sslcollector] token generation failed: %v", err)
-		} else {
-			if tok != cfg.Token {
-				logging.Logf("[sslcollector] weak/missing token replaced with generated token")
-				cfg.Token = tok
+		// Trimmed as Resolve trims it, so Report judges the value copied.
+		legacy := strings.TrimSpace(cfg.Token)
+		tok, src, err := hostsecrets.Resolve(hostsecrets.SSLCollectorToken, legacy)
+		if tok == "" {
+			// No token could be generated: keep serving the one this
+			// process runs, if any, rather than take the socket down.
+			if run, ok := hostsecrets.Running(hostsecrets.SSLCollectorToken); ok {
+				logging.Logf("[sslcollector] token generation failed: %v — keeping the running token", err)
+				tok = run
+			} else {
+				logging.Logf("[sslcollector] token generation failed: %v", err)
 			}
+		} else {
+			for _, line := range hostsecrets.Report(hostsecrets.SSLCollectorToken, "cfm.conf", legacy, tok, src, err) {
+				logging.Logf("[sslcollector] %s", line)
+			}
+		}
+		if tok == "" {
+			// Never serve with the cfm.conf placeholder as the bearer: no
+			// server until a later apply resolves a token (ServeSock would
+			// refuse an empty one, and Tick would respawn it forever).
+			cfg.Token = ""
+			enabled = false
+		} else {
+			cfg.Token = tok
 			// Write (or refresh) cfm_token.lua whenever the token is confirmed good.
 			// WriteLuaToken is atomic (write-tmp + rename) so partial writes cannot
 			// leave the Lua file in a broken state.
 			gid := CfmGroupID()
 
-			if cfg.LuaTokenPath != "" && cfg.LuaTokenPath != sharedLuaTokenPath {
-				logging.Logf("[sslcollector] ignoring SSLCOLLECTOR_LUA_TOKEN_PATH=%s; using fixed shared path=%s", cfg.LuaTokenPath, sharedLuaTokenPath)
+			if cfg.LuaTokenPath != "" && cfg.LuaTokenPath != SharedLuaTokenPath {
+				logging.Logf("[sslcollector] ignoring SSLCOLLECTOR_LUA_TOKEN_PATH=%s; using fixed shared path=%s", cfg.LuaTokenPath, SharedLuaTokenPath)
 			}
 			if werr := WriteLuaTokenWithMkdir(l.luaTokenPath, tok, gid); werr != nil {
 				logging.Logf("[sslcollector] failed to write lua token path=%s: %v", l.luaTokenPath, werr)
@@ -169,7 +189,7 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 		}
 	}
 
-	key := fmt.Sprintf("%t|%s|%s|%s|%d", cfg.Enabled, sp, cfg.Token, ttl, max)
+	key := fmt.Sprintf("%t|%s|%s|%s|%d", enabled, sp, cfg.Token, ttl, max)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -179,7 +199,7 @@ func (l *SockLifecycle) ApplyConfig(ctx context.Context, cfg *cfgpkg.SSLCollecto
 		return
 	}
 
-	if !cfg.Enabled {
+	if !enabled {
 		if l.cancel != nil {
 			l.cancel()
 			l.cancel = nil

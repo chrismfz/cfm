@@ -19,9 +19,6 @@ import (
 // is already present (case-insensitive match on the key, ignoring spaces
 // around '='), its value is replaced; otherwise the key is appended.
 //
-// Mirrors the regex-and-rewrite approach sslcollector.ValidateOrGenerateToken
-// uses for the cfm.conf SSLCOLLECTOR_SOCK_TOKEN, so both daemon-side and
-// CLI-side mutations of cfm.conf stay shape-compatible.
 // The daemon's fsnotify watcher on cfm.conf picks up the change and
 // triggers the existing reload path — no SIGHUP needed.
 //

@@ -19,10 +19,8 @@
 #                                         # apply (a plain config reload won't do)
 #
 # Tokens (CHALLENGE_TOKEN / OPENRESTY_TOKEN / SSLCOLLECTOR_SOCK_TOKEN) are NOT
-# set here — cfm auto-generates strong per-server values on first start:
-# CHALLENGE_TOKEN / OPENRESTY_TOKEN into /var/lib/cfm/secrets/ (leave their
-# `placeholder` lines in detectors.conf alone), SSLCOLLECTOR_SOCK_TOKEN back
-# into cfm.conf.
+# set here — cfm keeps strong per-server values in /var/lib/cfm/secrets/
+# (leave their `placeholder` lines in detectors.conf / cfm.conf alone).
 #
 # All values below are EMPTY by default, so an un-edited file is inert: no API
 # reporting is redirected to a real endpoint, and GeoIP falls back to the

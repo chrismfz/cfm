@@ -18,7 +18,6 @@ import (
 
 	"cfm/internal/detconf"
 	"cfm/internal/hostsecrets"
-	"cfm/internal/sslcollector"
 )
 
 type LuaTokenProbe struct {
@@ -72,11 +71,11 @@ func ReadLuaToken(path string) LuaTokenProbe {
 	return LuaTokenProbe{Token: tok, Present: true, Valid: IsStrongToken(tok)}
 }
 
-// IsStrongToken is the daemon's own rule (sslcollector.IsStrongToken, which
-// decides rotation and hostsecrets resolution), plus: a probe reports a token
+// IsStrongToken is the daemon's own rule (hostsecrets.IsStrongToken, which
+// decides the token resolution), plus: a probe reports a token
 // with surrounding whitespace as weak rather than trimming it.
 func IsStrongToken(tok string) bool {
-	return strings.TrimSpace(tok) == tok && sslcollector.IsStrongToken(tok)
+	return strings.TrimSpace(tok) == tok && hostsecrets.IsStrongToken(tok)
 }
 func TokenHealth(t LuaTokenProbe) string {
 	if !t.Present {

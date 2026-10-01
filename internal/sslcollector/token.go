@@ -1,105 +1,13 @@
 package sslcollector
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"cfm/internal/logging"
 )
-
-// badTokens matches well-known placeholder values that must not be used in
-// production. The check is case-insensitive and requires a full-string match.
-var badTokens = regexp.MustCompile(`(?i)^(supersecret|changeme|secret|password|default|token|test|demo|placeholder)$`)
-
-// confTokenLine patches the SSLCOLLECTOR_SOCK_TOKEN line in a cfm.conf file.
-var confTokenLine = regexp.MustCompile(`(?m)^(SSLCOLLECTOR_SOCK_TOKEN\s*=\s*).*$`)
-
-// tokenIsLuaSafe reports whether s can be emitted verbatim into a generated Lua
-// file via Go %q AND round-tripped through cfm.conf. It requires every byte to be
-// a graphical ASCII char (0x21..0x7e): no whitespace, no control bytes, and no
-// non-ASCII runes (audit F55). Go's %q renders a non-printable non-ASCII rune as
-// \uXXXX / \UXXXXXXXX, which LuaJIT cannot parse (it expects \xHH or \u{...}), so
-// a token containing e.g. a zero-width space would produce a cfm_token.lua /
-// cfm_bridge_token.lua that fails to compile — taking edge<->collector (and
-// edge<->bridge) auth down. An operator token that fails this is treated as weak
-// and regenerated (the generated 48-hex token is always safe). Byte iteration is
-// deliberate: any multi-byte UTF-8 rune has bytes >= 0x80 and is rejected.
-func tokenIsLuaSafe(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; c < 0x21 || c > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
-// IsStrongToken reports whether tok is usable as-is: at least 32 characters,
-// not a known placeholder, and Lua-safe (tokenIsLuaSafe). ValidateOrGenerateToken
-// (cfm.conf SSLCOLLECTOR_SOCK_TOKEN) regenerates anything else;
-// internal/hostsecrets (the [webdetector] tokens, which also require
-// hostsecrets.Usable) skips it: a weak detectors.conf value is not copied, and
-// a weak token file is left alone and reported.
-func IsStrongToken(tok string) bool {
-	cur := strings.TrimSpace(tok)
-	return len(cur) >= 32 && !badTokens.MatchString(cur) && tokenIsLuaSafe(cur)
-}
-
-// GenerateToken returns a new random token: 24 bytes from crypto/rand as 48
-// lowercase hex characters (strong and Lua-safe by construction).
-func GenerateToken() (string, error) {
-	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("sslcollector: token generation failed: %w", err)
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// ValidateOrGenerateToken returns current unchanged if it is strong (≥32 chars,
-// not a known placeholder). Otherwise it generates a new 48-hex-char token,
-// patches the SSLCOLLECTOR_SOCK_TOKEN line in cfgPath in place, and returns the
-// new token.
-//
-// cfgPath may be empty; in that case the file-patch step is skipped (non-fatal)
-// and the new token is still returned so the caller can update in-memory config.
-func ValidateOrGenerateToken(cfgPath, current string) (string, error) {
-	cur := strings.TrimSpace(current)
-	if IsStrongToken(cur) {
-		return cur, nil
-	}
-
-	token, err := GenerateToken()
-	if err != nil {
-		return "", err
-	}
-
-	if cfgPath != "" {
-		// cfgPath is set at daemon startup from filepath.Join(cfgDir, "cfm.conf")
-		// where cfgDir comes from a CLI flag or well-known path — never from
-		// network input. Require an absolute path as a sanity guard.
-		// #nosec G304 -- path is daemon-internal, not derived from user input
-		if !filepath.IsAbs(cfgPath) {
-			return token, fmt.Errorf("sslcollector: cfgPath must be absolute, got %q", cfgPath)
-		}
-		if data, err := os.ReadFile(cfgPath); err == nil { // #nosec G304
-			updated := confTokenLine.ReplaceAllString(string(data), "${1}"+token)
-			// Preserve the file's existing permissions (best-effort).
-			info, statErr := os.Stat(cfgPath)
-			mode := os.FileMode(0640)
-			if statErr == nil {
-				mode = info.Mode()
-			}
-			// #nosec G304 -- cfgPath is an absolute, daemon-internal config path
-			_ = os.WriteFile(cfgPath, []byte(updated), mode)
-		}
-	}
-
-	return token, nil
-}
 
 // WriteLuaToken atomically writes a Lua module that returns the token string to
 // luaPath. The file is created with mode 0640 (root:cfm) so that OpenResty

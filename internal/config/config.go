@@ -1406,20 +1406,18 @@ func clamp(v, lo, hi int) int {
 // (δεν πειράζει "http://..." γιατί απαιτούμε προηγούμενο space)
 func stripInlineComment(s string) string {
 	cut := func(txt, token string) string {
-		for {
-			i := strings.Index(txt, token)
-			if i < 0 {
+		for from := 0; ; {
+			k := strings.Index(txt[from:], token)
+			if k < 0 {
 				return txt
 			}
+			i := from + k
 			if i == 0 || txt[i-1] == ' ' || txt[i-1] == '\t' {
 				return strings.TrimSpace(txt[:i])
 			}
-			// βρες επόμενο
-			j := strings.Index(txt[i+len(token):], token)
-			if j < 0 {
-				return txt
-			}
-			txt = txt[:i+len(token)+j] + txt[i+len(token)+j:]
+			// βρες επόμενο (μετά από αυτό: το παλιό loop ξαναέβρισκε το ίδιο
+			// και κρεμούσε το parse σε τιμή με δύο " #")
+			from = i + len(token)
 		}
 	}
 	// πρώτα " #", μετά " //"

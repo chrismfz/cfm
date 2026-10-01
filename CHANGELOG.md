@@ -18,6 +18,28 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Changed
+- **`SSLCOLLECTOR_SOCK_TOKEN` now lives in `/var/lib/cfm/secrets/`, not in
+  `cfm.conf`,** the same way as the two `detectors.conf` tokens below. The
+  daemon used to write a generated socket token back into `/etc/cfm/cfm.conf`,
+  which left that conffile "modified" on every node (hence the
+  `cfm.conf.rpmnew` / `.dpkg-dist` after every upgrade).
+  - The token is in `/var/lib/cfm/secrets/sslcollector_sock_token` (root
+    only), and that file is the one in use. It is created once: on the first
+    start after the upgrade the daemon copies the token from `cfm.conf`, so
+    the edge keeps working without a reload; otherwise it generates one. The
+    daemon no longer writes `cfm.conf`.
+  - After that the `cfm.conf` line is not used and can be set back to
+    `placeholder`, the new stock value. Keep the line.
+  - To rotate: set the line to `placeholder`, delete the file, restart.
+  - `cfm ssl` / `cfm sslcollector` (and the cfm-admin "Rescan certs" button)
+    send the token the edge has, `/var/lib/cfm/lua/cfm_token.lua`, which the
+    daemon rewrites with the token it serves; the stored file is the
+    fallback.
+  - A `cfm.conf` token too long for a token file (4096 bytes or more) is not
+    copied: a new one is generated.
+  - If no token can be generated, the daemon keeps serving the one it
+    already runs. With none running, the socket stays down instead of
+    serving with the `cfm.conf` placeholder as its bearer.
 - **`CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` now live in
   `/var/lib/cfm/secrets/`, not in `detectors.conf`.** The daemon used to
   generate these per-host tokens into `/etc/cfm/detectors.conf`. That left the
@@ -96,6 +118,10 @@ back-filled here — see the git/PR history for that period.
   exempted AS7140–AS7149, AS71400 and so on, and `host=shop.gr` also matched
   `myshop.gr`. `host=` also ignores a `:port` and a trailing dot. Use `*` / `?`
   for a deliberate pattern.
+- **A `cfm.conf` value with two inline ` #` (or ` //`) no longer hangs the
+  daemon and every `cfm` command.** For example `KEY = value #a #b`: the
+  inline-comment scan kept finding the same ` #` and never returned, so the
+  config never finished loading. Which comments are cut is unchanged.
 - **A `detectors.conf` whose tokens sat outside `[webdetector]` no longer
   reloads every 5 seconds.** The old generator appended a missing token to the
   end of the file, which could put it in another section. After that the
