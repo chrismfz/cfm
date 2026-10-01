@@ -353,9 +353,12 @@ func (e *Enricher) LookupGeoFast(ipStr string) Result {
 //
 // Trade-off: only PTR is deferred. Country and ASN remain inline-accurate
 // on every request — country-block rules in cfm-admin still fire on the
-// FIRST request from a fresh IP. PTR-dependent paths (challenge_exclude
-// FCrDNS for Googlebot etc.) live in autoblock_sink and call Lookup()
-// synchronously on their own pipeline; they're unaffected by this method.
+// FIRST request from a fresh IP. PTR-dependent paths that need a FRESH PTR
+// (challenge_exclude FCrDNS for Googlebot etc.) live in autoblock_sink and
+// call Lookup() synchronously on their own pipeline; they're unaffected by
+// this method. The decision bridge's serve-time challenge-exclude check
+// (ChalExcludeHot) does read PTR through here: a bare ptr= rule sees "" on a
+// cold IP's first request (no match) and the PTR from cache afterwards.
 //
 // Concurrent misses for the same IP are coalesced via singleflight, and
 // the total number of in-flight async lookups is bounded by asyncSem so

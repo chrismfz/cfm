@@ -42,11 +42,38 @@
 #                       skip_vhost_only → only suppress vhost-wide rules
 #                                          (CHALLENGE_VHOST, CHALLENGE_SUSPICIOUS_VHOST_SCORE)
 #
+# Where the rules apply
+#   1. The log-driven detector: a matching IP is never armed with a per-IP
+#      challenge (all rule kinds, FCrDNS included). It also exempts a matching
+#      IP already seen on a vhost when that vhost goes under a vhost-wide
+#      challenge — but that check has no User-Agent, so it never fires for a
+#      rule with a ua= condition.
+#   2. Serve time, at the edge decision bridge: a matching REQUEST is not served
+#      a VHOST-WIDE challenge (auto suspicious_vhost / under_attack / manual),
+#      with either action. It makes no inline DNS lookups, so it uses ua / asn /
+#      host and a bare ptr= against the cached PTR only; a rule whose ptr= needs
+#      verify_fcrdns=1 never applies here (verified crawlers are cleared by
+#      CHALLENGE_GOODBOT_EXEMPT instead). It never lifts a per-IP challenge
+#      (e.g. a WAF challenge-tier hit) or a block, and the WAF still runs.
+#      Each lift is counted (bridge stats challenge_exclude_lifts) and logged to
+#      the challenges log as "action=exclude_lift", at most once per host per
+#      minute.
+#      Because it applies per request:
+#        - a ua-only rule lifts the vhost-wide challenge for ANYONE sending
+#          that UA;
+#        - an asn-only rule (e.g. the Skroutz and Apple rules below) lifts it
+#          for EVERY request from that network, Under-Attack Mode included.
+#      Only list networks you trust that much; pair asn= with ua= otherwise.
+
 # Glob semantics
 #   '*' matches any run of characters (including the empty string). It is NOT
 #       a path separator — it freely crosses '/' inside UA strings.
 #   '?' matches exactly one character.
-#   A pattern with no '*' or '?' is treated as a substring match.
+#   A pattern with no '*' or '?':
+#     ua= / ptr=  → substring match;
+#     asn=        → EXACT match (asn=as714 is AS714 only, never AS7145);
+#     host=       → that host and its subdomains (host=shop.gr covers
+#                   www.shop.gr, never myshop.gr).
 #
 # Safety guidance
 #   - UA alone is trivially spoofable. Anyone can set User-Agent: AhrefsBot.
