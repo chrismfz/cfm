@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -363,5 +364,38 @@ func TestResolveConfUnknown(t *testing.T) {
 	}
 	if got, src, err := ResolveConfUnknown(ChallengeToken); err != nil || got != strongA || src != SourceStore {
 		t.Fatalf("stored: ResolveConfUnknown = (%q, %q, %v), want the stored token", got, src, err)
+	}
+}
+
+// In the daemon, Effective is the token the process runs, even while its file
+// is deleted for a rotation that the next reload will perform.
+func TestEffectiveIsTheRunningTokenInTheDaemon(t *testing.T) {
+	useTempDir(t)
+	if _, _, err := Resolve(ChallengeToken, strongA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(Path(ChallengeToken)); err != nil {
+		t.Fatal(err)
+	}
+	if got := Effective(ChallengeToken, "placeholder"); got != strongA {
+		t.Fatalf("Effective = %q, want the running strongA until the reload", got)
+	}
+}
+
+// A store that keeps failing to write fails with the same message every
+// time (no random temp-file name), so the daemon logs it once.
+func TestWriteErrorIsStableAcrossReloads(t *testing.T) {
+	dir := useTempDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the file goes: CreateTemp works, the rename fails.
+	if err := os.MkdirAll(filepath.Join(Path(ChallengeToken), "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	e1 := write(ChallengeToken, strongA)
+	e2 := write(ChallengeToken, strongA)
+	if e1 == nil || e2 == nil || e1.Error() != e2.Error() || strings.Contains(e1.Error(), ".tmp-") {
+		t.Fatalf("write errors = %v / %v, want the same message without the temp file name", e1, e2)
 	}
 }

@@ -121,9 +121,13 @@ func ReadChallengeTokenProbe(path string) LuaTokenProbe {
 	// has none does it take the detectors.conf one, from the section
 	// hostsecrets.ConfSection picks. Probe the same, with the same cleaner.
 	// No [webdetector] in the effective config: the daemon resolves no token.
+	// A broken overlay: the daemon starts base-only (or keeps running), so
+	// fall back to the base file as it does.
 	merged, err := detconf.ReadLayeredFile(path)
 	if err != nil {
-		return LuaTokenProbe{}
+		if merged, err = detconf.ReadSectionsFile(path); err != nil {
+			return LuaTokenProbe{}
+		}
 	}
 	mergedWD, ok := merged.ByName["webdetector"]
 	if !ok {

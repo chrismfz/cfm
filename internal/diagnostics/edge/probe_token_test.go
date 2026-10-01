@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 
+	"cfm/internal/detconf"
 	"cfm/internal/hostsecrets"
 )
 
@@ -104,5 +105,32 @@ func TestReadChallengeTokenProbeOverlayOnlyToken(t *testing.T) {
 	}
 	if got := ReadChallengeTokenProbe(conf); got.Token == overlay {
 		t.Fatalf("ReadChallengeTokenProbe = %+v, want the overlay token ignored", got)
+	}
+}
+
+// A broken detectors.d overlay: the daemon starts base-only and keeps running
+// its stored token, so the probe reads the base and reports that token.
+func TestReadChallengeTokenProbeBrokenOverlay(t *testing.T) {
+	t.Setenv("CHALLENGE_TOKEN", "")
+	t.Cleanup(hostsecrets.SetDirForTest(filepath.Join(t.TempDir(), "secrets")))
+	const stored = "0123456789abcdef0123456789abcdef0123456789abcdef"
+	if _, _, err := hostsecrets.Resolve(hostsecrets.ChallengeToken, stored); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(hostsecrets.SetDirForTest(hostsecrets.Dir)) // forget the running token: probe like a CLI
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "detectors.conf")
+	if err := os.WriteFile(conf, []byte("[webdetector]\nCHALLENGE_TOKEN = placeholder\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A file where the overlay dir goes: the layered read fails (as root too).
+	if err := os.WriteFile(filepath.Join(dir, "detectors.d"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := detconf.ReadLayeredFile(conf); err == nil {
+		t.Fatal("fixture: the layered read must fail")
+	}
+	if got := ReadChallengeTokenProbe(conf); got.Token != stored {
+		t.Fatalf("ReadChallengeTokenProbe = %+v, want the stored token", got)
 	}
 }

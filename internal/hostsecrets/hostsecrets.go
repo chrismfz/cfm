@@ -164,12 +164,19 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 }
 
 // Effective is the value the daemon runs with for key, for read-only probes
-// (cfm health), by the same precedence as Resolve. A probe runs in its own
-// process, so it cannot see a token the daemon holds only in memory (a store
-// it could not write, or a file deleted to rotate, before the restart). When
+// (cfm health), by the same precedence as Resolve. In the daemon it is the
+// token this process runs. A probe in its own process cannot see a token the
+// daemon holds only in memory (a store it could not write, or a file deleted
+// to rotate, before the restart). When
 // nothing usable applies it returns the legacy value as given (possibly weak
 // or empty), so a probe reports weak/missing. It never generates or writes.
 func Effective(key, legacy string) string {
+	// In the daemon, the token this process runs (the last Resolve) is the
+	// answer, even while its file is being rotated (deleted, not yet
+	// reloaded). A separate probe process has none and resolves the store.
+	if v, found := running.Load(key); found {
+		return v.(string)
+	}
 	legacy = strings.TrimSpace(legacy)
 	cur, readErr := readStore(key)
 	if v, _, ok := choose(key, legacy, cur, readErr); ok {
@@ -289,6 +296,21 @@ func ensureDir() error {
 	return nil
 }
 
+// bare drops the path from a file-operation error: write's temp file has a
+// random name, and an error that differs on every reload defeats the
+// log-once guard of a store that keeps failing.
+func bare(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return le.Err
+	}
+	return err
+}
+
 // write stores value atomically: a temp file in Dir (0600), then rename.
 func write(key, value string) error {
 	if err := ensureDir(); err != nil {
@@ -296,27 +318,27 @@ func write(key, value string) error {
 	}
 	f, err := os.CreateTemp(Dir, "."+strings.ToLower(key)+".tmp-*")
 	if err != nil {
-		return fmt.Errorf("hostsecrets: temp file: %w", err)
+		return fmt.Errorf("hostsecrets: temp file in %s: %w", Dir, bare(err))
 	}
 	tmp := f.Name()
 	defer func() { _ = os.Remove(tmp) }() // no-op after a successful rename
 	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("hostsecrets: chmod temp: %w", err)
+		return fmt.Errorf("hostsecrets: chmod temp: %w", bare(err))
 	}
 	if _, err := f.WriteString(value + "\n"); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("hostsecrets: write temp: %w", err)
+		return fmt.Errorf("hostsecrets: write temp: %w", bare(err))
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		return fmt.Errorf("hostsecrets: sync temp: %w", err)
+		return fmt.Errorf("hostsecrets: sync temp: %w", bare(err))
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("hostsecrets: close temp: %w", err)
+		return fmt.Errorf("hostsecrets: close temp: %w", bare(err))
 	}
 	if err := os.Rename(tmp, Path(key)); err != nil {
-		return fmt.Errorf("hostsecrets: rename into %s: %w", Path(key), err)
+		return fmt.Errorf("hostsecrets: rename into %s: %w", Path(key), bare(err))
 	}
 	// Make the new directory entry durable too: a migrated token lost to a
 	// power cut would be regenerated once the conf line is a placeholder.
