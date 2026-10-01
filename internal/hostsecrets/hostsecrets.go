@@ -298,10 +298,13 @@ func Effective(key, legacy string) string {
 // file (one copied into a file readStore then refuses would never recover).
 // The detectors.conf tokens must also survive that file's value cleaner
 // (Usable). The cfm.conf value is used as the cfm.conf reader returns it (it
-// has already cut an inline comment and one pair of surrounding quotes; a ';'
-// or an embedded '#' stays), the value the old binary served, so strength
-// alone decides for SSLCOLLECTOR_SOCK_TOKEN (and the value goes to the Lua
-// mirror and the socket check verbatim).
+// has already cut an inline comment, a '#' or "//" after whitespace or a
+// closing quote, and one pair of surrounding quotes; a ';' or any other '#'
+// stays), so strength alone decides for SSLCOLLECTOR_SOCK_TOKEN (and the
+// value goes to the Lua mirror and the socket check verbatim). A token the old
+// binary served never held whitespace (IsStrongToken), so the reader returns
+// it unchanged, unless a quote sits right before a '#' or "//" in it (and
+// ParseCFMConf warns about a secret it now reads differently).
 func UsableFor(key, v string) bool {
 	if len(v) >= maxTokenFile { // the file is v plus a newline
 		return false

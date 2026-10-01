@@ -7,6 +7,7 @@ func TestIsSecret(t *testing.T) {
 		"CHALLENGE_TOKEN", "OPENRESTY_TOKEN", "bridge_token",
 		"HMAC_SECRET", "clamd_password", "API_KEY", "apikey",
 		"private_key", "privatekey",
+		"MAXMIND_LICENSE_KEY", "AUTH_MFA_ENCRYPTION_KEY",
 	}
 	for _, k := range secret {
 		if !IsSecret(k) {

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cfm/internal/secretkeys"
 )
 
 // Config is flat-by-category: one struct per logical area.
@@ -651,8 +653,15 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			return nil, fmt.Errorf("config: invalid line %d: %q", lineNo, line)
 		}
 		key := strings.ToUpper(strings.TrimSpace(k))
-		val := strings.TrimSpace(v)
-		val = stripInlineComment(val)
+		raw := strings.TrimSpace(v)
+		val := stripInlineComment(raw)
+		if secretkeys.IsSecret(key) && len(val) < len(legacyStripInlineComment(raw)) {
+			// Once per key per process (the file is parsed on every
+			// reload, and by most CLI commands); never the value.
+			if _, seen := warnedCutSecret.LoadOrStore(key, true); !seen {
+				log.Printf("config: warning: %s (cfm.conf or cfm.api.conf, line %d): text after a one-space '#' or '//' is cut from its value since 2026-10; if it is part of the secret, quote the value (a changed AUTH_TOKEN also changes the keys derived from it, such as the MFA key)", key, lineNo)
+			}
+		}
 		val = trimQuotes(val)
 
 		switch key {
@@ -1206,6 +1215,9 @@ func parseInt(s string) int {
 	return i
 }
 
+// splitCSV splits a cfm.conf list value. ParseCFMConf has already cut its
+// inline comment; cutting again per item, after trimQuotes, would cut a
+// " #" the operator quoted on purpose.
 func splitCSV(s string) []string {
 	if strings.TrimSpace(s) == "" {
 		return nil
@@ -1213,7 +1225,7 @@ func splitCSV(s string) []string {
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
+		p = trimQuotes(strings.TrimSpace(p))
 		if p != "" {
 			out = append(out, p)
 		}
@@ -1250,7 +1262,7 @@ func parseUint16CSV(s string) []uint16 {
 	parts := strings.Split(s, ",")
 	out := make([]uint16, 0, len(parts))
 	for _, p := range parts {
-		p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
+		p = trimQuotes(strings.TrimSpace(p))
 		if p == "" {
 			continue
 		}
@@ -1271,7 +1283,7 @@ func parseUint32CSV(s string) []uint32 {
 	parts := strings.Split(s, ",")
 	out := make([]uint32, 0, len(parts))
 	for _, p := range parts {
-		p = trimQuotes(stripInlineComment(strings.TrimSpace(p)))
+		p = trimQuotes(strings.TrimSpace(p))
 		if p == "" {
 			continue
 		}
@@ -1402,29 +1414,60 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
-// κόβει inline σχόλια που ξεκινούν μετά από κενό: " # ..." ή " // ..."
-// (δεν πειράζει "http://..." γιατί απαιτούμε προηγούμενο space)
+// stripInlineComment cuts an inline comment: a '#' or "//" after a space, a
+// tab or a closing quote ("value # note", "value // note", `"1"# on`). One
+// that follows anything else ("a#b", "http://x", a leading "#abc") is part of
+// the value, and so is one inside quotes (`"a # b"`, JSON, a quoted list
+// item). A quote opens only at the start of the value or after whitespace or
+// one of ",:[{(", and closes only before the end, whitespace, a comment or one
+// of ",:]})"; inside double quotes a backslash-quote does not close. So a
+// stray quote (`12"`, an apostrophe in "don't") opens or closes nothing.
+//
+// When a quote is left open the quotes cannot be trusted, and the rule before
+// 2026-10 applies (legacyStripInlineComment), so such a value never keeps
+// more comment text than it did then.
 func stripInlineComment(s string) string {
-	cut := func(txt, token string) string {
-		for from := 0; ; {
-			k := strings.Index(txt[from:], token)
-			if k < 0 {
-				return txt
+	isComment := func(i int) bool {
+		return s[i] == '#' || (s[i] == '/' && i+1 < len(s) && s[i+1] == '/')
+	}
+	var quote byte
+	closed := -1 // index just past the last closing quote
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == quote && !(quote == '"' && s[i-1] == '\\') &&
+				(i+1 == len(s) || strings.IndexByte(" \t,:]})#/", s[i+1]) >= 0) {
+				quote, closed = 0, i+1
 			}
-			i := from + k
-			if i == 0 || txt[i-1] == ' ' || txt[i-1] == '\t' {
-				return strings.TrimSpace(txt[:i])
-			}
-			// βρες επόμενο (μετά από αυτό: το παλιό loop ξαναέβρισκε το ίδιο
-			// και κρεμούσε το parse σε τιμή με δύο " #")
-			from = i + len(token)
+		case (c == '"' || c == '\'') && (i == 0 || strings.IndexByte(" \t,:[{(", s[i-1]) >= 0):
+			quote = c
+		case isComment(i) && i > 0 && (s[i-1] == ' ' || s[i-1] == '\t' || i == closed):
+			return strings.TrimSpace(s[:i])
 		}
 	}
-	// πρώτα " #", μετά " //"
-	s = cut(s, " #")
-	s = cut(s, " //")
+	if quote != 0 {
+		return legacyStripInlineComment(s)
+	}
 	return strings.TrimSpace(s)
 }
+
+// legacyStripInlineComment is the rule before 2026-10: a '#' or "//" is a
+// comment only after a space that itself follows a space or tab. Kept for a
+// value with a quote left open, and to tell a secret the new rule cuts
+// (ParseCFMConf warns).
+func legacyStripInlineComment(s string) string {
+	for i := 2; i < len(s); i++ {
+		if (s[i] == '#' || (s[i] == '/' && i+1 < len(s) && s[i+1] == '/')) &&
+			s[i-1] == ' ' && (s[i-2] == ' ' || s[i-2] == '\t') {
+			return strings.TrimSpace(s[:i])
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
+// warnedCutSecret holds the credential keys ParseCFMConf has warned about.
+var warnedCutSecret sync.Map
 
 func (c *SystemTweaksConfig) SetDefaults() {
 	if c.CTPerGB == 0 {

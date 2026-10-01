@@ -18,6 +18,32 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Changed
+- **`cfm.conf` inline comments after a single space are cut, so the value
+  before them applies.**
+  - Before, a comment was cut only with two spaces or a tab in front of it.
+    In `SYS_CT_MIN = "262144" # minimum entries` the whole string was the
+    value; it did not parse, and the built-in default applied with no
+    warning. A bool such as `KEY = 1 # on` read as off.
+  - Now a `#` or `//` starts a comment when it follows a space, a tab or a
+    closing quote (`"1"# on`). One that follows anything else stays part of
+    the value (`http://…`, `a#b`, a value starting with `#` or `//`, as a
+    raw or base64 key can), and so does one inside quotes (`"a # b"`, a JSON
+    string, a quoted list such as `"a # b, c"`). Quote a value that really
+    contains ` #` or ` //`.
+  - A quote opens only at the start of the value or after whitespace or
+    one of `,:[{(`, and closes only before the end, whitespace, a comment
+    or one of `,:]})`, so a stray `"` or an apostrophe inside a word opens
+    nothing. When a value leaves a quote open, the old rule applies, so it
+    never keeps more comment text than before.
+  - A credential (`AUTH_TOKEN`, `MCP_TOKEN`, `MAXMIND_LICENSE_KEY`, any key
+    `cfm debug` redacts) that the new rule cuts shorter logs a warning once,
+    without the value: quote it if the cut text was part of the secret. A
+    changed `AUTH_TOKEN` also changes the keys derived from it, such as the
+    MFA key when `AUTH_MFA_ENCRYPTION_KEY` is empty.
+  - The stock `cfm.conf` has two lines with a one-space comment,
+    `SYS_CT_MIN` and `SYS_CT_MAX`. Their values equal the defaults, so nothing changes unless you edited
+    them; then your value now applies. On the nodes checked, those two are
+    the only lines affected.
 - **`SSLCOLLECTOR_SOCK_TOKEN` now lives in `/var/lib/cfm/secrets/`, not in
   `cfm.conf`,** the same way as the two `detectors.conf` tokens below. The
   daemon used to write a generated socket token back into `/etc/cfm/cfm.conf`,
@@ -85,6 +111,15 @@ back-filled here — see the git/PR history for that period.
     older binary ran it.
 
 ### Fixed
+- **`cfm debug` bundles and the MCP detectors-config view now redact
+  `MAXMIND_LICENSE_KEY` and `AUTH_MFA_ENCRYPTION_KEY`.** The secret-key
+  matcher knew `token`, `secret`, `password`, `hmac`, `api_key` and
+  `private_key`, but not `license_key` or `encryption_key`, so those two
+  values went into a debug bundle in clear.
+- **A `cfm.conf` value with two inline ` #` (or ` //`) no longer hangs the
+  daemon and every `cfm` command.** For example `KEY = value #a #b`: the
+  inline-comment scan kept finding the same ` #` and never returned, so the
+  config never finished loading.
 - **Meta's link-preview crawlers are no longer served the challenge page on a
   vhost-wide challenge.** Under a vhost-wide challenge (`suspicious_vhost`,
   `under_attack` or a manual one) the edge serves the challenge to every client
@@ -118,10 +153,6 @@ back-filled here — see the git/PR history for that period.
   exempted AS7140–AS7149, AS71400 and so on, and `host=shop.gr` also matched
   `myshop.gr`. `host=` also ignores a `:port` and a trailing dot. Use `*` / `?`
   for a deliberate pattern.
-- **A `cfm.conf` value with two inline ` #` (or ` //`) no longer hangs the
-  daemon and every `cfm` command.** For example `KEY = value #a #b`: the
-  inline-comment scan kept finding the same ` #` and never returned, so the
-  config never finished loading. Which comments are cut is unchanged.
 - **A `detectors.conf` whose tokens sat outside `[webdetector]` no longer
   reloads every 5 seconds.** The old generator appended a missing token to the
   end of the file, which could put it in another section. After that the
