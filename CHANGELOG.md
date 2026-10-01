@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Changed
+- **`SSLCOLLECTOR_SOCK_TOKEN` now lives in `/var/lib/cfm/secrets/`, not in
+  `cfm.conf`,** the same way as the two `detectors.conf` tokens below. The
+  daemon used to write a generated socket token back into `/etc/cfm/cfm.conf`,
+  which left that conffile "modified" on every node (hence the
+  `cfm.conf.rpmnew` / `.dpkg-dist` after every upgrade).
+  - The token is in `/var/lib/cfm/secrets/sslcollector_sock_token` (root
+    only), and that file is the one in use. It is created once: on the first
+    start after the upgrade the daemon copies the token from `cfm.conf`, so
+    the edge keeps working without a reload; otherwise it generates one. CFM
+    never writes `cfm.conf`.
+  - After that the `cfm.conf` line is not used and can be set back to
+    `placeholder`, the new stock value. Keep the line.
+  - To rotate: set the line to `placeholder`, delete the file, restart.
+  - `cfm sslcollector` commands read the token from the same file.
+  - If a token cannot even be generated, the socket stays down instead of
+    serving with the `cfm.conf` placeholder as its bearer.
 - **`CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` now live in
   `/var/lib/cfm/secrets/`, not in `detectors.conf`.** The daemon used to
   generate these per-host tokens into `/etc/cfm/detectors.conf`. That left the

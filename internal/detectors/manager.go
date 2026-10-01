@@ -11,8 +11,6 @@ import (
 	webdet "cfm/internal/webdetector"
 	"context"
 	"encoding/binary"
-	"errors"
-	"fmt"
 	"hash/fnv"
 	"os"
 	"sort"
@@ -799,11 +797,6 @@ func (m *manager) stopAll() {
 func resolveHostTokens(confWD KV, confKnown bool) (challenge, bridge string) {
 	resolve := func(key string) string {
 		legacy := kvStrClean(confWD, key, "")
-		if sslcollector.IsStrongToken(legacy) && !hostsecrets.Usable(legacy) {
-			if _, seen := tokenUnusableLogged.LoadOrStore(key, true); !seen {
-				logging.Logf("[detectors] %s in detectors.conf is not used: the config reader would change it (a quoted ';', '#' or ' //', or stray quotes), so it cannot run as written", key)
-			}
-		}
 		var tok, src string
 		var err error
 		if confKnown {
@@ -818,75 +811,12 @@ func resolveHostTokens(confWD KV, confKnown bool) (challenge, bridge string) {
 			logging.Logf("[detectors] %s generation failed: %v", key, err)
 			return ""
 		}
-		logTokenSource(key, src, err)
-		if src == hostsecrets.SourceStore && hostsecrets.Usable(legacy) && legacy != tok {
-			// Once per distinct value: a later edit of the line logs again.
-			if prev, seen := tokenConfIgnoredLogged.Load(key); !seen || prev.(string) != legacy {
-				tokenConfIgnoredLogged.Store(key, legacy)
-				logging.Logf("[detectors] %s in detectors.conf is ignored: the token in %s is the one in use. To switch to the detectors.conf value, delete that file and restart; otherwise set the line to placeholder", key, hostsecrets.Path(key))
-			}
+		for _, line := range hostsecrets.Report(key, "detectors.conf", legacy, tok, src, err) {
+			logging.Logf("[detectors] %s", line)
 		}
 		return tok
 	}
 	return resolve(hostsecrets.ChallengeToken), resolve(hostsecrets.BridgeToken)
-}
-
-// tokenConfIgnoredLogged / tokenFromConfLogged remember, per token, that the
-// hint was logged: a reload happens on every config save and tailed-log
-// rotation, and the hint is the same every time.
-var tokenConfIgnoredLogged, tokenFromConfLogged, tokenUnusableLogged sync.Map
-
-// storeFallback says what the daemon runs while the token file cannot be used.
-func storeFallback(source string) string {
-	switch source {
-	case hostsecrets.SourceRunning:
-		return "keeping the running token"
-	case hostsecrets.SourceConf:
-		return "running the detectors.conf token, not stored"
-	default:
-		return "running a generated token, not stored: a restart generates another"
-	}
-}
-
-// tokenErrLogged holds, per token, the last error logged, so a store
-// that stays unwritable logs it once, not on every reload. Cleared on success.
-var tokenErrLogged sync.Map
-
-// logTokenSource logs where a [webdetector] token came from when it is worth
-// knowing: generated, copied from detectors.conf (once per process), or not
-// stored. A token read from the store is the steady state: silent.
-func logTokenSource(key, source string, err error) {
-	var msg string
-	switch {
-	case errors.Is(err, hostsecrets.ErrConfUnknown):
-		msg = fmt.Sprintf("[detectors] %s: %v — running it for now; retried each reload", key, err)
-	case errors.Is(err, hostsecrets.ErrStoreChanged):
-		msg = fmt.Sprintf("[detectors] %s: %v (%s) — running the %s token until then", key, err, hostsecrets.Path(key), source)
-	case errors.Is(err, hostsecrets.ErrStoreUnusable), errors.Is(err, hostsecrets.ErrStoreUnreadable):
-		msg = fmt.Sprintf("[detectors] %s: %v — the file is left alone; %s; retried each reload", key, err, storeFallback(source))
-	case err != nil && source == hostsecrets.SourceConf:
-		msg = fmt.Sprintf("[detectors] %s from detectors.conf could not be copied into %s: %v — running with it; retried each reload", key, hostsecrets.Path(key), err)
-	case err != nil:
-		msg = fmt.Sprintf("[detectors] %s source=%s NOT stored in %s: %v — kept for this process (retried each reload); a restart generates a new one", key, source, hostsecrets.Path(key), err)
-	}
-	if msg != "" {
-		// Keyed on the error, not the message: the source shifts between
-		// reloads (generated/conf first, running after) for the same fault.
-		if prev, ok := tokenErrLogged.Load(key); !ok || prev.(string) != err.Error() {
-			tokenErrLogged.Store(key, err.Error())
-			logging.Logf("%s", msg)
-		}
-		return
-	}
-	tokenErrLogged.Delete(key)
-	switch source {
-	case hostsecrets.SourceGenerated:
-		logging.Logf("[detectors] %s generated and stored in %s", key, hostsecrets.Path(key))
-	case hostsecrets.SourceConf:
-		if _, seen := tokenFromConfLogged.LoadOrStore(key, true); !seen {
-			logging.Logf("[detectors] %s copied from detectors.conf into %s, which is now the one in use; the detectors.conf line can be set back to placeholder", key, hostsecrets.Path(key))
-		}
-	}
 }
 
 // helpers for autoblock

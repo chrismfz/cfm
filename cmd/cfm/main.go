@@ -40,6 +40,7 @@ import (
 
 	"cfm/internal/detectors/mysql"
 	"cfm/internal/dnat"
+	"cfm/internal/hostsecrets"
 	"cfm/internal/sslcollector"
 	webdet "cfm/internal/webdetector"
 
@@ -213,7 +214,9 @@ func sslSockDefaults() (string, string) {
 		sock = "/var/run/sslcollector.sock"
 	}
 
-	return sock, cfg.SSLCollectorSock.Token
+	// The daemon serves the per-host stored token (hostsecrets); the cfm.conf
+	// value matters only until it has been copied there.
+	return sock, hostsecrets.Effective(hostsecrets.SSLCollectorToken, cfg.SSLCollectorSock.Token)
 }
 
 func main() {
@@ -741,7 +744,7 @@ func runDaemon(args []string) {
 	// limitation), surfaced here only because the gate is now visible
 	// at the top of startup. Operators with parse errors will see the
 	// usual "cfm.conf parse error" line and need to fix the config.
-	sslSockLc := sslcollector.NewSockLifecycle(sslcol, filepath.Join(cfgDir, "cfm.conf"))
+	sslSockLc := sslcollector.NewSockLifecycle(sslcol)
 	defer sslSockLc.Stop()
 	if engineCfg != nil {
 		sslSockLc.ApplyConfig(ctx, &engineCfg.SSLCollectorSock)

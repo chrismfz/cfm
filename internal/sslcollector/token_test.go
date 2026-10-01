@@ -318,84 +318,9 @@ func TestWriteLuaTokenToExistingParents(t *testing.T) {
 // cfm_bridge_token.lua always compile.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// zwsp is U+200B (zero-width space). Go %q renders it as the ​ escape,
-// which LuaJIT cannot parse — the F55 trigger. Written as an interpreted string
-// literal so the source stays plain ASCII.
-const zwsp = "​"
-
-func TestTokenIsLuaSafe(t *testing.T) {
-	t.Parallel()
-	safe := []string{
-		"abcdef0123456789",                   // hex (the generated form)
-		"AbC-_.~+/=Xyz012345",                // base64url-ish + punctuation
-		strings.Repeat("a", 48),              // long alnum
-		"!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", // every graphical ASCII punct incl. \" and \\
-	}
-	for _, s := range safe {
-		if !tokenIsLuaSafe(s) {
-			t.Errorf("tokenIsLuaSafe(%q) = false, want true", s)
-		}
-	}
-	unsafe := []string{
-		"abc def",                            // space
-		"abc\tdef",                           // tab
-		"abc\ndef",                           // newline
-		"abc\x00def",                         // NUL
-		"abc\x1fdef",                         // control
-		"abc\x7fdef",                         // DEL
-		"abc" + zwsp + "def",                 // zero-width space (multibyte)
-		"abc" + string(rune(0x00e9)) + "def", // é, non-ASCII accented rune
-		"abc" + string(rune(0x00a0)) + "def", // non-breaking space
-	}
-	for _, s := range unsafe {
-		if tokenIsLuaSafe(s) {
-			t.Errorf("tokenIsLuaSafe(%q) = true, want false", s)
-		}
-	}
-}
-
-func TestValidateOrGenerateTokenRegeneratesLuaUnsafe(t *testing.T) {
-	t.Parallel()
-	// Strong length (>=32) and not a placeholder, but contains a ZWSP → must be
-	// regenerated into a Lua-safe token.
-	bad := strings.Repeat("a", 40) + zwsp + strings.Repeat("b", 8)
-
-	got, err := ValidateOrGenerateToken("", bad)
-	if err != nil {
-		t.Fatalf("ValidateOrGenerateToken: %v", err)
-	}
-	if got == bad {
-		t.Fatalf("Lua-unsafe token returned unchanged; expected regeneration")
-	}
-	if len(got) < 32 || !tokenIsLuaSafe(got) {
-		t.Fatalf("regenerated token not strong+Lua-safe: %q", got)
-	}
-
-	// The same guard decides for the [webdetector] tokens (hostsecrets), and
-	// GenerateToken's output must always pass it.
-	if IsStrongToken(bad) {
-		t.Fatalf("IsStrongToken accepted a Lua-unsafe token")
-	}
-	gen, err := GenerateToken()
-	if err != nil {
-		t.Fatalf("GenerateToken: %v", err)
-	}
-	if !IsStrongToken(gen) || len(gen) != 48 {
-		t.Fatalf("GenerateToken returned a token IsStrongToken rejects: %q", gen)
-	}
-}
-
-func TestValidateOrGenerateTokenKeepsStrongSafeToken(t *testing.T) {
-	t.Parallel()
-	strong := strings.Repeat("a1b2c3d4", 6) // 48 chars, Lua-safe, not a placeholder
-	got, err := ValidateOrGenerateToken("", strong)
-	if err != nil {
-		t.Fatalf("ValidateOrGenerateToken: %v", err)
-	}
-	if got != strong {
-		t.Fatalf("strong Lua-safe token was changed: %q -> %q", strong, got)
-	}
-}
+// zwsp is U+200B (zero-width space). Go %q renders it as the \u200b escape,
+// which LuaJIT cannot parse — the F55 trigger (hostsecrets.LuaSafe rejects it).
+const zwsp = "\u200b"
 
 // Documents WHY the F55 guard exists: emitting an unvalidated ZWSP token yields
 // the Go %q ​ escape (invalid LuaJIT). The guard ensures the validators

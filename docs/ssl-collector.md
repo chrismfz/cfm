@@ -72,8 +72,12 @@ is a significantly smaller blast radius for key material enumeration.
 The socket is authenticated with a bearer token carried in the
 `X-SSLCollector-Token` HTTP header.  The token is:
 
-- Auto-generated at daemon startup if absent or a known placeholder (see
-  `internal/sslcollector/token.go:ValidateOrGenerateToken`).
+- Kept in `/var/lib/cfm/secrets/sslcollector_sock_token` (root, `0600`),
+  created once per host by `internal/hostsecrets`: copied from a
+  `SSLCOLLECTOR_SOCK_TOKEN` still set in `cfm.conf`, else generated. After
+  that `cfm.conf` is not consulted, and the daemon never writes it. To
+  rotate: set the `cfm.conf` line to `placeholder`, delete the file,
+  restart.
 - Written atomically to `/var/lib/cfm/lua/cfm_token.lua` at mode `0640`
   (owner `root`, group `cfm`).
 - Compared in constant time (`crypto/subtle.ConstantTimeCompare`) on every
@@ -278,7 +282,7 @@ tmpfs path (root-only, lost on reboot) would achieve this.
 |-----|---------|-------------|
 | `SSLCOLLECTOR_SOCK_ENABLE` | `1` | Enable the unix socket server |
 | `SSLCOLLECTOR_SOCK_PATH` | `/var/run/sslcollector.sock` | Socket path |
-| `SSLCOLLECTOR_SOCK_TOKEN` | *(auto-generated)* | Bearer token; weak/placeholder values are replaced at startup |
+| `SSLCOLLECTOR_SOCK_TOKEN` | `placeholder` | Read once, to create `/var/lib/cfm/secrets/sslcollector_sock_token` (the token in use) when that file is missing |
 | `SSLCOLLECTOR_SOCK_PEM_TTL` | `10m` | In-process PEM cache TTL per entry |
 | `SSLCOLLECTOR_SOCK_PEM_MAX` | `50000` | Maximum PEM cache entries before eviction |
 | `SSLCOLLECTOR_OFFLINE_CACHE` | `1` | Write/read on-disk snapshot for warm restart; set to `0` to disable |

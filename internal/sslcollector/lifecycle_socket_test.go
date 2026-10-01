@@ -16,8 +16,8 @@ import (
 // Test helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// strongToken is a 48-char value so ValidateOrGenerateToken treats it as
-// already-strong and does not try to patch cfm.conf.
+// strongToken is a 48-char usable token (hostsecrets.Usable): with the
+// package's empty token store it is copied there and served.
 const strongToken = "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijkl"
 
 func newTestCollector(t *testing.T) *Collector {
@@ -38,7 +38,7 @@ func newTestCollector(t *testing.T) *Collector {
 // the very outage class F27/F28 fix).
 func newTestLifecycle(t *testing.T, col *Collector) *SockLifecycle {
 	t.Helper()
-	lc := NewSockLifecycle(col, "")
+	lc := NewSockLifecycle(col)
 	d := t.TempDir()
 	lc.luaTokenPath = filepath.Join(d, "cfm_token.lua")
 	lc.luaConfigPath = filepath.Join(d, "cfm_sslcollector_config.lua")
@@ -347,8 +347,10 @@ func TestSockLifecycle_ConfigChangeRestartStaysDialable(t *testing.T) {
 	keyA := lc.testCfgKey()
 	genA := lc.testSeq()
 
-	// Rotate the token → different key → restart on the same path.
-	cfgB := &cfgpkg.SSLCollectorSockConfig{Enabled: true, SockPath: sock, Token: strongToken + "rotated", PEMTTL: time.Minute}
+	// A config change (the PEM TTL; the token itself comes from the per-host
+	// store, so editing it in cfm.conf changes nothing) → different key →
+	// restart on the same path.
+	cfgB := &cfgpkg.SSLCollectorSockConfig{Enabled: true, SockPath: sock, Token: strongToken, PEMTTL: 2 * time.Minute}
 	lc.ApplyConfig(ctx, cfgB)
 	if lc.testCfgKey() == keyA {
 		t.Fatalf("restart: cfgKey did not change on a config change")
