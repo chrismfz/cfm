@@ -64,3 +64,25 @@ func TestSockLifecycleTokenGeneratedOnAFreshNode(t *testing.T) {
 		t.Fatalf("store = %q (err %v), served %q; want one generated token, stored and served", b, err, cfg.Token)
 	}
 }
+
+// A working cfm.conf token with ';' or '#' (cfm.conf's reader keeps them, and
+// the old binary served them) is migrated as-is: served and mirrored to the
+// Lua token file unchanged, never replaced.
+func TestSockLifecycleMigratesATokenWithSemicolon(t *testing.T) {
+	t.Cleanup(hostsecrets.SetDirForTest(filepath.Join(t.TempDir(), "secrets")))
+	col := newTestCollector(t)
+	lc := newTestLifecycle(t, col)
+	defer lc.Stop()
+	tok := strongToken + ";x#y"
+	cfg := &cfgpkg.SSLCollectorSockConfig{Enabled: true, SockPath: filepath.Join(t.TempDir(), "s.sock"), Token: tok}
+	lc.ApplyConfig(context.Background(), cfg)
+	if cfg.Token != tok {
+		t.Fatalf("served %q, want the cfm.conf token %q", cfg.Token, tok)
+	}
+	if b, _ := os.ReadFile(hostsecrets.Path(hostsecrets.SSLCollectorToken)); strings.TrimSpace(string(b)) != tok {
+		t.Fatalf("store = %q, want %q", b, tok)
+	}
+	if b, _ := os.ReadFile(lc.luaTokenPath); !strings.Contains(string(b), `"`+tok+`"`) {
+		t.Fatalf("cfm_token.lua = %q, want it to return %q", b, tok)
+	}
+}

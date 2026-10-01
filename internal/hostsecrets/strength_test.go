@@ -8,7 +8,7 @@ import (
 // zwsp is U+200B (zero-width space). Go %q renders it as a \u escape, which
 // LuaJIT cannot parse — the F55 trigger. Written as an escape so the source
 // stays plain ASCII.
-const zwsp = "​"
+const zwsp = "\u200b"
 
 func TestLuaSafe(t *testing.T) {
 	t.Parallel()

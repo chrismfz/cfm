@@ -155,7 +155,7 @@ func readStore(key string) (string, error) {
 	if len(b) > maxTokenFile {
 		return "", fmt.Errorf("%w: over %d bytes", ErrStoreUnusable, maxTokenFile)
 	}
-	if v := strings.TrimSpace(string(b)); Usable(v) {
+	if v := strings.TrimSpace(string(b)); UsableFor(key, v) {
 		return v, nil
 	}
 	if strings.TrimSpace(string(b)) == "" {
@@ -175,6 +175,9 @@ var errEmpty = fmt.Errorf("%w: empty", ErrStoreUnusable)
 // daemon re-reads the resolved value through that cleaner, so a value it would
 // change would run as a DIFFERENT secret than the one mirrored to the edge
 // (cfm_bridge_token.lua), or as none at all.
+//
+// UsableFor applies it per key: the cfm.conf reader (SSLCollectorToken) keeps
+// ';', '#' and edge quotes verbatim, so there strength alone decides.
 func Usable(v string) bool {
 	return IsStrongToken(v) && detconf.CleanValue(v) == v
 }
@@ -238,7 +241,7 @@ func choose(key, legacy, cur string, readErr error) (value, source string, ok bo
 			return v.(string), SourceRunning, true
 		}
 	}
-	if Usable(legacy) {
+	if UsableFor(key, legacy) {
 		return legacy, SourceConf, true
 	}
 	if v, found := unstored.Load(key); found {
@@ -290,12 +293,26 @@ func Effective(key, legacy string) string {
 	return strings.TrimSpace(legacy)
 }
 
+// UsableFor reports whether v can be the token for key. The detectors.conf
+// tokens must also survive that file's value cleaner (Usable); cfm.conf's
+// reader returns ';', '#' and edge quotes unchanged, and the old binary served
+// such a SSLCOLLECTOR_SOCK_TOKEN as-is, so strength alone decides for it (and
+// the value goes to the Lua mirror and the socket check verbatim).
+func UsableFor(key, v string) bool {
+	if key == SSLCollectorToken {
+		return IsStrongToken(v) && strings.TrimSpace(v) == v
+	}
+	return Usable(v)
+}
+
 // ForgetRunning drops this process's running tokens (not a generated token
 // it could not store, which stays for the life of the process): the
 // detectors manager calls it when the config no longer has [webdetector], so
 // no probe reports a token nothing runs any more.
-func ForgetRunning() {
-	running.Range(func(k, _ any) bool { running.Delete(k); return true })
+func ForgetRunning(keys ...string) {
+	for _, k := range keys {
+		running.Delete(k)
+	}
 }
 
 // Running returns the token for key this process runs (the last Resolve), if

@@ -605,9 +605,44 @@ func TestForgetRunning(t *testing.T) {
 	if _, runs := Running(ChallengeToken); !runs {
 		t.Fatal("Running = false after Resolve")
 	}
-	ForgetRunning()
+	if _, _, err := Resolve(SSLCollectorToken, strongB); err != nil {
+		t.Fatal(err)
+	}
+	ForgetRunning(ChallengeToken, BridgeToken)
 	if _, runs := Running(ChallengeToken); runs {
 		t.Fatal("Running = true after ForgetRunning")
+	}
+	// Only the keys named: the sslcollector token keeps running when the
+	// detectors config loses its [webdetector] section.
+	if _, runs := Running(SSLCollectorToken); !runs {
+		t.Fatal("ForgetRunning dropped a key it was not given")
+	}
+}
+
+// cfm.conf's reader keeps ';', '#' and edge quotes verbatim, and the old
+// binary served such a socket token as-is: for SSLCOLLECTOR_SOCK_TOKEN
+// strength alone decides, so it is copied, not replaced.
+func TestUsableForTheCfmConfToken(t *testing.T) {
+	for _, v := range []string{strongA + ";x", strongA + "#x", "'" + strongA, `"` + strongA + `"`} {
+		if !UsableFor(SSLCollectorToken, v) {
+			t.Errorf("UsableFor(SSLCollectorToken, %q) = false, want true", v)
+		}
+		if UsableFor(ChallengeToken, v) {
+			t.Errorf("UsableFor(ChallengeToken, %q) = true, want false (the detectors.conf cleaner alters it)", v)
+		}
+	}
+	for _, v := range []string{"placeholder", strongA[:31], " " + strongA} {
+		if UsableFor(SSLCollectorToken, v) {
+			t.Errorf("UsableFor(SSLCollectorToken, %q) = true, want false", v)
+		}
+	}
+	useTempDir(t)
+	tok, src, err := Resolve(SSLCollectorToken, strongA+";x")
+	if err != nil || tok != strongA+";x" || src != SourceConf || stored(SSLCollectorToken) != strongA+";x" {
+		t.Fatalf("Resolve = (%q, %q, %v); want the cfm.conf token copied as-is", tok, src, err)
+	}
+	if got := Report(SSLCollectorToken, "cfm.conf", strongA+";x", tok, src, err); len(got) != 1 || strings.Contains(got[0], "not used") {
+		t.Fatalf("Report = %q, want only the copied hint", got)
 	}
 }
 

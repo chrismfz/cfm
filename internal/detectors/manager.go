@@ -420,7 +420,7 @@ func (m *manager) maybeReload(parent context.Context) {
 	} else {
 		// No [webdetector] any more: no token runs (health must not report
 		// the last one resolved).
-		hostsecrets.ForgetRunning()
+		hostsecrets.ForgetRunning(hostsecrets.ChallengeToken, hostsecrets.BridgeToken)
 	}
 	// ─────────────────────────────────────────────────────────────────────────
 

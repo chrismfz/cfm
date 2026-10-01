@@ -24,7 +24,7 @@ var (
 // store problem (once per distinct error). One wording for every caller.
 func Report(key, confName, legacy, tok, source string, err error) []string {
 	var out []string
-	if IsStrongToken(legacy) && !Usable(legacy) {
+	if IsStrongToken(legacy) && !UsableFor(key, legacy) {
 		if _, seen := reportUnusable.LoadOrStore(key, true); !seen {
 			out = append(out, fmt.Sprintf("%s in %s is not used: the config reader would change it (a quoted ';', '#' or ' //', or stray quotes), so it cannot run as written", key, confName))
 		}
@@ -60,7 +60,7 @@ func Report(key, confName, legacy, tok, source string, err error) []string {
 			out = append(out, fmt.Sprintf("%s copied from %s into %s, which is now the one in use; the %s line can be set back to placeholder", key, confName, Path(key), confName))
 		}
 	case SourceStore:
-		if Usable(legacy) && legacy != tok {
+		if UsableFor(key, legacy) && legacy != tok {
 			// Once per distinct value: a later edit of the line logs again.
 			if prev, seen := reportConfIgnored.Load(key); !seen || prev.(string) != legacy {
 				reportConfIgnored.Store(key, legacy)

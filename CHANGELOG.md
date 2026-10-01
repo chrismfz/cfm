@@ -26,8 +26,8 @@ back-filled here — see the git/PR history for that period.
   - The token is in `/var/lib/cfm/secrets/sslcollector_sock_token` (root
     only), and that file is the one in use. It is created once: on the first
     start after the upgrade the daemon copies the token from `cfm.conf`, so
-    the edge keeps working without a reload; otherwise it generates one. CFM
-    never writes `cfm.conf`.
+    the edge keeps working without a reload; otherwise it generates one. The
+    daemon no longer writes `cfm.conf`.
   - After that the `cfm.conf` line is not used and can be set back to
     `placeholder`, the new stock value. Keep the line.
   - To rotate: set the line to `placeholder`, delete the file, restart.
