@@ -110,6 +110,14 @@
 # -----------------------------------------------------------------------------
 ptr=*.googlebot.com; verify_fcrdns=1; action=skip
 ptr=*.google.com;    verify_fcrdns=1; action=skip
+#    Google-Read-Aloud: the Google Assistant / "Listen to this page" fetcher a
+#    USER triggers. Its PTRs (google-proxy-*.google.com) do forward-confirm, but
+#    it spreads requests over many IPs, so the cache-only FCrDNS exemption above
+#    rarely has a verdict in time on the decision hot path. The ASN pins it to
+#    Google's own network (AS15169 — NOT Google Cloud, AS396982): on titan
+#    2026-10-02, 98% of its requests were AS15169; the rest (Hetzner, Vultr,
+#    Online SAS) were spoofs and stay challenged.
+asn=as15169; ua=*google-read-aloud*; action=skip
 
 # -----------------------------------------------------------------------------
 # 2) Bingbot — verified via FCrDNS (PTRs under search.msn.com).
@@ -124,6 +132,18 @@ ptr=*.search.msn.com; verify_fcrdns=1; action=skip
 # -----------------------------------------------------------------------------
 asn=as32934; ua=*facebookexternalhit*; action=skip
 asn=as32934; ua=*meta*;                action=skip
+#    facebookcatalog/1.0 is the Commerce Manager product-catalog fetcher (it
+#    reads e-shop product pages/feeds). Its UA has neither "meta" nor
+#    "facebookexternalhit", so the two rules above miss it; seen challenged on
+#    shop vhosts on mars and orion (2026-10-01).
+asn=as32934; ua=*facebook*;            action=skip
+
+#    X / Twitter link previews (Twitterbot/1.0). All of them came from X's own
+#    AS13414 on titan (2026-10-02). The ASN matters: iMessage / Google Messages
+#    preview from the USER'S device with a UA that also contains
+#    "Twitterbot/1.0" (".. facebookexternalhit/1.1 Facebot Twitterbot/1.0"),
+#    and those residential requests must not match.
+asn=as13414; ua=*twitterbot*;          action=skip
 
 # -----------------------------------------------------------------------------
 # 4) Trusted partner ASNs — suppress only vhost-wide panic rules.

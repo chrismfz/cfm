@@ -252,3 +252,76 @@ func BenchmarkMatchNoDNSShippedRules(b *testing.B) {
 		_, _, _ = ce.MatchNoDNS("shop.gr", ua, asnFn, ptrFn, "CHALLENGE_VHOST")
 	}
 }
+
+// The SHIPPED exclude file exempts every Meta crawler UA seen challenged across
+// the fleet (2026-10-01) — only from Meta's own ASN. facebookcatalog (the
+// Commerce Manager product-catalog fetcher) matched neither *meta* nor
+// *facebookexternalhit*; the *facebook* rule covers it. The same UAs from the
+// Google Cloud spoofing farm (AS396982) or a residential ASN stay challenged.
+func TestShippedExcludeFile_MetaCrawlers(t *testing.T) {
+	ce, err := LoadChallengeExclude("../../configs/webdetector_challenge_exclude.txt")
+	if err != nil || ce == nil {
+		t.Fatalf("load shipped file: %v", err)
+	}
+	str := func(v string) func() string { return func() string { return v } }
+	uas := []string{
+		"facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+		"facebookcatalog/1.0",
+		"meta-externalads/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-webindexer/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))",
+	}
+	for _, ua := range uas {
+		if act, _, ok := ce.MatchNoDNS("shop.gr", ua, str("AS32934"), nil, "CHALLENGE_VHOST"); !ok || act != "skip" {
+			t.Errorf("Meta crawler from AS32934 not exempt: %q (ok=%v act=%q)", ua, ok, act)
+		}
+		for _, asn := range []string{"AS396982", "AS6799", ""} {
+			if _, _, ok := ce.MatchNoDNS("shop.gr", ua, str(asn), nil, "CHALLENGE_VHOST"); ok {
+				t.Errorf("Meta UA %q exempt from non-Meta ASN %q", ua, asn)
+			}
+		}
+	}
+	// A browser on a Meta-owned network is not a crawler: still challenged.
+	browser := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+	if _, _, ok := ce.MatchNoDNS("shop.gr", browser, str("AS32934"), nil, "CHALLENGE_VHOST"); ok {
+		t.Error("plain browser UA from AS32934 must not be exempt")
+	}
+}
+
+// The SHIPPED file exempts two user-triggered preview / fetch bots, each only
+// from its operator's own ASN (UAs and ASNs as observed on titan, 2026-10-02):
+// X's Twitterbot (AS13414) and Google-Read-Aloud (AS15169, Google's own network
+// — not Google Cloud AS396982). The same UAs from a spoofing host stay
+// challenged, and so does the on-device preview UA iMessage / Google Messages
+// send from residential networks (it also contains "Twitterbot/1.0").
+func TestShippedExcludeFile_PreviewFetchers(t *testing.T) {
+	ce, err := LoadChallengeExclude("../../configs/webdetector_challenge_exclude.txt")
+	if err != nil || ce == nil {
+		t.Fatalf("load shipped file: %v", err)
+	}
+	str := func(v string) func() string { return func() string { return v } }
+	const (
+		twitterbot = "Twitterbot/1.0"
+		readAloud  = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36 (compatible; Google-Read-Aloud; +https://support.google.com/webmasters/answer/1061943)"
+		onDevice   = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_1) AppleWebKit/601.2.4 (KHTML, like Gecko) Version/9.0.1 Safari/601.2.4 facebookexternalhit/1.1 Facebot Twitterbot/1.0"
+	)
+	for _, c := range []struct {
+		name, ua, asn string
+		want          bool
+	}{
+		{"twitterbot from X", twitterbot, "AS13414", true},
+		{"twitterbot from Google Cloud", twitterbot, "AS396982", false},
+		{"twitterbot from Hetzner", twitterbot, "AS24940", false},
+		{"read-aloud from Google", readAloud, "AS15169", true},
+		{"read-aloud from Google Cloud", readAloud, "AS396982", false},
+		{"read-aloud spoof from Hetzner", readAloud, "AS24940", false},
+		{"read-aloud, ASN unknown", readAloud, "", false},
+		{"iMessage/Messages on-device preview, residential", onDevice, "AS6799", false},
+		{"plain Google UA on AS15169 is not read-aloud", "Mozilla/5.0 (compatible; Google-Something/1.0)", "AS15169", false},
+	} {
+		_, _, ok := ce.MatchNoDNS("shop.gr", c.ua, str(c.asn), nil, "CHALLENGE_VHOST")
+		if ok != c.want {
+			t.Errorf("%s: exempt=%v, want %v", c.name, ok, c.want)
+		}
+	}
+}

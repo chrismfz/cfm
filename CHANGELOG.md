@@ -17,7 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Three more legitimate fetchers are no longer challenged: Meta's
+  product-catalog fetcher, X's link-preview bot and Google Read Aloud.** A
+  fleet scan of who the edge sent to the challenge page found each one
+  challenged. The shipped `webdetector_challenge_exclude.txt` adds a rule for
+  each, scoped to the operator's own network (ASN) so the same UA from anywhere
+  else stays challenged:
+  - `facebookcatalog` (Meta, AS32934) reads e-shop product pages for Facebook /
+    Instagram shops. Its UA matched neither existing Meta rule. Rule:
+    `asn=as32934; ua=*facebook*`.
+  - `Twitterbot` (X, AS13414) builds X link previews. Rule:
+    `asn=as13414; ua=*twitterbot*`. iMessage and Google Messages send a UA that
+    also contains `Twitterbot/1.0`, from the user's own device; those requests
+    are not on AS13414 and do not match.
+  - `Google-Read-Aloud` (Google, AS15169) is the "listen to this page" fetcher a
+    user triggers. Rule: `asn=as15169; ua=*google-read-aloud*`. AS15169 is
+    Google's own network, not Google Cloud (AS396982), where a spoofing farm
+    cycles fake bot UAs.
+  - The file is a conffile: a node whose copy was edited locally gets the new
+    rules in the `.rpmnew` / `.dpkg-dist` and needs them added by hand. The
+    rules lift a vhost-wide challenge only on nodes running 2026.10.01 or later.
 
 ## 2026.10.01
 
