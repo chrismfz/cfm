@@ -124,6 +124,11 @@ ptr=*.search.msn.com; verify_fcrdns=1; action=skip
 # -----------------------------------------------------------------------------
 asn=as32934; ua=*facebookexternalhit*; action=skip
 asn=as32934; ua=*meta*;                action=skip
+#    facebookcatalog/1.0 is the Commerce Manager product-catalog fetcher (it
+#    reads e-shop product pages/feeds). Its UA has neither "meta" nor
+#    "facebookexternalhit", so the two rules above miss it; seen challenged on
+#    shop vhosts on mars and orion (2026-10-01).
+asn=as32934; ua=*facebook*;            action=skip
 
 # -----------------------------------------------------------------------------
 # 4) Trusted partner ASNs — suppress only vhost-wide panic rules.

@@ -252,3 +252,38 @@ func BenchmarkMatchNoDNSShippedRules(b *testing.B) {
 		_, _, _ = ce.MatchNoDNS("shop.gr", ua, asnFn, ptrFn, "CHALLENGE_VHOST")
 	}
 }
+
+// The SHIPPED exclude file exempts every Meta crawler UA seen challenged across
+// the fleet (2026-10-01) — only from Meta's own ASN. facebookcatalog (the
+// Commerce Manager product-catalog fetcher) matched neither *meta* nor
+// *facebookexternalhit*; the *facebook* rule covers it. The same UAs from the
+// Google Cloud spoofing farm (AS396982) or a residential ASN stay challenged.
+func TestShippedExcludeFile_MetaCrawlers(t *testing.T) {
+	ce, err := LoadChallengeExclude("../../configs/webdetector_challenge_exclude.txt")
+	if err != nil || ce == nil {
+		t.Fatalf("load shipped file: %v", err)
+	}
+	str := func(v string) func() string { return func() string { return v } }
+	uas := []string{
+		"facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+		"facebookcatalog/1.0",
+		"meta-externalads/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-webindexer/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))",
+	}
+	for _, ua := range uas {
+		if act, _, ok := ce.MatchNoDNS("shop.gr", ua, str("AS32934"), nil, "CHALLENGE_VHOST"); !ok || act != "skip" {
+			t.Errorf("Meta crawler from AS32934 not exempt: %q (ok=%v act=%q)", ua, ok, act)
+		}
+		for _, asn := range []string{"AS396982", "AS6799", ""} {
+			if _, _, ok := ce.MatchNoDNS("shop.gr", ua, str(asn), nil, "CHALLENGE_VHOST"); ok {
+				t.Errorf("Meta UA %q exempt from non-Meta ASN %q", ua, asn)
+			}
+		}
+	}
+	// A browser on a Meta-owned network is not a crawler: still challenged.
+	browser := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+	if _, _, ok := ce.MatchNoDNS("shop.gr", browser, str("AS32934"), nil, "CHALLENGE_VHOST"); ok {
+		t.Error("plain browser UA from AS32934 must not be exempt")
+	}
+}

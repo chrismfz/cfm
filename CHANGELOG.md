@@ -17,7 +17,16 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Meta's product-catalog fetcher (`facebookcatalog`) is no longer
+  challenged.** It reads e-shop product pages for Facebook / Instagram shops,
+  and its UA matched neither shipped Meta rule (`*meta*`,
+  `*facebookexternalhit*`). It was seen challenged on shop vhosts on mars and
+  orion. The shipped `webdetector_challenge_exclude.txt` adds
+  `asn=as32934; ua=*facebook*; action=skip`, scoped to Meta's own network like
+  the other two. The file is a conffile: a node whose copy was edited locally
+  gets the new rule in the `.rpmnew` / `.dpkg-dist` and needs the line added by
+  hand.
 
 ## 2026.10.01
 
