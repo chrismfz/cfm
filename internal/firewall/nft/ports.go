@@ -3,7 +3,6 @@ package nft
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -12,15 +11,7 @@ import (
 	"cfm/internal/logging"
 )
 
-// sets για ports (type inet_service)
-const (
-	setTCPIn  = "tcp_in_ports"
-	setUDPIn  = "udp_in_ports"
-	setTCPOut = "tcp_out_ports"
-	setUDPOut = "udp_out_ports"
-)
-
-// port-scan tracking sets
+// port-scan tracking sets (also read by the portscan harvester)
 const (
 	psPairsV4    = "ps_pairs_v4"
 	psPairsV6    = "ps_pairs_v6"
@@ -28,285 +19,40 @@ const (
 	psPairsUDPV6 = "ps_pairs_udp_v6"
 )
 
-// απλό ensure για port-set (ΧΩΡΙΣ flags timeout)
-func (b *Backend) ensurePortSet(name string) error {
-	// για ranges στο set: flags interval
-	if !b.setExists(name) {
-		return b.nftCmd(fmt.Sprintf(
-			`add set %s %s %s { type inet_service; flags interval; }`,
-			family, tableName, name,
-		))
-	}
-	return nil
-}
-
-// normalize then flush + add elements όπως "80, 443, 7770-7800"
-func normalizeRanges(prs []config.PortRange) []config.PortRange {
-	if len(prs) == 0 {
-		return prs
-	}
-
-	// αν υπάρχει full-range -> ένα range
-	for _, r := range prs {
-		if r.From == 0 && r.To == 65535 {
-			//return []config.PortRange{{0, 65535}}
-			return []config.PortRange{{From: 0, To: 65535}}
-		}
-	}
-
-	// sort by From, then To
-	rs := make([]config.PortRange, 0, len(prs))
-	rs = append(rs, prs...)
-	sort.Slice(rs, func(i, j int) bool {
-		if rs[i].From == rs[j].From {
-			return rs[i].To < rs[j].To
-		}
-		return rs[i].From < rs[j].From
-	})
-
-	// merge overlapping/adjacent
-	out := make([]config.PortRange, 0, len(rs))
-	cur := rs[0]
-	for i := 1; i < len(rs); i++ {
-		r := rs[i]
-		if r.From <= cur.To+1 {
-			if r.To > cur.To {
-				cur.To = r.To
-			}
-		} else {
-			out = append(out, cur)
-			cur = r
-		}
-	}
-	out = append(out, cur)
-	return out
-}
-
-func (b *Backend) replacePortSet(name string, prs []config.PortRange) error {
-	// Κανονικοποίηση για καθαρά intervals
-	prs = normalizeRanges(prs)
-
-	if err := b.nftExpr(fmt.Sprintf(`flush set %s %s %s;`, family, tableName, name)); err != nil {
-		return err
-	}
-	if len(prs) == 0 {
+// ApplyPortsPolicy writes the TCP_IN/UDP_IN/TCP_OUT/UDP_OUT policy, the
+// debug-port accepts and the portscan tracking rules as ONE nft transaction
+// (firewall.PortsPolicyScript): no packet sees a half-applied policy, and a
+// failed apply leaves the previous one in place.
+func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
+	if cfg == nil {
 		return nil
 	}
-	elems := make([]string, 0, len(prs))
-	for _, r := range prs {
-		if r.From == r.To {
-			elems = append(elems, fmt.Sprintf("%d", r.From))
-		} else {
-			elems = append(elems, fmt.Sprintf("%d-%d", r.From, r.To))
-		}
-	}
-	expr := fmt.Sprintf("add element %s %s %s { %s };",
-		family, tableName, name, strings.Join(elems, ", "))
-	return b.nftExpr(expr)
-}
-
-// ApplyPortsPolicy συνθέτει τα allow/drop των θυρών και (προαιρετικά) το port-scan tracking.
-func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 	start := time.Now()
-	b.logPhase("ApplyPortsPolicy", "start", 0, nil, fmt.Sprintf("tcp_in=%d udp_in=%d tcp_out=%d udp_out=%d", len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut)))
+	summary := fmt.Sprintf("tcp_in=%d udp_in=%d tcp_out=%d udp_out=%d", len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut))
+	b.logPhase("ApplyPortsPolicy", "start", 0, nil, summary)
 	defer func() {
 		st := "ok"
 		if err != nil {
 			st = "fail"
 		}
-		b.logPhase("ApplyPortsPolicy", st, time.Since(start), err, fmt.Sprintf("tcp_in=%d udp_in=%d tcp_out=%d udp_out=%d", len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut)))
+		b.logPhase("ApplyPortsPolicy", st, time.Since(start), err, summary)
 	}()
-	// μικρό summary
 	logging.Logf("[ports] applying policy: tcp_in=%d ranges, udp_in=%d, tcp_out=%d, udp_out=%d",
 		len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut))
 
-	// ensure OUTPUT chain
-	if !b.chainExists("output") {
-		if err := b.nftCmd(fmt.Sprintf(
-			`add chain %s %s output { type filter hook output priority 0; policy accept; }`,
-			family, tableName)); err != nil {
-			return err
-		}
-	}
-	// Loopback exemption first, before tcp_out_ports/udp_out_ports are
-	// reloaded (possibly with a stricter list) and before any step below can
-	// return early: see firewall.OutputLoopbackAccept.
-	firewall.EnsureOutputLoopback(family, tableName,
-		func() (string, error) {
-			res, err := runNFTCommand(context.Background(), "-a", "list", "chain", family, tableName, "output")
-			return res.Stdout, err
-		},
-		b.nftCmd, logging.Logf)
+	p := firewall.PortsPolicy{Family: family, Table: tableName, TCPIn: cfg.TCPIn, UDPIn: cfg.UDPIn, TCPOut: cfg.TCPOut, UDPOut: cfg.UDPOut}
 
-	// ensure base port sets
-	for _, s := range []string{setTCPIn, setUDPIn, setTCPOut, setUDPOut} {
-		if err := b.ensurePortSet(s); err != nil {
-			return err
-		}
-	}
-
-	// load contents
-	//    if err := b.replacePortSet(setTCPIn,  cfg.TCPIn);  err != nil { return err }
-	// --- Debug ports: remove from the generic tcp_in set so they won't open to the world
-	filteredTCPIn := cfg.TCPIn
-	dbgPorts := []int{}
+	// Debug ports: out of the generic tcp_in set, accepted only from self and
+	// the resolved API addresses.
 	if b.cfg != nil {
-		if b.cfg.Debug.Port > 0 && b.cfg.Debug.Port <= 65535 {
-			dbgPorts = append(dbgPorts, b.cfg.Debug.Port)
-		}
-		if b.cfg.Debug.TLSPort > 0 && b.cfg.Debug.TLSPort <= 65535 {
-			dbgPorts = append(dbgPorts, b.cfg.Debug.TLSPort)
-		}
-	}
-	for _, p := range dbgPorts {
-		filteredTCPIn = subtractPort(filteredTCPIn, p)
-	}
-
-	// load contents (with debug port removed)
-	if err := b.replacePortSet(setTCPIn, filteredTCPIn); err != nil {
-		return err
-	}
-	if err := b.replacePortSet(setUDPIn, cfg.UDPIn); err != nil {
-		return err
-	}
-	if err := b.replacePortSet(setTCPOut, cfg.TCPOut); err != nil {
-		return err
-	}
-	if err := b.replacePortSet(setUDPOut, cfg.UDPOut); err != nil {
-		return err
-	}
-
-	// helper: idempotent rule add (ίδιο expr όπως το “nft list”)
-	addRule := func(chain, expr string) error {
-		if !b.ruleExists(chain, expr) {
-			return b.nftCmd(fmt.Sprintf(`add rule %s %s %s %s`, family, tableName, chain, expr))
-		}
-		return nil
-	}
-
-	delRule := func(chain, contains string) {
-		res, err := runNFTCommand(context.Background(), "-a", "list", "chain", family, tableName, chain)
-		out := []byte(res.Stdout + res.Stderr)
-		if err != nil {
-			return
-		}
-		for _, ln := range strings.Split(string(out), "\n") {
-			s := strings.TrimSpace(ln)
-			if s == "" || !strings.Contains(s, contains) {
-				continue
-			}
-			// βρες handle στο "# handle N"
-			idx := strings.LastIndex(s, "# handle ")
-			if idx < 0 {
-				continue
-			}
-			h := strings.TrimSpace(s[idx+len("# handle "):])
-			if sp := strings.Fields(h); len(sp) > 0 {
-				h = sp[0]
-			}
-			_, _ = runNFTCommand(context.Background(), "delete", "rule", family, tableName, chain, "handle", h)
-		}
-	}
-
-	// -------------------------
-	// Port-scan tracking (πριν τα accepts ΟΤΑΝ έχεις φίλτρο υπηρεσιών)
-	// -------------------------
-	hasSvcFilter := false
-	if b.cfg != nil && b.cfg.Portscan.Enabled {
-		ps := b.cfg.Portscan
-		b.ensurePortscanSets()
-
-		pairTTL := ps.Interval
-		if pairTTL <= 0 {
-			pairTTL = 60
-		}
-
-		// Συγκρότηση service filter από PS_ONLY_PORTS (ranges) + PS_PORTS (single)
-		svc := make([]config.PortRange, 0, len(ps.OnlyPorts)+len(ps.Ports))
-		svc = append(svc, ps.OnlyPorts...)
-		for _, p := range ps.Ports {
-			if p < 0 {
-				p = 0
-			}
-			if p > 65535 {
-				p = 65535
-			}
-			svc = append(svc, config.PortRange{From: p, To: p})
-		}
-		hasSvcFilter = len(svc) > 0
-
-		logging.Logf("[ports] portscan: enabled=%v interval=%ds track_tcp=%v track_udp=%v only_ranges=%d focus_ports=%d",
-			ps.Enabled, ps.Interval, ps.TrackTCP, ps.TrackUDP, len(ps.OnlyPorts), len(ps.Ports))
-
-		if hasSvcFilter {
-			const trackTCP = "ps_track_tcp_ports"
-			const trackUDP = "ps_track_udp_ports"
-
-			// sets τύπου inet_service
-			if err := b.ensurePortSet(trackTCP); err != nil {
-				return err
-			}
-			if err := b.replacePortSet(trackTCP, svc); err != nil {
-				return err
-			}
-			if ps.TrackUDP {
-				if err := b.ensurePortSet(trackUDP); err != nil {
-					return err
-				}
-				if err := b.replacePortSet(trackUDP, svc); err != nil {
-					return err
-				}
-			}
-			logging.Logf("[ports] ps_track_tcp_ports loaded (%d entries)", len(svc))
-
-			// positive-match tracking ΠΡΙΝ τα accepts
-			if ps.TrackTCP {
-				if err := addRule("input",
-					fmt.Sprintf(`tcp dport @%s add @%s { ip saddr . tcp dport timeout %ds }`,
-						trackTCP, psPairsV4, pairTTL)); err != nil {
-					return err
-				}
-				if err := addRule("input",
-					fmt.Sprintf(`ip6 nexthdr tcp tcp dport @%s add @%s { ip6 saddr . tcp dport timeout %ds }`,
-						trackTCP, psPairsV6, pairTTL)); err != nil {
-					return err
-				}
-			}
-			if ps.TrackUDP {
-				if err := addRule("input",
-					fmt.Sprintf(`udp dport @%s add @%s { ip saddr . udp dport timeout %ds }`,
-						trackUDP, psPairsUDPV4, pairTTL)); err != nil {
-					return err
-				}
-				if err := addRule("input",
-					fmt.Sprintf(`ip6 nexthdr udp udp dport @%s add @%s { ip6 saddr . udp dport timeout %ds }`,
-						trackUDP, psPairsUDPV6, pairTTL)); err != nil {
-					return err
-				}
+		for _, port := range []int{b.cfg.Debug.Port, b.cfg.Debug.TLSPort} {
+			if port > 0 && port <= 65535 {
+				p.DebugPorts = append(p.DebugPorts, port)
+				p.TCPIn = firewall.SubtractPort(p.TCPIn, port)
 			}
 		}
 	}
-
-	_ = addRule("input", `ct state established,related accept`)
-	//_ = addRule("input", `ct state invalid drop`)
-
-	// --- Allow lists (INPUT) ---
-	// Καθάρισε παλιούς “γυμνούς” κανόνες:
-	delRule("input", `tcp dport @`+setTCPIn+` accept`)
-	delRule("input", `udp dport @`+setUDPIn+` accept`)
-
-	// ΝΕΟΙ: μόνο για NEW
-	if err := addRule("input", `ct state new tcp dport @`+setTCPIn+` accept`); err != nil {
-		return err
-	}
-	if err := addRule("input", `ct state new udp dport @`+setUDPIn+` accept`); err != nil {
-		return err
-	}
-
-	// === Debug HTTP/TLS server exposure (strict) ===
-	// If debug ports are configured, permit them ONLY from loopback/self and the resolved API IPs.
-	if len(dbgPorts) > 0 {
-		// Ensure API debug sets exist and are refreshed
+	if len(p.DebugPorts) > 0 {
 		if err := b.ensureSet(debugAPIV4, "ipv4_addr"); err != nil {
 			return err
 		}
@@ -314,130 +60,38 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 			return err
 		}
 		b.refreshAPISets()
-
-		// Accept NEW only from self + API sets
-		for _, p := range dbgPorts {
-			if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip saddr @self_v4 accept`, p)); err != nil {
-				return err
-			}
-			if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip6 saddr @self_v6 accept`, p)); err != nil {
-				return err
-			}
-			if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip saddr @%s accept`, p, debugAPIV4)); err != nil {
-				return err
-			}
-			if err := addRule("input", fmt.Sprintf(`ct state new tcp dport %d ip6 saddr @%s accept`, p, debugAPIV6)); err != nil {
-				return err
-			}
-		}
-		// No generic accept for these ports here — everyone else ends up in the default NEW drops below.
 	}
 
-	// -------------------------
-	// Port-scan tracking (ΜΕΤΑ τα accepts όταν ΔΕΝ έχεις φίλτρο υπηρεσιών)
-	// -------------------------
-	if b.cfg != nil && b.cfg.Portscan.Enabled && !hasSvcFilter {
+	if b.cfg != nil && b.cfg.Portscan.Enabled {
 		ps := b.cfg.Portscan
-		pairTTL := ps.Interval
-		if pairTTL <= 0 {
-			pairTTL = 60
-		}
-
-		if ps.TrackTCP {
-			if err := addRule("input",
-				fmt.Sprintf(`tcp dport != @%s add @%s { ip saddr . tcp dport timeout %ds }`,
-					setTCPIn, psPairsV4, pairTTL)); err != nil {
-				return err
-			}
-			if err := addRule("input",
-				fmt.Sprintf(`ip6 nexthdr tcp tcp dport != @%s add @%s { ip6 saddr . tcp dport timeout %ds }`,
-					setTCPIn, psPairsV6, pairTTL)); err != nil {
-				return err
-			}
-		}
-		if ps.TrackUDP {
-			if err := addRule("input",
-				fmt.Sprintf(`udp dport != @%s add @%s { ip saddr . udp dport timeout %ds }`,
-					setUDPIn, psPairsUDPV4, pairTTL)); err != nil {
-				return err
-			}
-			if err := addRule("input",
-				fmt.Sprintf(`ip6 nexthdr udp udp dport != @%s add @%s { ip6 saddr . udp dport timeout %ds }`,
-					setUDPIn, psPairsUDPV6, pairTTL)); err != nil {
-				return err
-			}
-		}
+		b.ensurePortscanSets()
+		p.Portscan = portscanTracking(ps)
+		logging.Logf("[ports] portscan: enabled=%v interval=%ds track_tcp=%v track_udp=%v only_ranges=%d focus_ports=%d",
+			ps.Enabled, ps.Interval, ps.TrackTCP, ps.TrackUDP, len(ps.OnlyPorts), len(ps.Ports))
 	}
 
-	// -------------------------
-	// Default DROPs (INPUT)
-	// -------------------------
-	// --- Default DROPs (INPUT) ---
-	// Καθάρισε παλιούς
-	delRule("input", `tcp dport 0-65535 drop`)
-	delRule("input", `udp dport 0-65535 drop`)
-
-	// ΝΕΟΙ: NEW-only
-	if err := addRule("input", `ct state new tcp dport 0-65535 drop`); err != nil {
-		return err
-	}
-	if err := addRule("input", `ct state new udp dport 0-65535 drop`); err != nil {
-		return err
-	}
-
-	if err := addRule("input", `ct state invalid drop`); err != nil {
-		return err
-	}
-
-	// -------------------------
-	// OUTPUT policy
-	// -------------------------
-
-	_ = addRule("output", `ct state established,related accept`)
-	_ = addRule("output", `ct state invalid drop`)
-
-	// καθάρισε παλιούς “γυμνούς” drops στο OUTPUT
-	delRule("output", `tcp dport 0-65535 drop`)
-	delRule("output", `udp dport 0-65535 drop`)
-
-	// accept μόνο για NEW
-	if err := addRule("output", `ct state new tcp dport @`+setTCPOut+` accept`); err != nil {
-		return err
-	}
-	if err := addRule("output", `ct state new udp dport @`+setUDPOut+` accept`); err != nil {
-		return err
-	}
-
-	// catch-all NEW drops
-	if err := addRule("output", `ct state new tcp dport 0-65535 drop`); err != nil {
-		return err
-	}
-	if err := addRule("output", `ct state new udp dport 0-65535 drop`); err != nil {
-		return err
-	}
-
-	return nil
+	return firewall.ApplyPortsPolicyScript(p, b.listChainForPorts, b.nftCmd)
 }
 
-// subtractPort removes a single TCP port from a slice of PortRange, splitting ranges as needed.
-func subtractPort(prs []config.PortRange, p int) []config.PortRange {
-	if p <= 0 || p > 65535 || len(prs) == 0 {
-		return prs
+// portscanTracking is the PS_* config as the ports policy writes it: the
+// service filter is PS_ONLY_PORTS plus PS_PORTS (clamped to 0-65535).
+func portscanTracking(ps config.PortscanConfig) *firewall.PortscanTracking {
+	svc := append([]config.PortRange{}, ps.OnlyPorts...)
+	for _, port := range ps.Ports {
+		port = min(max(port, 0), 65535)
+		svc = append(svc, config.PortRange{From: port, To: port})
 	}
-	out := make([]config.PortRange, 0, len(prs)+1)
-	for _, r := range prs {
-		if p < r.From || p > r.To {
-			out = append(out, r)
-			continue
+	return &firewall.PortscanTracking{TrackTCP: ps.TrackTCP, TrackUDP: ps.TrackUDP, Interval: ps.Interval, Service: svc}
+}
+
+// listChainForPorts is firewall.ListChainFunc for this engine.
+func (b *Backend) listChainForPorts(chain string) (string, bool, error) {
+	res, err := runNFTCommand(context.Background(), "-a", "list", "chain", family, tableName, chain)
+	if err != nil {
+		if firewall.IsNFTNoSuchObject(res.Stderr) {
+			return "", false, nil
 		}
-		// p intersects this range; split around p
-		if r.From < p {
-			out = append(out, config.PortRange{From: r.From, To: p - 1})
-		}
-		if p < r.To {
-			out = append(out, config.PortRange{From: p + 1, To: r.To})
-		}
-		// if p == From == To -> drop entirely
+		return "", true, fmt.Errorf("nft -a list chain %s %s %s: %w: %s", family, tableName, chain, err, strings.TrimSpace(res.Stderr))
 	}
-	return out
+	return res.Stdout, true, nil
 }
