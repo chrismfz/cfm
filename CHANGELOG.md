@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **A strict `TCP_OUT` / `UDP_OUT` no longer cuts local traffic.** The egress
+  allowlist in `inet cfm output` had no loopback exemption (input has always
+  had `iif "lo" accept`), so narrowing `TCP_OUT` to e.g. `25,53,80,443`
+  silently broke every local connection: PHP → MariaDB on `127.0.0.1:3306`,
+  the edge → its origin or an app on a loopback port, an app → a local
+  Valkey/Postgres. `oif "lo" accept` is now the first rule of the output chain
+  on both firewall engines, written before the port sets are loaded on every
+  ports apply (daemon start or a `cfm.conf` change), exactly once; a failure
+  is logged and never skips the rest of the egress policy.
+  The shipped default (`0:65535`) was not affected; the allowlist now applies to
+  traffic leaving for the network only. TCP_OUT was never an isolation layer
+  between local accounts (it applied to root and the edge alike): a service
+  listening on loopback TCP is reachable by every local user, so keep
+  tenant-private services on unix sockets or behind uid-scoped rules.
 - **Three more legitimate fetchers are no longer challenged: Meta's
   product-catalog fetcher, X's link-preview bot and Google Read Aloud.** A
   fleet scan of who the edge sent to the challenge page found each one

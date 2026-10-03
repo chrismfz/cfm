@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"cfm/internal/config"
+	"cfm/internal/firewall"
 	"cfm/internal/logging"
 )
 
@@ -127,6 +128,15 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 			return err
 		}
 	}
+	// Loopback exemption first, before tcp_out_ports/udp_out_ports are
+	// reloaded (possibly with a stricter list) and before any step below can
+	// return early: see firewall.OutputLoopbackAccept.
+	firewall.EnsureOutputLoopback(family, tableName,
+		func() (string, error) {
+			res, err := runNFTCommand(context.Background(), "-a", "list", "chain", family, tableName, "output")
+			return res.Stdout, err
+		},
+		b.nftCmd, logging.Logf)
 
 	// ensure base port sets
 	for _, s := range []string{setTCPIn, setUDPIn, setTCPOut, setUDPOut} {
