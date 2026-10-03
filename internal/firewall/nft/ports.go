@@ -384,9 +384,7 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 	// OUTPUT policy
 	// -------------------------
 
-	if err := b.ensureOutputLoopbackAccept(); err != nil {
-		return err
-	}
+	b.ensureOutputLoopbackAccept()
 	_ = addRule("output", `ct state established,related accept`)
 	_ = addRule("output", `ct state invalid drop`)
 
@@ -436,13 +434,21 @@ func subtractPort(prs []config.PortRange, p int) []config.PortRange {
 	return out
 }
 
-// ensureOutputLoopbackAccept puts firewall.OutputLoopbackAccept at the head of
-// the output chain when it is missing. It is inserted, not appended: on a chain
-// that already holds the catch-all NEW drops, an appended accept would sit
-// below them and exempt nothing.
-func (b *Backend) ensureOutputLoopbackAccept() error {
-	if b.ruleExists("output", firewall.OutputLoopbackAccept) {
-		return nil
+// ensureOutputLoopbackAccept keeps exactly one firewall.OutputLoopbackAccept
+// in the output chain, inserted at its head when missing. It is best-effort: a failure is logged and the
+// rest of the egress policy is still applied (the next apply retries), because
+// skipping the allowlist would be worse than a missing exemption.
+func (b *Backend) ensureOutputLoopbackAccept() {
+	res, err := runNFTCommand(context.Background(), "-a", "list", "chain", family, tableName, "output")
+	if err != nil {
+		logging.Logf("[ports] output loopback accept: reading the output chain failed, left for the next apply: %v", err)
+		return
 	}
-	return b.nftCmd(fmt.Sprintf(`insert rule %s %s output %s`, family, tableName, firewall.OutputLoopbackAccept))
+	script := firewall.OutputLoopbackScript(family, tableName, res.Stdout)
+	if script == "" {
+		return
+	}
+	if err := b.nftCmd(script); err != nil {
+		logging.Logf("[ports] output loopback accept: %v", err)
+	}
 }

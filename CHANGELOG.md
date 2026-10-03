@@ -24,7 +24,9 @@ back-filled here — see the git/PR history for that period.
   silently broke every local connection: PHP → MariaDB on `127.0.0.1:3306`,
   the edge → its origin or an app on a loopback port, an app → a local
   Valkey/Postgres. `oif "lo" accept` is now the first rule of the output chain
-  on both firewall engines (inserted at the head on upgrade, never duplicated).
+  on both firewall engines (ensured on every ports apply, at the head of the
+  chain, exactly once; a failure to write it is logged and never skips the
+  rest of the egress policy).
   The shipped default (`0:65535`) was not affected; the allowlist now applies to
   traffic leaving for the network only.
 - **Three more legitimate fetchers are no longer challenged: Meta's

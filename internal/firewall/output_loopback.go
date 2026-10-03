@@ -1,5 +1,10 @@
 package firewall
 
+import (
+	"fmt"
+	"strings"
+)
+
 // OutputLoopbackAccept is the first rule of `inet cfm output`, written as nft
 // prints it. It exempts loopback from the TCP_OUT/UDP_OUT egress allowlist the
 // way `iif "lo" accept` exempts it from TCP_IN/UDP_IN on input.
@@ -15,3 +20,21 @@ package firewall
 // It does not cover traffic that a local DNAT rewrites to a non-loopback
 // interface (a rootful container port publish routes out through the bridge).
 const OutputLoopbackAccept = `oif "lo" accept`
+
+// OutputLoopbackScript returns the nft script that leaves exactly one
+// OutputLoopbackAccept at the head of `<family> <table> output`, given that
+// chain's `nft -a list chain` listing: an insert (the head of the chain, as on
+// input) when it is missing, a delete for every copy below the first. "" means
+// nothing to do. The caller must not call it with an unread listing: an empty
+// one reads as "missing", and on a chain that holds the rule that writes a copy.
+func OutputLoopbackScript(family, table, listing string) string {
+	rules := ParseChainRules(listing)
+	var lines []string
+	if !rules.Has(OutputLoopbackAccept) {
+		lines = append(lines, fmt.Sprintf("insert rule %s %s output %s", family, table, OutputLoopbackAccept))
+	}
+	for _, h := range rules.DuplicateHandles(OutputLoopbackAccept) {
+		lines = append(lines, fmt.Sprintf("delete rule %s %s output handle %s", family, table, h))
+	}
+	return strings.Join(lines, "\n")
+}

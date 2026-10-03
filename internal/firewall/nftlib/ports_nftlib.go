@@ -107,6 +107,7 @@ func buildPortsPolicySnapshots(cfg *config.PortsConfig) []hardeningRuleSnapshot 
 	out := []hardeningRuleSnapshot{
 		{Chain: "input", Path: "ct.established_related", Verdict: expr.VerdictAccept},
 		{Chain: "input", Path: "ct.invalid", Verdict: expr.VerdictDrop},
+		{Chain: "output", Path: "oif.lo", Verdict: expr.VerdictAccept},
 		{Chain: "output", Path: "ct.established_related", Verdict: expr.VerdictAccept},
 		{Chain: "output", Path: "ct.invalid", Verdict: expr.VerdictDrop},
 	}
@@ -418,9 +419,7 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 	}
 
 	// OUTPUT policy.
-	if err := b.ensureOutputLoopbackAccept(); err != nil {
-		return err
-	}
+	b.ensureOutputLoopbackAccept()
 	_ = addRule("output", "ct state established,related accept")
 	_ = addRule("output", "ct state invalid drop")
 	delRuleCLI("output", "tcp dport 0-65535 drop")
@@ -462,13 +461,21 @@ func subtractPortRange(prs []portRange, p int) []portRange {
 	return out
 }
 
-// ensureOutputLoopbackAccept puts firewall.OutputLoopbackAccept at the head of
-// the output chain when it is missing. It is inserted, not appended: on a chain
-// that already holds the catch-all NEW drops, an appended accept would sit
-// below them and exempt nothing.
-func (b *Backend) ensureOutputLoopbackAccept() error {
-	if b.ruleExistsCLI("output", firewall.OutputLoopbackAccept) {
-		return nil
+// ensureOutputLoopbackAccept keeps exactly one firewall.OutputLoopbackAccept
+// in the output chain, inserted at its head when missing. It is best-effort: a failure is logged and the
+// rest of the egress policy is still applied (the next apply retries), because
+// skipping the allowlist would be worse than a missing exemption.
+func (b *Backend) ensureOutputLoopbackAccept() {
+	listing, err := b.chainTextCLI("output")
+	if err != nil {
+		logging.Logf("[ports] output loopback accept: reading the output chain failed, left for the next apply: %v", err)
+		return
 	}
-	return b.nftExec("insert rule inet cfm output " + firewall.OutputLoopbackAccept)
+	script := firewall.OutputLoopbackScript("inet", cfmTableName, listing)
+	if script == "" {
+		return
+	}
+	if err := b.nftExec(script); err != nil {
+		logging.Logf("[ports] output loopback accept: %v", err)
+	}
 }
