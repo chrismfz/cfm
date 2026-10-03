@@ -3,7 +3,9 @@ package firewall
 import (
 	"errors"
 	"fmt"
-	"os"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 )
@@ -48,6 +50,32 @@ func TestOutputLoopbackScript_RemovesDuplicates(t *testing.T) {
 		"\t\toif \"lo\" accept # handle 39\n\t\toif \"lo\" accept # handle 46\n\t\tct state established,related accept # handle 40\n\t\toif \"lo\" accept # handle 47", 1)
 	got := OutputLoopbackScript("inet", "cfm", listing)
 	want := "delete rule inet cfm output handle 46\ndelete rule inet cfm output handle 47"
+	if got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+}
+
+// A narrower rule that merely contains the accept (an operator's per-port
+// workaround) is not the exemption: it is inserted at the head anyway, and the
+// narrower rule left alone.
+func TestOutputLoopbackScript_NarrowerRuleIsNotPresent(t *testing.T) {
+	listing := strings.Replace(outputChainWithDrops,
+		"\t\tct state established,related accept # handle 40",
+		"\t\ttcp dport 3306 oif \"lo\" accept # handle 39\n\t\tct state established,related accept # handle 40", 1)
+	got := OutputLoopbackScript("inet", "cfm", listing)
+	if got != `insert rule inet cfm output oif "lo" accept` {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// An exact copy below the head (here under `ct state invalid drop`, which then
+// drops invalid loopback packets first) is replaced by one at the head.
+func TestOutputLoopbackScript_CopyNotAtHeadIsMoved(t *testing.T) {
+	listing := strings.Replace(outputChainWithDrops,
+		"\t\tct state new tcp dport @tcp_out_ports accept # handle 42",
+		"\t\toif \"lo\" accept # handle 46\n\t\tct state new tcp dport @tcp_out_ports accept # handle 42", 1)
+	got := OutputLoopbackScript("inet", "cfm", listing)
+	want := "insert rule inet cfm output oif \"lo\" accept\ndelete rule inet cfm output handle 46"
 	if got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
 	}
@@ -98,23 +126,57 @@ func TestEnsureOutputLoopback_NoopWhenPresent(t *testing.T) {
 // the output chain exists: before the port sets are (re)loaded, so a stricter
 // TCP_OUT never takes effect without it, and before any step that can return
 // early. The helper is tested above; this pins that it stays wired in there.
+// It reads the AST, so a commented-out call does not count, and requires the
+// call as a statement of the function body itself, not inside a branch.
 func TestApplyPortsPolicy_EnsuresOutputLoopbackFirst(t *testing.T) {
 	for _, f := range []string{"nft/ports.go", "nftlib/ports_nftlib.go"} {
-		b, err := os.ReadFile(f) // #nosec G304 -- fixed repo path
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, f, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		src := string(b)
-		start := strings.Index(src, ") ApplyPortsPolicy(")
-		if start < 0 {
+		var body *ast.BlockStmt
+		for _, d := range file.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "ApplyPortsPolicy" && fd.Recv != nil {
+				body = fd.Body
+			}
+		}
+		if body == nil {
 			t.Fatalf("%s: ApplyPortsPolicy not found", f)
 		}
-		body := src[start:]
-		chain := strings.Index(body, "type filter hook output priority 0")
-		call := strings.Index(body, "firewall.EnsureOutputLoopback(")
-		sets := strings.Index(body, "[]string{setTCPIn, setUDPIn, setTCPOut, setUDPOut}")
-		if chain < 0 || call < 0 || sets < 0 || !(chain < call && call < sets) {
-			t.Errorf("%s: EnsureOutputLoopback must run after the output chain is ensured and before the port sets are loaded (chain=%d call=%d sets=%d)", f, chain, call, sets)
+		chain, call, sets := token.NoPos, token.NoPos, token.NoPos
+		ast.Inspect(body, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.BasicLit:
+				if chain == token.NoPos && strings.Contains(n.Value, "type filter hook output priority 0") {
+					chain = n.Pos()
+				}
+			case *ast.CompositeLit:
+				if sets == token.NoPos && len(n.Elts) == 4 {
+					if id, ok := n.Elts[2].(*ast.Ident); ok && id.Name == "setTCPOut" {
+						sets = n.Pos()
+					}
+				}
+			}
+			return true
+		})
+		for _, st := range body.List {
+			es, ok := st.(*ast.ExprStmt)
+			if !ok {
+				continue
+			}
+			ce, ok := es.X.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			if sel, ok := ce.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "EnsureOutputLoopback" {
+				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "firewall" {
+					call = ce.Pos()
+				}
+			}
+		}
+		if chain == token.NoPos || call == token.NoPos || sets == token.NoPos || !(chain < call && call < sets) {
+			t.Errorf("%s: firewall.EnsureOutputLoopback must be a top-level statement of ApplyPortsPolicy, after the output chain is ensured and before the port sets are loaded (chain=%v call=%v sets=%v)", f, chain, call, sets)
 		}
 	}
 }

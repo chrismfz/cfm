@@ -22,19 +22,28 @@ import (
 const OutputLoopbackAccept = `oif "lo" accept`
 
 // OutputLoopbackScript returns the nft script that leaves exactly one
-// OutputLoopbackAccept at the head of `<family> <table> output`, given that
-// chain's `nft -a list chain` listing: an insert (the head of the chain, as on
-// input) when it is missing, a delete for every copy below the first. "" means
-// nothing to do. The caller must not call it with an unread listing: an empty
-// one reads as "missing", and on a chain that holds the rule that writes a copy.
+// OutputLoopbackAccept, as the FIRST rule of `<family> <table> output`, given
+// that chain's `nft -a list chain` listing. "" means nothing to do.
+//
+// Only an exact copy at the head counts as present. A narrower rule that merely
+// contains it (`tcp dport 3306 oif "lo" accept`, an operator's workaround for
+// the bug this fixes) or an exact copy further down (below `ct state invalid
+// drop`, say) does not: the rule is inserted at the head and every other exact
+// copy deleted. The caller must not pass an unread listing: an empty one reads
+// as "missing", and on a chain that holds the rule that writes a copy.
 func OutputLoopbackScript(family, table, listing string) string {
 	rules := ParseChainRules(listing)
+	k := ruleKey(OutputLoopbackAccept)
+	atHead := len(rules.rules) > 0 && rules.rules[0].key == k
 	var lines []string
-	if !rules.Has(OutputLoopbackAccept) {
+	if !atHead {
 		lines = append(lines, fmt.Sprintf("insert rule %s %s output %s", family, table, OutputLoopbackAccept))
 	}
-	for _, h := range rules.DuplicateHandles(OutputLoopbackAccept) {
-		lines = append(lines, fmt.Sprintf("delete rule %s %s output handle %s", family, table, h))
+	for i, r := range rules.rules {
+		if r.key != k || r.handle == "" || (atHead && i == 0) {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("delete rule %s %s output handle %s", family, table, r.handle))
 	}
 	return strings.Join(lines, "\n")
 }
