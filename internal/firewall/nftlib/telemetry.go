@@ -22,10 +22,10 @@ import (
 )
 
 const (
-	psPairsV4    = "ps_pairs_v4"
-	psPairsV6    = "ps_pairs_v6"
-	psPairsUDPV4 = "ps_pairs_udp_v4"
-	psPairsUDPV6 = "ps_pairs_udp_v6"
+	psPairsV4    = firewall.SetPSPairsV4
+	psPairsV6    = firewall.SetPSPairsV6
+	psPairsUDPV4 = firewall.SetPSPairsUDPV4
+	psPairsUDPV6 = firewall.SetPSPairsUDPV6
 )
 
 // DumpFloodCounters logs flood counter deltas (non-blocking, overlap-guarded).

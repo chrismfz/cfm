@@ -14,13 +14,6 @@ import (
 	"github.com/google/nftables/expr"
 )
 
-const (
-	setTCPIn  = "tcp_in_ports"
-	setUDPIn  = "udp_in_ports"
-	setTCPOut = "tcp_out_ports"
-	setUDPOut = "udp_out_ports"
-)
-
 // portRange mirrors config.PortRange for local use.
 type portRange struct{ From, To int }
 
@@ -163,44 +156,18 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 	logging.Logf("[ports] applying policy: tcp_in=%d ranges, udp_in=%d, tcp_out=%d, udp_out=%d",
 		len(cfg.TCPIn), len(cfg.UDPIn), len(cfg.TCPOut), len(cfg.UDPOut))
 
-	p := firewall.PortsPolicy{Family: "inet", Table: cfmTableName, TCPIn: cfg.TCPIn, UDPIn: cfg.UDPIn, TCPOut: cfg.TCPOut, UDPOut: cfg.UDPOut}
-
-	// Debug ports: out of the generic tcp_in set, accepted only from self and
-	// the debug_api_* sets.
-	if b.cfg != nil {
-		for _, port := range []int{b.cfg.Debug.Port, b.cfg.Debug.TLSPort} {
-			if port > 0 && port <= 65535 {
-				p.DebugPorts = append(p.DebugPorts, port)
-				p.TCPIn = firewall.SubtractPort(p.TCPIn, port)
-			}
-		}
-	}
+	p := firewall.NewPortsPolicy("inet", cfmTableName, cfg, b.cfg)
 	if len(p.DebugPorts) > 0 {
-		_ = b.nftExec("add set inet cfm debug_api_v4 { type ipv4_addr; }")
-		_ = b.nftExec("add set inet cfm debug_api_v6 { type ipv6_addr; }")
+		_ = b.nftExec("add set inet cfm " + firewall.SetDebugAPIV4 + " { type ipv4_addr; }")
+		_ = b.nftExec("add set inet cfm " + firewall.SetDebugAPIV6 + " { type ipv6_addr; }")
 	}
-
 	// Portscan tracking sets (netlink-native, already ensured by telemetry on LoadPortScanner).
 	b.ensurePortscanSetsNative()
-	if b.cfg != nil && b.cfg.Portscan.Enabled {
+	if p.Portscan != nil {
 		ps := b.cfg.Portscan
-		svc := append([]config.PortRange{}, ps.OnlyPorts...)
-		for _, port := range ps.Ports {
-			port = min(max(port, 0), 65535)
-			svc = append(svc, config.PortRange{From: port, To: port})
-		}
-		p.Portscan = &firewall.PortscanTracking{TrackTCP: ps.TrackTCP, TrackUDP: ps.TrackUDP, Interval: ps.Interval, Service: svc}
 		logging.Logf("[ports] portscan: enabled=%v interval=%ds track_tcp=%v track_udp=%v only_ranges=%d focus_ports=%d",
 			ps.Enabled, ps.Interval, ps.TrackTCP, ps.TrackUDP, len(ps.OnlyPorts), len(ps.Ports))
 	}
 
-	return firewall.ApplyPortsPolicyScript(p,
-		func(chain string) (string, bool, error) {
-			text, err := b.chainTextCLI(chain)
-			if err != nil && firewall.IsNFTNoSuchObject(err.Error()) {
-				return "", false, nil
-			}
-			return text, err == nil, err
-		},
-		b.nftExec)
+	return firewall.ApplyPortsPolicyScript(p, nftReadCLI, b.nftExec)
 }

@@ -30,14 +30,20 @@ back-filled here — see the git/PR history for that period.
   now one `nft -f` batch the kernel applies all-or-nothing (a failed apply
   leaves the previous policy in place, and is re-planned and retried once).
   A re-apply that changes nothing writes no rule at all, only the set reload;
-  DNAT accepts and every other feature's rules keep their place. Also fixed on
-  the way:
+  DNAT accepts and every other feature's rules keep their place, and a rule
+  the policy lacks is inserted where it belongs (portscan tracking above the
+  DNAT accepts, so DNAT'd connections stay tracked). An existing output chain
+  is no longer re-declared, so its policy is kept, and an existing port set is
+  reloaded without being re-declared. Also fixed on the way:
   - a portscan TTL (`PS_INTERVAL`) of 60 s or more was looked for as `60s`
     while nft prints `1m`, so the four tracking rules were added again on
-    every apply; such copies, and rules left from an earlier TTL, debug port or
-    portscan mode, are now removed;
-  - an older catch-all drop in nft's reordered form (`tcp dport 0-65535 ct
-    state new drop`) is removed instead of being left above the accepts.
+    every apply; such copies are now removed, and so are tracking and
+    debug-port rules the config no longer has (an earlier TTL or mode, a
+    removed debug port, or portscan turned off, which used to leave its
+    tracking rules feeding `ps_pairs_*`);
+  - a catch-all drop in another form (`tcp dport 0-65535 ct state new drop`,
+    or with a counter or a comment) is removed instead of being left above
+    the accepts; a narrower drop (a source, an interface) is never touched.
 - **A strict `TCP_OUT` / `UDP_OUT` no longer cuts local traffic.** The egress
   allowlist in `inet cfm output` had no loopback exemption (input has always
   had `iif "lo" accept`), so narrowing `TCP_OUT` to e.g. `25,53,80,443`

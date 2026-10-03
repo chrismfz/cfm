@@ -60,8 +60,8 @@ const (
 	allowDynV6 = "allow_dyn_v6"
 
 	// Debug server: resolved API IPs (strictly for the debug port rules)
-	debugAPIV4 = "debug_api_v4"
-	debugAPIV6 = "debug_api_v6"
+	debugAPIV4 = firewall.SetDebugAPIV4
+	debugAPIV6 = firewall.SetDebugAPIV6
 
 	// external (SPLIT: hosts vs nets)
 	allowExtV4Hosts = "allow_ext_v4_hosts" // type ipv4_addr; flags timeout

@@ -3,6 +3,7 @@
 package firewall
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -44,6 +45,21 @@ func TestPortsPolicyScript_LiveNFT(t *testing.T) {
 		}
 	}
 	listing := func(chain string) string { return nft("-a", "list", "chain", "inet", "cfm", chain) }
+	read := func(args ...string) (string, error) {
+		out, err := exec.Command("nft", args...).Output() // #nosec G204 -- test, fixed binary
+		if ee, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("%w: %s", err, ee.Stderr)
+		}
+		return string(out), err
+	}
+	st := func() PortsPolicyState {
+		t.Helper()
+		s, err := readPortsPolicyState(PortsPolicy{Family: "inet", Table: "cfm"}, read)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
 	rulesOf := func(chain string) []string {
 		var out []string
 		for _, r := range ParseChainRules(listing(chain)).rules {
@@ -87,7 +103,7 @@ add rule inet cfm input ct state established,related accept`)
 	}
 
 	// 1) Fresh node: the whole policy in one transaction.
-	apply(PortsPolicyScript(p, listing("input"), ""))
+	apply(PortsPolicyScript(p, st()))
 	in := rulesOf("input")
 	want := []string{
 		`iif lo accept`, `ip saddr @self_v4 accept`, `ct state established,related accept`,
@@ -117,7 +133,7 @@ add rule inet cfm input ct state established,related accept`)
 
 	// 2) Re-apply: the printed rules are recognised (timeout 1h, quotes), so
 	// not one rule is written, only the sets reloaded.
-	if rl := ruleLines(PortsPolicyScript(p, listing("input"), listing("output"))); len(rl) != 0 {
+	if rl := ruleLines(PortsPolicyScript(p, st())); len(rl) != 0 {
 		t.Fatalf("re-apply on a converged node wrote rules:\n%s", strings.Join(rl, "\n"))
 	}
 
@@ -131,7 +147,7 @@ add rule inet cfm input ct state established,related accept`)
 		}
 	}
 	apply(`insert rule inet cfm input position ` + drop + ` tcp dport 9080 ct state new accept comment "cfm_dnat_accept:x"`)
-	if rl := ruleLines(PortsPolicyScript(p, listing("input"), listing("output"))); len(rl) != 0 {
+	if rl := ruleLines(PortsPolicyScript(p, st())); len(rl) != 0 {
 		t.Fatalf("an accept inserted above the drops triggered a rewrite:\n%s", strings.Join(rl, "\n"))
 	}
 
@@ -140,7 +156,7 @@ add rule inet cfm input ct state established,related accept`)
 	apply(`add rule inet cfm input tcp dport 0-65535 drop
 add rule inet cfm input ct state new tcp dport @tcp_in_ports accept
 add rule inet cfm input tcp dport 8443 accept`)
-	apply(PortsPolicyScript(p, listing("input"), listing("output")))
+	apply(PortsPolicyScript(p, st()))
 	in = rulesOf("input")
 	n := len(in)
 	// (`ct state invalid drop` was present, so it keeps its place, as on titan.)
@@ -156,17 +172,36 @@ add rule inet cfm input tcp dport 8443 accept`)
 			t.Fatalf("%q appears %d times:\n%s", k, count[ruleKey(k)], strings.Join(in, "\n"))
 		}
 	}
-	if count[ruleKey(ruleBareTCPDrop)] != 0 {
+	if count[ruleKey("tcp dport 0-65535 drop")] != 0 {
 		t.Fatalf("bare drop survived:\n%s", strings.Join(in, "\n"))
 	}
-	if rl := ruleLines(PortsPolicyScript(p, listing("input"), listing("output"))); len(rl) != 0 {
+	if rl := ruleLines(PortsPolicyScript(p, st())); len(rl) != 0 {
 		t.Fatalf("not converged after the repair:\n%s", strings.Join(rl, "\n"))
 	}
 
 	// 5) A stricter TCP_OUT lands together with everything else.
 	p.TCPOut = []config.PortRange{{From: 443, To: 443}}
-	apply(PortsPolicyScript(p, listing("input"), listing("output")))
+	apply(PortsPolicyScript(p, st()))
 	if s := nft("list", "set", "inet", "cfm", "tcp_out_ports"); !strings.Contains(s, "elements = { 443 }") {
 		t.Fatalf("tcp_out_ports after tightening:\n%s", s)
+	}
+
+	// 6) An operator's output policy survives an apply (the chain is never
+	// re-declared once it exists).
+	apply(`add chain inet cfm output { type filter hook output priority 0; policy drop; }`)
+	apply(PortsPolicyScript(p, st()))
+	if s := nft("list", "chain", "inet", "cfm", "output"); !strings.Contains(s, "policy drop;") {
+		t.Fatalf("output policy reset:\n%s", s)
+	}
+	apply(`add chain inet cfm output { type filter hook output priority 0; policy accept; }`)
+
+	// 7) A port set that exists with other flags is reloaded, not re-declared
+	// (re-declaring it fails the whole batch with "File exists").
+	apply(`flush chain inet cfm output
+delete set inet cfm tcp_out_ports
+add set inet cfm tcp_out_ports { type inet_service; flags interval,timeout; }`)
+	apply(PortsPolicyScript(p, st()))
+	if s := nft("list", "set", "inet", "cfm", "tcp_out_ports"); !strings.Contains(s, "443") {
+		t.Fatalf("tcp_out_ports with other flags not reloaded:\n%s", s)
 	}
 }

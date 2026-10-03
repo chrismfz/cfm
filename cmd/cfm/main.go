@@ -1317,11 +1317,12 @@ func runDaemon(args []string) {
 		}
 		logging.Logf("[daemon] === End ApplyPortsPolicy ===")
 
-		// ApplyPortsPolicy rewrites the default-drop rules at the end of the
-		// input chain. Re-assert the scoped `ct status dnat` accepts that
-		// `cfm dnat on` / `cfm dnat cpanel on` installed so DNAT-translated
-		// traffic to listener ports (e.g. 9080/9043/12082..) continues to be
-		// accepted without needing those ports in TCP_IN.
+		// Re-assert the scoped `ct status dnat` accepts that `cfm dnat on` /
+		// `cfm dnat cpanel on` installed, above the default drops, so
+		// DNAT-translated traffic to listener ports (e.g. 9080/9043/12082..)
+		// is accepted without those ports in TCP_IN. ApplyPortsPolicy never
+		// deletes them, but on a fresh chain they may be missing, or have been
+		// appended below the drops while no drop existed.
 		if err := be.EnsureDNATAccepts(); err != nil {
 			fmt.Fprintln(os.Stderr, "ensure dnat accepts error:", err)
 		}

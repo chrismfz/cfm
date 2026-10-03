@@ -53,18 +53,23 @@ func (b *Backend) ruleExistsCLI(chain, needle string) bool {
 	return firewall.ParseChainRules(text).Has(needle)
 }
 
-// chainTextCLI is `nft -a list chain inet cfm <chain>` (with rule handles). It
-// gets the CLI write timeout: on a node with large feed sets one nft process
-// takes seconds.
+// chainTextCLI is `nft -a list chain inet cfm <chain>` (with rule handles).
 func (b *Backend) chainTextCLI(chain string) (string, error) {
+	return nftReadCLI("-a", "list", "chain", "inet", cfmTableName, chain)
+}
+
+// nftReadCLI runs a read-only nft command (firewall.NFTRead). It gets the CLI
+// write timeout: on a node with large feed sets one nft process takes seconds.
+// An error carries nft's stderr.
+func nftReadCLI(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), nftlibCLITimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "nft", "-a", "list", "chain", "inet", cfmTableName, chain) // #nosec G204
+	cmd := exec.CommandContext(ctx, "nft", args...) // #nosec G204 -- fixed binary, args built by CFM
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("nft list chain inet %s %s: %w: %s", cfmTableName, chain, err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("nft %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
 }
