@@ -333,7 +333,6 @@ func TestBuildPortsPolicySnapshots_Parity(t *testing.T) {
 	want := []hardeningRuleSnapshot{
 		{Chain: "input", Path: "ct.established_related", Verdict: expr.VerdictAccept},
 		{Chain: "input", Path: "ct.invalid", Verdict: expr.VerdictDrop},
-		{Chain: "output", Path: "oif.lo", Verdict: expr.VerdictAccept},
 		{Chain: "output", Path: "ct.established_related", Verdict: expr.VerdictAccept},
 		{Chain: "output", Path: "ct.invalid", Verdict: expr.VerdictDrop},
 		{Chain: "input", Path: "ct.new.tcp.accept", Verdict: expr.VerdictAccept},

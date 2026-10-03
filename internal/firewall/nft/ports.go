@@ -128,6 +128,15 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 			return err
 		}
 	}
+	// Loopback exemption first, before tcp_out_ports/udp_out_ports are
+	// reloaded (possibly with a stricter list) and before any step below can
+	// return early: see firewall.OutputLoopbackAccept.
+	firewall.EnsureOutputLoopback(family, tableName,
+		func() (string, error) {
+			res, err := runNFTCommand(context.Background(), "-a", "list", "chain", family, tableName, "output")
+			return res.Stdout, err
+		},
+		b.nftCmd, logging.Logf)
 
 	// ensure base port sets
 	for _, s := range []string{setTCPIn, setUDPIn, setTCPOut, setUDPOut} {
@@ -384,7 +393,6 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 	// OUTPUT policy
 	// -------------------------
 
-	b.ensureOutputLoopbackAccept()
 	_ = addRule("output", `ct state established,related accept`)
 	_ = addRule("output", `ct state invalid drop`)
 
@@ -432,23 +440,4 @@ func subtractPort(prs []config.PortRange, p int) []config.PortRange {
 		// if p == From == To -> drop entirely
 	}
 	return out
-}
-
-// ensureOutputLoopbackAccept keeps exactly one firewall.OutputLoopbackAccept
-// in the output chain, inserted at its head when missing. It is best-effort: a failure is logged and the
-// rest of the egress policy is still applied (the next apply retries), because
-// skipping the allowlist would be worse than a missing exemption.
-func (b *Backend) ensureOutputLoopbackAccept() {
-	res, err := runNFTCommand(context.Background(), "-a", "list", "chain", family, tableName, "output")
-	if err != nil {
-		logging.Logf("[ports] output loopback accept: reading the output chain failed, left for the next apply: %v", err)
-		return
-	}
-	script := firewall.OutputLoopbackScript(family, tableName, res.Stdout)
-	if script == "" {
-		return
-	}
-	if err := b.nftCmd(script); err != nil {
-		logging.Logf("[ports] output loopback accept: %v", err)
-	}
 }

@@ -38,3 +38,28 @@ func OutputLoopbackScript(family, table, listing string) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// EnsureOutputLoopback keeps exactly one OutputLoopbackAccept in the output
+// chain, inserted at its head when missing. read returns the chain's
+// `nft -a list chain` listing; exec runs an nft script. Each engine passes its
+// own.
+//
+// It is best-effort: a failure is logged, never returned, so the rest of the
+// egress policy is still applied (an unenforced TCP_OUT would be worse than a
+// missing exemption), and it is retried on the next ports apply (daemon start
+// or a cfm.conf change). An unread chain is skipped rather than planned from an
+// empty listing, which would read as "missing" and stack a copy on every apply.
+func EnsureOutputLoopback(family, table string, read func() (string, error), exec func(string) error, logf func(string, ...any)) {
+	listing, err := read()
+	if err != nil {
+		logf("[ports] output loopback accept: reading the output chain failed, left for the next ports apply: %v", err)
+		return
+	}
+	script := OutputLoopbackScript(family, table, listing)
+	if script == "" {
+		return
+	}
+	if err := exec(script); err != nil {
+		logf("[ports] output loopback accept: %v", err)
+	}
+}

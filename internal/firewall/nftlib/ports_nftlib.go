@@ -107,7 +107,6 @@ func buildPortsPolicySnapshots(cfg *config.PortsConfig) []hardeningRuleSnapshot 
 	out := []hardeningRuleSnapshot{
 		{Chain: "input", Path: "ct.established_related", Verdict: expr.VerdictAccept},
 		{Chain: "input", Path: "ct.invalid", Verdict: expr.VerdictDrop},
-		{Chain: "output", Path: "oif.lo", Verdict: expr.VerdictAccept},
 		{Chain: "output", Path: "ct.established_related", Verdict: expr.VerdictAccept},
 		{Chain: "output", Path: "ct.invalid", Verdict: expr.VerdictDrop},
 	}
@@ -221,6 +220,12 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 			return err
 		}
 	}
+	// Loopback exemption first, before tcp_out_ports/udp_out_ports are
+	// reloaded (possibly with a stricter list) and before any step below can
+	// return early: see firewall.OutputLoopbackAccept.
+	firewall.EnsureOutputLoopback("inet", cfmTableName,
+		func() (string, error) { return b.chainTextCLI("output") },
+		b.nftExec, logging.Logf)
 
 	// Ensure port sets and load ranges.
 	for _, name := range []string{setTCPIn, setUDPIn, setTCPOut, setUDPOut} {
@@ -419,7 +424,6 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 	}
 
 	// OUTPUT policy.
-	b.ensureOutputLoopbackAccept()
 	_ = addRule("output", "ct state established,related accept")
 	_ = addRule("output", "ct state invalid drop")
 	delRuleCLI("output", "tcp dport 0-65535 drop")
@@ -459,23 +463,4 @@ func subtractPortRange(prs []portRange, p int) []portRange {
 		}
 	}
 	return out
-}
-
-// ensureOutputLoopbackAccept keeps exactly one firewall.OutputLoopbackAccept
-// in the output chain, inserted at its head when missing. It is best-effort: a failure is logged and the
-// rest of the egress policy is still applied (the next apply retries), because
-// skipping the allowlist would be worse than a missing exemption.
-func (b *Backend) ensureOutputLoopbackAccept() {
-	listing, err := b.chainTextCLI("output")
-	if err != nil {
-		logging.Logf("[ports] output loopback accept: reading the output chain failed, left for the next apply: %v", err)
-		return
-	}
-	script := firewall.OutputLoopbackScript("inet", cfmTableName, listing)
-	if script == "" {
-		return
-	}
-	if err := b.nftExec(script); err != nil {
-		logging.Logf("[ports] output loopback accept: %v", err)
-	}
 }
