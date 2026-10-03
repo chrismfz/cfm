@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"cfm/internal/config"
+	"cfm/internal/firewall"
 	"cfm/internal/logging"
 )
 
@@ -383,6 +384,9 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 	// OUTPUT policy
 	// -------------------------
 
+	if err := b.ensureOutputLoopbackAccept(); err != nil {
+		return err
+	}
 	_ = addRule("output", `ct state established,related accept`)
 	_ = addRule("output", `ct state invalid drop`)
 
@@ -430,4 +434,15 @@ func subtractPort(prs []config.PortRange, p int) []config.PortRange {
 		// if p == From == To -> drop entirely
 	}
 	return out
+}
+
+// ensureOutputLoopbackAccept puts firewall.OutputLoopbackAccept at the head of
+// the output chain when it is missing. It is inserted, not appended: on a chain
+// that already holds the catch-all NEW drops, an appended accept would sit
+// below them and exempt nothing.
+func (b *Backend) ensureOutputLoopbackAccept() error {
+	if b.ruleExists("output", firewall.OutputLoopbackAccept) {
+		return nil
+	}
+	return b.nftCmd(fmt.Sprintf(`insert rule %s %s output %s`, family, tableName, firewall.OutputLoopbackAccept))
 }

@@ -1,0 +1,17 @@
+package firewall
+
+// OutputLoopbackAccept is the first rule of `inet cfm output`, written as nft
+// prints it. It exempts loopback from the TCP_OUT/UDP_OUT egress allowlist the
+// way `iif "lo" accept` exempts it from TCP_IN/UDP_IN on input.
+//
+// Without it, a strict TCP_OUT (say 25,53,80,443) silently cuts every local
+// connection: PHP → MariaDB on 127.0.0.1:3306, the edge → its origin or an app
+// on a loopback port, an app → its Valkey/Postgres on a 127.x address. Traffic
+// to the host's own public address leaves through lo too. TCP_OUT exists to
+// limit what the host sends to the network, and lo never reaches it; isolation
+// between local accounts on loopback is the hosting panel's job (uid-scoped
+// rules), not this allowlist's.
+//
+// It does not cover traffic that a local DNAT rewrites to a non-loopback
+// interface (a rootful container port publish routes out through the bridge).
+const OutputLoopbackAccept = `oif "lo" accept`
