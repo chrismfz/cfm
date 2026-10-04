@@ -17,7 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **nftlib engine: the cPanel DNAT redirect is replaced in one batch too.**
+  `cfm dnat cpanel on`, every `cfm dnat cpanel bypass add/remove` and the
+  panel failsafe's recovery deleted `cfm_panel_redirect` in one netlink batch
+  and created the new one in a second: in between, panel traffic reached
+  cpsrvd directly, and a second batch that failed left the panel DNAT off
+  (seen live: `cfm dnat cpanel on --priority -250` on orion turned it off).
+  Now it is one batch, as the web redirect already was, and a rebuild that
+  fails keeps the old one. The 2026.10.04 entry said the nftlib engine
+  "already did" this; that was true of the web redirect only.
+- **`cfm dnat cpanel on` refuses a nat priority nft rejects** (-200 or below)
+  before it reloads the panel listener or touches the firewall, as
+  `cfm dnat on` does, instead of failing halfway with a long nft error.
 
 ## 2026.10.04
 

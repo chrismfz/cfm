@@ -48,11 +48,14 @@ func (b *Backend) PanelDNATOn(priority int) (err error) {
 		// and adding on top of a live table would duplicate every rule.
 		return fmt.Errorf("nftlib: look up %s: %w", panelDNATTableName, err)
 	}
+	// Delete and rebuild in ONE batch (the Flush at the end): the kernel
+	// applies it all-or-nothing, so the panel redirect never lapses and a
+	// rebuild that fails (an invalid nat priority, say) leaves the old one in
+	// force. The delete used to be flushed on its own first: in between,
+	// panel traffic reached cpsrvd directly, and a failed rebuild left the
+	// panel DNAT off.
 	if old != nil {
 		b.conn.DelTable(old)
-		if err := b.conn.Flush(); err != nil {
-			return err
-		}
 	}
 	prio := nftables.ChainPriority(priority)
 	policy := nftables.ChainPolicyAccept
