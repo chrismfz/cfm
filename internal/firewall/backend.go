@@ -143,9 +143,10 @@ type Backend interface {
 	DNATOff(family, table string) error
 	// EnsureDNATAccepts re-asserts the scoped `ct status dnat` accept rules
 	// in inet cfm/input for whatever web-DNAT mapping is currently active.
-	// Idempotent and a no-op when web DNAT is OFF. Intended to be called
-	// after ApplyPortsPolicy on every reload so the accepts survive the
-	// drop-rule rewrite.
+	// Idempotent and a no-op when web DNAT is OFF. Called after
+	// ApplyPortsPolicy on every reload: the ports policy never deletes these
+	// accepts, but on a fresh chain they may be missing, or sit below the
+	// drops if they were appended while no drop existed.
 	EnsureDNATAccepts() error
 
 	// Panel DNAT APIs manage cPanel/DirectAdmin panel redirects and scoped input accepts.

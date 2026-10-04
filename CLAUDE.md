@@ -60,6 +60,19 @@ dump on the `ct original …` match every DNAT accept carries, so those accepts
 are nft text on both backends (the cPanel ones in one shared implementation,
 `internal/firewall/panel_dnat_accepts.go`).
 
+The ports policy (TCP_IN/UDP_IN/TCP_OUT/UDP_OUT, debug ports, portscan
+tracking, the output loopback accept) is ONE `nft -f` transaction planned by
+`firewall.PortsPolicyScript`, shared by both engines. It used to be dozens of
+separate nft runs that deleted the live accepts and drops by substring and
+re-added them, leaving the input chain without a default drop for a moment on
+every apply. Don't add a ports-policy rule or set write outside that planner,
+and match rules by their exact printed key, never by substring: nft prints
+`timeout 60s` as `1m`, and `"%ds"` made every apply add the portscan rules
+again. A change to it gets a live run in an isolated netns
+(`unshare -rn env CFM_NFT_INTEGRATION=1 go test -p 1 ./internal/firewall/... -run
+'LiveNFT|ApplyPortsPolicyIsAtomic'`); the fleet's kernels (4.18, 5.14) are
+older than a dev box's.
+
 ---
 
 ## 3. CI gates — these MUST pass before pushing

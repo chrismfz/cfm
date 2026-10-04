@@ -774,8 +774,8 @@ func (b *Backend) dnatOffUnlocked(family, table, namespace string) error {
 // EnsureDNATAccepts re-asserts the scoped `ct status dnat` accept rules in
 // inet cfm/input for whatever unconditional (edge) web DNAT is currently
 // active. No-op when the DNAT table is absent or no edge rules are present.
-// Safe to call repeatedly; intended to run after ApplyPortsPolicy so the
-// accepts survive the drop-rule rewrite.
+// Safe to call repeatedly; runs after ApplyPortsPolicy so a fresh chain gets
+// its accepts above the drops (the ports policy itself never deletes them).
 func (b *Backend) EnsureDNATAccepts() error {
 	family, table := dnatDefaults("", "")
 	b.mu.Lock()

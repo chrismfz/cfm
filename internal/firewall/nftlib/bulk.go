@@ -28,12 +28,14 @@ const setWriteChunk = 1000
 //
 //   - Interval sets (CIDR/nets): the flush must be its OWN netlink transaction —
 //     flushing and re-adding an interval set in one batch fails with ENOTEMPTY
-//     ("directory not empty"); CFM's CLI path (replacePortSetCLI) splits them for
-//     the same reason. The elements are start/IntervalEnd PAIRS, added in
-//     batches of setWriteChunk each with its own Flush, cut only between pairs:
-//     a start without its end is an interval open to the top of the address
-//     space. The batches are not optional. google/nftables puts a message's
-//     elements in one netlink attribute, whose 16-bit length silently wraps
+//     ("directory not empty") on this netlink path. (The ports policy's CLI
+//     transaction flushes and refills its small port sets in one batch; that
+//     was verified on the fleet's kernels, 4.18 / 5.14 / 6.x.) The elements
+//     are start/IntervalEnd PAIRS, added in batches of setWriteChunk each with
+//     its own Flush, cut only between pairs: a start without its end is an
+//     interval open to the top of the address space. The batches are not
+//     optional. google/nftables puts a message's elements in one netlink
+//     attribute, whose 16-bit length silently wraps
 //     past 64 KiB (~1,600 IPv4 or ~1,000 IPv6 CIDRs), and the kernel then read
 //     a truncated list: ~360 of 2,000 /24s, or a start left without its end,
 //     an allow set accepting everything above it.

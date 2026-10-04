@@ -18,15 +18,41 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **The ports policy (TCP_IN/UDP_IN/TCP_OUT/UDP_OUT) is now written as one
+  nft transaction, on both engines.** Every ports apply (daemon start, any
+  `cfm.conf` change) used to delete the live `ct state new … @tcp_in_ports
+  accept` and the catch-all NEW drops by substring and re-add them one `nft`
+  process at a time, and to flush each port set before refilling it in a
+  second run. For a moment on every apply the input chain had no default drop
+  (all ports open) or no TCP_IN accept (new inbound connections dropped), and
+  an error between a delete and its re-add left it that way until the next
+  change. The sets, the input and output rules and the loopback exemption are
+  now one `nft -f` batch the kernel applies all-or-nothing (a failed apply
+  leaves the previous policy in place, and is re-planned and retried once).
+  A re-apply that changes nothing writes no rule at all, only the set reload;
+  DNAT accepts and every other feature's rules keep their place, and a rule
+  the policy lacks is inserted where it belongs (portscan tracking above the
+  DNAT accepts, so DNAT'd connections stay tracked). An existing output chain
+  is no longer re-declared, so its policy is kept, and an existing port set is
+  reloaded without being re-declared. Also fixed on the way:
+  - a portscan TTL (`PS_INTERVAL`) of 60 s or more was looked for as `60s`
+    while nft prints `1m`, so the four tracking rules were added again on
+    every apply; such copies are now removed, and so are tracking and
+    debug-port rules the config no longer has (an earlier TTL or mode, a
+    removed debug port, or portscan turned off, which used to leave its
+    tracking rules feeding `ps_pairs_*`);
+  - a catch-all drop in another form (`tcp dport 0-65535 ct state new drop`,
+    or with a counter or a comment) is removed instead of being left above
+    the accepts; a narrower drop (a source, an interface) is never touched.
 - **A strict `TCP_OUT` / `UDP_OUT` no longer cuts local traffic.** The egress
   allowlist in `inet cfm output` had no loopback exemption (input has always
   had `iif "lo" accept`), so narrowing `TCP_OUT` to e.g. `25,53,80,443`
   silently broke every local connection: PHP → MariaDB on `127.0.0.1:3306`,
   the edge → its origin or an app on a loopback port, an app → a local
   Valkey/Postgres. `oif "lo" accept` is now the first rule of the output chain
-  on both firewall engines, written before the port sets are loaded on every
-  ports apply (daemon start or a `cfm.conf` change), exactly once; a failure
-  is logged and never skips the rest of the egress policy.
+  on both firewall engines, exactly once, written on every ports apply (daemon
+  start or a `cfm.conf` change) in the same transaction as the port sets, so a
+  stricter `TCP_OUT` never lands without it.
   The shipped default (`0:65535`) was not affected; the allowlist now applies to
   traffic leaving for the network only. TCP_OUT was never an isolation layer
   between local accounts (it applied to root and the edge alike): a service

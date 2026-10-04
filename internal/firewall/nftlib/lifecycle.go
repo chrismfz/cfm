@@ -132,8 +132,8 @@ func (b *Backend) EnsureBase() (err error) {
 		{name: "allow_dyn_v4", keyType: nftables.TypeIPAddr, hasTimeout: true},
 		{name: "allow_dyn_v6", keyType: nftables.TypeIP6Addr, hasTimeout: true},
 		// debug API (restricted to debug port only)
-		{name: "debug_api_v4", keyType: nftables.TypeIPAddr},
-		{name: "debug_api_v6", keyType: nftables.TypeIP6Addr},
+		{name: firewall.SetDebugAPIV4, keyType: nftables.TypeIPAddr},
+		{name: firewall.SetDebugAPIV6, keyType: nftables.TypeIP6Addr},
 		// external allow/block unions (populated by feeds)
 		{name: "allow_ext_v4_hosts", keyType: nftables.TypeIPAddr, hasTimeout: true},
 		{name: "allow_ext_v6_hosts", keyType: nftables.TypeIP6Addr, hasTimeout: true},
