@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -134,23 +135,16 @@ func PortsPolicyScript(p PortsPolicy, st PortsPolicyState) string {
 	var out []string
 	add := func(format string, a ...any) { out = append(out, fmt.Sprintf(format, a...)) }
 
-	sets := []struct {
+	type portSet struct {
 		name   string
 		ranges []config.PortRange
-	}{
-		{setTCPIn, p.TCPIn}, {setUDPIn, p.UDPIn}, {setTCPOut, p.TCPOut}, {setUDPOut, p.UDPOut},
 	}
+	sets := []portSet{{setTCPIn, p.TCPIn}, {setUDPIn, p.UDPIn}, {setTCPOut, p.TCPOut}, {setUDPOut, p.UDPOut}}
 	ps := p.Portscan
 	if ps != nil && len(ps.Service) > 0 {
-		sets = append(sets, struct {
-			name   string
-			ranges []config.PortRange
-		}{setPSTrackTCP, ps.Service})
+		sets = append(sets, portSet{setPSTrackTCP, ps.Service})
 		if ps.TrackUDP {
-			sets = append(sets, struct {
-				name   string
-				ranges []config.PortRange
-			}{setPSTrackUDP, ps.Service})
+			sets = append(sets, portSet{setPSTrackUDP, ps.Service})
 		}
 	}
 	for _, s := range sets {
@@ -188,6 +182,14 @@ func PortsPolicyScript(p PortsPolicy, st PortsPolicyState) string {
 	return strings.Join(out, "\n")
 }
 
+// isCatchAllDrop is NOT IsInputDefaultDropLine, on purpose. That one is the
+// DNAT accepts' anchor ("insert before the first default drop"): it must find
+// the canonical drop, and errs toward matching any NEW-state drop of all
+// ports. This one decides what the planner may DELETE, so it is exact: only
+// the forms below, never a narrower drop someone else wrote. Both match the
+// canonical `ct state new tcp|udp dport 0-65535 drop` the planner writes,
+// which is all the anchor ever needs to find.
+//
 // isCatchAllDrop reports whether a rule is a catch-all port drop in any form
 // CFM has written, or nft has printed, it in: with or without `ct state new`,
 // in either order, with a counter or a comment. Any copy other than the
@@ -246,7 +248,9 @@ type chainSpec struct {
 func (c chainSpec) plan(family, table, chain, listing string) []string {
 	rules := ParseChainRules(listing).rules
 	var inserts, deletes, adds []string
+	gone := map[string]bool{} // handles this batch deletes
 	del := func(h string) {
+		gone[h] = true
 		deletes = append(deletes, fmt.Sprintf("delete rule %s %s %s handle %s", family, table, chain, h))
 	}
 
@@ -314,12 +318,19 @@ func (c chainSpec) plan(family, table, chain, listing string) []string {
 		}
 	}
 
-	if dropHandle, ok := c.converged(rules); ok {
-		if firstNew != "" {
-			insertAt(firstNew, mb)
-		} else {
-			adds = append(adds, c.addAll(family, table, chain, mb)...)
+	// Judge the order on the chain as it will be once this batch's deletes of
+	// copies and stale rules have run: a stray copy below the drops is a
+	// delete, not a reason to rewrite (and re-handle) every accept and drop.
+	var kept []chainRule
+	for _, r := range rules {
+		if r.handle == "" || !gone[r.handle] {
+			kept = append(kept, r)
 		}
+	}
+	if dropHandle, ok := c.converged(kept); ok {
+		// Converged implies an accept, which takes a NEW connection, so
+		// firstNew is set.
+		insertAt(firstNew, mb)
 		insertAt(dropHandle, mm)
 		adds = append(adds, c.addAll(family, table, chain, ma)...)
 		return append(append(inserts, deletes...), adds...)
@@ -350,9 +361,12 @@ func (c chainSpec) addAll(family, table, chain string, list []string) []string {
 
 // converged reports whether the owned accepts and drops are in order (and
 // the handle of the first drop): each exactly once, no other form of a
-// catch-all drop and no legacy accept, the accepts above the drops, the drops
-// in order, and below the first drop nothing but the other drops and `after`
-// rules.
+// catch-all drop and no legacy accept, every `before` rule present above the
+// first accept (portscan service tracking must see the packet before an
+// accept ends evaluation), the drops in order, and below the first drop
+// nothing but the other drops and `after` rules (so the accepts are above it).
+// When it is false, the rewrite deletes the accepts and drops and re-adds them
+// at the tail, which also puts them back below a misplaced `before` rule.
 func (c chainSpec) converged(rules []chainRule) (string, bool) {
 	exact := map[string]bool{}
 	for _, s := range append(append([]string{}, c.accepts...), c.drops...) {
@@ -379,8 +393,16 @@ func (c chainSpec) converged(rules []chainRule) (string, bool) {
 		}
 	}
 	firstDrop := pos[ruleKey(c.drops[0])][0]
+	firstAccept := firstDrop
 	for _, s := range c.accepts {
-		if pos[ruleKey(s)][0] > firstDrop {
+		firstAccept = min(firstAccept, pos[ruleKey(s)][0])
+	}
+	before := map[string]bool{}
+	for _, s := range c.before {
+		before[ruleKey(s)] = true
+	}
+	for _, r := range rules[firstAccept:] {
+		if before[r.key] {
 			return "", false
 		}
 	}
@@ -565,17 +587,19 @@ type NFTRead func(args ...string) (stdout string, err error)
 // once: another writer (a DNAT re-assert, a CLI one-shot) may have moved a
 // handle in between.
 func ApplyPortsPolicyScript(p PortsPolicy, read NFTRead, exec func(script string) error) error {
-	var err error
+	var errs []error
 	for attempt := 0; attempt < 2; attempt++ {
-		var st PortsPolicyState
-		if st, err = readPortsPolicyState(p, read); err != nil {
-			return fmt.Errorf("ports policy: %w", err)
+		st, err := readPortsPolicyState(p, read)
+		if err != nil {
+			errs = append(errs, err)
+			break
 		}
 		if err = exec(PortsPolicyScript(p, st)); err == nil {
 			return nil
 		}
+		errs = append(errs, fmt.Errorf("transaction (attempt %d): %w", attempt+1, err))
 	}
-	return fmt.Errorf("ports policy: %w", err)
+	return fmt.Errorf("ports policy: %w", errors.Join(errs...))
 }
 
 func readPortsPolicyState(p PortsPolicy, read NFTRead) (PortsPolicyState, error) {

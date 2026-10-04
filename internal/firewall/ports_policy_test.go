@@ -512,6 +512,46 @@ func TestPortsPolicyScript_PortscanOffRemovesTracking(t *testing.T) {
 	}
 }
 
+// Portscan service tracking that sits below the TCP_IN/UDP_IN accepts never
+// sees the packets they accept: not converged, and the rewrite re-adds the
+// accepts and drops below it.
+func TestPortsPolicyScript_TrackingBelowTheAcceptsIsRepaired(t *testing.T) {
+	track := "\t\ttcp dport @ps_track_tcp_ports add @ps_pairs_v4 { ip saddr . tcp dport timeout 30s } # handle 291\n" +
+		"\t\tip6 nexthdr tcp tcp dport @ps_track_tcp_ports add @ps_pairs_v6 { ip6 saddr . tcp dport timeout 30s } # handle 292\n" +
+		"\t\tudp dport @ps_track_udp_ports add @ps_pairs_udp_v4 { ip saddr . udp dport timeout 30s } # handle 293\n" +
+		"\t\tip6 nexthdr udp udp dport @ps_track_udp_ports add @ps_pairs_udp_v6 { ip6 saddr . udp dport timeout 30s } # handle 294\n"
+	accepts := "\t\tct state new tcp dport @tcp_in_ports accept # handle 295\n\t\tct state new udp dport @udp_in_ports accept # handle 296\n"
+	in := strings.Replace(orionInput, track+accepts, accepts+track, 1)
+	if in == orionInput {
+		t.Fatal("fixture not changed")
+	}
+	got := ruleLinesOf(PortsPolicyScript(liveNodePolicy(), state(in, convergedOutput)))
+	want := []string{
+		"delete rule inet cfm input handle 295",
+		"delete rule inet cfm input handle 296",
+		"delete rule inet cfm input handle 305",
+		"delete rule inet cfm input handle 306",
+		"add rule inet cfm input ct state new tcp dport @tcp_in_ports accept",
+		"add rule inet cfm input ct state new udp dport @udp_in_ports accept",
+		"add rule inet cfm input ct state new tcp dport 0-65535 drop",
+		"add rule inet cfm input ct state new udp dport 0-65535 drop",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A stray copy below the drops is deleted, and that alone: the accepts and
+// drops keep their handles (the post-deploy check reads them).
+func TestPortsPolicyScript_StrayCopyBelowTheDropsIsOnlyDeleted(t *testing.T) {
+	in := strings.Replace(orionInput, "\t\tct state invalid drop # handle 307\n",
+		"\t\tct state invalid drop # handle 307\n\t\tct state established,related accept # handle 999\n", 1)
+	got := strings.Join(ruleLinesOf(PortsPolicyScript(liveNodePolicy(), state(in, convergedOutput))), "\n")
+	if got != "delete rule inet cfm input handle 999" {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
 // No handle is ever deleted twice in one batch (that fails the whole batch).
 func TestPortsPolicyScript_NoHandleDeletedTwice(t *testing.T) {
 	in := strings.Replace(titanInput, "\t\tct state new udp dport 0-65535 drop # handle 488\n",
@@ -575,6 +615,11 @@ func TestApplyPortsPolicy_BothEnginesUseTheSharedTransaction(t *testing.T) {
 		}
 		ast.Inspect(body, func(n ast.Node) bool {
 			if lit, ok := n.(*ast.BasicLit); ok {
+				for _, set := range []string{setTCPIn, setUDPIn, setTCPOut, setUDPOut, setPSTrackTCP, setPSTrackUDP} {
+					if strings.Contains(lit.Value, set) {
+						t.Errorf("%s: ApplyPortsPolicy names the port set %s itself; only the planner writes it", f, set)
+					}
+				}
 				for _, w := range []string{"add rule", "insert rule", "delete rule", "flush set", "add element", "add chain", "flush chain"} {
 					if strings.Contains(lit.Value, w) {
 						t.Errorf("%s: ApplyPortsPolicy writes %q itself, outside the transaction", f, w)

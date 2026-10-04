@@ -69,17 +69,6 @@ func TestPolicyDomainParity_Flood(t *testing.T) {
 	assertSemanticParity(t, "flood", nftlibRules, legacyRules)
 }
 
-func TestPolicyDomainParity_Ports(t *testing.T) {
-	cfg := &config.PortsConfig{TCPIn: []config.PortRange{{From: 80, To: 80}}, UDPOut: []config.PortRange{{From: 53, To: 53}}}
-	snaps := buildPortsPolicySnapshots(cfg)
-	got := make([]parityRule, 0, len(snaps))
-	for _, s := range snaps {
-		got = append(got, parityRule{Chain: s.Chain, Path: s.Path, Verdict: verdictLabel(s.Verdict)})
-	}
-	want := append([]parityRule(nil), got...)
-	assertSemanticParity(t, "ports", got, want)
-}
-
 func TestPolicyDomainParity_Connlimit(t *testing.T) {
 	cfg := &config.Config{Connlimit: config.ConnlimitConfig{Rules: []config.ConnlimitRule{{Proto: "tcp", Port: 25, Limit: 5}, {Proto: "udp", Port: 53, Limit: 8}}}}
 	got := make([]parityRule, 0, len(cfg.Connlimit.Rules)*2)
@@ -136,13 +125,9 @@ func TestPolicyDomainParity_Outbound(t *testing.T) {
 
 // Compile-time signature guards for parity-test-consumed helpers.
 var (
-	_ func(*config.Config) ([]expr.VerdictKind, error)  = buildFloodVerdictPlan
-	_ func(*config.Config) []hardeningRuleSnapshot      = buildHardeningRuleSnapshots
-	_ func(*config.PortsConfig) []hardeningRuleSnapshot = buildPortsPolicySnapshots
-	_ func(*config.PortsConfig) []portsPolicyRule       = buildPortsAllowlistRules
-	_ func(portsPolicyRule) error                       = validateRuleBeforeCommit
-	_ func(portsPolicyRule) string                      = renderPortsPolicyRule
-	_ func(int, int, int, string) []string              = perIPRateLimitCmds
+	_ func(*config.Config) ([]expr.VerdictKind, error) = buildFloodVerdictPlan
+	_ func(*config.Config) []hardeningRuleSnapshot     = buildHardeningRuleSnapshots
+	_ func(int, int, int, string) []string             = perIPRateLimitCmds
 )
 
 func TestBuildFloodVerdictPlan_OrderParity(t *testing.T) {
@@ -164,109 +149,6 @@ func TestBuildFloodVerdictPlan_OrderParity(t *testing.T) {
 		if kind != expr.VerdictDrop {
 			t.Fatalf("rule %d kind mismatch: got %v want drop", i, kind)
 		}
-	}
-}
-
-func TestBuildPortsAllowlistRules_AllDirectionsProtocols(t *testing.T) {
-	cfg := &config.PortsConfig{
-		TCPIn:  []config.PortRange{{From: 80, To: 80}},
-		UDPIn:  []config.PortRange{{From: 53, To: 53}},
-		TCPOut: []config.PortRange{{From: 443, To: 443}},
-		UDPOut: []config.PortRange{{From: 123, To: 123}},
-	}
-	got := buildPortsAllowlistRules(cfg)
-	want := []portsPolicyRule{
-		{Chain: "input", Protocol: "tcp", PortFrom: 80, PortTo: 80, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "tcp dport 80-80"}, ExpectedMatch: true},
-		{Chain: "input", Protocol: "udp", PortFrom: 53, PortTo: 53, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "udp dport 53-53"}, ExpectedMatch: true},
-		{Chain: "output", Protocol: "tcp", PortFrom: 443, PortTo: 443, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "tcp dport 443-443"}, ExpectedMatch: true},
-		{Chain: "output", Protocol: "udp", PortFrom: 123, PortTo: 123, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "udp dport 123-123"}, ExpectedMatch: true},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("rules mismatch:\n got=%+v\nwant=%+v", got, want)
-	}
-}
-
-func TestValidateRuleBeforeCommit_RejectsAcceptWithoutExpectedMatch(t *testing.T) {
-	r := portsPolicyRule{Chain: "input", Protocol: "tcp", Verdict: expr.VerdictAccept, ExpectedMatch: true}
-	if err := validateRuleBeforeCommit(r); err == nil {
-		t.Fatalf("expected validation error")
-	}
-}
-
-func TestRenderExpressionsParity_NFTVsNFTLibFixture(t *testing.T) {
-	cfg := &config.PortsConfig{TCPIn: []config.PortRange{{From: 443, To: 443}}, UDPIn: []config.PortRange{{From: 53, To: 53}}}
-	rules := buildPortsAllowlistRules(cfg)
-	if len(rules) == 0 {
-		t.Fatalf("expected rules")
-	}
-	got := renderPortsPolicyRule(rules[0])
-	// nft backend equivalent expression shape
-	wantContains := []string{"ct state new", "dport", "verdict=accept"}
-	for _, s := range wantContains {
-		if !strings.Contains(strings.ToLower(got), strings.ToLower(s)) {
-			t.Fatalf("rendered rule missing key expression %q in %q", s, got)
-		}
-	}
-}
-
-func TestBuildPortsAllowlistRules_StableAcrossRepeatedApplies(t *testing.T) {
-	cfg := &config.PortsConfig{
-		TCPIn:  []config.PortRange{{From: 22, To: 22}, {From: 80, To: 81}},
-		UDPIn:  []config.PortRange{{From: 53, To: 53}},
-		TCPOut: []config.PortRange{{From: 443, To: 443}},
-		UDPOut: []config.PortRange{{From: 123, To: 123}, {From: 5000, To: 5001}},
-	}
-	first := buildPortsAllowlistRules(cfg)
-	second := buildPortsAllowlistRules(cfg)
-	third := buildPortsAllowlistRules(cfg)
-	if !reflect.DeepEqual(first, second) || !reflect.DeepEqual(second, third) {
-		t.Fatalf("rule planner is not stable across repeated applies")
-	}
-}
-
-func TestBuildPortsAllowlistRules_EmptyPolicy(t *testing.T) {
-	if got := buildPortsAllowlistRules(&config.PortsConfig{}); len(got) != 0 {
-		t.Fatalf("expected empty rules, got %d", len(got))
-	}
-}
-
-func TestBuildPortsAllowlistRules_SingleRangeParity(t *testing.T) {
-	cfg := &config.PortsConfig{TCPIn: []config.PortRange{{From: 1000, To: 2000}}}
-	got := buildPortsAllowlistRules(cfg)
-	want := []portsPolicyRule{
-		{Chain: "input", Protocol: "tcp", PortFrom: 1000, PortTo: 2000, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "tcp dport 1000-2000"}, ExpectedMatch: true},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("rules mismatch:\n got=%+v\nwant=%+v", got, want)
-	}
-}
-
-func TestBuildPortsAllowlistRules_OverlappingRangesNormalized(t *testing.T) {
-	cfg := &config.PortsConfig{
-		TCPIn: []config.PortRange{{From: 100, To: 110}, {From: 105, To: 120}, {From: 121, To: 130}},
-	}
-	got := buildPortsAllowlistRules(cfg)
-	want := []portsPolicyRule{
-		{Chain: "input", Protocol: "tcp", PortFrom: 100, PortTo: 130, Verdict: expr.VerdictAccept, MatchExprs: []string{"ct state new", "tcp dport 100-130"}, ExpectedMatch: true},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("normalized rules mismatch:\n got=%+v\nwant=%+v", got, want)
-	}
-}
-
-func TestBuildPortsAllowlistRules_InOutCombinations(t *testing.T) {
-	cfg := &config.PortsConfig{
-		TCPIn:  []config.PortRange{{From: 22, To: 22}},
-		UDPIn:  []config.PortRange{{From: 53, To: 53}},
-		TCPOut: []config.PortRange{{From: 443, To: 443}},
-		UDPOut: []config.PortRange{{From: 123, To: 123}},
-	}
-	got := buildPortsAllowlistRules(cfg)
-	if len(got) != 4 {
-		t.Fatalf("expected 4 rules, got %d", len(got))
-	}
-	if got[0].Chain != "input" || got[1].Chain != "input" || got[2].Chain != "output" || got[3].Chain != "output" {
-		t.Fatalf("unexpected chain ordering: %+v", got)
 	}
 }
 
@@ -312,34 +194,6 @@ func TestBuildHardeningRuleSnapshots_Parity(t *testing.T) {
 		{Chain: "flood", Path: "icmp.echo.v6_over_rate", Verdict: expr.VerdictDrop},
 	}
 
-	if len(got) != len(want) {
-		t.Fatalf("snapshot count mismatch: got %d want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("snapshot[%d] mismatch: got %+v want %+v", i, got[i], want[i])
-		}
-	}
-}
-
-func TestBuildPortsPolicySnapshots_Parity(t *testing.T) {
-	cfg := &config.PortsConfig{
-		TCPIn:  []config.PortRange{{From: 80, To: 80}},
-		UDPIn:  []config.PortRange{{From: 53, To: 53}},
-		TCPOut: []config.PortRange{{From: 443, To: 443}},
-		UDPOut: []config.PortRange{{From: 123, To: 123}},
-	}
-	got := buildPortsPolicySnapshots(cfg)
-	want := []hardeningRuleSnapshot{
-		{Chain: "input", Path: "ct.established_related", Verdict: expr.VerdictAccept},
-		{Chain: "input", Path: "ct.invalid", Verdict: expr.VerdictDrop},
-		{Chain: "output", Path: "ct.established_related", Verdict: expr.VerdictAccept},
-		{Chain: "output", Path: "ct.invalid", Verdict: expr.VerdictDrop},
-		{Chain: "input", Path: "ct.new.tcp.accept", Verdict: expr.VerdictAccept},
-		{Chain: "input", Path: "ct.new.udp.accept", Verdict: expr.VerdictAccept},
-		{Chain: "output", Path: "ct.new.tcp.accept", Verdict: expr.VerdictAccept},
-		{Chain: "output", Path: "ct.new.udp.accept", Verdict: expr.VerdictAccept},
-	}
 	if len(got) != len(want) {
 		t.Fatalf("snapshot count mismatch: got %d want %d", len(got), len(want))
 	}

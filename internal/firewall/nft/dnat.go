@@ -193,8 +193,9 @@ func parseDNATListenerPorts(out string) (httpPort, httpsPort int, ok bool) {
 
 // EnsureDNATAccepts re-asserts the scoped `ct status dnat` accepts in the
 // inet cfm input chain when web DNAT is active. No-op when the cfm_redirect
-// table is absent. Safe to call repeatedly; intended to run after
-// ApplyPortsPolicy so the accepts survive the drop-rule rewrite.
+// table is absent. Safe to call repeatedly; runs after ApplyPortsPolicy so a
+// fresh chain gets its accepts above the drops (the ports policy itself never
+// deletes them).
 func (b *Backend) EnsureDNATAccepts() error {
 	fam, tbl := dnatDefaults("", "")
 	if !b.dnatTableExists(fam, tbl) {
