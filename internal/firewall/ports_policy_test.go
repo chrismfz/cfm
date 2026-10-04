@@ -513,9 +513,9 @@ func TestPortsPolicyScript_PortscanOffRemovesTracking(t *testing.T) {
 }
 
 // Portscan service tracking that sits below the TCP_IN/UDP_IN accepts never
-// sees the packets they accept: not converged, and the rewrite re-adds the
-// accepts and drops below it.
-func TestPortsPolicyScript_TrackingBelowTheAcceptsIsRepaired(t *testing.T) {
+// sees the packets they accept: it is moved above the first rule that takes a
+// NEW connection, and the accepts and drops keep their handles.
+func TestPortsPolicyScript_TrackingBelowTheAcceptsIsMoved(t *testing.T) {
 	track := "\t\ttcp dport @ps_track_tcp_ports add @ps_pairs_v4 { ip saddr . tcp dport timeout 30s } # handle 291\n" +
 		"\t\tip6 nexthdr tcp tcp dport @ps_track_tcp_ports add @ps_pairs_v6 { ip6 saddr . tcp dport timeout 30s } # handle 292\n" +
 		"\t\tudp dport @ps_track_udp_ports add @ps_pairs_udp_v4 { ip saddr . udp dport timeout 30s } # handle 293\n" +
@@ -527,17 +527,55 @@ func TestPortsPolicyScript_TrackingBelowTheAcceptsIsRepaired(t *testing.T) {
 	}
 	got := ruleLinesOf(PortsPolicyScript(liveNodePolicy(), state(in, convergedOutput)))
 	want := []string{
-		"delete rule inet cfm input handle 295",
-		"delete rule inet cfm input handle 296",
-		"delete rule inet cfm input handle 305",
-		"delete rule inet cfm input handle 306",
-		"add rule inet cfm input ct state new tcp dport @tcp_in_ports accept",
-		"add rule inet cfm input ct state new udp dport @udp_in_ports accept",
-		"add rule inet cfm input ct state new tcp dport 0-65535 drop",
-		"add rule inet cfm input ct state new udp dport 0-65535 drop",
+		"insert rule inet cfm input position 295 tcp dport @ps_track_tcp_ports add @ps_pairs_v4 { ip saddr . tcp dport timeout 30s }",
+		"insert rule inet cfm input position 295 ip6 nexthdr tcp tcp dport @ps_track_tcp_ports add @ps_pairs_v6 { ip6 saddr . tcp dport timeout 30s }",
+		"insert rule inet cfm input position 295 udp dport @ps_track_udp_ports add @ps_pairs_udp_v4 { ip saddr . udp dport timeout 30s }",
+		"insert rule inet cfm input position 295 ip6 nexthdr udp udp dport @ps_track_udp_ports add @ps_pairs_udp_v6 { ip6 saddr . udp dport timeout 30s }",
+		"delete rule inet cfm input handle 291",
+		"delete rule inet cfm input handle 292",
+		"delete rule inet cfm input handle 293",
+		"delete rule inet cfm input handle 294",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("got:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// The same below a DNAT accept but above the policy's accepts (portscan turned
+// on later under the old code, which appended the tracking rules): DNAT'd
+// connections would never be tracked, so it is moved above the DNAT accept.
+func TestPortsPolicyScript_TrackingBelowADNATAcceptIsMoved(t *testing.T) {
+	in := `table inet cfm {
+	chain input { # handle 1
+		type filter hook input priority -50; policy accept;
+		iif "lo" accept # handle 2
+		ct state established,related accept # handle 3
+		tcp dport 9080 ct state new ct status dnat ct original proto-dst 80 accept comment "cfm_dnat_accept:web_http_tcp:80:9080" # handle 10
+		ct state invalid drop # handle 11
+		tcp dport @ps_track_tcp_ports add @ps_pairs_v4 { ip saddr . tcp dport timeout 30s } # handle 20
+		ct state new tcp dport @tcp_in_ports accept # handle 30
+		ct state new udp dport @udp_in_ports accept # handle 31
+		ct state new tcp dport 0-65535 drop # handle 40
+		ct state new udp dport 0-65535 drop # handle 41
+	}
+}
+`
+	p := liveNodePolicy()
+	p.DebugPorts = nil
+	p.Portscan.TrackUDP = false
+	got := strings.Join(ruleLinesOf(PortsPolicyScript(p, state(in, convergedOutput))), "\n")
+	for _, w := range []string{
+		"insert rule inet cfm input position 10 tcp dport @ps_track_tcp_ports add @ps_pairs_v4 { ip saddr . tcp dport timeout 30s }",
+		"delete rule inet cfm input handle 20",
+	} {
+		if !strings.Contains(got, w) {
+			t.Fatalf("missing %q in:\n%s", w, got)
+		}
+	}
+	for _, h := range []string{"handle 30", "handle 31", "handle 40", "handle 41"} {
+		if strings.Contains(got, h) {
+			t.Fatalf("rewrote an accept or drop (%s):\n%s", h, got)
+		}
 	}
 }
 

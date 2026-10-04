@@ -300,18 +300,45 @@ func (c chainSpec) plan(family, table, chain, listing string) []string {
 		}
 		return m
 	}
-	mb, mm, ma := missing(c.before), missing(c.middle), missing(c.after)
-
 	// Insert positions, taken before any delete in the batch (an insert at a
 	// handle the same batch then deletes is fine: nft applies the batch in
 	// order).
-	firstNew := ""
-	for _, r := range rules {
+	firstNew, firstNewIdx := "", len(rules)
+	for i, r := range rules {
 		if r.handle != "" && strings.Contains(" "+r.key+" ", " ct state new ") {
-			firstNew = r.handle
+			firstNew, firstNewIdx = r.handle, i
 			break
 		}
 	}
+
+	// A `before` rule must see the packet before ANY rule that takes a NEW
+	// connection (a DNAT accept included), not only before the policy's own
+	// accepts. One kept below that point (the old code appended portscan
+	// tracking enabled later after everything) is moved: deleted and
+	// re-inserted above it, in the same batch.
+	before := map[string]bool{}
+	for _, s := range c.before {
+		before[ruleKey(s)] = true
+	}
+	misplaced := map[string]bool{}
+	seenBefore := map[string]bool{}
+	for i, r := range rules {
+		if r.handle == "" || gone[r.handle] || !before[r.key] || seenBefore[r.key] {
+			continue
+		}
+		seenBefore[r.key] = true
+		if i > firstNewIdx {
+			misplaced[r.key] = true
+			del(r.handle)
+		}
+	}
+	var mb []string
+	for _, s := range c.before {
+		if !has[ruleKey(s)] || misplaced[ruleKey(s)] {
+			mb = append(mb, s)
+		}
+	}
+	mm, ma := missing(c.middle), missing(c.after)
 	insertAt := func(h string, list []string) {
 		for _, s := range list {
 			inserts = append(inserts, fmt.Sprintf("insert rule %s %s %s position %s %s", family, table, chain, h, s))

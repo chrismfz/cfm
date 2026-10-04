@@ -204,4 +204,41 @@ add set inet cfm tcp_out_ports { type inet_service; flags interval,timeout; }`)
 	if s := nft("list", "set", "inet", "cfm", "tcp_out_ports"); !strings.Contains(s, "443") {
 		t.Fatalf("tcp_out_ports with other flags not reloaded:\n%s", s)
 	}
+
+	// 8) Portscan tracking left BELOW a DNAT accept (the old code appended it
+	// when portscan was turned on later): moved above it, accepts and drops
+	// keep their handles.
+	handleOf := func(chain, key string) string {
+		for _, r := range ParseChainRules(listing(chain)).rules {
+			if r.key == ruleKey(key) {
+				return r.handle
+			}
+		}
+		t.Fatalf("no %q in %s", key, chain)
+		return ""
+	}
+	track := `tcp dport @ps_track_tcp_ports add @ps_pairs_v4 { ip saddr . tcp dport timeout 1h }`
+	dnat := `tcp dport 9080 ct state new accept comment "cfm_dnat_accept:x"`
+	accBefore := handleOf("input", "ct state new tcp dport @tcp_in_ports accept")
+	apply("delete rule inet cfm input handle " + handleOf("input", track) +
+		"\nadd rule inet cfm input position " + handleOf("input", dnat) + " " + track)
+	apply(PortsPolicyScript(p, st()))
+	ti, di := -1, -1
+	for i, r := range ParseChainRules(listing("input")).rules {
+		switch r.key {
+		case ruleKey(track):
+			ti = i
+		case ruleKey(dnat):
+			di = i
+		}
+	}
+	if ti < 0 || di < 0 || ti > di {
+		t.Fatalf("tracking (%d) not moved above the DNAT accept (%d):\n%s", ti, di, listing("input"))
+	}
+	if h := handleOf("input", "ct state new tcp dport @tcp_in_ports accept"); h != accBefore {
+		t.Fatalf("the tcp_in accept was rewritten (%s -> %s)", accBefore, h)
+	}
+	if rl := ruleLines(PortsPolicyScript(p, st())); len(rl) != 0 {
+		t.Fatalf("not converged after the move:\n%s", strings.Join(rl, "\n"))
+	}
 }
