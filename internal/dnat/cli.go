@@ -704,8 +704,11 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		// nft refuses a nat chain at -200 or below: refuse before the listener
 		// reload and the rebuild (which would only fail and keep the old
 		// chain), as `cfm dnat on` does.
-		if p := clampNFTPriority(*priority); p <= minNATChainPriority {
-			fmt.Fprintf(os.Stderr, "dnat cpanel on failed: priority %d is not a valid nat priority (must be above %d); nothing changed\n", p, minNATChainPriority)
+		// Clamp first, as the backend does, so the confirmation and the
+		// persisted priority say what is installed.
+		*priority = clampNFTPriority(*priority)
+		if *priority <= minNATChainPriority {
+			fmt.Fprintf(os.Stderr, "dnat cpanel on failed: priority %d is not a valid nat priority (must be above %d); nothing changed\n", *priority, minNATChainPriority)
 			return 2
 		}
 		// Intent is persisted only AFTER the full pipeline (listener
