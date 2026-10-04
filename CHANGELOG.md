@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.04
+
 ### Fixed
 - **nftlib engine: the cPanel DNAT redirect is replaced in one batch too.**
   `cfm dnat cpanel on`, every `cfm dnat cpanel bypass add/remove` and the
@@ -30,8 +34,6 @@ back-filled here — see the git/PR history for that period.
 - **`cfm dnat cpanel on` refuses a nat priority nft rejects** (-200 or below)
   before it reloads the panel listener or touches the firewall, as
   `cfm dnat on` does, instead of failing halfway with a long nft error.
-
-## 2026.10.04
 
 ### Fixed
 - **nft engine: the web and cPanel DNAT redirects are replaced in one
