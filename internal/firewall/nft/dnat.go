@@ -174,8 +174,14 @@ func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 		// moving to other listener ports.
 		return err
 	}
-	// The redirect points at the new ports now: drop the accepts nobody wants.
-	return b.ensureScopedDNATAccepts(httpPort, httpsPort, true)
+	// The redirect points at the new ports now: drop the accepts nobody wants,
+	// best effort. Leftovers match only connections DNAT'd to their port, which
+	// no redirect targets any more, and the next EnsureDNATAccepts prunes them.
+	// Failing here would report the committed redirect as not installed.
+	if err := b.ensureScopedDNATAccepts(httpPort, httpsPort, true); err != nil {
+		b.logPhase("DNATOn", "warn", 0, err, "op=dnat leftover scoped accepts (inert without a redirect to their port)")
+	}
+	return nil
 }
 
 // parseDNATListenerPorts scans the `list table inet cfm_redirect` output for

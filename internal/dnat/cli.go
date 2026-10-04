@@ -373,6 +373,13 @@ func RunCLI(args []string, backend firewall.Backend) int {
 			fmt.Fprintf(os.Stderr, "dnat on failed: priority %d is not a valid nat priority (must be above %d); nothing changed\n", effPrio, minNATChainPriority)
 			return 2
 		}
+		// Bad ports are input errors, refused before anything runs: past this
+		// point a failure to other ports removes the old redirect
+		// (dropRedirectToOtherPorts), and a typo must not do that.
+		if !validListenerPort(*httpPort) || !validListenerPort(*httpsPort) {
+			fmt.Fprintf(os.Stderr, "dnat on failed: invalid ports http=%d https=%d (must be 1-65535); nothing changed\n", *httpPort, *httpsPort)
+			return 2
+		}
 		if err := os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(effPrio)); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat on failed:", err)
 			return 1
@@ -991,12 +998,16 @@ func priorityOverrideWarning(applied, configured int, configRead bool) string {
 // replace the redirect in one transaction, so a failure keeps the redirect
 // that was in force. That is right unless `on` was moving to OTHER listener
 // ports: the old redirect then points at ports the edge may no longer serve,
-// and the sites go down while the failsafe, probing the new ports, sees a
-// healthy edge. For that case only, take the old outcome (the nft engine used
-// to delete the table before writing the new one): no redirect, traffic
-// straight to the backend, and say so. The table is read AFTER the failure,
-// so a batch the kernel committed despite an error (it then names the new
-// ports) is left alone, and an unreadable table is reported, never guessed.
+// and the failsafe would not notice, because it probes the daemon's own
+// HTTP_PORT/HTTPS_PORT (WebEdgePorts), which after an edge move name the new
+// ports. For that case only, whichever step failed, remove the redirect:
+// traffic goes straight to the backend, and it says so. That was the nft
+// engine's outcome before (it deleted the table before writing the new one);
+// the nftlib engine used to keep the stale redirect. Intent is unchanged, so
+// with intent ON the failsafe re-installs the redirect to the daemon's ports
+// once the edge answers there. The table is read AFTER the failure, so a batch
+// the kernel committed despite an error (it then names the new ports) is left
+// alone, and an unreadable table is reported, never guessed.
 func dropRedirectToOtherPorts(backend firewall.Backend, family, table string, httpPort, httpsPort int) {
 	on, err := backend.DNATStatus(family, table)
 	if err != nil {
@@ -1026,5 +1037,8 @@ func dropRedirectToOtherPorts(backend firewall.Backend, family, table string, ht
 		return
 	}
 	LogTransition(ScopeWeb, "OFF", "manual-failed", reason)
-	fmt.Fprintf(os.Stderr, "dnat on: removed the redirect to the old ports %d/%d (the edge may no longer listen there); web traffic now goes straight to the backend until `cfm dnat on` succeeds\n", oldHTTP, oldHTTPS)
+	fmt.Fprintf(os.Stderr, "dnat on: removed the redirect to the old ports %d/%d (the edge may no longer listen there); web traffic goes straight to the backend until `cfm dnat on` succeeds (with intent ON, the failsafe re-installs it to the daemon's HTTP_PORT/HTTPS_PORT once the edge answers there)\n", oldHTTP, oldHTTPS)
 }
+
+// validListenerPort reports whether p can be a DNAT target port.
+func validListenerPort(p int) bool { return p >= 1 && p <= 65535 }

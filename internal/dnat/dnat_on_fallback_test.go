@@ -20,6 +20,7 @@ type redirectBackend struct {
 	showErr   error
 	offErr    error
 	offCalls  int
+	onCalls   int
 }
 
 func (b *redirectBackend) DNATStatus(string, string) (bool, error) { return b.statusOn, b.statusErr }
@@ -33,6 +34,7 @@ func (b *redirectBackend) DNATShow(string, string) (string, error) {
 }
 func (b *redirectBackend) DNATOff(string, string) error { b.offCalls++; return b.offErr }
 func (b *redirectBackend) DNATOn(string, string, int, int) error {
+	b.onCalls++
 	return errors.New("nft: Could not process rule")
 }
 
@@ -126,5 +128,25 @@ func TestDNATOnFailureToNewPortsRemovesTheOldRedirect(t *testing.T) {
 	}
 	if enabled, present := LoadIntent(ScopeWeb); !present || !enabled {
 		t.Fatalf("intent changed by a failed on: enabled=%v present=%v", enabled, present)
+	}
+}
+
+// Out-of-range ports are an input error: refused before the backend runs, so
+// they never reach the fallback that would remove a working redirect.
+func TestDNATOnRefusesInvalidPortsBeforeTouchingTheRedirect(t *testing.T) {
+	withWebIntentOn(t)
+	t.Setenv("NFT_DNAT_PRIORITY", "")
+	for _, args := range [][]string{
+		{"on", "--http-port", "0"},
+		{"on", "--https-port", "70000"},
+		{"on", "--http-port", "-1"},
+	} {
+		be := &redirectBackend{statusOn: true, httpPort: 9080, httpsPort: 9043}
+		if rc := RunCLI(args, be); rc != 2 {
+			t.Errorf("%v: rc=%d, want 2", args, rc)
+		}
+		if be.onCalls != 0 || be.offCalls != 0 {
+			t.Errorf("%v: DNATOn=%d DNATOff=%d, want 0/0", args, be.onCalls, be.offCalls)
+		}
 	}
 }

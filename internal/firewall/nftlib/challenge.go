@@ -651,7 +651,14 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	if err := b.installEdgeDNATRules(t, ch, wanted, rules, includeLoopbackAccept); err != nil {
 		return err
 	}
-	return b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted, true)
+	// The redirect is committed: pruning the accepts nobody wants is best
+	// effort. Leftovers match only connections DNAT'd to their port, which no
+	// redirect targets any more, and the next EnsureDNATAccepts prunes them.
+	// Failing here would report the new redirect as not installed.
+	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted, true); err != nil {
+		b.logPhase("DNATOn", "warn", 0, err, "op=dnat leftover scoped accepts (inert without a redirect to their port)")
+	}
+	return nil
 }
 
 // hasForeignDNATRules reports whether a prerouting chain holds a rule the
