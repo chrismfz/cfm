@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.04
+
 ### Fixed
 - **The web DNAT accepts are no longer deleted and re-added on every reload.**
   After each ports apply (daemon start, any `cfm.conf` change) the daemon
@@ -33,8 +37,6 @@ back-filled here — see the git/PR history for that period.
   ports, the old ports' accepts now stay until the redirect has moved. The
   edge failsafe is unchanged (it turns DNAT off and on with `cfm dnat
   off/on`, not this re-assert).
-
-## 2026.10.04
 
 ### Fixed
 - **The ports policy (TCP_IN/UDP_IN/TCP_OUT/UDP_OUT) is now written as one
