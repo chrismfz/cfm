@@ -2,6 +2,7 @@ package dnat
 
 import (
 	"errors"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -148,5 +149,20 @@ func TestDNATOnRefusesInvalidPortsBeforeTouchingTheRedirect(t *testing.T) {
 		if be.onCalls != 0 || be.offCalls != 0 {
 			t.Errorf("%v: DNATOn=%d DNATOff=%d, want 0/0", args, be.onCalls, be.offCalls)
 		}
+	}
+}
+
+// `cfm dnat cpanel on` refuses a priority nft rejects before it reloads the
+// panel listener or touches the backend (the fake has no PanelDNATOn: a call
+// would panic).
+func TestPanelOnRefusesInvalidPriorityBeforeTouchingAnything(t *testing.T) {
+	// Should the refusal regress, the listener edit must not reach a real
+	// conf: point it at a file that does not exist.
+	orig := panelListenerChallengeConfigPaths
+	panelListenerChallengeConfigPaths = []string{filepath.Join(t.TempDir(), "cfm-panel-listeners.conf")}
+	t.Cleanup(func() { panelListenerChallengeConfigPaths = orig })
+	be := &redirectBackend{}
+	if rc := RunCLI([]string{"cpanel", "on", "--mode", "direct-cpsrvd", "--priority", "-250"}, be); rc != 2 {
+		t.Fatalf("rc=%d, want 2", rc)
 	}
 }
