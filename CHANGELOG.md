@@ -26,10 +26,13 @@ back-filled here — see the git/PR history for that period.
   the default drop (seen live: the three accepts got new handles on every
   `cfm.conf` touch, on both engines), and a failed insert left web traffic
   dropped until the next reload. They now follow the cPanel accepts' rule: an
-  accept already above the drop is kept untouched, a missing one is inserted,
-  and only then are extras (misplaced, duplicated, old ports, the other
-  engine's tag) deleted, in one `nft` batch. The edge failsafe is unchanged
-  (it turns DNAT off and on with `cfm dnat off/on`, not this re-assert).
+  accept already above the drop is kept untouched (matched by its comment
+  tag, so an older nft's print form doesn't count as a change), a missing one
+  is inserted, and only then are extras (misplaced, duplicated, the other
+  engine's tag) deleted, best effort. On `cfm dnat on` with new listener
+  ports, the old ports' accepts now stay until the redirect has moved. The
+  edge failsafe is unchanged (it turns DNAT off and on with `cfm dnat
+  off/on`, not this re-assert).
 
 ## 2026.10.04
 
