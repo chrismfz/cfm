@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.04
+
 ### Fixed
 - **nft engine: the web and cPanel DNAT redirects are replaced in one
   transaction.** `cfm dnat on`, every `cfm dnat bypass add/del`, the edge
@@ -41,8 +45,6 @@ back-filled here — see the git/PR history for that period.
   is best effort on both engines: a failure there is a logged warning (the
   leftovers match nothing, the next reload prunes them), no longer a
   `dnat on failed` for a redirect that was installed.
-
-## 2026.10.04
 
 ### Fixed
 - **The web DNAT accepts are no longer deleted and re-added on every reload.**
