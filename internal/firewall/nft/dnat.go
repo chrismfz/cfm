@@ -87,41 +87,34 @@ func dnatAcceptRuleComment(label string, from, to int) string {
 	return fmt.Sprintf("%s:%s:%d:%d", firewall.WebDNATAcceptTagNFT, label, from, to)
 }
 
-func dnatAcceptRuleExpr(spec dnatAcceptRuleSpec, beforeHandle string) string {
-	prefix := "add rule inet cfm input"
-	if strings.TrimSpace(beforeHandle) != "" {
-		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle)
-	}
-	expr := fmt.Sprintf(`%s %s dport %d ct state new ct status dnat ct original proto-dst %d accept comment "%s"`, prefix, spec.proto, spec.to, spec.from, dnatAcceptRuleComment(spec.label, spec.from, spec.to))
-	return strings.Join(strings.Fields(expr), " ")
+// dnatAcceptRuleBody is the accept for one mapping, as written after
+// `add rule inet cfm input`.
+func dnatAcceptRuleBody(spec dnatAcceptRuleSpec) string {
+	body := fmt.Sprintf(`%s dport %d ct state new ct status dnat ct original proto-dst %d accept comment "%s"`, spec.proto, spec.to, spec.from, dnatAcceptRuleComment(spec.label, spec.from, spec.to))
+	return strings.Join(strings.Fields(body), " ")
 }
 
-func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
-	_ = b.nftExpr("add table inet cfm")
-	_ = b.nftCmd("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
-	// MUST list via ListChainText (argv mode). nftOut feeds its argument to
-	// `nft -f -` (script mode), where the `-a` handle flag is a syntax error —
-	// that made the listing fail silently, so FirstInputDefaultDropHandle saw an
-	// error string, returned "", and the accepts were APPENDED after the default
-	// drop (never reached) instead of inserted before it. Fail closed on a list
-	// error rather than repeating that silent breakage.
-	out, err := b.ListChainText(family, tableName, "input")
-	if err != nil {
-		return fmt.Errorf("list %s %s input chain for dnat accepts: %w", family, tableName, err)
-	}
-	beforeHandle := firewall.FirstInputDefaultDropHandle(out)
-	if err := b.cleanupScopedDNATAccepts(); err != nil {
-		return err
-	}
+// ensureScopedDNATAccepts keeps one web DNAT accept per mapping above the
+// default drop (firewall.EnsureInputAccepts): one already in place is kept, a
+// missing one is inserted, and only then are the others (either engine's
+// tag) deleted, all in one nft batch. It used to delete every accept and
+// re-insert them one nft run at a time on each reload, a window in which
+// DNAT'd web connections hit the default drop.
+//
+// The listing is argv mode (ListChainText): nftOut feeds its argument to
+// `nft -f -` (script mode), where the `-a` handle flag is a syntax error. That
+// once made the listing fail silently, so FirstInputDefaultDropHandle saw an
+// error string, returned "", and the accepts were APPENDED after the default
+// drop (never reached) instead of inserted before it.
+func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int, prune bool) error {
+	var want []string
 	for _, spec := range dnatAcceptRuleSpecs(httpPort, httpsPort) {
-		if spec.to <= 0 {
-			continue
-		}
-		if err := b.nftCmd(dnatAcceptRuleExpr(spec, beforeHandle)); err != nil {
-			return err
+		if spec.to > 0 {
+			want = append(want, dnatAcceptRuleBody(spec))
 		}
 	}
-	return nil
+	_, err := firewall.EnsureInputAccepts(b.inputAcceptOps(), want, firewall.IsWebDNATAccept, prune)
+	return err
 }
 
 func (b *Backend) cleanupScopedDNATAccepts() error {
@@ -132,18 +125,13 @@ func (b *Backend) cleanupScopedDNATAccepts() error {
 		return nil
 	}
 	for _, line := range strings.Split(out, "\n") {
-		norm := strings.ReplaceAll(line, `"`, "")
-		// Both engines' tags: an nftlib-written accept left behind after an
-		// engine switch would otherwise stay forever.
-		tagged := strings.Contains(norm, firewall.WebDNATAcceptTagNFT+":") || strings.Contains(norm, firewall.WebDNATAcceptTagNFTLib+":")
-		if !tagged || !strings.Contains(norm, " handle ") {
+		// Both engines' tags (the same matcher EnsureInputAccepts uses): an
+		// nftlib-written accept left behind after an engine switch would
+		// otherwise stay forever.
+		if !firewall.IsWebDNATAccept(line) {
 			continue
 		}
-		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
-		if fields := strings.Fields(h); len(fields) > 0 {
-			h = fields[0]
-		}
-		if h != "" {
+		if h := firewall.RuleHandle(line); h != "" {
 			if err := b.nftCmd("delete rule inet cfm input handle " + h); err != nil {
 				return err
 			}
@@ -168,7 +156,9 @@ func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 		return fmt.Errorf("invalid ports: http=%d https=%d", httpPort, httpsPort)
 	}
 
-	if err := b.ensureScopedDNATAccepts(httpPort, httpsPort); err != nil {
+	// Accepts for the new listener ports first, keeping any for the old ones:
+	// the redirect still points there until it is replaced below.
+	if err := b.ensureScopedDNATAccepts(httpPort, httpsPort, false); err != nil {
 		return err
 	}
 
@@ -180,7 +170,11 @@ func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 	}
 
 	// Reuse your multi-line nft expression runner
-	return b.nftExpr(dnatScript(fam, tbl, httpPort, httpsPort, b.dnatPriority()))
+	if err := b.nftExpr(dnatScript(fam, tbl, httpPort, httpsPort, b.dnatPriority())); err != nil {
+		return err
+	}
+	// The redirect points at the new ports now: drop the accepts nobody wants.
+	return b.ensureScopedDNATAccepts(httpPort, httpsPort, true)
 }
 
 // parseDNATListenerPorts scans the `list table inet cfm_redirect` output for
@@ -209,7 +203,7 @@ func (b *Backend) EnsureDNATAccepts() error {
 	if !ok {
 		return nil
 	}
-	return b.ensureScopedDNATAccepts(httpPort, httpsPort)
+	return b.ensureScopedDNATAccepts(httpPort, httpsPort, true)
 }
 
 func (b *Backend) DNATOff(fam, tbl string) (err error) {

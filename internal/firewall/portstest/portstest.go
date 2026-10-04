@@ -19,6 +19,10 @@ type Engine struct {
 	EnsureBase       func() error
 	ApplyPortsPolicy func(*config.PortsConfig) error
 	DNATOn           func() error // web DNAT 80/443 -> 9080/9043
+	// DNATOnPorts is DNATOn with other listener ports (a port change).
+	DNATOnPorts func(httpPort, httpsPort int) error
+	// EnsureDNATAccepts is the daemon's re-assert after every ports apply.
+	EnsureDNATAccepts func() error
 }
 
 // RunAtomicAndStable drives an engine against a live nft: EnsureBase, the
@@ -76,12 +80,18 @@ func RunAtomicAndStable(t *testing.T, newEngine func(cfg *config.Config) Engine)
 	}
 	before := list("input") + list("output")
 
-	// Re-apply: not one rule rewritten (a rewritten rule gets a new handle).
+	// A reload as the daemon runs it (ports policy, then the DNAT accepts'
+	// re-assert): not one rule rewritten, the DNAT accepts included (a
+	// rewritten rule gets a new handle). The accepts used to be deleted and
+	// re-inserted on every reload, a window of dropped DNAT'd connections.
 	if err := e.ApplyPortsPolicy(&cfg.Ports); err != nil {
 		t.Fatalf("ApplyPortsPolicy (re-apply): %v", err)
 	}
+	if err := e.EnsureDNATAccepts(); err != nil {
+		t.Fatalf("EnsureDNATAccepts: %v", err)
+	}
 	if after := list("input") + list("output"); after != before {
-		t.Fatalf("a re-apply changed the chains:\nbefore:\n%s\nafter:\n%s", before, after)
+		t.Fatalf("a reload changed the chains:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 
 	in := list("input")
@@ -133,6 +143,25 @@ func RunAtomicAndStable(t *testing.T, newEngine func(cfg *config.Config) Engine)
 	set, _ := exec.Command("nft", "list", "set", "inet", "cfm", "tcp_out_ports").CombinedOutput()
 	if !strings.Contains(string(set), "elements = { 443 }") {
 		t.Fatalf("tcp_out_ports:\n%s", set)
+	}
+
+	// New listener ports: the accepts follow, each once and above the drop,
+	// and none for the old ports is left.
+	if err := e.DNATOnPorts(9081, 9044); err != nil {
+		t.Fatalf("DNATOn (new ports): %v", err)
+	}
+	in = list("input")
+	if strings.Contains(in, ":80:9080") || strings.Contains(in, ":443:9043") {
+		t.Fatalf("an accept for the old listener ports is left:\n%s", in)
+	}
+	for _, tag := range []string{":80:9081", ":443:9044"} {
+		if strings.Count(in, tag) < 1 {
+			t.Fatalf("no accept for %s:\n%s", tag, in)
+		}
+	}
+	dnat, drop = idx(`web_http_tcp:80:9081`), idx(`^\s*ct state new tcp dport 0-65535 drop`)
+	if dnat < 0 || dnat > drop {
+		t.Fatalf("new-port accept (%d) not above the drop (%d):\n%s", dnat, drop, in)
 	}
 }
 

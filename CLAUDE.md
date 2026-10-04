@@ -71,7 +71,12 @@ and match rules by their exact printed key, never by substring: nft prints
 again. A change to it gets a live run in an isolated netns
 (`unshare -rn env CFM_NFT_INTEGRATION=1 go test -p 1 ./internal/firewall/... -run
 'LiveNFT|ApplyPortsPolicyIsAtomic'`); the fleet's kernels (4.18, 5.14) are
-older than a dev box's.
+older than a dev box's. The DNAT accepts in the same chain follow one rule
+too: keep what is in place, insert before delete, a delete is best effort
+(`EnsurePanelDNATAccepts`; `EnsureInputAccepts` for the web ones, which also
+keeps the old-port accepts until DNATOn has moved the redirect). The web ones
+were deleted and re-added on every reload, a window of dropped DNAT'd
+connections that the live test now pins (a reload must not change a handle).
 
 ---
 

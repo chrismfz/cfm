@@ -530,49 +530,33 @@ func (b *Backend) cleanupScopedDNATAccepts(namespace string) error {
 	return nil
 }
 
-func dnatAcceptKey(spec dnatRuleSpec) string {
-	return fmt.Sprintf("f%d:p%d:d%d:t%d:a%s", spec.family, spec.proto, spec.dport, spec.toPort, dnatAddrID(spec.toAddr))
-}
-
-func dnatAcceptRuleExpr(namespace string, spec dnatRuleSpec, beforeHandle ...string) string {
+// dnatAcceptRuleBody is the accept for one spec, as written after
+// `add rule inet cfm input`.
+func dnatAcceptRuleBody(namespace string, spec dnatRuleSpec) string {
 	proto := "tcp"
 	if spec.proto == 17 {
 		proto = "udp"
 	}
-	prefix := "add rule inet cfm input"
-	if len(beforeHandle) > 0 && strings.TrimSpace(beforeHandle[0]) != "" {
-		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle[0])
-	}
-	expr := fmt.Sprintf(`%s %s %s dport %d ct state new ct status dnat ct original proto-dst %d accept comment "%s"`, prefix, dnatDaddrMatch(spec), proto, spec.toPort, spec.dport, dnatAcceptComment(namespace, dnatAcceptLabel(spec), int(spec.dport), int(spec.toPort)))
-	return strings.Join(strings.Fields(expr), " ")
+	body := fmt.Sprintf(`%s %s dport %d ct state new ct status dnat ct original proto-dst %d accept comment "%s"`, dnatDaddrMatch(spec), proto, spec.toPort, spec.dport, dnatAcceptComment(namespace, dnatAcceptLabel(spec), int(spec.dport), int(spec.toPort)))
+	return strings.Join(strings.Fields(body), " ")
 }
 
-func (b *Backend) ensureScopedDNATAccepts(namespace string, specs []dnatRuleSpec) error {
-	_ = b.nftExec("add table inet cfm")
-	_ = b.nftExec("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
-	// Fail closed, as the nft backend does: with no listing there is no
-	// default-drop handle, and the accepts would be appended AFTER the drop,
-	// where no packet ever reaches them.
-	out, err := b.ListChainText("inet", cfmTableName, "input")
-	if err != nil {
-		return fmt.Errorf("list inet %s input chain for dnat accepts: %w", cfmTableName, err)
-	}
-	beforeHandle := firewall.FirstInputDefaultDropHandle(out)
-	if err := b.cleanupScopedDNATAccepts(namespace); err != nil {
-		return err
-	}
-	seen := make(map[string]struct{})
+// ensureScopedDNATAccepts keeps one accept per spec above the default drop
+// (firewall.EnsureInputAccepts): one already in place is kept, a missing one
+// is inserted, and with prune the others (either engine's web tag, e.g. the
+// nft backend's from a CLI that ran it before the CLI followed cfm.conf's
+// engine) are deleted afterwards. It used to delete every accept and
+// re-insert them one nft run at a time on each reload, a window in which
+// DNAT'd web connections hit the default drop. Fails closed, as the nft
+// backend does: with no listing there is no default-drop handle, and the
+// accepts would be appended AFTER the drop, where no packet ever reaches them.
+func (b *Backend) ensureScopedDNATAccepts(namespace string, specs []dnatRuleSpec, prune bool) error {
+	var want []string
 	for _, spec := range specs {
-		key := dnatAcceptKey(spec)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		if err := b.nftExec(dnatAcceptRuleExpr(namespace, spec, beforeHandle)); err != nil {
-			return err
-		}
+		want = append(want, dnatAcceptRuleBody(namespace, spec))
 	}
-	return nil
+	_, err := firewall.EnsureInputAccepts(b.inputAcceptOps(), want, firewall.IsWebDNATAccept, prune)
+	return err
 }
 
 func (b *Backend) DNATOn(family, table string, httpPort, httpsPort int) (err error) {
@@ -619,8 +603,10 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 			return fmt.Errorf("nftlib: read %s %s prerouting rules: %w", family, table, err)
 		}
 	}
-	// nft CLI only (no b.mu inside), so safe to run under the lock.
-	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted); err != nil {
+	// nft CLI only (no b.mu inside), so safe to run under the lock. Accepts
+	// for the new ports go in first; the old ones stay until the redirect has
+	// moved (pruned after installEdgeDNATRules below).
+	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted, false); err != nil {
 		return err
 	}
 	// For CFM's own table, rebuild it whole in this same batch (so the
@@ -662,7 +648,10 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	// but on the second install (e.g. `cfm dnat bypass add`, which calls
 	// DNATOn again) the bypass rules ended up AFTER the surviving dport
 	// rules, silently breaking the bypass.
-	return b.installEdgeDNATRules(t, ch, wanted, rules, includeLoopbackAccept)
+	if err := b.installEdgeDNATRules(t, ch, wanted, rules, includeLoopbackAccept); err != nil {
+		return err
+	}
+	return b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted, true)
 }
 
 // hasForeignDNATRules reports whether a prerouting chain holds a rule the
@@ -806,7 +795,7 @@ func (b *Backend) EnsureDNATAccepts() error {
 	if len(wanted) == 0 {
 		return nil
 	}
-	return b.ensureScopedDNATAccepts(dnatAcceptNamespace(dnatRuleNamespaceEdge), wanted)
+	return b.ensureScopedDNATAccepts(dnatAcceptNamespace(dnatRuleNamespaceEdge), wanted, true)
 }
 
 func (b *Backend) DNATOff(family, table string) (err error) {

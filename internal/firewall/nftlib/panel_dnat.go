@@ -160,14 +160,14 @@ func (b *Backend) findTable(name string, family nftables.TableFamily) (*nftables
 	return nil, nil
 }
 
-// panelAcceptOps drives the shared panel-accept code (firewall.
-// EnsurePanelDNATAccepts & co) through the nft CLI, like the web DNAT accepts
-// in challenge.go. These rules must not be read over netlink:
+// inputAcceptOps drives the shared input-accept code (firewall.
+// EnsurePanelDNATAccepts & co, and firewall.EnsureInputAccepts for the web
+// DNAT accepts in challenge.go) through the nft CLI. These rules must not be read over netlink:
 // google/nftables v0.3.0 can't decode the `ct original proto-dst` match they
 // carry, and a chain holding one fails the whole GetRules dump — see
 // internal/firewall/panel_dnat_accepts.go. Nothing in this backend reads
 // inet cfm/input over netlink.
-func (b *Backend) panelAcceptOps() firewall.NFTTextOps {
+func (b *Backend) inputAcceptOps() firewall.NFTTextOps {
 	return firewall.NFTTextOps{
 		ListInput: func() (string, error) { return b.ListChainText("inet", cfmTableName, "input") },
 		Run:       b.nftExec,
@@ -175,13 +175,13 @@ func (b *Backend) panelAcceptOps() firewall.NFTTextOps {
 }
 
 func (b *Backend) EnsurePanelDNATAccepts() ([]string, error) {
-	return firewall.EnsurePanelDNATAccepts(b.panelAcceptOps())
+	return firewall.EnsurePanelDNATAccepts(b.inputAcceptOps())
 }
 
 func (b *Backend) RemovePanelDNATAccepts() ([]string, error) {
-	return firewall.RemovePanelDNATAccepts(b.panelAcceptOps())
+	return firewall.RemovePanelDNATAccepts(b.inputAcceptOps())
 }
 
 func (b *Backend) PanelDNATAcceptState() map[int]string {
-	return firewall.PanelDNATAcceptState(b.panelAcceptOps())
+	return firewall.PanelDNATAcceptState(b.inputAcceptOps())
 }

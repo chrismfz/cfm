@@ -10,8 +10,6 @@ import (
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
-
-	"cfm/internal/firewall"
 )
 
 func TestDNATRuleSpecIdentityParsing(t *testing.T) {
@@ -139,14 +137,14 @@ func TestDNATUnscopedWantedSpecsDoNotRequireChallengeSource(t *testing.T) {
 	}
 
 	accepts := []string{
-		`add rule inet cfm input tcp dport 9080 ct state new ct status dnat ct original proto-dst 80 accept comment "cfm_edge_dnat_accept:web_http_tcp:80:9080"`,
-		`add rule inet cfm input tcp dport 9043 ct state new ct status dnat ct original proto-dst 443 accept comment "cfm_edge_dnat_accept:web_https_tcp:443:9043"`,
-		`add rule inet cfm input udp dport 9043 ct state new ct status dnat ct original proto-dst 443 accept comment "cfm_edge_dnat_accept:web_https_udp:443:9043"`,
+		`tcp dport 9080 ct state new ct status dnat ct original proto-dst 80 accept comment "cfm_edge_dnat_accept:web_http_tcp:80:9080"`,
+		`tcp dport 9043 ct state new ct status dnat ct original proto-dst 443 accept comment "cfm_edge_dnat_accept:web_https_tcp:443:9043"`,
+		`udp dport 9043 ct state new ct status dnat ct original proto-dst 443 accept comment "cfm_edge_dnat_accept:web_https_udp:443:9043"`,
 	}
 	for i, spec := range specs {
-		got := dnatAcceptRuleExpr(dnatAcceptNamespaceEdge, spec)
+		got := dnatAcceptRuleBody(dnatAcceptNamespaceEdge, spec)
 		if got != accepts[i] {
-			t.Fatalf("dnatAcceptRuleExpr(DNATOn spec %d) = %q, want %q", i, got, accepts[i])
+			t.Fatalf("dnatAcceptRuleBody(DNATOn spec %d) = %q, want %q", i, got, accepts[i])
 		}
 		if strings.Contains(got, " saddr @") {
 			t.Fatalf("DNATOn accept rule is unexpectedly source-scoped: %q", got)
@@ -205,36 +203,15 @@ func TestDNATShowRuleLineOutput(t *testing.T) {
 	}
 }
 
-func TestDNATAcceptRuleExprUsesDNATMetadataAndTranslatedDestination(t *testing.T) {
+func TestDNATAcceptRuleBodyUsesDNATMetadataAndTranslatedDestination(t *testing.T) {
 	spec := dnatRuleSpec{family: nftables.TableFamilyIPv6, proto: 17, dport: 443, toPort: 9043, sourceSet: "self_v6", toAddr: net.ParseIP("2001:db8::10")}
-	want := `add rule inet cfm input ip6 daddr 2001:db8::10 udp dport 9043 ct state new ct status dnat ct original proto-dst 443 accept comment "cfm_edge_dnat_accept:web_https_ip6_udp:443:9043"`
-	got := dnatAcceptRuleExpr(dnatAcceptNamespaceEdge, spec)
+	want := `ip6 daddr 2001:db8::10 udp dport 9043 ct state new ct status dnat ct original proto-dst 443 accept comment "cfm_edge_dnat_accept:web_https_ip6_udp:443:9043"`
+	got := dnatAcceptRuleBody(dnatAcceptNamespaceEdge, spec)
 	if got != want {
-		t.Fatalf("dnatAcceptRuleExpr() = %q, want %q", got, want)
+		t.Fatalf("dnatAcceptRuleBody() = %q, want %q", got, want)
 	}
 	if strings.Contains(got, " saddr @") {
-		t.Fatalf("dnatAcceptRuleExpr() = %q, want no source-set membership requirement", got)
-	}
-}
-
-func TestDNATAcceptRuleExprCanInsertBeforeDefaultDropHandle(t *testing.T) {
-	spec := dnatRuleSpec{family: nftables.TableFamilyIPv4, proto: 6, dport: 80, toPort: 9080, sourceSet: "challenge_v4", toAddr: net.ParseIP("127.0.0.1")}
-	chain := `table inet cfm {
-		chain input {
-			ct state new tcp dport 0-65535 drop # handle 31
-			ct state new udp dport 0-65535 drop # handle 32
-		}
-	}`
-	handle := firewall.FirstInputDefaultDropHandle(chain)
-	if handle != "31" {
-		t.Fatalf("FirstInputDefaultDropHandle() = %q, want 31", handle)
-	}
-	got := dnatAcceptRuleExpr(dnatAcceptNamespaceEdge, spec, handle)
-	if !strings.HasPrefix(got, "insert rule inet cfm input position 31 ") {
-		t.Fatalf("DNAT accept rule was not handle-inserted before default drops: %q", got)
-	}
-	if strings.HasPrefix(got, "add rule inet cfm input ") {
-		t.Fatalf("DNAT accept rule used append syntax that can place it after default drops: %q", got)
+		t.Fatalf("dnatAcceptRuleBody() = %q, want no source-set membership requirement", got)
 	}
 }
 
