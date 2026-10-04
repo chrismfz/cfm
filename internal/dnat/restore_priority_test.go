@@ -180,8 +180,7 @@ func TestPriorityOverrideWarning(t *testing.T) {
 }
 
 // `cfm dnat on --priority` at -200 or below is refused before the backend is
-// touched: nft rejects the chain, and the nft backend deletes the live table
-// before adding, which would leave web DNAT off.
+// touched: nft rejects the chain, so the attempt could only fail.
 func TestDNATOnRefusesPriorityNFTRejects(t *testing.T) {
 	withWebIntentOn(t)
 	for _, p := range []string{"-200", "-250", "-300"} {

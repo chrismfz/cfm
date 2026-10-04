@@ -111,9 +111,9 @@ func reapplyWebPriorityIfChanged(backend firewall.Backend) {
 	}
 	want = clampNFTPriority(want)
 	if want <= minNATChainPriority {
-		// nft refuses a nat chain at -200 or below. The nft backend deletes
-		// the table before adding the new one, so trying would leave web
-		// DNAT off; keep the working chain and say why.
+		// nft refuses a nat chain at -200 or below. Both backends replace
+		// the table in one transaction, so trying would only fail and keep
+		// the working chain; skip it and say why.
 		LogTransition(ScopeWeb, "ON", "startup", fmt.Sprintf("kept the installed chain: NFT_DNAT_PRIORITY %d is not a valid nat priority (must be above %d)", want, minNATChainPriority))
 		return
 	}

@@ -615,8 +615,8 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	// `cfm dnat on --priority X` would silently keep the old one), or it
 	// holds rules this backend didn't write — e.g. the nft backend's form of
 	// the redirect from a CLI that ran it, which sits ahead of ours and keeps
-	// winning. The nft backend replaces the table on every DNATOn (in two
-	// steps). Another table keeps its chain.
+	// winning. The nft backend replaces the table on every DNATOn (in one
+	// transaction too). Another table keeps its chain.
 	if ch != nil && strings.EqualFold(family, firewall.DNATDefaultFamily) && table == firewall.DNATDefaultTable &&
 		(ch.Priority != nil && *ch.Priority != b.dnatChainPriority() || hasForeignDNATRules(rules)) {
 		b.conn.DelTable(ch.Table)
