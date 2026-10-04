@@ -21,6 +21,7 @@ func TestApplyPortsPolicyIsAtomicAndStable(t *testing.T) {
 			ApplyPortsPolicy:  b.ApplyPortsPolicy,
 			DNATOn:            func() error { return b.DNATOn("inet", "cfm_redirect", 9080, 9043) },
 			EnsureDNATAccepts: b.EnsureDNATAccepts,
+			DNATOnPorts:       func(h, hs int) error { return b.DNATOn("inet", "cfm_redirect", h, hs) },
 		}
 	})
 }

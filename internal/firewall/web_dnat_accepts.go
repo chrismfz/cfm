@@ -13,17 +13,20 @@ func IsWebDNATAccept(line string) bool {
 	return strings.Contains(norm, WebDNATAcceptTagNFT+":") || strings.Contains(norm, WebDNATAcceptTagNFTLib+":")
 }
 
-// EnsureInputAccepts makes `inet cfm input` hold exactly the rules in want
-// (rule bodies, written as for `add rule inet cfm input <body>`), each once
-// and above the ports policy's default drop, among the rules managed reports
-// as its own. It is the web DNAT accepts' counterpart of
-// EnsurePanelDNATAccepts, with the same guarantee: a wanted rule already in
-// place is KEPT, untouched. Otherwise it is inserted before the default drop
-// (appended when the chain has none), and only after that are the managed
-// rules nobody wants (misplaced below the drop, duplicated, other ports, the
-// other engine's tag) deleted. Inserts and deletes are one nft batch, so the
-// kernel applies them all-or-nothing: an accept that was working stays in
-// force until its replacement exists.
+// EnsureInputAccepts makes `inet cfm input` hold the rules in want (rule
+// bodies, written as for `add rule inet cfm input <body>`), each once and
+// above the ports policy's default drop, among the rules managed reports as
+// its own. It is the web DNAT accepts' counterpart of EnsurePanelDNATAccepts,
+// with the same guarantee: a wanted rule already in place is KEPT, untouched.
+// A missing one is inserted before the default drop (appended when the chain
+// has none), all inserts in one nft batch, and only after that, when prune is
+// set, are the managed rules nobody wants (misplaced below the drop,
+// duplicated, other ports, the other engine's tag) deleted, best effort: an
+// accept that was working stays in force until its replacement exists, and a
+// delete that fails (another process removed that handle first) never undoes
+// an insert. Pass prune=false while the redirect still points at the rules'
+// old target (DNATOn before it moves the redirect), then call again with
+// prune=true.
 //
 // It replaces a delete-everything-then-insert-one-by-one that ran on every
 // daemon reload (EnsureDNATAccepts after ApplyPortsPolicy): between the first
@@ -31,25 +34,28 @@ func IsWebDNATAccept(line string) bool {
 // listener (80/443 -> 9080/9043, not in TCP_IN) hit the default drop, for as
 // long as a few nft runs take on a node with large sets.
 //
-// A rule is matched on its printed text (ruleKey), so a wanted rule nft
-// prints in another order reads as missing: it is inserted again and the old
-// copy deleted in the same batch, every apply. That churns but never leaves a
-// gap.
-func EnsureInputAccepts(ops NFTTextOps, want []string, managed func(line string) bool) ([]string, error) {
-	_ = ops.Run("add table inet cfm")
-	_ = ops.Run("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
+// A rule is identified by its comment tag (and a `daddr`, if it has one), not
+// its whole printed text: older nft releases print `ct original proto-dst` as
+// hex with "[invalid type]" (see parsePanelAcceptLine), and a text match
+// would then replace every accept on every reload.
+func EnsureInputAccepts(ops NFTTextOps, want []string, managed func(line string) bool, prune bool) ([]string, error) {
 	// Fail closed on a listing error: without the default-drop handle the
 	// accepts would be appended after the drop, where nothing reaches them,
-	// and without the handles the stale ones could not be found.
+	// and without the handles the stale ones could not be found. A missing
+	// chain is declared and read again (EnsureBase normally made it).
 	out, err := ops.ListInput()
 	if err != nil {
-		return nil, fmt.Errorf("list inet cfm input chain for accepts: %w", err)
+		_ = ops.Run("add table inet cfm")
+		_ = ops.Run("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
+		if out, err = ops.ListInput(); err != nil {
+			return nil, fmt.Errorf("list inet cfm input chain for accepts: %w", err)
+		}
 	}
 	beforeHandle := FirstInputDefaultDropHandle(out)
 
 	type rule struct {
-		key, handle string
-		beforeDrop  bool
+		id, handle string
+		beforeDrop bool
 	}
 	var rules []rule
 	seenDrop := false
@@ -66,21 +72,21 @@ func EnsureInputAccepts(ops NFTTextOps, want []string, managed func(line string)
 		if i := strings.LastIndex(text, "# handle "); i >= 0 {
 			text = text[:i]
 		}
-		rules = append(rules, rule{key: ruleKey(text), handle: h, beforeDrop: !seenDrop})
+		rules = append(rules, rule{id: acceptIdentity(text), handle: h, beforeDrop: !seenDrop})
 	}
 
-	var script, changes []string
+	var inserts, changes []string
 	kept := map[string]bool{}
 	seen := map[string]bool{}
 	for _, w := range want {
-		k := ruleKey(w)
-		if seen[k] {
+		id := acceptIdentity(w)
+		if seen[id] {
 			continue
 		}
-		seen[k] = true
+		seen[id] = true
 		found := false
 		for _, r := range rules {
-			if !kept[r.handle] && r.beforeDrop && r.key == k {
+			if !kept[r.handle] && r.beforeDrop && r.id == id {
 				kept[r.handle], found = true, true
 				break
 			}
@@ -89,23 +95,70 @@ func EnsureInputAccepts(ops NFTTextOps, want []string, managed func(line string)
 			continue
 		}
 		if beforeHandle != "" {
-			script = append(script, "insert rule inet cfm input position "+beforeHandle+" "+w)
+			inserts = append(inserts, "insert rule inet cfm input position "+beforeHandle+" "+w)
 		} else {
-			script = append(script, "add rule inet cfm input "+w)
+			inserts = append(inserts, "add rule inet cfm input "+w)
 		}
 		changes = append(changes, "added: "+w)
 	}
-	for _, r := range rules {
-		if !kept[r.handle] {
-			script = append(script, "delete rule inet cfm input handle "+r.handle)
-			changes = append(changes, "removed handle "+r.handle)
+	if len(inserts) > 0 {
+		if err := ops.Run(strings.Join(inserts, "\n")); err != nil {
+			return nil, fmt.Errorf("insert inet cfm input accepts: %w", err)
 		}
 	}
-	if len(script) == 0 {
-		return nil, nil
+	if !prune {
+		return changes, nil
 	}
-	if err := ops.Run(strings.Join(script, "\n")); err != nil {
-		return nil, fmt.Errorf("update inet cfm input accepts: %w", err)
+	var stale []string
+	for _, r := range rules {
+		if !kept[r.handle] {
+			stale = append(stale, r.handle)
+		}
+	}
+	if len(stale) == 0 {
+		return changes, nil
+	}
+	// One batch when it goes through; one by one otherwise, so a handle
+	// another process already deleted doesn't keep the rest.
+	batch := make([]string, len(stale))
+	for i, h := range stale {
+		batch[i] = "delete rule inet cfm input handle " + h
+	}
+	if ops.Run(strings.Join(batch, "\n")) == nil {
+		for _, h := range stale {
+			changes = append(changes, "removed handle "+h)
+		}
+		return changes, nil
+	}
+	for i, h := range stale {
+		if err := ops.Run(batch[i]); err != nil {
+			changes = append(changes, fmt.Sprintf("could not remove handle %s: %v", h, err))
+			continue
+		}
+		changes = append(changes, "removed handle "+h)
 	}
 	return changes, nil
 }
+
+// acceptIdentity is what makes an accept the same rule across nft versions:
+// its comment tag, plus a `daddr <addr>` match if it has one. A rule with no
+// comment falls back to its printed text.
+func acceptIdentity(text string) string {
+	f := strings.Fields(strings.ReplaceAll(text, `"`, ""))
+	comment, daddr := "", ""
+	for i := 0; i+1 < len(f); i++ {
+		switch f[i] {
+		case "comment":
+			comment = f[i+1]
+		case "daddr":
+			daddr = f[i+1]
+		}
+	}
+	if comment == "" {
+		return ruleKey(text)
+	}
+	return comment + " " + daddr
+}
+
+// RuleHandle returns the handle of one `nft -a` listing line, or "".
+func RuleHandle(line string) string { return ruleHandle(line) }

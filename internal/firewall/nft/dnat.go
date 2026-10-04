@@ -87,14 +87,6 @@ func dnatAcceptRuleComment(label string, from, to int) string {
 	return fmt.Sprintf("%s:%s:%d:%d", firewall.WebDNATAcceptTagNFT, label, from, to)
 }
 
-func dnatAcceptRuleExpr(spec dnatAcceptRuleSpec, beforeHandle string) string {
-	prefix := "add rule inet cfm input"
-	if strings.TrimSpace(beforeHandle) != "" {
-		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle)
-	}
-	return prefix + " " + dnatAcceptRuleBody(spec)
-}
-
 // dnatAcceptRuleBody is the accept for one mapping, as written after
 // `add rule inet cfm input`.
 func dnatAcceptRuleBody(spec dnatAcceptRuleSpec) string {
@@ -114,14 +106,14 @@ func dnatAcceptRuleBody(spec dnatAcceptRuleSpec) string {
 // once made the listing fail silently, so FirstInputDefaultDropHandle saw an
 // error string, returned "", and the accepts were APPENDED after the default
 // drop (never reached) instead of inserted before it.
-func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
+func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int, prune bool) error {
 	var want []string
 	for _, spec := range dnatAcceptRuleSpecs(httpPort, httpsPort) {
 		if spec.to > 0 {
 			want = append(want, dnatAcceptRuleBody(spec))
 		}
 	}
-	_, err := firewall.EnsureInputAccepts(b.inputAcceptOps(), want, firewall.IsWebDNATAccept)
+	_, err := firewall.EnsureInputAccepts(b.inputAcceptOps(), want, firewall.IsWebDNATAccept, prune)
 	return err
 }
 
@@ -133,18 +125,13 @@ func (b *Backend) cleanupScopedDNATAccepts() error {
 		return nil
 	}
 	for _, line := range strings.Split(out, "\n") {
-		norm := strings.ReplaceAll(line, `"`, "")
-		// Both engines' tags: an nftlib-written accept left behind after an
-		// engine switch would otherwise stay forever.
-		tagged := strings.Contains(norm, firewall.WebDNATAcceptTagNFT+":") || strings.Contains(norm, firewall.WebDNATAcceptTagNFTLib+":")
-		if !tagged || !strings.Contains(norm, " handle ") {
+		// Both engines' tags (the same matcher EnsureInputAccepts uses): an
+		// nftlib-written accept left behind after an engine switch would
+		// otherwise stay forever.
+		if !firewall.IsWebDNATAccept(line) {
 			continue
 		}
-		h := strings.TrimSpace(norm[strings.LastIndex(norm, " handle ")+8:])
-		if fields := strings.Fields(h); len(fields) > 0 {
-			h = fields[0]
-		}
-		if h != "" {
+		if h := firewall.RuleHandle(line); h != "" {
 			if err := b.nftCmd("delete rule inet cfm input handle " + h); err != nil {
 				return err
 			}
@@ -169,7 +156,9 @@ func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 		return fmt.Errorf("invalid ports: http=%d https=%d", httpPort, httpsPort)
 	}
 
-	if err := b.ensureScopedDNATAccepts(httpPort, httpsPort); err != nil {
+	// Accepts for the new listener ports first, keeping any for the old ones:
+	// the redirect still points there until it is replaced below.
+	if err := b.ensureScopedDNATAccepts(httpPort, httpsPort, false); err != nil {
 		return err
 	}
 
@@ -181,7 +170,11 @@ func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 	}
 
 	// Reuse your multi-line nft expression runner
-	return b.nftExpr(dnatScript(fam, tbl, httpPort, httpsPort, b.dnatPriority()))
+	if err := b.nftExpr(dnatScript(fam, tbl, httpPort, httpsPort, b.dnatPriority())); err != nil {
+		return err
+	}
+	// The redirect points at the new ports now: drop the accepts nobody wants.
+	return b.ensureScopedDNATAccepts(httpPort, httpsPort, true)
 }
 
 // parseDNATListenerPorts scans the `list table inet cfm_redirect` output for
@@ -210,7 +203,7 @@ func (b *Backend) EnsureDNATAccepts() error {
 	if !ok {
 		return nil
 	}
-	return b.ensureScopedDNATAccepts(httpPort, httpsPort)
+	return b.ensureScopedDNATAccepts(httpPort, httpsPort, true)
 }
 
 func (b *Backend) DNATOff(fam, tbl string) (err error) {
