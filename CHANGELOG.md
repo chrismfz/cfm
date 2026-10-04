@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.04
+
 ### Fixed
 - **The ports policy (TCP_IN/UDP_IN/TCP_OUT/UDP_OUT) is now written as one
   nft transaction, on both engines.** Every ports apply (daemon start, any
