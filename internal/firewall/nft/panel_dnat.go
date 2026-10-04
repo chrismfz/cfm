@@ -50,8 +50,12 @@ func (b *Backend) PanelDNATOn(priority int) (err error) {
 		}
 		b.logPhase("PanelDNATOn", st, time.Since(start), err, fmt.Sprintf("op=dnat scope=cpanel priority=%d", priority))
 	}()
-	_ = b.nftCmd("delete table inet cfm_panel_redirect")
-	return b.nftExpr(panelDNATScript(priority))
+	// One transaction (replaceTableScript): the panel redirect never lapses,
+	// and a script that fails leaves the old one in force (the panel's
+	// listener ports are fixed, so the old redirect is never wrong). It used
+	// to be `delete table` then the new script in a second run: in between,
+	// panel traffic reached cpsrvd directly, and a failure left it that way.
+	return b.nftExpr(replaceTableScript(panelDNATFamily, panelDNATTable, panelDNATScript(priority)))
 }
 
 func (b *Backend) PanelDNATOff() (err error) {

@@ -162,19 +162,26 @@ func (b *Backend) DNATOn(fam, tbl string, httpPort, httpsPort int) (err error) {
 		return err
 	}
 
-	// Replace CFM's managed DNAT table so changed listener ports are applied.
-	if b.dnatTableExists(fam, tbl) {
-		if err := b.nftCmd(fmt.Sprintf("delete table %s %s", fam, tbl)); err != nil {
-			return err
-		}
-	}
-
-	// Reuse your multi-line nft expression runner
-	if err := b.nftExpr(dnatScript(fam, tbl, httpPort, httpsPort, b.dnatPriority())); err != nil {
+	// Replace CFM's managed DNAT table in ONE transaction (replaceTableScript):
+	// the redirect never lapses, and a script that fails changes nothing.
+	// It used to be `delete table` and then the new table in a second nft
+	// run: between the two, web traffic reached the backend directly (no
+	// edge, WAF or challenge), and a second run that failed left web DNAT
+	// off.
+	if err := b.nftExpr(replaceTableScript(fam, tbl, dnatScript(fam, tbl, httpPort, httpsPort, b.dnatPriority()))); err != nil {
+		// The old redirect, if any, is still in force: see
+		// dropRedirectToOtherPorts in internal/dnat for `cfm dnat on`
+		// moving to other listener ports.
 		return err
 	}
-	// The redirect points at the new ports now: drop the accepts nobody wants.
-	return b.ensureScopedDNATAccepts(httpPort, httpsPort, true)
+	// The redirect points at the new ports now: drop the accepts nobody wants,
+	// best effort. Leftovers match only connections DNAT'd to their port, which
+	// no redirect targets any more, and the next EnsureDNATAccepts prunes them.
+	// Failing here would report the committed redirect as not installed.
+	if err := b.ensureScopedDNATAccepts(httpPort, httpsPort, true); err != nil {
+		b.logPhase("DNATOn", "warn", 0, err, "op=dnat leftover scoped accepts (inert without a redirect to their port)")
+	}
+	return nil
 }
 
 // parseDNATListenerPorts scans the `list table inet cfm_redirect` output for
@@ -267,4 +274,13 @@ func (b *Backend) dnatPriority() int {
 		return 300
 	}
 	return prio
+}
+
+// replaceTableScript prefixes an nft script that defines family/table with the
+// statements that remove the table first, so `nft -f` replaces it in one
+// kernel transaction: no moment without the table, and nothing changes when
+// any statement fails. `add table` first makes the `delete` valid when the
+// table does not exist yet.
+func replaceTableScript(family, table, script string) string {
+	return fmt.Sprintf("add table %s %s\ndelete table %s %s\n", family, table, family, table) + script
 }

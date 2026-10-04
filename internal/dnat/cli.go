@@ -366,10 +366,18 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		// exactly what gets installed (the backend clamps too; an unclamped echo of
 		// an out-of-range --priority would misreport the real chain priority).
 		effPrio := clampNFTPriority(*priority)
-		// nft refuses a nat chain at -200 or below, and the nft backend deletes
-		// the live table before adding the new one: refuse before touching it.
+		// nft refuses a nat chain at -200 or below: refuse before touching it
+		// (the backends replace the table in one transaction, so it would
+		// only fail and keep the old chain, but say why up front).
 		if effPrio <= minNATChainPriority {
 			fmt.Fprintf(os.Stderr, "dnat on failed: priority %d is not a valid nat priority (must be above %d); nothing changed\n", effPrio, minNATChainPriority)
+			return 2
+		}
+		// Bad ports are input errors, refused before anything runs: past this
+		// point a failure to other ports removes the old redirect
+		// (dropRedirectToOtherPorts), and a typo must not do that.
+		if !validListenerPort(*httpPort) || !validListenerPort(*httpsPort) {
+			fmt.Fprintf(os.Stderr, "dnat on failed: invalid ports http=%d https=%d (must be 1-65535); nothing changed\n", *httpPort, *httpsPort)
 			return 2
 		}
 		if err := os.Setenv("NFT_DNAT_PRIORITY", strconv.Itoa(effPrio)); err != nil {
@@ -378,6 +386,7 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		}
 		if err := backend.DNATOn(*family, *table, *httpPort, *httpsPort); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat on failed:", err)
+			dropRedirectToOtherPorts(backend, *family, *table, *httpPort, *httpsPort)
 			return 1
 		}
 		if err := PersistIntent(ScopeWeb, true); err != nil {
@@ -984,3 +993,52 @@ func priorityOverrideWarning(applied, configured int, configRead bool) string {
 		"the host reboots or the failsafe re-installs DNAT, which all apply cfm.conf's value. "+
 		"To keep %d, set NFT_DNAT_PRIORITY = %d in cfm.conf.", applied, configured, applied, applied)
 }
+
+// dropRedirectToOtherPorts runs after a failed `cfm dnat on`. Both backends
+// replace the redirect in one transaction, so a failure keeps the redirect
+// that was in force. That is right unless `on` was moving to OTHER listener
+// ports: the old redirect then points at ports the edge may no longer serve,
+// and the failsafe would not notice, because it probes the daemon's own
+// HTTP_PORT/HTTPS_PORT (WebEdgePorts), which after an edge move name the new
+// ports. For that case only, whichever step failed, remove the redirect:
+// traffic goes straight to the backend, and it says so. That was the nft
+// engine's outcome before (it deleted the table before writing the new one);
+// the nftlib engine used to keep the stale redirect. Intent is unchanged, so
+// with intent ON the failsafe re-installs the redirect to the daemon's ports
+// once the edge answers there. The table is read AFTER the failure, so a batch
+// the kernel committed despite an error (it then names the new ports) is left
+// alone, and an unreadable table is reported, never guessed.
+func dropRedirectToOtherPorts(backend firewall.Backend, family, table string, httpPort, httpsPort int) {
+	on, err := backend.DNATStatus(family, table)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dnat on: could not check the redirect after the failure (%v); run `cfm dnat` and verify it points at %d/%d\n", err, httpPort, httpsPort)
+		return
+	}
+	if !on {
+		return
+	}
+	show, err := backend.DNATShow(family, table)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dnat on: could not read the redirect after the failure (%v); run `cfm dnat` and verify it points at %d/%d\n", err, httpPort, httpsPort)
+		return
+	}
+	oldHTTP, oldHTTPS, ok := firewall.ParseDNATListenerPorts(show)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "dnat on: could not tell which ports the redirect points at; run `cfm dnat` and verify it points at %d/%d\n", httpPort, httpsPort)
+		return
+	}
+	if oldHTTP == httpPort && oldHTTPS == httpsPort {
+		fmt.Fprintf(os.Stderr, "dnat on: the previous redirect (tcp/80->:%d, tcp+udp/443->:%d) is still in force\n", oldHTTP, oldHTTPS)
+		return
+	}
+	reason := fmt.Sprintf("dnat on to %d/%d failed; removed the redirect to the old ports %d/%d", httpPort, httpsPort, oldHTTP, oldHTTPS)
+	if err := backend.DNATOff(family, table); err != nil {
+		fmt.Fprintf(os.Stderr, "dnat on: the redirect still points at the OLD ports %d/%d and could not be removed (%v); if the edge no longer listens there, the sites are down: run `cfm dnat off`\n", oldHTTP, oldHTTPS, err)
+		return
+	}
+	LogTransition(ScopeWeb, "OFF", "manual-failed", reason)
+	fmt.Fprintf(os.Stderr, "dnat on: removed the redirect to the old ports %d/%d (the edge may no longer listen there); web traffic goes straight to the backend until `cfm dnat on` succeeds (with intent ON, the failsafe re-installs it to the daemon's HTTP_PORT/HTTPS_PORT once the edge answers there)\n", oldHTTP, oldHTTPS)
+}
+
+// validListenerPort reports whether p can be a DNAT target port.
+func validListenerPort(p int) bool { return p >= 1 && p <= 65535 }

@@ -615,8 +615,8 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	// `cfm dnat on --priority X` would silently keep the old one), or it
 	// holds rules this backend didn't write — e.g. the nft backend's form of
 	// the redirect from a CLI that ran it, which sits ahead of ours and keeps
-	// winning. The nft backend replaces the table on every DNATOn (in two
-	// steps). Another table keeps its chain.
+	// winning. The nft backend replaces the table on every DNATOn (in one
+	// transaction too). Another table keeps its chain.
 	if ch != nil && strings.EqualFold(family, firewall.DNATDefaultFamily) && table == firewall.DNATDefaultTable &&
 		(ch.Priority != nil && *ch.Priority != b.dnatChainPriority() || hasForeignDNATRules(rules)) {
 		b.conn.DelTable(ch.Table)
@@ -651,7 +651,14 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	if err := b.installEdgeDNATRules(t, ch, wanted, rules, includeLoopbackAccept); err != nil {
 		return err
 	}
-	return b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted, true)
+	// The redirect is committed: pruning the accepts nobody wants is best
+	// effort. Leftovers match only connections DNAT'd to their port, which no
+	// redirect targets any more, and the next EnsureDNATAccepts prunes them.
+	// Failing here would report the new redirect as not installed.
+	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted, true); err != nil {
+		b.logPhase("DNATOn", "warn", 0, err, "op=dnat leftover scoped accepts (inert without a redirect to their port)")
+	}
+	return nil
 }
 
 // hasForeignDNATRules reports whether a prerouting chain holds a rule the

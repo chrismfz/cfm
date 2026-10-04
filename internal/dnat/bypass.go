@@ -327,6 +327,7 @@ func reloadDNATScope(scope firewall.DNATBypassScope, backend firewall.Backend) i
 		// Re-render with the same priority we'd use for a fresh `on`.
 		if err := backend.PanelDNATOn(PanelStartupPriority()); err != nil {
 			fmt.Fprintf(os.Stderr, "cpanel DNAT reload failed: %v\n", err)
+			fmt.Fprintln(os.Stderr, "cpanel DNAT: the redirect with the PREVIOUS bypass list is still in force (the file already has the change); fix the cause and run the command again")
 			return 1
 		}
 		fmt.Println("cpanel DNAT reloaded with updated bypass list")
@@ -352,6 +353,7 @@ func reloadDNATScope(scope firewall.DNATBypassScope, backend firewall.Backend) i
 		}
 		if err := backend.DNATOn(DefaultFamily, DefaultTable, hp, hsp); err != nil {
 			fmt.Fprintf(os.Stderr, "web DNAT reload failed: %v\n", err)
+			fmt.Fprintln(os.Stderr, "web DNAT: the redirect with the PREVIOUS bypass list is still in force (the file already has the change); fix the cause and run the command again")
 			return 1
 		}
 		fmt.Println("web DNAT reloaded with updated bypass list")

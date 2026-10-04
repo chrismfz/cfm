@@ -17,7 +17,30 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **nft engine: the web and cPanel DNAT redirects are replaced in one
+  transaction.** `cfm dnat on`, every `cfm dnat bypass add/del`, the edge
+  failsafe's recovery and a startup `NFT_DNAT_PRIORITY` change rebuild the
+  redirect table (`cfm_redirect`; `cfm dnat cpanel on` the same for
+  `cfm_panel_redirect`). The nft engine deleted the table and created the new
+  one in a second `nft` run: in between, web (or panel) traffic reached the
+  backend directly, without the edge, WAF or challenge, and a second run that
+  failed left DNAT off. Now it is one batch the kernel applies all-or-nothing,
+  as the nftlib engine already did: a replacement that fails keeps the
+  working redirect, and a failed `cfm dnat bypass add/del` says the redirect
+  with the previous list is still in force. One case does not keep it: when
+  `cfm dnat on` to other listener ports fails, it reads the table after the
+  failure and, if the redirect still points at the old ports, removes it
+  (traffic goes straight to the backend, logged as an OFF transition; with
+  intent ON the failsafe re-installs it once the edge answers on the daemon's
+  ports). The edge may no longer listen on the old ports, and the failsafe,
+  which probes the daemon's `HTTP_PORT`/`HTTPS_PORT`, would not notice. That
+  was the nft engine's outcome before; on the nftlib engine it is new (it kept
+  the stale redirect). Out-of-range ports are now refused before anything
+  changes. Removing the old ports' accepts after the new redirect is in place
+  is best effort on both engines: a failure there is a logged warning (the
+  leftovers match nothing, the next reload prunes them), no longer a
+  `dnat on failed` for a redirect that was installed.
 
 ## 2026.10.04
 
