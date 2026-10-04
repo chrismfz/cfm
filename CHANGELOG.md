@@ -37,7 +37,10 @@ back-filled here — see the git/PR history for that period.
   which probes the daemon's `HTTP_PORT`/`HTTPS_PORT`, would not notice. That
   was the nft engine's outcome before; on the nftlib engine it is new (it kept
   the stale redirect). Out-of-range ports are now refused before anything
-  changes.
+  changes. Removing the old ports' accepts after the new redirect is in place
+  is best effort on both engines: a failure there is a logged warning (the
+  leftovers match nothing, the next reload prunes them), no longer a
+  `dnat on failed` for a redirect that was installed.
 
 ## 2026.10.04
 
