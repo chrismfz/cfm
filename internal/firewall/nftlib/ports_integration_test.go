@@ -20,9 +20,10 @@ func TestApplyPortsPolicyIsAtomicAndStable(t *testing.T) {
 		}
 		b.cfg = cfg
 		return portstest.Engine{
-			EnsureBase:       b.EnsureBase,
-			ApplyPortsPolicy: b.ApplyPortsPolicy,
-			DNATOn:           func() error { return b.DNATOn("inet", "cfm_redirect", 9080, 9043) },
+			EnsureBase:        b.EnsureBase,
+			ApplyPortsPolicy:  b.ApplyPortsPolicy,
+			DNATOn:            func() error { return b.DNATOn("inet", "cfm_redirect", 9080, 9043) },
+			EnsureDNATAccepts: b.EnsureDNATAccepts,
 		}
 	})
 }

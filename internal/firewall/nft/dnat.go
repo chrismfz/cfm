@@ -92,36 +92,37 @@ func dnatAcceptRuleExpr(spec dnatAcceptRuleSpec, beforeHandle string) string {
 	if strings.TrimSpace(beforeHandle) != "" {
 		prefix = "insert rule inet cfm input position " + strings.TrimSpace(beforeHandle)
 	}
-	expr := fmt.Sprintf(`%s %s dport %d ct state new ct status dnat ct original proto-dst %d accept comment "%s"`, prefix, spec.proto, spec.to, spec.from, dnatAcceptRuleComment(spec.label, spec.from, spec.to))
-	return strings.Join(strings.Fields(expr), " ")
+	return prefix + " " + dnatAcceptRuleBody(spec)
 }
 
+// dnatAcceptRuleBody is the accept for one mapping, as written after
+// `add rule inet cfm input`.
+func dnatAcceptRuleBody(spec dnatAcceptRuleSpec) string {
+	body := fmt.Sprintf(`%s dport %d ct state new ct status dnat ct original proto-dst %d accept comment "%s"`, spec.proto, spec.to, spec.from, dnatAcceptRuleComment(spec.label, spec.from, spec.to))
+	return strings.Join(strings.Fields(body), " ")
+}
+
+// ensureScopedDNATAccepts keeps one web DNAT accept per mapping above the
+// default drop (firewall.EnsureInputAccepts): one already in place is kept, a
+// missing one is inserted, and only then are the others (either engine's
+// tag) deleted, all in one nft batch. It used to delete every accept and
+// re-insert them one nft run at a time on each reload, a window in which
+// DNAT'd web connections hit the default drop.
+//
+// The listing is argv mode (ListChainText): nftOut feeds its argument to
+// `nft -f -` (script mode), where the `-a` handle flag is a syntax error. That
+// once made the listing fail silently, so FirstInputDefaultDropHandle saw an
+// error string, returned "", and the accepts were APPENDED after the default
+// drop (never reached) instead of inserted before it.
 func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int) error {
-	_ = b.nftExpr("add table inet cfm")
-	_ = b.nftCmd("add chain inet cfm input { type filter hook input priority 0; policy accept; }")
-	// MUST list via ListChainText (argv mode). nftOut feeds its argument to
-	// `nft -f -` (script mode), where the `-a` handle flag is a syntax error —
-	// that made the listing fail silently, so FirstInputDefaultDropHandle saw an
-	// error string, returned "", and the accepts were APPENDED after the default
-	// drop (never reached) instead of inserted before it. Fail closed on a list
-	// error rather than repeating that silent breakage.
-	out, err := b.ListChainText(family, tableName, "input")
-	if err != nil {
-		return fmt.Errorf("list %s %s input chain for dnat accepts: %w", family, tableName, err)
-	}
-	beforeHandle := firewall.FirstInputDefaultDropHandle(out)
-	if err := b.cleanupScopedDNATAccepts(); err != nil {
-		return err
-	}
+	var want []string
 	for _, spec := range dnatAcceptRuleSpecs(httpPort, httpsPort) {
-		if spec.to <= 0 {
-			continue
-		}
-		if err := b.nftCmd(dnatAcceptRuleExpr(spec, beforeHandle)); err != nil {
-			return err
+		if spec.to > 0 {
+			want = append(want, dnatAcceptRuleBody(spec))
 		}
 	}
-	return nil
+	_, err := firewall.EnsureInputAccepts(b.inputAcceptOps(), want, firewall.IsWebDNATAccept)
+	return err
 }
 
 func (b *Backend) cleanupScopedDNATAccepts() error {

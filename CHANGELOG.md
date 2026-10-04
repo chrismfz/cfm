@@ -17,7 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The web DNAT accepts are no longer deleted and re-added on every reload.**
+  After each ports apply (daemon start, any `cfm.conf` change) the daemon
+  re-asserts the `ct status dnat` accepts for the edge listener (80 → 9080,
+  443 → 9043). It used to delete them all and re-insert them one `nft` run at
+  a time, so for that moment every new web connection DNAT'd to the edge hit
+  the default drop (seen live: the three accepts got new handles on every
+  `cfm.conf` touch, on both engines), and a failed insert left web traffic
+  dropped until the next reload. They now follow the cPanel accepts' rule: an
+  accept already above the drop is kept untouched, a missing one is inserted,
+  and only then are extras (misplaced, duplicated, old ports, the other
+  engine's tag) deleted, in one `nft` batch. The edge failsafe is unchanged
+  (it turns DNAT off and on with `cfm dnat off/on`, not this re-assert).
 
 ## 2026.10.04
 

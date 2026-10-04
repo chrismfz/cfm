@@ -19,6 +19,8 @@ type Engine struct {
 	EnsureBase       func() error
 	ApplyPortsPolicy func(*config.PortsConfig) error
 	DNATOn           func() error // web DNAT 80/443 -> 9080/9043
+	// EnsureDNATAccepts is the daemon's re-assert after every ports apply.
+	EnsureDNATAccepts func() error
 }
 
 // RunAtomicAndStable drives an engine against a live nft: EnsureBase, the
@@ -76,12 +78,18 @@ func RunAtomicAndStable(t *testing.T, newEngine func(cfg *config.Config) Engine)
 	}
 	before := list("input") + list("output")
 
-	// Re-apply: not one rule rewritten (a rewritten rule gets a new handle).
+	// A reload as the daemon runs it (ports policy, then the DNAT accepts'
+	// re-assert): not one rule rewritten, the DNAT accepts included (a
+	// rewritten rule gets a new handle). The accepts used to be deleted and
+	// re-inserted on every reload, a window of dropped DNAT'd connections.
 	if err := e.ApplyPortsPolicy(&cfg.Ports); err != nil {
 		t.Fatalf("ApplyPortsPolicy (re-apply): %v", err)
 	}
+	if err := e.EnsureDNATAccepts(); err != nil {
+		t.Fatalf("EnsureDNATAccepts: %v", err)
+	}
 	if after := list("input") + list("output"); after != before {
-		t.Fatalf("a re-apply changed the chains:\nbefore:\n%s\nafter:\n%s", before, after)
+		t.Fatalf("a reload changed the chains:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 
 	in := list("input")
