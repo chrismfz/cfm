@@ -33,9 +33,9 @@ path/UA/country, per-vhost, from the UI.
 | # | Mechanism | Dimensions | Layer | Gap for the ask |
 |---|---|---|---|---|
 | M1 | **`IGNORE_IPS` / `IGNORE_NETS`** (`[global]` in `detectors.conf`; `internal/detectors/ignore.go`) | IP / CIDR | Both (Lua `is_self_origin` + Go bridge `bypassFunc`, `nginx_bridge.go:1723`) | Full bypass of **WAF + challenge + autoblock** — too broad; no path/UA/country/ASN; not per-vhost |
-| M2 | **Static file** `/etc/cfm/webdetector_challenge_exclude.txt` (`CHALLENGE_EXCLUDE_FILE`; `internal/detectors/challenge_exclude.go`) | UA, ASN, PTR, host + FCrDNS | Go log-driven (`autoblock_sink.go:233`) + Go bridge at serve time since 2026-10-01, vhost-wide challenge only (`ChalExcludeHot` → `MatchNoDNS`: ua/asn/host and a bare ptr against the cached PTR, ASN/PTR resolved lazily; no inline DNS on the hot path, so a rule whose `ptr=` needs `verify_fcrdns=1` is skipped there — FCrDNS crawlers are the good-bot downgrade's job; a per-IP challenge or block is never lifted; since 2026-10-06 also on the challenge page itself, `/__cfm_challenge`, which sends a match to `next` (`challengePageExempt`): that URL is what fetchers handed a visitor's address bar fetch, and its location bypasses the decision) | FCrDNS-crawler-oriented; **no path, no country, no IP/CIDR**; file-only (not UI/API/per-tenant); `skip`/`skip_vhost_only` only |
+| M2 | **Static file** `/etc/cfm/webdetector_challenge_exclude.txt` (`CHALLENGE_EXCLUDE_FILE`; `internal/detectors/challenge_exclude.go`) | UA, ASN, PTR, host + FCrDNS | Go log-driven (`autoblock_sink.go:233`) + Go bridge at serve time since 2026-10-01, vhost-wide challenge only (`ChalExcludeHot` → `MatchNoDNS`: ua/asn/host and a bare ptr against the cached PTR, ASN/PTR resolved lazily; no inline DNS on the hot path, so a rule whose `ptr=` needs `verify_fcrdns=1` is skipped there — FCrDNS crawlers are the good-bot downgrade's job; a per-IP challenge or block is never lifted; since 2026-10-06 also on the challenge page itself, `/__cfm_challenge`, which sends a match to `next` (`challengePageExempt`), unless `next` carries a `cfm_rt`: that URL is what fetchers handed a visitor's address bar fetch, and its location bypasses the decision) | FCrDNS-crawler-oriented; **no path, no country, no IP/CIDR**; file-only (not UI/API/per-tenant); `skip`/`skip_vhost_only` only |
 | M3 | **Runtime store** `/var/lib/cfm/webdetector_challenge_excludes.json` (`excludeStore`; `internal/webdetector/exclude_store.go`) | **host only** | Both (arming `hostChallengeExcluded` `challenge_rules.go:207`; edge via `MatchChallenge`) | `path` entries feed **WAF only**, never challenge (`rebuildCompiledLocked` `:443-467`); no country/UA/IP/ASN |
-| — | **FCrDNS good-bot downgrade** (`CHALLENGE_GOODBOT_EXEMPT`, default on; `goodBotDowngrade` `nginx_bridge.go:1826`) | verified crawler (PTR) | Go bridge | Eventual/cache-cold; only the 6 registry crawlers; not operator-extensible per path. Also honoured on the challenge page (`/__cfm_challenge` → `next`, since 2026-10-06) |
+| — | **FCrDNS good-bot downgrade** (`CHALLENGE_GOODBOT_EXEMPT`, default on; `goodBotDowngrade` `nginx_bridge_goodbot.go:553`) | verified crawler (PTR) | Go bridge | Eventual/cache-cold; only the 6 registry crawlers; not operator-extensible per path. Also honoured on the challenge page (`/__cfm_challenge` → `next`, since 2026-10-06) |
 | — | **`isChallengeExemptEndpoint`** (`challenge_rules.go:155`) | **hardcoded** path list (`wp-json/wc/`, webhooks, `/ws_vtrack/`) | Go bridge (`:1801`) | Not operator-editable |
 | — | **Traffic-rule `allow`** (`traffic_rules.go`) | country/ip/ua/path/method | edge rule engine | **Does NOT bypass challenge** — `allow` is only a first-match terminal inside the rule engine; `cfm.lua:1483` OR-guards never consult `rule_action=="allow"` (see `docs/traffic-rules-ux-proposal.md` F1, and the deliberate rejection at that doc §3) |
 
@@ -67,7 +67,7 @@ exactly what M1–M3 cannot express.
 
 A Challenge Access-Control entry, when it matches a request, **downgrades a
 `challenge` verdict to `allow`** — and does nothing else. It mirrors
-`goodBotDowngrade` (`nginx_bridge.go:1826`, which "never softens a block"):
+`goodBotDowngrade` (`nginx_bridge_goodbot.go:553`, which "never softens a block"):
 
 - It **never** weakens the **WAF** — SQLi/RCE/upload/webshell rules (`cfm_waf.lua`,
   `rule_action`) still fire and 403. (Same belt the static file already documents:
@@ -77,6 +77,11 @@ A Challenge Access-Control entry, when it matches a request, **downgrades a
 - It is **fail-open on enrichment** — an unresolved country/ASN does **not**
   match (same sentinel contract as `TrafficRuleMatch.CountryNotIn`), so a geo/ASN
   hiccup can never *grant* an exemption it shouldn't, nor *deny* traffic.
+- It also applies on the **challenge page itself** (`/__cfm_challenge`, since
+  2026-10-06; `challengePageExempt`). That location bypasses the decision, so
+  a matching client that lands there gets a 303 to `next`, matched with
+  `next` as the request. The exception is a `next` that carries a `cfm_rt`
+  (a challenged POST waiting for its owner), which still gets the page.
 
 This is strictly narrower and safer than `IGNORE_NETS` (M1), which bypasses
 everything.
