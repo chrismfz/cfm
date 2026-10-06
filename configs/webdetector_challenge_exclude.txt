@@ -64,6 +64,16 @@
 #        - an asn-only rule (e.g. the Skroutz and Apple rules below) lifts it
 #          for EVERY request from that network, Under-Attack Mode included.
 #      Only list networks you trust that much; pair asn= with ua= otherwise.
+#   3. The challenge page itself (/__cfm_challenge?next=...): a matching
+#      request is sent to next (303) instead of getting the challenge. The page
+#      URL is what a challenged visitor's address bar shows. Fetchers handed it
+#      (Google-Read-Aloud, Meta's link previews, Twitterbot) fetch that URL,
+#      and its location bypasses the edge decision, so step 2 never ran for
+#      them. Same matcher and limits as step 2. It is skipped when a per-IP
+#      challenge (an ipState entry or a geo policy) covers the client. next
+#      loses its cfm_rt (the visitor's POST resume). Logged to the challenges
+#      log as "exempt_redirect", at most once per host per minute. A verified
+#      good bot (CHALLENGE_GOODBOT_EXEMPT) gets the same redirect.
 
 # Glob semantics
 #   '*' matches any run of characters (including the empty string). It is NOT

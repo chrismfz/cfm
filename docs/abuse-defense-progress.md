@@ -58,7 +58,12 @@
   1. Farm solves with no payload (`hs=-`) pass an armed vhost, by design
      (D5b). This happened 227 times on orion in read 1.
   2. Google-Read-Aloud was still served the challenge on rigel after the
-     #1539 rule loaded. To investigate.
+     #1539 rule loaded. **Root cause found (2026-10-06):** fetchers fetch the
+     challenge page's own URL (`/__cfm_challenge?next=…`, the visitor's
+     address bar). That location bypasses the decision, so no exemption ran
+     there. The fix is the challenge-page exemption PR. Read 2 checks the
+     `exempt_redirect` lines and the drop in Meta and Read-Aloud fetches of
+     `/__cfm_challenge`.
 - **Open decisions** (master plan §5 / E4):
   1. Tighten the rescue or leave it, including a score ceiling (it clears
      up to 150; the measured human class scored exactly 100).

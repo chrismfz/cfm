@@ -172,13 +172,13 @@ func normalizeChallengeNext(raw string) string {
 	return "/"
 }
 
-// verifyRejects throttles logVerifyReject (and the loop breaker's own log
-// line) to one line per (ip, reason) a minute. clearedRedirects is the
-// challenge page's loop breaker: a second cleared redirect for the same (ip,
-// scope, host, canonical next) within 10 s serves the page instead. Both use the
-// package's one bounded TTL store through putIfAbsent: a key the full store
-// cannot record reads as seen, so both then take their conservative branch
-// (no log line, serve the page).
+// verifyRejects throttles logVerifyReject (and the challenge page's own log
+// lines) to one line per key a minute. nextRedirects is the challenge page's
+// loop breaker: a second redirect to next (cleared or exempt client) for the
+// same (ip, scope, host, canonical target) within 10 s serves the page
+// instead. Both use the package's one bounded TTL store through putIfAbsent: a
+// key the full store cannot record reads as seen, so both then take their
+// conservative branch (no log line, serve the page).
 var (
 	verifyRejects = pairTTLStore[struct{}]{
 		m:          map[string]time.Time{},
@@ -187,14 +187,32 @@ var (
 		sweepEvery: 5 * time.Second,
 		fullMsg:    "[challenge] verify_reject log throttle full (%d): further verify_reject lines are dropped until pressure drops",
 	}
-	clearedRedirects = pairTTLStore[struct{}]{
+	nextRedirects = pairTTLStore[struct{}]{
 		m:          map[string]time.Time{},
 		ttl:        10 * time.Second,
 		maxKeys:    4096,
 		sweepEvery: 2 * time.Second,
-		fullMsg:    "[challenge] cleared-redirect breaker store full (%d): cleared clients get the challenge page until pressure drops",
+		fullMsg:    "[challenge] next-redirect breaker store full (%d): cleared and exempt clients get the challenge page until pressure drops",
 	}
 )
+
+// withoutResumeToken drops the cfm_rt query argument from next. The token is
+// a challenged visitor's stored POST, bound to that visitor's IP and host.
+// The edge deletes it on the first GET that carries it, even one from another
+// IP, so a fetcher following the visitor's URL must not carry it.
+func withoutResumeToken(next string) string {
+	u, err := url.ParseRequestURI(next)
+	if err != nil || u.RawQuery == "" {
+		return next
+	}
+	q := u.Query()
+	if _, ok := q["cfm_rt"]; !ok {
+		return next
+	}
+	q.Del("cfm_rt")
+	u.RawQuery = q.Encode()
+	return normalizeChallengeNext(u.RequestURI())
+}
 
 // logVerifyReject writes the early verify 403s (cookie / token / PoW) to the
 // challenges log. They used to answer 403 silently, and the challenge page's
@@ -1304,29 +1322,52 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// the scope headers. A challenge the edge proxies through
 		// `location /` carries the client's X-Forwarded-Host / port headers,
 		// which must not pick the host or scope this check uses.
+		//
+		// A client the decision exempts by who it is (a verified good bot, an
+		// exclude-file match; see challengePageExempt) is also sent to next:
+		// this URL reaches fetchers from visitors' address bars and shared
+		// links, and its location bypasses cfm.lua, so without this they got
+		// the PoW the decision would never have served them. Web scope only:
+		// both exemptions govern the web decision. next loses its cfm_rt for
+		// them: the resume token is the visitor's POST, and the edge spends it
+		// on the first GET that carries it, whoever sends it.
 		if host, scope := trustedForwardedHost(r), clearanceScope(r); r.URL.Path == challengePath && host != "" {
+			now := time.Now()
+			why, target := "", next
 			if c, err := r.Cookie(clearanceCookieName(scope)); err == nil &&
-				verifyClearanceToken(c.Value, ip.String(), host, scope, time.Now()) {
-				// Keyed on next in a CANONICAL form (decoded path + sorted,
-				// re-encoded query), not the raw string: the edge's bounce comes
-				// back with next rebuilt from the request URI (differently
-				// escaped, same target), which a raw-string key would miss.
-				// Per target, so a second tab going to another page (even
-				// post.php with another ?post=) is not mistaken for a loop.
-				canon := next
-				if u, err := url.ParseRequestURI(next); err == nil {
+				verifyClearanceToken(c.Value, ip.String(), host, scope, now) {
+				why = "cleared"
+			} else if scope == "web" && s.bridge != nil {
+				if ex, ok := s.bridge.challengePageExempt(ip.String(), host, r.UserAgent(), now); ok {
+					why, target = ex, withoutResumeToken(next)
+				}
+			}
+			if why != "" {
+				// Keyed on the target in a CANONICAL form (decoded path +
+				// sorted, re-encoded query), not the raw string: the edge's
+				// bounce comes back with next rebuilt from the request URI
+				// (differently escaped, same target), which a raw-string key
+				// would miss. Per target, so a second tab going to another
+				// page (even post.php with another ?post=) is not mistaken
+				// for a loop.
+				canon := target
+				if u, err := url.ParseRequestURI(target); err == nil {
 					canon = u.Path + "?" + u.Query().Encode()
 				}
 				sum := sha256.Sum256([]byte(canon))
 				key := ip.String() + "|" + scope + "|" + host + "|" + hex.EncodeToString(sum[:8])
-				if clearedRedirects.putIfAbsent(key, struct{}{}, time.Now()) {
+				if nextRedirects.putIfAbsent(key, struct{}{}, now) {
+					if why != "cleared" && verifyRejects.putIfAbsent(host+"|exempt_redirect", struct{}{}, now) {
+						logging.LogfCHALLENGES("[challenge] exempt_redirect ip=%s host=%s why=%q next=%q ua=%q note=sent_to_next (per-host, 1/min)",
+							ip.String(), truncateForLog(host, 120), truncateForLog(why, 160), truncateForLog(target, 220), truncateForLog(r.UserAgent(), 200))
+					}
 					w.Header().Set("Cache-Control", "no-store")
-					http.Redirect(w, r, next, http.StatusSeeOther) // 303
+					http.Redirect(w, r, target, http.StatusSeeOther) // 303
 					return
 				}
-				if verifyRejects.putIfAbsent(ip.String()+"|cleared_redirect_loop", struct{}{}, time.Now()) {
-					logging.LogfCHALLENGES("[challenge] cleared_redirect_loop ip=%s host=%s scope=%s next=%q note=serving_page",
-						ip.String(), truncateForLog(host, 120), scope, truncateForLog(next, 220))
+				if verifyRejects.putIfAbsent(ip.String()+"|next_redirect_loop", struct{}{}, now) {
+					logging.LogfCHALLENGES("[challenge] next_redirect_loop ip=%s host=%s scope=%s why=%q next=%q note=serving_page",
+						ip.String(), truncateForLog(host, 120), scope, truncateForLog(why, 160), truncateForLog(target, 220))
 				}
 			}
 		}

@@ -2198,6 +2198,75 @@ func (b *NginxBridge) chalExcludeASN(ip string) uint32 {
 	return uint32(b.enr.LookupCachedOrAsync(ip).ASN)
 }
 
+// challengePageExempt reports whether the decision exempts this client from
+// a challenge by WHO it is, not by what challenged it, and why. It serves the
+// challenge page (/__cfm_challenge), which sends such a client to next
+// instead of serving the PoW.
+//
+// That page's URL is what a challenged visitor's address bar shows, and
+// fetchers handed that URL by the browser (Google-Read-Aloud's "listen to
+// this page", Meta's link-preview and agent fetchers, Twitterbot) or finding
+// it in a shared link (Googlebot, Applebot) fetch it directly. Its location
+// bypasses cfm.lua, so neither exemption below ever ran for them. Seen live
+// 2026-10-04..06: rigel served Read-Aloud the challenge after the #1539
+// exclude rule had loaded, and titan served /__cfm_challenge to
+// meta-externalagent ~2 870 times in three days.
+//
+// It mirrors the two client exemptions of handleDecision:
+//   - a verified good bot (CHALLENGE_GOODBOT_EXEMPT) lifts a per-IP and a
+//     vhost-wide challenge alike (goodBotDowngrade). Cache only, like the
+//     decision: a miss kicks the async forward-confirm.
+//   - the exclude file lifts a vhost-wide challenge only. It is not consulted
+//     when a per-IP challenge (an ipState entry or the geo floor) covers the
+//     client, because the edge would challenge next again.
+//
+// A per-IP block exempts nothing. Whatever the edge decides at next (the
+// fingerprint floor, a WAF hit, a traffic rule) still applies. The page's
+// redirect breaker serves the page if the edge sends the client straight
+// back.
+func (b *NginxBridge) challengePageExempt(ip, host, ua string, now time.Time) (string, bool) {
+	if b == nil || ip == "" {
+		return "", false
+	}
+	ipAction, _ := b.GetIPDecision(ip)
+	if ipAction == "block" {
+		return "", false
+	}
+	var geo enrich.Result
+	geoLoaded := false
+	lookupGeo := func() enrich.Result {
+		if !geoLoaded {
+			geoLoaded = true
+			if b.enr != nil {
+				geo = b.enr.LookupCachedOrAsync(ip)
+			}
+		}
+		return geo
+	}
+	ptrFn := func() string { return lookupGeo().PTR }
+	if b.goodBotExempt && b.goodBot != nil && b.enr != nil {
+		if name := b.goodBot.verified(ip, ptrFn, now); name != "" {
+			return "goodbot:" + name, true
+		}
+	}
+	if b.ChalExcludeHot == nil || ipAction == "challenge" {
+		return "", false
+	}
+	if GeoPolicyAction(lookupGeo().CountryISO, func() uint64 { return uint64(b.chalExcludeASN(ip)) }) != "" {
+		return "", false
+	}
+	asnFn := func() string {
+		if n := b.chalExcludeASN(ip); n > 0 {
+			return fmt.Sprintf("AS%d", n)
+		}
+		return ""
+	}
+	if _, rule, ok := b.ChalExcludeHot(host, ua, asnFn, ptrFn, "CHALLENGE_VHOST"); ok {
+		return "exclude:" + rule, true
+	}
+	return "", false
+}
+
 // handleIPPush: cfm (or external tool) pushes a new IP decision.
 // Also called internally by ChallengeIP/BlockIP — but can be called
 // directly by cfm's challenge_server.go sink as well.
