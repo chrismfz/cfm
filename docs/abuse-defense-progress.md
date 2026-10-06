@@ -61,7 +61,7 @@
      #1539 rule loaded. **Root cause found (2026-10-06):** fetchers fetch the
      challenge page's own URL (`/__cfm_challenge?next=…`, the visitor's
      address bar). That location bypasses the decision, so no exemption ran
-     there. The fix is the challenge-page exemption PR. Read 2 checks the
+     there. Fixed in #1546. Read 2 checks the
      `exempt_redirect` lines and the drop in Meta and Read-Aloud fetches of
      `/__cfm_challenge`.
 - **Open decisions** (master plan §5 / E4):
