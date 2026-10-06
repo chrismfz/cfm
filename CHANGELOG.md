@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.06
+
 ### Fixed
 - **The challenge page no longer serves the PoW to clients the decision
   exempts.** A challenged visitor's address bar shows the challenge page's own
