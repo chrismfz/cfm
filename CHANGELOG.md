@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.06
+
 ### Changed
 - **WAF rule 612 (missing fetch-metadata, logonly) measures more cleanly.**
   A 7-day read across seven nodes found real people and honest services in
@@ -48,8 +52,6 @@ back-filled here — see the git/PR history for that period.
   the victim's, or pads the recipient past the WAF's 32 KB body window (logged
   as `BODY_PAST_WINDOW`). Updating SP Page Builder (3.8 or later) closes all of
   them.
-
-## 2026.10.06
 
 ### Fixed
 - **The challenge page no longer serves the PoW to clients the decision
