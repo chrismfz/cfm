@@ -611,12 +611,21 @@ local function try_apply_post_resume(ip, host)
   if type(tok) == "table" then tok = tok[1] end
   tok = tostring(tok or "")
   if tok == "" then return false end
-  local raw = SH:get("pr|" .. tok); SH:delete("pr|" .. tok)
+  -- Consumed by its OWNER only: check ip/host BEFORE the delete. It used to
+  -- delete first, so the first GET carrying the token from ANY client spent
+  -- it, and the visitor's replay was lost. The URL carrying cfm_rt sits in the
+  -- visitor's address bar while they solve (/__cfm_challenge?next=…&cfm_rt=…),
+  -- and fetchers handed that URL (Google-Read-Aloud solves the challenge, a
+  -- link preview) reach it first. A foreign GET now leaves the entry to its
+  -- owner, and post_resume_ttl_sec expires an unclaimed one.
+  local key = "pr|" .. tok
+  local raw = SH:get(key)
   if not raw then return false end
   local obj = cjson.decode(raw)
-  if not obj then return false end
+  if not obj then SH:delete(key); return false end
   if tostring(obj.ip or "") ~= tostring(ip or "") then return false end
   if tostring(obj.host or "") ~= tostring(host or "") then return false end
+  SH:delete(key)
   local body = ngx.decode_base64(obj.body_b64 or "")
   if not body or #body == 0 or #body > CFG.post_resume_max_len then return false end
   -- set_body_data() requires the current request body to have been read first,
