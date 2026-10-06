@@ -17,6 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **WAF rule 612 (missing fetch-metadata, logonly) measures more cleanly.**
+  A 7-day read across seven nodes found real people and honest services in
+  its "browser-claiming automation" pool. Now kept out of the pool, as
+  self-declared bots: WP Rocket's SaaS fetcher (`WP-Rocket-SaaS`, which the
+  old `wp rocket` token never matched) and SimilarTech's SMTBot. Google
+  Mobile Ads WebViews (`afma-sdk`, a person tapping a paid ad) join TikTok
+  under the `NO_FETCH_META_IN_APP` tag, which is never enforced even if 612 is
+  promoted. Requests relayed by Google's front end (`,gzip(gfe)`) get their
+  own `NO_FETCH_META_GFE` tag so they can be judged on their own counts; the
+  string is spoofable, so they are not exempt. The rule stays logonly; nothing
+  is blocked or challenged by this change.
+
 ### Security
 - **New WAF rule 520 blocks spam relayed through Joomla SP Page Builder
   contact forms.** The page builder's `ajax_contact` addon mails whatever

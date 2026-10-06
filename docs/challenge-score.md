@@ -285,12 +285,15 @@ logs.
       `text/html` `GET`|`HEAD` nav carries no `Sec-Fetch-*` AND no `Accept-Language`;
       honest CLI clients, self-declared crawlers (named tokens, incl. SleepBot and
       GeedoShopProductFinder) and infra paths (`/robots.txt`, `/.well-known/*`)
-      never match; in-app browsers of social apps (named tokens,
-      `IN_APP_UA_TOKENS` — TikTok's `musical_ly`; a real person, header-poor by
-      the app's stack) are the known real-browser exception and get their own
+      never match; in-app WebViews of social apps and ad SDKs (named tokens,
+      `IN_APP_UA_TOKENS` — TikTok's `musical_ly` and, since 2026-10-06, Google
+      Mobile Ads' `afma-sdk` WebView; a real person, header-poor by the app's
+      stack) are the known real-browser exception and get their own
       tag `NO_FETCH_META_IN_APP` (recorded, separable, weighted on its own,
       clamped to logonly in `cfm_waf.lua` whatever the rule's mode — not
-      suppressed, so the spoofable token buys no silent skip); Safari excluded
+      suppressed, so the spoofable token buys no silent skip); a
+      Google-front-end relayed UA (`,gzip(gfe)`) gets `NO_FETCH_META_GFE`
+      (measured apart, NOT clamped: spoofable, exemption undecided); Safari excluded
       (16.4+ only). logonly SHADOW — surfaced by `waf_activity` (filter
       `rule=WAF_FETCH_METADATA`; `waf_fp_hunt` is panel-WAF-only), un-armed in
       `waf_security` (no edge-block rule), placed LAST so it never masks a stronger

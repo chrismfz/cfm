@@ -187,6 +187,24 @@ clean(req("GET", "Mozilla/5.0 (compatible; Aranet-SearchBot/1.0) Chrome/120.0.0.
       "Aranet-SearchBot self-declares (named token)")
 clean(req("GET", "WP Rocket/Preload Chrome/120.0.0.0"), "WP Rocket preload fetcher (named token)")
 
+-- 612 hygiene 2026-10-06: the exact UAs seen on the fleet.
+clean(req("GET", "Mozilla/5.0 (Linux; Android 13; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) " ..
+                 "Chrome/131.0.0.0 Mobile Safari/537.36 (compatible; WP-Rocket-SaaS/1.0; +https://wp-rocket.me/bot/)"),
+      "WP-Rocket-SaaS (hyphenated) self-declares (named token)")
+-- WP.com mShots is deliberately NOT a crawler token: its UA is HeadlessChrome,
+-- the automation this tell measures, so a name skip would hand any headless
+-- stack a one-token exit from the measurement.
+fires(req("GET", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " ..
+                 "HeadlessChrome/153.0.8010.52 Safari/537.36 WP.com mShots"),
+      "WP.com mShots (HeadlessChrome) stays in the measurement")
+clean(req("GET", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " ..
+                 "Chrome/94.0.4606.81 Safari/537.36 (compatible; SMTBot/1.0; +http://www.similartech.com/smtbot)"),
+      "SMTBot self-declares (named token)")
+-- Control: a bare HeadlessChrome (no mShots token) is automation and still trips.
+fires(req("GET", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " ..
+                 "HeadlessChrome/120.0.6099.28 Safari/537.36"),
+      "bare HeadlessChrome still trips the tell")
+
 -- 612 hygiene 2026-09-23: Viber's link-preview fetcher — a header-poor nav with
 -- a FIXED stale build UA and no self-identifying token (the largest benign pool
 -- in the tell). Suppressed on the exact build; sound only because 612 is logonly.
@@ -221,6 +239,20 @@ clean(req("GET", TIKTOK, { ["accept-language"] = "el-GR,el;q=0.9" }), "TikTok in
 clean(req("GET", TIKTOK .. " bytespider"), "crawler token + in-app token → crawler skip wins (no IN_APP tag)")
 clean(at("/robots.txt", TIKTOK), "in-app UA on /robots.txt → infra carve-out wins (no IN_APP tag)")
 clean(at("/.well-known/acme-challenge/x", TIKTOK), "in-app UA on /.well-known/ → infra carve-out wins")
+-- 2026-10-06: Google Mobile Ads WebView (a paid-ad click, in-app tag, clamped)
+-- and a request relayed by Google's front end (own GFE tag, NOT clamped: the
+-- string is spoofable) — exact UAs seen on the fleet.
+local GFE_TAG = "WAF_FETCH_METADATA:NO_FETCH_META_GFE"
+local ADMOB = "Mozilla/5.0 (Linux; Android 16; SM-A356B Build/BP4A.251205.006; wv) AppleWebKit/537.36 " ..
+              "(KHTML, like Gecko) Version/4.0 Chrome/153.0.8010.36 Mobile Safari/537.36 " ..
+              "(Mobile; afma-sdk-a-v262180000.262180000.0)"
+local GFE = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " ..
+            "Chrome/154.0.0.0 Safari/537.36,gzip(gfe),gzip(gfe)"
+fires_as(req("GET", ADMOB), IN_APP, "Google Mobile Ads WebView (afma-sdk) — own tag")
+fires_as(req("GET", GFE), GFE_TAG, "Google-front-end relayed request (gzip(gfe)) — its own tag")
+-- In-app wins over GFE (clause 6 runs first), and Accept-Language still stands down.
+fires_as(req("GET", ADMOB .. ",gzip(gfe)"), IN_APP, "in-app token + gzip(gfe) → in-app tag")
+clean(req("GET", GFE, { ["accept-language"] = "el-GR" }), "gzip(gfe) WITH Accept-Language is clean")
 -- Control: the same Android Chrome build WITHOUT the in-app token gets the tell
 -- proper, so the tag is keyed on the named token, not "any Android Chrome".
 fires(req("GET", "Mozilla/5.0 (Linux; Android 15; 23124RA7EO Build/AQ3A.240829.003) AppleWebKit/537.36 " ..
@@ -233,9 +265,12 @@ fires(req("GET", "Mozilla/5.0 (Linux; Android 15; 23124RA7EO Build/AQ3A.240829.0
 set_only({ rule_fetch_metadata_missing = "challenge" })
 fires_as(req("GET", CHROME), WANT, "promoted to challenge: the tell proper escalates", "challenge")
 fires_as(req("GET", TIKTOK), IN_APP, "promoted to challenge: in-app tag stays logonly (clamp)", "logonly")
+fires_as(req("GET", ADMOB), IN_APP, "promoted to challenge: afma-sdk stays logonly (clamp)", "logonly")
+fires_as(req("GET", GFE), GFE_TAG, "promoted to challenge: gzip(gfe) follows the rule (not clamped)", "challenge")
 set_only({ rule_fetch_metadata_missing = "block" })
 fires_as(req("GET", CHROME), WANT, "promoted to block: the tell proper escalates", "block")
 fires_as(req("GET", TIKTOK), IN_APP, "promoted to block: in-app tag stays logonly (clamp)", "logonly")
+fires_as(req("GET", ADMOB), IN_APP, "promoted to block: afma-sdk stays logonly (clamp)", "logonly")
 set_only({ rule_fetch_metadata_missing = "disabled" })
 clean(req("GET", TIKTOK), "disabled: nothing fires, in-app included")
 set_only({ rule_fetch_metadata_missing = "logonly" })
