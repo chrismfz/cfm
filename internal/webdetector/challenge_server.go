@@ -1326,7 +1326,8 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// only after the full decision, exemptions included, challenged that
 		// POST, so the exemption cannot clear it. An exempt owner sent there
 		// would lose the POST (an exclude rule can cover a whole network, e.g.
-		// Apple's AS714), and a fetcher would spend the owner's token.
+		// Apple's AS714). A fetcher sent there could not spend it: the edge
+		// consumes a cfm_rt only for its owner's ip and host.
 		if host, scope := trustedForwardedHost(r), clearanceScope(r); r.URL.Path == challengePath && host != "" {
 			now := time.Now()
 			why := ""

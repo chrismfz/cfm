@@ -45,6 +45,18 @@ back-filled here — see the git/PR history for that period.
     `exempt_redirect` line per host per minute.
   - The breaker's loop line is now `next_redirect_loop` (it was
     `cleared_redirect_loop`), with a `why=` field.
+- **A challenged POST is no longer lost to another client that opens its
+  resume URL first.** When a POST is challenged, the edge stores it and
+  replays it after the challenge, on the GET that carries its `cfm_rt`
+  token. The edge deleted the stored entry before checking that the request
+  came from the same IP and host, so the first GET with the token spent it,
+  from any client. The token sits in the visitor's address bar while they
+  solve, inside the challenge page's `next`. A fetcher handed that URL that
+  solves the challenge and follows `next` (Google-Read-Aloud does both)
+  could spend it before the visitor, and the visitor's save was lost. Only a
+  request from the same IP and host now consumes the entry. Another
+  client's GET leaves it in place, and an unclaimed one expires after
+  `CFM_POST_RESUME_TTL_SEC` (90 s by default).
 
 ## 2026.10.04
 
