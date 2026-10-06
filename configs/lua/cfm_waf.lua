@@ -1133,15 +1133,16 @@ function _M.check(ctx)
   -- site sends its spam. Keyed on addon=ajax_contact (and no other explicit
   -- option) and a decoded recipient list of 2+ addresses holding the submitted
   -- email on a domain no other recipient uses. Every method: Joomla reads the
-  -- form from $_REQUEST. MULTI_RECIPIENT (any other 2+ list) is measurement
-  -- only, clamped to logonly like
+  -- form from $_REQUEST. Only RECIPIENT_HAS_SUBMITTER takes the rule's mode;
+  -- MULTI_RECIPIENT (any other 2+ list) and BODY_PAST_WINDOW (the recipient
+  -- may sit past waf_body_max_len) are measurement only, clamped to logonly like
   -- rule 612's in-app tag: an owner may legitimately save a recipient list.
   do
     local mode = rule_mode(CFG.rule_form_relay_sppb_contact, "block")
     if mode ~= "disabled" then
-      local tag = det.detect_sppb_contact_relay(uri, m_lower, args, body, headers, get_norm_ab())
+      local tag = det.detect_sppb_contact_relay(args, body, headers, get_norm_ab())
       if tag then
-        local eff_mode = (tag == "MULTI_RECIPIENT") and "logonly" or mode
+        local eff_mode = (tag == "RECIPIENT_HAS_SUBMITTER") and mode or "logonly"
         local ttl = (eff_mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_FORM_RELAY:SPPB_AJAX_CONTACT:" .. tag, ttl, eff_mode, RULE_IDS.rule_form_relay_sppb_contact) then goto done end
       end

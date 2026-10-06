@@ -237,6 +237,65 @@ do
   check(dt < 0.2, string.format("multipart name= flood is linear (took %.3fs)", dt))
 end
 
+-- Review round 2 (PR review):
+do
+  -- No row cap to push the real rows past.
+  local junk = {}
+  for i = 1, 300 do junk[#junk + 1] = enc("data[j" .. i .. "][name]") .. "=x" end
+  fires(post(table.concat(junk, "&") .. "&" .. form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"))),
+        "300 junk rows before the real form")
+end
+do
+  -- PHP keys are case-sensitive: a differently-cased duplicate is ANOTHER key.
+  local b = form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"))
+  fires(post(b .. "&ADDON=x"), "an upper-case ADDON duplicate does not mask addon")
+  fires(post(b .. "&" .. enc("data[4][VALUE]") .. "=" .. enc(b64enc("x"))),
+        "an upper-case VALUE duplicate does not mask the recipient")
+  clean(post((b:gsub("data%%5B", "DATA%%5B"))), "upper-case DATA keys are not the form PHP reads")
+end
+do
+  -- Joomla's CMD filter strips junk from option/addon.
+  local b = form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"), {})
+  fires(post(b .. "&option=com_sppage%27builder&task=ajax&addon=ajax_contact"),
+        "junk byte inside option (CMD-filtered)")
+  fires(post(b .. "&option=.com_sppagebuilder&addon=ajax_contact%00"),
+        "leading dot in option, NUL in addon")
+end
+do
+  -- The multipart name comes from Content-Disposition only.
+  local MP = "multipart/form-data; boundary=----B"
+  local function part(n, v, extra)
+    return "------B\r\n" .. (extra or "") .. "Content-Disposition: form-data; name=\"" .. n .. "\"\r\n\r\n" .. v .. "\r\n"
+  end
+  local b = part("addon", "ajax_contact")
+    .. part("data[0][name]", "email") .. part("data[0][value]", "cdew@spam.example")
+    .. part("data[1][name]", "recipient")
+    .. part("data[1][value]", b64enc("litohotel@outlook.com,cdew@spam.example"), "X-Junk: a; name=\"zz\"\r\n")
+    .. "------B--\r\n"
+  fires(post(b, MP), "a decoy name= in another part header")
+end
+do
+  -- Content-Length beyond what the edge handed over, addon present, no recipient.
+  local c = post(form({ { "name", "x" }, { "message", string.rep("a", 500) } }))
+  c.headers["Content-Length"] = tostring(40000)
+  local hit, reason, _, action = waf.check(c)
+  check(hit == true and action == "logonly" and reason == "WAF_FORM_RELAY:SPPB_AJAX_CONTACT:BODY_PAST_WINDOW",
+        "truncated body with no recipient is logged BODY_PAST_WINDOW (got " .. tostring(reason) .. "/" .. tostring(action) .. ")")
+  clean(post(form({ { "name", "x" }, { "message", "hi" } })), "no recipient, whole body: nothing")
+end
+do
+  -- The domain check is linear in the list.
+  local list, ems = {}, {}
+  for i = 1, 200 do list[#list + 1] = "a" .. i .. "@d" .. i .. ".example"; ems[#ems + 1] = { "email", "a" .. i .. "@d" .. i .. ".example" } end
+  for i = 1, 2000 do list[#list + 1] = "f" .. i .. "@filler.example" end
+  for i = 1, 200 do list[#list + 1] = "p@d" .. i .. ".example" end
+  ems[#ems + 1] = { "recipient", b64enc(table.concat(list, ",")) }
+  local t0 = os.clock()
+  waf.check(post(form(ems)))
+  local dt = os.clock() - t0
+  check(dt < 0.2, string.format("200 emails x 2400 recipients is bounded (took %.3fs)", dt))
+end
+
 -- ── Measurement only ─────────────────────────────────────────────────────────
 logs_only(post(form(fields("owner@hotel.example,sales@hotel.example", "guest@mail.example"))),
           "an owner-saved recipient list (no submitter in it) is logonly")
@@ -247,6 +306,9 @@ logs_only(post(form(fields("owner@hotel.example, staff@hotel.example", "staff@ho
 -- The documented residual: a victim on the owner's own mail domain.
 logs_only(post(form(fields("owner@gmail.com,victim@gmail.com", "victim@gmail.com"))),
           "victim on the owner's mail domain is logged, not blocked")
+-- Documented residual: a decoy on the victim's domain defeats the domain clause.
+logs_only(post(form(fields("owner@hotel.gr,cdew@spam.example,x@spam.example", "cdew@spam.example"))),
+          "decoy on the victim's domain is logged, not blocked")
 -- Even with the rule at block, the MULTI tag never enforces.
 logs_only(post(form(fields("a@one.example,b@two.example,c@three.example", "guest@mail.example"))),
           "three recipients, none the submitter")

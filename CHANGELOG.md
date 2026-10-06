@@ -30,8 +30,10 @@ back-filled here — see the git/PR history for that period.
   6 h ban). A recipient list without the visitor's address is only logged
   (`MULTI_RECIPIENT`), since an owner may save several addresses and a staff
   member may test the form. It does not block a bot that replaces the recipient
-  outright or injects a victim on the owner's own mail domain; updating SP Page
-  Builder (3.8 or later) closes both.
+  outright, injects a victim on the owner's own mail domain or adds a decoy on
+  the victim's, or pads the recipient past the WAF's 32 KB body window (logged
+  as `BODY_PAST_WINDOW`). Updating SP Page Builder (3.8 or later) closes all of
+  them.
 
 ## 2026.10.06
 
