@@ -33,15 +33,15 @@ func TestRecordWAFTrigger_ParsesFingerprintToCanonicalID(t *testing.T) {
 	// (1) a block-tier trigger carrying the raw tuple → stored as the canonical id.
 	e.RecordWAFTrigger("203.0.113.10", "shop.example", "/x?id=1", "get", "block",
 		"WAF_SQLI", time.Minute, 64512, "Evil Hosting", "United States", "US", 301,
-		"curl/8.4.0", "", "", tuple)
+		"curl/8.4.0", "", "", tuple, nil)
 	// (2) a garbage/spoofed value that does not parse → fingerprint omitted.
 	e.RecordWAFTrigger("203.0.113.11", "shop.example", "/y", "get", "block",
 		"WAF_TRAVERSAL", time.Minute, 64512, "Evil Hosting", "United States", "US", 101,
-		"curl/8.4.0", "", "", "garbage")
+		"curl/8.4.0", "", "", "garbage", nil)
 	// (3) no fingerprint at all (plain-HTTP / older edge) → omitted.
 	e.RecordWAFTrigger("203.0.113.12", "shop.example", "/z", "get", "block",
 		"WAF_RCE", time.Minute, 64512, "Evil Hosting", "United States", "US", 320,
-		"curl/8.4.0", "", "", "")
+		"curl/8.4.0", "", "", "", nil)
 
 	rows, err := hs.QueryEvents("", "", "waf_trigger", 10)
 	if err != nil {

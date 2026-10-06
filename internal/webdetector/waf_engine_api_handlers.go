@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +32,9 @@ type wafEngineEvent struct {
 	UA          string `json:"ua,omitempty"`
 	Referer     string `json:"referer,omitempty"`
 	ContentType string `json:"content_type,omitempty"`
+	// AlsoRuleIDs: the other rules that matched the same request behind the
+	// headline (cfm_waf.also_rule_ids, record-only).
+	AlsoRuleIDs []int `json:"also_rule_ids,omitempty"`
 }
 
 type wafTopValue struct {
@@ -77,6 +81,12 @@ type wafEngineSummary struct {
 	HostFilter    string   `json:"host_filter,omitempty"`
 	PathFilter    string   `json:"path_filter,omitempty"`
 	UAFilter      string   `json:"ua_filter,omitempty"`
+	// AlsoMatches counts, for a NUMERIC rule filter with also=1, the events
+	// included because the rule matched BEHIND the headline (its id is in the
+	// event's also_rule_ids), not as the headline. TotalEvents includes them.
+	// Lets a rule that never owns the headline (a logonly scanner behind a
+	// challenge-tier rule) be measured; 0 without also=1.
+	AlsoMatches int `json:"also_matches,omitempty"`
 }
 
 func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) {
@@ -136,6 +146,10 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 			ruleIDFilter, numericRuleFilter = n, true
 		}
 	}
+	// also=1 widens a NUMERIC rule filter to the events where the rule matched
+	// behind the headline (also_rule_ids). Opt-in so the WAF page and
+	// waf_activity keep their headline-only meaning; waf_rule_detail asks for it.
+	includeAlso := numericRuleFilter && q.Get("also") == "1"
 	ipFilter := strings.TrimSpace(q.Get("ip"))
 	hostFilter := strings.ToLower(cleanHost(q.Get("host")))
 	pathFilter := strings.ToLower(strings.TrimSpace(q.Get("path")))
@@ -202,6 +216,8 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 		}
 		var method, uri, ua, referer, contentType, action string
 		var wafRuleID int
+		var alsoIDs []int
+		alsoMatch := false
 		if ev.Payload != nil {
 			method, _ = ev.Payload["method"].(string)
 			uri, _ = ev.Payload["uri"].(string)
@@ -217,6 +233,7 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 					wafRuleID = v
 				}
 			}
+			alsoIDs = payloadIntSlice(ev.Payload["also_rule_ids"])
 		}
 		if action = strings.TrimSpace(action); action == "" {
 			action = strings.TrimSpace(ev.Mode)
@@ -239,6 +256,7 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 			Action:    action,
 			Result:    "observed",
 		}
+		row.AlsoRuleIDs = alsoIDs
 		if ev.Type == "waf_trigger" {
 			if mode := strings.TrimSpace(ev.Mode); mode != "" {
 				row.Result = mode + "_triggered"
@@ -297,7 +315,10 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 		}
 		if ruleFilter != "" {
 			if numericRuleFilter && wafRuleID != ruleIDFilter {
-				continue
+				if !includeAlso || !slices.Contains(alsoIDs, ruleIDFilter) {
+					continue
+				}
+				alsoMatch = true
 			}
 			if !numericRuleFilter &&
 				!strings.Contains(strings.ToLower(rule), ruleFilter) &&
@@ -325,6 +346,9 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 		}
 
 		res.TotalEvents++
+		if alsoMatch {
+			res.AlsoMatches++
+		}
 		// Counted after the filters so a filtered summary's blocked count
 		// matches the events it actually covers.
 		blocked := ev.Status == http.StatusForbidden || strings.EqualFold(ev.Mode, "block")
@@ -377,6 +401,27 @@ func (e *Engine) handleWAFEngineSummary(w http.ResponseWriter, r *http.Request) 
 	res.Rows = rows
 
 	writeJSON(w, http.StatusOK, res)
+}
+
+// payloadIntSlice reads an int list from a history payload: []int in memory,
+// []any of float64 after a JSON round trip (the history store).
+func payloadIntSlice(v any) []int {
+	switch t := v.(type) {
+	case []int:
+		return t
+	case []any:
+		out := make([]int, 0, len(t))
+		for _, x := range t {
+			switch n := x.(type) {
+			case float64:
+				out = append(out, int(n))
+			case int:
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func sameIP(a, b string) bool {

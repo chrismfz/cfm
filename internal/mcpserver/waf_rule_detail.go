@@ -35,7 +35,7 @@ func registerWAFRuleDetail(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "waf_rule_detail",
-		Description: "Deep-dive ONE WAF rule / reason-family across BOTH surfaces at once — the in-path WEB edge and the PANEL (cPanel/WHM) edge — because the panel now runs the same cfm_waf ruleset. Give a reason family or substring (WAF_SQLI, WAF_RCE:EVAL, sqli) or a numeric rule id (320, 10001; resolved to its family for the web side). Returns: matched_rules (id, reason_family, group, built-in default_mode) from the registry; web {total/blocked events, unique ips/hosts, top exact-reasons, top ips (GeoIP), top hosts, top countries} over the last `hours`; panel {hits, scanner vs non-scanner split, nonscanner_would_block, matched rule_ids, sample non-scanner requests} from the panel LOGONLY/enforce burn-in lines. Use it to answer 'is rule X safe to enforce?' and to spot a rule clean on the web but firing on the panel from real browsers (an FP). Complements waf_activity (web aggregate) and waf_fp_hunt (panel aggregate). Read the `notes`.",
+		Description: "Deep-dive ONE WAF rule / reason-family across BOTH surfaces at once — the in-path WEB edge and the PANEL (cPanel/WHM) edge — because the panel now runs the same cfm_waf ruleset. Give a reason family or substring (WAF_SQLI, WAF_RCE:EVAL, sqli) or a numeric rule id (320, 10001; resolved to its family for the web side). Returns: matched_rules (id, reason_family, group, built-in default_mode) from the registry; web {total/blocked events, unique ips/hosts, top exact-reasons, top ips (GeoIP), top hosts, top countries} over the last `hours`; panel {hits, scanner vs non-scanner split, nonscanner_would_block, matched rule_ids, sample non-scanner requests} from the panel LOGONLY/enforce burn-in lines. Use it to answer 'is rule X safe to enforce?' and to spot a rule clean on the web but firing on the panel from real browsers (an FP). A numeric id also returns web_by_id {total_events, headline, also_matches}: also_matches counts requests where the rule matched BEHIND a stronger headline rule (also_rule_ids) — the only measurement a rule placed behind a stronger one gets (e.g. the logonly 421-436/439 scanners). Sampled: the edge sends it on the de-duplicated push (one per IP, family and tier per minute), so read it as a presence signal, not an exact count. Complements waf_activity (web aggregate) and waf_fp_hunt (panel aggregate). Read the `notes`.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in wafRuleDetailInput) (*mcp.CallToolResult, any, error) {
 		query := strings.TrimSpace(in.Rule)
 		if query == "" {
@@ -67,6 +67,28 @@ func registerWAFRuleDetail(srv *mcp.Server, d Deps) {
 		panelBody := section(ctx, d, "/api/v1/system/waf-fp-hunt", nil)
 
 		out := buildWAFRuleDetail(webBody, panelBody, rulesBody, query, webFilter, hours)
+		// A numeric query also asks the summary by id: that counts the events
+		// where the rule matched BEHIND the headline (also_rule_ids), which the
+		// family view above never sees — the only data a rule that runs after
+		// a stronger one ever produces.
+		if id, err := strconv.Atoi(query); err == nil && id > 0 {
+			byID := section(ctx, d, "/api/v1/waf/engine/summary",
+				url.Values{"rule": {strconv.Itoa(id)}, "also": {"1"}, "hours": {strconv.Itoa(hours)}, "limit": {"1"}})
+			if sectionError(byID) == "" {
+				var s struct {
+					TotalEvents int `json:"total_events"`
+					AlsoMatches int `json:"also_matches"`
+				}
+				if json.Unmarshal(byID, &s) == nil {
+					out["web_by_id"] = map[string]any{
+						"rule_id":      id,
+						"total_events": s.TotalEvents,
+						"headline":     s.TotalEvents - s.AlsoMatches,
+						"also_matches": s.AlsoMatches,
+					}
+				}
+			}
+		}
 		b, err := marshal(out)
 		if err != nil {
 			return nil, nil, err

@@ -2325,6 +2325,29 @@ local PUSH_KEY_KEEPS_TAG = {
   WAF_FETCH_METADATA = true,
 }
 
+-- also_rule_ids: the distinct waf_rule_ids in a check()'s `hits` other than
+-- the headline one — the first ALSO_RULE_IDS_MAX in evaluation order, then
+-- sorted (capping after a sort would always drop the high ids, the 10xxx CVE
+-- band first). cfm.lua ships them on the ip_push so a rule that only ever
+-- matches BEHIND a stronger one (a logonly scanner that loses the headline to
+-- a challenge-tier rule) is measurable. A rule placed after a BLOCK never runs
+-- on that request (`goto done`), so it cannot appear here. Record-only.
+local ALSO_RULE_IDS_MAX = 16
+function _M.also_rule_ids(hits, headline_id)
+  local out, seen = {}, {}
+  if type(hits) ~= "table" then return out end
+  for _, h in ipairs(hits) do
+    local id = tonumber(h and h.waf_rule_id)
+    if id and id > 0 and id ~= headline_id and not seen[id] then
+      seen[id] = true
+      out[#out + 1] = id
+      if #out >= ALSO_RULE_IDS_MAX then break end
+    end
+  end
+  table.sort(out)
+  return out
+end
+
 function _M.should_push(shdict, ip, reason, action)
   if not shdict or not ip or ip == "" then return true end
   -- Dedup on (ip, reason FAMILY, action tier).
