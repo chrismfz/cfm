@@ -3807,47 +3807,55 @@ end
 
 -- SP Page Builder `ajax_contact` mail relay (rule 520, 2026-10-06). The addon's
 -- getAjax() (components/com_sppagebuilder/addons/ajax_contact/site.php, read
--- on a live 3.7.9 install) takes the mail RECIPIENT from the request: the form
--- renders it as a hidden, base64'd `recipient` field, and the server runs
--- base64_decode() on whatever comes back and hands it to addRecipient(). A bot
--- appends a victim to that list and the site mails its spam for it. Seen on
--- titan 2026-10-06 (hotellito.gr, ~990 mails in 7 h from a Datacamp / AS42708 /
--- AS206092 proxy pool): every message went to the owner AND to the address the
--- bot typed into the form's own `email` field.
+-- on a live 3.7.9 install; 3.8+ reads the recipient from a server-encrypted
+-- blob instead and is not affected) takes the mail RECIPIENT from the request:
+-- the form renders it as a hidden, base64'd `recipient` field, and the server
+-- runs base64_decode() on whatever comes back and hands it to addRecipient().
+-- A bot appends a victim to that list and the site mails its spam for it.
+-- Seen on titan 2026-10-06 (hotellito.gr, ~990 mails in 7 h from a Datacamp /
+-- AS42708 / AS206092 proxy pool): every message went to the owner AND to the
+-- address the bot typed into the form's own `email` field.
 --
 -- The jQuery submit posts option=com_sppagebuilder&task=ajax&addon=ajax_contact
--- plus the form as data[N][name] / data[N][value] pairs. Joomla reads `data`
--- from $_REQUEST, so the pairs are taken from the query string AND a urlencoded
--- or multipart body; every occurrence counts (no "PHP keeps the last" guess).
+-- (a SEF page URL can supply `option` instead, so only a DIFFERENT explicit
+-- option rules the request out) and the form as
+-- data[N][name] / data[N][value] pairs. Joomla reads `data` from $_REQUEST, so
+-- the pairs are parsed from the query string and then from a urlencoded or
+-- multipart body, each key LAST-wins as PHP's parser does (body after query:
+-- POST wins in $_REQUEST). Key parsing follows PHP: the key is cut at a NUL and
+-- anything after the second `]` is ignored.
 --
 -- Tags:
---   RECIPIENT_HAS_SUBMITTER — the decoded recipient list holds 2+ addresses and
---     one of them is a submitted `email` value: the site would mail the
---     visitor's own address. A real form never does: the recipient is the
---     owner's saved setting, the visitor's address goes in the body and the
---     Reply-To. The rule's mode applies (block).
---   MULTI_RECIPIENT — 2+ addresses, none of them the submitter. An owner may
---     legitimately save a list, so this is measurement only: the caller clamps
---     it to logonly (cfm_waf.lua), whatever the rule's mode.
--- A single address is never flagged, so an owner testing the form with the
--- address it mails to is clean. Residuals: a bot that REPLACES the recipient
--- (one address) or types a different `email` than the address it injects is
--- invisible at the edge (only the second shows as MULTI_RECIPIENT); the fix for
--- those is the server-side one, updating SP Page Builder.
-local SPPB_B64_ALPHABET = "[^%w%+/]"
+--   RECIPIENT_HAS_SUBMITTER — the decoded recipient list holds 2+ addresses,
+--     one of them is the submitted `email`, and its DOMAIN differs from every
+--     other recipient's: the site would mail an outsider who typed their own
+--     address. A real form never does — the recipient is the owner's saved
+--     setting. The domain clause keeps an owner list (`owner@hotel, staff@hotel`)
+--     tested by a staff member clean. The rule's mode applies (block).
+--   MULTI_RECIPIENT — any other 2+ address list (no submitter, or a submitter
+--     sharing a recipient's domain). An owner may legitimately save a list, so
+--     this is measurement only: the caller clamps it to logonly (cfm_waf.lua).
+-- A single address is never flagged. Residuals: a bot that REPLACES the
+-- recipient (one address), types a different `email` than the one it injects,
+-- or injects a victim on the owner's own mail domain (two gmail.com addresses)
+-- is not blocked (the last two show as MULTI_RECIPIENT); a chunked POST with no
+-- Content-Length is never body-read by the WAF at all. Updating SP Page Builder
+-- closes all of them.
+local SPPB_MAX_ROWS = 256 -- far above any real form; bounds attacker-sized work
 
 local function form_decode(s)
   local t = (s or ""):gsub("%+", " ")
   return url_decode_once(t)
 end
 
--- PHP base64_decode (non-strict) drops every byte outside the alphabet and
--- tolerates missing padding; ngx.decode_base64 is strict, so canonicalise first.
+-- PHP base64_decode (non-strict) drops every byte outside the alphabet,
+-- tolerates missing padding and drops a trailing lone sextet; ngx.decode_base64
+-- is strict, so canonicalise first.
 local function php_b64_decode(v)
-  local s = v:gsub(SPPB_B64_ALPHABET, "")
-  if s == "" then return nil end
+  local s = v:gsub("[^%w%+/]", "")
   local r = #s % 4
-  if r == 1 then return nil end
+  if r == 1 then s = s:sub(1, -2); r = 0 end
+  if s == "" then return nil end
   if r > 0 then s = s .. string.rep("=", 4 - r) end
   local ok, dec = pcall(ngx.decode_base64, s)
   if ok then return dec end
@@ -3859,57 +3867,66 @@ local function trim_lower(s)
   return lower(t)
 end
 
--- Collect the data[N][name]/data[N][value] pairs of one `k=v&…` string into
--- rows[index] = {name=, value=}. Raw split on `&` first, then decode key and
--- value separately (PHP's order), so a `%26` inside a value cannot split it.
-local function sppb_collect_pairs(s, n, rows, top)
-  if not s or s == "" then return end
-  s = cap(s, n)
-  for pair in ("&" .. s):gmatch("&([^&]*)") do
-    local k, v = pair:match("^([^=]*)=(.*)$")
-    if k then
-      k = lower(form_decode(k)):gsub("^%s+", "")
-      local idx, field = k:match("^data%[([^%]]*)%]%[(%a+)%]$")
-      if idx and (field == "name" or field == "value") then
-        local row = rows[idx] or {}
-        row[field] = row[field] or {}
-        local list = row[field]
-        list[#list + 1] = form_decode(v)
-        rows[idx] = row
-      elseif k == "option" or k == "addon" then
-        top[k] = trim_lower(form_decode(v))
-      end
+-- One decoded request key → rows[idx][field] = value (last wins) or a top-level
+-- addon. PHP cuts a key at NUL, drops leading spaces and ignores whatever
+-- follows the closing `]` of the second level.
+local function sppb_put(k, v, rows, top)
+  local z = k:find("\0", 1, true)
+  if z then k = k:sub(1, z - 1) end
+  k = lower(k):gsub("^%s+", "")
+  local idx, field = k:match("^data%[([^%]]*)%]%[(%a+)%]")
+  if idx and (field == "name" or field == "value") then
+    local row = rows[idx]
+    if not row then
+      if top.n >= SPPB_MAX_ROWS then return end
+      top.n = top.n + 1
+      row = {}
+      rows[idx] = row
     end
+    row[field] = v
+  elseif k == "addon" or k == "option" then
+    top[k] = trim_lower(v)
   end
 end
 
--- Multipart twin of sppb_collect_pairs: each part's field name (never a
--- `filename=`), first value line.
-local function sppb_collect_multipart(b, rows, top)
-  local lb = lower(b)
+local function sppb_collect_pairs(s, rows, top)
+  if not s or s == "" then return end
+  for pair in ("&" .. s):gmatch("&([^&]*)") do
+    local k, v = pair:match("^([^=]*)=(.*)$")
+    if k then sppb_put(form_decode(k), form_decode(v), rows, top) end
+  end
+end
+
+-- Multipart: split on the boundary once, linear in the body. Each part's field
+-- name (never `filename=`) and its whole value (PHP keeps every line; the
+-- base64 decoder skips the CR/LF).
+local function sppb_collect_multipart(b, ct, rows, top)
+  local bnd = ct:match('[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]="([^"]+)"') or ct:match("[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]=([^;%s]+)")
+  if not bnd or bnd == "" then return end
+  local delim = "--" .. bnd
   local pos = 1
   while true do
-    local _, e = lb:find("[^%w_]name%s*=%s*", pos)
-    if not e then break end
-    pos = e + 1
-    local name = lb:match('^"([^"\r\n]*)', pos) or lb:match("^'([^'\r\n]*)", pos)
-                 or lb:match("^([^;%s]*)", pos)
-    if name then
-      local _, he = b:find("\r?\n\r?\n", pos)
-      if not he then break end
-      local v = b:match("^[^\r\n]*", he + 1) or ""
-      local idx, field = name:match("^data%[([^%]]*)%]%[(%a+)%]$")
-      if idx and (field == "name" or field == "value") then
-        local row = rows[idx] or {}
-        row[field] = row[field] or {}
-        local list = row[field]
-        list[#list + 1] = v
-        rows[idx] = row
-      elseif name == "option" or name == "addon" then
-        top[name] = trim_lower(v)
+    local s, e = b:find(delim, pos, true)
+    if not s then break end
+    local nxt = b:find(delim, e + 1, true)
+    local part = b:sub(e + 1, (nxt or #b + 1) - 1)
+    local hend_s, hend_e = part:find("\r?\n\r?\n")
+    if hend_s then
+      local hdr = lower(part:sub(1, hend_s))
+      local name = hdr:match('[^%w_]name%s*=%s*"([^"\r\n]*)"') or hdr:match("[^%w_]name%s*=%s*'([^'\r\n]*)'")
+                   or hdr:match("[^%w_]name%s*=%s*([^;%s]+)")
+      if name then
+        local v = part:sub(hend_e + 1):gsub("\r?\n$", "")
+        sppb_put(name, v, rows, top)
       end
     end
+    if not nxt then break end
+    pos = nxt
   end
+end
+
+local function addr_domain(a)
+  return a:match("@([^@]*)$") or ""
 end
 
 function _M.detect_sppb_contact_relay(uri, method, args, body, headers, _nab)
@@ -3922,33 +3939,35 @@ function _M.detect_sppb_contact_relay(uri, method, args, body, headers, _nab)
     return nil
   end
 
-  local rows, top = {}, {}
-  local un = tonumber(CFG.uri_scan_len or CFG.max_scan_len)
-  if not un or un < 1 then un = 2048 end
-  sppb_collect_pairs(args, un, rows, top)
+  -- The whole surface the edge handed over (the body is already capped at
+  -- waf_body_max_len); a message padded past the generic scan budget must not
+  -- hide the recipient. Work is linear and the row count is bounded.
+  local rows, top = {}, { n = 0 }
+  sppb_collect_pairs(cap(args or "", 32768), rows, top)
   if body and body ~= "" then
-    local ct = lower(header_string(headers and (headers["Content-Type"] or headers["content-type"])) or "")
+    local ct_raw = header_string(headers and (headers["Content-Type"] or headers["content-type"])) or ""
+    local ct = lower(ct_raw)
+    local b = cap(body, 32768)
     if has(ct, "multipart/form-data") then
-      sppb_collect_multipart(cap(body, bn), rows, top)
+      sppb_collect_multipart(b, ct_raw, rows, top) -- the boundary is case-sensitive
     elseif has(ct, "application/x-www-form-urlencoded") then
-      sppb_collect_pairs(body, bn, rows, top)
+      sppb_collect_pairs(b, rows, top)
     end
   end
-  if top.option ~= "com_sppagebuilder" or top.addon ~= "ajax_contact" then return nil end
+  if top.addon ~= "ajax_contact" then return nil end
+  -- An explicit other component routes elsewhere (the SEF router only DEFAULTS
+  -- `option`); an absent one may come from the page URL.
+  if top.option and top.option ~= "com_sppagebuilder" then return nil end
 
   local recipients, emails = {}, {}
   for _, row in pairs(rows) do
     if row.name and row.value then
-      for _, nm in ipairs(row.name) do
-        nm = trim_lower(nm)
-        for _, v in ipairs(row.value) do
-          if nm == "recipient" then
-            recipients[#recipients + 1] = v
-          elseif nm == "email" then
-            local e = trim_lower(v)
-            if e ~= "" then emails[e] = true end
-          end
-        end
+      local nm = trim_lower(row.name)
+      if nm == "recipient" then
+        recipients[#recipients + 1] = row.value
+      elseif nm == "email" then
+        local e = trim_lower(row.value)
+        if e ~= "" then emails[e] = true end
       end
     end
   end
@@ -3958,11 +3977,17 @@ function _M.detect_sppb_contact_relay(uri, method, args, body, headers, _nab)
     local dec = php_b64_decode(v)
     if dec then
       local addrs = {}
-      for a in lower(dec):gmatch("[^%s,;<>\"']+@[^%s,;<>\"']+") do addrs[#addrs + 1] = a end
+      for a in lower(dec):gmatch("[^%s,;<>\"'%z]+@[^%s,;<>\"'%z]+") do addrs[#addrs + 1] = a end
       if #addrs >= 2 then
         multi = true
-        for _, a in ipairs(addrs) do
-          if emails[a] then return "RECIPIENT_HAS_SUBMITTER" end
+        for i, a in ipairs(addrs) do
+          if emails[a] then
+            local d, foreign = addr_domain(a), true
+            for j, o in ipairs(addrs) do
+              if j ~= i and addr_domain(o) == d then foreign = false; break end
+            end
+            if foreign then return "RECIPIENT_HAS_SUBMITTER" end
+          end
         end
       end
     end

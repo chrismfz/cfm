@@ -178,9 +178,75 @@ do
   fires(post(form(f)), "long message pushes the recipient past the 2 KB memo window")
 end
 
+-- Review round 1 (bypasses PHP accepts):
+do
+  -- PHP ignores what follows the second `]` and cuts a key at NUL.
+  local b = form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"))
+  b = b:gsub("data%%5B4%%5D%%5Bvalue%%5D=", "data%%5B4%%5D%%5Bvalue%%5Dx=")
+  b = b:gsub("data%%5B1%%5D%%5Bname%%5D=", "data%%5B1%%5D%%5Bname%%5D%%00zz=")
+  fires(post(b), "junk after the key's last ] and a NUL-cut key")
+end
+do
+  -- A lone trailing sextet: PHP drops it, so must we.
+  local f = fields("x", "cdew@spam.example")
+  f[5][2] = b64enc("litohotel@outlook.com,cdew@spam.example") .. "A"
+  fires(post(form(f)), "base64 with a stray trailing character (length 1 mod 4)")
+end
+do
+  local f = fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example")
+  f[4][2] = string.rep("a", 9000)
+  fires(post(form(f)), "a 9000-byte message before the recipient (past the generic scan budget)")
+end
+do
+  local MP = "multipart/form-data; boundary=----B"
+  local e = b64enc("litohotel@outlook.com,cdew@spam.example")
+  local function part(n, v) return "------B\r\nContent-Disposition: form-data; name=\"" .. n .. "\"\r\n\r\n" .. v .. "\r\n" end
+  local b = part("addon", "ajax_contact")
+    .. part("data[0][name]", "email") .. part("data[0][value]", "cdew@spam.example")
+    .. part("data[1][name]", "recipient") .. part("data[1][value]", e:sub(1, 24) .. "\r\n" .. e:sub(25))
+    .. "------B--\r\n"
+  fires(post(b, MP), "multipart value split over two lines")
+end
+fires(post(form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"),
+                { task = "ajax", addon = "ajax_contact" })),
+      "no option (a SEF page URL supplies it)")
+do
+  -- Last wins per key, as PHP: an earlier clean value is overridden.
+  local b = form(fields("litohotel@outlook.com", "cdew@spam.example")) .. "&"
+    .. enc("data[4][value]") .. "=" .. enc(b64enc("litohotel@outlook.com,cdew@spam.example"))
+  fires(post(b), "a later duplicate key overrides the earlier value")
+end
+do
+  -- Attacker-sized input stays linear: thousands of rows and duplicate keys.
+  local parts = { "addon=ajax_contact" }
+  local v = enc(b64enc("a@b.example,c@d.example"))
+  for i = 1, 3000 do
+    parts[#parts + 1] = enc("data[" .. i .. "][name]") .. "=recipient"
+    parts[#parts + 1] = enc("data[" .. i .. "][value]") .. "=" .. v
+  end
+  local t0 = os.clock()
+  waf.check(post(table.concat(parts, "&")))
+  local dt = os.clock() - t0
+  check(dt < 0.5, string.format("3000-row body is bounded (took %.3fs)", dt))
+  local mp = { "------B\r\nContent-Disposition: form-data; name=\"addon\"\r\n\r\najax_contact\r\n" }
+  for _ = 1, 2300 do mp[#mp + 1] = " name=x" end
+  mp[#mp + 1] = "\r\n\r\n------B--\r\n"
+  t0 = os.clock()
+  waf.check(post(table.concat(mp), "multipart/form-data; boundary=----B"))
+  dt = os.clock() - t0
+  check(dt < 0.2, string.format("multipart name= flood is linear (took %.3fs)", dt))
+end
+
 -- ── Measurement only ─────────────────────────────────────────────────────────
 logs_only(post(form(fields("owner@hotel.example,sales@hotel.example", "guest@mail.example"))),
           "an owner-saved recipient list (no submitter in it) is logonly")
+-- An owner list tested by a staff member: the submitter shares a recipient's
+-- domain, so it is not an outsider (review round 1 false positive).
+logs_only(post(form(fields("owner@hotel.example, staff@hotel.example", "staff@hotel.example"))),
+          "staff testing an owner list on the same domain")
+-- The documented residual: a victim on the owner's own mail domain.
+logs_only(post(form(fields("owner@gmail.com,victim@gmail.com", "victim@gmail.com"))),
+          "victim on the owner's mail domain is logged, not blocked")
 -- Even with the rule at block, the MULTI tag never enforces.
 logs_only(post(form(fields("a@one.example,b@two.example,c@three.example", "guest@mail.example"))),
           "three recipients, none the submitter")
@@ -194,7 +260,7 @@ clean(post(form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.exa
       "another addon")
 clean(post(form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"),
                 { option = "com_contact", task = "ajax", addon = "ajax_contact" })),
-      "another component")
+      "an explicit other component")
 do
   local f = fields("x", "cdew@spam.example")
   f[5][2] = "!!!not-base64!!!"

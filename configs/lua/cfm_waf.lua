@@ -122,9 +122,10 @@ local CFG = {
   rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
   rule_form_relay_sppb_contact = "block", -- 520: Joomla SP Page Builder ajax_contact mail relay — the addon mails the
                                          -- client-posted base64 `recipient`; a bot appends a victim. Fires when the decoded
-                                         -- list has 2+ addresses and one is the form's own submitted `email` (a real form
-                                         -- never mails the visitor). Its MULTI_RECIPIENT tag (2+ addresses, no submitter —
-                                         -- an owner may save a list) is clamped to logonly at the call site. Seen 2026-10-06
+                                         -- list has 2+ addresses and one is the form's own submitted `email`, on a domain no
+                                         -- other recipient uses (a real form never mails an outside visitor). Its
+                                         -- MULTI_RECIPIENT tag (any other 2+ list — an owner may save one) is clamped to
+                                         -- logonly at the call site. Seen 2026-10-06
                                          -- on titan (hotellito.gr, ~990 spam mails / 7 h).
 
   -- ── Audit / payload rules ─────────────────────────────────────────────────
@@ -1129,10 +1130,11 @@ function _M.check(ctx)
   -- ── 3l2) SP Page Builder ajax_contact mail relay (rule 520) ─────────────────
   -- The addon mails whatever base64 `recipient` the client posts back; a bot
   -- appends a victim (the address it also types as the form's `email`) and the
-  -- site sends its spam. Keyed on option=com_sppagebuilder + addon=ajax_contact
-  -- and a decoded recipient list of 2+ addresses holding a submitted email.
-  -- Every method: Joomla reads the form from $_REQUEST. MULTI_RECIPIENT (2+
-  -- addresses, none the submitter) is measurement only, clamped to logonly like
+  -- site sends its spam. Keyed on addon=ajax_contact (and no other explicit
+  -- option) and a decoded recipient list of 2+ addresses holding the submitted
+  -- email on a domain no other recipient uses. Every method: Joomla reads the
+  -- form from $_REQUEST. MULTI_RECIPIENT (any other 2+ list) is measurement
+  -- only, clamped to logonly like
   -- rule 612's in-app tag: an owner may legitimately save a recipient list.
   do
     local mode = rule_mode(CFG.rule_form_relay_sppb_contact, "block")
