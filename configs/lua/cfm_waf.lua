@@ -120,6 +120,12 @@ local CFG = {
   rule_xmlrpc_multicall   = "block", -- system.multicall in XML-RPC body
   rule_xmlrpc_pingback    = "block", -- pingback.ping in XML-RPC body
   rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
+  rule_form_relay_sppb_contact = "block", -- 520: Joomla SP Page Builder ajax_contact mail relay — the addon mails the
+                                         -- client-posted base64 `recipient`; a bot appends a victim. Fires when the decoded
+                                         -- list has 2+ addresses and one is the form's own submitted `email` (a real form
+                                         -- never mails the visitor). Its MULTI_RECIPIENT tag (2+ addresses, no submitter —
+                                         -- an owner may save a list) is clamped to logonly at the call site. Seen 2026-10-06
+                                         -- on titan (hotellito.gr, ~990 spam mails / 7 h).
 
   -- ── Audit / payload rules ─────────────────────────────────────────────────
   rule_cmd_params       = "challenge_v2",   -- suspicious parameter keys: exec= passthru= shell_exec= eval= assert= system= cmd= command=
@@ -597,6 +603,7 @@ local RULE_IDS = {
   rule_xmlrpc_multicall        = 510,
   rule_xmlrpc_pingback         = 511,
   rule_xmlrpc_post_burst       = 512,
+  rule_form_relay_sppb_contact = 520,
 
   -- 6xx header / protocol anomaly
   rule_ctrl_chars              = 601,
@@ -1115,6 +1122,26 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_48908:SPPAGEBUILDER:" .. tag, ttl, mode, RULE_IDS.rule_cve_sppagebuilder_upload) then goto done end
+      end
+    end
+  end
+
+  -- ── 3l2) SP Page Builder ajax_contact mail relay (rule 520) ─────────────────
+  -- The addon mails whatever base64 `recipient` the client posts back; a bot
+  -- appends a victim (the address it also types as the form's `email`) and the
+  -- site sends its spam. Keyed on option=com_sppagebuilder + addon=ajax_contact
+  -- and a decoded recipient list of 2+ addresses holding a submitted email.
+  -- Every method: Joomla reads the form from $_REQUEST. MULTI_RECIPIENT (2+
+  -- addresses, none the submitter) is measurement only, clamped to logonly like
+  -- rule 612's in-app tag: an owner may legitimately save a recipient list.
+  do
+    local mode = rule_mode(CFG.rule_form_relay_sppb_contact, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_sppb_contact_relay(uri, m_lower, args, body, headers, get_norm_ab())
+      if tag then
+        local eff_mode = (tag == "MULTI_RECIPIENT") and "logonly" or mode
+        local ttl = (eff_mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_FORM_RELAY:SPPB_AJAX_CONTACT:" .. tag, ttl, eff_mode, RULE_IDS.rule_form_relay_sppb_contact) then goto done end
       end
     end
   end

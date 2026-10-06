@@ -17,7 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **New WAF rule 520 blocks spam relayed through Joomla SP Page Builder
+  contact forms.** The page builder's `ajax_contact` addon mails whatever
+  recipient the browser posts back, as a hidden base64 field. A bot adds a
+  victim to that list and the site sends the spam. On titan, hotellito.gr sent
+  ~990 such mails in 7 hours on 2026-10-06. Rule 520 blocks a submission whose
+  decoded recipient list has two or more addresses and includes the email typed
+  into the form. A real form never mails the visitor, so it ships at `block`.
+  Its new `WAF_FORM_RELAY` family is armed for autoblock (`FORM_RELAY = 1`,
+  6 h ban). A recipient list without the visitor's address is only logged
+  (`MULTI_RECIPIENT`), since an owner may save several addresses. It does not
+  catch a bot that replaces the recipient outright; updating SP Page Builder
+  does.
 
 ## 2026.10.06
 

@@ -3805,6 +3805,172 @@ function _M.detect_cve_sppagebuilder_upload(uri, method, args, body, headers)
   return nil
 end
 
+-- SP Page Builder `ajax_contact` mail relay (rule 520, 2026-10-06). The addon's
+-- getAjax() (components/com_sppagebuilder/addons/ajax_contact/site.php, read
+-- on a live 3.7.9 install) takes the mail RECIPIENT from the request: the form
+-- renders it as a hidden, base64'd `recipient` field, and the server runs
+-- base64_decode() on whatever comes back and hands it to addRecipient(). A bot
+-- appends a victim to that list and the site mails its spam for it. Seen on
+-- titan 2026-10-06 (hotellito.gr, ~990 mails in 7 h from a Datacamp / AS42708 /
+-- AS206092 proxy pool): every message went to the owner AND to the address the
+-- bot typed into the form's own `email` field.
+--
+-- The jQuery submit posts option=com_sppagebuilder&task=ajax&addon=ajax_contact
+-- plus the form as data[N][name] / data[N][value] pairs. Joomla reads `data`
+-- from $_REQUEST, so the pairs are taken from the query string AND a urlencoded
+-- or multipart body; every occurrence counts (no "PHP keeps the last" guess).
+--
+-- Tags:
+--   RECIPIENT_HAS_SUBMITTER — the decoded recipient list holds 2+ addresses and
+--     one of them is a submitted `email` value: the site would mail the
+--     visitor's own address. A real form never does: the recipient is the
+--     owner's saved setting, the visitor's address goes in the body and the
+--     Reply-To. The rule's mode applies (block).
+--   MULTI_RECIPIENT — 2+ addresses, none of them the submitter. An owner may
+--     legitimately save a list, so this is measurement only: the caller clamps
+--     it to logonly (cfm_waf.lua), whatever the rule's mode.
+-- A single address is never flagged, so an owner testing the form with the
+-- address it mails to is clean. Residuals: a bot that REPLACES the recipient
+-- (one address) or types a different `email` than the address it injects is
+-- invisible at the edge (only the second shows as MULTI_RECIPIENT); the fix for
+-- those is the server-side one, updating SP Page Builder.
+local SPPB_B64_ALPHABET = "[^%w%+/]"
+
+local function form_decode(s)
+  local t = (s or ""):gsub("%+", " ")
+  return url_decode_once(t)
+end
+
+-- PHP base64_decode (non-strict) drops every byte outside the alphabet and
+-- tolerates missing padding; ngx.decode_base64 is strict, so canonicalise first.
+local function php_b64_decode(v)
+  local s = v:gsub(SPPB_B64_ALPHABET, "")
+  if s == "" then return nil end
+  local r = #s % 4
+  if r == 1 then return nil end
+  if r > 0 then s = s .. string.rep("=", 4 - r) end
+  local ok, dec = pcall(ngx.decode_base64, s)
+  if ok then return dec end
+  return nil
+end
+
+local function trim_lower(s)
+  local t = (s or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  return lower(t)
+end
+
+-- Collect the data[N][name]/data[N][value] pairs of one `k=v&…` string into
+-- rows[index] = {name=, value=}. Raw split on `&` first, then decode key and
+-- value separately (PHP's order), so a `%26` inside a value cannot split it.
+local function sppb_collect_pairs(s, n, rows, top)
+  if not s or s == "" then return end
+  s = cap(s, n)
+  for pair in ("&" .. s):gmatch("&([^&]*)") do
+    local k, v = pair:match("^([^=]*)=(.*)$")
+    if k then
+      k = lower(form_decode(k)):gsub("^%s+", "")
+      local idx, field = k:match("^data%[([^%]]*)%]%[(%a+)%]$")
+      if idx and (field == "name" or field == "value") then
+        local row = rows[idx] or {}
+        row[field] = row[field] or {}
+        local list = row[field]
+        list[#list + 1] = form_decode(v)
+        rows[idx] = row
+      elseif k == "option" or k == "addon" then
+        top[k] = trim_lower(form_decode(v))
+      end
+    end
+  end
+end
+
+-- Multipart twin of sppb_collect_pairs: each part's field name (never a
+-- `filename=`), first value line.
+local function sppb_collect_multipart(b, rows, top)
+  local lb = lower(b)
+  local pos = 1
+  while true do
+    local _, e = lb:find("[^%w_]name%s*=%s*", pos)
+    if not e then break end
+    pos = e + 1
+    local name = lb:match('^"([^"\r\n]*)', pos) or lb:match("^'([^'\r\n]*)", pos)
+                 or lb:match("^([^;%s]*)", pos)
+    if name then
+      local _, he = b:find("\r?\n\r?\n", pos)
+      if not he then break end
+      local v = b:match("^[^\r\n]*", he + 1) or ""
+      local idx, field = name:match("^data%[([^%]]*)%]%[(%a+)%]$")
+      if idx and (field == "name" or field == "value") then
+        local row = rows[idx] or {}
+        row[field] = row[field] or {}
+        local list = row[field]
+        list[#list + 1] = v
+        rows[idx] = row
+      elseif name == "option" or name == "addon" then
+        top[name] = trim_lower(v)
+      end
+    end
+  end
+end
+
+function _M.detect_sppb_contact_relay(uri, method, args, body, headers, _nab)
+  -- Cheap gate: the addon name must appear somewhere (decoded). _nab caps each
+  -- side at body_budget(headers), so it may rule the request out only when it
+  -- saw both sides whole (the same contract as rule 10017).
+  local bn = body_budget(headers)
+  if _nab and #(args or "") <= bn and #(body or "") <= bn
+     and not has(_nab, "ajax_contact") then
+    return nil
+  end
+
+  local rows, top = {}, {}
+  local un = tonumber(CFG.uri_scan_len or CFG.max_scan_len)
+  if not un or un < 1 then un = 2048 end
+  sppb_collect_pairs(args, un, rows, top)
+  if body and body ~= "" then
+    local ct = lower(header_string(headers and (headers["Content-Type"] or headers["content-type"])) or "")
+    if has(ct, "multipart/form-data") then
+      sppb_collect_multipart(cap(body, bn), rows, top)
+    elseif has(ct, "application/x-www-form-urlencoded") then
+      sppb_collect_pairs(body, bn, rows, top)
+    end
+  end
+  if top.option ~= "com_sppagebuilder" or top.addon ~= "ajax_contact" then return nil end
+
+  local recipients, emails = {}, {}
+  for _, row in pairs(rows) do
+    if row.name and row.value then
+      for _, nm in ipairs(row.name) do
+        nm = trim_lower(nm)
+        for _, v in ipairs(row.value) do
+          if nm == "recipient" then
+            recipients[#recipients + 1] = v
+          elseif nm == "email" then
+            local e = trim_lower(v)
+            if e ~= "" then emails[e] = true end
+          end
+        end
+      end
+    end
+  end
+
+  local multi = false
+  for _, v in ipairs(recipients) do
+    local dec = php_b64_decode(v)
+    if dec then
+      local addrs = {}
+      for a in lower(dec):gmatch("[^%s,;<>\"']+@[^%s,;<>\"']+") do addrs[#addrs + 1] = a end
+      if #addrs >= 2 then
+        multi = true
+        for _, a in ipairs(addrs) do
+          if emails[a] then return "RECIPIENT_HAS_SUBMITTER" end
+        end
+      end
+    end
+  end
+  if multi then return "MULTI_RECIPIENT" end
+  return nil
+end
+
 -- phpfuck / numeric-XOR obfuscation blob detector, used by the generic
 -- obfuscation rule (439, logonly). Matches the INVARIANT shape of a PHP payload
 -- built to survive an eval() sink that permits only digits and arithmetic/
