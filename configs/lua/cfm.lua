@@ -611,13 +611,14 @@ local function try_apply_post_resume(ip, host)
   if type(tok) == "table" then tok = tok[1] end
   tok = tostring(tok or "")
   if tok == "" then return false end
-  -- Consumed by its OWNER only: check ip/host BEFORE the delete. It used to
-  -- delete first, so the first GET carrying the token from ANY client spent
-  -- it, and the visitor's replay was lost. The URL carrying cfm_rt sits in the
-  -- visitor's address bar while they solve (/__cfm_challenge?next=…&cfm_rt=…),
-  -- and fetchers handed that URL (Google-Read-Aloud solves the challenge, a
-  -- link preview) reach it first. A foreign GET now leaves the entry to its
-  -- owner, and post_resume_ttl_sec expires an unclaimed one.
+  -- Consumed by its OWNER only (the same ip and host): check BEFORE the
+  -- delete. It used to delete first, so the first GET carrying the token,
+  -- from ANY client, spent it and the visitor's replay was lost. The token
+  -- sits in the visitor's address bar while they solve (escaped inside the
+  -- challenge page's next=), and a fetcher handed that URL that solves the
+  -- challenge and follows next (Google-Read-Aloud does both) could get here
+  -- first. A foreign GET now leaves the entry to its owner, and
+  -- post_resume_ttl_sec expires an unclaimed one.
   local key = "pr|" .. tok
   local raw = SH:get(key)
   if not raw then return false end

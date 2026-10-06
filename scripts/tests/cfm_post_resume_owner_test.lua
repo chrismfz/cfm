@@ -5,10 +5,11 @@
 --   try_apply_post_resume() used to delete the "pr|<token>" entry BEFORE it
 --   checked that the request's ip and host match the entry's. The first GET
 --   carrying the token, from ANY client, therefore spent it, and the visitor's
---   replay was lost. That URL is in the visitor's address bar while they solve
---   (/__cfm_challenge?next=…&cfm_rt=…), and fetchers handed it get there first:
---   Google-Read-Aloud solves the challenge and follows next, and link previews
---   fetch it. A foreign GET must now leave the entry for its owner.
+--   replay was lost. The token is in the visitor's address bar while they
+--   solve (escaped inside the challenge page's next=), and a fetcher handed
+--   that URL that solves the challenge and follows next (Google-Read-Aloud
+--   does both) could get there first. A foreign GET must now leave the entry,
+--   and the request, alone.
 --
 --   cfm.lua is a top-to-bottom access script that is impractical to require
 --   standalone (see cfm_post_resume_readbody_test.lua), so this extracts the
@@ -81,30 +82,42 @@ local function store(tok, ip, host)
 end
 
 local OWNER, HOST = "203.0.113.10", "shop.example.com"
-store("tok1", OWNER, HOST)
 
 -- A fetcher on another IP (the visitor's URL, handed to Google-Read-Aloud).
+store("tok1", OWNER, HOST)
 request("tok1")
 check(try_apply_post_resume("66.102.8.73", HOST) == false, "a foreign IP must not apply the replay")
+check(next(applied) == nil, "a foreign IP's request must be left alone")
 check(dict["pr|tok1"] ~= nil, "a foreign IP must not spend the owner's token")
 
 -- The owner's IP on another host.
-request("tok1")
+store("tok2", OWNER, HOST)
+request("tok2")
 check(try_apply_post_resume(OWNER, "other.example.com") == false, "another host must not apply the replay")
-check(dict["pr|tok1"] ~= nil, "another host must not spend the owner's token")
+check(next(applied) == nil, "another host's request must be left alone")
+check(dict["pr|tok2"] ~= nil, "another host must not spend the owner's token")
 
--- The owner, after solving: the replay applies and the token is spent.
-request("tok1")
+-- The owner: the replay applies and the token is spent.
+store("tok3", OWNER, HOST)
+request("tok3")
 check(try_apply_post_resume(OWNER, HOST) == true, "the owner's GET must apply the replay")
 check(applied.method == "POST" and applied.body == "title=hello" and applied.read == true,
   "the replay must read the body, then set POST and the stored body")
+check(applied["Content-Type"] == "application/x-www-form-urlencoded", "the replay must restore the stored Content-Type")
 check(applied.uri == "/wp-admin/post.php" and applied.args == "post=7", "the replay must restore the stored uri")
 check(ngx.ctx.cfm_resumed_post == true, "the replay must mark ngx.ctx.cfm_resumed_post")
-check(dict["pr|tok1"] == nil, "the owner's replay must spend the token")
+check(dict["pr|tok3"] == nil, "the owner's replay must spend the token")
 
 -- Spent: a second GET with the same token replays nothing.
-request("tok1")
+request("tok3")
 check(try_apply_post_resume(OWNER, HOST) == false, "a spent token must not replay twice")
+
+-- The case that broke: a fetcher's GET first, then the owner's.
+store("tok4", OWNER, HOST)
+request("tok4")
+try_apply_post_resume("66.102.8.73", HOST)
+request("tok4")
+check(try_apply_post_resume(OWNER, HOST) == true, "the owner must still replay after a foreign GET")
 
 -- An entry that does not decode can never apply: it is dropped.
 dict["pr|bad"] = "garbage"
