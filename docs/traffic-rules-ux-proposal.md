@@ -203,6 +203,72 @@ fix for F1 is to say what `allow` does and route operators to excludes.
 
 ---
 
+## 3a. Fleet-wide country / ASN rules — proposal (2026-10-06)
+
+**Why.** On 2026-10-06 a contact-form spam bot relayed ~990 mails through
+hotellito.gr (titan; WAF rule 520 now blocks that vector). The same bot was
+hammering 4bag.gr `/contact-us/` on mars from **2 153 IPs, 2 003 of them PJSC
+MegaFon** (AS31133, Russian mobile CGNAT), half of them seen once. Per-IP
+blocking cannot keep up with that pool, and permanent fleet-wide blocks of
+CGNAT addresses would hit the real subscribers who inherit them. The tool that
+fits is a **challenge for the network**: a person solves it, the bot (no JS)
+never does.
+
+What existed that day, and why none of it was the easy path:
+- **Traffic rule, per node:** `vhosts:["*"]` + `country_in` + `challenge_v2`
+  works today (`ruleHostMatch` is `filepath.Match`, so `*` matches every
+  host). Mars got exactly that (`* / RU / challenge_v2`, rule
+  `r_b13ec7fcf4d408fc`). But it has no ASN, and it has to be added node by
+  node.
+- **Challenge Access** has `asn_in`, but it only EXEMPTS (allow), never
+  imposes.
+- **cfm-web country/ASN policy kinds** (challenge tiers, enforced daemon-side
+  in `handleDecision`) are fleet-wide, but in practice the operator UI reaches
+  an ASN only through a fingerprint it is attached to. There is no "challenge
+  this ASN everywhere" form.
+
+**Proposal, in shipping order:**
+
+1. **`match.asn_in` / `match.asn_not_in` on traffic rules** (the §3 row, now
+   with an incident behind it). Reuse Challenge Access's normaliser and its
+   cache-only enrich lookup. An unresolved ASN never matches (fail-open, as
+   country). `traffic_rules.go`, `rules-model.js` and the simulate API change
+   in the same PR (CLAUDE.md §6, Simulate is the enforcement path). Mutually
+   exclusive pair, like the country fields. ASN is BGP-derived (not
+   spoofable) but broad: the editor warns when `block` is chosen with an ASN
+   and no path/UA narrowing, and steers to `challenge_v2`.
+2. **Recipe "Challenge a network everywhere"** (`bulk_network_challenge`).
+   - Free variables: countries and/or ASNs (ASN picker shows the AS name from
+     the local mmdb), action `challenge_v2` (default) | `challenge` |
+     `block` (block needs a typed confirmation and shows the CGNAT warning).
+   - Rules created: 1. `allow verified_bot` (prio 10, so Yandex/Googlebot
+     from that network keep crawling), 2. the network rule on `vhosts:["*"]`
+     (prio 265, **on**).
+   - Entry points: the recipe grid, and "Challenge this ASN / country" on an
+     IP drilldown / `waf_activity` row, so the value is pasted, not retyped.
+   - Note prefix `recipe:bulk_network_challenge` (group field later, §3).
+3. **cfm-web: fleet traffic rules.** One rule authored centrally, pulled by
+   every node's agent like `fingerprint_policies` today, merged into the
+   node's rule set as read-only `origin: fleet` rules (the node keeps its own
+   local rules; a fleet rule cannot be edited locally, only overridden by a
+   local higher-priority `allow`).
+   - Doctrine carried over from the policy feed: arming is permission-gated
+     in cfm-web; a fleet `block` keyed only on country/ASN is refused (the
+     same "no geo deny" rule the policy kinds enforce), so fleet network
+     rules are challenge-tier; path/UA-narrowed blocks are allowed.
+   - TTL per fleet rule (default 7 d, renewable): an incident rule must not
+     outlive the incident by default.
+   - Each node reports per-rule hit counts back (needs the §3 `rule_id` on
+     the challenge log line), so cfm-web shows whether a fleet rule is doing
+     anything and where.
+   - This also removes the "an ASN must be attached to a fingerprint" detour:
+     the network becomes a first-class target.
+
+Out of scope here: making a traffic-rule `allow` bypass the WAF or an IP block
+(§3 "Deliberately not proposed" stands).
+
+---
+
 ## 4. Phasing
 
 1. **Phase 1 — LANDED (UI + docs, plus the F12 fix).** Facts F1/F2/F3/F8/F9
@@ -215,8 +281,8 @@ fix for F1 is to say what `allow` does and route operators to excludes.
    class of mistake outright.
 2. **Phase 2 — engine additions** from §3 in single-concern PRs:
    `country_not_in` + `ip_any` **landed**, `verified_bot` **landed** (editor
-   chips, recipes, README field table); next `simulate draft/trace`, then
-   `asn_in`.
+   chips, recipes, README field table); next `asn_in` (moved up 2026-10-06,
+   §3a), then `simulate draft/trace`.
 3. **Phase 3 — hit counters, shadowing hints, incident entry points**
    (Forensics → "block this UA as a rule").
 
