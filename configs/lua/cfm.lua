@@ -1412,7 +1412,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
     local req_headers = ngx.req.get_headers()
     local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
     local self_origin = is_self_origin(ip)
-    local hit, reason, ttl, waf_action, _waf_hits, waf_rule_id = waf.check({
+    local hit, reason, ttl, waf_action, waf_hits, waf_rule_id = waf.check({
       uri = uri, args = ngx.var.args or "", method = method,
       raw_uri = ngx.var.request_uri,
       host = host, ip = ip, cookie = ngx.var.http_cookie or "",
@@ -1532,6 +1532,14 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
             content_type = req_headers["content-type"],
             fingerprint  = tls_fp,
           }
+          -- The OTHER rules that matched this request, behind the headline:
+          -- without them a logonly rule that runs after a stronger one (the
+          -- 421-439 dropper/backdoor scanners sit behind 402/404) never shows
+          -- in cfm.waf.log, so its burn-in has no data at all. Record-only:
+          -- nothing downstream enforces on it. Omitted when empty (cjson would
+          -- encode an empty table as an object).
+          local also = waf.also_rule_ids and waf.also_rule_ids(waf_hits, waf_rule_id)
+          if also and #also > 0 then push.also_rule_ids = also end
           decision:rpc("ip_push", "POST", "/nginx/ip", cjson.encode(push),
             { ip = ip, host = p_host, uri = p_uri, method = p_meth })
         end

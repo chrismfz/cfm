@@ -1058,7 +1058,7 @@ func (e *Engine) appendHistory(ev HistoryEvent) {
 // ua, referer, contentType are the per-request forensic fields already
 // captured by the Lua bridge (see cfm.waf.log). They are persisted into
 // payload_json only when non-empty so older rows stay compact.
-func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, ttl time.Duration, asn uint, asnName, country, countryISO string, wafRuleID int, ua, referer, contentType, fingerprint string) {
+func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, ttl time.Duration, asn uint, asnName, country, countryISO string, wafRuleID int, ua, referer, contentType, fingerprint string, alsoRuleIDs []int) {
 	if e == nil {
 		return
 	}
@@ -1079,6 +1079,12 @@ func (e *Engine) RecordWAFTrigger(ip, host, uri, method, action, reason string, 
 	}
 	if wafRuleID > 0 {
 		payload["waf_rule_id"] = wafRuleID
+	}
+	// The other rules that matched behind the headline (record-only; already
+	// sanitized by the bridge). Lets a rule that never owns the headline be
+	// measured from history.
+	if len(alsoRuleIDs) > 0 {
+		payload["also_rule_ids"] = alsoRuleIDs
 	}
 	if ua = strings.TrimSpace(ua); ua != "" {
 		payload["ua"] = ua

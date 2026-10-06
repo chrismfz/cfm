@@ -314,7 +314,7 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			// action = "logonly", "challenge", "challenge_v2" or "block";
 			// reason = "WAF_XSS", "WAF_TRAVERSAL", etc.
 			if b := w.eng.NginxBridge(); b != nil {
-				b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType, fingerprint string) {
+				b.SetTriggerHook(func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType, fingerprint string, alsoRuleIDs []int) {
 					var asn uint
 					var asnName, country, countryISO string
 					if enr := w.eng.Enricher(); enr != nil {
@@ -347,11 +347,14 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 						"country":     country,
 						"country_iso": countryISO,
 					}
+					if len(alsoRuleIDs) > 0 {
+						entry["also_rule_ids"] = alsoRuleIDs
+					}
 					if buf, err := json.Marshal(entry); err == nil {
 						logging.LogfWAF("%s", string(buf))
 					}
 
-					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl, asn, asnName, country, countryISO, wafRuleID, ua, referer, contentType, fingerprint)
+					w.eng.RecordWAFTrigger(ip, host, uri, method, action, reason, ttl, asn, asnName, country, countryISO, wafRuleID, ua, referer, contentType, fingerprint, alsoRuleIDs)
 				})
 
 				// NEW: Hook per-request observations (e.g. OpenResty WAF returned 403)

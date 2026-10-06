@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -108,9 +109,11 @@ type NginxBridge struct {
 	// challenge_v2 push), reason (e.g. "WAF_XSS"), TTL, the per-request
 	// forensic fields (UA / Referer / Content-Type) that Lua attaches to every
 	// push, and the client TLS fingerprint (the raw cfm_tlsfp.value() tuple,
-	// parsed to a canonical id by the daemon; empty on plain-HTTP).
+	// parsed to a canonical id by the daemon; empty on plain-HTTP), and the
+	// OTHER rule ids that matched the same request behind the headline
+	// (sanitizeAlsoRuleIDs; record-only, nothing enforces on them).
 	// Set via SetTriggerHook. Called without b.mu held.
-	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType, fingerprint string)
+	OnTrigger func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType, fingerprint string, alsoRuleIDs []int)
 
 	// OnWAFStats is called once per row of the snapshot pushed by Lua.
 	// Each call carries an absolute count for the (hour_unix, host) tuple;
@@ -440,6 +443,72 @@ type nginxIPMsg struct {
 	// evidence downstream (the fleet reputation ledger, source #3). Empty on older Lua
 	// clients / plain-HTTP.
 	Fingerprint string `json:"fingerprint,omitempty"`
+
+	// AlsoRuleIDs are the OTHER cfm_waf rule ids that matched this request,
+	// behind the headline WAFRuleID (cfm_waf.also_rule_ids). A rule that only
+	// ever matches behind a stronger one — a logonly scanner placed after a
+	// challenge rule — is otherwise invisible in cfm.waf.log and history.
+	// Record-only: nothing keys a decision on them. Sanitized on receipt, and
+	// decoded leniently (alsoRuleIDList): a malformed value must never fail
+	// the decode of the message that carries the enforcement decision.
+	AlsoRuleIDs alsoRuleIDList `json:"also_rule_ids,omitempty"`
+}
+
+// alsoRuleIDList decodes also_rule_ids best-effort: integral numbers are kept,
+// anything else (a string, a fraction, a non-array) is dropped without an
+// error, so telemetry can never 400 the ip_push or drop a batch event.
+type alsoRuleIDList []int
+
+func (l *alsoRuleIDList) UnmarshalJSON(b []byte) error {
+	var raw []json.RawMessage
+	if json.Unmarshal(b, &raw) != nil {
+		*l = nil
+		return nil
+	}
+	out := make([]int, 0, len(raw))
+	for _, r := range raw {
+		var f float64
+		if json.Unmarshal(r, &f) != nil || f != math.Trunc(f) || f < math.MinInt32 || f > math.MaxInt32 {
+			continue
+		}
+		out = append(out, int(f))
+	}
+	*l = out
+	return nil
+}
+
+// maxAlsoRuleIDs bounds the also_rule_ids carried per trigger (the edge sends
+// at most 16). Rule ids are positive and below 100000 (the 10xxx CVE band).
+const maxAlsoRuleIDs = 16
+
+// sanitizeAlsoRuleIDs keeps the valid, distinct ids other than the headline —
+// the first maxAlsoRuleIDs in input (evaluation) order, then sorted. The input
+// is edge-supplied, so it is bounded before it reaches the log, the history
+// store or a subscriber.
+func sanitizeAlsoRuleIDs(in []int, headline int) []int {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(in))
+	out := make([]int, 0, len(in))
+	for _, id := range in {
+		if id <= 0 || id >= 100000 || id == headline {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+		if len(out) >= maxAlsoRuleIDs {
+			break
+		}
+	}
+	sort.Ints(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // nginxWAFStatsMsg is the snapshot pushed by Lua's maybe_flush_waf_insp.
@@ -1048,7 +1117,7 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 // SetTriggerHook registers a callback that fires whenever an external push
 // (POST /nginx/ip) sets a new IP decision. Use this to log WAF trigger events
 // to cfm.challenges.log with enrichment from the webdetector engine.
-func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType, fingerprint string)) {
+func (b *NginxBridge) SetTriggerHook(fn func(ip, action, reason string, ttl time.Duration, host, uri, method string, wafRuleID int, ua, referer, contentType, fingerprint string, alsoRuleIDs []int)) {
 	if b == nil {
 		return
 	}
@@ -2431,8 +2500,9 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	if reason != "" && b.OnTrigger != nil {
 		ip, action, host, uri, method, wafRuleID := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method, msg.WAFRuleID
 		ua, referer, ct, fp := msg.UA, msg.Referer, msg.ContentType, msg.Fingerprint
+		also := sanitizeAlsoRuleIDs([]int(msg.AlsoRuleIDs), wafRuleID)
 		b.dispatchHook(func() {
-			b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, ua, referer, ct, fp)
+			b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, ua, referer, ct, fp, also)
 		})
 	}
 
@@ -2761,8 +2831,9 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			if reason != "" && b.OnTrigger != nil {
 				ip, action, host, uri, method, wafRuleID := msg.IP, msg.Action, msg.Host, msg.URI, msg.Method, msg.WAFRuleID
 				ua, referer, ct, fp := msg.UA, msg.Referer, msg.ContentType, msg.Fingerprint
+				also := sanitizeAlsoRuleIDs([]int(msg.AlsoRuleIDs), wafRuleID)
 				b.dispatchHook(func() {
-					b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, ua, referer, ct, fp)
+					b.OnTrigger(ip, action, reason, ttl, host, uri, method, wafRuleID, ua, referer, ct, fp, also)
 				})
 			}
 			processed++

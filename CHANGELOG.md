@@ -17,7 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **WAF rules that only match behind a stronger rule are now measurable.**
+  The WAF log and detection history recorded only the headline rule of each
+  request. A logonly rule that runs after a stronger one never appeared at
+  all: a 30-day fleet read found zero hits for the 13 dropper/backdoor
+  scanners (421-425, 430-436, 439), which sit behind rules 402/404. That left
+  no data to decide whether to promote or retire them. Each WAF event now also
+  lists the other rules that matched the same request (`also_rule_ids`,
+  record-only, nothing enforces on it). The WAF summary API counts them for a
+  numeric rule filter when asked with `also=1` (`also_matches`; without it the
+  filter stays headline-only), and the MCP `waf_rule_detail` shows them as
+  `web_by_id`. The counts are sampled, not exact: the edge reports at most
+  one event per IP, rule family and tier a minute, so read them as "does this
+  rule fire at all", not as a rate. A rule after a blocking rule is still
+  never evaluated on that request; this covers the challenge and logonly
+  cases.
 
 ## 2026.10.06
 

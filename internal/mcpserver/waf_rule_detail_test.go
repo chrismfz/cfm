@@ -107,3 +107,37 @@ func TestBuildWAFRuleDetail_NumericQueryAndPanelUnavailable(t *testing.T) {
 		t.Fatalf("expected panel-unavailable note, got %v", notes)
 	}
 }
+
+// A numeric query also asks the summary BY ID, so a rule that matched behind a
+// stronger headline (also_rule_ids) is counted: web_by_id splits the total
+// into headline and also_matches. A family query never adds the block.
+func TestWAFRuleDetailNumericQueryReportsAlsoMatches(t *testing.T) {
+	fd := &fakeDispatch{bodyByPath: map[string][]byte{
+		"/api/v1/waf/rules":          []byte(`{"rules":[{"id":422,"name":"rule_php_dropper_wget_curl","group_name":"upload_malware","reason_family":"WAF_DROPPER","default_mode":"logonly"}]}`),
+		"/api/v1/waf/engine/summary": []byte(`{"total_events":3,"also_matches":2,"rows":[]}`),
+		"/api/v1/system/waf-fp-hunt": []byte(`{"error":"no panel"}`),
+	}}
+	ts := newTestServer(t, fd)
+
+	_, body := mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"waf_rule_detail","arguments":{"rule":"422","hours":24}}}`)
+	for _, want := range []string{`web_by_id`, `also_matches\": 2`, `headline\": 1`, `rule_id\": 422`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("waf_rule_detail rule=422: missing %s in %s", want, body)
+		}
+	}
+	// The by-id call is the last dispatch: it must ask for the numeric id
+	// with also=1 (a family filter never counts also_matches).
+	fd.mu.Lock()
+	lp, lq := fd.lastPath, fd.lastQuery
+	fd.mu.Unlock()
+	if lp != "/api/v1/waf/engine/summary" || lq.Get("rule") != "422" || lq.Get("also") != "1" {
+		t.Fatalf("by-id summary call = %s %v, want rule=422 also=1", lp, lq)
+	}
+
+	_, body = mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"waf_rule_detail","arguments":{"rule":"WAF_DROPPER","hours":24}}}`)
+	if strings.Contains(body, `web_by_id`) {
+		t.Fatalf("a family query must not add web_by_id: %s", body)
+	}
+}

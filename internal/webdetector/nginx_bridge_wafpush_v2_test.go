@@ -35,7 +35,7 @@ func TestWAFPushChallengeV2_StoresChallengeAndMarks(t *testing.T) {
 	b := NewNginxBridge("/tmp/cfm-test-wafv2.sock", "tok", time.Minute, time.Minute)
 
 	var gotAction, gotReason string
-	b.SetTriggerHook(func(_, action, reason string, _ time.Duration, _, _, _ string, _ int, _, _, _, _ string) {
+	b.SetTriggerHook(func(_, action, reason string, _ time.Duration, _, _, _ string, _ int, _, _, _, _ string, _ []int) {
 		gotAction, gotReason = action, reason
 	})
 
@@ -125,7 +125,7 @@ func TestWAFPushBatchChallengeV2_SameMapping(t *testing.T) {
 	b := NewNginxBridge("/tmp/cfm-test-wafv2c.sock", "tok", time.Minute, time.Minute)
 
 	var gotAction string
-	b.SetTriggerHook(func(_, action, _ string, _ time.Duration, _, _, _ string, _ int, _, _, _, _ string) {
+	b.SetTriggerHook(func(_, action, _ string, _ time.Duration, _, _, _ string, _ int, _, _, _, _ string, _ []int) {
 		gotAction = action
 	})
 
@@ -177,7 +177,7 @@ func TestRecordWAFTriggerChallengeV2_EventCarriesTierAndWafsecFilterDrops(t *tes
 	})
 
 	e.RecordWAFTrigger("203.0.113.64", "shop.example", "/p", "get", "challenge_v2",
-		"WAF_XSS", 10*time.Minute, 0, "", "", "", 302, "ua", "", "", "")
+		"WAF_XSS", 10*time.Minute, 0, "", "", "", 302, "ua", "", "", "", nil)
 
 	mu.Lock()
 	defer mu.Unlock()
