@@ -184,7 +184,7 @@ func TestChallengePage_PanelScopeUsesThePanelClearance(t *testing.T) {
 func resetThrottleStores(t *testing.T) {
 	t.Helper()
 	reset := func() {
-		for _, st := range []*pairTTLStore[struct{}]{&clearedRedirects, &verifyRejects} {
+		for _, st := range []*pairTTLStore[struct{}]{&nextRedirects, &verifyRejects} {
 			st.mu.Lock()
 			st.m = map[string]time.Time{}
 			st.fullWarn = false

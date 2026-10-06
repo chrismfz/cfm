@@ -3883,8 +3883,9 @@ func (e *Engine) SetChalExcludeFunc(fn func(ip, host, ua, asn, ptr, rule string)
 // SetChalExcludeHotFunc wires the DNS-free challenge-exclude matcher into the
 // edge decision bridge (handleDecision), so the operator file's ua/asn/host
 // rules exempt a matching request from a VHOST-WIDE challenge at serve time —
-// not only from the log-driven per-IP emits (isExcluded). Must be called before
-// RunOnce (the bridge reads the field without a lock).
+// not only from the log-driven per-IP emits (isExcluded) — and into the
+// challenge page (challengePageExempt). Must be called before RunOnce and
+// before the challenge server starts (both read the field without a lock).
 func (e *Engine) SetChalExcludeHotFunc(fn func(host, ua string, asn, ptr func() string, rule string) (action, matched string, ok bool)) {
 	if e == nil || e.nginxBridge == nil {
 		return

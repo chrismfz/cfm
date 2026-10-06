@@ -17,7 +17,34 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The challenge page no longer serves the PoW to clients the decision
+  exempts.** A challenged visitor's address bar shows the challenge page's own
+  URL (`/__cfm_challenge?next=…`). Fetchers handed that URL fetched it
+  directly: Google-Read-Aloud, Meta's link-preview and agent crawlers,
+  Twitterbot, and Googlebot or Applebot from shared links. That location
+  bypasses the edge decision, so none of the client exemptions ever ran for
+  them: the challenge-exclude file, the verified good-bot exemption, and
+  Challenge Access-Control. On rigel, Read-Aloud kept getting the challenge
+  after its #1539 rule had loaded. On titan, meta-externalagent got it
+  ~1 940 times in 14 hours (2026-10-05/06), and the link previews showed
+  "Just a moment…".
+  - The page now sends such a client straight to `next`. The cases are a
+    verified good bot (`CHALLENGE_GOODBOT_EXEMPT`), a Challenge
+    Access-Control match, or an exclude-file match.
+  - The exclude match is skipped when a per-IP challenge or a country/ASN
+    policy covers the client, because the file never lifts those.
+  - A `next` that carries a `cfm_rt` still gets the page. That token is a
+    challenged POST waiting for its owner, and no exemption cleared it.
+  - The page's redirect loop breaker covers these redirects, and is now per
+    HTTP method. If the edge still challenges the client at `next`, for a
+    reason none of these exemptions lifts (a fingerprint policy, a WAF hit, a
+    traffic rule), the client comes back once and then gets the page.
+  - Each redirect is counted in bridge stats
+    (`challenge_page_exempt_redirects`). The challenges log gets one
+    `exempt_redirect` line per host per minute.
+  - The breaker's loop line is now `next_redirect_loop` (it was
+    `cleared_redirect_loop`), with a `why=` field.
 
 ## 2026.10.04
 

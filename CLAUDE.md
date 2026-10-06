@@ -405,7 +405,18 @@ validator (hits many domains + many one-time token paths) trips the scanner
 heuristics and gets flagged, polluting per-IP state — under the since-RETIRED
 per-IP challenge-DNAT the flag redirected the validator outright and broke
 SSL issuance, the incident that earned the rule. Any path-based challenge
-exemption likely needs the same both-sides treatment.
+exemption likely needs the same both-sides treatment. A client exemption
+needs a second place too: the challenge page itself. That covers the verified
+good-bot downgrade, a Challenge Access-Control entry and the exclude file's
+serve-time match. `/__cfm_challenge?next=…` is what a challenged visitor's
+address bar shows, so fetchers handed that URL (Google-Read-Aloud, Meta link
+previews) fetch it directly, and its location bypasses cfm.lua.
+`challengePageExempt` mirrors the three `handleDecision` blocks and sends
+those clients to `next`; change the blocks and the mirror together. The
+exception is a `next` that carries a `cfm_rt`: the exemption cannot clear
+that challenged POST, and its owner would lose it. Before 2026-10-06 these
+clients got the PoW: titan served it to meta-externalagent ~1 940 times in
+14 hours.
 
 ### Traffic rules — `Simulate` IS the enforcement path
 `trafficRuleStore.Simulate` is wired as the nginx bridge's `RuleDecision`, so

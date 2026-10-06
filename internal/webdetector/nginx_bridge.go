@@ -39,6 +39,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -199,7 +200,8 @@ type NginxBridge struct {
 	// rule name) → (action skip|skip_vhost_only, matched); asn / ptr are lazy.
 	// A match lifts the VHOST-WIDE challenge only — never a per-IP challenge,
 	// never a block, never the WAF / traffic rules. nil when no exclude file
-	// is loaded. Set once at startup (SetChalExcludeHotFunc).
+	// is loaded. Set once at startup (SetChalExcludeHotFunc). Read by
+	// handleDecision and by the challenge page (challengePageExempt).
 	ChalExcludeHot func(host, ua string, asn, ptr func() string, rule string) (action, matched string, ok bool)
 	// chalExcludeASNFn overrides the ASN source for ChalExcludeHot (tests
 	// only; nil = the enricher's mmdb read).
@@ -208,8 +210,15 @@ type NginxBridge struct {
 	// (BridgeStats.ChallengeExcludeLifts); chalExcludeLogAt rate-limits the
 	// per-host log line (chalExcludeLogMu; taken only on a lift).
 	chalExcludeLifts atomic.Int64
+	// challengePageExemptRedirects counts challenge-page visits sent to next
+	// because challengePageExempt cleared the client
+	// (BridgeStats.ChallengePageExemptRedirects).
+	challengePageExemptRedirects atomic.Int64
 	chalExcludeLogMu sync.Mutex
 	chalExcludeLogAt map[string]time.Time
+	// chalPageLogAt rate-limits the per-host exempt_redirect log line
+	// (noteChallengePageExemptRedirect; under chalExcludeLogMu).
+	chalPageLogAt map[string]time.Time
 
 	// Clam
 	clamMgr      clam.Enqueuer
@@ -321,6 +330,11 @@ type BridgeStats struct {
 	// by a webdetector_challenge_exclude.txt rule (ChalExcludeHot).
 	// Cumulative since bridge start.
 	ChallengeExcludeLifts int64 `json:"challenge_exclude_lifts"`
+	// ChallengePageExemptRedirects: challenge-page visits (/__cfm_challenge)
+	// sent to next because the client is exempt by identity (verified good
+	// bot, Challenge Access-Control entry, exclude rule; challengePageExempt).
+	// Cumulative since bridge start.
+	ChallengePageExemptRedirects int64 `json:"challenge_page_exempt_redirects"`
 
 	Timing BridgeTimingStats `json:"timing"`
 }
@@ -1390,7 +1404,8 @@ func (b *NginxBridge) snapshotBridgeStats(activeIPs, activeVhosts int) BridgeSta
 		ActiveIPs:    activeIPs,
 		ActiveVhosts: activeVhosts,
 
-		ChallengeExcludeLifts: b.chalExcludeLifts.Load(),
+		ChallengeExcludeLifts:        b.chalExcludeLifts.Load(),
+		ChallengePageExemptRedirects: b.challengePageExemptRedirects.Load(),
 		Timing: BridgeTimingStats{
 			TotalP50Ms:     percentileDurationMsLocked(b.stats.totalDurations, 0.50),
 			TotalP95Ms:     percentileDurationMsLocked(b.stats.totalDurations, 0.95),
@@ -1993,7 +2008,8 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verified good-bot challenge exemption (per-IP scope; mirrors the subnet
-	// exemption in challenge_subnet_goodbot.go). Never serve a challenge to an
+	// exemption in challenge_subnet_goodbot.go). Mirrored on the challenge page
+	// by challengePageExempt, with the two blocks below: change both. Never serve a challenge to an
 	// FCrDNS-verified crawler: it cannot solve one, so challenging it silently
 	// breaks legitimate crawl/SEO/social (observed live: real Googlebot getting
 	// CHALLENGE_ERR_RATIO; Meta vhost-challenged on shop vhosts). Cache-only on
@@ -2024,7 +2040,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 
 	// Challenge Access-Control (operator allow-list): downgrade a would-be
 	// challenge to allow for a matching request (country/path/UA/IP/ASN/
-	// verified-bot, per-vhost or global). Mirrors goodBotDowngrade: NEVER
+	// verified-bot, per-vhost or global). Mirrored by challengePageExempt. Mirrors goodBotDowngrade: NEVER
 	// softens a per-IP block, and the WAF / traffic-rule engine below still
 	// applies. Runs only when a challenge would otherwise be served.
 	if b.ChallengeAccessExempt != nil && ipAction != "block" &&
@@ -2058,7 +2074,8 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Operator challenge-exclude file (webdetector_challenge_exclude.txt)
-	// against the VHOST-WIDE challenge, per request. Before this, a vhost-wide
+	// against the VHOST-WIDE challenge, per request (mirrored by
+	// challengePageExempt for the challenge page itself). Before this, a vhost-wide
 	// challenge (auto suspicious_vhost / under_attack / manual) consulted the
 	// file only through BypassIPTemp for IPs already seen in the vhost's
 	// window, and with an EMPTY UA — so ua-gated rules never matched there.
@@ -2196,6 +2213,143 @@ func (b *NginxBridge) chalExcludeASN(ip string) uint32 {
 		return uint32(f.LookupGeoFast(ip).ASN)
 	}
 	return uint32(b.enr.LookupCachedOrAsync(ip).ASN)
+}
+
+// challengePageExempt reports whether the decision exempts this client from
+// a challenge by WHO it is, not by what challenged it, and why. It serves the
+// challenge page (/__cfm_challenge), which sends such a client to next
+// instead of serving the PoW. next is the page's sanitized target.
+//
+// That page's URL is what a challenged visitor's address bar shows, and
+// fetchers handed that URL by the browser (Google-Read-Aloud's "listen to
+// this page", Meta's link-preview and agent fetchers, Twitterbot) or finding
+// it in a shared link (Googlebot, Applebot) fetch it directly. Its location
+// bypasses cfm.lua, so none of the exemptions below ever ran for them. Seen
+// live 2026-10-04..06: rigel kept serving Read-Aloud the PoW after its #1539
+// exclude rule loaded, and titan served the page to meta-externalagent
+// ~1 940 times in 14 hours (2026-10-05/06).
+//
+// It mirrors the three client exemptions of handleDecision, in its order
+// (keep them in step; each one there carries a pointer back here):
+//   - a verified good bot (CHALLENGE_GOODBOT_EXEMPT) lifts a per-IP and a
+//     vhost-wide challenge alike (goodBotDowngrade). Cache only, like the
+//     decision: a miss kicks the async forward-confirm.
+//   - a Challenge Access-Control entry (the operator allow-list) lifts both
+//     too, matched against next as the request.
+//   - the exclude file lifts a vhost-wide challenge only. It is not consulted
+//     when a per-IP challenge covers the client (an ipState entry, or a
+//     country/ASN policy, read live like the verify-side geo gate): the edge
+//     would challenge next again.
+//
+// A per-IP block exempts nothing. Whatever the edge decides at next (the
+// fingerprint floor, a WAF hit, a traffic rule) still applies. The page's
+// redirect breaker serves the page if the edge sends the client straight
+// back.
+func (b *NginxBridge) challengePageExempt(ip, host, ua, next string, now time.Time) (string, bool) {
+	if b == nil || ip == "" {
+		return "", false
+	}
+	goodBotOn := b.goodBotExempt && b.goodBot != nil && b.enr != nil
+	if !goodBotOn && b.ChallengeAccessExempt == nil && b.ChalExcludeHot == nil {
+		return "", false
+	}
+	ipAction, _ := b.GetIPDecision(ip)
+	if ipAction == "block" {
+		return "", false
+	}
+	var geo enrich.Result
+	geoLoaded := false
+	lookupGeo := func() enrich.Result {
+		if !geoLoaded {
+			geoLoaded = true
+			if b.enr != nil {
+				geo = b.enr.LookupCachedOrAsync(ip)
+			}
+		}
+		return geo
+	}
+	ptrFn := func() string { return lookupGeo().PTR }
+	var asnN uint32
+	asnDone := false
+	asn := func() uint32 {
+		if !asnDone {
+			asnDone = true
+			asnN = b.chalExcludeASN(ip)
+		}
+		return asnN
+	}
+
+	verifiedBot := ""
+	if goodBotOn {
+		if verifiedBot = b.goodBot.verified(ip, ptrFn, now); verifiedBot != "" {
+			return "goodbot:" + verifiedBot, true
+		}
+	}
+	if b.ChallengeAccessExempt != nil {
+		path, qs := next, ""
+		if u, err := url.ParseRequestURI(next); err == nil {
+			path, qs = u.Path, u.RawQuery
+		}
+		if !goodBotOn && b.goodBot != nil && b.enr != nil &&
+			b.ChallengeAccessNeedsVerifiedBot != nil && b.ChallengeAccessNeedsVerifiedBot(host) {
+			verifiedBot = b.goodBot.verified(ip, ptrFn, now)
+		}
+		if b.ChallengeAccessExempt(ChallengeAccessInput{
+			Host:        host,
+			IP:          ip,
+			UA:          ua,
+			Path:        path,
+			Method:      http.MethodGet,
+			Country:     lookupGeo().CountryISO,
+			QueryString: qs,
+			VerifiedBot: verifiedBot,
+		}, asn) {
+			return "access", true
+		}
+	}
+	if b.ChalExcludeHot == nil || ipAction == "challenge" || GeoPolicyActionForIP(ip) != "" {
+		return "", false
+	}
+	asnFn := func() string {
+		if n := asn(); n > 0 {
+			return fmt.Sprintf("AS%d", n)
+		}
+		return ""
+	}
+	if _, rule, ok := b.ChalExcludeHot(host, ua, asnFn, ptrFn, "CHALLENGE_VHOST"); ok {
+		return "exclude:" + rule, true
+	}
+	return "", false
+}
+
+// noteChallengePageExemptRedirect counts a challenge-page redirect to next for
+// a client challengePageExempt cleared (BridgeStats.ChallengePageExemptRedirects)
+// and logs it to the challenges log at most once per host per minute. The
+// throttle is its own bounded map, like noteChalExcludeLift's: the host is
+// client-chosen, so it must not crowd the challenge server's shared stores.
+func (b *NginxBridge) noteChallengePageExemptRedirect(host, ip, ua, why, next string, now time.Time) {
+	if b == nil {
+		return
+	}
+	b.challengePageExemptRedirects.Add(1)
+	b.chalExcludeLogMu.Lock()
+	if b.chalPageLogAt == nil {
+		b.chalPageLogAt = make(map[string]time.Time)
+	}
+	last, seen := b.chalPageLogAt[host]
+	due := !seen || now.Sub(last) >= time.Minute
+	if due {
+		if len(b.chalPageLogAt) >= 4096 {
+			clear(b.chalPageLogAt)
+		}
+		b.chalPageLogAt[host] = now
+	}
+	b.chalExcludeLogMu.Unlock()
+	if !due {
+		return
+	}
+	logging.LogfCHALLENGES("[challenge] exempt_redirect ip=%s host=%s why=%q next=%q ua=%q note=sent_to_next (per-host, 1/min)",
+		ip, truncateForLog(host, 120), truncateForLog(why, 160), truncateForLog(next, 220), truncateForLog(ua, 200))
 }
 
 // handleIPPush: cfm (or external tool) pushes a new IP decision.
@@ -3082,8 +3236,8 @@ func (b *NginxBridge) DropVhostAutoSource(host, source string) {
 }
 
 // GetIPDecision returns the current action and reason for an IP from the
-// in-process state. Used by the challenge server for post-intercept logging.
-// Returns ("", "") if the IP has no active entry.
+// in-process state. Used by the challenge server (post-intercept logging) and
+// by challengePageExempt. Returns ("", "") if the IP has no active entry.
 func (b *NginxBridge) GetIPDecision(ip string) (action, reason string) {
 	if b == nil {
 		return "", ""

@@ -11,7 +11,7 @@ import (
 // marks (gate teeth: challengeV2Marks per (ip,host), challengeV2IPMarks per
 // IP), the traffic-rule challenge notes (telemetry, challengeRuleNotes), the
 // challenge server's verify_reject log throttle (verifyRejects) and its
-// cleared-redirect loop breaker (clearedRedirects) — one implementation, so a
+// challenge-page redirect loop breaker (nextRedirects) — one implementation, so a
 // fix to the sweep, the cap or the once-per-episode warning reaches all of
 // them. Pair keys come from challengeV2MarkKey; the per-IP store keys on the
 // trimmed IP.
