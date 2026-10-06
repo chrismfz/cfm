@@ -2385,9 +2385,19 @@ local CRAWLER_UA_TOKENS = {
   --   aranet-searchbot— Aranet search crawler
   --   wp rocket       — WP Rocket's preload fetcher (the site warming its own cache)
   "bitsightbot", "iaskbot", "aranet-searchbot", "wp rocket",
+  -- 612 hygiene (2026-10-06, 7-day read on seven nodes): two more that
+  -- self-declare yet carry a `Chrome/` token.
+  --   wp-rocket — WP Rocket's SaaS fetcher ("compatible; WP-Rocket-SaaS/1.0";
+  --               One.com, `?nowprocket=1` URLs): the hyphenated spelling the
+  --               "wp rocket" token above never matched
+  --   smtbot    — SimilarTech's crawler ("compatible; SMTBot/1.0")
+  -- WordPress.com's mShots screenshot service was left OUT on purpose: its UA is
+  -- a literal HeadlessChrome, the automation this tell measures, so a name skip
+  -- would let any headless stack drop out by appending "WP.com mShots".
+  "wp-rocket", "smtbot",
 }
--- IN_APP_UA_TOKENS: in-app browsers of social apps — a real person tapping a
--- link or an ad inside the app. These are genuine Chromium WebViews (they carry
+-- IN_APP_UA_TOKENS: in-app WebViews (social apps, ad SDKs) — a real person
+-- tapping a link or an ad inside the app. These are genuine Chromium WebViews (they carry
 -- the `Chrome/NNN` token) but the embedding app's network stack ships a page
 -- navigation with neither Sec-Fetch-* nor Accept-Language, so they satisfy the
 -- tell exactly like headless automation while being the opposite of it.
@@ -2407,8 +2417,13 @@ local CRAWLER_UA_TOKENS = {
 -- so an app-package header gate could not be verified from captures; add one
 -- only from a capture that shows the header on these navigations, not from
 -- memory of what Android WebViews "usually" send.
+--
+-- 2026-10-06 (7-day read on seven nodes): afma-sdk, Google Mobile Ads' WebView —
+-- a person tapping a paid ad inside an app (`; wv)`, referer
+-- googleads.g.doubleclick.net, gclid in the URL). Challenging it would cost the
+-- customer the click.
 local IN_APP_UA_TOKENS = {
-  "musical_ly",
+  "musical_ly", "afma-sdk",
 }
 -- ua_has_token: plain-substring scan of a lowercased UA against one of the
 -- named-token lists above (shared by the crawler and in-app checks so the two
@@ -2466,13 +2481,16 @@ end
 -- on a navigation (clause 6), and crawlers/validators fetch infra paths
 -- header-poor (clause 1a) — are handled explicitly, which is why this rule can
 -- never be promoted past logonly on the "no real browser trips it" argument
--- alone. Returns one of two tags, or nil:
+-- alone. Returns one of three tags, or nil:
 --   NO_FETCH_META_NO_ACCEPT_LANG — the tell proper (browser-claiming automation);
 --   NO_FETCH_META_IN_APP         — clause 6: a named in-app browser
 --                                  (IN_APP_UA_TOKENS) that satisfies 1-5; still
 --                                  recorded, separable, weighted on its own, and
 --                                  clamped to logonly by the caller (cfm_waf.lua)
 --                                  whatever the rule's mode — measurement only.
+--   NO_FETCH_META_GFE            — clause 7: a ",gzip(gfe)" (Google-front-end
+--                                  relayed) UA that satisfies 1-6; measured
+--                                  apart, follows the rule's mode (not clamped).
 --
 -- Two suppress-only carve-outs return nil instead of measuring (they can only
 -- stand the rule down, never accuse): infrastructure paths (`/robots.txt`,
@@ -2488,7 +2506,7 @@ end
 -- the rule would mass-false-positive on real HTTP browser traffic. Keep both.
 --
 -- Cheap-first ordering: the Sec-Fetch/Accept-Language checks stand down the common
--- case (a real browser, which sends both) before the ~40-token crawler scan, so
+-- case (a real browser, which sends both) before the ~50-token crawler scan, so
 -- that loop only runs for the tiny set that already looks header-poor.
 function _M.detect_fetch_metadata_missing(headers, method, path)
   headers = headers or {}
@@ -2547,7 +2565,7 @@ function _M.detect_fetch_metadata_missing(headers, method, path)
   if not claims then return nil end
 
   -- (5) Known crawlers are a separate category — never part of this measurement.
-  -- After every cheap gate, so this ~40-token scan (and clause 6's) runs only
+  -- After every cheap gate, so this ~50-token scan (and clause 6's) runs only
   -- for the already-header-poor tiny set.
   if ua_is_declared_crawler(ua) then return nil end
 
@@ -2568,6 +2586,15 @@ function _M.detect_fetch_metadata_missing(headers, method, path)
   -- automation. Recorded under their own tag, never silently dropped (see
   -- IN_APP_UA_TOKENS for why a suppress would be the wrong shape here).
   if ua_is_in_app_browser(ua) then return "NO_FETCH_META_IN_APP" end
+
+  -- (7) ",gzip(gfe)" — Google's front end appends it to a request it relays
+  -- (2026-10-06: ~90 hits/7d, Google LLC plus some mobile-carrier egress,
+  -- ordinary article URLs). Could be a person behind a Google proxy or a bot on
+  -- Google infrastructure, and the string is trivially spoofable, so it is
+  -- neither suppressed nor clamped: its own tag, measured apart, following the
+  -- rule's mode. Whether it deserves an exemption is decided on its own counts
+  -- before any promotion (keyed on Google's ranges, not on the string).
+  if has(ua, "gzip(gfe)") then return "NO_FETCH_META_GFE" end
 
   return "NO_FETCH_META_NO_ACCEPT_LANG"
 end

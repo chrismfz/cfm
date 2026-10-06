@@ -189,7 +189,8 @@ local CFG = {
   -- real browser normally never trips (Track-2 Stage 1b; docs/challenge-score.md).
   -- Honest curl/wget/python clients never claim a browser, so they never match;
   -- self-declared crawlers and infra paths are skipped in the detector, and the
-  -- known real-browser exception (in-app WebViews of social apps, e.g. TikTok)
+  -- known real-browser exception (in-app WebViews: social apps such as TikTok,
+  -- Google's ad SDK)
   -- is recorded under its own NO_FETCH_META_IN_APP tag so it stays separable,
   -- and that tag is CLAMPED to logonly at the record() call: a promotion here
   -- only ever escalates the tell proper (NO_FETCH_META_NO_ACCEPT_LANG), never
@@ -2280,9 +2281,10 @@ function _M.check(ctx)
   -- GET|HEAD navigation with NO Sec-Fetch-* AND NO Accept-Language. Stacked weak
   -- signals — a real browser normally emits both — so honest CLI clients (they
   -- don't claim a browser) and self-declared crawlers (skipped in the detector)
-  -- never match; the one real-browser exception, in-app WebViews of social apps,
-  -- gets its own NO_FETCH_META_IN_APP tag, clamped to logonly below whatever the
-  -- rule's mode is. Shadow-only for burn-in; feeds the per-client challenge
+  -- never match; the one real-browser exception, in-app WebViews (social apps,
+  -- ad SDKs), gets its own NO_FETCH_META_IN_APP tag, clamped to logonly below
+  -- whatever the rule's mode is. Google-front-end relayed requests get
+  -- NO_FETCH_META_GFE: measured apart, NOT clamped (spoofable, undecided). Shadow-only for burn-in; feeds the per-client challenge
   -- score later, per tag.
   --
   -- Placed LAST on purpose: it is the WEAKEST signal here, so it must never become
@@ -2352,12 +2354,12 @@ function _M.should_push(shdict, ip, reason, action)
     -- Families whose tags are a FIXED, small set of categories that are meant to
     -- be compared against each other (not a volatile per-hit score/tag) keep the
     -- tag in the key: WAF_FETCH_METADATA's NO_FETCH_META_NO_ACCEPT_LANG vs
-    -- NO_FETCH_META_IN_APP are two populations whose per-tag counts decide the
+    -- NO_FETCH_META_IN_APP (and NO_FETCH_META_GFE) are populations whose per-tag counts decide the
     -- in-app challenge-score weight, and they share CGNAT mobile IPs — a
     -- family-keyed window would drop whichever tag fires second per IP per
     -- minute and bias exactly that comparison. Safe here because the family is
-    -- logonly-only (no block rule, no autoblock feed) and has two tags, so a
-    -- per-IP flood still collapses to at most two pushes per window.
+    -- logonly-only (no block rule, no autoblock feed) and has three tags, so a
+    -- per-IP flood still collapses to at most three pushes per window.
     key_reason = (reason and reason:match("^[^:]+:[^:]+")) or fam
   end
   -- challenge_v2 is its own action tier, like the others, so a plain-challenge
