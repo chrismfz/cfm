@@ -26,8 +26,9 @@ back-filled here — see the git/PR history for that period.
   decoded recipient list has two or more addresses and includes the email typed
   into the form, on a mail domain no other recipient uses. A real form never
   mails an outside visitor, so it ships at `block`.
-  Its new `WAF_FORM_RELAY` family is armed for autoblock (`FORM_RELAY = 1`,
-  6 h ban). A recipient list without the visitor's address is only logged
+  Its new `WAF_FORM_RELAY` family is held at 0 for autoblock during burn-in:
+  the 403 already stops the mail, and `FORM_RELAY = 1` adds the 6 h ban once
+  the fleet logs look clean. A recipient list without the visitor's address is only logged
   (`MULTI_RECIPIENT`), since an owner may save several addresses and a staff
   member may test the form. It does not block a bot that replaces the recipient
   outright, injects a victim on the owner's own mail domain or adds a decoy on

@@ -135,8 +135,8 @@ var wafRuleIDs = []WAFRule{
 	// addon mails the client-posted base64 `recipient`, so a bot appends a victim
 	// (seen on titan: ~990 spam mails in 7 h from one site). Abuse of a form, not
 	// of auth, but this is the abuse band. Its own family so the autoblock knob
-	// is separate (FORM_RELAY); armed by default like every block family — a
-	// source that relays spam through a customer's form is a clean ban.
+	// is separate (FORM_RELAY), HELD at 0 for burn-in (waf_security_register.go):
+	// the edge 403 stops the relay; the ban waits for a fleet review.
 	{ID: 520, Name: "rule_form_relay_sppb_contact", ReasonFamily: "WAF_FORM_RELAY", DefaultMode: "block"},
 
 	// 6xx header / protocol anomaly
