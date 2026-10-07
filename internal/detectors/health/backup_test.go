@@ -80,8 +80,13 @@ func TestPublishBackupIsEdgeTriggered(t *testing.T) {
 		t.Fatalf("a guest became uncovered again: want 1 event, got %+v", evs)
 	}
 
-	// The failure clears (next run OK), then a different run fails: new event.
+	// The failure clears (next run OK): a resolution under the same key. Then
+	// a different run fails: new event.
 	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup"}), "vega", now)
+	if evs := rec.take(); len(evs) != 1 || evs[0].Type != TypeBackupRecovered || evs[0].Key != failedRun.Key ||
+		evs[0].Severity != backupcheck.SevInfo || evs[0].Message != "backup OK again (was: failed)" {
+		t.Fatalf("cleared failure: want one backup_recovered, got %+v", evs)
+	}
 	next := failedRun
 	next.Key = "jb:run:r22"
 	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Findings: []backupcheck.Finding{next}}), "vega", now)
@@ -110,10 +115,46 @@ func TestPublishBackupUnreadableAdapterIsNotHealthy(t *testing.T) {
 	if len(evs) != 1 || evs[0].Type != TypeBackupCheckError || evs[0].Severity != "warning" {
 		t.Fatalf("want one backup_check_error, got %+v", evs)
 	}
-	// It reads again and the same run is still the latest failed one: no repeat.
+	// It reads again and the same run is still the latest failed one: no
+	// repeat of the failure, only the check error resolves.
 	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Findings: []backupcheck.Finding{failedRun}}), "orion", now)
-	if evs := rec.take(); len(evs) != 0 {
-		t.Fatalf("an unreadable spell must not re-arm findings: got %+v", evs)
+	if evs := rec.take(); len(evs) != 1 || evs[0].Type != TypeBackupRecovered || evs[0].Key != "jetbackup:error" {
+		t.Fatalf("an unreadable spell must not re-arm findings, and the error must resolve: got %+v", evs)
+	}
+}
+
+func TestPublishBackupRecoveryWaitsForASink(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true})
+	now := time.Now()
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Findings: []backupcheck.Finding{failedRun}}), "orion", now)
+	rec.take()
+
+	// It clears while nothing records history: the finding stays armed...
+	SetNodeFaultEventSink(nil)
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup"}), "orion", now)
+	if _, ok := backup.published[failedRun.Key]; !ok {
+		t.Fatal("an undelivered recovery must keep the finding armed")
+	}
+	// ...and the recovery goes out once a sink is back.
+	rec = recordFaults(t)
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup"}), "orion", now)
+	if evs := rec.take(); len(evs) != 1 || evs[0].Type != TypeBackupRecovered {
+		t.Fatalf("recovery must be retried: got %+v", evs)
+	}
+	if _, ok := backup.published[failedRun.Key]; ok {
+		t.Fatal("a delivered recovery must forget the finding")
+	}
+}
+
+func TestRecoveredMessageFallsBackToTheKey(t *testing.T) {
+	// a state file from before backup_recovered carries no message
+	if got := recoveredMessage("jb:stale:x", publishedBackup{}); got != "backup OK again (was: jb:stale:x)" {
+		t.Fatalf("got %q", got)
+	}
+	if got := recoveredMessage("jetbackup:error", publishedBackup{Message: "cannot read"}); got != "backup state readable again (was: cannot read)" {
+		t.Fatalf("got %q", got)
 	}
 }
 
@@ -301,5 +342,34 @@ func TestBackupFindingsStayArmedWhenTheCheckCannotJudge(t *testing.T) {
 		if evs := rec.take(); len(evs) != 0 {
 			t.Fatalf("%s: findings were re-armed and re-published: %+v", name, evs)
 		}
+	}
+}
+
+// A hung check is reported once, and resolved when the check finishes.
+func TestHungBackupCheckResolvesWhenItFinishes(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	release := make(chan struct{})
+	orig := backupCheckFunc
+	backupCheckFunc = func(context.Context, backupcheck.Options) backupcheck.Status {
+		<-release
+		return status(backupcheck.AdapterStatus{Name: "jetbackup"})
+	}
+	t.Cleanup(func() { backupCheckFunc = orig })
+
+	d := New(Config{BackupAlert: true, BackupEvery: time.Hour})
+	now := time.Now()
+	d.tickBackup(now, "orion")
+	d.tickBackup(now.Add(backupHungAfter+time.Minute), "orion")
+	d.tickBackup(now.Add(backupHungAfter+2*time.Minute), "orion")
+	if evs := rec.take(); len(evs) != 1 || evs[0].Type != TypeBackupCheckError || evs[0].Key != hungKey {
+		t.Fatalf("want one hung check error, got %+v", evs)
+	}
+
+	close(release)
+	waitPending(t)
+	d.tickBackup(now.Add(backupHungAfter+3*time.Minute), "orion")
+	if evs := rec.take(); len(evs) != 1 || evs[0].Type != TypeBackupRecovered || evs[0].Key != hungKey {
+		t.Fatalf("want the hung check resolved, got %+v", evs)
 	}
 }

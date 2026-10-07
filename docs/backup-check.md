@@ -42,13 +42,15 @@ nothing.
 | `backup_dest` | critical (Proxmox storage offline) / warning (< `BACKUP_DEST_FREE_PCT` free: Proxmox storage, JetBackup destination) | a backup destination the jobs use; Virtualmin destinations are not checked |
 | `backup_no_job` | warning | JetBackup with no enabled account-backup job, or Virtualmin with no enabled schedule (a job disabled during an incident and forgotten) |
 | `backup_check_error` | warning | an installed backup system could not be read on **two checks in a row**, or the check itself hung — "unknown", never "healthy" |
+| `backup_recovered` | info | a finding above is gone (the next run succeeded, the CLI reads again, the hung check finished). Same `key` as the finding it resolves; cfm-web closes that alert with it (unpins it, stops its reminders, posts RESOLVED) |
 
 Keys are per job / schedule / node / storage (`jb:failed:<job>`,
 `vm:stale:<schedule>`, `pve:partial:<node>`, …), never per run: a job that
 fails every night is ONE open alert (pinned and reminded by cfm-web), not one
 a night. Publishing is edge-triggered per key:
 once when it appears, again when its severity rises (a full storage that goes
-offline) or a set gains a member, and re-armed when it is gone. While an
+offline) or a set gains a member, and re-armed when it is gone — announced as
+`backup_recovered` under the same key (kept armed until that is delivered). While an
 adapter cannot be read, its findings stay armed (no repeat when it reads
 again). A key the check could not judge this time (a side read failed, the whole check
 panicked, an adapter briefly absent) also stays armed. The edge state is

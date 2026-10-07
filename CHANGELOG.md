@@ -17,7 +17,14 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Backup check: a fixed backup now says so (`backup_recovered`).** When a
+  backup finding goes away (the next run succeeds, the CLI reads again, a
+  hung check finishes) the node records `backup_recovered` under the same
+  key. cfm-web uses it to close the open alert: it posts RESOLVED and stops
+  the reminders, instead of reminding about a backup that already works
+  until someone presses Ack. Nodes without a cfm-web that knows the type
+  just keep it in their history.
 
 ## 2026.10.07
 
