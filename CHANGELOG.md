@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.07
+
 ### Added
 - **WAF rules that only match behind a stronger rule are now measurable.**
   The WAF log and detection history recorded only the headline rule of each
