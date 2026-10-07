@@ -115,6 +115,13 @@ type Config struct {
 	// tmp filesystem cleanup
 	TmpCleanOlder time.Duration // if >0 and /tmp usage exceeds TmpUsedPct, delete files older than this
 
+	// Backup check (backup.go, internal/backupcheck): JetBackup / Virtualmin /
+	// Proxmox vzdump, auto-detected; findings go to detection_history only.
+	BackupAlert             bool
+	BackupEvery             time.Duration // default 15m
+	BackupStuckAfter        time.Duration // default 24h
+	BackupProxmoxStaleAfter time.Duration // default 8d
+	BackupDestFreeMinPct    float64       // default 5
 }
 
 type Detector struct {
@@ -166,6 +173,8 @@ type Detector struct {
 	smartEverHealthy   map[string]bool // device seen PASS at least once
 	smartMissingStreak map[string]int  // consecutive cycles absent
 	smartDeadPublished map[string]bool // disk_dead already emitted for this device
+
+	backup backupState // see backup.go
 }
 
 func New(cfg Config) *Detector {
@@ -276,6 +285,8 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		RxMbps:      snap.RxMbps,
 		TxMbps:      snap.TxMbps,
 	})
+
+	d.tickBackup(collectedAt, snap.Host)
 
 	// evaluate & emit
 	for _, a := range d.evaluate(snap) {

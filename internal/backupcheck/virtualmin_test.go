@@ -1,0 +1,149 @@
+package backupcheck
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+)
+
+// Fixtures: gde's real Virtualmin output (7 Oct 2026), domain lists trimmed.
+
+const gdeScheds = `{"command":"list-scheduled-backups","status":"success","data":[
+ {"name":"17899324032606664","values":{"destination":["/backups/daily/%Y-%m-%d"],"enabled":["Yes"],"running":["No"]}},
+ {"name":"17899324822607494","values":{"destination":["/backups/weekly/%Y-W%V"],"enabled":["Yes"],"running":["No"],"cron_schedule":["weekly"]}},
+ {"name":"17909627033334733","values":{"destination":["ssh://user@rosso:65535:/opt/store1/x/%Y-W%V"],"enabled":["Yes"],"running":["No"]}}
+]}`
+
+func vmLog(epoch int64, sched, from, status string, failed int) string {
+	doms := strings.TrimSpace(strings.Repeat("d.gr ", failed))
+	return fmt.Sprintf(`{"name":"%d-1-1","values":{"scheduled_backup_id":[%q],"run_from":[%q],"final_status":[%q],"failed_domains":[%q]}}`, epoch, sched, from, status, doms)
+}
+
+const daily, weekly, rosso = "17899324032606664", "17899324822607494", "17909627033334733"
+
+func gdeLogs(extra ...string) string {
+	rows := []string{
+		vmLog(1789952402, daily, "sched", "Failed", 90), // 21 Sep, all 90 domains failed
+		vmLog(1790038852, daily, "sched", "OK", 0),
+		vmLog(1791075642, daily, "sched", "OK", 0),
+		vmLog(1791162052, daily, "sched", "OK", 0),
+		vmLog(1791248446, daily, "sched", "OK", 0),
+		vmLog(1791334846, daily, "sched", "OK", 0), // 7 Oct 01:00
+		vmLog(1790467247, weekly, "sched", "OK", 0),
+		vmLog(1791072047, weekly, "sched", "OK", 0),   // 4 Oct
+		vmLog(1790963477, rosso, "cgi", "Failed", 90), // a manual test run
+		vmLog(1790964127, rosso, "cgi", "OK", 0),
+		vmLog(1791104920, rosso, "sched", "OK", 0), // 4 Oct 09:00
+	}
+	rows = append(rows, extra...)
+	return `{"command":"list-backup-logs","status":"success","data":[` + strings.Join(rows, ",") + `]}`
+}
+
+var gdeNow = time.Date(2026, 10, 7, 19, 0, 0, 0, time.UTC)
+
+// gde's schedule files: daily at 01:00, special=weekly, Sundays 09:00.
+var gdePeriods = map[string]time.Duration{
+	daily:  cronPeriod(map[string]string{"mins": "0", "hours": "1", "days": "*", "months": "*", "weekdays": "*"}),
+	weekly: cronPeriod(map[string]string{"special": "weekly"}),
+	rosso:  cronPeriod(map[string]string{"mins": "0", "hours": "9", "days": "*", "months": "*", "weekdays": "0"}),
+}
+
+func TestVirtualminGdeTodayIsHealthy(t *testing.T) {
+	jobs, fs, err := evalVirtualmin([]byte(gdeScheds), []byte(gdeLogs()), gdePeriods, gdeNow, Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 0 {
+		t.Fatalf("healthy gde reported %+v", fs)
+	}
+	if len(jobs) != 3 || jobs[0].LastResult != "ok" || jobs[0].LastSuccess == nil {
+		t.Fatalf("jobs: %+v", jobs)
+	}
+}
+
+func TestVirtualminFailedScheduledRun(t *testing.T) {
+	logs := gdeLogs(vmLog(1791421246, daily, "sched", "Failed", 90)) // 8 Oct 01:00
+	_, fs, err := evalVirtualmin([]byte(gdeScheds), []byte(logs), gdePeriods, gdeNow.Add(8*time.Hour), Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := byType(fs)[TypeFailed]
+	if f.Severity != SevCritical || f.Key != "vm:run:1791421246-1-1" || !strings.Contains(f.Message, "90 domain(s) failed") {
+		t.Fatalf("want failed run, got %+v", fs)
+	}
+}
+
+func TestVirtualminManualTestRunsAreNotScheduleHealth(t *testing.T) {
+	// A failed UI test run AFTER the last scheduled one changes nothing.
+	logs := gdeLogs(vmLog(1791380000, rosso, "cgi", "Failed", 90))
+	_, fs, err := evalVirtualmin([]byte(gdeScheds), []byte(logs), gdePeriods, gdeNow, Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 0 {
+		t.Fatalf("a cgi run must not count: %+v", fs)
+	}
+}
+
+func TestVirtualminDailyStoppedRunningIsStale(t *testing.T) {
+	// No daily run since 7 Oct 01:00; on 9 Oct 06:00 that is >38h.
+	_, fs, err := evalVirtualmin([]byte(gdeScheds), []byte(gdeLogs()), gdePeriods, time.Date(2026, 10, 9, 6, 0, 0, 0, time.UTC), Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := byType(fs)[TypeStale]
+	if f.Key != "vm:stale:"+daily {
+		t.Fatalf("want daily stale, got %+v", fs)
+	}
+	for _, x := range fs {
+		if x.Key == "vm:stale:"+weekly {
+			t.Fatalf("weekly (last 4 Oct) is not stale on 9 Oct: %+v", x)
+		}
+	}
+}
+
+func TestVirtualminEnabledScheduleWithNoRunsIsStale(t *testing.T) {
+	scheds := strings.TrimSuffix(gdeScheds, "\n]}") + `,
+ {"name":"999","values":{"destination":["/backups/never"],"enabled":["Yes"],"running":["No"]}}
+]}`
+	_, fs, err := evalVirtualmin([]byte(scheds), []byte(gdeLogs()), gdePeriods, gdeNow, Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := byType(fs)[TypeStale]; f.Key != "vm:stale:999" {
+		t.Fatalf("want stale for the never-running schedule, got %+v", fs)
+	}
+}
+
+func TestVirtualminDisabledScheduleIsIgnored(t *testing.T) {
+	scheds := strings.Replace(gdeScheds, `"/backups/daily/%Y-%m-%d"],"enabled":["Yes"]`, `"/backups/daily/%Y-%m-%d"],"enabled":["No"]`, 1)
+	_, fs, err := evalVirtualmin([]byte(scheds), []byte(gdeLogs(vmLog(1791421246, daily, "sched", "Failed", 1))), gdePeriods, gdeNow.Add(48*time.Hour), Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range fs {
+		if strings.Contains(f.Key, daily) {
+			t.Fatalf("disabled schedule reported: %+v", f)
+		}
+	}
+}
+
+func TestCronPeriod(t *testing.T) {
+	for _, c := range []struct {
+		kv   map[string]string
+		want time.Duration
+	}{
+		{map[string]string{"special": "weekly"}, 7 * 24 * time.Hour},
+		{map[string]string{"hours": "1", "days": "*", "weekdays": "*"}, 24 * time.Hour},
+		{map[string]string{"hours": "9", "weekdays": "0"}, 7 * 24 * time.Hour},
+		{map[string]string{"hours": "2", "weekdays": "1,4"}, 84 * time.Hour},
+		{map[string]string{"hours": "1-5", "weekdays": "*"}, 24 * time.Hour / 5},
+		{map[string]string{"hours": "3", "days": "1"}, 31 * 24 * time.Hour},
+		{map[string]string{"special": ""}, 0},
+	} {
+		if got := cronPeriod(c.kv); got != c.want {
+			t.Errorf("%v: got %s want %s", c.kv, got, c.want)
+		}
+	}
+}
