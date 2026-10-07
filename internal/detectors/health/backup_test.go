@@ -46,6 +46,7 @@ var (
 )
 
 func TestPublishBackupIsEdgeTriggered(t *testing.T) {
+	resetBackupStateForTest()
 	rec := recordFaults(t)
 	d := New(Config{BackupAlert: true})
 	now := time.Now()
@@ -90,14 +91,21 @@ func TestPublishBackupIsEdgeTriggered(t *testing.T) {
 }
 
 func TestPublishBackupUnreadableAdapterIsNotHealthy(t *testing.T) {
+	resetBackupStateForTest()
 	rec := recordFaults(t)
 	d := New(Config{BackupAlert: true})
 	now := time.Now()
 	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Findings: []backupcheck.Finding{failedRun}}), "orion", now)
 	rec.take()
 
-	// The CLI breaks: an error event, and the failed run stays armed.
-	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Error: "listLogs: exit status 1"}), "orion", now)
+	// The CLI breaks: one bad read is a blip (nothing), two in a row is an
+	// error event; the failed run stays armed throughout.
+	broken := status(backupcheck.AdapterStatus{Name: "jetbackup", Error: "listLogs: exit status 1"})
+	d.publishBackup(broken, "orion", now)
+	if evs := rec.take(); len(evs) != 0 {
+		t.Fatalf("one failed read must not alert: %+v", evs)
+	}
+	d.publishBackup(broken, "orion", now)
 	evs := rec.take()
 	if len(evs) != 1 || evs[0].Type != TypeBackupCheckError || evs[0].Severity != "warning" {
 		t.Fatalf("want one backup_check_error, got %+v", evs)
@@ -110,6 +118,7 @@ func TestPublishBackupUnreadableAdapterIsNotHealthy(t *testing.T) {
 }
 
 func TestPublishBackupRetriesWhenNoSinkYet(t *testing.T) {
+	resetBackupStateForTest()
 	SetNodeFaultEventSink(nil)
 	d := New(Config{BackupAlert: true})
 	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Findings: []backupcheck.Finding{failedRun}}), "orion", time.Now())
@@ -121,6 +130,7 @@ func TestPublishBackupRetriesWhenNoSinkYet(t *testing.T) {
 }
 
 func TestTickBackupRunsInBackgroundAndPublishesNextTick(t *testing.T) {
+	resetBackupStateForTest()
 	rec := recordFaults(t)
 	calls := make(chan backupcheck.Options, 4)
 	orig := backupCheckFunc
@@ -141,10 +151,7 @@ func TestTickBackupRunsInBackgroundAndPublishesNextTick(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("check never ran")
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for d.backup.pending.Load() == nil && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitPending(t)
 	d.tickBackup(now.Add(time.Minute), "vega.myip.gr") // publishes; not due again yet
 	if evs := rec.take(); len(evs) != 1 {
 		t.Fatalf("want the finding published on the next tick, got %+v", evs)
@@ -156,6 +163,89 @@ func TestTickBackupRunsInBackgroundAndPublishesNextTick(t *testing.T) {
 	case <-calls:
 		t.Fatal("ran again before BACKUP_EVERY elapsed")
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func waitPending(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		backup.mu.Lock()
+		done := backup.pending != nil
+		backup.mu.Unlock()
+		if done {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("check result never arrived")
+}
+
+// A detector rebuild (detectors.conf save, log rotation) must not re-publish
+// what is already out, nor start a check before BACKUP_EVERY.
+func TestBackupStateSurvivesADetectorRebuild(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	calls := 0
+	var mu sync.Mutex
+	orig := backupCheckFunc
+	backupCheckFunc = func(context.Context, backupcheck.Options) backupcheck.Status {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return status(backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{uncovered("117")}})
+	}
+	t.Cleanup(func() { backupCheckFunc = orig })
+
+	now := time.Now()
+	old := New(Config{BackupAlert: true, BackupEvery: time.Hour})
+	old.tickBackup(now, "vega")
+	waitPending(t)
+	old.tickBackup(now.Add(time.Minute), "vega")
+	if evs := rec.take(); len(evs) != 1 {
+		t.Fatalf("first publish: %+v", evs)
+	}
+
+	rebuilt := New(Config{BackupAlert: true, BackupEvery: time.Hour})
+	rebuilt.tickBackup(now.Add(2*time.Minute), "vega")
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	n := calls
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("a rebuilt detector must not start a check before BACKUP_EVERY: %d calls", n)
+	}
+	rebuilt.publishBackup(status(backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{uncovered("117")}}), "vega", now)
+	if evs := rec.take(); len(evs) != 0 {
+		t.Fatalf("a rebuild must not re-publish: %+v", evs)
+	}
+}
+
+func TestPublishBackupSeverityRiseIsNews(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true})
+	low := backupcheck.Finding{Type: backupcheck.TypeDest, Severity: "warning", Adapter: "proxmox", Key: "pve:dest:geros", Message: "3% free"}
+	off := backupcheck.Finding{Type: backupcheck.TypeDest, Severity: "critical", Adapter: "proxmox", Key: "pve:dest:geros", Message: "offline"}
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{low}}), "vega", time.Now())
+	rec.take()
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{off}}), "vega", time.Now())
+	if evs := rec.take(); len(evs) != 1 || evs[0].Severity != "critical" {
+		t.Fatalf("low → offline must be published: %+v", evs)
+	}
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{low}}), "vega", time.Now())
+	if evs := rec.take(); len(evs) != 0 {
+		t.Fatalf("calming down is not news: %+v", evs)
+	}
+}
+
+func TestBackupCheckPanicBecomesACheckError(t *testing.T) {
+	orig := backupCheckFunc
+	backupCheckFunc = func(context.Context, backupcheck.Options) backupcheck.Status { panic("bad json") }
+	t.Cleanup(func() { backupCheckFunc = orig })
+	st := runBackupCheck(backupcheck.Options{})
+	if len(st.Adapters) != 1 || st.Adapters[0].Error == "" {
+		t.Fatalf("want an adapter error, got %+v", st)
 	}
 }
 

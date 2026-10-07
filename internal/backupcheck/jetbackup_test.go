@@ -204,3 +204,74 @@ func removeLogs(logs string, ids ...string) string {
 	out = strings.Replace(out, "},\n],", "}\n],", 1)
 	return out
 }
+
+func jbLogsFrom(jobID string, starts []string, status int) string {
+	var rows []string
+	for i, st := range starts {
+		t := ts(st)
+		rows = append(rows, fmt.Sprintf(`{"_id":"r%d","start_time":%q,"end_time":%q,"status":%d,"type":1,"info":{"ID":%q}}`,
+			i, t.Format(time.RFC3339), t.Add(time.Hour).Format(time.RFC3339), status, jobID))
+	}
+	return `{"success":1,"message":"","data":{"logs":[` + strings.Join(rows, ",") + `]}}`
+}
+
+func oneJob(lastRun, nextRun string, running bool) string {
+	return fmt.Sprintf(`{"success":1,"message":"","data":{"jobs":[{"_id":"J","name":"wk","type":1,"disabled":0,"running":%t,"last_run":%q,"next_run":%q}]}}`, running, lastRun, nextRun)
+}
+
+// A Mon–Fri job seen on Sunday evening: its last success is Friday's, 62h ago.
+func TestJetBackupWeekdayJobIsNotStaleAtTheWeekend(t *testing.T) {
+	starts := []string{
+		"2026-09-21T01:00:00Z", "2026-09-22T01:00:00Z", "2026-09-23T01:00:00Z", "2026-09-24T01:00:00Z", "2026-09-25T01:00:00Z",
+		"2026-09-28T01:00:00Z", "2026-09-29T01:00:00Z", "2026-09-30T01:00:00Z", "2026-10-01T01:00:00Z", "2026-10-02T01:00:00Z",
+	}
+	_, fs, err := evalJetBackup([]byte(oneJob("2026-10-02T01:00:00Z", "2026-10-05T01:00:00Z", false)), []byte(jbLogsFrom("J", starts, 1)), ts("2026-10-04T18:00:00Z"), Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 0 {
+		t.Fatalf("Mon–Fri job on Sunday: %+v", fs)
+	}
+}
+
+// A weekly job with a single run in the window, 3 days after it succeeded.
+func TestJetBackupWeeklyJobWithOneRunIsNotStale(t *testing.T) {
+	_, fs, err := evalJetBackup([]byte(oneJob("2026-10-04T01:00:00Z", "2026-10-11T01:00:00Z", false)), []byte(jbLogsFrom("J", []string{"2026-10-04T01:00:00Z"}, 1)), ts("2026-10-07T18:00:00Z"), Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 0 {
+		t.Fatalf("weekly job 3 days after a success: %+v", fs)
+	}
+}
+
+// A job pushed out of the log window: judged on its own last start.
+func TestJetBackupJobWithoutRunsInWindowUsesItsLastRun(t *testing.T) {
+	noRuns := `{"success":1,"message":"","data":{"logs":[]}}`
+	_, fs, err := evalJetBackup([]byte(oneJob("2026-10-06T01:00:00Z", "2026-10-07T01:00:00Z", false)), []byte(noRuns), ts("2026-10-07T10:00:00Z"), Thresholds{})
+	if err != nil || len(fs) != 0 {
+		t.Fatalf("recent last_run: want nothing, got %v %+v", err, fs)
+	}
+	_, fs, err = evalJetBackup([]byte(oneJob("2026-09-20T01:00:00Z", "2026-09-21T01:00:00Z", false)), []byte(noRuns), ts("2026-10-07T18:00:00Z"), Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := byType(fs)[TypeStale]; !strings.Contains(f.Message, "has not run since") {
+		t.Fatalf("want stale from last_run, got %+v", fs)
+	}
+}
+
+func TestJetBackupNoEnabledAccountJobIsAWarning(t *testing.T) {
+	jobs := `{"success":1,"message":"","data":{"jobs":[{"_id":"C","name":"JetBackup Config","type":3,"disabled":0},{"_id":"A","name":"accts","type":1,"disabled":1}]}}`
+	_, fs, err := evalJetBackup([]byte(jobs), []byte(`{"success":1,"message":"","data":{"logs":[]}}`), time.Now(), Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := byType(fs)[TypeNoJob]; f.Key != "jb:nojob" {
+		t.Fatalf("want backup_no_job, got %+v", fs)
+	}
+	_, fs, err = evalJetBackup([]byte(`{"success":1,"message":"","data":{"jobs":null}}`), []byte(`{"success":1,"message":"","data":{"logs":[]}}`), time.Now(), Thresholds{})
+	if err != nil || byType(fs)[TypeNoJob].Type == "" {
+		t.Fatalf("jobs:null: want backup_no_job, got %v %+v", err, fs)
+	}
+}

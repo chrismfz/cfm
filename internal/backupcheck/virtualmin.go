@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,18 +61,31 @@ func decodeVM(raw []byte) ([]vmRecord, error) {
 // point it elsewhere.
 var virtualminSchedDir = "/etc/webmin/virtual-server/backups"
 
-// schedulePeriods reads each schedule's own cron fields: a schedule with a
+// vmSchedInfo is what a schedule's own file says: how long its schedule
+// leaves between runs, and since when the file has existed in its current
+// form (its mtime — a new or just-edited schedule is not judged early).
+type vmSchedInfo struct {
+	period time.Duration
+	since  time.Time
+}
+
+// scheduleInfo reads each schedule's own cron fields: a schedule with a
 // single run in the history has no observed period, and gde's weekly push to
 // rosso (one run so far) would otherwise be judged as daily.
-func schedulePeriods(ids []string) map[string]time.Duration {
-	out := map[string]time.Duration{}
+func scheduleInfo(ids []string) map[string]vmSchedInfo {
+	out := map[string]vmSchedInfo{}
 	for _, id := range ids {
 		if id == "" || strings.ContainsAny(id, "/.") {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(virtualminSchedDir, id))
+		path := filepath.Join(virtualminSchedDir, id)
+		b, err := os.ReadFile(path)
 		if err != nil {
 			continue
+		}
+		info := vmSchedInfo{}
+		if fi, err := os.Stat(path); err == nil {
+			info.since = fi.ModTime()
 		}
 		kv := map[string]string{}
 		for _, line := range strings.Split(string(b), "\n") {
@@ -79,15 +93,16 @@ func schedulePeriods(ids []string) map[string]time.Duration {
 				kv[strings.TrimSpace(k)] = strings.TrimSpace(v)
 			}
 		}
-		if p := cronPeriod(kv); p > 0 {
-			out[id] = p
-		}
+		info.period = cronPeriod(kv)
+		out[id] = info
 	}
 	return out
 }
 
-// cronPeriod approximates the longest gap between runs of a webmin cron
-// schedule. Good enough for "is the last success too old?"; not a scheduler.
+// cronPeriod is the LONGEST gap between runs of a webmin cron schedule (a
+// Mon–Fri job's Friday→Monday, a 01–05 h job's 05→01), which is what "is the
+// last success too old?" must allow for. 0 when the schedule is not one it
+// understands. Good enough for staleness; not a scheduler.
 func cronPeriod(kv map[string]string) time.Duration {
 	switch strings.ToLower(kv["special"]) {
 	case "hourly":
@@ -101,38 +116,95 @@ func cronPeriod(kv map[string]string) time.Duration {
 	case "yearly", "annually":
 		return 366 * 24 * time.Hour
 	}
-	count := func(field string) int { // entries in "1,3,5" / "1-5"; 0 for "*" or empty
-		f := strings.TrimSpace(kv[field])
-		if f == "" || f == "*" {
-			return 0
-		}
-		n := 0
-		for _, part := range strings.Split(f, ",") {
-			if a, b, ok := strings.Cut(part, "-"); ok {
-				x, e1 := strconv.Atoi(strings.TrimSpace(a))
-				y, e2 := strconv.Atoi(strings.TrimSpace(b))
-				if e1 == nil && e2 == nil && y >= x {
-					n += y - x + 1
-					continue
-				}
-			}
-			n++
-		}
-		return n
-	}
 	if _, ok := kv["hours"]; !ok {
-		return 0 // not a cron schedule we understand
+		return 0
 	}
-	if count("months") > 0 || count("days") > 0 {
+	if cronSet(kv["months"], 1, 12) != nil || cronSet(kv["days"], 1, 31) != nil {
 		return 31 * 24 * time.Hour
 	}
-	if n := count("weekdays"); n > 0 && n < 7 {
-		return 7 * 24 * time.Hour / time.Duration(n)
+	if wd := cronSet(kv["weekdays"], 0, 6); wd != nil {
+		if len(wd) == 7 {
+			wd = nil // every day
+		} else {
+			return time.Duration(maxCircularGap(wd, 7)) * 24 * time.Hour
+		}
 	}
-	if n := count("hours"); n > 0 {
-		return 24 * time.Hour / time.Duration(n)
+	if hs := cronSet(kv["hours"], 0, 23); hs != nil {
+		return time.Duration(maxCircularGap(hs, 24)) * time.Hour
 	}
 	return time.Hour
+}
+
+// cronSet expands "1,3,5" / "1-5" / "*/2" into the sorted values within
+// [lo,hi]; nil for "*", empty or unparsable (= every value).
+func cronSet(field string, lo, hi int) []int {
+	f := strings.TrimSpace(field)
+	if f == "" || f == "*" {
+		return nil
+	}
+	seen := map[int]bool{}
+	for _, part := range strings.Split(f, ",") {
+		part = strings.TrimSpace(part)
+		step := 1
+		if base, st, ok := strings.Cut(part, "/"); ok {
+			n, err := strconv.Atoi(st)
+			if err != nil || n <= 0 {
+				return nil
+			}
+			step, part = n, base
+		}
+		a, b := lo, hi
+		switch {
+		case part == "*":
+		case strings.Contains(part, "-"):
+			x, y, _ := strings.Cut(part, "-")
+			var e1, e2 error
+			a, e1 = strconv.Atoi(x)
+			b, e2 = strconv.Atoi(y)
+			if e1 != nil || e2 != nil {
+				return nil
+			}
+		default:
+			n, err := strconv.Atoi(part)
+			if err != nil {
+				return nil
+			}
+			a, b = n, n
+		}
+		for v := a; v <= b; v += step {
+			x := v
+			if hi == 6 && x == 7 {
+				x = 0 // cron allows Sunday as 7
+			}
+			if x >= lo && x <= hi {
+				seen[x] = true
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]int, 0, len(seen))
+	for v := range seen {
+		out = append(out, v)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// maxCircularGap is the largest distance between consecutive values of a
+// sorted set on a ring of size n (e.g. weekdays on 7, hours on 24).
+func maxCircularGap(vals []int, n int) int {
+	if len(vals) == 0 {
+		return n
+	}
+	gap := vals[0] + n - vals[len(vals)-1]
+	for i := 1; i < len(vals); i++ {
+		if g := vals[i] - vals[i-1]; g > gap {
+			gap = g
+		}
+	}
+	return gap
 }
 
 func checkVirtualmin(run cmdFunc, now time.Time, th Thresholds) AdapterStatus {
@@ -154,7 +226,7 @@ func checkVirtualmin(run cmdFunc, now time.Time, th Thresholds) AdapterStatus {
 			ids = append(ids, r.Name)
 		}
 	}
-	st.Jobs, st.Findings, err = evalVirtualmin(sched, logs, schedulePeriods(ids), now, th)
+	st.Jobs, st.Findings, err = evalVirtualmin(sched, logs, scheduleInfo(ids), now, th)
 	if err != nil {
 		st.Error = err.Error()
 	}
@@ -162,16 +234,17 @@ func checkVirtualmin(run cmdFunc, now time.Time, th Thresholds) AdapterStatus {
 }
 
 type vmRun struct {
-	id     string
-	start  time.Time
-	ok     bool
-	failed int // failed domains
+	id       string
+	start    time.Time
+	ok       bool
+	finished bool // an empty final_status is a run still in progress
+	failed   int  // failed domains
 }
 
 // evalVirtualmin is the pure evaluation over the two virtualmin responses.
-// periods are the schedules' configured intervals (schedulePeriods); a schedule
-// missing from it is judged on its observed run gaps, never below a day.
-func evalVirtualmin(schedRaw, logsRaw []byte, periods map[string]time.Duration, now time.Time, th Thresholds) ([]Job, []Finding, error) {
+// info is each schedule's own file (scheduleInfo); a schedule missing from it
+// is judged on its observed run gaps, never below a day.
+func evalVirtualmin(schedRaw, logsRaw []byte, info map[string]vmSchedInfo, now time.Time, th Thresholds) ([]Job, []Finding, error) {
 	th = th.withDefaults()
 	scheds, err := decodeVM(schedRaw)
 	if err != nil {
@@ -197,15 +270,18 @@ func evalVirtualmin(schedRaw, logsRaw []byte, periods map[string]time.Duration, 
 		if start.Before(oldest) {
 			oldest = start
 		}
+		status := l.get("final_status")
 		runs[id] = append(runs[id], vmRun{
 			id: l.Name, start: start,
-			ok:     strings.EqualFold(l.get("final_status"), "OK"),
-			failed: len(strings.Fields(l.get("failed_domains"))),
+			ok:       strings.EqualFold(status, "OK"),
+			finished: status != "",
+			failed:   len(strings.Fields(l.get("failed_domains"))),
 		})
 	}
 
 	var jobs []Job
 	var findings []Finding
+	enabledScheds := 0
 	for _, s := range scheds {
 		id := s.Name
 		enabled := !strings.EqualFold(s.get("enabled"), "No")
@@ -214,11 +290,17 @@ func evalVirtualmin(schedRaw, logsRaw []byte, periods map[string]time.Duration, 
 		job := Job{Name: dest, ID: id, Disabled: !enabled, Running: running, Schedule: s.get("cron_schedule"), LastResult: "unknown"}
 
 		rs := runs[id]
-		var latest, success *vmRun
+		var latest, success, inProgress *vmRun
 		var starts []time.Time
 		for i := range rs {
 			r := &rs[i]
 			starts = append(starts, r.start)
+			if !r.finished {
+				if inProgress == nil || r.start.After(inProgress.start) {
+					inProgress = r
+				}
+				continue
+			}
 			if latest == nil || r.start.After(latest.start) {
 				latest = r
 			}
@@ -244,7 +326,20 @@ func evalVirtualmin(schedRaw, logsRaw []byte, periods map[string]time.Duration, 
 		if !enabled {
 			continue
 		}
+		enabledScheds++
 		label := fmt.Sprintf("Virtualmin backup to %s", dest)
+		si, haveInfo := info[id]
+		period := si.period
+		if !haveInfo || period <= 0 {
+			// The configured schedule decides the period. Without it, observed
+			// run gaps do, floored at a day: a test run minutes after a real one
+			// must not make a weekly job look hourly.
+			period = runPeriod(starts)
+			if period < 24*time.Hour {
+				period = 24 * time.Hour
+			}
+		}
+		limit := time.Duration(float64(period)*th.StaleFactor) + th.StaleGrace
 
 		if latest != nil {
 			at := latest.start.UTC().Format(time.RFC3339)
@@ -261,37 +356,56 @@ func evalVirtualmin(schedRaw, logsRaw []byte, periods map[string]time.Duration, 
 			}
 		}
 
-		if running && latest != nil && now.Sub(latest.start) > th.StuckAfter {
-			findings = append(findings, Finding{Type: TypeStuck, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:stuck:" + id,
-				Message: fmt.Sprintf("%s: still running %s after its last start", label, ago(now.Sub(latest.start)))})
-		}
-
-		// The configured schedule decides the period. Without it, observed run
-		// gaps do, floored at a day: a test run minutes after a real one must
-		// not make a weekly job look hourly.
-		period, ok := periods[id]
-		if !ok {
-			period = runPeriod(starts)
-			if period < 24*time.Hour {
-				period = 24 * time.Hour
+		// Stuck: a logged run still in progress for too long. Without a logged
+		// in-progress record, "running" alone says nothing about since when —
+		// only a schedule overdue by a whole period AND the stuck limit is.
+		if running {
+			switch {
+			case inProgress != nil && now.Sub(inProgress.start) > th.StuckAfter:
+				findings = append(findings, Finding{Type: TypeStuck, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:stuck:" + id,
+					Message: fmt.Sprintf("%s: running for %s (started %s)", label, ago(now.Sub(inProgress.start)), inProgress.start.UTC().Format(time.RFC3339))})
+			case inProgress == nil && len(starts) > 0 && now.Sub(latestStart(starts)) > period+th.StuckAfter:
+				findings = append(findings, Finding{Type: TypeStuck, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:stuck:" + id,
+					Message: fmt.Sprintf("%s: shown as running, but no scheduled run has started for %s", label, ago(now.Sub(latestStart(starts))))})
 			}
 		}
-		limit := time.Duration(float64(period)*th.StaleFactor) + th.StaleGrace
+
+		window := time.Duration(virtualminLogDays) * 24 * time.Hour
 		switch {
 		case success != nil:
 			if age := now.Sub(success.start); age > limit {
 				findings = append(findings, Finding{Type: TypeStale, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:stale:" + id,
 					Message: fmt.Sprintf("%s: no successful backup for %s (last success started %s)", label, ago(age), success.start.UTC().Format(time.RFC3339))})
 			}
-		case len(rs) == 0:
-			// Enabled, yet not one scheduled run in the whole window we read: the
-			// schedule has stopped firing (or never did).
-			findings = append(findings, Finding{Type: TypeStale, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:stale:" + id,
-				Message: fmt.Sprintf("%s: enabled but no scheduled run in the last %d days", label, virtualminLogDays)})
-		case now.Sub(oldest) > limit:
-			findings = append(findings, Finding{Type: TypeStale, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:stale:" + id,
-				Message: fmt.Sprintf("%s: no successful scheduled run in the last %s of history", label, ago(now.Sub(oldest)))})
+		case limit >= window:
+			// A schedule rarer than the history we read (yearly): no verdict.
+		case len(starts) > 0:
+			if first := earliest(starts); now.Sub(first) > limit {
+				findings = append(findings, Finding{Type: TypeStale, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:stale:" + id,
+					Message: fmt.Sprintf("%s: no successful scheduled run since at least %s", label, first.UTC().Format(time.RFC3339))})
+			}
+		default:
+			// Enabled yet never ran in the window: the schedule stopped firing —
+			// but only once it has existed (unchanged) longer than its limit.
+			if !si.since.IsZero() && now.Sub(si.since) > limit {
+				findings = append(findings, Finding{Type: TypeStale, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:stale:" + id,
+					Message: fmt.Sprintf("%s: enabled but no scheduled run in the last %d days", label, virtualminLogDays)})
+			}
 		}
 	}
+	if len(scheds) > 0 && enabledScheds == 0 || len(scheds) == 0 {
+		findings = append(findings, Finding{Type: TypeNoJob, Severity: SevWarning, Adapter: "virtualmin", Key: "vm:nojob",
+			Message: fmt.Sprintf("Virtualmin is installed but no scheduled backup is enabled (%d configured)", len(scheds))})
+	}
 	return jobs, findings, nil
+}
+
+func latestStart(ts []time.Time) time.Time {
+	l := ts[0]
+	for _, t := range ts[1:] {
+		if t.After(l) {
+			l = t
+		}
+	}
+	return l
 }

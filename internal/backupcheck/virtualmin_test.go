@@ -2,6 +2,8 @@ package backupcheck
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -42,11 +44,14 @@ func gdeLogs(extra ...string) string {
 
 var gdeNow = time.Date(2026, 10, 7, 19, 0, 0, 0, time.UTC)
 
-// gde's schedule files: daily at 01:00, special=weekly, Sundays 09:00.
-var gdePeriods = map[string]time.Duration{
-	daily:  cronPeriod(map[string]string{"mins": "0", "hours": "1", "days": "*", "months": "*", "weekdays": "*"}),
-	weekly: cronPeriod(map[string]string{"special": "weekly"}),
-	rosso:  cronPeriod(map[string]string{"mins": "0", "hours": "9", "days": "*", "months": "*", "weekdays": "0"}),
+// gde's schedule files: daily at 01:00, special=weekly, Sundays 09:00 — all
+// in place long before these runs.
+var gdeSince = time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+
+var gdePeriods = map[string]vmSchedInfo{
+	daily:  {cronPeriod(map[string]string{"mins": "0", "hours": "1", "days": "*", "months": "*", "weekdays": "*"}), gdeSince},
+	weekly: {cronPeriod(map[string]string{"special": "weekly"}), gdeSince},
+	rosso:  {cronPeriod(map[string]string{"mins": "0", "hours": "9", "days": "*", "months": "*", "weekdays": "0"}), gdeSince},
 }
 
 func TestVirtualminGdeTodayIsHealthy(t *testing.T) {
@@ -103,16 +108,66 @@ func TestVirtualminDailyStoppedRunningIsStale(t *testing.T) {
 	}
 }
 
-func TestVirtualminEnabledScheduleWithNoRunsIsStale(t *testing.T) {
+func TestVirtualminEnabledScheduleWithNoRunsIsStaleOnlyOnceItIsOldEnough(t *testing.T) {
 	scheds := strings.TrimSuffix(gdeScheds, "\n]}") + `,
  {"name":"999","values":{"destination":["/backups/never"],"enabled":["Yes"],"running":["No"]}}
 ]}`
-	_, fs, err := evalVirtualmin([]byte(scheds), []byte(gdeLogs()), gdePeriods, gdeNow, Thresholds{})
+	info := map[string]vmSchedInfo{daily: gdePeriods[daily], weekly: gdePeriods[weekly], rosso: gdePeriods[rosso],
+		"999": {24 * time.Hour, gdeNow.Add(-6 * time.Hour)}} // created this morning
+	_, fs, err := evalVirtualmin([]byte(scheds), []byte(gdeLogs()), info, gdeNow, Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 0 {
+		t.Fatalf("a schedule created 6h ago must not be judged yet: %+v", fs)
+	}
+	info["999"] = vmSchedInfo{24 * time.Hour, gdeNow.Add(-10 * 24 * time.Hour)}
+	_, fs, err = evalVirtualmin([]byte(scheds), []byte(gdeLogs()), info, gdeNow, Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if f := byType(fs)[TypeStale]; f.Key != "vm:stale:999" {
-		t.Fatalf("want stale for the never-running schedule, got %+v", fs)
+		t.Fatalf("10 days and never ran: want stale, got %+v", fs)
+	}
+}
+
+func TestVirtualminRunInProgressIsNeitherFailedNorStuck(t *testing.T) {
+	scheds := strings.Replace(gdeScheds, `"enabled":["Yes"],"running":["No"]}},
+ {"name":"17899324822607494"`, `"enabled":["Yes"],"running":["Yes"]}},
+ {"name":"17899324822607494"`, 1)
+	at := time.Date(2026, 10, 8, 1, 15, 0, 0, time.UTC)
+	// 8 Oct 01:00 run logged with no final status yet.
+	logs := gdeLogs(vmLog(1791421246, daily, "sched", "", 0))
+	_, fs, err := evalVirtualmin([]byte(scheds), []byte(logs), gdePeriods, at, Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 0 {
+		t.Fatalf("a run in progress is not a failure nor stuck: %+v", fs)
+	}
+	// Same, but not logged at all yet: still nothing.
+	_, fs, err = evalVirtualmin([]byte(scheds), []byte(gdeLogs()), gdePeriods, at, Thresholds{})
+	if err != nil || len(fs) != 0 {
+		t.Fatalf("running without a log record yet: %v %+v", err, fs)
+	}
+	// 30 h later the logged run is still going: stuck.
+	_, fs, err = evalVirtualmin([]byte(scheds), []byte(logs), gdePeriods, at.Add(30*time.Hour), Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := byType(fs)[TypeStuck]; f.Key != "vm:stuck:"+daily {
+		t.Fatalf("want stuck after 30h, got %+v", fs)
+	}
+}
+
+func TestVirtualminNoEnabledScheduleIsAWarning(t *testing.T) {
+	scheds := strings.ReplaceAll(gdeScheds, `"enabled":["Yes"]`, `"enabled":["No"]`)
+	_, fs, err := evalVirtualmin([]byte(scheds), []byte(gdeLogs()), gdePeriods, gdeNow, Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := byType(fs)[TypeNoJob]; f.Severity != SevWarning || f.Key != "vm:nojob" {
+		t.Fatalf("want backup_no_job, got %+v", fs)
 	}
 }
 
@@ -129,7 +184,7 @@ func TestVirtualminDisabledScheduleIsIgnored(t *testing.T) {
 	}
 }
 
-func TestCronPeriod(t *testing.T) {
+func TestCronPeriodIsTheLongestGap(t *testing.T) {
 	for _, c := range []struct {
 		kv   map[string]string
 		want time.Duration
@@ -137,13 +192,37 @@ func TestCronPeriod(t *testing.T) {
 		{map[string]string{"special": "weekly"}, 7 * 24 * time.Hour},
 		{map[string]string{"hours": "1", "days": "*", "weekdays": "*"}, 24 * time.Hour},
 		{map[string]string{"hours": "9", "weekdays": "0"}, 7 * 24 * time.Hour},
-		{map[string]string{"hours": "2", "weekdays": "1,4"}, 84 * time.Hour},
-		{map[string]string{"hours": "1-5", "weekdays": "*"}, 24 * time.Hour / 5},
+		{map[string]string{"hours": "9", "weekdays": "7"}, 7 * 24 * time.Hour},   // Sunday as 7
+		{map[string]string{"hours": "2", "weekdays": "1-5"}, 3 * 24 * time.Hour}, // Mon–Fri: Fri→Mon
+		{map[string]string{"hours": "2", "weekdays": "1,4"}, 4 * 24 * time.Hour}, // Thu→Mon
+		{map[string]string{"hours": "2", "weekdays": "0-6"}, 24 * time.Hour},     // every day
+		{map[string]string{"hours": "1-5", "weekdays": "*"}, 20 * time.Hour},     // 05→01
+		{map[string]string{"hours": "*/6", "weekdays": "*"}, 6 * time.Hour},
 		{map[string]string{"hours": "3", "days": "1"}, 31 * 24 * time.Hour},
 		{map[string]string{"special": ""}, 0},
 	} {
 		if got := cronPeriod(c.kv); got != c.want {
 			t.Errorf("%v: got %s want %s", c.kv, got, c.want)
 		}
+	}
+}
+
+func TestScheduleInfoReadsTheScheduleFile(t *testing.T) {
+	dir := t.TempDir()
+	orig := virtualminSchedDir
+	virtualminSchedDir = dir
+	t.Cleanup(func() { virtualminSchedDir = orig })
+	if err := os.WriteFile(filepath.Join(dir, "123"), []byte("mins=0\nhours=9\ndays=*\nmonths=*\nweekdays=0\nenabled=2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := scheduleInfo([]string{"123", "missing", "../etc"})
+	if got["123"].period != 7*24*time.Hour || got["123"].since.IsZero() {
+		t.Fatalf("got %+v", got)
+	}
+	if _, ok := got["missing"]; ok {
+		t.Fatal("missing file must be absent")
+	}
+	if _, ok := got["../etc"]; ok {
+		t.Fatal("a path-like id must never be read")
 	}
 }

@@ -14,9 +14,13 @@
 package backupcheck
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os/exec"
 	"sort"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -29,6 +33,7 @@ const (
 	TypeStuck     = "backup_stuck"     // a run has been going for longer than StuckAfter
 	TypeUncovered = "backup_uncovered" // guests/accounts that no backup job includes
 	TypeDest      = "backup_dest"      // a backup destination is offline or nearly full
+	TypeNoJob     = "backup_no_job"    // the backup system is installed but nothing is scheduled
 )
 
 const (
@@ -139,9 +144,59 @@ func (t Thresholds) withDefaults() Thresholds {
 // Runner runs a command and returns its stdout. Tests substitute it.
 type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
-// ExecRunner runs the real binary.
+// maxOutput caps what one CLI call may return (a truncated reply fails to
+// decode and is reported as a check error, never read as "healthy").
+const maxOutput = 16 << 20
+
+// ExecRunner runs the real binary. It cannot hang the check: on the context
+// deadline the whole process group is killed (a wrapper script's children
+// included), and WaitDelay bounds the wait for pipes a grandchild might hold
+// open. A failure carries the CLI's stderr, so an alert says why.
 func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
+	var stdout, stderr capped
+	stdout.max, stderr.max = maxOutput, 4096
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			if len(msg) > 300 {
+				msg = msg[:300] + "…"
+			}
+			err = fmt.Errorf("%w: %s", err, msg)
+		}
+		return nil, err
+	}
+	if stdout.over {
+		return nil, fmt.Errorf("output over %d bytes", maxOutput)
+	}
+	return stdout.Bytes(), nil
+}
+
+// capped is a bytes.Buffer that stops growing at max and remembers it did.
+type capped struct {
+	bytes.Buffer
+	max  int
+	over bool
+}
+
+func (c *capped) Write(p []byte) (int, error) {
+	if room := c.max - c.Len(); room < len(p) {
+		c.over = true
+		if room > 0 {
+			c.Buffer.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	return c.Buffer.Write(p)
 }
 
 // lookPath is a var so tests can pretend a binary exists.

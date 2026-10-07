@@ -34,31 +34,45 @@ nothing.
 
 | Type | Severity | Meaning |
 |---|---|---|
-| `backup_failed` | critical | the latest finished run failed (JetBackup status not 1/2; vzdump error text; Virtualmin `Failed`) |
-| `backup_partial` | warning | the latest run finished with some accounts/guests/domains failed (JetBackup 2; vzdump `job errors`; Virtualmin OK with `failed_domains`) |
-| `backup_stale` | critical | no **successful** run for longer than the job's period × 1.5 + 2 h (Proxmox: `BACKUP_PROXMOX_STALE`, 8 d) |
-| `backup_stuck` | critical | a run still going after `BACKUP_STUCK_AFTER` (24 h) |
-| `backup_uncovered` | warning | Proxmox guests in no backup job (one finding; re-published when a NEW guest joins the set) |
-| `backup_dest` | critical (offline) / warning (< `BACKUP_DEST_FREE_PCT` free) | a backup destination/storage the jobs use |
-| `backup_check_error` | warning | an installed backup system could not be read — "unknown", never "healthy" |
+| `backup_failed` | critical | the latest finished run failed (JetBackup status not 1/2; vzdump error text, or **3 `job errors` runs in a row** — vzdump says `job errors` even when every guest failed; Virtualmin `Failed`) |
+| `backup_partial` | warning | the latest run finished with some accounts/guests/domains failed (JetBackup 2; one or two vzdump `job errors`; Virtualmin OK with `failed_domains`) |
+| `backup_stale` | critical | no **successful** run for longer than the job's period × 1.5 + 2 h (Proxmox: `BACKUP_PROXMOX_STALE`, 8 d). A job is not judged before its own history (or, for Virtualmin, its schedule file) is that old |
+| `backup_stuck` | critical | a run still going after `BACKUP_STUCK_AFTER` (24 h), measured from that run's own start |
+| `backup_uncovered` | warning | Proxmox guests in no backup job, reported only by the node that hosts them (one finding; re-published when a NEW guest joins the set) |
+| `backup_dest` | critical (Proxmox storage offline) / warning (< `BACKUP_DEST_FREE_PCT` free: Proxmox storage, JetBackup destination) | a backup destination the jobs use; Virtualmin destinations are not checked |
+| `backup_no_job` | warning | JetBackup with no enabled account-backup job, or Virtualmin with no enabled schedule (a job disabled during an incident and forgotten) |
+| `backup_check_error` | warning | an installed backup system could not be read on **two checks in a row**, or the check itself hung — "unknown", never "healthy" |
 
 Publishing is edge-triggered per finding key (a run id, a job id, a storage):
-once when it appears, re-armed when it is gone. While an adapter cannot be
-read, its findings stay armed (no repeat when it reads again). A daemon
-restart re-publishes what is still true once.
+once when it appears, again when its severity rises (a full storage that goes
+offline) or a set gains a member, and re-armed when it is gone. While an
+adapter cannot be read, its findings stay armed (no repeat when it reads
+again). The edge state is process-wide, so the detector rebuilds that follow a
+`detectors.conf` save or a log rotation re-publish nothing; a daemon restart
+re-publishes what is still true once.
 
 ## Rules learned from the fleet's real output
 
 - **Freshness = the last successful run in the history**, never the job's own
   timestamps (orion: `last_completed` advanced on failed runs).
-- **The period comes from how often the job actually started** (median gap
-  between run starts), not `next_run − last_run`: a stuck run pins `last_run`,
-  which made orion's daily job look like a 17-day one and would have hidden
-  the 16-day stall.
+- **The period is the LONG gap between runs, from how often the job actually
+  started** (90th percentile of the gaps between run starts), not
+  `next_run − last_run`: a stuck run pins `last_run`, which made orion's daily
+  job look like a 17-day one and would have hidden the 16-day stall. The
+  percentile, not the median, so a Mon–Fri job's weekend does not read as a
+  missed backup. With fewer than 3 runs on record the job's schedule decides
+  (`next_run − last_run` when it is not mid-run), else 8 days.
 - **Virtualmin periods come from the schedule file** (`special` or the cron
-  fields): a weekly schedule with one run in its history has no observed
+  fields), as the LONGEST gap the schedule leaves (Mon–Fri → 3 d, hours 1–5 →
+  20 h): a weekly schedule with one run in its history has no observed
   period, and gde's weekly push to rosso would otherwise be judged as daily.
   Without the file, observed gaps decide, floored at a day.
+- A Virtualmin run in progress has an empty `final_status`: it is neither a
+  failure nor (until it passes the stuck limit) stuck.
+- Proxmox runs are judged **per node**, not per job — a vzdump task id
+  carries no job id, so a broken weekly job can hide behind a healthy daily
+  one on the same node. A node with no vzdump task at all is not judged (new,
+  or all its jobs' guests live elsewhere).
 - **Only scheduled runs count** for Virtualmin (`run_from = sched`): a failed
   test run from the UI is not the schedule's health.
 - JetBackup's `listLogs` ignores a `type` filter and mixes plugin scans

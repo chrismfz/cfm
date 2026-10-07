@@ -174,7 +174,6 @@ type Detector struct {
 	smartMissingStreak map[string]int  // consecutive cycles absent
 	smartDeadPublished map[string]bool // disk_dead already emitted for this device
 
-	backup backupState // see backup.go
 }
 
 func New(cfg Config) *Detector {

@@ -45,6 +45,9 @@ type jbFlex string
 
 func (f *jbFlex) UnmarshalJSON(b []byte) error {
 	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
+	if s == "null" {
+		s = ""
+	}
 	*f = jbFlex(s)
 	return nil
 }
@@ -160,7 +163,6 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 		starts          []time.Time
 	}
 	byJob := map[string]*runs{}
-	oldestRead := now
 	for i := range logs {
 		l := &logs[i]
 		if string(l.Type) != "1" || l.Info.ID == "" {
@@ -172,9 +174,6 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 			byJob[l.Info.ID] = r
 		}
 		if t, ok := l.StartTime.parse(); ok {
-			if t.Before(oldestRead) {
-				oldestRead = t
-			}
 			r.starts = append(r.starts, t)
 		}
 		end, ok := l.EndTime.parse()
@@ -192,6 +191,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 	var out []Job
 	var findings []Finding
 	seenDest := map[string]bool{}
+	enabledAccountJobs := 0
 	for _, j := range jobs {
 		job := Job{Name: j.Name, ID: j.ID, Disabled: j.Disabled.truthy(), Running: j.Running.truthy(), LastResult: "unknown"}
 		for _, s := range j.Schedules {
@@ -212,6 +212,9 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 		out = append(out, job)
 		if job.Disabled {
 			continue
+		}
+		if string(j.Type) == "1" {
+			enabledAccountJobs++
 		}
 		label := fmt.Sprintf("JetBackup job %q", j.Name)
 
@@ -249,11 +252,13 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 		// comes from how often the job actually STARTED, not next_run-last_run:
 		// a run stuck for 16 days pins last_run, which made a daily job look
 		// like a 17-day one and hid exactly the case this check exists for.
+		// With too few runs to measure, the job's own schedule (when it is not
+		// mid-run) or a conservative 8 days decides.
 		var starts []time.Time
 		if r != nil {
 			starts = r.starts
 		}
-		period := runPeriod(starts)
+		period := jbPeriod(starts, j)
 		limit := time.Duration(float64(period)*th.StaleFactor) + th.StaleGrace
 		switch {
 		case job.LastSuccess != nil:
@@ -264,15 +269,25 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 					Message: fmt.Sprintf("%s: no successful backup for %s (last success %s)", label, ago(age), job.LastSuccess.UTC().Format(time.RFC3339)),
 				})
 			}
-		case now.Sub(oldestRead) > limit:
-			// The history we read reaches back further than the limit and holds
-			// no success: that IS stale. (If the history is shorter — a new
-			// node, a pruned log — we cannot tell, and say nothing.)
-			if _, ran := j.LastRun.parse(); ran {
+		case len(starts) > 0:
+			// Runs in the history, none successful: stale once THIS job's own
+			// history reaches back past the limit (a new job is not judged
+			// before then).
+			if first := earliest(starts); now.Sub(first) > limit {
 				findings = append(findings, Finding{
 					Type: TypeStale, Severity: SevCritical, Adapter: "jetbackup",
 					Key:     "jb:stale:" + j.ID,
-					Message: fmt.Sprintf("%s: no successful backup in the last %s of run history", label, ago(now.Sub(oldestRead))),
+					Message: fmt.Sprintf("%s: no successful backup since at least %s (every run in the history failed)", label, first.UTC().Format(time.RFC3339)),
+				})
+			}
+		default:
+			// No run of this job in the history we read (a busy node's log
+			// window, or a job that stopped firing): judge on its own last start.
+			if lr, ok := j.LastRun.parse(); ok && now.Sub(lr) > limit {
+				findings = append(findings, Finding{
+					Type: TypeStale, Severity: SevCritical, Adapter: "jetbackup",
+					Key:     "jb:stale:" + j.ID,
+					Message: fmt.Sprintf("%s: has not run since %s", label, lr.UTC().Format(time.RFC3339)),
 				})
 			}
 		}
@@ -293,7 +308,41 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 			}
 		}
 	}
+	if enabledAccountJobs == 0 {
+		findings = append(findings, Finding{
+			Type: TypeNoJob, Severity: SevWarning, Adapter: "jetbackup",
+			Key:     "jb:nojob",
+			Message: fmt.Sprintf("JetBackup is installed but no account backup job is enabled (%d job(s) configured)", len(jobs)),
+		})
+	}
 	return out, findings, nil
+}
+
+// jbPeriod is the gap a job's schedule leaves between runs: measured from its
+// run starts when there are enough, else next_run-last_run when the job is not
+// mid-run (a running job's last_run may be days old), else 8 days.
+func jbPeriod(starts []time.Time, j jbJob) time.Duration {
+	if len(starts) >= 3 {
+		return runPeriod(starts)
+	}
+	if !j.Running.truthy() {
+		if lr, ok := j.LastRun.parse(); ok {
+			if nr, ok := j.NextRun.parse(); ok && nr.After(lr) {
+				return clampDur(nr.Sub(lr), time.Hour, 31*24*time.Hour)
+			}
+		}
+	}
+	return 8 * 24 * time.Hour
+}
+
+func earliest(ts []time.Time) time.Time {
+	e := ts[0]
+	for _, t := range ts[1:] {
+		if t.Before(e) {
+			e = t
+		}
+	}
+	return e
 }
 
 func laterEnd(end time.Time, than *jbLog) bool {
@@ -313,8 +362,9 @@ func jbResult(status string) string {
 	return "failed"
 }
 
-// runPeriod is the median gap between a job's run starts (default 24h with
-// fewer than two runs), clamped to [1h, 31d].
+// runPeriod is the LONG gap between a job's run starts — the 90th percentile,
+// so a Mon–Fri job's Friday→Monday gap counts and a one-off missed day does
+// not — clamped to [1h, 31d]; 24h with fewer than two runs.
 func runPeriod(starts []time.Time) time.Duration {
 	if len(starts) < 2 {
 		return 24 * time.Hour
@@ -331,5 +381,9 @@ func runPeriod(starts []time.Time) time.Duration {
 		return 24 * time.Hour
 	}
 	sort.Slice(gaps, func(a, b int) bool { return gaps[a] < gaps[b] })
-	return clampDur(gaps[len(gaps)/2], time.Hour, 31*24*time.Hour)
+	i := (len(gaps)*9+9)/10 - 1 // nearest-rank p90
+	if i < 0 {
+		i = 0
+	}
+	return clampDur(gaps[i], time.Hour, 31*24*time.Hour)
 }

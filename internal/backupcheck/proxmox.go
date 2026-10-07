@@ -85,7 +85,10 @@ func checkProxmox(run cmdFunc, node string, now time.Time, th Thresholds) Adapte
 		st.Error = "storage: " + err.Error()
 		return st
 	}
-	st.Jobs, st.Findings, err = evalProxmox(node, jobs, uncovered, tasks, storage, now, th)
+	// Which node hosts each guest, so a cluster reports an uncovered guest
+	// once (from its own node). Best effort: without it every node reports.
+	resources, _ := get("/cluster/resources", "--type", "vm")
+	st.Jobs, st.Findings, err = evalProxmox(node, jobs, uncovered, tasks, storage, resources, now, th)
 	if err != nil {
 		st.Error = err.Error()
 	}
@@ -93,7 +96,11 @@ func checkProxmox(run cmdFunc, node string, now time.Time, th Thresholds) Adapte
 }
 
 // evalProxmox is the pure evaluation over the four pvesh responses.
-func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw []byte, now time.Time, th Thresholds) ([]Job, []Finding, error) {
+//
+// Limits, by design: runs are judged per NODE, not per job — vzdump task ids
+// carry no job id, so a broken weekly job can hide behind a healthy daily one
+// on the same node (its guests still show as failed in `job errors` runs).
+func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resourcesRaw []byte, now time.Time, th Thresholds) ([]Job, []Finding, error) {
 	th = th.withDefaults()
 	var jobs []pveJob
 	if err := json.Unmarshal(jobsRaw, &jobs); err != nil {
@@ -110,6 +117,25 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw []byte
 	var storages []pveStorage
 	if err := json.Unmarshal(storageRaw, &storages); err != nil {
 		return nil, nil, fmt.Errorf("decode storage: %w", err)
+	}
+	var resources []struct {
+		VMID jbFlex `json:"vmid"`
+		Node string `json:"node"`
+	}
+	hostOf := map[string]string{}
+	if len(resourcesRaw) > 0 && json.Unmarshal(resourcesRaw, &resources) == nil {
+		for _, r := range resources {
+			hostOf[string(r.VMID)] = r.Node
+		}
+	}
+	if len(hostOf) > 0 {
+		mine := uncovered[:0]
+		for _, g := range uncovered {
+			if n, ok := hostOf[string(g.VMID)]; !ok || n == node {
+				mine = append(mine, g)
+			}
+		}
+		uncovered = mine
 	}
 
 	// Jobs that run on this node: enabled (absent = enabled) and either
@@ -138,6 +164,7 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw []byte
 	// Runs, newest first by end (running ones last).
 	sort.SliceStable(tasks, func(a, b int) bool { return tasks[a].EndTime > tasks[b].EndTime })
 	var latest, lastSuccess *pveTask
+	var finished []*pveTask
 	oldest := now
 	for i := range tasks {
 		t := &tasks[i]
@@ -155,6 +182,7 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw []byte
 			}
 			continue
 		}
+		finished = append(finished, t)
 		if latest == nil {
 			latest = t
 		}
@@ -168,6 +196,24 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw []byte
 		switch latest.Status {
 		case "OK":
 		case "job errors":
+			// "job errors" is also what a run where EVERY guest failed reports;
+			// the task list cannot tell the two apart. Three in a row is treated
+			// as a failure, not a partial.
+			streak := 0
+			for _, t := range finished {
+				if t.Status != "job errors" {
+					break
+				}
+				streak++
+			}
+			if streak >= 3 {
+				findings = append(findings, Finding{
+					Type: TypeFailed, Severity: SevCritical, Adapter: "proxmox",
+					Key:     "pve:task:" + latest.UPID,
+					Message: fmt.Sprintf("vzdump on %s: the last %d runs all finished with job errors (ended %s) — check which guests fail", node, streak, end),
+				})
+				break
+			}
 			findings = append(findings, Finding{
 				Type: TypePartial, Severity: SevWarning, Adapter: "proxmox",
 				Key:     "pve:task:" + latest.UPID,
@@ -193,11 +239,14 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw []byte
 					Message: fmt.Sprintf("no successful vzdump on %s for %s (last %s)", node, ago(age), at.UTC().Format(time.RFC3339)),
 				})
 			}
-		case len(tasks) == 0 || now.Sub(oldest) > th.ProxmoxStaleAfter:
+		case len(tasks) > 0 && now.Sub(oldest) > th.ProxmoxStaleAfter:
+			// Tasks on record reaching back past the limit, none successful.
+			// (No task at all says nothing: a new node, or one whose guests all
+			// live elsewhere, runs no vzdump.)
 			findings = append(findings, Finding{
 				Type: TypeStale, Severity: SevCritical, Adapter: "proxmox",
 				Key:     "pve:stale:" + node,
-				Message: fmt.Sprintf("%d backup job(s) apply to %s but no successful vzdump task is on record", active, node),
+				Message: fmt.Sprintf("no successful vzdump on %s in the last %s of task history", node, ago(now.Sub(oldest))),
 			})
 		}
 	}

@@ -24,9 +24,12 @@ back-filled here — see the git/PR history for that period.
   the health detector now reads JetBackup 5 (cPanel and DirectAdmin),
   Virtualmin scheduled backups and Proxmox vzdump, whichever is installed,
   and records `backup_failed`, `backup_partial`, `backup_stale`,
-  `backup_stuck`, `backup_uncovered` (Proxmox guests in no job),
-  `backup_dest` (backup storage offline or nearly full) and
-  `backup_check_error` in detection history, where cfm-web picks them up.
+  `backup_stuck`, `backup_uncovered` (Proxmox guests in no job, reported by
+  the node that hosts them), `backup_dest` (backup storage offline or nearly
+  full), `backup_no_job` (nothing enabled) and `backup_check_error` (a
+  backup system unreadable twice in a row, or a hung check) in detection
+  history, where cfm-web picks them up. Weekday-only, weekly and brand-new
+  jobs are judged on their own schedule, so a weekend is not a missed backup.
   "Stale" counts from the last SUCCESSFUL run: JetBackup advances a job's
   "last completed" even when the run failed. No local mail is sent. Knobs:
   `[health] BACKUP_ALERT`, `BACKUP_EVERY`, `BACKUP_STUCK_AFTER`,
