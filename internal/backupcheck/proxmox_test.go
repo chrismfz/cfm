@@ -1,6 +1,7 @@
 package backupcheck
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ const vegaTasks = `[
 var vegaNow = time.Unix(1791322845, 0).Add(3 * time.Hour)
 
 func TestProxmoxVegaToday(t *testing.T) {
-	jobs, fs, err := evalProxmox("vega", []byte(vegaJobs), []byte(vegaUncovered), []byte(vegaTasks), []byte(vegaStorage), nil, vegaNow, Thresholds{})
+	jobs, fs, _, err := evalProxmox("vega", []byte(vegaJobs), []byte(vegaUncovered), []byte(vegaTasks), []byte(vegaStorage), []byte(`[]`), vegaNow, Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +44,7 @@ func TestProxmoxVegaToday(t *testing.T) {
 	}
 	got := byType(fs)
 	// latest FINISHED run: "job errors" → partial warning
-	if f := got[TypePartial]; f.Severity != SevWarning || f.Key != "pve:task:UPID:vega:000831DD:0640E944:6AC1B32B:vzdump::root@pam:" {
+	if f := got[TypePartial]; f.Severity != SevWarning || f.Key != "pve:partial:vega" {
 		t.Fatalf("want backup_partial for the job-errors run, got %+v", fs)
 	}
 	// uncovered guests, as one finding with members
@@ -62,7 +63,7 @@ func TestProxmoxStorageOfflineAndFailedRun(t *testing.T) {
 	storage := strings.Replace(vegaStorage, `{"storage":"geros","active":1`, `{"storage":"geros","active":0`, 1)
 	tasks := `[{"upid":"U1","status":"could not activate storage 'geros': storage 'geros' is not online","starttime":1791322845,"endtime":1791322846},
 	           {"upid":"U0","status":"OK","starttime":1791068408,"endtime":1791076882}]`
-	_, fs, err := evalProxmox("vega", []byte(vegaJobs), []byte(`[]`), []byte(tasks), []byte(storage), nil, vegaNow, Thresholds{})
+	_, fs, _, err := evalProxmox("vega", []byte(vegaJobs), []byte(`[]`), []byte(tasks), []byte(storage), nil, vegaNow, Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +86,7 @@ func TestProxmoxStuckAndStale(t *testing.T) {
 	now := time.Unix(1791322845, 0).Add(30 * time.Hour)
 	tasks := `[{"upid":"RUN","status":"RUNNING","starttime":1791322845,"endtime":null},
 	           {"upid":"OLD","status":"OK","starttime":1790062578,"endtime":1790063082}]`
-	_, fs, err := evalProxmox("vega", []byte(vegaJobs), []byte(`[]`), []byte(tasks), []byte(vegaStorage), nil, now, Thresholds{})
+	_, fs, _, err := evalProxmox("vega", []byte(vegaJobs), []byte(`[]`), []byte(tasks), []byte(vegaStorage), nil, now, Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +101,7 @@ func TestProxmoxStuckAndStale(t *testing.T) {
 
 func TestProxmoxJobPinnedToAnotherNodeIsNotOurs(t *testing.T) {
 	jobs := `[{"enabled":1,"id":"j","schedule":"sun 02:00","storage":"geros","node":"other"}]`
-	_, fs, err := evalProxmox("vega", []byte(jobs), []byte(`[]`), []byte(`[]`), []byte(vegaStorage), nil, vegaNow, Thresholds{})
+	_, fs, _, err := evalProxmox("vega", []byte(jobs), []byte(`[]`), []byte(`[]`), []byte(vegaStorage), nil, vegaNow, Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +112,7 @@ func TestProxmoxJobPinnedToAnotherNodeIsNotOurs(t *testing.T) {
 
 func TestProxmoxNoTasksSaysNothing(t *testing.T) {
 	// A new node, or one whose guests all live on other nodes, runs no vzdump.
-	_, fs, err := evalProxmox("vega", []byte(vegaJobs), []byte(`[]`), []byte(`[]`), []byte(vegaStorage), nil, vegaNow, Thresholds{})
+	_, fs, _, err := evalProxmox("vega", []byte(vegaJobs), []byte(`[]`), []byte(`[]`), []byte(vegaStorage), nil, vegaNow, Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,11 +126,11 @@ func TestProxmoxThreeJobErrorsInARowIsAFailure(t *testing.T) {
 	           {"upid":"B","status":"job errors","starttime":1791200000,"endtime":1791201000},
 	           {"upid":"C","status":"job errors","starttime":1791100000,"endtime":1791101000},
 	           {"upid":"D","status":"OK","starttime":1791000000,"endtime":1791001000}]`
-	_, fs, err := evalProxmox("vega", []byte(vegaJobs), []byte(`[]`), []byte(tasks), []byte(vegaStorage), nil, vegaNow, Thresholds{})
+	_, fs, _, err := evalProxmox("vega", []byte(vegaJobs), []byte(`[]`), []byte(tasks), []byte(vegaStorage), nil, vegaNow, Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f := byType(fs)[TypeFailed]; f.Key != "pve:task:A" || f.Severity != SevCritical {
+	if f := byType(fs)[TypeFailed]; f.Key != "pve:failed:vega" || f.Severity != SevCritical {
 		t.Fatalf("want 3-in-a-row escalated to failed, got %+v", fs)
 	}
 	if _, ok := byType(fs)[TypePartial]; ok {
@@ -139,12 +140,49 @@ func TestProxmoxThreeJobErrorsInARowIsAFailure(t *testing.T) {
 
 func TestProxmoxUncoveredOnlyFromTheHostingNode(t *testing.T) {
 	resources := `[{"vmid":2575,"node":"vega"},{"vmid":122,"node":"altair"},{"vmid":117,"node":"vega"}]`
-	_, fs, err := evalProxmox("vega", []byte(vegaJobs), []byte(vegaUncovered), []byte(`[]`), []byte(vegaStorage), []byte(resources), vegaNow, Thresholds{})
+	_, fs, _, err := evalProxmox("vega", []byte(vegaJobs), []byte(vegaUncovered), []byte(`[]`), []byte(vegaStorage), []byte(resources), vegaNow, Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	u := byType(fs)[TypeUncovered]
 	if len(u.Members) != 2 || strings.Contains(u.Message, "w2025") {
 		t.Fatalf("guest 122 lives on altair: vega must not report it, got %+v", u)
+	}
+}
+
+func TestProxmoxWarningsIsASuccess(t *testing.T) {
+	tasks := `[{"upid":"W1","status":"WARNINGS: 1","starttime":1791300000,"endtime":1791301000},
+	           {"upid":"W2","status":"WARNINGS: 2","starttime":1791200000,"endtime":1791201000}]`
+	_, fs, _, err := evalProxmox("vega", []byte(vegaJobs), []byte(`[]`), []byte(tasks), []byte(vegaStorage), []byte(`[]`), vegaNow, Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 0 {
+		t.Fatalf("a run that succeeded with warnings is a success: %+v", fs)
+	}
+}
+
+func TestProxmoxResourcesUnreadableLeavesUncoveredUnknown(t *testing.T) {
+	_, fs, unknown, err := evalProxmox("vega", []byte(vegaJobs), []byte(vegaUncovered), []byte(`[]`), []byte(vegaStorage), nil, vegaNow, Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := byType(fs)[TypeUncovered]; ok || len(unknown) != 1 || unknown[0] != "pve:uncovered" {
+		t.Fatalf("want uncovered unknown, not widened: %+v %v", fs, unknown)
+	}
+}
+
+func TestProxmoxJobErrorsEveryNightGoesStale(t *testing.T) {
+	var rows []string
+	for i := 0; i < 10; i++ {
+		start := vegaNow.Add(-time.Duration(i+1) * 24 * time.Hour).Unix()
+		rows = append(rows, fmt.Sprintf(`{"upid":"E%d","status":"job errors","starttime":%d,"endtime":%d}`, i, start, start+600))
+	}
+	_, fs, _, err := evalProxmox("vega", []byte(vegaJobs), []byte(`[]`), []byte("["+strings.Join(rows, ",")+"]"), []byte(vegaStorage), []byte(`[]`), vegaNow, Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := byType(fs)[TypeStale]; f.Key != "pve:stale:vega" {
+		t.Fatalf("10 nights of job errors and no clean run: want stale, got %+v", fs)
 	}
 }

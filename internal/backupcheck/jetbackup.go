@@ -20,9 +20,13 @@ import (
 //   - `last_completed` advances on FAILED runs too — see the package doc.
 const (
 	jetbackupCLI = "jetbackup5api"
-	// jetbackupLogLimit bounds the history read. 300 runs is ~6 weeks for a
-	// daily job plus the daily config job and plugin runs on a busy node.
-	jetbackupLogLimit = 300
+	// jetbackupLogLimit bounds the history read. The whole retained history
+	// (orion and earth held ~210 entries) fits many times over; plugin scans
+	// and integrity checks share the stream, so a small window could push a
+	// daily job's runs out of it — and then a failing job would be judged on
+	// its own timestamps, which advance on failure. A history that does not
+	// fit is reported as a check error rather than guessed at.
+	jetbackupLogLimit = 5000
 )
 
 type jbTime string
@@ -145,7 +149,7 @@ func decodeJB(raw []byte, field string, into any) error {
 }
 
 // evalJetBackup is the pure evaluation over the two API responses.
-func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job, []Finding, error) {
+func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []Job, _ []Finding, err error) {
 	th = th.withDefaults()
 	var jobs []jbJob
 	if err := decodeJB(jobsRaw, "jobs", &jobs); err != nil {
@@ -155,6 +159,9 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 	if err := decodeJB(logsRaw, "logs", &logs); err != nil {
 		return nil, nil, fmt.Errorf("listLogs %w", err)
 	}
+	var total int
+	_ = decodeJB(logsRaw, "total", &total)
+	complete := total <= len(logs)
 
 	// Newest finished run and newest SUCCESSFUL run per job. logs arrive newest
 	// first; don't rely on it.
@@ -190,6 +197,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 
 	var out []Job
 	var findings []Finding
+	var unknownJobs []string
 	seenDest := map[string]bool{}
 	enabledAccountJobs := 0
 	for _, j := range jobs {
@@ -225,13 +233,13 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 			case "failed":
 				findings = append(findings, Finding{
 					Type: TypeFailed, Severity: SevCritical, Adapter: "jetbackup",
-					Key:     "jb:run:" + r.latest.ID,
+					Key:     "jb:failed:" + j.ID,
 					Message: fmt.Sprintf("%s: last run FAILED (status %s, ended %s)", label, r.latest.Status, end.UTC().Format(time.RFC3339)),
 				})
 			case "partial":
 				findings = append(findings, Finding{
 					Type: TypePartial, Severity: SevWarning, Adapter: "jetbackup",
-					Key:     "jb:run:" + r.latest.ID,
+					Key:     "jb:partial:" + j.ID,
 					Message: fmt.Sprintf("%s: last run only PARTIALLY completed (ended %s)", label, end.UTC().Format(time.RFC3339)),
 				})
 			}
@@ -243,7 +251,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 				findings = append(findings, Finding{
 					Type: TypeStuck, Severity: SevCritical, Adapter: "jetbackup",
 					Key:     "jb:stuck:" + j.ID,
-					Message: fmt.Sprintf("%s: running for %s (started %s) — likely stuck on an account", label, ago(now.Sub(started)), started.UTC().Format(time.RFC3339)),
+					Message: fmt.Sprintf("%s: running for %s (started %s) — likely stuck on an account", label, Ago(now.Sub(started)), started.UTC().Format(time.RFC3339)),
 				})
 			}
 		}
@@ -266,7 +274,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 				findings = append(findings, Finding{
 					Type: TypeStale, Severity: SevCritical, Adapter: "jetbackup",
 					Key:     "jb:stale:" + j.ID,
-					Message: fmt.Sprintf("%s: no successful backup for %s (last success %s)", label, ago(age), job.LastSuccess.UTC().Format(time.RFC3339)),
+					Message: fmt.Sprintf("%s: no successful backup for %s (last success %s)", label, Ago(age), job.LastSuccess.UTC().Format(time.RFC3339)),
 				})
 			}
 		case len(starts) > 0:
@@ -281,20 +289,26 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 				})
 			}
 		default:
-			// No run of this job in the history we read (a busy node's log
-			// window, or a job that stopped firing): judge on its own last start.
-			if lr, ok := j.LastRun.parse(); ok && now.Sub(lr) > limit {
+			// No run of this job in the history read. last_run can only prove
+			// "has not run" — it advances on FAILED runs, so a recent one with no
+			// log of it means the history is incomplete (purged, truncated, an
+			// empty API answer): unknown, never healthy.
+			lr, ok := j.LastRun.parse()
+			switch {
+			case ok && now.Sub(lr) > limit:
 				findings = append(findings, Finding{
 					Type: TypeStale, Severity: SevCritical, Adapter: "jetbackup",
 					Key:     "jb:stale:" + j.ID,
 					Message: fmt.Sprintf("%s: has not run since %s", label, lr.UTC().Format(time.RFC3339)),
 				})
+			case ok || !complete:
+				unknownJobs = append(unknownJobs, j.Name)
 			}
 		}
 
 		// 4. Destinations (shared between jobs; report each once).
 		for _, d := range j.Destinations {
-			if d.ID == "" || seenDest[d.ID] || d.Disabled.truthy() || d.DiskUsage.Total <= 0 {
+			if th.DestFreeMinPct < 0 || d.ID == "" || seenDest[d.ID] || d.Disabled.truthy() || d.DiskUsage.Total <= 0 {
 				continue
 			}
 			seenDest[d.ID] = true
@@ -308,6 +322,9 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 			}
 		}
 	}
+	if len(unknownJobs) > 0 {
+		err = fmt.Errorf("no run on record in the %d log entries read (of %d) for job(s) that have run: %s", len(logs), total, strings.Join(unknownJobs, ", "))
+	}
 	if enabledAccountJobs == 0 {
 		findings = append(findings, Finding{
 			Type: TypeNoJob, Severity: SevWarning, Adapter: "jetbackup",
@@ -315,7 +332,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) ([]Job
 			Message: fmt.Sprintf("JetBackup is installed but no account backup job is enabled (%d job(s) configured)", len(jobs)),
 		})
 	}
-	return out, findings, nil
+	return out, findings, err
 }
 
 // jbPeriod is the gap a job's schedule leaves between runs: measured from its

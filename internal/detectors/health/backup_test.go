@@ -260,3 +260,46 @@ func TestTickBackupDisabledDoesNothing(t *testing.T) {
 	d.tickBackup(time.Now(), "h")
 	time.Sleep(50 * time.Millisecond)
 }
+
+// A daemon restart (fresh process state, saved file present) must not
+// re-announce what is still open; without the file it would.
+func TestBackupStateSurvivesARestart(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true})
+	open := status(backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{uncovered("117")}})
+	d.publishBackup(open, "vega", time.Now())
+	if evs := rec.take(); len(evs) != 1 {
+		t.Fatalf("first publish: %+v", evs)
+	}
+	backup = &backupState{} // restart: memory gone, file kept
+	New(Config{BackupAlert: true}).publishBackup(open, "vega", time.Now())
+	if evs := rec.take(); len(evs) != 0 {
+		t.Fatalf("restart re-announced an open finding: %+v", evs)
+	}
+}
+
+func TestBackupFindingsStayArmedWhenTheCheckCannotJudge(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true})
+	now := time.Now()
+	open := status(
+		backupcheck.AdapterStatus{Name: "jetbackup", Findings: []backupcheck.Finding{failedRun}},
+		backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{uncovered("117")}},
+	)
+	d.publishBackup(open, "vega", now)
+	rec.take()
+
+	for name, st := range map[string]backupcheck.Status{
+		"panic":           status(backupcheck.AdapterStatus{Name: "backupcheck", Error: "internal error: boom"}),
+		"adapter missing": status(backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{uncovered("117")}}),
+		"unknown key":     status(backupcheck.AdapterStatus{Name: "jetbackup", Findings: []backupcheck.Finding{failedRun}}, backupcheck.AdapterStatus{Name: "proxmox", Unknown: []string{"pve:uncovered"}}),
+	} {
+		d.publishBackup(st, "vega", now)
+		d.publishBackup(open, "vega", now)
+		if evs := rec.take(); len(evs) != 0 {
+			t.Fatalf("%s: findings were re-armed and re-published: %+v", name, evs)
+		}
+	}
+}

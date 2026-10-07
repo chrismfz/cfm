@@ -66,7 +66,7 @@ func TestJetBackupOrion19SepFailedRunIsCritical(t *testing.T) {
 	}
 	got := byType(fs)
 	f, ok := got[TypeFailed]
-	if !ok || f.Severity != SevCritical || f.Key != "jb:run:run19" || !strings.Contains(f.Message, "Daily-Monthly") {
+	if !ok || f.Severity != SevCritical || f.Key != "jb:failed:603f830764375f7820538382" || !strings.Contains(f.Message, "Daily-Monthly") {
 		t.Fatalf("want critical backup_failed for run19, got %+v", fs)
 	}
 	if _, ok := got[TypeStale]; ok {
@@ -90,7 +90,7 @@ func TestJetBackupOrionStuckRunIsStuckAndStale(t *testing.T) {
 		t.Fatalf("want backup_stale measured from the 18 Sep success, got %+v", fs)
 	}
 	// the latest FINISHED run (20 Sep) failed too
-	if f := got[TypeFailed]; f.Key != "jb:run:run20" {
+	if f := got[TypeFailed]; f.Key != "jb:failed:603f830764375f7820538382" || !strings.Contains(f.Message, "2026-09-20T02:24:17Z") {
 		t.Fatalf("want backup_failed for run20, got %+v", fs)
 	}
 	for _, j := range jobsOut {
@@ -112,7 +112,7 @@ func TestJetBackupLastCompletedOnAFailedRunIsNotFreshness(t *testing.T) {
 	if f := got[TypeStale]; f.Type == "" || !strings.Contains(f.Message, "19d") {
 		t.Fatalf("want stale ~19d despite last_completed=today, got %+v", fs)
 	}
-	if f := got[TypeFailed]; f.Key != "jb:run:run21" {
+	if f := got[TypeFailed]; f.Key != "jb:failed:603f830764375f7820538382" || !strings.Contains(f.Message, "2026-10-07T10:28:07Z") {
 		t.Fatalf("want the 16-day run reported failed, got %+v", fs)
 	}
 	if _, ok := got[TypeStuck]; ok {
@@ -245,12 +245,13 @@ func TestJetBackupWeeklyJobWithOneRunIsNotStale(t *testing.T) {
 	}
 }
 
-// A job pushed out of the log window: judged on its own last start.
-func TestJetBackupJobWithoutRunsInWindowUsesItsLastRun(t *testing.T) {
-	noRuns := `{"success":1,"message":"","data":{"logs":[]}}`
-	_, fs, err := evalJetBackup([]byte(oneJob("2026-10-06T01:00:00Z", "2026-10-07T01:00:00Z", false)), []byte(noRuns), ts("2026-10-07T10:00:00Z"), Thresholds{})
-	if err != nil || len(fs) != 0 {
-		t.Fatalf("recent last_run: want nothing, got %v %+v", err, fs)
+// A job with no run in the history read: an old last_run proves "has not run";
+// a recent one (it advances on FAILED runs) proves nothing — unknown, an error.
+func TestJetBackupJobWithoutRunsInHistory(t *testing.T) {
+	noRuns := `{"success":1,"message":"","data":{"logs":[],"total":0}}`
+	_, fs, err := evalJetBackup([]byte(oneJob("2026-10-07T01:00:00Z", "2026-10-08T01:00:00Z", false)), []byte(noRuns), ts("2026-10-07T10:00:00Z"), Thresholds{})
+	if err == nil || len(fs) != 0 {
+		t.Fatalf("recent last_run, no log of it: want an error (unknown), got %v %+v", err, fs)
 	}
 	_, fs, err = evalJetBackup([]byte(oneJob("2026-09-20T01:00:00Z", "2026-09-21T01:00:00Z", false)), []byte(noRuns), ts("2026-10-07T18:00:00Z"), Thresholds{})
 	if err != nil {
@@ -258,6 +259,10 @@ func TestJetBackupJobWithoutRunsInWindowUsesItsLastRun(t *testing.T) {
 	}
 	if f := byType(fs)[TypeStale]; !strings.Contains(f.Message, "has not run since") {
 		t.Fatalf("want stale from last_run, got %+v", fs)
+	}
+	_, _, err = evalJetBackup([]byte(oneJob("2026-10-07T01:00:00Z", "2026-10-08T01:00:00Z", false)), []byte(`{"success":1,"message":"","data":{"logs":null}}`), ts("2026-10-07T10:00:00Z"), Thresholds{})
+	if err == nil {
+		t.Fatal("logs:null with a job that ran: want unknown")
 	}
 }
 

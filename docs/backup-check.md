@@ -43,13 +43,24 @@ nothing.
 | `backup_no_job` | warning | JetBackup with no enabled account-backup job, or Virtualmin with no enabled schedule (a job disabled during an incident and forgotten) |
 | `backup_check_error` | warning | an installed backup system could not be read on **two checks in a row**, or the check itself hung — "unknown", never "healthy" |
 
-Publishing is edge-triggered per finding key (a run id, a job id, a storage):
+Keys are per job / schedule / node / storage (`jb:failed:<job>`,
+`vm:stale:<schedule>`, `pve:partial:<node>`, …), never per run: a job that
+fails every night is ONE open alert (pinned and reminded by cfm-web), not one
+a night. Publishing is edge-triggered per key:
 once when it appears, again when its severity rises (a full storage that goes
 offline) or a set gains a member, and re-armed when it is gone. While an
 adapter cannot be read, its findings stay armed (no repeat when it reads
-again). The edge state is process-wide, so the detector rebuilds that follow a
-`detectors.conf` save or a log rotation re-publish nothing; a daemon restart
-re-publishes what is still true once.
+again). A key the check could not judge this time (a side read failed, the whole check
+panicked, an adapter briefly absent) also stays armed. The edge state is
+process-wide and saved to `/var/lib/cfm/backup_published.json`, so neither the
+detector rebuilds that follow a `detectors.conf` save or a log rotation nor a
+daemon restart (every package upgrade) re-announce what is already open.
+
+**Delivery depends on the webdetector history store**: the findings reach
+cfm-web as `detection_history` rows written through the node-fault sink the
+webdetector registers. A node running without the webdetector, or with its
+history off, records nothing (the publish is retried and never marked sent
+without a sink).
 
 ## Rules learned from the fleet's real output
 
@@ -81,7 +92,16 @@ re-publishes what is still true once.
 - Virtualmin's `started` text is local 12-hour time; the run `name` starts
   with the start epoch, which is used instead.
 - A running vzdump task reads `status: RUNNING`, `endtime: null`
-  (`--source all` is needed to list it at all).
+  (`--source all` is needed to list it at all). A successful run that logged
+  warnings reads `WARNINGS: <n>` — a success. Only a clean run (`OK` or
+  `WARNINGS`) counts as fresh: `job errors` is also what a run where every
+  guest failed reports, so a node ending that way every night goes stale.
+- JetBackup's own `last_run` advances on failed runs, so it can only prove
+  "has not run"; a job that ran recently but has no run in the log history
+  read is reported as a check error (unknown), never as healthy. The whole
+  retained history is read (5 000 entries; orion and earth held ~210).
+- Virtualmin destinations are shown with their credentials removed
+  (`ssh://user:***@host:/path`).
 
 ## Knobs (`[health]` in detectors.conf)
 
@@ -90,7 +110,7 @@ BACKUP_ALERT = 1
 BACKUP_EVERY = "15m"
 BACKUP_STUCK_AFTER = "24h"
 BACKUP_PROXMOX_STALE = "8d"
-BACKUP_DEST_FREE_PCT = 5
+BACKUP_DEST_FREE_PCT = 5    ; 0 turns the destination free-space check off
 ```
 
 ## Not covered yet

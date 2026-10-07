@@ -119,8 +119,20 @@ func cronPeriod(kv map[string]string) time.Duration {
 	if _, ok := kv["hours"]; !ok {
 		return 0
 	}
-	if cronSet(kv["months"], 1, 12) != nil || cronSet(kv["days"], 1, 31) != nil {
+	months, days := cronSet(kv["months"], 1, 12), cronSet(kv["days"], 1, 31)
+	if len(months) == 12 {
+		months = nil
+	}
+	if len(days) == 31 {
+		days = nil
+	}
+	if months != nil {
 		return 31 * 24 * time.Hour
+	}
+	if days != nil {
+		// "every other day" (odd days, */2) is a 2-day gap, not a month; the
+		// month end adds at most a day (31 → 1).
+		return time.Duration(maxCircularGap(days, 31)+1) * 24 * time.Hour
 	}
 	if wd := cronSet(kv["weekdays"], 0, 6); wd != nil {
 		if len(wd) == 7 {
@@ -256,7 +268,6 @@ func evalVirtualmin(schedRaw, logsRaw []byte, info map[string]vmSchedInfo, now t
 	}
 
 	runs := map[string][]vmRun{}
-	oldest := now
 	for _, l := range logs {
 		if l.get("run_from") != "sched" {
 			continue
@@ -267,9 +278,6 @@ func evalVirtualmin(schedRaw, logsRaw []byte, info map[string]vmSchedInfo, now t
 			continue
 		}
 		start := time.Unix(epoch, 0)
-		if start.Before(oldest) {
-			oldest = start
-		}
 		status := l.get("final_status")
 		runs[id] = append(runs[id], vmRun{
 			id: l.Name, start: start,
@@ -286,7 +294,7 @@ func evalVirtualmin(schedRaw, logsRaw []byte, info map[string]vmSchedInfo, now t
 		id := s.Name
 		enabled := !strings.EqualFold(s.get("enabled"), "No")
 		running := strings.EqualFold(s.get("running"), "Yes")
-		dest := s.get("destination")
+		dest := redactURL(s.get("destination"))
 		job := Job{Name: dest, ID: id, Disabled: !enabled, Running: running, Schedule: s.get("cron_schedule"), LastResult: "unknown"}
 
 		rs := runs[id]
@@ -349,9 +357,9 @@ func evalVirtualmin(schedRaw, logsRaw []byte, info map[string]vmSchedInfo, now t
 				if latest.failed > 0 {
 					msg += fmt.Sprintf(", %d domain(s) failed", latest.failed)
 				}
-				findings = append(findings, Finding{Type: TypeFailed, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:run:" + latest.id, Message: msg})
+				findings = append(findings, Finding{Type: TypeFailed, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:failed:" + id, Message: msg})
 			case "partial":
-				findings = append(findings, Finding{Type: TypePartial, Severity: SevWarning, Adapter: "virtualmin", Key: "vm:run:" + latest.id,
+				findings = append(findings, Finding{Type: TypePartial, Severity: SevWarning, Adapter: "virtualmin", Key: "vm:partial:" + id,
 					Message: fmt.Sprintf("%s: last scheduled run had %d failed domain(s) (started %s)", label, latest.failed, at)})
 			}
 		}
@@ -363,10 +371,10 @@ func evalVirtualmin(schedRaw, logsRaw []byte, info map[string]vmSchedInfo, now t
 			switch {
 			case inProgress != nil && now.Sub(inProgress.start) > th.StuckAfter:
 				findings = append(findings, Finding{Type: TypeStuck, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:stuck:" + id,
-					Message: fmt.Sprintf("%s: running for %s (started %s)", label, ago(now.Sub(inProgress.start)), inProgress.start.UTC().Format(time.RFC3339))})
+					Message: fmt.Sprintf("%s: running for %s (started %s)", label, Ago(now.Sub(inProgress.start)), inProgress.start.UTC().Format(time.RFC3339))})
 			case inProgress == nil && len(starts) > 0 && now.Sub(latestStart(starts)) > period+th.StuckAfter:
 				findings = append(findings, Finding{Type: TypeStuck, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:stuck:" + id,
-					Message: fmt.Sprintf("%s: shown as running, but no scheduled run has started for %s", label, ago(now.Sub(latestStart(starts))))})
+					Message: fmt.Sprintf("%s: shown as running, but no scheduled run has started for %s", label, Ago(now.Sub(latestStart(starts))))})
 			}
 		}
 
@@ -375,7 +383,7 @@ func evalVirtualmin(schedRaw, logsRaw []byte, info map[string]vmSchedInfo, now t
 		case success != nil:
 			if age := now.Sub(success.start); age > limit {
 				findings = append(findings, Finding{Type: TypeStale, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:stale:" + id,
-					Message: fmt.Sprintf("%s: no successful backup for %s (last success started %s)", label, ago(age), success.start.UTC().Format(time.RFC3339))})
+					Message: fmt.Sprintf("%s: no successful backup for %s (last success started %s)", label, Ago(age), success.start.UTC().Format(time.RFC3339))})
 			}
 		case limit >= window:
 			// A schedule rarer than the history we read (yearly): no verdict.
@@ -393,7 +401,7 @@ func evalVirtualmin(schedRaw, logsRaw []byte, info map[string]vmSchedInfo, now t
 			}
 		}
 	}
-	if len(scheds) > 0 && enabledScheds == 0 || len(scheds) == 0 {
+	if enabledScheds == 0 {
 		findings = append(findings, Finding{Type: TypeNoJob, Severity: SevWarning, Adapter: "virtualmin", Key: "vm:nojob",
 			Message: fmt.Sprintf("Virtualmin is installed but no scheduled backup is enabled (%d configured)", len(scheds))})
 	}
@@ -408,4 +416,26 @@ func latestStart(ts []time.Time) time.Time {
 		}
 	}
 	return l
+}
+
+// redactURL drops the credentials from a destination such as
+// "ssh://user:pass@host:/path" or "s3://key:secret@bucket/": the destination
+// labels a finding, and findings travel to detection_history and chat.
+// Everything between "://" and the last "@" before the path is replaced by the
+// part before its first ":" (the user name).
+func redactURL(u string) string {
+	i := strings.Index(u, "://")
+	if i < 0 {
+		return u
+	}
+	rest := u[i+3:]
+	at := strings.LastIndex(rest, "@")
+	if at < 0 {
+		return u
+	}
+	user := rest[:at]
+	if c := strings.IndexByte(user, ':'); c >= 0 {
+		user = user[:c] + ":***"
+	}
+	return u[:i+3] + user + rest[at:]
 }

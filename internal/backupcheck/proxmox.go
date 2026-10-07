@@ -87,8 +87,11 @@ func checkProxmox(run cmdFunc, node string, now time.Time, th Thresholds) Adapte
 	}
 	// Which node hosts each guest, so a cluster reports an uncovered guest
 	// once (from its own node). Best effort: without it every node reports.
-	resources, _ := get("/cluster/resources", "--type", "vm")
-	st.Jobs, st.Findings, err = evalProxmox(node, jobs, uncovered, tasks, storage, resources, now, th)
+	resources, rerr := get("/cluster/resources", "--type", "vm")
+	if rerr != nil {
+		resources = nil // evalProxmox: uncovered guests unknown this time
+	}
+	st.Jobs, st.Findings, st.Unknown, err = evalProxmox(node, jobs, uncovered, tasks, storage, resources, now, th)
 	if err != nil {
 		st.Error = err.Error()
 	}
@@ -100,30 +103,38 @@ func checkProxmox(run cmdFunc, node string, now time.Time, th Thresholds) Adapte
 // Limits, by design: runs are judged per NODE, not per job — vzdump task ids
 // carry no job id, so a broken weekly job can hide behind a healthy daily one
 // on the same node (its guests still show as failed in `job errors` runs).
-func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resourcesRaw []byte, now time.Time, th Thresholds) ([]Job, []Finding, error) {
+//
+// resourcesRaw (/cluster/resources) says which node hosts each guest; nil
+// means it could not be read, and the uncovered finding is then reported as
+// unknown rather than widened to every guest of the cluster on every node.
+func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resourcesRaw []byte, now time.Time, th Thresholds) ([]Job, []Finding, []string, error) {
 	th = th.withDefaults()
 	var jobs []pveJob
 	if err := json.Unmarshal(jobsRaw, &jobs); err != nil {
-		return nil, nil, fmt.Errorf("decode /cluster/backup: %w", err)
+		return nil, nil, nil, fmt.Errorf("decode /cluster/backup: %w", err)
 	}
 	var uncovered []pveGuest
 	if err := json.Unmarshal(uncoveredRaw, &uncovered); err != nil {
-		return nil, nil, fmt.Errorf("decode not-backed-up: %w", err)
+		return nil, nil, nil, fmt.Errorf("decode not-backed-up: %w", err)
 	}
 	var tasks []pveTask
 	if err := json.Unmarshal(tasksRaw, &tasks); err != nil {
-		return nil, nil, fmt.Errorf("decode tasks: %w", err)
+		return nil, nil, nil, fmt.Errorf("decode tasks: %w", err)
 	}
 	var storages []pveStorage
 	if err := json.Unmarshal(storageRaw, &storages); err != nil {
-		return nil, nil, fmt.Errorf("decode storage: %w", err)
+		return nil, nil, nil, fmt.Errorf("decode storage: %w", err)
 	}
 	var resources []struct {
 		VMID jbFlex `json:"vmid"`
 		Node string `json:"node"`
 	}
+	var unknown []string
 	hostOf := map[string]string{}
-	if len(resourcesRaw) > 0 && json.Unmarshal(resourcesRaw, &resources) == nil {
+	if resourcesRaw == nil || json.Unmarshal(resourcesRaw, &resources) != nil {
+		unknown = append(unknown, "pve:uncovered")
+		uncovered = nil
+	} else {
 		for _, r := range resources {
 			hostOf[string(r.VMID)] = r.Node
 		}
@@ -177,7 +188,7 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resou
 				findings = append(findings, Finding{
 					Type: TypeStuck, Severity: SevCritical, Adapter: "proxmox",
 					Key:     "pve:stuck:" + t.UPID,
-					Message: fmt.Sprintf("vzdump on %s running for %s (started %s)", node, ago(now.Sub(started)), started.UTC().Format(time.RFC3339)),
+					Message: fmt.Sprintf("vzdump on %s running for %s (started %s)", node, Ago(now.Sub(started)), started.UTC().Format(time.RFC3339)),
 				})
 			}
 			continue
@@ -186,16 +197,19 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resou
 		if latest == nil {
 			latest = t
 		}
-		if lastSuccess == nil && (t.Status == "OK" || t.Status == "job errors") {
+		// Only a clean run is fresh: "job errors" is also what a run where
+		// every guest failed reports, so a node that ends that way night after
+		// night must still go stale.
+		if lastSuccess == nil && pveClean(t.Status) {
 			lastSuccess = t
 		}
 	}
 
 	if latest != nil {
 		end := time.Unix(latest.EndTime, 0).UTC().Format(time.RFC3339)
-		switch latest.Status {
-		case "OK":
-		case "job errors":
+		switch {
+		case pveClean(latest.Status):
+		case latest.Status == "job errors":
 			// "job errors" is also what a run where EVERY guest failed reports;
 			// the task list cannot tell the two apart. Three in a row is treated
 			// as a failure, not a partial.
@@ -209,20 +223,20 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resou
 			if streak >= 3 {
 				findings = append(findings, Finding{
 					Type: TypeFailed, Severity: SevCritical, Adapter: "proxmox",
-					Key:     "pve:task:" + latest.UPID,
+					Key:     "pve:failed:" + node,
 					Message: fmt.Sprintf("vzdump on %s: the last %d runs all finished with job errors (ended %s) — check which guests fail", node, streak, end),
 				})
 				break
 			}
 			findings = append(findings, Finding{
 				Type: TypePartial, Severity: SevWarning, Adapter: "proxmox",
-				Key:     "pve:task:" + latest.UPID,
+				Key:     "pve:partial:" + node,
 				Message: fmt.Sprintf("vzdump on %s finished with job errors (some guests failed; ended %s) — see the task log", node, end),
 			})
 		default:
 			findings = append(findings, Finding{
 				Type: TypeFailed, Severity: SevCritical, Adapter: "proxmox",
-				Key:     "pve:task:" + latest.UPID,
+				Key:     "pve:failed:" + node,
 				Message: fmt.Sprintf("vzdump on %s FAILED: %s (ended %s)", node, strings.TrimSpace(latest.Status), end),
 			})
 		}
@@ -236,7 +250,7 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resou
 				findings = append(findings, Finding{
 					Type: TypeStale, Severity: SevCritical, Adapter: "proxmox",
 					Key:     "pve:stale:" + node,
-					Message: fmt.Sprintf("no successful vzdump on %s for %s (last %s)", node, ago(age), at.UTC().Format(time.RFC3339)),
+					Message: fmt.Sprintf("no clean vzdump on %s for %s (last OK run %s; later runs failed or ended with job errors)", node, Ago(age), at.UTC().Format(time.RFC3339)),
 				})
 			}
 		case len(tasks) > 0 && now.Sub(oldest) > th.ProxmoxStaleAfter:
@@ -246,7 +260,7 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resou
 			findings = append(findings, Finding{
 				Type: TypeStale, Severity: SevCritical, Adapter: "proxmox",
 				Key:     "pve:stale:" + node,
-				Message: fmt.Sprintf("no successful vzdump on %s in the last %s of task history", node, ago(now.Sub(oldest))),
+				Message: fmt.Sprintf("no successful vzdump on %s in the last %s of task history", node, Ago(now.Sub(oldest))),
 			})
 		}
 	}
@@ -286,7 +300,7 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resou
 			})
 			continue
 		}
-		if free := (1 - s.UsedFraction) * 100; s.UsedFraction > 0 && free < th.DestFreeMinPct {
+		if free := (1 - s.UsedFraction) * 100; th.DestFreeMinPct >= 0 && s.UsedFraction > 0 && free < th.DestFreeMinPct {
 			findings = append(findings, Finding{
 				Type: TypeDest, Severity: SevWarning, Adapter: "proxmox",
 				Key:     "pve:dest:" + s.Storage,
@@ -294,5 +308,11 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resou
 			})
 		}
 	}
-	return out, findings, nil
+	return out, findings, unknown, nil
+}
+
+// pveClean: the run succeeded. "WARNINGS: <n>" is a SUCCESSFUL task that logged
+// warnings (PVE 7+); "job errors" is not (some or all guests failed).
+func pveClean(status string) bool {
+	return status == "OK" || strings.HasPrefix(status, "WARNINGS")
 }

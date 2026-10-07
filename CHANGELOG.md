@@ -30,6 +30,12 @@ back-filled here — see the git/PR history for that period.
   backup system unreadable twice in a row, or a hung check) in detection
   history, where cfm-web picks them up. Weekday-only, weekly and brand-new
   jobs are judged on their own schedule, so a weekend is not a missed backup.
+  One alert per broken job (not one per failed run); what was published is
+  remembered in `/var/lib/cfm/backup_published.json`, so an upgrade does not
+  re-announce open findings. Proxmox `WARNINGS: n` runs are successes; a node
+  whose vzdump ends in `job errors` every night goes stale. Virtualmin
+  destinations are shown without their credentials. `BACKUP_DEST_FREE_PCT = 0`
+  turns the destination free-space check off.
   "Stale" counts from the last SUCCESSFUL run: JetBackup advances a job's
   "last completed" even when the run failed. No local mail is sent. Knobs:
   `[health] BACKUP_ALERT`, `BACKUP_EVERY`, `BACKUP_STUCK_AFTER`,

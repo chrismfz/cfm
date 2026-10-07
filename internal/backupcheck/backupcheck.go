@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -73,6 +74,9 @@ type AdapterStatus struct {
 	Error    string    `json:"error,omitempty"` // the adapter could not read its system
 	Jobs     []Job     `json:"jobs"`
 	Findings []Finding `json:"findings"`
+	// Unknown lists finding keys this check could not judge (a side read
+	// failed): neither present nor resolved, so the caller keeps them armed.
+	Unknown []string `json:"unknown,omitempty"`
 }
 
 // Status is the whole check. Adapters is empty on a node that runs none of the
@@ -89,12 +93,13 @@ func (s Status) Findings() []Finding {
 		out = append(out, a.Findings...)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		return sevRank(out[i].Severity) > sevRank(out[j].Severity)
+		return SevRank(out[i].Severity) > SevRank(out[j].Severity)
 	})
 	return out
 }
 
-func sevRank(s string) int {
+// SevRank orders severities (critical > warning > anything else).
+func SevRank(s string) int {
 	switch s {
 	case SevCritical:
 		return 2
@@ -118,7 +123,7 @@ type Thresholds struct {
 	// common weekly job).
 	ProxmoxStaleAfter time.Duration
 	// DestFreeMinPct: a destination with less free space than this is
-	// reported (default 5).
+	// reported (default 5; negative turns the free-space check off).
 	DestFreeMinPct float64
 }
 
@@ -135,7 +140,7 @@ func (t Thresholds) withDefaults() Thresholds {
 	if t.ProxmoxStaleAfter <= 0 {
 		t.ProxmoxStaleAfter = 8 * 24 * time.Hour
 	}
-	if t.DestFreeMinPct <= 0 {
+	if t.DestFreeMinPct == 0 {
 		t.DestFreeMinPct = 5
 	}
 	return t
@@ -162,12 +167,11 @@ func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 5 * time.Second
-	var stdout, stderr capped
-	stdout.max, stderr.max = maxOutput, 4096
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	stdout, stderr := &capped{max: maxOutput}, &capped{max: 4096}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
 	if err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+		if msg := strings.TrimSpace(stderr.buf.String()); msg != "" {
 			if len(msg) > 300 {
 				msg = msg[:300] + "…"
 			}
@@ -178,25 +182,28 @@ func ExecRunner(ctx context.Context, name string, args ...string) ([]byte, error
 	if stdout.over {
 		return nil, fmt.Errorf("output over %d bytes", maxOutput)
 	}
-	return stdout.Bytes(), nil
+	return stdout.buf.Bytes(), nil
 }
 
-// capped is a bytes.Buffer that stops growing at max and remembers it did.
+// capped is a writer that keeps at most max bytes and remembers it dropped
+// some. The buffer is a NAMED field on purpose: embedding bytes.Buffer would
+// promote its ReadFrom, io.Copy would use it, and Write — the cap — would
+// never run.
 type capped struct {
-	bytes.Buffer
+	buf  bytes.Buffer
 	max  int
 	over bool
 }
 
 func (c *capped) Write(p []byte) (int, error) {
-	if room := c.max - c.Len(); room < len(p) {
+	if room := c.max - c.buf.Len(); room < len(p) {
 		c.over = true
 		if room > 0 {
-			c.Buffer.Write(p[:room])
+			c.buf.Write(p[:room])
 		}
 		return len(p), nil
 	}
-	return c.Buffer.Write(p)
+	return c.buf.Write(p)
 }
 
 // lookPath is a var so tests can pretend a binary exists.
@@ -258,40 +265,17 @@ func clampDur(d, lo, hi time.Duration) time.Duration {
 	return d
 }
 
-// ago renders a duration for a message: "3d 4h", "17h", "45m".
-func ago(d time.Duration) string {
+// Ago renders a duration for a message: "3d 4h", "17h", "45m".
+func Ago(d time.Duration) string {
 	if d < time.Hour {
-		return d.Truncate(time.Minute).String()
+		return strconv.Itoa(int(d/time.Minute)) + "m"
 	}
-	days := int(d / (24 * time.Hour))
-	hours := int((d % (24 * time.Hour)) / time.Hour)
+	days, hours := int(d/(24*time.Hour)), int((d%(24*time.Hour))/time.Hour)
 	switch {
 	case days == 0:
-		return itoa(hours) + "h"
+		return strconv.Itoa(hours) + "h"
 	case hours == 0:
-		return itoa(days) + "d"
+		return strconv.Itoa(days) + "d"
 	}
-	return itoa(days) + "d " + itoa(hours) + "h"
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		b[i] = '-'
-	}
-	return string(b[i:])
+	return strconv.Itoa(days) + "d " + strconv.Itoa(hours) + "h"
 }

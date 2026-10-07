@@ -18,11 +18,18 @@ package health
 // The edge state is PACKAGE-level, not per Detector: the manager rebuilds every
 // detector on a detectors.conf save and on a watched log's rotation, and a
 // per-Detector state re-published every open finding fleet-wide each time.
-// A daemon restart still re-publishes what is true once.
+// It is also saved to backupStatePath, so a daemon restart (every package
+// upgrade) does not re-announce every open finding on every node either.
+//
+// The events reach cfm-web through the webdetector history store (the node
+// fault sink): a node without the webdetector, or with its history off,
+// records nothing — see docs/backup-check.md.
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -42,14 +49,19 @@ const (
 	// backup_check_error is published (a CLI slow during the nightly run must
 	// not alert, then clear, then alert).
 	backupErrorAfter = 2
-	// backupCheckTimeout bounds one whole check; one still "running" past
-	// backupHungAfter is reported, since nothing else would ever say so.
-	backupCheckTimeout = 5 * time.Minute
+	// backupCheckTimeout bounds one whole check (each CLI call has its own
+	// 60s bound; the slowest adapter makes 6 of them); one still "running"
+	// past backupHungAfter is reported, since nothing else would ever say so.
+	backupCheckTimeout = 12 * time.Minute
 	backupHungAfter    = 3 * backupCheckTimeout
 )
 
 // backupCheckFunc is a var so tests can substitute the check.
 var backupCheckFunc = backupcheck.Check
+
+// backupStatePath keeps what has been published across daemon restarts. A var
+// so tests point it at a temp dir (CLAUDE.md §5); "" disables persistence.
+var backupStatePath = "/var/lib/cfm/backup_published.json"
 
 var lastBackupStatus atomic.Pointer[backupcheck.Status]
 
@@ -58,9 +70,9 @@ var lastBackupStatus atomic.Pointer[backupcheck.Status]
 func LastBackupStatus() *backupcheck.Status { return lastBackupStatus.Load() }
 
 type publishedBackup struct {
-	adapter  string
-	severity string
-	members  map[string]bool
+	Adapter  string          `json:"adapter"`
+	Severity string          `json:"severity"`
+	Members  map[string]bool `json:"members,omitempty"`
 }
 
 type backupState struct {
@@ -70,17 +82,56 @@ type backupState struct {
 	next       time.Time
 	pending    *backupcheck.Status
 	published  map[string]publishedBackup // finding key → what was published
+	loaded     bool                       // published read from backupStatePath
 	errStreak  map[string]int             // adapter → consecutive unreadable checks
 	hungPublic bool
+}
+
+func (b *backupState) loadLocked() {
+	if b.loaded {
+		return
+	}
+	b.loaded = true
+	b.published = map[string]publishedBackup{}
+	if backupStatePath == "" {
+		return
+	}
+	if raw, err := os.ReadFile(backupStatePath); err == nil {
+		if err := json.Unmarshal(raw, &b.published); err != nil {
+			b.published = map[string]publishedBackup{}
+		}
+	}
+}
+
+func (b *backupState) saveLocked() {
+	if backupStatePath == "" {
+		return
+	}
+	raw, err := json.Marshal(b.published)
+	if err != nil {
+		return
+	}
+	tmp := backupStatePath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		logging.Logf("[health] backup state not saved: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, backupStatePath); err != nil {
+		logging.Logf("[health] backup state not saved: %v", err)
+	}
 }
 
 // backup is the one backup edge state of this process (see the file comment).
 var backup = &backupState{}
 
-// resetBackupStateForTest gives a test a fresh process-level state.
+// resetBackupStateForTest gives a test a fresh process-level state, as after
+// a daemon restart WITHOUT a saved state file.
 func resetBackupStateForTest() {
 	backup = &backupState{}
 	lastBackupStatus.Store(nil)
+	if backupStatePath != "" {
+		_ = os.Remove(backupStatePath)
+	}
 }
 
 // tickBackup is called from RunOnce: publish a finished check, start a new one
@@ -163,14 +214,24 @@ func (d *Detector) publishBackup(st backupcheck.Status, host string, now time.Ti
 }
 
 func (b *backupState) publishLocked(st backupcheck.Status, host string, now time.Time) {
-	if b.published == nil {
-		b.published = map[string]publishedBackup{}
-	}
+	b.loadLocked()
 	if b.errStreak == nil {
 		b.errStreak = map[string]int{}
 	}
 	findings := st.Findings()
 	erred := map[string]bool{}
+	seen := map[string]bool{}
+	unknown := map[string]bool{}
+	panicked := false
+	for _, a := range st.Adapters {
+		seen[a.Name] = true
+		for _, k := range a.Unknown {
+			unknown[k] = true
+		}
+		if a.Name == "backupcheck" && a.Error != "" {
+			panicked = true
+		}
+	}
 	for _, a := range st.Adapters {
 		if a.Error == "" {
 			delete(b.errStreak, a.Name)
@@ -191,17 +252,17 @@ func (b *backupState) publishLocked(st backupcheck.Status, host string, now time
 		current[f.Key] = true
 		prev, seen := b.published[f.Key]
 		members := toSet(f.Members)
-		if seen && !sevRose(prev.severity, f.Severity) {
+		if seen && !sevRose(prev.Severity, f.Severity) {
 			grew := false
 			for m := range members {
-				if !prev.members[m] {
+				if !prev.Members[m] {
 					grew = true
 				}
 			}
 			if !grew {
 				// unchanged, shrunk or calmer: remember the current state so a
 				// member that comes back, or a severity that rises again, is news
-				b.published[f.Key] = publishedBackup{adapter: f.Adapter, severity: f.Severity, members: members}
+				b.published[f.Key] = publishedBackup{Adapter: f.Adapter, Severity: f.Severity, Members: members}
 				continue
 			}
 		}
@@ -209,29 +270,30 @@ func (b *backupState) publishLocked(st backupcheck.Status, host string, now time
 			Type: f.Type, Severity: f.Severity, Host: host, Key: f.Key,
 			Message: f.Message, When: now,
 		}) {
-			b.published[f.Key] = publishedBackup{adapter: f.Adapter, severity: f.Severity, members: members}
+			b.published[f.Key] = publishedBackup{Adapter: f.Adapter, Severity: f.Severity, Members: members}
 		}
 	}
 	for key, p := range b.published {
-		// An erroring adapter keeps its findings armed, but not its own error
-		// finding: that one clears the moment the adapter reads again.
-		if !current[key] && (!erred[p.adapter] || strings.HasSuffix(key, ":error")) {
+		if current[key] || unknown[key] {
+			continue
+		}
+		// Re-arm only what this check positively saw resolved: the adapter
+		// read fine (an erroring one keeps its findings armed — but not its
+		// own error finding, which clears the moment it reads again), it was
+		// in this check at all (a CLI briefly off PATH proves nothing), and the
+		// check did not panic.
+		if panicked {
+			continue
+		}
+		if strings.HasSuffix(key, ":error") || (seen[p.Adapter] && !erred[p.Adapter]) {
 			delete(b.published, key)
 		}
 	}
+	b.saveLocked()
 }
 
 func sevRose(from, to string) bool {
-	rank := func(s string) int {
-		switch s {
-		case backupcheck.SevCritical:
-			return 2
-		case backupcheck.SevWarning:
-			return 1
-		}
-		return 0
-	}
-	return rank(to) > rank(from)
+	return backupcheck.SevRank(to) > backupcheck.SevRank(from)
 }
 
 func toSet(xs []string) map[string]bool {
@@ -242,17 +304,4 @@ func toSet(xs []string) map[string]bool {
 	return m
 }
 
-// ago renders a duration for a message: "3d 4h", "17h", "45m".
-func ago(d time.Duration) string {
-	if d < time.Hour {
-		return d.Truncate(time.Minute).String()
-	}
-	days, hours := int(d/(24*time.Hour)), int((d%(24*time.Hour))/time.Hour)
-	switch {
-	case days == 0:
-		return fmt.Sprintf("%dh", hours)
-	case hours == 0:
-		return fmt.Sprintf("%dd", days)
-	}
-	return fmt.Sprintf("%dd %dh", days, hours)
-}
+func ago(d time.Duration) string { return backupcheck.Ago(d) }

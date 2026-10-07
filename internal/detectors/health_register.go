@@ -105,7 +105,7 @@ func init() {
 			BackupEvery:             kvDur(kv, "BACKUP_EVERY", healthDefaultBackupEvery),
 			BackupStuckAfter:        kvDur(kv, "BACKUP_STUCK_AFTER", healthDefaultBackupStuckAfter),
 			BackupProxmoxStaleAfter: kvDur(kv, "BACKUP_PROXMOX_STALE", healthDefaultBackupProxmoxStale),
-			BackupDestFreeMinPct:    kvFlt(kv, "BACKUP_DEST_FREE_PCT", healthDefaultBackupDestFreePct),
+			BackupDestFreeMinPct:    backupDestFreePct(kvFlt(kv, "BACKUP_DEST_FREE_PCT", healthDefaultBackupDestFreePct)),
 		}
 
 		d := health.New(cfg)
@@ -114,4 +114,14 @@ func init() {
 		// Implement with a ticker inside health.New(..). No core.LineSource needed.
 		return d, nil
 	})
+}
+
+// backupDestFreePct maps the config value to the check's threshold: 0 (or
+// less) turns the destination free-space check off (backupcheck reads a
+// negative threshold as off; a zero there would mean "use the default").
+func backupDestFreePct(v float64) float64 {
+	if v <= 0 {
+		return -1
+	}
+	return v
 }

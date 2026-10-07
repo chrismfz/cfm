@@ -74,7 +74,7 @@ func TestVirtualminFailedScheduledRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := byType(fs)[TypeFailed]
-	if f.Severity != SevCritical || f.Key != "vm:run:1791421246-1-1" || !strings.Contains(f.Message, "90 domain(s) failed") {
+	if f.Severity != SevCritical || f.Key != "vm:failed:"+daily || !strings.Contains(f.Message, "90 domain(s) failed") {
 		t.Fatalf("want failed run, got %+v", fs)
 	}
 }
@@ -198,7 +198,10 @@ func TestCronPeriodIsTheLongestGap(t *testing.T) {
 		{map[string]string{"hours": "2", "weekdays": "0-6"}, 24 * time.Hour},     // every day
 		{map[string]string{"hours": "1-5", "weekdays": "*"}, 20 * time.Hour},     // 05→01
 		{map[string]string{"hours": "*/6", "weekdays": "*"}, 6 * time.Hour},
-		{map[string]string{"hours": "3", "days": "1"}, 31 * 24 * time.Hour},
+		{map[string]string{"hours": "3", "days": "1"}, 32 * 24 * time.Hour},  // monthly
+		{map[string]string{"hours": "3", "days": "*/2"}, 3 * 24 * time.Hour}, // every other day (+1 for the month end)
+		{map[string]string{"hours": "3", "days": "1-31"}, 24 * time.Hour},    // every day
+		{map[string]string{"hours": "3", "days": "*", "months": "1,7"}, 31 * 24 * time.Hour},
 		{map[string]string{"special": ""}, 0},
 	} {
 		if got := cronPeriod(c.kv); got != c.want {
@@ -224,5 +227,19 @@ func TestScheduleInfoReadsTheScheduleFile(t *testing.T) {
 	}
 	if _, ok := got["../etc"]; ok {
 		t.Fatal("a path-like id must never be read")
+	}
+}
+
+func TestRedactURLDropsCredentials(t *testing.T) {
+	for in, want := range map[string]string{
+		"ssh://user:s3cret@rosso.myip.gr:65535:/opt/x/%Y":                              "ssh://user:***@rosso.myip.gr:65535:/opt/x/%Y",
+		"ssh://athensescorts:|root|.ssh|id_rsa_backup@rosso.myip.gr:65535:/opt/store1": "ssh://athensescorts:***@rosso.myip.gr:65535:/opt/store1",
+		"s3://AKIA:abc/def@bucket/path":                                                "s3://AKIA:***@bucket/path",
+		"/backups/daily/%Y-%m-%d":                                                      "/backups/daily/%Y-%m-%d",
+		"ftp://anon@host/dir":                                                          "ftp://anon@host/dir",
+	} {
+		if got := redactURL(in); got != want {
+			t.Errorf("%q: got %q want %q", in, got, want)
+		}
 	}
 }

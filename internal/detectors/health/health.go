@@ -173,7 +173,6 @@ type Detector struct {
 	smartEverHealthy   map[string]bool // device seen PASS at least once
 	smartMissingStreak map[string]int  // consecutive cycles absent
 	smartDeadPublished map[string]bool // disk_dead already emitted for this device
-
 }
 
 func New(cfg Config) *Detector {
