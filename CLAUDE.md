@@ -833,6 +833,7 @@ because of that. Hard-won points:
 | Traffic Rules UX review & redesign proposal (cfm-admin rules builder / recipes) | `docs/traffic-rules-ux-proposal.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
 | Backup check (JetBackup / Virtualmin / Proxmox → detection_history) | `docs/backup-check.md` |
+| Mail abuse findings (hacked site / contact form, mailbox spike, hijacked mailbox → detection_history) | `docs/mail-abuse.md` |
 | Site Cache (per-vhost edge caching): design + as-built / operating it | `docs/site-cache-design.md` · `docs/site-cache-runbook.md` |
 
 **Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):

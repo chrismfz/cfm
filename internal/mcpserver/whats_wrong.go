@@ -700,9 +700,56 @@ func evalMailQueue(body json.RawMessage, sources map[string]string) []finding {
 	return nil
 }
 
+// mailAbuseView mirrors mailtraffic.AbuseView (the node's mail-abuse findings,
+// docs/mail-abuse.md) as served under `abuse` by /api/v1/mail/traffic.
+type mailAbuseView struct {
+	Type     string `json:"type"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+	Subject  string `json:"subject"`
+	Context  *struct {
+		Subjects    []string `json:"subjects"`
+		RcptDomains []string `json:"rcpt_domains"`
+		CopiedTo    string   `json:"copied_to"`
+	} `json:"context"`
+	Countries []string `json:"countries"`
+}
+
+var mailAbuseTitles = map[string]string{
+	"mail_script_spike":   "site sending spam through its scripts (hacked site / contact form)",
+	"mail_outbound_spike": "mailbox sending far above its history",
+	"mail_hijack":         "mailbox hijacked (logins from many countries/IPs)",
+}
+
+func evalMailAbuse(views []mailAbuseView) []finding {
+	var fs []finding
+	for _, v := range views {
+		sev := sevWarning
+		if v.Severity == "critical" {
+			sev = sevCritical
+		}
+		title := mailAbuseTitles[v.Type]
+		if title == "" {
+			title = v.Type
+		}
+		detail := v.Message
+		if c := v.Context; c != nil {
+			if len(c.Subjects) > 0 {
+				detail += " | subjects: «" + strings.Join(c.Subjects, "» «") + "»"
+			}
+			if len(c.RcptDomains) > 0 {
+				detail += " | recipient domains: " + strings.Join(c.RcptDomains, ", ")
+			}
+		}
+		fs = append(fs, finding{sev, "mail", title, detail, "mail_traffic", nil})
+	}
+	return fs
+}
+
 func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding {
 	var t struct {
-		Available bool `json:"available"`
+		Available bool             `json:"available"`
+		Abuse     *[]mailAbuseView `json:"abuse"`
 		Traffic   struct {
 			Anomalies []struct {
 				Addr            string  `json:"addr"`
@@ -719,6 +766,12 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 	if !t.Available {
 		sources["mail_traffic"] = "unavailable"
 		return nil
+	}
+	// The node's mail-abuse check (docs/mail-abuse.md) already covers the
+	// outbound anomalies below, with severity and context; the raw anomalies
+	// are the fallback for a node that predates it or has not checked yet.
+	if t.Abuse != nil {
+		return evalMailAbuse(*t.Abuse)
 	}
 	var fs []finding
 	for i, a := range t.Traffic.Anomalies {

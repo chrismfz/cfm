@@ -609,3 +609,19 @@ func TestEvalHealthFrontendNoneIsSilent(t *testing.T) {
 		t.Fatalf("frontend down must stay critical: %+v", fs)
 	}
 }
+
+// The node's mail-abuse findings replace the raw anomalies, with severity and
+// the context that tells a newsletter from spam.
+func TestEvalMailTrafficUsesTheAbuseFindings(t *testing.T) {
+	body := `{"available":true,"abuse":[{"type":"mail_script_spike","severity":"critical","message":"hotellito: 86 messages sent by scripts in 2h","subject":"hotellito",
+		"context":{"subjects":["Лазерные сканеры"],"rcpt_domains":["gmail.com×812"],"copied_to":"litohotel@outlook.com"}}],
+		"traffic":{"anomalies":[{"addr":"a@x","recent":90,"ratio":9,"kind":"spike"}]}}`
+	got := evalMailTraffic(json.RawMessage(body), map[string]string{})
+	if len(got) != 1 || got[0].Severity != sevCritical || !strings.Contains(got[0].Title, "contact form") ||
+		!strings.Contains(got[0].Detail, "«Лазерные сканеры»") || !strings.Contains(got[0].Detail, "gmail.com×812") {
+		t.Fatalf("want the abuse finding only, with context: %+v", got)
+	}
+	if got := evalMailTraffic(json.RawMessage(`{"available":true,"abuse":[],"traffic":{"anomalies":[{"addr":"a@x","recent":90,"ratio":9,"kind":"spike"}]}}`), map[string]string{}); len(got) != 0 {
+		t.Fatalf("a checked node with nothing open has nothing to say: %+v", got)
+	}
+}
