@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"cfm/internal/mailmeter"
 	"cfm/internal/mailqueue"
 )
 
@@ -398,5 +399,92 @@ func TestMappedIPv4IsTheSameSource(t *testing.T) {
 	}
 	if a, _ := authSource("2a02:587:1:2:3:4:5:6"); a != "2a02:587:1:2::/64" {
 		t.Fatalf("IPv6 /64: %q", a)
+	}
+}
+
+// orion, 8 Oct 2026: info@ read from the office (GR), the Mail.ru / VK
+// collector (rimap37.m.smailru.net, RU) and a mail app on Google Cloud (US)
+// within an hour — one owner, not a hijack.
+func TestMailCollectorsAreNotAHijack(t *testing.T) {
+	orig := geoOf
+	geoOf = func(ip string) (string, uint) {
+		switch {
+		case ip == "176.112.169.196":
+			return "RU", 47764
+		case strings.HasPrefix(ip, "34.27."):
+			return "US", 396982
+		}
+		return "GR", 6799
+	}
+	t.Cleanup(func() { geoOf = orig })
+	tr := newTracker()
+	for _, ip := range []string{"5.203.22.73", "176.112.169.196", "34.27.14.24", "34.27.195.226"} {
+		tr.observeMaillog("Oct  8 18:03:05 orion dovecot[1]: imap-login: Logged in: user=<info@socialpower.gr>, method=PLAIN, rip="+ip+", lip=157.90.128.246, mpid=1, TLS, session=<a>", time.Now())
+	}
+	if fs, _, _ := tr.evaluate(openTemp(t), time.Now()); len(fs) != 0 {
+		t.Fatalf("office + mail collectors is not a hijack: %+v", fs)
+	}
+}
+
+// A MILD volume spike pages only from abuseAlertFloor messages; an open one
+// stays judged below it so it does not flap; a small one far above its usual,
+// or one that looks like abuse, still pages.
+func TestSpikeAlertFloor(t *testing.T) {
+	T := time.Date(2026, 10, 8, 12, 0, 0, 0, time.Local)
+	baseline := func(t *testing.T, r func(int) mailmeter.Report) *Store {
+		st := openTemp(t)
+		for d := 1; d <= 5; d++ {
+			for h := 0; h < 3; h++ {
+				if err := st.AddReport(T.Add(-time.Duration(d)*24*time.Hour+time.Duration(h)*time.Hour), r(4)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return st
+	}
+	for _, kind := range []struct {
+		name, key string
+		r         func(int) mailmeter.Report
+	}{
+		{"script", "mail:script:shop", func(n int) mailmeter.Report { return localReport("shop", n) }},
+		{"mailbox", "mail:out:info@shop.gr", func(n int) mailmeter.Report { return outboundReport("info@shop.gr", n) }},
+	} {
+		t.Run(kind.name, func(t *testing.T) {
+			st := baseline(t, kind.r)
+			if err := st.AddReport(T.Add(-time.Hour), kind.r(37)); err != nil {
+				t.Fatal(err)
+			}
+			tr := newTracker()
+			if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 0 {
+				t.Fatalf("37 messages at ~4.6× is not an alert: %+v", fs)
+			}
+			if fs, _, _, _ := tr.evaluateWith(st, T, map[string]bool{kind.key: true}, nil); len(fs) != 1 {
+				t.Fatalf("an open spike is still judged below the floor: %+v", fs)
+			}
+			if err := st.AddReport(T.Add(-30*time.Minute), kind.r(30)); err != nil {
+				t.Fatal(err)
+			}
+			if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 1 || fs[0].Severity != "warning" {
+				t.Fatalf("67 messages is a (warning) alert: %+v", fs)
+			}
+		})
+	}
+}
+
+// A quiet site hacked: 45 messages at 45× its usual is below the floor in
+// volume, not in ratio — it pages. So does a small spike sending as a
+// foreign domain.
+func TestSmallButAbusiveSpikesStillAlert(t *testing.T) {
+	a := Anomaly{Addr: "quiet", Recent: 45, Ratio: 45, Kind: "spike"}
+	if belowAlertFloor(a, Context{}, false) {
+		t.Fatal("45 at 45× must alert")
+	}
+	mild := Anomaly{Addr: "shop", Recent: 37, Ratio: 4.6, Kind: "spike"}
+	if !belowAlertFloor(mild, Context{}, false) {
+		t.Fatal("37 at 4.6× with a clean context is not an alert")
+	}
+	if belowAlertFloor(mild, Context{ForeignFrom: true}, false) || belowAlertFloor(mild, Context{CopiedTo: "owner@shop.gr"}, false) ||
+		belowAlertFloor(mild, Context{OtherFrom: true}, false) {
+		t.Fatal("a small spike that looks like abuse must alert")
 	}
 }
