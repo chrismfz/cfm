@@ -39,6 +39,11 @@ type Config struct {
 	// MailAbuseAlertOff turns off the Mail Monitor's abuse findings
 	// (MAIL_ABUSE_ALERT = 0; on by default — docs/mail-abuse.md).
 	MailAbuseAlertOff bool
+	// MailRBLSpamhausDQSKey: a Spamhaus Data Query Service key. With it the
+	// RBL check asks <key>.zen.dq.spamhaus.net, which answers whatever the
+	// node's resolver (public resolvers are refused by zen.spamhaus.org). A
+	// credential: never logged.
+	MailRBLSpamhausDQSKey string
 }
 
 // --- Categories ---
@@ -832,6 +837,8 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		// --- Outbound Abuse Sentinel (phase 1) ---
 		case "MAIL_ABUSE_ALERT":
 			cfg.MailAbuseAlertOff = !parseBool(val)
+		case "MAIL_RBL_SPAMHAUS_DQS_KEY":
+			cfg.MailRBLSpamhausDQSKey = strings.TrimSpace(val)
 		case "OUTBOUND_ENABLED":
 			cfg.Outbound.Enabled = parseBool(val)
 		case "OUTBOUND_NFLOG":
@@ -1153,7 +1160,7 @@ func IsKnownKey(key string) bool {
 		"PS_ENABLED", "PS_INTERVAL", "PS_MODE", "PS_TTL", "PS_LIMIT", "PS_DIVERSITY", "PS_TRACK_TCP", "PS_TRACK_UDP", "PS_ONLY_PORTS", "PS_PORTS",
 		"SMTP_BLOCK", "SMTP_PORTS", "SMTP_ALLOWLOCAL", "SMTP_REDIRECT", "SMTP_REDIRECT_PORT", "SMTP_ALLOWUSER", "SMTP_ALLOWGROUP", "SMTP_ALLOW_UIDS", "SMTP_ALLOW_GIDS",
 		"SMTP_LOG", "SMTP_LOG_LIMIT", "SMTP_LOG_BURST", "SMTP_LOG_NFLOG", "SMTP_LOG_ENRICH",
-		"MAIL_ABUSE_ALERT",
+		"MAIL_ABUSE_ALERT", "MAIL_RBL_SPAMHAUS_DQS_KEY",
 		"OUTBOUND_ENABLED", "OUTBOUND_NFLOG", "OUTBOUND_WINDOW_SECONDS", "OUTBOUND_SMTP_CONN_PER_MIN", "OUTBOUND_SCAN_UNIQUE_DST_PER_MIN", "OUTBOUND_HTTP_RATE_PER_MIN", "OUTBOUND_SMTP_PORTS", "OUTBOUND_SCAN_PORTS", "OUTBOUND_HTTP_PORTS", "OUTBOUND_LOG_DEDUP_SECONDS", "OUTBOUND_NOTIFY_SEVERITY", "OUTBOUND_QUEUE_SAMPLES", "OUTBOUND_ALLOW_USERS", "OUTBOUND_ALLOW_GROUPS", "OUTBOUND_ALLOW_UIDS", "OUTBOUND_ALLOW_GIDS", "OUTBOUND_LOG_ENRICH", "OUTBOUND_HTTP_ATTRIBUTION_ENABLED", "OUTBOUND_DNS_PER_MIN", "OUTBOUND_DNS_DEBUG_ENABLED", "OUTBOUND_DNS_DEBUG_SAMPLE_COUNT", "OUTBOUND_DNS_DEBUG_DURATION_SEC", "OUTBOUND_DNS_DEBUG_DIR",
 		"LISTEN_ADDRESS", "PORT", "TLS_PORT", "TLS_LISTEN_ADDRESS",
 		"AUTH_DB_PATH", "AUTH_SESSION_DB_PATH", "AUTH_MFA_ENCRYPTION_KEY", "AUTH_MFA_LOGIN_VERIFY_ENABLED", "AUTH_MFA_TOTP_ENROLL_ENABLED", "AUTH_MFA_TOTP_PILOT_USERS", "AUTH_SESSION_TTL", "AUTH_SECURE_COOKIE", "AUTH_COOKIE_NAME",

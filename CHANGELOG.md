@@ -17,6 +17,17 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Spamhaus through DQS.** The fleet resolves through public resolvers, and
+  Spamhaus refuses `zen.spamhaus.org` queries from them, so the RBL check never
+  saw Spamhaus. `MAIL_RBL_SPAMHAUS_DQS_KEY` in cfm.conf makes it ask
+  `<key>.zen.dq.spamhaus.net` instead (the key is never logged or shown).
+
+### Changed
+- **Bounces are not a queue hog.** Frozen bounce messages (null sender `<>`)
+  piling up are the normal state of a cPanel queue; `mail_queue_hog` no longer
+  counts them, and an open one closes saying so.
+
 ### Fixed
 - **Mail hijack false positive:** a mailbox read by mail services for its
   owner (Mail.ru / VK's collector behind the myMail app, a mail app or CRM on

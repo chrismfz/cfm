@@ -653,6 +653,9 @@ func runDaemon(args []string) {
 	// Its abuse findings (hacked site / contact form, mailbox spike, hijacked
 	// mailbox → cfm-web alerts) are on unless MAIL_ABUSE_ALERT = 0.
 	mailtraffic.SetAbuseAlert(engineCfg == nil || !engineCfg.MailAbuseAlertOff)
+	if engineCfg != nil {
+		mailtraffic.SetSpamhausDQSKey(engineCfg.MailRBLSpamhausDQSKey)
+	}
 	defer mailtraffic.Shutdown()
 
 	// Per-tenant CPU signal (CloudLinux LVE). Starts an in-memory sampler of
