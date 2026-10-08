@@ -19,9 +19,10 @@ func orionJobs(running bool, lastRun, lastCompleted, nextRun string) string {
 ],"total":2}}`, orionDest, nextRun, lastRun, lastCompleted, running, orionDest)
 }
 
-// orionLogs: the Daily-Monthly runs of 18–21 Sep (status 1, 4, 4, then the
-// 16-day run), the daily config job, and the plugin/integrity noise that
-// shares the log stream. end21 = "" means the 21 Sep run is still going.
+// orionLogs: the Daily-Monthly runs of 18–21 Sep (status 1 = completed, then
+// 4, 4 = partially completed: an account over its disk quota, then the 16-day
+// run), the daily config job, and the plugin/integrity noise that shares the
+// log stream. end21 = "" means the 21 Sep run is still going.
 func orionLogs(end21 string, status21 int) string {
 	run21 := fmt.Sprintf(`{"_id":"run21","start_time":"2026-09-21T01:15:00+00:00","end_time":%q,"status":%d,"type":1,"info":{"Backup":"Daily-Monthly","ID":"603f830764375f7820538382","Total Accounts":199}}`, end21, status21)
 	return `{"success":1,"message":"","data":{"logs":[
@@ -54,9 +55,9 @@ func byType(fs []Finding) map[string]Finding {
 	return m
 }
 
-// 19 Sep, after the first failed run: the failure is reported at once, and
-// nothing is stale yet (last success 18 Sep ~02:23, a daily job allows 38h).
-func TestJetBackupOrion19SepFailedRunIsCritical(t *testing.T) {
+// 19 Sep, after the first partial run: a warning, not a failure, and nothing
+// is stale (a partial run is a backup, and a daily job allows 38h).
+func TestJetBackupOrion19SepPartialRunIsAWarning(t *testing.T) {
 	jobs := orionJobs(false, "2026-09-19T01:15:02+00:00", "2026-09-19T02:24:21+00:00", "2026-09-20T01:15:00+00:00")
 	// keep only the runs that existed on 19 Sep 03:00
 	logs := removeLogs(orionLogs("", 0), "run21", "run20", "cfg21", "cfg06", "integ", "imu")
@@ -65,16 +66,19 @@ func TestJetBackupOrion19SepFailedRunIsCritical(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := byType(fs)
-	f, ok := got[TypeFailed]
-	if !ok || f.Severity != SevCritical || f.Key != "jb:failed:603f830764375f7820538382" || !strings.Contains(f.Message, "Daily-Monthly") {
-		t.Fatalf("want critical backup_failed for run19, got %+v", fs)
+	f, ok := got[TypePartial]
+	if !ok || f.Severity != SevInfo || f.Key != "jb:partial:603f830764375f7820538382" || !strings.Contains(f.Message, "Daily-Monthly") {
+		t.Fatalf("want an info backup_partial for run19, got %+v", fs)
+	}
+	if _, ok := got[TypeFailed]; ok {
+		t.Fatalf("status 4 is Partially Completed, not a failure: %+v", fs)
 	}
 	if _, ok := got[TypeStale]; ok {
-		t.Fatalf("not stale yet on 19 Sep: %+v", fs)
+		t.Fatalf("not stale on 19 Sep: %+v", fs)
 	}
 }
 
-// 23 Sep: the 21 Sep run has been going for ~2 days, no success since 18 Sep.
+// 23 Sep: the 21 Sep run has been going for ~2 days, no backup since 20 Sep.
 func TestJetBackupOrionStuckRunIsStuckAndStale(t *testing.T) {
 	jobs := orionJobs(true, "2026-09-21T01:15:02+00:00", "2026-09-20T02:24:17+00:00", "2026-09-22T01:15:00+00:00")
 	logs := removeLogs(orionLogs("", 0), "cfg06", "integ", "imu")
@@ -86,37 +90,57 @@ func TestJetBackupOrionStuckRunIsStuckAndStale(t *testing.T) {
 	if f := got[TypeStuck]; f.Severity != SevCritical || f.Key != "jb:stuck:603f830764375f7820538382" {
 		t.Fatalf("want backup_stuck, got %+v", fs)
 	}
-	if f := got[TypeStale]; f.Severity != SevCritical || !strings.Contains(f.Message, "2026-09-18T02:23:01Z") {
-		t.Fatalf("want backup_stale measured from the 18 Sep success, got %+v", fs)
+	if f := got[TypeStale]; f.Severity != SevCritical || !strings.Contains(f.Message, "2026-09-20T02:24:17Z") {
+		t.Fatalf("want backup_stale measured from the 20 Sep (partial) backup, got %+v", fs)
 	}
-	// the latest FINISHED run (20 Sep) failed too
-	if f := got[TypeFailed]; f.Key != "jb:failed:603f830764375f7820538382" || !strings.Contains(f.Message, "2026-09-20T02:24:17Z") {
-		t.Fatalf("want backup_failed for run20, got %+v", fs)
+	// the latest FINISHED run (20 Sep) was partial
+	if f := got[TypePartial]; f.Key != "jb:partial:603f830764375f7820538382" || !strings.Contains(f.Message, "2026-09-20T02:24:17Z") {
+		t.Fatalf("want backup_partial for run20, got %+v", fs)
 	}
 	for _, j := range jobsOut {
-		if j.Name == "Daily-Monthly" && (!j.Running || j.LastSuccess == nil || !j.LastSuccess.Equal(ts("2026-09-18T02:23:01Z"))) {
+		if j.Name == "Daily-Monthly" && (!j.Running || j.LastSuccess == nil || !j.LastSuccess.Equal(ts("2026-09-20T02:24:17Z"))) {
 			t.Fatalf("job summary wrong: %+v", j)
 		}
 	}
 }
 
-// 7 Oct (today): the run ended — failed — and last_completed reads TODAY.
-// It must still be stale: last_completed advances on failed runs.
+// The 16-day run ends FAILED and last_completed reads TODAY. It must still be
+// stale: last_completed advances on failed runs.
 func TestJetBackupLastCompletedOnAFailedRunIsNotFreshness(t *testing.T) {
 	jobs := orionJobs(false, "2026-09-21T01:15:02+00:00", "2026-10-07T10:28:07+00:00", "2026-10-08T01:15:00+00:00")
-	_, fs, err := evalJetBackup([]byte(jobs), []byte(orionLogs("2026-10-07T10:28:07+00:00", 4)), ts("2026-10-07T19:00:00Z"), Thresholds{})
+	_, fs, err := evalJetBackup([]byte(jobs), []byte(orionLogs("2026-10-07T10:28:07+00:00", 2)), ts("2026-10-07T19:00:00Z"), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := byType(fs)
-	if f := got[TypeStale]; f.Type == "" || !strings.Contains(f.Message, "19d") {
-		t.Fatalf("want stale ~19d despite last_completed=today, got %+v", fs)
+	if f := got[TypeStale]; f.Type == "" || !strings.Contains(f.Message, "17d") {
+		t.Fatalf("want stale ~17d despite last_completed=today, got %+v", fs)
 	}
-	if f := got[TypeFailed]; f.Key != "jb:failed:603f830764375f7820538382" || !strings.Contains(f.Message, "2026-10-07T10:28:07Z") {
+	if f := got[TypeFailed]; f.Key != "jb:failed:603f830764375f7820538382" || !strings.Contains(f.Message, "last run FAILED") || !strings.Contains(f.Message, "2026-10-07T10:28:07Z") {
 		t.Fatalf("want the 16-day run reported failed, got %+v", fs)
 	}
 	if _, ok := got[TypeStuck]; ok {
 		t.Fatalf("not running any more, must not be stuck: %+v", fs)
+	}
+}
+
+// What orion really did on 7 Oct: the 16-day run ended Partially Completed.
+// That is a backup (a warning), and the stall itself was backup_stuck while it
+// ran.
+func TestJetBackupStatusNamesFollowJetBackup(t *testing.T) {
+	jobs := orionJobs(false, "2026-09-21T01:15:02+00:00", "2026-10-07T10:28:07+00:00", "2026-10-08T01:15:00+00:00")
+	for status, want := range map[int]string{4: TypePartial, 2: TypeFailed, 3: TypeFailed, 5: TypeFailed} {
+		_, fs, err := evalJetBackup([]byte(jobs), []byte(orionLogs("2026-10-07T10:28:07+00:00", status)), ts("2026-10-07T19:00:00Z"), Thresholds{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := byType(fs)
+		if _, ok := got[want]; !ok {
+			t.Fatalf("status %d: want %s, got %+v", status, want, fs)
+		}
+		if _, stale := got[TypeStale]; stale == (status == 4) {
+			t.Fatalf("status %d: stale must be %v, got %+v", status, status != 4, fs)
+		}
 	}
 }
 
@@ -136,13 +160,13 @@ func TestJetBackupHealthyJobReportsNothing(t *testing.T) {
 
 func TestJetBackupPartialRunIsAWarning(t *testing.T) {
 	jobs := orionJobs(false, "2026-09-21T01:15:02+00:00", "2026-09-21T02:30:00+00:00", "2026-09-22T01:15:00+00:00")
-	_, fs, err := evalJetBackup([]byte(jobs), []byte(orionLogs("2026-09-21T02:30:00+00:00", 2)), ts("2026-09-21T09:00:00Z"), Thresholds{})
+	_, fs, err := evalJetBackup([]byte(jobs), []byte(orionLogs("2026-09-21T02:30:00+00:00", 4)), ts("2026-09-21T09:00:00Z"), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := byType(fs)
-	if f := got[TypePartial]; f.Severity != SevWarning {
-		t.Fatalf("want backup_partial warning, got %+v", fs)
+	if f := got[TypePartial]; f.Severity != SevInfo {
+		t.Fatalf("want an info backup_partial, got %+v", fs)
 	}
 	if _, ok := got[TypeStale]; ok {
 		t.Fatal("a partial run is a success for freshness")

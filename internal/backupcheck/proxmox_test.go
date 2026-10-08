@@ -44,7 +44,7 @@ func TestProxmoxVegaToday(t *testing.T) {
 	}
 	got := byType(fs)
 	// latest FINISHED run: "job errors" → partial warning
-	if f := got[TypePartial]; f.Severity != SevWarning || f.Key != "pve:partial:vega" {
+	if f := got[TypePartial]; f.Severity != SevInfo || f.Key != "pve:partial:vega" {
 		t.Fatalf("want backup_partial for the job-errors run, got %+v", fs)
 	}
 	// uncovered guests, as one finding with members

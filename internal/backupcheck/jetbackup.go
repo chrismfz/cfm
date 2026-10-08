@@ -12,9 +12,13 @@ import (
 //
 // Two reads per check: the jobs (`listBackupJobs`) and the recent run history
 // (`listLogs`, newest first). Observed on the fleet (5.4.1.4):
-//   - a log's `status` is 1 for a completed run and 2 for a partial one; a
-//     failed run read 4 on orion (the "Backup Failed" runs of 19–21 Sep 2026).
-//     Anything but 1/2 is treated as failed and the raw status is reported.
+//   - a log's `status` is JetBackup's LOG_STATUS_*: 1 completed, 2 failed,
+//     3 aborted, 4 partially completed, 5 never finished (read from its UI
+//     code on titan, 8 Oct 2026; every run's log ends with that word). A
+//     partial run is the common case on a hosting node — one account over its
+//     own disk quota makes the whole job "Partially Completed" (orion and
+//     virgo, most nights) — so it is a warning, and it counts as a backup for
+//     freshness. Anything but 1/4 is treated as failed.
 //   - `type` 1 is a backup-job run; other types (8 = plugin scans, …) are
 //     ignored. A run's `info.ID` is the job's `_id`.
 //   - `last_completed` advances on FAILED runs too — see the package doc.
@@ -190,7 +194,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 		if r.latest == nil || laterEnd(end, r.latest) {
 			r.latest = l
 		}
-		if s := string(l.Status); (s == "1" || s == "2") && (r.success == nil || laterEnd(end, r.success)) {
+		if res := jbResult(string(l.Status)); (res == "ok" || res == "partial") && (r.success == nil || laterEnd(end, r.success)) {
 			r.success = l
 		}
 	}
@@ -234,13 +238,13 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 				findings = append(findings, Finding{
 					Type: TypeFailed, Severity: SevCritical, Adapter: "jetbackup",
 					Key:     "jb:failed:" + j.ID,
-					Message: fmt.Sprintf("%s: last run FAILED (status %s, ended %s)", label, r.latest.Status, end.UTC().Format(time.RFC3339)),
+					Message: fmt.Sprintf("%s: last run %s (ended %s)", label, jbStatusName(string(r.latest.Status)), end.UTC().Format(time.RFC3339)),
 				})
 			case "partial":
 				findings = append(findings, Finding{
-					Type: TypePartial, Severity: SevWarning, Adapter: "jetbackup",
+					Type: TypePartial, Severity: SevInfo, Adapter: "jetbackup",
 					Key:     "jb:partial:" + j.ID,
-					Message: fmt.Sprintf("%s: last run only PARTIALLY completed (ended %s)", label, end.UTC().Format(time.RFC3339)),
+					Message: fmt.Sprintf("%s: last run only PARTIALLY completed — some accounts were not backed up (ended %s)", label, end.UTC().Format(time.RFC3339)),
 				})
 			}
 		}
@@ -367,16 +371,30 @@ func laterEnd(end time.Time, than *jbLog) bool {
 	return !ok || end.After(t)
 }
 
+// jbResult maps JetBackup's LOG_STATUS_* (see the file comment).
 func jbResult(status string) string {
 	switch status {
 	case "1":
 		return "ok"
-	case "2":
+	case "4":
 		return "partial"
 	case "":
 		return "unknown"
 	}
 	return "failed"
+}
+
+// jbStatusName words a failed run's status as JetBackup's UI does.
+func jbStatusName(status string) string {
+	switch status {
+	case "2":
+		return "FAILED"
+	case "3":
+		return "was ABORTED"
+	case "5":
+		return "NEVER FINISHED"
+	}
+	return "FAILED (status " + status + ")"
 }
 
 // runPeriod is the LONG gap between a job's run starts — the 90th percentile,

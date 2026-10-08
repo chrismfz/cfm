@@ -34,8 +34,8 @@ nothing.
 
 | Type | Severity | Meaning |
 |---|---|---|
-| `backup_failed` | critical | the latest finished run failed (JetBackup status not 1/2; vzdump error text, or **3 `job errors` runs in a row** — vzdump says `job errors` even when every guest failed; Virtualmin `Failed`) |
-| `backup_partial` | warning | the latest run finished with some accounts/guests/domains failed (JetBackup 2; one or two vzdump `job errors`; Virtualmin OK with `failed_domains`) |
+| `backup_failed` | critical | the latest finished run failed (JetBackup Failed / Aborted / Never Finished, status 2/3/5; vzdump error text, or **3 `job errors` runs in a row** — vzdump says `job errors` even when every guest failed; Virtualmin `Failed`) |
+| `backup_partial` | info | the latest run finished with some accounts/guests/domains failed (JetBackup Partially Completed, status 4 — one account over its own disk quota is enough; one or two vzdump `job errors`; Virtualmin OK with `failed_domains`). **Info**, so it reaches the dashboard but no warning/critical route: on a hosting node it is the normal state (one customer over quota), and what matters is caught elsewhere — vzdump escalates to `backup_failed` after 3, and a job that backs up nothing goes `backup_stale` |
 | `backup_stale` | critical | no **successful** run for longer than the job's period × 1.5 + 2 h (Proxmox: `BACKUP_PROXMOX_STALE`, 8 d). A job is not judged before its own history (or, for Virtualmin, its schedule file) is that old |
 | `backup_stuck` | critical | a run still going after `BACKUP_STUCK_AFTER` (24 h), measured from that run's own start |
 | `backup_uncovered` | warning | Proxmox guests in no backup job, reported only by the node that hosts them (one finding; re-published when a NEW guest joins the set) |
@@ -67,7 +67,13 @@ without a sink).
 ## Rules learned from the fleet's real output
 
 - **Freshness = the last successful run in the history**, never the job's own
-  timestamps (orion: `last_completed` advanced on failed runs).
+  timestamps (orion: `last_completed` advanced on failed runs). A JetBackup
+  "Partially Completed" run counts: the other accounts were backed up.
+- **JetBackup's log `status` is its `LOG_STATUS_*`**: 1 Completed, 2 Failed,
+  3 Aborted, 4 Partially Completed, 5 Never Finished (from its UI code; every
+  run's log ends with the word). The first build read 2 as partial and 4 as
+  failed, so orion's and virgo's nightly partial runs (one account over its
+  own disk quota) were reported as `backup_failed` + `backup_stale`.
 - **The period is the LONG gap between runs, from how often the job actually
   started** (90th percentile of the gaps between run starts), not
   `next_run − last_run`: a stuck run pins `last_run`, which made orion's daily

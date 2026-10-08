@@ -26,6 +26,20 @@ back-filled here — see the git/PR history for that period.
   until someone presses Ack. Nodes without a cfm-web that knows the type
   just keep it in their history.
 
+### Fixed
+- **Backup check: a JetBackup "Partially Completed" run is no longer reported
+  as failed.** JetBackup's log status is 1 Completed, 2 Failed, 3 Aborted,
+  4 Partially Completed, 5 Never Finished; the check read 2 as partial and 4
+  as failed. A partial run (on orion and virgo most nights: one account over
+  its own disk quota) now raises `backup_partial` and counts as a backup for
+  freshness, so the false `backup_failed` + `backup_stale` alerts on those
+  nodes resolve on the next check after the upgrade.
+- **`backup_partial` is `info` (was `warning`)** for JetBackup, Virtualmin and
+  Proxmox: it shows on the cfm-web dashboard but reaches no warning/critical
+  alert route. A partial run is the normal state of a hosting node (one
+  customer over quota); vzdump still escalates to `backup_failed` after 3 in a
+  row, and a job that stops backing up goes `backup_stale`.
+
 ## 2026.10.07
 
 ### Added
