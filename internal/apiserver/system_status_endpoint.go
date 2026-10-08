@@ -260,6 +260,7 @@ func RegisterSystemStatus(m *http.ServeMux, backend firewall.Backend) {
 	m.HandleFunc("/api/v1/health/timeseries", handleHealthTimeseries)
 	m.HandleFunc("/api/v1/health/anomalies", handleHealthAnomalies)
 	m.HandleFunc("/api/v1/health/ingest", handleHealthIngest)
+	m.HandleFunc("/api/v1/health/backup", handleHealthBackup)
 }
 
 func requireHealthAccess(w http.ResponseWriter, r *http.Request) bool {

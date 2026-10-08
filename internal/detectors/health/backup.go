@@ -71,11 +71,19 @@ var backupCheckFunc = backupcheck.Check
 // so tests point it at a temp dir (CLAUDE.md §5); "" disables persistence.
 var backupStatePath = "/var/lib/cfm/backup_published.json"
 
-var lastBackupStatus atomic.Pointer[backupcheck.Status]
+var (
+	lastBackupStatus atomic.Pointer[backupcheck.Status]
+	backupEnabled    atomic.Bool
+)
 
 // LastBackupStatus is the most recent completed backup check on this node, or
 // nil before the first one (or when the check is disabled).
 func LastBackupStatus() *backupcheck.Status { return lastBackupStatus.Load() }
+
+// BackupCheckEnabled reports whether the health detector is running the backup
+// check (it is set on every health tick, so false also covers a node whose
+// health detector is off).
+func BackupCheckEnabled() bool { return backupEnabled.Load() }
 
 type publishedBackup struct {
 	Adapter  string          `json:"adapter"`
@@ -141,6 +149,7 @@ var backup = &backupState{}
 func resetBackupStateForTest() {
 	backup = &backupState{}
 	lastBackupStatus.Store(nil)
+	backupEnabled.Store(false)
 	if backupStatePath != "" {
 		_ = os.Remove(backupStatePath)
 	}
@@ -149,6 +158,7 @@ func resetBackupStateForTest() {
 // tickBackup is called from RunOnce: publish a finished check, start a new one
 // when due. Never blocks on the check itself.
 func (d *Detector) tickBackup(now time.Time, host string) {
+	backupEnabled.Store(d.cfg.BackupAlert)
 	if !d.cfg.BackupAlert {
 		return
 	}

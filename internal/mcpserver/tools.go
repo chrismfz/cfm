@@ -76,6 +76,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerAbuseShadow(srv, d)
 	registerLSMDetections(srv, d)
 	registerLSMStatus(srv, d)
+	registerBackupStatus(srv, d)
 	registerLVECPU(srv, d)
 	registerMySQLPressure(srv, d)
 	registerDBWebPressure(srv, d)

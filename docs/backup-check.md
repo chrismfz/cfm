@@ -64,6 +64,15 @@ webdetector registers. A node running without the webdetector, or with its
 history off, records nothing (the publish is retried and never marked sent
 without a sink).
 
+## Reading it
+
+`GET /api/v1/health/backup` (admin) and the node MCP tool `backup_status`
+return the latest check: `enabled` (BACKUP_ALERT), `status` (null until the
+first check finishes) with every job's last result and last success,
+`age_seconds`, and the open findings worst first. cfm-web polls it for its
+fleet Backups table and for `backup_unreported` (a node that used to report
+backups and stopped).
+
 ## Rules learned from the fleet's real output
 
 - **Freshness = the last successful run in the history**, never the job's own
