@@ -25,6 +25,10 @@ back-filled here — see the git/PR history for that period.
   the reminders, instead of reminding about a backup that already works
   until someone presses Ack. Nodes without a cfm-web that knows the type
   just keep it in their history.
+- **`GET /api/v1/health/backup` and the MCP tool `backup_status`:** the node's
+  latest backup check — every job with its last result and last successful
+  run, the open findings, and how old the check is. cfm-web polls it for its
+  fleet Backups table and to notice a node that stops reporting backups.
 
 ### Fixed
 - **Backup check: a JetBackup "Partially Completed" run is no longer reported
