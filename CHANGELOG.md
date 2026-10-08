@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.08
+
 ### Added
 - **Backup check: a fixed backup now says so (`backup_recovered`).** When a
   backup finding goes away (the next run succeeds, the CLI reads again, a
