@@ -278,9 +278,24 @@ func (e *Engine) shouldLogVhostSuppress(host string, now time.Time) bool {
     if last, ok := e.vhostSuppressLoggedAt[host]; ok && now.Sub(last) < win {
         return false
     }
+    // The abuse-shadow signals key this per (host, ip), so a rotating swarm
+    // would grow it for the Engine's life. An expired entry throttles nothing,
+    // so dropping it changes no answer.
+    if len(e.vhostSuppressLoggedAt) > vhostSuppressSweepAt && now.Sub(e.vhostSuppressSwept) >= time.Minute {
+        for k, t := range e.vhostSuppressLoggedAt {
+            if now.Sub(t) >= win {
+                delete(e.vhostSuppressLoggedAt, k)
+            }
+        }
+        e.vhostSuppressSwept = now
+    }
     e.vhostSuppressLoggedAt[host] = now
     return true
 }
+
+// vhostSuppressSweepAt is the map size past which shouldLogVhostSuppress
+// sweeps expired entries.
+const vhostSuppressSweepAt = 4096
 
 // keepManualOverSuppression is the shared "manual wins" handling for the
 // per-host exclude and ignore guards (kind is "exclude"/"ignore"). The caller

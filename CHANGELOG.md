@@ -47,8 +47,11 @@ back-filled here — see the git/PR history for that period.
   the read-back (`trp_get_translations_regular` with `string_ids` and no
   WordPress login). Its ban is held in code (`RULE_10019 = 1` arms it), because
   a translator whose login expired with the editor open sends the same request.
-  Updating the plugin is still the fix: an admin whose own language is a
-  secondary site language has the mail stored without the preview trick.
+  The rules read the request the way PHP does, count any value of a repeated
+  field, and block a matching request whose body the WAF could not see whole
+  (chunked, or past its 32 KB window) as `BODY_UNSEEN`. Updating the plugin is
+  still the fix: an admin whose own language is a secondary site language has
+  the mail stored without the preview trick.
 - **A crafted POST could freeze an edge worker for seconds (WAF rule 520,
   removed).** Rule 520 (SP Page Builder contact-form relay, released
   2026.10.06) scanned the posted recipient with a pattern that slows down
@@ -64,10 +67,13 @@ back-filled here — see the git/PR history for that period.
   PHP does.** PHP ends a name at a NUL byte and turns `.`, a space or an
   unmatched `[` into `_`, so `pagename%00x=…` reached WordPress as `pagename`
   while rule 10017 (CVE-2026-87902) did not see it. Rule 10017 and the new
-  TranslatePress rules now match those forms. Rule 10017 also picks the body
-  parser by the Content-Type's media type, as PHP does: a urlencoded body whose
-  Content-Type merely mentioned `multipart/form-data` in a parameter hid a
-  `pagename` traversal from it.
+  TranslatePress rules now match those forms. Rule 10017 also reads the body
+  the way PHP parses it: the parser is chosen by the Content-Type's media type,
+  and multipart bodies follow PHP's own rules (header continuation lines, the
+  5120-byte line cut, quoting). Before, a urlencoded body whose Content-Type
+  merely mentioned `multipart/form-data`, or a multipart field name split over
+  two header lines, hid a `pagename` traversal from it. The reader is checked
+  against a real PHP (`scripts/tests/php_request_fields_oracle.py`).
 
 ### Changed
 - **A `RULE_<id>` line in `[waf_security]` now honours an inline comment.**

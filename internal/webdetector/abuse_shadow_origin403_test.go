@@ -43,6 +43,43 @@ func TestParseTSV_UpstreamName(t *testing.T) {
 	if !ok || rec.UpstreamName != "" || rec.UA != "mozilla/5.0" {
 		t.Errorf("12 columns: ok=%v name=%q ua=%q", ok, rec.UpstreamName, rec.UA)
 	}
+	// A file TSV (escape=none) with a raw TAB inside the UA: the 13th field is
+	// not an upstream name, so it stays part of the UA, as before.
+	rec, ok = parseTSV(base + "\tsqlmap/1.7 (https://sqlmap.org)")
+	if !ok || rec.UpstreamName != "" || rec.UA != "mozilla/5.0\tsqlmap/1.7 (https://sqlmap.org)" {
+		t.Errorf("tab inside the UA: ok=%v name=%q ua=%q", ok, rec.UpstreamName, rec.UA)
+	}
+}
+
+// TestOrigin403Pending: the good-bot confirm is started for every IP still in
+// the tracker, not only those over the threshold on this tick.
+func TestOrigin403Pending(t *testing.T) {
+	e := &Engine{}
+	t0 := time.Unix(1791466170, 0)
+	e.trackOrigin403(t0, []origin403Burst{{host: "a.gr", ip: "66.249.75.64", post403: 31}})
+	got := e.origin403Pending([]origin403Burst{{host: "b.gr", ip: "1.2.3.4", post403: 40}})
+	if len(got) != 2 {
+		t.Fatalf("pending = %v, want the tracked IP and this tick's", got)
+	}
+}
+
+// TestShouldLogVhostSuppressSweeps: per-(host, ip) keys from a rotating swarm
+// do not accumulate; expired ones are dropped once the map is large.
+func TestShouldLogVhostSuppressSweeps(t *testing.T) {
+	e := &Engine{}
+	t0 := time.Unix(1791466170, 0)
+	for i := 0; i < vhostSuppressSweepAt+10; i++ {
+		e.shouldLogVhostSuppress(fmt.Sprintf("abuseshadow:o403:a.gr|10.0.%d.%d", i/256, i%256), t0)
+	}
+	if !e.shouldLogVhostSuppress("abuseshadow:o403:a.gr|192.0.2.1", t0.Add(time.Hour)) {
+		t.Fatal("a new key must log")
+	}
+	if n := len(e.vhostSuppressLoggedAt); n != 1 {
+		t.Errorf("expired keys must be swept, %d left", n)
+	}
+	if e.shouldLogVhostSuppress("abuseshadow:o403:a.gr|192.0.2.1", t0.Add(time.Hour+time.Minute)) {
+		t.Error("the throttle itself must still hold inside the window")
+	}
 }
 
 func TestIsOrigin403POST(t *testing.T) {
@@ -57,6 +94,7 @@ func TestIsOrigin403POST(t *testing.T) {
 		{"origin WAF with an empty body on another path", func(r *LogRec) { r.Bytes = 0 }, "/wp-json/batch/v1", true},
 		{"origin WAF, 107 bytes", func(r *LogRec) { r.Bytes = 107 }, "/wp/", true},
 		{"WordPress nonce refusal (-1) on admin-ajax", func(r *LogRec) { r.Bytes = 6 }, "/wp-admin/admin-ajax.php", false},
+		{"origin WAF, empty 403 on admin-ajax (WordPress's refusal is never empty)", func(r *LogRec) { r.Bytes = 0 }, "/wp-admin/admin-ajax.php", true},
 		{"WordPress refusal on admin-post", func(r *LogRec) { r.Bytes = 2 }, "/blog/wp-admin/admin-post.php", false},
 		{"gzipped WordPress refusal (mod_deflate)", func(r *LogRec) { r.Bytes = 26 }, "/wp-admin/admin-ajax.php", false},
 		{"CFM admin UI (daemon upstream)", nil, "/cfm-admin/api/v1/waf/rules", false},

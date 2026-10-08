@@ -553,7 +553,14 @@ points:
   promotion would have mis-armed autoblock. Key the
   detector on the exact endpoint/marker, reuse hardened helpers
   (`detect_upload_content`, not a raw `<?php` scan), and decide autoblock intent
-  in the same change.
+  in the same change. A rule keyed on a request FIELD reads it through
+  `php_request_fields` (`cfm_waf_detectors.lua`), never a hand-rolled split: a
+  field the edge reads differently from PHP is a bypass, and three review
+  rounds on 10017-10020 kept finding new ones (media type in a parameter,
+  multipart continuation lines, the 5120-byte line cut, `name==`, a decoy past
+  `max_input_vars`). Change that reader only with
+  `scripts/tests/php_request_fields_oracle.py check` passing against a real PHP
+  (`php -S` runs the same rfc1867.c as php-fpm), then `record` the CI fixture.
 
 ### Concurrency / process lifecycle
 Early bugs included zombie/unreaped detector tailer subprocesses, panics,

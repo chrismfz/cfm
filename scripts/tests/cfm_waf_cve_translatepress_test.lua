@@ -131,6 +131,23 @@ fires(post("/wp-login.php", "trp-edit-translation=preview", "action=lostpassword
            UE .. "; x=multipart/form-data"),
       "urlencoded body with a parameter naming multipart", LOST)
 
+do
+  -- WooCommerce handles the reset POST on any front-end URL; a chunked body
+  -- outside cfm.lua's body allowlist is never read.
+  local c = post("/", "trp-edit-translation=preview", "", UE)
+  c.headers["Transfer-Encoding"] = "chunked"
+  fires(c, "reset-preview parameter on a POST whose chunked body went unread", "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:BODY_UNSEEN", 10018)
+  local d = post("/", "trp-edit-translation=preview", ("x"):rep(100), UE)
+  d.headers["Content-Length"] = "70000"
+  fires(d, "reset-preview parameter with a body past the window", "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:BODY_UNSEEN", 10018)
+  -- the final field of a body that ends inside its headers is registered empty
+  fires(post("/my-account/lost-password/", "trp-edit-translation=preview",
+             '--b\r\nContent-Disposition: form-data; name="user_login"\r\n\r\nadmin\r\n--b\r\nContent-Disposition: form-data; name="wc_reset_password"\r\n',
+             "multipart/form-data; boundary=b"),
+        "WooCommerce field registered from headers that end the body", FORM)
+end
+clean(post("/contact/", "trp-edit-translation=preview", "your-name=A", UE, LOGIN_COOKIE),
+      "a logged-in translator's ordinary form in preview (body seen)")
 clean(get("/wp-login.php", "action=lostpassword&trp-edit-translation=preview"),
       "GET of the lost-password form in preview (only a POST sends the mail)")
 clean(get("/wp-login.php", "action=lostpassword"), "plain lost-password form")
@@ -205,6 +222,30 @@ do
         "multipart: a preamble before the first boundary", IDS)
   clean(post(AJAX, "", act .. part('Content-Disposition: form-data; name="string_ids"; filename="a.txt"', "[680]") .. fin, CT),
         "multipart: a file part goes to $_FILES, not $_POST")
+  -- Round 4 (each checked against php -S, see php_request_fields_oracle.py):
+  fires(post(AJAX, "", "--" .. B .. "X\r\n\r\n" .. act .. part('Content-Disposition: form-data; name="string_ids"', "[680]") .. fin, CT),
+        "multipart: a `--boundaryX` decoy line is not a boundary", IDS)
+  fires(post(AJAX, "", act .. part('Content-Disposition: form-data; name="string_\r\nids"', "[680]") .. fin, CT),
+        "multipart: a name split by a colon-less continuation line", IDS)
+  fires(post(AJAX, "", act .. part('Content-Disposition: form-data; name=="string_ids"', "[680]") .. fin, CT),
+        "multipart: name== (PHP skips repeated separators)", IDS)
+  fires(post(AJAX, "", act .. part("X: " .. ("p"):rep(5117) .. 'Content-Disposition: form-data; name="string_ids"', "[680]") .. fin, CT),
+        "multipart: a header cut at 5120 bytes starts a new header", IDS)
+end
+-- PHP stops at max_input_vars (1000): a trailing decoy duplicate is never seen.
+do
+  local pad = {}
+  for i = 1, 1000 do pad[#pad + 1] = "f" .. i .. "=" end
+  fires(post(AJAX, "", "action=trp_get_translations_regular&string_ids=%5B680%5D&" .. table.concat(pad, "&") .. "&action=x"),
+        "a trailing decoy action past max_input_vars", IDS)
+  fires(post(AJAX, "", "action=trp_get_translations_regular&string_ids=%5B680%5D&" .. table.concat(pad, "&") .. "&string_ids="),
+        "a trailing empty string_ids past max_input_vars", IDS)
+end
+-- action in the query, body not seen whole (chunked outside the body allowlist)
+do
+  local c = post(AJAX, "action=trp_get_translations_regular", "", UE)
+  c.headers["Transfer-Encoding"] = "chunked"
+  fires(c, "id lookup with an unread chunked body", "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:BODY_UNSEEN")
 end
 
 clean(post(AJAX, "", "action=trp_get_translations_regular&all_languages=false&security=abc&language=en_US"

@@ -847,6 +847,14 @@ function _M.check(ctx)
     return _body_lc
   end
 
+  -- The form fields PHP registers ($_GET, and $_POST for a POST), parsed
+  -- once and shared by the field-keyed CVE rules (10017, 10018/10019/10020).
+  local _php_fields
+  local function get_php_fields()
+    if not _php_fields then _php_fields = det.php_request_fields(m_lower, args, body, headers, det.PHP_FIELDS_WANT) end
+    return _php_fields
+  end
+
   local function get_norm_ab()
     if not _norm_ab then
       local budget = util.body_budget(headers)
@@ -1382,7 +1390,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_cve_wp_pagename_traversal, "block")
     if mode ~= "disabled" then
-      local tag = det.detect_cve_wp_pagename_traversal(uri, m_lower, args, body, headers, get_norm_ab())
+      local tag = det.detect_cve_wp_pagename_traversal(uri, m_lower, args, body, headers, get_norm_ab(), get_php_fields)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_87902:WORDPRESS:" .. tag, ttl, mode, RULE_IDS.rule_cve_wp_pagename_traversal) then goto done end
@@ -2227,7 +2235,7 @@ function _M.check(ctx)
     local mode_anon = rule_mode(CFG.rule_cve_translatepress_reset_preview, "block")
     local mode_auth = rule_mode(CFG.rule_cve_translatepress_reset_preview_authed, "block")
     if mode_anon ~= "disabled" or mode_auth ~= "disabled" then
-      local tag, logged_in = det.detect_cve_translatepress_reset_preview(m_lower, args, body, headers, cookie, get_norm_ab())
+      local tag, logged_in = det.detect_cve_translatepress_reset_preview(m_lower, args, body, headers, cookie, get_norm_ab(), get_php_fields)
       local mode = logged_in and mode_auth or mode_anon
       if tag and mode ~= "disabled" then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -2240,7 +2248,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_cve_translatepress_id_lookup, "block")
     if mode ~= "disabled" then
-      local tag = det.detect_cve_translatepress_id_lookup(args, body, headers, cookie, get_norm_ab())
+      local tag = det.detect_cve_translatepress_id_lookup(m_lower, args, body, headers, cookie, get_norm_ab(), get_php_fields)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:" .. tag, ttl, mode, RULE_IDS.rule_cve_translatepress_id_lookup) then goto done end

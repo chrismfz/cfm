@@ -57,16 +57,41 @@ type LogRec struct {
 
 // parseTSV parses the TSV log format used by access_cfm_tsv.log.
 // ts ip host method uri proto status bytes rt urt ref ua
+// isUpstreamName: "-" or an nginx upstream name as the confs write them
+// (cfm_apache, cfm_challenge, ...): lowercase letters, digits and `_`.
+func isUpstreamName(s string) bool {
+	if s == "-" {
+		return true
+	}
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func parseTSV(line string) (LogRec, bool) {
-	// 12 columns, or 13 with the upstream name (log-cfm.lua); a 13-column
-	// split keeps a 12-column line's UA whole (the edge strips tabs from it).
+	// 12 columns, or 13 with the upstream name (log-cfm.lua). The file-based
+	// TSV formats (log_format ... escape=none) can carry a raw TAB inside the
+	// Referer or UA, so a 13th field counts as the upstream name only when it
+	// looks like one; otherwise it is folded back into the UA, as the 12-way
+	// split always did.
 	f := strings.SplitN(line, "\t", 13)
 	if len(f) < 12 {
 		return LogRec{}, false
 	}
 	upName := ""
 	if len(f) == 13 {
-		upName = f[12]
+		if isUpstreamName(f[12]) {
+			upName = f[12]
+		} else {
+			f[11] += "\t" + f[12]
+		}
 	}
 	ts, _ := strconv.ParseFloat(f[0], 64)
 	st, _ := strconv.Atoi(f[6])
@@ -507,8 +532,11 @@ type Engine struct {
 	vhostLastChange  map[string]time.Time
 	// Throttle for the "suppressed_by_exclude" audit line (once per holddown
 	// window per host), so a sustained excluded-under-attack vhost doesn't spam
-	// the challenge log every reconcile cycle. Guarded by vhostMu.
+	// the challenge log every reconcile cycle. Guarded by vhostMu. Also keyed
+	// per (host, ip) by the abuse-shadow signals, so expired entries are swept
+	// (vhostSuppressSwept: at most once a minute, once the map is large).
 	vhostSuppressLoggedAt map[string]time.Time
+	vhostSuppressSwept    time.Time
 
 	// NEW: vhost uniqpaths state (phase 1) to avoid log spam + hysteresis
 	vhostUniqPathsActive     map[string]bool

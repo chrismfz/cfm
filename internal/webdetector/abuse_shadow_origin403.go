@@ -25,8 +25,9 @@ import (
 //     expired nonce makes REAL visitors send bursts of these (liloteddykidsworld.gr,
 //     rigel: 3 378 of them at 6 bytes from Greek mobile IPs, and Googlebot did
 //     the same on vani-atelier.gr). Only the tiny body tells them apart from a
-//     WAF block page (Wordfence's is ~7 KB; speedhost's origin WAF sends 0 or
-//     107 bytes on other paths, so a minimum size cannot be the test).
+//     WAF block page: 1-48 bytes on admin-ajax/admin-post. Wordfence's page is
+//     ~7 KB, and an EMPTY 403 still counts, because WordPress's refusal is never
+//     empty (speedhost's origin WAF sends 0 or 107 bytes).
 //   - endpoints whose upstream is not the site: CFM's own (/__cfm*, and
 //     /cfm-admin, proxied to the daemon, which refuses a stale CSRF/scoped
 //     token with 403) and cPanel's (/cpanelwebcall, and /cpsessN/ on the panel
@@ -93,8 +94,9 @@ func isOrigin403POST(rec LogRec, p string) bool {
 }
 
 // isWPAjaxDenial is WordPress's own "-1"/"0" refusal on its AJAX endpoints.
+// That body is never empty, so an EMPTY 403 there is an origin WAF's.
 func isWPAjaxDenial(p string, bytes int64) bool {
-	if bytes > wpAjaxDenialMaxBytes {
+	if bytes < 1 || bytes > wpAjaxDenialMaxBytes {
 		return false
 	}
 	return strings.HasSuffix(p, "/admin-ajax.php") || strings.HasSuffix(p, "/admin-post.php")
@@ -176,6 +178,28 @@ type origin403Track struct {
 	peak     origin403Burst
 }
 
+// origin403Pending is every IP over the threshold this tick or still in the
+// tracker, once each.
+func (e *Engine) origin403Pending(bursts []origin403Burst) []string {
+	seen := make(map[string]struct{}, len(bursts))
+	var out []string
+	add := func(ip string) {
+		if _, ok := seen[ip]; !ok {
+			seen[ip] = struct{}{}
+			out = append(out, ip)
+		}
+	}
+	for _, b := range bursts {
+		add(b.ip)
+	}
+	e.o403Mu.Lock()
+	for _, t := range e.o403Track {
+		add(t.ip)
+	}
+	e.o403Mu.Unlock()
+	return out
+}
+
 // trackOrigin403 folds this tick's bursts into the tracker and returns the
 // entries whose minute is over (removed from the tracker). Each entry keeps the
 // largest per-minute count seen, with the paths and requests of that minute.
@@ -219,12 +243,17 @@ func (e *Engine) emitAbuseShadowOrigin403(now time.Time) {
 			continue
 		}
 		kept = append(kept, b)
-		// Start the PTR lookup and, for a crawler-looking PTR, the forward-
-		// confirm now, so both are cached when the line is written a minute on.
-		if e.enr != nil && e.cfg.AbuseShadowGoodbotExempt {
-			ptr := e.enr.LookupCachedOrAsync(b.ip).PTR
+	}
+	// Start the PTR lookup and, for a crawler-looking PTR, the forward-confirm
+	// on every tick for every IP still waiting out its minute (not only those
+	// over the threshold right now): a PTR that missed the cache at first sight
+	// lands on a later tick, and the confirm must start then, or the line a
+	// minute on reads would_ban for a verified crawler.
+	if e.enr != nil && e.cfg.AbuseShadowGoodbotExempt {
+		for _, ip := range e.origin403Pending(kept) {
+			ptr := e.enr.LookupCachedOrAsync(ip).PTR
 			if ptr != "" {
-				origin403GoodBot.verified(b.ip, func() string { return ptr }, now)
+				origin403GoodBot.verified(ip, func() string { return ptr }, now)
 			}
 		}
 	}
