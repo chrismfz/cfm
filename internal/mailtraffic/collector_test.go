@@ -108,6 +108,9 @@ func TestEnableShutdownLifecycle(t *testing.T) {
 	if SharedStore() != nil {
 		t.Skip("mailtraffic already enabled in this process")
 	}
+	origIPs := rblIPs
+	rblIPs = func() []string { return nil } // no real DNSBL queries from a unit test
+	t.Cleanup(func() { rblIPs = origIPs })
 	if err := Enable(filepath.Join(t.TempDir(), "mt.db")); err != nil {
 		t.Fatal(err)
 	}

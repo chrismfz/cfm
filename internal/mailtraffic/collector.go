@@ -2,6 +2,7 @@ package mailtraffic
 
 import (
 	"bufio"
+	"context"
 	"os"
 	"path/filepath"
 	"sync"
@@ -42,17 +43,24 @@ type Collector struct {
 	// mail-abuse findings (abuse.go): per-line context + edge state
 	ab       *tracker
 	pub      *publisher
+	rbl      *rblChecker
 	lastEval time.Time
+	ctx      context.Context // cancelled when the collector stops
+	cancel   context.CancelFunc
 }
 
 func newCollector(st *Store, abuseStatePath string) *Collector {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Collector{
-		st:   st,
-		corr: map[string]*mailmeter.Correlator{},
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
-		ab:   newTracker(),
-		pub:  &publisher{path: abuseStatePath},
+		ctx:    ctx,
+		cancel: cancel,
+		st:     st,
+		corr:   map[string]*mailmeter.Correlator{},
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+		ab:     newTracker(),
+		pub:    &publisher{path: abuseStatePath},
+		rbl:    &rblChecker{},
 	}
 }
 
@@ -89,11 +97,12 @@ func (c *Collector) evalAbuse(now time.Time) {
 		return
 	}
 	c.lastEval = now
-	fs, recent, ok := c.ab.evaluate(c.st, now)
+	c.rbl.maybeRun(c.ctx, now) // background; its results are read on a later check
+	fs, recent, held, ok := c.ab.evaluateWith(c.st, now, c.pub.openKeys(), c.rbl)
 	if !ok {
 		return // the store could not be read: change nothing
 	}
-	c.pub.apply(fs, recent, now)
+	c.pub.applyHeld(fs, recent, held, now)
 }
 
 // pollFile ingests new lines from one log and flushes the poll's counters. The
@@ -238,6 +247,8 @@ func Shutdown() {
 	if c != nil {
 		close(c.stop)
 		<-c.done
+		c.cancel()
+		c.rbl.wg.Wait() // a DNSBL check in flight
 	}
 	if st != nil {
 		_ = st.Close()

@@ -23,8 +23,11 @@ mainlog / maillog every minute into hourly per-user counters) checks:
 |---|---|---|
 | `mail_script_spike` | warning / critical | a unix user's LOCAL submissions (`U=user P=local`: PHP `mail()`, sendmail from a script or cron) far above that user's own history — a hacked site or an abused contact form. The message names the script directory (`cwd=`), the envelope sender (flagged when it is not a domain on this host), and how many different recipients. `root`, `mailnull`, `cpanel*`, `exim` are skipped |
 | `mail_outbound_spike` | warning / critical | an authenticated mailbox (SMTP AUTH) sending far above its own history |
-| `mail_hijack` | critical | one mailbox SUCCESSFULLY authenticating from ≥ 3 countries, or ≥ 10 IPs in at least 2 countries, within an hour — a stolen password in use (IPs alone are not enough: a mailbox used as "send mail as" in Gmail logs in from dozens of Google addresses in one country; without GeoIP data there is no hijack finding) (exim `A=…` + `H=[ip]`, Postfix `sasl_username` + `client=[ip]`) |
-| `mail_recovered` | info | the finding with the same key is over (for a hijack: the logins stopped — the password still needs changing) |
+| `mail_hijack` | critical | one mailbox SUCCESSFULLY logging in from ≥ 3 countries, or from ≥ 10 sources of which ≥ 5 are outside its main country, within an hour — a stolen password in use. SMTP AUTH (exim `A=…` + `H=[ip]`, Postfix `sasl_username` + `client=[ip]`) and IMAP/POP3 (dovecot `Login:` / `Logged in:` + `rip=`; a failed login never counts). See "Hijack sources" below; without GeoIP data there is no hijack finding |
+| `mail_bounce_spike` | warning / critical | a sender (local user or authenticated mailbox) whose remote deliveries bounce in bulk: ≥ 20 bounces and ≥ 25 % of its delivered + bounced in the last 2 h (critical from 100 and 50 %; counted per recipient). A failure through a local transport (a full or deleted mailbox on this host) is not a bounce, as local deliveries are not counted either — a form or hacked account writing to harvested or made-up addresses. Names the main bounce reason (`no-such-user`, `blocked-reputation`, …) and the sender context. Stays open down to half of each threshold |
+| `mail_queue_hog` | warning / critical | one envelope sender holding ≥ 50 % of a queue of ≥ 100 messages, with ≥ 100 of them of which ≥ 50 are frozen or stuck over 1 h — a campaign going out fine is not a clogged queue (critical from 1 000); `<>` is shown as bounce messages (backscatter). Read from the exim/postfix queue detector's latest listing (`exim_queues` / `postfix_queues` must be on). A listing that failed (count fine, nothing listed — a big queue is slow to list) or is 10 min – 1 h old leaves an open finding as it is; older than that (the detector switched off) it no longer holds it. Stays open down to 30 % / 50 messages |
+| `mail_rbl_listed` | warning / critical | one of the node's public IPv4 addresses on Spamhaus ZEN (SBL / XBL / PBL), SpamCop, Barracuda or PSBL, checked every 30 min. Critical for a Spamhaus SBL/XBL listing or two lists at once. Each list is judged on its own: one that does not answer cleanly (a timeout, or Spamhaus's `127.255.255.x` "your resolver is refused" — logged once) keeps its own last verdict, never read as "delisted" and never holding the other lists' verdicts. An address that leaves the node is resolved |
+| `mail_recovered` | info | the finding with the same key is over (for a hijack: the logins stopped — the password still needs changing; for an RBL listing: delisted) |
 
 "Far above its history" is the Mail Monitor's anomaly rule: the last 2 h
 against the user's average per active hour over the previous 7 days, at least
@@ -32,15 +35,44 @@ against the user's average per active hour over the previous 7 days, at least
 flagged outright. **Critical** when it is ≥ 50 messages and ≥ 10× (or a sender
 with no history).
 
-Keys are per user / mailbox (`mail:script:<user>`, `mail:out:<addr>`,
-`mail:hijack:<addr>`), published once, again when the severity rises, and
+Keys are per user / mailbox / IP (`mail:script:<user>`, `mail:out:<addr>`,
+`mail:hijack:<addr>`, `mail:bounce:local:<user>` / `mail:bounce:auth:<addr>`
+(a cPanel user can be both), `mail:queue:<sender>`,
+`mail:rbl:<ip>`), published once, again when the severity rises, and
 resolved with `mail_recovered`. A spike closes only when the recent volume is
 back under 1.5× what was expected **when it opened** (or under 20): the
 baseline is the sender's own trailing week, so a long incident slowly becomes
-its own baseline and would otherwise "recover" while still sending. The edge
+its own baseline and would otherwise "recover" while still sending. A sender
+with no baseline before the spike has nothing to go back to: a new MAILBOX
+(`mail_outbound_spike`) that opened as a warning and stays under 200 in 2 h is
+resolved after a day at that volume ("now its usual volume"); a script spike
+or a critical one is never settled that way — a hacked quiet site opens
+exactly like a new sender, and stays open until the volume falls or someone
+acknowledges it. A new sender is a warning up to 200 in 2 h. The edge
 state is kept in `/var/lib/cfm/mail_abuse_published.json` (next to the
-counters), so restarts do not re-announce. Delivery is the same
+counters), so restarts do not re-announce. The per-line context (bounce
+outcomes, logins) lives in memory, so after a restart an open bounce finding
+is held for 2 h and an open hijack for 1 h, until the window has filled again:
+neither "back to normal" nor re-paged. Delivery is the same
 `detection_history` node-fault path as the backup check; cfm-web ingests it.
+
+## Hijack sources
+
+A login's address is first normalised, because several sources are one
+person, or a service acting for them:
+
+- loopback and private addresses (webmail, a local relay) are not counted;
+- an IPv6 address counts as its /64 (a phone rotates privacy addresses);
+- Google, Microsoft, Yahoo and Apple's networks (AS15169, 8075, 36647, 26101,
+  34010, 714, 6185) count as ONE source with no country: Gmail fetching a
+  mailbox over POP3 logs in from a dozen Google addresses an hour (seen on
+  titan, Oct 2026). A hijacker on a VM in those networks is missed — that
+  includes Azure, which shares AS8075 with Outlook.com; they mostly use
+  residential proxies and VPS networks.
+- `::ffff:1.2.3.4` is `1.2.3.4`.
+
+So "many IPs" needs ≥ 5 of them outside the mailbox's main country: a home,
+a phone and a VPN are many addresses in two places, not a hijack.
 
 ## Telling a newsletter from spam
 
@@ -73,8 +105,10 @@ counters and the MCP views stay.
 
 ## Not covered yet
 
-- Bounce/defer ratio spikes per sender, the node's own IP on an RBL, one
-  sender dominating the queue.
-- Dovecot (IMAP/POP) logins for the hijack check — SMTP AUTH only.
+- Bounces on a Postfix host with a content filter (amavis / rspamd
+  re-injecting): the re-injected message has a new queue id with no
+  authenticated sender, so its bounces are not attributed. Exim and plain
+  Postfix are.
+- IPv6 addresses on blocklists (few lists carry them).
 - Recipient novelty and the contact-form pattern are shown as context, not a
   trigger of their own.

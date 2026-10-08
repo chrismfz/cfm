@@ -61,7 +61,7 @@ func TestJetBackupOrion19SepPartialRunIsAWarning(t *testing.T) {
 	jobs := orionJobs(false, "2026-09-19T01:15:02+00:00", "2026-09-19T02:24:21+00:00", "2026-09-20T01:15:00+00:00")
 	// keep only the runs that existed on 19 Sep 03:00
 	logs := removeLogs(orionLogs("", 0), "run21", "run20", "cfg21", "cfg06", "integ", "imu")
-	_, fs, err := evalJetBackup([]byte(jobs), []byte(logs), ts("2026-09-19T03:00:00Z"), Thresholds{})
+	_, fs, _, err := evalJetBackup([]byte(jobs), []byte(logs), ts("2026-09-19T03:00:00Z"), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestJetBackupOrion19SepPartialRunIsAWarning(t *testing.T) {
 func TestJetBackupOrionStuckRunIsStuckAndStale(t *testing.T) {
 	jobs := orionJobs(true, "2026-09-21T01:15:02+00:00", "2026-09-20T02:24:17+00:00", "2026-09-22T01:15:00+00:00")
 	logs := removeLogs(orionLogs("", 0), "cfg06", "integ", "imu")
-	jobsOut, fs, err := evalJetBackup([]byte(jobs), []byte(logs), ts("2026-09-23T09:00:00Z"), Thresholds{})
+	jobsOut, fs, _, err := evalJetBackup([]byte(jobs), []byte(logs), ts("2026-09-23T09:00:00Z"), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestJetBackupOrionStuckRunIsStuckAndStale(t *testing.T) {
 // stale: last_completed advances on failed runs.
 func TestJetBackupLastCompletedOnAFailedRunIsNotFreshness(t *testing.T) {
 	jobs := orionJobs(false, "2026-09-21T01:15:02+00:00", "2026-10-07T10:28:07+00:00", "2026-10-08T01:15:00+00:00")
-	_, fs, err := evalJetBackup([]byte(jobs), []byte(orionLogs("2026-10-07T10:28:07+00:00", 2)), ts("2026-10-07T19:00:00Z"), Thresholds{})
+	_, fs, _, err := evalJetBackup([]byte(jobs), []byte(orionLogs("2026-10-07T10:28:07+00:00", 2)), ts("2026-10-07T19:00:00Z"), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestJetBackupLastCompletedOnAFailedRunIsNotFreshness(t *testing.T) {
 func TestJetBackupStatusNamesFollowJetBackup(t *testing.T) {
 	jobs := orionJobs(false, "2026-09-21T01:15:02+00:00", "2026-10-07T10:28:07+00:00", "2026-10-08T01:15:00+00:00")
 	for status, want := range map[int]string{4: TypePartial, 2: TypeFailed, 3: TypeFailed, 5: TypeFailed} {
-		_, fs, err := evalJetBackup([]byte(jobs), []byte(orionLogs("2026-10-07T10:28:07+00:00", status)), ts("2026-10-07T19:00:00Z"), Thresholds{})
+		_, fs, _, err := evalJetBackup([]byte(jobs), []byte(orionLogs("2026-10-07T10:28:07+00:00", status)), ts("2026-10-07T19:00:00Z"), Thresholds{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -149,7 +149,7 @@ func TestJetBackupStatusNamesFollowJetBackup(t *testing.T) {
 func TestJetBackupHealthyJobReportsNothing(t *testing.T) {
 	jobs := orionJobs(false, "2026-09-21T01:15:02+00:00", "2026-09-21T02:30:00+00:00", "2026-09-22T01:15:00+00:00")
 	logs := orionLogs("2026-09-21T02:30:00+00:00", 1) // still carries the failed integrity check (type 4)
-	_, fs, err := evalJetBackup([]byte(jobs), []byte(logs), ts("2026-09-21T09:00:00Z"), Thresholds{})
+	_, fs, _, err := evalJetBackup([]byte(jobs), []byte(logs), ts("2026-09-21T09:00:00Z"), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestJetBackupHealthyJobReportsNothing(t *testing.T) {
 
 func TestJetBackupPartialRunIsAWarning(t *testing.T) {
 	jobs := orionJobs(false, "2026-09-21T01:15:02+00:00", "2026-09-21T02:30:00+00:00", "2026-09-22T01:15:00+00:00")
-	_, fs, err := evalJetBackup([]byte(jobs), []byte(orionLogs("2026-09-21T02:30:00+00:00", 4)), ts("2026-09-21T09:00:00Z"), Thresholds{})
+	_, fs, _, err := evalJetBackup([]byte(jobs), []byte(orionLogs("2026-09-21T02:30:00+00:00", 4)), ts("2026-09-21T09:00:00Z"), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestJetBackupDisabledJobIsIgnoredAndDestinationLowIsWarned(t *testing.T) {
 	jobs := orionJobs(false, "2026-09-21T01:15:02+00:00", "2026-09-20T02:24:17+00:00", "2026-09-22T01:15:00+00:00")
 	jobs = strings.ReplaceAll(jobs, `"free":953824305152`, `"free":153824305152`) // ~1% free
 	jobs = strings.Replace(jobs, `"running":false,"disabled":0,"schedules":[{"name":"Daily7"}`, `"running":false,"disabled":1,"schedules":[{"name":"Daily7"}`, 1)
-	_, fs, err := evalJetBackup([]byte(jobs), []byte(orionLogs("", 0)), ts("2026-10-07T19:00:00Z"), Thresholds{})
+	_, fs, _, err := evalJetBackup([]byte(jobs), []byte(orionLogs("", 0)), ts("2026-10-07T19:00:00Z"), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestJetBackupDisabledJobIsIgnoredAndDestinationLowIsWarned(t *testing.T) {
 }
 
 func TestJetBackupAPIErrorIsAnErrorNotSilence(t *testing.T) {
-	_, _, err := evalJetBackup([]byte(`{"success":0,"message":"No permission","data":[]}`), []byte(orionLogs("", 0)), time.Now(), Thresholds{})
+	_, _, _, err := evalJetBackup([]byte(`{"success":0,"message":"No permission","data":[]}`), []byte(orionLogs("", 0)), time.Now(), Thresholds{})
 	if err == nil || !strings.Contains(err.Error(), "No permission") {
 		t.Fatalf("want api error surfaced, got %v", err)
 	}
@@ -249,7 +249,7 @@ func TestJetBackupWeekdayJobIsNotStaleAtTheWeekend(t *testing.T) {
 		"2026-09-21T01:00:00Z", "2026-09-22T01:00:00Z", "2026-09-23T01:00:00Z", "2026-09-24T01:00:00Z", "2026-09-25T01:00:00Z",
 		"2026-09-28T01:00:00Z", "2026-09-29T01:00:00Z", "2026-09-30T01:00:00Z", "2026-10-01T01:00:00Z", "2026-10-02T01:00:00Z",
 	}
-	_, fs, err := evalJetBackup([]byte(oneJob("2026-10-02T01:00:00Z", "2026-10-05T01:00:00Z", false)), []byte(jbLogsFrom("J", starts, 1)), ts("2026-10-04T18:00:00Z"), Thresholds{})
+	_, fs, _, err := evalJetBackup([]byte(oneJob("2026-10-02T01:00:00Z", "2026-10-05T01:00:00Z", false)), []byte(jbLogsFrom("J", starts, 1)), ts("2026-10-04T18:00:00Z"), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestJetBackupWeekdayJobIsNotStaleAtTheWeekend(t *testing.T) {
 
 // A weekly job with a single run in the window, 3 days after it succeeded.
 func TestJetBackupWeeklyJobWithOneRunIsNotStale(t *testing.T) {
-	_, fs, err := evalJetBackup([]byte(oneJob("2026-10-04T01:00:00Z", "2026-10-11T01:00:00Z", false)), []byte(jbLogsFrom("J", []string{"2026-10-04T01:00:00Z"}, 1)), ts("2026-10-07T18:00:00Z"), Thresholds{})
+	_, fs, _, err := evalJetBackup([]byte(oneJob("2026-10-04T01:00:00Z", "2026-10-11T01:00:00Z", false)), []byte(jbLogsFrom("J", []string{"2026-10-04T01:00:00Z"}, 1)), ts("2026-10-07T18:00:00Z"), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,34 +273,59 @@ func TestJetBackupWeeklyJobWithOneRunIsNotStale(t *testing.T) {
 // a recent one (it advances on FAILED runs) proves nothing — unknown, an error.
 func TestJetBackupJobWithoutRunsInHistory(t *testing.T) {
 	noRuns := `{"success":1,"message":"","data":{"logs":[],"total":0}}`
-	_, fs, err := evalJetBackup([]byte(oneJob("2026-10-07T01:00:00Z", "2026-10-08T01:00:00Z", false)), []byte(noRuns), ts("2026-10-07T10:00:00Z"), Thresholds{})
-	if err == nil || len(fs) != 0 {
-		t.Fatalf("recent last_run, no log of it: want an error (unknown), got %v %+v", err, fs)
+	_, fs, unknown, err := evalJetBackup([]byte(oneJob("2026-10-07T01:00:00Z", "2026-10-08T01:00:00Z", false)), []byte(noRuns), ts("2026-10-07T10:00:00Z"), Thresholds{})
+	// unknown for THIS job only (its keys stay armed), never an adapter-wide
+	// error that would freeze every other job's findings
+	// the history came back empty: not healthy — a check error (the job's keys
+	// stay armed too)
+	if err == nil || len(fs) != 0 || len(unknown) != 3 {
+		t.Fatalf("recent last_run, empty history: want unknown + a check error, got %v %+v %v", err, fs, unknown)
 	}
-	_, fs, err = evalJetBackup([]byte(oneJob("2026-09-20T01:00:00Z", "2026-09-21T01:00:00Z", false)), []byte(noRuns), ts("2026-10-07T18:00:00Z"), Thresholds{})
+	_, fs, _, err = evalJetBackup([]byte(oneJob("2026-09-20T01:00:00Z", "2026-09-21T01:00:00Z", false)), []byte(noRuns), ts("2026-10-07T18:00:00Z"), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if f := byType(fs)[TypeStale]; !strings.Contains(f.Message, "has not run since") {
 		t.Fatalf("want stale from last_run, got %+v", fs)
 	}
-	_, _, err = evalJetBackup([]byte(oneJob("2026-10-07T01:00:00Z", "2026-10-08T01:00:00Z", false)), []byte(`{"success":1,"message":"","data":{"logs":null}}`), ts("2026-10-07T10:00:00Z"), Thresholds{})
-	if err == nil {
+	_, _, unknown, _ = evalJetBackup([]byte(oneJob("2026-10-07T01:00:00Z", "2026-10-08T01:00:00Z", false)), []byte(`{"success":1,"message":"","data":{"logs":null}}`), ts("2026-10-07T10:00:00Z"), Thresholds{})
+	if len(unknown) == 0 {
 		t.Fatal("logs:null with a job that ran: want unknown")
 	}
 }
 
 func TestJetBackupNoEnabledAccountJobIsAWarning(t *testing.T) {
 	jobs := `{"success":1,"message":"","data":{"jobs":[{"_id":"C","name":"JetBackup Config","type":3,"disabled":0},{"_id":"A","name":"accts","type":1,"disabled":1}]}}`
-	_, fs, err := evalJetBackup([]byte(jobs), []byte(`{"success":1,"message":"","data":{"logs":[]}}`), time.Now(), Thresholds{})
+	_, fs, _, err := evalJetBackup([]byte(jobs), []byte(`{"success":1,"message":"","data":{"logs":[]}}`), time.Now(), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if f := byType(fs)[TypeNoJob]; f.Key != "jb:nojob" {
 		t.Fatalf("want backup_no_job, got %+v", fs)
 	}
-	_, fs, err = evalJetBackup([]byte(`{"success":1,"message":"","data":{"jobs":null}}`), []byte(`{"success":1,"message":"","data":{"logs":[]}}`), time.Now(), Thresholds{})
+	_, fs, _, err = evalJetBackup([]byte(`{"success":1,"message":"","data":{"jobs":null}}`), []byte(`{"success":1,"message":"","data":{"logs":[]}}`), time.Now(), Thresholds{})
 	if err != nil || byType(fs)[TypeNoJob].Type == "" {
 		t.Fatalf("jobs:null: want backup_no_job, got %v %+v", err, fs)
+	}
+}
+
+// One job missing from the history is that job's unknown; the others are
+// judged and the adapter is not an error.
+func TestJetBackupOneUnknownJobDoesNotFreezeTheOthers(t *testing.T) {
+	jobs := `{"success":1,"message":"","data":{"jobs":[
+ {"_id":"A","name":"daily","type":1,"disabled":0,"last_run":"2026-10-07T01:00:00Z"},
+ {"_id":"B","name":"monthly","type":1,"disabled":0,"last_run":"2026-10-07T02:00:00Z"}]}}`
+	logs := `{"success":1,"message":"","data":{"logs":[
+ {"_id":"r1","start_time":"2026-10-07T01:00:00+00:00","end_time":"2026-10-07T01:30:00+00:00","status":2,"type":1,"info":{"ID":"A"}},
+ {"_id":"r0","start_time":"2026-10-06T01:00:00+00:00","end_time":"2026-10-06T01:30:00+00:00","status":1,"type":1,"info":{"ID":"A"}}],"total":2}}`
+	_, fs, unknown, err := evalJetBackup([]byte(jobs), []byte(logs), ts("2026-10-07T10:00:00Z"), Thresholds{})
+	if err != nil {
+		t.Fatalf("one unknown job is not an adapter error: %v", err)
+	}
+	if byType(fs)[TypeFailed].Key != "jb:failed:A" {
+		t.Fatalf("job A is still judged: %+v", fs)
+	}
+	if len(unknown) != 3 || unknown[0] != "jb:failed:B" {
+		t.Fatalf("job B's keys stay armed: %v", unknown)
 	}
 }

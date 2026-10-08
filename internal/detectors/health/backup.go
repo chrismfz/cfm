@@ -57,6 +57,9 @@ const (
 	// backup_check_error is published (a CLI slow during the nightly run must
 	// not alert, then clear, then alert).
 	backupErrorAfter = 2
+	// backupGoneAfter: an adapter not seen for this long (uninstalled, the
+	// node migrated off it) has its open findings resolved as gone.
+	backupGoneAfter = 24 * time.Hour
 	// backupCheckTimeout bounds one whole check (each CLI call has its own
 	// 60s bound; the slowest adapter makes 6 of them); one still "running"
 	// past backupHungAfter is reported, since nothing else would ever say so.
@@ -96,15 +99,22 @@ type publishedBackup struct {
 }
 
 type backupState struct {
-	mu         sync.Mutex
-	running    bool
-	startedAt  time.Time
-	next       time.Time
-	pending    *backupcheck.Status
-	published  map[string]publishedBackup // finding key → what was published
-	loaded     bool                       // published read from backupStatePath
-	errStreak  map[string]int             // adapter → consecutive unreadable checks
-	hungPublic bool
+	mu        sync.Mutex
+	running   bool
+	startedAt time.Time
+	next      time.Time
+	pending   *backupcheck.Status
+	published map[string]publishedBackup // finding key → what was published (the hung check's too)
+	seenAt    map[string]time.Time       // adapter → last check it was present in
+	loaded    bool                       // published read from backupStatePath
+	errStreak map[string]int             // adapter → consecutive unreadable checks
+}
+
+// backupStateFile is the persisted edge state. A file written before seenAt
+// existed is the bare published map; loadLocked reads both.
+type backupStateFile struct {
+	Published map[string]publishedBackup `json:"published"`
+	SeenAt    map[string]time.Time       `json:"seen_at,omitempty"`
 }
 
 func (b *backupState) loadLocked() {
@@ -113,13 +123,26 @@ func (b *backupState) loadLocked() {
 	}
 	b.loaded = true
 	b.published = map[string]publishedBackup{}
+	b.seenAt = map[string]time.Time{}
 	if backupStatePath == "" {
 		return
 	}
-	if raw, err := os.ReadFile(backupStatePath); err == nil {
-		if err := json.Unmarshal(raw, &b.published); err != nil {
-			b.published = map[string]publishedBackup{}
+	raw, err := os.ReadFile(backupStatePath)
+	if err != nil {
+		return
+	}
+	var f backupStateFile
+	if err := json.Unmarshal(raw, &f); err == nil && f.Published != nil {
+		b.published = f.Published
+		if f.SeenAt != nil {
+			b.seenAt = f.SeenAt
 		}
+		return
+	}
+	if err := json.Unmarshal(raw, &b.published); err != nil {
+		// every open finding will be announced again: say why
+		logging.Logf("[health] backup state %s unreadable, starting over: %v", backupStatePath, err)
+		b.published = map[string]publishedBackup{}
 	}
 }
 
@@ -127,7 +150,7 @@ func (b *backupState) saveLocked() {
 	if backupStatePath == "" {
 		return
 	}
-	raw, err := json.Marshal(b.published)
+	raw, err := json.Marshal(backupStateFile{Published: b.published, SeenAt: b.seenAt})
 	if err != nil {
 		return
 	}
@@ -160,31 +183,36 @@ func resetBackupStateForTest() {
 func (d *Detector) tickBackup(now time.Time, host string) {
 	backupEnabled.Store(d.cfg.BackupAlert)
 	if !d.cfg.BackupAlert {
+		lastBackupStatus.Store(nil) // the API must not keep serving an old check
 		return
 	}
 	b := backup
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.loadLocked()
 
 	if st := b.pending; st != nil {
 		b.pending = nil
 		lastBackupStatus.Store(st)
-		if b.hungPublic && publishNodeFaultEvent(NodeFaultEvent{
+		// the hung finding is persisted like any other, so a restart (the
+		// obvious remedy for a hung CLI) still resolves it
+		if _, hung := b.published[hungKey]; hung && publishNodeFaultEvent(NodeFaultEvent{
 			Type: TypeBackupRecovered, Severity: backupcheck.SevInfo, Host: host,
 			Key: hungKey, When: now, Message: "backup check finished again",
 		}) {
-			b.hungPublic = false
+			delete(b.published, hungKey)
 		}
 		b.publishLocked(*st, host, now)
 	}
 	if b.running {
-		if now.Sub(b.startedAt) > backupHungAfter && !b.hungPublic {
+		if _, hung := b.published[hungKey]; now.Sub(b.startedAt) > backupHungAfter && !hung {
+			msg := fmt.Sprintf("backup check has not finished for %s — a backup CLI is hanging", ago(now.Sub(b.startedAt)))
 			if publishNodeFaultEvent(NodeFaultEvent{
 				Type: TypeBackupCheckError, Severity: backupcheck.SevWarning, Host: host,
-				Key: hungKey, When: now,
-				Message: fmt.Sprintf("backup check has not finished for %s — a backup CLI is hanging", ago(now.Sub(b.startedAt))),
+				Key: hungKey, When: now, Message: msg,
 			}) {
-				b.hungPublic = true
+				b.published[hungKey] = publishedBackup{Adapter: "backupcheck", Severity: backupcheck.SevWarning, Type: TypeBackupCheckError, Message: msg}
+				b.saveLocked()
 			}
 		}
 		return
@@ -246,18 +274,31 @@ func (b *backupState) publishLocked(st backupcheck.Status, host string, now time
 	if b.errStreak == nil {
 		b.errStreak = map[string]int{}
 	}
-	findings := st.Findings()
+	if b.seenAt == nil {
+		b.seenAt = map[string]time.Time{}
+	}
+	findings := foldRunFindings(st.Findings())
 	erred := map[string]bool{}
 	seen := map[string]bool{}
 	unknown := map[string]bool{}
+	jobs := map[string]backupcheck.Job{} // "<adapter>:<job id>" → job, for wording a recovery
 	panicked := false
 	for _, a := range st.Adapters {
 		seen[a.Name] = true
+		b.seenAt[a.Name] = now
 		for _, k := range a.Unknown {
 			unknown[k] = true
 		}
+		for _, j := range a.Jobs {
+			jobs[a.Name+":"+j.ID] = j
+		}
 		if a.Name == "backupcheck" && a.Error != "" {
 			panicked = true
+		}
+	}
+	for name := range b.errStreak {
+		if !seen[name] {
+			delete(b.errStreak, name) // an adapter that left (or a panic that did not recur) starts over
 		}
 	}
 	for _, a := range st.Adapters {
@@ -267,15 +308,36 @@ func (b *backupState) publishLocked(st backupcheck.Status, host string, now time
 		}
 		erred[a.Name] = true
 		b.errStreak[a.Name]++
+		key := a.Name + ":error"
 		if b.errStreak[a.Name] >= backupErrorAfter {
 			findings = append(findings, backupcheck.Finding{
 				Type: TypeBackupCheckError, Severity: backupcheck.SevWarning, Adapter: a.Name,
-				Key: a.Name + ":error", Message: "cannot read " + a.Name + " backup state: " + a.Error,
+				Key: key, Message: "cannot read " + a.Name + " backup state: " + a.Error,
 			})
+		} else if _, open := b.published[key]; open {
+			// the streak is in memory: after a restart a still-unreadable
+			// adapter starts over at 1, which must not "recover" its open error
+			unknown[key] = true
 		}
 	}
 
 	current := map[string]bool{}
+	subjects := map[string]backupcheck.Finding{} // run subject → the finding now standing for it
+	for _, f := range findings {
+		if subj, _ := runSubject(f.Key); subj != "" {
+			subjects[subj] = f
+		}
+	}
+	// A key this check could not judge is still superseded by a worse finding
+	// of the same job that it could: one job, one alert.
+	for k := range unknown {
+		subj, kind := runSubject(k)
+		if f, ok := subjects[subj]; ok && subj != "" {
+			if _, fk := runSubject(f.Key); runKinds[fk] > runKinds[kind] {
+				delete(unknown, k)
+			}
+		}
+	}
 	for _, f := range findings {
 		current[f.Key] = true
 		prev, seen := b.published[f.Key]
@@ -302,41 +364,133 @@ func (b *backupState) publishLocked(st backupcheck.Status, host string, now time
 		}
 	}
 	for key, p := range b.published {
-		if current[key] || unknown[key] {
+		if current[key] || unknown[key] || key == hungKey {
 			continue
 		}
 		// Re-arm only what this check positively saw resolved: the adapter
 		// read fine (an erroring one keeps its findings armed — but not its
 		// own error finding, which clears the moment it reads again), it was
 		// in this check at all (a CLI briefly off PATH proves nothing), and the
-		// check did not panic.
+		// check did not panic. An adapter gone for a day is uninstalled: its
+		// findings are resolved as such rather than kept open forever.
 		if panicked {
 			continue
 		}
-		if strings.HasSuffix(key, ":error") || (seen[p.Adapter] && !erred[p.Adapter]) {
-			// Forget it only once the recovery is delivered; without a sink it
-			// stays armed and is announced on a later check.
-			if publishNodeFaultEvent(NodeFaultEvent{
-				Type: TypeBackupRecovered, Severity: backupcheck.SevInfo, Host: host,
-				Key: key, When: now, Message: recoveredMessage(key, p),
-			}) {
-				delete(b.published, key)
+		var msg string
+		switch {
+		case isErrorKey(key, p):
+			msg = recoveredMessage(key, p)
+		case seen[p.Adapter] && !erred[p.Adapter]:
+			msg = b.resolvedMessage(key, p, subjects, jobs)
+		case !seen[p.Adapter] && !b.seenAt[p.Adapter].IsZero() && now.Sub(b.seenAt[p.Adapter]) >= backupGoneAfter:
+			msg = clipBackup(p.Adapter + " is no longer on this node (was: " + wasOf(key, p) + ")")
+		default:
+			if !seen[p.Adapter] && b.seenAt[p.Adapter].IsZero() {
+				b.seenAt[p.Adapter] = now // start the clock for a key from an older state file
 			}
+			continue
+		}
+		// Forget it only once the recovery is delivered; without a sink it
+		// stays armed and is announced on a later check.
+		if publishNodeFaultEvent(NodeFaultEvent{
+			Type: TypeBackupRecovered, Severity: backupcheck.SevInfo, Host: host,
+			Key: key, When: now, Message: msg,
+		}) {
+			delete(b.published, key)
 		}
 	}
 	b.saveLocked()
 }
 
-// recoveredMessage words a resolution after the finding it closes.
+// runKinds rank the per-run findings of one job / node, worst first: a stuck
+// run explains a failure and both explain staleness, so only the worst stands.
+var runKinds = map[string]int{"stuck": 4, "failed": 3, "stale": 2, "partial": 1}
+
+// runSubject splits a per-run key ("jb:failed:<id>", "pve:stale:<node>") into
+// its subject ("jb:<id>") and kind; "" for any other key. A Proxmox stuck key
+// carries the task's UPID ("pve:stuck:UPID:<node>:…"): its subject is the node,
+// like the node's failed / stale keys.
+func runSubject(key string) (subject, kind string) {
+	parts := strings.SplitN(key, ":", 3)
+	if len(parts) != 3 || runKinds[parts[1]] == 0 {
+		return "", ""
+	}
+	id := parts[2]
+	if parts[0] == "pve" && strings.HasPrefix(id, "UPID:") {
+		if f := strings.SplitN(id, ":", 3); len(f) >= 2 && f[1] != "" {
+			id = f[1]
+		}
+	}
+	return parts[0] + ":" + id, parts[1]
+}
+
+// foldRunFindings keeps, per job / node, only its worst per-run finding: a job
+// that keeps failing would otherwise page backup_failed AND, a day later,
+// backup_stale — two pinned criticals, reminded twice, for one problem.
+func foldRunFindings(fs []backupcheck.Finding) []backupcheck.Finding {
+	worst := map[string]int{}
+	for _, f := range fs {
+		if subj, kind := runSubject(f.Key); subj != "" && runKinds[kind] > worst[subj] {
+			worst[subj] = runKinds[kind]
+		}
+	}
+	out := fs[:0:0]
+	for _, f := range fs {
+		if subj, kind := runSubject(f.Key); subj != "" && runKinds[kind] < worst[subj] {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// resolvedMessage words a finding that this check no longer has: the same job
+// now has another finding (failed → stale, stuck → failed), the job was
+// disabled or removed, or it is fine.
+func (b *backupState) resolvedMessage(key string, p publishedBackup, subjects map[string]backupcheck.Finding, jobs map[string]backupcheck.Job) string {
+	was := wasOf(key, p)
+	subj, _ := runSubject(key)
+	if subj == "" {
+		return clipBackup("backup OK again (was: " + was + ")")
+	}
+	if f, ok := subjects[subj]; ok {
+		return clipBackup("now " + strings.TrimPrefix(f.Type, "backup_") + ": " + f.Message + " (was: " + was + ")")
+	}
+	if p.Adapter == "jetbackup" || p.Adapter == "virtualmin" {
+		id := subj[strings.IndexByte(subj, ':')+1:]
+		j, ok := jobs[p.Adapter+":"+id]
+		switch {
+		case !ok:
+			return clipBackup("job removed — no longer checked (was: " + was + ")")
+		case j.Disabled:
+			return clipBackup("job disabled — no longer checked (was: " + was + ")")
+		}
+	}
+	return clipBackup("backup OK again (was: " + was + ")")
+}
+
+func isErrorKey(key string, p publishedBackup) bool {
+	return p.Type == TypeBackupCheckError || (p.Type == "" && strings.HasSuffix(key, ":error"))
+}
+
+func wasOf(key string, p publishedBackup) string {
+	if p.Message == "" {
+		return key
+	}
+	return p.Message
+}
+
+// clipBackup keeps a message inside cfm-web's 255-character event column.
+func clipBackup(s string) string {
+	if r := []rune(s); len(r) > 240 {
+		return string(r[:239]) + "…"
+	}
+	return s
+}
+
+// recoveredMessage words the resolution of an error finding.
 func recoveredMessage(key string, p publishedBackup) string {
-	was := p.Message
-	if was == "" {
-		was = key
-	}
-	if p.Type == TypeBackupCheckError || strings.HasSuffix(key, ":error") {
-		return "backup state readable again (was: " + was + ")"
-	}
-	return "backup OK again (was: " + was + ")"
+	return clipBackup("backup state readable again (was: " + wasOf(key, p) + ")")
 }
 
 func sevRose(from, to string) bool {

@@ -12,7 +12,12 @@ package mailtraffic
 //   - mail_outbound_spike: an authenticated mailbox sending far above its own
 //     history (the anomaly whats_wrong already showed, now an alert).
 //   - mail_hijack: one mailbox SUCCESSFULLY authenticating from many IPs or
-//     countries within an hour — a stolen password being used.
+//     countries within an hour (SMTP AUTH, or IMAP/POP3 through dovecot) — a
+//     stolen password being used.
+//   - mail_bounce_spike: a sender whose mail bounces in bulk — a hacked
+//     account or form writing to harvested / made-up addresses (abuse_signals.go).
+//   - mail_queue_hog: one sender holding most of a large queue.
+//   - mail_rbl_listed: one of the node's public IPs on a DNS blocklist.
 //
 // Each finding is published once when it appears (again if its severity
 // rises), and resolved with mail_recovered under the same key once it is over.
@@ -27,8 +32,10 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"mime"
+	"net"
 	"os"
 	"regexp"
 	"sort"
@@ -39,6 +46,9 @@ import (
 
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
+	"cfm/internal/mailmeter"
+
+	"golang.org/x/text/encoding/htmlindex"
 )
 
 // Finding types — detection_history event types, so a change here is a wire
@@ -47,23 +57,35 @@ const (
 	TypeScriptSpike   = "mail_script_spike"
 	TypeOutboundSpike = "mail_outbound_spike"
 	TypeHijack        = "mail_hijack"
+	TypeBounceSpike   = "mail_bounce_spike"
+	TypeQueueHog      = "mail_queue_hog"
+	TypeRBLListed     = "mail_rbl_listed"
 	TypeRecovered     = "mail_recovered"
 )
 
 const (
 	abuseEvalEvery = 5 * time.Minute
-	// a hijack: one mailbox authenticated from this many countries, or from
-	// this many distinct IPs in at least two countries, within hijackWindow.
-	// IPs alone are not enough: a mailbox set up as "send mail as" in Gmail
-	// logs in from dozens of Google addresses, all in one country.
+	// a hijack: one mailbox logged in from this many countries, or from this
+	// many sources of which hijackMinAbroad are outside its main country,
+	// within hijackWindow. Sources alone are not enough: a phone's IPv6
+	// privacy addresses or a home + VPN are many sources, one or two places.
 	hijackWindow       = time.Hour
 	hijackMinCountries = 3
 	hijackMinIPs       = 10
+	hijackMinAbroad    = 5
 	// a spike is critical when it is both this many times its usual rate and
 	// at least this many messages in the recent window (or a sender with no
 	// history sending at least anomalyNewSenderFloor).
 	abuseCritRatio = 10.0
 	abuseCritFloor = 50
+	// a sender with no history is critical only from this many in the window
+	abuseNewCritFloor = 200
+	// an authenticated mailbox with no baseline from before its spike (a new
+	// mailbox, a migrated account) that opened as a warning and stays under
+	// abuseNewCritFloor closes once it has not been a finding for this long:
+	// its volume is its normal now. Never a script spike (a hacked quiet site
+	// opens exactly like this) and never one that was critical.
+	abuseNewSettle = 24 * time.Hour
 	// a spike closes once the recent volume is under this factor of the
 	// expected volume recorded when it opened (or under the spike floor).
 	abuseCloseFactor = 1.5
@@ -93,9 +115,10 @@ var (
 	// contact form sending "from" someone's gmail address is forging it.
 	localDomainFiles = []string{"/etc/localdomains", "/etc/virtualdomains", "/etc/virtual/domains"}
 
-	// countryOf resolves an IP to its ISO country ("" when unknown). A var so
-	// tests stub it; the default opens the node's GeoIP databases lazily.
-	countryOf = defaultCountryOf
+	// geoOf resolves an IP to its ISO country ("" when unknown) and ASN (0
+	// when unknown). A var so tests stub it; the default opens the node's
+	// GeoIP databases lazily.
+	geoOf = defaultGeoOf
 )
 
 func init() { abuseOn.Store(true) }
@@ -111,15 +134,29 @@ func SetFaultSink(fn FaultSink) {
 // SetAbuseAlert turns the findings on or off (cfm.conf MAIL_ABUSE_ALERT).
 func SetAbuseAlert(on bool) { abuseOn.Store(on) }
 
-func publish(typ, sev, key, msg string, when time.Time) bool {
+func publish(typ, sev, key, msg string, when time.Time) (ok bool) {
 	sinkMu.RLock()
 	fn := sink
 	sinkMu.RUnlock()
 	if fn == nil {
 		return false
 	}
-	defer func() { _ = recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Logf("[mailtraffic] fault sink panicked on %s %s: %v", typ, key, r)
+			ok = false
+		}
+	}()
 	return fn(typ, sev, key, msg, when)
+}
+
+// keySubject is a finding key's subject: "mail:<kind>:<subject>", where the
+// subject (an IPv6 address, mail:bounce:local:<user>) may itself hold colons.
+func keySubject(key string) string {
+	if parts := strings.SplitN(key, ":", 3); len(parts) == 3 {
+		return parts[2]
+	}
+	return key
 }
 
 var (
@@ -127,12 +164,40 @@ var (
 	geoEnr  *enrich.Enricher
 )
 
-func defaultCountryOf(ip string) string {
+func defaultGeoOf(ip string) (string, uint) {
 	geoOnce.Do(func() { geoEnr, _ = enrich.New("/etc/cfm", "/var/lib/cfm/maxmind") })
 	if geoEnr == nil {
-		return ""
+		return "", 0
 	}
-	return geoEnr.LookupGeoFast(ip).CountryISO
+	r := geoEnr.LookupGeoFast(ip)
+	return r.CountryISO, r.ASN
+}
+
+// fetcherASNs are the big mail providers whose servers log in to a mailbox on
+// its owner's behalf: Gmail fetching over POP3 or sending "as" the address,
+// Outlook.com, Yahoo, iCloud. Their many addresses count as one source and
+// their country as none, or every such mailbox would look hijacked. A hijacker
+// renting a VM in the same network is missed — they rarely do; residential
+// proxies and VPS networks are what show up.
+var fetcherASNs = map[uint]bool{15169: true, 8075: true, 36647: true, 26101: true, 34010: true, 714: true, 6185: true}
+
+// authSource normalises a login's source address: "" for an address that is not
+// a remote client (loopback, private: webmail, a local relay), the network for
+// a provider fetching mail, the /64 for IPv6 (one device rotates privacy
+// addresses inside it), else the address itself; and the country.
+func authSource(ip string) (src, country string) {
+	pip := net.ParseIP(ip)
+	if pip == nil || pip.IsLoopback() || pip.IsPrivate() || pip.IsLinkLocalUnicast() || pip.IsUnspecified() {
+		return "", ""
+	}
+	cc, asn := geoOf(ip)
+	if fetcherASNs[asn] {
+		return fmt.Sprintf("AS%d", asn), ""
+	}
+	if v4 := pip.To4(); v4 != nil {
+		return v4.String(), cc // ::ffff:1.2.3.4 is 1.2.3.4
+	}
+	return pip.Mask(net.CIDRMask(64, 128)).String() + "/64", cc
 }
 
 // ---- per-line context (what the counters don't keep) ----
@@ -152,15 +217,30 @@ type tracker struct {
 	line       int
 	pendingCwd string
 	pendingAt  int
-	samples    map[string][]sample             // "local:<user>" / "auth:<mailbox>" → recent messages
-	authIPs    map[string]map[string]time.Time // mailbox → source IP → last successful auth
+	samples    map[string][]sample            // "local:<user>" / "auth:<mailbox>" → recent messages
+	authIPs    map[string]map[string]authSeen // mailbox → source IP → last successful login
+	owners     map[string]owner               // exim message id / postfix QID → the sender key it was submitted by
+	outcomes   map[string][]outcome           // sender key → recent remote delivery outcomes
 
 	last      []AbuseView // the latest check's findings, for whats_wrong / mail_traffic
 	lastCheck time.Time
+	started   time.Time // what is in memory covers only the time since
+}
+
+// authSeen is a mailbox's last login from one source, and over what.
+type authSeen struct {
+	at  time.Time
+	via string // smtp | imap | pop3
 }
 
 func newTracker() *tracker {
-	return &tracker{samples: map[string][]sample{}, authIPs: map[string]map[string]time.Time{}}
+	return &tracker{
+		samples:  map[string][]sample{},
+		authIPs:  map[string]map[string]authSeen{},
+		owners:   map[string]owner{},
+		outcomes: map[string][]outcome{},
+		started:  time.Now(),
+	}
 }
 
 var (
@@ -171,8 +251,15 @@ var (
 	reHostIP  = regexp.MustCompile(`\bH=[^\[]*\[([0-9a-fA-F:.]+)\]`)
 	// T="subject" (exim log_selector +subject; `\"` escapes a quote)
 	reSubject = regexp.MustCompile(`\sT="((?:[^"\\]|\\.)*)"`)
-	// Postfix submission: `client=host[ip], sasl_method=PLAIN, sasl_username=user`
-	rePostfixAuth = regexp.MustCompile(`client=[^\[]*\[([0-9a-fA-F:.]+)\].*\bsasl_username=([^\s,]+)`)
+	// Postfix submission: `QID: client=host[ip], sasl_method=PLAIN, sasl_username=user`
+	rePostfixAuth = regexp.MustCompile(`(?:\]: ([0-9A-Za-z]+): )?client=[^\[]*\[([0-9a-fA-F:.]+)\].*\bsasl_username=([^\s,]+)`)
+	// a postfix line's queue id: `postfix/smtp[123]: 4AB12CD: to=<…>, …`
+	rePostfixQID = regexp.MustCompile(`postfix/[^\s\[]+\[\d+\]: ([0-9A-Za-z]+): `)
+	// Dovecot: `imap-login: Login: user=<a@b>, method=PLAIN, rip=1.2.3.4, lip=…`
+	// (2.4 logs "Logged in").
+	reDovecotLogin = regexp.MustCompile(`\b(imap|pop3)-login: (?:Login|Logged in): user=<([^>]+)>.*?\brip=([0-9a-fA-F:.]+)`)
+	// an exim mainlog line's message id and flag: `<date> <time> [pid] <id> <flag> `
+	reEximID = regexp.MustCompile(`^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?(?: [-+]\d{4})? (?:\[\d+\] )?([0-9A-Za-z]{6}-[0-9A-Za-z]{6,11}-[0-9A-Za-z]{2,4}) (<=|=>|->|\*\*|==) `)
 )
 
 func logTime(line string, now time.Time) time.Time {
@@ -185,8 +272,17 @@ func logTime(line string, now time.Time) time.Time {
 }
 
 var (
-	subjectDecoder = new(mime.WordDecoder)
-	reEncodedLeft  = regexp.MustCompile(`=\?\S*`)
+	// subjectDecoder reads any charset x/text knows (windows-1251, koi8-r,
+	// iso-8859-7, windows-1253: Russian spam and Greek mail), not only UTF-8.
+	subjectDecoder = &mime.WordDecoder{CharsetReader: func(charset string, in io.Reader) (io.Reader, error) {
+		enc, err := htmlindex.Get(charset)
+		if err != nil {
+			return nil, err
+		}
+		return enc.NewDecoder().Reader(in), nil
+	}}
+	reEncodedLeft = regexp.MustCompile(`=\?\S*`)
+	reEncodedWord = regexp.MustCompile(`=\?[^?\s]+\?[bBqQ]\?[^?\s]*\?=`)
 )
 
 // decodeSubject turns exim's logged subject (often RFC 2047 encoded words, and
@@ -196,6 +292,14 @@ func decodeSubject(raw string) string {
 	raw = strings.ReplaceAll(raw, `\"`, `"`)
 	if d, err := subjectDecoder.DecodeHeader(raw); err == nil {
 		raw = d
+	} else {
+		// one bad word must not cost the others: decode word by word
+		raw = reEncodedWord.ReplaceAllStringFunc(raw, func(w string) string {
+			if d, err := subjectDecoder.Decode(w); err == nil {
+				return d
+			}
+			return w
+		})
 	}
 	// whatever is still an encoded word did not decode (exim cut it short)
 	raw = reEncodedLeft.ReplaceAllString(raw, "")
@@ -221,6 +325,13 @@ func (t *tracker) observeExim(line string, now time.Time) {
 		t.pendingCwd, t.pendingAt = m[1], t.line
 		return
 	}
+	id := reEximID.FindStringSubmatch(line)
+	if id != nil && id[2] != "<=" {
+		if d, ok := mailmeter.ParseEximDelivery(line); ok && !localTransport(line) {
+			t.addOutcome(id[1], d, logTime(line, now))
+		}
+		return
+	}
 	if !strings.Contains(line, " <= ") {
 		return
 	}
@@ -239,30 +350,79 @@ func (t *tracker) observeExim(line string, now time.Time) {
 		}
 	}
 	if m := reEximLocalUser.FindStringSubmatch(line); m != nil {
-		if t.line-t.pendingAt <= 4 { // the cwd line is logged just before its arrival line
+		// the cwd line is logged just before its arrival line, but on a busy
+		// node other processes' lines interleave: take it only when it is under
+		// this user's own directory, and only once
+		if t.line-t.pendingAt <= 4 && cwdOwnedBy(t.pendingCwd, m[1]) {
 			s.cwd = t.pendingCwd
+			t.pendingCwd = ""
 		}
 		t.addSample("local:"+m[1], s)
+		if id != nil {
+			t.addOwner(id[1], "local:"+m[1], s.at)
+		}
 		return
 	}
 	if m := reEximAuthed.FindStringSubmatch(line); m != nil {
 		user := strings.ToLower(m[1])
 		t.addSample("auth:"+user, s)
+		if id != nil {
+			t.addOwner(id[1], "auth:"+user, s.at)
+		}
 		if ip := reHostIP.FindStringSubmatch(line); ip != nil {
-			t.addAuth(user, ip[1], s.at)
+			t.addAuth(user, ip[1], "smtp", s.at)
 		}
 	}
 }
 
-// observeMaillog takes one syslog maillog line (Postfix submissions).
+// observeMaillog takes one syslog maillog line: Postfix submissions and
+// deliveries, and Dovecot logins (on any host, exim's included).
 func (t *tracker) observeMaillog(line string, now time.Time) {
-	m := rePostfixAuth.FindStringSubmatch(line)
-	if m == nil {
-		return
-	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.addAuth(strings.ToLower(m[2]), m[1], now)
+	if m := reDovecotLogin.FindStringSubmatch(line); m != nil {
+		t.addAuth(strings.ToLower(m[2]), m[3], m[1], now)
+		return
+	}
+	if m := rePostfixAuth.FindStringSubmatch(line); m != nil {
+		user := strings.ToLower(m[3])
+		t.addAuth(user, m[2], "smtp", now)
+		if m[1] != "" {
+			t.addOwner(m[1], "auth:"+user, now)
+		}
+		return
+	}
+	if q := rePostfixQID.FindStringSubmatch(line); q != nil {
+		if d, ok := mailmeter.ParsePostfixDelivery(line); ok {
+			t.addOutcome(q[1], d, now)
+		} else if strings.HasSuffix(strings.TrimSpace(line), ": removed") {
+			delete(t.owners, q[1]) // postfix reuses queue ids
+		}
+	}
+}
+
+// cwdOwnedBy reports whether a script directory belongs to a unix user
+// (/home/<user>/…, /home2/<user>/…).
+func cwdOwnedBy(cwd, user string) bool {
+	if cwd == "" || user == "" {
+		return false
+	}
+	m := reHomeDir.FindStringSubmatch(cwd)
+	return m != nil && m[1] == user
+}
+
+// reHomeDir: a hosting home directory and its owner (/home/u/…, /home2/u/…).
+var reHomeDir = regexp.MustCompile(`^/home\d*/([^/]+)(?:/|$)`)
+
+var reEximTransport = regexp.MustCompile(`\sT=(\S+)`)
+
+// localTransport reports a delivery line through a local transport (a mailbox,
+// a pipe): local deliveries are not counted as delivered, so their failures
+// (a full or deleted local mailbox) must not count as bounces either. A line
+// with no transport at all ("retry timeout exceeded") is a remote give-up.
+func localTransport(line string) bool {
+	m := reEximTransport.FindStringSubmatch(line)
+	return m != nil && !strings.Contains(strings.ToLower(m[1]), "smtp")
 }
 
 var (
@@ -281,19 +441,19 @@ func (t *tracker) addSample(key string, s sample) {
 	t.samples[key] = ss
 }
 
-func (t *tracker) addAuth(user, ip string, at time.Time) {
+func (t *tracker) addAuth(user, ip, via string, at time.Time) {
 	ips := t.authIPs[user]
 	if ips == nil {
 		if len(t.authIPs) >= maxTrackedUsers {
 			return
 		}
-		ips = map[string]time.Time{}
+		ips = map[string]authSeen{}
 		t.authIPs[user] = ips
 	}
 	if _, ok := ips[ip]; !ok && len(ips) >= maxTrackedIPs {
 		return
 	}
-	ips[ip] = at
+	ips[ip] = authSeen{at: at, via: via}
 }
 
 // prune drops context older than the windows it is read over.
@@ -310,8 +470,8 @@ func (t *tracker) prune(now time.Time) {
 		}
 	}
 	for u, ips := range t.authIPs {
-		for ip, at := range ips {
-			if now.Sub(at) > hijackWindow {
+		for ip, a := range ips {
+			if now.Sub(a.at) > hijackWindow {
 				delete(ips, ip)
 			}
 		}
@@ -319,6 +479,7 @@ func (t *tracker) prune(now time.Time) {
 			delete(t.authIPs, u)
 		}
 	}
+	t.pruneOutcomes(now)
 }
 
 // Context is what a sender's recent messages looked like — enough to tell a
@@ -377,8 +538,12 @@ func (t *tracker) context(key, self string) Context {
 	for _, kv := range topN(doms, 5) {
 		c.RcptDomains = append(c.RcptDomains, fmt.Sprintf("%s×%d", kv.k, kv.n))
 	}
+	// the owner on (nearly) every message, most messages also to someone else,
+	// and those others (nearly) all different — not a site mailing its owner only
 	if top := topN(rcpts, 1); len(top) == 1 && len(ss) >= 5 &&
-		float64(top[0].n) >= 0.8*float64(len(ss)) && float64(len(rcpts)-1) >= 0.8*float64(others-top[0].n) {
+		float64(top[0].n) >= 0.8*float64(len(ss)) &&
+		float64(others-top[0].n) >= 0.8*float64(len(ss)) &&
+		float64(len(rcpts)-1) >= 0.8*float64(others-top[0].n) {
 		c.CopiedTo = top[0].k
 	}
 	return c
@@ -457,24 +622,38 @@ type AbuseView struct {
 	Context   *Context `json:"context,omitempty"`
 	IPs       int      `json:"ips,omitempty"`
 	Countries []string `json:"countries,omitempty"`
+	// StillOpen marks an alert that is no longer a finding this check but is
+	// not resolved yet (its volume is still high, or it is held): cfm-web
+	// still shows it, so the views do too, with the message it opened with.
+	StillOpen bool `json:"still_open,omitempty"`
 }
 
 // evaluate returns this check's findings, plus each spike key's recent volume
 // (for closing spikes against their opening baseline). ok=false when the store
 // could not be read: nothing should change on such a check.
 func (t *tracker) evaluate(st *Store, now time.Time) (fs []abuseFinding, recent map[string]int64, ok bool) {
+	fs, recent, _, ok = t.evaluateWith(st, now, nil, nil)
+	return fs, recent, ok
+}
+
+// evaluateWith is evaluate knowing which keys are open (so a finding can stay
+// open on a lower threshold than it took to open) and the latest RBL results.
+// held lists open keys this check could not judge (no fresh queue reading, a
+// blocklist that did not answer): they are neither re-published nor resolved.
+func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, rbl *rblChecker) (fs []abuseFinding, recent map[string]int64, held map[string]bool, ok bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.prune(now)
 	recent = map[string]int64{}
+	held = map[string]bool{}
 
 	out, outRecent, err := st.anomalyScan(now, nil, "outbound")
 	if err != nil {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	loc, locRecent, err := st.anomalyScan(now, nil, "local_sub")
 	if err != nil {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	for a, n := range outRecent {
 		recent["mail:out:"+a] = n
@@ -496,23 +675,52 @@ func (t *tracker) evaluate(st *Store, now time.Time) (fs []abuseFinding, recent 
 	}
 	hijacked := map[string]bool{}
 	for user, ips := range t.authIPs {
-		countries := map[string]bool{}
-		for ip := range ips {
-			if c := countryOf(ip); c != "" {
-				countries[c] = true
+		countries, sources, via := map[string]bool{}, map[string]string{}, map[string]bool{}
+		for ip, a := range ips {
+			src, cc := authSource(ip)
+			if src == "" {
+				continue
+			}
+			sources[src] = cc
+			via[a.via] = true
+			if cc != "" {
+				countries[cc] = true
 			}
 		}
-		if len(countries) < hijackMinCountries && (len(ips) < hijackMinIPs || len(countries) < 2) {
+		perCountry := map[string]int{}
+		for _, cc := range sources {
+			if cc != "" {
+				perCountry[cc]++
+			}
+		}
+		abroad := 0
+		if top := topN(perCountry, 1); len(top) == 1 {
+			for _, cc := range sources {
+				if cc != "" && cc != top[0].k {
+					abroad++
+				}
+			}
+		}
+		if len(countries) < hijackMinCountries && (len(sources) < hijackMinIPs || abroad < hijackMinAbroad) {
 			continue
 		}
 		hijacked[user] = true
 		cs := sortedKeys(countries)
-		msg := clip(fmt.Sprintf("%s: authenticated from %d IPs in %d countries (%s) within an hour — likely a stolen password",
-			user, len(ips), len(countries), strings.Join(cs, ", ")))
+		msg := clip(fmt.Sprintf("%s: logged in (%s) from %d IPs in %d countries (%s) within an hour — likely a stolen password",
+			user, strings.Join(sortedKeys(via), "/"), len(sources), len(countries), strings.Join(cs, ", ")))
 		f := abuseFinding{Type: TypeHijack, Severity: "critical", Key: "mail:hijack:" + user, Message: msg}
 		fs = append(fs, f)
 		c := t.context("auth:"+user, user)
-		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: user, IPs: len(ips), Countries: cs, Context: &c})
+		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: user, IPs: len(sources), Countries: cs, Context: &c})
+	}
+	if now.Sub(t.started) < hijackWindow {
+		// after a restart the logins in memory cover less than the window: an
+		// open hijack is neither confirmed nor resolved yet
+		for k := range open {
+			if strings.HasPrefix(k, "mail:hijack:") && !hijacked[strings.TrimPrefix(k, "mail:hijack:")] {
+				held[k] = true
+			}
+		}
 	}
 	for _, a := range out {
 		c := t.context("auth:"+a.Addr, a.Addr)
@@ -525,8 +733,14 @@ func (t *tracker) evaluate(st *Store, now time.Time) (fs []abuseFinding, recent 
 		fs = append(fs, f)
 		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, IPs: len(t.authIPs[a.Addr]), Context: &c})
 	}
+	for _, more := range [][]AbuseView{t.bounceFindings(now, open, held), queueFindings(now, open, held), rblFindings(rbl, open, held)} {
+		for _, v := range more {
+			fs = append(fs, abuseFinding{Type: v.Type, Severity: v.Severity, Key: v.Key, Message: v.Message})
+			views = append(views, v)
+		}
+	}
 	t.last, t.lastCheck = views, now
-	return fs, recent, true
+	return fs, recent, held, true
 }
 
 // CurrentAbuse returns the latest mail-abuse check's findings with their
@@ -540,8 +754,25 @@ func CurrentAbuse() ([]AbuseView, time.Time) {
 		return nil, time.Time{}
 	}
 	c.ab.mu.Lock()
-	defer c.ab.mu.Unlock()
-	return append([]AbuseView(nil), c.ab.last...), c.ab.lastCheck
+	views, at := append([]AbuseView(nil), c.ab.last...), c.ab.lastCheck
+	c.ab.mu.Unlock()
+	if at.IsZero() {
+		return nil, at
+	}
+	current := make(map[string]bool, len(views))
+	for _, v := range views {
+		current[v.Key] = true
+	}
+	c.pub.mu.Lock()
+	c.pub.load()
+	for key, o := range c.pub.open {
+		if !current[key] {
+			views = append(views, AbuseView{Type: o.Type, Severity: o.Severity, Key: key, Message: o.Message,
+				Subject: keySubject(key), StillOpen: true})
+		}
+	}
+	c.pub.mu.Unlock()
+	return views, at
 }
 
 func usual(a Anomaly) string {
@@ -554,10 +785,13 @@ func usual(a Anomaly) string {
 func expectedOf(a Anomaly) float64 { return a.BaselinePerHour * anomalyRecentHours }
 
 func spikeSeverity(a Anomaly) string {
-	if a.Recent >= abuseCritFloor && (a.Kind == "new-sender" || a.Ratio >= abuseCritRatio) {
+	switch {
+	case a.Kind == "new-sender" && a.Recent >= abuseNewCritFloor:
+		return "critical"
+	case a.Kind != "new-sender" && a.Recent >= abuseCritFloor && a.Ratio >= abuseCritRatio:
 		return "critical"
 	}
-	return "warning"
+	return "warning" // a new shop or a migrated account starting to send is not a page at 50
 }
 
 // clip keeps a message inside cfm-web's 255-character event column.
@@ -632,6 +866,9 @@ type openFinding struct {
 	Severity string  `json:"severity"`
 	Message  string  `json:"message"`
 	Expected float64 `json:"expected"`
+	// QuietSince is when a spike stopped being a finding while staying open
+	// on volume (zero while it is one).
+	QuietSince time.Time `json:"quiet_since,omitempty"`
 }
 
 type publisher struct {
@@ -685,8 +922,26 @@ func sevRank(s string) int {
 	return 0
 }
 
+// openKeys lists the findings currently open.
+func (p *publisher) openKeys() map[string]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.load()
+	out := make(map[string]bool, len(p.open))
+	for k := range p.open {
+		out[k] = true
+	}
+	return out
+}
+
 // apply publishes what is new or worse, and resolves what is over.
 func (p *publisher) apply(fs []abuseFinding, recent map[string]int64, now time.Time) {
+	p.applyHeld(fs, recent, nil, now)
+}
+
+// applyHeld is apply that leaves the held keys (not judged this check) as
+// they are.
+func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held map[string]bool, now time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.load()
@@ -694,6 +949,10 @@ func (p *publisher) apply(fs []abuseFinding, recent map[string]int64, now time.T
 	for _, f := range fs {
 		current[f.Key] = true
 		prev, seen := p.open[f.Key]
+		if seen && !prev.QuietSince.IsZero() {
+			prev.QuietSince = time.Time{} // a finding again: not quiet
+			p.open[f.Key] = prev
+		}
 		if seen && sevRank(f.Severity) <= sevRank(prev.Severity) {
 			continue // still open, no worse: nothing new to say
 		}
@@ -707,17 +966,43 @@ func (p *publisher) apply(fs []abuseFinding, recent map[string]int64, now time.T
 		p.open[f.Key] = openFinding{Type: f.Type, Severity: f.Severity, Message: f.Message, Expected: exp}
 	}
 	for key, o := range p.open {
-		if current[key] {
+		if current[key] || held[key] {
 			continue
 		}
 		n := recent[key]
-		if o.Type != TypeHijack && n >= anomalySpikeFloor && float64(n) > math.Max(o.Expected*abuseCloseFactor, 0) {
-			continue // the ratio fell (the incident became its own baseline) but the volume did not
+		spike := o.Type == TypeScriptSpike || o.Type == TypeOutboundSpike
+		settled := false
+		if spike && n >= anomalySpikeFloor && float64(n) > math.Max(o.Expected*abuseCloseFactor, 0) {
+			// the ratio fell (the incident became its own baseline) but the
+			// volume did not — unless there never was a baseline before it (a
+			// new sender): then, after a while, this volume is simply its normal
+			if o.QuietSince.IsZero() {
+				o.QuietSince = now
+				p.open[key] = o
+			}
+			canSettle := o.Expected == 0 && o.Type == TypeOutboundSpike && o.Severity != "critical" && n < abuseNewCritFloor
+			if !canSettle || now.Sub(o.QuietSince) < abuseNewSettle {
+				continue
+			}
+			settled = true
 		}
-		msg := clip("no more logins from many places — still change the password (was: " + o.Message + ")")
-		if o.Type != TypeHijack {
-			msg = clip(fmt.Sprintf("back to normal, %d in %dh (was: %s)", n, anomalyRecentHours, o.Message))
+		var msg string
+		switch o.Type {
+		case TypeHijack:
+			msg = "no more logins from many places — still change the password (was: " + o.Message + ")"
+		case TypeBounceSpike:
+			msg = "bounces back to normal (was: " + o.Message + ")"
+		case TypeQueueHog:
+			msg = "no longer filling the queue (was: " + o.Message + ")"
+		case TypeRBLListed:
+			msg = "no longer listed (was: " + o.Message + ")"
+		default:
+			msg = fmt.Sprintf("back to normal, %d in %dh (was: %s)", n, anomalyRecentHours, o.Message)
+			if settled {
+				msg = fmt.Sprintf("a new sender at a steady %d in %dh — now its usual volume (was: %s)", n, anomalyRecentHours, o.Message)
+			}
 		}
+		msg = clip(msg)
 		if publish(TypeRecovered, "info", key, msg, now) {
 			delete(p.open, key)
 		}

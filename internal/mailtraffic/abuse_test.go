@@ -165,11 +165,11 @@ func TestNoSinkKeepsTheFindingForTheNextCheck(t *testing.T) {
 }
 
 func TestHijackFromManyCountries(t *testing.T) {
-	orig := countryOf
-	countryOf = func(ip string) string {
-		return map[string]string{"1.1.1.1": "GR", "2.2.2.2": "VN", "3.3.3.3": "BR", "4.4.4.4": "GR"}[ip]
+	orig := geoOf
+	geoOf = func(ip string) (string, uint) {
+		return map[string]string{"1.1.1.1": "GR", "2.2.2.2": "VN", "3.3.3.3": "BR", "4.4.4.4": "GR"}[ip], 0
 	}
-	t.Cleanup(func() { countryOf = orig })
+	t.Cleanup(func() { geoOf = orig })
 	st := openTemp(t)
 	T := time.Unix(1_700_000_000, 0)
 	tr := newTracker()
@@ -194,9 +194,9 @@ func TestHijackFromManyCountries(t *testing.T) {
 // A mailbox used as "send mail as" in Gmail logs in from many Google IPs,
 // all in one country: not a hijack.
 func TestManyIPsInOneCountryAreNotAHijack(t *testing.T) {
-	orig := countryOf
-	countryOf = func(string) string { return "US" }
-	t.Cleanup(func() { countryOf = orig })
+	orig := geoOf
+	geoOf = func(string) (string, uint) { return "US", 0 }
+	t.Cleanup(func() { geoOf = orig })
 	tr := newTracker()
 	T := time.Unix(1_700_000_000, 0)
 	ts := T.Add(-5 * time.Minute).Format("2006-01-02 15:04:05")
@@ -250,5 +250,127 @@ func TestMailboxContext(t *testing.T) {
 	hij := tr.context("auth:info@shop.gr", "info@shop.gr")
 	if !hij.ForeignFrom || !strings.Contains(hij.describe("x"), "ceo@bank.example (not a domain here)") {
 		t.Fatalf("sending as a foreign address must be said: %+v", hij)
+	}
+}
+
+// Review of #1556: the cwd line belongs to whoever's directory it is.
+func TestCwdIsOnlyTakenForItsOwnUser(t *testing.T) {
+	tr := newTracker()
+	T := time.Now()
+	ts := T.Format("2006-01-02 15:04:05")
+	tr.observeExim(ts+" cwd=/home/alice/public_html 4 args: /usr/sbin/sendmail -t -i", T)
+	tr.observeExim(ts+" 1xEL5B-0000000G4kX-2aaa <= bob@x.gr U=bob P=local S=1 for a@b.c", T)
+	tr.observeExim(ts+" 1xEL5B-0000000G4kX-2bbb <= alice@x.gr U=alice P=local S=1 for a@b.c", T)
+	tr.observeExim(ts+" 1xEL5B-0000000G4kX-2ccc <= alice@x.gr U=alice P=local S=1 for a@b.c", T)
+	if c := tr.context("local:bob", ""); c.Cwd != "" {
+		t.Fatalf("bob must not get alice's directory: %q", c.Cwd)
+	}
+	ss := tr.samples["local:alice"]
+	if len(ss) != 2 || ss[0].cwd != "/home/alice/public_html" || ss[1].cwd != "" {
+		t.Fatalf("alice's cwd goes to her next message, once: %+v", ss)
+	}
+}
+
+// A site mailing only its owner is not a contact form spamming strangers.
+func TestCwdOwnedByIsAnchored(t *testing.T) {
+	for _, c := range []struct {
+		cwd, user string
+		want      bool
+	}{
+		{"/home/alice/public_html", "alice", true},
+		{"/home2/alice/public_html/x", "alice", true},
+		{"/home/alice", "alice", true},
+		{"/home/alice/public_html", "public_html", false},
+		{"/home/alice/public_html", "home", false},
+		{"/home/bob/www/alice/x", "alice", false},
+		{"/usr/local/cpanel", "alice", false},
+	} {
+		if got := cwdOwnedBy(c.cwd, c.user); got != c.want {
+			t.Errorf("cwdOwnedBy(%q, %q) = %v", c.cwd, c.user, got)
+		}
+	}
+}
+
+func TestOneRecipientIsNotTheContactFormPattern(t *testing.T) {
+	tr := newTracker()
+	T := time.Now()
+	ts := T.Format("2006-01-02 15:04:05")
+	for i := 0; i < 10; i++ {
+		tr.observeExim(ts+" 1xEL5B-0000000G4kX-2ddd <= shop@shop.gr U=shop P=local S=1 for owner@shop.gr", T)
+	}
+	if c := tr.context("local:shop", ""); c.CopiedTo != "" || c.Recipients != 1 {
+		t.Fatalf("one recipient: no pattern, one recipient counted: %+v", c)
+	}
+}
+
+func TestDecodeSubjectCharsets(t *testing.T) {
+	for raw, want := range map[string]string{
+		"=?windows-1251?B?z/Do4uXy?=":            "Привет",
+		"=?iso-8859-7?B?xvbv7Q==?=":              "Ζφον",
+		"=?koi8-r?B?8NLJ18XU?= =?utf-8?Q?plus?=": "Приветplus",
+	} {
+		if got := decodeSubject(raw); got != want {
+			t.Errorf("decodeSubject(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	// an unknown charset loses only its own word
+	if got := decodeSubject("=?x-nope?B?AAAA?= =?utf-8?Q?kept?="); !strings.Contains(got, "kept") {
+		t.Errorf("a bad word must not cost the others: %q", got)
+	}
+}
+
+// A new sender (a migrated account, a new shop) is a warning at 50, critical
+// only at 200; with no baseline from before, it settles after a while.
+func TestNewSenderSeverityAndSettling(t *testing.T) {
+	if s := spikeSeverity(Anomaly{Kind: "new-sender", Recent: 120}); s != "warning" {
+		t.Fatalf("120 from a new sender: %s", s)
+	}
+	if s := spikeSeverity(Anomaly{Kind: "new-sender", Recent: 250}); s != "critical" {
+		t.Fatalf("250 from a new sender: %s", s)
+	}
+	T := time.Now()
+	busy := func(key string) map[string]int64 { return map[string]int64{key: 120} }
+
+	// a new MAILBOX that opened as a warning settles after a quiet day
+	got := recordAbuse(t)
+	p := &publisher{}
+	p.apply([]abuseFinding{{Type: TypeOutboundSpike, Severity: "warning", Key: "mail:out:new@shop.gr", Message: "new@shop.gr: 120"}}, nil, T)
+	p.apply(nil, busy("mail:out:new@shop.gr"), T.Add(time.Hour))
+	p.apply(nil, busy("mail:out:new@shop.gr"), T.Add(20*time.Hour))
+	if len(*got) != 1 {
+		t.Fatalf("still busy, not settled yet: %+v", *got)
+	}
+	p.apply(nil, busy("mail:out:new@shop.gr"), T.Add(26*time.Hour))
+	if len(*got) != 2 || (*got)[1].typ != TypeRecovered || !strings.Contains((*got)[1].msg, "now its usual volume") {
+		t.Fatalf("a new mailbox settles: %+v", *got)
+	}
+
+	// a SCRIPT spike never settles: a hacked quiet site opens exactly like this
+	got = recordAbuse(t)
+	p = &publisher{}
+	p.apply([]abuseFinding{{Type: TypeScriptSpike, Severity: "warning", Key: "mail:script:shop", Message: "shop: 120"}}, nil, T)
+	p.apply(nil, busy("mail:script:shop"), T.Add(time.Hour))
+	p.apply(nil, busy("mail:script:shop"), T.Add(72*time.Hour))
+	if len(*got) != 1 {
+		t.Fatalf("a script spike stays open while the volume does: %+v", *got)
+	}
+
+	// nor does one that opened critical
+	got = recordAbuse(t)
+	p = &publisher{}
+	p.apply([]abuseFinding{{Type: TypeOutboundSpike, Severity: "critical", Key: "mail:out:x@shop.gr", Message: "x: 2000"}}, nil, T)
+	p.apply(nil, busy("mail:out:x@shop.gr"), T.Add(time.Hour))
+	p.apply(nil, busy("mail:out:x@shop.gr"), T.Add(72*time.Hour))
+	if len(*got) != 1 {
+		t.Fatalf("a critical spike never settles: %+v", *got)
+	}
+
+	// an old sender with a real baseline does not settle while still high
+	got2 := recordAbuse(t)
+	p2 := &publisher{}
+	p2.apply([]abuseFinding{{Type: TypeScriptSpike, Severity: "warning", Key: "mail:script:old", Message: "old", Expected: 2}}, nil, T)
+	p2.apply(nil, map[string]int64{"mail:script:old": 120}, T.Add(24*time.Hour))
+	if len(*got2) != 1 {
+		t.Fatalf("a spike over its real baseline stays open: %+v", *got2)
 	}
 }

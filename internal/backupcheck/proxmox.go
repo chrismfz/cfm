@@ -95,7 +95,57 @@ func checkProxmox(run cmdFunc, node string, now time.Time, th Thresholds) Adapte
 	if err != nil {
 		st.Error = err.Error()
 	}
+	// A shared storage (NFS, PBS) is the same for every node: one node reports
+	// it, not all of them. Best effort: without the cluster status every node does.
+	if cs, cerr := get("/cluster/status"); cerr == nil {
+		st.Findings, st.Unknown = dropSharedDestElsewhere(node, storage, cs, st.Findings, st.Unknown)
+	}
 	return st
+}
+
+// dropSharedDestElsewhere keeps a shared storage's FREE-SPACE finding only on
+// the reporting node: the lexically first ONLINE node of the cluster (space is
+// the same everywhere). On the others it is dropped but its key kept armed
+// (unknown), so an alert this node raised before still closes only when the
+// storage is fine again. "Offline" is per node (one node's NFS mount can fail
+// alone) and stays on every node.
+func dropSharedDestElsewhere(node string, storageRaw, statusRaw []byte, fs []Finding, unknown []string) ([]Finding, []string) {
+	var storages []struct {
+		Storage string `json:"storage"`
+		Shared  jbFlex `json:"shared"`
+	}
+	var status []struct {
+		Type   string `json:"type"`
+		Name   string `json:"name"`
+		Online jbFlex `json:"online"`
+	}
+	if json.Unmarshal(storageRaw, &storages) != nil || json.Unmarshal(statusRaw, &status) != nil {
+		return fs, unknown
+	}
+	reporter := ""
+	for _, n := range status {
+		if n.Type == "node" && n.Online.truthy() && (reporter == "" || n.Name < reporter) {
+			reporter = n.Name
+		}
+	}
+	if reporter == "" || reporter == node {
+		return fs, unknown
+	}
+	shared := map[string]bool{}
+	for _, s := range storages {
+		if s.Shared.truthy() {
+			shared["pve:dest:"+s.Storage] = true
+		}
+	}
+	out := fs[:0]
+	for _, f := range fs {
+		if shared[f.Key] && f.Severity != SevCritical { // critical = offline on this node
+			unknown = append(unknown, f.Key)
+			continue
+		}
+		out = append(out, f)
+	}
+	return out, unknown
 }
 
 // evalProxmox is the pure evaluation over the four pvesh responses.
@@ -126,17 +176,22 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resou
 		return nil, nil, nil, fmt.Errorf("decode storage: %w", err)
 	}
 	var resources []struct {
-		VMID jbFlex `json:"vmid"`
-		Node string `json:"node"`
+		VMID     jbFlex `json:"vmid"`
+		Node     string `json:"node"`
+		Template jbFlex `json:"template"`
 	}
 	var unknown []string
 	hostOf := map[string]string{}
+	hostedHere := 0 // guests (not templates) on this node
 	if resourcesRaw == nil || json.Unmarshal(resourcesRaw, &resources) != nil {
 		unknown = append(unknown, "pve:uncovered")
 		uncovered = nil
 	} else {
 		for _, r := range resources {
 			hostOf[string(r.VMID)] = r.Node
+			if r.Node == node && !r.Template.truthy() {
+				hostedHere++
+			}
 		}
 	}
 	if len(hostOf) > 0 {
@@ -171,6 +226,18 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resou
 	}
 
 	var findings []Finding
+
+	// Guests live here but no enabled job runs here: nothing backs them up.
+	// (A node hosting no guest, or only templates, needs no job; without the
+	// resource list it is not judged; and when the guests already show as
+	// backup_uncovered, that one finding says it.)
+	if active == 0 && hostedHere > 0 && len(uncovered) == 0 {
+		findings = append(findings, Finding{
+			Type: TypeNoJob, Severity: SevWarning, Adapter: "proxmox",
+			Key:     "pve:nojob:" + node,
+			Message: fmt.Sprintf("no enabled vzdump job runs on %s, which hosts %d guest(s)", node, hostedHere),
+		})
+	}
 
 	// Runs, newest first by end (running ones last).
 	sort.SliceStable(tasks, func(a, b int) bool { return tasks[a].EndTime > tasks[b].EndTime })

@@ -34,6 +34,52 @@ back-filled here — see the git/PR history for that period.
   foreign domain or another mailbox, so a newsletter can be told from spam.
   The `mail_traffic` MCP tool lists them under `abuse` (admin) and
   `whats_wrong` reports them. See `docs/mail-abuse.md`.
+- **More mail-abuse findings.** `mail_bounce_spike`: a sender whose mail
+  bounces in bulk (≥ 20 bounces and ≥ 25 % in 2 h), with the main reason —
+  a form or hacked account writing to harvested addresses. `mail_queue_hog`:
+  one sender holding half of a queue of 100+ messages. `mail_rbl_listed`: a
+  server IP on Spamhaus ZEN, SpamCop, Barracuda or PSBL (checked every
+  30 min; a list that refuses the resolver is logged once, never read as
+  "delisted"). `mail_hijack` now also counts IMAP/POP3 logins from dovecot,
+  and no longer counts Gmail / Outlook / Yahoo / iCloud fetching a mailbox as
+  many places (their network is one source), a phone's rotating IPv6 (one
+  /64), or a home plus a VPN (many addresses need 5+ outside the main
+  country).
+
+
+### Fixed
+- **Backup alerts: no more duplicates or false "OK again"** (review of the
+  backup check). One job is one alert: only the worst of stuck / failed /
+  stale / partial is published, so a failing job no longer also pages
+  `backup_stale` a day later. A change of state (partial → failed, failed →
+  stuck) resolves the old alert as "now failed: …", not "backup OK again". A
+  disabled or removed job says so. A restart no longer resolves and re-opens
+  an open `backup_check_error`, and a hung-check alert resolves after a
+  restart. An adapter gone for 24 h (uninstalled) resolves its alerts. One
+  JetBackup job with no logged run no longer freezes every other job behind a
+  `backup_check_error` (an empty or truncated log history still is one: it
+  must never read as healthy). A shared Proxmox storage running low is
+  reported by one node, not all; offline is still reported by each node whose
+  mount failed. A Proxmox stuck run folds with the node's failed / stale. New:
+  `backup_no_job` for a Proxmox node hosting guests (not just templates) with
+  no enabled vzdump job, when they are not already `backup_uncovered`.
+- **Node faults are marked sent only once stored.** With no history store or
+  a failed write a finding or recovery was marked delivered and lost; it is
+  now retried. Same for the mail-abuse findings.
+- **Mail-abuse alerts (review of #1556).** A new sender pages critical only
+  from 200 messages in 2 h. A new MAILBOX that opened as a warning and stays
+  under 200 settles after a day at a steady volume ("now its usual volume");
+  a script spike or a critical one never settles — a hacked quiet site opens
+  exactly like a new sender. The script directory is the sending user's own (a
+  busy node pointed at another tenant's site). The contact-form pattern no
+  longer matches a site mailing only its owner. Greek and Cyrillic subjects
+  in legacy charsets decode. `whats_wrong` shows alerts still open in
+  cfm-web and ignores a check that stopped running.
+- **Security: scoped history.** `history/events` never returns `mail_*` or
+  `backup_*` rows to a scoped (cPanel) caller, even with the server hostname
+  in scope.
+- `frontend_working` is `unknown`, not `none`, when no edge is found and the
+  DNAT state cannot be read.
 
 ## 2026.10.08
 

@@ -28,8 +28,9 @@ const (
 	// (orion and earth held ~210 entries) fits many times over; plugin scans
 	// and integrity checks share the stream, so a small window could push a
 	// daily job's runs out of it — and then a failing job would be judged on
-	// its own timestamps, which advance on failure. A history that does not
-	// fit is reported as a check error rather than guessed at.
+	// its own timestamps, which advance on failure. A job whose runs are not
+	// in the history read is unknown (its keys stay armed); when that is every
+	// job that ran, or the history came back empty, it is a check error.
 	jetbackupLogLimit = 5000
 )
 
@@ -125,9 +126,10 @@ func checkJetBackup(run cmdFunc, now time.Time, th Thresholds) AdapterStatus {
 		st.Error = "listLogs: " + err.Error()
 		return st
 	}
-	jobs, findings, err := evalJetBackup(jobsOut, logsOut, now, th)
+	jobs, findings, unknown, err := evalJetBackup(jobsOut, logsOut, now, th)
 	st.Jobs = jobs
 	st.Findings = findings
+	st.Unknown = unknown
 	if err != nil {
 		st.Error = err.Error()
 	}
@@ -153,15 +155,20 @@ func decodeJB(raw []byte, field string, into any) error {
 }
 
 // evalJetBackup is the pure evaluation over the two API responses.
-func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []Job, _ []Finding, err error) {
+//
+// unknown lists the finding keys of jobs this check could not judge (a job that
+// has run recently but has no run in the log history read): kept armed,
+// neither raised nor resolved — one such job must not turn the whole adapter
+// into an error and freeze every other job's findings.
+func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []Job, _ []Finding, unknown []string, err error) {
 	th = th.withDefaults()
 	var jobs []jbJob
 	if err := decodeJB(jobsRaw, "jobs", &jobs); err != nil {
-		return nil, nil, fmt.Errorf("listBackupJobs %w", err)
+		return nil, nil, nil, fmt.Errorf("listBackupJobs %w", err)
 	}
 	var logs []jbLog
 	if err := decodeJB(logsRaw, "logs", &logs); err != nil {
-		return nil, nil, fmt.Errorf("listLogs %w", err)
+		return nil, nil, nil, fmt.Errorf("listLogs %w", err)
 	}
 	var total int
 	_ = decodeJB(logsRaw, "total", &total)
@@ -202,6 +209,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 	var out []Job
 	var findings []Finding
 	var unknownJobs []string
+	judged := 0 // enabled jobs whose runs are in the history
 	seenDest := map[string]bool{}
 	enabledAccountJobs := 0
 	for _, j := range jobs {
@@ -229,6 +237,9 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 			enabledAccountJobs++
 		}
 		label := fmt.Sprintf("JetBackup job %q", j.Name)
+		if r != nil && (r.latest != nil || len(r.starts) > 0) {
+			judged++
+		}
 
 		// 1. The latest finished run.
 		if r != nil && r.latest != nil {
@@ -306,6 +317,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 					Message: fmt.Sprintf("%s: has not run since %s", label, lr.UTC().Format(time.RFC3339)),
 				})
 			case ok || !complete:
+				unknown = append(unknown, "jb:failed:"+j.ID, "jb:partial:"+j.ID, "jb:stale:"+j.ID)
 				unknownJobs = append(unknownJobs, j.Name)
 			}
 		}
@@ -326,9 +338,6 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 			}
 		}
 	}
-	if len(unknownJobs) > 0 {
-		err = fmt.Errorf("no run on record in the %d log entries read (of %d) for job(s) that have run: %s", len(logs), total, strings.Join(unknownJobs, ", "))
-	}
 	if enabledAccountJobs == 0 {
 		findings = append(findings, Finding{
 			Type: TypeNoJob, Severity: SevWarning, Adapter: "jetbackup",
@@ -336,7 +345,14 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 			Message: fmt.Sprintf("JetBackup is installed but no account backup job is enabled (%d job(s) configured)", len(jobs)),
 		})
 	}
-	return out, findings, err
+	// One job missing from the history is that job's problem. But no job
+	// judged at all (an empty or truncated listLogs answer) must not read as
+	// healthy: last_run advances on FAILED runs, so nothing else would ever
+	// alert on a job failing every night.
+	if len(unknownJobs) > 0 && (len(logs) == 0 || judged == 0) {
+		err = fmt.Errorf("no run on record in the %d log entries read (of %d) for job(s) that have run: %s", len(logs), total, strings.Join(unknownJobs, ", "))
+	}
+	return out, findings, unknown, err
 }
 
 // jbPeriod is the gap a job's schedule leaves between runs: measured from its
