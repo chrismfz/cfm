@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -486,5 +487,84 @@ func TestSmallButAbusiveSpikesStillAlert(t *testing.T) {
 	if belowAlertFloor(mild, Context{ForeignFrom: true}, false) || belowAlertFloor(mild, Context{CopiedTo: "owner@shop.gr"}, false) ||
 		belowAlertFloor(mild, Context{OtherFrom: true}, false) {
 		t.Fatal("a small spike that looks like abuse must alert")
+	}
+}
+
+// With a DQS key Spamhaus is asked through zen.dq.spamhaus.net; the key never
+// shows in a finding.
+func TestSpamhausThroughDQS(t *testing.T) {
+	const key = "testkey0000000000000000000"
+	SetSpamhausDQSKey(key)
+	t.Cleanup(func() { SetSpamhausDQSKey("") })
+	var asked []string
+	var mu sync.Mutex
+	oi, ol := rblIPs, rblLookup
+	rblIPs = func() []string { return []string{"84.54.49.4"} }
+	rblLookup = func(_ context.Context, name string) ([]string, error) {
+		mu.Lock()
+		asked = append(asked, name)
+		mu.Unlock()
+		if name == "4.49.54.84."+key+".zen.dq.spamhaus.net." {
+			return []string{"127.0.0.2"}, nil
+		}
+		return nil, notFound(name)
+	}
+	t.Cleanup(func() { rblIPs, rblLookup = oi, ol })
+	r := &rblChecker{}
+	r.check(context.Background(), time.Now())
+	fs, _, _, _ := newTracker().evaluateWith(openTemp(t), time.Now(), nil, r)
+	if len(fs) != 1 || !strings.Contains(fs[0].Message, "zen.spamhaus.org (SBL)") || strings.Contains(fs[0].Message, key) {
+		t.Fatalf("want the SBL listing under its public name: %+v (asked %v)", fs, asked)
+	}
+	for _, n := range asked {
+		if strings.HasSuffix(n, ".zen.spamhaus.org.") {
+			t.Fatalf("with a key the public zone must not be asked: %v", asked)
+		}
+	}
+	SetSpamhausDQSKey("not a key!")
+	if (rblList{zone: "zen.spamhaus.org", dqs: true}).queryZone() != "zen.spamhaus.org" {
+		t.Fatal("a malformed key is ignored")
+	}
+}
+
+// Bounce messages (null sender) piling up are not one sender's doing.
+func TestNullSenderIsNotAQueueHog(t *testing.T) {
+	T := time.Now()
+	stubQueue(t, mailqueue.Report{MeasuredAt: T, Total: 141, Parsed: 141, TopSenders: []mailqueue.SenderQueueStat{
+		{Sender: "<>", Total: 123, Frozen: 70, Deferred: 53},
+	}}, true)
+	if fs, _, _ := newTracker().evaluate(openTemp(t), T); len(fs) != 0 {
+		t.Fatalf("bounces are not a queue hog: %+v", fs)
+	}
+	got := recordAbuse(t)
+	p := &publisher{}
+	p.apply([]abuseFinding{{Type: TypeQueueHog, Severity: "warning", Key: "mail:queue:<>", Message: "bounce messages: 123 of 141"}}, nil, T)
+	p.apply(nil, nil, T)
+	if len(*got) != 2 || !strings.HasPrefix((*got)[1].msg, "bounce messages are no longer reported") {
+		t.Fatalf("an open <> hog closes with the reason: %+v", *got)
+	}
+}
+
+// A changed key gets its own "refused" log line.
+func TestNewDQSKeyResetsTheRefusalLog(t *testing.T) {
+	t.Cleanup(func() { SetSpamhausDQSKey("") })
+	rblRefusalLogged.Store("zen.spamhaus.org", true)
+	SetSpamhausDQSKey("testkey1111111111111111111")
+	if _, ok := rblRefusalLogged.Load("zen.spamhaus.org"); ok {
+		t.Fatal("a new key must be able to log its own refusal")
+	}
+}
+
+// A refusal for a key that was replaced mid-lookup is not logged against the
+// new key (and does not use up the new key's one "refused" line).
+func TestStaleRefusalIsNotLogged(t *testing.T) {
+	t.Cleanup(func() { SetSpamhausDQSKey("") })
+	zen := rblLists[0]
+	SetSpamhausDQSKey("testkey2222222222222222222")
+	asked := zen.queryZone()
+	SetSpamhausDQSKey("testkey3333333333333333333") // reload while the lookup is in flight
+	logRBLRefusal(zen, asked, "127.255.255.250")
+	if _, ok := rblRefusalLogged.Load(zen.zone); ok {
+		t.Fatal("the old key's refusal must not stand for the new key")
 	}
 }

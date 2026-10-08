@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -194,6 +195,11 @@ func queueFindings(now time.Time, open, held map[string]bool) []AbuseView {
 	}
 	var out []AbuseView
 	for _, s := range rep.TopSenders {
+		if s.Sender == "<>" || s.Sender == "" {
+			// bounces (null sender): frozen undeliverable bounces piling up is
+			// the normal state of a cPanel queue, not one sender's doing
+			continue
+		}
 		share := float64(s.Total) / float64(parsed)
 		key := "mail:queue:" + s.Sender
 		if open[key] {
@@ -207,11 +213,7 @@ func queueFindings(now time.Time, open, held map[string]bool) []AbuseView {
 		if s.Total >= queueHogCrit {
 			sev = "critical"
 		}
-		who := s.Sender
-		if who == "<>" || who == "" {
-			who = "bounce messages (null sender <>)"
-		}
-		msg := fmt.Sprintf("%s: %d of %d queued messages (%.0f%%)", who, s.Total, parsed, share*100)
+		msg := fmt.Sprintf("%s: %d of %d queued messages (%.0f%%)", s.Sender, s.Total, parsed, share*100)
 		if parsed < rep.Total {
 			msg += fmt.Sprintf(" of the %d listed, %d in the queue", parsed, rep.Total)
 		}
@@ -230,7 +232,9 @@ func queueFindings(now time.Time, open, held map[string]bool) []AbuseView {
 
 // rblList is one DNS blocklist and how to read its answers.
 type rblList struct {
-	zone string
+	zone string // the list's name in findings, logs and state (never the DQS key)
+	// dqs: the list is reachable through Spamhaus DQS when a key is set
+	dqs bool
 	// label names a listing from its 127.0.0.x answer ("" = not a listing:
 	// the list refuses this resolver, e.g. Spamhaus behind a public resolver).
 	label func(last byte) string
@@ -246,7 +250,7 @@ func plainLabel(last byte) string {
 }
 
 var rblLists = []rblList{
-	{zone: "zen.spamhaus.org", label: func(b byte) string {
+	{zone: "zen.spamhaus.org", dqs: true, label: func(b byte) string {
 		switch {
 		case b == 2 || b == 3 || b == 9:
 			return "SBL"
@@ -260,6 +264,41 @@ var rblLists = []rblList{
 	{zone: "bl.spamcop.net", label: plainLabel},
 	{zone: "b.barracudacentral.org", label: plainLabel},
 	{zone: "psbl.surriel.com", label: plainLabel},
+}
+
+// spamhausDQSKey is the Spamhaus DQS key (cfm.conf MAIL_RBL_SPAMHAUS_DQS_KEY);
+// "" queries the public zone.
+var spamhausDQSKey atomic.Value
+
+var reDQSKey = regexp.MustCompile(`^[a-z0-9]{20,40}$`)
+
+// SetSpamhausDQSKey sets the Spamhaus DQS key. A malformed one is ignored
+// (and said so, without echoing it).
+func SetSpamhausDQSKey(key string) {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if key != "" && !reDQSKey.MatchString(key) {
+		logging.Logf("[mailtraffic] MAIL_RBL_SPAMHAUS_DQS_KEY is not a DQS key (expected 20-40 letters/digits): ignored")
+		key = ""
+	}
+	if old, _ := spamhausDQSKey.Swap(key).(string); old != key {
+		// a new key (or none) deserves its own "refused" line if it is refused
+		for _, l := range rblLists {
+			if l.dqs {
+				rblRefusalLogged.Delete(l.zone)
+			}
+		}
+	}
+}
+
+// queryZone is the zone actually asked: through DQS for Spamhaus when a key
+// is set. Everything else (findings, logs, state) names the list by zone.
+func (l rblList) queryZone() string {
+	if l.dqs {
+		if k, _ := spamhausDQSKey.Load().(string); k != "" {
+			return k + ".zen.dq.spamhaus.net"
+		}
+	}
+	return l.zone
 }
 
 // rblListing is one list's listing of an address.
@@ -391,7 +430,8 @@ func (r *rblChecker) check(ctx context.Context, now time.Time) {
 // neither holds the other lists' verdicts.
 func queryRBL(ctx context.Context, rev string, l rblList) (rblStatus, rblListing) {
 	// the trailing dot keeps the resolver from also trying the search domains
-	addrs, err := rblLookup(ctx, rev+"."+l.zone+".")
+	zone := l.queryZone() // once: the key can change while this lookup is in flight
+	addrs, err := rblLookup(ctx, rev+"."+zone+".")
 	if err != nil {
 		if de, ok := err.(*net.DNSError); ok && de.IsNotFound {
 			return rblClean, rblListing{}
@@ -404,7 +444,7 @@ func queryRBL(ctx context.Context, rev string, l rblList) (rblStatus, rblListing
 			continue
 		}
 		if ip[1] != 0 || ip[2] != 0 {
-			logRBLRefusal(l.zone, a)
+			logRBLRefusal(l, zone, a)
 			return rblRefused, rblListing{}
 		}
 		if lb := l.label(ip[3]); lb != "" {
@@ -419,10 +459,18 @@ func queryRBL(ctx context.Context, rev string, l rblList) (rblStatus, rblListing
 
 var rblRefusalLogged sync.Map
 
-func logRBLRefusal(zone, answer string) {
-	if _, dup := rblRefusalLogged.LoadOrStore(zone, true); !dup {
-		logging.Logf("[mailtraffic] %s answered %s: it refuses this node's DNS resolver, so its listings cannot be checked", zone, answer)
+func logRBLRefusal(l rblList, asked, answer string) {
+	if l.queryZone() != asked {
+		return // the key changed while this lookup was in flight: its answer says nothing about the new one
 	}
+	if _, dup := rblRefusalLogged.LoadOrStore(l.zone, true); dup {
+		return
+	}
+	if asked != l.zone { // through DQS: the key, not the resolver (never log the key)
+		logging.Logf("[mailtraffic] %s (DQS) answered %s: the MAIL_RBL_SPAMHAUS_DQS_KEY was refused (wrong, expired or over quota), so its listings cannot be checked", l.zone, answer)
+		return
+	}
+	logging.Logf("[mailtraffic] %s answered %s: it refuses this node's DNS resolver, so its listings cannot be checked (set MAIL_RBL_SPAMHAUS_DQS_KEY)", l.zone, answer)
 }
 
 func reverseIPv4(s string) string {

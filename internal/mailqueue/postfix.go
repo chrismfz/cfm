@@ -175,6 +175,9 @@ func parsePostfixHeader(line string, now time.Time) (QueuedMsg, bool) {
 	if len(f) >= 7 {
 		sender = f[6]
 	}
+	if sender == "MAILER-DAEMON" {
+		sender = "" // postqueue's name for the null sender: a bounce, like exim's <>
+	}
 	return QueuedMsg{ID: id, SizeBytes: size, AgeSec: age, Sender: sender, Frozen: frozen}, true
 }
 

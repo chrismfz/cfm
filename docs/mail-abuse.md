@@ -25,8 +25,8 @@ mainlog / maillog every minute into hourly per-user counters) checks:
 | `mail_outbound_spike` | warning / critical | an authenticated mailbox (SMTP AUTH) sending far above its own history |
 | `mail_hijack` | critical | one mailbox SUCCESSFULLY logging in from ≥ 3 countries, or from ≥ 10 sources of which ≥ 5 are outside its main country, within an hour — a stolen password in use. SMTP AUTH (exim `A=…` + `H=[ip]`, Postfix `sasl_username` + `client=[ip]`) and IMAP/POP3 (dovecot `Login:` / `Logged in:` + `rip=`; a failed login never counts). See "Hijack sources" below; without GeoIP data there is no hijack finding |
 | `mail_bounce_spike` | warning / critical | a sender (local user or authenticated mailbox) whose remote deliveries bounce in bulk: ≥ 20 bounces and ≥ 25 % of its delivered + bounced in the last 2 h (critical from 100 and 50 %; counted per recipient). A failure through a local transport (a full or deleted mailbox on this host) is not a bounce, as local deliveries are not counted either — a form or hacked account writing to harvested or made-up addresses. Names the main bounce reason (`no-such-user`, `blocked-reputation`, …) and the sender context. Stays open down to half of each threshold |
-| `mail_queue_hog` | warning / critical | one envelope sender holding ≥ 50 % of a queue of ≥ 100 messages, with ≥ 100 of them of which ≥ 50 are frozen or stuck over 1 h — a campaign going out fine is not a clogged queue (critical from 1 000); `<>` is shown as bounce messages (backscatter). Read from the exim/postfix queue detector's latest listing (`exim_queues` / `postfix_queues` must be on). A listing that failed (count fine, nothing listed — a big queue is slow to list) or is 10 min – 1 h old leaves an open finding as it is; older than that (the detector switched off) it no longer holds it. Stays open down to 30 % / 50 messages |
-| `mail_rbl_listed` | warning / critical | one of the node's public IPv4 addresses on Spamhaus ZEN (SBL / XBL / PBL), SpamCop, Barracuda or PSBL, checked every 30 min. Critical for a Spamhaus SBL/XBL listing or two lists at once. Each list is judged on its own: one that does not answer cleanly (a timeout, or Spamhaus's `127.255.255.x` "your resolver is refused" — logged once) keeps its own last verdict, never read as "delisted" and never holding the other lists' verdicts. An address that leaves the node is resolved |
+| `mail_queue_hog` | warning / critical | one envelope sender holding ≥ 50 % of a queue of ≥ 100 messages, with ≥ 100 of them of which ≥ 50 are frozen or stuck over 1 h — a campaign going out fine is not a clogged queue (critical from 1 000); bounces (null sender: exim `<>`, Postfix `MAILER-DAEMON`) are not counted — frozen undeliverable bounces piling up are the normal state of a cPanel queue, not one sender's doing. Read from the exim/postfix queue detector's latest listing (`exim_queues` / `postfix_queues` must be on). A listing that failed (count fine, nothing listed — a big queue is slow to list) or is 10 min – 1 h old leaves an open finding as it is; older than that (the detector switched off) it no longer holds it. Stays open down to 30 % / 50 messages |
+| `mail_rbl_listed` | warning / critical | one of the node's public IPv4 addresses on Spamhaus ZEN (SBL / XBL / PBL), SpamCop, Barracuda or PSBL, checked every 30 min. Spamhaus refuses `zen.spamhaus.org` through public resolvers (the fleet's 1.1.1.1 / 8.8.8.8): set `MAIL_RBL_SPAMHAUS_DQS_KEY` and it is asked through Data Query Service (`<key>.zen.dq.spamhaus.net`) instead; the key is never logged or shown. Critical for a Spamhaus SBL/XBL listing or two lists at once. Each list is judged on its own: one that does not answer cleanly (a timeout, or Spamhaus's `127.255.255.x` "your resolver is refused" — logged once) keeps its own last verdict, never read as "delisted" and never holding the other lists' verdicts. An address that leaves the node is resolved |
 | `mail_recovered` | info | the finding with the same key is over (for a hijack: the logins stopped — the password still needs changing; for an RBL listing: delisted) |
 
 "Far above its history" is the Mail Monitor's anomaly rule: the last 2 h
@@ -115,6 +115,12 @@ general "what's wrong" on a node or `node="all"` names them too.
 
 `cfm.conf`: `MAIL_ABUSE_ALERT = 1` (default). `0` turns the findings off; the
 counters and the MCP views stay.
+
+`cfm.conf`: `MAIL_RBL_SPAMHAUS_DQS_KEY = <key>` (optional): a Spamhaus DQS
+key, so the Spamhaus lookup works behind a public resolver. A credential:
+keep it out of the repo; it is never logged, and `cfm debug` redacts it
+(`internal/secretkeys`). A cfm.conf edit applies without a restart (so does
+`MAIL_ABUSE_ALERT`).
 
 ## Not covered yet
 
