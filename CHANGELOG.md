@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.08
+
 ### Added
 - **Spamhaus through DQS.** The fleet resolves through public resolvers, and
   Spamhaus refuses `zen.spamhaus.org` queries from them, so the RBL check never
@@ -42,8 +46,6 @@ back-filled here — see the git/PR history for that period.
   21 and 37 messages at 4–5× a small sender's usual paged the channel for
   nothing. A small spike far above its usual (a quiet site hacked) or one
   sending as a foreign domain / in the contact-form pattern still alerts.
-
-## 2026.10.08
 
 ### Added
 - **Mail abuse reaches the team channel.** Every 5 min the Mail Monitor now
