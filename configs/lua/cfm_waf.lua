@@ -120,14 +120,6 @@ local CFG = {
   rule_xmlrpc_multicall   = "block", -- system.multicall in XML-RPC body
   rule_xmlrpc_pingback    = "block", -- pingback.ping in XML-RPC body
   rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
-  rule_form_relay_sppb_contact = "logonly", -- 520: Joomla SP Page Builder contact-form (ajax_contact / form_builder) mail
-                                         -- relay, MEASUREMENT ONLY. On SPPB <= 5.x the browser posts the recipient and the
-                                         -- Cc/Bcc header back (form_id's md5 "signature" uses one salt shared by every
-                                         -- install), so a crafted relay is byte-identical to a real submission, and a
-                                         -- site configured `Cc: {{email}}` relays with untouched requests (hotellito.gr,
-                                         -- titan, 2026-10-06). No block-tier shape exists; the tags name the relay-
-                                         -- configured sites and the submissions that mail the visitor. Fix: drop the
-                                         -- visitor-copy Cc/Bcc, update SPPB to 6.x. Clamped to logonly at the call site.
 
   -- ── Audit / payload rules ─────────────────────────────────────────────────
   rule_cmd_params       = "challenge_v2",   -- suspicious parameter keys: exec= passthru= shell_exec= eval= assert= system= cmd= command=
@@ -609,7 +601,8 @@ local RULE_IDS = {
   rule_xmlrpc_multicall        = 510,
   rule_xmlrpc_pingback         = 511,
   rule_xmlrpc_post_burst       = 512,
-  rule_form_relay_sppb_contact = 520,
+  -- 520 is intentionally skipped: the SP Page Builder contact-form relay rule
+  -- (2026-10-06), removed 2026-10-08 (CHANGELOG "Removed").
 
   -- 6xx header / protocol anomaly
   rule_ctrl_chars              = 601,
@@ -1135,22 +1128,12 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 3l2) SP Page Builder contact-form mail relay (rule 520, measurement) ───
-  -- See detect_sppb_form_relay: on SP Page Builder <= 5.x the request carries
-  -- the recipient and the Cc/Bcc header, so no edge signature separates a relay
-  -- from a real submission. Every tag is clamped to logonly (an operator who
-  -- sets the rule to block still only logs: a block here would refuse real
-  -- visitors of a relay-configured site). Every method: Joomla reads the form
-  -- from $_REQUEST.
-  do
-    local mode = rule_mode(CFG.rule_form_relay_sppb_contact, "logonly")
-    if mode ~= "disabled" then
-      local label, tag = det.detect_sppb_form_relay(args, body, headers, get_norm_ab())
-      if tag then
-        if record("WAF_FORM_RELAY:" .. label .. ":" .. tag, CFG.default_ttl_sec, "logonly", RULE_IDS.rule_form_relay_sppb_contact) then goto done end
-      end
-    end
-  end
+  -- (Rule 520, an SP Page Builder contact-form mail-relay detector, ran here
+  -- from 2026-10-06 and was REMOVED on 2026-10-08. The relay seen in the wild
+  -- was the site's own `Cc: {{email}}` setting, which no request-side rule can
+  -- tell from an honest visitor; the injection it guarded only works on
+  -- SP Page Builder <= 3.8.3 (fixed by upgrading); and mirroring PHP's request
+  -- parsing on every request kept yielding CPU-DoS and bypass edge cases.)
 
   -- (A block-tier vBulletin runMaths CVE rule, CVE-2026-61511 / id 10015, was
   -- prototyped here and REMOVED: its phpfuck signature false-positive-banned

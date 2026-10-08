@@ -47,6 +47,15 @@ back-filled here — see the git/PR history for that period.
   a translator whose login expired with the editor open sends the same request.
   Updating the plugin is still the fix: an admin whose own language is a
   secondary site language has the mail stored without the preview trick.
+- **A crafted POST could freeze an edge worker for seconds (WAF rule 520,
+  removed).** Rule 520 (SP Page Builder contact-form relay, released
+  2026.10.06) scanned the posted recipient with a pattern that slows down
+  quadratically on input it does not match. One ~30 KB POST carrying
+  `addon=ajax_contact`, sent to any site on the edge (not only SP Page Builder
+  ones), held an nginx worker for about 7 seconds; a few per second could tie
+  up every worker. The rule is removed (see Removed). Until this release is
+  installed, turn it off with `rule_form_relay_sppb_contact = "disabled"` in
+  `/etc/cfm/cfm_waf_config.lua`.
 
 ### Fixed
 - **WAF rules that match a request parameter by name now read the name the way
@@ -65,22 +74,29 @@ back-filled here — see the git/PR history for that period.
   family can mix armed and held block rules (the TranslatePress rules 10018
   vs 10019/10020), and a held rule's hit used to suppress the armed rule's
   ban and alert for the same IP for a minute.
-- **WAF rule 520 only measures SP Page Builder contact-form relays; it no
-  longer blocks.** The rule shipped on 2026-10-06 keyed on a recipient list
-  that PHPMailer refuses to send, so it blocked nothing that worked. The real
-  abuse on hotellito.gr came from the site's own form setting `Cc: {{email}}`:
-  every submission copied whatever address the visitor typed. On SP Page
-  Builder 5.x and older the browser posts the recipient and Cc/Bcc back
-  (3.8.7–5.x sign them with a salt shared by every install). A relay is
-  therefore an ordinary submission, and no edge rule can block it without
-  blocking real visitors. Rule 520 now logs, for `ajax_contact` and
-  `form_builder` alike:
-  - sites whose Cc/Bcc copies the visitor (`CC_VISITOR_TEMPLATE`);
-  - submissions that mail an address the visitor typed (`DELIVERS_TO_VISITOR`);
-  - literal copies to outside domains, such as the `admin@yourcompany.com`
-    placeholder (`CC_FOREIGN_LITERAL`).
-  The fix is per site: remove the visitor-copy Cc/Bcc and update SP Page
-  Builder to 6.x. The `FORM_RELAY` autoblock key is now inert.
+
+### Removed
+- **WAF rule 520 (`rule_form_relay_sppb_contact`, family `WAF_FORM_RELAY`).**
+  It never matched the abuse it was written for, and could not have:
+  - The spam on titan (hotellito.gr, ~1 500 mails) came from the
+    `form_builder` addon with the site's own `Cc: {{email}}` setting, so every
+    submission was copied to the address the visitor typed. Those requests
+    are identical to an honest visitor's; the fix is the form setting
+    (removed on 20 sites on 2026-10-07).
+  - The recipient list it watched for never delivers: Joomla hands PHPMailer
+    one address, and PHPMailer rejects a list.
+  - A rework that also covered injected `Cc:`/`Bcc:` headers had to mirror
+    PHP's request parsing on every request; review kept finding CPU-DoS and
+    bypass cases in it, which is too much risk for the few sites it could
+    protect.
+
+  What protects a site instead: update SP Page Builder to 3.8.8 or later
+  (3.8.0 to 3.8.3 still post these settings as plain base64 a bot can edit;
+  3.8.4 to 3.8.7 were not checked; correction to the 2026.10.06 entry, which
+  said 3.8), and don't put `{{...}}` placeholders in a form's Cc/Bcc. A
+  leftover `rule_form_relay_sppb_contact` line in `cfm_waf_config.lua` or
+  `FORM_RELAY` line in `detectors.conf` is ignored; delete it at leisure. Id
+  520 stays reserved.
 
 ## 2026.10.08
 
@@ -282,9 +298,7 @@ back-filled here — see the git/PR history for that period.
   outright, injects a victim on the owner's own mail domain or adds a decoy on
   the victim's, or pads the recipient past the WAF's 32 KB body window (logged
   as `BODY_PAST_WINDOW`). Updating SP Page Builder (3.8 or later) closes all of
-  them. _Corrected in [Unreleased]: this shape cannot deliver, the abuse used
-  the site's own `Cc: {{email}}`, and only 6.x stops a browser rewriting the
-  recipient. Rule 520 is logonly now._
+  them.
 
 ### Fixed
 - **The challenge page no longer serves the PoW to clients the decision
