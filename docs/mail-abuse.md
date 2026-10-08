@@ -23,8 +23,8 @@ mainlog / maillog every minute into hourly per-user counters) checks:
 |---|---|---|
 | `mail_script_spike` | warning / critical | a unix user's LOCAL submissions (`U=user P=local`: PHP `mail()`, sendmail from a script or cron) far above that user's own history — a hacked site or an abused contact form. The message names the script directory (`cwd=`), the envelope sender (flagged when it is not a domain on this host), and how many different recipients. `root`, `mailnull`, `cpanel*`, `exim` are skipped |
 | `mail_outbound_spike` | warning / critical | an authenticated mailbox (SMTP AUTH) sending far above its own history |
-| `mail_hijack` | critical | one mailbox SUCCESSFULLY authenticating from ≥ 3 countries or ≥ 10 IPs within an hour — a stolen password in use (exim `A=…` + `H=[ip]`, Postfix `sasl_username` + `client=[ip]`) |
-| `mail_recovered` | info | the finding with the same key is over |
+| `mail_hijack` | critical | one mailbox SUCCESSFULLY authenticating from ≥ 3 countries, or ≥ 10 IPs in at least 2 countries, within an hour — a stolen password in use (IPs alone are not enough: a mailbox used as "send mail as" in Gmail logs in from dozens of Google addresses in one country; without GeoIP data there is no hijack finding) (exim `A=…` + `H=[ip]`, Postfix `sasl_username` + `client=[ip]`) |
+| `mail_recovered` | info | the finding with the same key is over (for a hijack: the logins stopped — the password still needs changing) |
 
 "Far above its history" is the Mail Monitor's anomaly rule: the last 2 h
 against the user's average per active hour over the previous 7 days, at least

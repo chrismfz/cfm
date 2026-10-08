@@ -23,7 +23,7 @@ back-filled here — see the git/PR history for that period.
   contact form — sending far above that user's own history, with the script
   directory, the envelope sender and the number of different recipients),
   `mail_outbound_spike` (a mailbox doing the same) and `mail_hijack` (a
-  mailbox logging in from ≥ 3 countries or ≥ 10 IPs within an hour), and
+  mailbox logging in from ≥ 3 countries, or ≥ 10 IPs in 2+ countries, within an hour), and
   resolves each with `mail_recovered`. They go to `detection_history` for
   cfm-web to alert on. On titan a contact form sent ~1 000 messages a day for
   days without tripping `exim_relays`' fixed 110-per-15-min threshold; the

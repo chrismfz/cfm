@@ -183,6 +183,24 @@ func TestHijackFromManyCountries(t *testing.T) {
 	}
 }
 
+// A mailbox used as "send mail as" in Gmail logs in from many Google IPs,
+// all in one country: not a hijack.
+func TestManyIPsInOneCountryAreNotAHijack(t *testing.T) {
+	orig := countryOf
+	countryOf = func(string) string { return "US" }
+	t.Cleanup(func() { countryOf = orig })
+	tr := newTracker()
+	T := time.Unix(1_700_000_000, 0)
+	ts := T.Add(-5 * time.Minute).Format("2006-01-02 15:04:05")
+	for i := 0; i < 30; i++ {
+		ip := "209.85.220." + string(rune('0'+i%10)) + string(rune('0'+i/10))
+		tr.observeExim(ts+" 1x <= info@shop.gr H=(mail-gmail) ["+ip+"]:1 P=esmtpsa A=dovecot_login:info@shop.gr S=1 for a@b.c", T)
+	}
+	if fs, _, _ := tr.evaluate(openTemp(t), T); len(fs) != 0 {
+		t.Fatalf("one country, many IPs is not a hijack: %+v", fs)
+	}
+}
+
 func TestPostfixAuthIPsAreTracked(t *testing.T) {
 	tr := newTracker()
 	tr.observeMaillog("Oct  8 10:00:00 mx postfix/submission/smtpd[1]: 4AB: client=unknown[5.6.7.8], sasl_method=PLAIN, sasl_username=info@shop.gr", time.Now())

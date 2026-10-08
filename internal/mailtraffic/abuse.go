@@ -51,8 +51,10 @@ const (
 
 const (
 	abuseEvalEvery = 5 * time.Minute
-	// a hijack: one mailbox authenticated from this many countries, or this
-	// many distinct IPs, within hijackWindow.
+	// a hijack: one mailbox authenticated from this many countries, or from
+	// this many distinct IPs in at least two countries, within hijackWindow.
+	// IPs alone are not enough: a mailbox set up as "send mail as" in Gmail
+	// logs in from dozens of Google addresses, all in one country.
 	hijackWindow       = time.Hour
 	hijackMinCountries = 3
 	hijackMinIPs       = 10
@@ -365,7 +367,7 @@ func (t *tracker) evaluate(st *Store, now time.Time) (fs []abuseFinding, recent 
 				countries[c] = true
 			}
 		}
-		if len(countries) < hijackMinCountries && len(ips) < hijackMinIPs {
+		if len(countries) < hijackMinCountries && (len(ips) < hijackMinIPs || len(countries) < 2) {
 			continue
 		}
 		hijacked[user] = true
@@ -553,7 +555,7 @@ func (p *publisher) apply(fs []abuseFinding, recent map[string]int64, now time.T
 		if o.Type != TypeHijack && n >= anomalySpikeFloor && float64(n) > math.Max(o.Expected*abuseCloseFactor, 0) {
 			continue // the ratio fell (the incident became its own baseline) but the volume did not
 		}
-		msg := clip("back to normal (was: " + o.Message + ")")
+		msg := clip("no more logins from many places — still change the password (was: " + o.Message + ")")
 		if o.Type != TypeHijack {
 			msg = clip(fmt.Sprintf("back to normal, %d in %dh (was: %s)", n, anomalyRecentHours, o.Message))
 		}
