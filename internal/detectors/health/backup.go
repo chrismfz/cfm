@@ -13,7 +13,9 @@ package health
 // node faults: a finding is published once when it appears (again if its
 // severity rises or, for a set, a new member joins), re-armed when it is gone,
 // and an adapter that cannot be read keeps its findings armed (unknown is not
-// healthy).
+// healthy). A finding the check positively sees gone is announced as
+// backup_recovered under the same key, so cfm-web closes the open alert
+// instead of reminding about a backup that already works again.
 //
 // The edge state is PACKAGE-level, not per Detector: the manager rebuilds every
 // detector on a detectors.conf save and on a watched log's rotation, and a
@@ -44,6 +46,12 @@ import (
 // read — without it, a broken CLI would look exactly like "no problems".
 const TypeBackupCheckError = "backup_check_error"
 
+// TypeBackupRecovered resolves an earlier finding: same Key, severity info.
+const TypeBackupRecovered = "backup_recovered"
+
+// hungKey is the key of the "check never finished" finding.
+const hungKey = "backupcheck:hung"
+
 const (
 	// backupErrorAfter: an adapter must fail this many checks in a row before
 	// backup_check_error is published (a CLI slow during the nightly run must
@@ -73,6 +81,10 @@ type publishedBackup struct {
 	Adapter  string          `json:"adapter"`
 	Severity string          `json:"severity"`
 	Members  map[string]bool `json:"members,omitempty"`
+	// Type and Message word the recovery; absent in a state file written
+	// before backup_recovered existed.
+	Type    string `json:"type,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 type backupState struct {
@@ -147,13 +159,19 @@ func (d *Detector) tickBackup(now time.Time, host string) {
 	if st := b.pending; st != nil {
 		b.pending = nil
 		lastBackupStatus.Store(st)
+		if b.hungPublic && publishNodeFaultEvent(NodeFaultEvent{
+			Type: TypeBackupRecovered, Severity: backupcheck.SevInfo, Host: host,
+			Key: hungKey, When: now, Message: "backup check finished again",
+		}) {
+			b.hungPublic = false
+		}
 		b.publishLocked(*st, host, now)
 	}
 	if b.running {
 		if now.Sub(b.startedAt) > backupHungAfter && !b.hungPublic {
 			if publishNodeFaultEvent(NodeFaultEvent{
 				Type: TypeBackupCheckError, Severity: backupcheck.SevWarning, Host: host,
-				Key: "backupcheck:hung", When: now,
+				Key: hungKey, When: now,
 				Message: fmt.Sprintf("backup check has not finished for %s — a backup CLI is hanging", ago(now.Sub(b.startedAt))),
 			}) {
 				b.hungPublic = true
@@ -185,7 +203,7 @@ func (d *Detector) tickBackup(now time.Time, host string) {
 	go func() {
 		st := runBackupCheck(opts)
 		b.mu.Lock()
-		b.pending, b.running, b.hungPublic = &st, false, false
+		b.pending, b.running = &st, false
 		b.mu.Unlock()
 	}()
 }
@@ -262,7 +280,7 @@ func (b *backupState) publishLocked(st backupcheck.Status, host string, now time
 			if !grew {
 				// unchanged, shrunk or calmer: remember the current state so a
 				// member that comes back, or a severity that rises again, is news
-				b.published[f.Key] = publishedBackup{Adapter: f.Adapter, Severity: f.Severity, Members: members}
+				b.published[f.Key] = publishedBackup{Adapter: f.Adapter, Severity: f.Severity, Members: members, Type: f.Type, Message: f.Message}
 				continue
 			}
 		}
@@ -270,7 +288,7 @@ func (b *backupState) publishLocked(st backupcheck.Status, host string, now time
 			Type: f.Type, Severity: f.Severity, Host: host, Key: f.Key,
 			Message: f.Message, When: now,
 		}) {
-			b.published[f.Key] = publishedBackup{Adapter: f.Adapter, Severity: f.Severity, Members: members}
+			b.published[f.Key] = publishedBackup{Adapter: f.Adapter, Severity: f.Severity, Members: members, Type: f.Type, Message: f.Message}
 		}
 	}
 	for key, p := range b.published {
@@ -286,10 +304,29 @@ func (b *backupState) publishLocked(st backupcheck.Status, host string, now time
 			continue
 		}
 		if strings.HasSuffix(key, ":error") || (seen[p.Adapter] && !erred[p.Adapter]) {
-			delete(b.published, key)
+			// Forget it only once the recovery is delivered; without a sink it
+			// stays armed and is announced on a later check.
+			if publishNodeFaultEvent(NodeFaultEvent{
+				Type: TypeBackupRecovered, Severity: backupcheck.SevInfo, Host: host,
+				Key: key, When: now, Message: recoveredMessage(key, p),
+			}) {
+				delete(b.published, key)
+			}
 		}
 	}
 	b.saveLocked()
+}
+
+// recoveredMessage words a resolution after the finding it closes.
+func recoveredMessage(key string, p publishedBackup) string {
+	was := p.Message
+	if was == "" {
+		was = key
+	}
+	if p.Type == TypeBackupCheckError || strings.HasSuffix(key, ":error") {
+		return "backup state readable again (was: " + was + ")"
+	}
+	return "backup OK again (was: " + was + ")"
 }
 
 func sevRose(from, to string) bool {

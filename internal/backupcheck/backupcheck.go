@@ -40,6 +40,7 @@ const (
 const (
 	SevCritical = "critical"
 	SevWarning  = "warning"
+	SevInfo     = "info"
 )
 
 // Finding is one problem with one backup subject.
