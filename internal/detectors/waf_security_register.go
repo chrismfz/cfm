@@ -63,7 +63,8 @@ import (
 // tags only, but its family is HELD at 0 like any newly block-promoted family.
 // The edge 403 already stops the mail; the ban only adds persistence. A
 // residual false positive exists (an owner testing a form with an address the
-// form itself mails, on a domain the recipients don't share), and held it
+// form itself mails: for ajax_contact one on a domain no other recipient
+// shares; for form_builder any address its saved Cc/Bcc hardcodes), and held it
 // costs that owner one failed submit instead of a 6 h ban of the office IP.
 // Arm with `FORM_RELAY = 1` after a fleet review of `waf_rule_detail rule=520`.
 //

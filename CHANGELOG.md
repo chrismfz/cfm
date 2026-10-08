@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **A crafted contact-form POST could freeze an edge worker for seconds.**
+  WAF rule 520 (released 2026.10.06) scanned the posted SP Page Builder
+  recipient with a pattern that slows down quadratically on input it does not
+  match. One ~30 KB POST carrying `addon=ajax_contact`, sent to any site on the
+  edge (not only SP Page Builder ones), held an nginx worker for about 7
+  seconds; a few per second could tie up every worker. Every scan in the rule
+  is now linear: the same request takes 0.06 s, and a test pins each crafted
+  case under 0.2 s. Until this release is installed, you can turn the rule off
+  with `rule_form_relay_sppb_contact = "disabled"` in
+  `/etc/cfm/cfm_waf_config.lua`.
+
 ### Fixed
 - **WAF rule 520 (SP Page Builder contact-form spam relay) now looks at the
   form that was actually abused.** The rule shipped on 2026-10-06 watched the

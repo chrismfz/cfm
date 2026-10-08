@@ -1138,7 +1138,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_form_relay_sppb_contact, "block")
     if mode ~= "disabled" then
-      local which, tag = det.detect_sppb_contact_relay(args, body, headers, get_norm_ab(), ctx.host)
+      local which, tag = det.detect_sppb_contact_relay(args, body, headers, get_norm_ab())
       if which then
         local enforce = (tag == "RECIPIENT_HAS_SUBMITTER" or tag == "CC_HAS_SUBMITTER")
         local eff_mode = enforce and mode or "logonly"

@@ -453,6 +453,56 @@ do
   fb_is(post(m, MP), "CC_HAS_SUBMITTER", "block", "multipart name='addon' (single quotes)")
 end
 
+-- Review round 4.
+do
+  -- A Reply-To in the attacker's own header cannot switch the named email
+  -- field off: the email fields are a union.
+  fb_is(post(form(fb_fields("Reply-To: {{message}}\nCc: cdew@spam.example", "cdew@spam.example"), FB_TOP)),
+        "CC_HAS_SUBMITTER", "block", "Reply-To pointing elsewhere does not hide the email field")
+  fb_is(post(form(fb_fields("Reply-To: {{zzz}}\nCc: cdew@spam.example", "cdew@spam.example"), FB_TOP)),
+        "CC_HAS_SUBMITTER", "block", "Reply-To naming no field does not hide the email field")
+  -- Common spellings of the email field.
+  for _, nm in ipairs({ "your_email", "email_address", "Email-Address", "your-email" }) do
+    local f = fb_fields("Cc: cdew@spam.example", "nobody")
+    f[#f + 1] = { "sppb-form-builder-field[" .. nm .. "]", "cdew@spam.example" }
+    fb_is(post(form(f, FB_TOP)), "CC_HAS_SUBMITTER", "block", "email field named " .. nm)
+  end
+  -- PHP fills placeholders one field at a time, in posting order: a value
+  -- carrying {{b}} is filled again by the later field b.
+  local f = fb_fields("Cc: cdew@{{a}}", "cdew@spam.example")
+  f[#f + 1] = { "sppb-form-builder-field[a]", "{{b}}" }
+  f[#f + 1] = { "sppb-form-builder-field[b]", "spam.example" }
+  fb_is(post(form(f, FB_TOP)), "CC_HAS_SUBMITTER", "block", "chained placeholders resolve like PHP")
+  -- A cut body is logged even when the rows in the window look clean: a later
+  -- duplicate (PHP keys are last-wins) may carry the real header.
+  local c = post(form(fb_fields("Reply-To: {{email}}", "guest@mail.example"), FB_TOP))
+  c.headers["Content-Length"] = tostring(#c.body + 40000)
+  fb_is(c, "BODY_PAST_WINDOW", "logonly", "clean rows in the window, the rest unread")
+end
+do
+  -- Linear time on attacker-sized input (each took seconds with the old
+  -- patterns and stalled the nginx worker).
+  local function quick(c, label)
+    local t0 = os.clock()
+    waf.check(c)
+    local dt = os.clock() - t0
+    check(dt < 0.2, string.format("%s is linear (took %.3fs)", label, dt))
+  end
+  local f = fb_fields("Cc: cdew@spam.example", "cdew@spam.example")
+  f[#f + 1] = { string.rep("[", 30000), "x" }
+  quick(post(form(f, FB_TOP)), "a 30K '[' row name")
+  f = fb_fields("Cc: {{f}}@", "cdew@spam.example")
+  f[#f + 1] = { "sppb-form-builder-field[f]", string.rep("a", 24000) }
+  quick(post(form(f, FB_TOP)), "a 24K placeholder value ending in '@'")
+  quick(post(form(fields(string.rep("a", 23000) .. "@", "cdew@spam.example"))), "a 23K ajax_contact recipient ending in '@'")
+  quick(post(form(fb_fields("Cc: " .. string.rep("{", 23000), "x@y.example"), FB_TOP)), "a 23K '{' Cc value")
+  quick(post(form(fb_fields("Reply-To: " .. string.rep("{", 23000), "x@y.example"), FB_TOP)), "a 23K '{' Reply-To value")
+  quick(post(form(fb_fields("Cc: x" .. string.rep(" ", 23000) .. "x", "x@y.example"), FB_TOP)), "a 23K space run inside a Cc value")
+  f = fb_fields("Cc: cdew@spam.example", "cdew@spam.example")
+  f[#f + 1] = { "x" .. string.rep(" ", 30000) .. "x", "y" }
+  quick(post(form(f, FB_TOP)), "a 30K space run inside a row name")
+end
+
 -- Measurement only.
 fb_is(post(form(fb_fields("Reply-To: {{email}}\nReply-name: {{first-name}} {{last-name}}\nCc: {{email}}",
                           "victim@spam.example"), FB_TOP)),
@@ -487,12 +537,13 @@ fb_is(post(form(fb_fields("Reply-To: {{email}}\nCc: {{email}}, boss@gmail.com", 
 clean(post(form(fb_fields("Reply-To: {{email}}\nBcc: admin@yourcompany.com", "guest@mail.example"), FB_TOP)),
       "a saved literal Bcc nobody typed (the normal case, not tagged)")
 do
+  -- No staff exemption (review round 4): the host it keyed on is the
+  -- client's Host header on this edge, so it was a bypass. The accepted cost:
+  -- an owner who hardcoded `Cc: boss@site` and tests the form AS boss@site
+  -- gets one 403 for that submission (autoblock is held, no ban).
   local c = post(form(fb_fields("Cc: boss@hotel.example", "boss@hotel.example"), FB_TOP))
-  c.host = "www.hotel.example:443"
-  clean(c, "staff testing a form that copies boss@ the site's own domain")
-  c = post(form(fb_fields("Cc: boss@mail.hotel.example", "boss@mail.hotel.example"), FB_TOP))
-  c.host = "hotel.example"
-  clean(c, "staff on a subdomain of the site")
+  c.host = "www.hotel.example"
+  fb_is(c, "CC_HAS_SUBMITTER", "block", "owner testing with the address its saved Cc mails (accepted 403)")
 end
 do
   -- A select named *-email is not the visitor's email either (review round 3):
