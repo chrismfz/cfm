@@ -17,7 +17,26 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **WAF rule 520 (SP Page Builder contact-form spam relay) now looks at the
+  form that was actually abused.** The rule shipped on 2026-10-06 watched the
+  `ajax_contact` addon for an injected recipient list, but the spam on titan
+  (hotellito.gr) came from the `form_builder` addon, whose own setting was
+  `Cc: {{email}}`: every submission was copied to the address the visitor
+  typed. Those requests look exactly like an honest visitor's, so the WAF can't
+  block them. The fix is the form setting, removed on 20 sites on 2026-10-07.
+  The rule now logs that setting (`CC_PLACEHOLDER`, logonly) so you can find
+  sites still configured that way. It blocks only clear tampering on SP Page
+  Builder <= 3.8.3: a form_builder `Cc:`/`Bcc:` address written into the
+  header that equals one the visitor typed, or an ajax_contact recipient list
+  holding it. A bot that writes a plain `Cc: {{email}}` into a form is still
+  only logged, because it looks the same as that setting. The quick pre-check
+  no longer needs the literal text `ajax_contact`, which a bot could avoid
+  with `addon=ajax_<>contact` while Joomla still ran the addon. Autoblock for
+  the family stays held (`FORM_RELAY = 0`). Correction to the 2026.10.06
+  entry: SP Page Builder 3.8.0 to 3.8.3 still post these settings in plain
+  base64. 3.8.8 and later encrypt them (3.8.4 to 3.8.7 were not checked), so
+  update to 3.8.8 or later, not just to 3.8.
 
 ## 2026.10.08
 
@@ -186,27 +205,6 @@ _Nothing yet._
   rule fire at all", not as a rate. A rule after a blocking rule is still
   never evaluated on that request; this covers the challenge and logonly
   cases.
-
-### Fixed
-- **WAF rule 520 (SP Page Builder contact-form spam relay) now looks at the
-  form that was actually abused.** The rule shipped on 2026-10-06 watched the
-  `ajax_contact` addon for an injected recipient list, but the spam on titan
-  (hotellito.gr) came from the `form_builder` addon, whose own setting was
-  `Cc: {{email}}`: every submission was copied to the address the visitor
-  typed. Those requests look exactly like an honest visitor's, so the WAF can't
-  block them. The fix is the form setting, removed on 20 sites on 2026-10-07.
-  The rule now logs that setting (`CC_PLACEHOLDER`, logonly) so you can find
-  sites still configured that way. It blocks only clear tampering on SP Page
-  Builder <= 3.8.3: a form_builder `Cc:`/`Bcc:` address written into the
-  header that equals one the visitor typed, or an ajax_contact recipient list
-  holding it. A bot that writes a plain `Cc: {{email}}` into a form is still
-  only logged, because it looks the same as that setting. The quick pre-check
-  no longer needs the literal text `ajax_contact`, which a bot could avoid
-  with `addon=ajax_<>contact` while Joomla still ran the addon. Autoblock for
-  the family stays held (`FORM_RELAY = 0`). Correction to the 2026.10.06
-  entry: SP Page Builder 3.8.0 to 3.8.3 still post these settings in plain
-  base64. 3.8.8 and later encrypt them (3.8.4 to 3.8.7 were not checked), so
-  update to 3.8.8 or later, not just to 3.8.
 
 ## 2026.10.06
 

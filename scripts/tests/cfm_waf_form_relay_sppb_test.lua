@@ -439,6 +439,20 @@ do
   fb_is(post(form(f, FB_TOP)), "CC_HAS_SUBMITTER", "block", "duplicate field: the last in posting order wins")
 end
 
+-- The cheap gate must accept every addon-key spelling PHP does (review round 3).
+do
+  local b = form(fb_fields("Cc: cdew@spam.example", "cdew@spam.example"), {})
+  fb_is(post(b .. "&option=com_sppagebuilder&task=ajax&+addon=form_builder"),
+        "CC_HAS_SUBMITTER", "block", "+addon= (a leading space PHP drops)")
+  fb_is(post(b .. "&option=com_sppagebuilder&task=ajax&addon%00x=form_builder"),
+        "CC_HAS_SUBMITTER", "block", "addon%00x= (a key PHP cuts at NUL)")
+  local MP = "multipart/form-data; boundary=----B"
+  local function part(n, v) return "------B\r\nContent-Disposition: form-data; name='" .. n .. "'\r\n\r\n" .. v .. "\r\n" end
+  local m = part("addon", "form_builder") .. part("data[0][name]", "x[email]") .. part("data[0][value]", "cdew@spam.example")
+    .. part("data[1][name]", "additional_header") .. part("data[1][value]", b64enc("Cc: cdew@spam.example")) .. "------B--\r\n"
+  fb_is(post(m, MP), "CC_HAS_SUBMITTER", "block", "multipart name='addon' (single quotes)")
+end
+
 -- Measurement only.
 fb_is(post(form(fb_fields("Reply-To: {{email}}\nReply-name: {{first-name}} {{last-name}}\nCc: {{email}}",
                           "victim@spam.example"), FB_TOP)),
@@ -448,12 +462,26 @@ fb_is(post(form(fb_fields("Reply-To: {{email}}\nReply-name: {{first-name}} {{las
 fb_is(post(form(fb_fields("Reply-To: {{email}}\nCc: {{email}}", "cdew@spam.example"), FB_TOP)),
       "CC_PLACEHOLDER", "logonly", "a pure {{email}} Cc (configured or written) is logged only")
 do
-  -- An upload or a long message legitimately overflows the window: no
-  -- BODY_PAST_WINDOW for form_builder (review round 2), it would log every one.
+  -- The header row comes AFTER the visitor's fields, so a padded message can
+  -- hide it (review round 3): a urlencoded body past the window is logged.
   local c = post(form({ { "sppb-form-builder-field[message]", string.rep("a", 500) } }, FB_TOP))
   c.headers["Content-Length"] = tostring(40000)
-  clean(c, "form_builder body past the window is not logged")
+  fb_is(c, "BODY_PAST_WINDOW", "logonly", "urlencoded form_builder body past the window")
+  -- A multipart body overflows legitimately (uploads): not logged.
+  local MP = "multipart/form-data; boundary=----B"
+  local b = "------B\r\nContent-Disposition: form-data; name=\"addon\"\r\n\r\nform_builder\r\n"
+    .. "------B\r\nContent-Disposition: form-data; name=\"data[0][name]\"\r\n\r\nx[file]\r\n------B--\r\n"
+  c = post(b, MP)
+  c.headers["Content-Length"] = tostring(900000)
+  clean(c, "multipart form_builder upload past the window is not logged")
 end
+-- A configured placeholder list is the relay too (review round 3).
+fb_is(post(form(fb_fields("Cc: {{email}}, {{email}}", "victim@spam.example"), FB_TOP)),
+      "CC_PLACEHOLDER", "logonly", "a placeholder-only Cc list")
+-- A saved mix of placeholder and fixed address: an honest visitor is NOT
+-- blocked through the placeholder half (review round 3).
+fb_is(post(form(fb_fields("Reply-To: {{email}}\nCc: {{email}}, boss@gmail.com", "guest@mail.example"), FB_TOP)),
+      "CC_PLACEHOLDER", "logonly", "Cc: {{email}}, boss@gmail.com from an honest visitor")
 
 -- Clean.
 clean(post(form(fb_fields("Reply-To: {{email}}\nBcc: admin@yourcompany.com", "guest@mail.example"), FB_TOP)),
@@ -465,6 +493,13 @@ do
   c = post(form(fb_fields("Cc: boss@mail.hotel.example", "boss@mail.hotel.example"), FB_TOP))
   c.host = "hotel.example"
   clean(c, "staff on a subdomain of the site")
+end
+do
+  -- A select named *-email is not the visitor's email either (review round 3):
+  -- the Reply-To placeholder names the typed field.
+  local f = fb_fields("Reply-To: {{email}}\nBcc: boss@gmail.com", "guest@mail.example")
+  f[#f + 1] = { "sppb-form-builder-field[department-email]", "boss@gmail.com" }
+  clean(post(form(f, FB_TOP)), "a department-email select equal to the saved Bcc")
 end
 do
   -- A select whose value is a staff address is not typed input (review round 2).

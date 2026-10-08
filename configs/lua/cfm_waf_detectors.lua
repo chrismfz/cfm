@@ -3885,36 +3885,38 @@ end
 --     clean.)
 --   MULTI_RECIPIENT — any other 2+ address list (an owner may save one).
 -- form_builder
---   CC_HAS_SUBMITTER — a Cc/Bcc with an address written outside its `{{...}}`
---     placeholders resolves (placeholders filled from the form fields, a list
---     split into addresses) to the visitor's own email — a field whose name
---     holds "mail" or one a `Reply-To:` placeholder points at, never a select
---     or pre-filled value — and that address is not on the site's own domain
+--   CC_HAS_SUBMITTER — a Cc/Bcc part (the value split on , and ;) with an
+--     address written outside its `{{...}}` placeholders resolves
+--     (placeholders filled from the form fields) to the visitor's own email —
+--     the field a `Reply-To:` placeholder points at, else a field named
+--     exactly email / e-mail / mail / your-email; never a select or
+--     pre-filled value — and that address is not on the site's own domain
 --     (the host the edge routed on, not the client-set Host header). The
 --     hidden header is the owner's saved setting; a fixed address equal to
 --     the visitor's own input is tampering (a bot copying its victim into the
 --     header). The domain clause keeps staff who test a form that copies
 --     `boss@site` clean, and the attacker cannot move it.
---   CC_PLACEHOLDER — a Cc/Bcc made only of `{{field}}` placeholders, at least
---     one naming a real field: the site copies every submission to what the
+--   CC_PLACEHOLDER — a Cc/Bcc part made only of `{{field}}` placeholders, at
+--     least one naming a real field (`Cc: {{email}}, {{friend}}` too): the site copies every submission to what the
 --     visitor typed (relay by configuration, the titan case). Measurement only,
 --     see above.
 --   A literal Cc/Bcc nobody typed (an owner's saved `Bcc: boss@gmail`) is the
 --     normal case and is not tagged, so the log is not flooded with honest
 --     submissions.
---   BODY_PAST_WINDOW (ajax_contact only) — no recipient row seen and the
+--   BODY_PAST_WINDOW — the recipient / header row was not seen and the
 --     body's Content-Length exceeds what the edge handed the WAF
---     (waf_body_max_len): the row may sit past the window. Measurement only.
---     Not for form_builder: its uploads and long messages overflow the window
---     legitimately, and it would log every one.
+--     (waf_body_max_len): the row may sit past the window (form_builder posts
+--     its header AFTER the visitor's fields). Measurement only. Not for a
+--     multipart form_builder body, whose uploads overflow the window
+--     legitimately.
 -- Residuals (not blocked): the configured `Cc: {{email}}` relay itself (fix
 -- the form), and a bot that WRITES a pure `Cc: {{email}}` into a form that had
 -- none (it looks the same; logged as CC_PLACEHOLDER); a single replaced
 -- recipient on either addon (one address, shape unseen in the wild, so not
 -- guessed at); an injected Cc to a victim who is not also typed into a field;
 -- an ajax_contact victim on a recipient's mail domain, or a form_builder one
--- on the site's own domain; a recipient row padded past waf_body_max_len
--- (ajax_contact: logged as BODY_PAST_WINDOW; form_builder: not seen at all);
+-- on the site's own domain; a row padded past waf_body_max_len (logged as
+-- BODY_PAST_WINDOW; unlogged in a multipart form_builder body);
 -- an injected Cc copied to a field that is not the visitor's email; anything on 3.8.8+
 -- (encrypted); a chunked POST with no Content-Length, which the WAF never
 -- body-reads. Updating SP Page Builder and removing `{{...}}` Cc/Bcc lines
@@ -4036,17 +4038,17 @@ local function sppb_addrs(dec, per_domain)
   return addrs
 end
 
--- The Cc/Bcc values of one decoded form_builder additional_header, as the
--- addon parses it: split on "\n", split each line on ':', key [0] lowercased
--- and compared WITHOUT trimming, value [1] (up to the next ':') trimmed.
-local function sppb_cc_values(hdr)
+-- One decoded form_builder additional_header as the addon parses it: split on
+-- "\n", each line on ':', key [0] lowercased and compared WITHOUT trimming,
+-- value [1] (up to the next ':') trimmed. Returns { {key, value}, ... }; the
+-- ONE parser for both the Cc/Bcc lines and the Reply-To placeholder.
+local function sppb_header_lines(hdr)
   local out = {}
   for line in (hdr .. "\n"):gmatch("([^\n]*)\n") do
     local key, rest = line:match("^([^:]*):(.*)$")
-    local k = key and lower(key)
-    if k == "cc" or k == "bcc" then
+    if key then
       local v = (rest:match("^([^:]*)") or ""):gsub("^[%s%z]+", ""):gsub("[%s%z]+$", "")
-      if v ~= "" then out[#out + 1] = v end
+      out[#out + 1] = { lower(key), v }
     end
   end
   return out
@@ -4115,6 +4117,8 @@ end
 -- The addon splits the header into lines FIRST and fills each {{field}} in the
 -- extracted Cc/Bcc value afterwards (and Joomla strips CR/LF from recipients),
 -- so a typed newline cannot add a line: only the decoded template is parsed.
+local SPPB_EMAIL_FIELDS = { ["email"] = true, ["e-mail"] = true, ["mail"] = true, ["your-email"] = true }
+
 local function sppb_form_builder(rows, top, host)
   local hdrs, fields = {}, {}
   -- PHP array order (first appearance), so a duplicate field is last-wins
@@ -4131,44 +4135,54 @@ local function sppb_form_builder(rows, top, host)
     end
   end
   if #hdrs == 0 then return nil, false end
-  local decoded = {}
-  for _, v in ipairs(hdrs) do decoded[#decoded + 1] = php_b64_decode(v) end
-  -- "What the visitor typed" is their email field only: a field whose name
-  -- holds "mail", or one a Reply-To placeholder points at. A select or
-  -- pre-filled field whose value is a staff address is not typed input.
+  local lines = {}
+  for _, v in ipairs(hdrs) do
+    local dec = php_b64_decode(v)
+    if dec then
+      for _, kv in ipairs(sppb_header_lines(dec)) do lines[#lines + 1] = kv end
+    end
+  end
+  -- "What the visitor typed" is their email field only: the field a Reply-To
+  -- placeholder points at, or, when there is none, a field named exactly
+  -- email / e-mail / mail / your-email. A select or pre-filled field (even
+  -- one named department-email) is not typed input.
+  local email_fields = {}
+  for _, kv in ipairs(lines) do
+    if kv[1] == "reply-to" then
+      for f in kv[2]:gmatch("{{(.-)}}") do email_fields[f] = true end
+    end
+  end
+  if next(email_fields) == nil then
+    for f in pairs(fields) do
+      if SPPB_EMAIL_FIELDS[lower(f)] then email_fields[f] = true end
+    end
+  end
   local submitted = {}
-  local function add(f)
+  for f in pairs(email_fields) do
     local v = fields[f] and trim_lower(fields[f])
     if v and v:find("@", 1, true) then submitted[v] = true end
   end
-  for f in pairs(fields) do
-    if lower(f):find("mail", 1, true) then add(f) end
-  end
-  for _, dec in ipairs(decoded) do
-    for line in (dec .. "\n"):gmatch("([^\n]*)\n") do
-      local key, rest = line:match("^([^:]*):(.*)$")
-      if key and lower(key) == "reply-to" then
-        for f in rest:gmatch("{{(.-)}}") do add(f) end
-      end
-    end
-  end
   local placeholder = false
-  for _, dec in ipairs(decoded) do
-    for _, cc in ipairs(sppb_cc_values(dec)) do
-      local literal = cc:gsub("{{.-}}", "")
-      if literal:find("@", 1, true) then
-        -- An address written into the header: resolve the placeholders as the
-        -- addon does (unknown ones stay as text) and check every address.
-        local resolved = cc:gsub("{{(.-)}}", function(k) return fields[k] end)
-        for _, a in ipairs(sppb_addrs(resolved, {})) do
-          if submitted[a] and not sppb_on_site_domain(a, host) then
-            return "CC_HAS_SUBMITTER", true
+  for _, kv in ipairs(lines) do
+    if kv[1] == "cc" or kv[1] == "bcc" then
+      -- Each comma/semicolon part on its own: only a part with an address
+      -- written outside its placeholders is compared, so a saved
+      -- `Cc: {{email}}, boss@x` never matches the visitor's own address
+      -- through its placeholder half.
+      for part in (kv[2] .. ","):gmatch("([^,;]*)[,;]") do
+        local literal = part:gsub("{{.-}}", "")
+        if literal:find("@", 1, true) then
+          local resolved = part:gsub("{{(.-)}}", function(k) return fields[k] end)
+          for _, a in ipairs(sppb_addrs(resolved, {})) do
+            if submitted[a] and not sppb_on_site_domain(a, host) then
+              return "CC_HAS_SUBMITTER", true
+            end
           end
-        end
-      elseif literal:match("^[%s%z]*$") then
-        -- Only placeholders: a relay when one names a real field.
-        for k in cc:gmatch("{{(.-)}}") do
-          if fields[k] ~= nil then placeholder = true end
+        elseif literal:match("^[%s%z]*$") then
+          -- Only placeholders: a relay when one names a real field.
+          for k in part:gmatch("{{(.-)}}") do
+            if fields[k] ~= nil then placeholder = true end
+          end
         end
       end
     end
@@ -4180,16 +4194,16 @@ end
 -- Returns the addon tag ("SPPB_AJAX_CONTACT" / "SPPB_FORM_BUILDER") and the
 -- finding tag, or nil.
 function _M.detect_sppb_contact_relay(args, body, headers, _nab, host)
-  -- Cheap gate on an `addon` KEY (a pair `addon=` or a multipart name="addon")
-  -- and a `data[` row, in the normalized surface (url-decoded, lowercased) —
-  -- never on the addon's value: Joomla's STRING filter lets a mangled value
-  -- still dispatch. PHP drops leading spaces from a key.
+  -- Cheap gate: a `data[` row and the word `addon` anywhere in the normalized
+  -- surface (url-decoded, lowercased). It must stay a SUPERSET of what the
+  -- parser below and PHP accept as the addon key (`+addon=`, `addon%00=`,
+  -- multipart `name='addon'` all reach $_REQUEST['addon']), and never look at
+  -- the addon's value: Joomla's STRING filter lets a mangled value dispatch.
   -- _nab caps each side at body_budget(headers), so it may rule the request
   -- out only when it saw both sides whole (the same contract as rule 10017).
   local bn = body_budget(headers)
   if _nab and #(args or "") <= bn and #(body or "") <= bn
-     and not ((("&" .. _nab):find("&%s*addon=") or has(_nab, 'name="addon"') or has(_nab, "name=addon"))
-              and has(_nab, "data[")) then
+     and not (has(_nab, "data[") and has(_nab, "addon")) then
     return nil
   end
 
@@ -4221,10 +4235,11 @@ function _M.detect_sppb_contact_relay(args, body, headers, _nab, host)
 
   local tag, seen = check(rows, top, host)
   if tag then return which, tag end
-  -- form_builder posts the header with the settings, ahead of uploads and long
-  -- messages that legitimately overflow the window, so only ajax_contact gets
-  -- the padded-row measurement.
-  if not seen and which == "SPPB_AJAX_CONTACT" then
+  -- The row may sit past the window: form_builder posts its header AFTER the
+  -- visitor's fields, so a padded message hides it. Not for a multipart
+  -- form_builder body, whose uploads overflow the window legitimately.
+  local ct = lower(header_string(headers and (headers["Content-Type"] or headers["content-type"])) or "")
+  if not seen and (which == "SPPB_AJAX_CONTACT" or not has(ct, "multipart/form-data")) then
     local cl = tonumber(header_string(headers and (headers["Content-Length"] or headers["content-length"])) or "")
     if cl and cl > #(body or "") then return which, "BODY_PAST_WINDOW" end
   end
