@@ -719,6 +719,9 @@ var mailAbuseTitles = map[string]string{
 	"mail_script_spike":   "site sending spam through its scripts (hacked site / contact form)",
 	"mail_outbound_spike": "mailbox sending far above its history",
 	"mail_hijack":         "mailbox hijacked (logins from many countries/IPs)",
+	"mail_bounce_spike":   "sender's mail bouncing in bulk (harvested / made-up addresses)",
+	"mail_queue_hog":      "one sender holding most of the mail queue",
+	"mail_rbl_listed":     "server IP on a mail blocklist (RBL)",
 }
 
 func evalMailAbuse(views []mailAbuseView) []finding {

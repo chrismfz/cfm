@@ -165,11 +165,11 @@ func TestNoSinkKeepsTheFindingForTheNextCheck(t *testing.T) {
 }
 
 func TestHijackFromManyCountries(t *testing.T) {
-	orig := countryOf
-	countryOf = func(ip string) string {
-		return map[string]string{"1.1.1.1": "GR", "2.2.2.2": "VN", "3.3.3.3": "BR", "4.4.4.4": "GR"}[ip]
+	orig := geoOf
+	geoOf = func(ip string) (string, uint) {
+		return map[string]string{"1.1.1.1": "GR", "2.2.2.2": "VN", "3.3.3.3": "BR", "4.4.4.4": "GR"}[ip], 0
 	}
-	t.Cleanup(func() { countryOf = orig })
+	t.Cleanup(func() { geoOf = orig })
 	st := openTemp(t)
 	T := time.Unix(1_700_000_000, 0)
 	tr := newTracker()
@@ -194,9 +194,9 @@ func TestHijackFromManyCountries(t *testing.T) {
 // A mailbox used as "send mail as" in Gmail logs in from many Google IPs,
 // all in one country: not a hijack.
 func TestManyIPsInOneCountryAreNotAHijack(t *testing.T) {
-	orig := countryOf
-	countryOf = func(string) string { return "US" }
-	t.Cleanup(func() { countryOf = orig })
+	orig := geoOf
+	geoOf = func(string) (string, uint) { return "US", 0 }
+	t.Cleanup(func() { geoOf = orig })
 	tr := newTracker()
 	T := time.Unix(1_700_000_000, 0)
 	ts := T.Add(-5 * time.Minute).Format("2006-01-02 15:04:05")

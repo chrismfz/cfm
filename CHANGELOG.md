@@ -34,6 +34,17 @@ back-filled here — see the git/PR history for that period.
   foreign domain or another mailbox, so a newsletter can be told from spam.
   The `mail_traffic` MCP tool lists them under `abuse` (admin) and
   `whats_wrong` reports them. See `docs/mail-abuse.md`.
+- **More mail-abuse findings.** `mail_bounce_spike`: a sender whose mail
+  bounces in bulk (≥ 20 bounces and ≥ 25 % in 2 h), with the main reason —
+  a form or hacked account writing to harvested addresses. `mail_queue_hog`:
+  one sender holding half of a queue of 100+ messages. `mail_rbl_listed`: a
+  server IP on Spamhaus ZEN, SpamCop, Barracuda or PSBL (checked every
+  30 min; a list that refuses the resolver is logged once, never read as
+  "delisted"). `mail_hijack` now also counts IMAP/POP3 logins from dovecot,
+  and no longer counts Gmail / Outlook / Yahoo / iCloud fetching a mailbox as
+  many places (their network is one source), a phone's rotating IPv6 (one
+  /64), or a home plus a VPN (many addresses need 5+ outside the main
+  country).
 
 ## 2026.10.08
 

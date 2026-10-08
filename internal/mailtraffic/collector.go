@@ -42,6 +42,7 @@ type Collector struct {
 	// mail-abuse findings (abuse.go): per-line context + edge state
 	ab       *tracker
 	pub      *publisher
+	rbl      *rblChecker
 	lastEval time.Time
 }
 
@@ -53,6 +54,7 @@ func newCollector(st *Store, abuseStatePath string) *Collector {
 		done: make(chan struct{}),
 		ab:   newTracker(),
 		pub:  &publisher{path: abuseStatePath},
+		rbl:  &rblChecker{},
 	}
 }
 
@@ -89,11 +91,12 @@ func (c *Collector) evalAbuse(now time.Time) {
 		return
 	}
 	c.lastEval = now
-	fs, recent, ok := c.ab.evaluate(c.st, now)
+	c.rbl.maybeRun(now) // background; its results are read on a later check
+	fs, recent, held, ok := c.ab.evaluateWith(c.st, now, c.pub.openKeys(), c.rbl)
 	if !ok {
 		return // the store could not be read: change nothing
 	}
-	c.pub.apply(fs, recent, now)
+	c.pub.applyHeld(fs, recent, held, now)
 }
 
 // pollFile ingests new lines from one log and flushes the poll's counters. The
