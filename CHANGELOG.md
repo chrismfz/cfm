@@ -21,10 +21,13 @@ back-filled here — see the git/PR history for that period.
 - **Spamhaus through DQS.** The fleet resolves through public resolvers, and
   Spamhaus refuses `zen.spamhaus.org` queries from them, so the RBL check never
   saw Spamhaus. `MAIL_RBL_SPAMHAUS_DQS_KEY` in cfm.conf makes it ask
-  `<key>.zen.dq.spamhaus.net` instead (the key is never logged or shown).
+  `<key>.zen.dq.spamhaus.net` instead. The key is never logged or shown, and
+  `cfm debug` redacts it; editing it (or `MAIL_ABUSE_ALERT`) in cfm.conf
+  applies without a restart.
 
 ### Changed
-- **Bounces are not a queue hog.** Frozen bounce messages (null sender `<>`)
+- **Bounces are not a queue hog.** Frozen bounce messages (null sender: exim
+  `<>`, Postfix `MAILER-DAEMON`)
   piling up are the normal state of a cPanel queue; `mail_queue_hog` no longer
   counts them, and an open one closes saying so.
 

@@ -1185,6 +1185,10 @@ func runDaemon(args []string) {
 		cfg.SystemTweaks.SetDefaults()
 		logging.Init(&cfg.Logging)
 
+		// Mail abuse knobs follow a cfm.conf edit without a restart.
+		mailtraffic.SetAbuseAlert(!cfg.MailAbuseAlertOff)
+		mailtraffic.SetSpamhausDQSKey(cfg.MailRBLSpamhausDQSKey)
+
 		clam.SetLogger(logging.LogfCLAM)
 
 		if clamMgr != nil {

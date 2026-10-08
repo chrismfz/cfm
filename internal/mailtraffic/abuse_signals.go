@@ -280,7 +280,14 @@ func SetSpamhausDQSKey(key string) {
 		logging.Logf("[mailtraffic] MAIL_RBL_SPAMHAUS_DQS_KEY is not a DQS key (expected 20-40 letters/digits): ignored")
 		key = ""
 	}
-	spamhausDQSKey.Store(key)
+	if old, _ := spamhausDQSKey.Swap(key).(string); old != key {
+		// a new key (or none) deserves its own "refused" line if it is refused
+		for _, l := range rblLists {
+			if l.dqs {
+				rblRefusalLogged.Delete(l.zone)
+			}
+		}
+	}
 }
 
 // queryZone is the zone actually asked: through DQS for Spamhaus when a key

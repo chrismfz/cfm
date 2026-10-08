@@ -544,3 +544,13 @@ func TestNullSenderIsNotAQueueHog(t *testing.T) {
 		t.Fatalf("an open <> hog closes with the reason: %+v", *got)
 	}
 }
+
+// A changed key gets its own "refused" log line.
+func TestNewDQSKeyResetsTheRefusalLog(t *testing.T) {
+	t.Cleanup(func() { SetSpamhausDQSKey("") })
+	rblRefusalLogged.Store("zen.spamhaus.org", true)
+	SetSpamhausDQSKey("testkey1111111111111111111")
+	if _, ok := rblRefusalLogged.Load("zen.spamhaus.org"); ok {
+		t.Fatal("a new key must be able to log its own refusal")
+	}
+}

@@ -13,13 +13,14 @@ import "regexp"
 
 // re matches config key names that hold secrets (case-insensitive, substring):
 // token, secret, password, hmac, api_key/apikey, private_key/privatekey,
-// license_key (MAXMIND_LICENSE_KEY), encryption_key (AUTH_MFA_ENCRYPTION_KEY). It is
+// license_key (MAXMIND_LICENSE_KEY), encryption_key (AUTH_MFA_ENCRYPTION_KEY),
+// dqs_key (MAIL_RBL_SPAMHAUS_DQS_KEY). It is
 // deliberately BROAD / fail-safe — over-matching a non-secret is safe (it just
 // gets redacted), under-matching leaks a credential. A caller that must keep a
 // specific non-secret key visible even though its name matches (e.g. a numeric
 // threshold called TOKEN_IP) applies its own small allowlist on top; it must
 // never loosen this pattern.
-var re = regexp.MustCompile(`(?i)(token|secret|password|hmac|api_?key|private_?key|license_?key|encryption_?key)`)
+var re = regexp.MustCompile(`(?i)(token|secret|password|hmac|api_?key|private_?key|license_?key|encryption_?key|dqs_?key)`)
 
 // IsSecret reports whether a config key name looks like it holds a secret value.
 func IsSecret(key string) bool { return re.MatchString(key) }
