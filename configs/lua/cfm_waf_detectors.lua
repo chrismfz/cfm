@@ -3964,6 +3964,8 @@ local function each_request_field(args, body, headers, fn)
     if not s or s == "" then return end
     for pair in ("&" .. s):gmatch("&([^&]*)") do
       local k, v = pair:match("^([^=]*)=(.*)$")
+      -- PHP registers a bare `key` (no `=`) as an empty string.
+      if not k and pair ~= "" then k, v = pair, "" end
       if k then fn(form_decode(k), form_decode(v)) end
     end
   end

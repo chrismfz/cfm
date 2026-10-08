@@ -112,6 +112,23 @@ check(push(nil, IP, "WAF_RCE", "block") == true, "no shdict -> push (fail-open)"
 check(push(sh,  "",  "WAF_RCE", "block") == true, "empty ip -> push (fail-open)")
 check(push(sh,  nil, "WAF_RCE", "block") == true, "nil ip -> push (fail-open)")
 
+-- Block tier keys the rule id when given: a held block rule (10019/10020,
+-- RULE_<id> = 0) must not swallow the armed 10018's push for the same IP.
+do
+  local sh = new_shdict()
+  do
+    check(waf.should_push(sh, "198.51.100.9", "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:STRING_IDS", "block", 10019) == true,
+          "held 10019 block push goes out")
+    check(waf.should_push(sh, "198.51.100.9", "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:LOSTPASSWORD", "block", 10018) == true,
+          "armed 10018 push is not masked by the 10019 window")
+    check(waf.should_push(sh, "198.51.100.9", "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:LOSTPASSWORD", "block", 10018) == false,
+          "a second 10018 push in the window is deduped")
+    check(waf.should_push(sh, "198.51.100.9", "WAF_XSS:A", "challenge", 302) == true, "challenge push")
+    check(waf.should_push(sh, "198.51.100.9", "WAF_XSS:B", "challenge", 303) == false,
+          "lower tiers stay family-keyed (rule id ignored)")
+  end
+end
+
 if fails > 0 then
   io.stderr:write("\n" .. fails .. " test(s) failed in cfm_waf_should_push_test.lua\n")
   os.exit(1)

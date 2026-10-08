@@ -107,6 +107,8 @@ fires(post("/wp-login.php", "", "trp-edit-translation=preview&action=lostpasswor
       "both in the body", LOST)
 fires(post("/wp-login.php", "action=lostpassword&trp%2Dedit%2Dtranslation=preview", "user_login=admin"),
       "percent-encoded parameter name", LOST)
+fires(post("/wp-login.php", "action=lostpassword&trp-edit-translation", "user_login=admin"),
+      "bare parameter without `=` (PHP registers it as an empty string)", LOST)
 fires(post("/wp-login.php", "action=lostpassword&trp-edit-translation%5B%5D=preview", "user_login=admin"),
       "array form of the parameter (PHP keys it on the name before the bracket)", LOST)
 fires(post("/secret-login/", "action=lostpassword&trp-edit-translation=preview", "user_login=admin"),

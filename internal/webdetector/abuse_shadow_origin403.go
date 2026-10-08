@@ -55,8 +55,6 @@ const (
 	// when the origin gzips it (mod_deflate on everything), plus chunk framing.
 	// A WAF block page is never this small on these paths (Wordfence's is ~7 KB).
 	wpAjaxDenialMaxBytes = 48
-	// maxOrigin403EnrichPerTick bounds the per-tick enrichment/log work.
-	maxOrigin403EnrichPerTick = 50
 )
 
 // origin403Window is the per-minute window the burst is counted over.
@@ -112,7 +110,9 @@ type origin403Burst struct {
 }
 
 // origin403Bursts snapshots the (host, ip) pairs at or over perMin in the last
-// minute. Pure over the engine state (read lock only), so it is testable
+// minute: only buckets that START inside it count, so a partly-overlapping
+// bucket never stretches the window past 60 s (it can read up to one bucket
+// short instead — the safe direction for a threshold). Pure over the engine state (read lock only), so it is testable
 // without the enricher.
 func (e *Engine) origin403Bursts(now time.Time, perMin int) []origin403Burst {
 	from := now.Add(-origin403Window)
@@ -126,7 +126,7 @@ func (e *Engine) origin403Bursts(now time.Time, perMin int) []origin403Burst {
 		var counts map[string]int
 		for i := range hs.buckets {
 			b := &hs.buckets[i]
-			if b.to.Before(from) || len(b.ipsOrigin403POST) == 0 {
+			if b.from.Before(from) || len(b.ipsOrigin403POST) == 0 {
 				continue
 			}
 			if counts == nil {
@@ -144,7 +144,7 @@ func (e *Engine) origin403Bursts(now time.Time, perMin int) []origin403Burst {
 			reqs := 0
 			for i := range hs.buckets {
 				b := &hs.buckets[i]
-				if b.to.Before(from) {
+				if b.from.Before(from) {
 					continue
 				}
 				for h := range b.ipOrigin403Paths[ip] {
@@ -217,17 +217,15 @@ func (e *Engine) emitAbuseShadowOrigin403(now time.Time) {
 			}
 		}
 	}
-	enriched := 0
+	// No per-tick cap: everything below is a cache read or an async start
+	// (LookupCachedOrAsync, the good-bot verdict cache), and a due entry has
+	// already left the tracker, so a cap would silently drop it.
 	for _, t := range e.trackOrigin403(now, kept) {
-		if enriched >= maxOrigin403EnrichPerTick {
-			break
-		}
 		// One line per (host, ip) per holddown, so a persistent burst does not
 		// log every minute.
 		if !e.shouldLogVhostSuppress("abuseshadow:o403:"+t.host+"|"+t.ip, now) {
 			continue
 		}
-		enriched++
 		var asn uint
 		var cc, goodBot string
 		if e.enr != nil {

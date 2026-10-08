@@ -1498,7 +1498,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- load-bearing: it is what writes the (per-IP) rung mark the verify
       -- gate keys on, so a body-carried payload must not dodge it.
       local function push_and_log_waf_hit()
-        if waf.should_push and waf.should_push(SH, ip, reason, waf_action) then
+        if waf.should_push and waf.should_push(SH, ip, reason, waf_action, waf_rule_id) then
           -- Forensic fields (UA / Referer / Content-Type) are always
           -- attached. The single cfm.waf.log now emits one JSON record
           -- per trigger carrying everything Go knows: timestamp, action,

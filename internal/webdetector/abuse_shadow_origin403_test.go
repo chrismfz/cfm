@@ -198,3 +198,19 @@ func TestOrigin403PerMinDefault(t *testing.T) {
 		t.Errorf("configured threshold not applied")
 	}
 }
+
+// TestOrigin403BucketStraddle: a bucket that starts before the minute does not
+// count, so the window never stretches past 60 s.
+func TestOrigin403BucketStraddle(t *testing.T) {
+	e := newOrigin403Engine(true)
+	t0 := time.Unix(1791466170, 0) // bucket [t0, t0+5s)
+	feedPOST403(e, t0, "198.51.100.4", "a.gr", "/xmlrpc.php", 10, 4000, true)
+	feedPOST403(e, t0.Add(10*time.Second), "198.51.100.4", "a.gr", "/xmlrpc.php", 25, 4000, true)
+	// now-60s falls inside the first bucket: only the 25 later POSTs count.
+	if got := e.origin403Bursts(t0.Add(62*time.Second), 30); len(got) != 0 {
+		t.Errorf("a straddling bucket must not count: got %+v", got)
+	}
+	if got := e.origin403Bursts(t0.Add(40*time.Second), 30); len(got) != 1 || got[0].post403 != 35 {
+		t.Errorf("inside the minute both buckets count: got %+v", got)
+	}
+}

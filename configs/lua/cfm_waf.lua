@@ -11,7 +11,7 @@
 -- Public API:
 --   _M.enabled() -> bool
 --   _M.check(ctx) -> hit(bool), reason(string), ttl_sec(int), action(string)
---   _M.should_push(shdict, ip, reason, action) -> bool
+--   _M.should_push(shdict, ip, reason, action, rule_id) -> bool
 --
 -- ctx fields expected from caller:
 --   uri, args, method, host, ip, peer, cf_ip, cookie, shdict, headers, body
@@ -2380,7 +2380,7 @@ function _M.also_rule_ids(hits, headline_id)
   return out
 end
 
-function _M.should_push(shdict, ip, reason, action)
+function _M.should_push(shdict, ip, reason, action, rule_id)
   if not shdict or not ip or ip == "" then return true end
   -- Dedup on (ip, reason FAMILY, action tier).
   --   * FAMILY (the part before the first ":", the same identity
@@ -2397,12 +2397,14 @@ function _M.should_push(shdict, ip, reason, action)
   --     autoblocked (a security under-report and an evasion primitive). Keying
   --     the action guarantees the first block hit of a family always pushes,
   --     while same-tier score/tag floods still collapse to one push per window.
-  -- Caveat for future maintainers: this collapses distinct BLOCK sub-reasons of a
-  -- family to one push/window, which is correct only while each armed family has a
-  -- SINGLE block rule (the Go autoblock is family-keyed at threshold 1). If a
-  -- family ever gains a 2nd block rule AND one is suppressed per-rule (RULE_<id>=0)
-  -- while the family stays armed, a block hit of the suppressed rule could consume
-  -- this window and mask the armed rule's push — revisit the key (add rule_id) then.
+  --   * RULE ID for the block tier (when the caller passes it): a family can
+  --     have several block rules with different autoblock arming — WAF_CVE has
+  --     the armed 10018 next to 10019/10020, which are held per rule
+  --     (RULE_<id> = 0). A family-keyed block window let a held rule's hit
+  --     swallow the armed rule's push for push_cooldown_sec: send the held
+  --     request first, then the real one, and no ban or alert followed. One
+  --     push per (block rule, ip) per window is still bounded by the number of
+  --     block rules. Lower tiers stay family-keyed (Phase 1 only feeds block).
   local fam = (reason and reason:match("^([^:]+)")) or "WAF"
   local key_reason = fam
   if PUSH_KEY_KEEPS_TAG[fam] then
@@ -2425,6 +2427,10 @@ function _M.should_push(shdict, ip, reason, action)
   -- a family-keyed window dropped it for every host after the first; a
   -- push_v2_host_cap budget bounded it, because $host is client-chosen. Both
   -- went once the mark became per IP.
+  local rid = tonumber(rule_id)
+  if action == "block" and rid and rid > 0 then
+    key_reason = key_reason .. "#" .. rid
+  end
   local k  = "wafpush|" .. key_reason .. "|" .. (action or "na") .. "|" .. ip
   local ok = shdict:add(k, 1, CFG.push_cooldown_sec)
   return ok == true

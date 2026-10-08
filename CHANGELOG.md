@@ -56,6 +56,15 @@ back-filled here — see the git/PR history for that period.
   TranslatePress rules now match those forms.
 
 ### Changed
+- **A `RULE_<id>` line in `[waf_security]` now honours an inline comment.**
+  `RULE_511 = 2 ; note` used to fail to parse and silently fall back to the
+  family default; it now applies 2, like every other detectors.conf scalar
+  since the earlier inline-comment fix. Check your `RULE_` lines if any carry
+  a comment.
+- **WAF hit pushes are de-duplicated per block rule, not per family.** A
+  family can mix armed and held block rules (the TranslatePress rules 10018
+  vs 10019/10020), and a held rule's hit used to suppress the armed rule's
+  ban and alert for the same IP for a minute.
 - **WAF rule 520 only measures SP Page Builder contact-form relays; it no
   longer blocks.** The rule shipped on 2026-10-06 keyed on a recipient list
   that PHPMailer refuses to send, so it blocked nothing that worked. The real
