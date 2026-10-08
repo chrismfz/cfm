@@ -44,6 +44,10 @@ func TestIsOrigin403POST(t *testing.T) {
 		{"origin WAF, 107 bytes", func(r *LogRec) { r.Bytes = 107 }, "/wp/", true},
 		{"WordPress nonce refusal (-1) on admin-ajax", func(r *LogRec) { r.Bytes = 6 }, "/wp-admin/admin-ajax.php", false},
 		{"WordPress refusal on admin-post", func(r *LogRec) { r.Bytes = 2 }, "/blog/wp-admin/admin-post.php", false},
+		{"gzipped WordPress refusal (mod_deflate)", func(r *LogRec) { r.Bytes = 26 }, "/wp-admin/admin-ajax.php", false},
+		{"CFM admin UI (daemon upstream)", nil, "/cfm-admin/api/v1/waf/rules", false},
+		{"cPanel webcall", nil, "/cpanelwebcall/abc", false},
+		{"cPanel session on a panel listener", nil, "/cpsess1234567890/execute/fileman/list_files", false},
 		{"edge 403 (no upstream)", func(r *LogRec) { r.Upstream = false }, "/wp-admin/admin-ajax.php", false},
 		{"CFM verify endpoint", nil, "/__cfm_verify", false},
 		{"GET", func(r *LogRec) { r.Method = "get" }, "/wp-login.php", false},
@@ -124,11 +128,48 @@ func TestOrigin403Bursts(t *testing.T) {
 		t.Errorf("a burst older than a minute must not count, got %+v", late)
 	}
 
-	// The emit runs without an enricher and throttles per (host, ip): it must
-	// not panic, and a second tick inside the holddown logs nothing new.
+	// The emit waits out the first minute (no line, no throttle token), then
+	// logs once and takes the token. No enricher: it must not panic.
+	key := "abuseshadow:o403:" + host + "|172.81.132.89"
 	e.emitAbuseShadowOrigin403(now)
-	if e.shouldLogVhostSuppress("abuseshadow:o403:"+host+"|172.81.132.89", now.Add(5*time.Second)) {
-		t.Errorf("the first emit should have taken the throttle token for the titan burst")
+	if _, ok := e.vhostSuppressLoggedAt[key]; ok {
+		t.Errorf("the first tick over the threshold must not log yet")
+	}
+	e.emitAbuseShadowOrigin403(now.Add(origin403Window))
+	if _, ok := e.vhostSuppressLoggedAt[key]; !ok {
+		t.Errorf("a minute after the first crossing the burst must have logged")
+	}
+}
+
+// TestTrackOrigin403Peak: the line carries the peak minute, not the count at
+// the first crossing, and an entry is due exactly one minute after first sight.
+func TestTrackOrigin403Peak(t *testing.T) {
+	e := &Engine{}
+	t0 := time.Unix(1791466170, 0)
+	b := func(n, paths, reqs int) []origin403Burst {
+		return []origin403Burst{{host: "a.gr", ip: "1.2.3.4", post403: n, paths: paths, reqs: reqs}}
+	}
+	if due := e.trackOrigin403(t0, b(31, 1, 31)); len(due) != 0 {
+		t.Fatalf("nothing is due at first sight, got %+v", due)
+	}
+	if due := e.trackOrigin403(t0.Add(20*time.Second), b(115, 2, 120)); len(due) != 0 {
+		t.Fatalf("nothing is due before the minute, got %+v", due)
+	}
+	// The burst decays; the peak must survive.
+	due := e.trackOrigin403(t0.Add(origin403Window), b(60, 1, 60))
+	if len(due) != 1 {
+		t.Fatalf("one entry due after the minute, got %d", len(due))
+	}
+	if p := due[0].peak; p.post403 != 115 || p.paths != 2 || p.reqs != 120 {
+		t.Errorf("peak = %+v, want post403=115 paths=2 reqs=120", p)
+	}
+	if len(e.o403Track) != 0 {
+		t.Errorf("a due entry must leave the tracker (bounded memory), %d left", len(e.o403Track))
+	}
+	// A burst that stops before its minute is still logged when the minute ends.
+	e.trackOrigin403(t0.Add(2*time.Minute), b(40, 1, 40))
+	if due := e.trackOrigin403(t0.Add(3*time.Minute), nil); len(due) != 1 || due[0].peak.post403 != 40 {
+		t.Errorf("a burst that stopped must still be logged with its peak, got %+v", due)
 	}
 }
 

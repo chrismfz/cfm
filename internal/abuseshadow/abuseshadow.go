@@ -275,8 +275,11 @@ type Summary struct {
 	// origin_403_burst: would_ban lines (a per-IP burst of POSTs the origin
 	// answered 403), and the top (host, ip) by peak per-minute count. Omitted
 	// when the signal never fired in the window.
-	WouldBan     int               `json:"would_ban,omitempty"`
-	TopOrigin403 []origin403Entity `json:"top_origin_403,omitempty"`
+	WouldBan int `json:"would_ban,omitempty"`
+	// Origin403Exempt counts origin_403_burst lines from FCrDNS-verified good
+	// bots, kept out of ExemptGoodbot, which pairs with would_challenge.
+	Origin403Exempt int               `json:"origin_403_exempt_goodbot,omitempty"`
+	TopOrigin403    []origin403Entity `json:"top_origin_403,omitempty"`
 
 	// Per-vhost signal breakdowns — which hosts each new signal flagged, ranked by
 	// its own peak metric. This is what answers "is facet flagging real floods or a
@@ -660,6 +663,10 @@ func Summarize(lines []string) Summary {
 				}
 			}
 		case "exempt_goodbot":
+			if e.Signal == "origin_403_burst" {
+				s.Origin403Exempt++
+				break
+			}
 			s.ExemptGoodbot++
 			if e.GoodBot != "" {
 				byGoodbot[e.GoodBot]++

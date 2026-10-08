@@ -336,13 +336,19 @@ watch them accumulate from the gateway. Contract:
   (09-15..10-08): almost only scanner swarms on speedhost (668 bursts / 45 IPs
   in ~3 weeks at >= 30/min), plus the titan attack. "Origin answered" =
   `LogRec.Upstream` (the edge logged an upstream time). Excluded at ingest:
-  WordPress's own `-1`/`0` refusal on admin-ajax/admin-post (<= 16 bytes — real
-  visitors on a cached page with a stale nonce send bursts of these:
-  liloteddykidsworld.gr, 3 378 in the logs; Googlebot too) and CFM's own
-  `/__cfm*`. Log line `verdict=would_ban` (or `exempt_goodbot`, FCrDNS, async
-  cache) with `post403`, `paths` and `reqs` (every request from the IP to the
-  host in the minute — the FP read). `abuse_shadow` returns `would_ban` and
-  `top_origin_403`. Knobs `ABUSE_SHADOW_ORIGIN403` (default on under the
+  WordPress's own `-1`/`0` refusal on admin-ajax/admin-post (<= 48 bytes, so a
+  gzipped one too — real visitors on a cached page with a stale nonce send
+  bursts of these: liloteddykidsworld.gr, 3 378 in the logs; Googlebot too),
+  and paths whose upstream is not the site (`/__cfm*`, `/cfm-admin`,
+  `/cpanelwebcall`, `/cpsessN/` on the panel listeners). A crossing is logged
+  one minute later with the PEAK minute (`post403`, `paths`, `reqs` = every
+  request from the IP to the host in that minute — the FP read); the minute
+  also lets the async PTR/FCrDNS finish, so a verified crawler logs
+  `exempt_goodbot`. `abuse_shadow` returns `would_ban`,
+  `origin_403_exempt_goodbot` and `top_origin_403`. Open burn-in questions: are
+  the speedhost 107-byte 403s on `/wp-json/` an origin WAF or WordPress's own
+  REST nonce refusal (`rest_cookie_invalid_nonce`, ~90 bytes)? And before any
+  promotion, a shared egress IP the edge does not unwrap reads as one source. Knobs `ABUSE_SHADOW_ORIGIN403` (default on under the
   master) and `ABUSE_SHADOW_ORIGIN403_PER_MIN` (30). Silent on a node without
   the edge (the Apache log has no upstream time). Promotion target, after the
   burn-in: a soft-TTL ban through the autoblock sink.

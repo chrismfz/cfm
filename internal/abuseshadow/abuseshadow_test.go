@@ -447,8 +447,9 @@ func TestSummarizeOrigin403(t *testing.T) {
 		`2026-10-08 17:02:00 [abuse-shadow] signal=origin_403_burst verified_crawler="googlebot" exempt (per-IP FCrDNS; e.g. ip=66.249.75.64)`,
 	}
 	s := Summarize(lines)
-	if s.WouldBan != 3 || s.ExemptGoodbot != 1 {
-		t.Fatalf("would_ban=%d exempt_goodbot=%d, want 3 and 1", s.WouldBan, s.ExemptGoodbot)
+	if s.WouldBan != 3 || s.Origin403Exempt != 1 || s.ExemptGoodbot != 0 {
+		t.Fatalf("would_ban=%d origin_403_exempt=%d exempt_goodbot=%d, want 3, 1, 0 (the rate-outlier pair stays clean)",
+			s.WouldBan, s.Origin403Exempt, s.ExemptGoodbot)
 	}
 	if s.WouldChallenge != 0 {
 		t.Errorf("origin_403_burst must not count as would_challenge, got %d", s.WouldChallenge)

@@ -27,24 +27,34 @@ import (
 //     the same on vani-atelier.gr). Only the tiny body tells them apart from a
 //     WAF block page (Wordfence's is ~7 KB; speedhost's origin WAF sends 0 or
 //     107 bytes on other paths, so a minimum size cannot be the test).
-//   - CFM's own endpoints (/__cfm_*): the daemon is their upstream, so its
-//     verify refusals look like an origin 403.
+//   - endpoints whose upstream is not the site: CFM's own (/__cfm*, and
+//     /cfm-admin, proxied to the daemon, which refuses a stale CSRF/scoped
+//     token with 403) and cPanel's (/cpanelwebcall, and /cpsessN/ on the panel
+//     listeners, which log to the same stream: an expired session polling the
+//     UI gets cpsrvd 403s).
 // "The origin answered" is LogRec.Upstream: the edge logged an upstream time.
 // The Apache origin log carries none, so on a node without the edge this
 // signal stays silent.
 //
 // Runs on the per-tick emitIPChallenges under ABUSE_SHADOW; nothing here
-// challenges or blocks. A line with verdict=would_ban is what a soft-TTL ban
-// would have hit; a verified good bot logs exempt_goodbot instead.
+// challenges or blocks. A (host, ip) that crosses the threshold is tracked for
+// one minute and logged once that minute is over, with the PEAK per-minute
+// count, paths and requests seen in it: the first tick over the threshold
+// would only ever show ~30. The minute also lets the async PTR lookup and the
+// good-bot forward-confirm (started at first sight) finish, so a verified
+// crawler logs exempt_goodbot instead of a premature would_ban. A line with
+// verdict=would_ban is what a soft-TTL ban would have hit. Before any
+// promotion: a shared egress IP the edge does not unwrap (a non-Cloudflare
+// proxy, a corporate NAT) reads as one source here.
 
 const (
 	// origin403PathCap bounds the distinct-path set kept per IP per bucket.
 	origin403PathCap = 64
 	// wpAjaxDenialMaxBytes: WordPress answers a refused admin-ajax/admin-post
-	// call with "-1" or "0" (wp_die), which the edge logs at a handful of bytes
-	// (6-10 with headers trimmed, gzip framing included). A WAF block page is
-	// never this small on these paths.
-	wpAjaxDenialMaxBytes = 16
+	// call with "-1" or "0" (wp_die): 2-10 bytes as logged on the fleet, ~22
+	// when the origin gzips it (mod_deflate on everything), plus chunk framing.
+	// A WAF block page is never this small on these paths (Wordfence's is ~7 KB).
+	wpAjaxDenialMaxBytes = 48
 	// maxOrigin403EnrichPerTick bounds the per-tick enrichment/log work.
 	maxOrigin403EnrichPerTick = 50
 )
@@ -66,7 +76,8 @@ func isOrigin403POST(rec LogRec, p string) bool {
 	if rec.Method != "post" || rec.Status != 403 || !rec.Upstream {
 		return false
 	}
-	if strings.HasPrefix(p, "/__cfm") {
+	if strings.HasPrefix(p, "/__cfm") || strings.HasPrefix(p, "/cfm-admin") ||
+		strings.HasPrefix(p, "/cpanelwebcall") || strings.HasPrefix(p, "/cpsess") {
 		return false
 	}
 	return !isWPAjaxDenial(p, rec.Bytes)
@@ -147,33 +158,84 @@ func (e *Engine) origin403Bursts(now time.Time, perMin int) []origin403Burst {
 	return out
 }
 
+// origin403Track is a burst waiting out its first minute.
+type origin403Track struct {
+	host, ip string
+	first    time.Time
+	peak     origin403Burst
+}
+
+// trackOrigin403 folds this tick's bursts into the tracker and returns the
+// entries whose minute is over (removed from the tracker). Each entry keeps the
+// largest per-minute count seen, with the paths and requests of that minute.
+func (e *Engine) trackOrigin403(now time.Time, bursts []origin403Burst) []origin403Track {
+	e.o403Mu.Lock()
+	defer e.o403Mu.Unlock()
+	if e.o403Track == nil {
+		e.o403Track = make(map[string]*origin403Track)
+	}
+	for _, b := range bursts {
+		k := b.host + "|" + b.ip
+		t := e.o403Track[k]
+		if t == nil {
+			e.o403Track[k] = &origin403Track{host: b.host, ip: b.ip, first: now, peak: b}
+			continue
+		}
+		if b.post403 > t.peak.post403 {
+			t.peak = b
+		}
+	}
+	var due []origin403Track
+	for k, t := range e.o403Track {
+		if now.Sub(t.first) >= origin403Window {
+			due = append(due, *t)
+			delete(e.o403Track, k)
+		}
+	}
+	return due
+}
+
 // emitAbuseShadowOrigin403 logs Signal O. Called from the per-tick
 // emitIPChallenges inside the ABUSE_SHADOW block.
 func (e *Engine) emitAbuseShadowOrigin403(now time.Time) {
 	if !e.cfg.AbuseShadow || !e.cfg.AbuseShadowOrigin403 {
 		return
 	}
-	enriched := 0
-	for _, b := range e.origin403Bursts(now, e.origin403PerMin()) {
+	bursts := e.origin403Bursts(now, e.origin403PerMin())
+	kept := bursts[:0]
+	for _, b := range bursts {
 		if e.isBypassed(b.ip) {
 			continue
 		}
+		kept = append(kept, b)
+		// Start the PTR lookup and, for a crawler-looking PTR, the forward-
+		// confirm now, so both are cached when the line is written a minute on.
+		if e.enr != nil && e.cfg.AbuseShadowGoodbotExempt {
+			ptr := e.enr.LookupCachedOrAsync(b.ip).PTR
+			if ptr != "" {
+				origin403GoodBot.verified(b.ip, func() string { return ptr }, now)
+			}
+		}
+	}
+	enriched := 0
+	for _, t := range e.trackOrigin403(now, kept) {
 		if enriched >= maxOrigin403EnrichPerTick {
 			break
 		}
 		// One line per (host, ip) per holddown, so a persistent burst does not
-		// log every tick.
-		if !e.shouldLogVhostSuppress("abuseshadow:o403:"+b.host+"|"+b.ip, now) {
+		// log every minute.
+		if !e.shouldLogVhostSuppress("abuseshadow:o403:"+t.host+"|"+t.ip, now) {
 			continue
 		}
 		enriched++
 		var asn uint
-		var cc, ptr, goodBot string
+		var cc, goodBot string
 		if e.enr != nil {
-			r := e.enr.LookupCachedOrAsync(b.ip)
-			asn, cc, ptr = r.ASN, r.CountryISO, r.PTR
+			r := e.enr.LookupCachedOrAsync(t.ip)
+			asn, cc = r.ASN, r.CountryISO
 			if e.cfg.AbuseShadowGoodbotExempt {
-				goodBot = origin403GoodBot.verified(b.ip, func() string { return ptr }, now)
+				ptr := r.PTR
+				goodBot = origin403GoodBot.verified(t.ip, func() string { return ptr }, now)
 			}
 		}
 		verdict := "would_ban"
@@ -182,7 +244,7 @@ func (e *Engine) emitAbuseShadowOrigin403(now time.Time) {
 		}
 		logging.LogfABUSESHADOW(
 			"[abuse-shadow] signal=origin_403_burst host=%s ip=%s post403=%d paths=%d reqs=%d window=60s asn=%d cc=%s good_bot=%s verdict=%s",
-			b.host, b.ip, b.post403, b.paths, b.reqs, asn, orDash(cc), orDash(goodBot), verdict,
+			t.host, t.ip, t.peak.post403, t.peak.paths, t.peak.reqs, asn, orDash(cc), orDash(goodBot), verdict,
 		)
 	}
 }

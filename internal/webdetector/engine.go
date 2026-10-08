@@ -481,7 +481,13 @@ type Engine struct {
 	chalLast map[string]chalCtx
 
 	// VHOST under-attack state (auto suspicious)
-	vhostMu          sync.Mutex
+	vhostMu sync.Mutex
+
+	// Signal O (abuse_shadow_origin403.go): bursts seen over the threshold and
+	// waiting out their first minute so the line carries the peak. Entries live
+	// about a minute. Guarded by o403Mu.
+	o403Mu           sync.Mutex
+	o403Track        map[string]*origin403Track
 	vhostUnderAttack map[string]bool
 	vhostLastChange  map[string]time.Time
 	// Throttle for the "suppressed_by_exclude" audit line (once per holddown
