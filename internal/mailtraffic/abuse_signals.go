@@ -44,6 +44,7 @@ const (
 	queueHogKeepMin   = 50
 	queueHogKeepShare = 0.3
 	queueStale        = 10 * time.Minute
+	queueHoldMax      = time.Hour // a reading this old (detector off) no longer holds anything
 
 	rblEvery   = 30 * time.Minute
 	rblTimeout = 20 * time.Second
@@ -106,7 +107,16 @@ func (t *tracker) pruneOutcomes(now time.Time) {
 	}
 }
 
-func (t *tracker) bounceFindings(now time.Time, open map[string]bool) []AbuseView {
+func (t *tracker) bounceFindings(now time.Time, open, held map[string]bool) []AbuseView {
+	if now.Sub(t.started) < contextWindow {
+		// after a restart the window is still filling (outcomes live in memory):
+		// an open finding can be neither confirmed nor resolved yet
+		for k := range open {
+			if strings.HasPrefix(k, "mail:bounce:") {
+				held[k] = true
+			}
+		}
+	}
 	var out []AbuseView
 	for key, os := range t.outcomes {
 		bounced, reasons := 0, map[string]int{}
@@ -123,7 +133,7 @@ func (t *tracker) bounceFindings(now time.Time, open map[string]bool) []AbuseVie
 		if systemLocalUsers[user] {
 			continue
 		}
-		fkey := "mail:bounce:" + user
+		fkey := "mail:bounce:" + key // mail:bounce:local:<user> / mail:bounce:auth:<mailbox> — a cPanel user can be both
 		minN, minShare := bounceMinCount, bounceMinShare
 		if open[fkey] {
 			minN, minShare = bounceMinCount/2, bounceMinShare/2
@@ -140,7 +150,7 @@ func (t *tracker) bounceFindings(now time.Time, open map[string]bool) []AbuseVie
 			self = user
 		}
 		c := t.context(key, self)
-		head := fmt.Sprintf("%s: %d of %d messages bounced in %dh (%.0f%%)", user, bounced, len(os), anomalyRecentHours, share*100)
+		head := fmt.Sprintf("%s: %d of %d deliveries bounced in %dh (%.0f%%)", user, bounced, len(os), anomalyRecentHours, share*100)
 		if r := topKey(reasons); r != "" {
 			head += " · mostly " + r
 		}
@@ -159,18 +169,27 @@ var queueReport = mailqueue.Latest
 
 func queueFindings(now time.Time, open, held map[string]bool) []AbuseView {
 	rep, ok := queueReport()
-	if !ok || now.Sub(rep.MeasuredAt) > queueStale {
-		// no fresh reading (the queue detector is off or failing): an open
-		// finding can be neither confirmed nor resolved
+	hold := func() {
 		for k := range open {
 			if strings.HasPrefix(k, "mail:queue:") {
 				held[k] = true
 			}
 		}
+	}
+	if !ok || now.Sub(rep.MeasuredAt) > queueStale {
+		// no fresh reading (the queue detector failing): an open finding can be
+		// neither confirmed nor resolved — for a while; a detector switched off
+		// for good must not hold it forever
+		if ok && now.Sub(rep.MeasuredAt) <= queueHoldMax {
+			hold()
+		}
 		return nil
 	}
 	parsed := rep.Parsed
 	if parsed == 0 {
+		if rep.Total > 0 {
+			hold() // the count worked but the listing did not (a big queue is slow to list)
+		}
 		return nil
 	}
 	var out []AbuseView
@@ -192,7 +211,10 @@ func queueFindings(now time.Time, open, held map[string]bool) []AbuseView {
 		if who == "<>" || who == "" {
 			who = "bounce messages (null sender <>)"
 		}
-		msg := fmt.Sprintf("%s: %d of %d queued messages (%.0f%%)", who, s.Total, rep.Total, share*100)
+		msg := fmt.Sprintf("%s: %d of %d queued messages (%.0f%%)", who, s.Total, parsed, share*100)
+		if parsed < rep.Total {
+			msg += fmt.Sprintf(" of the %d listed, %d in the queue", parsed, rep.Total)
+		}
 		if s.Frozen > 0 {
 			msg += fmt.Sprintf(", %d frozen", s.Frozen)
 		}
@@ -240,19 +262,30 @@ var rblLists = []rblList{
 	{zone: "psbl.surriel.com", label: plainLabel},
 }
 
-type rblResult struct {
-	listed []string // "zen.spamhaus.org (SBL)"
+// rblListing is one list's listing of an address.
+type rblListing struct {
+	label  string // "SBL", "listed"
 	severe bool
-	failed bool // a list did not answer cleanly: the IP is not judged
 }
+
+// rblStatus is what one list said about one address.
+type rblStatus int
+
+const (
+	rblClean   rblStatus = iota // not listed (NXDOMAIN / NODATA)
+	rblListed                   // a listing
+	rblRefused                  // the list refuses this resolver (127.255.255.x): it says nothing
+	rblFailed                   // no clean answer this time (timeout, SERVFAIL)
+)
 
 // rblChecker looks the node's public IPv4 addresses up on the blocklists every
 // rblEvery, off the collector's poll (DNS can be slow).
 type rblChecker struct {
 	running atomic.Bool
+	wg      sync.WaitGroup // the in-flight check, joined on Shutdown
 	mu      sync.Mutex
 	last    time.Time
-	results map[string]rblResult
+	results map[string]map[string]rblListing // ip → zone → listing; nil before the first check
 }
 
 var (
@@ -284,17 +317,20 @@ func defaultRBLIPs() []string {
 	return out
 }
 
-// maybeRun starts a check in the background when one is due.
-func (r *rblChecker) maybeRun(now time.Time) {
+// maybeRun starts a check in the background when one is due; parent cancels it
+// (the collector stopping).
+func (r *rblChecker) maybeRun(parent context.Context, now time.Time) {
 	r.mu.Lock()
 	due := now.Sub(r.last) >= rblEvery
 	r.mu.Unlock()
 	if !due || !r.running.CompareAndSwap(false, true) {
 		return
 	}
+	r.wg.Add(1)
 	go func() {
+		defer r.wg.Done()
 		defer r.running.Store(false)
-		ctx, cancel := context.WithTimeout(context.Background(), rblTimeout)
+		ctx, cancel := context.WithTimeout(parent, rblTimeout)
 		defer cancel()
 		r.check(ctx, now)
 	}()
@@ -302,10 +338,13 @@ func (r *rblChecker) maybeRun(now time.Time) {
 
 func (r *rblChecker) check(ctx context.Context, now time.Time) {
 	ips := rblIPs()
-	if len(ips) == 0 {
+	if len(ips) == 0 || ctx.Err() != nil {
 		return // nothing to check (or the addresses could not be read): judge nothing
 	}
-	res := make(map[string]rblResult, len(ips))
+	r.mu.Lock()
+	prev := r.results
+	r.mu.Unlock()
+	res := make(map[string]map[string]rblListing, len(ips))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
@@ -320,45 +359,44 @@ func (r *rblChecker) check(ctx context.Context, now time.Time) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				label, severe, failed := queryRBL(ctx, rev, l)
+				st, listing := queryRBL(ctx, rev, l)
 				mu.Lock()
 				defer mu.Unlock()
-				cur := res[ip]
-				if failed {
-					cur.failed = true
+				if res[ip] == nil {
+					res[ip] = map[string]rblListing{}
 				}
-				if label != "" {
-					name := l.zone
-					if label != "listed" {
-						name += " (" + label + ")"
+				switch st {
+				case rblListed:
+					res[ip][l.zone] = listing
+				case rblFailed, rblRefused:
+					// one list not answering must neither delist the address
+					// nor hold its other lists' verdicts: keep this list's last word
+					if old, ok := prev[ip][l.zone]; ok {
+						res[ip][l.zone] = old
 					}
-					cur.listed = append(cur.listed, name)
-					cur.severe = cur.severe || severe
 				}
-				res[ip] = cur
 			}(ip, rev, l)
 		}
 	}
 	wg.Wait()
-	for ip, v := range res {
-		sort.Strings(v.listed)
-		res[ip] = v
-	}
 	r.mu.Lock()
 	r.results, r.last = res, now
 	r.mu.Unlock()
 }
 
-// queryRBL asks one list about one address. NXDOMAIN is a clean "not listed";
-// any other error, or an answer that is not a listing (the list refusing this
-// resolver), is a failure that leaves the address unjudged.
-func queryRBL(ctx context.Context, rev string, l rblList) (label string, severe, failed bool) {
-	addrs, err := rblLookup(ctx, rev+"."+l.zone)
+// queryRBL asks one list about one address. NXDOMAIN / NODATA is a clean "not
+// listed". 127.255.255.x is the list refusing this node's resolver (Spamhaus
+// behind a public resolver, logged once). Neither a refusal nor a failure (any
+// other error or unexpected answer) changes that list's previous verdict, and
+// neither holds the other lists' verdicts.
+func queryRBL(ctx context.Context, rev string, l rblList) (rblStatus, rblListing) {
+	// the trailing dot keeps the resolver from also trying the search domains
+	addrs, err := rblLookup(ctx, rev+"."+l.zone+".")
 	if err != nil {
 		if de, ok := err.(*net.DNSError); ok && de.IsNotFound {
-			return "", false, false
+			return rblClean, rblListing{}
 		}
-		return "", false, true
+		return rblFailed, rblListing{}
 	}
 	for _, a := range addrs {
 		ip := net.ParseIP(a).To4()
@@ -366,16 +404,17 @@ func queryRBL(ctx context.Context, rev string, l rblList) (label string, severe,
 			continue
 		}
 		if ip[1] != 0 || ip[2] != 0 {
-			// 127.255.255.x: Spamhaus (and others) refusing an open / public
-			// resolver — the answer says nothing about the address
 			logRBLRefusal(l.zone, a)
-			return "", false, true
+			return rblRefused, rblListing{}
 		}
 		if lb := l.label(ip[3]); lb != "" {
-			return lb, l.severe != nil && l.severe(ip[3]), false
+			return rblListed, rblListing{label: lb, severe: l.severe != nil && l.severe(ip[3])}
 		}
 	}
-	return "", false, len(addrs) > 0
+	if len(addrs) == 0 {
+		return rblClean, rblListing{}
+	}
+	return rblFailed, rblListing{}
 }
 
 var rblRefusalLogged sync.Map
@@ -409,19 +448,27 @@ func rblFindings(r *rblChecker, open, held map[string]bool) []AbuseView {
 		return nil
 	}
 	var out []AbuseView
-	for ip, v := range r.results {
-		key := "mail:rbl:" + ip
-		if len(v.listed) == 0 {
-			if v.failed && open[key] {
-				held[key] = true
-			}
+	for ip, zones := range r.results {
+		if len(zones) == 0 {
 			continue
 		}
+		key := "mail:rbl:" + ip
+		var listed []string
+		severe := false
+		for zone, l := range zones {
+			name := zone
+			if l.label != "listed" {
+				name += " (" + l.label + ")"
+			}
+			listed = append(listed, name)
+			severe = severe || l.severe
+		}
+		sort.Strings(listed)
 		sev := "warning"
-		if v.severe || len(v.listed) >= 2 {
+		if severe || len(listed) >= 2 {
 			sev = "critical"
 		}
-		msg := clip(fmt.Sprintf("%s is on %s — mail sent from it is rejected or junked", ip, strings.Join(v.listed, ", ")))
+		msg := clip(fmt.Sprintf("%s is on %s — mail sent from it is rejected or junked", ip, strings.Join(listed, ", ")))
 		out = append(out, AbuseView{Type: TypeRBLListed, Severity: sev, Key: key, Message: msg, Subject: ip})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })

@@ -51,12 +51,12 @@ func TestBounceSpikePerSender(t *testing.T) {
 		t.Fatalf("want one bounce finding: %+v", fs)
 	}
 	f := fs[0]
-	if f.Type != TypeBounceSpike || f.Key != "mail:bounce:hotellito" || f.Severity != "warning" ||
-		!strings.Contains(f.Message, "25 of 30 messages bounced") || !strings.Contains(f.Message, "mostly no-such-user") {
+	if f.Type != TypeBounceSpike || f.Key != "mail:bounce:local:hotellito" || f.Severity != "warning" ||
+		!strings.Contains(f.Message, "25 of 30 deliveries bounced") || !strings.Contains(f.Message, "mostly no-such-user") {
 		t.Fatalf("bad bounce finding: %+v", f)
 	}
 	// a fading wave stays open on the lower threshold, then closes
-	open := map[string]bool{"mail:bounce:hotellito": true}
+	open := map[string]bool{"mail:bounce:local:hotellito": true}
 	tr2 := newTracker()
 	for i := 0; i < 20; i++ {
 		id := fmt.Sprintf("1tXyZc-%06d-AB", i)
@@ -87,7 +87,7 @@ func TestPostfixBouncesAreAttributedToTheMailbox(t *testing.T) {
 		tr.observeMaillog("Oct  8 10:00:01 mx postfix/smtp[2]: "+qid+": to=<x@gmail.com>, relay=gmail-smtp-in.l.google.com[142.250.1.1]:25, delay=1, dsn=5.1.1, status=bounced (host said: 550 5.1.1 user unknown)", T)
 	}
 	fs, _, _ := tr.evaluate(openTemp(t), T)
-	if len(fs) != 1 || fs[0].Key != "mail:bounce:info@shop.gr" {
+	if len(fs) != 1 || fs[0].Key != "mail:bounce:auth:info@shop.gr" {
 		t.Fatalf("want the mailbox's bounces: %+v", fs)
 	}
 }
@@ -195,6 +195,7 @@ func stubRBL(t *testing.T, ips []string, answers map[string][]string, fail map[s
 	oi, ol := rblIPs, rblLookup
 	rblIPs = func() []string { return ips }
 	rblLookup = func(_ context.Context, name string) ([]string, error) {
+		name = strings.TrimSuffix(name, ".")
 		if fail[name] {
 			return nil, &net.DNSError{Err: "i/o timeout", Name: name, IsTimeout: true}
 		}
@@ -229,8 +230,8 @@ func TestRBLListing(t *testing.T) {
 	if fs[1].Key != "mail:rbl:84.54.49.5" || fs[1].Severity != "warning" || !strings.Contains(fs[1].Message, "bl.spamcop.net") {
 		t.Fatalf("bad SpamCop finding: %+v", fs[1])
 	}
-	if !held["mail:rbl:84.54.49.6"] {
-		t.Fatalf("an unanswered list must hold the open finding: %v", held)
+	if len(held) != 0 {
+		t.Fatalf("a list refusing the resolver holds nothing (it never listed 84.54.49.6): %v", held)
 	}
 
 	// delisted: a clean answer closes it
@@ -240,11 +241,11 @@ func TestRBLListing(t *testing.T) {
 		t.Fatalf("a delisted IP is over: %+v %v", fs, held)
 	}
 
-	// a timeout does not close it
+	// a timeout after a clean answer does not list it again
 	stubRBL(t, []string{"84.54.49.4"}, nil, map[string]bool{"4.49.54.84.zen.spamhaus.org": true})
 	r.check(context.Background(), T)
-	if _, _, held, _ := newTracker().evaluateWith(openTemp(t), T, map[string]bool{"mail:rbl:84.54.49.4": true}, r); !held["mail:rbl:84.54.49.4"] {
-		t.Fatalf("a DNS timeout must hold the finding: %v", held)
+	if fs, _, _, _ := newTracker().evaluateWith(openTemp(t), T, nil, r); len(fs) != 0 {
+		t.Fatalf("a timeout keeps the last (clean) verdict: %+v", fs)
 	}
 }
 
@@ -295,5 +296,107 @@ func TestManySourcesNeedSeveralAbroad(t *testing.T) {
 	fs, _, _ := tr.evaluate(openTemp(t), time.Now())
 	if len(fs) != 1 || fs[0].Key != "mail:hijack:info@shop.gr" {
 		t.Fatalf("want only the proxies abroad: %+v", fs)
+	}
+}
+
+// Review findings (PR #1557): each one a scenario that used to page wrongly.
+
+// A list that refuses this resolver (Spamhaus behind a public resolver) or does
+// not answer must not keep a delisted address open forever.
+func TestRBLDelistingWithARefusingList(t *testing.T) {
+	T := time.Now()
+	stubRBL(t, []string{"84.54.49.5"}, map[string][]string{
+		"5.49.54.84.zen.spamhaus.org": {"127.255.255.254"},
+		"5.49.54.84.bl.spamcop.net":   {"127.0.0.2"},
+	}, map[string]bool{"5.49.54.84.b.barracudacentral.org": true})
+	r := &rblChecker{}
+	r.check(context.Background(), T)
+	fs, _, _, _ := newTracker().evaluateWith(openTemp(t), T, nil, r)
+	if len(fs) != 1 || fs[0].Severity != "warning" {
+		t.Fatalf("want the SpamCop listing: %+v", fs)
+	}
+	// SpamCop delists; Spamhaus still refuses, Barracuda still times out
+	stubRBL(t, []string{"84.54.49.5"}, map[string][]string{"5.49.54.84.zen.spamhaus.org": {"127.255.255.254"}},
+		map[string]bool{"5.49.54.84.b.barracudacentral.org": true})
+	r.check(context.Background(), T)
+	fs, _, held, _ := newTracker().evaluateWith(openTemp(t), T, map[string]bool{"mail:rbl:84.54.49.5": true}, r)
+	if len(fs) != 0 || len(held) != 0 {
+		t.Fatalf("delisted on SpamCop is over, whatever the other lists do: %+v %v", fs, held)
+	}
+	// a list that times out keeps its own last verdict
+	stubRBL(t, []string{"84.54.49.5"}, map[string][]string{"5.49.54.84.bl.spamcop.net": {"127.0.0.2"}}, nil)
+	r.check(context.Background(), T)
+	stubRBL(t, []string{"84.54.49.5"}, nil, map[string]bool{"5.49.54.84.bl.spamcop.net": true})
+	r.check(context.Background(), T)
+	if fs, _, _, _ := newTracker().evaluateWith(openTemp(t), T, nil, r); len(fs) != 1 {
+		t.Fatalf("a timeout must keep the listing: %+v", fs)
+	}
+}
+
+// After a restart the bounce window is empty: an open finding is held until it
+// has filled, not resolved and re-paged.
+func TestBounceFindingSurvivesARestart(t *testing.T) {
+	tr := newTracker()
+	open := map[string]bool{"mail:bounce:local:hotellito": true}
+	_, _, held, _ := tr.evaluateWith(openTemp(t), time.Now(), open, nil)
+	if !held["mail:bounce:local:hotellito"] {
+		t.Fatalf("a fresh tracker must hold open bounce findings: %v", held)
+	}
+	_, _, held, _ = tr.evaluateWith(openTemp(t), time.Now().Add(3*time.Hour), open, nil)
+	if held["mail:bounce:local:hotellito"] {
+		t.Fatalf("once the window has filled it is judged: %v", held)
+	}
+}
+
+// A failed `exim -bp` (count fine, listing empty) holds an open hog.
+func TestQueueListingFailureHolds(t *testing.T) {
+	T := time.Now()
+	open := map[string]bool{"mail:queue:spam@gmail.com": true}
+	stubQueue(t, mailqueue.Report{MeasuredAt: T, Total: 900}, true)
+	if _, _, held, _ := newTracker().evaluateWith(openTemp(t), T, open, nil); !held["mail:queue:spam@gmail.com"] {
+		t.Fatalf("a failed listing must hold: %v", held)
+	}
+	// the detector switched off long ago: no longer held
+	stubQueue(t, mailqueue.Report{MeasuredAt: T.Add(-2 * time.Hour), Total: 900, Parsed: 900}, true)
+	if _, _, held, _ := newTracker().evaluateWith(openTemp(t), T, open, nil); held["mail:queue:spam@gmail.com"] {
+		t.Fatalf("a reading hours old must not hold forever: %v", held)
+	}
+}
+
+// A cron mailing a full local mailbox is not a bounce spike: local deliveries
+// are not counted, so their failures are not either.
+func TestLocalMailboxFailuresAreNotBounces(t *testing.T) {
+	T := time.Unix(1_700_000_000, 0)
+	ts := T.Add(-20 * time.Minute).Format("2006-01-02 15:04:05")
+	tr := newTracker()
+	for i := 0; i < 30; i++ {
+		id := fmt.Sprintf("1tXyZd-%06d-AB", i)
+		tr.observeExim(eximArrival(ts, id, "bob", "info@bob.gr"), T)
+		tr.observeExim(ts+" "+id+" ** info@bob.gr R=virtual_user T=virtual_userdelivery: Mailbox quota exceeded", T)
+	}
+	if fs, _, _ := tr.evaluate(openTemp(t), T); len(fs) != 0 {
+		t.Fatalf("local mailbox failures are not bounces: %+v", fs)
+	}
+	// a remote give-up with no transport still counts
+	tr2 := newTracker()
+	for i := 0; i < 25; i++ {
+		id := fmt.Sprintf("1tXyZe-%06d-AB", i)
+		tr2.observeExim(eximArrival(ts, id, "bob", "x@gmail.com"), T)
+		tr2.observeExim(ts+" "+id+" ** x@gmail.com: retry timeout exceeded", T)
+	}
+	if fs, _, _ := tr2.evaluate(openTemp(t), T); len(fs) != 1 {
+		t.Fatalf("a retry timeout is a bounce: %+v", fs)
+	}
+}
+
+func TestMappedIPv4IsTheSameSource(t *testing.T) {
+	orig := geoOf
+	geoOf = func(string) (string, uint) { return "GR", 1 }
+	t.Cleanup(func() { geoOf = orig })
+	if a, _ := authSource("::ffff:84.54.49.4"); a != "84.54.49.4" {
+		t.Fatalf("mapped IPv4: %q", a)
+	}
+	if a, _ := authSource("2a02:587:1:2:3:4:5:6"); a != "2a02:587:1:2::/64" {
+		t.Fatalf("IPv6 /64: %q", a)
 	}
 }

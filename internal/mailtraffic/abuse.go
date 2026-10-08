@@ -169,10 +169,10 @@ func authSource(ip string) (src, country string) {
 	if fetcherASNs[asn] {
 		return fmt.Sprintf("AS%d", asn), ""
 	}
-	if pip.To4() == nil {
-		return pip.Mask(net.CIDRMask(64, 128)).String() + "/64", cc
+	if v4 := pip.To4(); v4 != nil {
+		return v4.String(), cc // ::ffff:1.2.3.4 is 1.2.3.4
 	}
-	return ip, cc
+	return pip.Mask(net.CIDRMask(64, 128)).String() + "/64", cc
 }
 
 // ---- per-line context (what the counters don't keep) ----
@@ -199,6 +199,7 @@ type tracker struct {
 
 	last      []AbuseView // the latest check's findings, for whats_wrong / mail_traffic
 	lastCheck time.Time
+	started   time.Time // what is in memory covers only the time since
 }
 
 // authSeen is a mailbox's last login from one source, and over what.
@@ -213,6 +214,7 @@ func newTracker() *tracker {
 		authIPs:  map[string]map[string]authSeen{},
 		owners:   map[string]owner{},
 		outcomes: map[string][]outcome{},
+		started:  time.Now(),
 	}
 }
 
@@ -283,7 +285,7 @@ func (t *tracker) observeExim(line string, now time.Time) {
 	}
 	id := reEximID.FindStringSubmatch(line)
 	if id != nil && id[2] != "<=" {
-		if d, ok := mailmeter.ParseEximDelivery(line); ok {
+		if d, ok := mailmeter.ParseEximDelivery(line); ok && !localTransport(line) {
 			t.addOutcome(id[1], d, logTime(line, now))
 		}
 		return
@@ -347,8 +349,21 @@ func (t *tracker) observeMaillog(line string, now time.Time) {
 	if q := rePostfixQID.FindStringSubmatch(line); q != nil {
 		if d, ok := mailmeter.ParsePostfixDelivery(line); ok {
 			t.addOutcome(q[1], d, now)
+		} else if strings.HasSuffix(strings.TrimSpace(line), ": removed") {
+			delete(t.owners, q[1]) // postfix reuses queue ids
 		}
 	}
+}
+
+var reEximTransport = regexp.MustCompile(`\sT=(\S+)`)
+
+// localTransport reports a delivery line through a local transport (a mailbox,
+// a pipe): local deliveries are not counted as delivered, so their failures
+// (a full or deleted local mailbox) must not count as bounces either. A line
+// with no transport at all ("retry timeout exceeded") is a remote give-up.
+func localTransport(line string) bool {
+	m := reEximTransport.FindStringSubmatch(line)
+	return m != nil && !strings.Contains(strings.ToLower(m[1]), "smtp")
 }
 
 var (
@@ -631,6 +646,15 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		c := t.context("auth:"+user, user)
 		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: user, IPs: len(sources), Countries: cs, Context: &c})
 	}
+	if now.Sub(t.started) < hijackWindow {
+		// after a restart the logins in memory cover less than the window: an
+		// open hijack is neither confirmed nor resolved yet
+		for k := range open {
+			if strings.HasPrefix(k, "mail:hijack:") && !hijacked[strings.TrimPrefix(k, "mail:hijack:")] {
+				held[k] = true
+			}
+		}
+	}
 	for _, a := range out {
 		c := t.context("auth:"+a.Addr, a.Addr)
 		head := fmt.Sprintf("%s: %d authenticated messages in %dh (%s)", a.Addr, a.Recent, anomalyRecentHours, usual(a))
@@ -642,7 +666,7 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		fs = append(fs, f)
 		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, IPs: len(t.authIPs[a.Addr]), Context: &c})
 	}
-	for _, more := range [][]AbuseView{t.bounceFindings(now, open), queueFindings(now, open, held), rblFindings(rbl, open, held)} {
+	for _, more := range [][]AbuseView{t.bounceFindings(now, open, held), queueFindings(now, open, held), rblFindings(rbl, open, held)} {
 		for _, v := range more {
 			fs = append(fs, abuseFinding{Type: v.Type, Severity: v.Severity, Key: v.Key, Message: v.Message})
 			views = append(views, v)
