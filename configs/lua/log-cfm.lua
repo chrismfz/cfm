@@ -36,7 +36,7 @@
 -- parser, so the contract MUST stay in sync with
 -- internal/webdetector/engine.go::parseTSV.
 --
--- Field order (TAB-separated, newline-terminated, 12 columns):
+-- Field order (TAB-separated, newline-terminated, 13 columns):
 --
 --   idx  field   ngx source               type / notes
 --   ---  ------  -----------------------  ----------------------------------
@@ -52,6 +52,15 @@
 --    9   urt     ngx.var.upstream_response_time  seconds or "-" (normalized to 0 downstream)
 --   10   ref     ngx.var.http_referer     string (tabs/newlines stripped)
 --   11   ua      ngx.var.http_user_agent  string (tabs/newlines stripped)
+--   12   up      ngx.var.cfm_upstream     where cfm.lua / the conf routed the
+--                                         request: "cfm_apache*" = the site's
+--                                         origin, "cfm_challenge" = CFM's own
+--                                         challenge server, "-" when unset.
+--                                         Added 2026-10-08 as the LAST column;
+--                                         the daemon reads 12 or 13 (an edge
+--                                         still on the old module sends 12). An
+--                                         older daemon would fold it into ua, so
+--                                         the package ships both together.
 --
 -- Connection reuse: setkeepalive(10000, 100) gives us up to 100 pooled
 -- cosockets per worker, idle timeout 10s. First timer per worker pays
@@ -237,6 +246,7 @@ function _M.log()
     nz(var.upstream_response_time),
     clean(var.http_referer),
     clean(var.http_user_agent),
+    nz(var.cfm_upstream),
   }, "\t") .. "\n"
 
   buf_n     = buf_n + 1

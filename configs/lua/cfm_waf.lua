@@ -1390,36 +1390,6 @@ function _M.check(ctx)
     end
   end
 
-  -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018 / 10019) ──
-  -- Every method. 10018/10020 read $_REQUEST like WordPress; 10019 also takes
-  -- the query string although get_translations() reads $_POST (a harmless
-  -- over-match). 10020 is the logged-in split of 10018's detector, with its
-  -- own mode and its ban held in code.
-  do
-    local mode_anon = rule_mode(CFG.rule_cve_translatepress_reset_preview, "block")
-    local mode_auth = rule_mode(CFG.rule_cve_translatepress_reset_preview_authed, "block")
-    if mode_anon ~= "disabled" or mode_auth ~= "disabled" then
-      local tag, logged_in = det.detect_cve_translatepress_reset_preview(m_lower, args, body, headers, cookie, get_norm_ab())
-      local mode = logged_in and mode_auth or mode_anon
-      if tag and mode ~= "disabled" then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        local id = logged_in and RULE_IDS.rule_cve_translatepress_reset_preview_authed
-                   or RULE_IDS.rule_cve_translatepress_reset_preview
-        if record("WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:" .. tag, ttl, mode, id) then goto done end
-      end
-    end
-  end
-  do
-    local mode = rule_mode(CFG.rule_cve_translatepress_id_lookup, "block")
-    if mode ~= "disabled" then
-      local tag = det.detect_cve_translatepress_id_lookup(args, body, headers, cookie, get_norm_ab())
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:" .. tag, ttl, mode, RULE_IDS.rule_cve_translatepress_id_lookup) then goto done end
-      end
-    end
-  end
-
   -- ── 17) Upload filename extension blacklist ───────────────────────────────
   do
     local mode = rule_mode(CFG.rule_upload_filename, "logonly")
@@ -2237,6 +2207,43 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_numeric_xor_obfuscation) then goto done end
+      end
+    end
+  end
+
+  -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018-10020) ──
+  -- Placed after every armed block-tier family, next to traversal, for the
+  -- same reason: 10019 and 10020 block at the edge but their autoblock is
+  -- held in code (heldAutoblockRules), so evaluated earlier a held hit would
+  -- own the headline and take the ban and alert away from an armed rule on
+  -- the same request (`string_ids=1` added to a SQLi POST). 10018 is armed
+  -- and runs first of the three.
+  -- 10018/10020: POST only (a GET of the form sends no mail), reading
+  -- $_REQUEST like WordPress; 10019 any method, also taking
+  -- the query string although get_translations() reads $_POST (a harmless
+  -- over-match). 10020 is the logged-in split of 10018's detector, with its
+  -- own mode and its ban held in code.
+  do
+    local mode_anon = rule_mode(CFG.rule_cve_translatepress_reset_preview, "block")
+    local mode_auth = rule_mode(CFG.rule_cve_translatepress_reset_preview_authed, "block")
+    if mode_anon ~= "disabled" or mode_auth ~= "disabled" then
+      local tag, logged_in = det.detect_cve_translatepress_reset_preview(m_lower, args, body, headers, cookie, get_norm_ab())
+      local mode = logged_in and mode_auth or mode_anon
+      if tag and mode ~= "disabled" then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        local id = logged_in and RULE_IDS.rule_cve_translatepress_reset_preview_authed
+                   or RULE_IDS.rule_cve_translatepress_reset_preview
+        if record("WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:" .. tag, ttl, mode, id) then goto done end
+      end
+    end
+  end
+  do
+    local mode = rule_mode(CFG.rule_cve_translatepress_id_lookup, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_translatepress_id_lookup(args, body, headers, cookie, get_norm_ab())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:" .. tag, ttl, mode, RULE_IDS.rule_cve_translatepress_id_lookup) then goto done end
       end
     end
   end

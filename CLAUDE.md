@@ -478,9 +478,15 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   than un-arming the family. Arming a *newly* block-promoted family is still a
   deliberate opt-in decision, after its own burn-in.
 - **The Lua edge de-dups pushes per `(ip, reason family, action tier)`** within `push_cooldown`
-  (`cfm_waf.lua should_push`). Harmless at threshold 1 (first hit is what
-  counts), but an accumulate threshold (e.g. 40) counts distinct cooldown
-  windows, not raw hits — retune when Phase 2 turns on challenge-tier families.
+  (`cfm_waf.lua should_push`) — and, for the `block` tier, per RULE too
+  (since 2026-10-08: a family can mix armed and held block rules, and a held
+  rule's push must not swallow an armed one's). Harmless at threshold 1 (first
+  hit is what counts), but an accumulate threshold (e.g. 40) counts distinct
+  cooldown windows, not raw hits, and two block rules of one family in the same
+  window push twice — retune when Phase 2 turns on challenge-tier families.
+  A held block RULE (`heldAutoblockRules`, e.g. 10019/10020) shadows armed ones
+  exactly like a held family does, so it runs late in `cfm_waf.lua`, next to
+  traversal.
 - **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
   API reporting and email are the section sink's job (`autoblock_sink.go`) —
   don't reimplement them. A plain alert blocks per the section `BLOCK` policy;

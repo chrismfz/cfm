@@ -28,7 +28,9 @@ back-filled here — see the git/PR history for that period.
   exempt. The `abuse_shadow` MCP tool lists the top offenders with how many
   ordinary requests each sent. Log-only: nothing is challenged or blocked. On
   by default wherever `ABUSE_SHADOW = 1`; the threshold is
-  `ABUSE_SHADOW_ORIGIN403_PER_MIN`.
+  `ABUSE_SHADOW_ORIGIN403_PER_MIN`. The edge's log feed to the daemon gains a
+  13th column naming the upstream, so CFM's own challenge server's 403s are not
+  mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
 - **WAF rules 10018/10019/10020 block the TranslatePress account takeover
@@ -37,7 +39,7 @@ back-filled here — see the git/PR history for that period.
   plugin stores the reset mail, key included, as a translatable string. They
   then read it back through an AJAX action that answers anyone. Seen on titan
   on 2026-10-08 (villadimitramykonos.com). Rule 10018 blocks the reset request
-  (`trp-edit-translation` on a lost-password request); the fleet's retained
+  (`trp-edit-translation` on a lost-password POST); the fleet's retained
   edge logs show the attack and nothing else. It is armed: a 6 h ban and a
   `WAF/CVE-2026-19632` alert. The plugin's editor preview adds that parameter
   to every form, so the same request from a logged-in user, most likely a
@@ -62,7 +64,10 @@ back-filled here — see the git/PR history for that period.
   PHP does.** PHP ends a name at a NUL byte and turns `.`, a space or an
   unmatched `[` into `_`, so `pagename%00x=…` reached WordPress as `pagename`
   while rule 10017 (CVE-2026-87902) did not see it. Rule 10017 and the new
-  TranslatePress rules now match those forms.
+  TranslatePress rules now match those forms. Rule 10017 also picks the body
+  parser by the Content-Type's media type, as PHP does: a urlencoded body whose
+  Content-Type merely mentioned `multipart/form-data` in a parameter hid a
+  `pagename` traversal from it.
 
 ### Changed
 - **A `RULE_<id>` line in `[waf_security]` now honours an inline comment.**

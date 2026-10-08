@@ -94,6 +94,8 @@ fires({ uri = "/", raw_uri = "/", method = "POST", ip = "203.0.113.84", body = "
 
 fires(post("/", "pagename=templates%2F..%2F..%2Fplaceholder", "application/x-www-form-urlencoded"),
       "urlencoded POST body ($_POST wins in WP)", BODY)
+fires(post("/", "pagename=templates%2F..%2F..%2Fplaceholder", "application/x-www-form-urlencoded; x=multipart/form-data"),
+      "urlencoded body with a parameter naming multipart (SAPI reads the media type)", BODY)
 local MP = "multipart/form-data; boundary=----B"
 fires(post("/", "------B\r\nContent-Disposition: form-data; name=\"pagename\"\r\n\r\n" ..
                 "templates/../../placeholder\r\n------B--\r\n", MP),

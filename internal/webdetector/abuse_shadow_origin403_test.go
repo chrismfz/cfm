@@ -31,6 +31,20 @@ func TestParseTSV_Upstream(t *testing.T) {
 	}
 }
 
+// TestParseTSV_UpstreamName: the 13th column names the edge's upstream; a
+// 12-column line (an edge on the older module) leaves it empty and its UA whole.
+func TestParseTSV_UpstreamName(t *testing.T) {
+	base := "1791466170.6\t172.81.132.89\ta.gr\tPOST\t/xmlrpc.php\tHTTP/1.1\t403\t7\t0.002\t0.001\t-\tMozilla/5.0"
+	rec, ok := parseTSV(base + "\tcfm_challenge")
+	if !ok || rec.UpstreamName != "cfm_challenge" || rec.UA != "mozilla/5.0" {
+		t.Errorf("13 columns: ok=%v name=%q ua=%q", ok, rec.UpstreamName, rec.UA)
+	}
+	rec, ok = parseTSV(base)
+	if !ok || rec.UpstreamName != "" || rec.UA != "mozilla/5.0" {
+		t.Errorf("12 columns: ok=%v name=%q ua=%q", ok, rec.UpstreamName, rec.UA)
+	}
+}
+
 func TestIsOrigin403POST(t *testing.T) {
 	base := LogRec{Method: "post", Status: 403, Upstream: true, Bytes: 7007}
 	cases := []struct {
@@ -52,6 +66,10 @@ func TestIsOrigin403POST(t *testing.T) {
 		{"CFM verify endpoint", nil, "/__cfm_verify", false},
 		{"GET", func(r *LogRec) { r.Method = "get" }, "/wp-login.php", false},
 		{"origin 200", func(r *LogRec) { r.Status = 200 }, "/wp-admin/admin-ajax.php", false},
+		{"named origin", func(r *LogRec) { r.UpstreamName = "cfm_apache" }, "/xmlrpc.php", true},
+		{"CFM challenge server's own 403 (bad ua)", func(r *LogRec) { r.UpstreamName = "cfm_challenge"; r.Bytes = 7 }, "/xmlrpc.php", false},
+		{"panel origin", func(r *LogRec) { r.UpstreamName = "cfm_panel_origin" }, "/login/", false},
+		{"edge names no upstream (cfm-admin location)", func(r *LogRec) { r.UpstreamName = "-" }, "/xmlrpc.php", false},
 	}
 	for _, c := range cases {
 		r := base

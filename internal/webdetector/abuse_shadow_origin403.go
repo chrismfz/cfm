@@ -32,9 +32,14 @@ import (
 //     token with 403) and cPanel's (/cpanelwebcall, and /cpsessN/ on the panel
 //     listeners, which log to the same stream: an expired session polling the
 //     UI gets cpsrvd 403s).
-// "The origin answered" is LogRec.Upstream: the edge logged an upstream time.
-// The Apache origin log carries none, so on a node without the edge this
-// signal stays silent.
+// "The origin answered" is LogRec.Upstream (the edge logged an upstream time)
+// AND, where the edge names its upstream (LogRec.UpstreamName, log-cfm.lua
+// column 12), a cfm_apache* one: CFM's own challenge server is proxied too and
+// answers a challenged POST with an odd UA with a 403 of its own. An edge
+// still on the 12-column module names none; until it reloads, a challenged
+// vhost's "bad ua" refusals can read as origin 403s. The Apache origin log
+// carries no upstream time, so on a node without the edge this signal stays
+// silent.
 //
 // Runs on the per-tick emitIPChallenges under ABUSE_SHADOW; nothing here
 // challenges or blocks. A (host, ip) that crosses the threshold is tracked for
@@ -72,6 +77,12 @@ func (e *Engine) origin403PerMin() int {
 // p is the path without the query string.
 func isOrigin403POST(rec LogRec, p string) bool {
 	if rec.Method != "post" || rec.Status != 403 || !rec.Upstream {
+		return false
+	}
+	// The edge names its upstream (13-column lines): only the site's origin
+	// counts. CFM's challenge server is an upstream too and refuses an odd UA
+	// with its own 403 ("bad ua"), which must not read as an origin WAF.
+	if rec.UpstreamName != "" && !strings.HasPrefix(rec.UpstreamName, "cfm_apache") {
 		return false
 	}
 	if strings.HasPrefix(p, "/__cfm") || strings.HasPrefix(p, "/cfm-admin") ||

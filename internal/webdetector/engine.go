@@ -40,20 +40,33 @@ type LogRec struct {
 	UA      string
 	Ref     string
 	// Upstream is true when the urt column held a value (not "-"): the edge
-	// proxied the request and an upstream answered it. A request the edge
-	// answered itself (WAF/challenge/IP block, cache hit) has no upstream.
+	// proxied the request and an upstream answered it — the site's origin OR
+	// CFM's own challenge server (see UpstreamName). A request the edge
+	// answered itself (WAF/IP block, cache hit) has no upstream.
 	// Kept apart from URT because a fast origin logs "0.000" and a retried
 	// one "0.1, 0.2" (which URT parses as 0). The combined format and the
 	// Apache origin log never set it.
 	Upstream bool
+	// UpstreamName is the edge's $cfm_upstream (log-cfm.lua column 12):
+	// "cfm_apache*" is the site's origin, "cfm_challenge" CFM's own challenge
+	// server (a challenged request HAS an upstream time). "-" when the edge
+	// routed nowhere it names; empty when the line had no such column (an
+	// edge on the older 12-column module, the combined format).
+	UpstreamName string
 }
 
 // parseTSV parses the TSV log format used by access_cfm_tsv.log.
 // ts ip host method uri proto status bytes rt urt ref ua
 func parseTSV(line string) (LogRec, bool) {
-	f := strings.SplitN(line, "\t", 12)
+	// 12 columns, or 13 with the upstream name (log-cfm.lua); a 13-column
+	// split keeps a 12-column line's UA whole (the edge strips tabs from it).
+	f := strings.SplitN(line, "\t", 13)
 	if len(f) < 12 {
 		return LogRec{}, false
+	}
+	upName := ""
+	if len(f) == 13 {
+		upName = f[12]
 	}
 	ts, _ := strconv.ParseFloat(f[0], 64)
 	st, _ := strconv.Atoi(f[6])
@@ -80,7 +93,8 @@ func parseTSV(line string) (LogRec, bool) {
 		UA:     strings.ToLower(f[11]),
 		Ref:    strings.ToLower(f[10]),
 
-		Upstream: f[9] != "" && f[9] != "-",
+		Upstream:     f[9] != "" && f[9] != "-",
+		UpstreamName: upName,
 	}, true
 }
 

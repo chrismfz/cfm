@@ -228,16 +228,18 @@ type topEntity struct {
 }
 
 // origin403Entity is one (host, ip) the origin_403_burst signal would have
-// banned, with its peak minute. Reqs next to Post403 is the FP read: a real
-// user hitting an origin WAF also sends ordinary requests.
+// banned: Post403/Paths/Reqs come together from its STRONGEST line (most
+// POSTs refused), never stitched from different minutes, plus how many lines
+// it logged (Hits). Reqs next to Post403 is the FP read: a real user hitting
+// an origin WAF also sends ordinary requests.
 type origin403Entity struct {
-	Host       string `json:"host"`
-	IP         string `json:"ip"`
-	Hits       int    `json:"hits"`
-	MaxPost403 int    `json:"max_post403"`
-	MaxPaths   int    `json:"max_paths"`
-	MaxReqs    int    `json:"max_reqs"`
-	CC         string `json:"cc,omitempty"`
+	Host    string `json:"host"`
+	IP      string `json:"ip"`
+	Hits    int    `json:"hits"`
+	Post403 int    `json:"post403"`
+	Paths   int    `json:"paths"`
+	Reqs    int    `json:"reqs"`
+	CC      string `json:"cc,omitempty"`
 }
 
 // sigHost is one vhost flagged by a per-vhost signal (facet/cost/dc): the values
@@ -652,14 +654,8 @@ func Summarize(lines []string) Summary {
 					o403[k] = t
 				}
 				t.Hits++
-				if e.Post403 > t.MaxPost403 {
-					t.MaxPost403 = e.Post403
-				}
-				if e.Paths > t.MaxPaths {
-					t.MaxPaths = e.Paths
-				}
-				if e.Reqs > t.MaxReqs {
-					t.MaxReqs = e.Reqs
+				if e.Post403 > t.Post403 {
+					t.Post403, t.Paths, t.Reqs = e.Post403, e.Paths, e.Reqs
 				}
 			}
 		case "exempt_goodbot":
@@ -715,8 +711,8 @@ func Summarize(lines []string) Summary {
 			ot = append(ot, *t)
 		}
 		sort.Slice(ot, func(i, j int) bool {
-			if ot[i].MaxPost403 != ot[j].MaxPost403 {
-				return ot[i].MaxPost403 > ot[j].MaxPost403
+			if ot[i].Post403 != ot[j].Post403 {
+				return ot[i].Post403 > ot[j].Post403
 			}
 			if ot[i].Host != ot[j].Host {
 				return ot[i].Host < ot[j].Host

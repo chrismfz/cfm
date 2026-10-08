@@ -144,26 +144,28 @@ local function has_dotdot_segment(v)
   return s:find("/%.%./") ~= nil
 end
 
--- The name PHP registers a (decoded, lowercased) request variable under, as
--- far as it matters for `pagename`: leading whitespace is dropped and an array
--- suffix `[...]` selects the base name. (PHP's `.`/space → `_` mangling cannot
--- turn anything else into `pagename`, which contains neither.)
+-- The name PHP registers a decoded request variable under, as
+-- php_register_variable_ex() (PHP 8) builds it: the name ends at a NUL,
+-- leading SPACES (only) go, ` ` and `.` become `_`, and an array name ends at
+-- its first `[`. A `[` with no `]` after it becomes `_` instead, and from there
+-- on every ` `, `.` and `[` becomes `_` too. Callers that compare case-
+-- insensitively lowercase first.
 local function php_var_name(k)
-  -- As php_register_variable_ex() does: the name ends at a NUL, leading spaces
-  -- go, an array name ends at its first `[` (a `[` with no `]` after it
-  -- becomes `_` instead), and a space or `.` becomes `_`.
   local z = k:find("\0", 1, true)
   if z then k = k:sub(1, z - 1) end
-  k = k:gsub("^%s+", "")
+  k = k:gsub("^ +", "")
   local b = k:find("[", 1, true)
-  if b then
-    if k:find("]", b + 1, true) then
-      k = k:sub(1, b - 1)
-    else
-      k = k:sub(1, b - 1) .. "_" .. k:sub(b + 1)
-    end
-  end
-  return (k:gsub("[ %.]", "_"))
+  if not b then return (k:gsub("[ %.]", "_")) end
+  local base = k:sub(1, b - 1):gsub("[ %.]", "_")
+  if k:find("]", b + 1, true) then return base end
+  return base .. "_" .. k:sub(b + 1):gsub("[ %.%[]", "_")
+end
+
+-- The media type SAPI picks the POST body parser by: the Content-Type up to
+-- its first `;`, `,` or space, lowercased (sapi_read_post_data). A parameter
+-- that merely mentions another type does not change the parser.
+local function php_media_type(ct_raw)
+  return lower((ct_raw or ""):match("^[^;, ]*"))
 end
 
 -- Rule 10017 — CVE-2026-87902 (GHSA-7hp8-65ch-5whp), WordPress core 4.7–7.1.1
@@ -217,8 +219,8 @@ function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _
   if scan_pairs(args, un) then return "ARG" end
 
   if method ~= "post" or not body or body == "" then return nil end
-  local ct = lower(header_string(headers and (headers["Content-Type"] or headers["content-type"])) or "")
-  if has(ct, "multipart/form-data") then
+  local mt = php_media_type(header_string(headers and (headers["Content-Type"] or headers["content-type"])))
+  if mt == "multipart/form-data" then
     -- Each form field NAME (a `name=` parameter, never `filename=`), quoted
     -- either way or bare; for a `pagename` field skip its part headers to the
     -- blank line and take the first value line.
@@ -238,7 +240,7 @@ function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _
         if v and has_dotdot_segment(normalize(v)) then return "BODY" end
       end
     end
-  elseif has(ct, "application/x-www-form-urlencoded") and scan_pairs(body, bn) then
+  elseif mt == "application/x-www-form-urlencoded" and scan_pairs(body, bn) then
     return "BODY"
   end
   return nil
@@ -3843,55 +3845,140 @@ function _M.detect_cve_sppagebuilder_upload(uri, method, args, body, headers)
   return nil
 end
 
--- Request-field helpers for the TranslatePress rules (10018/10019/10020):
--- the form fields PHP would see, decoded.
+-- Request-field helpers for the TranslatePress rules (10018/10019/10020): the
+-- form fields PHP registers in $_GET / $_POST, read the way PHP reads them, so
+-- a request PHP serves cannot hide a field from the rule by a spelling the
+-- edge reads differently. Over-reading is the safe direction; under-reading is
+-- a bypass.
 
-local function form_decode(s)
-  local t = (s or ""):gsub("%+", " ")
-  return url_decode_once(t)
+-- php_ap_getword (main/rfc1867.c): s from i up to the first `stop` outside a
+-- '…' or "…" quote (a quote char right after a backslash does not close it).
+-- Returns the word and the index after the stop.
+local GETWORD_CLASS = { [";"] = "[;\"']", ["="] = "[=\"']" }
+local function php_ap_getword(s, i, stop)
+  local n, j = #s, i
+  while j <= n do
+    local k = s:find(GETWORD_CLASS[stop], j)
+    if not k then break end
+    local c = s:sub(k, k)
+    if c == stop then return s:sub(i, k - 1), k + 1 end
+    local p = k + 1
+    while true do
+      local q = s:find(c, p, true)
+      if not q then return s:sub(i), n + 1 end
+      p = q + 1
+      if s:sub(q - 1, q - 1) ~= "\\" or q - 1 == k then break end
+    end
+    j = p
+  end
+  return s:sub(i), n + 1
 end
 
--- Multipart: split on the boundary once (linear in the body). The field name
--- comes from the part's Content-Disposition header only (never `filename=`);
--- the value is the whole part body. fn(name, value) runs once per named part,
--- in order.
+-- php_ap_getword_conf: the parameter value — leading whitespace skipped, then a
+-- quoted string (\<quote> unescaped) or the run up to the next whitespace.
+local function php_ap_getword_conf(s, i)
+  i = s:find("%S", i)
+  if not i then return "" end
+  local c = s:sub(i, i)
+  if c == '"' or c == "'" then
+    local p = i + 1
+    while true do
+      local q = s:find(c, p, true)
+      if not q then return (s:sub(i + 1):gsub("\\" .. c, c)) end
+      if s:sub(q - 1, q - 1) ~= "\\" or q - 1 == i then
+        return (s:sub(i + 1, q - 1):gsub("\\" .. c, c))
+      end
+      p = q + 1
+    end
+  end
+  return s:match("^%S*", i)
+end
+
+-- The multipart boundary as rfc1867.c finds it: the first `boundary` (case-
+-- sensitive, else case-insensitive), the first `=` after it, then a quoted
+-- value or the run up to `,` / `;`.
+local function php_mp_boundary(ct_raw)
+  local s = ct_raw:find("boundary", 1, true) or lower(ct_raw):find("boundary", 1, true)
+  if not s then return nil end
+  local eq = ct_raw:find("=", s + 8, true)
+  if not eq then return nil end
+  local rest = ct_raw:sub(eq + 1)
+  if rest:sub(1, 1) == '"' then
+    local q = rest:find('"', 2, true)
+    return q and rest:sub(2, q - 1) or nil
+  end
+  return rest:match("^[^,;]*")
+end
+
+-- Multipart: each named non-file part, as rfc1867.c registers it. A boundary
+-- counts only at the start of a line (PHP skips a preamble and splits the data
+-- on "\n--boundary"); the rest of the boundary line is ignored; header lines
+-- run to a blank line, a line starting with space/tab continues the previous
+-- one, and the FIRST Content-Disposition header is the one read. Its `name`
+-- is the LAST `name=` parameter (parameters split on `;` outside quotes, keys
+-- compared case-insensitively). A part with a `filename` parameter goes to
+-- $_FILES, not $_POST, and is skipped. One trailing CR is dropped from the
+-- value. fn(name, value) runs once per part, in order. Linear in the body.
 local function each_multipart_field(b, ct_raw, fn)
-  local bnd = ct_raw:match('[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]="([^"]+)"')
-              or ct_raw:match("[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]=([^;%s]+)")
+  local bnd = php_mp_boundary(ct_raw)
   if not bnd or bnd == "" then return end
-  local delim = "--" .. bnd
-  local _, e = b:find(delim, 1, true)
+  local delim = "\n--" .. bnd
+  local s = "\n" .. b
+  local _, e = s:find(delim, 1, true)
   while e do
-    local nxt = b:find(delim, e + 1, true)
-    local part = b:sub(e + 1, (nxt or #b + 1) - 1)
-    local hs, he = part:find("\r?\n\r?\n")
-    if hs then
-      local name
-      for line in part:sub(1, hs):gmatch("[^\r\n]+") do
-        if lower(line):match("^%s*content%-disposition%s*:") then
-          -- the parameter is matched case-insensitively, its value verbatim
-          local lp = lower(line)
-          local _, ne = lp:find("[;%s]name%s*=%s*")
-          if ne then
-            name = line:match('^"([^"]*)"', ne + 1) or line:match("^'([^']*)'", ne + 1)
-                   or line:match("^([^;%s]+)", ne + 1)
-          end
-          break
+    local nl = s:find("\n", e + 1, true)
+    if not nl then return end
+    -- headers
+    local hdrs, last = {}, nil
+    local pos, data_start = nl + 1, nil
+    while pos <= #s do
+      local le = s:find("\n", pos, true)
+      if not le then return end
+      local line = s:sub(pos, le - 1):gsub("\r$", "")
+      pos = le + 1
+      if line == "" then data_start = pos; break end
+      local c1 = line:sub(1, 1)
+      if (c1 == " " or c1 == "\t") and last then
+        last.v[#last.v + 1] = line -- joined once, below: no quadratic concat
+      else
+        local k, v = line:match("^([^:]*):%s*(.*)$")
+        if k then last = { k = lower(k), v = { v } }; hdrs[#hdrs + 1] = last else last = nil end
+      end
+    end
+    if not data_start then return end
+    local nxt = s:find(delim, data_start, true)
+    local cd
+    for _, h in ipairs(hdrs) do
+      if h.k == "content-disposition" then cd = table.concat(h.v); break end
+    end
+    if cd then
+      local name, filename
+      local i = cd:find("%S") or #cd + 1
+      while i <= #cd do
+        local pair
+        pair, i = php_ap_getword(cd, i, ";")
+        i = cd:find("%S", i) or #cd + 1
+        if pair:find("=", 1, true) then
+          local key, j = php_ap_getword(pair, 1, "=")
+          local lk = lower(key)
+          if lk == "name" then name = php_ap_getword_conf(pair, j)
+          elseif lk == "filename" then filename = php_ap_getword_conf(pair, j) end
         end
       end
-      if name then
-        local v = part:sub(he + 1):gsub("\r?\n$", "")
+      if name and name ~= "" and not filename then
+        local v = s:sub(data_start, (nxt or #s + 1) - 1):gsub("\r$", "")
         fn(name, v)
       end
     end
-    if not nxt then break end
-    _, e = b:find(delim, nxt, true)
+    if not nxt then return end
+    e = nxt + #delim - 1
   end
 end
 
--- Every form field PHP would see in $_GET / $_POST: the query string, then an
+-- Every form field PHP would see in $_GET / $_POST: the query string, then a
 -- urlencoded or multipart body (the whole surface the edge handed over; cfm.lua
--- already caps the body at waf_body_max_len). fn(name, value) gets the decoded
+-- already caps the body at waf_body_max_len). The body parser is chosen by the
+-- media type, as SAPI does (php_media_type). fn(name, value) gets the decoded
 -- key and value, query string first, so a caller that keeps the last value per
 -- name gets $_REQUEST's POST-over-GET precedence.
 local function each_request_field(args, body, headers, fn)
@@ -3901,16 +3988,16 @@ local function each_request_field(args, body, headers, fn)
       local k, v = pair:match("^([^=]*)=(.*)$")
       -- PHP registers a bare `key` (no `=`) as an empty string.
       if not k and pair ~= "" then k, v = pair, "" end
-      if k then fn(form_decode(k), form_decode(v)) end
+      if k then fn(_form_unescape(k), _form_unescape(v)) end
     end
   end
   pairs_of(args)
   if body and body ~= "" then
     local ct_raw = header_string(headers and (headers["Content-Type"] or headers["content-type"])) or ""
-    local ct = lower(ct_raw)
-    if has(ct, "multipart/form-data") then
+    local mt = php_media_type(ct_raw)
+    if mt == "multipart/form-data" then
       each_multipart_field(body, ct_raw, fn)
-    elseif has(ct, "application/x-www-form-urlencoded") then
+    elseif mt == "application/x-www-form-urlencoded" then
       pairs_of(body)
     end
   end
@@ -3934,7 +4021,7 @@ end
 -- action editor-only.
 --
 -- 10018 / 10020 RESET_PREVIEW: `trp-edit-translation` on a password-reset
--- request — wp-login.php's lostpassword/retrievepassword action, or
+-- POST — wp-login.php's lostpassword/retrievepassword action, or
 -- WooCommerce's lost-password POST (wc_reset_password /
 -- woocommerce-lost-password-nonce; it mails through the same filter). WordPress
 -- reads `action` from $_REQUEST. Fleet-wide the only sighting in the retained
@@ -3959,9 +4046,19 @@ end
 -- the preview trick, and only the update closes that case.
 local TRP_RESET_ACTIONS = { lostpassword = true, retrievepassword = true }
 
+-- Both TranslatePress detectors read the same fields; the last parse is kept
+-- so a request both of them reach (one over the _nab budget, e.g. a large
+-- upload) is parsed once. Keyed on the request's own headers table, which the
+-- edge builds per request, plus args and body; the table is read-only.
+local trp_memo_h, trp_memo_a, trp_memo_b, trp_memo_f
 local function trp_fields(args, body, headers)
+  if headers ~= nil and rawequal(headers, trp_memo_h)
+     and args == trp_memo_a and body == trp_memo_b then
+    return trp_memo_f
+  end
   local f = {}
   each_request_field(args, body, headers, function(k, v) f[php_var_name(k)] = v end)
+  trp_memo_h, trp_memo_a, trp_memo_b, trp_memo_f = headers, args, body, f
   return f
 end
 
@@ -3977,12 +4074,15 @@ function _M.detect_cve_translatepress_reset_preview(method, args, body, headers,
      and not has(_nab, "trp-edit-translation") then
     return nil
   end
+  -- Both reset forms send the mail only on POST (wp-login.php calls
+  -- retrieve_password() under $http_post); a GET of the form cannot store it.
+  if method ~= "post" then return nil end
   local f = trp_fields(args, body, headers)
   if f["trp-edit-translation"] == nil then return nil end
   local tag
   if TRP_RESET_ACTIONS[f.action or ""] then
     tag = "LOSTPASSWORD"
-  elseif method == "post" and f.user_login ~= nil
+  elseif f.user_login ~= nil
          and (f.wc_reset_password ~= nil or f["woocommerce-lost-password-nonce"] ~= nil) then
     tag = "WC_LOSTPASSWORD"
   end

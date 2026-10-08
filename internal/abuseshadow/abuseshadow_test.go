@@ -441,7 +441,7 @@ func TestSummarizeHumanityWouldV2(t *testing.T) {
 func TestSummarizeOrigin403(t *testing.T) {
 	lines := []string{
 		"2026-10-08 16:30:00 [abuse-shadow] signal=origin_403_burst host=villadimitramykonos.com ip=172.81.132.89 post403=87 paths=2 reqs=92 window=60s asn=62904 cc=US good_bot=- verdict=would_ban",
-		"2026-10-08 16:45:00 [abuse-shadow] signal=origin_403_burst host=villadimitramykonos.com ip=172.81.132.89 post403=29 paths=1 reqs=30 window=60s asn=62904 cc=US good_bot=- verdict=would_ban",
+		"2026-10-08 16:45:00 [abuse-shadow] signal=origin_403_burst host=villadimitramykonos.com ip=172.81.132.89 post403=29 paths=5 reqs=400 window=60s asn=62904 cc=US good_bot=- verdict=would_ban",
 		"2026-10-08 17:00:00 [abuse-shadow] signal=origin_403_burst host=meliasma.gr ip=45.148.10.80 post403=56 paths=3 reqs=341 window=60s asn=48090 cc=NL good_bot=- verdict=would_ban",
 		"2026-10-08 17:01:00 [abuse-shadow] signal=origin_403_burst host=vani-atelier.gr ip=66.249.75.64 post403=40 paths=1 reqs=400 window=60s asn=15169 cc=US good_bot=googlebot verdict=exempt_goodbot",
 		`2026-10-08 17:02:00 [abuse-shadow] signal=origin_403_burst verified_crawler="googlebot" exempt (per-IP FCrDNS; e.g. ip=66.249.75.64)`,
@@ -458,7 +458,8 @@ func TestSummarizeOrigin403(t *testing.T) {
 		t.Fatalf("top_origin_403 has %d rows, want 2: %+v", len(s.TopOrigin403), s.TopOrigin403)
 	}
 	top := s.TopOrigin403[0]
-	if top.IP != "172.81.132.89" || top.Hits != 2 || top.MaxPost403 != 87 || top.MaxPaths != 2 || top.MaxReqs != 92 || top.CC != "US" {
+	if top.IP != "172.81.132.89" || top.Hits != 2 || top.Post403 != 87 || top.Paths != 2 || top.Reqs != 92 || top.CC != "US" {
+		// the second line's paths=5 reqs=400 must not be stitched onto the 87
 		t.Errorf("top row = %+v", top)
 	}
 	if s.Total != 4 {
