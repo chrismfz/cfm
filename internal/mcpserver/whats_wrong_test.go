@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sec builds a sections map from key→raw-JSON-body pairs.
@@ -613,7 +614,8 @@ func TestEvalHealthFrontendNoneIsSilent(t *testing.T) {
 // The node's mail-abuse findings replace the raw anomalies, with severity and
 // the context that tells a newsletter from spam.
 func TestEvalMailTrafficUsesTheAbuseFindings(t *testing.T) {
-	body := `{"available":true,"abuse":[{"type":"mail_script_spike","severity":"critical","message":"hotellito: 86 messages sent by scripts in 2h","subject":"hotellito",
+	now := `"abuse_checked_at":"` + time.Now().UTC().Format(time.RFC3339) + `",`
+	body := `{"available":true,` + now + `"abuse":[{"type":"mail_script_spike","severity":"critical","message":"hotellito: 86 messages sent by scripts in 2h","subject":"hotellito",
 		"context":{"subjects":["Лазерные сканеры"],"rcpt_domains":["gmail.com×812"],"copied_to":"litohotel@outlook.com"}}],
 		"traffic":{"anomalies":[{"addr":"a@x","recent":90,"ratio":9,"kind":"spike"}]}}`
 	got := evalMailTraffic(json.RawMessage(body), map[string]string{})
@@ -621,7 +623,16 @@ func TestEvalMailTrafficUsesTheAbuseFindings(t *testing.T) {
 		!strings.Contains(got[0].Detail, "«Лазерные сканеры»") || !strings.Contains(got[0].Detail, "gmail.com×812") {
 		t.Fatalf("want the abuse finding only, with context: %+v", got)
 	}
-	if got := evalMailTraffic(json.RawMessage(`{"available":true,"abuse":[],"traffic":{"anomalies":[{"addr":"a@x","recent":90,"ratio":9,"kind":"spike"}]}}`), map[string]string{}); len(got) != 0 {
+	if got := evalMailTraffic(json.RawMessage(`{"available":true,`+now+`"abuse":[],"traffic":{"anomalies":[{"addr":"a@x","recent":90,"ratio":9,"kind":"spike"}]}}`), map[string]string{}); len(got) != 0 {
 		t.Fatalf("a checked node with nothing open has nothing to say: %+v", got)
+	}
+	// an alert still open in cfm-web is still said
+	if got := evalMailTraffic(json.RawMessage(`{"available":true,`+now+`"abuse":[{"type":"mail_script_spike","severity":"warning","message":"shop: 60","still_open":true}]}`), map[string]string{}); len(got) != 1 || !strings.Contains(got[0].Detail, "still open") {
+		t.Fatalf("a still-open alert must be shown: %+v", got)
+	}
+	// a check that stopped running is not trusted: the raw anomalies are used
+	stale := `"abuse_checked_at":"` + time.Now().Add(-time.Hour).UTC().Format(time.RFC3339) + `",`
+	if got := evalMailTraffic(json.RawMessage(`{"available":true,`+stale+`"abuse":[],"traffic":{"anomalies":[{"addr":"a@x","recent":90,"ratio":9,"kind":"spike"}]}}`), map[string]string{}); len(got) != 1 || got[0].Title != "outbound mail spike" {
+		t.Fatalf("stale abuse views fall back to the anomalies: %+v", got)
 	}
 }

@@ -803,10 +803,15 @@ func deriveFrontendWorking(frontend, dnatState string) (string, string, Frontend
 		// mailcow in docker (mymail), a nameserver, a backup box — is not
 		// down. With DNAT on, though, traffic is redirected to an edge that
 		// is not there: that IS down.
-		if strings.EqualFold(strings.TrimSpace(dnatState), "on") {
+		switch strings.ToLower(strings.TrimSpace(dnatState)) {
+		case "on":
 			return "down", "frontend unknown: DNAT is on but no edge (angie/openresty/nginx) was found", FrontendDebug{}
+		case "off":
+			return "none", "no web frontend on this host (no angie/openresty/nginx)", FrontendDebug{}
 		}
-		return "none", "no web frontend on this host (no angie/openresty/nginx)", FrontendDebug{}
+		// the DNAT state could not be read: "none" would claim more than we
+		// know (DNAT might be redirecting to the missing edge) — say unknown
+		return "unknown", "no edge (angie/openresty/nginx) found, and the DNAT state could not be read", FrontendDebug{}
 	}
 
 	candidates := map[string]frontendSignal{

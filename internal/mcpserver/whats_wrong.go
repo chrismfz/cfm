@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -713,7 +714,13 @@ type mailAbuseView struct {
 		CopiedTo    string   `json:"copied_to"`
 	} `json:"context"`
 	Countries []string `json:"countries"`
+	StillOpen bool     `json:"still_open"`
 }
+
+// mailAbuseStale: abuse views older than this (the node's check stopped
+// running — store errors, collector stuck) are not trusted; the raw anomalies
+// are used instead. The check runs every 5 min.
+const mailAbuseStale = 15 * time.Minute
 
 var mailAbuseTitles = map[string]string{
 	"mail_script_spike":   "site sending spam through its scripts (hacked site / contact form)",
@@ -736,6 +743,9 @@ func evalMailAbuse(views []mailAbuseView) []finding {
 			title = v.Type
 		}
 		detail := v.Message
+		if v.StillOpen {
+			detail = "still open (no longer over the threshold, not resolved yet): " + detail
+		}
 		if c := v.Context; c != nil {
 			if len(c.Subjects) > 0 {
 				detail += " | subjects: «" + strings.Join(c.Subjects, "» «") + "»"
@@ -753,6 +763,7 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 	var t struct {
 		Available bool             `json:"available"`
 		Abuse     *[]mailAbuseView `json:"abuse"`
+		CheckedAt time.Time        `json:"abuse_checked_at"`
 		Traffic   struct {
 			Anomalies []struct {
 				Addr            string  `json:"addr"`
@@ -773,7 +784,7 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 	// The node's mail-abuse check (docs/mail-abuse.md) already covers the
 	// outbound anomalies below, with severity and context; the raw anomalies
 	// are the fallback for a node that predates it or has not checked yet.
-	if t.Abuse != nil {
+	if t.Abuse != nil && time.Since(t.CheckedAt) <= mailAbuseStale {
 		return evalMailAbuse(*t.Abuse)
 	}
 	var fs []finding

@@ -252,3 +252,83 @@ func TestMailboxContext(t *testing.T) {
 		t.Fatalf("sending as a foreign address must be said: %+v", hij)
 	}
 }
+
+// Review of #1556: the cwd line belongs to whoever's directory it is.
+func TestCwdIsOnlyTakenForItsOwnUser(t *testing.T) {
+	tr := newTracker()
+	T := time.Now()
+	ts := T.Format("2006-01-02 15:04:05")
+	tr.observeExim(ts+" cwd=/home/alice/public_html 4 args: /usr/sbin/sendmail -t -i", T)
+	tr.observeExim(ts+" 1xEL5B-0000000G4kX-2aaa <= bob@x.gr U=bob P=local S=1 for a@b.c", T)
+	tr.observeExim(ts+" 1xEL5B-0000000G4kX-2bbb <= alice@x.gr U=alice P=local S=1 for a@b.c", T)
+	tr.observeExim(ts+" 1xEL5B-0000000G4kX-2ccc <= alice@x.gr U=alice P=local S=1 for a@b.c", T)
+	if c := tr.context("local:bob", ""); c.Cwd != "" {
+		t.Fatalf("bob must not get alice's directory: %q", c.Cwd)
+	}
+	ss := tr.samples["local:alice"]
+	if len(ss) != 2 || ss[0].cwd != "/home/alice/public_html" || ss[1].cwd != "" {
+		t.Fatalf("alice's cwd goes to her next message, once: %+v", ss)
+	}
+}
+
+// A site mailing only its owner is not a contact form spamming strangers.
+func TestOneRecipientIsNotTheContactFormPattern(t *testing.T) {
+	tr := newTracker()
+	T := time.Now()
+	ts := T.Format("2006-01-02 15:04:05")
+	for i := 0; i < 10; i++ {
+		tr.observeExim(ts+" 1xEL5B-0000000G4kX-2ddd <= shop@shop.gr U=shop P=local S=1 for owner@shop.gr", T)
+	}
+	if c := tr.context("local:shop", ""); c.CopiedTo != "" || c.Recipients != 1 {
+		t.Fatalf("one recipient: no pattern, one recipient counted: %+v", c)
+	}
+}
+
+func TestDecodeSubjectCharsets(t *testing.T) {
+	for raw, want := range map[string]string{
+		"=?windows-1251?B?z/Do4uXy?=":            "Привет",
+		"=?iso-8859-7?B?xvbv7Q==?=":              "Ζφον",
+		"=?koi8-r?B?8NLJ18XU?= =?utf-8?Q?plus?=": "Приветplus",
+	} {
+		if got := decodeSubject(raw); got != want {
+			t.Errorf("decodeSubject(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	// an unknown charset loses only its own word
+	if got := decodeSubject("=?x-nope?B?AAAA?= =?utf-8?Q?kept?="); !strings.Contains(got, "kept") {
+		t.Errorf("a bad word must not cost the others: %q", got)
+	}
+}
+
+// A new sender (a migrated account, a new shop) is a warning at 50, critical
+// only at 200; with no baseline from before, it settles after a while.
+func TestNewSenderSeverityAndSettling(t *testing.T) {
+	if s := spikeSeverity(Anomaly{Kind: "new-sender", Recent: 120}); s != "warning" {
+		t.Fatalf("120 from a new sender: %s", s)
+	}
+	if s := spikeSeverity(Anomaly{Kind: "new-sender", Recent: 250}); s != "critical" {
+		t.Fatalf("250 from a new sender: %s", s)
+	}
+	got := recordAbuse(t)
+	p := &publisher{}
+	T := time.Now()
+	p.apply([]abuseFinding{{Type: TypeScriptSpike, Severity: "warning", Key: "mail:script:shop", Message: "shop: 120", Expected: 0}}, nil, T)
+	busy := map[string]int64{"mail:script:shop": 120}
+	p.apply(nil, busy, T.Add(time.Hour))
+	p.apply(nil, busy, T.Add(5*time.Hour))
+	if len(*got) != 1 {
+		t.Fatalf("still busy, not settled yet: %+v", *got)
+	}
+	p.apply(nil, busy, T.Add(8*time.Hour))
+	if len(*got) != 2 || (*got)[1].typ != TypeRecovered || !strings.Contains((*got)[1].msg, "now its usual volume") {
+		t.Fatalf("a new sender settles: %+v", *got)
+	}
+	// an old sender with a real baseline does not settle while still high
+	got2 := recordAbuse(t)
+	p2 := &publisher{}
+	p2.apply([]abuseFinding{{Type: TypeScriptSpike, Severity: "warning", Key: "mail:script:old", Message: "old", Expected: 2}}, nil, T)
+	p2.apply(nil, map[string]int64{"mail:script:old": 120}, T.Add(24*time.Hour))
+	if len(*got2) != 1 {
+		t.Fatalf("a spike over its real baseline stays open: %+v", *got2)
+	}
+}

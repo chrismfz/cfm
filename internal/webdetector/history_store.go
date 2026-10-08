@@ -271,9 +271,13 @@ func isSQLiteFile(path string) (bool, error) {
 	return string(hdr[:n]) == "SQLite format 3\x00", nil
 }
 
-func (s *HistoryStore) Append(ev HistoryEvent) {
+func (s *HistoryStore) Append(ev HistoryEvent) { s.AppendChecked(ev) }
+
+// AppendChecked is Append reporting whether the row was written (false with no
+// store or on a failed INSERT).
+func (s *HistoryStore) AppendChecked(ev HistoryEvent) bool {
 	if s == nil || s.db == nil {
-		return
+		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -296,12 +300,13 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		logging.Logf("[webdetector][history] sqlite append failed: %v", err)
-		return
+		return false
 	}
 	if id, err := res.LastInsertId(); err == nil {
 		ev.ID = id
 	}
 	// Prune runs on its own ticker (see prunerLoop); Append never blocks on it.
+	return true
 }
 
 // readWAFEventsSinceLocked returns waf_observe/waf_trigger events with

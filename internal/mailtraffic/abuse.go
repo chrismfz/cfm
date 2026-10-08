@@ -32,6 +32,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"mime"
 	"net"
@@ -46,6 +47,8 @@ import (
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
 	"cfm/internal/mailmeter"
+
+	"golang.org/x/text/encoding/htmlindex"
 )
 
 // Finding types — detection_history event types, so a change here is a wire
@@ -75,6 +78,11 @@ const (
 	// history sending at least anomalyNewSenderFloor).
 	abuseCritRatio = 10.0
 	abuseCritFloor = 50
+	// a sender with no history is critical only from this many in the window
+	abuseNewCritFloor = 200
+	// a spike with no baseline from before it (a new sender) closes once it
+	// has not been a finding for this long: its volume is its normal now
+	abuseNewSettle = 6 * time.Hour
 	// a spike closes once the recent volume is under this factor of the
 	// expected volume recorded when it opened (or under the spike floor).
 	abuseCloseFactor = 1.5
@@ -247,8 +255,17 @@ func logTime(line string, now time.Time) time.Time {
 }
 
 var (
-	subjectDecoder = new(mime.WordDecoder)
-	reEncodedLeft  = regexp.MustCompile(`=\?\S*`)
+	// subjectDecoder reads any charset x/text knows (windows-1251, koi8-r,
+	// iso-8859-7, windows-1253: Russian spam and Greek mail), not only UTF-8.
+	subjectDecoder = &mime.WordDecoder{CharsetReader: func(charset string, in io.Reader) (io.Reader, error) {
+		enc, err := htmlindex.Get(charset)
+		if err != nil {
+			return nil, err
+		}
+		return enc.NewDecoder().Reader(in), nil
+	}}
+	reEncodedLeft = regexp.MustCompile(`=\?\S*`)
+	reEncodedWord = regexp.MustCompile(`=\?[^?\s]+\?[bBqQ]\?[^?\s]*\?=`)
 )
 
 // decodeSubject turns exim's logged subject (often RFC 2047 encoded words, and
@@ -258,6 +275,14 @@ func decodeSubject(raw string) string {
 	raw = strings.ReplaceAll(raw, `\"`, `"`)
 	if d, err := subjectDecoder.DecodeHeader(raw); err == nil {
 		raw = d
+	} else {
+		// one bad word must not cost the others: decode word by word
+		raw = reEncodedWord.ReplaceAllStringFunc(raw, func(w string) string {
+			if d, err := subjectDecoder.Decode(w); err == nil {
+				return d
+			}
+			return w
+		})
 	}
 	// whatever is still an encoded word did not decode (exim cut it short)
 	raw = reEncodedLeft.ReplaceAllString(raw, "")
@@ -308,8 +333,12 @@ func (t *tracker) observeExim(line string, now time.Time) {
 		}
 	}
 	if m := reEximLocalUser.FindStringSubmatch(line); m != nil {
-		if t.line-t.pendingAt <= 4 { // the cwd line is logged just before its arrival line
+		// the cwd line is logged just before its arrival line, but on a busy
+		// node other processes' lines interleave: take it only when it is under
+		// this user's own directory, and only once
+		if t.line-t.pendingAt <= 4 && cwdOwnedBy(t.pendingCwd, m[1]) {
 			s.cwd = t.pendingCwd
+			t.pendingCwd = ""
 		}
 		t.addSample("local:"+m[1], s)
 		if id != nil {
@@ -353,6 +382,12 @@ func (t *tracker) observeMaillog(line string, now time.Time) {
 			delete(t.owners, q[1]) // postfix reuses queue ids
 		}
 	}
+}
+
+// cwdOwnedBy reports whether a script directory belongs to a unix user
+// (/home/<user>/…, /home2/<user>/…).
+func cwdOwnedBy(cwd, user string) bool {
+	return cwd != "" && user != "" && strings.Contains(cwd+"/", "/"+user+"/")
 }
 
 var reEximTransport = regexp.MustCompile(`\sT=(\S+)`)
@@ -479,8 +514,12 @@ func (t *tracker) context(key, self string) Context {
 	for _, kv := range topN(doms, 5) {
 		c.RcptDomains = append(c.RcptDomains, fmt.Sprintf("%s×%d", kv.k, kv.n))
 	}
+	// the owner on (nearly) every message, most messages also to someone else,
+	// and those others (nearly) all different — not a site mailing its owner only
 	if top := topN(rcpts, 1); len(top) == 1 && len(ss) >= 5 &&
-		float64(top[0].n) >= 0.8*float64(len(ss)) && float64(len(rcpts)-1) >= 0.8*float64(others-top[0].n) {
+		float64(top[0].n) >= 0.8*float64(len(ss)) &&
+		float64(others-top[0].n) >= 0.8*float64(len(ss)) &&
+		float64(len(rcpts)-1) >= 0.8*float64(others-top[0].n) {
 		c.CopiedTo = top[0].k
 	}
 	return c
@@ -559,6 +598,10 @@ type AbuseView struct {
 	Context   *Context `json:"context,omitempty"`
 	IPs       int      `json:"ips,omitempty"`
 	Countries []string `json:"countries,omitempty"`
+	// StillOpen marks an alert that is no longer a finding this check but is
+	// not resolved yet (its volume is still high, or it is held): cfm-web
+	// still shows it, so the views do too, with the message it opened with.
+	StillOpen bool `json:"still_open,omitempty"`
 }
 
 // evaluate returns this check's findings, plus each spike key's recent volume
@@ -687,8 +730,25 @@ func CurrentAbuse() ([]AbuseView, time.Time) {
 		return nil, time.Time{}
 	}
 	c.ab.mu.Lock()
-	defer c.ab.mu.Unlock()
-	return append([]AbuseView(nil), c.ab.last...), c.ab.lastCheck
+	views, at := append([]AbuseView(nil), c.ab.last...), c.ab.lastCheck
+	c.ab.mu.Unlock()
+	if at.IsZero() {
+		return nil, at
+	}
+	current := make(map[string]bool, len(views))
+	for _, v := range views {
+		current[v.Key] = true
+	}
+	c.pub.mu.Lock()
+	c.pub.load()
+	for key, o := range c.pub.open {
+		if !current[key] {
+			views = append(views, AbuseView{Type: o.Type, Severity: o.Severity, Key: key, Message: o.Message,
+				Subject: key[strings.LastIndexByte(key, ':')+1:], StillOpen: true})
+		}
+	}
+	c.pub.mu.Unlock()
+	return views, at
 }
 
 func usual(a Anomaly) string {
@@ -701,10 +761,13 @@ func usual(a Anomaly) string {
 func expectedOf(a Anomaly) float64 { return a.BaselinePerHour * anomalyRecentHours }
 
 func spikeSeverity(a Anomaly) string {
-	if a.Recent >= abuseCritFloor && (a.Kind == "new-sender" || a.Ratio >= abuseCritRatio) {
+	switch {
+	case a.Kind == "new-sender" && a.Recent >= abuseNewCritFloor:
+		return "critical"
+	case a.Kind != "new-sender" && a.Recent >= abuseCritFloor && a.Ratio >= abuseCritRatio:
 		return "critical"
 	}
-	return "warning"
+	return "warning" // a new shop or a migrated account starting to send is not a page at 50
 }
 
 // clip keeps a message inside cfm-web's 255-character event column.
@@ -779,6 +842,9 @@ type openFinding struct {
 	Severity string  `json:"severity"`
 	Message  string  `json:"message"`
 	Expected float64 `json:"expected"`
+	// QuietSince is when a spike stopped being a finding while staying open
+	// on volume (zero while it is one).
+	QuietSince time.Time `json:"quiet_since,omitempty"`
 }
 
 type publisher struct {
@@ -860,6 +926,10 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 		current[f.Key] = true
 		prev, seen := p.open[f.Key]
 		if seen && sevRank(f.Severity) <= sevRank(prev.Severity) {
+			if !prev.QuietSince.IsZero() {
+				prev.QuietSince = time.Time{}
+				p.open[f.Key] = prev
+			}
 			continue // still open, no worse: nothing new to say
 		}
 		if !publish(f.Type, f.Severity, f.Key, f.Message, now) {
@@ -877,8 +947,19 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 		}
 		n := recent[key]
 		spike := o.Type == TypeScriptSpike || o.Type == TypeOutboundSpike
+		settled := false
 		if spike && n >= anomalySpikeFloor && float64(n) > math.Max(o.Expected*abuseCloseFactor, 0) {
-			continue // the ratio fell (the incident became its own baseline) but the volume did not
+			// the ratio fell (the incident became its own baseline) but the
+			// volume did not — unless there never was a baseline before it (a
+			// new sender): then, after a while, this volume is simply its normal
+			if o.QuietSince.IsZero() {
+				o.QuietSince = now
+				p.open[key] = o
+			}
+			if o.Expected > 0 || now.Sub(o.QuietSince) < abuseNewSettle {
+				continue
+			}
+			settled = true
 		}
 		var msg string
 		switch o.Type {
@@ -892,6 +973,9 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 			msg = "no longer listed (was: " + o.Message + ")"
 		default:
 			msg = fmt.Sprintf("back to normal, %d in %dh (was: %s)", n, anomalyRecentHours, o.Message)
+			if settled {
+				msg = fmt.Sprintf("a new sender at a steady %d in %dh — now its usual volume (was: %s)", n, anomalyRecentHours, o.Message)
+			}
 		}
 		msg = clip(msg)
 		if publish(TypeRecovered, "info", key, msg, now) {

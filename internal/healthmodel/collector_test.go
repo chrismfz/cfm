@@ -287,8 +287,10 @@ func TestDeriveFrontendWorking_NoFrontendIsNotDown(t *testing.T) {
 		if v != "none" || reason == "" {
 			t.Fatalf("frontend %q, DNAT off: got %q (%s), want none", fe, v, reason)
 		}
-		if v, _, _ := deriveFrontendWorking(fe, "unknown"); v != "none" {
-			t.Fatalf("frontend %q, DNAT unknown: got %q, want none", fe, v)
+		// DNAT unreadable: not "none" (it might be redirecting to the missing
+		// edge), not a page either
+		if v, _, _ := deriveFrontendWorking(fe, "unknown"); v != "unknown" {
+			t.Fatalf("frontend %q, DNAT unknown: got %q, want unknown", fe, v)
 		}
 		if v, _, _ := deriveFrontendWorking(fe, "on"); v != "down" {
 			t.Fatalf("frontend %q, DNAT on: got %q, want down", fe, v)
