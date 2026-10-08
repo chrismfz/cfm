@@ -32,10 +32,13 @@ mainlog / maillog every minute into hourly per-user counters) checks:
 "Far above its history" is the Mail Monitor's anomaly rule: the last 2 h
 against the user's average per active hour over the previous 7 days, at least
 3× and at least 20 messages; a sender with almost no history sending ≥ 50 is
-flagged outright. It becomes an **alert** only from 50 messages in the 2 h
-(an open one keeps being judged below that, so it does not flap): 20–40
+flagged outright. A MILD spike — under 50 messages in the 2 h AND under 10×
+its usual, with nothing abusive in its context — is not an alert: 20–40
 messages at 4–5× a small sender's usual is a newsletter or a busy day, and
-paged the channel for nothing; `mail_traffic`'s `anomalies` still list them.
+paged the channel for nothing (`mail_traffic`'s `anomalies` still list it). A
+small spike far above its usual (a quiet site hacked: 45 at 45×), or one
+sending as a foreign domain / another mailbox or in the contact-form pattern,
+still alerts; an open one keeps being judged, so it does not flap.
 **Critical** when it is ≥ 50 messages and ≥ 10×, or a sender with no history
 from 200.
 
@@ -76,7 +79,8 @@ person, or a service acting for them:
   info@socialpower.gr was read from the office (GR), the VK collector (RU)
   and an app on Google Cloud (US) in one hour — one owner, paged as a
   hijack before this. A hijacker on a VM in those networks is missed —
-  Google Cloud and Azure (which shares AS8075 with Outlook.com) included;
+  Google Cloud and Azure (which shares AS8075 with Outlook.com) included, and
+  likely VK Cloud's VMs if they sit in AS47764;
   they mostly use residential proxies and VPS networks.
 - `::ffff:1.2.3.4` is `1.2.3.4`.
 

@@ -78,10 +78,11 @@ const (
 	// history sending at least anomalyNewSenderFloor).
 	abuseCritRatio = 10.0
 	abuseCritFloor = 50
-	// a volume spike becomes an ALERT only from this many messages in the
-	// window (mail_traffic's anomalies still list the smaller ones): 20–40
-	// messages at 4–5× a small sender's usual is a newsletter or a busy day,
-	// and paged the channel for nothing (titan, orion, Oct 2026)
+	// a MILD volume spike (under abuseCritRatio×, nothing abusive in its
+	// context) becomes an ALERT only from this many messages in the window
+	// (mail_traffic's anomalies still list the smaller ones): 20–40 messages
+	// at 4–5× a small sender's usual is a newsletter or a busy day, and paged
+	// the channel for nothing (titan, orion, Oct 2026)
 	abuseAlertFloor = 50
 	// a sender with no history is critical only from this many in the window
 	abuseNewCritFloor = 200
@@ -187,8 +188,8 @@ func defaultGeoOf(ip string) (string, uint) {
 // look hijacked (orion, Oct 2026: info@ read from the office in GR, the VK
 // collector in RU and an app on Google Cloud in the US — 3 countries, one
 // owner). A hijacker on a VM in these networks is missed — Google Cloud and
-// Azure (AS8075) included; residential proxies and VPS networks are what
-// show up.
+// Azure (AS8075) included, and likely VK Cloud's VMs if they sit in AS47764;
+// residential proxies and VPS networks are what show up.
 var fetcherASNs = map[uint]bool{
 	15169: true, 396982: true, // Google, Google Cloud
 	8075:  true,                           // Microsoft (Outlook.com, Azure)
@@ -680,10 +681,13 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 
 	var views []AbuseView
 	for _, a := range loc {
-		if systemLocalUsers[a.Addr] || (a.Recent < abuseAlertFloor && !open["mail:script:"+a.Addr]) {
+		if systemLocalUsers[a.Addr] {
 			continue
 		}
 		c := t.context("local:"+a.Addr, "")
+		if belowAlertFloor(a, c, open["mail:script:"+a.Addr]) {
+			continue
+		}
 		msg := clip(c.describe(fmt.Sprintf("%s: %d messages sent by scripts in %dh (%s)", a.Addr, a.Recent, anomalyRecentHours, usual(a))))
 		f := abuseFinding{Type: TypeScriptSpike, Severity: spikeSeverity(a), Key: "mail:script:" + a.Addr, Message: msg, Expected: expectedOf(a)}
 		fs = append(fs, f)
@@ -739,10 +743,10 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		}
 	}
 	for _, a := range out {
-		if a.Recent < abuseAlertFloor && !open["mail:out:"+a.Addr] {
+		c := t.context("auth:"+a.Addr, a.Addr)
+		if belowAlertFloor(a, c, open["mail:out:"+a.Addr]) {
 			continue
 		}
-		c := t.context("auth:"+a.Addr, a.Addr)
 		head := fmt.Sprintf("%s: %d authenticated messages in %dh (%s)", a.Addr, a.Recent, anomalyRecentHours, usual(a))
 		if ips := t.authIPs[a.Addr]; len(ips) > 1 && !hijacked[a.Addr] {
 			head += fmt.Sprintf(" · from %d IPs", len(ips))
@@ -792,6 +796,18 @@ func CurrentAbuse() ([]AbuseView, time.Time) {
 	}
 	c.pub.mu.Unlock()
 	return views, at
+}
+
+// belowAlertFloor: a MILD small spike (under abuseAlertFloor messages, under
+// abuseCritRatio× its usual) is not an alert — a newsletter or a busy day. A
+// small one far above its usual (a quiet site hacked, 45 a day at 45×), or one
+// that looks like abuse (sending as a foreign domain or another mailbox, the
+// contact-form pattern), still is; and an open one keeps being judged.
+func belowAlertFloor(a Anomaly, c Context, open bool) bool {
+	if open || a.Recent >= abuseAlertFloor || a.Ratio >= abuseCritRatio {
+		return false
+	}
+	return !c.ForeignFrom && !c.OtherFrom && c.CopiedTo == ""
 }
 
 func usual(a Anomaly) string {

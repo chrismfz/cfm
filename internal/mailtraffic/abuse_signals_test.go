@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"cfm/internal/mailmeter"
 	"cfm/internal/mailqueue"
 )
 
@@ -425,32 +426,65 @@ func TestMailCollectorsAreNotAHijack(t *testing.T) {
 	}
 }
 
-// A volume spike pages only from abuseAlertFloor messages; an open one stays
-// judged below it so it does not flap.
+// A MILD volume spike pages only from abuseAlertFloor messages; an open one
+// stays judged below it so it does not flap; a small one far above its usual,
+// or one that looks like abuse, still pages.
 func TestSpikeAlertFloor(t *testing.T) {
-	st := openTemp(t)
 	T := time.Date(2026, 10, 8, 12, 0, 0, 0, time.Local)
-	for d := 1; d <= 5; d++ {
-		for h := 0; h < 3; h++ {
-			if err := st.AddReport(T.Add(-time.Duration(d)*24*time.Hour+time.Duration(h)*time.Hour), localReport("shop", 4)); err != nil {
-				t.Fatal(err)
+	baseline := func(t *testing.T, r func(int) mailmeter.Report) *Store {
+		st := openTemp(t)
+		for d := 1; d <= 5; d++ {
+			for h := 0; h < 3; h++ {
+				if err := st.AddReport(T.Add(-time.Duration(d)*24*time.Hour+time.Duration(h)*time.Hour), r(4)); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
+		return st
 	}
-	if err := st.AddReport(T.Add(-time.Hour), localReport("shop", 37)); err != nil {
-		t.Fatal(err)
+	for _, kind := range []struct {
+		name, key string
+		r         func(int) mailmeter.Report
+	}{
+		{"script", "mail:script:shop", func(n int) mailmeter.Report { return localReport("shop", n) }},
+		{"mailbox", "mail:out:info@shop.gr", func(n int) mailmeter.Report { return outboundReport("info@shop.gr", n) }},
+	} {
+		t.Run(kind.name, func(t *testing.T) {
+			st := baseline(t, kind.r)
+			if err := st.AddReport(T.Add(-time.Hour), kind.r(37)); err != nil {
+				t.Fatal(err)
+			}
+			tr := newTracker()
+			if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 0 {
+				t.Fatalf("37 messages at ~4.6× is not an alert: %+v", fs)
+			}
+			if fs, _, _, _ := tr.evaluateWith(st, T, map[string]bool{kind.key: true}, nil); len(fs) != 1 {
+				t.Fatalf("an open spike is still judged below the floor: %+v", fs)
+			}
+			if err := st.AddReport(T.Add(-30*time.Minute), kind.r(30)); err != nil {
+				t.Fatal(err)
+			}
+			if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 1 || fs[0].Severity != "warning" {
+				t.Fatalf("67 messages is a (warning) alert: %+v", fs)
+			}
+		})
 	}
-	tr := newTracker()
-	if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 0 {
-		t.Fatalf("37 messages at ~9× is not an alert: %+v", fs)
+}
+
+// A quiet site hacked: 45 messages at 45× its usual is below the floor in
+// volume, not in ratio — it pages. So does a small spike sending as a
+// foreign domain.
+func TestSmallButAbusiveSpikesStillAlert(t *testing.T) {
+	a := Anomaly{Addr: "quiet", Recent: 45, Ratio: 45, Kind: "spike"}
+	if belowAlertFloor(a, Context{}, false) {
+		t.Fatal("45 at 45× must alert")
 	}
-	if fs, _, _, _ := tr.evaluateWith(st, T, map[string]bool{"mail:script:shop": true}, nil); len(fs) != 1 {
-		t.Fatalf("an open spike is still judged below the floor: %+v", fs)
+	mild := Anomaly{Addr: "shop", Recent: 37, Ratio: 4.6, Kind: "spike"}
+	if !belowAlertFloor(mild, Context{}, false) {
+		t.Fatal("37 at 4.6× with a clean context is not an alert")
 	}
-	if err := st.AddReport(T.Add(-30*time.Minute), localReport("shop", 30)); err != nil {
-		t.Fatal(err)
-	}
-	if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 1 {
-		t.Fatalf("67 messages is an alert: %+v", fs)
+	if belowAlertFloor(mild, Context{ForeignFrom: true}, false) || belowAlertFloor(mild, Context{CopiedTo: "owner@shop.gr"}, false) ||
+		belowAlertFloor(mild, Context{OtherFrom: true}, false) {
+		t.Fatal("a small spike that looks like abuse must alert")
 	}
 }

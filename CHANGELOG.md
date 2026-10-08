@@ -23,9 +23,11 @@ back-filled here — see the git/PR history for that period.
   Google Cloud) counted as logins from Russia and the US. Those networks now
   count as one source with no country, like Gmail / Outlook / Yahoo / iCloud
   (orion, 8 Oct: info@socialpower.gr, GR + RU + US, one owner).
-- **Fewer mail spike pages:** a volume spike alerts only from 50 messages in
-  2 h (`mail_traffic` still lists the smaller anomalies); 21 and 37 messages
-  at 4–5× a small sender's usual paged the channel for nothing.
+- **Fewer mail spike pages:** a MILD volume spike (under 50 messages in 2 h
+  and under 10× its usual, nothing abusive in its context) no longer alerts;
+  21 and 37 messages at 4–5× a small sender's usual paged the channel for
+  nothing. A small spike far above its usual (a quiet site hacked) or one
+  sending as a foreign domain / in the contact-form pattern still alerts.
 
 ## 2026.10.08
 
