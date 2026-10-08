@@ -593,6 +593,108 @@ do
   clean(post(form(f, FB_TOP)), "an undecodable header")
 end
 
+-- Review round 5.
+do
+  local function timed(c, label)
+    local t0 = os.clock()
+    local hit, reason, _, act = waf.check(c)
+    local dt = os.clock() - t0
+    check(dt < 0.2, string.format("%s is bounded (took %.3fs)", label, dt))
+    return hit, reason, act
+  end
+  -- Each field doubles the next one's placeholders: a 3.6 KB POST took 33 s
+  -- and 4.3 KB ran the worker out of memory with the 3-pass fill. Bounded now,
+  -- and an unresolvable part blocks (it is attacker-only).
+  local f = fb_fields("Cc: cdew@{{a1}}", "cdew@spam.example")
+  for i = 1, 40 do
+    f[#f + 1] = { "sppb-form-builder-field[a" .. i .. "]", "{{a" .. (i + 1) .. "}}{{a" .. (i + 1) .. "}}" }
+  end
+  local _, reason, act = timed(post(form(f, FB_TOP)), "a doubling placeholder chain")
+  check(reason == FB .. "CC_UNRESOLVED" and act == "block",
+        "a doubling chain is CC_UNRESOLVED/block (got " .. tostring(reason) .. "/" .. tostring(act) .. ")")
+  -- A value repeating its own placeholder: PHP replaces each field ONCE, so
+  -- it stays literal text (undeliverable); the 3-pass fill multiplied it.
+  f = fb_fields("Cc: cdew@{{a}}", "cdew@spam.example")
+  f[#f + 1] = { "sppb-form-builder-field[a]", string.rep("{{a}}", 150) }
+  local hit = timed(post(form(f, FB_TOP)), "a self-repeating placeholder")
+  check(hit ~= true, "a self-repeating placeholder is undeliverable, not flagged")
+  -- A deep honest-shaped chain still resolves like PHP.
+  f = fb_fields("Cc: cdew@{{c1}}", "cdew@spam.example")
+  for i = 1, 300 do f[#f + 1] = { "sppb-form-builder-field[c" .. i .. "]", "{{c" .. (i + 1) .. "}}" } end
+  f[#f + 1] = { "sppb-form-builder-field[c301]", "spam.example" }
+  local _, r2, a2 = timed(post(form(f, FB_TOP)), "a 300-field chain")
+  check(r2 == FB .. "CC_HAS_SUBMITTER" and a2 == "block", "a 300-field chain resolves (got " .. tostring(r2) .. ")")
+  -- A chain that grows past the cap and shrinks back to one address: PHP
+  -- mails it, so it must not be skipped as "too long".
+  f = fb_fields("Cc: cdew{{a}}@spam.example", "cdew@spam.example")
+  f[#f + 1] = { "sppb-form-builder-field[a]", string.rep("{{b}}", 300) }
+  f[#f + 1] = { "sppb-form-builder-field[b]", "" }
+  fb_is(post(form(f, FB_TOP)), "CC_UNRESOLVED", "block", "grow-then-shrink chain past the cap")
+  -- A field named with `}}`: the placeholder `{{a}}b}}` is invisible to the scan.
+  f = fb_fields("Cc: cdew@{{a}}b}}", "cdew@spam.example")
+  f[#f + 1] = { "sppb-form-builder-field[a}}b]", "spam.example" }
+  fb_is(post(form(f, FB_TOP)), "CC_UNRESOLVED", "block", "a field name holding }}")
+  -- Many placeholder parts share one step budget.
+  local cc = {}
+  for i = 1, 1500 do cc[#cc + 1] = "x" .. i .. "@{{d}}" end
+  f = fb_fields("Cc: " .. table.concat(cc, ","), "cdew@spam.example")
+  f[#f + 1] = { "sppb-form-builder-field[d]", string.rep("{{e}}", 150) }
+  f[#f + 1] = { "sppb-form-builder-field[e]", "y" }
+  timed(post(form(f, FB_TOP)), "1500 placeholder parts")
+end
+do
+  -- Decoys the edge used to read as the last value (PHP does not): every
+  -- candidate is checked now.
+  local inj = b64enc("Cc: cdew@spam.example")
+  local b = form(fb_fields("Cc: cdew@spam.example", "cdew@spam.example"), FB_TOP)
+  fb_is(post(b .. "&%09" .. enc("data[6][value]") .. "=" .. enc(b64enc("Reply-To: {{email}}"))),
+        "CC_HAS_SUBMITTER", "block", "a tab-led decoy key (PHP keeps it apart)")
+  local MP = "multipart/form-data; boundary=----B"
+  local function part(cd, v) return "------B\r\nContent-Disposition: form-data; " .. cd .. "\r\n\r\n" .. v .. "\r\n" end
+  local base = part('name="addon"', "form_builder") .. part('name="data[0][name]"', "x[email]")
+    .. part('name="data[0][value]"', "cdew@spam.example") .. part('name="data[1][name]"', "additional_header")
+    .. part('name="data[1][value]"', inj)
+  fb_is(post(base .. part('name="data[1][value]"; filename="a.txt"', b64enc("Reply-To: x")) .. "------B--\r\n", MP),
+        "CC_HAS_SUBMITTER", "block", "a later multipart file part (PHP files it under $_FILES)")
+  fb_is(post(base .. part('name="data[1][value]"; name="zz"', b64enc("Reply-To: x")) .. "------B--\r\n", MP),
+        "CC_HAS_SUBMITTER", "block", "a later part with two name= (PHP keeps the last)")
+  -- PHP's boundary: everything after the '=' that follows "boundary".
+  fb_is(post(base .. "------B--\r\n", "multipart/form-data; boundary =----B"),
+        "CC_HAS_SUBMITTER", "block", "boundary = with a space")
+  fb_is(post(base .. "------B--\r\n", "multipart/form-data; BOUNDARY=----B"),
+        "CC_HAS_SUBMITTER", "block", "upper-case BOUNDARY")
+  -- PHP picks the parser by the media type before ';': a parameter naming
+  -- multipart does not make a urlencoded body multipart.
+  fb_is(post(b, "application/x-www-form-urlencoded; x=multipart/form-data"),
+        "CC_HAS_SUBMITTER", "block", "urlencoded with a multipart-looking parameter")
+  fb_is(post(b, "application/x-www-form-urlencoded,text/plain"),
+        "CC_HAS_SUBMITTER", "block", "urlencoded media type cut at ','")
+  clean(post(b, "text/plain; x=application/x-www-form-urlencoded"), "a text/plain body is not $_POST")
+end
+do
+  -- A duplicate addon/option candidate cannot hide the real one.
+  local b = form(fb_fields("Cc: cdew@spam.example", "cdew@spam.example"), {})
+  fb_is(post(b .. "&option=com_sppagebuilder&addon=form_builder", UE, "addon=zz&option=com_x"),
+        "CC_HAS_SUBMITTER", "block", "query addon/option overridden by the body")
+end
+do
+  -- cfm.lua flags a cut body; no Content-Length needed.
+  local c = post(form(fb_fields("Reply-To: {{email}}", "guest@mail.example"), FB_TOP))
+  ngx.ctx = { cfm_waf_body_cut = true }
+  fb_is(c, "BODY_PAST_WINDOW", "logonly", "the edge's body-cut flag")
+  ngx.ctx = nil
+  -- A finding in the window outranks the unread rest.
+  c = post(form(fb_fields("Reply-To: {{email}}\nCc: {{email}}", "victim@spam.example"), FB_TOP))
+  c.headers["Content-Length"] = tostring(#c.body + 40000)
+  fb_is(c, "CC_PLACEHOLDER", "logonly", "CC_PLACEHOLDER outranks BODY_PAST_WINDOW")
+end
+do
+  -- `contact_email` is as often a department select: not the visitor's email.
+  local f = fb_fields("Reply-To: {{email}}\nBcc: boss@gmail.com", "guest@mail.example")
+  f[#f + 1] = { "sppb-form-builder-field[contact_email]", "boss@gmail.com" }
+  clean(post(form(f, FB_TOP)), "a contact_email select equal to the saved Bcc")
+end
+
 -- ── Disabled ────────────────────────────────────────────────────────────────
 waf.set_rule("rule_form_relay_sppb_contact", "disabled")
 clean(post(form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"))), "rule disabled")

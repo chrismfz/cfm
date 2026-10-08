@@ -3859,11 +3859,16 @@ end
 -- URL can supply `option` instead, so only a DIFFERENT explicit option rules
 -- the request out) and the form as data[N][name] / data[N][value] pairs. The
 -- request is read the way PHP and Joomla read it:
---   * from the query string, then a urlencoded or multipart body ($_REQUEST,
---     POST wins), each key LAST-wins;
+--   * from the query string, then a body PHP parses (picked by the media type
+--     before the first ';', ',' or space: urlencoded or multipart, the
+--     boundary found as rfc1867.c finds it);
 --   * keys are case-SENSITIVE (`DATA[0][VALUE]` or `ADDON` is another key),
---     cut at a NUL, leading spaces dropped, anything after the second `]`
---     ignored; a multipart part's name comes from its Content-Disposition only;
+--     cut at a NUL, leading SPACES dropped, anything after the second `]`
+--     ignored; a multipart part's names come from its Content-Disposition;
+--   * PHP keeps a key's LAST value; the edge keeps EVERY value a key gets and
+--     checks each (a file part, a doubled `name=` or a repeated key is one more
+--     candidate), so a decoy the edge reads differently from PHP can add a
+--     candidate but never hide the real one. Same for `addon` and `option`;
 --   * `option` / `addon` go through Joomla's CMD filter (only [A-Za-z0-9_.-]
 --     kept, leading dots dropped) before they are compared. The controller
 --     reads `addon` through the STRING filter (strips tags) for the class name
@@ -3874,8 +3879,8 @@ end
 --     can produce; form_builder's form FIELDS are the rows PHP turns into
 --     $fieldNames (a `[name]` in the row name, or `policy`), nothing else.
 --
--- Tags (the caller enforces only the two *_HAS_SUBMITTER tags; every other tag
--- is clamped to logonly):
+-- Tags (the caller enforces SPPB_ENFORCED_TAGS: the two *_HAS_SUBMITTER tags
+-- and CC_UNRESOLVED; every other tag is clamped to logonly):
 -- ajax_contact
 --   RECIPIENT_HAS_SUBMITTER — the decoded recipient list holds 2+ addresses,
 --     one of them is the submitted `email`, and no other address in the list
@@ -3898,6 +3903,11 @@ end
 --     so a domain clause there was a bypass. The accepted false positive: an
 --     owner who hardcoded `Cc: boss@site` and tests the form AS boss@site gets
 --     a 403 for that one submission (autoblock is held).
+--   CC_UNRESOLVED — a Cc/Bcc part with an address written outside its
+--     placeholders whose fill exceeds the bounds (SPPB_PART_MAX bytes at any
+--     step, SPPB_FILL_STEPS per request, or a field named with `}}`). Only a
+--     crafted form gets there: blocked rather than skipped, because a chain
+--     can grow past the cap and shrink back to one address.
 --   CC_PLACEHOLDER — a Cc/Bcc part made only of `{{field}}` placeholders, at
 --     least one naming a real field (`Cc: {{email}}, {{friend}}` too): the site copies every submission to what the
 --     visitor typed (relay by configuration, the titan case). Measurement only,
@@ -3905,16 +3915,19 @@ end
 --   A literal Cc/Bcc nobody typed (an owner's saved `Bcc: boss@gmail`) is the
 --     normal case and is not tagged, so the log is not flooded with honest
 --     submissions.
---   BODY_PAST_WINDOW — no tampering found and the body's Content-Length
---     exceeds what the edge handed the WAF (waf_body_max_len): a row, or a
+--   BODY_PAST_WINDOW — nothing else found and the body was cut at
+--     waf_body_max_len (cfm.lua's ngx.ctx.cfm_waf_body_cut, or a
+--     Content-Length beyond what the edge handed over): a row, or a
 --     later duplicate of one (PHP keys are last-wins), may sit past the window
 --     (form_builder posts its header AFTER the visitor's fields). Measurement
 --     only. Not for a multipart form_builder body, whose uploads overflow the
 --     window legitimately.
 -- Every pattern here runs on attacker-sized input, so each scan is linear
--- (plain finds and single-class gmatch): the first version's `X+@X+`,
--- `%[...%]`, `{{.-}}` and `%s+$` were quadratic, and one ~30 KB POST stalled
--- an nginx worker for 2-10 s. The Lua test pins each case under 0.2 s.
+-- (plain finds and single-class gmatch) and the placeholder fill is bounded
+-- (see CC_UNRESOLVED): the first version's `X+@X+`, `%[...%]`, `{{.-}}` and
+-- `%s+$` were quadratic, and one ~30 KB POST stalled an nginx worker for
+-- 2-10 s; a later multi-pass fill was exponential (3.6 KB, 33 s). The Lua
+-- test pins each case under 0.2 s.
 -- Residuals (not blocked): the configured `Cc: {{email}}` relay itself (fix
 -- the form), and a bot that WRITES a pure `Cc: {{email}}` into a form that had
 -- none (it looks the same; logged as CC_PLACEHOLDER); a single replaced
@@ -3947,18 +3960,18 @@ local function php_b64_decode(v)
   return nil
 end
 
--- Linear trim: every input here is attacker-sized, and an unanchored
--- `%s+$` is quadratic on a long space run that does not reach the end (a
--- 23K-space value stalled a worker for seconds). Trims PHP trim()'s set
--- (space, \t, \n, \r, \v, \0 and \f via %s).
+-- Trim without a backtracking pattern: every input here is attacker-sized,
+-- and an unanchored `%s+$` is quadratic on a long space run that does not
+-- reach the end (a 23K-space value stalled a worker for seconds). Trims PHP
+-- trim()'s set exactly: space, \t, \n, \r, \v and \0 (not \f).
 local function sppb_trim(s)
   s = s or ""
-  local a = s:find("[^%s%z]")
+  local a = s:find("[^ \t\n\r\v%z]")
   if not a then return "" end
   local b = #s
   while b > a do
     local c = s:byte(b)
-    if c ~= 32 and c ~= 0 and (c < 9 or c > 13) then break end
+    if c ~= 32 and c ~= 0 and (c < 9 or c > 13 or c == 12) then break end
     b = b - 1
   end
   return s:sub(a, b)
@@ -3974,27 +3987,45 @@ local function joomla_cmd(v)
   return lower(t)
 end
 
--- One decoded request key → rows[idx][field] = value (last wins), or the
--- top-level option/addon. Case-sensitive, as PHP array keys are.
+local function add_unique(list, seen, v)
+  if not seen[v] then
+    seen[v] = true
+    list[#list + 1] = v
+  end
+end
+
+-- One decoded request key → a candidate for rows[idx].names / .values, or for
+-- the top-level option/addon sets. Case-sensitive, as PHP array keys are.
+-- EVERY value a key receives is kept, not just the last: PHP keeps the last,
+-- but where the edge's reading of a key could differ from PHP's (a multipart
+-- part PHP files under $_FILES, a doubled `name=`), a decoy written after the
+-- real value would otherwise replace it here and hide it. The checks run on
+-- every candidate, so a decoy can add one but never remove one. An honest
+-- form sends each key once.
 local function sppb_put(k, v, rows, top)
   local z = k:find("\0", 1, true)
   if z then k = k:sub(1, z - 1) end
-  k = k:gsub("^%s+", "")
+  -- PHP drops leading SPACES only (a tab-led key is another key).
+  local a = k:find("[^ ]")
+  k = a and k:sub(a) or ""
   local idx, field = k:match("^data%[([^%]]*)%]%[(%a+)%]")
   if idx and (field == "name" or field == "value") then
     local row = rows[idx]
     if not row then
-      row = {}
+      row = { names = {}, values = {}, seen_n = {}, seen_v = {} }
       rows[idx] = row
-      -- PHP keeps an array in first-insertion order; a later duplicate key
-      -- overwrites in place. form_builder's last-wins fields follow it.
+      -- PHP keeps an array in first-insertion order; form_builder's
+      -- $fieldNames (and so its fill order) follows it.
       local order = top._order
       if not order then order = {}; top._order = order end
       order[#order + 1] = idx
     end
-    row[field] = v
+    if field == "name" then add_unique(row.names, row.seen_n, v)
+    else add_unique(row.values, row.seen_v, v) end
   elseif k == "addon" or k == "option" then
-    top[k] = joomla_cmd(v)
+    local set = top[k]
+    if not set then set = {}; top[k] = set end
+    set[joomla_cmd(v)] = true
   end
 end
 
@@ -4006,13 +4037,27 @@ local function sppb_collect_pairs(s, rows, top)
   end
 end
 
--- Multipart: split on the boundary once (linear in the body). The field name
--- comes from the part's Content-Disposition header only (never `filename=`);
--- the value is the whole part body (PHP keeps every line; the base64 decoder
--- skips the CR/LF).
+-- PHP's multipart boundary (rfc1867.c): the first "boundary" in the
+-- Content-Type (case-sensitive, then case-insensitive), then everything after
+-- the next '=': a quoted value up to the closing quote, else up to ',' or ';'
+-- (spaces kept verbatim).
+local function sppb_boundary(ct)
+  local s = ct:find("boundary", 1, true) or lower(ct):find("boundary", 1, true)
+  local eq = s and ct:find("=", s + 8, true)
+  if not eq then return nil end
+  local v = ct:sub(eq + 1)
+  if v:sub(1, 1) == '"' then
+    return v:match('^"([^"]*)"')
+  end
+  return v:match("^[^,;]*")
+end
+
+-- Multipart: split on the boundary once (linear in the body). The field names
+-- come from the parts' Content-Disposition headers (every `name=` there is a
+-- candidate; `filename=` is never one); the value is the whole part body (PHP
+-- keeps every line; the base64 decoder skips the CR/LF).
 local function sppb_collect_multipart(b, ct_raw, rows, top)
-  local bnd = ct_raw:match('[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]="([^"]+)"')
-              or ct_raw:match("[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]=([^;%s]+)")
+  local bnd = sppb_boundary(ct_raw)
   if not bnd or bnd == "" then return end
   local delim = "--" .. bnd
   local _, e = b:find(delim, 1, true)
@@ -4021,22 +4066,25 @@ local function sppb_collect_multipart(b, ct_raw, rows, top)
     local part = b:sub(e + 1, (nxt or #b + 1) - 1)
     local hs, he = part:find("\r?\n\r?\n")
     if hs then
-      local name
+      local names = {}
       for line in part:sub(1, hs):gmatch("[^\r\n]+") do
-        if lower(line):match("^%s*content%-disposition%s*:") then
+        local lp = lower(line)
+        if lp:match("^%s*content%-disposition%s*:") then
           -- the parameter is matched case-insensitively, its value verbatim
-          local lp = lower(line)
-          local _, ne = lp:find("[;%s]name%s*=%s*")
-          if ne then
-            name = line:match('^"([^"]*)"', ne + 1) or line:match("^'([^']*)'", ne + 1)
-                   or line:match("^([^;%s]+)", ne + 1)
+          local i = 1
+          while true do
+            local _, ne = lp:find("[;%s]name%s*=%s*", i)
+            if not ne then break end
+            local name = line:match('^"([^"]*)"', ne + 1) or line:match("^'([^']*)'", ne + 1)
+                         or line:match("^([^;%s]+)", ne + 1)
+            if name then names[#names + 1] = name end
+            i = ne + 1
           end
-          break
         end
       end
-      if name then
+      if #names > 0 then
         local v = part:sub(he + 1):gsub("\r?\n$", "")
-        sppb_put(name, v, rows, top)
+        for _, name in ipairs(names) do sppb_put(name, v, rows, top) end
       end
     end
     if not nxt then break end
@@ -4052,22 +4100,24 @@ end
 -- mail domain.
 local function sppb_addrs(dec, per_domain)
   -- Tokens between separators, kept when an '@' sits inside them (not first,
-  -- not last). Linear: `X+@X+` backtracked quadratically on a long run with
-  -- an '@' at its end (a 23 KB `aaaa…@` took seconds per request).
+  -- not last). Single-class gmatch: `X+@X+` backtracked quadratically on a
+  -- long run with an '@' at its end (a 23 KB `aaaa…@` took seconds).
   local addrs = {}
   for tok in lower(dec):gmatch("[^%s,;<>\"'%z]+") do
     local at = tok:find("@", 2, true)
     if at and at < #tok then
       addrs[#addrs + 1] = tok
-      local d = addr_domain(tok)
-      per_domain[d] = (per_domain[d] or 0) + 1
+      if per_domain then
+        local d = addr_domain(tok)
+        per_domain[d] = (per_domain[d] or 0) + 1
+      end
     end
   end
   return addrs
 end
 
--- `{{name}}` placeholders, scanned linearly with plain finds (a lazy `{{.-}}`
--- is quadratic on many `{{` with no `}}`). Returns the text outside the
+-- `{{name}}` placeholders, scanned with plain finds (a lazy `{{.-}}` is
+-- quadratic on many `{{` with no `}}`). Returns the text outside the
 -- placeholders and the list of names; an unterminated `{{` is literal text,
 -- as in PHP's str_replace, which only replaces a complete `{{name}}`.
 local function sppb_placeholders(s)
@@ -4085,33 +4135,79 @@ local function sppb_placeholders(s)
   return table.concat(lit), names
 end
 
--- Fill the placeholders from `fields` the way the addon does: PHP runs one
--- str_replace per field in posting order, so a value carrying `{{other}}` is
--- filled again by a later field. Each pass here is linear; three passes cover
--- that chaining (an over-approximation only an attacker's input can reach).
-local function sppb_fill(s, fields)
-  for _ = 1, 3 do
-    local out, i, changed = {}, 1, false
-    while true do
-      local o = s:find("{{", i, true)
-      if not o then break end
-      local c = s:find("}}", o + 2, true)
-      if not c then break end
-      local v = fields[s:sub(o + 2, c - 1)]
-      out[#out + 1] = s:sub(i, o - 1)
-      if v ~= nil then
-        out[#out + 1] = v
-        changed = true
-      else
-        out[#out + 1] = s:sub(o, c + 1)
-      end
-      i = c + 2
-    end
-    if not changed then return s end
-    out[#out + 1] = s:sub(i)
-    s = table.concat(out)
+-- The fill below is bounded, not linear. A Cc/Bcc part longer than this,
+-- before or during the fill, cannot be one address PHPMailer accepts (an
+-- address is at most 254 bytes), and a fill that needs more steps than the
+-- request budget was built to: both are attacker-only, so the part is
+-- reported UNRESOLVED (enforced) instead of being skipped. Skipping would be
+-- a bypass: a chain can grow past the cap and shrink back to one address.
+local SPPB_PART_MAX = 1024
+local SPPB_FILL_STEPS = 2000
+
+-- PHP's str_replace(needle, val, s), aborted once the result passes the cap.
+local function sppb_replace(s, needle, val)
+  local out, n, i = {}, 0, 1
+  while true do
+    local o = s:find(needle, i, true)
+    if not o then break end
+    out[#out + 1] = s:sub(i, o - 1)
+    out[#out + 1] = val
+    n = n + (o - i) + #val
+    if n > SPPB_PART_MAX then return nil end
+    i = o + #needle
   end
-  return s
+  if i == 1 then return s end
+  out[#out + 1] = s:sub(i)
+  if n + (#s - i + 1) > SPPB_PART_MAX then return nil end
+  return table.concat(out)
+end
+
+-- The earliest field (by $fieldNames position) after `cur` whose complete
+-- `{{name}}` occurs in s. Every `{{` is a start (overlaps included, as
+-- str_replace finds `{{b}}` inside `{{a{{b}}`); the closing `}}` is shared by
+-- all starts before it, so the scan stays linear.
+local function sppb_next_field(s, cur, pos)
+  local best, i, c = nil, 1, nil
+  while true do
+    local o = s:find("{{", i, true)
+    if not o then break end
+    if not c or c < o + 2 then
+      c = s:find("}}", o + 2, true)
+      if not c then break end
+    end
+    local p = pos[s:sub(o + 2, c - 1)]
+    if p and p > cur and (not best or p < best) then best = p end
+    i = o + 1
+  end
+  return best
+end
+
+-- Does some fill of part s (PHP: one str_replace per field, in $fieldNames
+-- order) produce an address in `submitted`? A field that received more than
+-- one candidate value (see sppb_put) is tried with each. Fields between `cur`
+-- and the next one present in s cannot change it, so only those are stepped.
+-- Returns true (hit), false, or nil when the bounds above were hit, or when
+-- a field name holds `}}` (the scan cannot see `{{a}}b}}` as one placeholder;
+-- no honest field is named that way).
+local function sppb_fill_hits(s, cur, ctx)
+  ctx.steps = ctx.steps + 1
+  if ctx.odd or ctx.steps > SPPB_FILL_STEPS or #s > SPPB_PART_MAX then return nil end
+  local p = sppb_next_field(s, cur, ctx.pos)
+  if not p then
+    for _, a in ipairs(sppb_addrs(s)) do
+      if ctx.submitted[a] then return true end
+    end
+    return false
+  end
+  local name = ctx.order[p]
+  local needle = "{{" .. name .. "}}"
+  for _, v in ipairs(ctx.vals[name]) do
+    local r = sppb_replace(s, needle, v)
+    if not r then return nil end
+    local hit = sppb_fill_hits(r, p, ctx)
+    if hit ~= false then return hit end
+  end
+  return false
 end
 
 -- One decoded form_builder additional_header as the addon parses it: split on
@@ -4133,13 +4229,15 @@ end
 local function sppb_ajax_contact(rows)
   local recipients, emails = {}, {}
   for _, row in pairs(rows) do
-    if row.name and row.value then
-      local nm = trim_lower(row.name)
-      if nm == "recipient" then
-        recipients[#recipients + 1] = row.value
-      elseif nm == "email" then
-        local em = trim_lower(row.value)
-        if em ~= "" then emails[em] = true end
+    for _, n in ipairs(row.names) do
+      local nm = trim_lower(n)
+      for _, v in ipairs(row.values) do
+        if nm == "recipient" then
+          recipients[#recipients + 1] = v
+        elseif nm == "email" then
+          local em = trim_lower(v)
+          if em ~= "" then emails[em] = true end
+        end
       end
     end
   end
@@ -4185,25 +4283,34 @@ end
 -- The addon splits the header into lines FIRST and fills each {{field}} in the
 -- extracted Cc/Bcc value afterwards (and Joomla strips CR/LF from recipients),
 -- so a typed newline cannot add a line: only the decoded template is parsed.
--- Field names that read as "the visitor's email" (compared with everything but
--- letters and digits removed): email, e-mail, your_email, email-address, ...
+-- Field names that mean "the visitor's own email" (compared with everything
+-- but letters and digits removed): email, e-mail, your_email, email-address,
+-- your-email-address. Deliberately narrow: `contact_email`, `user_email` or
+-- `mail` is as often a department select holding a staff address the saved
+-- Bcc also mails, which would read as tampering.
 local SPPB_EMAIL_FIELDS = {
-  ["email"] = true, ["mail"] = true, ["youremail"] = true, ["emailaddress"] = true,
-  ["youremailaddress"] = true, ["useremail"] = true, ["contactemail"] = true,
+  ["email"] = true, ["youremail"] = true, ["emailaddress"] = true,
+  ["youremailaddress"] = true,
 }
 
 local function sppb_form_builder(rows, top)
-  local hdrs, fields = {}, {}
-  -- PHP array order (first appearance), so a duplicate field is last-wins
-  -- exactly as $fieldNames is.
+  local hdrs, order, pos, vals, seen, odd = {}, {}, {}, {}, {}, false
   for _, idx in ipairs(top._order or {}) do
     local row = rows[idx]
-    if row.name and row.value then
-      if trim_lower(row.name) == "additional_header" then
-        hdrs[#hdrs + 1] = row.value
+    for _, n in ipairs(row.names) do
+      if trim_lower(n) == "additional_header" then
+        for _, v in ipairs(row.values) do hdrs[#hdrs + 1] = v end
       else
-        local f = sppb_field_name(row.name)
-        if f then fields[f] = row.value end
+        local f = sppb_field_name(n)
+        if f then
+          if not pos[f] then
+            if f:find("}}", 1, true) then odd = true end
+            order[#order + 1] = f
+            pos[f] = #order
+            vals[f], seen[f] = {}, {}
+          end
+          for _, v in ipairs(row.values) do add_unique(vals[f], seen[f], v) end
+        end
       end
     end
   end
@@ -4222,7 +4329,7 @@ local function sppb_form_builder(rows, top)
   -- switch the check off. A select or pre-filled field named otherwise (even
   -- department-email) is not typed input.
   local email_fields = {}
-  for f in pairs(fields) do
+  for f in pairs(vals) do
     if SPPB_EMAIL_FIELDS[lower(f):gsub("[^%w]", "")] then email_fields[f] = true end
   end
   for _, kv in ipairs(lines) do
@@ -4233,10 +4340,13 @@ local function sppb_form_builder(rows, top)
   end
   local submitted = {}
   for f in pairs(email_fields) do
-    local v = fields[f] and trim_lower(fields[f])
-    if v and v:find("@", 1, true) then submitted[v] = true end
+    for _, v in ipairs(vals[f] or {}) do
+      v = trim_lower(v)
+      if v:find("@", 1, true) then submitted[v] = true end
+    end
   end
-  local placeholder = false
+  local ctx = { steps = 0, order = order, pos = pos, vals = vals, submitted = submitted, odd = odd }
+  local placeholder, unresolved = false, false
   for _, kv in ipairs(lines) do
     if kv[1] == "cc" or kv[1] == "bcc" then
       -- Each comma/semicolon part on its own: only a part with an address
@@ -4246,21 +4356,35 @@ local function sppb_form_builder(rows, top)
       for part in (kv[2] .. ","):gmatch("([^,;]*)[,;]") do
         local literal, names = sppb_placeholders(part)
         if literal:find("@", 1, true) then
-          for _, a in ipairs(sppb_addrs(sppb_fill(part, fields), {})) do
-            if submitted[a] then return "CC_HAS_SUBMITTER" end
+          if #names == 0 then
+            -- Nothing to fill (the common injected shape): compare directly,
+            -- whatever its length (an over-long part is undeliverable anyway).
+            for _, a in ipairs(sppb_addrs(part)) do
+              if submitted[a] then return "CC_HAS_SUBMITTER" end
+            end
+          else
+            local hit = sppb_fill_hits(part, 0, ctx)
+            if hit then return "CC_HAS_SUBMITTER" end
+            if hit == nil then unresolved = true end
           end
         elseif not literal:find("[^%s%z]") then
           -- Only placeholders: a relay when one names a real field.
           for _, k in ipairs(names) do
-            if fields[k] ~= nil then placeholder = true end
+            if pos[k] then placeholder = true end
           end
         end
       end
     end
   end
+  if unresolved then return "CC_UNRESOLVED" end
   if placeholder then return "CC_PLACEHOLDER" end
   return nil
 end
+
+local SPPB_ENFORCED = {
+  RECIPIENT_HAS_SUBMITTER = true, CC_HAS_SUBMITTER = true, CC_UNRESOLVED = true,
+}
+_M.SPPB_ENFORCED_TAGS = SPPB_ENFORCED
 
 -- Returns the addon tag ("SPPB_AJAX_CONTACT" / "SPPB_FORM_BUILDER") and the
 -- finding tag, or nil.
@@ -4280,42 +4404,51 @@ function _M.detect_sppb_contact_relay(args, body, headers, _nab)
 
   -- The whole surface the edge handed over (cfm.lua already caps the body at
   -- waf_body_max_len): a message padded past the generic scan budget must not
-  -- hide the row. Linear: one pass per source, last-wins rows.
+  -- hide the row. One pass per source.
   local rows, top = {}, {}
   sppb_collect_pairs(args, rows, top)
   local ct_raw = header_string(headers and (headers["Content-Type"] or headers["content-type"])) or ""
-  local multipart = has(lower(ct_raw), "multipart/form-data")
+  -- PHP picks the body parser by the media type alone: lowercased, up to the
+  -- first ';', ',' or space (so `multipart/form-data, x` is still multipart).
+  local media = lower(ct_raw):match("^[ \t]*([^;, ]*)")
+  local multipart = media == "multipart/form-data"
   if body and body ~= "" then
     if multipart then
       sppb_collect_multipart(body, ct_raw, rows, top) -- the boundary is case-sensitive
-    elseif has(lower(ct_raw), "application/x-www-form-urlencoded") then
+    elseif media == "application/x-www-form-urlencoded" then
       sppb_collect_pairs(body, rows, top)
     end
   end
-  local which, check
-  if top.addon == "ajax_contact" then
-    which, check = "SPPB_AJAX_CONTACT", sppb_ajax_contact
-  elseif top.addon == "form_builder" then
-    which, check = "SPPB_FORM_BUILDER", sppb_form_builder
-  else
-    return nil
-  end
   -- An explicit other component routes elsewhere (the SEF router only DEFAULTS
   -- `option`); an absent one may come from the page URL.
-  if top.option and top.option ~= "com_sppagebuilder" then return nil end
-
-  local tag = check(rows, top)
-  -- Tampering found in the window: that is the answer.
-  if tag == "RECIPIENT_HAS_SUBMITTER" or tag == "CC_HAS_SUBMITTER" then return which, tag end
-  -- The body was cut at waf_body_max_len: a row, or a later duplicate of one
-  -- (PHP keys are last-wins), may sit past the window, so log that the rest
-  -- went unread even when an earlier row looked clean. Not for a multipart
-  -- form_builder body, whose uploads overflow the window legitimately.
+  if top.option and not top.option["com_sppagebuilder"] then return nil end
+  local addons = top.addon or {}
+  local which, tag
+  for _, a in ipairs({
+    { addons["ajax_contact"], "SPPB_AJAX_CONTACT", sppb_ajax_contact },
+    { addons["form_builder"], "SPPB_FORM_BUILDER", sppb_form_builder },
+  }) do
+    if a[1] then
+      local t = a[3](rows, top)
+      -- Tampering found in the window: that is the answer.
+      if t and SPPB_ENFORCED[t] then return a[2], t end
+      if not which or (t and not tag) then which, tag = a[2], t end
+    end
+  end
+  if not which then return nil end
+  if tag then return which, tag end
+  -- Nothing found, but the body was cut at waf_body_max_len: a row, or a
+  -- later duplicate of one (PHP keys are last-wins), may sit past the window.
+  -- cfm.lua flags the cut (ngx.ctx.cfm_waf_body_cut); Content-Length covers a
+  -- caller that does not. Not for a multipart form_builder body, whose uploads
+  -- overflow the window legitimately.
   if which == "SPPB_AJAX_CONTACT" or not multipart then
     local cl = tonumber(header_string(headers and (headers["Content-Length"] or headers["content-length"])) or "")
-    if cl and cl > #(body or "") then return which, "BODY_PAST_WINDOW" end
+    local ctx = ngx and ngx.ctx
+    if (cl and cl > #(body or "")) or (ctx and ctx.cfm_waf_body_cut) then
+      return which, "BODY_PAST_WINDOW"
+    end
   end
-  if tag then return which, tag end
   return nil
 end
 

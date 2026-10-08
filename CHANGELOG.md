@@ -24,8 +24,11 @@ back-filled here — see the git/PR history for that period.
   match. One ~30 KB POST carrying `addon=ajax_contact`, sent to any site on the
   edge (not only SP Page Builder ones), held an nginx worker for about 7
   seconds; a few per second could tie up every worker. Every scan in the rule
-  is now linear: the same request takes 0.06 s, and a test pins each crafted
-  case under 0.2 s. Until this release is installed, you can turn the rule off
+  is now bounded: the same request takes 0.06 s, and a test pins each crafted
+  case under 0.2 s. That includes filling a form_builder `Cc:` line's
+  `{{field}}` placeholders, which a chain of fields could grow exponentially:
+  the fill now follows PHP exactly under a fixed size and step limit, and a
+  line that exceeds it is blocked, since no honest form needs one. Until this release is installed, you can turn the rule off
   with `rule_form_relay_sppb_contact = "disabled"` in
   `/etc/cfm/cfm_waf_config.lua`.
 
@@ -41,7 +44,9 @@ back-filled here — see the git/PR history for that period.
   sites still configured that way. It blocks only clear tampering on SP Page
   Builder <= 3.8.3: a form_builder `Cc:`/`Bcc:` address written into the
   header that equals one the visitor typed, or an ajax_contact recipient list
-  holding it. A bot that writes a plain `Cc: {{email}}` into a form is still
+  holding it. When the edge and PHP could read a request's fields differently
+  (a duplicated field, a file part), every reading is checked, so a decoy
+  value can't hide the real one. A bot that writes a plain `Cc: {{email}}` into a form is still
   only logged, because it looks the same as that setting. The quick pre-check
   no longer needs the literal text `ajax_contact`, which a bot could avoid
   with `addon=ajax_<>contact` while Joomla still ran the addon. Autoblock for

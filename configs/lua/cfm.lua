@@ -537,13 +537,19 @@ local function get_req_body_for_waf(uri, method, max_len)
   ngx.req.read_body()
   local data = ngx.req.get_body_data()
   if data and data ~= "" then
-    local result = (#data > max_len) and string.sub(data, 1, max_len) or data
+    local result = data
+    -- Rule 520 logs a body it could not read whole (BODY_PAST_WINDOW).
+    if #data > max_len then result = string.sub(data, 1, max_len); ngx.ctx.cfm_waf_body_cut = true end
     ngx.ctx.waf_body = result; return result
   end
   local body_file = ngx.req.get_body_file()
   if body_file and body_file ~= "" then
     local f = io.open(body_file, "rb")
-    if f then local chunk = f:read(max_len) or ""; f:close(); ngx.ctx.waf_body = chunk; return chunk end
+    if f then
+      local chunk = f:read(max_len) or ""
+      if f:read(1) then ngx.ctx.cfm_waf_body_cut = true end
+      f:close(); ngx.ctx.waf_body = chunk; return chunk
+    end
   end
   ngx.ctx.waf_body = ""; return ""
 end

@@ -59,7 +59,7 @@ import (
 // before arming. The CVE's `pagename` leg is rule 10017, under WAF_CVE, armed.
 //
 // WAF_FORM_RELAY (rule 520, SP Page Builder contact-form mail relays,
-// 2026-10-06, reworked 2026-10-08) ships at edge-`block` for its two tampering
+// 2026-10-06, reworked 2026-10-08) ships at edge-`block` for its tampering
 // tags only, but its family is HELD at 0 like any newly block-promoted family.
 // The edge 403 already stops the mail; the ban only adds persistence. A
 // residual false positive exists (an owner testing a form with an address the

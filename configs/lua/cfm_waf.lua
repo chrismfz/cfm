@@ -123,7 +123,8 @@ local CFG = {
   rule_form_relay_sppb_contact = "block", -- 520: Joomla SP Page Builder contact-form mail relay (<= 3.8.3, settings posted
                                          -- as plain base64). Blocks only tampering: an ajax_contact recipient LIST holding the
                                          -- submitted email, or a form_builder Cc/Bcc address written into the header that equals
-                                         -- one the visitor typed. Every other tag (CC_PLACEHOLDER = the site's own
+                                         -- one the visitor typed (or a Cc/Bcc whose placeholders cannot be filled within
+                                         -- bounds, CC_UNRESOLVED: attacker-only). Every other tag (CC_PLACEHOLDER = the site's own
                                          -- `Cc: {{email}}` relay, MULTI_RECIPIENT, BODY_PAST_WINDOW) is clamped to logonly at
                                          -- the call site. See detect_sppb_contact_relay.
 
@@ -1130,17 +1131,17 @@ function _M.check(ctx)
   -- ── 3l2) SP Page Builder contact-form mail relay (rule 520) ────────────────
   -- ajax_contact mails the base64 `recipient` and form_builder adds the Cc/Bcc
   -- lines of the base64 `additional_header`, both as posted by the client (on
-  -- <= 3.8.3). Every method: Joomla reads the form from $_REQUEST. Only the two
-  -- tampering tags (RECIPIENT_HAS_SUBMITTER, CC_HAS_SUBMITTER) take the rule's
-  -- mode; the rest are measurement, clamped to logonly like rule 612's in-app
-  -- tag. CC_PLACEHOLDER is the site's own `Cc: {{email}}` setting: an honest
+  -- <= 3.8.3). Every method: Joomla reads the form from $_REQUEST. Only the
+  -- tampering tags (det.SPPB_ENFORCED_TAGS: RECIPIENT_HAS_SUBMITTER,
+  -- CC_HAS_SUBMITTER, CC_UNRESOLVED) take the rule's mode; the rest are
+  -- measurement, clamped to logonly like rule 612's in-app tag. CC_PLACEHOLDER is the site's own `Cc: {{email}}` setting: an honest
   -- visitor's submission looks the same, so it can only be logged.
   do
     local mode = rule_mode(CFG.rule_form_relay_sppb_contact, "block")
     if mode ~= "disabled" then
       local which, tag = det.detect_sppb_contact_relay(args, body, headers, get_norm_ab())
       if which then
-        local enforce = (tag == "RECIPIENT_HAS_SUBMITTER" or tag == "CC_HAS_SUBMITTER")
+        local enforce = det.SPPB_ENFORCED_TAGS[tag] == true
         local eff_mode = enforce and mode or "logonly"
         local ttl = (eff_mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_FORM_RELAY:" .. which .. ":" .. tag, ttl, eff_mode, RULE_IDS.rule_form_relay_sppb_contact) then goto done end
