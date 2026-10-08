@@ -39,15 +39,17 @@ nothing.
 | `backup_stale` | critical | no **successful** run for longer than the job's period × 1.5 + 2 h (Proxmox: `BACKUP_PROXMOX_STALE`, 8 d). A job is not judged before its own history (or, for Virtualmin, its schedule file) is that old |
 | `backup_stuck` | critical | a run still going after `BACKUP_STUCK_AFTER` (24 h), measured from that run's own start |
 | `backup_uncovered` | warning | Proxmox guests in no backup job, reported only by the node that hosts them (one finding; re-published when a NEW guest joins the set) |
-| `backup_dest` | critical (Proxmox storage offline) / warning (< `BACKUP_DEST_FREE_PCT` free: Proxmox storage, JetBackup destination) | a backup destination the jobs use; Virtualmin destinations are not checked |
-| `backup_no_job` | warning | JetBackup with no enabled account-backup job, or Virtualmin with no enabled schedule (a job disabled during an incident and forgotten) |
+| `backup_dest` | critical (Proxmox storage offline) / warning (< `BACKUP_DEST_FREE_PCT` free: Proxmox storage, JetBackup destination) | a backup destination the jobs use; Virtualmin destinations are not checked. A **shared** Proxmox storage (NFS, PBS) is reported by one node only — the lexically first online node of the cluster (`/cluster/status`) — not by every node |
+| `backup_no_job` | warning | JetBackup with no enabled account-backup job, Virtualmin with no enabled schedule (a job disabled during an incident and forgotten), or a Proxmox node that hosts guests but runs no enabled vzdump job (`pve:nojob:<node>`) |
 | `backup_check_error` | warning | an installed backup system could not be read on **two checks in a row**, or the check itself hung — "unknown", never "healthy" |
-| `backup_recovered` | info | a finding above is gone (the next run succeeded, the CLI reads again, the hung check finished). Same `key` as the finding it resolves; cfm-web closes that alert with it (unpins it, stops its reminders, posts RESOLVED) |
+| `backup_recovered` | info | a finding above is gone. Same `key` as the finding it resolves; cfm-web closes that alert with it (unpins it, stops its reminders, posts RESOLVED). The message says why: "backup OK again" (the next run succeeded), "now failed: …" (the same job has another finding now — partial → failed, failed → stuck), "job disabled / job removed — no longer checked", "backup state readable again", "backup check finished again", or "<adapter> is no longer on this node" (absent for 24 h) |
 
 Keys are per job / schedule / node / storage (`jb:failed:<job>`,
 `vm:stale:<schedule>`, `pve:partial:<node>`, …), never per run: a job that
 fails every night is ONE open alert (pinned and reminded by cfm-web), not one
-a night. Publishing is edge-triggered per key:
+a night. One job / node also has ONE per-run alert at a time: only its worst of
+stuck > failed > stale > partial is published (a failing job that also goes
+stale stays one alert, `backup_failed`). Publishing is edge-triggered per key:
 once when it appears, again when its severity rises (a full storage that goes
 offline) or a set gains a member, and re-armed when it is gone — announced as
 `backup_recovered` under the same key (kept armed until that is delivered). While an
@@ -56,13 +58,24 @@ again). A key the check could not judge this time (a side read failed, the whole
 panicked, an adapter briefly absent) also stays armed. The edge state is
 process-wide and saved to `/var/lib/cfm/backup_published.json`, so neither the
 detector rebuilds that follow a `detectors.conf` save or a log rotation nor a
-daemon restart (every package upgrade) re-announce what is already open.
+daemon restart (every package upgrade) re-announce what is already open. That
+file also holds the hung-check alert (so a restart, the remedy for a hung CLI,
+still resolves it) and when each adapter was last present. The "two checks in a
+row" count for `backup_check_error` is in memory: after a restart an
+open error is kept as it is until the adapter reads again, never resolved by
+the restart itself. A JetBackup job the check cannot judge (it ran recently,
+but no run of it is in the log history read) keeps ITS keys armed; the other
+jobs are judged as usual (it used to turn the whole adapter into an error).
 
 **Delivery depends on the webdetector history store**: the findings reach
 cfm-web as `detection_history` rows written through the node-fault sink the
 webdetector registers. A node running without the webdetector, or with its
-history off, records nothing (the publish is retried and never marked sent
-without a sink).
+history off, records nothing. A finding (or recovery) is marked sent only
+when the history row was actually written: no sink, no history store or a
+failed INSERT leaves it armed and it is retried on the next check. The rows
+(`backup_*`, like `mail_*`) are never returned to a scoped (cPanel) caller of
+`history/events`, whose scope may include the server hostname they are
+written under.
 
 ## Reading it
 

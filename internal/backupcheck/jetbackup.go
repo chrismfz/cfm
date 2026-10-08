@@ -125,9 +125,10 @@ func checkJetBackup(run cmdFunc, now time.Time, th Thresholds) AdapterStatus {
 		st.Error = "listLogs: " + err.Error()
 		return st
 	}
-	jobs, findings, err := evalJetBackup(jobsOut, logsOut, now, th)
+	jobs, findings, unknown, err := evalJetBackup(jobsOut, logsOut, now, th)
 	st.Jobs = jobs
 	st.Findings = findings
+	st.Unknown = unknown
 	if err != nil {
 		st.Error = err.Error()
 	}
@@ -153,15 +154,20 @@ func decodeJB(raw []byte, field string, into any) error {
 }
 
 // evalJetBackup is the pure evaluation over the two API responses.
-func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []Job, _ []Finding, err error) {
+//
+// unknown lists the finding keys of jobs this check could not judge (a job that
+// has run recently but has no run in the log history read): kept armed,
+// neither raised nor resolved — one such job must not turn the whole adapter
+// into an error and freeze every other job's findings.
+func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []Job, _ []Finding, unknown []string, err error) {
 	th = th.withDefaults()
 	var jobs []jbJob
 	if err := decodeJB(jobsRaw, "jobs", &jobs); err != nil {
-		return nil, nil, fmt.Errorf("listBackupJobs %w", err)
+		return nil, nil, nil, fmt.Errorf("listBackupJobs %w", err)
 	}
 	var logs []jbLog
 	if err := decodeJB(logsRaw, "logs", &logs); err != nil {
-		return nil, nil, fmt.Errorf("listLogs %w", err)
+		return nil, nil, nil, fmt.Errorf("listLogs %w", err)
 	}
 	var total int
 	_ = decodeJB(logsRaw, "total", &total)
@@ -201,7 +207,6 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 
 	var out []Job
 	var findings []Finding
-	var unknownJobs []string
 	seenDest := map[string]bool{}
 	enabledAccountJobs := 0
 	for _, j := range jobs {
@@ -306,7 +311,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 					Message: fmt.Sprintf("%s: has not run since %s", label, lr.UTC().Format(time.RFC3339)),
 				})
 			case ok || !complete:
-				unknownJobs = append(unknownJobs, j.Name)
+				unknown = append(unknown, "jb:failed:"+j.ID, "jb:partial:"+j.ID, "jb:stale:"+j.ID)
 			}
 		}
 
@@ -326,9 +331,6 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 			}
 		}
 	}
-	if len(unknownJobs) > 0 {
-		err = fmt.Errorf("no run on record in the %d log entries read (of %d) for job(s) that have run: %s", len(logs), total, strings.Join(unknownJobs, ", "))
-	}
 	if enabledAccountJobs == 0 {
 		findings = append(findings, Finding{
 			Type: TypeNoJob, Severity: SevWarning, Adapter: "jetbackup",
@@ -336,7 +338,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 			Message: fmt.Sprintf("JetBackup is installed but no account backup job is enabled (%d job(s) configured)", len(jobs)),
 		})
 	}
-	return out, findings, err
+	return out, findings, unknown, nil
 }
 
 // jbPeriod is the gap a job's schedule leaves between runs: measured from its

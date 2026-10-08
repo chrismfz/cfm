@@ -95,7 +95,55 @@ func checkProxmox(run cmdFunc, node string, now time.Time, th Thresholds) Adapte
 	if err != nil {
 		st.Error = err.Error()
 	}
+	// A shared storage (NFS, PBS) is the same for every node: one node reports
+	// it, not all of them. Best effort: without the cluster status every node does.
+	if cs, cerr := get("/cluster/status"); cerr == nil {
+		st.Findings, st.Unknown = dropSharedDestElsewhere(node, storage, cs, st.Findings, st.Unknown)
+	}
 	return st
+}
+
+// dropSharedDestElsewhere keeps a shared storage's finding only on the
+// reporting node: the lexically first ONLINE node of the cluster. On the
+// others the finding is dropped but its key kept armed (unknown), so an alert
+// this node raised before still closes only when the storage is fine again.
+func dropSharedDestElsewhere(node string, storageRaw, statusRaw []byte, fs []Finding, unknown []string) ([]Finding, []string) {
+	var storages []struct {
+		Storage string `json:"storage"`
+		Shared  jbFlex `json:"shared"`
+	}
+	var status []struct {
+		Type   string `json:"type"`
+		Name   string `json:"name"`
+		Online jbFlex `json:"online"`
+	}
+	if json.Unmarshal(storageRaw, &storages) != nil || json.Unmarshal(statusRaw, &status) != nil {
+		return fs, unknown
+	}
+	reporter := ""
+	for _, n := range status {
+		if n.Type == "node" && n.Online.truthy() && (reporter == "" || n.Name < reporter) {
+			reporter = n.Name
+		}
+	}
+	if reporter == "" || reporter == node {
+		return fs, unknown
+	}
+	shared := map[string]bool{}
+	for _, s := range storages {
+		if s.Shared.truthy() {
+			shared["pve:dest:"+s.Storage] = true
+		}
+	}
+	out := fs[:0]
+	for _, f := range fs {
+		if shared[f.Key] {
+			unknown = append(unknown, f.Key)
+			continue
+		}
+		out = append(out, f)
+	}
+	return out, unknown
 }
 
 // evalProxmox is the pure evaluation over the four pvesh responses.
@@ -171,6 +219,25 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resou
 	}
 
 	var findings []Finding
+
+	// Guests live here but no enabled job runs here: nothing backs them up.
+	// (A node hosting no guest needs no job; without the resource list it is
+	// not judged.)
+	if active == 0 {
+		hosted := 0
+		for _, n := range hostOf {
+			if n == node {
+				hosted++
+			}
+		}
+		if hosted > 0 {
+			findings = append(findings, Finding{
+				Type: TypeNoJob, Severity: SevWarning, Adapter: "proxmox",
+				Key:     "pve:nojob:" + node,
+				Message: fmt.Sprintf("no enabled vzdump job runs on %s, which hosts %d guest(s)", node, hosted),
+			})
+		}
+	}
 
 	// Runs, newest first by end (running ones last).
 	sort.SliceStable(tasks, func(a, b int) bool { return tasks[a].EndTime > tasks[b].EndTime })

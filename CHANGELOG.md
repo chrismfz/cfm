@@ -46,6 +46,36 @@ back-filled here — see the git/PR history for that period.
   /64), or a home plus a VPN (many addresses need 5+ outside the main
   country).
 
+
+### Fixed
+- **Backup alerts: no more duplicates or false "OK again"** (review of the
+  backup check). One job is one alert: only the worst of stuck / failed /
+  stale / partial is published, so a failing job no longer also pages
+  `backup_stale` a day later. A change of state (partial → failed, failed →
+  stuck) resolves the old alert as "now failed: …", not "backup OK again". A
+  disabled or removed job says so. A restart no longer resolves and re-opens
+  an open `backup_check_error`, and a hung-check alert resolves after a
+  restart. An adapter gone for 24 h (uninstalled) resolves its alerts. One
+  JetBackup job with no logged run no longer freezes every other job behind a
+  `backup_check_error`. A shared Proxmox storage is reported by one node, not
+  all. New: `backup_no_job` for a Proxmox node hosting guests with no enabled
+  vzdump job.
+- **Node faults are marked sent only once stored.** With no history store or
+  a failed write a finding or recovery was marked delivered and lost; it is
+  now retried. Same for the mail-abuse findings.
+- **Mail-abuse alerts (review of #1556).** A new sender pages critical only
+  from 200 messages in 2 h and settles after 6 h at a steady volume (it used
+  to stay open forever). The script directory is the sending user's own (a
+  busy node pointed at another tenant's site). The contact-form pattern no
+  longer matches a site mailing only its owner. Greek and Cyrillic subjects
+  in legacy charsets decode. `whats_wrong` shows alerts still open in
+  cfm-web and ignores a check that stopped running.
+- **Security: scoped history.** `history/events` never returns `mail_*` or
+  `backup_*` rows to a scoped (cPanel) caller, even with the server hostname
+  in scope.
+- `frontend_working` is `unknown`, not `none`, when no edge is found and the
+  DNAT state cannot be read.
+
 ## 2026.10.08
 
 ### Added

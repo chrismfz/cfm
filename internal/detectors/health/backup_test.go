@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -150,7 +151,8 @@ func TestPublishBackupRecoveryWaitsForASink(t *testing.T) {
 
 func TestRecoveredMessageFallsBackToTheKey(t *testing.T) {
 	// a state file from before backup_recovered carries no message
-	if got := recoveredMessage("jb:stale:x", publishedBackup{}); got != "backup OK again (was: jb:stale:x)" {
+	jobs := map[string]backupcheck.Job{"jetbackup:x": {ID: "x"}}
+	if got := (&backupState{}).resolvedMessage("jb:stale:x", publishedBackup{Adapter: "jetbackup"}, nil, jobs); got != "backup OK again (was: jb:stale:x)" {
 		t.Fatalf("got %q", got)
 	}
 	if got := recoveredMessage("jetbackup:error", publishedBackup{Message: "cannot read"}); got != "backup state readable again (was: cannot read)" {
@@ -371,5 +373,144 @@ func TestHungBackupCheckResolvesWhenItFinishes(t *testing.T) {
 	d.tickBackup(now.Add(backupHungAfter+3*time.Minute), "orion")
 	if evs := rec.take(); len(evs) != 1 || evs[0].Type != TypeBackupRecovered || evs[0].Key != hungKey {
 		t.Fatalf("want the hung check resolved, got %+v", evs)
+	}
+}
+
+// Review of the merged backup check (#1551–#1554): each case used to page or
+// resolve wrongly.
+
+func restartBackupState() { backup = &backupState{} } // the state file stays
+
+func TestUnreadableAdapterDoesNotFlapAcrossARestart(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true})
+	now := time.Now()
+	broken := status(backupcheck.AdapterStatus{Name: "jetbackup", Error: "exit 1"})
+	d.publishBackup(broken, "orion", now)
+	d.publishBackup(broken, "orion", now)
+	if evs := rec.take(); len(evs) != 1 || evs[0].Type != TypeBackupCheckError {
+		t.Fatalf("want the error after two checks: %+v", evs)
+	}
+	restartBackupState()
+	d.publishBackup(broken, "orion", now.Add(time.Hour))
+	if evs := rec.take(); len(evs) != 0 {
+		t.Fatalf("a restart must neither resolve nor repeat a still-open error: %+v", evs)
+	}
+	d.publishBackup(broken, "orion", now.Add(2*time.Hour))
+	if evs := rec.take(); len(evs) != 0 {
+		t.Fatalf("still broken, still open, nothing new: %+v", evs)
+	}
+}
+
+func TestEscalationIsNotAnnouncedAsOK(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true})
+	now := time.Now()
+	partial := backupcheck.Finding{Type: backupcheck.TypePartial, Severity: "info", Adapter: "proxmox", Key: "pve:partial:vega", Message: "job errors"}
+	failed := backupcheck.Finding{Type: backupcheck.TypeFailed, Severity: "critical", Adapter: "proxmox", Key: "pve:failed:vega", Message: "3 runs with job errors"}
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{partial}}), "vega", now)
+	rec.take()
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{failed}}), "vega", now)
+	evs := rec.take()
+	if len(evs) != 2 {
+		t.Fatalf("want the failure and the partial closing: %+v", evs)
+	}
+	for _, ev := range evs {
+		if ev.Type == TypeBackupRecovered && (strings.Contains(ev.Message, "OK again") || !strings.HasPrefix(ev.Message, "now failed")) {
+			t.Fatalf("partial → failed is not 'OK again': %q", ev.Message)
+		}
+	}
+}
+
+func TestOneJobOneAlert(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true})
+	failed := backupcheck.Finding{Type: backupcheck.TypeFailed, Severity: "critical", Adapter: "jetbackup", Key: "jb:failed:J", Message: "failed"}
+	stale := backupcheck.Finding{Type: backupcheck.TypeStale, Severity: "critical", Adapter: "jetbackup", Key: "jb:stale:J", Message: "no success for 2d"}
+	stuck := backupcheck.Finding{Type: backupcheck.TypeStuck, Severity: "critical", Adapter: "jetbackup", Key: "jb:stuck:J", Message: "running 16d"}
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Findings: []backupcheck.Finding{failed, stale}}), "orion", time.Now())
+	if evs := rec.take(); len(evs) != 1 || evs[0].Key != "jb:failed:J" {
+		t.Fatalf("a failing job that also went stale is ONE alert (failed): %+v", evs)
+	}
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Findings: []backupcheck.Finding{stuck, stale}}), "orion", time.Now())
+	evs := rec.take()
+	if len(evs) != 2 || evs[0].Key != "jb:stuck:J" || evs[1].Type != TypeBackupRecovered || !strings.HasPrefix(evs[1].Message, "now stuck") {
+		t.Fatalf("stuck supersedes failed (and stale): %+v", evs)
+	}
+}
+
+func TestHungCheckResolvesAfterARestart(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true, BackupEvery: time.Minute})
+	block := make(chan struct{})
+	orig := backupCheckFunc
+	backupCheckFunc = func(ctx context.Context, o backupcheck.Options) backupcheck.Status {
+		<-block
+		return status()
+	}
+	now := time.Now()
+	d.tickBackup(now, "orion")
+	running := backup // the state the check goroutine reports back to
+	t.Cleanup(func() {
+		close(block)
+		// let both check goroutines (before and after the restart) finish
+		// before restoring the hook
+		for _, st := range []*backupState{running, backup} {
+			for {
+				st.mu.Lock()
+				done := !st.running
+				st.mu.Unlock()
+				if done {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
+		backupCheckFunc = orig
+	})
+	d.tickBackup(now.Add(backupHungAfter+time.Minute), "orion")
+	if evs := rec.take(); len(evs) != 1 || evs[0].Key != hungKey {
+		t.Fatalf("want the hung alert: %+v", evs)
+	}
+	// restart (the daemon is restarted to unstick the CLI); the next check finishes
+	restartBackupState()
+	backup.pending = &backupcheck.Status{CheckedAt: now}
+	d.tickBackup(now.Add(2*backupHungAfter), "orion")
+	if evs := rec.take(); len(evs) == 0 || evs[0].Key != hungKey || evs[0].Type != TypeBackupRecovered {
+		t.Fatalf("the hung alert must resolve after a restart: %+v", evs)
+	}
+}
+
+func TestUninstalledAdapterResolvesAfterADay(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true})
+	now := time.Now()
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Findings: []backupcheck.Finding{failedRun}}), "orion", now)
+	rec.take()
+	d.publishBackup(status(), "orion", now.Add(time.Hour)) // briefly gone: proves nothing
+	if evs := rec.take(); len(evs) != 0 {
+		t.Fatalf("an hour without the CLI resolves nothing: %+v", evs)
+	}
+	d.publishBackup(status(), "orion", now.Add(25*time.Hour))
+	if evs := rec.take(); len(evs) != 1 || evs[0].Type != TypeBackupRecovered || !strings.Contains(evs[0].Message, "no longer on this node") {
+		t.Fatalf("gone for a day: resolved as uninstalled: %+v", evs)
+	}
+}
+
+func TestRemovedOrDisabledJobIsNotOK(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true})
+	f := backupcheck.Finding{Type: backupcheck.TypeFailed, Severity: "critical", Adapter: "jetbackup", Key: "jb:failed:J", Message: "failed"}
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Jobs: []backupcheck.Job{{ID: "J"}}, Findings: []backupcheck.Finding{f}}), "orion", time.Now())
+	rec.take()
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Jobs: []backupcheck.Job{{ID: "J", Disabled: true}}}), "orion", time.Now())
+	if evs := rec.take(); len(evs) != 1 || !strings.HasPrefix(evs[0].Message, "job disabled") {
+		t.Fatalf("a disabled job is not 'OK again': %+v", evs)
 	}
 }

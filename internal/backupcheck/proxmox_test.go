@@ -186,3 +186,36 @@ func TestProxmoxJobErrorsEveryNightGoesStale(t *testing.T) {
 		t.Fatalf("10 nights of job errors and no clean run: want stale, got %+v", fs)
 	}
 }
+
+// Review of the merged check: a shared storage is reported by one node of the
+// cluster (the first online one), not every node.
+func TestSharedStorageIsReportedOnce(t *testing.T) {
+	storage := []byte(`[{"storage":"pbs","shared":1},{"storage":"local","shared":0}]`)
+	status := []byte(`[{"type":"cluster","name":"c"},{"type":"node","name":"vega","online":1},{"type":"node","name":"antares","online":0},{"type":"node","name":"bootes","online":1}]`)
+	fs := []Finding{{Key: "pve:dest:pbs"}, {Key: "pve:dest:local"}}
+	out, unknown := dropSharedDestElsewhere("vega", storage, status, append([]Finding(nil), fs...), nil)
+	if len(out) != 1 || out[0].Key != "pve:dest:local" || len(unknown) != 1 || unknown[0] != "pve:dest:pbs" {
+		t.Fatalf("vega is not the reporter (bootes is; antares is offline): %+v %v", out, unknown)
+	}
+	if out, _ := dropSharedDestElsewhere("bootes", storage, status, append([]Finding(nil), fs...), nil); len(out) != 2 {
+		t.Fatalf("the reporter keeps it: %+v", out)
+	}
+}
+
+// Guests live on the node but no enabled job runs there.
+func TestProxmoxNoJobForAHostingNode(t *testing.T) {
+	jobs := `[{"id":"backup-1","enabled":0,"schedule":"02:00","storage":"pbs"}]`
+	resources := `[{"vmid":101,"node":"vega"},{"vmid":102,"node":"bootes"}]`
+	_, fs, _, err := evalProxmox("vega", []byte(jobs), []byte(`[]`), []byte(`[]`), []byte(`[]`), []byte(resources), vegaNow, Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := byType(fs)[TypeNoJob]; f.Key != "pve:nojob:vega" || !strings.Contains(f.Message, "1 guest") {
+		t.Fatalf("want backup_no_job for vega: %+v", fs)
+	}
+	// a node hosting nothing needs no job
+	_, fs, _, _ = evalProxmox("antares", []byte(jobs), []byte(`[]`), []byte(`[]`), []byte(`[]`), []byte(resources), vegaNow, Thresholds{})
+	if byType(fs)[TypeNoJob].Type != "" {
+		t.Fatalf("no guests, no job needed: %+v", fs)
+	}
+}
