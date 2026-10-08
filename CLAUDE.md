@@ -464,7 +464,8 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   real submission byte for byte — see `docs/waf.md`.) A held RULE can also
   ship in code: `heldAutoblockRules` in `waf_security_register.go` is the
   default for a `RULE_<id>` key, so the hold reaches configs that predate the
-  rule (10019, the TranslatePress id-lookup leg). The rendered `[waf_security]` template is derived from
+  rule (10019 and 10020, the TranslatePress id-lookup leg and the
+  logged-in reset-preview request). The rendered `[waf_security]` template is derived from
   the same code defaults, so a fresh `detectors.conf` lists exactly these.
 - **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
   default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and

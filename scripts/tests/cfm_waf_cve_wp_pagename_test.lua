@@ -78,6 +78,7 @@ fires(get("/", "pagename=templates%2F..%2F..%2Fplaceholder"), "percent-encoded s
 fires(get("/", "pagename=templates/%2e%2e/%2E%2E/placeholder"), "percent-encoded dots (mixed case)", ARG)
 fires(get("/", "pagename=templates/%252e%252e/placeholder"), "double-encoded dots", ARG)
 fires(get("/", "pagename=templates%5c..%5cplaceholder"), "backslash separators", ARG)
+fires(get("/", "pagename%00z=templates/../../placeholder"), "NUL-cut name (PHP ends the name at NUL)", ARG)
 fires(get("/", "pagename=templates/.."), "trailing .. segment", ARG)
 fires(get("/", "page%6eame=templates/../../placeholder"), "percent-encoded key (PHP decodes keys)", ARG)
 fires(get("/", "pagename=a%26/../../placeholder"), "%26 inside the value cannot split it", ARG)

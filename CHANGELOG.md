@@ -18,20 +18,29 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
-- **WAF rules 10018/10019 block the TranslatePress account takeover
+- **WAF rules 10018/10019/10020 block the TranslatePress account takeover
   (CVE-2026-19632, TranslatePress 3.3.1 and older; fixed in 3.3.2).** An
   attacker asks for the admin's password reset in translation preview, so the
   plugin stores the reset mail, key included, as a translatable string. They
   then read it back through an AJAX action that answers anyone. Seen on titan
   on 2026-10-08 (villadimitramykonos.com). Rule 10018 blocks the reset request
-  (`trp-edit-translation` on a lost-password request). No legitimate request
-  carries it: the fleet's retained edge logs show the attack and nothing else.
-  It is armed: a 6 h ban and a `WAF/CVE-2026-19632` alert. Rule 10019 blocks
+  (`trp-edit-translation` on a lost-password request); the fleet's retained
+  edge logs show the attack and nothing else. It is armed: a 6 h ban and a
+  `WAF/CVE-2026-19632` alert. The plugin's editor preview adds that parameter
+  to every form, so the same request from a logged-in user, most likely a
+  translator, is filed as rule 10020: still a 403, but no ban. Rule 10019 blocks
   the read-back (`trp_get_translations_regular` with `string_ids` and no
   WordPress login). Its ban is held in code (`RULE_10019 = 1` arms it), because
   a translator whose login expired with the editor open sends the same request.
   Updating the plugin is still the fix: an admin whose own language is a
   secondary site language has the mail stored without the preview trick.
+
+### Fixed
+- **WAF rules that match a request parameter by name now read the name the way
+  PHP does.** PHP ends a name at a NUL byte and turns `.`, a space or an
+  unmatched `[` into `_`, so `pagename%00x=…` reached WordPress as `pagename`
+  while rule 10017 (CVE-2026-87902) did not see it. Rule 10017 and the new
+  TranslatePress rules now match those forms.
 
 ### Changed
 - **WAF rule 520 only measures SP Page Builder contact-form relays; it no

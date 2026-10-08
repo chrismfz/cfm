@@ -185,12 +185,16 @@ var wafRuleIDs = []WAFRule{
 	// 10017: CVE-2026-87902, WordPress core page-template traversal — a
 	// `pagename` query var (GET or POST) carrying a `..` segment. Armed.
 	{ID: 10017, Name: "rule_cve_wp_pagename_traversal", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
-	// 10018 / 10019: CVE-2026-19632, TranslatePress <= 3.3.1 unauth account
-	// takeover. 10018 = `trp-edit-translation` on a password-reset request
-	// (armed); 10019 = unauthenticated trp_get_translations_regular with
-	// string_ids (edge block, autoblock held per rule in heldAutoblockRules).
+	// 10018 / 10019 / 10020: CVE-2026-19632, TranslatePress <= 3.3.1 unauth
+	// account takeover. 10018 = `trp-edit-translation` on a password-reset
+	// request without a WordPress login (armed); 10020 = the same request WITH
+	// one (a translator in the editor preview, which adds the parameter to
+	// every form); 10019 = unauthenticated trp_get_translations_regular with
+	// string_ids. 10019 and 10020 block at the edge with their autoblock held
+	// in code (heldAutoblockRules).
 	{ID: 10018, Name: "rule_cve_translatepress_reset_preview", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10019, Name: "rule_cve_translatepress_id_lookup", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	{ID: 10020, Name: "rule_cve_translatepress_reset_preview_authed", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

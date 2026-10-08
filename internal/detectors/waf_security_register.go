@@ -77,10 +77,15 @@ var heldAutoblockFamilies = map[string]struct{}{
 // 10019 (CVE-2026-19632, TranslatePress id lookup): the edge 403 needs no
 // hold, but a translator whose WordPress login expired while the editor was
 // open sends the same request without the login cookie, and a 6 h ban of the
-// office IP is the wrong answer to that. 10018, the reset-preview leg, stays
-// armed: no legitimate request carries it.
+// office IP is the wrong answer to that.
+//
+// 10020 (the same CVE's reset-preview request WITH a WordPress login cookie):
+// TranslatePress's editor preview adds `trp-edit-translation` to every form,
+// so a translator submitting a lost-password form there sends it. 10018, the
+// request without a login, stays armed.
 var heldAutoblockRules = map[string]int{
 	"10019": 0,
+	"10020": 0,
 }
 
 func wafSecurityRuleOverrides(kv KV) map[string]int {
@@ -98,7 +103,8 @@ func wafSecurityRuleOverrides(kv KV) map[string]int {
 		if id == "" {
 			continue
 		}
-		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+		// cleanScalar: an inline `; note` must not silently keep the code hold.
+		if n, err := strconv.Atoi(cleanScalar(v)); err == nil {
 			overrides[id] = n
 		}
 	}

@@ -251,7 +251,8 @@ local CFG = {
   rule_cve_gravity_smtp = "block", -- CVE-2026-4020: Gravity SMTP (<=2.1.4) unauth sensitive-info exposure. REST route /gravitysmtp/v1/tests/mock-data has permission_callback=true and dumps the full System Report (PHP/DB/server versions, paths, plugins, API keys/tokens). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate — the only legit caller is the wp-admin settings screen, which carries the logged-in cookie.
   rule_cve_sppagebuilder_upload = "block", -- CVE-2026-48908: Joomla SP Page Builder (com_sppagebuilder) asset.upload* (uploadCustomIcon/uploadImage/uploadFont) — unauth arbitrary file upload->RCE ("ANTONKILL", actively exploited 2026-07). Runs before rules 401/414 for CVE attribution. Keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content); reuses the hardened upload detectors. Near-zero FP (a legit icon/image/font upload never carries PHP). Body-budget caveat: a php entry past waf_body_max_len is ClamAV's backstop.
   rule_cve_wp_pagename_traversal = "block", -- CVE-2026-87902 (GHSA-7hp8-65ch-5whp): WordPress core 4.7.0–7.1.1 unauth page-template path traversal. get_page_template() builds page-{$pagename}.php from the url-decoded `pagename` query var without the `..` check, so a readable local .php outside the theme gets included (RCE via pearcmd.php when register_argc_argv=On). Fires on a `pagename` value (query string, urlencoded or multipart POST — WP reads $_POST first) holding a `..` segment; a real pagename is a slug path and never does (near-zero FP). The pretty-permalink route (path -> pagename) is rule 103. Armed like every WAF_CVE block rule: 6h ban + WAF/CVE-2026-87902 alert.
-  rule_cve_translatepress_reset_preview = "block", -- CVE-2026-19632 (TranslatePress <= 3.3.1, fixed 3.3.2): `trp-edit-translation` on a password-reset request (wp-login.php lostpassword/retrievepassword, or a POST with user_login) forces translation preview so the reset mail — key included — is stored as a translatable string. TranslatePress's own preview strips the parameter from wp-login links; the only fleet sighting (09-15..10-08) is the titan attack. Armed: 6h ban + WAF/CVE-2026-19632 alert.
+  rule_cve_translatepress_reset_preview = "block", -- CVE-2026-19632 (TranslatePress <= 3.3.1, fixed 3.3.2): `trp-edit-translation` on a password-reset request (wp-login.php lostpassword/retrievepassword, or WooCommerce's lost-password POST) forces translation preview so the reset mail — key included — is stored as a translatable string. Its one legitimate source is the editor preview, which adds it to every form; a hit with a WordPress login cookie is filed under id 10020 (same mode, autoblock held in code), one without under 10018 (armed: 6h ban + WAF/CVE-2026-19632 alert). Fleet sightings 09-15..10-08: the titan attack only.
+  rule_cve_translatepress_reset_preview_authed = "block", -- CVE-2026-19632, 10018's request WITH a WordPress login cookie: most likely a translator submitting a lost-password form inside the editor preview (the preview adds the parameter to every form). Edge 403 only; autoblock held in code (RULE_10020 = 0) so the translator is not banned.
   rule_cve_translatepress_id_lookup = "block", -- CVE-2026-19632 second leg: unauthenticated action=trp_get_translations_regular with string_ids reads stored strings back by id. Only the logged-in editor (trp-editor.js) sends string_ids; gated on no wordpress_logged_in_ cookie (FP filter, a junk cookie bypasses it). Edge block; autoblock held per rule (RULE_10019 = 0): a translator whose login expired mid-session would otherwise be banned.
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
 
@@ -653,6 +654,7 @@ local RULE_IDS = {
   rule_cve_elementor_pro_form_upload = 10016,
   rule_cve_wp_pagename_traversal = 10017,
   rule_cve_translatepress_reset_preview = 10018,
+  rule_cve_translatepress_reset_preview_authed = 10020,
   rule_cve_translatepress_id_lookup = 10019,
 }
 
@@ -1406,14 +1408,21 @@ function _M.check(ctx)
   end
 
   -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018 / 10019) ──
-  -- Every method: WordPress reads both legs from $_REQUEST.
+  -- Every method. 10018/10020 read $_REQUEST like WordPress; 10019 also takes
+  -- the query string although get_translations() reads $_POST (a harmless
+  -- over-match). 10020 is the logged-in split of 10018's detector, with its
+  -- own mode and its ban held in code.
   do
-    local mode = rule_mode(CFG.rule_cve_translatepress_reset_preview, "block")
-    if mode ~= "disabled" then
-      local tag = det.detect_cve_translatepress_reset_preview(m_lower, args, body, headers, get_norm_ab())
-      if tag then
+    local mode_anon = rule_mode(CFG.rule_cve_translatepress_reset_preview, "block")
+    local mode_auth = rule_mode(CFG.rule_cve_translatepress_reset_preview_authed, "block")
+    if mode_anon ~= "disabled" or mode_auth ~= "disabled" then
+      local tag, logged_in = det.detect_cve_translatepress_reset_preview(m_lower, args, body, headers, cookie, get_norm_ab())
+      local mode = logged_in and mode_auth or mode_anon
+      if tag and mode ~= "disabled" then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:" .. tag, ttl, mode, RULE_IDS.rule_cve_translatepress_reset_preview) then goto done end
+        local id = logged_in and RULE_IDS.rule_cve_translatepress_reset_preview_authed
+                   or RULE_IDS.rule_cve_translatepress_reset_preview
+        if record("WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:" .. tag, ttl, mode, id) then goto done end
       end
     end
   end

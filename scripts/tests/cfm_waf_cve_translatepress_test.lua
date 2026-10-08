@@ -35,6 +35,8 @@ end
 local cfg = waf.get_config()
 check(cfg.rule_cve_translatepress_reset_preview == "block",
       "rule_cve_translatepress_reset_preview ships at block (got " .. tostring(cfg.rule_cve_translatepress_reset_preview) .. ")")
+check(cfg.rule_cve_translatepress_reset_preview_authed == "block",
+      "rule_cve_translatepress_reset_preview_authed ships at block")
 check(cfg.rule_cve_translatepress_id_lookup == "block",
       "rule_cve_translatepress_id_lookup ships at block (got " .. tostring(cfg.rule_cve_translatepress_id_lookup) .. ")")
 
@@ -65,10 +67,13 @@ local function multipart(fields)
   return table.concat(b), "multipart/form-data; boundary=----WebKitFormBoundaryX"
 end
 
-local function fires(c, label, want)
-  local hit, reason, _, action = waf.check(c)
+local function fires(c, label, want, want_id)
+  local hit, reason, _, action, _, id = waf.check(c)
   check(hit == true and action == "block", label .. " — blocks (got hit=" .. tostring(hit) .. " action=" .. tostring(action) .. ")")
   check(reason == want, label .. " — reason=" .. want .. " (got " .. tostring(reason) .. ")")
+  if want_id then
+    check(id == want_id, label .. " — rule id " .. want_id .. " (got " .. tostring(id) .. ")")
+  end
 end
 local function clean(c, label)
   local hit, reason = waf.check(c)
@@ -76,13 +81,22 @@ local function clean(c, label)
 end
 
 -- ═══ Rule 10018 — reset request in translation preview ══════════════════════
-set_only({ rule_cve_translatepress_reset_preview = "block" })
+set_only({ rule_cve_translatepress_reset_preview = "block", rule_cve_translatepress_reset_preview_authed = "block" })
 local LOST = "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:LOSTPASSWORD"
-local FORM = "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:RESET_FORM"
+local FORM = "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:WC_LOSTPASSWORD"
+local LOGIN_COOKIE = "wordpress_logged_in_0123abcd=editor%7C1791%7Cx"
 
 fires(post("/wp-login.php", "action=lostpassword&trp-edit-translation=preview",
            "user_login=admin&redirect_to=&wp-submit=Get+New+Password"),
-      "the titan request (POST lostpassword, preview in the query)", LOST)
+      "the titan request (POST lostpassword, preview in the query)", LOST, 10018)
+fires(post("/wp-login.php", "action=lostpassword&trp-edit-translation=preview",
+           "user_login=admin&wp-submit=Get+New+Password", UE, LOGIN_COOKIE),
+      "a logged-in translator submitting the form in preview — filed under 10020 (ban held)", LOST, 10020)
+-- PHP's variable-name rewriting (php_register_variable_ex): NUL ends the name.
+fires(post("/wp-login.php", "action=lostpassword&trp-edit-translation%00x=preview", "user_login=admin"),
+      "NUL-cut parameter name", LOST)
+fires(post("/wp-login.php", "trp-edit-translation=preview", "action%00x=lostpassword&user_login=admin"),
+      "NUL-cut action name", LOST)
 fires(get("/wp-login.php", "action=lostpassword&trp-edit-translation=preview"),
       "GET of the lost-password form in preview", LOST)
 fires(post("/wp-login.php", "action=retrievepassword&trp-edit-translation=true", "user_login=admin"),
@@ -104,6 +118,9 @@ end
 fires(post("/my-account/lost-password/", "trp-edit-translation=preview",
            "user_login=admin&wc_reset_password=true&woocommerce-lost-password-nonce=abc"),
       "WooCommerce lost-password form in preview", FORM)
+fires(post("/my-account/lost-password/", "trp-edit-translation=preview",
+           "user.login=admin&wc_reset_password=true"),
+      "WooCommerce form with user.login (PHP: user_login)", FORM)
 
 clean(get("/wp-login.php", "action=lostpassword"), "plain lost-password form")
 clean(post("/wp-login.php", "action=lostpassword", "user_login=admin&wp-submit=Get+New+Password"),
@@ -113,6 +130,10 @@ clean(get("/", "trp-edit-translation=true"), "translation editor home")
 clean(get("/wp-login.php", "action=logout&trp-edit-translation=preview"), "logout in preview (not a reset)")
 clean(post("/contact/", "trp-edit-translation=preview", "your-name=A&your-email=a%40b.gr"),
       "a contact form submitted inside the preview")
+clean(post("/wp-login.php", "action=register&trp-edit-translation=preview", "user_login=new&user_email=n%40x.gr", UE, LOGIN_COOKIE),
+      "core registration form submitted in the editor preview")
+clean(post("/my-account/edit-account/", "", "trp-edit-translation=preview&user_login=admin&account_email=a%40b.gr"),
+      "a profile form with user_login (not a reset)")
 clean(post("/wp-login.php", "action=lostpassword", "user_login=admin&note=trp-edit-translation"),
       "the word as a value, not a parameter")
 
@@ -134,6 +155,12 @@ do
 end
 fires(post(AJAX, "", "action=trp_get_translations_regular&string_ids=[5]", UE, "wp-settings-time-1=1791"),
       "other WordPress cookies are not a login", IDS)
+-- PHP's variable-name rewriting: `.`/space/unmatched `[` become `_`, NUL ends it.
+fires(post(AJAX, "", "action=trp_get_translations_regular&string.ids=%5B680%5D"), "string.ids", IDS)
+fires(post(AJAX, "", "action=trp_get_translations_regular&string+ids=%5B680%5D"), "string ids", IDS)
+fires(post(AJAX, "", "action=trp_get_translations_regular&string%5Bids=%5B680%5D"), "string[ids", IDS)
+fires(post(AJAX, "", "action=trp_get_translations_regular&string_ids%00x=%5B680%5D"), "string_ids NUL-cut", IDS)
+fires(post(AJAX, "", "action%00x=trp_get_translations_regular&string_ids=%5B680%5D"), "action NUL-cut", IDS)
 
 clean(post(AJAX, "", "action=trp_get_translations_regular&all_languages=false&security=abc&language=en_US"
            .. "&original_language=el&originals=%5B%22Hello%22%5D&skip_machine_translation=%5B%5D&dynamic_strings=true"),

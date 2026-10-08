@@ -285,6 +285,16 @@ do
   check(dt < 0.2, string.format("200 typed emails x 2400 recipients is bounded (took %.3fs)", dt))
 end
 
+do
+  -- A long run with no `@` must stay linear (a `x+@x+` gmatch was quadratic:
+  -- ~8 s for 24 KB).
+  local f = fields(string.rep("a", 24000), "guest@mail.example")
+  local t0 = os.clock()
+  waf.check(post(form(f)))
+  local dt = os.clock() - t0
+  check(dt < 0.5, string.format("24 KB recipient with no @ is linear (took %.3fs)", dt))
+end
+
 -- ── Clean ────────────────────────────────────────────────────────────────────
 clean(post(form(fields("litohotel@outlook.com", "guest@mail.example"))), "a normal ajax_contact submission")
 clean(post(form(fb_old("info@hotel.example", "Reply-To: {{email}}", "guest@mail.example"), FB)),

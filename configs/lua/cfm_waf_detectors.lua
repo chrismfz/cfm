@@ -149,10 +149,21 @@ end
 -- suffix `[...]` selects the base name. (PHP's `.`/space → `_` mangling cannot
 -- turn anything else into `pagename`, which contains neither.)
 local function php_var_name(k)
+  -- As php_register_variable_ex() does: the name ends at a NUL, leading spaces
+  -- go, an array name ends at its first `[` (a `[` with no `]` after it
+  -- becomes `_` instead), and a space or `.` becomes `_`.
+  local z = k:find("\0", 1, true)
+  if z then k = k:sub(1, z - 1) end
   k = k:gsub("^%s+", "")
   local b = k:find("[", 1, true)
-  if b then k = k:sub(1, b - 1) end
-  return k
+  if b then
+    if k:find("]", b + 1, true) then
+      k = k:sub(1, b - 1)
+    else
+      k = k:sub(1, b - 1) .. "_" .. k:sub(b + 1)
+    end
+  end
+  return (k:gsub("[ %.]", "_"))
 end
 
 -- Rule 10017 — CVE-2026-87902 (GHSA-7hp8-65ch-5whp), WordPress core 4.7–7.1.1
@@ -3832,21 +3843,8 @@ function _M.detect_cve_sppagebuilder_upload(uri, method, args, body, headers)
   return nil
 end
 
--- SP Page Builder `ajax_contact` mail relay (rule 520, 2026-10-06). The addon's
--- getAjax() (components/com_sppagebuilder/addons/ajax_contact/site.php, read
--- on a live 3.7.9 install; 3.8+ reads the recipient from a server-encrypted
--- blob instead and is not affected) takes the mail RECIPIENT from the request:
--- the form renders it as a hidden, base64'd `recipient` field, and the server
--- runs base64_decode() on whatever comes back and hands it to addRecipient().
--- A bot appends a victim to that list and the site mails its spam for it.
--- Seen on titan 2026-10-06 (hotellito.gr, ~990 mails in 7 h from a Datacamp /
--- AS42708 / AS206092 proxy pool): every message went to the owner AND to the
--- address the bot typed into the form's own `email` field.
---
--- The jQuery submit posts option=com_sppagebuilder&task=ajax&addon=ajax_contact
--- (a SEF page URL can supply `option` instead, so only a DIFFERENT explicit
--- option rules the request out) and the form as data[N][name] / data[N][value]
--- pairs. The request is read the way PHP and Joomla read it:
+-- SP Page Builder request parsing, shared by rule 520 (detect_sppb_form_relay
+-- below). The request is read the way PHP and Joomla read it:
 --   * from the query string, then a urlencoded or multipart body ($_REQUEST,
 --     POST wins), each key LAST-wins;
 --   * keys are case-SENSITIVE (`DATA[0][VALUE]` or `ADDON` is another key),
@@ -3856,27 +3854,6 @@ end
 --     kept, leading dots dropped) before they are compared;
 --   * the `name` values (`recipient`, `email`) are compared case-insensitively,
 --     a deliberate over-match only an attacker can produce.
---
--- Tags:
---   RECIPIENT_HAS_SUBMITTER — the decoded recipient list holds 2+ addresses,
---     one of them is the submitted `email`, and no other address in the list
---     shares its domain: the site would mail an outsider who typed their own
---     address. A real form never does — the recipient is the owner's saved
---     setting. The domain clause keeps an owner list (`owner@hotel, staff@hotel`)
---     tested by a staff member clean. The rule's mode applies (block).
---   MULTI_RECIPIENT — any other 2+ address list. An owner may legitimately save
---     a list, so this is measurement only: the caller clamps it to logonly.
---   BODY_PAST_WINDOW — addon=ajax_contact, no recipient row seen, and the
---     body's Content-Length exceeds what the edge handed the WAF
---     (waf_body_max_len): the recipient may sit past the window (a padded
---     message). Measurement only, clamped to logonly like MULTI_RECIPIENT.
--- A single address is never flagged. Residuals (not blocked): a bot that
--- REPLACES the recipient (one address); one that types a different `email`
--- than the one it injects; a victim on the owner's own mail domain, or a decoy
--- address added on the victim's domain (both defeat the domain clause and show
--- as MULTI_RECIPIENT); a recipient padded past waf_body_max_len (shows as
--- BODY_PAST_WINDOW); a chunked POST with no Content-Length, which the WAF never
--- body-reads. Updating SP Page Builder closes all of them.
 
 local function form_decode(s)
   local t = (s or ""):gsub("%+", " ")
@@ -4052,9 +4029,14 @@ local SPPB_CONTROL_FIELDS = {
   is_policy = true, from_email = true, from_name = true,
 }
 
+-- Linear: split on separators first, keep the tokens with an `@` in them (a
+-- single `x+@x+` gmatch backtracks quadratically over a long run with no `@`).
 local function sppb_addrs(s)
   local out = {}
-  for a in lower(s or ""):gmatch("[^%s,;<>\"'%z]+@[^%s,;<>\"'%z]+") do out[#out + 1] = a end
+  for tok in lower(s or ""):gmatch("[^%s,;<>\"'%z]+") do
+    local at = tok:find("@", 1, true)
+    if at and at > 1 and at < #tok then out[#out + 1] = tok end
+  end
   return out
 end
 
@@ -4193,14 +4175,20 @@ end
 -- skips mail translation on wp-login.php and admin requests and makes the
 -- action editor-only.
 --
--- 10018 RESET_PREVIEW: `trp-edit-translation` on a password-reset request —
--- wp-login.php's lostpassword/retrievepassword action, or any POST carrying
--- `user_login` (WooCommerce's lost-password form mails through the same
--- filter). TranslatePress's own preview strips the parameter from wp-login
--- links (is_admin_link), so no legitimate request carries it there; fleet-wide
--- the only sighting in the retained edge logs (2026-09-15 .. 10-08) is the
--- titan attack. The `action` the attacker uses is not needed to be on the URL:
--- WordPress reads $_REQUEST.
+-- 10018 / 10020 RESET_PREVIEW: `trp-edit-translation` on a password-reset
+-- request — wp-login.php's lostpassword/retrievepassword action, or
+-- WooCommerce's lost-password POST (wc_reset_password /
+-- woocommerce-lost-password-nonce; it mails through the same filter). WordPress
+-- reads `action` from $_REQUEST. Fleet-wide the only sighting in the retained
+-- edge logs (2026-09-15 .. 10-08) is the titan attack, but the parameter has
+-- one legitimate source: the preview script (trp-iframe-preview-script.js) adds
+-- it as a hidden input to every form in the translation editor's preview. A
+-- translator is logged in, so a request with a WordPress login cookie is filed
+-- under 10020 (edge 403, autoblock held in code); without one it is 10018,
+-- armed. Residuals: a theme/plugin AJAX reset handler reached with
+-- `trp-edit-translation=preview` in the Referer or `_wp_http_referer` (the
+-- plugin copies it into $_REQUEST for front-end AJAX), and either leg padded
+-- past waf_body_max_len.
 --
 -- 10019 ID_LOOKUP: action=trp_get_translations_regular with a non-empty
 -- `string_ids` from a client without a WordPress login cookie. Only
@@ -4219,7 +4207,13 @@ local function trp_fields(args, body, headers)
   return f
 end
 
-function _M.detect_cve_translatepress_reset_preview(method, args, body, headers, _nab)
+-- Returns the tag and whether the request carries a WordPress login cookie:
+-- the caller files a logged-in hit under rule 10020 (edge 403, ban held) —
+-- TranslatePress's preview script adds `trp-edit-translation=preview` to EVERY
+-- form in the editor preview, so a translator submitting a lost-password form
+-- there sends this exact request. The attack needs no login; a junk cookie
+-- only trades the ban for the 403.
+function _M.detect_cve_translatepress_reset_preview(method, args, body, headers, cookie, _nab)
   local bn = body_budget(headers)
   if _nab and #(args or "") <= bn and #(body or "") <= bn
      and not has(_nab, "trp-edit-translation") then
@@ -4227,15 +4221,21 @@ function _M.detect_cve_translatepress_reset_preview(method, args, body, headers,
   end
   local f = trp_fields(args, body, headers)
   if f["trp-edit-translation"] == nil then return nil end
-  if TRP_RESET_ACTIONS[f.action or ""] then return "LOSTPASSWORD" end
-  if method == "post" and f.user_login ~= nil then return "RESET_FORM" end
-  return nil
+  local tag
+  if TRP_RESET_ACTIONS[f.action or ""] then
+    tag = "LOSTPASSWORD"
+  elseif method == "post" and f.user_login ~= nil
+         and (f.wc_reset_password ~= nil or f["woocommerce-lost-password-nonce"] ~= nil) then
+    tag = "WC_LOSTPASSWORD"
+  end
+  if not tag then return nil end
+  return tag, has(lower(cookie or ""), "wordpress_logged_in_")
 end
 
 function _M.detect_cve_translatepress_id_lookup(args, body, headers, cookie, _nab)
   local bn = body_budget(headers)
   if _nab and #(args or "") <= bn and #(body or "") <= bn
-     and not (has(_nab, "string_ids") and has(_nab, "trp_get_translations_regular")) then
+     and not has(_nab, "trp_get_translations_regular") then
     return nil
   end
   if has(lower(cookie or ""), "wordpress_logged_in_") then return nil end

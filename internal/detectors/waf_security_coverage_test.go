@@ -145,8 +145,14 @@ func TestWAFSecurityRuleHolds(t *testing.T) {
 	if got, ok := wafSecurityRuleOverrides(KV{})["10019"]; !ok || got != 0 {
 		t.Errorf("RULE_10019 should default to the code hold 0, got %d (present=%v)", got, ok)
 	}
+	if got := wafSecurityRuleOverrides(KV{})["10020"]; got != 0 {
+		t.Errorf("RULE_10020 should default to the code hold 0, got %d", got)
+	}
 	if got := wafSecurityRuleOverrides(KV{"RULE_10019": "1"})["10019"]; got != 1 {
 		t.Errorf("operator RULE_10019 = 1 must win over the code hold, got %d", got)
+	}
+	if got := wafSecurityRuleOverrides(KV{"RULE_10019": "1 ; armed after review"})["10019"]; got != 1 {
+		t.Errorf("an inline comment must not keep the code hold, got %d", got)
 	}
 	if _, ok := wafSecurityRuleOverrides(KV{})["10018"]; ok {
 		t.Errorf("10018 (TranslatePress reset preview) must stay armed with the family, not held")
