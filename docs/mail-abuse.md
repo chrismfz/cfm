@@ -32,8 +32,12 @@ mainlog / maillog every minute into hourly per-user counters) checks:
 "Far above its history" is the Mail Monitor's anomaly rule: the last 2 h
 against the user's average per active hour over the previous 7 days, at least
 3× and at least 20 messages; a sender with almost no history sending ≥ 50 is
-flagged outright. **Critical** when it is ≥ 50 messages and ≥ 10× (or a sender
-with no history).
+flagged outright. It becomes an **alert** only from 50 messages in the 2 h
+(an open one keeps being judged below that, so it does not flap): 20–40
+messages at 4–5× a small sender's usual is a newsletter or a busy day, and
+paged the channel for nothing; `mail_traffic`'s `anomalies` still list them.
+**Critical** when it is ≥ 50 messages and ≥ 10×, or a sender with no history
+from 200.
 
 Keys are per user / mailbox / IP (`mail:script:<user>`, `mail:out:<addr>`,
 `mail:hijack:<addr>`, `mail:bounce:local:<user>` / `mail:bounce:auth:<addr>`
@@ -63,12 +67,17 @@ person, or a service acting for them:
 
 - loopback and private addresses (webmail, a local relay) are not counted;
 - an IPv6 address counts as its /64 (a phone rotates privacy addresses);
-- Google, Microsoft, Yahoo and Apple's networks (AS15169, 8075, 36647, 26101,
-  34010, 714, 6185) count as ONE source with no country: Gmail fetching a
-  mailbox over POP3 logs in from a dozen Google addresses an hour (seen on
-  titan, Oct 2026). A hijacker on a VM in those networks is missed — that
-  includes Azure, which shares AS8075 with Outlook.com; they mostly use
-  residential proxies and VPS networks.
+- the networks of services that read a mailbox for its owner count as ONE
+  source with no country: Google (AS15169) and Google Cloud (AS396982, where
+  third-party mail apps and CRMs sync), Microsoft (8075), Yahoo (36647,
+  26101, 34010), Apple (714, 6185) and Mail.ru / VK (47764, its collector
+  `rimap*.m.smailru.net` behind the myMail app). Gmail fetching a mailbox over
+  POP3 logs in from a dozen Google addresses an hour (titan); orion's
+  info@socialpower.gr was read from the office (GR), the VK collector (RU)
+  and an app on Google Cloud (US) in one hour — one owner, paged as a
+  hijack before this. A hijacker on a VM in those networks is missed —
+  Google Cloud and Azure (which shares AS8075 with Outlook.com) included;
+  they mostly use residential proxies and VPS networks.
 - `::ffff:1.2.3.4` is `1.2.3.4`.
 
 So "many IPs" needs ≥ 5 of them outside the mailbox's main country: a home,

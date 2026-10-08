@@ -17,7 +17,15 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Mail hijack false positive:** a mailbox read by mail services for its
+  owner (Mail.ru / VK's collector behind the myMail app, a mail app or CRM on
+  Google Cloud) counted as logins from Russia and the US. Those networks now
+  count as one source with no country, like Gmail / Outlook / Yahoo / iCloud
+  (orion, 8 Oct: info@socialpower.gr, GR + RU + US, one owner).
+- **Fewer mail spike pages:** a volume spike alerts only from 50 messages in
+  2 h (`mail_traffic` still lists the smaller anomalies); 21 and 37 messages
+  at 4–5× a small sender's usual paged the channel for nothing.
 
 ## 2026.10.08
 

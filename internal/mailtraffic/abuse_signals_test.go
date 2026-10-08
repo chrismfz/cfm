@@ -400,3 +400,57 @@ func TestMappedIPv4IsTheSameSource(t *testing.T) {
 		t.Fatalf("IPv6 /64: %q", a)
 	}
 }
+
+// orion, 8 Oct 2026: info@ read from the office (GR), the Mail.ru / VK
+// collector (rimap37.m.smailru.net, RU) and a mail app on Google Cloud (US)
+// within an hour — one owner, not a hijack.
+func TestMailCollectorsAreNotAHijack(t *testing.T) {
+	orig := geoOf
+	geoOf = func(ip string) (string, uint) {
+		switch {
+		case ip == "176.112.169.196":
+			return "RU", 47764
+		case strings.HasPrefix(ip, "34.27."):
+			return "US", 396982
+		}
+		return "GR", 6799
+	}
+	t.Cleanup(func() { geoOf = orig })
+	tr := newTracker()
+	for _, ip := range []string{"5.203.22.73", "176.112.169.196", "34.27.14.24", "34.27.195.226"} {
+		tr.observeMaillog("Oct  8 18:03:05 orion dovecot[1]: imap-login: Logged in: user=<info@socialpower.gr>, method=PLAIN, rip="+ip+", lip=157.90.128.246, mpid=1, TLS, session=<a>", time.Now())
+	}
+	if fs, _, _ := tr.evaluate(openTemp(t), time.Now()); len(fs) != 0 {
+		t.Fatalf("office + mail collectors is not a hijack: %+v", fs)
+	}
+}
+
+// A volume spike pages only from abuseAlertFloor messages; an open one stays
+// judged below it so it does not flap.
+func TestSpikeAlertFloor(t *testing.T) {
+	st := openTemp(t)
+	T := time.Date(2026, 10, 8, 12, 0, 0, 0, time.Local)
+	for d := 1; d <= 5; d++ {
+		for h := 0; h < 3; h++ {
+			if err := st.AddReport(T.Add(-time.Duration(d)*24*time.Hour+time.Duration(h)*time.Hour), localReport("shop", 4)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := st.AddReport(T.Add(-time.Hour), localReport("shop", 37)); err != nil {
+		t.Fatal(err)
+	}
+	tr := newTracker()
+	if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 0 {
+		t.Fatalf("37 messages at ~9× is not an alert: %+v", fs)
+	}
+	if fs, _, _, _ := tr.evaluateWith(st, T, map[string]bool{"mail:script:shop": true}, nil); len(fs) != 1 {
+		t.Fatalf("an open spike is still judged below the floor: %+v", fs)
+	}
+	if err := st.AddReport(T.Add(-30*time.Minute), localReport("shop", 30)); err != nil {
+		t.Fatal(err)
+	}
+	if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 1 {
+		t.Fatalf("67 messages is an alert: %+v", fs)
+	}
+}
