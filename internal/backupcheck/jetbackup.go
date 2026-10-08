@@ -28,8 +28,9 @@ const (
 	// (orion and earth held ~210 entries) fits many times over; plugin scans
 	// and integrity checks share the stream, so a small window could push a
 	// daily job's runs out of it — and then a failing job would be judged on
-	// its own timestamps, which advance on failure. A history that does not
-	// fit is reported as a check error rather than guessed at.
+	// its own timestamps, which advance on failure. A job whose runs are not
+	// in the history read is unknown (its keys stay armed); when that is every
+	// job that ran, or the history came back empty, it is a check error.
 	jetbackupLogLimit = 5000
 )
 
@@ -207,6 +208,8 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 
 	var out []Job
 	var findings []Finding
+	var unknownJobs []string
+	judged := 0 // enabled jobs whose runs are in the history
 	seenDest := map[string]bool{}
 	enabledAccountJobs := 0
 	for _, j := range jobs {
@@ -234,6 +237,9 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 			enabledAccountJobs++
 		}
 		label := fmt.Sprintf("JetBackup job %q", j.Name)
+		if r != nil && (r.latest != nil || len(r.starts) > 0) {
+			judged++
+		}
 
 		// 1. The latest finished run.
 		if r != nil && r.latest != nil {
@@ -312,6 +318,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 				})
 			case ok || !complete:
 				unknown = append(unknown, "jb:failed:"+j.ID, "jb:partial:"+j.ID, "jb:stale:"+j.ID)
+				unknownJobs = append(unknownJobs, j.Name)
 			}
 		}
 
@@ -338,7 +345,14 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 			Message: fmt.Sprintf("JetBackup is installed but no account backup job is enabled (%d job(s) configured)", len(jobs)),
 		})
 	}
-	return out, findings, unknown, nil
+	// One job missing from the history is that job's problem. But no job
+	// judged at all (an empty or truncated listLogs answer) must not read as
+	// healthy: last_run advances on FAILED runs, so nothing else would ever
+	// alert on a job failing every night.
+	if len(unknownJobs) > 0 && (len(logs) == 0 || judged == 0) {
+		err = fmt.Errorf("no run on record in the %d log entries read (of %d) for job(s) that have run: %s", len(logs), total, strings.Join(unknownJobs, ", "))
+	}
+	return out, findings, unknown, err
 }
 
 // jbPeriod is the gap a job's schedule leaves between runs: measured from its

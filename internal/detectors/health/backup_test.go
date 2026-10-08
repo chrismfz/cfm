@@ -514,3 +514,45 @@ func TestRemovedOrDisabledJobIsNotOK(t *testing.T) {
 		t.Fatalf("a disabled job is not 'OK again': %+v", evs)
 	}
 }
+
+// A vzdump stuck for days is ONE alert with the node's stale, and when it ends
+// FAILED its stuck alert says so instead of "OK again".
+func TestProxmoxStuckFoldsWithTheNode(t *testing.T) {
+	if subj, kind := runSubject("pve:stuck:UPID:vega:0012ABCD:0A1B2C3D:66F0:vzdump::root@pam:"); subj != "pve:vega" || kind != "stuck" {
+		t.Fatalf("UPID key → node subject: %q %q", subj, kind)
+	}
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true})
+	stuck := backupcheck.Finding{Type: backupcheck.TypeStuck, Severity: "critical", Adapter: "proxmox", Key: "pve:stuck:UPID:vega:1:2:3:vzdump::root@pam:", Message: "running 9d"}
+	stale := backupcheck.Finding{Type: backupcheck.TypeStale, Severity: "critical", Adapter: "proxmox", Key: "pve:stale:vega", Message: "no clean vzdump for 9d"}
+	failed := backupcheck.Finding{Type: backupcheck.TypeFailed, Severity: "critical", Adapter: "proxmox", Key: "pve:failed:vega", Message: "FAILED"}
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{stuck, stale}}), "vega", time.Now())
+	if evs := rec.take(); len(evs) != 1 || evs[0].Type != backupcheck.TypeStuck {
+		t.Fatalf("stuck + stale on one node is one alert: %+v", evs)
+	}
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "proxmox", Findings: []backupcheck.Finding{failed, stale}}), "vega", time.Now())
+	for _, ev := range rec.take() {
+		if ev.Type == TypeBackupRecovered && !strings.HasPrefix(ev.Message, "now failed") {
+			t.Fatalf("stuck → failed is not 'OK again': %q", ev.Message)
+		}
+	}
+}
+
+// A key this check could not judge is still superseded by a worse finding of
+// the same job: one job, one alert.
+func TestUnknownKeyIsSupersededByAWorseFinding(t *testing.T) {
+	resetBackupStateForTest()
+	rec := recordFaults(t)
+	d := New(Config{BackupAlert: true})
+	failed := backupcheck.Finding{Type: backupcheck.TypeFailed, Severity: "critical", Adapter: "jetbackup", Key: "jb:failed:J", Message: "failed"}
+	stuck := backupcheck.Finding{Type: backupcheck.TypeStuck, Severity: "critical", Adapter: "jetbackup", Key: "jb:stuck:J", Message: "running 3d"}
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Jobs: []backupcheck.Job{{ID: "J"}}, Findings: []backupcheck.Finding{failed}}), "orion", time.Now())
+	rec.take()
+	d.publishBackup(status(backupcheck.AdapterStatus{Name: "jetbackup", Jobs: []backupcheck.Job{{ID: "J"}},
+		Findings: []backupcheck.Finding{stuck}, Unknown: []string{"jb:failed:J", "jb:partial:J", "jb:stale:J"}}), "orion", time.Now())
+	evs := rec.take()
+	if len(evs) != 2 || evs[1].Key != "jb:failed:J" || !strings.HasPrefix(evs[1].Message, "now stuck") {
+		t.Fatalf("want stuck + failed resolved as 'now stuck': %+v", evs)
+	}
+}

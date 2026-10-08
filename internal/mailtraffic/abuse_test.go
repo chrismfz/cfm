@@ -272,6 +272,25 @@ func TestCwdIsOnlyTakenForItsOwnUser(t *testing.T) {
 }
 
 // A site mailing only its owner is not a contact form spamming strangers.
+func TestCwdOwnedByIsAnchored(t *testing.T) {
+	for _, c := range []struct {
+		cwd, user string
+		want      bool
+	}{
+		{"/home/alice/public_html", "alice", true},
+		{"/home2/alice/public_html/x", "alice", true},
+		{"/home/alice", "alice", true},
+		{"/home/alice/public_html", "public_html", false},
+		{"/home/alice/public_html", "home", false},
+		{"/home/bob/www/alice/x", "alice", false},
+		{"/usr/local/cpanel", "alice", false},
+	} {
+		if got := cwdOwnedBy(c.cwd, c.user); got != c.want {
+			t.Errorf("cwdOwnedBy(%q, %q) = %v", c.cwd, c.user, got)
+		}
+	}
+}
+
 func TestOneRecipientIsNotTheContactFormPattern(t *testing.T) {
 	tr := newTracker()
 	T := time.Now()
@@ -309,20 +328,43 @@ func TestNewSenderSeverityAndSettling(t *testing.T) {
 	if s := spikeSeverity(Anomaly{Kind: "new-sender", Recent: 250}); s != "critical" {
 		t.Fatalf("250 from a new sender: %s", s)
 	}
+	T := time.Now()
+	busy := func(key string) map[string]int64 { return map[string]int64{key: 120} }
+
+	// a new MAILBOX that opened as a warning settles after a quiet day
 	got := recordAbuse(t)
 	p := &publisher{}
-	T := time.Now()
-	p.apply([]abuseFinding{{Type: TypeScriptSpike, Severity: "warning", Key: "mail:script:shop", Message: "shop: 120", Expected: 0}}, nil, T)
-	busy := map[string]int64{"mail:script:shop": 120}
-	p.apply(nil, busy, T.Add(time.Hour))
-	p.apply(nil, busy, T.Add(5*time.Hour))
+	p.apply([]abuseFinding{{Type: TypeOutboundSpike, Severity: "warning", Key: "mail:out:new@shop.gr", Message: "new@shop.gr: 120"}}, nil, T)
+	p.apply(nil, busy("mail:out:new@shop.gr"), T.Add(time.Hour))
+	p.apply(nil, busy("mail:out:new@shop.gr"), T.Add(20*time.Hour))
 	if len(*got) != 1 {
 		t.Fatalf("still busy, not settled yet: %+v", *got)
 	}
-	p.apply(nil, busy, T.Add(8*time.Hour))
+	p.apply(nil, busy("mail:out:new@shop.gr"), T.Add(26*time.Hour))
 	if len(*got) != 2 || (*got)[1].typ != TypeRecovered || !strings.Contains((*got)[1].msg, "now its usual volume") {
-		t.Fatalf("a new sender settles: %+v", *got)
+		t.Fatalf("a new mailbox settles: %+v", *got)
 	}
+
+	// a SCRIPT spike never settles: a hacked quiet site opens exactly like this
+	got = recordAbuse(t)
+	p = &publisher{}
+	p.apply([]abuseFinding{{Type: TypeScriptSpike, Severity: "warning", Key: "mail:script:shop", Message: "shop: 120"}}, nil, T)
+	p.apply(nil, busy("mail:script:shop"), T.Add(time.Hour))
+	p.apply(nil, busy("mail:script:shop"), T.Add(72*time.Hour))
+	if len(*got) != 1 {
+		t.Fatalf("a script spike stays open while the volume does: %+v", *got)
+	}
+
+	// nor does one that opened critical
+	got = recordAbuse(t)
+	p = &publisher{}
+	p.apply([]abuseFinding{{Type: TypeOutboundSpike, Severity: "critical", Key: "mail:out:x@shop.gr", Message: "x: 2000"}}, nil, T)
+	p.apply(nil, busy("mail:out:x@shop.gr"), T.Add(time.Hour))
+	p.apply(nil, busy("mail:out:x@shop.gr"), T.Add(72*time.Hour))
+	if len(*got) != 1 {
+		t.Fatalf("a critical spike never settles: %+v", *got)
+	}
+
 	// an old sender with a real baseline does not settle while still high
 	got2 := recordAbuse(t)
 	p2 := &publisher{}

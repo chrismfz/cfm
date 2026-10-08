@@ -42,7 +42,13 @@ Keys are per user / mailbox / IP (`mail:script:<user>`, `mail:out:<addr>`,
 resolved with `mail_recovered`. A spike closes only when the recent volume is
 back under 1.5× what was expected **when it opened** (or under 20): the
 baseline is the sender's own trailing week, so a long incident slowly becomes
-its own baseline and would otherwise "recover" while still sending. The edge
+its own baseline and would otherwise "recover" while still sending. A sender
+with no baseline before the spike has nothing to go back to: a new MAILBOX
+(`mail_outbound_spike`) that opened as a warning and stays under 200 in 2 h is
+resolved after a day at that volume ("now its usual volume"); a script spike
+or a critical one is never settled that way — a hacked quiet site opens
+exactly like a new sender, and stays open until the volume falls or someone
+acknowledges it. A new sender is a warning up to 200 in 2 h. The edge
 state is kept in `/var/lib/cfm/mail_abuse_published.json` (next to the
 counters), so restarts do not re-announce. The per-line context (bounce
 outcomes, logins) lives in memory, so after a restart an open bounce finding

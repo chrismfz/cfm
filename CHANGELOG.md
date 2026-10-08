@@ -57,15 +57,20 @@ back-filled here — see the git/PR history for that period.
   an open `backup_check_error`, and a hung-check alert resolves after a
   restart. An adapter gone for 24 h (uninstalled) resolves its alerts. One
   JetBackup job with no logged run no longer freezes every other job behind a
-  `backup_check_error`. A shared Proxmox storage is reported by one node, not
-  all. New: `backup_no_job` for a Proxmox node hosting guests with no enabled
-  vzdump job.
+  `backup_check_error` (an empty or truncated log history still is one: it
+  must never read as healthy). A shared Proxmox storage running low is
+  reported by one node, not all; offline is still reported by each node whose
+  mount failed. A Proxmox stuck run folds with the node's failed / stale. New:
+  `backup_no_job` for a Proxmox node hosting guests (not just templates) with
+  no enabled vzdump job, when they are not already `backup_uncovered`.
 - **Node faults are marked sent only once stored.** With no history store or
   a failed write a finding or recovery was marked delivered and lost; it is
   now retried. Same for the mail-abuse findings.
 - **Mail-abuse alerts (review of #1556).** A new sender pages critical only
-  from 200 messages in 2 h and settles after 6 h at a steady volume (it used
-  to stay open forever). The script directory is the sending user's own (a
+  from 200 messages in 2 h. A new MAILBOX that opened as a warning and stays
+  under 200 settles after a day at a steady volume ("now its usual volume");
+  a script spike or a critical one never settles — a hacked quiet site opens
+  exactly like a new sender. The script directory is the sending user's own (a
   busy node pointed at another tenant's site). The contact-form pattern no
   longer matches a site mailing only its owner. Greek and Cyrillic subjects
   in legacy charsets decode. `whats_wrong` shows alerts still open in

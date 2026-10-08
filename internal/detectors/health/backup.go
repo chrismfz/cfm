@@ -296,6 +296,11 @@ func (b *backupState) publishLocked(st backupcheck.Status, host string, now time
 			panicked = true
 		}
 	}
+	for name := range b.errStreak {
+		if !seen[name] {
+			delete(b.errStreak, name) // an adapter that left (or a panic that did not recur) starts over
+		}
+	}
 	for _, a := range st.Adapters {
 		if a.Error == "" {
 			delete(b.errStreak, a.Name)
@@ -321,6 +326,16 @@ func (b *backupState) publishLocked(st backupcheck.Status, host string, now time
 	for _, f := range findings {
 		if subj, _ := runSubject(f.Key); subj != "" {
 			subjects[subj] = f
+		}
+	}
+	// A key this check could not judge is still superseded by a worse finding
+	// of the same job that it could: one job, one alert.
+	for k := range unknown {
+		subj, kind := runSubject(k)
+		if f, ok := subjects[subj]; ok && subj != "" {
+			if _, fk := runSubject(f.Key); runKinds[fk] > runKinds[kind] {
+				delete(unknown, k)
+			}
 		}
 	}
 	for _, f := range findings {
@@ -392,13 +407,21 @@ func (b *backupState) publishLocked(st backupcheck.Status, host string, now time
 var runKinds = map[string]int{"stuck": 4, "failed": 3, "stale": 2, "partial": 1}
 
 // runSubject splits a per-run key ("jb:failed:<id>", "pve:stale:<node>") into
-// its subject ("jb:<id>") and kind; "" for any other key.
+// its subject ("jb:<id>") and kind; "" for any other key. A Proxmox stuck key
+// carries the task's UPID ("pve:stuck:UPID:<node>:…"): its subject is the node,
+// like the node's failed / stale keys.
 func runSubject(key string) (subject, kind string) {
 	parts := strings.SplitN(key, ":", 3)
 	if len(parts) != 3 || runKinds[parts[1]] == 0 {
 		return "", ""
 	}
-	return parts[0] + ":" + parts[2], parts[1]
+	id := parts[2]
+	if parts[0] == "pve" && strings.HasPrefix(id, "UPID:") {
+		if f := strings.SplitN(id, ":", 3); len(f) >= 2 && f[1] != "" {
+			id = f[1]
+		}
+	}
+	return parts[0] + ":" + id, parts[1]
 }
 
 // foldRunFindings keeps, per job / node, only its worst per-run finding: a job

@@ -80,9 +80,12 @@ const (
 	abuseCritFloor = 50
 	// a sender with no history is critical only from this many in the window
 	abuseNewCritFloor = 200
-	// a spike with no baseline from before it (a new sender) closes once it
-	// has not been a finding for this long: its volume is its normal now
-	abuseNewSettle = 6 * time.Hour
+	// an authenticated mailbox with no baseline from before its spike (a new
+	// mailbox, a migrated account) that opened as a warning and stays under
+	// abuseNewCritFloor closes once it has not been a finding for this long:
+	// its volume is its normal now. Never a script spike (a hacked quiet site
+	// opens exactly like this) and never one that was critical.
+	abuseNewSettle = 24 * time.Hour
 	// a spike closes once the recent volume is under this factor of the
 	// expected volume recorded when it opened (or under the spike floor).
 	abuseCloseFactor = 1.5
@@ -131,15 +134,29 @@ func SetFaultSink(fn FaultSink) {
 // SetAbuseAlert turns the findings on or off (cfm.conf MAIL_ABUSE_ALERT).
 func SetAbuseAlert(on bool) { abuseOn.Store(on) }
 
-func publish(typ, sev, key, msg string, when time.Time) bool {
+func publish(typ, sev, key, msg string, when time.Time) (ok bool) {
 	sinkMu.RLock()
 	fn := sink
 	sinkMu.RUnlock()
 	if fn == nil {
 		return false
 	}
-	defer func() { _ = recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Logf("[mailtraffic] fault sink panicked on %s %s: %v", typ, key, r)
+			ok = false
+		}
+	}()
 	return fn(typ, sev, key, msg, when)
+}
+
+// keySubject is a finding key's subject: "mail:<kind>:<subject>", where the
+// subject (an IPv6 address, mail:bounce:local:<user>) may itself hold colons.
+func keySubject(key string) string {
+	if parts := strings.SplitN(key, ":", 3); len(parts) == 3 {
+		return parts[2]
+	}
+	return key
 }
 
 var (
@@ -387,8 +404,15 @@ func (t *tracker) observeMaillog(line string, now time.Time) {
 // cwdOwnedBy reports whether a script directory belongs to a unix user
 // (/home/<user>/…, /home2/<user>/…).
 func cwdOwnedBy(cwd, user string) bool {
-	return cwd != "" && user != "" && strings.Contains(cwd+"/", "/"+user+"/")
+	if cwd == "" || user == "" {
+		return false
+	}
+	m := reHomeDir.FindStringSubmatch(cwd)
+	return m != nil && m[1] == user
 }
+
+// reHomeDir: a hosting home directory and its owner (/home/u/…, /home2/u/…).
+var reHomeDir = regexp.MustCompile(`^/home\d*/([^/]+)(?:/|$)`)
 
 var reEximTransport = regexp.MustCompile(`\sT=(\S+)`)
 
@@ -744,7 +768,7 @@ func CurrentAbuse() ([]AbuseView, time.Time) {
 	for key, o := range c.pub.open {
 		if !current[key] {
 			views = append(views, AbuseView{Type: o.Type, Severity: o.Severity, Key: key, Message: o.Message,
-				Subject: key[strings.LastIndexByte(key, ':')+1:], StillOpen: true})
+				Subject: keySubject(key), StillOpen: true})
 		}
 	}
 	c.pub.mu.Unlock()
@@ -925,11 +949,11 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 	for _, f := range fs {
 		current[f.Key] = true
 		prev, seen := p.open[f.Key]
+		if seen && !prev.QuietSince.IsZero() {
+			prev.QuietSince = time.Time{} // a finding again: not quiet
+			p.open[f.Key] = prev
+		}
 		if seen && sevRank(f.Severity) <= sevRank(prev.Severity) {
-			if !prev.QuietSince.IsZero() {
-				prev.QuietSince = time.Time{}
-				p.open[f.Key] = prev
-			}
 			continue // still open, no worse: nothing new to say
 		}
 		if !publish(f.Type, f.Severity, f.Key, f.Message, now) {
@@ -956,7 +980,8 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 				o.QuietSince = now
 				p.open[key] = o
 			}
-			if o.Expected > 0 || now.Sub(o.QuietSince) < abuseNewSettle {
+			canSettle := o.Expected == 0 && o.Type == TypeOutboundSpike && o.Severity != "critical" && n < abuseNewCritFloor
+			if !canSettle || now.Sub(o.QuietSince) < abuseNewSettle {
 				continue
 			}
 			settled = true

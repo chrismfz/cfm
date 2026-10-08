@@ -276,8 +276,10 @@ func TestJetBackupJobWithoutRunsInHistory(t *testing.T) {
 	_, fs, unknown, err := evalJetBackup([]byte(oneJob("2026-10-07T01:00:00Z", "2026-10-08T01:00:00Z", false)), []byte(noRuns), ts("2026-10-07T10:00:00Z"), Thresholds{})
 	// unknown for THIS job only (its keys stay armed), never an adapter-wide
 	// error that would freeze every other job's findings
-	if err != nil || len(fs) != 0 || len(unknown) != 3 {
-		t.Fatalf("recent last_run, no log of it: want this job unknown, got %v %+v %v", err, fs, unknown)
+	// the history came back empty: not healthy — a check error (the job's keys
+	// stay armed too)
+	if err == nil || len(fs) != 0 || len(unknown) != 3 {
+		t.Fatalf("recent last_run, empty history: want unknown + a check error, got %v %+v %v", err, fs, unknown)
 	}
 	_, fs, _, err = evalJetBackup([]byte(oneJob("2026-09-20T01:00:00Z", "2026-09-21T01:00:00Z", false)), []byte(noRuns), ts("2026-10-07T18:00:00Z"), Thresholds{})
 	if err != nil {
@@ -304,5 +306,26 @@ func TestJetBackupNoEnabledAccountJobIsAWarning(t *testing.T) {
 	_, fs, _, err = evalJetBackup([]byte(`{"success":1,"message":"","data":{"jobs":null}}`), []byte(`{"success":1,"message":"","data":{"logs":[]}}`), time.Now(), Thresholds{})
 	if err != nil || byType(fs)[TypeNoJob].Type == "" {
 		t.Fatalf("jobs:null: want backup_no_job, got %v %+v", err, fs)
+	}
+}
+
+// One job missing from the history is that job's unknown; the others are
+// judged and the adapter is not an error.
+func TestJetBackupOneUnknownJobDoesNotFreezeTheOthers(t *testing.T) {
+	jobs := `{"success":1,"message":"","data":{"jobs":[
+ {"_id":"A","name":"daily","type":1,"disabled":0,"last_run":"2026-10-07T01:00:00Z"},
+ {"_id":"B","name":"monthly","type":1,"disabled":0,"last_run":"2026-10-07T02:00:00Z"}]}}`
+	logs := `{"success":1,"message":"","data":{"logs":[
+ {"_id":"r1","start_time":"2026-10-07T01:00:00+00:00","end_time":"2026-10-07T01:30:00+00:00","status":2,"type":1,"info":{"ID":"A"}},
+ {"_id":"r0","start_time":"2026-10-06T01:00:00+00:00","end_time":"2026-10-06T01:30:00+00:00","status":1,"type":1,"info":{"ID":"A"}}],"total":2}}`
+	_, fs, unknown, err := evalJetBackup([]byte(jobs), []byte(logs), ts("2026-10-07T10:00:00Z"), Thresholds{})
+	if err != nil {
+		t.Fatalf("one unknown job is not an adapter error: %v", err)
+	}
+	if byType(fs)[TypeFailed].Key != "jb:failed:A" {
+		t.Fatalf("job A is still judged: %+v", fs)
+	}
+	if len(unknown) != 3 || unknown[0] != "jb:failed:B" {
+		t.Fatalf("job B's keys stay armed: %v", unknown)
 	}
 }

@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cfm/internal/logging"
 )
 
 // NodeFaultEvent is one durable hardware/storage fault observation.
@@ -69,7 +71,8 @@ func publishNodeFaultEvent(ev NodeFaultEvent) (ok bool) {
 		return false
 	}
 	defer func() {
-		if recover() != nil {
+		if r := recover(); r != nil {
+			logging.Logf("[health] node-fault sink panicked on %s %s: %v", ev.Type, ev.Key, r)
 			ok = false
 		}
 	}()
