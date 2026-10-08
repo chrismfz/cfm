@@ -78,3 +78,30 @@ func TestRecordNodeFaultEvent_IgnoresEmptyType(t *testing.T) {
 		t.Fatalf("typeless fault must not be persisted, got %d rows", len(out.Rows))
 	}
 }
+
+// Mail-abuse and backup rows are about the whole server (other tenants'
+// subjects, recipients, account names), written under its hostname: a scoped
+// caller never gets them, even with the hostname in scope.
+func TestServerOnlyRowsAreDroppedForScopedCallers(t *testing.T) {
+	rows := func() []HistoryEvent {
+		return []HistoryEvent{
+			{Type: "mail_script_spike", Host: "titan.example.com", Reason: "hotellito: …"},
+			{Type: "backup_failed", Host: "titan.example.com", Reason: "job x"},
+			{Type: "challenge_solved", Host: "titan.example.com"},
+		}
+	}
+	scoped := dropServerOnlyRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(scopedCtx("titan.example.com")), rows())
+	if len(scoped) != 1 || scoped[0].Type != "challenge_solved" {
+		t.Fatalf("scoped caller must only get its own row types: %+v", scoped)
+	}
+	if admin := dropServerOnlyRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(adminCtx()), rows()); len(admin) != 3 {
+		t.Fatalf("admin keeps every row: %+v", admin)
+	}
+}
+
+func TestRecordNodeFaultEventReportsWhetherStored(t *testing.T) {
+	var e *Engine
+	if e.RecordNodeFaultEvent(health.NodeFaultEvent{Type: "backup_failed"}) {
+		t.Fatal("no engine / no history store: not stored")
+	}
+}

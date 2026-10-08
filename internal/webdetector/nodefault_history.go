@@ -12,9 +12,12 @@ import (
 // disk_mdadm_degraded) and can be pinned/acknowledged fleet-side — surviving a
 // dmesg ring wrap or a daemon restart. Wired as the node-fault sink in
 // internal/detectors/webdetector_register.go; mirrors RecordHardwareECCEvent.
-func (e *Engine) RecordNodeFaultEvent(ev health.NodeFaultEvent) {
+// It reports whether the row was written: the publishers keep a finding armed
+// (retry next cycle) instead of marking it sent when there is no history store
+// or the write failed.
+func (e *Engine) RecordNodeFaultEvent(ev health.NodeFaultEvent) bool {
 	if e == nil || e.history == nil || ev.Type == "" {
-		return
+		return false
 	}
 	ts := ev.When
 	if ts.IsZero() {
@@ -26,7 +29,7 @@ func (e *Engine) RecordNodeFaultEvent(ev health.NodeFaultEvent) {
 	if ev.Key != "" {
 		payload["key"] = ev.Key
 	}
-	e.appendHistory(HistoryEvent{
+	return e.history.AppendChecked(HistoryEvent{
 		TsUnix:  ts.Unix(),
 		Type:    ev.Type,
 		Host:    ev.Host,

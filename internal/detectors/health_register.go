@@ -20,6 +20,15 @@ const (
 	healthDefaultTmpCleanOlder = 12 * time.Hour
 )
 
+// Backup check defaults (internal/backupcheck). They must equal the stock
+// configs/detectors.conf [health] values (reference_defaults_config_test.go).
+const (
+	healthDefaultBackupEvery        = 15 * time.Minute
+	healthDefaultBackupStuckAfter   = 24 * time.Hour
+	healthDefaultBackupProxmoxStale = 8 * 24 * time.Hour
+	healthDefaultBackupDestFreePct  = 5
+)
+
 func init() {
 	meta.Register(meta.DetectorMeta{
 		TypeKey:          "health",
@@ -91,6 +100,12 @@ func init() {
 			EnrichDirs:     dirs,
 
 			TmpCleanOlder: kvDur(kv, "TMP_CLEAN_OLDER", healthDefaultTmpCleanOlder),
+
+			BackupAlert:             kvBool(kv, "BACKUP_ALERT", true),
+			BackupEvery:             kvDur(kv, "BACKUP_EVERY", healthDefaultBackupEvery),
+			BackupStuckAfter:        kvDur(kv, "BACKUP_STUCK_AFTER", healthDefaultBackupStuckAfter),
+			BackupProxmoxStaleAfter: kvDur(kv, "BACKUP_PROXMOX_STALE", healthDefaultBackupProxmoxStale),
+			BackupDestFreeMinPct:    backupDestFreePct(kvFlt(kv, "BACKUP_DEST_FREE_PCT", healthDefaultBackupDestFreePct)),
 		}
 
 		d := health.New(cfg)
@@ -99,4 +114,14 @@ func init() {
 		// Implement with a ticker inside health.New(..). No core.LineSource needed.
 		return d, nil
 	})
+}
+
+// backupDestFreePct maps the config value to the check's threshold: 0 (or
+// less) turns the destination free-space check off (backupcheck reads a
+// negative threshold as off; a zero there would mean "use the default").
+func backupDestFreePct(v float64) float64 {
+	if v <= 0 {
+		return -1
+	}
+	return v
 }

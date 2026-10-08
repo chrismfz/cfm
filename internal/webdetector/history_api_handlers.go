@@ -199,6 +199,33 @@ func redactScopedHistoryRows(r *http.Request, rows []HistoryEvent) {
 	}
 }
 
+// serverOnlyTypePrefixes are node-fault rows about the whole server, written
+// under the node's own hostname: mail abuse (other tenants' subjects, script
+// directories, recipients) and backups (other accounts' names). A scoped
+// caller whose scope happens to include the hostname must still not read
+// them; they are admin (and cfm-web, admin token) only.
+var serverOnlyTypePrefixes = []string{"mail_", "backup_"}
+
+func dropServerOnlyRows(r *http.Request, rows []HistoryEvent) []HistoryEvent {
+	if IsAdminRequest(r) {
+		return rows
+	}
+	out := rows[:0]
+	for _, ev := range rows {
+		drop := false
+		for _, p := range serverOnlyTypePrefixes {
+			if strings.HasPrefix(ev.Type, p) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
 func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
@@ -218,6 +245,7 @@ func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	rows = dropServerOnlyRows(r, rows)
 	redactScopedHistoryRows(r, rows)
 	enrichEnabled := strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "1") || strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "true")
 	if !enrichEnabled || e.enr == nil {

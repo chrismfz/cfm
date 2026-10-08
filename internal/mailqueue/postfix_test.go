@@ -126,3 +126,22 @@ func TestParsePostfixArrival_YearRollback(t *testing.T) {
 		t.Fatalf("age = %d, want %d (year should roll back)", age, 25*3600)
 	}
 }
+
+// postqueue names the null sender MAILER-DAEMON: a bounce, bucketed like
+// exim's <> (so a pile of bounces is not "one sender filling the queue").
+func TestPostqueueMailerDaemonIsTheNullSender(t *testing.T) {
+	q := `-Queue ID-  --Size-- ----Arrival Time---- -Sender/Recipient-------
+AB12CD34EF    3000 Wed Aug  5 10:00:33  MAILER-DAEMON
+     (host mx.example[192.0.2.1] said: 550 5.1.1 user unknown)
+                                         someone@example.com
+
+-- 3 Kbytes in 1 Request.
+`
+	msgs, _ := parsePostqueue(q, nowFixed)
+	if len(msgs) != 1 || msgs[0].Sender != "" {
+		t.Fatalf("MAILER-DAEMON is the null sender: %+v", msgs)
+	}
+	if top := topSenders(msgs, 5); len(top) != 1 || top[0].Sender != "<>" {
+		t.Fatalf("bucketed as <>: %+v", top)
+	}
+}

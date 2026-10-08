@@ -22,6 +22,7 @@ import (
 	"cfm/internal/detectors/meta"
 	"cfm/internal/detectors/solverfarm"
 	"cfm/internal/logging"
+	"cfm/internal/mailtraffic"
 	webdet "cfm/internal/webdetector"
 )
 
@@ -1013,7 +1014,13 @@ func init() {
 		health.SetECCEventSink(engine.RecordHardwareECCEvent)
 		// Same for boolean STATE hard-faults (failed SMART device, degraded mdadm
 		// array): edge-triggered, persisted durably, pinned/ack'd fleet-side.
-		health.SetNodeFaultEventSink(engine.RecordNodeFaultEvent)
+		health.SetNodeFaultEventSinkChecked(engine.RecordNodeFaultEvent)
+		// Mail abuse (hacked site / contact form, mailbox spike, hijacked
+		// mailbox) rides the same node-fault path to cfm-web (docs/mail-abuse.md).
+		mailtraffic.SetFaultSink(func(typ, severity, key, message string, when time.Time) bool {
+			host, _ := os.Hostname()
+			return engine.RecordNodeFaultEvent(health.NodeFaultEvent{Type: typ, Severity: severity, Host: host, Key: key, Message: message, When: when})
+		})
 		// Persist emitted challenge_solver_farm findings (distributed-farm
 		// convictions) into the same durable history store as event_type=solver_farm
 		// so they are queryable via detection_history and can be PULLed into the

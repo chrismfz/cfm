@@ -41,7 +41,7 @@ type RuntimeStatus struct {
 	DNATFrontend                 string        `json:"dnat_frontend,omitempty"`
 	DNATConfidence               string        `json:"dnat_confidence,omitempty"` // high/medium/low
 	DNATWarning                  string        `json:"dnat_warning,omitempty"`
-	FrontendWorking              string        `json:"frontend_working,omitempty"` // working/degraded/down
+	FrontendWorking              string        `json:"frontend_working,omitempty"` // working/degraded/down, none (no web frontend on this host), or unknown (no edge found and the DNAT state unreadable)
 	FrontendReason               string        `json:"frontend_reason,omitempty"`
 	EdgeService                  string        `json:"edge_service,omitempty"`        // angie/openresty/nginx/unknown
 	UpstreamService              string        `json:"upstream_service,omitempty"`    // nginx/apache/...

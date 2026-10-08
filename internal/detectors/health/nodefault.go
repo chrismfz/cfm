@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cfm/internal/logging"
 )
 
 // NodeFaultEvent is one durable hardware/storage fault observation.
@@ -31,13 +33,25 @@ type NodeFaultEvent struct {
 
 var (
 	nodeFaultSinkMu sync.RWMutex
-	nodeFaultSink   func(NodeFaultEvent)
+	nodeFaultSink   func(NodeFaultEvent) bool
 )
 
-// SetNodeFaultEventSink registers (replacing any prior) the consumer of node
-// fault events. Mirrors SetECCEventSink / clam.SetScanEventSink: the detector is
-// a leaf package, so the persister subscribes. nil detaches. Concurrency-safe.
+// SetNodeFaultEventSink registers (replacing any prior) a consumer of node fault
+// events that always accepts them (tests, simple consumers). Mirrors
+// SetECCEventSink / clam.SetScanEventSink: the detector is a leaf package, so
+// the persister subscribes. nil detaches. Concurrency-safe.
 func SetNodeFaultEventSink(fn func(NodeFaultEvent)) {
+	if fn == nil {
+		SetNodeFaultEventSinkChecked(nil)
+		return
+	}
+	SetNodeFaultEventSinkChecked(func(ev NodeFaultEvent) bool { fn(ev); return true })
+}
+
+// SetNodeFaultEventSinkChecked registers a consumer that reports whether it
+// stored the event: a false (no history store, a failed write) leaves the
+// finding armed, so it is retried next cycle instead of marked sent and lost.
+func SetNodeFaultEventSinkChecked(fn func(NodeFaultEvent) bool) {
 	nodeFaultSinkMu.Lock()
 	nodeFaultSink = fn
 	nodeFaultSinkMu.Unlock()
@@ -45,19 +59,24 @@ func SetNodeFaultEventSink(fn func(NodeFaultEvent)) {
 
 // publishNodeFaultEvent delivers ev to the sink if set; a misbehaving sink must
 // never take down the detector loop, so panics are contained. Returns true when
-// a sink was invoked: the caller only advances its edge state on a delivered
-// event, so a fault present before the persister has registered its sink (a
-// startup ordering race) is retried next cycle rather than dropped forever.
-func publishNodeFaultEvent(ev NodeFaultEvent) bool {
+// the sink stored the event: the caller only advances its edge state on a
+// delivered event, so a fault present before the persister has registered its
+// sink (a startup ordering race), or one the store failed to write, is retried
+// next cycle rather than dropped forever.
+func publishNodeFaultEvent(ev NodeFaultEvent) (ok bool) {
 	nodeFaultSinkMu.RLock()
 	fn := nodeFaultSink
 	nodeFaultSinkMu.RUnlock()
 	if fn == nil {
 		return false
 	}
-	defer func() { _ = recover() }()
-	fn(ev)
-	return true
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Logf("[health] node-fault sink panicked on %s %s: %v", ev.Type, ev.Key, r)
+			ok = false
+		}
+	}()
+	return fn(ev)
 }
 
 // smartFaultMessage renders a one-line summary for a failed SMART device.

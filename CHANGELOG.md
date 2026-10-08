@@ -17,7 +17,160 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.08
+
 ### Added
+- **Spamhaus through DQS.** The fleet resolves through public resolvers, and
+  Spamhaus refuses `zen.spamhaus.org` queries from them, so the RBL check never
+  saw Spamhaus. `MAIL_RBL_SPAMHAUS_DQS_KEY` in cfm.conf makes it ask
+  `<key>.zen.dq.spamhaus.net` instead. The key is never logged or shown, and
+  `cfm debug` redacts it; editing it (or `MAIL_ABUSE_ALERT`) in cfm.conf
+  applies without a restart.
+
+### Changed
+- **Bounces are not a queue hog.** Frozen bounce messages (null sender: exim
+  `<>`, Postfix `MAILER-DAEMON`)
+  piling up are the normal state of a cPanel queue; `mail_queue_hog` no longer
+  counts them, and an open one closes saying so.
+
+### Fixed
+- **Mail hijack false positive:** a mailbox read by mail services for its
+  owner (Mail.ru / VK's collector behind the myMail app, a mail app or CRM on
+  Google Cloud) counted as logins from Russia and the US. Those networks now
+  count as one source with no country, like Gmail / Outlook / Yahoo / iCloud
+  (orion, 8 Oct: info@socialpower.gr, GR + RU + US, one owner).
+- **Fewer mail spike pages:** a MILD volume spike (under 50 messages in 2 h
+  and under 10× its usual, nothing abusive in its context) no longer alerts;
+  21 and 37 messages at 4–5× a small sender's usual paged the channel for
+  nothing. A small spike far above its usual (a quiet site hacked) or one
+  sending as a foreign domain / in the contact-form pattern still alerts.
+
+### Added
+- **Mail abuse reaches the team channel.** Every 5 min the Mail Monitor now
+  raises `mail_script_spike` (a site's scripts — a hacked site or an abused
+  contact form — sending far above that user's own history, with the script
+  directory, the envelope sender and the number of different recipients),
+  `mail_outbound_spike` (a mailbox doing the same) and `mail_hijack` (a
+  mailbox logging in from ≥ 3 countries, or ≥ 10 IPs in 2+ countries, within an hour), and
+  resolves each with `mail_recovered`. They go to `detection_history` for
+  cfm-web to alert on. On titan a contact form sent ~1 000 messages a day for
+  days without tripping `exim_relays`' fixed 110-per-15-min threshold; the
+  per-user baseline sees it in the first hour. Alert only. `MAIL_ABUSE_ALERT
+  = 0` in cfm.conf turns it off. Each finding shows the decoded subject, the
+  top recipient domains, the contact-form pattern (the owner copied on every
+  message plus a new outside address each time) and a sender spoofing a
+  foreign domain or another mailbox, so a newsletter can be told from spam.
+  The `mail_traffic` MCP tool lists them under `abuse` (admin) and
+  `whats_wrong` reports them. See `docs/mail-abuse.md`.
+- **More mail-abuse findings.** `mail_bounce_spike`: a sender whose mail
+  bounces in bulk (≥ 20 bounces and ≥ 25 % in 2 h), with the main reason —
+  a form or hacked account writing to harvested addresses. `mail_queue_hog`:
+  one sender holding half of a queue of 100+ messages. `mail_rbl_listed`: a
+  server IP on Spamhaus ZEN, SpamCop, Barracuda or PSBL (checked every
+  30 min; a list that refuses the resolver is logged once, never read as
+  "delisted"). `mail_hijack` now also counts IMAP/POP3 logins from dovecot,
+  and no longer counts Gmail / Outlook / Yahoo / iCloud fetching a mailbox as
+  many places (their network is one source), a phone's rotating IPv6 (one
+  /64), or a home plus a VPN (many addresses need 5+ outside the main
+  country).
+
+
+### Fixed
+- **Backup alerts: no more duplicates or false "OK again"** (review of the
+  backup check). One job is one alert: only the worst of stuck / failed /
+  stale / partial is published, so a failing job no longer also pages
+  `backup_stale` a day later. A change of state (partial → failed, failed →
+  stuck) resolves the old alert as "now failed: …", not "backup OK again". A
+  disabled or removed job says so. A restart no longer resolves and re-opens
+  an open `backup_check_error`, and a hung-check alert resolves after a
+  restart. An adapter gone for 24 h (uninstalled) resolves its alerts. One
+  JetBackup job with no logged run no longer freezes every other job behind a
+  `backup_check_error` (an empty or truncated log history still is one: it
+  must never read as healthy). A shared Proxmox storage running low is
+  reported by one node, not all; offline is still reported by each node whose
+  mount failed. A Proxmox stuck run folds with the node's failed / stale. New:
+  `backup_no_job` for a Proxmox node hosting guests (not just templates) with
+  no enabled vzdump job, when they are not already `backup_uncovered`.
+- **Node faults are marked sent only once stored.** With no history store or
+  a failed write a finding or recovery was marked delivered and lost; it is
+  now retried. Same for the mail-abuse findings.
+- **Mail-abuse alerts (review of #1556).** A new sender pages critical only
+  from 200 messages in 2 h. A new MAILBOX that opened as a warning and stays
+  under 200 settles after a day at a steady volume ("now its usual volume");
+  a script spike or a critical one never settles — a hacked quiet site opens
+  exactly like a new sender. The script directory is the sending user's own (a
+  busy node pointed at another tenant's site). The contact-form pattern no
+  longer matches a site mailing only its owner. Greek and Cyrillic subjects
+  in legacy charsets decode. `whats_wrong` shows alerts still open in
+  cfm-web and ignores a check that stopped running.
+- **Security: scoped history.** `history/events` never returns `mail_*` or
+  `backup_*` rows to a scoped (cPanel) caller, even with the server hostname
+  in scope.
+- `frontend_working` is `unknown`, not `none`, when no edge is found and the
+  DNAT state cannot be read.
+
+### Added
+- **Backup check: a fixed backup now says so (`backup_recovered`).** When a
+  backup finding goes away (the next run succeeds, the CLI reads again, a
+  hung check finishes) the node records `backup_recovered` under the same
+  key. cfm-web uses it to close the open alert: it posts RESOLVED and stops
+  the reminders, instead of reminding about a backup that already works
+  until someone presses Ack. Nodes without a cfm-web that knows the type
+  just keep it in their history.
+- **`GET /api/v1/health/backup` and the MCP tool `backup_status`:** the node's
+  latest backup check — every job with its last result and last successful
+  run, the open findings, and how old the check is. cfm-web polls it for its
+  fleet Backups table and to notice a node that stops reporting backups.
+
+### Fixed
+- **A node with no web frontend is no longer "frontend down".** On a host
+  with no angie/openresty/nginx at all — mailcow in docker (mymail), a
+  nameserver, a backup box — `system_health` reported `frontend_working:
+  down` ("frontend unknown") and `whats_wrong` raised a critical "frontend not
+  serving" every time, so the daily digest flagged mymail as broken while it
+  served mail fine. Such a host now reads `frontend_working: none` and is not
+  a finding. A stopped edge is still detected and still `down`, and so is a
+  host with DNAT on and no edge.
+- **Backup check: a JetBackup "Partially Completed" run is no longer reported
+  as failed.** JetBackup's log status is 1 Completed, 2 Failed, 3 Aborted,
+  4 Partially Completed, 5 Never Finished; the check read 2 as partial and 4
+  as failed. A partial run (on orion and virgo most nights: one account over
+  its own disk quota) now raises `backup_partial` and counts as a backup for
+  freshness, so the false `backup_failed` + `backup_stale` alerts on those
+  nodes resolve on the next check after the upgrade.
+- **`backup_partial` is `info` (was `warning`)** for JetBackup, Virtualmin and
+  Proxmox: it shows on the cfm-web dashboard but reaches no warning/critical
+  alert route. A partial run is the normal state of a hosting node (one
+  customer over quota); vzdump still escalates to `backup_failed` after 3 in a
+  row, and a job that stops backing up goes `backup_stale`.
+
+## 2026.10.07
+
+### Added
+- **Backup check: the health detector now notices backups that stopped.**
+  On orion the daily JetBackup job failed on 19 and 20 Sep and then sat on
+  one account for 16 days; nobody knew until a customer asked. Every 15 min
+  the health detector now reads JetBackup 5 (cPanel and DirectAdmin),
+  Virtualmin scheduled backups and Proxmox vzdump, whichever is installed,
+  and records `backup_failed`, `backup_partial`, `backup_stale`,
+  `backup_stuck`, `backup_uncovered` (Proxmox guests in no job, reported by
+  the node that hosts them), `backup_dest` (backup storage offline or nearly
+  full), `backup_no_job` (nothing enabled) and `backup_check_error` (a
+  backup system unreadable twice in a row, or a hung check) in detection
+  history, where cfm-web picks them up. Weekday-only, weekly and brand-new
+  jobs are judged on their own schedule, so a weekend is not a missed backup.
+  One alert per broken job (not one per failed run); what was published is
+  remembered in `/var/lib/cfm/backup_published.json`, so an upgrade does not
+  re-announce open findings. Proxmox `WARNINGS: n` runs are successes; a node
+  whose vzdump ends in `job errors` every night goes stale. Virtualmin
+  destinations are shown without their credentials. `BACKUP_DEST_FREE_PCT = 0`
+  turns the destination free-space check off.
+  "Stale" counts from the last SUCCESSFUL run: JetBackup advances a job's
+  "last completed" even when the run failed. No local mail is sent. Knobs:
+  `[health] BACKUP_ALERT`, `BACKUP_EVERY`, `BACKUP_STUCK_AFTER`,
+  `BACKUP_PROXMOX_STALE`, `BACKUP_DEST_FREE_PCT`. See `docs/backup-check.md`.
 - **WAF rules that only match behind a stronger rule are now measurable.**
   The WAF log and detection history recorded only the headline rule of each
   request. A logonly rule that runs after a stronger one never appeared at

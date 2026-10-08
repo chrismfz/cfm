@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sec builds a sections map from key→raw-JSON-body pairs.
@@ -596,5 +597,42 @@ func TestWhatsWrong_PanelBurnIn(t *testing.T) {
 	}
 	if countCat(clean.Findings, "panel") != 0 {
 		t.Errorf("clean burn-in should yield no panel finding, got %+v", clean.Findings)
+	}
+}
+
+// frontend_working "none" (no web frontend on the host: mailcow, a nameserver)
+// is not a finding; "down" still is.
+func TestEvalHealthFrontendNoneIsSilent(t *testing.T) {
+	if fs := evalHealth(json.RawMessage(`{"runtime":{"frontend_working":"none","frontend_reason":"no web frontend on this host"}}`)); len(fs) != 0 {
+		t.Fatalf("frontend none must not be a finding: %+v", fs)
+	}
+	if fs := evalHealth(json.RawMessage(`{"runtime":{"frontend_working":"down"}}`)); len(fs) != 1 || fs[0].Severity != sevCritical {
+		t.Fatalf("frontend down must stay critical: %+v", fs)
+	}
+}
+
+// The node's mail-abuse findings replace the raw anomalies, with severity and
+// the context that tells a newsletter from spam.
+func TestEvalMailTrafficUsesTheAbuseFindings(t *testing.T) {
+	now := `"abuse_checked_at":"` + time.Now().UTC().Format(time.RFC3339) + `",`
+	body := `{"available":true,` + now + `"abuse":[{"type":"mail_script_spike","severity":"critical","message":"hotellito: 86 messages sent by scripts in 2h","subject":"hotellito",
+		"context":{"subjects":["Лазерные сканеры"],"rcpt_domains":["gmail.com×812"],"copied_to":"litohotel@outlook.com"}}],
+		"traffic":{"anomalies":[{"addr":"a@x","recent":90,"ratio":9,"kind":"spike"}]}}`
+	got := evalMailTraffic(json.RawMessage(body), map[string]string{})
+	if len(got) != 1 || got[0].Severity != sevCritical || !strings.Contains(got[0].Title, "contact form") ||
+		!strings.Contains(got[0].Detail, "«Лазерные сканеры»") || !strings.Contains(got[0].Detail, "gmail.com×812") {
+		t.Fatalf("want the abuse finding only, with context: %+v", got)
+	}
+	if got := evalMailTraffic(json.RawMessage(`{"available":true,`+now+`"abuse":[],"traffic":{"anomalies":[{"addr":"a@x","recent":90,"ratio":9,"kind":"spike"}]}}`), map[string]string{}); len(got) != 0 {
+		t.Fatalf("a checked node with nothing open has nothing to say: %+v", got)
+	}
+	// an alert still open in cfm-web is still said
+	if got := evalMailTraffic(json.RawMessage(`{"available":true,`+now+`"abuse":[{"type":"mail_script_spike","severity":"warning","message":"shop: 60","still_open":true}]}`), map[string]string{}); len(got) != 1 || !strings.Contains(got[0].Detail, "still open") {
+		t.Fatalf("a still-open alert must be shown: %+v", got)
+	}
+	// a check that stopped running is not trusted: the raw anomalies are used
+	stale := `"abuse_checked_at":"` + time.Now().Add(-time.Hour).UTC().Format(time.RFC3339) + `",`
+	if got := evalMailTraffic(json.RawMessage(`{"available":true,`+stale+`"abuse":[],"traffic":{"anomalies":[{"addr":"a@x","recent":90,"ratio":9,"kind":"spike"}]}}`), map[string]string{}); len(got) != 1 || got[0].Title != "outbound mail spike" {
+		t.Fatalf("stale abuse views fall back to the anomalies: %+v", got)
 	}
 }

@@ -116,6 +116,21 @@ func TestReferenceConfigMatchesRuntimeDefaults(t *testing.T) {
 	if got := kvInt(health, "TMP_PCT", -1); got != healthDefaultTmpPct {
 		t.Errorf("[health] TMP_PCT = %d in stock, code default is %d", got, healthDefaultTmpPct)
 	}
+	for key, want := range map[string]time.Duration{
+		"BACKUP_EVERY":         healthDefaultBackupEvery,
+		"BACKUP_STUCK_AFTER":   healthDefaultBackupStuckAfter,
+		"BACKUP_PROXMOX_STALE": healthDefaultBackupProxmoxStale,
+	} {
+		if got := kvDur(health, key, 999*time.Hour); got != want {
+			t.Errorf("[health] %s = %s in stock, code default is %s", key, got, want)
+		}
+	}
+	if got := kvFlt(health, "BACKUP_DEST_FREE_PCT", -1); got != healthDefaultBackupDestFreePct {
+		t.Errorf("[health] BACKUP_DEST_FREE_PCT = %v in stock, code default is %v", got, healthDefaultBackupDestFreePct)
+	}
+	if !kvBool(health, "BACKUP_ALERT", false) {
+		t.Error("[health] BACKUP_ALERT must be on in stock")
+	}
 	if got := kvDur(health, "TMP_CLEAN_OLDER", 999*time.Hour); got != healthDefaultTmpCleanOlder {
 		t.Errorf("[health] TMP_CLEAN_OLDER = %s in stock, code default is %s", got, healthDefaultTmpCleanOlder)
 	}

@@ -650,6 +650,10 @@ func runDaemon(args []string) {
 	if err := mailtraffic.Enable("/var/lib/cfm/mailtraffic.db"); err != nil {
 		logging.Logf("[mailtraffic] disabled (store unavailable): %v", err)
 	}
+	// Its abuse findings (hacked site / contact form, mailbox spike, hijacked
+	// mailbox → cfm-web alerts) are on unless MAIL_ABUSE_ALERT = 0.
+	// (MAIL_RBL_SPAMHAUS_DQS_KEY and a reload of either: applySystemConfig.)
+	mailtraffic.SetAbuseAlert(engineCfg == nil || !engineCfg.MailAbuseAlertOff)
 	defer mailtraffic.Shutdown()
 
 	// Per-tenant CPU signal (CloudLinux LVE). Starts an in-memory sampler of
@@ -1178,6 +1182,10 @@ func runDaemon(args []string) {
 	applySystemConfig := func(cfg *cfgpkg.Config) {
 		cfg.SystemTweaks.SetDefaults()
 		logging.Init(&cfg.Logging)
+
+		// Mail abuse knobs follow a cfm.conf edit without a restart.
+		mailtraffic.SetAbuseAlert(!cfg.MailAbuseAlertOff)
+		mailtraffic.SetSpamhausDQSKey(cfg.MailRBLSpamhausDQSKey)
 
 		clam.SetLogger(logging.LogfCLAM)
 
