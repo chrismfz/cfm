@@ -206,7 +206,9 @@ fix for F1 is to say what `allow` does and route operators to excludes.
 ## 3a. Fleet-wide country / ASN rules — proposal (2026-10-06)
 
 **Why.** On 2026-10-06 a contact-form spam bot relayed ~990 mails through
-hotellito.gr (titan; WAF rule 520 now blocks that vector). The same bot was
+hotellito.gr (titan; the site's own form config `Cc: {{email}}` copied every
+visitor, so the requests were real submissions — WAF rule 520 only measures this
+vector, the fix was removing the Cc). The same bot was
 hammering 4bag.gr `/contact-us/` on mars from **2 153 IPs, 2 003 of them PJSC
 MegaFon** (AS31133, Russian mobile CGNAT), half of them seen once. Per-IP
 blocking cannot keep up with that pool, and permanent fleet-wide blocks of

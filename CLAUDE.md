@@ -454,12 +454,17 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   `WAF_UPLOAD_CONTENT` (402), `WAF_WEBSHELL` since 2026-07-03 (413, the
   proper-noun drop-path subset), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305)
   `WAF_AUTH_BURST` (510-512, the xmlrpc multicall / pingback / burst
-  rules) — all armed to 1 — plus `WAF_FORM_RELAY` (520, the SP Page Builder
-  ajax_contact mail relay, since 2026-10-06; **held at 0** for burn-in) and
+  rules) — all armed to 1 — plus
   `WAF_TRAVERSAL` since 2026-09-05 (rule 101;
   raw-path rule 103 since 2026-09-22; **held at 0** through its burn-in, see
   below) — those are the only ones that
-  can fire in Phase 1. The rendered `[waf_security]` template is derived from
+  can fire in Phase 1. (`WAF_FORM_RELAY`, rule 520, shipped at block on
+  2026-10-06 and was demoted to logonly measurement on 2026-10-08: on SP Page
+  Builder <= 5.x the request carries the recipient and Cc/Bcc, so a relay is a
+  real submission byte for byte — see `docs/waf.md`.) A held RULE can also
+  ship in code: `heldAutoblockRules` in `waf_security_register.go` is the
+  default for a `RULE_<id>` key, so the hold reaches configs that predate the
+  rule (10019, the TranslatePress id-lookup leg). The rendered `[waf_security]` template is derived from
   the same code defaults, so a fresh `detectors.conf` lists exactly these.
 - **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
   default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and

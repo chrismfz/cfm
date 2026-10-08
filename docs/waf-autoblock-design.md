@@ -192,7 +192,9 @@ COOLDOWN = "20m"
 ; WAF_RCE (320, 329), WAF_UPLOAD_FNAME (401, 414), WAF_UPLOAD_CONTENT (402),
 ; WAF_WEBSHELL (413, the proper-noun drop-path subset, added 2026-07-03),
 ; WAF_CVE (10001+), WAF_PHP_WRAPPER (305), WAF_AUTH_BURST (510-512),
-; WAF_FORM_RELAY (520, SP Page Builder mail relay, added 2026-10-06, held at 0) and
+; (WAF_FORM_RELAY, rule 520, shipped at block 2026-10-06 and is logonly since
+; 2026-10-08: no edge shape separates an SP Page Builder relay from a real
+; submission, so the family has no block rule and is inert) and
 ; WAF_TRAVERSAL (101, promoted 2026-09-05; 103, raw-path, added 2026-09-22). All default to 1 except WAF_TRAVERSAL, held at 0 through its
 ; burn-in (volume: ~2 300 scanner IPs/week fleet-wide); its step runs after every
 ; armed block family in cfm_waf.lua so it cannot shadow their bans. WAF_WEBSHELL was HELD at 0 through burn-in — a webshell

@@ -131,13 +131,14 @@ var wafRuleIDs = []WAFRule{
 	{ID: 510, Name: "rule_xmlrpc_multicall", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	{ID: 511, Name: "rule_xmlrpc_pingback", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	{ID: 512, Name: "rule_xmlrpc_post_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
-	// 520 (2026-10-06): Joomla SP Page Builder `ajax_contact` mail relay — the
-	// addon mails the client-posted base64 `recipient`, so a bot appends a victim
-	// (seen on titan: ~990 spam mails in 7 h from one site). Abuse of a form, not
-	// of auth, but this is the abuse band. Its own family so the autoblock knob
-	// is separate (FORM_RELAY), HELD at 0 for burn-in (waf_security_register.go):
-	// the edge 403 stops the relay; the ban waits for a fleet review.
-	{ID: 520, Name: "rule_form_relay_sppb_contact", ReasonFamily: "WAF_FORM_RELAY", DefaultMode: "block"},
+	// 520 (2026-10-06): Joomla SP Page Builder contact-form mail relay
+	// (ajax_contact / form_builder). Abuse of a form, not of auth, but this is
+	// the abuse band, in its own family. Logonly MEASUREMENT since 2026-10-08:
+	// on SPPB <= 5.x the request itself carries the recipient and Cc/Bcc, so no
+	// edge shape separates a relay from a real submission (see the detector);
+	// it names relay-configured sites and visitor-addressed deliveries. With no
+	// block rule the FORM_RELAY autoblock family is inert.
+	{ID: 520, Name: "rule_form_relay_sppb_contact", ReasonFamily: "WAF_FORM_RELAY", DefaultMode: "logonly"},
 
 	// 6xx header / protocol anomaly
 	{ID: 601, Name: "rule_ctrl_chars", ReasonFamily: "WAF_CTRL_CHARS", DefaultMode: "challenge_v2"},
@@ -184,6 +185,12 @@ var wafRuleIDs = []WAFRule{
 	// 10017: CVE-2026-87902, WordPress core page-template traversal — a
 	// `pagename` query var (GET or POST) carrying a `..` segment. Armed.
 	{ID: 10017, Name: "rule_cve_wp_pagename_traversal", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	// 10018 / 10019: CVE-2026-19632, TranslatePress <= 3.3.1 unauth account
+	// takeover. 10018 = `trp-edit-translation` on a password-reset request
+	// (armed); 10019 = unauthenticated trp_get_translations_regular with
+	// string_ids (edge block, autoblock held per rule in heldAutoblockRules).
+	{ID: 10018, Name: "rule_cve_translatepress_reset_preview", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	{ID: 10019, Name: "rule_cve_translatepress_id_lookup", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

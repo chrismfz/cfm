@@ -17,7 +17,39 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **WAF rules 10018/10019 block the TranslatePress account takeover
+  (CVE-2026-19632, TranslatePress 3.3.1 and older; fixed in 3.3.2).** An
+  attacker asks for the admin's password reset in translation preview, so the
+  plugin stores the reset mail, key included, as a translatable string. They
+  then read it back through an AJAX action that answers anyone. Seen on titan
+  on 2026-10-08 (villadimitramykonos.com). Rule 10018 blocks the reset request
+  (`trp-edit-translation` on a lost-password request). No legitimate request
+  carries it: the fleet's retained edge logs show the attack and nothing else.
+  It is armed: a 6 h ban and a `WAF/CVE-2026-19632` alert. Rule 10019 blocks
+  the read-back (`trp_get_translations_regular` with `string_ids` and no
+  WordPress login). Its ban is held in code (`RULE_10019 = 1` arms it), because
+  a translator whose login expired with the editor open sends the same request.
+  Updating the plugin is still the fix: an admin whose own language is a
+  secondary site language has the mail stored without the preview trick.
+
+### Changed
+- **WAF rule 520 only measures SP Page Builder contact-form relays; it no
+  longer blocks.** The rule shipped on 2026-10-06 keyed on a recipient list
+  that PHPMailer refuses to send, so it blocked nothing that worked. The real
+  abuse on hotellito.gr came from the site's own form setting `Cc: {{email}}`:
+  every submission copied whatever address the visitor typed. On SP Page
+  Builder 5.x and older the browser posts the recipient and Cc/Bcc back
+  (3.8.7–5.x sign them with a salt shared by every install). A relay is
+  therefore an ordinary submission, and no edge rule can block it without
+  blocking real visitors. Rule 520 now logs, for `ajax_contact` and
+  `form_builder` alike:
+  - sites whose Cc/Bcc copies the visitor (`CC_VISITOR_TEMPLATE`);
+  - submissions that mail an address the visitor typed (`DELIVERS_TO_VISITOR`);
+  - literal copies to outside domains, such as the `admin@yourcompany.com`
+    placeholder (`CC_FOREIGN_LITERAL`).
+  The fix is per site: remove the visitor-copy Cc/Bcc and update SP Page
+  Builder to 6.x. The `FORM_RELAY` autoblock key is now inert.
 
 ## 2026.10.08
 
@@ -219,7 +251,9 @@ _Nothing yet._
   outright, injects a victim on the owner's own mail domain or adds a decoy on
   the victim's, or pads the recipient past the WAF's 32 KB body window (logged
   as `BODY_PAST_WINDOW`). Updating SP Page Builder (3.8 or later) closes all of
-  them.
+  them. _Corrected in [Unreleased]: this shape cannot deliver, the abuse used
+  the site's own `Cc: {{email}}`, and only 6.x stops a browser rewriting the
+  recipient. Rule 520 is logonly now._
 
 ### Fixed
 - **The challenge page no longer serves the PoW to clients the decision

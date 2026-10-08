@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -120,5 +121,34 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	}
 	if over["WAF_WEBSHELL"] != 3 {
 		t.Errorf("WEBSHELL=3 override not applied: got %d", over["WAF_WEBSHELL"])
+	}
+}
+
+// TestWAFSecurityRuleHolds pins the per-rule code holds: each names a real
+// edge-block rule (a hold on anything else is meaningless), the hold is the
+// default with no RULE_<id> key, and an operator's RULE_<id> still wins.
+func TestWAFSecurityRuleHolds(t *testing.T) {
+	for id := range heldAutoblockRules {
+		n, err := strconv.Atoi(id)
+		if err != nil {
+			t.Fatalf("held rule id %q is not numeric", id)
+		}
+		r, ok := webdetector.WAFRuleByID(n)
+		if !ok {
+			t.Errorf("held rule %s is not in the WAF registry", id)
+			continue
+		}
+		if r.DefaultMode != "block" {
+			t.Errorf("held rule %s defaults to %q at the edge, not block — drop the hold", id, r.DefaultMode)
+		}
+	}
+	if got, ok := wafSecurityRuleOverrides(KV{})["10019"]; !ok || got != 0 {
+		t.Errorf("RULE_10019 should default to the code hold 0, got %d (present=%v)", got, ok)
+	}
+	if got := wafSecurityRuleOverrides(KV{"RULE_10019": "1"})["10019"]; got != 1 {
+		t.Errorf("operator RULE_10019 = 1 must win over the code hold, got %d", got)
+	}
+	if _, ok := wafSecurityRuleOverrides(KV{})["10018"]; ok {
+		t.Errorf("10018 (TranslatePress reset preview) must stay armed with the family, not held")
 	}
 }

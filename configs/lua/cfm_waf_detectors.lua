@@ -3938,8 +3938,8 @@ end
 -- Multipart: split on the boundary once (linear in the body). The field name
 -- comes from the part's Content-Disposition header only (never `filename=`);
 -- the value is the whole part body (PHP keeps every line; the base64 decoder
--- skips the CR/LF).
-local function sppb_collect_multipart(b, ct_raw, rows, top)
+-- skips the CR/LF). fn(name, value) runs once per named part, in order.
+local function each_multipart_field(b, ct_raw, fn)
   local bnd = ct_raw:match('[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]="([^"]+)"')
               or ct_raw:match("[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]=([^;%s]+)")
   if not bnd or bnd == "" then return end
@@ -3965,7 +3965,7 @@ local function sppb_collect_multipart(b, ct_raw, rows, top)
       end
       if name then
         local v = part:sub(he + 1):gsub("\r?\n$", "")
-        sppb_put(name, v, rows, top)
+        fn(name, v)
       end
     end
     if not nxt then break end
@@ -3973,24 +3973,119 @@ local function sppb_collect_multipart(b, ct_raw, rows, top)
   end
 end
 
+local function sppb_collect_multipart(b, ct_raw, rows, top)
+  each_multipart_field(b, ct_raw, function(k, v) sppb_put(k, v, rows, top) end)
+end
+
+-- Every form field PHP would see in $_GET / $_POST: the query string, then an
+-- urlencoded or multipart body (the whole surface the edge handed over; cfm.lua
+-- already caps the body at waf_body_max_len). fn(name, value) gets the decoded
+-- key and value, query string first, so a caller that keeps the last value per
+-- name gets $_REQUEST's POST-over-GET precedence.
+local function each_request_field(args, body, headers, fn)
+  local function pairs_of(s)
+    if not s or s == "" then return end
+    for pair in ("&" .. s):gmatch("&([^&]*)") do
+      local k, v = pair:match("^([^=]*)=(.*)$")
+      if k then fn(form_decode(k), form_decode(v)) end
+    end
+  end
+  pairs_of(args)
+  if body and body ~= "" then
+    local ct_raw = header_string(headers and (headers["Content-Type"] or headers["content-type"])) or ""
+    local ct = lower(ct_raw)
+    if has(ct, "multipart/form-data") then
+      each_multipart_field(body, ct_raw, fn)
+    elseif has(ct, "application/x-www-form-urlencoded") then
+      pairs_of(body)
+    end
+  end
+end
+
 local function addr_domain(a)
   return a:match("@([^@]*)$") or ""
 end
 
-function _M.detect_sppb_contact_relay(args, body, headers, _nab)
-  -- Cheap gate: the addon name must appear somewhere (decoded). _nab caps each
-  -- side at body_budget(headers), so it may rule the request out only when it
-  -- saw both sides whole (the same contract as rule 10017). get_norm_ab() is
-  -- already built for every request by the SQLi rules, so this costs one find.
+-- Rule 520 — SP Page Builder contact-form mail relay, MEASUREMENT ONLY.
+--
+-- Both form addons (ajax_contact, form_builder) mail whatever the browser
+-- posts back. Read from the installed addons on the fleet (2026-10-08):
+--   * ajax_contact and form_builder <= 3.8.6 send `recipient` and (form_builder)
+--     `additional_header` as plain base64 data[N] fields;
+--   * form_builder 3.8.7 - 5.x pack them into `form_id` = base64(JSON) ":"
+--     md5(salt . payload), with ONE hard-coded salt shared by every install,
+--     so the "signature" is forgeable by anyone holding the plugin;
+--   * 6.x signs with an HMAC over the site's Joomla secret, the first version
+--     an outsider cannot rewrite.
+-- getAjax() then mails recipient + the Cc: and Bcc: lines of the header, after
+-- replacing {{field}} with what the visitor typed. So on <= 5.x a crafted
+-- request can mail anyone, one address per slot, and it is byte-for-byte the
+-- shape of a real submission: the edge cannot tell an attacker's recipient from
+-- the owner's. And a site whose own header says `Cc: {{email}}` (hotellito.gr,
+-- 2026-10-06, ~990 mails in 7 h) relays with untouched requests. Neither has a
+-- block-tier signature, so this rule only measures (the call site clamps every
+-- tag to logonly): it names the sites still configured as relays and the
+-- submissions that deliver to an address the visitor typed. The fix is the
+-- site's: drop the visitor-copy Cc/Bcc and update SP Page Builder to 6.x.
+--
+-- Tags, first match wins:
+--   CC_VISITOR_TEMPLATE  the site's Cc:/Bcc: copies a visitor field ({{...}})
+--   DELIVERS_TO_VISITOR  recipient/Cc/Bcc holds an address the visitor typed
+--                        into the form
+--   CC_FOREIGN_LITERAL   a literal Cc:/Bcc: on a domain neither the recipient
+--                        nor the site uses (a template placeholder like
+--                        admin@yourcompany.com, or a crafted copy)
+--   MULTI_RECIPIENT      a slot holds 2+ addresses (PHPMailer rejects the list
+--                        on Joomla 3, so this is a probe, not a relay)
+--   BODY_PAST_WINDOW     no recipient seen, and the body ran past the window
+-- The addon is matched after Joomla's CMD filter (the filter the controller
+-- builds the addon's file path with), so `ajax_<>contact` still matches. The
+-- second return value names it: SPPB_AJAX_CONTACT or SPPB_FORM_BUILDER.
+local SPPB_ADDON_LABEL = { ajax_contact = "SPPB_AJAX_CONTACT", form_builder = "SPPB_FORM_BUILDER" }
+-- The addons' own hidden/control fields; every other data[] field is visitor input.
+local SPPB_CONTROL_FIELDS = {
+  recipient = true, additional_header = true, form_id = true, from = true,
+  addon_id = true, email_subject = true, email_template = true,
+  success_message = true, failed_message = true, captcha_type = true,
+  view_type = true, module_id = true, captcha_question = true,
+  captcha_answer = true, ["g-recaptcha-response"] = true, policy = true,
+  is_policy = true, from_email = true, from_name = true,
+}
+
+local function sppb_addrs(s)
+  local out = {}
+  for a in lower(s or ""):gmatch("[^%s,;<>\"'%z]+@[^%s,;<>\"'%z]+") do out[#out + 1] = a end
+  return out
+end
+
+-- A JSON string member of the form_id payload, with the \/ escapes undone.
+local function sppb_json_str(j, key)
+  local v = j:match('"' .. key .. '"%s*:%s*"([^"]*)"')
+  return v and v:gsub("\\/", "/") or nil
+end
+
+-- The site's own domain and its subdomains count as the site.
+local function same_site(domain, host)
+  if domain == "" or host == "" then return false end
+  return domain == host or host:sub(-(#domain + 1)) == "." .. domain
+         or domain:sub(-(#host + 1)) == "." .. host
+end
+
+function _M.detect_sppb_form_relay(args, body, headers, _nab)
+  -- Cheap gate on the field names (they arrive as data[N][name] VALUES, so they
+  -- are in the decoded surface whatever the addon is called). _nab caps each
+  -- side at body_budget(headers): it may rule the request out only when it saw
+  -- both sides whole (the same contract as rule 10017).
+  -- A body the edge cut short (Content-Length past what it handed over) may
+  -- hide the fields, so it always takes the full parse.
   local bn = body_budget(headers)
-  if _nab and #(args or "") <= bn and #(body or "") <= bn
-     and not has(_nab, "ajax_contact") then
+  local cl = tonumber(header_string(headers and (headers["Content-Length"] or headers["content-length"])) or "")
+  local cut = cl ~= nil and cl > #(body or "")
+  if _nab and not cut and #(args or "") <= bn and #(body or "") <= bn
+     and not (has(_nab, "recipient") or has(_nab, "form_id") or has(_nab, "additional_header")) then
     return nil
   end
 
-  -- The whole surface the edge handed over (cfm.lua already caps the body at
-  -- waf_body_max_len): a message padded past the generic scan budget must not
-  -- hide the recipient. Linear: one pass per source, last-wins rows.
   local rows, top = {}, {}
   sppb_collect_pairs(args, rows, top)
   if body and body ~= "" then
@@ -4002,51 +4097,151 @@ function _M.detect_sppb_contact_relay(args, body, headers, _nab)
       sppb_collect_pairs(body, rows, top)
     end
   end
-  if top.addon ~= "ajax_contact" then return nil end
+  local label = SPPB_ADDON_LABEL[top.addon or ""]
+  if not label then return nil end
   -- An explicit other component routes elsewhere (the SEF router only DEFAULTS
   -- `option`); an absent one may come from the page URL.
   if top.option and top.option ~= "com_sppagebuilder" then return nil end
 
-  local recipients, emails = {}, {}
+  local recipient, header, form_id
+  local typed = {}
   for _, row in pairs(rows) do
     if row.name and row.value then
-      local nm = trim_lower(row.name)
-      if nm == "recipient" then
-        recipients[#recipients + 1] = row.value
-      elseif nm == "email" then
-        local em = trim_lower(row.value)
-        if em ~= "" then emails[em] = true end
+      local nm = row.name:gsub("^%s+", ""):gsub("%s+$", "")
+      local lnm = lower(nm)
+      if lnm == "recipient" then recipient = php_b64_decode(row.value)
+      elseif lnm == "additional_header" then header = php_b64_decode(row.value)
+      elseif lnm == "form_id" then form_id = row.value
+      elseif not SPPB_CONTROL_FIELDS[lnm] then
+        local v = trim_lower(row.value)
+        if v:find("@", 1, true) then typed[v] = true end
       end
     end
   end
+  if form_id then
+    local j = php_b64_decode(form_id:match("^[^:]*"))
+    if j then
+      local r = sppb_json_str(j, "recipient_email")
+      local h = sppb_json_str(j, "additional_header")
+      if r then recipient = php_b64_decode(r) or recipient end
+      if h then header = php_b64_decode(h) or header end
+    end
+  end
 
-  if #recipients == 0 then
-    local cl = tonumber(header_string(headers and (headers["Content-Length"] or headers["content-length"])) or "")
-    if cl and cl > #(body or "") then return "BODY_PAST_WINDOW" end
+  if not recipient and not header then
+    if cut then return label, "BODY_PAST_WINDOW" end
     return nil
   end
 
-  local multi = false
-  for _, v in ipairs(recipients) do
-    local dec = php_b64_decode(v)
-    if dec then
-      local addrs, per_domain = {}, {}
-      for a in lower(dec):gmatch("[^%s,;<>\"'%z]+@[^%s,;<>\"'%z]+") do
-        addrs[#addrs + 1] = a
-        local d = addr_domain(a)
-        per_domain[d] = (per_domain[d] or 0) + 1
-      end
-      if #addrs >= 2 then
-        multi = true
-        for _, a in ipairs(addrs) do
-          if emails[a] and per_domain[addr_domain(a)] == 1 then
-            return "RECIPIENT_HAS_SUBMITTER"
-          end
-        end
-      end
+  -- getAjax(): explode("\n") the header, then explode(':') each line and take
+  -- the text between the first and second colon; the name compares lowercased
+  -- but untrimmed. The last Cc and the last Bcc line win. A {{field}} in either
+  -- is the site copying what the visitor typed: tagged before any address
+  -- check, so the substitution getAjax() then does never has to be emulated.
+  local copies = {}
+  for line in ((header or "") .. "\n"):gmatch("([^\n]*)\n") do
+    local k, v = line:match("^([^:]*):([^:]*)")
+    if k then
+      k = lower(k)
+      if k == "cc" or k == "bcc" then copies[k] = v:gsub("^%s+", ""):gsub("%s+$", "") end
     end
   end
-  if multi then return "MULTI_RECIPIENT" end
+  local slots = { recipient or "" }
+  for _, k in ipairs({ "cc", "bcc" }) do
+    local v = copies[k]
+    if v then
+      if v:find("{{", 1, true) then return label, "CC_VISITOR_TEMPLATE" end
+      slots[#slots + 1] = v
+    end
+  end
+
+  local multi, rdomains = false, {}
+  for _, a in ipairs(sppb_addrs(recipient)) do rdomains[addr_domain(a)] = true end
+  for _, s in ipairs(slots) do
+    local list = sppb_addrs(s)
+    if #list >= 2 then multi = true end
+    for _, a in ipairs(list) do
+      if typed[a] then return label, "DELIVERS_TO_VISITOR" end
+    end
+  end
+  local host = lower(header_string(headers and (headers["Host"] or headers["host"])) or "")
+  host = host:gsub(":%d+$", ""):gsub("^www%.", "")
+  for _, k in ipairs({ "cc", "bcc" }) do
+    for _, a in ipairs(sppb_addrs(copies[k])) do
+      local d = addr_domain(a)
+      if not rdomains[d] and not same_site(d, host) then return label, "CC_FOREIGN_LITERAL" end
+    end
+  end
+  if multi then return label, "MULTI_RECIPIENT" end
+  return nil
+end
+
+-- Rules 10018 / 10019 — CVE-2026-19632, TranslatePress (translatepress-
+-- multilingual) <= 3.3.1 unauthenticated account takeover (CVSS 9.8, fixed in
+-- 3.3.2). Source: the 3.3.1 -> 3.3.2 diff from downloads.wordpress.org, read
+-- 2026-10-08, and the titan capture (villadimitramykonos.com, 2026-10-08).
+-- Every 2.x/3.x release on the fleet carries the same code path.
+--
+-- The chain: (1) the attacker requests a password reset for the admin. With
+-- `trp-edit-translation=preview` on the request, force_language_in_preview()
+-- switches the request to the first non-default language, so wp_mail_filter()
+-- runs the reset mail through translate_page() and automatic string saving
+-- stores its lines — the reset URL with its key included — as original
+-- strings. (2) wp_ajax_nopriv_trp_get_translations_regular answers
+-- unauthenticated callers and looks dictionary rows up by the client's
+-- `string_ids`, so the attacker walks the ids and reads the key back. 3.3.2
+-- skips mail translation on wp-login.php and admin requests and makes the
+-- action editor-only.
+--
+-- 10018 RESET_PREVIEW: `trp-edit-translation` on a password-reset request —
+-- wp-login.php's lostpassword/retrievepassword action, or any POST carrying
+-- `user_login` (WooCommerce's lost-password form mails through the same
+-- filter). TranslatePress's own preview strips the parameter from wp-login
+-- links (is_admin_link), so no legitimate request carries it there; fleet-wide
+-- the only sighting in the retained edge logs (2026-09-15 .. 10-08) is the
+-- titan attack. The `action` the attacker uses is not needed to be on the URL:
+-- WordPress reads $_REQUEST.
+--
+-- 10019 ID_LOOKUP: action=trp_get_translations_regular with a non-empty
+-- `string_ids` from a client without a WordPress login cookie. Only
+-- trp-editor.js sends string_ids, and only logged-in translators load it; the
+-- logged-out front end (trp-translate-dom-changes.js) never does. The cookie
+-- gate is an FP filter, not a control: a junk wordpress_logged_in_ cookie
+-- bypasses it (WordPress then treats the caller as logged out and the leak
+-- works). 10018 stops the storing step for the default-locale admin; an admin
+-- whose own locale is a secondary language has the reset mail stored without
+-- the preview trick, and only the update closes that case.
+local TRP_RESET_ACTIONS = { lostpassword = true, retrievepassword = true }
+
+local function trp_fields(args, body, headers)
+  local f = {}
+  each_request_field(args, body, headers, function(k, v) f[php_var_name(k)] = v end)
+  return f
+end
+
+function _M.detect_cve_translatepress_reset_preview(method, args, body, headers, _nab)
+  local bn = body_budget(headers)
+  if _nab and #(args or "") <= bn and #(body or "") <= bn
+     and not has(_nab, "trp-edit-translation") then
+    return nil
+  end
+  local f = trp_fields(args, body, headers)
+  if f["trp-edit-translation"] == nil then return nil end
+  if TRP_RESET_ACTIONS[f.action or ""] then return "LOSTPASSWORD" end
+  if method == "post" and f.user_login ~= nil then return "RESET_FORM" end
+  return nil
+end
+
+function _M.detect_cve_translatepress_id_lookup(args, body, headers, cookie, _nab)
+  local bn = body_budget(headers)
+  if _nab and #(args or "") <= bn and #(body or "") <= bn
+     and not (has(_nab, "string_ids") and has(_nab, "trp_get_translations_regular")) then
+    return nil
+  end
+  if has(lower(cookie or ""), "wordpress_logged_in_") then return nil end
+  local f = trp_fields(args, body, headers)
+  if f.action ~= "trp_get_translations_regular" then return nil end
+  if (f.string_ids or ""):find("%d") then return "STRING_IDS" end
   return nil
 end
 

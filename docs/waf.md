@@ -1076,7 +1076,7 @@ Current assignments:
   501  rule_auth_burst                 510  rule_xmlrpc_multicall
   502  rule_auth_wp_checks             511  rule_xmlrpc_pingback
                                        512  rule_xmlrpc_post_burst
-                                       520  rule_form_relay_sppb_contact (block; SP Page Builder ajax_contact mail relay)
+                                       520  rule_form_relay_sppb_contact (logonly; SP Page Builder contact-form relay measurement)
 
 6xx — Header / protocol anomaly
   601  rule_ctrl_chars                 605  rule_crlf_injection
@@ -1286,6 +1286,47 @@ The detector checks base64 first, so a base64 opener is attributed to **438** an
 Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see their FP notes above). Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
 
 ---
+
+## Rule 520 — SP Page Builder contact-form relay (measurement only)
+
+Rule 520 shipped at `block` on 2026-10-06 against the hotellito.gr relay
+(titan, ~990 mails in 7 h) and was demoted to `logonly` on 2026-10-08. It
+had keyed on `addon=ajax_contact` with a decoded recipient LIST holding the
+visitor's email. The real abuse was `form_builder` with the site's own
+setting `Cc: {{email}}`: the requests were ordinary submissions. The list
+shape cannot deliver (PHPMailer rejects a comma list in one recipient), and
+the cheap gate needed the literal `ajax_contact`, which `ajax_<>contact`
+dodges (Joomla's CMD filter strips the brackets before it builds the
+addon's file path).
+
+What the installed addons do (read on earth/titan, 2026-10-08):
+
+| SP Page Builder | Where recipient / Cc / Bcc come from |
+| --- | --- |
+| ajax_contact, form_builder <= 3.8.6 | plain base64 `data[]` fields (`recipient`, `additional_header`) posted by the browser |
+| form_builder 3.8.7 – 5.x | `form_id` = base64(JSON) `:` md5(salt . payload), with one hard-coded salt shared by every install — forgeable |
+| form_builder 6.x | HMAC over the site's Joomla `secret` — the first version an outsider cannot rewrite |
+
+`getAjax()` then mails the recipient plus one Cc and one Bcc taken from the
+header, after replacing `{{field}}` with what the visitor typed. So on
+<= 5.x a crafted request can mail anyone, and it is the same bytes as a real
+submission: the edge does not know the configured recipient. No block-tier
+signature exists, so the call site clamps every tag to `logonly`, even when
+the rule is set to `block`. The tags (reason
+`WAF_FORM_RELAY:SPPB_AJAX_CONTACT|SPPB_FORM_BUILDER:<TAG>`), first match wins:
+
+| Tag | Meaning | Use |
+| --- | --- | --- |
+| `CC_VISITOR_TEMPLATE` | the site's Cc/Bcc copies a visitor field (`{{email}}`) | find relay-configured sites fleet-wide |
+| `DELIVERS_TO_VISITOR` | recipient/Cc/Bcc holds an address the visitor typed | crafted relays, and owners testing their own form |
+| `CC_FOREIGN_LITERAL` | a literal Cc/Bcc on a domain neither the site nor the recipient uses | template placeholders (`admin@yourcompany.com`) and crafted copies |
+| `MULTI_RECIPIENT` | a slot holds 2+ addresses | probes of the list shape |
+| `BODY_PAST_WINDOW` | no recipient seen in a body the edge cut short | coverage gap marker |
+
+The fix is the site's: remove the visitor-copy Cc/Bcc, and update SP Page
+Builder to 6.x. Mail-side volume (one account sending to many outside
+recipients) is the mail-abuse detector's job (`docs/mail-abuse.md`). The
+`WAF_FORM_RELAY` autoblock family has no block rule and is inert.
 
 ## Per-vhost rule exclusions
 
