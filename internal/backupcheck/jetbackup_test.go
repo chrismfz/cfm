@@ -67,8 +67,8 @@ func TestJetBackupOrion19SepPartialRunIsAWarning(t *testing.T) {
 	}
 	got := byType(fs)
 	f, ok := got[TypePartial]
-	if !ok || f.Severity != SevWarning || f.Key != "jb:partial:603f830764375f7820538382" || !strings.Contains(f.Message, "Daily-Monthly") {
-		t.Fatalf("want a backup_partial warning for run19, got %+v", fs)
+	if !ok || f.Severity != SevInfo || f.Key != "jb:partial:603f830764375f7820538382" || !strings.Contains(f.Message, "Daily-Monthly") {
+		t.Fatalf("want an info backup_partial for run19, got %+v", fs)
 	}
 	if _, ok := got[TypeFailed]; ok {
 		t.Fatalf("status 4 is Partially Completed, not a failure: %+v", fs)
@@ -165,8 +165,8 @@ func TestJetBackupPartialRunIsAWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := byType(fs)
-	if f := got[TypePartial]; f.Severity != SevWarning {
-		t.Fatalf("want backup_partial warning, got %+v", fs)
+	if f := got[TypePartial]; f.Severity != SevInfo {
+		t.Fatalf("want an info backup_partial, got %+v", fs)
 	}
 	if _, ok := got[TypeStale]; ok {
 		t.Fatal("a partial run is a success for freshness")

@@ -242,7 +242,7 @@ func evalJetBackup(jobsRaw, logsRaw []byte, now time.Time, th Thresholds) (_ []J
 				})
 			case "partial":
 				findings = append(findings, Finding{
-					Type: TypePartial, Severity: SevWarning, Adapter: "jetbackup",
+					Type: TypePartial, Severity: SevInfo, Adapter: "jetbackup",
 					Key:     "jb:partial:" + j.ID,
 					Message: fmt.Sprintf("%s: last run only PARTIALLY completed — some accounts were not backed up (ended %s)", label, end.UTC().Format(time.RFC3339)),
 				})

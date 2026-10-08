@@ -359,7 +359,7 @@ func evalVirtualmin(schedRaw, logsRaw []byte, info map[string]vmSchedInfo, now t
 				}
 				findings = append(findings, Finding{Type: TypeFailed, Severity: SevCritical, Adapter: "virtualmin", Key: "vm:failed:" + id, Message: msg})
 			case "partial":
-				findings = append(findings, Finding{Type: TypePartial, Severity: SevWarning, Adapter: "virtualmin", Key: "vm:partial:" + id,
+				findings = append(findings, Finding{Type: TypePartial, Severity: SevInfo, Adapter: "virtualmin", Key: "vm:partial:" + id,
 					Message: fmt.Sprintf("%s: last scheduled run had %d failed domain(s) (started %s)", label, latest.failed, at)})
 			}
 		}

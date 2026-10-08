@@ -229,7 +229,7 @@ func evalProxmox(node string, jobsRaw, uncoveredRaw, tasksRaw, storageRaw, resou
 				break
 			}
 			findings = append(findings, Finding{
-				Type: TypePartial, Severity: SevWarning, Adapter: "proxmox",
+				Type: TypePartial, Severity: SevInfo, Adapter: "proxmox",
 				Key:     "pve:partial:" + node,
 				Message: fmt.Sprintf("vzdump on %s finished with job errors (some guests failed; ended %s) — see the task log", node, end),
 			})
