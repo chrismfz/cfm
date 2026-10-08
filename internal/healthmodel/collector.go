@@ -797,7 +797,16 @@ func readProcComm(pid int) string {
 func deriveFrontendWorking(frontend, dnatState string) (string, string, FrontendDebug) {
 	frontend = strings.ToLower(strings.TrimSpace(frontend))
 	if frontend == "" || frontend == "unknown" {
-		return "down", "frontend unknown", FrontendDebug{}
+		// "unknown" means no angie/openresty/nginx at all on this host: no
+		// binary, unit or config (a stopped edge is still detected, and is
+		// "service inactive" below). A host that serves no web through CFM —
+		// mailcow in docker (mymail), a nameserver, a backup box — is not
+		// down. With DNAT on, though, traffic is redirected to an edge that
+		// is not there: that IS down.
+		if strings.EqualFold(strings.TrimSpace(dnatState), "on") {
+			return "down", "frontend unknown: DNAT is on but no edge (angie/openresty/nginx) was found", FrontendDebug{}
+		}
+		return "none", "no web frontend on this host (no angie/openresty/nginx)", FrontendDebug{}
 	}
 
 	candidates := map[string]frontendSignal{

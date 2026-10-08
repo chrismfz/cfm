@@ -31,6 +31,14 @@ back-filled here — see the git/PR history for that period.
   fleet Backups table and to notice a node that stops reporting backups.
 
 ### Fixed
+- **A node with no web frontend is no longer "frontend down".** On a host
+  with no angie/openresty/nginx at all — mailcow in docker (mymail), a
+  nameserver, a backup box — `system_health` reported `frontend_working:
+  down` ("frontend unknown") and `whats_wrong` raised a critical "frontend not
+  serving" every time, so the daily digest flagged mymail as broken while it
+  served mail fine. Such a host now reads `frontend_working: none` and is not
+  a finding. A stopped edge is still detected and still `down`, and so is a
+  host with DNAT on and no edge.
 - **Backup check: a JetBackup "Partially Completed" run is no longer reported
   as failed.** JetBackup's log status is 1 Completed, 2 Failed, 3 Aborted,
   4 Partially Completed, 5 Never Finished; the check read 2 as partial and 4
