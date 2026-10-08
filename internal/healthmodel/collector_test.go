@@ -277,3 +277,21 @@ func TestPopulateConntrackUsage(t *testing.T) {
 		t.Fatalf("unexpected conntrack usage: %+v", network)
 	}
 }
+
+// A host with no angie/openresty/nginx at all (mailcow in docker, a
+// nameserver) is not "down" — unless DNAT redirects traffic to an edge that
+// is not there.
+func TestDeriveFrontendWorking_NoFrontendIsNotDown(t *testing.T) {
+	for _, fe := range []string{"", "unknown"} {
+		v, reason, _ := deriveFrontendWorking(fe, "off")
+		if v != "none" || reason == "" {
+			t.Fatalf("frontend %q, DNAT off: got %q (%s), want none", fe, v, reason)
+		}
+		if v, _, _ := deriveFrontendWorking(fe, "unknown"); v != "none" {
+			t.Fatalf("frontend %q, DNAT unknown: got %q, want none", fe, v)
+		}
+		if v, _, _ := deriveFrontendWorking(fe, "on"); v != "down" {
+			t.Fatalf("frontend %q, DNAT on: got %q, want down", fe, v)
+		}
+	}
+}

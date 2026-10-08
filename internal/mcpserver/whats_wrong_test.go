@@ -598,3 +598,14 @@ func TestWhatsWrong_PanelBurnIn(t *testing.T) {
 		t.Errorf("clean burn-in should yield no panel finding, got %+v", clean.Findings)
 	}
 }
+
+// frontend_working "none" (no web frontend on the host: mailcow, a nameserver)
+// is not a finding; "down" still is.
+func TestEvalHealthFrontendNoneIsSilent(t *testing.T) {
+	if fs := evalHealth(json.RawMessage(`{"runtime":{"frontend_working":"none","frontend_reason":"no web frontend on this host"}}`)); len(fs) != 0 {
+		t.Fatalf("frontend none must not be a finding: %+v", fs)
+	}
+	if fs := evalHealth(json.RawMessage(`{"runtime":{"frontend_working":"down"}}`)); len(fs) != 1 || fs[0].Severity != sevCritical {
+		t.Fatalf("frontend down must stay critical: %+v", fs)
+	}
+}
