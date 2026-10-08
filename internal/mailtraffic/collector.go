@@ -3,6 +3,7 @@ package mailtraffic
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -37,14 +38,21 @@ type Collector struct {
 	corr map[string]*mailmeter.Correlator // per resolved log path (Postfix QID correlation)
 	stop chan struct{}
 	done chan struct{}
+
+	// mail-abuse findings (abuse.go): per-line context + edge state
+	ab       *tracker
+	pub      *publisher
+	lastEval time.Time
 }
 
-func newCollector(st *Store) *Collector {
+func newCollector(st *Store, abuseStatePath string) *Collector {
 	return &Collector{
 		st:   st,
 		corr: map[string]*mailmeter.Correlator{},
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
+		ab:   newTracker(),
+		pub:  &publisher{path: abuseStatePath},
 	}
 }
 
@@ -67,11 +75,25 @@ type parseDeliveryFn func(string) (mailmeter.Delivery, bool)
 
 func (c *Collector) pollOnce(now time.Time) {
 	if p := firstExisting(eximPaths); p != "" {
-		c.pollFile(now, p, mailmeter.ParseEximLine, mailmeter.ParseEximDelivery)
+		c.pollFile(now, p, mailmeter.ParseEximLine, mailmeter.ParseEximDelivery, c.ab.observeExim)
 	}
 	if p := firstExisting(maillogPaths); p != "" {
-		c.pollFile(now, p, mailmeter.ParseMaillogLine, mailmeter.ParsePostfixDelivery)
+		c.pollFile(now, p, mailmeter.ParseMaillogLine, mailmeter.ParsePostfixDelivery, c.ab.observeMaillog)
 	}
+	c.evalAbuse(now)
+}
+
+// evalAbuse runs the mail-abuse check every abuseEvalEvery (abuse.go).
+func (c *Collector) evalAbuse(now time.Time) {
+	if !abuseOn.Load() || now.Sub(c.lastEval) < abuseEvalEvery {
+		return
+	}
+	c.lastEval = now
+	fs, recent, ok := c.ab.evaluate(c.st, now)
+	if !ok {
+		return // the store could not be read: change nothing
+	}
+	c.pub.apply(fs, recent, now)
 }
 
 // pollFile ingests new lines from one log and flushes the poll's counters. The
@@ -87,7 +109,7 @@ func (c *Collector) pollOnce(now time.Time) {
 // double-counted; the chunk is re-read next poll and the QID→sender map may have
 // already advanced past a freed QID, undercounting at most the sends whose
 // submission was in an earlier already-persisted poll — acceptable here.
-func (c *Collector) pollFile(now time.Time, path string, parse parseFn, parseDeliv parseDeliveryFn) {
+func (c *Collector) pollFile(now time.Time, path string, parse parseFn, parseDeliv parseDeliveryFn, observe func(string, time.Time)) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return
@@ -137,6 +159,9 @@ func (c *Collector) pollFile(now time.Time, path string, parse parseFn, parseDel
 		}
 		consumed += int64(len(line))
 		corr.Feed(parse(line), &r)
+		if observe != nil {
+			observe(line, now)
+		}
 		if d, ok := parseDeliv(line); ok {
 			deliv[DeliveryKey{Provider: d.Provider, Outcome: int(d.Outcome), Reason: d.Reason}]++
 		}
@@ -189,7 +214,7 @@ func Enable(path string) error {
 		return err
 	}
 	shared = st
-	coll = newCollector(st)
+	coll = newCollector(st, filepath.Join(filepath.Dir(path), "mail_abuse_published.json"))
 	go coll.run()
 	logging.Logf("[mailtraffic] enabled: %s", path)
 	return nil

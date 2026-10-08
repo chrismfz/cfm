@@ -650,6 +650,9 @@ func runDaemon(args []string) {
 	if err := mailtraffic.Enable("/var/lib/cfm/mailtraffic.db"); err != nil {
 		logging.Logf("[mailtraffic] disabled (store unavailable): %v", err)
 	}
+	// Its abuse findings (hacked site / contact form, mailbox spike, hijacked
+	// mailbox → cfm-web alerts) are on unless MAIL_ABUSE_ALERT = 0.
+	mailtraffic.SetAbuseAlert(engineCfg == nil || !engineCfg.MailAbuseAlertOff)
 	defer mailtraffic.Shutdown()
 
 	// Per-tenant CPU signal (CloudLinux LVE). Starts an in-memory sampler of

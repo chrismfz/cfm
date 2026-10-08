@@ -17,7 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Mail abuse reaches the team channel.** Every 5 min the Mail Monitor now
+  raises `mail_script_spike` (a site's scripts — a hacked site or an abused
+  contact form — sending far above that user's own history, with the script
+  directory, the envelope sender and the number of different recipients),
+  `mail_outbound_spike` (a mailbox doing the same) and `mail_hijack` (a
+  mailbox logging in from ≥ 3 countries or ≥ 10 IPs within an hour), and
+  resolves each with `mail_recovered`. They go to `detection_history` for
+  cfm-web to alert on. On titan a contact form sent ~1 000 messages a day for
+  days without tripping `exim_relays`' fixed 110-per-15-min threshold; the
+  per-user baseline sees it in the first hour. Alert only. `MAIL_ABUSE_ALERT
+  = 0` in cfm.conf turns it off. See `docs/mail-abuse.md`.
 
 ## 2026.10.08
 

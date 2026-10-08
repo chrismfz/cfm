@@ -276,20 +276,32 @@ func (s *Store) deliverability(cutoff int64, limit int) (*Deliverability, error)
 // sustained for many hours slowly bleeds into the sender's own baseline and can
 // fall back under the ratio after ~2 days — detection is strongest at onset.
 func (s *Store) anomalies(now time.Time, scope map[string]struct{}, limit int) ([]Anomaly, error) {
+	out, _, err := s.anomalyScan(now, scope, "outbound")
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, err
+}
+
+// anomalyScan is anomalies over one counter column ("outbound" for
+// authenticated mailboxes, "local_sub" for local script submitters, keyed on
+// the unix user), uncapped, plus every address's recent volume. col is an
+// internal constant, never user input.
+func (s *Store) anomalyScan(now time.Time, scope map[string]struct{}, col string) ([]Anomaly, map[string]int64, error) {
 	out := []Anomaly{}
 	recentCutoff := bucketOf(now.Add(-anomalyRecentHours * time.Hour))
 	baselineStart := bucketOf(now.Add(-anomalyBaselineDays * 24 * time.Hour))
 
-	recent, err := s.sumOutbound(scope, recentCutoff, 0)
+	recent, err := s.sumCol(col, scope, recentCutoff, 0)
 	if err != nil {
-		return out, err
+		return out, nil, err
 	}
 	if len(recent) == 0 {
-		return out, nil
+		return out, recent, nil
 	}
-	base, err := s.baselineStats(scope, baselineStart, recentCutoff)
+	base, err := s.baselineStats(col, scope, baselineStart, recentCutoff)
 	if err != nil {
-		return out, err
+		return out, nil, err
 	}
 
 	for addr, rec := range recent {
@@ -327,17 +339,14 @@ func (s *Store) anomalies(now time.Time, scope map[string]struct{}, limit int) (
 		}
 		return out[i].Addr < out[j].Addr
 	})
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+	return out, recent, nil
 }
 
-// sumOutbound sums the outbound column per sender address over [lo, hi) buckets
-// (hi<=0 means no upper bound), scope-filtered. Only real senders appear (the
-// outbound column is set only for email senders, never local users or "*").
-func (s *Store) sumOutbound(scope map[string]struct{}, lo, hi int64) (map[string]int64, error) {
-	q := `SELECT address, SUM(outbound) FROM mail_counters WHERE bucket>=? AND outbound>0`
+// sumCol sums one counter column per address over [lo, hi) buckets (hi<=0
+// means no upper bound), scope-filtered. The outbound column is set only for
+// email senders, local_sub only for local unix users.
+func (s *Store) sumCol(col string, scope map[string]struct{}, lo, hi int64) (map[string]int64, error) {
+	q := `SELECT address, SUM(` + col + `) FROM mail_counters WHERE bucket>=? AND ` + col + `>0`
 	args := []any{lo}
 	if hi > 0 {
 		q += ` AND bucket<?`
@@ -376,8 +385,8 @@ type baselineStat struct {
 // baselineStats sums outbound and counts distinct active hours per sender over
 // [lo, hi), scope-filtered. The active-hour count is the divisor for a
 // per-active-hour rate, so silent hours don't dilute a bursty sender's rate.
-func (s *Store) baselineStats(scope map[string]struct{}, lo, hi int64) (map[string]baselineStat, error) {
-	q := `SELECT address, SUM(outbound), COUNT(DISTINCT bucket) FROM mail_counters WHERE bucket>=? AND bucket<? AND outbound>0`
+func (s *Store) baselineStats(col string, scope map[string]struct{}, lo, hi int64) (map[string]baselineStat, error) {
+	q := `SELECT address, SUM(` + col + `), COUNT(DISTINCT bucket) FROM mail_counters WHERE bucket>=? AND bucket<? AND ` + col + `>0`
 	args := []any{lo, hi}
 	if scope != nil {
 		frag, a := inClause(scope)
