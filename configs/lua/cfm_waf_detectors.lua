@@ -3832,51 +3832,93 @@ function _M.detect_cve_sppagebuilder_upload(uri, method, args, body, headers)
   return nil
 end
 
--- SP Page Builder `ajax_contact` mail relay (rule 520, 2026-10-06). The addon's
--- getAjax() (components/com_sppagebuilder/addons/ajax_contact/site.php, read
--- on a live 3.7.9 install; 3.8+ reads the recipient from a server-encrypted
--- blob instead and is not affected) takes the mail RECIPIENT from the request:
--- the form renders it as a hidden, base64'd `recipient` field, and the server
--- runs base64_decode() on whatever comes back and hands it to addRecipient().
--- A bot appends a victim to that list and the site mails its spam for it.
--- Seen on titan 2026-10-06 (hotellito.gr, ~990 mails in 7 h from a Datacamp /
--- AS42708 / AS206092 proxy pool): every message went to the owner AND to the
--- address the bot typed into the form's own `email` field.
+-- SP Page Builder contact-form mail relays (rule 520). Two addons mail what
+-- the browser sends back, on the versions that still post their settings as
+-- plain base64 hidden fields (read on live 3.7.9 / 3.8.3 installs; 3.8.8+ post
+-- an encrypted blob instead, which the edge cannot read):
+--   * `ajax_contact` takes the RECIPIENT from the base64 `recipient` field;
+--   * `form_builder` takes extra headers from the base64 `additional_header`
+--     field and turns each `Cc:` / `Bcc:` line into another recipient; the
+--     `{{field}}` placeholders in the extracted value are then filled with
+--     what the visitor typed.
 --
--- The jQuery submit posts option=com_sppagebuilder&task=ajax&addon=ajax_contact
--- (a SEF page URL can supply `option` instead, so only a DIFFERENT explicit
--- option rules the request out) and the form as data[N][name] / data[N][value]
--- pairs. The request is read the way PHP and Joomla read it:
+-- What actually happened (titan, hotellito.gr, 2026-09 to 2026-10-07, ~1 500
+-- mails): the site's own form_builder setting was `Cc: {{email}}` (SP Page
+-- Builder's default template), so every submission was copied to whatever
+-- address the visitor typed. A bot typed victims' addresses and the site sent
+-- its spam. Nothing was injected: those requests are byte-for-byte what an
+-- honest visitor sends, so no WAF rule can block them without breaking the
+-- form. The fix is the form setting (removed fleet-wide 2026-10-07). This rule
+-- only LOGS that shape (CC_PLACEHOLDER), to find sites still configured that
+-- way. The first version of this rule (2026-10-06) looked at ajax_contact with
+-- an injected recipient LIST, a shape that never delivers mail: Joomla 3/4
+-- hand the recipient to PHPMailer as one address, and PHPMailer rejects a
+-- comma/semicolon list. It never matched the real traffic.
+--
+-- The submit posts option=com_sppagebuilder&task=ajax&addon=<addon> (a SEF page
+-- URL can supply `option` instead, so only a DIFFERENT explicit option rules
+-- the request out) and the form as data[N][name] / data[N][value] pairs. The
+-- request is read the way PHP and Joomla read it:
 --   * from the query string, then a urlencoded or multipart body ($_REQUEST,
 --     POST wins), each key LAST-wins;
 --   * keys are case-SENSITIVE (`DATA[0][VALUE]` or `ADDON` is another key),
 --     cut at a NUL, leading spaces dropped, anything after the second `]`
 --     ignored; a multipart part's name comes from its Content-Disposition only;
 --   * `option` / `addon` go through Joomla's CMD filter (only [A-Za-z0-9_.-]
---     kept, leading dots dropped) before they are compared;
---   * the `name` values (`recipient`, `email`) are compared case-insensitively,
---     a deliberate over-match only an attacker can produce.
+--     kept, leading dots dropped) before they are compared. The controller
+--     reads `addon` through the STRING filter (strips tags) for the class name
+--     and through CMD for the file path, so `ajax_<>contact` still dispatches:
+--     the cheap gate therefore keys on the `addon` KEY, never on its value;
+--   * the row `name` values (`recipient`, `email`, `additional_header`) are
+--     compared case-insensitively, a deliberate over-match only an attacker
+--     can produce; form_builder's form FIELDS are the rows PHP turns into
+--     $fieldNames (a `[name]` in the row name, or `policy`), nothing else.
 --
--- Tags:
+-- Tags (the caller enforces only the two *_HAS_SUBMITTER tags; every other tag
+-- is clamped to logonly):
+-- ajax_contact
 --   RECIPIENT_HAS_SUBMITTER — the decoded recipient list holds 2+ addresses,
 --     one of them is the submitted `email`, and no other address in the list
---     shares its domain: the site would mail an outsider who typed their own
---     address. A real form never does — the recipient is the owner's saved
---     setting. The domain clause keeps an owner list (`owner@hotel, staff@hotel`)
---     tested by a staff member clean. The rule's mode applies (block).
---   MULTI_RECIPIENT — any other 2+ address list. An owner may legitimately save
---     a list, so this is measurement only: the caller clamps it to logonly.
---   BODY_PAST_WINDOW — addon=ajax_contact, no recipient row seen, and the
+--     shares its domain. Tampering only: the recipient is the owner's saved
+--     setting. (It cannot deliver through PHPMailer, see above, but it is an
+--     attempt; the domain clause keeps a staff member testing an owner list
+--     clean.)
+--   MULTI_RECIPIENT — any other 2+ address list (an owner may save one).
+-- form_builder
+--   CC_HAS_SUBMITTER — a Cc/Bcc with an address written outside its `{{...}}`
+--     placeholders resolves (placeholders filled from the form fields, a list
+--     split into addresses) to the visitor's own email — a field whose name
+--     holds "mail" or one a `Reply-To:` placeholder points at, never a select
+--     or pre-filled value — and that address is not on the site's own domain
+--     (the host the edge routed on, not the client-set Host header). The
+--     hidden header is the owner's saved setting; a fixed address equal to
+--     the visitor's own input is tampering (a bot copying its victim into the
+--     header). The domain clause keeps staff who test a form that copies
+--     `boss@site` clean, and the attacker cannot move it.
+--   CC_PLACEHOLDER — a Cc/Bcc made only of `{{field}}` placeholders, at least
+--     one naming a real field: the site copies every submission to what the
+--     visitor typed (relay by configuration, the titan case). Measurement only,
+--     see above.
+--   A literal Cc/Bcc nobody typed (an owner's saved `Bcc: boss@gmail`) is the
+--     normal case and is not tagged, so the log is not flooded with honest
+--     submissions.
+--   BODY_PAST_WINDOW (ajax_contact only) — no recipient row seen and the
 --     body's Content-Length exceeds what the edge handed the WAF
---     (waf_body_max_len): the recipient may sit past the window (a padded
---     message). Measurement only, clamped to logonly like MULTI_RECIPIENT.
--- A single address is never flagged. Residuals (not blocked): a bot that
--- REPLACES the recipient (one address); one that types a different `email`
--- than the one it injects; a victim on the owner's own mail domain, or a decoy
--- address added on the victim's domain (both defeat the domain clause and show
--- as MULTI_RECIPIENT); a recipient padded past waf_body_max_len (shows as
--- BODY_PAST_WINDOW); a chunked POST with no Content-Length, which the WAF never
--- body-reads. Updating SP Page Builder closes all of them.
+--     (waf_body_max_len): the row may sit past the window. Measurement only.
+--     Not for form_builder: its uploads and long messages overflow the window
+--     legitimately, and it would log every one.
+-- Residuals (not blocked): the configured `Cc: {{email}}` relay itself (fix
+-- the form), and a bot that WRITES a pure `Cc: {{email}}` into a form that had
+-- none (it looks the same; logged as CC_PLACEHOLDER); a single replaced
+-- recipient on either addon (one address, shape unseen in the wild, so not
+-- guessed at); an injected Cc to a victim who is not also typed into a field;
+-- an ajax_contact victim on a recipient's mail domain, or a form_builder one
+-- on the site's own domain; a recipient row padded past waf_body_max_len
+-- (ajax_contact: logged as BODY_PAST_WINDOW; form_builder: not seen at all);
+-- an injected Cc copied to a field that is not the visitor's email; anything on 3.8.8+
+-- (encrypted); a chunked POST with no Content-Length, which the WAF never
+-- body-reads. Updating SP Page Builder and removing `{{...}}` Cc/Bcc lines
+-- from form settings closes them.
 
 local function form_decode(s)
   local t = (s or ""):gsub("%+", " ")
@@ -3920,6 +3962,11 @@ local function sppb_put(k, v, rows, top)
     if not row then
       row = {}
       rows[idx] = row
+      -- PHP keeps an array in first-insertion order; a later duplicate key
+      -- overwrites in place. form_builder's last-wins fields follow it.
+      local order = top._order
+      if not order then order = {}; top._order = order end
+      order[#order + 1] = idx
     end
     row[field] = v
   elseif k == "addon" or k == "option" then
@@ -3977,36 +4024,36 @@ local function addr_domain(a)
   return a:match("@([^@]*)$") or ""
 end
 
-function _M.detect_sppb_contact_relay(args, body, headers, _nab)
-  -- Cheap gate: the addon name must appear somewhere (decoded). _nab caps each
-  -- side at body_budget(headers), so it may rule the request out only when it
-  -- saw both sides whole (the same contract as rule 10017). get_norm_ab() is
-  -- already built for every request by the SQLi rules, so this costs one find.
-  local bn = body_budget(headers)
-  if _nab and #(args or "") <= bn and #(body or "") <= bn
-     and not has(_nab, "ajax_contact") then
-    return nil
+-- The addresses in one decoded recipient value (lowercased), plus a count per
+-- mail domain.
+local function sppb_addrs(dec, per_domain)
+  local addrs = {}
+  for a in lower(dec):gmatch("[^%s,;<>\"'%z]+@[^%s,;<>\"'%z]+") do
+    addrs[#addrs + 1] = a
+    local d = addr_domain(a)
+    per_domain[d] = (per_domain[d] or 0) + 1
   end
+  return addrs
+end
 
-  -- The whole surface the edge handed over (cfm.lua already caps the body at
-  -- waf_body_max_len): a message padded past the generic scan budget must not
-  -- hide the recipient. Linear: one pass per source, last-wins rows.
-  local rows, top = {}, {}
-  sppb_collect_pairs(args, rows, top)
-  if body and body ~= "" then
-    local ct_raw = header_string(headers and (headers["Content-Type"] or headers["content-type"])) or ""
-    local ct = lower(ct_raw)
-    if has(ct, "multipart/form-data") then
-      sppb_collect_multipart(body, ct_raw, rows, top) -- the boundary is case-sensitive
-    elseif has(ct, "application/x-www-form-urlencoded") then
-      sppb_collect_pairs(body, rows, top)
+-- The Cc/Bcc values of one decoded form_builder additional_header, as the
+-- addon parses it: split on "\n", split each line on ':', key [0] lowercased
+-- and compared WITHOUT trimming, value [1] (up to the next ':') trimmed.
+local function sppb_cc_values(hdr)
+  local out = {}
+  for line in (hdr .. "\n"):gmatch("([^\n]*)\n") do
+    local key, rest = line:match("^([^:]*):(.*)$")
+    local k = key and lower(key)
+    if k == "cc" or k == "bcc" then
+      local v = (rest:match("^([^:]*)") or ""):gsub("^[%s%z]+", ""):gsub("[%s%z]+$", "")
+      if v ~= "" then out[#out + 1] = v end
     end
   end
-  if top.addon ~= "ajax_contact" then return nil end
-  -- An explicit other component routes elsewhere (the SEF router only DEFAULTS
-  -- `option`); an absent one may come from the page URL.
-  if top.option and top.option ~= "com_sppagebuilder" then return nil end
+  return out
+end
 
+-- ajax_contact: the decoded `recipient` list (see the tags above).
+local function sppb_ajax_contact(rows)
   local recipients, emails = {}, {}
   for _, row in pairs(rows) do
     if row.name and row.value then
@@ -4019,34 +4066,168 @@ function _M.detect_sppb_contact_relay(args, body, headers, _nab)
       end
     end
   end
-
-  if #recipients == 0 then
-    local cl = tonumber(header_string(headers and (headers["Content-Length"] or headers["content-length"])) or "")
-    if cl and cl > #(body or "") then return "BODY_PAST_WINDOW" end
-    return nil
-  end
-
+  if #recipients == 0 then return nil, false end
   local multi = false
   for _, v in ipairs(recipients) do
     local dec = php_b64_decode(v)
     if dec then
-      local addrs, per_domain = {}, {}
-      for a in lower(dec):gmatch("[^%s,;<>\"'%z]+@[^%s,;<>\"'%z]+") do
-        addrs[#addrs + 1] = a
-        local d = addr_domain(a)
-        per_domain[d] = (per_domain[d] or 0) + 1
-      end
+      local per_domain = {}
+      local addrs = sppb_addrs(dec, per_domain)
       if #addrs >= 2 then
         multi = true
         for _, a in ipairs(addrs) do
           if emails[a] and per_domain[addr_domain(a)] == 1 then
-            return "RECIPIENT_HAS_SUBMITTER"
+            return "RECIPIENT_HAS_SUBMITTER", true
           end
         end
       end
     end
   end
-  if multi then return "MULTI_RECIPIENT" end
+  if multi then return "MULTI_RECIPIENT", true end
+  return nil, true
+end
+
+-- The form fields as form_builder builds $fieldNames: a row whose name holds
+-- `[x]` becomes field `x` (the first bracket; a `*` past the first character
+-- marks it required and is dropped), and the `policy` row keeps its name.
+-- Hidden rows without brackets are not fields and never fill a placeholder.
+local function sppb_field_name(name)
+  if name == "policy" then return name end
+  local inner = name:match("%[([^%]]*)%]")
+  if not inner then return nil end
+  local star = inner:find("*", 1, true)
+  if star and star > 1 then inner = inner:gsub("%*", "") end
+  return inner
+end
+
+-- Is the address on the site's own domain? `host` is the host the edge routed
+-- the request to (ngx.var.host: the request line's host, else Host), never the
+-- raw Host header, which an absolute-URI request line lets a client set to
+-- anything. Port and a leading www. are dropped. A Cc there is staff.
+local function sppb_on_site_domain(addr, host)
+  local h = lower(strip_host_port(host or "") or ""):gsub("^www%.", "")
+  local d = addr_domain(addr)
+  if h == "" or h == "-" or d == "" then return false end
+  return d == h or d:sub(-(#h + 1)) == "." .. h or h:sub(-(#d + 1)) == "." .. d
+end
+
+-- form_builder: the decoded `additional_header` Cc/Bcc lines (see the tags).
+-- The addon splits the header into lines FIRST and fills each {{field}} in the
+-- extracted Cc/Bcc value afterwards (and Joomla strips CR/LF from recipients),
+-- so a typed newline cannot add a line: only the decoded template is parsed.
+local function sppb_form_builder(rows, top, host)
+  local hdrs, fields = {}, {}
+  -- PHP array order (first appearance), so a duplicate field is last-wins
+  -- exactly as $fieldNames is.
+  for _, idx in ipairs(top._order or {}) do
+    local row = rows[idx]
+    if row.name and row.value then
+      if trim_lower(row.name) == "additional_header" then
+        hdrs[#hdrs + 1] = row.value
+      else
+        local f = sppb_field_name(row.name)
+        if f then fields[f] = row.value end
+      end
+    end
+  end
+  if #hdrs == 0 then return nil, false end
+  local decoded = {}
+  for _, v in ipairs(hdrs) do decoded[#decoded + 1] = php_b64_decode(v) end
+  -- "What the visitor typed" is their email field only: a field whose name
+  -- holds "mail", or one a Reply-To placeholder points at. A select or
+  -- pre-filled field whose value is a staff address is not typed input.
+  local submitted = {}
+  local function add(f)
+    local v = fields[f] and trim_lower(fields[f])
+    if v and v:find("@", 1, true) then submitted[v] = true end
+  end
+  for f in pairs(fields) do
+    if lower(f):find("mail", 1, true) then add(f) end
+  end
+  for _, dec in ipairs(decoded) do
+    for line in (dec .. "\n"):gmatch("([^\n]*)\n") do
+      local key, rest = line:match("^([^:]*):(.*)$")
+      if key and lower(key) == "reply-to" then
+        for f in rest:gmatch("{{(.-)}}") do add(f) end
+      end
+    end
+  end
+  local placeholder = false
+  for _, dec in ipairs(decoded) do
+    for _, cc in ipairs(sppb_cc_values(dec)) do
+      local literal = cc:gsub("{{.-}}", "")
+      if literal:find("@", 1, true) then
+        -- An address written into the header: resolve the placeholders as the
+        -- addon does (unknown ones stay as text) and check every address.
+        local resolved = cc:gsub("{{(.-)}}", function(k) return fields[k] end)
+        for _, a in ipairs(sppb_addrs(resolved, {})) do
+          if submitted[a] and not sppb_on_site_domain(a, host) then
+            return "CC_HAS_SUBMITTER", true
+          end
+        end
+      elseif literal:match("^[%s%z]*$") then
+        -- Only placeholders: a relay when one names a real field.
+        for k in cc:gmatch("{{(.-)}}") do
+          if fields[k] ~= nil then placeholder = true end
+        end
+      end
+    end
+  end
+  if placeholder then return "CC_PLACEHOLDER", true end
+  return nil, true
+end
+
+-- Returns the addon tag ("SPPB_AJAX_CONTACT" / "SPPB_FORM_BUILDER") and the
+-- finding tag, or nil.
+function _M.detect_sppb_contact_relay(args, body, headers, _nab, host)
+  -- Cheap gate on an `addon` KEY (a pair `addon=` or a multipart name="addon")
+  -- and a `data[` row, in the normalized surface (url-decoded, lowercased) —
+  -- never on the addon's value: Joomla's STRING filter lets a mangled value
+  -- still dispatch. PHP drops leading spaces from a key.
+  -- _nab caps each side at body_budget(headers), so it may rule the request
+  -- out only when it saw both sides whole (the same contract as rule 10017).
+  local bn = body_budget(headers)
+  if _nab and #(args or "") <= bn and #(body or "") <= bn
+     and not ((("&" .. _nab):find("&%s*addon=") or has(_nab, 'name="addon"') or has(_nab, "name=addon"))
+              and has(_nab, "data[")) then
+    return nil
+  end
+
+  -- The whole surface the edge handed over (cfm.lua already caps the body at
+  -- waf_body_max_len): a message padded past the generic scan budget must not
+  -- hide the row. Linear: one pass per source, last-wins rows.
+  local rows, top = {}, {}
+  sppb_collect_pairs(args, rows, top)
+  if body and body ~= "" then
+    local ct_raw = header_string(headers and (headers["Content-Type"] or headers["content-type"])) or ""
+    local ct = lower(ct_raw)
+    if has(ct, "multipart/form-data") then
+      sppb_collect_multipart(body, ct_raw, rows, top) -- the boundary is case-sensitive
+    elseif has(ct, "application/x-www-form-urlencoded") then
+      sppb_collect_pairs(body, rows, top)
+    end
+  end
+  local which, check
+  if top.addon == "ajax_contact" then
+    which, check = "SPPB_AJAX_CONTACT", sppb_ajax_contact
+  elseif top.addon == "form_builder" then
+    which, check = "SPPB_FORM_BUILDER", sppb_form_builder
+  else
+    return nil
+  end
+  -- An explicit other component routes elsewhere (the SEF router only DEFAULTS
+  -- `option`); an absent one may come from the page URL.
+  if top.option and top.option ~= "com_sppagebuilder" then return nil end
+
+  local tag, seen = check(rows, top, host)
+  if tag then return which, tag end
+  -- form_builder posts the header with the settings, ahead of uploads and long
+  -- messages that legitimately overflow the window, so only ajax_contact gets
+  -- the padded-row measurement.
+  if not seen and which == "SPPB_AJAX_CONTACT" then
+    local cl = tonumber(header_string(headers and (headers["Content-Length"] or headers["content-length"])) or "")
+    if cl and cl > #(body or "") then return which, "BODY_PAST_WINDOW" end
+  end
   return nil
 end
 

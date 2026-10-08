@@ -131,12 +131,14 @@ var wafRuleIDs = []WAFRule{
 	{ID: 510, Name: "rule_xmlrpc_multicall", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	{ID: 511, Name: "rule_xmlrpc_pingback", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	{ID: 512, Name: "rule_xmlrpc_post_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
-	// 520 (2026-10-06): Joomla SP Page Builder `ajax_contact` mail relay — the
-	// addon mails the client-posted base64 `recipient`, so a bot appends a victim
-	// (seen on titan: ~990 spam mails in 7 h from one site). Abuse of a form, not
-	// of auth, but this is the abuse band. Its own family so the autoblock knob
-	// is separate (FORM_RELAY), HELD at 0 for burn-in (waf_security_register.go):
-	// the edge 403 stops the relay; the ban waits for a fleet review.
+	// 520 (2026-10-06, reworked 2026-10-08): Joomla SP Page Builder contact-form
+	// mail relays (<= 3.8.3 post their settings as plain base64): blocks only
+	// tampering — an ajax_contact recipient list or a form_builder Cc/Bcc written
+	// into the header, holding the visitor's own address. The relay seen on titan was the site's
+	// own `Cc: {{email}}` setting, which looks like an honest visitor and is only
+	// logged (CC_PLACEHOLDER). Abuse of a form, not of auth, but this is the abuse
+	// band. Its own family so the autoblock knob is separate (FORM_RELAY), HELD at
+	// 0 for burn-in (waf_security_register.go).
 	{ID: 520, Name: "rule_form_relay_sppb_contact", ReasonFamily: "WAF_FORM_RELAY", DefaultMode: "block"},
 
 	// 6xx header / protocol anomaly

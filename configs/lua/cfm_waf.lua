@@ -120,13 +120,12 @@ local CFG = {
   rule_xmlrpc_multicall   = "block", -- system.multicall in XML-RPC body
   rule_xmlrpc_pingback    = "block", -- pingback.ping in XML-RPC body
   rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
-  rule_form_relay_sppb_contact = "block", -- 520: Joomla SP Page Builder ajax_contact mail relay — the addon mails the
-                                         -- client-posted base64 `recipient`; a bot appends a victim. Fires when the decoded
-                                         -- list has 2+ addresses and one is the form's own submitted `email`, on a domain no
-                                         -- other recipient uses (a real form never mails an outside visitor). Its
-                                         -- MULTI_RECIPIENT tag (any other 2+ list — an owner may save one) is clamped to
-                                         -- logonly at the call site. Seen 2026-10-06
-                                         -- on titan (hotellito.gr, ~990 spam mails / 7 h).
+  rule_form_relay_sppb_contact = "block", -- 520: Joomla SP Page Builder contact-form mail relay (<= 3.8.3, settings posted
+                                         -- as plain base64). Blocks only tampering: an ajax_contact recipient LIST holding the
+                                         -- submitted email, or a form_builder Cc/Bcc address written into the header that equals
+                                         -- one the visitor typed. Every other tag (CC_PLACEHOLDER = the site's own
+                                         -- `Cc: {{email}}` relay, MULTI_RECIPIENT, BODY_PAST_WINDOW) is clamped to logonly at
+                                         -- the call site. See detect_sppb_contact_relay.
 
   -- ── Audit / payload rules ─────────────────────────────────────────────────
   rule_cmd_params       = "challenge_v2",   -- suspicious parameter keys: exec= passthru= shell_exec= eval= assert= system= cmd= command=
@@ -1128,24 +1127,23 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 3l2) SP Page Builder ajax_contact mail relay (rule 520) ─────────────────
-  -- The addon mails whatever base64 `recipient` the client posts back; a bot
-  -- appends a victim (the address it also types as the form's `email`) and the
-  -- site sends its spam. Keyed on addon=ajax_contact (and no other explicit
-  -- option) and a decoded recipient list of 2+ addresses holding the submitted
-  -- email on a domain no other recipient uses. Every method: Joomla reads the
-  -- form from $_REQUEST. Only RECIPIENT_HAS_SUBMITTER takes the rule's mode;
-  -- MULTI_RECIPIENT (any other 2+ list) and BODY_PAST_WINDOW (the recipient
-  -- may sit past waf_body_max_len) are measurement only, clamped to logonly like
-  -- rule 612's in-app tag: an owner may legitimately save a recipient list.
+  -- ── 3l2) SP Page Builder contact-form mail relay (rule 520) ────────────────
+  -- ajax_contact mails the base64 `recipient` and form_builder adds the Cc/Bcc
+  -- lines of the base64 `additional_header`, both as posted by the client (on
+  -- <= 3.8.3). Every method: Joomla reads the form from $_REQUEST. Only the two
+  -- tampering tags (RECIPIENT_HAS_SUBMITTER, CC_HAS_SUBMITTER) take the rule's
+  -- mode; the rest are measurement, clamped to logonly like rule 612's in-app
+  -- tag. CC_PLACEHOLDER is the site's own `Cc: {{email}}` setting: an honest
+  -- visitor's submission looks the same, so it can only be logged.
   do
     local mode = rule_mode(CFG.rule_form_relay_sppb_contact, "block")
     if mode ~= "disabled" then
-      local tag = det.detect_sppb_contact_relay(args, body, headers, get_norm_ab())
-      if tag then
-        local eff_mode = (tag == "RECIPIENT_HAS_SUBMITTER") and mode or "logonly"
+      local which, tag = det.detect_sppb_contact_relay(args, body, headers, get_norm_ab(), ctx.host)
+      if which then
+        local enforce = (tag == "RECIPIENT_HAS_SUBMITTER" or tag == "CC_HAS_SUBMITTER")
+        local eff_mode = enforce and mode or "logonly"
         local ttl = (eff_mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_FORM_RELAY:SPPB_AJAX_CONTACT:" .. tag, ttl, eff_mode, RULE_IDS.rule_form_relay_sppb_contact) then goto done end
+        if record("WAF_FORM_RELAY:" .. which .. ":" .. tag, ttl, eff_mode, RULE_IDS.rule_form_relay_sppb_contact) then goto done end
       end
     end
   end

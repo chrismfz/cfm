@@ -58,14 +58,14 @@ import (
 // (it was invisible before it existed) — check `waf_rule_detail rule=103`
 // before arming. The CVE's `pagename` leg is rule 10017, under WAF_CVE, armed.
 //
-// WAF_FORM_RELAY (rule 520, the SP Page Builder ajax_contact mail relay,
-// 2026-10-06) ships at edge-`block` from day one, but its family is HELD at 0
-// like any newly block-promoted family. The edge 403 already stops the relay
-// (the mail is never sent); the ban only adds persistence. A residual false
-// positive exists (an owner who saved `info@hotel.gr, owner@gmail.com` testing
-// the form with the gmail address), and held it costs that owner one failed
-// submit instead of a 6 h ban of the office IP. Arm with `FORM_RELAY = 1`
-// after a fleet review of `waf_rule_detail rule=520`.
+// WAF_FORM_RELAY (rule 520, SP Page Builder contact-form mail relays,
+// 2026-10-06, reworked 2026-10-08) ships at edge-`block` for its two tampering
+// tags only, but its family is HELD at 0 like any newly block-promoted family.
+// The edge 403 already stops the mail; the ban only adds persistence. A
+// residual false positive exists (an owner testing a form with an address the
+// form itself mails, on a domain the recipients don't share), and held it
+// costs that owner one failed submit instead of a 6 h ban of the office IP.
+// Arm with `FORM_RELAY = 1` after a fleet review of `waf_rule_detail rule=520`.
 //
 // heldAutoblockFamilies is the ONE source for that hold: the default loop,
 // the DefaultsTemplate rendered into a fresh detectors.conf and
@@ -74,7 +74,7 @@ import (
 // rationale for each entry lives in the comment above, not in the map.
 var heldAutoblockFamilies = map[string]struct{}{
 	"WAF_TRAVERSAL":  {}, // rules 101 (block since 2026-09-05) + 103 (2026-09-22); held for burn-in (~2 300 scanner IPs/week)
-	"WAF_FORM_RELAY": {}, // rule 520 (2026-10-06, new heuristic); held for burn-in — the edge 403 already stops the relay
+	"WAF_FORM_RELAY": {}, // rule 520 (2026-10-06, reworked 2026-10-08); held for burn-in — the edge 403 already stops the relay
 }
 
 func wafSecurityFamilies(kv KV) map[string]int {

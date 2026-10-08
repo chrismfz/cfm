@@ -1,10 +1,12 @@
 -- Tests for rule 520 rule_form_relay_sppb_contact (WAF_FORM_RELAY, block):
--- the Joomla SP Page Builder `ajax_contact` mail relay.
+-- Joomla SP Page Builder (<= 3.8.3) contact-form mail relays.
 --
--- The addon's getAjax() base64-decodes the client-posted hidden `recipient`
--- field and mails it. A bot appends a victim, the address it also types as the
--- form's `email` (seen on titan 2026-10-06, hotellito.gr). The request shapes
--- below are what the addon's jQuery submit sends: option/task/addon at the top
+-- ajax_contact base64-decodes the client-posted hidden `recipient` field and
+-- mails it; form_builder adds the Cc/Bcc lines of the client-posted base64
+-- `additional_header`. Only tampering blocks (a recipient list or a literal
+-- Cc/Bcc holding the visitor's own address); the site's own `Cc: {{email}}`
+-- setting (titan, hotellito.gr, 2026-09/10) is logged only. The request shapes
+-- below are what the addons' jQuery submit sends: option/task/addon at the top
 -- level and the form as data[N][name] / data[N][value] pairs.
 --
 -- ngx.decode_base64 is replaced by a real (strict, nil-on-invalid) decoder so
@@ -137,7 +139,7 @@ end
 
 -- ── Positives ────────────────────────────────────────────────────────────────
 fires(post(form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"))),
-      "the titan relay shape (owner, victim; victim = submitted email)")
+      "an injected recipient list (owner, victim; victim = submitted email)")
 fires(post(form(fields("litohotel@outlook.com, CDEW@Spam.Example ", " cdew@spam.example"))),
       "case and whitespace differences")
 fires(post(form(fields("litohotel@outlook.com;cdew@spam.example", "cdew@spam.example"))),
@@ -338,12 +340,180 @@ clean(post("option=com_sppagebuilder&task=ajax&addon=ajax_contact", UE), "no for
 clean(post(form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example")), "application/json"),
       "a JSON body never becomes $_POST")
 
+-- ── The cheap gate keys on the `addon` KEY, not its value ───────────────────
+-- Joomla reads `addon` through STRING (strips tags) for the class and CMD for
+-- the file path, so a tag-mangled value still dispatches to ajax_contact.
+fires(post(form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"),
+                { option = "com_sppagebuilder", task = "ajax", addon = "ajax_<>contact" })),
+      "addon=ajax_<>contact (no literal ajax_contact anywhere)")
+do
+  local b = form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"), {})
+  fires(post(b .. "&option=com_sppagebuilder&task=ajax&%61ddon=ajax_%3C%3Econtact"),
+        "url-encoded addon key and a mangled value")
+end
+
+-- ── form_builder: Cc/Bcc lines of the base64 additional_header ──────────────
+-- The addon (<= 3.8.3) splits the decoded header on "\n" and ':', keeps lines
+-- whose untrimmed, lowercased key is cc/bcc, and fills {{field}} placeholders
+-- with what the visitor typed. Field names are the inner [..] of the row name.
+local FB_TOP = { option = "com_sppagebuilder", task = "ajax", addon = "form_builder" }
+local function fb_fields(header, typed_email, recipient)
+  return {
+    { "sppb-form-builder-field[first-name*]", "Rickymub" },
+    { "sppb-form-builder-field[email*]", typed_email },
+    { "sppb-form-builder-field[message]", "spam body" },
+    { "recipient", b64enc(recipient or "litohotel@outlook.com") },
+    { "from", b64enc("") },
+    { "email_subject", b64enc("{{subject}} | {{email}} | {{site-name}}") },
+    { "additional_header", b64enc(header) },
+    { "addon_id", "1618817591947" },
+    { "view_type", "page" },
+  }
+end
+local FB = "WAF_FORM_RELAY:SPPB_FORM_BUILDER:"
+local function fb_is(c, tag, action, label)
+  local hit, reason, _, act = waf.check(c)
+  check(hit == true and act == action and reason == FB .. tag,
+        label .. " — " .. action .. " " .. FB .. tag .. " (got " .. tostring(reason) .. "/" .. tostring(act) .. ")")
+end
+
+-- Block: a LITERAL Cc/Bcc equal to the address the visitor typed, outside the
+-- recipients' domains (the hidden header was rewritten).
+fb_is(post(form(fb_fields("Reply-To: {{email}}\nCc: cdew@spam.example", "cdew@spam.example"), FB_TOP)),
+      "CC_HAS_SUBMITTER", "block", "injected literal Cc = typed address")
+fb_is(post(form(fb_fields("Reply-To: {{email}}\r\nbCC:  CDEW@spam.example \r\n", " cdew@Spam.Example"), FB_TOP)),
+      "CC_HAS_SUBMITTER", "block", "Bcc, mixed case, CRLF lines, padded value")
+fb_is(post(form(fb_fields("Cc: {{email}}\nBcc: cdew@spam.example", "cdew@spam.example"), FB_TOP)),
+      "CC_HAS_SUBMITTER", "block", "a placeholder line does not mask an injected literal one")
+fb_is(post(form(fb_fields("Cc: cdew@spam.example:junk", "cdew@spam.example"), FB_TOP)),
+      "CC_HAS_SUBMITTER", "block", "value cut at the next ':' as PHP's explode does")
+fb_is({ uri = "/index.php", raw_uri = "/index.php", method = "GET", ip = "203.0.113.92", body = "", headers = {},
+        args = form(fb_fields("Cc: cdew@spam.example", "cdew@spam.example"), FB_TOP) },
+      "CC_HAS_SUBMITTER", "block", "GET with the form in the query string")
+fb_is(post(form(fb_fields("Cc: cdew@spam.example", "cdew@spam.example"),
+                { option = "com_sppagebuilder", task = "ajax", addon = "form_<>builder" })),
+      "CC_HAS_SUBMITTER", "block", "addon=form_<>builder still dispatches (CMD and STRING both give form_builder)")
+-- A tag with a letter in it leaves the letter for CMD (form_bbuilder): the
+-- addon file is not found and nothing is mailed, so nothing to flag.
+clean(post(form(fb_fields("Cc: cdew@spam.example", "cdew@spam.example"),
+                { option = "com_sppagebuilder", task = "ajax", addon = "form_<b>builder" })),
+      "addon=form_<b>builder does not dispatch")
+do
+  -- PHP's base64_decode is non-strict: stripped padding still decodes.
+  local f = fb_fields("Cc: cdew@spam.example", "cdew@spam.example")
+  f[7][2] = f[7][2]:gsub("=", "")
+  fb_is(post(form(f, FB_TOP)), "CC_HAS_SUBMITTER", "block", "unpadded base64 header")
+end
+-- An address outside the placeholders is written into the header: a trailing
+-- placeholder (empty or unknown field) does not hide it (review finding).
+do
+  local f = fb_fields("Cc: cdew@spam.example{{empty}}", "cdew@spam.example")
+  f[#f + 1] = { "sppb-form-builder-field[empty]", "" }
+  fb_is(post(form(f, FB_TOP)), "CC_HAS_SUBMITTER", "block", "literal address + an empty field placeholder")
+end
+do
+  local f = fb_fields("Cc: cdew@{{dom}}", "cdew@spam.example")
+  f[#f + 1] = { "sppb-form-builder-field[dom]", "spam.example" }
+  fb_is(post(form(f, FB_TOP)), "CC_HAS_SUBMITTER", "block", "half literal, half placeholder")
+end
+do
+  -- The posted recipient cannot buy the staff exemption (review finding): only
+  -- the Host the form was posted to can.
+  local c = post(form(fb_fields("Cc: victim@gmail.com", "victim@gmail.com", "x@gmail.com"), FB_TOP))
+  c.host = "www.hotel.example"
+  fb_is(c, "CC_HAS_SUBMITTER", "block", "a gmail recipient does not exempt a gmail victim")
+  -- The raw Host header is client-set (absolute-URI request line): only the
+  -- host the edge routed on (ctx.host) counts (review round 2).
+  c = post(form(fb_fields("Cc: victim@gmail.com", "victim@gmail.com"), FB_TOP))
+  c.host, c.headers.Host = "hotel.example", "gmail.com"
+  fb_is(c, "CC_HAS_SUBMITTER", "block", "a forged Host header buys no exemption")
+end
+-- A list in the Cc value is split like the ajax_contact recipient.
+fb_is(post(form(fb_fields("Cc: cdew@spam.example, decoy@example.org", "cdew@spam.example"), FB_TOP)),
+      "CC_HAS_SUBMITTER", "block", "victim inside a Cc list")
+do
+  -- PHP's last-wins field: the later duplicate fills the placeholder.
+  local f = fb_fields("Cc: cdew@{{dom}}", "cdew@spam.example")
+  f[#f + 1] = { "sppb-form-builder-field[dom]", "other.example" }
+  f[#f + 1] = { "sppb-form-builder-field[dom]", "spam.example" }
+  fb_is(post(form(f, FB_TOP)), "CC_HAS_SUBMITTER", "block", "duplicate field: the last in posting order wins")
+end
+
+-- Measurement only.
+fb_is(post(form(fb_fields("Reply-To: {{email}}\nReply-name: {{first-name}} {{last-name}}\nCc: {{email}}",
+                          "victim@spam.example"), FB_TOP)),
+      "CC_PLACEHOLDER", "logonly", "the titan setting: Cc: {{email}} (an honest visitor looks the same)")
+-- The documented residual: a bot that WRITES a pure placeholder Cc looks like
+-- the configured relay, so it is logged, not blocked.
+fb_is(post(form(fb_fields("Reply-To: {{email}}\nCc: {{email}}", "cdew@spam.example"), FB_TOP)),
+      "CC_PLACEHOLDER", "logonly", "a pure {{email}} Cc (configured or written) is logged only")
+do
+  -- An upload or a long message legitimately overflows the window: no
+  -- BODY_PAST_WINDOW for form_builder (review round 2), it would log every one.
+  local c = post(form({ { "sppb-form-builder-field[message]", string.rep("a", 500) } }, FB_TOP))
+  c.headers["Content-Length"] = tostring(40000)
+  clean(c, "form_builder body past the window is not logged")
+end
+
+-- Clean.
+clean(post(form(fb_fields("Reply-To: {{email}}\nBcc: admin@yourcompany.com", "guest@mail.example"), FB_TOP)),
+      "a saved literal Bcc nobody typed (the normal case, not tagged)")
+do
+  local c = post(form(fb_fields("Cc: boss@hotel.example", "boss@hotel.example"), FB_TOP))
+  c.host = "www.hotel.example:443"
+  clean(c, "staff testing a form that copies boss@ the site's own domain")
+  c = post(form(fb_fields("Cc: boss@mail.hotel.example", "boss@mail.hotel.example"), FB_TOP))
+  c.host = "hotel.example"
+  clean(c, "staff on a subdomain of the site")
+end
+do
+  -- A select whose value is a staff address is not typed input (review round 2).
+  local f = fb_fields("Reply-To: {{email}}\nBcc: boss@gmail.com", "guest@mail.example")
+  f[#f + 1] = { "sppb-form-builder-field[department]", "boss@gmail.com" }
+  clean(post(form(f, FB_TOP)), "a department select equal to the saved Bcc")
+end
+clean(post(form(fb_fields("Cc: {{nonexistent}}", "cdew@spam.example"), FB_TOP)),
+      "a placeholder naming no field is not a relay")
+clean(post(form(fb_fields("Cc: none", "cdew@spam.example"), FB_TOP)), "a Cc with no address")
+do
+  -- The gate wants an addon KEY: `addons[..]` (WHMCS/WooCommerce) is not one.
+  local b = "addons%5B1%5D=form_builder&" .. form(fb_fields("Cc: cdew@spam.example", "cdew@spam.example"), {})
+  clean(post(b), "addons[] is not the addon key")
+end
+do
+  -- A hidden row is not a form field: it never counts as "typed" (review finding).
+  local f = fb_fields("Bcc: boss@partner.example", "guest@mail.example")
+  f[#f + 1] = { "reply_to", "boss@partner.example" }
+  clean(post(form(f, FB_TOP)), "a hidden non-field row repeating the saved Bcc")
+end
+-- An unknown placeholder stays as text in PHP: the address is invalid and
+-- PHPMailer mails nothing, so there is nothing to flag.
+clean(post(form(fb_fields("Cc: cdew@spam.example{{nothing}}", "cdew@spam.example"), FB_TOP)),
+      "literal address + an unknown placeholder (undeliverable)")
+clean(post("option=com_sppagebuilder&task=ajax&addon=form_builder&x=1", UE),
+      "addon without any data[] row (cheap gate)")
+clean(post(form(fb_fields("Reply-To: {{email}}\nReply-name: {{first-name}}", "guest@mail.example"), FB_TOP)),
+      "form_builder without Cc/Bcc (the fixed setting)")
+clean(post(form(fb_fields(" Cc: cdew@spam.example", "cdew@spam.example"), FB_TOP)),
+      "a leading space in the key: PHP does not trim it, so no Cc")
+clean(post(form(fb_fields("Cc cdew@spam.example", "cdew@spam.example"), FB_TOP)),
+      "a Cc line without a colon")
+clean(post(form(fb_fields("Cc: cdew@spam.example", "cdew@spam.example"),
+                { option = "com_contact", task = "ajax", addon = "form_builder" })),
+      "form_builder under an explicit other component")
+do
+  local f = fb_fields("Cc: cdew@spam.example", "cdew@spam.example")
+  f[7][2] = "!!!not-base64!!!"
+  clean(post(form(f, FB_TOP)), "an undecodable header")
+end
+
 -- ── Disabled ────────────────────────────────────────────────────────────────
 waf.set_rule("rule_form_relay_sppb_contact", "disabled")
 clean(post(form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"))), "rule disabled")
+clean(post(form(fb_fields("Cc: cdew@spam.example", "cdew@spam.example"), FB_TOP)), "rule disabled (form_builder)")
 
 if fails > 0 then
   io.stderr:write(string.format("%d failure(s)\n", fails))
   os.exit(1)
 end
-print("ok: cfm_waf SP Page Builder ajax_contact mail relay (rule 520)")
+print("ok: cfm_waf SP Page Builder ajax_contact + form_builder mail relay (rule 520)")
