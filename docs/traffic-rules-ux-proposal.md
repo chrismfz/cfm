@@ -207,7 +207,7 @@ fix for F1 is to say what `allow` does and route operators to excludes.
 
 **Why.** On 2026-10-06 a contact-form spam bot relayed ~990 mails through
 hotellito.gr (titan; that relay was the form's own `Cc: {{email}}` setting, fixed
-in the form settings on 2026-10-07; WAF rule 520 only logs it, as `CC_PLACEHOLDER`). The same bot was
+in the form settings on 2026-10-07; no request-side WAF rule can tell it from an honest visitor). The same bot was
 hammering 4bag.gr `/contact-us/` on mars from **2 153 IPs, 2 003 of them PJSC
 MegaFon** (AS31133, Russian mobile CGNAT), half of them seen once. Per-IP
 blocking cannot keep up with that pool, and permanent fleet-wide blocks of

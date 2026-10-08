@@ -18,44 +18,38 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
-- **A crafted contact-form POST could freeze an edge worker for seconds.**
-  WAF rule 520 (released 2026.10.06) scanned the posted SP Page Builder
-  recipient with a pattern that slows down quadratically on input it does not
-  match. One ~30 KB POST carrying `addon=ajax_contact`, sent to any site on the
-  edge (not only SP Page Builder ones), held an nginx worker for about 7
-  seconds; a few per second could tie up every worker. Every scan in the rule
-  is now bounded: the same request takes 0.06 s, and a test pins each crafted
-  case under 0.2 s. That includes filling a form_builder `Cc:` line's
-  `{{field}}` placeholders, which a chain of fields could grow exponentially:
-  the fill now follows PHP exactly under a fixed size and step limit, and a
-  line that exceeds it is blocked, since no honest form needs one. So is a
-  request that sends one form row under more than 16 different spellings,
-  which an honest form never does and which otherwise cost over a second. Until this release is installed, you can turn the rule off
-  with `rule_form_relay_sppb_contact = "disabled"` in
+- **A crafted POST could freeze an edge worker for seconds (WAF rule 520,
+  removed).** Rule 520 (SP Page Builder contact-form relay, released
+  2026.10.06) scanned the posted recipient with a pattern that slows down
+  quadratically on input it does not match. One ~30 KB POST carrying
+  `addon=ajax_contact`, sent to any site on the edge (not only SP Page Builder
+  ones), held an nginx worker for about 7 seconds; a few per second could tie
+  up every worker. The rule is removed (see Removed). Until this release is
+  installed, turn it off with `rule_form_relay_sppb_contact = "disabled"` in
   `/etc/cfm/cfm_waf_config.lua`.
 
-### Fixed
-- **WAF rule 520 (SP Page Builder contact-form spam relay) now looks at the
-  form that was actually abused.** The rule shipped on 2026-10-06 watched the
-  `ajax_contact` addon for an injected recipient list, but the spam on titan
-  (hotellito.gr) came from the `form_builder` addon, whose own setting was
-  `Cc: {{email}}`: every submission was copied to the address the visitor
-  typed. Those requests look exactly like an honest visitor's, so the WAF can't
-  block them. The fix is the form setting, removed on 20 sites on 2026-10-07.
-  The rule now logs that setting (`CC_PLACEHOLDER`, logonly) so you can find
-  sites still configured that way. It blocks only clear tampering on SP Page
-  Builder <= 3.8.3: a form_builder `Cc:`/`Bcc:` address written into the
-  header that equals one the visitor typed, or an ajax_contact recipient list
-  holding it. When the edge and PHP could read a request's fields differently
-  (a duplicated field, a file part), every reading is checked, so a decoy
-  value can't hide the real one. A bot that writes a plain `Cc: {{email}}` into a form is still
-  only logged, because it looks the same as that setting. The quick pre-check
-  no longer needs the literal text `ajax_contact`, which a bot could avoid
-  with `addon=ajax_<>contact` while Joomla still ran the addon. Autoblock for
-  the family stays held (`FORM_RELAY = 0`). Correction to the 2026.10.06
-  entry: SP Page Builder 3.8.0 to 3.8.3 still post these settings in plain
-  base64. 3.8.8 and later encrypt them (3.8.4 to 3.8.7 were not checked), so
-  update to 3.8.8 or later, not just to 3.8.
+### Removed
+- **WAF rule 520 (`rule_form_relay_sppb_contact`, family `WAF_FORM_RELAY`).**
+  It never matched the abuse it was written for, and could not have:
+  - The spam on titan (hotellito.gr, ~1 500 mails) came from the
+    `form_builder` addon with the site's own `Cc: {{email}}` setting, so every
+    submission was copied to the address the visitor typed. Those requests
+    are identical to an honest visitor's; the fix is the form setting
+    (removed on 20 sites on 2026-10-07).
+  - The recipient list it watched for never delivers: Joomla hands PHPMailer
+    one address, and PHPMailer rejects a list.
+  - A rework that also covered injected `Cc:`/`Bcc:` headers had to mirror
+    PHP's request parsing on every request; review kept finding CPU-DoS and
+    bypass cases in it, which is too much risk for the few sites it could
+    protect.
+
+  What protects a site instead: update SP Page Builder to 3.8.8 or later
+  (3.8.0 to 3.8.3 still post these settings as plain base64 a bot can edit;
+  3.8.4 to 3.8.7 were not checked; correction to the 2026.10.06 entry, which
+  said 3.8), and don't put `{{...}}` placeholders in a form's Cc/Bcc. A
+  leftover `rule_form_relay_sppb_contact` line in `cfm_waf_config.lua` or
+  `FORM_RELAY` line in `detectors.conf` is ignored; delete it at leisure. Id
+  520 stays reserved.
 
 ## 2026.10.08
 

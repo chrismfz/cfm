@@ -13,7 +13,7 @@
 //   2xx client identity (UA)
 //   3xx injection (SQLi, XSS, RCE, b64, deserialization, XXE, shellshock, …)
 //   4xx upload / malware / obfuscation
-//   5xx auth abuse / brute force (and form abuse: 520 mail relay)
+//   5xx auth abuse / brute force
 //   6xx header / protocol anomaly
 //   7xx SSRF / external interaction
 //   8xx info disclosure / debug
@@ -131,15 +131,8 @@ var wafRuleIDs = []WAFRule{
 	{ID: 510, Name: "rule_xmlrpc_multicall", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	{ID: 511, Name: "rule_xmlrpc_pingback", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	{ID: 512, Name: "rule_xmlrpc_post_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
-	// 520 (2026-10-06, reworked 2026-10-08): Joomla SP Page Builder contact-form
-	// mail relays (<= 3.8.3 post their settings as plain base64): blocks only
-	// tampering — an ajax_contact recipient list or a form_builder Cc/Bcc written
-	// into the header, holding the visitor's own address. The relay seen on titan was the site's
-	// own `Cc: {{email}}` setting, which looks like an honest visitor and is only
-	// logged (CC_PLACEHOLDER). Abuse of a form, not of auth, but this is the abuse
-	// band. Its own family so the autoblock knob is separate (FORM_RELAY), HELD at
-	// 0 for burn-in (waf_security_register.go).
-	{ID: 520, Name: "rule_form_relay_sppb_contact", ReasonFamily: "WAF_FORM_RELAY", DefaultMode: "block"},
+	// 520 intentionally skipped: the SP Page Builder contact-form mail-relay
+	// rule (2026-10-06), removed 2026-10-08 (CHANGELOG "Removed").
 
 	// 6xx header / protocol anomaly
 	{ID: 601, Name: "rule_ctrl_chars", ReasonFamily: "WAF_CTRL_CHARS", DefaultMode: "challenge_v2"},
