@@ -13,7 +13,7 @@
 //   2xx client identity (UA)
 //   3xx injection (SQLi, XSS, RCE, b64, deserialization, XXE, shellshock, …)
 //   4xx upload / malware / obfuscation
-//   5xx auth abuse / brute force (and form abuse: 520 mail relay)
+//   5xx auth abuse / brute force
 //   6xx header / protocol anomaly
 //   7xx SSRF / external interaction
 //   8xx info disclosure / debug
@@ -131,13 +131,8 @@ var wafRuleIDs = []WAFRule{
 	{ID: 510, Name: "rule_xmlrpc_multicall", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	{ID: 511, Name: "rule_xmlrpc_pingback", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	{ID: 512, Name: "rule_xmlrpc_post_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
-	// 520 (2026-10-06): Joomla SP Page Builder `ajax_contact` mail relay — the
-	// addon mails the client-posted base64 `recipient`, so a bot appends a victim
-	// (seen on titan: ~990 spam mails in 7 h from one site). Abuse of a form, not
-	// of auth, but this is the abuse band. Its own family so the autoblock knob
-	// is separate (FORM_RELAY), HELD at 0 for burn-in (waf_security_register.go):
-	// the edge 403 stops the relay; the ban waits for a fleet review.
-	{ID: 520, Name: "rule_form_relay_sppb_contact", ReasonFamily: "WAF_FORM_RELAY", DefaultMode: "block"},
+	// 520 intentionally skipped: the SP Page Builder contact-form mail-relay
+	// rule (2026-10-06), removed 2026-10-08 (CHANGELOG "Removed").
 
 	// 6xx header / protocol anomaly
 	{ID: 601, Name: "rule_ctrl_chars", ReasonFamily: "WAF_CTRL_CHARS", DefaultMode: "challenge_v2"},

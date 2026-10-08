@@ -1076,7 +1076,7 @@ Current assignments:
   501  rule_auth_burst                 510  rule_xmlrpc_multicall
   502  rule_auth_wp_checks             511  rule_xmlrpc_pingback
                                        512  rule_xmlrpc_post_burst
-                                       520  rule_form_relay_sppb_contact (block; SP Page Builder ajax_contact mail relay)
+                                       520  (retired 2026-10-08: SP Page Builder contact-form mail relay)
 
 6xx — Header / protocol anomaly
   601  rule_ctrl_chars                 605  rule_crlf_injection

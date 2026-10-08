@@ -17,7 +17,39 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **A crafted POST could freeze an edge worker for seconds (WAF rule 520,
+  removed).** Rule 520 (SP Page Builder contact-form relay, released
+  2026.10.06) scanned the posted recipient with a pattern that slows down
+  quadratically on input it does not match. One ~30 KB POST carrying
+  `addon=ajax_contact`, sent to any site on the edge (not only SP Page Builder
+  ones), held an nginx worker for about 7 seconds; a few per second could tie
+  up every worker. The rule is removed (see Removed). Until this release is
+  installed, turn it off with `rule_form_relay_sppb_contact = "disabled"` in
+  `/etc/cfm/cfm_waf_config.lua`.
+
+### Removed
+- **WAF rule 520 (`rule_form_relay_sppb_contact`, family `WAF_FORM_RELAY`).**
+  It never matched the abuse it was written for, and could not have:
+  - The spam on titan (hotellito.gr, ~1 500 mails) came from the
+    `form_builder` addon with the site's own `Cc: {{email}}` setting, so every
+    submission was copied to the address the visitor typed. Those requests
+    are identical to an honest visitor's; the fix is the form setting
+    (removed on 20 sites on 2026-10-07).
+  - The recipient list it watched for never delivers: Joomla hands PHPMailer
+    one address, and PHPMailer rejects a list.
+  - A rework that also covered injected `Cc:`/`Bcc:` headers had to mirror
+    PHP's request parsing on every request; review kept finding CPU-DoS and
+    bypass cases in it, which is too much risk for the few sites it could
+    protect.
+
+  What protects a site instead: update SP Page Builder to 3.8.8 or later
+  (3.8.0 to 3.8.3 still post these settings as plain base64 a bot can edit;
+  3.8.4 to 3.8.7 were not checked; correction to the 2026.10.06 entry, which
+  said 3.8), and don't put `{{...}}` placeholders in a form's Cc/Bcc. A
+  leftover `rule_form_relay_sppb_contact` line in `cfm_waf_config.lua` or
+  `FORM_RELAY` line in `detectors.conf` is ignored; delete it at leisure. Id
+  520 stays reserved.
 
 ## 2026.10.08
 
