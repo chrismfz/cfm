@@ -1029,7 +1029,7 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 			msg = "bounces back to normal (was: " + o.Message + ")"
 		case TypeQueueHog:
 			msg = "no longer filling the queue (was: " + o.Message + ")"
-			if strings.HasSuffix(key, ":<>") {
+			if strings.HasSuffix(key, ":<>") || strings.HasSuffix(key, ":MAILER-DAEMON") { // Postfix's name for it, before it was mapped
 				// bounces are no longer judged at all (abuse_signals.go)
 				msg = "bounce messages are no longer reported as filling the queue (was: " + o.Message + ")"
 			}

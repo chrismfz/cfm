@@ -554,3 +554,17 @@ func TestNewDQSKeyResetsTheRefusalLog(t *testing.T) {
 		t.Fatal("a new key must be able to log its own refusal")
 	}
 }
+
+// A refusal for a key that was replaced mid-lookup is not logged against the
+// new key (and does not use up the new key's one "refused" line).
+func TestStaleRefusalIsNotLogged(t *testing.T) {
+	t.Cleanup(func() { SetSpamhausDQSKey("") })
+	zen := rblLists[0]
+	SetSpamhausDQSKey("testkey2222222222222222222")
+	asked := zen.queryZone()
+	SetSpamhausDQSKey("testkey3333333333333333333") // reload while the lookup is in flight
+	logRBLRefusal(zen, asked, "127.255.255.250")
+	if _, ok := rblRefusalLogged.Load(zen.zone); ok {
+		t.Fatal("the old key's refusal must not stand for the new key")
+	}
+}

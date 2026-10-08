@@ -430,7 +430,8 @@ func (r *rblChecker) check(ctx context.Context, now time.Time) {
 // neither holds the other lists' verdicts.
 func queryRBL(ctx context.Context, rev string, l rblList) (rblStatus, rblListing) {
 	// the trailing dot keeps the resolver from also trying the search domains
-	addrs, err := rblLookup(ctx, rev+"."+l.queryZone()+".")
+	zone := l.queryZone() // once: the key can change while this lookup is in flight
+	addrs, err := rblLookup(ctx, rev+"."+zone+".")
 	if err != nil {
 		if de, ok := err.(*net.DNSError); ok && de.IsNotFound {
 			return rblClean, rblListing{}
@@ -443,7 +444,7 @@ func queryRBL(ctx context.Context, rev string, l rblList) (rblStatus, rblListing
 			continue
 		}
 		if ip[1] != 0 || ip[2] != 0 {
-			logRBLRefusal(l, a)
+			logRBLRefusal(l, zone, a)
 			return rblRefused, rblListing{}
 		}
 		if lb := l.label(ip[3]); lb != "" {
@@ -458,11 +459,14 @@ func queryRBL(ctx context.Context, rev string, l rblList) (rblStatus, rblListing
 
 var rblRefusalLogged sync.Map
 
-func logRBLRefusal(l rblList, answer string) {
+func logRBLRefusal(l rblList, asked, answer string) {
+	if l.queryZone() != asked {
+		return // the key changed while this lookup was in flight: its answer says nothing about the new one
+	}
 	if _, dup := rblRefusalLogged.LoadOrStore(l.zone, true); dup {
 		return
 	}
-	if l.queryZone() != l.zone { // through DQS: the key, not the resolver (never log the key)
+	if asked != l.zone { // through DQS: the key, not the resolver (never log the key)
 		logging.Logf("[mailtraffic] %s (DQS) answered %s: the MAIL_RBL_SPAMHAUS_DQS_KEY was refused (wrong, expired or over quota), so its listings cannot be checked", l.zone, answer)
 		return
 	}
