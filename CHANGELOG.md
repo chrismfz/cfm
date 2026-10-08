@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.08
+
 ### Added
 - **Mail abuse reaches the team channel.** Every 5 min the Mail Monitor now
   raises `mail_script_spike` (a site's scripts — a hacked site or an abused
@@ -80,8 +84,6 @@ back-filled here — see the git/PR history for that period.
   in scope.
 - `frontend_working` is `unknown`, not `none`, when no edge is found and the
   DNAT state cannot be read.
-
-## 2026.10.08
 
 ### Added
 - **Backup check: a fixed backup now says so (`backup_recovered`).** When a
