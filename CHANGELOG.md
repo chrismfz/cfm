@@ -28,7 +28,9 @@ back-filled here — see the git/PR history for that period.
   case under 0.2 s. That includes filling a form_builder `Cc:` line's
   `{{field}}` placeholders, which a chain of fields could grow exponentially:
   the fill now follows PHP exactly under a fixed size and step limit, and a
-  line that exceeds it is blocked, since no honest form needs one. Until this release is installed, you can turn the rule off
+  line that exceeds it is blocked, since no honest form needs one. So is a
+  request that sends one form row under more than 16 different spellings,
+  which an honest form never does and which otherwise cost over a second. Until this release is installed, you can turn the rule off
   with `rule_form_relay_sppb_contact = "disabled"` in
   `/etc/cfm/cfm_waf_config.lua`.
 

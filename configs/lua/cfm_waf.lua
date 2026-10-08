@@ -124,7 +124,8 @@ local CFG = {
                                          -- as plain base64). Blocks only tampering: an ajax_contact recipient LIST holding the
                                          -- submitted email, or a form_builder Cc/Bcc address written into the header that equals
                                          -- one the visitor typed (or a Cc/Bcc whose placeholders cannot be filled within
-                                         -- bounds, CC_UNRESOLVED: attacker-only). Every other tag (CC_PLACEHOLDER = the site's own
+                                         -- bounds, CC_UNRESOLVED, or a row flooded with
+                                         -- candidate keys, ROWS_AMBIGUOUS: both attacker-only). Every other tag (CC_PLACEHOLDER = the site's own
                                          -- `Cc: {{email}}` relay, MULTI_RECIPIENT, BODY_PAST_WINDOW) is clamped to logonly at
                                          -- the call site. See detect_sppb_contact_relay.
 
@@ -1133,7 +1134,7 @@ function _M.check(ctx)
   -- lines of the base64 `additional_header`, both as posted by the client (on
   -- <= 3.8.3). Every method: Joomla reads the form from $_REQUEST. Only the
   -- tampering tags (det.SPPB_ENFORCED_TAGS: RECIPIENT_HAS_SUBMITTER,
-  -- CC_HAS_SUBMITTER, CC_UNRESOLVED) take the rule's mode; the rest are
+  -- CC_HAS_SUBMITTER, CC_UNRESOLVED, ROWS_AMBIGUOUS) take the rule's mode; the rest are
   -- measurement, clamped to logonly like rule 612's in-app tag. CC_PLACEHOLDER is the site's own `Cc: {{email}}` setting: an honest
   -- visitor's submission looks the same, so it can only be logged.
   do

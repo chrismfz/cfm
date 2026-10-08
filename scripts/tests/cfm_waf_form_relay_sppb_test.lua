@@ -695,6 +695,52 @@ do
   clean(post(form(f, FB_TOP)), "a contact_email select equal to the saved Bcc")
 end
 
+-- Review round 5, second pass.
+do
+  local function timed(c, label)
+    local t0 = os.clock()
+    local hit, reason, _, act = waf.check(c)
+    local dt = os.clock() - t0
+    check(dt < 0.2, string.format("%s is bounded (took %.3fs)", label, dt))
+    return hit, reason, act
+  end
+  -- Many raw names trimming to one name, crossed with many values: names x
+  -- values grew quadratically (>1 s, ~70 MB). A row past 16 candidates is
+  -- ROWS_AMBIGUOUS (enforced; an honest form sends each key once).
+  local ws = { " ", "%09", "%0A", "%0D", "%0B", "%00" }
+  for _, nm in ipairs({ "recipient", "additional_header" }) do
+    local parts = { "addon=" .. (nm == "recipient" and "ajax_contact" or "form_builder") }
+    for a = 1, 6 do for b = 1, 6 do for c = 1, 6 do
+      parts[#parts + 1] = "data%5B0%5D%5Bname%5D=" .. nm .. ws[a] .. ws[b] .. ws[c]
+    end end end
+    for i = 1, 300 do parts[#parts + 1] = "data%5B0%5D%5Bvalue%5D=" .. enc(b64enc("Cc:a@b,c@d\n" .. i)) end
+    local _, reason, act = timed(post(table.concat(parts, "&")), nm .. " names x values")
+    check(reason and reason:find(":ROWS_AMBIGUOUS$") and act == "block",
+          nm .. " names x values is ROWS_AMBIGUOUS/block (got " .. tostring(reason) .. ")")
+  end
+  -- The fill budget with values spread over many rows (no row cap applies),
+  -- and a 1 KB run of `{` in the part: every scan must stay cheap.
+  local f = fb_fields("Cc: z@q{{a}}" .. string.rep("{", 1000) .. "}}", "cdew@spam.example")
+  for i = 1, 600 do f[#f + 1] = { "x[a]", "v" .. i } end
+  timed(post(form(f, FB_TOP)), "600 candidates x a 1 KB '{' run")
+  -- A field name ending in `}`: PHP's needle `{{x}}}` is invisible to the scan.
+  f = fb_fields("Cc: cdew{{x}}}@spam.example", "cdew@spam.example")
+  f[#f + 1] = { "sppb-form-builder-field[x}]", "" }
+  fb_is(post(form(f, FB_TOP)), "CC_UNRESOLVED", "block", "a field name ending in }")
+  -- A bare key is "" in PHP; a field with no value row fills as "".
+  local b = form(fb_fields("Cc: cdew{{x}}@spam.example", "cdew@spam.example"), FB_TOP)
+    .. "&" .. enc("data[20][name]") .. "=" .. enc("sppb-form-builder-field[x]") .. "&" .. enc("data[20][value]")
+  fb_is(post(b), "CC_HAS_SUBMITTER", "block", "a bare value key fills as empty")
+  f = fb_fields("Cc: cdew{{x}}@spam.example", "cdew@spam.example")
+  f[#f + 1] = { "sppb-form-builder-field[x]", "" }
+  b = form(f, FB_TOP):gsub("&data%%5B9%%5D%%5Bvalue%%5D=", "&zz=")
+  fb_is(post(b), "CC_HAS_SUBMITTER", "block", "a field with no value row fills as empty")
+  -- Sixteen candidates is still read (a cap, not a hair trigger).
+  b = form(fb_fields("Cc: cdew@spam.example", "cdew@spam.example"), FB_TOP)
+  for i = 1, 15 do b = b .. "&" .. enc("data[6][name]") .. "=" .. enc("additional_header" .. string.rep(" ", i)) end
+  fb_is(post(b), "CC_HAS_SUBMITTER", "block", "16 name candidates on one row")
+end
+
 -- ── Disabled ────────────────────────────────────────────────────────────────
 waf.set_rule("rule_form_relay_sppb_contact", "disabled")
 clean(post(form(fields("litohotel@outlook.com,cdew@spam.example", "cdew@spam.example"))), "rule disabled")

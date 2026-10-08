@@ -3879,8 +3879,13 @@ end
 --     can produce; form_builder's form FIELDS are the rows PHP turns into
 --     $fieldNames (a `[name]` in the row name, or `policy`), nothing else.
 --
--- Tags (the caller enforces SPPB_ENFORCED_TAGS: the two *_HAS_SUBMITTER tags
--- and CC_UNRESOLVED; every other tag is clamped to logonly):
+-- Tags (the caller enforces SPPB_ENFORCED_TAGS: the two *_HAS_SUBMITTER tags,
+-- CC_UNRESOLVED and ROWS_AMBIGUOUS; every other tag is clamped to logonly):
+-- both addons
+--   ROWS_AMBIGUOUS — one data[N] row received more than SPPB_ROW_CANDIDATES
+--     distinct names or values. An honest form sends each key once; capping
+--     silently would let a decoy flood hide the real value, and keeping every
+--     candidate let names x values grow quadratically (>1 s per request).
 -- ajax_contact
 --   RECIPIENT_HAS_SUBMITTER — the decoded recipient list holds 2+ addresses,
 --     one of them is the submitted `email`, and no other address in the list
@@ -3905,9 +3910,12 @@ end
 --     a 403 for that one submission (autoblock is held).
 --   CC_UNRESOLVED — a Cc/Bcc part with an address written outside its
 --     placeholders whose fill exceeds the bounds (SPPB_PART_MAX bytes at any
---     step, SPPB_FILL_STEPS per request, or a field named with `}}`). Only a
+--     step, SPPB_FILL_STEPS per request, or a field named with `}`). Only a
 --     crafted form gets there: blocked rather than skipped, because a chain
---     can grow past the cap and shrink back to one address.
+--     can grow past the cap and shrink back to one address. The accepted
+--     false positive: a saved part mixing a fixed address and a free-text
+--     field (`Cc: sales@x {{message}}`, not a deliverable address anyway) and
+--     a visitor message over 1 KB.
 --   CC_PLACEHOLDER — a Cc/Bcc part made only of `{{field}}` placeholders, at
 --     least one naming a real field (`Cc: {{email}}, {{friend}}` too): the site copies every submission to what the
 --     visitor typed (relay by configuration, the titan case). Measurement only,
@@ -3987,8 +3995,16 @@ local function joomla_cmd(v)
   return lower(t)
 end
 
-local function add_unique(list, seen, v)
+-- A row keeps at most this many distinct names and values. An honest form
+-- sends each key once; past the cap the request is ROWS_AMBIGUOUS (enforced),
+-- because dropping candidates would let a decoy flood hide the real one, and
+-- keeping them all let names x values grow quadratically (a 32 KB body of
+-- `additional_header<ws>` names took over a second).
+local SPPB_ROW_CANDIDATES = 16
+
+local function add_unique(list, seen, v, top)
   if not seen[v] then
+    if #list >= SPPB_ROW_CANDIDATES then top._flood = true; return end
     seen[v] = true
     list[#list + 1] = v
   end
@@ -4020,8 +4036,8 @@ local function sppb_put(k, v, rows, top)
       if not order then order = {}; top._order = order end
       order[#order + 1] = idx
     end
-    if field == "name" then add_unique(row.names, row.seen_n, v)
-    else add_unique(row.values, row.seen_v, v) end
+    if field == "name" then add_unique(row.names, row.seen_n, v, top)
+    else add_unique(row.values, row.seen_v, v, top) end
   elseif k == "addon" or k == "option" then
     local set = top[k]
     if not set then set = {}; top[k] = set end
@@ -4032,8 +4048,10 @@ end
 local function sppb_collect_pairs(s, rows, top)
   if not s or s == "" then return end
   for pair in ("&" .. s):gmatch("&([^&]*)") do
+    -- A bare key (no '=') is "" in PHP.
     local k, v = pair:match("^([^=]*)=(.*)$")
-    if k then sppb_put(form_decode(k), form_decode(v), rows, top) end
+    if not k then k, v = pair, "" end
+    if k ~= "" then sppb_put(form_decode(k), form_decode(v), rows, top) end
   end
 end
 
@@ -4166,7 +4184,7 @@ end
 -- `{{name}}` occurs in s. Every `{{` is a start (overlaps included, as
 -- str_replace finds `{{b}}` inside `{{a{{b}}`); the closing `}}` is shared by
 -- all starts before it, so the scan stays linear.
-local function sppb_next_field(s, cur, pos)
+local function sppb_next_field(s, cur, pos, maxlen)
   local best, i, c = nil, 1, nil
   while true do
     local o = s:find("{{", i, true)
@@ -4175,7 +4193,9 @@ local function sppb_next_field(s, cur, pos)
       c = s:find("}}", o + 2, true)
       if not c then break end
     end
-    local p = pos[s:sub(o + 2, c - 1)]
+    -- no field name is longer than maxlen: skip the copy (a 1 KB run of `{`
+    -- would otherwise copy ~500 KB per scan)
+    local p = (c - o - 2 <= maxlen) and pos[s:sub(o + 2, c - 1)]
     if p and p > cur and (not best or p < best) then best = p end
     i = o + 1
   end
@@ -4187,12 +4207,12 @@ end
 -- one candidate value (see sppb_put) is tried with each. Fields between `cur`
 -- and the next one present in s cannot change it, so only those are stepped.
 -- Returns true (hit), false, or nil when the bounds above were hit, or when
--- a field name holds `}}` (the scan cannot see `{{a}}b}}` as one placeholder;
--- no honest field is named that way).
+-- a field name holds `}` (the scan cannot see `{{a}}b}}` or `{{x}}}` as one
+-- placeholder; no honest field is named that way).
 local function sppb_fill_hits(s, cur, ctx)
   ctx.steps = ctx.steps + 1
   if ctx.odd or ctx.steps > SPPB_FILL_STEPS or #s > SPPB_PART_MAX then return nil end
-  local p = sppb_next_field(s, cur, ctx.pos)
+  local p = sppb_next_field(s, cur, ctx.pos, ctx.maxlen)
   if not p then
     for _, a in ipairs(sppb_addrs(s)) do
       if ctx.submitted[a] then return true end
@@ -4227,17 +4247,22 @@ end
 
 -- ajax_contact: the decoded `recipient` list (see the tags above).
 local function sppb_ajax_contact(rows)
-  local recipients, emails = {}, {}
+  local recipients, seen, emails = {}, {}, {}
   for _, row in pairs(rows) do
+    -- the row's names reduced to what they can mean, then each value once
+    local is_rcpt, is_email = false, false
     for _, n in ipairs(row.names) do
       local nm = trim_lower(n)
-      for _, v in ipairs(row.values) do
-        if nm == "recipient" then
-          recipients[#recipients + 1] = v
-        elseif nm == "email" then
-          local em = trim_lower(v)
-          if em ~= "" then emails[em] = true end
-        end
+      if nm == "recipient" then is_rcpt = true elseif nm == "email" then is_email = true end
+    end
+    for _, v in ipairs(row.values) do
+      if is_rcpt and not seen[v] then
+        seen[v] = true
+        recipients[#recipients + 1] = v
+      end
+      if is_email then
+        local em = trim_lower(v)
+        if em ~= "" then emails[em] = true end
       end
     end
   end
@@ -4294,27 +4319,44 @@ local SPPB_EMAIL_FIELDS = {
 }
 
 local function sppb_form_builder(rows, top)
-  local hdrs, order, pos, vals, seen, odd = {}, {}, {}, {}, {}, false
+  local hdrs, hseen, order, pos, vals, seen = {}, {}, {}, {}, {}, {}
+  local odd, maxlen = false, 0
   for _, idx in ipairs(top._order or {}) do
     local row = rows[idx]
+    local is_hdr = false
     for _, n in ipairs(row.names) do
       if trim_lower(n) == "additional_header" then
-        for _, v in ipairs(row.values) do hdrs[#hdrs + 1] = v end
+        is_hdr = true
       else
         local f = sppb_field_name(n)
         if f then
           if not pos[f] then
-            if f:find("}}", 1, true) then odd = true end
+            -- `{{x}}}` for a field `x}`: the scan pairs `{{` with the first
+            -- `}}`, so a `}` in a name is filled fail-closed (no honest field
+            -- is named that way).
+            if f:find("}", 1, true) then odd = true end
+            if #f > maxlen then maxlen = #f end
             order[#order + 1] = f
             pos[f] = #order
             vals[f], seen[f] = {}, {}
           end
-          for _, v in ipairs(row.values) do add_unique(vals[f], seen[f], v) end
+          for _, v in ipairs(row.values) do
+            if not seen[f][v] then seen[f][v] = true; vals[f][#vals[f] + 1] = v end
+          end
         end
+      end
+    end
+    if is_hdr then
+      for _, v in ipairs(row.values) do
+        if not hseen[v] then hseen[v] = true; hdrs[#hdrs + 1] = v end
       end
     end
   end
   if #hdrs == 0 then return nil end
+  -- A field with no value is filled with "" (PHP's missing index).
+  for _, f in ipairs(order) do
+    if #vals[f] == 0 then vals[f][1] = "" end
+  end
   local lines = {}
   for _, v in ipairs(hdrs) do
     local dec = php_b64_decode(v)
@@ -4345,7 +4387,8 @@ local function sppb_form_builder(rows, top)
       if v:find("@", 1, true) then submitted[v] = true end
     end
   end
-  local ctx = { steps = 0, order = order, pos = pos, vals = vals, submitted = submitted, odd = odd }
+  local ctx = { steps = 0, order = order, pos = pos, vals = vals, submitted = submitted,
+                odd = odd, maxlen = maxlen }
   local placeholder, unresolved = false, false
   for _, kv in ipairs(lines) do
     if kv[1] == "cc" or kv[1] == "bcc" then
@@ -4383,6 +4426,7 @@ end
 
 local SPPB_ENFORCED = {
   RECIPIENT_HAS_SUBMITTER = true, CC_HAS_SUBMITTER = true, CC_UNRESOLVED = true,
+  ROWS_AMBIGUOUS = true,
 }
 _M.SPPB_ENFORCED_TAGS = SPPB_ENFORCED
 
@@ -4423,6 +4467,11 @@ function _M.detect_sppb_contact_relay(args, body, headers, _nab)
   -- `option`); an absent one may come from the page URL.
   if top.option and not top.option["com_sppagebuilder"] then return nil end
   local addons = top.addon or {}
+  if top._flood then
+    if addons["ajax_contact"] then return "SPPB_AJAX_CONTACT", "ROWS_AMBIGUOUS" end
+    if addons["form_builder"] then return "SPPB_FORM_BUILDER", "ROWS_AMBIGUOUS" end
+    return nil
+  end
   local which, tag
   for _, a in ipairs({
     { addons["ajax_contact"], "SPPB_AJAX_CONTACT", sppb_ajax_contact },
