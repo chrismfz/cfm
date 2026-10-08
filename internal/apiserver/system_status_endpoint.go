@@ -1157,9 +1157,21 @@ func handleMailTraffic(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	resp := map[string]any{
 		"ok": true, "schema": "system.mail_traffic.v1", "available": true, "traffic": sum,
-	})
+	}
+	// The mail-abuse findings (docs/mail-abuse.md) name local users, script
+	// paths and other tenants' mailboxes: whole-server, so admin only.
+	if scope == nil {
+		if views, at := mailtraffic.CurrentAbuse(); !at.IsZero() {
+			if views == nil {
+				views = []mailtraffic.AbuseView{}
+			}
+			resp["abuse"] = views
+			resp["abuse_checked_at"] = at.UTC()
+		}
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // mailSelfIP caches the host's bound IPs (enumerated once) for the DNS check.

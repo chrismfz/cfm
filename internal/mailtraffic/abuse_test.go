@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"cfm/internal/mailmeter"
 )
@@ -67,10 +68,11 @@ func TestScriptSpikeHotellito(t *testing.T) {
 	}
 
 	tr := newTracker()
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 6; i++ {
 		ts := T.Add(-time.Duration(30-i) * time.Minute).Format("2006-01-02 15:04:05")
 		tr.observeExim(ts+" cwd=/home/hotellito/public_html 4 args: /usr/sbin/sendmail -t -i -fwebhostingcosmoteam@gmail.com", T)
-		tr.observeExim(ts+" 1xEL5B-0000000G4kX-2ged <= webhostingcosmoteam@gmail.com U=hotellito P=local S=1390 id=x@hotellito.gr T=\"offer for you\" for litohotel@outlook.com victim"+string(rune('a'+i))+"@gmail.com", T)
+		// the real subject, as exim logged (and cut) it on titan
+		tr.observeExim(ts+" 1xEL5B-0000000G4kX-2ged <= webhostingcosmoteam@gmail.com U=hotellito P=local S=1390 id=x@hotellito.gr T=\"=?utf-8?B?0JvQsNC30LXRgNC90YvQtSDRgdC60LDQvdC10YDRiyB8IHBhd3ViYWxlODky?=  =?utf-8?B?QGdtYWlsLmNvbSB8\" for litohotel@outlook.com victim"+string(rune('a'+i))+"@gmail.com", T)
 	}
 	fs, recent, ok := tr.evaluate(st, T)
 	if !ok || len(fs) != 1 {
@@ -80,13 +82,19 @@ func TestScriptSpikeHotellito(t *testing.T) {
 	if f.Type != TypeScriptSpike || f.Severity != "critical" || f.Key != "mail:script:hotellito" {
 		t.Fatalf("unexpected finding %+v", f)
 	}
-	for _, want := range []string{"86 messages sent by scripts", "/home/hotellito/public_html", "webhostingcosmoteam@gmail.com (not a domain on this server)", "4 different recipients"} {
+	for _, want := range []string{"86 messages sent by scripts", "/home/hotellito/public_html", "webhostingcosmoteam@gmail.com (not a domain here)", "contact-form pattern: litohotel@outlook.com + a new address each"} {
 		if !strings.Contains(f.Message, want) {
 			t.Fatalf("message %q lacks %q", f.Message, want)
 		}
 	}
-	if len(f.Message) > 255 {
-		t.Fatalf("message too long for cfm-web: %d", len(f.Message))
+	if n := utf8.RuneCountInString(f.Message); n > 250 { // cfm-web keeps 250 characters
+		t.Fatalf("message too long for cfm-web: %d characters", n)
+	}
+
+	if len(tr.last) != 1 || tr.last[0].Context == nil || tr.last[0].Context.Recipients != 7 ||
+		len(tr.last[0].Context.Subjects) != 1 || !strings.HasPrefix(tr.last[0].Context.Subjects[0], "Лазерные сканеры") ||
+		tr.last[0].Context.RcptDomains[0] != "gmail.com×6" {
+		t.Fatalf("the view must carry the decoded subject and recipients: %+v", tr.last)
 	}
 
 	p := &publisher{path: filepath.Join(t.TempDir(), "state.json")}
@@ -206,5 +214,41 @@ func TestPostfixAuthIPsAreTracked(t *testing.T) {
 	tr.observeMaillog("Oct  8 10:00:00 mx postfix/submission/smtpd[1]: 4AB: client=unknown[5.6.7.8], sasl_method=PLAIN, sasl_username=info@shop.gr", time.Now())
 	if _, ok := tr.authIPs["info@shop.gr"]["5.6.7.8"]; !ok {
 		t.Fatalf("postfix sasl login not tracked: %+v", tr.authIPs)
+	}
+}
+
+func TestDecodeSubject(t *testing.T) {
+	for raw, want := range map[string]string{
+		"Order #123 confirmed":                 "Order #123 confirmed",
+		"=?utf-8?B?zpXPhc+HzrHPgc65z4PPhM+O?=": "Ευχαριστώ",
+		// exim cut the second encoded word: keep what decodes, drop the stub
+		"=?utf-8?B?zpXPhc+HzrHPgc65z4PPhM+O?=  =?utf-8?B?QGdtYW": "Ευχαριστώ",
+		`say \"hi\"`: `say "hi"`,
+	} {
+		if got := decodeSubject(raw); got != want {
+			t.Fatalf("decodeSubject(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// A mailbox sending as someone else is worth saying; a newsletter from its own
+// address to many domains is not a contact-form pattern.
+func TestMailboxContext(t *testing.T) {
+	withLocalDomains(t, "shop.gr")
+	tr := newTracker()
+	T := time.Unix(1_700_000_000, 0)
+	ts := T.Add(-5 * time.Minute).Format("2006-01-02 15:04:05")
+	for i := 0; i < 10; i++ {
+		r := "c" + string(rune('a'+i)) + "@d" + string(rune('a'+i%3)) + ".com"
+		tr.observeExim(ts+" 1x <= news@shop.gr H=(x) [1.1.1.1]:1 P=esmtpsa A=dovecot_login:news@shop.gr S=1 T=\"Autumn sale\" for "+r, T)
+		tr.observeExim(ts+" 1y <= ceo@bank.example H=(x) [1.1.1.1]:1 P=esmtpsa A=dovecot_login:info@shop.gr S=1 T=\"Invoice\" for "+r, T)
+	}
+	news := tr.context("auth:news@shop.gr", "news@shop.gr")
+	if news.OtherFrom || news.ForeignFrom || news.CopiedTo != "" || news.Recipients != 10 || news.Subjects[0] != "Autumn sale" {
+		t.Fatalf("a newsletter: %+v", news)
+	}
+	hij := tr.context("auth:info@shop.gr", "info@shop.gr")
+	if !hij.ForeignFrom || !strings.Contains(hij.describe("x"), "ceo@bank.example (not a domain here)") {
+		t.Fatalf("sending as a foreign address must be said: %+v", hij)
 	}
 }

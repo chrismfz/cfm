@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"mime"
 	"os"
 	"regexp"
 	"sort"
@@ -136,11 +137,14 @@ func defaultCountryOf(ip string) string {
 
 // ---- per-line context (what the counters don't keep) ----
 
-type localSample struct {
-	at    time.Time
-	cwd   string
-	from  string
-	rcpts []string
+// sample is one recent message of a sender, kept for the alert's context: a
+// subject and the recipients tell a newsletter from a hijacked contact form.
+type sample struct {
+	at      time.Time
+	cwd     string // local submissions: the script's directory
+	from    string // envelope sender
+	subject string
+	rcpts   []string
 }
 
 type tracker struct {
@@ -148,12 +152,15 @@ type tracker struct {
 	line       int
 	pendingCwd string
 	pendingAt  int
-	local      map[string][]localSample        // unix user → recent local submissions
+	samples    map[string][]sample             // "local:<user>" / "auth:<mailbox>" → recent messages
 	authIPs    map[string]map[string]time.Time // mailbox → source IP → last successful auth
+
+	last      []AbuseView // the latest check's findings, for whats_wrong / mail_traffic
+	lastCheck time.Time
 }
 
 func newTracker() *tracker {
-	return &tracker{local: map[string][]localSample{}, authIPs: map[string]map[string]time.Time{}}
+	return &tracker{samples: map[string][]sample{}, authIPs: map[string]map[string]time.Time{}}
 }
 
 var (
@@ -162,6 +169,8 @@ var (
 	reLogTime = regexp.MustCompile(`^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)`)
 	reFrom    = regexp.MustCompile(`\s<=\s(\S+)`)
 	reHostIP  = regexp.MustCompile(`\bH=[^\[]*\[([0-9a-fA-F:.]+)\]`)
+	// T="subject" (exim log_selector +subject; `\"` escapes a quote)
+	reSubject = regexp.MustCompile(`\sT="((?:[^"\\]|\\.)*)"`)
 	// Postfix submission: `client=host[ip], sasl_method=PLAIN, sasl_username=user`
 	rePostfixAuth = regexp.MustCompile(`client=[^\[]*\[([0-9a-fA-F:.]+)\].*\bsasl_username=([^\s,]+)`)
 )
@@ -173,6 +182,34 @@ func logTime(line string, now time.Time) time.Time {
 		}
 	}
 	return now
+}
+
+var (
+	subjectDecoder = new(mime.WordDecoder)
+	reEncodedLeft  = regexp.MustCompile(`=\?\S*`)
+)
+
+// decodeSubject turns exim's logged subject (often RFC 2047 encoded words, and
+// cut short by exim) into readable text. An encoded word exim cut in half is
+// dropped rather than shown as base64.
+func decodeSubject(raw string) string {
+	raw = strings.ReplaceAll(raw, `\"`, `"`)
+	if d, err := subjectDecoder.DecodeHeader(raw); err == nil {
+		raw = d
+	}
+	// whatever is still an encoded word did not decode (exim cut it short)
+	raw = reEncodedLeft.ReplaceAllString(raw, "")
+	raw = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, raw)
+	raw = strings.Join(strings.Fields(raw), " ")
+	if r := []rune(raw); len(r) > 80 {
+		raw = string(r[:79]) + "…"
+	}
+	return raw
 }
 
 // observeExim takes one exim mainlog line.
@@ -187,28 +224,32 @@ func (t *tracker) observeExim(line string, now time.Time) {
 	if !strings.Contains(line, " <= ") {
 		return
 	}
-	at := logTime(line, now)
+	s := sample{at: logTime(line, now)}
+	if f := reFrom.FindStringSubmatch(line); f != nil {
+		s.from = strings.ToLower(f[1])
+	}
+	if m := reSubject.FindStringSubmatch(line); m != nil {
+		s.subject = decodeSubject(m[1])
+	}
+	if i := strings.LastIndex(line, " for "); i >= 0 {
+		for _, r := range strings.Fields(line[i+5:]) {
+			if strings.Contains(r, "@") {
+				s.rcpts = append(s.rcpts, strings.ToLower(r))
+			}
+		}
+	}
 	if m := reEximLocalUser.FindStringSubmatch(line); m != nil {
-		s := localSample{at: at}
 		if t.line-t.pendingAt <= 4 { // the cwd line is logged just before its arrival line
 			s.cwd = t.pendingCwd
 		}
-		if f := reFrom.FindStringSubmatch(line); f != nil {
-			s.from = strings.ToLower(f[1])
-		}
-		if i := strings.LastIndex(line, " for "); i >= 0 {
-			for _, r := range strings.Fields(line[i+5:]) {
-				if strings.Contains(r, "@") {
-					s.rcpts = append(s.rcpts, strings.ToLower(r))
-				}
-			}
-		}
-		t.addLocal(m[1], s)
+		t.addSample("local:"+m[1], s)
 		return
 	}
 	if m := reEximAuthed.FindStringSubmatch(line); m != nil {
+		user := strings.ToLower(m[1])
+		t.addSample("auth:"+user, s)
 		if ip := reHostIP.FindStringSubmatch(line); ip != nil {
-			t.addAuth(strings.ToLower(m[1]), ip[1], at)
+			t.addAuth(user, ip[1], s.at)
 		}
 	}
 }
@@ -229,15 +270,15 @@ var (
 	reEximAuthed    = regexp.MustCompile(`\bP=esmtps?a\b.*\bA=[^:\s]+:([^\s]+)`)
 )
 
-func (t *tracker) addLocal(user string, s localSample) {
-	if _, ok := t.local[user]; !ok && len(t.local) >= maxTrackedUsers {
+func (t *tracker) addSample(key string, s sample) {
+	if _, ok := t.samples[key]; !ok && len(t.samples) >= maxTrackedUsers {
 		return
 	}
-	ss := append(t.local[user], s)
+	ss := append(t.samples[key], s)
 	if len(ss) > maxSamples {
 		ss = ss[len(ss)-maxSamples:]
 	}
-	t.local[user] = ss
+	t.samples[key] = ss
 }
 
 func (t *tracker) addAuth(user, ip string, at time.Time) {
@@ -257,15 +298,15 @@ func (t *tracker) addAuth(user, ip string, at time.Time) {
 
 // prune drops context older than the windows it is read over.
 func (t *tracker) prune(now time.Time) {
-	for u, ss := range t.local {
+	for k, ss := range t.samples {
 		i := 0
 		for i < len(ss) && now.Sub(ss[i].at) > contextWindow {
 			i++
 		}
 		if i == len(ss) {
-			delete(t.local, u)
+			delete(t.samples, k)
 		} else {
-			t.local[u] = ss[i:]
+			t.samples[k] = ss[i:]
 		}
 	}
 	for u, ips := range t.authIPs {
@@ -280,32 +321,121 @@ func (t *tracker) prune(now time.Time) {
 	}
 }
 
-// localContext summarises a user's recent local submissions for a message.
-func (t *tracker) localContext(user string) (cwd, from string, rcpts int) {
-	cwds, froms := map[string]int{}, map[string]int{}
-	seen := map[string]bool{}
-	for _, s := range t.local[user] {
+// Context is what a sender's recent messages looked like — enough to tell a
+// newsletter from a hacked contact form without opening a log.
+type Context struct {
+	Messages    int      `json:"messages"` // in the sample (the last 2 h, capped)
+	Cwd         string   `json:"cwd,omitempty"`
+	From        string   `json:"from,omitempty"`
+	ForeignFrom bool     `json:"foreign_from,omitempty"` // the envelope sender's domain is not on this host
+	OtherFrom   bool     `json:"other_from,omitempty"`   // a mailbox sending as an address that is not itself
+	Subjects    []string `json:"subjects,omitempty"`     // the most common, up to 3
+	Recipients  int      `json:"recipients"`             // distinct
+	RcptDomains []string `json:"rcpt_domains,omitempty"` // "gmail.com×812", top 5
+	// CopiedTo is set when one address gets (nearly) every message while the
+	// rest go to a new address each time: a contact form's "send a copy to
+	// the sender" abused to spam, the owner in copy.
+	CopiedTo string `json:"copied_to,omitempty"`
+}
+
+func (t *tracker) context(key, self string) Context {
+	ss := t.samples[key]
+	c := Context{Messages: len(ss)}
+	if len(ss) == 0 {
+		return c
+	}
+	cwds, froms, subjects, rcpts, doms := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
+	others := 0
+	for _, s := range ss {
 		if s.cwd != "" {
 			cwds[s.cwd]++
 		}
 		if s.from != "" {
 			froms[s.from]++
 		}
-		for _, r := range s.rcpts {
-			seen[r] = true
+		if s.subject != "" {
+			subjects[s.subject]++
 		}
+		for _, r := range s.rcpts {
+			if rcpts[r] == 0 {
+				if i := strings.LastIndex(r, "@"); i >= 0 {
+					doms[r[i+1:]]++
+				}
+			}
+			rcpts[r]++
+		}
+		others += len(s.rcpts)
 	}
-	return topKey(cwds), topKey(froms), len(seen)
+	c.Cwd, c.From, c.Recipients = topKey(cwds), topKey(froms), len(rcpts)
+	if c.From != "" {
+		c.ForeignFrom = foreignSender(c.From)
+		c.OtherFrom = self != "" && strings.Contains(self, "@") && c.From != self
+	}
+	for _, kv := range topN(subjects, 3) {
+		c.Subjects = append(c.Subjects, kv.k)
+	}
+	for _, kv := range topN(doms, 5) {
+		c.RcptDomains = append(c.RcptDomains, fmt.Sprintf("%s×%d", kv.k, kv.n))
+	}
+	if top := topN(rcpts, 1); len(top) == 1 && len(ss) >= 5 &&
+		float64(top[0].n) >= 0.8*float64(len(ss)) && float64(len(rcpts)-1) >= 0.8*float64(others-top[0].n) {
+		c.CopiedTo = top[0].k
+	}
+	return c
+}
+
+type kv struct {
+	k string
+	n int
+}
+
+func topN(m map[string]int, n int) []kv {
+	out := make([]kv, 0, len(m))
+	for k, v := range m {
+		out = append(out, kv{k, v})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].n != out[j].n {
+			return out[i].n > out[j].n
+		}
+		return out[i].k < out[j].k
+	})
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
 }
 
 func topKey(m map[string]int) string {
-	best, n := "", 0
-	for k, v := range m {
-		if v > n || (v == n && k < best) {
-			best, n = k, v
+	if t := topN(m, 1); len(t) == 1 {
+		return t[0].k
+	}
+	return ""
+}
+
+// describe appends a context's telling parts to an alert message, most
+// telling first (the message is cut at the column limit).
+func (c Context) describe(msg string) string {
+	if c.Cwd != "" {
+		msg += " · from " + c.Cwd
+	}
+	if c.From != "" {
+		switch {
+		case c.ForeignFrom:
+			msg += " · as " + c.From + " (not a domain here)"
+		case c.OtherFrom:
+			msg += " · as " + c.From + " (not itself)"
 		}
 	}
-	return best
+	if c.CopiedTo != "" {
+		msg += fmt.Sprintf(" · contact-form pattern: %s + a new address each", c.CopiedTo)
+	} else if c.Recipients > 0 {
+		msg += fmt.Sprintf(" · %d different recipients", c.Recipients)
+	}
+	if len(c.Subjects) > 0 {
+		msg += " · «" + c.Subjects[0] + "»"
+	}
+	return msg
 }
 
 // ---- evaluation ----
@@ -313,6 +443,20 @@ func topKey(m map[string]int) string {
 type abuseFinding struct {
 	Type, Severity, Key, Message string
 	Expected                     float64 // the spike's expected volume when it opened
+}
+
+// AbuseView is one current finding with its full context, for whats_wrong
+// and the mail_traffic view.
+type AbuseView struct {
+	Type      string   `json:"type"`
+	Severity  string   `json:"severity"`
+	Key       string   `json:"key"`
+	Message   string   `json:"message"`
+	Subject   string   `json:"subject"` // the user / mailbox
+	Recent    int64    `json:"recent,omitempty"`
+	Context   *Context `json:"context,omitempty"`
+	IPs       int      `json:"ips,omitempty"`
+	Countries []string `json:"countries,omitempty"`
 }
 
 // evaluate returns this check's findings, plus each spike key's recent volume
@@ -339,25 +483,16 @@ func (t *tracker) evaluate(st *Store, now time.Time) (fs []abuseFinding, recent 
 		recent["mail:script:"+a] = n
 	}
 
+	var views []AbuseView
 	for _, a := range loc {
 		if systemLocalUsers[a.Addr] {
 			continue
 		}
-		cwd, from, rcpts := t.localContext(a.Addr)
-		msg := fmt.Sprintf("%s: %d messages sent by scripts in %dh (%s)", a.Addr, a.Recent, anomalyRecentHours, usual(a))
-		if cwd != "" {
-			msg += " · from " + cwd
-		}
-		if from != "" {
-			msg += " · as " + from
-			if foreignSender(from) {
-				msg += " (not a domain on this server)"
-			}
-		}
-		if rcpts > 0 {
-			msg += fmt.Sprintf(" · %d different recipients", rcpts)
-		}
-		fs = append(fs, abuseFinding{Type: TypeScriptSpike, Severity: spikeSeverity(a), Key: "mail:script:" + a.Addr, Message: clip(msg), Expected: expectedOf(a)})
+		c := t.context("local:"+a.Addr, "")
+		msg := clip(c.describe(fmt.Sprintf("%s: %d messages sent by scripts in %dh (%s)", a.Addr, a.Recent, anomalyRecentHours, usual(a))))
+		f := abuseFinding{Type: TypeScriptSpike, Severity: spikeSeverity(a), Key: "mail:script:" + a.Addr, Message: msg, Expected: expectedOf(a)}
+		fs = append(fs, f)
+		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, Context: &c})
 	}
 	hijacked := map[string]bool{}
 	for user, ips := range t.authIPs {
@@ -371,25 +506,49 @@ func (t *tracker) evaluate(st *Store, now time.Time) (fs []abuseFinding, recent 
 			continue
 		}
 		hijacked[user] = true
-		fs = append(fs, abuseFinding{Type: TypeHijack, Severity: "critical", Key: "mail:hijack:" + user,
-			Message: clip(fmt.Sprintf("%s: authenticated from %d IPs in %d countries (%s) within an hour — likely a stolen password",
-				user, len(ips), len(countries), strings.Join(sortedKeys(countries), ", ")))})
+		cs := sortedKeys(countries)
+		msg := clip(fmt.Sprintf("%s: authenticated from %d IPs in %d countries (%s) within an hour — likely a stolen password",
+			user, len(ips), len(countries), strings.Join(cs, ", ")))
+		f := abuseFinding{Type: TypeHijack, Severity: "critical", Key: "mail:hijack:" + user, Message: msg}
+		fs = append(fs, f)
+		c := t.context("auth:"+user, user)
+		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: user, IPs: len(ips), Countries: cs, Context: &c})
 	}
 	for _, a := range out {
-		msg := fmt.Sprintf("%s: %d authenticated messages in %dh (%s)", a.Addr, a.Recent, anomalyRecentHours, usual(a))
+		c := t.context("auth:"+a.Addr, a.Addr)
+		head := fmt.Sprintf("%s: %d authenticated messages in %dh (%s)", a.Addr, a.Recent, anomalyRecentHours, usual(a))
 		if ips := t.authIPs[a.Addr]; len(ips) > 1 && !hijacked[a.Addr] {
-			msg += fmt.Sprintf(" · from %d IPs", len(ips))
+			head += fmt.Sprintf(" · from %d IPs", len(ips))
 		}
-		fs = append(fs, abuseFinding{Type: TypeOutboundSpike, Severity: spikeSeverity(a), Key: "mail:out:" + a.Addr, Message: clip(msg), Expected: expectedOf(a)})
+		msg := clip(c.describe(head))
+		f := abuseFinding{Type: TypeOutboundSpike, Severity: spikeSeverity(a), Key: "mail:out:" + a.Addr, Message: msg, Expected: expectedOf(a)}
+		fs = append(fs, f)
+		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, IPs: len(t.authIPs[a.Addr]), Context: &c})
 	}
+	t.last, t.lastCheck = views, now
 	return fs, recent, true
+}
+
+// CurrentAbuse returns the latest mail-abuse check's findings with their
+// context and when it ran; nil and a zero time before the first check, when the
+// collector is not running, or when the check is off.
+func CurrentAbuse() ([]AbuseView, time.Time) {
+	sharedMu.RLock()
+	c := coll
+	sharedMu.RUnlock()
+	if c == nil || !abuseOn.Load() {
+		return nil, time.Time{}
+	}
+	c.ab.mu.Lock()
+	defer c.ab.mu.Unlock()
+	return append([]AbuseView(nil), c.ab.last...), c.ab.lastCheck
 }
 
 func usual(a Anomaly) string {
 	if a.Kind == "new-sender" {
 		return "it rarely sends mail"
 	}
-	return fmt.Sprintf("usually %.1f/h, %.0f× that", a.BaselinePerHour, a.Ratio)
+	return fmt.Sprintf("%.0f× its usual %.1f/h", a.Ratio, a.BaselinePerHour)
 }
 
 func expectedOf(a Anomaly) float64 { return a.BaselinePerHour * anomalyRecentHours }

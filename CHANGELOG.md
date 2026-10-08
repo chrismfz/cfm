@@ -28,7 +28,12 @@ back-filled here — see the git/PR history for that period.
   cfm-web to alert on. On titan a contact form sent ~1 000 messages a day for
   days without tripping `exim_relays`' fixed 110-per-15-min threshold; the
   per-user baseline sees it in the first hour. Alert only. `MAIL_ABUSE_ALERT
-  = 0` in cfm.conf turns it off. See `docs/mail-abuse.md`.
+  = 0` in cfm.conf turns it off. Each finding shows the decoded subject, the
+  top recipient domains, the contact-form pattern (the owner copied on every
+  message plus a new outside address each time) and a sender spoofing a
+  foreign domain or another mailbox, so a newsletter can be told from spam.
+  The `mail_traffic` MCP tool lists them under `abuse` (admin) and
+  `whats_wrong` reports them. See `docs/mail-abuse.md`.
 
 ## 2026.10.08
 

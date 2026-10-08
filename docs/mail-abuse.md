@@ -42,6 +42,30 @@ state is kept in `/var/lib/cfm/mail_abuse_published.json` (next to the
 counters), so restarts do not re-announce. Delivery is the same
 `detection_history` node-fault path as the backup check; cfm-web ingests it.
 
+## Telling a newsletter from spam
+
+Each finding carries a **context** gathered from the log lines of the last
+2 h (up to 2 000 per user / mailbox):
+
+- the decoded **subjects** (`T="…"`, RFC 2047 words decoded, ≤ 80 chars, the 3
+  most common) — the alert shows the top one as `· «subject»`;
+- the **recipients**: how many different addresses, the top recipient domains
+  (`gmail.com×812`), and the **contact-form pattern** — one address (the site
+  owner) in ≥ 80 % of ≥ 5 messages while the others are ≥ 80 % distinct;
+- the **sender**: a local script sending "as" an address whose domain is not on
+  this host (`· as x@gmail.com (not a domain here)`), or a mailbox sending as an
+  address other than itself (`(not itself)`) — the spoofing tell;
+- the script directory (`cwd=`) for local submissions.
+
+A newsletter reads as one sender, one subject, many mixed recipient domains
+from its own address; a hacked form reads as a foreign "from", a constant
+copied-to owner and a new outside address each time. The node does not decide
+which — it shows it.
+
+The same findings, with the full context, are in the `mail_traffic` MCP tool
+(`abuse`, admin callers only) and in `whats_wrong` (category `mail`), so a
+general "what's wrong" on a node or `node="all"` names them too.
+
 ## Knob
 
 `cfm.conf`: `MAIL_ABUSE_ALERT = 1` (default). `0` turns the findings off; the
@@ -52,5 +76,5 @@ counters and the MCP views stay.
 - Bounce/defer ratio spikes per sender, the node's own IP on an RBL, one
   sender dominating the queue.
 - Dovecot (IMAP/POP) logins for the hijack check — SMTP AUTH only.
-- Recipient novelty (a contact form writes to a NEW outside address every
-  time): reported as a count, not yet a trigger of its own.
+- Recipient novelty and the contact-form pattern are shown as context, not a
+  trigger of their own.
