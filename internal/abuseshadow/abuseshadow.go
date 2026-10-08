@@ -59,6 +59,11 @@ type Entry struct {
 	DCReqs    int     `json:"dc_reqs,omitempty"`   // dc: datacenter requests
 	DCIPs     int     `json:"dc_ips,omitempty"`    // dc: distinct datacenter IPs
 
+	// origin_403_burst (per IP): POSTs the origin answered 403 in the minute,
+	// with Paths (distinct paths among them) and Reqs (every request from the
+	// IP to the host in that minute) above. verdict=would_ban|exempt_goodbot.
+	Post403 int `json:"post403,omitempty"`
+
 	// Per-IP challenge_score signal metrics (internal/webdetector/challenge_score.go).
 	// A decision line carries fp/score/solves/tells + verdict=would_harden|would_deny;
 	// a store-cap NOTE line carries note=store_cap_reached + dropped= (verdict=would_shadow).
@@ -123,6 +128,8 @@ func Parse(line string) (Entry, bool) {
 			e.IP = v
 		case "rps":
 			e.RPS, _ = strconv.ParseFloat(v, 64)
+		case "post403":
+			e.Post403, _ = strconv.Atoi(v)
 		case "ratio":
 			e.Ratio, _ = strconv.ParseFloat(v, 64)
 		case "reqs":
@@ -220,6 +227,19 @@ type topEntity struct {
 	GoodBot  string  `json:"good_bot,omitempty"`
 }
 
+// origin403Entity is one (host, ip) the origin_403_burst signal would have
+// banned, with its peak minute. Reqs next to Post403 is the FP read: a real
+// user hitting an origin WAF also sends ordinary requests.
+type origin403Entity struct {
+	Host       string `json:"host"`
+	IP         string `json:"ip"`
+	Hits       int    `json:"hits"`
+	MaxPost403 int    `json:"max_post403"`
+	MaxPaths   int    `json:"max_paths"`
+	MaxReqs    int    `json:"max_reqs"`
+	CC         string `json:"cc,omitempty"`
+}
+
 // sigHost is one vhost flagged by a per-vhost signal (facet/cost/dc): the values
 // from its STRONGEST firing (facet ranked by expansion, dc by datacenter
 // fraction; cost has one metric) plus how many windows fired (Hits). Reporting a
@@ -251,6 +271,12 @@ type Summary struct {
 	ByCountry      []kv        `json:"by_country"`  // ISO-2 country distribution (would_challenge only)
 	ByGoodbot      []kv        `json:"by_good_bot"` // which good bots were exempted
 	TopWouldBlock  []topEntity `json:"top_would_challenge"`
+
+	// origin_403_burst: would_ban lines (a per-IP burst of POSTs the origin
+	// answered 403), and the top (host, ip) by peak per-minute count. Omitted
+	// when the signal never fired in the window.
+	WouldBan     int               `json:"would_ban,omitempty"`
+	TopOrigin403 []origin403Entity `json:"top_origin_403,omitempty"`
 
 	// Per-vhost signal breakdowns — which hosts each new signal flagged, ranked by
 	// its own peak metric. This is what answers "is facet flagging real floods or a
@@ -364,7 +390,8 @@ func Summarize(lines []string) Summary {
 	byGoodbot := map[string]int{}
 	hosts := map[string]struct{}{}
 	ips := map[string]struct{}{}
-	ent := map[string]*topEntity{} // key host|ip, would_challenge only
+	ent := map[string]*topEntity{}        // key host|ip, would_challenge only
+	o403 := map[string]*origin403Entity{} // key host|ip, origin_403_burst would_ban only
 	facetHosts := map[string]*sigHost{}
 	costHosts := map[string]*sigHost{}
 	dcHosts := map[string]*sigHost{}
@@ -612,6 +639,26 @@ func Summarize(lines []string) Summary {
 			if e.Reqs > t.MaxReqs {
 				t.MaxReqs = e.Reqs
 			}
+		case "would_ban":
+			s.WouldBan++
+			if e.Signal == "origin_403_burst" {
+				k := e.Host + "|" + e.IP
+				t := o403[k]
+				if t == nil {
+					t = &origin403Entity{Host: e.Host, IP: e.IP, CC: e.CC}
+					o403[k] = t
+				}
+				t.Hits++
+				if e.Post403 > t.MaxPost403 {
+					t.MaxPost403 = e.Post403
+				}
+				if e.Paths > t.MaxPaths {
+					t.MaxPaths = e.Paths
+				}
+				if e.Reqs > t.MaxReqs {
+					t.MaxReqs = e.Reqs
+				}
+			}
 		case "exempt_goodbot":
 			s.ExemptGoodbot++
 			if e.GoodBot != "" {
@@ -654,6 +701,26 @@ func Summarize(lines []string) Summary {
 		tops = tops[:25]
 	}
 	s.TopWouldBlock = tops
+
+	if len(o403) > 0 {
+		ot := make([]origin403Entity, 0, len(o403))
+		for _, t := range o403 {
+			ot = append(ot, *t)
+		}
+		sort.Slice(ot, func(i, j int) bool {
+			if ot[i].MaxPost403 != ot[j].MaxPost403 {
+				return ot[i].MaxPost403 > ot[j].MaxPost403
+			}
+			if ot[i].Host != ot[j].Host {
+				return ot[i].Host < ot[j].Host
+			}
+			return ot[i].IP < ot[j].IP
+		})
+		if len(ot) > 25 {
+			ot = ot[:25]
+		}
+		s.TopOrigin403 = ot
+	}
 
 	// Every comparator ends on Host (unique per map key) so the order — and thus
 	// which host is dropped at the 25-cap — is deterministic across calls even when

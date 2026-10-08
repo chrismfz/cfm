@@ -17,6 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Shadow signal for bursts the origin's own WAF blocks.** An IP that sends
+  30 or more POSTs a minute to one site, all answered 403 by the site's own
+  WAF (Wordfence, ModSecurity), is now logged to `cfm.abuse_shadow.log` as
+  `signal=origin_403_burst verdict=would_ban`. CFM had let such traffic through
+  silently: the TranslatePress exploit on titan was 115 of them in a minute.
+  WordPress's own "-1" nonce refusals are left out, because real visitors on a
+  cached page send bursts of those, and verified good bots are logged as
+  exempt. The `abuse_shadow` MCP tool lists the top offenders with how many
+  ordinary requests each sent. Log-only: nothing is challenged or blocked. On
+  by default wherever `ABUSE_SHADOW = 1`; the threshold is
+  `ABUSE_SHADOW_ORIGIN403_PER_MIN`.
+
 ### Security
 - **WAF rules 10018/10019/10020 block the TranslatePress account takeover
   (CVE-2026-19632, TranslatePress 3.3.1 and older; fixed in 3.3.2).** An

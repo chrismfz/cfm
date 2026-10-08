@@ -39,6 +39,13 @@ type LogRec struct {
 	RT, URT float64
 	UA      string
 	Ref     string
+	// Upstream is true when the urt column held a value (not "-"): the edge
+	// proxied the request and an upstream answered it. A request the edge
+	// answered itself (WAF/challenge/IP block, cache hit) has no upstream.
+	// Kept apart from URT because a fast origin logs "0.000" and a retried
+	// one "0.1, 0.2" (which URT parses as 0). The combined format and the
+	// Apache origin log never set it.
+	Upstream bool
 }
 
 // parseTSV parses the TSV log format used by access_cfm_tsv.log.
@@ -72,6 +79,8 @@ func parseTSV(line string) (LogRec, bool) {
 		URT:    ut,
 		UA:     strings.ToLower(f[11]),
 		Ref:    strings.ToLower(f[10]),
+
+		Upstream: f[9] != "" && f[9] != "-",
 	}, true
 }
 
@@ -148,6 +157,13 @@ type bucketSW struct {
 	ipsMalRule map[string]map[int]int // ip -> ruleIndex -> count
 
 	ips403WAF map[string]int // WAF-origin 403s (from OpenResty cfm_waf.lua via observe)
+
+	// Origin-403 POST burst (abuse_shadow Signal O, abuse_shadow_origin403.go):
+	// POSTs the ORIGIN answered 403 (an origin WAF such as Wordfence/ModSecurity),
+	// per IP, and the distinct paths they hit. Maintained only while the shadow
+	// signal is enabled.
+	ipsOrigin403POST map[string]int
+	ipOrigin403Paths map[string]map[uint64]struct{}
 
 	// Challenge paths counters (for "challenge-only" actions)
 	ipsChalPath map[string]int
@@ -1612,6 +1628,14 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 
 	// Per-IP error thresholds (optional)
 	if rec.IP != "" {
+		if e.cfg.AbuseShadow && e.cfg.AbuseShadowOrigin403 && isOrigin403POST(rec, p) {
+			if b.ipsOrigin403POST == nil {
+				b.ipsOrigin403POST = make(map[string]int)
+				b.ipOrigin403Paths = make(map[string]map[uint64]struct{})
+			}
+			b.ipsOrigin403POST[rec.IP]++
+			addHashToSetWithCap(b.ipOrigin403Paths, rec.IP, hash64(p), origin403PathCap)
+		}
 		if rec.Status == 403 && e.cfg.IP403Count > 0 {
 			// Static asset paths are excluded (as with the 404 and 40x-combo
 			// counters below). Origin-emitted 403s on images/css/js — hotlink

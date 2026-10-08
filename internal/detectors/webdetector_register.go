@@ -717,6 +717,9 @@ func init() {
 			AbuseShadowDCFracMinReq:  kvInt(kv, "ABUSE_SHADOW_DCFRAC_MIN_REQ", 0),
 			AbuseShadowDCFracMinIPs:  kvInt(kv, "ABUSE_SHADOW_DCFRAC_MIN_IPS", 0),
 
+			AbuseShadowOrigin403:       kvBool(kv, "ABUSE_SHADOW_ORIGIN403", true),
+			AbuseShadowOrigin403PerMin: kvInt(kv, "ABUSE_SHADOW_ORIGIN403_PER_MIN", 0),
+
 			// Optional uniqIP-based vhost auto mode
 			ChallengeSuspiciousUniqIP:    kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP", false),
 			ChallengeSuspiciousUniqIPOn:  kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_ON", 0),
