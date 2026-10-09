@@ -342,8 +342,10 @@ var (
 // hijack check (refreshed at most every selfRefresh: interfaces rarely change).
 func selfResolver() *selfip.Resolver {
 	rblSelfOnce.Do(func() { rblSelf = selfip.New() })
-	if now := time.Now().Unix(); now-selfRefreshedAt.Load() >= int64(selfRefresh/time.Second) {
-		selfRefreshedAt.Store(now)
+	now, last := time.Now().Unix(), selfRefreshedAt.Load()
+	// a clock stepped back (NTP after a fast boot RTC) is due too, or the
+	// gate would stall for as long as the step
+	if d := now - last; (d < 0 || d >= int64(selfRefresh/time.Second)) && selfRefreshedAt.CompareAndSwap(last, now) {
 		rblSelf.Refresh()
 	}
 	return rblSelf
