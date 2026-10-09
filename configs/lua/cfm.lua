@@ -359,13 +359,17 @@ local function esc(s) return ngx.escape_uri(s or "") end
 -- arrives from ngx.req.get_headers() as a table, which cjson encodes as a
 -- JSON array, and the daemon's string field then fails the decode of the
 -- whole push: no ban, no cfm.waf.log record, no history, no v2 mark. The
--- first non-empty value (cfm_waf_util.header_string); absent stays absent.
+-- first non-empty value, as cfm_waf_util.header_string reads it (not called
+-- here: this must hold when that module failed to load); else absent.
 local function push_header(v)
   if type(v) == "string" then return v end
-  if type(v) ~= "table" or not wutil_ok then return nil end
-  local s = wutil.header_string(v)
-  if s == "" then return nil end
-  return s
+  if type(v) == "table" then
+    for i = 1, #v do
+      local s = v[i]
+      if type(s) == "string" and s ~= "" then return s end
+    end
+  end
+  return nil
 end
 
 local function with_query_arg(u, k, v)

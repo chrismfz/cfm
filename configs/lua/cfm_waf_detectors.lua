@@ -5091,19 +5091,19 @@ function _M.detect_polyglot_upload(body, headers)
   if not body or body == "" then return nil end
 
   headers = headers or {}
-  -- Boundary tokens are case-sensitive (RFC 2046 §5.1.1) — extract from the
-  -- original header value, not a lowered copy. Only the multipart/form-data
-  -- check itself is case-insensitive. header_string, not the raw value: a
-  -- repeated Content-Type arrives as a table, and :match on it raised, so
-  -- check() failed open with every later rule unrun. Not php_content_type:
-  -- its ", " join would leave a comma on the end of the boundary token.
-  local ct_raw = header_string(headers["content-type"] or headers["Content-Type"])
+  -- The Content-Type and boundary PHP uses (php_content_type: a repeated
+  -- header joined with ", ", as Apache hands it over; php_mp_boundary: the
+  -- run rfc1867.c splits on, cut at "," / ";", or the quoted value). The
+  -- raw value used to be read here: a repeated header is a table, :match on
+  -- it raised and check() failed open with every later rule unrun, and a
+  -- boundary PHP reads differently (`XB,y`, a second header, `"X B"`) left
+  -- this walk looking for a separator PHP never used. Boundary tokens are
+  -- case-sensitive (RFC 2046 §5.1.1), so only the media-type test is lowered.
+  local ct_raw = php_content_type(headers)
   if not has(lower(ct_raw), "multipart/form-data") then return nil end
 
-  local boundary = ct_raw:match("[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]=([^;%s]+)")
-  if not boundary then return nil end
-  boundary = boundary:gsub('^"', ''):gsub('"$', '')
-  if boundary == "" then return nil end
+  local boundary = php_mp_boundary(ct_raw)
+  if not boundary or boundary == "" then return nil end
 
   local sep = "--" .. boundary
 

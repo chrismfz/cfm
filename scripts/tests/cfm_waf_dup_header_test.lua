@@ -41,6 +41,22 @@ check(ok, "412 must not raise on a repeated Content-Type (" .. tostring(two) .. 
 check(ok and two == one, "412 reads the first Content-Type when it repeats (got " .. tostring(two) .. ")")
 ok = pcall(det.detect_polyglot_upload, poly, { ["content-type"] = {} })
 check(ok, "412 must not raise on an empty header table")
+-- The boundary PHP splits on, wherever it sits (both reviews of the first
+-- cut of this fix): in a second header (Apache joins them with ", "), before
+-- a comma, or quoted.
+check(det.detect_polyglot_upload(poly,
+        { ["content-type"] = { "multipart/form-data", "boundary=XB" } }) == one,
+      "412 finds a boundary carried by a second Content-Type")
+check(det.detect_polyglot_upload(poly,
+        { ["content-type"] = "multipart/form-data; boundary=XB,y" }) == one,
+      "412 cuts the boundary at a comma, as PHP does")
+local qpoly = poly:gsub("%-%-XB", "--X B")
+check(det.detect_polyglot_upload(qpoly,
+        { ["content-type"] = 'multipart/form-data; boundary="X B"' }) == one,
+      "412 reads a quoted boundary whole")
+check(det.detect_polyglot_upload(poly,
+        { ["Content-Type"] = "multipart/form-data; boundary=XB" }) == one,
+      "412 reads the canonical-case header name")
 
 -- ── check(): the rules after 412 still run ─────────────────────────────────
 local body = "--XB\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n" ..
@@ -97,7 +113,7 @@ do
   local fn_src = src:match("\n(local function push_header%(v%).-\nend)\n")
   check(fn_src ~= nil, "push_header found in cfm.lua")
   if fn_src then
-    local env = setmetatable({ wutil_ok = true, wutil = require("cfm_waf_util") }, { __index = _G })
+    local env = setmetatable({}, { __index = _G })
     local chunk = assert(loadstring(fn_src .. "\nreturn push_header"))
     setfenv(chunk, env)
     local push_header = chunk()
@@ -105,8 +121,8 @@ do
     check(push_header(nil) == nil, "an absent header stays absent")
     check(push_header({ "", "b", "c" }) == "b", "a repeated header is its first non-empty value")
     check(push_header({}) == nil, "an empty table is absent")
-    env.wutil_ok = false
-    check(push_header({ "a", "b" }) == nil, "no util: a repeated header is dropped, never a table")
+    check(push_header({ "a", "b" }) == "a", "the first of two values")
+    check(push_header({ 1, {} }) == nil, "non-string values are never sent")
   end
 end
 
