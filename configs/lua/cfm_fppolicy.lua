@@ -30,7 +30,9 @@
 -- verdict, because the daemon always parses the raw tuple itself.
 --
 -- FAIL-OPEN BY CONSTRUCTION: no fingerprint (plain HTTP), RPC error, daemon
--- down, dict full — every failure path answers "" (no action). A short
+-- down, dict full — every failure path answers "" (no action). The one
+-- exception is a spent RPC budget for a fingerprint that was ARMED when last
+-- asked: it keeps that answer (the armed reserve, see STALE_TTL). A short
 -- negative cache (ERR_TTL) bounds retry pressure during a daemon outage, and
 -- the decision circuit breaker PROTECTS this kind too (a tripped breaker
 -- fails the lookup fast instead of paying decision_timeout_ms per uncached
@@ -49,7 +51,8 @@
 -- clean-allow cache or the circuit-breaker state — the same churn lesson
 -- that gave geo its own dict. The same minting also forces an RPC per new
 -- key, so RPC_BUDGET caps lookups node-wide per second; over budget the
--- lookup fails open without caching (bounded work, no dict churn).
+-- lookup writes nothing (bounded work, no dict churn) and fails open, unless the
+-- fingerprint was armed when last asked (the armed reserve, see STALE_TTL).
 
 local cjson = require "cjson.safe"
 local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
@@ -67,6 +70,27 @@ local ERR_TTL     = 10  -- RPC failure — retry soon, but never per-request
 -- so a healthy node sits far under this. Sustained saturation means either a
 -- key-minting client (which this bounds) or a much bigger fleet (raise it).
 local RPC_BUDGET = 50
+
+-- The armed reserve. RPC_BUDGET is node-wide, so a client that mints junk
+-- fingerprints (50+ handshakes a second with rotating cipher values) used to
+-- make every uncached lookup fail open, an armed farm's included once its
+-- 30 s cache lapsed: the deny stopped answering for as long as the flood ran.
+-- Now the last ARMED answer for a fingerprint (deny / challenge /
+-- challenge_v2) is kept under its own key (fpps|, STALE_TTL), and over
+-- budget such a fingerprint is asked anyway from a separate reserve
+-- (STALE_RPC_BUDGET a second): only armed answers write fpps| keys, so a
+-- flood cannot spend it. The fresh answer refreshes both keys, so a disarm,
+-- an FP_POLICY_ALLOW_FPS entry or an expiry still lands within the normal
+-- cache TTL. Only when the reserve is spent too is the stale answer served
+-- (then those changes can reach this node up to STALE_TTL late; the edge
+-- FP_POLICY = 0 kill switch is unaffected). A fingerprint not asked about in
+-- the last STALE_TTL (never seen, idle that long, or a node restart / dict
+-- reload since) has no answer on record and still fails open while the
+-- budget is spent, as does an RPC error (no stale answer then: the daemon
+-- is the only one who can correct it). While the daemon is down AND the
+-- reserve is spent, though, the stale answer is served without an RPC.
+local STALE_TTL = 600
+local STALE_RPC_BUDGET = 10
 
 -- is_grease mirrors internal/tlsfp.isGREASE: a 6-char 0x?a?a token whose two
 -- hex bytes are identical with low nibble 'a' (how nginx renders the RFC 8701
@@ -120,7 +144,8 @@ function M.lookup(deps)
   if not key_in then return "", nil end
 
   local sh = deps.sh
-  local ck = "fpp|" .. ngx.md5(key_in)
+  local kh = ngx.md5(key_in)
+  local ck = "fpp|" .. kh
 
   if sh then
     local cached = sh:get(ck)
@@ -133,11 +158,25 @@ function M.lookup(deps)
   end
 
   -- Node-wide per-second budget on uncached lookups (see ISOLATION above).
-  -- Over budget: fail open, cache nothing (a churning attacker must not be
-  -- able to write either).
+  -- Over budget a churning attacker must not be able to write anything: a
+  -- fingerprint with no armed answer on record fails open; one with an armed
+  -- answer is asked from the armed reserve, and served that answer when the
+  -- reserve is spent too (STALE_TTL above). Over budget a fingerprint with no
+  -- armed answer on record writes nothing; the reserve's RPCs (10/s, armed
+  -- fingerprints only) write as any lookup does.
+  local sk = "fpps|" .. kh
   if sh then
     local n = shd.incr(sh, "fpp|rpc_budget", 1, 1)
-    if n and n > RPC_BUDGET then return "", nil end
+    if n and n > RPC_BUDGET then
+      local stale = sh:get(sk)
+      if not stale then return "", nil end
+      local r = shd.incr(sh, "fpp|stale_budget", 1, 1)
+      if r and r > STALE_RPC_BUDGET then
+        local sep = stale:find("|", 1, true)
+        if sep then return stale:sub(1, sep - 1), stale:sub(sep + 1) end
+        return "", nil
+      end
+    end
   end
 
   local body, err = deps.rpc("/nginx/fppolicy?fp=" .. ngx.escape_uri(deps.raw))
@@ -160,7 +199,14 @@ function M.lookup(deps)
   local ttl = tonumber(obj.ttl) or DEFAULT_TTL
   if ttl <= 0 then ttl = DEFAULT_TTL end
   if action == "" then ttl = math.min(ttl, MISS_TTL) end
-  if sh then sh:set(ck, action .. "|" .. id, ttl) end
+  if sh then
+    sh:set(ck, action .. "|" .. id, ttl)
+    if action ~= "" then
+      sh:set(sk, action .. "|" .. id, STALE_TTL)
+    else
+      sh:delete(sk)  -- disarmed: no stale answer to fall back on
+    end
+  end
   return action, id ~= "" and id or nil
 end
 

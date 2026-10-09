@@ -354,7 +354,12 @@ local function notify_impl(ip, waf_tag)
     if not CFG.methods[method] then return nil end
 
     local host = (ngx.var.host or ""):lower()
-    local uri  = ngx.var.request_uri or ""
+    -- The decoded, dot-segment-normalised path (what nginx routes and the
+    -- origin runs), not the raw request_uri: `/acctxfer/../real/upload.php`
+    -- matched the /acctxfer inline bypass as written and reached
+    -- /real/upload.php unscanned inline (where WAF rule 103, which blocks
+    -- that request line by default, is off, excluded or failed open).
+    local uri  = ngx.var.uri or ""
     if is_excluded(host, uri) then return nil end
 
     local ct = (ngx.var.content_type or ""):lower()
@@ -400,7 +405,7 @@ local function notify_impl(ip, waf_tag)
     local payload = cjson.encode({
         ip             = ip,
         host           = host,
-        uri            = uri,
+        uri            = ngx.var.request_uri or uri,  -- reported as sent
         method         = method,
         filename       = extract_filename(),
         body_file      = scan_path,

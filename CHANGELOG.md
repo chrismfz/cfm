@@ -33,6 +33,23 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
+- **A flood of junk TLS fingerprints no longer switches off an armed
+  fingerprint deny.** The edge asks the daemon about at most 50 new
+  fingerprints a second per server; a client offering rotating cipher lists
+  used that budget up, and every fingerprint whose 30-second cache had
+  lapsed then went unchecked, an armed farm's included. A fingerprint that
+  was armed when last asked is now still asked, from a small reserve the
+  flood cannot spend, and keeps its last answer if even that runs out (then
+  a disarm, an allow-listed fingerprint or an expiry can reach a flooded
+  server up to 10 minutes late; the `FP_POLICY = 0` kill switch is
+  immediate). A fingerprint not asked about in the last 10 minutes (new, idle,
+  or since a restart) still passes while the flood lasts, as before.
+- **The ClamAV inline-scan bypass for cPanel account transfers matches the
+  path the server runs.** It (and the module's excluded paths) matched the
+  request line as sent, so a `/acctxfer/../` prefix skipped the inline
+  verdict for any upload. The WAF's traversal rule (103) already blocks that
+  request by default; this closes it where the rule is off, held at
+  log-only, excluded for the site, or the WAF has failed open.
 - **The XML-RPC brute-force and pingback rules can no longer be skipped by
   claiming to be Jetpack.** Rules 510-512 let through any request carrying a
   Jetpack marker (`?for=jetpack`, a Jetpack or WordPress.com User-Agent, or
