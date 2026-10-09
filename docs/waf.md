@@ -1133,7 +1133,7 @@ ticket quoting `<? echo $title; ?>` is no webshell. Expect some logonly noise
 from text attachments that quote PHP (`<? if(…)`): review it at promotion.
 Only file parts (a `filename=`, as PHP registers them) are read, to the
 multipart body budget (16 KB), and only for the openers, not 402's
-superglobal words (`$_POST` in ticket / forum text is a known 402 FP). Added
+superglobal words (since 2026-10-09 402 reads those in file parts only, so `$_POST` in ticket / forum text is no longer a 402 FP). Added
 2026-10-09 at `logonly`: those bytes were never scanned before, and a text
 attachment quoting PHP would be a 6 h ban at block. Promote it in
 `cfm_waf_config.lua` (`rule_upload_content_deep = "block"`) after a clean

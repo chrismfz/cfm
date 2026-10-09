@@ -232,6 +232,15 @@ back-filled here — see the git/PR history for that period.
   `/etc/cfm/cfm_waf_config.lua`.
 
 ### Fixed
+- **Two upload rules no longer ban people for innocent file names and text.**
+  The upload file-name rule (401) matched its sensitive names anywhere in a
+  name, so uploading `Q3.environmental-report.pdf` (`.env`) or
+  `superuser.ini` (`user.ini`) blocked the uploader and banned their IP for
+  6 hours; the names must now stand on their own (`.env`, `.env.local`,
+  `.htaccess`, `user.ini`, `web.config` are still blocked). The
+  upload-content rule (402) blocked a multipart form whose TEXT fields
+  mentioned `$_POST` or `$_GET`, such as a support ticket about a form
+  handler; it now looks for those only inside uploaded files.
 - **Mail hijack false positive: the node's own address.** A site's form or
   mailer authenticating to the server it runs on connects to the server's
   public IP; that login counted as a remote one, with the node's country

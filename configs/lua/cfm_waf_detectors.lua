@@ -4193,13 +4193,22 @@ function _M.detect_upload_filename(body, headers)
       return ""
     end)
 
-    -- Special full-name matches (shared hosting critical paths)
-    if has(fname, "user.ini")   then return "user.ini" end
-    if has(fname, "php.ini")    then return "php.ini" end
-    if has(fname, ".htaccess")  then return ".htaccess" end
-    if has(fname, ".htpasswd")  then return ".htpasswd" end
-    if has(fname, ".env")       then return ".env" end
-    if has(fname, "web.config") then return "web.config" end
+    -- Special full-name matches (shared hosting critical paths). Anchored like
+    -- the extension matchers below: the name must be followed by a non-word
+    -- character (`.env.local`, `.htaccess.bak`, a path separator) or the end,
+    -- so `.env` no longer matches `Q3.environmental-report.pdf` or
+    -- `x.envelope.png` — rule 401 is block + autoblock-armed, and a mid-word
+    -- match banned a legitimate uploader for 6 h (edge Lua sweep 2026-10-09).
+    -- A name that does not start with a dot must also START a path segment
+    -- (`superuser.ini` is not user.ini; PHP reads only the exact name).
+    local function named(n) return fname:find(n .. "[^%w]") or fname:find(n .. "$") end
+    local function whole(n) return named("^" .. n) or named("[^%w]" .. n) end
+    if whole("user%.ini")   then return "user.ini" end
+    if whole("php%.ini")    then return "php.ini" end
+    if named("%.htaccess")  then return ".htaccess" end
+    if named("%.htpasswd")  then return ".htpasswd" end
+    if whole("%.env")       then return ".env" end
+    if whole("web%.config") then return "web.config" end
 
     -- Extension checks: match anywhere in filename to catch double-extensions
     if fname:match("%.php[%d]*[^%w]") or fname:match("%.php[%d]*$") then return "php" end
@@ -4740,10 +4749,20 @@ function _M.detect_upload_content(body, headers)
   if has(b, "<?php") or has_php_short_echo(b) then return "UPLOAD_PHP_TAG" end
   if has(b, "<jsp:")                          then return "UPLOAD_JSP_TAG" end
 
-  -- PHP superglobals inside file content = almost certainly a webshell
-  if has(b, "$_get")    or has(b, "$_post")   or has(b, "$_request")
-     or has(b, "$_files") or has(b, "$_server") or has(b, "$_cookie") then
-    return "UPLOAD_PHP_SUPERGLOBAL"
+  -- PHP superglobals inside FILE content = almost certainly a webshell. Only
+  -- the bytes of file parts (a `filename=`, as PHP registers them) within
+  -- the window are read: a ticket or forum text field that mentions
+  -- `$_POST` is no upload, and rule 402 is block + autoblock-armed (edge Lua
+  -- sweep 2026-10-09). The openers above still read the whole window.
+  for _, f in ipairs(php_file_parts(body, php_content_type(headers))) do
+    local fs, fe = f[2], f[3]
+    if fs > CFG.max_scan_len then break end
+    if fe > CFG.max_scan_len then fe = CFG.max_scan_len end
+    local part = lower(body:sub(fs, fe))
+    if has(part, "$_get")    or has(part, "$_post")   or has(part, "$_request")
+       or has(part, "$_files") or has(part, "$_server") or has(part, "$_cookie") then
+      return "UPLOAD_PHP_SUPERGLOBAL"
+    end
   end
 
   -- ImageMagick MVG / SVG command injection (ImageTragick)
