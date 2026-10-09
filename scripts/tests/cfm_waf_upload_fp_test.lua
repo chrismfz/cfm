@@ -7,7 +7,9 @@
 --     end after the name; a dotless name must also start a segment).
 --   * 402 looked for PHP superglobals in the whole first 2 KB of a multipart
 --     body, text fields included: a support ticket mentioning `$_POST` was
---     blocked. Only file parts are read for them now.
+--     blocked. Only file parts are read for them now, and only next to a PHP
+--     short open tag / <script language="php"> in the same part: an attached
+--     error.log or notes file quoting `$_POST` is no webshell.
 
 _G.ngx = {
   now           = function() return 1000 end,
@@ -51,7 +53,8 @@ do
     check(not r.ids:find(",401,", 1, true), fn .. " is no special name: " .. show(r))
   end
   for _, fn in ipairs({ ".env", ".env.local", "a/.env", ".htaccess", ".htaccess.bak", ".htpasswd", ".user.ini",
-                        "user.ini", "php.ini", "x/php.ini", "web.config", "WEB.CONFIG", "shell.php" }) do
+                        "user.ini", "php.ini", "x/php.ini", "web.config", "WEB.CONFIG", "shell.php",
+                        "x%2f.env", "%5cphp.ini", "x%5cweb.config", "a%2F.htaccess" }) do
     local r = run(body(part('name="f"; filename="' .. fn .. '"', "data", "text/plain")))
     check(r.ids:find(",401,", 1, true) and r.action == "block", fn .. " is still blocked by 401: " .. show(r))
   end
@@ -63,10 +66,16 @@ do
   check(not r.ids:find(",402,", 1, true), "a ticket text field mentioning $_POST is not 402: " .. show(r))
   r = run(body(part('name="subject"', "re: $_GET and $_SERVER"), part('name="message"', "see above")))
   check(not r.ids:find(",402,", 1, true), "superglobal words across text fields are not 402: " .. show(r))
-  r = run(body(part('name="f"; filename="avatar.gif"', "GIF89a; system($_GET['c']);", "image/gif")))
-  check(r.ids:find(",402,", 1, true) and r.action == "block", "a file part carrying $_GET is still 402: " .. show(r))
-  r = run(body(part('name="message"', "hello"), part('name="f"; filename="a.jpg"', "x $_REQUEST y", "image/jpeg")))
+  r = run(body(part('name="f"; filename="avatar.gif"', "GIF89a <? system($_GET['c']); ?>", "image/gif")))
+  check(r.ids:find(",402,", 1, true) and r.action == "block", "a file part carrying <? + $_GET is still 402: " .. show(r))
+  r = run(body(part('name="message"', "hello"), part('name="f"; filename="a.jpg"', "x <? eval($_REQUEST[x]); ?> y", "image/jpeg")))
   check(r.ids:find(",402,", 1, true), "a file after a text field is still read: " .. show(r))
+  r = run(body(part('name="f"; filename="s.png"', "<script language=\"php\">echo $_COOKIE[a];</script>", "image/png")))
+  check(r.ids:find(",402,", 1, true), "<script language=php> + a superglobal in a file is 402: " .. show(r))
+  r = run(body(part('name="f"; filename="error.log"', "PHP Notice: Undefined index: email in form.php ($_POST['email'])", "text/plain")))
+  check(not r.ids:find(",402,", 1, true), "an attached error.log quoting $_POST is not 402: " .. show(r))
+  r = run(body(part('name="f"; filename="notes.md"', "We log $_SERVER['REMOTE_ADDR'] for each visit.", "text/markdown")))
+  check(not r.ids:find(",402,", 1, true), "an attached notes file mentioning $_SERVER is not 402: " .. show(r))
   r = run(body(part('name="message"', "<?php echo 1; ?>")))
   check(r.ids:find(",402,", 1, true), "the PHP opener still reads the whole window (unchanged): " .. show(r))
 end

@@ -240,7 +240,10 @@ back-filled here — see the git/PR history for that period.
   `.htaccess`, `user.ini`, `web.config` are still blocked). The
   upload-content rule (402) blocked a multipart form whose TEXT fields
   mentioned `$_POST` or `$_GET`, such as a support ticket about a form
-  handler; it now looks for those only inside uploaded files.
+  handler, or an attached `error.log` quoting one; it now looks for those
+  only inside uploaded files, next to a PHP open tag (`<?`, `<?php`, `<?=`,
+  `<script language="php">`) in the same file. A name hidden behind an
+  encoded separator (`x%2f.env`) is still caught.
 - **Mail hijack false positive: the node's own address.** A site's form or
   mailer authenticating to the server it runs on connects to the server's
   public IP; that login counted as a remote one, with the node's country
