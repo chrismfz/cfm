@@ -316,7 +316,7 @@ end
 -- one CR before it dropped. fn(name, value) runs once per field, in order.
 local function each_multipart_field(b, ct_raw, fn)
   local bnd = php_mp_boundary(ct_raw)
-  if not bnd or bnd == "" then return end
+  if not bnd then return end -- an EMPTY boundary is valid to PHP: parts split on `--` lines
   local B, nextb = "--" .. bnd, "\n--" .. bnd
   local n, p = #b, 1
   while true do
@@ -363,11 +363,12 @@ local function each_multipart_field(b, ct_raw, fn)
       if name and not filename and name ~= "" then
         -- php_ap_memstr also matches a boundary PREFIX that runs to the end of
         -- the body ("\n", "\n--", ...): a last value is cut there too.
+        -- nextb holds one LF (its first byte), so only the body's last LF can
+        -- start such a prefix: one comparison.
         local cut = bound
         if not cut then
-          for k = math.max(p, n - #nextb + 2), n do
-            if b:byte(k) == 10 and nextb:sub(1, n - k + 1) == b:sub(k) then cut = k; break end
-          end
+          local k = b:find("\n[^\n]*$", p)
+          if k and n - k + 1 < #nextb and nextb:sub(1, n - k + 1) == b:sub(k) then cut = k end
         end
         local v = b:sub(p, (cut or n + 1) - 1)
         if cut and v:sub(-1) == "\r" then v = v:sub(1, -2) end
@@ -380,10 +381,19 @@ end
 
 -- Every form field PHP registers: the query string ($_GET), then, for a POST
 -- only, a urlencoded or multipart body ($_POST) chosen by the media type.
+-- The Content-Type PHP sees: Apache joins a repeated request header with ", "
+-- before handing it to PHP, so a second Content-Type line can carry the
+-- boundary (header_string would read the first only).
+local function php_content_type(headers)
+  local v = headers and (headers["Content-Type"] or headers["content-type"])
+  if type(v) == "table" then return table.concat(v, ", ") end
+  return v or ""
+end
+
 local function each_request_field(method, args, body, headers, fn)
   if args and args ~= "" then each_form_pair(args, "args", fn) end
   if method ~= "post" or not body or body == "" then return end
-  local ct_raw = header_string(headers and (headers["Content-Type"] or headers["content-type"])) or ""
+  local ct_raw = php_content_type(headers)
   local mt = php_media_type(ct_raw)
   if mt == "multipart/form-data" then
     each_multipart_field(body, ct_raw, function(k, v) fn(k, v, "body", false) end)
@@ -423,6 +433,13 @@ function _M.php_request_fields(method, args, body, headers, want)
   return f
 end
 
+-- get_fields is cfm_waf.check's lazy php_request_fields getter, so the
+-- field-keyed rules share one parse; a standalone caller passes nil.
+local function request_fields(method, args, body, headers, get_fields)
+  if get_fields then return get_fields() end
+  return _M.php_request_fields(method, args, body, headers, _M.PHP_FIELDS_WANT)
+end
+
 -- The cheap pre-check for a rule keyed on a field: `word` must appear in the
 -- memoized normalize(args & body) surface. It may only rule the field out when
 -- that surface saw the request whole (both sides within body_budget) and when
@@ -435,8 +452,7 @@ local function field_gate_open(method, args, body, headers, _nab, word, value_wo
   local bn = body_budget(headers)
   if #(args or "") > bn or #(body or "") > bn then return true end
   if not value_word and method == "post" and body and body ~= ""
-     and php_media_type(header_string(headers and (headers["Content-Type"] or headers["content-type"])))
-         == "multipart/form-data" then
+     and php_media_type(php_content_type(headers)) == "multipart/form-data" then
     return true
   end
   return has(_nab, word)
@@ -460,26 +476,50 @@ end
 -- `_nab` is the memoized normalize(args & body) surface from cfm_waf.check —
 -- decoded and lowercased, so an encoded key still shows as `pagename`. When it
 -- does not contain the word the request cannot carry the var and the rule
--- costs one find (field_gate_open says when that holds). Budgets match the
--- rest of the engine: uri_scan_len for the query string, body_budget(headers)
--- for the body (audits F09/F30).
+-- costs one find (field_gate_open says when that holds). The reader takes the
+-- whole query string (nginx caps the request line at 64 KB) and the whole body
+-- cfm.lua handed over (waf_body_max_len); the legacy multipart scan below it
+-- keeps its body_budget(headers) cap (audits F09/F30).
 function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _nab, get_fields)
   if not field_gate_open(method, args, body, headers, _nab, "pagename") then return nil end
 
   -- Every value PHP registers for `pagename` (php_request_fields: the query
   -- string, then for a POST the body as PHP parses it), key and value decoded
   -- separately, so a `%26` inside the value cannot split it.
-  local f = get_fields and get_fields() or _M.php_request_fields(method, args, body, headers, _M.PHP_FIELDS_WANT)
+  local f = request_fields(method, args, body, headers, get_fields)
   local t = f.pagename
-  if not t then return nil end
   local found
-  for i, v in ipairs(t) do
+  for i, v in ipairs(t or {}) do
     if has_dotdot_segment(normalize(v)) then
       if t.srcs[i] == "args" then return "ARG" end
       found = "BODY"
     end
   end
-  return found
+  if found then return found end
+
+  -- And the pre-2026-10-08 multipart scan, kept beside the reader so the rule
+  -- never sees less than it did: it reads every `name=` parameter (never
+  -- `filename=`) without looking for a boundary, an over-read that still
+  -- catches a body the reader could not split.
+  if method ~= "post" or not body or body == "" then return nil end
+  if not has(lower(php_content_type(headers)), "multipart/form-data") then return nil end
+  local b  = cap(body, body_budget(headers))
+  local lb = lower(b)
+  local pos = 1
+  while true do
+    local _, e = lb:find("[^%w_]name%s*=%s*", pos)
+    if not e then break end
+    pos = e + 1
+    local name = lb:match('^"([^"\r\n]*)', pos) or lb:match("^'([^'\r\n]*)", pos)
+                 or lb:match("^([^;%s]*)", pos)
+    if name and php_var_name(normalize(name)) == "pagename" then
+      local _, he = b:find("\r?\n\r?\n", pos)
+      if not he then break end
+      local v = b:match("^[^\r\n]*", he + 1)
+      if v and has_dotdot_segment(normalize(v)) then return "BODY" end
+    end
+  end
+  return nil
 end
 
 -- A data: URI in the request PATH is a client-side artifact, not an attack: a
@@ -4091,12 +4131,15 @@ end
 -- it as a hidden input to every form in the translation editor's preview. A
 -- translator is logged in, so a request with a WordPress login cookie is filed
 -- under 10020 (edge 403, autoblock held in code); without one it is 10018,
--- armed. Fields are read as PHP reads them (php_request_fields), any value of
--- a repeated field counts, and a body the WAF did not see whole is tagged
--- BODY_UNSEEN rather than passed. Residuals: a theme/plugin AJAX reset handler
+-- armed. Fields are read as PHP reads them (php_request_fields) and any value
+-- of a repeated field counts. Residuals: a theme/plugin AJAX reset handler
 -- reached with `trp-edit-translation=preview` in the Referer or
 -- `_wp_http_referer` (the plugin copies it into $_REQUEST for front-end AJAX),
--- and the parameter itself sent only in a body the WAF did not see whole.
+-- and a field in a part of the body the WAF did not see (past
+-- waf_body_max_len, or a chunked POST outside cfm.lua's body allowlist, which
+-- it does not read) — the same limit every body rule has. A "body not seen"
+-- tag was tried and dropped: on the armed 10018 it would ban a translator
+-- whose large form was submitted in the preview after their login expired.
 --
 -- 10019 ID_LOOKUP: action=trp_get_translations_regular with a non-empty
 -- `string_ids` from a client without a WordPress login cookie. Only
@@ -4121,66 +4164,42 @@ local function any_value(f, name, pred)
   return false
 end
 
--- The request had a body the WAF did not see whole: a Content-Length past what
--- it read (waf_body_max_len), or a chunked body cfm.lua did not read at all (a
--- POST outside its body allowlist: waf_body_gate needs a length). A field the
--- rule needs may be in the part it did not see.
-local function body_unseen(body, headers)
-  local n = #(body or "")
-  local cl = tonumber(header_string(headers and (headers["Content-Length"] or headers["content-length"])) or "")
-  if cl and cl > n then return true end
-  local te = header_string(headers and (headers["Transfer-Encoding"] or headers["transfer-encoding"]))
-  return te ~= nil and te ~= "" and n == 0
-end
-
--- get_fields is cfm_waf.check's lazy php_request_fields getter, so the two
--- detectors share one parse; standalone callers pass nil.
-local function trp_fields(method, args, body, headers, get_fields)
-  if get_fields then return get_fields() end
-  return _M.php_request_fields(method, args, body, headers, _M.PHP_FIELDS_WANT)
-end
 
 -- Returns the tag and whether the request carries a WordPress login cookie:
 -- the caller files a logged-in hit under rule 10020 (edge 403, ban held) —
 -- TranslatePress's preview script adds `trp-edit-translation=preview` to EVERY
 -- form in the editor preview, so a translator submitting a lost-password form
 -- there sends this exact request. The attack needs no login; a junk cookie
--- only trades the ban for the 403. BODY_UNSEEN: the parameter is there on a
--- POST whose body the WAF did not see whole, where a WooCommerce reset form
--- (handled on ANY front-end URL) could sit; no browser form in the preview
--- sends a chunked or >waf_body_max_len body without a login.
+-- only trades the ban for the 403.
 function _M.detect_cve_translatepress_reset_preview(method, args, body, headers, cookie, _nab, get_fields)
   -- Both reset forms send the mail only on POST (wp-login.php calls
   -- retrieve_password() under $http_post); a GET of the form cannot store it.
   if method ~= "post" then return nil end
   if not field_gate_open(method, args, body, headers, _nab, "trp-edit-translation") then return nil end
-  local f = trp_fields(method, args, body, headers, get_fields)
+  local f = request_fields(method, args, body, headers, get_fields)
   if not f["trp-edit-translation"] then return nil end
   local tag
   if any_value(f, "action", function(v) return TRP_RESET_ACTIONS[v] end) then
     tag = "LOSTPASSWORD"
   elseif f.user_login and (f.wc_reset_password or f["woocommerce-lost-password-nonce"]) then
     tag = "WC_LOSTPASSWORD"
-  elseif body_unseen(body, headers) then
-    tag = "BODY_UNSEEN"
   end
   if not tag then return nil end
   return tag, has(lower(cookie or ""), "wordpress_logged_in_")
 end
 
--- BODY_UNSEEN: the action is in the query string and the body, where
--- get_translations() reads string_ids from, was not seen whole.
 function _M.detect_cve_translatepress_id_lookup(method, args, body, headers, cookie, _nab, get_fields)
   if has(lower(cookie or ""), "wordpress_logged_in_") then return nil end
   if not field_gate_open(method, args, body, headers, _nab, "trp_get_translations_regular", true) then
     return nil
   end
-  local f = trp_fields(method, args, body, headers, get_fields)
+  local f = request_fields(method, args, body, headers, get_fields)
   if not any_value(f, "action", function(v) return v == "trp_get_translations_regular" end) then
     return nil
   end
-  if any_value(f, "string_ids", function(v) return v:find("%d") ~= nil end) then return "STRING_IDS" end
-  if method == "post" and body_unseen(body, headers) then return "BODY_UNSEEN" end
+  -- Anything but an empty list (`[]`): the ids are cast server-side, so a
+  -- `[true]` reads row 1 as well as a `[1]` does.
+  if any_value(f, "string_ids", function(v) return v:find("[^%s%[%]]") ~= nil end) then return "STRING_IDS" end
   return nil
 end
 

@@ -137,7 +137,7 @@ def gen_case(r):
                        "application/x-www-form-urlencoded; x=multipart/form-data", "Application/X-WWW-Form-Urlencoded,x",
                        "application/x-www-form-urlencodedx", "text/plain"])
         return {"method": method, "query": query, "ct": ct, "body": gen_urlencoded(r)}
-    bnd = r.choice(["b", "----WebKitFormBoundaryX", "a b", "x;y"])
+    bnd = r.choice(["b", "----WebKitFormBoundaryX", "a b", "x;y", ""])
     btoken = r.choice(['boundary=' + bnd, 'boundary="' + bnd + '"', 'BOUNDARY=' + bnd,
                        'boundary=' + bnd + '; boundary=zz', 'boundary="' + bnd + '"; x=1', 'x=boundary; boundary=' + bnd])
     ct = r.choice(["multipart/form-data; ", "multipart/form-data;", "Multipart/Form-Data; ",

@@ -97,6 +97,9 @@ fires(post("/", "pagename=templates%2F..%2F..%2Fplaceholder", "application/x-www
 fires(post("/", "--b\r\nContent-Disposition: form-data; name=\"page\r\nname\"\r\n\r\ntemplates/../../placeholder\r\n--b--\r\n",
            "multipart/form-data; boundary=b"),
       "multipart name split by a colon-less continuation line (PHP joins it)", BODY)
+fires(post("/", "--\r\nContent-Disposition: form-data; name=\"pagename\"\r\n\r\n../../x\r\n----\r\n",
+           "multipart/form-data; boundary="),
+      "multipart with an empty boundary (PHP accepts it)", BODY)
 fires(post("/", "pagename=templates%2F..%2F..%2Fplaceholder", "application/x-www-form-urlencoded; x=multipart/form-data"),
       "urlencoded body with a parameter naming multipart (SAPI reads the media type)", BODY)
 local MP = "multipart/form-data; boundary=----B"

@@ -8,7 +8,7 @@
 --     string saving stores it, reset key included.
 --
 --   rule 10019  rule_cve_translatepress_id_lookup      (WAF_CVE, block, autoblock held)
---     action=trp_get_translations_regular with a non-empty string_ids and no
+--     action=trp_get_translations_regular with a non-empty string_ids (not `[]`) and no
 --     WordPress login cookie — the nopriv lookup that reads the stored strings
 --     back by id. Only trp-editor.js (logged-in translators) sends string_ids.
 --
@@ -132,14 +132,6 @@ fires(post("/wp-login.php", "trp-edit-translation=preview", "action=lostpassword
       "urlencoded body with a parameter naming multipart", LOST)
 
 do
-  -- WooCommerce handles the reset POST on any front-end URL; a chunked body
-  -- outside cfm.lua's body allowlist is never read.
-  local c = post("/", "trp-edit-translation=preview", "", UE)
-  c.headers["Transfer-Encoding"] = "chunked"
-  fires(c, "reset-preview parameter on a POST whose chunked body went unread", "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:BODY_UNSEEN", 10018)
-  local d = post("/", "trp-edit-translation=preview", ("x"):rep(100), UE)
-  d.headers["Content-Length"] = "70000"
-  fires(d, "reset-preview parameter with a body past the window", "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:BODY_UNSEEN", 10018)
   -- the final field of a body that ends inside its headers is registered empty
   fires(post("/my-account/lost-password/", "trp-edit-translation=preview",
              '--b\r\nContent-Disposition: form-data; name="user_login"\r\n\r\nadmin\r\n--b\r\nContent-Disposition: form-data; name="wc_reset_password"\r\n',
@@ -241,17 +233,33 @@ do
   fires(post(AJAX, "", "action=trp_get_translations_regular&string_ids=%5B680%5D&" .. table.concat(pad, "&") .. "&string_ids="),
         "a trailing empty string_ids past max_input_vars", IDS)
 end
--- action in the query, body not seen whole (chunked outside the body allowlist)
+-- PHP accepts an EMPTY boundary (parts split on `--` lines).
+fires(post(AJAX, "", '--\r\nContent-Disposition: form-data; name="action"\r\n\r\ntrp_get_translations_regular\r\n'
+           .. '--\r\nContent-Disposition: form-data; name="string_ids"\r\n\r\n[680]\r\n----\r\n',
+           "multipart/form-data; boundary="),
+      "multipart with an empty boundary", IDS)
+-- Apache joins two Content-Type lines with ", " before PHP sees them.
 do
-  local c = post(AJAX, "action=trp_get_translations_regular", "", UE)
+  local c = post(AJAX, "", '--b\r\nContent-Disposition: form-data; name="action"\r\n\r\ntrp_get_translations_regular\r\n'
+                 .. '--b\r\nContent-Disposition: form-data; name="string_ids"\r\n\r\n[680]\r\n--b--\r\n')
+  c.headers["Content-Type"] = { "multipart/form-data", "x; boundary=b" }
+  fires(c, "the boundary in a second Content-Type line", IDS)
+end
+-- A chunked POST outside cfm.lua's body allowlist is not read (a limit every
+-- body rule shares): no "body not seen" verdict on the armed rule, which would
+-- ban a translator's large form submitted in the preview.
+do
+  local c = post("/contact/", "trp-edit-translation=preview", "", UE)
   c.headers["Transfer-Encoding"] = "chunked"
-  fires(c, "id lookup with an unread chunked body", "WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:BODY_UNSEEN")
+  clean(c, "the preview parameter on a POST whose body was not read")
 end
 
 clean(post(AJAX, "", "action=trp_get_translations_regular&all_languages=false&security=abc&language=en_US"
            .. "&original_language=el&originals=%5B%22Hello%22%5D&skip_machine_translation=%5B%5D&dynamic_strings=true"),
       "<= 3.3.1 front-end DOM-changes request (originals, no string_ids)")
 clean(post(AJAX, "", "action=trp_get_translations_regular&string_ids=%5B%5D"), "empty id list")
+clean(post(AJAX, "", "action=trp_get_translations_regular&string_ids=%5B+%5D"), "empty id list with a space")
+fires(post(AJAX, "", "action=trp_get_translations_regular&string_ids=%5Btrue%5D"), "a non-numeric id list (cast server-side)", IDS)
 clean(post(AJAX, "", "action=trp_get_translations_domchanges&string_ids=[1]"), "3.3.2 front-end action")
 clean(post("/wp-content/plugins/translatepress-multilingual/includes/trp-ajax.php", "",
            "action=trp_get_translations_regular&language=en_US&original_language=el&originals=%5B%22Hello%22%5D"),

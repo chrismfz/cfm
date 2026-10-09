@@ -47,11 +47,11 @@ back-filled here — see the git/PR history for that period.
   the read-back (`trp_get_translations_regular` with `string_ids` and no
   WordPress login). Its ban is held in code (`RULE_10019 = 1` arms it), because
   a translator whose login expired with the editor open sends the same request.
-  The rules read the request the way PHP does, count any value of a repeated
-  field, and block a matching request whose body the WAF could not see whole
-  (chunked, or past its 32 KB window) as `BODY_UNSEEN`. Updating the plugin is
-  still the fix: an admin whose own language is a secondary site language has
-  the mail stored without the preview trick.
+  The rules read the request the way PHP does and count any value of a
+  repeated field. Updating the plugin is still the fix: an admin whose own
+  language is a secondary site language has the mail stored without the preview
+  trick, and a field placed where the WAF reads no body (past its 32 KB window,
+  or a chunked POST outside its body allowlist) is not seen.
 - **A crafted POST could freeze an edge worker for seconds (WAF rule 520,
   removed).** Rule 520 (SP Page Builder contact-form relay, released
   2026.10.06) scanned the posted recipient with a pattern that slows down
