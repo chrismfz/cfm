@@ -207,6 +207,13 @@ func authSource(ip string) (src, country string) {
 	if pip == nil || pip.IsLoopback() || pip.IsPrivate() || pip.IsLinkLocalUnicast() || pip.IsUnspecified() {
 		return "", ""
 	}
+	// The node's own public address is not a remote login: a site's form or
+	// mailer authenticating to the server it runs on connects to its public
+	// IP (orion, Oct 2026: nothak.gr's form, 21 SMTP AUTH logins from
+	// 157.90.128.246 — orion itself — read as "DE").
+	if isSelfIP(ip) {
+		return "", ""
+	}
 	cc, asn := geoOf(ip)
 	if fetcherASNs[asn] {
 		return fmt.Sprintf("AS%d", asn), ""

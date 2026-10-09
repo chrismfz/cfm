@@ -568,3 +568,41 @@ func TestStaleRefusalIsNotLogged(t *testing.T) {
 		t.Fatal("the old key's refusal must not stand for the new key")
 	}
 }
+
+// orion, 9 Oct 2026: info@nothak.gr — the site's form authenticating to
+// orion's own public IP (DE), Outlook syncing from Azure, the owner on GR
+// lines, one IMAP login from AWS. The node's own address is not a remote
+// login: GR + AWS (US) is two countries, not a hijack.
+func TestOwnAddressIsNotARemoteLogin(t *testing.T) {
+	og, os := geoOf, isSelfIP
+	geoOf = func(ip string) (string, uint) {
+		switch ip {
+		case "157.90.128.246":
+			return "DE", 24940
+		case "40.105.25.29":
+			return "US", 8075
+		case "34.234.64.116":
+			return "US", 14618
+		}
+		return "GR", 6799
+	}
+	isSelfIP = func(ip string) bool { return ip == "157.90.128.246" }
+	t.Cleanup(func() { geoOf, isSelfIP = og, os })
+	tr := newTracker()
+	T := time.Now()
+	ts := T.Add(-10 * time.Minute).Format("2006-01-02 15:04:05")
+	for i := 0; i < 5; i++ {
+		tr.observeExim(fmt.Sprintf("%s 1xEL5B-0000000G4k%d-2aaa <= info@nothak.gr H=(nothak.gr) [157.90.128.246]:4%d P=esmtpsa X=TLS1.3 A=dovecot_login:info@nothak.gr S=900 for info@nothak.gr", ts, i, i), T)
+	}
+	for _, ip := range []string{"40.105.25.29", "94.67.120.142", "94.69.154.174", "34.234.64.116"} {
+		tr.observeMaillog("Oct  9 12:18:43 orion dovecot[1]: imap-login: Logged in: user=<info@nothak.gr>, method=PLAIN, rip="+ip+", lip=157.90.128.246, mpid=1, TLS, session=<a>", T)
+	}
+	if fs, _, _ := tr.evaluate(openTemp(t), T); len(fs) != 0 {
+		t.Fatalf("the node's own address must not count as a country: %+v", fs)
+	}
+	// without the fix the same logins were 3 countries (DE, GR, US)
+	isSelfIP = func(string) bool { return false }
+	if fs, _, _ := tr.evaluate(openTemp(t), T); len(fs) != 1 {
+		t.Fatalf("control: counting the node's own IP gives the old false hijack: %+v", fs)
+	}
+}

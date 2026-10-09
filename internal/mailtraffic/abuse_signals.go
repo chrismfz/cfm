@@ -338,11 +338,30 @@ var (
 	rblSelfOnce sync.Once
 )
 
-func defaultRBLIPs() []string {
+// selfResolver is the node's own addresses, shared by the RBL check and the
+// hijack check (refreshed at most every selfRefresh: interfaces rarely change).
+func selfResolver() *selfip.Resolver {
 	rblSelfOnce.Do(func() { rblSelf = selfip.New() })
-	rblSelf.Refresh()
+	now, last := time.Now().Unix(), selfRefreshedAt.Load()
+	// a clock stepped back (NTP after a fast boot RTC) is due too, or the
+	// gate would stall for as long as the step
+	if d := now - last; (d < 0 || d >= int64(selfRefresh/time.Second)) && selfRefreshedAt.CompareAndSwap(last, now) {
+		rblSelf.Refresh()
+	}
+	return rblSelf
+}
+
+const selfRefresh = 10 * time.Minute
+
+var (
+	selfRefreshedAt atomic.Int64
+	// isSelfIP reports an address of this node (a var so tests stub it).
+	isSelfIP = func(ip string) bool { return selfResolver().Contains(ip) }
+)
+
+func defaultRBLIPs() []string {
 	var out []string
-	for _, s := range rblSelf.LocalIPs() {
+	for _, s := range selfResolver().LocalIPs() {
 		ip := net.ParseIP(s).To4()
 		if ip == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() || (ip[0] == 100 && ip[1]&0xc0 == 64) {
 			continue // IPv6 (few lists), private, CGNAT

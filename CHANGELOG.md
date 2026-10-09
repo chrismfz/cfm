@@ -97,6 +97,11 @@ back-filled here — see the git/PR history for that period.
   `/etc/cfm/cfm_waf_config.lua`.
 
 ### Fixed
+- **Mail hijack false positive: the node's own address.** A site's form or
+  mailer authenticating to the server it runs on connects to the server's
+  public IP; that login counted as a remote one, with the node's country
+  (orion, 9 Oct: info@nothak.gr paged as "DE, GR, US" — DE was orion
+  itself). The node's own addresses are no longer hijack sources.
 - **WAF rules that match a request parameter by name now read the name the way
   PHP does.** PHP ends a name at a NUL byte and turns `.`, a space or an
   unmatched `[` into `_`, so `pagename%00x=…` reached WordPress as `pagename`
