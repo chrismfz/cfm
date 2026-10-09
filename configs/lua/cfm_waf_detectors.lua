@@ -17,9 +17,13 @@ local _M = {}
 
 -- Late-bound upvalues populated by _M.init().
 local CFG, util
+-- The %XX decoder is pure (no CFG), so it is bound at load: the paths that
+-- use it (the PHP form reader, the filename*= check) work before _M.init and
+-- with a partial util alike.
+local url_decode_once = require("cfm_waf_util").url_decode_once
 local has, header_string, lower, cap, count_occurs, has_long_b64_blob,
       is_known_legit_php_upload_endpoint, score_obfuscation_blob, begins,
-      url_decode_once, normalize, strip_sql_comments, scan_str,
+      normalize, strip_sql_comments, scan_str,
       strip_host_port, is_ipv4_literal, is_ipv6_literal, body_budget
 
 function _M.init(cfg, u)
@@ -34,9 +38,6 @@ function _M.init(cfg, u)
   is_known_legit_php_upload_endpoint = u.is_known_legit_php_upload_endpoint
   score_obfuscation_blob             = u.score_obfuscation_blob
   begins                             = u.begins
-  -- A caller (a test) may pass a partial util: the %XX decoder needs no init,
-  -- so fall back to the module's own rather than leave the upvalue nil.
-  url_decode_once                    = u.url_decode_once or require("cfm_waf_util").url_decode_once
   normalize                          = u.normalize
   strip_sql_comments                 = u.strip_sql_comments
   scan_str                           = u.scan_str
@@ -173,7 +174,6 @@ end
 
 -- application/x-www-form-urlencoded decode (php_url_decode): `+` is a space,
 -- %XX a byte (cfm_waf_util's url_decode_once), a malformed % stays literal.
--- url_decode_once is a late-bound upvalue (_M.init); this only runs after it.
 local function _form_unescape(s)
   return url_decode_once((s:gsub("%+", " ")))
 end

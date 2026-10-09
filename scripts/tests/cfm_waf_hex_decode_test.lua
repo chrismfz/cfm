@@ -13,16 +13,17 @@ local function reference(s)
 end
 
 local fails = 0
+-- msg is a function, built only on failure (85k checks per run).
 local function check(cond, msg)
   if cond then return end
   fails = fails + 1
-  if fails <= 10 then io.stderr:write("FAIL: " .. msg .. "\n") end
+  if fails <= 10 then io.stderr:write("FAIL: " .. msg() .. "\n") end
 end
 
 for a = 0, 255 do
   for b = 0, 255 do
     local s = "x%" .. string.char(a, b) .. "y"
-    check(util.url_decode_once(s) == reference(s), ("pair %d,%d"):format(a, b))
+    check(util.url_decode_once(s) == reference(s), function() return ("pair %d,%d"):format(a, b) end)
   end
 end
 
@@ -32,7 +33,7 @@ for _ = 1, 20000 do
   local parts = {}
   for i = 1, math.random(0, 24) do parts[i] = alphabet[math.random(#alphabet)] end
   local s = table.concat(parts)
-  check(util.url_decode_once(s) == reference(s), "random " .. s:gsub("%c", "?"))
+  check(util.url_decode_once(s) == reference(s), function() return "random " .. s:gsub("%c", "?") end)
 end
 
 if fails > 0 then

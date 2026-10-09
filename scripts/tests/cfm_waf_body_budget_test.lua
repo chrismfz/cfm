@@ -185,8 +185,8 @@ end
 -- dummy CFG to access its private helpers.
 do
   -- Slow-path reference: replicate the original normalize using the public
-  -- helpers we still have. url_decode_once isn't exported, so test by
-  -- comparing fast-path output to manually-constructed expectations.
+  -- helpers we still have: compare fast-path output to manually-constructed
+  -- expectations (cfm_waf_hex_decode_test.lua pins url_decode_once itself).
   local cases = {
     { input = "Hello, World",          want = "hello, world",       label = "ascii no %" },
     { input = "ABC123",                want = "abc123",             label = "no special chars" },
