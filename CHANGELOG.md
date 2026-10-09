@@ -250,6 +250,17 @@ back-filled here — see the git/PR history for that period.
   `/etc/cfm/cfm_waf_config.lua`.
 
 ### Fixed
+- **The login brute-force rule (501) now covers direct visitors, and only
+  counts real login attempts.** It skipped every visitor not behind
+  Cloudflare, so most brute force against `wp-login.php`, Drupal, Joomla,
+  OpenCart, Magento and custom login forms went unseen by it. It also counted
+  every request to those pages, so an OpenCart or Joomla admin clicking
+  through eight admin pages in 20 seconds got a challenge. It now counts only
+  a POST that submits a password (8 in 20 s per IP, a JSON login too), not
+  page loads, admin navigation or admin uploads; a login padded past the
+  32 KB the WAF reads still counts. For direct visitors it only logs for now (burn-in); behind
+  Cloudflare it challenges as before. cPanel / WHM / webmail are unchanged:
+  cPanel's own login-failure detector bans there.
 - **Two upload rules no longer ban people for innocent file names and text.**
   The upload file-name rule (401) matched its sensitive names anywhere in a
   name, so uploading `Q3.environmental-report.pdf` (`.env`) or

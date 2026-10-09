@@ -153,6 +153,7 @@ end
 do
   run({ waf_hit = { action = "logonly", reason = "WAF_XSS:TEST", rule_id = 210 } })
   assert_true(waf_ctx ~= nil and waf_ctx.body == "", "panel WAF probe passes an EMPTY body (never buffers the panel body)")
+  assert_true(waf_ctx.body_unread == true, "panel WAF probe says the body was never read (rule 501 skips it)")
   assert_true(has_waf_line("logonly"), "a logonly hit is recorded as would_logonly")
 end
 

@@ -352,6 +352,10 @@ local function panel_waf_probe(ip, host, uri, args, method, ua, scope, enforce)
             cookie = ngx.var.http_cookie or "",
             headers = req_headers,
             body = "",  -- reduced profile: never buffer the panel body
+            -- No body read at all: rule 501 would otherwise read the empty body
+            -- as one cut short (Content-Length > 0) and count cPanel's own
+            -- `/login/` POSTs; cPanel's login_log detector covers logins here.
+            body_unread = true,
             -- Same dict the web edge passes as SH. cfm_waf's burst detectors
             -- mutate counters here, but they are gated on web-app auth markers
             -- (/wp-login.php, /xmlrpc.php, …), which legitimate panel traffic
