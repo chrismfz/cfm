@@ -391,7 +391,14 @@ the challenge/logonly tiers; `cfm_waf_bad_ua_shadow_test.lua`), and at
 `hits`. Same order fix, same cost shape as traversal: a fleet read of
 2026-10-02..09 showed ~14.5k score-99 events a week (sampled, one per IP /
 family / tier a minute; mostly `UA_FAKE_LEGACY_MSIE`, 76 `UA_SQLMAP`), which
-now run the remaining budget-capped detectors before blocking.
+now run the remaining budget-capped detectors before blocking. Side effects: those requests now
+feed the per-IP burst counters (rules 510-512, armed, can ban them), cost what
+a browser-UA request costs (~45 µs a GET, ~4 ms a 30 KB form POST), and the
+challenge / logonly hits behind 201 now show in `also_rule_ids`, so burn-in
+"also" counts include scanner traffic from this date. Mirror image, as for
+traversal: an operator who arms `BAD_UA = 1` loses the 201 ban on a request
+where an earlier held or un-armed block rule (10019/10020, a family set to
+0) also matched; at the shipped arming neither side bans.
 
 ## Open questions (decide before Phase 1)
 

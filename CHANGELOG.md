@@ -41,6 +41,11 @@ back-filled here — see the git/PR history for that period.
   the same payload earns from any other client. The SQL-injection, command
   injection, CVE and other banning rules now get the first word; a scanner
   request with no such payload still gets its 403, labelled as before.
+  Such requests now also count toward the wp-login / xmlrpc burst rules, so
+  a scanner hammering those can be banned by them too. An operator who armed
+  the bad-UA ban (`BAD_UA = 1` in `[waf_security]`) now loses it on a
+  request where an earlier non-banning block rule (the held TranslatePress
+  rules, or a family set to 0) also matched.
 - **Site Cache writes far less to disk under abuse.** The static-asset cache
   stored a full copy for every distinct query string, and a HEAD or an
   aborted download still stored the whole file: five HEAD requests with random

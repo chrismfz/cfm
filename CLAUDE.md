@@ -531,7 +531,7 @@ points:
   who arms `TRAVERSAL` and un-arms another family gets the mirror image).
   Rule 201's block (score >= 99 scanner UA; WAF_BAD_UA is un-armed) sits in
   the same late spot since 2026-10-09: at step 1 it shadowed sqlmap's own
-  SQLi ban.
+  SQLi ban (same mirror image if an operator arms `BAD_UA`).
   "Push every block-tier hit" was considered and rejected: it needs the block
   short-circuit removed (cheap rules first, heavy scanners skipped on blocked
   requests — a design feature, not an accident) for a case that does not

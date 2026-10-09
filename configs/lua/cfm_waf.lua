@@ -2483,7 +2483,8 @@ local PUSH_KEY_KEEPS_TAG = {
 -- band first). cfm.lua ships them on the ip_push so a rule that only ever
 -- matches BEHIND a stronger one (a logonly scanner that loses the headline to
 -- a challenge-tier rule) is measurable. A rule placed after a BLOCK never runs
--- on that request (`goto done`), so it cannot appear here. Record-only.
+-- on that request (`goto done`), so it cannot appear here — except rule
+-- 201's deferred block, appended at ::done:: behind an earlier block. Record-only.
 local ALSO_RULE_IDS_MAX = 16
 function _M.also_rule_ids(hits, headline_id)
   local out, seen = {}, {}

