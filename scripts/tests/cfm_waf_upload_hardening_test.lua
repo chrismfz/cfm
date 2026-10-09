@@ -132,6 +132,15 @@ do
     "<?=1;system('id');?>", "<?=PHP_EOL;system('id')?>", "<?=.5?system('id'):1?>",
     "<?=1_0|system('id')?>", "<?=throw new Exception(system('id'))?>",
     "<?=#[A]function(){}and system('id')?>", "<?=_(system('id'))?>",
+    -- Strings, casts, groups, indexes and comments inside the expression,
+    -- statements after `;`, and a long chain (fail closed).
+    "<?=!\"{${system('id')}}\"?>", "<?=1?\"{${system('id')}}\":0?>", "<?=PHP_EOL.''.system('id')?>",
+    "<?=1;'';system('id');", "<?=_('').system('id')?>", "<?=PHP_EOL.(string)system('id')?>",
+    "<?=!(int)system('id')?>", "<?=1 .(1).system('id')?>", "<?=PHP_EOL.[1][0].system('id')?>",
+    "<?=PHP_EOL./**/system('id')?>", "<?=PHP_EOL;/**/system('id')?>", "<?=PHP_EOL.//x\nsystem('id')?>",
+    "<?=1|<<<A\n{${system('id')}}\nA;\n", "<?=1;{system('id');}", "<?=1;static function(){};system('id');",
+    "<?=1;goto a;a:system('id');", "<?=1" .. ("+1"):rep(30) .. "+system('id')?>",
+    "<?=1+" .. ("("):rep(30) .. "system('id')" .. (")"):rep(30) .. "?>",
   }) do
     local r = run(body(part('name="f"; filename="x.jpg"', php, "image/jpeg")))
     check(r.ids:find(",402=block,", 1, true), "402 catches " .. php:gsub("\n", "<LF>") .. ": " .. show(r))
@@ -150,7 +159,9 @@ do
   -- real code counts: template text quoted in a ticket stays clean.
   for _, txt in ipairs({ "the login page shows <?= __('Login') ?> literally", "<?=_e('x')?> and <?= _('y') ?>",
                          '<a href="<?= BASE_URL ?>">home</a>', "<p><?= SITE_NAME ?> ($5)</p>",
-                         'Total: <?= 3 ?>"', "see <?= PHP_VERSION ?> [docs]", '<?= DEBUG ? "on" : "off" ?>' }) do
+                         'Total: <?= 3 ?>"', "see <?= PHP_VERSION ?> [docs]", '<?= DEBUG ? "on" : "off" ?>',
+                         '<?= TITLE ?: "Untitled" ?>', '<?= ENV == "prod" ? "min" : "dev" ?>.js',
+                         '<?= user.name || "anon" ?>', "<?= x;\n?>", "<?= 5 - (2 ?>" }) do
     local r = run(body(part('name="message"', txt)))
     check(not r.hit, "a ticket quoting " .. txt .. " stays clean: " .. show(r))
   end
@@ -181,7 +192,8 @@ do
   -- fields too — a ticket quoting `<? echo $title; ?>` is no webshell.
   for _, php in ipairs({ '<? echo strtoupper("ok3");?>', "<? $x = `id`; ?>", "<?\nsystem('id');",
                         "<? @eval($x);?>", "<? system ('id');?>", "<? \\system('id');", "<? /**/system('id');",
-                        "<?system('id');?>", "<?$x='id';system($x)?>", "<?/**/system('id')?>" }) do
+                        "<?system('id');?>", "<?$x='id';system($x)?>", "<?/**/system('id')?>",
+                        "<?$a;system('id');", "<? ;system('id');", "<?{system('id');}", "<?if(1)system('id');" }) do
     r = run(body(part('name="f"; filename="x.jpg"', php, "image/jpeg")))
     check(r.ids:find(",415=logonly,", 1, true) and not r.ids:find(",402=", 1, true),
           "short open tag in a small file → 415, not 402: " .. php:gsub("\n", "<LF>") .. ": " .. show(r))
@@ -203,8 +215,10 @@ do
     -- …and on openers that share one long tail of comments and blanks.
     for _, s in ipairs({ ("<?=/*"):rep(13000), ("<?=#"):rep(16000), ("<? "):rep(20000), ("<?=system"):rep(7000),
                          ("<?=/*"):rep(6000) .. "*/" .. ("/**/ "):rep(6000), ("<?=#"):rep(8000) .. "\n" .. (" "):rep(32000),
-                         ("<? /*"):rep(6000) .. "*/" .. (" "):rep(32000), ("<?=/*"):rep(6000) .. "*/" .. ("!"):rep(32000) }) do
-      local t0 = os.clock(); se(s, true)
+                         ("<? /*"):rep(6000) .. "*/" .. (" "):rep(32000), ("<?=/*"):rep(6000) .. "*/" .. ("!"):rep(32000),
+                         ("<?/*"):rep(6000) .. "*/" .. ("a"):rep(32000),
+                         ("<?=/*"):rep(4000) .. "*/" .. (("a"):rep(2000) .. "+"):rep(20) }) do
+      local t0 = os.clock(); se(s, true); se(s, false)
       local ms = (os.clock() - t0) * 1000
       check(ms < 250, ("short-echo parser on 64 KB of %q… took %.1f ms"):format(s:sub(1, 8), ms))
     end
