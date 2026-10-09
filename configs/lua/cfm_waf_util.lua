@@ -309,6 +309,32 @@ local function url_decode_once(s)
   return (s:gsub("%%(%x%x)", HEX_BYTE))
 end
 
+-- A JSON body's printable-ASCII escapes decoded, for the scan surface:
+-- \u0020-\u007E and `\/`, as json_decode() turns them into the bytes the app
+-- sees (`\u0027` is a quote). Not the control escapes (\n \t …, \u000a): the
+-- block editor saves a post's newlines as `\n`, and a multi-line SQL example
+-- in a code block would then read as an injection (301 block + autoblock).
+-- Non-ASCII \u escapes stay as written, as do `\\` (one unit) and `\"`.
+local function json_unescape_ascii(s)
+  if not s or not s:find("\\", 1, true) then return s end
+  local out, i = {}, 1
+  while true do
+    local j = s:find("\\", i, true)
+    if not j then out[#out + 1] = s:sub(i); break end
+    out[#out + 1] = s:sub(i, j - 1)
+    local c = s:sub(j + 1, j + 1)
+    local h = (c == "u") and s:match("^00([2-7]%x)", j + 2)
+    if h and h ~= "7f" and h ~= "7F" then
+      out[#out + 1] = string.char(tonumber(h, 16)); i = j + 6
+    elseif c == "/" then
+      out[#out + 1] = "/"; i = j + 2
+    else
+      out[#out + 1] = s:sub(j, j + 1); i = j + 2  -- `\\`, `\"`, \n, other \u: as written
+    end
+  end
+  return table.concat(out)
+end
+
 local function normalize(s)
   if not s or s == "" then return "" end
   -- Fast path: a string with no "%" cannot contain any %xx escape, so both
@@ -377,13 +403,19 @@ end
 -- older configs. This window is wider than the legacy 2048, which is safe only
 -- because strip_sql_comments is now O(n) (F62) — a quadratic strip here would
 -- turn the bigger window into a CPU-DoS.
-local function scan_str(uri, args)
-  -- Defensive like body_budget(): an operator-authored cfm_waf_config.lua could
-  -- set uri_scan_len to a string / 0 / negative. tonumber + positivity floor
-  -- keeps cap()'s `#s <= n` from erroring (nil/string) or silently disabling
-  -- the scan (0), degrading to the legacy 2048 instead.
+-- The request-line scan budget (CFG.uri_scan_len). Defensive like
+-- body_budget(): an operator-authored cfm_waf_config.lua could set it to a
+-- string / 0 / negative. tonumber + positivity floor keeps cap()'s `#s <= n`
+-- from erroring (nil/string) or silently disabling the scan (0), degrading to
+-- the legacy 2048 instead.
+local function uri_scan_cap()
   local n = tonumber(CFG and (CFG.uri_scan_len or CFG.max_scan_len))
   if not n or n < 1 then n = 2048 end
+  return n
+end
+
+local function scan_str(uri, args)
+  local n = uri_scan_cap()
   return normalize(cap(uri or "", n) .. "?" .. cap(args or "", n))
 end
 
@@ -456,12 +488,22 @@ local function body_budget(headers)
   local ct = header_string(raw)
   if ct == "" then return pick_or("other") end
   ct = string.lower(ct)
-  if string.find(ct, "application/json", 1, true)               then return pick_or("json") end
-  if string.find(ct, "multipart/form-data", 1, true)            then return pick_or("multipart") end
-  if string.find(ct, "application/x-www-form-urlencoded", 1, true) then return pick_or("urlencoded") end
-  if string.find(ct, "application/xml", 1, true)
-     or string.find(ct, "text/xml", 1, true)                    then return pick_or("xml") end
-  return pick_or("other")
+  -- Every type the header names counts, and the largest budget wins: a
+  -- parameter naming another type (`application/json; x=multipart/form-data`)
+  -- must never shrink the surface below what the media type gets. A JSON /
+  -- XML type by its subtype or suffix (application/vnd.api+json, text/json,
+  -- application/soap+xml …; they used to get the 2 KB "other" budget). Not a
+  -- bare substring: an office document (vnd.openxmlformats-…) is a zip.
+  local best
+  local function take(key)
+    local v = pick_or(key)
+    if not best or v > best then best = v end
+  end
+  if string.find(ct, "multipart/form-data", 1, true)            then take("multipart") end
+  if string.find(ct, "application/x-www-form-urlencoded", 1, true) then take("urlencoded") end
+  if ct:find("[/+]json") then take("json") end
+  if ct:find("[/+]xml")  then take("xml") end
+  return best or pick_or("other")
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -567,6 +609,8 @@ _M.is_php_hostile_asset_upload = is_php_hostile_asset_upload
 _M.score_obfuscation_blob             = score_obfuscation_blob
 _M.begins                             = begins
 _M.url_decode_once                    = url_decode_once
+_M.json_unescape_ascii                = json_unescape_ascii
+_M.uri_scan_cap                       = uri_scan_cap
 _M.normalize                          = normalize
 _M.strip_sql_comments                 = strip_sql_comments
 _M.scan_str                           = scan_str

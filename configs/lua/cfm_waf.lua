@@ -435,8 +435,10 @@ local CFG = {
   max_header_lines_mode = "logonly",
 
   -- Body scan budget, keyed by request Content-Type. The merged args+body
-  -- string fed to body-aware rules (traversal/rce/xss/sqli/php-wrappers/
-  -- ssrf/proto-pollution via get_norm_ab() below) is capped to the entry
+  -- string fed to the body-aware rules (sqli, php wrappers, ssrf, js proto,
+  -- log4shell, superglobal, c2, php object injection … via get_norm_ab()
+  -- below; traversal 101, rce 320 and xss 302 read scan_str, the URI and
+  -- query only, never the body) is capped, body side, to the entry
   -- that matches the request's Content-Type. cap() enforces the byte
   -- ceiling per call, so a single huge body cannot starve the worker —
   -- work scales with the budget, not the request size.
@@ -807,7 +809,7 @@ function _M.check(ctx)
   -- scan_str(uri,args) is shared by traversal/rce/xss/sqli (4 rules).
   -- norm_args_body is shared by php_wrappers/ssrf/js_proto (3 rules).
   -- Without this, each rule independently calls normalize()+url_decode twice.
-  local _scan_ua, _scan_ua_nodata, _norm_ab, _norm_args, _body_lc
+  local _scan_ua, _scan_ua_nodata, _norm_ab, _norm_args, _norm_args_wide, _body_lc
   -- Comment-stripped SQLi scan pair (sc, scw), memoized PER SURFACE so the
   -- three SQLi rules share one strip_sql_comments + '+'-collapse pass instead
   -- of recomputing it each (uri+args and args+body surfaces) — audit F30b.
@@ -850,6 +852,19 @@ function _M.check(ctx)
     if not _norm_args then _norm_args = normalize(cap(args or "", CFG.max_scan_len)) end
     return _norm_args
   end
+  -- The same, to the request-line budget (uri_scan_len): for a rule whose
+  -- payload query padding would otherwise push past max_scan_len (306).
+  local function get_norm_args_wide()
+    if not _norm_args_wide then
+      if #(args or "") <= CFG.max_scan_len then _norm_args_wide = get_norm_args()
+      else
+        local n = util.uri_scan_cap()
+        if n < CFG.max_scan_len then n = CFG.max_scan_len end  -- never narrower than get_norm_args
+        _norm_args_wide = normalize(cap(args, n))
+      end
+    end
+    return _norm_args_wide
+  end
 
   -- lower(cap(body,max_scan_len)), shared by the five RCE-marker detectors
   -- (reverse_shell/persistence/rootkit/lolbin/coinminer) (audit F59).
@@ -878,7 +893,23 @@ function _M.check(ctx)
       -- separately guarantees the body always gets its full budget; capping
       -- before the concat also bounds the transient to ~2*budget without
       -- materialising a large body first.
-      _norm_ab = normalize(cap(args or "", budget) .. "&" .. cap(body or "", budget))
+      -- The query side gets the request-line budget (uri_scan_len) when that is
+      -- larger: on a GET (no Content-Type, the 2 KB "other" budget) 2 KB of
+      -- query padding pushed a php:// / O:… payload past every rule reading
+      -- this surface; the query rules on scan_str already read that deep.
+      local acap = budget
+      local ucap = util.uri_scan_cap()
+      if ucap > acap then acap = ucap end
+      -- A JSON body's printable \u00XX / \/ escapes are decoded (json_unescape_ascii):
+      -- `\u0027` is a quote to the app. JSON by media type or by shape (a body
+      -- that opens with { or [; an app may json_decode php://input whatever
+      -- the Content-Type says).
+      local b = cap(body or "", budget)
+      if b ~= "" and b:find("\\", 1, true) then
+        local ct = lower(util.header_string(headers["content-type"] or headers["Content-Type"]))
+        if ct:find("json", 1, true) or b:find("^%s*[%[{]") then b = util.json_unescape_ascii(b) end
+      end
+      _norm_ab = normalize(cap(args or "", acap) .. "&" .. b)
     end
     return _norm_ab
   end
@@ -1184,7 +1215,11 @@ function _M.check(ctx)
   -- the raw surface needs no outer strip here.
   do
     local mode = rule_mode(CFG.rule_rce, "block")
-    if mode ~= "disabled" and det.detect_rce(uri, args, get_scan_ua()) then
+    -- A raw `+` in the query string read as the space it is there
+    -- (`;wget+http://…`), as PHP reads it: normalize() leaves it as is. The
+    -- path's `+`, and a `%2B`, stay a literal plus. This rule's markers only.
+    local rce_s = (args or ""):find("+", 1, true) and util.scan_str(uri, (args:gsub("%+", " "))) or get_scan_ua()
+    if mode ~= "disabled" and det.detect_rce(uri, args, rce_s) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
       if record("WAF_RCE", ttl, mode, RULE_IDS.rule_rce) then goto done end
@@ -1736,7 +1771,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_serialize, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_php_serialize(args, get_norm_args())
+      local tag = det.detect_php_serialize(args, get_norm_args_wide())
       if tag then
         if record("WAF_SERIALIZE:" .. tag, CFG.default_ttl_sec, mode, RULE_IDS.rule_serialize) then goto done end
       end
