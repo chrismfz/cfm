@@ -89,8 +89,13 @@ check(dk("/forum/ucp.php?mode=register", { qs = "" }) ~=
 local ks1 = dk("/assets/app.css")
 local ks2 = dk("/assets/vendor/huge/" .. string.rep("z", 100) .. ".js")
 check(ks1 == ks2, "static assets from same (ip,host,scope) share one coalesced key")
-check(ks1 == dk("/assets/app.css", { qs = "v=123" }),
-      "static assets coalesce regardless of query (cache-buster ?v= ignored)")
+-- Only a plain GET / HEAD with no query coalesces (since 2026-10-09): a
+-- missing /x.svg is served by WordPress's index.php with its query, so a
+-- POST or a `?rest_route=` must not reuse the coalesced allow.
+check(ks1 == dk("/assets/app.css", { method = "HEAD" }), "a HEAD coalesces like a GET")
+check(ks1 ~= dk("/assets/app.css", { qs = "v=123" }) and dk("/assets/app.css", { qs = "v=123" }):sub(1, 2) == "d|",
+      "a static path with a query takes the per-URL key")
+check(ks1 ~= dk("/x.svg", { method = "POST" }), "a POST to a static path takes the per-URL key")
 check(ks1:sub(1, 3) == "ds|", "static key uses the 'ds|' namespace")
 check(ks1 ~= dk("/assets/app.css", { scope = "panel:2087" }),
       "static key varies by scope")

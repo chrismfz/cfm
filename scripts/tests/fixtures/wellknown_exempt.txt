@@ -1,0 +1,47 @@
+# The /.well-known/ plain-fetch test, run by both sides:
+#   cfm.lua well_known_plain (the in-path carve-out, Step 0a1) and
+#   internal/webdetector isWellKnownChallengeExempt (the log-driven scoring
+#   exemption). Columns: METHOD PATH QUERY EXPECT [RAW] (QUERY "-" = none;
+#   EXPECT 1 = exempt). PATH is the decoded, normalised path the edge sees;
+#   RAW, when given, the request target as sent (the edge compares the two,
+#   the Go side reads RAW from the access log), else RAW = PATH.
+GET      /.well-known/acme-challenge/Xy_9-AbC        -                 1
+HEAD     /.well-known/acme-challenge/Xy_9-AbC        -                 1
+GET      /.well-known/pki-validation/ABCDEF0123.txt  -                 1
+GET      /.well-known/security.txt                   -                 1
+GET      /.well-known/mta-sts.txt                    -                 1
+GET      /.WELL-KNOWN/apple-app-site-association     -                 1
+GET      /.well-known/openid-configuration           -                 1
+PROPFIND /.well-known/caldav                         -                 1
+OPTIONS  /.well-known/carddav                        -                 1
+OPTIONS  /.well-known/carddav/                       -                 0
+GET      /.well-known/acme-challenge/                -                 0
+GET      /.well-known/                               -                 0
+GET      /.well-known/x.plx                          -                 0
+GET      /.well-known/x.fcgi/y                       -                 0
+GET      /.well-known/carddav                        -                 1
+PROPFIND /.well-known/caldav                         x=1               0
+PROPFIND /.well-known/caldav/x                       -                 0
+PROPFIND /.well-known/x                              -                 0
+POST     /.well-known/caldav                         -                 0
+POST     /.well-known/x                              -                 0
+PUT      /.well-known/acme-challenge/x               -                 0
+GET      /.well-known/x                              rest_route=/a/b   0
+GET      /.well-known/webfinger                      resource=acct:a@b 0
+HEAD     /.well-known/x                              a=1               0
+GET      /.well-known/acme-challenge/sh.php          -                 0
+GET      /.well-known/acme-challenge/sh.PHP7         -                 0
+GET      /.well-known/x.phtml/y.txt                  -                 0
+GET      /.well-known/x.php.                         -                 0
+GET      /.well-known/a.css.php/x.png                -                 0
+GET      /.well-known/x.cgi                          -                 0
+GET      /.well-known/x.phps                         -                 0
+GET      /.well-known/photo.png                      -                 1
+GET      /.well-known/x.php5x                        -                 1
+GET      /well-known/x                               -                 0
+GET      /app/.well-known/x                          -                 0
+GET      /.well-known/x                              -                 0     /.well-known/x?
+GET      /.well-known/x                              -                 0     /.well-known/./x
+GET      /.well-known/x                              -                 0     /.well-known//x
+GET      /.well-known/x                              -                 0     /.well-known/%78
+GET      /.well-known/x                              -                 0     /.well-known/x/.

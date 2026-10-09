@@ -764,17 +764,19 @@ local function micro_cookie_verdict(cookie_header, strict, extra_auth)
     return true, nil
 end
 
--- Request paths never micro-cached even for an anonymous client. /.well-known/
--- is already routed to origin at cfm.lua Step 0a1 (never reaches an allow-
--- return), so it is not re-checked here; /acctxfer* (cPanel account transfer)
--- does reach an allow and must not be cached. The admin / login / *.php paths
+-- Request paths never micro-cached even for an anonymous client. A plain
+-- /.well-known/ fetch is routed to origin at cfm.lua Step 0a1; the rest of the
+-- prefix (a query, a POST, a script) takes the normal pipeline since
+-- 2026-10-09 and can reach the Step 4 allow, so it is listed here (webfinger,
+-- an app routed under it). /acctxfer* (cPanel account transfer) does reach an
+-- allow and must not be cached. The admin / login / *.php paths
 -- go to the no-buffer passthrough location, which never routes to micro (only
 -- `location /` sets $cfm_micro_conf to "1"); they are listed again so the rail
 -- does not rest on the conf's location regex alone, and the rail also covers
 -- what that regex misses (other script extensions, PATH_INFO URLs). Matched on
 -- the decoded, lowercased path (nginx matches that location case-insensitively).
 local MICRO_PATH_PREFIX = {
-    "/acctxfer", "/wp-admin", "/administrator/", "/admin/", "/sysadmin/",
+    "/.well-known/", "/acctxfer", "/wp-admin", "/administrator/", "/admin/", "/sysadmin/",
     "/___proxy_subdomain_",       -- cPanel's proxy-subdomain paths (panel services)
 }
 -- A path segment that names a PHP script: the script extensions the static-asset

@@ -333,12 +333,14 @@ function Client:rpc(kind, method, path, body, req_ctx)
 end
 
 function Client:cache_key(ip, host, method, scheme, uri, qs, scope)
-  if self.h.is_static and self.h.is_static(uri) then
-    -- Static assets coalesce to ONE entry per (ip,host,scope) with path AND
-    -- query dropped. Known limitation: a query-scoped traffic rule written for
-    -- a static-extension path (e.g. "/x.css?token=…") can be served a cached
-    -- clean-allow warmed by a benign hit to the same extension. Query-scoping a
-    -- static-asset path is unusual; the static coalesce (hot-path win) is kept.
+  if self.h.is_static and (method == "GET" or method == "HEAD") and (qs == nil or qs == "")
+     and self.h.is_static(uri) then
+    -- Static assets coalesce to ONE entry per (ip,host,scope) with the path
+    -- dropped: a plain GET / HEAD with no query only (since 2026-10-09). A
+    -- missing `/x.svg` is served by WordPress's index.php with its query, so
+    -- `POST /x.svg?rest_route=…` reused the coalesced allow and the traffic
+    -- rules keyed on the route or the method never ran. A static path with a
+    -- query (`?ver=`) takes the per-URL key.
     return "ds|" .. ip .. "|" .. host .. "|" .. (scope or "web")
   end
   -- Fold the query into the key by hashing path and query INDEPENDENTLY. Each

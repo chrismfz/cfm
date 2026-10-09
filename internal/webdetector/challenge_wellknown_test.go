@@ -1,31 +1,76 @@
 package webdetector
 
 import (
+	"bufio"
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestIsWellKnownChallengeExempt(t *testing.T) {
+	// Raw-target cases (the engine sees the request target undecoded).
 	cases := map[string]bool{
-		"/.well-known/acme-challenge/0ebjUVe":  true,
-		"/.WELL-KNOWN/acme-challenge/0ebjUVe":  true, // case-insensitive
-		"/.well-known/pki-validation/abc.txt":  true,
-		"/.well-known/security.txt":            true,
-		"/.well-known/acme-challenge/x?foo=..": true,  // query stripped before check
-		"/index.php":                           false,
-		"/well-known/x":                        false, // missing the leading dot
-		"/app/.well-known/x":                   false, // not at the start
-		"/.well-known/../../etc/passwd":        false, // literal traversal escapes the exemption
-		"/.well-known/%2e%2e/wp-login.php":     false, // encoded traversal (raw URI) — must NOT exempt
-		"/.well-known/%2E%2E/x":                false, // encoded traversal, upper hex
-		"/.well-known/acme-challenge/%2f":      false, // any percent-encoding in the path → score it
-		"":                                     false,
+		"/.well-known/acme-challenge/0ebjUVe": true,
+		"/.WELL-KNOWN/acme-challenge/0ebjUVe": true, // case-insensitive
+		"/.well-known/pki-validation/abc.txt": true,
+		"/.well-known/security.txt":           true,
+		"/.well-known/security.txt?":          false, // an empty query: the edge's raw target differs too
+		"/.well-known/./x":                    false, // a dot segment, refused at the edge
+		"/.well-known/acme-challenge/x?a=1":   false, // a query is not a plain fetch
+		"/index.php":                          false,
+		"/well-known/x":                       false, // missing the leading dot
+		"/app/.well-known/x":                  false, // not at the start
+		"/.well-known/../../etc/passwd":       false, // literal traversal escapes the exemption
+		"/.well-known/%2e%2e/wp-login.php":    false, // encoded traversal (raw URI) — must NOT exempt
+		"/.well-known/%2E%2E/x":               false, // encoded traversal, upper hex
+		"/.well-known/acme-challenge/%2f":     false, // any percent-encoding in the path → score it
+		"":                                    false,
 	}
 	for in, want := range cases {
-		if got := isWellKnownChallengeExempt(in); got != want {
-			t.Errorf("isWellKnownChallengeExempt(%q) = %v, want %v", in, got, want)
+		if got := isWellKnownChallengeExempt("get", in); got != want {
+			t.Errorf("isWellKnownChallengeExempt(get, %q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// TestIsWellKnownChallengeExempt_EdgeParity runs the fixture cfm.lua's
+// well_known_plain runs too (cfm_wellknown_static_key_test.lua): the engine
+// exempts exactly what the edge exempts.
+func TestIsWellKnownChallengeExempt_EdgeParity(t *testing.T) {
+	f, err := os.Open("../../scripts/tests/fixtures/wellknown_exempt.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	n := 0
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fs := strings.Fields(line)
+		if len(fs) != 4 && len(fs) != 5 {
+			t.Fatalf("bad fixture line %q", line)
+		}
+		target := fs[1]
+		if len(fs) == 5 {
+			target = fs[4] // the raw request target as sent
+		}
+		if fs[2] != "-" {
+			target += "?" + fs[2]
+		}
+		want := fs[3] == "1"
+		// The access log carries the method lowercased.
+		if got := isWellKnownChallengeExempt(strings.ToLower(fs[0]), strings.ToLower(target)); got != want {
+			t.Errorf("isWellKnownChallengeExempt(%s, %q) = %v, want %v", fs[0], target, got, want)
+		}
+		n++
+	}
+	if n < 25 {
+		t.Fatalf("fixture read %d cases", n)
 	}
 }
 

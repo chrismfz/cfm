@@ -899,13 +899,70 @@ local STATIC_ASSET_EXT = {
   woff=true, woff2=true, ttf=true, otf=true, eot=true,
 }
 
+-- Script extensions a path segment can carry and still run as a script with
+-- the rest of the path as PATH_INFO (`/xmlrpc.php/x.css`), or through a
+-- multi-extension handler (`x.php.css` under Apache's AddHandler). Mirrored
+-- by scriptExt in internal/webdetector/engine.go (the /.well-known/ scoring
+-- exemption); both read scripts/tests/fixtures/wellknown_exempt.txt. The
+-- static-asset nginx location and cfm_cache.lua's script_ext keep their own,
+-- PHP-only lists on purpose.
+local SCRIPT_EXT = {
+  php = true, phtml = true, pht = true, phar = true, phps = true,
+  cgi = true, fcgi = true, pl = true, plx = true, ppl = true, perl = true, py = true,
+  asp = true, aspx = true, jsp = true, shtml = true,
+}
+-- An extension (a run of letters and digits after a dot) followed by `.`, `/`
+-- or the end that names a script. Each dot is tried: the `.` that ends one
+-- extension can start the next (`/a.css.php/x.png`).
+local function path_has_script_ext(path)
+  local lp, i = path:lower(), 1
+  while true do
+    local _, e, ext = lp:find("%.(%w+)", i)
+    if not e then return false end
+    local nx = lp:sub(e + 1, e + 1)
+    if (nx == "" or nx == "." or nx == "/") and (SCRIPT_EXT[ext] or ext:match("^php%d+$")) then
+      return true
+    end
+    i = e + 1
+  end
+end
+
+-- Step 0a1's test: a plain fetch under /.well-known/ (method as nginx gives
+-- it, path decoded, args the raw query, raw the request target as sent). GET /
+-- HEAD of a file (not a directory: DirectoryIndex would run an index.php
+-- there) with no query and no script extension; and CalDAV / CardDAV
+-- discovery (RFC 6764: PROPFIND / OPTIONS on the two redirect stubs), which
+-- clients send with no query. The raw target must be the decoded path byte
+-- for byte: nginx passes the RAW target upstream, and the app routes on it —
+-- `/%73earch/…/%2e%2e/%2e%2e/%2ewell-known/x` is `/.well-known/x` here and a
+-- WordPress search for the bytes before it there. Validator names (base64url
+-- tokens, HEX.txt) never need escaping.
+local function well_known_plain(m, path, args, raw)
+  if args and args ~= "" then return false end
+  if raw ~= path then return false end
+  local lp = path:lower()
+  if lp:sub(1, 13) ~= "/.well-known/" or lp:sub(-1) == "/" then return false end
+  local stub = lp:match("^/%.well%-known/(c[a-z]+dav)$")
+  if (stub == "caldav" or stub == "carddav")
+     and (m == "GET" or m == "HEAD" or m == "PROPFIND" or m == "OPTIONS") then
+    return true
+  end
+  if m ~= "GET" and m ~= "HEAD" then return false end
+  return not path_has_script_ext(lp)
+end
+
 local function is_static_asset_uri(uri)
   if type(uri) ~= "string" or uri == "" then return false end
-  -- Strip query string, then take the extension after the final dot.
-  local path = uri:match("^([^?#]+)") or uri
+  -- The extension after the final dot. `uri` is ngx.var.uri, decoded and with
+  -- no query: a `?` / `#` in it came from %3F / %23 and is part of the file
+  -- name (`/up/a.svg%23.php` runs a.svg#.php), so nothing is stripped.
+  local path = uri
   local ext = path:match("%.([%w]+)$")
   if not ext then return false end
-  return STATIC_ASSET_EXT[ext:lower()] == true
+  if STATIC_ASSET_EXT[ext:lower()] ~= true then return false end
+  -- `/xmlrpc.php/x.css` is xmlrpc.php: it must not share the coalesced
+  -- per-(ip,host) static allow, or its traffic rules and throttles never run.
+  return not path_has_script_ext(path)
 end
 
 -- Build the cfm_decisions cache key for a request.
@@ -933,9 +990,10 @@ end
 --     clean-allow warmed by "/x" is never reused for "/x?mode=register" whose
 --     query-scoped rule would challenge/block. A query-less request hashes
 --     exactly the path (== the old key), so no-query traffic keeps its previous
---     cache entry; static assets still coalesce (is_static_asset_uri strips the
---     query first). Only dynamic endpoints — where query-scoped rules live —
---     pay the extra per-query cache cardinality.
+--     cache entry. Static assets coalesce only for a GET / HEAD with no query
+--     (cfm_decision.cache_key); one with a query takes the per-URL key. Only
+--     dynamic endpoints — where query-scoped rules live — pay the extra
+--     per-query cache cardinality.
 --   * ua IS a verdict input (UAAny traffic rules can block/challenge) yet is
 --     deliberately omitted: it is client-controlled (a determined attacker sets
 --     any UA anyway), only clean allows are cached, and the TTL is short, so the
@@ -1274,24 +1332,31 @@ end
 --   403 urn:ietf:params:acme:error:unauthorized
 -- on exactly the cpanel./webmail./whm. service subdomains.
 --
--- The whole prefix is exempted (not just acme-challenge): it also covers
--- pki-validation, security.txt, mta-sts, apple-app-site-association, etc.; it
--- is a standardized static/metadata namespace; and it matches what the HTTPS
--- panel listeners already do (cfm_panel.lua is_exempt_path) and what
--- cPanel/Imunify/ModSecurity-CRS do.
+-- Plain fetches anywhere under the prefix are exempted (not just
+-- acme-challenge): pki-validation, security.txt, mta-sts,
+-- apple-app-site-association, etc.; a standardized static/metadata namespace.
+-- An exempted request skips the WAF rule engine too, not only the challenge.
 --
--- TRADE-OFF (accepted): this skips the WAF rule engine for the whole prefix,
--- not only the challenge. A few /.well-known/ endpoints can be app-routed
--- (e.g. /.well-known/webfinger, /.well-known/openid-configuration) and thus
--- lose WAF inspection. This is bounded: `uri` is nginx-decoded and
--- dot-segment-normalized, so /.well-known/acme-challenge/../../x collapses out
--- of the prefix and is NOT exempted (no traversal-out evasion); the request
--- still reaches the normal origin (this is a WAF-skip, not an auth bypass);
--- and the same pattern is already used for static-asset classes. If you ever
--- need WAF on app-routed .well-known endpoints, scope this to
--- acme-challenge/ + pki-validation/ instead.
+-- Only a plain fetch is exempted (since 2026-10-09, well_known_plain): GET /
+-- HEAD, no query string, no script extension in the path, plus CalDAV /
+-- CardDAV discovery. That is every validator and metadata fetch above. A
+-- front-controller app (WordPress routes any missing path to index.php) was
+-- otherwise reachable whole under `/.well-known/x?rest_route=…` or a POST,
+-- with no WAF, no IP block and no challenge; a shell dropped in
+-- `.well-known/` (a common spot) was too, when commanded through its query or
+-- a POST. Those now take the normal pipeline. `/.well-known/webfinger?…`
+-- does as well, so it can be challenged while its vhost is. Residual: a shell
+-- under the prefix commanded by a header, a cookie or a request body on a
+-- plain GET, or run by a handler the list does not name (an `.htaccess`
+-- AddHandler for `.txt`); a path-only payload reaching a plugin that logs
+-- the path (the path is still a plain file name); a Tomcat-style
+-- `x.jsp;jsessionid=` (irrelevant on Apache).
+-- The panel ports (cfm_panel.lua) still exempt the whole prefix: cpsrvd is
+-- not a front controller. The log-driven engine mirrors this test
+-- (isWellKnownChallengeExempt).
 do
-  if lower(uri):find("/.well-known/", 1, true) == 1 then
+  if lower(uri):find("/.well-known/", 1, true) == 1
+     and well_known_plain(method, uri, ngx.var.args, ngx.var.request_uri) then
     ngx.header["X-CFM-Bypass"] = "well-known"
     log_route(ngx.INFO, "bypass=well-known host=" .. host .. " uri=" .. uri)
     ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
@@ -1823,10 +1888,10 @@ end
 -- (e.g. /cfm-admin/login). Runs AFTER WAF so rules still inspect the request,
 -- and is skipped entirely when a valid cfm_clearance cookie is present
 -- (Step 2b above returns before we reach this block).
--- NOTE: /.well-known/ never reaches here — Step 0a1 routes the whole prefix
--- to the origin upstream before WAF/forced/bridge challenge, so neither the
--- WAF rule engine nor a forced challenge inspects it (see Step 0a1 for the
--- ACME/CA-DCV rationale and the accepted WAF-coverage trade-off).
+-- NOTE: a plain /.well-known/ fetch (GET / HEAD, no query, no script
+-- extension) never reaches here — Step 0a1 routes it to the origin upstream
+-- before WAF/forced/bridge challenge (see Step 0a1 for the ACME/CA-DCV
+-- rationale). Anything else under the prefix takes the normal pipeline.
 if ngx.var.cfm_force_challenge == "1" then
   ngx.header["X-CFM-Action"]  = "challenge_forced"
   ngx.header["Cache-Control"] = "no-store"

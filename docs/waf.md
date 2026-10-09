@@ -1544,7 +1544,7 @@ Kill switch: `CFM_WAF_STATS_ENABLE=0` disables hit-rate counters + flushing.
   ├─ \.(css|js|woff2?|ttf|eot|png|jpe?g|gif|webp|ico|map)$         → bypass cfm.lua, proxy to origin
   └─ everything else                                               ↓
 [ access_by_lua: cfm.lua ]
-  ├─ Step 0a1 /.well-known/            → origin (no WAF, no challenge)
+  ├─ Step 0a1 /.well-known/ plain GET/HEAD (no query, no script ext) → origin (no WAF, no challenge)
   ├─ Step 0b/0c UA emergency, fingerprint deny
   ├─ POST resume
   ├─ Step 0d  cpanel./whm./webmail. + proxy subdomains reach cpsrvd + /cpsess<N>/ API path
@@ -1567,7 +1567,7 @@ Kill switch: `CFM_WAF_STATS_ENABLE=0` disables hit-rate counters + flushing.
 
 Key invariants:
 
-1. **WAF runs even with valid clearance** for any request that reaches `cfm.lua`. No dynamic payload reaches origin without inspection — except the two Step 0 carve-outs above (`/.well-known/`, and the cPanel API endpoints on a panel proxy host, which cpsrvd authenticates itself; FP case 11).
+1. **WAF runs even with valid clearance** for any request that reaches `cfm.lua`. No dynamic payload reaches origin without inspection — except the two Step 0 carve-outs above (a plain `/.well-known/` fetch: GET / HEAD, no query string, no script extension in the path — anything else under the prefix is inspected, since 2026-10-09; and the cPanel API endpoints on a panel proxy host, which cpsrvd authenticates itself; FP case 11).
 2. **Post-clearance challenge cannot loop.** Conversion happens before the action switch; the `challenge` branch in the WAF hit handler is unreachable when `clearance_allow=true`.
 3. **POST replays are safe.** A resumed POST (`cfm_resumed_post`) is treated like any cleared client — `clearance_allow` keys on `clearance_ok` alone. A *cleared* replay runs the WAF (block-tier blocks; a challenge-tier hit is risk-downgraded by `post_clearance_action`) and then fast-paths to origin at Step 2b, so the stashed save is not lost. An *uncleared* replay that re-triggers a challenge still hits the `block_replayed` safety net (Step 2 challenge branch + Step 3) — the loop it exists to stop.
 4. **CFM control endpoints bypass `cfm.lua`.** `/__cfm_challenge`, `/__cfm_verify` are exact-match nginx locations — no WAF, no challenge, no origin.
