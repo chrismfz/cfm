@@ -1563,6 +1563,29 @@ Key invariants:
 | `block_replayed` | UNCLEARED POST replay re-triggered a challenge → 403 (a cleared replay is converted / fast-pathed instead) |
 | `challenge_forced` | nginx-marked location forced challenge |
 
+### Which request bodies the WAF reads (`cfm.lua` `waf_should_read_body`)
+
+- **POST to an allowlisted path** (`.php`, `/wp-admin/`, `/wp-json/`, `/?wc-ajax=`, … — the list in
+  `waf_should_read_body`): always read.
+- **Any other POST/PUT/PATCH:** read when the Content-Type is inspectable (form, JSON, XML,
+  multipart, `text/*`) and the Content-Length is at most `CFM_WAF_BODY_READ_MAX_CL` (1 MiB).
+- **POST on `location /` with no Content-Length (chunked, HTTP/2) or a larger one** (since
+  2026-10-09): read too, because nginx buffers that location's bodies anyway (the conf sets
+  `$cfm_body_buffered`). Only the first `CFM_WAF_BODY_MAX_LEN` (32 KB) is ever scanned.
+  These bodies are in **burn-in**: the request is decided without them, as before. When that
+  check made no hit, a hit the body produces is pushed as logonly; with no hit or a logonly
+  one, it is also logged as `waf_body_burnin would=<action> … waf_rule_id=<id>` (one line a
+  minute per IP). The burn-in corpus is those error-log lines (CFM MCP `edge_error_tail`,
+  `node="all"`, text `waf_body_burnin`): the pushed record reads like any logonly hit. After a
+  clean burn-in, `CFM_WAF_BODY_BUFFERED_ENFORCE=1` (declared with `env` in the edge conf; read
+  at worker start) enforces them. Cost: the WAF runs twice on these requests during burn-in,
+  about 6-10 ms of worker CPU for a 32 KB body, what an allowlisted POST already pays once.
+- A body the module cannot read (an HTTP/3 POST without Content-Length, and HTTP/2 on older
+  lua-nginx-module builds) is left unread and logged as `waf_body_unread` (one a minute per
+  IP); the request goes on through the other checks. Under `CFM_FAIL_OPEN=0` it gets a 500
+  when the old gate would have read it (an allowlisted path); a body read only because the
+  location buffers it stays unread, as before.
+
 ---
 
 ## Upstream interception — when traffic never reaches the WAF

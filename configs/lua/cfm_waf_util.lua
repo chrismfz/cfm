@@ -526,15 +526,25 @@ end
 --   • the Content-Type is not inspectable (binary/media/archive) — keep it
 --     streaming, don't waste a scan on opaque bytes; or
 --   • the Content-Length is absent/unmeasurable (chunked / Transfer-Encoding:
---     chunked) — we can't size-gate what we can't measure, so don't force-buffer
---     a potentially unbounded upload on a proxy_request_buffering=off location; or
---   • the declared length exceeds `cap` — reading only buys us the first ~32 KB
---     of scan (F08 truncates), so buffering multi-MB/GB bodies has no upside.
+--     chunked) and `buffered` is not true — we can't size-gate what we can't
+--     measure, so don't force-buffer a potentially unbounded upload on a
+--     proxy_request_buffering=off location; or
+--   • the declared length exceeds `cap` and `buffered` is not true — reading
+--     only buys us the first ~32 KB of scan (F08 truncates), so buffering
+--     multi-MB/GB bodies there has no upside.
+-- `buffered`: the location buffers request bodies anyway, so reading one
+-- spools nothing nginx would not (it is spooled earlier: before the edge's
+-- decision, where the proxy would spool it after), and both size rules are moot (the caller passes it for
+-- POST on the confs' `location /` only).
 -- Pure (no upvalues beyond ct_is_inspectable / a default cap) so it is unit-
 -- tested directly; cfm.lua isn't loadable, this is where the read/skip truth
 -- table lives.
-local function waf_body_gate(ct, cl, max_cl)
+local function waf_body_gate(ct, cl, max_cl, buffered)
   if not ct_is_inspectable(ct) then return false end
+  -- Where nginx buffers the body anyway, read it whatever its size: only the
+  -- first waf_body_max_len bytes are scanned, and skipping a large one let a
+  -- body padded past max_cl carry a payload past the WAF on a clean route.
+  if buffered == true then return true end
   if cl == nil then return false end                    -- chunked/unmeasurable → stream
   if cl > (max_cl or 1048576) then return false end     -- too large → stream
   return true

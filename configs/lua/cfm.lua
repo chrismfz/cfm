@@ -474,6 +474,17 @@ local function waf_should_read_body(uri, method)
 
   local ct = lower(ngx.var.http_content_type or "")
   local cl = tonumber(ngx.var.http_content_length or "")
+  -- A POST body with no Content-Length (chunked, or HTTP/2 without the
+  -- header), or one longer than waf_body_read_max_cl, is read where the
+  -- location buffers bodies anyway (the confs' `location /` sets
+  -- $cfm_body_buffered; the server default and the streaming locations clear
+  -- it). Both used to go unread on every route outside the allowlist below,
+  -- so a chunked or padded POST to a clean-URL route reached the app
+  -- uninspected. POST only: a PUT / PATCH (sync and REST clients) keeps the
+  -- size gate. The cost: such a body is spooled here, before Step 3 decides,
+  -- where nginx would have spooled it for the proxy after; a client Step 3
+  -- then refuses had it discarded before.
+  local buffered = method == "post" and ngx.var.cfm_body_buffered == "1"
 
   -- F07: PUT/PATCH were NOT body-inspected before this change (the gate was
   -- POST-only), so there is no legacy "read regardless of size" expectation for
@@ -483,7 +494,7 @@ local function waf_should_read_body(uri, method)
   -- keeps STREAMING on a proxy_request_buffering=off location instead of being
   -- force-buffered just to scan its first waf_body_max_len bytes.
   if method ~= "post" then
-    return wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl) or false
+    return wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl, buffered) or false
   end
 
   -- POST: known-dynamic endpoints are read regardless of size. This is the
@@ -503,7 +514,9 @@ local function waf_should_read_body(uri, method)
   if has(uri, "/wp-content/")     then return true end
   if has(uri, "/wp-includes/")    then return true end
   if has(uri, "/wc-api/")         then return true end
-  if has(uri, "wc-ajax=")         then return true end
+  -- `uri` is the path ($uri carries no query string): WooCommerce's
+  -- `/?wc-ajax=…` endpoint is matched on the query, by argument name.
+  if ("&" .. lower(ngx.var.args or "")):find("&wc-ajax=", 1, true) then return true end
   if has(uri, "/administrator/")  then return true end
   if has(uri, "/components/")     then return true end
   if has(uri, "/modules/")        then return true end
@@ -544,16 +557,39 @@ local function waf_should_read_body(uri, method)
   -- old positive allowlist let smuggle a body-borne SQLi/RCE/webshell past the
   -- WAF entirely (the Go log engine sees no body). Gate on an inspectable
   -- Content-Type + a measured, bounded Content-Length so binary/media uploads
-  -- and chunked/streaming bodies keep STREAMING (never force-buffer the
-  -- proxy_request_buffering=off media location) and we don't buffer a large body
-  -- just to scan its first waf_body_max_len bytes.
-  return wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl) or false
+  -- keep STREAMING (never force-buffer the proxy_request_buffering=off media
+  -- location) and we don't buffer a large body just to scan its first
+  -- waf_body_max_len bytes. A body with no Content-Length is read only where
+  -- the location buffers it anyway (`buffered`, above); elsewhere it streams.
+  local read = wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl, buffered) or false
+  -- Read only because the location buffers it (the old gate would not have):
+  -- its hits are in burn-in unless CFG.waf_body_buffered_enforce (Step 2).
+  if read and buffered and not wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl, false) then
+    ngx.ctx.cfm_body_burnin = true
+  end
+  return read
 end
 
 local function get_req_body_for_waf(uri, method, max_len)
   if not waf_should_read_body(uri, method) then return "" end
   if ngx.ctx.waf_body ~= nil then return ngx.ctx.waf_body end
-  ngx.req.read_body()
+  -- pcall: lua-nginx-module raises on a body it cannot read here, e.g. an
+  -- HTTP/3 request without Content-Length ("http3 requests are not supported
+  -- without content-length header"; HTTP/2 too on older builds). Unguarded,
+  -- that took the request to request_failure, which under fail_open skips
+  -- every check after the WAF. The body then stays unread, as a stream.
+  -- Under fail_closed the error still goes to request_failure (500) for a
+  -- body the old gate read; one read only because the location buffers it
+  -- (cfm_body_burnin) was never read before, so it stays unread instead.
+  local read_ok, read_err = pcall(ngx.req.read_body)
+  if not read_ok then
+    if not CFG.fail_open and not ngx.ctx.cfm_body_burnin then error(read_err, 0) end
+    local rip = real_ip()
+    if not SH or SH:add("bodyunread|" .. tostring(rip), 1, 60) then
+      log_ev(ngx.WARN, "[cfm] waf_body_unread ip=", rip, " uri=", uri, " err=", tostring(read_err))
+    end
+    ngx.ctx.waf_body = ""; return ""
+  end
   local data = ngx.req.get_body_data()
   if data and data ~= "" then
     local result = (#data > max_len) and string.sub(data, 1, max_len) or data
@@ -1455,12 +1491,18 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
     end
     local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
     local self_origin = is_self_origin(ip)
+    -- Burn-in (cfm_cfg waf_body_buffered_enforce): a body read only because
+    -- the location buffers it (chunked, or over waf_body_read_max_cl, on
+    -- `location /`) is new to the WAF. The request is decided without it,
+    -- as before; its own hits are checked after, pushed and logged as logonly.
+    local body_burnin = ngx.ctx.cfm_body_burnin and not CFG.waf_body_buffered_enforce
+                        and req_body ~= ""
     local waf_ctx = {
       uri = uri, args = ngx.var.args or "", method = method,
       raw_uri = ngx.var.request_uri,
       host = host, ip = ip, cookie = ngx.var.http_cookie or "",
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
-      headers = req_headers, body = req_body, self_origin = self_origin,
+      headers = req_headers, body = body_burnin and "" or req_body, self_origin = self_origin,
       skip_rule_ids = skip_rule_ids,
     }
     -- A rule that raised used to take the whole request into the
@@ -1489,6 +1531,28 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- maybe_flush_waf_insp piggybacks on the request to push the snapshot
       -- to Go without needing an init_worker timer.
       waf_insp_incr(host)
+      if body_burnin and (not hit or waf_action == "logonly") then
+        -- The body's own hits: shdict nil, so the burst counters the check
+        -- above already moved are not counted twice (those rules need it,
+        -- and they decided above). With no hit above, a body hit becomes the
+        -- (logonly) hit; after a logonly one it is only logged.
+        waf_ctx.body, waf_ctx.shdict = req_body, nil
+        local b_ok, b_hit, b_reason, b_ttl, b_action, b_hits, b_rule = pcall(waf.check, waf_ctx)
+        if not b_ok then
+          if not SH or SH:add("bodyburnin|" .. tostring(ip), 1, 60) then
+            log_ev(ngx.ERR, "[cfm] waf_body_burnin error ip=", ip, " host=", host, " uri=", uri,
+                   " err=", tostring(b_hit))
+          end
+        elseif b_hit then
+          if not SH or SH:add("bodyburnin|" .. tostring(ip), 1, 60) then
+            log_ev(ngx.WARN, "[cfm] waf_body_burnin would=", tostring(b_action), " ip=", ip, " host=", host,
+                   " uri=", uri, " reason=", tostring(b_reason), " waf_rule_id=", tostring(b_rule))
+          end
+          if not hit then
+            hit, reason, ttl, waf_action, waf_hits, waf_rule_id = true, b_reason, b_ttl, "logonly", b_hits, b_rule
+          end
+        end
+      end
     end
     maybe_flush_waf_insp()
     if hit then
