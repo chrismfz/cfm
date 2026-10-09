@@ -118,6 +118,8 @@ do
         "Drupal .format (PHP's _format) login counts")
   check(burst(9, { uri = "/admin/index.php", args = "route=common/login.login", body = pad:sub(1, 32768), clen = tostring(#pad),
                    peer = "172.70.1.1" }) == "challenge_v2", "OpenCart 4 login route padded counts")
+  check(burst(9, { uri = "/admin/index.php", args = "route=%20common/login.login", body = pad:sub(1, 32768), clen = tostring(#pad),
+                   peer = "172.70.1.1" }) == "challenge_v2", "OpenCart route with a leading blank (trimmed by OC4) counts")
   -- Magento's storefront login (a /login path: login[username] + login[password]).
   check(burst(9, { uri = "/customer/account/loginPost/", body = "form_key=x&login%5Busername%5D=a%40b.c&login%5Bpassword%5D=g",
                    peer = "172.70.1.1" }) == "challenge_v2", "Magento storefront loginPost counts")

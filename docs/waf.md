@@ -1323,7 +1323,8 @@ the way PHP reads it (`php_request_fields`): WordPress `wp-login.php` `pwd`, Dru
 `/admin/index.php` and custom `…/login` forms `password` / `pass` / `pwd` / `passwd`,
 Magento's `login[username]` + `login[password]` (two `login` values) on any of those
 endpoints, or on its admin route (an `admin` path segment) alone. The query's `route` /
-`_format` are read as PHP registers them in `$_GET` (`%5Fformat`, `.format`).
+`_format` are read as PHP registers them in `$_GET` (`%5Fformat`, `.format`), the route
+after its leading blanks as OpenCart 4 trims it.
 A JSON body (by media type or a leading `{`) counts by one of those keys, its `\u00XX`
 escapes decoded; Drupal's REST login (`/user/login?_format=…`) counts whatever the body,
 since Drupal decodes it by `_format`. A GET of the login page and admin navigation never
@@ -1356,8 +1357,9 @@ which the edge cannot tell from successes.
 Not counted (the path test reads `ngx.var.uri`, no query string): Drupal 7
 `/index.php?q=user/login`, Joomla `POST /administrator/` (the directory index), Joomla's
 frontend login (`/index.php?option=com_users&task=user.login`), WooCommerce
-`/my-account/`, Adminer, a password sent in a POST's query string, Magento's admin login
-padded past the cut on its bare route (`/admin/…`, where big bodies are saves), and field
+`/my-account/`, Adminer, a password sent in a POST's query string, OpenCart 3's login padded past the cut
+on any route but `common/login` (a logged-out POST anywhere reaches its login controller),
+Magento's admin login padded past the cut on its bare route (`/admin/…`, where big bodies are saves), and field
 names outside the list (`session[password]`, Symfony `_password`, an array-wrapped or
 BOM-prefixed JSON body). An OpenCart admin
 customer save sends an empty `password=` and counts; eight in 20 s is not a workflow.

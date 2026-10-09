@@ -1511,10 +1511,15 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers
   -- the query; Joomla's option=com_login is posted in the body).
   -- The query keys as PHP registers them in $_GET (php_request_fields):
   -- `route=common%2Flogin`, `%5Fformat=`, `.format=` (PHP's `_format`).
-  local q = (args and args ~= "") and _M.php_request_fields("get", args, "", headers, AUTH_QUERY_FIELDS) or {}
+  -- Parsed only for the two tags that read it. The value is compared after
+  -- its leading blanks, as OpenCart 4 trims $_GET (`route=%20common/login`).
+  local q
   local function q_has(name, prefix)
+    if not q then
+      q = (args and args ~= "") and _M.php_request_fields("get", args, "", headers, AUTH_QUERY_FIELDS) or {}
+    end
     for _, v in ipairs(q[name] or {}) do
-      if not prefix or lower(v):sub(1, #prefix) == prefix then return true end
+      if not prefix or lower((v:gsub("^[%s%z]+", ""))):sub(1, #prefix) == prefix then return true end
     end
     return false
   end
