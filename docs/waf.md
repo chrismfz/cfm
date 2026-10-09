@@ -1313,6 +1313,28 @@ Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see 
 
 ---
 
+## Rule 501 — `rule_auth_burst` (login submissions)
+
+Counts credential **submissions** per IP across vhosts: `auth_burst_threshold` (8)
+in `auth_window_sec` (20 s), then the rule's mode (`challenge_v2`). A request counts
+only when it is a POST to a login endpoint whose body carries a password field, read
+the way PHP reads it (`php_request_fields`): WordPress `wp-login.php` `pwd`, Drupal
+`/user/login` `pass`, Joomla `/administrator/index.php` `passwd`, OpenCart
+`/admin/index.php` and custom `…/login` forms `password` / `pass` / `pwd`, Magento's
+admin route `login[username]` + `login[password]`. A GET of the login page, admin
+navigation and admin saves never count; XML-RPC is left to 510-512.
+
+Since 2026-10-09. Before that the rule counted every request to those paths (an
+OpenCart admin browsing `/admin/index.php?route=…` or a Joomla admin saving was
+challenged after 8 pages), and it skipped every client that is its own TCP peer, so it
+only ever ran behind a trusted proxy (Cloudflare). Direct clients now count too, capped
+at `auth_burst_direct_mode` (`logonly`) for a burn-in; a proxied client keeps the
+rule's mode. Promote by setting `auth_burst_direct_mode` (never stronger than
+`rule_auth_burst`) once `waf_rule_detail 501` reads clean. On the panel ports
+(cPanel / WHM / webmail, peer = client) it is a log line only: the panel gate enforces
+block-tier rules, and cPanel's own `login_log` detector (`internal/detectors/cpanel`)
+bans repeated failures, which the edge cannot tell from successes.
+
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 
 510 (`system.multicall`) and 511 (`pingback.ping`) read the **method names** of

@@ -1471,11 +1471,45 @@ local function window_count(shdict, key, win)
   return cnt
 end
 
-function _M.detect_auth_burst(ip, host, uri, method, shdict)
+-- The password field names a login form posts, as PHP registers them
+-- (php_var_name): WordPress `pwd`, Drupal `pass`, Joomla `passwd`, OpenCart
+-- and most custom forms `password`, Magento `login[password]` (registered as
+-- `login`).
+local AUTH_PASSWORD_FIELDS = { pwd = true, pass = true, passwd = true, password = true, login = true }
+
+-- Rule 501 counts credential SUBMISSIONS: a POST to a login endpoint that
+-- carries a password field, read the way PHP reads the body
+-- (php_request_fields). It used to count every request to the endpoint, so
+-- an OpenCart / Joomla / Magento admin navigating or saving (`/admin/
+-- index.php?route=…`, `POST /administrator/index.php`) or a GET of the login
+-- page counted like a guess (edge Lua sweep 2026-10-09). XML-RPC carries no
+-- form field and is left to 510-512, which read its payload.
+function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers)
   if not shdict or not ip or ip == "" then return nil end
+  if lower(method or "") ~= "post" or not body or body == "" then return nil end
 
   local tag = auth_endpoint_tag(uri, method)
-  if not tag then return nil end
+  -- Magento's admin login posts to the admin route itself (`/admin/`,
+  -- `/admin/admin/index/index/key/…`), which no path test can tell from an
+  -- admin save; its form is: login[username] + login[password].
+  local magento = not tag and has(lower(uri or ""), "/admin")
+  if not tag and not magento then return nil end
+  local f = _M.php_request_fields("post", args, body, headers, AUTH_PASSWORD_FIELDS)
+  local function in_body(t)
+    local n = 0
+    for i = 1, #(t or {}) do if t.srcs[i] == "body" then n = n + 1 end end
+    return n
+  end
+  if magento then
+    if in_body(f.login) < 2 then return nil end
+    tag = "AUTH_MAGENTO_ADMIN"
+  else
+    local cred = false
+    for _, t in pairs(f) do
+      if in_body(t) > 0 then cred = true; break end
+    end
+    if not cred then return nil end
+  end
 
   local win = tonumber(CFG.auth_window_sec or 20) or 20
   local thr = tonumber(CFG.auth_burst_threshold or 8) or 8

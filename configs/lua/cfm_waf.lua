@@ -393,6 +393,10 @@ local CFG = {
   -- Generic auth burst tuning
   auth_window_sec      = 20,
   auth_burst_threshold = 8,
+  -- Rule 501's mode for a client that is its own TCP peer (no trusted proxy),
+  -- never stronger than rule_auth_burst. logonly from 2026-10-09: before that
+  -- the rule skipped direct clients entirely; a burn-in before it challenges.
+  auth_burst_direct_mode = "logonly",
   auth_ttl_sec         = 600,
 
   -- WP login helper tuning
@@ -1733,23 +1737,28 @@ local function check_impl(ctx, st)
   end
 
   -- ── 28) Generic auth endpoint burst ──────────────────────────────────────
+  -- Counts credential submissions (detect_auth_burst). It used to skip every
+  -- request whose client IP is the TCP peer, i.e. every direct client: the
+  -- rule ran only behind a trusted proxy (Cloudflare). Direct clients now
+  -- count too, capped at auth_burst_direct_mode (logonly) for a burn-in;
+  -- promote it once the fleet read is clean. Proxied clients keep the rule's
+  -- mode. On the panel ports (peer = ip, block-tier only) it is a log line:
+  -- cPanel's own login_log detector (internal/detectors/cpanel) bans failures.
   do
     local mode = rule_mode(CFG.rule_auth_burst, "challenge")
     if mode ~= "disabled" then
       local peer = ctx.peer or ""
-
-      if not (peer ~= "" and ip ~= "" and ip == peer) then
-        local tag = nil
-        if not det.is_known_legit_xmlrpc(uri, args, headers, body, ip) then
-          tag = det.detect_auth_burst(ip, nil, uri, method, shdict)
-        end
+      if peer == "" or ip == peer then
+        local cap = CFG.auth_burst_direct_mode or "logonly"
+        if (ACTION_SEVERITY[cap] or 0) < (ACTION_SEVERITY[mode] or 0) then mode = cap end
+      end
+      if mode ~= "disabled" then
+        local tag = det.detect_auth_burst(ip, nil, uri, method, shdict, args, body, headers)
         if tag then
           local ttl = CFG.auth_ttl_sec or CFG.default_ttl_sec
           if record("WAF_AUTH_BURST:" .. tag, ttl, mode, RULE_IDS.rule_auth_burst) then goto done end
         end
       end
-
-
     end
   end
 

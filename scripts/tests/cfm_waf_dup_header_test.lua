@@ -113,7 +113,10 @@ do
   check(burst > 0, "an xmlrpc POST reaches a burst counter (got none)")
   -- The detectors themselves key per IP, whatever host a caller passes.
   keys = {}
-  det.detect_auth_burst("203.0.113.11", "Example.COM", "/wp-login.php", "POST", dict)
+  for _ = 1, 2 do
+    det.detect_auth_burst("203.0.113.11", "Example.COM", "/wp-login.php", "POST", dict, "", "log=admin&pwd=x",
+      { ["content-type"] = "application/x-www-form-urlencoded" })
+  end
   det.detect_xmlrpc_post_burst("203.0.113.11", "example.com", "/xmlrpc.php", "POST", dict, "",
     { ["user-agent"] = CHROME }, "<methodCall><methodName>system.multicall</methodName></methodCall>")
   local n = 0
