@@ -33,6 +33,17 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
+- **Requests under `/.well-known/` are inspected unless they are a plain
+  fetch.** The whole prefix skipped the WAF, the IP block and the challenge
+  (for certificate validation). On a WordPress site, which routes any missing
+  path to its `index.php`, that made the whole site reachable without them
+  under `/.well-known/x?…` or a POST, and a shell dropped in `.well-known/`
+  too. Only a GET or HEAD with no query string and no script extension is
+  exempted now: Let's Encrypt / AutoSSL and CA validation, `security.txt`,
+  MTA-STS and app-association files keep working. And a request such as
+  `/xmlrpc.php/x.css` (a PHP script with a static-looking tail) no longer
+  reuses a visitor's cached allow for static assets, so the traffic rules and
+  throttles that apply to `xmlrpc.php` run for it.
 - **Four ways to slip a webshell past the upload rules are closed.** A
   filename split over two header lines (`filename="shell.p` + line break +
   `hp"`, or `file` + line break + `name="shell.php"`) is `shell.php` to PHP

@@ -899,13 +899,32 @@ local STATIC_ASSET_EXT = {
   woff=true, woff2=true, ttf=true, otf=true, eot=true,
 }
 
+-- Script extensions a path segment can carry and still run as a script with
+-- the rest of the path as PATH_INFO (`/xmlrpc.php/x.css`), or through a
+-- multi-extension handler (`x.php.css` under Apache's AddHandler).
+local SCRIPT_EXT = {
+  php = true, phtml = true, pht = true, phar = true, phps = true,
+  cgi = true, pl = true, py = true, asp = true, aspx = true, jsp = true, shtml = true,
+}
+local function path_has_script_ext(path)
+  local lp = path:lower()
+  for ext in lp:gmatch("%.(%w+)[%./]") do
+    if SCRIPT_EXT[ext] or ext:match("^php%d+$") then return true end
+  end
+  local last = lp:match("%.(%w+)$")
+  return last ~= nil and (SCRIPT_EXT[last] or last:match("^php%d+$")) ~= nil
+end
+
 local function is_static_asset_uri(uri)
   if type(uri) ~= "string" or uri == "" then return false end
   -- Strip query string, then take the extension after the final dot.
   local path = uri:match("^([^?#]+)") or uri
   local ext = path:match("%.([%w]+)$")
   if not ext then return false end
-  return STATIC_ASSET_EXT[ext:lower()] == true
+  if STATIC_ASSET_EXT[ext:lower()] ~= true then return false end
+  -- `/xmlrpc.php/x.css` is xmlrpc.php: it must not share the coalesced
+  -- per-(ip,host) static allow, or its traffic rules and throttles never run.
+  return not path_has_script_ext(path)
 end
 
 -- Build the cfm_decisions cache key for a request.
@@ -1287,11 +1306,23 @@ end
 -- dot-segment-normalized, so /.well-known/acme-challenge/../../x collapses out
 -- of the prefix and is NOT exempted (no traversal-out evasion); the request
 -- still reaches the normal origin (this is a WAF-skip, not an auth bypass);
--- and the same pattern is already used for static-asset classes. If you ever
--- need WAF on app-routed .well-known endpoints, scope this to
--- acme-challenge/ + pki-validation/ instead.
+-- and the same pattern is already used for static-asset classes.
+--
+-- Only a plain fetch is exempted (since 2026-10-09): GET / HEAD, no query
+-- string, no script extension in the path. That is every validator and
+-- metadata fetch above. A front-controller app (WordPress routes any missing
+-- path to index.php) was otherwise reachable whole under
+-- `/.well-known/x?rest_route=…` or a POST, with no WAF, no IP block and no
+-- challenge; a shell dropped in `.well-known/` (a common spot) was too. Those
+-- now take the normal pipeline. `/.well-known/webfinger?resource=…` does as
+-- well, so it can be challenged while its vhost is.
 do
-  if lower(uri):find("/.well-known/", 1, true) == 1 then
+  local wk_method = ngx.req.get_method()
+  local wk_args = ngx.var.args
+  if lower(uri):find("/.well-known/", 1, true) == 1
+     and (wk_method == "GET" or wk_method == "HEAD")
+     and (wk_args == nil or wk_args == "")
+     and not path_has_script_ext(uri) then
     ngx.header["X-CFM-Bypass"] = "well-known"
     log_route(ngx.INFO, "bypass=well-known host=" .. host .. " uri=" .. uri)
     ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
@@ -1823,10 +1854,10 @@ end
 -- (e.g. /cfm-admin/login). Runs AFTER WAF so rules still inspect the request,
 -- and is skipped entirely when a valid cfm_clearance cookie is present
 -- (Step 2b above returns before we reach this block).
--- NOTE: /.well-known/ never reaches here — Step 0a1 routes the whole prefix
--- to the origin upstream before WAF/forced/bridge challenge, so neither the
--- WAF rule engine nor a forced challenge inspects it (see Step 0a1 for the
--- ACME/CA-DCV rationale and the accepted WAF-coverage trade-off).
+-- NOTE: a plain /.well-known/ fetch (GET / HEAD, no query, no script
+-- extension) never reaches here — Step 0a1 routes it to the origin upstream
+-- before WAF/forced/bridge challenge (see Step 0a1 for the ACME/CA-DCV
+-- rationale). Anything else under the prefix takes the normal pipeline.
 if ngx.var.cfm_force_challenge == "1" then
   ngx.header["X-CFM-Action"]  = "challenge_forced"
   ngx.header["Cache-Control"] = "no-store"
