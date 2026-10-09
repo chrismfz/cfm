@@ -316,7 +316,8 @@ end
 -- `filename` goes to $_FILES; one with neither name nor filename ends the
 -- parse ("Mime headers garbled"). A value runs to the next "\n--<boundary>",
 -- one CR before it dropped. fn(name, value) runs once per field, in order;
--- on_file(filename, name), when given, once per file part PHP registers.
+-- on_file(filename, name, s, e), when given, once per file part PHP registers
+-- (its bytes are b[s..e]). fn may be nil: no field value is then copied.
 local function each_multipart_field(b, ct_raw, fn, on_file)
   local bnd = php_mp_boundary(ct_raw)
   if not bnd then return end -- an EMPTY boundary is valid to PHP: parts split on `--` lines
@@ -366,7 +367,7 @@ local function each_multipart_field(b, ct_raw, fn, on_file)
       -- The file's bytes are b[p .. (bound or n + 1) - 1], CR before the
       -- boundary included (a scanner over-reading one byte is harmless).
       if filename and on_file then on_file(filename, name, p, (bound or n + 1) - 1) end
-      if name and not filename and name ~= "" then
+      if fn and name and not filename and name ~= "" then
         -- php_ap_memstr also matches a boundary PREFIX that runs to the end of
         -- the body ("\n", "\n--", ...): a last value is cut there too.
         -- nextb holds one LF (its first byte), so only the body's last LF can
@@ -400,6 +401,20 @@ local function php_content_type(headers)
     return table.concat(parts, ", ")
   end
   return v or ""
+end
+
+-- The file parts PHP registers in a multipart body, as { filename, s, e }
+-- (bytes body[s..e]). Rules 401 and 415 both read them: the last parse is kept
+-- (Lua strings are interned, so the key test is a pointer compare).
+local fp_body, fp_ct, fp_parts
+local function php_file_parts(body, ct_raw)
+  if body == fp_body and ct_raw == fp_ct then return fp_parts end
+  local parts = {}
+  each_multipart_field(body, ct_raw, nil, function(fname, _, s, e)
+    parts[#parts + 1] = { fname, s, e }
+  end)
+  fp_body, fp_ct, fp_parts = body, ct_raw, parts
+  return parts
 end
 
 -- skip(s), when given, may rule a whole urlencoded source (the query string,
@@ -4126,13 +4141,11 @@ function _M.detect_upload_filename(body, headers)
   -- one before it, so `filename="shell.p` CRLF `hp"` is `shell.php` to PHP,
   -- and `file` CRLF `name="shell.php"` is a `filename=` parameter; the
   -- matchers above read one line at a time and saw neither.
-  local found
-  each_multipart_field(body, php_content_type(headers), function() end, function(fname)
-    if found then return end
-    local hit = bad_fname(fname)
-    if hit then found = "UPLOAD_FNAME:" .. hit .. ":" .. fname:sub(1, 64) end
-  end)
-  return found
+  for _, f in ipairs(php_file_parts(body, php_content_type(headers))) do
+    local hit = bad_fname(f[1])
+    if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. f[1]:sub(1, 64) end
+  end
+  return nil
 end
 
 -- [top-4c] Webshell PHP file hidden INSIDE an uploaded ZIP archive.
@@ -4230,16 +4243,18 @@ end
 -- (see rule 432: "Legit binary files never contain `<?php`").
 --
 -- `s` MUST already be lowercased (matches both detector call sites).
--- After `<?=` (or a `<?` short open tag and whitespace), PHP skips
--- whitespace, comments (`/* … */`, `# …`, `// …` to the line end), `@` and a
--- leading `\` (a namespaced name) before the expression. These were missed:
--- `<?=\strtoupper(…)`, `<?=/**/system(…)`, `<?=#x` LF `system(…)`,
--- `<?=print`id``, `<?= new X(…)`, `<? echo …`. The expression must still
--- open like PHP code (a variable, a backtick exec, a quoted string, `(`,
--- `[`, a call `name(` (namespaced too), or one of the constructs below),
--- which keeps the 3-byte opener binary-safe. One left-to-right pass: the
--- `*/` / line-end lookups are reused while still ahead, so runs of openers
--- cannot make it quadratic.
+-- After `<?=` PHP skips whitespace, comments (`/* … */`, `# …` / `// …` to the
+-- line end), `@` and a leading `\` (a namespaced name), and an expression may
+-- open with a unary operator or a number. These were missed: `<?=\f(…)`,
+-- `<?=/**/f(…)`, `<?=#x` LF `f(…)`, `<?=print`…``, `<?= new X(…)`,
+-- `<?=!f(…)`, `<?=0?f(…):1`, and the `<? echo …` short open tag. What follows
+-- must still open like PHP code (a variable, a backtick exec, a quoted string,
+-- `(`, `[`, a call `name(` (namespaced, comments allowed before the `(`), one
+-- of the constructs below, or a unary / numeric lead into one of those), which
+-- keeps the 3-byte opener binary-safe. The `<?` short open tag is held
+-- tighter (whitespace, then `$`, a construct or an immediate `name(`): it is
+-- two bytes. PHP whitespace only (space, tab, CR, LF; not Lua's %s). One
+-- left-to-right pass: the `*/` / line-end lookups are reused while ahead.
 local SHORT_ECHO_WORDS = {
   echo = true, print = true, new = true, eval = true, include = true, include_once = true,
   require = true, require_once = true, exit = true, die = true, clone = true,
@@ -4248,46 +4263,59 @@ local function has_php_short_echo(s)
   if not s or s == "" then return false end
   local n = #s
   local close_at, nl_at = 0, 0     -- the last `*/` / LF found, reused while ahead
-  local function skip_comment(i)   -- i at `/*`: the index after its `*/`, or nil
-    if close_at <= i + 1 then close_at = s:find("*/", i + 2, true) or (n + 1) end
-    if close_at > n then return nil end
-    return close_at + 2
-  end
-  local function expr_at(i)
+  local function ws(c) return c == " " or c == "\t" or c == "\r" or c == "\n" end
+  -- Whitespace and comments from i; with `lead`, also `@` and `\`. The index
+  -- after them, or nil when a comment runs to the end.
+  local function skip(i, lead)
     while i <= n do
       local c = s:sub(i, i)
-      if c:find("^[%s@\\]") then
+      if ws(c) or (lead and (c == "@" or c == "\\")) then
         i = i + 1
       elseif c == "/" and s:sub(i + 1, i + 1) == "*" then
-        i = skip_comment(i)
-        if not i then return false end
+        if close_at <= i + 1 then close_at = s:find("*/", i + 2, true) or (n + 1) end
+        if close_at > n then return nil end
+        i = close_at + 2
       elseif c == "#" or (c == "/" and s:sub(i + 1, i + 1) == "/") then
         if nl_at <= i then nl_at = s:find("\n", i, true) or (n + 1) end
-        if nl_at > n then return false end
+        if nl_at > n then return nil end
         i = nl_at + 1
       else
         break
       end
     end
-    if i > n then return false end
+    return i
+  end
+  local function expr_at(i, depth)
+    i = skip(i, true)
+    if not i or i > n then return false end
     local c = s:sub(i, i)
     if c == "$" or c == "`" or c == "'" or c == '"' or c == "(" or c == "[" then return true end
+    if depth < 4 then
+      -- A unary operator, or a number and a binary operator, leading into an
+      -- expression (`!f(…)`, `-$x`, `0?f(…):1`, `1+$x`).
+      if c == "!" or c == "~" or c == "-" or c == "+" then return expr_at(i + 1, depth + 1) end
+      local num_end = s:match("^%d[%d%.]*()", i)
+      if num_end then
+        local j = skip(num_end, false)
+        if j and j <= n and s:sub(j, j):find("^[%?:%.%%%+%-%*/|&%^<>=,]") then
+          return expr_at(j + 1, depth + 1)
+        end
+        return false
+      end
+    end
     local word, j = s:match("^([%a_][%w_\\]*)()", i)
     if not word then return false end
     if SHORT_ECHO_WORDS[word] then return true end
-    -- A call: the name, then whitespace / a comment, then `(`.
-    while j <= n do
-      local d = s:sub(j, j)
-      if d:find("^%s") then
-        j = j + 1
-      elseif d == "/" and s:sub(j + 1, j + 1) == "*" then
-        j = skip_comment(j)
-        if not j then return false end
-      else
-        break
-      end
-    end
-    return s:sub(j, j) == "("
+    j = skip(j, false)                 -- a call: the name, then ws / comments, then `(`
+    return j ~= nil and s:sub(j, j) == "("
+  end
+  local function short_open_at(i)      -- after `<?` + whitespace
+    while i <= n and ws(s:sub(i, i)) do i = i + 1 end
+    if i > n then return false end
+    if s:sub(i, i) == "$" then return true end
+    local word, j = s:match("^([%a_][%w_]*)()", i)
+    if not word then return false end
+    return SHORT_ECHO_WORDS[word] or s:sub(j, j) == "("
   end
   local pos = 1
   while true do
@@ -4295,9 +4323,9 @@ local function has_php_short_echo(s)
     if not k then return false end
     local nx = s:sub(k + 2, k + 2)
     if nx == "=" then
-      if expr_at(k + 3) then return true end
-    elseif nx ~= "" and nx:find("^%s") then
-      if expr_at(k + 2) then return true end   -- `<?` short open tag
+      if expr_at(k + 3, 0) then return true end
+    elseif ws(nx) then
+      if short_open_at(k + 2) then return true end
     end
     pos = k + 2
   end
@@ -4350,19 +4378,21 @@ function _M.detect_upload_content_deep(body, headers)
   local ct = php_content_type(headers)
   if not has(lower(ct), "multipart/form-data") then return nil end
   local limit = body_budget(headers)
-  local tag
-  each_multipart_field(body, ct, function() end, function(_, _, s, e)
-    if tag or s > limit then return end
+  for _, f in ipairs(php_file_parts(body, ct)) do
+    local s, e = f[2], f[3]
+    if s > limit then break end
     if e > limit then e = limit end
-    -- 402 already read the first max_scan_len bytes; start a little before
-    -- that edge so an opener straddling it is seen whole.
-    if e <= CFG.max_scan_len then return end
-    if s < CFG.max_scan_len - 16 then s = math.max(s, CFG.max_scan_len - 16) end
-    local part = lower(body:sub(s, e))
-    if has(part, "<?php") or has_php_short_echo(part) then tag = "UPLOAD_PHP_TAG_DEEP"
-    elseif has(part, "<jsp:") then tag = "UPLOAD_JSP_TAG_DEEP" end
-  end)
-  return tag
+    -- A part 402 read whole (it ends inside the first max_scan_len bytes) is
+    -- skipped; one that runs past that edge is read from its START: an
+    -- opener before the edge with its code past it (`<?=` + padding) is seen
+    -- by neither rule otherwise.
+    if e > CFG.max_scan_len then
+      local part = lower(body:sub(s, e))
+      if has(part, "<?php") or has_php_short_echo(part) then return "UPLOAD_PHP_TAG_DEEP" end
+      if has(part, "<jsp:") then return "UPLOAD_JSP_TAG_DEEP" end
+    end
+  end
+  return nil
 end
 
 -- SP Page Builder unauthenticated arbitrary file upload -> RCE (CVE-2026-48908,

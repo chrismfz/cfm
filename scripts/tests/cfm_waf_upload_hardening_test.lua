@@ -90,12 +90,17 @@ do
     '<?=\\strtoupper("ok1")?>', '<?=/**/strtoupper("ok2")?>', '<? echo strtoupper("ok3");?>',
     '<?=#x\nstrtoupper("ok4")?>', '<?=print`echo ok5`?>', '<?=\tnew ArrayObject([1])?>',
     '<?=system/**/("id")?>', '<?=@$_GET[0]?>',
+    "<?=!system('id')?>", "<?=-system('id')?>", "<?=~system('id')?>", "<?=0?system('id'):1?>",
+    "<?=system//x\n('id')?>", "<?=system#x\n('id')?>",
   }) do
     local r = run(body(part('name="f"; filename="x.jpg"', php, "image/jpeg")))
     check(r.ids:find(",402=block,", 1, true), "402 catches " .. php:gsub("\n", "<LF>") .. ": " .. show(r))
   end
   -- Binary-safe: a stray `<?=` / `<?` in non-PHP content.
-  for _, s in ipairs({ "<?xml version=\"1.0\"?>", "a<?=b", "x <? y", "<?=9", "data<?\0=" }) do
+  -- \v and \f are not PHP whitespace after an opener (the tokenizer reads
+  -- space, tab, CR, LF only).
+  for _, s in ipairs({ "<?xml version=\"1.0\"?>", "a<?=b", "x <? y", "<?=9", "data<?\0=",
+                       "<?\v$x", "<?=\f$x", "<?\fecho $x" }) do
     local r = run(body(part('name="f"; filename="x.svg"', s, "image/svg+xml")))
     check(not r.ids:find(",402=", 1, true), "no 402 on " .. s:gsub("%z", "\\0") .. ": " .. show(r))
   end
@@ -117,6 +122,11 @@ do
   check(not r.ids:find(",415=", 1, true), "superglobal words in a file past 2 KB: not 415: " .. show(r))
   r = run(body(part('name="f"; filename="photo.jpg"', img, "image/jpeg")))
   check(not r.hit, "a clean 3 KB image stays clean: " .. show(r))
+  -- An opener inside 402's 2 KB with its code padded past the edge: 402 sees
+  -- `<?=` and blanks, so 415 reads the part from its start.
+  r = run(body(part('name="f"; filename="a.gif"',
+    "GIF89a" .. ("\1"):rep(1850) .. "<?=" .. (" "):rep(300) .. "system($_GET[0]);?>", "image/gif")))
+  check(r.ids:find(",415=logonly,", 1, true), "an opener straddling 402's edge → 415: " .. show(r))
 end
 
 -- ── Cost: the short-echo parser stays linear on runs of openers ─────────────

@@ -1123,6 +1123,8 @@ The rules are split deliberately so each catches a different *class* of evasion.
 Rule 402's PHP / JSP openers (`<?php`, a short-echo `<?=` / `<?` with a PHP
 expression after it, `<jsp:`) in the uploaded **files** past 402's window (the
 body's first 2 KB): a webshell after 2 KB of image data, or in a second file.
+A file part that runs past that edge is read from its start, so an opener
+inside the 2 KB with its code padded past it is seen whole.
 Only file parts (a `filename=`, as PHP registers them) are read, to the
 multipart body budget (16 KB), and only for the openers, not 402's
 superglobal words (`$_POST` in ticket / forum text is a known 402 FP). Added
