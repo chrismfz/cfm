@@ -88,7 +88,7 @@ do
   -- `<?xml` is a short tag too: `xml:` is a goto label, `xml ;` a constant.
   for _, sh in ipairs({ "<?xml:system($_GET[c]);", "<?XML :system($_GET[c]);?>", "<?xml ;system($_GET[c]);",
                         "<?xml-1;system($_GET[c]);", "<?xml_parser_create();system($_GET[c]);",
-                        "<?xml and a==1;system($_GET[c]);", "<?xpacket:eval($_POST[x]);" }) do
+                        "<?xml and-a==1;system($_GET[c]);", "<?xpacket:eval($_POST[x]);" }) do
     r = run(body(part('name="f"; filename="a.jpg"', sh, "image/jpeg")))
     check(r.ids:find(",402,", 1, true) and r.action == "block", "xml-prefixed shell " .. sh .. " is 402: " .. show(r))
   end

@@ -4748,7 +4748,7 @@ end
 -- mso-application): two identifiers in a row are a parse error under
 -- short_open_tag, so nothing in the file runs. A bare `<?xml` prefix is not
 -- exempt: `<?xml:system($_GET[c]);` is a goto label and runs. `==` / `=>`
--- after the attribute are not exempt either (`<?xml and a==1;` parses).
+-- after the attribute are not exempt either (`<?xml and-a==1;` parses).
 local PI_NAMES = { "xml", "xml%-stylesheet", "xpacket", "mso%-application" }
 local function is_inert_pi(s, k)
   for _, n in ipairs(PI_NAMES) do

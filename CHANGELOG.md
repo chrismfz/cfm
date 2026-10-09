@@ -242,8 +242,8 @@ back-filled here — see the git/PR history for that period.
   mentioned `$_POST` or `$_GET`, such as a support ticket about a form
   handler, or an attached `error.log` quoting one; it now looks for those
   only inside uploaded files, next to a PHP short open tag (`<?`) or
-  `<script language="php">` in the same file (`<?php` and `<?=` still block
-  on their own, anywhere). An XML header PHP cannot run, such as an SVG's
+  `<script language="php">` in the same file (`<?php`, and `<?=` followed by
+  code, still block on their own within the scanned window). An XML header PHP cannot run, such as an SVG's
   `<?xml version=…?>` or a photo's XMP `<?xpacket begin=…?>`, is not an
   open tag. A name hidden behind URL encoding is caught: `x%2f.env` as
   before, and now `%2ehtaccess` too.
