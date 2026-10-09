@@ -1316,14 +1316,20 @@ Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see 
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 
 510 (`system.multicall`) and 511 (`pingback.ping`) read the **method names** of
-an XML-RPC body as WordPress's IXR_Message reads them: every `<methodName>`
-element in the whole body (the last one is the call), with comments dropped,
-CDATA unwrapped, character and predefined entity references decoded and the
-ends trimmed (`det.xmlrpc_method_names`, since 2026-10-09). Before that they
-looked for the words in the first 2 KB of the body only: a comment or blanks
-before `<methodName>`, or `system&#46;multicall`, hid the call. The body-wide
-match on the first 2 KB is kept as well (a multicall's own calls are strings in
-its params).
+an XML-RPC body as WordPress's IXR_Message reads them (`det.xmlrpc_method_names`,
+since 2026-10-09): one linear pass replays IXR's parser events — every start and
+end tag clears the text buffer, comments and processing instructions leave it,
+CDATA and character / predefined entity references add to it, `</methodName>`
+takes `trim(buffer)`, and a `>` inside a quoted attribute does not end a tag.
+Every name is checked (IXR calls the last). So `system&#46;multicall`, CDATA,
+comments, `junk<x/>system.multicall` and padding all read as WordPress reads
+them; before, the rules looked for the words in the first 2 KB of the body. The
+body-wide match on the first 2 KB stays (a multicall's own calls are strings in
+its params). The edge reads the first `waf_body_max_len` bytes (32 KB) of a
+body: a call of 32 KB or more with **no** method name in them was padded past
+the edge, and is reported under 510 at `logonly` (`AUTH_WP_XMLRPC_HIDDEN_METHOD`,
+a burn-in before it blocks; every client writes the name in its first hundred
+bytes or so). Rule 512 still counts those POSTs.
 
 510-512 and the auth burst (501) skip Jetpack's own traffic
 (`is_known_legit_xmlrpc`): a Jetpack marker (`?for=jetpack`, a Jetpack /
@@ -1342,7 +1348,13 @@ Until then a Jetpack request from a new address is an ordinary XML-RPC client
 
 The burst counters (501, 502's repeated HEAD, 512) are one atomic
 `cfm_shdict.incr` per window; the get-then-set pair before it lost increments
-between workers.
+between workers. A window under 1 s counts as 1 s, and the first hit only opens
+the window (a threshold of 1 still needs a second hit), as before.
+
+This list of ranges is the one place they are hard-coded: the traffic-rules
+xmlrpc lockdown preset (`rules-model.js`) takes them as an operator input on
+purpose, since an allow rule there opens the whole path to them; here they only
+narrow an exemption that used to need no network at all.
 
 ## Per-vhost rule exclusions
 

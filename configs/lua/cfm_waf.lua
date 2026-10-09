@@ -1693,6 +1693,13 @@ function _M.check(ctx)
         local ttl = CFG.auth_xmlrpc_pingback_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
         if record("WAF_AUTH_BURST:" .. xtag, ttl, mode, RULE_IDS.rule_xmlrpc_pingback) then goto done end
       end
+    elseif xtag == "AUTH_WP_XMLRPC_HIDDEN_METHOD" then
+      -- A ≥32 KB call with no method name in the part the edge reads
+      -- (padding past waf_body_max_len). New (2026-10-09): reported under
+      -- 510 at logonly whatever 510's mode, for a burn-in before it blocks.
+      if rule_mode(CFG.rule_xmlrpc_multicall, "block") ~= "disabled" then
+        record("WAF_AUTH_BURST:" .. xtag, CFG.default_ttl_sec, "logonly", RULE_IDS.rule_xmlrpc_multicall)
+      end
     end
   end
 

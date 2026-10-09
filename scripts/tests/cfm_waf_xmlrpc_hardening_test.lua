@@ -47,8 +47,10 @@ local function newdict()
 end
 
 local CHROME = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+-- The pad goes inside <methodCall>: WordPress rejects anything else before
+-- its root tag.
 local function call(name, pad)
-  return '<?xml version="1.0"?>' .. (pad or "") .. "<methodCall><methodName>" .. name ..
+  return '<?xml version="1.0"?><methodCall>' .. (pad or "") .. "<methodName>" .. name ..
          "</methodName><params><param><value><string>admin</string></value></param></params></methodCall>"
 end
 local function run(body, t)
@@ -88,6 +90,15 @@ do
     call("<![CDATA[system.multicall]]>"), call("system<!-- -->.multicall"),
     call("  system.multicall\n"),
     call("wp.getUsersBlogs") .. "<methodName>system.multicall</methodName>",  -- the last one is the call
+    -- IXR clears its text buffer at every tag: the name is the text after the
+    -- last inner tag. A `>` in an attribute value does not end the tag.
+    call("x" .. ("a"):rep(3000) .. "<x/>system.multicall"),
+    call("<x>" .. ("j"):rep(3000) .. "</x>system.multicall"),
+    '<?xml version="1.0"?><methodCall><!--' .. ("p"):rep(3000) .. '--><methodName a=">">system.multicall</methodName></methodCall>',
+    call("<?pi > ?>system.multicall", "<!--" .. ("p"):rep(3000) .. "-->"),
+    call("&#13;&#9;&#10;&#xd;system.multicall", "<!--" .. ("p"):rep(3000) .. "-->"),
+    ("<methodName>decoy</methodName>"):rep(80):gsub("^", '<?xml version="1.0"?><methodCall>') .. "<methodName>system.multicall</methodName></methodCall>",
+    call("<x><![CDATA[<!--]]></x>system.multicall", "<!--" .. ("p"):rep(3000) .. "-->"),
   }) do
     local r = run(b)
     check(r.ids:find(",510,", 1, true), "510 sees " .. b:sub(1, 90):gsub("\n", "<LF>") .. "… (" .. show(r) .. ")")
@@ -100,10 +111,30 @@ do
   local r = run(call("wp.getUsersBlogs", "<!--" .. ("x"):rep(3000) .. "-->"))
   check(not r.ids:find(",510,", 1, true) and not r.ids:find(",511,", 1, true),
         "wp.getUsersBlogs past 2 KB: neither 510 nor 511 (" .. show(r) .. ")")
-  local names = det.xmlrpc_method_names(call("a&amp;b&#0;&#999999;&bogus;"))
-  check(names[1] == "a&b??&bogus;", "entities decoded, odd ones neutral, unknown ones kept: " .. tostring(names[1]))
-  local many = ("<methodName>x</methodName>"):rep(500)
-  check(#det.xmlrpc_method_names(many) <= 64, "method names are bounded")
+  local names = det.xmlrpc_method_names(call("a&amp;b&#999999;&bogus;"))
+  check(names[1] == "a&b?&bogus;", "entities decoded, non-ASCII neutral, unknown ones kept: " .. tostring(names[1]))
+  -- A name the edge cannot see (padded past the 32 KB it reads): reported
+  -- under 510 at logonly (burn-in), never blocked.
+  local hidden = '<?xml version="1.0"?><methodCall><!--' .. ("p"):rep(33000) .. "--><methodName>system.multicall</methodName></methodCall>"
+  local r2 = run(hidden:sub(1, 32768))
+  check(r2.ids:find(",510,", 1, true) and r2.action ~= "block" and r2.reason:find("HIDDEN_METHOD", 1, true),
+        "a call with no method name in the first 32 KB: 510 logonly (" .. show(r2) .. ")")
+  local big = call("metaWeblog.newMediaObject") .. ("<!-- " .. ("b"):rep(1000) .. " -->"):rep(40)
+  r2 = run(big:sub(1, 32768))
+  check(not r2.ids:find(",510,", 1, true), "a large call with its name up front: no 510 (" .. show(r2) .. ")")
+end
+
+-- ── The reader is linear: no pattern over attacker text backtracks ─────────
+do
+  for _, b in ipairs({ "<methodName>" .. ("<!--"):rep(8000), "<methodName>" .. ("<![cdata["):rep(3600),
+                       "<methodName>" .. ("<"):rep(32000), "<methodName>" .. ("<a"):rep(16000),
+                       "<methodName>a" .. (" "):rep(32000) .. "b</methodName>", ("<a b='>"):rep(4000),
+                       ("&#"):rep(16000), ("<x>"):rep(10000) }) do
+    local t0 = os.clock()
+    det.xmlrpc_method_names(b:sub(1, 32768))
+    local ms = (os.clock() - t0) * 1000
+    check(ms < 100, ("method-name reader on %q… took %.1f ms"):format(b:sub(1, 16), ms))
+  end
 end
 
 -- ── 512: an atomic per-IP window ────────────────────────────────────────────

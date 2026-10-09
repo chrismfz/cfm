@@ -1462,7 +1462,13 @@ end
 -- its first hit as it did with the old ts/cnt pair; never dict:incr with an
 -- init (cfm_shdict.lua). nil when the dict refuses (full, wrong type).
 local function window_count(shdict, key, win)
-  return (shd.incr(shdict, key, 1, win))
+  -- A window under 1 s would be no expiry (0) or a refused add (< 0).
+  if not win or win < 1 then win = 1 end
+  local cnt = shd.incr(shdict, key, 1, win)
+  -- The first hit only opens the window, as the old ts/cnt pair did: a
+  -- threshold of 1 still needs a second hit.
+  if cnt and cnt < 2 then return 0 end
+  return cnt
 end
 
 function _M.detect_auth_burst(ip, host, uri, method, shdict)
@@ -1471,7 +1477,7 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict)
   local tag = auth_endpoint_tag(uri, method)
   if not tag then return nil end
 
-    local win = tonumber(CFG.auth_window_sec or 20) or 20
+  local win = tonumber(CFG.auth_window_sec or 20) or 20
   local thr = tonumber(CFG.auth_burst_threshold or 8) or 8
 
   -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
@@ -1695,38 +1701,96 @@ end
 
 
 -- The method names an XML-RPC body calls, as WordPress's IXR_Message reads
--- them: the text of every <methodName> element (the last one is the call;
--- every one is returned), with comments dropped, CDATA unwrapped, character
--- and the predefined entity references decoded, inner tags dropped and the
--- ends trimmed. `system&#46;multicall`, `<![CDATA[system.multicall]]>` and
--- `system<!---->.multicall` all call system.multicall. The whole body is
--- read: the old 2 KB window let padding (a comment, blanks) push the method
--- name out of sight. Lowercased; at most XMLRPC_MAX_METHODS names.
-local XMLRPC_MAX_METHODS = 64
+-- them. IXR collects character data into one buffer that every start tag and
+-- every end tag clears; comments and processing instructions do not touch it;
+-- CDATA sections and character / predefined entity references add their
+-- text; at </methodName> the method is trim(buffer) (the last one is the
+-- call). This reader replays exactly those events over the body, in one
+-- linear pass (plain finds only: a pattern with `.-` over attacker text was
+-- seconds of CPU per 32 KB request), and returns every name. So
+-- `system&#46;multicall`, `<![CDATA[system.multicall]]>`,
+-- `system<!---->.multicall`, `junk<x/>system.multicall` (the text after the
+-- last inner tag) and `<methodName a=">">` all read as IXR reads them, and
+-- padding cannot push the name out of the 2 KB window the rule used to read.
+-- Names are lowercased (IXR is case-sensitive; reading more is the safe side)
+-- and at most XMLRPC_MAX_NAME bytes long. The edge reads the first
+-- waf_body_max_len bytes of a body (32 KB): a name past them is unseen.
+local XMLRPC_MAX_NAME = 256
+local XMLRPC_HIDDEN_LEN = 32768
 local XML_ENT = { amp = "&", lt = "<", gt = ">", quot = '"', apos = "'" }
-local function xml_char(cp)
-  if cp and cp >= 32 and cp < 127 then return string.char(cp) end
-  return "?"
+local function xml_text(t)
+  if not t:find("&", 1, true) then return t end
+  return (t:gsub("&(#?)([%w]+);", function(hash, v)
+    local cp
+    if hash == "" then return XML_ENT[v] end
+    if v:sub(1, 1) == "x" then cp = tonumber(v:sub(2), 16) else cp = tonumber(v) end
+    if cp and cp < 128 then return string.char(cp) end
+    return "?"
+  end))
+end
+local PHP_TRIM = { [32] = true, [9] = true, [10] = true, [13] = true, [0] = true, [11] = true }
+local function php_trim(t)
+  local i, j = 1, #t
+  while i <= j and PHP_TRIM[t:byte(i)] do i = i + 1 end
+  while j >= i and PHP_TRIM[t:byte(j)] do j = j - 1 end
+  return t:sub(i, j)
 end
 local function xmlrpc_method_names(body)
-  local names, lb = {}, lower(body)
-  local pos = 1
-  while #names < XMLRPC_MAX_METHODS do
-    local s = lb:find("<methodname", pos, true)
-    if not s then break end
-    local open_end = lb:find(">", s, true)
-    if not open_end then break end
-    local e = lb:find("</methodname", open_end, true)
-    local inner = lb:sub(open_end + 1, (e or #lb + 1) - 1)
-    inner = inner:gsub("<!%-%-.-%-%->", "")
-                 :gsub("<!%[cdata%[(.-)%]%]>", "%1")
-                 :gsub("<[^>]*>", "")
-                 :gsub("&#x(%x+);", function(h) return xml_char(tonumber(h, 16)) end)
-                 :gsub("&#(%d+);", function(d) return xml_char(tonumber(d)) end)
-                 :gsub("&(%a+);", function(n) return XML_ENT[n] end)
-    names[#names + 1] = inner:match("^[ \t\r\n]*(.-)[ \t\r\n]*$")
-    if not e then break end
-    pos = e + 12
+  local lb, names, buf = lower(body), {}, {}
+  local n, pos = #lb, 1
+  local function add_text(t)
+    if t ~= "" then buf[#buf + 1] = t end
+  end
+  local function close_name()
+    names[#names + 1] = php_trim(table.concat(buf)):sub(1, XMLRPC_MAX_NAME)
+  end
+  while pos <= n do
+    local lt = lb:find("<", pos, true)
+    add_text(xml_text(lb:sub(pos, (lt or n + 1) - 1)))
+    if not lt then break end
+    if lb:sub(lt, lt + 3) == "<!--" then
+      local e = lb:find("-->", lt + 4, true)
+      if not e then break end
+      pos = e + 3
+    elseif lb:sub(lt, lt + 8) == "<![cdata[" then
+      local e = lb:find("]]>", lt + 9, true)
+      if not e then break end
+      add_text(lb:sub(lt + 9, e - 1))
+      pos = e + 3
+    elseif lb:sub(lt + 1, lt + 1) == "?" then
+      local e = lb:find("?>", lt + 2, true)
+      if not e then break end
+      pos = e + 2
+    elseif lb:sub(lt + 1, lt + 1) == "!" then
+      local e = lb:find(">", lt + 2, true)
+      if not e then break end
+      pos = e + 1
+    else
+      -- A start or end tag: its end is the first `>` outside a quoted
+      -- attribute value.
+      local j, e = lt + 1, nil
+      while true do
+        local k = lb:find("[\"'>]", j)
+        if not k then break end
+        local c = lb:sub(k, k)
+        if c == ">" then e = k; break end
+        local q = lb:find(c, k + 1, true)
+        if not q then break end
+        j = q + 1
+      end
+      if not e then break end
+      local closing = lb:sub(lt + 1, lt + 1) == "/"
+      local name = lb:match(closing and "^</([^%s/>]+)" or "^<([^%s/>]+)", lt)
+      local self_closing = (not closing) and lb:sub(e - 1, e - 1) == "/"
+      if closing then
+        if name == "methodname" then close_name() end
+      elseif self_closing and name == "methodname" then
+        buf = {}
+        close_name()
+      end
+      buf = {}
+      pos = e + 1
+    end
   end
   return names
 end
@@ -1745,7 +1809,8 @@ function _M.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
   end
 
   local pingback = false
-  for _, m in ipairs(xmlrpc_method_names(body)) do
+  local names = xmlrpc_method_names(body)
+  for _, m in ipairs(names) do
     if m == "system.multicall" then return "AUTH_WP_XMLRPC_MULTICALL" end
     if m == "pingback.ping" then pingback = true end
   end
@@ -1754,6 +1819,11 @@ function _M.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
   local nb = normalize(cap(body, CFG.max_scan_len))
   if has(nb, "system.multicall") then return "AUTH_WP_XMLRPC_MULTICALL" end
   if pingback or has(nb, "pingback.ping") then return "AUTH_WP_XMLRPC_PINGBACK" end
+  -- The edge reads the first XMLRPC_HIDDEN_LEN (waf_body_max_len) bytes of
+  -- a body. A call whose name is not in them was padded there: the method
+  -- name is the first child of <methodCall>, and every client writes it in
+  -- the first hundred bytes or so. Reported, not blocked (cfm_waf.lua).
+  if #names == 0 and #body >= XMLRPC_HIDDEN_LEN then return "AUTH_WP_XMLRPC_HIDDEN_METHOD" end
 
   return nil
 end
@@ -1771,7 +1841,7 @@ function _M.detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, header
 
   if not has(uri, "/xmlrpc.php") then return nil end
 
-    local win = tonumber(CFG.xmlrpc_post_window_sec or 60) or 60
+  local win = tonumber(CFG.xmlrpc_post_window_sec or 60) or 60
   local thr = tonumber(CFG.xmlrpc_post_threshold or 6) or 6
 
   -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).

@@ -39,8 +39,10 @@ back-filled here — see the git/PR history for that period.
   the word "jetpack" in the body), all of which the client chooses; a marker
   now counts only from the networks Jetpack publishes (overridable as
   `xmlrpc_jetpack_nets` in `cfm_waf_config.lua`). The multicall and pingback
-  rules also read the called method as WordPress does, in the whole body:
-  padding the request past 2 KB, or writing `system&#46;multicall`, hid it.
+  rules also read the called method as WordPress does, in the first 32 KB of
+  the body that the edge reads: padding the request past 2 KB, writing
+  `system&#46;multicall`, or tricks with comments and inner tags hid it. A
+  call padded past those 32 KB is now reported (log-only for now).
   And the XML-RPC and login burst counters count atomically across nginx
   workers.
 - **Requests under `/.well-known/` are inspected unless they are a plain
