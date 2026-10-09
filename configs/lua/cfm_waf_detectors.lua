@@ -551,10 +551,10 @@ function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _
   end
   if found then return found end
 
-  -- And the pre-2026-10-08 multipart scan, kept beside the reader so the rule
-  -- never sees less than it did: it reads every `name=` parameter (never
-  -- `filename=`) without looking for a boundary, an over-read that still
-  -- catches a body the reader could not split.
+  -- And the pre-2026-10-08 multipart scan, kept beside the reader as an
+  -- over-read: it reads every `name=` parameter (never `filename=`) without
+  -- looking for a boundary, so it still catches a body the reader could not
+  -- split. Since 2026-10-09 it reads each name's head only (below).
   if method ~= "post" or not body or body == "" then return nil end
   if not has(lower(php_content_type(headers)), "multipart/form-data") then return nil end
   -- Gated as on main: this scan only matches a name whose normalize() holds
@@ -568,15 +568,22 @@ function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _
   -- every few bytes, and each name used to be read, and normalized, to the
   -- end of the run: quadratic, 0.5-1.3 s on a 32 KB body. Whether
   -- php_var_name(normalize(name)) is "pagename" depends only on the name's
-  -- head (leading spaces, the word in at most double %-encoding, then the
-  -- end, a NUL or `[...]`), so a name is read from its first non-space byte
-  -- for at most NAME_HEAD bytes, and the scan resumes after the bytes read,
-  -- so every byte is read once. What that changes: a `name=` inside another
-  -- name's head, which PHP reads as part of that name; a `pagename[...]` array
-  -- whose `]` lies past the head, which WordPress never reads as a page
-  -- path, and a name padded to the head with %-encoded spaces, which PHP
-  -- (it does not decode a multipart name) never reads as `pagename`. The value after the next blank line is found and
-  -- checked once per blank line, not once per name.
+  -- head: leading spaces, the word in at most double %-encoding, then the
+  -- end, a NUL or `[...]`. Neither `;` nor a space is in the word, and a
+  -- space after it becomes `_`. So a name is read from its first non-space
+  -- byte up to its first `;` or whitespace, for at most NAME_HEAD bytes, and
+  -- the scan resumes there: every byte is read about once, and a `;name=`
+  -- that starts a real parameter is never inside the bytes skipped (even
+  -- after a decoy `-name=` in another parameter's quoted value, read from
+  -- its closing quote). A name that goes on past the bytes read matches only
+  -- when its head settled it (a NUL or `[...]`), never on the bare word.
+  -- What the bounds change: a `name=` inside another name, which PHP reads
+  -- as part of that name (or after only whitespace, which PHP does not
+  -- split parameters on); a name padded past NAME_HEAD with %-encoded
+  -- spaces, which PHP (it does not decode a multipart name) never reads as
+  -- `pagename`; and a `pagename[...]` array whose `]` lies past the head or
+  -- after a `;`/space, which WordPress never reads as a page path. The value
+  -- after the next blank line is found and checked once per blank line.
   local hs, he, checked_he
   while true do
     local _, e = lb:find("[^%w_]name%s*=%s*", pos)
@@ -585,18 +592,29 @@ function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _
     local q = lb:sub(pos, pos)
     local name
     local ns = pos
+    -- `cont`: the name goes on past the bytes read (cut at NAME_HEAD, or a
+    -- quoted name stopped at a `;` or a space inside the quotes).
+    local cont
     if q == '"' or q == "'" then
       ns = lb:find("[^ ]", pos + 1) or (#lb + 1)
-      name = lb:sub(ns, ns + NAME_HEAD - 1):match(q == '"' and '^[^"\r\n]*' or "^[^'\r\n]*")
+      name = lb:sub(ns, ns + NAME_HEAD - 1):match(q == '"' and '^[^";%s]*' or "^[^';%s]*")
+      local nb = lb:sub(ns + #name, ns + #name)
+      cont = nb ~= "" and nb ~= q and nb ~= "\r" and nb ~= "\n"
     else
       name = lb:sub(pos, pos + NAME_HEAD - 1):match("^[^;%s]*")
+      cont = #name == NAME_HEAD and lb:find("^[^;%s]", pos + #name) ~= nil
     end
-    -- Resume after the bytes just read: a `name=` inside them is part of
-    -- this name to PHP (a parameter ends only at `;`, a space or a line).
-    pos = math.max(pos, ns + #name)
-    -- Without a `%` the name is its own normalize(): it must start with the word.
-    if (name:sub(1, 8) == "pagename" or name:find("%", 1, true))
-       and php_var_name(normalize(name)) == "pagename" then
+    if ns + #name > pos then pos = ns + #name end
+    -- The first byte decides most names: normalize() only decodes %XX and
+    -- lowercases, so a name that does not start `%` or `p` stays unmatched,
+    -- and one without a `%` is its own normalize().
+    local c1 = name:sub(1, 1)
+    local nn = (c1 == "%" or (c1 == "p" and (name:sub(1, 8) == "pagename" or name:find("%", 1, true))))
+               and normalize(name)
+    -- A name that goes on is `pagename` only if its head already settled
+    -- it (a NUL, or `[...]`); a head that reads exactly the word does not.
+    if nn and php_var_name(nn) == "pagename"
+       and not (cont and nn:gsub("^ +", "") == "pagename") then
       if not hs or hs < pos then hs, he = b:find("\r?\n\r?\n", pos) end
       if not hs then break end
       if he ~= checked_he then
@@ -1925,6 +1943,7 @@ _M.each_kv, _M.KV_DBG_KEY, _M.KV_CMD_KEY = each_kv, KV_DBG_KEY, KV_CMD_KEY
 -- previous `=`. The `&` lookup and its test are shared by every `=` before
 -- the same `&`.
 local function has_amp_amp_value(s)
+  if not s:find("&&", 1, true) then return false end  -- the pattern needs one
   local sep, amp, amp_ok
   for p = 1, #s do
     local c = s:byte(p)
@@ -2097,43 +2116,23 @@ function _M.detect_debug_toggles(args, _na)
   local a = _na or normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
 
-  local function arg_has_key(keys, values)
-    return each_kv(a, KV_DBG_KEY, false, function(key, val)
-      for _, wantk in ipairs(keys) do
-        if key == wantk then
-          if not values then
-            return true
-          end
-          for _, wantv in ipairs(values) do
-            if val == wantv then
-              return true
-            end
-          end
-        end
-      end
-    end)
-  end
-
-  if arg_has_key({"xdebug_session_start"}) then
-    return "DBG_XDEBUG"
-  end
-
-  if arg_has_key({"xdebug"}) then
-    return "DBG_XDEBUG_KEY"
-  end
-
-  if arg_has_key({"debug"}, {"1", "true"}) then
-    return "DBG_DEBUG"
-  end
-
-  if arg_has_key({"trace"}, {"1", "true"}) then
-    return "DBG_TRACE"
-  end
-
-  if arg_has_key({"stacktrace"}, {"1", "true"}) then
-    return "DBG_STACKTRACE"
-  end
-
+  -- One pass over the pairs; the tags keep their order of precedence (the
+  -- first-listed toggle wins wherever it sits in the query string).
+  local seen = {}
+  each_kv(a, KV_DBG_KEY, false, function(key, val)
+    if key == "xdebug_session_start" then seen[1] = true; return true end
+    if key == "xdebug" then seen[2] = true
+    elseif val == "1" or val == "true" then
+      if key == "debug" then seen[3] = true
+      elseif key == "trace" then seen[4] = true
+      elseif key == "stacktrace" then seen[5] = true end
+    end
+  end)
+  if seen[1] then return "DBG_XDEBUG" end
+  if seen[2] then return "DBG_XDEBUG_KEY" end
+  if seen[3] then return "DBG_DEBUG" end
+  if seen[4] then return "DBG_TRACE" end
+  if seen[5] then return "DBG_STACKTRACE" end
   return nil
 end
 

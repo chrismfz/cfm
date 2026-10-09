@@ -148,12 +148,22 @@ do
     'name="pagename\0x"', 'name="pagename[]"', 'name="pagename[a]"', 'name = "pagename"',
     'name="' .. ("%25%37%30"):rep(1) .. '%25%36%31%25%36%37%25%36%35%25%36%65%25%36%31%25%36%64%25%36%35%25%30%30"',
     'x=1; name="pagename"', 'filename="a"; name="pagename"',
+    -- A decoy `-name=` in another parameter's quoted value is read from its
+    -- closing quote; the real parameter after the `;` must still be seen.
+    'x="a-name=";name="pagename"', "x='-name=';name=pagename", 'x="a-name=" ; name="pagename"',
+    -- A name that goes on past a `;`/space or the head bound, settled early.
+    'name="pagename%00 x"', 'name="pagename[a] b"', 'name="' .. (" "):rep(150) .. 'pagename"',
   }) do
     check(scan(cd) == "BODY", "legacy scan still reads " .. show(cd))
   end
   for _, cd in ipairs({
     'name="pagenames"', 'filename="pagename"', 'name="xpagename"', 'name="page name"',
     'name="pagename[x"', 'name="a-name=pagename"', "name=a-name=pagename",
+    -- %-encoded spaces fill the head up to exactly `pagename`; the name goes
+    -- on (`pagenamex`), so it is not `pagename`.
+    'name="%20' .. ("%2520"):rep(17) .. 'pagenamex"',
+    'name="pagename x"', 'name="pagename;x"', "name='pagename x'", 'name="%70agename x"',
+    'name="' .. ("%2520"):rep(18) .. 'pagename"',
   }) do
     check(scan(cd) == nil, "legacy scan does not read " .. show(cd))
   end
@@ -194,6 +204,42 @@ do
     local ms = elapsed_ms(c[2])
     check(ms < LIMIT, ("%s took %.1f ms on 64 KB (limit %d)"):format(c[1], ms, LIMIT))
   end
+end
+
+-- ── detect_debug_toggles == the old five-pass version ──────────────────────
+do
+  local function old_debug(a)
+    if a == "" then return nil end
+    local function arg_has_key(keys, values)
+      for key, val in a:gmatch("([^&=?]+)=([^&]*)") do
+        for _, wantk in ipairs(keys) do
+          if key == wantk then
+            if not values then return true end
+            for _, wantv in ipairs(values) do if val == wantv then return true end end
+          end
+        end
+      end
+      return false
+    end
+    if arg_has_key({"xdebug_session_start"}) then return "DBG_XDEBUG" end
+    if arg_has_key({"xdebug"}) then return "DBG_XDEBUG_KEY" end
+    if arg_has_key({"debug"}, {"1", "true"}) then return "DBG_DEBUG" end
+    if arg_has_key({"trace"}, {"1", "true"}) then return "DBG_TRACE" end
+    if arg_has_key({"stacktrace"}, {"1", "true"}) then return "DBG_STACKTRACE" end
+    return nil
+  end
+  local alpha = { "xdebug_session_start", "xdebug", "debug", "trace", "stacktrace", "=", "&", "?",
+                  "1", "true", "0", "a", "x", "=1", "=true" }
+  local bad = 0
+  for _ = 1, N do
+    local q = rand_str(alpha, 10)
+    -- _na is the caller's normalized string; pass it so both read the same bytes.
+    if det.detect_debug_toggles(q, q) ~= old_debug(q) then
+      bad = bad + 1
+      if bad <= 5 then check(false, "detect_debug_toggles(" .. show(q) .. ") ~= old") end
+    end
+  end
+  check(bad == 0, "detect_debug_toggles differs from the old version in " .. bad .. " cases")
 end
 
 -- ── The detectors that use them still answer as before ─────────────────────
