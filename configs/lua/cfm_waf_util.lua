@@ -309,6 +309,16 @@ local function url_decode_once(s)
   return (s:gsub("%%(%x%x)", HEX_BYTE))
 end
 
+-- A JSON body's ASCII escapes decoded, as PHP's json_decode() reads them:
+-- `\u0027` is a quote to the app, so the scan surface must see one. Only
+-- \u0000-\u007F and `\/` (non-ASCII escapes cannot spell a payload the rules
+-- look for). A string with no backslash is returned as is.
+local function json_unescape_ascii(s)
+  if not s or not s:find("\\", 1, true) then return s end
+  s = s:gsub("\\[uU]00([0-7]%x)", function(h) return string.char(tonumber(h, 16)) end)
+  return (s:gsub("\\/", "/"))
+end
+
 local function normalize(s)
   if not s or s == "" then return "" end
   -- Fast path: a string with no "%" cannot contain any %xx escape, so both
@@ -456,11 +466,13 @@ local function body_budget(headers)
   local ct = header_string(raw)
   if ct == "" then return pick_or("other") end
   ct = string.lower(ct)
-  if string.find(ct, "application/json", 1, true)               then return pick_or("json") end
   if string.find(ct, "multipart/form-data", 1, true)            then return pick_or("multipart") end
   if string.find(ct, "application/x-www-form-urlencoded", 1, true) then return pick_or("urlencoded") end
-  if string.find(ct, "application/xml", 1, true)
-     or string.find(ct, "text/xml", 1, true)                    then return pick_or("xml") end
+  -- Any JSON / XML media type (application/vnd.api+json, text/json,
+  -- application/soap+xml …), as ct_is_inspectable reads them; they used to
+  -- get the 2 KB "other" budget, so a payload past it went unscanned.
+  if string.find(ct, "json", 1, true)                           then return pick_or("json") end
+  if string.find(ct, "xml", 1, true)                            then return pick_or("xml") end
   return pick_or("other")
 end
 
@@ -567,6 +579,7 @@ _M.is_php_hostile_asset_upload = is_php_hostile_asset_upload
 _M.score_obfuscation_blob             = score_obfuscation_blob
 _M.begins                             = begins
 _M.url_decode_once                    = url_decode_once
+_M.json_unescape_ascii                = json_unescape_ascii
 _M.normalize                          = normalize
 _M.strip_sql_comments                 = strip_sql_comments
 _M.scan_str                           = scan_str
