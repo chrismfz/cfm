@@ -1537,7 +1537,7 @@ Kill switch: `CFM_WAF_STATS_ENABLE=0` disables hit-rate counters + flushing.
   ├─ Step 2b  honour clearance_allow → refresh cookie, allow origin (return)
   ├─ Step 2.5 forced_challenge for marked locations
   ├─ Step 3   bridge decision (Go side: ip/vhost/rule, fingerprint floor)
-  └─ Step 4   allow (micro cache: never for a logonly hit)
+  └─ Step 4   allow (micro cache: never for a logonly hit or a WAF error)
 ```
 
 Key invariants:
@@ -1555,6 +1555,7 @@ Key invariants:
 | `allow_cookie` | No WAF hit, valid clearance, allowed |
 | `logonly` | WAF logonly hit, then allowed by the later steps (until 2026-10-09 a logonly hit went straight to origin, skipping Steps 2.5-3; a later block / challenge / throttle now reports its own value) |
 | `logonly_pc` | challenge converted to logonly under clearance, then allowed |
+| `waf_error` | the WAF raised under `CFM_FAIL_OPEN` (logged `waf_error`), the request went on uninspected and was allowed by the later steps |
 | `block` | Direct WAF block |
 | `block_pc` | challenge converted to block under clearance + high-risk reason |
 | `challenge` | WAF challenge, no clearance |

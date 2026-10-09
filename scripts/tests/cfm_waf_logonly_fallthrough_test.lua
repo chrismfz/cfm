@@ -61,7 +61,7 @@ function H.run(req)
   local rpcs = {}
   _G.ngx = {
     var = vars,
-    ctx = {},
+    ctx = (function() local c = {}; if req.ctx_init then req.ctx_init(c) end; return c end)(),
     header = headers_out,
     shared = { cfm_decisions = SH },
     ERR = 0, WARN = 1, INFO = 2, DEBUG = 3,
@@ -177,6 +177,22 @@ do
   r = H.run{ headers = LOG4, verdict = { ip_action = "allow", vhost_action = "allow", rule_action = "block", rule_id = "r1" } }
   check(r.ok and r.exited == 403, "logonly hit + traffic-rule block → 403 (" .. desc(r) .. ")")
 
+  r = H.run{ headers = LOG4, verdict = { ip_action = "allow", vhost_action = "allow", rule_action = "throttle", rule_id = "r2" } }
+  check(r.ok and r.exited == 429 and r.action == "throttle", "logonly hit + throttle rule → 429 (" .. desc(r) .. ")")
+
+  -- An uncleared resumed POST with a logonly hit on a challenged vhost ends
+  -- like a clean uncleared replay there: block_replayed (the loop guard).
+  local function resumed(ctx) ctx.cfm_resumed_post = true end
+  r = H.run{ headers = LOG4, method = "POST", ctx_init = resumed, verdict = { ip_action = "allow", vhost_action = "challenge" } }
+  local clean = H.run{ method = "POST", ctx_init = resumed, verdict = { ip_action = "allow", vhost_action = "challenge" } }
+  check(r.ok and r.action == "block_replayed" and clean.action == "block_replayed",
+        "uncleared resumed POST + logonly hit on a challenged vhost: block_replayed, as a clean one (" .. desc(r) .. ")")
+  -- A cleared one reaches the origin, as before.
+  r = H.run{ headers = LOG4, method = "POST", ctx_init = resumed, clearance = true,
+             vars = { cookie_cfm_clearance = "good" }, verdict = { ip_action = "allow", vhost_action = "challenge" } }
+  check(r.ok and r.action == "logonly" and r.upstream == "cfm_apache",
+        "cleared resumed POST + logonly hit: origin (" .. desc(r) .. ")")
+
   r = H.run{ headers = LOG4, fp_action = "challenge" }
   check(r.ok and r.action == "challenge", "logonly hit + fingerprint challenge floor → challenge (" .. desc(r) .. ")")
 
@@ -226,7 +242,8 @@ do
   end
   check(logged, "WAF error under fail_open is logged, with the rule's stack")
   r = H.run{ waf_fake = boom, fail_open = true }
-  check(r.ok and r.action == "allow" and r.upstream == "cfm_apache", "WAF error under fail_open, nothing else: allowed (" .. desc(r) .. ")")
+  check(r.ok and r.action == "waf_error" and r.upstream == "cfm_apache",
+        "WAF error under fail_open, nothing else: allowed, reported waf_error (" .. desc(r) .. ")")
   r = H.run{ waf_fake = boom, fail_open = false }
   check(r.ok and r.exited == 500, "WAF error under fail_closed: 500, as before (" .. desc(r) .. ")")
 end
@@ -240,7 +257,7 @@ do
         "logonly hit with micro armed: origin, not the micro cache (" .. desc(r) .. ")")
   local boom = { enabled = function() return true end, check = function() error("rule exploded") end }
   r = H.run{ micro = true, waf_fake = boom, fail_open = true }
-  check(r.ok and r.execd == nil and r.action == "allow" and r.upstream == "cfm_apache",
+  check(r.ok and r.execd == nil and r.action == "waf_error" and r.upstream == "cfm_apache",
         "WAF error with micro armed: origin, not the micro cache (" .. desc(r) .. ")")
 end
 do

@@ -64,7 +64,7 @@ check(same(also, { 612 }), "612 surfaces behind the XSS headline (got " .. show(
 do
   local f = assert(io.open("configs/lua/cfm.lua", "r"))
   local src = f:read("*a"); f:close()
-  check(src:find("local waf_ran, hit, reason, ttl, waf_action, waf_hits, waf_rule_id = xpcall(waf.check, debug.traceback,", 1, true) ~= nil,
+  check(src:find("local waf_ran, hit, reason, ttl, waf_action, waf_hits, waf_rule_id = xpcall(waf.check, debug.traceback, waf_ctx)", 1, true) ~= nil,
         "cfm.lua keeps the check()'s hits list (waf_hits)")
   check(src:find("waf.also_rule_ids(waf_hits, waf_rule_id)", 1, true) ~= nil,
         "cfm.lua computes also_rule_ids from the hits and the headline id")

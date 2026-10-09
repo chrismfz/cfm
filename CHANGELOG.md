@@ -44,8 +44,9 @@ back-filled here — see the git/PR history for that period.
   and such a request is never served from the micro cache. Separately, an
   error inside a WAF rule no longer skips those checks either: with the
   default `CFM_FAIL_OPEN` the request goes on without the WAF (logged as
-  `waf_error` with the rule's stack, and never micro-cached); with
-  `CFM_FAIL_OPEN=0` it still gets a 500.
+  `waf_error` with the rule's stack, reported as `X-CFM-Action: waf_error`
+  when allowed, and never micro-cached); with `CFM_FAIL_OPEN=0` it still
+  gets a 500.
 - **One crafted request could hold an edge worker for up to a second.** Five
   WAF checks re-scanned the same bytes over and over on purpose-built input:
   the WordPress page-template check (rule 10017) on a 32 KB form upload took
