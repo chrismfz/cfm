@@ -474,12 +474,13 @@ local function waf_should_read_body(uri, method)
 
   local ct = lower(ngx.var.http_content_type or "")
   local cl = tonumber(ngx.var.http_content_length or "")
-  -- A body with no Content-Length (chunked, or HTTP/2 without the header) is
-  -- read where the location buffers bodies anyway (the confs' `location /`
-  -- sets $cfm_body_buffered): it used to go unread on every route outside
-  -- the allowlist below, so a chunked POST to a clean-URL route reached the
-  -- app uninspected.
-  local buffered = ngx.var.cfm_body_buffered == "1"
+  -- A POST body with no Content-Length (chunked, or HTTP/2 without the
+  -- header) is read where the location buffers bodies anyway (the confs'
+  -- `location /` sets $cfm_body_buffered, the streaming locations clear it):
+  -- it used to go unread on every route outside the allowlist below, so a
+  -- chunked POST to a clean-URL route reached the app uninspected. POST only:
+  -- a chunked PUT / PATCH (sync and REST clients) keeps streaming, as before.
+  local buffered = method == "post" and ngx.var.cfm_body_buffered == "1"
 
   -- F07: PUT/PATCH were NOT body-inspected before this change (the gate was
   -- POST-only), so there is no legacy "read regardless of size" expectation for
@@ -510,8 +511,8 @@ local function waf_should_read_body(uri, method)
   if has(uri, "/wp-includes/")    then return true end
   if has(uri, "/wc-api/")         then return true end
   -- `uri` is the path ($uri carries no query string): WooCommerce's
-  -- `/?wc-ajax=…` endpoint is matched on the query.
-  if has(lower(ngx.var.args or ""), "wc-ajax=") then return true end
+  -- `/?wc-ajax=…` endpoint is matched on the query, by argument name.
+  if ("&" .. lower(ngx.var.args or "")):find("&wc-ajax=", 1, true) then return true end
   if has(uri, "/administrator/")  then return true end
   if has(uri, "/components/")     then return true end
   if has(uri, "/modules/")        then return true end
@@ -542,8 +543,8 @@ local function waf_should_read_body(uri, method)
   if has(uri, "/sites/default/")  then return true end
   if uri:match("/upload[s]?/.*%.php") then return true end
   if uri:match("/files/.*%.php")      then return true end
-  if uri:match("%.php/")         then return true end  -- PATH_INFO (/x.php/y)
-  if uri:match("%.phtml/")       then return true end
+  if uri:match("%.php[%?/].*")   then return true end
+  if uri:match("%.phtml[%?/].*") then return true end
   if uri:match("%.php$")         then return true end
   if uri:match("%.phtml$")       then return true end
   -- F07: the allowlist above is a fast-path for known-dynamic endpoints. Beyond
@@ -562,7 +563,16 @@ end
 local function get_req_body_for_waf(uri, method, max_len)
   if not waf_should_read_body(uri, method) then return "" end
   if ngx.ctx.waf_body ~= nil then return ngx.ctx.waf_body end
-  ngx.req.read_body()
+  -- pcall: lua-nginx-module raises on a body it cannot read here, e.g. an
+  -- HTTP/3 request without Content-Length ("http3 requests are not supported
+  -- without content-length header"; HTTP/2 too on older builds). Unguarded,
+  -- that took the request to request_failure, which under fail_open skips
+  -- every check after the WAF. The body then stays unread, as a stream.
+  local read_ok, read_err = pcall(ngx.req.read_body)
+  if not read_ok then
+    log_ev(ngx.WARN, "[cfm] waf_body_unread ip=", real_ip(), " uri=", uri, " err=", tostring(read_err))
+    ngx.ctx.waf_body = ""; return ""
+  end
   local data = ngx.req.get_body_data()
   if data and data ~= "" then
     local result = (#data > max_len) and string.sub(data, 1, max_len) or data

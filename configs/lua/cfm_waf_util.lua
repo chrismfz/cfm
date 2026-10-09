@@ -526,8 +526,10 @@ end
 --   • the Content-Type is not inspectable (binary/media/archive) — keep it
 --     streaming, don't waste a scan on opaque bytes; or
 --   • the Content-Length is absent/unmeasurable (chunked / Transfer-Encoding:
---     chunked) — we can't size-gate what we can't measure, so don't force-buffer
---     a potentially unbounded upload on a proxy_request_buffering=off location; or
+--     chunked) and `buffered` is not true — we can't size-gate what we can't
+--     measure, so don't force-buffer a potentially unbounded upload on a
+--     proxy_request_buffering=off location (where the location buffers it
+--     anyway, `buffered`, reading it costs nothing more); or
 --   • the declared length exceeds `cap` — reading only buys us the first ~32 KB
 --     of scan (F08 truncates), so buffering multi-MB/GB bodies has no upside.
 -- Pure (no upvalues beyond ct_is_inspectable / a default cap) so it is unit-

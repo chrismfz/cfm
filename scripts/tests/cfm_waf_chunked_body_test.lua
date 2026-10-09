@@ -29,8 +29,9 @@ local FORM = "application/x-www-form-urlencoded"
 local function post(t)
   local vars = { http_content_type = t.ct or FORM, http_content_length = t.cl }
   if t.buffered then vars.cfm_body_buffered = "1" end
-  return H.run{ method = "POST", uri = t.uri or "/checkout", args = t.args or "", body = t.body or SQLI,
-                headers = { ["content-type"] = t.ct or FORM, ["user-agent"] = "Mozilla/5.0" }, vars = vars }
+  return H.run{ method = t.method or "POST", uri = t.uri or "/checkout", args = t.args or "", body = t.body or SQLI,
+                headers = { ["content-type"] = t.ct or FORM, ["user-agent"] = "Mozilla/5.0" }, vars = vars,
+                read_body_error = t.read_body_error, verdict = t.verdict }
 end
 
 -- ── cfm.lua end to end ──────────────────────────────────────────────────────
@@ -51,10 +52,32 @@ do
   r = post{ buffered = true, body = "q=hello world&email=a@b.example" }
   check(r.ok and r.exited == nil and r.action == "allow", "chunked clean form on `location /`: allowed (" .. desc(r) .. ")")
 
-  -- wc-ajax rides in the query string: a large (over-cap) or chunked body there
-  -- is read via the allowlist, wherever the location.
+  -- POST only: a chunked PUT / PATCH keeps streaming, as before.
+  r = post{ buffered = true, method = "PUT" }
+  check(r.ok and r.exited == nil, "chunked PUT on `location /`: still unread (" .. desc(r) .. ")")
+
+  -- wc-ajax rides in the query string, matched by argument name: a large
+  -- (over-cap) or chunked body there is read via the allowlist.
   r = post{ uri = "/", args = "wc-ajax=checkout" }
   check(r.ok and r.exited == 403, "POST /?wc-ajax=… with no Content-Length: read via the allowlist (" .. desc(r) .. ")")
+  r = post{ uri = "/", args = "x=1&WC-AJAX=checkout" }
+  check(r.ok and r.exited == 403, "wc-ajax matched case-insensitively, after other args (" .. desc(r) .. ")")
+  r = post{ uri = "/", args = "zwc-ajax=1" }
+  check(r.ok and r.exited == nil, "a value or name merely containing wc-ajax= does not force a read (" .. desc(r) .. ")")
+
+  -- A body read_body cannot read (HTTP/3 without Content-Length) used to raise
+  -- out of the access phase into request_failure, which under fail_open skips
+  -- every check after the WAF. Now: the body stays unread, the rest still runs.
+  local H3 = "http3 requests are not supported without content-length header"
+  r = post{ buffered = true, read_body_error = H3, verdict = { ip_action = "block" } }
+  check(r.ok and r.exited == 403 and r.action == "block",
+        "HTTP/3 CL-less POST, read_body raises: the IP block still applies (" .. desc(r) .. ")")
+  r = post{ uri = "/wp-login.php", read_body_error = H3 }
+  check(r.ok and r.action == "allow" and r.upstream == "cfm_apache",
+        "HTTP/3 CL-less POST to an allowlisted path: no request_failure, allowed unread (" .. desc(r) .. ")")
+  local logged = false
+  for _, l in ipairs(r.logs) do if l:find("waf_body_unread", 1, true) then logged = true end end
+  check(logged, "the unread body is logged (waf_body_unread)")
 end
 
 -- ── waf_body_gate's `buffered` argument ─────────────────────────────────────
@@ -67,19 +90,47 @@ do
   check(g("application/json", 2000000, 1048576, true) == false, "over the cap stays skipped where buffered")
 end
 
--- ── Both edge confs mark `location /`, and only it ──────────────────────────
+-- ── The confs: `location /` marks itself, every streaming location clears ──
+-- Each `location … {` block is cut out by brace matching (comments dropped).
+local function location_blocks(src)
+  src = src:gsub("#[^\n]*", "")
+  local out = {}
+  local pos = 1
+  while true do
+    local s, e, head = src:find("\n%s*(location%s[^{]*){", pos)
+    if not s then break end
+    local depth, i = 1, e + 1
+    while depth > 0 and i <= #src do
+      local c = src:sub(i, i)
+      if c == "{" then depth = depth + 1 elseif c == "}" then depth = depth - 1 end
+      i = i + 1
+    end
+    out[#out + 1] = { head = head:gsub("%s+$", ""), body = src:sub(e + 1, i - 2) }
+    pos = e + 1
+  end
+  return out
+end
 for _, path in ipairs({ "configs/openresty.conf", "configs/angie.conf" }) do
   local f = assert(io.open(path, "r"))
   local src = f:read("*a"); f:close()
-  local roots, marks = 0, 0
-  for _ in src:gmatch("\n%s*location / {") do roots = roots + 1 end
-  for _ in src:gmatch('set %$cfm_body_buffered "1";') do marks = marks + 1 end
-  check(roots == 2 and marks == 2, path .. ": every `location /` (" .. roots .. ") sets $cfm_body_buffered (" .. marks .. ")")
-  for block in src:gmatch("location / {(.-)\n        }") do
-    check(block:find('set $cfm_body_buffered "1";', 1, true) ~= nil, path .. ": a `location /` lacks the marker")
-    check(not block:find("proxy_request_buffering%s+off"), path .. ": a marked location must buffer request bodies")
+  local roots = 0
+  for _, b in ipairs(location_blocks(src)) do
+    local sets_on  = b.body:find('set%s+%$cfm_body_buffered%s+"1"%s*;') ~= nil
+    local streams  = b.body:find("proxy_request_buffering%s+off") ~= nil
+    if b.head == "location /" then
+      roots = roots + 1
+      check(sets_on, path .. ": `location /` must set $cfm_body_buffered \"1\"")
+    end
+    if sets_on then
+      check(not streams, path .. ": " .. b.head .. " sets the marker but streams request bodies")
+    end
+    if streams then
+      check(b.body:find('set%s+%$cfm_body_buffered%s+""%s*;') ~= nil,
+            path .. ": " .. b.head .. " streams request bodies but does not clear $cfm_body_buffered")
+    end
   end
-  check(src:find("\n    proxy_request_buffering      on;", 1, true) ~= nil, path .. ": the http block buffers request bodies")
+  check(roots >= 1, path .. ": no `location /` found")
+  check(src:find("\n%s*proxy_request_buffering%s+on%s*;") ~= nil, path .. ": the http block buffers request bodies")
 end
 
 if fails > 0 then

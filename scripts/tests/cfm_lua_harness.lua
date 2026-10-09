@@ -58,7 +58,7 @@ function H.run(req)
       get_method = function() return req.method or "GET" end,
       start_time = function() return 999 end,
       get_headers = function() return req.headers or {} end,
-      read_body = function() end,
+      read_body = function() if req.read_body_error then error(req.read_body_error) end end,
       get_body_data = function() return req.body end,
       get_body_file = function() return nil end,
       get_uri_args = function() return {} end,
