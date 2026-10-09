@@ -8,13 +8,10 @@
 package.path = "configs/lua/?.lua;" .. package.path
 local det = require("cfm_waf_detectors")
 
--- detect_upload_filename needs `lower`, `has` and (for filename*=) the
--- shared %XX decoder from the util table.
-_G.ngx = _G.ngx or { log = function() end, ERR = 0, WARN = 1, INFO = 2 }
+-- detect_upload_filename only needs `lower` and `has` from the util table.
 det.init({}, {
   has   = function(h, n) return h and n and h:find(n, 1, true) ~= nil end,
   lower = string.lower,
-  url_decode_once = require("cfm_waf_util").url_decode_once,
 })
 
 local fails = 0

@@ -34,7 +34,9 @@ function _M.init(cfg, u)
   is_known_legit_php_upload_endpoint = u.is_known_legit_php_upload_endpoint
   score_obfuscation_blob             = u.score_obfuscation_blob
   begins                             = u.begins
-  url_decode_once                    = u.url_decode_once
+  -- A caller (a test) may pass a partial util: the %XX decoder needs no init,
+  -- so fall back to the module's own rather than leave the upvalue nil.
+  url_decode_once                    = u.url_decode_once or require("cfm_waf_util").url_decode_once
   normalize                          = u.normalize
   strip_sql_comments                 = u.strip_sql_comments
   scan_str                           = u.scan_str
