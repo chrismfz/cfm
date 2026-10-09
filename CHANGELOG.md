@@ -39,8 +39,12 @@ back-filled here — see the git/PR history for that period.
   path to its `index.php`, that made the whole site reachable without them
   under `/.well-known/x?…` or a POST, and a shell dropped in `.well-known/`
   too. Only a GET or HEAD with no query string and no script extension is
-  exempted now: Let's Encrypt / AutoSSL and CA validation, `security.txt`,
-  MTA-STS and app-association files keep working. And a request such as
+  exempted now (and CalDAV / CardDAV discovery): Let's Encrypt / AutoSSL and
+  CA validation, `security.txt`, MTA-STS, app-association files and
+  calendar/contacts setup keep working. A `/.well-known/webfinger?…` lookup
+  is now challenged while its site is. The traffic-scoring side follows the
+  same rule, so a scanner probing `/.well-known/x.php` is scored as well. And
+  a request such as
   `/xmlrpc.php/x.css` (a PHP script with a static-looking tail) no longer
   reuses a visitor's cached allow for static assets, so the traffic rules and
   throttles that apply to `xmlrpc.php` run for it.

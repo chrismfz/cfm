@@ -35,6 +35,7 @@ do
     { uri = "/.well-known/security.txt", method = "HEAD" },
     { uri = "/.well-known/mta-sts.txt" },
     { uri = "/.WELL-KNOWN/apple-app-site-association" },
+    { uri = "/.well-known/caldav", method = "PROPFIND" },
   }) do
     local r = H.run{ uri = t.uri, method = t.method }
     check(bypassed(r), t.uri .. " (" .. (t.method or "GET") .. ") still bypasses: " .. desc(r))
@@ -58,10 +59,31 @@ do
   check(r.exited == 403 or r.action == "block", "a SQLi under /.well-known/ is blocked: " .. desc(r))
 end
 
+-- ── well_known_plain against the fixture the Go engine runs too ─────────────
+do
+  local src = io.open("configs/lua/cfm.lua"):read("*a")
+  local chunk = src:match("(local SCRIPT_EXT = %b{}.-\nlocal function well_known_plain%(m, path, args%).-\nend\n)")
+  check(chunk ~= nil, "well_known_plain found in cfm.lua")
+  if chunk then
+    local plain = assert(loadstring(chunk .. "\nreturn well_known_plain"))()
+    local n = 0
+    for line in io.lines("scripts/tests/fixtures/wellknown_exempt.txt") do
+      local m, path, q, want = line:match("^(%u+)%s+(%S+)%s+(%S+)%s+([01])%s*$")
+      if m then
+        n = n + 1
+        local got = plain(m, path, q ~= "-" and q or "")
+        check(got == (want == "1"), ("well_known_plain(%s %s ?%s) = %s, want %s"):format(m, path, q, tostring(got), want))
+      end
+    end
+    check(n >= 25, "fixture read (" .. n .. " cases)")
+  end
+end
+
 -- ── The static decision key: never for a script behind PATH_INFO ─────────────
 do
   local src = io.open("configs/lua/cfm.lua"):read("*a")
   local chunk = src:match("(local STATIC_ASSET_EXT = %b{}.-\nlocal function is_static_asset_uri%(uri%).-\nend\n)")
+  -- (the chunk spans SCRIPT_EXT, path_has_script_ext and well_known_plain too)
   check(chunk ~= nil, "is_static_asset_uri found in cfm.lua")
   if chunk then
     local is_static = assert(loadstring(chunk .. "\nreturn is_static_asset_uri"))()
@@ -69,7 +91,7 @@ do
       check(is_static(u), u .. " is a static asset")
     end
     for _, u in ipairs({ "/xmlrpc.php/x.css", "/forum/ucp.php/a.svg", "/x.PHP5/y.png", "/a.phtml/b.js",
-                         "/cgi-bin/x.cgi/y.css", "/up/x.php.svg", "/x.php" }) do
+                         "/cgi-bin/x.cgi/y.css", "/up/x.php.svg", "/x.php", "/a.css.php/x.png" }) do
       check(not is_static(u), u .. " is not a static asset")
     end
 
@@ -90,6 +112,19 @@ do
     check(k1:sub(1, 3) == "ds|", "a static asset coalesces: " .. k1)
     check(k2 ~= k1 and k2:sub(1, 2) == "d|", "/xmlrpc.php/x.css gets its own per-URL key: " .. k2)
     _G.ngx = saved
+  end
+end
+
+-- ── Site Cache: the prefix that now reaches Step 4 is never micro-cached ─────
+do
+  local src = io.open("configs/lua/cfm_cache.lua"):read("*a")
+  local chunk = src:match("(local MICRO_PATH_PREFIX = %b{}.-\nlocal function micro_path_blocked%(uri%).-\nend\n)")
+  check(chunk ~= nil, "micro_path_blocked found in cfm_cache.lua")
+  if chunk then
+    local blocked = assert(loadstring(chunk .. "\nreturn micro_path_blocked"))()
+    check(blocked("/.well-known/webfinger"), "/.well-known/webfinger is never micro-cached")
+    check(blocked("/.well-known/x"), "/.well-known/x is never micro-cached")
+    check(not blocked("/blog/post"), "an ordinary page still can be")
   end
 end
 

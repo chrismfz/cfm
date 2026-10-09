@@ -1513,8 +1513,8 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	// pollutes per-IP state (and, under the retired per-IP challenge-DNAT,
 	// redirected the validator outright and broke SSL issuance — the incident
 	// that earned this rule). Decision-side mirror of the in-path carve-out
-	// (cfm.lua Step 0a1).
-	if isWellKnownChallengeExempt(rec.URI) {
+	// (cfm.lua Step 0a1): a plain fetch only, as the edge exempts.
+	if isWellKnownChallengeExempt(rec.Method, rec.URI) {
 		return
 	}
 	// Retain the raw request in the access ring for edge_access_tail triage.
@@ -3838,22 +3838,29 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 	return false
 }
 
-// isWellKnownChallengeExempt reports whether a request path is in the reserved
-// /.well-known/ namespace (RFC 8615) and must NOT feed the log-driven per-IP
-// challenge heuristics.
+// isWellKnownChallengeExempt reports whether a request is a plain fetch in the
+// reserved /.well-known/ namespace (RFC 8615) that must NOT feed the
+// log-driven per-IP challenge heuristics.
 //
-// This mirrors the in-path serving carve-out in cfm.lua (Step 0a1) on the
-// decision side. A CA's ACME HTTP-01 / DCV validator legitimately hits many
-// vhosts and many one-time token paths (e.g. Let's Encrypt / AutoSSL validating
-// a whole shared server), which otherwise trips the scanner heuristics —
-// CHALLENGE_UNIQHOSTS_IP / CHALLENGE_UNIQPATHS_IP — and challenge-flags the
-// validator IP. The in-path carve-out still serves the token, but the flag
-// pollutes per-IP state — and under the RETIRED per-IP challenge-DNAT the
-// flagged IP was redirected before cfm.lua ran, so ACME validation failed
-// (403 urn:ietf:params:acme:error:unauthorized) and certificate issuance
-// broke outright: the incident that earned this both-sides rule.
+// This mirrors the in-path serving carve-out in cfm.lua (Step 0a1,
+// well_known_plain) on the decision side. A CA's ACME HTTP-01 / DCV validator
+// legitimately hits many vhosts and many one-time token paths (e.g. Let's
+// Encrypt / AutoSSL validating a whole shared server), which otherwise trips
+// the scanner heuristics — CHALLENGE_UNIQHOSTS_IP / CHALLENGE_UNIQPATHS_IP —
+// and challenge-flags the validator IP. The in-path carve-out still serves the
+// token, but the flag pollutes per-IP state — and under the RETIRED per-IP
+// challenge-DNAT the flagged IP was redirected before cfm.lua ran, so ACME
+// validation failed (403 urn:ietf:params:acme:error:unauthorized) and
+// certificate issuance broke outright: the incident that earned this
+// both-sides rule.
 //
-// Whole prefix, to match the in-path carve-out. Query string is stripped first.
+// The same test as the edge (since 2026-10-09): GET / HEAD with no query and
+// no script extension in the path, or CalDAV / CardDAV discovery (GET / HEAD /
+// PROPFIND / OPTIONS on the two stubs). A POST, a query or a `.php` under the
+// prefix — a scanner probing `/.well-known/x.php`, an app reached through it —
+// is inspected at the edge and scored here. Both sides run
+// scripts/tests/fixtures/wellknown_exempt.txt.
+//
 // Unlike the in-path guard — which runs on nginx-decoded, dot-segment-normalized
 // input — this sees the RAW request target (rec.URI is lowercased but not
 // percent-decoded). So we refuse to exempt any /.well-known/ path containing a
@@ -3862,11 +3869,14 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 // `/.well-known/%2e%2e/x` would otherwise slip past a literal `..` check yet
 // resolve to the real target on a backend that collapses it — blinding the
 // behavioural challenge layer. Anything encoded/traversing is scored normally.
-func isWellKnownChallengeExempt(p string) bool {
+func isWellKnownChallengeExempt(method, p string) bool {
 	if p == "" {
 		return false
 	}
 	if i := strings.IndexByte(p, '?'); i >= 0 {
+		if i < len(p)-1 {
+			return false // a query string
+		}
 		p = p[:i]
 	}
 	lp := strings.ToLower(p)
@@ -3876,7 +3886,66 @@ func isWellKnownChallengeExempt(p string) bool {
 	if strings.Contains(lp, "..") || strings.Contains(lp, "%") {
 		return false
 	}
-	return true
+	m := strings.ToUpper(method)
+	switch strings.TrimSuffix(lp, "/") {
+	case "/.well-known/caldav", "/.well-known/carddav":
+		if m == "GET" || m == "HEAD" || m == "PROPFIND" || m == "OPTIONS" {
+			return true
+		}
+	}
+	if m != "GET" && m != "HEAD" {
+		return false
+	}
+	return !pathHasScriptExt(lp)
+}
+
+// scriptExt mirrors cfm.lua's SCRIPT_EXT: extensions a path segment can carry
+// and still run as a script (PATH_INFO, or a multi-extension handler).
+var scriptExt = map[string]bool{
+	"php": true, "phtml": true, "pht": true, "phar": true, "phps": true,
+	"cgi": true, "pl": true, "py": true, "asp": true, "aspx": true, "jsp": true, "shtml": true,
+}
+
+func isScriptExt(ext string) bool {
+	if scriptExt[ext] {
+		return true
+	}
+	if len(ext) > 3 && ext[:3] == "php" {
+		for _, c := range ext[3:] {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// pathHasScriptExt mirrors cfm.lua's path_has_script_ext on a lowercased
+// path: an extension (a run of ASCII letters and digits after a dot) followed
+// by `.` or `/`, or at the end, that names a script.
+func pathHasScriptExt(lp string) bool {
+	isAlnum := func(c byte) bool {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	}
+	for i := 0; i < len(lp); i++ {
+		if lp[i] != '.' {
+			continue
+		}
+		j := i + 1
+		for j < len(lp) && isAlnum(lp[j]) {
+			j++
+		}
+		if j == i+1 {
+			continue
+		}
+		if j == len(lp) || lp[j] == '.' || lp[j] == '/' {
+			if isScriptExt(lp[i+1 : j]) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isStaticAssetPath returns true for common static asset URLs that should not

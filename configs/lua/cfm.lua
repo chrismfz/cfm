@@ -901,18 +901,46 @@ local STATIC_ASSET_EXT = {
 
 -- Script extensions a path segment can carry and still run as a script with
 -- the rest of the path as PATH_INFO (`/xmlrpc.php/x.css`), or through a
--- multi-extension handler (`x.php.css` under Apache's AddHandler).
+-- multi-extension handler (`x.php.css` under Apache's AddHandler). Mirrored
+-- by scriptExt in internal/webdetector/engine.go (the /.well-known/ scoring
+-- exemption); both read scripts/tests/fixtures/wellknown_exempt.txt. The
+-- static-asset nginx location and cfm_cache.lua's script_ext keep their own,
+-- PHP-only lists on purpose.
 local SCRIPT_EXT = {
   php = true, phtml = true, pht = true, phar = true, phps = true,
   cgi = true, pl = true, py = true, asp = true, aspx = true, jsp = true, shtml = true,
 }
+-- An extension (a run of letters and digits after a dot) followed by `.`, `/`
+-- or the end that names a script. Each dot is tried: the `.` that ends one
+-- extension can start the next (`/a.css.php/x.png`).
 local function path_has_script_ext(path)
-  local lp = path:lower()
-  for ext in lp:gmatch("%.(%w+)[%./]") do
-    if SCRIPT_EXT[ext] or ext:match("^php%d+$") then return true end
+  local lp, i = path:lower(), 1
+  while true do
+    local _, e, ext = lp:find("%.(%w+)", i)
+    if not e then return false end
+    local nx = lp:sub(e + 1, e + 1)
+    if (nx == "" or nx == "." or nx == "/") and (SCRIPT_EXT[ext] or ext:match("^php%d+$")) then
+      return true
+    end
+    i = e + 1
   end
-  local last = lp:match("%.(%w+)$")
-  return last ~= nil and (SCRIPT_EXT[last] or last:match("^php%d+$")) ~= nil
+end
+
+-- Step 0a1's test: a plain fetch under /.well-known/ (method as nginx gives
+-- it, path decoded, args the raw query). GET / HEAD with no query and no
+-- script extension; and CalDAV / CardDAV discovery (RFC 6764: PROPFIND /
+-- OPTIONS on the two redirect stubs), which clients send with no query.
+local function well_known_plain(m, path, args)
+  if args and args ~= "" then return false end
+  local lp = path:lower()
+  if lp:sub(1, 13) ~= "/.well-known/" then return false end
+  local stub = lp:match("^/%.well%-known/(c[a-z]+dav)/?$")
+  if (stub == "caldav" or stub == "carddav")
+     and (m == "GET" or m == "HEAD" or m == "PROPFIND" or m == "OPTIONS") then
+    return true
+  end
+  if m ~= "GET" and m ~= "HEAD" then return false end
+  return not path_has_script_ext(lp)
 end
 
 local function is_static_asset_uri(uri)
@@ -1308,21 +1336,22 @@ end
 -- still reaches the normal origin (this is a WAF-skip, not an auth bypass);
 -- and the same pattern is already used for static-asset classes.
 --
--- Only a plain fetch is exempted (since 2026-10-09): GET / HEAD, no query
--- string, no script extension in the path. That is every validator and
--- metadata fetch above. A front-controller app (WordPress routes any missing
--- path to index.php) was otherwise reachable whole under
--- `/.well-known/x?rest_route=…` or a POST, with no WAF, no IP block and no
--- challenge; a shell dropped in `.well-known/` (a common spot) was too. Those
--- now take the normal pipeline. `/.well-known/webfinger?resource=…` does as
--- well, so it can be challenged while its vhost is.
+-- Only a plain fetch is exempted (since 2026-10-09, well_known_plain): GET /
+-- HEAD, no query string, no script extension in the path, plus CalDAV /
+-- CardDAV discovery. That is every validator and metadata fetch above. A
+-- front-controller app (WordPress routes any missing path to index.php) was
+-- otherwise reachable whole under `/.well-known/x?rest_route=…` or a POST,
+-- with no WAF, no IP block and no challenge; a shell dropped in
+-- `.well-known/` (a common spot) was too, when commanded through its query or
+-- a POST. Those now take the normal pipeline. `/.well-known/webfinger?…`
+-- does as well, so it can be challenged while its vhost is. Residual: a shell
+-- under the prefix commanded by a header or cookie on a plain GET, or run by a
+-- handler the list does not name (an `.htaccess` AddHandler for `.txt`).
+-- The panel ports (cfm_panel.lua) still exempt the whole prefix: cpsrvd is
+-- not a front controller. The log-driven engine mirrors this test
+-- (isWellKnownChallengeExempt).
 do
-  local wk_method = ngx.req.get_method()
-  local wk_args = ngx.var.args
-  if lower(uri):find("/.well-known/", 1, true) == 1
-     and (wk_method == "GET" or wk_method == "HEAD")
-     and (wk_args == nil or wk_args == "")
-     and not path_has_script_ext(uri) then
+  if well_known_plain(method, uri, ngx.var.args) then
     ngx.header["X-CFM-Bypass"] = "well-known"
     log_route(ngx.INFO, "bypass=well-known host=" .. host .. " uri=" .. uri)
     ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
