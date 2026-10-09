@@ -33,6 +33,23 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
+- **A repeated request header no longer switches the WAF off for that
+  request, or loses its ban.** Two `Content-Type` headers crashed the
+  polyglot-upload check (rule 412); the edge fails open, so every later WAF
+  rule (the PHP dropper scanners, TranslatePress 10018-10020, path traversal
+  101/103) and the rest of the edge's checks (IP blocks, challenges, traffic
+  rules) were skipped and the request reached the site. The check now reads
+  the Content-Type and its boundary the way PHP does (a second header, a
+  boundary cut at a comma, an empty boundary, a media type that is not
+  multipart first), so it can no longer be pointed at a different boundary
+  from the one the site's upload parser uses. Separately, a WAF hit whose
+  request repeated `User-Agent`, `Referer` or `Content-Type` was reported to
+  the daemon in a form it refused, so the hit was dropped whole: no ban, no
+  `cfm.waf.log` line, no history row; that report now carries each header's
+  first value. The xmlrpc / login burst counters keep counting per IP across
+  all of a server's sites, as before; that is now explicit in the code, and
+  a new test fails any module under `configs/lua/` that reads an undeclared
+  global.
 - **WAF rules 10018/10019/10020 block the TranslatePress account takeover
   (CVE-2026-19632, TranslatePress 3.3.1 and older; fixed in 3.3.2).** An
   attacker asks for the admin's password reset in translation preview, so the

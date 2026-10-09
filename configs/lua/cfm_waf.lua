@@ -1596,10 +1596,15 @@ function _M.check(ctx)
   end
 
   -- ── 25) WP-specific auth checks ──────────────────────────────────────────
+  -- The three burst detectors below take a host for their counter key and
+  -- are passed nil, so they count per IP ACROSS vhosts (key host "-"). That
+  -- is how the fleet's thresholds were tuned: these calls used to read an
+  -- undeclared global `host`, always nil, and a per-vhost key would let a
+  -- spray split across a server's vhosts stay under every threshold.
   do
     local mode = rule_mode(CFG.rule_auth_wp_checks, "challenge")
     if mode ~= "disabled" then
-      local tag = det.detect_wp_login_probe(uri, method, headers, ip, host, shdict)
+      local tag = det.detect_wp_login_probe(uri, method, headers, ip, nil, shdict)
       if tag == "AUTH_WP_LOGIN_HEAD" then
         local ttl = CFG.auth_wp_login_head_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
         if record("WAF_AUTH_BURST:" .. tag, ttl, mode, RULE_IDS.rule_auth_wp_checks) then goto done end
@@ -1638,7 +1643,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "block")
     if mode ~= "disabled" then
-      local tag = det.detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, headers, body)
+      local tag = det.detect_xmlrpc_post_burst(ip, nil, uri, method, shdict, args, headers, body)
       if tag then
         local ttl = CFG.xmlrpc_post_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
         if record("WAF_AUTH_BURST:" .. tag, ttl, mode, RULE_IDS.rule_xmlrpc_post_burst) then goto done end
@@ -1655,7 +1660,7 @@ function _M.check(ctx)
       if not (peer ~= "" and ip ~= "" and ip == peer) then
         local tag = nil
         if not det.is_known_legit_xmlrpc(uri, args, headers, body) then
-          tag = det.detect_auth_burst(ip, host, uri, method, shdict)
+          tag = det.detect_auth_burst(ip, nil, uri, method, shdict)
         end
         if tag then
           local ttl = CFG.auth_ttl_sec or CFG.default_ttl_sec

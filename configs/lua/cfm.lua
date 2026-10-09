@@ -355,6 +355,20 @@ local function log_ev(level, ...)
 end
 local function esc(s) return ngx.escape_uri(s or "") end
 
+-- A request header for the /nginx/ip push, as ONE string. A repeated header
+-- arrives from ngx.req.get_headers() as a table, which cjson encodes as a
+-- JSON array, and the daemon's string field then fails the decode of the
+-- whole push: no ban, no cfm.waf.log record, no history, no v2 mark. The
+-- first non-empty value (cfm_waf_util.header_string; the push runs only when
+-- cfm_waf loaded, and it requires that module); else absent.
+local function push_header(v)
+  if type(v) == "string" then return v end
+  if not wutil_ok then return nil end
+  local s = wutil.header_string(v)
+  if s == "" then return nil end
+  return s
+end
+
 local function with_query_arg(u, k, v)
   u = tostring(u or "/")
   local sep = u:find("?", 1, true) and "&" or "?"
@@ -1543,9 +1557,9 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
             ip = ip, action = waf_action, ttl_sec = ttl or 600,
             reason = reason, host = p_host, uri = p_uri, method = p_meth,
             waf_rule_id  = waf_rule_id,
-            ua           = req_headers["user-agent"],
-            referer      = req_headers["referer"],
-            content_type = req_headers["content-type"],
+            ua           = push_header(req_headers["user-agent"]),
+            referer      = push_header(req_headers["referer"]),
+            content_type = push_header(req_headers["content-type"]),
             fingerprint  = tls_fp,
           }
           -- The OTHER rules that matched this request, behind the headline:

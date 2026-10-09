@@ -1395,8 +1395,8 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict)
   local win = tonumber(CFG.auth_window_sec or 20) or 20
   local thr = tonumber(CFG.auth_burst_threshold or 8) or 8
 
-  local host_key = lower(host or "-")
-  if host_key == "" then host_key = "-" end
+  -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
+  local host_key = "-"
 
   local kts  = "auth|ts|"  .. ip .. "|" .. host_key .. "|" .. tag
   local kcnt = "auth|cnt|" .. ip .. "|" .. host_key .. "|" .. tag
@@ -1442,8 +1442,8 @@ function _M.detect_wp_login_probe(uri, method, headers, ip, host, shdict)
       local now = ngx.now()
       local win = tonumber(CFG.auth_wp_login_head_window_sec or 20) or 20
       local thr = tonumber(CFG.auth_wp_login_head_threshold or 3) or 3
-      local host_key = lower(host or "-")
-      if host_key == "" then host_key = "-" end
+      -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
+      local host_key = "-"
 
       local kts  = "authwph|ts|"  .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD"
       local kcnt = "authwph|cnt|" .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD"
@@ -1626,8 +1626,8 @@ function _M.detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, header
   local win = tonumber(CFG.xmlrpc_post_window_sec or 60) or 60
   local thr = tonumber(CFG.xmlrpc_post_threshold or 6) or 6
 
-  local host_key = lower(host or "-")
-  if host_key == "" then host_key = "-" end
+  -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
+  local host_key = "-"
 
   local kts  = "xmlrpc|ts|"  .. ip .. "|" .. host_key
   local kcnt = "xmlrpc|cnt|" .. ip .. "|" .. host_key
@@ -2635,8 +2635,9 @@ function _M.detect_content_type_anomaly(headers)
     -- RFC 2045 allows the parameter value to be a quoted-string. cPanel
     -- webmail (and other server-internal multipart producers) emit
     -- `boundary="----WebKitFormBoundary..."` with literal surrounding
-    -- quotes. Strip them before validating, mirroring the helper at
-    -- detect_polyglot_upload.
+    -- quotes. Strip them before validating. (A coarser read than
+    -- php_mp_boundary, which rules 412 and the field reader use: it only
+    -- feeds this anomaly check.)
     if bval then
       bval = bval:gsub('^"', ''):gsub('"$', '')
     end
@@ -5091,16 +5092,20 @@ function _M.detect_polyglot_upload(body, headers)
   if not body or body == "" then return nil end
 
   headers = headers or {}
-  -- Boundary tokens are case-sensitive (RFC 2046 §5.1.1) — extract from the
-  -- original header value, not a lowered copy. Only the multipart/form-data
-  -- check itself is case-insensitive.
-  local ct_raw = headers["content-type"] or headers["Content-Type"] or ""
-  if not has(lower(ct_raw), "multipart/form-data") then return nil end
+  -- The Content-Type, media type and boundary PHP uses, read by the same
+  -- helpers as each_request_field: php_content_type (a repeated header
+  -- joined with ", ", as Apache hands it over), php_media_type, and
+  -- php_mp_boundary (the run rfc1867.c splits on, cut at "," / ";", or the
+  -- quoted value; empty is valid, parts then split on bare `--` lines). The
+  -- raw value used to be read here: a repeated header is a table, :match on
+  -- it raised and check() failed open with every later rule unrun, and a
+  -- boundary PHP reads differently (`XB,y`, a second header, `"X B"`, an
+  -- empty one) left this walk looking for a separator PHP never used.
+  local ct_raw = php_content_type(headers)
+  if php_media_type(ct_raw) ~= "multipart/form-data" then return nil end
 
-  local boundary = ct_raw:match("[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]=([^;%s]+)")
+  local boundary = php_mp_boundary(ct_raw)
   if not boundary then return nil end
-  boundary = boundary:gsub('^"', ''):gsub('"$', '')
-  if boundary == "" then return nil end
 
   local sep = "--" .. boundary
 
