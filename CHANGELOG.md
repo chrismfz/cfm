@@ -257,8 +257,8 @@ back-filled here — see the git/PR history for that period.
   every request to those pages, so an OpenCart or Joomla admin clicking
   through eight admin pages in 20 seconds got a challenge. It now counts only
   a POST that submits a password (8 in 20 s per IP, a JSON login too), not
-  page loads or admin navigation; a login padded past the 32 KB the WAF reads
-  still counts. For direct visitors it only logs for now (burn-in); behind
+  page loads, admin navigation or admin uploads; a login padded past the
+  32 KB the WAF reads still counts. For direct visitors it only logs for now (burn-in); behind
   Cloudflare it challenges as before. cPanel / WHM / webmail are unchanged:
   cPanel's own login-failure detector bans there.
 - **Two upload rules no longer ban people for innocent file names and text.**

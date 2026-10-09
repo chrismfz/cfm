@@ -1473,8 +1473,8 @@ end
 
 -- The password field names a login form posts, as PHP registers them
 -- (php_var_name): WordPress `pwd`, Drupal `pass`, Joomla `passwd`, OpenCart
--- and most custom forms `password`, Magento `login[password]` (registered as
--- `login`).
+-- and most custom forms `password`; plus `login`, Magento's login[username] +
+-- login[password] array, read only on its admin route.
 -- waf_body_max_len as cfm.lua reads it (cfm_cfg.lua), like XMLRPC_HIDDEN_LEN.
 local AUTH_BODY_CUT = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "") or 32768
 local AUTH_PASSWORD_FIELDS = { pwd = true, pass = true, passwd = true, password = true, login = true }
@@ -1502,18 +1502,36 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers
   -- POST) must not pay a field parse here.
   local magento = not tag and (luri:find("/admin/", 1, true) or luri:find("/admin$"))
   if not tag and not magento then return nil end
+  -- XML-RPC is 510-512's (they read its payload, Jetpack carve-out included).
+  if tag == "AUTH_WP_XMLRPC" then return nil end
 
-  -- The edge reads the first waf_body_max_len bytes of a body (or none of
-  -- it). A login form is never that big: a body cut there, or not read, was
-  -- padded to push the password field past the cut, and PHP still reads
-  -- it. Counted (path-keyed, as the rule always was), not for Magento's
-  -- admin route, where big bodies are admin saves.
-  local clen = tonumber(header_string(headers["content-length"] or headers["Content-Length"])) or 0
-  local cut = #body >= AUTH_BODY_CUT or clen > #body
+  -- An endpoint that only logs in. The Joomla / OpenCart admin index serves
+  -- every admin action, so only its login route qualifies (OpenCart's sits in
+  -- the query; Joomla's option=com_login is posted in the body).
+  local largs = lower(args or "")
+  local login_only = tag == "AUTH_WP_LOGIN" or tag == "AUTH_DRUPAL_LOGIN" or tag == "AUTH_LOGIN_POST"
+    or tag == "AUTH_ADMIN_LOGIN" or tag == "AUTH_MAGENTO_ADMIN"
+    or (tag == "AUTH_OPENCART_ADMIN" and largs:find("route=common/login", 1, true) ~= nil)
+
+  -- The edge reads the first waf_body_max_len bytes of a body, or none of it
+  -- (no Content-Length on HTTP/3, a read that failed). A login form is never
+  -- that big: a body cut there (a complete one of exactly that size reads as
+  -- cut too, on the safe side), or a POST whose body went unread, was padded
+  -- to push the password past the cut, and PHP still reads it. Counted by the
+  -- path, as the rule always did, on a login-only endpoint; a big body on an
+  -- admin index is an upload or a save. Residual: a Joomla admin login padded
+  -- past the cut (its login posts a session CSRF token too).
+  local clen_raw = headers["content-length"] or headers["Content-Length"]
+  local clen = tonumber(header_string(clen_raw)) or 0
+  local cut = #body >= AUTH_BODY_CUT or clen > #body or (body == "" and clen_raw == nil)
   if body == "" and not cut then return nil end
 
   local cred = false
-  if tag and cut then
+  if cut then
+    cred = login_only
+  elseif tag == "AUTH_DRUPAL_LOGIN" and largs:find("_format=", 1, true) then
+    -- Drupal's REST login decodes the body by `_format` (json, xml …),
+    -- whatever the Content-Type says: any body is a login attempt.
     cred = true
   else
     local f = _M.php_request_fields("post", args, body, headers, AUTH_PASSWORD_FIELDS)
@@ -1525,13 +1543,15 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers
     if magento then
       if in_body(f.login) >= 2 then tag, cred = "AUTH_MAGENTO_ADMIN", true end
     else
-      for _, t in pairs(f) do
-        if in_body(t) > 0 then cred = true; break end
+      -- `login` is Magento's array (and a username elsewhere): not a
+      -- password field outside that branch.
+      for name, t in pairs(f) do
+        if name ~= "login" and in_body(t) > 0 then cred = true; break end
       end
-      -- A JSON login (Drupal's /user/login?_format=json, SPA forms): a
-      -- password key in the body. php_request_fields reads form bodies only.
-      if not cred and php_media_type(php_content_type(headers)):find("json", 1, true) then
-        local lb = lower(cap(body, CFG.max_scan_len))
+      -- A JSON login (SPA forms): a password key in the body, by media type
+      -- or by shape, its \u00XX escapes decoded as json_decode reads them.
+      if not cred and (php_media_type(php_content_type(headers)):find("json", 1, true) or body:find("^%s*{")) then
+        local lb = lower(util.json_unescape_ascii(body))
         cred = lb:find('"pass"%s*:') or lb:find('"password"%s*:') or lb:find('"pwd"%s*:')
                or lb:find('"passwd"%s*:') or false
       end

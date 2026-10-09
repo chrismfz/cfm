@@ -1320,9 +1320,21 @@ in `auth_window_sec` (20 s), then the rule's mode (`challenge_v2`). A request co
 only when it is a POST to a login endpoint whose body carries a password field, read
 the way PHP reads it (`php_request_fields`): WordPress `wp-login.php` `pwd`, Drupal
 `/user/login` `pass`, Joomla `/administrator/index.php` `passwd`, OpenCart
-`/admin/index.php` and custom `…/login` forms `password` / `pass` / `pwd`, Magento's
-admin route `login[username]` + `login[password]`. A GET of the login page, admin
-navigation and admin saves never count; XML-RPC is left to 510-512.
+`/admin/index.php` and custom `…/login` forms `password` / `pass` / `pwd` / `passwd`,
+Magento's admin route (an `admin` path segment) `login[username]` + `login[password]`.
+A JSON body (by media type or a leading `{`) counts by one of those keys, its `\u00XX`
+escapes decoded; Drupal's REST login (`/user/login?_format=…`) counts whatever the body,
+since Drupal decodes it by `_format`. A GET of the login page and admin navigation never
+count; XML-RPC is left to 510-512.
+
+A POST to a **login-only** endpoint (`wp-login.php`, `/user/login`, `…/login`,
+`/admin/login`, Magento's admin login paths, OpenCart's `route=common/login`) whose body
+the edge cut at `waf_body_max_len` (32 KB), or did not read (Content-Length larger than
+what was read, or no Content-Length and nothing read, as on HTTP/3), counts by its path,
+as the rule always did: no login form is that big, and padding would otherwise push the
+password past the cut, where PHP still reads it. The Joomla / OpenCart admin index serves
+every admin action, so a big body there (a media upload, a long article) is not counted;
+residual: a Joomla admin login padded past the cut (it posts a session CSRF token too).
 
 Since 2026-10-09. Before that the rule counted every request to those paths (an
 OpenCart admin browsing `/admin/index.php?route=…` or a Joomla admin saving was
@@ -1331,18 +1343,18 @@ only ever ran behind a trusted proxy (Cloudflare). Direct clients now count too,
 at `auth_burst_direct_mode` (`logonly`) for a burn-in; a proxied client keeps the
 rule's mode. Promote by setting `auth_burst_direct_mode` (never stronger than
 `rule_auth_burst`; an unknown value reads as `logonly`) once `waf_rule_detail 501` reads
-clean. A JSON login (Drupal's `/user/login?_format=json`) counts by a `"pass"` /
-`"password"` / `"pwd"` / `"passwd"` key. A login POST whose body the edge cut at
-`waf_body_max_len` (32 KB) or did not read counts by its path, as the rule always did: no
-login form is that big, and padding would otherwise push the password past the cut,
-where PHP still reads it. The panel ports (cPanel / WHM / webmail) pass the WAF no body,
-so 501 never fires there; cPanel's own `login_log` detector (`internal/detectors/cpanel`)
-bans repeated failures, which the edge cannot tell from successes.
+clean. Before promoting, look for relay IPs in that read (QUIC.cloud, Sucuri, an office
+NAT): an untrusted relay reads as one direct client across every vhost.
+
+The panel ports (cPanel / WHM / webmail) pass the WAF no body, so 501 never fires there;
+cPanel's own `login_log` detector (`internal/detectors/cpanel`) bans repeated failures,
+which the edge cannot tell from successes.
 
 Not counted (the path test reads `ngx.var.uri`, no query string): Drupal 7
-`/index.php?q=user/login`, Joomla `POST /administrator/` (the directory index), WooCommerce
-`/my-account/`, Adminer. An OpenCart admin customer save sends an empty `password=` and
-counts; eight in 20 s is not a workflow.
+`/index.php?q=user/login`, Joomla `POST /administrator/` (the directory index), Joomla's
+frontend login (`/index.php?option=com_users&task=user.login`), WooCommerce
+`/my-account/`, Adminer, and a password sent in a POST's query string. An OpenCart admin
+customer save sends an empty `password=` and counts; eight in 20 s is not a workflow.
 
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 

@@ -94,6 +94,26 @@ do
         "a login padded past the WAF's 32 KB still counts")
   check(burst(9, { uri = "/wp-login.php", body = "", clen = "40000", peer = "172.70.1.1" }) == "challenge_v2",
         "an unread login body (Content-Length only) counts")
+  -- Cut at 32 KB with no Content-Length (chunked, HTTP/2).
+  check(burst(9, { uri = "/wp-login.php", body = pad:sub(1, 32768), peer = "172.70.1.1" }) == "challenge_v2",
+        "a chunked login cut at 32 KB counts")
+  -- Unread, no Content-Length (HTTP/3).
+  check(burst(9, { uri = "/wp-login.php", body = "", peer = "172.70.1.1" }) == "challenge_v2",
+        "an unread login body without Content-Length counts")
+  -- Drupal's REST login decodes by _format, whatever the Content-Type.
+  check(burst(9, { uri = "/user/login", args = "_format=json", ct = "text/plain",
+                   body = '{"name":"admin","pass":"guess"}', peer = "172.70.1.1" }) == "challenge_v2",
+        "Drupal _format login under text/plain counts")
+  -- A JSON key spelled with escapes, past 2 KB, no JSON media type.
+  check(burst(9, { uri = "/account/login", ct = "text/plain", peer = "172.70.1.1",
+                   body = '{"a":"' .. ("x"):rep(3000) .. '","user":"admin","p\\u0061ss":"guess"}' }) == "challenge_v2",
+        "an escaped JSON password key past 2 KB counts")
+  -- Magento on the bare /admin route.
+  check(burst(9, { uri = "/admin", body = "form_key=x&login%5Busername%5D=a&login%5Bpassword%5D=b", peer = "172.70.1.1" }) == "challenge_v2",
+        "Magento login on bare /admin counts")
+  -- OpenCart's login route padded past the cut.
+  check(burst(9, { uri = "/admin/index.php", args = "route=common/login", body = pad:sub(1, 32768), clen = tostring(#pad),
+                   peer = "172.70.1.1" }) == "challenge_v2", "OpenCart login route padded counts")
 end
 
 -- ── Not credential submissions: never counted ───────────────────────────────
@@ -112,6 +132,11 @@ do
     { "admin save with one login",     { uri = "/admin/customer/save/", body = "form_key=x&login=jdoe", peer = P } },
     { "wp-admin admin-ajax login[]",   { uri = "/wp-admin/admin-ajax.php", body = "action=x&login%5Ba%5D=1&login%5Bb%5D=2", peer = P } },
     { "padded admin save (Magento)",   { uri = "/admin/catalog/product/save/", body = ("a"):rep(32768), clen = "50000", peer = P } },
+    { "Joomla media upload > 32 KB",   { uri = "/administrator/index.php", args = "option=com_media&format=json&task=api.files",
+                                         ct = "application/json", body = '{"name":"a.jpg","content":"' .. ("A"):rep(40000) .. '"}', peer = P } },
+    { "OpenCart filemanager upload",   { uri = "/admin/index.php", args = "route=common/filemanager.upload", body = ("B"):rep(32768), clen = "90000", peer = P } },
+    { "xmlrpc wp.uploadFile 40 KB",    { uri = "/xmlrpc.php", ct = "text/xml", body = ("C"):rep(32768), clen = "40000", peer = P } },
+    { "username-only login field",     { uri = "/account/login", body = "login=jdoe&remember=1", peer = P } },
     { "xmlrpc (510-512's job)",        { uri = "/xmlrpc.php", ct = "text/xml", peer = P,
                                          body = "<?xml version=\"1.0\"?><methodCall><methodName>wp.getUsersBlogs</methodName><params><param><value>admin</value></param><param><value>x</value></param></params></methodCall>" } },
   }
@@ -130,6 +155,8 @@ do
   end
   reload("logonly", "challenge")
   check(burst(9, { uri = "/wp-login.php", body = "log=a&pwd=b" }) == "logonly", "rule logonly + cap challenge: stays logonly")
+  reload("challenge_v2", "challenge")
+  check(burst(9, { uri = "/wp-login.php", body = "log=a&pwd=b" }) == "challenge", "the cap applies when set (challenge)")
   reload("challenge_v2", "chalenge")
   check(burst(9, { uri = "/wp-login.php", body = "log=a&pwd=b" }) == "logonly", "a misspelled cap reads as logonly")
   package.loaded["cfm_waf_config"] = nil
