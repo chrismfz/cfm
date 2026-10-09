@@ -286,7 +286,12 @@ local cache_ok, cfm_cache = pcall(require, "cfm_cache")
 -- never break the allow path) and return the ngx.exec target, or nil. The
 -- caller must ngx.exec the non-nil result OUTSIDE this pcall — ngx.exec never
 -- returns, so wrapping it in pcall would swallow the internal redirect.
+-- A request the WAF flagged (a logonly hit) or could not inspect (waf.check
+-- raised) is never micro-cached (ngx.ctx.cfm_no_micro, set at Step 2): both
+-- went to the origin uncached before they went on to Step 4, and the cache
+-- must not keep a response to a payload the WAF flagged or never saw.
 local function micro_cache_target()
+  if ngx.ctx.cfm_no_micro then return nil end
   if not cache_ok or not cfm_cache or not cfm_cache.micro_gate then return nil end
   local ok, target = pcall(cfm_cache.micro_gate)
   if ok and type(target) == "string" then return target end
@@ -1406,6 +1411,14 @@ if CFG.debug_headers then ngx.header["X-CFM-Clearance"] = clearance_status end
 -- UNCLEARED replay — the loop they exist to stop.
 local clearance_allow = clearance_ok
 
+-- Set by a logonly WAF hit, which records and pushes it, then goes on through
+-- Steps 2b-4 like a clean request (it used to route to the origin there and
+-- then, so an IP block, a vhost challenge, a traffic rule, a throttle and the
+-- fingerprint floor never ran for it), and by a WAF that raised under
+-- fail_open. The value ("logonly" / "logonly_pc" / "waf_error") is the
+-- X-CFM-Action reported when the request ends allowed.
+local waf_allow_action
+
 -- ── Step 2: Inline WAF ───────────────────────────────────────────────────────
 -- Runs even when clearance is valid: a solved challenge does not authorise
 -- exploit payloads, and a logonly hit must not silently let a webshell
@@ -1442,18 +1455,41 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
     end
     local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
     local self_origin = is_self_origin(ip)
-    local hit, reason, ttl, waf_action, waf_hits, waf_rule_id = waf.check({
+    local waf_ctx = {
       uri = uri, args = ngx.var.args or "", method = method,
       raw_uri = ngx.var.request_uri,
       host = host, ip = ip, cookie = ngx.var.http_cookie or "",
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
       headers = req_headers, body = req_body, self_origin = self_origin,
       skip_rule_ids = skip_rule_ids,
-    })
-    -- Hit-rate denominator: every WAF inspection counts, regardless of
-    -- whether a rule fired. maybe_flush_waf_insp piggybacks on the request
-    -- to push the snapshot to Go without needing an init_worker timer.
-    waf_insp_incr(host)
+    }
+    -- A rule that raised used to take the whole request into the
+    -- request_failure handler, which under fail_open skipped every step after
+    -- the WAF as well (IP block, challenges, traffic rules). Under fail_open
+    -- the request now goes on without the WAF; under fail_closed the check
+    -- runs unwrapped, so a raise still reaches that handler (500), as before.
+    local waf_ran, hit, reason, ttl, waf_action, waf_hits, waf_rule_id
+    if CFG.fail_open then
+      waf_ran, hit, reason, ttl, waf_action, waf_hits, waf_rule_id = xpcall(waf.check, debug.traceback, waf_ctx)
+    else
+      waf_ran = true
+      hit, reason, ttl, waf_action, waf_hits, waf_rule_id = waf.check(waf_ctx)
+    end
+    if not waf_ran then
+      -- `hit` is the error with the rule's stack (debug.traceback). Logged
+      -- per request, as request_failure was.
+      log_ev(ngx.ERR, "[cfm] waf_error request_id=", ngx.var.request_id or "-", " ip=", ip,
+             " host=", host, " uri=", uri, " err=", tostring(hit))
+      waf_allow_action = "waf_error"
+      ngx.ctx.cfm_no_micro = true  -- uninspected: never micro-cached
+      hit = false
+    else
+      -- Hit-rate denominator: every WAF inspection counts, regardless of
+      -- whether a rule fired (one that raised inspected nothing).
+      -- maybe_flush_waf_insp piggybacks on the request to push the snapshot
+      -- to Go without needing an init_worker timer.
+      waf_insp_incr(host)
+    end
     maybe_flush_waf_insp()
     if hit then
       waf_action = waf_action or "challenge"
@@ -1485,7 +1521,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- block this request. A `block` already stops the malware at the edge,
       -- so rescanning the same payload wastes ClamAV resources and produces a
       -- redundant infected-upload notification. For everything else — a clean
-      -- pass, a logonly hit, or a challenge — the payload either reaches origin
+      -- pass, a logonly hit, or a challenge — the payload may reach origin
       -- or is a rule-gap signal worth an alert, which is exactly what the scan
       -- is for. (Gated on the routing action, taken after the post-clearance
       -- challenge→block promotion so a promoted block is correctly skipped.)
@@ -1497,8 +1533,10 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- it to logonly/block above.) The exclusion must stay challenge-tier-only:
       -- a resumed POST whose hit degraded to logonly on replay — the
       -- post-clearance downgrade, or a burst-window rule that is quiet now
-      -- while a logonly rule still matches — DOES reach origin and must still
-      -- be scanned.
+      -- while a logonly rule still matches — can reach origin and must still
+      -- be scanned. (A logonly hit is scanned before Step 3 decides; one
+      -- Step 3 then blocks or challenges costs a scan that was not needed,
+      -- the same trade as a challenge-tier hit.)
       local waf_challenge_tier = (waf_action == "challenge" or waf_action == "challenge_v2")
       if clamav_ok and waf_action ~= "block"
          and not (waf_challenge_tier and ngx.ctx.cfm_resumed_post) then
@@ -1579,12 +1617,10 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       end
 
       if waf_action == "logonly" then
-        ngx.header["X-CFM-Action"] = converted_from_challenge and "logonly_pc" or "logonly"
-        if clearance_allow then
-          refresh_clearance_cookie(clearance_cookie, ip, host, clearance_scope)
-          touch_ok_scoped(ip, host, clearance_scope)
-        end
-        ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+        -- Not a decision: Steps 2b-4 decide (see waf_allow_action).
+        -- The steps after this one set X-CFM-Action from it.
+        waf_allow_action = converted_from_challenge and "logonly_pc" or "logonly"
+        ngx.ctx.cfm_no_micro = true  -- see micro_cache_target
       elseif waf_action == "block" then
         ngx.header["X-CFM-Action"] = converted_from_challenge and "block_pc" or "block"
         ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
@@ -1626,9 +1662,11 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
 
       push_and_log_waf_hit()
       if waf_action == "block" then return ngx.exit(CFG.block_code) end
-      return
+      if waf_action ~= "logonly" then return end
+      -- A logonly hit goes on to Steps 2b-4. Its upload was scanned above.
     else
-      -- No WAF rule fired: the upload passed the WAF cleanly, so scan it.
+      -- No WAF rule fired (or the WAF raised under fail_open and inspected
+      -- nothing): scan the upload.
       if clamav_ok then
         local cv = clamav.notify(ip, nil)
         if cv and cv.block then
@@ -1652,7 +1690,8 @@ if not waf_ok and clamav_ok then
 end
 
 -- ── Step 2b: Honour clearance allow (deferred from Step 1) ──────────────────
--- WAF either passed cleanly or is disabled/excluded for this host. Now we
+-- WAF either passed cleanly, only logged (a logonly hit, see
+-- waf_allow_action), or is disabled/excluded for this host. Now we
 -- can safely apply the clearance fast-path: refresh the cookie, touch the
 -- ok cache, and route to origin. This intentionally short-circuits the
 -- forced-challenge and bridge-decision steps below — clearance means
@@ -1678,7 +1717,7 @@ if clearance_allow then
         " navs=", navs, " window=", pcw.WINDOW_SEC, " verdict=", v)
     end
   end
-  ngx.header["X-CFM-Action"] = "allow_cookie"
+  ngx.header["X-CFM-Action"] = waf_allow_action or "allow_cookie"
   ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
   -- Site Cache Tier B: micro-cache is deliberately NOT wired on this
   -- clearance fast-path yet. `refresh_clearance_cookie` above sets the sliding
@@ -1758,7 +1797,8 @@ if ip_action == "challenge" or vh_action == "challenge" or rule_action == "chall
   if ngx.ctx.cfm_resumed_post then
     -- Only an UNCLEARED replay reaches here: a resumed POST that holds valid
     -- clearance took the Step 2b fast-path to origin (clearance_allow now keys on
-    -- clearance_ok), and a WAF hit exited in Step 2. A replay that is still being
+    -- clearance_ok), and a block / challenge WAF hit exited in Step 2 (a logonly
+    -- hit comes on to here, like a clean replay). A replay that is still being
     -- challenged and holds no clearance is the loop block_replayed exists to stop.
     ngx.header["X-CFM-Action"] = "block_replayed"
     ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
@@ -1798,7 +1838,7 @@ if rule_action == "throttle" then
 end
 
 -- ── Step 4: Allow ────────────────────────────────────────────────────────────
-ngx.header["X-CFM-Action"] = "allow"
+ngx.header["X-CFM-Action"] = waf_allow_action or "allow"
 ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
 if CFG.log_allows or CFG.debug then
   log_route(ngx.INFO, "allow ip=" .. ip .. " host=" .. host .. " pass=" .. ngx.var.cfm_pass .. cache_flag)
