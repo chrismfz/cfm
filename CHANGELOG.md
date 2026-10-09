@@ -39,20 +39,24 @@ back-filled here — see the git/PR history for that period.
   body padded past 1 MB reached a clean-URL route (`/checkout`, a custom
   router, an API path outside the WAF's list of known endpoints) with its
   body unread, so a SQL injection or webshell in it went straight to the
-  site. The edge now reads such a POST body (scanning its first 32 KB, as
-  for any body) where nginx buffers it anyway (the main `location /`; the
-  PHP/admin and media locations keep streaming, and a PUT or PATCH keeps the
-  old size rule), and checks it like any other. This needs the edge config
-  shipped with this release (`location /` sets `$cfm_body_buffered`; the
-  server default and the streaming locations clear it); with an older one
-  these bodies stay unread, as before. Separately, a body the edge cannot
-  read at all (an HTTP/3 POST without Content-Length) no longer skips every
-  check: reading it raised an error that, under the default `CFM_FAIL_OPEN`,
-  sent the request straight to the site past IP blocks, challenges and
-  traffic rules (even to `/wp-login.php`). It is now logged as
-  `waf_body_unread` and the request goes on through those checks. Also,
+  site. The edge now reads such a POST body (its first 32 KB, as for any
+  body) where nginx buffers it anyway (the main `location /`; the PHP/admin
+  and media locations keep streaming, and a PUT or PATCH keeps the old size
+  rule). These bodies start in burn-in: the request is decided as before,
+  and a hit only the body produces is recorded as log-only, with an
+  error-log line `waf_body_burnin would=<action>`. Once that looks clean,
+  `CFM_WAF_BODY_BUFFERED_ENFORCE=1` enforces them. This needs the edge
+  config shipped with this release (`location /` sets `$cfm_body_buffered`;
+  the server default and the streaming locations clear it); with an older
+  one these bodies stay unread, as before. Separately, a body the edge
+  cannot read at all (an HTTP/3 POST without Content-Length) no longer skips
+  every check: reading it raised an error that, under the default
+  `CFM_FAIL_OPEN`, sent the request straight to the site past IP blocks,
+  challenges and traffic rules (even to `/wp-login.php`). It is now logged
+  as `waf_body_unread` (once a minute per IP) and the request goes on
+  through those checks; with `CFM_FAIL_OPEN=0` it still gets a 500. Also,
   WooCommerce's `/?wc-ajax=` endpoint, which is on that list, never matched
-  it.
+  it. See docs/waf.md, "Which request bodies the WAF reads".
 - **A request that tripped a log-only WAF rule skipped every check after the
   WAF.** The edge sent it straight to the site, so an IP block, a site under
   challenge or Under-Attack Mode, a traffic rule, a throttle, a

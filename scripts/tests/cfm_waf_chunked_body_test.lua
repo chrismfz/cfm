@@ -31,46 +31,72 @@ local function post(t)
   if t.buffered then vars.cfm_body_buffered = "1" end
   return H.run{ method = t.method or "POST", uri = t.uri or "/checkout", args = t.args or "", body = t.body or SQLI,
                 headers = { ["content-type"] = t.ct or FORM, ["user-agent"] = "Mozilla/5.0" }, vars = vars,
-                read_body_error = t.read_body_error, verdict = t.verdict }
+                read_body_error = t.read_body_error, verdict = t.verdict, env = t.env }
 end
 
 -- ── cfm.lua end to end ──────────────────────────────────────────────────────
+local ENFORCE = { CFM_WAF_BODY_BUFFERED_ENFORCE = "1" }
+local function has_log(r, word)
+  for _, l in ipairs(r.logs) do if l:find(word, 1, true) then return true end end
+  return false
+end
 do
   local r = post{ cl = tostring(#SQLI) }
   check(r.ok and r.exited == 403, "measured POST to a clean route: inspected, blocked (" .. desc(r) .. ")")
 
+  -- A chunked body on `location /`, newly read: in burn-in by default. The
+  -- request is decided without it (allowed); its hit is pushed and logged as
+  -- logonly, with the action it would have taken.
   r = post{ buffered = true }
-  check(r.ok and r.exited == 403, "chunked POST to a clean route on `location /`: inspected, blocked (" .. desc(r) .. ")")
+  check(r.ok and r.exited == nil and r.action == "logonly" and r.reads == 1,
+        "chunked POST on `location /`, burn-in: read, logonly (" .. desc(r) .. ")")
+  check(r.rpcs:find("ip_push", 1, true) ~= nil, "the burn-in hit is pushed (" .. r.rpcs .. ")")
+  check(has_log(r, "waf_body_burnin would=block"), "the burn-in hit is logged with its would-be action")
+  -- Enforced: blocked like any other hit.
+  r = post{ buffered = true, env = ENFORCE }
+  check(r.ok and r.exited == 403, "chunked POST on `location /`, enforced: inspected, blocked (" .. desc(r) .. ")")
+  -- A hit the request makes without its body still decides it, burn-in or not.
+  r = post{ buffered = true, args = "id=1' UNION SELECT user_pass FROM wp_users-- -" }
+  check(r.ok and r.exited == 403, "burn-in body + a SQLi in the query: blocked by the query (" .. desc(r) .. ")")
+  -- The later steps still apply to a burn-in hit (logonly falls through).
+  r = post{ buffered = true, verdict = { ip_action = "block" } }
+  check(r.ok and r.exited == 403 and r.action == "block", "burn-in hit + IP block → 403 (" .. desc(r) .. ")")
 
   r = post{}
-  check(r.ok and r.exited == nil and r.action == "allow",
-        "chunked POST where the location streams: still unread, as before (" .. desc(r) .. ")")
+  check(r.ok and r.exited == nil and r.action == "allow" and r.reads == 0,
+        "chunked POST where the location streams: unread, as before (" .. desc(r) .. ")")
 
   r = post{ buffered = true, ct = "application/octet-stream" }
-  check(r.ok and r.exited == nil, "chunked binary body: never read (" .. desc(r) .. ")")
+  check(r.ok and r.exited == nil and r.reads == 0, "chunked binary body: never read (" .. desc(r) .. ")")
 
   r = post{ buffered = true, body = "q=hello world&email=a@b.example" }
-  check(r.ok and r.exited == nil and r.action == "allow", "chunked clean form on `location /`: allowed (" .. desc(r) .. ")")
+  check(r.ok and r.exited == nil and r.action == "allow" and not has_log(r, "waf_body_burnin"),
+        "chunked clean form on `location /`: allowed, nothing logged (" .. desc(r) .. ")")
 
-  -- A body padded past waf_body_read_max_cl (1 MiB): read on `location /`,
-  -- where nginx buffers it anyway; only its head is scanned.
+  -- A body padded past waf_body_read_max_cl (1 MiB): read on `location /`
+  -- (burn-in, then enforced), unread where the location streams.
   r = post{ buffered = true, cl = "2000000" }
-  check(r.ok and r.exited == 403, "padded (over-cap) POST on `location /`: inspected, blocked (" .. desc(r) .. ")")
+  check(r.ok and r.action == "logonly" and r.reads == 1, "padded POST on `location /`, burn-in: logonly (" .. desc(r) .. ")")
+  r = post{ buffered = true, cl = "2000000", env = ENFORCE }
+  check(r.ok and r.exited == 403, "padded POST on `location /`, enforced: blocked (" .. desc(r) .. ")")
   r = post{ cl = "2000000" }
-  check(r.ok and r.exited == nil, "padded POST where the location streams: unread, as before (" .. desc(r) .. ")")
+  check(r.ok and r.exited == nil and r.reads == 0, "padded POST where the location streams: unread, as before (" .. desc(r) .. ")")
+  -- A measured body under the cap on `location /` was read before: not burn-in.
+  r = post{ buffered = true, cl = tostring(#SQLI) }
+  check(r.ok and r.exited == 403, "measured POST on `location /`: enforced as before, no burn-in (" .. desc(r) .. ")")
 
-  -- POST only: a chunked PUT / PATCH keeps streaming, as before.
+  -- POST only: a chunked PUT / PATCH is not read, as before.
   r = post{ buffered = true, method = "PUT" }
-  check(r.ok and r.exited == nil, "chunked PUT on `location /`: still unread (" .. desc(r) .. ")")
+  check(r.ok and r.reads == 0, "chunked PUT on `location /`: not read (" .. desc(r) .. " reads=" .. r.reads .. ")")
 
   -- wc-ajax rides in the query string, matched by argument name: a large
-  -- (over-cap) or chunked body there is read via the allowlist.
+  -- (over-cap) or chunked body there is read via the allowlist (enforced).
   r = post{ uri = "/", args = "wc-ajax=checkout" }
   check(r.ok and r.exited == 403, "POST /?wc-ajax=… with no Content-Length: read via the allowlist (" .. desc(r) .. ")")
   r = post{ uri = "/", args = "x=1&WC-AJAX=checkout" }
   check(r.ok and r.exited == 403, "wc-ajax matched case-insensitively, after other args (" .. desc(r) .. ")")
   r = post{ uri = "/", args = "zwc-ajax=1" }
-  check(r.ok and r.exited == nil, "a value or name merely containing wc-ajax= does not force a read (" .. desc(r) .. ")")
+  check(r.ok and r.exited == nil and r.reads == 0, "a name merely containing wc-ajax= does not force a read (" .. desc(r) .. ")")
 
   -- A body read_body cannot read (HTTP/3 without Content-Length) used to raise
   -- out of the access phase into request_failure, which under fail_open skips
@@ -82,9 +108,11 @@ do
   r = post{ uri = "/wp-login.php", read_body_error = H3 }
   check(r.ok and r.action == "allow" and r.upstream == "cfm_apache",
         "HTTP/3 CL-less POST to an allowlisted path: no request_failure, allowed unread (" .. desc(r) .. ")")
-  local logged = false
-  for _, l in ipairs(r.logs) do if l:find("waf_body_unread", 1, true) then logged = true end end
-  check(logged, "the unread body is logged (waf_body_unread)")
+  check(has_log(r, "waf_body_unread"), "the unread body is logged (waf_body_unread)")
+  -- fail_closed: still a 500, as before.
+  r = H.run{ method = "POST", uri = "/wp-login.php", body = SQLI, fail_open = false, read_body_error = H3,
+             headers = { ["content-type"] = FORM }, vars = { http_content_type = FORM } }
+  check(r.ok and r.exited == 500, "HTTP/3 CL-less POST under fail_closed: 500, as before (" .. desc(r) .. ")")
 end
 
 -- ── waf_body_gate's `buffered` argument ─────────────────────────────────────

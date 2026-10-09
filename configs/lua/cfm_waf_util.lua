@@ -533,14 +533,12 @@ end
 --     only buys us the first ~32 KB of scan (F08 truncates), so buffering
 --     multi-MB/GB bodies there has no upside.
 -- `buffered`: the location buffers request bodies anyway, so reading one
--- costs nothing more and both size rules are moot (the caller passes it for
+-- spools nothing nginx would not (it is spooled earlier: before the edge's
+-- decision, where the proxy would spool it after), and both size rules are moot (the caller passes it for
 -- POST on the confs' `location /` only).
 -- Pure (no upvalues beyond ct_is_inspectable / a default cap) so it is unit-
 -- tested directly; cfm.lua isn't loadable, this is where the read/skip truth
 -- table lives.
--- buffered: the location buffers request bodies anyway (the edge confs' `location /`
--- sets $cfm_body_buffered), so a body with no Content-Length (chunked, or HTTP/2
--- without the header) costs nothing more to read there; elsewhere it streams.
 local function waf_body_gate(ct, cl, max_cl, buffered)
   if not ct_is_inspectable(ct) then return false end
   -- Where nginx buffers the body anyway, read it whatever its size: only the

@@ -82,6 +82,13 @@ local M = {
   -- (they read regardless of size, as before).
   waf_body_read_max_cl = tonumber(os.getenv("CFM_WAF_BODY_READ_MAX_CL") or "1048576"),
 
+  -- A POST body the gate reads only because the location buffers it anyway (no
+  -- Content-Length, or one over waf_body_read_max_cl, on `location /`; added
+  -- 2026-10-09) is in burn-in: its WAF hits are pushed and logged as logonly
+  -- (`waf_body_burnin would=<action>`), and the request is decided as before,
+  -- without that body. "1" enforces them like any other hit.
+  waf_body_buffered_enforce = (os.getenv("CFM_WAF_BODY_BUFFERED_ENFORCE") == "1"),
+
   -- Challenge POST replay: a challenged POST's body is stashed (shared dict,
   -- base64) and re-applied after the challenge solves, so form content is not
   -- lost. Allowed content-types: urlencoded / json / text/plain / multipart

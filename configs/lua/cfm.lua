@@ -561,7 +561,13 @@ local function waf_should_read_body(uri, method)
   -- location) and we don't buffer a large body just to scan its first
   -- waf_body_max_len bytes. A body with no Content-Length is read only where
   -- the location buffers it anyway (`buffered`, above); elsewhere it streams.
-  return wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl, buffered) or false
+  local read = wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl, buffered) or false
+  -- Read only because the location buffers it (the old gate would not have):
+  -- its hits are in burn-in unless CFG.waf_body_buffered_enforce (Step 2).
+  if read and buffered and not wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl, false) then
+    ngx.ctx.cfm_body_burnin = true
+  end
+  return read
 end
 
 local function get_req_body_for_waf(uri, method, max_len)
@@ -572,9 +578,14 @@ local function get_req_body_for_waf(uri, method, max_len)
   -- without content-length header"; HTTP/2 too on older builds). Unguarded,
   -- that took the request to request_failure, which under fail_open skips
   -- every check after the WAF. The body then stays unread, as a stream.
+  -- Under fail_closed the error still goes to request_failure (500).
   local read_ok, read_err = pcall(ngx.req.read_body)
   if not read_ok then
-    log_ev(ngx.WARN, "[cfm] waf_body_unread ip=", real_ip(), " uri=", uri, " err=", tostring(read_err))
+    if not CFG.fail_open then error(read_err, 0) end
+    local rip = real_ip()
+    if not SH or SH:add("bodyunread|" .. tostring(rip), 1, 60) then
+      log_ev(ngx.WARN, "[cfm] waf_body_unread ip=", rip, " uri=", uri, " err=", tostring(read_err))
+    end
     ngx.ctx.waf_body = ""; return ""
   end
   local data = ngx.req.get_body_data()
@@ -1478,12 +1489,18 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
     end
     local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
     local self_origin = is_self_origin(ip)
+    -- Burn-in (cfm_cfg waf_body_buffered_enforce): a body read only because
+    -- the location buffers it (chunked, or over waf_body_read_max_cl, on
+    -- `location /`) is new to the WAF. The request is decided without it,
+    -- as before; its own hits are checked after, pushed and logged as logonly.
+    local body_burnin = ngx.ctx.cfm_body_burnin and not CFG.waf_body_buffered_enforce
+                        and req_body ~= ""
     local waf_ctx = {
       uri = uri, args = ngx.var.args or "", method = method,
       raw_uri = ngx.var.request_uri,
       host = host, ip = ip, cookie = ngx.var.http_cookie or "",
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
-      headers = req_headers, body = req_body, self_origin = self_origin,
+      headers = req_headers, body = body_burnin and "" or req_body, self_origin = self_origin,
       skip_rule_ids = skip_rule_ids,
     }
     -- A rule that raised used to take the whole request into the
@@ -1512,6 +1529,20 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- maybe_flush_waf_insp piggybacks on the request to push the snapshot
       -- to Go without needing an init_worker timer.
       waf_insp_incr(host)
+      if body_burnin and not hit then
+        -- The body's own hits: shdict nil, so the burst counters the check
+        -- above already moved are not counted twice (those rules need it,
+        -- and they decided above).
+        waf_ctx.body, waf_ctx.shdict = req_body, nil
+        local b_ok, b_hit, b_reason, b_ttl, b_action, b_hits, b_rule = pcall(waf.check, waf_ctx)
+        if b_ok and b_hit then
+          if not SH or SH:add("bodyburnin|" .. tostring(ip), 1, 60) then
+            log_ev(ngx.WARN, "[cfm] waf_body_burnin would=", tostring(b_action), " ip=", ip, " host=", host,
+                   " uri=", uri, " reason=", tostring(b_reason), " waf_rule_id=", tostring(b_rule))
+          end
+          hit, reason, ttl, waf_action, waf_hits, waf_rule_id = true, b_reason, b_ttl, "logonly", b_hits, b_rule
+        end
+      end
     end
     maybe_flush_waf_insp()
     if hit then

@@ -25,6 +25,7 @@ local H = {}
 function H.run(req)
   -- fresh module state for things cfm.lua require()s each request
   local exited, redirected, execd
+  local reads = 0  -- ngx.req.read_body calls
   local logs = {}
   local headers_out = {}
   local vars = {
@@ -58,7 +59,10 @@ function H.run(req)
       get_method = function() return req.method or "GET" end,
       start_time = function() return 999 end,
       get_headers = function() return req.headers or {} end,
-      read_body = function() if req.read_body_error then error(req.read_body_error) end end,
+      read_body = function()
+        reads = reads + 1
+        if req.read_body_error then error(req.read_body_error) end
+      end,
       get_body_data = function() return req.body end,
       get_body_file = function() return nil end,
       get_uri_args = function() return {} end,
@@ -118,6 +122,7 @@ function H.run(req)
   local real_getenv = os.getenv
   os.getenv = function(k)
     if k == "CFM_FAIL_OPEN" and req.fail_open ~= nil then return req.fail_open and "1" or "0" end
+    if req.env and req.env[k] ~= nil then return req.env[k] end
     return real_getenv(k)
   end
   package.loaded["cfm_waf"] = req.waf_fake or H.real_waf()
@@ -127,7 +132,7 @@ function H.run(req)
   return {
     ok = ok, err = err, exited = exited, redirected = redirected, execd = execd,
     upstream = vars.cfm_upstream, pass = vars.cfm_pass, action = headers_out["X-CFM-Action"],
-    rpcs = table.concat(rpcs, ","), logs = logs, SH = SH,
+    rpcs = table.concat(rpcs, ","), logs = logs, SH = SH, reads = reads,
   }
 end
 

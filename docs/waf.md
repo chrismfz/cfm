@@ -1563,6 +1563,23 @@ Key invariants:
 | `block_replayed` | UNCLEARED POST replay re-triggered a challenge → 403 (a cleared replay is converted / fast-pathed instead) |
 | `challenge_forced` | nginx-marked location forced challenge |
 
+### Which request bodies the WAF reads (`cfm.lua` `waf_should_read_body`)
+
+- **POST to an allowlisted path** (`.php`, `/wp-admin/`, `/wp-json/`, `/?wc-ajax=`, … — the list in
+  `waf_should_read_body`): always read.
+- **Any other POST/PUT/PATCH:** read when the Content-Type is inspectable (form, JSON, XML,
+  multipart, `text/*`) and the Content-Length is at most `CFM_WAF_BODY_READ_MAX_CL` (1 MiB).
+- **POST on `location /` with no Content-Length (chunked, HTTP/2) or a larger one** (since
+  2026-10-09): read too, because nginx buffers that location's bodies anyway (the conf sets
+  `$cfm_body_buffered`). Only the first `CFM_WAF_BODY_MAX_LEN` (32 KB) is ever scanned.
+  These bodies are in **burn-in**: the request is decided without them, as before, and a hit
+  only the body produces is pushed and logged as logonly, with an error-log line
+  `waf_body_burnin would=<action> … waf_rule_id=<id>` (one a minute per IP). After a clean
+  burn-in, `CFM_WAF_BODY_BUFFERED_ENFORCE=1` (declared with `env` in the edge conf) enforces them.
+- A body the module cannot read (an HTTP/3 POST without Content-Length on lua-nginx-module
+  ≤ 0.10.26) is left unread and logged as `waf_body_unread`; the request goes on through the
+  other checks (under `CFM_FAIL_OPEN=0` it gets a 500).
+
 ---
 
 ## Upstream interception — when traffic never reaches the WAF
