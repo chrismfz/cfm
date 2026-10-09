@@ -76,6 +76,12 @@
 #       next probe of a page that stopped being cacheable).
 #     * proxy_cache_convert_head is never turned off, anywhere (the key has no
 #       method: a body-less HEAD entry would be served to GETs).
+#     * disk rails: every proxy_cache_path carries min_free=2g; every Tier A
+#       (cfm_static) location carries `proxy_cache_min_uses 2;` and
+#       $cfm_cache_too_big on proxy_no_cache, whose map
+#       ($upstream_http_content_length, 8+ digits → "1") holds exactly its two
+#       entries (a random query string, a HEAD or an aborted GET stored a full
+#       copy of a big file each time).
 #     * every cache location sends `Host $host` and `X-Forwarded-Proto $cf_xfp`
 #       exactly once each (the vhost and scheme the origin answers for must be
 #       the key's), and a micro location never stores a response that hands
@@ -291,6 +297,12 @@ for f in "$ORT" "$ANG"; do
       if (body !~ (A "proxy_cache_lock[[:space:]]+on[[:space:]]*;")) m = m " proxy_cache_lock-must-be-on"
       if (st && body !~ (A "proxy_cache_lock_timeout[[:space:]]+1s[[:space:]]*;")) m = m " static-proxy_cache_lock_timeout-must-be-1s"
       if (mi && body !~ (A "proxy_cache_lock_timeout[[:space:]]+5s[[:space:]]*;")) m = m " micro-proxy_cache_lock_timeout-must-be-5s(cold-fill-stampede)"
+      # Disk rails (Tier A): the key carries the query, so a one-off random
+      # query must not be stored (min_uses 2), and no 10 MB+ object at all
+      # ($cfm_cache_too_big) — five HEADs with random queries on a 20 MB image
+      # once wrote ~96 MB.
+      if (st && body !~ (A "proxy_no_cache[[:space:]][^;]*[$]cfm_cache_too_big[[:space:];]")) m = m " static-proxy_no_cache-$cfm_cache_too_big(10MB+-objects-could-fill-the-disk)"
+      if (st && body !~ (A "proxy_cache_min_uses[[:space:]]+2[[:space:]]*;")) m = m " static-proxy_cache_min_uses-must-be-2(one-off-random-queries-would-be-stored)"
       # Forwarded headers an app may build URLs or routes from are not in the
       # key: X-Forwarded-Host is pinned to $host and the rest are dropped, each
       # set exactly once (a second proxy_set_header for the same name, in any
@@ -429,6 +441,7 @@ for f in "$ORT" "$ANG"; do
       # Rail maps: exactly their two entries (one extra key re-opens the leak).
       mapcheck("^[[:space:]]*map[[:space:]]+[$]http_authorization[[:space:]]+[$]cfm_req_auth[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"\" \"\";", "$http_authorization → $cfm_req_auth", "")
       mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_status[[:space:]]+[$]cfm_cache_non200[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"200\" \"\";", "$upstream_status → $cfm_cache_non200 (only-200)", "")
+      mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_content_length[[:space:]]+[$]cfm_cache_too_big[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]+$\" \"1\";", "$upstream_http_content_length → $cfm_cache_too_big (Tier A: 10 MB+ never stored)", "")
       mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_cache_control[[:space:]]+[$]cfm_cc_nostore[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~*(private|no-store|no-cache|s-maxage=0*(?:[^0-9]|$))\" \"1\";", "$upstream_http_cache_control → $cfm_cc_nostore (micro: private/no-store/no-cache/s-maxage=0 never stored)", "volatile;")
       mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_x_accel_expires[[:space:]]+[$]cfm_xae_nocache[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^(?:0+|@.*)$\" \"1\";", "$upstream_http_x_accel_expires → $cfm_xae_nocache (micro: X-Accel-Expires 0 / @… never stored)", "volatile;")
       mapcheck("^[[:space:]]*map[[:space:]]+\"[$]xfp_trusted_peer:[$]http_cf_ipcountry\"[[:space:]]+[$]cfm_cf_ipcountry[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^1:(?<cc>.+)$\" $cc;", "trusted-peer CF-IPCountry → $cfm_cf_ipcountry (micro: a client cannot forge the country)", "")
@@ -436,7 +449,7 @@ for f in "$ORT" "$ANG"; do
       if (!micro_seen) print "ERR no @cfm_micro_<n>s cache location found — the Tier B checks must verify something."
       if (micro_seen && http_rwlua) print "ERR an http-level rewrite_by_lua* — inherited by the `location /` of the micro server, its ngx.req.set_uri(…, true) would carry the $cfm_micro_conf sentinel into another location."
       if (!sentinels) print "ERR no set $cfm_micro_conf \"1\" sentinel found — Tier B would never route."
-      nm1 = 0; nm2 = 0; nm3 = 0; nm4 = 0; nmc = 0; nme = 0; nign = 0
+      nm1 = 0; nm2 = 0; nm3 = 0; nm4 = 0; nm5 = 0; nmc = 0; nme = 0; nign = 0
       for (k = 1; k <= K; k++) {
         u = tolower(ST[k]); gsub(/\002/, "{", u); gsub(/\003/, "}", u); gsub(/\001/, ";", u)
         fw = u; sub(/^[[:space:]]*/, "", fw); sub(/[^a-z0-9_].*$/, "", fw)
@@ -450,6 +463,10 @@ for f in "$ORT" "$ANG"; do
         if (u ~ /[$][{]?cfm_cache_non200([^a-z0-9_]|$)/) {
           if (u ~ /^[[:space:]]*map[[:space:]]+[$]upstream_status[[:space:]]+[$]cfm_cache_non200[[:space:]]*[{][[:space:]]*$/) nm2++
           else if (fw != "proxy_no_cache") print "ERR line " SL[k] ": $cfm_cache_non200 appears in a " fw " statement — only its map and proxy_no_cache may reference it (another writer can re-open non-200 storage)."
+        }
+        if (u ~ /[$][{]?cfm_cache_too_big([^a-z0-9_]|$)/) {
+          if (u ~ /^[[:space:]]*map[[:space:]]+[$]upstream_http_content_length[[:space:]]+[$]cfm_cache_too_big[[:space:]]*[{][[:space:]]*$/) nm5++
+          else if (fw != "proxy_no_cache") print "ERR line " SL[k] ": $cfm_cache_too_big appears in a " fw " statement — only its map and proxy_no_cache may reference it (a `set` in a location would switch the 10 MB rail off)."
         }
         if (u ~ /[$][{]?cfm_cc_nostore([^a-z0-9_]|$)/) {
           if (u ~ /^[[:space:]]*map[[:space:]]+[$]upstream_http_cache_control[[:space:]]+[$]cfm_cc_nostore[[:space:]]*[{][[:space:]]*$/) nm3++
@@ -507,6 +524,7 @@ for f in "$ORT" "$ANG"; do
       if (nm2 != 1) print "ERR $cfm_cache_non200 is written by " nm2 " copies of its map — it must have exactly one."
       if (nm3 != 1) print "ERR $cfm_cc_nostore is written by " nm3 " copies of its map — it must have exactly one."
       if (nm4 != 1) print "ERR $cfm_xae_nocache is written by " nm4 " copies of its map — it must have exactly one."
+      if (nm5 != 1) print "ERR $cfm_cache_too_big is written by " nm5 " copies of its map — it must have exactly one."
       if (nmc != sentinels) print "ERR " nmc " set $cfm_micro_conf \"1\" statements but " sentinels " sit in a `location /` — one is outside any location."
       if (nme != mdefs) print "ERR " nme " set $cfm_micro_conf \"\" statements but only " mdefs + 0 " are a server-level default of a micro server — one inside a location (or at http level) can clear the sentinel of `location /`."
       for (k = 1; k <= K; k++) { u = ST[k]; if (u ~ /^[[:space:]]*include[[:space:]]/) { sub(/^[[:space:]]*include[[:space:]]+/, "", u); sub(/[[:space:]]*;.*$/, "", u); print "INC " u } }
@@ -514,7 +532,7 @@ for f in "$ORT" "$ANG"; do
       if (all !~ (A "lua_shared_dict[[:space:]]+cfm_cache_uncacheable[[:space:]]+[0-9]+[kKmM]?[[:space:]]*;")) print "ERR no lua_shared_dict cfm_cache_uncacheable — Tier B cannot remember an uncacheable key, so its requests queue on the cache lock."
       lt2 = tolower(LT); ltc = tolower(LTC)
       if (lt2 !~ /pcall\(cm\.micro_note\)/ || lt2 !~ /"cfm_apache_micro"/) print "ERR the http-level log_by_lua no longer calls cfm_cache.micro_note for cfm_apache_micro requests — Tier B would stop remembering uncacheable keys and their requests would queue on the cache lock."
-      if (lt2 ~ /cfm_req_auth|cfm_cache_skip|cfm_cache_non200|cfm_cc_nostore|cfm_xae_nocache|cfm_micro_conf/) print "ERR inline Lua references $cfm_req_auth / $cfm_cache_skip / $cfm_cache_non200 / $cfm_cc_nostore / $cfm_xae_nocache / $cfm_micro_conf — the cache rails must come only from the conf maps, the sentinel and cfm_cache.lua."
+      if (lt2 ~ /cfm_req_auth|cfm_cache_skip|cfm_cache_non200|cfm_cc_nostore|cfm_xae_nocache|cfm_cache_too_big|cfm_micro_conf/) print "ERR inline Lua references $cfm_req_auth / $cfm_cache_skip / $cfm_cache_non200 / $cfm_cc_nostore / $cfm_xae_nocache / $cfm_cache_too_big / $cfm_micro_conf — the cache rails must come only from the conf maps, the sentinel and cfm_cache.lua."
       # ...by any spelling: ngx.var is read ONLY as ngx.var.<name> (a bracket
       # index or an alias reaches a variable by a computed name, which the
       # check above cannot see), and never assigned for a CFM variable (one of
@@ -555,6 +573,10 @@ for f in "$ORT" "$ANG"; do
   if ! grep -Eq '^[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/cfm_static[[:space:]]' "$f"; then
     err "$f: no 'proxy_cache_path .../cfm_static' zone declared — Tier A config missing?"
   fi
+  # Every cache zone keeps 2 GB of the filesystem free (the cache manager
+  # evicts below it): a shared cPanel /var must never fill from the cache.
+  nofree=$(grep -nE '^[[:space:]]*proxy_cache_path[[:space:]]' "$f" | grep -vE '[[:space:]]min_free=2g([[:space:]]|;)' || true)
+  [ -z "$nofree" ] || err "$f: a proxy_cache_path has no 'min_free=2g' — the cache could fill the disk: $(tr '\n' ' ' <<< "$nofree")"
   # The other anchors (at least one cfm_static cache location, the bypass /
   # no_cache / only-200 predicates, the four rail maps, the per-server
   # $cfm_cache_skip "1") are enforced statement-aware in section (a), counted

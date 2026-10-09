@@ -30,8 +30,9 @@ Use this checklist for challenge or WAF Lua/config updates before reloading Angi
 - `./scripts/tests/check_site_cache_config.sh` passes (CI runs it too): the
   bypass-by-default gate and every cache rail are still pinned in both confs.
 - After the reload, on the box: an armed vhost still answers the debug stamp
-  (`docs/site-cache-runbook.md` §4), its assets show `ucache="HIT"` after a
-  second request, and `cfm webtop site-cache stats` still moves.
+  (`docs/site-cache-runbook.md` §4), its assets show `ucache="HIT"` from the
+  third request (Tier A stores a URL on its second, `proxy_cache_min_uses 2`),
+  and `cfm webtop site-cache stats` still moves.
 - `MICRO_CACHE_ENFORCE` defaults to `1` since 2026-09-23. A release that
   changes the micro path (cfm_cache.lua's gate, the micro locations, the cookie
   rails) re-runs `docs/site-cache-design.md` §5.7 steps 5–7 on one armed
