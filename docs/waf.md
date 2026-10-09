@@ -1346,14 +1346,18 @@ rule's mode. Promote by setting `auth_burst_direct_mode` (never stronger than
 clean. Before promoting, look for relay IPs in that read (QUIC.cloud, Sucuri, an office
 NAT): an untrusted relay reads as one direct client across every vhost.
 
-The panel ports (cPanel / WHM / webmail) pass the WAF no body, so 501 never fires there;
+The panel ports (cPanel / WHM / webmail) read no body and say so (`body_unread`), so 501
+never runs there;
 cPanel's own `login_log` detector (`internal/detectors/cpanel`) bans repeated failures,
 which the edge cannot tell from successes.
 
 Not counted (the path test reads `ngx.var.uri`, no query string): Drupal 7
 `/index.php?q=user/login`, Joomla `POST /administrator/` (the directory index), Joomla's
 frontend login (`/index.php?option=com_users&task=user.login`), WooCommerce
-`/my-account/`, Adminer, and a password sent in a POST's query string. An OpenCart admin
+`/my-account/`, Adminer, a password sent in a POST's query string, Magento's admin login
+padded past the cut on its bare route (`/admin/…`, where big bodies are saves), and field
+names outside the list (`session[password]`, Symfony `_password`, an array-wrapped or
+BOM-prefixed JSON body). An OpenCart admin
 customer save sends an empty `password=` and counts; eight in 20 s is not a workflow.
 
 ## XML-RPC rules (510-512) and the Jetpack carve-out

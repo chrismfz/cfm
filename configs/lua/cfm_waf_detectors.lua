@@ -1508,7 +1508,8 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers
   -- An endpoint that only logs in. The Joomla / OpenCart admin index serves
   -- every admin action, so only its login route qualifies (OpenCart's sits in
   -- the query; Joomla's option=com_login is posted in the body).
-  local largs = lower(args or "")
+  -- Decoded once, as PHP reads $_GET: `route=common%2Flogin`, `%5Fformat=`.
+  local largs = lower(url_decode_once(args or ""))
   local login_only = tag == "AUTH_WP_LOGIN" or tag == "AUTH_DRUPAL_LOGIN" or tag == "AUTH_LOGIN_POST"
     or tag == "AUTH_ADMIN_LOGIN" or tag == "AUTH_MAGENTO_ADMIN"
     or (tag == "AUTH_OPENCART_ADMIN" and largs:find("route=common/login", 1, true) ~= nil)
@@ -1543,11 +1544,12 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers
     if magento then
       if in_body(f.login) >= 2 then tag, cred = "AUTH_MAGENTO_ADMIN", true end
     else
-      -- `login` is Magento's array (and a username elsewhere): not a
-      -- password field outside that branch.
+      -- `login` alone is a username; two of them are Magento's
+      -- login[username] + login[password] (its storefront loginPost too).
       for name, t in pairs(f) do
         if name ~= "login" and in_body(t) > 0 then cred = true; break end
       end
+      if not cred and in_body(f.login) >= 2 then cred = true end
       -- A JSON login (SPA forms): a password key in the body, by media type
       -- or by shape, its \u00XX escapes decoded as json_decode reads them.
       if not cred and (php_media_type(php_content_type(headers)):find("json", 1, true) or body:find("^%s*{")) then

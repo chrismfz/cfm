@@ -1742,11 +1742,12 @@ local function check_impl(ctx, st)
   -- rule ran only behind a trusted proxy (Cloudflare). Direct clients now
   -- count too, capped at auth_burst_direct_mode (logonly) for a burn-in;
   -- promote it once the fleet read is clean. Proxied clients keep the rule's
-  -- mode. The panel ports pass no body, so it never fires there (as before);
-  -- cPanel's own login_log detector (internal/detectors/cpanel) bans failures.
+  -- mode. The panel ports read no body (ctx.body_unread), so it never runs
+  -- there, as before; cPanel's own login_log detector
+  -- (internal/detectors/cpanel) bans failures.
   do
     local mode = rule_mode(CFG.rule_auth_burst, "challenge")
-    if mode ~= "disabled" then
+    if mode ~= "disabled" and not ctx.body_unread then
       local peer = ctx.peer or ""
       if peer == "" or ip == peer then
         -- An unknown value (a typo) is logonly, never a silent "disabled".

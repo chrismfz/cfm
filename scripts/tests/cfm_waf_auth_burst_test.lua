@@ -108,6 +108,17 @@ do
   check(burst(9, { uri = "/account/login", ct = "text/plain", peer = "172.70.1.1",
                    body = '{"a":"' .. ("x"):rep(3000) .. '","user":"admin","p\\u0061ss":"guess"}' }) == "challenge_v2",
         "an escaped JSON password key past 2 KB counts")
+  -- Drupal's _format branch on its own: an XML login, not JSON-shaped, and
+  -- an encoded `%5Fformat`.
+  check(burst(9, { uri = "/user/login", args = "%5Fformat=xml", ct = "text/plain",
+                   body = "<r><name>a</name><pass>x</pass></r>", peer = "172.70.1.1" }) == "challenge_v2",
+        "Drupal _format=xml login counts")
+  -- Magento's storefront login (a /login path: login[username] + login[password]).
+  check(burst(9, { uri = "/customer/account/loginPost/", body = "form_key=x&login%5Busername%5D=a%40b.c&login%5Bpassword%5D=g",
+                   peer = "172.70.1.1" }) == "challenge_v2", "Magento storefront loginPost counts")
+  -- OpenCart's login route encoded, padded.
+  check(burst(9, { uri = "/admin/index.php", args = "route=common%2Flogin", body = pad:sub(1, 32768), clen = tostring(#pad),
+                   peer = "172.70.1.1" }) == "challenge_v2", "OpenCart encoded login route padded counts")
   -- Magento on the bare /admin route.
   check(burst(9, { uri = "/admin", body = "form_key=x&login%5Busername%5D=a&login%5Bpassword%5D=b", peer = "172.70.1.1" }) == "challenge_v2",
         "Magento login on bare /admin counts")
@@ -161,6 +172,21 @@ do
   check(burst(9, { uri = "/wp-login.php", body = "log=a&pwd=b" }) == "logonly", "a misspelled cap reads as logonly")
   package.loaded["cfm_waf_config"] = nil
   package.loaded["cfm_waf"] = nil
+end
+
+-- ── The panel ports read no body: never counted there ──────────────────────
+do
+  local dict, act = new_dict(), nil
+  for _ = 1, 12 do
+    local _, _, _, _, hits = waf.check({
+      uri = "/login/", args = "login_only=1", raw_uri = "/login/?login_only=1", method = "POST",
+      ip = "203.0.113.30", peer = "203.0.113.30", body = "", body_unread = true, shdict = dict,
+      headers = { ["user-agent"] = CHROME, ["content-length"] = "40", ["content-type"] = FORM },
+    })
+    act = nil
+    for _, h in ipairs(hits or {}) do if h.waf_rule_id == 501 then act = h.action end end
+  end
+  check(act == nil, "a panel login (body_unread) is not counted (got " .. tostring(act) .. ")")
 end
 
 if fails > 0 then
