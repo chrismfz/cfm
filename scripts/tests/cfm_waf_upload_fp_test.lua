@@ -54,7 +54,8 @@ do
   end
   for _, fn in ipairs({ ".env", ".env.local", "a/.env", ".htaccess", ".htaccess.bak", ".htpasswd", ".user.ini",
                         "user.ini", "php.ini", "x/php.ini", "web.config", "WEB.CONFIG", "shell.php",
-                        "x%2f.env", "%5cphp.ini", "x%5cweb.config", "a%2F.htaccess" }) do
+                        "x%2f.env", "%5cphp.ini", "x%5cweb.config", "a%2F.htaccess", "%2ehtaccess",
+                        "x%2f%2eenv", ".user%2eini" }) do
     local r = run(body(part('name="f"; filename="' .. fn .. '"', "data", "text/plain")))
     check(r.ids:find(",401,", 1, true) and r.action == "block", fn .. " is still blocked by 401: " .. show(r))
   end
@@ -76,6 +77,15 @@ do
   check(not r.ids:find(",402,", 1, true), "an attached error.log quoting $_POST is not 402: " .. show(r))
   r = run(body(part('name="f"; filename="notes.md"', "We log $_SERVER['REMOTE_ADDR'] for each visit.", "text/markdown")))
   check(not r.ids:find(",402,", 1, true), "an attached notes file mentioning $_SERVER is not 402: " .. show(r))
+  -- Any `<?` but `<?xml` is the opener: short-tag shells the strict 415
+  -- heuristic does not read as code are still 402.
+  for _, sh in ipairs({ "<?`$_GET[c]`;", "<?('sys'.'tem')($_GET[c]);", "\255\216\255\224<?`$_GET[c]`;",
+                        "<?'system'($_GET[c]);", "<?$$a=$_GET;" }) do
+    r = run(body(part('name="f"; filename="a.txt"', sh, "text/plain")))
+    check(r.ids:find(",402,", 1, true) and r.action == "block", "short-tag shell " .. sh .. " is 402: " .. show(r))
+  end
+  r = run(body(part('name="f"; filename="a.svg"', '<?xml version="1.0"?><svg><text>$_GET</text></svg>', "image/svg+xml")))
+  check(not r.ids:find(",402,", 1, true), "an SVG (<?xml) mentioning $_GET is not 402: " .. show(r))
   r = run(body(part('name="message"', "<?php echo 1; ?>")))
   check(r.ids:find(",402,", 1, true), "the PHP opener still reads the whole window (unchanged): " .. show(r))
 end
