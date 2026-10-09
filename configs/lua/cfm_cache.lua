@@ -662,11 +662,30 @@ local MICRO_IGNORE_PREFIX = {
 -- __Host- / __Secure- prefix stripped. The lists are normalised the same way
 -- at load (connect.sid and .aspnetcore. still match). Linear: plain finds and
 -- single-class gsubs only (the name comes from the client).
-local function hex_byte(h) return string.char(tonumber(h, 16)) end
+--
+-- %XX decode: a gsub with a lookup-table replacement (no Lua call per escape),
+-- the same table as cfm_waf_util's url_decode_once. Kept here rather than
+-- required from the WAF so the Site Cache never depends on a WAF module (a
+-- missing file there would silently switch both off); the two cannot drift
+-- because scripts/tests/cfm_waf_hex_decode_test.lua checks this decoder
+-- against the WAF's over every byte pair.
+local HEX_BYTE = {}
+do
+    local hx = "0123456789abcdef"
+    for i = 0, 255 do
+        local a, b = math.floor(i / 16) + 1, i % 16 + 1
+        for _, x in ipairs({ hx:sub(a, a), hx:sub(a, a):upper() }) do
+            for _, y in ipairs({ hx:sub(b, b), hx:sub(b, b):upper() }) do
+                HEX_BYTE[x .. y] = string.char(i)
+            end
+        end
+    end
+end
+local function percent_decode(s) return (s:gsub("%%(%x%x)", HEX_BYTE)) end
 local function cookie_key(name)
     local n = name
     if n:find("+", 1, true) then n = n:gsub("%+", " ") end
-    if n:find("%", 1, true) then n = n:gsub("%%(%x%x)", hex_byte) end
+    if n:find("%", 1, true) then n = percent_decode(n) end
     local z = n:find("\0", 1, true)
     if z then n = n:sub(1, z - 1) end
     -- PHP skips leading spaces of the (decoded) name: +PHPSESSID is PHPSESSID
@@ -1239,6 +1258,7 @@ _M._micro_bucket       = micro_bucket_seconds
 _M._micro_zone_name    = micro_zone_name
 _M._micro_cookie       = micro_cookie_verdict
 _M._cookie_key         = cookie_key
+_M._percent_decode     = percent_decode
 _M._micro_decision     = micro_decision
 _M._micro_storable     = micro_storable
 _M._micro_mark_ttl     = micro_mark_ttl
