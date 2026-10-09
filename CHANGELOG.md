@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.09
+
 ### Added
 - **Shadow signal for bursts the origin's own WAF blocks.** An IP that sends
   30 or more POSTs a minute to one site, all answered 403 by the site's own
