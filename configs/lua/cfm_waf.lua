@@ -1677,8 +1677,8 @@ function _M.check(ctx)
   -- ── 26) XML-RPC strong body signatures ───────────────────────────────────
   do
     local xtag = nil
-    if not det.is_known_legit_xmlrpc(uri, args, headers, body) then
-      xtag = det.detect_xmlrpc_probe(uri, method, body)
+    if not det.is_known_legit_xmlrpc(uri, args, headers, body, ip) then
+      xtag = det.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
     end
 
     if xtag == "AUTH_WP_XMLRPC_MULTICALL" then
@@ -1692,6 +1692,13 @@ function _M.check(ctx)
       if mode ~= "disabled" then
         local ttl = CFG.auth_xmlrpc_pingback_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
         if record("WAF_AUTH_BURST:" .. xtag, ttl, mode, RULE_IDS.rule_xmlrpc_pingback) then goto done end
+      end
+    elseif xtag == "AUTH_WP_XMLRPC_HIDDEN_METHOD" then
+      -- A ≥32 KB call with no method name in the part the edge reads
+      -- (padding past waf_body_max_len). New (2026-10-09): reported under
+      -- 510 at logonly whatever 510's mode, for a burn-in before it blocks.
+      if rule_mode(CFG.rule_xmlrpc_multicall, "block") ~= "disabled" then
+        record("WAF_AUTH_BURST:" .. xtag, CFG.default_ttl_sec, "logonly", RULE_IDS.rule_xmlrpc_multicall)
       end
     end
   end
@@ -1717,7 +1724,7 @@ function _M.check(ctx)
 
       if not (peer ~= "" and ip ~= "" and ip == peer) then
         local tag = nil
-        if not det.is_known_legit_xmlrpc(uri, args, headers, body) then
+        if not det.is_known_legit_xmlrpc(uri, args, headers, body, ip) then
           tag = det.detect_auth_burst(ip, nil, uri, method, shdict)
         end
         if tag then

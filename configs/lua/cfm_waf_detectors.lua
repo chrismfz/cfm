@@ -21,6 +21,7 @@ local CFG, util
 -- use it (the PHP form reader, the filename*= check) work before _M.init and
 -- with a partial util alike.
 local url_decode_once = require("cfm_waf_util").url_decode_once
+local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
 local has, header_string, lower, cap, count_occurs, has_long_b64_blob,
       is_known_legit_php_upload_endpoint, score_obfuscation_blob, begins,
       normalize, strip_sql_comments, scan_str,
@@ -1455,35 +1456,37 @@ end
   return nil
 end
 
+-- A fixed-window hit counter: the count of hits on key in the window its
+-- first hit opened (`win` seconds). cfm_shdict.incr: one atomic incr, the
+-- key's TTL set at creation and left alone, so the window closes `win` after
+-- its first hit as it did with the old ts/cnt pair; never dict:incr with an
+-- init (cfm_shdict.lua). nil when the dict refuses (full, wrong type).
+local function window_count(shdict, key, win)
+  -- A window under 1 s would be no expiry (0) or a refused add (< 0).
+  if not win or win < 1 then win = 1 end
+  local cnt = shd.incr(shdict, key, 1, win)
+  -- The first hit only opens the window, as the old ts/cnt pair did: a
+  -- threshold of 1 still needs a second hit.
+  if cnt and cnt < 2 then return 0 end
+  return cnt
+end
+
 function _M.detect_auth_burst(ip, host, uri, method, shdict)
   if not shdict or not ip or ip == "" then return nil end
 
   local tag = auth_endpoint_tag(uri, method)
   if not tag then return nil end
 
-  local now = ngx.now()
   local win = tonumber(CFG.auth_window_sec or 20) or 20
   local thr = tonumber(CFG.auth_burst_threshold or 8) or 8
 
   -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
   local host_key = "-"
 
-  local kts  = "auth|ts|"  .. ip .. "|" .. host_key .. "|" .. tag
-  local kcnt = "auth|cnt|" .. ip .. "|" .. host_key .. "|" .. tag
-
-  local ts  = shdict:get(kts)
-  local cnt = shdict:get(kcnt) or 0
-
-  if not ts or (now - ts) >= win then
-    shdict:set(kts, now, win + 1)
-    shdict:set(kcnt, 1, win + 1)
-    return nil
-  end
-
-  cnt = cnt + 1
-  shdict:set(kcnt, cnt, win + 1)
-
-  if cnt >= thr then
+  -- One atomic counter per window (window_count): the get-then-set pair it
+  -- replaces lost increments between workers and could restart a window.
+  local cnt = window_count(shdict, "auth|w|" .. ip .. "|" .. host_key .. "|" .. tag, win)
+  if cnt and cnt >= thr then
     return tag
   end
   return nil
@@ -1509,26 +1512,14 @@ function _M.detect_wp_login_probe(uri, method, headers, ip, host, shdict)
 
     local repeated_head = false
     if shdict and ip and ip ~= "" then
-      local now = ngx.now()
       local win = tonumber(CFG.auth_wp_login_head_window_sec or 20) or 20
       local thr = tonumber(CFG.auth_wp_login_head_threshold or 3) or 3
       -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
       local host_key = "-"
 
-      local kts  = "authwph|ts|"  .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD"
-      local kcnt = "authwph|cnt|" .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD"
-      local ts = shdict:get(kts)
-      local cnt = shdict:get(kcnt) or 0
-
-      if not ts or (now - ts) >= win then
-        shdict:set(kts, now, win + 1)
-        shdict:set(kcnt, 1, win + 1)
-      else
-        cnt = cnt + 1
-        shdict:set(kcnt, cnt, win + 1)
-        if cnt >= thr then
-          repeated_head = true
-        end
+      local cnt = window_count(shdict, "authwph|w|" .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD", win)
+      if cnt and cnt >= thr then
+        repeated_head = true
       end
     end
 
@@ -1545,9 +1536,59 @@ function _M.detect_wp_login_probe(uri, method, headers, ip, host, shdict)
   return nil
 end
 
+-- The networks WordPress.com / Jetpack call a site's xmlrpc.php from, as
+-- Jetpack publishes them (https://jetpack.com/ips-v4.txt, the same eight
+-- ranges as its "Add Jetpack IPs to an Allowlist" page; read 2026-10-09).
+-- CFG.xmlrpc_jetpack_nets overrides the list (cfm_waf_config.lua) when they
+-- change. IPv4 only: Jetpack publishes no IPv6 range.
+local JETPACK_NETS_DEFAULT = {
+  "122.248.245.244/32", "54.217.201.243/32", "54.232.116.4/32", "192.0.80.0/20",
+  "192.0.96.0/20", "192.0.112.0/20", "195.234.108.0/22", "192.0.64.0/18",
+}
+local jp_src, jp_ranges
+local function ipv4_num(ip)
+  local a, b, c, d = ip:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+  if not a then return nil end
+  a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+  if a > 255 or b > 255 or c > 255 or d > 255 then return nil end
+  return ((a * 256 + b) * 256 + c) * 256 + d
+end
+local function jetpack_ranges()
+  local src = CFG.xmlrpc_jetpack_nets
+  if type(src) ~= "table" then src = JETPACK_NETS_DEFAULT end
+  if src ~= jp_src then
+    local r = {}
+    for _, cidr in ipairs(src) do
+      local ip, bits = tostring(cidr):match("^([%d%.]+)/(%d+)$")
+      local n, b = ip and ipv4_num(ip), tonumber(bits)
+      if n and b and b >= 0 and b <= 32 then
+        local size = 2 ^ (32 - b)
+        local lo = n - (n % size)
+        r[#r + 1] = { lo, lo + size - 1 }
+      end
+    end
+    jp_src, jp_ranges = src, r
+  end
+  return jp_ranges
+end
+local function is_jetpack_ip(ip)
+  ip = tostring(ip or ""):gsub("^::ffff:", "")
+  local n = ipv4_num(ip)
+  if not n then return false end
+  for _, r in ipairs(jetpack_ranges()) do
+    if n >= r[1] and n <= r[2] then return true end
+  end
+  return false
+end
+_M.is_jetpack_ip = is_jetpack_ip
+
 -- Narrow carve-out for known-legit WordPress XML-RPC traffic.
 -- Goal: avoid challenging Jetpack while keeping generic XML-RPC protection.
-local function is_known_legit_xmlrpc(uri, args, headers, body)
+-- The markers below are the client's to send (`?for=jetpack`, a UA, the word
+-- in the body), so since 2026-10-09 the request must also come from a
+-- Jetpack network (is_jetpack_ip): a marker alone let any client run
+-- system.multicall / pingback.ping past rules 510-512 and 501.
+local function is_known_legit_xmlrpc(uri, args, headers, body, ip)
   uri = lower(uri or "")
 
   -- F24: gate on the URI FIRST. This predicate runs on the WAF hot path for every
@@ -1556,6 +1597,9 @@ local function is_known_legit_xmlrpc(uri, args, headers, body)
   -- (double-url-decode + lowercase + cap) below, which was pure waste on the
   -- ~99% of requests that aren't xmlrpc.
   if not has(uri, "/xmlrpc.php") then
+    return false
+  end
+  if not is_jetpack_ip(ip) then
     return false
   end
 
@@ -1656,24 +1700,158 @@ local function is_wc_api_callback(ul, args)
 end
 
 
-function _M.detect_xmlrpc_probe(uri, method, body)
+-- The method names an XML-RPC body calls, as WordPress's IXR_Message reads
+-- them. IXR collects character data into one buffer that every start tag and
+-- every end tag clears; comments and processing instructions do not touch it;
+-- CDATA sections and character / predefined entity references add their
+-- text; at </methodName> the method is trim(buffer) (the last one is the
+-- call). This reader replays exactly those events over the body, in one
+-- linear pass (plain finds only: a pattern with `.-` over attacker text was
+-- seconds of CPU per 32 KB request), and returns every name. So
+-- `system&#46;multicall`, `<![CDATA[system.multicall]]>`,
+-- `system<!---->.multicall`, `junk<x/>system.multicall` (the text after the
+-- last inner tag) and `<methodName a=">">` all read as IXR reads them, and
+-- padding cannot push the name out of the 2 KB window the rule used to read.
+-- Names are lowercased (IXR is case-sensitive; reading more is the safe side)
+-- and at most XMLRPC_MAX_NAME bytes long. The edge reads the first
+-- waf_body_max_len bytes of a body (32 KB): a name past them is unseen.
+local XMLRPC_MAX_NAME = 256
+-- The edge's body cap (cfm_cfg.lua waf_body_max_len, from the same env).
+local XMLRPC_HIDDEN_LEN = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "") or 32768
+-- The calls that legitimately run past the edge's body cap (a media upload,
+-- a long post). A cut body whose last visible name is anything else was
+-- padded: IXR calls the LAST name, which may sit past the cut.
+local XMLRPC_BIG_CALLS = {
+  ["wp.uploadfile"] = true, ["metaweblog.newmediaobject"] = true,
+  ["wp.newpost"] = true, ["wp.editpost"] = true, ["metaweblog.newpost"] = true,
+  ["metaweblog.editpost"] = true, ["wp.newpage"] = true, ["wp.editpage"] = true,
+  ["blogger.newpost"] = true, ["blogger.editpost"] = true, ["wp.newcomment"] = true,
+  ["wp.editcomment"] = true,
+}
+local XML_ENT = { amp = "&", lt = "<", gt = ">", quot = '"', apos = "'" }
+local function xml_text(t)
+  if not t:find("&", 1, true) then return t end
+  return (t:gsub("&(#?)([%w]+);", function(hash, v)
+    local cp
+    if hash == "" then return XML_ENT[v] end
+    if v:sub(1, 1) == "x" then cp = tonumber(v:sub(2), 16) else cp = tonumber(v) end
+    if cp and cp < 128 then return string.char(cp) end
+    return "?"
+  end))
+end
+local PHP_TRIM = { [32] = true, [9] = true, [10] = true, [13] = true, [0] = true, [11] = true }
+local function php_trim(t)
+  local i, j = 1, #t
+  while i <= j and PHP_TRIM[t:byte(i)] do i = i + 1 end
+  while j >= i and PHP_TRIM[t:byte(j)] do j = j - 1 end
+  return t:sub(i, j)
+end
+local function xmlrpc_method_names(body)
+  -- IXR_Message::parse first drops ONE `<?xml…?>` lying wholly in the first
+  -- 100 bytes of the (trimmed) body, wherever it sits — inside a tag or an
+  -- attribute value too (preg_replace('/<\?xml.*?\?>/s', …, 1), case-
+  -- sensitive). Replay that before reading, or the span desyncs the reader.
+  body = php_trim(body)
+  local h = body:sub(1, 100)
+  local xs = h:find("<?xml", 1, true)
+  local xe = xs and h:find("?>", xs + 5, true)
+  if xe then body = body:sub(1, xs - 1) .. body:sub(xe + 2) end
+  -- One text buffer, reused (nb = its live length): a fresh table per tag
+  -- was most of the cost on a body of tiny tags. Bytes compared, not subs.
+  local lb, names, buf, nb = lower(body), {}, {}, 0
+  local n, pos = #lb, 1
+  local function close_name()
+    -- Lowercased again: an entity decodes to its own case (`&#x46;` is F).
+    names[#names + 1] = lower(php_trim(table.concat(buf, "", 1, nb))):sub(1, XMLRPC_MAX_NAME)
+  end
+  while pos <= n do
+    local lt = lb:find("<", pos, true)
+    local stop = (lt or n + 1) - 1
+    if stop >= pos then
+      nb = nb + 1; buf[nb] = xml_text(lb:sub(pos, stop))
+    end
+    if not lt then break end
+    local c1, c2, c3 = lb:byte(lt + 1, lt + 3)
+    if c1 == 33 and c2 == 45 and c3 == 45 then                -- <!-- … -->
+      local e = lb:find("-->", lt + 4, true)
+      if not e then break end
+      pos = e + 3
+    elseif c1 == 33 and c2 == 91 and lb:sub(lt, lt + 8) == "<![cdata[" then
+      local e = lb:find("]]>", lt + 9, true)
+      if not e then break end
+      nb = nb + 1; buf[nb] = lb:sub(lt + 9, e - 1)
+      pos = e + 3
+    elseif c1 == 63 then                                      -- <? … ?>
+      local e = lb:find("?>", lt + 2, true)
+      if not e then break end
+      pos = e + 2
+    elseif c1 == 33 then                                      -- <!DOCTYPE …>
+      local e = lb:find(">", lt + 2, true)
+      if not e then break end
+      pos = e + 1
+    else
+      -- A start or end tag: its end is the first `>` outside a quoted
+      -- attribute value.
+      local j, e = lt + 1, nil
+      while true do
+        local k = lb:find("[\"'>]", j)
+        if not k then break end
+        local c = lb:byte(k)
+        if c == 62 then e = k; break end
+        local q = lb:find(c == 34 and '"' or "'", k + 1, true)
+        if not q then break end
+        j = q + 1
+      end
+      if not e then break end
+      if c1 == 47 then                                        -- </methodName>
+        if lb:find("^</methodname[%s>]", lt) then close_name() end
+      elseif lb:byte(e - 1) == 47 and lb:find("^<methodname[%s/]", lt) then
+        nb = 0                                                -- <methodName/>
+        close_name()
+      end
+      nb = 0
+      pos = e + 1
+    end
+  end
+  return names
+end
+_M.xmlrpc_method_names = xmlrpc_method_names
+
+function _M.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
   uri = lower(uri or "")
   method = lower(method or "get")
-  body = normalize(cap(body or "", CFG.max_scan_len))
 
   if not has(uri, "/xmlrpc.php") then return nil end
   if method ~= "post" then return nil end
+  if not body or body == "" then return nil end
 
-  if is_known_legit_xmlrpc(uri, "", nil, body) then
+  if is_known_legit_xmlrpc(uri, args or "", headers, body, ip) then
     return nil
   end
 
-  if has(body, "system.multicall") then
-    return "AUTH_WP_XMLRPC_MULTICALL"
+  local pingback = false
+  local names = xmlrpc_method_names(body)
+  for _, m in ipairs(names) do
+    if m == "system.multicall" then return "AUTH_WP_XMLRPC_MULTICALL" end
+    if m == "pingback.ping" then pingback = true end
   end
-
-  if has(body, "pingback.ping") then
-    return "AUTH_WP_XMLRPC_PINGBACK"
+  -- A multicall's own calls are strings in its params; the body-wide match
+  -- the rule always had stays for them (and for anything the reader misses).
+  local nb = normalize(cap(body, CFG.max_scan_len))
+  if has(nb, "system.multicall") then return "AUTH_WP_XMLRPC_MULTICALL" end
+  if pingback or has(nb, "pingback.ping") then return "AUTH_WP_XMLRPC_PINGBACK" end
+  -- The edge reads the first XMLRPC_HIDDEN_LEN (waf_body_max_len) bytes of
+  -- a body. A cut body with no name in them, or whose last visible name is
+  -- not a call that carries a big body (XMLRPC_BIG_CALLS: a decoy name, the
+  -- real one past the cut), was padded there: the method name is the first
+  -- child of <methodCall>, and every client writes it in the first hundred
+  -- bytes or so. Reported, not blocked (cfm_waf.lua). Known limit: a decoy
+  -- that IS a big call (`wp.uploadFile` up front, system.multicall past the
+  -- cut) reads as that call, and nothing here sees the real one; only the
+  -- 512 rate limit applies. Closing it needs the part of the body past the
+  -- cut (a plain `</methodName` count over it).
+  if #body >= XMLRPC_HIDDEN_LEN and not XMLRPC_BIG_CALLS[names[#names] or ""] then
+    return "AUTH_WP_XMLRPC_HIDDEN_METHOD"
   end
 
   return nil
@@ -1686,35 +1864,20 @@ function _M.detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, header
   method = lower(method or "get")
 
   if method ~= "post" then return nil end
-  if is_known_legit_xmlrpc(uri, args, headers, body) then
+  if is_known_legit_xmlrpc(uri, args, headers, body, ip) then
     return nil
   end
 
   if not has(uri, "/xmlrpc.php") then return nil end
 
-  local now = ngx.now()
   local win = tonumber(CFG.xmlrpc_post_window_sec or 60) or 60
   local thr = tonumber(CFG.xmlrpc_post_threshold or 6) or 6
 
   -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
   local host_key = "-"
 
-  local kts  = "xmlrpc|ts|"  .. ip .. "|" .. host_key
-  local kcnt = "xmlrpc|cnt|" .. ip .. "|" .. host_key
-
-  local ts  = shdict:get(kts)
-  local cnt = shdict:get(kcnt) or 0
-
-  if not ts or (now - ts) >= win then
-    shdict:set(kts, now, win + 1)
-    shdict:set(kcnt, 1, win + 1)
-    return nil
-  end
-
-  cnt = cnt + 1
-  shdict:set(kcnt, cnt, win + 1)
-
-  if cnt >= thr then
+  local cnt = window_count(shdict, "xmlrpc|w|" .. ip .. "|" .. host_key, win)
+  if cnt and cnt >= thr then
     return "AUTH_WP_XMLRPC_POST_BURST"
   end
 

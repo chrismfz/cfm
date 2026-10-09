@@ -33,6 +33,18 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
+- **The XML-RPC brute-force and pingback rules can no longer be skipped by
+  claiming to be Jetpack.** Rules 510-512 let through any request carrying a
+  Jetpack marker (`?for=jetpack`, a Jetpack or WordPress.com User-Agent, or
+  the word "jetpack" in the body), all of which the client chooses; a marker
+  now counts only from the networks Jetpack publishes (overridable as
+  `xmlrpc_jetpack_nets` in `cfm_waf_config.lua`). The multicall and pingback
+  rules also read the called method as WordPress does, in the first 32 KB of
+  the body that the edge reads: padding the request past 2 KB, writing
+  `system&#46;multicall`, or tricks with comments and inner tags hid it. A
+  call padded past those 32 KB is now reported (log-only for now).
+  And the XML-RPC and login burst counters count atomically across nginx
+  workers.
 - **Requests under `/.well-known/` are inspected unless they are a plain
   fetch.** The whole prefix skipped the WAF, the IP block and the challenge
   (for certificate validation). On a WordPress site, which routes any missing

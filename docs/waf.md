@@ -1313,6 +1313,59 @@ Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see 
 
 ---
 
+## XML-RPC rules (510-512) and the Jetpack carve-out
+
+510 (`system.multicall`) and 511 (`pingback.ping`) read the **method names** of
+an XML-RPC body as WordPress's IXR_Message reads them (`det.xmlrpc_method_names`,
+since 2026-10-09): one linear pass replays IXR's parser events — every start and
+end tag clears the text buffer, comments and processing instructions leave it,
+CDATA and character / predefined entity references add to it, `</methodName>`
+takes `trim(buffer)`, and a `>` inside a quoted attribute does not end a tag.
+Every name is checked (IXR calls the last). So `system&#46;multicall`, CDATA,
+comments, `junk<x/>system.multicall` and padding all read as WordPress reads
+them; before, the rules looked for the words in the first 2 KB of the body. The
+body-wide match on the first 2 KB stays (a multicall's own calls are strings in
+its params). The edge reads the first `waf_body_max_len` bytes (32 KB) of a
+body: a call cut there whose last visible method name is none (or is not one
+of the calls that carry a big body: `wp.uploadFile`, `metaWeblog.newMediaObject`,
+new / edit post, page or comment — a decoy, the real name past the cut) was
+padded past the edge, and is reported under 510 at `logonly`
+(`AUTH_WP_XMLRPC_HIDDEN_METHOD`, a burn-in before it blocks; every client writes
+the name in its first hundred bytes or so). So rule 510, a block-tier rule, has
+logonly hits too; they never feed autoblock. Rule 512 still counts those POSTs.
+**Known limit:** a decoy that *is* one of those big calls (`wp.uploadFile` up
+front, `system.multicall` past the cut — IXR calls the last name) reads as the
+big call, and neither 510 nor the hidden-method signal fires; only 512's rate
+limit applies. Closing it needs the part of the body past the cut (a plain
+`</methodName` count over it), which the edge does not keep today.
+Before reading, the reader drops one `<?xml…?>` from the first 100 bytes, as
+IXR does wherever it sits.
+
+510-512 and the auth burst (501) skip Jetpack's own traffic
+(`is_known_legit_xmlrpc`): a Jetpack marker (`?for=jetpack`, a Jetpack /
+WordPress.com User-Agent, the word in the body) **from a Jetpack network**. The
+networks are the ranges Jetpack publishes (`https://jetpack.com/ips-v4.txt`, the
+same as its "Add Jetpack IPs to an Allowlist" page; eight IPv4 ranges, read
+2026-10-09). Before that a marker alone was enough, and any client could add
+one. If Jetpack changes its ranges, set them in `cfm_waf_config.lua`:
+
+```lua
+xmlrpc_jetpack_nets = { "192.0.64.0/18", "195.234.108.0/22", "..." },
+```
+
+Until then a Jetpack request from a new address is an ordinary XML-RPC client
+(512 counts its POSTs: 6 a minute per IP across the server's vhosts).
+
+The burst counters (501, 502's repeated HEAD, 512) are one atomic
+`cfm_shdict.incr` per window; the get-then-set pair before it lost increments
+between workers. A window under 1 s counts as 1 s, and the first hit only opens
+the window (a threshold of 1 still needs a second hit), as before.
+
+This list of ranges is the one place they are hard-coded: the traffic-rules
+xmlrpc lockdown preset (`rules-model.js`) takes them as an operator input on
+purpose, since an allow rule there opens the whole path to them; here they only
+narrow an exemption that used to need no network at all.
+
 ## Per-vhost rule exclusions
 
 Operators can suppress specific WAF rules on specific hosts/paths without disabling the whole WAF for that scope. This solves the canonical "scraper triggers `WAF_PROXY_HDR` on one site" pattern (3xK Tech / vitolighting from `docs/waf-analysis-2026-05-08.md`) — keep the rest of the ruleset hot, drop just the noisy rule on the affected host.
