@@ -92,6 +92,7 @@ do
   local det = require("cfm_waf_detectors")
   local orig = det.detect_rce
   det.detect_rce = function() error("boom") end
+  local function restore() det.detect_rce = orig end
   local ok, hit, reason, _, action, hits, rule_id = pcall(waf.check, {
     uri = "/index.php", args = "id=1", raw_uri = "/index.php?id=1", method = "GET", ip = "203.0.113.5", body = "",
     headers = { ["user-agent"] = SQLMAP, accept = "*/*" } })
@@ -106,7 +107,11 @@ do
     uri = "/index.php", args = "id=1", raw_uri = "/index.php?id=1", method = "GET", ip = "203.0.113.5", body = "",
     skip_rule_ids = { [201] = true }, headers = { ["user-agent"] = SQLMAP, accept = "*/*" } })
   check(not ok, "sqlmap with 201 excluded + a raising rule: the error goes up")
-  det.detect_rce = orig
+  -- A nil ctx: the real error goes up, not one from the handler.
+  local _, err = pcall(waf.check, nil)
+  check(tostring(err):find("boom", 1, true),
+        "nil ctx: the handler does not mask the error (" .. tostring(err) .. ")")
+  restore()
 end
 
 if fails > 0 then

@@ -2481,11 +2481,23 @@ function _M.check(ctx)
   local ok, hit, reason, ttl, action, hits, rule_id = xpcall(check_impl, debug.traceback, ctx, st)
   if ok then return hit, reason, ttl, action, hits, rule_id end
   local b = st.bad_ua
-  local skip = ctx.skip_rule_ids
-  if not b or (skip and skip[RULE_IDS.rule_bad_ua]) then error(hit, 0) end
-  if ngx and ngx.log then
-    ngx.log(ngx.ERR, "[cfm_waf] rule raised behind a deferred rule-201 block; blocked as 201: ", tostring(hit))
+  if not b then error(hit, 0) end
+  local c = type(ctx) == "table" and ctx or {}
+  if c.skip_rule_ids and c.skip_rule_ids[RULE_IDS.rule_bad_ua] then error(hit, 0) end
+  -- One line a minute per node (a scan sends this request by the thousand
+  -- while the bug is live); without a dict, every time.
+  local sh = c.shdict
+  local first = true
+  if sh and sh.add then
+    local okadd, added = pcall(sh.add, sh, "waf_201_raise", 1, 60)
+    first = (not okadd) or added
   end
+  if first and ngx and ngx.log then
+    ngx.log(ngx.ERR, "[cfm_waf] rule raised behind a deferred rule-201 block; blocked as 201 ip=",
+            tostring(c.ip), " host=", tostring(c.host), " uri=", tostring(c.uri), " err=", tostring(hit))
+  end
+  -- Only the 201 hit: hits recorded before the raise are dropped (main never
+  -- evaluated those rules on this request either).
   return true, b.reason, b.ttl, "block",
          { { reason = b.reason, ttl = b.ttl, action = "block", waf_rule_id = RULE_IDS.rule_bad_ua } },
          RULE_IDS.rule_bad_ua
