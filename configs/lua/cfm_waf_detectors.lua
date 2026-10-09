@@ -1902,10 +1902,13 @@ local function each_kv(s, keyb, nonempty, fn)
     if not eq then return false end
     local ks = eq
     while ks > pos and keyb[s:byte(ks - 1)] do ks = ks - 1 end
-    local ve = s:find("&", eq + 1, true) or (n + 1)
-    if ks == eq or (nonempty and ve == eq + 1) then
+    -- No pair here (an empty key, or an empty value where one is required):
+    -- move past this `=` without looking for the value's end, or a run of
+    -- such `=` with no `&` would rescan to the end once per `=`.
+    if ks == eq or (nonempty and (eq == n or s:byte(eq + 1) == 38)) then
       pos = eq + 1
     else
+      local ve = s:find("&", eq + 1, true) or (n + 1)
       if fn(s:sub(ks, eq - 1), s:sub(eq + 1, ve - 1)) then return true end
       pos = ve
     end

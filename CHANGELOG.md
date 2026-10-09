@@ -44,9 +44,11 @@ back-filled here — see the git/PR history for that period.
   exactly the answers they gave before. Rule 10017's fallback scan now reads
   each form field name's first 96 bytes and no longer looks inside a name it
   has read; the names it stops matching are a `name=` inside another field's
-  name, which PHP reads as part of that name, and a long `pagename[...]`
-  array, which WordPress never uses as a page path. PHP's own reading of the
-  request, which the rule checks first, is unchanged.
+  name, which PHP reads as part of that name, a name padded past 96 bytes
+  with %-encoded spaces, which PHP (it does not decode a form field name)
+  never reads as `pagename`, and a long `pagename[...]` array, which
+  WordPress never uses as a page path. PHP's own reading of the request,
+  which the rule checks first, is unchanged.
 - **A repeated request header no longer switches the WAF off for that
   request, or loses its ban.** Two `Content-Type` headers crashed the
   polyglot-upload check (rule 412); the edge fails open, so every later WAF

@@ -166,7 +166,7 @@ end
 -- ── Scaling: 64 KB of each worst input ─────────────────────────────────────
 do
   local K = 65536
-  local LIMIT = 250  -- ms; the old forms take seconds on these
+  local LIMIT = 250  -- ms; the old forms take seconds on these (1-34 s measured)
   local mp = { ["content-type"] = "multipart/form-data; boundary=zzzz" }
   local cases = {
     { "10017 -name=",   function() det.detect_cve_wp_pagename_traversal("/", "post", "", ("-name="):rep(K / 6), mp) end },
@@ -179,6 +179,12 @@ do
     { "kv aaaa",        function() det.each_kv(("a"):rep(K), det.KV_DBG_KEY, false, function() end) end },
     { "kv aaaa`",       function() det.each_kv(("a"):rep(K) .. "`", det.KV_CMD_KEY, true, function() end) end },
     { "kv a=a=",        function() det.each_kv(("a="):rep(K / 2), det.KV_DBG_KEY, false, function() end) end },
+    -- No pair at any `=` (empty key / empty value) and no `&`: still one pass.
+    { "kv ?=?=",        function() det.each_kv(("?="):rep(K / 2), det.KV_DBG_KEY, false, function() end) end },
+    { "kv !=!=",        function() det.each_kv(("!="):rep(K / 2), det.KV_CMD_KEY, true, function() end) end },
+    { "kv a=a= nonempty", function() det.each_kv(("a="):rep(K / 2), det.KV_CMD_KEY, true, function() end) end },
+    { "10017 quoted spaces", function()
+        det.detect_cve_wp_pagename_traversal("/", "post", "", ('-name="' .. (" "):rep(200)):rep(K / 207), mp) end },
     { "&&& =",          function() det.has_amp_amp_value(("&"):rep(K) .. "=") end },
     { "?a=b?a=b &&k",   function() det.has_amp_amp_value(("?a=b"):rep(K / 8) .. "&&" .. ("k"):rep(K / 2)) end },
     { "&a&a",           function() det.has_amp_amp_value(("&a"):rep(K / 2)) end },
