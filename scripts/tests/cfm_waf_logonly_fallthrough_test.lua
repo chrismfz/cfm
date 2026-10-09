@@ -221,8 +221,10 @@ do
   check(r.ok and r.exited == 403 and r.action == "block",
         "WAF error under fail_open: the bridge's IP block still applies (" .. desc(r) .. ")")
   local logged = false
-  for _, l in ipairs(r.logs) do if l:find("waf_error", 1, true) and l:find("rule exploded", 1, true) then logged = true end end
-  check(logged, "WAF error under fail_open is logged")
+  for _, l in ipairs(r.logs) do
+    if l:find("waf_error", 1, true) and l:find("rule exploded", 1, true) and l:find("traceback", 1, true) then logged = true end
+  end
+  check(logged, "WAF error under fail_open is logged, with the rule's stack")
   r = H.run{ waf_fake = boom, fail_open = true }
   check(r.ok and r.action == "allow" and r.upstream == "cfm_apache", "WAF error under fail_open, nothing else: allowed (" .. desc(r) .. ")")
   r = H.run{ waf_fake = boom, fail_open = false }
@@ -236,13 +238,16 @@ do
   r = H.run{ micro = true, headers = LOG4 }
   check(r.ok and r.execd == nil and r.action == "logonly" and r.upstream == "cfm_apache",
         "logonly hit with micro armed: origin, not the micro cache (" .. desc(r) .. ")")
+  local boom = { enabled = function() return true end, check = function() error("rule exploded") end }
+  r = H.run{ micro = true, waf_fake = boom, fail_open = true }
+  check(r.ok and r.execd == nil and r.action == "allow" and r.upstream == "cfm_apache",
+        "WAF error with micro armed: origin, not the micro cache (" .. desc(r) .. ")")
 end
 do
   local f = assert(io.open("configs/lua/cfm.lua", "r"))
   local src = f:read("*a"); f:close()
-  check(src:find("local function micro_cache_target()\n  if ngx.ctx.cfm_waf_logonly then return nil end", 1, true) ~= nil,
-        "micro_cache_target refuses a logonly hit")
-  check(src:find("ngx.ctx.cfm_waf_logonly = true", 1, true) ~= nil, "a logonly hit sets the flag")
+  check(src:find("local function micro_cache_target()\n  if ngx.ctx.cfm_no_micro then return nil end", 1, true) ~= nil,
+        "micro_cache_target refuses a flagged request")
 end
 
 if fails > 0 then
