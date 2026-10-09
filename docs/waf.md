@@ -1568,7 +1568,8 @@ Key invariants:
 - **POST to an allowlisted path** (`.php`, `/wp-admin/`, `/wp-json/`, `/?wc-ajax=`, … — the list in
   `waf_should_read_body`): always read.
 - **Any other POST/PUT/PATCH:** read when the Content-Type is inspectable (form, JSON, XML,
-  multipart, `text/*`) and the Content-Length is at most `CFM_WAF_BODY_READ_MAX_CL` (1 MiB).
+  multipart, `text/*`, or none at all) and the Content-Length is at most
+  `CFM_WAF_BODY_READ_MAX_CL` (1 MiB).
 - **POST on `location /` with no Content-Length (chunked, HTTP/2) or a larger one** (since
   2026-10-09): read too, because nginx buffers that location's bodies anyway (the conf sets
   `$cfm_body_buffered`). Only the first `CFM_WAF_BODY_MAX_LEN` (32 KB) is ever scanned.
