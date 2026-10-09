@@ -857,25 +857,15 @@ function _M.check(ctx)
   local function get_norm_args_wide()
     if not _norm_args_wide then
       if #(args or "") <= CFG.max_scan_len then _norm_args_wide = get_norm_args()
-      else _norm_args_wide = normalize(cap(args, CFG.uri_scan_len or CFG.max_scan_len)) end
+      else _norm_args_wide = normalize(cap(args, util.uri_scan_cap())) end
     end
     return _norm_args_wide
   end
 
   -- lower(cap(body,max_scan_len)), shared by the five RCE-marker detectors
   -- (reverse_shell/persistence/rootkit/lolbin/coinminer) (audit F59).
-  -- A form-encoded body is url-decoded first (`+` a space, %XX a byte, as PHP
-  -- reads it): `;wget%20…` / `bash+-i` in a form post went past these
-  -- markers, which match the decoded text.
   local function get_body_lc()
-    if not _body_lc then
-      local b = cap(body or "", CFG.max_scan_len)
-      if b:find("[%%+]") and lower(util.header_string(headers["content-type"] or headers["Content-Type"]))
-                              :find("application/x-www-form-urlencoded", 1, true) then
-        b = util.url_decode_once((b:gsub("%+", " ")))
-      end
-      _body_lc = lower(b)
-    end
+    if not _body_lc then _body_lc = lower(cap(body or "", CFG.max_scan_len)) end
     return _body_lc
   end
 
@@ -904,7 +894,8 @@ function _M.check(ctx)
       -- query padding pushed a php:// / O:… payload past every rule reading
       -- this surface; the query rules on scan_str already read that deep.
       local acap = budget
-      if (CFG.uri_scan_len or 0) > acap then acap = CFG.uri_scan_len end
+      local ucap = util.uri_scan_cap()
+      if ucap > acap then acap = ucap end
       -- A JSON body's \u00XX / \/ escapes are decoded (json_unescape_ascii):
       -- `\u0027` is a quote to the app. JSON by media type or by shape (a body
       -- that opens with { or [; an app may json_decode php://input whatever
@@ -1220,7 +1211,9 @@ function _M.check(ctx)
   -- the raw surface needs no outer strip here.
   do
     local mode = rule_mode(CFG.rule_rce, "block")
-    if mode ~= "disabled" and det.detect_rce(uri, args, get_scan_ua()) then
+    -- `+` read as the space it is in a query string (`;wget+http://…`), as
+    -- PHP reads it: normalize() leaves it as is. This rule's markers only.
+    if mode ~= "disabled" and det.detect_rce(uri, args, (get_scan_ua():gsub("%+", " "))) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
       if record("WAF_RCE", ttl, mode, RULE_IDS.rule_rce) then goto done end

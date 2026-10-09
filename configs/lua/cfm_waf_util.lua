@@ -309,14 +309,30 @@ local function url_decode_once(s)
   return (s:gsub("%%(%x%x)", HEX_BYTE))
 end
 
--- A JSON body's ASCII escapes decoded, as PHP's json_decode() reads them:
--- `\u0027` is a quote to the app, so the scan surface must see one. Only
--- \u0000-\u007F and `\/` (non-ASCII escapes cannot spell a payload the rules
--- look for). A string with no backslash is returned as is.
+-- A JSON body's ASCII escapes decoded, for the scan surface: \u0000-\u007F,
+-- `\/` and the control escapes \t \n \r \b \f, as json_decode() turns them into
+-- the bytes the app sees (`\u0027` is a quote, `\t` a separator between SQL
+-- words). Non-ASCII \u escapes cannot spell a payload the rules look for and
+-- stay as written, as do `\\` and `\"`.
+local JSON_CTRL = { ["/"] = "/", t = "\t", n = "\n", r = "\r", b = "\b", f = "\f" }
 local function json_unescape_ascii(s)
   if not s or not s:find("\\", 1, true) then return s end
-  s = s:gsub("\\[uU]00([0-7]%x)", function(h) return string.char(tonumber(h, 16)) end)
-  return (s:gsub("\\/", "/"))
+  local out, i = {}, 1
+  while true do
+    local j = s:find("\\", i, true)
+    if not j then out[#out + 1] = s:sub(i); break end
+    out[#out + 1] = s:sub(i, j - 1)
+    local c = s:sub(j + 1, j + 1)
+    local h = (c == "u") and s:match("^00([0-7]%x)", j + 2)
+    if h then
+      out[#out + 1] = string.char(tonumber(h, 16)); i = j + 6
+    elseif JSON_CTRL[c] then
+      out[#out + 1] = JSON_CTRL[c]; i = j + 2
+    else
+      out[#out + 1] = s:sub(j, j + 1); i = j + 2  -- `\\`, `\"`, a non-ASCII \u: as written
+    end
+  end
+  return table.concat(out)
 end
 
 local function normalize(s)
@@ -387,13 +403,19 @@ end
 -- older configs. This window is wider than the legacy 2048, which is safe only
 -- because strip_sql_comments is now O(n) (F62) — a quadratic strip here would
 -- turn the bigger window into a CPU-DoS.
-local function scan_str(uri, args)
-  -- Defensive like body_budget(): an operator-authored cfm_waf_config.lua could
-  -- set uri_scan_len to a string / 0 / negative. tonumber + positivity floor
-  -- keeps cap()'s `#s <= n` from erroring (nil/string) or silently disabling
-  -- the scan (0), degrading to the legacy 2048 instead.
+-- The request-line scan budget (CFG.uri_scan_len). Defensive like
+-- body_budget(): an operator-authored cfm_waf_config.lua could set it to a
+-- string / 0 / negative. tonumber + positivity floor keeps cap()'s `#s <= n`
+-- from erroring (nil/string) or silently disabling the scan (0), degrading to
+-- the legacy 2048 instead.
+local function uri_scan_cap()
   local n = tonumber(CFG and (CFG.uri_scan_len or CFG.max_scan_len))
   if not n or n < 1 then n = 2048 end
+  return n
+end
+
+local function scan_str(uri, args)
+  local n = uri_scan_cap()
   return normalize(cap(uri or "", n) .. "?" .. cap(args or "", n))
 end
 
@@ -468,11 +490,12 @@ local function body_budget(headers)
   ct = string.lower(ct)
   if string.find(ct, "multipart/form-data", 1, true)            then return pick_or("multipart") end
   if string.find(ct, "application/x-www-form-urlencoded", 1, true) then return pick_or("urlencoded") end
-  -- Any JSON / XML media type (application/vnd.api+json, text/json,
-  -- application/soap+xml …), as ct_is_inspectable reads them; they used to
-  -- get the 2 KB "other" budget, so a payload past it went unscanned.
-  if string.find(ct, "json", 1, true)                           then return pick_or("json") end
-  if string.find(ct, "xml", 1, true)                            then return pick_or("xml") end
+  -- A JSON / XML media type by its subtype or suffix (application/vnd.api+json,
+  -- text/json, application/soap+xml …): they used to get the 2 KB "other"
+  -- budget, so a payload past it went unscanned. Not a bare substring: an
+  -- office document (vnd.openxmlformats-…) is a zip, not XML.
+  if ct:find("[/+]json") then return pick_or("json") end
+  if ct:find("[/+]xml")  then return pick_or("xml") end
   return pick_or("other")
 end
 
@@ -580,6 +603,7 @@ _M.score_obfuscation_blob             = score_obfuscation_blob
 _M.begins                             = begins
 _M.url_decode_once                    = url_decode_once
 _M.json_unescape_ascii                = json_unescape_ascii
+_M.uri_scan_cap                       = uri_scan_cap
 _M.normalize                          = normalize
 _M.strip_sql_comments                 = strip_sql_comments
 _M.scan_str                           = scan_str

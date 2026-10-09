@@ -1730,16 +1730,18 @@ Body-aware detectors (`php_wrappers`, `ssrf_proto`, `js_proto`) consume a normal
 | Key | Default | Matches |
 |---|---|---|
 | `urlencoded` | `8192`  | `application/x-www-form-urlencoded` |
-| `json`       | `32768` | any media type containing `json` (`application/json`, `application/vnd.api+json`, `text/json`; since 2026-10-09, before that `application/json` only) |
+| `json`       | `32768` | a `json` subtype or `+json` suffix (`application/json`, `application/vnd.api+json`, `text/json`; since 2026-10-09, before that `application/json` only) |
 | `multipart`  | `16384` | `multipart/form-data` (matched first) |
-| `xml`        | `16384` | any media type containing `xml` (`application/xml`, `text/xml`, `application/soap+xml`) |
+| `xml`        | `16384` | an `xml` subtype or `+xml` suffix (`application/xml`, `text/xml`, `application/soap+xml`) |
 | `other`      | `2048`  | Everything else (incl. unset / unknown / `text/plain`) |
 
 That budget caps the **body** side. The query side of the same string gets the request-line
 budget (`uri_scan_len`, 8192) when that is larger (since 2026-10-09; on a GET the "other"
 2 KB used to cap it, so query padding hid a payload). A JSON body (by media type, or one
-that opens with `{` / `[`) has its `\u0000`-`\u007F` and `\/` escapes decoded first, as
-`json_decode` reads them (`util.json_unescape_ascii`).
+that opens with `{` / `[`) has its `\u0000`-`\u007F`, `\/` and `\t \n \r \b \f` escapes decoded
+first (`util.json_unescape_ascii`; `\\` stays one unit, so Gutenberg's `\\u0027` stays text).
+JSON / XML are matched by subtype or suffix (`/json`, `+json`, `/xml`, `+xml`): an office
+document (`vnd.openxmlformats-…`) is a zip and keeps the 2 KB budget.
 
 `CFG.max_scan_len` (default `2048`) is the legacy fallback used by callsites without header context — URI+args scans (`scan_str`) and body-only detectors invoked outside the engine's hot path. The 17+ standalone callsites in `cfm_waf_detectors.lua` still use it; only `get_norm_ab` is on the budget table today.
 

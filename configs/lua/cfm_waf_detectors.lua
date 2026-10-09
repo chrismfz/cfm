@@ -652,12 +652,10 @@ function _M.detect_rce(uri, args, _s)
   if has(s, "${j{n{d{i") then return true end
   if has(s, "$%7bjndi")  then return true end
 
-  -- `+` too: in a query string it is the space (`;wget+http://…`), and
-  -- normalize() leaves it as is.
-  if has(s, ";wget ") or has(s, ";wget+") then return true end
-  if has(s, ";curl ") or has(s, ";curl+") then return true end
+  if has(s, ";wget ") then return true end
+  if has(s, ";curl ") then return true end
   if has(s, "|bash")  then return true end
-  if has(s, "|sh ")   or has(s, "|sh+")   then return true end
+  if has(s, "|sh ")   then return true end
   if has(s, "`wget")  then return true end
   if has(s, "`curl")  then return true end
 

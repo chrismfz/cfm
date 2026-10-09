@@ -33,21 +33,21 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
-- **Five ways to hide a payload from the WAF's scan are closed.** A JSON
+- **Four ways to hide a payload from the WAF's scan are closed.** A JSON
   body's escapes were scanned as written, so `1\u0027 OR
-  \u00271\u0027=\u00271` (a quote tautology once the app decodes it) passed
-  the SQL-injection rule; they are now decoded the way PHP's `json_decode`
-  does. JSON and XML sent under a media type like `application/vnd.api+json`
-  or `application/soap+xml` were scanned only to 2 KB instead of 32 / 16 KB.
-  On a GET, 2 KB of padding in the query string pushed a `php://` wrapper or
-  a serialized PHP object out of reach of the rules that block them; the
-  query is now scanned to 8 KB, as the injection rules already did. Form
-  posts were not URL-decoded for the reverse-shell, persistence, rootkit,
-  LOLBin and coin-miner markers (all challenge-tier), so
-  `bash+-i+>%26+/dev/tcp/…` went unseen. And `;wget+http://…` in a query
-  string (`+` is a space there) slipped past the command-injection block
-  rule. Legitimate JSON with escaped quotes, accents, HTML or URLs is
-  unaffected.
+  \u00271\u0027=\u00271` (a quote tautology once the app decodes it), or SQL
+  words split by `\t`, passed the SQL-injection rule; ASCII `\u00XX`, `\/`
+  and control escapes are now decoded for the scan (an escaped backslash
+  stays one, so the WordPress editor's `\\u0027` attributes stay text). JSON
+  and XML sent under a media type like `application/vnd.api+json` or
+  `application/soap+xml` were scanned only to 2 KB instead of 32 / 16 KB. On
+  a GET, 2 KB of padding in the query string pushed a `php://` wrapper or a
+  serialized PHP object out of reach of the rules that block them; the query
+  is now scanned to 8 KB, as the injection rules already did. And
+  `;wget+http://…` or `|sh+…` in a query string (`+` is a space there)
+  slipped past the command-injection block rule, which already blocked the
+  `%20` spelling. Legitimate JSON with escaped quotes, accents, HTML or
+  URLs, and office-document uploads, are unaffected.
 - **A POST body sent without a Content-Length, or declared larger than 1 MB,
   was never inspected by the WAF on most routes.** A chunked upload
   (`Transfer-Encoding: chunked`), an HTTP/2 request without the header, or a
