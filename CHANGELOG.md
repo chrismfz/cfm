@@ -88,6 +88,11 @@ back-filled here — see the git/PR history for that period.
   (never below 100); `0` turns the check off.
 
 ### Changed
+- **The Site Cache's cookie matching uses the WAF's percent-decoder.** One
+  small module, `cfm_urldecode.lua`, now holds the edge's only `%XX` decoder
+  (lookup table, no Lua call per escape), shared by the WAF and the Site
+  Cache's session-cookie matching, so the two cannot drift apart. Same bytes
+  out. The installers' pre-flight lists the new module.
 - **The WAF's percent-decoding is faster.** The normalized scan surface every
   rule reads, and the `filename*=` upload check, now decode `%XX` through a
   lookup table instead of a Lua call per escape: a 30 KB percent-encoded body

@@ -56,6 +56,7 @@
 -- until their first poll succeeds).
 
 local cjson = require "cjson.safe"
+local urldecode = require "cfm_urldecode" -- the edge's one %XX decoder (shared with the WAF)
 local bcfg  = require "cfm_bridge_cfg"   -- master SITE_CACHE gate (~10s TTL)
 
 local _M = {}
@@ -662,11 +663,10 @@ local MICRO_IGNORE_PREFIX = {
 -- __Host- / __Secure- prefix stripped. The lists are normalised the same way
 -- at load (connect.sid and .aspnetcore. still match). Linear: plain finds and
 -- single-class gsubs only (the name comes from the client).
-local function hex_byte(h) return string.char(tonumber(h, 16)) end
 local function cookie_key(name)
     local n = name
     if n:find("+", 1, true) then n = n:gsub("%+", " ") end
-    if n:find("%", 1, true) then n = n:gsub("%%(%x%x)", hex_byte) end
+    if n:find("%", 1, true) then n = urldecode.percent(n) end
     local z = n:find("\0", 1, true)
     if z then n = n:sub(1, z - 1) end
     -- PHP skips leading spaces of the (decoded) name: +PHPSESSID is PHPSESSID
