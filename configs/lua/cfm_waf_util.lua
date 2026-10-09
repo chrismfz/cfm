@@ -285,10 +285,27 @@ local function begins(s, prefix)
   return string.sub(s, 1, #prefix) == prefix
 end
 
+-- HEX_BYTE["2e"] = "." for every %XX pair, either hex case: a gsub with a
+-- table replacement decodes without a Lua call per escape (the function form
+-- did string.char(tonumber(h, 16)) for each). Every pair %x%x can match is a
+-- key, so nothing falls through to the literal match. Shared with the PHP
+-- form decoder in cfm_waf_detectors.lua; scripts/tests/cfm_waf_hex_decode_test.lua
+-- pins it to the function form over all byte pairs.
+local HEX_BYTE = {}
+do
+  local hx = "0123456789abcdef"
+  for i = 0, 255 do
+    local a, b = math.floor(i / 16) + 1, i % 16 + 1
+    for _, x in ipairs({ hx:sub(a, a), hx:sub(a, a):upper() }) do
+      for _, y in ipairs({ hx:sub(b, b), hx:sub(b, b):upper() }) do
+        HEX_BYTE[x .. y] = string.char(i)
+      end
+    end
+  end
+end
+
 local function url_decode_once(s)
-  return (s:gsub("%%(%x%x)", function(h)
-    return string.char(tonumber(h, 16))
-  end))
+  return (s:gsub("%%(%x%x)", HEX_BYTE))
 end
 
 local function normalize(s)
@@ -539,6 +556,7 @@ _M.is_php_hostile_asset_upload = is_php_hostile_asset_upload
 _M.score_obfuscation_blob             = score_obfuscation_blob
 _M.begins                             = begins
 _M.url_decode_once                    = url_decode_once
+_M.HEX_BYTE                           = HEX_BYTE
 _M.normalize                          = normalize
 _M.strip_sql_comments                 = strip_sql_comments
 _M.scan_str                           = scan_str

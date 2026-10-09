@@ -170,22 +170,10 @@ end
 -- direction; under-reading is a bypass. Every scan is linear in the input.
 
 -- application/x-www-form-urlencoded decode (php_url_decode): `+` is a space,
--- %XX a byte, a malformed % stays literal.
-local HEX_BYTE = {}
-do
-  local hx = "0123456789abcdef"
-  for i = 0, 255 do
-    local a, b = math.floor(i / 16) + 1, i % 16 + 1
-    for _, x in ipairs({ hx:sub(a, a), hx:sub(a, a):upper() }) do
-      for _, y in ipairs({ hx:sub(b, b), hx:sub(b, b):upper() }) do
-        HEX_BYTE[x .. y] = string.char(i)
-      end
-    end
-  end
-end
+-- %XX a byte (cfm_waf_util's url_decode_once), a malformed % stays literal.
+-- url_decode_once is a late-bound upvalue (_M.init); this only runs after it.
 local function _form_unescape(s)
-  s = s:gsub("%+", " ")
-  return (s:gsub("%%(%x%x)", HEX_BYTE))
+  return url_decode_once((s:gsub("%+", " ")))
 end
 
 -- Each `k=v` pair of a form-encoded string, split on `&` (empty pairs
@@ -3972,7 +3960,7 @@ function _M.detect_upload_filename(body, headers)
   -- on the backend either.
   for raw in body:gmatch(FN .. "%s*%*%s*=%s*([^%s;\r\n\"]+)") do
     local v = raw:match("^[^']*'[^']*'(.*)$") or raw
-    v = v:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+    v = url_decode_once(v)
     local hit = bad_fname(v)
     if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. v:sub(1, 64) end
   end
