@@ -488,15 +488,22 @@ local function body_budget(headers)
   local ct = header_string(raw)
   if ct == "" then return pick_or("other") end
   ct = string.lower(ct)
-  if string.find(ct, "multipart/form-data", 1, true)            then return pick_or("multipart") end
-  if string.find(ct, "application/x-www-form-urlencoded", 1, true) then return pick_or("urlencoded") end
-  -- A JSON / XML media type by its subtype or suffix (application/vnd.api+json,
-  -- text/json, application/soap+xml …): they used to get the 2 KB "other"
-  -- budget, so a payload past it went unscanned. Not a bare substring: an
-  -- office document (vnd.openxmlformats-…) is a zip, not XML.
-  if ct:find("[/+]json") then return pick_or("json") end
-  if ct:find("[/+]xml")  then return pick_or("xml") end
-  return pick_or("other")
+  -- Every type the header names counts, and the largest budget wins: a
+  -- parameter naming another type (`application/json; x=multipart/form-data`)
+  -- must never shrink the surface below what the media type gets. A JSON /
+  -- XML type by its subtype or suffix (application/vnd.api+json, text/json,
+  -- application/soap+xml …; they used to get the 2 KB "other" budget). Not a
+  -- bare substring: an office document (vnd.openxmlformats-…) is a zip.
+  local best
+  local function take(key)
+    local v = pick_or(key)
+    if not best or v > best then best = v end
+  end
+  if string.find(ct, "multipart/form-data", 1, true)            then take("multipart") end
+  if string.find(ct, "application/x-www-form-urlencoded", 1, true) then take("urlencoded") end
+  if ct:find("[/+]json") then take("json") end
+  if ct:find("[/+]xml")  then take("xml") end
+  return best or pick_or("other")
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────

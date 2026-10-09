@@ -114,8 +114,14 @@ do
   check(bb({ ["content-type"] = "text/json; charset=utf-8" }) == json, "text/json gets the JSON budget")
   local xml = bb({ ["content-type"] = "application/xml" })
   check(bb({ ["content-type"] = "application/soap+xml" }) == xml, "+xml gets the XML budget")
-  check(bb({ ["content-type"] = "multipart/form-data; boundary=json" }) == bb({ ["content-type"] = "multipart/form-data" }),
-        "multipart is matched before a `json` in its boundary")
+  -- A parameter naming another type never shrinks the budget (security
+  -- review of this PR: the first cut matched the form types first).
+  for _, ct in ipairs({ "application/json; x=application/x-www-form-urlencoded",
+                        "application/json; boundary=multipart/form-data",
+                        "application/x-www-form-urlencoded; x=application/json",
+                        "multipart/form-data; boundary=application/json" }) do
+    check(bb({ ["content-type"] = ct }) == json, ct .. ": the JSON budget (the largest named)")
+  end
   check(bb({ ["content-type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }) ==
         bb({ ["content-type"] = "application/octet-stream" }), "an office document keeps the 2 KB budget")
   check(j('a\\\\u0027b') == 'a\\\\u0027b', "an escaped backslash is one unit: \\\\u0027 stays text")
