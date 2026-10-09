@@ -6,9 +6,10 @@
 --     register shell.php (checked against php -S). 401 now also checks every
 --     filename PHP registers (each_multipart_field, the oracle-checked reader).
 --   * 414 stopped after 512 `PK\3\4` headers: 512 decoys in a field before the
---     real zip hid its entries (the ANTONKILL SP Page Builder vector).
+--     real zip hid its entries (the ANTONKILL SP Page Builder vector). Reading
+--     them all must not cost a match per overlapping name (zip_bad_index).
 --   * 402's short-echo matcher missed `<?=\f(`, `<?=/**/f(`, `<?=#x` LF `f(`,
---     `<?=print`…``, `<?= new X(`, and the `<? echo` short open tag.
+--     `<?=print`…``, `<?= new X(`, `<?=0||f(`, `<?=true?f():1` …
 --   * 402 reads the body's first 2 KB only: a webshell after 2 KB of image
 --     data went unseen. New rule 415 reads the uploaded files to the multipart
 --     budget for the openers, logonly (burn-in).
@@ -82,6 +83,34 @@ do
     check(r.action == "block" and (r.ids:find(",414=block,", 1, true) or r.ids:find(",10014=block,", 1, true)),
           n .. " decoys: the SP Page Builder zip is blocked: " .. show(r))
   end
+  -- zip_bad_index answers exactly what _zip_entry_bad_ext does on every range.
+  local toks = { ".php", ".php5", "5", ".phtml", ".phtm", "l", ".pht", ".phar", ".phps", ".htaccess",
+                 ".user.ini", ".user", "x", "/", " ", "\0", ".", ".ph", "p", "t", "-", "_", ".PHP" }
+  math.randomseed(5)
+  local mism = 0
+  for _ = 1, 3000 do
+    local t = {}
+    for j = 1, math.random(1, 12) do t[j] = toks[math.random(#toks)] end
+    local lb = table.concat(t):lower()
+    local bad = det._zip_bad_index(lb)
+    for _ = 1, 10 do
+      local a = math.random(1, #lb); local z = math.random(a, #lb)
+      if bad(a, z) ~= (det._zip_entry_bad_ext(lb:sub(a, z)) ~= nil) then
+        mism = mism + 1
+        if mism < 4 then check(false, ("zip_bad_index(%q)(%d, %d) disagrees"):format(lb, a, z)) end
+      end
+    end
+  end
+  check(mism == 0, mism .. " zip_bad_index mismatches")
+  -- Overlapping fake headers (one every 11 bytes, each naming 512 bytes) with
+  -- a decoy extension in every name, then a real entry: found, and cheaply.
+  local unit = "PK\3\4\0\2a.phz"
+  local b = body(part('name="file"; filename="a.zip"', unit:rep(2900) .. zip_entry("x.php"), "application/zip"))
+  local t0 = os.clock()
+  local hit = det.detect_upload_archive_php(b, { ["content-type"] = MP .. " " })
+  local ms = (os.clock() - t0) * 1000
+  check(hit and hit:find("ZIP_PHP", 1, true), "the entry after 2 900 overlapping headers is found: " .. tostring(hit))
+  check(ms < 60, ("414 over 2 900 overlapping headers took %.1f ms"):format(ms))
 end
 
 -- ── 402: short-echo variants ───────────────────────────────────────────────
@@ -92,6 +121,13 @@ do
     '<?=system/**/("id")?>', '<?=@$_GET[0]?>',
     "<?=!system('id')?>", "<?=-system('id')?>", "<?=~system('id')?>", "<?=0?system('id'):1?>",
     "<?=system//x\n('id')?>", "<?=system#x\n('id')?>",
+    "<?=0||system('id')?>", "<?=1&&system('id')?>", "<?=1??system('id')?>", "<?=0?:system('id')?>",
+    "<?=1 and system('id')?>", "<?=0x1?system('id'):1?>", "<?=true?system('id'):1?>",
+    "<?=PHP_EOL.system('id')?>", "<?=Closure::fromCallable('system')('id')?>",
+    "<?=<<<A\n{${system('id')}}\nA\n?>", "<?=!!!!!!!system('id')?>",
+    -- A `#` comment ends at `?>`: a later opener inside a scanned comment
+    -- must not reuse that comment's `*/` (it did: a 402 and 415 bypass).
+    "<?=1# ?><?=/* */system('echo PWNED')?>\n/* q */ x",
   }) do
     local r = run(body(part('name="f"; filename="x.jpg"', php, "image/jpeg")))
     check(r.ids:find(",402=block,", 1, true), "402 catches " .. php:gsub("\n", "<LF>") .. ": " .. show(r))
@@ -102,7 +138,13 @@ do
   for _, s in ipairs({ "<?xml version=\"1.0\"?>", "a<?=b", "x <? y", "<?=9", "data<?\0=",
                        "<?\v$x", "<?=\f$x", "<?\fecho $x", "<? $ 5" }) do
     local r = run(body(part('name="f"; filename="x.svg"', s, "image/svg+xml")))
-    check(not r.ids:find(",402=", 1, true), "no 402 on " .. s:gsub("%z", "\\0") .. ": " .. show(r))
+    check(not r.ids:find(",402=", 1, true) and not r.ids:find(",415=", 1, true),
+          "no 402 / 415 on " .. s:gsub("%z", "\\0") .. ": " .. show(r))
+  end
+  -- A ticket quoting a translation call (`__(` / `_e(` / `_(`): no 402 block.
+  for _, txt in ipairs({ "the login page shows <?= __('Login') ?> literally", "<?=_e('x')?> and <?= _('y') ?>" }) do
+    local r = run(body(part('name="message"', txt)))
+    check(not r.hit, "a ticket quoting " .. txt .. " stays clean: " .. show(r))
   end
 end
 
@@ -129,7 +171,8 @@ do
   check(r.ids:find(",415=logonly,", 1, true), "an opener straddling 402's edge → 415: " .. show(r))
   -- The `<?` short open tag: 415 (file bytes), never 402, which reads text
   -- fields too — a ticket quoting `<? echo $title; ?>` is no webshell.
-  for _, php in ipairs({ '<? echo strtoupper("ok3");?>', "<? $x = `id`; ?>", "<?\nsystem('id');" }) do
+  for _, php in ipairs({ '<? echo strtoupper("ok3");?>', "<? $x = `id`; ?>", "<?\nsystem('id');",
+                        "<? @eval($x);?>", "<? system ('id');?>", "<? \\system('id');", "<? /**/system('id');" }) do
     r = run(body(part('name="f"; filename="x.jpg"', php, "image/jpeg")))
     check(r.ids:find(",415=logonly,", 1, true) and not r.ids:find(",402=", 1, true),
           "short open tag in a small file → 415, not 402: " .. php:gsub("\n", "<LF>") .. ": " .. show(r))
