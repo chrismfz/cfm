@@ -87,7 +87,7 @@ end
 -- ── 402: short-echo variants ───────────────────────────────────────────────
 do
   for _, php in ipairs({
-    '<?=\\strtoupper("ok1")?>', '<?=/**/strtoupper("ok2")?>', '<? echo strtoupper("ok3");?>',
+    '<?=\\strtoupper("ok1")?>', '<?=/**/strtoupper("ok2")?>', '<?=#x\rstrtoupper("ok3")?>',
     '<?=#x\nstrtoupper("ok4")?>', '<?=print`echo ok5`?>', '<?=\tnew ArrayObject([1])?>',
     '<?=system/**/("id")?>', '<?=@$_GET[0]?>',
     "<?=!system('id')?>", "<?=-system('id')?>", "<?=~system('id')?>", "<?=0?system('id'):1?>",
@@ -100,7 +100,7 @@ do
   -- \v and \f are not PHP whitespace after an opener (the tokenizer reads
   -- space, tab, CR, LF only).
   for _, s in ipairs({ "<?xml version=\"1.0\"?>", "a<?=b", "x <? y", "<?=9", "data<?\0=",
-                       "<?\v$x", "<?=\f$x", "<?\fecho $x" }) do
+                       "<?\v$x", "<?=\f$x", "<?\fecho $x", "<? $ 5" }) do
     local r = run(body(part('name="f"; filename="x.svg"', s, "image/svg+xml")))
     check(not r.ids:find(",402=", 1, true), "no 402 on " .. s:gsub("%z", "\\0") .. ": " .. show(r))
   end
@@ -127,17 +127,29 @@ do
   r = run(body(part('name="f"; filename="a.gif"',
     "GIF89a" .. ("\1"):rep(1850) .. "<?=" .. (" "):rep(300) .. "system($_GET[0]);?>", "image/gif")))
   check(r.ids:find(",415=logonly,", 1, true), "an opener straddling 402's edge → 415: " .. show(r))
+  -- The `<?` short open tag: 415 (file bytes), never 402, which reads text
+  -- fields too — a ticket quoting `<? echo $title; ?>` is no webshell.
+  for _, php in ipairs({ '<? echo strtoupper("ok3");?>', "<? $x = `id`; ?>", "<?\nsystem('id');" }) do
+    r = run(body(part('name="f"; filename="x.jpg"', php, "image/jpeg")))
+    check(r.ids:find(",415=logonly,", 1, true) and not r.ids:find(",402=", 1, true),
+          "short open tag in a small file → 415, not 402: " .. php:gsub("\n", "<LF>") .. ": " .. show(r))
+  end
+  for _, txt in ipairs({ "After the PHP 8 upgrade my theme shows raw code: <? echo $title; ?> help",
+                         "Is <? print_r($x) ?> still allowed?" }) do
+    r = run(body(part('name="message"', txt)))
+    check(not r.hit, "a ticket quoting a short tag stays clean: " .. show(r))
+  end
 end
 
 -- ── Cost: the short-echo parser stays linear on runs of openers ─────────────
 do
   local src = io.open("configs/lua/cfm_waf_detectors.lua"):read("*a")
-  local fsrc = src:match("(local SHORT_ECHO_WORDS.-\nlocal function has_php_short_echo%(s%).-\nend\n)")
+  local fsrc = src:match("(local SHORT_ECHO_WORDS.-\nlocal function has_php_short_echo%(s, open_tag%).-\nend\n)")
   check(fsrc ~= nil, "has_php_short_echo found")
   if fsrc then
     local se = assert(loadstring(fsrc .. "\nreturn has_php_short_echo"))()
     for _, s in ipairs({ ("<?=/*"):rep(13000), ("<?=#"):rep(16000), ("<? "):rep(20000), ("<?=system"):rep(7000) }) do
-      local t0 = os.clock(); se(s)
+      local t0 = os.clock(); se(s, true)
       local ms = (os.clock() - t0) * 1000
       check(ms < 250, ("short-echo parser on 64 KB of %q… took %.1f ms"):format(s:sub(1, 8), ms))
     end

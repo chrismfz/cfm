@@ -4251,15 +4251,18 @@ end
 -- must still open like PHP code (a variable, a backtick exec, a quoted string,
 -- `(`, `[`, a call `name(` (namespaced, comments allowed before the `(`), one
 -- of the constructs below, or a unary / numeric lead into one of those), which
--- keeps the 3-byte opener binary-safe. The `<?` short open tag is held
--- tighter (whitespace, then `$`, a construct or an immediate `name(`): it is
--- two bytes. PHP whitespace only (space, tab, CR, LF; not Lua's %s). One
--- left-to-right pass: the `*/` / line-end lookups are reused while ahead.
+-- keeps the 3-byte opener binary-safe. The `<?` short open tag is read only
+-- with `open_tag` (file bytes, rule 415: 402 reads text fields too, and a
+-- support ticket quoting `<? echo $x ?>` is no webshell) and held tighter
+-- (whitespace, then a variable, a construct or an immediate `name(`): it is
+-- two bytes. PHP whitespace only (space, tab, CR, LF; not Lua's %s); a `#` /
+-- `//` comment ends at CR or LF. One left-to-right pass: the `*/` / line-end
+-- lookups are reused while ahead.
 local SHORT_ECHO_WORDS = {
   echo = true, print = true, new = true, eval = true, include = true, include_once = true,
   require = true, require_once = true, exit = true, die = true, clone = true,
 }
-local function has_php_short_echo(s)
+local function has_php_short_echo(s, open_tag)
   if not s or s == "" then return false end
   local n = #s
   local close_at, nl_at = 0, 0     -- the last `*/` / LF found, reused while ahead
@@ -4276,7 +4279,7 @@ local function has_php_short_echo(s)
         if close_at > n then return nil end
         i = close_at + 2
       elseif c == "#" or (c == "/" and s:sub(i + 1, i + 1) == "/") then
-        if nl_at <= i then nl_at = s:find("\n", i, true) or (n + 1) end
+        if nl_at <= i then nl_at = s:find("[\r\n]", i) or (n + 1) end
         if nl_at > n then return nil end
         i = nl_at + 1
       else
@@ -4312,7 +4315,7 @@ local function has_php_short_echo(s)
   local function short_open_at(i)      -- after `<?` + whitespace
     while i <= n and ws(s:sub(i, i)) do i = i + 1 end
     if i > n then return false end
-    if s:sub(i, i) == "$" then return true end
+    if s:find("^%$[%$%a_\128-\255]", i) then return true end
     local word, j = s:match("^([%a_][%w_]*)()", i)
     if not word then return false end
     return SHORT_ECHO_WORDS[word] or s:sub(j, j) == "("
@@ -4324,7 +4327,7 @@ local function has_php_short_echo(s)
     local nx = s:sub(k + 2, k + 2)
     if nx == "=" then
       if expr_at(k + 3, 0) then return true end
-    elseif ws(nx) then
+    elseif open_tag and ws(nx) then
       if short_open_at(k + 2) then return true end
     end
     pos = k + 2
@@ -4366,14 +4369,16 @@ end
 
 -- Rule 415 — the PHP / JSP openers of rule 402, in the uploaded FILES past the
 -- part of the body 402 reads (its first max_scan_len bytes, 2 KB): a webshell
--- after 2 KB of image data, or in a second file, went unseen. Only file parts
--- (a `filename=`, as PHP registers them: each_multipart_field) are read, to the
--- multipart body budget, and only for the openers — not 402's superglobal
--- words, which ticket and forum text fields carry. Ships logonly (burn-in):
+-- after 2 KB of image data, or in a second file, went unseen. Also the `<?`
+-- short open tag (`<? echo …`), which 402 does not read: it scans text fields
+-- too. Only file parts (a `filename=`, as PHP registers them:
+-- each_multipart_field) are read, each from its start, to the multipart body
+-- budget, and only for the openers — not 402's superglobal words, which
+-- ticket and forum text fields carry. Ships logonly (burn-in):
 -- these bytes were never scanned before, and a text attachment quoting PHP
 -- would be a 6 h autoblock at block.
 function _M.detect_upload_content_deep(body, headers)
-  if not body or #body <= CFG.max_scan_len then return nil end
+  if not body or body == "" then return nil end
   headers = headers or {}
   local ct = php_content_type(headers)
   if not has(lower(ct), "multipart/form-data") then return nil end
@@ -4382,15 +4387,12 @@ function _M.detect_upload_content_deep(body, headers)
     local s, e = f[2], f[3]
     if s > limit then break end
     if e > limit then e = limit end
-    -- A part 402 read whole (it ends inside the first max_scan_len bytes) is
-    -- skipped; one that runs past that edge is read from its START: an
-    -- opener before the edge with its code past it (`<?=` + padding) is seen
-    -- by neither rule otherwise.
-    if e > CFG.max_scan_len then
-      local part = lower(body:sub(s, e))
-      if has(part, "<?php") or has_php_short_echo(part) then return "UPLOAD_PHP_TAG_DEEP" end
-      if has(part, "<jsp:") then return "UPLOAD_JSP_TAG_DEEP" end
-    end
+    -- Every file part, from its START: an opener inside 402's window with its
+    -- code padded past the edge (`<?=` + blanks) is seen whole, and the `<?`
+    -- short open tag, which 402 leaves alone, is read in file bytes here.
+    local part = lower(body:sub(s, e))
+    if has(part, "<?php") or has_php_short_echo(part, true) then return "UPLOAD_PHP_TAG_DEEP" end
+    if has(part, "<jsp:") then return "UPLOAD_JSP_TAG_DEEP" end
   end
   return nil
 end

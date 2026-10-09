@@ -42,10 +42,12 @@ back-filled here — see the git/PR history for that period.
   headers in a form field before the real zip (the ANTONKILL vector) hid its
   webshell entry; it now reads them all. The upload-content rule (402)
   missed short PHP tags written `<?=\func(…)`, `<?=/**/func(…)`,
-  `<?=print`…``, `<?= new …`, or `<? echo …`; it now reads them as PHP does,
-  still without firing on stray bytes in images. And 402 only reads the
-  first 2 KB of the request, so a webshell after 2 KB of image data went
-  unseen: the new rule 415 reads uploaded files deeper for PHP / JSP tags.
+  `<?=print`…``, `<?= new …` or `<?=!func(…)`; it now reads them as PHP
+  does, still without firing on stray bytes in images. And 402 only reads
+  the first 2 KB of the request, so a webshell after 2 KB of image data went
+  unseen: the new rule 415 reads each uploaded file whole for PHP / JSP tags,
+  including the `<? echo …` short open tag (in files only: a support ticket
+  quoting it is not flagged).
   It ships log-only for burn-in; promote it in `cfm_waf_config.lua` once its
   hits look clean (docs/waf.md, rule 415).
 - **Four ways to hide a payload from the WAF's scan are closed.** A JSON

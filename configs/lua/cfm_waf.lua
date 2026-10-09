@@ -251,7 +251,7 @@ local CFG = {
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
   rule_upload_content     = "block",  -- webshell bytes / PHP tags inside uploaded file content
-  rule_upload_content_deep = "logonly", -- 402's PHP/JSP openers in uploaded FILES past 402's 2 KB window (added 2026-10-09; burn-in, then promote)
+  rule_upload_content_deep = "logonly", -- 402's PHP/JSP openers (+ the `<?` short open tag) in each uploaded FILE, whole (added 2026-10-09; burn-in, then promote)
   rule_upload_archive_php = "block",  -- PHP webshell compressed inside an uploaded .zip (ZIP entry name scan). Scoped to Joomla asset uploads (option=com_ + task=asset.upload), where a php-bearing zip is never legitimate → safe to block.
   rule_script_obfuscation = "challenge_v2",  -- raw POST-body PHP/JS obfuscation scorer
   rule_upload_obfuscation = "challenge_v2",  -- multipart uploaded file content obfuscation scorer
@@ -1499,7 +1499,7 @@ function _M.check(ctx)
     end
   end
 
-  -- ── 18b) Upload content past 402's window (415, burn-in) ─────────────────
+  -- ── 18b) Upload content in each file part, whole (415, burn-in) ──────────
   do
     local mode = rule_mode(CFG.rule_upload_content_deep, "logonly")
     if mode ~= "disabled"
