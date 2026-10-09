@@ -33,15 +33,17 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
-- **Site Cache can no longer be made to fill the disk.** The static-asset
-  cache stored a full copy for every distinct query string, and a HEAD or an
+- **Site Cache writes far less to disk under abuse.** The static-asset cache
+  stored a full copy for every distinct query string, and a HEAD or an
   aborted download still stored the whole file: five HEAD requests with random
   query strings on a 20 MB image wrote about 96 MB, and only the 10 GB
   `max_size` stopped it, too late for a shared cPanel `/var`. Now every cache
-  zone keeps 2 GB of the disk free (`min_free`), a static asset is stored only
-  on its second request (so a one-off random query is never stored), and a
-  response of 10 MB or more is never stored. A cached asset therefore takes
-  one more trip to the site before it is served from the cache.
+  zone keeps 2 GB of the disk free (`min_free`, checked about every 10
+  seconds), a static asset is stored only on its second request (so a one-off
+  random query is never stored), and a response declaring 10 MB or more is
+  never stored. A cached asset therefore takes one more trip to the site
+  before it is served from the cache. The limits that remain are listed in
+  docs/site-cache-design.md (the disk rails).
 - **A flood of junk TLS fingerprints no longer switches off an armed
   fingerprint deny.** The edge asks the daemon about at most 50 new
   fingerprints a second per server; a client offering rotating cipher lists

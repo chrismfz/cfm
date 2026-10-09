@@ -329,14 +329,23 @@ wildcard too (§6).
   `inactive=7d`) and `cfm_micro_{1,2,5,10,30,60}s` (512 MB to 1 GB each).
   The daemon creates them on start and the installers and packages create them
   before any `-t`, owned `root:cfm`.
-- **Disk rails.** Every zone has `min_free=2g`: while the filesystem holding
-  `/var/cache/nginx` has less than 2 GB free, nginx's cache manager evicts
-  cached objects, so the cache never fills a shared disk (on a nearly full
-  disk the cache simply stays small). Tier A stores a URL only on its second
-  request (`proxy_cache_min_uses 2`, so random query strings never reach the
-  disk) and never stores a response of 10 MB or more. A first request for an
-  asset is therefore always a MISS that is not stored; the second is a MISS
-  that is.
+- **Disk rails.** They bound how much the cache can write; they do not make
+  a fill impossible.
+  - Every zone has `min_free=2g`: while the filesystem holding
+    `/var/cache/nginx` has less than 2 GB free, nginx's cache manager evicts.
+    It checks about every 10 s, so a fast fill can dip below the floor for
+    that long before eviction starts.
+  - On a filesystem that stays under 2 GB free, Site Cache is effectively
+    off: every object is evicted within ~10 s of being stored, stats show
+    mostly MISS, and nothing is logged. Free space on `/var` is the first
+    thing to check when an armed vhost never HITs.
+  - Tier A stores a URL only on its second request (`proxy_cache_min_uses 2`:
+    a one-off random query string never reaches the disk), so an asset is a
+    MISS twice and a HIT from the third request; a purge (§6) costs one extra
+    origin fetch per asset.
+  - Tier A never stores a response that declares a `Content-Length` of 10 MB
+    or more. A response without one (an origin compressing on the fly, e.g.
+    cPanel "Optimize Website", sends it chunked) is not capped.
 - **Retired cache dirs.** Nothing creates these any more, and the current
   confs name none of them, so they are safe to delete:
   - `/var/cache/nginx/cfm_micro`, from before the per-bucket zones;

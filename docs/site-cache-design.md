@@ -396,13 +396,24 @@ proxy_cache_path /var/cache/nginx/cfm_micro_60s  levels=1:2 keys_zone=cfm_micro_
 on disk, and a HEAD (nginx fetches it as a GET) or an aborted GET still stored
 the whole file: five HEADs with random queries on a 20 MB image wrote ~96 MB.
 So every zone keeps `min_free=2g` (the cache manager evicts while the
-filesystem has less than 2 GB free, so a shared cPanel `/var` never fills from
-the cache, whatever `max_size` says), and the Tier A locations add
+filesystem has less than 2 GB free), and the Tier A locations add
 `proxy_cache_min_uses 2` (a key is stored on its second request: a one-off
 random query never reaches the disk) and `$cfm_cache_too_big` on
-`proxy_no_cache` (`map $upstream_http_content_length`: a response of 10 MB or
-more is never stored; big media already streams uncached through the
+`proxy_no_cache` (`map $upstream_http_content_length`: a response declaring 10
+MB or more is never stored; big media already streams uncached through the
 passthrough location). `check_site_cache_config.sh` pins all three.
+
+These bound the write amplification; they do not close it. Measured limits:
+the cache manager samples `min_free` about every 10 s, so a fast fill can go
+~1 GB below the floor before eviction starts; a response without a
+`Content-Length` (on-the-fly compression sends it chunked) is not capped; two
+tiny requests (two HEADs, or two `Range: bytes=0-0`) still store a full object,
+once per `Accept-Encoding` value (Vary); Tier B has no size cap or min_uses
+(bounded by its zones' `max_size`); and random-query keys still take
+`keys_zone` slots. The rail that would bound the write rate whatever the
+headers is a per-vhost fill budget (stored-MISS bytes counted in the log
+phase, the gate leaving the vhost bypassed for a cooldown when over) — not
+built.
 
 Each cache location also carries the **anti-stampede** trio (§5.6):
 `proxy_cache_lock on;`, `proxy_cache_use_stale updating error timeout;`
