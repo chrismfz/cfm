@@ -33,24 +33,26 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
-- **A POST body sent without a Content-Length was never inspected by the WAF
-  on most routes.** A chunked upload (`Transfer-Encoding: chunked`), or an
-  HTTP/2 request without the header, reached a clean-URL route (`/checkout`,
-  a custom router, an API path outside the WAF's list of known endpoints)
-  with its body unread, so a SQL injection or webshell in it went straight
-  to the site. The edge now reads such a POST body where nginx buffers it
-  anyway (the main `location /`; the PHP/admin and media locations keep
-  streaming, and a chunked PUT or PATCH is still not read), and checks it
-  like any other. This needs the edge config shipped with this release
-  (`location /` sets `$cfm_body_buffered`, the streaming locations clear
-  it); with an older one these bodies stay unread, as before. Separately, a
-  body the edge cannot read at all (an HTTP/3 POST without Content-Length)
-  no longer skips every check: reading it raised an error that, under the
-  default `CFM_FAIL_OPEN`, sent the request straight to the site past IP
-  blocks, challenges and traffic rules (even to `/wp-login.php`). It is now
-  logged as `waf_body_unread` and the request goes on through those checks.
-  Also, WooCommerce's `/?wc-ajax=` endpoint, which is on that list, never
-  matched it.
+- **A POST body sent without a Content-Length, or declared larger than 1 MB,
+  was never inspected by the WAF on most routes.** A chunked upload
+  (`Transfer-Encoding: chunked`), an HTTP/2 request without the header, or a
+  body padded past 1 MB reached a clean-URL route (`/checkout`, a custom
+  router, an API path outside the WAF's list of known endpoints) with its
+  body unread, so a SQL injection or webshell in it went straight to the
+  site. The edge now reads such a POST body (scanning its first 32 KB, as
+  for any body) where nginx buffers it anyway (the main `location /`; the
+  PHP/admin and media locations keep streaming, and a PUT or PATCH keeps the
+  old size rule), and checks it like any other. This needs the edge config
+  shipped with this release (`location /` sets `$cfm_body_buffered`; the
+  server default and the streaming locations clear it); with an older one
+  these bodies stay unread, as before. Separately, a body the edge cannot
+  read at all (an HTTP/3 POST without Content-Length) no longer skips every
+  check: reading it raised an error that, under the default `CFM_FAIL_OPEN`,
+  sent the request straight to the site past IP blocks, challenges and
+  traffic rules (even to `/wp-login.php`). It is now logged as
+  `waf_body_unread` and the request goes on through those checks. Also,
+  WooCommerce's `/?wc-ajax=` endpoint, which is on that list, never matched
+  it.
 - **A request that tripped a log-only WAF rule skipped every check after the
   WAF.** The edge sent it straight to the site, so an IP block, a site under
   challenge or Under-Attack Mode, a traffic rule, a throttle, a

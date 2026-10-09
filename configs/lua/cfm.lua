@@ -475,11 +475,15 @@ local function waf_should_read_body(uri, method)
   local ct = lower(ngx.var.http_content_type or "")
   local cl = tonumber(ngx.var.http_content_length or "")
   -- A POST body with no Content-Length (chunked, or HTTP/2 without the
-  -- header) is read where the location buffers bodies anyway (the confs'
-  -- `location /` sets $cfm_body_buffered, the streaming locations clear it):
-  -- it used to go unread on every route outside the allowlist below, so a
-  -- chunked POST to a clean-URL route reached the app uninspected. POST only:
-  -- a chunked PUT / PATCH (sync and REST clients) keeps streaming, as before.
+  -- header), or one longer than waf_body_read_max_cl, is read where the
+  -- location buffers bodies anyway (the confs' `location /` sets
+  -- $cfm_body_buffered; the server default and the streaming locations clear
+  -- it). Both used to go unread on every route outside the allowlist below,
+  -- so a chunked or padded POST to a clean-URL route reached the app
+  -- uninspected. POST only: a PUT / PATCH (sync and REST clients) keeps the
+  -- size gate. The cost: such a body is spooled here, before Step 3 decides,
+  -- where nginx would have spooled it for the proxy after; a client Step 3
+  -- then refuses had it discarded before.
   local buffered = method == "post" and ngx.var.cfm_body_buffered == "1"
 
   -- F07: PUT/PATCH were NOT body-inspected before this change (the gate was

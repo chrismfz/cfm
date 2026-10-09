@@ -52,6 +52,13 @@ do
   r = post{ buffered = true, body = "q=hello world&email=a@b.example" }
   check(r.ok and r.exited == nil and r.action == "allow", "chunked clean form on `location /`: allowed (" .. desc(r) .. ")")
 
+  -- A body padded past waf_body_read_max_cl (1 MiB): read on `location /`,
+  -- where nginx buffers it anyway; only its head is scanned.
+  r = post{ buffered = true, cl = "2000000" }
+  check(r.ok and r.exited == 403, "padded (over-cap) POST on `location /`: inspected, blocked (" .. desc(r) .. ")")
+  r = post{ cl = "2000000" }
+  check(r.ok and r.exited == nil, "padded POST where the location streams: unread, as before (" .. desc(r) .. ")")
+
   -- POST only: a chunked PUT / PATCH keeps streaming, as before.
   r = post{ buffered = true, method = "PUT" }
   check(r.ok and r.exited == nil, "chunked PUT on `location /`: still unread (" .. desc(r) .. ")")
@@ -87,7 +94,8 @@ do
   check(g("application/json", nil, 1048576, false) == false, "chunked json where it streams: skipped")
   check(g("application/json", nil, 1048576) == false, "chunked json, no flag (old callers): skipped")
   check(g("image/png", nil, 1048576, true) == false, "chunked binary where buffered: skipped")
-  check(g("application/json", 2000000, 1048576, true) == false, "over the cap stays skipped where buffered")
+  check(g("application/json", 2000000, 1048576, true) == true, "over the cap: read where buffered")
+  check(g("application/json", 2000000, 1048576, false) == false, "over the cap: skipped where it streams")
 end
 
 -- ── The confs: `location /` marks itself, every streaming location clears ──
@@ -130,6 +138,13 @@ for _, path in ipairs({ "configs/openresty.conf", "configs/angie.conf" }) do
     end
   end
   check(roots >= 1, path .. ": no `location /` found")
+  -- Every server that runs cfm.lua declares the default, so no location reads
+  -- it uninitialized and an internal redirect starts from "".
+  local servers, defaults = 0, 0
+  for _ in src:gmatch("\n%s*access_by_lua_file%s+[^\n]*cfm%.lua;") do servers = servers + 1 end
+  for _ in src:gmatch('\n        set %$cfm_body_buffered "";') do defaults = defaults + 1 end
+  check(servers >= 1 and defaults == servers,
+        path .. ": " .. servers .. " cfm.lua server(s), " .. defaults .. " server-level $cfm_body_buffered default(s)")
   check(src:find("\n%s*proxy_request_buffering%s+on%s*;") ~= nil, path .. ": the http block buffers request bodies")
 end
 
