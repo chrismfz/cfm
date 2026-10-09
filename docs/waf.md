@@ -1330,10 +1330,19 @@ challenged after 8 pages), and it skipped every client that is its own TCP peer,
 only ever ran behind a trusted proxy (Cloudflare). Direct clients now count too, capped
 at `auth_burst_direct_mode` (`logonly`) for a burn-in; a proxied client keeps the
 rule's mode. Promote by setting `auth_burst_direct_mode` (never stronger than
-`rule_auth_burst`) once `waf_rule_detail 501` reads clean. On the panel ports
-(cPanel / WHM / webmail, peer = client) it is a log line only: the panel gate enforces
-block-tier rules, and cPanel's own `login_log` detector (`internal/detectors/cpanel`)
+`rule_auth_burst`; an unknown value reads as `logonly`) once `waf_rule_detail 501` reads
+clean. A JSON login (Drupal's `/user/login?_format=json`) counts by a `"pass"` /
+`"password"` / `"pwd"` / `"passwd"` key. A login POST whose body the edge cut at
+`waf_body_max_len` (32 KB) or did not read counts by its path, as the rule always did: no
+login form is that big, and padding would otherwise push the password past the cut,
+where PHP still reads it. The panel ports (cPanel / WHM / webmail) pass the WAF no body,
+so 501 never fires there; cPanel's own `login_log` detector (`internal/detectors/cpanel`)
 bans repeated failures, which the edge cannot tell from successes.
+
+Not counted (the path test reads `ngx.var.uri`, no query string): Drupal 7
+`/index.php?q=user/login`, Joomla `POST /administrator/` (the directory index), WooCommerce
+`/my-account/`, Adminer. An OpenCart admin customer save sends an empty `password=` and
+counts; eight in 20 s is not a workflow.
 
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 

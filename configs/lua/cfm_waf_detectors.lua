@@ -1475,6 +1475,8 @@ end
 -- (php_var_name): WordPress `pwd`, Drupal `pass`, Joomla `passwd`, OpenCart
 -- and most custom forms `password`, Magento `login[password]` (registered as
 -- `login`).
+-- waf_body_max_len as cfm.lua reads it (cfm_cfg.lua), like XMLRPC_HIDDEN_LEN.
+local AUTH_BODY_CUT = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "") or 32768
 local AUTH_PASSWORD_FIELDS = { pwd = true, pass = true, passwd = true, password = true, login = true }
 
 -- Rule 501 counts credential SUBMISSIONS: a POST to a login endpoint that
@@ -1486,30 +1488,56 @@ local AUTH_PASSWORD_FIELDS = { pwd = true, pass = true, passwd = true, password 
 -- form field and is left to 510-512, which read its payload.
 function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers)
   if not shdict or not ip or ip == "" then return nil end
-  if lower(method or "") ~= "post" or not body or body == "" then return nil end
+  -- POST only: PHP fills $_POST for a POST alone.
+  if lower(method or "") ~= "post" then return nil end
+  body = body or ""
+  headers = headers or {}
 
+  local luri = lower(uri or "")
   local tag = auth_endpoint_tag(uri, method)
   -- Magento's admin login posts to the admin route itself (`/admin/`,
   -- `/admin/admin/index/index/key/…`), which no path test can tell from an
-  -- admin save; its form is: login[username] + login[password].
-  local magento = not tag and has(lower(uri or ""), "/admin")
+  -- admin save; its form is login[username] + login[password]. A path
+  -- SEGMENT `admin` only: WordPress's /wp-admin/admin-ajax.php (its hottest
+  -- POST) must not pay a field parse here.
+  local magento = not tag and (luri:find("/admin/", 1, true) or luri:find("/admin$"))
   if not tag and not magento then return nil end
-  local f = _M.php_request_fields("post", args, body, headers, AUTH_PASSWORD_FIELDS)
-  local function in_body(t)
-    local n = 0
-    for i = 1, #(t or {}) do if t.srcs[i] == "body" then n = n + 1 end end
-    return n
-  end
-  if magento then
-    if in_body(f.login) < 2 then return nil end
-    tag = "AUTH_MAGENTO_ADMIN"
+
+  -- The edge reads the first waf_body_max_len bytes of a body (or none of
+  -- it). A login form is never that big: a body cut there, or not read, was
+  -- padded to push the password field past the cut, and PHP still reads
+  -- it. Counted (path-keyed, as the rule always was), not for Magento's
+  -- admin route, where big bodies are admin saves.
+  local clen = tonumber(header_string(headers["content-length"] or headers["Content-Length"])) or 0
+  local cut = #body >= AUTH_BODY_CUT or clen > #body
+  if body == "" and not cut then return nil end
+
+  local cred = false
+  if tag and cut then
+    cred = true
   else
-    local cred = false
-    for _, t in pairs(f) do
-      if in_body(t) > 0 then cred = true; break end
+    local f = _M.php_request_fields("post", args, body, headers, AUTH_PASSWORD_FIELDS)
+    local function in_body(t)
+      local n = 0
+      for i = 1, #(t or {}) do if t.srcs[i] == "body" then n = n + 1 end end
+      return n
     end
-    if not cred then return nil end
+    if magento then
+      if in_body(f.login) >= 2 then tag, cred = "AUTH_MAGENTO_ADMIN", true end
+    else
+      for _, t in pairs(f) do
+        if in_body(t) > 0 then cred = true; break end
+      end
+      -- A JSON login (Drupal's /user/login?_format=json, SPA forms): a
+      -- password key in the body. php_request_fields reads form bodies only.
+      if not cred and php_media_type(php_content_type(headers)):find("json", 1, true) then
+        local lb = lower(cap(body, CFG.max_scan_len))
+        cred = lb:find('"pass"%s*:') or lb:find('"password"%s*:') or lb:find('"pwd"%s*:')
+               or lb:find('"passwd"%s*:') or false
+      end
+    end
   end
+  if not cred then return nil end
 
   local win = tonumber(CFG.auth_window_sec or 20) or 20
   local thr = tonumber(CFG.auth_burst_threshold or 8) or 8
