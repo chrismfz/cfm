@@ -8,7 +8,8 @@
 --   * 402 looked for PHP superglobals in the whole first 2 KB of a multipart
 --     body, text fields included: a support ticket mentioning `$_POST` was
 --     blocked. Only file parts are read for them now, and only next to a PHP
---     short open tag / <script language="php"> in the same part: an attached
+--     open tag (any `<?` but an XML declaration-style PI PHP cannot parse) /
+--     <script language="php"> in the same part: an attached
 --     error.log or notes file quoting `$_POST` is no webshell.
 
 _G.ngx = {
@@ -55,7 +56,7 @@ do
   for _, fn in ipairs({ ".env", ".env.local", "a/.env", ".htaccess", ".htaccess.bak", ".htpasswd", ".user.ini",
                         "user.ini", "php.ini", "x/php.ini", "web.config", "WEB.CONFIG", "shell.php",
                         "x%2f.env", "%5cphp.ini", "x%5cweb.config", "a%2F.htaccess", "%2ehtaccess",
-                        "x%2f%2eenv", ".user%2eini" }) do
+                        "x%2f%2eenv", ".user%2eini", ".htaccess%41", ".env%61" }) do
     local r = run(body(part('name="f"; filename="' .. fn .. '"', "data", "text/plain")))
     check(r.ids:find(",401,", 1, true) and r.action == "block", fn .. " is still blocked by 401: " .. show(r))
   end
@@ -84,8 +85,22 @@ do
     r = run(body(part('name="f"; filename="a.txt"', sh, "text/plain")))
     check(r.ids:find(",402,", 1, true) and r.action == "block", "short-tag shell " .. sh .. " is 402: " .. show(r))
   end
-  r = run(body(part('name="f"; filename="a.svg"', '<?xml version="1.0"?><svg><text>$_GET</text></svg>', "image/svg+xml")))
-  check(not r.ids:find(",402,", 1, true), "an SVG (<?xml) mentioning $_GET is not 402: " .. show(r))
+  -- `<?xml` is a short tag too: `xml:` is a goto label, `xml ;` a constant.
+  for _, sh in ipairs({ "<?xml:system($_GET[c]);", "<?XML :system($_GET[c]);?>", "<?xml ;system($_GET[c]);",
+                        "<?xml-1;system($_GET[c]);", "<?xml_parser_create();system($_GET[c]);",
+                        "<?xml and a==1;system($_GET[c]);", "<?xpacket:eval($_POST[x]);" }) do
+    r = run(body(part('name="f"; filename="a.jpg"', sh, "image/jpeg")))
+    check(r.ids:find(",402,", 1, true) and r.action == "block", "xml-prefixed shell " .. sh .. " is 402: " .. show(r))
+  end
+  -- An XML-style PI PHP cannot parse is no opener: nothing in the file runs.
+  for _, doc in ipairs({ '<?xml version="1.0"?><svg><text>$_GET</text></svg>',
+                         '<?XML VERSION="1.0"?><svg><text>$_GET</text></svg>',
+                         '<?xml-stylesheet type="text/xsl" href="s.xsl"?><doc>$_SERVER</doc>',
+                         "\255\216\255\225<?xpacket begin='' id='W5M0'?><dc:title>Using $_GET in PHP</dc:title>",
+                         '<?xml version="1.0"?><?mso-application progid="Word.Document"?><w>$_POST</w>' }) do
+    r = run(body(part('name="f"; filename="a.svg"', doc, "image/svg+xml")))
+    check(not r.ids:find(",402,", 1, true), "an XML PI document mentioning a superglobal is not 402: " .. show(r))
+  end
   r = run(body(part('name="message"', "<?php echo 1; ?>")))
   check(r.ids:find(",402,", 1, true), "the PHP opener still reads the whole window (unchanged): " .. show(r))
 end

@@ -241,10 +241,12 @@ back-filled here — see the git/PR history for that period.
   upload-content rule (402) blocked a multipart form whose TEXT fields
   mentioned `$_POST` or `$_GET`, such as a support ticket about a form
   handler, or an attached `error.log` quoting one; it now looks for those
-  only inside uploaded files, next to a PHP open tag (`<?`, `<?php`, `<?=`,
-  `<script language="php">`; an SVG's `<?xml` is not one) in the same file.
-  A name hidden behind URL encoding (`x%2f.env`, `%2ehtaccess`) is still
-  caught.
+  only inside uploaded files, next to a PHP short open tag (`<?`) or
+  `<script language="php">` in the same file (`<?php` and `<?=` still block
+  on their own, anywhere). An XML header PHP cannot run, such as an SVG's
+  `<?xml version=…?>` or a photo's XMP `<?xpacket begin=…?>`, is not an
+  open tag. A name hidden behind URL encoding is caught: `x%2f.env` as
+  before, and now `%2ehtaccess` too.
 - **Mail hijack false positive: the node's own address.** A site's form or
   mailer authenticating to the server it runs on connects to the server's
   public IP; that login counted as a remote one, with the node's country

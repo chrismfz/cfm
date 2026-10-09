@@ -4201,11 +4201,13 @@ function _M.detect_upload_filename(body, headers)
     -- match banned a legitimate uploader for 6 h (edge Lua sweep 2026-10-09).
     -- `.env`, `user.ini`, `php.ini` and `web.config` must also be preceded by
     -- the start or a non-alphanumeric character (`superuser.ini` is not
-    -- user.ini; PHP reads only the exact name). The checks read a copy
+    -- user.ini; PHP reads only the exact name). The checks also read a copy
     -- URL-decoded once (`x%2f.env`, `%2ehtaccess`): an app that URL-decodes a
     -- client file name before taking its basename gets `.env` from it.
+    -- The raw name is read too: `.htaccess%41` stays as written to PHP.
     local sn = url_decode_once(fname)
-    local function named(n) return sn:find(n .. "[^%w]") or sn:find(n .. "$") end
+    local function named1(t, n) return t:find(n .. "[^%w]") or t:find(n .. "$") end
+    local function named(n) return named1(fname, n) or (sn ~= fname and named1(sn, n)) end
     local function whole(n) return named("^" .. n) or named("[^%w]" .. n) end
     if whole("user%.ini")   then return "user.ini" end
     if whole("php%.ini")    then return "php.ini" end
@@ -4739,14 +4741,31 @@ end
 -- injection patterns.  Only fires on multipart/form-data.
 -- Note: detect_php_webshell_body already covers direct PHP POSTs; this rule
 -- adds coverage for files disguised with a different Content-Type / extension.
--- Any `<?` that is not `<?xml` (s lowercased): rule 402's opener next to a
--- superglobal in a file part (see detect_upload_content).
+-- Any `<?` but an XML-style processing instruction PHP cannot parse (s
+-- lowercased): rule 402's opener next to a superglobal in a file part (see
+-- detect_upload_content). Exempt is `<?NAME WS attr=` for the PIs real files
+-- carry (an XML declaration, a stylesheet, XMP's xpacket, Office's
+-- mso-application): two identifiers in a row are a parse error under
+-- short_open_tag, so nothing in the file runs. A bare `<?xml` prefix is not
+-- exempt: `<?xml:system($_GET[c]);` is a goto label and runs. `==` / `=>`
+-- after the attribute are not exempt either (`<?xml and a==1;` parses).
+local PI_NAMES = { "xml", "xml%-stylesheet", "xpacket", "mso%-application" }
+local function is_inert_pi(s, k)
+  for _, n in ipairs(PI_NAMES) do
+    local e = select(2, s:find("^<%?" .. n .. "%s+[%a_][%w_:%-]*%s*=", k))
+    if e then
+      local c = s:sub(e + 1, e + 1)
+      if c ~= "=" and c ~= ">" then return true end
+    end
+  end
+  return false
+end
 local function php_open_tag_loose(s)
   local k = 1
   while true do
     k = s:find("<?", k, true)
     if not k then return false end
-    if s:sub(k + 2, k + 4) ~= "xml" then return true end
+    if not is_inert_pi(s, k) then return true end
     k = k + 2
   end
 end
@@ -4765,7 +4784,8 @@ function _M.detect_upload_content(body, headers)
   if has(b, "<?php") or has_php_short_echo(b) then return "UPLOAD_PHP_TAG" end
   if has(b, "<jsp:")                          then return "UPLOAD_JSP_TAG" end
 
-  -- The opener is any `<?` but `<?xml`: not the strict has_php_short_echo
+  -- The opener is any `<?` but an inert XML-style PI (php_open_tag_loose):
+  -- not the strict has_php_short_echo
   -- (415's "random bytes must not read as code" test), which rejects valid
   -- short-tag shells (`<?`$_GET[c]`;`, `<?('sys'.'tem')($_GET[c]);`); the
   -- superglobal in the same part already rules out a binary collision.
