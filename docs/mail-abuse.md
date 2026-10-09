@@ -68,7 +68,10 @@ neither "back to normal" nor re-paged. Delivery is the same
 A login's address is first normalised, because several sources are one
 person, or a service acting for them:
 
-- loopback and private addresses (webmail, a local relay) are not counted;
+- loopback and private addresses (webmail, a local relay) are not counted,
+  nor the node's own public addresses (a site's form or mailer
+  authenticating to the server it runs on connects to its public IP — on
+  orion, nothak.gr's form read as a login from "DE");
 - an IPv6 address counts as its /64 (a phone rotates privacy addresses);
 - the networks of services that read a mailbox for its owner count as ONE
   source with no country: Google (AS15169) and Google Cloud (AS396982, where

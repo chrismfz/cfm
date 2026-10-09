@@ -17,6 +17,13 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **Mail hijack false positive: the node's own address.** A site's form or
+  mailer authenticating to the server it runs on connects to the server's
+  public IP; that login counted as a remote one, with the node's country
+  (orion, 9 Oct: info@nothak.gr paged as "DE, GR, US" — DE was orion
+  itself). The node's own addresses are no longer hijack sources.
+
 ### Added
 - **Shadow signal for bursts the origin's own WAF blocks.** An IP that sends
   30 or more POSTs a minute to one site, all answered 403 by the site's own
