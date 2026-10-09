@@ -182,6 +182,7 @@ do
     -- No pair at any `=` (empty key / empty value) and no `&`: still one pass.
     { "kv ?=?=",        function() det.each_kv(("?="):rep(K / 2), det.KV_DBG_KEY, false, function() end) end },
     { "kv !=!=",        function() det.each_kv(("!="):rep(K / 2), det.KV_CMD_KEY, true, function() end) end },
+    { "kv ====",        function() det.each_kv(("="):rep(K), det.KV_DBG_KEY, false, function() end) end },
     { "kv a=a= nonempty", function() det.each_kv(("a="):rep(K / 2), det.KV_CMD_KEY, true, function() end) end },
     { "10017 quoted spaces", function()
         det.detect_cve_wp_pagename_traversal("/", "post", "", ('-name="' .. (" "):rep(200)):rep(K / 207), mp) end },
