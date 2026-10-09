@@ -21,6 +21,7 @@ local CFG, util
 -- use it (the PHP form reader, the filename*= check) work before _M.init and
 -- with a partial util alike.
 local url_decode_once = require("cfm_waf_util").url_decode_once
+local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init) (see cfm_shdict.lua)
 local has, header_string, lower, cap, count_occurs, has_long_b64_blob,
       is_known_legit_php_upload_endpoint, score_obfuscation_blob, begins,
       normalize, strip_sql_comments, scan_str,
@@ -1455,35 +1456,31 @@ end
   return nil
 end
 
+-- A fixed-window hit counter: the count of hits on key in the window its
+-- first hit opened (`win` seconds). cfm_shdict.incr: one atomic incr, the
+-- key's TTL set at creation and left alone, so the window closes `win` after
+-- its first hit as it did with the old ts/cnt pair; never dict:incr with an
+-- init (cfm_shdict.lua). nil when the dict refuses (full, wrong type).
+local function window_count(shdict, key, win)
+  return (shd.incr(shdict, key, 1, win))
+end
+
 function _M.detect_auth_burst(ip, host, uri, method, shdict)
   if not shdict or not ip or ip == "" then return nil end
 
   local tag = auth_endpoint_tag(uri, method)
   if not tag then return nil end
 
-  local now = ngx.now()
-  local win = tonumber(CFG.auth_window_sec or 20) or 20
+    local win = tonumber(CFG.auth_window_sec or 20) or 20
   local thr = tonumber(CFG.auth_burst_threshold or 8) or 8
 
   -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
   local host_key = "-"
 
-  local kts  = "auth|ts|"  .. ip .. "|" .. host_key .. "|" .. tag
-  local kcnt = "auth|cnt|" .. ip .. "|" .. host_key .. "|" .. tag
-
-  local ts  = shdict:get(kts)
-  local cnt = shdict:get(kcnt) or 0
-
-  if not ts or (now - ts) >= win then
-    shdict:set(kts, now, win + 1)
-    shdict:set(kcnt, 1, win + 1)
-    return nil
-  end
-
-  cnt = cnt + 1
-  shdict:set(kcnt, cnt, win + 1)
-
-  if cnt >= thr then
+  -- One atomic counter per window (window_count): the get-then-set pair it
+  -- replaces lost increments between workers and could restart a window.
+  local cnt = window_count(shdict, "auth|w|" .. ip .. "|" .. host_key .. "|" .. tag, win)
+  if cnt and cnt >= thr then
     return tag
   end
   return nil
@@ -1509,26 +1506,14 @@ function _M.detect_wp_login_probe(uri, method, headers, ip, host, shdict)
 
     local repeated_head = false
     if shdict and ip and ip ~= "" then
-      local now = ngx.now()
       local win = tonumber(CFG.auth_wp_login_head_window_sec or 20) or 20
       local thr = tonumber(CFG.auth_wp_login_head_threshold or 3) or 3
       -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
       local host_key = "-"
 
-      local kts  = "authwph|ts|"  .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD"
-      local kcnt = "authwph|cnt|" .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD"
-      local ts = shdict:get(kts)
-      local cnt = shdict:get(kcnt) or 0
-
-      if not ts or (now - ts) >= win then
-        shdict:set(kts, now, win + 1)
-        shdict:set(kcnt, 1, win + 1)
-      else
-        cnt = cnt + 1
-        shdict:set(kcnt, cnt, win + 1)
-        if cnt >= thr then
-          repeated_head = true
-        end
+      local cnt = window_count(shdict, "authwph|w|" .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD", win)
+      if cnt and cnt >= thr then
+        repeated_head = true
       end
     end
 
@@ -1545,9 +1530,59 @@ function _M.detect_wp_login_probe(uri, method, headers, ip, host, shdict)
   return nil
 end
 
+-- The networks WordPress.com / Jetpack call a site's xmlrpc.php from, as
+-- Jetpack publishes them (https://jetpack.com/ips-v4.txt, the same eight
+-- ranges as its "Add Jetpack IPs to an Allowlist" page; read 2026-10-09).
+-- CFG.xmlrpc_jetpack_nets overrides the list (cfm_waf_config.lua) when they
+-- change. IPv4 only: Jetpack publishes no IPv6 range.
+local JETPACK_NETS_DEFAULT = {
+  "122.248.245.244/32", "54.217.201.243/32", "54.232.116.4/32", "192.0.80.0/20",
+  "192.0.96.0/20", "192.0.112.0/20", "195.234.108.0/22", "192.0.64.0/18",
+}
+local jp_src, jp_ranges
+local function ipv4_num(ip)
+  local a, b, c, d = ip:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+  if not a then return nil end
+  a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+  if a > 255 or b > 255 or c > 255 or d > 255 then return nil end
+  return ((a * 256 + b) * 256 + c) * 256 + d
+end
+local function jetpack_ranges()
+  local src = CFG.xmlrpc_jetpack_nets
+  if type(src) ~= "table" then src = JETPACK_NETS_DEFAULT end
+  if src ~= jp_src then
+    local r = {}
+    for _, cidr in ipairs(src) do
+      local ip, bits = tostring(cidr):match("^([%d%.]+)/(%d+)$")
+      local n, b = ip and ipv4_num(ip), tonumber(bits)
+      if n and b and b >= 0 and b <= 32 then
+        local size = 2 ^ (32 - b)
+        local lo = n - (n % size)
+        r[#r + 1] = { lo, lo + size - 1 }
+      end
+    end
+    jp_src, jp_ranges = src, r
+  end
+  return jp_ranges
+end
+local function is_jetpack_ip(ip)
+  ip = tostring(ip or ""):gsub("^::ffff:", "")
+  local n = ipv4_num(ip)
+  if not n then return false end
+  for _, r in ipairs(jetpack_ranges()) do
+    if n >= r[1] and n <= r[2] then return true end
+  end
+  return false
+end
+_M.is_jetpack_ip = is_jetpack_ip
+
 -- Narrow carve-out for known-legit WordPress XML-RPC traffic.
 -- Goal: avoid challenging Jetpack while keeping generic XML-RPC protection.
-local function is_known_legit_xmlrpc(uri, args, headers, body)
+-- The markers below are the client's to send (`?for=jetpack`, a UA, the word
+-- in the body), so since 2026-10-09 the request must also come from a
+-- Jetpack network (is_jetpack_ip): a marker alone let any client run
+-- system.multicall / pingback.ping past rules 510-512 and 501.
+local function is_known_legit_xmlrpc(uri, args, headers, body, ip)
   uri = lower(uri or "")
 
   -- F24: gate on the URI FIRST. This predicate runs on the WAF hot path for every
@@ -1556,6 +1591,9 @@ local function is_known_legit_xmlrpc(uri, args, headers, body)
   -- (double-url-decode + lowercase + cap) below, which was pure waste on the
   -- ~99% of requests that aren't xmlrpc.
   if not has(uri, "/xmlrpc.php") then
+    return false
+  end
+  if not is_jetpack_ip(ip) then
     return false
   end
 
@@ -1656,25 +1694,66 @@ local function is_wc_api_callback(ul, args)
 end
 
 
-function _M.detect_xmlrpc_probe(uri, method, body)
+-- The method names an XML-RPC body calls, as WordPress's IXR_Message reads
+-- them: the text of every <methodName> element (the last one is the call;
+-- every one is returned), with comments dropped, CDATA unwrapped, character
+-- and the predefined entity references decoded, inner tags dropped and the
+-- ends trimmed. `system&#46;multicall`, `<![CDATA[system.multicall]]>` and
+-- `system<!---->.multicall` all call system.multicall. The whole body is
+-- read: the old 2 KB window let padding (a comment, blanks) push the method
+-- name out of sight. Lowercased; at most XMLRPC_MAX_METHODS names.
+local XMLRPC_MAX_METHODS = 64
+local XML_ENT = { amp = "&", lt = "<", gt = ">", quot = '"', apos = "'" }
+local function xml_char(cp)
+  if cp and cp >= 32 and cp < 127 then return string.char(cp) end
+  return "?"
+end
+local function xmlrpc_method_names(body)
+  local names, lb = {}, lower(body)
+  local pos = 1
+  while #names < XMLRPC_MAX_METHODS do
+    local s = lb:find("<methodname", pos, true)
+    if not s then break end
+    local open_end = lb:find(">", s, true)
+    if not open_end then break end
+    local e = lb:find("</methodname", open_end, true)
+    local inner = lb:sub(open_end + 1, (e or #lb + 1) - 1)
+    inner = inner:gsub("<!%-%-.-%-%->", "")
+                 :gsub("<!%[cdata%[(.-)%]%]>", "%1")
+                 :gsub("<[^>]*>", "")
+                 :gsub("&#x(%x+);", function(h) return xml_char(tonumber(h, 16)) end)
+                 :gsub("&#(%d+);", function(d) return xml_char(tonumber(d)) end)
+                 :gsub("&(%a+);", function(n) return XML_ENT[n] end)
+    names[#names + 1] = inner:match("^[ \t\r\n]*(.-)[ \t\r\n]*$")
+    if not e then break end
+    pos = e + 12
+  end
+  return names
+end
+_M.xmlrpc_method_names = xmlrpc_method_names
+
+function _M.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
   uri = lower(uri or "")
   method = lower(method or "get")
-  body = normalize(cap(body or "", CFG.max_scan_len))
 
   if not has(uri, "/xmlrpc.php") then return nil end
   if method ~= "post" then return nil end
+  if not body or body == "" then return nil end
 
-  if is_known_legit_xmlrpc(uri, "", nil, body) then
+  if is_known_legit_xmlrpc(uri, args or "", headers, body, ip) then
     return nil
   end
 
-  if has(body, "system.multicall") then
-    return "AUTH_WP_XMLRPC_MULTICALL"
+  local pingback = false
+  for _, m in ipairs(xmlrpc_method_names(body)) do
+    if m == "system.multicall" then return "AUTH_WP_XMLRPC_MULTICALL" end
+    if m == "pingback.ping" then pingback = true end
   end
-
-  if has(body, "pingback.ping") then
-    return "AUTH_WP_XMLRPC_PINGBACK"
-  end
+  -- A multicall's own calls are strings in its params; the body-wide match
+  -- the rule always had stays for them (and for anything the reader misses).
+  local nb = normalize(cap(body, CFG.max_scan_len))
+  if has(nb, "system.multicall") then return "AUTH_WP_XMLRPC_MULTICALL" end
+  if pingback or has(nb, "pingback.ping") then return "AUTH_WP_XMLRPC_PINGBACK" end
 
   return nil
 end
@@ -1686,35 +1765,20 @@ function _M.detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, header
   method = lower(method or "get")
 
   if method ~= "post" then return nil end
-  if is_known_legit_xmlrpc(uri, args, headers, body) then
+  if is_known_legit_xmlrpc(uri, args, headers, body, ip) then
     return nil
   end
 
   if not has(uri, "/xmlrpc.php") then return nil end
 
-  local now = ngx.now()
-  local win = tonumber(CFG.xmlrpc_post_window_sec or 60) or 60
+    local win = tonumber(CFG.xmlrpc_post_window_sec or 60) or 60
   local thr = tonumber(CFG.xmlrpc_post_threshold or 6) or 6
 
   -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
   local host_key = "-"
 
-  local kts  = "xmlrpc|ts|"  .. ip .. "|" .. host_key
-  local kcnt = "xmlrpc|cnt|" .. ip .. "|" .. host_key
-
-  local ts  = shdict:get(kts)
-  local cnt = shdict:get(kcnt) or 0
-
-  if not ts or (now - ts) >= win then
-    shdict:set(kts, now, win + 1)
-    shdict:set(kcnt, 1, win + 1)
-    return nil
-  end
-
-  cnt = cnt + 1
-  shdict:set(kcnt, cnt, win + 1)
-
-  if cnt >= thr then
+  local cnt = window_count(shdict, "xmlrpc|w|" .. ip .. "|" .. host_key, win)
+  if cnt and cnt >= thr then
     return "AUTH_WP_XMLRPC_POST_BURST"
   end
 

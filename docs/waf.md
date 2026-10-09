@@ -1313,6 +1313,37 @@ Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see 
 
 ---
 
+## XML-RPC rules (510-512) and the Jetpack carve-out
+
+510 (`system.multicall`) and 511 (`pingback.ping`) read the **method names** of
+an XML-RPC body as WordPress's IXR_Message reads them: every `<methodName>`
+element in the whole body (the last one is the call), with comments dropped,
+CDATA unwrapped, character and predefined entity references decoded and the
+ends trimmed (`det.xmlrpc_method_names`, since 2026-10-09). Before that they
+looked for the words in the first 2 KB of the body only: a comment or blanks
+before `<methodName>`, or `system&#46;multicall`, hid the call. The body-wide
+match on the first 2 KB is kept as well (a multicall's own calls are strings in
+its params).
+
+510-512 and the auth burst (501) skip Jetpack's own traffic
+(`is_known_legit_xmlrpc`): a Jetpack marker (`?for=jetpack`, a Jetpack /
+WordPress.com User-Agent, the word in the body) **from a Jetpack network**. The
+networks are the ranges Jetpack publishes (`https://jetpack.com/ips-v4.txt`, the
+same as its "Add Jetpack IPs to an Allowlist" page; eight IPv4 ranges, read
+2026-10-09). Before that a marker alone was enough, and any client could add
+one. If Jetpack changes its ranges, set them in `cfm_waf_config.lua`:
+
+```lua
+xmlrpc_jetpack_nets = { "192.0.64.0/18", "195.234.108.0/22", "..." },
+```
+
+Until then a Jetpack request from a new address is an ordinary XML-RPC client
+(512 counts its POSTs: 6 a minute per IP across the server's vhosts).
+
+The burst counters (501, 502's repeated HEAD, 512) are one atomic
+`cfm_shdict.incr` per window; the get-then-set pair before it lost increments
+between workers.
+
 ## Per-vhost rule exclusions
 
 Operators can suppress specific WAF rules on specific hosts/paths without disabling the whole WAF for that scope. This solves the canonical "scraper triggers `WAF_PROXY_HDR` on one site" pattern (3xK Tech / vitolighting from `docs/waf-analysis-2026-05-08.md`) — keep the rest of the ruleset hot, drop just the noisy rule on the affected host.

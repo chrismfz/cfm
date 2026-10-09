@@ -6,7 +6,8 @@
 -- cheap /xmlrpc.php URI check — pure waste on the ~99% of non-xmlrpc requests.
 -- The fix gates on the URI first. These tests prove the short-circuit (a
 -- non-xmlrpc URI performs ZERO normalize calls) and that xmlrpc/Jetpack
--- detection is unchanged.
+-- detection is unchanged. Since 2026-10-09 a marker counts only from a Jetpack
+-- network (the fifth argument, the client IP).
 
 package.path = "configs/lua/?.lua;" .. package.path
 local det = require("cfm_waf_detectors")
@@ -29,6 +30,7 @@ local function check(cond, msg)
 end
 
 local function reset() normalize_calls = 0 end
+local JP = "192.0.84.10"   -- in 192.0.80.0/20, a Jetpack network
 
 -- ── F24: a non-/xmlrpc.php request short-circuits BEFORE normalize ───────────
 -- Even with jetpack markers in args/body, a non-xmlrpc URI returns false without
@@ -41,26 +43,34 @@ check(normalize_calls == 0,
 
 -- ── Behavior unchanged for real /xmlrpc.php traffic ─────────────────────────
 reset()
-check(det.is_known_legit_xmlrpc("/xmlrpc.php", "for=jetpack", {}, "") == true,
+check(det.is_known_legit_xmlrpc("/xmlrpc.php", "for=jetpack", {}, "", JP) == true,
       "xmlrpc + for=jetpack args -> true")
 check(normalize_calls > 0, "xmlrpc path still normalizes (Jetpack detection intact)")
 
-check(det.is_known_legit_xmlrpc("/xmlrpc.php?rest=1", "", {}, "hello jetpack world") == true,
+check(det.is_known_legit_xmlrpc("/xmlrpc.php?rest=1", "", {}, "hello jetpack world", JP) == true,
       "xmlrpc + jetpack body -> true")
 
-check(det.is_known_legit_xmlrpc("/xmlrpc.php", "", { ["user-agent"] = "Jetpack/9.9" }, "") == true,
+check(det.is_known_legit_xmlrpc("/xmlrpc.php", "", { ["user-agent"] = "Jetpack/9.9" }, "", JP) == true,
       "xmlrpc + Jetpack UA -> true")
-check(det.is_known_legit_xmlrpc("/xmlrpc.php", "", { ["User-Agent"] = "WordPress.com" }, "") == true,
+check(det.is_known_legit_xmlrpc("/xmlrpc.php", "", { ["User-Agent"] = "WordPress.com" }, "", JP) == true,
       "xmlrpc + WordPress.com UA (capitalized header key) -> true")
 
 -- A real /xmlrpc.php request without any Jetpack marker is NOT auto-legit.
-check(det.is_known_legit_xmlrpc("/xmlrpc.php", "q=x", {}, "generic body") == false,
+check(det.is_known_legit_xmlrpc("/xmlrpc.php", "q=x", {}, "generic body", JP) == false,
       "xmlrpc without jetpack markers -> false")
+
+-- Every marker, from anywhere else: not legit (the client sends them).
+for _, ip in ipairs({ "203.0.113.9", "", "192.0.128.1", "::ffff:203.0.113.9" }) do
+  check(det.is_known_legit_xmlrpc("/xmlrpc.php", "for=jetpack", { ["user-agent"] = "Jetpack" }, "jetpack", ip) == false,
+        "jetpack markers from " .. (ip == "" and "no IP" or ip) .. " -> false")
+end
+check(det.is_known_legit_xmlrpc("/xmlrpc.php", "for=jetpack", {}, "", "::ffff:192.0.84.10") == true,
+      "an IPv4-mapped Jetpack address -> true")
 
 -- The gate is case-insensitive (uri is lower()ed first), so an uppercase URI is
 -- still routed to the xmlrpc path — not accidentally short-circuited.
 reset()
-check(det.is_known_legit_xmlrpc("/XMLRPC.PHP", "for=jetpack", {}, "") == true,
+check(det.is_known_legit_xmlrpc("/XMLRPC.PHP", "for=jetpack", {}, "", JP) == true,
       "uppercase /XMLRPC.PHP + jetpack -> true (gate lower()s the URI)")
 check(normalize_calls > 0, "uppercase xmlrpc URI still reaches the normalize path")
 

@@ -1677,8 +1677,8 @@ function _M.check(ctx)
   -- ── 26) XML-RPC strong body signatures ───────────────────────────────────
   do
     local xtag = nil
-    if not det.is_known_legit_xmlrpc(uri, args, headers, body) then
-      xtag = det.detect_xmlrpc_probe(uri, method, body)
+    if not det.is_known_legit_xmlrpc(uri, args, headers, body, ip) then
+      xtag = det.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
     end
 
     if xtag == "AUTH_WP_XMLRPC_MULTICALL" then
@@ -1717,7 +1717,7 @@ function _M.check(ctx)
 
       if not (peer ~= "" and ip ~= "" and ip == peer) then
         local tag = nil
-        if not det.is_known_legit_xmlrpc(uri, args, headers, body) then
+        if not det.is_known_legit_xmlrpc(uri, args, headers, body, ip) then
           tag = det.detect_auth_burst(ip, nil, uri, method, shdict)
         end
         if tag then
