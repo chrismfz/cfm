@@ -171,36 +171,52 @@ do
         "over-budget lookup writes no cache entry (keys=" .. nkeys .. ")")
 end
 
--- A junk-fingerprint flood spends the node-wide budget: a fingerprint that
--- was ARMED when last asked keeps that answer (fpps| stale key), so an armed
--- deny still answers once its 30 s cache lapses; one never asked still fails
--- open, and a disarm drops the stale answer.
+-- A junk-fingerprint flood spends the node-wide budget. A fingerprint that
+-- was ARMED when last asked is asked anyway from the armed reserve (a flood
+-- cannot spend it: only armed answers write fpps| keys), which refreshes its
+-- answer; when the reserve is spent too it keeps its last answer. One never
+-- asked still fails open; a disarm drops the stale answer; an RPC error
+-- fails open and keeps it.
 do
   local sh, calls, answer = new_dict(), 0, '{"action":"deny","id":"c28caa00","ttl":30}'
   local deps = { raw = raw, sh = sh, rpc = function() calls = calls + 1; return answer, nil end }
+  local ck = "fpp|" .. ngx.md5(fpp.key_input(raw))
+  local sk = "fpps|" .. ngx.md5(fpp.key_input(raw))
   check(fpp.lookup(deps) == "deny", "armed answer fetched")
-  sh._store["fpp|" .. ngx.md5(fpp.key_input(raw))] = nil       -- the 30 s cache lapses
+  check(sh._store[sk] and sh._store[sk].ttl == 600, "the armed answer is kept 600 s under fpps|")
+  sh._store[ck] = nil                                            -- the 30 s cache lapses
   for i = 1, 60 do                                               -- the flood
     fpp.lookup({ raw = "1|TLSv1.3|0x" .. i .. ":X|x25519|h2", sh = sh,
                  rpc = function() return '{"action":"","id":"","ttl":30}', nil end })
   end
   local before = calls
   local a, id = fpp.lookup(deps)
-  check(a == "deny" and id == "c28caa00" and calls == before,
-        "over budget: the armed fingerprint keeps its last answer, no rpc (" .. tostring(a) .. ")")
+  check(a == "deny" and id == "c28caa00" and calls == before + 1,
+        "over budget: an armed fingerprint is asked from the reserve (" .. tostring(a) .. ")")
+  -- The reserve spent too: the stale answer, no RPC, nothing written.
+  sh._store[ck] = nil
+  sh:set("fpp|stale_budget", 1000, 1)
+  before = calls
+  a, id = fpp.lookup(deps)
+  check(a == "deny" and id == "c28caa00" and calls == before and sh._store[ck] == nil,
+        "reserve spent: the stale armed answer, no rpc, no cache write")
   local other = "1|TLSv1.3|TLS_CHACHA20_POLY1305_SHA256|X25519|h2"
   check(fpp.lookup({ raw = other, sh = sh, rpc = deps.rpc }) == "",
         "over budget: a fingerprint never asked still fails open")
+  -- An RPC error (reserve available) fails open and keeps the stale answer.
+  sh._store["fpp|stale_budget"] = nil
+  sh._store[ck] = nil
+  check(fpp.lookup({ raw = raw, sh = sh, rpc = function() return nil, "timeout" end }) == "",
+        "an rpc error fails open")
+  check(sh._store[sk] ~= nil, "…and keeps the stale answer")
   -- A disarm (asked while the budget allows) drops the stale answer.
   local sh2 = new_dict()
   local d2 = { raw = raw, sh = sh2, rpc = function() return answer, nil end }
   fpp.lookup(d2)
   answer = '{"action":"","id":"","ttl":30}'
-  sh2._store["fpp|" .. ngx.md5(fpp.key_input(raw))] = nil
+  sh2._store[ck] = nil
   fpp.lookup(d2)
-  sh2:set("fpp|rpc_budget", 1000, 1)
-  sh2._store["fpp|" .. ngx.md5(fpp.key_input(raw))] = nil
-  check(fpp.lookup(d2) == "", "a disarmed fingerprint has no stale answer to fall back on")
+  check(sh2._store[sk] == nil, "a disarmed fingerprint has no stale answer to fall back on")
 end
 
 -- ttl<=0 from the daemon must not pin the entry forever (exptime 0 =

@@ -357,7 +357,8 @@ local function notify_impl(ip, waf_tag)
     -- The decoded, dot-segment-normalised path (what nginx routes and the
     -- origin runs), not the raw request_uri: `/acctxfer/../real/upload.php`
     -- matched the /acctxfer inline bypass as written and reached
-    -- /real/upload.php unscanned inline.
+    -- /real/upload.php unscanned inline (where WAF rule 103, which blocks
+    -- that request line by default, is off, excluded or failed open).
     local uri  = ngx.var.uri or ""
     if is_excluded(host, uri) then return nil end
 
