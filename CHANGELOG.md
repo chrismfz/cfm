@@ -88,11 +88,6 @@ back-filled here — see the git/PR history for that period.
   (never below 100); `0` turns the check off.
 
 ### Changed
-- **The Site Cache decodes `%XX` in cookie names through a lookup table** too,
-  instead of a Lua call per escape. It keeps its own copy rather than
-  depending on a WAF module (a missing file there must never switch the cache
-  off), and a test pins it to the WAF's decoder over every byte pair, so the
-  two read a cookie name identically. Same bytes out.
 - **The WAF's percent-decoding is faster.** The normalized scan surface every
   rule reads, and the `filename*=` upload check, now decode `%XX` through a
   lookup table instead of a Lua call per escape: a 30 KB percent-encoded body

@@ -380,21 +380,6 @@ do
   check(okc == false and whyc == "cookie-size", "a Cookie header over 8 KB → bypass:cookie-size")
 end
 
--- cookie_key's %XX decoder is its own copy of the WAF's table (the Site Cache
--- must not depend on a WAF module), so it is pinned to the WAF's decoder over
--- every byte pair: the two can never decode a cookie name differently.
-do
-  local waf_decode = require("cfm_waf_util").url_decode_once
-  local bad = 0
-  for a = 0, 255 do
-    for b = 0, 255 do
-      local s = "c%" .. string.char(a, b)
-      if cache._percent_decode(s) ~= waf_decode(s) then bad = bad + 1 end
-    end
-  end
-  check(bad == 0, ("cookie_key decodes %d byte pairs differently from cfm_waf_util"):format(bad))
-end
-
 -- ── Tier B micro-cache: full request decision ─────────────────────────────────
 local function armed(ttl) return { micro = { on = true, ttl = ttl }, strict_cookies = false } end
 local function dec(pol, m, u, c, a)
