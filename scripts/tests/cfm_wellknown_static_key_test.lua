@@ -47,8 +47,16 @@ do
     { uri = "/.well-known/acme-challenge/sh.PHP7", why = "a .php7 file" },
     { uri = "/.well-known/x.phtml/y.txt", why = "PATH_INFO behind a script" },
     { uri = "/.well-known/webfinger", args = "resource=acct:a@b", why = "webfinger with its query" },
+    -- nginx sends the RAW target upstream: it must be the decoded path itself.
+    { uri = "/.well-known/x", request_uri = "/%73earch/%27%29%20UNION%20SELECT%201--%20/%2e%2e/%2e%2e/%2ewell-known/x",
+      why = "a raw target that normalises into the prefix" },
+    { uri = "/.well-known/x", request_uri = "/.well-known/x#payload", why = "a raw fragment" },
+    { uri = "/.well-known/a.txt", request_uri = "/.well-known/a%2etxt", why = "an escaped byte" },
+    -- A directory runs its index.php (DirectoryIndex).
+    { uri = "/.well-known/acme-challenge/", why = "a directory" },
+    { uri = "/.well-known/", why = "the prefix itself" },
   }) do
-    local r = H.run{ uri = t.uri, args = t.args, method = t.method }
+    local r = H.run{ uri = t.uri, args = t.args, method = t.method, request_uri = t.request_uri }
     -- The WAF or the bridge decides it (a bare POST can be challenged by
     -- the WAF before the bridge is asked).
     check(not bypassed(r) and (r.rpcs:find("decision", 1, true) or r.rpcs:find("waf_excludes", 1, true)),
@@ -62,7 +70,7 @@ end
 -- ── well_known_plain against the fixture the Go engine runs too ─────────────
 do
   local src = io.open("configs/lua/cfm.lua"):read("*a")
-  local chunk = src:match("(local SCRIPT_EXT = %b{}.-\nlocal function well_known_plain%(m, path, args%).-\nend\n)")
+  local chunk = src:match("(local SCRIPT_EXT = %b{}.-\nlocal function well_known_plain%(m, path, args, raw%).-\nend\n)")
   check(chunk ~= nil, "well_known_plain found in cfm.lua")
   if chunk then
     local plain = assert(loadstring(chunk .. "\nreturn well_known_plain"))()
@@ -71,7 +79,7 @@ do
       local m, path, q, want = line:match("^(%u+)%s+(%S+)%s+(%S+)%s+([01])%s*$")
       if m then
         n = n + 1
-        local got = plain(m, path, q ~= "-" and q or "")
+        local got = plain(m, path, q ~= "-" and q or "", path)
         check(got == (want == "1"), ("well_known_plain(%s %s ?%s) = %s, want %s"):format(m, path, q, tostring(got), want))
       end
     end
@@ -87,11 +95,12 @@ do
   check(chunk ~= nil, "is_static_asset_uri found in cfm.lua")
   if chunk then
     local is_static = assert(loadstring(chunk .. "\nreturn is_static_asset_uri"))()
-    for _, u in ipairs({ "/a/b.css", "/x.svg", "/bootstrap-4.6.0/css/x.css", "/img/a.PNG", "/x.css?v=1" }) do
+    for _, u in ipairs({ "/a/b.css", "/x.svg", "/bootstrap-4.6.0/css/x.css", "/img/a.PNG" }) do
       check(is_static(u), u .. " is a static asset")
     end
     for _, u in ipairs({ "/xmlrpc.php/x.css", "/forum/ucp.php/a.svg", "/x.PHP5/y.png", "/a.phtml/b.js",
-                         "/cgi-bin/x.cgi/y.css", "/up/x.php.svg", "/x.php", "/a.css.php/x.png" }) do
+                         "/cgi-bin/x.cgi/y.css", "/up/x.php.svg", "/x.php", "/a.css.php/x.png",
+                         "/up/a.svg#.php", "/up/a.svg?.php", "/x.plx/y.svg" }) do
       check(not is_static(u), u .. " is not a static asset")
     end
 

@@ -908,7 +908,8 @@ local STATIC_ASSET_EXT = {
 -- PHP-only lists on purpose.
 local SCRIPT_EXT = {
   php = true, phtml = true, pht = true, phar = true, phps = true,
-  cgi = true, pl = true, py = true, asp = true, aspx = true, jsp = true, shtml = true,
+  cgi = true, fcgi = true, pl = true, plx = true, ppl = true, perl = true, py = true,
+  asp = true, aspx = true, jsp = true, shtml = true,
 }
 -- An extension (a run of letters and digits after a dot) followed by `.`, `/`
 -- or the end that names a script. Each dot is tried: the `.` that ends one
@@ -927,14 +928,21 @@ local function path_has_script_ext(path)
 end
 
 -- Step 0a1's test: a plain fetch under /.well-known/ (method as nginx gives
--- it, path decoded, args the raw query). GET / HEAD with no query and no
--- script extension; and CalDAV / CardDAV discovery (RFC 6764: PROPFIND /
--- OPTIONS on the two redirect stubs), which clients send with no query.
-local function well_known_plain(m, path, args)
+-- it, path decoded, args the raw query, raw the request target as sent). GET /
+-- HEAD of a file (not a directory: DirectoryIndex would run an index.php
+-- there) with no query and no script extension; and CalDAV / CardDAV
+-- discovery (RFC 6764: PROPFIND / OPTIONS on the two redirect stubs), which
+-- clients send with no query. The raw target must be the decoded path byte
+-- for byte: nginx passes the RAW target upstream, and the app routes on it —
+-- `/%73earch/…/%2e%2e/%2e%2e/%2ewell-known/x` is `/.well-known/x` here and a
+-- WordPress search for the bytes before it there. Validator names (base64url
+-- tokens, HEX.txt) never need escaping.
+local function well_known_plain(m, path, args, raw)
   if args and args ~= "" then return false end
+  if raw ~= path then return false end
   local lp = path:lower()
-  if lp:sub(1, 13) ~= "/.well-known/" then return false end
-  local stub = lp:match("^/%.well%-known/(c[a-z]+dav)/?$")
+  if lp:sub(1, 13) ~= "/.well-known/" or lp:sub(-1) == "/" then return false end
+  local stub = lp:match("^/%.well%-known/(c[a-z]+dav)$")
   if (stub == "caldav" or stub == "carddav")
      and (m == "GET" or m == "HEAD" or m == "PROPFIND" or m == "OPTIONS") then
     return true
@@ -945,8 +953,10 @@ end
 
 local function is_static_asset_uri(uri)
   if type(uri) ~= "string" or uri == "" then return false end
-  -- Strip query string, then take the extension after the final dot.
-  local path = uri:match("^([^?#]+)") or uri
+  -- The extension after the final dot. `uri` is ngx.var.uri, decoded and with
+  -- no query: a `?` / `#` in it came from %3F / %23 and is part of the file
+  -- name (`/up/a.svg%23.php` runs a.svg#.php), so nothing is stripped.
+  local path = uri
   local ext = path:match("%.([%w]+)$")
   if not ext then return false end
   if STATIC_ASSET_EXT[ext:lower()] ~= true then return false end
@@ -1351,7 +1361,7 @@ end
 -- not a front controller. The log-driven engine mirrors this test
 -- (isWellKnownChallengeExempt).
 do
-  if well_known_plain(method, uri, ngx.var.args) then
+  if well_known_plain(method, uri, ngx.var.args, ngx.var.request_uri) then
     ngx.header["X-CFM-Bypass"] = "well-known"
     log_route(ngx.INFO, "bypass=well-known host=" .. host .. " uri=" .. uri)
     ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)

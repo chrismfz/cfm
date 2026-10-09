@@ -3854,9 +3854,9 @@ func hasAnyPrefix(s string, prefixes []string) bool {
 // certificate issuance broke outright: the incident that earned this
 // both-sides rule.
 //
-// The same test as the edge (since 2026-10-09): GET / HEAD with no query and
-// no script extension in the path, or CalDAV / CardDAV discovery (GET / HEAD /
-// PROPFIND / OPTIONS on the two stubs). A POST, a query or a `.php` under the
+// The same test as the edge (since 2026-10-09): GET / HEAD of a file (no
+// trailing `/`) with no query and no script extension in the path, or CalDAV /
+// CardDAV discovery (GET / HEAD / PROPFIND / OPTIONS on the two stubs). A POST, a query or a `.php` under the
 // prefix — a scanner probing `/.well-known/x.php`, an app reached through it —
 // is inspected at the edge and scored here. Both sides run
 // scripts/tests/fixtures/wellknown_exempt.txt.
@@ -3883,11 +3883,17 @@ func isWellKnownChallengeExempt(method, p string) bool {
 	if !strings.HasPrefix(lp, "/.well-known/") {
 		return false
 	}
-	if strings.Contains(lp, "..") || strings.Contains(lp, "%") {
+	// The edge exempts only a raw target equal to its normalised form; on
+	// the raw side that means no escapes, dot segments, `//` or fragment.
+	if strings.Contains(lp, "..") || strings.Contains(lp, "%") || strings.Contains(lp, "//") ||
+		strings.Contains(lp, "#") {
 		return false
 	}
+	if strings.HasSuffix(lp, "/") {
+		return false // a directory: DirectoryIndex would run its index.php
+	}
 	m := strings.ToUpper(method)
-	switch strings.TrimSuffix(lp, "/") {
+	switch lp {
 	case "/.well-known/caldav", "/.well-known/carddav":
 		if m == "GET" || m == "HEAD" || m == "PROPFIND" || m == "OPTIONS" {
 			return true
@@ -3903,7 +3909,8 @@ func isWellKnownChallengeExempt(method, p string) bool {
 // and still run as a script (PATH_INFO, or a multi-extension handler).
 var scriptExt = map[string]bool{
 	"php": true, "phtml": true, "pht": true, "phar": true, "phps": true,
-	"cgi": true, "pl": true, "py": true, "asp": true, "aspx": true, "jsp": true, "shtml": true,
+	"cgi": true, "fcgi": true, "pl": true, "plx": true, "ppl": true, "perl": true, "py": true,
+	"asp": true, "aspx": true, "jsp": true, "shtml": true,
 }
 
 func isScriptExt(ext string) bool {

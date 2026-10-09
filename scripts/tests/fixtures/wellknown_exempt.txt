@@ -12,7 +12,12 @@ GET      /.well-known/mta-sts.txt                    -                 1
 GET      /.WELL-KNOWN/apple-app-site-association     -                 1
 GET      /.well-known/openid-configuration           -                 1
 PROPFIND /.well-known/caldav                         -                 1
-OPTIONS  /.well-known/carddav/                       -                 1
+OPTIONS  /.well-known/carddav                        -                 1
+OPTIONS  /.well-known/carddav/                       -                 0
+GET      /.well-known/acme-challenge/                -                 0
+GET      /.well-known/                               -                 0
+GET      /.well-known/x.plx                          -                 0
+GET      /.well-known/x.fcgi/y                       -                 0
 GET      /.well-known/carddav                        -                 1
 PROPFIND /.well-known/caldav                         x=1               0
 PROPFIND /.well-known/caldav/x                       -                 0
