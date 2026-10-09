@@ -749,7 +749,7 @@ end
 -- MAIN CHECK
 -- ─────────────────────────────────────────────────────────────────────────────
 
-function _M.check(ctx)
+local function check_impl(ctx, st)
   if not CFG.enabled then
     return false, nil, nil, nil
   end
@@ -947,6 +947,11 @@ function _M.check(ctx)
   local final_action  = nil
   local final_rule_id = nil
 
+  -- Rule 201's block, held back until after every armed block-tier family
+  -- (step 1 sets it; recorded before traversal, or at ::done:: if an earlier
+  -- block ended evaluation first, so the hit is never lost). It lives in
+  -- `st` so _M.check can still block as 201 if a later rule raises.
+
   local function record(reason, ttl, action, rule_id)
     local sev = ACTION_SEVERITY[action] or 0
     if sev == 0 then return false end
@@ -985,7 +990,18 @@ function _M.check(ctx)
           action = "block"
         end
         local ttl = (action == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, action, RULE_IDS.rule_bad_ua) then goto done end
+        local reason = "WAF_BAD_UA:" .. tag .. ":score=" .. score
+        -- A block is recorded late (before traversal, see "Bad UA block,
+        -- deferred" below): WAF_BAD_UA has no block-tier rule, so its
+        -- autoblock is not armed, and as the first block hit it owned the
+        -- headline and `goto done` skipped the armed families. `sqlmap` with
+        -- a SQLi payload lost the 6h ban and the alert; a CVE probe from
+        -- nuclei lost the WAF/CVE alert.
+        if action == "block" then
+          st.bad_ua = { reason = reason, ttl = ttl }
+        else
+          record(reason, ttl, action, RULE_IDS.rule_bad_ua)
+        end
       end
     end
   end
@@ -2337,6 +2353,24 @@ function _M.check(ctx)
     end
   end
 
+  -- ── Bad UA block (rule 201), deferred from step 1 ───────────────────────
+  -- A score >= 99 scanner identity (sqlmap, nikto, nuclei …) or an operator
+  -- `block` mode blocks, but WAF_BAD_UA has no block-tier rule, so its
+  -- autoblock is not armed (waf_security_register.go). Recorded at step 1, it
+  -- owned the headline as the first block hit, `goto done` skipped the rest,
+  -- and cfm.lua pushes only the headline: the armed SQLi / RCE / CVE hit on
+  -- the same request (the scanner's actual payload) never reached autoblock.
+  -- Recorded here, after every armed block family and before the held
+  -- traversal rules, the armed family owns the headline and the ban; a
+  -- scanner request with no armed payload still blocks, labelled as before.
+  -- Cost: such a request now runs the remaining detectors (budget-capped
+  -- scans) instead of stopping at step 1.
+  if st.bad_ua then
+    local b = st.bad_ua
+    st.bad_ua = nil
+    if record(b.reason, b.ttl, "block", RULE_IDS.rule_bad_ua) then goto done end
+  end
+
   -- ── Traversal (rule 101) — AFTER every armed block-tier family on purpose ──
   -- rule_traversal is block-tier since 2026-09-05, but its autoblock family
   -- (WAF_TRAVERSAL) is HELD un-armed for burn-in (waf_security_register.go).
@@ -2423,10 +2457,50 @@ function _M.check(ctx)
   end
 
   ::done::
+  -- An earlier block ended evaluation before the deferred rule-201 block was
+  -- recorded: keep the hit (it does not take the headline, an equal-severity
+  -- hit is already there).
+  if st.bad_ua then
+    record(st.bad_ua.reason, st.bad_ua.ttl, "block", RULE_IDS.rule_bad_ua)
+    st.bad_ua = nil
+  end
   if final_sev == 0 then
     return false, nil, nil, nil
   end
   return true, final_reason, final_ttl, final_action, hits, final_rule_id
+end
+
+-- check_impl, plus the deferred rule-201 block on a raise. Rule 201's block
+-- used to end evaluation at step 1, so a scanner request (sqlmap, nikto …)
+-- never reached a later rule; it now runs them all first (see "Bad UA block,
+-- deferred"), and under fail_open a rule that raised would let it through
+-- uninspected (cfm.lua's waf_error) where it used to be blocked. Blocked as
+-- 201 here instead; with no deferred block the error goes up as before.
+function _M.check(ctx)
+  local st = {}
+  local ok, hit, reason, ttl, action, hits, rule_id = xpcall(check_impl, debug.traceback, ctx, st)
+  if ok then return hit, reason, ttl, action, hits, rule_id end
+  local b = st.bad_ua
+  if not b then error(hit, 0) end
+  local c = type(ctx) == "table" and ctx or {}
+  if c.skip_rule_ids and c.skip_rule_ids[RULE_IDS.rule_bad_ua] then error(hit, 0) end
+  -- One line a minute per node (a scan sends this request by the thousand
+  -- while the bug is live); without a dict, every time.
+  local sh = c.shdict
+  local first = true
+  if sh and sh.add then
+    local okadd, added, aerr = pcall(sh.add, sh, "waf_201_raise", 1, 60)
+    first = (not okadd) or added or aerr ~= "exists"
+  end
+  if first and ngx and ngx.log then
+    ngx.log(ngx.ERR, "[cfm_waf] rule raised behind a deferred rule-201 block; blocked as 201 ip=",
+            tostring(c.ip), " host=", tostring(c.host), " uri=", tostring(c.uri), " err=", tostring(hit))
+  end
+  -- Only the 201 hit: hits recorded before the raise are dropped (main never
+  -- evaluated those rules on this request either).
+  return true, b.reason, b.ttl, "block",
+         { { reason = b.reason, ttl = b.ttl, action = "block", waf_rule_id = RULE_IDS.rule_bad_ua } },
+         RULE_IDS.rule_bad_ua
 end
 
 -- Reason families whose first ":"-tag stays in the should_push cooldown key —
@@ -2442,7 +2516,8 @@ local PUSH_KEY_KEEPS_TAG = {
 -- band first). cfm.lua ships them on the ip_push so a rule that only ever
 -- matches BEHIND a stronger one (a logonly scanner that loses the headline to
 -- a challenge-tier rule) is measurable. A rule placed after a BLOCK never runs
--- on that request (`goto done`), so it cannot appear here. Record-only.
+-- on that request (`goto done`), so it cannot appear here — except rule
+-- 201's deferred block, appended at ::done:: behind an earlier block. Record-only.
 local ALSO_RULE_IDS_MAX = 16
 function _M.also_rule_ids(hits, headline_id)
   local out, seen = {}, {}

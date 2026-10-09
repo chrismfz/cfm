@@ -379,6 +379,33 @@ let `record()` keep evaluating only when the block hit belongs to a held
 family (a small Lua-side set mirroring `heldAutoblockFamilies`), so armed
 families still short-circuit as today.
 
+**Rule 201's block joins the late group (2026-10-09).** `WAF_BAD_UA` has no
+block-tier rule (its default is `challenge_v2`), so it is not armed, yet a
+score >= 99 scanner identity (sqlmap, nikto, nuclei, zgrab, the fake legacy
+MSIE / Windows UAs) or an operator `block` mode blocks. Recorded at step 1 it
+was the first block hit on every such request: sqlmap's own SQLi payload, a
+nuclei CVE probe, never reached autoblock or the CVE alert. The block is now
+recorded after every armed block family and before traversal (step 1 keeps
+the challenge/logonly tiers; `cfm_waf_bad_ua_shadow_test.lua`), and at
+`::done::` when an earlier block ended evaluation, so the 201 hit stays in
+`hits`. Same order fix, same cost shape as traversal: a fleet read of
+2026-10-02..09 showed ~14.5k score-99 events a week (sampled, one per IP /
+family / tier a minute; mostly `UA_FAKE_LEGACY_MSIE`, 76 `UA_SQLMAP`), which
+now run the remaining budget-capped detectors before blocking. Side effects: those requests now
+feed the per-IP burst counters (rules 510-512, armed, can ban them), cost what
+a browser-UA request costs (~45 µs a GET, ~4 ms a 30 KB form POST), and the
+challenge / logonly hits behind 201 now show in `also_rule_ids`, so burn-in
+"also" counts include scanner traffic from this date. Mirror image, as for
+traversal: an operator who arms `BAD_UA = 1` loses the 201 ban on a request
+where an earlier held or un-armed block rule (10019/10020, a family set to
+0) also matched; at the shipped arming neither side bans. Authorised scanners (Nessus,
+Acunetix/AWVS, AppScan are score 99) that send an armed payload are now banned
+too; `ALLOW_NETS` / `ALLOW_UA_CONTAINS` exempt them. A rule that raises behind
+the deferred block no longer lets the scanner through under `fail_open`
+(cfm.lua's `waf_error` path): `_M.check` runs the pipeline under `xpcall`
+and, when a 201 block is pending, blocks as 201 and logs `[cfm_waf] rule
+raised behind a deferred rule-201 block`.
+
 ## Open questions (decide before Phase 1)
 
 - **Detector name:** `waf_security` (sibling of `exim_security`,

@@ -33,6 +33,24 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
+- **A known scanner's attack now gets the scanner banned.** A request from a
+  self-declared scanner (sqlmap, nikto, nuclei, zgrab, a fake legacy Internet
+  Explorer UA) was blocked by the bad-User-Agent rule (201) before any other
+  rule ran, and that rule does not ban. So sqlmap sending a SQL injection, or
+  nuclei probing a CVE, got a 403 but never the 6-hour ban or the CVE alert
+  the same payload earns from any other client. The SQL-injection, command
+  injection, CVE and other banning rules now get the first word; a scanner
+  request with no such payload still gets its 403, labelled as before.
+  Such requests now also count toward the wp-login / xmlrpc burst rules, so
+  a scanner hammering those can be banned by them too. An operator who armed
+  the bad-UA ban (`BAD_UA = 1` in `[waf_security]`) now loses it on a
+  request where an earlier non-banning block rule (the held TranslatePress
+  rules, or a family set to 0) also matched. Commercial scanners carry the
+  same scanner User-Agents (Nessus, Acunetix's `AWVS`, AppScan): an
+  authorised scan, such as a customer's own or a PCI ASV scan, whose probes
+  trip a banning rule now gets the 6-hour ban and the alert too. Exempt its
+  source from the ban with `ALLOW_NETS` (or `ALLOW_UA_CONTAINS`) in
+  `[waf_security]`; the request itself still gets its 403, as before.
 - **Site Cache writes far less to disk under abuse.** The static-asset cache
   stored a full copy for every distinct query string, and a HEAD or an
   aborted download still stored the whole file: five HEAD requests with random
