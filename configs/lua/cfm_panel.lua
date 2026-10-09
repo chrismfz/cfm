@@ -354,9 +354,10 @@ local function panel_waf_probe(ip, host, uri, args, method, ua, scope, enforce)
             body = "",  -- reduced profile: never buffer the panel body
             -- Same dict the web edge passes as SH. cfm_waf's burst detectors
             -- mutate counters here, but they are gated on web-app auth markers
-            -- (/wp-login.php, /xmlrpc.php, …), which no panel URI carries. They
-            -- are keyed per IP across hosts (cfm_waf.lua step 25), so a client
-            -- that sends one to a panel port only adds to its own counter.
+            -- (/wp-login.php, /xmlrpc.php, …), which legitimate panel traffic
+            -- never carries. They are keyed per IP across hosts (cfm_waf.lua
+            -- step 25), shared with the web edge, so a client that sends one
+            -- to a panel port adds to its own per-IP counter.
             shdict = ngx.shared.cfm_decisions,
             self_origin = false,
         })

@@ -38,7 +38,7 @@ check(one ~= nil, "412 sees the polyglot with one Content-Type (fixture sanity)"
 local ok, two = pcall(det.detect_polyglot_upload, poly,
   { ["content-type"] = { "multipart/form-data; boundary=XB", "text/plain" } })
 check(ok, "412 must not raise on a repeated Content-Type (" .. tostring(two) .. ")")
-check(ok and two == one, "412 reads the first Content-Type when it repeats (got " .. tostring(two) .. ")")
+check(ok and two == one, "412 reads the joined Content-Type when it repeats (got " .. tostring(two) .. ")")
 ok = pcall(det.detect_polyglot_upload, poly, { ["content-type"] = {} })
 check(ok, "412 must not raise on an empty header table")
 -- The boundary PHP splits on, wherever it sits (both reviews of the first
@@ -57,6 +57,20 @@ check(det.detect_polyglot_upload(qpoly,
 check(det.detect_polyglot_upload(poly,
         { ["Content-Type"] = "multipart/form-data; boundary=XB" }) == one,
       "412 reads the canonical-case header name")
+-- An empty boundary is valid to PHP: parts split on bare `--` lines.
+local epoly = poly:gsub("%-%-XB", "--")
+for _, ct in ipairs({ "multipart/form-data; boundary=", 'multipart/form-data; boundary=""' }) do
+  check(det.detect_polyglot_upload(epoly, { ["content-type"] = ct }) == one,
+        "412 walks an empty boundary (" .. ct .. ")")
+end
+-- PHP's media type is the joined value's first: text/plain first means PHP
+-- parses no upload, so 412 has nothing to scan.
+check(det.detect_polyglot_upload(poly,
+        { ["content-type"] = { "text/plain", "multipart/form-data; boundary=XB" } }) == nil,
+      "412 skips a body PHP reads as text/plain")
+check(det.detect_polyglot_upload(poly,
+        { ["content-type"] = "text/plain; x=multipart/form-data; boundary=XB" }) == nil,
+      "412 skips multipart named only in a parameter")
 
 -- ── check(): the rules after 412 still run ─────────────────────────────────
 local body = "--XB\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n" ..
@@ -97,6 +111,19 @@ do
     end
   end
   check(burst > 0, "an xmlrpc POST reaches a burst counter (got none)")
+  -- The detectors themselves key per IP, whatever host a caller passes.
+  keys = {}
+  det.detect_auth_burst("203.0.113.11", "Example.COM", "/wp-login.php", "POST", dict)
+  det.detect_xmlrpc_post_burst("203.0.113.11", "example.com", "/xmlrpc.php", "POST", dict, "",
+    { ["user-agent"] = CHROME }, "<methodCall><methodName>system.multicall</methodName></methodCall>")
+  local n = 0
+  for _, k in ipairs(keys) do
+    if k:find("|203.0.113.11|", 1, true) then
+      n = n + 1
+      check(k:find("|203.0.113.11|-", 1, true) ~= nil, "a passed host never splits the key: " .. k)
+    end
+  end
+  check(n > 0, "auth/xmlrpc detectors reached their counters")
 end
 
 -- ── cfm.lua: the push carries strings ───────────────────────────────────────
@@ -113,7 +140,7 @@ do
   local fn_src = src:match("\n(local function push_header%(v%).-\nend)\n")
   check(fn_src ~= nil, "push_header found in cfm.lua")
   if fn_src then
-    local env = setmetatable({}, { __index = _G })
+    local env = setmetatable({ wutil_ok = true, wutil = require("cfm_waf_util") }, { __index = _G })
     local chunk = assert(loadstring(fn_src .. "\nreturn push_header"))
     setfenv(chunk, env)
     local push_header = chunk()
