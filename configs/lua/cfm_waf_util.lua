@@ -11,7 +11,7 @@
 local _M = {}
 
 -- CFG is set by the engine via _M.init(cfg) at module load.
--- scan_str() is the only helper that needs it (max_scan_len).
+-- scan_str() (max_scan_len) and waf_request_headers() (max_header_lines) read it.
 local CFG
 
 function _M.init(cfg)
@@ -548,24 +548,24 @@ _M.strip_host_port                    = strip_host_port
 _M.is_ipv4_literal                    = is_ipv4_literal
 _M.is_ipv6_literal                    = is_ipv6_literal
 
--- The request headers for the WAF, complete. ngx.req.get_headers() returns
--- the first 100 header lines only (err "truncated"), while nginx forwards every
--- line to the origin: a request padded past line 100 hid every later header
--- from the WAF (a CVE marker header, a second Content-Type carrying the
--- boundary, the body headers the field reader needs). A truncated read is
--- retried with up to WAF_MAX_HEADER_LINES lines; a request with even more is
--- reported as too_many, and the caller refuses it (no client sends that many,
--- and reading them all would let one request build a table of thousands).
--- Returns headers, too_many.
-local WAF_MAX_HEADER_LINES = 1000
-_M.WAF_MAX_HEADER_LINES = WAF_MAX_HEADER_LINES
+-- The request headers for the WAF, complete. ngx.req.get_headers() alone
+-- returns the first 100 header lines (err "truncated"), while nginx forwards
+-- every line to the origin: a request padded past line 100 hid every later
+-- header from the WAF (a CVE marker header, a second Content-Type carrying the
+-- boundary, the body headers the PHP field reader needs). So the headers are
+-- read up to CFG.max_header_lines (cfm_waf CFG, default 1000) in one call, and
+-- a request with more is reported as too_many: the callers refuse it (no
+-- client sends that many, and reading them all would let one request build a
+-- table of thousands). max_header_lines = 0 turns the refusal off (the first
+-- 1000 lines are read, the rest go unseen, as before). Returns headers, too_many.
 function _M.waf_request_headers(req)
   req = req or ngx.req
-  local h, err = req.get_headers()
-  if err == "truncated" then
-    h, err = req.get_headers(WAF_MAX_HEADER_LINES)
-  end
-  return h, err == "truncated"
+  local max = tonumber(CFG and CFG.max_header_lines) or 1000
+  local refuse = max > 0
+  if max <= 0 then max = 1000 end
+  if max < 100 then max = 100 end
+  local h, err = req.get_headers(max)
+  return h, refuse and err == "truncated"
 end
 
 return _M

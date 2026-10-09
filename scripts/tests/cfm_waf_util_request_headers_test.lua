@@ -1,7 +1,7 @@
--- cfm_waf_util.waf_request_headers: ngx.req.get_headers() stops at 100 header
--- lines ("truncated") while nginx forwards them all. The WAF retries with up
--- to WAF_MAX_HEADER_LINES and reports a request with even more as too_many
--- (the callers refuse it), so no header hides past line 100.
+-- cfm_waf_util.waf_request_headers: ngx.req.get_headers() alone stops at 100
+-- header lines ("truncated") while nginx forwards them all. The WAF reads up to
+-- CFG.max_header_lines (default 1000) in one call and reports a request with
+-- more as too_many (the callers refuse it); 0 turns the refusal off.
 
 _G.ngx = { log = function() end, ERR = 0, WARN = 1, INFO = 2 }
 package.path = "configs/lua/?.lua;" .. package.path
@@ -14,8 +14,8 @@ local function check(c, m)
   io.stderr:write("FAIL: " .. m .. "\n")
 end
 
--- A fake request with `n` header lines: get_headers(max) (default 100) returns
--- the first `max` and "truncated" past it.
+-- A fake request with `n` header lines: get_headers(max) (default 100)
+-- returns the first `max` and "truncated" past it.
 local function req(n)
   local calls = {}
   return {
@@ -31,22 +31,29 @@ local function req(n)
   }
 end
 
-local r = req(30)
-local h, too_many = util.waf_request_headers(r)
-check(h["x-h30"] == "v" and not too_many and #r.calls == 1, "30 lines: one read, all headers, not too many")
+local cfg = { max_header_lines = 1000 }
+util.init(cfg)
 
-r = req(150)
-h, too_many = util.waf_request_headers(r)
+local r = req(150)
+local h, too_many = util.waf_request_headers(r)
 check(h["x-h150"] == "v", "150 lines: the header on line 150 is read")
 check(not too_many, "150 lines: not too many")
-check(r.calls[2] == util.WAF_MAX_HEADER_LINES, "150 lines: re-read with the larger cap")
+check(#r.calls == 1 and r.calls[1] == 1000, "one read, capped at max_header_lines")
 
-r = req(util.WAF_MAX_HEADER_LINES + 1)
+h, too_many = util.waf_request_headers(req(1001))
+check(too_many, "1001 lines: too_many")
+
+cfg.max_header_lines = 0
+h, too_many = util.waf_request_headers(req(5000))
+check(not too_many and h["x-h1000"] == "v", "max_header_lines = 0: no refusal, the first 1000 lines read")
+
+cfg.max_header_lines = 20
+r = req(150)
 h, too_many = util.waf_request_headers(r)
-check(too_many, "more than WAF_MAX_HEADER_LINES lines: too_many")
+check(r.calls[1] == 100 and too_many, "a cap below 100 is raised to 100 (never fewer than before)")
 
 if fails > 0 then
   io.stderr:write(("cfm_waf_util request headers tests: %d FAILED\n"):format(fails))
   os.exit(1)
 end
-print("ok: cfm_waf_util.waf_request_headers reads past 100 header lines, refuses past the cap")
+print("ok: cfm_waf_util.waf_request_headers reads up to max_header_lines, refuses past it")

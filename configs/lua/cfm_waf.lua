@@ -423,6 +423,12 @@ local CFG = {
   block_ttl_sec     = 10,
   push_cooldown_sec = 60,
 
+  -- Header lines the WAF reads (cfm_waf_util.waf_request_headers). A request
+  -- with more is refused: 431 on the web edge (cfm.lua), a WAF_HEADER_LINES
+  -- block-tier hit on the panel ports. 0 = never refuse (only the first 1000
+  -- lines are then inspected). No client sends anywhere near 1000.
+  max_header_lines  = 1000,
+
   -- Body scan budget, keyed by request Content-Type. The merged args+body
   -- string fed to body-aware rules (traversal/rce/xss/sqli/php-wrappers/
   -- ssrf/proto-pollution via get_norm_ab() below) is capped to the entry

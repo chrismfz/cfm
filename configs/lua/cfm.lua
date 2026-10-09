@@ -1416,10 +1416,13 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       req_headers = ngx.req.get_headers()
     end
     if too_many_headers then
-      -- More header lines than the WAF reads (cfm_waf_util): refused rather
-      -- than passed with headers the WAF never saw.
-      ngx.log(ngx.WARN, "[cfm] refused: more than ", wutil.WAF_MAX_HEADER_LINES,
-              " request header lines ip=", tostring(ip), " host=", tostring(host))
+      -- More header lines than the WAF reads (cfm_waf_util, max_header_lines
+      -- in cfm_waf_config.lua; 0 turns this off): refused rather than passed
+      -- with headers the WAF never saw. One log line per IP a minute.
+      if not SH or SH:add("hdrlines|" .. tostring(ip), 1, 60) then
+        ngx.log(ngx.WARN, "[cfm] refused 431: too many request header lines ip=",
+                tostring(ip), " host=", tostring(host), " uri=", tostring(uri))
+      end
       return ngx.exit(431)
     end
     local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)

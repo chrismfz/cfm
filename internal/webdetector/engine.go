@@ -55,10 +55,9 @@ type LogRec struct {
 	UpstreamName string
 }
 
-// parseTSV parses the TSV log format used by access_cfm_tsv.log.
-// ts ip host method uri proto status bytes rt urt ref ua
-// parseTSV reads the 12-column TSV of the file tailers (log_format cfm_tsv,
-// httpd-cfm.conf). Those formats log raw TABs from the Referer and UA
+// parseTSV reads the 12-column TSV of the file tailers (access_cfm_tsv.log,
+// log_format cfm_tsv; httpd-cfm.conf): ts ip host method uri proto status
+// bytes rt urt ref ua. Those formats log raw TABs from the Referer and UA
 // (escape=none), so anything past column 11 is the UA, as it always was:
 // no 13th column is ever read from a file.
 func parseTSV(line string) (LogRec, bool) { return parseTSVCols(line, false) }

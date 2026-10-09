@@ -81,7 +81,9 @@ back-filled here — see the git/PR history for that period.
   multipart boundary, and the body headers the PHP field reader needs. The
   WAF now reads up to 1 000 header lines, on the web edge and the panel ports.
   A request with more is refused with `431` (on the panel ports, blocked when
-  the panel WAF enforces): no client sends that many.
+  the panel WAF enforces): no client sends that many. The limit is
+  `max_header_lines` in `/etc/cfm/cfm_waf_config.lua`; `0` turns the refusal
+  off. Refusals are logged to the edge error log, one line per IP a minute.
 - **A file-tailed TSV log with a TAB inside the User-Agent no longer loses part
   of the UA.** Only the edge's socket feed carries the new upstream column;
   the file formats are read as 12 columns again, as before this release.

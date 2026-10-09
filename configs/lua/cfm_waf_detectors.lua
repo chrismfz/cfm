@@ -455,16 +455,12 @@ local function holds_hint(d, hints)
 end
 
 -- A urlencoded source can hold a wanted key only if its decoded, lowercased
--- text holds all the pieces of some wanted name. The raw text is tried first
--- (a hit there means read the source); only a source with `%` or `+` and no
--- raw hit is decoded to look again. One pass of plain finds instead of
--- splitting thousands of pairs (a 64 KB query string).
+-- text holds all the pieces of some wanted name: one decode (only when the
+-- source has `%` or `+`) and a few plain finds instead of splitting thousands
+-- of pairs (a 64 KB query string).
 local function source_lacks(hints)
   return function(s)
-    local l = lower(s)
-    if holds_hint(l, hints) then return false end
-    if not s:find("[%%+]") then return true end
-    return not holds_hint(lower(_form_unescape(s)), hints)
+    return not holds_hint(lower(s:find("[%%+]") and _form_unescape(s) or s), hints)
   end
 end
 

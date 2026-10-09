@@ -327,7 +327,11 @@ local function panel_waf_probe(ip, host, uri, args, method, ua, scope, enforce)
     local req_headers, too_many = nil, false
     if panel_wutil then
         local okh, h, tm = pcall(panel_wutil.waf_request_headers)
-        if okh then req_headers, too_many = h, tm end
+        if okh then
+            req_headers, too_many = h, tm
+        else
+            ngx.log(ngx.ERR, "[cfm_panel_waf] waf_request_headers failed, first 100 header lines only: ", tostring(h))
+        end
     end
     req_headers = req_headers or ngx.req.get_headers()
     local okc, hit, reason, _ttl, action, _hits, rule_id
