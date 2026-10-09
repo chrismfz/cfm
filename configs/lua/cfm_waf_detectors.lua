@@ -315,8 +315,10 @@ end
 -- case) is the one read, its `name` the LAST `name=` parameter. A part with a
 -- `filename` goes to $_FILES; one with neither name nor filename ends the
 -- parse ("Mime headers garbled"). A value runs to the next "\n--<boundary>",
--- one CR before it dropped. fn(name, value) runs once per field, in order.
-local function each_multipart_field(b, ct_raw, fn)
+-- one CR before it dropped. fn(name, value) runs once per field, in order;
+-- on_file(filename, name, s, e), when given, once per file part PHP registers
+-- (its bytes are b[s..e]). fn may be nil: no field value is then copied.
+local function each_multipart_field(b, ct_raw, fn, on_file)
   local bnd = php_mp_boundary(ct_raw)
   if not bnd then return end -- an EMPTY boundary is valid to PHP: parts split on `--` lines
   local B, nextb = "--" .. bnd, "\n--" .. bnd
@@ -362,7 +364,10 @@ local function each_multipart_field(b, ct_raw, fn)
       end
       if not name and not filename then return end
       local bound = b:find(nextb, p, true)
-      if name and not filename and name ~= "" then
+      -- The file's bytes are b[p .. (bound or n + 1) - 1], CR before the
+      -- boundary included (a scanner over-reading one byte is harmless).
+      if filename and on_file then on_file(filename, name, p, (bound or n + 1) - 1) end
+      if fn and name and not filename and name ~= "" then
         -- php_ap_memstr also matches a boundary PREFIX that runs to the end of
         -- the body ("\n", "\n--", ...): a last value is cut there too.
         -- nextb holds one LF (its first byte), so only the body's last LF can
@@ -396,6 +401,20 @@ local function php_content_type(headers)
     return table.concat(parts, ", ")
   end
   return v or ""
+end
+
+-- The file parts PHP registers in a multipart body, as { filename, s, e }
+-- (bytes body[s..e]). Rules 401 and 415 both read them: the last parse is kept
+-- (Lua strings are interned, so the key test is a pointer compare).
+local fp_body, fp_ct, fp_parts
+local function php_file_parts(body, ct_raw)
+  if body == fp_body and ct_raw == fp_ct then return fp_parts end
+  local parts = {}
+  each_multipart_field(body, ct_raw, nil, function(fname, _, s, e)
+    parts[#parts + 1] = { fname, s, e }
+  end)
+  fp_body, fp_ct, fp_parts = body, ct_raw, parts
+  return parts
 end
 
 -- skip(s), when given, may rule a whole urlencoded source (the query string,
@@ -4117,6 +4136,15 @@ function _M.detect_upload_filename(body, headers)
     if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. raw:sub(1, 64) end
   end
 
+  -- And every filename PHP itself registers (each_multipart_field, the
+  -- oracle-checked rfc1867 reader): a header line with no `:` continues the
+  -- one before it, so `filename="shell.p` CRLF `hp"` is `shell.php` to PHP,
+  -- and `file` CRLF `name="shell.php"` is a `filename=` parameter; the
+  -- matchers above read one line at a time and saw neither.
+  for _, f in ipairs(php_file_parts(body, php_content_type(headers))) do
+    local hit = bad_fname(f[1])
+    if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. f[1]:sub(1, 64) end
+  end
   return nil
 end
 
@@ -4160,28 +4188,100 @@ local function _zip_entry_bad_ext(name)
   return nil
 end
 
+-- _zip_entry_bad_ext over every name range of one string, indexed once:
+-- returns bad(a, b), true iff _zip_entry_bad_ext(lb:sub(a, b)) is non-nil, in
+-- O(log n). Zip headers can overlap (a fake `PK\3\4` every 11 bytes, each
+-- naming 512 bytes): matching every name was ~3 000 lowercase-and-14-pattern
+-- passes over 512 bytes, ~0.4 s of worker CPU per 32 KB request. Each place
+-- a bad extension can start (a `.p` / `.h` / `.u`) is classified once:
+--   * T, the first name end b at which it is bad through a `[^%w]` pattern
+--     (the byte after the extension is in the name and not alphanumeric);
+--   * the name ends at which it is bad through a `$` pattern (the name ends
+--     inside or at the end of the extension), kept per end as the largest
+--     start (`tail[b]`).
+-- A name [a, b] is bad iff tail[b] >= a, or some start m >= a has T <= b
+-- (a suffix minimum over the starts).
+local function zip_bad_index(lb)
+  local n = #lb
+  local ms, ts, tail = {}, {}, {}
+  local function nonword(i)
+    local c = lb:byte(i)
+    return c ~= nil and not ((c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122))
+  end
+  local p = lb:find("%.[phu]")
+  while p do
+    local T = math.huge
+    local function at_end(b) if not tail[b] or tail[b] < p then tail[b] = p end end
+    local function then_nonword(i) if nonword(i) and i < T then T = i end end
+    if lb:find("^%.ph", p) then
+      local e = lb:match("^%.php%d*()", p)          -- %.php%d*
+      if e then
+        for b = p + 3, e - 1 do at_end(b) end
+        then_nonword(e)
+      end
+      if lb:find("^%.phtm", p) then                  -- %.phtml?
+        at_end(p + 4)
+        if lb:byte(p + 5) == 108 then at_end(p + 5); then_nonword(p + 6) else then_nonword(p + 5) end
+      end
+      if lb:find("^%.pht", p) then at_end(p + 3); then_nonword(p + 4) end
+      if lb:find("^%.phar", p) or lb:find("^%.phps", p) then at_end(p + 4); then_nonword(p + 5) end
+    elseif lb:find("^%.htaccess", p) or lb:find("^%.user%.ini", p) then
+      at_end(p + 8); then_nonword(p + 9)
+    end
+    if T < math.huge then ms[#ms + 1] = p; ts[#ts + 1] = T end
+    p = lb:find("%.[phu]", p + 1)
+  end
+  for k = #ts - 1, 1, -1 do
+    if ts[k + 1] < ts[k] then ts[k] = ts[k + 1] end
+  end
+  return function(a, b)
+    local m = tail[b]
+    if m and m >= a then return true end
+    local lo, hi = 1, #ms
+    while lo <= hi do
+      local mid = math.floor((lo + hi) / 2)
+      if ms[mid] < a then lo = mid + 1 else hi = mid - 1 end
+    end
+    return lo <= #ms and ts[lo] <= b
+  end
+end
+_M._zip_bad_index = zip_bad_index          -- exposed for the equivalence test
+_M._zip_entry_bad_ext = _zip_entry_bad_ext
+
+local arch_body, arch_ct, arch_res
 function _M.detect_upload_archive_php(body, headers)
   if not body or body == "" then return nil end
   headers = headers or {}
   local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
   if not has(ct, "multipart/form-data") then return nil end
 
+  -- 414 and the SP Page Builder rule (10014) scan the same body: the last
+  -- result is kept (strings are interned: the key test is a pointer compare).
+  if body == arch_body and ct == arch_ct then return arch_res end
+
   local blen = #body
+  local bad                                  -- zip_bad_index(lower(body)), on first use
 
   -- sig: 4-byte ZIP header magic. len_off/name_off: byte offsets (from the 'P')
   -- of the 2-byte LE filename length and the filename itself.
+  -- Every header in the body is read, each name in O(log n) (zip_bad_index),
+  -- and the body is bounded by waf_body_max_len. An iteration cap (512 until
+  -- 2026-10-09) let 512 decoy `PK\3\4` bytes in a field before the real zip
+  -- hide its entries.
   local function scan(sig, len_off, name_off)
     local pos = body:find(sig, 1, true)
-    local iters = 0
-    while pos and iters < 512 do
-      iters = iters + 1
+    while pos do
       local a, b = body:byte(pos + len_off), body:byte(pos + len_off + 1)
       if a and b then
         local nlen = a + b * 256
-        if nlen > 0 and nlen <= 512 and (pos + name_off + nlen - 1) <= blen then
-          local raw = body:sub(pos + name_off, pos + name_off + nlen - 1)
-          local hit = _zip_entry_bad_ext(lower(raw))
-          if hit then return hit, raw end
+        local a, z = pos + name_off, pos + name_off + nlen - 1
+        if nlen > 0 and nlen <= 512 and z <= blen then
+          bad = bad or zip_bad_index(lower(body))
+          if bad(a, z) then
+            local raw = body:sub(a, z)
+            local hit = _zip_entry_bad_ext(lower(raw))
+            if hit then return hit, raw end
+          end
         end
       end
       pos = body:find(sig, pos + 4, true)
@@ -4191,8 +4291,9 @@ function _M.detect_upload_archive_php(body, headers)
 
   local hit, name = scan("PK\3\4", 26, 30)   -- local file header
   if not hit then hit, name = scan("PK\1\2", 28, 46) end  -- central directory
-  if hit then return "ZIP_" .. hit .. ":" .. lower(name):sub(1, 64) end
-  return nil
+  arch_body, arch_ct = body, ct
+  arch_res = hit and ("ZIP_" .. hit .. ":" .. lower(name):sub(1, 64)) or nil
+  return arch_res
 end
 
 -- A bare `<?=` PHP short-echo opener is only three bytes (`3C 3F 3D`) and
@@ -4213,19 +4314,247 @@ end
 -- (see rule 432: "Legit binary files never contain `<?php`").
 --
 -- `s` MUST already be lowercased (matches both detector call sites).
-local function has_php_short_echo(s)
+-- After `<?=` PHP skips whitespace, comments (`/* … */`; `# …` / `// …` to a
+-- CR, an LF or a `?>`; `#[` in operand position is a PHP 8 attribute), `@`
+-- and a leading `\` (a namespaced name). What follows must open like PHP code:
+-- a variable, a backtick exec, a quoted string, `(`, `[`, a heredoc `<<<`, a
+-- call `name(` (namespaced, comments allowed before the `(`) or `Name::`, an
+-- attribute, or one of the constructs below. That keeps the 3-byte opener
+-- binary-safe. It may also be reached through an expression of operands that
+-- are not code by themselves (a number, a constant, a string, a cast, a
+-- bracketed group) joined by unary and binary operators: `0||f(…)`,
+-- `true?f(…):1`, `PHP_EOL.''./**/f(…)`, `!(int)f(…)`. Past such an operator
+-- only real code counts (a variable, a backtick, a call, a construct, a `"…"`
+-- string that interpolates): template text quoted in a ticket,
+-- `<?= DEBUG ? "on" : "off" ?>`, is no webshell; nor is `<?= BASE_URL ?>">`,
+-- where `?>` ends the tag (it is never an operator). After a `;` a statement
+-- starts: anything but the end of the tag counts. A name that starts with `_`
+-- (`__(`, `_e(`, gettext's `_(`) is a call only with `open_tag`; under 402,
+-- which reads text fields too, its arguments are read as operands instead:
+-- `<?= __('Login') ?>` is not code, `<?=_(system(…))` is. An expression
+-- still unresolved after SE_STEPS operands counts as code (fail closed: no
+-- random bytes or ticket text get there).
+--
+-- The `<?` short open tag is read only with `open_tag` (file bytes, rule 415:
+-- a support ticket quoting `<? echo $x ?>` is no webshell either) and held
+-- tighter (whitespace, `@` / `\` / comments / `;` / braces, then a variable, a
+-- construct or a call `name(`): it is two bytes. PHP whitespace only (space,
+-- tab, CR, LF; not Lua's %s). The comment ends are found once per string and
+-- binary-searched (a later opener can sit inside an earlier one's comment),
+-- and the skips, expression reads and short-tag reads are memoized by where
+-- they land, so openers that share a long tail (comments, blanks, a long
+-- name) read it once.
+local SHORT_ECHO_WORDS = {
+  echo = true, print = true, new = true, eval = true, include = true, include_once = true,
+  require = true, require_once = true, exit = true, die = true, clone = true, throw = true,
+}
+local SHORT_OPEN_CONTROL = { ["if"] = true, ["for"] = true, ["while"] = true, foreach = true, switch = true }
+local PHP_CASTS = {
+  int = true, integer = true, string = true, bool = true, boolean = true, float = true,
+  double = true, real = true, array = true, object = true, binary = true, unset = true,
+}
+-- The first entry >= q of a sorted list (nil when none).
+local function first_at_or_after(list, q)
+  local lo, hi = 1, #list
+  while lo <= hi do
+    local mid = math.floor((lo + hi) / 2)
+    if list[mid] < q then lo = mid + 1 else hi = mid - 1 end
+  end
+  return list[lo]
+end
+local SE_OP = "^[%?:%.%%%+%-%*/|&%^<>=,!~;][%?:%.%%%+%-%*/|&%^<>=,!~;]?[%?:%.%%%+%-%*/|&%^<>=,!~;]?()"
+local SE_STEPS = 24
+local function has_php_short_echo(s, open_tag)
   if not s or s == "" then return false end
-  -- An optional `@` error-suppression operator may sit between the opener
-  -- and the expression (`<?=@eval(...)`). PHP function names may contain
-  -- digits (`base64_decode`, `md5`, `sha1`, `str_rot13`), so the name class
-  -- is `[%w_]` (NOT `[%a_]` — excluding digits was a real bypass for
-  -- input-driven shells like `<?=base64_decode(file_get_contents(...))`).
-  return (s:find("<%?=%s*@?%s*%$")            -- <?=$_GET / <?= $x / <?=@$x
-       or s:find("<%?=%s*@?%s*`")             -- <?=`id`
-       or s:find("<%?=%s*@?%s*['\"]")         -- <?='cmd' / <?="cmd"
-       or s:find("<%?=%s*@?%s*%(")            -- <?=(expr)
-       or s:find("<%?=%s*@?%s*%a[%w_]*%s*%(") -- <?=base64_decode( / <?=md5( / <?=system(
-       ) ~= nil
+  local n = #s
+  local closes, ends               -- `*/` starts; CR / LF / `?>` positions (lazy)
+  local skip_memo = { {}, {} }     -- [lead and 1 or 2][landing] = result (false: to the end)
+  local expr_memo = {}             -- [pos * 2 + chained] = result
+  local open_memo = {}             -- [landing * 2 + glued] = result
+  local function ws(c) return c == " " or c == "\t" or c == "\r" or c == "\n" end
+  -- Whitespace and comments from i; with `lead` (operand position), also `@`
+  -- and `\`, and `#[` is an attribute, not a comment. The index after them,
+  -- or nil when a comment runs to the end.
+  local function skip(i, lead)
+    local memo, landed, res = skip_memo[lead and 1 or 2], {}, nil
+    while true do
+      local m = memo[i]
+      if m ~= nil then res = m; break end
+      landed[#landed + 1] = i
+      i = s:match(lead and "^[ \t\r\n@\\]*()" or "^[ \t\r\n]*()", i)
+      local c, c2 = s:sub(i, i), s:sub(i + 1, i + 1)
+      if c == "/" and c2 == "*" then
+        if not closes then
+          closes = {}
+          local k = s:find("*/", 1, true)
+          while k do closes[#closes + 1] = k; k = s:find("*/", k + 1, true) end
+        end
+        local e = first_at_or_after(closes, i + 2)
+        if not e then res = false; break end
+        i = e + 2
+      elseif (c == "#" and not (lead and c2 == "[")) or (c == "/" and c2 == "/") then
+        if not ends then
+          ends = {}
+          local k = s:find("[\r\n?]", 1)
+          while k do
+            if s:byte(k) ~= 63 or s:byte(k + 1) == 62 then ends[#ends + 1] = k end
+            k = s:find("[\r\n?]", k + 1)
+          end
+        end
+        local e = first_at_or_after(ends, i + 1)
+        if not e then res = false; break end
+        i = (s:byte(e) == 63) and e or e + 1   -- `?>` ends the comment and the tag
+      else
+        res = i; break
+      end
+    end
+    for _, p in ipairs(landed) do memo[p] = res end
+    return res or nil
+  end
+  -- The closing quote of the string opening at i (escapes honoured), or nil.
+  local function string_end(i)
+    local pat = (s:sub(i, i) == "'") and "['\\]" or '["\\]'
+    local j = i + 1
+    while true do
+      local k = s:find(pat, j)
+      if not k then return nil end
+      if s:byte(k) ~= 92 then return k end
+      j = k + 2
+    end
+  end
+  local function heredoc_at(i) return s:find("^<<<[ \t]*['\"]?[%a_]", i) ~= nil end
+  local function expr_at(i)
+    local chained, keys, res = false, {}, nil
+    for _ = 1, SE_STEPS do
+      i = skip(i, true)
+      if not i or i > n then res = false; break end
+      local key = i * 2 + (chained and 1 or 0)
+      if expr_memo[key] ~= nil then res = expr_memo[key]; break end
+      keys[#keys + 1] = key
+      local c = s:sub(i, i)
+      local j                                         -- the end of an operand
+      if c == "$" or c == "`" or c == "#" then res = true; break end   -- `#`: an attribute
+      if c == "!" or c == "~" or c == "-" or c == "+" then
+        i = s:match("^[!~%-%+]+()", i)                -- unary operators
+        chained = true
+      elseif c == "(" or c == "[" then
+        if not chained then res = true; break end
+        local w, ce = s:match("^%([ \t]*([%a]+)[ \t]*%)()", i)
+        i = (w and PHP_CASTS[w]) and ce or i + 1      -- a cast, or read into the group
+      elseif c == "<" then
+        res = heredoc_at(i); break
+      else
+        if c == "'" or c == '"' then
+          if not chained then res = true; break end
+          local e = string_end(i)
+          if not e then res = false; break end
+          if c == '"' then
+            local body = s:sub(i + 1, e - 1)
+            if body:find("%$[%a_{]") or body:find("{$", 1, true) then res = true; break end
+          end
+          j = e + 1
+        else
+          -- A number, or a name: a construct, a call, `Name::`, or a constant.
+          j = s:match("^%.?%d[%w%._]*()", i)
+          if not j then
+            local word
+            word, j = s:match("^([%a_][%w_\\]*)()", i)
+            if not word then res = false; break end
+            if SHORT_ECHO_WORDS[word] then res = true; break end
+            local k = skip(j, false)
+            if not k then res = false; break end
+            if s:sub(k, k) == "(" then
+              if open_tag or word:byte(1) ~= 95 then res = true; break end
+              j = nil; i = k + 1                    -- `_(…)` under 402: read its arguments
+            elseif s:find("^::[%a_%$]", k) then
+              res = true; break
+            end
+          end
+        end
+        if j then
+          -- Closing brackets, then a binary operator (up to three characters,
+          -- or and / or / xor), cut before a comment or a heredoc it ran into.
+          -- An index `[` is read into; a `(` after an operand calls it.
+          j = skip(j, false)
+          while j and (s:sub(j, j) == ")" or s:sub(j, j) == "]") do j = skip(j + 1, false) end
+          if not j then res = false; break end
+          local cj = s:sub(j, j)
+          if cj == "(" then res = true; break end
+          local o = (cj == "[") and j + 1 or s:match(SE_OP, j)
+          if o and cj ~= "[" then
+            if s:sub(j, o - 1):find("?>", 1, true) then res = false; break end  -- the tag ends
+            for p = j, o - 1 do
+              local two = s:sub(p, p + 1)
+              if two == "/*" or two == "//" or s:sub(p, p + 2) == "<<<" then o = p; break end
+            end
+            if o == j then res = heredoc_at(j); break end
+            local sc = s:find(";", j, true)
+            if sc and sc < o then                     -- a statement starts
+              local r = skip(sc + 1, true)
+              res = r ~= nil and r <= n and s:sub(r, r + 1) ~= "?>"
+              break
+            end
+          elseif not o then
+            local w, wo = s:match("^([%a_][%w_]*)()", j)
+            if w == "and" or w == "or" or w == "xor" then o = wo end
+          end
+          if not o then res = false; break end
+          i = o
+        end
+        chained = true
+      end
+    end
+    if res == nil then res = true end                 -- SE_STEPS operands: fail closed
+    for _, k in ipairs(keys) do expr_memo[k] = res end
+    return res
+  end
+  local function short_open_at(i)      -- after `<?` (not `<?=`)
+    -- Glued to the tag (`<?system(`, `<?$x=`), held tighter still: two
+    -- random bytes after `<?` must not read as code (an ASCII variable name
+    -- of two bytes, or one and `=` / `;` / `[` / `-`, a call name of three or a
+    -- control keyword).
+    local glued = not ws(s:sub(i, i))
+    i = skip(i, true)
+    if not i or i > n then return false end
+    local key = i * 2 + (glued and 1 or 0)
+    if open_memo[key] ~= nil then return open_memo[key] end
+    local j = s:match("^[;{}]+()", i)                 -- empty statements, a block
+    if j then
+      j = skip(j, true)
+      if not j or j > n then open_memo[key] = false; return false end
+    else
+      j = i
+    end
+    local res
+    if s:find(glued and "^%$[%a_][%w_=;%[%-]" or "^%$[%$%a_\128-\255]", j) then
+      res = true
+    else
+      local word, k = s:match("^([%a_][%w_]*)()", j)
+      if not word then
+        res = false
+      elseif SHORT_ECHO_WORDS[word] then
+        res = true
+      elseif glued and #word < 3 and not SHORT_OPEN_CONTROL[word] then
+        res = false
+      else
+        k = skip(k, false)
+        res = k ~= nil and s:sub(k, k) == "("
+      end
+    end
+    open_memo[key] = res
+    return res
+  end
+  local pos = 1
+  while true do
+    local k = s:find("<?", pos, true)
+    if not k then return false end
+    if s:sub(k + 2, k + 2) == "=" then
+      if expr_at(k + 3) then return true end
+    elseif open_tag then
+      if short_open_at(k + 2) then return true end
+    end
+    pos = k + 2
+  end
 end
 
 -- [top-4b] Webshell / malicious content in uploaded file bytes.
@@ -4258,6 +4587,36 @@ function _M.detect_upload_content(body, headers)
   if has(b, "push graphic-context") then return "UPLOAD_IMAGEMAGICK_MVG" end
   if b:find("<image%s") and has(b, "url%(") then return "UPLOAD_IMAGEMAGICK_URL" end
 
+  return nil
+end
+
+-- Rule 415 — the PHP / JSP openers of rule 402, in the uploaded FILES past the
+-- part of the body 402 reads (its first max_scan_len bytes, 2 KB): a webshell
+-- after 2 KB of image data, or in a second file, went unseen. Also the `<?`
+-- short open tag (`<? echo …`), which 402 does not read: it scans text fields
+-- too. Only file parts (a `filename=`, as PHP registers them:
+-- each_multipart_field) are read, each from its start, to the multipart body
+-- budget, and only for the openers — not 402's superglobal words, which
+-- ticket and forum text fields carry. Ships logonly (burn-in):
+-- these bytes were never scanned before, and a text attachment quoting PHP
+-- would be a 6 h autoblock at block.
+function _M.detect_upload_content_deep(body, headers)
+  if not body or body == "" then return nil end
+  headers = headers or {}
+  local ct = php_content_type(headers)
+  if not has(lower(ct), "multipart/form-data") then return nil end
+  local limit = body_budget(headers)
+  for _, f in ipairs(php_file_parts(body, ct)) do
+    local s, e = f[2], f[3]
+    if s > limit then break end
+    if e > limit then e = limit end
+    -- Every file part, from its START: an opener inside 402's window with its
+    -- code padded past the edge (`<?=` + blanks) is seen whole, and the `<?`
+    -- short open tag, which 402 leaves alone, is read in file bytes here.
+    local part = lower(body:sub(s, e))
+    if has(part, "<?php") or has_php_short_echo(part, true) then return "UPLOAD_PHP_TAG_DEEP" end
+    if has(part, "<jsp:") then return "UPLOAD_JSP_TAG_DEEP" end
+  end
   return nil
 end
 

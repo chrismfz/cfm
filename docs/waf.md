@@ -1057,6 +1057,8 @@ Current assignments:
   403  rule_upload_obfuscation         411  rule_webshell_ping
   404  rule_php_webshell_body          412  rule_polyglot_upload
                                        413  rule_webshell_path_known
+                                       414  rule_upload_archive_php
+                                       415  rule_upload_content_deep      (logonly burn-in)
                                        421  rule_php_split_string_canary
                                        422  rule_php_dropper_wget_curl
                                        423  rule_php_dropper_markers
@@ -1115,6 +1117,29 @@ The `rule_id` field returned by the bridge's `/nginx/decision` endpoint is a **s
 Reason family **`WAF_BACKDOOR`** (added to `_M.WAF_HIGH_RISK_REASONS` so post-clearance challenges still escalate to block when these rules are promoted past `logonly`). Source workload for the initial set: a 2026-05-19 captured PHP webshell deployed as `wp-content/themes/bridge/includes/radio.php` — char-pool-obfuscated PDF-polyglot loader.
 
 The rules are split deliberately so each catches a different *class* of evasion. The captured radio.php sample trips 431 + 432 + 433 together (severity aggregation picks the strongest action; all three rule IDs appear in `hits`).
+
+### Rule 415 — `rule_upload_content_deep`
+
+Rule 402's PHP / JSP openers (`<?php`, a short-echo `<?=` with a PHP
+expression after it, `<jsp:`) in the uploaded **files** past 402's window (the
+body's first 2 KB): a webshell after 2 KB of image data, or in a second file.
+Each file part is read from its start, so an opener inside the 2 KB with its
+code padded past it is seen whole. 415 also reads the two-byte `<?` short open
+tag (whitespace, `@` / `\` / comments, then a variable, `echo` / `print` / …
+or a call `name(`; glued to the tag, `<?system(` / `<?$x=`, a little
+tighter, as two random bytes after `<?` must not read as code), which 402
+does not: 402 scans text fields too, and a
+ticket quoting `<? echo $title; ?>` is no webshell. Expect some logonly noise
+from text attachments that quote PHP (`<? if(…)`): review it at promotion.
+Only file parts (a `filename=`, as PHP registers them) are read, to the
+multipart body budget (16 KB), and only for the openers, not 402's
+superglobal words (`$_POST` in ticket / forum text is a known 402 FP). Added
+2026-10-09 at `logonly`: those bytes were never scanned before, and a text
+attachment quoting PHP would be a 6 h ban at block. Promote it in
+`cfm_waf_config.lua` (`rule_upload_content_deep = "block"`) after a clean
+burn-in (`node_call waf_rule_detail` / the `cfm.waf.log` hits for 415); the
+family (`WAF_UPLOAD_CONTENT`) is already autoblock-armed through 402, so a
+promotion arms 415 too. Exempt on the same legit-archive endpoints as 402.
 
 ### Rule 430 — `rule_htaccess_poisoning`
 

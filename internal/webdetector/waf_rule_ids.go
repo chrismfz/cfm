@@ -117,6 +117,7 @@ var wafRuleIDs = []WAFRule{
 	// (option=com_ + task=asset.upload*), where a php-bearing zip is never
 	// legitimate — so it ships at `block`.
 	{ID: 414, Name: "rule_upload_archive_php", ReasonFamily: "WAF_UPLOAD_FNAME", DefaultMode: "block"},
+	{ID: 415, Name: "rule_upload_content_deep", ReasonFamily: "WAF_UPLOAD_CONTENT", DefaultMode: "logonly"},
 	{ID: 421, Name: "rule_php_split_string_canary", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 422, Name: "rule_php_dropper_wget_curl", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 423, Name: "rule_php_dropper_markers", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},

@@ -251,6 +251,7 @@ local CFG = {
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
   rule_upload_content     = "block",  -- webshell bytes / PHP tags inside uploaded file content
+  rule_upload_content_deep = "logonly", -- 402's PHP/JSP openers (+ the `<?` short open tag) in each uploaded FILE, whole (added 2026-10-09; burn-in, then promote)
   rule_upload_archive_php = "block",  -- PHP webshell compressed inside an uploaded .zip (ZIP entry name scan). Scoped to Joomla asset uploads (option=com_ + task=asset.upload), where a php-bearing zip is never legitimate → safe to block.
   rule_script_obfuscation = "challenge_v2",  -- raw POST-body PHP/JS obfuscation scorer
   rule_upload_obfuscation = "challenge_v2",  -- multipart uploaded file content obfuscation scorer
@@ -584,6 +585,7 @@ local RULE_IDS = {
   -- 4xx upload / malware
   rule_upload_filename         = 401,
   rule_upload_content          = 402,
+  rule_upload_content_deep     = 415,
   rule_upload_archive_php      = 414,
   rule_upload_obfuscation      = 403,
   rule_php_webshell_body       = 404,
@@ -1493,6 +1495,20 @@ function _M.check(ctx)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_UPLOAD_CONTENT:" .. tag, ttl, mode, RULE_IDS.rule_upload_content) then goto done end
+      end
+    end
+  end
+
+  -- ── 18b) Upload content in each file part, whole (415, burn-in) ──────────
+  do
+    local mode = rule_mode(CFG.rule_upload_content_deep, "logonly")
+    if mode ~= "disabled"
+       and body_inspect_ok
+       and not legit_archive_upload then
+      local tag = det.detect_upload_content_deep(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_UPLOAD_CONTENT:" .. tag, ttl, mode, RULE_IDS.rule_upload_content_deep) then goto done end
       end
     end
   end
