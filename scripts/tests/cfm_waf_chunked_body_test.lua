@@ -91,12 +91,16 @@ do
   r = post{ buffered = true, method = "PUT" }
   check(r.ok and r.reads == 0, "chunked PUT on `location /`: not read (" .. desc(r) .. " reads=" .. r.reads .. ")")
 
-  -- wc-ajax rides in the query string, matched by argument name: a large
-  -- (over-cap) or chunked body there is read via the allowlist (enforced).
+  -- wc-ajax rides in the query string, matched by argument name. A body the
+  -- size / CT gate read before (measured, under the cap) is enforced as
+  -- before; one only the revived entry reads (chunked here) is in burn-in.
+  r = post{ uri = "/", args = "wc-ajax=checkout", cl = tostring(#SQLI) }
+  check(r.ok and r.exited == 403, "POST /?wc-ajax=… measured: enforced, as before (" .. desc(r) .. ")")
   r = post{ uri = "/", args = "wc-ajax=checkout" }
-  check(r.ok and r.exited == 403, "POST /?wc-ajax=… with no Content-Length: read via the allowlist (" .. desc(r) .. ")")
-  r = post{ uri = "/", args = "x=1&WC-AJAX=checkout" }
-  check(r.ok and r.exited == 403, "wc-ajax matched case-insensitively, after other args (" .. desc(r) .. ")")
+  check(r.ok and r.reads == 1 and r.action == "logonly" and has_log(r, "waf_body_burnin would=block"),
+        "POST /?wc-ajax=… chunked: read via the allowlist, burn-in (" .. desc(r) .. ")")
+  r = post{ uri = "/", args = "x=1&WC-AJAX=checkout", env = ENFORCE }
+  check(r.ok and r.exited == 403, "wc-ajax matched case-insensitively, after other args; enforced (" .. desc(r) .. ")")
   r = post{ uri = "/", args = "zwc-ajax=1" }
   check(r.ok and r.exited == nil and r.reads == 0, "a name merely containing wc-ajax= does not force a read (" .. desc(r) .. ")")
 
@@ -123,6 +127,11 @@ do
   check(r.ok and r.exited == nil and r.action == "allow",
         "HTTP/3 chunked POST to a clean route under fail_closed: unread, allowed, as on main (" .. desc(r) .. ")")
 
+  -- A logonly hit without the body and a clean body: the re-check fires the
+  -- same header rule again, which is not the body's, so nothing is logged.
+  r = post{ buffered = true, headers_extra = true, body = "q=hello world&email=a@b.example" }
+  check(r.ok and r.action == "logonly" and not has_log(r, "waf_body_burnin"),
+        "logonly header hit + clean burn-in body: no burn-in record (" .. desc(r) .. ")")
   -- A logonly hit without the body still lets the body's would-be block be
   -- logged for burn-in (the request stays logonly).
   r = post{ buffered = true, headers_extra = true }
