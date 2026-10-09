@@ -54,9 +54,10 @@ back-filled here — see the git/PR history for that period.
   `CFM_FAIL_OPEN`, sent the request straight to the site past IP blocks,
   challenges and traffic rules (even to `/wp-login.php`). It is now logged
   as `waf_body_unread` (once a minute per IP) and the request goes on
-  through those checks; with `CFM_FAIL_OPEN=0` it still gets a 500. Also,
-  WooCommerce's `/?wc-ajax=` endpoint, which is on that list, never matched
-  it. See docs/waf.md, "Which request bodies the WAF reads".
+  through those checks; with `CFM_FAIL_OPEN=0` it still gets a 500 where it
+  did before. Also, WooCommerce's `/?wc-ajax=` endpoint, which is on that
+  list, never matched it. See docs/waf.md, "Which request bodies the WAF
+  reads".
 - **A request that tripped a log-only WAF rule skipped every check after the
   WAF.** The edge sent it straight to the site, so an IP block, a site under
   challenge or Under-Attack Mode, a traffic rule, a throttle, a

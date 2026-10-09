@@ -29,8 +29,10 @@ local FORM = "application/x-www-form-urlencoded"
 local function post(t)
   local vars = { http_content_type = t.ct or FORM, http_content_length = t.cl }
   if t.buffered then vars.cfm_body_buffered = "1" end
+  local headers = { ["content-type"] = t.ct or FORM, ["user-agent"] = "Mozilla/5.0" }
+  if t.headers_extra then headers["x-a"] = "${date:}" end  -- trips logonly rule_log4shell
   return H.run{ method = t.method or "POST", uri = t.uri or "/checkout", args = t.args or "", body = t.body or SQLI,
-                headers = { ["content-type"] = t.ct or FORM, ["user-agent"] = "Mozilla/5.0" }, vars = vars,
+                headers = headers, vars = vars,
                 read_body_error = t.read_body_error, verdict = t.verdict, env = t.env }
 end
 
@@ -113,6 +115,39 @@ do
   r = H.run{ method = "POST", uri = "/wp-login.php", body = SQLI, fail_open = false, read_body_error = H3,
              headers = { ["content-type"] = FORM }, vars = { http_content_type = FORM } }
   check(r.ok and r.exited == 500, "HTTP/3 CL-less POST under fail_closed: 500, as before (" .. desc(r) .. ")")
+  -- …but a body main never read (chunked on `location /`) stays unread under
+  -- fail_closed too, as on main: no new 500.
+  r = H.run{ method = "POST", uri = "/checkout", body = "a=b", fail_open = false, read_body_error = H3,
+             headers = { ["content-type"] = FORM, ["user-agent"] = "Mozilla/5.0" },
+             vars = { http_content_type = FORM, cfm_body_buffered = "1" } }
+  check(r.ok and r.exited == nil and r.action == "allow",
+        "HTTP/3 chunked POST to a clean route under fail_closed: unread, allowed, as on main (" .. desc(r) .. ")")
+
+  -- A logonly hit without the body still lets the body's would-be block be
+  -- logged for burn-in (the request stays logonly).
+  r = post{ buffered = true, headers_extra = true }
+  check(r.ok and r.action == "logonly" and has_log(r, "waf_body_burnin would=block"),
+        "logonly header hit + burn-in body: the body's block is still logged (" .. desc(r) .. ")")
+end
+
+-- A burn-in check that raises is logged, never fatal.
+do
+  local calls = 0
+  local fake = {
+    enabled = function() return true end,
+    check = function(ctx)
+      calls = calls + 1
+      if ctx.body ~= "" then error("body rule exploded") end
+      return false
+    end,
+    should_push = function() return true end,
+    also_rule_ids = function() return {} end,
+    post_clearance_action = function(a) return a, false end,
+  }
+  local r = H.run{ method = "POST", uri = "/checkout", body = SQLI, waf_fake = fake,
+                   headers = { ["content-type"] = FORM }, vars = { http_content_type = FORM, cfm_body_buffered = "1" } }
+  check(r.ok and r.action == "allow" and has_log(r, "waf_body_burnin error"),
+        "a raising burn-in check: logged, request allowed (" .. desc(r) .. ")")
 end
 
 -- ── waf_body_gate's `buffered` argument ─────────────────────────────────────

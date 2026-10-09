@@ -578,10 +578,12 @@ local function get_req_body_for_waf(uri, method, max_len)
   -- without content-length header"; HTTP/2 too on older builds). Unguarded,
   -- that took the request to request_failure, which under fail_open skips
   -- every check after the WAF. The body then stays unread, as a stream.
-  -- Under fail_closed the error still goes to request_failure (500).
+  -- Under fail_closed the error still goes to request_failure (500) for a
+  -- body the old gate read; one read only because the location buffers it
+  -- (cfm_body_burnin) was never read before, so it stays unread instead.
   local read_ok, read_err = pcall(ngx.req.read_body)
   if not read_ok then
-    if not CFG.fail_open then error(read_err, 0) end
+    if not CFG.fail_open and not ngx.ctx.cfm_body_burnin then error(read_err, 0) end
     local rip = real_ip()
     if not SH or SH:add("bodyunread|" .. tostring(rip), 1, 60) then
       log_ev(ngx.WARN, "[cfm] waf_body_unread ip=", rip, " uri=", uri, " err=", tostring(read_err))
@@ -1529,18 +1531,26 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- maybe_flush_waf_insp piggybacks on the request to push the snapshot
       -- to Go without needing an init_worker timer.
       waf_insp_incr(host)
-      if body_burnin and not hit then
+      if body_burnin and (not hit or waf_action == "logonly") then
         -- The body's own hits: shdict nil, so the burst counters the check
         -- above already moved are not counted twice (those rules need it,
-        -- and they decided above).
+        -- and they decided above). With no hit above, a body hit becomes the
+        -- (logonly) hit; after a logonly one it is only logged.
         waf_ctx.body, waf_ctx.shdict = req_body, nil
         local b_ok, b_hit, b_reason, b_ttl, b_action, b_hits, b_rule = pcall(waf.check, waf_ctx)
-        if b_ok and b_hit then
+        if not b_ok then
+          if not SH or SH:add("bodyburnin|" .. tostring(ip), 1, 60) then
+            log_ev(ngx.ERR, "[cfm] waf_body_burnin error ip=", ip, " host=", host, " uri=", uri,
+                   " err=", tostring(b_hit))
+          end
+        elseif b_hit then
           if not SH or SH:add("bodyburnin|" .. tostring(ip), 1, 60) then
             log_ev(ngx.WARN, "[cfm] waf_body_burnin would=", tostring(b_action), " ip=", ip, " host=", host,
                    " uri=", uri, " reason=", tostring(b_reason), " waf_rule_id=", tostring(b_rule))
           end
-          hit, reason, ttl, waf_action, waf_hits, waf_rule_id = true, b_reason, b_ttl, "logonly", b_hits, b_rule
+          if not hit then
+            hit, reason, ttl, waf_action, waf_hits, waf_rule_id = true, b_reason, b_ttl, "logonly", b_hits, b_rule
+          end
         end
       end
     end
