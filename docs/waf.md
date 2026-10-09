@@ -1738,8 +1738,10 @@ Body-aware detectors (`php_wrappers`, `ssrf_proto`, `js_proto`) consume a normal
 That budget caps the **body** side. The query side of the same string gets the request-line
 budget (`uri_scan_len`, 8192) when that is larger (since 2026-10-09; on a GET the "other"
 2 KB used to cap it, so query padding hid a payload). A JSON body (by media type, or one
-that opens with `{` / `[`) has its `\u0000`-`\u007F`, `\/` and `\t \n \r \b \f` escapes decoded
-first (`util.json_unescape_ascii`; `\\` stays one unit, so Gutenberg's `\\u0027` stays text).
+that opens with `{` / `[`) has its printable `\u0020`-`\u007E` and `\/` escapes decoded first
+(`util.json_unescape_ascii`; `\\` stays one unit, so Gutenberg's `\\u0027` stays text). Control
+escapes (`\n`, `\t`, `\u000a` …) are not: the block editor saves a post's newlines as `\n`, and a
+multi-line SQL example in a code block would read as an injection.
 JSON / XML are matched by subtype or suffix (`/json`, `+json`, `/xml`, `+xml`): an office
 document (`vnd.openxmlformats-…`) is a zip and keeps the 2 KB budget.
 

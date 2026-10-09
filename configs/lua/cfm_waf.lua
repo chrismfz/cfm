@@ -857,7 +857,11 @@ function _M.check(ctx)
   local function get_norm_args_wide()
     if not _norm_args_wide then
       if #(args or "") <= CFG.max_scan_len then _norm_args_wide = get_norm_args()
-      else _norm_args_wide = normalize(cap(args, util.uri_scan_cap())) end
+      else
+        local n = util.uri_scan_cap()
+        if n < CFG.max_scan_len then n = CFG.max_scan_len end  -- never narrower than get_norm_args
+        _norm_args_wide = normalize(cap(args, n))
+      end
     end
     return _norm_args_wide
   end
@@ -896,7 +900,7 @@ function _M.check(ctx)
       local acap = budget
       local ucap = util.uri_scan_cap()
       if ucap > acap then acap = ucap end
-      -- A JSON body's \u00XX / \/ escapes are decoded (json_unescape_ascii):
+      -- A JSON body's printable \u00XX / \/ escapes are decoded (json_unescape_ascii):
       -- `\u0027` is a quote to the app. JSON by media type or by shape (a body
       -- that opens with { or [; an app may json_decode php://input whatever
       -- the Content-Type says).
@@ -1211,9 +1215,11 @@ function _M.check(ctx)
   -- the raw surface needs no outer strip here.
   do
     local mode = rule_mode(CFG.rule_rce, "block")
-    -- `+` read as the space it is in a query string (`;wget+http://…`), as
-    -- PHP reads it: normalize() leaves it as is. This rule's markers only.
-    if mode ~= "disabled" and det.detect_rce(uri, args, (get_scan_ua():gsub("%+", " "))) then
+    -- A raw `+` in the query string read as the space it is there
+    -- (`;wget+http://…`), as PHP reads it: normalize() leaves it as is. The
+    -- path's `+`, and a `%2B`, stay a literal plus. This rule's markers only.
+    local rce_s = (args or ""):find("+", 1, true) and util.scan_str(uri, (args:gsub("%+", " "))) or get_scan_ua()
+    if mode ~= "disabled" and det.detect_rce(uri, args, rce_s) then
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
       if record("WAF_RCE", ttl, mode, RULE_IDS.rule_rce) then goto done end

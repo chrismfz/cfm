@@ -309,12 +309,12 @@ local function url_decode_once(s)
   return (s:gsub("%%(%x%x)", HEX_BYTE))
 end
 
--- A JSON body's ASCII escapes decoded, for the scan surface: \u0000-\u007F,
--- `\/` and the control escapes \t \n \r \b \f, as json_decode() turns them into
--- the bytes the app sees (`\u0027` is a quote, `\t` a separator between SQL
--- words). Non-ASCII \u escapes cannot spell a payload the rules look for and
--- stay as written, as do `\\` and `\"`.
-local JSON_CTRL = { ["/"] = "/", t = "\t", n = "\n", r = "\r", b = "\b", f = "\f" }
+-- A JSON body's printable-ASCII escapes decoded, for the scan surface:
+-- \u0020-\u007E and `\/`, as json_decode() turns them into the bytes the app
+-- sees (`\u0027` is a quote). Not the control escapes (\n \t …, \u000a): the
+-- block editor saves a post's newlines as `\n`, and a multi-line SQL example
+-- in a code block would then read as an injection (301 block + autoblock).
+-- Non-ASCII \u escapes stay as written, as do `\\` (one unit) and `\"`.
 local function json_unescape_ascii(s)
   if not s or not s:find("\\", 1, true) then return s end
   local out, i = {}, 1
@@ -323,13 +323,13 @@ local function json_unescape_ascii(s)
     if not j then out[#out + 1] = s:sub(i); break end
     out[#out + 1] = s:sub(i, j - 1)
     local c = s:sub(j + 1, j + 1)
-    local h = (c == "u") and s:match("^00([0-7]%x)", j + 2)
-    if h then
+    local h = (c == "u") and s:match("^00([2-7]%x)", j + 2)
+    if h and h ~= "7f" and h ~= "7F" then
       out[#out + 1] = string.char(tonumber(h, 16)); i = j + 6
-    elseif JSON_CTRL[c] then
-      out[#out + 1] = JSON_CTRL[c]; i = j + 2
+    elseif c == "/" then
+      out[#out + 1] = "/"; i = j + 2
     else
-      out[#out + 1] = s:sub(j, j + 1); i = j + 2  -- `\\`, `\"`, a non-ASCII \u: as written
+      out[#out + 1] = s:sub(j, j + 1); i = j + 2  -- `\\`, `\"`, \n, other \u: as written
     end
   end
   return table.concat(out)
