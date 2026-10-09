@@ -4193,13 +4193,28 @@ function _M.detect_upload_filename(body, headers)
       return ""
     end)
 
-    -- Special full-name matches (shared hosting critical paths)
-    if has(fname, "user.ini")   then return "user.ini" end
-    if has(fname, "php.ini")    then return "php.ini" end
-    if has(fname, ".htaccess")  then return ".htaccess" end
-    if has(fname, ".htpasswd")  then return ".htpasswd" end
-    if has(fname, ".env")       then return ".env" end
-    if has(fname, "web.config") then return "web.config" end
+    -- Special full-name matches (shared hosting critical paths). Anchored like
+    -- the extension matchers below: the name must be followed by a non-word
+    -- character (`.env.local`, `.htaccess.bak`, a path separator) or the end,
+    -- so `.env` no longer matches `Q3.environmental-report.pdf` or
+    -- `x.envelope.png` — rule 401 is block + autoblock-armed, and a mid-word
+    -- match banned a legitimate uploader for 6 h (edge Lua sweep 2026-10-09).
+    -- `.env`, `user.ini`, `php.ini` and `web.config` must also be preceded by
+    -- the start or a non-alphanumeric character (`superuser.ini` is not
+    -- user.ini; PHP reads only the exact name). The checks also read a copy
+    -- URL-decoded once (`x%2f.env`, `%2ehtaccess`): an app that URL-decodes a
+    -- client file name before taking its basename gets `.env` from it.
+    -- The raw name is read too: `.htaccess%41` stays as written to PHP.
+    local sn = url_decode_once(fname)
+    local function named1(t, n) return t:find(n .. "[^%w]") or t:find(n .. "$") end
+    local function named(n) return named1(fname, n) or (sn ~= fname and named1(sn, n)) end
+    local function whole(n) return named("^" .. n) or named("[^%w]" .. n) end
+    if whole("user%.ini")   then return "user.ini" end
+    if whole("php%.ini")    then return "php.ini" end
+    if named("%.htaccess")  then return ".htaccess" end
+    if named("%.htpasswd")  then return ".htpasswd" end
+    if whole("%.env")       then return ".env" end
+    if whole("web%.config") then return "web.config" end
 
     -- Extension checks: match anywhere in filename to catch double-extensions
     if fname:match("%.php[%d]*[^%w]") or fname:match("%.php[%d]*$") then return "php" end
@@ -4726,6 +4741,35 @@ end
 -- injection patterns.  Only fires on multipart/form-data.
 -- Note: detect_php_webshell_body already covers direct PHP POSTs; this rule
 -- adds coverage for files disguised with a different Content-Type / extension.
+-- Any `<?` but an XML-style processing instruction PHP cannot parse (s
+-- lowercased): rule 402's opener next to a superglobal in a file part (see
+-- detect_upload_content). Exempt is `<?NAME WS attr=` for the PIs real files
+-- carry (an XML declaration, a stylesheet, XMP's xpacket, Office's
+-- mso-application): two identifiers in a row are a parse error under
+-- short_open_tag, so nothing in the file runs. A bare `<?xml` prefix is not
+-- exempt: `<?xml:system($_GET[c]);` is a goto label and runs. `==` / `=>`
+-- after the attribute are not exempt either (`<?xml and-a==1;` parses).
+local PI_NAMES = { "xml", "xml%-stylesheet", "xpacket", "mso%-application" }
+local function is_inert_pi(s, k)
+  for _, n in ipairs(PI_NAMES) do
+    local e = select(2, s:find("^<%?" .. n .. "%s+[%a_][%w_:%-]*%s*=", k))
+    if e then
+      local c = s:sub(e + 1, e + 1)
+      if c ~= "=" and c ~= ">" then return true end
+    end
+  end
+  return false
+end
+local function php_open_tag_loose(s)
+  local k = 1
+  while true do
+    k = s:find("<?", k, true)
+    if not k then return false end
+    if not is_inert_pi(s, k) then return true end
+    k = k + 2
+  end
+end
+
 function _M.detect_upload_content(body, headers)
   if not body or body == "" then return nil end
 
@@ -4740,10 +4784,29 @@ function _M.detect_upload_content(body, headers)
   if has(b, "<?php") or has_php_short_echo(b) then return "UPLOAD_PHP_TAG" end
   if has(b, "<jsp:")                          then return "UPLOAD_JSP_TAG" end
 
-  -- PHP superglobals inside file content = almost certainly a webshell
-  if has(b, "$_get")    or has(b, "$_post")   or has(b, "$_request")
-     or has(b, "$_files") or has(b, "$_server") or has(b, "$_cookie") then
-    return "UPLOAD_PHP_SUPERGLOBAL"
+  -- The opener is any `<?` but an inert XML-style PI (php_open_tag_loose):
+  -- not the strict has_php_short_echo
+  -- (415's "random bytes must not read as code" test), which rejects valid
+  -- short-tag shells (`<?`$_GET[c]`;`, `<?('sys'.'tem')($_GET[c]);`); the
+  -- superglobal in the same part already rules out a binary collision.
+  -- PHP superglobals inside FILE content, next to a PHP opener the checks
+  -- above do not read (the `<?` short open tag, `<script language="php">`):
+  -- a short-tag webshell. Only the bytes of file parts (a `filename=`, as PHP
+  -- registers them) within the window are read, and only with that opener in
+  -- the same part: a ticket text field, or an attached log or note, that
+  -- mentions `$_POST` cannot run as PHP, and rule 402 is block +
+  -- autoblock-armed (edge Lua sweep 2026-10-09). The `<?php` / `<?=` checks
+  -- above still read the whole window.
+  for _, f in ipairs(php_file_parts(body, php_content_type(headers))) do
+    local fs, fe = f[2], f[3]
+    if fs > CFG.max_scan_len then break end
+    if fe > CFG.max_scan_len then fe = CFG.max_scan_len end
+    local part = lower(body:sub(fs, fe))
+    if (has(part, "$_get")    or has(part, "$_post")   or has(part, "$_request")
+        or has(part, "$_files") or has(part, "$_server") or has(part, "$_cookie"))
+       and (php_open_tag_loose(part) or part:find("<script%s+language%s*=%s*['\"]?php")) then
+      return "UPLOAD_PHP_SUPERGLOBAL"
+    end
   end
 
   -- ImageMagick MVG / SVG command injection (ImageTragick)
