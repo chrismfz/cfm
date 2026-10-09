@@ -1716,7 +1716,18 @@ end
 -- and at most XMLRPC_MAX_NAME bytes long. The edge reads the first
 -- waf_body_max_len bytes of a body (32 KB): a name past them is unseen.
 local XMLRPC_MAX_NAME = 256
-local XMLRPC_HIDDEN_LEN = 32768
+-- The edge's body cap (cfm_cfg.lua waf_body_max_len, from the same env).
+local XMLRPC_HIDDEN_LEN = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "") or 32768
+-- The calls that legitimately run past the edge's body cap (a media upload,
+-- a long post). A cut body whose last visible name is anything else was
+-- padded: IXR calls the LAST name, which may sit past the cut.
+local XMLRPC_BIG_CALLS = {
+  ["wp.uploadfile"] = true, ["metaweblog.newmediaobject"] = true,
+  ["wp.newpost"] = true, ["wp.editpost"] = true, ["metaweblog.newpost"] = true,
+  ["metaweblog.editpost"] = true, ["wp.newpage"] = true, ["wp.editpage"] = true,
+  ["blogger.newpost"] = true, ["blogger.editpost"] = true, ["wp.newcomment"] = true,
+  ["wp.editcomment"] = true,
+}
 local XML_ENT = { amp = "&", lt = "<", gt = ">", quot = '"', apos = "'" }
 local function xml_text(t)
   if not t:find("&", 1, true) then return t end
@@ -1736,6 +1747,15 @@ local function php_trim(t)
   return t:sub(i, j)
 end
 local function xmlrpc_method_names(body)
+  -- IXR_Message::parse first drops ONE `<?xml…?>` lying wholly in the first
+  -- 100 bytes of the (trimmed) body, wherever it sits — inside a tag or an
+  -- attribute value too (preg_replace('/<\?xml.*?\?>/s', …, 1), case-
+  -- sensitive). Replay that before reading, or the span desyncs the reader.
+  body = php_trim(body)
+  local h = body:sub(1, 100)
+  local xs = h:find("<?xml", 1, true)
+  local xe = xs and h:find("?>", xs + 5, true)
+  if xe then body = body:sub(1, xs - 1) .. body:sub(xe + 2) end
   local lb, names, buf = lower(body), {}, {}
   local n, pos = #lb, 1
   local function add_text(t)
@@ -1820,10 +1840,14 @@ function _M.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
   if has(nb, "system.multicall") then return "AUTH_WP_XMLRPC_MULTICALL" end
   if pingback or has(nb, "pingback.ping") then return "AUTH_WP_XMLRPC_PINGBACK" end
   -- The edge reads the first XMLRPC_HIDDEN_LEN (waf_body_max_len) bytes of
-  -- a body. A call whose name is not in them was padded there: the method
-  -- name is the first child of <methodCall>, and every client writes it in
-  -- the first hundred bytes or so. Reported, not blocked (cfm_waf.lua).
-  if #names == 0 and #body >= XMLRPC_HIDDEN_LEN then return "AUTH_WP_XMLRPC_HIDDEN_METHOD" end
+  -- a body. A cut body with no name in them, or whose last visible name is
+  -- not a call that carries a big body (XMLRPC_BIG_CALLS: a decoy name, the
+  -- real one past the cut), was padded there: the method name is the first
+  -- child of <methodCall>, and every client writes it in the first hundred
+  -- bytes or so. Reported, not blocked (cfm_waf.lua).
+  if #body >= XMLRPC_HIDDEN_LEN and not XMLRPC_BIG_CALLS[names[#names] or ""] then
+    return "AUTH_WP_XMLRPC_HIDDEN_METHOD"
+  end
 
   return nil
 end

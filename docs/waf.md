@@ -1326,10 +1326,15 @@ comments, `junk<x/>system.multicall` and padding all read as WordPress reads
 them; before, the rules looked for the words in the first 2 KB of the body. The
 body-wide match on the first 2 KB stays (a multicall's own calls are strings in
 its params). The edge reads the first `waf_body_max_len` bytes (32 KB) of a
-body: a call of 32 KB or more with **no** method name in them was padded past
-the edge, and is reported under 510 at `logonly` (`AUTH_WP_XMLRPC_HIDDEN_METHOD`,
-a burn-in before it blocks; every client writes the name in its first hundred
-bytes or so). Rule 512 still counts those POSTs.
+body: a call cut there whose last visible method name is none (or is not one
+of the calls that carry a big body: `wp.uploadFile`, `metaWeblog.newMediaObject`,
+new / edit post, page or comment — a decoy, the real name past the cut) was
+padded past the edge, and is reported under 510 at `logonly`
+(`AUTH_WP_XMLRPC_HIDDEN_METHOD`, a burn-in before it blocks; every client writes
+the name in its first hundred bytes or so). So rule 510, a block-tier rule, has
+logonly hits too; they never feed autoblock. Rule 512 still counts those POSTs.
+Before reading, the reader drops one `<?xml…?>` from the first 100 bytes, as
+IXR does wherever it sits.
 
 510-512 and the auth burst (501) skip Jetpack's own traffic
 (`is_known_legit_xmlrpc`): a Jetpack marker (`?for=jetpack`, a Jetpack /

@@ -99,11 +99,16 @@ do
     call("&#13;&#9;&#10;&#xd;system.multicall", "<!--" .. ("p"):rep(3000) .. "-->"),
     ("<methodName>decoy</methodName>"):rep(80):gsub("^", '<?xml version="1.0"?><methodCall>') .. "<methodName>system.multicall</methodName></methodCall>",
     call("<x><![CDATA[<!--]]></x>system.multicall", "<!--" .. ("p"):rep(3000) .. "-->"),
+    -- IXR first drops one `<?xml…?>` from the first 100 bytes, wherever it is:
+    -- inside an attribute it would otherwise desync the reader.
+    "<methodCall><x a='<?xml' b=\"?>'/><methodName>system&#46;multicall</methodName>" ..
+      "<params><param><value><string>admin</string></value></param></params></methodCall>",
   }) do
     local r = run(b)
     check(r.ids:find(",510,", 1, true), "510 sees " .. b:sub(1, 90):gsub("\n", "<LF>") .. "… (" .. show(r) .. ")")
   end
-  for _, b in ipairs({ call("pingback&#46;ping", "<!--" .. ("x"):rep(3000) .. "-->"), call("<![CDATA[pingback.ping]]>") }) do
+  for _, b in ipairs({ call("pingback&#46;ping", "<!--" .. ("x"):rep(3000) .. "-->"), call("<![CDATA[pingback.ping]]>"),
+                       "<methodCall><methodName <?xml >?>>pingback&#46;ping</methodName></methodCall>" }) do
     local r = run(b)
     check(r.ids:find(",511,", 1, true), "511 sees " .. b:sub(1, 90) .. "… (" .. show(r) .. ")")
   end
@@ -119,6 +124,12 @@ do
   local r2 = run(hidden:sub(1, 32768))
   check(r2.ids:find(",510,", 1, true) and r2.action ~= "block" and r2.reason:find("HIDDEN_METHOD", 1, true),
         "a call with no method name in the first 32 KB: 510 logonly (" .. show(r2) .. ")")
+  -- A decoy name up front and the real one past the cut: IXR calls the last.
+  local decoy = '<?xml version="1.0"?><methodCall><methodName>wp.getOptions</methodName><!--' .. ("p"):rep(33000) ..
+                "--><methodName>system.multicall</methodName></methodCall>"
+  r2 = run(decoy:sub(1, 32768))
+  check(r2.reason:find("HIDDEN_METHOD", 1, true) and r2.action ~= "block",
+        "a decoy name before the cut: 510 logonly (" .. show(r2) .. ")")
   local big = call("metaWeblog.newMediaObject") .. ("<!-- " .. ("b"):rep(1000) .. " -->"):rep(40)
   r2 = run(big:sub(1, 32768))
   check(not r2.ids:find(",510,", 1, true), "a large call with its name up front: no 510 (" .. show(r2) .. ")")
