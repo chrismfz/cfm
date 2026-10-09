@@ -398,7 +398,13 @@ challenge / logonly hits behind 201 now show in `also_rule_ids`, so burn-in
 "also" counts include scanner traffic from this date. Mirror image, as for
 traversal: an operator who arms `BAD_UA = 1` loses the 201 ban on a request
 where an earlier held or un-armed block rule (10019/10020, a family set to
-0) also matched; at the shipped arming neither side bans.
+0) also matched; at the shipped arming neither side bans. Authorised scanners (Nessus,
+Acunetix/AWVS, AppScan are score 99) that send an armed payload are now banned
+too; `ALLOW_NETS` / `ALLOW_UA_CONTAINS` exempt them. A rule that raises behind
+the deferred block no longer lets the scanner through under `fail_open`
+(cfm.lua's `waf_error` path): `_M.check` runs the pipeline under `xpcall`
+and, when a 201 block is pending, blocks as 201 and logs `[cfm_waf] rule
+raised behind a deferred rule-201 block`.
 
 ## Open questions (decide before Phase 1)
 

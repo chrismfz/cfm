@@ -52,7 +52,8 @@ do
   check(r.ids:find(",201,", 1, true), "nuclei + RCE: the 201 hit is kept (" .. show(r) .. ")")
 
   r = run{ ua = "Mozilla/5.00 (Nikto/2.5.0) (Evasions:None) (Test:000001)", args = "f=php://filter/resource=index.php" }
-  check(r.reason:find("^WAF_PHP_WRAPPER") and r.action == "block", "nikto + php://: PHP_WRAPPER is the headline (" .. show(r) .. ")")
+  check(r.reason:find("^WAF_PHP_WRAPPER") and r.action == "block" and r.ids:find(",201,", 1, true),
+        "nikto + php://: PHP_WRAPPER is the headline, 201 kept (" .. show(r) .. ")")
 end
 
 -- ── Unchanged: a scanner with no armed payload still blocks as 201 ─────────
@@ -82,6 +83,30 @@ do
   r = run{ ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
            args = "id=1%27%20UNION%20SELECT%201,2,3--%20-" }
   check(r.reason:find("^WAF_SQLI") and not r.ids:find(",201,", 1, true), "browser + SQLi: no 201 (" .. show(r) .. ")")
+end
+
+-- ── A rule that raises behind the deferred block still blocks as 201 ──────
+-- At step 1 the block stopped evaluation; now later rules run, and under
+-- fail_open a raise would let the scanner through uninspected.
+do
+  local det = require("cfm_waf_detectors")
+  local orig = det.detect_rce
+  det.detect_rce = function() error("boom") end
+  local ok, hit, reason, _, action, hits, rule_id = pcall(waf.check, {
+    uri = "/index.php", args = "id=1", raw_uri = "/index.php?id=1", method = "GET", ip = "203.0.113.5", body = "",
+    headers = { ["user-agent"] = SQLMAP, accept = "*/*" } })
+  check(ok and hit and action == "block" and rule_id == 201 and tostring(reason):find("^WAF_BAD_UA")
+        and hits and hits[1] and hits[1].waf_rule_id == 201,
+        "sqlmap + a raising rule: blocked as 201 (" .. tostring(ok) .. " " .. tostring(reason) .. ")")
+  ok = pcall(waf.check, {
+    uri = "/index.php", args = "id=1", raw_uri = "/index.php?id=1", method = "GET", ip = "203.0.113.5", body = "",
+    headers = { ["user-agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", accept = "*/*" } })
+  check(not ok, "browser + a raising rule: the error still goes up (cfm.lua's fail_open decides)")
+  ok = pcall(waf.check, {
+    uri = "/index.php", args = "id=1", raw_uri = "/index.php?id=1", method = "GET", ip = "203.0.113.5", body = "",
+    skip_rule_ids = { [201] = true }, headers = { ["user-agent"] = SQLMAP, accept = "*/*" } })
+  check(not ok, "sqlmap with 201 excluded + a raising rule: the error goes up")
+  det.detect_rce = orig
 end
 
 if fails > 0 then

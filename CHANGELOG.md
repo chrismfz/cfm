@@ -45,7 +45,11 @@ back-filled here — see the git/PR history for that period.
   a scanner hammering those can be banned by them too. An operator who armed
   the bad-UA ban (`BAD_UA = 1` in `[waf_security]`) now loses it on a
   request where an earlier non-banning block rule (the held TranslatePress
-  rules, or a family set to 0) also matched.
+  rules, or a family set to 0) also matched. Commercial scanners carry the
+  same scanner User-Agents (Nessus, Acunetix, AppScan): an authorised scan,
+  such as a customer's own or a PCI ASV scan, whose probes trip a banning
+  rule now gets the 6-hour ban and the alert too. Exempt its source with
+  `ALLOW_NETS` (or `ALLOW_UA_CONTAINS`) in `[waf_security]`.
 - **Site Cache writes far less to disk under abuse.** The static-asset cache
   stored a full copy for every distinct query string, and a HEAD or an
   aborted download still stored the whole file: five HEAD requests with random

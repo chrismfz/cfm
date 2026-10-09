@@ -749,7 +749,7 @@ end
 -- MAIN CHECK
 -- ─────────────────────────────────────────────────────────────────────────────
 
-function _M.check(ctx)
+local function check_impl(ctx, st)
   if not CFG.enabled then
     return false, nil, nil, nil
   end
@@ -949,8 +949,8 @@ function _M.check(ctx)
 
   -- Rule 201's block, held back until after every armed block-tier family
   -- (step 1 sets it; recorded before traversal, or at ::done:: if an earlier
-  -- block ended evaluation first, so the hit is never lost).
-  local bad_ua_block = nil
+  -- block ended evaluation first, so the hit is never lost). It lives in
+  -- `st` so _M.check can still block as 201 if a later rule raises.
 
   local function record(reason, ttl, action, rule_id)
     local sev = ACTION_SEVERITY[action] or 0
@@ -998,7 +998,7 @@ function _M.check(ctx)
         -- a SQLi payload lost the 6h ban and the alert; a CVE probe from
         -- nuclei lost the WAF/CVE alert.
         if action == "block" then
-          bad_ua_block = { reason = reason, ttl = ttl }
+          st.bad_ua = { reason = reason, ttl = ttl }
         else
           record(reason, ttl, action, RULE_IDS.rule_bad_ua)
         end
@@ -2365,9 +2365,9 @@ function _M.check(ctx)
   -- scanner request with no armed payload still blocks, labelled as before.
   -- Cost: such a request now runs the remaining detectors (budget-capped
   -- scans) instead of stopping at step 1.
-  if bad_ua_block then
-    local b = bad_ua_block
-    bad_ua_block = nil
+  if st.bad_ua then
+    local b = st.bad_ua
+    st.bad_ua = nil
     if record(b.reason, b.ttl, "block", RULE_IDS.rule_bad_ua) then goto done end
   end
 
@@ -2460,14 +2460,35 @@ function _M.check(ctx)
   -- An earlier block ended evaluation before the deferred rule-201 block was
   -- recorded: keep the hit (it does not take the headline, an equal-severity
   -- hit is already there).
-  if bad_ua_block then
-    record(bad_ua_block.reason, bad_ua_block.ttl, "block", RULE_IDS.rule_bad_ua)
-    bad_ua_block = nil
+  if st.bad_ua then
+    record(st.bad_ua.reason, st.bad_ua.ttl, "block", RULE_IDS.rule_bad_ua)
+    st.bad_ua = nil
   end
   if final_sev == 0 then
     return false, nil, nil, nil
   end
   return true, final_reason, final_ttl, final_action, hits, final_rule_id
+end
+
+-- check_impl, plus the deferred rule-201 block on a raise. Rule 201's block
+-- used to end evaluation at step 1, so a scanner request (sqlmap, nikto …)
+-- never reached a later rule; it now runs them all first (see "Bad UA block,
+-- deferred"), and under fail_open a rule that raised would let it through
+-- uninspected (cfm.lua's waf_error) where it used to be blocked. Blocked as
+-- 201 here instead; with no deferred block the error goes up as before.
+function _M.check(ctx)
+  local st = {}
+  local ok, hit, reason, ttl, action, hits, rule_id = xpcall(check_impl, debug.traceback, ctx, st)
+  if ok then return hit, reason, ttl, action, hits, rule_id end
+  local b = st.bad_ua
+  local skip = ctx.skip_rule_ids
+  if not b or (skip and skip[RULE_IDS.rule_bad_ua]) then error(hit, 0) end
+  if ngx and ngx.log then
+    ngx.log(ngx.ERR, "[cfm_waf] rule raised behind a deferred rule-201 block; blocked as 201: ", tostring(hit))
+  end
+  return true, b.reason, b.ttl, "block",
+         { { reason = b.reason, ttl = b.ttl, action = "block", waf_rule_id = RULE_IDS.rule_bad_ua } },
+         RULE_IDS.rule_bad_ua
 end
 
 -- Reason families whose first ":"-tag stays in the should_push cooldown key —
