@@ -548,31 +548,24 @@ _M.strip_host_port                    = strip_host_port
 _M.is_ipv4_literal                    = is_ipv4_literal
 _M.is_ipv6_literal                    = is_ipv6_literal
 
--- ngx.req.get_headers() returns the first 100 header lines only (err
--- "truncated"), but nginx forwards every line and PHP parses the body by the
--- Content-Type it receives. A request padded past line 100 would hide the body
--- headers from the WAF: the PHP field reader, body_budget and the
--- Content-Length checks would then read no body. So they are backfilled from
--- nginx's own parse. Other headers past line 100 stay unseen: reading them all
--- (get_headers(0)) would let one request build a table of thousands.
-local BODY_HEADERS = {
-  { "content-type", "http_content_type" },
-  { "content-length", "http_content_length" },
-  { "transfer-encoding", "http_transfer_encoding" },
-}
-function _M.waf_request_headers(req, var)
+-- The request headers for the WAF, complete. ngx.req.get_headers() returns
+-- the first 100 header lines only (err "truncated"), while nginx forwards every
+-- line to the origin: a request padded past line 100 hid every later header
+-- from the WAF (a CVE marker header, a second Content-Type carrying the
+-- boundary, the body headers the field reader needs). A truncated read is
+-- retried with up to WAF_MAX_HEADER_LINES lines; a request with even more is
+-- reported as too_many, and the caller refuses it (no client sends that many,
+-- and reading them all would let one request build a table of thousands).
+-- Returns headers, too_many.
+local WAF_MAX_HEADER_LINES = 1000
+_M.WAF_MAX_HEADER_LINES = WAF_MAX_HEADER_LINES
+function _M.waf_request_headers(req)
   req = req or ngx.req
-  var = var or ngx.var
   local h, err = req.get_headers()
-  if err == "truncated" and type(h) == "table" then
-    for _, p in ipairs(BODY_HEADERS) do
-      if h[p[1]] == nil then
-        local v = var[p[2]]
-        if v ~= nil and v ~= "" then h[p[1]] = v end
-      end
-    end
+  if err == "truncated" then
+    h, err = req.get_headers(WAF_MAX_HEADER_LINES)
   end
-  return h
+  return h, err == "truncated"
 end
 
 return _M

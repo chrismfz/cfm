@@ -42,7 +42,9 @@ type WAFRule struct {
 	// rule whose edge 403 is right but whose ban can land on a legitimate
 	// user; an operator's RULE_<id> in detectors.conf still wins. A held block
 	// rule shadows armed ones, so cfm_waf.lua evaluates it late (CLAUDE.md §6).
-	HoldAutoblock bool `json:"hold_autoblock,omitempty"`
+	// Not in the API JSON: it is only the code default (an operator's RULE_<id>
+	// decides), and scoped callers read this registry too.
+	HoldAutoblock bool `json:"-"`
 }
 
 // wafRuleIDs is the in-process registry. Keep entries sorted by ID — the

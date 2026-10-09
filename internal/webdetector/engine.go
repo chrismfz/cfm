@@ -57,24 +57,6 @@ type LogRec struct {
 
 // parseTSV parses the TSV log format used by access_cfm_tsv.log.
 // ts ip host method uri proto status bytes rt urt ref ua
-// isUpstreamName: "-" or an nginx upstream name as the confs write them
-// (cfm_apache, cfm_challenge, ...): lowercase letters, digits and `_`.
-func isUpstreamName(s string) bool {
-	if s == "-" {
-		return true
-	}
-	if s == "" || len(s) > 64 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
-			return false
-		}
-	}
-	return true
-}
-
 // parseTSV reads the 12-column TSV of the file tailers (log_format cfm_tsv,
 // httpd-cfm.conf). Those formats log raw TABs from the Referer and UA
 // (escape=none), so anything past column 11 is the UA, as it always was:
@@ -82,8 +64,10 @@ func isUpstreamName(s string) bool {
 func parseTSV(line string) (LogRec, bool) { return parseTSVCols(line, false) }
 
 // parseSocketTSV reads a line of the edge's ingest socket (log-cfm.lua), which
-// strips TABs from every field and may add a 13th column, the upstream name;
-// an edge still on the older module sends 12.
+// strips TABs from every field and may add a 13th column, the upstream name,
+// taken as written; an edge still on the older module sends 12. The socket
+// hands over newline-terminated records only (serveConn), so a record cut off
+// mid-send never reads as a 12-column one.
 func parseSocketTSV(line string) (LogRec, bool) { return parseTSVCols(line, true) }
 
 func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
@@ -97,11 +81,7 @@ func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 	}
 	upName := ""
 	if len(f) == 13 {
-		if isUpstreamName(f[12]) {
-			upName = f[12]
-		} else {
-			f[11] += "\t" + f[12]
-		}
+		upName = f[12]
 	}
 	ts, _ := strconv.ParseFloat(f[0], 64)
 	st, _ := strconv.Atoi(f[6])

@@ -272,6 +272,11 @@ do
         panel_waf = w
     end
 end
+local panel_wutil
+do
+    local ok_u, u = pcall(require, "cfm_waf_util")
+    if ok_u and type(u) == "table" and u.waf_request_headers then panel_wutil = u end
+end
 
 -- Shared self-origin predicate (self-IP set + [global] IGNORE_IPS/IGNORE_NETS +
 -- loopback), identical to the web edge — single source, no drift (§5). pcall'd
@@ -316,21 +321,35 @@ local function panel_waf_probe(ip, host, uri, args, method, ua, scope, enforce)
     if not panel_waf.enabled() then return end
     if panel_is_self(ip) then return end
 
-    local okc, hit, reason, _ttl, action, _hits, rule_id = pcall(function()
-        return panel_waf.check({
-            uri = uri, args = args or "", method = method,
-            host = host, ip = ip, peer = ip,
-            cookie = ngx.var.http_cookie or "",
-            headers = ngx.req.get_headers(),
-            body = "",  -- reduced profile: never buffer the panel body
-            -- Same dict the web edge passes as SH. cfm_waf's burst detectors
-            -- mutate counters here, but they are gated on web-app auth markers
-            -- (/wp-login.php, /xmlrpc.php, …) AND keyed by (ip,host), so a panel
-            -- URI on a panel Host never tips a web vhost's enforced burst state.
-            shdict = ngx.shared.cfm_decisions,
-            self_origin = false,
-        })
-    end)
+    -- The complete header set (cfm_waf_util.waf_request_headers): the first
+    -- 100 lines alone let a padded request hide the headers the WAF reads. More
+    -- lines than it reads is itself a block-tier hit, enforced like any other.
+    local req_headers, too_many = nil, false
+    if panel_wutil then
+        local okh, h, tm = pcall(panel_wutil.waf_request_headers)
+        if okh then req_headers, too_many = h, tm end
+    end
+    req_headers = req_headers or ngx.req.get_headers()
+    local okc, hit, reason, _ttl, action, _hits, rule_id
+    if too_many then
+        okc, hit, reason, action = true, true, "WAF_HEADER_LINES", "block"
+    else
+        okc, hit, reason, _ttl, action, _hits, rule_id = pcall(function()
+            return panel_waf.check({
+                uri = uri, args = args or "", method = method,
+                host = host, ip = ip, peer = ip,
+                cookie = ngx.var.http_cookie or "",
+                headers = req_headers,
+                body = "",  -- reduced profile: never buffer the panel body
+                -- Same dict the web edge passes as SH. cfm_waf's burst detectors
+                -- mutate counters here, but they are gated on web-app auth markers
+                -- (/wp-login.php, /xmlrpc.php, …) AND keyed by (ip,host), so a panel
+                -- URI on a panel Host never tips a web vhost's enforced burst state.
+                shdict = ngx.shared.cfm_decisions,
+                self_origin = false,
+            })
+        end)
+    end
     if not okc or not hit then return end
     action = tostring(action or "block")
 

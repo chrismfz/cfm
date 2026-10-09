@@ -264,10 +264,11 @@ func (s *IngestSocket) serveConn(ctx context.Context, e *Engine, conn net.Conn) 
 			continue // resynced at a newline; the oversized line was dropped
 		}
 
-		if len(line) > 0 {
-			if line[len(line)-1] == '\n' {
-				line = line[:len(line)-1]
-			}
+		// Only a newline-terminated record is complete: log-cfm.lua ends every
+		// record with one, so a fragment at EOF or a read error is a record cut
+		// off mid-send, and parsing it would read a truncated UA or upstream.
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			line = line[:len(line)-1]
 			// ReadSlice returns a slice into br's buffer, invalidated by the next
 			// read — copy to a string before handing it downstream, which retains it.
 			s.handleLine(e, string(line))

@@ -428,6 +428,48 @@ _M.PHP_FIELDS_WANT = {
   user_login = true, wc_reset_password = true, ["woocommerce-lost-password-nonce"] = true,
 }
 
+-- want_hints(want): for each wanted name, the literal pieces any key PHP
+-- registers under it must contain once url-decoded and lowercased. php_var_name
+-- only drops leading spaces, cuts at NUL or `[`, and turns ` `, `.` and `[`
+-- into `_`, so every piece between the name's `_`s survives in the key as is
+-- (`string_ids` <- `string.ids`, `string ids`, `string[ids`).
+local function want_hints(want)
+  local h = {}
+  for name in pairs(want) do
+    local parts = {}
+    for p in name:gmatch("[^_]+") do parts[#parts + 1] = p end
+    h[#h + 1] = parts
+  end
+  return h
+end
+
+local function holds_hint(d, hints)
+  for _, parts in ipairs(hints) do
+    local all = true
+    for _, p in ipairs(parts) do
+      if not d:find(p, 1, true) then all = false; break end
+    end
+    if all then return true end
+  end
+  return false
+end
+
+-- A urlencoded source can hold a wanted key only if its decoded, lowercased
+-- text holds all the pieces of some wanted name. The raw text is tried first
+-- (a hit there means read the source); only a source with `%` or `+` and no
+-- raw hit is decoded to look again. One pass of plain finds instead of
+-- splitting thousands of pairs (a 64 KB query string).
+local function source_lacks(hints)
+  return function(s)
+    local l = lower(s)
+    if holds_hint(l, hints) then return false end
+    if not s:find("[%%+]") then return true end
+    return not holds_hint(lower(_form_unescape(s)), hints)
+  end
+end
+
+local PHP_FIELDS_HINTS = want_hints(_M.PHP_FIELDS_WANT)
+
 -- name (as PHP registers it, php_var_name) -> EVERY value it was sent with,
 -- in order, and t.srcs[i] = "args" / "body" for each. Rules test "any value",
 -- not PHP's last: PHP stops registering at max_input_vars (1000 by default),
@@ -436,43 +478,6 @@ _M.PHP_FIELDS_WANT = {
 -- LOWERCASED name (PHP keys are case-sensitive: `ACTION` over-reads, the safe
 -- side), and only their values are decoded: a body of thousands of pairs then
 -- costs a split and a find per pair.
--- want_hints(want): for each wanted name, the literal pieces any key PHP
--- registers under it must contain once url-decoded and lowercased. php_var_name
--- only drops leading spaces, cuts at NUL or `[`, and turns ` `, `.` and `[`
--- into `_`, so every piece between the name's `_`s survives in the key as is
--- (`string_ids` <- `string.ids`, `string ids`, `string[ids`).
-local hints_cache = setmetatable({}, { __mode = "k" })
-local function want_hints(want)
-  local h = hints_cache[want]
-  if h then return h end
-  h = {}
-  for name in pairs(want) do
-    local parts = {}
-    for p in name:gmatch("[^_]+") do parts[#parts + 1] = p end
-    h[#h + 1] = parts
-  end
-  hints_cache[want] = h
-  return h
-end
-
--- A urlencoded source can hold a wanted key only if its decoded, lowercased
--- text holds all the pieces of some wanted name: one decode and a few plain
--- finds instead of splitting thousands of pairs (a 64 KB query string).
-local function source_lacks(want)
-  local hints = want_hints(want)
-  return function(s)
-    local d = lower(s:find("[%%+]") and _form_unescape(s) or s)
-    for _, parts in ipairs(hints) do
-      local all = true
-      for _, p in ipairs(parts) do
-        if not d:find(p, 1, true) then all = false; break end
-      end
-      if all then return false end
-    end
-    return true
-  end
-end
-
 function _M.php_request_fields(method, args, body, headers, want)
   local f = {}
   each_request_field(method, args, body, headers, function(k, v, src, enc)
@@ -486,7 +491,7 @@ function _M.php_request_fields(method, args, body, headers, want)
     if not t then t = { srcs = {} }; f[name] = t end
     t[#t + 1] = v
     t.srcs[#t] = src
-  end, want and source_lacks(want))
+  end, want and source_lacks(want == _M.PHP_FIELDS_WANT and PHP_FIELDS_HINTS or want_hints(want)))
   return f
 end
 
