@@ -315,8 +315,9 @@ end
 -- case) is the one read, its `name` the LAST `name=` parameter. A part with a
 -- `filename` goes to $_FILES; one with neither name nor filename ends the
 -- parse ("Mime headers garbled"). A value runs to the next "\n--<boundary>",
--- one CR before it dropped. fn(name, value) runs once per field, in order.
-local function each_multipart_field(b, ct_raw, fn)
+-- one CR before it dropped. fn(name, value) runs once per field, in order;
+-- on_file(filename, name), when given, once per file part PHP registers.
+local function each_multipart_field(b, ct_raw, fn, on_file)
   local bnd = php_mp_boundary(ct_raw)
   if not bnd then return end -- an EMPTY boundary is valid to PHP: parts split on `--` lines
   local B, nextb = "--" .. bnd, "\n--" .. bnd
@@ -362,6 +363,9 @@ local function each_multipart_field(b, ct_raw, fn)
       end
       if not name and not filename then return end
       local bound = b:find(nextb, p, true)
+      -- The file's bytes are b[p .. (bound or n + 1) - 1], CR before the
+      -- boundary included (a scanner over-reading one byte is harmless).
+      if filename and on_file then on_file(filename, name, p, (bound or n + 1) - 1) end
       if name and not filename and name ~= "" then
         -- php_ap_memstr also matches a boundary PREFIX that runs to the end of
         -- the body ("\n", "\n--", ...): a last value is cut there too.
@@ -4117,7 +4121,18 @@ function _M.detect_upload_filename(body, headers)
     if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. raw:sub(1, 64) end
   end
 
-  return nil
+  -- And every filename PHP itself registers (each_multipart_field, the
+  -- oracle-checked rfc1867 reader): a header line with no `:` continues the
+  -- one before it, so `filename="shell.p` CRLF `hp"` is `shell.php` to PHP,
+  -- and `file` CRLF `name="shell.php"` is a `filename=` parameter; the
+  -- matchers above read one line at a time and saw neither.
+  local found
+  each_multipart_field(body, php_content_type(headers), function() end, function(fname)
+    if found then return end
+    local hit = bad_fname(fname)
+    if hit then found = "UPLOAD_FNAME:" .. hit .. ":" .. fname:sub(1, 64) end
+  end)
+  return found
 end
 
 -- [top-4c] Webshell PHP file hidden INSIDE an uploaded ZIP archive.
@@ -4170,11 +4185,13 @@ function _M.detect_upload_archive_php(body, headers)
 
   -- sig: 4-byte ZIP header magic. len_off/name_off: byte offsets (from the 'P')
   -- of the 2-byte LE filename length and the filename itself.
+  -- Every header in the body is read: the loop is linear (each find moves
+  -- past the last), and the body is bounded by waf_body_max_len. An
+  -- iteration cap (512 until 2026-10-09) let 512 decoy `PK\3\4` bytes in a
+  -- field before the real zip hide its entries.
   local function scan(sig, len_off, name_off)
     local pos = body:find(sig, 1, true)
-    local iters = 0
-    while pos and iters < 512 do
-      iters = iters + 1
+    while pos do
       local a, b = body:byte(pos + len_off), body:byte(pos + len_off + 1)
       if a and b then
         local nlen = a + b * 256
@@ -4213,19 +4230,77 @@ end
 -- (see rule 432: "Legit binary files never contain `<?php`").
 --
 -- `s` MUST already be lowercased (matches both detector call sites).
+-- After `<?=` (or a `<?` short open tag and whitespace), PHP skips
+-- whitespace, comments (`/* … */`, `# …`, `// …` to the line end), `@` and a
+-- leading `\` (a namespaced name) before the expression. These were missed:
+-- `<?=\strtoupper(…)`, `<?=/**/system(…)`, `<?=#x` LF `system(…)`,
+-- `<?=print`id``, `<?= new X(…)`, `<? echo …`. The expression must still
+-- open like PHP code (a variable, a backtick exec, a quoted string, `(`,
+-- `[`, a call `name(` (namespaced too), or one of the constructs below),
+-- which keeps the 3-byte opener binary-safe. One left-to-right pass: the
+-- `*/` / line-end lookups are reused while still ahead, so runs of openers
+-- cannot make it quadratic.
+local SHORT_ECHO_WORDS = {
+  echo = true, print = true, new = true, eval = true, include = true, include_once = true,
+  require = true, require_once = true, exit = true, die = true, clone = true,
+}
 local function has_php_short_echo(s)
   if not s or s == "" then return false end
-  -- An optional `@` error-suppression operator may sit between the opener
-  -- and the expression (`<?=@eval(...)`). PHP function names may contain
-  -- digits (`base64_decode`, `md5`, `sha1`, `str_rot13`), so the name class
-  -- is `[%w_]` (NOT `[%a_]` — excluding digits was a real bypass for
-  -- input-driven shells like `<?=base64_decode(file_get_contents(...))`).
-  return (s:find("<%?=%s*@?%s*%$")            -- <?=$_GET / <?= $x / <?=@$x
-       or s:find("<%?=%s*@?%s*`")             -- <?=`id`
-       or s:find("<%?=%s*@?%s*['\"]")         -- <?='cmd' / <?="cmd"
-       or s:find("<%?=%s*@?%s*%(")            -- <?=(expr)
-       or s:find("<%?=%s*@?%s*%a[%w_]*%s*%(") -- <?=base64_decode( / <?=md5( / <?=system(
-       ) ~= nil
+  local n = #s
+  local close_at, nl_at = 0, 0     -- the last `*/` / LF found, reused while ahead
+  local function skip_comment(i)   -- i at `/*`: the index after its `*/`, or nil
+    if close_at <= i + 1 then close_at = s:find("*/", i + 2, true) or (n + 1) end
+    if close_at > n then return nil end
+    return close_at + 2
+  end
+  local function expr_at(i)
+    while i <= n do
+      local c = s:sub(i, i)
+      if c:find("^[%s@\\]") then
+        i = i + 1
+      elseif c == "/" and s:sub(i + 1, i + 1) == "*" then
+        i = skip_comment(i)
+        if not i then return false end
+      elseif c == "#" or (c == "/" and s:sub(i + 1, i + 1) == "/") then
+        if nl_at <= i then nl_at = s:find("\n", i, true) or (n + 1) end
+        if nl_at > n then return false end
+        i = nl_at + 1
+      else
+        break
+      end
+    end
+    if i > n then return false end
+    local c = s:sub(i, i)
+    if c == "$" or c == "`" or c == "'" or c == '"' or c == "(" or c == "[" then return true end
+    local word, j = s:match("^([%a_][%w_\\]*)()", i)
+    if not word then return false end
+    if SHORT_ECHO_WORDS[word] then return true end
+    -- A call: the name, then whitespace / a comment, then `(`.
+    while j <= n do
+      local d = s:sub(j, j)
+      if d:find("^%s") then
+        j = j + 1
+      elseif d == "/" and s:sub(j + 1, j + 1) == "*" then
+        j = skip_comment(j)
+        if not j then return false end
+      else
+        break
+      end
+    end
+    return s:sub(j, j) == "("
+  end
+  local pos = 1
+  while true do
+    local k = s:find("<?", pos, true)
+    if not k then return false end
+    local nx = s:sub(k + 2, k + 2)
+    if nx == "=" then
+      if expr_at(k + 3) then return true end
+    elseif nx ~= "" and nx:find("^%s") then
+      if expr_at(k + 2) then return true end   -- `<?` short open tag
+    end
+    pos = k + 2
+  end
 end
 
 -- [top-4b] Webshell / malicious content in uploaded file bytes.
@@ -4259,6 +4334,35 @@ function _M.detect_upload_content(body, headers)
   if b:find("<image%s") and has(b, "url%(") then return "UPLOAD_IMAGEMAGICK_URL" end
 
   return nil
+end
+
+-- Rule 415 — the PHP / JSP openers of rule 402, in the uploaded FILES past the
+-- part of the body 402 reads (its first max_scan_len bytes, 2 KB): a webshell
+-- after 2 KB of image data, or in a second file, went unseen. Only file parts
+-- (a `filename=`, as PHP registers them: each_multipart_field) are read, to the
+-- multipart body budget, and only for the openers — not 402's superglobal
+-- words, which ticket and forum text fields carry. Ships logonly (burn-in):
+-- these bytes were never scanned before, and a text attachment quoting PHP
+-- would be a 6 h autoblock at block.
+function _M.detect_upload_content_deep(body, headers)
+  if not body or #body <= CFG.max_scan_len then return nil end
+  headers = headers or {}
+  local ct = php_content_type(headers)
+  if not has(lower(ct), "multipart/form-data") then return nil end
+  local limit = body_budget(headers)
+  local tag
+  each_multipart_field(body, ct, function() end, function(_, _, s, e)
+    if tag or s > limit then return end
+    if e > limit then e = limit end
+    -- 402 already read the first max_scan_len bytes; start a little before
+    -- that edge so an opener straddling it is seen whole.
+    if e <= CFG.max_scan_len then return end
+    if s < CFG.max_scan_len - 16 then s = math.max(s, CFG.max_scan_len - 16) end
+    local part = lower(body:sub(s, e))
+    if has(part, "<?php") or has_php_short_echo(part) then tag = "UPLOAD_PHP_TAG_DEEP"
+    elseif has(part, "<jsp:") then tag = "UPLOAD_JSP_TAG_DEEP" end
+  end)
+  return tag
 end
 
 -- SP Page Builder unauthenticated arbitrary file upload -> RCE (CVE-2026-48908,

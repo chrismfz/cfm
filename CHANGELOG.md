@@ -33,6 +33,21 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
+- **Four ways to slip a webshell past the upload rules are closed.** A
+  filename split over two header lines (`filename="shell.p` + line break +
+  `hp"`, or `file` + line break + `name="shell.php"`) is `shell.php` to PHP
+  but was invisible to the filename rule (401); it now also checks every
+  filename PHP itself registers. The PHP-in-zip check (414, and the SP Page
+  Builder rule built on it) stopped after 512 zip headers, so 512 decoy
+  headers in a form field before the real zip (the ANTONKILL vector) hid its
+  webshell entry; it now reads them all. The upload-content rule (402)
+  missed short PHP tags written `<?=\func(…)`, `<?=/**/func(…)`,
+  `<?=print`…``, `<?= new …`, or `<? echo …`; it now reads them as PHP does,
+  still without firing on stray bytes in images. And 402 only reads the
+  first 2 KB of the request, so a webshell after 2 KB of image data went
+  unseen: the new rule 415 reads uploaded files deeper for PHP / JSP tags.
+  It ships log-only for burn-in; promote it in `cfm_waf_config.lua` once its
+  hits look clean (docs/waf.md, rule 415).
 - **Four ways to hide a payload from the WAF's scan are closed.** A JSON
   body's escapes were scanned as written, so `1\u0027 OR
   \u00271\u0027=\u00271` (a quote tautology once the app decodes it) passed
