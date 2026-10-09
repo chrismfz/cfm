@@ -33,6 +33,19 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
+- **A request that tripped a log-only WAF rule skipped every check after the
+  WAF.** The edge sent it straight to the site, so an IP block, a site under
+  challenge or Under-Attack Mode, a traffic rule, a throttle, a
+  challenge-armed fingerprint and a forced-challenge location (e.g. a login
+  page) all let it through. Anyone could trigger that on purpose: one header
+  such as `X-A: ${date:}` trips the log-only Log4Shell rule. A log-only hit
+  is now recorded as before and then goes through those checks like any
+  other request; `X-CFM-Action` still reads `logonly` when it is allowed,
+  and such a request is never served from the micro cache. Separately, an
+  error inside a WAF rule no longer skips those checks either: with the
+  default `CFM_FAIL_OPEN` the request goes on without the WAF (and the error
+  is logged as `waf_error`, once a minute per IP); with `CFM_FAIL_OPEN=0` it
+  still gets a 500.
 - **One crafted request could hold an edge worker for up to a second.** Five
   WAF checks re-scanned the same bytes over and over on purpose-built input:
   the WordPress page-template check (rule 10017) on a 32 KB form upload took
