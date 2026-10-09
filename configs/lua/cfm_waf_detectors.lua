@@ -386,7 +386,13 @@ end
 -- boundary (header_string would read the first only).
 local function php_content_type(headers)
   local v = headers and (headers["Content-Type"] or headers["content-type"])
-  if type(v) == "table" then return table.concat(v, ", ") end
+  if type(v) == "table" then
+    local parts = {}
+    for _, s in ipairs(v) do
+      if type(s) == "string" and s ~= "" then parts[#parts + 1] = s end
+    end
+    return table.concat(parts, ", ")
+  end
   return v or ""
 end
 
@@ -503,7 +509,11 @@ function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _
   -- catches a body the reader could not split.
   if method ~= "post" or not body or body == "" then return nil end
   if not has(lower(php_content_type(headers)), "multipart/form-data") then return nil end
-  local b  = cap(body, body_budget(headers))
+  -- Gated as on main: this scan only matches a name whose normalize() holds
+  -- `pagename`, which _nab shows whenever it saw the request whole.
+  local bn = body_budget(headers)
+  if _nab and #(args or "") <= bn and #body <= bn and not has(_nab, "pagename") then return nil end
+  local b  = cap(body, bn)
   local lb = lower(b)
   local pos = 1
   while true do
@@ -4163,7 +4173,6 @@ local function any_value(f, name, pred)
   end
   return false
 end
-
 
 -- Returns the tag and whether the request carries a WordPress login cookie:
 -- the caller files a logged-in hit under rule 10020 (edge 403, ban held) —
