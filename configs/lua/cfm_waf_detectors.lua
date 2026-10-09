@@ -1756,32 +1756,36 @@ local function xmlrpc_method_names(body)
   local xs = h:find("<?xml", 1, true)
   local xe = xs and h:find("?>", xs + 5, true)
   if xe then body = body:sub(1, xs - 1) .. body:sub(xe + 2) end
-  local lb, names, buf = lower(body), {}, {}
+  -- One text buffer, reused (nb = its live length): a fresh table per tag
+  -- was most of the cost on a body of tiny tags. Bytes compared, not subs.
+  local lb, names, buf, nb = lower(body), {}, {}, 0
   local n, pos = #lb, 1
-  local function add_text(t)
-    if t ~= "" then buf[#buf + 1] = t end
-  end
   local function close_name()
-    names[#names + 1] = php_trim(table.concat(buf)):sub(1, XMLRPC_MAX_NAME)
+    -- Lowercased again: an entity decodes to its own case (`&#x46;` is F).
+    names[#names + 1] = lower(php_trim(table.concat(buf, "", 1, nb))):sub(1, XMLRPC_MAX_NAME)
   end
   while pos <= n do
     local lt = lb:find("<", pos, true)
-    add_text(xml_text(lb:sub(pos, (lt or n + 1) - 1)))
+    local stop = (lt or n + 1) - 1
+    if stop >= pos then
+      nb = nb + 1; buf[nb] = xml_text(lb:sub(pos, stop))
+    end
     if not lt then break end
-    if lb:sub(lt, lt + 3) == "<!--" then
+    local c1, c2, c3 = lb:byte(lt + 1, lt + 3)
+    if c1 == 33 and c2 == 45 and c3 == 45 then                -- <!-- … -->
       local e = lb:find("-->", lt + 4, true)
       if not e then break end
       pos = e + 3
-    elseif lb:sub(lt, lt + 8) == "<![cdata[" then
+    elseif c1 == 33 and c2 == 91 and lb:sub(lt, lt + 8) == "<![cdata[" then
       local e = lb:find("]]>", lt + 9, true)
       if not e then break end
-      add_text(lb:sub(lt + 9, e - 1))
+      nb = nb + 1; buf[nb] = lb:sub(lt + 9, e - 1)
       pos = e + 3
-    elseif lb:sub(lt + 1, lt + 1) == "?" then
+    elseif c1 == 63 then                                      -- <? … ?>
       local e = lb:find("?>", lt + 2, true)
       if not e then break end
       pos = e + 2
-    elseif lb:sub(lt + 1, lt + 1) == "!" then
+    elseif c1 == 33 then                                      -- <!DOCTYPE …>
       local e = lb:find(">", lt + 2, true)
       if not e then break end
       pos = e + 1
@@ -1792,23 +1796,20 @@ local function xmlrpc_method_names(body)
       while true do
         local k = lb:find("[\"'>]", j)
         if not k then break end
-        local c = lb:sub(k, k)
-        if c == ">" then e = k; break end
-        local q = lb:find(c, k + 1, true)
+        local c = lb:byte(k)
+        if c == 62 then e = k; break end
+        local q = lb:find(c == 34 and '"' or "'", k + 1, true)
         if not q then break end
         j = q + 1
       end
       if not e then break end
-      local closing = lb:sub(lt + 1, lt + 1) == "/"
-      local name = lb:match(closing and "^</([^%s/>]+)" or "^<([^%s/>]+)", lt)
-      local self_closing = (not closing) and lb:sub(e - 1, e - 1) == "/"
-      if closing then
-        if name == "methodname" then close_name() end
-      elseif self_closing and name == "methodname" then
-        buf = {}
+      if c1 == 47 then                                        -- </methodName>
+        if lb:find("^</methodname[%s>]", lt) then close_name() end
+      elseif lb:byte(e - 1) == 47 and lb:find("^<methodname[%s/]", lt) then
+        nb = 0                                                -- <methodName/>
         close_name()
       end
-      buf = {}
+      nb = 0
       pos = e + 1
     end
   end
@@ -1844,7 +1845,11 @@ function _M.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
   -- not a call that carries a big body (XMLRPC_BIG_CALLS: a decoy name, the
   -- real one past the cut), was padded there: the method name is the first
   -- child of <methodCall>, and every client writes it in the first hundred
-  -- bytes or so. Reported, not blocked (cfm_waf.lua).
+  -- bytes or so. Reported, not blocked (cfm_waf.lua). Known limit: a decoy
+  -- that IS a big call (`wp.uploadFile` up front, system.multicall past the
+  -- cut) reads as that call, and nothing here sees the real one; only the
+  -- 512 rate limit applies. Closing it needs the part of the body past the
+  -- cut (a plain `</methodName` count over it).
   if #body >= XMLRPC_HIDDEN_LEN and not XMLRPC_BIG_CALLS[names[#names] or ""] then
     return "AUTH_WP_XMLRPC_HIDDEN_METHOD"
   end

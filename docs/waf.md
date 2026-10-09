@@ -1333,6 +1333,11 @@ padded past the edge, and is reported under 510 at `logonly`
 (`AUTH_WP_XMLRPC_HIDDEN_METHOD`, a burn-in before it blocks; every client writes
 the name in its first hundred bytes or so). So rule 510, a block-tier rule, has
 logonly hits too; they never feed autoblock. Rule 512 still counts those POSTs.
+**Known limit:** a decoy that *is* one of those big calls (`wp.uploadFile` up
+front, `system.multicall` past the cut — IXR calls the last name) reads as the
+big call, and neither 510 nor the hidden-method signal fires; only 512's rate
+limit applies. Closing it needs the part of the body past the cut (a plain
+`</methodName` count over it), which the edge does not keep today.
 Before reading, the reader drops one `<?xml…?>` from the first 100 bytes, as
 IXR does wherever it sits.
 

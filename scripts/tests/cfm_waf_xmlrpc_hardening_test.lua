@@ -130,6 +130,10 @@ do
   r2 = run(decoy:sub(1, 32768))
   check(r2.reason:find("HIDDEN_METHOD", 1, true) and r2.action ~= "block",
         "a decoy name before the cut: 510 logonly (" .. show(r2) .. ")")
+  -- An entity decodes to its own case: `wp.upload&#x46;ile` is still the
+  -- upload call (lowercased after decoding).
+  local nm = det.xmlrpc_method_names(call("wp.upload&#x46;ile"))
+  check(nm[1] == "wp.uploadfile", "names are lowercased after entity decoding: " .. tostring(nm[1]))
   local big = call("metaWeblog.newMediaObject") .. ("<!-- " .. ("b"):rep(1000) .. " -->"):rep(40)
   r2 = run(big:sub(1, 32768))
   check(not r2.ids:find(",510,", 1, true), "a large call with its name up front: no 510 (" .. show(r2) .. ")")
@@ -140,7 +144,7 @@ do
   for _, b in ipairs({ "<methodName>" .. ("<!--"):rep(8000), "<methodName>" .. ("<![cdata["):rep(3600),
                        "<methodName>" .. ("<"):rep(32000), "<methodName>" .. ("<a"):rep(16000),
                        "<methodName>a" .. (" "):rep(32000) .. "b</methodName>", ("<a b='>"):rep(4000),
-                       ("&#"):rep(16000), ("<x>"):rep(10000) }) do
+                       ("&#"):rep(16000), ("<x>"):rep(10000), ("<>"):rep(16000), ("</>"):rep(10000) }) do
     local t0 = os.clock()
     det.xmlrpc_method_names(b:sub(1, 32768))
     local ms = (os.clock() - t0) * 1000
