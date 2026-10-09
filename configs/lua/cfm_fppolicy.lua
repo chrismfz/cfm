@@ -68,6 +68,18 @@ local ERR_TTL     = 10  -- RPC failure — retry soon, but never per-request
 -- key-minting client (which this bounds) or a much bigger fleet (raise it).
 local RPC_BUDGET = 50
 
+-- STALE_TTL: how long the last ARMED answer for a fingerprint (deny /
+-- challenge / challenge_v2) is kept as a fallback, under its own key, for
+-- the case the budget is spent. RPC_BUDGET is node-wide, so a client that
+-- mints junk fingerprints (50+ handshakes a second with rotating cipher
+-- values) used to make every uncached lookup fail open, an armed farm's
+-- included once its 30 s cache lapsed: the deny stopped answering for as long
+-- as the flood ran. Over budget, a fingerprint that was armed when last asked
+-- now keeps that answer. Only armed answers are kept (a few keys); a
+-- fingerprint never asked still fails open. The price: while the budget
+-- stays spent, a central disarm reaches this node up to STALE_TTL late.
+local STALE_TTL = 600
+
 -- is_grease mirrors internal/tlsfp.isGREASE: a 6-char 0x?a?a token whose two
 -- hex bytes are identical with low nibble 'a' (how nginx renders the RFC 8701
 -- GREASE code points OpenSSL does not know).
@@ -137,7 +149,14 @@ function M.lookup(deps)
   -- able to write either).
   if sh then
     local n = shd.incr(sh, "fpp|rpc_budget", 1, 1)
-    if n and n > RPC_BUDGET then return "", nil end
+    if n and n > RPC_BUDGET then
+      local stale = sh:get("fpps|" .. ck)
+      if stale then
+        local sep = stale:find("|", 1, true)
+        if sep then return stale:sub(1, sep - 1), stale:sub(sep + 1) end
+      end
+      return "", nil
+    end
   end
 
   local body, err = deps.rpc("/nginx/fppolicy?fp=" .. ngx.escape_uri(deps.raw))
@@ -160,7 +179,14 @@ function M.lookup(deps)
   local ttl = tonumber(obj.ttl) or DEFAULT_TTL
   if ttl <= 0 then ttl = DEFAULT_TTL end
   if action == "" then ttl = math.min(ttl, MISS_TTL) end
-  if sh then sh:set(ck, action .. "|" .. id, ttl) end
+  if sh then
+    sh:set(ck, action .. "|" .. id, ttl)
+    if action ~= "" then
+      sh:set("fpps|" .. ck, action .. "|" .. id, STALE_TTL)
+    else
+      sh:delete("fpps|" .. ck)  -- disarmed: no stale answer to fall back on
+    end
+  end
   return action, id ~= "" and id or nil
 end
 

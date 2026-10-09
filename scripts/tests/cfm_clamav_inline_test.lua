@@ -61,7 +61,9 @@ local function build_ngx()
     ERR = 0, WARN = 1, INFO = 2, DEBUG = 3,
     ctx = { waf_body = S.waf_body },
     var = {
-      host = S.host, request_uri = S.uri or "/upload",
+      -- uri: the decoded, normalised path nginx routes (S.path when the raw
+      -- request_uri normalises to something else).
+      host = S.host, request_uri = S.uri or "/upload", uri = S.path or S.uri or "/upload",
       content_type = "multipart/form-data; boundary=X",
       request_id = "abcd1234",
     },
@@ -126,7 +128,7 @@ local function run(opts)
   MODE_OVERRIDE_HOSTS = opts.mode_overrides or {}
   S = {
     host = opts.host or "site.example.gr",
-    uri = opts.uri,
+    uri = opts.uri, path = opts.path,
     body_file = "/spool/req",
     waf_body = 'Content-Disposition: form-data; name="f"; filename="a.zip"\r\n',
   }
@@ -195,6 +197,13 @@ r = run{ mode = "inline", uri = "/acctxfer/stream",
          bridge = { sync_body = '{"block":true,"signature":"Sig"}' } }
 check(r == nil and #sent_async == 1 and #sent_sync == 0,
   "/acctxfer prefix -> async lane even in inline mode")
+
+-- 10. The bypass is matched on the normalised path: `/acctxfer/../x` is /x
+-- to nginx and the origin, and is scanned inline like any upload.
+r = run{ mode = "inline", uri = "/acctxfer/../real/upload.php", path = "/real/upload.php",
+         bridge = { sync_body = '{"block":true,"signature":"Sig"}' } }
+check(type(r) == "table" and r.block == true and #sent_sync == 1,
+  "/acctxfer/../real/upload.php -> scanned inline (normalised path), blocked")
 
 if fails > 0 then
   io.stderr:write(("cfm_clamav inline tests: %d FAILED\n"):format(fails))

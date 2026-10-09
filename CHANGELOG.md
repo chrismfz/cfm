@@ -33,6 +33,18 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
+- **A flood of junk TLS fingerprints no longer switches off an armed
+  fingerprint deny.** The edge asks the daemon about at most 50 new
+  fingerprints a second per server; a client offering rotating cipher lists
+  used that budget up, and every fingerprint whose 30-second cache had
+  lapsed then went unchecked, an armed farm's included. A fingerprint that
+  was armed when last asked now keeps that answer while the budget is spent
+  (for up to 10 minutes, so a disarm can reach a flooded server that late).
+- **An upload to `/acctxfer/../some/path.php` is scanned inline by ClamAV.**
+  The inline-scan bypass for cPanel account transfers (and the operator's
+  excluded paths) matched the request line as sent, so a `/acctxfer/../`
+  prefix skipped the inline verdict for any upload; they now match the path
+  the server actually runs.
 - **The XML-RPC brute-force and pingback rules can no longer be skipped by
   claiming to be Jetpack.** Rules 510-512 let through any request carrying a
   Jetpack marker (`?for=jetpack`, a Jetpack or WordPress.com User-Agent, or

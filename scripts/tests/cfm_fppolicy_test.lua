@@ -80,6 +80,7 @@ local function new_dict()
       if store[k] then return false, "exists" end
       store[k] = { v = v, ttl = ttl }; return true
     end,
+    delete = function(_, k) store[k] = nil end,
     _store = store,
   }
 end
@@ -168,6 +169,38 @@ do
   check(a == "" and calls == 0, "over-budget lookup fails open without an rpc")
   check(nkeys == 1, -- only the budget counter itself exists
         "over-budget lookup writes no cache entry (keys=" .. nkeys .. ")")
+end
+
+-- A junk-fingerprint flood spends the node-wide budget: a fingerprint that
+-- was ARMED when last asked keeps that answer (fpps| stale key), so an armed
+-- deny still answers once its 30 s cache lapses; one never asked still fails
+-- open, and a disarm drops the stale answer.
+do
+  local sh, calls, answer = new_dict(), 0, '{"action":"deny","id":"c28caa00","ttl":30}'
+  local deps = { raw = raw, sh = sh, rpc = function() calls = calls + 1; return answer, nil end }
+  check(fpp.lookup(deps) == "deny", "armed answer fetched")
+  sh._store["fpp|" .. ngx.md5(fpp.key_input(raw))] = nil       -- the 30 s cache lapses
+  for i = 1, 60 do                                               -- the flood
+    fpp.lookup({ raw = "1|TLSv1.3|0x" .. i .. ":X|x25519|h2", sh = sh,
+                 rpc = function() return '{"action":"","id":"","ttl":30}', nil end })
+  end
+  local before = calls
+  local a, id = fpp.lookup(deps)
+  check(a == "deny" and id == "c28caa00" and calls == before,
+        "over budget: the armed fingerprint keeps its last answer, no rpc (" .. tostring(a) .. ")")
+  local other = "1|TLSv1.3|TLS_CHACHA20_POLY1305_SHA256|X25519|h2"
+  check(fpp.lookup({ raw = other, sh = sh, rpc = deps.rpc }) == "",
+        "over budget: a fingerprint never asked still fails open")
+  -- A disarm (asked while the budget allows) drops the stale answer.
+  local sh2 = new_dict()
+  local d2 = { raw = raw, sh = sh2, rpc = function() return answer, nil end }
+  fpp.lookup(d2)
+  answer = '{"action":"","id":"","ttl":30}'
+  sh2._store["fpp|" .. ngx.md5(fpp.key_input(raw))] = nil
+  fpp.lookup(d2)
+  sh2:set("fpp|rpc_budget", 1000, 1)
+  sh2._store["fpp|" .. ngx.md5(fpp.key_input(raw))] = nil
+  check(fpp.lookup(d2) == "", "a disarmed fingerprint has no stale answer to fall back on")
 end
 
 -- ttl<=0 from the daemon must not pin the entry forever (exptime 0 =
