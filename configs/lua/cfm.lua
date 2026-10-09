@@ -474,6 +474,12 @@ local function waf_should_read_body(uri, method)
 
   local ct = lower(ngx.var.http_content_type or "")
   local cl = tonumber(ngx.var.http_content_length or "")
+  -- A body with no Content-Length (chunked, or HTTP/2 without the header) is
+  -- read where the location buffers bodies anyway (the confs' `location /`
+  -- sets $cfm_body_buffered): it used to go unread on every route outside
+  -- the allowlist below, so a chunked POST to a clean-URL route reached the
+  -- app uninspected.
+  local buffered = ngx.var.cfm_body_buffered == "1"
 
   -- F07: PUT/PATCH were NOT body-inspected before this change (the gate was
   -- POST-only), so there is no legacy "read regardless of size" expectation for
@@ -483,7 +489,7 @@ local function waf_should_read_body(uri, method)
   -- keeps STREAMING on a proxy_request_buffering=off location instead of being
   -- force-buffered just to scan its first waf_body_max_len bytes.
   if method ~= "post" then
-    return wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl) or false
+    return wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl, buffered) or false
   end
 
   -- POST: known-dynamic endpoints are read regardless of size. This is the
@@ -503,7 +509,9 @@ local function waf_should_read_body(uri, method)
   if has(uri, "/wp-content/")     then return true end
   if has(uri, "/wp-includes/")    then return true end
   if has(uri, "/wc-api/")         then return true end
-  if has(uri, "wc-ajax=")         then return true end
+  -- `uri` is the path ($uri carries no query string): WooCommerce's
+  -- `/?wc-ajax=…` endpoint is matched on the query.
+  if has(lower(ngx.var.args or ""), "wc-ajax=") then return true end
   if has(uri, "/administrator/")  then return true end
   if has(uri, "/components/")     then return true end
   if has(uri, "/modules/")        then return true end
@@ -534,8 +542,8 @@ local function waf_should_read_body(uri, method)
   if has(uri, "/sites/default/")  then return true end
   if uri:match("/upload[s]?/.*%.php") then return true end
   if uri:match("/files/.*%.php")      then return true end
-  if uri:match("%.php[%?/].*")   then return true end
-  if uri:match("%.phtml[%?/].*") then return true end
+  if uri:match("%.php/")         then return true end  -- PATH_INFO (/x.php/y)
+  if uri:match("%.phtml/")       then return true end
   if uri:match("%.php$")         then return true end
   if uri:match("%.phtml$")       then return true end
   -- F07: the allowlist above is a fast-path for known-dynamic endpoints. Beyond
@@ -544,10 +552,11 @@ local function waf_should_read_body(uri, method)
   -- old positive allowlist let smuggle a body-borne SQLi/RCE/webshell past the
   -- WAF entirely (the Go log engine sees no body). Gate on an inspectable
   -- Content-Type + a measured, bounded Content-Length so binary/media uploads
-  -- and chunked/streaming bodies keep STREAMING (never force-buffer the
-  -- proxy_request_buffering=off media location) and we don't buffer a large body
-  -- just to scan its first waf_body_max_len bytes.
-  return wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl) or false
+  -- keep STREAMING (never force-buffer the proxy_request_buffering=off media
+  -- location) and we don't buffer a large body just to scan its first
+  -- waf_body_max_len bytes. A body with no Content-Length is read only where
+  -- the location buffers it anyway (`buffered`, above); elsewhere it streams.
+  return wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl, buffered) or false
 end
 
 local function get_req_body_for_waf(uri, method, max_len)

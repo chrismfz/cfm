@@ -533,9 +533,12 @@ end
 -- Pure (no upvalues beyond ct_is_inspectable / a default cap) so it is unit-
 -- tested directly; cfm.lua isn't loadable, this is where the read/skip truth
 -- table lives.
-local function waf_body_gate(ct, cl, max_cl)
+-- buffered: the location buffers request bodies anyway (the edge confs' `location /`
+-- sets $cfm_body_buffered), so a body with no Content-Length (chunked, or HTTP/2
+-- without the header) costs nothing more to read there; elsewhere it streams.
+local function waf_body_gate(ct, cl, max_cl, buffered)
   if not ct_is_inspectable(ct) then return false end
-  if cl == nil then return false end                    -- chunked/unmeasurable → stream
+  if cl == nil then return buffered == true end         -- chunked: read only where nginx buffers
   if cl > (max_cl or 1048576) then return false end     -- too large → stream
   return true
 end
