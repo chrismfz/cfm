@@ -990,9 +990,10 @@ end
 --     clean-allow warmed by "/x" is never reused for "/x?mode=register" whose
 --     query-scoped rule would challenge/block. A query-less request hashes
 --     exactly the path (== the old key), so no-query traffic keeps its previous
---     cache entry; static assets still coalesce (is_static_asset_uri strips the
---     query first). Only dynamic endpoints — where query-scoped rules live —
---     pay the extra per-query cache cardinality.
+--     cache entry. Static assets coalesce only for a GET / HEAD with no query
+--     (cfm_decision.cache_key); one with a query takes the per-URL key. Only
+--     dynamic endpoints — where query-scoped rules live — pay the extra
+--     per-query cache cardinality.
 --   * ua IS a verdict input (UAAny traffic rules can block/challenge) yet is
 --     deliberately omitted: it is client-controlled (a determined attacker sets
 --     any UA anyway), only clean allows are cached, and the TTL is short, so the
@@ -1331,20 +1332,10 @@ end
 --   403 urn:ietf:params:acme:error:unauthorized
 -- on exactly the cpanel./webmail./whm. service subdomains.
 --
--- The whole prefix is exempted (not just acme-challenge): it also covers
--- pki-validation, security.txt, mta-sts, apple-app-site-association, etc.; it
--- is a standardized static/metadata namespace; and it matches what the HTTPS
--- panel listeners already do (cfm_panel.lua is_exempt_path) and what
--- cPanel/Imunify/ModSecurity-CRS do.
---
--- TRADE-OFF (accepted): this skips the WAF rule engine for the whole prefix,
--- not only the challenge. A few /.well-known/ endpoints can be app-routed
--- (e.g. /.well-known/webfinger, /.well-known/openid-configuration) and thus
--- lose WAF inspection. This is bounded: `uri` is nginx-decoded and
--- dot-segment-normalized, so /.well-known/acme-challenge/../../x collapses out
--- of the prefix and is NOT exempted (no traversal-out evasion); the request
--- still reaches the normal origin (this is a WAF-skip, not an auth bypass);
--- and the same pattern is already used for static-asset classes.
+-- Plain fetches anywhere under the prefix are exempted (not just
+-- acme-challenge): pki-validation, security.txt, mta-sts,
+-- apple-app-site-association, etc.; a standardized static/metadata namespace.
+-- An exempted request skips the WAF rule engine too, not only the challenge.
 --
 -- Only a plain fetch is exempted (since 2026-10-09, well_known_plain): GET /
 -- HEAD, no query string, no script extension in the path, plus CalDAV /
@@ -1355,13 +1346,17 @@ end
 -- `.well-known/` (a common spot) was too, when commanded through its query or
 -- a POST. Those now take the normal pipeline. `/.well-known/webfinger?…`
 -- does as well, so it can be challenged while its vhost is. Residual: a shell
--- under the prefix commanded by a header or cookie on a plain GET, or run by a
--- handler the list does not name (an `.htaccess` AddHandler for `.txt`).
+-- under the prefix commanded by a header, a cookie or a request body on a
+-- plain GET, or run by a handler the list does not name (an `.htaccess`
+-- AddHandler for `.txt`); a path-only payload reaching a plugin that logs
+-- the path (the path is still a plain file name); a Tomcat-style
+-- `x.jsp;jsessionid=` (irrelevant on Apache).
 -- The panel ports (cfm_panel.lua) still exempt the whole prefix: cpsrvd is
 -- not a front controller. The log-driven engine mirrors this test
 -- (isWellKnownChallengeExempt).
 do
-  if well_known_plain(method, uri, ngx.var.args, ngx.var.request_uri) then
+  if lower(uri):find("/.well-known/", 1, true) == 1
+     and well_known_plain(method, uri, ngx.var.args, ngx.var.request_uri) then
     ngx.header["X-CFM-Bypass"] = "well-known"
     log_route(ngx.INFO, "bypass=well-known host=" .. host .. " uri=" .. uri)
     ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)

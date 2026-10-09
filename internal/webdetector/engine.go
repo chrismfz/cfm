@@ -3873,11 +3873,8 @@ func isWellKnownChallengeExempt(method, p string) bool {
 	if p == "" {
 		return false
 	}
-	if i := strings.IndexByte(p, '?'); i >= 0 {
-		if i < len(p)-1 {
-			return false // a query string
-		}
-		p = p[:i]
+	if strings.IndexByte(p, '?') >= 0 {
+		return false // a query (even an empty `?`: the edge's raw target differs then)
 	}
 	lp := strings.ToLower(p)
 	if !strings.HasPrefix(lp, "/.well-known/") {
@@ -3886,7 +3883,7 @@ func isWellKnownChallengeExempt(method, p string) bool {
 	// The edge exempts only a raw target equal to its normalised form; on
 	// the raw side that means no escapes, dot segments, `//` or fragment.
 	if strings.Contains(lp, "..") || strings.Contains(lp, "%") || strings.Contains(lp, "//") ||
-		strings.Contains(lp, "#") {
+		strings.Contains(lp, "#") || strings.Contains(lp, "/./") || strings.HasSuffix(lp, "/.") {
 		return false
 	}
 	if strings.HasSuffix(lp, "/") {

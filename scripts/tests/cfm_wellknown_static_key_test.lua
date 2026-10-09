@@ -76,10 +76,10 @@ do
     local plain = assert(loadstring(chunk .. "\nreturn well_known_plain"))()
     local n = 0
     for line in io.lines("scripts/tests/fixtures/wellknown_exempt.txt") do
-      local m, path, q, want = line:match("^(%u+)%s+(%S+)%s+(%S+)%s+([01])%s*$")
+      local m, path, q, want, raw = line:match("^(%u+)%s+(%S+)%s+(%S+)%s+([01])%s*(%S*)%s*$")
       if m then
         n = n + 1
-        local got = plain(m, path, q ~= "-" and q or "", path)
+        local got = plain(m, path, q ~= "-" and q or "", raw ~= "" and raw or path)
         check(got == (want == "1"), ("well_known_plain(%s %s ?%s) = %s, want %s"):format(m, path, q, tostring(got), want))
       end
     end

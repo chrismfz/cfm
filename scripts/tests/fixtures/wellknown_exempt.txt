@@ -1,9 +1,10 @@
 # The /.well-known/ plain-fetch test, run by both sides:
 #   cfm.lua well_known_plain (the in-path carve-out, Step 0a1) and
 #   internal/webdetector isWellKnownChallengeExempt (the log-driven scoring
-#   exemption). Columns: METHOD PATH QUERY EXPECT (QUERY "-" = none; EXPECT 1
-#   = exempt). Paths are plain (no %-escapes, no `..`): the Go side refuses
-#   those on its raw input, the edge sees them decoded and normalised.
+#   exemption). Columns: METHOD PATH QUERY EXPECT [RAW] (QUERY "-" = none;
+#   EXPECT 1 = exempt). PATH is the decoded, normalised path the edge sees;
+#   RAW, when given, the request target as sent (the edge compares the two,
+#   the Go side reads RAW from the access log), else RAW = PATH.
 GET      /.well-known/acme-challenge/Xy_9-AbC        -                 1
 HEAD     /.well-known/acme-challenge/Xy_9-AbC        -                 1
 GET      /.well-known/pki-validation/ABCDEF0123.txt  -                 1
@@ -39,3 +40,8 @@ GET      /.well-known/photo.png                      -                 1
 GET      /.well-known/x.php5x                        -                 1
 GET      /well-known/x                               -                 0
 GET      /app/.well-known/x                          -                 0
+GET      /.well-known/x                              -                 0     /.well-known/x?
+GET      /.well-known/x                              -                 0     /.well-known/./x
+GET      /.well-known/x                              -                 0     /.well-known//x
+GET      /.well-known/x                              -                 0     /.well-known/%78
+GET      /.well-known/x                              -                 0     /.well-known/x/.

@@ -16,7 +16,8 @@ func TestIsWellKnownChallengeExempt(t *testing.T) {
 		"/.WELL-KNOWN/acme-challenge/0ebjUVe": true, // case-insensitive
 		"/.well-known/pki-validation/abc.txt": true,
 		"/.well-known/security.txt":           true,
-		"/.well-known/security.txt?":          true,  // an empty query is none
+		"/.well-known/security.txt?":          false, // an empty query: the edge's raw target differs too
+		"/.well-known/./x":                    false, // a dot segment, refused at the edge
 		"/.well-known/acme-challenge/x?a=1":   false, // a query is not a plain fetch
 		"/index.php":                          false,
 		"/well-known/x":                       false, // missing the leading dot
@@ -51,10 +52,13 @@ func TestIsWellKnownChallengeExempt_EdgeParity(t *testing.T) {
 			continue
 		}
 		fs := strings.Fields(line)
-		if len(fs) != 4 {
+		if len(fs) != 4 && len(fs) != 5 {
 			t.Fatalf("bad fixture line %q", line)
 		}
 		target := fs[1]
+		if len(fs) == 5 {
+			target = fs[4] // the raw request target as sent
+		}
 		if fs[2] != "-" {
 			target += "?" + fs[2]
 		}
