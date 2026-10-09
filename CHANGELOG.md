@@ -33,6 +33,14 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
+- **A known scanner's attack now gets the scanner banned.** A request from a
+  self-declared scanner (sqlmap, nikto, nuclei, zgrab, a fake legacy Internet
+  Explorer UA) was blocked by the bad-User-Agent rule (201) before any other
+  rule ran, and that rule does not ban. So sqlmap sending a SQL injection, or
+  nuclei probing a CVE, got a 403 but never the 6-hour ban or the CVE alert
+  the same payload earns from any other client. The SQL-injection, command
+  injection, CVE and other banning rules now get the first word; a scanner
+  request with no such payload still gets its 403, labelled as before.
 - **Site Cache writes far less to disk under abuse.** The static-asset cache
   stored a full copy for every distinct query string, and a HEAD or an
   aborted download still stored the whole file: five HEAD requests with random

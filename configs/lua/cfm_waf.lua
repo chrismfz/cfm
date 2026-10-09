@@ -947,6 +947,11 @@ function _M.check(ctx)
   local final_action  = nil
   local final_rule_id = nil
 
+  -- Rule 201's block, held back until after every armed block-tier family
+  -- (step 1 sets it; recorded before traversal, or at ::done:: if an earlier
+  -- block ended evaluation first, so the hit is never lost).
+  local bad_ua_block = nil
+
   local function record(reason, ttl, action, rule_id)
     local sev = ACTION_SEVERITY[action] or 0
     if sev == 0 then return false end
@@ -985,7 +990,18 @@ function _M.check(ctx)
           action = "block"
         end
         local ttl = (action == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_BAD_UA:" .. tag .. ":score=" .. score, ttl, action, RULE_IDS.rule_bad_ua) then goto done end
+        local reason = "WAF_BAD_UA:" .. tag .. ":score=" .. score
+        -- A block is recorded late (before traversal, see "Bad UA block,
+        -- deferred" below): WAF_BAD_UA has no block-tier rule, so its
+        -- autoblock is not armed, and as the first block hit it owned the
+        -- headline and `goto done` skipped the armed families. `sqlmap` with
+        -- a SQLi payload lost the 6h ban and the alert; a CVE probe from
+        -- nuclei lost the WAF/CVE alert.
+        if action == "block" then
+          bad_ua_block = { reason = reason, ttl = ttl }
+        else
+          record(reason, ttl, action, RULE_IDS.rule_bad_ua)
+        end
       end
     end
   end
@@ -2337,6 +2353,24 @@ function _M.check(ctx)
     end
   end
 
+  -- ── Bad UA block (rule 201), deferred from step 1 ───────────────────────
+  -- A score >= 99 scanner identity (sqlmap, nikto, nuclei …) or an operator
+  -- `block` mode blocks, but WAF_BAD_UA has no block-tier rule, so its
+  -- autoblock is not armed (waf_security_register.go). Recorded at step 1, it
+  -- owned the headline as the first block hit, `goto done` skipped the rest,
+  -- and cfm.lua pushes only the headline: the armed SQLi / RCE / CVE hit on
+  -- the same request (the scanner's actual payload) never reached autoblock.
+  -- Recorded here, after every armed block family and before the held
+  -- traversal rules, the armed family owns the headline and the ban; a
+  -- scanner request with no armed payload still blocks, labelled as before.
+  -- Cost: such a request now runs the remaining detectors (budget-capped
+  -- scans) instead of stopping at step 1.
+  if bad_ua_block then
+    local b = bad_ua_block
+    bad_ua_block = nil
+    if record(b.reason, b.ttl, "block", RULE_IDS.rule_bad_ua) then goto done end
+  end
+
   -- ── Traversal (rule 101) — AFTER every armed block-tier family on purpose ──
   -- rule_traversal is block-tier since 2026-09-05, but its autoblock family
   -- (WAF_TRAVERSAL) is HELD un-armed for burn-in (waf_security_register.go).
@@ -2423,6 +2457,13 @@ function _M.check(ctx)
   end
 
   ::done::
+  -- An earlier block ended evaluation before the deferred rule-201 block was
+  -- recorded: keep the hit (it does not take the headline, an equal-severity
+  -- hit is already there).
+  if bad_ua_block then
+    record(bad_ua_block.reason, bad_ua_block.ttl, "block", RULE_IDS.rule_bad_ua)
+    bad_ua_block = nil
+  end
   if final_sev == 0 then
     return false, nil, nil, nil
   end

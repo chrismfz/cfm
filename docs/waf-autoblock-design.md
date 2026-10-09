@@ -379,6 +379,20 @@ let `record()` keep evaluating only when the block hit belongs to a held
 family (a small Lua-side set mirroring `heldAutoblockFamilies`), so armed
 families still short-circuit as today.
 
+**Rule 201's block joins the late group (2026-10-09).** `WAF_BAD_UA` has no
+block-tier rule (its default is `challenge_v2`), so it is not armed, yet a
+score >= 99 scanner identity (sqlmap, nikto, nuclei, zgrab, the fake legacy
+MSIE / Windows UAs) or an operator `block` mode blocks. Recorded at step 1 it
+was the first block hit on every such request: sqlmap's own SQLi payload, a
+nuclei CVE probe, never reached autoblock or the CVE alert. The block is now
+recorded after every armed block family and before traversal (step 1 keeps
+the challenge/logonly tiers; `cfm_waf_bad_ua_shadow_test.lua`), and at
+`::done::` when an earlier block ended evaluation, so the 201 hit stays in
+`hits`. Same order fix, same cost shape as traversal: a fleet read of
+2026-10-02..09 showed ~14.5k score-99 events a week (sampled, one per IP /
+family / tier a minute; mostly `UA_FAKE_LEGACY_MSIE`, 76 `UA_SQLMAP`), which
+now run the remaining budget-capped detectors before blocking.
+
 ## Open questions (decide before Phase 1)
 
 - **Detector name:** `waf_security` (sibling of `exim_security`,
