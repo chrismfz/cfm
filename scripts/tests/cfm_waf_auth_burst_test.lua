@@ -113,6 +113,11 @@ do
   check(burst(9, { uri = "/user/login", args = "%5Fformat=xml", ct = "text/plain",
                    body = "<r><name>a</name><pass>x</pass></r>", peer = "172.70.1.1" }) == "challenge_v2",
         "Drupal _format=xml login counts")
+  check(burst(9, { uri = "/user/login", args = ".format=xml", ct = "text/plain",
+                   body = "<r><name>a</name><pass>x</pass></r>", peer = "172.70.1.1" }) == "challenge_v2",
+        "Drupal .format (PHP's _format) login counts")
+  check(burst(9, { uri = "/admin/index.php", args = "route=common/login.login", body = pad:sub(1, 32768), clen = tostring(#pad),
+                   peer = "172.70.1.1" }) == "challenge_v2", "OpenCart 4 login route padded counts")
   -- Magento's storefront login (a /login path: login[username] + login[password]).
   check(burst(9, { uri = "/customer/account/loginPost/", body = "form_key=x&login%5Busername%5D=a%40b.c&login%5Bpassword%5D=g",
                    peer = "172.70.1.1" }) == "challenge_v2", "Magento storefront loginPost counts")

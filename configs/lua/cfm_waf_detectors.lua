@@ -1477,6 +1477,7 @@ end
 -- login[password] array, read only on its admin route.
 -- waf_body_max_len as cfm.lua reads it (cfm_cfg.lua), like XMLRPC_HIDDEN_LEN.
 local AUTH_BODY_CUT = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "") or 32768
+local AUTH_QUERY_FIELDS = { route = true, _format = true }
 local AUTH_PASSWORD_FIELDS = { pwd = true, pass = true, passwd = true, password = true, login = true }
 
 -- Rule 501 counts credential SUBMISSIONS: a POST to a login endpoint that
@@ -1508,11 +1509,18 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers
   -- An endpoint that only logs in. The Joomla / OpenCart admin index serves
   -- every admin action, so only its login route qualifies (OpenCart's sits in
   -- the query; Joomla's option=com_login is posted in the body).
-  -- Decoded once, as PHP reads $_GET: `route=common%2Flogin`, `%5Fformat=`.
-  local largs = lower(url_decode_once(args or ""))
+  -- The query keys as PHP registers them in $_GET (php_request_fields):
+  -- `route=common%2Flogin`, `%5Fformat=`, `.format=` (PHP's `_format`).
+  local q = (args and args ~= "") and _M.php_request_fields("get", args, "", headers, AUTH_QUERY_FIELDS) or {}
+  local function q_has(name, prefix)
+    for _, v in ipairs(q[name] or {}) do
+      if not prefix or lower(v):sub(1, #prefix) == prefix then return true end
+    end
+    return false
+  end
   local login_only = tag == "AUTH_WP_LOGIN" or tag == "AUTH_DRUPAL_LOGIN" or tag == "AUTH_LOGIN_POST"
     or tag == "AUTH_ADMIN_LOGIN" or tag == "AUTH_MAGENTO_ADMIN"
-    or (tag == "AUTH_OPENCART_ADMIN" and largs:find("route=common/login", 1, true) ~= nil)
+    or (tag == "AUTH_OPENCART_ADMIN" and q_has("route", "common/login"))
 
   -- The edge reads the first waf_body_max_len bytes of a body, or none of it
   -- (no Content-Length on HTTP/3, a read that failed). A login form is never
@@ -1530,7 +1538,7 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers
   local cred = false
   if cut then
     cred = login_only
-  elseif tag == "AUTH_DRUPAL_LOGIN" and largs:find("_format=", 1, true) then
+  elseif tag == "AUTH_DRUPAL_LOGIN" and q_has("_format") then
     -- Drupal's REST login decodes the body by `_format` (json, xml …),
     -- whatever the Content-Type says: any body is a login attempt.
     cred = true

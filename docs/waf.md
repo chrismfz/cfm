@@ -1321,7 +1321,9 @@ only when it is a POST to a login endpoint whose body carries a password field, 
 the way PHP reads it (`php_request_fields`): WordPress `wp-login.php` `pwd`, Drupal
 `/user/login` `pass`, Joomla `/administrator/index.php` `passwd`, OpenCart
 `/admin/index.php` and custom `…/login` forms `password` / `pass` / `pwd` / `passwd`,
-Magento's admin route (an `admin` path segment) `login[username]` + `login[password]`.
+Magento's `login[username]` + `login[password]` (two `login` values) on any of those
+endpoints, or on its admin route (an `admin` path segment) alone. The query's `route` /
+`_format` are read as PHP registers them in `$_GET` (`%5Fformat`, `.format`).
 A JSON body (by media type or a leading `{`) counts by one of those keys, its `\u00XX`
 escapes decoded; Drupal's REST login (`/user/login?_format=…`) counts whatever the body,
 since Drupal decodes it by `_format`. A GET of the login page and admin navigation never
