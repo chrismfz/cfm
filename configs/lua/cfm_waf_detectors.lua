@@ -530,6 +530,10 @@ end
 -- whole query string (nginx caps the request line at 64 KB) and the whole body
 -- cfm.lua handed over (waf_body_max_len); the legacy multipart scan below it
 -- keeps its body_budget(headers) cap (audits F09/F30).
+-- Rule 10017's legacy scan reads a name's head only: "pagename" and the byte
+-- after it (a NUL or `[`), each at most double %-encoded (`%25%37%30` for
+-- `p`, 9 bytes), fit in 81.
+local NAME_HEAD = 96
 function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _nab, get_fields)
   if not field_gate_open(method, args, body, headers, _nab, "pagename") then return nil end
 
@@ -560,17 +564,46 @@ function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _
   local b  = cap(body, bn)
   local lb = lower(b)
   local pos = 1
+  -- Linear. A run with no `;` or space (`-name=-name=…`) holds a `name=`
+  -- every few bytes, and each name used to be read, and normalized, to the
+  -- end of the run: quadratic, 0.5-1.3 s on a 32 KB body. Whether
+  -- php_var_name(normalize(name)) is "pagename" depends only on the name's
+  -- head (leading spaces, the word in at most double %-encoding, then the
+  -- end, a NUL or `[...]`), so a name is read from its first non-space byte
+  -- for at most NAME_HEAD bytes, and the scan resumes after the bytes read,
+  -- so every byte is read once. What that changes: a `name=` inside another
+  -- name's head, which PHP reads as part of that name; a `pagename[...]` array
+  -- whose `]` lies past the head, which WordPress never reads as a page
+  -- path, and a name padded to the head with %-encoded spaces, which PHP
+  -- (it does not decode a multipart name) never reads as `pagename`. The value after the next blank line is found and
+  -- checked once per blank line, not once per name.
+  local hs, he, checked_he
   while true do
     local _, e = lb:find("[^%w_]name%s*=%s*", pos)
     if not e then break end
     pos = e + 1
-    local name = lb:match('^"([^"\r\n]*)', pos) or lb:match("^'([^'\r\n]*)", pos)
-                 or lb:match("^([^;%s]*)", pos)
-    if name and php_var_name(normalize(name)) == "pagename" then
-      local _, he = b:find("\r?\n\r?\n", pos)
-      if not he then break end
-      local v = b:match("^[^\r\n]*", he + 1)
-      if v and has_dotdot_segment(normalize(v)) then return "BODY" end
+    local q = lb:sub(pos, pos)
+    local name
+    local ns = pos
+    if q == '"' or q == "'" then
+      ns = lb:find("[^ ]", pos + 1) or (#lb + 1)
+      name = lb:sub(ns, ns + NAME_HEAD - 1):match(q == '"' and '^[^"\r\n]*' or "^[^'\r\n]*")
+    else
+      name = lb:sub(pos, pos + NAME_HEAD - 1):match("^[^;%s]*")
+    end
+    -- Resume after the bytes just read: a `name=` inside them is part of
+    -- this name to PHP (a parameter ends only at `;`, a space or a line).
+    pos = math.max(pos, ns + #name)
+    -- Without a `%` the name is its own normalize(): it must start with the word.
+    if (name:sub(1, 8) == "pagename" or name:find("%", 1, true))
+       and php_var_name(normalize(name)) == "pagename" then
+      if not hs or hs < pos then hs, he = b:find("\r?\n\r?\n", pos) end
+      if not hs then break end
+      if he ~= checked_he then
+        checked_he = he
+        local v = b:match("^[^\r\n]*", he + 1)
+        if v and has_dotdot_segment(normalize(v)) then return "BODY" end
+      end
     end
   end
   return nil
@@ -1848,6 +1881,67 @@ local BACKTICK_CMDS = {
   uname = true, whoami = true, cat = true, ls = true, ping = true,
 }
 
+-- Linear forms of two gmatch loops over the 2 KB normalized query string.
+-- `for k, v in s:gmatch("(K+)=(V)")`, with K a byte class and V `[^&]*`
+-- (or `[^&]+` when nonempty), restarts at every byte of a long run of key
+-- bytes with no `=` and runs to its end: quadratic (~30 ms on a 2 KB `aaa…`).
+-- The key gmatch finds ending at an `=` is the run of key bytes right before
+-- it, cut where the previous match (or the string) began, so each_kv walks
+-- back from each `=` over that run, and resumes at the value's end as
+-- gmatch does. fn returning true stops the walk (and each_kv returns true).
+local KV_DBG_KEY = {}     -- [^&=?]
+for c = 0, 255 do KV_DBG_KEY[c] = true end
+KV_DBG_KEY[38], KV_DBG_KEY[61], KV_DBG_KEY[63] = nil, nil, nil
+local KV_CMD_KEY = { [95] = true, [45] = true }   -- [a-z0-9_%-]
+for c = 48, 57 do KV_CMD_KEY[c] = true end
+for c = 97, 122 do KV_CMD_KEY[c] = true end
+local function each_kv(s, keyb, nonempty, fn)
+  local pos, n = 1, #s
+  while pos <= n do
+    local eq = s:find("=", pos, true)
+    if not eq then return false end
+    local ks = eq
+    while ks > pos and keyb[s:byte(ks - 1)] do ks = ks - 1 end
+    local ve = s:find("&", eq + 1, true) or (n + 1)
+    if ks == eq or (nonempty and ve == eq + 1) then
+      pos = eq + 1
+    else
+      if fn(s:sub(ks, eq - 1), s:sub(eq + 1, ve - 1)) then return true end
+      pos = ve
+    end
+  end
+  return false
+end
+_M.each_kv, _M.KV_DBG_KEY, _M.KV_CMD_KEY = each_kv, KV_DBG_KEY, KV_CMD_KEY
+
+-- The linear form of s:match("[%?&][^=]+=[^&]*&&[a-z0-9_%-]+="): some `?`/`&`
+-- with at least one byte before the next `=`, then that `=`, its value up to
+-- the first `&`, which must be `&&` followed by `key=`. Whether a given `=`
+-- completes it depends only on the `=` (the first `&` after it), so test
+-- each `=` once, when a `?`/`&` stood at least two bytes before it since the
+-- previous `=`. The `&` lookup and its test are shared by every `=` before
+-- the same `&`.
+local function has_amp_amp_value(s)
+  local sep, amp, amp_ok
+  for p = 1, #s do
+    local c = s:byte(p)
+    if c == 61 then
+      if sep and sep <= p - 2 then
+        if amp == nil or (amp and amp <= p) then
+          amp = s:find("&", p + 1, true) or false
+          amp_ok = amp and s:byte(amp + 1) == 38 and s:find("^[a-z0-9_%-]+=", amp + 2) ~= nil
+        end
+        if amp_ok then return true end
+      end
+      sep = nil
+    elseif (c == 63 or c == 38) and not sep then
+      sep = p
+    end
+  end
+  return false
+end
+_M.has_amp_amp_value = has_amp_amp_value
+
 function _M.detect_cmd_payload(args, _na)
   local a = _na or normalize(cap(args or "", CFG.max_scan_len))
   if a == "" then return nil end
@@ -1885,7 +1979,7 @@ function _M.detect_cmd_payload(args, _na)
     end
   end
 
-  if string.match(a, "[%?&][^=]+=[^&]*&&[a-z0-9_%-]+=") then
+  if has_amp_amp_value(a) then
     return nil
   end
 
@@ -1908,7 +2002,7 @@ function _M.detect_cmd_payload(args, _na)
   -- Only enter this path when backtick characters are actually present —
   -- the gmatch loop is otherwise dead work on every non-backtick request.
   if a:find("`", 1, true) or a:find("%%60", 1, true) then
-    for key, val in a:gmatch("([a-z0-9_%-]+)=([^&]+)") do
+    each_kv(a, KV_CMD_KEY, true, function(key, val)
       if key == "q" or key == "s" or key == "term" or key == "search" or key == "query" then
         local cleaned = val:gsub("%%60", ""):gsub("`", "")
         if cleaned ~= val then
@@ -1933,7 +2027,7 @@ function _M.detect_cmd_payload(args, _na)
           end
         end
       end
-    end
+    end)
   end
 
   local function has_semi_cmd(s)
@@ -2001,7 +2095,7 @@ function _M.detect_debug_toggles(args, _na)
   if a == "" then return nil end
 
   local function arg_has_key(keys, values)
-    for key, val in a:gmatch("([^&=?]+)=([^&]*)") do
+    return each_kv(a, KV_DBG_KEY, false, function(key, val)
       for _, wantk in ipairs(keys) do
         if key == wantk then
           if not values then
@@ -2014,8 +2108,7 @@ function _M.detect_debug_toggles(args, _na)
           end
         end
       end
-    end
-    return false
+    end)
   end
 
   if arg_has_key({"xdebug_session_start"}) then
@@ -3057,6 +3150,29 @@ function _M.detect_xxe(body, headers)
   return nil
 end
 
+-- s holds a CR or LF, then only non-word bytes, then `kw` (a pattern):
+-- the linear form of s:find("[\r\n]%W*" .. kw). That pattern restarted from
+-- every CR/LF and ran its `%W*` over the whole non-word run after it, so a
+-- body of newlines was quadratic. A CR/LF and the keyword are joined by
+-- non-word bytes only when the CR/LF lies in the non-word run that ends
+-- right before the keyword, so walk back from each keyword over that run.
+local function crlf_then(s, kw)
+  local init = 1
+  while true do
+    local ks = s:find(kw, init)
+    if not ks then return false end
+    local j = ks - 1
+    while j >= 1 do
+      local c = s:byte(j)
+      if c == 13 or c == 10 then return true end
+      if (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) then break end
+      j = j - 1
+    end
+    init = ks + 1
+  end
+end
+_M.crlf_then = crlf_then
+
 -- [top-10b] CRLF / HTTP response-splitting injection.
 -- Source: uusec http-response-splitting.lua.
 -- Checks for CR or LF followed by a header name in args and body.
@@ -3095,10 +3211,10 @@ function _M.detect_crlf_injection(args, body)
   -- request is multipart, so no request Content-Type header inspection is needed.
 
   -- Raw CR/LF followed by a header keyword
-  if al:find("[\r\n]%W*content%-type%s*:",   1) then return "CRLF_CONTENT_TYPE" end
-  if al:find("[\r\n]%W*content%-length%s*:", 1) then return "CRLF_CONTENT_LENGTH" end
-  if sl:find("[\r\n]%W*set%-cookie%s*:",     1) then return "CRLF_SET_COOKIE" end
-  if sl:find("[\r\n]%W*location%s*:",        1) then return "CRLF_LOCATION" end
+  if crlf_then(al, "content%-type%s*:")   then return "CRLF_CONTENT_TYPE" end
+  if crlf_then(al, "content%-length%s*:") then return "CRLF_CONTENT_LENGTH" end
+  if crlf_then(sl, "set%-cookie%s*:")     then return "CRLF_SET_COOKIE" end
+  if crlf_then(sl, "location%s*:")        then return "CRLF_LOCATION" end
 
   -- URL-encoded CRLF sequences. Content-Type stays args-scoped here too (else a
   -- body carrying a literal `%0a` before `Content-Type:` re-trips the same FP as
@@ -3108,9 +3224,9 @@ function _M.detect_crlf_injection(args, body)
       return (x:gsub("%%0d%%0a", "\r\n"):gsub("%%0d", "\r"):gsub("%%0a", "\n"))
     end
     local decoded = decode(sl)
-    if decode(al):find("[\r\n]%W*content%-type%s*:") or
-       decoded:find("[\r\n]%W*set%-cookie%s*:")      or
-       decoded:find("[\r\n]%W*location%s*:")         then
+    if crlf_then(decode(al), "content%-type%s*:") or
+       crlf_then(decoded, "set%-cookie%s*:")      or
+       crlf_then(decoded, "location%s*:")         then
       return "CRLF_URL_ENCODED"
     end
   end
@@ -3620,14 +3736,29 @@ end
 -- require both traversal AND a php-exec extension in it — so a legit upload
 -- whose file CONTENT happens to contain `../`/`.phtml` can't false-positive it
 -- (a legit gform_unique_id is a bare UUID). `method` is m_lower from the caller.
+-- The gform_unique_id value: a multipart part's, else a urlencoded one's.
+-- The multipart leg is the linear form of
+-- b:match('[Nn]ame="gform_unique_id".-\r?\n\r?\n([^\r\n]*)'), whose `.-`
+-- ran to the end of the body from every name="gform_unique_id" when no blank
+-- line followed (quadratic, ~0.3 s on a 32 KB body). The first blank line
+-- after the FIRST occurrence is the one that pattern returns; with none after
+-- it there is none after a later one either.
+local function gform_unique_id_value(b)
+  local _, ne = b:find('[Nn]ame="gform_unique_id"')
+  if ne then
+    local _, be = b:find("\r?\n\r?\n", ne + 1)
+    if be then return b:match("^[^\r\n]*", be + 1) end
+  end
+  return b:match("gform_unique_id=([^&\r\n]*)")
+end
+_M.gform_unique_id_value = gform_unique_id_value
+
 function _M.detect_cve_gf_multi_uploader(uri, method, args, body)
   if method ~= "post" then return nil end
   -- Cheap endpoint gate: gf_page=upload rides in the query string.
   if not has(lower((uri or "") .. "&" .. (args or "")), "gf_page=upload") then return nil end
   -- Extract the gform_unique_id value (multipart field part or urlencoded).
-  local b = body or ""
-  local val = b:match('[Nn]ame="gform_unique_id".-\r?\n\r?\n([^\r\n]*)')
-           or b:match("gform_unique_id=([^&\r\n]*)")
+  local val = gform_unique_id_value(body or "")
   if not val then return nil end
   local v = lower(val)
   if (has(v, "../") or has(v, "..%2f") or has(v, "..%5c") or has(v, "%2e%2e"))
