@@ -37,6 +37,12 @@ type WAFRule struct {
 	GroupName     string `json:"group_name"`     // "injection", "upload", …
 	ReasonFamily  string `json:"reason_family"`  // canonical WAF_* prefix the rule emits
 	DefaultMode   string `json:"default_mode"`   // built-in default mode in Lua CFG (informational)
+	// HoldAutoblock: a block rule whose waf_security ban is held in code (the
+	// default for its RULE_<id> key is 0) while its family stays armed. For a
+	// rule whose edge 403 is right but whose ban can land on a legitimate
+	// user; an operator's RULE_<id> in detectors.conf still wins. A held block
+	// rule shadows armed ones, so cfm_waf.lua evaluates it late (CLAUDE.md §6).
+	HoldAutoblock bool `json:"hold_autoblock,omitempty"`
 }
 
 // wafRuleIDs is the in-process registry. Keep entries sorted by ID — the
@@ -184,11 +190,13 @@ var wafRuleIDs = []WAFRule{
 	// request without a WordPress login (armed); 10020 = the same request WITH
 	// one (a translator in the editor preview, which adds the parameter to
 	// every form); 10019 = unauthenticated trp_get_translations_regular with
-	// string_ids. 10019 and 10020 block at the edge with their autoblock held
-	// in code (heldAutoblockRules).
+	// string_ids. 10019 and 10020 block at the edge with their autoblock held:
+	// a translator whose login expired with the editor open sends 10019's
+	// request, and one submitting a lost-password form in the preview sends
+	// 10020's; a 6 h ban of the office IP is the wrong answer to either.
 	{ID: 10018, Name: "rule_cve_translatepress_reset_preview", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
-	{ID: 10019, Name: "rule_cve_translatepress_id_lookup", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
-	{ID: 10020, Name: "rule_cve_translatepress_reset_preview_authed", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	{ID: 10019, Name: "rule_cve_translatepress_id_lookup", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
+	{ID: 10020, Name: "rule_cve_translatepress_reset_preview_authed", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

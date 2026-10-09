@@ -1,7 +1,6 @@
 package detectors
 
 import (
-	"strconv"
 	"strings"
 	"testing"
 
@@ -128,19 +127,18 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 // edge-block rule (a hold on anything else is meaningless), the hold is the
 // default with no RULE_<id> key, and an operator's RULE_<id> still wins.
 func TestWAFSecurityRuleHolds(t *testing.T) {
-	for id := range heldAutoblockRules {
-		n, err := strconv.Atoi(id)
-		if err != nil {
-			t.Fatalf("held rule id %q is not numeric", id)
-		}
-		r, ok := webdetector.WAFRuleByID(n)
-		if !ok {
-			t.Errorf("held rule %s is not in the WAF registry", id)
+	held := 0
+	for _, r := range webdetector.WAFRules() {
+		if !r.HoldAutoblock {
 			continue
 		}
+		held++
 		if r.DefaultMode != "block" {
-			t.Errorf("held rule %s defaults to %q at the edge, not block — drop the hold", id, r.DefaultMode)
+			t.Errorf("held rule %d defaults to %q at the edge, not block — drop the hold", r.ID, r.DefaultMode)
 		}
+	}
+	if held != 2 {
+		t.Errorf("%d rules hold their autoblock in code, want 2 (10019, 10020) — update this test with the change", held)
 	}
 	if got, ok := wafSecurityRuleOverrides(KV{})["10019"]; !ok || got != 0 {
 		t.Errorf("RULE_10019 should default to the code hold 0, got %d (present=%v)", got, ok)

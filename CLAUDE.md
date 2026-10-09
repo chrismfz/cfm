@@ -459,7 +459,7 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   raw-path rule 103 since 2026-09-22; **held at 0** through its burn-in, see
   below) — those are the only ones that
   can fire in Phase 1. A held RULE can also
-  ship in code: `heldAutoblockRules` in `waf_security_register.go` is the
+  ship in code: `HoldAutoblock` on its `WAFRule` (`waf_rule_ids.go`) is the
   default for a `RULE_<id>` key, so the hold reaches configs that predate the
   rule (10019 and 10020, the TranslatePress id-lookup leg and the
   logged-in reset-preview request). The rendered `[waf_security]` template is derived from
@@ -484,7 +484,7 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   hit is what counts), but an accumulate threshold (e.g. 40) counts distinct
   cooldown windows, not raw hits, and two block rules of one family in the same
   window push twice — retune when Phase 2 turns on challenge-tier families.
-  A held block RULE (`heldAutoblockRules`, e.g. 10019/10020) shadows armed ones
+  A held block RULE (`WAFRule.HoldAutoblock`, e.g. 10019/10020) shadows armed ones
   exactly like a held family does, so it runs late in `cfm_waf.lua`, next to
   traversal.
 - **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),

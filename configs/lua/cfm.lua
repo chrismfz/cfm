@@ -1409,7 +1409,7 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       table.sort(ids)
       ngx.header["X-CFM-WAF-Skip-Rules"] = table.concat(ids, ",")
     end
-    local req_headers = ngx.req.get_headers()
+    local req_headers = wutil_ok and wutil.waf_request_headers() or ngx.req.get_headers()
     local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
     local self_origin = is_self_origin(ip)
     local hit, reason, ttl, waf_action, waf_hits, waf_rule_id = waf.check({

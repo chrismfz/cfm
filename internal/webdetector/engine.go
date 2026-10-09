@@ -75,13 +75,23 @@ func isUpstreamName(s string) bool {
 	return true
 }
 
-func parseTSV(line string) (LogRec, bool) {
-	// 12 columns, or 13 with the upstream name (log-cfm.lua). The file-based
-	// TSV formats (log_format ... escape=none) can carry a raw TAB inside the
-	// Referer or UA, so a 13th field counts as the upstream name only when it
-	// looks like one; otherwise it is folded back into the UA, as the 12-way
-	// split always did.
-	f := strings.SplitN(line, "\t", 13)
+// parseTSV reads the 12-column TSV of the file tailers (log_format cfm_tsv,
+// httpd-cfm.conf). Those formats log raw TABs from the Referer and UA
+// (escape=none), so anything past column 11 is the UA, as it always was:
+// no 13th column is ever read from a file.
+func parseTSV(line string) (LogRec, bool) { return parseTSVCols(line, false) }
+
+// parseSocketTSV reads a line of the edge's ingest socket (log-cfm.lua), which
+// strips TABs from every field and may add a 13th column, the upstream name;
+// an edge still on the older module sends 12.
+func parseSocketTSV(line string) (LogRec, bool) { return parseTSVCols(line, true) }
+
+func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
+	n := 12
+	if upstreamCol {
+		n = 13
+	}
+	f := strings.SplitN(line, "\t", n)
 	if len(f) < 12 {
 		return LogRec{}, false
 	}

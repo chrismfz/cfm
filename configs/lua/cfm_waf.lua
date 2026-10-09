@@ -2222,7 +2222,7 @@ function _M.check(ctx)
   -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018-10020) ──
   -- Placed after every armed block-tier family, next to traversal, for the
   -- same reason: 10019 and 10020 block at the edge but their autoblock is
-  -- held in code (heldAutoblockRules), so evaluated earlier a held hit would
+  -- held in code (WAFRule.HoldAutoblock), so evaluated earlier a held hit would
   -- own the headline and take the ban and alert away from an armed rule on
   -- the same request (`string_ids=1` added to a SQLi POST). 10018 is armed
   -- and runs first of the three.

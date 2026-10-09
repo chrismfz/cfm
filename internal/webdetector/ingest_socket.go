@@ -322,7 +322,15 @@ func (s *IngestSocket) handleLine(e *Engine, line string) {
 	if line == "" {
 		return
 	}
-	rec, ok := e.adapter.Parse(line)
+	// The edge's TSV first (it may carry the upstream column the file formats
+	// never do), then the adapter for anything else.
+	rec, ok := LogRec{}, false
+	if strings.Count(line, "\t") >= 11 {
+		rec, ok = parseSocketTSV(line)
+	}
+	if !ok {
+		rec, ok = e.adapter.Parse(line)
+	}
 	if !ok {
 		telemetry.RecordWebdetParseFailure()
 		return

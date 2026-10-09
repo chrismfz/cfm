@@ -74,6 +74,15 @@ back-filled here — see the git/PR history for that period.
   merely mentioned `multipart/form-data`, or a multipart field name split over
   two header lines, hid a `pagename` traversal from it. The reader is checked
   against a real PHP (`scripts/tests/php_request_fields_oracle.py`).
+- **A request with more than 100 header lines no longer hides its body from
+  the WAF.** The edge's header table stops at 100 lines, but nginx forwards
+  them all and PHP parses the body by its Content-Type. Padded past line 100,
+  the Content-Type and Content-Length were missing, so the body-reading rules
+  (10017-10020, and every rule that sizes its body scan from them) read no
+  body. They are now taken from nginx's own parse when the table is cut short.
+- **A file-tailed TSV log with a TAB inside the User-Agent no longer loses part
+  of the UA.** Only the edge's socket feed carries the new upstream column;
+  the file formats are read as 12 columns again, as before this release.
 
 ### Changed
 - **A `RULE_<id>` line in `[waf_security]` now honours an inline comment.**
@@ -85,6 +94,12 @@ back-filled here — see the git/PR history for that period.
   family can mix armed and held block rules (the TranslatePress rules 10018
   vs 10019/10020), and a held rule's hit used to suppress the armed rule's
   ban and alert for the same IP for a minute.
+- **The per-rule autoblock hold lives in the WAF rule registry.** `GET
+  /api/v1/waf/rules` now shows `hold_autoblock: true` for 10019 and 10020;
+  `RULE_<id>` in `detectors.conf` still overrides it.
+- **The PHP field reader skips a long query string or form body that cannot
+  hold a field the rules read.** A 64 KB query of unrelated parameters cost
+  the reader up to 11 ms; it now costs 1-2 ms.
 
 ### Removed
 - **WAF rule 520 (`rule_form_relay_sppb_contact`, family `WAF_FORM_RELAY`).**

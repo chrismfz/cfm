@@ -548,4 +548,31 @@ _M.strip_host_port                    = strip_host_port
 _M.is_ipv4_literal                    = is_ipv4_literal
 _M.is_ipv6_literal                    = is_ipv6_literal
 
+-- ngx.req.get_headers() returns the first 100 header lines only (err
+-- "truncated"), but nginx forwards every line and PHP parses the body by the
+-- Content-Type it receives. A request padded past line 100 would hide the body
+-- headers from the WAF: the PHP field reader, body_budget and the
+-- Content-Length checks would then read no body. So they are backfilled from
+-- nginx's own parse. Other headers past line 100 stay unseen: reading them all
+-- (get_headers(0)) would let one request build a table of thousands.
+local BODY_HEADERS = {
+  { "content-type", "http_content_type" },
+  { "content-length", "http_content_length" },
+  { "transfer-encoding", "http_transfer_encoding" },
+}
+function _M.waf_request_headers(req, var)
+  req = req or ngx.req
+  var = var or ngx.var
+  local h, err = req.get_headers()
+  if err == "truncated" and type(h) == "table" then
+    for _, p in ipairs(BODY_HEADERS) do
+      if h[p[1]] == nil then
+        local v = var[p[2]]
+        if v ~= nil and v ~= "" then h[p[1]] = v end
+      end
+    end
+  end
+  return h
+end
+
 return _M
