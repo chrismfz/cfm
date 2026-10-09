@@ -111,6 +111,24 @@ do
   local _, err = pcall(waf.check, nil)
   check(tostring(err):find("boom", 1, true),
         "nil ctx: the handler does not mask the error (" .. tostring(err) .. ")")
+  -- The ERR line is throttled through ctx.shdict: once a minute, not per request.
+  local store, logged = {}, 0
+  local dict = { add = function(self, k, v)
+    if store[k] then return false, "exists" end
+    store[k] = v; return true
+  end }
+  local olog = ngx.log
+  ngx.log = function(_, ...)
+    if table.concat({ ... }):find("deferred rule-201", 1, true) then logged = logged + 1 end
+  end
+  for _ = 1, 3 do
+    local ok3, _, _, _, a3 = pcall(waf.check, {
+      uri = "/index.php", args = "id=1", raw_uri = "/index.php?id=1", method = "GET", ip = "203.0.113.5", body = "",
+      shdict = dict, headers = { ["user-agent"] = SQLMAP, accept = "*/*" } })
+    check(ok3 and a3 == "block", "throttled raise: still blocked")
+  end
+  ngx.log = olog
+  check(logged == 1, "three raises behind 201 with a dict: one ERR line (" .. logged .. ")")
   restore()
 end
 

@@ -2489,8 +2489,8 @@ function _M.check(ctx)
   local sh = c.shdict
   local first = true
   if sh and sh.add then
-    local okadd, added = pcall(sh.add, sh, "waf_201_raise", 1, 60)
-    first = (not okadd) or added
+    local okadd, added, aerr = pcall(sh.add, sh, "waf_201_raise", 1, 60)
+    first = (not okadd) or added or aerr ~= "exists"
   end
   if first and ngx and ngx.log then
     ngx.log(ngx.ERR, "[cfm_waf] rule raised behind a deferred rule-201 block; blocked as 201 ip=",
