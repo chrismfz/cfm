@@ -1499,7 +1499,7 @@ Measured on bench host with the three body-aware rules enabled, running through 
 | 30 KB plain JSON | text/plain | 2 KB (truncated by `other` budget) | ~11 µs |
 | 30 KB plain JSON | application/json | 30 KB (`json` budget=32K) | ~71 µs |
 | 500 KB plain JSON | application/json | 32 KB (capped by `json` budget) | ~87 µs |
-| 30 KB %-encoded | application/json | 30 KB | ~2 ms (slow path: two gsub passes) |
+| 30 KB %-encoded | application/json | 30 KB | ~0.6 ms (slow path: two table-driven gsub passes; ~1.5 ms with the per-escape decoder before 2026-10-09) |
 
 End-to-end ceiling in production is bounded by `CFM_WAF_BODY_MAX_LEN` (default 8192); `body_scan_budget.json = 32768` only takes effect once the env var is also raised. Until then, JSON traffic is effectively capped at 8 KB regardless of the table value — still a 4× improvement over the previous 2 KB `max_scan_len`.
 

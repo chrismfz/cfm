@@ -17,9 +17,13 @@ local _M = {}
 
 -- Late-bound upvalues populated by _M.init().
 local CFG, util
+-- The %XX decoder is pure (no CFG), so it is bound at load: the paths that
+-- use it (the PHP form reader, the filename*= check) work before _M.init and
+-- with a partial util alike.
+local url_decode_once = require("cfm_waf_util").url_decode_once
 local has, header_string, lower, cap, count_occurs, has_long_b64_blob,
       is_known_legit_php_upload_endpoint, score_obfuscation_blob, begins,
-      url_decode_once, normalize, strip_sql_comments, scan_str,
+      normalize, strip_sql_comments, scan_str,
       strip_host_port, is_ipv4_literal, is_ipv6_literal, body_budget
 
 function _M.init(cfg, u)
@@ -34,7 +38,6 @@ function _M.init(cfg, u)
   is_known_legit_php_upload_endpoint = u.is_known_legit_php_upload_endpoint
   score_obfuscation_blob             = u.score_obfuscation_blob
   begins                             = u.begins
-  url_decode_once                    = u.url_decode_once
   normalize                          = u.normalize
   strip_sql_comments                 = u.strip_sql_comments
   scan_str                           = u.scan_str
@@ -170,22 +173,9 @@ end
 -- direction; under-reading is a bypass. Every scan is linear in the input.
 
 -- application/x-www-form-urlencoded decode (php_url_decode): `+` is a space,
--- %XX a byte, a malformed % stays literal.
-local HEX_BYTE = {}
-do
-  local hx = "0123456789abcdef"
-  for i = 0, 255 do
-    local a, b = math.floor(i / 16) + 1, i % 16 + 1
-    for _, x in ipairs({ hx:sub(a, a), hx:sub(a, a):upper() }) do
-      for _, y in ipairs({ hx:sub(b, b), hx:sub(b, b):upper() }) do
-        HEX_BYTE[x .. y] = string.char(i)
-      end
-    end
-  end
-end
+-- %XX a byte (cfm_waf_util's url_decode_once), a malformed % stays literal.
 local function _form_unescape(s)
-  s = s:gsub("%+", " ")
-  return (s:gsub("%%(%x%x)", HEX_BYTE))
+  return url_decode_once((s:gsub("%+", " ")))
 end
 
 -- Each `k=v` pair of a form-encoded string, split on `&` (empty pairs
@@ -3972,7 +3962,7 @@ function _M.detect_upload_filename(body, headers)
   -- on the backend either.
   for raw in body:gmatch(FN .. "%s*%*%s*=%s*([^%s;\r\n\"]+)") do
     local v = raw:match("^[^']*'[^']*'(.*)$") or raw
-    v = v:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+    v = url_decode_once(v)
     local hit = bad_fname(v)
     if hit then return "UPLOAD_FNAME:" .. hit .. ":" .. v:sub(1, 64) end
   end
