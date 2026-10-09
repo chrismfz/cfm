@@ -381,15 +381,28 @@ built — Tier A has one zone and follows the origin's headers, §5.4):
 
 ```nginx
 # Static (disk): one zone
-proxy_cache_path /var/cache/nginx/cfm_static      levels=1:2 keys_zone=cfm_static:20m    max_size=10g  inactive=7d   use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_static      levels=1:2 keys_zone=cfm_static:20m    max_size=10g  min_free=2g inactive=7d   use_temp_path=off;
 # Micro (tiny, short-lived; on disk): 1/2/5/10/30/60s — cfm_cache.lua MICRO_BUCKETS
-proxy_cache_path /var/cache/nginx/cfm_micro_1s   levels=1:2 keys_zone=cfm_micro_1s:10m  max_size=512m inactive=30s  use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_micro_2s   levels=1:2 keys_zone=cfm_micro_2s:10m  max_size=512m inactive=30s  use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_micro_5s   levels=1:2 keys_zone=cfm_micro_5s:10m  max_size=512m inactive=60s  use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_micro_10s  levels=1:2 keys_zone=cfm_micro_10s:10m max_size=512m inactive=60s  use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_micro_30s  levels=1:2 keys_zone=cfm_micro_30s:10m max_size=1g   inactive=120s use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_micro_60s  levels=1:2 keys_zone=cfm_micro_60s:10m max_size=1g   inactive=180s use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_1s   levels=1:2 keys_zone=cfm_micro_1s:10m  max_size=512m min_free=2g inactive=30s  use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_2s   levels=1:2 keys_zone=cfm_micro_2s:10m  max_size=512m min_free=2g inactive=30s  use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_5s   levels=1:2 keys_zone=cfm_micro_5s:10m  max_size=512m min_free=2g inactive=60s  use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_10s  levels=1:2 keys_zone=cfm_micro_10s:10m max_size=512m min_free=2g inactive=60s  use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_30s  levels=1:2 keys_zone=cfm_micro_30s:10m max_size=1g min_free=2g   inactive=120s use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_60s  levels=1:2 keys_zone=cfm_micro_60s:10m max_size=1g min_free=2g   inactive=180s use_temp_path=off;
 ```
+
+**Disk rails** (since 2026-10-09). The Tier A key carries the query string
+(asset versions ride on `?ver=`), so every distinct query was a new full object
+on disk, and a HEAD (nginx fetches it as a GET) or an aborted GET still stored
+the whole file: five HEADs with random queries on a 20 MB image wrote ~96 MB.
+So every zone keeps `min_free=2g` (the cache manager evicts while the
+filesystem has less than 2 GB free, so a shared cPanel `/var` never fills from
+the cache, whatever `max_size` says), and the Tier A locations add
+`proxy_cache_min_uses 2` (a key is stored on its second request: a one-off
+random query never reaches the disk) and `$cfm_cache_too_big` on
+`proxy_no_cache` (`map $upstream_http_content_length`: a response of 10 MB or
+more is never stored; big media already streams uncached through the
+passthrough location). `check_site_cache_config.sh` pins all three.
 
 Each cache location also carries the **anti-stampede** trio (§5.6):
 `proxy_cache_lock on;`, `proxy_cache_use_stale updating error timeout;`

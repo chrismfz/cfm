@@ -76,6 +76,12 @@
 #       next probe of a page that stopped being cacheable).
 #     * proxy_cache_convert_head is never turned off, anywhere (the key has no
 #       method: a body-less HEAD entry would be served to GETs).
+#     * disk rails: every proxy_cache_path carries min_free=2g; every Tier A
+#       (cfm_static) location carries `proxy_cache_min_uses 2;` and
+#       $cfm_cache_too_big on proxy_no_cache, whose map
+#       ($upstream_http_content_length, 8+ digits → "1") holds exactly its two
+#       entries (a random query string, a HEAD or an aborted GET stored a full
+#       copy of a big file each time).
 #     * every cache location sends `Host $host` and `X-Forwarded-Proto $cf_xfp`
 #       exactly once each (the vhost and scheme the origin answers for must be
 #       the key's), and a micro location never stores a response that hands
@@ -291,6 +297,12 @@ for f in "$ORT" "$ANG"; do
       if (body !~ (A "proxy_cache_lock[[:space:]]+on[[:space:]]*;")) m = m " proxy_cache_lock-must-be-on"
       if (st && body !~ (A "proxy_cache_lock_timeout[[:space:]]+1s[[:space:]]*;")) m = m " static-proxy_cache_lock_timeout-must-be-1s"
       if (mi && body !~ (A "proxy_cache_lock_timeout[[:space:]]+5s[[:space:]]*;")) m = m " micro-proxy_cache_lock_timeout-must-be-5s(cold-fill-stampede)"
+      # Disk rails (Tier A): the key carries the query, so a one-off random
+      # query must not be stored (min_uses 2), and no 10 MB+ object at all
+      # ($cfm_cache_too_big) — five HEADs with random queries on a 20 MB image
+      # once wrote ~96 MB.
+      if (st && body !~ (A "proxy_no_cache[[:space:]][^;]*[$]cfm_cache_too_big[[:space:];]")) m = m " static-proxy_no_cache-$cfm_cache_too_big(10MB+-objects-could-fill-the-disk)"
+      if (st && body !~ (A "proxy_cache_min_uses[[:space:]]+2[[:space:]]*;")) m = m " static-proxy_cache_min_uses-must-be-2(one-off-random-queries-would-be-stored)"
       # Forwarded headers an app may build URLs or routes from are not in the
       # key: X-Forwarded-Host is pinned to $host and the rest are dropped, each
       # set exactly once (a second proxy_set_header for the same name, in any
@@ -429,6 +441,7 @@ for f in "$ORT" "$ANG"; do
       # Rail maps: exactly their two entries (one extra key re-opens the leak).
       mapcheck("^[[:space:]]*map[[:space:]]+[$]http_authorization[[:space:]]+[$]cfm_req_auth[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"\" \"\";", "$http_authorization → $cfm_req_auth", "")
       mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_status[[:space:]]+[$]cfm_cache_non200[[:space:]]*[{][[:space:]]*$", "default \"1\";", "\"200\" \"\";", "$upstream_status → $cfm_cache_non200 (only-200)", "")
+      mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_content_length[[:space:]]+[$]cfm_cache_too_big[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]+$\" \"1\";", "$upstream_http_content_length → $cfm_cache_too_big (Tier A: 10 MB+ never stored)", "")
       mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_cache_control[[:space:]]+[$]cfm_cc_nostore[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~*(private|no-store|no-cache|s-maxage=0*(?:[^0-9]|$))\" \"1\";", "$upstream_http_cache_control → $cfm_cc_nostore (micro: private/no-store/no-cache/s-maxage=0 never stored)", "volatile;")
       mapcheck("^[[:space:]]*map[[:space:]]+[$]upstream_http_x_accel_expires[[:space:]]+[$]cfm_xae_nocache[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^(?:0+|@.*)$\" \"1\";", "$upstream_http_x_accel_expires → $cfm_xae_nocache (micro: X-Accel-Expires 0 / @… never stored)", "volatile;")
       mapcheck("^[[:space:]]*map[[:space:]]+\"[$]xfp_trusted_peer:[$]http_cf_ipcountry\"[[:space:]]+[$]cfm_cf_ipcountry[[:space:]]*[{][[:space:]]*$", "default \"\";", "\"~^1:(?<cc>.+)$\" $cc;", "trusted-peer CF-IPCountry → $cfm_cf_ipcountry (micro: a client cannot forge the country)", "")
@@ -555,6 +568,10 @@ for f in "$ORT" "$ANG"; do
   if ! grep -Eq '^[[:space:]]*proxy_cache_path[[:space:]]+/var/cache/nginx/cfm_static[[:space:]]' "$f"; then
     err "$f: no 'proxy_cache_path .../cfm_static' zone declared — Tier A config missing?"
   fi
+  # Every cache zone keeps 2 GB of the filesystem free (the cache manager
+  # evicts below it): a shared cPanel /var must never fill from the cache.
+  nofree=$(grep -nE '^[[:space:]]*proxy_cache_path[[:space:]]' "$f" | grep -vE '[[:space:]]min_free=2g([[:space:]]|;)' || true)
+  [ -z "$nofree" ] || err "$f: a proxy_cache_path has no 'min_free=2g' — the cache could fill the disk: $(tr '\n' ' ' <<< "$nofree")"
   # The other anchors (at least one cfm_static cache location, the bypass /
   # no_cache / only-200 predicates, the four rail maps, the per-server
   # $cfm_cache_skip "1") are enforced statement-aware in section (a), counted
