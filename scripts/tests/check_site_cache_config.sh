@@ -80,8 +80,10 @@
 #       (cfm_static) location carries `proxy_cache_min_uses 2;` and
 #       $cfm_cache_too_big on proxy_no_cache, whose map
 #       ($upstream_http_content_length, 8+ digits → "1") holds exactly its two
-#       entries (a random query string, a HEAD or an aborted GET stored a full
-#       copy of a big file each time).
+#       entries and is the only writer of the variable (a random query string,
+#       a HEAD or an aborted GET stored a full copy of a big file each time).
+#       min_free is read per proxy_cache_path STATEMENT: exactly one, and 2g
+#       (nginx takes the last of repeated parameters; a comment is nothing).
 #     * every cache location sends `Host $host` and `X-Forwarded-Proto $cf_xfp`
 #       exactly once each (the vhost and scheme the origin answers for must be
 #       the key's), and a micro location never stores a response that hands
@@ -156,7 +158,8 @@ for f in "$ORT" "$ANG"; do
   #     Lua code, Lua comments and Lua strings can neither satisfy a rail nor
   #     unbalance a location. Inline Lua must not reference the guarded
   #     variables at all ($cfm_cache_skip / $cfm_req_auth / $cfm_cache_non200 /
-  #     $cfm_cc_nostore / $cfm_xae_nocache / $cfm_micro_conf: the cache-on flip
+  #     $cfm_cc_nostore / $cfm_xae_nocache / $cfm_cache_too_big /
+  #     $cfm_micro_conf: the cache-on flip
   #     and the micro routing live in cfm_cache.lua, never inline).
   # Every rail must then match a DIRECTIVE at a statement start, so comment
   # text or a quoted value never satisfies one; a one-line location, { on the
@@ -173,8 +176,9 @@ for f in "$ORT" "$ANG"; do
   # and header names are): a statement that mentions $cfm_req_auth may only be
   # its map (map $http_authorization $cfm_req_auth) or a cache predicate; the
   # same for $cfm_cache_non200 (its map $upstream_status), $cfm_cc_nostore
-  # (map $upstream_http_cache_control) and $cfm_xae_nocache (map
-  # $upstream_http_x_accel_expires) with proxy_no_cache; $cfm_cache_skip may
+  # (map $upstream_http_cache_control), $cfm_xae_nocache (map
+  # $upstream_http_x_accel_expires) and $cfm_cache_too_big (map
+  # $upstream_http_content_length) with proxy_no_cache; $cfm_cache_skip may
   # only be `set … "1"` or a cache predicate; $cfm_micro_conf only its
   # sentinel `set … "1"` in a `location /`. The other spellings of a writer
   # are closed too: no regex named capture may be named cfm_* / cf_* / xfp_*
@@ -194,7 +198,7 @@ for f in "$ORT" "$ANG"; do
   # included); those read the code with strings blanked, the rail-name ban
   # reads it with strings (long ones included) kept. (Deliberately obfuscated Lua, a
   # global looked up by a computed name, is beyond a static check: this guards
-  # against refactor mistakes and the plain spellings.) All four maps hold EXACTLY their
+  # against refactor mistakes and the plain spellings.) Every rail map holds EXACTLY its
   # entries (two; the two micro maps also `volatile;`). proxy_ignore_headers
   # never lists Set-Cookie / Vary, lists
   # Cache-Control / Expires / X-Accel-Expires only in a micro location, and
@@ -518,6 +522,9 @@ for f in "$ORT" "$ANG"; do
         if (fw == "proxy_ignore_headers" && u ~ /[[:space:]]["\047]?(set-cookie|vary)["\047]?([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_ignore_headers lists Set-Cookie or Vary — nginx would then store a response that sets a cookie, or one Vary variant for everyone."
         if (fw == "proxy_cache_convert_head" && u ~ /[[:space:]]["\047]?off["\047]?([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_cache_convert_head off — the cache key has no method, so a body-less HEAD entry would be served to GET clients."
         if (fw == "proxy_cache_path" && u ~ /cfm_micro_/) { z = ST[k]; gsub(/[[:space:]]+/, " ", z); print "MZONE " z }
+        # Every cache zone, as a statement (comments stripped, wherever it
+        # sits on its line), for the min_free check below.
+        if (fw == "proxy_cache_path") { z = ST[k]; gsub(/[[:space:]]+/, " ", z); print "CZONE " z }
         if (fw == "proxy_cache_methods" && u ~ /[[:space:]]["\047]?(post|put|patch|delete)["\047]?([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_cache_methods lists a non-GET/HEAD method — a cached POST/PUT result would be served to every client."
       }
       if (nm1 != 1) print "ERR $cfm_req_auth is written by " nm1 " copies of its map — it must have exactly one."
@@ -561,8 +568,9 @@ for f in "$ORT" "$ANG"; do
   [ "$incs" = "$want_incs" ] \
     || err "$f: the conf includes [$incs] — expected exactly [$want_incs]; an included file is not scanned by this guard."
   mzones_of["$f"]=$(sed -n 's/^MZONE //p' <<< "$parsed")
+  czones=$(sed -n 's/^CZONE //p' <<< "$parsed")
   mranges_of["$f"]=$(sed -n 's/^MRANGE //p' <<< "$parsed")
-  parsed=$(grep -Ev '^(NCACHE|NSTATIC|CLOC|INC|MZONE|MRANGE) ' <<< "$parsed" || true)
+  parsed=$(grep -Ev '^(NCACHE|NSTATIC|CLOC|INC|MZONE|CZONE|MRANGE) ' <<< "$parsed" || true)
   if [ -n "$parsed" ]; then
     while IFS= read -r line; do
       err "$f: ${line#ERR }"
@@ -574,9 +582,18 @@ for f in "$ORT" "$ANG"; do
     err "$f: no 'proxy_cache_path .../cfm_static' zone declared — Tier A config missing?"
   fi
   # Every cache zone keeps 2 GB of the filesystem free (the cache manager
-  # evicts below it): a shared cPanel /var must never fill from the cache.
-  nofree=$(grep -nE '^[[:space:]]*proxy_cache_path[[:space:]]' "$f" | grep -vE '[[:space:]]min_free=2g([[:space:]]|;)' || true)
-  [ -z "$nofree" ] || err "$f: a proxy_cache_path has no 'min_free=2g' — the cache could fill the disk: $(tr '\n' ' ' <<< "$nofree")"
+  # evicts below it). Read per STATEMENT (comments stripped): exactly one
+  # min_free= parameter, and it is 2g. nginx takes the LAST of repeated
+  # parameters, so `min_free=2g min_free=0` is off; a `# min_free=2g`
+  # comment is nothing.
+  [ -n "$czones" ] || err "$f: no proxy_cache_path statement parsed — the min_free check must verify something."
+  while IFS= read -r z; do
+    [ -n "$z" ] || continue
+    nmf=$(grep -o '[[:space:]]min_free=[^[:space:];]*' <<< " $z" | wc -l)
+    if [ "$nmf" -ne 1 ] || ! grep -Eq '[[:space:]]min_free=2g([[:space:];]|$)' <<< " $z"; then
+      err "$f: a proxy_cache_path must carry exactly one 'min_free=2g' (nginx takes the last of repeated parameters) — the cache could fill the disk: $z"
+    fi
+  done <<< "$czones"
   # The other anchors (at least one cfm_static cache location, the bypass /
   # no_cache / only-200 predicates, the four rail maps, the per-server
   # $cfm_cache_skip "1") are enforced statement-aware in section (a), counted

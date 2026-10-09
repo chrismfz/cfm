@@ -387,8 +387,8 @@ proxy_cache_path /var/cache/nginx/cfm_micro_1s   levels=1:2 keys_zone=cfm_micro_
 proxy_cache_path /var/cache/nginx/cfm_micro_2s   levels=1:2 keys_zone=cfm_micro_2s:10m  max_size=512m min_free=2g inactive=30s  use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_micro_5s   levels=1:2 keys_zone=cfm_micro_5s:10m  max_size=512m min_free=2g inactive=60s  use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_micro_10s  levels=1:2 keys_zone=cfm_micro_10s:10m max_size=512m min_free=2g inactive=60s  use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_micro_30s  levels=1:2 keys_zone=cfm_micro_30s:10m max_size=1g min_free=2g   inactive=120s use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_micro_60s  levels=1:2 keys_zone=cfm_micro_60s:10m max_size=1g min_free=2g   inactive=180s use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_30s  levels=1:2 keys_zone=cfm_micro_30s:10m max_size=1g   min_free=2g inactive=120s use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_60s  levels=1:2 keys_zone=cfm_micro_60s:10m max_size=1g   min_free=2g inactive=180s use_temp_path=off;
 ```
 
 **Disk rails** (since 2026-10-09). The Tier A key carries the query string
