@@ -33,6 +33,23 @@ back-filled here — see the git/PR history for that period.
   mistaken for the site's; until the edge reloads after the upgrade they can be.
 
 ### Security
+- **One crafted request could hold an edge worker for up to a second.** Five
+  WAF checks re-scanned the same bytes over and over on purpose-built input:
+  the WordPress page-template check (rule 10017) on a 32 KB form upload took
+  0.5-0.9 s, the Gravity Forms uploader check (10010) 0.2 s, and the
+  debug-toggle, command-injection and CRLF checks 20-160 ms on a 2 KB query
+  string. Any unauthenticated visitor to any site could send them in a loop.
+  Each now reads its input once; the same requests take under 10 ms in
+  total, what any request of that size costs. Four of the checks give
+  exactly the answers they gave before. Rule 10017's fallback scan now reads
+  each form field name only up to its first `;` or space, at most 96 bytes,
+  and does not look inside a name it has read. The names it stops matching
+  are: a `name=` inside another field's name, or after only a space, neither
+  of which PHP reads as a field; a name padded past 96 bytes with %-encoded
+  spaces, which PHP (it does not decode a form field name) never reads as
+  `pagename`; and a `pagename[...]` array whose `]` is past that point,
+  which WordPress never uses as a page path. PHP's own reading of the
+  request, which the rule checks first, is unchanged.
 - **A repeated request header no longer switches the WAF off for that
   request, or loses its ban.** Two `Content-Type` headers crashed the
   polyglot-upload check (rule 412); the edge fails open, so every later WAF
