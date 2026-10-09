@@ -83,9 +83,12 @@ local RPC_BUDGET = 50
 -- an FP_POLICY_ALLOW_FPS entry or an expiry still lands within the normal
 -- cache TTL. Only when the reserve is spent too is the stale answer served
 -- (then those changes can reach this node up to STALE_TTL late; the edge
--- FP_POLICY = 0 kill switch is unaffected). A fingerprint never asked still
--- fails open, as does an RPC error (no stale answer then: the daemon is the
--- only one who can correct it).
+-- FP_POLICY = 0 kill switch is unaffected). A fingerprint not asked about in
+-- the last STALE_TTL (never seen, idle that long, or a node restart / dict
+-- reload since) has no answer on record and still fails open while the
+-- budget is spent, as does an RPC error (no stale answer then: the daemon
+-- is the only one who can correct it). While the daemon is down AND the
+-- reserve is spent, though, the stale answer is served without an RPC.
 local STALE_TTL = 600
 local STALE_RPC_BUDGET = 10
 
@@ -141,7 +144,8 @@ function M.lookup(deps)
   if not key_in then return "", nil end
 
   local sh = deps.sh
-  local ck = "fpp|" .. ngx.md5(key_in)
+  local kh = ngx.md5(key_in)
+  local ck = "fpp|" .. kh
 
   if sh then
     local cached = sh:get(ck)
@@ -157,8 +161,10 @@ function M.lookup(deps)
   -- Over budget a churning attacker must not be able to write anything: a
   -- fingerprint with no armed answer on record fails open; one with an armed
   -- answer is asked from the armed reserve, and served that answer when the
-  -- reserve is spent too (STALE_TTL above). Nothing is written either way.
-  local sk = "fpps|" .. ngx.md5(key_in)
+  -- reserve is spent too (STALE_TTL above). Over budget a fingerprint with no
+  -- armed answer on record writes nothing; the reserve's RPCs (10/s, armed
+  -- fingerprints only) write as any lookup does.
+  local sk = "fpps|" .. kh
   if sh then
     local n = shd.incr(sh, "fpp|rpc_budget", 1, 1)
     if n and n > RPC_BUDGET then
