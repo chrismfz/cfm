@@ -5093,8 +5093,11 @@ function _M.detect_polyglot_upload(body, headers)
   headers = headers or {}
   -- Boundary tokens are case-sensitive (RFC 2046 §5.1.1) — extract from the
   -- original header value, not a lowered copy. Only the multipart/form-data
-  -- check itself is case-insensitive.
-  local ct_raw = headers["content-type"] or headers["Content-Type"] or ""
+  -- check itself is case-insensitive. header_string, not the raw value: a
+  -- repeated Content-Type arrives as a table, and :match on it raised, so
+  -- check() failed open with every later rule unrun. Not php_content_type:
+  -- its ", " join would leave a comma on the end of the boundary token.
+  local ct_raw = header_string(headers["content-type"] or headers["Content-Type"])
   if not has(lower(ct_raw), "multipart/form-data") then return nil end
 
   local boundary = ct_raw:match("[Bb][Oo][Uu][Nn][Dd][Aa][Rr][Yy]=([^;%s]+)")
