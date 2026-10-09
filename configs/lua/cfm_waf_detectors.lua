@@ -4315,29 +4315,34 @@ end
 --
 -- `s` MUST already be lowercased (matches both detector call sites).
 -- After `<?=` PHP skips whitespace, comments (`/* … */`; `# …` / `// …` to a
--- CR, an LF or a `?>`), `@` and a leading `\` (a namespaced name). What
--- follows must open like PHP code: a variable, a backtick exec, a quoted
--- string, `(`, `[`, a heredoc `<<<`, a call `name(` (namespaced, comments
--- allowed before the `(`) or `Name::`, or one of the constructs below. It may
--- be reached through unary operators (`!f(…)`) and through operands that are
--- not code by themselves, a number or a constant, each followed by a binary
--- operator (`0||f(…)`, `1 and f(…)`, `true?f(…):1`, `PHP_EOL.f(…)`). That
--- keeps the 3-byte opener binary-safe. These were missed: `<?=\f(…)`,
--- `<?=/**/f(…)`, `<?=#x` LF `f(…)`, `<?=print`…``, `<?= new X(…)` and the
--- forms above. A name that starts with `_` is a call only with `open_tag`:
--- 402 reads text fields too, and a ticket quoting `<?= __('Login') ?>` (a
--- translation call) is no webshell.
+-- CR, an LF or a `?>`; `#[` is a PHP 8 attribute, not a comment), `@` and a
+-- leading `\` (a namespaced name). What follows must open like PHP code: a
+-- variable, a backtick exec, a quoted string, `(`, `[`, a heredoc `<<<`, a call
+-- `name(` (namespaced, comments allowed before the `(`) or `Name::`, an
+-- attribute, or one of the constructs below. It may be reached through unary
+-- operators (`!f(…)`) and through operands that are not code by themselves, a
+-- number or a constant, each followed by a binary operator or a `;`
+-- (`0||f(…)`, `1 and f(…)`, `true?f(…):1`, `PHP_EOL.f(…)`, `1;f(…)`). Past
+-- such an operator only real code counts (a variable, a backtick, a call, a
+-- construct, or a `(` / `[` read into): template text quoted in a ticket,
+-- `<?= DEBUG ? "on" : "off" ?>`, is no webshell; nor is `<?= BASE_URL ?>">`,
+-- where `?>` ends the tag (it is never an operator). That keeps the 3-byte
+-- opener binary-safe. A name that starts with `_` (`__(`, `_e(`, gettext's
+-- `_(`) is a call only with `open_tag`; under 402, which reads text fields
+-- too, its arguments are read as such an operand: `<?= __('Login') ?>` is not
+-- code, `<?=_(system(…))` is.
 --
 -- The `<?` short open tag is read only with `open_tag` (file bytes, rule 415:
 -- a support ticket quoting `<? echo $x ?>` is no webshell either) and held
--- tighter (whitespace, then `@` / `\` / comments, then a variable, a construct
--- or a call `name(`): it is two bytes. PHP whitespace only (space, tab, CR,
--- LF; not Lua's %s). The comment ends are found once per string and
--- binary-searched: a later opener can sit inside an earlier one's comment, so
--- a cached "next `*/`" from an earlier search is not the next one for it.
+-- tighter (whitespace, `@` / `\` / comments, then a variable, a construct or a
+-- call `name(`): it is two bytes. PHP whitespace only (space, tab, CR, LF; not
+-- Lua's %s). The comment ends are found once per string and binary-searched
+-- (a later opener can sit inside an earlier one's comment), and every place a
+-- skip or an expression read lands is memoized: openers that share one long
+-- tail of comments and blanks (`<?=/*` × N, `*/`, blanks) walk it once.
 local SHORT_ECHO_WORDS = {
   echo = true, print = true, new = true, eval = true, include = true, include_once = true,
-  require = true, require_once = true, exit = true, die = true, clone = true,
+  require = true, require_once = true, exit = true, die = true, clone = true, throw = true,
 }
 -- The first entry >= q of a sorted list (nil when none).
 local function first_at_or_after(list, q)
@@ -4348,28 +4353,34 @@ local function first_at_or_after(list, q)
   end
   return list[lo]
 end
+local SE_OP = "^[%?:%.%%%+%-%*/|&%^<>=,!~;][%?:%.%%%+%-%*/|&%^<>=,!~;]?[%?:%.%%%+%-%*/|&%^<>=,!~;]?()"
 local function has_php_short_echo(s, open_tag)
   if not s or s == "" then return false end
   local n = #s
   local closes, ends               -- `*/` starts; CR / LF / `?>` positions (lazy)
+  local skip_memo = { {}, {} }     -- [lead and 1 or 2][landing] = result (false: to the end)
+  local expr_memo = {}             -- [pos * 2 + chained] = result
   local function ws(c) return c == " " or c == "\t" or c == "\r" or c == "\n" end
   -- Whitespace and comments from i; with `lead`, also `@` and `\`. The index
   -- after them, or nil when a comment runs to the end.
   local function skip(i, lead)
-    while i <= n do
-      local c = s:sub(i, i)
-      if ws(c) or (lead and (c == "@" or c == "\\")) then
-        i = i + 1
-      elseif c == "/" and s:sub(i + 1, i + 1) == "*" then
+    local memo, landed, res = skip_memo[lead and 1 or 2], {}, nil
+    while true do
+      local m = memo[i]
+      if m ~= nil then res = m; break end
+      landed[#landed + 1] = i
+      i = s:match(lead and "^[ \t\r\n@\\]*()" or "^[ \t\r\n]*()", i)
+      local c, c2 = s:sub(i, i), s:sub(i + 1, i + 1)
+      if c == "/" and c2 == "*" then
         if not closes then
           closes = {}
           local k = s:find("*/", 1, true)
           while k do closes[#closes + 1] = k; k = s:find("*/", k + 1, true) end
         end
         local e = first_at_or_after(closes, i + 2)
-        if not e then return nil end
+        if not e then res = false; break end
         i = e + 2
-      elseif c == "#" or (c == "/" and s:sub(i + 1, i + 1) == "/") then
+      elseif (c == "#" and c2 ~= "[") or (c == "/" and c2 == "/") then
         if not ends then
           ends = {}
           local k = s:find("[\r\n?]", 1)
@@ -4379,60 +4390,91 @@ local function has_php_short_echo(s, open_tag)
           end
         end
         local e = first_at_or_after(ends, i + 1)
-        if not e then return nil end
+        if not e then res = false; break end
         i = (s:byte(e) == 63) and e or e + 1   -- `?>` ends the comment and the tag
       else
-        break
+        res = i; break
       end
     end
-    return i
+    for _, p in ipairs(landed) do memo[p] = res end
+    return res or nil
   end
   local function expr_at(i)
+    local chained, keys, res = false, {}, nil
     for _ = 1, 16 do
       i = skip(i, true)
-      if not i or i > n then return false end
+      if not i or i > n then res = false; break end
+      local key = i * 2 + (chained and 1 or 0)
+      if expr_memo[key] ~= nil then res = expr_memo[key]; break end
+      keys[#keys + 1] = key
       local c = s:sub(i, i)
-      if c == "$" or c == "`" or c == "'" or c == '"' or c == "(" or c == "[" then return true end
-      if c == "!" or c == "~" or c == "-" or c == "+" then
-        i = s:match("^[!~%-%+]+()", i)            -- unary operators
+      if c == "$" or c == "`" or c == "#" then res = true; break end   -- `#`: skip stops at `#[`
+      if c == "'" or c == '"' then res = not chained; break end
+      if c == "(" or c == "[" then
+        if not chained then res = true; break end
+        i = i + 1                                     -- read into it
+      elseif c == "!" or c == "~" or c == "-" or c == "+" then
+        i = s:match("^[!~%-%+]+()", i)                -- unary operators
+        chained = true
       elseif c == "<" then
-        return s:find("^<<<[ \t]*['\"]?[%a_]", i) ~= nil   -- a heredoc / nowdoc
+        res = s:find("^<<<[ \t]*['\"]?[%a_]", i) ~= nil  -- a heredoc / nowdoc
+        break
       else
         -- An operand: a number, or a name (a construct, a call, `Name::`, or
         -- a constant that needs a binary operator after it).
-        local j = s:match("^%d[%w%.]*()", i)
+        local j = s:match("^%.?%d[%w%._]*()", i)
+        local args = false
         if not j then
           local word
           word, j = s:match("^([%a_][%w_\\]*)()", i)
-          if not word then return false end
-          if SHORT_ECHO_WORDS[word] then return true end
+          if not word then res = false; break end
+          if SHORT_ECHO_WORDS[word] then res = true; break end
           j = skip(j, false)
-          if not j then return false end
-          if s:sub(j, j) == "(" and (open_tag or word:byte(1) ~= 95) then return true end
-          if s:find("^::[%a_%$]", j) then return true end
+          if not j then res = false; break end
+          if s:sub(j, j) == "(" then
+            if open_tag or word:byte(1) ~= 95 then res = true; break end
+            args = true                               -- `_(…)` under 402: read its arguments
+          elseif s:find("^::[%a_%$]", j) then
+            res = true; break
+          end
         else
           j = skip(j, false)
-          if not j then return false end
+          if not j then res = false; break end
         end
-        -- A binary operator (up to three characters, or and / or / xor).
-        local o = s:match("^[%?:%.%%%+%-%*/|&%^<>=,!~][%?:%.%%%+%-%*/|&%^<>=,!~]?[%?:%.%%%+%-%*/|&%^<>=,!~]?()", j)
-        if not o then
-          local w, wo = s:match("^([%a_][%w_]*)()", j)
-          if w == "and" or w == "or" or w == "xor" then o = wo end
+        if args then
+          i = j + 1
+        else
+          -- A binary operator (up to three characters, `;`, or and / or /
+          -- xor). `?>` closes the tag: never an operator.
+          local o = s:match(SE_OP, j)
+          if o and s:sub(j, o - 1):find("?>", 1, true) then res = false; break end
+          if not o then
+            local w, wo = s:match("^([%a_][%w_]*)()", j)
+            if w == "and" or w == "or" or w == "xor" then o = wo end
+          end
+          if not o then res = false; break end
+          i = o
         end
-        if not o then return false end
-        i = o
+        chained = true
       end
     end
-    return false
+    if res ~= nil then
+      for _, k in ipairs(keys) do expr_memo[k] = res end
+    end
+    return res == true
   end
-  local function short_open_at(i)      -- after `<?` + whitespace
+  local function short_open_at(i)      -- after `<?` (not `<?=`)
+    -- Glued to the tag (`<?system(`, `<?$x=`), held tighter still: two
+    -- random bytes after `<?` must not read as code (an ASCII variable name
+    -- of two bytes or one and its `=`, a name of three before its `(`).
+    local glued = not ws(s:sub(i, i))
     i = skip(i, true)
     if not i or i > n then return false end
-    if s:find("^%$[%$%a_\128-\255]", i) then return true end
+    if s:find(glued and "^%$[%a_][%w_=]" or "^%$[%$%a_\128-\255]", i) then return true end
     local word, j = s:match("^([%a_][%w_]*)()", i)
     if not word then return false end
     if SHORT_ECHO_WORDS[word] then return true end
+    if glued and #word < 3 then return false end
     j = skip(j, false)
     return j ~= nil and s:sub(j, j) == "("
   end
@@ -4440,10 +4482,9 @@ local function has_php_short_echo(s, open_tag)
   while true do
     local k = s:find("<?", pos, true)
     if not k then return false end
-    local nx = s:sub(k + 2, k + 2)
-    if nx == "=" then
+    if s:sub(k + 2, k + 2) == "=" then
       if expr_at(k + 3) then return true end
-    elseif open_tag and ws(nx) then
+    elseif open_tag then
       if short_open_at(k + 2) then return true end
     end
     pos = k + 2

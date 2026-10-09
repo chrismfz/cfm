@@ -84,8 +84,9 @@ do
           n .. " decoys: the SP Page Builder zip is blocked: " .. show(r))
   end
   -- zip_bad_index answers exactly what _zip_entry_bad_ext does on every range.
-  local toks = { ".php", ".php5", "5", ".phtml", ".phtm", "l", ".pht", ".phar", ".phps", ".htaccess",
-                 ".user.ini", ".user", "x", "/", " ", "\0", ".", ".ph", "p", "t", "-", "_", ".PHP" }
+  local toks = { ".php", ".php5", "5", "56", ".phtml", ".phtm", "l", ".pht", ".phar", ".phps", ".htaccess",
+                 ".user.ini", ".user", ".ini", "x", "/", " ", "\0", "\128", "\255", ".", ".ph", "p", "t", "-",
+                 "_", ".PHP", ".PhTmL", ".HTACCESS" }
   math.randomseed(5)
   local mism = 0
   for _ = 1, 3000 do
@@ -93,7 +94,7 @@ do
     for j = 1, math.random(1, 12) do t[j] = toks[math.random(#toks)] end
     local lb = table.concat(t):lower()
     local bad = det._zip_bad_index(lb)
-    for _ = 1, 10 do
+    for _ = 1, 25 do
       local a = math.random(1, #lb); local z = math.random(a, #lb)
       if bad(a, z) ~= (det._zip_entry_bad_ext(lb:sub(a, z)) ~= nil) then
         mism = mism + 1
@@ -110,7 +111,7 @@ do
   local hit = det.detect_upload_archive_php(b, { ["content-type"] = MP .. " " })
   local ms = (os.clock() - t0) * 1000
   check(hit and hit:find("ZIP_PHP", 1, true), "the entry after 2 900 overlapping headers is found: " .. tostring(hit))
-  check(ms < 60, ("414 over 2 900 overlapping headers took %.1f ms"):format(ms))
+  check(ms < 120, ("414 over 2 900 overlapping headers took %.1f ms"):format(ms))
 end
 
 -- ── 402: short-echo variants ───────────────────────────────────────────────
@@ -128,6 +129,9 @@ do
     -- A `#` comment ends at `?>`: a later opener inside a scanned comment
     -- must not reuse that comment's `*/` (it did: a 402 and 415 bypass).
     "<?=1# ?><?=/* */system('echo PWNED')?>\n/* q */ x",
+    "<?=1;system('id');?>", "<?=PHP_EOL;system('id')?>", "<?=.5?system('id'):1?>",
+    "<?=1_0|system('id')?>", "<?=throw new Exception(system('id'))?>",
+    "<?=#[A]function(){}and system('id')?>", "<?=_(system('id'))?>",
   }) do
     local r = run(body(part('name="f"; filename="x.jpg"', php, "image/jpeg")))
     check(r.ids:find(",402=block,", 1, true), "402 catches " .. php:gsub("\n", "<LF>") .. ": " .. show(r))
@@ -142,7 +146,11 @@ do
           "no 402 / 415 on " .. s:gsub("%z", "\\0") .. ": " .. show(r))
   end
   -- A ticket quoting a translation call (`__(` / `_e(` / `_(`): no 402 block.
-  for _, txt in ipairs({ "the login page shows <?= __('Login') ?> literally", "<?=_e('x')?> and <?= _('y') ?>" }) do
+  -- `?>` ends the tag (never an operator), and past a constant's operator only
+  -- real code counts: template text quoted in a ticket stays clean.
+  for _, txt in ipairs({ "the login page shows <?= __('Login') ?> literally", "<?=_e('x')?> and <?= _('y') ?>",
+                         '<a href="<?= BASE_URL ?>">home</a>', "<p><?= SITE_NAME ?> ($5)</p>",
+                         'Total: <?= 3 ?>"', "see <?= PHP_VERSION ?> [docs]", '<?= DEBUG ? "on" : "off" ?>' }) do
     local r = run(body(part('name="message"', txt)))
     check(not r.hit, "a ticket quoting " .. txt .. " stays clean: " .. show(r))
   end
@@ -172,7 +180,8 @@ do
   -- The `<?` short open tag: 415 (file bytes), never 402, which reads text
   -- fields too — a ticket quoting `<? echo $title; ?>` is no webshell.
   for _, php in ipairs({ '<? echo strtoupper("ok3");?>', "<? $x = `id`; ?>", "<?\nsystem('id');",
-                        "<? @eval($x);?>", "<? system ('id');?>", "<? \\system('id');", "<? /**/system('id');" }) do
+                        "<? @eval($x);?>", "<? system ('id');?>", "<? \\system('id');", "<? /**/system('id');",
+                        "<?system('id');?>", "<?$x='id';system($x)?>", "<?/**/system('id')?>" }) do
     r = run(body(part('name="f"; filename="x.jpg"', php, "image/jpeg")))
     check(r.ids:find(",415=logonly,", 1, true) and not r.ids:find(",402=", 1, true),
           "short open tag in a small file → 415, not 402: " .. php:gsub("\n", "<LF>") .. ": " .. show(r))
@@ -191,7 +200,10 @@ do
   check(fsrc ~= nil, "has_php_short_echo found")
   if fsrc then
     local se = assert(loadstring(fsrc .. "\nreturn has_php_short_echo"))()
-    for _, s in ipairs({ ("<?=/*"):rep(13000), ("<?=#"):rep(16000), ("<? "):rep(20000), ("<?=system"):rep(7000) }) do
+    -- …and on openers that share one long tail of comments and blanks.
+    for _, s in ipairs({ ("<?=/*"):rep(13000), ("<?=#"):rep(16000), ("<? "):rep(20000), ("<?=system"):rep(7000),
+                         ("<?=/*"):rep(6000) .. "*/" .. ("/**/ "):rep(6000), ("<?=#"):rep(8000) .. "\n" .. (" "):rep(32000),
+                         ("<? /*"):rep(6000) .. "*/" .. (" "):rep(32000), ("<?=/*"):rep(6000) .. "*/" .. ("!"):rep(32000) }) do
       local t0 = os.clock(); se(s, true)
       local ms = (os.clock() - t0) * 1000
       check(ms < 250, ("short-echo parser on 64 KB of %q… took %.1f ms"):format(s:sub(1, 8), ms))

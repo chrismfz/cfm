@@ -43,15 +43,16 @@ back-filled here — see the git/PR history for that period.
   webshell entry; it now reads them all, at a fixed cost per header. The
   upload-content rule (402, and the polyglot and SP Page Builder rules that
   share its matcher) missed short PHP tags written `<?=\func(…)`,
-  `<?=/**/func(…)`, `<?=print`…``, `<?= new …`, `<?=0||func(…)` or
-  `<?=true?func(…):1`; it now follows PHP's own reading of what comes after
-  `<?=`, still without firing on stray bytes in images or on a ticket that
-  quotes a translation call (`<?= __('Login') ?>`). And 402 only reads the
+  `<?=/**/func(…)`, `<?=print`…``, `<?= new …`, `<?=0||func(…)`,
+  `<?=1;func(…)` or `<?=true?func(…):1`; it now reads what comes after
+  `<?=` much as PHP does, still without firing on stray bytes in images or on
+  a ticket that quotes template code (`<?= __('Login') ?>`,
+  `<a href="<?= BASE_URL ?>">`). And 402 only reads the
   first 2 KB of the request, so a webshell after 2 KB of image data went
   unseen: the new rule 415 reads each uploaded file, from its start to the
   16 KB multipart scan budget, for PHP / JSP tags, including the
-  `<? echo …` short open tag (in files only: a support ticket quoting it is
-  not flagged). It ships log-only for burn-in; promote it in
+  `<? echo …` / `<?system(…)` short open tag (in files only: a support
+  ticket quoting it is not flagged). It ships log-only for burn-in; promote it in
   `cfm_waf_config.lua` once its hits look clean (docs/waf.md, rule 415).
 - **Four ways to hide a payload from the WAF's scan are closed.** A JSON
   body's escapes were scanned as written, so `1\u0027 OR

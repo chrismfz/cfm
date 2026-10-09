@@ -1126,7 +1126,9 @@ body's first 2 KB): a webshell after 2 KB of image data, or in a second file.
 Each file part is read from its start, so an opener inside the 2 KB with its
 code padded past it is seen whole. 415 also reads the two-byte `<?` short open
 tag (whitespace, `@` / `\` / comments, then a variable, `echo` / `print` / …
-or a call `name(`), which 402 does not: 402 scans text fields too, and a
+or a call `name(`; glued to the tag, `<?system(` / `<?$x=`, a little
+tighter, as two random bytes after `<?` must not read as code), which 402
+does not: 402 scans text fields too, and a
 ticket quoting `<? echo $title; ?>` is no webshell. Expect some logonly noise
 from text attachments that quote PHP (`<? if(…)`): review it at promotion.
 Only file parts (a `filename=`, as PHP registers them) are read, to the
