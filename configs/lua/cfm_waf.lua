@@ -423,6 +423,17 @@ local CFG = {
   block_ttl_sec     = 10,
   push_cooldown_sec = 60,
 
+  -- Header lines the WAF reads (cfm_waf_util.waf_request_headers; a value
+  -- below 100 counts as 100, the edge's own floor). A request with MORE lines
+  -- is, per max_header_lines_mode: "logonly" (default, burn-in) — logged
+  -- (`[cfm] header_lines=over_max`), passed, its first max_header_lines lines
+  -- inspected; "block" — refused (431 on the web edge, a WAF_HEADER_LINES
+  -- block-tier hit on the panel ports, enforced when the panel WAF enforces).
+  -- max_header_lines = 0: read 1000 lines, never log or refuse. No client
+  -- sends anywhere near 1000.
+  max_header_lines      = 1000,
+  max_header_lines_mode = "logonly",
+
   -- Body scan budget, keyed by request Content-Type. The merged args+body
   -- string fed to body-aware rules (traversal/rce/xss/sqli/php-wrappers/
   -- ssrf/proto-pollution via get_norm_ab() below) is capped to the entry
@@ -2222,7 +2233,7 @@ function _M.check(ctx)
   -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018-10020) ──
   -- Placed after every armed block-tier family, next to traversal, for the
   -- same reason: 10019 and 10020 block at the edge but their autoblock is
-  -- held in code (heldAutoblockRules), so evaluated earlier a held hit would
+  -- held in code (WAFRule.HoldAutoblock), so evaluated earlier a held hit would
   -- own the headline and take the ban and alert away from an armed rule on
   -- the same request (`string_ids=1` added to a SQLi POST). 10018 is armed
   -- and runs first of the three.

@@ -264,13 +264,16 @@ func (s *IngestSocket) serveConn(ctx context.Context, e *Engine, conn net.Conn) 
 			continue // resynced at a newline; the oversized line was dropped
 		}
 
-		if len(line) > 0 {
-			if line[len(line)-1] == '\n' {
-				line = line[:len(line)-1]
-			}
+		// Only a newline-terminated record is complete: log-cfm.lua ends every
+		// record with one, so a fragment at EOF or a read error is a record cut
+		// off mid-send, and parsing it would read a truncated UA or upstream.
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			line = line[:len(line)-1]
 			// ReadSlice returns a slice into br's buffer, invalidated by the next
 			// read — copy to a string before handing it downstream, which retains it.
 			s.handleLine(e, string(line))
+		} else if len(line) > 0 {
+			telemetry.RecordWebdetParseFailure() // a record cut off mid-send
 		}
 		if err != nil {
 			return
@@ -322,7 +325,12 @@ func (s *IngestSocket) handleLine(e *Engine, line string) {
 	if line == "" {
 		return
 	}
-	rec, ok := e.adapter.Parse(line)
+	// The edge's TSV first (it may carry the upstream column the file formats
+	// never do), then the adapter for anything else.
+	rec, ok := parseSocketTSV(line)
+	if !ok {
+		rec, ok = e.adapter.Parse(line)
+	}
 	if !ok {
 		telemetry.RecordWebdetParseFailure()
 		return

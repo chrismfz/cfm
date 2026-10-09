@@ -171,9 +171,21 @@ end
 
 -- application/x-www-form-urlencoded decode (php_url_decode): `+` is a space,
 -- %XX a byte, a malformed % stays literal.
+local HEX_BYTE = {}
+do
+  local hx = "0123456789abcdef"
+  for i = 0, 255 do
+    local a, b = math.floor(i / 16) + 1, i % 16 + 1
+    for _, x in ipairs({ hx:sub(a, a), hx:sub(a, a):upper() }) do
+      for _, y in ipairs({ hx:sub(b, b), hx:sub(b, b):upper() }) do
+        HEX_BYTE[x .. y] = string.char(i)
+      end
+    end
+  end
+end
 local function _form_unescape(s)
   s = s:gsub("%+", " ")
-  return (s:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
+  return (s:gsub("%%(%x%x)", HEX_BYTE))
 end
 
 -- Each `k=v` pair of a form-encoded string, split on `&` (empty pairs
@@ -396,14 +408,16 @@ local function php_content_type(headers)
   return v or ""
 end
 
-local function each_request_field(method, args, body, headers, fn)
-  if args and args ~= "" then each_form_pair(args, "args", fn) end
+-- skip(s), when given, may rule a whole urlencoded source (the query string,
+-- a urlencoded body) out before it is split; a multipart body is always read.
+local function each_request_field(method, args, body, headers, fn, skip)
+  if args and args ~= "" and not (skip and skip(args)) then each_form_pair(args, "args", fn) end
   if method ~= "post" or not body or body == "" then return end
   local ct_raw = php_content_type(headers)
   local mt = php_media_type(ct_raw)
   if mt == "multipart/form-data" then
     each_multipart_field(body, ct_raw, function(k, v) fn(k, v, "body", false) end)
-  elseif mt == "application/x-www-form-urlencoded" then
+  elseif mt == "application/x-www-form-urlencoded" and not (skip and skip(body)) then
     each_form_pair(body, "body", fn)
   end
 end
@@ -413,6 +427,46 @@ _M.PHP_FIELDS_WANT = {
   pagename = true, action = true, string_ids = true, ["trp-edit-translation"] = true,
   user_login = true, wc_reset_password = true, ["woocommerce-lost-password-nonce"] = true,
 }
+
+-- want_hints(want): for each wanted name, the literal pieces any key PHP
+-- registers under it must contain once url-decoded and lowercased. php_var_name
+-- only drops leading spaces, cuts at NUL or `[`, and turns ` `, `.` and `[`
+-- into `_`, so every piece between the name's `_`s survives in the key as is
+-- (`string_ids` <- `string.ids`, `string ids`, `string[ids`).
+local function want_hints(want)
+  local h = {}
+  for name in pairs(want) do
+    local parts = {}
+    for p in name:gmatch("[^_]+") do parts[#parts + 1] = p end
+    h[#h + 1] = parts
+  end
+  return h
+end
+
+local function holds_hint(d, hints)
+  for _, parts in ipairs(hints) do
+    local all = true
+    for _, p in ipairs(parts) do
+      if not d:find(p, 1, true) then all = false; break end
+    end
+    if all then return true end
+  end
+  return false
+end
+
+-- A urlencoded source can hold a wanted key only if its decoded, lowercased
+-- text holds all the pieces of some wanted name: one decode (only when the
+-- source has `%` or `+`) and a few plain finds instead of splitting thousands
+-- of pairs (a 64 KB query string). Only a source past SOURCE_PREFILTER_MIN
+-- bytes is checked: a short one is split as cheaply, and a source that does
+-- name a field would pay both.
+local SOURCE_PREFILTER_MIN = 4096
+local function source_lacks(hints)
+  return function(s)
+    if #s < SOURCE_PREFILTER_MIN then return false end
+    return not holds_hint(lower(s:find("[%%+]") and _form_unescape(s) or s), hints)
+  end
+end
 
 -- name (as PHP registers it, php_var_name) -> EVERY value it was sent with,
 -- in order, and t.srcs[i] = "args" / "body" for each. Rules test "any value",
@@ -435,7 +489,7 @@ function _M.php_request_fields(method, args, body, headers, want)
     if not t then t = { srcs = {} }; f[name] = t end
     t[#t + 1] = v
     t.srcs[#t] = src
-  end)
+  end, want and source_lacks(want_hints(want)))  -- hints from `want` as it is now: never stale
   return f
 end
 

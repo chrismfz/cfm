@@ -11,7 +11,7 @@
 local _M = {}
 
 -- CFG is set by the engine via _M.init(cfg) at module load.
--- scan_str() is the only helper that needs it (max_scan_len).
+-- scan_str() (max_scan_len) and waf_request_headers() (max_header_lines) read it.
 local CFG
 
 function _M.init(cfg)
@@ -547,5 +547,27 @@ _M.body_budget                        = body_budget
 _M.strip_host_port                    = strip_host_port
 _M.is_ipv4_literal                    = is_ipv4_literal
 _M.is_ipv6_literal                    = is_ipv6_literal
+
+-- The request headers for the WAF, complete. ngx.req.get_headers() alone
+-- returns the first 100 header lines (err "truncated"), while nginx forwards
+-- every line to the origin: a request padded past line 100 hid every later
+-- header from the WAF (a CVE marker header, a second Content-Type carrying the
+-- boundary, the body headers the PHP field reader needs). So the headers are
+-- read up to CFG.max_header_lines (cfm_waf CFG, default 1000, never fewer than
+-- 100) in one call, and a request with more is reported as too_many; the
+-- callers log or refuse it per CFG.max_header_lines_mode (reading them all
+-- would let one request build a table of thousands). max_header_lines = 0:
+-- 1000 lines are read and too_many is never reported. Returns headers,
+-- too_many, block (too_many under max_header_lines_mode = "block").
+function _M.waf_request_headers(req)
+  req = req or ngx.req
+  local max = tonumber(CFG and CFG.max_header_lines) or 1000
+  local refuse = max > 0
+  if max <= 0 then max = 1000 end
+  if max < 100 then max = 100 end
+  local h, err = req.get_headers(max)
+  local too_many = refuse and err == "truncated"
+  return h, too_many, too_many and CFG ~= nil and CFG.max_header_lines_mode == "block"
+end
 
 return _M

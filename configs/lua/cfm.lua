@@ -1409,7 +1409,23 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       table.sort(ids)
       ngx.header["X-CFM-WAF-Skip-Rules"] = table.concat(ids, ",")
     end
-    local req_headers = ngx.req.get_headers()
+    local req_headers, too_many_headers, refuse_headers
+    if wutil_ok and wutil.waf_request_headers then
+      req_headers, too_many_headers, refuse_headers = wutil.waf_request_headers()
+    else
+      req_headers = ngx.req.get_headers()
+    end
+    if too_many_headers then
+      -- More header lines than the WAF reads (cfm_waf_util; max_header_lines /
+      -- max_header_lines_mode in cfm_waf_config.lua). Logged (one line per IP a
+      -- minute, through log_ev: host/uri are client-controlled, F39), and
+      -- refused only under max_header_lines_mode = "block".
+      if not SH or SH:add("hdrlines|" .. tostring(ip), 1, 60) then
+        log_ev(ngx.WARN, "[cfm] header_lines=over_max action=", refuse_headers and "block" or "logonly",
+               " ip=", ip, " host=", host, " uri=", uri)
+      end
+      if refuse_headers then return ngx.exit(431) end
+    end
     local req_body    = get_req_body_for_waf(uri, method, CFG.waf_body_max_len)
     local self_origin = is_self_origin(ip)
     local hit, reason, ttl, waf_action, waf_hits, waf_rule_id = waf.check({

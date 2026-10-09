@@ -53,6 +53,28 @@ for i, c in ipairs(cases) do
     end
   end
 end
+-- The filtered read skips a whole urlencoded source when its decoded text
+-- lacks the pieces of every wanted name; each spelling PHP folds into a wanted
+-- name must still be read when it sits in a long query of other keys.
+local junk = ("utm_x=1&"):rep(2000)
+for _, c in ipairs({
+  { "string.ids=1", "string_ids" }, { "STRING%5BIDS=1", "string_ids" }, { "string+ids=1", "string_ids" },
+  { "%20%20action=1", "action" }, { "act%69on=1", "action" }, { "ACTION%00x=1", "action" },
+  { "user.login=1", "user_login" }, { "wc.reset%5Bpassword=1", "wc_reset_password" },
+  { "PAGE%4eAME[x]=1", "pagename" }, { "trp%2Dedit-translation=1", "trp-edit-translation" },
+}) do
+  for _, where in ipairs({ "args", "body" }) do
+    local q = junk .. c[1] .. "&" .. junk
+    local f = (where == "args")
+      and det.php_request_fields("get", q, "", {}, det.PHP_FIELDS_WANT)
+      or det.php_request_fields("post", "", q, { ["Content-Type"] = "application/x-www-form-urlencoded" }, det.PHP_FIELDS_WANT)
+    if not (f[c[2]] and f[c[2]][1] == "1") then
+      fails = fails + 1
+      io.stderr:write(("FAIL filtered read missed %s (as %s) in the %s\n"):format(c[1], c[2], where))
+    end
+  end
+end
+
 if fails > 0 then
   io.stderr:write(("php_request_fields: %d of %d cases differ from PHP\n"):format(fails, #cases))
   os.exit(1)

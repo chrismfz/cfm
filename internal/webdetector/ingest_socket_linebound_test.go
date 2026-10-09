@@ -111,3 +111,13 @@ func TestIngestServeConn_ClosesOnUnboundedFloodLine(t *testing.T) {
 		t.Fatalf("got %q, want exactly [\"before\"] (flood line must not be ingested)", got)
 	}
 }
+
+// A record without its trailing newline at EOF is one cut off mid-send
+// (log-cfm.lua ends every record with one): it must not be ingested, or its
+// truncated UA / upstream column would read as a complete line.
+func TestIngestServeConn_DropsUnterminatedFinalRecord(t *testing.T) {
+	got := runServeConn(t, "whole\tline\n"+"cut\toff\tmid-sen")
+	if len(got) != 1 || got[0] != "whole\tline" {
+		t.Fatalf("got %q, want only the terminated record", got)
+	}
+}

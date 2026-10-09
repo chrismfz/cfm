@@ -74,6 +74,18 @@ back-filled here — see the git/PR history for that period.
   merely mentioned `multipart/form-data`, or a multipart field name split over
   two header lines, hid a `pagename` traversal from it. The reader is checked
   against a real PHP (`scripts/tests/php_request_fields_oracle.py`).
+- **A request padded past 100 header lines no longer hides headers from the
+  WAF.** The edge read only the first 100 header lines, while nginx forwards
+  them all: any header after line 100 was invisible to the WAF. That included
+  a CVE rule's marker header (rule 10012), a second Content-Type carrying the
+  multipart boundary, and the body headers the PHP field reader needs. The
+  WAF now reads up to 1 000 header lines, on the web edge and the panel ports.
+  A request with more is logged (`header_lines=over_max`, one line per IP a
+  minute in the edge error log) and, for its burn-in, passed with its first
+  1 000 lines inspected. Set `max_header_lines_mode = "block"` in
+  `/etc/cfm/cfm_waf_config.lua` to refuse it (`431`; on the panel ports a
+  block when the panel WAF enforces). `max_header_lines` sets the limit
+  (never below 100); `0` turns the check off.
 
 ### Changed
 - **A `RULE_<id>` line in `[waf_security]` now honours an inline comment.**

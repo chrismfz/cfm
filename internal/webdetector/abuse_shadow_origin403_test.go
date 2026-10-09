@@ -31,23 +31,25 @@ func TestParseTSV_Upstream(t *testing.T) {
 	}
 }
 
-// TestParseTSV_UpstreamName: the 13th column names the edge's upstream; a
-// 12-column line (an edge on the older module) leaves it empty and its UA whole.
+// TestParseTSV_UpstreamName: only the edge's socket line carries the 13th
+// column (the upstream name); a 12-column socket line (an edge on the older
+// module) leaves it empty. A file TSV never has one: past column 11 is the UA
+// (escape=none logs raw TABs), whatever it looks like.
 func TestParseTSV_UpstreamName(t *testing.T) {
 	base := "1791466170.6\t172.81.132.89\ta.gr\tPOST\t/xmlrpc.php\tHTTP/1.1\t403\t7\t0.002\t0.001\t-\tMozilla/5.0"
-	rec, ok := parseTSV(base + "\tcfm_challenge")
+	rec, ok := parseSocketTSV(base + "\tcfm_challenge")
 	if !ok || rec.UpstreamName != "cfm_challenge" || rec.UA != "mozilla/5.0" {
-		t.Errorf("13 columns: ok=%v name=%q ua=%q", ok, rec.UpstreamName, rec.UA)
+		t.Errorf("socket, 13 columns: ok=%v name=%q ua=%q", ok, rec.UpstreamName, rec.UA)
 	}
-	rec, ok = parseTSV(base)
+	rec, ok = parseSocketTSV(base)
 	if !ok || rec.UpstreamName != "" || rec.UA != "mozilla/5.0" {
-		t.Errorf("12 columns: ok=%v name=%q ua=%q", ok, rec.UpstreamName, rec.UA)
+		t.Errorf("socket, 12 columns: ok=%v name=%q ua=%q", ok, rec.UpstreamName, rec.UA)
 	}
-	// A file TSV (escape=none) with a raw TAB inside the UA: the 13th field is
-	// not an upstream name, so it stays part of the UA, as before.
-	rec, ok = parseTSV(base + "\tsqlmap/1.7 (https://sqlmap.org)")
-	if !ok || rec.UpstreamName != "" || rec.UA != "mozilla/5.0\tsqlmap/1.7 (https://sqlmap.org)" {
-		t.Errorf("tab inside the UA: ok=%v name=%q ua=%q", ok, rec.UpstreamName, rec.UA)
+	for _, tail := range []string{"-", "cfm_apache", "sqlmap/1.7 (https://sqlmap.org)"} {
+		rec, ok = parseTSV(base + "\t" + tail)
+		if !ok || rec.UpstreamName != "" || rec.UA != "mozilla/5.0\t"+tail {
+			t.Errorf("file TSV with a TAB in the UA (%q): ok=%v name=%q ua=%q", tail, ok, rec.UpstreamName, rec.UA)
+		}
 	}
 }
 

@@ -23,18 +23,18 @@
 -- the request is never affected): a single failed send now drops its whole
 -- batch instead of one line — bounded by FLUSH_LINES/FLUSH_BYTES, which cap a
 -- normal batch — and a mid-send timeout can truncate the final record, which
--- the receiver's parseTSV already rejects as a malformed line. Memory is
+-- the receiver drops: it ingests newline-terminated records only (serveConn in
+-- internal/webdetector/ingest_socket.go). Memory is
 -- bounded by BOTH a line and a byte cap (request_uri/UA are attacker-
 -- influenced). Record order across a batch boundary is not guaranteed (each
 -- record carries its own ts; the old per-request path was in fact MORE
 -- concurrent). On worker shutdown the ≤FLUSH_INTERVAL tail is dropped (cosockets
 -- are disabled in a premature timer), same best-effort class as before.
 --
--- Emits one TSV record per request to /run/cfm/ingest.sock, matching the
--- exact column order and delimiters produced by the cfm_tsv access_log
--- format. The receiver (CFM socket listener) reuses the existing TSV
--- parser, so the contract MUST stay in sync with
--- internal/webdetector/engine.go::parseTSV.
+-- Emits one TSV record per request to /run/cfm/ingest.sock, in the column
+-- order of the cfm_tsv access_log format plus a 13th column (below). The
+-- receiver reads it with parseSocketTSV, so the contract MUST stay in sync
+-- with internal/webdetector/engine.go::parseTSVCols.
 --
 -- Field order (TAB-separated, newline-terminated, 13 columns):
 --
