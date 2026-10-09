@@ -423,11 +423,16 @@ local CFG = {
   block_ttl_sec     = 10,
   push_cooldown_sec = 60,
 
-  -- Header lines the WAF reads (cfm_waf_util.waf_request_headers). A request
-  -- with more is refused: 431 on the web edge (cfm.lua), a WAF_HEADER_LINES
-  -- block-tier hit on the panel ports. 0 = never refuse (only the first 1000
-  -- lines are then inspected). No client sends anywhere near 1000.
-  max_header_lines  = 1000,
+  -- Header lines the WAF reads (cfm_waf_util.waf_request_headers; a value
+  -- below 100 counts as 100, the edge's own floor). A request with MORE lines
+  -- is, per max_header_lines_mode: "logonly" (default, burn-in) — logged
+  -- (`[cfm] header_lines=over_max`), passed, its first max_header_lines lines
+  -- inspected; "block" — refused (431 on the web edge, a WAF_HEADER_LINES
+  -- block-tier hit on the panel ports, enforced when the panel WAF enforces).
+  -- max_header_lines = 0: read 1000 lines, never log or refuse. No client
+  -- sends anywhere near 1000.
+  max_header_lines      = 1000,
+  max_header_lines_mode = "logonly",
 
   -- Body scan budget, keyed by request Content-Type. The merged args+body
   -- string fed to body-aware rules (traversal/rce/xss/sqli/php-wrappers/

@@ -457,14 +457,16 @@ end
 -- A urlencoded source can hold a wanted key only if its decoded, lowercased
 -- text holds all the pieces of some wanted name: one decode (only when the
 -- source has `%` or `+`) and a few plain finds instead of splitting thousands
--- of pairs (a 64 KB query string).
+-- of pairs (a 64 KB query string). Only a source past SOURCE_PREFILTER_MIN
+-- bytes is checked: a short one is split as cheaply, and a source that does
+-- name a field would pay both.
+local SOURCE_PREFILTER_MIN = 4096
 local function source_lacks(hints)
   return function(s)
+    if #s < SOURCE_PREFILTER_MIN then return false end
     return not holds_hint(lower(s:find("[%%+]") and _form_unescape(s) or s), hints)
   end
 end
-
-local PHP_FIELDS_HINTS = want_hints(_M.PHP_FIELDS_WANT)
 
 -- name (as PHP registers it, php_var_name) -> EVERY value it was sent with,
 -- in order, and t.srcs[i] = "args" / "body" for each. Rules test "any value",
@@ -487,7 +489,7 @@ function _M.php_request_fields(method, args, body, headers, want)
     if not t then t = { srcs = {} }; f[name] = t end
     t[#t + 1] = v
     t.srcs[#t] = src
-  end, want and source_lacks(want == _M.PHP_FIELDS_WANT and PHP_FIELDS_HINTS or want_hints(want)))
+  end, want and source_lacks(want_hints(want)))  -- hints from `want` as it is now: never stale
   return f
 end
 

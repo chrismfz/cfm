@@ -1,7 +1,8 @@
 -- cfm_waf_util.waf_request_headers: ngx.req.get_headers() alone stops at 100
 -- header lines ("truncated") while nginx forwards them all. The WAF reads up to
 -- CFG.max_header_lines (default 1000) in one call and reports a request with
--- more as too_many (the callers refuse it); 0 turns the refusal off.
+-- more as too_many, and as to-be-refused under max_header_lines_mode = block;
+-- 0 turns the check off.
 
 _G.ngx = { log = function() end, ERR = 0, WARN = 1, INFO = 2 }
 package.path = "configs/lua/?.lua;" .. package.path
@@ -40,8 +41,14 @@ check(h["x-h150"] == "v", "150 lines: the header on line 150 is read")
 check(not too_many, "150 lines: not too many")
 check(#r.calls == 1 and r.calls[1] == 1000, "one read, capped at max_header_lines")
 
-h, too_many = util.waf_request_headers(req(1001))
-check(too_many, "1001 lines: too_many")
+local blk
+h, too_many, blk = util.waf_request_headers(req(1001))
+check(too_many and not blk, "1001 lines: too_many, not refused under the default logonly mode")
+cfg.max_header_lines_mode = "block"
+h, too_many, blk = util.waf_request_headers(req(1001))
+check(too_many and blk, "1001 lines under max_header_lines_mode = block: refused")
+h, too_many, blk = util.waf_request_headers(req(999))
+check(not too_many and not blk, "999 lines under block mode: passed")
 
 cfg.max_header_lines = 0
 h, too_many = util.waf_request_headers(req(5000))

@@ -272,6 +272,8 @@ func (s *IngestSocket) serveConn(ctx context.Context, e *Engine, conn net.Conn) 
 			// ReadSlice returns a slice into br's buffer, invalidated by the next
 			// read — copy to a string before handing it downstream, which retains it.
 			s.handleLine(e, string(line))
+		} else if len(line) > 0 {
+			telemetry.RecordWebdetParseFailure() // a record cut off mid-send
 		}
 		if err != nil {
 			return
@@ -325,10 +327,7 @@ func (s *IngestSocket) handleLine(e *Engine, line string) {
 	}
 	// The edge's TSV first (it may carry the upstream column the file formats
 	// never do), then the adapter for anything else.
-	rec, ok := LogRec{}, false
-	if strings.Count(line, "\t") >= 11 {
-		rec, ok = parseSocketTSV(line)
-	}
+	rec, ok := parseSocketTSV(line)
 	if !ok {
 		rec, ok = e.adapter.Parse(line)
 	}

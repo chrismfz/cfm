@@ -80,13 +80,12 @@ back-filled here — see the git/PR history for that period.
   a CVE rule's marker header (rule 10012), a second Content-Type carrying the
   multipart boundary, and the body headers the PHP field reader needs. The
   WAF now reads up to 1 000 header lines, on the web edge and the panel ports.
-  A request with more is refused with `431` (on the panel ports, blocked when
-  the panel WAF enforces): no client sends that many. The limit is
-  `max_header_lines` in `/etc/cfm/cfm_waf_config.lua`; `0` turns the refusal
-  off. Refusals are logged to the edge error log, one line per IP a minute.
-- **A file-tailed TSV log with a TAB inside the User-Agent no longer loses part
-  of the UA.** Only the edge's socket feed carries the new upstream column;
-  the file formats are read as 12 columns again, as before this release.
+  A request with more is logged (`header_lines=over_max`, one line per IP a
+  minute in the edge error log) and, for its burn-in, passed with its first
+  1 000 lines inspected. Set `max_header_lines_mode = "block"` in
+  `/etc/cfm/cfm_waf_config.lua` to refuse it (`431`; on the panel ports a
+  block when the panel WAF enforces). `max_header_lines` sets the limit
+  (never below 100); `0` turns the check off.
 
 ### Changed
 - **A `RULE_<id>` line in `[waf_security]` now honours an inline comment.**
@@ -98,10 +97,6 @@ back-filled here — see the git/PR history for that period.
   family can mix armed and held block rules (the TranslatePress rules 10018
   vs 10019/10020), and a held rule's hit used to suppress the armed rule's
   ban and alert for the same IP for a minute.
-- **The PHP field reader skips a long query string or form body that cannot
-  hold a field the rules read.** A 64 KB query of unrelated parameters cost
-  the reader up to 11 ms; it now costs 1-2 ms. A source that does name one is
-  read as before.
 
 ### Removed
 - **WAF rule 520 (`rule_form_relay_sppb_contact`, family `WAF_FORM_RELAY`).**

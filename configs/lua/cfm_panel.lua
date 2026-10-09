@@ -323,36 +323,45 @@ local function panel_waf_probe(ip, host, uri, args, method, ua, scope, enforce)
 
     -- The complete header set (cfm_waf_util.waf_request_headers): the first
     -- 100 lines alone let a padded request hide the headers the WAF reads. More
-    -- lines than it reads is itself a block-tier hit, enforced like any other.
-    local req_headers, too_many = nil, false
+    -- lines than it reads is, under max_header_lines_mode = "block", itself a
+    -- block-tier hit (when no real rule already blocks), enforced like any
+    -- other; the real rules are evaluated either way.
+    local req_headers, too_many_block = nil, false
     if panel_wutil then
-        local okh, h, tm = pcall(panel_wutil.waf_request_headers)
+        local okh, h, tm, blk = pcall(panel_wutil.waf_request_headers)
         if okh then
-            req_headers, too_many = h, tm
+            req_headers, too_many_block = h, blk
+            if tm and not blk then
+                -- logonly burn-in: logged once per IP a minute (no uri: it is
+                -- client-controlled and percent-decoded), then passed
+                local sh = ngx.shared.cfm_decisions
+                if not sh or sh:add("hdrlines|" .. tostring(ip), 1, 60) then
+                    ngx.log(ngx.WARN, "[cfm_panel_waf] header_lines=over_max action=logonly ip=",
+                            tostring(ip), " host=", tostring(host))
+                end
+            end
         else
             ngx.log(ngx.ERR, "[cfm_panel_waf] waf_request_headers failed, first 100 header lines only: ", tostring(h))
         end
     end
     req_headers = req_headers or ngx.req.get_headers()
-    local okc, hit, reason, _ttl, action, _hits, rule_id
-    if too_many then
-        okc, hit, reason, action = true, true, "WAF_HEADER_LINES", "block"
-    else
-        okc, hit, reason, _ttl, action, _hits, rule_id = pcall(function()
-            return panel_waf.check({
-                uri = uri, args = args or "", method = method,
-                host = host, ip = ip, peer = ip,
-                cookie = ngx.var.http_cookie or "",
-                headers = req_headers,
-                body = "",  -- reduced profile: never buffer the panel body
-                -- Same dict the web edge passes as SH. cfm_waf's burst detectors
-                -- mutate counters here, but they are gated on web-app auth markers
-                -- (/wp-login.php, /xmlrpc.php, …) AND keyed by (ip,host), so a panel
-                -- URI on a panel Host never tips a web vhost's enforced burst state.
-                shdict = ngx.shared.cfm_decisions,
-                self_origin = false,
-            })
-        end)
+    local okc, hit, reason, _ttl, action, _hits, rule_id = pcall(function()
+        return panel_waf.check({
+            uri = uri, args = args or "", method = method,
+            host = host, ip = ip, peer = ip,
+            cookie = ngx.var.http_cookie or "",
+            headers = req_headers,
+            body = "",  -- reduced profile: never buffer the panel body
+            -- Same dict the web edge passes as SH. cfm_waf's burst detectors
+            -- mutate counters here, but they are gated on web-app auth markers
+            -- (/wp-login.php, /xmlrpc.php, …) AND keyed by (ip,host), so a panel
+            -- URI on a panel Host never tips a web vhost's enforced burst state.
+            shdict = ngx.shared.cfm_decisions,
+            self_origin = false,
+        })
+    end)
+    if too_many_block and not (okc and hit and tostring(action) == "block") then
+        okc, hit, reason, action, rule_id = true, true, "WAF_HEADER_LINES", "block", nil
     end
     if not okc or not hit then return end
     action = tostring(action or "block")

@@ -553,11 +553,12 @@ _M.is_ipv6_literal                    = is_ipv6_literal
 -- every line to the origin: a request padded past line 100 hid every later
 -- header from the WAF (a CVE marker header, a second Content-Type carrying the
 -- boundary, the body headers the PHP field reader needs). So the headers are
--- read up to CFG.max_header_lines (cfm_waf CFG, default 1000) in one call, and
--- a request with more is reported as too_many: the callers refuse it (no
--- client sends that many, and reading them all would let one request build a
--- table of thousands). max_header_lines = 0 turns the refusal off (the first
--- 1000 lines are read, the rest go unseen, as before). Returns headers, too_many.
+-- read up to CFG.max_header_lines (cfm_waf CFG, default 1000, never fewer than
+-- 100) in one call, and a request with more is reported as too_many; the
+-- callers log or refuse it per CFG.max_header_lines_mode (reading them all
+-- would let one request build a table of thousands). max_header_lines = 0:
+-- 1000 lines are read and too_many is never reported. Returns headers,
+-- too_many, block (too_many under max_header_lines_mode = "block").
 function _M.waf_request_headers(req)
   req = req or ngx.req
   local max = tonumber(CFG and CFG.max_header_lines) or 1000
@@ -565,7 +566,8 @@ function _M.waf_request_headers(req)
   if max <= 0 then max = 1000 end
   if max < 100 then max = 100 end
   local h, err = req.get_headers(max)
-  return h, refuse and err == "truncated"
+  local too_many = refuse and err == "truncated"
+  return h, too_many, too_many and CFG ~= nil and CFG.max_header_lines_mode == "block"
 end
 
 return _M
