@@ -1572,10 +1572,11 @@ Key invariants:
 - **POST on `location /` with no Content-Length (chunked, HTTP/2) or a larger one** (since
   2026-10-09): read too, because nginx buffers that location's bodies anyway (the conf sets
   `$cfm_body_buffered`). Only the first `CFM_WAF_BODY_MAX_LEN` (32 KB) is ever scanned.
-  These bodies are in **burn-in**: the request is decided without them, as before. When that
-  check made no hit, a hit the body produces is pushed as logonly; with no hit or a logonly
-  one, it is also logged as `waf_body_burnin would=<action> … waf_rule_id=<id>` (one line a
-  minute per IP). The burn-in corpus is those error-log lines (CFM MCP `edge_error_tail`,
+  These bodies (and a `/?wc-ajax=` body the size / Content-Type rule would not have read) are
+  in **burn-in**: the request is decided without them, as before. When that check made no hit,
+  a hit the body produces is pushed as logonly; with no hit or a logonly one, the strongest
+  hit only the body produces (a rule the body-free check did not) is logged as
+  `waf_body_burnin would=<action> … waf_rule_id=<id>` (one line a minute per IP). The burn-in corpus is those error-log lines (CFM MCP `edge_error_tail`,
   `node="all"`, text `waf_body_burnin`): the pushed record reads like any logonly hit. After a
   clean burn-in, `CFM_WAF_BODY_BUFFERED_ENFORCE=1` (declared with `env` in the edge conf; read
   at worker start) enforces them. Cost: the WAF runs twice on these requests during burn-in,
@@ -1731,9 +1732,12 @@ Body-aware detectors (`php_wrappers`, `ssrf_proto`, `js_proto`) consume a normal
 |---|---|---|
 | `urlencoded` | `8192`  | `application/x-www-form-urlencoded` |
 | `json`       | `32768` | a `json` subtype or `+json` suffix (`application/json`, `application/vnd.api+json`, `text/json`; since 2026-10-09, before that `application/json` only) |
-| `multipart`  | `16384` | `multipart/form-data` (matched first) |
+| `multipart`  | `16384` | `multipart/form-data` |
 | `xml`        | `16384` | an `xml` subtype or `+xml` suffix (`application/xml`, `text/xml`, `application/soap+xml`) |
 | `other`      | `2048`  | Everything else (incl. unset / unknown / `text/plain`) |
+
+Every type the header names counts and the largest budget wins (since 2026-10-09), so a
+parameter naming another type (`application/json; x=multipart/form-data`) never shrinks it.
 
 That budget caps the **body** side. The query side of the same string gets the request-line
 budget (`uri_scan_len`, 8192) when that is larger (since 2026-10-09; on a GET the "other"

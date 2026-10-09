@@ -515,8 +515,15 @@ local function waf_should_read_body(uri, method)
   if has(uri, "/wp-includes/")    then return true end
   if has(uri, "/wc-api/")         then return true end
   -- `uri` is the path ($uri carries no query string): WooCommerce's
-  -- `/?wc-ajax=…` endpoint is matched on the query, by argument name.
-  if ("&" .. lower(ngx.var.args or "")):find("&wc-ajax=", 1, true) then return true end
+  -- `/?wc-ajax=…` endpoint is matched on the query, by argument name. This
+  -- entry was dead until 2026-10-09: a body the size/CT gate would not have
+  -- read here is new to the WAF, so it is in burn-in like the buffered ones.
+  if ("&" .. lower(ngx.var.args or "")):find("&wc-ajax=", 1, true) then
+    if not (wutil_ok and wutil.waf_body_gate(ct, cl, CFG.waf_body_read_max_cl, false)) then
+      ngx.ctx.cfm_body_burnin = true
+    end
+    return true
+  end
   if has(uri, "/administrator/")  then return true end
   if has(uri, "/components/")     then return true end
   if has(uri, "/modules/")        then return true end
@@ -1447,6 +1454,9 @@ if CFG.debug_headers then ngx.header["X-CFM-Clearance"] = clearance_status end
 -- UNCLEARED replay — the loop they exist to stop.
 local clearance_allow = clearance_ok
 
+-- Burn-in (Step 2): the strongest of the body's own hits is the one recorded.
+local BURNIN_SEV = { logonly = 1, challenge = 2, challenge_v2 = 3, block = 4 }
+
 -- Set by a logonly WAF hit, which records and pushes it, then goes on through
 -- Steps 2b-4 like a clean request (it used to route to the origin there and
 -- then, so an IP block, a vhost challenge, a traffic rule, a throttle and the
@@ -1544,12 +1554,25 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
                    " err=", tostring(b_hit))
           end
         elseif b_hit then
-          if not SH or SH:add("bodyburnin|" .. tostring(ip), 1, 60) then
-            log_ev(ngx.WARN, "[cfm] waf_body_burnin would=", tostring(b_action), " ip=", ip, " host=", host,
-                   " uri=", uri, " reason=", tostring(b_reason), " waf_rule_id=", tostring(b_rule))
+          -- Only the body's own hits: a rule the body-free check above also
+          -- produced (a logonly URI / header rule) fires again here and is
+          -- not the body's. The strongest of the rest is the burn-in record.
+          local seen, best = {}, nil
+          for _, h in ipairs(waf_hits or {}) do seen[tostring(h.waf_rule_id)] = true end
+          for _, h in ipairs(b_hits or {}) do
+            if not seen[tostring(h.waf_rule_id)]
+               and (not best or (BURNIN_SEV[h.action] or 0) > (BURNIN_SEV[best.action] or 0)) then
+              best = h
+            end
           end
-          if not hit then
-            hit, reason, ttl, waf_action, waf_hits, waf_rule_id = true, b_reason, b_ttl, "logonly", b_hits, b_rule
+          if best then
+            if not SH or SH:add("bodyburnin|" .. tostring(ip), 1, 60) then
+              log_ev(ngx.WARN, "[cfm] waf_body_burnin would=", tostring(best.action), " ip=", ip, " host=", host,
+                     " uri=", uri, " reason=", tostring(best.reason), " waf_rule_id=", tostring(best.waf_rule_id))
+            end
+            if not hit then
+              hit, reason, ttl, waf_action, waf_hits, waf_rule_id = true, best.reason, best.ttl, "logonly", b_hits, best.waf_rule_id
+            end
           end
         end
       end

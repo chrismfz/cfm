@@ -859,8 +859,8 @@ function _M.check(ctx)
       if #(args or "") <= CFG.max_scan_len then _norm_args_wide = get_norm_args()
       else
         local n = util.uri_scan_cap()
-        if n < CFG.max_scan_len then n = CFG.max_scan_len end  -- never narrower than get_norm_args
-        _norm_args_wide = normalize(cap(args, n))
+        if n <= CFG.max_scan_len then _norm_args_wide = get_norm_args()  -- never narrower
+        else _norm_args_wide = normalize(cap(args, n)) end
       end
     end
     return _norm_args_wide
@@ -1218,11 +1218,18 @@ function _M.check(ctx)
     -- A raw `+` in the query string read as the space it is there
     -- (`;wget+http://…`), as PHP reads it: normalize() leaves it as is. The
     -- path's `+`, and a `%2B`, stay a literal plus. This rule's markers only.
-    local rce_s = (args or ""):find("+", 1, true) and util.scan_str(uri, (args:gsub("%+", " "))) or get_scan_ua()
-    if mode ~= "disabled" and det.detect_rce(uri, args, rce_s) then
-      local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-      ttl, mode = mode_ttl_action(mode, ttl)
-      if record("WAF_RCE", ttl, mode, RULE_IDS.rule_rce) then goto done end
+    -- Rebuilt only when a raw `+` could matter: every marker that has a space
+    -- also has a `;` or `|`, so a scan without one needs no second pass.
+    if mode ~= "disabled" then
+      local rce_s = get_scan_ua()
+      if (args or ""):find("+", 1, true) and rce_s:find("[;|]") then
+        rce_s = util.scan_str(uri, (args:gsub("%+", " ")))
+      end
+      if det.detect_rce(uri, args, rce_s) then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        ttl, mode = mode_ttl_action(mode, ttl)
+        if record("WAF_RCE", ttl, mode, RULE_IDS.rule_rce) then goto done end
+      end
     end
   end
 
