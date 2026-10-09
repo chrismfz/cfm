@@ -285,9 +285,29 @@ local function begins(s, prefix)
   return string.sub(s, 1, #prefix) == prefix
 end
 
--- %XX decode, one pass: cfm_urldecode, the edge's one decoder (shared with
--- cfm_cache's cookie matching).
-local url_decode_once = require("cfm_urldecode").percent
+-- HEX_BYTE["2e"] = "." for every %XX pair, either hex case: a gsub with a
+-- table replacement decodes without a Lua call per escape (the function form
+-- did string.char(tonumber(h, 16)) for each). Every pair %x%x can match is a
+-- key, so nothing falls through to the literal match. The detectors (the PHP
+-- form decoder, the filename*= check) call url_decode_once; the table itself
+-- stays private. scripts/tests/cfm_waf_hex_decode_test.lua pins it to the
+-- function form over all byte pairs.
+local HEX_BYTE = {}
+do
+  local hx = "0123456789abcdef"
+  for i = 0, 255 do
+    local a, b = math.floor(i / 16) + 1, i % 16 + 1
+    for _, x in ipairs({ hx:sub(a, a), hx:sub(a, a):upper() }) do
+      for _, y in ipairs({ hx:sub(b, b), hx:sub(b, b):upper() }) do
+        HEX_BYTE[x .. y] = string.char(i)
+      end
+    end
+  end
+end
+
+local function url_decode_once(s)
+  return (s:gsub("%%(%x%x)", HEX_BYTE))
+end
 
 local function normalize(s)
   if not s or s == "" then return "" end
