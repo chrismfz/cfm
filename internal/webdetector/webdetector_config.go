@@ -275,6 +275,12 @@ type Config struct {
 	AbuseShadowDCFracMinReq  int     // ABUSE_SHADOW_DCFRAC_MIN_REQ (min total requests, guards tiny vhosts)
 	AbuseShadowDCFracMinIPs  int     // ABUSE_SHADOW_DCFRAC_MIN_IPS (min distinct datacenter IPs — a spread, not one)
 
+	// Signal O (abuse_shadow_origin403.go): per-IP burst of POSTs the ORIGIN
+	// answered 403 on one vhost. Log-only; gated under AbuseShadow, default-on
+	// with it.
+	AbuseShadowOrigin403       bool // ABUSE_SHADOW_ORIGIN403 (default on under ABUSE_SHADOW)
+	AbuseShadowOrigin403PerMin int  // ABUSE_SHADOW_ORIGIN403_PER_MIN (origin-403 POSTs per minute; default 30)
+
 	// Optional: volume-based (uniqIP) auto under-attack mode with hysteresis.
 	// Useful for sophisticated crawlers that avoid errors but spray many unique IPs.
 	ChallengeSuspiciousUniqIP    bool // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP (1/0)

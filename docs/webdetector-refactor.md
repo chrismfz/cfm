@@ -328,6 +328,30 @@ watch them accumulate from the gateway. Contract:
   "Signal C (rate outlier)" — but Signal C shipped in I2 above; the open items
   here were Signal B and the Signal D idea in §4b, both dropped 2026-09-29 —
   master plan §5.)*
+- [x] **Signal O** (2026-10-08) — `origin_403_burst`: an IP sending >= 30
+  POSTs/min to one vhost that the ORIGIN answered 403 (an origin WAF —
+  Wordfence/ModSecurity — refusing them while CFM let them through). Case: the
+  CVE-2026-19632 exploit on titan (115 admin-ajax POSTs in a minute, all
+  Wordfence 403s, nothing from CFM). Fleet read of the retained edge logs
+  (09-15..10-08): almost only scanner swarms on speedhost (668 bursts / 45 IPs
+  in ~3 weeks at >= 30/min), plus the titan attack. "Origin answered" =
+  `LogRec.Upstream` (the edge logged an upstream time). Excluded at ingest:
+  WordPress's own `-1`/`0` refusal on admin-ajax/admin-post (<= 48 bytes, so a
+  gzipped one too — real visitors on a cached page with a stale nonce send
+  bursts of these: liloteddykidsworld.gr, 3 378 in the logs; Googlebot too),
+  and paths whose upstream is not the site (`/__cfm*`, `/cfm-admin`,
+  `/cpanelwebcall`, `/cpsessN/` on the panel listeners). A crossing is logged
+  one minute later with the PEAK minute (`post403`, `paths`, `reqs` = every
+  request from the IP to the host in that minute — the FP read); the minute
+  also lets the async PTR/FCrDNS finish, so a verified crawler logs
+  `exempt_goodbot`. `abuse_shadow` returns `would_ban`,
+  `origin_403_exempt_goodbot` and `top_origin_403`. Open burn-in questions: are
+  the speedhost 107-byte 403s on `/wp-json/` an origin WAF or WordPress's own
+  REST nonce refusal (`rest_cookie_invalid_nonce`, ~90 bytes)? And before any
+  promotion, a shared egress IP the edge does not unwrap reads as one source. Knobs `ABUSE_SHADOW_ORIGIN403` (default on under the
+  master) and `ABUSE_SHADOW_ORIGIN403_PER_MIN` (30). Silent on a node without
+  the edge (the Apache log has no upstream time). Promotion target, after the
+  burn-in: a soft-TTL ban through the autoblock sink.
 - [ ] **I6** — promote whatever the data justifies to per-IP/subnet challenge.
   *(Frozen with the Track-1 shadow signals until the next Class-2 flood.)*
 - [ ] **I7** — smarter vhost-wide arm on concentration signals. *(Superseded

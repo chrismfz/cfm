@@ -11,7 +11,7 @@
 -- Public API:
 --   _M.enabled() -> bool
 --   _M.check(ctx) -> hit(bool), reason(string), ttl_sec(int), action(string)
---   _M.should_push(shdict, ip, reason, action) -> bool
+--   _M.should_push(shdict, ip, reason, action, rule_id) -> bool
 --
 -- ctx fields expected from caller:
 --   uri, args, method, host, ip, peer, cf_ip, cookie, shdict, headers, body
@@ -243,6 +243,9 @@ local CFG = {
   rule_cve_gravity_smtp = "block", -- CVE-2026-4020: Gravity SMTP (<=2.1.4) unauth sensitive-info exposure. REST route /gravitysmtp/v1/tests/mock-data has permission_callback=true and dumps the full System Report (PHP/DB/server versions, paths, plugins, API keys/tokens). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate — the only legit caller is the wp-admin settings screen, which carries the logged-in cookie.
   rule_cve_sppagebuilder_upload = "block", -- CVE-2026-48908: Joomla SP Page Builder (com_sppagebuilder) asset.upload* (uploadCustomIcon/uploadImage/uploadFont) — unauth arbitrary file upload->RCE ("ANTONKILL", actively exploited 2026-07). Runs before rules 401/414 for CVE attribution. Keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content); reuses the hardened upload detectors. Near-zero FP (a legit icon/image/font upload never carries PHP). Body-budget caveat: a php entry past waf_body_max_len is ClamAV's backstop.
   rule_cve_wp_pagename_traversal = "block", -- CVE-2026-87902 (GHSA-7hp8-65ch-5whp): WordPress core 4.7.0–7.1.1 unauth page-template path traversal. get_page_template() builds page-{$pagename}.php from the url-decoded `pagename` query var without the `..` check, so a readable local .php outside the theme gets included (RCE via pearcmd.php when register_argc_argv=On). Fires on a `pagename` value (query string, urlencoded or multipart POST — WP reads $_POST first) holding a `..` segment; a real pagename is a slug path and never does (near-zero FP). The pretty-permalink route (path -> pagename) is rule 103. Armed like every WAF_CVE block rule: 6h ban + WAF/CVE-2026-87902 alert.
+  rule_cve_translatepress_reset_preview = "block", -- CVE-2026-19632 (TranslatePress <= 3.3.1, fixed 3.3.2): `trp-edit-translation` on a password-reset request (wp-login.php lostpassword/retrievepassword, or WooCommerce's lost-password POST) forces translation preview so the reset mail — key included — is stored as a translatable string. Its one legitimate source is the editor preview, which adds it to every form; a hit with a WordPress login cookie is filed under id 10020 (same mode, autoblock held in code), one without under 10018 (armed: 6h ban + WAF/CVE-2026-19632 alert). Fleet sightings 09-15..10-08: the titan attack only.
+  rule_cve_translatepress_reset_preview_authed = "block", -- CVE-2026-19632, 10018's request WITH a WordPress login cookie: most likely a translator submitting a lost-password form inside the editor preview (the preview adds the parameter to every form). Edge 403 only; autoblock held in code (RULE_10020 = 0) so the translator is not banned.
+  rule_cve_translatepress_id_lookup = "block", -- CVE-2026-19632 second leg: unauthenticated action=trp_get_translations_regular with string_ids reads stored strings back by id. Only the logged-in editor (trp-editor.js) sends string_ids; gated on no wordpress_logged_in_ cookie (FP filter, a junk cookie bypasses it). Edge block; autoblock held per rule (RULE_10019 = 0): a translator whose login expired mid-session would otherwise be banned.
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
 
   -- [top-4]  Upload controls
@@ -643,6 +646,9 @@ local RULE_IDS = {
   -- vBulletin runMaths CVE-2026-61511 block rule — see WAF_CVE.md "Removed".
   rule_cve_elementor_pro_form_upload = 10016,
   rule_cve_wp_pagename_traversal = 10017,
+  rule_cve_translatepress_reset_preview = 10018,
+  rule_cve_translatepress_reset_preview_authed = 10020,
+  rule_cve_translatepress_id_lookup = 10019,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -839,6 +845,14 @@ function _M.check(ctx)
   local function get_body_lc()
     if not _body_lc then _body_lc = lower(cap(body or "", CFG.max_scan_len)) end
     return _body_lc
+  end
+
+  -- The form fields PHP registers ($_GET, and $_POST for a POST), parsed
+  -- once and shared by the field-keyed CVE rules (10017, 10018/10019/10020).
+  local _php_fields
+  local function get_php_fields()
+    if not _php_fields then _php_fields = det.php_request_fields(m_lower, args, body, headers, det.PHP_FIELDS_WANT) end
+    return _php_fields
   end
 
   local function get_norm_ab()
@@ -1376,7 +1390,7 @@ function _M.check(ctx)
   do
     local mode = rule_mode(CFG.rule_cve_wp_pagename_traversal, "block")
     if mode ~= "disabled" then
-      local tag = det.detect_cve_wp_pagename_traversal(uri, m_lower, args, body, headers, get_norm_ab())
+      local tag = det.detect_cve_wp_pagename_traversal(uri, m_lower, args, body, headers, get_norm_ab(), get_php_fields)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_87902:WORDPRESS:" .. tag, ttl, mode, RULE_IDS.rule_cve_wp_pagename_traversal) then goto done end
@@ -2205,6 +2219,43 @@ function _M.check(ctx)
     end
   end
 
+  -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018-10020) ──
+  -- Placed after every armed block-tier family, next to traversal, for the
+  -- same reason: 10019 and 10020 block at the edge but their autoblock is
+  -- held in code (heldAutoblockRules), so evaluated earlier a held hit would
+  -- own the headline and take the ban and alert away from an armed rule on
+  -- the same request (`string_ids=1` added to a SQLi POST). 10018 is armed
+  -- and runs first of the three.
+  -- 10018/10020: POST only (a GET of the form sends no mail), reading
+  -- $_REQUEST like WordPress; 10019 any method, also taking
+  -- the query string although get_translations() reads $_POST (a harmless
+  -- over-match). 10020 is the logged-in split of 10018's detector, with its
+  -- own mode and its ban held in code.
+  do
+    local mode_anon = rule_mode(CFG.rule_cve_translatepress_reset_preview, "block")
+    local mode_auth = rule_mode(CFG.rule_cve_translatepress_reset_preview_authed, "block")
+    if mode_anon ~= "disabled" or mode_auth ~= "disabled" then
+      local tag, logged_in = det.detect_cve_translatepress_reset_preview(m_lower, args, body, headers, cookie, get_norm_ab(), get_php_fields)
+      local mode = logged_in and mode_auth or mode_anon
+      if tag and mode ~= "disabled" then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        local id = logged_in and RULE_IDS.rule_cve_translatepress_reset_preview_authed
+                   or RULE_IDS.rule_cve_translatepress_reset_preview
+        if record("WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:" .. tag, ttl, mode, id) then goto done end
+      end
+    end
+  end
+  do
+    local mode = rule_mode(CFG.rule_cve_translatepress_id_lookup, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_translatepress_id_lookup(m_lower, args, body, headers, cookie, get_norm_ab(), get_php_fields)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:" .. tag, ttl, mode, RULE_IDS.rule_cve_translatepress_id_lookup) then goto done end
+      end
+    end
+  end
+
   -- ── Traversal (rule 101) — AFTER every armed block-tier family on purpose ──
   -- rule_traversal is block-tier since 2026-09-05, but its autoblock family
   -- (WAF_TRAVERSAL) is HELD un-armed for burn-in (waf_security_register.go).
@@ -2327,7 +2378,7 @@ function _M.also_rule_ids(hits, headline_id)
   return out
 end
 
-function _M.should_push(shdict, ip, reason, action)
+function _M.should_push(shdict, ip, reason, action, rule_id)
   if not shdict or not ip or ip == "" then return true end
   -- Dedup on (ip, reason FAMILY, action tier).
   --   * FAMILY (the part before the first ":", the same identity
@@ -2344,12 +2395,14 @@ function _M.should_push(shdict, ip, reason, action)
   --     autoblocked (a security under-report and an evasion primitive). Keying
   --     the action guarantees the first block hit of a family always pushes,
   --     while same-tier score/tag floods still collapse to one push per window.
-  -- Caveat for future maintainers: this collapses distinct BLOCK sub-reasons of a
-  -- family to one push/window, which is correct only while each armed family has a
-  -- SINGLE block rule (the Go autoblock is family-keyed at threshold 1). If a
-  -- family ever gains a 2nd block rule AND one is suppressed per-rule (RULE_<id>=0)
-  -- while the family stays armed, a block hit of the suppressed rule could consume
-  -- this window and mask the armed rule's push — revisit the key (add rule_id) then.
+  --   * RULE ID for the block tier (when the caller passes it): a family can
+  --     have several block rules with different autoblock arming — WAF_CVE has
+  --     the armed 10018 next to 10019/10020, which are held per rule
+  --     (RULE_<id> = 0). A family-keyed block window let a held rule's hit
+  --     swallow the armed rule's push for push_cooldown_sec: send the held
+  --     request first, then the real one, and no ban or alert followed. One
+  --     push per (block rule, ip) per window is still bounded by the number of
+  --     block rules. Lower tiers stay family-keyed (Phase 1 only feeds block).
   local fam = (reason and reason:match("^([^:]+)")) or "WAF"
   local key_reason = fam
   if PUSH_KEY_KEEPS_TAG[fam] then
@@ -2372,6 +2425,10 @@ function _M.should_push(shdict, ip, reason, action)
   -- a family-keyed window dropped it for every host after the first; a
   -- push_v2_host_cap budget bounded it, because $host is client-chosen. Both
   -- went once the mark became per IP.
+  local rid = tonumber(rule_id)
+  if action == "block" and rid and rid > 0 then
+    key_reason = key_reason .. "#" .. rid
+  end
   local k  = "wafpush|" .. key_reason .. "|" .. (action or "na") .. "|" .. ip
   local ok = shdict:add(k, 1, CFG.push_cooldown_sec)
   return ok == true

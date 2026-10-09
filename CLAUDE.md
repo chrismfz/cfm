@@ -458,7 +458,11 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   `WAF_TRAVERSAL` since 2026-09-05 (rule 101;
   raw-path rule 103 since 2026-09-22; **held at 0** through its burn-in, see
   below) — those are the only ones that
-  can fire in Phase 1. The rendered `[waf_security]` template is derived from
+  can fire in Phase 1. A held RULE can also
+  ship in code: `heldAutoblockRules` in `waf_security_register.go` is the
+  default for a `RULE_<id>` key, so the hold reaches configs that predate the
+  rule (10019 and 10020, the TranslatePress id-lookup leg and the
+  logged-in reset-preview request). The rendered `[waf_security]` template is derived from
   the same code defaults, so a fresh `detectors.conf` lists exactly these.
 - **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
   default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and
@@ -474,9 +478,15 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   than un-arming the family. Arming a *newly* block-promoted family is still a
   deliberate opt-in decision, after its own burn-in.
 - **The Lua edge de-dups pushes per `(ip, reason family, action tier)`** within `push_cooldown`
-  (`cfm_waf.lua should_push`). Harmless at threshold 1 (first hit is what
-  counts), but an accumulate threshold (e.g. 40) counts distinct cooldown
-  windows, not raw hits — retune when Phase 2 turns on challenge-tier families.
+  (`cfm_waf.lua should_push`) — and, for the `block` tier, per RULE too
+  (since 2026-10-08: a family can mix armed and held block rules, and a held
+  rule's push must not swallow an armed one's). Harmless at threshold 1 (first
+  hit is what counts), but an accumulate threshold (e.g. 40) counts distinct
+  cooldown windows, not raw hits, and two block rules of one family in the same
+  window push twice — retune when Phase 2 turns on challenge-tier families.
+  A held block RULE (`heldAutoblockRules`, e.g. 10019/10020) shadows armed ones
+  exactly like a held family does, so it runs late in `cfm_waf.lua`, next to
+  traversal.
 - **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
   API reporting and email are the section sink's job (`autoblock_sink.go`) —
   don't reimplement them. A plain alert blocks per the section `BLOCK` policy;
@@ -543,7 +553,14 @@ points:
   promotion would have mis-armed autoblock. Key the
   detector on the exact endpoint/marker, reuse hardened helpers
   (`detect_upload_content`, not a raw `<?php` scan), and decide autoblock intent
-  in the same change.
+  in the same change. A rule keyed on a request FIELD reads it through
+  `php_request_fields` (`cfm_waf_detectors.lua`), never a hand-rolled split: a
+  field the edge reads differently from PHP is a bypass, and three review
+  rounds on 10017-10020 kept finding new ones (media type in a parameter,
+  multipart continuation lines, the 5120-byte line cut, `name==`, a decoy past
+  `max_input_vars`). Change that reader only with
+  `scripts/tests/php_request_fields_oracle.py check` passing against a real PHP
+  (`php -S` runs the same rfc1867.c as php-fpm), then `record` the CI fixture.
 
 ### Concurrency / process lifecycle
 Early bugs included zombie/unreaped detector tailer subprocesses, panics,

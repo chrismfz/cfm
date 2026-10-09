@@ -17,7 +17,41 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Shadow signal for bursts the origin's own WAF blocks.** An IP that sends
+  30 or more POSTs a minute to one site, all answered 403 by the site's own
+  WAF (Wordfence, ModSecurity), is now logged to `cfm.abuse_shadow.log` as
+  `signal=origin_403_burst verdict=would_ban`. CFM had let such traffic through
+  silently: the TranslatePress exploit on titan was 115 of them in a minute.
+  WordPress's own "-1" nonce refusals are left out, because real visitors on a
+  cached page send bursts of those, and verified good bots are logged as
+  exempt. The `abuse_shadow` MCP tool lists the top offenders with how many
+  ordinary requests each sent. Log-only: nothing is challenged or blocked. On
+  by default wherever `ABUSE_SHADOW = 1`; the threshold is
+  `ABUSE_SHADOW_ORIGIN403_PER_MIN`. The edge's log feed to the daemon gains a
+  13th column naming the upstream, so CFM's own challenge server's 403s are not
+  mistaken for the site's; until the edge reloads after the upgrade they can be.
+
 ### Security
+- **WAF rules 10018/10019/10020 block the TranslatePress account takeover
+  (CVE-2026-19632, TranslatePress 3.3.1 and older; fixed in 3.3.2).** An
+  attacker asks for the admin's password reset in translation preview, so the
+  plugin stores the reset mail, key included, as a translatable string. They
+  then read it back through an AJAX action that answers anyone. Seen on titan
+  on 2026-10-08 (villadimitramykonos.com). Rule 10018 blocks the reset request
+  (`trp-edit-translation` on a lost-password POST); the fleet's retained
+  edge logs show the attack and nothing else. It is armed: a 6 h ban and a
+  `WAF/CVE-2026-19632` alert. The plugin's editor preview adds that parameter
+  to every form, so the same request from a logged-in user, most likely a
+  translator, is filed as rule 10020: still a 403, but no ban. Rule 10019 blocks
+  the read-back (`trp_get_translations_regular` with `string_ids` and no
+  WordPress login). Its ban is held in code (`RULE_10019 = 1` arms it), because
+  a translator whose login expired with the editor open sends the same request.
+  The rules read the request the way PHP does and count any value of a
+  repeated field. Updating the plugin is still the fix: an admin whose own
+  language is a secondary site language has the mail stored without the preview
+  trick, and a field placed where the WAF reads no body (past its 32 KB window,
+  or a chunked POST outside its body allowlist) is not seen.
 - **A crafted POST could freeze an edge worker for seconds (WAF rule 520,
   removed).** Rule 520 (SP Page Builder contact-form relay, released
   2026.10.06) scanned the posted recipient with a pattern that slows down
@@ -27,6 +61,30 @@ back-filled here — see the git/PR history for that period.
   up every worker. The rule is removed (see Removed). Until this release is
   installed, turn it off with `rule_form_relay_sppb_contact = "disabled"` in
   `/etc/cfm/cfm_waf_config.lua`.
+
+### Fixed
+- **WAF rules that match a request parameter by name now read the name the way
+  PHP does.** PHP ends a name at a NUL byte and turns `.`, a space or an
+  unmatched `[` into `_`, so `pagename%00x=…` reached WordPress as `pagename`
+  while rule 10017 (CVE-2026-87902) did not see it. Rule 10017 and the new
+  TranslatePress rules now match those forms. Rule 10017 also reads the body
+  the way PHP parses it: the parser is chosen by the Content-Type's media type,
+  and multipart bodies follow PHP's own rules (header continuation lines, the
+  5120-byte line cut, quoting). Before, a urlencoded body whose Content-Type
+  merely mentioned `multipart/form-data`, or a multipart field name split over
+  two header lines, hid a `pagename` traversal from it. The reader is checked
+  against a real PHP (`scripts/tests/php_request_fields_oracle.py`).
+
+### Changed
+- **A `RULE_<id>` line in `[waf_security]` now honours an inline comment.**
+  `RULE_511 = 2 ; note` used to fail to parse and silently fall back to the
+  family default; it now applies 2, like every other detectors.conf scalar
+  since the earlier inline-comment fix. Check your `RULE_` lines if any carry
+  a comment.
+- **WAF hit pushes are de-duplicated per block rule, not per family.** A
+  family can mix armed and held block rules (the TranslatePress rules 10018
+  vs 10019/10020), and a held rule's hit used to suppress the armed rule's
+  ban and alert for the same IP for a minute.
 
 ### Removed
 - **WAF rule 520 (`rule_form_relay_sppb_contact`, family `WAF_FORM_RELAY`).**

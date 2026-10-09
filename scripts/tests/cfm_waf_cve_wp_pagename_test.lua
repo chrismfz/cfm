@@ -78,6 +78,7 @@ fires(get("/", "pagename=templates%2F..%2F..%2Fplaceholder"), "percent-encoded s
 fires(get("/", "pagename=templates/%2e%2e/%2E%2E/placeholder"), "percent-encoded dots (mixed case)", ARG)
 fires(get("/", "pagename=templates/%252e%252e/placeholder"), "double-encoded dots", ARG)
 fires(get("/", "pagename=templates%5c..%5cplaceholder"), "backslash separators", ARG)
+fires(get("/", "pagename%00z=templates/../../placeholder"), "NUL-cut name (PHP ends the name at NUL)", ARG)
 fires(get("/", "pagename=templates/.."), "trailing .. segment", ARG)
 fires(get("/", "page%6eame=templates/../../placeholder"), "percent-encoded key (PHP decodes keys)", ARG)
 fires(get("/", "pagename=a%26/../../placeholder"), "%26 inside the value cannot split it", ARG)
@@ -93,6 +94,14 @@ fires({ uri = "/", raw_uri = "/", method = "POST", ip = "203.0.113.84", body = "
 
 fires(post("/", "pagename=templates%2F..%2F..%2Fplaceholder", "application/x-www-form-urlencoded"),
       "urlencoded POST body ($_POST wins in WP)", BODY)
+fires(post("/", "--b\r\nContent-Disposition: form-data; name=\"page\r\nname\"\r\n\r\ntemplates/../../placeholder\r\n--b--\r\n",
+           "multipart/form-data; boundary=b"),
+      "multipart name split by a colon-less continuation line (PHP joins it)", BODY)
+fires(post("/", "--\r\nContent-Disposition: form-data; name=\"page\r\nname\"\r\n\r\n../../x\r\n----\r\n",
+           "multipart/form-data; boundary="),
+      "multipart with an empty boundary and a split name (only the reader reads it)", BODY)
+fires(post("/", "pagename=templates%2F..%2F..%2Fplaceholder", "application/x-www-form-urlencoded; x=multipart/form-data"),
+      "urlencoded body with a parameter naming multipart (SAPI reads the media type)", BODY)
 local MP = "multipart/form-data; boundary=----B"
 fires(post("/", "------B\r\nContent-Disposition: form-data; name=\"pagename\"\r\n\r\n" ..
                 "templates/../../placeholder\r\n------B--\r\n", MP),

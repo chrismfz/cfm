@@ -64,7 +64,51 @@ import (
 // one-line deletion here (plus the reference detectors.conf comment). The
 // rationale for each entry lives in the comment above, not in the map.
 var heldAutoblockFamilies = map[string]struct{}{
-	"WAF_TRAVERSAL":  {}, // rules 101 (block since 2026-09-05) + 103 (2026-09-22); held for burn-in (~2 300 scanner IPs/week)
+	"WAF_TRAVERSAL": {}, // rules 101 (block since 2026-09-05) + 103 (2026-09-22); held for burn-in (~2 300 scanner IPs/week)
+}
+
+// heldAutoblockRules are per-rule holds shipped in code: the default for a
+// RULE_<id> key, so the hold reaches hosts whose detectors.conf predates the
+// rule (a reference-config line alone never does). An operator's RULE_<id>
+// in detectors.conf still wins. Use it for a rule whose edge block is right
+// but whose ban can land on a legitimate user, inside a family that stays
+// armed (hold the rule, not the family).
+//
+// 10019 (CVE-2026-19632, TranslatePress id lookup): the edge 403 needs no
+// hold, but a translator whose WordPress login expired while the editor was
+// open sends the same request without the login cookie, and a 6 h ban of the
+// office IP is the wrong answer to that.
+//
+// 10020 (the same CVE's reset-preview request WITH a WordPress login cookie):
+// TranslatePress's editor preview adds `trp-edit-translation` to every form,
+// so a translator submitting a lost-password form there sends it. 10018, the
+// request without a login, stays armed.
+var heldAutoblockRules = map[string]int{
+	"10019": 0,
+	"10020": 0,
+}
+
+func wafSecurityRuleOverrides(kv KV) map[string]int {
+	overrides := map[string]int{}
+	for id, n := range heldAutoblockRules {
+		overrides[id] = n
+	}
+	// Any RULE_<id> = N key (the parser keeps arbitrary keys, uppercased) wins
+	// over the family default and over the code hold for that rule id.
+	for k, v := range kv {
+		if !strings.HasPrefix(k, "RULE_") {
+			continue
+		}
+		id := strings.TrimSpace(strings.TrimPrefix(k, "RULE_"))
+		if id == "" {
+			continue
+		}
+		// cleanScalar: an inline `; note` must not silently keep the code hold.
+		if n, err := strconv.Atoi(cleanScalar(v)); err == nil {
+			overrides[id] = n
+		}
+	}
+	return overrides
 }
 
 func wafSecurityFamilies(kv KV) map[string]int {
@@ -119,21 +163,7 @@ func init() {
 
 		families := wafSecurityFamilies(kv)
 
-		// Per-rule-id overrides: any RULE_<id> = N key (parser keeps arbitrary
-		// keys, uppercased) wins over the family default for that rule id.
-		overrides := map[string]int{}
-		for k, v := range kv {
-			if !strings.HasPrefix(k, "RULE_") {
-				continue
-			}
-			id := strings.TrimSpace(strings.TrimPrefix(k, "RULE_"))
-			if id == "" {
-				continue
-			}
-			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-				overrides[id] = n
-			}
-		}
+		overrides := wafSecurityRuleOverrides(kv)
 
 		cfg := wafsec.Config{
 			Every:           kvDur(kv, "EVERY", defEvery),

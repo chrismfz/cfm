@@ -39,14 +39,59 @@ type LogRec struct {
 	RT, URT float64
 	UA      string
 	Ref     string
+	// Upstream is true when the urt column held a value (not "-"): the edge
+	// proxied the request and an upstream answered it — the site's origin OR
+	// CFM's own challenge server (see UpstreamName). A request the edge
+	// answered itself (WAF/IP block, cache hit) has no upstream.
+	// Kept apart from URT because a fast origin logs "0.000" and a retried
+	// one "0.1, 0.2" (which URT parses as 0). The combined format and the
+	// Apache origin log never set it.
+	Upstream bool
+	// UpstreamName is the edge's $cfm_upstream (log-cfm.lua column 12):
+	// "cfm_apache*" is the site's origin, "cfm_challenge" CFM's own challenge
+	// server (a challenged request HAS an upstream time). "-" when the edge
+	// routed nowhere it names; empty when the line had no such column (an
+	// edge on the older 12-column module, the combined format).
+	UpstreamName string
 }
 
 // parseTSV parses the TSV log format used by access_cfm_tsv.log.
 // ts ip host method uri proto status bytes rt urt ref ua
+// isUpstreamName: "-" or an nginx upstream name as the confs write them
+// (cfm_apache, cfm_challenge, ...): lowercase letters, digits and `_`.
+func isUpstreamName(s string) bool {
+	if s == "-" {
+		return true
+	}
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func parseTSV(line string) (LogRec, bool) {
-	f := strings.SplitN(line, "\t", 12)
+	// 12 columns, or 13 with the upstream name (log-cfm.lua). The file-based
+	// TSV formats (log_format ... escape=none) can carry a raw TAB inside the
+	// Referer or UA, so a 13th field counts as the upstream name only when it
+	// looks like one; otherwise it is folded back into the UA, as the 12-way
+	// split always did.
+	f := strings.SplitN(line, "\t", 13)
 	if len(f) < 12 {
 		return LogRec{}, false
+	}
+	upName := ""
+	if len(f) == 13 {
+		if isUpstreamName(f[12]) {
+			upName = f[12]
+		} else {
+			f[11] += "\t" + f[12]
+		}
 	}
 	ts, _ := strconv.ParseFloat(f[0], 64)
 	st, _ := strconv.Atoi(f[6])
@@ -72,6 +117,9 @@ func parseTSV(line string) (LogRec, bool) {
 		URT:    ut,
 		UA:     strings.ToLower(f[11]),
 		Ref:    strings.ToLower(f[10]),
+
+		Upstream:     f[9] != "" && f[9] != "-",
+		UpstreamName: upName,
 	}, true
 }
 
@@ -148,6 +196,13 @@ type bucketSW struct {
 	ipsMalRule map[string]map[int]int // ip -> ruleIndex -> count
 
 	ips403WAF map[string]int // WAF-origin 403s (from OpenResty cfm_waf.lua via observe)
+
+	// Origin-403 POST burst (abuse_shadow Signal O, abuse_shadow_origin403.go):
+	// POSTs the ORIGIN answered 403 (an origin WAF such as Wordfence/ModSecurity),
+	// per IP, and the distinct paths they hit. Maintained only while the shadow
+	// signal is enabled.
+	ipsOrigin403POST map[string]int
+	ipOrigin403Paths map[string]map[uint64]struct{}
 
 	// Challenge paths counters (for "challenge-only" actions)
 	ipsChalPath map[string]int
@@ -464,14 +519,24 @@ type Engine struct {
 	// last context for an IP that matched a challenge rule (host/uri/pattern)
 	chalLast map[string]chalCtx
 
+	// Signal O (abuse_shadow_origin403.go): bursts seen over the threshold and
+	// waiting out their first minute so the line carries the peak. Entries live
+	// about a minute. Guarded by o403Mu.
+	o403Mu    sync.Mutex
+	o403Track map[string]*origin403Track
+
 	// VHOST under-attack state (auto suspicious)
-	vhostMu          sync.Mutex
+	vhostMu sync.Mutex
+
 	vhostUnderAttack map[string]bool
 	vhostLastChange  map[string]time.Time
 	// Throttle for the "suppressed_by_exclude" audit line (once per holddown
 	// window per host), so a sustained excluded-under-attack vhost doesn't spam
-	// the challenge log every reconcile cycle. Guarded by vhostMu.
+	// the challenge log every reconcile cycle. Guarded by vhostMu. Also keyed
+	// per (host, ip) by the abuse-shadow signals, so expired entries are swept
+	// (vhostSuppressSwept: at most once a minute, once the map is large).
 	vhostSuppressLoggedAt map[string]time.Time
+	vhostSuppressSwept    time.Time
 
 	// NEW: vhost uniqpaths state (phase 1) to avoid log spam + hysteresis
 	vhostUniqPathsActive     map[string]bool
@@ -1612,6 +1677,14 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 
 	// Per-IP error thresholds (optional)
 	if rec.IP != "" {
+		if e.cfg.AbuseShadow && e.cfg.AbuseShadowOrigin403 && isOrigin403POST(rec, p) {
+			if b.ipsOrigin403POST == nil {
+				b.ipsOrigin403POST = make(map[string]int)
+				b.ipOrigin403Paths = make(map[string]map[uint64]struct{})
+			}
+			b.ipsOrigin403POST[rec.IP]++
+			addHashToSetWithCap(b.ipOrigin403Paths, rec.IP, hash64(p), origin403PathCap)
+		}
 		if rec.Status == 403 && e.cfg.IP403Count > 0 {
 			// Static asset paths are excluded (as with the 404 and 40x-combo
 			// counters below). Origin-emitted 403s on images/css/js — hotlink

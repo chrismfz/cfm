@@ -13,7 +13,7 @@
 --   ds|<ip>|<host>|<scope>                     static-asset decision cache
 --   geo|<ip>                                   country-code cache (cfm_geocache dict; direct-deleted, F25)
 --   ok_touch|<ip>|<host>|<scope>               solved-IP touch gate
---   wafpush|<reason>|<ip>                      WAF push cooldown (IP is the LAST field)
+--   wafpush|<family>[:<tag>|#<rule id>]|<action>|<ip>  WAF push cooldown (IP is the LAST field)
 --   panel_cooldown|<ip>|<host>                 panel challenge cooldown (cfm_panel)
 --   panel_ok|<ip>|<host>                       panel challenge passed/bypass
 --   panel_loop|<ip>|<host>                     panel challenge loop counter
@@ -175,7 +175,9 @@ function _M.purge_ip(ip)
       -- "stuck behind a challenge" state, so it must be cleared on unblock.
       if parts[2] == ip then plane = "panel" end
     elseif prefix == "wafpush" then
-      -- cfm_waf.lua writes wafpush|<family>[:<tag>]|<action>|<ip>: the IP
+      -- cfm_waf.lua writes wafpush|<family>[:<tag>|#<rule id>]|<action>|<ip>
+      -- (the tag for PUSH_KEY_KEEPS_TAG families, the rule id on the block
+      -- tier): the IP
       -- is the LAST field, not field 2.
       if parts[#parts] == ip then plane = "wafpush" end
     elseif prefix == "tr" then
