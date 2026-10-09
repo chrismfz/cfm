@@ -578,8 +578,8 @@ function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _
   -- its closing quote). A name that goes on past the bytes read matches only
   -- when its head settled it (a NUL or `[...]`), never on the bare word.
   -- What the bounds change: a `name=` inside another name, which PHP reads
-  -- as part of that name (or after only whitespace, which PHP does not
-  -- split parameters on); a name padded past NAME_HEAD with %-encoded
+  -- as part of that name (or after only whitespace or a line break, where
+  -- PHP sees no new parameter); a name padded past NAME_HEAD with %-encoded
   -- spaces, which PHP (it does not decode a multipart name) never reads as
   -- `pagename`; and a `pagename[...]` array whose `]` lies past the head or
   -- after a `;`/space, which WordPress never reads as a page path. The value
@@ -1904,7 +1904,8 @@ local BACKTICK_CMDS = {
 -- (or `[^&]+` when nonempty), restarts at every byte of a long run of key
 -- bytes with no `=` and runs to its end: quadratic (~30 ms on a 2 KB `aaa…`).
 -- The key gmatch finds ending at an `=` is the run of key bytes right before
--- it, cut where the previous match (or the string) began, so each_kv walks
+-- it, cut where the search resumed (the previous match's end, the byte after
+-- a skipped `=`, or the string's start), so each_kv walks
 -- back from each `=` over that run, and resumes at the value's end as
 -- gmatch does. fn returning true stops the walk (and each_kv returns true).
 local KV_DBG_KEY = {}     -- [^&=?]
