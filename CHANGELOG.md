@@ -17,7 +17,34 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **A challenged POST can no longer slip past the WAF through its resume
+  link.** When a POST without a query string was challenged, the client got
+  a resume link carrying a one-time token. Following that link raised an edge
+  error, and under fail-open (the default) the stored POST went to the site
+  without the WAF re-checking its body, traffic rules or the per-IP decision.
+  The client did not even have to solve the challenge: it could follow the
+  link itself, once, from the same IP and site. Only the body it had been
+  challenged with could be sent this way; a request the WAF blocks is never
+  stored. The replay now goes through every check, and one sent without
+  solving is refused while the challenge stands.
+
+### Fixed
+- **A challenged WordPress save is replayed without an edge error.** When a
+  challenged POST had no query string (`/wp-admin/post.php`), its replay
+  after the solve raised a Lua error at the edge (`set_uri_args` got nil);
+  under fail-open (the default) the save still reached the site, but the URL
+  kept the `?cfm_rt=` token; under fail-closed it got a 500 and was lost.
+  Seen on rigel and orion.
+- **The WAF hit-rate counters' background push no longer fails about once
+  a day per node.** It failed with `attempt to index upvalue 'SH' (a nil
+  value)` (every node since September): it read state left over from the
+  request that scheduled it. The next push usually restored the counts, but
+  the last one of an hour could be lost. It now carries what it needs with
+  it, and an error reaching the daemon no longer aborts it either.
+- **`/dev/members.db` and similar paths no longer trip the `/dev/mem` rule
+  (324).** It matched the text anywhere; `/dev/mem` and `/dev/kmem` now have
+  to be the whole name.
 
 ## 2026.10.09
 

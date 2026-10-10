@@ -5368,7 +5368,17 @@ local function search_rce_markers(uri, args, body, scan_ua, patterns, _bl)
   end
   for i = 1, #patterns do
     local p = patterns[i]
-    if has(s, p[1]) then
+    if p[3] then
+      -- A whole name: not followed by a letter, digit or `_` (`/dev/mem` is
+      -- not `/dev/members.db`).
+      local from = 1
+      while true do
+        local a, b = s:find(p[1], from, true)
+        if not a then break end
+        if not s:sub(b + 1, b + 1):find("^[%w_]") then return p[2] end
+        from = a + 1
+      end
+    elseif has(s, p[1]) then
       return p[2]
     end
   end
@@ -5440,9 +5450,10 @@ local ROOTKIT_PATTERNS = {
 
   -- Direct memory devices — extremely strong indicator. Any HTTP request
   -- that mentions /dev/mem or /dev/kmem inside command-execution context
-  -- is overwhelmingly an exploit attempt.
-  { "/dev/mem",                  "DEV_MEM_ACCESS" },
-  { "/dev/kmem",                 "DEV_KMEM_ACCESS" },
+  -- is overwhelmingly an exploit attempt. A whole name (third field): a
+  -- substring match challenged `/dev/members.db` (edge Lua sweep 2026-10-09).
+  { "/dev/mem",                  "DEV_MEM_ACCESS",  true },
+  { "/dev/kmem",                 "DEV_KMEM_ACCESS", true },
 }
 
 function _M.detect_rootkit_artifacts(uri, args, body, _s, _bl)
