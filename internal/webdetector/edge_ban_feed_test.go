@@ -184,4 +184,7 @@ func TestEdgeBanClearedEmptiesTheEdge(t *testing.T) {
 	if r.Ready != nil || len(r.Del) != 1 || r.Del[0] != "34.153.214.160" {
 		t.Fatalf("cleared store: %s, want the ban deleted", raw)
 	}
+	if st := b.EdgeBanStatus(); !st.Cleared || st.Ready {
+		t.Errorf("status %+v, want cleared and not ready", st)
+	}
 }

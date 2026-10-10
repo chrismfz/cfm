@@ -161,8 +161,16 @@ func TestClear(t *testing.T) {
 	s.Add(net.ParseIP("203.0.113.70"), nil, "manual", true)
 	s.Reconcile(snap(now.Add(-time.Minute), nil, blk("203.0.113.70", 0)))
 	s.Clear()
-	if ok, _ := s.Banned("203.0.113.70"); ok || s.Len() != 0 {
-		t.Fatal("Clear left a ban")
+	if ok, _ := s.Banned("203.0.113.70"); ok || len(s.List()) != 0 || !s.Cleared() {
+		t.Fatal("a cleared store still answers")
+	}
+	// The entries stay: a reconcile that works again restores what nft holds.
+	if s.Len() != 1 {
+		t.Fatalf("Clear dropped the entries (len %d)", s.Len())
+	}
+	s.Reconcile(snap(now.Add(-time.Minute), nil, blk("203.0.113.70", 0)))
+	if ok, _ := s.Banned("203.0.113.70"); !ok || s.Cleared() {
+		t.Fatal("after a working reconcile the ban nft holds is not answered")
 	}
 }
 

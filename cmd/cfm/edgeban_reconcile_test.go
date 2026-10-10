@@ -63,8 +63,9 @@ func TestEdgeBanReconcileAllOrNone(t *testing.T) {
 	}
 }
 
-// Three failed reads in a row empty the store and make it answer nothing
-// until a read works again.
+// Three failed reads in a row make the store answer nothing (to the edge
+// too) until a read works again; it keeps its entries, so the bans nft still
+// holds are answered again on recovery.
 func TestEdgeBanReconcileClearsAfterThreeFailures(t *testing.T) {
 	s := newReconcileStore(t, "203.0.113.6")
 	be := &setsFake{sets: map[string][]firewall.SetElementTimed{"block_v4": {{Elem: "203.0.113.6"}}}, fail: map[string]bool{}}
@@ -74,8 +75,8 @@ func TestEdgeBanReconcileClearsAfterThreeFailures(t *testing.T) {
 	for i := 0; i < edgeBanFailClear; i++ {
 		f = edgeBanReconcileOnce(s, be, f)
 	}
-	if s.Ready() || s.Len() != 0 {
-		t.Fatalf("after %d failures: ready=%v len=%d, want emptied and not ready", f, s.Ready(), s.Len())
+	if s.Ready() || !s.Cleared() || len(s.List()) != 0 {
+		t.Fatalf("after %d failures: ready=%v cleared=%v list=%v, want nothing answered", f, s.Ready(), s.Cleared(), s.List())
 	}
 	// A ban added while nft is unreadable is not answered unchecked.
 	s.Add(net.ParseIP("203.0.113.7"), nil, "manual", true)
@@ -83,12 +84,15 @@ func TestEdgeBanReconcileClearsAfterThreeFailures(t *testing.T) {
 		t.Fatal("a ban was answered while nft was unreadable")
 	}
 	be.fail = map[string]bool{}
-	be.sets["block_v4"] = []firewall.SetElementTimed{{Elem: "203.0.113.7"}}
+	be.sets["block_v4"] = []firewall.SetElementTimed{{Elem: "203.0.113.6"}, {Elem: "203.0.113.7"}}
 	if f = edgeBanReconcileOnce(s, be, f); f != 0 {
 		t.Fatalf("recovery: fails=%d", f)
 	}
 	if ok, _ := s.Banned("203.0.113.7"); !ok {
 		t.Fatal("after recovery the ban held by nft is answered again")
+	}
+	if ok, _ := s.Banned("203.0.113.6"); !ok {
+		t.Fatal("a ban from before the failure, still in nft, was lost")
 	}
 }
 

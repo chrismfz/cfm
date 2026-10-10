@@ -18,10 +18,11 @@ import (
 // minute.
 const edgeBanReconcileEvery = 2 * time.Minute
 
-// edgeBanFailClear is how many failed reads in a row empty the store.
+// edgeBanFailClear is how many failed reads in a row stop the store (and
+// the edge) answering bans until a read works again.
 const edgeBanFailClear = 3
 
-// edgeBanFailRemind repeats the "store emptied" warning while reads keep
+// edgeBanFailRemind repeats the "answers no ban" warning while reads keep
 // failing (every hour at the two-minute pace), so it is not one line lost in
 // the log.
 const edgeBanFailRemind = 30
@@ -91,7 +92,7 @@ func readEdgeBanSnapshot(be firewall.Backend) (edgeban.Snapshot, error) {
 // edgeBanReconcileOnce runs one reconcile and returns the failed reads in a
 // row. A failed read leaves the store as it is (a store never checked against
 // nft answers nothing); edgeBanFailClear in a row (the table gone after `cfm
-// disable`, a broken backend) empty it and make it answer nothing until a
+// disable`, a broken backend) Clear it: it answers nothing until a
 // read works again. Logged on the transitions only.
 func edgeBanReconcileOnce(s *edgeban.Store, be firewall.Backend, fails int) int {
 	snap, err := readEdgeBanSnapshot(be)
@@ -108,7 +109,7 @@ func edgeBanReconcileOnce(s *edgeban.Store, be firewall.Backend, fails int) int 
 		logging.Logf("[edgeban] reconcile skipped (%d in a row): %v", fails, err)
 	case fails == edgeBanFailClear:
 		s.Clear()
-		logging.Logf("[edgeban] %d failed reads: store emptied, the edge answers no ban until nft is readable: %v", fails, err)
+		logging.Logf("[edgeban] %d failed reads: the edge answers no ban until nft is readable: %v", fails, err)
 	case fails%edgeBanFailRemind == 0:
 		logging.Logf("[edgeban] still unreadable after %d reads, the edge answers no ban: %v", fails, err)
 	}

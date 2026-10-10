@@ -404,25 +404,22 @@ func (s *Store) Reconcile(snap Snapshot) {
 	}
 }
 
-// Clear empties the store and makes it answer nothing until the next
-// Reconcile (the caller decided nft cannot be read).
+// Clear makes the store answer nothing, to the edge too, until the next
+// Reconcile (the caller decided nft cannot be read: three failed reads, the
+// table gone after `cfm disable`). It keeps the entries: List and Banned
+// answer nothing while not ready, and a reconcile that works again narrows
+// them to what nft still blocks, so a transient read failure does not throw
+// away bans nft still holds.
 func (s *Store) Clear() {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	had := len(s.m) > 0
-	s.m = map[string]Entry{}
-	s.mu.Unlock()
 	// Not ready again, and no allow snapshot: a ban added while nft cannot be
 	// read is never answered unchecked.
 	s.ready.Store(false)
 	s.cleared.Store(true)
-	version.Add(1)
 	s.allow.Store(nil)
-	if had {
-		s.save()
-	}
+	version.Add(1)
 }
 
 // allowSet matches the addresses nft's allow sets accept: hosts, CIDRs and

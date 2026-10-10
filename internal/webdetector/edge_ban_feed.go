@@ -26,7 +26,7 @@ import (
 
 // edgeBanFeedMax bounds the list. The store holds the web-related and manual
 // bans only (not fleet feeds or cfm.deny), a few thousand at most on a busy
-// node; the edge dict (cfm_edgeban, 8m, two slots) holds ~25k.
+// node; the edge dict (cfm_edgeban, 16m) holds two copies of this many.
 const edgeBanFeedMax = 20000
 
 // edgeBanJournalMax is how many changes the journal keeps. An edge further
@@ -73,6 +73,7 @@ type EdgeBanStatus struct {
 	Enabled    bool      `json:"enabled"`
 	Mode       string    `json:"mode"`
 	Ready      bool      `json:"ready"`
+	Cleared    bool      `json:"cleared"` // nft unreadable: the edge was told to drop its copy
 	Store      int       `json:"store"`
 	Published  int       `json:"published"`
 	Epoch      string    `json:"epoch,omitempty"`
@@ -100,6 +101,7 @@ func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) (map[stri
 	if len(items) > edgeBanFeedMax {
 		// Over the cap, keep the longest bans: permanent first, then the
 		// latest expiry (address order would drop a whole storm of new bans).
+		// Many manual permanent bans can thus crowd out fresh autoblocks.
 		sort.SliceStable(items, func(a, c int) bool {
 			ea, ec := items[a].Expires, items[c].Expires
 			if ea.IsZero() != ec.IsZero() {
@@ -284,6 +286,7 @@ func (b *NginxBridge) EdgeBanStatus() EdgeBanStatus {
 	st := EdgeBanStatus{Enabled: edgeban.Enabled(), Mode: edgeban.EdgeMode()}
 	if s := edgeban.Default(); s != nil {
 		st.Ready = s.Ready()
+		st.Cleared = s.Cleared()
 		st.Store = s.Len()
 	}
 	if b == nil {

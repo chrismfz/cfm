@@ -229,6 +229,26 @@ clock = clock + eb.POLL_SEC
 eb.tick(dec, decode)
 timers[#timers].cb(false, unpack(timers[#timers].args))
 check(calls[#calls]:find("&full=1", 1, true), "no live list: ask for the whole list: " .. calls[#calls])
+-- A whole list that does not fit: not switched to, and no poll for
+-- FULL_BACKOFF (each try would evict more live entries).
+d:delete("eb:lock")
+clock = clock + eb.POLL_SEC
+replies[1] = full("e1", 50, { ["192.0.2.88"] = 0 })
+d.full = true
+eb.tick(dec, decode)
+timers[#timers].cb(false, unpack(timers[#timers].args))
+d.full = false
+check(d:get("eb:backoff") ~= nil and logs[#logs]:find("did not fit", 1, true), "a failed whole list starts the backoff and says so")
+local before = #calls
+clock = clock + eb.POLL_SEC
+eb.tick(dec, decode)
+timers[#timers].cb(false, unpack(timers[#timers].args))
+check(#calls == before, "no poll during the backoff")
+-- An invalid expiry in the changes leaves an existing entry alone.
+reset()
+eb.apply(d, full("e1", 1, { ["203.0.113.5"] = 0 }), clock)
+eb.apply(d, delta("e1", 2, { ["203.0.113.5"] = "x" }), clock)
+check(as("203.0.113.5") == "block", "a non-numeric expiry in the changes is skipped, not a delete")
 -- No dict at all.
 ngx.shared = {}
 eb.tick(dec, decode)

@@ -470,8 +470,9 @@ safe).
 `ForceUnblock`, which `cfm unblock` reaches over the API); `cfm allow` (over
 `edge-ban?unban=1`) and a `cfm.allow` host lift it too. Every two minutes a
 reconcile reads the block and allow sets — all of them or none: a failed or
-partial read skips the reconcile, and three in a row empty the store and make
-it answer nothing until a read works — and
+partial read skips the reconcile, and three in a row make it answer nothing,
+to the edge too, until a read works (it keeps its entries; the next working
+read narrows them to nft) — and
 *narrows* the store: an entry nft no longer blocks (expired, unblocked from the
 CLI, flushed) is dropped unless it was written after the read began, and an
 earlier nft expiry clamps it. It never imports from nft. The store persists in

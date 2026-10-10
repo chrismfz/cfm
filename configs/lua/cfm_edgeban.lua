@@ -30,12 +30,13 @@
 -- address left over from an older list carries an older id and never
 -- matches. Changes are written into the live slot directly. Each entry lives
 -- as long as its ban (a permanent one has no TTL), as in nft: with the daemon
--- down the edge keeps enforcing what nft enforces. A full dict evicts its
--- least recently used keys (the old slot's go first: every whole list
--- rewrites the live ones); an evicted live entry comes back with the next
--- whole list, and a lost eb:cur makes the next poll ask for one. A write
--- that fails outright leaves the position where it was (the same changes
--- come again). A daemon whose store was cleared (nft unreadable, the table
+-- down the edge keeps enforcing what nft enforces. The dict is sized for two
+-- copies of the daemon's cap; past that, a write evicts the least recently
+-- used keys (live ones too) or fails. A whole list that fails is not switched
+-- to, and the next whole list waits FULL_BACKOFF (each try would evict more
+-- live entries); a lost live entry comes back with the next whole list, and
+-- a lost eb:cur makes the next poll ask for one. Changes that fail leave the
+-- position where it was (the same changes come again). A daemon whose store was cleared (nft unreadable, the table
 -- gone after `cfm disable`) sends an empty list: the copy is emptied.
 --
 -- A lookup is two dict gets, for a proxied request only.
@@ -67,6 +68,7 @@ local M = {}
 local POLL_SEC   = 5
 local FULL_SEC   = 600
 local LOCK_TTL   = 30    -- frees a lock only if its timer never ran
+local FULL_BACKOFF = 60  -- after a whole list that did not fit
 local LOG_SEC    = 60    -- one log line per address per LOG_SEC
 local CUR_KEY    = "eb:cur"    -- "<slot>|<list id>"
 local POS_KEY    = "eb:pos"    -- "<epoch>:<seq>" last applied
@@ -74,6 +76,7 @@ local MODE_KEY   = "eb:mode"
 local POLLED_KEY = "eb:polled"
 local FULL_KEY   = "eb:full"
 local LOCK_KEY   = "eb:lock"
+local BACKOFF_KEY = "eb:backoff"
 local WOULD_KEY  = "eb:n:would"
 local BLOCK_KEY  = "eb:n:block"
 
@@ -164,13 +167,14 @@ function M.static_gate()
   return ngx.exit(403)
 end
 
--- ttl_for: the dict TTL for an expiry (0 = none, permanent); nil if past.
+-- ttl_for: the dict TTL for an expiry (0 = none, permanent); false if it is
+-- past; nil if it is not a number (missing / null: skipped, never permanent).
 local function ttl_for(exp, now)
   exp = tonumber(exp)
-  if not exp then return nil end -- missing / null: skip, never permanent
+  if not exp then return nil end
   if exp == 0 then return 0 end
   local ttl = exp - now
-  if ttl <= 0 then return nil end
+  if ttl <= 0 then return false end
   return ttl
 end
 
@@ -215,9 +219,9 @@ function M.apply(d, r, now)
     for ip, exp in pairs(r.set) do
       if type(ip) == "string" and ip ~= "" then
         local ttl = ttl_for(exp, now)
-        if not ttl then
-          d:delete(pfx .. ip)
-        elseif not d:set(pfx .. ip, id, ttl) then
+        if ttl == false then
+          d:delete(pfx .. ip) -- expired meanwhile
+        elseif ttl and not d:set(pfx .. ip, id, ttl) then
           return false -- dict full: the same changes come again
         end
       end
@@ -233,6 +237,9 @@ function M.apply(d, r, now)
 end
 
 local function poll(d, dec, decode, full)
+  -- After a whole list that did not fit, no poll for FULL_BACKOFF: the
+  -- daemon would answer an out-of-reach position with the whole list again.
+  if d:get(BACKOFF_KEY) then return end
   local would, blocked = d:get(WOULD_KEY) or 0, d:get(BLOCK_KEY) or 0
   local path = "/nginx/edgeban?would=" .. would .. "&blocked=" .. blocked
   local have = d:get(POS_KEY)
@@ -254,7 +261,11 @@ local function poll(d, dec, decode, full)
       if v and v < 0 then d:set(k, 0) end -- the key was evicted meanwhile
     end
   end
-  M.apply(d, decode(body), ngx.now())
+  local r = decode(body)
+  if not M.apply(d, r, ngx.now()) and type(r) == "table" and r.full then
+    d:set(BACKOFF_KEY, 1, FULL_BACKOFF)
+    ngx.log(ngx.WARN, "[cfm] edge_ban: the whole list did not fit the cfm_edgeban dict; next try in ", FULL_BACKOFF, "s")
+  end
 end
 
 local function poll_cb(premature, dec, decode, full)
