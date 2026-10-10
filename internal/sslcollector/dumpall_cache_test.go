@@ -246,3 +246,29 @@ func TestDumpAllFallbackBuildsOncePerVersion(t *testing.T) {
 		t.Errorf("new version: builds=%d", builds)
 	}
 }
+
+// A fallback payload that lost an entry (a PEM read error) is served but not
+// reused: the next request rebuilds instead of handing the gap to every
+// worker until the next version change.
+func TestDumpAllFallbackDoesNotReuseAnIncompletePayload(t *testing.T) {
+	col, path := newSnapshotCollector(t)
+	_ = os.Remove(path)
+	key := col.exact["a.example.com"].KeyPath + ".a"
+	if err := os.WriteFile(key, []byte("KEYA"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	col.exact["a.example.com"] = &Entry{Fingerprint: "fpA2", CertPath: col.exact["a.example.com"].CertPath, KeyPath: key, NotAfter: time.Now().Add(24 * time.Hour)}
+	if err := os.Rename(key, key+".gone"); err != nil {
+		t.Fatal(err)
+	}
+	b1, _ := col.dumpAllFallback()
+	if strings.Contains(string(b1), `"a.example.com"`) {
+		t.Fatal("setup: the unreadable entry made it in")
+	}
+	if err := os.Rename(key+".gone", key); err != nil {
+		t.Fatal(err)
+	}
+	if b2, _ := col.dumpAllFallback(); !strings.Contains(string(b2), `"a.example.com"`) {
+		t.Error("incomplete fallback payload reused: the host stays missing for every worker")
+	}
+}

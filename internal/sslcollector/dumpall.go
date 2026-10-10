@@ -248,10 +248,12 @@ func (c *Collector) dumpAllFallback() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Reused only under the version it was built for. A payload built across
-	// an index swap carries the older label, so it never matches a newer
-	// version and is rebuilt on the next request.
-	if h, ok := readSnapshotHeaderFrom(bytes.NewReader(body), false); ok && h.Version == ver {
+	// Reused only when complete and under the version it was built for. A
+	// payload built across an index swap carries the older label and is not
+	// complete; one that lost an entry to a transient PEM read error is not
+	// complete either — shared with every worker, the gap would stay until
+	// the next version change (the edge does not read `complete`).
+	if h, ok := readSnapshotHeaderFrom(bytes.NewReader(body), false); ok && h.Complete && h.Version == ver {
 		f.body, f.ver, f.at = body, ver, now
 		// Let it go after the TTL: a ~110 MB buffer must not stay resident
 		// until the next fallback (often hours).
