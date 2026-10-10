@@ -150,6 +150,31 @@ if poll_stats then
   end
 end
 
+-- A fetch already running in this worker blocks a second one on either path.
+if poll_stats then
+  local do_dumpall = upvalue(M.start_background, "do_dumpall")
+  local nested
+  local real_request = package.loaded["resty.http"].new
+  dict_data["lock:dumpall"] = nil
+  package.loaded["resty.http"].new = function()
+    local c = real_request()
+    local req = c.request
+    function c:request(r)
+      if r.path == "/dumpall" and nested == nil then
+        nested = count("/dumpall")
+        do_dumpall(true)  -- a forced fetch while the version fetch runs
+        nested = count("/dumpall") - nested
+      end
+      return req(self, r)
+    end
+    return c
+  end
+  do_dumpall(false)
+  package.loaded["resty.http"].new = real_request
+  check(nested == 0, "a forced fetch inside a running fetch is skipped (got " .. tostring(nested) .. ")")
+  check(dict_data["lock:dumpall"] == nil, "the skipped forced fetch took no shared lock")
+end
+
 -- 32 workers: the stagger shrinks so the last one starts within the window.
 if poll_stats then
   ngx.worker.count = function() return 32 end

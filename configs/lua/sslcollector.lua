@@ -546,16 +546,18 @@ local _dumpall_scheduled = false
 -- worker gets the same bytes), so concurrent fetches cost it no rebuild each.
 local function do_dumpall(shared_lock)
   local lock_key = "lock:dumpall"
+  -- One fetch at a time in this worker, on either path: a forced and a
+  -- version-triggered fetch overlapping in one worker doubled its decode,
+  -- and the older payload landing last rolled the worker back a version.
+  if _dumpall_inflight then
+    return
+  end
   if shared_lock then
     if not dict:add(lock_key, true, LOCK_TTL) then
       return  -- another worker is already running; skip
     end
-  else
-    if _dumpall_inflight then
-      return
-    end
-    _dumpall_inflight = true
   end
+  _dumpall_inflight = true
 
   -- [FIX-A] Record attempt time immediately, before any I/O.
   -- Written to shared dict so all workers see it and respect FORCE_DUMPALL_MIN_RETRY.
@@ -600,9 +602,8 @@ local function do_dumpall(shared_lock)
   -- Always release the lock
   if shared_lock then
     dict:delete(lock_key)
-  else
-    _dumpall_inflight = false
   end
+  _dumpall_inflight = false
 
   if not ok then
     ngx.log(ngx.ERR, "[sslcollector] do_dumpall unhandled error (lock released): ", err)

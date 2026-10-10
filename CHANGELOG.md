@@ -43,9 +43,9 @@ back-filled here — see the git/PR history for that period.
   into a fresh buffer (memory spikes of 50–280 MB in the daemon), and every
   hourly rescan rewrote the snapshot (~18 s) even when nothing had changed.
   The daemon now serves the snapshot file it already keeps (when it is
-  current and complete) and otherwise builds the list once for all workers,
-  rewrites the snapshot only when the list changed, and reads its counts off
-  its front.
+  current and complete) and otherwise builds the list once for the workers
+  asking at the same time, rewrites the snapshot only when the list changed
+  (or the file on disk is incomplete), and reads its counts off its front.
   A host moving to another certificate (one expiring) now also counts as a
   change.
 - **`cfm debug` bundles now carry the CPU and heap profile tops again, and
