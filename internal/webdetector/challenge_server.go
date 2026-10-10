@@ -45,7 +45,7 @@ type ChallengeServer struct {
 	httpSrv *http.Server
 	httpLn  net.Listener
 
-	fw     firewall.Backend // abuse self-protection only (rlFirewallBlock → AddBlock)
+	fw     firewall.Backend // abuse self-protection only (rlFirewallBlock → firewall.ExtendBlock)
 	bridge *NginxBridge     // release path: ClearIP after solve
 
 	cookieLife time.Duration // solved cookie lifetime (cfm_ok) and OK TTL

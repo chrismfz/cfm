@@ -725,6 +725,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 				"key":        a.Key,                   // detector-specific key
 			},
 		}
+		if out.Extra["block_kept"] != "" {
+			ev.Extra["block_kept"] = out.Extra["block_kept"]
+		}
 
 		notify.Enqueue(ev)
 
@@ -732,7 +735,12 @@ func (s *sectionSink) Publish(a core.Alert) {
 		// SEND_TO_BLOCKLIST (leniency) selects the destination list: "lenient"
 		// records centrally for visibility without propagating to the farm,
 		// otherwise the global blocklist.
-		if !sendToAPI {
+		if out.Extra["block_kept"] != "" {
+			// A longer ban was already in place (ExtendBlock kept it): the
+			// shorter TTL must not reach the fleet list either, where a report
+			// could shorten the central entry as AddBlock shortened the local one.
+			out.Extra["send_to_api"] = "kept"
+		} else if !sendToAPI {
 			out.Extra["send_to_api"] = "no"
 			if logging.DebugEnabled() {
 				logging.LogfDETECTOR("[leniency] skipping ReportBlock for %s (section=%s)", ipStr, s.section)

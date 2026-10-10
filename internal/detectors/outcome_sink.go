@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"strings"
 	core "cfm/internal/detectors/core"
 	"cfm/internal/logging"
 )
@@ -55,6 +56,10 @@ func (OutcomeLoggerSink) Publish(a core.Alert) {
 					blocked = "Yes (ttl=" + t + ")"
 				} else {
 					blocked = "Yes (ttl)"
+				}
+				// A longer (or permanent) ban was already in place and stays.
+				if a.Extra["block_kept"] == "longer" {
+					blocked = strings.TrimSuffix(blocked, ")") + "; longer ban kept)"
 				}
 			default:
 				blocked = "Yes"

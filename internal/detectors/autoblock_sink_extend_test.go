@@ -13,7 +13,8 @@ import (
 // the element (as both backends do), AddBlockBatch only adds or extends.
 type sinkSetFake struct {
 	firewall.Backend
-	left map[string]time.Duration // 0 = permanent
+	left    map[string]time.Duration // 0 = permanent
+	reports []int                    // ReportBlock TTLs (seconds)
 }
 
 func (f *sinkSetFake) AddBlock(ip net.IP, _ string, ttl *time.Duration) error {
@@ -25,7 +26,10 @@ func (f *sinkSetFake) AddBlock(ip net.IP, _ string, ttl *time.Duration) error {
 }
 
 // ReportBlock (the fleet report after a block) does nothing here.
-func (f *sinkSetFake) ReportBlock(string, string, string, string, int) error { return nil }
+func (f *sinkSetFake) ReportBlock(_, _, _, _ string, ttl int) error {
+	f.reports = append(f.reports, ttl)
+	return nil
+}
 
 func (f *sinkSetFake) AddBlockBatch(entries []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
 	var cur []firewall.SetElementTimed
@@ -58,5 +62,14 @@ func TestSectionSinkTTLBlockNeverShortens(t *testing.T) {
 	web.Publish(core.Alert{When: time.Now(), Kind: "WEB/403/BOT", Key: ip})
 	if got := fw.left[ip]; got != 7*24*time.Hour {
 		t.Fatalf("after a 1h webdetector block: %v left, want the 7d ban kept", got)
+	}
+	// The kept ban is reported as such, and the shorter TTL never reaches the
+	// fleet list (a report could shorten the central entry).
+	webOut := web.inner.(*capturingSink).got
+	if len(webOut) != 1 || webOut[0].Extra["block_kept"] != "longer" || webOut[0].Extra["blocked"] != "yes" {
+		t.Fatalf("webdetector outcome: %+v, want blocked=yes block_kept=longer", webOut)
+	}
+	if len(fw.reports) != 1 || fw.reports[0] != 7*24*3600 {
+		t.Fatalf("ReportBlock TTLs %v, want only the 7d ban reported", fw.reports)
 	}
 }
