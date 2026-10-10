@@ -355,13 +355,19 @@ func runPProfTop(profile []byte, workDir string) ([]byte, error) {
 // rest is inherited so Go's toolchain discovery (GOROOT, etc.) keeps working.
 //
 // The shared cache holds a binary `cfm debug` runs as root, so it is used
-// only when nobody else can write it: the bundle root (and the cache, if it
-// exists) owned by us and not group/other-writable. `--output /tmp` would
+// only when the bundle root (and the cache, if it exists) is a directory
+// owned by us and not group/other-writable. Only that directory is checked,
+// not its parents: an --output inside a directory someone else controls is
+// as exposed as the bundle itself. `--output /tmp` would
 // otherwise let any local user plant the pprof build root then executes;
 // such a root gets the per-bundle cache (in a fresh 0750 bundle dir).
 func pprofEnv(workDir string) []string {
 	if workDir == "" {
 		return nil
+	}
+	// go refuses a relative GOCACHE ("not an absolute path").
+	if abs, err := filepath.Abs(workDir); err == nil {
+		workDir = abs
 	}
 	cache := filepath.Join(workDir, ".gocache")
 	root := filepath.Dir(workDir)

@@ -93,6 +93,9 @@ func TestPProfEnvSharesTheBuildCacheOnlyUnderAPrivateRoot(t *testing.T) {
 	if env := pprofEnv(""); env != nil {
 		t.Errorf("no workDir: env %v, want the inherited one (nil)", env)
 	}
+	if gc := pprofEnvMap("rel/20261010T155826Z")["GOCACHE"]; !filepath.IsAbs(gc) {
+		t.Errorf("relative --output: GOCACHE %q, want an absolute path (go refuses a relative one)", gc)
+	}
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o750); err != nil {
 		t.Fatal(err)
