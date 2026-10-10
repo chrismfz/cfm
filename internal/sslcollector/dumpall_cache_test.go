@@ -179,3 +179,26 @@ func TestIncompleteSnapshotIsNeitherServedNorKept(t *testing.T) {
 		t.Errorf("after the key came back: %+v, want a complete rewrite", h)
 	}
 }
+
+// A Refresh swapping the index between the payload's version read and its
+// copy of the maps labels the content with a version it does not have: such
+// a payload is not complete, so the snapshot is not trusted at that label.
+func TestPayloadRacingARefreshIsNotComplete(t *testing.T) {
+	col, path := newSnapshotCollector(t)
+	dumpAllAfterStatsHook = func() {
+		col.mu.Lock()
+		col.exact["late.example.com"] = col.exact["a.example.com"]
+		col.mu.Unlock()
+	}
+	t.Cleanup(func() { dumpAllAfterStatsHook = nil })
+	col.WriteSnapshot()
+	h, ok := readSnapshotHeader(path, true)
+	if !ok || h.Complete {
+		t.Fatalf("payload built across an index swap: %+v ok=%v, want complete=false", h, ok)
+	}
+	dumpAllAfterStatsHook = nil
+	col.WriteSnapshot() // same version now, but not complete: rewritten
+	if h, _ := readSnapshotHeader(path, true); !h.Complete || h.ExactN != 2 || h.Version != col.Stats().Version {
+		t.Errorf("rewrite after the race: %+v", h)
+	}
+}

@@ -69,6 +69,10 @@ func stripPrivateKeyBlocks(pemData []byte) []byte {
 	return out.Bytes()
 }
 
+// dumpAllAfterStatsHook runs between BuildDumpAllPayload's version read and
+// its copy of the index. Tests only (a Refresh landing in that window).
+var dumpAllAfterStatsHook func()
+
 // dumpAllPayload is the JSON envelope returned by /dumpall AND written
 // to disk by WriteSnapshot. Keeping a single source of truth for the
 // payload shape ensures the on-disk snapshot is byte-for-byte equivalent
@@ -102,6 +106,9 @@ type dumpAllPayload struct {
 // hostnames.
 func (c *Collector) BuildDumpAllPayload() ([]byte, int, int, error) {
 	st := c.Stats()
+	if dumpAllAfterStatsHook != nil {
+		dumpAllAfterStatsHook()
+	}
 
 	c.mu.RLock()
 	exact := make(map[string]*Entry, len(c.exact))
@@ -190,7 +197,13 @@ func (c *Collector) BuildDumpAllPayload() ([]byte, int, int, error) {
 	}
 
 	out.ExactN, out.WildN = len(out.Exact), len(out.Wild)
-	out.Complete = out.ExactN == len(exactKeys) && out.WildN == len(wildKeys)
+	// The version was read before the maps were copied, and Refresh is not
+	// serialised: a swap in between labels this content with a version it
+	// does not have. Such a payload is not complete — a snapshot trusted as
+	// current at that label would never be rewritten (an unchanged version
+	// is skipped) nor rebuilt for /dumpall.
+	out.Complete = out.ExactN == len(exactKeys) && out.WildN == len(wildKeys) &&
+		c.Stats().Version == st.Version
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	if err := enc.Encode(out); err != nil {
