@@ -735,12 +735,12 @@ func (s *sectionSink) Publish(a core.Alert) {
 		// SEND_TO_BLOCKLIST (leniency) selects the destination list: "lenient"
 		// records centrally for visibility without propagating to the farm,
 		// otherwise the global blocklist.
-		if out.Extra["block_kept"] != "" {
-			// A longer ban was already in place (ExtendBlock kept it): the
-			// shorter TTL must not reach the fleet list either, where a report
-			// could shorten the central entry as AddBlock shortened the local one.
-			out.Extra["send_to_api"] = "kept"
-		} else if !sendToAPI {
+		// A kept ban (ExtendBlock found a longer one) is still reported with
+		// this section's own TTL: the longer local ban may never have reached
+		// the fleet (SEND_TO_API=no, lenient, cfm.deny, a manual ban), and its
+		// full length is a local decision. That the central list should not let
+		// a shorter report cut a longer entry is cfm-web's merge to make.
+		if !sendToAPI {
 			out.Extra["send_to_api"] = "no"
 			if logging.DebugEnabled() {
 				logging.LogfDETECTOR("[leniency] skipping ReportBlock for %s (section=%s)", ipStr, s.section)

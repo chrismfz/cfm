@@ -35,9 +35,9 @@ back-filled here — see the git/PR history for that period.
   1-hour web-detector ban of a scanner turned its 7-day WAF ban into an hour
   (mars, 9 Oct: the scanner was back after the hour). Automatic bans (the
   detector sections, challenge self-protection) now only add or extend a ban;
-  a longer or permanent ban stays, the alert says "longer ban kept", and the
-  shorter time is not reported to the fleet blocklist. Manual bans from the
-  CLI and API still set exactly the time the operator asks for.
+  a longer or permanent ban stays, and the detector log line says "longer ban
+  kept". Manual bans from the CLI and API still set exactly the time the
+  operator asks for.
 - **A challenged WordPress save is replayed without an edge error.** When a
   challenged POST had no query string (`/wp-admin/post.php`), its replay
   after the solve raised a Lua error at the edge (`set_uri_args` got nil);

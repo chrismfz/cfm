@@ -63,13 +63,32 @@ func TestSectionSinkTTLBlockNeverShortens(t *testing.T) {
 	if got := fw.left[ip]; got != 7*24*time.Hour {
 		t.Fatalf("after a 1h webdetector block: %v left, want the 7d ban kept", got)
 	}
-	// The kept ban is reported as such, and the shorter TTL never reaches the
-	// fleet list (a report could shorten the central entry).
+	// The kept ban is marked, and each section still reports its own ban to
+	// the fleet as before (the 7d one may have been local-only).
 	webOut := web.inner.(*capturingSink).got
 	if len(webOut) != 1 || webOut[0].Extra["block_kept"] != "longer" || webOut[0].Extra["blocked"] != "yes" {
 		t.Fatalf("webdetector outcome: %+v, want blocked=yes block_kept=longer", webOut)
 	}
-	if len(fw.reports) != 1 || fw.reports[0] != 7*24*3600 {
-		t.Fatalf("ReportBlock TTLs %v, want only the 7d ban reported", fw.reports)
+	if len(fw.reports) != 2 || fw.reports[0] != 7*24*3600 || fw.reports[1] != 3600 {
+		t.Fatalf("ReportBlock TTLs %v, want each section's own (7d, then 1h)", fw.reports)
+	}
+}
+
+// The detector log line shows a kept ban.
+func TestOutcomeBlockedShowsKeptBan(t *testing.T) {
+	cases := []struct {
+		extra map[string]string
+		want  string
+	}{
+		{map[string]string{"blocked": "yes", "block_mode": "ttl", "ttl": "1h0m0s", "block_kept": "longer"}, "Yes (ttl=1h0m0s; longer ban kept)"},
+		{map[string]string{"blocked": "yes", "block_mode": "ttl", "block_kept": "longer"}, "Yes (ttl; longer ban kept)"},
+		{map[string]string{"blocked": "yes", "block_mode": "ttl", "ttl": "1h0m0s"}, "Yes (ttl=1h0m0s)"},
+		{map[string]string{"blocked": "yes", "block_mode": "permanent"}, "Yes (permanent)"},
+		{nil, "No"},
+	}
+	for _, c := range cases {
+		if got := outcomeBlocked(c.extra); got != c.want {
+			t.Errorf("outcomeBlocked(%v) = %q, want %q", c.extra, got, c.want)
+		}
 	}
 }
