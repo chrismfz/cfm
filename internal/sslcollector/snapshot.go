@@ -1,8 +1,10 @@
 package sslcollector
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,15 +49,6 @@ func snapshotPath() string { return snapshotPathForTests }
 // "no existing snapshot" and race to create one.
 var snapshotMu sync.Mutex
 
-// snapshotHeader is the minimal shape we need to validate the existing
-// on-disk snapshot for the regression guard. Decoding into this avoids
-// pulling cert/key PEMs into memory just to count them.
-type snapshotHeader struct {
-	Version string `json:"version"`
-	Exact   []any  `json:"exact"`
-	Wild    []any  `json:"wild"`
-}
-
 // WriteSnapshot serializes the collector's current cert index and writes
 // it to /var/lib/cfm/sslcollector/dump.json. Best-effort: errors are
 // logged but never returned to callers, because a missing snapshot only
@@ -77,6 +70,24 @@ func (c *Collector) WriteSnapshot() {
 	snapshotMu.Lock()
 	defer snapshotMu.Unlock()
 
+	// Unchanged index (the hourly discovery Refresh, a stat-tick Refresh of
+	// a touched-but-identical file, the watcher and the stat tick both
+	// firing for one change): the file on disk is already this version, so
+	// skip the rebuild — on a 7 800-host node it re-read every PEM and
+	// wrote ~110 MB, taking ~18 s.
+	//
+	// The skip re-stamps the file's mtime: the regression guard below
+	// releases on a snapshot older than regressionGuardMaxStale, and that
+	// age must mean "not confirmed current for an hour", not "unchanged for
+	// an hour" — or a partial scan after a quiet week (a reboot) would
+	// overwrite a good snapshot. Only a Complete one is skipped.
+	path := snapshotPath()
+	if h, ok := readSnapshotHeader(path, false); ok && h.Complete && h.Version != "" && h.Version == c.Stats().Version && !forceSnapshot() {
+		now := time.Now()
+		_ = os.Chtimes(path, now, now)
+		return
+	}
+
 	body, exactN, wildN, err := c.BuildDumpAllPayload()
 	if err != nil {
 		logging.Logf("[sslcollector] snapshot: build payload failed: %v", err)
@@ -87,7 +98,6 @@ func (c *Collector) WriteSnapshot() {
 		return
 	}
 
-	path := snapshotPath()
 	if prevExact, prevWild, ok := readSnapshotCounts(path); ok {
 		prev := prevExact + prevWild
 		next := exactN + wildN
@@ -133,15 +143,142 @@ func (c *Collector) WriteSnapshot() {
 // guard treats the new write as unconditionally safe (better to have a
 // fresh snapshot than to keep a corrupted one).
 func readSnapshotCounts(path string) (int, int, bool) {
-	b, err := os.ReadFile(path)
+	h, ok := readSnapshotHeader(path, true)
+	return h.ExactN, h.WildN, ok
+}
+
+// snapshotHeader is the front of a snapshot: its version and entry counts.
+type snapshotHeader struct {
+	Version      string
+	ExactN       int
+	WildN        int
+	Complete     bool // every indexed name is in it (absent in an older file: false)
+	countsInHead bool
+}
+
+// readSnapshotHeader reads the version (and, with needCounts, the entry
+// counts) off the front of a snapshot without decoding its entries: a
+// snapshot written since 2026-10-10 carries exact_n / wild_n ahead of the
+// entries. An older one has no counts there, so with needCounts its entries
+// are counted one by one as a stream (each decoded and dropped). ok=false
+// for a missing, unreadable or malformed file, or one with no version.
+func readSnapshotHeader(path string, needCounts bool) (snapshotHeader, bool) {
+	f, err := os.Open(path)
 	if err != nil {
-		return 0, 0, false
+		return snapshotHeader{}, false
 	}
+	defer f.Close()
+	return readSnapshotHeaderFrom(f, needCounts)
+}
+
+func readSnapshotHeaderFrom(r io.Reader, needCounts bool) (snapshotHeader, bool) {
 	var h snapshotHeader
-	if err := json.Unmarshal(b, &h); err != nil {
-		return 0, 0, false
+	dec := json.NewDecoder(bufio.NewReaderSize(r, 4096))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return h, false
 	}
-	return len(h.Exact), len(h.Wild), true
+	var haveExact, haveWild, haveVersion bool
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return h, false
+		}
+		key, _ := t.(string)
+		switch key {
+		case "version":
+			if err := dec.Decode(&h.Version); err != nil {
+				return h, false
+			}
+			haveVersion = true
+		case "exact_n":
+			if err := dec.Decode(&h.ExactN); err != nil {
+				return h, false
+			}
+			haveExact, h.countsInHead = true, true
+		case "wild_n":
+			if err := dec.Decode(&h.WildN); err != nil {
+				return h, false
+			}
+			haveWild = true
+		case "complete":
+			if err := dec.Decode(&h.Complete); err != nil {
+				return h, false
+			}
+		case "exact", "wild":
+			if haveExact && haveWild {
+				return h, haveVersion
+			}
+			if !needCounts {
+				// An older snapshot (no counts ahead): its version is all a
+				// caller without needCounts wants, and it is not Complete.
+				return h, haveVersion && h.Version != ""
+			}
+			n, ok := countArray(dec)
+			if !ok {
+				return h, false
+			}
+			if key == "exact" {
+				h.ExactN, haveExact = n, true
+			} else {
+				h.WildN, haveWild = n, true
+			}
+		default:
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return h, false
+			}
+		}
+	}
+	if _, err := dec.Token(); err != nil { // the closing brace: a whole object
+		return h, false
+	}
+	return h, haveVersion && haveExact && haveWild
+}
+
+// countArray counts the elements of the array the decoder is at, decoding
+// and dropping one at a time.
+func countArray(dec *json.Decoder) (int, bool) {
+	if t, err := dec.Token(); err != nil || t != json.Delim('[') {
+		return 0, false
+	}
+	n := 0
+	for dec.More() {
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return 0, false
+		}
+		n++
+	}
+	if _, err := dec.Token(); err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// openCurrentSnapshot opens the on-disk snapshot when it is Complete and holds
+// version, for
+// /dumpall to stream. The version is read off the open file itself, so a
+// snapshot renamed in between is either the old file (still open, still
+// whole) or rejected. ok=false: build the payload instead.
+func openCurrentSnapshot(version string) (*os.File, int64, bool) {
+	if version == "" {
+		return nil, 0, false
+	}
+	f, err := os.Open(snapshotPath())
+	if err != nil {
+		return nil, 0, false
+	}
+	h, ok := readSnapshotHeaderFrom(f, false)
+	st, serr := f.Stat()
+	if !ok || !h.Complete || h.Version != version || serr != nil || !st.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, 0, false
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		_ = f.Close()
+		return nil, 0, false
+	}
+	return f, st.Size(), true
 }
 
 // writeSnapshotAtomic writes body to path via a sibling .tmp file +

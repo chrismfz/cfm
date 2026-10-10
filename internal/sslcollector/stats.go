@@ -26,13 +26,21 @@ func (c *Collector) Stats() Stats {
 	c.mu.RLock()
 	exactN := len(c.exact)
 	wildN := len(c.wildSuffix)
-	// Collect unique Entry pointers (avoid double counting per-host)
+	// Collect unique Entry pointers (avoid double counting per-host), and
+	// which entry serves each name: betterEntry ranks by validity at the
+	// scan time, so a name can move to another (already known) pair as one
+	// expires with no pair changing — the version must move too, or the
+	// workers and the snapshot (WriteSnapshot skips an unchanged version)
+	// keep the old mapping.
 	uniq := map[*Entry]struct{}{}
-	for _, e := range c.exact {
+	names := make([]string, 0, exactN+wildN)
+	for h, e := range c.exact {
 		uniq[e] = struct{}{}
+		names = append(names, "e|"+h+"|"+e.Fingerprint)
 	}
-	for _, e := range c.wildSuffix {
+	for suf, e := range c.wildSuffix {
 		uniq[e] = struct{}{}
+		names = append(names, "w|"+suf+"|"+e.Fingerprint)
 	}
 	c.mu.RUnlock()
 
@@ -67,9 +75,14 @@ func (c *Collector) Stats() Stats {
             e.ChainMTime.UTC().Format(time.RFC3339Nano))
     }
     sort.Strings(keys)
+    sort.Strings(names)
     h := sha256.New()
     for _, k := range keys {
         h.Write([]byte(k))
+        h.Write([]byte{'\n'})
+    }
+    for _, n := range names {
+        h.Write([]byte(n))
         h.Write([]byte{'\n'})
     }
     ver := hex.EncodeToString(h.Sum(nil))

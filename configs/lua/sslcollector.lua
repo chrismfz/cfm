@@ -120,11 +120,13 @@ local OFFLINE_CACHE = (_cfg.offline_cache ~= false)
 -- climbing exponentially, to handle the brief cfm-not-up-yet window
 -- after a reboot).
 -- Resets to POLL_SECS_MIN on any successful /stats response.
--- 60s baseline: a new cert added on the cfm host is visible to running
--- workers within ~60s of the daemon's Refresh() picking it up (fsnotify
--- watcher fires within ~2s, so end-to-end is typically ~1 minute). The
--- /stats roundtrip is a few hundred bytes — cost is trivial.
-local POLL_SECS_MIN = 60    -- 60s base (healthy)
+-- 10s baseline: a new cert added on the cfm host is visible to running
+-- workers within ~10s of the daemon's Refresh() picking it up (fsnotify
+-- watcher fires within ~2s). The /stats roundtrip is a few hundred bytes —
+-- cost is trivial; the whole list is fetched only on a version change.
+-- (60s until 2026-10-10, and with the shared dumpall lock a version change
+-- reached one worker per poll: the sixth worker on earth took 4.5 min.)
+local POLL_SECS_MIN = 10    -- 10s base (healthy)
 local POLL_SECS_MAX = 600  -- 10m ceiling (sustained failures)
 
 -- Lock TTL for do_dumpall(). High enough to cover large payloads + latency.
@@ -522,11 +524,40 @@ end
 -- do_dumpall: fetch, validate, ingest, conditionally persist
 -- ---------------------------------------------------------------------------
 
-local function do_dumpall()
+-- One fetch at a time in this worker (the version-triggered path).
+local _dumpall_inflight = false
+-- A version-triggered fetch waits worker_id * DUMPALL_STAGGER_SECS: decoding
+-- the list (~110 MB on a 7 800-host node, about a second) blocks the worker's
+-- event loop, and the workers must not all stall on the same second. The
+-- step shrinks so the last worker starts within DUMPALL_STAGGER_WINDOW (six
+-- workers: 0, 2, … 10 s; 32 workers: ~0.6 s apart).
+local DUMPALL_STAGGER_SECS = 2
+local DUMPALL_STAGGER_WINDOW = 20
+local _dumpall_scheduled = false
+
+-- shared_lock: true for the startup and the age-forced fetches, which every
+-- worker would otherwise make at the same moment; they stay one at a time
+-- across workers. A VERSION change does not take it: each worker must fetch
+-- the new list anyway, and serialising them meant one worker per poll (the
+-- others found the lock held and waited for their next poll), so the last
+-- worker served a new cert minutes after the first. The daemon serves the
+-- list from its snapshot file for the current version, and while that file
+-- is still being written it builds the list once for all workers (a waiting
+-- worker gets the same bytes), so concurrent fetches cost it no rebuild each.
+local function do_dumpall(shared_lock)
   local lock_key = "lock:dumpall"
-  if not dict:add(lock_key, true, LOCK_TTL) then
-    return  -- another worker is already running; skip
+  -- One fetch at a time in this worker, on either path: a forced and a
+  -- version-triggered fetch overlapping in one worker doubled its decode,
+  -- and the older payload landing last rolled the worker back a version.
+  if _dumpall_inflight then
+    return
   end
+  if shared_lock then
+    if not dict:add(lock_key, true, LOCK_TTL) then
+      return  -- another worker is already running; skip
+    end
+  end
+  _dumpall_inflight = true
 
   -- [FIX-A] Record attempt time immediately, before any I/O.
   -- Written to shared dict so all workers see it and respect FORCE_DUMPALL_MIN_RETRY.
@@ -569,7 +600,10 @@ local function do_dumpall()
   end)
 
   -- Always release the lock
-  dict:delete(lock_key)
+  if shared_lock then
+    dict:delete(lock_key)
+  end
+  _dumpall_inflight = false
 
   if not ok then
     ngx.log(ngx.ERR, "[sslcollector] do_dumpall unhandled error (lock released): ", err)
@@ -608,7 +642,7 @@ local function maybe_force_dumpall()
       return
     end
     ngx.log(ngx.WARN, "[sslcollector] worker has no dumpall record, forcing now")
-    do_dumpall()
+    do_dumpall(true)
     return
   end
 
@@ -629,7 +663,7 @@ local function maybe_force_dumpall()
 
   ngx.log(ngx.WARN,
     "[sslcollector] worker store ", age, "s old (limit ", FORCE_DUMPALL_AFTER, "s), forcing refresh")
-  do_dumpall()
+  do_dumpall(true)
 end
 
 -- ---------------------------------------------------------------------------
@@ -664,15 +698,28 @@ local function poll_stats(premature)
       if newv ~= "" then
         -- Compare against _worker_version, not the shared dict. Each worker
         -- must independently detect version changes and fetch for itself.
-        -- If do_dumpall() is blocked by lock, _worker_version won't advance
-        -- (ingest_dumpall never ran), so the next poll tick will see the
-        -- mismatch again and retry — giving each worker eventual consistency
-        -- within one poll interval rather than waiting for the force-refresh.
+        -- If the fetch fails or is still pending, _worker_version won't
+        -- advance (ingest_dumpall never ran), so the next poll tick sees the
+        -- mismatch again and retries (a scheduled fetch is not doubled).
         if newv ~= _worker_version then
           ngx.log(ngx.NOTICE,
             "[sslcollector] worker version change ", _worker_version, " -> ", newv,
             " (triggering worker refresh)")
-          do_dumpall()
+          if not _dumpall_scheduled then
+            _dumpall_scheduled = true
+            local n = (ngx.worker.count and ngx.worker.count()) or 1
+            local step = math.min(DUMPALL_STAGGER_SECS, DUMPALL_STAGGER_WINDOW / math.max(n, 1))
+            local delay = (ngx.worker.id() or 0) * step
+            local tok = ngx.timer.at(delay, function(premature)
+              _dumpall_scheduled = false
+              if premature then return end
+              do_dumpall(false)
+            end)
+            if not tok then
+              _dumpall_scheduled = false
+              do_dumpall(false)
+            end
+          end
           -- Always update the shared monitoring key regardless of whether
           -- do_dumpall() was blocked — other workers and cfm_stats read it.
           dict:set("meta:version", newv, 86400)
@@ -722,7 +769,7 @@ function M.start_background()
     -- 2) Attempt live dumpall immediately.
     --    Sets meta:last_dumpall_attempt_at + meta:last_dumpall_at (on success)
     --    so the first maybe_force_dumpall() tick (~1s later) is correctly throttled.
-    do_dumpall()
+    do_dumpall(true)
 
     -- 3) Start poll loop
     ngx.timer.at(1, poll_stats)

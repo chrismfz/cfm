@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -69,17 +70,34 @@ func stripPrivateKeyBlocks(pemData []byte) []byte {
 	return out.Bytes()
 }
 
+// dumpAllAfterStatsHook runs between BuildDumpAllPayload's version read and
+// its copy of the index. Tests only (a Refresh landing in that window).
+var dumpAllAfterStatsHook func()
+
 // dumpAllPayload is the JSON envelope returned by /dumpall AND written
 // to disk by WriteSnapshot. Keeping a single source of truth for the
 // payload shape ensures the on-disk snapshot is byte-for-byte equivalent
 // to what the OpenResty/Angie worker would fetch over the socket, so
 // load_from_snapshot() and ingest_dumpall(...,"snapshot") behave the
 // same as the live path.
+//
+// version, exact_n and wild_n come before the entries so a reader can take
+// the header off the front of the file (readSnapshotHeader) without decoding
+// the PEMs: the snapshot is ~110 MB on a 7 800-host node. The Lua reader
+// ignores the counts.
 type dumpAllPayload struct {
 	Version     string    `json:"version"`
 	GeneratedAt time.Time `json:"generated_at"`
-	Exact       []any     `json:"exact"`
-	Wild        []any     `json:"wild"`
+	ExactN      int       `json:"exact_n"`
+	WildN       int       `json:"wild_n"`
+	// Complete: every name in the index made it into the payload. An entry
+	// whose PEM could not be read is skipped (getPEM); such a payload is
+	// still written and served, but never taken as current — the snapshot
+	// is rewritten and /dumpall rebuilt until a whole one is made, as every
+	// /dumpall was before 2026-10-10.
+	Complete bool  `json:"complete"`
+	Exact    []any `json:"exact"`
+	Wild     []any `json:"wild"`
 }
 
 // BuildDumpAllPayload serializes the collector's current cert index in the
@@ -89,6 +107,9 @@ type dumpAllPayload struct {
 // hostnames.
 func (c *Collector) BuildDumpAllPayload() ([]byte, int, int, error) {
 	st := c.Stats()
+	if dumpAllAfterStatsHook != nil {
+		dumpAllAfterStatsHook()
+	}
 
 	c.mu.RLock()
 	exact := make(map[string]*Entry, len(c.exact))
@@ -176,10 +197,73 @@ func (c *Collector) BuildDumpAllPayload() ([]byte, int, int, error) {
 		})
 	}
 
+	out.ExactN, out.WildN = len(out.Exact), len(out.Wild)
+	// The version was read before the maps were copied, and Refresh is not
+	// serialised: a swap in between labels this content with a version it
+	// does not have. Such a payload is not complete — a snapshot trusted as
+	// current at that label would never be rewritten (an unchanged version
+	// is skipped) nor rebuilt for /dumpall.
+	out.Complete = out.ExactN == len(exactKeys) && out.WildN == len(wildKeys) &&
+		c.Stats().Version == st.Version
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	if err := enc.Encode(out); err != nil {
 		return nil, 0, 0, fmt.Errorf("encode dumpall: %w", err)
 	}
 	return buf.Bytes(), len(out.Exact), len(out.Wild), nil
+}
+
+// dumpAllFallbackTTL is how long a fallback /dumpall payload is reused for
+// the same version.
+const dumpAllFallbackTTL = 30 * time.Second
+
+type dumpAllFallbackState struct {
+	mu   sync.Mutex
+	ver  string
+	at   time.Time
+	body []byte
+}
+
+// dumpAllFallback is /dumpall's payload when the snapshot file is not the
+// current version — chiefly the window between a Refresh's swap and its
+// WriteSnapshot (~18 s on a 7 800-host node), which is exactly when every
+// worker fetches after a version change. One build at a time: a concurrent
+// caller waits for it and gets the same bytes, and the payload is reused for
+// its version for dumpAllFallbackTTL, so N workers cost one build instead of
+// N simultaneous ~110 MB ones (the shared Lua lock used to serialise them;
+// the workers no longer take it on a version change). Also covers a
+// snapshot held back by the regression guard, a failed write, or an
+// incomplete one.
+func (c *Collector) dumpAllFallback() ([]byte, error) {
+	f := &c.fallback
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now()
+	ver := c.Stats().Version
+	if f.body != nil && f.ver == ver && now.Sub(f.at) < dumpAllFallbackTTL {
+		return f.body, nil
+	}
+	f.body, f.ver = nil, ""
+	body, _, _, err := c.BuildDumpAllPayload()
+	if err != nil {
+		return nil, err
+	}
+	// Reused only when complete and under the version it was built for. A
+	// payload built across an index swap carries the older label and is not
+	// complete; one that lost an entry to a transient PEM read error is not
+	// complete either — shared with every worker, the gap would stay until
+	// the next version change (the edge does not read `complete`).
+	if h, ok := readSnapshotHeaderFrom(bytes.NewReader(body), false); ok && h.Complete && h.Version == ver {
+		f.body, f.ver, f.at = body, ver, now
+		// Let it go after the TTL: a ~110 MB buffer must not stay resident
+		// until the next fallback (often hours).
+		time.AfterFunc(dumpAllFallbackTTL, func() {
+			f.mu.Lock()
+			if f.at.Equal(now) {
+				f.body, f.ver = nil, ""
+			}
+			f.mu.Unlock()
+		})
+	}
+	return body, nil
 }
