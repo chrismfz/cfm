@@ -501,9 +501,12 @@ to: a whole list is written into the other slot and `eb:cur` flips to it in
 one set, so a lookup never sees half a list and a leftover never matches;
 changes are written into the live slot. Each entry lives as long as its ban
 (a permanent one has no TTL), as in nft, so a daemon outage does not lift
-bans at the edge. A full dict evicts its least recently used keys (the old
-slot's first); an evicted live entry returns with the next whole list, and a
-lost `eb:cur` makes the next poll ask for one. A store CLEARED after three
+bans at the edge. The dict is sized for two copies of the 20 000 cap (16m;
+eight different 20k-IPv6 lists in a row kept the live list whole on nginx
+1.24): a write into a full dict does not fail, it evicts the least recently
+used keys, the leftovers of older lists. Past that size evictions would
+reach live entries silently (back with the next whole list), and a lost
+`eb:cur` makes the next poll ask for one. A store CLEARED after three
 failed nft reads (the table gone after `cfm disable`) publishes an empty
 list, so the edge drops its copy; only a store not yet reconciled since a
 start replies `{"ready":false}`. An IPv4-mapped peer is looked up as IPv4.

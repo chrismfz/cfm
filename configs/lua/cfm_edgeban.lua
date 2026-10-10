@@ -31,12 +31,13 @@
 -- matches. Changes are written into the live slot directly. Each entry lives
 -- as long as its ban (a permanent one has no TTL), as in nft: with the daemon
 -- down the edge keeps enforcing what nft enforces. The dict is sized for two
--- copies of the daemon's cap; past that, a write evicts the least recently
--- used keys (live ones too) or fails. A whole list that fails is not switched
--- to, and the next whole list waits FULL_BACKOFF (each try would evict more
--- live entries); a lost live entry comes back with the next whole list, and
--- a lost eb:cur makes the next poll ask for one. Changes that fail leave the
--- position where it was (the same changes come again). A daemon whose store was cleared (nft unreadable, the table
+-- copies of the daemon's cap (16m for 20k; measured on nginx 1.24): a write
+-- into a full dict does not fail, it evicts the least recently used keys,
+-- and those are the leftovers of older lists, so the live list stays whole.
+-- Past that size the evictions would reach live entries silently (they come
+-- back with the next whole list); a lost eb:cur makes the next poll ask for
+-- one. A write the dict does refuse leaves the position where it was (the
+-- same changes or list come again). A daemon whose store was cleared (nft unreadable, the table
 -- gone after `cfm disable`) sends an empty list: the copy is emptied.
 --
 -- A lookup is two dict gets, for a proxied request only.
@@ -68,7 +69,6 @@ local M = {}
 local POLL_SEC   = 5
 local FULL_SEC   = 600
 local LOCK_TTL   = 30    -- frees a lock only if its timer never ran
-local FULL_BACKOFF = 60  -- after a whole list that did not fit
 local LOG_SEC    = 60    -- one log line per address per LOG_SEC
 local CUR_KEY    = "eb:cur"    -- "<slot>|<list id>"
 local POS_KEY    = "eb:pos"    -- "<epoch>:<seq>" last applied
@@ -76,7 +76,6 @@ local MODE_KEY   = "eb:mode"
 local POLLED_KEY = "eb:polled"
 local FULL_KEY   = "eb:full"
 local LOCK_KEY   = "eb:lock"
-local BACKOFF_KEY = "eb:backoff"
 local WOULD_KEY  = "eb:n:would"
 local BLOCK_KEY  = "eb:n:block"
 
@@ -198,7 +197,7 @@ function M.apply(d, r, now)
       if type(ip) == "string" and ip ~= "" then
         local ttl = ttl_for(exp, now)
         if ttl and not d:set(pfx .. ip, pos, ttl) then
-          return false -- dict full: keep the old list, try again next poll
+          return false -- refused: keep the old list, the whole list comes again
         end
       end
     end
@@ -222,7 +221,7 @@ function M.apply(d, r, now)
         if ttl == false then
           d:delete(pfx .. ip) -- expired meanwhile
         elseif ttl and not d:set(pfx .. ip, id, ttl) then
-          return false -- dict full: the same changes come again
+          return false -- refused: the same changes come again
         end
       end
     end
@@ -237,9 +236,6 @@ function M.apply(d, r, now)
 end
 
 local function poll(d, dec, decode, full)
-  -- After a whole list that did not fit, no poll for FULL_BACKOFF: the
-  -- daemon would answer an out-of-reach position with the whole list again.
-  if d:get(BACKOFF_KEY) then return end
   local would, blocked = d:get(WOULD_KEY) or 0, d:get(BLOCK_KEY) or 0
   local path = "/nginx/edgeban?would=" .. would .. "&blocked=" .. blocked
   local have = d:get(POS_KEY)
@@ -261,11 +257,7 @@ local function poll(d, dec, decode, full)
       if v and v < 0 then d:set(k, 0) end -- the key was evicted meanwhile
     end
   end
-  local r = decode(body)
-  if not M.apply(d, r, ngx.now()) and type(r) == "table" and r.full then
-    d:set(BACKOFF_KEY, 1, FULL_BACKOFF)
-    ngx.log(ngx.WARN, "[cfm] edge_ban: the whole list did not fit the cfm_edgeban dict; next try in ", FULL_BACKOFF, "s")
-  end
+  M.apply(d, decode(body), ngx.now())
 end
 
 local function poll_cb(premature, dec, decode, full)
