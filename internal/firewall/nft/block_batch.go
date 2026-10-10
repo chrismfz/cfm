@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	"cfm/internal/firewall"
 )
@@ -20,6 +21,18 @@ const blockBatchStmtElems = 1000
 // blockBatchAttempts bounds the read-plan-write rounds of one AddBlockBatch.
 const blockBatchAttempts = 3
 
+// hostBatchMu serialises this process's writes that can replace or remove a
+// host block (the batches' read-plan-write rounds, AddBlock, RemoveBlock,
+// CreateBlock, the permanent kernel autoblock; nftlib holds its b.mu the same
+// way). The allow batch shares it. AddElementsBulk (bulk manual import) stays
+// outside: it only adds addresses its own read found absent. Without it two automatic bans of
+// one address at once — waf_security asking 7d and the webdetector 1h, each
+// detector in its own goroutine — both read the old element, both plan a
+// replace, and whichever commits last wins: a 1h ban over the 7d one. A writer
+// in another process (the CLI) is still only caught by the exclusive create.
+// Process-wide, not per Backend: the daemon builds more than one.
+var hostBatchMu sync.Mutex
+
 // AddBlockBatch blocks many host addresses in one `nft -f -` transaction,
 // after one `nft -j list set` per address family: three nft processes per
 // attempt at most, whatever the batch size, where AddBlock forks two per
@@ -27,9 +40,9 @@ const blockBatchAttempts = 3
 // never shortens
 // (firewall.PlanBlockBatch).
 //
-// Between the read and the write another writer (an autoblock, another API
-// request, the CLI) can change the set, and this backend has no lock across
-// processes:
+// In this process the rounds are serialised (hostBatchMu). Between the read
+// and the write another process (the CLI) can still change the set, and there
+// is no lock across processes:
 //   - An element due for replacement can expire or be removed: its delete
 //     fails and nft aborts the whole transaction.
 //   - One of the new addresses can be added. A plain `add element` would then
@@ -60,6 +73,8 @@ func (b *Backend) hostBatch(kind, set4, set6 string, entries []firewall.BlockEnt
 	if len(v4)+len(v6) == 0 {
 		return res, nil
 	}
+	hostBatchMu.Lock()
+	defer hostBatchMu.Unlock()
 	var lastErr error
 	for attempt := 0; attempt < blockBatchAttempts; attempt++ {
 		script, planned, err := b.hostBatchScript(set4, set6, v4, v6)
@@ -153,7 +168,7 @@ func (b *Backend) hostBatchScript(set4, set6 string, v4, v6 []firewall.BlockEntr
 		}
 		current, err := b.ListSetElementsTimed(fam.set)
 		if err != nil {
-			return "", res, fmt.Errorf("read %s %s %s: %w", family, tableName, fam.set, err)
+			return "", res, fmt.Errorf("%w: %s %s %s: %w", firewall.ErrBlockRead, family, tableName, fam.set, err)
 		}
 		plan := firewall.PlanBlockBatch(fam.want, current)
 		res = res.Add(plan.Result())
@@ -202,6 +217,8 @@ func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
 	if len(v4)+len(v6) == 0 {
 		return nil
 	}
+	hostBatchMu.Lock()
+	defer hostBatchMu.Unlock()
 	var lastErr error
 	for attempt := 0; attempt < blockBatchAttempts; attempt++ {
 		var sb strings.Builder
@@ -214,7 +231,7 @@ func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
 			}
 			current, err := b.ListSetElementsTimed(fam.set)
 			if err != nil {
-				return fmt.Errorf("read %s %s %s: %w", family, tableName, fam.set, err)
+				return fmt.Errorf("%w: %s %s %s: %w", firewall.ErrBlockRead, family, tableName, fam.set, err)
 			}
 			var elems []string
 			for _, ip := range firewall.HostsPresent(fam.want, current) {

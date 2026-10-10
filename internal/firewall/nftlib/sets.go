@@ -71,7 +71,7 @@ func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
 			}
 			elems, err := b.conn.GetSetElements(f.set)
 			if err != nil {
-				return fmt.Errorf("nftlib RemoveBlockBatch read %s: %w", f.name, err)
+				return fmt.Errorf("%w: nftlib RemoveBlockBatch %s: %w", firewall.ErrBlockRead, f.name, err)
 			}
 			present := firewall.HostsPresent(f.want, elemsToTimed(elems, f.set.Interval))
 			for i := 0; i < len(present) && lastErr == nil; i += setWriteChunk {

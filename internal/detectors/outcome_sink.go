@@ -70,7 +70,11 @@ func outcomeBlocked(extra map[string]string) string {
 			}
 			if esc := extra["escalated"]; esc != "" {
 				if bt := extra["block_ttl"]; bt != "" {
-					blocked += " -> Escalated: " + esc + " (ttl=" + bt + ")"
+					blocked += " -> Escalated: " + esc + " (ttl=" + bt
+					if extra["block_kept"] == "longer" {
+						blocked += "; longer ban kept"
+					}
+					blocked += ")"
 				} else {
 					blocked += " -> Escalated: " + esc
 				}
@@ -92,6 +96,17 @@ func outcomeBlocked(extra map[string]string) string {
 				}
 			default:
 				blocked = "Yes"
+			}
+
+		case "", "no":
+			// The firewall refused the block (autoblock_sink sets block_err).
+			if e := strings.Join(strings.Fields(extra["block_err"]), " "); e != "" {
+				// One line (nft errors carry the script and a caret line),
+				// cut on a rune boundary.
+				if r := []rune(e); len(r) > 160 {
+					e = string(r[:160]) + "…"
+				}
+				blocked = "No (block failed: " + e + ")"
 			}
 		}
 	}

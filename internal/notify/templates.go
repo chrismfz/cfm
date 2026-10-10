@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-var defaultSubject = `[CFM] {{.Host}} — {{.Kind}} {{.SrcIP}} ({{.ASN}}, {{.Country}}) reason={{.Reason}} ttl={{.TTL}}`
+var defaultSubject = `[CFM] {{.Host}} — {{.Kind}} {{.SrcIP}} ({{.ASN}}, {{.Country}}) reason={{.Reason}} ttl={{.TTL}}{{with (index .Extra "block_kept")}} (longer ban kept){{end}}`
 
 var defaultBody = `{{.When}} {{.TZ}}
 Host: {{.Host}}
@@ -17,7 +17,7 @@ ASN: {{.ASN}}
 Country: {{.Country}}
 PTR: {{.PTR}}
 Reason: {{.Reason}}
-TTL: {{.TTL}}
+TTL: {{.TTL}}{{with (index .Extra "block_kept")}} (a longer ban was already in place and stays){{end}}
 Count: {{.Count}}
 Section: {{.Section}}
 {{- if .Samples}}

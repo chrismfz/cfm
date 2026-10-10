@@ -664,6 +664,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 			out.Extra["blocked"] = "yes"
 			out.Extra["block_mode"] = "permanent"
 			blockOK = true
+		} else {
+			out.Extra["block_err"] = err.Error()
+			logging.Logf("[detectors] block %s (section=%s permanent) failed: %v", ipStr, s.section, err)
 		}
 
 	case "ttl":
@@ -697,6 +700,10 @@ func (s *sectionSink) Publish(a core.Alert) {
 				out.Extra["block_kept"] = "longer"
 			}
 			blockOK = true
+		} else {
+			// Not blocked: say why (the outcome line reads "No").
+			out.Extra["block_err"] = err.Error()
+			logging.Logf("[detectors] block %s (section=%s ttl=%s) failed: %v", ipStr, s.section, ttl, err)
 		}
 	}
 

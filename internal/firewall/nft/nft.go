@@ -774,17 +774,23 @@ func (b *Backend) refreshAPISets() {
 
 // -------- block (manual) --------
 
+// AddBlock replaces whatever block the address has (the manual path; the
+// automatic one is firewall.ExtendBlock). It holds hostBatchMu like the
+// batches: unserialised, its delete + add could land between a batch's read
+// and write, and the batch's replace would then cut a permanent ban to its TTL.
 func (b *Backend) AddBlock(ip net.IP, _ string, ttl *time.Duration) error {
 	if ip == nil {
 		return errors.New("nil ip")
 	}
+	hostBatchMu.Lock()
+	defer hostBatchMu.Unlock()
 	set := setV4
 	if ip.To4() == nil {
 		set = setV6
 	}
 	elem := ip.String()
 
-	_ = b.RemoveBlock(ip)
+	_ = b.removeBlockLocked(ip)
 
 	ttlStr := ""
 	if ttl != nil && *ttl > 0 {
@@ -796,7 +802,7 @@ func (b *Backend) AddBlock(ip net.IP, _ string, ttl *time.Duration) error {
 		return nil
 	}
 	if strings.Contains(out, "already exists") || strings.Contains(out, "File exists") {
-		_ = b.RemoveBlock(ip)
+		_ = b.removeBlockLocked(ip)
 		if out2, err2 := b.nftAddElementArgv(set, elem, ttlStr); err2 == nil {
 			return nil
 		} else {
@@ -810,6 +816,43 @@ func (b *Backend) RemoveBlock(ip net.IP) error {
 	if ip == nil {
 		return errors.New("nil ip")
 	}
+	hostBatchMu.Lock()
+	defer hostBatchMu.Unlock()
+	return b.removeBlockLocked(ip)
+}
+
+// CreateBlock blocks ip for ttl only if no block holds it: one exclusive
+// `create element`. exists reports a block already there, left as it is
+// (its length unknown). firewall.ExtendBlock's fallback when the set can't
+// be read: unlike AddBlock it never shortens a ban.
+func (b *Backend) CreateBlock(ip net.IP, ttl time.Duration) (exists bool, err error) {
+	if ip == nil || ip.IsUnspecified() || ttl <= 0 {
+		return false, fmt.Errorf("not blockable: %v for %s", ip, ttl)
+	}
+	// humanTimeout prints anything under a second as "0s", which nft takes
+	// as no timeout: a permanent ban. One second, as SplitBlockEntries does.
+	if ttl < time.Second {
+		ttl = time.Second
+	}
+	set := setV4
+	if ip.To4() == nil {
+		set = setV6
+	}
+	hostBatchMu.Lock()
+	defer hostBatchMu.Unlock()
+	res, err := runNFTCommand(context.Background(), "create", "element", family, tableName, set,
+		"{ "+ip.String()+" timeout "+humanTimeout(ttl)+" }")
+	if err == nil {
+		return false, nil
+	}
+	if out := res.Stdout + res.Stderr; strings.Contains(out, "File exists") || strings.Contains(out, "already exists") {
+		return true, nil
+	}
+	return false, &nftBatchError{msg: nftFirstError(res.Stdout+res.Stderr, err), err: err}
+}
+
+// removeBlockLocked is RemoveBlock under hostBatchMu.
+func (b *Backend) removeBlockLocked(ip net.IP) error {
 	set := setV4
 	elem := ip.String()
 	if ip.To4() == nil {
