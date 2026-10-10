@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.10
+
 ### Security
 - **A ban now also stops an attacker who comes through Cloudflare.** The
   firewall only sees the address a connection comes from, and for a site
