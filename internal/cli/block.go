@@ -156,6 +156,7 @@ func RunBlock(args []string, be firewall.Backend, cfgDir string, tableExists fun
 			fmt.Fprintln(os.Stderr, "block error:", err)
 			return 1
 		}
+		notifyEdgeBan(ip, dur)
 	}
 
 	// persist to cfm.deny only for permanent entries

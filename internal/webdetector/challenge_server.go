@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"cfm/internal/edgeban"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	"cfm/internal/tlsfp"
@@ -1716,7 +1717,9 @@ func (s *ChallengeServer) rlFirewallBlock(ip net.IP, kind int) {
 	st.fwBlockedUntil = now.Add(ttl)
 	s.rlMu.Unlock()
 
-	_, _ = firewall.ExtendBlock(s.fw, ip, ttl) // never shortens a longer block
+	if _, err := firewall.ExtendBlock(s.fw, ip, ttl); err == nil { // never shortens a longer block
+		edgeban.Ban(ip, &ttl, "challenge_selfprotect", false)
+	}
 }
 
 // ---------------- helpers ----------------
@@ -1842,7 +1845,9 @@ func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status in
 			if ip == nil {
 				return
 			}
-			_, _ = firewall.ExtendBlock(s.fw, ip, ttl) // never shortens a longer block
+			if _, err := firewall.ExtendBlock(s.fw, ip, ttl); err == nil { // never shortens a longer block
+				edgeban.Ban(ip, &ttl, "challenge_abuse", false)
+			}
 		}
 	}
 

@@ -11,6 +11,7 @@ import (
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
+	"cfm/internal/edgeban"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	"cfm/internal/notify"
@@ -475,6 +476,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 				if s.pol.Mode != "dryrun" {
 					// Never shortens a longer block of the address (ExtendBlock).
 					if kept, err := firewall.ExtendBlock(s.fw, ip, bttl); err == nil {
+						// A web challenge escalated: the edge enforces it too
+						// (a client behind a proxy never meets the nft drop).
+						edgeban.Ban(ip, &bttl, s.section, false)
 						out.Extra["escalated"] = "block"
 						out.Extra["block_ttl"] = bttl.String()
 						if kept {
@@ -652,6 +656,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 
 	case "permanent":
 		if err := s.fw.AddBlock(ip, comment, nil); err == nil {
+			if edgeban.WebSection(s.section) {
+				edgeban.Ban(ip, nil, s.section, false)
+			}
 			out.Extra["blocked"] = "yes"
 			out.Extra["block_mode"] = "permanent"
 			blockOK = true
@@ -676,6 +683,11 @@ func (s *sectionSink) Publish(a core.Alert) {
 		// shorter block from another section (webdetector 1h) cut a longer one
 		// (waf_security 7d) short. A longer or permanent block is kept.
 		if kept, err := firewall.ExtendBlock(s.fw, ip, ttl); err == nil {
+			// A web section's ban is enforced at the edge too: a client
+			// behind a trusted proxy (Cloudflare) never meets the nft drop.
+			if edgeban.WebSection(s.section) {
+				edgeban.Ban(ip, &ttl, s.section, false)
+			}
 			out.Extra["blocked"] = "yes"
 			out.Extra["block_mode"] = "ttl"
 			out.Extra["ttl"] = ttl.String()

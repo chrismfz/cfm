@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"cfm/internal/dnat"
+	"cfm/internal/edgeban"
 	"cfm/internal/unblock"
 )
 
@@ -43,6 +44,9 @@ func nginxAdminHTTPPort() int {
 // ForceUnblock clears every per-IP WAF plane for ip and reports what it cleared.
 // It satisfies unblock.WAFCleaner. Best-effort and never panics.
 func (b *NginxBridge) ForceUnblock(ip string) unblock.WAFResult {
+	// The edge ban goes whatever the bridge's state: `cfm unblock` reaches
+	// the daemon only through here.
+	edgeban.Unban(ip)
 	if b == nil || !b.cfg.Enabled {
 		return unblock.WAFResult{}
 	}

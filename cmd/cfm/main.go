@@ -8,6 +8,7 @@ import (
 	cfgpkg "cfm/internal/config"
 	detpkg "cfm/internal/detectors"
 	"cfm/internal/enrich"
+	"cfm/internal/edgeban"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
 	"cfm/internal/firewall/nftlib"
@@ -251,6 +252,8 @@ func main() {
 		cli.RunTest()
 	case "block":
 		be := mustBackend()
+		clihttp.SetToken(apiAuthToken())
+		cli.EdgeBanBaseURL = apiBaseURL()
 		os.Exit(cli.RunBlock(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "unblock":
 		be := mustBackend()
@@ -776,6 +779,15 @@ func runDaemon(args []string) {
 		os.Exit(1)
 	}
 	done()
+
+	// Edge ban store (internal/edgeban): the web-related and manual bans the
+	// edge enforces itself, for clients behind a trusted proxy that the nft
+	// drop never sees. Loaded from disk, then narrowed to what nft still
+	// blocks every minute; it answers nothing until the first reconcile.
+	edgeStore := edgeban.New(edgeban.DefaultPath)
+	edgeStore.Load()
+	edgeban.SetDefault(edgeStore)
+	go runEdgeBanReconcile(edgeStore, be)
 
 	//Notify manager
 

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"cfm/internal/edgeban"
 	"cfm/internal/firewall"
 	"cfm/internal/locate"
 	"cfm/internal/logging"
@@ -160,6 +161,7 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 			rs := time.Now()
 			logging.LogfAPI("[unblock.exec] engine=%s backend_type=%s batch_size=%d method=RemoveBlock ip=%s", engine, backendType, 1, ip.String())
 			_ = be.RemoveBlock(ip) // idempotent
+			edgeban.Unban(ip.String())
 			logging.LogfAPI("[unblock.exec.done] engine=%s backend_type=%s batch_size=%d method=RemoveBlock ip=%s duration=%s", engine, backendType, 1, ip.String(), time.Since(rs))
 			nftDone <- wb
 		}()

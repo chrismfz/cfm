@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"cfm/internal/edgeban"
 	"cfm/internal/firewall"
 	"cfm/internal/ipquery"
 	"cfm/internal/locate"
@@ -114,6 +115,10 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 			for _, ip := range list {
 				errs[ip.String()] = opts.BE.RemoveBlock(ip)
 			}
+		}
+		// The edge's own ban goes with the nft one (no-op outside the daemon).
+		for _, ip := range list {
+			edgeban.Unban(ip.String())
 		}
 		via := ""
 		if batchErr != nil {

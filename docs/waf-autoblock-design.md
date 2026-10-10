@@ -427,3 +427,41 @@ raised behind a deferred rule-201 block`.
   yet still surfaces the rare compromised-.gr-host, and — because GeoIP is
   game-able (a GR-geolocated VPS was brute-forcing xmlrpc in the sample) —
   leniency must stay a *temp-ban*, never a skip.
+
+## Edge ban — clients behind a trusted proxy (2026-10-10)
+
+An nft ban drops by the address on the wire. A client behind a trusted proxy
+(Cloudflare) arrives from the proxy's address, and the edge learns the real one
+from `CF-Connecting-IP` via realip, so `ip saddr @block_v4 drop` never sees it:
+34.153.214.160 was banned for 7 days by `waf_security` and kept hitting
+`cpanel.`/`cpcontacts.` hostnames through Cloudflare (titan, mars, orion,
+speedhost, 2026-10-09).
+
+`internal/edgeban` keeps the bans the edge enforces itself. **What goes in:**
+the sink's bans for the web sections (`edgeban.WebSection`: waf_security,
+webdetector, challenge_*, modsec, cfm_endpoints, cpanel), the challenge-fail
+escalation, the challenge server's self-protection blocks, and manual bans
+(`POST /api/v1/block`, `cfm block` through `POST /api/v1/webdet/edge-ban`).
+**What stays out:** fleet feeds (`block_ext_*`), `cfm.deny` (it can hold
+thousands of entries), port-scan / flood bans (L3/L4; some may be proxy
+addresses), mail / SSH / FTP / database sections. It is not an nft mirror.
+
+**Consistency.** Every in-daemon unblock removes the entry
+(`/api/v1/unblock`, `unblock.DoMany` — the agent's fleet unblock, and
+`ForceUnblock`, which `cfm unblock` reaches over the API). Every minute a
+reconcile reads the block and allow host sets and *narrows* the store: an entry
+nft no longer blocks (expired, unblocked from the CLI, flushed) or that an
+allow lets through is dropped, and an earlier nft expiry clamps it. It never
+imports from nft. The store persists in `/var/lib/cfm/edgeban.json` and answers
+nothing until the first reconcile after a start; three failed reads in a row
+empty it. Everything uncertain fails toward not blocking.
+
+**Enforcement (B1).** The bridge decision answers `ip_action=block` for a
+web-scope decision whose client is in the store: after the IGNORE_IPS bypass
+(operator decision: ignored stays ignored), before the host bypass, solved-ok
+state, exemptions and traffic rules, and also while the bridge sheds. The panel
+scope is untouched. Kill switch `[webdetector] EDGE_BAN`. **Not yet covered**
+(B2/B3): cfm.lua paths that return before Step 3 (the clearance-cookie fast
+path, the Step 0 bypass list, the cPanel proxy-subdomain passthrough), the
+static-asset location, the decision cache's <=90 s clean-allow window, and the
+panel ports.

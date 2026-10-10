@@ -391,7 +391,10 @@ function Client:get(ip, host, uri, qs, method, scheme, ua, country, scope)
   --   * only clean allows are cached (see the cache write below), so a
   --     currently-blocked IP hitting a NEW url misses and sees the block;
   --   * the WAF runs uncached on EVERY request — payloads are always caught;
-  --   * nft autoblock is kernel-level — severe bans drop before the edge.
+  --   * nft autoblock drops a DIRECT client before the edge; a client behind a
+  --     trusted proxy (Cloudflare) arrives from the proxy's address and is
+  --     not dropped there, which the edge ban store answers (internal/edgeban,
+  --     ip_action=block, never cached) — subject to this same <=90s window.
   -- The residual is thus "evade an edge behavioural challenge/block for <=90s on
   -- already-cached URLs", which is self-healing. Closing it would need a per-IP
   -- block-generation marker checked on every hit + Go-side publishing — a poor

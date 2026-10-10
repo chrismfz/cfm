@@ -296,6 +296,8 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
     this one was caught by the guard in CI, in a test added the same day);
   - the `notify` and `detectorscfg` `systemConfigPath` (via
     `SetSystemConfigPathForTest` from the apiserver `TestMain`).
+  - the `edgeban` `DefaultPath` (`/var/lib/cfm/edgeban.json`, via
+    `SetPathForTest`; a test installing a Default store gives it a temp path);
   - the `hostsecrets` `Dir` (`/var/lib/cfm/secrets`, the per-host
     CHALLENGE_TOKEN / OPENRESTY_TOKEN / SSLCOLLECTOR_SOCK_TOKEN store; via `SetDirForTest`, which also
     clears the per-process token caches, from the `TestMain` of a package whose
@@ -487,6 +489,17 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   A held block RULE (`WAFRule.HoldAutoblock`, e.g. 10019/10020) shadows armed ones
   exactly like a held family does, so it runs late in `cfm_waf.lua`, next to
   traversal.
+- **An nft ban never stops a client behind a trusted proxy** (Cloudflare): on
+  the wire it is the proxy's address. A banned scanner kept hitting sites for
+  half an hour after each ban (2026-10-09). The web-related bans (the
+  waf_security / webdetector / challenge_* / modsec / cfm_endpoints / cpanel
+  sections, the challenge server, manual API/CLI bans) also go to the edge ban
+  store (`internal/edgeban`), which the bridge decision answers
+  `ip_action=block` (after IGNORE_IPS, before every allow). It is NOT an nft
+  mirror (fleet feeds, cfm.deny, port-scan/flood bans stay out): a reconcile
+  only narrows it to what nft still blocks. A new web blocker or unblock path
+  must call `edgeban.Ban` / `edgeban.Unban`. Kill switch `[webdetector]
+  EDGE_BAN`.
 - **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
   API reporting and email are the section sink's job (`autoblock_sink.go`) —
   don't reimplement them. A plain alert blocks per the section `BLOCK` policy;
