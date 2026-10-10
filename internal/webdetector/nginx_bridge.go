@@ -17,6 +17,8 @@
 //   POST /nginx/vhost       { "host":"example.com", "action":"challenge", "ttl_sec":600 }
 //   POST /nginx/vhost/clear { "host":"example.com" }
 //   GET  /nginx/status      → NginxBridgeStatus (for cfm status / debug)
+//   GET  /nginx/edgeban?epoch=E&seq=N → the edge-ban changes since N, or the
+//                              whole list (cfm_edgeban.lua; edge_ban_feed.go)
 //
 // Lua polls these from the shared-dict server (cfm_decisions.lua) which
 // subscribes to the same socket.
@@ -26,8 +28,8 @@ package webdetector
 import (
 	"bufio"
 	"bytes"
-	"cfm/internal/edgeban"
 	"cfm/internal/clam"
+	"cfm/internal/edgeban"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
@@ -218,8 +220,8 @@ type NginxBridge struct {
 	// because challengePageExempt cleared the client
 	// (BridgeStats.ChallengePageExemptRedirects).
 	challengePageExemptRedirects atomic.Int64
-	chalExcludeLogMu sync.Mutex
-	chalExcludeLogAt map[string]time.Time
+	chalExcludeLogMu             sync.Mutex
+	chalExcludeLogAt             map[string]time.Time
 	// chalPageLogAt rate-limits the per-host exempt_redirect log line
 	// (noteChallengePageExemptRedirect; under chalExcludeLogMu).
 	chalPageLogAt map[string]time.Time
@@ -249,6 +251,9 @@ type NginxBridge struct {
 	hookCh      chan func()
 	hookDropped atomic.Int64
 	hookStopped atomic.Bool
+
+	// edgeBanJournal backs /nginx/edgeban (edge_ban_feed.go).
+	edgeBanJournal edgeBanJournal
 }
 
 func (b *NginxBridge) SetEnricher(e *enrich.Enricher) { b.enr = e }
@@ -364,11 +369,12 @@ type BridgeTimingStats struct {
 
 // NginxBridgeStatus is what GET /nginx/status returns.
 type NginxBridgeStatus struct {
-	Enabled      bool        `json:"enabled"`
-	SockPath     string      `json:"sock_path"`
-	ActiveIPs    []string    `json:"active_ips"`
-	ActiveVhosts []string    `json:"active_vhosts"`
-	Stats        BridgeStats `json:"stats"`
+	Enabled      bool          `json:"enabled"`
+	SockPath     string        `json:"sock_path"`
+	ActiveIPs    []string      `json:"active_ips"`
+	ActiveVhosts []string      `json:"active_vhosts"`
+	Stats        BridgeStats   `json:"stats"`
+	EdgeBan      EdgeBanStatus `json:"edge_ban"`
 }
 
 // Snapshot payload for Lua local enforcement.
@@ -1457,6 +1463,7 @@ func (b *NginxBridge) Status() NginxBridgeStatus {
 		ActiveIPs:    ips,
 		ActiveVhosts: vhs,
 		Stats:        st,
+		EdgeBan:      b.EdgeBanStatus(),
 	}
 }
 
@@ -1777,6 +1784,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/upload/scan", b.instrument("/nginx/upload/scan", b.handleUploadScanSync))
 	mux.HandleFunc("/nginx/events/batch", b.instrument("/nginx/events/batch", b.handleEventsBatch))
 	mux.HandleFunc("/nginx/fppolicy", b.instrument("/nginx/fppolicy", b.handleFpPolicy))
+	mux.HandleFunc("/nginx/edgeban", b.instrument("/nginx/edgeban", b.handleEdgeBan))
 
 	srv := newBridgeHTTPServer(mux)
 

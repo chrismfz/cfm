@@ -470,20 +470,71 @@ safe).
 `ForceUnblock`, which `cfm unblock` reaches over the API); `cfm allow` (over
 `edge-ban?unban=1`) and a `cfm.allow` host lift it too. Every two minutes a
 reconcile reads the block and allow sets — all of them or none: a failed or
-partial read skips the reconcile, and three in a row empty the store and make
-it answer nothing until a read works — and
+partial read skips the reconcile, and three in a row make it answer nothing,
+to the edge too, until a read works (it keeps its entries; the next working
+read narrows them to nft) — and
 *narrows* the store: an entry nft no longer blocks (expired, unblocked from the
 CLI, flushed) is dropped unless it was written after the read began, and an
 earlier nft expiry clamps it. It never imports from nft. The store persists in
 `/var/lib/cfm/edgeban.json` (one writer at a time) and answers nothing until
 the first reconcile after a start.
 
-**Enforcement (B1).** The bridge decision answers `ip_action=block` for a
-proxied, web-scope decision whose client is in the store: after the IGNORE_IPS
-bypass (operator decision: ignored stays ignored), before the host bypass,
-solved-ok state, exemptions and traffic rules, and also while the bridge sheds.
-The panel scope is untouched. Kill switch `[webdetector] EDGE_BAN`. **Not yet
-covered** (B2/B3): cfm.lua paths that return before Step 3 (the clearance-cookie
-fast path, the Step 0 bypass list, the cPanel proxy-subdomain passthrough), the
-static-asset location, the decision cache's <=90 s clean-allow window, and the
-panel ports.
+**Enforcement at the edge (B2).** `cfm_edgeban.lua` keeps the edge's own
+copy of the list, pulled from `GET /nginx/edgeban` (`edge_ban_feed.go`). The
+daemon keeps what the edge should hold (every address the store answers, less
+IGNORE_IPS, capped at 20 000) and a numbered journal of the changes to it (the
+last 4 096; an epoch per daemon start). It resyncs that list against the store
+only when the store's version moves (every write, reconcile and switch), an
+entry in it expires, or after 5 minutes: an idle poll is a version compare.
+The edge sends its position (`epoch`, `seq`) and gets the changes since
+(`set` / `del`), so a poll costs what changed, not the list; the whole list
+comes on its first poll, after a daemon restart, when it is further behind
+than the journal reaches, and every 10 minutes (a consistency check). A store
+that has not reconciled yet replies `{"ready":false}` and the edge keeps its
+copy.
+
+One worker at a time (a dict lock held while a poll is in flight) polls every
+5 s from a timer started by any `cfm.lua` request (the static location only
+reads). The list lives in two slots of the `cfm_edgeban` dict (`cfm_decisions`
+until the conf is reloaded), each value the id of the whole list it belongs
+to: a whole list is written into the other slot and `eb:cur` flips to it in
+one set, so a lookup never sees half a list and a leftover never matches;
+changes are written into the live slot. Each entry lives as long as its ban
+(a permanent one has no TTL), as in nft, so a daemon outage does not lift
+bans at the edge. The dict is sized for two copies of the 20 000 cap (16m;
+eight different 20k-IPv6 lists in a row kept the live list whole on nginx
+1.24): a write into a full dict does not fail, it evicts the least recently
+used keys, the leftovers of older lists. Past that size evictions would
+reach live entries silently (back with the next whole list), and a lost
+`eb:cur` makes the next poll ask for one. A store CLEARED after three
+failed nft reads (the table gone after `cfm disable`) publishes an empty
+list, so the edge drops its copy; only a store not yet reconciled since a
+start replies `{"ready":false}`. An IPv4-mapped peer is looked up as IPv4.
+
+**Mode.** `[webdetector] EDGE_BAN_MODE`, sent with every reply: `log` (the
+default, the burn-in) counts and logs what it would block, `enforce` answers
+403 (`X-CFM-Action: block`, `X-CFM-Edge-Ban: 1`, `$cfm_upstream = cfm_block`).
+One `would_block edge_ban` / `block edge_ban` line per address per minute in
+the edge error log. The edge's counts ride on its next poll; `GET
+/api/v1/webdet/edge-ban` (admin; `edge-ban.json` in a `cfm debug` bundle) and
+the bridge status show the mode, the journal position, the list size, the
+last poll and full list, the would-block / blocked totals and the last resync
+time. The decision path (B1) answers bans regardless of the mode, so during
+the burn-in `would_block` also counts requests Step 3 blocks anyway: it is an
+upper bound of what enforce adds (the clearance cookie, cached allows, 0d,
+0a1 and static files are the difference).
+
+`cfm.lua` checks it in **Step 0e**, right after the static IP/CIDR bypass
+(`cfm_bypass_ip`, the crawler/CDN list) and before every other exemption:
+the panel targeted bypass, the local-origin bypass, `/.well-known/` (0a1),
+the cPanel proxy-subdomain passthrough (0d), the clearance cookie (2b) and the
+decision's cached clean allows (up to 90 s). The static-asset locations, which
+skip `cfm.lua`, call `cfm_edgeban.static_gate()` before the Site Cache gate.
+Proxied requests only. On a proxied request it is two dict gets; on a direct
+one, a variable compare. A ban or unban reaches the edge within one poll (5 s
+plus the RPC). `cfm_edgeban_test.lua` pins the module and where `cfm.lua` and
+both confs call it.
+
+**Not covered:** the panel ports (2083/2087/2096, B3), the challenge page and
+`/__cfm_verify`, `/cpanelwebcall` and `/cfm-admin`, which skip `cfm.lua` and
+are not static assets.

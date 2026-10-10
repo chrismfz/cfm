@@ -27,6 +27,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,19 +60,29 @@ type Entry struct {
 
 // Store is the set of edge-enforced bans.
 type Store struct {
-	mu     sync.RWMutex
-	m      map[string]Entry
-	path   string
-	ready  atomic.Bool
-	now    func() time.Time
-	allow  atomic.Pointer[allowSet] // nft's allow sets at the last reconcile
-	saveMu sync.Mutex               // one save at a time: snapshot, write, rename
+	mu    sync.RWMutex
+	m     map[string]Entry
+	path  string
+	ready atomic.Bool
+	// cleared: Clear ran (nft unreadable, the table gone after `cfm
+	// disable`) and no reconcile has worked since. Unlike a store that
+	// never reconciled after a start, it knows its bans are not to be
+	// enforced: the edge's copy is emptied, not kept.
+	cleared atomic.Bool
+	now     func() time.Time
+	allow   atomic.Pointer[allowSet] // nft's allow sets at the last reconcile
+	saveMu  sync.Mutex               // one save at a time: snapshot, write, rename
 }
 
 var (
-	enabled atomic.Bool
-	def     atomic.Pointer[Store]
-	proxies atomic.Pointer[[]*net.IPNet] // the trusted proxies' own ranges
+	// version changes whenever what List could return may have changed: a
+	// write to a store, a reconcile, the kill switch, the proxy ranges, the
+	// Default store. The edge feed caches on it (internal/webdetector).
+	version  atomic.Uint64
+	enabled  atomic.Bool
+	edgeMode atomic.Value // string, see EdgeMode
+	def      atomic.Pointer[Store]
+	proxies  atomic.Pointer[[]*net.IPNet] // the trusted proxies' own ranges
 )
 
 // SetTrustedProxies sets the ranges the edge trusts to name the client
@@ -82,7 +93,12 @@ var (
 func SetTrustedProxies(nets []*net.IPNet) {
 	cp := append([]*net.IPNet(nil), nets...)
 	proxies.Store(&cp)
+	version.Add(1)
 }
+
+// Version changes whenever List's answer may have (expiry aside: an entry
+// that expires drops out of List with no write).
+func Version() uint64 { return version.Load() }
 
 func isTrustedProxy(ip net.IP) bool {
 	p := proxies.Load()
@@ -127,13 +143,40 @@ func init() { enabled.Store(true) }
 
 // SetEnabled is the [webdetector] EDGE_BAN kill switch: off, Banned answers
 // false for every address (the store keeps its entries).
-func SetEnabled(on bool) { enabled.Store(on) }
+func SetEnabled(on bool) {
+	if enabled.Swap(on) != on {
+		version.Add(1)
+	}
+}
+
+// EdgeMode is how the edge treats a banned proxied client at cfm.lua's top
+// and on the static location ([webdetector] EDGE_BAN_MODE): "log" (count and
+// log what it would block; the burn-in default) or "enforce" (403). The
+// bridge decision path answers bans either way (EDGE_BAN alone gates it).
+func EdgeMode() string {
+	if m, _ := edgeMode.Load().(string); m == "enforce" {
+		return m
+	}
+	return "log"
+}
+
+// SetEdgeMode sets EdgeMode; anything but "enforce" is "log".
+func SetEdgeMode(m string) {
+	if strings.EqualFold(strings.TrimSpace(m), "enforce") {
+		edgeMode.Store("enforce")
+		return
+	}
+	edgeMode.Store("log")
+}
 
 // Enabled reports the kill switch.
 func Enabled() bool { return enabled.Load() }
 
 // SetDefault installs the daemon's store; nil uninstalls it.
-func SetDefault(s *Store) { def.Store(s) }
+func SetDefault(s *Store) {
+	def.Store(s)
+	version.Add(1)
+}
 
 // Default is the daemon's store, nil when none is installed (the one-shot
 // CLI, tests). Every package-level helper below is a no-op then.
@@ -223,6 +266,11 @@ func (s *Store) Banned(ip string) (bool, time.Duration) {
 	if !ok {
 		return false, 0
 	}
+	return s.answers(addr, e, s.now())
+}
+
+// answers is Banned for an entry the store holds.
+func (s *Store) answers(addr net.IP, e Entry, now time.Time) (bool, time.Duration) {
 	// nft accepts an allowed address before any block drop: so does the edge.
 	if a := s.allow.Load(); a != nil && a.contains(addr) {
 		return false, 0
@@ -233,11 +281,47 @@ func (s *Store) Banned(ip string) (bool, time.Duration) {
 	if e.Expires.IsZero() {
 		return true, 0
 	}
-	left := e.Expires.Sub(s.now())
+	left := e.Expires.Sub(now)
 	if left <= 0 {
 		return false, 0
 	}
 	return true, left
+}
+
+// Item is one address the edge must block (List). A zero Expires is
+// permanent.
+type Item struct {
+	IP      string
+	Expires time.Time
+}
+
+// List returns every address Banned answers true for now, sorted by
+// address: the feed the edge pulls (/nginx/edgeban). Empty until the first
+// Reconcile and while switched off, as Banned.
+func (s *Store) List() []Item {
+	if s == nil || !enabled.Load() || !s.ready.Load() {
+		return nil
+	}
+	now := s.now()
+	// Copy under the lock, check outside it: the allow sets are scanned per
+	// entry, and a writer waiting on a long read lock would stall every
+	// Banned() behind it (Go's writer preference) on the decision hot path.
+	s.mu.RLock()
+	all := make([]Item, 0, len(s.m))
+	ents := make([]Entry, 0, len(s.m))
+	for k, e := range s.m {
+		all = append(all, Item{IP: k, Expires: e.Expires})
+		ents = append(ents, e)
+	}
+	s.mu.RUnlock()
+	out := all[:0]
+	for i, it := range all {
+		if ok, _ := s.answers(net.ParseIP(it.IP), ents[i], now); ok {
+			out = append(out, it)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
+	return out
 }
 
 // Len is the number of entries (expired ones included until Reconcile).
@@ -249,6 +333,9 @@ func (s *Store) Len() int {
 	defer s.mu.RUnlock()
 	return len(s.m)
 }
+
+// Cleared reports whether Clear ran with no reconcile working since.
+func (s *Store) Cleared() bool { return s != nil && s.cleared.Load() }
 
 // Ready reports whether a Reconcile has run.
 func (s *Store) Ready() bool { return s != nil && s.ready.Load() }
@@ -310,28 +397,29 @@ func (s *Store) Reconcile(snap Snapshot) {
 	}
 	s.mu.Unlock()
 	s.ready.Store(true)
+	s.cleared.Store(false)
+	version.Add(1) // the allow sets and readiness, even with no entry changed
 	if changed {
 		s.save()
 	}
 }
 
-// Clear empties the store and makes it answer nothing until the next
-// Reconcile (the caller decided nft cannot be read).
+// Clear makes the store answer nothing, to the edge too, until the next
+// Reconcile (the caller decided nft cannot be read: three failed reads, the
+// table gone after `cfm disable`). It keeps the entries: List and Banned
+// answer nothing while not ready, and a reconcile that works again narrows
+// them to what nft still blocks, so a transient read failure does not throw
+// away bans nft still holds.
 func (s *Store) Clear() {
 	if s == nil {
 		return
 	}
-	s.mu.Lock()
-	had := len(s.m) > 0
-	s.m = map[string]Entry{}
-	s.mu.Unlock()
 	// Not ready again, and no allow snapshot: a ban added while nft cannot be
 	// read is never answered unchecked.
 	s.ready.Store(false)
+	s.cleared.Store(true)
 	s.allow.Store(nil)
-	if had {
-		s.save()
-	}
+	version.Add(1)
 }
 
 // allowSet matches the addresses nft's allow sets accept: hosts, CIDRs and
@@ -428,12 +516,14 @@ func (s *Store) Load() {
 		}
 	}
 	s.mu.Unlock()
+	version.Add(1)
 }
 
 // save writes the store atomically (temp file + rename), one save at a time
 // so an older snapshot never lands after a newer one. Best effort: a failed
 // write only costs the bans a restart would have kept.
 func (s *Store) save() {
+	version.Add(1)
 	if s.path == "" {
 		return
 	}
@@ -486,3 +576,6 @@ func Unban(ip string) { Default().Remove(ip) }
 
 // IsBanned asks the Default store (false without one).
 func IsBanned(ip string) (bool, time.Duration) { return Default().Banned(ip) }
+
+// List is the Default store's List (nil without one).
+func List() []Item { return Default().List() }

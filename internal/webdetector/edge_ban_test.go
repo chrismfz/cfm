@@ -169,6 +169,21 @@ func TestEdgeBanEndpoint(t *testing.T) {
 	if ok, _ := s.Banned("203.0.113.50"); ok {
 		t.Fatal("unban=1 left the ban")
 	}
+
+	// GET is the status (cfm debug's edge-ban.json), admin-only too.
+	get := func(ctx context.Context) (int, string) {
+		rr := httptest.NewRecorder()
+		e.handleEdgeBan(rr, httptest.NewRequest(http.MethodGet, "/api/v1/webdet/edge-ban", nil).WithContext(ctx))
+		return rr.Code, rr.Body.String()
+	}
+	if code, _ := get(scopedCtx("a.gr")); code != http.StatusForbidden {
+		t.Fatalf("scoped GET: %d, want 403", code)
+	}
+	code, body := get(adminCtx())
+	var st EdgeBanStatus
+	if code != http.StatusOK || json.Unmarshal([]byte(body), &st) != nil || st.Mode != "log" || !st.Enabled {
+		t.Fatalf("admin GET: %d %s", code, body)
+	}
 }
 
 type extendOnlyFW struct{ firewall.Backend }

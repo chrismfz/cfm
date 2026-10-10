@@ -500,8 +500,13 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   every allow. It is NOT an nft mirror (fleet feeds, cfm.deny, port-scan/flood
   bans stay out): a reconcile from a complete read only narrows it to what nft
   still blocks, and every nft allow set wins. A new web blocker or unblock /
-  allow path must call `edgeban.Ban` / `edgeban.Unban`. Kill switch
-  `[webdetector] EDGE_BAN`.
+  allow path must call `edgeban.Ban` / `edgeban.Unban`. The edge keeps its
+  own copy (`cfm_edgeban.lua`, the changes pulled from `/nginx/edgeban` every
+  ~5 s) and checks it at cfm.lua Step 0e, before every exemption but the
+  static IP/CIDR bypass, and on the static-asset locations: a new exemption
+  step goes AFTER it, or a banned proxied client walks through it. That check
+  is `[webdetector] EDGE_BAN_MODE` = `log` (burn-in default) or `enforce`.
+  Kill switch `[webdetector] EDGE_BAN`.
 - **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
   API reporting and email are the section sink's job (`autoblock_sink.go`) —
   don't reimplement them. A plain alert blocks per the section `BLOCK` policy;
