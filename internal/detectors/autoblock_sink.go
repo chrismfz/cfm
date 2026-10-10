@@ -472,15 +472,14 @@ func (s *sectionSink) Publish(a core.Alert) {
 					bttl = time.Hour
 				}
 
-				comment := "CHALLENGE_FAIL"
-				if r := firstNonEmpty(out.Extra["rule"], out.Extra["reason"], string(out.Kind)); r != "" {
-					comment = "CHALLENGE_FAIL | " + r
-				}
-
 				if s.pol.Mode != "dryrun" {
-					if err := s.fw.AddBlock(ip, comment, &bttl); err == nil {
+					// Never shortens a longer block of the address (ExtendBlock).
+					if kept, err := firewall.ExtendBlock(s.fw, ip, bttl); err == nil {
 						out.Extra["escalated"] = "block"
 						out.Extra["block_ttl"] = bttl.String()
+						if kept {
+							out.Extra["block_kept"] = "longer"
+						}
 					} else {
 						out.Extra["escalated"] = "block_failed"
 						out.Extra["block_err"] = err.Error()
@@ -673,10 +672,16 @@ func (s *sectionSink) Publish(a core.Alert) {
 		if ttl <= 0 {
 			ttl = time.Hour
 		}
-		if err := s.fw.AddBlock(ip, comment, &ttl); err == nil {
+		// ExtendBlock, not AddBlock: AddBlock replaces the element, so a
+		// shorter block from another section (webdetector 1h) cut a longer one
+		// (waf_security 7d) short. A longer or permanent block is kept.
+		if kept, err := firewall.ExtendBlock(s.fw, ip, ttl); err == nil {
 			out.Extra["blocked"] = "yes"
 			out.Extra["block_mode"] = "ttl"
 			out.Extra["ttl"] = ttl.String()
+			if kept {
+				out.Extra["block_kept"] = "longer"
+			}
 			blockOK = true
 		}
 	}
@@ -720,6 +725,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 				"key":        a.Key,                   // detector-specific key
 			},
 		}
+		if out.Extra["block_kept"] != "" {
+			ev.Extra["block_kept"] = out.Extra["block_kept"]
+		}
 
 		notify.Enqueue(ev)
 
@@ -727,6 +735,11 @@ func (s *sectionSink) Publish(a core.Alert) {
 		// SEND_TO_BLOCKLIST (leniency) selects the destination list: "lenient"
 		// records centrally for visibility without propagating to the farm,
 		// otherwise the global blocklist.
+		// A kept ban (ExtendBlock found a longer one) is still reported with
+		// this section's own TTL: the longer local ban may never have reached
+		// the fleet (SEND_TO_API=no, lenient, cfm.deny, a manual ban), and its
+		// full length is a local decision. That the central list should not let
+		// a shorter report cut a longer entry is cfm-web's merge to make.
 		if !sendToAPI {
 			out.Extra["send_to_api"] = "no"
 			if logging.DebugEnabled() {
