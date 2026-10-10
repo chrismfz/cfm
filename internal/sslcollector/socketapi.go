@@ -202,7 +202,7 @@ func (s *sockServer) handleDumpAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, _, _, err := s.col.BuildDumpAllPayload()
+	body, err := s.col.dumpAllFallback()
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

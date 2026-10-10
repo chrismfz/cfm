@@ -541,8 +541,9 @@ local _dumpall_scheduled = false
 -- the new list anyway, and serialising them meant one worker per poll (the
 -- others found the lock held and waited for their next poll), so the last
 -- worker served a new cert minutes after the first. The daemon serves the
--- list from its snapshot file for the current version (no rebuild per
--- worker), so concurrent fetches cost it a file read each.
+-- list from its snapshot file for the current version, and while that file
+-- is still being written it builds the list once for all workers (a waiting
+-- worker gets the same bytes), so concurrent fetches cost it no rebuild each.
 local function do_dumpall(shared_lock)
   local lock_key = "lock:dumpall"
   if shared_lock then

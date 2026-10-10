@@ -160,7 +160,12 @@ after a Refresh that changed the index (an unchanged version is not
 rewritten: that was ~110 MB and ~18s on a 7 800-host node, every discovery
 tick), and `/dumpall` streams that file when it is the current version
 instead of rebuilding the payload (re-reading every PEM into a buffer) for
-each worker. An older snapshot — kept by the regression guard — is not
+each worker. Until the snapshot of a new version is written (the ~18s
+between a Refresh's swap and its WriteSnapshot on a large node, which is
+when the workers fetch) and whenever the snapshot is not current, `/dumpall`
+builds the payload once per version: concurrent requests wait for that
+build and get the same bytes, which are reused for 30s and then released.
+An older snapshot — kept by the regression guard — is not
 served, nor is one marked `complete: false` (an entry's PEM could not be
 read when it was built); the payload is built as before, and an incomplete
 snapshot is rewritten on the next Refresh even at the same version. A

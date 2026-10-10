@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -200,5 +201,48 @@ func TestPayloadRacingARefreshIsNotComplete(t *testing.T) {
 	col.WriteSnapshot() // same version now, but not complete: rewritten
 	if h, _ := readSnapshotHeader(path, true); !h.Complete || h.ExactN != 2 || h.Version != col.Stats().Version {
 		t.Errorf("rewrite after the race: %+v", h)
+	}
+}
+
+// While the snapshot is not current (the window between a Refresh's swap and
+// its WriteSnapshot, when every worker fetches), concurrent /dumpall calls
+// share one build instead of rebuilding ~110 MB each at the same time.
+func TestDumpAllFallbackBuildsOncePerVersion(t *testing.T) {
+	col, path := newSnapshotCollector(t)
+	_ = os.Remove(path) // no snapshot: every /dumpall falls back
+	builds := 0
+	dumpAllAfterStatsHook = func() { builds++ }
+	t.Cleanup(func() { dumpAllAfterStatsHook = nil })
+	s := &sockServer{col: col, cfg: SockServerConfig{Token: strongToken}}
+
+	var wg sync.WaitGroup
+	bodies := make([]string, 6)
+	for i := range bodies {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/dumpall", nil)
+			req.Header.Set("X-SSLCollector-Token", strongToken)
+			s.handleDumpAll(rr, req)
+			bodies[i] = rr.Body.String()
+		}(i)
+	}
+	wg.Wait()
+	if builds != 1 {
+		t.Errorf("6 concurrent fallbacks made %d builds, want 1", builds)
+	}
+	for i, b := range bodies {
+		if !strings.Contains(b, `"a.example.com"`) || b != bodies[0] {
+			t.Errorf("worker %d got a different or empty payload", i)
+		}
+	}
+
+	// A new version is built afresh.
+	col.mu.Lock()
+	col.exact["b.example.com"] = col.exact["a.example.com"]
+	col.mu.Unlock()
+	if b, _ := col.dumpAllFallback(); builds != 2 || !strings.Contains(string(b), `"b.example.com"`) {
+		t.Errorf("new version: builds=%d", builds)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -210,4 +211,57 @@ func (c *Collector) BuildDumpAllPayload() ([]byte, int, int, error) {
 		return nil, 0, 0, fmt.Errorf("encode dumpall: %w", err)
 	}
 	return buf.Bytes(), len(out.Exact), len(out.Wild), nil
+}
+
+// dumpAllFallbackTTL is how long a fallback /dumpall payload is reused for
+// the same version.
+const dumpAllFallbackTTL = 30 * time.Second
+
+type dumpAllFallbackState struct {
+	mu   sync.Mutex
+	ver  string
+	at   time.Time
+	body []byte
+}
+
+// dumpAllFallback is /dumpall's payload when the snapshot file is not the
+// current version — chiefly the window between a Refresh's swap and its
+// WriteSnapshot (~18 s on a 7 800-host node), which is exactly when every
+// worker fetches after a version change. One build at a time: a concurrent
+// caller waits for it and gets the same bytes, and the payload is reused for
+// its version for dumpAllFallbackTTL, so N workers cost one build instead of
+// N simultaneous ~110 MB ones (the shared Lua lock used to serialise them;
+// the workers no longer take it on a version change). Also covers a
+// snapshot held back by the regression guard, a failed write, or an
+// incomplete one.
+func (c *Collector) dumpAllFallback() ([]byte, error) {
+	f := &c.fallback
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now()
+	ver := c.Stats().Version
+	if f.body != nil && f.ver == ver && now.Sub(f.at) < dumpAllFallbackTTL {
+		return f.body, nil
+	}
+	f.body, f.ver = nil, ""
+	body, _, _, err := c.BuildDumpAllPayload()
+	if err != nil {
+		return nil, err
+	}
+	// Reused only under the version it was built for. A payload built across
+	// an index swap carries the older label, so it never matches a newer
+	// version and is rebuilt on the next request.
+	if h, ok := readSnapshotHeaderFrom(bytes.NewReader(body), false); ok && h.Version == ver {
+		f.body, f.ver, f.at = body, ver, now
+		// Let it go after the TTL: a ~110 MB buffer must not stay resident
+		// until the next fallback (often hours).
+		time.AfterFunc(dumpAllFallbackTTL, func() {
+			f.mu.Lock()
+			if f.at.Equal(now) {
+				f.body, f.ver = nil, ""
+			}
+			f.mu.Unlock()
+		})
+	}
+	return body, nil
 }
