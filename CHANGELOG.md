@@ -24,7 +24,9 @@ back-filled here — see the git/PR history for that period.
   was piped to `go tool pprof`, which takes no profile on stdin), and each
   bundle carried its own `.gocache` with a fresh build of pprof. The profile
   now goes through a temp file, and the build cache is shared by every bundle
-  in `/var/lib/cfm/debug/.gocache`. The raw `.pb.gz` profiles were always
+  in `/var/lib/cfm/debug/.gocache` (with `--output` elsewhere, only when that
+  root is owned by the caller and not group/other-writable: the cache holds a
+  binary `cfm debug` runs as root). The raw `.pb.gz` profiles were always
   complete.
 
 ## 2026.10.10

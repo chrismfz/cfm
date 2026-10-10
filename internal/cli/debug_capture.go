@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"cfm/internal/clihttp"
@@ -313,10 +314,10 @@ func fetchPprof(baseURL, endpoint string, dur time.Duration) ([]byte, error) {
 // lost. The orchestrator passes the bundle directory itself, which
 // lives under defaultDebugBundleRoot (/var/lib/cfm/debug) — exec by
 // project convention. GOCACHE is its parent's `.gocache`, shared by every
-// bundle: current Go ships no prebuilt pprof (pkg/tool), so the first use
-// builds it from source (~160 MB of cache), and a
-// cache inside the bundle cost that per bundle (pruneBundles leaves
-// the non-timestamp name alone). Empty workDir falls back to the
+// bundle (when that root is private, see pprofEnv): current Go ships no
+// prebuilt pprof (pkg/tool), so the first use builds it from source
+// (~160 MB of cache), and a cache inside the bundle cost that per bundle
+// (pruneBundles leaves the non-timestamp name alone). Empty workDir falls back to the
 // inherited env and the system temp dir.
 func runPProfTop(profile []byte, workDir string) ([]byte, error) {
 	if _, err := exec.LookPath("go"); err != nil {
@@ -352,15 +353,40 @@ func runPProfTop(profile []byte, workDir string) ([]byte, error) {
 // workDir and GOCACHE at its parent's `.gocache`, so the pprof helper binary
 // lands on an exec-able filesystem and is built once for every bundle. The
 // rest is inherited so Go's toolchain discovery (GOROOT, etc.) keeps working.
+//
+// The shared cache holds a binary `cfm debug` runs as root, so it is used
+// only when nobody else can write it: the bundle root (and the cache, if it
+// exists) owned by us and not group/other-writable. `--output /tmp` would
+// otherwise let any local user plant the pprof build root then executes;
+// such a root gets the per-bundle cache (in a fresh 0750 bundle dir).
 func pprofEnv(workDir string) []string {
 	if workDir == "" {
 		return nil
 	}
+	cache := filepath.Join(workDir, ".gocache")
+	root := filepath.Dir(workDir)
+	if ownedAndPrivate(root) {
+		shared := filepath.Join(root, ".gocache")
+		if _, err := os.Lstat(shared); os.IsNotExist(err) || ownedAndPrivate(shared) {
+			cache = shared
+		}
+	}
 	return append(os.Environ(),
 		"TMPDIR="+workDir,
 		"GOTMPDIR="+workDir,
-		"GOCACHE="+filepath.Join(filepath.Dir(workDir), ".gocache"),
+		"GOCACHE="+cache,
 	)
+}
+
+// ownedAndPrivate reports whether path is a directory (not a symlink) owned
+// by this process's effective uid that neither group nor others can write.
+func ownedAndPrivate(path string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.IsDir() || fi.Mode().Perm()&0o022 != 0 {
+		return false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Geteuid()
 }
 
 // tailFile returns the last `n` lines of a file. Reads from the end in
