@@ -87,6 +87,13 @@ func TestOutcomeBlockedShowsKeptBan(t *testing.T) {
 		{map[string]string{"blocked": "yes", "block_mode": "ttl", "ttl": "1h0m0s"}, "Yes (ttl=1h0m0s)"},
 		{map[string]string{"blocked": "yes", "block_mode": "permanent"}, "Yes (permanent)"},
 		{nil, "No"},
+		{map[string]string{"blocked": "dryrun"}, "DryRun"},
+		{map[string]string{"blocked": "challenge", "ttl": "30m0s"}, "Challenged (ttl=30m0s)"},
+		{map[string]string{"blocked": "challenge", "ttl": "30m0s", "escalated": "block", "block_ttl": "1h0m0s"},
+			"Challenged (ttl=30m0s) -> Escalated: block (ttl=1h0m0s)"},
+		{map[string]string{"blocked": "challenge", "ttl": "30m0s", "escalated": "block", "block_ttl": "1h0m0s", "block_kept": "longer"},
+			"Challenged (ttl=30m0s) -> Escalated: block (ttl=1h0m0s; longer ban kept)"},
+		{map[string]string{"block_err": "nft: timeout"}, "No (block failed: nft: timeout)"},
 	}
 	for _, c := range cases {
 		if got := outcomeBlocked(c.extra); got != c.want {

@@ -75,7 +75,7 @@ func (b *Backend) hostBatch(op, set4, set6 string, entries []firewall.BlockEntry
 			}
 			elems, err := b.conn.GetSetElements(f.set)
 			if err != nil {
-				return res, fmt.Errorf("nftlib %s read %s: %w", op, f.name, err)
+				return res, fmt.Errorf("%w: nftlib %s %s: %w", firewall.ErrBlockRead, op, f.name, err)
 			}
 			plan := firewall.PlanBlockBatch(f.want, elemsToTimed(elems, f.set.Interval))
 			planned = planned.Add(plan.Result())

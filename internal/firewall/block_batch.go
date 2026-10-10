@@ -1,9 +1,12 @@
 package firewall
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"time"
+
+	"cfm/internal/logging"
 )
 
 // Batched host blocks: many addresses in one kernel transaction.
@@ -11,8 +14,9 @@ import (
 // AddBlock costs two `nft` processes per address on the exec backend
 // (RemoveBlock, add; four when the add hits an existing element and retries)
 // and one netlink transaction per address on nftlib. An automatic single block
-// goes through ExtendBlock (a one-entry batch: it never shortens), but a batch — a fleet blocklist
-// delta, a bulk API call — would fork per address. AddBlockBatch instead reads
+// goes through ExtendBlock (a one-entry batch: it never shortens; AddBlock is
+// the manual path), and a batch — a fleet blocklist delta, a bulk API call —
+// would fork per address. AddBlockBatch instead reads
 // each block set once and writes the whole batch in one transaction (exec: one
 // `nft -f -` run; nftlib: one per 1000 addresses): a few kernel round trips for
 // any batch size, more only when the set changed between the read and the
@@ -224,6 +228,11 @@ func HostsPresent(want []net.IP, current []SetElementTimed) []net.IP {
 	return out
 }
 
+// ErrBlockRead marks an AddBlockBatch (AddAllowBatch, RemoveBlockBatch) that
+// failed reading a set, before writing anything: errors.Is tells it apart
+// from a write the kernel refused.
+var ErrBlockRead = errors.New("set read failed")
+
 // ExtendBlock blocks one address for ttl through AddBlockBatch: it adds or
 // extends the block, never shortens it. Automatic blockers (the detector
 // sinks, the challenge server) use it in place of AddBlock, which replaces
@@ -231,8 +240,13 @@ func HostsPresent(want []net.IP, current []SetElementTimed) []net.IP {
 // ban of the same scanner, which then expired after an hour (mars,
 // 2026-10-09). kept reports an existing block at least as long (or
 // permanent), left unchanged; the address is blocked either way.
+//
+// The batch has to read the set first (`nft -j list set` on the exec
+// backend, a command that can time out under load). When that read fails it
+// falls back to AddBlock: a ban that may cut a longer one short beats no ban
+// at all, which is what AddBlock-only callers always got.
 func ExtendBlock(be Backend, ip net.IP, ttl time.Duration) (kept bool, err error) {
-	res, err := be.AddBlockBatch([]BlockEntry{{IP: ip, TTL: ttl}})
+	res, err := ExtendBlockResult(be, ip, ttl)
 	if err != nil {
 		return false, err
 	}
@@ -240,4 +254,19 @@ func ExtendBlock(be Backend, ip net.IP, ttl time.Duration) (kept bool, err error
 		return false, fmt.Errorf("not blockable: %v", ip)
 	}
 	return res.Kept > 0, nil
+}
+
+// ExtendBlockResult is ExtendBlock's batch with the AddBlock fallback, for a
+// caller that tells added, extended and kept apart (the kernel autoblock). A
+// fallback block counts as Added.
+func ExtendBlockResult(be Backend, ip net.IP, ttl time.Duration) (BlockBatchResult, error) {
+	res, err := be.AddBlockBatch([]BlockEntry{{IP: ip, TTL: ttl}})
+	if !errors.Is(err, ErrBlockRead) {
+		return res, err
+	}
+	logging.Logf("[firewall] block %s for %s: %v; blocking with AddBlock (a longer ban may be cut short)", ip, ttl, err)
+	if err := be.AddBlock(ip, "", &ttl); err != nil {
+		return BlockBatchResult{}, err
+	}
+	return BlockBatchResult{Added: 1}, nil
 }

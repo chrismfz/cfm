@@ -55,7 +55,17 @@ back-filled here — see the git/PR history for that period.
   detector sections, challenge self-protection) now only add or extend a ban;
   a longer or permanent ban stays, and the detector log line says "longer ban
   kept". Manual bans from the CLI and API still set exactly the time the
-  operator asks for.
+  operator asks for. Two bans of one IP arriving at the same moment no longer
+  race either (on the default `nft` engine the later write could still win).
+  Mail and Slack alerts say "longer ban kept" too, in the built-in templates
+  and the reference `notify.conf` (an existing `/etc/cfm/notify.conf` keeps its
+  own subject). One effect to know: a lenient (GR/CY) ban of an IP that
+  another section already banned for longer no longer shortens that ban.
+- **A ban no longer fails when the firewall is slow to answer.** Automatic
+  bans first read the block set; when that read failed (an `nft` timeout under
+  load) the IP was not banned at all, and nothing said why. They now ban it
+  the old way (which may cut a longer ban short), log the reason, and a ban
+  that still fails shows `No (block failed: …)` on the detector log line.
 - **A challenged WordPress save is replayed without an edge error.** When a
   challenged POST had no query string (`/wp-admin/post.php`), its replay
   after the solve raised a Lua error at the edge (`set_uri_args` got nil);

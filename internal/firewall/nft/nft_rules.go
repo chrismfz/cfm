@@ -471,7 +471,11 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 		if parsedIP.To4() != nil { // a v4-mapped address is blocked as IPv4
 			set = "block_v4"
 		}
-		res, err := b.AddBlockBatch([]firewall.BlockEntry{{IP: parsedIP, TTL: time.Duration(ttl) * time.Second}})
+		// ExtendBlockResult: never shortens a longer ban, and an unreadable
+		// set still blocks (AddBlock). A kept ban is neither reported nor
+		// notified here, unlike the detector sinks (autoblock_sink.go), which
+		// report their own TTL: a flood ban is this node's own decision.
+		res, err := firewall.ExtendBlockResult(b, parsedIP, time.Duration(ttl)*time.Second)
 		if err != nil {
 			logging.Logf("[autoblock] %s %s -> %s ttl=%ds failed: %v", fam, logIP, set, ttl, err)
 			return err

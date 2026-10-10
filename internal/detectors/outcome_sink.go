@@ -70,7 +70,11 @@ func outcomeBlocked(extra map[string]string) string {
 			}
 			if esc := extra["escalated"]; esc != "" {
 				if bt := extra["block_ttl"]; bt != "" {
-					blocked += " -> Escalated: " + esc + " (ttl=" + bt + ")"
+					blocked += " -> Escalated: " + esc + " (ttl=" + bt
+					if extra["block_kept"] == "longer" {
+						blocked += "; longer ban kept"
+					}
+					blocked += ")"
 				} else {
 					blocked += " -> Escalated: " + esc
 				}
@@ -92,6 +96,15 @@ func outcomeBlocked(extra map[string]string) string {
 				}
 			default:
 				blocked = "Yes"
+			}
+
+		case "":
+			// The firewall refused the block (autoblock_sink sets block_err).
+			if e := extra["block_err"]; e != "" {
+				if len(e) > 160 {
+					e = e[:160] + "…"
+				}
+				blocked = "No (block failed: " + e + ")"
 			}
 		}
 	}
