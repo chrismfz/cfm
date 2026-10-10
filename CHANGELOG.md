@@ -54,7 +54,8 @@ back-filled here — see the git/PR history for that period.
   solving is refused while the challenge stands.
 
 ### Fixed
-- **The edge logs rotate every day again on EL9 / CloudLinux 9.** There the
+- **The edge logs rotate every day again on EL9 / CloudLinux 9 (and Debian
+  11+ / Ubuntu 22.04+).** There the
   system's `logrotate.service` runs with `/usr` read-only
   (`ProtectSystem=full`), so its nightly run failed on every OpenResty log
   under `/usr/local/openresty/nginx/logs` (`Read-only file system`) and the

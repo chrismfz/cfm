@@ -70,13 +70,16 @@ there (or ship a host-specific drop-in), don't duplicate the entry.
   time-based directives are not applied twice.
 - **`/etc/systemd/system/logrotate.service.d/cfm-openresty.conf`**
   (`configs/cfm-logrotate-systemd.conf`, `ReadWritePaths=-/usr/local/openresty/nginx/logs`).
-  EL9 / CloudLinux 9 run `logrotate.service` with `ProtectSystem=full`, which
+  EL9 / CloudLinux 9, Debian 11+ and Ubuntu 22.04+ run `logrotate.service`
+  with `ProtectSystem=full`, which
   makes `/usr` read-only to it, so the daily run failed on every OpenResty log
   with `Read-only file system` and the unit ended `failed` each night. It
   still recorded those logs as rotated, so only the hourly `maxsize` pass ever
   rotated them (2026-10-10: titan and rigel had `access-panel.log` from July
   and May). The leading `-` lets the unit start on a host without OpenResty;
-  EL8 (`ProtectSystem=no`) is unaffected. `check_logrotate_coverage.sh
+  EL8 (logrotate from cron) is unaffected. Another `/etc/logrotate.d` entry
+  rotating logs under `/usr` (cPanel's, under `/usr/local`) can still leave
+  the unit `failed`: read `journalctl -u logrotate`, not just the unit state. `check_logrotate_coverage.sh
   --host` fails a host where the unit has `ProtectSystem` set without it.
 
 ## Adding a new log

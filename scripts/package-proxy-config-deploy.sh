@@ -737,6 +737,7 @@ deploy_logrotate_config() {
         echo "CFM logrotate: deployed $dlc_dst"
     else
         echo "WARNING: CFM logrotate: failed to deploy $dlc_dst"
+        deploy_logrotate_dropin # independent of the config file
         return 0
     fi
 
@@ -787,7 +788,10 @@ deploy_logrotate_dropin() {
     if [ -z "${CFM_LOGROTATE_DROPIN_DST:-}" ] && [ ! -d /run/systemd/system ]; then
         return 0 # not a systemd host
     fi
-    if [ -f "$dld_dst" ] && cmp -s "$dld_src" "$dld_dst"; then
+    # sha256sum (coreutils) like the config above: cmp (diffutils) can be
+    # missing on a minimal image, which would re-copy and reload every time.
+    if [ -f "$dld_dst" ] &&
+        [ "$(sha256sum "$dld_src" 2>/dev/null | awk '{print $1}')" = "$(sha256sum "$dld_dst" 2>/dev/null | awk '{print $1}')" ]; then
         return 0
     fi
 

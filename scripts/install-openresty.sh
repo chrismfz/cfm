@@ -503,11 +503,12 @@ install_logrotate_config() {
     local dropin_src="/usr/share/cfm/configs/cfm-logrotate-systemd.conf"
     local dropin_dst="/etc/systemd/system/logrotate.service.d/cfm-openresty.conf"
     if [ -f "$dropin_src" ] && [ -d /run/systemd/system ]; then
-        mkdir -p "$(dirname "$dropin_dst")"
-        cp -f "$dropin_src" "$dropin_dst"
-        chmod 0644 "$dropin_dst"
-        systemctl daemon-reload || warn "systemctl daemon-reload failed"
-        log "Installed logrotate.service drop-in: $dropin_dst"
+        if mkdir -p "$(dirname "$dropin_dst")" && cp -f "$dropin_src" "$dropin_dst" && chmod 0644 "$dropin_dst"; then
+            systemctl daemon-reload || warn "systemctl daemon-reload failed"
+            log "Installed logrotate.service drop-in: $dropin_dst"
+        else
+            warn "Could not install the logrotate.service drop-in: $dropin_dst"
+        fi
     fi
 
     if command -v logrotate >/dev/null 2>&1; then

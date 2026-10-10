@@ -199,7 +199,8 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   `access.bad_request.log`, `cfm.clam.log`, `cfm.socket.log`, `ua_emergency.log`).
   Run `./scripts/tests/check_logrotate_coverage.sh --host` on a live server to
   see what is actually rotated there. A log logrotate is configured for can
-  still be unwritable to it: EL9's `logrotate.service` has
+  still be unwritable to it: `logrotate.service` on EL9, Debian 11+ and
+  Ubuntu 22.04+ has
   `ProtectSystem=full` (`/usr` read-only), so the OpenResty logs under
   `/usr/local` need the `logrotate.service.d/cfm-openresty.conf` drop-in
   (`configs/cfm-logrotate-systemd.conf`), and `--host` checks for it. See
