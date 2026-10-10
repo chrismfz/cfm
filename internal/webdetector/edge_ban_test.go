@@ -188,3 +188,19 @@ func TestChallengeSelfProtectFeedsEdgeBan(t *testing.T) {
 		t.Fatal("self-protection block not in the edge ban store")
 	}
 }
+
+// `cfm unblock` reaches the daemon through force-unblock-ip: the edge ban
+// goes even when no bridge is wired.
+func TestForceUnblockHandlerUnbansWithoutBridge(t *testing.T) {
+	s := installEdgeBans(t, "203.0.113.95")
+	e := &Engine{}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webdet/force-unblock-ip?ip=203.0.113.95", nil).WithContext(adminCtx())
+	e.handleForceUnblockIP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("force-unblock: %d %s", rr.Code, rr.Body.String())
+	}
+	if ok, _ := s.Banned("203.0.113.95"); ok {
+		t.Fatal("force-unblock with no bridge left the edge ban")
+	}
+}

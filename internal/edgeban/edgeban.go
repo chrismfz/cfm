@@ -71,7 +71,57 @@ type Store struct {
 var (
 	enabled atomic.Bool
 	def     atomic.Pointer[Store]
+	proxies atomic.Pointer[[]*net.IPNet] // the trusted proxies' own ranges
 )
+
+// SetTrustedProxies sets the ranges the edge trusts to name the client
+// (trusted_proxies.conf). An address in them is never answered: realip
+// leaves remote_addr at a proxy address when CF-Connecting-IP itself names
+// one (a Cloudflare Worker's subrequest), so a ban of that address would
+// 403 every visitor who arrives the same way.
+func SetTrustedProxies(nets []*net.IPNet) {
+	cp := append([]*net.IPNet(nil), nets...)
+	proxies.Store(&cp)
+}
+
+func isTrustedProxy(ip net.IP) bool {
+	p := proxies.Load()
+	if p == nil {
+		return false
+	}
+	for _, n := range *p {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseTrustedProxies reads `set_real_ip_from <cidr|ip>;` lines (the
+// trusted_proxies.conf format); anything else is skipped.
+func ParseTrustedProxies(text string) []*net.IPNet {
+	var out []*net.IPNet
+	for _, line := range strings.Split(text, "\n") {
+		f := strings.Fields(strings.TrimSpace(line))
+		if len(f) < 2 || f[0] != "set_real_ip_from" {
+			continue
+		}
+		v := strings.TrimSuffix(f[1], ";")
+		if !strings.Contains(v, "/") {
+			if ip := net.ParseIP(v); ip != nil {
+				if ip.To4() != nil {
+					v += "/32"
+				} else {
+					v += "/128"
+				}
+			}
+		}
+		if _, n, err := net.ParseCIDR(v); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
 
 func init() { enabled.Store(true) }
 
@@ -177,6 +227,9 @@ func (s *Store) Banned(ip string) (bool, time.Duration) {
 	if a := s.allow.Load(); a != nil && a.contains(addr) {
 		return false, 0
 	}
+	if isTrustedProxy(addr) {
+		return false, 0
+	}
 	if e.Expires.IsZero() {
 		return true, 0
 	}
@@ -262,7 +315,8 @@ func (s *Store) Reconcile(snap Snapshot) {
 	}
 }
 
-// Clear empties the store (the caller decided nft cannot be read).
+// Clear empties the store and makes it answer nothing until the next
+// Reconcile (the caller decided nft cannot be read).
 func (s *Store) Clear() {
 	if s == nil {
 		return
@@ -271,6 +325,10 @@ func (s *Store) Clear() {
 	had := len(s.m) > 0
 	s.m = map[string]Entry{}
 	s.mu.Unlock()
+	// Not ready again, and no allow snapshot: a ban added while nft cannot be
+	// read is never answered unchecked.
+	s.ready.Store(false)
+	s.allow.Store(nil)
 	if had {
 		s.save()
 	}

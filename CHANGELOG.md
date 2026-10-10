@@ -26,9 +26,10 @@ back-filled here — see the git/PR history for that period.
   (API, cfm-admin's "Block selected", `cfm block`), are now also enforced by
   the edge for the same time, for a visitor that comes through Cloudflare:
   its request gets a 403. Unblocking or allowing lifts it at once, and a ban
-  the firewall no longer holds stops within a minute. An address any firewall
-  allow list covers (including the fleet whitelist) is never blocked this
-  way, and direct visitors are left to the firewall as before. Mail, SSH and
+  the firewall no longer holds stops within two minutes. An address any
+  firewall allow list covers (including the fleet whitelist and the server's
+  own addresses) or a Cloudflare address is never blocked this way, and
+  direct visitors are left to the firewall as before. Mail, SSH and
   other non-web bans, fleet blocklists and `cfm.deny` are not copied.
   `[global] IGNORE_IPS` stay exempt; `[webdetector] EDGE_BAN = 0` turns it
   off. This release covers requests that reach the edge's per-IP

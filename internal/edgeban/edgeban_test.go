@@ -209,3 +209,27 @@ func TestNilStoreHelpers(t *testing.T) {
 		t.Fatal("no store installed: nothing is banned")
 	}
 }
+
+// A trusted proxy's own address is never answered (a Cloudflare Worker's
+// subrequest names a Cloudflare address in CF-Connecting-IP).
+func TestTrustedProxyAddressNeverBanned(t *testing.T) {
+	nets := ParseTrustedProxies("# comment\nset_real_ip_from 173.245.48.0/20;\nset_real_ip_from 2a06:98c0::/29;\nset_real_ip_from 198.51.100.77;\nreal_ip_header CF-Connecting-IP;\n")
+	if len(nets) != 3 {
+		t.Fatalf("parsed %d ranges, want 3", len(nets))
+	}
+	SetTrustedProxies(nets)
+	t.Cleanup(func() { SetTrustedProxies(nil) })
+	s, now := newTestStore(t)
+	for _, ip := range []string{"2a06:98c0:3600::103", "173.245.48.9", "198.51.100.77", "203.0.113.90"} {
+		s.Add(net.ParseIP(ip), nil, "waf_security", false)
+	}
+	s.Reconcile(snap(now.Add(-time.Minute), nil, blk("2a06:98c0:3600::103", 0), blk("173.245.48.9", 0), blk("198.51.100.77", 0), blk("203.0.113.90", 0)))
+	for _, ip := range []string{"2a06:98c0:3600::103", "173.245.48.9", "198.51.100.77"} {
+		if ok, _ := s.Banned(ip); ok {
+			t.Errorf("%s is a trusted proxy address: must never be edge-banned", ip)
+		}
+	}
+	if ok, _ := s.Banned("203.0.113.90"); !ok {
+		t.Error("an ordinary client must stay banned")
+	}
+}

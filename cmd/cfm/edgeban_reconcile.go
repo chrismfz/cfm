@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"cfm/internal/edgeban"
@@ -10,23 +11,52 @@ import (
 )
 
 // edgeBanReconcileEvery paces the edge ban store's narrowing to nft (an
-// unblock from the CLI, a flush, an expiry, a new allow). Unbans inside the
-// daemon are immediate; this is the backstop.
-const edgeBanReconcileEvery = time.Minute
+// unblock from the CLI, a flush, a new allow entry). Unbans and allows inside
+// the daemon, `cfm unblock` and `cfm allow` are immediate and expiry is
+// checked at lookup; this is the backstop. Each run lists 14 sets — on the
+// exec backend 14 nft processes, each loading the ruleset — hence not every
+// minute.
+const edgeBanReconcileEvery = 2 * time.Minute
 
 // edgeBanFailClear is how many failed reads in a row empty the store.
 const edgeBanFailClear = 3
 
-// The sets a reconcile reads: the host block sets, and every allow set nft
-// accepts before its block drops (inet cfm input).
+// The sets a reconcile reads: the host block sets, and every set nft accepts
+// in `inet cfm input` before its block drops (self, allow, dyndns, the fleet
+// whitelist, allow nets).
 var (
 	edgeBanBlockSets = []string{"block_v4", "block_v6"}
 	edgeBanAllowSets = []string{
+		"self_v4", "self_v6",
 		"allow_v4", "allow_v6", "allow_dyn_v4", "allow_dyn_v6",
 		"allow_ext_v4_hosts", "allow_ext_v6_hosts", "allow_ext_v4_nets", "allow_ext_v6_nets",
 		"allow_v4_nets", "allow_v6_nets",
 	}
 )
+
+// The trusted proxies' own ranges, as the edge includes them (the live copy
+// first, then the packaged reference). A var so tests point it elsewhere.
+var edgeBanTrustedProxyFiles = []string{
+	"/usr/local/openresty/nginx/conf/trusted_proxies.conf",
+	"/etc/angie/trusted_proxies.conf",
+	"/usr/share/cfm/configs/trusted_proxies.conf",
+}
+
+// loadEdgeBanTrustedProxies hands the first readable trusted_proxies.conf to
+// the store (an address in it is never edge-banned).
+func loadEdgeBanTrustedProxies() {
+	for _, p := range edgeBanTrustedProxyFiles {
+		raw, err := os.ReadFile(p) // #nosec G304 -- fixed system paths
+		if err != nil {
+			continue
+		}
+		if nets := edgeban.ParseTrustedProxies(string(raw)); len(nets) > 0 {
+			edgeban.SetTrustedProxies(nets)
+			return
+		}
+	}
+	logging.Logf("[edgeban] no trusted_proxies.conf found: proxy addresses are not guarded")
+}
 
 // readEdgeBanSnapshot reads every set, or fails: a partial read (one set
 // missing or erroring) must not reconcile, it would drop real bans.
@@ -51,29 +81,39 @@ func readEdgeBanSnapshot(be firewall.Backend) (edgeban.Snapshot, error) {
 	return snap, nil
 }
 
-// runEdgeBanReconcile narrows the edge ban store to what nft holds, now and
-// every edgeBanReconcileEvery. A failed read leaves the store as it is (it
-// stays not ready until a read works: nothing is blocked at the edge on a
-// store never checked against nft); edgeBanFailClear failed reads in a row
-// (the table gone after `cfm disable`, a broken backend) empty it: the edge
-// must not keep enforcing bans nft may no longer hold.
+// edgeBanReconcileOnce runs one reconcile and returns the failed reads in a
+// row. A failed read leaves the store as it is (a store never checked against
+// nft answers nothing); edgeBanFailClear in a row (the table gone after `cfm
+// disable`, a broken backend) empty it and make it answer nothing until a
+// read works again. Logged on the transitions only.
+func edgeBanReconcileOnce(s *edgeban.Store, be firewall.Backend, fails int) int {
+	snap, err := readEdgeBanSnapshot(be)
+	if err == nil {
+		if fails >= edgeBanFailClear {
+			logging.Logf("[edgeban] nft readable again after %d failed reads", fails)
+		}
+		s.Reconcile(snap)
+		return 0
+	}
+	fails++
+	switch {
+	case fails < edgeBanFailClear:
+		logging.Logf("[edgeban] reconcile skipped (%d in a row): %v", fails, err)
+	case fails == edgeBanFailClear:
+		s.Clear()
+		logging.Logf("[edgeban] %d failed reads: store emptied, the edge answers no ban until nft is readable: %v", fails, err)
+	}
+	return fails
+}
+
+// runEdgeBanReconcile reconciles now and every edgeBanReconcileEvery.
 func runEdgeBanReconcile(s *edgeban.Store, be firewall.Backend) {
+	loadEdgeBanTrustedProxies()
 	t := time.NewTicker(edgeBanReconcileEvery)
 	defer t.Stop()
 	fails := 0
 	for {
-		snap, err := readEdgeBanSnapshot(be)
-		if err == nil {
-			s.Reconcile(snap)
-			fails = 0
-		} else {
-			fails++
-			logging.Logf("[edgeban] reconcile skipped (%d in a row): %v", fails, err)
-			if fails == edgeBanFailClear {
-				s.Clear()
-				logging.Logf("[edgeban] %d failed reads: store emptied (fail toward not blocking)", fails)
-			}
-		}
+		fails = edgeBanReconcileOnce(s, be, fails)
 		<-t.C
 	}
 }

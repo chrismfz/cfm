@@ -453,18 +453,25 @@ bridge answers the store only then. A direct client is nft's alone: its ban
 drops it before the edge, and nft's allow sets decide for it. An older edge
 sends no `px` and gets nothing from the store.
 
-**Allows win, as in nft.** A reconcile reads every allow set nft accepts
-before its block drops (`allow_v4/v6`, `allow_dyn_*`, `allow_ext_*` hosts and
-nets — the fleet whitelist — and `allow_*_nets`, hosts, CIDRs and ranges), and
-the store never answers an address they cover, even for a ban added after the
-read.
+**Allows win, as in nft.** A reconcile reads every set nft accepts before its
+block drops (`self_v4/v6`, `allow_v4/v6`, `allow_dyn_*`, `allow_ext_*` hosts
+and nets — the fleet whitelist — and `allow_*_nets`; hosts, CIDRs and ranges),
+and the store never answers an address they cover, even for a ban added after
+the read (a ban added right after a NEW allow, before the next reconcile, is
+the one residual). Nor does it answer a trusted proxy's own address
+(trusted_proxies.conf): realip leaves `remote_addr` at a Cloudflare address
+when CF-Connecting-IP names one (a Worker's subrequest), and a ban of it would
+403 every visitor arriving that way. `cfm allow --ttl` lifts the edge ban for
+good; when the allow expires nft blocks again but the edge does not (fails
+safe).
 
 **Consistency.** Every in-daemon unblock removes the entry
 (`/api/v1/unblock`, `unblock.DoMany` — the agent's fleet unblock — and
 `ForceUnblock`, which `cfm unblock` reaches over the API); `cfm allow` (over
-`edge-ban?unban=1`) and a `cfm.allow` host lift it too. Every minute a
+`edge-ban?unban=1`) and a `cfm.allow` host lift it too. Every two minutes a
 reconcile reads the block and allow sets — all of them or none: a failed or
-partial read skips the reconcile, and three in a row empty the store — and
+partial read skips the reconcile, and three in a row empty the store and make
+it answer nothing until a read works — and
 *narrows* the store: an entry nft no longer blocks (expired, unblocked from the
 CLI, flushed) is dropped unless it was written after the read began, and an
 earlier nft expiry clamps it. It never imports from nft. The store persists in

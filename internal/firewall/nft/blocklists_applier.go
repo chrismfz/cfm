@@ -177,6 +177,12 @@ func (b *Backend) ListSetElementsTimed(setName string) ([]firewall.SetElementTim
 	if err != nil {
 		return nil, err
 	}
+	return parseTimedSetJSON(raw)
+}
+
+// parseTimedSetJSON walks `nft -j list set` output into elements with their
+// remaining TTL (ListSetElementsTimed).
+func parseTimedSetJSON(raw []byte) ([]firewall.SetElementTimed, error) {
 	var root map[string]any
 	if err := json.Unmarshal(raw, &root); err != nil {
 		return nil, err

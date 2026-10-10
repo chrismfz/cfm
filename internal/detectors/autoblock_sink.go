@@ -478,7 +478,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 					if kept, err := firewall.ExtendBlock(s.fw, ip, bttl); err == nil {
 						// A web challenge escalated: the edge enforces it too
 						// (a client behind a proxy never meets the nft drop).
-						edgeban.Ban(ip, &bttl, s.section, false)
+						if edgeban.WebSection(s.section) {
+							edgeban.Ban(ip, &bttl, s.section, false)
+						}
 						out.Extra["escalated"] = "block"
 						out.Extra["block_ttl"] = bttl.String()
 						if kept {
