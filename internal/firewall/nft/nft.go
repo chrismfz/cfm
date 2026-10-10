@@ -826,8 +826,13 @@ func (b *Backend) RemoveBlock(ip net.IP) error {
 // (its length unknown). firewall.ExtendBlock's fallback when the set can't
 // be read: unlike AddBlock it never shortens a ban.
 func (b *Backend) CreateBlock(ip net.IP, ttl time.Duration) (exists bool, err error) {
-	if ip == nil || ip.IsUnspecified() {
-		return false, fmt.Errorf("not blockable: %v", ip)
+	if ip == nil || ip.IsUnspecified() || ttl <= 0 {
+		return false, fmt.Errorf("not blockable: %v for %s", ip, ttl)
+	}
+	// humanTimeout prints anything under a second as "0s", which nft takes
+	// as no timeout: a permanent ban. One second, as SplitBlockEntries does.
+	if ttl < time.Second {
+		ttl = time.Second
 	}
 	set := setV4
 	if ip.To4() == nil {

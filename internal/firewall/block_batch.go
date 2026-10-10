@@ -49,7 +49,11 @@ type BlockBatchResult struct {
 	Added    int // weren't blocked
 	Extended int // were blocked for less time than asked; now for the new TTL
 	Kept     int // already blocked at least as long, or permanently: unchanged
-	Skipped  int // not usable: no IP, an unspecified address, or no time left
+	// Present: already blocked, for how long unknown (the set could not be
+	// read; ExtendBlockResult's exclusive create found the address there).
+	// Never counted as Kept, which promises a ban at least as long.
+	Present int
+	Skipped int // not usable: no IP, an unspecified address, or no time left
 }
 
 // Add sums two results.
@@ -58,6 +62,7 @@ func (r BlockBatchResult) Add(o BlockBatchResult) BlockBatchResult {
 		Added:    r.Added + o.Added,
 		Extended: r.Extended + o.Extended,
 		Kept:     r.Kept + o.Kept,
+		Present:  r.Present + o.Present,
 		Skipped:  r.Skipped + o.Skipped,
 	}
 }
@@ -251,7 +256,7 @@ func ExtendBlock(be Backend, ip net.IP, ttl time.Duration) (kept bool, err error
 	if err != nil {
 		return false, err
 	}
-	if res.Added+res.Extended+res.Kept == 0 {
+	if res.Added+res.Extended+res.Kept+res.Present == 0 {
 		return false, fmt.Errorf("not blockable: %v", ip)
 	}
 	return res.Kept > 0, nil
@@ -280,7 +285,7 @@ func ExtendBlockResult(be Backend, ip net.IP, ttl time.Duration) (BlockBatchResu
 		}
 		logging.Logf("[firewall] block %s for %s: %v; created it without the read (already blocked: %v)", ip, ttl, readErr, exists)
 		if exists {
-			return BlockBatchResult{Kept: 1}, nil
+			return BlockBatchResult{Present: 1}, nil
 		}
 		return BlockBatchResult{Added: 1}, nil
 	}

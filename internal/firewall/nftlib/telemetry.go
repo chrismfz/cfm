@@ -298,9 +298,10 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 			set = setBlockV4
 		}
 		// ExtendBlockResult: never shortens a longer ban, and an unreadable
-		// set still blocks (AddBlock). A kept ban is neither reported nor
-		// notified here, unlike the detector sinks (autoblock_sink.go), which
-		// report their own TTL: a flood ban is this node's own decision.
+		// set still blocks (exec: an exclusive create; nftlib: AddBlock). A
+		// kept ban is neither reported nor notified here, unlike the detector
+		// sinks (autoblock_sink.go), which report their own TTL: a flood ban
+		// is this node's own decision.
 		res, err := firewall.ExtendBlockResult(b, parsedIP, time.Duration(ttl)*time.Second)
 		if err != nil {
 			logging.Logf("[autoblock] %s %s -> %s ttl=%ds failed: %v", fam, logIP, set, ttl, err)
@@ -308,6 +309,10 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 		}
 		b.lastAutoBlockAt[ip] = time.Now()
 		switch {
+		case res.Present > 0:
+			logging.Logf("[autoblock] %s %s already in %s (for how long unknown: the set was unreadable); left as is (reason=%s)",
+				fam, logIP, set, reason)
+			return nil
 		case res.Kept > 0:
 			logging.Logf("[autoblock] %s %s already in %s for at least ttl=%ds; kept (reason=%s)",
 				fam, logIP, set, ttl, reason)

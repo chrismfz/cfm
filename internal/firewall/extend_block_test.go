@@ -100,7 +100,8 @@ func (f *errBatchFake) AddBlock(ip net.IP, _ string, ttl *time.Duration) error {
 }
 
 // A set that cannot be read (an `nft -j list set` timeout under load) must
-// not mean no ban at all: ExtendBlock falls back to AddBlock. A write the
+// not mean no ban at all: without an exclusive create (nftlib) ExtendBlock
+// falls back to AddBlock. A write the
 // kernel refused does not fall back (AddBlock would replace a longer ban the
 // batch saw and meant to keep).
 func TestExtendBlockFallsBackOnReadError(t *testing.T) {
@@ -138,8 +139,8 @@ func (f *creatorFake) CreateBlock(ip net.IP, ttl time.Duration) (bool, error) {
 }
 
 // Where the backend can create exclusively, a failed read never replaces a
-// ban: an existing one (a permanent cfm.deny ban) is kept, and AddBlock is
-// not called.
+// ban: an existing one (a permanent cfm.deny ban) stays, and AddBlock is not
+// called. ExtendBlock then reports blocked, not kept.
 func TestExtendBlockReadErrorPrefersExclusiveCreate(t *testing.T) {
 	ip := net.ParseIP("203.0.113.41")
 	readErr := fmt.Errorf("%w: inet cfm block_v4: %w", ErrBlockRead, errors.New("signal: killed"))
@@ -149,11 +150,22 @@ func TestExtendBlockReadErrorPrefersExclusiveCreate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if exists && res.Kept != 1 || !exists && res.Added != 1 {
+		// An existing ban of unknown length is Present, never Kept (which
+		// promises one at least as long).
+		if exists && (res.Present != 1 || res.Kept != 0) || !exists && res.Added != 1 {
 			t.Errorf("exists=%v: result %+v", exists, res)
 		}
 		if len(f.created) != 1 || len(f.addBlock) != 0 {
 			t.Errorf("exists=%v: created=%v addBlock=%v, want one create and no AddBlock", exists, f.created, f.addBlock)
 		}
+	}
+}
+
+func TestExtendBlockPresentIsNotKept(t *testing.T) {
+	readErr := fmt.Errorf("%w: x", ErrBlockRead)
+	f := &creatorFake{errBatchFake: errBatchFake{err: readErr}, exists: true}
+	kept, err := ExtendBlock(f, net.ParseIP("203.0.113.42"), time.Hour)
+	if err != nil || kept {
+		t.Fatalf("kept=%v err=%v, want blocked and not kept", kept, err)
 	}
 }

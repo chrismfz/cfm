@@ -107,6 +107,14 @@ add set inet cfm block_v6 { type ipv6_addr; flags timeout; }`)
 	if d, ok := left(perm); !ok || d != 0 {
 		t.Fatalf("CreateBlock touched a permanent ban: present=%v left=%s", ok, d)
 	}
+	// A sub-second TTL must not become "timeout 0s", i.e. permanent.
+	const sub = "192.0.2.15"
+	if _, err := b.CreateBlock(net.ParseIP(sub), 500*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if d, ok := left(sub); ok && d == 0 {
+		t.Fatal("CreateBlock(500ms) made a permanent ban")
+	}
 	const fresh = "192.0.2.13"
 	if exists, err := b.CreateBlock(net.ParseIP(fresh), time.Hour); err != nil || exists {
 		t.Fatalf("CreateBlock of a new address: exists=%v err=%v", exists, err)
