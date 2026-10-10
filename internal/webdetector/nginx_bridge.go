@@ -28,8 +28,8 @@ package webdetector
 import (
 	"bufio"
 	"bytes"
-	"cfm/internal/edgeban"
 	"cfm/internal/clam"
+	"cfm/internal/edgeban"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
@@ -220,8 +220,8 @@ type NginxBridge struct {
 	// because challengePageExempt cleared the client
 	// (BridgeStats.ChallengePageExemptRedirects).
 	challengePageExemptRedirects atomic.Int64
-	chalExcludeLogMu sync.Mutex
-	chalExcludeLogAt map[string]time.Time
+	chalExcludeLogMu             sync.Mutex
+	chalExcludeLogAt             map[string]time.Time
 	// chalPageLogAt rate-limits the per-host exempt_redirect log line
 	// (noteChallengePageExemptRedirect; under chalExcludeLogMu).
 	chalPageLogAt map[string]time.Time
@@ -251,6 +251,9 @@ type NginxBridge struct {
 	hookCh      chan func()
 	hookDropped atomic.Int64
 	hookStopped atomic.Bool
+
+	// edgeBanCache is the last /nginx/edgeban feed built (edge_ban_feed.go).
+	edgeBanCache edgeBanFeedCache
 }
 
 func (b *NginxBridge) SetEnricher(e *enrich.Enricher) { b.enr = e }

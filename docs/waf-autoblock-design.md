@@ -482,14 +482,22 @@ the first reconcile after a start.
 copy of the list. The bridge serves it as `GET /nginx/edgeban` (every address
 the store answers, less IGNORE_IPS, with its expiry; capped at 20 000) under a
 generation that is a hash of exactly that content, so the same content has
-the same generation across daemon restarts. One worker at a time (a dict
-lock) polls it every 2 s from a timer started by any `cfm.lua` request,
+the same generation across daemon restarts. It is built once per change (a
+store version bumped by every write, reconcile and switch, or the earliest
+expiry in it, or 30 s) and served from that cache otherwise; past the cap the
+highest addresses are left out and logged every 10 minutes. A store that has
+not reconciled yet (a daemon start, nft unreadable) replies `{"ready":false}`
+and the edge keeps its copy, so bans hold through a daemon restart. One worker at a time (a dict
+lock held while a poll is in flight) polls it every 2 s from a timer started
+by any `cfm.lua` request (the static location only reads),
 sending the generation it holds (`?gen=`; the reply is then `unchanged`), and
 fetches the whole list every 60 s. The list lives in two slots of the
 `cfm_edgeban` dict (`cfm_decisions` until the conf is reloaded): a new list is
 written into the other slot and `eb:cur` flips to it in one set, so a lookup
 never sees half a list, and a leftover address carries an older generation
-and never matches. Each entry's TTL is the ban's remaining time capped at
+and never matches; a same-generation refresh rewrites the live slot and never
+touches `eb:cur`. An IPv4-mapped peer (`::ffff:a.b.c.d`) is looked up as
+`a.b.c.d`, as the daemon keys it. Each entry's TTL is the ban's remaining time capped at
 300 s, refreshed by the full fetch: with the daemon unreachable the copy fades
 within 5 minutes (fail open). A lookup is two dict gets.
 

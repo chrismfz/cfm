@@ -21,6 +21,7 @@ local function new_dict()
     store[k] = { v = v, exp = (ttl and ttl > 0) and (clock + ttl) or nil }
     return true
   end
+  function d:delete(k) store[k] = nil end
   function d:add(k, v, ttl)
     if self:get(k) ~= nil then return false, "exists" end
     return self:set(k, v, ttl)
@@ -114,6 +115,9 @@ check(eb._current(d) == s1, "same generation stays in its slot")
 clock = clock + 20
 check(eb.check("203.0.113.5"), "the refresh extended the entry's TTL")
 
+-- ── IPv4-mapped peer as nginx prints it ─────────────────────────────────────
+check(eb.check("::ffff:203.0.113.5"), "an IPv4-mapped address matches its IPv4 entry")
+
 -- ── Replies that change nothing ─────────────────────────────────────────────
 reset()
 d = ngx.shared.cfm_edgeban
@@ -123,6 +127,7 @@ for _, r in ipairs({ { gen = "g1", unchanged = true }, { gen = "g9", unchanged =
   check(eb.apply(d, r, clock) == false, "a reply without a usable list changes nothing")
 end
 check(eb.apply(d, nil, clock) == false, "nil reply changes nothing")
+check(eb.apply(d, { ready = false }, clock) == false, "a daemon not ready yet changes nothing (the copy holds)")
 check(eb.check("203.0.113.5"), "the list survives bad replies")
 -- An already-expired ban is not written.
 eb.apply(d, { gen = "g2", ips = { ["198.51.100.8"] = clock - 1 } }, clock)
@@ -147,7 +152,7 @@ check(calls[1] == "/nginx/edgeban", "full fetch carries no ?gen=")
 check(eb.check("203.0.113.5"), "the polled list answers")
 clock = clock + eb.POLL_SEC
 eb.tick(dec, decode)
-check(#timers == 2 and timers[2].args[3] == false, "next window: an incremental poll")
+check(#timers == 2 and timers[2].args[3] == false, "next window: an incremental poll (the finished poll released the lock)")
 timers[2].cb(false, unpack(timers[2].args))
 check(calls[2] == "/nginx/edgeban?gen=g1", "incremental poll sends the held generation")
 clock = clock + eb.FULL_SEC
@@ -159,6 +164,20 @@ check(#calls == 2, "a premature timer does no RPC")
 local bad = { rpc = function() return nil, "timeout" end }
 eb._poll_cb(false, bad, decode, true)
 check(eb.check("203.0.113.5"), "a failed RPC keeps the list")
+-- A poll still in flight holds the lock: no second poller, whatever the pace.
+clock = clock + eb.POLL_SEC
+eb.tick(dec, decode)
+check(#timers == 4, "a new window schedules a poll")
+clock = clock + eb.POLL_SEC
+eb.tick(dec, decode)
+check(#timers == 4, "while that poll is in flight, no other starts")
+timers[4].cb(false, unpack(timers[4].args))
+-- A same-generation refresh never moves eb:cur back.
+local slotA = eb._current(d)
+eb.apply(d, { gen = "gX", ips = { ["192.0.2.77"] = 0 } }, clock)
+check(eb.apply(d, { gen = "gX", ips = { ["192.0.2.77"] = 0 } }, clock) == false and eb._current(d) ~= slotA,
+  "a same-generation refresh leaves the live pointer alone")
+eb.apply(d, { gen = "g1", ips = { ["203.0.113.5"] = 0 } }, clock)
 -- No dict at all: tick and check do nothing.
 ngx.shared = {}
 eb.tick(dec, decode)

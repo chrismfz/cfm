@@ -33,7 +33,10 @@
 -- leaves out allowed addresses, trusted-proxy addresses and IGNORE_IPS.
 --
 -- FAIL-OPEN: no dict, no list yet, daemon down, a bad reply — every failure
--- answers "not banned". [webdetector] EDGE_BAN = 0 empties the daemon's list.
+-- answers "not banned". A daemon that has not reconciled yet (a restart)
+-- replies {"ready":false}: the copy stays and fades on its entry TTLs, so
+-- the bans hold through a daemon restart. After more than ENTRY_TTL_MAX with
+-- no cfm.lua request, the first request finds the copy gone. [webdetector] EDGE_BAN = 0 empties the daemon's list.
 --
 -- ISOLATION: entries live in the dedicated cfm_edgeban dict; on upgrade lag
 -- (new Lua, conf not reloaded yet) in cfm_decisions, under the same keys.
@@ -50,6 +53,7 @@ local CUR_KEY       = "eb:cur"   -- "<slot><gen>", slot "a" or "b"
 local POLLED_KEY    = "eb:polled"
 local FULL_KEY      = "eb:full"
 local LOCK_KEY      = "eb:lock"
+local LOCK_TTL      = 30
 
 local function dict()
   local sh = ngx.shared
@@ -70,6 +74,9 @@ end
 function M.banned(ip)
   local d = dict()
   if not d or not ip or ip == "" then return false end
+  -- nginx prints an IPv4-mapped peer as ::ffff:a.b.c.d; the daemon keys it
+  -- as a.b.c.d.
+  if ip:sub(1, 7) == "::ffff:" and ip:find(".", 8, true) then ip = ip:sub(8) end
   local cur = d:get(CUR_KEY)
   if type(cur) ~= "string" or #cur < 2 then return false end
   return d:get("eb|" .. cur:sub(1, 1) .. "|" .. ip) == cur:sub(2)
@@ -110,8 +117,11 @@ function M.apply(d, r, now)
   if type(r.ips) ~= "table" then return false end
   local slot, gen = current(d)
   -- The same generation (a periodic full fetch) refreshes the live slot in
-  -- place: same content, same values. A new one goes to the other slot.
-  if gen ~= r.gen then slot = (slot == "a") and "b" or "a" end
+  -- place: same content, same values, and eb:cur is left alone (a slow
+  -- refresh must never flip a newer list back). A new one goes to the other
+  -- slot.
+  local same = (gen == r.gen)
+  if not same then slot = (slot == "a") and "b" or "a" end
   local pfx = "eb|" .. slot .. "|"
   for ip, exp in pairs(r.ips) do
     if type(ip) == "string" and ip ~= "" then
@@ -123,21 +133,31 @@ function M.apply(d, r, now)
       end
     end
   end
+  if same then return false end
   d:set(CUR_KEY, slot .. r.gen)
   return true
 end
 
-local function poll_cb(premature, dec, decode, full)
-  if premature or not dec or not decode then return end
-  local d = dict()
-  if not d then return end
+local function poll(d, dec, decode, full)
   local path = "/nginx/edgeban"
   local _, have = current(d)
   if have and not full then path = path .. "?gen=" .. ngx.escape_uri(have) end
   local body = dec:rpc("edgeban", "GET", path)
   if not body then return end
-  local r = decode(body)
-  M.apply(d, r, ngx.now())
+  -- {"ready":false} (a daemon that has not reconciled yet) carries no list:
+  -- the copy stays, fading on its entry TTLs.
+  M.apply(d, decode(body), ngx.now())
+end
+
+local function poll_cb(premature, dec, decode, full)
+  local d = dict()
+  if not d then return end
+  if not premature and dec and decode then
+    pcall(poll, d, dec, decode, full)
+  end
+  -- The lock covers the poll in flight only (one poller at a time, however
+  -- slow the RPC); POLLED_KEY paces the next one.
+  d:delete(LOCK_KEY)
 end
 
 -- tick starts a poll when one is due: called on every cfm.lua request, one
@@ -148,11 +168,12 @@ function M.tick(dec, decode)
   if not d or not dec then return end
   local now = ngx.now()
   if now - (d:get(POLLED_KEY) or 0) < POLL_SEC then return end
-  if not d:add(LOCK_KEY, 1, POLL_SEC) then return end
+  -- LOCK_TTL only frees a lock whose timer never ran (the worker exited).
+  if not d:add(LOCK_KEY, 1, LOCK_TTL) then return end
   d:set(POLLED_KEY, now)
   local full = now - (d:get(FULL_KEY) or 0) >= FULL_SEC
   if full then d:set(FULL_KEY, now) end
-  ngx.timer.at(0, poll_cb, dec, decode, full)
+  if not ngx.timer.at(0, poll_cb, dec, decode, full) then d:delete(LOCK_KEY) end
 end
 
 M._poll_cb = poll_cb

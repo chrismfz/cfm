@@ -70,6 +70,10 @@ type Store struct {
 }
 
 var (
+	// version changes whenever what List could return may have changed: a
+	// write to a store, a reconcile, the kill switch, the proxy ranges, the
+	// Default store. The edge feed caches on it (internal/webdetector).
+	version atomic.Uint64
 	enabled atomic.Bool
 	def     atomic.Pointer[Store]
 	proxies atomic.Pointer[[]*net.IPNet] // the trusted proxies' own ranges
@@ -83,7 +87,12 @@ var (
 func SetTrustedProxies(nets []*net.IPNet) {
 	cp := append([]*net.IPNet(nil), nets...)
 	proxies.Store(&cp)
+	version.Add(1)
 }
+
+// Version changes whenever List's answer may have (expiry aside: an entry
+// that expires drops out of List with no write).
+func Version() uint64 { return version.Load() }
 
 func isTrustedProxy(ip net.IP) bool {
 	p := proxies.Load()
@@ -128,13 +137,20 @@ func init() { enabled.Store(true) }
 
 // SetEnabled is the [webdetector] EDGE_BAN kill switch: off, Banned answers
 // false for every address (the store keeps its entries).
-func SetEnabled(on bool) { enabled.Store(on) }
+func SetEnabled(on bool) {
+	if enabled.Swap(on) != on {
+		version.Add(1)
+	}
+}
 
 // Enabled reports the kill switch.
 func Enabled() bool { return enabled.Load() }
 
 // SetDefault installs the daemon's store; nil uninstalls it.
-func SetDefault(s *Store) { def.Store(s) }
+func SetDefault(s *Store) {
+	def.Store(s)
+	version.Add(1)
+}
 
 // Default is the daemon's store, nil when none is installed (the one-shot
 // CLI, tests). Every package-level helper below is a no-op then.
@@ -261,14 +277,23 @@ func (s *Store) List() []Item {
 		return nil
 	}
 	now := s.now()
+	// Copy under the lock, check outside it: the allow sets are scanned per
+	// entry, and a writer waiting on a long read lock would stall every
+	// Banned() behind it (Go's writer preference) on the decision hot path.
 	s.mu.RLock()
-	out := make([]Item, 0, len(s.m))
+	all := make([]Item, 0, len(s.m))
+	ents := make([]Entry, 0, len(s.m))
 	for k, e := range s.m {
-		if ok, _ := s.answers(net.ParseIP(k), e, now); ok {
-			out = append(out, Item{IP: k, Expires: e.Expires})
-		}
+		all = append(all, Item{IP: k, Expires: e.Expires})
+		ents = append(ents, e)
 	}
 	s.mu.RUnlock()
+	out := all[:0]
+	for i, it := range all {
+		if ok, _ := s.answers(net.ParseIP(it.IP), ents[i], now); ok {
+			out = append(out, it)
+		}
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
 	return out
 }
@@ -343,6 +368,7 @@ func (s *Store) Reconcile(snap Snapshot) {
 	}
 	s.mu.Unlock()
 	s.ready.Store(true)
+	version.Add(1) // the allow sets and readiness, even with no entry changed
 	if changed {
 		s.save()
 	}
@@ -361,6 +387,7 @@ func (s *Store) Clear() {
 	// Not ready again, and no allow snapshot: a ban added while nft cannot be
 	// read is never answered unchecked.
 	s.ready.Store(false)
+	version.Add(1)
 	s.allow.Store(nil)
 	if had {
 		s.save()
@@ -461,12 +488,14 @@ func (s *Store) Load() {
 		}
 	}
 	s.mu.Unlock()
+	version.Add(1)
 }
 
 // save writes the store atomically (temp file + rename), one save at a time
 // so an older snapshot never lands after a newer one. Best effort: a failed
 // write only costs the bans a restart would have kept.
 func (s *Store) save() {
+	version.Add(1)
 	if s.path == "" {
 		return
 	}

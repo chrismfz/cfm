@@ -80,8 +80,43 @@ func TestEdgeBanFeed(t *testing.T) {
 	if len(off.IPs) != 0 || off.Gen == "" {
 		t.Errorf("EDGE_BAN=0: %+v, want an empty list", off)
 	}
+	// A store that has not reconciled (a daemon start) knows nothing either
+	// way: "not ready", no list, so the edge keeps its copy.
 	edgeban.SetDefault(edgeban.New(""))
-	if _, cold := fetchEdgeBan(t, b, "", "tok"); len(cold.IPs) != 0 {
-		t.Errorf("unreconciled store: %+v, want an empty list", cold)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/nginx/edgeban", nil)
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleEdgeBan(rr, req)
+	var cold map[string]any
+	_ = json.Unmarshal(rr.Body.Bytes(), &cold)
+	if cold["ready"] != false || cold["ips"] != nil || cold["gen"] != nil {
+		t.Errorf("unreconciled store: %s, want {\"ready\":false}", rr.Body.String())
+	}
+}
+
+// The feed is built once per change: an unchanged store answers from the
+// cache, a write or an expiry inside it rebuilds it.
+func TestEdgeBanFeedCache(t *testing.T) {
+	s := installEdgeBans(t, "34.153.214.160")
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	gen1, ips1 := b.edgeBanFeed()
+	if gen2, ips2 := b.edgeBanFeed(); gen2 != gen1 || len(ips2) != len(ips1) {
+		t.Fatal("unchanged store: a different feed")
+	}
+	calls := 0
+	b.bypassFunc = func(string) bool { calls++; return false }
+	b.edgeBanFeed()
+	if calls != 0 {
+		t.Fatal("unchanged store: the feed was rebuilt")
+	}
+	short := 1500 * time.Millisecond
+	s.Add(net.ParseIP("198.51.100.9"), &short, "manual", true)
+	gen3, ips3 := b.edgeBanFeed()
+	if gen3 == gen1 || ips3["198.51.100.9"] == 0 {
+		t.Fatalf("after a ban: gen %s ips %v, want the new ban", gen3, ips3)
+	}
+	time.Sleep(short + 100*time.Millisecond)
+	if _, ips4 := b.edgeBanFeed(); len(ips4) != 1 {
+		t.Fatalf("after the timed ban expired: %v, want it gone (rebuilt at its expiry)", ips4)
 	}
 }
