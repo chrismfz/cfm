@@ -379,6 +379,17 @@ end
 -- `uri` is the DECODED path (ngx.var.uri); `qs` is the raw query (ngx.var.args,
 -- may be ""). They are sent as separate RPC params so the bridge never has to
 -- re-split a "path?query" concat (a decoded path can contain a literal '?').
+-- "&px=1" when this request reached the edge through a trusted proxy: the
+-- realip module replaced remote_addr with the client the proxy named
+-- (CF-Connecting-IP), so the TCP peer ($realip_remote_addr) differs. The
+-- bridge answers its edge ban store (internal/edgeban) only then: an nft ban
+-- already drops a direct client, and nft's allow sets decide for it.
+local function via_trusted_proxy()
+  local ok, peer, addr = pcall(function() return ngx.var.realip_remote_addr, ngx.var.remote_addr end)
+  if ok and peer and peer ~= "" and addr and peer ~= addr then return "&px=1" end
+  return ""
+end
+
 function Client:get(ip, host, uri, qs, method, scheme, ua, country, scope)
   local cfg = self.cfg
   local SH = self.sh
@@ -391,7 +402,10 @@ function Client:get(ip, host, uri, qs, method, scheme, ua, country, scope)
   --   * only clean allows are cached (see the cache write below), so a
   --     currently-blocked IP hitting a NEW url misses and sees the block;
   --   * the WAF runs uncached on EVERY request — payloads are always caught;
-  --   * nft autoblock is kernel-level — severe bans drop before the edge.
+  --   * nft autoblock drops a DIRECT client before the edge; a client behind a
+  --     trusted proxy (Cloudflare) arrives from the proxy's address and is
+  --     not dropped there, which the edge ban store answers (internal/edgeban,
+  --     ip_action=block, never cached) — subject to this same <=90s window.
   -- The residual is thus "evade an edge behavioural challenge/block for <=90s on
   -- already-cached URLs", which is self-healing. Closing it would need a per-IP
   -- block-generation marker checked on every hit + Go-side publishing — a poor
@@ -433,7 +447,8 @@ function Client:get(ip, host, uri, qs, method, scheme, ua, country, scope)
                "&scheme="  .. esc(scheme)  ..
                "&ua="      .. esc(ua or "")      ..
                "&country=" .. esc(country or "") ..
-               "&scope="   .. esc(scope or "web")
+               "&scope="   .. esc(scope or "web") ..
+               via_trusted_proxy()
 
   local body, err = self:rpc("decision", "GET", path, nil, {
     ip = ip, host = host, uri = uri, method = method,

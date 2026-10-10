@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"cfm/internal/edgeban"
 	"cfm/internal/unblock"
 )
 
@@ -49,8 +50,10 @@ func (e *Engine) handleForceUnblockIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// No bridge wired (tests / early startup): nothing to clear, report empty.
+	// No bridge wired (tests / early startup): nothing to clear, report empty
+	// — but the edge ban goes all the same (ForceUnblock would drop it).
 	if e.nginxBridge == nil {
+		edgeban.Unban(ip)
 		writeJSON(w, http.StatusOK, unblock.WAFResult{})
 		return
 	}

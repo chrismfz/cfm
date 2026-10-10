@@ -18,6 +18,24 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **A ban now also stops an attacker who comes through Cloudflare.** The
+  firewall only sees the address a connection comes from, and for a site
+  behind Cloudflare that is Cloudflare's, so a banned scanner kept reaching
+  sites for half an hour after each ban (9 Oct). Bans from the WAF, the web
+  detector, the challenge sections and other web detectors, and manual bans
+  (API, cfm-admin's "Block selected", `cfm block`), are now also enforced by
+  the edge for the same time, for a visitor that comes through Cloudflare:
+  its request gets a 403. Unblocking or allowing lifts it at once, and a ban
+  the firewall no longer holds stops within two minutes. An address any
+  firewall allow list covers (including the fleet whitelist and the server's
+  own addresses) or a Cloudflare address is never blocked this way, and
+  direct visitors are left to the firewall as before. Mail, SSH and
+  other non-web bans, fleet blocklists and `cfm.deny` are not copied.
+  `[global] IGNORE_IPS` stay exempt; `[webdetector] EDGE_BAN = 0` turns it
+  off. This release covers requests that reach the edge's per-IP
+  decision; the remaining paths (logged-in visitors with a challenge
+  cookie, the cPanel/webmail proxy hostnames, static files, the panel
+  ports) follow.
 - **A challenged POST can no longer slip past the WAF through its resume
   link.** When a POST without a query string was challenged, the client got
   a resume link carrying a one-time token. Following that link raised an edge

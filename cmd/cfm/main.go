@@ -7,6 +7,7 @@ import (
 	"cfm/internal/blocklists"
 	cfgpkg "cfm/internal/config"
 	detpkg "cfm/internal/detectors"
+	"cfm/internal/edgeban"
 	"cfm/internal/enrich"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/nft"
@@ -251,6 +252,8 @@ func main() {
 		cli.RunTest()
 	case "block":
 		be := mustBackend()
+		clihttp.SetToken(apiAuthToken())
+		cli.EdgeBanBaseURL = apiBaseURL()
 		os.Exit(cli.RunBlock(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "unblock":
 		be := mustBackend()
@@ -264,6 +267,8 @@ func main() {
 		os.Exit(cli.RunList(os.Args[2:], be, tableExistsProbe(be)))
 	case "allow":
 		be := mustBackend()
+		clihttp.SetToken(apiAuthToken())
+		cli.EdgeBanBaseURL = apiBaseURL()
 		os.Exit(cli.RunAllow(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "unallow":
 		be := mustBackend()
@@ -777,6 +782,15 @@ func runDaemon(args []string) {
 	}
 	done()
 
+	// Edge ban store (internal/edgeban): the web-related and manual bans the
+	// edge enforces itself, for clients behind a trusted proxy that the nft
+	// drop never sees. Loaded from disk, then narrowed to what nft still
+	// blocks every two minutes; it answers nothing until the first reconcile.
+	edgeStore := edgeban.New(edgeban.DefaultPath)
+	edgeStore.Load()
+	edgeban.SetDefault(edgeStore)
+	go runEdgeBanReconcile(edgeStore, be)
+
 	//Notify manager
 
 	done = step("notify.Init")
@@ -913,6 +927,7 @@ func runDaemon(args []string) {
 						fmt.Fprintln(os.Stderr, "allow apply error:", err)
 						continue
 					}
+					edgeban.Unban(e.IP.String()) // nft accepts it now: so does the edge
 				}
 				seenAllow[key] = spec
 			} else {

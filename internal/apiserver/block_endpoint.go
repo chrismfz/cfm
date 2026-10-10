@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"cfm/internal/edgeban"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/selfip"
 	"cfm/internal/logging"
@@ -99,6 +100,9 @@ func makeBlockHandler(be firewall.Backend) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
+		// A manual ban is enforced at the edge too, with the operator's TTL
+		// (a client behind a trusted proxy never meets the nft drop).
+		edgeban.Ban(ip, ttlPtr, "manual", true)
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ok":     true,
@@ -235,6 +239,11 @@ func makeBlockBatchHandler(be firewall.Backend, selfIPs selfIPChecker) http.Hand
 				}
 			} else {
 				blocked = pending
+				// Manual bans are enforced at the edge too (cfm-admin "Block
+				// selected"); extend semantics, like the batch.
+				for _, canon := range pending {
+					edgeban.Ban(net.ParseIP(canon), ttlPtr, "manual", false)
+				}
 			}
 		}
 

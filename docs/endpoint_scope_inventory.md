@@ -45,6 +45,7 @@ than being mistaken for admin. Code that reads `CtxScopeKey{}` **directly**
 - `/api/v1/webdet/summary`
 - `/api/v1/webdet/hot-ips`, `/api/v1/webdet/ip-short`, `/api/v1/webdet/ip-drilldown`, `/api/v1/webdet/analyze-ip`
 - `/api/v1/webdet/history/stats|prune|truncate`
+- `/api/v1/webdet/force-unblock-ip` (`RequireAdmin`; `cfm unblock`'s path into the daemon: clears the per-IP WAF planes and the edge ban) and `/api/v1/webdet/edge-ban` (`RequireAdmin`, since 2026-10-10: `cfm block` records a manual ban in the edge ban store, `internal/edgeban`, so the edge also blocks the client behind a trusted proxy)
 - `/api/v1/webdet/ua-top`, `/api/v1/webdet/ua-drill`, `/api/v1/webdet/ua-emergency` (global "Web Bots" UA controls — `RequireAdmin`)
 - `/api/v1/clam/health` (`RequireAdmin`: box-level ClamAV scanner status — clamd reachability, circuit breaker, queue geometry, lifetime counters, 24h infection count (persisted), global scan default. Not per-vhost, so admin-only. Per-vhost scan coverage on the ClamAV page comes from the scoped `/api/v1/webdet/vhosts` instead.)
 - `/api/v1/challenge/summary|vhosts|ips|ip`

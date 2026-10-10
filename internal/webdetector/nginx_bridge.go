@@ -26,6 +26,7 @@ package webdetector
 import (
 	"bufio"
 	"bytes"
+	"cfm/internal/edgeban"
 	"cfm/internal/clam"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
@@ -1877,6 +1878,38 @@ func decisionConcurrencyCap() int {
 
 // handleDecision: Lua asks "what do I do with this IP / vhost?"
 // GET /nginx/decision?ip=1.2.3.4&host=example.com
+// writeEdgeBan answers ip_action=block for a web-scope decision whose client
+// is in the edge ban store (internal/edgeban) and reached the edge through a
+// trusted proxy (px=1, set by cfm_decision.lua when realip replaced the TCP
+// peer), and reports whether it did. A direct client is nft's alone: its ban
+// drops it before the edge, and nft's allow sets (the fleet whitelist,
+// allow nets, dyndns) decide for it; an older edge that sends no px gets
+// nothing from here. A panel-scope decision is left alone: the panel ports
+// get their own, separately rolled-out check.
+func (b *NginxBridge) writeEdgeBan(w http.ResponseWriter, r *http.Request) bool {
+	q := r.URL.Query()
+	if q.Get("px") != "1" {
+		return false
+	}
+	if sc := strings.TrimSpace(q.Get("scope")); sc != "" && sc != "web" {
+		return false
+	}
+	ip := strings.TrimSpace(q.Get("ip"))
+	if b.bypassFunc != nil && b.bypassFunc(ip) {
+		return false
+	}
+	if ok, _ := edgeban.IsBanned(ip); !ok {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-CFM-Edge-Ban", "1")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"ip_action":    "block",
+		"vhost_action": "allow",
+	})
+	return true
+}
+
 func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	if !b.checkToken(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -1903,9 +1936,10 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	//
 	// Trade-off accepted: during shed, the handler does NOT consult ipState
 	// (so a blocked IP slips through for that request), vhState, or run
-	// traffic rules. For severe blocks, kernel-level nft rules drop the
-	// packet before it reaches nginx — so the soft "block" leak is bounded
-	// to web-only blocks during burst saturation. Operators should alert
+	// traffic rules. An nft ban drops a direct client before it reaches
+	// nginx, and the edge ban store (internal/edgeban) is still answered for
+	// one behind a trusted proxy (writeEdgeBan), so the leak is bounded to
+	// the bridge's own soft blocks during burst saturation. Operators should alert
 	// on SheddedCount > 0 sustained — it indicates the bridge is overloaded
 	// or its dependencies (geoip, rule engine) are stalled.
 	select {
@@ -1915,6 +1949,10 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		b.stats.mu.Lock()
 		b.stats.shedCount++
 		b.stats.mu.Unlock()
+		// An edge ban is a map lookup: it holds even while the bridge sheds.
+		if b.writeEdgeBan(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-CFM-Bridge-Shed", "1")
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -1989,6 +2027,14 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 			"ip_action":    "allow",
 			"vhost_action": "allow",
 		})
+		return
+	}
+	// ── Edge ban (internal/edgeban): a web ban the nft drop cannot enforce on
+	// a client behind a trusted proxy. After the IGNORE_IPS bypass above (an
+	// ignored address stays ignored), before every allow below: the host
+	// bypass, the solved-ok state, the exemptions and the traffic rules never
+	// lift a ban, as nft's drop would not.
+	if b.writeEdgeBan(w, r) {
 		return
 	}
 	// ── NEW: host-level static bypass (CHALLENGE_HOST_BYPASS) ─────────────────

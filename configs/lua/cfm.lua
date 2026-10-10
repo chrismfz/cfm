@@ -1501,7 +1501,9 @@ uri    = ngx.var.uri          or uri
 -- as the bodyless GET carrier.
 -- Skipped for these paths, as on the panel ports: the WAF, clearance, and
 -- Step 3, i.e. traffic rules (block/throttle/challenge) and the daemon's
--- per-IP L7 decision. Kernel (nft) blocks, including autoblock, still apply.
+-- per-IP L7 decision. Kernel (nft) blocks, including autoblock, still apply
+-- to a DIRECT client only: one behind a trusted proxy (Cloudflare) reaches
+-- here from the proxy's address, so an nft ban does not stop it on this path.
 -- Residual: a domain whose own vhost carries a wildcard alias (*.example.com)
 -- ahead of cPanel's proxy vhost would send cpanel.example.com to its docroot.
 -- The module missing (upgrade lag) → no passthrough (the old behaviour).

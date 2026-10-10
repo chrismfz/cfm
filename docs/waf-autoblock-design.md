@@ -427,3 +427,63 @@ raised behind a deferred rule-201 block`.
   yet still surfaces the rare compromised-.gr-host, and — because GeoIP is
   game-able (a GR-geolocated VPS was brute-forcing xmlrpc in the sample) —
   leniency must stay a *temp-ban*, never a skip.
+
+## Edge ban — clients behind a trusted proxy (2026-10-10)
+
+An nft ban drops by the address on the wire. A client behind a trusted proxy
+(Cloudflare) arrives from the proxy's address, and the edge learns the real one
+from `CF-Connecting-IP` via realip, so `ip saddr @block_v4 drop` never sees it:
+34.153.214.160 was banned for 7 days by `waf_security` and kept hitting
+`cpanel.`/`cpcontacts.` hostnames through Cloudflare (titan, mars, orion,
+speedhost, 2026-10-09).
+
+`internal/edgeban` keeps the bans the edge enforces itself. **What goes in:**
+the sink's bans for the web sections (`edgeban.WebSection`: waf_security,
+webdetector, challenge_*, modsec, cfm_endpoints, cpanel), the challenge
+server's self-protection blocks, and manual bans (`POST /api/v1/firewall/block`,
+cfm-admin's "Block selected" `POST /api/v1/firewall/block/batch`, `cfm block`
+through `POST /api/v1/webdet/edge-ban`; a CIDR block is not). **What stays
+out:** fleet feeds (`block_ext_*`), `cfm.deny` (it can hold thousands of
+entries), port-scan / flood bans (L3/L4; some may be proxy addresses), mail /
+SSH / FTP / database sections. It is not an nft mirror.
+
+**Proxied requests only.** `cfm_decision.lua` adds `px=1` to the decision RPC
+when realip replaced the TCP peer (`$realip_remote_addr ~= $remote_addr`); the
+bridge answers the store only then. A direct client is nft's alone: its ban
+drops it before the edge, and nft's allow sets decide for it. An older edge
+sends no `px` and gets nothing from the store.
+
+**Allows win, as in nft.** A reconcile reads every set nft accepts before its
+block drops (`self_v4/v6`, `allow_v4/v6`, `allow_dyn_*`, `allow_ext_*` hosts
+and nets — the fleet whitelist — and `allow_*_nets`; hosts, CIDRs and ranges),
+and the store never answers an address they cover, even for a ban added after
+the read (a ban added right after a NEW allow, before the next reconcile, is
+the one residual). Nor does it answer a trusted proxy's own address
+(trusted_proxies.conf): realip leaves `remote_addr` at a Cloudflare address
+when CF-Connecting-IP names one (a Worker's subrequest), and a ban of it would
+403 every visitor arriving that way. `cfm allow --ttl` lifts the edge ban for
+good; when the allow expires nft blocks again but the edge does not (fails
+safe).
+
+**Consistency.** Every in-daemon unblock removes the entry
+(`/api/v1/unblock`, `unblock.DoMany` — the agent's fleet unblock — and
+`ForceUnblock`, which `cfm unblock` reaches over the API); `cfm allow` (over
+`edge-ban?unban=1`) and a `cfm.allow` host lift it too. Every two minutes a
+reconcile reads the block and allow sets — all of them or none: a failed or
+partial read skips the reconcile, and three in a row empty the store and make
+it answer nothing until a read works — and
+*narrows* the store: an entry nft no longer blocks (expired, unblocked from the
+CLI, flushed) is dropped unless it was written after the read began, and an
+earlier nft expiry clamps it. It never imports from nft. The store persists in
+`/var/lib/cfm/edgeban.json` (one writer at a time) and answers nothing until
+the first reconcile after a start.
+
+**Enforcement (B1).** The bridge decision answers `ip_action=block` for a
+proxied, web-scope decision whose client is in the store: after the IGNORE_IPS
+bypass (operator decision: ignored stays ignored), before the host bypass,
+solved-ok state, exemptions and traffic rules, and also while the bridge sheds.
+The panel scope is untouched. Kill switch `[webdetector] EDGE_BAN`. **Not yet
+covered** (B2/B3): cfm.lua paths that return before Step 3 (the clearance-cookie
+fast path, the Step 0 bypass list, the cPanel proxy-subdomain passthrough), the
+static-asset location, the decision cache's <=90 s clean-allow window, and the
+panel ports.

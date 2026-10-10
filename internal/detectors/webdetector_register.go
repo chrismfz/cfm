@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"cfm/internal/edgeban"
 	"cfm/internal/apiserver"
 	"cfm/internal/clam"
 	core "cfm/internal/detectors/core"
@@ -963,6 +964,11 @@ func init() {
 		// permission-gated act in cfm-web) and FP_POLICY_ALLOW_FPS (per-id
 		// exemptions, the ALLOW_FPS-style escape hatch). Package-level like the
 		// solverfarm marks; re-applied on every reload.
+		// EDGE_BAN (default ON): the edge enforces the web-related and manual
+		// nft bans itself, for clients behind a trusted proxy (internal/edgeban).
+		// 0 = the edge stops answering them at once (the store keeps its entries).
+		edgeban.SetEnabled(kvBool(kv, "EDGE_BAN", true))
+
 		webdet.ConfigureFingerprintPolicyEnforcement(
 			kvBool(kv, "FP_POLICY", true),
 			csvKV(kv, "FP_POLICY_ALLOW_FPS"),

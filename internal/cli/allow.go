@@ -84,6 +84,7 @@ func RunAllow(args []string, be firewall.Backend, cfgDir string, tableExists fun
 			fmt.Fprintln(os.Stderr, "allow error:", err)
 			return 1
 		}
+		notifyEdgeUnban(ip)
 	}
 
 	// persist to cfm.allow only for permanent entries
