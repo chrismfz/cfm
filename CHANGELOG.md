@@ -17,7 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **A challenged WordPress save is replayed without an edge error.** When a
+  challenged POST had no query string (`/wp-admin/post.php`), its replay
+  after the solve raised a Lua error at the edge (`set_uri_args` got nil);
+  the request still reached the site, but the rest of the edge's checks were
+  skipped and the URL kept the `?cfm_rt=` token. Seen on rigel and orion.
+- **The WAF hit-rate counters no longer die about once a day per node.** The
+  background flush of the per-host inspection counters failed with `attempt
+  to index upvalue 'SH' (a nil value)` (every node since September): it read
+  state left over from the request that scheduled it. It now carries what it
+  needs with it.
+- **`/dev/members.db` and similar paths no longer trip the `/dev/mem` rule
+  (324).** It matched the text anywhere; `/dev/mem` and `/dev/kmem` now have
+  to be the whole name.
 
 ## 2026.10.09
 

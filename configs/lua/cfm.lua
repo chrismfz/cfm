@@ -712,7 +712,12 @@ local function try_apply_post_resume(ip, host)
     ngx.req.set_uri(target_uri:sub(1, qidx - 1), false)
     ngx.req.set_uri_args(target_uri:sub(qidx + 1))
   else
-    ngx.req.set_uri(target_uri, false); ngx.req.set_uri_args(nil)
+    -- No query on the original POST: clear the carrier's (`cfm_rt=…`). An
+    -- empty table, not nil: set_uri_args(nil) raises ("string, number, or
+    -- table expected"), and under fail_open that ended the access phase here,
+    -- with the replayed POST sent on still carrying ?cfm_rt= (edge Lua sweep
+    -- 2026-10-09; `/wp-admin/post.php` saves on rigel and orion).
+    ngx.req.set_uri(target_uri, false); ngx.req.set_uri_args({})
   end
   ngx.ctx.cfm_resumed_post = true
   log_route(ngx.INFO, "post_resume_applied ip=" .. tostring(ip) ..
@@ -790,6 +795,25 @@ end
 -- Pushes ABSOLUTE counts per (hour, host); Go upserts. Repeated pushes for
 -- the same hour overwrite cleanly. At hour rollover the current bucket
 -- starts fresh; the previous hour's bucket gets one more push then ages out.
+-- The flush timer's callback: everything it touches comes in as an argument
+-- (see maybe_flush_waf_insp), never as an upvalue of this per-request chunk.
+local function waf_insp_flush_cb(premature, sh, dec, encode)
+  if premature or not sh or not dec then return end
+  local rows = {}
+  local keys = sh:get_keys(2000) or {}
+  for _, k in ipairs(keys) do
+    if k:sub(1, 12) == "waf_insp:hr=" then
+      local hr_str, h = k:match("^waf_insp:hr=(%d+)|host=(.*)$")
+      local cnt = sh:get(k)
+      if hr_str and cnt and cnt > 0 then
+        rows[#rows + 1] = { hour_unix = tonumber(hr_str), host = h or "", count = cnt }
+      end
+    end
+  end
+  if #rows == 0 then return end
+  dec:rpc("waf_stats", "POST", "/nginx/waf/stats", encode({ rows = rows }))
+end
+
 local function maybe_flush_waf_insp()
   if not SH or not CFG.waf_stats_enable then return end
   local last = SH:get("waf_insp:last_flush") or 0
@@ -805,22 +829,16 @@ local function maybe_flush_waf_insp()
   -- that case skip the RPC (the next worker / next minute will retry).
   -- cosocket APIs (used by http_unix → rpc_call) are supported in
   -- ngx.timer.at callbacks.
-  local sched_ok, sched_err = ngx.timer.at(0, function(premature)
-    if premature then return end
-    local rows = {}
-    local keys = SH:get_keys(2000) or {}
-    for _, k in ipairs(keys) do
-      if k:sub(1, 12) == "waf_insp:hr=" then
-        local hr_str, h = k:match("^waf_insp:hr=(%d+)|host=(.*)$")
-        local cnt = SH:get(k)
-        if hr_str and cnt and cnt > 0 then
-          rows[#rows + 1] = { hour_unix = tonumber(hr_str), host = h or "", count = cnt }
-        end
-      end
-    end
-    if #rows == 0 then return end
-    decision:rpc("waf_stats", "POST", "/nginx/waf/stats", cjson.encode({ rows = rows }))
-  end)
+  --
+  -- The callback takes what it needs as timer ARGUMENTS and closes over
+  -- nothing. This file runs per request (access_by_lua_file), so SH /
+  -- decision / cjson are locals of the request's chunk, still on its
+  -- coroutine stack when the timer is created: as upvalues they read that
+  -- stack later, after the request finished and its coroutine was reset for
+  -- another one, and about once a day per node the flush died with
+  -- "attempt to index upvalue 'SH' (a nil value)" (edge Lua sweep
+  -- 2026-10-09, fleet errors since September). Arguments are copied.
+  local sched_ok, sched_err = ngx.timer.at(0, waf_insp_flush_cb, SH, decision, cjson.encode)
   if not sched_ok and CFG.debug then
     ngx.log(ngx.WARN, "cfm: waf_insp flush schedule failed: ", tostring(sched_err))
   end
