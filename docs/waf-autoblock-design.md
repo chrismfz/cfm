@@ -584,8 +584,14 @@ and challenge (`WEB/403`, `WEB/404`, `WEB/40X`, `WEB/403WAF`, `WEB/BOT`,
 the same sources as the solver-farm finding's `good_bots`, the canonical
 crawler PTR list forward-confirmed (FCrDNS, the bridge's verdict cache, inline
 here) and the exclude file's `verify_fcrdns=1` PTR rules. Not the file's
-`ua=` / `asn=` rules: a UA is a claim, and Google's ASN is all of GCP. The
-skip is a `block_trigger` history row with `outcome=exempt_goodbot`. Other
+`ua=` / `asn=` rules: a UA is a claim, and Google's ASN is all of GCP. So
+the shipped file's FCrDNS crawlers (Ahrefs, Semrush, Google's googlezip
+proxy) are exempt from these bans too, request rate included. A PTR lookup
+that fails is inconclusive, never "no PTR" (that would drop a crawler's
+graced verdict and ban it on a DNS blip). The skip is a `block_trigger`
+history row with `outcome=exempt_goodbot`. Challenge alerts
+(`emitIPChallenges`, `WEB/CHALLENGE`) do not consult it; the edge exempts a
+verified crawler when serving one (`CHALLENGE_GOODBOT_EXEMPT`). Other
 sections that ban web clients (`waf_security`, `modsec`, challenge_*) do not
 consult it: a WAF block-tier hit is the request's own payload.
 

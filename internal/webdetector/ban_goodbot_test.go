@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func TestEmitIPBlocksSparesVerifiedGoodBots(t *testing.T) {
 	t.Cleanup(func() { banGoodBot = prev })
 
 	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, IP403Count: 5})
-	e.banPTRFn = func(ip string) string { return ptrs[ip] }
+	e.banPTRFn = func(ip string) (string, bool) { return ptrs[ip], true }
 	for _, ip := range []string{crawler, spoof, plain} {
 		feed403s(e, ip, 8)
 	}
@@ -84,7 +85,7 @@ func TestEmitIPBlocksSparesOperatorFileGoodBots(t *testing.T) {
 	t.Cleanup(func() { banGoodBot = prev })
 
 	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, IP403Count: 5})
-	e.banPTRFn = func(string) string { return "crawler-1.uptime.example.org" }
+	e.banPTRFn = func(string) (string, bool) { return "crawler-1.uptime.example.org", true }
 	calls := 0
 	e.chalGoodBotFunc = func(ip, ptr string, budget *int) (string, bool) {
 		calls++
@@ -98,5 +99,30 @@ func TestEmitIPBlocksSparesOperatorFileGoodBots(t *testing.T) {
 	e.emitIPBlocks(time.Now(), out)
 	if got := drainKeys(out); len(got) != 0 || calls != 1 {
 		t.Errorf("operator-file crawler: alerts %v calls %d, want none and one file check", got, calls)
+	}
+}
+
+// A reverse lookup that fails is inconclusive, never "no PTR": a crawler whose
+// verdict expired (still inside the stale grace) keeps it through a DNS blip,
+// and the shared cache keeps the verdict too.
+func TestGoodBotForBanKeepsAGracedVerdictThroughAFailedPTRLookup(t *testing.T) {
+	const crawler = "66.249.66.2"
+	gb := newBanGoodBot()
+	gb.verify = func(ptr, ip string) (string, bool) { return "googlebot", true }
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute})
+	e.nginxBridge = &NginxBridge{goodBot: gb}
+
+	t0 := time.Now()
+	e.banPTRFn = func(string) (string, bool) { return "crawl-66-249-66-2.googlebot.com", true }
+	if got := e.goodBotForBan(context.Background(), crawler, nil, t0); got != "googlebot" {
+		t.Fatalf("first verify: %q", got)
+	}
+	later := t0.Add(goodBotIPPosTTL + time.Minute) // expired, inside the grace
+	e.banPTRFn = func(string) (string, bool) { return "", false }
+	if got := e.goodBotForBan(context.Background(), crawler, nil, later); got != "googlebot" {
+		t.Errorf("failed PTR lookup: %q, want the graced verdict kept", got)
+	}
+	if got := gb.verified(crawler, nil, later); got != "googlebot" {
+		t.Errorf("shared cache after the failed lookup: %q, want the verdict still there", got)
 	}
 }

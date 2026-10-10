@@ -480,7 +480,7 @@ type Engine struct {
 
 	// banPTRFn overrides the reverse-DNS source of the IP-ban good-bot check
 	// (goodBotForBan; default the enricher). Tests only.
-	banPTRFn func(ip string) string
+	banPTRFn func(ip string) (ptr string, ok bool)
 
 	mu    sync.RWMutex
 	hosts map[string]*hostState
@@ -3723,7 +3723,7 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
 		// times on orion, 2026-10-02..10, and the ban went to the fleet
 		// blocklist). The cooldown above bounds this to one check per IP per
 		// cooldown; the verdict is cached.
-		if bot := e.goodBotForBan(goodBotCtx, row.IP, &goodBotBudget); bot != "" {
+		if bot := e.goodBotForBan(goodBotCtx, row.IP, &goodBotBudget, now); bot != "" {
 			e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": "exempt_goodbot", "good_bot": bot, "req": row.Req, "vhosts": row.Vhosts, "action": action}})
 			continue
 		}
