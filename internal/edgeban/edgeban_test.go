@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,5 +232,50 @@ func TestTrustedProxyAddressNeverBanned(t *testing.T) {
 	}
 	if ok, _ := s.Banned("203.0.113.90"); !ok {
 		t.Error("an ordinary client must stay banned")
+	}
+}
+
+// List is what Banned answers, sorted: no allowed, trusted-proxy or expired
+// address, nothing before the first reconcile or while switched off.
+func TestListMatchesBanned(t *testing.T) {
+	s := New("")
+	now := time.Now()
+	s.now = func() time.Time { return now }
+	short := time.Minute
+	for _, ip := range []string{"203.0.113.9", "198.51.100.1", "192.0.2.10", "173.245.48.10"} {
+		s.Add(net.ParseIP(ip), nil, "waf_security", false)
+	}
+	s.Add(net.ParseIP("198.51.100.2"), &short, "webdetector", false)
+	if got := s.List(); got != nil {
+		t.Fatalf("before the first reconcile: %v", got)
+	}
+	s.Reconcile(Snapshot{
+		Blocks: []firewall.SetElementTimed{{Elem: "203.0.113.9"}, {Elem: "198.51.100.1"}, {Elem: "192.0.2.10"},
+			{Elem: "173.245.48.10"}, {Elem: "198.51.100.2", Expires: time.Minute}},
+		Allows: []string{"192.0.2.0/24"},
+		ReadAt: now.Add(-time.Second),
+	})
+	_, cf, _ := net.ParseCIDR("173.245.48.0/20")
+	SetTrustedProxies([]*net.IPNet{cf})
+	defer SetTrustedProxies(nil)
+
+	var ips []string
+	for _, it := range s.List() {
+		ips = append(ips, it.IP)
+		if ok, _ := s.Banned(it.IP); !ok {
+			t.Errorf("List has %s, Banned says no", it.IP)
+		}
+	}
+	if want := "198.51.100.1 198.51.100.2 203.0.113.9"; strings.Join(ips, " ") != want {
+		t.Fatalf("List = %v, want %s (sorted; no allowed or proxy address)", ips, want)
+	}
+	now = now.Add(2 * time.Minute)
+	if got := len(s.List()); got != 2 {
+		t.Errorf("after the timed ban expired: %d items, want 2", got)
+	}
+	SetEnabled(false)
+	defer SetEnabled(true)
+	if got := s.List(); got != nil {
+		t.Errorf("switched off: %v", got)
 	}
 }

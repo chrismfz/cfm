@@ -478,12 +478,34 @@ earlier nft expiry clamps it. It never imports from nft. The store persists in
 `/var/lib/cfm/edgeban.json` (one writer at a time) and answers nothing until
 the first reconcile after a start.
 
-**Enforcement (B1).** The bridge decision answers `ip_action=block` for a
-proxied, web-scope decision whose client is in the store: after the IGNORE_IPS
-bypass (operator decision: ignored stays ignored), before the host bypass,
-solved-ok state, exemptions and traffic rules, and also while the bridge sheds.
-The panel scope is untouched. Kill switch `[webdetector] EDGE_BAN`. **Not yet
-covered** (B2/B3): cfm.lua paths that return before Step 3 (the clearance-cookie
-fast path, the Step 0 bypass list, the cPanel proxy-subdomain passthrough), the
-static-asset location, the decision cache's <=90 s clean-allow window, and the
-panel ports.
+**Enforcement at the edge (B2).** `cfm_edgeban.lua` keeps the edge's own
+copy of the list. The bridge serves it as `GET /nginx/edgeban` (every address
+the store answers, less IGNORE_IPS, with its expiry; capped at 20 000) under a
+generation that is a hash of exactly that content, so the same content has
+the same generation across daemon restarts. One worker at a time (a dict
+lock) polls it every 2 s from a timer started by any `cfm.lua` request,
+sending the generation it holds (`?gen=`; the reply is then `unchanged`), and
+fetches the whole list every 60 s. The list lives in two slots of the
+`cfm_edgeban` dict (`cfm_decisions` until the conf is reloaded): a new list is
+written into the other slot and `eb:cur` flips to it in one set, so a lookup
+never sees half a list, and a leftover address carries an older generation
+and never matches. Each entry's TTL is the ban's remaining time capped at
+300 s, refreshed by the full fetch: with the daemon unreachable the copy fades
+within 5 minutes (fail open). A lookup is two dict gets.
+
+`cfm.lua` checks it in **Step 0e**, right after the static IP/CIDR bypass
+(`cfm_bypass_ip`, the crawler/CDN list) and before every other exemption:
+the panel targeted bypass, the local-origin bypass, `/.well-known/` (0a1),
+the cPanel proxy-subdomain passthrough (0d), the clearance cookie (2b) and the
+decision's cached clean allows (up to 90 s). A hit is a 403 (`X-CFM-Action:
+block`, `X-CFM-Edge-Ban: 1`, `$cfm_upstream = cfm_block`, a `block edge_ban`
+line in the edge error log). The static-asset locations, which skip `cfm.lua`,
+call `cfm_edgeban.static_gate()` before the Site Cache gate. Proxied requests
+only, as in the decision. A ban or unban reaches the edge within one poll
+(~2 s plus the RPC). The decision path (B1) still answers too, for an edge
+that predates this module. `cfm_edgeban_test.lua` pins the module and where
+`cfm.lua` and both confs call it.
+
+**Not covered:** the panel ports (2083/2087/2096, B3), the challenge page and
+`/__cfm_verify`, `/cpanelwebcall` and `/cfm-admin`, which skip `cfm.lua` and
+are not static assets.

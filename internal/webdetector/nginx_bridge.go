@@ -17,6 +17,8 @@
 //   POST /nginx/vhost       { "host":"example.com", "action":"challenge", "ttl_sec":600 }
 //   POST /nginx/vhost/clear { "host":"example.com" }
 //   GET  /nginx/status      → NginxBridgeStatus (for cfm status / debug)
+//   GET  /nginx/edgeban?gen=G → {"gen":G,"ips":{ip:expires_unix}} or {"gen":G,"unchanged":true}
+//                              (the edge's copy of the edge bans, cfm_edgeban.lua)
 //
 // Lua polls these from the shared-dict server (cfm_decisions.lua) which
 // subscribes to the same socket.
@@ -1777,6 +1779,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/upload/scan", b.instrument("/nginx/upload/scan", b.handleUploadScanSync))
 	mux.HandleFunc("/nginx/events/batch", b.instrument("/nginx/events/batch", b.handleEventsBatch))
 	mux.HandleFunc("/nginx/fppolicy", b.instrument("/nginx/fppolicy", b.handleFpPolicy))
+	mux.HandleFunc("/nginx/edgeban", b.instrument("/nginx/edgeban", b.handleEdgeBan))
 
 	srv := newBridgeHTTPServer(mux)
 

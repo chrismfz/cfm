@@ -32,10 +32,14 @@ back-filled here — see the git/PR history for that period.
   direct visitors are left to the firewall as before. Mail, SSH and
   other non-web bans, fleet blocklists and `cfm.deny` are not copied.
   `[global] IGNORE_IPS` stay exempt; `[webdetector] EDGE_BAN = 0` turns it
-  off. This release covers requests that reach the edge's per-IP
-  decision; the remaining paths (logged-in visitors with a challenge
-  cookie, the cPanel/webmail proxy hostnames, static files, the panel
-  ports) follow.
+  off. The edge checks it first, before any other exemption: a visitor
+  holding a challenge cookie, the cPanel/webmail proxy hostnames,
+  `/.well-known/` and static files are blocked too, and a new ban or an
+  unban reaches every request within a few seconds (the 90-second cache of
+  allowed requests no longer delays it). The edge config gains a
+  `cfm_edgeban` shared dict; until the edge reloads it, the bans are kept in
+  the existing decision cache. Not covered yet: the cPanel/WHM/webmail ports
+  (2083/2087/2096), the challenge page itself and `/cfm-admin`.
 - **A challenged POST can no longer slip past the WAF through its resume
   link.** When a POST without a query string was challenged, the client got
   a resume link carrying a one-time token. Following that link raised an edge

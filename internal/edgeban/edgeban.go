@@ -27,6 +27,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -223,6 +224,11 @@ func (s *Store) Banned(ip string) (bool, time.Duration) {
 	if !ok {
 		return false, 0
 	}
+	return s.answers(addr, e, s.now())
+}
+
+// answers is Banned for an entry the store holds.
+func (s *Store) answers(addr net.IP, e Entry, now time.Time) (bool, time.Duration) {
 	// nft accepts an allowed address before any block drop: so does the edge.
 	if a := s.allow.Load(); a != nil && a.contains(addr) {
 		return false, 0
@@ -233,11 +239,38 @@ func (s *Store) Banned(ip string) (bool, time.Duration) {
 	if e.Expires.IsZero() {
 		return true, 0
 	}
-	left := e.Expires.Sub(s.now())
+	left := e.Expires.Sub(now)
 	if left <= 0 {
 		return false, 0
 	}
 	return true, left
+}
+
+// Item is one address the edge must block (List). A zero Expires is
+// permanent.
+type Item struct {
+	IP      string
+	Expires time.Time
+}
+
+// List returns every address Banned answers true for now, sorted by
+// address: the feed the edge pulls (/nginx/edgeban). Empty until the first
+// Reconcile and while switched off, as Banned.
+func (s *Store) List() []Item {
+	if s == nil || !enabled.Load() || !s.ready.Load() {
+		return nil
+	}
+	now := s.now()
+	s.mu.RLock()
+	out := make([]Item, 0, len(s.m))
+	for k, e := range s.m {
+		if ok, _ := s.answers(net.ParseIP(k), e, now); ok {
+			out = append(out, Item{IP: k, Expires: e.Expires})
+		}
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
+	return out
 }
 
 // Len is the number of entries (expired ones included until Reconcile).
@@ -486,3 +519,6 @@ func Unban(ip string) { Default().Remove(ip) }
 
 // IsBanned asks the Default store (false without one).
 func IsBanned(ip string) (bool, time.Duration) { return Default().Banned(ip) }
+
+// List is the Default store's List (nil without one).
+func List() []Item { return Default().List() }
