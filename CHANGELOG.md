@@ -54,6 +54,14 @@ back-filled here — see the git/PR history for that period.
   solving is refused while the challenge stands.
 
 ### Fixed
+- **The edge logs rotate every day again on EL9 / CloudLinux 9 (and Debian
+  11+ / Ubuntu 22.04+).** There the
+  system's `logrotate.service` runs with `/usr` read-only
+  (`ProtectSystem=full`), so its nightly run failed on every OpenResty log
+  under `/usr/local/openresty/nginx/logs` (`Read-only file system`) and the
+  unit ended `failed`. Those logs were rotated only when one passed 2 GB, so
+  some went months without rotating. The package now installs a small
+  systemd drop-in that lets the unit write that directory.
 - **A shorter automatic ban no longer cuts a longer one short.** When two
   detectors banned the same IP, the later ban replaced the earlier one, so a
   1-hour web-detector ban of a scanner turned its 7-day WAF ban into an hour

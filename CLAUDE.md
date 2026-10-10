@@ -198,7 +198,13 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   filename, because enumerated lists drift (they silently missed
   `access.bad_request.log`, `cfm.clam.log`, `cfm.socket.log`, `ua_emergency.log`).
   Run `./scripts/tests/check_logrotate_coverage.sh --host` on a live server to
-  see what is actually rotated there. See `docs/log-rotation.md`.
+  see what is actually rotated there. A log logrotate is configured for can
+  still be unwritable to it: `logrotate.service` on EL9, Debian 11+ and
+  Ubuntu 22.04+ has
+  `ProtectSystem=full` (`/usr` read-only), so the OpenResty logs under
+  `/usr/local` need the `logrotate.service.d/cfm-openresty.conf` drop-in
+  (`configs/cfm-logrotate-systemd.conf`), and `--host` checks for it. See
+  `docs/log-rotation.md`.
 - **Lua has exactly ONE delivery path: `/var/lib/cfm/lua/`, owned by the
   package.** The Makefile stages `configs/lua/` there with `rsync --delete`
   (that flag, not a PKGROOT wipe, is what makes a retired module leave the

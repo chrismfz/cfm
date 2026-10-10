@@ -737,6 +737,7 @@ deploy_logrotate_config() {
         echo "CFM logrotate: deployed $dlc_dst"
     else
         echo "WARNING: CFM logrotate: failed to deploy $dlc_dst"
+        deploy_logrotate_dropin # independent of the config file
         return 0
     fi
 
@@ -764,6 +765,44 @@ deploy_logrotate_cron() {
         echo "CFM logrotate: deployed hourly pass $dlcr_dst"
     else
         echo "WARNING: CFM logrotate: failed to deploy $dlcr_dst"
+    fi
+
+    deploy_logrotate_dropin
+    return 0
+}
+
+# The systemd drop-in that lets logrotate.service write the OpenResty logs
+# (configs/cfm-logrotate-systemd.conf: EL9 runs it with ProtectSystem=full,
+# /usr read-only). Like the hourly runner it is no operator knob: refreshed
+# when it differs, and systemd reloaded only then. Without systemd it is
+# skipped (nothing reads it).
+deploy_logrotate_dropin() {
+    dld_src="$CFM_CONFIG_DIR/cfm-logrotate-systemd.conf"
+    dld_dst=${CFM_LOGROTATE_DROPIN_DST:-/etc/systemd/system/logrotate.service.d/cfm-openresty.conf}
+    dld_systemctl=${CFM_SYSTEMCTL:-systemctl}
+
+    if [ ! -f "$dld_src" ]; then
+        echo "WARNING: CFM logrotate: systemd drop-in missing: $dld_src"
+        return 0
+    fi
+    if [ -z "${CFM_LOGROTATE_DROPIN_DST:-}" ] && [ ! -d /run/systemd/system ]; then
+        return 0 # not a systemd host
+    fi
+    # sha256sum (coreutils) like the config above: cmp (diffutils) can be
+    # missing on a minimal image, which would re-copy and reload every time.
+    if [ -f "$dld_dst" ] &&
+        [ "$(sha256sum "$dld_src" 2>/dev/null | awk '{print $1}')" = "$(sha256sum "$dld_dst" 2>/dev/null | awk '{print $1}')" ]; then
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$dld_dst")" 2>/dev/null || true
+    if cp -f "$dld_src" "$dld_dst" 2>/dev/null; then
+        chmod 0644 "$dld_dst" 2>/dev/null || true
+        echo "CFM logrotate: deployed systemd drop-in $dld_dst"
+        "$dld_systemctl" daemon-reload >/dev/null 2>&1 ||
+            echo "WARNING: CFM logrotate: systemctl daemon-reload failed; the drop-in applies after the next reload"
+    else
+        echo "WARNING: CFM logrotate: failed to deploy $dld_dst"
     fi
 
     return 0
