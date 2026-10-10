@@ -498,6 +498,18 @@ install_logrotate_config() {
         warn "Hourly logrotate runner not found, skipping: $cron_src"
     fi
 
+    # EL9's logrotate.service has ProtectSystem=full (/usr read-only): the
+    # drop-in lets it write /usr/local/openresty/nginx/logs.
+    local dropin_src="/usr/share/cfm/configs/cfm-logrotate-systemd.conf"
+    local dropin_dst="/etc/systemd/system/logrotate.service.d/cfm-openresty.conf"
+    if [ -f "$dropin_src" ] && [ -d /run/systemd/system ]; then
+        mkdir -p "$(dirname "$dropin_dst")"
+        cp -f "$dropin_src" "$dropin_dst"
+        chmod 0644 "$dropin_dst"
+        systemctl daemon-reload || warn "systemctl daemon-reload failed"
+        log "Installed logrotate.service drop-in: $dropin_dst"
+    fi
+
     if command -v logrotate >/dev/null 2>&1; then
         if logrotate -d "$dst" >/dev/null 2>&1; then
             log "logrotate config validates: $dst"

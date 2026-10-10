@@ -1086,4 +1086,33 @@ before=$(snapshot "$live")
 run_or "$pkg" "$live" 1 >/dev/null
 assert_untouched "$live" "$before" "failed deploy with old backups"
 
+# 35. The logrotate.service drop-in (EL9 ProtectSystem=full made /usr, and so
+# the OpenResty logs, read-only to the daily run): installed once with a
+# systemd reload, left alone (no reload) when current, refreshed when it
+# differs, and never a reason to fail.
+cp configs/cfm-logrotate-systemd.conf "$configs/" # the shipped file itself
+dropin="$tmp/systemd/logrotate.service.d/cfm-openresty.conf"
+reloads="$tmp/systemctl.calls"
+cat >"$bin_dir/fake-systemctl" <<EOF_SC
+#!/bin/sh
+echo "\$*" >>"$reloads"
+EOF_SC
+chmod 0755 "$bin_dir/fake-systemctl"
+run_dropin() {
+  CFM_CONFIG_DIR="$configs" CFM_LOGROTATE_DROPIN_DST="$dropin" CFM_SYSTEMCTL="$bin_dir/fake-systemctl" \
+    sh -c '. "$1"; deploy_logrotate_dropin' sh "$tmp/functions.sh"
+}
+out=$(run_dropin)
+cmp -s "$configs/cfm-logrotate-systemd.conf" "$dropin" || { echo "FAIL: the drop-in was not installed" >&2; printf '%s\n' "$out" >&2; exit 1; }
+rg -q '^ReadWritePaths=-/usr/local/openresty/nginx/logs$' "$dropin" || { echo "FAIL: the drop-in does not open the OpenResty log dir (with a leading -)" >&2; exit 1; }
+[ "$(cat "$reloads" 2>/dev/null)" = "daemon-reload" ] || { echo "FAIL: installing the drop-in must reload systemd once" >&2; cat "$reloads" >&2; exit 1; }
+run_dropin >/dev/null
+[ "$(wc -l <"$reloads")" -eq 1 ] || { echo "FAIL: a current drop-in must not reload systemd again" >&2; exit 1; }
+echo "# stale" >"$dropin"
+run_dropin >/dev/null
+cmp -s "$configs/cfm-logrotate-systemd.conf" "$dropin" && [ "$(wc -l <"$reloads")" -eq 2 ] \
+  || { echo "FAIL: a stale drop-in must be refreshed with a reload" >&2; exit 1; }
+rg -q 'deploy_logrotate_dropin' "$tmp/functions.sh" && awk '/^deploy_logrotate_cron\(\)/,/^}/' "$tmp/functions.sh" | rg -q '^ *deploy_logrotate_dropin$' \
+  || { echo "FAIL: the package deploy no longer installs the drop-in (deploy_logrotate_cron calls it)" >&2; exit 1; }
+
 echo "OK: package proxy deploy helper tests only the main engine configs, with the new sidecars staged; a failed run leaves the live dir untouched"

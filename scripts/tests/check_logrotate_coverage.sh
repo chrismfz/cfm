@@ -270,6 +270,30 @@ host_mode() {
         echo
     fi
 
+    # A path logrotate.service may not write is "covered" yet never rotated:
+    # EL9 runs it with ProtectSystem=full, /usr read-only, and the OpenResty
+    # logs live under /usr/local (configs/cfm-logrotate-systemd.conf).
+    local orlogs=/usr/local/openresty/nginx/logs ps rw
+    if [ -d "$orlogs" ] && command -v systemctl >/dev/null 2>&1; then
+        ps="$(systemctl show logrotate.service -p ProtectSystem --value 2>/dev/null)"
+        rw="$(systemctl show logrotate.service -p ReadWritePaths --value 2>/dev/null)"
+        case "$ps" in
+            full|strict|yes|true)
+                case " $rw " in
+                    *" $orlogs "*|*" -$orlogs "*) ;;
+                    *)
+                        red "logrotate.service has ProtectSystem=$ps without ReadWritePaths=$orlogs:"
+                        red "the daily run cannot rotate the OpenResty logs (Read-only file system)."
+                        red "Install /etc/systemd/system/logrotate.service.d/cfm-openresty.conf"
+                        red "(configs/cfm-logrotate-systemd.conf) and run systemctl daemon-reload."
+                        echo
+                        fail=1
+                        ;;
+                esac
+                ;;
+        esac
+    fi
+
     echo "Dry-run the CFM config with:"
     echo "  logrotate -d $lrd/logrotate-cfm"
     echo
