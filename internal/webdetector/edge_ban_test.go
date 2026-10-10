@@ -20,19 +20,28 @@ import (
 func installEdgeBans(t *testing.T, ips ...string) *edgeban.Store {
 	t.Helper()
 	s := edgeban.New(filepath.Join(t.TempDir(), "edgeban.json"))
-	var blocks []firewall.BlockedEntry
+	var blocks []firewall.SetElementTimed
 	for _, ip := range ips {
 		s.Add(net.ParseIP(ip), nil, "waf_security", false)
-		blocks = append(blocks, firewall.BlockedEntry{IP: net.ParseIP(ip)})
+		blocks = append(blocks, firewall.SetElementTimed{Elem: ip})
 	}
-	s.Reconcile(blocks, nil)
+	s.Reconcile(edgeban.Snapshot{Blocks: blocks, ReadAt: time.Now().Add(time.Second)})
 	edgeban.SetDefault(s)
 	t.Cleanup(func() { edgeban.SetDefault(nil) })
 	return s
 }
 
+// edgeDecide asks for a decision as an edge would for a request that came
+// through a trusted proxy (px=1); edgeDecideDirect as for a direct client.
 func edgeDecide(b *NginxBridge, ip, host, scope string) (map[string]any, http.Header) {
-	q := url.Values{"ip": {ip}, "host": {host}, "uri": {"/"}, "method": {"GET"}}
+	return decideWith(b, url.Values{"ip": {ip}, "host": {host}, "uri": {"/"}, "method": {"GET"}, "px": {"1"}}, scope)
+}
+
+func edgeDecideDirect(b *NginxBridge, ip, host string) (map[string]any, http.Header) {
+	return decideWith(b, url.Values{"ip": {ip}, "host": {host}, "uri": {"/"}, "method": {"GET"}}, "")
+}
+
+func decideWith(b *NginxBridge, q url.Values, scope string) (map[string]any, http.Header) {
 	if scope != "" {
 		q.Set("scope", scope)
 	}
@@ -58,6 +67,11 @@ func TestDecisionAnswersEdgeBan(t *testing.T) {
 	}
 	if got, _ := edgeDecide(b, "34.153.214.161", "shop.example.com", ""); got["ip_action"] != "allow" {
 		t.Fatalf("another client: %+v, want allow", got)
+	}
+	// A direct client is nft's alone (its ban drops it before the edge; nft's
+	// allow sets decide for it), and an older edge sends no px.
+	if got, hdr := edgeDecideDirect(b, "34.153.214.160", "shop.example.com"); got["ip_action"] == "block" || hdr.Get("X-CFM-Edge-Ban") != "" {
+		t.Fatalf("direct client answered the edge ban: %+v", got)
 	}
 
 	// The host bypass (cPanel/webmail hosts) and the solved-ok state never
@@ -112,6 +126,11 @@ func TestDecisionEdgeBanWhileShedding(t *testing.T) {
 	if got, hdr := edgeDecide(b, "198.51.100.9", "shop.example.com", ""); got["rule_action"] != "shed" || hdr.Get("X-CFM-Bridge-Shed") != "1" {
 		t.Fatalf("an unbanned client while shedding: %+v", got)
 	}
+	// IGNORE_IPS stays exempt on the shed path too.
+	b.bypassFunc = func(ip string) bool { return ip == "34.153.214.160" }
+	if got, _ := edgeDecide(b, "34.153.214.160", "shop.example.com", ""); got["ip_action"] == "block" {
+		t.Fatalf("shedding: an IGNORE_IPS address was edge-banned: %+v", got)
+	}
 }
 
 // `cfm block` reaches the daemon's store through the admin endpoint.
@@ -136,11 +155,36 @@ func TestEdgeBanEndpoint(t *testing.T) {
 	if code := call("ip=203.0.113.51&ttl=-1h", adminCtx()); code != http.StatusBadRequest {
 		t.Fatalf("bad ttl: %d, want 400", code)
 	}
-	s.Reconcile([]firewall.BlockedEntry{{IP: net.ParseIP("203.0.113.50")}}, nil)
+	s.Reconcile(edgeban.Snapshot{Blocks: []firewall.SetElementTimed{{Elem: "203.0.113.50"}}, ReadAt: time.Now().Add(time.Second)})
 	if ok, _ := s.Banned("203.0.113.50"); !ok {
 		t.Fatal("the manual ban did not reach the store")
 	}
 	if ok, _ := s.Banned("203.0.113.52"); ok {
 		t.Fatal("a scoped token's ban reached the store")
+	}
+	// `cfm allow` lifts it.
+	if code := call("ip=203.0.113.50&unban=1", adminCtx()); code != http.StatusOK {
+		t.Fatalf("unban: %d", code)
+	}
+	if ok, _ := s.Banned("203.0.113.50"); ok {
+		t.Fatal("unban=1 left the ban")
+	}
+}
+
+type extendOnlyFW struct{ firewall.Backend }
+
+func (extendOnlyFW) AddBlockBatch(e []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
+	return firewall.BlockBatchResult{Added: len(e)}, nil
+}
+
+// The challenge server's self-protection block is enforced at the edge too.
+func TestChallengeSelfProtectFeedsEdgeBan(t *testing.T) {
+	s := installEdgeBans(t)
+	cs := NewChallengeServer(extendOnlyFW{})
+	cs.rlFwEnabled = true
+	cs.rlFirewallBlock(net.ParseIP("203.0.113.80"), rlKindPage)
+	s.Reconcile(edgeban.Snapshot{Blocks: []firewall.SetElementTimed{{Elem: "203.0.113.80"}}, ReadAt: time.Now().Add(time.Second)})
+	if ok, _ := s.Banned("203.0.113.80"); !ok {
+		t.Fatal("self-protection block not in the edge ban store")
 	}
 }

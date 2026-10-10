@@ -20,13 +20,14 @@ func newTestStore(t *testing.T) (*Store, *time.Time) {
 	return s, &now
 }
 
-func blocked(ip string, left time.Duration, now time.Time) firewall.BlockedEntry {
-	e := firewall.BlockedEntry{IP: net.ParseIP(ip)}
-	if left > 0 {
-		exp := now.Add(left)
-		e.Expires = &exp
-	}
-	return e
+// blk is one nft block element with left remaining (0 = permanent).
+func blk(ip string, left time.Duration) firewall.SetElementTimed {
+	return firewall.SetElementTimed{Elem: ip, Expires: left}
+}
+
+// snap is a complete nft read that began at readAt.
+func snap(readAt time.Time, allows []string, blocks ...firewall.SetElementTimed) Snapshot {
+	return Snapshot{Blocks: blocks, Allows: allows, ReadAt: readAt}
 }
 
 func TestNotReadyBeforeReconcile(t *testing.T) {
@@ -42,7 +43,7 @@ func TestAddExtendKeepExact(t *testing.T) {
 	ip := net.ParseIP("34.153.214.160")
 	s.Add(ip, dur(7*24*time.Hour), "waf_security", false)
 	s.Add(ip, dur(time.Hour), "webdetector", false) // never shortens
-	s.Reconcile([]firewall.BlockedEntry{blocked("34.153.214.160", 7*24*time.Hour, *now)}, nil)
+	s.Reconcile(snap(now.Add(-time.Minute), nil, blk("34.153.214.160", 7*24*time.Hour)))
 	if ok, left := s.Banned("34.153.214.160"); !ok || left != 7*24*time.Hour {
 		t.Fatalf("after 7d then 1h: banned=%v left=%v, want 7d", ok, left)
 	}
@@ -54,7 +55,6 @@ func TestAddExtendKeepExact(t *testing.T) {
 	if ok, left := s.Banned("34.153.214.160"); !ok || left != 0 {
 		t.Fatalf("permanent: banned=%v left=%v", ok, left)
 	}
-	// IPv4-mapped is the same address.
 	if ok, _ := s.Banned("::ffff:34.153.214.160"); !ok {
 		t.Fatal("IPv4-mapped form not matched")
 	}
@@ -66,7 +66,7 @@ func TestAddExtendKeepExact(t *testing.T) {
 func TestExpiryAndKillSwitch(t *testing.T) {
 	s, now := newTestStore(t)
 	s.Add(net.ParseIP("203.0.113.5"), dur(time.Hour), "waf_security", false)
-	s.Reconcile([]firewall.BlockedEntry{blocked("203.0.113.5", time.Hour, *now)}, nil)
+	s.Reconcile(snap(now.Add(-time.Minute), nil, blk("203.0.113.5", time.Hour)))
 	SetEnabled(false)
 	ok, _ := s.Banned("203.0.113.5")
 	SetEnabled(true)
@@ -84,13 +84,13 @@ func TestReconcileNarrowsOnly(t *testing.T) {
 	for _, ip := range []string{"198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4"} {
 		s.Add(net.ParseIP(ip), dur(6*time.Hour), "waf_security", false)
 	}
-	s.Reconcile([]firewall.BlockedEntry{
-		blocked("198.51.100.1", 6*time.Hour, *now), // kept
-		blocked("198.51.100.2", time.Hour, *now),   // nft ends earlier: clamp
-		blocked("198.51.100.4", 6*time.Hour, *now), // but allowed: dropped
-		blocked("192.0.2.9", 0, *now),              // nft-only (cfm.deny): never imported
+	s.Reconcile(snap(now.Add(time.Second), []string{"198.51.100.4"},
+		blk("198.51.100.1", 6*time.Hour), // kept
+		blk("198.51.100.2", time.Hour),   // nft ends earlier: clamp
+		blk("198.51.100.4", 6*time.Hour), // but allowed: dropped
+		blk("192.0.2.9", 0),              // nft-only (cfm.deny): never imported
 		// .3 missing from nft: unblocked from the CLI / flushed / expired
-	}, []firewall.BlockedEntry{{IP: net.ParseIP("198.51.100.4")}})
+	))
 	if ok, left := s.Banned("198.51.100.1"); !ok || left != 6*time.Hour {
 		t.Errorf(".1: %v %v", ok, left)
 	}
@@ -111,6 +111,60 @@ func TestReconcileNarrowsOnly(t *testing.T) {
 	}
 }
 
+// A ban written after the nft read began is not "missing from nft": the read
+// predates it (review of b2073f6: a 7d ban landing mid-read was dropped).
+func TestReconcileKeepsBanAddedDuringRead(t *testing.T) {
+	s, now := newTestStore(t)
+	readAt := *now
+	*now = now.Add(2 * time.Second)
+	s.Add(net.ParseIP("203.0.113.40"), dur(7*24*time.Hour), "waf_security", false)
+	s.Reconcile(snap(readAt, nil)) // the read saw nothing
+	if ok, _ := s.Banned("203.0.113.40"); !ok {
+		t.Fatal("a ban added after the read began was dropped")
+	}
+	// The next read, after the ban, does decide.
+	s.Reconcile(snap(now.Add(time.Second), nil))
+	if ok, _ := s.Banned("203.0.113.40"); ok {
+		t.Fatal("a later read without it must drop it")
+	}
+}
+
+// Every nft allow set counts: hosts, nets (the fleet whitelist, cfm allow
+// CIDR), ranges — nft accepts before any block drop.
+func TestAllowSetsWinImmediately(t *testing.T) {
+	s, now := newTestStore(t)
+	ips := []string{"52.96.0.10", "192.0.2.15", "2001:db8::7", "203.0.113.60"}
+	var blocks []firewall.SetElementTimed
+	for _, ip := range ips {
+		s.Add(net.ParseIP(ip), nil, "waf_security", false)
+		blocks = append(blocks, blk(ip, 0))
+	}
+	s.Reconcile(snap(now.Add(-time.Minute), []string{"52.96.0.0/14", "192.0.2.10-192.0.2.20", "2001:db8::/32"}, blocks...))
+	for _, ip := range ips[:3] {
+		if ok, _ := s.Banned(ip); ok {
+			t.Errorf("%s is allowed by an nft allow set: must not be banned", ip)
+		}
+	}
+	if ok, _ := s.Banned("203.0.113.60"); !ok {
+		t.Error("an address no allow covers must stay banned")
+	}
+	// A ban added after the allow snapshot is not answered either.
+	s.Add(net.ParseIP("52.97.1.1"), nil, "manual", true)
+	if ok, _ := s.Banned("52.97.1.1"); ok {
+		t.Error("a new ban of an allowed address was answered")
+	}
+}
+
+func TestClear(t *testing.T) {
+	s, now := newTestStore(t)
+	s.Add(net.ParseIP("203.0.113.70"), nil, "manual", true)
+	s.Reconcile(snap(now.Add(-time.Minute), nil, blk("203.0.113.70", 0)))
+	s.Clear()
+	if ok, _ := s.Banned("203.0.113.70"); ok || s.Len() != 0 {
+		t.Fatal("Clear left a ban")
+	}
+}
+
 func TestRemoveAndPersistence(t *testing.T) {
 	s, now := newTestStore(t)
 	s.Add(net.ParseIP("203.0.113.7"), dur(time.Hour), "manual", true)
@@ -122,10 +176,10 @@ func TestRemoveAndPersistence(t *testing.T) {
 	s2 := New(s.path)
 	s2.now = s.now
 	s2.Load()
-	if s2.Banned("203.0.113.8"); s2.Ready() {
+	if s2.Ready() {
 		t.Fatal("a loaded store must not answer before reconcile")
 	}
-	s2.Reconcile([]firewall.BlockedEntry{blocked("203.0.113.8", 0, *now)}, nil)
+	s2.Reconcile(snap(now.Add(time.Minute), nil, blk("203.0.113.8", 0)))
 	if ok, _ := s2.Banned("203.0.113.8"); !ok {
 		t.Error("persisted permanent ban lost")
 	}
@@ -140,7 +194,7 @@ func TestWebSection(t *testing.T) {
 			t.Errorf("%s should be a web section", s)
 		}
 	}
-	for _, s := range []string{"ssh_auth", "exim_security", "dovecot_auth", "ftpd", "mysql", "health", ""} {
+	for _, s := range []string{"ssh_auth", "exim_security", "dovecot_auth", "ftpd", "mysql", "health", "ngm_auth", ""} {
 		if WebSection(s) {
 			t.Errorf("%s should not be a web section", s)
 		}

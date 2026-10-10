@@ -14,10 +14,11 @@ import (
 // daemon's store, so it calls this after a successful block.
 //
 //	POST /api/v1/webdet/edge-ban?ip=1.2.3.4[&ttl=6h]   (no ttl: permanent)
+//	POST /api/v1/webdet/edge-ban?ip=1.2.3.4&unban=1    (`cfm allow`: lift it)
 //
 // Admin-only. The store keeps the entry only while nft blocks the address
 // (edgeban.Store.Reconcile), so a ban recorded here that nft does not hold is
-// dropped at the next reconcile. Unbans go through force-unblock-ip.
+// dropped at the next reconcile. `cfm unblock` goes through force-unblock-ip.
 func (e *Engine) handleEdgeBan(w http.ResponseWriter, r *http.Request) {
 	if !RequireAdmin(w, r) {
 		return
@@ -30,6 +31,11 @@ func (e *Engine) handleEdgeBan(w http.ResponseWriter, r *http.Request) {
 	ip := net.ParseIP(strings.TrimSpace(r.URL.Query().Get("ip")))
 	if ip == nil || ip.IsUnspecified() {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid or missing ip"})
+		return
+	}
+	if r.URL.Query().Get("unban") == "1" {
+		edgeban.Unban(ip.String())
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ip": ip.String(), "unbanned": true})
 		return
 	}
 	var ttl *time.Duration

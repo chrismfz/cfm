@@ -113,11 +113,11 @@ func TestSectionSinkEdgeBan(t *testing.T) {
 	pub("webdetector", "dryrun", "198.51.100.23")
 	pub("challenge_cookie_discard", "permanent", "198.51.100.24")
 
-	var blocks []firewall.BlockedEntry
+	var blocks []firewall.SetElementTimed
 	for ip := range fw.left {
-		blocks = append(blocks, firewall.BlockedEntry{IP: net.ParseIP(ip)})
+		blocks = append(blocks, firewall.SetElementTimed{Elem: ip})
 	}
-	store.Reconcile(blocks, nil)
+	store.Reconcile(edgeban.Snapshot{Blocks: blocks, ReadAt: time.Now().Add(time.Second)})
 	for ip, want := range map[string]bool{
 		"34.153.214.160": true,  // web section
 		"198.51.100.22":  false, // ssh: nft only

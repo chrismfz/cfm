@@ -1879,14 +1879,22 @@ func decisionConcurrencyCap() int {
 // handleDecision: Lua asks "what do I do with this IP / vhost?"
 // GET /nginx/decision?ip=1.2.3.4&host=example.com
 // writeEdgeBan answers ip_action=block for a web-scope decision whose client
-// is in the edge ban store (internal/edgeban), and reports whether it did.
-// A panel-scope decision is left alone: the panel ports get their own,
-// separately rolled-out check.
+// is in the edge ban store (internal/edgeban) and reached the edge through a
+// trusted proxy (px=1, set by cfm_decision.lua when realip replaced the TCP
+// peer), and reports whether it did. A direct client is nft's alone: its ban
+// drops it before the edge, and nft's allow sets (the fleet whitelist,
+// allow nets, dyndns) decide for it; an older edge that sends no px gets
+// nothing from here. A panel-scope decision is left alone: the panel ports
+// get their own, separately rolled-out check.
 func (b *NginxBridge) writeEdgeBan(w http.ResponseWriter, r *http.Request) bool {
-	if sc := strings.TrimSpace(r.URL.Query().Get("scope")); sc != "" && sc != "web" {
+	q := r.URL.Query()
+	if q.Get("px") != "1" {
 		return false
 	}
-	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+	if sc := strings.TrimSpace(q.Get("scope")); sc != "" && sc != "web" {
+		return false
+	}
+	ip := strings.TrimSpace(q.Get("ip"))
 	if b.bypassFunc != nil && b.bypassFunc(ip) {
 		return false
 	}

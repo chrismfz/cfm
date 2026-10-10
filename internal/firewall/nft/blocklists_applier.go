@@ -202,13 +202,17 @@ func (b *Backend) ListSetElementsTimed(setName string) ([]firewall.SetElementTim
 				}
 			case map[string]any:
 				if inner, ok := v["elem"].(map[string]any); ok {
-					val := strings.TrimSpace(toStr(inner["val"]))
+					val := jsonElemString(inner["val"])
 					if val == "" {
-						val = strings.TrimSpace(toStr(inner["prefix"]))
+						val = jsonElemString(inner)
 					}
 					if val != "" {
 						out = append(out, firewall.SetElementTimed{Elem: val, Expires: elemExpires(inner)})
 					}
+				} else if val := jsonElemString(v); val != "" {
+					// An interval set's element printed bare:
+					// {"prefix":{"addr":…,"len":…}} or {"range":[first,last]}.
+					out = append(out, firewall.SetElementTimed{Elem: val, Expires: elemExpires(v)})
 				} else if val := strings.TrimSpace(toStr(v["elem"])); val != "" {
 					out = append(out, firewall.SetElementTimed{Elem: val, Expires: elemExpires(v)})
 				}
@@ -216,6 +220,30 @@ func (b *Backend) ListSetElementsTimed(setName string) ([]firewall.SetElementTim
 		}
 	}
 	return out, nil
+}
+
+// jsonElemString renders one `nft -j` element value: a plain string, a
+// {"prefix":{"addr","len"}} as addr/len, a {"range":[first,last]} as
+// first-last (the forms ListSetElementsTimed's callers parse); "" otherwise.
+func jsonElemString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case map[string]any:
+		if p, ok := x["prefix"].(map[string]any); ok {
+			addr := strings.TrimSpace(toStr(p["addr"]))
+			if n, ok := p["len"].(float64); ok && addr != "" {
+				return fmt.Sprintf("%s/%d", addr, int(n))
+			}
+		}
+		if r, ok := x["range"].([]any); ok && len(r) == 2 {
+			lo, hi := strings.TrimSpace(toStr(r[0])), strings.TrimSpace(toStr(r[1]))
+			if lo != "" && hi != "" {
+				return lo + "-" + hi
+			}
+		}
+	}
+	return ""
 }
 
 // elemExpires is an element's remaining time. nft prints expires in whole

@@ -439,29 +439,44 @@ speedhost, 2026-10-09).
 
 `internal/edgeban` keeps the bans the edge enforces itself. **What goes in:**
 the sink's bans for the web sections (`edgeban.WebSection`: waf_security,
-webdetector, challenge_*, modsec, cfm_endpoints, cpanel), the challenge-fail
-escalation, the challenge server's self-protection blocks, and manual bans
-(`POST /api/v1/block`, `cfm block` through `POST /api/v1/webdet/edge-ban`).
-**What stays out:** fleet feeds (`block_ext_*`), `cfm.deny` (it can hold
-thousands of entries), port-scan / flood bans (L3/L4; some may be proxy
-addresses), mail / SSH / FTP / database sections. It is not an nft mirror.
+webdetector, challenge_*, modsec, cfm_endpoints, cpanel), the challenge
+server's self-protection blocks, and manual bans (`POST /api/v1/firewall/block`,
+cfm-admin's "Block selected" `POST /api/v1/firewall/block/batch`, `cfm block`
+through `POST /api/v1/webdet/edge-ban`; a CIDR block is not). **What stays
+out:** fleet feeds (`block_ext_*`), `cfm.deny` (it can hold thousands of
+entries), port-scan / flood bans (L3/L4; some may be proxy addresses), mail /
+SSH / FTP / database sections. It is not an nft mirror.
+
+**Proxied requests only.** `cfm_decision.lua` adds `px=1` to the decision RPC
+when realip replaced the TCP peer (`$realip_remote_addr ~= $remote_addr`); the
+bridge answers the store only then. A direct client is nft's alone: its ban
+drops it before the edge, and nft's allow sets decide for it. An older edge
+sends no `px` and gets nothing from the store.
+
+**Allows win, as in nft.** A reconcile reads every allow set nft accepts
+before its block drops (`allow_v4/v6`, `allow_dyn_*`, `allow_ext_*` hosts and
+nets — the fleet whitelist — and `allow_*_nets`, hosts, CIDRs and ranges), and
+the store never answers an address they cover, even for a ban added after the
+read.
 
 **Consistency.** Every in-daemon unblock removes the entry
-(`/api/v1/unblock`, `unblock.DoMany` — the agent's fleet unblock, and
-`ForceUnblock`, which `cfm unblock` reaches over the API). Every minute a
-reconcile reads the block and allow host sets and *narrows* the store: an entry
-nft no longer blocks (expired, unblocked from the CLI, flushed) or that an
-allow lets through is dropped, and an earlier nft expiry clamps it. It never
-imports from nft. The store persists in `/var/lib/cfm/edgeban.json` and answers
-nothing until the first reconcile after a start; three failed reads in a row
-empty it. Everything uncertain fails toward not blocking.
+(`/api/v1/unblock`, `unblock.DoMany` — the agent's fleet unblock — and
+`ForceUnblock`, which `cfm unblock` reaches over the API); `cfm allow` (over
+`edge-ban?unban=1`) and a `cfm.allow` host lift it too. Every minute a
+reconcile reads the block and allow sets — all of them or none: a failed or
+partial read skips the reconcile, and three in a row empty the store — and
+*narrows* the store: an entry nft no longer blocks (expired, unblocked from the
+CLI, flushed) is dropped unless it was written after the read began, and an
+earlier nft expiry clamps it. It never imports from nft. The store persists in
+`/var/lib/cfm/edgeban.json` (one writer at a time) and answers nothing until
+the first reconcile after a start.
 
 **Enforcement (B1).** The bridge decision answers `ip_action=block` for a
-web-scope decision whose client is in the store: after the IGNORE_IPS bypass
-(operator decision: ignored stays ignored), before the host bypass, solved-ok
-state, exemptions and traffic rules, and also while the bridge sheds. The panel
-scope is untouched. Kill switch `[webdetector] EDGE_BAN`. **Not yet covered**
-(B2/B3): cfm.lua paths that return before Step 3 (the clearance-cookie fast
-path, the Step 0 bypass list, the cPanel proxy-subdomain passthrough), the
+proxied, web-scope decision whose client is in the store: after the IGNORE_IPS
+bypass (operator decision: ignored stays ignored), before the host bypass,
+solved-ok state, exemptions and traffic rules, and also while the bridge sheds.
+The panel scope is untouched. Kill switch `[webdetector] EDGE_BAN`. **Not yet
+covered** (B2/B3): cfm.lua paths that return before Step 3 (the clearance-cookie
+fast path, the Step 0 bypass list, the cPanel proxy-subdomain passthrough), the
 static-asset location, the decision cache's <=90 s clean-allow window, and the
 panel ports.

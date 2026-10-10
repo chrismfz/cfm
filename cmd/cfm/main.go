@@ -267,6 +267,8 @@ func main() {
 		os.Exit(cli.RunList(os.Args[2:], be, tableExistsProbe(be)))
 	case "allow":
 		be := mustBackend()
+		clihttp.SetToken(apiAuthToken())
+		cli.EdgeBanBaseURL = apiBaseURL()
 		os.Exit(cli.RunAllow(os.Args[2:], be, cfgDir(), tableExistsProbe(be)))
 	case "unallow":
 		be := mustBackend()
@@ -925,6 +927,7 @@ func runDaemon(args []string) {
 						fmt.Fprintln(os.Stderr, "allow apply error:", err)
 						continue
 					}
+					edgeban.Unban(e.IP.String()) // nft accepts it now: so does the edge
 				}
 				seenAllow[key] = spec
 			} else {

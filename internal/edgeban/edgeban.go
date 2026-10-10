@@ -13,10 +13,13 @@
 // port-scan and flood bans (thousands of entries, some of them proxy
 // addresses), which the edge must not copy. It only ever narrows to what
 // nft still blocks: Reconcile drops an entry nft no longer blocks (expired,
-// unblocked from the CLI, flushed) or an allow set now lets through, and
-// clamps an expiry to nft's. Unblocks inside the daemon remove the entry at
-// once. Anything uncertain fails toward NOT blocking: the store answers
-// nothing until its first reconcile, and a disabled store answers nothing.
+// unblocked from the CLI, flushed), and clamps an expiry to nft's. An
+// address any nft allow set accepts (hosts, nets, the fleet whitelist) is
+// never answered, as nft accepts it before any drop. Unblocks inside the
+// daemon remove the entry at once. The bridge answers it only for a request
+// that came through a trusted proxy: a direct client is nft's alone. Anything
+// uncertain fails toward NOT blocking: the store answers nothing until its
+// first reconcile, and a disabled store answers nothing.
 package edgeban
 
 import (
@@ -24,7 +27,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,15 +52,20 @@ func SetPathForTest(path string) (restore func()) {
 type Entry struct {
 	Expires time.Time `json:"expires,omitempty"`
 	Source  string    `json:"source,omitempty"`
+	// Added is when the entry was last written: a reconcile never drops an
+	// entry written after its nft read began (the read predates the ban).
+	Added time.Time `json:"added,omitempty"`
 }
 
 // Store is the set of edge-enforced bans.
 type Store struct {
-	mu    sync.RWMutex
-	m     map[string]Entry
-	path  string
-	ready atomic.Bool
-	now   func() time.Time
+	mu     sync.RWMutex
+	m      map[string]Entry
+	path   string
+	ready  atomic.Bool
+	now    func() time.Time
+	allow  atomic.Pointer[allowSet] // nft's allow sets at the last reconcile
+	saveMu sync.Mutex               // one save at a time: snapshot, write, rename
 }
 
 var (
@@ -106,7 +113,7 @@ func (s *Store) Add(ip net.IP, ttl *time.Duration, source string, exact bool) {
 	if s == nil || k == "" {
 		return
 	}
-	e := Entry{Source: source}
+	e := Entry{Source: source, Added: s.now()}
 	if ttl != nil && *ttl > 0 {
 		e.Expires = s.now().Add(*ttl)
 	}
@@ -155,7 +162,8 @@ func (s *Store) Banned(ip string) (bool, time.Duration) {
 	if s == nil || !enabled.Load() || !s.ready.Load() {
 		return false, 0
 	}
-	k := key(net.ParseIP(strings.TrimSpace(ip)))
+	addr := net.ParseIP(strings.TrimSpace(ip))
+	k := key(addr)
 	if k == "" {
 		return false, 0
 	}
@@ -163,6 +171,10 @@ func (s *Store) Banned(ip string) (bool, time.Duration) {
 	e, ok := s.m[k]
 	s.mu.RUnlock()
 	if !ok {
+		return false, 0
+	}
+	// nft accepts an allowed address before any block drop: so does the edge.
+	if a := s.allow.Load(); a != nil && a.contains(addr) {
 		return false, 0
 	}
 	if e.Expires.IsZero() {
@@ -188,41 +200,56 @@ func (s *Store) Len() int {
 // Ready reports whether a Reconcile has run.
 func (s *Store) Ready() bool { return s != nil && s.ready.Load() }
 
-// Reconcile narrows the store to what nft still enforces: blocks and allows
-// are the block_v4/v6 and allow_v4/v6 host sets as ListBlocks / ListAllows
-// return them. An entry nft no longer blocks, or that an allow lets through,
-// is dropped; a later nft expiry never extends an entry, an earlier one
-// clamps it. Expired entries go. The first call makes the store answer.
-func (s *Store) Reconcile(blocks, allows []firewall.BlockedEntry) {
+// Snapshot is one read of nft for Reconcile: the block host sets
+// (block_v4/v6, with remaining TTLs) and every allow set (hosts, nets and
+// ranges, as ListSetElementsTimed prints them), read starting at ReadAt.
+type Snapshot struct {
+	Blocks []firewall.SetElementTimed
+	Allows []string
+	ReadAt time.Time
+}
+
+// Reconcile narrows the store to what nft still enforces, from a COMPLETE
+// read (the caller skips it on any read error: an empty or partial read
+// would drop real bans). An entry nft no longer blocks is dropped unless it
+// was written after the read began (a ban landing mid-read); one an allow
+// covers is dropped; a later nft expiry never extends an entry, an earlier
+// one clamps it; expired entries go. The allow sets are kept for Banned, and
+// the first call makes the store answer.
+func (s *Store) Reconcile(snap Snapshot) {
 	if s == nil {
 		return
 	}
 	now := s.now()
-	inNft := make(map[string]time.Time, len(blocks)) // zero = permanent
-	for _, b := range blocks {
-		if k := key(b.IP); k != "" {
+	inNft := make(map[string]time.Time, len(snap.Blocks)) // zero = permanent
+	for _, b := range snap.Blocks {
+		if k := key(net.ParseIP(strings.TrimSpace(b.Elem))); k != "" {
 			var exp time.Time
-			if b.Expires != nil {
-				exp = *b.Expires
+			if b.Expires > 0 {
+				exp = now.Add(b.Expires)
 			}
 			inNft[k] = exp
 		}
 	}
-	allowed := make(map[string]bool, len(allows))
-	for _, a := range allows {
-		if k := key(a.IP); k != "" {
-			allowed[k] = true
-		}
-	}
+	allow := parseAllowSet(snap.Allows)
+	s.allow.Store(allow)
 	changed := false
 	s.mu.Lock()
 	for k, e := range s.m {
 		exp, blocked := inNft[k]
+		fresh := !snap.ReadAt.IsZero() && !e.Added.Before(snap.ReadAt)
 		switch {
-		case !blocked, allowed[k], !e.Expires.IsZero() && !e.Expires.After(now):
+		case !e.Expires.IsZero() && !e.Expires.After(now):
 			delete(s.m, k)
 			changed = true
-		case !exp.IsZero() && (e.Expires.IsZero() || exp.Before(e.Expires)):
+		case allow.contains(net.ParseIP(k)):
+			delete(s.m, k)
+			changed = true
+		case !blocked && !fresh:
+			delete(s.m, k)
+			changed = true
+		case blocked && !exp.IsZero() && (e.Expires.IsZero() || e.Expires.Sub(exp) > time.Second):
+			// nft ends earlier (more than a second: its own clock): clamp.
 			e.Expires = exp
 			s.m[k] = e
 			changed = true
@@ -233,6 +260,93 @@ func (s *Store) Reconcile(blocks, allows []firewall.BlockedEntry) {
 	if changed {
 		s.save()
 	}
+}
+
+// Clear empties the store (the caller decided nft cannot be read).
+func (s *Store) Clear() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	had := len(s.m) > 0
+	s.m = map[string]Entry{}
+	s.mu.Unlock()
+	if had {
+		s.save()
+	}
+}
+
+// allowSet matches the addresses nft's allow sets accept: hosts, CIDRs and
+// first-last ranges.
+type allowSet struct {
+	hosts  map[string]bool
+	nets   []*net.IPNet
+	ranges [][2]net.IP
+}
+
+func parseAllowSet(elems []string) *allowSet {
+	a := &allowSet{hosts: map[string]bool{}}
+	for _, raw := range elems {
+		e := strings.TrimSpace(raw)
+		switch {
+		case e == "":
+		case strings.Contains(e, "/"):
+			if _, n, err := net.ParseCIDR(e); err == nil {
+				a.nets = append(a.nets, n)
+			}
+		case strings.Contains(e, "-"):
+			parts := strings.SplitN(e, "-", 2)
+			lo, hi := net.ParseIP(strings.TrimSpace(parts[0])), net.ParseIP(strings.TrimSpace(parts[1]))
+			if lo != nil && hi != nil {
+				a.ranges = append(a.ranges, [2]net.IP{norm(lo), norm(hi)})
+			}
+		default:
+			if k := key(net.ParseIP(e)); k != "" {
+				a.hosts[k] = true
+			}
+		}
+	}
+	return a
+}
+
+func norm(ip net.IP) net.IP {
+	if v4 := ip.To4(); v4 != nil {
+		return v4
+	}
+	return ip.To16()
+}
+
+func (a *allowSet) contains(ip net.IP) bool {
+	if a == nil || ip == nil {
+		return false
+	}
+	if a.hosts[key(ip)] {
+		return true
+	}
+	for _, n := range a.nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	n := norm(ip)
+	for _, r := range a.ranges {
+		if len(r[0]) == len(n) && bytesCompare(r[0], n) <= 0 && bytesCompare(n, r[1]) <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func bytesCompare(a, b net.IP) int {
+	for i := range a {
+		if a[i] != b[i] {
+			if a[i] < b[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 // Load reads the persisted store (missing or unreadable: empty). Entries
@@ -258,29 +372,22 @@ func (s *Store) Load() {
 	s.mu.Unlock()
 }
 
-// save writes the store atomically (temp file + rename). Best effort: a
-// failed write only costs the bans a restart would have kept.
+// save writes the store atomically (temp file + rename), one save at a time
+// so an older snapshot never lands after a newer one. Best effort: a failed
+// write only costs the bans a restart would have kept.
 func (s *Store) save() {
 	if s.path == "" {
 		return
 	}
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	s.mu.RLock()
-	keys := make([]string, 0, len(s.m))
-	for k := range s.m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := make(map[string]Entry, len(keys))
-	for _, k := range keys {
-		out[k] = s.m[k]
-	}
+	raw, err := json.Marshal(s.m)
 	s.mu.RUnlock()
-	raw, err := json.Marshal(out)
 	if err != nil {
 		return
 	}
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, ".edgeban-*")
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".edgeban-*")
 	if err != nil {
 		return
 	}
@@ -308,7 +415,7 @@ func WebSection(section string) bool {
 	case "waf_security", "webdetector", "modsec", "cfm_endpoints", "cpanel":
 		return true
 	}
-	return strings.HasPrefix(s, "challenge_") || strings.HasPrefix(s, "waf_security.")
+	return strings.HasPrefix(s, "challenge_")
 }
 
 // Ban records a ban in the Default store (no-op without one).

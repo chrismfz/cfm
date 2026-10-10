@@ -239,6 +239,11 @@ func makeBlockBatchHandler(be firewall.Backend, selfIPs selfIPChecker) http.Hand
 				}
 			} else {
 				blocked = pending
+				// Manual bans are enforced at the edge too (cfm-admin "Block
+				// selected"); extend semantics, like the batch.
+				for _, canon := range pending {
+					edgeban.Ban(net.ParseIP(canon), ttlPtr, "manual", false)
+				}
 			}
 		}
 

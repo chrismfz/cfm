@@ -495,11 +495,13 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   waf_security / webdetector / challenge_* / modsec / cfm_endpoints / cpanel
   sections, the challenge server, manual API/CLI bans) also go to the edge ban
   store (`internal/edgeban`), which the bridge decision answers
-  `ip_action=block` (after IGNORE_IPS, before every allow). It is NOT an nft
-  mirror (fleet feeds, cfm.deny, port-scan/flood bans stay out): a reconcile
-  only narrows it to what nft still blocks. A new web blocker or unblock path
-  must call `edgeban.Ban` / `edgeban.Unban`. Kill switch `[webdetector]
-  EDGE_BAN`.
+  `ip_action=block` for PROXIED requests only (`px=1` from cfm_decision.lua;
+  a direct client is nft's, allow sets included), after IGNORE_IPS, before
+  every allow. It is NOT an nft mirror (fleet feeds, cfm.deny, port-scan/flood
+  bans stay out): a reconcile from a complete read only narrows it to what nft
+  still blocks, and every nft allow set wins. A new web blocker or unblock /
+  allow path must call `edgeban.Ban` / `edgeban.Unban`. Kill switch
+  `[webdetector] EDGE_BAN`.
 - **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
   API reporting and email are the section sink's job (`autoblock_sink.go`) —
   don't reimplement them. A plain alert blocks per the section `BLOCK` policy;
