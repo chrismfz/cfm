@@ -14,6 +14,15 @@ import (
 // cached — an unverified one is banned as before, never exempted on a guess.
 const goodBotBanTickBudget = 5 * time.Second
 
+// banNotBotTTL / banNotBotCap: how long, and for how many IPs, a definitive
+// "not a crawler" is remembered by the ban check (an IP that gains a crawler
+// PTR is re-checked after the TTL). At the cap, expired entries are pruned
+// first, then the map is reset — losing the memory costs only lookups.
+const (
+	banNotBotTTL = 10 * time.Minute
+	banNotBotCap = 4096
+)
+
 // banGoodBot is the verdict cache of the IP-ban check when the engine has no
 // nginx bridge (no edge). With a bridge, the bridge's cache is used instead, so
 // a crawler the challenge exemption already verified costs no DNS here.
@@ -72,8 +81,8 @@ func (e *Engine) goodBotForBan(ctx context.Context, ip string, budget *int, now 
 			return direct()
 		}
 	}
-	if ptrFn == nil || ctx.Err() != nil {
-		return gb.verified(ip, nil, now) // no resolver / no time left: cache only
+	if ptrFn == nil || ctx.Err() != nil || e.knownNotBot(ip, now) {
+		return gb.verified(ip, nil, now) // no resolver / no time left / known: cache only
 	}
 	var ptr string
 	var ptrOK, resolved bool
@@ -92,5 +101,39 @@ func (e *Engine) goodBotForBan(ctx context.Context, ip string, budget *int, now 
 			}
 		}
 	}
+	// Definitively not a crawler: the lookup completed and its PTR is empty or
+	// claimed by no rule. A crawler-suffix PTR is left to the verdict cache
+	// (it caches its own negatives), and anything inconclusive — a failed
+	// lookup, no time or budget left for the file rules — is not remembered.
+	if name == "" && resolved && ptrOK && !looksLikeGoodBotPTR(ptr) &&
+		ctx.Err() == nil && (e.chalGoodBotFunc == nil || ptr == "" || (budget != nil && *budget > 0)) {
+		e.rememberNotBot(ip, now)
+	}
 	return name
+}
+
+func (e *Engine) knownNotBot(ip string, now time.Time) bool {
+	e.banNotBotMu.Lock()
+	defer e.banNotBotMu.Unlock()
+	t, ok := e.banNotBot[ip]
+	return ok && now.Sub(t) < banNotBotTTL
+}
+
+func (e *Engine) rememberNotBot(ip string, now time.Time) {
+	e.banNotBotMu.Lock()
+	defer e.banNotBotMu.Unlock()
+	if e.banNotBot == nil {
+		e.banNotBot = make(map[string]time.Time)
+	}
+	if len(e.banNotBot) >= banNotBotCap {
+		for k, t := range e.banNotBot {
+			if now.Sub(t) >= banNotBotTTL {
+				delete(e.banNotBot, k)
+			}
+		}
+		if len(e.banNotBot) >= banNotBotCap {
+			e.banNotBot = make(map[string]time.Time)
+		}
+	}
+	e.banNotBot[ip] = now
 }

@@ -126,3 +126,40 @@ func TestGoodBotForBanKeepsAGracedVerdictThroughAFailedPTRLookup(t *testing.T) {
 		t.Errorf("shared cache after the failed lookup: %q, want the verdict still there", got)
 	}
 }
+
+// An IP the ban check found definitively not a crawler is not looked up again
+// on every cooldown (a flooder behind Cloudflare stays in IPShort, and a slow
+// reverse zone cost up to 2 s per lookup on the detector tick); a failed
+// lookup is not remembered.
+func TestGoodBotForBanRemembersDefinitiveNegatives(t *testing.T) {
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute})
+	e.nginxBridge = &NginxBridge{goodBot: newBanGoodBot()}
+	lookups := map[string]int{}
+	e.banPTRFn = func(ip string) (string, bool) {
+		lookups[ip]++
+		switch ip {
+		case "203.0.113.1":
+			return "", true // no PTR
+		case "203.0.113.2":
+			return "host-2.isp.example", true // a PTR no rule claims
+		}
+		return "", false // lookup failed
+	}
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		for _, ip := range []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"} {
+			if got := e.goodBotForBan(context.Background(), ip, nil, now.Add(time.Duration(i)*30*time.Second)); got != "" {
+				t.Fatalf("%s: %q", ip, got)
+			}
+		}
+	}
+	if lookups["203.0.113.1"] != 1 || lookups["203.0.113.2"] != 1 {
+		t.Errorf("definitive negatives looked up again: %v", lookups)
+	}
+	if lookups["203.0.113.3"] != 3 {
+		t.Errorf("failed lookup remembered: %v (want 3 tries)", lookups)
+	}
+	if e.goodBotForBan(context.Background(), "203.0.113.1", nil, now.Add(banNotBotTTL+time.Minute)); lookups["203.0.113.1"] != 2 {
+		t.Errorf("negative not re-checked after the TTL: %v", lookups)
+	}
+}

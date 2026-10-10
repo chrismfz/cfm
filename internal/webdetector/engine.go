@@ -481,6 +481,11 @@ type Engine struct {
 	// banPTRFn overrides the reverse-DNS source of the IP-ban good-bot check
 	// (goodBotForBan; default the enricher). Tests only.
 	banPTRFn func(ip string) (ptr string, ok bool)
+	// banNotBot: IPs goodBotForBan found definitively not a crawler (no PTR,
+	// or one no rule claims) — skipped for banNotBotTTL so a flooder still in
+	// IPShort costs no reverse lookup on every cooldown.
+	banNotBotMu sync.Mutex
+	banNotBot   map[string]time.Time
 
 	mu    sync.RWMutex
 	hosts map[string]*hostState
