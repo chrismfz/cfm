@@ -1,8 +1,10 @@
 package detectors
 
 import (
+	"errors"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,6 +96,8 @@ func TestOutcomeBlockedShowsKeptBan(t *testing.T) {
 		{map[string]string{"blocked": "challenge", "ttl": "30m0s", "escalated": "block", "block_ttl": "1h0m0s", "block_kept": "longer"},
 			"Challenged (ttl=30m0s) -> Escalated: block (ttl=1h0m0s; longer ban kept)"},
 		{map[string]string{"block_err": "nft: timeout"}, "No (block failed: nft: timeout)"},
+		{map[string]string{"blocked": "no", "block_err": "nft: timeout"}, "No (block failed: nft: timeout)"},
+		{map[string]string{"blocked": "no"}, "No"},
 	}
 	for _, c := range cases {
 		if got := outcomeBlocked(c.extra); got != c.want {
@@ -133,6 +137,36 @@ func TestSectionSinkEdgeBan(t *testing.T) {
 	} {
 		if got, _ := store.Banned(ip); got != want {
 			t.Errorf("%s edge-banned=%v, want %v", ip, got, want)
+		}
+	}
+}
+
+// failingBlockFake refuses every block.
+type failingBlockFake struct{ firewall.Backend }
+
+func (failingBlockFake) AddBlockBatch([]firewall.BlockEntry) (firewall.BlockBatchResult, error) {
+	return firewall.BlockBatchResult{}, errors.New("nft block batch: Error: Could not process rule\ncreate element …\n^^^")
+}
+func (failingBlockFake) AddBlock(net.IP, string, *time.Duration) error {
+	return errors.New("nft add element failed")
+}
+
+// A block the firewall refused is not silent: the outcome carries why, on
+// one line.
+func TestSectionSinkReportsFailedBlock(t *testing.T) {
+	for _, mode := range []string{"ttl", "permanent"} {
+		in := &capturingSink{}
+		s := &sectionSink{section: "ssh_auth", pol: blockPolicy{Mode: mode, TTL: time.Hour}, fw: failingBlockFake{}, inner: in}
+		s.Publish(core.Alert{When: time.Now(), Kind: "SSH/AUTHFAIL", Key: "198.51.100.50"})
+		if len(in.got) != 1 {
+			t.Fatalf("%s: %d alerts out", mode, len(in.got))
+		}
+		ex := in.got[0].Extra
+		if ex["blocked"] == "yes" || ex["block_err"] == "" {
+			t.Fatalf("%s: blocked=%q block_err=%q", mode, ex["blocked"], ex["block_err"])
+		}
+		if got := outcomeBlocked(ex); !strings.HasPrefix(got, "No (block failed: nft ") || strings.Contains(got, "\n") {
+			t.Errorf("%s: outcome %q", mode, got)
 		}
 	}
 }

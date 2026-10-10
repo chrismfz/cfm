@@ -100,6 +100,46 @@ add set inet cfm block_v6 { type ipv6_addr; flags timeout; }`)
 		t.Fatalf("permanent ban: present=%v left=%s, want permanent", ok, d)
 	}
 
+	// The read-failure fallback: an exclusive create keeps an existing ban.
+	if exists, err := b.CreateBlock(net.ParseIP(perm), time.Hour); err != nil || !exists {
+		t.Fatalf("CreateBlock over a permanent ban: exists=%v err=%v", exists, err)
+	}
+	if d, ok := left(perm); !ok || d != 0 {
+		t.Fatalf("CreateBlock touched a permanent ban: present=%v left=%s", ok, d)
+	}
+	const fresh = "192.0.2.13"
+	if exists, err := b.CreateBlock(net.ParseIP(fresh), time.Hour); err != nil || exists {
+		t.Fatalf("CreateBlock of a new address: exists=%v err=%v", exists, err)
+	}
+	if d, ok := left(fresh); !ok || d < 50*time.Minute || d > time.Hour {
+		t.Fatalf("CreateBlock: present=%v left=%s, want ~1h", ok, d)
+	}
+
+	// A manual permanent ban racing an automatic 1h one: the permanent one
+	// must stand (AddBlock holds the same lock as the batch).
+	const manual = "192.0.2.14"
+	for round := 0; round < 15; round++ {
+		nftRun("flush set inet cfm block_v4\nadd element inet cfm block_v4 { " + manual + " timeout 30m }")
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := b.AddBlock(net.ParseIP(manual), "", nil); err != nil {
+				t.Errorf("round %d AddBlock: %v", round, err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, err := firewall.ExtendBlock(b, net.ParseIP(manual), time.Hour); err != nil {
+				t.Errorf("round %d ExtendBlock: %v", round, err)
+			}
+		}()
+		wg.Wait()
+		if d, ok := left(manual); !ok || d != 0 {
+			t.Fatalf("round %d: permanent + 1h left present=%v left=%s, want permanent", round, ok, d)
+		}
+	}
+
 	// Two bans of one address at once, many rounds: the 7d one must stand.
 	const race = "192.0.2.12"
 	for round := 0; round < 15; round++ {

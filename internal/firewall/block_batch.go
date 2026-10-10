@@ -243,8 +243,9 @@ var ErrBlockRead = errors.New("set read failed")
 //
 // The batch has to read the set first (`nft -j list set` on the exec
 // backend, a command that can time out under load). When that read fails it
-// falls back to AddBlock: a ban that may cut a longer one short beats no ban
-// at all, which is what AddBlock-only callers always got.
+// still blocks: with one exclusive create where the backend has it
+// (BlockCreator, exec: an existing ban stays), else with AddBlock (nftlib: a
+// ban that may cut a longer one short beats no ban at all).
 func ExtendBlock(be Backend, ip net.IP, ttl time.Duration) (kept bool, err error) {
 	res, err := ExtendBlockResult(be, ip, ttl)
 	if err != nil {
@@ -256,17 +257,36 @@ func ExtendBlock(be Backend, ip net.IP, ttl time.Duration) (kept bool, err error
 	return res.Kept > 0, nil
 }
 
-// ExtendBlockResult is ExtendBlock's batch with the AddBlock fallback, for a
-// caller that tells added, extended and kept apart (the kernel autoblock). A
-// fallback block counts as Added.
+// BlockCreator is a backend that can block an address only if nothing blocks
+// it yet (exec: an exclusive `create element`). ExtendBlock's read-failure
+// fallback prefers it to AddBlock, which replaces a longer ban.
+type BlockCreator interface {
+	CreateBlock(ip net.IP, ttl time.Duration) (exists bool, err error)
+}
+
+// ExtendBlockResult is ExtendBlock's batch with the read-failure fallback, for
+// a caller that tells added, extended and kept apart (the kernel autoblock).
 func ExtendBlockResult(be Backend, ip net.IP, ttl time.Duration) (BlockBatchResult, error) {
 	res, err := be.AddBlockBatch([]BlockEntry{{IP: ip, TTL: ttl}})
 	if !errors.Is(err, ErrBlockRead) {
 		return res, err
 	}
-	logging.Logf("[firewall] block %s for %s: %v; blocking with AddBlock (a longer ban may be cut short)", ip, ttl, err)
+	readErr := err
+	if bc, ok := be.(BlockCreator); ok {
+		// Never shortens: an existing ban, whatever its length, stays.
+		exists, err := bc.CreateBlock(ip, ttl)
+		if err != nil {
+			return BlockBatchResult{}, fmt.Errorf("%v; create: %w", readErr, err)
+		}
+		logging.Logf("[firewall] block %s for %s: %v; created it without the read (already blocked: %v)", ip, ttl, readErr, exists)
+		if exists {
+			return BlockBatchResult{Kept: 1}, nil
+		}
+		return BlockBatchResult{Added: 1}, nil
+	}
+	logging.Logf("[firewall] block %s for %s: %v; blocking with AddBlock (a longer ban may be cut short)", ip, ttl, readErr)
 	if err := be.AddBlock(ip, "", &ttl); err != nil {
-		return BlockBatchResult{}, err
+		return BlockBatchResult{}, fmt.Errorf("%v; AddBlock: %w", readErr, err)
 	}
 	return BlockBatchResult{Added: 1}, nil
 }

@@ -21,8 +21,9 @@ const blockBatchStmtElems = 1000
 // blockBatchAttempts bounds the read-plan-write rounds of one AddBlockBatch.
 const blockBatchAttempts = 3
 
-// hostBatchMu serialises this process's read-plan-write rounds on the host
-// sets (nftlib holds its b.mu the same way). Without it two automatic bans of
+// hostBatchMu serialises this process's writes to the host block sets
+// (the batches' read-plan-write rounds, AddBlock, RemoveBlock, CreateBlock;
+// nftlib holds its b.mu the same way). The allow batch shares it. Without it two automatic bans of
 // one address at once — waf_security asking 7d and the webdetector 1h, each
 // detector in its own goroutine — both read the old element, both plan a
 // replace, and whichever commits last wins: a 1h ban over the 7d one. A writer

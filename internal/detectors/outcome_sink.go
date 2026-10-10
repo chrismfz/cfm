@@ -98,11 +98,13 @@ func outcomeBlocked(extra map[string]string) string {
 				blocked = "Yes"
 			}
 
-		case "":
+		case "", "no":
 			// The firewall refused the block (autoblock_sink sets block_err).
-			if e := extra["block_err"]; e != "" {
-				if len(e) > 160 {
-					e = e[:160] + "…"
+			if e := strings.Join(strings.Fields(extra["block_err"]), " "); e != "" {
+				// One line (nft errors carry the script and a caret line),
+				// cut on a rune boundary.
+				if r := []rune(e); len(r) > 160 {
+					e = string(r[:160]) + "…"
 				}
 				blocked = "No (block failed: " + e + ")"
 			}
