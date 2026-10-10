@@ -60,13 +60,18 @@ type Entry struct {
 
 // Store is the set of edge-enforced bans.
 type Store struct {
-	mu     sync.RWMutex
-	m      map[string]Entry
-	path   string
-	ready  atomic.Bool
-	now    func() time.Time
-	allow  atomic.Pointer[allowSet] // nft's allow sets at the last reconcile
-	saveMu sync.Mutex               // one save at a time: snapshot, write, rename
+	mu    sync.RWMutex
+	m     map[string]Entry
+	path  string
+	ready atomic.Bool
+	// cleared: Clear ran (nft unreadable, the table gone after `cfm
+	// disable`) and no reconcile has worked since. Unlike a store that
+	// never reconciled after a start, it knows its bans are not to be
+	// enforced: the edge's copy is emptied, not kept.
+	cleared atomic.Bool
+	now     func() time.Time
+	allow   atomic.Pointer[allowSet] // nft's allow sets at the last reconcile
+	saveMu  sync.Mutex               // one save at a time: snapshot, write, rename
 }
 
 var (
@@ -329,6 +334,9 @@ func (s *Store) Len() int {
 	return len(s.m)
 }
 
+// Cleared reports whether Clear ran with no reconcile working since.
+func (s *Store) Cleared() bool { return s != nil && s.cleared.Load() }
+
 // Ready reports whether a Reconcile has run.
 func (s *Store) Ready() bool { return s != nil && s.ready.Load() }
 
@@ -389,6 +397,7 @@ func (s *Store) Reconcile(snap Snapshot) {
 	}
 	s.mu.Unlock()
 	s.ready.Store(true)
+	s.cleared.Store(false)
 	version.Add(1) // the allow sets and readiness, even with no entry changed
 	if changed {
 		s.save()
@@ -408,6 +417,7 @@ func (s *Store) Clear() {
 	// Not ready again, and no allow snapshot: a ban added while nft cannot be
 	// read is never answered unchecked.
 	s.ready.Store(false)
+	s.cleared.Store(true)
 	version.Add(1)
 	s.allow.Store(nil)
 	if had {

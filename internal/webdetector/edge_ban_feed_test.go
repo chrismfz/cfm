@@ -171,3 +171,17 @@ func TestEdgeBanStatusCounters(t *testing.T) {
 		t.Error("the bridge status carries the edge-ban status")
 	}
 }
+
+// A store cleared after failed nft reads (the table gone after `cfm
+// disable`) knows its bans are not enforced: the edge's copy is emptied
+// through the usual changes, not kept as for a daemon start.
+func TestEdgeBanClearedEmptiesTheEdge(t *testing.T) {
+	s := installEdgeBans(t, "34.153.214.160")
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	_, first, _ := pollEdgeBan(t, b, url.Values{}, "tok")
+	s.Clear()
+	_, r, raw := pollEdgeBan(t, b, at(first), "tok")
+	if r.Ready != nil || len(r.Del) != 1 || r.Del[0] != "34.153.214.160" {
+		t.Fatalf("cleared store: %s, want the ban deleted", raw)
+	}
+}

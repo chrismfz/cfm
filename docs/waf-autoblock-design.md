@@ -500,8 +500,12 @@ to: a whole list is written into the other slot and `eb:cur` flips to it in
 one set, so a lookup never sees half a list and a leftover never matches;
 changes are written into the live slot. Each entry lives as long as its ban
 (a permanent one has no TTL), as in nft, so a daemon outage does not lift
-bans at the edge. A write the dict refuses leaves the position where it was
-and the same changes come again. An IPv4-mapped peer is looked up as IPv4.
+bans at the edge. A full dict evicts its least recently used keys (the old
+slot's first); an evicted live entry returns with the next whole list, and a
+lost `eb:cur` makes the next poll ask for one. A store CLEARED after three
+failed nft reads (the table gone after `cfm disable`) publishes an empty
+list, so the edge drops its copy; only a store not yet reconciled since a
+start replies `{"ready":false}`. An IPv4-mapped peer is looked up as IPv4.
 
 **Mode.** `[webdetector] EDGE_BAN_MODE`, sent with every reply: `log` (the
 default, the burn-in) counts and logs what it would block, `enforce` answers
@@ -511,7 +515,10 @@ the edge error log. The edge's counts ride on its next poll; `GET
 /api/v1/webdet/edge-ban` (admin; `edge-ban.json` in a `cfm debug` bundle) and
 the bridge status show the mode, the journal position, the list size, the
 last poll and full list, the would-block / blocked totals and the last resync
-time. The decision path (B1) answers bans regardless of the mode.
+time. The decision path (B1) answers bans regardless of the mode, so during
+the burn-in `would_block` also counts requests Step 3 blocks anyway: it is an
+upper bound of what enforce adds (the clearance cookie, cached allows, 0d,
+0a1 and static files are the difference).
 
 `cfm.lua` checks it in **Step 0e**, right after the static IP/CIDR bypass
 (`cfm_bypass_ip`, the crawler/CDN list) and before every other exemption:

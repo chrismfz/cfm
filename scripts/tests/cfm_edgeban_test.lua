@@ -19,6 +19,7 @@ local function new_dict()
   end
   function d:set(k, v, ttl)
     if self.full and k:sub(1, 3) == "eb|" then return false, "no memory" end
+    if self.failcur and k == "eb:cur" then return false, "no memory" end
     store[k] = { v = v, exp = (ttl and ttl > 0) and (clock + ttl) or nil }
     return true
   end
@@ -156,13 +157,28 @@ check(not eb.apply(d, delta("e1", 21, { ["192.0.2.9"] = 0 }), clock), "changes t
 check(d:get("eb:pos") == "e1:10", "do not advance the position (they come again)")
 d.full = false
 
+-- A whole list whose eb:cur write fails does not move the position (changes
+-- would go onto the old list from the new position).
+reset()
+eb.apply(d, full("e1", 10, { ["203.0.113.5"] = 0 }), clock)
+d.failcur = true
+check(not eb.apply(d, full("e1", 20, { ["192.0.2.9"] = 0 }), clock) and d:get("eb:pos") == "e1:10",
+  "a whole list that cannot become live keeps the old position")
+d.failcur = false
+-- A null / missing expiry is skipped, never made permanent.
+eb.apply(d, delta("e1", 11, { ["192.0.2.60"] = "x" }), clock)
+check(as("192.0.2.60") == nil, "a non-numeric expiry is skipped")
+-- The mode of a "not ready" reply still applies.
+eb.apply(d, { ready = false, mode = "log" }, clock)
+check(as("203.0.113.5") == "log", "a not-ready reply carries the mode")
+
 -- ── Replies that change nothing ─────────────────────────────────────────────
 for _, r in ipairs({ { ready = false }, { epoch = "", seq = 1, full = true, ips = {} }, { seq = 1, full = true, ips = {} },
                      { epoch = "e1", full = true, ips = {} }, { epoch = "e1", seq = 30, full = true, ips = "x" } }) do
   check(eb.apply(d, r, clock) == false, "a reply without a usable list changes nothing")
 end
 check(eb.apply(d, nil, clock) == false, "nil reply changes nothing")
-check(as("203.0.113.5") == "block", "the list survives bad replies")
+check(as("203.0.113.5") ~= nil, "the list survives bad replies")
 
 -- ── tick / poll: one poller, a position, counters, a full every FULL_SEC ────
 reset()
@@ -205,6 +221,14 @@ check(#calls == n and d:get("eb:lock") == nil, "a premature timer does no RPC an
 clock = clock + eb.FULL_SEC
 eb.tick(dec, decode)
 check(timers[5].args[3] == true, "every FULL_SEC a full list again (the consistency check)")
+-- eb:cur lost (evicted) while eb:pos survives: the next poll asks for the
+-- whole list instead of changes that have nothing to go onto.
+d:delete("eb:cur")
+d:delete("eb:lock")
+clock = clock + eb.POLL_SEC
+eb.tick(dec, decode)
+timers[#timers].cb(false, unpack(timers[#timers].args))
+check(calls[#calls]:find("&full=1", 1, true), "no live list: ask for the whole list: " .. calls[#calls])
 -- No dict at all.
 ngx.shared = {}
 eb.tick(dec, decode)

@@ -30,8 +30,13 @@
 -- address left over from an older list carries an older id and never
 -- matches. Changes are written into the live slot directly. Each entry lives
 -- as long as its ban (a permanent one has no TTL), as in nft: with the daemon
--- down the edge keeps enforcing what nft enforces. A write that fails (dict
--- full) leaves the position where it was, so the same changes come again.
+-- down the edge keeps enforcing what nft enforces. A full dict evicts its
+-- least recently used keys (the old slot's go first: every whole list
+-- rewrites the live ones); an evicted live entry comes back with the next
+-- whole list, and a lost eb:cur makes the next poll ask for one. A write
+-- that fails outright leaves the position where it was (the same changes
+-- come again). A daemon whose store was cleared (nft unreadable, the table
+-- gone after `cfm disable`) sends an empty list: the copy is emptied.
 --
 -- A lookup is two dict gets, for a proxied request only.
 --
@@ -161,7 +166,8 @@ end
 
 -- ttl_for: the dict TTL for an expiry (0 = none, permanent); nil if past.
 local function ttl_for(exp, now)
-  exp = tonumber(exp) or 0
+  exp = tonumber(exp)
+  if not exp then return nil end -- missing / null: skip, never permanent
   if exp == 0 then return 0 end
   local ttl = exp - now
   if ttl <= 0 then return nil end
@@ -171,10 +177,12 @@ end
 -- apply writes one decoded reply into d. Returns true if it moved the
 -- position. Exposed for the tests.
 function M.apply(d, r, now)
-  if type(r) ~= "table" or r.ready == false then return false end
+  if type(r) ~= "table" then return false end
+  -- The mode applies whatever else the reply holds ("not ready" included).
+  if r.mode == "enforce" or r.mode == "log" then d:set(MODE_KEY, r.mode) end
+  if r.ready == false then return false end
   local epoch, seq = r.epoch, tonumber(r.seq)
   if type(epoch) ~= "string" or epoch == "" or not seq then return false end
-  if r.mode == "enforce" or r.mode == "log" then d:set(MODE_KEY, r.mode) end
   local pos = epoch .. ":" .. string.format("%d", seq)
 
   if r.full then
@@ -190,7 +198,9 @@ function M.apply(d, r, now)
         end
       end
     end
-    d:set(CUR_KEY, slot .. "|" .. pos)
+    -- The position only with the list it belongs to: changes are applied
+    -- onto the live list from the position.
+    if not d:set(CUR_KEY, slot .. "|" .. pos) then return false end
     d:set(POS_KEY, pos)
     return true
   end
@@ -228,7 +238,9 @@ local function poll(d, dec, decode, full)
   local have = d:get(POS_KEY)
   local epoch, seq
   if type(have) == "string" then epoch, seq = have:match("^(.+):(%d+)$") end
-  if full or not epoch then
+  -- No live list (eb:cur evicted, or never written): changes have nothing to
+  -- go onto, so ask for the whole list.
+  if full or not epoch or not current(d) then
     path = path .. "&full=1"
   else
     path = path .. "&epoch=" .. ngx.escape_uri(epoch) .. "&seq=" .. seq
@@ -236,8 +248,12 @@ local function poll(d, dec, decode, full)
   local body = dec:rpc("edgeban", "GET", path)
   if not body then return end
   -- Reported: take them off the counters (what arrived meanwhile stays).
-  if would > 0 then d:incr(WOULD_KEY, -would) end
-  if blocked > 0 then d:incr(BLOCK_KEY, -blocked) end
+  for k, n in pairs({ [WOULD_KEY] = would, [BLOCK_KEY] = blocked }) do
+    if n > 0 then
+      local v = d:incr(k, -n)
+      if v and v < 0 then d:set(k, 0) end -- the key was evicted meanwhile
+    end
+  end
   M.apply(d, decode(body), ngx.now())
 end
 

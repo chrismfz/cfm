@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,6 +97,17 @@ func newEdgeBanEpoch() string {
 // its expiry in unix seconds (0 = permanent); capped at edgeBanFeedMax.
 func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) (map[string]int64, time.Time) {
 	items := edgeban.List()
+	if len(items) > edgeBanFeedMax {
+		// Over the cap, keep the longest bans: permanent first, then the
+		// latest expiry (address order would drop a whole storm of new bans).
+		sort.SliceStable(items, func(a, c int) bool {
+			ea, ec := items[a].Expires, items[c].Expires
+			if ea.IsZero() != ec.IsZero() {
+				return ea.IsZero()
+			}
+			return ea.After(ec)
+		})
+	}
 	cur := make(map[string]int64, len(items))
 	recheck := now.Add(edgeBanSyncMax)
 	truncated := 0
@@ -118,7 +130,7 @@ func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) (map[stri
 	}
 	if truncated > 0 && now.Sub(j.logged) > 10*time.Minute {
 		j.logged = now
-		logging.Logf("[edgeban] %d bans, the edge copy takes %d: %d left out (the last in address-string order)", len(cur)+truncated, edgeBanFeedMax, truncated)
+		logging.Logf("[edgeban] %d bans, the edge copy takes %d: %d left out (the soonest to expire)", len(cur)+truncated, edgeBanFeedMax, truncated)
 	}
 	return cur, recheck
 }
@@ -216,8 +228,9 @@ func (b *NginxBridge) edgeBanReply(epoch string, seq uint64, haveSeq, wantFull b
 //
 //	{"full":true,"ips":{"203.0.113.5":1760000000,"198.51.100.7":0}}
 //	{"set":{ip:expiry,...},"del":[ip,...]}       the changes since seq
-//	{"ready":false}   the store has not reconciled yet (a daemon start, nft
-//	                  unreadable): the edge keeps the copy it has
+//	{"ready":false}   the store has not reconciled since the daemon started:
+//	                  the edge keeps the copy it has (a store Cleared after
+//	                  failed nft reads publishes an empty list instead)
 //
 // Expiry is unix seconds, 0 permanent. EDGE_BAN = 0 empties the list (the
 // edge drops every entry through the usual changes).
@@ -232,7 +245,11 @@ func (b *NginxBridge) handleEdgeBan(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	b.edgeBanCount(q.Get("would"), q.Get("blocked"))
-	if s := edgeban.Default(); edgeban.Enabled() && (s == nil || !s.Ready()) {
+	// Not ready since a start: nothing known either way, the edge keeps its
+	// copy. Cleared (nft unreadable three times, the table gone after `cfm
+	// disable`): the bans are not enforced any more, so the list published
+	// is empty (List answers nothing) and the edge drops its copy.
+	if s := edgeban.Default(); edgeban.Enabled() && (s == nil || (!s.Ready() && !s.Cleared())) {
 		writeEdgeBanJSON(w, map[string]any{"ready": false, "mode": edgeban.EdgeMode()})
 		return
 	}
