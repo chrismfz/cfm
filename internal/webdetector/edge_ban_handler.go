@@ -15,6 +15,8 @@ import (
 //
 //	POST /api/v1/webdet/edge-ban?ip=1.2.3.4[&ttl=6h]   (no ttl: permanent)
 //	POST /api/v1/webdet/edge-ban?ip=1.2.3.4&unban=1    (`cfm allow`: lift it)
+//	GET  /api/v1/webdet/edge-ban                       (status: EdgeBanStatus —
+//	     the mode, what the edge was sent, what it would block / blocked)
 //
 // Admin-only. The store keeps the entry only while nft blocks the address
 // (edgeban.Store.Reconcile), so a ban recorded here that nft does not hold is
@@ -23,8 +25,12 @@ func (e *Engine) handleEdgeBan(w http.ResponseWriter, r *http.Request) {
 	if !RequireAdmin(w, r) {
 		return
 	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, e.nginxBridge.EdgeBanStatus())
+		return
+	}
 	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
+		w.Header().Set("Allow", "GET, POST")
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}

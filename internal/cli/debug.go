@@ -290,6 +290,13 @@ func RunDebug(args []string) int {
 		} else {
 			manifest.set("waf-excludes.json", "skipped: "+err.Error())
 		}
+		// The edge's copy of the edge bans: mode, what it was sent, what it
+		// would block / blocked (internal/webdetector/edge_ban_feed.go).
+		if b, err := fetchAPI(opts.apiAddr, "/api/v1/webdet/edge-ban"); err == nil {
+			writeFile(bundlePath, "edge-ban.json", b, manifest, "edge-ban.json")
+		} else {
+			manifest.set("edge-ban.json", "skipped: "+err.Error())
+		}
 	}()
 
 	// 10) Sanitised config dump.

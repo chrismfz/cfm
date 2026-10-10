@@ -1268,22 +1268,20 @@ end
 -- wire it is Cloudflare's address. The daemon's web-related and manual bans
 -- (internal/edgeban) are therefore enforced here too, for proxied requests
 -- only (a direct client is nft's), from a copy cfm_edgeban.lua keeps current
--- every ~2 s. It runs before every bypass below but the static IP/CIDR one
+-- every ~5 s. It runs before every bypass below but the static IP/CIDR one
 -- above: the panel proxy hostnames (0d), /.well-known/ (0a1), a clearance
 -- cookie (2b) and a cached clean allow (Step 3, up to 90 s) must not let a
--- banned client through, as nft would not for a direct one. pcall'd and fail
--- open: a missing module or list answers "not banned".
+-- banned client through, as nft would not for a direct one. In
+-- EDGE_BAN_MODE=log (the burn-in default) it only counts and logs. Never
+-- raises (step pcalls itself) and fails open: a missing module or list
+-- answers "not banned".
 do
   local ok, eb = pcall(require, "cfm_edgeban")
-  if ok and type(eb) == "table" and eb.check then
-    pcall(eb.tick, decision, cjson.decode)
-    if eb.check(ip) then
-      ngx.header["X-CFM-Action"] = "block"
-      ngx.header["X-CFM-Edge-Ban"] = "1"
-      ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
-      log_route(ngx.WARN, "block edge_ban ip=" .. tostring(ip) .. " host=" .. tostring(host))
-      return ngx.exit(CFG.block_code)
-    end
+  if ok and type(eb) == "table" and eb.step and eb.step(ip, decision, cjson.decode) == "block" then
+    ngx.header["X-CFM-Action"] = "block"
+    ngx.header["X-CFM-Edge-Ban"] = "1"
+    ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
+    return ngx.exit(CFG.block_code)
   end
 end
 

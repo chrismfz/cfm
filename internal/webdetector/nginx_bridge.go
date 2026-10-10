@@ -17,8 +17,8 @@
 //   POST /nginx/vhost       { "host":"example.com", "action":"challenge", "ttl_sec":600 }
 //   POST /nginx/vhost/clear { "host":"example.com" }
 //   GET  /nginx/status      → NginxBridgeStatus (for cfm status / debug)
-//   GET  /nginx/edgeban?gen=G → {"gen":G,"ips":{ip:expires_unix}} or {"gen":G,"unchanged":true}
-//                              (the edge's copy of the edge bans, cfm_edgeban.lua)
+//   GET  /nginx/edgeban?epoch=E&seq=N → the edge-ban changes since N, or the
+//                              whole list (cfm_edgeban.lua; edge_ban_feed.go)
 //
 // Lua polls these from the shared-dict server (cfm_decisions.lua) which
 // subscribes to the same socket.
@@ -252,8 +252,8 @@ type NginxBridge struct {
 	hookDropped atomic.Int64
 	hookStopped atomic.Bool
 
-	// edgeBanCache is the last /nginx/edgeban feed built (edge_ban_feed.go).
-	edgeBanCache edgeBanFeedCache
+	// edgeBanJournal backs /nginx/edgeban (edge_ban_feed.go).
+	edgeBanJournal edgeBanJournal
 }
 
 func (b *NginxBridge) SetEnricher(e *enrich.Enricher) { b.enr = e }
@@ -369,11 +369,12 @@ type BridgeTimingStats struct {
 
 // NginxBridgeStatus is what GET /nginx/status returns.
 type NginxBridgeStatus struct {
-	Enabled      bool        `json:"enabled"`
-	SockPath     string      `json:"sock_path"`
-	ActiveIPs    []string    `json:"active_ips"`
-	ActiveVhosts []string    `json:"active_vhosts"`
-	Stats        BridgeStats `json:"stats"`
+	Enabled      bool          `json:"enabled"`
+	SockPath     string        `json:"sock_path"`
+	ActiveIPs    []string      `json:"active_ips"`
+	ActiveVhosts []string      `json:"active_vhosts"`
+	Stats        BridgeStats   `json:"stats"`
+	EdgeBan      EdgeBanStatus `json:"edge_ban"`
 }
 
 // Snapshot payload for Lua local enforcement.
@@ -1462,6 +1463,7 @@ func (b *NginxBridge) Status() NginxBridgeStatus {
 		ActiveIPs:    ips,
 		ActiveVhosts: vhs,
 		Stats:        st,
+		EdgeBan:      b.EdgeBanStatus(),
 	}
 }
 

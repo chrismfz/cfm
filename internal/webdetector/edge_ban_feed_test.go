@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"testing"
 	"time"
 
@@ -12,111 +14,160 @@ import (
 )
 
 type edgeBanReply struct {
-	Gen       string           `json:"gen"`
-	Unchanged bool             `json:"unchanged"`
-	IPs       map[string]int64 `json:"ips"`
+	Ready *bool            `json:"ready"`
+	Epoch string           `json:"epoch"`
+	Seq   uint64           `json:"seq"`
+	Mode  string           `json:"mode"`
+	Full  bool             `json:"full"`
+	IPs   map[string]int64 `json:"ips"`
+	Set   map[string]int64 `json:"set"`
+	Del   []string         `json:"del"`
 }
 
-func fetchEdgeBan(t *testing.T, b *NginxBridge, gen, token string) (int, edgeBanReply) {
+func pollEdgeBan(t *testing.T, b *NginxBridge, q url.Values, token string) (int, edgeBanReply, string) {
 	t.Helper()
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/nginx/edgeban?gen="+gen, nil)
+	req := httptest.NewRequest(http.MethodGet, "/nginx/edgeban?"+q.Encode(), nil)
 	req.Header.Set("X-CFM-Token", token)
 	b.handleEdgeBan(rr, req)
 	var r edgeBanReply
 	_ = json.Unmarshal(rr.Body.Bytes(), &r)
-	return rr.Code, r
+	return rr.Code, r, rr.Body.String()
 }
 
-// The feed the edge pulls: every banned address (less IGNORE_IPS) with its
-// expiry, under a generation that is the content's hash: unchanged content
-// answers "unchanged", a change gives a new generation, and the same content
-// gives the same generation again (a daemon restart keeps the edge's copy).
-func TestEdgeBanFeed(t *testing.T) {
+func at(r edgeBanReply) url.Values {
+	return url.Values{"epoch": {r.Epoch}, "seq": {strconv.FormatUint(r.Seq, 10)}}
+}
+
+// The edge pulls the whole list first, then only what changed since its
+// position: a ban, an unban, an expiry. An edge out of reach (another epoch,
+// a position the journal no longer covers, or one ahead of it) gets the
+// whole list again.
+func TestEdgeBanJournal(t *testing.T) {
 	s := installEdgeBans(t, "34.153.214.160", "203.0.113.5")
-	ttl := time.Hour
-	s.Add(net.ParseIP("198.51.100.7"), &ttl, "manual", true) // added after the read: still answered
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
 	b.bypassFunc = func(ip string) bool { return ip == "203.0.113.5" } // IGNORE_IPS
 
-	if code, _ := fetchEdgeBan(t, b, "", "wrong"); code != http.StatusForbidden {
+	if code, _, _ := pollEdgeBan(t, b, url.Values{}, "wrong"); code != http.StatusForbidden {
 		t.Fatalf("bad token: http %d, want 403", code)
 	}
-	code, r := fetchEdgeBan(t, b, "", "tok")
-	if code != 200 || r.Gen == "" || r.Unchanged {
-		t.Fatalf("first fetch: http %d %+v", code, r)
+	_, first, raw := pollEdgeBan(t, b, url.Values{}, "tok")
+	if !first.Full || first.Epoch == "" || first.Mode != "log" {
+		t.Fatalf("first poll: %s, want the whole list in log mode", raw)
 	}
-	if exp, ok := r.IPs["34.153.214.160"]; !ok || exp != 0 {
-		t.Errorf("permanent ban: %v %v, want expiry 0", exp, ok)
+	if exp, ok := first.IPs["34.153.214.160"]; !ok || exp != 0 {
+		t.Errorf("permanent ban: %v %v", exp, ok)
 	}
-	if exp := r.IPs["198.51.100.7"]; exp < time.Now().Add(59*time.Minute).Unix() {
-		t.Errorf("timed ban expiry %d, want ~now+1h", exp)
-	}
-	if _, ok := r.IPs["203.0.113.5"]; ok {
-		t.Error("an IGNORE_IPS address is in the feed")
+	if _, ok := first.IPs["203.0.113.5"]; ok {
+		t.Error("an IGNORE_IPS address is in the list")
 	}
 
-	if _, again := fetchEdgeBan(t, b, r.Gen, "tok"); !again.Unchanged || again.Gen != r.Gen || again.IPs != nil {
-		t.Fatalf("same content with its generation: %+v, want unchanged", again)
+	// Nothing changed: an empty change set, same position.
+	_, idle, raw := pollEdgeBan(t, b, at(first), "tok")
+	if idle.Full || len(idle.Set) != 0 || len(idle.Del) != 0 || idle.Seq != first.Seq {
+		t.Fatalf("idle poll: %s, want no changes", raw)
+	}
+	if idle.Del == nil {
+		t.Error(`del must be [] on the wire, never null`)
 	}
 
+	ttl := time.Hour
+	s.Add(net.ParseIP("198.51.100.7"), &ttl, "manual", true)
 	s.Remove("34.153.214.160")
-	_, after := fetchEdgeBan(t, b, r.Gen, "tok")
-	if after.Unchanged || after.Gen == r.Gen {
-		t.Fatalf("after an unban: %+v, want a new generation", after)
+	_, ch, raw := pollEdgeBan(t, b, at(idle), "tok")
+	if ch.Full || ch.Set["198.51.100.7"] < time.Now().Add(59*time.Minute).Unix() || len(ch.Del) != 1 || ch.Del[0] != "34.153.214.160" {
+		t.Fatalf("changes: %s, want +198.51.100.7 and -34.153.214.160", raw)
 	}
-	if _, ok := after.IPs["34.153.214.160"]; ok {
-		t.Error("the unbanned address is still in the feed")
-	}
-	s.Add(net.ParseIP("34.153.214.160"), nil, "waf_security", false)
-	if _, back := fetchEdgeBan(t, b, "", "tok"); back.Gen != r.Gen {
-		t.Errorf("the same content again: gen %s, want %s", back.Gen, r.Gen)
+	// The same position asked again gets the same changes (the edge could
+	// not write them).
+	if _, again, _ := pollEdgeBan(t, b, at(idle), "tok"); len(again.Set) != 1 || len(again.Del) != 1 {
+		t.Errorf("the same position again: %+v", again)
 	}
 
-	// The kill switch and a store not yet reconciled send an empty list.
-	edgeban.SetEnabled(false)
-	_, off := fetchEdgeBan(t, b, "", "tok")
-	edgeban.SetEnabled(true)
-	if len(off.IPs) != 0 || off.Gen == "" {
-		t.Errorf("EDGE_BAN=0: %+v, want an empty list", off)
+	// Out of reach: another epoch, a position ahead, a forced full.
+	for name, q := range map[string]url.Values{
+		"other epoch": {"epoch": {"nope"}, "seq": {"1"}},
+		"ahead":       {"epoch": {ch.Epoch}, "seq": {strconv.FormatUint(ch.Seq+5, 10)}},
+		"full=1":      {"epoch": {ch.Epoch}, "seq": {strconv.FormatUint(ch.Seq, 10)}, "full": {"1"}},
+		"bad seq":     {"epoch": {ch.Epoch}, "seq": {"x"}},
+	} {
+		if _, r, raw := pollEdgeBan(t, b, q, "tok"); !r.Full || r.IPs["198.51.100.7"] == 0 {
+			t.Errorf("%s: %s, want the whole list", name, raw)
+		}
 	}
-	// A store that has not reconciled (a daemon start) knows nothing either
-	// way: "not ready", no list, so the edge keeps its copy.
-	edgeban.SetDefault(edgeban.New(""))
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/nginx/edgeban", nil)
-	req.Header.Set("X-CFM-Token", "tok")
-	b.handleEdgeBan(rr, req)
-	var cold map[string]any
-	_ = json.Unmarshal(rr.Body.Bytes(), &cold)
-	if cold["ready"] != false || cold["ips"] != nil || cold["gen"] != nil {
-		t.Errorf("unreconciled store: %s, want {\"ready\":false}", rr.Body.String())
+
+	// A position the trimmed journal no longer covers gets the whole list.
+	j := &b.edgeBanJournal
+	j.mu.Lock()
+	j.log = j.log[len(j.log)-1:]
+	j.mu.Unlock()
+	if _, r, raw := pollEdgeBan(t, b, at(first), "tok"); !r.Full {
+		t.Errorf("behind the journal: %s, want the whole list", raw)
+	}
+
+	// The mode rides on every reply.
+	edgeban.SetEdgeMode("enforce")
+	defer edgeban.SetEdgeMode("log")
+	if _, r, _ := pollEdgeBan(t, b, at(ch), "tok"); r.Mode != "enforce" {
+		t.Errorf("mode %q, want enforce", r.Mode)
+	}
+
+	// EDGE_BAN = 0: the list empties through the usual changes.
+	edgeban.SetEnabled(false)
+	_, off, raw := pollEdgeBan(t, b, at(ch), "tok")
+	edgeban.SetEnabled(true)
+	if off.Full || len(off.Del) != 1 || off.Del[0] != "198.51.100.7" {
+		t.Errorf("EDGE_BAN=0: %s, want the remaining ban deleted", raw)
 	}
 }
 
-// The feed is built once per change: an unchanged store answers from the
-// cache, a write or an expiry inside it rebuilds it.
-func TestEdgeBanFeedCache(t *testing.T) {
+// A store that has not reconciled (a daemon start) knows nothing either
+// way: "not ready" and no list, so the edge keeps its copy.
+func TestEdgeBanNotReady(t *testing.T) {
+	edgeban.SetDefault(edgeban.New(""))
+	t.Cleanup(func() { edgeban.SetDefault(nil) })
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	_, r, raw := pollEdgeBan(t, b, url.Values{}, "tok")
+	if r.Ready == nil || *r.Ready || r.IPs != nil || r.Epoch != "" {
+		t.Fatalf("unreconciled store: %s, want {\"ready\":false}", raw)
+	}
+}
+
+// The journal is resynced only when the store's version moves, an entry in
+// it expires, or edgeBanSyncMax passes: an idle poll does no list scan.
+func TestEdgeBanSyncOnlyOnChange(t *testing.T) {
 	s := installEdgeBans(t, "34.153.214.160")
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
-	gen1, ips1 := b.edgeBanFeed()
-	if gen2, ips2 := b.edgeBanFeed(); gen2 != gen1 || len(ips2) != len(ips1) {
-		t.Fatal("unchanged store: a different feed")
-	}
-	calls := 0
-	b.bypassFunc = func(string) bool { calls++; return false }
-	b.edgeBanFeed()
-	if calls != 0 {
-		t.Fatal("unchanged store: the feed was rebuilt")
+	_, first, _ := pollEdgeBan(t, b, url.Values{}, "tok")
+	scans := 0
+	b.bypassFunc = func(string) bool { scans++; return false }
+	pollEdgeBan(t, b, at(first), "tok")
+	if scans != 0 {
+		t.Fatal("an idle poll scanned the list")
 	}
 	short := 1500 * time.Millisecond
 	s.Add(net.ParseIP("198.51.100.9"), &short, "manual", true)
-	gen3, ips3 := b.edgeBanFeed()
-	if gen3 == gen1 || ips3["198.51.100.9"] == 0 {
-		t.Fatalf("after a ban: gen %s ips %v, want the new ban", gen3, ips3)
+	_, ch, _ := pollEdgeBan(t, b, at(first), "tok")
+	if ch.Set["198.51.100.9"] == 0 {
+		t.Fatalf("after a ban: %+v", ch)
 	}
 	time.Sleep(short + 100*time.Millisecond)
-	if _, ips4 := b.edgeBanFeed(); len(ips4) != 1 {
-		t.Fatalf("after the timed ban expired: %v, want it gone (rebuilt at its expiry)", ips4)
+	if _, exp, raw := pollEdgeBan(t, b, at(ch), "tok"); len(exp.Del) != 1 {
+		t.Fatalf("after the timed ban expired: %s, want it deleted", raw)
+	}
+}
+
+// The edge's counters ride on its polls; the status shows them.
+func TestEdgeBanStatusCounters(t *testing.T) {
+	installEdgeBans(t, "34.153.214.160")
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	pollEdgeBan(t, b, url.Values{"would": {"7"}, "blocked": {"2"}}, "tok")
+	pollEdgeBan(t, b, url.Values{"would": {"3"}, "blocked": {"-9"}}, "tok")
+	st := b.EdgeBanStatus()
+	if st.WouldBlock != 10 || st.Blocked != 2 || st.Published != 1 || !st.Ready || st.Mode != "log" || st.LastPoll.IsZero() {
+		t.Fatalf("status %+v", st)
+	}
+	if b.Status().EdgeBan.Published != 1 {
+		t.Error("the bridge status carries the edge-ban status")
 	}
 }

@@ -73,10 +73,11 @@ var (
 	// version changes whenever what List could return may have changed: a
 	// write to a store, a reconcile, the kill switch, the proxy ranges, the
 	// Default store. The edge feed caches on it (internal/webdetector).
-	version atomic.Uint64
-	enabled atomic.Bool
-	def     atomic.Pointer[Store]
-	proxies atomic.Pointer[[]*net.IPNet] // the trusted proxies' own ranges
+	version  atomic.Uint64
+	enabled  atomic.Bool
+	edgeMode atomic.Value // string, see EdgeMode
+	def      atomic.Pointer[Store]
+	proxies  atomic.Pointer[[]*net.IPNet] // the trusted proxies' own ranges
 )
 
 // SetTrustedProxies sets the ranges the edge trusts to name the client
@@ -141,6 +142,26 @@ func SetEnabled(on bool) {
 	if enabled.Swap(on) != on {
 		version.Add(1)
 	}
+}
+
+// EdgeMode is how the edge treats a banned proxied client at cfm.lua's top
+// and on the static location ([webdetector] EDGE_BAN_MODE): "log" (count and
+// log what it would block; the burn-in default) or "enforce" (403). The
+// bridge decision path answers bans either way (EDGE_BAN alone gates it).
+func EdgeMode() string {
+	if m, _ := edgeMode.Load().(string); m == "enforce" {
+		return m
+	}
+	return "log"
+}
+
+// SetEdgeMode sets EdgeMode; anything but "enforce" is "log".
+func SetEdgeMode(m string) {
+	if strings.EqualFold(strings.TrimSpace(m), "enforce") {
+		edgeMode.Store("enforce")
+		return
+	}
+	edgeMode.Store("log")
 }
 
 // Enabled reports the kill switch.
