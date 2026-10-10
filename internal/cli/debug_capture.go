@@ -301,44 +301,66 @@ func fetchPprof(baseURL, endpoint string, dur time.Duration) ([]byte, error) {
 // `go tool pprof -top -cum`. If `go` isn't on PATH, returns a sentinel
 // error so the orchestrator can keep the .pb.gz blob and skip the text.
 //
-// Profile is fed via stdin so we don't need to write a temp file just to
-// pipe it back out.
+// The profile goes to pprof as a temp file in workDir: pprof takes no
+// profile on stdin (`-` is read as a file name, "stat -: no such file or
+// directory"), so the top was missing from every bundle until 2026-10-10.
 //
 // `workDir` must be a writable + EXECUTABLE directory: `go tool pprof`
-// extracts a helper binary into $TMPDIR / GOTMPDIR / GOCACHE and
+// builds a helper binary into $TMPDIR / GOTMPDIR / GOCACHE and
 // fork+exec's it. On hosts where /tmp is mounted noexec (a common
 // hardening default — observed on virgo 2026-05-09), the exec fails
 // with "fork/exec ...: permission denied" and the top rendering is
 // lost. The orchestrator passes the bundle directory itself, which
 // lives under defaultDebugBundleRoot (/var/lib/cfm/debug) — exec by
-// project convention. Empty workDir falls back to the inherited env.
+// project convention. GOCACHE is its parent's `.gocache`, shared by every
+// bundle: current Go ships no prebuilt pprof (pkg/tool), so the first use
+// builds it from source (~160 MB of cache), and a
+// cache inside the bundle cost that per bundle (pruneBundles leaves
+// the non-timestamp name alone). Empty workDir falls back to the
+// inherited env and the system temp dir.
 func runPProfTop(profile []byte, workDir string) ([]byte, error) {
 	if _, err := exec.LookPath("go"); err != nil {
 		return nil, errors.New("go binary not on PATH; raw profile retained")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "tool", "pprof", "-top", "-cum", "-")
-	cmd.Stdin = bytes.NewReader(profile)
+	f, err := os.CreateTemp(workDir, ".pprof-*.pb.gz")
+	if err != nil {
+		return nil, fmt.Errorf("pprof top: %w", err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(profile); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("pprof top: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("pprof top: %w", err)
+	}
+	cmd := exec.CommandContext(ctx, "go", "tool", "pprof", "-top", "-cum", f.Name())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if workDir != "" {
-		// Override TMPDIR/GOTMPDIR/GOCACHE to point at workDir so the
-		// pprof helper binary lands on an exec-able filesystem. We
-		// inherit the rest of the env so Go's toolchain discovery
-		// (GOROOT, etc.) keeps working.
-		env := append(os.Environ(),
-			"TMPDIR="+workDir,
-			"GOTMPDIR="+workDir,
-			"GOCACHE="+filepath.Join(workDir, ".gocache"),
-		)
-		cmd.Env = env
-	}
+	cmd.Env = pprofEnv(workDir)
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("pprof top: %w (stderr=%q)", err, stderr.String())
 	}
 	return stdout.Bytes(), nil
+}
+
+// pprofEnv is the environment `go tool pprof` runs with: nil (inherited)
+// without a workDir, else the inherited env with TMPDIR/GOTMPDIR pointed at
+// workDir and GOCACHE at its parent's `.gocache`, so the pprof helper binary
+// lands on an exec-able filesystem and is built once for every bundle. The
+// rest is inherited so Go's toolchain discovery (GOROOT, etc.) keeps working.
+func pprofEnv(workDir string) []string {
+	if workDir == "" {
+		return nil
+	}
+	return append(os.Environ(),
+		"TMPDIR="+workDir,
+		"GOTMPDIR="+workDir,
+		"GOCACHE="+filepath.Join(filepath.Dir(workDir), ".gocache"),
+	)
 }
 
 // tailFile returns the last `n` lines of a file. Reads from the end in

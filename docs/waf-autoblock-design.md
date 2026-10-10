@@ -538,3 +538,47 @@ both confs call it.
 **Not covered:** the panel ports (2083/2087/2096, B3), the challenge page and
 `/__cfm_verify`, `/cpanelwebcall` and `/cfm-admin`, which skip `cfm.lua` and
 are not static assets.
+
+### Burn-in read (2026-10-10, ~4 h after the deploy) — enforce is gated on it
+
+`EDGE_BAN_MODE = log` on titan, earth, mars, rigel, orion, virgo, speedhost
+since 2026-10-10 ~12:20 UTC. The first read, per node (store size /
+`would_block` count from `edge-ban.json`; `would_block` lines are one per
+address per minute):
+
+| node | store | would_block | lines / IPs | |
+|---|---|---|---|---|
+| mars | 140 | 6 146 | 644 / 54 | 97% of lines on scanner paths |
+| orion | 103 | 2 961 | 623 / 62 | 95% |
+| titan | 31 | 1 765 | 23 / 12 | 87% |
+| earth, rigel, virgo | 40 / 8 / 10 | 0 | — | |
+
+Sources: `waf_security` and `webdetector` almost entirely (one `modsec`). The
+bulk is a distributed `POST /xmlrpc.php` brute force through Cloudflare with a
+forged `Jetpack by WordPress.com` / `WordPress.com` UA from residential
+addresses worldwide (not Automattic's ranges), banned by rules 510-512: each
+address ~150 requests, ~95% already 403 at the WAF, the ban stops the rest.
+The others are scanners on `/wp-content/plugins/*/…php`, `/xyz.php`,
+`/.env`-style paths, and cloud-hosted crawlers (Azure, GCP, DigitalOcean).
+No Lua error, no latency change (titan `luams` p50/p95/p99 1/3/15 → 1/2/11
+ms), edge-ban CPU ~0.1% of a core.
+
+**Two false positives, both from `webdetector`'s `WEB/403` (`403_flood`), and
+both pre-date the edge ban** (nft already banned them and reported them to the
+fleet blocklist with `ttl=3600`; behind Cloudflare the nft ban missed them, the
+edge ban in `enforce` would not):
+
+- **Googlebot** (66.249.x.x, FCrDNS-verified — `abuse_shadow` already labels
+  it `good_bot=googlebot verdict=exempt_goodbot`) crawling a WooCommerce
+  shop's `?add_to_wishlist=` links, which the origin answers 403. Orion banned
+  and reported a Googlebot address 10 times between 2026-10-02 and 10-10,
+  mars once. `emitIPBlocks` has no good-bot exemption.
+- **A logged-in WordPress admin** (Greek residential ISP) on the Site Kit
+  dashboard: it polls `admin-ajax.php?action=rest-nonce` (200) and
+  `wp-json/google-site-kit/v1/` (403 from the origin) every ~5 s, a third of
+  its requests 403, above the 25% share gate.
+
+**Gate for `enforce`:** the `WEB/403` good-bot exemption ships (and, decided
+with it, the logged-in-origin-403 case), then a fresh read of every node shows
+no would-block on a verified good bot or a residential address with a normal
+browsing pattern. The next read is scheduled for 2026-10-20.
