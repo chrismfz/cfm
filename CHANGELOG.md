@@ -18,6 +18,14 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **The web detector no longer bans verified search-engine crawlers.** A shop
+  answering 403 to Googlebot's `?add_to_wishlist=` links made the 403-flood
+  rule ban Googlebot for an hour and report it to the fleet blocklist — ten
+  times on one node in a week. Every web-detector IP ban and challenge now
+  skips an address that is a forward-confirmed (FCrDNS) good bot: Googlebot,
+  Bingbot, Applebot, Yandex, Meta and the rest of the built-in list, plus the
+  challenge exclude file's `verify_fcrdns=1` PTR rules (not its `ua=`/`asn=`
+  rules). The skip is in the history as `outcome=exempt_goodbot`.
 - **`cfm debug` bundles now carry the CPU and heap profile tops again, and
   are ~160 MB smaller.** `pprof-cpu-top.txt` / `pprof-heap-top.txt` were
   missing from every bundle ("stat -: no such file or directory": the profile
