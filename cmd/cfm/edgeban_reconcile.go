@@ -21,9 +21,16 @@ const edgeBanReconcileEvery = 2 * time.Minute
 // edgeBanFailClear is how many failed reads in a row empty the store.
 const edgeBanFailClear = 3
 
+// edgeBanFailRemind repeats the "store emptied" warning while reads keep
+// failing (every hour at the two-minute pace), so it is not one line lost in
+// the log.
+const edgeBanFailRemind = 30
+
 // The sets a reconcile reads: the host block sets, and every set nft accepts
 // in `inet cfm input` before its block drops (self, allow, dyndns, the fleet
-// whitelist, allow nets).
+// whitelist, allow nets). TestEdgeBanSetsMatchTheInputChain pins both lists
+// to both backends' EnsureBase: a set missing here leaves an allow unseen, a
+// set that no longer exists fails every read and turns the edge ban off.
 var (
 	edgeBanBlockSets = []string{"block_v4", "block_v6"}
 	edgeBanAllowSets = []string{
@@ -102,6 +109,8 @@ func edgeBanReconcileOnce(s *edgeban.Store, be firewall.Backend, fails int) int 
 	case fails == edgeBanFailClear:
 		s.Clear()
 		logging.Logf("[edgeban] %d failed reads: store emptied, the edge answers no ban until nft is readable: %v", fails, err)
+	case fails%edgeBanFailRemind == 0:
+		logging.Logf("[edgeban] still unreadable after %d reads, the edge answers no ban: %v", fails, err)
 	}
 	return fails
 }

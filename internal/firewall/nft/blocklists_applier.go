@@ -173,11 +173,12 @@ func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
 // its remaining TTL. Expires is zero when the element has no timeout.
 func (b *Backend) ListSetElementsTimed(setName string) ([]firewall.SetElementTimed, error) {
 	res, err := runNFTCommand(context.Background(), "-j", "list", "set", family, tableName, setName)
-	raw := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return nil, err
 	}
-	return parseTimedSetJSON(raw)
+	// Stdout only: a warning nft prints on success (a table another tool
+	// manages, on a CSF / firewalld host) is not JSON and would fail every read.
+	return parseTimedSetJSON([]byte(res.Stdout))
 }
 
 // parseTimedSetJSON walks `nft -j list set` output into elements with their

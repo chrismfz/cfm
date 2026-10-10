@@ -785,7 +785,7 @@ func runDaemon(args []string) {
 	// Edge ban store (internal/edgeban): the web-related and manual bans the
 	// edge enforces itself, for clients behind a trusted proxy that the nft
 	// drop never sees. Loaded from disk, then narrowed to what nft still
-	// blocks every minute; it answers nothing until the first reconcile.
+	// blocks every two minutes; it answers nothing until the first reconcile.
 	edgeStore := edgeban.New(edgeban.DefaultPath)
 	edgeStore.Load()
 	edgeban.SetDefault(edgeStore)

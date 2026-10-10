@@ -3,8 +3,12 @@ package main
 import (
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
+	"time"
 
 	"cfm/internal/edgeban"
 	"cfm/internal/firewall"
@@ -98,5 +102,62 @@ func TestEdgeBanReconcileSelfIsAllowed(t *testing.T) {
 	edgeBanReconcileOnce(s, be, 0)
 	if ok, _ := s.Banned("84.54.49.200"); ok {
 		t.Fatal("a self address was edge-banned")
+	}
+}
+
+// Both lists are the input chain's own: every set EnsureBase accepts before
+// its block drops, on both backends, and the two host block sets.
+func TestEdgeBanSetsMatchTheInputChain(t *testing.T) {
+	acceptRe := regexp.MustCompile("saddr @([a-z0-9_]+) accept`")
+	for _, src := range []string{"../../internal/firewall/nft/nft.go", "../../internal/firewall/nftlib/lifecycle.go"} {
+		raw, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]bool{}
+		for _, m := range acceptRe.FindAllStringSubmatch(string(raw), -1) {
+			got[m[1]] = true
+		}
+		want := map[string]bool{}
+		for _, s := range edgeBanAllowSets {
+			want[s] = true
+		}
+		for s := range got {
+			if !want[s] && !strings.HasPrefix(s, "debug") {
+				t.Errorf("%s: the input chain accepts @%s, edgeBanAllowSets does not read it", src, s)
+			}
+		}
+		for s := range want {
+			if !got[s] {
+				t.Errorf("%s: edgeBanAllowSets reads %s, the input chain accepts no such set", src, s)
+			}
+		}
+		for _, s := range edgeBanBlockSets {
+			if !strings.Contains(string(raw), "saddr @"+s+" drop`") {
+				t.Errorf("%s: no `saddr @%s drop` rule", src, s)
+			}
+		}
+	}
+}
+
+// The first file with a parsable range wins; an empty one falls through.
+func TestLoadEdgeBanTrustedProxies(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.conf")
+	good := filepath.Join(dir, "trusted_proxies.conf")
+	_ = os.WriteFile(empty, []byte("# nothing\nreal_ip_header CF-Connecting-IP;\n"), 0o600)
+	_ = os.WriteFile(good, []byte("set_real_ip_from 173.245.48.0/20;\n"), 0o600)
+	old := edgeBanTrustedProxyFiles
+	edgeBanTrustedProxyFiles = []string{filepath.Join(dir, "missing.conf"), empty, good}
+	t.Cleanup(func() { edgeBanTrustedProxyFiles = old; edgeban.SetTrustedProxies(nil) })
+
+	loadEdgeBanTrustedProxies()
+	s := newReconcileStore(t, "173.245.48.10", "203.0.113.5")
+	s.Reconcile(edgeban.Snapshot{Blocks: []firewall.SetElementTimed{{Elem: "173.245.48.10"}, {Elem: "203.0.113.5"}}, ReadAt: time.Now().Add(time.Second)})
+	if b, _ := s.Banned("173.245.48.10"); b {
+		t.Error("a Cloudflare address from the loaded file is edge-banned")
+	}
+	if b, _ := s.Banned("203.0.113.5"); !b {
+		t.Error("an ordinary banned address is not")
 	}
 }
