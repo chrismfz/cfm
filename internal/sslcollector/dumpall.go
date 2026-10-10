@@ -85,8 +85,14 @@ type dumpAllPayload struct {
 	GeneratedAt time.Time `json:"generated_at"`
 	ExactN      int       `json:"exact_n"`
 	WildN       int       `json:"wild_n"`
-	Exact       []any     `json:"exact"`
-	Wild        []any     `json:"wild"`
+	// Complete: every name in the index made it into the payload. An entry
+	// whose PEM could not be read is skipped (getPEM); such a payload is
+	// still written and served, but never taken as current — the snapshot
+	// is rewritten and /dumpall rebuilt until a whole one is made, as every
+	// /dumpall was before 2026-10-10.
+	Complete bool  `json:"complete"`
+	Exact    []any `json:"exact"`
+	Wild     []any `json:"wild"`
 }
 
 // BuildDumpAllPayload serializes the collector's current cert index in the
@@ -184,6 +190,7 @@ func (c *Collector) BuildDumpAllPayload() ([]byte, int, int, error) {
 	}
 
 	out.ExactN, out.WildN = len(out.Exact), len(out.Wild)
+	out.Complete = out.ExactN == len(exactKeys) && out.WildN == len(wildKeys)
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	if err := enc.Encode(out); err != nil {

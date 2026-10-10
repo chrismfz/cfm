@@ -140,14 +140,16 @@ hostname certs such as Exim (`/etc/exim.*`).
 Workers poll `/stats` every `POLL_SECS_MIN` (10s). When the daemon's
 `Version` hash changes (any fingerprint/mtime change, or a name moving to
 another pair), each worker fetches `/dumpall` after `worker_id × 2s`
-(`DUMPALL_STAGGER_SECS`: decoding the list blocks a worker's event loop for
-about a second on a large node, and the workers must not all stall at once).
+(`DUMPALL_STAGGER_SECS`, shrunk so the last worker starts within 20s —
+`DUMPALL_STAGGER_WINDOW`: decoding the list blocks a worker's event loop
+for about a second on a large node, and the workers must not all stall at
+once).
 A version-triggered fetch does not take the shared `lock:dumpall`; the
 startup and age-forced fetches do. A `FORCE_DUMPALL_AFTER` (1h) safety net
 re-pulls even if a version change was missed.
 
-**Net result:** a new domain is live on every worker within ~10–25s (≈2s
-watcher debounce + ≤10s poll + the stagger); the 1h fallbacks bound the
+**Net result:** a new domain is live on every worker within ~30s (≈2s
+watcher debounce + ≤10s poll + the ≤20s stagger; ~10–25s with six workers); the 1h fallbacks bound the
 worst case if the event-driven path ever misses. Until 2026-10-10 the poll
 was 60s and a version-triggered fetch took the shared lock, so the workers
 fetched one per poll: on a six-worker node the last one served a new cert
@@ -159,7 +161,13 @@ rewritten: that was ~110 MB and ~18s on a 7 800-host node, every discovery
 tick), and `/dumpall` streams that file when it is the current version
 instead of rebuilding the payload (re-reading every PEM into a buffer) for
 each worker. An older snapshot — kept by the regression guard — is not
-served; the payload is built as before. The snapshot carries `exact_n` /
+served, nor is one marked `complete: false` (an entry's PEM could not be
+read when it was built); the payload is built as before, and an incomplete
+snapshot is rewritten on the next Refresh even at the same version. A
+skipped (unchanged) write re-stamps the file's mtime, which the regression
+guard's 1h staleness release reads as "last confirmed current". A
+version-triggered fetch no longer holds `lock:dumpall`, so cfm_stats'
+`ingest_lock` shows only the startup / forced fetches. The snapshot carries `exact_n` /
 `wild_n` ahead of the entries, so the regression guard reads them off the
 front instead of decoding the whole file.
 

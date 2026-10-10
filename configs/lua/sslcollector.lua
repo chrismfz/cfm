@@ -528,9 +528,11 @@ end
 local _dumpall_inflight = false
 -- A version-triggered fetch waits worker_id * DUMPALL_STAGGER_SECS: decoding
 -- the list (~110 MB on a 7 800-host node, about a second) blocks the worker's
--- event loop, and the workers must not all stall on the same second. Six
--- workers are done in ~10 s plus a poll.
+-- event loop, and the workers must not all stall on the same second. The
+-- step shrinks so the last worker starts within DUMPALL_STAGGER_WINDOW (six
+-- workers: 0, 2, … 10 s; 32 workers: ~0.6 s apart).
 local DUMPALL_STAGGER_SECS = 2
+local DUMPALL_STAGGER_WINDOW = 20
 local _dumpall_scheduled = false
 
 -- shared_lock: true for the startup and the age-forced fetches, which every
@@ -703,7 +705,9 @@ local function poll_stats(premature)
             " (triggering worker refresh)")
           if not _dumpall_scheduled then
             _dumpall_scheduled = true
-            local delay = (ngx.worker.id() or 0) * DUMPALL_STAGGER_SECS
+            local n = (ngx.worker.count and ngx.worker.count()) or 1
+            local step = math.min(DUMPALL_STAGGER_SECS, DUMPALL_STAGGER_WINDOW / math.max(n, 1))
+            local delay = (ngx.worker.id() or 0) * step
             local tok = ngx.timer.at(delay, function(premature)
               _dumpall_scheduled = false
               if premature then return end

@@ -66,7 +66,7 @@ _G.ngx = {
     at = function(delay, fn) timers[#timers + 1] = { delay = delay, fn = fn }; return true end,
     every = function() return true end,
   },
-  worker = { id = function() return 3 end, pid = function() return 1 end, exiting = function() return false end },
+  worker = { id = function() return 3 end, count = function() return 6 end, pid = function() return 1 end, exiting = function() return false end },
   config = { subsystem = "http" },
   re = { match = function() return nil end },
 }
@@ -148,6 +148,19 @@ if poll_stats then
     do_dumpall(true)
     check(count("/dumpall") == before, "a shared-lock fetch is skipped while the lock is held")
   end
+end
+
+-- 32 workers: the stagger shrinks so the last one starts within the window.
+if poll_stats then
+  ngx.worker.count = function() return 32 end
+  ngx.worker.id = function() return 31 end
+  stats_version = "v3"
+  timers = {}
+  poll_stats(false)
+  local fetch
+  for _, t in ipairs(timers) do if t.fn ~= poll_stats then fetch = t end end
+  check(fetch and fetch.delay <= 20,
+        "32 workers: the last worker's delay stays within 20 s (got " .. tostring(fetch and fetch.delay) .. ")")
 end
 
 if fails > 0 then

@@ -75,7 +75,16 @@ func (c *Collector) WriteSnapshot() {
 	// firing for one change): the file on disk is already this version, so
 	// skip the rebuild — on a 7 800-host node it re-read every PEM and
 	// wrote ~110 MB, taking ~18 s.
-	if h, ok := readSnapshotHeader(snapshotPath(), false); ok && h.Version != "" && h.Version == c.Stats().Version && !forceSnapshot() {
+	//
+	// The skip re-stamps the file's mtime: the regression guard below
+	// releases on a snapshot older than regressionGuardMaxStale, and that
+	// age must mean "not confirmed current for an hour", not "unchanged for
+	// an hour" — or a partial scan after a quiet week (a reboot) would
+	// overwrite a good snapshot. Only a Complete one is skipped.
+	path := snapshotPath()
+	if h, ok := readSnapshotHeader(path, false); ok && h.Complete && h.Version != "" && h.Version == c.Stats().Version && !forceSnapshot() {
+		now := time.Now()
+		_ = os.Chtimes(path, now, now)
 		return
 	}
 
@@ -89,7 +98,6 @@ func (c *Collector) WriteSnapshot() {
 		return
 	}
 
-	path := snapshotPath()
 	if prevExact, prevWild, ok := readSnapshotCounts(path); ok {
 		prev := prevExact + prevWild
 		next := exactN + wildN
@@ -144,6 +152,7 @@ type snapshotHeader struct {
 	Version      string
 	ExactN       int
 	WildN        int
+	Complete     bool // every indexed name is in it (absent in an older file: false)
 	countsInHead bool
 }
 
@@ -181,9 +190,6 @@ func readSnapshotHeaderFrom(r io.Reader, needCounts bool) (snapshotHeader, bool)
 				return h, false
 			}
 			haveVersion = true
-			if !needCounts {
-				return h, h.Version != ""
-			}
 		case "exact_n":
 			if err := dec.Decode(&h.ExactN); err != nil {
 				return h, false
@@ -194,9 +200,18 @@ func readSnapshotHeaderFrom(r io.Reader, needCounts bool) (snapshotHeader, bool)
 				return h, false
 			}
 			haveWild = true
+		case "complete":
+			if err := dec.Decode(&h.Complete); err != nil {
+				return h, false
+			}
 		case "exact", "wild":
 			if haveExact && haveWild {
 				return h, haveVersion
+			}
+			if !needCounts {
+				// An older snapshot (no counts ahead): its version is all a
+				// caller without needCounts wants, and it is not Complete.
+				return h, haveVersion && h.Version != ""
 			}
 			n, ok := countArray(dec)
 			if !ok {
@@ -240,7 +255,8 @@ func countArray(dec *json.Decoder) (int, bool) {
 	return n, true
 }
 
-// openCurrentSnapshot opens the on-disk snapshot when it holds version, for
+// openCurrentSnapshot opens the on-disk snapshot when it is Complete and holds
+// version, for
 // /dumpall to stream. The version is read off the open file itself, so a
 // snapshot renamed in between is either the old file (still open, still
 // whole) or rejected. ok=false: build the payload instead.
@@ -254,7 +270,7 @@ func openCurrentSnapshot(version string) (*os.File, int64, bool) {
 	}
 	h, ok := readSnapshotHeaderFrom(f, false)
 	st, serr := f.Stat()
-	if !ok || h.Version != version || serr != nil || !st.Mode().IsRegular() {
+	if !ok || !h.Complete || h.Version != version || serr != nil || !st.Mode().IsRegular() {
 		_ = f.Close()
 		return nil, 0, false
 	}
