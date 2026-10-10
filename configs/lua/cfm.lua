@@ -781,22 +781,15 @@ local function waf_insp_incr(host)
   end
 end
 
--- maybe_flush_waf_insp opportunistically pushes the current shdict snapshot
--- to /nginx/waf/stats. Called inline from cfm.lua's request hot path; cheap
--- in the common case (one shdict get + numeric compare). Only runs the
--- flush body once per CFG.waf_stats_flush_sec across all workers, gated by
--- shdict:add() (atomic claim on the lock key).
---
--- The actual snapshot+RPC happens in a background light-thread via
--- ngx.timer.at(0, ...) so the originating request never pays the RPC
--- round-trip latency (~5-10ms typical, up to decision_timeout_ms worst
--- case). The lock-winning request pays only the lock-claim cost (~µs).
---
--- Pushes ABSOLUTE counts per (hour, host); Go upserts. Repeated pushes for
--- the same hour overwrite cleanly. At hour rollover the current bucket
--- starts fresh; the previous hour's bucket gets one more push then ages out.
--- The flush timer's callback: everything it touches comes in as an argument
--- (see maybe_flush_waf_insp), never as an upvalue of this per-request chunk.
+-- The flush timer's callback: everything it touches comes in as an argument,
+-- never as an upvalue of this per-request chunk. A request that ends in
+-- ngx.exit / ngx.exec / ngx.redirect never returns from the chunk, so its
+-- locals stay OPEN upvalues on the request coroutine's stack; OpenResty puts
+-- that coroutine back in its thread cache with lua_resetthread, which nils
+-- the stack without closing them (luajit2 closes the parent's list), and a
+-- closure that fires later reads nil — "attempt to index upvalue 'SH' (a nil
+-- value)", about once a day per node until 2026-10-09. The same hazard holds
+-- for any closure of this file that outlives its request.
 local function waf_insp_flush_cb(premature, sh, dec, encode)
   if premature or not sh or not dec then return end
   local rows = {}
@@ -811,9 +804,24 @@ local function waf_insp_flush_cb(premature, sh, dec, encode)
     end
   end
   if #rows == 0 then return end
-  dec:rpc("waf_stats", "POST", "/nginx/waf/stats", encode({ rows = rows }))
+  dec:rpc("waf_stats", "POST", "/nginx/waf/stats", encode({ rows = rows }),
+          { ip = "-", host = "-", uri = "/nginx/waf/stats" })
 end
 
+-- maybe_flush_waf_insp opportunistically pushes the current shdict snapshot
+-- to /nginx/waf/stats. Called inline from cfm.lua's request hot path; cheap
+-- in the common case (one shdict get + numeric compare). Only runs the
+-- flush body once per CFG.waf_stats_flush_sec across all workers, gated by
+-- shdict:add() (atomic claim on the lock key).
+--
+-- The actual snapshot+RPC happens in a background light-thread via
+-- ngx.timer.at(0, ...) so the originating request never pays the RPC
+-- round-trip latency (~5-10ms typical, up to decision_timeout_ms worst
+-- case). The lock-winning request pays only the lock-claim cost (~µs).
+--
+-- Pushes ABSOLUTE counts per (hour, host); Go upserts. Repeated pushes for
+-- the same hour overwrite cleanly. At hour rollover the current bucket
+-- starts fresh; the previous hour's bucket gets one more push then ages out.
 local function maybe_flush_waf_insp()
   if not SH or not CFG.waf_stats_enable then return end
   local last = SH:get("waf_insp:last_flush") or 0
@@ -830,14 +838,7 @@ local function maybe_flush_waf_insp()
   -- cosocket APIs (used by http_unix → rpc_call) are supported in
   -- ngx.timer.at callbacks.
   --
-  -- The callback takes what it needs as timer ARGUMENTS and closes over
-  -- nothing. This file runs per request (access_by_lua_file), so SH /
-  -- decision / cjson are locals of the request's chunk, still on its
-  -- coroutine stack when the timer is created: as upvalues they read that
-  -- stack later, after the request finished and its coroutine was reset for
-  -- another one, and about once a day per node the flush died with
-  -- "attempt to index upvalue 'SH' (a nil value)" (edge Lua sweep
-  -- 2026-10-09, fleet errors since September). Arguments are copied.
+  -- State goes in as timer ARGUMENTS (see waf_insp_flush_cb).
   local sched_ok, sched_err = ngx.timer.at(0, waf_insp_flush_cb, SH, decision, cjson.encode)
   if not sched_ok and CFG.debug then
     ngx.log(ngx.WARN, "cfm: waf_insp flush schedule failed: ", tostring(sched_err))

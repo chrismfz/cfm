@@ -17,17 +17,26 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **A challenged POST replayed after the solve is inspected again.** When
+  the challenged POST had no query string, the replay raised an edge error
+  and, under fail-open, went to the site without the WAF re-checking its body
+  (including the stricter verdict a solved client gets for a risky hit),
+  traffic rules or the per-IP decision. Only a client that had solved the
+  challenge could replay, and only the body it had been challenged with.
+
 ### Fixed
 - **A challenged WordPress save is replayed without an edge error.** When a
   challenged POST had no query string (`/wp-admin/post.php`), its replay
   after the solve raised a Lua error at the edge (`set_uri_args` got nil);
-  the request still reached the site, but the rest of the edge's checks were
-  skipped and the URL kept the `?cfm_rt=` token. Seen on rigel and orion.
-- **The WAF hit-rate counters no longer die about once a day per node.** The
-  background flush of the per-host inspection counters failed with `attempt
-  to index upvalue 'SH' (a nil value)` (every node since September): it read
-  state left over from the request that scheduled it. It now carries what it
-  needs with it.
+  the save still reached the site, but the URL kept the `?cfm_rt=` token.
+  Seen on rigel and orion.
+- **The WAF hit-rate counters' background push no longer fails about once
+  a day per node.** It failed with `attempt to index upvalue 'SH' (a nil
+  value)` (every node since September): it read state left over from the
+  request that scheduled it. The next push usually restored the counts, but
+  the last one of an hour could be lost. It now carries what it needs with
+  it, and an error reaching the daemon no longer aborts it either.
 - **`/dev/members.db` and similar paths no longer trip the `/dev/mem` rule
   (324).** It matched the text anywhere; `/dev/mem` and `/dev/kmem` now have
   to be the whole name.

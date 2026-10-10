@@ -20,6 +20,7 @@ check(hit("/x", "f=/dev/memory_report.pdf") == nil, "/dev/memory_report.pdf is n
 check(hit("/x", "", "path=/dev/kmemcache_notes") == nil, "/dev/kmemcache_notes is not /dev/kmem")
 check(hit("/x", "cmd=dd+if%3D/dev/mem+bs%3D1") == "DEV_MEM_ACCESS", "dd if=/dev/mem is DEV_MEM_ACCESS")
 check(hit("/x", "f=/dev/mem") == "DEV_MEM_ACCESS", "/dev/mem at the end")
+check(hit("/x", "f=/dev/mem_dump") == nil, "/dev/mem_dump is not /dev/mem (`_` is part of a name)")
 check(hit("/x", "", "cat /dev/kmem | strings") == "DEV_KMEM_ACCESS", "/dev/kmem in a body")
 check(hit("/x", "a=/dev/members&b=/dev/mem;") == "DEV_MEM_ACCESS", "a later whole /dev/mem after a /dev/members")
 check(hit("/x", "f=/dev/mem.bin") == "DEV_MEM_ACCESS", "/dev/mem followed by a dot still counts")

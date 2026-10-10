@@ -303,11 +303,20 @@ function Client:rpc(kind, method, path, body, req_ctx)
   local elapsed_ms = math.floor((ngx.now() - t0) * 1000 + 0.5)
   if err then
     req_ctx = req_ctx or {}
-    local ctx_ip = req_ctx.ip or (self.h.real_ip and self.h.real_ip())
-    local ctx_host = req_ctx.host or (ngx.var.host or "-")
-    local ctx_uri = req_ctx.uri or (ngx.var.request_uri or ngx.var.uri or "-")
+    -- A timer (the waf_insp flush) has no request: ngx.var / ngx.header /
+    -- ngx.ctx raise "API disabled in the current context" there, and the
+    -- log_route hook is a closure of the per-request cfm.lua chunk.
+    local no_req = ngx.get_phase and ngx.get_phase() == "timer"
+    local ctx_ip = req_ctx.ip or (not no_req and self.h.real_ip and self.h.real_ip()) or "-"
+    local ctx_host = req_ctx.host or (no_req and "-") or (ngx.var.host or "-")
+    local ctx_uri = req_ctx.uri or (no_req and "-") or (ngx.var.request_uri or ngx.var.uri or "-")
 
-    if cfg.debug or cfg.debug_headers then
+    if no_req then
+      if cfg.debug then
+        ngx.log(ngx.WARN, "[cfm] rpc_err kind=", tostring(kind or "-"), " path=", tostring(path or "-"),
+          " class=", tostring(err_class), " elapsed_ms=", tostring(elapsed_ms))
+      end
+    elseif cfg.debug or cfg.debug_headers then
       ngx.ctx.cfm_bridge_error = err_class
       ngx.ctx.cfm_bridge_latency_ms = elapsed_ms
       if cfg.debug_headers then
@@ -316,7 +325,7 @@ function Client:rpc(kind, method, path, body, req_ctx)
       end
     end
 
-    if cfg.debug and self.h.log_route then
+    if not no_req and cfg.debug and self.h.log_route then
       self.h.log_route(ngx.WARN, "rpc_err kind=" .. tostring(kind or "-") ..
         " path=" .. tostring(path or "-") ..
         " class=" .. tostring(err_class) ..

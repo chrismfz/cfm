@@ -58,7 +58,7 @@ local try_apply = assert(load(fnsrc .. "\nreturn try_apply_post_resume"))()
 store["pr|tok1"] = '{ ip = "203.0.113.4", host = "a.gr", uri = "/wp-admin/post.php", body_b64 = "action=editpost&post_ID=1" }'
 local ok, res = pcall(try_apply, "203.0.113.4", "a.gr")
 check(ok and res == true, "a resume to a query-less URI applies (" .. tostring(res) .. ")")
-check(uri == "/wp-admin/post.php" and type(uri_args) == "table" and next(uri_args) == nil,
+check(uri == "/wp-admin/post.php" and (uri_args == "" or (type(uri_args) == "table" and next(uri_args) == nil)),
       "the carrier's ?cfm_rt= is cleared (args " .. tostring(uri_args) .. ")")
 check(method == "POST" and body_data == "action=editpost&post_ID=1", "the POST is replayed")
 check(ngx.ctx.cfm_resumed_post == true, "the request is marked a resumed POST")
