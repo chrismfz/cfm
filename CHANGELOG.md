@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.10
+
 ### Fixed
 - **The web detector no longer bans verified search-engine crawlers.** A shop
   answering 403 to Googlebot's `?add_to_wishlist=` links made the 403-flood
@@ -58,8 +62,6 @@ back-filled here — see the git/PR history for that period.
   root is owned by the caller and not group/other-writable: the cache holds a
   binary `cfm debug` runs as root). The raw `.pb.gz` profiles were always
   complete.
-
-## 2026.10.10
 
 ### Security
 - **A ban now also stops an attacker who comes through Cloudflare.** The
