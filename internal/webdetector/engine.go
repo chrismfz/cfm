@@ -478,6 +478,15 @@ type Engine struct {
 	// exclude file is loaded. Set once at startup via SetChalGoodBotFunc.
 	chalGoodBotFunc func(ip, ptr string, budget *int) (string, bool)
 
+	// banPTRFn overrides the reverse-DNS source of the IP-ban good-bot check
+	// (goodBotForBan; default the enricher). Tests only.
+	banPTRFn func(ip string) (ptr string, ok bool)
+	// banNotBot: IPs goodBotForBan found definitively not a crawler (no PTR,
+	// or one no rule claims) — skipped for banNotBotTTL so a flooder still in
+	// IPShort costs no reverse lookup on every cooldown.
+	banNotBotMu sync.Mutex
+	banNotBot   map[string]time.Time
+
 	mu    sync.RWMutex
 	hosts map[string]*hostState
 
@@ -3614,6 +3623,13 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
 		return
 	}
 
+	// One bounded budget per tick for the good-bot check's DNS (see
+	// goodBotForBan): the forward-confirms of the operator file's rules, and a
+	// deadline for the whole tick.
+	goodBotCtx, cancelGoodBot := context.WithTimeout(context.Background(), goodBotBanTickBudget)
+	defer cancelGoodBot()
+	goodBotBudget := maxFindingFileConfirm
+
 	for _, row := range rows {
 		// find "block" proposal
 		blockReason := ""
@@ -3702,6 +3718,18 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
 		}()
 		if skip {
 			e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": "suppressed_by_cooldown", "req": row.Req, "vhosts": row.Vhosts, "action": action}})
+			continue
+		}
+
+		// A verified good bot (FCrDNS: the canonical crawler list, plus the
+		// operator exclude file's verify_fcrdns=1 PTR rules) is never banned or
+		// challenged from here: its 403s / 404s / rate are the origin's answers
+		// to a crawl (a shop 403ing ?add_to_wishlist= links banned Googlebot ten
+		// times on orion, 2026-10-02..10, and the ban went to the fleet
+		// blocklist). The cooldown above bounds this to one check per IP per
+		// cooldown; the verdict is cached.
+		if bot := e.goodBotForBan(goodBotCtx, row.IP, &goodBotBudget, now); bot != "" {
+			e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": "exempt_goodbot", "good_bot": bot, "req": row.Req, "vhosts": row.Vhosts, "action": action}})
 			continue
 		}
 

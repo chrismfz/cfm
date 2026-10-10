@@ -318,8 +318,10 @@ const (
 // definitive negative; a non-empty reason means "could not tell" (a non-empty
 // name WITH a reason is a stale verdict whose re-verify did not complete).
 // Never call it on the decision hot path. Callers: the simulate APIs
-// (TrafficRuleSimulateForAPI, the challenge-access simulate) and the ChallengeV2
-// verify gate, for a solve it is about to reject (verifiedBeforeReject). They
+// (TrafficRuleSimulateForAPI, the challenge-access simulate), the ChallengeV2
+// verify gate, for a solve it is about to reject (verifiedBeforeReject), and
+// the web detector's IP-ban tick (goodBotForBan, at most once per candidate
+// per cooldown, and none for an IP it already knows is not a crawler). They
 // share syncSem, so neither can take the hot path's slots; a burst of one can
 // only make the other's answer "inconclusive" / no waiver. The pool is
 // node-wide, so that includes a scoped tenant's simulate calls starving the
