@@ -75,9 +75,16 @@ func stripPrivateKeyBlocks(pemData []byte) []byte {
 // to what the OpenResty/Angie worker would fetch over the socket, so
 // load_from_snapshot() and ingest_dumpall(...,"snapshot") behave the
 // same as the live path.
+//
+// version, exact_n and wild_n come before the entries so a reader can take
+// the header off the front of the file (readSnapshotHeader) without decoding
+// the PEMs: the snapshot is ~110 MB on a 7 800-host node. The Lua reader
+// ignores the counts.
 type dumpAllPayload struct {
 	Version     string    `json:"version"`
 	GeneratedAt time.Time `json:"generated_at"`
+	ExactN      int       `json:"exact_n"`
+	WildN       int       `json:"wild_n"`
 	Exact       []any     `json:"exact"`
 	Wild        []any     `json:"wild"`
 }
@@ -176,6 +183,7 @@ func (c *Collector) BuildDumpAllPayload() ([]byte, int, int, error) {
 		})
 	}
 
+	out.ExactN, out.WildN = len(out.Exact), len(out.Wild)
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	if err := enc.Encode(out); err != nil {

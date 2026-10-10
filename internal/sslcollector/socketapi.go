@@ -40,9 +40,11 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -184,6 +186,19 @@ func (s *sockServer) handleDumpAll(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// The snapshot WriteSnapshot keeps on disk is this same payload: serve
+	// it as is when it is the current version, instead of rebuilding the
+	// whole index (re-reading every PEM, a ~110 MB buffer on a large node)
+	// for every worker that asks. Anything else — no snapshot, an older one
+	// the regression guard kept — is built as before.
+	if f, size, ok := openCurrentSnapshot(s.col.Stats().Version); ok {
+		defer f.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		_, _ = io.Copy(w, f)
 		return
 	}
 

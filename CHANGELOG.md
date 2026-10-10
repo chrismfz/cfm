@@ -29,6 +29,22 @@ back-filled here — see the git/PR history for that period.
   rules) — so a crawler listed there (the shipped file has Ahrefs and
   Semrush) is no longer banned for its request rate either. The skip is in
   the history as `outcome=exempt_goodbot`.
+- **A new or renewed certificate reaches every edge worker in ~10–25 s, not
+  minutes.** Workers checked for a new certificate list every 60 s, and each
+  fetch of the list took a lock shared by all workers, so they picked it up
+  one per minute: on a six-worker node the last one served a new cert 4.5
+  minutes after the daemon saw it (visitors hitting that worker got the
+  fallback certificate). Workers now check every 10 s and fetch the list
+  without the shared lock, a couple of seconds apart.
+- **The certificate collector no longer rebuilds its whole list for every
+  worker, or rewrites it when nothing changed.** On a node with 7 800 hosts
+  the list is ~110 MB: each worker's fetch re-read every certificate and key
+  into a fresh buffer (memory spikes of 50–280 MB in the daemon), and every
+  hourly rescan rewrote the snapshot (~18 s) even when nothing had changed.
+  The daemon now serves the snapshot file it already keeps, rewrites it only
+  when the list changed, and reads the snapshot's counts off its front.
+  A host moving to another certificate (one expiring) now also counts as a
+  change.
 - **`cfm debug` bundles now carry the CPU and heap profile tops again, and
   are ~160 MB smaller.** `pprof-cpu-top.txt` / `pprof-heap-top.txt` were
   missing from every bundle ("stat -: no such file or directory": the profile
