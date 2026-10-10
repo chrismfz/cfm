@@ -804,8 +804,7 @@ local function waf_insp_flush_cb(premature, sh, dec, encode)
     end
   end
   if #rows == 0 then return end
-  dec:rpc("waf_stats", "POST", "/nginx/waf/stats", encode({ rows = rows }),
-          { ip = "-", host = "-", uri = "/nginx/waf/stats" })
+  dec:rpc("waf_stats", "POST", "/nginx/waf/stats", encode({ rows = rows }))
 end
 
 -- maybe_flush_waf_insp opportunistically pushes the current shdict snapshot

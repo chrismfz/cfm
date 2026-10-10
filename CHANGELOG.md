@@ -18,18 +18,23 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
-- **A challenged POST replayed after the solve is inspected again.** When
-  the challenged POST had no query string, the replay raised an edge error
-  and, under fail-open, went to the site without the WAF re-checking its body
-  (including the stricter verdict a solved client gets for a risky hit),
-  traffic rules or the per-IP decision. Only a client that had solved the
-  challenge could replay, and only the body it had been challenged with.
+- **A challenged POST can no longer slip past the WAF through its resume
+  link.** When a POST without a query string was challenged, the client got
+  a resume link carrying a one-time token. Following that link raised an edge
+  error, and under fail-open (the default) the stored POST went to the site
+  without the WAF re-checking its body, traffic rules or the per-IP decision.
+  The client did not even have to solve the challenge: it could follow the
+  link itself, once, from the same IP and site. Only the body it had been
+  challenged with could be sent this way; a request the WAF blocks is never
+  stored. The replay now goes through every check, and one sent without
+  solving is refused while the challenge stands.
 
 ### Fixed
 - **A challenged WordPress save is replayed without an edge error.** When a
   challenged POST had no query string (`/wp-admin/post.php`), its replay
   after the solve raised a Lua error at the edge (`set_uri_args` got nil);
-  the save still reached the site, but the URL kept the `?cfm_rt=` token.
+  under fail-open (the default) the save still reached the site, but the URL
+  kept the `?cfm_rt=` token; under fail-closed it got a 500 and was lost.
   Seen on rigel and orion.
 - **The WAF hit-rate counters' background push no longer fails about once
   a day per node.** It failed with `attempt to index upvalue 'SH' (a nil

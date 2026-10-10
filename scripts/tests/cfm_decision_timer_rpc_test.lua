@@ -47,6 +47,27 @@ for _, dbg in ipairs({ { debug = false, debug_headers = false }, { debug = true,
   check(ok, "an RPC error from a timer without a req_ctx does not raise")
 end
 
+-- In a request (the access phase) the error path is unchanged: debug headers,
+-- ngx.ctx and the log_route hook with the caller's ip / host / uri.
+do
+  local hdr, ctxv, routed = {}, {}, nil
+  ngx.get_phase = function() return "access" end
+  ngx.var = { host = "h.gr", request_uri = "/r" }
+  ngx.ctx, ngx.header = ctxv, hdr
+  local c = cfm_decision.new({ debug = true, debug_headers = true },
+    { shdict = sh, real_ip = function() return "198.51.100.1" end, log_route = function(_, m) routed = m end })
+  c.http = function() return nil, "timeout" end
+  local ok = pcall(c.rpc, c, "observe", "POST", "/nginx/observe", "{}", { ip = "203.0.113.9", host = "a.gr", uri = "/p" })
+  check(ok, "a request-phase RPC error does not raise")
+  check(hdr["X-CFM-Bridge-Error"] ~= nil and ctxv.cfm_bridge_error ~= nil, "request phase: debug header and ngx.ctx set")
+  check(routed and routed:find("ip=203.0.113.9", 1, true) and routed:find("host=a.gr", 1, true)
+        and routed:find("uri=/p", 1, true), "request phase: log_route gets the caller's ip/host/uri (" .. tostring(routed) .. ")")
+  routed = nil
+  pcall(c.rpc, c, "observe", "POST", "/nginx/observe", "{}")
+  check(routed and routed:find("ip=198.51.100.1", 1, true) and routed:find("host=h.gr", 1, true),
+        "request phase without req_ctx: falls back to the request (" .. tostring(routed) .. ")")
+end
+
 if fails > 0 then
   io.stderr:write(("decision timer rpc tests: %d FAILED\n"):format(fails))
   os.exit(1)
