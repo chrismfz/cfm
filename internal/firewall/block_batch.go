@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"fmt"
 	"net"
 	"time"
 )
@@ -220,4 +221,22 @@ func HostsPresent(want []net.IP, current []SetElementTimed) []net.IP {
 		}
 	}
 	return out
+}
+
+// ExtendBlock blocks one address for ttl through AddBlockBatch: it adds or
+// extends the block, never shortens it. Automatic blockers (the detector
+// sinks, the challenge server) use it in place of AddBlock, which replaces
+// the element: on the exec backend a webdetector 1h block replaced a 7d WAF
+// ban of the same scanner, which then expired after an hour (mars,
+// 2026-10-09). kept reports an existing block at least as long (or
+// permanent), left unchanged; the address is blocked either way.
+func ExtendBlock(be Backend, ip net.IP, ttl time.Duration) (kept bool, err error) {
+	res, err := be.AddBlockBatch([]BlockEntry{{IP: ip, TTL: ttl}})
+	if err != nil {
+		return false, err
+	}
+	if res.Added+res.Extended+res.Kept == 0 {
+		return false, fmt.Errorf("not blockable: %v", ip)
+	}
+	return res.Kept > 0, nil
 }

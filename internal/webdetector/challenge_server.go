@@ -1693,14 +1693,10 @@ func (s *ChallengeServer) rlFirewallBlock(ip net.IP, kind int) {
 		return
 	}
 
-	// Pick TTL and comment by endpoint kind
-	var ttl time.Duration
-	comment := "cfm:challenge_selfprotect:page"
+	// Pick TTL by endpoint kind
+	ttl := s.rlFwTTLPage
 	if kind == rlKindVerify {
 		ttl = s.rlFwTTLVerify
-		comment = "cfm:challenge_selfprotect:verify"
-	} else {
-		ttl = s.rlFwTTLPage
 	}
 
 	// De-dupe: don't keep re-adding the same block every time we ban in memory.
@@ -1720,7 +1716,7 @@ func (s *ChallengeServer) rlFirewallBlock(ip net.IP, kind int) {
 	st.fwBlockedUntil = now.Add(ttl)
 	s.rlMu.Unlock()
 
-	_ = s.fw.AddBlock(ip, comment, &ttl)
+	_, _ = firewall.ExtendBlock(s.fw, ip, ttl) // never shortens a longer block
 }
 
 // ---------------- helpers ----------------
@@ -1846,8 +1842,7 @@ func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status in
 			if ip == nil {
 				return
 			}
-			comment := "cfm:challenge_abuse"
-			_ = s.fw.AddBlock(ip, comment, &ttl)
+			_, _ = firewall.ExtendBlock(s.fw, ip, ttl) // never shortens a longer block
 		}
 	}
 
