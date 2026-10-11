@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 )
@@ -94,9 +93,11 @@ func (c *Client) ScanStream(r io.Reader, d time.Duration) (*Result, error) {
 	}
 }
 
-// ScanFileStream opens path and INSTREAMs its content.
+// ScanFileStream opens path (OpenRegular: the spool may sit in a dir the
+// edge's user can write, and a FIFO swapped in would block the inline scan)
+// and INSTREAMs its content.
 func (c *Client) ScanFileStream(path string, d time.Duration) (*Result, error) {
-	f, err := os.Open(path)
+	f, err := OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}
