@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.11
+
 ### Fixed
 - **Edge workers no longer re-download the whole certificate list on every
   change during an AutoSSL run.** AutoSSL renews many certs within minutes,
