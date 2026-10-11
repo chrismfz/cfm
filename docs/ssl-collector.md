@@ -147,9 +147,20 @@ once).
 A version-triggered fetch does not take the shared `lock:dumpall`; the
 startup and age-forced fetches do. A `FORCE_DUMPALL_AFTER` (1h) safety net
 re-pulls even if a version change was missed.
+A worker makes at most one version-triggered fetch per
+`DUMPALL_MIN_GAP_SECS` (30s), and none while one is running or once it
+already holds the newest version. AutoSSL renews in a burst and the daemon
+publishes a version per refresh: on earth (2026-10-11, 01:03-01:06) every
+worker re-fetched the whole 110 MB list every ~10s, ~20 times each, and the
+daemon peaked at 1.2 GB serving them. The first change of a burst still goes
+out on the stagger alone; later ones fold into one fetch per gap. Before
+that fix the last worker also fetched every version twice (its 10s stagger
+equals the poll interval, and the poll in the same second, before the
+ingest, scheduled another).
 
 **Net result:** a new domain is live on every worker within ~30s (≈2s
-watcher debounce + ≤10s poll + the ≤20s stagger; ~10–25s with six workers); the 1h fallbacks bound the
+watcher debounce + ≤10s poll + the ≤20s stagger; ~10–25s with six workers;
+a change inside a burst waits up to the 30s gap); the 1h fallbacks bound the
 worst case if the event-driven path ever misses. Until 2026-10-10 the poll
 was 60s and a version-triggered fetch took the shared lock, so the workers
 fetched one per poll: on a six-worker node the last one served a new cert

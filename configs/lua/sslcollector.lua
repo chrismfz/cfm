@@ -534,6 +534,17 @@ local _dumpall_inflight = false
 local DUMPALL_STAGGER_SECS = 2
 local DUMPALL_STAGGER_WINDOW = 20
 local _dumpall_scheduled = false
+-- At most one version-triggered fetch per DUMPALL_MIN_GAP_SECS in a worker.
+-- AutoSSL renews certs in a burst, and the daemon publishes a version per
+-- refresh: on earth (2026-10-11 01:03-01:06) every worker fetched the whole
+-- 110 MB list every ~10 s, ~20 times each, and the daemon peaked at 1.2 GB
+-- serving them. The first change of a burst still goes out at once (stagger
+-- only); the later ones fold into one fetch per gap, which brings the newest.
+local DUMPALL_MIN_GAP_SECS = 30
+local _last_version_fetch_at = 0
+-- The newest version /stats reported; a scheduled fetch is skipped when this
+-- worker already holds it (another fetch got there first).
+local _wanted_version = ""
 
 -- shared_lock: true for the startup and the age-forced fetches, which every
 -- worker would otherwise make at the same moment; they stay one at a time
@@ -700,24 +711,39 @@ local function poll_stats(premature)
         -- must independently detect version changes and fetch for itself.
         -- If the fetch fails or is still pending, _worker_version won't
         -- advance (ingest_dumpall never ran), so the next poll tick sees the
-        -- mismatch again and retries (a scheduled fetch is not doubled).
+        -- mismatch again and retries once DUMPALL_MIN_GAP_SECS has passed
+        -- (a scheduled or running fetch is not doubled).
+        _wanted_version = newv
         if newv ~= _worker_version then
           ngx.log(ngx.NOTICE,
             "[sslcollector] worker version change ", _worker_version, " -> ", newv,
             " (triggering worker refresh)")
-          if not _dumpall_scheduled then
+          -- Not while a fetch runs either: the last worker's stagger equals
+          -- the poll interval, so the poll that ran in the same second as its
+          -- fetch, before the ingest, scheduled a second one (seen on every
+          -- node, 2026-10-11: the last worker ingested each version twice,
+          -- 10 s apart). A fetch that brings an older version is caught by
+          -- the next poll.
+          if not _dumpall_scheduled and not _dumpall_inflight then
             _dumpall_scheduled = true
             local n = (ngx.worker.count and ngx.worker.count()) or 1
             local step = math.min(DUMPALL_STAGGER_SECS, DUMPALL_STAGGER_WINDOW / math.max(n, 1))
             local delay = (ngx.worker.id() or 0) * step
+            local wait = _last_version_fetch_at + DUMPALL_MIN_GAP_SECS - ngx.now()
+            if wait > delay then delay = wait end
+            local function fetch()
+              if _worker_version == _wanted_version then return end
+              _last_version_fetch_at = ngx.now()
+              do_dumpall(false)
+            end
             local tok = ngx.timer.at(delay, function(premature)
               _dumpall_scheduled = false
               if premature then return end
-              do_dumpall(false)
+              fetch()
             end)
             if not tok then
               _dumpall_scheduled = false
-              do_dumpall(false)
+              fetch()
             end
           end
           -- Always update the shared monitoring key regardless of whether
