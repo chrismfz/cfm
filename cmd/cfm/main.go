@@ -587,44 +587,56 @@ func runDaemon(args []string) {
 	// /var/lib/cfm/sslcollector is owned root:cfm 0770 so the OpenResty
 	// worker (running as the cfm user) can read the cert snapshot there.
 	// cfmGID is 0 when the cfm group does not exist yet
-	// (install-openresty.sh not yet run); os.Chown with GID 0 is a
-	// no-op — permissions stay root:root and the daemon logs a warning
-	// when the socket server starts.
+	// (install-openresty.sh not yet run): nothing is chowned —
+	// permissions stay root:root and the daemon logs a warning when the
+	// socket server starts.
 	//
-	// secureDir sets mode and group on the opened dir, refusing a symlink:
-	// scanner/pending and scanner/infected sit in a cfm-writable parent.
+	// nofollow: the parent is writable by the cfm group (scanner, root:cfm
+	// 0770), so the name may be a planted symlink — secureDir sets mode and
+	// group on the opened dir and refuses one. Elsewhere the parent is
+	// root-only, and a symlink is an operator's (a bigger disk) and is
+	// followed.
 	cfmGID := sslcollector.CfmGroupID()
 	for _, d := range []struct {
-		path  string
-		mode  os.FileMode
-		group bool // root:cfm (when the cfm group exists)
+		path     string
+		mode     os.FileMode
+		group    bool // root:cfm (when the cfm group exists)
+		nofollow bool
 	}{
-		{"/var/lib/cfm", 0o701, false},
-		{"/var/lib/cfm/lua", 0o750, true},
-		{"/var/lib/cfm/sslcollector", 0o770, true},
+		{"/var/lib/cfm", 0o701, false, false},
+		{"/var/lib/cfm/lua", 0o750, true, false},
+		{"/var/lib/cfm/sslcollector", 0o770, true, false},
 		// scanner dirs: root:cfm 0770. The Angie worker (cfm user)
 		// writes upload spool files here via cfm_clamav.lua when the
 		// request body is not already on disk as nginx's client body
 		// temp. Without group-write the worker logs "[cfm_clamav]
 		// cannot write temp: Permission denied" on every multipart
 		// POST.
-		{"/var/lib/cfm/scanner", 0o770, true},
-		{"/var/lib/cfm/scanner/pending", 0o770, true},
-		{"/var/lib/cfm/scanner/infected", 0o770, true},
-		{"/var/log/cfm", 0o700, false},
+		{"/var/lib/cfm/scanner", 0o770, true, false},
+		{"/var/lib/cfm/scanner/pending", 0o770, true, true},
+		{"/var/lib/cfm/scanner/infected", 0o770, true, true},
+		{"/var/log/cfm", 0o700, false, false},
 		// /var/run is tmpfs on systemd systems — recreate on every
 		// daemon start. Without this the bridge socket (OPENRESTY_SOCK)
 		// creation fails on boot. 0750 root:cfm: OpenResty/Angie workers
 		// (cfm group) need to traverse in to reach sockets; no other
 		// local user has a reason to list this dir.
-		{"/var/run/cfm", 0o750, true},
+		{"/var/run/cfm", 0o750, true, false},
 	} {
 		gid := 0
 		if d.group {
 			gid = cfmGID
 		}
-		if err := secureDir(d.path, d.mode, gid); err != nil {
-			logging.Logf("[startup] WARNING data dir: %v", err)
+		if d.nofollow {
+			if err := secureDir(d.path, d.mode, gid); err != nil {
+				logging.Logf("[startup] WARNING data dir: %v", err)
+			}
+			continue
+		}
+		_ = os.MkdirAll(d.path, d.mode)
+		_ = os.Chmod(d.path, d.mode)
+		if gid > 0 {
+			_ = os.Chown(d.path, 0, gid)
 		}
 	}
 	if cfmGID > 0 {

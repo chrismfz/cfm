@@ -36,15 +36,19 @@ back-filled here — see the git/PR history for that period.
   the snapshot and make it readable by the `cfm` group. The temp file is now
   created new under a random name, and its mode and group are set on the
   open file.
-- **The daemon's start-up no longer changes the mode or group of whatever a
-  data-dir name points at.** At every start it chmod'ed and chown'ed
-  `/var/lib/cfm/scanner/pending`, `scanner/infected`, the Site Cache zone
-  dirs and `sslcollector/dump.json` by name, in directories the `cfm` group
-  can write. A `cfm` process that replaced one with a symlink had root make
-  the target (`/etc`, say) group-writable by `cfm`, or hand a file such as
-  Debian's `/etc/shadow` to the `cfm` group. The daemon now opens each one
-  without following symlinks and sets mode and group on the open handle; a
-  symlink is left alone with a warning in the log.
+- **The daemon no longer follows a name the web server's user can plant.**
+  `/var/lib/cfm/scanner/pending`, `scanner/infected` and
+  `sslcollector/dump.json` sit in directories the `cfm` group can write.
+  At every start the daemon chmod'ed and chown'ed them by name, so a `cfm`
+  process that replaced one with a symlink had root make the target (`/etc`,
+  say) group-writable by `cfm`, or hand a file such as Debian's
+  `/etc/shadow` to the `cfm` group. They are now opened without following
+  symlinks (a hard-linked `dump.json` is refused too) and set on the open
+  handle; a refused name is left alone with a warning in the log. A FIFO
+  planted as `dump.json` no longer hangs every `/dumpall` and snapshot
+  write, and the snapshot's mtime is no longer stamped by name. Directories
+  in root-only parents (`/var/log/cfm`, the Site Cache zones) still follow
+  an operator's symlink, as before.
 
 ## 2026.10.11
 

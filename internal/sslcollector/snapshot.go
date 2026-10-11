@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"cfm/internal/logging"
@@ -82,10 +83,18 @@ func (c *Collector) WriteSnapshot() {
 	// an hour" — or a partial scan after a quiet week (a reboot) would
 	// overwrite a good snapshot. Only a Complete one is skipped.
 	path := snapshotPath()
-	if h, ok := readSnapshotHeader(path, false); ok && h.Complete && h.Version != "" && h.Version == c.Stats().Version && !forceSnapshot() {
-		now := time.Now()
-		_ = os.Chtimes(path, now, now)
-		return
+	if f, err := openSnapshotFile(path); err == nil {
+		h, ok := readSnapshotHeaderFrom(f, false)
+		if ok && h.Complete && h.Version != "" && h.Version == c.Stats().Version && !forceSnapshot() {
+			// On the open file: by name, a symlink swapped in meanwhile
+			// would have root stamp its target.
+			now := time.Now()
+			ts := []syscall.Timeval{syscall.NsecToTimeval(now.UnixNano()), syscall.NsecToTimeval(now.UnixNano())}
+			_ = syscall.Futimes(int(f.Fd()), ts)
+			_ = f.Close()
+			return
+		}
+		_ = f.Close()
 	}
 
 	// Written straight to the temp file (the payload is never whole in
@@ -174,7 +183,7 @@ type snapshotHeader struct {
 // are counted one by one as a stream (each decoded and dropped). ok=false
 // for a missing, unreadable or malformed file, or one with no version.
 func readSnapshotHeader(path string, needCounts bool) (snapshotHeader, bool) {
-	f, err := os.Open(path)
+	f, err := openSnapshotFile(path)
 	if err != nil {
 		return snapshotHeader{}, false
 	}
@@ -275,13 +284,13 @@ func openCurrentSnapshot(version string) (*os.File, int64, bool) {
 	if version == "" {
 		return nil, 0, false
 	}
-	f, err := os.Open(snapshotPath())
+	f, err := openSnapshotFile(snapshotPath())
 	if err != nil {
 		return nil, 0, false
 	}
 	h, ok := readSnapshotHeaderFrom(f, false)
 	st, serr := f.Stat()
-	if !ok || !h.Complete || h.Version != version || serr != nil || !st.Mode().IsRegular() {
+	if !ok || !h.Complete || h.Version != version || serr != nil {
 		_ = f.Close()
 		return nil, 0, false
 	}
@@ -290,6 +299,23 @@ func openCurrentSnapshot(version string) (*os.File, int64, bool) {
 		return nil, 0, false
 	}
 	return f, st.Size(), true
+}
+
+// openSnapshotFile opens the snapshot for reading: not through a symlink,
+// and only a regular file. The directory is writable by the edge's user,
+// and a FIFO planted at dump.json blocked a plain open forever — every
+// /dumpall and every snapshot write (under snapshotMu) with it.
+func openSnapshotFile(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%s: not a regular file", path)
+	}
+	return f, nil
 }
 
 // writeSnapshotAtomic writes body to path via a sibling .tmp file +

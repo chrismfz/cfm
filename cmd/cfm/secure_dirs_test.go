@@ -28,13 +28,23 @@ func TestSecureDirRefusesASymlink(t *testing.T) {
 	}
 }
 
-// testGID: a group to chown to when the test runs as root (root:<gid> needs
-// root), 0 (no chown) otherwise — the CI runner is not root.
+// testGID: a non-zero group to chown to when the test runs as root
+// (root:<gid> needs root; gid 0 means "no chown"), 0 otherwise — the CI
+// runner is not root.
 func testGID() int {
 	if os.Geteuid() == 0 {
-		return os.Getgid()
+		return 65534
 	}
 	return 0
+}
+
+func gidOf(t *testing.T, path string) int {
+	t.Helper()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int(st.Sys().(*syscall.Stat_t).Gid)
 }
 
 func TestSecureDirCreatesAndFixesTheMode(t *testing.T) {
@@ -45,6 +55,9 @@ func TestSecureDirCreatesAndFixesTheMode(t *testing.T) {
 	}
 	if st, _ := os.Stat(d); !st.IsDir() || st.Mode().Perm() != 0o770 {
 		t.Fatalf("created %v %o", st.IsDir(), st.Mode().Perm())
+	}
+	if g := testGID(); g != 0 && gidOf(t, d) != g {
+		t.Errorf("group %d, want %d", gidOf(t, d), g)
 	}
 	if err := os.Chmod(d, 0o700); err != nil {
 		t.Fatal(err)
@@ -91,11 +104,22 @@ func TestChownRegularFileRefusesSymlinksAndFIFOs(t *testing.T) {
 	if err := chownRegularFile(filepath.Join(dir, "missing.json"), os.Getgid()); err != nil {
 		t.Errorf("missing file: %v", err)
 	}
+	// A hard link to another file (fs.protected_hardlinks off) is not ours.
+	hl := filepath.Join(dir, "hard.json")
+	if err := os.Link(victim, hl); err != nil {
+		t.Fatal(err)
+	}
+	if err := chownRegularFile(hl, os.Getgid()); err == nil {
+		t.Error("chownRegularFile accepted a hard link")
+	}
+
 	reg := filepath.Join(dir, "real.json")
 	if err := os.WriteFile(reg, []byte("{}"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := chownRegularFile(reg, os.Getgid()); err != nil && os.Geteuid() == 0 {
-		t.Errorf("regular file: %v", err)
+	if g := testGID(); g != 0 {
+		if err := chownRegularFile(reg, g); err != nil || gidOf(t, reg) != g {
+			t.Errorf("regular file: err=%v group %d, want %d", err, gidOf(t, reg), g)
+		}
 	}
 }

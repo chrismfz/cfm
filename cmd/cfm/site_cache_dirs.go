@@ -51,9 +51,10 @@ func ensureSiteCacheDirs(root string, gid int) {
 		_ = os.Chmod(root, keep|0o111)
 	}
 	for _, name := range siteCacheDirNames {
-		// Not through a symlink (secureDir): the parent may be writable by
-		// the edge's user.
-		_ = secureDir(filepath.Join(root, name), 0o770, gid)
+		d := filepath.Join(root, name)
+		_ = os.MkdirAll(d, 0o770)
+		_ = os.Chmod(d, 0o770)
+		_ = os.Chown(d, 0, gid)
 	}
 }
 
