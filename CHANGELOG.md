@@ -25,7 +25,7 @@ back-filled here — see the git/PR history for that period.
   the daemon peak at 1.2 GB. The list is now written entry by entry straight
   to the file, and the web server is always served from a file: a synthetic
   60 MB list now costs +28 MB of heap instead of +235 MB, and a certificate
-  change with six web-server workers fetching it +29 MB instead of +351 MB.
+  change with six web-server workers fetching it +57 MB instead of +351 MB.
 
 ### Security
 - **The certificate snapshot's temp file can no longer be redirected by the

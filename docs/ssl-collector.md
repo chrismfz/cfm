@@ -189,8 +189,8 @@ snapshot) the daemon reached 1.2 GB during an AutoSSL run (2026-10-10) and
 during a simulated one with nine cert changes in three minutes
 (2026-10-11). The heap now holds the index copy, one PEM pair per
 certificate and a 256 KB write buffer (a 60 MB synthetic snapshot: +28 MB
-peak, was +235 MB; a version change with six workers fetching: +29 MB, was
-+351 MB).
+peak, was +235 MB; a version change with six workers fetching while the
+snapshot is written: +57 MB, was +351 MB).
 
 A skipped (unchanged) write re-stamps the file's mtime, which the regression
 guard's 1h staleness release reads as "last confirmed current". A
