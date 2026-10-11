@@ -729,7 +729,10 @@ local function poll_stats(premature)
             local n = (ngx.worker.count and ngx.worker.count()) or 1
             local step = math.min(DUMPALL_STAGGER_SECS, DUMPALL_STAGGER_WINDOW / math.max(n, 1))
             local delay = (ngx.worker.id() or 0) * step
-            local wait = _last_version_fetch_at + DUMPALL_MIN_GAP_SECS - ngx.now()
+            -- Capped at the gap: ngx.now() is wall-clock, and a clock stepped
+            -- back would otherwise hold the fetch for as long as the step.
+            local wait = math.min(_last_version_fetch_at + DUMPALL_MIN_GAP_SECS - ngx.now(),
+                                  DUMPALL_MIN_GAP_SECS)
             if wait > delay then delay = wait end
             local function fetch()
               if _worker_version == _wanted_version then return end
@@ -743,7 +746,9 @@ local function poll_stats(premature)
             end)
             if not tok then
               _dumpall_scheduled = false
-              fetch()
+              -- No timer: fetch now, unless inside the gap (the next poll
+              -- retries).
+              if wait <= 0 then fetch() end
             end
           end
           -- Always update the shared monitoring key regardless of whether

@@ -24,8 +24,9 @@ back-filled here — see the git/PR history for that period.
   on a 7 800-host node each worker pulled the 110 MB list ~20 times in 3.5
   minutes and the cfm daemon peaked at 1.2 GB serving them. A worker now
   fetches at most once per 30 s for version changes (the first change still
-  goes out within seconds; later ones are folded into one fetch that brings
-  the newest), and the last worker no longer fetches every version twice.
+  reaches every worker within ~30 s, as before; later ones are folded into
+  one fetch that brings the newest), and the last worker no longer fetches
+  every version twice.
 
 ## 2026.10.10
 

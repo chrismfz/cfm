@@ -275,6 +275,34 @@ if poll_stats then
   f = pending()
   check(f[1] and f[1].delay == 25,
         "next change 5 s after a fetch waits out the 30 s gap (got " .. tostring(f[1] and f[1].delay) .. ")")
+
+  -- A wall clock stepped back 1 h after a fetch: the wait is capped at the gap.
+  if f[1] then f[1].fn(false) end -- fetch v13 at 2215+25
+  local fetched_at = clock
+  stats_version, dumpall_version = "v14", "v14"
+  clock = fetched_at - 3600
+  timers = {}
+  poll()
+  f = pending()
+  check(f[1] and f[1].delay <= 30,
+        "clock stepped back: the wait stays within the gap (got " .. tostring(f[1] and f[1].delay) .. ")")
+  if f[1] then f[1].fn(true) end
+
+  -- No timer available: no fetch inside the gap (the next poll retries).
+  clock = fetched_at + 5
+  timers = {}
+  local real_at = ngx.timer.at
+  ngx.timer.at = function(delay, fn)
+    if fn == poll_stats then return real_at(delay, fn) end
+    return nil, "too many pending timers"
+  end
+  before = count("/dumpall")
+  poll()
+  check(count("/dumpall") == before, "timer failure inside the gap: no fetch")
+  clock = fetched_at + 31
+  poll()
+  check(count("/dumpall") == before + 1, "timer failure past the gap: fetches inline")
+  ngx.timer.at = real_at
   on_dumpall = nil
 end
 
