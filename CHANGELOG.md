@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.11
+
 ### Fixed
 - **The cfm daemon no longer needs four times the certificate list's size in
   memory to write it.** Each certificate change rebuilt the whole list (all
@@ -77,8 +81,6 @@ back-filled here — see the git/PR history for that period.
     `pending` with no control characters in its name, a queued file
     swapped for a symlink or FIFO is dropped, and the stale-spool sweep no
     longer follows a symlinked `pending`.
-
-## 2026.10.11
 
 ### Fixed
 - **Edge workers no longer re-download the whole certificate list on every
