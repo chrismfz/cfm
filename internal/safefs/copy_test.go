@@ -1,4 +1,4 @@
-package clam
+package safefs
 
 import (
 	"os"
@@ -49,9 +49,6 @@ func TestOpenRegularRefusesSymlinksAndFIFOs(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("blocked on a FIFO")
-	}
-	if _, err := isArchiveFile(link); err == nil {
-		t.Error("isArchiveFile read through a symlink")
 	}
 }
 

@@ -78,3 +78,43 @@ func TestIsArchiveFile(t *testing.T) {
 		t.Fatal("missing file should return an error (caller fails open to scanning)")
 	}
 }
+
+// pending is writable by the edge's user: a queued file swapped for a
+// symlink is not read through.
+func TestIsArchiveFileDoesNotFollowASymlink(t *testing.T) {
+	dir := t.TempDir()
+	zip := filepath.Join(dir, "z")
+	if err := os.WriteFile(zip, []byte("PK\x03\x04"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "l")
+	if err := os.Symlink(zip, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := isArchiveFile(link); err == nil {
+		t.Error("isArchiveFile read through a symlink")
+	}
+}
+
+// A queued temp copy swapped for a symlink (to /: ScanPath walked the whole
+// filesystem as root) is dropped, not followed; the link is removed, its
+// target left alone.
+func TestProcessDropsASymlinkedTempCopy(t *testing.T) {
+	victim := t.TempDir()
+	keep := filepath.Join(victim, "keep")
+	if err := os.WriteFile(keep, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "upload_1")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(Config{Enabled: true, Network: "unix", Address: filepath.Join(t.TempDir(), "none.sock")})
+	m.process(Job{Path: link, TempCopy: true})
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("symlinked temp copy not removed: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("symlink target touched: %v", err)
+	}
+}

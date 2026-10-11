@@ -49,17 +49,26 @@ back-filled here — see the git/PR history for that period.
   write, and the snapshot's mtime is no longer stamped by name. Directories
   in root-only parents (`/var/log/cfm`, the Site Cache zones) still follow
   an operator's symlink, as before.
-- **A ClamAV upload copy can no longer be redirected to an arbitrary file.**
-  The scanner's `pending` and `infected` directories are writable by the web
-  server's user (`cfm`). When an inline scan failed, the daemon (root) copied
-  the upload to `pending/inline_fb_<name>`, and an infected upload's evidence
-  to `infected/<name>`, by writing to that fixed name — following a symlink
-  planted there. A `cfm` process could thus have root write upload bytes of
-  its choosing anywhere (`/etc/cron.d/…`). Every copy into those directories
-  (including the bridge's `upload_<time>_<ip>` copy) is now a new file with a
-  random suffix, created exclusively, and the source is read without
-  following a symlink or blocking on a FIFO. Evidence files are now named
-  `<name>.<random>`.
+- **The web server's user can no longer make the daemon write, chmod or
+  delete files elsewhere through the ClamAV scanner directories.** The
+  scanner dir was `root:cfm 0770`, so a `cfm` process could rename `pending`
+  or `infected` away and put a symlink (to `/etc`, say) in its place: every
+  15 s root re-applied mode 0770 and group `cfm` to it by name, copied
+  uploads (bytes of the attacker's choosing) and infected evidence into it,
+  and removed spool files resolved through it. Even without the directory
+  swap, root wrote the inline-scan fallback copy and the evidence copy to a
+  fixed file name, following a symlink planted there. Now:
+  - `scanner` is `root:cfm 0750` and `infected` `root:root 0700` (the edge
+    only ever writes `pending`, which stays `root:cfm 0770`); their mode and
+    owner are set on the opened directory, and a directory that is a
+    symlink is refused and the feature that uses it disabled, with a
+    warning — an operator who symlinked `pending` or `infected` elsewhere
+    must point `CLAMD_PENDING_DIR` / `CLAMD_INFECTED_DIR` at the real path;
+  - every copy into those dirs is a new file with a random suffix, created
+    exclusively, read from a source opened without following a symlink or
+    blocking on a FIFO (inline evidence is now named `<name>.<random>`);
+  - a spool the edge hands over must be a regular file directly in
+    `pending`, and a queued file swapped for a symlink or FIFO is dropped.
 
 ## 2026.10.11
 

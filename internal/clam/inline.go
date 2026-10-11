@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"cfm/internal/safefs"
 )
 
 // Inline (blocking) upload scanning — CLAM_SCAN_MODE=inline. The edge calls
@@ -99,7 +101,7 @@ func (m *Manager) ScanUploadSync(job Job) SyncVerdict {
 	evidence := ""
 	if job.InfectedDir != "" {
 		_ = os.MkdirAll(job.InfectedDir, 0o700)
-		if p, cerr := CopyToNew(job.Path, job.InfectedDir, filepath.Base(job.Path)+"."); cerr == nil {
+		if p, cerr := safefs.CopyToNew(job.Path, job.InfectedDir, filepath.Base(job.Path)+"."); cerr == nil {
 			evidence = p
 		}
 	}
@@ -131,7 +133,7 @@ func (m *Manager) enqueueAsyncFallback(job Job) {
 		return
 	}
 	_ = os.MkdirAll(m.cfg.PendingDir, 0o700)
-	dst, err := CopyToNew(job.Path, m.cfg.PendingDir, "inline_fb_"+filepath.Base(job.Path)+".")
+	dst, err := safefs.CopyToNew(job.Path, m.cfg.PendingDir, "inline_fb_"+filepath.Base(job.Path)+".")
 	if err != nil {
 		return
 	}

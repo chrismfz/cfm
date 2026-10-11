@@ -17,6 +17,7 @@ import (
 	"cfm/internal/mailtraffic"
 	"cfm/internal/notify"
 	"cfm/internal/panelauth"
+	"cfm/internal/safefs"
 	"cfm/internal/srcreportcli"
 	status "cfm/internal/status"
 	"cfm/internal/sysctl"
@@ -591,51 +592,65 @@ func runDaemon(args []string) {
 	// permissions stay root:root and the daemon logs a warning when the
 	// socket server starts.
 	//
-	// nofollow: the parent is writable by the cfm group (scanner, root:cfm
-	// 0770), so the name may be a planted symlink — secureDir sets mode and
-	// group on the opened dir and refuses one. Elsewhere the parent is
+	// Only pending is writable by the cfm group under scanner; scanner itself
+	// is not (0750), so pending and infected cannot be swapped for a symlink
+	// by the edge's user. Until 2026-10-11 scanner was 0770 root:cfm and
+	// infected 0770 root:cfm: a cfm process could rename pending away and
+	// put a symlink to /etc there, and root wrote upload copies — and
+	// chmod/chown'd the dir — through it. pending and infected still go
+	// through safefs.SecureDir (no symlink followed): one planted before
+	// this upgrade is refused, not followed. Elsewhere the parent is
 	// root-only, and a symlink is an operator's (a bigger disk) and is
 	// followed.
 	cfmGID := sslcollector.CfmGroupID()
+	const (
+		ownNone = iota // leave the group alone
+		ownCfm         // root:cfm (when the cfm group exists)
+		ownRoot        // root:root
+	)
 	for _, d := range []struct {
 		path     string
 		mode     os.FileMode
-		group    bool // root:cfm (when the cfm group exists)
+		own      int
 		nofollow bool
 	}{
-		{"/var/lib/cfm", 0o701, false, false},
-		{"/var/lib/cfm/lua", 0o750, true, false},
-		{"/var/lib/cfm/sslcollector", 0o770, true, false},
-		// scanner dirs: root:cfm 0770. The Angie worker (cfm user)
-		// writes upload spool files here via cfm_clamav.lua when the
-		// request body is not already on disk as nginx's client body
-		// temp. Without group-write the worker logs "[cfm_clamav]
-		// cannot write temp: Permission denied" on every multipart
-		// POST.
-		{"/var/lib/cfm/scanner", 0o770, true, false},
-		{"/var/lib/cfm/scanner/pending", 0o770, true, true},
-		{"/var/lib/cfm/scanner/infected", 0o770, true, true},
-		{"/var/log/cfm", 0o700, false, false},
+		{"/var/lib/cfm", 0o701, ownNone, false},
+		{"/var/lib/cfm/lua", 0o750, ownCfm, false},
+		{"/var/lib/cfm/sslcollector", 0o770, ownCfm, false},
+		// scanner: root:cfm 0750, traversable by the edge. pending:
+		// root:cfm 0770 — the Angie worker (cfm user) writes upload spool
+		// files there via cfm_clamav.lua when the request body is not
+		// already on disk as nginx's client body temp (without
+		// group-write it logs "[cfm_clamav] cannot write temp: Permission
+		// denied" on every multipart POST). infected: root only — the
+		// edge never reads or writes evidence.
+		{"/var/lib/cfm/scanner", 0o750, ownCfm, false},
+		{"/var/lib/cfm/scanner/pending", 0o770, ownCfm, true},
+		{"/var/lib/cfm/scanner/infected", 0o700, ownRoot, true},
+		{"/var/log/cfm", 0o700, ownNone, false},
 		// /var/run is tmpfs on systemd systems — recreate on every
 		// daemon start. Without this the bridge socket (OPENRESTY_SOCK)
 		// creation fails on boot. 0750 root:cfm: OpenResty/Angie workers
 		// (cfm group) need to traverse in to reach sockets; no other
 		// local user has a reason to list this dir.
-		{"/var/run/cfm", 0o750, true, false},
+		{"/var/run/cfm", 0o750, ownCfm, false},
 	} {
-		gid := 0
-		if d.group {
+		gid := -1
+		switch {
+		case d.own == ownCfm && cfmGID > 0:
 			gid = cfmGID
+		case d.own == ownRoot:
+			gid = 0
 		}
 		if d.nofollow {
-			if err := secureDir(d.path, d.mode, gid); err != nil {
+			if err := safefs.SecureDir(d.path, d.mode, gid); err != nil {
 				logging.Logf("[startup] WARNING data dir: %v", err)
 			}
 			continue
 		}
 		_ = os.MkdirAll(d.path, d.mode)
 		_ = os.Chmod(d.path, d.mode)
-		if gid > 0 {
+		if gid >= 0 {
 			_ = os.Chown(d.path, 0, gid)
 		}
 	}
@@ -644,7 +659,7 @@ func runDaemon(args []string) {
 		// root:root before the cfm group was in place). Without this,
 		// OpenResty (cfm user) cannot read the snapshot on startup
 		// until it successfully writes a new one. Not through a symlink.
-		if err := chownRegularFile("/var/lib/cfm/sslcollector/dump.json", cfmGID); err != nil {
+		if err := safefs.ChownRegularFile("/var/lib/cfm/sslcollector/dump.json", cfmGID); err != nil {
 			logging.Logf("[startup] WARNING snapshot: %v", err)
 		}
 		// Site Cache dirs (root:cfm 0770, parent traversable) — see

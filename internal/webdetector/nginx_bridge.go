@@ -32,6 +32,7 @@ import (
 	"cfm/internal/edgeban"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
+	"cfm/internal/safefs"
 	"cfm/internal/sslcollector"
 	"context"
 	"crypto/sha256"
@@ -227,6 +228,7 @@ type NginxBridge struct {
 
 	// Clam
 	clamMgr      clam.Enqueuer
+	clamDirWarn  string // last SetClamManager dir refusal logged
 	clamPending  string
 	clamInfected string
 
@@ -700,26 +702,43 @@ func (b *NginxBridge) SetClamManager(m clam.Enqueuer, pendingDir, infectedDir st
 	if b == nil {
 		return
 	}
+	// pending: root:cfm 0770 so the Angie worker (cfm user) can write
+	// upload spool files here directly from cfm_clamav.lua's write_temp
+	// when the body is not already on disk as nginx's client body temp.
+	// infected: root only (the edge never touches evidence). runDaemon() in
+	// cmd/cfm/main.go pre-creates the default dirs; this redoes it for a
+	// PendingDir/InfectedDir an admin overrode. On the opened dir, never by
+	// name (safefs.SecureDir): this runs every 15 s, and by name a
+	// symlink at the path had root chmod 0770 / chown root:cfm its target.
+	// A dir that is a symlink disables what uses it: root copies uploads
+	// into pending and evidence into infected, and must not do it through
+	// a link the edge's user may have planted.
+	var msgs []string
+	if pendingDir != "" {
+		gid := -1
+		if g := sslcollector.CfmGroupID(); g > 0 {
+			gid = g
+		}
+		if err := safefs.SecureDir(pendingDir, 0o770, gid); err != nil {
+			msgs = append(msgs, "clam pending dir refused, upload scanning disabled: "+err.Error())
+			m, pendingDir = nil, ""
+		}
+	}
+	if infectedDir != "" {
+		if err := safefs.SecureDir(infectedDir, 0o700, 0); err != nil {
+			msgs = append(msgs, "clam infected dir refused, no evidence kept: "+err.Error())
+			infectedDir = ""
+		}
+	}
+	if w := strings.Join(msgs, "; "); w != b.clamDirWarn {
+		b.clamDirWarn = w // every 15 s: log a change, not each call
+		if w != "" {
+			logging.Logf("[nginx-bridge] WARNING %s", w)
+		}
+	}
 	b.clamMgr = m
 	b.clamPending = pendingDir
 	b.clamInfected = infectedDir
-	// 0770 root:cfm so the Angie worker (cfm user) can write upload
-	// spool files here directly from cfm_clamav.lua's write_temp when
-	// the body is not already on disk as nginx's client body temp.
-	// runDaemon() in cmd/cfm/main.go pre-creates these with the same
-	// mode and chowns to the cfm group; we redo it here in case the
-	// admin overrode PendingDir/InfectedDir to a non-default path.
-	gid := sslcollector.CfmGroupID()
-	for _, d := range []string{pendingDir, infectedDir} {
-		if d == "" {
-			continue
-		}
-		_ = os.MkdirAll(d, 0o770)
-		_ = os.Chmod(d, 0o770)
-		if gid > 0 {
-			_ = os.Chown(d, 0, gid)
-		}
-	}
 }
 
 type nginxUploadMsg struct {
@@ -787,8 +806,8 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		safeIP := sanitizeForFilename(ip)
 		// A new file (O_EXCL), read without following a symlink: pending
-		// is writable by the edge's user (clam.CopyToNew).
-		dst, err := clam.CopyToNew(srcPath, b.clamPending,
+		// is writable by the edge's user (safefs.CopyToNew).
+		dst, err := safefs.CopyToNew(srcPath, b.clamPending,
 			fmt.Sprintf("upload_%d_%s_", time.Now().UnixNano(), safeIP))
 		if err != nil {
 			logging.LogfCLAM("[upload] copy_failed src=%q err=%v", srcPath, err)
@@ -938,7 +957,18 @@ func validateUploadSourcePath(bodyFile string, alreadyCopied bool, clamPending s
 		return "", false
 	}
 	if alreadyCopied {
-		return validatePathWithinDir(srcPath, clamPending)
+		// The edge's own spool (cfm_clamav.lua write_temp): a regular file
+		// directly in pending, by the very path given. Root removes it after
+		// the scan, and pending is writable by the edge's user: resolving
+		// symlinks (or accepting a subdir it could later swap for one) let
+		// a path like pending/x -> /etc/shadow be deleted as root.
+		if clamPending == "" || filepath.Dir(srcPath) != filepath.Clean(clamPending) {
+			return "", false
+		}
+		if fi, err := os.Lstat(srcPath); err != nil || !fi.Mode().IsRegular() {
+			return "", false
+		}
+		return srcPath, true
 	}
 	for _, base := range nginxUploadAllowedDirs {
 		if p, ok := validatePathWithinDir(srcPath, base); ok {

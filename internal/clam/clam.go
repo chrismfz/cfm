@@ -379,7 +379,17 @@ func (m *Manager) worker(id int) {
 }
 
 func (m *Manager) process(job Job) {
-	fi, err := os.Stat(job.Path)
+	// A temp copy sits in pending, writable by the edge's user: one swapped
+	// for a symlink (to /, say — a root walk of the whole filesystem through
+	// ScanPath) or a FIFO is dropped, not followed.
+	stat := os.Stat
+	if job.TempCopy {
+		stat = os.Lstat
+	}
+	fi, err := stat(job.Path)
+	if err == nil && job.TempCopy && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("not a regular file (%s)", fi.Mode().Type())
+	}
 	if err != nil {
 		logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
 			job.IP, job.Host, job.URI, job.Reason, err)

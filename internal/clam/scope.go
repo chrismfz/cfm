@@ -2,6 +2,8 @@ package clam
 
 import (
 	"io"
+
+	"cfm/internal/safefs"
 )
 
 // Scan-scope gate (CLAM_SCAN_SCOPE=archives): decide from a file's MAGIC BYTES
@@ -67,7 +69,7 @@ func isArchiveMagic(head []byte) bool {
 // An open/read error is returned so the caller can fail toward coverage
 // (scan anyway) rather than silently skipping.
 func isArchiveFile(path string) (bool, error) {
-	f, err := OpenRegular(path) // pending is writable by the edge's user
+	f, err := safefs.OpenRegular(path) // pending is writable by the edge's user
 	if err != nil {
 		return false, err
 	}
