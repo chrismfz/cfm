@@ -227,10 +227,11 @@ type NginxBridge struct {
 	chalPageLogAt map[string]time.Time
 
 	// Clam
-	clamMgr      clam.Enqueuer
-	clamDirWarn  string // last SetClamManager dir refusal logged
-	clamPending  string
-	clamInfected string
+	// clam: the scanner wiring, replaced whole by SetClamManager (every
+	// 15 s, and on reload) while the upload handlers read it.
+	clam        atomic.Pointer[clamWiring]
+	clamSetMu   sync.Mutex // serialises SetClamManager
+	clamDirWarn string     // last dir refusal logged (under clamSetMu)
 
 	// enricher maxmind
 	// LookupCachedOrAsync is used on the request hot path so a cold IP's
@@ -689,10 +690,10 @@ type clamSyncScanner interface {
 // ClamHealth returns the scanner health snapshot when a clam manager is wired
 // and exposes one. Non-blocking (reads cached breaker state; never dials clamd).
 func (b *NginxBridge) ClamHealth() (clam.HealthSnapshot, bool) {
-	if b == nil || b.clamMgr == nil {
+	if b == nil || b.clamWired().mgr == nil {
 		return clam.HealthSnapshot{}, false
 	}
-	if hr, ok := b.clamMgr.(clamHealthReporter); ok {
+	if hr, ok := b.clamWired().mgr.(clamHealthReporter); ok {
 		return hr.Health(), true
 	}
 	return clam.HealthSnapshot{}, false
@@ -713,6 +714,8 @@ func (b *NginxBridge) SetClamManager(m clam.Enqueuer, pendingDir, infectedDir st
 	// A dir that is a symlink disables what uses it: root copies uploads
 	// into pending and evidence into infected, and must not do it through
 	// a link the edge's user may have planted.
+	b.clamSetMu.Lock()
+	defer b.clamSetMu.Unlock()
 	var msgs []string
 	if pendingDir != "" {
 		gid := -1
@@ -725,7 +728,7 @@ func (b *NginxBridge) SetClamManager(m clam.Enqueuer, pendingDir, infectedDir st
 		}
 	}
 	if infectedDir != "" {
-		if err := safefs.SecureDir(infectedDir, 0o700, 0); err != nil {
+		if err := safefs.SecureDir(infectedDir, 0o700, clamInfectedGID); err != nil {
 			msgs = append(msgs, "clam infected dir refused, no evidence kept: "+err.Error())
 			infectedDir = ""
 		}
@@ -736,9 +739,25 @@ func (b *NginxBridge) SetClamManager(m clam.Enqueuer, pendingDir, infectedDir st
 			logging.Logf("[nginx-bridge] WARNING %s", w)
 		}
 	}
-	b.clamMgr = m
-	b.clamPending = pendingDir
-	b.clamInfected = infectedDir
+	b.clam.Store(&clamWiring{mgr: m, pending: pendingDir, infected: infectedDir})
+}
+
+// clamInfectedGID is the infected dir's group (root:root). A var for tests,
+// which do not run as root (-1: leave the group alone).
+var clamInfectedGID = 0
+
+// clamWiring is the scanner as the upload handlers see it.
+type clamWiring struct {
+	mgr      clam.Enqueuer
+	pending  string
+	infected string
+}
+
+func (b *NginxBridge) clamWired() clamWiring {
+	if p := b.clam.Load(); p != nil {
+		return *p
+	}
+	return clamWiring{}
 }
 
 type nginxUploadMsg struct {
@@ -779,12 +798,13 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 	logging.LogfCLAM("[upload] ip=%s host=%s uri=%s filename=%q reason=%s",
 		ip, host, uri, filename, reason)
 
-	if bodyFile == "" || b.clamMgr == nil || !b.clamMgr.Enabled() {
+	cw := b.clamWired()
+	if bodyFile == "" || cw.mgr == nil || !cw.mgr.Enabled() {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	srcPath, ok := validateUploadSourcePath(bodyFile, msg.AlreadyCopied, b.clamPending)
+	srcPath, ok := validateUploadSourcePath(bodyFile, msg.AlreadyCopied, cw.pending)
 	if !ok {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -807,7 +827,7 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 		safeIP := sanitizeForFilename(ip)
 		// A new file (O_EXCL), read without following a symlink: pending
 		// is writable by the edge's user (safefs.CopyToNew).
-		dst, err := safefs.CopyToNew(srcPath, b.clamPending,
+		dst, err := safefs.CopyToNew(srcPath, cw.pending,
 			fmt.Sprintf("upload_%d_%s_", time.Now().UnixNano(), safeIP))
 		if err != nil {
 			logging.LogfCLAM("[upload] copy_failed src=%q err=%v", srcPath, err)
@@ -826,7 +846,7 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 		label += ":" + filename
 	}
 
-	enqueued := b.clamMgr.Enqueue(clam.Job{
+	enqueued := cw.mgr.Enqueue(clam.Job{
 		Path:        scanPath,
 		IP:          ip,
 		Host:        host,
@@ -834,7 +854,7 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 		FileName:    filename,
 		Reason:      label,
 		TempCopy:    true,
-		InfectedDir: b.clamInfected,
+		InfectedDir: cw.infected,
 	})
 
 	if !enqueued && tempOwned && scanPath != "" {
@@ -914,12 +934,13 @@ func (b *NginxBridge) handleUploadScanSync(w http.ResponseWriter, r *http.Reques
 	uri := strings.TrimSpace(msg.URI)
 	filename := strings.TrimSpace(msg.Filename)
 
-	scanner, _ := b.clamMgr.(clamSyncScanner)
-	if b.clamMgr == nil || !b.clamMgr.Enabled() || scanner == nil {
+	cw := b.clamWired()
+	scanner, _ := cw.mgr.(clamSyncScanner)
+	if cw.mgr == nil || !cw.mgr.Enabled() || scanner == nil {
 		writeVerdict(allow("scanner_unavailable"))
 		return
 	}
-	srcPath, ok := validateUploadSourcePath(msg.BodyFile, msg.AlreadyCopied, b.clamPending)
+	srcPath, ok := validateUploadSourcePath(msg.BodyFile, msg.AlreadyCopied, cw.pending)
 	if !ok {
 		writeVerdict(allow("bad_path"))
 		return
@@ -935,7 +956,7 @@ func (b *NginxBridge) handleUploadScanSync(w http.ResponseWriter, r *http.Reques
 		URI:         uri,
 		FileName:    filename,
 		Reason:      "UPLOAD:inline",
-		InfectedDir: b.clamInfected,
+		InfectedDir: cw.infected,
 	})
 	logging.LogfCLAM("[upload_sync] ip=%s host=%s uri=%s verdict=%s block=%v sig=%q",
 		ip, host, uri, v.Verdict, v.Block, v.Signature)
@@ -963,6 +984,11 @@ func validateUploadSourcePath(bodyFile string, alreadyCopied bool, clamPending s
 		// symlinks (or accepting a subdir it could later swap for one) let
 		// a path like pending/x -> /etc/shadow be deleted as root.
 		if clamPending == "" || filepath.Dir(srcPath) != filepath.Clean(clamPending) {
+			return "", false
+		}
+		// The async scan sends the path to clamd in a newline-terminated
+		// command: no control characters in it.
+		if strings.IndexFunc(srcPath, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
 			return "", false
 		}
 		if fi, err := os.Lstat(srcPath); err != nil || !fi.Mode().IsRegular() {

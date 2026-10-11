@@ -3,6 +3,7 @@ package webdetector
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -54,6 +55,11 @@ func TestValidateUploadSourcePathAlreadyCopiedIsADirectRegularChild(t *testing.T
 // by name, so a symlink at either had root chmod 0770 / chown root:cfm its
 // target. Now a symlinked dir is left alone and disables what uses it.
 func TestSetClamManagerRefusesSymlinkedDirs(t *testing.T) {
+	if os.Geteuid() != 0 { // root:root needs root (the CI runner is not)
+		orig := clamInfectedGID
+		clamInfectedGID = -1
+		t.Cleanup(func() { clamInfectedGID = orig })
+	}
 	root := t.TempDir()
 	victim := filepath.Join(root, "etc")
 	if err := os.Mkdir(victim, 0o700); err != nil {
@@ -73,8 +79,8 @@ func TestSetClamManagerRefusesSymlinkedDirs(t *testing.T) {
 	if st, _ := os.Stat(victim); st.Mode().Perm() != 0o700 {
 		t.Fatalf("symlink target re-moded to %o", st.Mode().Perm())
 	}
-	if b.clamMgr != nil || b.clamPending != "" || b.clamInfected != "" {
-		t.Fatalf("symlinked dirs still wired: mgr=%v pending=%q infected=%q", b.clamMgr, b.clamPending, b.clamInfected)
+	if cw := b.clamWired(); cw.mgr != nil || cw.pending != "" || cw.infected != "" {
+		t.Fatalf("symlinked dirs still wired: %+v", cw)
 	}
 	if b.clamDirWarn == "" {
 		t.Error("refusal not recorded for the log")
@@ -83,8 +89,8 @@ func TestSetClamManagerRefusesSymlinkedDirs(t *testing.T) {
 	// Plain dirs: pending 0770, infected 0700, wired.
 	p2, i2 := filepath.Join(root, "p2"), filepath.Join(root, "i2")
 	b.SetClamManager(fake, p2, i2)
-	if b.clamMgr == nil || b.clamPending != p2 || b.clamInfected != i2 {
-		t.Fatalf("plain dirs not wired")
+	if cw := b.clamWired(); cw.mgr == nil || cw.pending != p2 || cw.infected != i2 {
+		t.Fatalf("plain dirs not wired: %+v", cw)
 	}
 	if st, _ := os.Stat(p2); st.Mode().Perm() != 0o770 {
 		t.Errorf("pending mode %o", st.Mode().Perm())
@@ -94,5 +100,23 @@ func TestSetClamManagerRefusesSymlinkedDirs(t *testing.T) {
 	}
 	if b.clamDirWarn != "" {
 		t.Errorf("stale warning %q", b.clamDirWarn)
+	}
+	if os.Geteuid() == 0 {
+		if st, _ := os.Stat(i2); st.Sys().(*syscall.Stat_t).Gid != 0 {
+			t.Errorf("infected group %d, want root", st.Sys().(*syscall.Stat_t).Gid)
+		}
+	}
+}
+
+// A spool name with a control character is refused: the async scan sends
+// the path to clamd in a newline-terminated command.
+func TestValidateUploadSourcePathRefusesControlChars(t *testing.T) {
+	pending := t.TempDir()
+	p := filepath.Join(pending, "upload_x\nSHUTDOWN")
+	if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := validateUploadSourcePath(p, true, pending); ok {
+		t.Error("control character accepted in a spool name")
 	}
 }

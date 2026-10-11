@@ -62,13 +62,20 @@ back-filled here — see the git/PR history for that period.
     only ever writes `pending`, which stays `root:cfm 0770`); their mode and
     owner are set on the opened directory, and a directory that is a
     symlink is refused and the feature that uses it disabled, with a
-    warning — an operator who symlinked `pending` or `infected` elsewhere
-    must point `CLAMD_PENDING_DIR` / `CLAMD_INFECTED_DIR` at the real path;
+    warning. An operator who symlinked `pending` or `infected` to another
+    disk must replace the symlink with a real directory or a bind mount
+    (not change `CLAMD_PENDING_DIR`: the edge's spool path is fixed at
+    `/var/lib/cfm/scanner/pending`);
   - every copy into those dirs is a new file with a random suffix, created
     exclusively, read from a source opened without following a symlink or
-    blocking on a FIFO (inline evidence is now named `<name>.<random>`);
+    blocking on a FIFO; evidence, inline and async, is now a copy named
+    `<name>.<random>` (async evidence used to be the edge's own spool,
+    renamed — its user could rewrite it, or overwrite it by re-posting the
+    name);
   - a spool the edge hands over must be a regular file directly in
-    `pending`, and a queued file swapped for a symlink or FIFO is dropped.
+    `pending` with no control characters in its name, a queued file
+    swapped for a symlink or FIFO is dropped, and the stale-spool sweep no
+    longer follows a symlinked `pending`.
 
 ## 2026.10.11
 

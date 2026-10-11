@@ -1,9 +1,13 @@
 package clam
 
 import (
+	"bufio"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // The archives scope gate keys on magic bytes only. Positive: every container
@@ -116,5 +120,62 @@ func TestProcessDropsASymlinkedTempCopy(t *testing.T) {
 	}
 	if _, err := os.Stat(keep); err != nil {
 		t.Errorf("symlink target touched: %v", err)
+	}
+}
+
+// fakeScanClamd answers every newline-terminated command with "<path>:
+// Eicar FOUND" (the async SCAN path).
+func fakeScanClamd(t *testing.T) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "clamd.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				line, _ := bufio.NewReader(c).ReadString('\n')
+				_, _ = c.Write([]byte(strings.TrimPrefix(strings.TrimSpace(line), "SCAN ") + ": Eicar-Test-Signature FOUND\n"))
+			}(c)
+		}
+	}()
+	return sock
+}
+
+// Async evidence is a copy into a new file, not the edge's spool renamed:
+// renamed, its inode stayed writable through an fd the edge's user held, and
+// re-posting the (known) name overwrote earlier evidence.
+func TestAsyncEvidenceIsANewCopy(t *testing.T) {
+	pending, inf := t.TempDir(), t.TempDir()
+	spool := filepath.Join(pending, "upload_1")
+	if err := os.WriteFile(spool, []byte("X5O!P%@AP"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Earlier evidence under the spool's plain name must survive.
+	earlier := filepath.Join(inf, "upload_1")
+	if err := os.WriteFile(earlier, []byte("EARLIER"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(Config{Enabled: true, Network: "unix", Address: fakeScanClamd(t), Timeout: 2 * time.Second})
+	m.process(Job{Path: spool, TempCopy: true, InfectedDir: inf})
+	if _, err := os.Lstat(spool); !os.IsNotExist(err) {
+		t.Errorf("spool left in pending: %v", err)
+	}
+	if b, _ := os.ReadFile(earlier); string(b) != "EARLIER" {
+		t.Errorf("earlier evidence overwritten: %q", b)
+	}
+	got, _ := filepath.Glob(filepath.Join(inf, "upload_1.*"))
+	if len(got) != 1 {
+		t.Fatalf("evidence copies: %v", got)
+	}
+	if b, _ := os.ReadFile(got[0]); string(b) != "X5O!P%@AP" {
+		t.Errorf("evidence content %q", b)
 	}
 }

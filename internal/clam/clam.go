@@ -13,6 +13,7 @@ import (
 
 	"cfm/internal/enrich"
 	"cfm/internal/notify"
+	"cfm/internal/safefs"
 )
 
 type Config struct {
@@ -485,12 +486,16 @@ func (m *Manager) process(job Job) {
 	}
 
 	if r.Infected && !sigIgnoredHit {
-		dest := job.Path // fallback if rename fails
+		dest := job.Path // fallback if the copy fails
 		if job.InfectedDir != "" {
 			_ = os.MkdirAll(job.InfectedDir, 0o700)
-			candidate := filepath.Join(job.InfectedDir, filepath.Base(job.Path))
-			if rerr := os.Rename(job.Path, candidate); rerr == nil {
-				dest = candidate
+			// A copy into a new file, as inline evidence: renamed, the
+			// edge's own spool kept its inode (writable through an fd its
+			// user still held), and its name — which that user knows —
+			// could be re-posted to overwrite earlier evidence.
+			if p, cerr := safefs.CopyToNew(job.Path, job.InfectedDir, filepath.Base(job.Path)+"."); cerr == nil {
+				_ = os.Remove(job.Path)
+				dest = p
 			}
 		}
 		logf("[clam_scan] evidence kept path=%s ip=%s host=%s sig=%q",

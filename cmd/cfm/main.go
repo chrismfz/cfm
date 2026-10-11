@@ -1721,6 +1721,11 @@ func resolveOutboundAllowOwners(cfg *cfgpkg.Config) {
 }
 
 func sweepPendingDir(dir string, maxAge time.Duration) {
+	// Not through a symlink at dir (one planted before scanner became
+	// 0750): it would remove upload_* files wherever it points.
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
