@@ -36,6 +36,15 @@ back-filled here — see the git/PR history for that period.
   the snapshot and make it readable by the `cfm` group. The temp file is now
   created new under a random name, and its mode and group are set on the
   open file.
+- **The daemon's start-up no longer changes the mode or group of whatever a
+  data-dir name points at.** At every start it chmod'ed and chown'ed
+  `/var/lib/cfm/scanner/pending`, `scanner/infected`, the Site Cache zone
+  dirs and `sslcollector/dump.json` by name, in directories the `cfm` group
+  can write. A `cfm` process that replaced one with a symlink had root make
+  the target (`/etc`, say) group-writable by `cfm`, or hand a file such as
+  Debian's `/etc/shadow` to the `cfm` group. The daemon now opens each one
+  without following symlinks and sets mode and group on the open handle; a
+  symlink is left alone with a warning in the log.
 
 ## 2026.10.11
 

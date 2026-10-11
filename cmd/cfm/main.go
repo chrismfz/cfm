@@ -590,48 +590,51 @@ func runDaemon(args []string) {
 	// (install-openresty.sh not yet run); os.Chown with GID 0 is a
 	// no-op — permissions stay root:root and the daemon logs a warning
 	// when the socket server starts.
+	//
+	// secureDir sets mode and group on the opened dir, refusing a symlink:
+	// scanner/pending and scanner/infected sit in a cfm-writable parent.
 	cfmGID := sslcollector.CfmGroupID()
 	for _, d := range []struct {
-		path string
-		mode os.FileMode
+		path  string
+		mode  os.FileMode
+		group bool // root:cfm (when the cfm group exists)
 	}{
-		{"/var/lib/cfm", 0o701},
-		{"/var/lib/cfm/lua", 0o750},
-		{"/var/lib/cfm/sslcollector", 0o770},
+		{"/var/lib/cfm", 0o701, false},
+		{"/var/lib/cfm/lua", 0o750, true},
+		{"/var/lib/cfm/sslcollector", 0o770, true},
 		// scanner dirs: root:cfm 0770. The Angie worker (cfm user)
 		// writes upload spool files here via cfm_clamav.lua when the
 		// request body is not already on disk as nginx's client body
 		// temp. Without group-write the worker logs "[cfm_clamav]
 		// cannot write temp: Permission denied" on every multipart
-		// POST; the chown happens below alongside the other cfm-group
-		// dirs.
-		{"/var/lib/cfm/scanner", 0o770},
-		{"/var/lib/cfm/scanner/pending", 0o770},
-		{"/var/lib/cfm/scanner/infected", 0o770},
-		{"/var/log/cfm", 0o700},
+		// POST.
+		{"/var/lib/cfm/scanner", 0o770, true},
+		{"/var/lib/cfm/scanner/pending", 0o770, true},
+		{"/var/lib/cfm/scanner/infected", 0o770, true},
+		{"/var/log/cfm", 0o700, false},
 		// /var/run is tmpfs on systemd systems — recreate on every
 		// daemon start. Without this the bridge socket (OPENRESTY_SOCK)
 		// creation fails on boot. 0750 root:cfm: OpenResty/Angie workers
 		// (cfm group) need to traverse in to reach sockets; no other
-		// local user has a reason to list this dir. The chown to cfm gid
-		// happens below alongside the other cfm-group dirs.
-		{"/var/run/cfm", 0o750},
+		// local user has a reason to list this dir.
+		{"/var/run/cfm", 0o750, true},
 	} {
-		_ = os.MkdirAll(d.path, d.mode)
-		_ = os.Chmod(d.path, d.mode)
+		gid := 0
+		if d.group {
+			gid = cfmGID
+		}
+		if err := secureDir(d.path, d.mode, gid); err != nil {
+			logging.Logf("[startup] WARNING data dir: %v", err)
+		}
 	}
 	if cfmGID > 0 {
-		_ = os.Chown("/var/lib/cfm/lua", 0, cfmGID)
-		_ = os.Chown("/var/lib/cfm/sslcollector", 0, cfmGID)
-		_ = os.Chown("/var/lib/cfm/scanner", 0, cfmGID)
-		_ = os.Chown("/var/lib/cfm/scanner/pending", 0, cfmGID)
-		_ = os.Chown("/var/lib/cfm/scanner/infected", 0, cfmGID)
-		_ = os.Chown("/var/run/cfm", 0, cfmGID)
 		// Chown the snapshot file if it already exists (eg written as
 		// root:root before the cfm group was in place). Without this,
 		// OpenResty (cfm user) cannot read the snapshot on startup
-		// until it successfully writes a new one.
-		_ = os.Chown("/var/lib/cfm/sslcollector/dump.json", 0, cfmGID)
+		// until it successfully writes a new one. Not through a symlink.
+		if err := chownRegularFile("/var/lib/cfm/sslcollector/dump.json", cfmGID); err != nil {
+			logging.Logf("[startup] WARNING snapshot: %v", err)
+		}
 		// Site Cache dirs (root:cfm 0770, parent traversable) — see
 		// ensureSiteCacheDirs in site_cache_dirs.go.
 		ensureSiteCacheDirs(siteCacheRoot, cfmGID)
