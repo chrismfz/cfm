@@ -172,15 +172,13 @@ rewritten: that was ~110 MB and ~18s on a 7 800-host node, every discovery
 tick), and `/dumpall` streams that file when it is the current version
 instead of rebuilding the payload for each worker. When it is not (the
 window between a Refresh's swap and its WriteSnapshot, which is when the
-workers fetch), `/dumpall` waits for that write, or makes it, and serves
-the file; concurrent requests find it written and current. When no snapshot
-of the version can be written — the regression guard keeps the older one,
-the index is empty, the write failed — the payload is written to an unlinked
-temp file next to the snapshot and streamed from there (one build at a
-time). A snapshot marked `complete: false` (an entry's PEM could not be read
-when it was built) is not taken as current: each `/dumpall` rewrites it
-first (a PEM that is back gets in) and serves what that write made, and the
-next Refresh rewrites it even at the same version.
+workers fetch; a snapshot the regression guard holds back or one marked
+`complete: false`; an empty index; a failed write), `/dumpall` builds the
+payload once per version into an unlinked temp file next to the snapshot,
+serves it to every concurrent request and reuses it for 30s (only when
+complete, so an entry whose PEM could not be read is retried on the next
+request). It never writes the snapshot itself. With no room for the temp
+file (a full `/var`), it streams the payload to the worker as it is written.
 
 **The payload is never whole in memory.** It is written entry by entry,
 straight to the snapshot's `.tmp` file; the header's `exact_n`, `wild_n` and

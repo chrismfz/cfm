@@ -27,6 +27,16 @@ back-filled here — see the git/PR history for that period.
   60 MB list now costs +28 MB of heap instead of +235 MB, and a certificate
   change with six web-server workers fetching it +29 MB instead of +351 MB.
 
+### Security
+- **The certificate snapshot's temp file can no longer be redirected by the
+  web server's user.** The daemon wrote the snapshot (every certificate's
+  private key included) to a fixed `dump.json.tmp` in a directory the `cfm`
+  group can write, and set its mode and group by name. A `cfm` process that
+  planted that name as a symlink had root overwrite the link's target with
+  the snapshot and make it readable by the `cfm` group. The temp file is now
+  created new under a random name, and its mode and group are set on the
+  open file.
+
 ## 2026.10.11
 
 ### Fixed

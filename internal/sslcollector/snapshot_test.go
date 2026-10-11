@@ -36,8 +36,35 @@ func TestWriteSnapshotAtomic_RoundTripAndPermissions(t *testing.T) {
 	if string(got) != string(body) {
 		t.Fatalf("body mismatch: %s", got)
 	}
-	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
-		t.Fatalf(".tmp leaked: %v", err)
+	if left, _ := filepath.Glob(path + ".tmp*"); len(left) != 0 {
+		t.Fatalf(".tmp leaked: %v", left)
+	}
+}
+
+// The temp file is created new (O_EXCL, random name), never opened by a
+// fixed name: the directory is group-writable by the edge's user, and a
+// "dump.json.tmp" planted as a symlink had root truncate and fill its target
+// with the snapshot (private keys included) and chmod/chown it root:cfm 0640.
+func TestWriteSnapshotDoesNotFollowAPlantedTmpSymlink(t *testing.T) {
+	col, path := newSnapshotCollector(t)
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, path+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	col.WriteSnapshot()
+	got, _ := os.ReadFile(victim)
+	st, _ := os.Stat(victim)
+	if string(got) != "SECRET" || st.Mode().Perm() != 0o600 {
+		t.Fatalf("symlink target written or re-moded: %q %o", got, st.Mode().Perm())
+	}
+	if h, ok := readSnapshotHeader(path, true); !ok || h.ExactN != 1 {
+		t.Fatalf("snapshot not written: %+v ok=%v", h, ok)
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm() != 0o640 {
+		t.Fatalf("snapshot %v %v", fi, err)
 	}
 }
 

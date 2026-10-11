@@ -48,6 +48,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cfm/internal/logging"
 )
 
 type SockServerConfig struct {
@@ -190,31 +192,33 @@ func (s *sockServer) handleDumpAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The snapshot WriteSnapshot keeps on disk is this same payload: serve
-	// it when it is the current version. Otherwise the write that follows
-	// every index swap is running or did not happen: wait for it, or make
-	// it (WriteSnapshot skips a version already on disk), and serve the
-	// file. The payload is never built in memory: that was ~450 MB per
-	// build on a 7 800-host node.
-	ver := s.col.Stats().Version
-	f, size, ok := openCurrentSnapshot(ver)
-	if !ok {
-		s.col.WriteSnapshot()
-		ver = s.col.Stats().Version
-		f, size, ok = openSnapshotAt(ver, false)
+	// it when it is the current version. Otherwise (the write that follows
+	// an index swap has not landed yet, or will not: the regression guard,
+	// an empty index, a write error) serve a build shared per version — on
+	// disk, never in memory: that was ~450 MB per build on a 7 800-host
+	// node. This handler never writes the snapshot itself.
+	if f, size, ok := openCurrentSnapshot(s.col.Stats().Version); ok {
+		defer f.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		_, _ = io.Copy(w, f)
+		return
 	}
-	if !ok {
-		// No snapshot of this version could be written (the regression
-		// guard keeps the older one, an empty index, a write error).
-		var err error
-		if f, size, err = s.col.dumpAllBuildFile(); err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
+	bp, release, err := s.col.dumpAllBuilt()
+	if err == nil {
+		defer release()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", strconv.FormatInt(bp.size, 10))
+		_, _ = io.Copy(w, io.NewSectionReader(bp.f, 0, bp.size))
+		return
 	}
-	defer f.Close()
+	// No room for a temp file (a full /var): stream it to the worker as it
+	// is written. Its counts stay 0 — the edge does not read them.
+	logging.Logf("[sslcollector] /dumpall: temp build failed (%v); streaming the payload", err)
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	_, _ = io.Copy(w, f)
+	if _, err := s.col.writePayload(w, nil); err != nil {
+		logging.Logf("[sslcollector] /dumpall: stream failed: %v", err)
+	}
 }
 
 func (s *sockServer) handleStats(w http.ResponseWriter, r *http.Request) {

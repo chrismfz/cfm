@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -79,6 +80,7 @@ var dumpAllAfterStatsHook func()
 
 // payloadResult is what writePayload wrote.
 type payloadResult struct {
+	Version       string // the label written: the index version read first
 	ExactN, WildN int
 	// Complete: every name in the index made it into the payload. An entry
 	// whose PEM could not be read is skipped (getPEM); such a payload is
@@ -96,7 +98,8 @@ const payloadCountWidth = 10
 // byte written): the counts and `complete` sit in the header, ahead of the
 // entries, so readSnapshotHeader can take them off the front of a ~110 MB
 // file; they are written as padded placeholders and filled in through at
-// once the entries are out.
+// once the entries are out. With at nil they stay 0 / false (a payload
+// streamed to a worker, which reads neither).
 //
 // The payload used to be built whole in memory (a map per entry, a buffer
 // for the JSON and the encoder's own copy of it): about four times its size
@@ -109,8 +112,8 @@ const payloadCountWidth = 10
 // each entry, which every JSON reader skips. The entries are written by hand
 // (writeJSONString), with no per-entry allocation.
 func (c *Collector) writePayload(w io.Writer, at io.WriterAt) (payloadResult, error) {
-	var res payloadResult
 	st := c.Stats()
+	res := payloadResult{Version: st.Version}
 	if dumpAllAfterStatsHook != nil {
 		dumpAllAfterStatsHook()
 	}
@@ -268,6 +271,9 @@ func (c *Collector) writePayload(w io.Writer, at io.WriterAt) (payloadResult, er
 			b   string
 		}{completeAt, "true "})
 	}
+	if at == nil {
+		return res, nil // streamed to a client: the edge reads no counts
+	}
 	for _, p := range patches {
 		if _, err := at.WriteAt([]byte(p.b), int64(p.off)); err != nil {
 			return res, fmt.Errorf("dumpall header: %w", err)
@@ -327,35 +333,111 @@ func writeJSONString(w *bufio.Writer, s string) {
 	w.WriteByte('"')
 }
 
-// dumpAllBuildFile writes the payload to an unlinked temp file and returns
-// it positioned at the start, for /dumpall when no current snapshot can be
-// written (the regression guard holds the older one, the index is empty, the
-// write failed). One build at a time: the workers are staggered, and the
-// temp file keeps the payload out of the heap.
-func (c *Collector) dumpAllBuildFile() (*os.File, int64, error) {
-	c.buildMu.Lock()
-	defer c.buildMu.Unlock()
-	dir := filepath.Dir(snapshotPath())
-	if err := os.MkdirAll(dir, 0o770); err != nil {
-		return nil, 0, err
+// dumpAllBuildTTL is how long a built /dumpall payload is reused for its
+// version. A var for tests.
+var dumpAllBuildTTL = 30 * time.Second
+
+// dumpAllTempDir is where /dumpall builds its payload: next to the snapshot,
+// on disk (/tmp may be a tmpfs, i.e. RAM). A var for tests.
+var dumpAllTempDir = func() string { return filepath.Dir(snapshotPath()) }
+
+// builtPayload is a /dumpall payload written to an unlinked temp file: read
+// through ReadAt (concurrent readers share it), closed once it is neither
+// current nor being read.
+type builtPayload struct {
+	f       *os.File
+	size    int64
+	ver     string
+	at      time.Time
+	refs    int
+	retired bool
+}
+
+type dumpAllBuildState struct {
+	mu  sync.Mutex
+	cur *builtPayload
+}
+
+// dumpAllBuilt returns the /dumpall payload of the current version when the
+// snapshot is not it — the window between a Refresh's swap and its
+// WriteSnapshot, which is when the workers fetch, or a snapshot the
+// regression guard holds back, an empty index, a failed write. It is built
+// once per version (a concurrent caller waits for the build) into an
+// unlinked temp file, never in memory, and reused for dumpAllBuildTTL when
+// complete — as the in-memory payload of the earlier fallback was, at ~4x
+// its size in heap. release must be called when done reading.
+//
+// The file is never reopened by name: the directory is group-writable by
+// the edge's user, so a path could be swapped for a symlink.
+func (c *Collector) dumpAllBuilt() (*builtPayload, func(), error) {
+	b := &c.built
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ver := c.Stats().Version
+	if cur := b.cur; cur != nil && cur.ver == ver && time.Since(cur.at) < dumpAllBuildTTL {
+		cur.refs++
+		return cur, b.releaser(cur), nil
 	}
-	// On disk next to the snapshot, not in /tmp (a tmpfs is RAM).
-	f, err := os.CreateTemp(dir, ".dumpall-*")
+	f, err := os.CreateTemp(dumpAllTempDir(), ".dumpall-*")
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
 	_ = os.Remove(f.Name())
-	if _, err := c.writePayload(f, f); err != nil {
-		_ = f.Close()
-		return nil, 0, err
-	}
-	size, err := f.Seek(0, io.SeekCurrent)
-	if err == nil {
-		_, err = f.Seek(0, io.SeekStart)
-	}
+	res, err := c.writePayload(f, f)
 	if err != nil {
 		_ = f.Close()
-		return nil, 0, err
+		return nil, nil, err
 	}
-	return f, size, nil
+	size, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	bp := &builtPayload{f: f, size: size, ver: res.Version, at: time.Now(), refs: 1}
+	// Reused only when complete and under the version it was built for. A
+	// payload built across an index swap carries the older label and is not
+	// complete; one that lost an entry to a transient PEM read error is not
+	// complete either — shared with every worker, the gap would stay until
+	// the next version change (the edge does not read `complete`).
+	if res.Complete && res.Version == ver {
+		b.retire(b.cur)
+		b.cur = bp
+		time.AfterFunc(dumpAllBuildTTL, func() {
+			b.mu.Lock()
+			if b.cur == bp {
+				b.cur = nil
+				b.retire(bp)
+			}
+			b.mu.Unlock()
+		})
+	} else {
+		bp.retired = true
+	}
+	return bp, b.releaser(bp), nil
+}
+
+// retire marks bp no longer current and closes it when nobody reads it.
+// Called with b.mu held.
+func (b *dumpAllBuildState) retire(bp *builtPayload) {
+	if bp == nil {
+		return
+	}
+	bp.retired = true
+	if bp.refs == 0 {
+		_ = bp.f.Close()
+	}
+}
+
+func (b *dumpAllBuildState) releaser(bp *builtPayload) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.mu.Lock()
+			bp.refs--
+			if bp.refs == 0 && bp.retired {
+				_ = bp.f.Close()
+			}
+			b.mu.Unlock()
+		})
+	}
 }

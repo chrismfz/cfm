@@ -272,13 +272,6 @@ func countArray(dec *json.Decoder) (int, bool) {
 // snapshot renamed in between is either the old file (still open, still
 // whole) or rejected. ok=false: build the payload instead.
 func openCurrentSnapshot(version string) (*os.File, int64, bool) {
-	return openSnapshotAt(version, true)
-}
-
-// openSnapshotAt is openCurrentSnapshot; requireComplete=false also accepts
-// a snapshot that lost an entry to an unreadable PEM (it is the best payload
-// that version has: a rebuild would skip the same entry).
-func openSnapshotAt(version string, requireComplete bool) (*os.File, int64, bool) {
 	if version == "" {
 		return nil, 0, false
 	}
@@ -288,7 +281,7 @@ func openSnapshotAt(version string, requireComplete bool) (*os.File, int64, bool
 	}
 	h, ok := readSnapshotHeaderFrom(f, false)
 	st, serr := f.Stat()
-	if !ok || (requireComplete && !h.Complete) || h.Version != version || serr != nil || !st.Mode().IsRegular() {
+	if !ok || !h.Complete || h.Version != version || serr != nil || !st.Mode().IsRegular() {
 		_ = f.Close()
 		return nil, 0, false
 	}
@@ -313,17 +306,30 @@ func writeSnapshotAtomic(path string, body []byte) error {
 	return commitSnapshotTmp(f, path)
 }
 
-// openSnapshotTmp creates (truncating) the sibling .tmp file a snapshot is
-// written to before commitSnapshotTmp renames it over path.
+// openSnapshotTmp creates the temp file a snapshot is written to before
+// commitSnapshotTmp renames it over path: a new file with a random name
+// (O_EXCL), never a fixed one — the directory is group-writable by the
+// edge's user, and a fixed "dump.json.tmp" planted as a symlink had root
+// truncate, fill and chmod/chown the link's target.
 func openSnapshotTmp(path string) (*os.File, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o770); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", dir, err)
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o640)
+	// Temp files left by a crash: the fixed name an older daemon used, and
+	// an hour-old random one (writes are serialised; Remove does not follow
+	// a symlink).
+	_ = os.Remove(path + ".tmp")
+	if old, _ := filepath.Glob(path + ".tmp-*"); len(old) > 0 {
+		for _, o := range old {
+			if st, err := os.Lstat(o); err == nil && time.Since(st.ModTime()) > time.Hour {
+				_ = os.Remove(o)
+			}
+		}
+	}
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", tmp, err)
+		return nil, fmt.Errorf("create temp in %s: %w", dir, err)
 	}
 	return f, nil
 }
@@ -334,14 +340,23 @@ func discardSnapshotTmp(f *os.File) {
 	_ = os.Remove(f.Name())
 }
 
-// commitSnapshotTmp fsyncs and closes the .tmp file and renames it over
-// path. Explicit Chmod calls bypass the daemon's umask (which is often 0077
-// from systemd), ensuring the snapshot ends up mode 0640 so
-// OpenResty/Angie workers (cfm group) can read it. Without the explicit
-// Chmod, `os.OpenFile(..., 0o640)` produces 0600 under a 0077 umask and the
-// workers silently fall through to the fallback cert path on every reload.
+// commitSnapshotTmp sets the temp file's mode and group, fsyncs, closes and
+// renames it over path. The explicit Chmod makes the snapshot 0640 whatever
+// the daemon's umask (often 0077 from systemd) or CreateTemp's 0600, so the
+// OpenResty/Angie workers (cfm group) can read it: without it they silently
+// fell through to the fallback cert path on every reload.
 func commitSnapshotTmp(f *os.File, path string) error {
 	tmp := f.Name()
+	// Force the on-disk mode independently of the process umask (CreateTemp
+	// makes 0600). On the open file, not the name: see openSnapshotTmp.
+	if cerr := f.Chmod(0o640); cerr != nil {
+		logging.Logf("[sslcollector] snapshot: WARNING chmod tmp %s: %v", tmp, cerr)
+	}
+	if gid := CfmGroupID(); gid > 0 {
+		if cerr := f.Chown(0, gid); cerr != nil {
+			logging.Logf("[sslcollector] snapshot: WARNING chown tmp %s to root:%d: %v", tmp, gid, cerr)
+		}
+	}
 	if serr := f.Sync(); serr != nil {
 		discardSnapshotTmp(f)
 		return fmt.Errorf("fsync %s: %w", tmp, serr)
@@ -350,31 +365,11 @@ func commitSnapshotTmp(f *os.File, path string) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("close %s: %w", tmp, cerr)
 	}
-	// Force the on-disk mode independently of the process umask. See
-	// writeLuaToken in token.go for the same pattern.
-	if cerr := os.Chmod(tmp, 0o640); cerr != nil {
-		logging.Logf("[sslcollector] snapshot: WARNING chmod tmp %s: %v", tmp, cerr)
-	}
-	if gid := CfmGroupID(); gid > 0 {
-		if cerr := os.Chown(tmp, 0, gid); cerr != nil {
-			logging.Logf("[sslcollector] snapshot: WARNING chown tmp %s to root:%d: %v", tmp, gid, cerr)
-		}
-	}
 	if rerr := os.Rename(tmp, path); rerr != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename %s -> %s: %w", tmp, path, rerr)
 	}
-	// Re-assert mode + ownership on the final path. os.Rename keeps
-	// the inode (and its attributes from .tmp), but defensive re-set
-	// guards against edge cases where the destination already existed
-	// with stricter perms.
-	if cerr := os.Chmod(path, 0o640); cerr != nil {
-		logging.Logf("[sslcollector] snapshot: WARNING chmod final %s: %v", path, cerr)
-	}
-	if gid := CfmGroupID(); gid > 0 {
-		if cerr := os.Chown(path, 0, gid); cerr != nil {
-			logging.Logf("[sslcollector] snapshot: WARNING chown final %s to root:%d: %v", path, gid, cerr)
-		}
-	}
+	// No chmod/chown by name after the rename: the rename keeps the inode
+	// set up above, and a name in this directory can be a planted symlink.
 	return nil
 }

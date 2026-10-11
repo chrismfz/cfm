@@ -210,7 +210,7 @@ func TestPayloadRacingARefreshIsNotComplete(t *testing.T) {
 
 // While the snapshot is not current (the window between a Refresh's swap and
 // its WriteSnapshot, when every worker fetches), concurrent /dumpall calls
-// share one build: the first writes the snapshot, the others find it current.
+// share one build (an unlinked temp file, reused for its version).
 func TestDumpAllBuildsOncePerVersion(t *testing.T) {
 	col, path := newSnapshotCollector(t)
 	_ = os.Remove(path) // no snapshot
@@ -246,8 +246,9 @@ func TestDumpAllBuildsOncePerVersion(t *testing.T) {
 	if b := dumpAllBody(t, s); builds != 2 || !strings.Contains(b, `"b.example.com"`) {
 		t.Errorf("new version: builds=%d", builds)
 	}
-	if h, _ := readSnapshotHeader(path, true); h.Version != col.Stats().Version || h.ExactN != 2 {
-		t.Errorf("snapshot after the new version: %+v", h)
+	// /dumpall never writes the snapshot: Refresh does.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("/dumpall wrote the snapshot: %v", err)
 	}
 }
 
@@ -298,10 +299,23 @@ func TestDumpAllServesTheIndexWhenTheGuardKeepsTheSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &sockServer{col: col, cfg: SockServerConfig{Token: strongToken}}
+	builds := 0
+	dumpAllAfterStatsHook = func() { builds++ }
+	t.Cleanup(func() { dumpAllAfterStatsHook = nil })
 	b := dumpAllBody(t, s)
 	h, ok := readSnapshotHeaderFrom(strings.NewReader(b), true)
 	if !ok || h.Version != col.Stats().Version || h.ExactN != 1 || h.WildN != 1 || !h.Complete {
 		t.Errorf("served %+v ok=%v, want the current index", h, ok)
+	}
+	// The workers' retries reuse it: not a rewrite of the snapshot (refused
+	// by the guard) plus a build per request.
+	for i := 0; i < 3; i++ {
+		if dumpAllBody(t, s) != b {
+			t.Errorf("retry %d served another payload", i)
+		}
+	}
+	if builds != 1 {
+		t.Errorf("4 /dumpall under the guard made %d builds, want 1", builds)
 	}
 	if got, _ := os.ReadFile(path); string(got) != big {
 		t.Error("the guarded snapshot was overwritten")
@@ -394,12 +408,71 @@ func TestDumpAllAfterAVersionChangeDoesNotHoldThePayloadInMemory(t *testing.T) {
 		req.Header.Set("X-SSLCollector-Token", strongToken)
 		s.handleDumpAll(&w, req)
 	})
-	st, _ := os.Stat(path)
-	if w.n != st.Size() {
-		t.Fatalf("served %d bytes, snapshot is %d", w.n, st.Size())
+	if w.n < 1<<20 {
+		t.Fatalf("served %d bytes", w.n)
 	}
-	if alloc > uint64(st.Size())/2 {
-		t.Errorf("/dumpall allocated %d KB for a %d KB payload, want under half of it", alloc>>10, st.Size()>>10)
+	if alloc > uint64(w.n)/2 {
+		t.Errorf("/dumpall allocated %d KB for a %d KB payload, want under half of it", alloc>>10, w.n>>10)
+	}
+	_ = path
+}
+
+// No room for the temp build (a full /var): the payload is streamed to the
+// worker as it is written, instead of a 500.
+func TestDumpAllStreamsWhenNoTempFileCanBeMade(t *testing.T) {
+	col, path := newSnapshotCollector(t)
+	_ = os.Remove(path)
+	orig := dumpAllTempDir
+	dumpAllTempDir = func() string { return filepath.Join(path, "not-a-dir") }
+	t.Cleanup(func() { dumpAllTempDir = orig })
+	s := &sockServer{col: col, cfg: SockServerConfig{Token: strongToken}}
+	var got struct {
+		Version string            `json:"version"`
+		Exact   []json.RawMessage `json:"exact"`
+		Wild    []json.RawMessage `json:"wild"`
+	}
+	if err := json.Unmarshal([]byte(dumpAllBody(t, s)), &got); err != nil {
+		t.Fatalf("streamed payload: %v", err)
+	}
+	if got.Version != col.Stats().Version || len(got.Exact) != 1 || len(got.Wild) != 1 {
+		t.Errorf("streamed payload: %+v", got)
+	}
+}
+
+// A shared build stays readable for whoever is reading it after it expires
+// or is replaced, and is closed once the last reader is done.
+func TestDumpAllBuildOutlivesItsReaders(t *testing.T) {
+	col, path := newSnapshotCollector(t)
+	_ = os.Remove(path)
+	orig := dumpAllBuildTTL
+	dumpAllBuildTTL = 20 * time.Millisecond
+	t.Cleanup(func() { dumpAllBuildTTL = orig })
+	b1, rel1, err := col.dumpAllBuilt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, rel2, _ := col.dumpAllBuilt()
+	if b2 != b1 {
+		t.Fatal("not shared within the TTL")
+	}
+	rel2()
+	time.Sleep(60 * time.Millisecond) // expired
+	b3, rel3, _ := col.dumpAllBuilt()
+	if b3 == b1 {
+		t.Fatal("reused past the TTL")
+	}
+	buf := make([]byte, 16)
+	if _, err := b1.f.ReadAt(buf, 0); err != nil {
+		t.Fatalf("expired build closed under its reader: %v", err)
+	}
+	rel1()
+	rel1() // idempotent
+	if _, err := b1.f.ReadAt(buf, 0); err == nil {
+		t.Error("expired build left open after its last reader")
+	}
+	rel3()
+	if _, err := b3.f.ReadAt(buf, 0); err != nil {
+		t.Errorf("current build closed while still current: %v", err)
 	}
 }
 
