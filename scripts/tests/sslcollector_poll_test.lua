@@ -8,11 +8,17 @@
 --   * a version change fetches without the shared lock, after
 --     worker_id * DUMPALL_STAGGER_SECS (the workers must not all stall on the
 --     same ~1 s decode), and a pending fetch is not scheduled twice;
---   * the startup / age-forced fetches keep the shared lock.
+--   * the startup / age-forced fetches keep the shared lock;
+--   * a worker makes one version fetch per DUMPALL_MIN_GAP_SECS, none while
+--     one runs, and none for a version it already holds (2026-10-11).
 
 -- ── Mocks ────────────────────────────────────────────────────────────────────
 local requests = {}
 local stats_version = "v2"
+-- nil: /dumpall bodies fail validation (no ingest). Set: a valid one-cert list
+-- of that version, which the worker ingests.
+local dumpall_version
+local on_dumpall -- called while a /dumpall request is in flight
 package.loaded["ngx.ssl"] = {
   server_name = function() return "" end,
   parse_pem_cert = function() return {} end,
@@ -29,6 +35,10 @@ package.loaded["resty.http"] = {
     function c:request(req)
       requests[#requests + 1] = req.path
       local body = (req.path == "/stats") and ("STATS:" .. stats_version) or "DUMPALL"
+      if req.path == "/dumpall" and dumpall_version then
+        body = ("DUMPALL:" .. dumpall_version .. ":"):rep(30) -- past SNAP_MIN_BYTES
+      end
+      if on_dumpall and req.path == "/dumpall" then on_dumpall() end
       return { status = 200, read_body = function() return body end }
     end
     function c:close() end
@@ -40,6 +50,11 @@ package.loaded["cjson.safe"] = {
   decode = function(s)
     local v = type(s) == "string" and s:match("^STATS:(.*)$")
     if v then return { version = v } end
+    local d = type(s) == "string" and s:match("^DUMPALL:([^:]*):")
+    if d then
+      return { version = d, wild = {},
+               exact = { { host = "a.example", cert_pem = "C", key_pem = "K" } } }
+    end
     return nil -- a /dumpall body: rejected by validation, which is fine here
   end,
 }
@@ -179,6 +194,9 @@ end
 if poll_stats then
   ngx.worker.count = function() return 32 end
   ngx.worker.id = function() return 31 end
+  -- Past the min gap since the fetch above (the stagger alone is under test).
+  ngx.now = function() return 1100 end
+  ngx.time = function() return 1100 end
   stats_version = "v3"
   timers = {}
   poll_stats(false)
@@ -186,6 +204,127 @@ if poll_stats then
   for _, t in ipairs(timers) do if t.fn ~= poll_stats then fetch = t end end
   check(fetch and fetch.delay <= 20,
         "32 workers: the last worker's delay stays within 20 s (got " .. tostring(fetch and fetch.delay) .. ")")
+end
+
+-- The last worker (stagger == poll interval) fetched every version twice: its
+-- fetch cleared _dumpall_scheduled, and the poll that ran in the same second,
+-- before the ingest, saw the old version and scheduled another (every node,
+-- 2026-10-11). And during an AutoSSL burst each version change was a fetch of
+-- the whole list per worker: at most one per DUMPALL_MIN_GAP_SECS now.
+if poll_stats then
+  for _, t in ipairs(timers) do if t.fn ~= poll_stats then t.fn(true) end end -- drop the 32-worker fetch
+  local clock = 2000
+  ngx.now = function() return clock end
+  ngx.time = function() return clock end
+  ngx.worker.count = function() return 6 end
+  ngx.worker.id = function() return 5 end
+  local function poll()
+    dict_data["meta:last_dumpall_attempt_at"] = clock -- keep the forced path quiet
+    poll_stats(false)
+  end
+  local function pending()
+    local list = {}
+    for _, t in ipairs(timers) do if t.fn ~= poll_stats then list[#list + 1] = t end end
+    return list
+  end
+
+  stats_version, dumpall_version = "v10", "v10"
+  timers = {}
+  poll()
+  local f = pending()
+  check(#f == 1 and f[1].delay == 10, "last worker: fetch in 10 s (got " .. tostring(f[1] and f[1].delay) .. ")")
+
+  -- The fetch fires; the next poll runs in the same second, before the ingest.
+  clock = 2010
+  timers = {}
+  on_dumpall = function() on_dumpall = nil; poll() end
+  local before = count("/dumpall")
+  f[1].fn(false)
+  check(count("/dumpall") == before + 1, "the fetch ran")
+  check(#pending() == 0, "no second fetch scheduled by the poll that overlapped the first (got " .. #pending() .. ")")
+  for _, t in ipairs(pending()) do t.fn(false) end
+  check(count("/dumpall") == before + 1, "the version was fetched once (got " .. (count("/dumpall") - before) .. ")")
+
+  -- A scheduled fetch whose version arrived another way does not fetch.
+  stats_version, dumpall_version = "v11", "v11"
+  clock = 2100
+  timers = {}
+  poll()
+  f = pending()
+  local do_dumpall = upvalue(M.start_background, "do_dumpall")
+  dict_data["lock:dumpall"] = nil
+  do_dumpall(true) -- e.g. the age-forced fetch, brings v11
+  before = count("/dumpall")
+  if f[1] then f[1].fn(false) end
+  check(count("/dumpall") == before, "a scheduled fetch is skipped when the worker already holds the version")
+
+  -- An AutoSSL burst: the first change goes out on the stagger; the next one
+  -- within DUMPALL_MIN_GAP_SECS of that fetch waits for the gap.
+  stats_version, dumpall_version = "v12", "v12"
+  clock = 2200
+  timers = {}
+  poll()
+  f = pending()
+  check(f[1] and f[1].delay == 10, "first change of a burst: stagger only (got " .. tostring(f[1] and f[1].delay) .. ")")
+  clock = 2210
+  if f[1] then f[1].fn(false) end
+  stats_version, dumpall_version = "v13", "v13"
+  clock = 2215
+  timers = {}
+  poll()
+  f = pending()
+  check(f[1] and f[1].delay == 25,
+        "next change 5 s after a fetch waits out the 30 s gap (got " .. tostring(f[1] and f[1].delay) .. ")")
+
+  -- A wall clock stepped back 1 h after a fetch: the wait is capped at the gap.
+  if f[1] then f[1].fn(false) end -- fetch v13 at 2215+25
+  local fetched_at = clock
+  stats_version, dumpall_version = "v14", "v14"
+  clock = fetched_at - 3600
+  timers = {}
+  poll()
+  f = pending()
+  check(f[1] and f[1].delay <= 30,
+        "clock stepped back: the wait stays within the gap (got " .. tostring(f[1] and f[1].delay) .. ")")
+  if f[1] then f[1].fn(true) end
+
+  -- No timer available: no fetch inside the gap (the next poll retries).
+  clock = fetched_at + 5
+  timers = {}
+  local real_at = ngx.timer.at
+  ngx.timer.at = function(delay, fn)
+    if fn == poll_stats then return real_at(delay, fn) end
+    return nil, "too many pending timers"
+  end
+  before = count("/dumpall")
+  poll()
+  check(count("/dumpall") == before, "timer failure inside the gap: no fetch")
+  clock = fetched_at + 31
+  poll()
+  check(count("/dumpall") == before + 1, "timer failure past the gap: fetches inline")
+  ngx.timer.at = real_at
+
+  -- A scheduled fetch that fires while a forced fetch runs does nothing and
+  -- stamps no gap (the forced one's result is not one the gap should hold).
+  stats_version, dumpall_version = "v15", "v15"
+  clock = fetched_at + 100
+  timers = {}
+  poll()
+  f = pending()
+  local stamp = upvalue(f[1].fn, "fetch") and upvalue(upvalue(f[1].fn, "fetch"), "_last_version_fetch_at")
+  dumpall_version = "v14" -- the forced fetch returns an older build
+  on_dumpall = function() on_dumpall = nil; f[1].fn(false) end
+  dict_data["lock:dumpall"] = nil
+  do_dumpall(true)
+  local after = upvalue(upvalue(f[1].fn, "fetch"), "_last_version_fetch_at")
+  check(after == stamp, "no gap stamped by a fetch skipped for a running one (" .. tostring(stamp) .. " -> " .. tostring(after) .. ")")
+  dumpall_version = "v15"
+  timers = {}
+  poll()
+  f = pending()
+  check(f[1] and f[1].delay == 10,
+        "the next poll retries on the stagger, not a fresh gap (got " .. tostring(f[1] and f[1].delay) .. ")")
+  on_dumpall = nil
 end
 
 if fails > 0 then
