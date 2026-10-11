@@ -3,8 +3,10 @@ package sslcollector
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -356,7 +358,14 @@ type builtPayload struct {
 type dumpAllBuildState struct {
 	mu  sync.Mutex
 	cur *builtPayload
+	// stream: one payload streamed to a worker at a time (no temp file
+	// possible); each holds its own copy of the PEMs.
+	stream sync.Mutex
 }
+
+// errSnapshotCurrent: the snapshot became the current version while the
+// caller waited for the build lock; serve it instead.
+var errSnapshotCurrent = errors.New("snapshot is current")
 
 // dumpAllBuilt returns the /dumpall payload of the current version when the
 // snapshot is not it — the window between a Refresh's swap and its
@@ -369,7 +378,7 @@ type dumpAllBuildState struct {
 //
 // The file is never reopened by name: the directory is group-writable by
 // the edge's user, so a path could be swapped for a symlink.
-func (c *Collector) dumpAllBuilt() (*builtPayload, func(), error) {
+func (c *Collector) dumpAllBuilt(ctx context.Context) (*builtPayload, func(), error) {
 	b := &c.built
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -377,6 +386,15 @@ func (c *Collector) dumpAllBuilt() (*builtPayload, func(), error) {
 	if cur := b.cur; cur != nil && cur.ver == ver && time.Since(cur.at) < dumpAllBuildTTL {
 		cur.refs++
 		return cur, b.releaser(cur), nil
+	}
+	// Waiting for the lock can take a build's time: the worker may be gone
+	// (its socket timeout), or the snapshot written meanwhile.
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if f, _, ok := openCurrentSnapshot(ver); ok {
+		_ = f.Close()
+		return nil, nil, errSnapshotCurrent
 	}
 	f, err := os.CreateTemp(dumpAllTempDir(), ".dumpall-*")
 	if err != nil {

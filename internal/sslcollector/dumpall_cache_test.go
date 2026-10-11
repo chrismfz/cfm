@@ -2,7 +2,9 @@ package sslcollector
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -394,7 +396,7 @@ func TestWriteSnapshotDoesNotHoldThePayloadInMemory(t *testing.T) {
 }
 
 // /dumpall right after a version change (no current snapshot) does not
-// build the payload in memory either: it writes the snapshot and streams it.
+// build the payload in memory either: it builds it into a temp file.
 func TestDumpAllAfterAVersionChangeDoesNotHoldThePayloadInMemory(t *testing.T) {
 	col, path := bigCollector(t)
 	col.WriteSnapshot()
@@ -445,19 +447,19 @@ func TestDumpAllBuildOutlivesItsReaders(t *testing.T) {
 	col, path := newSnapshotCollector(t)
 	_ = os.Remove(path)
 	orig := dumpAllBuildTTL
-	dumpAllBuildTTL = 20 * time.Millisecond
+	dumpAllBuildTTL = 300 * time.Millisecond
 	t.Cleanup(func() { dumpAllBuildTTL = orig })
-	b1, rel1, err := col.dumpAllBuilt()
+	b1, rel1, err := col.dumpAllBuilt(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	b2, rel2, _ := col.dumpAllBuilt()
+	b2, rel2, _ := col.dumpAllBuilt(context.Background())
 	if b2 != b1 {
 		t.Fatal("not shared within the TTL")
 	}
 	rel2()
-	time.Sleep(60 * time.Millisecond) // expired
-	b3, rel3, _ := col.dumpAllBuilt()
+	time.Sleep(600 * time.Millisecond) // expired
+	b3, rel3, _ := col.dumpAllBuilt(context.Background())
 	if b3 == b1 {
 		t.Fatal("reused past the TTL")
 	}
@@ -560,5 +562,27 @@ func TestPayloadEntriesRoundTrip(t *testing.T) {
 	}
 	if len(got.Exact[0]) != len(wantExact) || len(got.Wild[0]) != len(wantWild) {
 		t.Errorf("unexpected fields: %v / %v", got.Exact[0], got.Wild[0])
+	}
+}
+
+// A caller that waited for the build lock serves the snapshot if it was
+// written meanwhile, and a caller whose worker is gone builds nothing.
+func TestDumpAllBuiltRechecksAfterWaiting(t *testing.T) {
+	col, path := newSnapshotCollector(t)
+	_ = os.Remove(path)
+	builds := 0
+	dumpAllAfterStatsHook = func() { builds++ }
+	t.Cleanup(func() { dumpAllAfterStatsHook = nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := col.dumpAllBuilt(ctx); err == nil || builds != 0 {
+		t.Errorf("cancelled caller: err=%v builds=%d", err, builds)
+	}
+	dumpAllAfterStatsHook = nil
+	col.WriteSnapshot()
+	builds = 0
+	dumpAllAfterStatsHook = func() { builds++ }
+	if _, _, err := col.dumpAllBuilt(context.Background()); !errors.Is(err, errSnapshotCurrent) || builds != 0 {
+		t.Errorf("snapshot current: err=%v builds=%d", err, builds)
 	}
 }

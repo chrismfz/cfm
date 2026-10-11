@@ -181,7 +181,8 @@ request). It never writes the snapshot itself. With no room for the temp
 file (a full `/var`), it streams the payload to the worker as it is written.
 
 **The payload is never whole in memory.** It is written entry by entry,
-straight to the snapshot's `.tmp` file; the header's `exact_n`, `wild_n` and
+straight to a temp file next to the snapshot (`dump.json.tmp-*`, created
+with O_EXCL); the header's `exact_n`, `wild_n` and
 `complete` are written as padded placeholders and filled in once the entries
 are out. Building it whole (a map per entry, the JSON buffer, the encoder's
 copy of it) took about four times its size in heap: on earth (110 MB
