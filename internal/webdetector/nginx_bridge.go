@@ -52,6 +52,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -690,7 +691,7 @@ type clamSyncScanner interface {
 // ClamHealth returns the scanner health snapshot when a clam manager is wired
 // and exposes one. Non-blocking (reads cached breaker state; never dials clamd).
 func (b *NginxBridge) ClamHealth() (clam.HealthSnapshot, bool) {
-	if b == nil || b.clamWired().mgr == nil {
+	if b == nil {
 		return clam.HealthSnapshot{}, false
 	}
 	if hr, ok := b.clamWired().mgr.(clamHealthReporter); ok {
@@ -977,6 +978,11 @@ func validateUploadSourcePath(bodyFile string, alreadyCopied bool, clamPending s
 	if err != nil {
 		return "", false
 	}
+	// No control characters: the path (or a copy named after it) goes to
+	// clamd in a newline-terminated SCAN command, and into log lines.
+	if strings.IndexFunc(srcPath, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return "", false
+	}
 	if alreadyCopied {
 		// The edge's own spool (cfm_clamav.lua write_temp): a regular file
 		// directly in pending, by the very path given. Root removes it after
@@ -986,12 +992,13 @@ func validateUploadSourcePath(bodyFile string, alreadyCopied bool, clamPending s
 		if clamPending == "" || filepath.Dir(srcPath) != filepath.Clean(clamPending) {
 			return "", false
 		}
-		// The async scan sends the path to clamd in a newline-terminated
-		// command: no control characters in it.
-		if strings.IndexFunc(srcPath, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		// One link: a hard link to a root file (fs.protected_hardlinks off)
+		// is not the edge's spool.
+		fi, err := os.Lstat(srcPath)
+		if err != nil || !fi.Mode().IsRegular() {
 			return "", false
 		}
-		if fi, err := os.Lstat(srcPath); err != nil || !fi.Mode().IsRegular() {
+		if sys, ok := fi.Sys().(*syscall.Stat_t); ok && sys.Nlink != 1 {
 			return "", false
 		}
 		return srcPath, true

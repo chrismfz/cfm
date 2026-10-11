@@ -38,7 +38,8 @@ back-filled here — see the git/PR history for that period.
   open file.
 - **The daemon no longer follows a name the web server's user can plant.**
   `/var/lib/cfm/scanner/pending`, `scanner/infected` and
-  `sslcollector/dump.json` sit in directories the `cfm` group can write.
+  `sslcollector/dump.json` sat in directories the `cfm` group could write
+  (the scanner dir is no longer group-writable, below).
   At every start the daemon chmod'ed and chown'ed them by name, so a `cfm`
   process that replaced one with a symlink had root make the target (`/etc`,
   say) group-writable by `cfm`, or hand a file such as Debian's

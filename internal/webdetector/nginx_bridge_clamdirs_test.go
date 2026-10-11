@@ -108,8 +108,9 @@ func TestSetClamManagerRefusesSymlinkedDirs(t *testing.T) {
 	}
 }
 
-// A spool name with a control character is refused: the async scan sends
-// the path to clamd in a newline-terminated command.
+// A path with a control character is refused, spool or nginx body temp:
+// the path (or a copy named after it) goes to clamd in a newline-terminated
+// SCAN command.
 func TestValidateUploadSourcePathRefusesControlChars(t *testing.T) {
 	pending := t.TempDir()
 	p := filepath.Join(pending, "upload_x\nSHUTDOWN")
@@ -118,5 +119,26 @@ func TestValidateUploadSourcePathRefusesControlChars(t *testing.T) {
 	}
 	if _, ok := validateUploadSourcePath(p, true, pending); ok {
 		t.Error("control character accepted in a spool name")
+	}
+	tmp := filepath.Join(os.TempDir(), "x\nSHUTDOWN")
+	if _, ok := validateUploadSourcePath(tmp, false, pending); ok {
+		t.Error("control character accepted in a body temp path")
+	}
+}
+
+// A spool hard-linked to another file (fs.protected_hardlinks off) is not
+// the edge's own.
+func TestValidateUploadSourcePathRefusesHardLinks(t *testing.T) {
+	pending := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "shadow")
+	if err := os.WriteFile(victim, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hl := filepath.Join(pending, "upload_hl")
+	if err := os.Link(victim, hl); err != nil {
+		t.Skipf("link: %v", err)
+	}
+	if _, ok := validateUploadSourcePath(hl, true, pending); ok {
+		t.Error("hard-linked spool accepted")
 	}
 }
