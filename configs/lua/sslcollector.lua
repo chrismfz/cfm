@@ -736,6 +736,10 @@ local function poll_stats(premature)
             if wait > delay then delay = wait end
             local function fetch()
               if _worker_version == _wanted_version then return end
+              -- A forced fetch is running: it brings the newest version; and
+              -- if not, the next poll retries without a gap stamped for
+              -- nothing.
+              if _dumpall_inflight then return end
               _last_version_fetch_at = ngx.now()
               do_dumpall(false)
             end

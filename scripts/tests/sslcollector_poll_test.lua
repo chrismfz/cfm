@@ -303,6 +303,27 @@ if poll_stats then
   poll()
   check(count("/dumpall") == before + 1, "timer failure past the gap: fetches inline")
   ngx.timer.at = real_at
+
+  -- A scheduled fetch that fires while a forced fetch runs does nothing and
+  -- stamps no gap (the forced one's result is not one the gap should hold).
+  stats_version, dumpall_version = "v15", "v15"
+  clock = fetched_at + 100
+  timers = {}
+  poll()
+  f = pending()
+  local stamp = upvalue(f[1].fn, "fetch") and upvalue(upvalue(f[1].fn, "fetch"), "_last_version_fetch_at")
+  dumpall_version = "v14" -- the forced fetch returns an older build
+  on_dumpall = function() on_dumpall = nil; f[1].fn(false) end
+  dict_data["lock:dumpall"] = nil
+  do_dumpall(true)
+  local after = upvalue(upvalue(f[1].fn, "fetch"), "_last_version_fetch_at")
+  check(after == stamp, "no gap stamped by a fetch skipped for a running one (" .. tostring(stamp) .. " -> " .. tostring(after) .. ")")
+  dumpall_version = "v15"
+  timers = {}
+  poll()
+  f = pending()
+  check(f[1] and f[1].delay == 10,
+        "the next poll retries on the stagger, not a fresh gap (got " .. tostring(f[1] and f[1].delay) .. ")")
   on_dumpall = nil
 end
 
