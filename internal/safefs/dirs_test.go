@@ -1,4 +1,4 @@
-package main
+package safefs
 
 import (
 	"os"
@@ -20,7 +20,7 @@ func TestSecureDirRefusesASymlink(t *testing.T) {
 	if err := os.Symlink(victim, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := secureDir(link, 0o770, os.Getgid()); err == nil {
+	if err := SecureDir(link, 0o770, os.Getgid()); err == nil {
 		t.Error("secureDir followed a symlink without an error")
 	}
 	if st, _ := os.Stat(victim); st.Mode().Perm() != 0o700 {
@@ -28,14 +28,13 @@ func TestSecureDirRefusesASymlink(t *testing.T) {
 	}
 }
 
-// testGID: a non-zero group to chown to when the test runs as root
-// (root:<gid> needs root; gid 0 means "no chown"), 0 otherwise — the CI
-// runner is not root.
+// testGID: a group to chown to when the test runs as root (root:<gid> needs
+// root), -1 (no chown) otherwise — the CI runner is not root.
 func testGID() int {
 	if os.Geteuid() == 0 {
 		return 65534
 	}
-	return 0
+	return -1
 }
 
 func gidOf(t *testing.T, path string) int {
@@ -50,19 +49,19 @@ func gidOf(t *testing.T, path string) int {
 func TestSecureDirCreatesAndFixesTheMode(t *testing.T) {
 	dir := t.TempDir()
 	d := filepath.Join(dir, "a", "b")
-	if err := secureDir(d, 0o770, testGID()); err != nil {
+	if err := SecureDir(d, 0o770, testGID()); err != nil {
 		t.Fatal(err)
 	}
 	if st, _ := os.Stat(d); !st.IsDir() || st.Mode().Perm() != 0o770 {
 		t.Fatalf("created %v %o", st.IsDir(), st.Mode().Perm())
 	}
-	if g := testGID(); g != 0 && gidOf(t, d) != g {
+	if g := testGID(); g >= 0 && gidOf(t, d) != g {
 		t.Errorf("group %d, want %d", gidOf(t, d), g)
 	}
 	if err := os.Chmod(d, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := secureDir(d, 0o770, 0); err != nil {
+	if err := SecureDir(d, 0o770, -1); err != nil {
 		t.Fatal(err)
 	}
 	if st, _ := os.Stat(d); st.Mode().Perm() != 0o770 {
@@ -82,7 +81,7 @@ func TestChownRegularFileRefusesSymlinksAndFIFOs(t *testing.T) {
 	if err := os.Symlink(victim, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := chownRegularFile(link, os.Getgid()); err == nil {
+	if err := ChownRegularFile(link, os.Getgid()); err == nil {
 		t.Error("chownRegularFile followed a symlink without an error")
 	}
 
@@ -91,7 +90,7 @@ func TestChownRegularFileRefusesSymlinksAndFIFOs(t *testing.T) {
 		t.Skipf("mkfifo: %v", err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- chownRegularFile(fifo, os.Getgid()) }()
+	go func() { done <- ChownRegularFile(fifo, os.Getgid()) }()
 	select {
 	case err := <-done:
 		if err == nil {
@@ -101,7 +100,7 @@ func TestChownRegularFileRefusesSymlinksAndFIFOs(t *testing.T) {
 		t.Fatal("chownRegularFile hung on a FIFO")
 	}
 
-	if err := chownRegularFile(filepath.Join(dir, "missing.json"), os.Getgid()); err != nil {
+	if err := ChownRegularFile(filepath.Join(dir, "missing.json"), os.Getgid()); err != nil {
 		t.Errorf("missing file: %v", err)
 	}
 	// A hard link to another file (fs.protected_hardlinks off) is not ours.
@@ -109,7 +108,7 @@ func TestChownRegularFileRefusesSymlinksAndFIFOs(t *testing.T) {
 	if err := os.Link(victim, hl); err != nil {
 		t.Fatal(err)
 	}
-	if err := chownRegularFile(hl, os.Getgid()); err == nil {
+	if err := ChownRegularFile(hl, os.Getgid()); err == nil {
 		t.Error("chownRegularFile accepted a hard link")
 	}
 
@@ -117,8 +116,8 @@ func TestChownRegularFileRefusesSymlinksAndFIFOs(t *testing.T) {
 	if err := os.WriteFile(reg, []byte("{}"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if g := testGID(); g != 0 {
-		if err := chownRegularFile(reg, g); err != nil || gidOf(t, reg) != g {
+	if g := testGID(); g >= 0 {
+		if err := ChownRegularFile(reg, g); err != nil || gidOf(t, reg) != g {
 			t.Errorf("regular file: err=%v group %d, want %d", err, gidOf(t, reg), g)
 		}
 	}

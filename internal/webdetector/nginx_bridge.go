@@ -32,6 +32,7 @@ import (
 	"cfm/internal/edgeban"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
+	"cfm/internal/safefs"
 	"cfm/internal/sslcollector"
 	"context"
 	"crypto/sha256"
@@ -39,7 +40,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net"
 	"net/http"
@@ -52,6 +52,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -227,9 +228,11 @@ type NginxBridge struct {
 	chalPageLogAt map[string]time.Time
 
 	// Clam
-	clamMgr      clam.Enqueuer
-	clamPending  string
-	clamInfected string
+	// clam: the scanner wiring, replaced whole by SetClamManager (every
+	// 15 s, and on reload) while the upload handlers read it.
+	clam        atomic.Pointer[clamWiring]
+	clamSetMu   sync.Mutex // serialises SetClamManager
+	clamDirWarn string     // last dir refusal logged (under clamSetMu)
 
 	// enricher maxmind
 	// LookupCachedOrAsync is used on the request hot path so a cold IP's
@@ -688,10 +691,10 @@ type clamSyncScanner interface {
 // ClamHealth returns the scanner health snapshot when a clam manager is wired
 // and exposes one. Non-blocking (reads cached breaker state; never dials clamd).
 func (b *NginxBridge) ClamHealth() (clam.HealthSnapshot, bool) {
-	if b == nil || b.clamMgr == nil {
+	if b == nil {
 		return clam.HealthSnapshot{}, false
 	}
-	if hr, ok := b.clamMgr.(clamHealthReporter); ok {
+	if hr, ok := b.clamWired().mgr.(clamHealthReporter); ok {
 		return hr.Health(), true
 	}
 	return clam.HealthSnapshot{}, false
@@ -701,26 +704,61 @@ func (b *NginxBridge) SetClamManager(m clam.Enqueuer, pendingDir, infectedDir st
 	if b == nil {
 		return
 	}
-	b.clamMgr = m
-	b.clamPending = pendingDir
-	b.clamInfected = infectedDir
-	// 0770 root:cfm so the Angie worker (cfm user) can write upload
-	// spool files here directly from cfm_clamav.lua's write_temp when
-	// the body is not already on disk as nginx's client body temp.
-	// runDaemon() in cmd/cfm/main.go pre-creates these with the same
-	// mode and chowns to the cfm group; we redo it here in case the
-	// admin overrode PendingDir/InfectedDir to a non-default path.
-	gid := sslcollector.CfmGroupID()
-	for _, d := range []string{pendingDir, infectedDir} {
-		if d == "" {
-			continue
+	// pending: root:cfm 0770 so the Angie worker (cfm user) can write
+	// upload spool files here directly from cfm_clamav.lua's write_temp
+	// when the body is not already on disk as nginx's client body temp.
+	// infected: root only (the edge never touches evidence). runDaemon() in
+	// cmd/cfm/main.go pre-creates the default dirs; this redoes it for a
+	// PendingDir/InfectedDir an admin overrode. On the opened dir, never by
+	// name (safefs.SecureDir): this runs every 15 s, and by name a
+	// symlink at the path had root chmod 0770 / chown root:cfm its target.
+	// A dir that is a symlink disables what uses it: root copies uploads
+	// into pending and evidence into infected, and must not do it through
+	// a link the edge's user may have planted.
+	b.clamSetMu.Lock()
+	defer b.clamSetMu.Unlock()
+	var msgs []string
+	if pendingDir != "" {
+		gid := -1
+		if g := sslcollector.CfmGroupID(); g > 0 {
+			gid = g
 		}
-		_ = os.MkdirAll(d, 0o770)
-		_ = os.Chmod(d, 0o770)
-		if gid > 0 {
-			_ = os.Chown(d, 0, gid)
+		if err := safefs.SecureDir(pendingDir, 0o770, gid); err != nil {
+			msgs = append(msgs, "clam pending dir refused, upload scanning disabled: "+err.Error())
+			m, pendingDir = nil, ""
 		}
 	}
+	if infectedDir != "" {
+		if err := safefs.SecureDir(infectedDir, 0o700, clamInfectedGID); err != nil {
+			msgs = append(msgs, "clam infected dir refused, no evidence kept: "+err.Error())
+			infectedDir = ""
+		}
+	}
+	if w := strings.Join(msgs, "; "); w != b.clamDirWarn {
+		b.clamDirWarn = w // every 15 s: log a change, not each call
+		if w != "" {
+			logging.Logf("[nginx-bridge] WARNING %s", w)
+		}
+	}
+	b.clam.Store(&clamWiring{mgr: m, pending: pendingDir, infected: infectedDir})
+}
+
+// clamInfectedGID is the infected dir's group (root:root). A var for tests,
+// which do not run as root (-1: leave the group alone).
+var clamInfectedGID = 0
+
+// clamWiring is the scanner as the upload handlers see it.
+type clamWiring struct {
+	mgr      clam.Enqueuer
+	pending  string
+	infected string
+}
+
+func (b *NginxBridge) clamWired() clamWiring {
+	if p := b.clam.Load(); p != nil {
+		return *p
+	}
+	return clamWiring{}
 }
 
 type nginxUploadMsg struct {
@@ -761,12 +799,13 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 	logging.LogfCLAM("[upload] ip=%s host=%s uri=%s filename=%q reason=%s",
 		ip, host, uri, filename, reason)
 
-	if bodyFile == "" || b.clamMgr == nil || !b.clamMgr.Enabled() {
+	cw := b.clamWired()
+	if bodyFile == "" || cw.mgr == nil || !cw.mgr.Enabled() {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	srcPath, ok := validateUploadSourcePath(bodyFile, msg.AlreadyCopied, b.clamPending)
+	srcPath, ok := validateUploadSourcePath(bodyFile, msg.AlreadyCopied, cw.pending)
 	if !ok {
 		w.WriteHeader(http.StatusOK)
 		return
@@ -787,10 +826,11 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 	} else {
 
 		safeIP := sanitizeForFilename(ip)
-		dst := filepath.Join(b.clamPending,
-			fmt.Sprintf("upload_%d_%s", time.Now().UnixNano(), safeIP))
-
-		if err := copyFile(srcPath, dst); err != nil {
+		// A new file (O_EXCL), read without following a symlink: pending
+		// is writable by the edge's user (safefs.CopyToNew).
+		dst, err := safefs.CopyToNew(srcPath, cw.pending,
+			fmt.Sprintf("upload_%d_%s_", time.Now().UnixNano(), safeIP))
+		if err != nil {
 			logging.LogfCLAM("[upload] copy_failed src=%q err=%v", srcPath, err)
 			w.WriteHeader(http.StatusOK)
 			return
@@ -807,7 +847,7 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 		label += ":" + filename
 	}
 
-	enqueued := b.clamMgr.Enqueue(clam.Job{
+	enqueued := cw.mgr.Enqueue(clam.Job{
 		Path:        scanPath,
 		IP:          ip,
 		Host:        host,
@@ -815,7 +855,7 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 		FileName:    filename,
 		Reason:      label,
 		TempCopy:    true,
-		InfectedDir: b.clamInfected,
+		InfectedDir: cw.infected,
 	})
 
 	if !enqueued && tempOwned && scanPath != "" {
@@ -824,25 +864,6 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(out, in)
-	cerr := out.Close()
-	if err != nil {
-		_ = os.Remove(dst)
-		return err
-	}
-	return cerr
 }
 
 func sanitizeForFilename(s string) string {
@@ -914,12 +935,13 @@ func (b *NginxBridge) handleUploadScanSync(w http.ResponseWriter, r *http.Reques
 	uri := strings.TrimSpace(msg.URI)
 	filename := strings.TrimSpace(msg.Filename)
 
-	scanner, _ := b.clamMgr.(clamSyncScanner)
-	if b.clamMgr == nil || !b.clamMgr.Enabled() || scanner == nil {
+	cw := b.clamWired()
+	scanner, _ := cw.mgr.(clamSyncScanner)
+	if cw.mgr == nil || !cw.mgr.Enabled() || scanner == nil {
 		writeVerdict(allow("scanner_unavailable"))
 		return
 	}
-	srcPath, ok := validateUploadSourcePath(msg.BodyFile, msg.AlreadyCopied, b.clamPending)
+	srcPath, ok := validateUploadSourcePath(msg.BodyFile, msg.AlreadyCopied, cw.pending)
 	if !ok {
 		writeVerdict(allow("bad_path"))
 		return
@@ -935,7 +957,7 @@ func (b *NginxBridge) handleUploadScanSync(w http.ResponseWriter, r *http.Reques
 		URI:         uri,
 		FileName:    filename,
 		Reason:      "UPLOAD:inline",
-		InfectedDir: b.clamInfected,
+		InfectedDir: cw.infected,
 	})
 	logging.LogfCLAM("[upload_sync] ip=%s host=%s uri=%s verdict=%s block=%v sig=%q",
 		ip, host, uri, v.Verdict, v.Block, v.Signature)
@@ -956,8 +978,30 @@ func validateUploadSourcePath(bodyFile string, alreadyCopied bool, clamPending s
 	if err != nil {
 		return "", false
 	}
+	// No control characters: the path (or a copy named after it) goes to
+	// clamd in a newline-terminated SCAN command, and into log lines.
+	if strings.IndexFunc(srcPath, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return "", false
+	}
 	if alreadyCopied {
-		return validatePathWithinDir(srcPath, clamPending)
+		// The edge's own spool (cfm_clamav.lua write_temp): a regular file
+		// directly in pending, by the very path given. Root removes it after
+		// the scan, and pending is writable by the edge's user: resolving
+		// symlinks (or accepting a subdir it could later swap for one) let
+		// a path like pending/x -> /etc/shadow be deleted as root.
+		if clamPending == "" || filepath.Dir(srcPath) != filepath.Clean(clamPending) {
+			return "", false
+		}
+		// One link: a hard link to a root file (fs.protected_hardlinks off)
+		// is not the edge's spool.
+		fi, err := os.Lstat(srcPath)
+		if err != nil || !fi.Mode().IsRegular() {
+			return "", false
+		}
+		if sys, ok := fi.Sys().(*syscall.Stat_t); ok && sys.Nlink != 1 {
+			return "", false
+		}
+		return srcPath, true
 	}
 	for _, base := range nginxUploadAllowedDirs {
 		if p, ok := validatePathWithinDir(srcPath, base); ok {

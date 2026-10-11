@@ -13,6 +13,7 @@ import (
 
 	"cfm/internal/enrich"
 	"cfm/internal/notify"
+	"cfm/internal/safefs"
 )
 
 type Config struct {
@@ -379,7 +380,17 @@ func (m *Manager) worker(id int) {
 }
 
 func (m *Manager) process(job Job) {
-	fi, err := os.Stat(job.Path)
+	// A temp copy sits in pending, writable by the edge's user: one swapped
+	// for a symlink (to /, say — a root walk of the whole filesystem through
+	// ScanPath) or a FIFO is dropped, not followed.
+	stat := os.Stat
+	if job.TempCopy {
+		stat = os.Lstat
+	}
+	fi, err := stat(job.Path)
+	if err == nil && job.TempCopy && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("not a regular file (%s)", fi.Mode().Type())
+	}
 	if err != nil {
 		logf("[clam_scan] result=error ip=%s host=%s uri=%s reason=%s err=%q",
 			job.IP, job.Host, job.URI, job.Reason, err)
@@ -475,12 +486,16 @@ func (m *Manager) process(job Job) {
 	}
 
 	if r.Infected && !sigIgnoredHit {
-		dest := job.Path // fallback if rename fails
+		dest := job.Path // fallback if the copy fails
 		if job.InfectedDir != "" {
 			_ = os.MkdirAll(job.InfectedDir, 0o700)
-			candidate := filepath.Join(job.InfectedDir, filepath.Base(job.Path))
-			if rerr := os.Rename(job.Path, candidate); rerr == nil {
-				dest = candidate
+			// A copy into a new file, as inline evidence: renamed, the
+			// edge's own spool kept its inode (writable through an fd its
+			// user still held), and its name — which that user knows —
+			// could be re-posted to overwrite earlier evidence.
+			if p, cerr := safefs.CopyToNew(job.Path, job.InfectedDir, filepath.Base(job.Path)+"."); cerr == nil {
+				_ = os.Remove(job.Path)
+				dest = p
 			}
 		}
 		logf("[clam_scan] evidence kept path=%s ip=%s host=%s sig=%q",

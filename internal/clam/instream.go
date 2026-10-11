@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
+
+	"cfm/internal/safefs"
 )
 
 // clamd INSTREAM client — the inline (blocking) scan path. The daemon reads
@@ -94,9 +95,11 @@ func (c *Client) ScanStream(r io.Reader, d time.Duration) (*Result, error) {
 	}
 }
 
-// ScanFileStream opens path and INSTREAMs its content.
+// ScanFileStream opens path (OpenRegular: the spool may sit in a dir the
+// edge's user can write, and a FIFO swapped in would block the inline scan)
+// and INSTREAMs its content.
 func (c *Client) ScanFileStream(path string, d time.Duration) (*Result, error) {
-	f, err := os.Open(path)
+	f, err := safefs.OpenRegular(path)
 	if err != nil {
 		return nil, err
 	}

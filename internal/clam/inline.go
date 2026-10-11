@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"cfm/internal/safefs"
 )
 
 // Inline (blocking) upload scanning — CLAM_SCAN_MODE=inline. The edge calls
@@ -99,9 +101,8 @@ func (m *Manager) ScanUploadSync(job Job) SyncVerdict {
 	evidence := ""
 	if job.InfectedDir != "" {
 		_ = os.MkdirAll(job.InfectedDir, 0o700)
-		candidate := filepath.Join(job.InfectedDir, filepath.Base(job.Path))
-		if cerr := copyFileContents(job.Path, candidate); cerr == nil {
-			evidence = candidate
+		if p, cerr := safefs.CopyToNew(job.Path, job.InfectedDir, filepath.Base(job.Path)+"."); cerr == nil {
+			evidence = p
 		}
 	}
 	m.safeNotifyInfected(job, r, evidence, mode)
@@ -132,8 +133,8 @@ func (m *Manager) enqueueAsyncFallback(job Job) {
 		return
 	}
 	_ = os.MkdirAll(m.cfg.PendingDir, 0o700)
-	dst := filepath.Join(m.cfg.PendingDir, "inline_fb_"+filepath.Base(job.Path))
-	if err := copyFileContents(job.Path, dst); err != nil {
+	dst, err := safefs.CopyToNew(job.Path, m.cfg.PendingDir, "inline_fb_"+filepath.Base(job.Path)+".")
+	if err != nil {
 		return
 	}
 	fb := job
@@ -142,12 +143,4 @@ func (m *Manager) enqueueAsyncFallback(job Job) {
 	if !m.Enqueue(fb) {
 		_ = os.Remove(dst)
 	}
-}
-
-func copyFileContents(src, dst string) error {
-	b, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, b, 0o600)
 }
