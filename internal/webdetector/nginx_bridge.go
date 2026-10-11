@@ -39,7 +39,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net"
 	"net/http"
@@ -787,10 +786,11 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 	} else {
 
 		safeIP := sanitizeForFilename(ip)
-		dst := filepath.Join(b.clamPending,
-			fmt.Sprintf("upload_%d_%s", time.Now().UnixNano(), safeIP))
-
-		if err := copyFile(srcPath, dst); err != nil {
+		// A new file (O_EXCL), read without following a symlink: pending
+		// is writable by the edge's user (clam.CopyToNew).
+		dst, err := clam.CopyToNew(srcPath, b.clamPending,
+			fmt.Sprintf("upload_%d_%s_", time.Now().UnixNano(), safeIP))
+		if err != nil {
 			logging.LogfCLAM("[upload] copy_failed src=%q err=%v", srcPath, err)
 			w.WriteHeader(http.StatusOK)
 			return
@@ -824,25 +824,6 @@ func (b *NginxBridge) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(out, in)
-	cerr := out.Close()
-	if err != nil {
-		_ = os.Remove(dst)
-		return err
-	}
-	return cerr
 }
 
 func sanitizeForFilename(s string) string {

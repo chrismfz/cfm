@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -106,9 +107,13 @@ func TestScanUploadSync_InfectedBlocksAndQuarantines(t *testing.T) {
 	if !v.Block || v.Verdict != "infected" || v.Signature != "Win.Trojan.Hide-1" {
 		t.Fatalf("infected verdict wrong: %+v", v)
 	}
-	// Evidence copied, original left for the caller to clean.
-	if _, err := os.Stat(filepath.Join(inf, filepath.Base(p))); err != nil {
-		t.Fatalf("quarantine copy missing: %v", err)
+	// Evidence copied (a new file named after the spool), original left for
+	// the caller to clean.
+	if filepath.Dir(got.Evidence) != inf || !strings.HasPrefix(filepath.Base(got.Evidence), filepath.Base(p)+".") {
+		t.Fatalf("evidence path %q", got.Evidence)
+	}
+	if b, err := os.ReadFile(got.Evidence); err != nil || string(b) != "PK\x03\x04payload" {
+		t.Fatalf("quarantine copy: %q %v", b, err)
 	}
 	if _, err := os.Stat(p); err != nil {
 		t.Fatalf("original spool must remain (caller owns it): %v", err)
@@ -221,5 +226,46 @@ func TestScanUploadSync_ScopeSkipsNonArchive(t *testing.T) {
 	v := m.ScanUploadSync(Job{Path: p, Host: "h.example.com"})
 	if v.Block || v.Verdict != "skipped_scope" {
 		t.Fatalf("scope-skip verdict wrong: %+v", v)
+	}
+}
+
+// pending and infected are root:cfm 0770: the edge's user can plant names
+// there. The fallback copy (pending/inline_fb_<spool>) and the evidence copy
+// (infected/<spool>) were os.WriteFile to a fixed name, which followed a
+// planted symlink: root wrote the upload's bytes wherever it pointed.
+func TestInlineCopiesDoNotFollowPlantedSymlinks(t *testing.T) {
+	victimDir := t.TempDir()
+	victim := filepath.Join(victimDir, "cron")
+	if err := os.WriteFile(victim, []byte("ORIGINAL"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spool := zipFile(t)
+
+	// Fallback: clamd hangs, the spool is copied into pending.
+	pending := t.TempDir()
+	if err := os.Symlink(victim, filepath.Join(pending, "inline_fb_"+filepath.Base(spool))); err != nil {
+		t.Fatal(err)
+	}
+	m := inlineManager(t, fakeClamd(t, "", true), func(c *Config) {
+		c.InlineTimeout = 200 * time.Millisecond
+		c.PendingDir = pending
+	})
+	m.ScanUploadSync(Job{Path: spool, Host: "h.example.com"})
+	if ql, _ := m.QueueDepth(); ql != 1 {
+		t.Fatalf("fallback not enqueued (queue=%d)", ql)
+	}
+
+	// Evidence: an infected verdict copies the spool into infected.
+	inf := t.TempDir()
+	if err := os.Symlink(victim, filepath.Join(inf, filepath.Base(spool))); err != nil {
+		t.Fatal(err)
+	}
+	m2 := inlineManager(t, fakeClamd(t, "stream: Eicar FOUND\x00", false), nil)
+	if v := m2.ScanUploadSync(Job{Path: spool, Host: "h.example.com", InfectedDir: inf}); !v.Block {
+		t.Fatalf("verdict %+v", v)
+	}
+
+	if b, _ := os.ReadFile(victim); string(b) != "ORIGINAL" {
+		t.Fatalf("symlink target overwritten: %q", b)
 	}
 }

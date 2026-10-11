@@ -49,6 +49,17 @@ back-filled here — see the git/PR history for that period.
   write, and the snapshot's mtime is no longer stamped by name. Directories
   in root-only parents (`/var/log/cfm`, the Site Cache zones) still follow
   an operator's symlink, as before.
+- **A ClamAV upload copy can no longer be redirected to an arbitrary file.**
+  The scanner's `pending` and `infected` directories are writable by the web
+  server's user (`cfm`). When an inline scan failed, the daemon (root) copied
+  the upload to `pending/inline_fb_<name>`, and an infected upload's evidence
+  to `infected/<name>`, by writing to that fixed name — following a symlink
+  planted there. A `cfm` process could thus have root write upload bytes of
+  its choosing anywhere (`/etc/cron.d/…`). Every copy into those directories
+  (including the bridge's `upload_<time>_<ip>` copy) is now a new file with a
+  random suffix, created exclusively, and the source is read without
+  following a symlink or blocking on a FIFO. Evidence files are now named
+  `<name>.<random>`.
 
 ## 2026.10.11
 
