@@ -17,9 +17,8 @@ import (
 type Collector struct {
 	cfg Config
 
-	// fallback: the /dumpall payload built when the snapshot is not current
-	// (see dumpAllFallback), one build at a time and reused for its version.
-	fallback dumpAllFallbackState
+	// buildMu: one /dumpall temp-file build at a time (dumpAllBuildFile).
+	buildMu sync.Mutex
 
 	// refreshedOnce flips to true after the first successful Refresh()
 	// completes. Run() consults this to skip its own initial Refresh

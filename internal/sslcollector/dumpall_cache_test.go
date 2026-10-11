@@ -1,10 +1,14 @@
 package sslcollector
 
 import (
+	"bufio"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -206,12 +210,13 @@ func TestPayloadRacingARefreshIsNotComplete(t *testing.T) {
 
 // While the snapshot is not current (the window between a Refresh's swap and
 // its WriteSnapshot, when every worker fetches), concurrent /dumpall calls
-// share one build instead of rebuilding ~110 MB each at the same time.
-func TestDumpAllFallbackBuildsOncePerVersion(t *testing.T) {
+// share one build: the first writes the snapshot, the others find it current.
+func TestDumpAllBuildsOncePerVersion(t *testing.T) {
 	col, path := newSnapshotCollector(t)
-	_ = os.Remove(path) // no snapshot: every /dumpall falls back
+	_ = os.Remove(path) // no snapshot
+	var mu sync.Mutex
 	builds := 0
-	dumpAllAfterStatsHook = func() { builds++ }
+	dumpAllAfterStatsHook = func() { mu.Lock(); builds++; mu.Unlock() }
 	t.Cleanup(func() { dumpAllAfterStatsHook = nil })
 	s := &sockServer{col: col, cfg: SockServerConfig{Token: strongToken}}
 
@@ -221,16 +226,12 @@ func TestDumpAllFallbackBuildsOncePerVersion(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			rr := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/dumpall", nil)
-			req.Header.Set("X-SSLCollector-Token", strongToken)
-			s.handleDumpAll(rr, req)
-			bodies[i] = rr.Body.String()
+			bodies[i] = dumpAllBody(t, s)
 		}(i)
 	}
 	wg.Wait()
 	if builds != 1 {
-		t.Errorf("6 concurrent fallbacks made %d builds, want 1", builds)
+		t.Errorf("6 concurrent /dumpall made %d builds, want 1", builds)
 	}
 	for i, b := range bodies {
 		if !strings.Contains(b, `"a.example.com"`) || b != bodies[0] {
@@ -238,19 +239,34 @@ func TestDumpAllFallbackBuildsOncePerVersion(t *testing.T) {
 		}
 	}
 
-	// A new version is built afresh.
+	// A new version is built afresh (and becomes the snapshot).
 	col.mu.Lock()
 	col.exact["b.example.com"] = col.exact["a.example.com"]
 	col.mu.Unlock()
-	if b, _ := col.dumpAllFallback(); builds != 2 || !strings.Contains(string(b), `"b.example.com"`) {
+	if b := dumpAllBody(t, s); builds != 2 || !strings.Contains(b, `"b.example.com"`) {
 		t.Errorf("new version: builds=%d", builds)
+	}
+	if h, _ := readSnapshotHeader(path, true); h.Version != col.Stats().Version || h.ExactN != 2 {
+		t.Errorf("snapshot after the new version: %+v", h)
 	}
 }
 
-// A fallback payload that lost an entry (a PEM read error) is served but not
-// reused: the next request rebuilds instead of handing the gap to every
-// worker until the next version change.
-func TestDumpAllFallbackDoesNotReuseAnIncompletePayload(t *testing.T) {
+func dumpAllBody(t *testing.T, s *sockServer) string {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/dumpall", nil)
+	req.Header.Set("X-SSLCollector-Token", strongToken)
+	s.handleDumpAll(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("/dumpall status %d", rr.Code)
+	}
+	return rr.Body.String()
+}
+
+// A payload that lost an entry (a PEM read error) is served (it is the best
+// that version has), and the next /dumpall after the PEM is back rebuilds it
+// instead of handing the gap to every worker until the next version change.
+func TestDumpAllRebuildsAnIncompletePayload(t *testing.T) {
 	col, path := newSnapshotCollector(t)
 	_ = os.Remove(path)
 	key := col.exact["a.example.com"].KeyPath + ".a"
@@ -261,14 +277,215 @@ func TestDumpAllFallbackDoesNotReuseAnIncompletePayload(t *testing.T) {
 	if err := os.Rename(key, key+".gone"); err != nil {
 		t.Fatal(err)
 	}
-	b1, _ := col.dumpAllFallback()
-	if strings.Contains(string(b1), `"a.example.com"`) {
-		t.Fatal("setup: the unreadable entry made it in")
+	s := &sockServer{col: col, cfg: SockServerConfig{Token: strongToken}}
+	if b := dumpAllBody(t, s); strings.Contains(b, `"a.example.com"`) || !strings.Contains(b, `"example.com"`) {
+		t.Fatalf("setup: unexpected payload %.200s", b)
 	}
 	if err := os.Rename(key+".gone", key); err != nil {
 		t.Fatal(err)
 	}
-	if b2, _ := col.dumpAllFallback(); !strings.Contains(string(b2), `"a.example.com"`) {
-		t.Error("incomplete fallback payload reused: the host stays missing for every worker")
+	if b := dumpAllBody(t, s); !strings.Contains(b, `"a.example.com"`) {
+		t.Error("incomplete payload reused: the host stays missing for every worker")
+	}
+}
+
+// When the regression guard keeps an older snapshot, /dumpall still serves
+// the current index (built to a temp file), and the snapshot is left alone.
+func TestDumpAllServesTheIndexWhenTheGuardKeepsTheSnapshot(t *testing.T) {
+	col, path := newSnapshotCollector(t)
+	big := `{"version":"older","exact_n":100,"wild_n":0,"complete":true,"exact":[],"wild":[]}`
+	if err := os.WriteFile(path, []byte(big), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	s := &sockServer{col: col, cfg: SockServerConfig{Token: strongToken}}
+	b := dumpAllBody(t, s)
+	h, ok := readSnapshotHeaderFrom(strings.NewReader(b), true)
+	if !ok || h.Version != col.Stats().Version || h.ExactN != 1 || h.WildN != 1 || !h.Complete {
+		t.Errorf("served %+v ok=%v, want the current index", h, ok)
+	}
+	if got, _ := os.ReadFile(path); string(got) != big {
+		t.Error("the guarded snapshot was overwritten")
+	}
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".dumpall-*")); len(left) != 0 {
+		t.Errorf("temp build left behind: %v", left)
+	}
+}
+
+// bigCollector: 60 certs, 40 names each, ~8 KB of PEM per cert — a payload
+// many times the size of its unique PEMs, as on a cPanel node.
+func bigCollector(t *testing.T) (*Collector, string) {
+	t.Helper()
+	col, path := newSnapshotCollector(t)
+	dir := filepath.Dir(path)
+	col.exact = map[string]*Entry{}
+	col.wildSuffix = map[string]*Entry{}
+	pem := strings.Repeat("MIIFazCCBFOgAwIBAgISA0123456789abcdefghijklmnopqrstuvwxyz0123/+\n", 120)
+	for i := 0; i < 60; i++ {
+		cp := filepath.Join(dir, fmt.Sprintf("c%d.pem", i))
+		kp := filepath.Join(dir, fmt.Sprintf("k%d.pem", i))
+		if err := os.WriteFile(cp, []byte(pem), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(kp, []byte(pem[:1700]), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		e := &Entry{Fingerprint: fmt.Sprintf("fp%03d", i), CertPath: cp, KeyPath: kp, NotAfter: time.Now().Add(24 * time.Hour)}
+		for j := 0; j < 40; j++ {
+			col.exact[fmt.Sprintf("h%02d.d%03d.example", j, i)] = e
+		}
+		col.wildSuffix[fmt.Sprintf("d%03d.example", i)] = e
+	}
+	return col, path
+}
+
+func allocatedBy(f func()) uint64 {
+	var a, b runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&a)
+	f()
+	runtime.ReadMemStats(&b)
+	return b.TotalAlloc - a.TotalAlloc
+}
+
+// The snapshot is written entry by entry: building it whole in memory (a map
+// per entry, the JSON buffer, the encoder's copy) took about four times its
+// size in heap — the daemon reached 1.2 GB on earth during an AutoSSL run.
+func TestWriteSnapshotDoesNotHoldThePayloadInMemory(t *testing.T) {
+	col, path := bigCollector(t)
+	alloc := allocatedBy(col.WriteSnapshot)
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alloc > uint64(st.Size())/2 {
+		t.Errorf("WriteSnapshot allocated %d KB for a %d KB snapshot, want under half of it", alloc>>10, st.Size()>>10)
+	}
+	var got struct {
+		Exact []struct {
+			Host    string `json:"host"`
+			CertPEM string `json:"cert_pem"`
+		} `json:"exact"`
+		Wild []json.RawMessage `json:"wild"`
+	}
+	body, _ := os.ReadFile(path)
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("snapshot is not valid JSON: %v", err)
+	}
+	if len(got.Exact) != 2400 || len(got.Wild) != 60 || got.Exact[0].Host != "h00.d000.example" || got.Exact[0].CertPEM == "" {
+		t.Errorf("snapshot content: %d exact, %d wild, first %+v", len(got.Exact), len(got.Wild), got.Exact[0].Host)
+	}
+	if h, ok := readSnapshotHeader(path, false); !ok || !h.Complete || h.Version != col.Stats().Version {
+		t.Errorf("header %+v ok=%v", h, ok)
+	}
+}
+
+// /dumpall right after a version change (no current snapshot) does not
+// build the payload in memory either: it writes the snapshot and streams it.
+func TestDumpAllAfterAVersionChangeDoesNotHoldThePayloadInMemory(t *testing.T) {
+	col, path := bigCollector(t)
+	col.WriteSnapshot()
+	col.mu.Lock()
+	col.exact["new.example"] = col.exact["h00.d000.example"]
+	col.mu.Unlock()
+	s := &sockServer{col: col, cfg: SockServerConfig{Token: strongToken}}
+	var w discardWriter
+	alloc := allocatedBy(func() {
+		req := httptest.NewRequest(http.MethodGet, "/dumpall", nil)
+		req.Header.Set("X-SSLCollector-Token", strongToken)
+		s.handleDumpAll(&w, req)
+	})
+	st, _ := os.Stat(path)
+	if w.n != st.Size() {
+		t.Fatalf("served %d bytes, snapshot is %d", w.n, st.Size())
+	}
+	if alloc > uint64(st.Size())/2 {
+		t.Errorf("/dumpall allocated %d KB for a %d KB payload, want under half of it", alloc>>10, st.Size()>>10)
+	}
+}
+
+type discardWriter struct {
+	h http.Header
+	n int64
+}
+
+func (d *discardWriter) Header() http.Header {
+	if d.h == nil {
+		d.h = http.Header{}
+	}
+	return d.h
+}
+func (d *discardWriter) Write(b []byte) (int, error) { d.n += int64(len(b)); return len(b), nil }
+func (d *discardWriter) WriteHeader(int)             {}
+
+// writeJSONString's output decodes to what encoding/json's would (invalid
+// UTF-8 becomes U+FFFD in both), so the hand-written payload reads the same
+// in the workers' cjson and in the Go readers.
+func TestWriteJSONStringMatchesEncodingJSON(t *testing.T) {
+	cases := []string{
+		"", "plain", "-----BEGIN CERTIFICATE-----\nMIIF/+=\n-----END CERTIFICATE-----\n",
+		`quote " backslash \ slash /`, "ctl \x00\x01\x1f\t\r\n\x7f", "ελληνικά é ü 漢字",
+		"bad utf8 \xff\xfe end", "  ", "<script>&amp;</script>", "\\\"\\",
+	}
+	for _, in := range cases {
+		var buf strings.Builder
+		bw := bufio.NewWriter(&buf)
+		writeJSONString(bw, in)
+		if err := bw.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		var got string
+		if err := json.Unmarshal([]byte(buf.String()), &got); err != nil {
+			t.Errorf("%q: invalid JSON %s: %v", in, buf.String(), err)
+			continue
+		}
+		ref, _ := json.Marshal(in)
+		var want string
+		_ = json.Unmarshal(ref, &want)
+		if got != want {
+			t.Errorf("%q: decodes to %q, encoding/json's to %q", in, got, want)
+		}
+	}
+}
+
+// Every entry field round-trips, with the PEMs exactly as on disk.
+func TestPayloadEntriesRoundTrip(t *testing.T) {
+	col, path := newSnapshotCollector(t)
+	col.WriteSnapshot()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Version string              `json:"version"`
+		ExactN  int                 `json:"exact_n"`
+		WildN   int                 `json:"wild_n"`
+		Exact   []map[string]string `json:"exact"`
+		Wild    []map[string]string `json:"wild"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	e := col.exact["a.example.com"]
+	cert, _ := os.ReadFile(e.CertPath)
+	key, _ := os.ReadFile(e.KeyPath)
+	wantExact := map[string]string{"host": "a.example.com", "fingerprint": "fpA", "cert_pem": string(cert),
+		"key_pem": string(key), "not_after": e.NotAfter.Format(time.RFC3339)}
+	wantWild := map[string]string{"suffix": "example.com", "fingerprint": "fpW", "cert_pem": string(cert),
+		"key_pem": string(key), "not_after": col.wildSuffix["example.com"].NotAfter.Format(time.RFC3339)}
+	if got.Version != col.Stats().Version || got.ExactN != 1 || got.WildN != 1 || len(got.Exact) != 1 || len(got.Wild) != 1 {
+		t.Fatalf("header/counts: %+v", got)
+	}
+	for k, v := range wantExact {
+		if got.Exact[0][k] != v {
+			t.Errorf("exact %s = %q, want %q", k, got.Exact[0][k], v)
+		}
+	}
+	for k, v := range wantWild {
+		if got.Wild[0][k] != v {
+			t.Errorf("wild %s = %q, want %q", k, got.Wild[0][k], v)
+		}
+	}
+	if len(got.Exact[0]) != len(wantExact) || len(got.Wild[0]) != len(wantWild) {
+		t.Errorf("unexpected fields: %v / %v", got.Exact[0], got.Wild[0])
 	}
 }

@@ -17,7 +17,15 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The cfm daemon no longer needs four times the certificate list's size in
+  memory to write it.** Each certificate change rebuilt the whole list (all
+  hosts with their PEMs, ~110 MB on a 7 800-host node) in memory before
+  writing it to disk or handing it to the web server, so an AutoSSL run made
+  the daemon peak at 1.2 GB. The list is now written entry by entry straight
+  to the file, and the web server is always served from a file: a synthetic
+  60 MB list now costs +28 MB of heap instead of +235 MB, and a certificate
+  change with six web-server workers fetching it +29 MB instead of +351 MB.
 
 ## 2026.10.11
 

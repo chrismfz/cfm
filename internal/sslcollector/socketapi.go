@@ -190,25 +190,31 @@ func (s *sockServer) handleDumpAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The snapshot WriteSnapshot keeps on disk is this same payload: serve
-	// it as is when it is the current version, instead of rebuilding the
-	// whole index (re-reading every PEM, a ~110 MB buffer on a large node)
-	// for every worker that asks. Anything else — no snapshot, an older one
-	// the regression guard kept — is built as before.
-	if f, size, ok := openCurrentSnapshot(s.col.Stats().Version); ok {
-		defer f.Close()
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-		_, _ = io.Copy(w, f)
-		return
+	// it when it is the current version. Otherwise the write that follows
+	// every index swap is running or did not happen: wait for it, or make
+	// it (WriteSnapshot skips a version already on disk), and serve the
+	// file. The payload is never built in memory: that was ~450 MB per
+	// build on a 7 800-host node.
+	ver := s.col.Stats().Version
+	f, size, ok := openCurrentSnapshot(ver)
+	if !ok {
+		s.col.WriteSnapshot()
+		ver = s.col.Stats().Version
+		f, size, ok = openSnapshotAt(ver, false)
 	}
-
-	body, err := s.col.dumpAllFallback()
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+	if !ok {
+		// No snapshot of this version could be written (the regression
+		// guard keeps the older one, an empty index, a write error).
+		var err error
+		if f, size, err = s.col.dumpAllBuildFile(); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 	}
+	defer f.Close()
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(body)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	_, _ = io.Copy(w, f)
 }
 
 func (s *sockServer) handleStats(w http.ResponseWriter, r *http.Request) {

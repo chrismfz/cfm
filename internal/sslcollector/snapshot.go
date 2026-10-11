@@ -88,12 +88,22 @@ func (c *Collector) WriteSnapshot() {
 		return
 	}
 
-	body, exactN, wildN, err := c.BuildDumpAllPayload()
+	// Written straight to the temp file (the payload is never whole in
+	// memory), then checked against the guards below before the rename.
+	tmp, err := openSnapshotTmp(path)
 	if err != nil {
+		logging.Logf("[sslcollector] snapshot: write failed: %v", err)
+		return
+	}
+	res, err := c.writePayload(tmp, tmp)
+	if err != nil {
+		discardSnapshotTmp(tmp)
 		logging.Logf("[sslcollector] snapshot: build payload failed: %v", err)
 		return
 	}
+	exactN, wildN := res.ExactN, res.WildN
 	if exactN+wildN == 0 {
+		discardSnapshotTmp(tmp)
 		logging.Logf("[sslcollector] snapshot: skip write (zero entries; keeping existing on-disk snapshot if any)")
 		return
 	}
@@ -125,12 +135,13 @@ func (c *Collector) WriteSnapshot() {
 			} else {
 				logging.Logf("[sslcollector] snapshot: skip write (regression guard: existing has %d entries, new has %d; >33%% drop). Set CFM_SSLCOLLECTOR_FORCE_SNAPSHOT=1 to override.",
 					prev, next)
+				discardSnapshotTmp(tmp)
 				return
 			}
 		}
 	}
 
-	if err := writeSnapshotAtomic(path, body); err != nil {
+	if err := commitSnapshotTmp(tmp, path); err != nil {
 		logging.Logf("[sslcollector] snapshot: write failed: %v", err)
 		return
 	}
@@ -261,6 +272,13 @@ func countArray(dec *json.Decoder) (int, bool) {
 // snapshot renamed in between is either the old file (still open, still
 // whole) or rejected. ok=false: build the payload instead.
 func openCurrentSnapshot(version string) (*os.File, int64, bool) {
+	return openSnapshotAt(version, true)
+}
+
+// openSnapshotAt is openCurrentSnapshot; requireComplete=false also accepts
+// a snapshot that lost an entry to an unreadable PEM (it is the best payload
+// that version has: a rebuild would skip the same entry).
+func openSnapshotAt(version string, requireComplete bool) (*os.File, int64, bool) {
 	if version == "" {
 		return nil, 0, false
 	}
@@ -270,7 +288,7 @@ func openCurrentSnapshot(version string) (*os.File, int64, bool) {
 	}
 	h, ok := readSnapshotHeaderFrom(f, false)
 	st, serr := f.Stat()
-	if !ok || !h.Complete || h.Version != version || serr != nil || !st.Mode().IsRegular() {
+	if !ok || (requireComplete && !h.Complete) || h.Version != version || serr != nil || !st.Mode().IsRegular() {
 		_ = f.Close()
 		return nil, 0, false
 	}
@@ -282,30 +300,50 @@ func openCurrentSnapshot(version string) (*os.File, int64, bool) {
 }
 
 // writeSnapshotAtomic writes body to path via a sibling .tmp file +
-// rename. Explicit Chmod calls bypass the daemon's umask (which is
-// often 0077 from systemd), ensuring the snapshot ends up mode 0640
-// so OpenResty/Angie workers (cfm group) can read it. Without the
-// explicit Chmod, `os.OpenFile(..., 0o640)` produces 0600 under a
-// 0077 umask and the workers silently fall through to the fallback
-// cert path on every reload.
+// rename (openSnapshotTmp + commitSnapshotTmp).
 func writeSnapshotAtomic(path string, body []byte) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o770); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
-	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	f, err := openSnapshotTmp(path)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", tmp, err)
+		return err
 	}
 	if _, werr := f.Write(body); werr != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write %s: %w", tmp, werr)
+		discardSnapshotTmp(f)
+		return fmt.Errorf("write %s: %w", f.Name(), werr)
 	}
+	return commitSnapshotTmp(f, path)
+}
+
+// openSnapshotTmp creates (truncating) the sibling .tmp file a snapshot is
+// written to before commitSnapshotTmp renames it over path.
+func openSnapshotTmp(path string) (*os.File, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o770); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o640)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", tmp, err)
+	}
+	return f, nil
+}
+
+// discardSnapshotTmp closes and removes a .tmp file that is not committed.
+func discardSnapshotTmp(f *os.File) {
+	_ = f.Close()
+	_ = os.Remove(f.Name())
+}
+
+// commitSnapshotTmp fsyncs and closes the .tmp file and renames it over
+// path. Explicit Chmod calls bypass the daemon's umask (which is often 0077
+// from systemd), ensuring the snapshot ends up mode 0640 so
+// OpenResty/Angie workers (cfm group) can read it. Without the explicit
+// Chmod, `os.OpenFile(..., 0o640)` produces 0600 under a 0077 umask and the
+// workers silently fall through to the fallback cert path on every reload.
+func commitSnapshotTmp(f *os.File, path string) error {
+	tmp := f.Name()
 	if serr := f.Sync(); serr != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
+		discardSnapshotTmp(f)
 		return fmt.Errorf("fsync %s: %w", tmp, serr)
 	}
 	if cerr := f.Close(); cerr != nil {
