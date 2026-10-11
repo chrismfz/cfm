@@ -17,7 +17,38 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The cfm daemon no longer needs four times the certificate list's size in
+  memory to write it.** Each certificate change rebuilt the whole list (all
+  hosts with their PEMs, ~110 MB on a 7 800-host node) in memory before
+  writing it to disk or handing it to the web server, so an AutoSSL run made
+  the daemon peak at 1.2 GB. The list is now written entry by entry straight
+  to the file, and the web server is always served from a file: a synthetic
+  60 MB list now costs +28 MB of heap instead of +235 MB, and a certificate
+  change with six web-server workers fetching it +57 MB instead of +351 MB.
+
+### Security
+- **The certificate snapshot's temp file can no longer be redirected by the
+  web server's user.** The daemon wrote the snapshot (every certificate's
+  private key included) to a fixed `dump.json.tmp` in a directory the `cfm`
+  group can write, and set its mode and group by name. A `cfm` process that
+  planted that name as a symlink had root overwrite the link's target with
+  the snapshot and make it readable by the `cfm` group. The temp file is now
+  created new under a random name, and its mode and group are set on the
+  open file.
+- **The daemon no longer follows a name the web server's user can plant.**
+  `/var/lib/cfm/scanner/pending`, `scanner/infected` and
+  `sslcollector/dump.json` sit in directories the `cfm` group can write.
+  At every start the daemon chmod'ed and chown'ed them by name, so a `cfm`
+  process that replaced one with a symlink had root make the target (`/etc`,
+  say) group-writable by `cfm`, or hand a file such as Debian's
+  `/etc/shadow` to the `cfm` group. They are now opened without following
+  symlinks (a hard-linked `dump.json` is refused too) and set on the open
+  handle; a refused name is left alone with a warning in the log. A FIFO
+  planted as `dump.json` no longer hangs every `/dumpall` and snapshot
+  write, and the snapshot's mtime is no longer stamped by name. Directories
+  in root-only parents (`/var/log/cfm`, the Site Cache zones) still follow
+  an operator's symlink, as before.
 
 ## 2026.10.11
 

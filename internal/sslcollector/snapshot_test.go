@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -36,8 +37,35 @@ func TestWriteSnapshotAtomic_RoundTripAndPermissions(t *testing.T) {
 	if string(got) != string(body) {
 		t.Fatalf("body mismatch: %s", got)
 	}
-	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
-		t.Fatalf(".tmp leaked: %v", err)
+	if left, _ := filepath.Glob(path + ".tmp*"); len(left) != 0 {
+		t.Fatalf(".tmp leaked: %v", left)
+	}
+}
+
+// The temp file is created new (O_EXCL, random name), never opened by a
+// fixed name: the directory is group-writable by the edge's user, and a
+// "dump.json.tmp" planted as a symlink had root truncate and fill its target
+// with the snapshot (private keys included) and chmod/chown it root:cfm 0640.
+func TestWriteSnapshotDoesNotFollowAPlantedTmpSymlink(t *testing.T) {
+	col, path := newSnapshotCollector(t)
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, path+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	col.WriteSnapshot()
+	got, _ := os.ReadFile(victim)
+	st, _ := os.Stat(victim)
+	if string(got) != "SECRET" || st.Mode().Perm() != 0o600 {
+		t.Fatalf("symlink target written or re-moded: %q %o", got, st.Mode().Perm())
+	}
+	if h, ok := readSnapshotHeader(path, true); !ok || h.ExactN != 1 {
+		t.Fatalf("snapshot not written: %+v ok=%v", h, ok)
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink != 0 || fi.Mode().Perm() != 0o640 {
+		t.Fatalf("snapshot %v %v", fi, err)
 	}
 }
 
@@ -263,5 +291,62 @@ func TestCollectorWriteSnapshot_SkipsZeroEntries(t *testing.T) {
 	}
 	if !strings.Contains(string(got), `"keep"`) {
 		t.Fatalf("existing snapshot must not have been overwritten with zero-entry payload; got %s", got)
+	}
+}
+
+// dump.json sits in a directory the edge's user can write. A FIFO planted
+// there blocked a plain open forever (every /dumpall, and every snapshot
+// write under snapshotMu); a symlink had the unchanged-version skip stamp
+// its target's mtime by name.
+func TestSnapshotReadersRefuseFIFOsAndSymlinks(t *testing.T) {
+	col, path := newSnapshotCollector(t)
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if f, _, ok := openCurrentSnapshot(col.Stats().Version); ok {
+			f.Close()
+			t.Error("FIFO served as the snapshot")
+		}
+		col.WriteSnapshot() // replaces it
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocked on a FIFO at dump.json")
+	}
+	if h, ok := readSnapshotHeader(path, true); !ok || h.ExactN != 1 {
+		t.Fatalf("snapshot not written over the FIFO: %+v ok=%v", h, ok)
+	}
+
+	// A symlink to a current-looking file elsewhere: not read through, and
+	// its target's mtime is not stamped.
+	victim := filepath.Join(t.TempDir(), "victim.json")
+	body, _ := os.ReadFile(path)
+	if err := os.WriteFile(victim, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(victim, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, path); err != nil {
+		t.Fatal(err)
+	}
+	if f, _, ok := openCurrentSnapshot(col.Stats().Version); ok {
+		f.Close()
+		t.Error("snapshot read through a symlink")
+	}
+	col.WriteSnapshot()
+	if st, _ := os.Stat(victim); !st.ModTime().Equal(old) {
+		t.Errorf("symlink target's mtime stamped: %v", st.ModTime())
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("snapshot not rewritten over the symlink: %v %v", fi, err)
 	}
 }

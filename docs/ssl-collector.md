@@ -170,17 +170,30 @@ fetched one per poll: on a six-worker node the last one served a new cert
 after a Refresh that changed the index (an unchanged version is not
 rewritten: that was ~110 MB and ~18s on a 7 800-host node, every discovery
 tick), and `/dumpall` streams that file when it is the current version
-instead of rebuilding the payload (re-reading every PEM into a buffer) for
-each worker. Until the snapshot of a new version is written (the ~18s
-between a Refresh's swap and its WriteSnapshot on a large node, which is
-when the workers fetch) and whenever the snapshot is not current, `/dumpall`
-builds the payload once per version: concurrent requests wait for that
-build and get the same bytes, which are reused for 30s and then released.
-An older snapshot — kept by the regression guard — is not
-served, nor is one marked `complete: false` (an entry's PEM could not be
-read when it was built); the payload is built as before, and an incomplete
-snapshot is rewritten on the next Refresh even at the same version. A
-skipped (unchanged) write re-stamps the file's mtime, which the regression
+instead of rebuilding the payload for each worker. When it is not (the
+window between a Refresh's swap and its WriteSnapshot, which is when the
+workers fetch; a snapshot the regression guard holds back or one marked
+`complete: false`; an empty index; a failed write), `/dumpall` builds the
+payload once per version into an unlinked temp file next to the snapshot,
+serves it to every concurrent request and reuses it for 30s (only when
+complete, so an entry whose PEM could not be read is retried on the next
+request). It never writes the snapshot itself. With no room for the temp
+file (a full `/var`), it streams the payload to the worker as it is written.
+
+**The payload is never whole in memory.** It is written entry by entry,
+straight to a temp file next to the snapshot (`dump.json.tmp-*`, created
+with O_EXCL); the header's `exact_n`, `wild_n` and
+`complete` are written as padded placeholders and filled in once the entries
+are out. Building it whole (a map per entry, the JSON buffer, the encoder's
+copy of it) took about four times its size in heap: on earth (110 MB
+snapshot) the daemon reached 1.2 GB during an AutoSSL run (2026-10-10) and
+during a simulated one with nine cert changes in three minutes
+(2026-10-11). The heap now holds the index copy, one PEM pair per
+certificate and a 256 KB write buffer (a 60 MB synthetic snapshot: +28 MB
+peak, was +235 MB; a version change with six workers fetching while the
+snapshot is written: +57 MB, was +351 MB).
+
+A skipped (unchanged) write re-stamps the file's mtime, which the regression
 guard's 1h staleness release reads as "last confirmed current". A
 version-triggered fetch no longer holds `lock:dumpall`, so cfm_stats'
 `ingest_lock` shows only the startup / forced fetches. The snapshot carries `exact_n` /
