@@ -523,7 +523,11 @@ func (t *tracker) addAuth(user, ip, via string, at time.Time) {
 		t.authIPs[user] = ips
 	}
 	if _, ok := ips[ip]; !ok && len(ips) >= maxTrackedIPs {
-		return
+		// full: a SENDING address takes the place of the oldest one that only
+		// read (a phone's rotating IPv6 must not keep a botnet's SMTP logins out)
+		if via != "smtp" || !evictOldestReader(ips) {
+			return
+		}
 	}
 	a := ips[ip]
 	if i := viaIndex(via); i >= 0 && at.After(a.via[i]) {
@@ -533,6 +537,23 @@ func (t *tracker) addAuth(user, ip, via string, at time.Time) {
 		a.at = at
 	}
 	ips[ip] = a
+}
+
+// evictOldestReader drops the source that last logged in longest ago and has
+// never sent mail (SMTP); false when every source has sent.
+func evictOldestReader(ips map[string]authSeen) bool {
+	smtp := viaIndex("smtp")
+	victim, at := "", time.Time{}
+	for ip, a := range ips {
+		if a.via[smtp].IsZero() && (victim == "" || a.at.Before(at)) {
+			victim, at = ip, a.at
+		}
+	}
+	if victim == "" {
+		return false
+	}
+	delete(ips, victim)
+	return true
 }
 
 // prune drops context older than the windows it is read over.
@@ -755,8 +776,8 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 	}
 
 	// keys of this check's findings: a spike's tells include a bounce finding
-	// of its own (judged first, listed after the spikes as before) and a
-	// hijack candidate; a hijack is confirmed by a spike or bounce finding
+	// of its own (judged first, listed after the spikes as before); a hijack
+	// is confirmed by a bounce finding or a spike at warning or above
 	found := map[string]bool{}
 	var others []AbuseView
 	for _, more := range [][]AbuseView{t.bounceFindings(now, open, held), queueFindings(now, open, held), rblFindings(rbl, open, held)} {
@@ -801,16 +822,21 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 	for _, a := range out {
 		c := t.context("auth:"+a.Addr, a.Addr)
 		key := "mail:out:" + a.Addr
-		ips := len(t.authIPs[a.Addr])
-		// many sending addresses at once is a botnet using the password, not
-		// an office (a phone, a desktop and a webmail are three)
-		tell := c.abusive() || found["mail:bounce:auth:"+a.Addr] || hijacked[a.Addr] || ips >= spikeManyIPs
+		senders := t.smtpSources(a.Addr, now)
+		// the spike's OWN tells. Many SENDING addresses at once is a botnet
+		// using the password, not an office (a phone, a desktop and a webmail
+		// are three; phones that only read an office mailbox are not counted).
+		// A hijack candidate is not one: the spike CONFIRMS the hijack, and a
+		// mailbox read from three countries sending its usual run would
+		// otherwise confirm it with its own volume — a loop back to the
+		// critical pages the hijack severity removed (review of #1599).
+		tell := c.abusive() || found["mail:bounce:auth:"+a.Addr] || senders >= spikeManyIPs
 		if (!tell && t.doneBefore(a, key, open[key])) || belowAlertFloor(a, tell, open[key]) {
 			continue
 		}
 		head := fmt.Sprintf("%s: %d authenticated messages in %dh (%s)", a.Addr, a.Recent, anomalyRecentHours, usual(a))
-		if ips > 1 && !hijacked[a.Addr] {
-			head += fmt.Sprintf(" · from %d IPs", ips)
+		if senders > 1 && !hijacked[a.Addr] {
+			head += fmt.Sprintf(" · sent from %d IPs", senders)
 		}
 		sev := spikeSeverity(a)
 		if !tell && a.Kind == "spike" {
@@ -825,7 +851,15 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		msg := clip(c.describe(head))
 		f := abuseFinding{Type: TypeOutboundSpike, Severity: sev, Key: "mail:out:" + a.Addr, Message: msg, Expected: expectedOf(a)}
 		fs = append(fs, f)
-		found[f.Key] = true
+		// a spike confirms a hijack at warning or above (a tell of its own, or
+		// extreme), or when it is far past the sender's record: a volume-only
+		// info one a little over its record is an owner's run as often as not,
+		// and on a trip that is no stolen password; half again its record is
+		if sev != "info" || farPastPeak(a) {
+			found[f.Key] = true
+		}
+		// IPs: every login source of the mailbox (as it always was); the
+		// message's "sent from N IPs" counts the sending ones
 		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, IPs: len(t.authIPs[a.Addr]), Context: &c})
 	}
 	for _, v := range others {
@@ -892,9 +926,9 @@ func CurrentAbuse() ([]AbuseView, time.Time) {
 // belowAlertFloor: a MILD small spike (under abuseAlertFloor messages, under
 // abuseCritRatio× its usual) is not an alert — a newsletter or a busy day. A
 // small one far above its usual (a quiet site hacked, 45 a day at 45×), or one
-// with a tell of abuse (Context.abusive, bounces of its own, a hijack
-// candidate, many sending addresses), still is; and an open one keeps being
-// judged.
+// with a tell of abuse (Context.abusive, bounces of its own, many SENDING
+// addresses — not a hijack candidate, which the spike confirms instead),
+// still is; and an open one keeps being judged.
 func belowAlertFloor(a Anomaly, tell, open bool) bool {
 	if open || a.Recent >= abuseAlertFloor || a.Ratio >= abuseCritRatio {
 		return false
@@ -904,8 +938,9 @@ func belowAlertFloor(a Anomaly, tell, open bool) bool {
 
 // abusive: the context carries a tell of abuse — a sender outside this
 // host's domains, a mailbox sending as another domain, the contact-form
-// pattern. The caller adds what lives outside the context (bounces, logins
-// from many places).
+// pattern. The caller adds what lives outside the context (bounces of its
+// own, 10+ sending addresses); logins from many countries are not a tell of a
+// spike (the spike confirms the hijack, never the other way round).
 func (c Context) abusive() bool {
 	return c.ForeignFrom || c.OtherFrom || c.CopiedTo != ""
 }
@@ -916,10 +951,24 @@ func (c Context) abusive() bool {
 // Asked only when nothing looks abusive. Never for an open finding (its own
 // incident is in the peak by then), nor for a sender alerted on (warning or
 // critical) within the peak's days: that peak may be the thief's first wave.
-// Strictly under: at the top of an hour the current bucket is still empty,
-// and a steady sender's two hours equal its two-hour peak.
+// Spikes resolved before this memory existed (cfm 2026-10-14) are not in it.
+// At or under the peak (Anomaly.UnderPeak): a fixed-size run sent the same
+// way every day equals its peak. A peak that could not be read is no peak:
+// every spike is judged as before the peak existed (a hacked site's script
+// spike must not wait on the store; a mailbox's tell-less one is info).
 func (t *tracker) doneBefore(a Anomaly, key string, open bool) bool {
-	return !open && !t.alerted[key] && a.Kind == "spike" && a.Peak > 0 && a.Recent < a.Peak
+	return !open && !t.alerted[key] && a.UnderPeak
+}
+
+// hijackConfirmFactor: a volume-only spike this many times its own peak (or
+// with no peak at all) confirms a hijack candidate's hijack.
+const hijackConfirmFactor = 1.5
+
+func farPastPeak(a Anomaly) bool {
+	if a.Kind != "spike" {
+		return true // a new sender: no record to be near
+	}
+	return a.Peak == 0 || float64(a.Recent) >= hijackConfirmFactor*float64(a.Peak)
 }
 
 // setAlerted records the spike keys alerted on within anomalyPeakDays
@@ -928,6 +977,26 @@ func (t *tracker) setAlerted(keys map[string]bool) {
 	t.mu.Lock()
 	t.alerted = keys
 	t.mu.Unlock()
+}
+
+// smtpSources counts the distinct sources a mailbox SENT mail from (SMTP
+// AUTH) within hijackWindow — fetchers and gateways each one source, the
+// node's own and private addresses none (authSource). Logins are kept for
+// hijackWindow (1 h), the spike's window is 2 h: a botnet that stopped over an
+// hour ago is not counted.
+func (t *tracker) smtpSources(user string, now time.Time) int {
+	cutoff := now.Add(-hijackWindow)
+	srcs := map[string]bool{}
+	smtp := viaIndex("smtp")
+	for ip, a := range t.authIPs[user] {
+		if a.via[smtp].IsZero() || a.via[smtp].Before(cutoff) {
+			continue
+		}
+		if src, _ := authSource(ip); src != "" {
+			srcs[src] = true
+		}
+	}
+	return len(srcs)
 }
 
 // volumeOnly is a spike's severity with no tell of abuse: one step down.
@@ -1064,13 +1133,15 @@ type publisher struct {
 	path   string // "" = not persisted
 	loaded bool
 	open   map[string]openFinding
-	past   map[string]pastFinding // resolved hijacks, kept in pastPath()
+	past   map[string]pastFinding // resolved hijacks and spikes, kept in pastPath()
 	// pastDirty: past changed since it was last written (it rarely does; the
 	// open findings are written every check, as before)
 	pastDirty bool
 }
 
-// pastPath is where resolved hijacks are kept, next to the open findings.
+// pastPath is where resolved findings are remembered (hijacks for
+// hijackQuiet, spikes for anomalyPeakDays), next to the open findings. The
+// file name predates the spikes.
 func (p *publisher) pastPath() string {
 	return strings.TrimSuffix(p.path, ".json") + "_hijacks.json"
 }
@@ -1172,7 +1243,11 @@ func sevRank(s string) int {
 
 // alertedSpikes lists the spike keys alerted on (warning or critical) that
 // are open or closed within anomalyPeakDays: their sender's peak may hold that
-// incident, so it is no "done before" (tracker.doneBefore).
+// incident, so it is no "done before" (tracker.doneBefore). An info spike
+// (volume only) is not remembered: a sender's usual run that once set a new
+// record would otherwise never be "done before" again, and be listed every
+// day — a tell-less second wave under a first one is indistinguishable from
+// that run, and the first wave was already listed.
 func (p *publisher) alertedSpikes(now time.Time) map[string]bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

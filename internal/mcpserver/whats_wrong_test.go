@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -647,5 +648,24 @@ func TestEvalMailAbuseSeverities(t *testing.T) {
 	})
 	if len(fs) != 3 || fs[0].Severity != sevInfo || fs[1].Severity != sevWarning || fs[2].Severity != sevCritical {
 		t.Fatalf("want info, warning, critical: %+v", fs)
+	}
+}
+
+// Without the abuse check, the raw anomalies list warnings before the
+// spikes under their own peak (info), so a sender's usual run does not push a
+// real spike past the cap; the "more" line is as severe as what it hides.
+func TestEvalMailTrafficFallbackPutsWarningsFirst(t *testing.T) {
+	var anoms []string
+	for i := 0; i < 6; i++ { // under their peak: info
+		anoms = append(anoms, fmt.Sprintf(`{"addr":"run%d@x.gr","recent":100,"ratio":4,"kind":"spike","peak":200,"under_peak":true}`, i))
+	}
+	anoms = append(anoms, `{"addr":"real@x.gr","recent":100,"ratio":3.5,"kind":"spike","peak":50}`)
+	body := []byte(`{"available":true,"traffic":{"anomalies":[` + strings.Join(anoms, ",") + `]}}`)
+	fs := evalMailTraffic(body, map[string]string{})
+	if len(fs) != wwMailAnomalyCap+1 || fs[0].Severity != sevWarning || !strings.Contains(fs[0].Detail, "real@x.gr") {
+		t.Fatalf("the real spike first: %+v", fs)
+	}
+	if last := fs[len(fs)-1]; last.Title != "more outbound-mail anomalies" || last.Severity != sevInfo {
+		t.Fatalf("the hidden tail is info: %+v", last)
 	}
 }

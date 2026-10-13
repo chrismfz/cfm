@@ -52,8 +52,8 @@ func outFinding(t *testing.T, fs []abuseFinding) *abuseFinding {
 	return got
 }
 
-// The peak is the largest sum over two consecutive hourly buckets, before the
-// recent window.
+// The peak is the largest sum over three consecutive hourly buckets (the
+// recent window's span), before the recent window and its 6 h gap.
 func TestPeakWindows(t *testing.T) {
 	st := openTemp(t)
 	day := spikeT.Add(-3 * 24 * time.Hour)
@@ -68,8 +68,8 @@ func TestPeakWindows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["a@x.gr"] != 170 || got["none@x.gr"] != 0 {
-		t.Fatalf("want 100+70, ignoring the recent window and >28 days: %+v", got)
+	if got["a@x.gr"] != 175 || got["none@x.gr"] != 0 {
+		t.Fatalf("want 5+100+70, ignoring the recent window and >28 days: %+v", got)
 	}
 }
 
@@ -157,11 +157,44 @@ func TestVolumeOnlyStepsDownOneLevel(t *testing.T) {
 		dovecotLogin(tr, "info@shop.gr", "imap", ip, spikeT)
 	}
 	fs, _, _, _ = tr.evaluateWith(st, spikeT, nil, nil)
-	if f := outFinding(t, fs); f == nil || f.Severity != "warning" || strings.Contains(f.Message, "volume only") {
-		t.Fatalf("a spike of a mailbox logged in from many countries is a warning: %+v", fs)
+	if f := outFinding(t, fs); f == nil || f.Severity != "info" {
+		t.Fatalf("the hijack candidate is not a tell of the spike: volume only: %+v", fs)
 	}
 	if h := onlyHijack(t, fs); h.Severity != "critical" {
-		t.Fatalf("and the hijack is confirmed by it: %+v", h)
+		t.Fatalf("a volume-only spike five times its record confirms the hijack: %+v", h)
+	}
+
+	// a run a little over its record (yesterday 4+120+4 = 128, today 135)
+	st = spikeStore(t, "info@shop.gr")
+	addOut(t, st, "info@shop.gr", spikeT.Add(-24*time.Hour+time.Hour), 120)
+	addOut(t, st, "info@shop.gr", spikeT.Add(-time.Hour), 135)
+	fs, _, _, _ = tr.evaluateWith(st, spikeT, nil, nil)
+	if f := outFinding(t, fs); f == nil || f.Severity != "info" {
+		t.Fatalf("a little over its record: volume only: %+v", fs)
+	}
+	if h := onlyHijack(t, fs); h.Severity != "warning" {
+		t.Fatalf("an owner's run a little over its record does not confirm the hijack: %+v", h)
+	}
+}
+
+// Review of PR #1599: a SENDING address takes the place of the oldest
+// read-only one when a mailbox's sources are full.
+func TestSMTPLoginEvictsTheOldestReader(t *testing.T) {
+	tr := newTracker()
+	T := spikeT
+	for i := 0; i < maxTrackedIPs; i++ {
+		dovecotLogin(tr, "a@x.gr", "imap", fmt.Sprintf("2a02:1:%x::1", i), T.Add(time.Duration(i)*time.Second))
+	}
+	smtpLogin(tr, "a@x.gr", "9.9.9.9", T.Add(time.Hour))
+	if _, ok := tr.authIPs["a@x.gr"]["9.9.9.9"]; !ok || len(tr.authIPs["a@x.gr"]) != maxTrackedIPs {
+		t.Fatalf("the SMTP login is kept, the cap holds: %d", len(tr.authIPs["a@x.gr"]))
+	}
+	if _, ok := tr.authIPs["a@x.gr"]["2a02:1:0::1"]; ok {
+		t.Fatal("the oldest reader was the one dropped")
+	}
+	dovecotLogin(tr, "a@x.gr", "imap", "8.8.8.8", T.Add(time.Hour))
+	if _, ok := tr.authIPs["a@x.gr"]["8.8.8.8"]; ok {
+		t.Fatal("a new reader still waits for room")
 	}
 }
 
@@ -180,22 +213,23 @@ func TestATellBeatsDoneBefore(t *testing.T) {
 	}
 }
 
-// Review of PR #1598: at the top of an hour the current bucket is empty, and
-// a steady sender's last two hours EQUAL a two-hour peak: equal is not
-// "done before". The hours just before the recent window are not in the
-// peak, so a falling incident cannot hide behind its own first hours.
-func TestSteadyOrFallingRateIsNotDoneBefore(t *testing.T) {
-	st := openTemp(t)
-	for h := 30; h >= 1; h-- {
-		addOut(t, st, "a@x.gr", spikeT.Add(-time.Duration(h)*time.Hour), 100)
+// Review of PR #1598 / #1599: UnderPeak is AT or under (a fixed-size run sent
+// the same way every day equals its peak), over the recent window's three
+// buckets, and the hours just before the recent window are not in the peak,
+// so a falling incident cannot hide behind its own first hours.
+func TestUnderPeakAndAFallingIncidentIsNotItsOwnPeak(t *testing.T) {
+	st := spikeStore(t, "a@x.gr")
+	addOut(t, st, "a@x.gr", spikeT.Add(-24*time.Hour+time.Hour), 92) // yesterday: 4+96+4 = 104 over three hours
+	addOut(t, st, "a@x.gr", spikeT.Add(-time.Hour), 104)
+	an, _, err := st.anomalyScan(spikeT, nil, "outbound")
+	if err != nil || len(an) != 1 || an[0].Peak != 104 || !an[0].UnderPeak {
+		t.Fatalf("equal to its peak: a run it has sent before: %+v %v", an, err)
 	}
-	peaks, err := st.peakWindows("outbound", []string{"a@x.gr"}, spikeT)
-	if err != nil || peaks["a@x.gr"] != 200 {
-		t.Fatalf("peak: %+v %v", peaks, err)
-	}
-	tr := newTracker()
-	if tr.doneBefore(Anomaly{Addr: "a@x.gr", Kind: "spike", Recent: 200, Peak: 200}, "mail:out:a@x.gr", false) {
-		t.Fatal("equal to its peak is not done before")
+	st = spikeStore(t, "a@x.gr")
+	addOut(t, st, "a@x.gr", spikeT.Add(-24*time.Hour+time.Hour), 92)
+	addOut(t, st, "a@x.gr", spikeT.Add(-time.Hour), 105)
+	if an, _, _ = st.anomalyScan(spikeT, nil, "outbound"); len(an) != 1 || an[0].UnderPeak {
+		t.Fatalf("over its peak: not under it: %+v", an)
 	}
 
 	st = openTemp(t) // never opened: 150, 100, 50 in the three hours before now
@@ -209,7 +243,8 @@ func TestSteadyOrFallingRateIsNotDoneBefore(t *testing.T) {
 
 // Review of PR #1598: a sender alerted on (warning or critical) within the
 // peak's days is never "done before" — its peak may be the thief's first
-// wave. An info spike is not remembered.
+// wave. An info spike (volume only) is not remembered: a usual run that once
+// set a record would otherwise be listed every day.
 func TestAlertedSpikeIsNeverDoneBefore(t *testing.T) {
 	recordAbuse(t)
 	T := spikeT
@@ -230,26 +265,34 @@ func TestAlertedSpikeIsNeverDoneBefore(t *testing.T) {
 
 	tr := newTracker()
 	tr.setAlerted(map[string]bool{"mail:out:a@x.gr": true})
-	a := Anomaly{Addr: "a@x.gr", Kind: "spike", Recent: 100, Peak: 300}
+	a := Anomaly{Addr: "a@x.gr", Kind: "spike", Recent: 100, Peak: 300, UnderPeak: true}
 	if tr.doneBefore(a, "mail:out:a@x.gr", false) || !tr.doneBefore(a, "mail:out:c@x.gr", false) {
 		t.Fatal("only the alerted sender loses done-before")
 	}
 }
 
-// Review of PR #1598: a spike sent from many addresses at once (a botnet with
-// the password) is not volume only, and a hijack candidate's small spike is
-// still a finding: it confirms the hijack.
-func TestManyIPsAndHijackAreTells(t *testing.T) {
+// Review of PR #1598 / #1599: a spike SENT from many addresses at once (a
+// botnet with the password) is not volume only — an office's phones reading
+// it are not counted — and a hijack candidate is not a tell of the spike: its
+// small, mild spike is no finding and confirms nothing.
+func TestManySendersIsATellAHijackCandidateIsNot(t *testing.T) {
 	stubGeo(t, func(string) (string, uint) { return "GR", 3 })
 	st := spikeStore(t, "info@shop.gr")
 	addOut(t, st, "info@shop.gr", spikeT.Add(-time.Hour), 60)
 	tr := newTracker()
-	for i := 0; i < spikeManyIPs; i++ {
+	for i := 0; i < spikeManyIPs; i++ { // an office's phones only READ: no tell
 		dovecotLogin(tr, "info@shop.gr", "imap", fmt.Sprintf("62.1.1.%d", i), spikeT)
 	}
 	fs, _, _, _ := tr.evaluateWith(st, spikeT, nil, nil)
+	if f := outFinding(t, fs); f == nil || f.Severity != "info" {
+		t.Fatalf("read from %d addresses: still volume only: %+v", spikeManyIPs, fs)
+	}
+	for i := 0; i < spikeManyIPs; i++ {
+		smtpLogin(tr, "info@shop.gr", fmt.Sprintf("62.1.2.%d", i), spikeT)
+	}
+	fs, _, _, _ = tr.evaluateWith(st, spikeT, nil, nil)
 	if f := outFinding(t, fs); f == nil || f.Severity != "warning" || strings.Contains(f.Message, "volume only") {
-		t.Fatalf("from %d addresses: a warning: %+v", spikeManyIPs, fs)
+		t.Fatalf("sent from %d addresses: a warning: %+v", spikeManyIPs, fs)
 	}
 
 	stubGeo(t, threeCountries)
@@ -260,11 +303,11 @@ func TestManyIPsAndHijackAreTells(t *testing.T) {
 		dovecotLogin(tr, "info@shop.gr", "imap", ip, spikeT)
 	}
 	fs, _, _, _ = tr.evaluateWith(st, spikeT, nil, nil)
-	if f := outFinding(t, fs); f == nil {
-		t.Fatalf("a hijack candidate's small spike is a finding: %+v", fs)
+	if f := outFinding(t, fs); f != nil {
+		t.Fatalf("a small, mild spike of a hijack candidate is no finding: %+v", f)
 	}
-	if h := onlyHijack(t, fs); h.Severity != "critical" {
-		t.Fatalf("and it confirms the hijack: %+v", h)
+	if h := onlyHijack(t, fs); h.Severity != "warning" {
+		t.Fatalf("and confirms nothing: %+v", h)
 	}
 }
 
@@ -300,5 +343,74 @@ func TestNewSenderIsNotSteppedDown(t *testing.T) {
 	fs, _, _, _ := tr.evaluateWith(st, spikeT, nil, nil)
 	if f := outFinding(t, fs); f == nil || f.Severity != "warning" || strings.Contains(f.Message, "volume only") {
 		t.Fatalf("a new sender at 120 is a warning: %+v", fs)
+	}
+}
+
+// Review of PR #1598 / #1599: a mailbox read from three countries sending its
+// usual run (under its own peak, no tell of its own) is no spike finding, so
+// it does not confirm the hijack — on the first check or any later one.
+func TestUsualRunDoesNotConfirmAHijack(t *testing.T) {
+	stubGeo(t, threeCountries)
+	st := spikeStore(t, "info@shop.gr")
+	addOut(t, st, "info@shop.gr", spikeT.Add(-24*time.Hour+time.Hour), 120) // yesterday's run
+	addOut(t, st, "info@shop.gr", spikeT.Add(-time.Hour), 80)               // over 3× its average, under its run
+	tr := newTracker()
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"} {
+		dovecotLogin(tr, "info@shop.gr", "imap", ip, spikeT)
+	}
+	open := map[string]bool{}
+	for check := 0; check < 3; check++ {
+		fs, _, _, _ := tr.evaluateWith(st, spikeT.Add(time.Duration(check)*5*time.Minute), open, nil)
+		if f := outFinding(t, fs); f != nil {
+			t.Fatalf("check %d: its usual run is no finding: %+v", check, f)
+		}
+		h := onlyHijack(t, fs)
+		if h.Severity != "warning" {
+			t.Fatalf("check %d: its usual run does not confirm the hijack: %+v", check, h)
+		}
+		for _, f := range fs {
+			open[f.Key] = true // what the publisher holds open after it
+		}
+	}
+}
+
+// ... but the same run with another tell of abuse (sending as a foreign
+// domain) does confirm it: the password is being used.
+func TestUsualRunWithATellConfirmsAHijack(t *testing.T) {
+	withLocalDomains(t, "shop.gr")
+	stubGeo(t, threeCountries)
+	st := spikeStore(t, "info@shop.gr")
+	addOut(t, st, "info@shop.gr", spikeT.Add(-24*time.Hour+time.Hour), 120)
+	addOut(t, st, "info@shop.gr", spikeT.Add(-time.Hour), 80)
+	tr := newTracker()
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"} {
+		dovecotLogin(tr, "info@shop.gr", "imap", ip, spikeT)
+	}
+	sendAs(tr, "info@shop.gr", "x@gmail.com", 10)
+	fs, _, _, _ := tr.evaluateWith(st, spikeT, nil, nil)
+	if h := onlyHijack(t, fs); h.Severity != "critical" {
+		t.Fatalf("a spike with a tell of its own confirms the hijack: %+v", h)
+	}
+}
+
+// Review of PR #1599: the anomalies list puts runs under their peak last —
+// the API cuts it at its limit, and usual runs must not push a real spike off.
+func TestUnderPeakRunsSortLast(t *testing.T) {
+	st := openTemp(t)
+	for _, who := range []string{"run1@x.gr", "run2@x.gr", "real@x.gr"} {
+		for d := 1; d <= 5; d++ {
+			for h := 0; h < 3; h++ {
+				addOut(t, st, who, spikeT.Add(-time.Duration(d)*24*time.Hour+time.Duration(h)*time.Hour), 4)
+			}
+		}
+	}
+	for _, who := range []string{"run1@x.gr", "run2@x.gr"} {
+		addOut(t, st, who, spikeT.Add(-24*time.Hour+time.Hour), 200) // yesterday's run
+		addOut(t, st, who, spikeT.Add(-time.Hour), 150)              // 150 at a high ratio, under its run
+	}
+	addOut(t, st, "real@x.gr", spikeT.Add(-time.Hour), 40) // a lower ratio, over its peak
+	an, _, err := st.anomalyScan(spikeT, nil, "outbound")
+	if err != nil || len(an) != 3 || an[0].Addr != "real@x.gr" || an[0].UnderPeak || !an[2].UnderPeak {
+		t.Fatalf("the real spike first: %+v %v", an, err)
 	}
 }
