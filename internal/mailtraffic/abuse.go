@@ -523,7 +523,11 @@ func (t *tracker) addAuth(user, ip, via string, at time.Time) {
 		t.authIPs[user] = ips
 	}
 	if _, ok := ips[ip]; !ok && len(ips) >= maxTrackedIPs {
-		return
+		// full: a SENDING address takes the place of the oldest one that only
+		// read (a phone's rotating IPv6 must not keep a botnet's SMTP logins out)
+		if via != "smtp" || !evictOldestReader(ips) {
+			return
+		}
 	}
 	a := ips[ip]
 	if i := viaIndex(via); i >= 0 && at.After(a.via[i]) {
@@ -533,6 +537,23 @@ func (t *tracker) addAuth(user, ip, via string, at time.Time) {
 		a.at = at
 	}
 	ips[ip] = a
+}
+
+// evictOldestReader drops the source that last logged in longest ago and has
+// never sent mail (SMTP); false when every source has sent.
+func evictOldestReader(ips map[string]authSeen) bool {
+	smtp := viaIndex("smtp")
+	victim, at := "", time.Time{}
+	for ip, a := range ips {
+		if a.via[smtp].IsZero() && (victim == "" || a.at.Before(at)) {
+			victim, at = ip, a.at
+		}
+	}
+	if victim == "" {
+		return false
+	}
+	delete(ips, victim)
+	return true
 }
 
 // prune drops context older than the windows it is read over.
@@ -830,10 +851,11 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		msg := clip(c.describe(head))
 		f := abuseFinding{Type: TypeOutboundSpike, Severity: sev, Key: "mail:out:" + a.Addr, Message: msg, Expected: expectedOf(a)}
 		fs = append(fs, f)
-		// a spike confirms a hijack only at warning or above (a tell of its own,
-		// or extreme): a volume-only info one is an owner's run a little over
-		// its record as often as not, and on a trip that is no stolen password
-		if sev != "info" {
+		// a spike confirms a hijack at warning or above (a tell of its own, or
+		// extreme), or when it is far past the sender's record: a volume-only
+		// info one a little over its record is an owner's run as often as not,
+		// and on a trip that is no stolen password; half again its record is
+		if sev != "info" || farPastPeak(a) {
 			found[f.Key] = true
 		}
 		// IPs: every login source of the mailbox (as it always was); the
@@ -936,6 +958,17 @@ func (c Context) abusive() bool {
 // spike must not wait on the store; a mailbox's tell-less one is info).
 func (t *tracker) doneBefore(a Anomaly, key string, open bool) bool {
 	return !open && !t.alerted[key] && a.UnderPeak
+}
+
+// hijackConfirmFactor: a volume-only spike this many times its own peak (or
+// with no peak at all) confirms a hijack candidate's hijack.
+const hijackConfirmFactor = 1.5
+
+func farPastPeak(a Anomaly) bool {
+	if a.Kind != "spike" {
+		return true // a new sender: no record to be near
+	}
+	return a.Peak == 0 || float64(a.Recent) >= hijackConfirmFactor*float64(a.Peak)
 }
 
 // setAlerted records the spike keys alerted on within anomalyPeakDays

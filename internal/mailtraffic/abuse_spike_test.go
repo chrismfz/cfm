@@ -160,8 +160,41 @@ func TestVolumeOnlyStepsDownOneLevel(t *testing.T) {
 	if f := outFinding(t, fs); f == nil || f.Severity != "info" {
 		t.Fatalf("the hijack candidate is not a tell of the spike: volume only: %+v", fs)
 	}
+	if h := onlyHijack(t, fs); h.Severity != "critical" {
+		t.Fatalf("a volume-only spike five times its record confirms the hijack: %+v", h)
+	}
+
+	// a run a little over its record (yesterday 4+120+4 = 128, today 135)
+	st = spikeStore(t, "info@shop.gr")
+	addOut(t, st, "info@shop.gr", spikeT.Add(-24*time.Hour+time.Hour), 120)
+	addOut(t, st, "info@shop.gr", spikeT.Add(-time.Hour), 135)
+	fs, _, _, _ = tr.evaluateWith(st, spikeT, nil, nil)
+	if f := outFinding(t, fs); f == nil || f.Severity != "info" {
+		t.Fatalf("a little over its record: volume only: %+v", fs)
+	}
 	if h := onlyHijack(t, fs); h.Severity != "warning" {
-		t.Fatalf("a volume-only (info) spike does not confirm the hijack: an owner's run a little over its record: %+v", h)
+		t.Fatalf("an owner's run a little over its record does not confirm the hijack: %+v", h)
+	}
+}
+
+// Review of PR #1599: a SENDING address takes the place of the oldest
+// read-only one when a mailbox's sources are full.
+func TestSMTPLoginEvictsTheOldestReader(t *testing.T) {
+	tr := newTracker()
+	T := spikeT
+	for i := 0; i < maxTrackedIPs; i++ {
+		dovecotLogin(tr, "a@x.gr", "imap", fmt.Sprintf("2a02:1:%x::1", i), T.Add(time.Duration(i)*time.Second))
+	}
+	smtpLogin(tr, "a@x.gr", "9.9.9.9", T.Add(time.Hour))
+	if _, ok := tr.authIPs["a@x.gr"]["9.9.9.9"]; !ok || len(tr.authIPs["a@x.gr"]) != maxTrackedIPs {
+		t.Fatalf("the SMTP login is kept, the cap holds: %d", len(tr.authIPs["a@x.gr"]))
+	}
+	if _, ok := tr.authIPs["a@x.gr"]["2a02:1:0::1"]; ok {
+		t.Fatal("the oldest reader was the one dropped")
+	}
+	dovecotLogin(tr, "a@x.gr", "imap", "8.8.8.8", T.Add(time.Hour))
+	if _, ok := tr.authIPs["a@x.gr"]["8.8.8.8"]; ok {
+		t.Fatal("a new reader still waits for room")
 	}
 }
 

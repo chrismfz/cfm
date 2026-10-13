@@ -25,13 +25,13 @@ back-filled here — see the git/PR history for that period.
   three countries that sends its usual run no longer confirms a hijack:
   logins from many countries are no longer a tell of the spike (the spike is
   what confirms the hijack), so the usual run is "done before" and no
-  finding, and only a spike at warning or above (a tell of its own, or
-  extreme) confirms a hijack, not a volume-only info one. A fixed-size run
-  that equals its peak is "done before" too. Sending from 10+
+  finding, and a spike confirms a hijack at warning or above (a tell of its
+  own, or extreme) or at 1.5× its own record, not a volume-only run a little
+  over it. A fixed-size run that equals its peak is "done before" too. Sending from 10+
   addresses counts as a tell only for addresses that SENT mail, not an
   office's phones reading the mailbox, and the message now says
-  `· sent from N IPs`. If the peak cannot be read, spikes are judged without
-  it instead of the whole mail check being skipped. `whats_wrong`'s
+  `· sent from N IPs`; with a mailbox's 256 tracked sources full, a sending
+  one takes the place of the oldest reader. `whats_wrong`'s
   fallback lists warnings before the runs under their peak, and reads the
   node's `under_peak` instead of its own copy of the rule; `mail_traffic`'s
   anomalies list those runs last, so its capped list never drops a real

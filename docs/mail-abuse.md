@@ -81,9 +81,10 @@ capped list never drops a real spike for them.
 "Done before" only ever decides a spike with no tell of abuse, so what it
 weighs is info-or-nothing (or the stepped-down warning of an extreme one),
 never a page; a spike with a tell skips it. If the peak cannot be read,
-every spike is judged as before the peak existed (logged at most every 10
-min): a hacked site's script spike must not wait on the store, and a
-mailbox's tell-less one is info. An
+the check fails like any other read of the store: nothing changes that time,
+and it runs again in 5 min (judged blind, a script sender's usual run would
+page and be remembered as alerted for 28 days; held, a hacked site would wait
+on the store). An
 open finding keeps being judged as before (its own incident is in the peak by
 then). Without the abuse check (stale, or `MAIL_ABUSE_ALERT = 0`)
 `whats_wrong` lists the raw anomalies, a spike under its peak as info. A monthly run older than the counters' 30 days, or a sender's first
@@ -110,7 +111,9 @@ tells:
 - it SENT mail (SMTP AUTH) from 10 addresses or more in the hour (a botnet
   with the password; an office is a phone, a desktop and a webmail, and the
   phones that only read an office mailbox are not counted). Logins are kept
-  for an hour, so a botnet that stopped over an hour ago is not counted.
+  for an hour, so a botnet that stopped over an hour ago is not counted. A
+  mailbox keeps up to 256 sources; when they are full, a sending one takes the
+  place of the oldest that only read.
 
 A tell also keeps a spike under the 50-message floor an alert. The message
 names how many addresses the mailbox SENT from (`· sent from 3 IPs`).
@@ -120,11 +123,13 @@ the spike is what CONFIRMS the hijack ("Hijack severity" below). Counting it
 both ways made a mailbox read from three countries that sends its usual run a
 finding that then confirmed its own hijack — a critical page for an owner on a
 trip. So the usual run (under its peak, no tell of its own) is no finding and
-confirms nothing, and a volume-only info spike (a run a little over its
-record) confirms nothing either: only a spike at warning or above — a tell of
-its own, or extreme — confirms the hijack. Left open: a thief who reads AND
-sends from one country, tell-less and under the alert floor, leaves the
-hijack a warning that names that country.
+confirms nothing, and neither does a volume-only info spike a little over its
+record (an owner's run growing). A spike confirms the hijack at warning or
+above (a tell of its own, or extreme), or when it is at least 1.5× its own
+record (or the sender has none) — a thief who reads and sends from his own
+country, tell-less, sending 200 where the record is 100, is caught that way.
+Left open: such a thief sending under 1.5× the record, or under the alert
+floor, leaves the hijack a warning that names his country.
 
 Local script spikes (`mail_script_spike`) keep their severity: a hacked site
 sending as its own domain to many addresses shows none of these tells. "Done
