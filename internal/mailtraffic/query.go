@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"cfm/internal/logging"
@@ -85,8 +86,9 @@ type Anomaly struct {
 	// is a burst this sender has sent before (a daily order run, a weekly
 	// newsletter) — still listed, never an alert. Set for "spike" only.
 	Peak int64 `json:"peak"`
-	// UnderPeak: a spike strictly under its Peak — the one definition, which
-	// the abuse check (doneBefore) and whats_wrong's fallback both read.
+	// UnderPeak: a spike at or under its Peak (a fixed-size run equals it) —
+	// the one definition, which the abuse check (doneBefore) and
+	// whats_wrong's fallback both read.
 	UnderPeak bool `json:"under_peak,omitempty"`
 	// PeakUnknown: the peak could not be read this time (the store failed);
 	// the abuse check then holds a tell-less spike instead of judging it.
@@ -359,11 +361,13 @@ func (s *Store) anomalyScan(now time.Time, scope map[string]struct{}, col string
 	if err != nil {
 		// the peak only spares a sender's usual run: the check goes on, and
 		// spikes with a tell of abuse are judged as ever (PeakUnknown)
-		logging.Logf("[mailtraffic] sender peaks not read (%v): tell-less spikes held this check", err)
+		if peakLogLimit.Allow() {
+			logging.Logf("[mailtraffic] sender peaks not read (%v): the abuse check holds tell-less, non-extreme spikes until they are", err)
+		}
 	}
 	for i := range out {
 		out[i].Peak = peaks[out[i].Addr]
-		out[i].UnderPeak = out[i].Kind == "spike" && out[i].Peak > 0 && out[i].Recent < out[i].Peak
+		out[i].UnderPeak = out[i].Kind == "spike" && out[i].Peak > 0 && out[i].Recent <= out[i].Peak
 		out[i].PeakUnknown = err != nil && out[i].Kind == "spike"
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -380,6 +384,26 @@ func (s *Store) anomalyScan(now time.Time, scope map[string]struct{}, col string
 		return out[i].Addr < out[j].Addr
 	})
 	return out, recent, nil
+}
+
+// peakLogLimit: anomalyScan also serves every mail_traffic read, so a failing
+// peak query is logged at most once per 10 minutes.
+var peakLogLimit = &logEvery{every: 10 * time.Minute}
+
+type logEvery struct {
+	mu    sync.Mutex
+	every time.Duration
+	last  time.Time
+}
+
+func (l *logEvery) Allow() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if now := time.Now(); now.Sub(l.last) >= l.every {
+		l.last = now
+		return true
+	}
+	return false
 }
 
 // peakWindows is, per address, the largest sum of its counter over any

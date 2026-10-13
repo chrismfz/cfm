@@ -755,8 +755,8 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 	}
 
 	// keys of this check's findings: a spike's tells include a bounce finding
-	// of its own (judged first, listed after the spikes as before) and a
-	// hijack candidate; a hijack is confirmed by a spike or bounce finding
+	// of its own (judged first, listed after the spikes as before); a hijack
+	// is confirmed by a bounce finding or a spike at warning or above
 	found := map[string]bool{}
 	var others []AbuseView
 	for _, more := range [][]AbuseView{t.bounceFindings(now, open, held), queueFindings(now, open, held), rblFindings(rbl, open, held)} {
@@ -830,8 +830,13 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		msg := clip(c.describe(head))
 		f := abuseFinding{Type: TypeOutboundSpike, Severity: sev, Key: "mail:out:" + a.Addr, Message: msg, Expected: expectedOf(a)}
 		fs = append(fs, f)
-		found[f.Key] = true // a hijack candidate's spike confirms the hijack
-		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, IPs: senders, Context: &c})
+		// a spike confirms a hijack only at warning or above (a tell of its own,
+		// or extreme): a volume-only info one is an owner's run a little over
+		// its record as often as not, and on a trip that is no stolen password
+		if sev != "info" {
+			found[f.Key] = true
+		}
+		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, IPs: len(t.authIPs[a.Addr]), Context: &c})
 	}
 	for _, v := range others {
 		fs = append(fs, abuseFinding{Type: v.Type, Severity: v.Severity, Key: v.Key, Message: v.Message})
@@ -922,12 +927,19 @@ func (c Context) abusive() bool {
 // incident is in the peak by then), nor for a sender alerted on (warning or
 // critical) within the peak's days: that peak may be the thief's first wave.
 // Spikes resolved before this memory existed (cfm 2026-10-14) are not in it.
-// Strictly under the peak (Anomaly.UnderPeak): a run as large as the record
-// is not "done before". When the peak could not be read (PeakUnknown) a
-// tell-less spike is held for the next check rather than published blind:
-// it would page a usual run and keep it from "done before" for 28 days.
+// At or under the peak (Anomaly.UnderPeak): a fixed-size run sent the same
+// way every day equals its peak. When the peak could not be read
+// (PeakUnknown) a tell-less spike is held for the next check rather than
+// published blind — it would page a usual run and keep it from "done before"
+// for 28 days — unless it is extreme.
 func (t *tracker) doneBefore(a Anomaly, key string, open bool) bool {
-	return !open && !t.alerted[key] && (a.UnderPeak || a.PeakUnknown)
+	return !open && !t.alerted[key] && (a.UnderPeak || (a.PeakUnknown && !extremeSpike(a)))
+}
+
+// extremeSpike: what stays a warning on volume alone (spikeSeverity's
+// critical, stepped down): never held for an unknown peak.
+func extremeSpike(a Anomaly) bool {
+	return a.Recent >= abuseCritFloor && a.Ratio >= abuseCritRatio
 }
 
 // setAlerted records the spike keys alerted on within anomalyPeakDays

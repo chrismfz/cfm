@@ -52,9 +52,10 @@ a run spread over three hours is measured the same both times — over the 28
 days before the recent window, the last 6 hours before it left out
 (`mail_traffic`'s `anomalies` carry it as `peak`). The gap means an incident
 not caught at its onset (no sink yet, a restart) cannot count its own first
-hours, even at a falling rate; a daily run is a day back. Strictly **under**
-its peak, **with no tell of abuse** (below), it is a burst this sender has sent
-before: still listed in `anomalies`, never a finding. The tells are judged
+hours, even at a falling rate; a daily run is a day back. **At or under** its
+peak (a fixed-size run — payroll to the same staff — equals it), **with no tell
+of abuse** (below), it is a burst this sender has sent before: still listed in
+`anomalies`, never a finding. The tells are judged
 first because the peak can be the same thief's earlier run, and for the same
 reason a sender **alerted on** (a warning or critical spike, open or closed
 within the 28 days, remembered next to the hijacks in
@@ -74,8 +75,8 @@ purpose or not yet closed:
 weighs is info-or-nothing (or the stepped-down warning of an extreme one),
 never a page; a spike with a tell skips it. If the peak cannot be read, a
 tell-less spike is held for the next check (published blind it would page a
-usual run and keep it from "done before" for 28 days); one with a tell is
-judged as ever. An
+usual run and keep it from "done before" for 28 days); one with a tell, or an
+extreme one (≥ 50 at ≥ 10×), is judged as ever (logged at most every 10 min). An
 open finding keeps being judged as before (its own incident is in the peak by
 then). Without the abuse check (stale, or `MAIL_ABUSE_ALERT = 0`)
 `whats_wrong` lists the raw anomalies, a spike under its peak as info. A monthly run older than the counters' 30 days, or a sender's first
@@ -112,7 +113,11 @@ the spike is what CONFIRMS the hijack ("Hijack severity" below). Counting it
 both ways made a mailbox read from three countries that sends its usual run a
 finding that then confirmed its own hijack — a critical page for an owner on a
 trip. So the usual run (under its peak, no tell of its own) is no finding and
-confirms nothing; a spike past its peak, even volume-only info, confirms it.
+confirms nothing, and a volume-only info spike (a run a little over its
+record) confirms nothing either: only a spike at warning or above — a tell of
+its own, or extreme — confirms the hijack. Left open: a thief who reads AND
+sends from one country, tell-less and under the alert floor, leaves the
+hijack a warning that names that country.
 
 Local script spikes (`mail_script_spike`) keep their severity: a hacked site
 sending as its own domain to many addresses shows none of these tells. "Done
@@ -207,8 +212,10 @@ when, as well, within the hour:
   owner only reads elsewhere looks like the owner sending from where they
   read. That warning names the country (`sent mail only from VN, where it is
   also read`), so check it is the owner's;
-- the same mailbox has a `mail_outbound_spike` or `mail_bounce_spike` FINDING
-  this check (one only held open on its volume is no news about this hour);
+- the same mailbox has a `mail_bounce_spike` finding, or a `mail_outbound_spike`
+  at warning or above, this check (one only held open on its volume is no news
+  about this hour; a volume-only info one is an owner's run a little over its
+  record as often as not);
 - its **forwarder or mail filter changed in the last 24 h** (cPanel: a line for
   the address in `/etc/valiases/<domain>` with that file changed, or
   `~<owner>/etc/<domain>/<local>/filter`, what webmail's Email Filters writes;

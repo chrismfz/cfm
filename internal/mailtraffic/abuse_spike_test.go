@@ -160,8 +160,8 @@ func TestVolumeOnlyStepsDownOneLevel(t *testing.T) {
 	if f := outFinding(t, fs); f == nil || f.Severity != "info" {
 		t.Fatalf("the hijack candidate is not a tell of the spike: volume only: %+v", fs)
 	}
-	if h := onlyHijack(t, fs); h.Severity != "critical" {
-		t.Fatalf("but a spike past its peak confirms the hijack: %+v", h)
+	if h := onlyHijack(t, fs); h.Severity != "warning" {
+		t.Fatalf("a volume-only (info) spike does not confirm the hijack: an owner's run a little over its record: %+v", h)
 	}
 }
 
@@ -180,23 +180,23 @@ func TestATellBeatsDoneBefore(t *testing.T) {
 	}
 }
 
-// Review of PR #1598: UnderPeak is strictly under (a run as large as the
-// record is not "done before"), the peak spans the recent window's three
-// buckets, and the hours just before the recent window are not in it, so a
-// falling incident cannot hide behind its own first hours.
-func TestUnderPeakIsStrictAndAFallingIncidentIsNotItsOwnPeak(t *testing.T) {
+// Review of PR #1598 / #1599: UnderPeak is AT or under (a fixed-size run sent
+// the same way every day equals its peak), over the recent window's three
+// buckets, and the hours just before the recent window are not in the peak,
+// so a falling incident cannot hide behind its own first hours.
+func TestUnderPeakAndAFallingIncidentIsNotItsOwnPeak(t *testing.T) {
 	st := spikeStore(t, "a@x.gr")
 	addOut(t, st, "a@x.gr", spikeT.Add(-24*time.Hour+time.Hour), 92) // yesterday: 4+96+4 = 104 over three hours
 	addOut(t, st, "a@x.gr", spikeT.Add(-time.Hour), 104)
 	an, _, err := st.anomalyScan(spikeT, nil, "outbound")
-	if err != nil || len(an) != 1 || an[0].Peak != 104 || an[0].UnderPeak {
-		t.Fatalf("equal to its peak: not under it: %+v %v", an, err)
+	if err != nil || len(an) != 1 || an[0].Peak != 104 || !an[0].UnderPeak {
+		t.Fatalf("equal to its peak: a run it has sent before: %+v %v", an, err)
 	}
 	st = spikeStore(t, "a@x.gr")
 	addOut(t, st, "a@x.gr", spikeT.Add(-24*time.Hour+time.Hour), 92)
-	addOut(t, st, "a@x.gr", spikeT.Add(-time.Hour), 100)
-	if an, _, _ = st.anomalyScan(spikeT, nil, "outbound"); len(an) != 1 || !an[0].UnderPeak {
-		t.Fatalf("under its peak: %+v", an)
+	addOut(t, st, "a@x.gr", spikeT.Add(-time.Hour), 105)
+	if an, _, _ = st.anomalyScan(spikeT, nil, "outbound"); len(an) != 1 || an[0].UnderPeak {
+		t.Fatalf("over its peak: not under it: %+v", an)
 	}
 
 	st = openTemp(t) // never opened: 150, 100, 50 in the three hours before now
@@ -365,9 +365,12 @@ func TestUsualRunWithATellConfirmsAHijack(t *testing.T) {
 // before" for 28 days); one with a tell is judged as ever.
 func TestPeakUnknownHoldsTellLessSpikes(t *testing.T) {
 	tr := newTracker()
-	a := Anomaly{Addr: "a@x.gr", Kind: "spike", Recent: 100, PeakUnknown: true}
+	a := Anomaly{Addr: "a@x.gr", Kind: "spike", Recent: 100, Ratio: 4, PeakUnknown: true}
 	if !tr.doneBefore(a, "mail:out:a@x.gr", false) {
 		t.Fatal("a tell-less spike with an unknown peak is held")
+	}
+	if tr.doneBefore(Anomaly{Addr: "a@x.gr", Kind: "spike", Recent: 800, Ratio: 25, PeakUnknown: true}, "mail:out:a@x.gr", false) {
+		t.Fatal("an extreme one is never held")
 	}
 	if tr.doneBefore(a, "mail:out:a@x.gr", true) {
 		t.Fatal("an open one is still judged")
