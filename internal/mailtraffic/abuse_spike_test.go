@@ -359,3 +359,25 @@ func TestUsualRunWithATellConfirmsAHijack(t *testing.T) {
 		t.Fatalf("a spike with a tell of its own confirms the hijack: %+v", h)
 	}
 }
+
+// Review of PR #1599: the anomalies list puts runs under their peak last —
+// the API cuts it at its limit, and usual runs must not push a real spike off.
+func TestUnderPeakRunsSortLast(t *testing.T) {
+	st := openTemp(t)
+	for _, who := range []string{"run1@x.gr", "run2@x.gr", "real@x.gr"} {
+		for d := 1; d <= 5; d++ {
+			for h := 0; h < 3; h++ {
+				addOut(t, st, who, spikeT.Add(-time.Duration(d)*24*time.Hour+time.Duration(h)*time.Hour), 4)
+			}
+		}
+	}
+	for _, who := range []string{"run1@x.gr", "run2@x.gr"} {
+		addOut(t, st, who, spikeT.Add(-24*time.Hour+time.Hour), 200) // yesterday's run
+		addOut(t, st, who, spikeT.Add(-time.Hour), 150)              // 150 at a high ratio, under its run
+	}
+	addOut(t, st, "real@x.gr", spikeT.Add(-time.Hour), 40) // a lower ratio, over its peak
+	an, _, err := st.anomalyScan(spikeT, nil, "outbound")
+	if err != nil || len(an) != 3 || an[0].Addr != "real@x.gr" || an[0].UnderPeak || !an[2].UnderPeak {
+		t.Fatalf("the real spike first: %+v %v", an, err)
+	}
+}

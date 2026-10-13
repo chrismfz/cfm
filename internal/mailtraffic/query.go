@@ -367,9 +367,15 @@ func (s *Store) anomalyScan(now time.Time, scope map[string]struct{}, col string
 		out[i].UnderPeak = out[i].Kind == "spike" && out[i].Peak > 0 && out[i].Recent <= out[i].Peak
 	}
 	sort.Slice(out, func(i, j int) bool {
-		// New senders first (strongest signal), then higher ratio, then volume.
+		// New senders first (strongest signal), runs at or under their own
+		// peak last (a sender's usual run: the API cuts this list at its
+		// limit, and twenty of them must not push a real spike off it), then
+		// higher ratio, then volume.
 		if ni, nj := out[i].Kind == "new-sender", out[j].Kind == "new-sender"; ni != nj {
 			return ni
+		}
+		if out[i].UnderPeak != out[j].UnderPeak {
+			return !out[i].UnderPeak
 		}
 		if out[i].Ratio != out[j].Ratio {
 			return out[i].Ratio > out[j].Ratio

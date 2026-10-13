@@ -33,7 +33,9 @@ back-filled here — see the git/PR history for that period.
   `· sent from N IPs`. If the peak cannot be read, spikes are judged without
   it instead of the whole mail check being skipped. `whats_wrong`'s
   fallback lists warnings before the runs under their peak, and reads the
-  node's `under_peak` instead of its own copy of the rule.
+  node's `under_peak` instead of its own copy of the rule; `mail_traffic`'s
+  anomalies list those runs last, so its capped list never drops a real
+  spike for them.
 - **A mailbox sending its usual big run, or volume with nothing abusive
   about it, no longer pages as a "compromised mailbox".** Titan's channel saw
   15 `mail_outbound_spike` alerts in 5 days, nearly all order confirmations,

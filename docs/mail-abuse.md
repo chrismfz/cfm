@@ -69,7 +69,14 @@ purpose or not yet closed:
 - spikes closed before this memory existed (2026-10-14) are not in it;
 - an incident never published at its onset (the sink down for over 6 hours)
   that runs at a steady rate can read "done before" once its first hours are
-  in the peak (the recent window's current hour is partial).
+  in the peak (the recent window's current hour is partial);
+- for the same reason, early in an hour a tell-less sender somewhat above its
+  old rate can read "done before" until the current hour fills (comparing
+  rates instead would page the three-hour run every day again). Tell-less, so
+  info or nothing either way.
+
+`mail_traffic`'s anomalies list runs at or under their peak last, so a
+capped list never drops a real spike for them.
 
 "Done before" only ever decides a spike with no tell of abuse, so what it
 weighs is info-or-nothing (or the stepped-down warning of an extreme one),
