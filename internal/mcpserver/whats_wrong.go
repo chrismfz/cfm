@@ -780,6 +780,7 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 				Ratio           float64 `json:"ratio"`
 				Kind            string  `json:"kind"`
 				Peak            int64   `json:"peak"`
+				UnderPeak       bool    `json:"under_peak"` // mailtraffic's one definition
 			} `json:"anomalies"`
 		} `json:"traffic"`
 	}
@@ -796,11 +797,8 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 	if t.Abuse != nil && time.Since(t.CheckedAt) <= mailAbuseStale {
 		return evalMailAbuse(*t.Abuse)
 	}
-	var fs []finding
-	for i, a := range t.Traffic.Anomalies {
-		if i >= wwMailAnomalyCap {
-			break
-		}
+	var all []finding
+	for _, a := range t.Traffic.Anomalies {
 		var detail, title string
 		if a.Kind == "new-sender" {
 			title = "new sender blasting outbound mail"
@@ -815,16 +813,29 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 		// it on, so nothing is hidden: a spike under the sender's own peak is
 		// only shown as info, with the peak.
 		sev := sevWarning
-		if a.Kind == "spike" && a.Peak > 0 && a.Recent < a.Peak {
+		if a.UnderPeak {
 			sev = sevInfo
-			detail += fmt.Sprintf("; under its own 2h peak of %d in the last 28 days", a.Peak)
+			detail += fmt.Sprintf("; under its own peak of %d in the last 28 days", a.Peak)
 		}
-		fs = append(fs, finding{sev, "mail", title, detail, "mail_traffic", nil})
+		all = append(all, finding{sev, "mail", title, detail, "mail_traffic", nil})
 	}
-	// Don't silently drop the tail — say how many more there are (a mass compromise
-	// can far exceed the cap), pointing at mail_traffic for the full list.
-	if extra := len(t.Traffic.Anomalies) - wwMailAnomalyCap; extra > 0 {
-		fs = append(fs, finding{sevWarning, "mail", "more outbound-mail anomalies",
+	// warnings first (the anomalies come sorted by ratio, and a sender's usual
+	// run at 4× would otherwise push a real 3.5× spike past the cap)
+	sort.SliceStable(all, func(i, j int) bool { return all[i].Severity == sevWarning && all[j].Severity != sevWarning })
+	fs := all
+	if len(all) > wwMailAnomalyCap {
+		fs = append([]finding(nil), all[:wwMailAnomalyCap]...)
+		// Don't silently drop the tail — say how many more there are (a mass
+		// compromise can far exceed the cap), pointing at mail_traffic for the
+		// full list; as severe as the worst of them.
+		sev := sevInfo
+		for _, f := range all[wwMailAnomalyCap:] {
+			if f.Severity == sevWarning {
+				sev = sevWarning
+			}
+		}
+		extra := len(all) - wwMailAnomalyCap
+		fs = append(fs, finding{sev, "mail", "more outbound-mail anomalies",
 			fmt.Sprintf("%d more sender anomaly(ies) beyond the top %d shown", extra, wwMailAnomalyCap), "mail_traffic", nil})
 	}
 	return fs

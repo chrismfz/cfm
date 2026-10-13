@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"cfm/internal/logging"
 	"cfm/internal/mailmeter"
 )
 
@@ -77,12 +78,16 @@ type Anomaly struct {
 	BaselinePerHour float64 `json:"baseline_per_hour"` // the sender's own average per ACTIVE hour over the baseline (0 for new-sender)
 	Ratio           float64 `json:"ratio"`             // recent ÷ expected (0 for new-sender)
 	Kind            string  `json:"kind"`              // "spike" | "new-sender"
-	// Peak is the most the sender sent in any anomalyRecentHours of whole
-	// hourly buckets over the anomalyPeakDays before the recent window, the
-	// last anomalyPeakGap left out: "has it done this before?". A spike at or under it with no tell of abuse is a
-	// burst this sender has sent before (a daily order run, a weekly
+	// Peak is the most the sender sent in any anomalyRecentHours+1 hourly
+	// buckets (the recent window's span) over the anomalyPeakDays before the
+	// recent window, the last anomalyPeakGap left out: "has it done this
+	// before?". A spike strictly under it (UnderPeak) with no tell of abuse
+	// is a burst this sender has sent before (a daily order run, a weekly
 	// newsletter) — still listed, never an alert. Set for "spike" only.
 	Peak int64 `json:"peak"`
+	// UnderPeak: a spike strictly under its Peak — the one definition, which
+	// the abuse check (doneBefore) and whats_wrong's fallback both read.
+	UnderPeak bool `json:"under_peak,omitempty"`
 }
 
 // Summary is the read view served by GET /api/v1/mail/traffic. All lists are
@@ -349,10 +354,14 @@ func (s *Store) anomalyScan(now time.Time, scope map[string]struct{}, col string
 	}
 	peaks, err := s.peakWindows(col, flagged, now)
 	if err != nil {
-		return out, nil, err
+		// the peak only spares a sender's usual run: without it every spike is
+		// judged as before (Peak 0 = never "done before"), the check goes on
+		logging.Logf("[mailtraffic] sender peaks not read (%v): judging spikes without them", err)
+		peaks = nil
 	}
 	for i := range out {
 		out[i].Peak = peaks[out[i].Addr]
+		out[i].UnderPeak = out[i].Kind == "spike" && out[i].Peak > 0 && out[i].Recent < out[i].Peak
 	}
 	sort.Slice(out, func(i, j int) bool {
 		// New senders first (strongest signal), then higher ratio, then volume.
@@ -371,9 +380,12 @@ func (s *Store) anomalyScan(now time.Time, scope map[string]struct{}, col string
 }
 
 // peakWindows is, per address, the largest sum of its counter over any
-// anomalyRecentHours consecutive hourly buckets, from anomalyPeakDays back to
-// anomalyPeakGap before the recent window: an incident that was not caught at
-// its onset (no sink yet, a restart) cannot become its own "done before".
+// anomalyRecentHours+1 consecutive hourly buckets — as many as the recent
+// window spans (the hour of now-2h, now-1h and the current one), so a run
+// spread over three hours is measured the same both times — from
+// anomalyPeakDays back to anomalyPeakGap before the recent window: an
+// incident that was not caught at its onset (no sink yet, a restart) cannot
+// become its own "done before".
 // Asked only for the flagged spikes (a handful per check), through the
 // (address, bucket) index.
 func (s *Store) peakWindows(col string, addrs []string, now time.Time) (map[string]int64, error) {
@@ -383,7 +395,7 @@ func (s *Store) peakWindows(col string, addrs []string, now time.Time) (map[stri
 	}
 	hi := bucketOf(now.Add(-anomalyRecentHours*time.Hour - anomalyPeakGap))
 	lo := bucketOf(now.Add(-anomalyPeakDays * 24 * time.Hour))
-	span := int64(anomalyRecentHours) * bucketSeconds
+	span := int64(anomalyRecentHours+1) * bucketSeconds
 	type hour struct{ b, n int64 }
 	for start := 0; start < len(addrs); start += 500 { // under SQLite's bound-parameter limit
 		chunk := addrs[start:min(start+500, len(addrs))]
