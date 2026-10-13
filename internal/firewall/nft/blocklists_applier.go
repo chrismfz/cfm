@@ -121,15 +121,19 @@ func (b *Backend) RebuildExternalUnions() error {
 
 // --- Helpers -------------------------------------------------------------
 
-// Επιστρέφει τα elements ενός set ως raw []string (IP ή CIDR), χωρίς parsing σε net.IP
+// ListSetElementsRaw returns a set's elements as strings, as the nftlib
+// backend does: an address, a CIDR ("a/n") or a range ("a-b"). It used to turn
+// a {"prefix":…} / {"range":…} element (an interval set's) into "<nil>" and a
+// timeout-wrapped one into "map[…]".
 func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
 	res, err := runNFTCommand(context.Background(), "-j", "list", "set", family, tableName, setName)
-	raw := []byte(res.Stdout + res.Stderr)
 	if err != nil {
 		return nil, err
 	}
+	// Stdout only: a warning nft prints on success (a table another tool
+	// manages, on a CSF / firewalld host) is not JSON and would fail every read.
 	var root map[string]any
-	if err := json.Unmarshal(raw, &root); err != nil {
+	if err := json.Unmarshal([]byte(res.Stdout), &root); err != nil {
 		return nil, err
 	}
 	nftables, _ := root["nftables"].([]any)
@@ -145,28 +149,23 @@ func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
 			arr, _ = setObj["elements"].([]any)
 		}
 		for _, e := range arr {
-			switch v := e.(type) {
-			case string:
-				s := strings.TrimSpace(v)
-				if s != "" {
-					out = append(out, s)
-				}
-			case map[string]any:
-				// JSON formats ποικίλουν: πιάσε val όπου υπάρχει
-				if inner, ok := v["elem"].(map[string]any); ok {
-					val := toStr(inner["val"])
-					val = strings.TrimSpace(val)
-					if val != "" {
-						out = append(out, val)
-					}
-				} else if val := strings.TrimSpace(toStr(v["elem"])); val != "" {
-					out = append(out, val)
-				}
-				// (σε “interval” sets το nft συνήθως επιστρέφει CIDR ως string, οπότε τα καλύψαμε ήδη)
+			if s := rawElemString(e); s != "" {
+				out = append(out, s)
 			}
 		}
 	}
 	return out, nil
+}
+
+// rawElemString: one element for ListSetElementsRaw, unwrapping a
+// timeout-carrying {"elem":{"val":…}}.
+func rawElemString(e any) string {
+	if m, ok := e.(map[string]any); ok {
+		if inner, ok := m["elem"].(map[string]any); ok {
+			return jsonElemString(inner["val"])
+		}
+	}
+	return jsonElemString(e)
 }
 
 // ListSetElementsTimed parses `nft -j list set` and returns each element with

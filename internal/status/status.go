@@ -216,7 +216,7 @@ func Run(args []string, backend firewall.Backend) {
 	st, fromCache := readCachedTableSummary(*cacheTTL)
 	if !fromCache {
 		st = readTableSummary(backend)
-		if *cacheTTL > 0 {
+		if *cacheTTL > 0 && !st.incomplete() {
 			writeCachedTableSummary(st)
 		}
 	}
@@ -1034,13 +1034,21 @@ type statusRow struct {
 	Feed     string `json:"feed"`
 	Hosts    int    `json:"hosts"`
 	Prefixes int    `json:"prefixes"`
+	// Err: the set's elements could not be read (its counts are unknown).
+	Err string `json:"error,omitempty"`
 }
 
 type statusOut struct {
-	TablePresent bool        `json:"table_present"`
-	RulesPresent bool        `json:"rules_present"`
-	Sets         []statusRow `json:"sets"`
-	Totals       struct {
+	TablePresent bool `json:"table_present"`
+	RulesPresent bool `json:"rules_present"`
+	// ReadError: table inet cfm could not be read; presence and counts are
+	// unknown (never reported as "absent" or zero).
+	ReadError string `json:"read_error,omitempty"`
+	// RulesErr: the table and its sets were read but the rules were not;
+	// RulesPresent is then unknown.
+	RulesErr string      `json:"rules_error,omitempty"`
+	Sets     []statusRow `json:"sets"`
+	Totals   struct {
 		Allow   struct{ Hosts, Prefixes, Entries int } `json:"allow"`
 		Block   struct{ Hosts, Prefixes, Entries int } `json:"block"`
 		Overall int                                    `json:"overall"`
@@ -1092,32 +1100,112 @@ func writeCachedTableSummary(st statusOut) {
 	_ = os.WriteFile(statusCachePath(), payload, 0o600)
 }
 
+// readTableSummary counts the rules and the set entries of table inet cfm.
+//
+// Two readers, one result. The exec backend's ListTableJSON is `nft -j list
+// table`: rules and set elements in one dump. The nftlib backend's is its own
+// shape (set names in "set_info", no rules, no elements), and on a host whose
+// nft cannot print JSON, or prints a warning on stderr, the exec dump does not
+// parse either. Those cases count from the text dump (`nft -t -n list table`,
+// never netlink: nftlib cannot read the input chain over netlink) and read each
+// set's elements with ListSetElementsRaw. Before this, nftlib nodes printed
+// "table present, but no rules found" and zero totals over a full firewall.
+//
+// A read that fails is reported in ReadError (or a row's Err), never as zero.
 func readTableSummary(backend firewall.Backend) statusOut {
 	out := statusOut{}
-	raw, err := backend.ListTableJSON("inet", "cfm")
-	if err != nil {
-		out.TablePresent = false
-		out.RulesPresent = false
+	raw, jerr := backend.ListTableJSON("inet", "cfm")
+	if jerr == nil {
+		if ok := summaryFromNftJSON(raw, &out); ok {
+			finishTableSummary(&out)
+			return out
+		}
+	}
+	info := map[string]string{}
+	if jerr == nil {
+		info = setInfoTypes(raw) // nftlib: the sets it listed over netlink
+	}
+	names := map[string]string{}
+	txt, terr := backend.ListTableTextNoDNS("inet", "cfm")
+	switch {
+	case terr == nil:
+		out.TablePresent = true
+		out.RulesPresent = countChainRules(txt) > 0
+		names = tableSetTypes(txt)
+	case len(info) > 0:
+		// nftlib listed the table's sets, so the table is there: only the
+		// rule count is unknown (the text dump can time out on a loaded node).
+		out.TablePresent = true
+		out.RulesErr = oneLine(terr.Error())
+	default:
+		if jerr != nil && isNoSuchTable(jerr.Error()+" "+terr.Error()+" "+txt) {
+			return out // TablePresent=false: nft says the table is not there
+		}
+		out.ReadError = oneLine(terr.Error())
+		if jerr != nil {
+			out.ReadError += " (json: " + oneLine(jerr.Error()) + ")"
+		}
 		return out
 	}
-	out.TablePresent = true
+	for n, t := range info {
+		names[n] = t
+	}
+	for _, name := range sortedKeys(names) {
+		action, family, scope, feed, ok := setinventory.ClassifySet(name)
+		if !ok {
+			continue
+		}
+		family = familyForType(names[name], family)
+		row := statusRow{Set: name, Action: action, Family: family, Scope: scope, Feed: feed}
+		elems, err := backend.ListSetElementsRaw(name)
+		if err != nil {
+			row.Err = err.Error()
+		} else {
+			for _, e := range elems {
+				countElem(e, &row)
+			}
+		}
+		addRow(&out, row)
+	}
+	finishTableSummary(&out)
+	return out
+}
 
+// summaryFromNftJSON fills out from `nft -j list table` output. false when raw
+// is not that shape (nftlib's, or unparseable): the caller then reads the text
+// dump instead.
+func summaryFromNftJSON(raw []byte, out *statusOut) bool {
 	var parsed struct {
 		Nftables []struct {
+			Table *struct {
+				Name string `json:"name"`
+			} `json:"table,omitempty"`
 			Set *struct {
-				Family string        `json:"family"`
-				Name   string        `json:"name"`
-				Table  string        `json:"table"`
-				Type   string        `json:"type"`
-				Elem   []interface{} `json:"elem"`
+				Name string        `json:"name"`
+				Type interface{}   `json:"type"`
+				Elem []interface{} `json:"elem"`
 			} `json:"set,omitempty"`
 			Rule *struct {
-				Chain string        `json:"chain"`
-				Expr  []interface{} `json:"expr"`
+				Chain string `json:"chain"`
 			} `json:"rule,omitempty"`
 		} `json:"nftables"`
 	}
-	_ = json.Unmarshal(raw, &parsed)
+	// A Decoder reads the first JSON value and ignores what follows it: the
+	// exec backend appends nft's stderr (a warning about a table another tool
+	// manages, on a CSF / firewalld host) to the JSON on stdout.
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&parsed); err != nil {
+		return false
+	}
+	hasTable := false
+	for _, it := range parsed.Nftables {
+		if it.Table != nil {
+			hasTable = true
+		}
+	}
+	if !hasTable {
+		return false
+	}
+	out.TablePresent = true
 	rc := 0
 	for _, it := range parsed.Nftables {
 		if it.Rule != nil {
@@ -1125,42 +1213,226 @@ func readTableSummary(backend firewall.Backend) statusOut {
 		}
 	}
 	out.RulesPresent = rc > 0
-
 	for _, it := range parsed.Nftables {
 		if it.Set == nil {
 			continue
 		}
-		s := it.Set
-		action, family, scope, feed, ok := setinventory.ClassifySet(s.Name)
+		set := it.Set
+		action, family, scope, feed, ok := setinventory.ClassifySet(set.Name)
 		if !ok {
 			continue
 		}
-		if s.Type == "ipv4_addr" && family != "v4" {
-			family = "v4"
+		typ, _ := set.Type.(string)
+		family = familyForType(typ, family)
+		row := statusRow{Set: set.Name, Action: action, Family: family, Scope: scope, Feed: feed}
+		for _, el := range set.Elem {
+			countJSONElem(el, &row)
 		}
-		if s.Type == "ipv6_addr" && family != "v6" {
-			family = "v6"
+		addRow(out, row)
+	}
+	return true
+}
+
+// countJSONElem counts one `nft -j` set element: a bare address, a
+// {"prefix":…} or {"range":…}, or either wrapped as {"elem":{"val":…}} when
+// the element carries a timeout or expiry (it was not counted before).
+func countJSONElem(el interface{}, row *statusRow) {
+	switch v := el.(type) {
+	case string:
+		countElem(v, row)
+	case map[string]interface{}:
+		if inner, ok := v["elem"].(map[string]interface{}); ok {
+			countJSONElem(inner["val"], row)
+			return
 		}
-		row := statusRow{Set: s.Name, Action: action, Family: family, Scope: scope, Feed: feed}
-		for _, el := range s.Elem {
-			switch el.(type) {
-			case string:
-				row.Hosts++
-			case map[string]interface{}:
-				if _, ok := el.(map[string]interface{})["prefix"]; ok {
-					row.Prefixes++
-				}
-			}
+		if _, ok := v["prefix"]; ok {
+			row.Prefixes++
+			return
 		}
-		out.Sets = append(out.Sets, row)
-		if action == "ALLOW" {
-			out.Totals.Allow.Hosts += row.Hosts
-			out.Totals.Allow.Prefixes += row.Prefixes
-		} else {
-			out.Totals.Block.Hosts += row.Hosts
-			out.Totals.Block.Prefixes += row.Prefixes
+		if _, ok := v["range"]; ok {
+			row.Prefixes++
 		}
 	}
+}
+
+// countElem counts one element as ListSetElementsRaw prints it: an address is
+// a host, a CIDR ("a/n") or a range ("a-b") a prefix.
+func countElem(e string, row *statusRow) {
+	e = strings.TrimSpace(e)
+	if e == "" {
+		return
+	}
+	if strings.ContainsAny(e, "/-") {
+		row.Prefixes++
+	} else {
+		row.Hosts++
+	}
+}
+
+func familyForType(typ, family string) string {
+	switch typ {
+	case "ipv4_addr":
+		return "v4"
+	case "ipv6_addr":
+		return "v6"
+	}
+	return family
+}
+
+func addRow(out *statusOut, row statusRow) {
+	out.Sets = append(out.Sets, row)
+	if row.Action == "ALLOW" {
+		out.Totals.Allow.Hosts += row.Hosts
+		out.Totals.Allow.Prefixes += row.Prefixes
+	} else {
+		out.Totals.Block.Hosts += row.Hosts
+		out.Totals.Block.Prefixes += row.Prefixes
+	}
+}
+
+// oneLine folds a multi-line error (nft prints the command and a caret line
+// under it) into one line.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// incomplete: some part of the summary could not be read (not cached, so the
+// next run reads again).
+func (st statusOut) incomplete() bool {
+	if st.ReadError != "" || st.RulesErr != "" {
+		return true
+	}
+	for _, r := range st.Sets {
+		if r.Err != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// stripQuoted removes the "…" strings of an nft text line (a comment, a log
+// prefix, an interface name), so a brace inside one is not counted.
+func stripQuoted(s string) string {
+	var b strings.Builder
+	in := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if in {
+			if c == '\\' {
+				i++
+			} else if c == '"' {
+				in = false
+			}
+			continue
+		}
+		if c == '"' {
+			in = true
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// isNoSuchTable: nft's answer for a table that does not exist.
+func isNoSuchTable(msg string) bool {
+	return strings.Contains(msg, "No such file or directory")
+}
+
+// countChainRules counts the rules in an `nft list table` text dump: the
+// statements directly inside a `chain X {` block, not its type/hook/policy
+// line, its comment "…" line, a # comment or a blank line. A rule whose anonymous set wraps over
+// several lines is counted once (only lines that START at the chain's own
+// depth count). Sets, maps, counters and quotas sit outside chains.
+func countChainRules(txt string) int {
+	n := 0
+	inChain := false
+	depth := 0 // brace depth inside the current chain (1 = chain body)
+	for _, ln := range strings.Split(txt, "\n") {
+		t := strings.TrimSpace(ln)
+		if !inChain {
+			if strings.HasPrefix(t, "chain ") && strings.HasSuffix(t, "{") {
+				inChain = true
+				depth = 1
+			}
+			continue
+		}
+		startDepth := depth
+		bare := stripQuoted(t)
+		depth += strings.Count(bare, "{") - strings.Count(bare, "}")
+		if depth <= 0 {
+			inChain = false
+			continue
+		}
+		if startDepth != 1 || t == "" || strings.HasPrefix(t, "#") || t == "}" {
+			continue
+		}
+		// the chain's own type/hook/policy line and its comment "…" line
+		if strings.HasPrefix(t, "type ") || strings.HasPrefix(t, "policy ") || strings.HasPrefix(t, "comment \"") {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// tableSetTypes returns every named set in an `nft list table` text dump with
+// its key type ("" when the dump does not say).
+func tableSetTypes(txt string) map[string]string {
+	out := map[string]string{}
+	cur := ""
+	for _, ln := range strings.Split(txt, "\n") {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "set ") && strings.HasSuffix(t, "{") {
+			f := strings.Fields(t)
+			if len(f) >= 3 {
+				cur = f[1]
+				out[cur] = ""
+			}
+			continue
+		}
+		if cur != "" && strings.HasPrefix(t, "type ") {
+			out[cur] = strings.TrimSpace(strings.TrimPrefix(t, "type "))
+			cur = ""
+		}
+		if t == "}" {
+			cur = ""
+		}
+	}
+	return out
+}
+
+// setInfoTypes reads the nftlib backend's ListTableJSON shape ("set_info").
+func setInfoTypes(raw []byte) map[string]string {
+	var parsed struct {
+		SetInfo []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"set_info"`
+	}
+	out := map[string]string{}
+	if json.Unmarshal(raw, &parsed) != nil {
+		return out
+	}
+	for _, s := range parsed.SetInfo {
+		if s.Name != "" {
+			out[s.Name] = s.Type
+		}
+	}
+	return out
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// finishTableSummary computes the totals and sorts the rows.
+func finishTableSummary(out *statusOut) {
 	out.Totals.Allow.Entries = out.Totals.Allow.Hosts + out.Totals.Allow.Prefixes
 	out.Totals.Block.Entries = out.Totals.Block.Hosts + out.Totals.Block.Prefixes
 	out.Totals.Overall = out.Totals.Allow.Entries + out.Totals.Block.Entries
@@ -1189,12 +1461,17 @@ func readTableSummary(backend firewall.Backend) statusOut {
 		}
 		return a.Set < b.Set
 	})
-	return out
 }
 
 func printSummary(st statusOut) {
+	if st.ReadError != "" && !st.TablePresent {
+		fmt.Println("Firewall: UNKNOWN (could not read table inet cfm: " + st.ReadError + ")")
+		return
+	}
 	if st.TablePresent {
-		if st.RulesPresent {
+		if st.RulesErr != "" {
+			fmt.Println("Firewall: table present, rules could not be read (" + st.RulesErr + ")")
+		} else if st.RulesPresent {
 			fmt.Println("Firewall: active (table inet cfm present, rules installed)")
 		} else {
 			fmt.Println("Firewall: table present, but no rules found")
@@ -1208,11 +1485,25 @@ func printSummary(st statusOut) {
 		st.Totals.Block.Entries, st.Totals.Block.Hosts, st.Totals.Block.Prefixes,
 		st.Totals.Overall,
 	)
+	unread := 0
+	for _, r := range st.Sets {
+		if r.Err != "" {
+			unread++
+		}
+	}
+	if unread > 0 {
+		fmt.Printf("  (%d set(s) could not be read — the totals leave them out)\n", unread)
+	}
 	fmt.Println("Sets:")
 	for _, r := range st.Sets {
 		extra := ""
 		if r.Feed != "" {
 			extra = " [feed: " + r.Feed + "]"
+		}
+		if r.Err != "" {
+			fmt.Printf(" - %-5s %-2s %-6s %-35s READ FAILED: %s%s\n",
+				r.Action, r.Family, r.Scope, r.Set, r.Err, extra)
+			continue
 		}
 		fmt.Printf(" - %-5s %-2s %-6s %-35s hosts=%-5d prefixes=%-5d%s\n",
 			r.Action, r.Family, r.Scope, r.Set, r.Hosts, r.Prefixes, extra)
