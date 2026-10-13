@@ -73,10 +73,10 @@ purpose or not yet closed:
 
 "Done before" only ever decides a spike with no tell of abuse, so what it
 weighs is info-or-nothing (or the stepped-down warning of an extreme one),
-never a page; a spike with a tell skips it. If the peak cannot be read, a
-tell-less spike is held for the next check (published blind it would page a
-usual run and keep it from "done before" for 28 days); one with a tell, or an
-extreme one (≥ 50 at ≥ 10×), is judged as ever (logged at most every 10 min). An
+never a page; a spike with a tell skips it. If the peak cannot be read,
+every spike is judged as before the peak existed (logged at most every 10
+min): a hacked site's script spike must not wait on the store, and a
+mailbox's tell-less one is info. An
 open finding keeps being judged as before (its own incident is in the peak by
 then). Without the abuse check (stale, or `MAIL_ABUSE_ALERT = 0`)
 `whats_wrong` lists the raw anomalies, a spike under its peak as info. A monthly run older than the counters' 30 days, or a sender's first

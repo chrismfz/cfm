@@ -30,9 +30,8 @@ back-filled here — see the git/PR history for that period.
   that equals its peak is "done before" too. Sending from 10+
   addresses counts as a tell only for addresses that SENT mail, not an
   office's phones reading the mailbox, and the message now says
-  `· sent from N IPs`. If the peak cannot be read, the check holds the
-  tell-less, non-extreme spikes for the next check instead of skipping the
-  whole mail check. `whats_wrong`'s
+  `· sent from N IPs`. If the peak cannot be read, spikes are judged without
+  it instead of the whole mail check being skipped. `whats_wrong`'s
   fallback lists warnings before the runs under their peak, and reads the
   node's `under_peak` instead of its own copy of the rule.
 - **A mailbox sending its usual big run, or volume with nothing abusive

@@ -359,20 +359,3 @@ func TestUsualRunWithATellConfirmsAHijack(t *testing.T) {
 		t.Fatalf("a spike with a tell of its own confirms the hijack: %+v", h)
 	}
 }
-
-// Review of PR #1599: when the peak cannot be read, a tell-less spike is held
-// (not published blind, which would page a usual run and keep it from "done
-// before" for 28 days); one with a tell is judged as ever.
-func TestPeakUnknownHoldsTellLessSpikes(t *testing.T) {
-	tr := newTracker()
-	a := Anomaly{Addr: "a@x.gr", Kind: "spike", Recent: 100, Ratio: 4, PeakUnknown: true}
-	if !tr.doneBefore(a, "mail:out:a@x.gr", false) {
-		t.Fatal("a tell-less spike with an unknown peak is held")
-	}
-	if tr.doneBefore(Anomaly{Addr: "a@x.gr", Kind: "spike", Recent: 800, Ratio: 25, PeakUnknown: true}, "mail:out:a@x.gr", false) {
-		t.Fatal("an extreme one is never held")
-	}
-	if tr.doneBefore(a, "mail:out:a@x.gr", true) {
-		t.Fatal("an open one is still judged")
-	}
-}

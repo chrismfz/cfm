@@ -836,6 +836,8 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		if sev != "info" {
 			found[f.Key] = true
 		}
+		// IPs: every login source of the mailbox (as it always was); the
+		// message's "sent from N IPs" counts the sending ones
 		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, IPs: len(t.authIPs[a.Addr]), Context: &c})
 	}
 	for _, v := range others {
@@ -902,9 +904,9 @@ func CurrentAbuse() ([]AbuseView, time.Time) {
 // belowAlertFloor: a MILD small spike (under abuseAlertFloor messages, under
 // abuseCritRatio× its usual) is not an alert — a newsletter or a busy day. A
 // small one far above its usual (a quiet site hacked, 45 a day at 45×), or one
-// with a tell of abuse (Context.abusive, bounces of its own, a hijack
-// candidate, many sending addresses), still is; and an open one keeps being
-// judged.
+// with a tell of abuse (Context.abusive, bounces of its own, many SENDING
+// addresses — not a hijack candidate, which the spike confirms instead),
+// still is; and an open one keeps being judged.
 func belowAlertFloor(a Anomaly, tell, open bool) bool {
 	if open || a.Recent >= abuseAlertFloor || a.Ratio >= abuseCritRatio {
 		return false
@@ -914,8 +916,9 @@ func belowAlertFloor(a Anomaly, tell, open bool) bool {
 
 // abusive: the context carries a tell of abuse — a sender outside this
 // host's domains, a mailbox sending as another domain, the contact-form
-// pattern. The caller adds what lives outside the context (bounces, logins
-// from many places).
+// pattern. The caller adds what lives outside the context (bounces of its
+// own, 10+ sending addresses); logins from many countries are not a tell of a
+// spike (the spike confirms the hijack, never the other way round).
 func (c Context) abusive() bool {
 	return c.ForeignFrom || c.OtherFrom || c.CopiedTo != ""
 }
@@ -928,18 +931,11 @@ func (c Context) abusive() bool {
 // critical) within the peak's days: that peak may be the thief's first wave.
 // Spikes resolved before this memory existed (cfm 2026-10-14) are not in it.
 // At or under the peak (Anomaly.UnderPeak): a fixed-size run sent the same
-// way every day equals its peak. When the peak could not be read
-// (PeakUnknown) a tell-less spike is held for the next check rather than
-// published blind — it would page a usual run and keep it from "done before"
-// for 28 days — unless it is extreme.
+// way every day equals its peak. A peak that could not be read is no peak:
+// every spike is judged as before the peak existed (a hacked site's script
+// spike must not wait on the store; a mailbox's tell-less one is info).
 func (t *tracker) doneBefore(a Anomaly, key string, open bool) bool {
-	return !open && !t.alerted[key] && (a.UnderPeak || (a.PeakUnknown && !extremeSpike(a)))
-}
-
-// extremeSpike: what stays a warning on volume alone (spikeSeverity's
-// critical, stepped down): never held for an unknown peak.
-func extremeSpike(a Anomaly) bool {
-	return a.Recent >= abuseCritFloor && a.Ratio >= abuseCritRatio
+	return !open && !t.alerted[key] && a.UnderPeak
 }
 
 // setAlerted records the spike keys alerted on within anomalyPeakDays
