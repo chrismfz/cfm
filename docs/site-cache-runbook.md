@@ -13,7 +13,7 @@ Two tiers, both off for every vhost until one is armed:
 | Tier | What is cached | Where | TTL |
 |---|---|---|---|
 | **A: static** | Files ending in `.css .js .map .woff .woff2 .ttf .eot .png .jpg .jpeg .gif .webp .ico`, on :9080 and :9043 | the static-asset locations, zone `cfm_static` (10 GB, `inactive=7d`) | the origin's `Cache-Control` / `Expires`, **1 h fallback**. The stored static recipe and TTL are labels only. |
-| **B: micro** | Anonymous GET/HEAD responses through the HTTPS `location /`: HTML pages, but also anything else served there (REST JSON, feeds, svg…). It runs on the plain-allow path, after the WAF, challenge and bridge decisions. | internal `@cfm_micro_<n>s` locations, one zone per bucket | the vhost's micro TTL snapped to 1 / 2 / 5 / 10 / 30 / 60 s (empty = 1 s, above 60 s = 60 s). The origin's cache headers are ignored except for their "do not store" signals. |
+| **B: micro** | Anonymous GET/HEAD responses through the HTTPS `location /`: HTML pages, but also anything else served there (REST JSON, feeds, svg…). It runs on the plain-allow path, after the WAF, challenge and bridge decisions. | internal `@cfm_micro_<n>s` locations, one zone per bucket | the vhost's micro TTL snapped to 1 / 2 / 5 / 10 / 30 / 60 / 90 / 120 s (empty = 1 s, above 120 s = 120 s). The origin's cache headers are ignored except for their "do not store" signals. |
 
 Tier B serves an armed vhost's anonymous pages from cache while
 `MICRO_CACHE_ENFORCE = 1`, the default since 2026-09-23. At `0` it is a dry

@@ -310,7 +310,10 @@ export const UNVERIFIABLE_BOT_UAS = Object.freeze(
 // previews. Recipes therefore keep these in the UA-based allow as well (same
 // forgeable trust as before this field existed) until verdicts are persisted /
 // pre-seeded.
-export const PREVIEW_ONE_SHOT_UAS = Object.freeze([...VERIFIED_BOT_UA_GLOBS.meta]);
+// Explicit, not VERIFIED_BOT_UA_GLOBS.meta: meta-externalads (the ads-catalog
+// crawler) re-crawls from the same IPs, so its verdict is there in time and it
+// gets no forgeable UA allow.
+export const PREVIEW_ONE_SHOT_UAS = Object.freeze(["*facebookexternalhit*", "*meta-externalagent*"]);
 export const UA_ALLOW_ALONGSIDE_VERIFIED = Object.freeze([...UNVERIFIABLE_BOT_UAS, ...PREVIEW_ONE_SHOT_UAS]);
 
 // ── Form ⇄ payload ────────────────────────────────────────────────────────

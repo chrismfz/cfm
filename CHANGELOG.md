@@ -36,10 +36,14 @@ back-filled here — see the git/PR history for that period.
 
 ### Changed
 - **Site Cache Tier B now stores pages that only set tracking cookies.** A
-  response whose `Set-Cookie` headers are all `_fbp`, `_fbc`, `_ga*`, `_gid`,
-  `_gat*` or `_gcl_*` is micro-cached, and those cookies are removed from every
-  micro response, so no visitor ever receives another visitor's id (the
-  Facebook pixel and Google tags set them again in the browser). Facebook for
+  response whose `Set-Cookie` headers are all tracking cookies (`_fbp`,
+  `_fbc`, `_ga`, `_ga_<ID>`, `_gid`, `_gat`, `_gcl_au/aw/dc/gb/gf/ha/gs`) is
+  micro-cached, and those cookies are removed from every micro response, so no
+  visitor ever receives another visitor's id (the Facebook pixel and Google
+  tags set them again in the browser). The cost, for a shop to know before
+  arming micro: these cookies no longer come from the server, so Safari keeps
+  them only 7 days, and a Facebook pixel event id printed into a cached page is
+  shared by the visitors of one TTL (Conversions API deduplication). Facebook for
   WooCommerce sets `_fbp` from the server on every page, so until now no such
   shop could be micro-cached. Any other cookie (a session, cart, login,
   consent or currency choice) still means the page is never stored. The micro
@@ -47,8 +51,11 @@ back-filled here — see the git/PR history for that period.
   micro cache once after the upgrade.
 - **Meta's ads crawler (`meta-externalads`) is part of the Meta crawler family
   in the traffic-rule recipes** (social group, "Throttle Meta crawlers",
-  "Block Meta bot query-string loops", "Crawlers are read-only"). It was
-  missing, so "Crawlers are read-only" let its POSTs through.
+  "Block Meta bot query-string loops", "Crawlers are read-only") and in the
+  edge's Meta crawler throttle (5 req/s per site, 60/min per IP). It was
+  missing, so "Crawlers are read-only" let its POSTs through. It is not added
+  to the User-Agent-only allow some recipes put in front of verified crawlers
+  for Meta's one-shot link previews: it is a repeat crawler.
 
 ## 2026.10.11
 

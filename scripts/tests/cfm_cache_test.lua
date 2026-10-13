@@ -226,7 +226,7 @@ _site_cache_on = true
 
 -- ── Tier B micro-cache: TTL-bucket snapping (Phase B1, pure helper) ────────────
 -- proxy_cache_valid is per-location + not variablizable, so a stored micro TTL
--- snaps to one of the six declared cfm_micro_<n>s zones. Exact buckets pass
+-- snaps to one of the eight declared cfm_micro_<n>s zones. Exact buckets pass
 -- through; between-bucket values snap to the nearest; ties snap DOWN (shorter,
 -- safer); junk/<=0/absent → the smallest bucket (closest to not caching).
 for _, b in ipairs({ 1, 2, 5, 10, 30, 60, 90, 120 }) do
@@ -937,9 +937,10 @@ end
 
 -- ── Response-side tracking cookies (2026-10-13) ───────────────────────────────
 -- A micro response whose Set-Cookie headers ALL name a tracking cookie (_fbp,
--- _fbc, _ga, _ga_<id>, _gid, _gat, _gat_<id>, _gcl_<x>) is storable: the
--- header filter strips them and clears $cfm_sc_unsafe. Anything else keeps the
--- fail-closed "1" and reaches the visitor untouched.
+-- _fbc, _ga, _ga_<ID>, _gid, _gat, _gcl_{au,aw,dc,gb,gf,ha,gs}) is storable:
+-- the header filter strips every tracking line and clears $cfm_sc_unsafe when
+-- nothing else is left. Anything else keeps the fail-closed "1" and reaches
+-- the visitor untouched.
 do
   local TO = cache._setcookie_tracking_only
   check(TO("_fbp=fb.1.123; Path=/; Expires=Wed, 21 Oct 2026 07:28:00 GMT") == true, "a lone _fbp is tracking")
@@ -955,7 +956,9 @@ do
   check(TO("_ga.sid=x") == false and TO("_ga%20=x") == false and TO("_ga[x]=y") == false,
         "names are read as the browser stores them, not through PHP's request rules")
   check(TO("__Secure-_fbp=x") == true and TO("__Host-_ga=x") == true, "a __Secure- / __Host- prefix is stripped before matching")
-  check(TO("_FBP=x") == true, "names compare case-insensitively (as the request lists)")
+  check(TO("_FBP=x") == false and TO("_GA_ABC123=x") == false, "names are case-sensitive, as the browser stores them")
+  check(TO("__Host-PHPSESSID=x") == false and TO("__Secure-wordpress_logged_in_x=u") == false,
+        "a __Host- / __Secure- prefix never makes a session cookie tracking")
   check(TO("PHPSESSID=abc; Path=/; HttpOnly") == false, "a session cookie is not tracking")
   check(TO({ "_fbp=x", "wordpress_logged_in_x=u" }) == false, "one non-tracking cookie makes the whole response unsafe")
   check(TO({ "wp_woocommerce_session_x=w", "_fbp=x" }) == false, "order does not matter")
@@ -1002,6 +1005,37 @@ do
   check(h == "_fbp=1" and u == "1", "no $cfm_upstream → never touched")
   for k in pairs(_header) do _header[k] = nil end
   ngx.var.cfm_upstream = nil; ngx.var.cfm_sc_unsafe = nil
+end
+
+-- ── Version skew: this Lua with an edge conf from before 2026-10-13 ─────────
+-- The package always installs the Lua; the conf only when `-t` passes. An old
+-- conf has no @cfm_micro_90s/120s and no $cfm_sc_unsafe (its presence marks a
+-- new conf).
+do
+  _micro_enforce = true
+  cache._rebuild_cache({ { host = "skew.com", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "2m" } } })
+  micro_req("skew.com"); ngx.var.cfm_sc_unsafe = "1"
+  check(cache.micro_gate() == "@cfm_micro_120s", "new conf: a 2m TTL routes to the 120s bucket")
+  micro_req("skew.com"); ngx.var.cfm_sc_unsafe = nil
+  check(cache.micro_gate() == "@cfm_micro_60s", "old conf (no $cfm_sc_unsafe): never exec into a bucket it lacks — clamp to 60s")
+  cache._rebuild_cache({ { host = "skew.com", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "30s" } } })
+  micro_req("skew.com"); ngx.var.cfm_sc_unsafe = nil
+  check(cache.micro_gate() == "@cfm_micro_30s", "old conf: buckets it has are untouched")
+  -- micro_note on an old conf reads the origin's Set-Cookie as before
+  local function note(sc)
+    _uncacheable.data = {}; _uncacheable.sets = 0
+    micro_req("skew.com", "/n")
+    ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.upstream_cache_status = "MISS"; ngx.var.upstream_status = "200"
+    ngx.var.cfm_sc_unsafe = nil; ngx.var.upstream_http_set_cookie = sc
+    ngx.var.cfm_cc_nostore = ""; ngx.var.cfm_xae_nocache = ""; ngx.var.upstream_http_vary = nil
+    ngx.var.upstream_http_x_accel_buffering = nil; ngx.var.upstream_http_cart_token = nil; ngx.var.upstream_http_woocommerce_session = nil
+    cache.micro_note()
+    return _uncacheable.sets
+  end
+  check(note(nil) == 0, "old conf, no Set-Cookie: a storable MISS is not marked (micro keeps working)")
+  check(note("PHPSESSID=x") == 1, "old conf, a Set-Cookie: marked, as nginx refused to store it")
+  ngx.var.upstream_http_set_cookie = nil
+  _micro_enforce = false
 end
 
 if fails > 0 then

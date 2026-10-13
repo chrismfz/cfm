@@ -991,7 +991,7 @@ cPanel, so every rail is absolute):
 - **Tier A — static assets** (css/js/map, fonts, png/jpg/gif/webp/ico), on
   :9080 and :9043: the origin's `Cache-Control` / `Expires` decide the TTL,
   1 h fallback.
-- **Tier B — micro-cache of anonymous pages** (1–60 s buckets): any anonymous
+- **Tier B — micro-cache of anonymous pages** (1–120 s buckets): any anonymous
   GET/HEAD through the HTTPS `location /`, HTML or not, after the WAF /
   challenge / bridge decisions (cfm.lua Step 4). Live for an armed vhost
   (`MICRO_CACHE_ENFORCE = 1`, the default since 2026-09-23; `0` is a node-wide
@@ -1001,7 +1001,9 @@ cPanel, so every rail is absolute):
 Never cached, whatever a policy says (design §4):
 - **Both tiers:**
   - requests with `Authorization`;
-  - `Set-Cookie` / private / no-store responses;
+  - `Set-Cookie` / private / no-store responses (Tier B: a response whose
+    cookies are all tracking ones — `_fbp`, `_ga`… — is stored, with those
+    cookies removed);
   - non-200s;
   - panel and webmail hosts;
   - methods other than GET/HEAD;

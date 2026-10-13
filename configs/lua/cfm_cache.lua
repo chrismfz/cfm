@@ -517,6 +517,8 @@ end
 -- protection the gap between 7s and 8s is operationally meaningless
 -- (design §5.4), so the snapped menu behaves as effectively continuous.
 local MICRO_BUCKETS = { 1, 2, 5, 10, 30, 60, 90, 120 } -- seconds; mirrors the declared cfm_micro_<n>s zones
+-- The largest bucket a conf from before 2026-10-13 declares (see micro_gate).
+local LEGACY_MAX_BUCKET = 60
 
 -- micro_bucket_seconds: snap a stored TTL to the nearest bucket. Accepts a
 -- number of seconds or a string "[+]<n><unit>" with unit s/m/h/d, as the
@@ -781,10 +783,10 @@ end
 -- Google's _ga/_ga_<ID>/_gid/_gat/_gcl_{au,aw,dc,gb,gf,ha,gs}. It is NOT the request
 -- ignore-list above (cfm_* and consent cookies are not here: an origin that
 -- sets one of those is telling the visitor something per visitor).
--- Matched on the name AS THE BROWSER STORES IT (case-insensitive, after a
--- __Secure- / __Host- prefix), never through cookie_key(): those are PHP's
--- request-side readings, and a response cookie named "_ga.sid" or "_ga%20" is
--- not Google's. A name must be [A-Za-z0-9_-] only.
+-- Matched on the name AS THE BROWSER STORES IT: case-sensitive (a cookie
+-- named _FBP is not Meta's), after a __Secure- / __Host- prefix, never through
+-- cookie_key() (PHP's request-side readings: "_ga.sid" or "_ga%20" is not
+-- Google's). A name must be [A-Za-z0-9_-] only.
 local MICRO_SETCOOKIE_TRACKING_EXACT = {
     ["_fbp"] = true, ["_fbc"] = true,
     ["_ga"] = true, ["_gid"] = true, ["_gat"] = true,
@@ -812,12 +814,12 @@ end
 -- setcookie_is_tracking: PURE. A name from setcookie_name.
 local function setcookie_is_tracking(name)
     local l = name:lower()
-    if l:sub(1, 9) == "__secure-" then name = name:sub(10); l = l:sub(10)
-    elseif l:sub(1, 7) == "__host-" then name = name:sub(8); l = l:sub(8) end
-    if MICRO_SETCOOKIE_TRACKING_EXACT[l] then return true end
+    if l:sub(1, 9) == "__secure-" then name = name:sub(10)
+    elseif l:sub(1, 7) == "__host-" then name = name:sub(8) end
+    if MICRO_SETCOOKIE_TRACKING_EXACT[name] then return true end
     -- GA4: _ga_<measurement id>, the id upper-case letters and digits as Google
     -- writes it (so not "_ga_session")
-    if name:sub(1, 4):lower() == "_ga_" and name:sub(5):find("^[A-Z0-9]+$") then return true end
+    if name:sub(1, 4) == "_ga_" and name:sub(5):find("^[A-Z0-9]+$") then return true end
     return false
 end
 
@@ -1145,7 +1147,14 @@ function _M.micro_note()
     if v.cfm_upstream ~= "cfm_apache_micro" then return end
     local dict = ngx.shared and ngx.shared[UNCACHEABLE_DICT]
     if not dict then return end
-    local ttl = micro_mark_ttl(st, v.upstream_status, v.cfm_sc_unsafe,
+    -- An older conf has no $cfm_sc_unsafe: there nginx still refuses any
+    -- Set-Cookie natively, so read the origin's header as before.
+    local sc = v.cfm_sc_unsafe
+    if sc == nil then
+        local set_cookie = v.upstream_http_set_cookie
+        sc = (type(set_cookie) == "string" and set_cookie ~= "") and "1" or ""
+    end
+    local ttl = micro_mark_ttl(st, v.upstream_status, sc,
                                v.cfm_cc_nostore, v.cfm_xae_nocache, v.upstream_http_vary,
                                v.upstream_http_x_accel_buffering, session_token_header(v))
     if ttl then dict:set(micro_mark_key(), true, ttl) end
@@ -1340,6 +1349,12 @@ function _M.micro_gate()
     if ngx.req.is_internal() then return nil end
     local ok, bucket = micro_verdict(p)
     if not ok then return nil end
+    -- Version skew: the package always installs this file, but the edge conf
+    -- is deployed only when `-t` passes, so a node can run this Lua with an
+    -- older conf. That conf has no @cfm_micro_90s / @cfm_micro_120s (an exec
+    -- there would 500 every anonymous visitor) and no $cfm_sc_unsafe; the
+    -- variable's presence is how the conf says it is new enough.
+    if bucket > LEGACY_MAX_BUCKET and ngx.var.cfm_sc_unsafe == nil then bucket = LEGACY_MAX_BUCKET end
     ngx.var.cfm_cache_skip = "0"
     ngx.var.cfm_cache_gen  = tostring(p.gen or 0)
     return "@cfm_micro_" .. bucket .. "s"

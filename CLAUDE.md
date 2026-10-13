@@ -828,14 +828,21 @@ because of that. Hard-won points:
   Both tiers: Authorization, `Set-Cookie`/private/no-store, non-200,
   panel/webmail hosts, GET/HEAD only, script paths — with ONE Tier B
   exception (2026-10-13): a response whose Set-Cookie headers are ALL
-  tracking cookies (`_fbp`, `_fbc`, `_ga*`, `_gid`, `_gat*`, `_gcl_*`) is
-  stored, and the HTTPS server's header filter strips them from every micro
+  tracking cookies (`_fbp`, `_fbc`, `_ga`, `_ga_<ID>`, `_gid`, `_gat`,
+  `_gcl_au/aw/dc/gb/gf/ha/gs`, case-sensitive) is stored, and the HTTPS
+  server's header filter strips every tracking line from every micro
   response (`cfm_cache.micro_setcookie_filter`, `$cfm_sc_unsafe` fail-closed
   "1"). Facebook for WooCommerce sets `_fbp` server-side on every page, so
   without it no such shop could be micro-cached. It must stay in the
   server-level `header_filter_by_lua_block`: a location-level one replaces
   that block. nginx tests `proxy_no_cache` after the header filters (verified
-  live on nginx 1.24 + lua-nginx-module 0.10.26); the guard pins the rest. Tier A reads no request
+  live on nginx 1.24 + lua-nginx-module 0.10.26); the guard pins the rest.
+  The filter reads `headers_out`, so a cookie the EDGE adds before the micro
+  exec (`cfm_clearance`) also keeps `$cfm_sc_unsafe` at "1": wiring the
+  clearance fast path to micro (design §5.5.1) must exclude those first. A
+  node can run new Lua with an old conf (the conf deploys only when `-t`
+  passes): `micro_gate` clamps to 60 s and `micro_note` keeps the old cookie
+  rule when `$cfm_sc_unsafe` is undeclared. Tier A reads no request
   cookie and looks at the path only for its extension; session cookies,
   credential headers and admin paths are Tier B only.
 - **`SITE_CACHE = 0` freezes each worker's policy table.** There is no feed

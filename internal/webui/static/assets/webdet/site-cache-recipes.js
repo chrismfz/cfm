@@ -47,7 +47,7 @@ export const SC_RECIPES = Object.freeze([
   },
   {
     key: "near_static",
-    title: "Near-static pages (micro-cache 10–60 s)",
+    title: "Near-static pages (micro-cache 10–120 s)",
     description:
       "Tier B with a longer bucket for pages that rarely change (a landing page, a news front page). Visitors can see a page up to the TTL old; purge after an edit to show it at once.",
     vars: [

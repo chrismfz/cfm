@@ -776,6 +776,8 @@ test("bots_no_ajax: crawlers are blocked on the JS-only endpoints (titan 2026-10
 test("meta-externalads is a verifiable Meta crawler, never an UNVERIFIABLE (UA-only) one", () => {
   assert.ok(VERIFIED_BOT_UA_GLOBS.meta.includes("*meta-externalads*"));
   assert.ok(!UNVERIFIABLE_BOT_UAS.includes("*meta-externalads*"));
+  assert.ok(!UA_ALLOW_ALONGSIDE_VERIFIED.includes("*meta-externalads*"), "the ads crawler gets no forgeable UA-only allow");
+  assert.ok(UA_ALLOW_ALONGSIDE_VERIFIED.includes("*facebookexternalhit*") && UA_ALLOW_ALONGSIDE_VERIFIED.includes("*meta-externalagent*"));
   const t = recipe("throttle_meta").build({ vhosts: "a.com" })[0];
   assert.ok(t.match.ua_any.includes("*meta-externalads*"));
   const q = recipe("block_meta_qs").build({ vhosts: "a.com" })[0];
