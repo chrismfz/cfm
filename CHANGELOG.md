@@ -56,6 +56,23 @@ back-filled here — see the git/PR history for that period.
   missing, so "Crawlers are read-only" let its POSTs through. It is not added
   to the User-Agent-only allow some recipes put in front of verified crawlers
   for Meta's one-shot link previews: it is a repeat crawler.
+- **SE Ranking's crawler (`SERankingBacklinksBot`) is in the recipes' SEO tools
+  group.** On a WooCommerce shop it walked every category's `?type=…&orderby=…`
+  combination, and each page ran a product-filter count over 14–31 M rows (up
+  to 65 s per query).
+
+### Fixed
+- **`cfm status` reports the firewall on nftlib nodes.** It printed "table
+  present, but no rules found" and zero totals over a full firewall (one node:
+  174 rules, 110 000+ entries). It read only `nft -j` output, and the nftlib
+  backend answers in its own format; it now counts rules from the nft text dump
+  and each set's entries through the backend. The same fallback covers a host
+  whose `nft -j` output does not parse (a warning on stderr). A read that fails
+  is reported as such ("UNKNOWN", "READ FAILED" per set, `read_error` in
+  `--json`), never as zero or "table absent". Entries with a timeout are now
+  counted on exec-engine nodes too, so their totals can go up.
+- **CLI commands no longer print the daemon's `[startup] backend type=…` line**
+  (it also landed in `cfm status --json` output).
 
 ## 2026.10.11
 

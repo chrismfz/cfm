@@ -269,8 +269,8 @@ export const BOT_GROUPS = Object.freeze([
     key: "seo",
     phrase: "SEO tools",
     label: "SEO tools",
-    hint: "AhrefsBot, SemrushBot, MJ12bot, DotBot, BLEXBot, PetalBot, DataForSeoBot",
-    patterns: ["*AhrefsBot*", "*SemrushBot*", "*MJ12bot*", "*DotBot*", "*BLEXBot*", "*PetalBot*", "*DataForSeoBot*"],
+    hint: "AhrefsBot, SemrushBot, MJ12bot, DotBot, BLEXBot, PetalBot, DataForSeoBot, SERankingBacklinksBot",
+    patterns: ["*AhrefsBot*", "*SemrushBot*", "*MJ12bot*", "*DotBot*", "*BLEXBot*", "*PetalBot*", "*DataForSeoBot*", "*SERankingBacklinksBot*"],
   },
   {
     key: "scripts",
