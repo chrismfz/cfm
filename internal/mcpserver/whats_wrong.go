@@ -739,6 +739,11 @@ func evalMailAbuse(views []mailAbuseView) []finding {
 			sev = sevCritical
 		}
 		title := mailAbuseTitles[v.Type]
+		if v.Type == "mail_hijack" && v.Severity != "critical" {
+			// logins from many places with nothing done through them
+			// (mailtraffic/abuse_hijack.go): a question for the owner
+			title = "mailbox logged in from many places, its password not seen in use (travel / VPN, or a stolen password)"
+		}
 		if title == "" {
 			title = v.Type
 		}

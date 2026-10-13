@@ -23,11 +23,11 @@ mainlog / maillog every minute into hourly per-user counters) checks:
 |---|---|---|
 | `mail_script_spike` | warning / critical | a unix user's LOCAL submissions (`U=user P=local`: PHP `mail()`, sendmail from a script or cron) far above that user's own history — a hacked site or an abused contact form. The message names the script directory (`cwd=`), the envelope sender (flagged when it is not a domain on this host), and how many different recipients. `root`, `mailnull`, `cpanel*`, `exim` are skipped |
 | `mail_outbound_spike` | warning / critical | an authenticated mailbox (SMTP AUTH) sending far above its own history |
-| `mail_hijack` | critical | one mailbox SUCCESSFULLY logging in from ≥ 3 countries, or from ≥ 10 sources of which ≥ 5 are outside its main country, within an hour — a stolen password in use. SMTP AUTH (exim `A=…` + `H=[ip]`, Postfix `sasl_username` + `client=[ip]`) and IMAP/POP3 (dovecot `Login:` / `Logged in:` + `rip=`; a failed login never counts). See "Hijack sources" below; without GeoIP data there is no hijack finding |
+| `mail_hijack` | warning / critical | one mailbox SUCCESSFULLY logging in from ≥ 3 countries, or from ≥ 10 sources of which ≥ 5 are outside its main country, within an hour. SMTP AUTH (exim `A=…` + `H=[ip]`, Postfix `sasl_username` + `client=[ip]`) and IMAP/POP3 (dovecot `Login:` / `Logged in:` + `rip=`; a failed login never counts). **Critical** only when the mailbox is also being USED — see "Hijack severity" below; logins alone are a warning. See "Hijack sources" below; without GeoIP data there is no hijack finding |
 | `mail_bounce_spike` | warning / critical | a sender (local user or authenticated mailbox) whose remote deliveries bounce in bulk: ≥ 20 bounces and ≥ 25 % of its delivered + bounced in the last 2 h (critical from 100 and 50 %; counted per recipient). A failure through a local transport (a full or deleted mailbox on this host) is not a bounce, as local deliveries are not counted either — a form or hacked account writing to harvested or made-up addresses. Names the main bounce reason (`no-such-user`, `blocked-reputation`, …) and the sender context. Stays open down to half of each threshold |
 | `mail_queue_hog` | warning / critical | one envelope sender holding ≥ 50 % of a queue of ≥ 100 messages, with ≥ 100 of them of which ≥ 50 are frozen or stuck over 1 h — a campaign going out fine is not a clogged queue (critical from 1 000); bounces (null sender: exim `<>`, Postfix `MAILER-DAEMON`) are not counted — frozen undeliverable bounces piling up are the normal state of a cPanel queue, not one sender's doing. Read from the exim/postfix queue detector's latest listing (`exim_queues` / `postfix_queues` must be on). A listing that failed (count fine, nothing listed — a big queue is slow to list) or is 10 min – 1 h old leaves an open finding as it is; older than that (the detector switched off) it no longer holds it. Stays open down to 30 % / 50 messages |
 | `mail_rbl_listed` | warning / critical | one of the node's public IPv4 addresses on Spamhaus ZEN (SBL / XBL / PBL), SpamCop, Barracuda or PSBL, checked every 30 min. Spamhaus refuses `zen.spamhaus.org` through public resolvers (the fleet's 1.1.1.1 / 8.8.8.8): set `MAIL_RBL_SPAMHAUS_DQS_KEY` and it is asked through Data Query Service (`<key>.zen.dq.spamhaus.net`) instead; the key is never logged or shown. Critical for a Spamhaus SBL/XBL listing or two lists at once. Each list is judged on its own: one that does not answer cleanly (a timeout, or Spamhaus's `127.255.255.x` "your resolver is refused" — logged once) keeps its own last verdict, never read as "delisted" and never holding the other lists' verdicts. An address that leaves the node is resolved |
-| `mail_recovered` | info | the finding with the same key is over (for a hijack: the logins stopped — the password still needs changing; for an RBL listing: delisted) |
+| `mail_recovered` | info | the finding with the same key is over (for a critical hijack: the logins stopped — the password still needs changing; for an RBL listing: delisted) |
 
 "Far above its history" is the Mail Monitor's anomaly rule: the last 2 h
 against the user's average per active hour over the previous 7 days, at least
@@ -85,10 +85,77 @@ person, or a service acting for them:
   Google Cloud and Azure (which shares AS8075 with Outlook.com) included, and
   likely VK Cloud's VMs if they sit in AS47764;
   they mostly use residential proxies and VPS networks.
+- corporate security gateways count the same way, as ONE source with no
+  country: Netskope (AS55256), Zscaler (AS53813, 62044, 22616) and Cisco
+  Umbrella (AS36692). A company sends its staff's traffic out through the
+  vendor's nearest point of presence, which geolocates anywhere: on orion,
+  larrynail@aspirephysiciansolutions.com was read from a US phone, the French
+  office and Netskope exits in IN and UG, and paged as a hijack every few
+  hours. They are paid enterprise tenants, not a VPN anyone can buy (Cloudflare
+  WARP or a consumer VPN still count by country);
 - `::ffff:1.2.3.4` is `1.2.3.4`.
 
 So "many IPs" needs ≥ 5 of them outside the mailbox's main country: a home,
 a phone and a VPN are many addresses in two places, not a hijack.
+
+## Hijack severity
+
+Logins from many places are a candidate. In the week before this rule (Oct
+2026) the fleet raised 33 critical hijacks on 10 mailboxes, and every one of
+them was a mailbox READ from abroad (IMAP/POP3) with no mail sent from there:
+owners travelling, behind a VPN or a corporate proxy. They paged the channel
+and were reminded every 6 h until acknowledged, so the team stopped reading
+them. A thief who has the password uses it, so a hijack is **critical** only
+when, as well, within the hour:
+
+- the mailbox **sent mail (SMTP AUTH) from a country it was not read from**
+  (IMAP/POP3) within the hour: the owner's mail app sends from where it
+  reads, a thief submitting spam sends from where nobody reads;
+- or it **sent mail from two countries or more** within the hour: the owner
+  and a thief with a full mail client both sending.
+
+  No "home country" is guessed: within an hour the majority is whoever has
+  more addresses, and a thief behind a proxy pool has more than the owner.
+  Sources with no country (the fetchers and gateways above) are not judged.
+  Each source keeps the time of its last login per protocol, so an address
+  that sent two hours ago and only reads now has not sent within the hour.
+  One gap is left: a thief who reads AND sends from one country while the
+  owner only reads elsewhere looks like the owner sending from where they
+  read. That warning names the country (`sent mail only from VN, where it is
+  also read`), so check it is the owner's;
+- the same mailbox has a `mail_outbound_spike` or `mail_bounce_spike` FINDING
+  this check (one only held open on its volume is no news about this hour);
+- its **forwarder or mail filter changed in the last 24 h** (cPanel: a line for
+  the address in `/etc/valiases/<domain>` with that file changed, or
+  `~<owner>/etc/<domain>/<local>/filter`, what webmail's Email Filters writes;
+  the owner comes from `/etc/userdatadomains` / `/etc/userdomains` through
+  `internal/panelmap`). A thief keeps a copy of the mail
+  coming. `valiases` is the whole domain's file: a change to ANY forwarder of
+  the domain counts for an address that has one, so check the forwarder the
+  message names. Not read on DirectAdmin or Postfix hosts, only asked when
+  nothing above already confirmed the hijack, and the answer is reused for
+  10 minutes.
+
+The message names which (`… and sent mail from VN — likely a stolen
+password`). Otherwise the finding is a **warning** that says `reading only`
+(or `sent mail only from GR, where it is also read`) and asks to check with
+the owner. An alert published critical stays critical in `whats_wrong` /
+`mail_traffic` while open, even if a later check judges the hour a warning
+(the SMTP login left the window): publishing never downgrades. Reading alone can still be a thief (business email
+compromise: the mail is read now and the fraud sent from elsewhere later), so
+it is still published, shown in `whats_wrong` and `mail_traffic`, and rises to
+critical, published again, the moment one of the above appears.
+
+**No re-page for the same trip.** A resolved WARNING hijack is remembered for
+7 days (`/var/lib/cfm/mail_abuse_published_hijacks.json`, next to the open
+findings) with every country it was seen from while open. The same mailbox
+back as a warning from no new country is not published again (it is still
+listed in `whats_wrong` / `mail_traffic`), and each such sighting renews the
+7 days, so an owner behind the same VPN every day is not paged every week. A
+new country, a critical one, or 7 days without a sighting makes it news.
+Nothing is quiet after a critical hijack: that password was in use and may
+not have been changed. Only a critical hijack's `mail_recovered` says the
+password still needs changing.
 
 ## Telling a newsletter from spam
 
