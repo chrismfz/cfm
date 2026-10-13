@@ -24,11 +24,11 @@
 
 ## 2. Current picture (update on every read)
 
-*As of 2026-10-06 (read 1).*
+*As of 2026-10-13 (read 2).*
 
-- **Fleet version:** the 7 web nodes run `2026.10.04`; the 4 nodes without an
-  edge (3deers, mymail, saf, watchdog) run `2026.09.26` and serve no
-  challenge.
+- **Fleet version:** the 7 web nodes run `2026.10.11`. The 4 nodes without
+  an edge serve no challenge: mymail, saf and watchdog run `2026.10.08`, and
+  3deers runs `2026.09.26`.
 - **Live since release 2026.09.29** (deployed 2026-09-29/30):
 
   | PR | What |
@@ -48,22 +48,35 @@
   second open tab reaches its own page), #1537 (the challenge-exclude file's
   ua/asn rules apply at serve time) and #1539 (Twitterbot, Google-Read-Aloud
   and Meta's facebookcatalog exempted).
+
+  Releases 2026.10.08 to 2026.10.11, deployed by 2026-10-11, added, in this
+  area:
+  - #1546: the challenge page sends exempt clients to `next`;
+  - #1547: a `cfm_rt` is consumed only by its owner;
+  - #1574: the fppolicy armed reserve;
+  - #1582 and #1584: web bans at the edge;
+  - #1587: a verified good bot is never IP-banned.
 - **What bites today:** operator-armed fingerprint / country-ASN policies
-  from cfm-web (a US country policy is armed), the WAF challenge tier at
+  from cfm-web (no `v2=geo` line in read 2's week: the US country policy
+  looks disarmed), the WAF challenge tier at
   `challenge_v2`, manual vhost v2 tiers, the automatic vhost challenges
   (auto-v2) and the rescue.
 - **Under measurement:** the auto-v2 false-reject rate on humans, the
   rescue (`v2_rescued=input`), the trajectory readings (humans vs farms).
 - **Watch items** (findings, not decisions; details in the newest entry):
   1. Farm solves with no payload (`hs=-`) pass an armed vhost, by design
-     (D5b). This happened 227 times on orion in read 1.
-  2. Google-Read-Aloud was still served the challenge on rigel after the
-     #1539 rule loaded. **Root cause found (2026-10-06):** fetchers fetch the
-     challenge page's own URL (`/__cfm_challenge?next=…`, the visitor's
-     address bar). That location bypasses the decision, so no exemption ran
-     there. Fixed in #1546. Read 2 checks the
-     `exempt_redirect` lines and the drop in Meta and Read-Aloud fetches of
-     `/__cfm_challenge`.
+     (D5b). This happened 378 times in read 2 (333 on orion), up from 227
+     in read 1.
+  2. *(Closed in read 2.)* Google-Read-Aloud and Meta were served the
+     challenge through the challenge page's own URL. #1546 fixed this.
+     Read 2: 0 Read-Aloud or Meta rejects, and Meta's solve attempts on
+     titan down ~90 %.
+  3. The challenge page sends Meta to `next`, and the edge challenges it
+     again: ~14 900 `next_redirect_loop` lines, mostly titan
+     www.stereotiki.gr and mars shopzy.gr. The edge's challenge source is
+     not found yet; the leading candidate is the Step-0c fingerprint floor.
+     No harm, since the breaker serves the page, but the mirror is
+     incomplete.
 - **Open decisions** (master plan §5 / E4):
   1. Tighten the rescue or leave it, including a score ceiling (it clears
      up to 150; the measured human class scored exactly 100).
@@ -72,9 +85,8 @@
   3. `cfm_pcw` exit review, due 2026-10-20.
   4. Config decisions after E4: `vhost_config` in auto-v2; the shipped
      `solver_farm` defaults; the orphan `HUMANITY_*` keys.
-- **Next reads:** Tuesdays 2026-10-13 and 10-20, 12:00 Athens (scheduled
-  check-ins). The 10-20 read also brings the proposals for the open
-  decisions.
+- **Next read:** Tuesday 2026-10-20, 12:00 Athens (scheduled check-in). It
+  is read 3, and it brings the proposals for the open decisions.
 - **Kill switches, if a read shows harm:** `CHALLENGE_V2_INPUT_RESCUE = 0`
   (rescue off) · `CHALLENGE_V2_AUTO_VHOST = off` (auto-v2 off) · per vhost
   `cfm webtop challenge tier <vhost> v1` · `CHALLENGE_V2_HW_TELLS = 0` ·
@@ -85,13 +97,13 @@
 
 | Node | Edge | Version | `ABUSE_SHADOW` | History kept | ChallengeV2 knobs |
 |---|---|---|---|---|---|
-| earth | openresty | 2026.10.04 | 1 | 30 d / 1M rows | defaults |
-| mars | openresty | 2026.10.04 | 1 | 30 d / 1M rows | defaults |
-| orion | angie | 2026.10.04 | 1 | 30 d / 1M rows | defaults |
-| rigel | openresty | 2026.10.04 | 1 | 30 d / 1M rows | defaults |
-| server.speedhost.gr | openresty | 2026.10.04 | 1 (since 2026-09-29) | **7 d** | defaults |
-| titan | openresty | 2026.10.04 | 1 | 30 d / 1M rows | defaults |
-| virgo | angie | 2026.10.04 | 1 | **7 d** | defaults |
+| earth | openresty | 2026.10.11 | 1 | 30 d / 1M rows | defaults |
+| mars | openresty | 2026.10.11 | 1 | 30 d / 1M rows | defaults |
+| orion | angie | 2026.10.11 | 1 | 30 d / 1M rows | defaults |
+| rigel | openresty | 2026.10.11 | 1 | 30 d / 1M rows | defaults |
+| server.speedhost.gr | openresty | 2026.10.11 | 1 (since 2026-09-29) | **7 d** | defaults |
+| titan | openresty | 2026.10.11 | 1 | 30 d / 1M rows | defaults |
+| virgo | angie | 2026.10.11 | 1 | **7 d** | defaults |
 
 `/var/log/cfm/*.log` (challenges, abuse_shadow) keeps 14 generations, daily
 or at 200 MB, so a busy node may hold less than 14 days. **A read therefore
@@ -139,11 +151,199 @@ week missed is a week lost on virgo and speedhost.
   on most nodes, but only from ~10-01 on mars and orion. With a small
   `limit` it stops early, so `matched` is not a count; count from the lines.
 - Log lines carry node-local time (Athens, UTC+3). History `ts_utc` is UTC.
+- **Read 2 onwards: parse the nodes' own logs over SSH (read-only)** when
+  the operator's SSH access is available. Use `cfm.challenges.log*`,
+  `cfm.abuse_shadow.log*`, `challenge.access.log*` and the edge's
+  `access.cfm.log*`, with a python script fed on stdin. Nothing is written
+  on the node. This covers the full week on every node, with no relay cap.
+  - Pool trajectory percentiles from per-node 5 % quantiles.
+  - `would_v2` lives in the abuse_shadow log (`signal=humanity
+    verdict=would_v2`), not in the challenges log.
+  - `challenge.access.log` records only `/__cfm_verify` POSTs.
+  - `access.cfm.log` records challenged and blocked requests, not passes.
+  - `post_resume_applied` is logged at INFO, below the edge's error_log
+    level, so a replay is not countable.
 - Human label = GR/CY consumer ISP ASN **and** a GR/CY address, no bot UA.
+  A Greek public-sector or school network (AS8248, PTR `…sch.gr`) also
+  counts.
   Starlink (14593) and Vodafone IPs also carry farm exits; check the fp and
   `hc` before calling a reject human.
 
 ## 6. Entries
+
+### 2026-10-13 — read 2 (window: 7 days to 2026-10-13 12:00 Athens)
+
+The second week with auto-v2 and the rescue live, and the first with #1546
+and #1547. This read parsed every node's own logs over SSH (read-only), so
+every count covers the full week: no relay cap, no sampling (method note
+in §5).
+
+- **Fleet:**
+  - The 7 web nodes run `2026.10.11`. The edgeless nodes run `2026.10.08`
+    (mymail, saf, watchdog) and `2026.09.26` (3deers).
+  - Live since read 1, in this area:
+    - #1546: the challenge page sends exempt clients to `next`.
+    - #1547: a `cfm_rt` is consumed only by its owner.
+    - #1574: the fppolicy armed reserve under a fingerprint flood.
+    - #1582 and #1584: web bans enforced at the edge.
+    - #1587: a verified good bot is never IP-banned.
+    - #1550: `also_rule_ids` on WAF hits.
+
+    Both #1546 and #1547 were deployed on 2026-10-06, per the operator.
+  - No ChallengeV2 or `ABUSE_SHADOW` knob changed on any node. No node's
+    `detectors.conf` was written after 2026-10-01.
+  - Operator policies: **no `v2=geo` line anywhere this week**. Read 1 had
+    43, and orion had ~500 a day on 09-29/30. The US country policy looks
+    disarmed; cfm-web holds the record. No row came from a fingerprint
+    policy.
+- **Health:**
+  - The trajectory keys are present. `ut` was 0 on all 3 419 labelled
+    lines with pointer input.
+  - `hs=-` (no payload) on 415 solves, 409 of them on convicted farm fps
+    (orion 358, titan 41). No page break.
+  - 378 of them were **passes under an arm**: 333 on orion, 36 on titan,
+    9 on earth and mars together. 375 of the 378 were farm fps. Read 1 had
+    227 on orion.
+  - On orion that is ~2.2 % against its 14 912 farm rejects, up from
+    ~1.2 % on read 1's busiest day. Watch item 1, still small.
+- **Arms:** `challenge_v2_reject` lines per node, all `scope=web`:
+
+  | Node | Rejects | Main hosts |
+  |---|---|---|
+  | orion | 15 488 | www.mathematica.gr 8 832, www.vitolighting.com 5 446 |
+  | titan | 15 397 | www.e-vafeiadis.gr 6 262, gastronom.hk 4 882, techking.gr 2 754 |
+  | mars | 6 631 | happy-nest.gr 4 527, sfragida.com.gr 1 079 |
+  | earth | 3 013 | motopegasus.com 2 869 |
+  | virgo | 63 | mygreecetours.org 58 |
+  | server.speedhost.gr | 33 | pittakistore.gr 16 |
+  | rigel | 19 | santorinitours.org 14 |
+
+  - Total 40 644, the whole week on every node. Read 1 had ~25 000, with
+    titan and orion capped at 3 days.
+  - Under `v2=vhost`: 40 127.
+    - `auto:suspicious_vhost` 38 384, `auto:uniqpaths_short` 1 743.
+    - No `manual` or `pin` reject.
+  - Under a mark: 517. These are `src=rule` 475 (mars, a `challenge_v2`
+    traffic rule) and `src=waf` 42.
+  - By fingerprint:
+    - `c28caa00` 24 412 (titan, mars, earth, speedhost, rigel);
+    - `95070673` 14 973 (orion, virgo);
+    - `19877aeb` 16;
+    - no fp 1 222 (mars 624 and orion 563, vhosts behind a trusted proxy);
+    - other 21.
+  - **Human-labelled rejects: 1, and the recourse worked again.**
+    - orion, www.mathematica.gr, 10-13 07:16Z: a Greek school network
+      (AS8248 CTI Diophantus, PTR `…sch.gr`), Windows Chrome/109.
+    - hs 100 (`sw_renderer,outer_zero`), ptr 1 / mv 0, under
+      `auto:uniqpaths_short`.
+    - It passed 10 s later with hs 90, once `outer_zero` had gone. That is
+      the same profile as read 1's only human.
+    - The other GR/CY-addressed rejects were webdriver datacenter exits
+      (Datacamp, PacketHub; `tells=webdriver`).
+  - Google-Read-Aloud and Meta: **0 reject rows** this week. Read 1 had 3
+    for Read-Aloud on rigel.
+- **Rescue:**
+  - No `v2_rescued=input` anywhere, on solve, reject or would_v2 lines.
+  - **RED FLAG check: clear.**
+  - Farm-fp lines with real input (ptr ≥ 5, mv ≥ 100): 507 of 2 031. Every
+    one passed on score; none was rejected, so the rescue never came into
+    play. Humans: 711 of 1 388.
+- **Would-v2 sizing (unarmed, `abuse_shadow` humanity):**
+  - 24 007 lines, 23 080 of them on farm fps.
+  - No human-labelled line and no rescued line.
+  - The residue is the same two farm sources as read 1:
+    - `vhost:vhost_config`: orion 16 463 (mail.mathematica.gr, `95070673`),
+      earth 187, titan 37.
+    - The v1 traffic rule `r_57e05719c3d78f21` on mars: 3 979, `c28caa00`.
+  - Orion also has `vhost:manual` (v1) 378 and its v1 rule
+    `r_406f009fd2f281d5` 120.
+- **Trajectory:** humans vs farm fps, lines with pointer input only.
+  Pooled from per-node 5 % quantiles, so values are interpolated.
+
+  | Reading | Humans p10 / med / p90 (n 1 388) | Farm fps p10 / med / p90 (n 2 031) |
+  |---|---|---|
+  | ptr | 1 / 8 / 41 | 1 / 1 / 17 |
+  | mv (px) | 2 / 162 / 1 290 | 0 / 0 / 603 |
+  | co/ptr | 1.0 / 2.0 / 6.5 | 1.6 / 2.0 / 4.6 |
+  | st | 0.30 / 0.95 / 1.0 | 0.50 / 0.97 / 1.0 |
+  | dj | 0.28 / 0.87 / 2.39 | 0.28 / 0.63 / 1.73 |
+  | mj (px) | 1 / 38 / 264 | 0 / 0 / 172 |
+  | pd (ms) | 51 / 493 / 2 580 | 50 / 351 / 1 460 |
+
+  - The farms' typical input is still one synthetic event (ptr 1, mv 0,
+    co 2).
+  - Where both sides really move (ptr ≥ 8, mv ≥ 200), `st ≥ 0.99` covers
+    16 % of human lines (90 of 555) and 23 % of farm lines (86 of 374).
+    Read 1 had 20 % and 34 %.
+  - `dj` and `pd` run lower for farms at the median and the p90, as in
+    read 1, but the ranges overlap almost entirely.
+- **#1546 / #1547 check (deployed 2026-10-06):**
+  - **Meta and Read-Aloud.** On titan, Meta's `POST /__cfm_verify` (its
+    failed solve attempts in `challenge.access.log`) per day:
+
+    | Day | Attempts |
+    |---|---|
+    | 10-05 | 4 556 |
+    | 10-06 (the deploy day) | 1 928 |
+    | 10-07 to 10-12 | 435, 327, 257, 312, 108, 462 |
+
+    - That is a drop of ~90 %.
+    - Google IPs: 3–7 a day before, then 0 on five of the six days.
+    - No Read-Aloud or Meta reject row anywhere.
+    - What remains is Meta under a challenge the page cannot lift (below).
+  - **`exempt_redirect` lines:** 15 856 in all.
+    - These are throttled to one per host per minute, so they are a lower
+      bound on redirects.
+    - By node: titan 10 962 (Meta exclude rule 10 615, goodbot 345), mars
+      2 461 (goodbot 1 436, exclude 1 025), orion 1 536 (access 689,
+      exclude 668, goodbot 179), earth 743, virgo 103, rigel 32,
+      speedhost 19.
+    - The bridge counter `challenge_page_exempt_redirects` was not read; it
+      resets on a reload.
+  - **`next_redirect_loop` was NOT rare: ~14 900 lines.**
+    - titan 13 418: 98 % Meta on www.stereotiki.gr, 8 072 on 10-07 alone,
+      falling to 3 on 10-13.
+    - mars 1 220: Meta on shopzy.gr, `goodbot:meta` and exclude.
+    - orion 137, earth 109, virgo 16, speedhost 7, rigel 0.
+    - The mechanism: the page judged Meta exempt and sent it to `next`, but
+      the edge challenged it again. On titan, Meta's 302s to the challenge
+      on 10-13 were stereotiki 1 191, program.bet-prognostika.com 870 and a
+      long tail.
+    - The breaker then served the page. Meta ends where it was before
+      #1546, one hop later, so this is a measured mismatch, not harm.
+    - The edge's source for that challenge is **not yet found**. It is not
+      the vhost challenge: stereotiki is in `CHALLENGE_VHOST_IGNORE`. It is
+      not a traffic rule, not a WAF hit and not a geo floor (no `v2=geo`).
+    - The leading candidate is the Step-0c fingerprint-policy floor, which
+      neither the decision exemptions nor `challengePageExempt` see. It is
+      unconfirmed: the edge logs carry no action reason. Watch item 3.
+  - **#1547 is not measurable from the logs.**
+    - `post_resume_applied` is logged at INFO, below the edge's error_log
+      level.
+    - `access.cfm.log` records challenged requests, not passes.
+    - On titan, 2–4 challenged POSTs a day stored a resume token. No
+      failure was reported.
+- **Since last read:**
+  - Rejects now have full-week coverage: 40 644. They are almost all
+    auto-v2 on farm-hit vhosts. They caught one human, a school PC, who
+    passed on the retry.
+  - The geo arm went quiet.
+  - The rescue still has not fired.
+  - #1546 cut Meta's challenge solves on titan by ~90 %, and Read-Aloud and
+    Meta rejects to 0. It left a page/edge mismatch for Meta.
+  - The trajectory readings still show no separating band. Both reads
+    agree there is none, so **no candidate rule**.
+- **Watch items:**
+  1. `hs=-` passes under an arm: 378, up from 227. This is D5b by design;
+     a rising share is the farm's way past the arm.
+  2. (Read 1's Google-Read-Aloud item) **Closed.** #1546 ended Read-Aloud
+     and Meta rejects. Its residual is item 3.
+  3. **New.** The challenge page sends Meta to `next`, and the edge
+     challenges it again (titan stereotiki / bet-prognostika, mars
+     shopzy). Find the edge's challenge source for those requests: a debug
+     header, or the `/nginx/decision` answer for one Meta IP. Then mirror
+     it in `challengePageExempt`, or leave it.
+- **Actions:** none. No decision, so nothing goes to the master plan.
 
 ### 2026-10-06 — read 1 (window: 7 days to 2026-10-06)
 
