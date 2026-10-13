@@ -262,6 +262,7 @@ type tracker struct {
 	authIPs    map[string]map[string]authSeen // mailbox → source IP → last successful login
 	owners     map[string]owner               // exim message id / postfix QID → the sender key it was submitted by
 	outcomes   map[string][]outcome           // sender key → recent remote delivery outcomes
+	rules      map[string]rulesSeen           // mailbox → its forwarder / filter answer (abuse_hijack.go)
 
 	last      []AbuseView // the latest check's findings, for whats_wrong / mail_traffic
 	lastCheck time.Time
@@ -768,7 +769,7 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		}
 	}
 	// keys of this check's findings: a hijack is confirmed by a spike or a
-	// bounce finding of the same mailbox, new or still open
+	// bounce finding of the same mailbox this check
 	found := map[string]bool{}
 	for _, a := range out {
 		c := t.context("auth:"+a.Addr, a.Addr)
@@ -792,9 +793,15 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 			views = append(views, v)
 		}
 	}
-	rules := &rulesCheck{}
+	var ask []string // only a candidate nothing else confirmed costs file reads
 	for _, h := range cands {
-		f := h.finding(found, open, rules, now)
+		if len(h.used(found)) == 0 {
+			ask = append(ask, h.user)
+		}
+	}
+	rules := t.rulesChanged(ask, now)
+	for _, h := range cands {
+		f := h.finding(found, rules)
 		fs = append(fs, f)
 		c := t.context("auth:"+h.user, h.user)
 		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: f.Message, Subject: h.user, IPs: h.sources, Countries: h.countries, Context: &c})
@@ -825,6 +832,14 @@ func CurrentAbuse() ([]AbuseView, time.Time) {
 	}
 	c.pub.mu.Lock()
 	c.pub.load()
+	for i, v := range views {
+		// an open alert is never downgraded (publishing only follows a rise):
+		// a hijack paged critical and re-judged a warning this hour shows as
+		// what the team was told, with that message
+		if o, ok := c.pub.open[v.Key]; ok && sevRank(o.Severity) > sevRank(v.Severity) {
+			views[i].Severity, views[i].Message = o.Severity, o.Message
+		}
+	}
 	for key, o := range c.pub.open {
 		if !current[key] {
 			views = append(views, AbuseView{Type: o.Type, Severity: o.Severity, Key: key, Message: o.Message,
@@ -972,6 +987,9 @@ type publisher struct {
 	loaded bool
 	open   map[string]openFinding
 	past   map[string]pastHijack // resolved hijacks, kept in pastPath()
+	// pastDirty: past changed since it was last written (it rarely does; the
+	// open findings are written every check, as before)
+	pastDirty bool
 }
 
 // pastPath is where resolved hijacks are kept, next to the open findings.
@@ -1001,6 +1019,7 @@ func (p *publisher) quiet(f abuseFinding, now time.Time) bool {
 	}
 	h.At = now // still the same pattern: remembered from its latest sighting
 	p.past[f.Key] = h
+	p.pastDirty = true
 	return true
 }
 
@@ -1030,28 +1049,33 @@ func (p *publisher) save(now time.Time) {
 	for k, h := range p.past {
 		if now.Sub(h.At) >= hijackQuiet {
 			delete(p.past, k)
+			p.pastDirty = true
 		}
 	}
 	if p.path == "" {
 		return
 	}
 	writeState(p.path, p.open)
-	writeState(p.pastPath(), p.past)
+	if p.pastDirty && writeState(p.pastPath(), p.past) {
+		p.pastDirty = false
+	}
 }
 
-func writeState(path string, v any) {
+func writeState(path string, v any) bool {
 	raw, err := json.Marshal(v)
 	if err != nil {
-		return
+		return false
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		logging.Logf("[mailtraffic] abuse state not saved: %v", err)
-		return
+		return false
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		logging.Logf("[mailtraffic] abuse state not saved: %v", err)
+		return false
 	}
+	return true
 }
 
 func sevRank(s string) int {
@@ -1162,6 +1186,7 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 		if publish(TypeRecovered, "info", key, msg, now) {
 			if o.Type == TypeHijack {
 				p.past[key] = pastHijack{Countries: o.Countries, Severity: o.Severity, At: now}
+				p.pastDirty = true
 			}
 			delete(p.open, key)
 		}

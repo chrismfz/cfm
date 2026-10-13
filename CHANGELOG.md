@@ -23,9 +23,9 @@ back-filled here — see the git/PR history for that period.
   mailboxes, each reminded every 6 h, and every one was a mailbox only READ
   from abroad: owners travelling, behind a VPN or a company proxy. A hijack is
   now critical only when the mailbox is also used within the hour: mail sent
-  (SMTP AUTH) from a country other than its home, an outbound or bounce spike
-  of its own, or its forwarder or mail filter changed in the last 24 h
-  (cPanel). The message says which. Without that it is a warning that asks to
+  (SMTP AUTH) from a country it was not read from, or from two countries, an
+  outbound or bounce spike of its own, or its forwarder or mail filter
+  changed in the last 24 h (cPanel). The message says which. Without that it is a warning that asks to
   check with the owner, and it is raised to critical the moment one appears.
   A warning hijack that comes back from no new country is not published
   again while it keeps coming back at least weekly

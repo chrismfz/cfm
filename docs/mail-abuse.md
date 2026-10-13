@@ -108,28 +108,40 @@ and were reminded every 6 h until acknowledged, so the team stopped reading
 them. A thief who has the password uses it, so a hijack is **critical** only
 when, as well, within the hour:
 
-- the mailbox **sent mail (SMTP AUTH) from a country other than its home**: the
-  country most of its sources are in. With no single such country (a tie:
-  three countries, one address each, is the common shape) a country counts
-  only for an address that sent WITHOUT reading: a spammer submits, the
-  owner's mail app reads and sends from one address. Each source keeps the
-  time of its last login per protocol, so an address that sent two hours ago
-  and only reads now has not sent within the hour;
-- the same mailbox has a `mail_outbound_spike` or `mail_bounce_spike` finding,
-  new this check or still open;
+- the mailbox **sent mail (SMTP AUTH) from a country it was not read from**
+  (IMAP/POP3) within the hour: the owner's mail app sends from where it
+  reads, a thief submitting spam sends from where nobody reads;
+- or it **sent mail from two countries or more** within the hour: the owner
+  and a thief with a full mail client both sending.
+
+  No "home country" is guessed: within an hour the majority is whoever has
+  more addresses, and a thief behind a proxy pool has more than the owner.
+  Sources with no country (the fetchers and gateways above) are not judged.
+  Each source keeps the time of its last login per protocol, so an address
+  that sent two hours ago and only reads now has not sent within the hour.
+  One gap is left: a thief who reads AND sends from one country while the
+  owner only reads elsewhere looks like the owner sending from where they
+  read. That warning names the country (`sent mail only from VN, where it is
+  also read`), so check it is the owner's;
+- the same mailbox has a `mail_outbound_spike` or `mail_bounce_spike` FINDING
+  this check (one only held open on its volume is no news about this hour);
 - its **forwarder or mail filter changed in the last 24 h** (cPanel: a line for
   the address in `/etc/valiases/<domain>` with that file changed, or
   `~<owner>/etc/<domain>/<local>/filter`, what webmail's Email Filters writes;
-  the owner comes from `/etc/userdomains`). A thief keeps a copy of the mail
+  the owner comes from `/etc/userdatadomains` / `/etc/userdomains` through
+  `internal/panelmap`). A thief keeps a copy of the mail
   coming. `valiases` is the whole domain's file: a change to ANY forwarder of
   the domain counts for an address that has one, so check the forwarder the
-  message names. Not read on DirectAdmin or Postfix hosts, and only asked when
-  nothing above already confirmed the hijack.
+  message names. Not read on DirectAdmin or Postfix hosts, only asked when
+  nothing above already confirmed the hijack, and the answer is reused for
+  10 minutes.
 
 The message names which (`… and sent mail from VN — likely a stolen
 password`). Otherwise the finding is a **warning** that says `reading only`
-(or `no mail sent from abroad` when the mailbox sent only from home) and asks
-to check with the owner. Reading alone can still be a thief (business email
+(or `sent mail only from GR, where it is also read`) and asks to check with
+the owner. An alert published critical stays critical in `whats_wrong` /
+`mail_traffic` while open, even if a later check judges the hour a warning
+(the SMTP login left the window): publishing never downgrades. Reading alone can still be a thief (business email
 compromise: the mail is read now and the fraud sent from elsewhere later), so
 it is still published, shown in `whats_wrong` and `mail_traffic`, and rises to
 critical, published again, the moment one of the above appears.

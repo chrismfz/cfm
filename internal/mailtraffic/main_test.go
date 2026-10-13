@@ -3,6 +3,8 @@ package mailtraffic
 import (
 	"os"
 	"testing"
+
+	"cfm/internal/panelmap"
 )
 
 // TestMain keeps the real host out of the unit tests: the node's own
@@ -14,6 +16,8 @@ import (
 func TestMain(m *testing.M) {
 	isSelfIP = func(string) bool { return false }
 	cpanelEtc = "/nonexistent/cfm-test-etc"
+	panelmap.UserDataDomainsPath = "/nonexistent/cfm-test-etc/userdatadomains"
+	panelmap.UserDomainsPath = "/nonexistent/cfm-test-etc/userdomains"
 	mailboxHome = func(string) string { return "" }
 	os.Exit(m.Run())
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"cfm/internal/panelmap"
 )
 
 func stubGeo(t *testing.T, fn func(ip string) (string, uint)) {
@@ -86,26 +88,26 @@ func TestHijackSendingFromAbroadIsCritical(t *testing.T) {
 	}
 }
 
-// The owner sending from home while the mailbox is read from abroad is not
-// mail sent from abroad.
-func TestHijackSendingOnlyFromHomeIsAWarning(t *testing.T) {
+// The owner sending from where the mailbox is also read is not a thief
+// sending: a warning that says where the mail went out from.
+func TestHijackSendingOnlyWhereItIsReadIsAWarning(t *testing.T) {
 	stubGeo(t, threeCountries)
 	T := time.Now()
 	tr := newTracker()
-	smtpLogin(tr, "info@shop.gr", "1.1.1.1", T)
-	smtpLogin(tr, "info@shop.gr", "1.1.1.2", T)
+	dovecotLogin(tr, "info@shop.gr", "imap", "1.1.1.1", T)
+	smtpLogin(tr, "info@shop.gr", "1.1.1.2", T) // the office desktop, the phone reads: both GR
 	dovecotLogin(tr, "info@shop.gr", "imap", "2.2.2.2", T)
 	dovecotLogin(tr, "info@shop.gr", "imap", "3.3.3.3", T)
 	fs, _, _ := tr.evaluate(openTemp(t), T)
 	f := onlyHijack(t, fs)
-	if f.Severity != "warning" || !strings.Contains(f.Message, "no mail sent from abroad") || !strings.Contains(f.Message, "(imap/smtp)") {
+	if f.Severity != "warning" || !strings.Contains(f.Message, "sent mail only from GR, where it is also read") || !strings.Contains(f.Message, "(imap/smtp)") {
 		t.Fatalf("want a warning: %+v", f)
 	}
 }
 
-// With no single home country (one source each), every country it sent
-// from counts as abroad: a tie must not hide the thief's country.
-func TestHijackTieHasNoHomeCountry(t *testing.T) {
+// One address per country (the common shape): mail sent from a country the
+// mailbox is not read from is the thief's, whatever the counts.
+func TestHijackSentFromAnUnreadCountry(t *testing.T) {
 	stubGeo(t, threeCountries)
 	T := time.Now()
 	tr := newTracker()
@@ -118,20 +120,48 @@ func TestHijackTieHasNoHomeCountry(t *testing.T) {
 	}
 }
 
-// A tie where the owner's mail app reads and sends from one address (the
-// common shape: three countries, one address each) is not mail sent from
-// abroad.
-func TestHijackTieOwnerAppReadingAndSending(t *testing.T) {
-	stubGeo(t, threeCountries)
+// A thief behind a proxy pool has more addresses than the owner: no
+// majority vote decides where "home" is (review of PR #1597).
+func TestHijackThiefWithMoreAddressesThanTheOwner(t *testing.T) {
+	stubGeo(t, func(ip string) (string, uint) {
+		switch {
+		case strings.HasPrefix(ip, "41."):
+			return "NG", 1
+		case ip == "9.9.9.9":
+			return "US", 2
+		}
+		return "GR", 3
+	})
 	T := time.Now()
 	tr := newTracker()
-	dovecotLogin(tr, "info@shop.gr", "imap", "1.1.1.1", T)
-	smtpLogin(tr, "info@shop.gr", "1.1.1.1", T)
-	dovecotLogin(tr, "info@shop.gr", "imap", "2.2.2.2", T)
+	for _, ip := range []string{"41.0.0.1", "41.0.0.2", "41.0.0.3", "41.0.0.4"} {
+		smtpLogin(tr, "info@shop.gr", ip, T)
+	}
+	dovecotLogin(tr, "info@shop.gr", "imap", "62.1.1.1", T)
+	dovecotLogin(tr, "info@shop.gr", "imap", "62.1.1.2", T)
+	dovecotLogin(tr, "info@shop.gr", "imap", "9.9.9.9", T)
+	fs, _, _ := tr.evaluate(openTemp(t), T)
+	if f := onlyHijack(t, fs); f.Severity != "critical" || !strings.Contains(f.Message, "sent mail from NG") {
+		t.Fatalf("want critical: %+v", f)
+	}
+}
+
+// A thief with a full mail client reads and sends from one address; the
+// owner sends too, from home: mail from two countries in the hour.
+func TestHijackSentFromTwoCountries(t *testing.T) {
+	stubGeo(t, func(ip string) (string, uint) {
+		return map[string]string{"1.1.1.1": "GR", "2.2.2.2": "VN", "3.3.3.3": "RS"}[ip], 0
+	})
+	T := time.Now()
+	tr := newTracker()
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2"} {
+		dovecotLogin(tr, "info@shop.gr", "imap", ip, T)
+		smtpLogin(tr, "info@shop.gr", ip, T)
+	}
 	dovecotLogin(tr, "info@shop.gr", "imap", "3.3.3.3", T)
 	fs, _, _ := tr.evaluate(openTemp(t), T)
-	if f := onlyHijack(t, fs); f.Severity != "warning" || !strings.Contains(f.Message, "no mail sent from abroad") {
-		t.Fatalf("want a warning: %+v", f)
+	if f := onlyHijack(t, fs); f.Severity != "critical" || !strings.Contains(f.Message, "sent mail from GR, VN") {
+		t.Fatalf("want critical: %+v", f)
 	}
 }
 
@@ -152,43 +182,40 @@ func TestHijackOldSMTPDoesNotCount(t *testing.T) {
 	}
 }
 
-// A spike or bounce finding of the same mailbox, new or still open, confirms
-// the hijack.
+// A spike or bounce FINDING of the same mailbox this check confirms the
+// hijack; one only held open on volume does not (review of PR #1597).
 func TestHijackConfirmedByItsOwnSpikeOrBounces(t *testing.T) {
 	h := hijackCand{user: "a@x.gr", sources: 3, countries: []string{"GR", "MK", "RS"}, vias: []string{"imap"}}
-	T := time.Now()
-	if f := h.finding(nil, nil, nil, T); f.Severity != "warning" {
+	if f := h.finding(nil, nil); f.Severity != "warning" {
 		t.Fatalf("nothing else: a warning: %+v", f)
 	}
-	for _, tc := range []struct {
-		found, open map[string]bool
-		want        string
-	}{
-		{map[string]bool{"mail:out:a@x.gr": true}, nil, "is sending far above its usual"},
-		{nil, map[string]bool{"mail:out:a@x.gr": true}, "is sending far above its usual"},
-		{map[string]bool{"mail:bounce:auth:a@x.gr": true}, nil, "its mail bounces in bulk"},
+	for k, want := range map[string]string{
+		"mail:out:a@x.gr":         "is sending far above its usual",
+		"mail:bounce:auth:a@x.gr": "its mail bounces in bulk",
 	} {
-		if f := h.finding(tc.found, tc.open, nil, T); f.Severity != "critical" || !strings.Contains(f.Message, tc.want) {
-			t.Fatalf("want critical %q: %+v", tc.want, f)
+		if f := h.finding(map[string]bool{k: true}, nil); f.Severity != "critical" || !strings.Contains(f.Message, want) {
+			t.Fatalf("want critical %q: %+v", want, f)
 		}
 	}
-	if f := h.finding(map[string]bool{"mail:out:b@x.gr": true}, nil, nil, T); f.Severity != "warning" {
+	if f := h.finding(map[string]bool{"mail:out:b@x.gr": true}, nil); f.Severity != "warning" {
 		t.Fatalf("another mailbox's spike confirms nothing: %+v", f)
 	}
 }
 
 // A forwarder or a mail filter set on the mailbox within a day confirms it;
-// one changed long ago, or another address's forwarder, does not.
+// one changed long ago, or another address's forwarder, does not. The answer
+// is reused for hijackRulesRecheck.
 func TestHijackConfirmedByChangedForwarderOrFilter(t *testing.T) {
 	etc, home := t.TempDir(), t.TempDir()
-	origEtc, origHome := cpanelEtc, mailboxHome
+	origEtc, origHome, origUD := cpanelEtc, mailboxHome, panelmap.UserDomainsPath
 	cpanelEtc, mailboxHome = etc, func(u string) string {
 		if u == "shopuser" {
 			return home
 		}
 		return ""
 	}
-	t.Cleanup(func() { cpanelEtc, mailboxHome = origEtc, origHome })
+	panelmap.UserDomainsPath = filepath.Join(etc, "userdomains")
+	t.Cleanup(func() { cpanelEtc, mailboxHome, panelmap.UserDomainsPath = origEtc, origHome, origUD })
 	write := func(p, body string, age time.Duration) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
@@ -202,34 +229,46 @@ func TestHijackConfirmedByChangedForwarderOrFilter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write(filepath.Join(etc, "userdomains"), "other.gr: someone\nshop.gr: shopuser\n", 30*24*time.Hour)
+	write(panelmap.UserDomainsPath, "other.gr: someone\nshop.gr: shopuser\n", 30*24*time.Hour)
 	valiases := filepath.Join(etc, "valiases", "shop.gr")
 	filter := filepath.Join(home, "etc", "shop.gr", "info", "filter")
 	T := time.Now()
+	rules := func(addr string) string {
+		return rulesFor(addr, panelmap.HostOwners([]string{"shop.gr"}), T)
+	}
 
 	write(valiases, "sales@shop.gr: boss@gmail.com\n", time.Hour)
-	if r := (&rulesCheck{}).changed("info@shop.gr", T); r != "" {
+	if r := rules("info@shop.gr"); r != "" {
 		t.Fatalf("another address's forwarder: %q", r)
 	}
 	write(valiases, "Info@shop.gr: thief@gmail.com\n", time.Hour)
-	if r := (&rulesCheck{}).changed("info@shop.gr", T); r != "its forwarder" {
+	if r := rules("info@shop.gr"); r != "its forwarder" {
 		t.Fatalf("want its forwarder: %q", r)
 	}
 	write(valiases, "info@shop.gr: owner@gmail.com\n", 3*24*time.Hour)
 	write(filter, "# Exim filter\n", 2*time.Hour)
-	if r := (&rulesCheck{}).changed("info@shop.gr", T); r != "its mail filter" {
+	if r := rules("info@shop.gr"); r != "its mail filter" {
 		t.Fatalf("want its mail filter: %q", r)
 	}
+
+	tr := newTracker()
+	got := tr.rulesChanged([]string{"info@shop.gr"}, T)
 	h := hijackCand{user: "info@shop.gr", sources: 3, countries: []string{"BR", "GR", "VN"}, vias: []string{"imap"}}
-	if f := h.finding(nil, nil, &rulesCheck{}, T); f.Severity != "critical" || !strings.Contains(f.Message, "its mail filter changed in the last 24 h") {
+	if f := h.finding(nil, got); f.Severity != "critical" || !strings.Contains(f.Message, "its mail filter changed in the last 24 h") {
 		t.Fatalf("want critical: %+v", f)
 	}
 	write(filter, "# Exim filter\n", 3*24*time.Hour)
-	if r := (&rulesCheck{}).changed("info@shop.gr", T); r != "" {
+	if r := rules("info@shop.gr"); r != "" {
 		t.Fatalf("old changes confirm nothing: %q", r)
 	}
+	if got := tr.rulesChanged([]string{"info@shop.gr"}, T.Add(5*time.Minute)); got["info@shop.gr"] != "its mail filter" {
+		t.Fatalf("the answer is reused within hijackRulesRecheck: %+v", got)
+	}
+	if got := tr.rulesChanged([]string{"info@shop.gr"}, T.Add(hijackRulesRecheck)); got["info@shop.gr"] != "" {
+		t.Fatalf("then asked again: %+v", got)
+	}
 	for _, bad := range []string{"../../x@shop.gr", "info@../etc", "info@", "@shop.gr", "a/b@shop.gr"} {
-		if r := (&rulesCheck{}).changed(bad, T); r != "" {
+		if r := rules(bad); r != "" {
 			t.Fatalf("%q: %q", bad, r)
 		}
 	}
@@ -337,5 +376,29 @@ func TestHijackQuietRenewsAndRemembersEveryCountry(t *testing.T) {
 	}
 	if len(*got) != 2 {
 		t.Fatalf("the same pattern every day stays quiet: %+v", *got)
+	}
+}
+
+// An alert paged critical and re-judged a warning this hour (the SMTP login
+// left the window) is shown as what the team was told: publishing never
+// downgrades it (review of PR #1597).
+func TestCurrentAbuseKeepsThePublishedSeverity(t *testing.T) {
+	c := newCollector(openTemp(t), "")
+	c.ab.last = []AbuseView{{Type: TypeHijack, Severity: "warning", Key: "mail:hijack:a@x.gr", Message: "now"}}
+	c.ab.lastCheck = time.Now()
+	c.pub.load()
+	c.pub.open["mail:hijack:a@x.gr"] = openFinding{Type: TypeHijack, Severity: "critical", Message: "paged"}
+	sharedMu.Lock()
+	prev := coll
+	coll = c
+	sharedMu.Unlock()
+	t.Cleanup(func() {
+		sharedMu.Lock()
+		coll = prev
+		sharedMu.Unlock()
+	})
+	views, _ := CurrentAbuse()
+	if len(views) != 1 || views[0].Severity != "critical" || views[0].Message != "paged" {
+		t.Fatalf("want the published critical: %+v", views)
 	}
 }

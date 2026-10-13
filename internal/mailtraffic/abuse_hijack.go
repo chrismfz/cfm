@@ -18,6 +18,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"cfm/internal/panelmap"
 )
 
 const (
@@ -31,8 +33,8 @@ const (
 )
 
 var (
-	// cpanelEtc holds cPanel's mail config (valiases, userdomains). A var so
-	// tests keep the host's files out.
+	// cpanelEtc holds cPanel's forwarders (valiases). A var so tests keep the
+	// host's files out (the domain owners come from panelmap).
 	cpanelEtc = "/etc"
 	// mailboxHome is a unix user's home directory ("" when unknown).
 	mailboxHome = func(name string) string {
@@ -50,12 +52,13 @@ type hijackCand struct {
 	sources   int
 	countries []string // sorted
 	vias      []string // the protocols seen within the window, sorted
-	// smtpAbroad: the countries it SENT mail from (SMTP AUTH) other than its
-	// home country — the country most of its sources are in. With no single
-	// such country (a tie: three countries, one address each, is the common
-	// shape), a country counts only for a source that sent without reading:
-	// a spammer submits, the owner's mail app does both from one address.
-	smtpAbroad []string
+	// sentFrom: the countries it SENT mail from (SMTP AUTH) within the window;
+	// sentUnread: those of them it was not READ from (IMAP/POP3) within it.
+	// The owner's mail app sends from where it reads; a thief submitting spam
+	// sends from where nobody reads. No "home country" is guessed: within an
+	// hour the majority is whoever has more addresses, and a thief behind a
+	// proxy pool has more than the owner.
+	sentFrom, sentUnread []string
 }
 
 // hijackCandidates lists the mailboxes logged in from hijackMinCountries
@@ -66,19 +69,23 @@ func (t *tracker) hijackCandidates(now time.Time) []hijackCand {
 	var out []hijackCand
 	for user, ips := range t.authIPs {
 		countries, sources, vias := map[string]bool{}, map[string]string{}, map[string]bool{}
-		smtpFrom := map[string]bool{} // country → some source there sent WITHOUT reading
+		sent, read := map[string]bool{}, map[string]bool{}
 		for ip, a := range ips {
 			src, cc := authSource(ip)
 			if src == "" {
 				continue
 			}
 			sources[src] = cc
-			w := a.within(cutoff)
-			for _, v := range w {
+			for _, v := range a.within(cutoff) {
 				vias[v] = true
-			}
-			if cc != "" && len(w) > 0 && w[len(w)-1] == "smtp" { // authVias order: smtp is last
-				smtpFrom[cc] = smtpFrom[cc] || len(w) == 1
+				if cc == "" {
+					continue // a fetcher or a corporate gateway: no place to judge
+				}
+				if v == "smtp" {
+					sent[cc] = true
+				} else {
+					read[cc] = true
+				}
 			}
 			if cc != "" {
 				countries[cc] = true
@@ -101,42 +108,45 @@ func (t *tracker) hijackCandidates(now time.Time) []hijackCand {
 		if len(countries) < hijackMinCountries && (len(sources) < hijackMinIPs || abroad < hijackMinAbroad) {
 			continue
 		}
-		home := ""
-		if top := topN(perCountry, 2); len(top) >= 1 && (len(top) == 1 || top[0].n > top[1].n) {
-			home = top[0].k
-		}
-		h := hijackCand{user: user, sources: len(sources), countries: sortedKeys(countries), vias: sortedKeys(vias)}
-		for cc, only := range smtpFrom {
-			if cc != home && (home != "" || only) {
-				h.smtpAbroad = append(h.smtpAbroad, cc)
+		h := hijackCand{user: user, sources: len(sources), countries: sortedKeys(countries), vias: sortedKeys(vias), sentFrom: sortedKeys(sent)}
+		for _, cc := range h.sentFrom {
+			if !read[cc] {
+				h.sentUnread = append(h.sentUnread, cc)
 			}
 		}
-		sort.Strings(h.smtpAbroad)
 		out = append(out, h)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].user < out[j].user })
 	return out
 }
 
-// finding judges a candidate: critical when the mailbox is being used (mail
-// sent from abroad, a spike or bounce finding of its own, new or still open,
-// a forwarder or filter changed), else a warning. rules may be nil (no
-// forwarder/filter check); it is only asked when nothing else confirmed it.
-func (h hijackCand) finding(found, open map[string]bool, rules *rulesCheck, now time.Time) abuseFinding {
+// used lists what this check saw done with the mailbox's password: mail sent
+// from a country it was not read from, or from two countries or more (owner
+// and thief both sending), or a spike / bounce FINDING of its own this check
+// (not one only held open on volume: that is no news about this hour).
+func (h hijackCand) used(found map[string]bool) []string {
 	var did []string
-	if len(h.smtpAbroad) > 0 {
-		did = append(did, "sent mail from "+strings.Join(h.smtpAbroad, ", "))
+	switch {
+	case len(h.sentUnread) > 0:
+		did = append(did, "sent mail from "+strings.Join(h.sentUnread, ", "))
+	case len(h.sentFrom) >= 2:
+		did = append(did, "sent mail from "+strings.Join(h.sentFrom, ", "))
 	}
-	if k := "mail:out:" + h.user; found[k] || open[k] {
+	if found["mail:out:"+h.user] {
 		did = append(did, "is sending far above its usual")
 	}
-	if k := "mail:bounce:auth:" + h.user; found[k] || open[k] {
+	if found["mail:bounce:auth:"+h.user] {
 		did = append(did, "its mail bounces in bulk")
 	}
-	if len(did) == 0 && rules != nil {
-		if r := rules.changed(h.user, now); r != "" {
-			did = append(did, r+" changed in the last 24 h")
-		}
+	return did
+}
+
+// finding judges a candidate: critical when the mailbox is being used (used,
+// or a forwarder / filter changed: rules, from rulesChanged), else a warning.
+func (h hijackCand) finding(found map[string]bool, rules map[string]string) abuseFinding {
+	did := h.used(found)
+	if r := rules[h.user]; len(did) == 0 && r != "" {
+		did = append(did, r+" changed in the last 24 h")
 	}
 	head := fmt.Sprintf("%s: logged in (%s) from %d IPs in %d countries (%s) within an hour",
 		h.user, strings.Join(h.vias, "/"), h.sources, len(h.countries), strings.Join(h.countries, ", "))
@@ -147,29 +157,67 @@ func (h hijackCand) finding(found, open map[string]bool, rules *rulesCheck, now 
 		return f
 	}
 	what := "reading only"
-	for _, v := range h.vias {
-		if v == "smtp" {
-			what = "no mail sent from abroad"
-		}
+	if len(h.sentFrom) > 0 {
+		what = "sent mail only from " + h.sentFrom[0] + ", where it is also read"
 	}
 	f.Severity = "warning"
 	f.Message = clip(head + " · " + what + " — ask the owner (travel, a VPN?); if not them, a stolen password")
 	return f
 }
 
-// rulesCheck answers whether a mailbox's forwarder or filter changed, for one check, reading cPanel's
-// userdomains (thousands of lines on a big host) at most once.
-type rulesCheck struct {
-	owners map[string]string // domain → cPanel user; nil until read
+// rulesSeen is one mailbox's forwarder / filter answer, reused for
+// hijackRulesRecheck: a candidate is judged every check (5 min), and the
+// answer costs file reads under the tracker lock.
+type rulesSeen struct {
+	at   time.Time
+	what string
 }
 
-// changed names what was changed on a mailbox within hijackRulesWindow: its
+const hijackRulesRecheck = 10 * time.Minute
+
+// rulesChanged answers rulesFor for each address, from the cache when fresh;
+// the owners of the domains still to look up are read once (panelmap).
+func (t *tracker) rulesChanged(addrs []string, now time.Time) map[string]string {
+	out := map[string]string{}
+	if t.rules == nil {
+		t.rules = map[string]rulesSeen{}
+	}
+	var ask, doms []string
+	for _, a := range addrs {
+		if r, ok := t.rules[a]; ok && now.Sub(r.at) >= 0 && now.Sub(r.at) < hijackRulesRecheck {
+			out[a] = r.what
+			continue
+		}
+		ask = append(ask, a)
+		if i := strings.LastIndex(a, "@"); i > 0 {
+			doms = append(doms, a[i+1:])
+		}
+	}
+	if len(ask) == 0 {
+		return out
+	}
+	owners := panelmap.HostOwners(doms)
+	for _, a := range ask {
+		w := rulesFor(a, owners, now)
+		t.rules[a] = rulesSeen{at: now, what: w}
+		out[a] = w
+	}
+	for a, r := range t.rules {
+		if now.Sub(r.at) >= hijackRulesRecheck || now.Sub(r.at) < 0 {
+			delete(t.rules, a)
+		}
+	}
+	return out
+}
+
+// rulesFor names what was changed on a mailbox within hijackRulesWindow: its
 // forwarder (cPanel /etc/valiases/<domain> changed, and holds a line for the
 // address) or its own mail filter (~/etc/<domain>/<local>/filter, what
 // webmail's "Email Filters" writes). "" when nothing changed, or not cPanel.
 // The forwarder file is the domain's: a change to ANY forwarder of the domain
 // counts for an address that has one (the line's own history is not kept).
-func (r *rulesCheck) changed(addr string, now time.Time) string {
+// owners maps a domain to its cPanel account.
+func rulesFor(addr string, owners map[string]string, now time.Time) string {
 	i := strings.LastIndex(addr, "@")
 	if i <= 0 || i == len(addr)-1 || strings.ContainsAny(addr, "/\\\x00") || strings.Contains(addr, "..") {
 		return ""
@@ -179,16 +227,7 @@ func (r *rulesCheck) changed(addr string, now time.Time) string {
 	if p := filepath.Join(cpanelEtc, "valiases", dom); recentlyChanged(p, now) && hasLinePrefix(p, addr+":") {
 		changed = append(changed, "its forwarder")
 	}
-	if r.owners == nil {
-		r.owners = map[string]string{}
-		scanLines(filepath.Join(cpanelEtc, "userdomains"), func(l string) bool {
-			if k, v, ok := strings.Cut(l, ":"); ok {
-				r.owners[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
-			}
-			return true
-		})
-	}
-	if owner := r.owners[dom]; owner != "" {
+	if owner := owners[dom]; owner != "" {
 		if home := mailboxHome(owner); home != "" && recentlyChanged(filepath.Join(home, "etc", dom, local, "filter"), now) {
 			changed = append(changed, "its mail filter")
 		}
