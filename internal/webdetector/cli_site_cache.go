@@ -105,7 +105,7 @@ turning static on, or re-enabling micro, starts the vhost from an empty cache):
   --micro off            disable the micro tier (its recipe/TTL are kept)
   --static-ttl D         stored with the static tier (a label: the edge honours
                          the origin's Cache-Control/Expires, 1h fallback)
-  --micro-ttl  D         micro TTL (s/m/h/d; snaps to 1/2/5/10/30/60s, >60s = 60s,
+  --micro-ttl  D         micro TTL (s/m/h/d; snaps to 1/2/5/10/30/60/90/120s, >120s = 120s,
                          empty = 1s; the recipe name does not set it)
   --strict-cookies       micro: bypass on ANY cookie not on the ignore list
                          (analytics / consent / cfm_*) — max safety, less cache

@@ -24,7 +24,10 @@ Caching is bypass-by-default. What is never cached, whatever a policy says
 
 - **Both tiers:**
   - a request with an `Authorization` header;
-  - a response with `Set-Cookie`, or with `Cache-Control: private` / `no-store`;
+  - a response with `Set-Cookie`, or with `Cache-Control: private` / `no-store`
+    (Tier B exception: a response whose cookies are ALL tracking cookies —
+    `_fbp`, `_fbc`, `_ga*`, `_gid`, `_gat*`, `_gcl_*` — is stored, and those
+    cookies are removed from every micro response);
   - a non-200 response;
   - panel and webmail hosts;
   - methods other than GET/HEAD;
@@ -224,7 +227,9 @@ cfm webtop site-cache stats [host]      # also: MCP site_cache_stats, GET /api/v
   so read the breakdown too. The CLI table shows HIT, MISS, EXPIRED, STALE and
   BYPASS; UPDATING and REVALIDATED are in the API and MCP JSON.
 - **Near-zero HIT with high MISS/EXPIRED** means the origin is not sending
-  cacheable responses (e.g. `private`, `no-store`, `Set-Cookie`), or the
+  cacheable responses (e.g. `private`, `no-store`, a session `Set-Cookie` —
+  a PHP session started for every visitor, `PHPSESSID` with `no-store`, is the
+  common one), or the
   location is misconfigured.
 - **Per-tier totals** (`cfm_static`, `cfm_micro`) are in the admin JSON
   `/cfm-admin/lua-stats` under `cache.zones`. They sum the armed vhosts only.
@@ -326,7 +331,7 @@ wildcard too (§6).
 ## 10. Disk and housekeeping
 
 - **Where the caches live.** Under `/var/cache/nginx`: `cfm_static` (10 GB,
-  `inactive=7d`) and `cfm_micro_{1,2,5,10,30,60}s` (512 MB to 1 GB each).
+  `inactive=7d`) and `cfm_micro_{1,2,5,10,30,60,90,120}s` (512 MB to 1 GB each).
   The daemon creates them on start and the installers and packages create them
   before any `-t`, owned `root:cfm`.
 - **Disk rails.** They bound how much the cache can write; they do not make

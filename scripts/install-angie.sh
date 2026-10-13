@@ -735,7 +735,7 @@ Pre-flight status:
   cfm user present:         $(id -u cfm >/dev/null 2>&1 && echo yes || echo "NO — angie will fail to start")
   Temp dirs (cfm:cfm):      /var/lib/cfm/nginx/{client_body_temp,proxy_temp}
   Log dir (cfm:cfm):        /var/log/angie/
-  Cache dirs (root:cfm):    /var/cache/nginx/cfm_static + cfm_micro_{1,2,5,10,30,60}s
+  Cache dirs (root:cfm):    /var/cache/nginx/cfm_static + cfm_micro_{1,2,5,10,30,60,90,120}s
   Self-signed fallback:     /var/lib/cfm/certs/selfsigned/{fullchain,privkey}.pem
   CFM lua runtime checked:  /var/lib/cfm/lua/
   Extra resty (maxminddb):  /etc/angie/lualib/resty/

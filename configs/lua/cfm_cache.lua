@@ -516,14 +516,14 @@ end
 -- TTL (recipe preset or operator custom) SNAPS to the nearest bucket — for herd
 -- protection the gap between 7s and 8s is operationally meaningless
 -- (design §5.4), so the snapped menu behaves as effectively continuous.
-local MICRO_BUCKETS = { 1, 2, 5, 10, 30, 60 } -- seconds; mirrors the declared cfm_micro_<n>s zones
+local MICRO_BUCKETS = { 1, 2, 5, 10, 30, 60, 90, 120 } -- seconds; mirrors the declared cfm_micro_<n>s zones
 
 -- micro_bucket_seconds: snap a stored TTL to the nearest bucket. Accepts a
 -- number of seconds or a string "[+]<n><unit>" with unit s/m/h/d, as the
 -- daemon's parseCacheTTL stores it ("5s", "+5s", "1m", "2h"; a bare number or
 -- inner spaces, which the daemon rejects, are read as seconds); nil/empty/
 -- unparseable or <=0 snaps to the smallest bucket (the safest, shortest TTL —
--- closest to not caching), anything above 60s clamps to 60s. Ties snap DOWN
+-- closest to not caching), anything above 120s clamps to 120s. Ties snap DOWN
 -- (the shorter, safer TTL) because the buckets ascend and the comparison keeps
 -- the first minimum. (It used to read only the digits, so "1m" became 1s.)
 local TTL_UNIT_SECONDS = { [""] = 1, s = 1, m = 60, h = 3600, d = 86400 }
@@ -764,6 +764,85 @@ local function micro_cookie_verdict(cookie_header, strict, extra_auth)
     return true, nil
 end
 
+-- Response-side tracking cookies (Tier B only). A response whose Set-Cookie
+-- headers ALL name one of these is still micro-cached: the micro locations
+-- ignore Set-Cookie for nginx's own store decision and put $cfm_sc_unsafe on
+-- proxy_no_cache instead, and the HTTPS server's header filter
+-- (micro_setcookie_filter) clears $cfm_sc_unsafe and REMOVES those headers on
+-- every micro response, fetched or served from cache, so no visitor is ever
+-- handed another visitor's identifier. Any other cookie (a session, a cart, a
+-- login, a consent or currency choice, a name it cannot parse) keeps
+-- $cfm_sc_unsafe at its fail-closed "1": not stored, and its Set-Cookie reaches
+-- the visitor untouched. Why: Facebook for WooCommerce and similar plugins set
+-- _fbp server-side on EVERY page, so before this no page of such a site could
+-- be micro-cached (titan/earth 2026-10-13). Deliberately narrow — identifiers
+-- that only an analytics script reads, never the app: Meta's _fbp/_fbc and
+-- Google's _ga/_ga_<id>/_gid/_gat/_gat_<id>/_gcl_<x>. It is NOT the request
+-- ignore-list above (cfm_* and consent cookies are not here: an origin that
+-- sets one of those is telling the visitor something per visitor).
+local MICRO_SETCOOKIE_TRACKING_EXACT = norm_set({
+    ["_fbp"] = true, ["_fbc"] = true,
+    ["_ga"] = true, ["_gid"] = true, ["_gat"] = true,
+})
+local MICRO_SETCOOKIE_TRACKING_PREFIX = norm_list({ "_ga_", "_gat_", "_gcl_" })
+
+-- setcookie_name: the cookie name of ONE Set-Cookie header value (RFC 6265
+-- §5.2: the name-value pair is everything before the first ';', the name what
+-- precedes its first '='). nil when there is no '=' in that pair or the name
+-- is empty: a line the edge cannot read is never treated as tracking.
+local function setcookie_name(line)
+    if type(line) ~= "string" then return nil end
+    local semi = line:find(";", 1, true)
+    local pair = semi and line:sub(1, semi - 1) or line
+    if not pair:find("=", 1, true) then return nil end
+    local name = cookie_name(pair)
+    if not name or name == "" then return nil end
+    return name
+end
+
+-- setcookie_tracking_only: PURE. true when every Set-Cookie value (a string, or
+-- the table ngx.header returns for several) names a tracking cookie; false for
+-- any other or unreadable one, and for nil / an empty table (there is nothing
+-- to strip, the caller handles "no Set-Cookie" itself).
+local function setcookie_tracking_only(sc)
+    local lines = type(sc) == "table" and sc or { sc }
+    if #lines == 0 then return false end
+    for _, l in ipairs(lines) do
+        local name = setcookie_name(l)
+        if not name then return false end
+        if not name_matches(cookie_key(name), MICRO_SETCOOKIE_TRACKING_EXACT, MICRO_SETCOOKIE_TRACKING_PREFIX) then
+            return false
+        end
+    end
+    return true
+end
+
+-- micro_setcookie_filter: header-filter hook (the HTTPS server's
+-- header_filter_by_lua_block; a location-level one would replace that block,
+-- check_site_cache_config.sh refuses it). Acts only on a response a
+-- @cfm_micro_<n>s location produced ($cfm_upstream "cfm_apache_micro"):
+--   * no Set-Cookie            → $cfm_sc_unsafe = ""  (storable as far as cookies go)
+--   * only tracking cookies    → headers removed, $cfm_sc_unsafe = ""
+--   * anything else            → untouched, $cfm_sc_unsafe stays "1"
+-- nginx tests proxy_no_cache after the header filters ran (verified on nginx
+-- 1.24 + lua-nginx-module 0.10.26), so this decides the store. On a cache HIT
+-- the stored copy still carries the first fetch's tracking Set-Cookie (nginx
+-- stores the origin's headers); this filter removes it there too. An error
+-- here leaves "1": nothing stored, cookies delivered.
+function _M.micro_setcookie_filter()
+    local v = ngx.var
+    if v.cfm_upstream ~= "cfm_apache_micro" then return end
+    local sc = ngx.header["Set-Cookie"]
+    if sc == nil or (type(sc) == "table" and #sc == 0) then
+        v.cfm_sc_unsafe = ""
+        return
+    end
+    if setcookie_tracking_only(sc) then
+        ngx.header["Set-Cookie"] = nil
+        v.cfm_sc_unsafe = ""
+    end
+end
+
 -- Request paths never micro-cached even for an anonymous client. A plain
 -- /.well-known/ fetch is routed to origin at cfm.lua Step 0a1; the rest of the
 -- prefix (a query, a POST, a script) takes the normal pipeline since
@@ -934,7 +1013,7 @@ end
 --   * a MISS that could not be stored: MICRO_UNCACHEABLE_TTL.
 --   * an EXPIRED refresh that could not be stored — the page changed (sets a
 --     cookie, went private, redirects, 404): MICRO_UNCACHEABLE_STALE_TTL,
---     longer than the largest micro zone's `inactive` (180s), so the stale copy
+--     longer than the largest micro zone's `inactive` (210s), so the stale copy
 --     is evicted before the next probe. Otherwise every probe would serve it
 --     to the requests arriving during its fetch, for as long as they kept it
 --     warm. check_site_cache_config.sh pins inactive + 30s <= this value.
@@ -963,16 +1042,20 @@ end
 -- micro_storable: PURE. Would nginx store this fetched response in a micro
 -- location? Mirrors the location's rails: proxy_no_cache $cfm_cache_non200
 -- (only a 200), $cfm_cc_nostore and $cfm_xae_nocache (the maps on the origin's
--- Cache-Control / X-Accel-Expires), plus nginx's own Set-Cookie and Vary rules
--- (neither header is ignored), and X-Accel-Buffering: no (not ignored either:
+-- Cache-Control / X-Accel-Expires), $cfm_sc_unsafe (Set-Cookie is ignored by
+-- nginx there; micro_setcookie_filter leaves "1" unless every cookie is a
+-- tracking one), nginx's own Vary rule (not ignored), and X-Accel-Buffering: no
+-- (not ignored either:
 -- nginx then streams the response and stores nothing). A "*" anywhere in Vary
 -- counts, which is slightly broader than nginx (only a bare "*"): the cost is
 -- a skipped micro, never a stored response. (A response carrying
 -- X-Accel-Redirect is served by an internal redirect and never reaches
 -- micro_note with a fetch status — it is neither stored nor remembered.)
-local function micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr)
+local function micro_storable(status, sc_unsafe, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr)
     if status ~= "200" then return false end
-    if type(set_cookie) == "string" and set_cookie ~= "" then return false end
+    -- "" only: nil (the filter never ran) or anything else counts as unsafe,
+    -- as nginx reads the variable's fail-closed default
+    if sc_unsafe ~= "" then return false end
     -- $upstream_http_cart_token / $upstream_http_woocommerce_session on the
     -- micro locations' proxy_no_cache: a session token handed out in a header
     if type(session_hdr) == "string" and session_hdr ~= "" then return false end
@@ -988,7 +1071,7 @@ end
 -- or nil to not mark it (see the rules above). cache_status is
 -- $upstream_cache_status; status is $upstream_status, whose LAST entry is the
 -- answer (a retried fetch lists every attempt).
-local function micro_mark_ttl(cache_status, status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr)
+local function micro_mark_ttl(cache_status, status, sc_unsafe, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr)
     if cache_status ~= "MISS" and cache_status ~= "EXPIRED" then return nil end
     local code = tonumber(type(status) == "string" and status:match("(%d%d%d)%s*$") or nil)
     if not code then return nil end
@@ -996,7 +1079,7 @@ local function micro_mark_ttl(cache_status, status, set_cookie, cc_nostore, xae_
         if cache_status == "MISS" then return MICRO_UNCACHEABLE_SHORT_TTL end
         return nil
     end
-    if micro_storable(status, set_cookie, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr) then return nil end
+    if micro_storable(status, sc_unsafe, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr) then return nil end
     if cache_status == "EXPIRED" then return MICRO_UNCACHEABLE_STALE_TTL end
     return MICRO_UNCACHEABLE_TTL
 end
@@ -1031,7 +1114,7 @@ function _M.micro_note()
     if v.cfm_upstream ~= "cfm_apache_micro" then return end
     local dict = ngx.shared and ngx.shared[UNCACHEABLE_DICT]
     if not dict then return end
-    local ttl = micro_mark_ttl(st, v.upstream_status, v.upstream_http_set_cookie,
+    local ttl = micro_mark_ttl(st, v.upstream_status, v.cfm_sc_unsafe,
                                v.cfm_cc_nostore, v.cfm_xae_nocache, v.upstream_http_vary,
                                v.upstream_http_x_accel_buffering, session_token_header(v))
     if ttl then dict:set(micro_mark_key(), true, ttl) end
@@ -1243,6 +1326,7 @@ _M._micro_cookie       = micro_cookie_verdict
 _M._cookie_key         = cookie_key
 _M._micro_decision     = micro_decision
 _M._micro_storable     = micro_storable
+_M._setcookie_tracking_only = setcookie_tracking_only
 _M._micro_mark_ttl     = micro_mark_ttl
 _M._panel_host         = panel_host
 _M._has_micro          = function() return _cache.has_micro end

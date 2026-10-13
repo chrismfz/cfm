@@ -25,7 +25,7 @@ export const MICRO_RECIPES = Object.freeze(["micro_safe", "micro_aggressive", "m
 // disabled (design §8): it stays selectable only on an entry that already uses it.
 export const MICRO_RECIPES_OFFERED = Object.freeze(["micro_safe", "micro_aggressive", "micro_custom"]);
 // The micro TTL buckets, in seconds (cfm_cache.lua MICRO_BUCKETS).
-export const MICRO_BUCKETS = Object.freeze([1, 2, 5, 10, 30, 60]);
+export const MICRO_BUCKETS = Object.freeze([1, 2, 5, 10, 30, 60, 90, 120]);
 export const MAX_AUTH_COOKIES = 32;
 export const MAX_HOST_LEN = 253;
 
@@ -113,7 +113,7 @@ export function ttlError(v) {
 
 // microBucketSeconds mirrors cfm_cache.lua micro_bucket_seconds: the edge reads
 // "[+]<n><unit>" (a bare number or inner spaces too), snaps to the nearest
-// bucket with ties going DOWN, clamps above 60 s, and falls back to the
+// bucket with ties going DOWN, clamps above 120 s, and falls back to the
 // smallest bucket for empty / unparseable / <= 0.
 export function microBucketSeconds(ttl) {
   let n = NaN;

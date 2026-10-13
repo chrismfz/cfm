@@ -17,7 +17,35 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Site Cache: micro TTLs of 90 s and 120 s.** Two more Tier B buckets
+  (`cfm_micro_90s`, `cfm_micro_120s`), selectable on the cfm-admin Site cache
+  page and with `cfm webtop site-cache set <host> --micro-ttl 90s|2m`. A TTL
+  above 120 s now snaps to 120 s (was 60 s). The new cache dirs are created by
+  the daemon and `cfm-cache-dirs.sh`; the edge conf needs the new reference
+  `openresty.conf` / `angie.conf` (zones + locations), which the package update
+  installs.
+- **Traffic rules recipe "Crawlers don't call AJAX / tracking endpoints".**
+  Blocks social, AI and SEO crawlers, any method, on `admin-ajax.php`,
+  `?wc-ajax=`, the WooCommerce Store API, PixelYourSite's `/wp-json/pys-*`
+  events and LiteSpeed's `guest.vary.php`. A crawler that renders pages runs
+  their JavaScript: on 2026-10-13 Meta's ads crawler fired ~7 000 such calls on
+  one shop in an hour and took titan's load from ~25 to ~70. Pages, images and
+  feeds stay open, so ad catalogs and previews keep working.
+
+### Changed
+- **Site Cache Tier B now stores pages that only set tracking cookies.** A
+  response whose `Set-Cookie` headers are all `_fbp`, `_fbc`, `_ga*`, `_gid`,
+  `_gat*` or `_gcl_*` is micro-cached, and those cookies are removed from every
+  micro response, so no visitor ever receives another visitor's id (the
+  Facebook pixel and Google tags set them again in the browser). Facebook for
+  WooCommerce sets `_fbp` from the server on every page, so until now no such
+  shop could be micro-cached. Any other cookie (a session, cart, login,
+  consent or currency choice) still means the page is never stored.
+- **Meta's ads crawler (`meta-externalads`) is part of the Meta crawler family
+  in the traffic-rule recipes** (social group, "Throttle Meta crawlers",
+  "Block Meta bot query-string loops", "Crawlers are read-only"). It was
+  missing, so "Crawlers are read-only" let its POSTs through.
 
 ## 2026.10.11
 

@@ -52,7 +52,7 @@ export const SC_RECIPES = Object.freeze([
       "Tier B with a longer bucket for pages that rarely change (a landing page, a news front page). Visitors can see a page up to the TTL old; purge after an edit to show it at once.",
     vars: [
       { key: "vhosts", label: "Vhosts", type: "vhosts", required: true, placeholder: "news.example.com" },
-      { key: "ttl", label: "TTL", type: "select", required: true, default: "10s", options: ["10s", "30s", "60s"] },
+      { key: "ttl", label: "TTL", type: "select", required: true, default: "10s", options: ["10s", "30s", "60s", "90s", "120s"] },
     ],
     warnings: [
       "Where this node has MICRO_CACHE_ENFORCE = 1, pages are served from cache at once; at 0 it is a dry run.",

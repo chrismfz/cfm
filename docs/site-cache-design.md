@@ -175,7 +175,7 @@ request-time (Lua, `access` phase) and response-time (nginx-native + a thin
 |---|---|---|
 | `GET`/`HEAD` only | `proxy_cache_methods` (default) | POST / logins cached |
 | Status: **only `200` is stored** (as-built Tier A — dropped the optional `301/404`) | `map $upstream_status $cfm_cache_non200` → `proxy_no_cache` (hard block, beats any origin `Cache-Control`), not just `proxy_cache_valid` | **3xx redirect / SSO loop cached** (the incident that removed CFM's global cache) |
-| Response has `Set-Cookie` → never store | nginx default (we **never** add `Set-Cookie` to `proxy_ignore_headers`) | user A's session served to user B |
+| Response has `Set-Cookie` → never store | Tier A: nginx default (`Set-Cookie` is never in its `proxy_ignore_headers`). Tier B (as-built 2026-10-13): the micro locations ignore `Set-Cookie` for nginx's own decision and put `$cfm_sc_unsafe` on `proxy_no_cache` instead. It defaults to `"1"` at server level and only `cfm_cache.micro_setcookie_filter` (the HTTPS server's `header_filter_by_lua_block`) clears it, for a response with no `Set-Cookie` or whose `Set-Cookie` headers are ALL tracking cookies (`_fbp`, `_fbc`, `_ga`, `_ga_<id>`, `_gid`, `_gat`, `_gat_<id>`, `_gcl_<x>`), which it then strips — on the fetch and on every HIT, since nginx stores the origin's headers. Any other or unreadable cookie keeps `"1"`: not stored, delivered untouched. nginx tests `proxy_no_cache` after the header filters ran (verified on nginx 1.24 + lua-nginx-module 0.10.26: `_fbp`-only and Google-only pages MISS → HIT with no cookie served; a session, a session + `_fbp`, a cookie without `=`, `_fbp` + `no-store` never stored, cookies delivered) | user A's session served to user B; one visitor's analytics id handed to everyone (hence the strip) |
 | Request carries a **named app-session cookie** → `$cfm_cache_skip=1` (see §4.1 — **allowlist by name**, NOT "any cookie") | Lua cookie-name allowlist | **logged-in users get stale/foreign content** |
 | Origin `Cache-Control: private\|no-store\|no-cache` → never store | Tier A: nginx default (not ignored). Tier B (as-built): the micro locations set `proxy_ignore_headers Cache-Control Expires X-Accel-Expires` so the TTL is always the bucket's, and put the shared-cache "do not store" signals back on `proxy_no_cache` through two `volatile` maps: `$cfm_cc_nostore` (`private` / `no-store` / `no-cache` / `s-maxage=0`, anywhere in the header, any case — `no-cache="Set-Cookie"` counts) and `$cfm_xae_nocache` (`X-Accel-Expires` `0` or any absolute `@<time>`). **Deliberately not `max-age=0`**: it is aimed at browsers too, and the common `.htaccess` recipes (H5BP, WP Rocket: `ExpiresByType text/html "access plus 0 seconds"`) send it on every HTML page, so honouring it would switch micro off for exactly the sites it is for; `s-maxage=0` is the shared-cache opt-out and is honoured | origin keeps the final say on *whether* a page is stored; on Tier B not on *how long* (a `max-age=3600` or far-future `Expires` page would otherwise sit in a micro zone for an hour, or for as long as the date says). Residual: a page whose only "do not cache" signal is `max-age=0`, a past or invalid `Expires`, a malformed `Cache-Control` value nginx would refuse (`max-age="60"`, `max-age=-1`) or `Pragma: no-cache` (nginx never read `Pragma`) is micro-cached for the bucket TTL. Stricter the other way: `X-Accel-Expires: 60` + `Cache-Control: no-cache` (natively stored — `X-Accel-Expires` wins) is not stored |
 | Panel hosts/ports (`:2083/:2087/:2096`), webmail hosts, `/.well-known/`, `/acctxfer*`, cPanel/webmail bypass paths → never | The panel ports are separate listeners with no cache location; a plain `/.well-known/` fetch is routed at `cfm.lua` Step 0a1, and Tier B also skips the whole prefix (the rest of it reaches Step 4 since 2026-10-09). As-built: `panel_host()` in `cfm_cache.lua` skips BOTH tiers for a host with a panel prefix — the `cfm_panel_hosts.lua` list `cfm.lua` and `cfm_panel.lua` share (`cpanel`, `whm`, `webmail`, `webdisk`, `mail`) plus the cache-only service prefixes `autodiscover`, `autoconfig`, `cpcalendars`, `cpcontacts` — whether the policy is a wildcard or the exact host; a missing module caches nothing (one WARN at load). Tier B also skips `/.well-known/`, `/acctxfer*`, `/wp-admin`, `/administrator/`, `/admin/`, `/sysadmin/`, `/___proxy_subdomain_*`, any path to a PHP script (`.php`, `.php<digit>`, `.phtml`, `.pht`, `.phar` at the end of the path or of a segment — `/index.php/cart` too), `?doing_wp_cron` and `?_envelope` (WordPress REST then moves the response headers — a `Cart-Token` — into the body) | **cPanel / webmail / SSO / AutoSSL broken** |
@@ -254,8 +254,11 @@ geo / hint header pins, the session-token response predicates
 included, nothing else writing them), `background_update off`, the exact
 `use_stale` list and one `proxy_cache_valid 200 <N>s` matching the bucket's
 name and zone — and, file-wide, that `proxy_ignore_headers` never lists
-`Set-Cookie` or `Vary` and lists `Cache-Control` / `Expires` / `X-Accel-Expires`
-only in a micro location (one at server/http level would be inherited by Tier
+`Vary` and lists `Cache-Control` / `Expires` / `X-Accel-Expires` / `Set-Cookie`
+only in a micro location (exactly that list, with `$cfm_sc_unsafe` on its
+`proxy_no_cache`, the server's one `set $cfm_sc_unsafe "1";` and one
+`header_filter_by_lua_block` calling `micro_setcookie_filter`, and no
+location-level header filter in a micro location) (one at server/http level would be inherited by Tier
 A), that the `$cfm_micro_conf` sentinel sits once in a redirect-free, buffering
 `location /` of the server holding the micro locations (with its server-level
 `""` default) and nowhere else, that `lua_shared_dict cfm_cache_uncacheable`
@@ -361,9 +364,11 @@ is not counted at all (BYPASS counts something else, §11.1).
 > it under `MICRO_CACHE_ENFORCE = 1`; in dry-run the verdict is surfaced only on
 > the debug-gated `X-CFM-Cache` header (`microcache=would/<n>s` |
 > `microcache=bypass:<reason>`). The **response**-side rails are enforced at
-> store time by the micro locations: `Set-Cookie` / `Vary` natively, and — since
-> they ignore the origin's `Cache-Control` / `Expires` / `X-Accel-Expires` for
-> the TTL — the `$cfm_cc_nostore` / `$cfm_xae_nocache` maps (§4).
+> store time by the micro locations: `Vary` natively, `Set-Cookie` through
+> `$cfm_sc_unsafe` (only tracking cookies may be stored, and are stripped), and
+> — since they ignore the origin's `Cache-Control` / `Expires` /
+> `X-Accel-Expires` for the TTL — the `$cfm_cc_nostore` / `$cfm_xae_nocache`
+> maps (§4).
 
 ---
 
@@ -382,7 +387,7 @@ built — Tier A has one zone and follows the origin's headers, §5.4):
 ```nginx
 # Static (disk): one zone
 proxy_cache_path /var/cache/nginx/cfm_static      levels=1:2 keys_zone=cfm_static:20m    max_size=10g  min_free=2g inactive=7d   use_temp_path=off;
-# Micro (tiny, short-lived; on disk): 1/2/5/10/30/60s — cfm_cache.lua MICRO_BUCKETS
+# Micro (tiny, short-lived; on disk): 1/2/5/10/30/60/90/120s — cfm_cache.lua MICRO_BUCKETS
 proxy_cache_path /var/cache/nginx/cfm_micro_1s   levels=1:2 keys_zone=cfm_micro_1s:10m  max_size=512m min_free=2g inactive=30s  use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_micro_2s   levels=1:2 keys_zone=cfm_micro_2s:10m  max_size=512m min_free=2g inactive=30s  use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_micro_5s   levels=1:2 keys_zone=cfm_micro_5s:10m  max_size=512m min_free=2g inactive=60s  use_temp_path=off;
@@ -504,11 +509,11 @@ only a little startup memory.
 
 The stored TTL is parsed with the units the daemon accepts (`s`/`m`/`h`/`d`,
 an optional leading `+`): `1m` is 60 s (as-built fix — the edge used to read only the digits, so `1m` was
-1 s), and anything above 60 s clamps to the 60 s bucket; an empty or
+1 s), and anything above 120 s clamps to the 120 s bucket; an empty or
 unparseable TTL gets the 1 s bucket.
 
 **Micro — recommended presets AND custom, both work.** The micro bucket set is
-**`{1, 2, 5, 10, 30, 60}s`** (6 tiny zones). *As built* the TTL comes only from
+**`{1, 2, 5, 10, 30, 60, 90, 120}s`** (8 tiny zones; 90 s and 120 s added 2026-10-13). *As built* the TTL comes only from
 the tier's `ttl` (`--micro-ttl`); a recipe name does not set it, so a micro
 tier without a TTL gets the 1 s bucket. *As built*, the cfm-admin page (§7.3)
 offers the six buckets as its TTL menu (a stored TTL that is not a bucket is
@@ -1007,7 +1012,7 @@ names).
 > for micro, its `ttl`, snapped to a bucket (empty = 1 s; §5.4) — so
 > `micro_aggressive` without `--micro-ttl` behaves as 1 s, every static recipe
 > behaves the same (origin headers, 1 h fallback), and `fullpage_advanced` is an
-> ordinary micro label, accepted and clamped to 60 s. The page's recipes
+> ordinary micro label, accepted and clamped to 120 s. The page's recipes
 > below therefore always send the micro TTL.
 
 The stored vocabulary: `static_lean`, `static_aggressive` (static);
@@ -1271,7 +1276,9 @@ New `scripts/tests/check_site_cache_config.sh` (in the spirit of
    Nothing else may write a rail variable (header-family writers, named
    captures, inline Lua).
 2. **Set-Cookie safety:** assert `Set-Cookie` is never added to
-   `proxy_ignore_headers` in a cache location. *As built:* the guard also
+   `proxy_ignore_headers` in a cache location. *As built since 2026-10-13:*
+   except in a `@cfm_micro_<n>s` location, in the exact form, with the
+   `$cfm_sc_unsafe` rail and its server-level default + header filter (§4). *As built:* the guard also
    forbids ignoring `Vary`, and allows ignoring `Cache-Control` / `Expires` /
    `X-Accel-Expires` only in a `@cfm_micro_<n>s` location that carries the
    replacement no-store rails.
