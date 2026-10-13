@@ -839,7 +839,9 @@ because of that. Hard-won points:
   live on nginx 1.24 + lua-nginx-module 0.10.26); the guard pins the rest.
   The filter reads `headers_out`, so a cookie the EDGE adds before the micro
   exec (`cfm_clearance`) also keeps `$cfm_sc_unsafe` at "1": wiring the
-  clearance fast path to micro (design §5.5.1) must exclude those first. A
+  clearance fast path to micro (design §5.5.1) must exclude those first —
+  in the filter AND in `micro_note`, which marks a URL uncacheable on the same
+  `$cfm_sc_unsafe`. A
   node can run new Lua with an old conf (the conf deploys only when `-t`
   passes): `micro_gate` clamps to 60 s and `micro_note` keeps the old cookie
   rule when `$cfm_sc_unsafe` is undeclared. Tier A reads no request

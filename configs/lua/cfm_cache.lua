@@ -864,7 +864,8 @@ local function response_setcookie()
     local resp = ngx.resp
     if resp and resp.get_headers then
         local h = resp.get_headers(0)
-        return h and h["set-cookie"], true
+        if type(h) ~= "table" then return nil, false end
+        return h["set-cookie"], true
     end
     local sc = ngx.header["Set-Cookie"]
     return sc, not (type(sc) == "table" and #sc >= SETCOOKIE_READ_CAP)
