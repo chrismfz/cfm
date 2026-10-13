@@ -787,7 +787,7 @@ because of that. Hard-won points:
 - **Tier A's static recipe/TTL are labels.** The static locations follow the
   origin's Cache-Control/Expires with a 1 h fallback; don't document or promise
   a static TTL the edge doesn't apply. Micro TTL snaps to MICRO_BUCKETS
-  {1,2,5,10,30,60}s; the guard pins the Lua list to the conf zones/locations.
+  {1,2,5,10,30,60,90,120}s; the guard pins the Lua list to the conf zones/locations.
 - **Go↔Lua parity via a generated fixture.** `site_cache_edge_parity_test.go`
   renders the real feed + `StatsKeyFor` answers into
   `scripts/tests/fixtures/site_cache_edge_parity.lua`; the Lua test feeds it to
@@ -826,7 +826,25 @@ because of that. Hard-won points:
   counters (the slab slot doubles past a 52-byte key).
 - **The never-cache rules differ by tier. Don't document them as one list.**
   Both tiers: Authorization, `Set-Cookie`/private/no-store, non-200,
-  panel/webmail hosts, GET/HEAD only, script paths. Tier A reads no request
+  panel/webmail hosts, GET/HEAD only, script paths — with ONE Tier B
+  exception (2026-10-13): a response whose Set-Cookie headers are ALL
+  tracking cookies (`_fbp`, `_fbc`, `_ga`, `_ga_<ID>`, `_gid`, `_gat`,
+  `_gcl_au/aw/dc/gb/gf/ha/gs`, case-sensitive) is stored, and the HTTPS
+  server's header filter strips every tracking line from every micro
+  response (`cfm_cache.micro_setcookie_filter`, `$cfm_sc_unsafe` fail-closed
+  "1"). Facebook for WooCommerce sets `_fbp` server-side on every page, so
+  without it no such shop could be micro-cached. It must stay in the
+  server-level `header_filter_by_lua_block`: a location-level one replaces
+  that block. nginx tests `proxy_no_cache` after the header filters (verified
+  live on nginx 1.24 + lua-nginx-module 0.10.26); the guard pins the rest.
+  The filter reads `headers_out`, so a cookie the EDGE adds before the micro
+  exec (`cfm_clearance`) also keeps `$cfm_sc_unsafe` at "1": wiring the
+  clearance fast path to micro (design §5.5.1) must exclude those first —
+  in the filter AND in `micro_note`, which marks a URL uncacheable on the same
+  `$cfm_sc_unsafe`. A
+  node can run new Lua with an old conf (the conf deploys only when `-t`
+  passes): `micro_gate` clamps to 60 s and `micro_note` keeps the old cookie
+  rule when `$cfm_sc_unsafe` is undeclared. Tier A reads no request
   cookie and looks at the path only for its extension; session cookies,
   credential headers and admin paths are Tier B only.
 - **`SITE_CACHE = 0` freezes each worker's policy table.** There is no feed

@@ -45,7 +45,7 @@
 # scripts only warn; installers report it).
 
 ROOT=${1:-/var/cache/nginx}
-CFM_CACHE_DIRS="cfm_static cfm_micro_1s cfm_micro_2s cfm_micro_5s cfm_micro_10s cfm_micro_30s cfm_micro_60s"
+CFM_CACHE_DIRS="cfm_static cfm_micro_1s cfm_micro_2s cfm_micro_5s cfm_micro_10s cfm_micro_30s cfm_micro_60s cfm_micro_90s cfm_micro_120s"
 
 # Without the cfm group (a manual run before the package created it; both
 # installers create the account first) the dirs are still created, so `-t`

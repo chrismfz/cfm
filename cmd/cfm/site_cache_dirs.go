@@ -10,7 +10,7 @@ const siteCacheRoot = "/var/cache/nginx"
 
 // siteCacheDirNames are the Site Cache zone dirs under siteCacheRoot: Tier A is
 // the single cfm_static zone, Tier B micro-cache one zone per TTL bucket
-// {1,2,5,10,30,60}s. Each proxy_cache_path dir MUST exist before `angie -t` /
+// {1,2,5,10,30,60,90,120}s. Each proxy_cache_path dir MUST exist before `angie -t` /
 // `openresty -t` or the config test fails [emerg]. This list must match the
 // proxy_cache_path dirs in configs/openresty.conf and configs/angie.conf and
 // the list in scripts/cfm-cache-dirs.sh (the packaging/installer copy of this
@@ -23,6 +23,8 @@ var siteCacheDirNames = []string{
 	"cfm_micro_10s",
 	"cfm_micro_30s",
 	"cfm_micro_60s",
+	"cfm_micro_90s",
+	"cfm_micro_120s",
 }
 
 // ensureSiteCacheDirs provisions the Site Cache dirs under root: each zone dir

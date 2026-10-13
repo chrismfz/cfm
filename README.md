@@ -951,7 +951,7 @@ they differ in a few practical places:
 | Extra resty libs | Fetched at install time via `opm get` (`lua-resty-http`, `lua-resty-string`, `lua-resty-maxminddb`) | Bundled in `angie-module-lua` except `lua-resty-maxminddb`, which the script `git clone`s into `/etc/angie/lualib/resty/` |
 | Self-signed fallback cert | `/var/lib/cfm/certs/selfsigned/` | `/var/lib/cfm/certs/selfsigned/` |
 | Temp dir chown | Explicit `cfm:cfm 0700` for `/var/lib/cfm/nginx/{client_body_temp,proxy_temp}` | Explicit chown of `/var/lib/cfm/nginx/*` and `/var/log/angie/` to `cfm:cfm` (the Angie package creates log dirs as `angie:angie` by default) |
-| Site Cache dirs | `/var/cache/nginx` (traversable, created 0755) with `cfm_static` + `cfm_micro_{1,2,5,10,30,60}s` as `root:cfm 0770`, created (and an unusable tree purged) by `scripts/cfm-cache-dirs.sh` before `-t` — the same helper the `.deb`/`.rpm` scripts run | same |
+| Site Cache dirs | `/var/cache/nginx` (traversable, created 0755) with `cfm_static` + `cfm_micro_{1,2,5,10,30,60,90,120}s` as `root:cfm 0770`, created (and an unusable tree purged) by `scripts/cfm-cache-dirs.sh` before `-t` — the same helper the `.deb`/`.rpm` scripts run | same |
 | Config validation before deploy | `openresty -t -p <prefix> -c <src>` before copy | `angie -t -p /etc/angie -c <src>` before copy |
 | Idempotent (safe to re-run) | Yes | Yes |
 | Touches the other backend | No | No — both can coexist on disk, only one may run at a time (port collision on `:9080`/`:9043`) |
@@ -991,7 +991,7 @@ cPanel, so every rail is absolute):
 - **Tier A — static assets** (css/js/map, fonts, png/jpg/gif/webp/ico), on
   :9080 and :9043: the origin's `Cache-Control` / `Expires` decide the TTL,
   1 h fallback.
-- **Tier B — micro-cache of anonymous pages** (1–60 s buckets): any anonymous
+- **Tier B — micro-cache of anonymous pages** (1–120 s buckets): any anonymous
   GET/HEAD through the HTTPS `location /`, HTML or not, after the WAF /
   challenge / bridge decisions (cfm.lua Step 4). Live for an armed vhost
   (`MICRO_CACHE_ENFORCE = 1`, the default since 2026-09-23; `0` is a node-wide
@@ -1001,7 +1001,9 @@ cPanel, so every rail is absolute):
 Never cached, whatever a policy says (design §4):
 - **Both tiers:**
   - requests with `Authorization`;
-  - `Set-Cookie` / private / no-store responses;
+  - `Set-Cookie` / private / no-store responses (Tier B: a response whose
+    cookies are all tracking ones — `_fbp`, `_ga`… — is stored, with those
+    cookies removed);
   - non-200s;
   - panel and webmail hosts;
   - methods other than GET/HEAD;

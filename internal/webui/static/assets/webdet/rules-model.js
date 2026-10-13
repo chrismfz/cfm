@@ -88,7 +88,7 @@ export const KNOWN_METHODS = Object.freeze(["GET", "POST", "HEAD", "PUT", "PATCH
 // User-Agent string.
 export const VERIFIED_BOT_NAMES = Object.freeze(["googlebot", "bingbot", "yahoo", "applebot", "yandex", "meta"]);
 const VERIFIED_BOT_DISPLAY = Object.freeze({
-  googlebot: "Googlebot", bingbot: "Bingbot", yahoo: "Yahoo Slurp", applebot: "Applebot", yandex: "YandexBot", meta: "Meta (facebookexternalhit / meta-externalagent)",
+  googlebot: "Googlebot", bingbot: "Bingbot", yahoo: "Yahoo Slurp", applebot: "Applebot", yandex: "YandexBot", meta: "Meta (facebookexternalhit / meta-externalagent / meta-externalads)",
 });
 export const VERIFIED_BOT_LABEL = VERIFIED_BOT_NAMES.map((n) => VERIFIED_BOT_DISPLAY[n] || n).join(", ");
 
@@ -104,7 +104,9 @@ export const VERIFIED_BOT_UA_GLOBS = Object.freeze({
   yahoo: ["*Slurp*"],
   applebot: ["*Applebot*"],
   yandex: ["*YandexBot*"],
-  meta: ["*facebookexternalhit*", "*meta-externalagent*"],
+  // meta-externalads (Meta's ads-catalog crawler, added 2026-10-13) reverses
+  // to fbsv.net like the other two.
+  meta: ["*facebookexternalhit*", "*meta-externalagent*", "*meta-externalads*"],
 });
 const VERIFIABLE_UA_GLOBS = new Set(Object.values(VERIFIED_BOT_UA_GLOBS).flat());
 const VERIFIABLE_UA_GLOBS_LC = new Set([...VERIFIABLE_UA_GLOBS].map((u) => u.toLowerCase()));
@@ -247,8 +249,8 @@ export const BOT_GROUPS = Object.freeze([
     key: "social",
     phrase: "social preview bots",
     label: "Social previews",
-    hint: "facebookexternalhit, meta-externalagent, Twitterbot, LinkedInBot, Slackbot, WhatsApp, TelegramBot",
-    patterns: ["*facebookexternalhit*", "*meta-externalagent*", "*Twitterbot*", "*LinkedInBot*", "*Slackbot*", "*WhatsApp*", "*TelegramBot*"],
+    hint: "facebookexternalhit, meta-externalagent, meta-externalads, Twitterbot, LinkedInBot, Slackbot, WhatsApp, TelegramBot",
+    patterns: ["*facebookexternalhit*", "*meta-externalagent*", "*meta-externalads*", "*Twitterbot*", "*LinkedInBot*", "*Slackbot*", "*WhatsApp*", "*TelegramBot*"],
   },
   {
     key: "ai",
@@ -308,7 +310,10 @@ export const UNVERIFIABLE_BOT_UAS = Object.freeze(
 // previews. Recipes therefore keep these in the UA-based allow as well (same
 // forgeable trust as before this field existed) until verdicts are persisted /
 // pre-seeded.
-export const PREVIEW_ONE_SHOT_UAS = Object.freeze([...VERIFIED_BOT_UA_GLOBS.meta]);
+// Explicit, not VERIFIED_BOT_UA_GLOBS.meta: meta-externalads (the ads-catalog
+// crawler) re-crawls from the same IPs, so its verdict is there in time and it
+// gets no forgeable UA allow.
+export const PREVIEW_ONE_SHOT_UAS = Object.freeze(["*facebookexternalhit*", "*meta-externalagent*"]);
 export const UA_ALLOW_ALONGSIDE_VERIFIED = Object.freeze([...UNVERIFIABLE_BOT_UAS, ...PREVIEW_ONE_SHOT_UAS]);
 
 // ── Form ⇄ payload ────────────────────────────────────────────────────────
@@ -931,6 +936,17 @@ export const PROBE_PATHS = Object.freeze([
 // The HTTP methods a crawler has no business sending. GET/HEAD/OPTIONS stay
 // open (link previews, robots, CORS preflight).
 export const WRITE_METHODS = Object.freeze(["POST", "PUT", "PATCH", "DELETE"]);
+// The endpoints only a page's JavaScript calls (bots_no_ajax): WordPress AJAX,
+// WooCommerce cart fragments + Store API, PixelYourSite events, LiteSpeed's
+// guest vary probe. Wildcard-free → literal prefixes; "/?wc-ajax" is path "/"
+// (every path) AND a wc-ajax query parameter (any value).
+export const CRAWLER_AJAX_PATHS = Object.freeze([
+  "/wp-admin/admin-ajax.php",
+  "/?wc-ajax",
+  "/wp-json/wc/store/",
+  "/wp-json/pys-",
+  "/wp-content/plugins/litespeed-cache/guest.vary.php",
+]);
 // Query parameters a crawler legitimately carries: click ids, campaign tags,
 // pagination, feeds/exports. Everything else on a bot request is a facet /
 // filter permutation (min_price, filter_color, orderby, ind=…).
@@ -1056,10 +1072,10 @@ export const RECIPES = Object.freeze([
     key: "throttle_meta",
     kind: "single",
     title: "Throttle Meta crawlers",
-    description: "facebookexternalhit / meta-externalagent at soft_bot (2 req/s, burst 20).",
+    description: "facebookexternalhit / meta-externalagent / meta-externalads at soft_bot (2 req/s, burst 20).",
     vars: [VAR_VHOSTS],
     build(vars) {
-      return [rule("throttle_meta", { enabled: true, priority: 150, vhosts: vhostsVar(vars), match: { ua_any: ["*facebookexternalhit*", "*meta-externalagent*"], methods: ["GET"] }, action: { type: "throttle", profile: "soft_bot" }, text: "Meta crawler soft throttle" })];
+      return [rule("throttle_meta", { enabled: true, priority: 150, vhosts: vhostsVar(vars), match: { ua_any: [...VERIFIED_BOT_UA_GLOBS.meta], methods: ["GET"] }, action: { type: "throttle", profile: "soft_bot" }, text: "Meta crawler soft throttle" })];
     },
   },
   {
@@ -1079,7 +1095,7 @@ export const RECIPES = Object.freeze([
     description: "Block Meta/GoogleOther crawlers hitting pages with unexpected query strings (fbclid/export/xml pass through).",
     vars: [VAR_VHOSTS],
     build(vars) {
-      return [rule("block_meta_qs", { enabled: false, priority: 330, vhosts: vhostsVar(vars), match: { ua_any: ["*facebookexternalhit*", "*meta-externalagent*", "*GoogleOther*"], methods: ["GET"], has_qs: true, qs_not_rx: "(?:^|[&;])(?:fbclid|export|xml)(?:=|[&;]|$)" }, action: { type: "block" }, text: "Meta/GoogleOther with unexpected query strings (disabled — validate first)" })];
+      return [rule("block_meta_qs", { enabled: false, priority: 330, vhosts: vhostsVar(vars), match: { ua_any: [...VERIFIED_BOT_UA_GLOBS.meta, "*GoogleOther*"], methods: ["GET"], has_qs: true, qs_not_rx: "(?:^|[&;])(?:fbclid|export|xml)(?:=|[&;]|$)" }, action: { type: "block" }, text: "Meta/GoogleOther with unexpected query strings (disabled — validate first)" })];
     },
   },
   {
@@ -1144,6 +1160,30 @@ export const RECIPES = Object.freeze([
       return groupsVar(vars, varDefault(VAR_GROUPS)).map((g, i) => {
         const risky = GROUPS_WITH_COLLATERAL.has(g.key) || g.key === "search";
         return rule(k, { enabled: !risky, priority: 350 + i, vhosts, match: { ua_any: g.patterns.slice(), methods: [...WRITE_METHODS] }, action: { type: "block" }, text: `${g.phrase} never write${risky ? " (disabled — legitimate writers may match)" : ""}` });
+      });
+    },
+  },
+  {
+    key: "bots_no_ajax",
+    kind: "multi",
+    title: "Crawlers don't call AJAX / tracking endpoints",
+    description: "Block social, AI and SEO crawlers, any method, on the endpoints only a page's own JavaScript calls: WordPress admin-ajax.php, WooCommerce ?wc-ajax= and its Store API, PixelYourSite's /wp-json/pys-* tracking events and LiteSpeed's guest.vary.php. A crawler that renders pages runs that JavaScript too, and every such call is a full WordPress boot: on 2026-10-13 Meta's ads crawler (meta-externalads) fired ~7 000 of them on one shop in an hour and took its server from load ~25 to ~70. Pages, images and feeds stay open, so ad catalogs, previews and indexing keep working.",
+    vars: [VAR_VHOSTS, VAR_GROUPS, { key: "paths", label: "Extra endpoints (optional)", type: "paths", placeholder: "/wp-json/my-plugin/" }],
+    warnings: [
+      "The social / AI / SEO rules are created ENABLED: a crawler has no cart, session or analytics of its own to update — its tracking events only pollute the site's statistics. \"search\" and \"scripts\" are created DISABLED: Googlebot renders pages too, and a site whose CONTENT arrives through admin-ajax (AJAX product filters, infinite scroll) would be indexed without it.",
+      "No verified-crawler allow is put in front on purpose: Meta's crawlers ARE verified crawlers (FCrDNS to fbsv.net), and an allow would let exactly the calls this recipe exists to stop through. A verified-crawler allow ALREADY on the vhost (\"Tame bots\", \"Geo fence\", \"Geo challenge\" put one at priority 10) makes this recipe a no-op for Meta and every other verified crawler, and a throttle at a lower priority number (\"Throttle Meta\" 150, \"Tame bots\" 110/130) throttles their GET calls instead of blocking them: check the vhost's rules in the simulator first.",
+      "Matched paths are site-root ones: a WordPress in a subdirectory (/blog/wp-admin/admin-ajax.php) or a ?rest_route=/pys-… call needs its own entry under \"Extra endpoints\". The ai group includes user-initiated agents (ChatGPT-User, Claude-User), which are blocked from these endpoints too.",
+      "/?wc-ajax matches any URL carrying a wc-ajax parameter (WooCommerce adds it to the current page URL), and the /wp-json/pys- prefix every PixelYourSite event endpoint (Facebook, TikTok, Pinterest…).",
+      "A shop that renders PRICES through admin-ajax (a multi-currency plugin in AJAX mode — WOOCS, CURCY) shows an ad crawler the page without them, which can get catalog items rejected for a price mismatch: check one product page as the crawler sees it before scoping this to such a site.",
+    ],
+    build(vars) {
+      const vhosts = vhostsVar(vars);
+      const k = "bots_no_ajax";
+      const extra = pathsVar(vars, []);
+      const paths = [...CRAWLER_AJAX_PATHS, ...extra.filter((p) => !CRAWLER_AJAX_PATHS.includes(p))];
+      return groupsVar(vars, varDefault(VAR_GROUPS)).map((g, i) => {
+        const risky = GROUPS_WITH_COLLATERAL.has(g.key) || g.key === "search";
+        return rule(k, { enabled: !risky, priority: 370 + i, vhosts, match: { ua_any: g.patterns.slice(), path_any: paths.slice() }, action: { type: "block" }, text: `${g.phrase} never call AJAX / tracking endpoints${risky ? " (disabled — validate first)" : ""}` });
       });
     },
   },

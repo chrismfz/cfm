@@ -25,7 +25,7 @@ export const MICRO_RECIPES = Object.freeze(["micro_safe", "micro_aggressive", "m
 // disabled (design §8): it stays selectable only on an entry that already uses it.
 export const MICRO_RECIPES_OFFERED = Object.freeze(["micro_safe", "micro_aggressive", "micro_custom"]);
 // The micro TTL buckets, in seconds (cfm_cache.lua MICRO_BUCKETS).
-export const MICRO_BUCKETS = Object.freeze([1, 2, 5, 10, 30, 60]);
+export const MICRO_BUCKETS = Object.freeze([1, 2, 5, 10, 30, 60, 90, 120]);
 export const MAX_AUTH_COOKIES = 32;
 export const MAX_HOST_LEN = 253;
 
@@ -113,7 +113,7 @@ export function ttlError(v) {
 
 // microBucketSeconds mirrors cfm_cache.lua micro_bucket_seconds: the edge reads
 // "[+]<n><unit>" (a bare number or inner spaces too), snaps to the nearest
-// bucket with ties going DOWN, clamps above 60 s, and falls back to the
+// bucket with ties going DOWN, clamps above 120 s, and falls back to the
 // smallest bucket for empty / unparseable / <= 0.
 export function microBucketSeconds(ttl) {
   let n = NaN;
@@ -314,7 +314,7 @@ export function validateForm(form, { original = null, inScope = () => true, exis
     if (terr) errors.push(`Micro TTL: ${terr}.`);
     else if (!String(f.microTTL || "").trim()) warnings.push("Micro TTL is empty: the edge runs it at 1 s.");
     else if (!isBucketTTL(f.microTTL)) warnings.push(`Micro TTL ${String(f.microTTL).trim()} is not a bucket: the edge snaps it to ${microBucketSeconds(String(f.microTTL))} s.`);
-    if (f.microRecipe === "fullpage_advanced") warnings.push("full-page advanced is a label only: the micro tier never caches longer than 60 s.");
+    if (f.microRecipe === "fullpage_advanced") warnings.push("full-page advanced is a label only: the micro tier never caches longer than 120 s.");
   }
   const cookies = parseAuthCookies(f.authCookies);
   // Stored values the operator did not touch are not re-validated: buildPatch

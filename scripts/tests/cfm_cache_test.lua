@@ -226,10 +226,10 @@ _site_cache_on = true
 
 -- ── Tier B micro-cache: TTL-bucket snapping (Phase B1, pure helper) ────────────
 -- proxy_cache_valid is per-location + not variablizable, so a stored micro TTL
--- snaps to one of the six declared cfm_micro_<n>s zones. Exact buckets pass
+-- snaps to one of the eight declared cfm_micro_<n>s zones. Exact buckets pass
 -- through; between-bucket values snap to the nearest; ties snap DOWN (shorter,
 -- safer); junk/<=0/absent → the smallest bucket (closest to not caching).
-for _, b in ipairs({ 1, 2, 5, 10, 30, 60 }) do
+for _, b in ipairs({ 1, 2, 5, 10, 30, 60, 90, 120 }) do
   check(cache._micro_bucket(b) == b, "micro bucket exact " .. b .. "s passes through")
   check(cache._micro_bucket(b .. "s") == b, "micro bucket string \"" .. b .. "s\" parses")
 end
@@ -237,7 +237,7 @@ check(cache._micro_bucket(3) == 2,  "3s snaps down to 2s (|3-2|<|3-5|)")
 check(cache._micro_bucket(4) == 5,  "4s snaps up to 5s (|4-5|<|4-2|)")
 check(cache._micro_bucket(8) == 10, "8s snaps to 10s")
 check(cache._micro_bucket(45) == 30, "45s snaps down to 30s (tie 30/60 → smaller)")
-check(cache._micro_bucket(1000) == 60, "huge TTL clamps to the largest bucket")
+check(cache._micro_bucket(1000) == 120, "huge TTL clamps to the largest bucket")
 check(cache._micro_bucket(0) == 1,  "0 → smallest bucket (no caching-adjacent)")
 check(cache._micro_bucket(-5) == 1, "negative → smallest bucket")
 check(cache._micro_bucket(nil) == 1, "nil → smallest bucket")
@@ -247,9 +247,13 @@ check(cache._micro_bucket("30 s") == 30, "TTL with spaces parses")
 -- units, as the daemon's parseCacheTTL accepts them (s/m/h/d): "1m" used to read
 -- as 1s because only the digits were parsed
 check(cache._micro_bucket("1m") == 60, "1m → 60s (minutes, not 1s)")
-check(cache._micro_bucket("2h") == 60, "2h clamps to the largest bucket")
-check(cache._micro_bucket("1d") == 60, "1d clamps to the largest bucket")
-check(cache._micro_bucket("90s") == 60, "90s clamps to the largest bucket")
+check(cache._micro_bucket("2h") == 120, "2h clamps to the largest bucket")
+check(cache._micro_bucket("1d") == 120, "1d clamps to the largest bucket")
+check(cache._micro_bucket("90s") == 90, "90s is a bucket (2026-10-13)")
+check(cache._micro_bucket("2m") == 120, "2m is the 120s bucket")
+check(cache._micro_bucket("100s") == 90, "100s snaps to 90s (nearest)")
+check(cache._micro_bucket("105s") == 90, "105s ties between 90/120 and snaps DOWN")
+check(cache._micro_bucket("75s") == 60, "75s ties between 60/90 and snaps DOWN")
 check(cache._micro_bucket("5S") == 5, "upper-case unit parses")
 check(cache._micro_bucket("7x") == 1, "unknown unit → smallest bucket")
 check(cache._micro_bucket("1.5s") == 1, "fractional → unparseable → smallest bucket")
@@ -624,17 +628,18 @@ end
 -- ── PR-3: micro_storable mirrors the micro location's store rails ─────────────
 do
   local S = cache._micro_storable
-  check(S("200", nil, "", "", nil) == true, "a plain 200 is storable")
+  check(S("200", "", "", "", nil) == true, "a plain 200 is storable")
   check(S("200", "", "", "", "Accept-Encoding") == true, "Vary: Accept-Encoding is storable")
-  check(S("404", nil, "", "", nil) == false, "a 404 is not storable")
+  check(S("404", "", "", "", nil) == false, "a 404 is not storable")
   check(S("502, 200", nil, "", "", nil) == false, "a retried status list is not storable (like the only-200 map)")
-  check(S(nil, nil, "", "", nil) == false, "no upstream status is not storable")
-  check(S("200", "a=b", "", "", nil) == false, "Set-Cookie is not storable")
-  check(S("200", nil, "1", "", nil) == false, "$cfm_cc_nostore=1 is not storable")
-  check(S("200", nil, "", "1", nil) == false, "$cfm_xae_nocache=1 is not storable")
-  check(S("200", nil, "", "", "*") == false, "Vary: * is not storable")
-  check(S("200", nil, "", "", string.rep("a", 129)) == false, "a Vary longer than nginx stores is not storable")
-  check(S("200", nil, "", "", "Accept-Encoding, *") == false, "a * inside a Vary list is not storable")
+  check(S(nil, "", "", "", nil) == false, "no upstream status is not storable")
+  check(S("200", "1", "", "", nil) == false, "$cfm_sc_unsafe=1 (a non-tracking Set-Cookie) is not storable")
+  check(S("200", nil, "", "", nil) == false, "$cfm_sc_unsafe unset (the filter never ran) is not storable: fail-closed")
+  check(S("200", "", "1", "", nil) == false, "$cfm_cc_nostore=1 is not storable")
+  check(S("200", "", "", "1", nil) == false, "$cfm_xae_nocache=1 is not storable")
+  check(S("200", "", "", "", "*") == false, "Vary: * is not storable")
+  check(S("200", "", "", "", string.rep("a", 129)) == false, "a Vary longer than nginx stores is not storable")
+  check(S("200", "", "", "", "Accept-Encoding, *") == false, "a * inside a Vary list is not storable")
 end
 
 -- ── PR-3: micro_mark_ttl — which fetches are remembered, and for how long ─────
@@ -642,7 +647,7 @@ do
   local T = cache._micro_mark_ttl
   check(T("MISS", "404") == 60, "MISS 404 → 60s")
   check(T("EXPIRED", "404") == 240, "EXPIRED 404 → 240s (outlives the largest zone inactive)")
-  check(T("MISS", "200", "a=b") == 60, "MISS Set-Cookie → 60s")
+  check(T("MISS", "200", "1") == 60, "MISS with an unsafe Set-Cookie → 60s")
   check(T("EXPIRED", "200", nil, "1") == 240, "EXPIRED private → 240s")
   for _, code in ipairs({ "401", "403", "410", "301", "302" }) do
     check(T("EXPIRED", code) == 240, "EXPIRED " .. code .. " (the page changed) marks")
@@ -658,11 +663,12 @@ do
   check(T("MISS", "502, 404") == 60, "a retried fetch is judged by its LAST answer")
   check(T("MISS", "404, 503") == 5, "a retried fetch ending in 5xx: the short mark")
   check(T("MISS", "200 : 404") == 60, "an internal-redirect status list is judged by its last entry")
-  check(T("MISS", "200", nil, "", "", nil, "No") == 60, "X-Accel-Buffering: no (any case) → not storable → marks")
-  check(T("MISS", "200", nil, "", "", nil, "yes") == nil, "X-Accel-Buffering: yes stays storable")
-  check(T("MISS", "200", nil, "", "", nil, nil, "jwt.t_abc") == 60, "a response handing out a Cart-Token is not storable → marks")
-  check(cache._micro_storable("200", nil, "", "", nil, nil, "jwt.t_abc") == false, "micro_storable: a session-token response header is not storable")
-  check(T("MISS", "200") == nil, "a storable MISS is not marked")
+  check(T("MISS", "200", "", "", "", nil, "No") == 60, "X-Accel-Buffering: no (any case) → not storable → marks")
+  check(T("MISS", "200", "", "", "", nil, "yes") == nil, "X-Accel-Buffering: yes stays storable")
+  check(T("MISS", "200", "", "", "", nil, nil, "jwt.t_abc") == 60, "a response handing out a Cart-Token is not storable → marks")
+  check(cache._micro_storable("200", "", "", "", nil, nil, "jwt.t_abc") == false, "micro_storable: a session-token response header is not storable")
+  check(T("MISS", "200", "") == nil, "a storable MISS is not marked")
+  check(T("MISS", "200") == 60, "a MISS whose cookie verdict is missing is marked (fail-closed)")
   check(T("HIT", "404") == nil and T("STALE", "404") == nil and T("UPDATING", "404") == nil, "no fetch → no mark")
   check(T("MISS", nil) == nil and T("MISS", "-") == nil, "no upstream answer → no mark")
 end
@@ -681,7 +687,9 @@ local function micro_req(host, uri)
 end
 local function log_micro(cache_status, status, set_cookie, cc, xae, vary, xab, cart)
   ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.upstream_cache_status = cache_status
-  ngx.var.upstream_status = status; ngx.var.upstream_http_set_cookie = set_cookie
+  -- set_cookie: nil = the response set no cookie (the header filter cleared
+  -- $cfm_sc_unsafe); anything else stands for an unsafe one (left at "1")
+  ngx.var.upstream_status = status; ngx.var.cfm_sc_unsafe = (set_cookie == nil) and "" or "1"
   ngx.var.cfm_cc_nostore = cc or ""; ngx.var.cfm_xae_nocache = xae or ""
   ngx.var.upstream_http_vary = vary; ngx.var.upstream_http_x_accel_buffering = xab
   ngx.var.upstream_http_cart_token = cart; ngx.var.upstream_http_woocommerce_session = nil
@@ -767,7 +775,7 @@ ngx.var.http_x_cfm_cache_debug = nil
 -- as false on proxy_no_cache; the Lua mirror must too)
 _uncacheable.data = {}; _uncacheable.sets = 0
 micro_req("m.com", "/wcs"); ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.upstream_cache_status = "MISS"
-ngx.var.upstream_status = "200"; ngx.var.upstream_http_set_cookie = nil; ngx.var.cfm_cc_nostore = ""
+ngx.var.upstream_status = "200"; ngx.var.cfm_sc_unsafe = ""; ngx.var.cfm_cc_nostore = ""
 ngx.var.cfm_xae_nocache = ""; ngx.var.upstream_http_vary = nil; ngx.var.upstream_http_x_accel_buffering = nil
 ngx.var.upstream_http_cart_token = ""; ngx.var.upstream_http_woocommerce_session = "sess-x"
 cache.micro_note()
@@ -924,6 +932,137 @@ do
   c4._rebuild_cache({ { host = "m.com", gen = 1, micro = { on = true, recipe = "micro_safe", ttl = "5s" } } })
   micro_req("m.com")
   check(c4.micro_gate() == "@cfm_micro_5s", "nginx 1.25 → routes (control)")
+  _micro_enforce = false
+end
+
+-- ── Response-side tracking cookies (2026-10-13) ───────────────────────────────
+-- A micro response whose Set-Cookie headers ALL name a tracking cookie (_fbp,
+-- _fbc, _ga, _ga_<ID>, _gid, _gat, _gcl_{au,aw,dc,gb,gf,ha,gs}) is storable:
+-- the header filter strips every tracking line and clears $cfm_sc_unsafe when
+-- nothing else is left. Anything else keeps the fail-closed "1" and reaches
+-- the visitor untouched.
+do
+  local TO = cache._setcookie_tracking_only
+  check(TO("_fbp=fb.1.123; Path=/; Expires=Wed, 21 Oct 2026 07:28:00 GMT") == true, "a lone _fbp is tracking")
+  check(TO({ "_ga=GA1.1.1; Path=/", "_ga_ABC123=GS1.1; Path=/", "_gcl_au=1.1.1" }) == true, "Google identifiers are tracking")
+  check(TO({ "_fbc=fb.1.x", "_gid=GA1.2.3", "_gat=1" }) == true, "_fbc / _gid / _gat are tracking")
+  check(TO("_gat_UA123=1") == false, "_gat_<id> is not on the list (JS-set only)")
+  -- review round (2026-10-13): stricter names, no comma-joined lines
+  check(TO("_fbp=fb.1.x, wordpress_logged_in_x=u; path=/") == false, "a comma-joined line hiding a login cookie is never tracking")
+  check(TO("_fbp=a,b") == false, "a comma anywhere in the name-value pair → unreadable")
+  check(TO("_ga_session=x") == false and TO("_ga_abc123=x") == false, "_ga_<id> needs Google's upper-case id")
+  check(TO("_ga_ABC123XYZ=GS1.1") == true, "a GA4 _ga_<ID> is tracking")
+  check(TO("_gcl_session=x") == false and TO("_gcl_au=1") == true, "_gcl_ only for the known conversion-linker names")
+  check(TO("_ga.sid=x") == false and TO("_ga%20=x") == false and TO("_ga[x]=y") == false,
+        "names are read as the browser stores them, not through PHP's request rules")
+  check(TO("__Secure-_fbp=x") == true and TO("__Host-_ga=x") == true, "a __Secure- / __Host- prefix is stripped before matching")
+  check(TO("_FBP=x") == false and TO("_GA_ABC123=x") == false, "names are case-sensitive, as the browser stores them")
+  check(TO("__Host-PHPSESSID=x") == false and TO("__Secure-wordpress_logged_in_x=u") == false,
+        "a __Host- / __Secure- prefix never makes a session cookie tracking")
+  check(TO("PHPSESSID=abc; Path=/; HttpOnly") == false, "a session cookie is not tracking")
+  check(TO({ "_fbp=x", "wordpress_logged_in_x=u" }) == false, "one non-tracking cookie makes the whole response unsafe")
+  check(TO({ "wp_woocommerce_session_x=w", "_fbp=x" }) == false, "order does not matter")
+  check(TO("noequals") == false, "a Set-Cookie without '=' is never tracking")
+  check(TO("=value") == false and TO("  =v") == false, "an empty name is never tracking")
+  check(TO("; _fbp=x") == false, "the name is read before the first ';' only")
+  check(TO("x; _fbp=y") == false, "a pair without '=' before the first ';' is never tracking")
+  check(TO("cfm_clearance=x") == false, "CFM's own cookies are not on the response list")
+  check(TO("euconsent-v2=x") == false and TO("_hjSessionUser_1=x") == false,
+        "consent and other analytics cookies are not on the (narrow) response list")
+  check(TO("_fbpx=1") == false and TO("_gax=1") == false, "exact names do not match as prefixes")
+  check(TO({}) == false and TO(nil) == false, "nothing to classify → not 'tracking only'")
+  check(TO({ "_fbp=x", 42 }) == false, "a non-string value is never tracking")
+
+  -- micro_setcookie_filter (the HTTPS server's header filter)
+  local function run(up, sc, start)
+    for k in pairs(_header) do _header[k] = nil end
+    _header["Set-Cookie"] = sc
+    ngx.var.cfm_upstream = up
+    ngx.var.cfm_sc_unsafe = start
+    cache.micro_setcookie_filter()
+    return _header["Set-Cookie"], ngx.var.cfm_sc_unsafe
+  end
+  local h, u = run("cfm_apache_micro", nil, "1")
+  check(h == nil and u == "", "micro, no Set-Cookie → $cfm_sc_unsafe cleared")
+  h, u = run("cfm_apache_micro", "_fbp=fb.1.1; Path=/", "1")
+  check(h == nil and u == "", "micro, only _fbp → stripped and cleared")
+  h, u = run("cfm_apache_micro", { "_ga=1", "_gcl_au=2" }, "1")
+  check(h == nil and u == "", "micro, only Google ids → stripped and cleared")
+  h, u = run("cfm_apache_micro", { "_fbp=1", "PHPSESSID=2" }, "1")
+  check(h == "PHPSESSID=2" and u == "1", "micro, a session among them → the session stays, _fbp is removed, stays unsafe")
+  h, u = run("cfm_apache_micro", { "cfm_clearance=B", "_fbp=storedA" }, "1")
+  check(h == "cfm_clearance=B" and u == "1",
+        "a HIT whose stored _fbp sits next to a cookie set before the micro exec never lets the stored _fbp out")
+  h, u = run("cfm_apache_micro", "_fbp=fb.1.x, wordpress_logged_in_x=u", "1")
+  check(h == "_fbp=fb.1.x, wordpress_logged_in_x=u" and u == "1", "a comma-joined line is kept whole and unsafe")
+  h, u = run("cfm_apache_micro", "noequals", "1")
+  check(h == "noequals" and u == "1", "micro, an unreadable cookie → untouched, stays unsafe")
+  h, u = run("cfm_apache_micro", {}, "1")
+  check(u == "", "micro, an empty Set-Cookie table counts as none")
+  -- 100+ values: ngx.header stops reading at 100 (lua-resty-core)
+  local many = {}
+  for i = 1, 100 do many[i] = "_fbp=" .. i end
+  many[101] = "wordpress_logged_in_x=u"
+  local function capped(t) local c = {} for i = 1, math.min(#t, 100) do c[i] = t[i] end return c end
+  -- (a) ngx.header only, which truncates at 100 → left alone, unsafe
+  for k in pairs(_header) do _header[k] = nil end
+  setmetatable(_header, { __index = function(_, k) if k == "Set-Cookie" then return capped(many) end end })
+  ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.cfm_sc_unsafe = "1"
+  cache.micro_setcookie_filter()
+  check(ngx.var.cfm_sc_unsafe == "1" and rawget(_header, "Set-Cookie") == nil,
+        "ngx.header-only, 100 values (maybe truncated) → nothing cleared, nothing rewritten")
+  setmetatable(_header, nil)
+  -- (b) ngx.resp.get_headers(0) reads every line → the login cookie keeps it unsafe and is kept
+  ngx.resp = { get_headers = function(n)
+    assert(n == 0, "get_headers must be called uncapped")
+    return { ["set-cookie"] = _header["Set-Cookie"] }
+  end }
+  h, u = run("cfm_apache_micro", many, "1")
+  check(u == "1" and h == "wordpress_logged_in_x=u",
+        "101 lines via get_headers(0): 100 tracking lines stripped, the login line kept, stays unsafe")
+  local all = {}
+  for i = 1, 150 do all[i] = "_ga=" .. i end
+  h, u = run("cfm_apache_micro", all, "1")
+  check(u == "" and h == nil, "150 tracking-only lines via get_headers(0) → stripped and cleared")
+  h, u = run("cfm_apache_micro", { "_fbp=1", "PHPSESSID=2" }, "1")
+  check(h == "PHPSESSID=2" and u == "1", "get_headers path: same verdicts as ngx.header")
+  ngx.resp = nil
+  h, u = run("cfm_apache", "_fbp=1", "1")
+  check(h == "_fbp=1" and u == "1", "not a micro response → never touched")
+  h, u = run(nil, "_fbp=1", "1")
+  check(h == "_fbp=1" and u == "1", "no $cfm_upstream → never touched")
+  for k in pairs(_header) do _header[k] = nil end
+  ngx.var.cfm_upstream = nil; ngx.var.cfm_sc_unsafe = nil
+end
+
+-- ── Version skew: this Lua with an edge conf from before 2026-10-13 ─────────
+-- The package always installs the Lua; the conf only when `-t` passes. An old
+-- conf has no @cfm_micro_90s/120s and no $cfm_sc_unsafe (its presence marks a
+-- new conf).
+do
+  _micro_enforce = true
+  cache._rebuild_cache({ { host = "skew.com", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "2m" } } })
+  micro_req("skew.com"); ngx.var.cfm_sc_unsafe = "1"
+  check(cache.micro_gate() == "@cfm_micro_120s", "new conf: a 2m TTL routes to the 120s bucket")
+  micro_req("skew.com"); ngx.var.cfm_sc_unsafe = nil
+  check(cache.micro_gate() == "@cfm_micro_60s", "old conf (no $cfm_sc_unsafe): never exec into a bucket it lacks — clamp to 60s")
+  cache._rebuild_cache({ { host = "skew.com", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "30s" } } })
+  micro_req("skew.com"); ngx.var.cfm_sc_unsafe = nil
+  check(cache.micro_gate() == "@cfm_micro_30s", "old conf: buckets it has are untouched")
+  -- micro_note on an old conf reads the origin's Set-Cookie as before
+  local function note(sc)
+    _uncacheable.data = {}; _uncacheable.sets = 0
+    micro_req("skew.com", "/n")
+    ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.upstream_cache_status = "MISS"; ngx.var.upstream_status = "200"
+    ngx.var.cfm_sc_unsafe = nil; ngx.var.upstream_http_set_cookie = sc
+    ngx.var.cfm_cc_nostore = ""; ngx.var.cfm_xae_nocache = ""; ngx.var.upstream_http_vary = nil
+    ngx.var.upstream_http_x_accel_buffering = nil; ngx.var.upstream_http_cart_token = nil; ngx.var.upstream_http_woocommerce_session = nil
+    cache.micro_note()
+    return _uncacheable.sets
+  end
+  check(note(nil) == 0, "old conf, no Set-Cookie: a storable MISS is not marked (micro keeps working)")
+  check(note("PHPSESSID=x") == 1, "old conf, a Set-Cookie: marked, as nginx refused to store it")
+  ngx.var.upstream_http_set_cookie = nil
   _micro_enforce = false
 end
 

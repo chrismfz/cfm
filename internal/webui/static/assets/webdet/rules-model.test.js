@@ -10,6 +10,7 @@ import {
   RECIPES,
   PROBE_PATHS,
   WRITE_METHODS,
+  CRAWLER_AJAX_PATHS,
   BOT_QS_PASSTHROUGH,
   THROTTLE_PROFILES,
   UA_ALLOW_ALONGSIDE_VERIFIED,
@@ -614,7 +615,7 @@ test("shadowingRules: an earlier enabled allow or throttle that covers the row's
 });
 
 test("recipe var defaults are the build() fallbacks: an empty required var builds what the form shows", () => {
-  for (const key of ["geo_fence", "geo_fence_admin", "lock_panel_subdomains", "geo_challenge", "throttle_hot_path", "lock_dev_sites", "bots_read_only", "bots_no_qs"]) {
+  for (const key of ["geo_fence", "geo_fence_admin", "lock_panel_subdomains", "geo_challenge", "throttle_hot_path", "lock_dev_sites", "bots_read_only", "bots_no_qs", "bots_no_ajax"]) {
     const rcp = recipe(key);
     const withDefaults = rcp.build(recipeVarsDefaults(rcp, { vhosts: "a.com" }));
     const emptied = { ...recipeVarsDefaults(rcp, { vhosts: "a.com" }) };
@@ -731,4 +732,54 @@ test("monitoring_probes is a link to the challenge excludes, and recipe keys are
   const keys = RECIPES.map((r) => r.key);
   assert.equal(new Set(keys).size, keys.length);
   for (const k of keys) assert.match(k, /^[a-z0-9_]+$/, `${k} survives the recipe:<key> note tag`);
+});
+
+test("bots_no_ajax: crawlers are blocked on the JS-only endpoints (titan 2026-10-13), pages stay open", () => {
+  const rcp = recipe("bots_no_ajax");
+  const rules = rcp.build({ vhosts: "axidwear.com", groups: "" });
+  assert.equal(rules.length, 3, "default social + ai + seo");
+  for (const r of rules) {
+    assert.equal(r.action.type, "block");
+    assert.equal(r.enabled, true);
+    assert.deepEqual(r.match.path_any, [...CRAWLER_AJAX_PATHS]);
+    assert.ok(!r.match.methods || r.match.methods.length === 0, "every method: wc-ajax and pys events are POSTs, admin-ajax is GET or POST");
+    assert.ok(!r.match.verified_bot, "Meta's crawlers are FCrDNS-verified: a verified allow would let these calls through");
+    assert.ok(r.priority >= PRIORITY_BANDS.block.from && r.priority <= PRIORITY_BANDS.block.to);
+  }
+  assert.ok(rules[0].match.ua_any.includes("*meta-externalads*"), "the ads crawler seen on axidwear is in the social group");
+  const any = (path, qs = "") => CRAWLER_AJAX_PATHS.some((p) => pathPatternMatches(p, path, qs));
+  // what meta-externalads called on axidwear.com
+  assert.ok(any("/wp-json/pys-facebook/v1/event"));
+  assert.ok(any("/wp-json/pys-tiktok/v1/event"));
+  assert.ok(any("/wp-admin/admin-ajax.php", "action=pys_get_pbid"));
+  assert.ok(any("/wp-admin/admin-ajax.php"), "action in the POST body");
+  assert.ok(any("/", "wc-ajax=get_refreshed_fragments"));
+  assert.ok(any("/shop/x/", "wc-ajax=add_to_cart"), "wc-ajax on any page URL");
+  assert.ok(any("/wp-content/plugins/litespeed-cache/guest.vary.php"));
+  assert.ok(any("/wp-json/wc/store/v1/cart"));
+  // what it must still be able to fetch
+  assert.ok(!any("/"), "the home page");
+  assert.ok(!any("/shop/agori/set-123/"), "a product page");
+  assert.ok(!any("/", "fbclid=x&utm_source=fb"), "a page with ad click ids");
+  assert.ok(!any("/wp-content/uploads/2026/10/x.jpg"), "images");
+  assert.ok(!any("/feed/"), "feeds");
+  assert.ok(!any("/wp-json/wp/v2/posts"), "the public REST API");
+  assert.ok(!any("/wp-json/pys"), "a path that only shares the prefix without the dash");
+  // search / scripts / empty start disabled; groups follow BOT_GROUPS order
+  const custom = rcp.build({ vhosts: "a.com", groups: "search, social, scripts" });
+  assert.deepEqual(custom.map((r) => r.enabled), [false, true, false]);
+  // extra endpoints are appended, never duplicated
+  const extra = rcp.build({ vhosts: "a.com", groups: "social", paths: "/wp-json/my-plugin/, /wp-admin/admin-ajax.php" });
+  assert.deepEqual(extra[0].match.path_any, [...CRAWLER_AJAX_PATHS, "/wp-json/my-plugin/"]);
+});
+
+test("meta-externalads is a verifiable Meta crawler, never an UNVERIFIABLE (UA-only) one", () => {
+  assert.ok(VERIFIED_BOT_UA_GLOBS.meta.includes("*meta-externalads*"));
+  assert.ok(!UNVERIFIABLE_BOT_UAS.includes("*meta-externalads*"));
+  assert.ok(!UA_ALLOW_ALONGSIDE_VERIFIED.includes("*meta-externalads*"), "the ads crawler gets no forgeable UA-only allow");
+  assert.ok(UA_ALLOW_ALONGSIDE_VERIFIED.includes("*facebookexternalhit*") && UA_ALLOW_ALONGSIDE_VERIFIED.includes("*meta-externalagent*"));
+  const t = recipe("throttle_meta").build({ vhosts: "a.com" })[0];
+  assert.ok(t.match.ua_any.includes("*meta-externalads*"));
+  const q = recipe("block_meta_qs").build({ vhosts: "a.com" })[0];
+  assert.ok(q.match.ua_any.includes("*meta-externalads*") && q.match.ua_any.includes("*GoogleOther*"));
 });
