@@ -6,7 +6,8 @@
 --     POST /administrator/index.php saves).
 -- It now counts credential submissions only (a POST carrying a password
 -- field, read like PHP), for every client; a direct client is capped at
--- auth_burst_direct_mode (logonly) for a burn-in.
+-- auth_burst_direct_mode: logonly for a burn-in, challenge_v2 (the rule's own
+-- mode) since 2026-10-13.
 
 _G.ngx = {
   now           = function() return 1000 end,
@@ -63,7 +64,7 @@ local function burst(n, t)
   return act
 end
 
--- ── Credential submissions count, direct clients included (logonly) ────────
+-- ── Credential submissions count, direct clients included (challenge_v2) ───
 do
   local cases = {
     { "WordPress",   { uri = "/wp-login.php", body = "log=admin&pwd=guess&wp-submit=Log+In" } },
@@ -75,7 +76,7 @@ do
   }
   for _, c in ipairs(cases) do
     local a = burst(9, c[2])
-    check(a == "logonly", c[1] .. ": 9 direct credential POSTs → 501 logonly (got " .. tostring(a) .. ")")
+    check(a == "challenge_v2", c[1] .. ": 9 direct credential POSTs → 501 challenge_v2 (got " .. tostring(a) .. ")")
     local p = {}
     for k, v in pairs(c[2]) do p[k] = v end
     p.peer = "172.70.1.1"  -- a Cloudflare edge relayed it: the rule's own mode
@@ -84,7 +85,7 @@ do
   end
   check(burst(7, { uri = "/wp-login.php", body = "log=admin&pwd=guess" }) == nil, "7 submissions: under the threshold")
   -- No peer at all reads as direct.
-  check(burst(9, { uri = "/wp-login.php", body = "log=admin&pwd=guess", peer = false }) == "logonly", "no peer: direct, logonly")
+  check(burst(9, { uri = "/wp-login.php", body = "log=admin&pwd=guess", peer = false }) == "challenge_v2", "no peer: direct, challenge_v2")
   -- Drupal's JSON login.
   check(burst(9, { uri = "/user/login", args = "_format=json", ct = "application/json",
                    body = '{"name":"admin","pass":"guess"}', peer = "172.70.1.1" }) == "challenge_v2", "Drupal JSON login counts")
@@ -175,6 +176,10 @@ do
   check(burst(9, { uri = "/wp-login.php", body = "log=a&pwd=b" }) == "logonly", "rule logonly + cap challenge: stays logonly")
   reload("challenge_v2", "challenge")
   check(burst(9, { uri = "/wp-login.php", body = "log=a&pwd=b" }) == "challenge", "the cap applies when set (challenge)")
+  reload("challenge_v2", "logonly")
+  check(burst(9, { uri = "/wp-login.php", body = "log=a&pwd=b" }) == "logonly", "an operator's logonly cap steps the direct side back")
+  check(burst(9, { uri = "/wp-login.php", body = "log=a&pwd=b", peer = "172.70.1.1" }) == "challenge_v2",
+        "the logonly cap leaves a proxied client at the rule's mode")
   reload("challenge_v2", "chalenge")
   check(burst(9, { uri = "/wp-login.php", body = "log=a&pwd=b" }) == "logonly", "a misspelled cap reads as logonly")
   package.loaded["cfm_waf_config"] = nil
@@ -200,4 +205,4 @@ if fails > 0 then
   io.stderr:write(("auth burst tests: %d FAILED\n"):format(fails))
   os.exit(1)
 end
-print("ok: rule 501 counts credential submissions, direct clients at logonly")
+print("ok: rule 501 counts credential submissions, direct clients at challenge_v2")
