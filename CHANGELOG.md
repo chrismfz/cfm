@@ -61,6 +61,15 @@ back-filled here — see the git/PR history for that period.
   combination, and each page ran a product-filter count over 14–31 M rows (up
   to 65 s per query). A rule copies the group's list when it is created: an
   existing SEO-tools rule gains it only when re-created from the recipe.
+- **OpenAI's GPTBot and OAI-SearchBot are no longer on the crawler bypass list**
+  (`challenge_waf_bypass.conf`, 51 prefixes). A bypassed client skips the
+  traffic rules as well as the WAF and the challenge, so no "bots" recipe could
+  reach them: on one shop GPTBot walked every `?filter_category=` combination at
+  ~2 req/s, 2.4 s a page, and a block rule matching it never ran. They are now
+  ordinary clients: rules can throttle or block them, and a vhost-wide challenge
+  applies to them too (a page they can only skip, as any crawler without a
+  bypass does). Google, Bing, DuckDuckGo, Applebot, Skroutz and QUIC.cloud stay
+  bypassed — and so stay out of every traffic rule.
 
 ### Fixed
 - **`cfm status` reports the firewall on nftlib nodes.** It printed "table
