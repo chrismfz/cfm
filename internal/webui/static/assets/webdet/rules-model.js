@@ -1170,6 +1170,7 @@ export const RECIPES = Object.freeze([
       "The social / AI / SEO rules are created ENABLED: a crawler has no cart, session or analytics of its own to update — its tracking events only pollute the site's statistics. \"search\" and \"scripts\" are created DISABLED: Googlebot renders pages too, and a site whose CONTENT arrives through admin-ajax (AJAX product filters, infinite scroll) would be indexed without it.",
       "No verified-crawler allow is put in front on purpose: Meta's crawlers ARE verified crawlers (FCrDNS to fbsv.net), and an allow would let exactly the calls this recipe exists to stop through.",
       "/?wc-ajax matches any URL carrying a wc-ajax parameter (WooCommerce adds it to the current page URL), and the /wp-json/pys- prefix every PixelYourSite event endpoint (Facebook, TikTok, Pinterest…).",
+      "A shop that renders PRICES through admin-ajax (a multi-currency plugin in AJAX mode — WOOCS, CURCY) shows an ad crawler the page without them, which can get catalog items rejected for a price mismatch: check one product page as the crawler sees it before scoping this to such a site.",
     ],
     build(vars) {
       const vhosts = vhostsVar(vars);

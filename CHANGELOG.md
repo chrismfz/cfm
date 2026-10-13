@@ -24,7 +24,8 @@ back-filled here — see the git/PR history for that period.
   above 120 s now snaps to 120 s (was 60 s). The new cache dirs are created by
   the daemon and `cfm-cache-dirs.sh`; the edge conf needs the new reference
   `openresty.conf` / `angie.conf` (zones + locations), which the package update
-  installs.
+  installs. A vhost whose stored micro TTL is above 60 s (e.g. `2m`) moves
+  from the 60 s bucket to 90 s or 120 s on upgrade; set it again to keep 60 s.
 - **Traffic rules recipe "Crawlers don't call AJAX / tracking endpoints".**
   Blocks social, AI and SEO crawlers, any method, on `admin-ajax.php`,
   `?wc-ajax=`, the WooCommerce Store API, PixelYourSite's `/wp-json/pys-*`
@@ -41,7 +42,9 @@ back-filled here — see the git/PR history for that period.
   Facebook pixel and Google tags set them again in the browser). Facebook for
   WooCommerce sets `_fbp` from the server on every page, so until now no such
   shop could be micro-cached. Any other cookie (a session, cart, login,
-  consent or currency choice) still means the page is never stored.
+  consent or currency choice) still means the page is never stored. The micro
+  cache key changed with this, so every micro-armed vhost starts from an empty
+  micro cache once after the upgrade.
 - **Meta's ads crawler (`meta-externalads`) is part of the Meta crawler family
   in the traffic-rule recipes** (social group, "Throttle Meta crawlers",
   "Block Meta bot query-string loops", "Crawlers are read-only"). It was

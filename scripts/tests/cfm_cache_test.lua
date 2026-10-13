@@ -944,7 +944,16 @@ do
   local TO = cache._setcookie_tracking_only
   check(TO("_fbp=fb.1.123; Path=/; Expires=Wed, 21 Oct 2026 07:28:00 GMT") == true, "a lone _fbp is tracking")
   check(TO({ "_ga=GA1.1.1; Path=/", "_ga_ABC123=GS1.1; Path=/", "_gcl_au=1.1.1" }) == true, "Google identifiers are tracking")
-  check(TO({ "_fbc=fb.1.x", "_gid=GA1.2.3", "_gat=1", "_gat_UA123=1" }) == true, "_fbc / _gid / _gat / _gat_<id> are tracking")
+  check(TO({ "_fbc=fb.1.x", "_gid=GA1.2.3", "_gat=1" }) == true, "_fbc / _gid / _gat are tracking")
+  check(TO("_gat_UA123=1") == false, "_gat_<id> is not on the list (JS-set only)")
+  -- review round (2026-10-13): stricter names, no comma-joined lines
+  check(TO("_fbp=fb.1.x, wordpress_logged_in_x=u; path=/") == false, "a comma-joined line hiding a login cookie is never tracking")
+  check(TO("_fbp=a,b") == false, "a comma anywhere in the name-value pair → unreadable")
+  check(TO("_ga_session=x") == false and TO("_ga_abc123=x") == false, "_ga_<id> needs Google's upper-case id")
+  check(TO("_ga_ABC123XYZ=GS1.1") == true, "a GA4 _ga_<ID> is tracking")
+  check(TO("_gcl_session=x") == false and TO("_gcl_au=1") == true, "_gcl_ only for the known conversion-linker names")
+  check(TO("_ga.sid=x") == false and TO("_ga%20=x") == false and TO("_ga[x]=y") == false,
+        "names are read as the browser stores them, not through PHP's request rules")
   check(TO("__Secure-_fbp=x") == true and TO("__Host-_ga=x") == true, "a __Secure- / __Host- prefix is stripped before matching")
   check(TO("_FBP=x") == true, "names compare case-insensitively (as the request lists)")
   check(TO("PHPSESSID=abc; Path=/; HttpOnly") == false, "a session cookie is not tracking")
@@ -977,7 +986,12 @@ do
   h, u = run("cfm_apache_micro", { "_ga=1", "_gcl_au=2" }, "1")
   check(h == nil and u == "", "micro, only Google ids → stripped and cleared")
   h, u = run("cfm_apache_micro", { "_fbp=1", "PHPSESSID=2" }, "1")
-  check(type(h) == "table" and #h == 2 and u == "1", "micro, a session among them → untouched, stays unsafe")
+  check(h == "PHPSESSID=2" and u == "1", "micro, a session among them → the session stays, _fbp is removed, stays unsafe")
+  h, u = run("cfm_apache_micro", { "cfm_clearance=B", "_fbp=storedA" }, "1")
+  check(h == "cfm_clearance=B" and u == "1",
+        "a HIT whose stored _fbp sits next to a cookie set before the micro exec never lets the stored _fbp out")
+  h, u = run("cfm_apache_micro", "_fbp=fb.1.x, wordpress_logged_in_x=u", "1")
+  check(h == "_fbp=fb.1.x, wordpress_logged_in_x=u" and u == "1", "a comma-joined line is kept whole and unsafe")
   h, u = run("cfm_apache_micro", "noequals", "1")
   check(h == "noequals" and u == "1", "micro, an unreadable cookie → untouched, stays unsafe")
   h, u = run("cfm_apache_micro", {}, "1")

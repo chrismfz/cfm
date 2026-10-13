@@ -26,8 +26,12 @@ Caching is bypass-by-default. What is never cached, whatever a policy says
   - a request with an `Authorization` header;
   - a response with `Set-Cookie`, or with `Cache-Control: private` / `no-store`
     (Tier B exception: a response whose cookies are ALL tracking cookies —
-    `_fbp`, `_fbc`, `_ga*`, `_gid`, `_gat*`, `_gcl_*` — is stored, and those
-    cookies are removed from every micro response);
+    `_fbp`, `_fbc`, `_ga`, `_ga_<ID>`, `_gid`, `_gat`, `_gcl_au/aw/dc/gb/gf/ha/gs`
+    — is stored, and those cookies are removed from every micro response. The
+    pixel / tag sets them again in the browser; the cost is shorter-lived
+    cookies on Safari and a pixel `eventID` shared within one TTL, which a
+    shop that relies on server-side Conversions API deduplication should
+    know before arming micro);
   - a non-200 response;
   - panel and webmail hosts;
   - methods other than GET/HEAD;

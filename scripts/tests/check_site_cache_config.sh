@@ -22,7 +22,8 @@
 #       $cfm_req_auth;` — bypass-by-default (serve + store), the only-200 rail
 #       and the credentialed-request rail — plus buffering ON (nginx stores
 #       nothing off it), the whole key
-#       `g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri`, the
+#       `g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri`
+#       (`g$cfm_cache_gen|sc1|…` in a micro location — see $cfm_sc_unsafe), the
 #       lock on with its per-tier timeout (1s static, 5s micro), and the
 #       forwarded-header pins (X-Forwarded-Host = $host, the rest dropped; each
 #       set exactly once). Any other cache zone is rejected.
@@ -302,7 +303,11 @@ for f in "$ORT" "$ANG"; do
       # ($scheme: :9080 and :9043 reach different origin ports) AND the scheme
       # the origin is told ($cf_xfp: differs behind a trusted peer) — either
       # alone merges two origin answers — then host and full URI.
-      if (body !~ (A "proxy_cache_key[[:space:]]+\"g[$]cfm_cache_gen[|][$]server_addr[|][$]scheme[|][$]cf_xfp://[$]host[$]request_uri\"[[:space:]]*;")) m = m " proxy_cache_key-must-be-g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri"
+      # A micro key carries "sc1|" after the generation: its entries may hold a
+      # tracking Set-Cookie that only the current header filter strips, so a
+      # conf without that filter (a downgrade) must never share them.
+      if (!mi && body !~ (A "proxy_cache_key[[:space:]]+\"g[$]cfm_cache_gen[|][$]server_addr[|][$]scheme[|][$]cf_xfp://[$]host[$]request_uri\"[[:space:]]*;")) m = m " proxy_cache_key-must-be-g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri"
+      if (mi && body !~ (A "proxy_cache_key[[:space:]]+\"g[$]cfm_cache_gen[|]sc1[|][$]server_addr[|][$]scheme[|][$]cf_xfp://[$]host[$]request_uri\"[[:space:]]*;")) m = m " micro-proxy_cache_key-must-be-g$cfm_cache_gen|sc1|$server_addr|$scheme|$cf_xfp://$host$request_uri"
       # Anti-stampede: the lock ON, and its wait per tier (it must outlast the
       # fill, else a cold-key burst all reaches the origin, yet it bounds the
       # queue on an uncacheable key). Static files fill fast: 1s. HTML: 5s.
@@ -563,7 +568,7 @@ for f in "$ORT" "$ANG"; do
       lt2 = tolower(LT); ltc = tolower(LTC)
       if (lt2 !~ /pcall\(cm\.micro_note\)/ || lt2 !~ /"cfm_apache_micro"/) print "ERR the http-level log_by_lua no longer calls cfm_cache.micro_note for cfm_apache_micro requests — Tier B would stop remembering uncacheable keys and their requests would queue on the cache lock."
       if (lt2 ~ /cfm_req_auth|cfm_cache_skip|cfm_cache_non200|cfm_cc_nostore|cfm_xae_nocache|cfm_cache_too_big|cfm_micro_conf|cfm_sc_unsafe/) print "ERR inline Lua references $cfm_req_auth / $cfm_cache_skip / $cfm_cache_non200 / $cfm_cc_nostore / $cfm_xae_nocache / $cfm_cache_too_big / $cfm_micro_conf / $cfm_sc_unsafe — the cache rails must come only from the conf maps, the sentinel and cfm_cache.lua."
-      if (lt2 !~ /pcall\(cache\.micro_setcookie_filter\)/) print "ERR the inline Lua never calls pcall(cache.micro_setcookie_filter) — Tier B would never store a page (the $cfm_sc_unsafe default stays \"1\") or, with the default removed, would store and replay Set-Cookie headers."
+      if (lt2 !~ /local okc, cache = pcall\(require, "cfm_cache"\)[[:space:]]+if okc and cache and cache\.micro_setcookie_filter then[[:space:]]+local oks, errs = pcall\(cache\.micro_setcookie_filter\)/) print "ERR the inline Lua never calls pcall(cache.micro_setcookie_filter) — Tier B would never store a page (the $cfm_sc_unsafe default stays \"1\") or, with the default removed, would store and replay Set-Cookie headers."
       # ...by any spelling: ngx.var is read ONLY as ngx.var.<name> (a bracket
       # index or an alias reaches a variable by a computed name, which the
       # check above cannot see), and never assigned for a CFM variable (one of

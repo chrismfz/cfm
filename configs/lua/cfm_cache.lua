@@ -765,7 +765,8 @@ local function micro_cookie_verdict(cookie_header, strict, extra_auth)
 end
 
 -- Response-side tracking cookies (Tier B only). A response whose Set-Cookie
--- headers ALL name one of these is still micro-cached: the micro locations
+-- headers ALL name one of these is still micro-cached (the lines themselves
+-- are removed from every micro response): the micro locations
 -- ignore Set-Cookie for nginx's own store decision and put $cfm_sc_unsafe on
 -- proxy_no_cache instead, and the HTTPS server's header filter
 -- (micro_setcookie_filter) clears $cfm_sc_unsafe and REMOVES those headers on
@@ -777,27 +778,47 @@ end
 -- _fbp server-side on EVERY page, so before this no page of such a site could
 -- be micro-cached (titan/earth 2026-10-13). Deliberately narrow — identifiers
 -- that only an analytics script reads, never the app: Meta's _fbp/_fbc and
--- Google's _ga/_ga_<id>/_gid/_gat/_gat_<id>/_gcl_<x>. It is NOT the request
+-- Google's _ga/_ga_<ID>/_gid/_gat/_gcl_{au,aw,dc,gb,gf,ha,gs}. It is NOT the request
 -- ignore-list above (cfm_* and consent cookies are not here: an origin that
 -- sets one of those is telling the visitor something per visitor).
-local MICRO_SETCOOKIE_TRACKING_EXACT = norm_set({
+-- Matched on the name AS THE BROWSER STORES IT (case-insensitive, after a
+-- __Secure- / __Host- prefix), never through cookie_key(): those are PHP's
+-- request-side readings, and a response cookie named "_ga.sid" or "_ga%20" is
+-- not Google's. A name must be [A-Za-z0-9_-] only.
+local MICRO_SETCOOKIE_TRACKING_EXACT = {
     ["_fbp"] = true, ["_fbc"] = true,
     ["_ga"] = true, ["_gid"] = true, ["_gat"] = true,
-})
-local MICRO_SETCOOKIE_TRACKING_PREFIX = norm_list({ "_ga_", "_gat_", "_gcl_" })
+    -- Google Ads / Floodlight conversion linker
+    ["_gcl_au"] = true, ["_gcl_aw"] = true, ["_gcl_dc"] = true, ["_gcl_gb"] = true,
+    ["_gcl_gf"] = true, ["_gcl_ha"] = true, ["_gcl_gs"] = true,
+}
 
 -- setcookie_name: the cookie name of ONE Set-Cookie header value (RFC 6265
 -- §5.2: the name-value pair is everything before the first ';', the name what
--- precedes its first '='). nil when there is no '=' in that pair or the name
--- is empty: a line the edge cannot read is never treated as tracking.
+-- precedes its first '='). nil when that pair has no '=', an empty name, a
+-- name outside [A-Za-z0-9_-], or a ',' anywhere in it: a line joining several
+-- cookies ("_fbp=x, wordpress_logged_in_y=z") is never read as its first one.
+-- Linear: plain finds, one anchored single-class match on a short name.
 local function setcookie_name(line)
     if type(line) ~= "string" then return nil end
     local semi = line:find(";", 1, true)
     local pair = semi and line:sub(1, semi - 1) or line
-    if not pair:find("=", 1, true) then return nil end
+    if not pair:find("=", 1, true) or pair:find(",", 1, true) then return nil end
     local name = cookie_name(pair)
-    if not name or name == "" then return nil end
+    if not name or name == "" or #name > 128 or name:find("[^%w_%-]") then return nil end
     return name
+end
+
+-- setcookie_is_tracking: PURE. A name from setcookie_name.
+local function setcookie_is_tracking(name)
+    local l = name:lower()
+    if l:sub(1, 9) == "__secure-" then name = name:sub(10); l = l:sub(10)
+    elseif l:sub(1, 7) == "__host-" then name = name:sub(8); l = l:sub(8) end
+    if MICRO_SETCOOKIE_TRACKING_EXACT[l] then return true end
+    -- GA4: _ga_<measurement id>, the id upper-case letters and digits as Google
+    -- writes it (so not "_ga_session")
+    if name:sub(1, 4):lower() == "_ga_" and name:sub(5):find("^[A-Z0-9]+$") then return true end
+    return false
 end
 
 -- setcookie_tracking_only: PURE. true when every Set-Cookie value (a string, or
@@ -809,10 +830,7 @@ local function setcookie_tracking_only(sc)
     if #lines == 0 then return false end
     for _, l in ipairs(lines) do
         local name = setcookie_name(l)
-        if not name then return false end
-        if not name_matches(cookie_key(name), MICRO_SETCOOKIE_TRACKING_EXACT, MICRO_SETCOOKIE_TRACKING_PREFIX) then
-            return false
-        end
+        if not name or not setcookie_is_tracking(name) then return false end
     end
     return true
 end
@@ -821,14 +839,19 @@ end
 -- header_filter_by_lua_block; a location-level one would replace that block,
 -- check_site_cache_config.sh refuses it). Acts only on a response a
 -- @cfm_micro_<n>s location produced ($cfm_upstream "cfm_apache_micro"):
---   * no Set-Cookie            → $cfm_sc_unsafe = ""  (storable as far as cookies go)
---   * only tracking cookies    → headers removed, $cfm_sc_unsafe = ""
---   * anything else            → untouched, $cfm_sc_unsafe stays "1"
+--   * every tracking Set-Cookie line is REMOVED, always — whatever else the
+--     response carries, fetched or served from cache. A stored copy keeps the
+--     first fetch's tracking line (nginx stores the origin's headers), and a
+--     line added to the request before the micro exec must not turn a HIT
+--     into "not tracking-only" and let that stored line out.
+--   * $cfm_sc_unsafe = "" when nothing else is left (no Set-Cookie, or only
+--     tracking ones); any other or unreadable line stays, untouched, and keeps
+--     the fail-closed "1".
 -- nginx tests proxy_no_cache after the header filters ran (verified on nginx
--- 1.24 + lua-nginx-module 0.10.26), so this decides the store. On a cache HIT
--- the stored copy still carries the first fetch's tracking Set-Cookie (nginx
--- stores the origin's headers); this filter removes it there too. An error
--- here leaves "1": nothing stored, cookies delivered.
+-- 1.24 + lua-nginx-module 0.10.26; Angie shares the code), so this decides the
+-- store. An error here leaves "1" and the headers as sent: nothing stored. The
+-- micro cache key carries "sc1|" so an older conf without this filter (a
+-- downgrade) can never HIT an entry stored with a tracking line in it.
 function _M.micro_setcookie_filter()
     local v = ngx.var
     if v.cfm_upstream ~= "cfm_apache_micro" then return end
@@ -837,10 +860,18 @@ function _M.micro_setcookie_filter()
         v.cfm_sc_unsafe = ""
         return
     end
-    if setcookie_tracking_only(sc) then
-        ngx.header["Set-Cookie"] = nil
-        v.cfm_sc_unsafe = ""
+    local lines = type(sc) == "table" and sc or { sc }
+    local keep = {}
+    for _, l in ipairs(lines) do
+        local name = setcookie_name(l)
+        if not (name and setcookie_is_tracking(name)) then keep[#keep + 1] = l end
     end
+    if #keep < #lines then
+        if #keep == 0 then ngx.header["Set-Cookie"] = nil
+        elseif #keep == 1 then ngx.header["Set-Cookie"] = keep[1]
+        else ngx.header["Set-Cookie"] = keep end
+    end
+    if #keep == 0 then v.cfm_sc_unsafe = "" end
 end
 
 -- Request paths never micro-cached even for an anonymous client. A plain
