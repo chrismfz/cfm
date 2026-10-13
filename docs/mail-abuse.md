@@ -70,7 +70,12 @@ purpose or not yet closed:
   that runs at a steady rate can read "done before" once its first hours are
   in the peak (the recent window's current hour is partial).
 
-If the peak cannot be read, every spike is judged without it. An
+"Done before" only ever decides a spike with no tell of abuse, so what it
+weighs is info-or-nothing (or the stepped-down warning of an extreme one),
+never a page; a spike with a tell skips it. If the peak cannot be read, a
+tell-less spike is held for the next check (published blind it would page a
+usual run and keep it from "done before" for 28 days); one with a tell is
+judged as ever. An
 open finding keeps being judged as before (its own incident is in the peak by
 then). Without the abuse check (stale, or `MAIL_ABUSE_ALERT = 0`)
 `whats_wrong` lists the raw anomalies, a spike under its peak as info. A monthly run older than the counters' 30 days, or a sender's first
@@ -94,17 +99,20 @@ tells:
   is the same owner, shown as `· as claim@…` and no tell;
 - the contact-form pattern;
 - a `mail_bounce_spike` finding of the same mailbox this check;
-- the mailbox is logged in from many countries this hour (a hijack candidate,
-  which the spike in turn confirms — unless that is all the spike has: a
-  mailbox read from three countries sending its usual run, under its peak,
-  with no other tell and no incident open or alerted on, does not confirm it);
 - it SENT mail (SMTP AUTH) from 10 addresses or more in the hour (a botnet
   with the password; an office is a phone, a desktop and a webmail, and the
-  phones that only read an office mailbox are not counted).
+  phones that only read an office mailbox are not counted). Logins are kept
+  for an hour, so a botnet that stopped over an hour ago is not counted.
 
-A tell also keeps a spike under the 50-message floor an alert, and a hijack
-candidate's small spike over its peak still confirms the hijack. The message
+A tell also keeps a spike under the 50-message floor an alert. The message
 names how many addresses the mailbox SENT from (`· sent from 3 IPs`).
+
+Logins from many countries (a hijack candidate) are NOT a tell of the spike:
+the spike is what CONFIRMS the hijack ("Hijack severity" below). Counting it
+both ways made a mailbox read from three countries that sends its usual run a
+finding that then confirmed its own hijack — a critical page for an owner on a
+trip. So the usual run (under its peak, no tell of its own) is no finding and
+confirms nothing; a spike past its peak, even volume-only info, confirms it.
 
 Local script spikes (`mail_script_spike`) keep their severity: a hacked site
 sending as its own domain to many addresses shows none of these tells. "Done

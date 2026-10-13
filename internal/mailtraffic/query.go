@@ -88,6 +88,9 @@ type Anomaly struct {
 	// UnderPeak: a spike strictly under its Peak — the one definition, which
 	// the abuse check (doneBefore) and whats_wrong's fallback both read.
 	UnderPeak bool `json:"under_peak,omitempty"`
+	// PeakUnknown: the peak could not be read this time (the store failed);
+	// the abuse check then holds a tell-less spike instead of judging it.
+	PeakUnknown bool `json:"peak_unknown,omitempty"`
 }
 
 // Summary is the read view served by GET /api/v1/mail/traffic. All lists are
@@ -354,14 +357,14 @@ func (s *Store) anomalyScan(now time.Time, scope map[string]struct{}, col string
 	}
 	peaks, err := s.peakWindows(col, flagged, now)
 	if err != nil {
-		// the peak only spares a sender's usual run: without it every spike is
-		// judged as before (Peak 0 = never "done before"), the check goes on
-		logging.Logf("[mailtraffic] sender peaks not read (%v): judging spikes without them", err)
-		peaks = nil
+		// the peak only spares a sender's usual run: the check goes on, and
+		// spikes with a tell of abuse are judged as ever (PeakUnknown)
+		logging.Logf("[mailtraffic] sender peaks not read (%v): tell-less spikes held this check", err)
 	}
 	for i := range out {
 		out[i].Peak = peaks[out[i].Addr]
 		out[i].UnderPeak = out[i].Kind == "spike" && out[i].Peak > 0 && out[i].Recent < out[i].Peak
+		out[i].PeakUnknown = err != nil && out[i].Kind == "spike"
 	}
 	sort.Slice(out, func(i, j int) bool {
 		// New senders first (strongest signal), then higher ratio, then volume.

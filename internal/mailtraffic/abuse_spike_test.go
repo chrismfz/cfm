@@ -157,11 +157,11 @@ func TestVolumeOnlyStepsDownOneLevel(t *testing.T) {
 		dovecotLogin(tr, "info@shop.gr", "imap", ip, spikeT)
 	}
 	fs, _, _, _ = tr.evaluateWith(st, spikeT, nil, nil)
-	if f := outFinding(t, fs); f == nil || f.Severity != "warning" || strings.Contains(f.Message, "volume only") {
-		t.Fatalf("a spike of a mailbox logged in from many countries is a warning: %+v", fs)
+	if f := outFinding(t, fs); f == nil || f.Severity != "info" {
+		t.Fatalf("the hijack candidate is not a tell of the spike: volume only: %+v", fs)
 	}
 	if h := onlyHijack(t, fs); h.Severity != "critical" {
-		t.Fatalf("and the hijack is confirmed by it: %+v", h)
+		t.Fatalf("but a spike past its peak confirms the hijack: %+v", h)
 	}
 }
 
@@ -238,10 +238,11 @@ func TestAlertedSpikeIsNeverDoneBefore(t *testing.T) {
 	}
 }
 
-// Review of PR #1598: a spike sent from many addresses at once (a botnet with
-// the password) is not volume only, and a hijack candidate's small spike is
-// still a finding: it confirms the hijack.
-func TestManyIPsAndHijackAreTells(t *testing.T) {
+// Review of PR #1598 / #1599: a spike SENT from many addresses at once (a
+// botnet with the password) is not volume only — an office's phones reading
+// it are not counted — and a hijack candidate is not a tell of the spike: its
+// small, mild spike is no finding and confirms nothing.
+func TestManySendersIsATellAHijackCandidateIsNot(t *testing.T) {
 	stubGeo(t, func(string) (string, uint) { return "GR", 3 })
 	st := spikeStore(t, "info@shop.gr")
 	addOut(t, st, "info@shop.gr", spikeT.Add(-time.Hour), 60)
@@ -269,11 +270,11 @@ func TestManyIPsAndHijackAreTells(t *testing.T) {
 		dovecotLogin(tr, "info@shop.gr", "imap", ip, spikeT)
 	}
 	fs, _, _, _ = tr.evaluateWith(st, spikeT, nil, nil)
-	if f := outFinding(t, fs); f == nil {
-		t.Fatalf("a hijack candidate's small spike is a finding: %+v", fs)
+	if f := outFinding(t, fs); f != nil {
+		t.Fatalf("a small, mild spike of a hijack candidate is no finding: %+v", f)
 	}
-	if h := onlyHijack(t, fs); h.Severity != "critical" {
-		t.Fatalf("and it confirms the hijack: %+v", h)
+	if h := onlyHijack(t, fs); h.Severity != "warning" {
+		t.Fatalf("and confirms nothing: %+v", h)
 	}
 }
 
@@ -312,9 +313,9 @@ func TestNewSenderIsNotSteppedDown(t *testing.T) {
 	}
 }
 
-// Review of PR #1598: a mailbox read from three countries sending its usual
-// run (under its own peak) is a finding — the hijack candidate is a tell —
-// but it does not confirm the hijack: its volume is not news.
+// Review of PR #1598 / #1599: a mailbox read from three countries sending its
+// usual run (under its own peak, no tell of its own) is no spike finding, so
+// it does not confirm the hijack — on the first check or any later one.
 func TestUsualRunDoesNotConfirmAHijack(t *testing.T) {
 	stubGeo(t, threeCountries)
 	st := spikeStore(t, "info@shop.gr")
@@ -324,12 +325,19 @@ func TestUsualRunDoesNotConfirmAHijack(t *testing.T) {
 	for _, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"} {
 		dovecotLogin(tr, "info@shop.gr", "imap", ip, spikeT)
 	}
-	fs, _, _, _ := tr.evaluateWith(st, spikeT, nil, nil)
-	if outFinding(t, fs) == nil {
-		t.Fatalf("still a finding: %+v", fs)
-	}
-	if h := onlyHijack(t, fs); h.Severity != "warning" {
-		t.Fatalf("its usual run does not confirm the hijack: %+v", h)
+	open := map[string]bool{}
+	for check := 0; check < 3; check++ {
+		fs, _, _, _ := tr.evaluateWith(st, spikeT.Add(time.Duration(check)*5*time.Minute), open, nil)
+		if f := outFinding(t, fs); f != nil {
+			t.Fatalf("check %d: its usual run is no finding: %+v", check, f)
+		}
+		h := onlyHijack(t, fs)
+		if h.Severity != "warning" {
+			t.Fatalf("check %d: its usual run does not confirm the hijack: %+v", check, h)
+		}
+		for _, f := range fs {
+			open[f.Key] = true // what the publisher holds open after it
+		}
 	}
 }
 
@@ -349,5 +357,19 @@ func TestUsualRunWithATellConfirmsAHijack(t *testing.T) {
 	fs, _, _, _ := tr.evaluateWith(st, spikeT, nil, nil)
 	if h := onlyHijack(t, fs); h.Severity != "critical" {
 		t.Fatalf("a spike with a tell of its own confirms the hijack: %+v", h)
+	}
+}
+
+// Review of PR #1599: when the peak cannot be read, a tell-less spike is held
+// (not published blind, which would page a usual run and keep it from "done
+// before" for 28 days); one with a tell is judged as ever.
+func TestPeakUnknownHoldsTellLessSpikes(t *testing.T) {
+	tr := newTracker()
+	a := Anomaly{Addr: "a@x.gr", Kind: "spike", Recent: 100, PeakUnknown: true}
+	if !tr.doneBefore(a, "mail:out:a@x.gr", false) {
+		t.Fatal("a tell-less spike with an unknown peak is held")
+	}
+	if tr.doneBefore(a, "mail:out:a@x.gr", true) {
+		t.Fatal("an open one is still judged")
 	}
 }

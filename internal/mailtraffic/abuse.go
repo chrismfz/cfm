@@ -42,7 +42,6 @@ import (
 	"net"
 	"os"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -803,12 +802,14 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		c := t.context("auth:"+a.Addr, a.Addr)
 		key := "mail:out:" + a.Addr
 		senders := t.smtpSources(a.Addr, now)
-		// many SENDING addresses at once is a botnet using the password, not
-		// an office (a phone, a desktop and a webmail are three); the phones
-		// that only read an office mailbox are not counted. otherTell: a tell
-		// that is not the hijack candidate itself (which this spike confirms)
-		otherTell := c.abusive() || found["mail:bounce:auth:"+a.Addr] || senders >= spikeManyIPs
-		tell := otherTell || hijacked[a.Addr]
+		// the spike's OWN tells. Many SENDING addresses at once is a botnet
+		// using the password, not an office (a phone, a desktop and a webmail
+		// are three; phones that only read an office mailbox are not counted).
+		// A hijack candidate is not one: the spike CONFIRMS the hijack, and a
+		// mailbox read from three countries sending its usual run would
+		// otherwise confirm it with its own volume — a loop back to the
+		// critical pages the hijack severity removed (review of #1599).
+		tell := c.abusive() || found["mail:bounce:auth:"+a.Addr] || senders >= spikeManyIPs
 		if (!tell && t.doneBefore(a, key, open[key])) || belowAlertFloor(a, tell, open[key]) {
 			continue
 		}
@@ -829,14 +830,8 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		msg := clip(c.describe(head))
 		f := abuseFinding{Type: TypeOutboundSpike, Severity: sev, Key: "mail:out:" + a.Addr, Message: msg, Expected: expectedOf(a)}
 		fs = append(fs, f)
-		// it confirms a hijack unless the hijack candidate is all it has: a
-		// mailbox read from three countries sending its usual run (under its
-		// peak, nothing else abusive, no incident open or alerted on) is not
-		// a thief sending — its volume is no news
-		if !a.UnderPeak || otherTell || open[key] || t.alerted[key] {
-			found[f.Key] = true
-		}
-		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, IPs: len(t.authIPs[a.Addr]), Context: &c})
+		found[f.Key] = true // a hijack candidate's spike confirms the hijack
+		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, IPs: senders, Context: &c})
 	}
 	for _, v := range others {
 		fs = append(fs, abuseFinding{Type: v.Type, Severity: v.Severity, Key: v.Key, Message: v.Message})
@@ -928,9 +923,11 @@ func (c Context) abusive() bool {
 // critical) within the peak's days: that peak may be the thief's first wave.
 // Spikes resolved before this memory existed (cfm 2026-10-14) are not in it.
 // Strictly under the peak (Anomaly.UnderPeak): a run as large as the record
-// is not "done before".
+// is not "done before". When the peak could not be read (PeakUnknown) a
+// tell-less spike is held for the next check rather than published blind:
+// it would page a usual run and keep it from "done before" for 28 days.
 func (t *tracker) doneBefore(a Anomaly, key string, open bool) bool {
-	return !open && !t.alerted[key] && a.UnderPeak
+	return !open && !t.alerted[key] && (a.UnderPeak || a.PeakUnknown)
 }
 
 // setAlerted records the spike keys alerted on within anomalyPeakDays
@@ -943,12 +940,15 @@ func (t *tracker) setAlerted(keys map[string]bool) {
 
 // smtpSources counts the distinct sources a mailbox SENT mail from (SMTP
 // AUTH) within hijackWindow — fetchers and gateways each one source, the
-// node's own and private addresses none (authSource).
+// node's own and private addresses none (authSource). Logins are kept for
+// hijackWindow (1 h), the spike's window is 2 h: a botnet that stopped over an
+// hour ago is not counted.
 func (t *tracker) smtpSources(user string, now time.Time) int {
 	cutoff := now.Add(-hijackWindow)
 	srcs := map[string]bool{}
+	smtp := viaIndex("smtp")
 	for ip, a := range t.authIPs[user] {
-		if !slices.Contains(a.within(cutoff), "smtp") {
+		if a.via[smtp].IsZero() || a.via[smtp].Before(cutoff) {
 			continue
 		}
 		if src, _ := authSource(ip); src != "" {

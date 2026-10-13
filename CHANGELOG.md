@@ -22,13 +22,15 @@ back-filled here — see the git/PR history for that period.
   2026-10-13 change.** The sender's peak is now measured over three hourly
   buckets, the same span as the recent window, so an order or payroll run
   spread over three hours is no longer paged every day. A mailbox read from
-  three countries that sends its usual run no longer confirms a hijack: the
-  spike is still a finding, but its volume is not news (another tell, or an
-  incident already open or alerted on, still confirms it). Sending from 10+
+  three countries that sends its usual run no longer confirms a hijack:
+  logins from many countries are no longer a tell of the spike (the spike is
+  what confirms the hijack), so the usual run is "done before" and no
+  finding; a spike past its peak still confirms it. Sending from 10+
   addresses counts as a tell only for addresses that SENT mail, not an
   office's phones reading the mailbox, and the message now says
-  `· sent from N IPs`. If the peak cannot be read, the check judges spikes
-  without it instead of skipping the whole mail check. `whats_wrong`'s
+  `· sent from N IPs`. If the peak cannot be read, the check holds the
+  tell-less spikes for the next check instead of skipping the whole mail
+  check. `whats_wrong`'s
   fallback lists warnings before the runs under their peak, and reads the
   node's `under_peak` instead of its own copy of the rule.
 - **A mailbox sending its usual big run, or volume with nothing abusive
