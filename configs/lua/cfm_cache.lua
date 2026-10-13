@@ -854,10 +854,27 @@ end
 -- store. An error here leaves "1" and the headers as sent: nothing stored. The
 -- micro cache key carries "sc1|" so an older conf without this filter (a
 -- downgrade) can never HIT an entry stored with a tracking line in it.
+-- The lines are read with ngx.resp.get_headers(0): an ngx.header read stops at
+-- 100 values (lua-resty-core MAX_HEADER_VALUES), so 100 tracking lines before a
+-- login cookie read as "tracking only" — the page was stored and the login
+-- line, assigned back from the truncated list, dropped. Where only ngx.header
+-- exists (a mock, an old module) a list of 100 or more is left alone, unsafe.
+local SETCOOKIE_READ_CAP = 100
+local function response_setcookie()
+    local resp = ngx.resp
+    if resp and resp.get_headers then
+        local h = resp.get_headers(0)
+        return h and h["set-cookie"], true
+    end
+    local sc = ngx.header["Set-Cookie"]
+    return sc, not (type(sc) == "table" and #sc >= SETCOOKIE_READ_CAP)
+end
+
 function _M.micro_setcookie_filter()
     local v = ngx.var
     if v.cfm_upstream ~= "cfm_apache_micro" then return end
-    local sc = ngx.header["Set-Cookie"]
+    local sc, complete = response_setcookie()
+    if not complete then return end
     if sc == nil or (type(sc) == "table" and #sc == 0) then
         v.cfm_sc_unsafe = ""
         return

@@ -999,6 +999,34 @@ do
   check(h == "noequals" and u == "1", "micro, an unreadable cookie → untouched, stays unsafe")
   h, u = run("cfm_apache_micro", {}, "1")
   check(u == "", "micro, an empty Set-Cookie table counts as none")
+  -- 100+ values: ngx.header stops reading at 100 (lua-resty-core)
+  local many = {}
+  for i = 1, 100 do many[i] = "_fbp=" .. i end
+  many[101] = "wordpress_logged_in_x=u"
+  local function capped(t) local c = {} for i = 1, math.min(#t, 100) do c[i] = t[i] end return c end
+  -- (a) ngx.header only, which truncates at 100 → left alone, unsafe
+  for k in pairs(_header) do _header[k] = nil end
+  setmetatable(_header, { __index = function(_, k) if k == "Set-Cookie" then return capped(many) end end })
+  ngx.var.cfm_upstream = "cfm_apache_micro"; ngx.var.cfm_sc_unsafe = "1"
+  cache.micro_setcookie_filter()
+  check(ngx.var.cfm_sc_unsafe == "1" and rawget(_header, "Set-Cookie") == nil,
+        "ngx.header-only, 100 values (maybe truncated) → nothing cleared, nothing rewritten")
+  setmetatable(_header, nil)
+  -- (b) ngx.resp.get_headers(0) reads every line → the login cookie keeps it unsafe and is kept
+  ngx.resp = { get_headers = function(n)
+    assert(n == 0, "get_headers must be called uncapped")
+    return { ["set-cookie"] = _header["Set-Cookie"] }
+  end }
+  h, u = run("cfm_apache_micro", many, "1")
+  check(u == "1" and h == "wordpress_logged_in_x=u",
+        "101 lines via get_headers(0): 100 tracking lines stripped, the login line kept, stays unsafe")
+  local all = {}
+  for i = 1, 150 do all[i] = "_ga=" .. i end
+  h, u = run("cfm_apache_micro", all, "1")
+  check(u == "" and h == nil, "150 tracking-only lines via get_headers(0) → stripped and cleared")
+  h, u = run("cfm_apache_micro", { "_fbp=1", "PHPSESSID=2" }, "1")
+  check(h == "PHPSESSID=2" and u == "1", "get_headers path: same verdicts as ngx.header")
+  ngx.resp = nil
   h, u = run("cfm_apache", "_fbp=1", "1")
   check(h == "_fbp=1" and u == "1", "not a micro response → never touched")
   h, u = run(nil, "_fbp=1", "1")

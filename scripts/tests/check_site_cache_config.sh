@@ -48,7 +48,9 @@
 #       cfm_cache.micro_setcookie_filter, which that server's ONE
 #       header_filter_by_lua_block must call (a location-level one in a micro
 #       location would replace it, and the tracking cookies would be stored
-#       and served to everyone); nothing else
+#       and served to everyone) — unconditionally: the exact call at block
+#       depth 0, nothing before it that leaves the block, nothing in that
+#       block rebinding pcall / require / ngx / okc / cache (section b1); nothing else
 #       writing them — proxy_cache_background_update off (on keeps serving a
 #       stale page whose refresh can no longer be stored), exactly
 #       `proxy_cache_use_stale updating error timeout http_500 http_502
@@ -627,6 +629,87 @@ for f in "$ORT" "$ANG"; do
   # no_cache / only-200 predicates, the four rail maps, the per-server
   # $cfm_cache_skip "1") are enforced statement-aware in section (a), counted
   # by the parser, so a commented-out directive never satisfies them.
+
+  # ── (b1) the micro Set-Cookie filter call is unconditional ─────────────────
+  # Section (a) pins that the inline Lua contains the call; this pins HOW it
+  # runs. In the header_filter_by_lua_block that calls it (comments and blank
+  # lines dropped, strings masked for the token scan): the four statements
+  # are consecutive, each on its own line, and open at block depth 0 — not
+  # inside an `if false then`, a HIT-only branch or a function. Nothing
+  # before them may leave the block (return / goto / ngx.exit / error), and
+  # nothing in the block may rebind pcall, require, ngx, okc, cache or the
+  # filter, or reach them through _G / _ENV / setmetatable / rawset / setfenv /
+  # package / load*. A skipped call leaves $cfm_sc_unsafe "1" (nothing stored:
+  # safe, but Tier B silently stops), a rebound one could clear it for any
+  # response. Long strings / long comments are refused here (their contents
+  # would go unscanned).
+  sc_hf=$(awk '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function blank(s,   o, i, ch, q) {
+      o = ""; q = ""
+      for (i = 1; i <= length(s); i++) {
+        ch = substr(s, i, 1)
+        if (q != "") { if (ch == "\\") { o = o "xx"; i++; continue } if (ch == q) { q = ""; o = o ch } else o = o "x"; continue }
+        if (ch == "\"" || ch == "\047") { q = ch; o = o ch; continue }
+        o = o ch
+      }
+      return o
+    }
+    /^[[:space:]]*header_filter_by_lua_block[[:space:]]*[{][[:space:]]*$/ { inb = 1; nb++; n = 0; d = 1; next }
+    inb {
+      l = $0
+      if (l ~ /--\[=*\[/ || l ~ /\[=*\[/) { print "ERR header filter block " nb ": a long string or long comment — the Set-Cookie filter pin cannot scan it."; }
+      b = blank(l); c = index(b, "--")
+      if (c) { l = substr(l, 1, c - 1); b = substr(b, 1, c - 1) }
+      t = b; gsub(/[^{}]/, "", t)
+      for (i = 1; i <= length(t); i++) { if (substr(t, i, 1) == "{") d++; else d-- }
+      if (d <= 0) { inb = 0; L[nb] = n; next }
+      if (trim(l) == "") next
+      n++; RAW[nb, n] = trim(l); BL[nb, n] = b
+      next
+    }
+    END {
+      want[1] = "local okc, cache = pcall(require, \"cfm_cache\")"
+      want[2] = "if okc and cache and cache.micro_setcookie_filter then"
+      want[3] = "local oks, errs = pcall(cache.micro_setcookie_filter)"
+      want[5] = "end"
+      found = 0
+      for (k = 1; k <= nb; k++) {
+        has = 0
+        for (i = 1; i <= L[k]; i++) if (index(RAW[k, i], "micro_setcookie_filter")) has = 1
+        if (!has) continue
+        found++
+        at = 0
+        for (i = 1; i + 4 <= L[k]; i++) {
+          if (RAW[k, i] == want[1] && RAW[k, i + 1] == want[2] && RAW[k, i + 2] == want[3] \
+              && RAW[k, i + 3] ~ /^if not oks then ngx\.log\(ngx\.ERR, "\[cfm_cache\] micro_setcookie_filter failed: ", tostring\(errs\)\) end$/ \
+              && RAW[k, i + 4] == want[5]) { at = i; break }
+        }
+        if (!at) { print "ERR the header filter does not carry the exact four-statement micro_setcookie_filter call (local okc, cache = pcall(require, \"cfm_cache\") / if okc and cache and cache.micro_setcookie_filter then / local oks, errs = pcall(cache.micro_setcookie_filter) / if not oks then ngx.log(...) end / end), each on its own line."; continue }
+        depth = 0
+        for (i = 1; i <= L[k]; i++) {
+          s = BL[k, i]; gsub(/[^A-Za-z0-9_.]/, " ", s)
+          nt = split(s, T, " ")
+          if (i == at && depth != 0) print "ERR the micro_setcookie_filter call opens at Lua block depth " depth " — it must be unconditional (not inside an if / do / function / loop)."
+          for (j = 1; j <= nt; j++) {
+            w = T[j]
+            if (i < at && (w == "return" || w == "goto" || w == "ngx.exit" || w == "error")) print "ERR `" w "` before the micro_setcookie_filter call in the header filter — it can skip the call."
+            if (w ~ /^(_G|_ENV|setmetatable|rawset|setfenv|package|load|loadstring|dofile|debug)(\.|$)/) print "ERR `" w "` in the header filter that calls micro_setcookie_filter — it could rebind what the call depends on."
+            if (w == "if" || w == "do" || w == "function" || w == "repeat") depth++
+            if (w == "end" || w == "until") depth--
+          }
+          if (i != at) {
+            r = BL[k, i]
+            if (r ~ /(^|[^A-Za-z0-9_.])(pcall|require|ngx|okc|cache)[[:space:]]*(,[^=]*)?=([^=]|$)/ || r ~ /,[[:space:]]*(pcall|require|ngx|okc|cache)[[:space:]]*(,[^=]*)?=([^=]|$)/ || r ~ /function[[:space:]]+(pcall|require)([^A-Za-z0-9_]|$)/ || r ~ /micro_setcookie_filter[[:space:]]*=([^=]|$)/ || r ~ /local[[:space:]]+(function[[:space:]]+)?(pcall|require|ngx)([^A-Za-z0-9_]|$)/) print "ERR the header filter rebinds pcall / require / ngx / okc / cache / micro_setcookie_filter: " RAW[k, i]
+          }
+        }
+      }
+      if (found != 1) print "ERR " found " header_filter_by_lua_block(s) call micro_setcookie_filter — want exactly 1."
+    }
+  ' "$f")
+  if [ -n "$sc_hf" ]; then
+    while IFS= read -r line; do err "$f: ${line#ERR }"; done <<< "$sc_hf"
+  fi
 
   # ── (b2) Tier B micro-cache zones (Phase B1): every MICRO_BUCKETS TTL declared ─
   # Each zone's dir must exist before `-t` (the daemon + installers provision
