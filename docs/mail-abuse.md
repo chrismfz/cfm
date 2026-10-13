@@ -47,15 +47,20 @@ sender with one big run a day reads "3×" every day: titan's itadmin@ sent its
 "Order production start" run of 177 one morning and 176 the next, paged both
 days. So a spike (script or mailbox) is also compared with the sender's
 **peak**: the most it sent in any two consecutive whole hours over the 28 days
-before the recent window (`mail_traffic`'s `anomalies` carry it as `peak`).
-The recent window is the hours of now−2 h and now−1 h plus the current one, so
-a sender at a steady rate is always over its peak: an incident not caught at
-its onset (no sink yet, a restart) never becomes its own "done before". At or
-under its peak, **with no tell of abuse** (below), it is a burst this sender
-has sent before: still listed in `anomalies`, never a finding. The tells are
-judged first because the peak can be the same thief's earlier run. An open
-finding keeps being judged as before (its own incident is in the peak by
-then). A monthly run older than the counters' 30 days, or a sender's first
+before the recent window, the last 6 hours before it left out (`mail_traffic`'s
+`anomalies` carry it as `peak`). The gap means an incident not caught at its
+onset (no sink yet, a restart) cannot count its own first hours, even at a
+falling rate; a daily run is a day back. Strictly **under** its peak, **with no
+tell of abuse** (below), it is a burst this sender has sent before: still
+listed in `anomalies`, never a finding (equal is not enough: at the top of an
+hour the current bucket is empty, and a steady sender's two hours equal a
+two-hour peak). The tells are judged first because the peak can be the same
+thief's earlier run, and for the same reason a sender alerted on (a warning or
+critical spike, open or closed within the 28 days, remembered next to the
+hijacks in `mail_abuse_published_hijacks.json`) is never "done before". An
+open finding keeps being judged as before (its own incident is in the peak by
+then). Without the abuse check (stale, or `MAIL_ABUSE_ALERT = 0`)
+`whats_wrong` lists the raw anomalies, a spike under its peak as info. A monthly run older than the counters' 30 days, or a sender's first
 run, is not "done before".
 
 ### Volume alone
@@ -77,7 +82,12 @@ tells:
 - the contact-form pattern;
 - a `mail_bounce_spike` finding of the same mailbox this check;
 - the mailbox is logged in from many countries this hour (a hijack candidate,
-  which the spike in turn confirms: "Hijack severity" below).
+  which the spike in turn confirms: "Hijack severity" below);
+- it is sending from 10 addresses or more at once (a botnet with the
+  password; an office is a phone, a desktop and a webmail).
+
+A tell also keeps a spike under the 50-message floor an alert, so a hijack
+candidate's small spike still confirms the hijack.
 
 Local script spikes (`mail_script_spike`) keep their severity: a hacked site
 sending as its own domain to many addresses shows none of these tells. "Done

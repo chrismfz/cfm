@@ -98,6 +98,7 @@ func (c *Collector) evalAbuse(now time.Time) {
 	}
 	c.lastEval = now
 	c.rbl.maybeRun(c.ctx, now) // background; its results are read on a later check
+	c.ab.setAlerted(c.pub.alertedSpikes(now))
 	fs, recent, held, ok := c.ab.evaluateWith(c.st, now, c.pub.openKeys(), c.rbl)
 	if !ok {
 		return // the store could not be read: change nothing

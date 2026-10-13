@@ -483,15 +483,15 @@ func TestSpikeAlertFloor(t *testing.T) {
 // foreign domain.
 func TestSmallButAbusiveSpikesStillAlert(t *testing.T) {
 	a := Anomaly{Addr: "quiet", Recent: 45, Ratio: 45, Kind: "spike"}
-	if belowAlertFloor(a, Context{}, false) {
+	if belowAlertFloor(a, Context{}.abusive(), false) {
 		t.Fatal("45 at 45× must alert")
 	}
 	mild := Anomaly{Addr: "shop", Recent: 37, Ratio: 4.6, Kind: "spike"}
-	if !belowAlertFloor(mild, Context{}, false) {
+	if !belowAlertFloor(mild, Context{}.abusive(), false) {
 		t.Fatal("37 at 4.6× with a clean context is not an alert")
 	}
-	if belowAlertFloor(mild, Context{ForeignFrom: true}, false) || belowAlertFloor(mild, Context{CopiedTo: "owner@shop.gr"}, false) ||
-		belowAlertFloor(mild, Context{OtherFrom: true}, false) {
+	if belowAlertFloor(mild, Context{ForeignFrom: true}.abusive(), false) || belowAlertFloor(mild, Context{CopiedTo: "owner@shop.gr"}.abusive(), false) ||
+		belowAlertFloor(mild, Context{OtherFrom: true}.abusive(), false) || belowAlertFloor(mild, true, false) {
 		t.Fatal("a small spike that looks like abuse must alert")
 	}
 }

@@ -180,17 +180,114 @@ func TestATellBeatsDoneBefore(t *testing.T) {
 	}
 }
 
-// A sender at a steady rate is always over its peak (two whole hours against
-// two hours plus the current one): an incident not caught at its onset never
-// becomes its own "done before".
-func TestSteadyRateIsOverItsPeak(t *testing.T) {
-	st := spikeStore(t, "info@shop.gr")
-	for h := 6; h >= 0; h-- {
-		addOut(t, st, "info@shop.gr", spikeT.Add(-time.Duration(h)*time.Hour), 100)
+// Review of PR #1598: at the top of an hour the current bucket is empty, and
+// a steady sender's last two hours EQUAL a two-hour peak: equal is not
+// "done before". The hours just before the recent window are not in the
+// peak, so a falling incident cannot hide behind its own first hours.
+func TestSteadyOrFallingRateIsNotDoneBefore(t *testing.T) {
+	st := openTemp(t)
+	for h := 30; h >= 1; h-- {
+		addOut(t, st, "a@x.gr", spikeT.Add(-time.Duration(h)*time.Hour), 100)
 	}
-	a, _, err := st.anomalyScan(spikeT, nil, "outbound")
-	if err != nil || len(a) != 1 || a[0].Recent <= a[0].Peak {
-		t.Fatalf("want recent over peak: %+v %v", a, err)
+	peaks, err := st.peakWindows("outbound", []string{"a@x.gr"}, spikeT)
+	if err != nil || peaks["a@x.gr"] != 200 {
+		t.Fatalf("peak: %+v %v", peaks, err)
+	}
+	tr := newTracker()
+	if tr.doneBefore(Anomaly{Addr: "a@x.gr", Kind: "spike", Recent: 200, Peak: 200}, "mail:out:a@x.gr", false) {
+		t.Fatal("equal to its peak is not done before")
+	}
+
+	st = openTemp(t) // never opened: 150, 100, 50 in the three hours before now
+	for i, n := range []int{150, 100, 50} {
+		addOut(t, st, "b@x.gr", spikeT.Add(-time.Duration(3-i)*time.Hour), n)
+	}
+	if peaks, _ := st.peakWindows("outbound", []string{"b@x.gr"}, spikeT); peaks["b@x.gr"] != 0 {
+		t.Fatalf("the incident's own first hours are not its peak: %+v", peaks)
+	}
+}
+
+// Review of PR #1598: a sender alerted on (warning or critical) within the
+// peak's days is never "done before" — its peak may be the thief's first
+// wave. An info spike is not remembered.
+func TestAlertedSpikeIsNeverDoneBefore(t *testing.T) {
+	recordAbuse(t)
+	T := spikeT
+	p := &publisher{}
+	w := abuseFinding{Type: TypeOutboundSpike, Severity: "warning", Key: "mail:out:a@x.gr", Message: "m", Expected: 8}
+	i := abuseFinding{Type: TypeOutboundSpike, Severity: "info", Key: "mail:out:b@x.gr", Message: "m", Expected: 8}
+	p.apply([]abuseFinding{w, i}, nil, T)
+	if got := p.alertedSpikes(T); !got["mail:out:a@x.gr"] || got["mail:out:b@x.gr"] {
+		t.Fatalf("an open warning is alerted, an info is not: %+v", got)
+	}
+	p.apply(nil, nil, T.Add(time.Hour)) // both resolved
+	if got := p.alertedSpikes(T.Add(10 * 24 * time.Hour)); !got["mail:out:a@x.gr"] || got["mail:out:b@x.gr"] {
+		t.Fatalf("remembered after it closed: %+v", got)
+	}
+	if got := p.alertedSpikes(T.Add(time.Hour + anomalyPeakDays*24*time.Hour)); got["mail:out:a@x.gr"] {
+		t.Fatalf("forgotten after anomalyPeakDays: %+v", got)
+	}
+
+	tr := newTracker()
+	tr.setAlerted(map[string]bool{"mail:out:a@x.gr": true})
+	a := Anomaly{Addr: "a@x.gr", Kind: "spike", Recent: 100, Peak: 300}
+	if tr.doneBefore(a, "mail:out:a@x.gr", false) || !tr.doneBefore(a, "mail:out:c@x.gr", false) {
+		t.Fatal("only the alerted sender loses done-before")
+	}
+}
+
+// Review of PR #1598: a spike sent from many addresses at once (a botnet with
+// the password) is not volume only, and a hijack candidate's small spike is
+// still a finding: it confirms the hijack.
+func TestManyIPsAndHijackAreTells(t *testing.T) {
+	stubGeo(t, func(string) (string, uint) { return "GR", 3 })
+	st := spikeStore(t, "info@shop.gr")
+	addOut(t, st, "info@shop.gr", spikeT.Add(-time.Hour), 60)
+	tr := newTracker()
+	for i := 0; i < spikeManyIPs; i++ {
+		dovecotLogin(tr, "info@shop.gr", "imap", fmt.Sprintf("62.1.1.%d", i), spikeT)
+	}
+	fs, _, _, _ := tr.evaluateWith(st, spikeT, nil, nil)
+	if f := outFinding(t, fs); f == nil || f.Severity != "warning" || strings.Contains(f.Message, "volume only") {
+		t.Fatalf("from %d addresses: a warning: %+v", spikeManyIPs, fs)
+	}
+
+	stubGeo(t, threeCountries)
+	st = spikeStore(t, "info@shop.gr")
+	addOut(t, st, "info@shop.gr", spikeT.Add(-time.Hour), 30) // under the floor
+	tr = newTracker()
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"} {
+		dovecotLogin(tr, "info@shop.gr", "imap", ip, spikeT)
+	}
+	fs, _, _, _ = tr.evaluateWith(st, spikeT, nil, nil)
+	if f := outFinding(t, fs); f == nil {
+		t.Fatalf("a hijack candidate's small spike is a finding: %+v", fs)
+	}
+	if h := onlyHijack(t, fs); h.Severity != "critical" {
+		t.Fatalf("and it confirms the hijack: %+v", h)
+	}
+}
+
+// Review of PR #1598: findings keep their order — spikes, then bounces /
+// queue / blocklists, then hijacks.
+func TestFindingOrder(t *testing.T) {
+	stubGeo(t, threeCountries)
+	st := spikeStore(t, "info@shop.gr")
+	addOut(t, st, "info@shop.gr", spikeT.Add(-time.Hour), 60)
+	tr := newTracker()
+	for _, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"} {
+		dovecotLogin(tr, "info@shop.gr", "imap", ip, spikeT)
+	}
+	for i := 0; i < 40; i++ {
+		tr.outcomes["auth:info@shop.gr"] = append(tr.outcomes["auth:info@shop.gr"], outcome{at: spikeT, bounced: true})
+	}
+	fs, _, _, _ := tr.evaluateWith(st, spikeT, nil, nil)
+	var types []string
+	for _, f := range fs {
+		types = append(types, f.Type)
+	}
+	if strings.Join(types, ",") != TypeOutboundSpike+","+TypeBounceSpike+","+TypeHijack {
+		t.Fatalf("order: %v", types)
 	}
 }
 

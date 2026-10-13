@@ -99,6 +99,10 @@ const (
 	// a spike closes once the recent volume is under this factor of the
 	// expected volume recorded when it opened (or under the spike floor).
 	abuseCloseFactor = 1.5
+	// spikeManyIPs: a mailbox spiking while it sends from this many addresses
+	// at once is a tell of abuse (a botnet with the password), however few
+	// countries they are in.
+	spikeManyIPs = 10
 	// context kept per user / mailbox (bounded: a flood must not grow memory).
 	contextWindow   = anomalyRecentHours * time.Hour
 	maxSamples      = 2000
@@ -263,6 +267,7 @@ type tracker struct {
 	owners     map[string]owner               // exim message id / postfix QID → the sender key it was submitted by
 	outcomes   map[string][]outcome           // sender key → recent remote delivery outcomes
 	rules      map[string]rulesSeen           // mailbox → its forwarder / filter answer (abuse_hijack.go)
+	alerted    map[string]bool                // spike keys alerted on within anomalyPeakDays (doneBefore)
 
 	last      []AbuseView // the latest check's findings, for whats_wrong / mail_traffic
 	lastCheck time.Time
@@ -766,8 +771,9 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 			continue
 		}
 		c := t.context("local:"+a.Addr, "")
+		key := "mail:script:" + a.Addr
 		tell := c.abusive() || found["mail:bounce:local:"+a.Addr]
-		if (!tell && doneBefore(a, open["mail:script:"+a.Addr])) || belowAlertFloor(a, c, open["mail:script:"+a.Addr]) {
+		if (!tell && t.doneBefore(a, key, open[key])) || belowAlertFloor(a, tell, open[key]) {
 			continue
 		}
 		msg := clip(c.describe(fmt.Sprintf("%s: %d messages sent by scripts in %dh (%s)", a.Addr, a.Recent, anomalyRecentHours, usual(a))))
@@ -792,19 +798,19 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 			}
 		}
 	}
-	for _, v := range others {
-		fs = append(fs, abuseFinding{Type: v.Type, Severity: v.Severity, Key: v.Key, Message: v.Message})
-		views = append(views, v)
-	}
 	for _, a := range out {
 		c := t.context("auth:"+a.Addr, a.Addr)
-		tell := c.abusive() || found["mail:bounce:auth:"+a.Addr] || hijacked[a.Addr]
-		if (!tell && doneBefore(a, open["mail:out:"+a.Addr])) || belowAlertFloor(a, c, open["mail:out:"+a.Addr]) {
+		key := "mail:out:" + a.Addr
+		ips := len(t.authIPs[a.Addr])
+		// many sending addresses at once is a botnet using the password, not
+		// an office (a phone, a desktop and a webmail are three)
+		tell := c.abusive() || found["mail:bounce:auth:"+a.Addr] || hijacked[a.Addr] || ips >= spikeManyIPs
+		if (!tell && t.doneBefore(a, key, open[key])) || belowAlertFloor(a, tell, open[key]) {
 			continue
 		}
 		head := fmt.Sprintf("%s: %d authenticated messages in %dh (%s)", a.Addr, a.Recent, anomalyRecentHours, usual(a))
-		if ips := t.authIPs[a.Addr]; len(ips) > 1 && !hijacked[a.Addr] {
-			head += fmt.Sprintf(" · from %d IPs", len(ips))
+		if ips > 1 && !hijacked[a.Addr] {
+			head += fmt.Sprintf(" · from %d IPs", ips)
 		}
 		sev := spikeSeverity(a)
 		if !tell && a.Kind == "spike" {
@@ -821,6 +827,10 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		fs = append(fs, f)
 		found[f.Key] = true
 		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, IPs: len(t.authIPs[a.Addr]), Context: &c})
+	}
+	for _, v := range others {
+		fs = append(fs, abuseFinding{Type: v.Type, Severity: v.Severity, Key: v.Key, Message: v.Message})
+		views = append(views, v)
 	}
 	var ask []string // only a candidate nothing else confirmed costs file reads
 	for _, h := range cands {
@@ -882,13 +892,14 @@ func CurrentAbuse() ([]AbuseView, time.Time) {
 // belowAlertFloor: a MILD small spike (under abuseAlertFloor messages, under
 // abuseCritRatio× its usual) is not an alert — a newsletter or a busy day. A
 // small one far above its usual (a quiet site hacked, 45 a day at 45×), or one
-// that looks like abuse (sending as a foreign domain or another mailbox, the
-// contact-form pattern), still is; and an open one keeps being judged.
-func belowAlertFloor(a Anomaly, c Context, open bool) bool {
+// with a tell of abuse (Context.abusive, bounces of its own, a hijack
+// candidate, many sending addresses), still is; and an open one keeps being
+// judged.
+func belowAlertFloor(a Anomaly, tell, open bool) bool {
 	if open || a.Recent >= abuseAlertFloor || a.Ratio >= abuseCritRatio {
 		return false
 	}
-	return !c.abusive()
+	return !tell
 }
 
 // abusive: the context carries a tell of abuse — a sender outside this
@@ -899,14 +910,24 @@ func (c Context) abusive() bool {
 	return c.ForeignFrom || c.OtherFrom || c.CopiedTo != ""
 }
 
-// doneBefore: a spike no larger than the sender's own peak over the last
+// doneBefore: a spike under the sender's own peak over the last
 // anomalyPeakDays (Anomaly.Peak) is a burst it has sent before — itadmin@'s
 // 177 one morning and 176 the next was paged both days (titan, Oct 2026).
-// Asked only when nothing looks abusive: the peak can be an earlier incident
-// of the same thief. An open finding keeps being judged: its own incident is
-// in the peak by then.
-func doneBefore(a Anomaly, open bool) bool {
-	return !open && a.Kind == "spike" && a.Peak > 0 && a.Recent <= a.Peak
+// Asked only when nothing looks abusive. Never for an open finding (its own
+// incident is in the peak by then), nor for a sender alerted on (warning or
+// critical) within the peak's days: that peak may be the thief's first wave.
+// Strictly under: at the top of an hour the current bucket is still empty,
+// and a steady sender's two hours equal its two-hour peak.
+func (t *tracker) doneBefore(a Anomaly, key string, open bool) bool {
+	return !open && !t.alerted[key] && a.Kind == "spike" && a.Peak > 0 && a.Recent < a.Peak
+}
+
+// setAlerted records the spike keys alerted on within anomalyPeakDays
+// (publisher.alertedSpikes), read by doneBefore.
+func (t *tracker) setAlerted(keys map[string]bool) {
+	t.mu.Lock()
+	t.alerted = keys
+	t.mu.Unlock()
 }
 
 // volumeOnly is a spike's severity with no tell of abuse: one step down.
@@ -1029,8 +1050,10 @@ type openFinding struct {
 	Countries []string `json:"countries,omitempty"`
 }
 
-// pastHijack is a resolved hijack, remembered for hijackQuiet.
-type pastHijack struct {
+// pastFinding is a resolved finding remembered after it closed: a hijack for
+// hijackQuiet (publisher.quiet), a warning / critical spike for
+// anomalyPeakDays (publisher.alertedSpikes).
+type pastFinding struct {
 	Countries []string  `json:"countries"`
 	Severity  string    `json:"severity"`
 	At        time.Time `json:"at"` // when it was resolved
@@ -1041,7 +1064,7 @@ type publisher struct {
 	path   string // "" = not persisted
 	loaded bool
 	open   map[string]openFinding
-	past   map[string]pastHijack // resolved hijacks, kept in pastPath()
+	past   map[string]pastFinding // resolved hijacks, kept in pastPath()
 	// pastDirty: past changed since it was last written (it rarely does; the
 	// open findings are written every check, as before)
 	pastDirty bool
@@ -1084,7 +1107,7 @@ func (p *publisher) load() {
 	}
 	p.loaded = true
 	p.open = map[string]openFinding{}
-	p.past = map[string]pastHijack{}
+	p.past = map[string]pastFinding{}
 	if p.path == "" {
 		return
 	}
@@ -1095,14 +1118,18 @@ func (p *publisher) load() {
 	}
 	if raw, err := os.ReadFile(p.pastPath()); err == nil {
 		if json.Unmarshal(raw, &p.past) != nil {
-			p.past = map[string]pastHijack{}
+			p.past = map[string]pastFinding{}
 		}
 	}
 }
 
 func (p *publisher) save(now time.Time) {
 	for k, h := range p.past {
-		if now.Sub(h.At) >= hijackQuiet {
+		keep := hijackQuiet
+		if !strings.HasPrefix(k, "mail:hijack:") {
+			keep = anomalyPeakDays * 24 * time.Hour
+		}
+		if now.Sub(h.At) >= keep {
 			delete(p.past, k)
 			p.pastDirty = true
 		}
@@ -1141,6 +1168,27 @@ func sevRank(s string) int {
 		return 1
 	}
 	return 0
+}
+
+// alertedSpikes lists the spike keys alerted on (warning or critical) that
+// are open or closed within anomalyPeakDays: their sender's peak may hold that
+// incident, so it is no "done before" (tracker.doneBefore).
+func (p *publisher) alertedSpikes(now time.Time) map[string]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.load()
+	out := map[string]bool{}
+	for k, o := range p.open {
+		if (o.Type == TypeOutboundSpike || o.Type == TypeScriptSpike) && sevRank(o.Severity) >= sevRank("warning") {
+			out[k] = true
+		}
+	}
+	for k, h := range p.past {
+		if !strings.HasPrefix(k, "mail:hijack:") && sevRank(h.Severity) >= sevRank("warning") && now.Sub(h.At) < anomalyPeakDays*24*time.Hour {
+			out[k] = true
+		}
+	}
+	return out
 }
 
 // openKeys lists the findings currently open.
@@ -1239,8 +1287,8 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 		}
 		msg = clip(msg)
 		if publish(TypeRecovered, "info", key, msg, now) {
-			if o.Type == TypeHijack {
-				p.past[key] = pastHijack{Countries: o.Countries, Severity: o.Severity, At: now}
+			if o.Type == TypeHijack || (spike && sevRank(o.Severity) >= sevRank("warning")) {
+				p.past[key] = pastFinding{Countries: o.Countries, Severity: o.Severity, At: now}
 				p.pastDirty = true
 			}
 			delete(p.open, key)

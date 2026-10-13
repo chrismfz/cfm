@@ -27,11 +27,14 @@ back-filled here — see the git/PR history for that period.
   (itadmin@ sent 177 one morning and 176 the next, paged both days). A
   mailbox spike with no tell of abuse (a sender outside this host's domains,
   sending as another domain, the contact-form pattern, bounces of its own,
-  logins from many countries) is published one step down and marked
-  `· volume only`: info instead of a warning (logged, below every warning
-  route), a warning instead of critical. A new sender with no history is not
-  stepped down. A mailbox sending as another address of its OWN domain
-  (`mail@` sending its `claim@` notices) is no longer flagged "(not itself)".
+  logins from many countries, sending from 10+ addresses at once) is
+  published one step down and marked `· volume only`: info instead of a
+  warning (logged, below every warning route), a warning instead of
+  critical. A new sender with no history is not stepped down, and a sender
+  alerted on in the last 28 days is never "done before" (its peak may be the
+  thief's first wave). A mailbox sending as another address of its OWN
+  domain (`mail@` sending its `claim@` notices) is no longer flagged
+  "(not itself)".
   `mail_traffic`'s anomalies carry the sender's `peak`. See docs/mail-abuse.md
   "Done before" and "Volume alone".
 - **A mailbox read from three countries is no longer a critical hijack

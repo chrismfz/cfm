@@ -797,16 +797,10 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 		return evalMailAbuse(*t.Abuse)
 	}
 	var fs []finding
-	shown := 0
-	for _, a := range t.Traffic.Anomalies {
-		if a.Kind == "spike" && a.Peak > 0 && a.Recent <= a.Peak {
-			continue // a burst this sender has sent before (mailtraffic doneBefore)
+	for i, a := range t.Traffic.Anomalies {
+		if i >= wwMailAnomalyCap {
+			break
 		}
-		if shown >= wwMailAnomalyCap {
-			shown++
-			continue
-		}
-		shown++
 		var detail, title string
 		if a.Kind == "new-sender" {
 			title = "new sender blasting outbound mail"
@@ -817,11 +811,19 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 		}
 		// Warning, not critical: a spike can be legitimate bulk/transactional mail;
 		// this is a "look at this account" signal, not proof of compromise.
-		fs = append(fs, finding{sevWarning, "mail", title, detail, "mail_traffic", nil})
+		// Without the abuse check (stale or off) there is no context to judge
+		// it on, so nothing is hidden: a spike under the sender's own peak is
+		// only shown as info, with the peak.
+		sev := sevWarning
+		if a.Kind == "spike" && a.Peak > 0 && a.Recent < a.Peak {
+			sev = sevInfo
+			detail += fmt.Sprintf("; under its own 2h peak of %d in the last 28 days", a.Peak)
+		}
+		fs = append(fs, finding{sev, "mail", title, detail, "mail_traffic", nil})
 	}
 	// Don't silently drop the tail — say how many more there are (a mass compromise
 	// can far exceed the cap), pointing at mail_traffic for the full list.
-	if extra := shown - wwMailAnomalyCap; extra > 0 {
+	if extra := len(t.Traffic.Anomalies) - wwMailAnomalyCap; extra > 0 {
 		fs = append(fs, finding{sevWarning, "mail", "more outbound-mail anomalies",
 			fmt.Sprintf("%d more sender anomaly(ies) beyond the top %d shown", extra, wwMailAnomalyCap), "mail_traffic", nil})
 	}
