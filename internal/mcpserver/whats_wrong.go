@@ -735,8 +735,11 @@ func evalMailAbuse(views []mailAbuseView) []finding {
 	var fs []finding
 	for _, v := range views {
 		sev := sevWarning
-		if v.Severity == "critical" {
+		switch v.Severity {
+		case "critical":
 			sev = sevCritical
+		case "info":
+			sev = sevInfo // a spike of volume alone: listed, nothing abusive about it
 		}
 		title := mailAbuseTitles[v.Type]
 		if v.Type == "mail_hijack" && v.Severity != "critical" {
@@ -776,6 +779,7 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 				BaselinePerHour float64 `json:"baseline_per_hour"`
 				Ratio           float64 `json:"ratio"`
 				Kind            string  `json:"kind"`
+				Peak            int64   `json:"peak"`
 			} `json:"anomalies"`
 		} `json:"traffic"`
 	}
@@ -807,7 +811,15 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 		}
 		// Warning, not critical: a spike can be legitimate bulk/transactional mail;
 		// this is a "look at this account" signal, not proof of compromise.
-		fs = append(fs, finding{sevWarning, "mail", title, detail, "mail_traffic", nil})
+		// Without the abuse check (stale or off) there is no context to judge
+		// it on, so nothing is hidden: a spike under the sender's own peak is
+		// only shown as info, with the peak.
+		sev := sevWarning
+		if a.Kind == "spike" && a.Peak > 0 && a.Recent < a.Peak {
+			sev = sevInfo
+			detail += fmt.Sprintf("; under its own 2h peak of %d in the last 28 days", a.Peak)
+		}
+		fs = append(fs, finding{sev, "mail", title, detail, "mail_traffic", nil})
 	}
 	// Don't silently drop the tail — say how many more there are (a mass compromise
 	// can far exceed the cap), pointing at mail_traffic for the full list.

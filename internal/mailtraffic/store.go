@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS mail_counters (
 );
 CREATE INDEX IF NOT EXISTS mail_counters_bucket ON mail_counters(bucket);
 CREATE INDEX IF NOT EXISTS mail_counters_domain ON mail_counters(domain, bucket);
+CREATE INDEX IF NOT EXISTS mail_counters_address ON mail_counters(address, bucket);
 
 CREATE TABLE IF NOT EXISTS mail_tailpos (
 	path   TEXT PRIMARY KEY,

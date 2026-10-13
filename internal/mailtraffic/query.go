@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"cfm/internal/mailmeter"
@@ -18,6 +19,14 @@ const (
 	anomalySpikeFloor     = 20  // and at least this many, so tiny senders don't trip
 	anomalyNewSenderFloor = 50  // a sender with too little history sending >= this is flagged outright
 	anomalyMinActiveHours = 3   // need the sender active in this many baseline hours before a ratio is trusted
+	// anomalyPeakDays: how far back a sender's own largest burst is looked for
+	// (Anomaly.Peak). Inside the store's 30-day retention.
+	anomalyPeakDays = 28
+	// anomalyPeakGap: the hours just before the recent window are left out of
+	// the peak, so an incident that was never opened (no sink yet, a restart)
+	// cannot count its own first hours as "done before" — a falling rate
+	// would otherwise hide behind them. A daily run is a day back.
+	anomalyPeakGap = 6 * time.Hour
 )
 
 // Totals is the whole-window sum of each counter within the caller's scope.
@@ -68,6 +77,12 @@ type Anomaly struct {
 	BaselinePerHour float64 `json:"baseline_per_hour"` // the sender's own average per ACTIVE hour over the baseline (0 for new-sender)
 	Ratio           float64 `json:"ratio"`             // recent ÷ expected (0 for new-sender)
 	Kind            string  `json:"kind"`              // "spike" | "new-sender"
+	// Peak is the most the sender sent in any anomalyRecentHours of whole
+	// hourly buckets over the anomalyPeakDays before the recent window, the
+	// last anomalyPeakGap left out: "has it done this before?". A spike at or under it with no tell of abuse is a
+	// burst this sender has sent before (a daily order run, a weekly
+	// newsletter) — still listed, never an alert. Set for "spike" only.
+	Peak int64 `json:"peak"`
 }
 
 // Summary is the read view served by GET /api/v1/mail/traffic. All lists are
@@ -326,6 +341,19 @@ func (s *Store) anomalyScan(now time.Time, scope map[string]struct{}, col string
 			}
 		}
 	}
+	var flagged []string // a new sender has no history to have a peak in
+	for _, a := range out {
+		if a.Kind == "spike" {
+			flagged = append(flagged, a.Addr)
+		}
+	}
+	peaks, err := s.peakWindows(col, flagged, now)
+	if err != nil {
+		return out, nil, err
+	}
+	for i := range out {
+		out[i].Peak = peaks[out[i].Addr]
+	}
 	sort.Slice(out, func(i, j int) bool {
 		// New senders first (strongest signal), then higher ratio, then volume.
 		if ni, nj := out[i].Kind == "new-sender", out[j].Kind == "new-sender"; ni != nj {
@@ -340,6 +368,64 @@ func (s *Store) anomalyScan(now time.Time, scope map[string]struct{}, col string
 		return out[i].Addr < out[j].Addr
 	})
 	return out, recent, nil
+}
+
+// peakWindows is, per address, the largest sum of its counter over any
+// anomalyRecentHours consecutive hourly buckets, from anomalyPeakDays back to
+// anomalyPeakGap before the recent window: an incident that was not caught at
+// its onset (no sink yet, a restart) cannot become its own "done before".
+// Asked only for the flagged spikes (a handful per check), through the
+// (address, bucket) index.
+func (s *Store) peakWindows(col string, addrs []string, now time.Time) (map[string]int64, error) {
+	peaks := map[string]int64{}
+	if len(addrs) == 0 {
+		return peaks, nil
+	}
+	hi := bucketOf(now.Add(-anomalyRecentHours*time.Hour - anomalyPeakGap))
+	lo := bucketOf(now.Add(-anomalyPeakDays * 24 * time.Hour))
+	span := int64(anomalyRecentHours) * bucketSeconds
+	type hour struct{ b, n int64 }
+	for start := 0; start < len(addrs); start += 500 { // under SQLite's bound-parameter limit
+		chunk := addrs[start:min(start+500, len(addrs))]
+		// one row per (bucket, address): the primary key
+		q := `SELECT address, bucket, ` + col + ` FROM mail_counters WHERE bucket>=? AND bucket<? AND ` + col + `>0 AND address IN (?` + strings.Repeat(",?", len(chunk)-1) + `) ORDER BY address, bucket`
+		args := []any{lo, hi}
+		for _, a := range chunk {
+			args = append(args, a)
+		}
+		rows, err := s.db.Query(q, args...)
+		if err != nil {
+			return nil, err
+		}
+		byAddr := map[string][]hour{}
+		for rows.Next() {
+			var addr string
+			var h hour
+			if err := rows.Scan(&addr, &h.b, &h.n); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			byAddr[addr] = append(byAddr[addr], h)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		for addr, hs := range byAddr {
+			var peak, sum int64
+			for i, j := 0, 0; j < len(hs); j++ {
+				sum += hs[j].n
+				for hs[j].b-hs[i].b >= span {
+					sum -= hs[i].n
+					i++
+				}
+				peak = max(peak, sum)
+			}
+			peaks[addr] = peak
+		}
+	}
+	return peaks, nil
 }
 
 // sumCol sums one counter column per address over [lo, hi) buckets (hi<=0

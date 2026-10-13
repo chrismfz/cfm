@@ -22,7 +22,7 @@ mainlog / maillog every minute into hourly per-user counters) checks:
 | Type | Severity | Meaning |
 |---|---|---|
 | `mail_script_spike` | warning / critical | a unix user's LOCAL submissions (`U=user P=local`: PHP `mail()`, sendmail from a script or cron) far above that user's own history — a hacked site or an abused contact form. The message names the script directory (`cwd=`), the envelope sender (flagged when it is not a domain on this host), and how many different recipients. `root`, `mailnull`, `cpanel*`, `exim` are skipped |
-| `mail_outbound_spike` | warning / critical | an authenticated mailbox (SMTP AUTH) sending far above its own history |
+| `mail_outbound_spike` | info / warning / critical | an authenticated mailbox (SMTP AUTH) sending far above its own history, and above its own largest burst of the last 28 days. **Info** (listed, never paged) when nothing about it looks like abuse — see "Volume alone" below |
 | `mail_hijack` | warning / critical | one mailbox SUCCESSFULLY logging in from ≥ 3 countries, or from ≥ 10 sources of which ≥ 5 are outside its main country, within an hour. SMTP AUTH (exim `A=…` + `H=[ip]`, Postfix `sasl_username` + `client=[ip]`) and IMAP/POP3 (dovecot `Login:` / `Logged in:` + `rip=`; a failed login never counts). **Critical** only when the mailbox is also being USED — see "Hijack severity" below; logins alone are a warning. See "Hijack sources" below; without GeoIP data there is no hijack finding |
 | `mail_bounce_spike` | warning / critical | a sender (local user or authenticated mailbox) whose remote deliveries bounce in bulk: ≥ 20 bounces and ≥ 25 % of its delivered + bounced in the last 2 h (critical from 100 and 50 %; counted per recipient). A failure through a local transport (a full or deleted mailbox on this host) is not a bounce, as local deliveries are not counted either — a form or hacked account writing to harvested or made-up addresses. Names the main bounce reason (`no-such-user`, `blocked-reputation`, …) and the sender context. Stays open down to half of each threshold |
 | `mail_queue_hog` | warning / critical | one envelope sender holding ≥ 50 % of a queue of ≥ 100 messages, with ≥ 100 of them of which ≥ 50 are frozen or stuck over 1 h — a campaign going out fine is not a clogged queue (critical from 1 000); bounces (null sender: exim `<>`, Postfix `MAILER-DAEMON`) are not counted — frozen undeliverable bounces piling up are the normal state of a cPanel queue, not one sender's doing. Read from the exim/postfix queue detector's latest listing (`exim_queues` / `postfix_queues` must be on). A listing that failed (count fine, nothing listed — a big queue is slow to list) or is 10 min – 1 h old leaves an open finding as it is; older than that (the detector switched off) it no longer holds it. Stays open down to 30 % / 50 messages |
@@ -37,10 +37,69 @@ its usual, with nothing abusive in its context — is not an alert: 20–40
 messages at 4–5× a small sender's usual is a newsletter or a busy day, and
 paged the channel for nothing (`mail_traffic`'s `anomalies` still list it). A
 small spike far above its usual (a quiet site hacked: 45 at 45×), or one
-sending as a foreign domain / another mailbox or in the contact-form pattern,
+sending as a foreign domain / another domain or in the contact-form pattern,
 still alerts; an open one keeps being judged, so it does not flap.
 **Critical** when it is ≥ 50 messages and ≥ 10×, or a sender with no history
 from 200.
+
+**Done before.** The ratio is against the sender's AVERAGE active hour, so a
+sender with one big run a day reads "3×" every day: titan's itadmin@ sent its
+"Order production start" run of 177 one morning and 176 the next, paged both
+days. So a spike (script or mailbox) is also compared with the sender's
+**peak**: the most it sent in any two consecutive whole hours over the 28 days
+before the recent window, the last 6 hours before it left out (`mail_traffic`'s
+`anomalies` carry it as `peak`). The gap means an incident not caught at its
+onset (no sink yet, a restart) cannot count its own first hours, even at a
+falling rate; a daily run is a day back. Strictly **under** its peak, **with no
+tell of abuse** (below), it is a burst this sender has sent before: still
+listed in `anomalies`, never a finding (equal is not enough: at the top of an
+hour the current bucket is empty, and a steady sender's two hours equal a
+two-hour peak). The tells are judged first because the peak can be the same
+thief's earlier run, and for the same reason a sender alerted on (a warning or
+critical spike, open or closed within the 28 days, remembered next to the
+hijacks in `mail_abuse_published_hijacks.json`) is never "done before". An
+open finding keeps being judged as before (its own incident is in the peak by
+then). Without the abuse check (stale, or `MAIL_ABUSE_ALERT = 0`)
+`whats_wrong` lists the raw anomalies, a spike under its peak as info. A monthly run older than the counters' 30 days, or a sender's first
+run, is not "done before".
+
+### Volume alone
+
+Most mailbox spikes the channel saw were a shop's order confirmations, a
+claims system, a payroll run: volume and nothing else. A mailbox spike with no
+**tell of abuse** is published one step down: a would-be warning as **info**
+(in the event log and `whats_wrong`, below every route set to warning; a route
+an operator sets to `info` receives them) and a would-be critical as a warning
+(still seen: 422 read receipts in 2 h is a loop worth knowing about). The
+message says `· volume only`. A **new sender** (no history at all) is not
+stepped down: a dormant mailbox suddenly sending is the strongest signal. The
+tells:
+
+- the envelope sender is not a domain on this host (`(not a domain here)`);
+- the mailbox sends as an address of ANOTHER domain (`(another domain)`); as
+  another address of its own domain (`mail@` sending its `claim@` notices) it
+  is the same owner, shown as `· as claim@…` and no tell;
+- the contact-form pattern;
+- a `mail_bounce_spike` finding of the same mailbox this check;
+- the mailbox is logged in from many countries this hour (a hijack candidate,
+  which the spike in turn confirms: "Hijack severity" below);
+- it is sending from 10 addresses or more at once (a botnet with the
+  password; an office is a phone, a desktop and a webmail).
+
+A tell also keeps a spike under the 50-message floor an alert, so a hijack
+candidate's small spike still confirms the hijack.
+
+Local script spikes (`mail_script_spike`) keep their severity: a hacked site
+sending as its own domain to many addresses shows none of these tells. "Done
+before" still applies to them, unless they send as a foreign domain, in the
+contact-form pattern, or bounce.
+
+One gap is left on purpose: a mailbox sending as another address of its OWN
+domain used to count as spoofing, and kept even a 20-message spike an alert.
+That was titan's `mail@pantelos.gr` → `claim@`, paged twice a day. A thief
+sending a few internal-looking messages (`info@` as `ceo@`, business email
+compromise) never reached the spike floor anyway; the hijack check is what
+sees that mailbox's logins.
 
 Keys are per user / mailbox / IP (`mail:script:<user>`, `mail:out:<addr>`,
 `mail:hijack:<addr>`, `mail:bounce:local:<user>` / `mail:bounce:auth:<addr>`
@@ -169,7 +228,8 @@ Each finding carries a **context** gathered from the log lines of the last
   owner) in ≥ 80 % of ≥ 5 messages while the others are ≥ 80 % distinct;
 - the **sender**: a local script sending "as" an address whose domain is not on
   this host (`· as x@gmail.com (not a domain here)`), or a mailbox sending as an
-  address other than itself (`(not itself)`) — the spoofing tell;
+  address of another domain (`(another domain)`) — the spoofing tell (another
+  address of its own domain is shown as `· as claim@…`, no tell);
 - the script directory (`cwd=`) for local submissions.
 
 A newsletter reads as one sender, one subject, many mixed recipient domains

@@ -465,8 +465,14 @@ func TestSpikeAlertFloor(t *testing.T) {
 			if err := st.AddReport(T.Add(-30*time.Minute), kind.r(30)); err != nil {
 				t.Fatal(err)
 			}
-			if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 1 || fs[0].Severity != "warning" {
-				t.Fatalf("67 messages is a (warning) alert: %+v", fs)
+			// 67 is past the floor: a script spike warns; a mailbox's, with no
+			// tell of abuse, is volume only (info, never paged)
+			want := "warning"
+			if kind.name == "mailbox" {
+				want = "info"
+			}
+			if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 1 || fs[0].Severity != want {
+				t.Fatalf("67 messages is a (%s) finding: %+v", want, fs)
 			}
 		})
 	}
@@ -477,15 +483,15 @@ func TestSpikeAlertFloor(t *testing.T) {
 // foreign domain.
 func TestSmallButAbusiveSpikesStillAlert(t *testing.T) {
 	a := Anomaly{Addr: "quiet", Recent: 45, Ratio: 45, Kind: "spike"}
-	if belowAlertFloor(a, Context{}, false) {
+	if belowAlertFloor(a, Context{}.abusive(), false) {
 		t.Fatal("45 at 45× must alert")
 	}
 	mild := Anomaly{Addr: "shop", Recent: 37, Ratio: 4.6, Kind: "spike"}
-	if !belowAlertFloor(mild, Context{}, false) {
+	if !belowAlertFloor(mild, Context{}.abusive(), false) {
 		t.Fatal("37 at 4.6× with a clean context is not an alert")
 	}
-	if belowAlertFloor(mild, Context{ForeignFrom: true}, false) || belowAlertFloor(mild, Context{CopiedTo: "owner@shop.gr"}, false) ||
-		belowAlertFloor(mild, Context{OtherFrom: true}, false) {
+	if belowAlertFloor(mild, Context{ForeignFrom: true}.abusive(), false) || belowAlertFloor(mild, Context{CopiedTo: "owner@shop.gr"}.abusive(), false) ||
+		belowAlertFloor(mild, Context{OtherFrom: true}.abusive(), false) || belowAlertFloor(mild, true, false) {
 		t.Fatal("a small spike that looks like abuse must alert")
 	}
 }
