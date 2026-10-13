@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Changed
+- **A mailbox sending its usual big run, or volume with nothing abusive
+  about it, no longer pages as a "compromised mailbox".** Titan's channel saw
+  15 `mail_outbound_spike` alerts in 5 days, nearly all order confirmations,
+  a claims system and a payroll run. A spike (mailbox or script) with no tell
+  of abuse and no larger than the sender's own largest two-hour burst of the
+  last 28 days is a run it has sent before and is no longer a finding
+  (itadmin@ sent 177 one morning and 176 the next, paged both days). A
+  mailbox spike with no tell of abuse (a sender outside this host's domains,
+  sending as another domain, the contact-form pattern, bounces of its own,
+  logins from many countries) is published one step down and marked
+  `· volume only`: info instead of a warning (logged, below every warning
+  route), a warning instead of critical. A new sender with no history is not
+  stepped down. A mailbox sending as another address of its OWN domain
+  (`mail@` sending its `claim@` notices) is no longer flagged "(not itself)".
+  `mail_traffic`'s anomalies carry the sender's `peak`. See docs/mail-abuse.md
+  "Done before" and "Volume alone".
 - **A mailbox read from three countries is no longer a critical hijack
   page.** In a week the fleet raised 33 critical `mail_hijack` alerts on 10
   mailboxes, each reminded every 6 h, and every one was a mailbox only READ

@@ -636,3 +636,16 @@ func TestEvalMailTrafficUsesTheAbuseFindings(t *testing.T) {
 		t.Fatalf("stale abuse views fall back to the anomalies: %+v", got)
 	}
 }
+
+// A mail spike of volume alone is info (mailtraffic: no tell of abuse), so it
+// does not read as a problem next to the warnings.
+func TestEvalMailAbuseSeverities(t *testing.T) {
+	fs := evalMailAbuse([]mailAbuseView{
+		{Type: "mail_outbound_spike", Severity: "info", Message: "a@x.gr: 60 … · volume only"},
+		{Type: "mail_outbound_spike", Severity: "warning", Message: "b@x.gr"},
+		{Type: "mail_hijack", Severity: "critical", Message: "c@x.gr"},
+	})
+	if len(fs) != 3 || fs[0].Severity != sevInfo || fs[1].Severity != sevWarning || fs[2].Severity != sevCritical {
+		t.Fatalf("want info, warning, critical: %+v", fs)
+	}
+}

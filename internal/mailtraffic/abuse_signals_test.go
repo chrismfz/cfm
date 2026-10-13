@@ -465,8 +465,14 @@ func TestSpikeAlertFloor(t *testing.T) {
 			if err := st.AddReport(T.Add(-30*time.Minute), kind.r(30)); err != nil {
 				t.Fatal(err)
 			}
-			if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 1 || fs[0].Severity != "warning" {
-				t.Fatalf("67 messages is a (warning) alert: %+v", fs)
+			// 67 is past the floor: a script spike warns; a mailbox's, with no
+			// tell of abuse, is volume only (info, never paged)
+			want := "warning"
+			if kind.name == "mailbox" {
+				want = "info"
+			}
+			if fs, _, _, _ := tr.evaluateWith(st, T, nil, nil); len(fs) != 1 || fs[0].Severity != want {
+				t.Fatalf("67 messages is a (%s) finding: %+v", want, fs)
 			}
 		})
 	}

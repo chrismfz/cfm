@@ -735,8 +735,11 @@ func evalMailAbuse(views []mailAbuseView) []finding {
 	var fs []finding
 	for _, v := range views {
 		sev := sevWarning
-		if v.Severity == "critical" {
+		switch v.Severity {
+		case "critical":
 			sev = sevCritical
+		case "info":
+			sev = sevInfo // a spike of volume alone: listed, nothing abusive about it
 		}
 		title := mailAbuseTitles[v.Type]
 		if v.Type == "mail_hijack" && v.Severity != "critical" {
@@ -776,6 +779,7 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 				BaselinePerHour float64 `json:"baseline_per_hour"`
 				Ratio           float64 `json:"ratio"`
 				Kind            string  `json:"kind"`
+				Peak            int64   `json:"peak"`
 			} `json:"anomalies"`
 		} `json:"traffic"`
 	}
@@ -793,10 +797,16 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 		return evalMailAbuse(*t.Abuse)
 	}
 	var fs []finding
-	for i, a := range t.Traffic.Anomalies {
-		if i >= wwMailAnomalyCap {
-			break
+	shown := 0
+	for _, a := range t.Traffic.Anomalies {
+		if a.Kind == "spike" && a.Peak > 0 && a.Recent <= a.Peak {
+			continue // a burst this sender has sent before (mailtraffic doneBefore)
 		}
+		if shown >= wwMailAnomalyCap {
+			shown++
+			continue
+		}
+		shown++
 		var detail, title string
 		if a.Kind == "new-sender" {
 			title = "new sender blasting outbound mail"
@@ -811,7 +821,7 @@ func evalMailTraffic(body json.RawMessage, sources map[string]string) []finding 
 	}
 	// Don't silently drop the tail — say how many more there are (a mass compromise
 	// can far exceed the cap), pointing at mail_traffic for the full list.
-	if extra := len(t.Traffic.Anomalies) - wwMailAnomalyCap; extra > 0 {
+	if extra := shown - wwMailAnomalyCap; extra > 0 {
 		fs = append(fs, finding{sevWarning, "mail", "more outbound-mail anomalies",
 			fmt.Sprintf("%d more sender anomaly(ies) beyond the top %d shown", extra, wwMailAnomalyCap), "mail_traffic", nil})
 	}
