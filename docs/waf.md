@@ -1343,11 +1343,16 @@ Since 2026-10-09. Before that the rule counted every request to those paths (an
 OpenCart admin browsing `/admin/index.php?route=…` or a Joomla admin saving was
 challenged after 8 pages), and it skipped every client that is its own TCP peer, so it
 only ever ran behind a trusted proxy (Cloudflare). Direct clients now count too, capped
-at `auth_burst_direct_mode` (`logonly`) for a burn-in; a proxied client keeps the
-rule's mode. Promote by setting `auth_burst_direct_mode` (never stronger than
-`rule_auth_burst`; an unknown value reads as `logonly`) once `waf_rule_detail 501` reads
-clean. Before promoting, look for relay IPs in that read (QUIC.cloud, Sucuri, an office
-NAT): an untrusted relay reads as one direct client across every vhost.
+at `auth_burst_direct_mode` (never stronger than `rule_auth_burst`; an unknown value
+reads as `logonly`); a proxied client keeps the rule's mode. The cap was `logonly` for a
+burn-in and is `challenge_v2` (the rule's own mode) since 2026-10-13. The burn-in read
+(86 h, six nodes, `cfm.waf.log`): ~1 850 direct hits, nearly all `AUTH_WP_LOGIN`, all
+but 9 single hits from hosting / VPN / Tor ASNs (one node's ~1 460 from ~11 Oracle Cloud
+IPs spraying `wp-login.php` across vhosts, `cpanel.` / `webmail.` subdomains included),
+no Greek ISP, no relay (QUIC.cloud, Sucuri, an office NAT) and no admin retrying their own
+login. Set `auth_burst_direct_mode = "logonly"` in `cfm_waf_config.lua` to step back; an
+untrusted relay that appears later reads as one direct client across every vhost, so
+look for one in `waf_rule_detail 501` before blaming the rule.
 
 The panel ports (cPanel / WHM / webmail) read no body and say so (`body_unread`), so 501
 never runs there;

@@ -17,7 +17,16 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **A WordPress / Drupal / Joomla / OpenCart / Magento login brute force from
+  a direct client is now challenged.** The login-burst rule (WAF 501) has
+  counted clients that connect directly, not only those behind Cloudflare,
+  since 2026-10-09, but only logged them for a burn-in. Over 86 hours on six
+  servers it logged ~1 850 such hits, nearly all from hosting, VPN and Tor
+  networks (on one server ~11 cloud addresses made ~1 460 of them), and no
+  real visitor. They now get the same challenge as proxied clients; a
+  challenge never leads to a firewall ban. To go back to logging only, set
+  `auth_burst_direct_mode = "logonly"` in `cfm_waf_config.lua`.
 
 ## 2026.10.11
 

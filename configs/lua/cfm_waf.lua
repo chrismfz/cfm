@@ -394,9 +394,12 @@ local CFG = {
   auth_window_sec      = 20,
   auth_burst_threshold = 8,
   -- Rule 501's mode for a client that is its own TCP peer (no trusted proxy),
-  -- never stronger than rule_auth_burst. logonly from 2026-10-09: before that
-  -- the rule skipped direct clients entirely; a burn-in before it challenges.
-  auth_burst_direct_mode = "logonly",
+  -- never stronger than rule_auth_burst. Before 2026-10-09 the rule skipped
+  -- direct clients entirely; logonly through a burn-in, challenge_v2 (the
+  -- rule's own mode) since 2026-10-13: of ~1 850 direct hits in 86 h on six
+  -- nodes, all but 9 single hits came from hosting / VPN / Tor ASNs. Set
+  -- "logonly" here to step back without touching the proxied side.
+  auth_burst_direct_mode = "challenge_v2",
   auth_ttl_sec         = 600,
 
   -- WP login helper tuning
@@ -1740,8 +1743,8 @@ local function check_impl(ctx, st)
   -- Counts credential submissions (detect_auth_burst). It used to skip every
   -- request whose client IP is the TCP peer, i.e. every direct client: the
   -- rule ran only behind a trusted proxy (Cloudflare). Direct clients now
-  -- count too, capped at auth_burst_direct_mode (logonly) for a burn-in;
-  -- promote it once the fleet read is clean. Proxied clients keep the rule's
+  -- count too, capped at auth_burst_direct_mode (challenge_v2 since
+  -- 2026-10-13, after a logonly burn-in). Proxied clients keep the rule's
   -- mode. The panel ports read no body (ctx.body_unread), so it never runs
   -- there, as before; cPanel's own login_log detector
   -- (internal/detectors/cpanel) bans failures.
