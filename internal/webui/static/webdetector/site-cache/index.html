@@ -36,7 +36,7 @@
             <code>private</code> by the origin.
           </div>
           <div class="callout" :class="{ warn: scMicroMode !== 'enforced' || scCacheOff }">
-            <strong>Micro tier (B).</strong> Anonymous GET/HEAD over HTTPS, for 1–60 s.
+            <strong>Micro tier (B).</strong> Anonymous GET/HEAD over HTTPS, for 1–120 s.
             <template v-if="scCacheOff">This node: <strong>off</strong>
               (<code>SITE_CACHE = 0</code>, below)<span v-if="scMicroMode === 'enforced'">; with
               <code>MICRO_CACHE_ENFORCE = 1</code>, an armed micro tier is live again once it is back on</span>.</template>
@@ -49,7 +49,7 @@
           </div>
           <div class="callout">
             <strong>Never cached, on either tier:</strong> a request with <code>Authorization</code>,
-            a response with <code>Set-Cookie</code> / <code>private</code> / <code>no-store</code>,
+            a response with <code>Set-Cookie</code> (micro: unless every cookie is a tracking one — <code>_fbp</code>, <code>_ga</code>… — which is then removed) / <code>private</code> / <code>no-store</code>,
             a non-200, panel and webmail hosts. The micro tier also skips session cookies,
             credential headers, partial-page requests and admin paths.
           </div>

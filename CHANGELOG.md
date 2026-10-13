@@ -27,6 +27,77 @@ back-filled here — see the git/PR history for that period.
   real visitor. They now get the same challenge as proxied clients; a
   challenge never leads to a firewall ban. To go back to logging only, set
   `auth_burst_direct_mode = "logonly"` in `cfm_waf_config.lua`.
+### Added
+- **Site Cache: micro TTLs of 90 s and 120 s.** Two more Tier B buckets
+  (`cfm_micro_90s`, `cfm_micro_120s`), selectable on the cfm-admin Site cache
+  page and with `cfm webtop site-cache set <host> --micro-ttl 90s|2m`. A TTL
+  above 120 s now snaps to 120 s (was 60 s). The new cache dirs are created by
+  the daemon and `cfm-cache-dirs.sh`; the edge conf needs the new reference
+  `openresty.conf` / `angie.conf` (zones + locations), which the package update
+  installs. A vhost whose stored micro TTL is above 60 s (e.g. `2m`) moves
+  from the 60 s bucket to 90 s or 120 s on upgrade; set it again to keep 60 s.
+- **Traffic rules recipe "Crawlers don't call AJAX / tracking endpoints".**
+  Blocks social, AI and SEO crawlers, any method, on `admin-ajax.php`,
+  `?wc-ajax=`, the WooCommerce Store API, PixelYourSite's `/wp-json/pys-*`
+  events and LiteSpeed's `guest.vary.php`. A crawler that renders pages runs
+  their JavaScript: on 2026-10-13 Meta's ads crawler fired ~7 000 such calls on
+  one shop in an hour and took titan's load from ~25 to ~70. Pages, images and
+  feeds stay open, so ad catalogs and previews keep working.
+
+### Changed
+- **Site Cache Tier B now stores pages that only set tracking cookies.** A
+  response whose `Set-Cookie` headers are all tracking cookies (`_fbp`,
+  `_fbc`, `_ga`, `_ga_<ID>`, `_gid`, `_gat`, `_gcl_au/aw/dc/gb/gf/ha/gs`) is
+  micro-cached, and those cookies are removed from every micro response, so no
+  visitor ever receives another visitor's id (the Facebook pixel and Google
+  tags set them again in the browser). The cost, for a shop to know before
+  arming micro: these cookies no longer come from the server, so Safari keeps
+  them only 7 days, and a Facebook pixel event id printed into a cached page is
+  shared by the visitors of one TTL (Conversions API deduplication). Facebook for
+  WooCommerce sets `_fbp` from the server on every page, so until now no such
+  shop could be micro-cached. Any other cookie (a session, cart, login,
+  consent or currency choice) still means the page is never stored. The micro
+  cache key changed with this, so every micro-armed vhost starts from an empty
+  micro cache once after the upgrade.
+- **Meta's ads crawler (`meta-externalads`) is part of the Meta crawler family
+  in the traffic-rule recipes** (social group, "Throttle Meta crawlers",
+  "Block Meta bot query-string loops", "Crawlers are read-only") and in the
+  edge's Meta crawler throttle (5 req/s per site, 60/min per IP). It was
+  missing, so "Crawlers are read-only" let its POSTs through. It is not added
+  to the User-Agent-only allow some recipes put in front of verified crawlers
+  for Meta's one-shot link previews: it is a repeat crawler.
+- **SE Ranking's crawler (`SERankingBacklinksBot`) is in the recipes' SEO tools
+  group.** On a WooCommerce shop it walked every category's `?type=…&orderby=…`
+  combination, and each page ran a product-filter count over 14–31 M rows (up
+  to 65 s per query). A rule copies the group's list when it is created: an
+  existing SEO-tools rule gains it only when re-created from the recipe.
+- **OpenAI's GPTBot and OAI-SearchBot are no longer on the crawler bypass list**
+  (`challenge_waf_bypass.conf`, 51 prefixes). A bypassed client skips the
+  traffic rules as well as the WAF and the challenge, so no "bots" recipe could
+  reach them: on one shop GPTBot walked every `?filter_category=` combination at
+  ~2 req/s, 2.4 s a page, and a block rule matching it never ran. They are now
+  ordinary clients: rules can throttle or block them, and a vhost-wide challenge
+  applies to them too (a page they can only skip, as any crawler without a
+  bypass does). Google, Bing, DuckDuckGo, Applebot, Skroutz and QUIC.cloud stay
+  bypassed — and so stay out of every traffic rule.
+
+### Fixed
+- **`cfm status` reports the firewall on nftlib nodes.** It printed "table
+  present, but no rules found" and zero totals over a full firewall (one node:
+  174 rules, 110 000+ entries). It read only `nft -j` output, and the nftlib
+  backend answers in its own format; it now counts rules from the nft text dump
+  and each set's entries through the backend. The same fallback covers a host
+  whose `nft -j` output does not parse (a warning on stderr). A read that fails
+  is reported as such ("UNKNOWN", "READ FAILED" per set, `read_error` in
+  `--json`), never as zero or "table absent"; when only the rules cannot be
+  read the set totals are still shown. Entries with a timeout are now counted
+  on exec-engine nodes too, so their totals can go up.
+- **The exec firewall backend lists interval-set entries as CIDRs / ranges.**
+  It turned `{"prefix"}` / `{"range"}` elements into `<nil>` (and timeout-
+  wrapped ones into `map[…]`) for every caller, and failed a read on a warning
+  nft printed on stderr.
+- **CLI commands no longer print the daemon's `[startup] backend type=…` line**
+  (it also landed in `cfm status --json` output).
 
 ## 2026.10.11
 

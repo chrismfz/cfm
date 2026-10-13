@@ -22,7 +22,8 @@
 #       $cfm_req_auth;` — bypass-by-default (serve + store), the only-200 rail
 #       and the credentialed-request rail — plus buffering ON (nginx stores
 #       nothing off it), the whole key
-#       `g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri`, the
+#       `g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri`
+#       (`g$cfm_cache_gen|sc1|…` in a micro location — see $cfm_sc_unsafe), the
 #       lock on with its per-tier timeout (1s static, 5s micro), and the
 #       forwarded-header pins (X-Forwarded-Host = $host, the rest dropped; each
 #       set exactly once). Any other cache zone is rejected.
@@ -31,15 +32,25 @@
 #       writes either variable (so `Authorization: 0`, which a raw predicate
 #       reads as false, still counts; no extra key can exempt a credential or
 #       store a 404/301).
-#     * Set-Cookie and Vary are never added to proxy_ignore_headers (nginx must
-#       keep NOT caching a response that sets a cookie, and must keep one copy
-#       per Vary variant), and proxy_cache_methods never lists a non-GET/HEAD
-#       method. Cache-Control / Expires / X-Accel-Expires may be ignored ONLY
-#       in a @cfm_micro_<n>s location, which must then carry exactly
-#       `proxy_ignore_headers Cache-Control Expires X-Accel-Expires;` plus the
-#       replacement rails $cfm_cc_nostore (private/no-store/no-cache/
-#       s-maxage=0) and $cfm_xae_nocache (X-Accel-Expires 0 / @…) on
-#       proxy_no_cache — their maps exact (volatile included), nothing else
+#     * Vary is never added to proxy_ignore_headers (nginx must keep one copy
+#       per Vary variant), Set-Cookie only in a @cfm_micro_<n>s location (see
+#       below; anywhere else nginx would store a response that sets a cookie),
+#       and proxy_cache_methods never lists a non-GET/HEAD method.
+#       Cache-Control / Expires / X-Accel-Expires / Set-Cookie may be ignored
+#       ONLY in a @cfm_micro_<n>s location, which must then carry exactly
+#       `proxy_ignore_headers Cache-Control Expires X-Accel-Expires Set-Cookie;`
+#       plus the replacement rails $cfm_cc_nostore (private/no-store/no-cache/
+#       s-maxage=0), $cfm_xae_nocache (X-Accel-Expires 0 / @…) and
+#       $cfm_sc_unsafe (any Set-Cookie that is not a tracking cookie) on
+#       proxy_no_cache — the two maps exact (volatile included); $cfm_sc_unsafe
+#       written only by one server-level `set $cfm_sc_unsafe "1";` (the
+#       fail-closed default) in each micro server and cleared only by
+#       cfm_cache.micro_setcookie_filter, which that server's ONE
+#       header_filter_by_lua_block must call (a location-level one in a micro
+#       location would replace it, and the tracking cookies would be stored
+#       and served to everyone) — unconditionally: the exact call at block
+#       depth 0, nothing before it that leaves the block, nothing in that
+#       block rebinding pcall / require / ngx / okc / cache (section b1); nothing else
 #       writing them — proxy_cache_background_update off (on keeps serving a
 #       stale page whose refresh can no longer be stored), exactly
 #       `proxy_cache_use_stale updating error timeout http_500 http_502
@@ -294,7 +305,11 @@ for f in "$ORT" "$ANG"; do
       # ($scheme: :9080 and :9043 reach different origin ports) AND the scheme
       # the origin is told ($cf_xfp: differs behind a trusted peer) — either
       # alone merges two origin answers — then host and full URI.
-      if (body !~ (A "proxy_cache_key[[:space:]]+\"g[$]cfm_cache_gen[|][$]server_addr[|][$]scheme[|][$]cf_xfp://[$]host[$]request_uri\"[[:space:]]*;")) m = m " proxy_cache_key-must-be-g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri"
+      # A micro key carries "sc1|" after the generation: its entries may hold a
+      # tracking Set-Cookie that only the current header filter strips, so a
+      # conf without that filter (a downgrade) must never share them.
+      if (!mi && body !~ (A "proxy_cache_key[[:space:]]+\"g[$]cfm_cache_gen[|][$]server_addr[|][$]scheme[|][$]cf_xfp://[$]host[$]request_uri\"[[:space:]]*;")) m = m " proxy_cache_key-must-be-g$cfm_cache_gen|$server_addr|$scheme|$cf_xfp://$host$request_uri"
+      if (mi && body !~ (A "proxy_cache_key[[:space:]]+\"g[$]cfm_cache_gen[|]sc1[|][$]server_addr[|][$]scheme[|][$]cf_xfp://[$]host[$]request_uri\"[[:space:]]*;")) m = m " micro-proxy_cache_key-must-be-g$cfm_cache_gen|sc1|$server_addr|$scheme|$cf_xfp://$host$request_uri"
       # Anti-stampede: the lock ON, and its wait per tier (it must outlast the
       # fill, else a cold-key burst all reaches the origin, yet it bounds the
       # queue on an uncacheable key). Static files fill fast: 1s. HTML: 5s.
@@ -344,8 +359,12 @@ for f in "$ORT" "$ANG"; do
       # cannot be stored must not keep a stale page alive (background_update off).
       if (mi) {
         if (insrv) srv_micro = 1
-        if (cnt(body, A "proxy_ignore_headers[[:space:]]") != 1 || body !~ (A "proxy_ignore_headers[[:space:]]+Cache-Control[[:space:]]+Expires[[:space:]]+X-Accel-Expires[[:space:]]*;")) m = m " micro-proxy_ignore_headers-must-be-exactly-Cache-Control-Expires-X-Accel-Expires"
+        if (cnt(body, A "proxy_ignore_headers[[:space:]]") != 1 || body !~ (A "proxy_ignore_headers[[:space:]]+Cache-Control[[:space:]]+Expires[[:space:]]+X-Accel-Expires[[:space:]]+Set-Cookie[[:space:]]*;")) m = m " micro-proxy_ignore_headers-must-be-exactly-Cache-Control-Expires-X-Accel-Expires-Set-Cookie"
         else micro_ign++
+        if (body !~ (A "proxy_no_cache[[:space:]][^;]*[$]cfm_sc_unsafe[[:space:];]")) m = m " proxy_no_cache-$cfm_sc_unsafe(a-response-setting-a-session-cookie-could-be-stored)"
+        # the server-level header filter clears $cfm_sc_unsafe and strips the
+        # tracking cookies; a location-level one would REPLACE it here
+        if (body ~ (A "header_filter_by_lua(_block|_file)?([[:space:]]|[{])")) m = m " micro-location-header_filter_by_lua(replaces-the-server-Set-Cookie-filter)"
         if (body !~ (A "proxy_no_cache[[:space:]][^;]*[$]cfm_cc_nostore[[:space:];]")) m = m " proxy_no_cache-$cfm_cc_nostore(private/no-store/no-cache-could-be-stored)"
         if (body !~ (A "proxy_no_cache[[:space:]][^;]*[$]cfm_xae_nocache[[:space:];]")) m = m " proxy_no_cache-$cfm_xae_nocache(X-Accel-Expires:0-could-be-stored)"
         if (body !~ (A "proxy_no_cache[[:space:]][^;]*[$]upstream_http_cart_token[[:space:];]")) m = m " proxy_no_cache-$upstream_http_cart_token(a-WooCommerce-cart-session-could-be-stored)"
@@ -408,10 +427,12 @@ for f in "$ORT" "$ANG"; do
       for (k = 1; k <= K; k++) {
         s = ST[k]; ls = tolower(s)
         isopen = (s ~ /[{][[:space:]]*$/); isclose = (s ~ /^[[:space:]]*[}][[:space:]]*$/)
-        if (!insrv && !loc && isopen && ls ~ /^[[:space:]]*server[[:space:]]*[{][[:space:]]*$/) { insrv = 1; srvD = D; srv_set = 0; srv_cache = 0; srv_micro = 0; srv_sentinel = 0; srv_mdef = 0; srv_rwlua = 0; srvline = SL[k] }
+        if (!insrv && !loc && isopen && ls ~ /^[[:space:]]*server[[:space:]]*[{][[:space:]]*$/) { insrv = 1; srvD = D; srv_set = 0; srv_cache = 0; srv_micro = 0; srv_sentinel = 0; srv_mdef = 0; srv_rwlua = 0; srv_hf = 0; srv_scdef = 0; srvline = SL[k] }
         if (insrv && D == srvD + 1 && ls ~ /^[[:space:]]*set[[:space:]]+[$]cfm_cache_skip[[:space:]]+"1"[[:space:]]*;/) srv_set = 1
         if (insrv && !loc && D == srvD + 1 && ls ~ /^[[:space:]]*set[[:space:]]+[$]cfm_micro_conf[[:space:]]+""[[:space:]]*;[[:space:]]*$/) { srv_mdef++; mdefs++ }
         if (insrv && !loc && ls ~ /^[[:space:]]*rewrite_by_lua(_block|_file)?([[:space:]]|[{])/) srv_rwlua++
+        if (insrv && !loc && ls ~ /^[[:space:]]*header_filter_by_lua(_block|_file)?([[:space:]]|[{])/) srv_hf++
+        if (insrv && !loc && D == srvD + 1 && ls ~ /^[[:space:]]*set[[:space:]]+[$]cfm_sc_unsafe[[:space:]]+"1"[[:space:]]*;[[:space:]]*$/) { srv_scdef++; scdefs++ }
         if (!insrv && !loc && ls ~ /^[[:space:]]*rewrite_by_lua(_block|_file)?([[:space:]]|[{])/) http_rwlua++
         if (ls ~ /^[[:space:]]*log_by_lua(_block|_file)?([[:space:]]|[{])/ && (D != 1 || insrv || loc)) print "ERR line " SL[k] ": a log_by_lua* below http level overrides the http-level one — the Tier B remember-uncacheable hook (cfm_cache.micro_note) and the cache stats would stop for it."
         if (!loc && ls ~ /^[[:space:]]*proxy_buffering[[:space:]]+["\047]?off["\047]?[[:space:]]*;/) print "ERR line " SL[k] ": proxy_buffering off at " (insrv ? "server" : "http") " level — `location /` (the Tier B entry) inherits it and would stream; turn buffering off per location."
@@ -429,6 +450,8 @@ for f in "$ORT" "$ANG"; do
           if (srv_sentinel && !srv_micro) print "ERR the server block opened at line " srvline " sets $cfm_micro_conf \"1\" but has no @cfm_micro_<n>s location — an ngx.exec to a missing named location 500s."
           if (srv_micro && srv_mdef != 1) print "ERR the server block opened at line " srvline " has @cfm_micro_<n>s locations but " srv_mdef " server-level set $cfm_micro_conf \"\" defaults (want exactly 1) — without it every read outside `location /` logs an uninitialized-variable warning."
           if (!srv_micro && srv_mdef) print "ERR the server block opened at line " srvline " sets a $cfm_micro_conf default but has no @cfm_micro_<n>s location."
+          if (srv_micro && srv_hf != 1) print "ERR the server block opened at line " srvline " has @cfm_micro_<n>s locations and " srv_hf " server-level header_filter_by_lua* — it needs exactly one, calling cfm_cache.micro_setcookie_filter (Tier B would otherwise store and replay a tracking Set-Cookie, or never store anything)."
+          if (srv_micro && srv_scdef != 1) print "ERR the server block opened at line " srvline " has @cfm_micro_<n>s locations but " srv_scdef " server-level set $cfm_sc_unsafe \"1\"; — it needs exactly one (the fail-closed default the header filter clears)."
           if (srv_micro && srv_rwlua) print "ERR the server block opened at line " srvline " has @cfm_micro_<n>s locations and a server-level rewrite_by_lua* — inherited by `location /`, its ngx.req.set_uri(…, true) would carry the sentinel into another location."
           insrv = 0 } }
       }
@@ -453,7 +476,7 @@ for f in "$ORT" "$ANG"; do
       if (!micro_seen) print "ERR no @cfm_micro_<n>s cache location found — the Tier B checks must verify something."
       if (micro_seen && http_rwlua) print "ERR an http-level rewrite_by_lua* — inherited by the `location /` of the micro server, its ngx.req.set_uri(…, true) would carry the $cfm_micro_conf sentinel into another location."
       if (!sentinels) print "ERR no set $cfm_micro_conf \"1\" sentinel found — Tier B would never route."
-      nm1 = 0; nm2 = 0; nm3 = 0; nm4 = 0; nm5 = 0; nmc = 0; nme = 0; nign = 0
+      nm1 = 0; nm2 = 0; nm3 = 0; nm4 = 0; nm5 = 0; nmc = 0; nme = 0; nign = 0; nsd = 0; nsc = 0
       for (k = 1; k <= K; k++) {
         u = tolower(ST[k]); gsub(/\002/, "{", u); gsub(/\003/, "}", u); gsub(/\001/, ";", u)
         fw = u; sub(/^[[:space:]]*/, "", fw); sub(/[^a-z0-9_].*$/, "", fw)
@@ -479,6 +502,10 @@ for f in "$ORT" "$ANG"; do
         if (u ~ /[$][{]?cfm_xae_nocache([^a-z0-9_]|$)/) {
           if (u ~ /^[[:space:]]*map[[:space:]]+[$]upstream_http_x_accel_expires[[:space:]]+[$]cfm_xae_nocache[[:space:]]*[{][[:space:]]*$/) nm4++
           else if (fw != "proxy_no_cache") print "ERR line " SL[k] ": $cfm_xae_nocache appears in a " fw " statement — only its map and proxy_no_cache may reference it."
+        }
+        if (u ~ /[$][{]?cfm_sc_unsafe([^a-z0-9_]|$)/) {
+          if (u ~ /^[[:space:]]*set[[:space:]]+[$]cfm_sc_unsafe[[:space:]]+"1"[[:space:]]*;[[:space:]]*$/) nsd++
+          else if (fw != "proxy_no_cache") print "ERR line " SL[k] ": $cfm_sc_unsafe appears in a " fw " statement — only its server-level fail-closed default and proxy_no_cache may reference it (another writer can let a session cookie be stored)."
         }
         if (u ~ /[$][{]?cfm_micro_conf([^a-z0-9_]|$)/) {
           if (u ~ /^[[:space:]]*set[[:space:]]+[$]cfm_micro_conf[[:space:]]+"1"[[:space:]]*;[[:space:]]*$/) nmc++
@@ -519,7 +546,8 @@ for f in "$ORT" "$ANG"; do
         gsub(/["\047${}]/, "", wt)
         if (wt ~ HDRV) print "ERR line " SL[k] ": " (fw != "" ? fw : "a block entry") " writes $" wt " — that shadows the request/response header (or cookie/arg) value, which the cache rails read."
         if (u ~ /[$][{]?cfm_cache_skip([^a-z0-9_]|$)/ && !pred && u !~ /^[[:space:]]*set[[:space:]]+[$]cfm_cache_skip[[:space:]]+"1"[[:space:]]*;[[:space:]]*$/) print "ERR line " SL[k] ": $cfm_cache_skip appears in a " fw " statement — the conf may only set it to \"1\" (the cache-on flip comes ONLY from cfm_cache.lua)."
-        if (fw == "proxy_ignore_headers" && u ~ /[[:space:]]["\047]?(set-cookie|vary)["\047]?([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_ignore_headers lists Set-Cookie or Vary — nginx would then store a response that sets a cookie, or one Vary variant for everyone."
+        if (fw == "proxy_ignore_headers" && u ~ /[[:space:]]["\047]?vary["\047]?([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_ignore_headers lists Vary — nginx would then store one Vary variant for everyone."
+        if (fw == "proxy_ignore_headers" && u ~ /[[:space:]]["\047]?set-cookie["\047]?([[:space:];]|$)/) nsc++
         if (fw == "proxy_cache_convert_head" && u ~ /[[:space:]]["\047]?off["\047]?([[:space:];]|$)/) print "ERR line " SL[k] ": proxy_cache_convert_head off — the cache key has no method, so a body-less HEAD entry would be served to GET clients."
         if (fw == "proxy_cache_path" && u ~ /cfm_micro_/) { z = ST[k]; gsub(/[[:space:]]+/, " ", z); print "MZONE " z }
         # Every cache zone, as a statement (comments stripped, wherever it
@@ -535,11 +563,14 @@ for f in "$ORT" "$ANG"; do
       if (nmc != sentinels) print "ERR " nmc " set $cfm_micro_conf \"1\" statements but " sentinels " sit in a `location /` — one is outside any location."
       if (nme != mdefs) print "ERR " nme " set $cfm_micro_conf \"\" statements but only " mdefs + 0 " are a server-level default of a micro server — one inside a location (or at http level) can clear the sentinel of `location /`."
       for (k = 1; k <= K; k++) { u = ST[k]; if (u ~ /^[[:space:]]*include[[:space:]]/) { sub(/^[[:space:]]*include[[:space:]]+/, "", u); sub(/[[:space:]]*;.*$/, "", u); print "INC " u } }
+      if (nsc != micro_ign) print "ERR " nsc " proxy_ignore_headers statements list Set-Cookie but only " micro_ign " are the exact micro form in a @cfm_micro_<n>s location — anywhere else (Tier A, a server/http-level one a location inherits) nginx would store a response that sets a cookie, with no $cfm_sc_unsafe rail behind it."
+      if (nsd != scdefs) print "ERR " nsd " set $cfm_sc_unsafe \"1\" statements but only " scdefs + 0 " are the server-level default of a server — one in a location (or at http level) is not where the header filter expects it."
       if (nign != micro_ign) print "ERR " nign " proxy_ignore_headers statements list Cache-Control / Expires / X-Accel-Expires but only " micro_ign " sit in the micro locations — Tier A (or a server/http-level one a location inherits) would let the origin set the TTL and drop the nginx private/no-store rail."
       if (all !~ (A "lua_shared_dict[[:space:]]+cfm_cache_uncacheable[[:space:]]+[0-9]+[kKmM]?[[:space:]]*;")) print "ERR no lua_shared_dict cfm_cache_uncacheable — Tier B cannot remember an uncacheable key, so its requests queue on the cache lock."
       lt2 = tolower(LT); ltc = tolower(LTC)
       if (lt2 !~ /pcall\(cm\.micro_note\)/ || lt2 !~ /"cfm_apache_micro"/) print "ERR the http-level log_by_lua no longer calls cfm_cache.micro_note for cfm_apache_micro requests — Tier B would stop remembering uncacheable keys and their requests would queue on the cache lock."
-      if (lt2 ~ /cfm_req_auth|cfm_cache_skip|cfm_cache_non200|cfm_cc_nostore|cfm_xae_nocache|cfm_cache_too_big|cfm_micro_conf/) print "ERR inline Lua references $cfm_req_auth / $cfm_cache_skip / $cfm_cache_non200 / $cfm_cc_nostore / $cfm_xae_nocache / $cfm_cache_too_big / $cfm_micro_conf — the cache rails must come only from the conf maps, the sentinel and cfm_cache.lua."
+      if (lt2 ~ /cfm_req_auth|cfm_cache_skip|cfm_cache_non200|cfm_cc_nostore|cfm_xae_nocache|cfm_cache_too_big|cfm_micro_conf|cfm_sc_unsafe/) print "ERR inline Lua references $cfm_req_auth / $cfm_cache_skip / $cfm_cache_non200 / $cfm_cc_nostore / $cfm_xae_nocache / $cfm_cache_too_big / $cfm_micro_conf / $cfm_sc_unsafe — the cache rails must come only from the conf maps, the sentinel and cfm_cache.lua."
+      if (lt2 !~ /local okc, cache = pcall\(require, "cfm_cache"\)[[:space:]]+if okc and cache and cache\.micro_setcookie_filter then[[:space:]]+local oks, errs = pcall\(cache\.micro_setcookie_filter\)/) print "ERR the inline Lua never calls pcall(cache.micro_setcookie_filter) — Tier B would never store a page (the $cfm_sc_unsafe default stays \"1\") or, with the default removed, would store and replay Set-Cookie headers."
       # ...by any spelling: ngx.var is read ONLY as ngx.var.<name> (a bracket
       # index or an alias reaches a variable by a computed name, which the
       # check above cannot see), and never assigned for a CFM variable (one of
@@ -598,6 +629,87 @@ for f in "$ORT" "$ANG"; do
   # no_cache / only-200 predicates, the four rail maps, the per-server
   # $cfm_cache_skip "1") are enforced statement-aware in section (a), counted
   # by the parser, so a commented-out directive never satisfies them.
+
+  # ── (b1) the micro Set-Cookie filter call is unconditional ─────────────────
+  # Section (a) pins that the inline Lua contains the call; this pins HOW it
+  # runs. In the header_filter_by_lua_block that calls it (comments and blank
+  # lines dropped, strings masked for the token scan): the four statements
+  # are consecutive, each on its own line, and open at block depth 0 — not
+  # inside an `if false then`, a HIT-only branch or a function. Nothing
+  # before them may leave the block (return / goto / ngx.exit / error), and
+  # nothing in the block may rebind pcall, require, ngx, okc, cache or the
+  # filter, or reach them through _G / _ENV / setmetatable / rawset / setfenv /
+  # package / load*. A skipped call leaves $cfm_sc_unsafe "1" (nothing stored:
+  # safe, but Tier B silently stops), a rebound one could clear it for any
+  # response. Long strings / long comments are refused here (their contents
+  # would go unscanned).
+  sc_hf=$(awk '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function blank(s,   o, i, ch, q) {
+      o = ""; q = ""
+      for (i = 1; i <= length(s); i++) {
+        ch = substr(s, i, 1)
+        if (q != "") { if (ch == "\\") { o = o "xx"; i++; continue } if (ch == q) { q = ""; o = o ch } else o = o "x"; continue }
+        if (ch == "\"" || ch == "\047") { q = ch; o = o ch; continue }
+        o = o ch
+      }
+      return o
+    }
+    /^[[:space:]]*header_filter_by_lua_block[[:space:]]*[{][[:space:]]*$/ { inb = 1; nb++; n = 0; d = 1; next }
+    inb {
+      l = $0
+      if (l ~ /--\[=*\[/ || l ~ /\[=*\[/) { print "ERR header filter block " nb ": a long string or long comment — the Set-Cookie filter pin cannot scan it."; }
+      b = blank(l); c = index(b, "--")
+      if (c) { l = substr(l, 1, c - 1); b = substr(b, 1, c - 1) }
+      t = b; gsub(/[^{}]/, "", t)
+      for (i = 1; i <= length(t); i++) { if (substr(t, i, 1) == "{") d++; else d-- }
+      if (d <= 0) { inb = 0; L[nb] = n; next }
+      if (trim(l) == "") next
+      n++; RAW[nb, n] = trim(l); BL[nb, n] = b
+      next
+    }
+    END {
+      want[1] = "local okc, cache = pcall(require, \"cfm_cache\")"
+      want[2] = "if okc and cache and cache.micro_setcookie_filter then"
+      want[3] = "local oks, errs = pcall(cache.micro_setcookie_filter)"
+      want[5] = "end"
+      found = 0
+      for (k = 1; k <= nb; k++) {
+        has = 0
+        for (i = 1; i <= L[k]; i++) if (index(RAW[k, i], "micro_setcookie_filter")) has = 1
+        if (!has) continue
+        found++
+        at = 0
+        for (i = 1; i + 4 <= L[k]; i++) {
+          if (RAW[k, i] == want[1] && RAW[k, i + 1] == want[2] && RAW[k, i + 2] == want[3] \
+              && RAW[k, i + 3] ~ /^if not oks then ngx\.log\(ngx\.ERR, "\[cfm_cache\] micro_setcookie_filter failed: ", tostring\(errs\)\) end$/ \
+              && RAW[k, i + 4] == want[5]) { at = i; break }
+        }
+        if (!at) { print "ERR the header filter does not carry the exact four-statement micro_setcookie_filter call (local okc, cache = pcall(require, \"cfm_cache\") / if okc and cache and cache.micro_setcookie_filter then / local oks, errs = pcall(cache.micro_setcookie_filter) / if not oks then ngx.log(...) end / end), each on its own line."; continue }
+        depth = 0
+        for (i = 1; i <= L[k]; i++) {
+          s = BL[k, i]; gsub(/[^A-Za-z0-9_.]/, " ", s)
+          nt = split(s, T, " ")
+          if (i == at && depth != 0) print "ERR the micro_setcookie_filter call opens at Lua block depth " depth " — it must be unconditional (not inside an if / do / function / loop)."
+          for (j = 1; j <= nt; j++) {
+            w = T[j]
+            if (i < at && (w == "return" || w == "goto" || w == "ngx.exit" || w == "error")) print "ERR `" w "` before the micro_setcookie_filter call in the header filter — it can skip the call."
+            if (w ~ /^(_G|_ENV|setmetatable|rawset|setfenv|package|load|loadstring|dofile|debug)(\.|$)/) print "ERR `" w "` in the header filter that calls micro_setcookie_filter — it could rebind what the call depends on."
+            if (w == "if" || w == "do" || w == "function" || w == "repeat") depth++
+            if (w == "end" || w == "until") depth--
+          }
+          if (i != at) {
+            r = BL[k, i]
+            if (r ~ /(^|[^A-Za-z0-9_.])(pcall|require|ngx|okc|cache)[[:space:]]*(,[^=]*)?=([^=]|$)/ || r ~ /,[[:space:]]*(pcall|require|ngx|okc|cache)[[:space:]]*(,[^=]*)?=([^=]|$)/ || r ~ /function[[:space:]]+(pcall|require)([^A-Za-z0-9_]|$)/ || r ~ /micro_setcookie_filter[[:space:]]*=([^=]|$)/ || r ~ /local[[:space:]]+(function[[:space:]]+)?(pcall|require|ngx)([^A-Za-z0-9_]|$)/) print "ERR the header filter rebinds pcall / require / ngx / okc / cache / micro_setcookie_filter: " RAW[k, i]
+          }
+        }
+      }
+      if (found != 1) print "ERR " found " header_filter_by_lua_block(s) call micro_setcookie_filter — want exactly 1."
+    }
+  ' "$f")
+  if [ -n "$sc_hf" ]; then
+    while IFS= read -r line; do err "$f: ${line#ERR }"; done <<< "$sc_hf"
+  fi
 
   # ── (b2) Tier B micro-cache zones (Phase B1): every MICRO_BUCKETS TTL declared ─
   # Each zone's dir must exist before `-t` (the daemon + installers provision
@@ -753,4 +865,4 @@ if [ "$fail" -ne 0 ]; then
   echo "[site-cache-config] FAILED — see errors above (invariant: caching is bypass-by-default; the gate must come from Lua)." >&2
   exit 1
 fi
-echo "[site-cache-config] OK: cfm_static zone declared, Tier B micro buckets = cfm_cache.lua MICRO_BUCKETS ($micro_ttls; zone + internal @cfm_micro_<n>s location, no more, no fewer) in both confs, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered + (micro) internal, only-200 rail (\$cfm_cache_non200) enforced, request-identity rails (\$cfm_req_auth bypass + map, full g\$cfm_cache_gen|\$server_addr|\$scheme|\$cf_xfp:// key, per-tier lock_timeout, forwarded headers pinned) on every cache location, every location + every proxy_cache directive accounted for, cache dirs provisioned by the daemon and cfm-cache-dirs.sh == the proxy_cache_path dirs, Set-Cookie/Vary never ignored, Cache-Control/Expires/X-Accel-Expires ignored only in micro with the \$cfm_cc_nostore/\$cfm_xae_nocache rails (volatile maps) + background_update off + use_stale incl. http_5xx + proxy_cache_valid == the bucket, the \$cfm_micro_conf sentinel only in a redirect-free location / of the micro server (server default \"\"), the cfm_cache_uncacheable dict with micro inactive < MICRO_UNCACHEABLE_STALE_TTL, convert_head never off, the include set pinned, no other writer of a guarded or header-family variable (named capture, map/geo/set*, string-form *_by_lua; inline Lua, long strings included, uses ngx.var only as ngx.var.<name>), GET/HEAD-only cache methods, openresty↔angie parity ($ort_n static locations)."
+echo "[site-cache-config] OK: cfm_static zone declared, Tier B micro buckets = cfm_cache.lua MICRO_BUCKETS ($micro_ttls; zone + internal @cfm_micro_<n>s location, no more, no fewer) in both confs, \$cfm_cache_skip bypass-by-default, every proxy_cache location gated + buffered + (micro) internal, only-200 rail (\$cfm_cache_non200) enforced, request-identity rails (\$cfm_req_auth bypass + map, full g\$cfm_cache_gen|\$server_addr|\$scheme|\$cf_xfp:// key, per-tier lock_timeout, forwarded headers pinned) on every cache location, every location + every proxy_cache directive accounted for, cache dirs provisioned by the daemon and cfm-cache-dirs.sh == the proxy_cache_path dirs, Vary never ignored, Cache-Control/Expires/X-Accel-Expires/Set-Cookie ignored only in micro with the \$cfm_cc_nostore/\$cfm_xae_nocache rails (volatile maps) + the \$cfm_sc_unsafe rail (server default \"1\", one server header filter calling micro_setcookie_filter, none in a micro location) + background_update off + use_stale incl. http_5xx + proxy_cache_valid == the bucket, the \$cfm_micro_conf sentinel only in a redirect-free location / of the micro server (server default \"\"), the cfm_cache_uncacheable dict with micro inactive < MICRO_UNCACHEABLE_STALE_TTL, convert_head never off, the include set pinned, no other writer of a guarded or header-family variable (named capture, map/geo/set*, string-form *_by_lua; inline Lua, long strings included, uses ngx.var only as ngx.var.<name>), GET/HEAD-only cache methods, openresty↔angie parity ($ort_n static locations)."

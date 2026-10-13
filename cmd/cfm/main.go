@@ -115,7 +115,9 @@ func mustBackend() firewall.Backend {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	logging.Logf("[startup] backend type=%T engine=%s", be, engine)
+	// No startup log here: logging.Logf prints to stdout until the daemon's
+	// logging.Init, so every CLI command printed the daemon's "[startup]
+	// backend type=" line (into `cfm status --json` too).
 	return be
 }
 

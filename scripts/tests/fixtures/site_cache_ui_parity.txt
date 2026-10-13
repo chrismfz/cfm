@@ -35,8 +35,15 @@ bucket	20s	10
 bucket	45s	30
 bucket	46s	60
 bucket	1m	60
-bucket	2h	60
-bucket	1d	60
+bucket	75s	60
+bucket	76s	90
+bucket	90s	90
+bucket	100s	90
+bucket	105s	90
+bucket	106s	120
+bucket	2m	120
+bucket	2h	120
+bucket	1d	120
 bucket	+5s	5
 bucket	5	5
 bucket	5 s	5

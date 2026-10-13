@@ -94,8 +94,13 @@ SOURCES = [
     "txt:https://tools.koalityengine.com/ip.txt",
     "asn:AS202042",
     "json:https://duckduckgo.com/duckduckbot.json",
-    "json:https://openai.com/gptbot.json",
-    "json:https://openai.com/searchbot.json",
+    # OpenAI's GPTBot / OAI-SearchBot ranges were here until 2026-10-13. A bypass
+    # skips the traffic rules too (cfm.lua Step 0 returns before Step 3), so
+    # no "bots" recipe could reach them: GPTBot walked every ?filter_category=
+    # combination of a shop on orion at ~2 req/s, 2.4 s each, and a block rule
+    # matching it never ran. A training / AI-search crawler needs no WAF or
+    # challenge bypass; it is now an ordinary client the rules can throttle or
+    # block. Re-add only together with a Step 0 that still applies rules.
     # QUIC.cloud stays, on purpose (decided 2026-09-26, re-check before removing).
     # Its nodes fetch sites that use the LiteSpeed Cache plugin, as `qcbot/1.0
     # (+http://quic.cloud/bot.html)`, for page optimization (critical CSS etc.):
