@@ -59,7 +59,8 @@ back-filled here — see the git/PR history for that period.
 - **SE Ranking's crawler (`SERankingBacklinksBot`) is in the recipes' SEO tools
   group.** On a WooCommerce shop it walked every category's `?type=…&orderby=…`
   combination, and each page ran a product-filter count over 14–31 M rows (up
-  to 65 s per query).
+  to 65 s per query). A rule copies the group's list when it is created: an
+  existing SEO-tools rule gains it only when re-created from the recipe.
 
 ### Fixed
 - **`cfm status` reports the firewall on nftlib nodes.** It printed "table
@@ -69,8 +70,13 @@ back-filled here — see the git/PR history for that period.
   and each set's entries through the backend. The same fallback covers a host
   whose `nft -j` output does not parse (a warning on stderr). A read that fails
   is reported as such ("UNKNOWN", "READ FAILED" per set, `read_error` in
-  `--json`), never as zero or "table absent". Entries with a timeout are now
-  counted on exec-engine nodes too, so their totals can go up.
+  `--json`), never as zero or "table absent"; when only the rules cannot be
+  read the set totals are still shown. Entries with a timeout are now counted
+  on exec-engine nodes too, so their totals can go up.
+- **The exec firewall backend lists interval-set entries as CIDRs / ranges.**
+  It turned `{"prefix"}` / `{"range"}` elements into `<nil>` (and timeout-
+  wrapped ones into `map[…]`) for every caller, and failed a read on a warning
+  nft printed on stderr.
 - **CLI commands no longer print the daemon's `[startup] backend type=…` line**
   (it also landed in `cfm status --json` output).
 

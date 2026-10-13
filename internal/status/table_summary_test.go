@@ -236,3 +236,48 @@ func TestReadTableSummary_ReadFailuresAreNotZero(t *testing.T) {
 		}
 	})
 }
+
+// The exec backend appends nft's stderr after the JSON on stdout. The JSON is
+// still read (the fallback would fork one `nft -j list set` per set, and on
+// exec those reads fail on the same warning).
+func TestReadTableSummary_TrailingStderrKeepsTheJSONPath(t *testing.T) {
+	be := &fakeBE{
+		tableJSON: `{"nftables":[{"table":{"family":"inet","name":"cfm"}},` +
+			`{"set":{"name":"block_v4","type":"ipv4_addr","elem":["198.51.100.1","198.51.100.2"]}},` +
+			`{"rule":{"chain":"input"}}]}` + "\nWarning: table ip filter is managed by iptables-nft, do not touch!\n",
+		textErr: errors.New("the text dump must not be read"),
+		elemErr: map[string]error{"block_v4": errors.New("the per-set read must not happen")},
+	}
+	st := readTableSummary(be)
+	if !st.RulesPresent || st.ReadError != "" || rowOf(t, st, "block_v4").Hosts != 2 {
+		t.Fatalf("got %+v", st)
+	}
+}
+
+// nftlib listed the sets over netlink, so a text dump that fails (it can time
+// out on a loaded node) leaves only the rule count unknown.
+func TestReadTableSummary_NftlibTextFailsKeepsSets(t *testing.T) {
+	be := nftlibShape()
+	be.text, be.textErr = "", errors.New("signal: killed")
+	st := readTableSummary(be)
+	if !st.TablePresent || st.RulesErr == "" || st.ReadError != "" || st.Totals.Overall != 8 {
+		t.Fatalf("got %+v", st)
+	}
+	if !st.incomplete() {
+		t.Error("a summary without its rule count must not be cached")
+	}
+	out := captureSummary(t, st)
+	if !strings.Contains(out, "rules could not be read") || strings.Contains(out, "no rules found") || strings.Contains(out, "UNKNOWN") {
+		t.Errorf("summary:\n%s", out)
+	}
+}
+
+func TestCountChainRules_CommentsAndQuotedBraces(t *testing.T) {
+	txt := "table inet cfm {\n" +
+		"\tchain input {\n\t\tcomment \"managed by cfm\"\n\t\ttype filter hook input priority 0; policy accept;\n" +
+		"\t\tiif \"x}\" accept comment \"odd } brace\"\n\t}\n" +
+		"\tchain output {\n\t\tlog prefix \"{ cfm \" accept\n\t}\n}\n"
+	if got := countChainRules(txt); got != 2 {
+		t.Fatalf("countChainRules = %d, want 2 (one rule per chain)", got)
+	}
+}
