@@ -18,6 +18,23 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Changed
+- **A mailbox read from three countries is no longer a critical hijack
+  page.** In a week the fleet raised 33 critical `mail_hijack` alerts on 10
+  mailboxes, each reminded every 6 h, and every one was a mailbox only READ
+  from abroad: owners travelling, behind a VPN or a company proxy. A hijack is
+  now critical only when the mailbox is also used within the hour: mail sent
+  (SMTP AUTH) from a country other than its home, an outbound or bounce spike
+  of its own, or its forwarder or mail filter changed in the last 24 h
+  (cPanel). The message says which. Without that it is a warning that asks to
+  check with the owner, and it is raised to critical the moment one appears.
+  A warning hijack that comes back from no new country is not published
+  again while it keeps coming back at least weekly
+  (`/var/lib/cfm/mail_abuse_published_hijacks.json`); a critical one, or any
+  hijack after a critical one, always is.
+  Netskope, Zscaler and Cisco Umbrella exits now count as one source with no
+  country, like Gmail fetching: on orion one company's staff were paged every
+  few hours from Netskope exits in IN and UG. See docs/mail-abuse.md "Hijack
+  severity".
 - **A WordPress / Drupal / Joomla / OpenCart / Magento login brute force from
   a direct client is now challenged.** The login-burst rule (WAF 501) has
   counted clients that connect directly, not only those behind Cloudflare,

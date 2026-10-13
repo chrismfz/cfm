@@ -12,8 +12,10 @@ package mailtraffic
 //   - mail_outbound_spike: an authenticated mailbox sending far above its own
 //     history (the anomaly whats_wrong already showed, now an alert).
 //   - mail_hijack: one mailbox SUCCESSFULLY authenticating from many IPs or
-//     countries within an hour (SMTP AUTH, or IMAP/POP3 through dovecot) — a
-//     stolen password being used.
+//     countries within an hour (SMTP AUTH, or IMAP/POP3 through dovecot):
+//     critical when the password is also being used — mail sent from abroad,
+//     a spike of its own, a forwarder or filter set — else a warning, a
+//     question for the owner (abuse_hijack.go).
 //   - mail_bounce_spike: a sender whose mail bounces in bulk — a hacked
 //     account or form writing to harvested / made-up addresses (abuse_signals.go).
 //   - mail_queue_hog: one sender holding most of a large queue.
@@ -21,6 +23,8 @@ package mailtraffic
 //
 // Each finding is published once when it appears (again if its severity
 // rises), and resolved with mail_recovered under the same key once it is over.
+// A warning hijack back within a week from the same countries is not
+// published again (publisher.quiet).
 // A spike closes only when the volume is back near what it was BEFORE the
 // alert opened: a sender's baseline is its own trailing week, so a long
 // incident slowly becomes its own baseline and would otherwise "recover"
@@ -198,6 +202,19 @@ var fetcherASNs = map[uint]bool{
 	47764: true, // Mail.ru / VK
 }
 
+// proxyASNs are corporate security gateways (SASE / secure web gateways): a
+// company sends its staff's traffic out through the vendor's nearest point of
+// presence, which geolocates anywhere (orion, Oct 2026:
+// larrynail@aspirephysiciansolutions.com read from a US phone, the French
+// office and Netskope exits in IN and UG — paged as a hijack every few hours).
+// A paid enterprise tenant, not a VPN anyone can buy: they count as one source
+// with no country, like the fetchers. ASNs checked on RIPEstat (Oct 2026).
+var proxyASNs = map[uint]bool{
+	55256: true,                           // Netskope
+	53813: true, 62044: true, 22616: true, // Zscaler
+	36692: true, // Cisco Umbrella
+}
+
 // authSource normalises a login's source address: "" for an address that is not
 // a remote client (loopback, private: webmail, a local relay), the network for
 // a provider fetching mail, the /64 for IPv6 (one device rotates privacy
@@ -215,7 +232,7 @@ func authSource(ip string) (src, country string) {
 		return "", ""
 	}
 	cc, asn := geoOf(ip)
-	if fetcherASNs[asn] {
+	if fetcherASNs[asn] || proxyASNs[asn] {
 		return fmt.Sprintf("AS%d", asn), ""
 	}
 	if v4 := pip.To4(); v4 != nil {
@@ -251,10 +268,35 @@ type tracker struct {
 	started   time.Time // what is in memory covers only the time since
 }
 
-// authSeen is a mailbox's last login from one source, and over what.
+// authSeen is a mailbox's last login from one source, per protocol: a hijack
+// is judged on what each source did INSIDE the window (an address that sent
+// mail two hours ago and only reads now has not sent mail within the hour).
 type authSeen struct {
-	at  time.Time
-	via string // smtp | imap | pop3
+	at  time.Time    // the latest login over any protocol
+	via [3]time.Time // the latest login per authVias protocol
+}
+
+// authVias are the login protocols, sorted (the order a message lists them).
+var authVias = [3]string{"imap", "pop3", "smtp"}
+
+func viaIndex(via string) int {
+	for i, v := range authVias {
+		if v == via {
+			return i
+		}
+	}
+	return -1
+}
+
+// within lists the protocols this source logged in over since cutoff.
+func (a authSeen) within(cutoff time.Time) []string {
+	var out []string
+	for i, at := range a.via {
+		if !at.IsZero() && !at.Before(cutoff) {
+			out = append(out, authVias[i])
+		}
+	}
+	return out
 }
 
 func newTracker() *tracker {
@@ -477,7 +519,14 @@ func (t *tracker) addAuth(user, ip, via string, at time.Time) {
 	if _, ok := ips[ip]; !ok && len(ips) >= maxTrackedIPs {
 		return
 	}
-	ips[ip] = authSeen{at: at, via: via}
+	a := ips[ip]
+	if i := viaIndex(via); i >= 0 && at.After(a.via[i]) {
+		a.via[i] = at
+	}
+	if at.After(a.at) {
+		a.at = at
+	}
+	ips[ip] = a
 }
 
 // prune drops context older than the windows it is read over.
@@ -631,7 +680,8 @@ func (c Context) describe(msg string) string {
 
 type abuseFinding struct {
 	Type, Severity, Key, Message string
-	Expected                     float64 // the spike's expected volume when it opened
+	Expected                     float64  // the spike's expected volume when it opened
+	Countries                    []string // a hijack's countries (re-publishing is judged on them)
 }
 
 // AbuseView is one current finding with its full context, for whats_wrong
@@ -700,45 +750,13 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		fs = append(fs, f)
 		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, Context: &c})
 	}
+	// a hijack is spotted first (the spike messages below leave out the IP
+	// count it already gives) and judged last: its severity depends on what
+	// else the same mailbox is doing this check
+	cands := t.hijackCandidates(now)
 	hijacked := map[string]bool{}
-	for user, ips := range t.authIPs {
-		countries, sources, via := map[string]bool{}, map[string]string{}, map[string]bool{}
-		for ip, a := range ips {
-			src, cc := authSource(ip)
-			if src == "" {
-				continue
-			}
-			sources[src] = cc
-			via[a.via] = true
-			if cc != "" {
-				countries[cc] = true
-			}
-		}
-		perCountry := map[string]int{}
-		for _, cc := range sources {
-			if cc != "" {
-				perCountry[cc]++
-			}
-		}
-		abroad := 0
-		if top := topN(perCountry, 1); len(top) == 1 {
-			for _, cc := range sources {
-				if cc != "" && cc != top[0].k {
-					abroad++
-				}
-			}
-		}
-		if len(countries) < hijackMinCountries && (len(sources) < hijackMinIPs || abroad < hijackMinAbroad) {
-			continue
-		}
-		hijacked[user] = true
-		cs := sortedKeys(countries)
-		msg := clip(fmt.Sprintf("%s: logged in (%s) from %d IPs in %d countries (%s) within an hour — likely a stolen password",
-			user, strings.Join(sortedKeys(via), "/"), len(sources), len(countries), strings.Join(cs, ", ")))
-		f := abuseFinding{Type: TypeHijack, Severity: "critical", Key: "mail:hijack:" + user, Message: msg}
-		fs = append(fs, f)
-		c := t.context("auth:"+user, user)
-		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: user, IPs: len(sources), Countries: cs, Context: &c})
+	for _, h := range cands {
+		hijacked[h.user] = true
 	}
 	if now.Sub(t.started) < hijackWindow {
 		// after a restart the logins in memory cover less than the window: an
@@ -749,6 +767,9 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 			}
 		}
 	}
+	// keys of this check's findings: a hijack is confirmed by a spike or a
+	// bounce finding of the same mailbox, new or still open
+	found := map[string]bool{}
 	for _, a := range out {
 		c := t.context("auth:"+a.Addr, a.Addr)
 		if belowAlertFloor(a, c, open["mail:out:"+a.Addr]) {
@@ -761,13 +782,22 @@ func (t *tracker) evaluateWith(st *Store, now time.Time, open map[string]bool, r
 		msg := clip(c.describe(head))
 		f := abuseFinding{Type: TypeOutboundSpike, Severity: spikeSeverity(a), Key: "mail:out:" + a.Addr, Message: msg, Expected: expectedOf(a)}
 		fs = append(fs, f)
+		found[f.Key] = true
 		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: msg, Subject: a.Addr, Recent: a.Recent, IPs: len(t.authIPs[a.Addr]), Context: &c})
 	}
 	for _, more := range [][]AbuseView{t.bounceFindings(now, open, held), queueFindings(now, open, held), rblFindings(rbl, open, held)} {
 		for _, v := range more {
 			fs = append(fs, abuseFinding{Type: v.Type, Severity: v.Severity, Key: v.Key, Message: v.Message})
+			found[v.Key] = true
 			views = append(views, v)
 		}
+	}
+	rules := &rulesCheck{}
+	for _, h := range cands {
+		f := h.finding(found, open, rules, now)
+		fs = append(fs, f)
+		c := t.context("auth:"+h.user, h.user)
+		views = append(views, AbuseView{Type: f.Type, Severity: f.Severity, Key: f.Key, Message: f.Message, Subject: h.user, IPs: h.sources, Countries: h.countries, Context: &c})
 	}
 	t.last, t.lastCheck = views, now
 	return fs, recent, held, true
@@ -844,6 +874,20 @@ func clip(s string) string {
 	return s
 }
 
+func unionSorted(a, b []string) []string {
+	m := map[string]bool{}
+	for _, s := range a {
+		m[s] = true
+	}
+	for _, s := range b {
+		m[s] = true
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return sortedKeys(m)
+}
+
 func sortedKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -911,6 +955,15 @@ type openFinding struct {
 	// QuietSince is when a spike stopped being a finding while staying open
 	// on volume (zero while it is one).
 	QuietSince time.Time `json:"quiet_since,omitempty"`
+	// Countries: a hijack's countries when it was published.
+	Countries []string `json:"countries,omitempty"`
+}
+
+// pastHijack is a resolved hijack, remembered for hijackQuiet.
+type pastHijack struct {
+	Countries []string  `json:"countries"`
+	Severity  string    `json:"severity"`
+	At        time.Time `json:"at"` // when it was resolved
 }
 
 type publisher struct {
@@ -918,6 +971,37 @@ type publisher struct {
 	path   string // "" = not persisted
 	loaded bool
 	open   map[string]openFinding
+	past   map[string]pastHijack // resolved hijacks, kept in pastPath()
+}
+
+// pastPath is where resolved hijacks are kept, next to the open findings.
+func (p *publisher) pastPath() string {
+	return strings.TrimSuffix(p.path, ".json") + "_hijacks.json"
+}
+
+// quiet reports a WARNING hijack that is the warning resolved within
+// hijackQuiet again, from no new country. It is not published (whats_wrong
+// and mail_traffic still list it), and it renews the memory: an owner behind
+// the same VPN every day is not paged again every week.
+func (p *publisher) quiet(f abuseFinding, now time.Time) bool {
+	h, ok := p.past[f.Key]
+	if !ok || now.Sub(h.At) >= hijackQuiet || f.Severity == "critical" || h.Severity == "critical" {
+		// a critical one is never quiet, nor anything after one: that
+		// password was being used, and it may not have been changed
+		return false
+	}
+	was := map[string]bool{}
+	for _, cc := range h.Countries {
+		was[cc] = true
+	}
+	for _, cc := range f.Countries {
+		if !was[cc] {
+			return false
+		}
+	}
+	h.At = now // still the same pattern: remembered from its latest sighting
+	p.past[f.Key] = h
+	return true
 }
 
 func (p *publisher) load() {
@@ -926,6 +1010,7 @@ func (p *publisher) load() {
 	}
 	p.loaded = true
 	p.open = map[string]openFinding{}
+	p.past = map[string]pastHijack{}
 	if p.path == "" {
 		return
 	}
@@ -934,22 +1019,37 @@ func (p *publisher) load() {
 			p.open = map[string]openFinding{}
 		}
 	}
+	if raw, err := os.ReadFile(p.pastPath()); err == nil {
+		if json.Unmarshal(raw, &p.past) != nil {
+			p.past = map[string]pastHijack{}
+		}
+	}
 }
 
-func (p *publisher) save() {
+func (p *publisher) save(now time.Time) {
+	for k, h := range p.past {
+		if now.Sub(h.At) >= hijackQuiet {
+			delete(p.past, k)
+		}
+	}
 	if p.path == "" {
 		return
 	}
-	raw, err := json.Marshal(p.open)
+	writeState(p.path, p.open)
+	writeState(p.pastPath(), p.past)
+}
+
+func writeState(path string, v any) {
+	raw, err := json.Marshal(v)
 	if err != nil {
 		return
 	}
-	tmp := p.path + ".tmp"
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		logging.Logf("[mailtraffic] abuse state not saved: %v", err)
 		return
 	}
-	if err := os.Rename(tmp, p.path); err != nil {
+	if err := os.Rename(tmp, path); err != nil {
 		logging.Logf("[mailtraffic] abuse state not saved: %v", err)
 	}
 }
@@ -995,8 +1095,15 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 			prev.QuietSince = time.Time{} // a finding again: not quiet
 			p.open[f.Key] = prev
 		}
+		if seen && f.Type == TypeHijack {
+			prev.Countries = unionSorted(prev.Countries, f.Countries) // every country of the episode
+			p.open[f.Key] = prev
+		}
 		if seen && sevRank(f.Severity) <= sevRank(prev.Severity) {
 			continue // still open, no worse: nothing new to say
+		}
+		if !seen && f.Type == TypeHijack && p.quiet(f, now) {
+			continue // the same hijack as last time: already said
 		}
 		if !publish(f.Type, f.Severity, f.Key, f.Message, now) {
 			continue // no sink yet: retried next check
@@ -1005,7 +1112,7 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 		if seen {
 			exp = prev.Expected // keep the baseline from before the incident
 		}
-		p.open[f.Key] = openFinding{Type: f.Type, Severity: f.Severity, Message: f.Message, Expected: exp}
+		p.open[f.Key] = openFinding{Type: f.Type, Severity: f.Severity, Message: f.Message, Expected: exp, Countries: unionSorted(prev.Countries, f.Countries)}
 	}
 	for key, o := range p.open {
 		if current[key] || held[key] {
@@ -1031,7 +1138,10 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 		var msg string
 		switch o.Type {
 		case TypeHijack:
-			msg = "no more logins from many places — still change the password (was: " + o.Message + ")"
+			msg = "no more logins from many places (was: " + o.Message + ")"
+			if o.Severity == "critical" {
+				msg = "no more logins from many places — still change the password (was: " + o.Message + ")"
+			}
 		case TypeBounceSpike:
 			msg = "bounces back to normal (was: " + o.Message + ")"
 		case TypeQueueHog:
@@ -1050,8 +1160,11 @@ func (p *publisher) applyHeld(fs []abuseFinding, recent map[string]int64, held m
 		}
 		msg = clip(msg)
 		if publish(TypeRecovered, "info", key, msg, now) {
+			if o.Type == TypeHijack {
+				p.past[key] = pastHijack{Countries: o.Countries, Severity: o.Severity, At: now}
+			}
 			delete(p.open, key)
 		}
 	}
-	p.save()
+	p.save(now)
 }
