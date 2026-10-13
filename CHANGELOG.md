@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.13
+
 ### Changed
 - **"Done before" and "volume only" spikes: a follow-up review of the
   2026-10-13 change.** The sender's peak is now measured over three hourly
