@@ -877,6 +877,7 @@ code {
 .sim-result { margin-top: .5rem; font-size: .86rem; line-height: 1.5; }
 .sim-result .sim-disabled { margin-top: .3rem; color: var(--muted); }
 .recipes-pane { margin-bottom: .8rem; }
+.transfer-pane { display: grid; gap: .8rem; margin-bottom: .8rem; }
 .recipe-grid { display: grid; gap: .55rem; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); margin-bottom: .7rem; }
 .recipe-card {
   display: flex; flex-direction: column; align-items: flex-start; gap: .3rem; text-align: left;

@@ -48,6 +48,7 @@
         <div class="toolbar wrap">
           <button :class="editorMode === 'editor' ? '' : 'btn-quiet'" @click="setEditorMode('editor')">{{ ruleEditID ? 'Edit rule' : 'New rule' }}</button>
           <button :class="editorMode === 'recipes' ? '' : 'btn-quiet'" @click="setEditorMode('recipes')">Recipes</button>
+          <button :class="editorMode === 'transfer' ? '' : 'btn-quiet'" @click="setEditorMode('transfer')" title="Move rules between servers as a JSON file">Export / Import</button>
           <span class="toolbar-gap"></span>
           <label for="rules-vhost-filter">Vhost</label>
           <select id="rules-vhost-filter" class="input" v-model="rulesVhostFilter" title="Show only rules scoped to this vhost">
@@ -119,6 +120,68 @@
                 <button v-else :disabled="!recipePreview.length" @click="loadRecipeIntoEditor">Load into editor</button>
               </div>
             </template>
+          </section>
+        </div>
+
+        <!-- ── Export / import ──────────────────────────────────────────── -->
+        <div v-else-if="editorMode === 'transfer'" class="transfer-pane">
+          <section class="mini-card">
+            <h3>Export</h3>
+            <p class="muted">Download the rules as a JSON file to import on another server (e.g. when a site moves). The file carries no ids or dates; the target assigns new ones.</p>
+            <p>
+              Exports <strong>{{ rulesVhostFilter ? 'the rules scoped to ' + rulesVhostFilter : 'every rule you can see' }}</strong>.
+              <span class="muted">Pick a vhost in the filter above to export one site.</span>
+            </p>
+            <div class="toolbar">
+              <button :disabled="rulesBusy" @click="exportRules">Export {{ rulesVhostFilter || 'all vhosts' }}</button>
+            </div>
+          </section>
+
+          <section class="mini-card">
+            <h3>Import</h3>
+            <p class="muted">Choose a file exported from CFM (cfm-admin or <code>cfm webtop rules export</code>). You see what will happen before anything is written. A rule this server already has (same vhosts, conditions and action) is skipped; if any rule is invalid, nothing is imported.</p>
+            <div class="toolbar wrap">
+              <input ref="rulesImportFile" type="file" accept=".json,application/json" :disabled="rulesBusy" @change="onImportFile" />
+              <label class="muted form-check" title="Import every rule disabled, to test with the simulator before enabling">
+                <input type="checkbox" :checked="transferDisabled" :disabled="rulesBusy || transferDone" @change="onTransferDisabledChange($event)" /> import as disabled
+              </label>
+            </div>
+            <p class="muted" v-if="transferDoc">
+              <strong>{{ transferFileName }}</strong>: {{ transferDoc.rules.length }} rule(s)<template v-if="transferDoc.node"> from {{ transferDoc.node }}</template><template v-if="transferDoc.exported_at"> ({{ String(transferDoc.exported_at).slice(0, 10) }})</template><template v-if="transferVhosts.length"> for {{ transferVhosts.join(', ') }}</template>.
+              <template v-if="transferDoc.skipped_unsupported"> The source server left out {{ transferDoc.skipped_unsupported }} rule(s) it could not export (written by a newer cfm).</template>
+              Rules of a site that is not set up on this server yet still import; they apply once its vhost is served here.
+            </p>
+            <ul class="msg-list errors" v-if="transferError"><li>{{ transferError }}</li></ul>
+            <p v-if="transferPlan && transferSummary.text">
+              <span class="pill" :class="transferSummary.tone">{{ transferDone ? 'imported' : 'preview' }}</span> {{ transferDone ? 'Done. ' : '' }}{{ transferDone ? '' : transferSummary.text }}
+              <template v-if="transferDone">{{ (transferPlan.added || []).length }} rule(s) added, {{ transferPlan.duplicates || 0 }} duplicate(s) skipped.</template>
+            </p>
+            <div class="table-wrap" v-if="transferPlan && transferPlan.items && transferPlan.items.length">
+              <table class="mini-table">
+                <thead><tr><th>#</th><th>Result</th><th>Prio</th><th>On</th><th>Action</th><th>What it does</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr v-for="it in transferPlan.items" :key="it.index">
+                    <td>{{ it.index + 1 }}</td>
+                    <td>
+                      <span class="pill" :class="transferItemTone(it.status)">{{ transferDone && it.status === 'add' ? 'added' : it.status }}</span>
+                      <div class="muted" v-if="it.rule && it.rule.id && transferDone">{{ it.rule.id }}</div>
+                      <div class="muted" v-if="it.duplicate_of">same as {{ it.duplicate_of }}</div>
+                      <div class="danger-text" v-if="it.error">{{ it.error }}</div>
+                      <div class="muted" v-for="w in (it.warnings || [])" :key="w">⚠ {{ w }}</div>
+                    </td>
+                    <td>{{ it.rule ? it.rule.priority : '' }}</td>
+                    <td><span class="pill" :class="it.rule && it.rule.enabled ? 'ok' : 'warn'">{{ it.rule && it.rule.enabled ? 'on' : 'off' }}</span></td>
+                    <td><span class="pill" :class="actionTone(it.rule && it.rule.action && it.rule.action.type)">{{ it.rule && it.rule.action ? it.rule.action.type : '-' }}</span></td>
+                    <td>{{ it.rule ? recipeRuleSentence(it.rule) : '' }}</td>
+                    <td class="muted">{{ it.rule ? it.rule.note : '' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="toolbar">
+              <button v-if="!transferDone" :disabled="rulesBusy || !transferSummary.canImport" @click="runImport">Import {{ transferPlan && transferPlan.add ? transferPlan.add + ' rule(s)' : '' }}</button>
+              <button class="btn-quiet" v-if="transferDoc || transferError" :disabled="rulesBusy" @click="resetTransfer">{{ transferDone ? 'Import another file' : 'Clear' }}</button>
+            </div>
           </section>
         </div>
 

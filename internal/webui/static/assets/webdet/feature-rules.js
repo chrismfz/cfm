@@ -41,6 +41,15 @@ import {
   validateRecipeVars,
   validateRuleForm,
 } from "./rules-model.js";
+import {
+  docVhosts,
+  exportFileName,
+  exportPath,
+  importPath,
+  itemTone,
+  parseExportFile,
+  planSummary,
+} from "./rules-transfer.js";
 
 const CHIP_KEYS = ["paths", "uas", "countries", "ips", "vbot", "methods", "qs"];
 
@@ -88,6 +97,14 @@ export const rulesMixin = {
       simulateResult: null,
       simulateRequest: null, // the request that produced simulateResult (not the live form)
       simulateNote: "",
+
+      // Export / import (moving a site's rules between nodes)
+      transferDoc: null, // the parsed export file
+      transferFileName: "",
+      transferDisabled: false,
+      transferPlan: null, // the daemon's import plan (dry run or result)
+      transferDone: false, // transferPlan is the result of a real import
+      transferError: "",
     };
   },
 
@@ -188,6 +205,12 @@ export const rulesMixin = {
       }
       return { tone: "", text: "No enabled rule matches — the request proceeds to the normal challenge / WAF decision." };
     },
+    transferSummary() {
+      return planSummary(this.transferPlan);
+    },
+    transferVhosts() {
+      return docVhosts(this.transferDoc);
+    },
     simulateDisabledText() {
       const d = this.simulateResult?.disabled_match;
       if (!d) return "";
@@ -253,7 +276,7 @@ export const rulesMixin = {
 
     // ── Editor state ─────────────────────────────────────────────────────
     setEditorMode(mode) {
-      this.editorMode = mode === "recipes" ? "recipes" : "editor";
+      this.editorMode = ["recipes", "transfer"].includes(mode) ? mode : "editor";
     },
     setAction(key) {
       const act = actionInfo(key);
@@ -460,6 +483,141 @@ export const rulesMixin = {
       if (!rows.length) return;
       this.loadPayloadIntoForm(rows[0]);
       this.actionMsg = `Loaded "${this.selectedRecipe?.title}" into the editor — review, then save.`;
+    },
+
+    // ── Export / import ─────────────────────────────────────────────────
+    // The daemon validates, de-duplicates and scope-checks the import and
+    // writes it all-or-nothing (traffic_rules_transfer.go); the page always
+    // shows the dry-run plan first and imports exactly the previewed file.
+    transferItemTone(status) {
+      return itemTone(status);
+    },
+    async exportRules() {
+      const vh = this.rulesVhostFilter;
+      try {
+        const doc = await this.fetchJSON(exportPath(vh));
+        const n = (doc?.rules || []).length;
+        if (!n) {
+          this.actionMsg = `Export: no rules${vh ? ` scoped to ${vh}` : ""}.`;
+          return;
+        }
+        const name = exportFileName(vh);
+        const blob = new Blob([`${JSON.stringify(doc, null, 2)}\n`], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        const skipped = Number(doc?.skipped_unsupported) || 0;
+        this.actionMsg = `Exported ${n} rule(s) to ${name}.${skipped ? ` ${skipped} rule(s) written by a newer cfm were left out.` : ""}`;
+      } catch (err) {
+        this.actionMsg = `Export failed: ${this.formatApiError(err)}`;
+        console.error("[cfm-admin] rules export failed", err);
+      }
+    },
+    resetTransfer() {
+      this.transferDoc = null;
+      this.transferFileName = "";
+      this.transferPlan = null;
+      this.transferDone = false;
+      this.transferError = "";
+      const input = this.$refs?.rulesImportFile;
+      if (input) input.value = "";
+    },
+    async onImportFile(ev) {
+      const file = ev?.target?.files?.[0];
+      this.transferDoc = null;
+      this.transferPlan = null;
+      this.transferDone = false;
+      this.transferError = "";
+      this.transferFileName = file ? file.name : "";
+      if (!file) return;
+      if (file.size > 2 * 1024 * 1024) {
+        this.transferError = "The file is larger than 2 MiB, more than this page can import. Split it, or import it with \"cfm webtop rules import\" in parts.";
+        return;
+      }
+      let text = "";
+      this.rulesBusy = true; // the file input stays disabled while it is read
+      try {
+        text = await file.text();
+      } catch (err) {
+        this.transferError = `Could not read the file: ${err?.message || err}`;
+        return;
+      } finally {
+        this.rulesBusy = false;
+      }
+      const { doc, error } = parseExportFile(text);
+      if (error) {
+        this.transferError = error;
+        return;
+      }
+      this.transferDoc = doc;
+      await this.previewImport();
+    },
+    onTransferDisabledChange(ev) {
+      this.transferDisabled = Boolean(ev?.target?.checked);
+      // The plan shows enabled states, so a changed checkbox needs a new one.
+      if (this.transferDoc && !this.transferDone) this.previewImport();
+    },
+    // postImport returns the daemon's plan: a 400 still carries one (which
+    // rule is invalid and why), so it is read from the error too.
+    async postImport(dryRun) {
+      try {
+        return await this.postJSON(importPath({ dryRun, disabled: this.transferDisabled }), this.transferDoc);
+      } catch (err) {
+        if (err?.data && Array.isArray(err.data.items)) return err.data;
+        throw err;
+      }
+    },
+    async previewImport() {
+      if (!this.transferDoc) return;
+      this.rulesBusy = true;
+      this.transferError = "";
+      try {
+        this.transferPlan = await this.postImport(true);
+        this.transferDone = false;
+      } catch (err) {
+        this.transferPlan = null;
+        this.transferError = `Preview failed: ${this.formatApiError(err)}`;
+        console.error("[cfm-admin] rules import preview failed", err);
+      } finally {
+        this.rulesBusy = false;
+      }
+    },
+    async runImport() {
+      if (!this.transferDoc || !this.transferSummary.canImport) return;
+      const add = Number(this.transferPlan?.add) || 0;
+      const enabled = (this.transferPlan?.items || []).filter((it) => it.status === "add" && it.rule?.enabled).length;
+      const ok = window.confirm(
+        `Import ${add} rule(s) from ${this.transferFileName}?\n${enabled} will be enforced immediately, ${add - enabled} saved disabled.`,
+      );
+      if (!ok) return;
+      this.rulesBusy = true;
+      this.transferError = "";
+      try {
+        const plan = await this.postImport(false);
+        this.transferPlan = plan;
+        if (plan?.error) {
+          // Nothing was written. Show what changed (e.g. another import added
+          // the same rules meanwhile) with a fresh preview.
+          this.rulesBusy = false;
+          await this.previewImport();
+          this.transferError = `Import failed, nothing was written: ${plan.error}. The preview below is up to date.`;
+          return;
+        }
+        this.transferDone = true;
+        const ids = plan?.added || [];
+        this.actionMsg = `Imported ${ids.length} rule(s) from ${this.transferFileName}${ids.length ? ` (${ids.join(", ")})` : ""}.`;
+        await this.refreshRules();
+      } catch (err) {
+        this.transferError = `Import failed: ${this.formatApiError(err)}`;
+        console.error("[cfm-admin] rules import failed", err);
+      } finally {
+        this.rulesBusy = false;
+      }
     },
 
     // ── Simulator ───────────────────────────────────────────────────────

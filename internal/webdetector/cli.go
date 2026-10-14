@@ -117,6 +117,8 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop rules update <id> --file rule.json")
 	fmt.Println("  cfm webtop rules remove <id>")
 	fmt.Println("  cfm webtop rules simulate --host <vhost> [--ip <ip>] [--ua <ua>] [--path </x>] [--method GET] [--country US]")
+	fmt.Println("  cfm webtop rules export [--vhost <host>]... [--out rules.json]")
+	fmt.Println("  cfm webtop rules import --file rules.json [--dry-run] [--disabled]")
 	fmt.Println("  cfm webtop challenge-access list                         # challenge exemptions (allow-list)")
 	fmt.Println("  cfm webtop challenge-access add --file entry.json        # add an exemption")
 	fmt.Println("  cfm webtop challenge-access update <id> --file entry.json")

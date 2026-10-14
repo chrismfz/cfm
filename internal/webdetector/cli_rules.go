@@ -51,8 +51,20 @@ func runRulesWebTop(baseURL string, args []string) error {
 			return err
 		}
 		return runRulesSimulate(baseURL, in)
+	case "export":
+		vhosts, out, err := parseRulesExportFlags(args[1:])
+		if err != nil {
+			return err
+		}
+		return runRulesExport(baseURL, vhosts, out)
+	case "import":
+		in, err := parseRulesImportFlags(args[1:])
+		if err != nil {
+			return err
+		}
+		return runRulesImport(baseURL, in)
 	default:
-		return fmt.Errorf("unknown rules subcommand %q (use list|get|add|update|remove|simulate)", args[0])
+		return fmt.Errorf("unknown rules subcommand %q (use list|get|add|update|remove|simulate|export|import)", args[0])
 	}
 }
 
