@@ -1640,6 +1640,10 @@ cfm webtop rules add --file docs/examples/traffic-rule-throttle-meta.json
 cfm webtop rules update <rule-id> --file docs/examples/traffic-rule-challenge-login.json
 cfm webtop rules remove <rule-id>
 cfm webtop rules simulate --host example.com --ua "facebookexternalhit/1.1" --path / --method GET --country US
+# Move a site's rules to another server (also: cfm-admin → Traffic Rules → Export / Import)
+cfm webtop rules export --vhost example.com --out example-rules.json   # on the old server
+cfm webtop rules import --file example-rules.json --dry-run            # on the new one: preview
+cfm webtop rules import --file example-rules.json [--disabled]         # all-or-nothing; duplicates skipped
 
 # Site Cache (per-vhost edge caching — docs/site-cache-runbook.md)
 cfm webtop site-cache list

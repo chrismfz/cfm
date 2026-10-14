@@ -17,7 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Traffic rules export / import, to move a site's rules between servers.**
+  cfm-admin → Traffic Rules → **Export / Import** downloads the rules of the
+  vhost picked in the filter (or every rule) as a JSON file, and imports such a
+  file on another server. The import always shows a preview first: which rules
+  will be added, which already exist there (same vhosts, conditions and action;
+  skipped, so importing the same file twice adds nothing) and any priority shared
+  with an existing rule on the same vhost. "Import as disabled" brings every rule
+  in disabled, to test with the simulator first. One invalid rule rejects the
+  whole file and nothing is written. Imported rules get new ids, and their note
+  says where they came from ("imported from orion 2026-10-14"). The same from
+  the CLI: `cfm webtop rules export --vhost <host> --out f.json` and
+  `cfm webtop rules import --file f.json [--dry-run] [--disabled]`. Scoped
+  (cPanel) users can export and import rules for their own vhosts only. Until
+  now a site moving servers had its rules retyped by hand.
 
 ## 2026.10.13
 

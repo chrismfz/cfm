@@ -68,6 +68,8 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/webdet/rules/update", e.handleWebdetRulesUpdate},
 		{"/api/v1/webdet/rules/remove", e.handleWebdetRulesRemove},
 		{"/api/v1/webdet/rules/simulate", e.handleWebdetRulesSimulate},
+		{"/api/v1/webdet/rules/export", e.handleWebdetRulesExport},
+		{"/api/v1/webdet/rules/import", e.handleWebdetRulesImport},
 
 		// Bot-top control surface (box-wide, UA-keyed).
 		{"/api/v1/webdet/ua-top", e.handleUATop},
