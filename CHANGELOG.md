@@ -36,7 +36,7 @@ back-filled here — see the git/PR history for that period.
   file) is refused rather than imported without it, since that would widen
   it. A cPanel user's export carries only their own vhosts, and the import
   accepts only their own vhosts. A rule shared with other sites comes along
-  in an operator's export with all its vhosts. Until now a site moving
+  in an operator's export with all its vhosts, and the preview names them. Until now a site moving
   servers had its rules retyped by hand.
 
 ## 2026.10.13

@@ -4,7 +4,7 @@
 // server to another without retyping its rules).
 //
 //   GET  /api/v1/webdet/rules/export[?vhost=a&vhost=b]
-//   POST /api/v1/webdet/rules/import[?dry_run=1]   body: the export document
+//   POST /api/v1/webdet/rules/import[?dry_run=1][&disabled=1]   body: the export document
 //
 // The document is portable: no ids, no timestamps (the target assigns them).
 // Import validates every rule with normalizeTrafficRule — the same validator
@@ -21,6 +21,7 @@
 package webdetector
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,10 +48,12 @@ type TrafficRuleExport struct {
 	Action   TrafficRuleAction `json:"action"`
 	Note     string            `json:"note,omitempty"`
 
-	// unknownFields: the rule's match or scope carries a key this build
-	// does not know (a newer cfm's selector, or a typo). Dropping it would
-	// widen the rule, possibly to every request, so such a rule is invalid.
-	unknownFields bool
+	// shapeErr: why the rule's JSON does not have the shape this build
+	// reads (a key it does not know — a newer cfm's selector or a typo — at
+	// any level, or no match object at all). The typed decode would drop
+	// such a key, and a dropped selector widens the rule, possibly to every
+	// request, so the rule is invalid.
+	shapeErr string
 }
 
 // TrafficRulesExportDoc is the export / import document.
@@ -153,7 +156,11 @@ func trafficRuleKey(r TrafficRule) string {
 	m.CountryIn = sorted(m.CountryIn)
 	m.CountryNotIn = sorted(m.CountryNotIn)
 	m.IPAny = sorted(m.IPAny)
-	m.UAAny = sorted(m.UAAny)
+	ua := make([]string, len(m.UAAny))
+	for i, p := range m.UAAny {
+		ua[i] = strings.ToLower(p) // UA patterns match case-insensitively
+	}
+	m.UAAny = sorted(ua)
 	m.PathAny = sorted(m.PathAny)
 	m.Methods = sorted(m.Methods)
 	b, _ := json.Marshal(struct {
@@ -204,6 +211,13 @@ func planTrafficRuleImport(existing []TrafficRule, doc TrafficRulesExportDoc, di
 	var added []TrafficRule // this file's rules planned so far, for priority ties
 	origin := importNoteSuffix(doc)
 	seen := map[string]int{}
+	exported := map[string]bool{} // the export's vhost filter (and www twins), if any
+	for _, h := range doc.Vhosts {
+		if h = normalizeControlHost(h); h != "" {
+			bare := strings.TrimPrefix(h, "www.")
+			exported[bare], exported["www."+bare] = true, true
+		}
+	}
 	for i, x := range doc.Rules {
 		item := TrafficRuleImportItem{Index: i}
 		in := TrafficRule{
@@ -216,8 +230,8 @@ func planTrafficRuleImport(existing []TrafficRule, doc TrafficRulesExportDoc, di
 		}
 		norm, err := normalizeTrafficRule(in, true)
 		switch {
-		case x.unknownFields:
-			item.Status, item.Error = "invalid", "uses match or scope fields this cfm does not understand (a newer cfm, or a typo); importing it without them would widen the rule"
+		case x.shapeErr != "":
+			item.Status, item.Error = "invalid", x.shapeErr
 			item.Rule = in
 		case err != nil:
 			item.Status, item.Error = "invalid", err.Error()
@@ -245,6 +259,17 @@ func planTrafficRuleImport(existing []TrafficRule, doc TrafficRulesExportDoc, di
 			} else {
 				item.Status = "add"
 				seen[k] = i
+				if len(exported) > 0 {
+					var others []string
+					for _, h := range norm.Scope.Vhosts {
+						if !exported[h] {
+							others = append(others, h)
+						}
+					}
+					if len(others) > 0 {
+						item.Warnings = append(item.Warnings, fmt.Sprintf("this rule also applies to %s, which the export was not for (the rule was shared with other sites on the source)", strings.Join(others, ", ")))
+					}
+				}
 				for _, r := range existing {
 					if !r.Unsupported && r.Priority == norm.Priority && vhostsOverlap(r.Scope.Vhosts, norm.Scope.Vhosts) {
 						item.Warnings = append(item.Warnings, fmt.Sprintf("priority %d is also used by %s on the same vhost (ties resolve by id)", norm.Priority, r.ID))
@@ -275,9 +300,11 @@ func planTrafficRuleImport(existing []TrafficRule, doc TrafficRulesExportDoc, di
 	return res, nil
 }
 
-// decodeTrafficRulesDoc reads an export document. Each rule's match and scope
-// are probed for unknown keys with decodeStoredRule, the store's own guard:
-// the typed decode drops them silently, and a dropped selector widens the rule.
+// decodeTrafficRulesDoc reads an export document. Unlike the store's load
+// (decodeStoredRule, which keeps a newer cfm's rule frozen on disk), an import
+// has a fixed shape: every rule is checked for unknown keys at the top level
+// and in scope, match and action (rulesShapeError), since the typed decode
+// drops them silently and a dropped selector widens the rule.
 func decodeTrafficRulesDoc(r io.Reader) (TrafficRulesExportDoc, error) {
 	var raw struct {
 		TrafficRulesExportDoc
@@ -293,12 +320,55 @@ func decodeTrafficRulesDoc(r io.Reader) (TrafficRulesExportDoc, error) {
 		if err := json.Unmarshal(rr, &x); err != nil {
 			return TrafficRulesExportDoc{}, fmt.Errorf("rule #%d: %w", i+1, err)
 		}
-		if _, unknown := decodeStoredRule(rr); unknown {
-			x.unknownFields = true
-		}
+		x.shapeErr = ruleShapeError(rr)
 		doc.Rules = append(doc.Rules, x)
 	}
 	return doc, nil
+}
+
+// ruleShapeError names the first key of an imported rule this build does not
+// read, or a missing match object; "" when the rule has the export shape. The
+// id / timestamps / unsupported keys of a listed rule are tolerated (ignored),
+// so `cfm webtop rules list` / `get` JSON can be pasted into a document.
+func ruleShapeError(raw json.RawMessage) string {
+	var top struct {
+		ID          json.RawMessage `json:"id"`
+		Enabled     json.RawMessage `json:"enabled"`
+		Priority    json.RawMessage `json:"priority"`
+		Scope       json.RawMessage `json:"scope"`
+		Match       json.RawMessage `json:"match"`
+		Action      json.RawMessage `json:"action"`
+		Note        json.RawMessage `json:"note"`
+		CreatedAt   json.RawMessage `json:"created_at"`
+		UpdatedAt   json.RawMessage `json:"updated_at"`
+		Unsupported json.RawMessage `json:"unsupported"`
+	}
+	strict := func(b []byte, v any) error {
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.DisallowUnknownFields()
+		return dec.Decode(v)
+	}
+	const why = " (a newer cfm, or a typo); importing the rule without it would widen it"
+	if err := strict(raw, &top); err != nil {
+		return "rule: " + err.Error() + why
+	}
+	if len(top.Match) == 0 || string(top.Match) == "null" {
+		return `no "match" object; a rule meant to match every request needs an explicit "match": {}`
+	}
+	if err := strict(top.Match, &TrafficRuleMatch{}); err != nil {
+		return "match: " + err.Error() + why
+	}
+	if len(top.Scope) > 0 {
+		if err := strict(top.Scope, &TrafficRuleScope{}); err != nil {
+			return "scope: " + err.Error() + why
+		}
+	}
+	if len(top.Action) > 0 {
+		if err := strict(top.Action, &TrafficRuleAction{}); err != nil {
+			return "action: " + err.Error() + why
+		}
+	}
+	return ""
 }
 
 func importNoteSuffix(doc TrafficRulesExportDoc) string {

@@ -539,7 +539,17 @@ export const rulesMixin = {
         this.transferError = "The file is larger than 2 MiB, more than this page can import. Split it, or import it with \"cfm webtop rules import\" in parts.";
         return;
       }
-      const { doc, error } = parseExportFile(await file.text());
+      let text = "";
+      this.rulesBusy = true; // the file input stays disabled while it is read
+      try {
+        text = await file.text();
+      } catch (err) {
+        this.transferError = `Could not read the file: ${err?.message || err}`;
+        return;
+      } finally {
+        this.rulesBusy = false;
+      }
+      const { doc, error } = parseExportFile(text);
       if (error) {
         this.transferError = error;
         return;
@@ -591,7 +601,11 @@ export const rulesMixin = {
         const plan = await this.postImport(false);
         this.transferPlan = plan;
         if (plan?.error) {
-          this.transferError = `Import failed: ${plan.error}`;
+          // Nothing was written. Show what changed (e.g. another import added
+          // the same rules meanwhile) with a fresh preview.
+          this.rulesBusy = false;
+          await this.previewImport();
+          this.transferError = `Import failed, nothing was written: ${plan.error}. The preview below is up to date.`;
           return;
         }
         this.transferDone = true;

@@ -232,6 +232,10 @@ func TestTrafficRulesImportRefusesUnknownFields(t *testing.T) {
 		"newer selector": `{"enabled":true,"priority":10,"scope":{"vhosts":["a.gr"]},"match":{"asn_any":["AS123"]},"action":{"type":"block"}}`,
 		"typo":           `{"enabled":true,"priority":10,"scope":{"vhosts":["a.gr"]},"match":{"path":["/wp-login.php"]},"action":{"type":"block"}}`,
 		"scope key":      `{"enabled":true,"priority":10,"scope":{"vhosts":["a.gr"],"paths":["/x"]},"match":{"ua_any":["*bot*"]},"action":{"type":"block"}}`,
+		"top-level typo": `{"enabled":true,"priority":10,"scope":{"vhosts":["a.gr"]},"macth":{"ua_any":["*bot*"]},"action":{"type":"block"}}`,
+		"action key":     `{"enabled":true,"priority":10,"scope":{"vhosts":["a.gr"]},"match":{"ua_any":["*bot*"]},"action":{"type":"block","except_ua":["*x*"]}}`,
+		"no match":       `{"enabled":true,"priority":10,"scope":{"vhosts":["a.gr"]},"action":{"type":"block"}}`,
+		"null match":     `{"enabled":true,"priority":10,"scope":{"vhosts":["a.gr"]},"match":null,"action":{"type":"block"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			e, mux := newTestEngine(t)
@@ -242,7 +246,7 @@ func TestTrafficRulesImportRefusesUnknownFields(t *testing.T) {
 			if rr.Code != http.StatusBadRequest || res.Invalid != 1 || len(e.TrafficRuleList()) != 0 {
 				t.Fatalf("%d %+v", rr.Code, res)
 			}
-			if !strings.Contains(res.Items[0].Error, "does not understand") {
+			if e := res.Items[0].Error; !strings.Contains(e, "widen") && !strings.Contains(e, `no "match" object`) {
 				t.Fatalf("error = %q", res.Items[0].Error)
 			}
 		})
@@ -319,5 +323,54 @@ func TestTrafficRulesScopedExportNarrowsSharedRules(t *testing.T) {
 	_, dstMux := newTestEngine(t)
 	if code, res := importVia(t, dstMux, false, "", doc); code != http.StatusOK || len(res.Added) != 1 {
 		t.Fatalf("%d %+v", code, res)
+	}
+}
+
+// An unknown action TYPE is not a widening: it is reported as what it is.
+// The id / timestamps of a listed rule are tolerated, and an explicit empty
+// match is a legal match-everything rule.
+func TestTrafficRulesImportShapeEdges(t *testing.T) {
+	_, mux := newTestEngine(t)
+	body := `{"format":"cfm-traffic-rules","version":1,"rules":[{"priority":10,"scope":{"vhosts":["a.gr"]},"match":{},"action":{"type":"blok"}}]}`
+	rr := doRequest(mux, adminCtx(), http.MethodPost, "/api/v1/webdet/rules/import?dry_run=1", []byte(body))
+	var res TrafficRuleImportResult
+	_ = json.Unmarshal(rr.Body.Bytes(), &res)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(res.Items[0].Error, "action type") {
+		t.Fatalf("%d %+v", rr.Code, res)
+	}
+	body = `{"format":"cfm-traffic-rules","version":1,"rules":[{"id":"r_1","created_at":"2026-10-14T10:00:00Z","updated_at":"2026-10-14T10:00:00Z","enabled":true,"priority":10,"scope":{"vhosts":["a.gr"]},"match":{},"action":{"type":"allow"}}]}`
+	rr = doRequest(mux, adminCtx(), http.MethodPost, "/api/v1/webdet/rules/import?dry_run=1", []byte(body))
+	_ = json.Unmarshal(rr.Body.Bytes(), &res)
+	if rr.Code != http.StatusOK || res.Add != 1 {
+		t.Fatalf("%d %+v", rr.Code, res)
+	}
+}
+
+func TestTrafficRulesImportUACaseIsADuplicate(t *testing.T) {
+	e, mux := newTestEngine(t)
+	if _, err := e.TrafficRuleAdd(TrafficRule{Enabled: true, Priority: 10, Scope: TrafficRuleScope{Vhosts: []string{"a.gr"}},
+		Match: TrafficRuleMatch{UAAny: []string{"*GPTBot*"}}, Action: TrafficRuleAction{Type: TrafficActionBlock}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := TrafficRulesExportDoc{Format: trafficRulesExportFormat, Version: 1, Rules: []TrafficRuleExport{
+		{Enabled: true, Priority: 10, Scope: TrafficRuleScope{Vhosts: []string{"a.gr"}}, Match: TrafficRuleMatch{UAAny: []string{"*gptbot*"}}, Action: TrafficRuleAction{Type: TrafficActionBlock}},
+	}}
+	if _, res := importVia(t, mux, true, "?dry_run=1", doc); res.Duplicates != 1 {
+		t.Fatalf("%+v", res)
+	}
+}
+
+// A rule the source shared with another site comes with that site's vhost;
+// the preview says so.
+func TestTrafficRulesImportWarnsAboutVhostsOutsideTheExport(t *testing.T) {
+	_, mux := newTestEngine(t)
+	doc := TrafficRulesExportDoc{Format: trafficRulesExportFormat, Version: 1, Vhosts: []string{"gokids.gr"}, Rules: []TrafficRuleExport{
+		{Enabled: true, Priority: 10, Scope: TrafficRuleScope{Vhosts: []string{"gokids.gr", "www.gokids.gr", "other.gr"}}, Match: TrafficRuleMatch{UAAny: []string{"*x*"}}, Action: TrafficRuleAction{Type: TrafficActionBlock}},
+		// The www twin is the same site: no warning.
+		{Enabled: true, Priority: 20, Scope: TrafficRuleScope{Vhosts: []string{"gokids.gr", "www.gokids.gr"}}, Match: TrafficRuleMatch{UAAny: []string{"*y*"}}, Action: TrafficRuleAction{Type: TrafficActionBlock}},
+	}}
+	_, res := importVia(t, mux, true, "?dry_run=1", doc)
+	if res.Add != 2 || len(res.Items[0].Warnings) != 1 || !strings.Contains(res.Items[0].Warnings[0], "applies to other.gr,") || len(res.Items[1].Warnings) != 0 {
+		t.Fatalf("%+v", res)
 	}
 }
