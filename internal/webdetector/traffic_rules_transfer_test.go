@@ -2,6 +2,7 @@ package webdetector
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -195,7 +196,7 @@ func TestTrafficRulesTransferScope(t *testing.T) {
 	foreign := TrafficRulesExportDoc{Format: trafficRulesExportFormat, Version: 1, Rules: append(append([]TrafficRuleExport{}, doc.Rules...),
 		TrafficRuleExport{Enabled: true, Priority: 5, Scope: TrafficRuleScope{Vhosts: []string{"other.gr"}}, Match: TrafficRuleMatch{UAAny: []string{"*"}}, Action: TrafficRuleAction{Type: TrafficActionBlock}})}
 	code, res := importVia(t, dstMux, false, "", foreign)
-	if code != http.StatusBadRequest || res.Invalid != 1 || len(dst.TrafficRuleList()) != 0 {
+	if code != http.StatusForbidden || res.Invalid != 1 || len(dst.TrafficRuleList()) != 0 {
 		t.Fatalf("scoped import of a foreign vhost must be refused whole: %d %+v", code, res)
 	}
 	if code, res := importVia(t, dstMux, false, "", doc); code != http.StatusOK || len(res.Added) != 3 {
@@ -220,5 +221,103 @@ func TestWithImportNote(t *testing.T) {
 	long := strings.Repeat("x", maxRuleNoteLen-5)
 	if got := withImportNote(long, "imported from orion 2026-10-14"); got != long {
 		t.Fatalf("a note that would overflow must stay unchanged")
+	}
+}
+
+// A match or scope key this build does not know is dropped by the typed
+// decode, and a dropped selector widens the rule (here to all of a.gr). The
+// import must refuse it, like the store's own load does.
+func TestTrafficRulesImportRefusesUnknownFields(t *testing.T) {
+	for name, rule := range map[string]string{
+		"newer selector": `{"enabled":true,"priority":10,"scope":{"vhosts":["a.gr"]},"match":{"asn_any":["AS123"]},"action":{"type":"block"}}`,
+		"typo":           `{"enabled":true,"priority":10,"scope":{"vhosts":["a.gr"]},"match":{"path":["/wp-login.php"]},"action":{"type":"block"}}`,
+		"scope key":      `{"enabled":true,"priority":10,"scope":{"vhosts":["a.gr"],"paths":["/x"]},"match":{"ua_any":["*bot*"]},"action":{"type":"block"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, mux := newTestEngine(t)
+			body := `{"format":"cfm-traffic-rules","version":1,"rules":[` + rule + `]}`
+			rr := doRequest(mux, adminCtx(), http.MethodPost, "/api/v1/webdet/rules/import", []byte(body))
+			var res TrafficRuleImportResult
+			_ = json.Unmarshal(rr.Body.Bytes(), &res)
+			if rr.Code != http.StatusBadRequest || res.Invalid != 1 || len(e.TrafficRuleList()) != 0 {
+				t.Fatalf("%d %+v", rr.Code, res)
+			}
+			if !strings.Contains(res.Items[0].Error, "does not understand") {
+				t.Fatalf("error = %q", res.Items[0].Error)
+			}
+		})
+	}
+}
+
+// A duplicate whose twin here is disabled, or has another priority, is still
+// a duplicate, but the plan must say the import does not change it.
+func TestTrafficRulesImportDuplicateWarnings(t *testing.T) {
+	e, mux := newTestEngine(t)
+	if _, err := e.TrafficRuleAdd(TrafficRule{Enabled: false, Priority: 300, Scope: TrafficRuleScope{Vhosts: []string{"a.gr"}},
+		Match: TrafficRuleMatch{CountryIn: []string{"VN", "IN"}}, Action: TrafficRuleAction{Type: TrafficActionBlock}}); err != nil {
+		t.Fatal(err)
+	}
+	doc := TrafficRulesExportDoc{Format: trafficRulesExportFormat, Version: 1, Rules: []TrafficRuleExport{
+		// Same countries in another order: still the same rule.
+		{Enabled: true, Priority: 350, Scope: TrafficRuleScope{Vhosts: []string{"a.gr"}}, Match: TrafficRuleMatch{CountryIn: []string{"IN", "VN"}}, Action: TrafficRuleAction{Type: TrafficActionBlock}},
+	}}
+	code, res := importVia(t, mux, true, "?dry_run=1", doc)
+	if code != http.StatusOK || res.Duplicates != 1 || res.Add != 0 {
+		t.Fatalf("%d %+v", code, res)
+	}
+	w := strings.Join(res.Items[0].Warnings, " | ")
+	if !strings.Contains(w, "DISABLED here") || !strings.Contains(w, "priority 300 here") {
+		t.Fatalf("warnings = %q", w)
+	}
+}
+
+func TestTrafficRulesImportPriorityTieInsideTheFile(t *testing.T) {
+	_, mux := newTestEngine(t)
+	doc := TrafficRulesExportDoc{Format: trafficRulesExportFormat, Version: 1, Rules: []TrafficRuleExport{
+		{Enabled: true, Priority: 100, Scope: TrafficRuleScope{Vhosts: []string{"a.gr"}}, Match: TrafficRuleMatch{UAAny: []string{"*x*"}}, Action: TrafficRuleAction{Type: TrafficActionBlock}},
+		{Enabled: true, Priority: 100, Scope: TrafficRuleScope{Vhosts: []string{"a.gr"}}, Match: TrafficRuleMatch{UAAny: []string{"*x*"}}, Action: TrafficRuleAction{Type: TrafficActionAllow}},
+	}}
+	_, res := importVia(t, mux, true, "?dry_run=1", doc)
+	if res.Add != 2 || len(res.Items[1].Warnings) != 1 || !strings.Contains(res.Items[1].Warnings[0], "another rule of this file") {
+		t.Fatalf("%+v", res)
+	}
+}
+
+// Two imports of one file planned on the same snapshot: the second write
+// must not add the rules again.
+func TestTrafficRulesAddManyRechecksDuplicates(t *testing.T) {
+	e, _ := newTestEngine(t)
+	r := TrafficRule{Enabled: true, Priority: 10, Scope: TrafficRuleScope{Vhosts: []string{"a.gr"}}, Match: TrafficRuleMatch{UAAny: []string{"*x*"}}, Action: TrafficRuleAction{Type: TrafficActionBlock}}
+	if _, err := e.TrafficRuleAddMany([]TrafficRule{r}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.TrafficRuleAddMany([]TrafficRule{r}); !errors.Is(err, errRulesChanged) {
+		t.Fatalf("second AddMany err = %v", err)
+	}
+	if n := len(e.TrafficRuleList()); n != 1 {
+		t.Fatalf("%d rules", n)
+	}
+}
+
+// A scoped export carries only the tenant's own vhosts of a rule the
+// operator shares with another tenant, so the tenant can import it back.
+func TestTrafficRulesScopedExportNarrowsSharedRules(t *testing.T) {
+	src, mux := newTestEngine(t)
+	if _, err := src.TrafficRuleAdd(TrafficRule{Enabled: true, Priority: 10, Scope: TrafficRuleScope{Vhosts: []string{"gokids.gr", "other.gr"}},
+		Match: TrafficRuleMatch{UAAny: []string{"*x*"}}, Action: TrafficRuleAction{Type: TrafficActionBlock}}); err != nil {
+		t.Fatal(err)
+	}
+	rr := doRequest(mux, scopedCtx("gokids.gr", "www.gokids.gr"), http.MethodGet, "/api/v1/webdet/rules/export", nil)
+	var doc TrafficRulesExportDoc
+	_ = json.Unmarshal(rr.Body.Bytes(), &doc)
+	if len(doc.Rules) != 1 || strings.Join(doc.Rules[0].Scope.Vhosts, ",") != "gokids.gr" {
+		t.Fatalf("%+v", doc.Rules)
+	}
+	if got := src.TrafficRuleList()[0].Scope.Vhosts; len(got) != 2 {
+		t.Fatalf("export changed the stored rule: %v", got)
+	}
+	_, dstMux := newTestEngine(t)
+	if code, res := importVia(t, dstMux, false, "", doc); code != http.StatusOK || len(res.Added) != 1 {
+		t.Fatalf("%d %+v", code, res)
 	}
 }

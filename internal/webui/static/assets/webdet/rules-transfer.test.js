@@ -52,10 +52,14 @@ test("planSummary only allows a clean plan with something to add", () => {
   const warn = planSummary({ add: 2, duplicates: 1, invalid: 0, items: [{ warnings: ["priority 100 …"] }, {}] });
   assert.equal(warn.canImport, true);
   assert.equal(warn.tone, "warn");
-  assert.match(warn.text, /2 rule\(s\) will be added, 1 duplicate\(s\) skipped, 1 with a priority warning/);
+  assert.match(warn.text, /2 rule\(s\) will be added, 1 duplicate\(s\) skipped, 1 with a warning/);
   const dupOnly = planSummary({ add: 0, duplicates: 5, invalid: 0, items: [] });
   assert.equal(dupOnly.canImport, false);
   assert.match(dupOnly.text, /All 5 rule\(s\) already exist/);
+  const dupDiffer = planSummary({ add: 0, duplicates: 2, invalid: 0, items: [{ warnings: ["r_1 is DISABLED here"] }, {}] });
+  assert.equal(dupDiffer.canImport, false);
+  assert.equal(dupDiffer.tone, "warn");
+  assert.match(dupDiffer.text, /1 of them differ here/);
   const bad = planSummary({ add: 4, duplicates: 0, invalid: 1, error: "1 rule(s) are invalid; nothing was imported", items: [] });
   assert.equal(bad.canImport, false);
   assert.equal(bad.tone, "danger");

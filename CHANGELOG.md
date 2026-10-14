@@ -29,9 +29,15 @@ back-filled here — see the git/PR history for that period.
   whole file and nothing is written. Imported rules get new ids, and their note
   says where they came from ("imported from orion 2026-10-14"). The same from
   the CLI: `cfm webtop rules export --vhost <host> --out f.json` and
-  `cfm webtop rules import --file f.json [--dry-run] [--disabled]`. Scoped
-  (cPanel) users can export and import rules for their own vhosts only. Until
-  now a site moving servers had its rules retyped by hand.
+  `cfm webtop rules import --file f.json [--dry-run] [--disabled]`. A rule
+  that already exists but is disabled there, or has another priority, is
+  flagged in the preview (the import does not change it). A rule with a field
+  this cfm does not understand (from a newer cfm, or a typo in a hand-edited
+  file) is refused rather than imported without it, since that would widen
+  it. A cPanel user's export carries only their own vhosts, and the import
+  accepts only their own vhosts. A rule shared with other sites comes along
+  in an operator's export with all its vhosts. Until now a site moving
+  servers had its rules retyped by hand.
 
 ## 2026.10.13
 

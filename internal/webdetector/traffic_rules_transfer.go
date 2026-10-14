@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sort"
@@ -34,7 +35,7 @@ import (
 const (
 	trafficRulesExportFormat  = "cfm-traffic-rules"
 	trafficRulesExportVersion = 1
-	maxRuleImportBodyBytes    = 2 << 20 // 2 MiB: maxRulesGlobal rules with room to spare
+	maxRuleImportBodyBytes    = 2 << 20 // 2 MiB: a site's rules many times over (a whole node can exceed it: "request body too large")
 )
 
 // TrafficRuleExport is one rule as it travels between nodes.
@@ -45,6 +46,11 @@ type TrafficRuleExport struct {
 	Match    TrafficRuleMatch  `json:"match"`
 	Action   TrafficRuleAction `json:"action"`
 	Note     string            `json:"note,omitempty"`
+
+	// unknownFields: the rule's match or scope carries a key this build
+	// does not know (a newer cfm's selector, or a typo). Dropping it would
+	// widen the rule, possibly to every request, so such a rule is invalid.
+	unknownFields bool
 }
 
 // TrafficRulesExportDoc is the export / import document.
@@ -80,6 +86,8 @@ type TrafficRuleImportResult struct {
 	Invalid    int                     `json:"invalid"`
 	Added      []string                `json:"added,omitempty"` // new ids (not on a dry run)
 	Error      string                  `json:"error,omitempty"`
+
+	outOfScope int // invalid only because a vhost is outside the caller's scope
 }
 
 // exportTrafficRules builds the document from the node's rules. With vhosts
@@ -133,15 +141,26 @@ func scopeNamesAny(scope []string, want map[string]bool) bool {
 }
 
 // trafficRuleKey identifies a rule by what it does (vhosts, match, action),
-// ignoring id, priority, enabled, note and timestamps.
+// ignoring id, priority, enabled, note and timestamps. The list selectors are
+// sets, so they are compared sorted.
 func trafficRuleKey(r TrafficRule) string {
-	v := append([]string(nil), r.Scope.Vhosts...)
-	sort.Strings(v)
+	sorted := func(in []string) []string {
+		out := append([]string(nil), in...)
+		sort.Strings(out)
+		return out
+	}
+	m := r.Match
+	m.CountryIn = sorted(m.CountryIn)
+	m.CountryNotIn = sorted(m.CountryNotIn)
+	m.IPAny = sorted(m.IPAny)
+	m.UAAny = sorted(m.UAAny)
+	m.PathAny = sorted(m.PathAny)
+	m.Methods = sorted(m.Methods)
 	b, _ := json.Marshal(struct {
 		V []string          `json:"v"`
 		M TrafficRuleMatch  `json:"m"`
 		A TrafficRuleAction `json:"a"`
-	}{v, r.Match, r.Action})
+	}{sorted(r.Scope.Vhosts), m, r.Action})
 	return string(b)
 }
 
@@ -176,12 +195,13 @@ func planTrafficRuleImport(existing []TrafficRule, doc TrafficRulesExportDoc, di
 	if len(doc.Rules) > maxRulesGlobal {
 		return res, fmt.Errorf("too many rules in the document (max %d)", maxRulesGlobal)
 	}
-	byKey := map[string]string{}
+	byKey := map[string]TrafficRule{}
 	for _, r := range existing {
 		if !r.Unsupported {
-			byKey[trafficRuleKey(r)] = r.ID
+			byKey[trafficRuleKey(r)] = r
 		}
 	}
+	var added []TrafficRule // this file's rules planned so far, for priority ties
 	origin := importNoteSuffix(doc)
 	seen := map[string]int{}
 	for i, x := range doc.Rules {
@@ -196,18 +216,30 @@ func planTrafficRuleImport(existing []TrafficRule, doc TrafficRulesExportDoc, di
 		}
 		norm, err := normalizeTrafficRule(in, true)
 		switch {
+		case x.unknownFields:
+			item.Status, item.Error = "invalid", "uses match or scope fields this cfm does not understand (a newer cfm, or a typo); importing it without them would widen the rule"
+			item.Rule = in
 		case err != nil:
 			item.Status, item.Error = "invalid", err.Error()
 			item.Rule = in
 		case inScope != nil && !inScope(norm.Scope.Vhosts):
 			item.Status, item.Error = "invalid", "vhost not in scope"
 			item.Rule = norm
+			res.outOfScope++
 		default:
 			norm.ID = "" // assigned when added
 			item.Rule = norm
 			k := trafficRuleKey(norm)
-			if id, ok := byKey[k]; ok {
-				item.Status, item.DuplicateOf = "duplicate", id
+			if ex, ok := byKey[k]; ok {
+				item.Status, item.DuplicateOf = "duplicate", ex.ID
+				// The key ignores enabled and priority: say so when the rule
+				// already here would not behave like the imported one.
+				if norm.Enabled && !ex.Enabled {
+					item.Warnings = append(item.Warnings, fmt.Sprintf("%s is DISABLED here; it is not enabled by this import", ex.ID))
+				}
+				if norm.Priority != ex.Priority {
+					item.Warnings = append(item.Warnings, fmt.Sprintf("%s has priority %d here, the file says %d; it is not changed by this import", ex.ID, ex.Priority, norm.Priority))
+				}
 			} else if j, ok := seen[k]; ok {
 				item.Status, item.DuplicateOf = "duplicate", fmt.Sprintf("rule #%d of this file", j+1)
 			} else {
@@ -218,6 +250,13 @@ func planTrafficRuleImport(existing []TrafficRule, doc TrafficRulesExportDoc, di
 						item.Warnings = append(item.Warnings, fmt.Sprintf("priority %d is also used by %s on the same vhost (ties resolve by id)", norm.Priority, r.ID))
 					}
 				}
+				for _, r := range added {
+					if r.Priority == norm.Priority && vhostsOverlap(r.Scope.Vhosts, norm.Scope.Vhosts) {
+						item.Warnings = append(item.Warnings, fmt.Sprintf("priority %d is also used by another rule of this file on the same vhost (ties resolve by id, which is random)", norm.Priority))
+						break
+					}
+				}
+				added = append(added, norm)
 			}
 		}
 		switch item.Status {
@@ -231,9 +270,35 @@ func planTrafficRuleImport(existing []TrafficRule, doc TrafficRulesExportDoc, di
 		res.Items = append(res.Items, item)
 	}
 	if res.Add > 0 && len(existing)+res.Add > maxRulesGlobal {
-		return res, fmt.Errorf("importing %d rule(s) would exceed the limit of %d rules (this node has %d)", res.Add, maxRulesGlobal, len(existing))
+		return res, fmt.Errorf("importing %d rule(s) would exceed the limit of %d rules", res.Add, maxRulesGlobal)
 	}
 	return res, nil
+}
+
+// decodeTrafficRulesDoc reads an export document. Each rule's match and scope
+// are probed for unknown keys with decodeStoredRule, the store's own guard:
+// the typed decode drops them silently, and a dropped selector widens the rule.
+func decodeTrafficRulesDoc(r io.Reader) (TrafficRulesExportDoc, error) {
+	var raw struct {
+		TrafficRulesExportDoc
+		Rules []json.RawMessage `json:"rules"`
+	}
+	if err := json.NewDecoder(r).Decode(&raw); err != nil {
+		return TrafficRulesExportDoc{}, err
+	}
+	doc := raw.TrafficRulesExportDoc
+	doc.Rules = make([]TrafficRuleExport, 0, len(raw.Rules))
+	for i, rr := range raw.Rules {
+		var x TrafficRuleExport
+		if err := json.Unmarshal(rr, &x); err != nil {
+			return TrafficRulesExportDoc{}, fmt.Errorf("rule #%d: %w", i+1, err)
+		}
+		if _, unknown := decodeStoredRule(rr); unknown {
+			x.unknownFields = true
+		}
+		doc.Rules = append(doc.Rules, x)
+	}
+	return doc, nil
 }
 
 func importNoteSuffix(doc TrafficRulesExportDoc) string {
@@ -261,6 +326,10 @@ func withImportNote(note, origin string) string {
 	return out
 }
 
+// errRulesChanged: an identical rule appeared between the import's plan and
+// its write (another import ran meanwhile). Nothing is written.
+var errRulesChanged = errors.New("an identical rule was added meanwhile (another import?); nothing was imported, preview again")
+
 // AddMany adds rules atomically: all are normalized first, then stored and
 // saved once. One failure adds nothing.
 func (s *trafficRuleStore) AddMany(in []TrafficRule) ([]TrafficRule, error) {
@@ -279,9 +348,20 @@ func (s *trafficRuleStore) AddMany(in []TrafficRule) ([]TrafficRule, error) {
 	if len(s.rules)+len(norms) > maxRulesGlobal {
 		return nil, fmt.Errorf("too many rules (max %d)", maxRulesGlobal)
 	}
+	// The import planned its duplicates on a snapshot; a concurrent import
+	// of the same file must not add them twice.
+	have := map[string]bool{}
+	for _, r := range s.rules {
+		if !r.Unsupported {
+			have[trafficRuleKey(r)] = true
+		}
+	}
 	for _, n := range norms {
 		if _, exists := s.rules[n.ID]; exists {
 			return nil, errors.New("rule id already exists")
+		}
+		if have[trafficRuleKey(n)] {
+			return nil, errRulesChanged
 		}
 	}
 	for _, n := range norms {
@@ -330,6 +410,21 @@ func (e *Engine) handleWebdetRulesExport(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	rows := scopeFilterRules(e.TrafficRuleList(), r)
+	if scope := vhostScopeFromContext(r.Context()); scope != nil {
+		// A rule the operator shares with other tenants' vhosts is listed
+		// for this tenant, but its file must carry only the tenant's own
+		// vhosts: it would leak the others, and could not be imported back
+		// by the same tenant (import checks every vhost).
+		for i := range rows {
+			own := make([]string, 0, len(rows[i].Scope.Vhosts))
+			for _, h := range rows[i].Scope.Vhosts {
+				if vhostAllowed(strings.ToLower(h), scope) {
+					own = append(own, h)
+				}
+			}
+			rows[i].Scope.Vhosts = own
+		}
+	}
 	writeJSON(w, http.StatusOK, exportTrafficRules(rows, vhosts, nodeHostname(), time.Now()))
 }
 
@@ -348,8 +443,8 @@ func (e *Engine) handleWebdetRulesImport(w http.ResponseWriter, r *http.Request)
 	dryRun := truthyParam(q.Get("dry_run"))
 	disabled := truthyParam(q.Get("disabled"))
 
-	var doc TrafficRulesExportDoc
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRuleImportBodyBytes)).Decode(&doc); err != nil {
+	doc, err := decodeTrafficRulesDoc(http.MaxBytesReader(w, r.Body, maxRuleImportBodyBytes))
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, TrafficRuleImportResult{DryRun: dryRun, Error: "invalid json: " + err.Error()})
 		return
 	}
@@ -362,12 +457,16 @@ func (e *Engine) handleWebdetRulesImport(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if plan.Invalid > 0 {
+		status := http.StatusBadRequest
+		if plan.Invalid == plan.outOfScope {
+			status = http.StatusForbidden // as /rules/add for a vhost outside the token
+		}
 		if dryRun {
 			plan.Error = fmt.Sprintf("%d rule(s) are invalid; nothing can be imported", plan.Invalid)
 		} else {
 			plan.Error = fmt.Sprintf("%d rule(s) are invalid; nothing was imported", plan.Invalid)
 		}
-		writeJSON(w, http.StatusBadRequest, plan)
+		writeJSON(w, status, plan)
 		return
 	}
 	if dryRun || plan.Add == 0 {
@@ -383,7 +482,11 @@ func (e *Engine) handleWebdetRulesImport(w http.ResponseWriter, r *http.Request)
 	added, err := e.TrafficRuleAddMany(toAdd)
 	if err != nil {
 		plan.Error = err.Error()
-		writeJSON(w, http.StatusBadRequest, plan)
+		status := http.StatusBadRequest
+		if errors.Is(err, errRulesChanged) {
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, plan)
 		return
 	}
 	k := 0

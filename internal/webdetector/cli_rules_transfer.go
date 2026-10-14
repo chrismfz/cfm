@@ -141,6 +141,9 @@ func runRulesImport(baseURL string, f rulesImportFlags) error {
 		return jerr
 	}
 	printRulesImportResult(res)
+	if n := rulesDocSkipped(body); n > 0 {
+		fmt.Printf("note: the source server left %d rule(s) out of this file (written by a newer cfm)\n", n)
+	}
 	if resp.StatusCode >= 400 || res.Error != "" {
 		if res.Error == "" {
 			res.Error = fmt.Sprintf("request failed with status %d", resp.StatusCode)
@@ -178,4 +181,12 @@ func printRulesImportResult(res TrafficRuleImportResult) {
 			it.Rule.Action.Type, strings.Join(it.Rule.Scope.Vhosts, ","), detail)
 	}
 	_ = w.Flush()
+}
+
+func rulesDocSkipped(body []byte) int {
+	var d struct {
+		Skipped int `json:"skipped_unsupported"`
+	}
+	_ = json.Unmarshal(body, &d)
+	return d.Skipped
 }

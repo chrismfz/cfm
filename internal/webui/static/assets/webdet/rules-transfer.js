@@ -73,11 +73,13 @@ export function planSummary(plan) {
     return { text: `${bad} rule(s) are invalid; nothing can be imported.`, tone: "danger", canImport: false };
   }
   if (!add) {
-    return { text: dup ? `All ${dup} rule(s) already exist on this node; nothing to import.` : "Nothing to import.", tone: "", canImport: false };
+    if (!dup) return { text: "Nothing to import.", tone: "", canImport: false };
+    const differ = warn ? ` ${warn} of them differ here (disabled or another priority): see the warnings.` : "";
+    return { text: `All ${dup} rule(s) already exist on this node; nothing to import.${differ}`, tone: warn ? "warn" : "", canImport: false };
   }
   const parts = [`${add} rule(s) will be added`];
   if (dup) parts.push(`${dup} duplicate(s) skipped`);
-  if (warn) parts.push(`${warn} with a priority warning`);
+  if (warn) parts.push(`${warn} with a warning`);
   return { text: `${parts.join(", ")}.`, tone: warn ? "warn" : "ok", canImport: true };
 }
 

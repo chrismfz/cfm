@@ -148,6 +148,7 @@
             </div>
             <p class="muted" v-if="transferDoc">
               <strong>{{ transferFileName }}</strong>: {{ transferDoc.rules.length }} rule(s)<template v-if="transferDoc.node"> from {{ transferDoc.node }}</template><template v-if="transferDoc.exported_at"> ({{ String(transferDoc.exported_at).slice(0, 10) }})</template><template v-if="transferVhosts.length"> for {{ transferVhosts.join(', ') }}</template>.
+              <template v-if="transferDoc.skipped_unsupported"> The source server left out {{ transferDoc.skipped_unsupported }} rule(s) it could not export (written by a newer cfm).</template>
               Rules of a site that is not set up on this server yet still import; they apply once its vhost is served here.
             </p>
             <ul class="msg-list errors" v-if="transferError"><li>{{ transferError }}</li></ul>

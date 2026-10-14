@@ -536,7 +536,7 @@ export const rulesMixin = {
       this.transferFileName = file ? file.name : "";
       if (!file) return;
       if (file.size > 2 * 1024 * 1024) {
-        this.transferError = "The file is larger than 2 MiB; that is not a traffic rules export.";
+        this.transferError = "The file is larger than 2 MiB, more than this page can import. Split it, or import it with \"cfm webtop rules import\" in parts.";
         return;
       }
       const { doc, error } = parseExportFile(await file.text());
