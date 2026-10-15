@@ -1936,7 +1936,12 @@ function _M.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
   -- the rule always had stays for them (and for anything the reader misses).
   local nb = normalize(cap(body, CFG.max_scan_len))
   if has(nb, "system.multicall") then return "AUTH_WP_XMLRPC_MULTICALL" end
-  if pingback or has(nb, "pingback.ping") then return "AUTH_WP_XMLRPC_PINGBACK" end
+  -- Second value: a REAL pingback, i.e. pingback.ping is the call IXR
+  -- dispatches (the last name). The words anywhere else (a param of another
+  -- call) still tag the request, but are not one (cfm_waf.lua step 26).
+  if pingback or has(nb, "pingback.ping") then
+    return "AUTH_WP_XMLRPC_PINGBACK", names[#names] == "pingback.ping"
+  end
   -- The edge reads the first XMLRPC_HIDDEN_LEN (waf_body_max_len) bytes of
   -- a body. A cut body with no name in them, or whose last visible name is
   -- not a call that carries a big body (XMLRPC_BIG_CALLS: a decoy name, the

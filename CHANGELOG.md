@@ -39,6 +39,24 @@ back-filled here — see the git/PR history for that period.
   in an operator's export with all its vhosts, and the preview names them. Until now a site moving
   servers had its rules retyped by hand.
 
+### Changed
+- **A WordPress pingback no longer bans the server that sent it.** Every
+  `pingback.ping` to `/xmlrpc.php` still gets a 403 (rule 511), but its
+  `waf_security` ban is held in code (`RULE_511 = 0`). WordPress itself sends
+  one when a post links to a site here, and the ban (the section `BLOCK`, 7 days
+  on several nodes, reported to the fleet list) landed on the sender's shared
+  hosting server, every port included, mail too: a fleet review of 2026-10-15
+  found 35 such pingbacks among ~680 rule-511 hits, three of the senders still
+  on the fleet list. Multicall (510) and the XML-RPC POST burst (512) keep the
+  ban. Since a held block rule would take the headline, and with it the ban,
+  from an armed rule on the same body, the 511 block is now recorded after
+  the armed rules. A real pingback (the call WordPress runs is
+  `pingback.ping`) never counts toward 512, and the edge's IP block after it
+  lasts 10 seconds instead of 30 minutes, which used to 403 every request from
+  the sender's server to every site on the node. The words carried inside
+  another XML-RPC call (a password guess) still count toward 512's ban.
+  `RULE_511 = 1` in `[waf_security]` arms it again.
+
 ## 2026.10.13
 
 ### Changed

@@ -118,7 +118,7 @@ local CFG = {
                                          -- rollout: start this rule in "logonly" to baseline HEAD noise,
                                          -- then promote to "challenge" after validating logs.
   rule_xmlrpc_multicall   = "block", -- system.multicall in XML-RPC body
-  rule_xmlrpc_pingback    = "block", -- pingback.ping in XML-RPC body
+  rule_xmlrpc_pingback    = "block", -- pingback.ping in XML-RPC body. Edge 403 only: autoblock held in code (RULE_511 = 0), WordPress's own pingback client sends it. Recorded late, after the armed families.
   rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
 
   -- ── Audit / payload rules ─────────────────────────────────────────────────
@@ -1699,10 +1699,14 @@ local function check_impl(ctx, st)
 
   -- ── 26) XML-RPC strong body signatures ───────────────────────────────────
   do
-    local xtag = nil
+    local xtag, real_pingback = nil, false
     if not det.is_known_legit_xmlrpc(uri, args, headers, body, ip) then
-      xtag = det.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
+      xtag, real_pingback = det.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
     end
+    -- A real pingback skips 512 below whatever 511's mode or exclusion: an
+    -- operator who lets pingbacks through must not see their sender banned
+    -- by the burst counter instead.
+    st.real_pingback = xtag == "AUTH_WP_XMLRPC_PINGBACK" and real_pingback == true
 
     if xtag == "AUTH_WP_XMLRPC_MULTICALL" then
       local mode = rule_mode(CFG.rule_xmlrpc_multicall, "block")
@@ -1713,8 +1717,31 @@ local function check_impl(ctx, st)
     elseif xtag == "AUTH_WP_XMLRPC_PINGBACK" then
       local mode = rule_mode(CFG.rule_xmlrpc_pingback, "block")
       if mode ~= "disabled" then
-        local ttl = CFG.auth_xmlrpc_pingback_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_AUTH_BURST:" .. xtag, ttl, mode, RULE_IDS.rule_xmlrpc_pingback) then goto done end
+        -- A real pingback is a call WordPress (IXR) dispatches to
+        -- pingback.ping: the LAST method name. The detector also fires on
+        -- the words anywhere in the first 2 KB, which any XML-RPC call can
+        -- carry as a param; such a request is still a 511 block, but it
+        -- counts toward 512 below and keeps the long IP block, or adding the
+        -- words would buy a credential sprayer out of every ban now that
+        -- 511's own is held.
+        local real = st.real_pingback
+        -- A real one blocks this request only: the IP block is block_ttl_sec
+        -- (10 s), as for any block, not the 30 min that 403'd every request
+        -- from the sender's (shared hosting) server on every vhost here.
+        local ttl = real and CFG.block_ttl_sec
+                    or CFG.auth_xmlrpc_pingback_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
+        -- A block is recorded late (see "XML-RPC pingback block, deferred"):
+        -- its autoblock is held in code (RULE_511 = 0), and as the first
+        -- block hit it would own the headline and shadow an armed rule on
+        -- the same body (a serialized object, 329). A real pingback skips
+        -- 512 below: its block used to end evaluation before 512 counted,
+        -- and must not count toward a ban now. (501 counts a password
+        -- field, which a pingback does not carry.)
+        if mode == "block" and not (skip_rule_ids and skip_rule_ids[RULE_IDS.rule_xmlrpc_pingback]) then
+          st.xmlrpc_pingback = { reason = "WAF_AUTH_BURST:" .. xtag, ttl = ttl }
+        else
+          record("WAF_AUTH_BURST:" .. xtag, ttl, mode, RULE_IDS.rule_xmlrpc_pingback)
+        end
       end
     elseif xtag == "AUTH_WP_XMLRPC_HIDDEN_METHOD" then
       -- A ≥32 KB call with no method name in the part the edge reads
@@ -1730,7 +1757,7 @@ local function check_impl(ctx, st)
   -- ── 27) Generic XML-RPC POST burst ───────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "block")
-    if mode ~= "disabled" then
+    if mode ~= "disabled" and not st.real_pingback then
       local tag = det.detect_xmlrpc_post_burst(ip, nil, uri, method, shdict, args, headers, body)
       if tag then
         local ttl = CFG.xmlrpc_post_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
@@ -2368,6 +2395,21 @@ local function check_impl(ctx, st)
     end
   end
 
+  -- ── XML-RPC pingback block (rule 511), deferred from step 26 ─────────────
+  -- Every pingback.ping blocks (403), but its waf_security ban is held in
+  -- code (WAFRule.HoldAutoblock, RULE_511 = 0): WordPress itself sends one
+  -- (UA "The Incutio XML-RPC PHP Library -- WordPress/x") when a post links
+  -- to one of our sites, and at threshold 1 that banned the sender's shared
+  -- hosting server fleet-wide for the section BLOCK (7 d on orion/titan),
+  -- every port included (fleet review 2026-10-15: 35 of ~680 hits). A held
+  -- block rule shadows armed ones (CLAUDE.md §6), so it is recorded here,
+  -- after every armed block family, next to the held 10019/10020.
+  if st.xmlrpc_pingback then
+    local b = st.xmlrpc_pingback
+    st.xmlrpc_pingback = nil
+    if record(b.reason, b.ttl, "block", RULE_IDS.rule_xmlrpc_pingback) then goto done end
+  end
+
   -- ── Bad UA block (rule 201), deferred from step 1 ───────────────────────
   -- A score >= 99 scanner identity (sqlmap, nikto, nuclei …) or an operator
   -- `block` mode blocks, but WAF_BAD_UA has no block-tier rule, so its
@@ -2472,9 +2514,13 @@ local function check_impl(ctx, st)
   end
 
   ::done::
-  -- An earlier block ended evaluation before the deferred rule-201 block was
+  -- An earlier block ended evaluation before a deferred block (511, 201) was
   -- recorded: keep the hit (it does not take the headline, an equal-severity
   -- hit is already there).
+  if st.xmlrpc_pingback then
+    record(st.xmlrpc_pingback.reason, st.xmlrpc_pingback.ttl, "block", RULE_IDS.rule_xmlrpc_pingback)
+    st.xmlrpc_pingback = nil
+  end
   if st.bad_ua then
     record(st.bad_ua.reason, st.bad_ua.ttl, "block", RULE_IDS.rule_bad_ua)
     st.bad_ua = nil
@@ -2485,37 +2531,46 @@ local function check_impl(ctx, st)
   return true, final_reason, final_ttl, final_action, hits, final_rule_id
 end
 
--- check_impl, plus the deferred rule-201 block on a raise. Rule 201's block
--- used to end evaluation at step 1, so a scanner request (sqlmap, nikto …)
--- never reached a later rule; it now runs them all first (see "Bad UA block,
--- deferred"), and under fail_open a rule that raised would let it through
--- uninspected (cfm.lua's waf_error) where it used to be blocked. Blocked as
--- 201 here instead; with no deferred block the error goes up as before.
+-- check_impl, plus a deferred block on a raise. Rule 201's block used to end
+-- evaluation at step 1 and rule 511's at step 26, so a scanner request
+-- (sqlmap, nikto …) or a pingback never reached a later rule; they now run
+-- them all first (see "Bad UA block, deferred" and "XML-RPC pingback block,
+-- deferred"), and under fail_open a rule that raised would let the request
+-- through uninspected (cfm.lua's waf_error) where it used to be blocked.
+-- Blocked as the deferred rule here instead (511 when both are pending; the
+-- request blocks either way); with no deferred block the error goes up as
+-- before. A deferred 511 is stored only when 511 is not excluded for the
+-- vhost; 201's is stored regardless, so its exclusion is checked here.
 function _M.check(ctx)
   local st = {}
   local ok, hit, reason, ttl, action, hits, rule_id = xpcall(check_impl, debug.traceback, ctx, st)
   if ok then return hit, reason, ttl, action, hits, rule_id end
-  local b = st.bad_ua
-  if not b then error(hit, 0) end
   local c = type(ctx) == "table" and ctx or {}
-  if c.skip_rule_ids and c.skip_rule_ids[RULE_IDS.rule_bad_ua] then error(hit, 0) end
-  -- One line a minute per node (a scan sends this request by the thousand
-  -- while the bug is live); without a dict, every time.
+  local ua = st.bad_ua
+  if ua and c.skip_rule_ids and c.skip_rule_ids[RULE_IDS.rule_bad_ua] then ua = nil end
+  local b, rid = st.xmlrpc_pingback, RULE_IDS.rule_xmlrpc_pingback
+  if not b then b, rid = ua, RULE_IDS.rule_bad_ua end
+  if not b then error(hit, 0) end
+  -- One line a minute per node and rule (a scan sends this request by the
+  -- thousand while the bug is live); without a dict, every time.
   local sh = c.shdict
   local first = true
   if sh and sh.add then
-    local okadd, added, aerr = pcall(sh.add, sh, "waf_201_raise", 1, 60)
+    local okadd, added, aerr = pcall(sh.add, sh, "waf_" .. rid .. "_raise", 1, 60)
     first = (not okadd) or added or aerr ~= "exists"
   end
   if first and ngx and ngx.log then
-    ngx.log(ngx.ERR, "[cfm_waf] rule raised behind a deferred rule-201 block; blocked as 201 ip=",
+    ngx.log(ngx.ERR, "[cfm_waf] rule raised behind a deferred rule-", rid, " block; blocked as ", rid, " ip=",
             tostring(c.ip), " host=", tostring(c.host), " uri=", tostring(c.uri), " err=", tostring(hit))
   end
-  -- Only the 201 hit: hits recorded before the raise are dropped (main never
-  -- evaluated those rules on this request either).
-  return true, b.reason, b.ttl, "block",
-         { { reason = b.reason, ttl = b.ttl, action = "block", waf_rule_id = RULE_IDS.rule_bad_ua } },
-         RULE_IDS.rule_bad_ua
+  -- Only the deferred hits (511 first, 201 kept beside it): hits recorded
+  -- before the raise are dropped (main never evaluated those rules on this
+  -- request either).
+  local out = { { reason = b.reason, ttl = b.ttl, action = "block", waf_rule_id = rid } }
+  if ua and b ~= ua then
+    out[2] = { reason = ua.reason, ttl = ua.ttl, action = "block", waf_rule_id = RULE_IDS.rule_bad_ua }
+  end
+  return true, b.reason, b.ttl, "block", out, rid
 end
 
 -- Reason families whose first ":"-tag stays in the should_push cooldown key —

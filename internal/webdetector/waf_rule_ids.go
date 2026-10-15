@@ -138,7 +138,11 @@ var wafRuleIDs = []WAFRule{
 	{ID: 501, Name: "rule_auth_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge_v2"},
 	{ID: 502, Name: "rule_auth_wp_checks", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge_v2"},
 	{ID: 510, Name: "rule_xmlrpc_multicall", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
-	{ID: 511, Name: "rule_xmlrpc_pingback", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
+	// 511: every pingback.ping is a 403, but its ban is held: WordPress itself
+	// sends one when a post links to our site, and at threshold 1 that banned
+	// the sender's shared hosting server fleet-wide (35 of ~680 hits, fleet
+	// review 2026-10-15). 510 and 512 keep the family's autoblock.
+	{ID: 511, Name: "rule_xmlrpc_pingback", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block", HoldAutoblock: true},
 	{ID: 512, Name: "rule_xmlrpc_post_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	// 520 intentionally skipped: the SP Page Builder contact-form mail-relay
 	// rule (2026-10-06), removed 2026-10-08 (CHANGELOG "Removed").
