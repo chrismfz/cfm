@@ -1406,10 +1406,15 @@ not an option (a one-line spoof, and `ALLOW_UA_CONTAINS` exempts every family).
 Like 10019/10020 the block is recorded after every armed block rule
 (`st.xmlrpc_pingback`), so a pingback carrying an armed payload (a serialized
 object, rule 329) is banned by that rule. A real pingback (the method IXR
-dispatches, the last `methodName`, is `pingback.ping`) never counts toward
-512, as when its block ended evaluation at step 26, and leaves a 10 s IP block
-(`block_ttl_sec`) instead of 30 min; the words carried as a param of another
-call still count toward 512. Botnet pingbacks (`PHP/6.x`, a PHP that never
+dispatches, the last `methodName`, is `pingback.ping`, in a body the edge saw
+whole: shorter than `waf_body_max_len` and no shorter than its
+Content-Length) that 511 stops (`block`, `challenge`, `challenge_v2`) never
+counts toward 512, as when its block ended evaluation at step 26, and leaves
+a 10 s IP decision (`block_ttl_sec`) instead of 30 min. Everything else still
+counts toward 512: the words carried as a param of another call, a decoy
+padded past the window or read short (the call IXR runs is behind the cut),
+and any pingback 511 lets through (`logonly`, excluded), which reaches
+WordPress, as before the hold. Botnet pingbacks (`PHP/6.x`, a PHP that never
 existed) get the same 403 and no ban. Decision record:
 `docs/waf-autoblock-design.md`.
 

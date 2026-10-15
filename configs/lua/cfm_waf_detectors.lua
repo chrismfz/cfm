@@ -1477,6 +1477,17 @@ end
 -- login[password] array, read only on its admin route.
 -- waf_body_max_len as cfm.lua reads it (cfm_cfg.lua), like XMLRPC_HIDDEN_LEN.
 local AUTH_BODY_CUT = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "") or 32768
+
+-- body_was_cut: did the edge see less than the whole body PHP will read? It
+-- reads the first waf_body_max_len bytes, or none of it (no Content-Length on
+-- HTTP/3, a read that failed). A complete body of exactly that size reads as
+-- cut too, on the safe side. The one test for "cut" (501's padded login, 511's
+-- real-pingback check); keep it here rather than a copy per rule.
+local function body_was_cut(body, headers)
+  local clen_raw = headers and (headers["content-length"] or headers["Content-Length"])
+  local clen = tonumber(header_string(clen_raw)) or 0
+  return #body >= AUTH_BODY_CUT or clen > #body or (body == "" and clen_raw == nil)
+end
 local AUTH_QUERY_FIELDS = { route = true, _format = true }
 local AUTH_PASSWORD_FIELDS = { pwd = true, pass = true, passwd = true, password = true, login = true }
 
@@ -1535,9 +1546,7 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers
   -- path, as the rule always did, on a login-only endpoint; a big body on an
   -- admin index is an upload or a save. Residual: a Joomla admin login padded
   -- past the cut (its login posts a session CSRF token too).
-  local clen_raw = headers["content-length"] or headers["Content-Length"]
-  local clen = tonumber(header_string(clen_raw)) or 0
-  local cut = #body >= AUTH_BODY_CUT or clen > #body or (body == "" and clen_raw == nil)
+  local cut = body_was_cut(body, headers)
   if body == "" and not cut then return nil end
 
   local cred = false
@@ -1937,10 +1946,13 @@ function _M.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
   local nb = normalize(cap(body, CFG.max_scan_len))
   if has(nb, "system.multicall") then return "AUTH_WP_XMLRPC_MULTICALL" end
   -- Second value: a REAL pingback, i.e. pingback.ping is the call IXR
-  -- dispatches (the last name). The words anywhere else (a param of another
+  -- dispatches (the last name) AND the edge saw the whole body
+  -- (body_was_cut): IXR calls the last name of the WHOLE body, and a name
+  -- past the cut (a padded wp.getUsersBlogs behind a decoy pingback.ping) is
+  -- one the edge never sees. The words anywhere else (a param of another
   -- call) still tag the request, but are not one (cfm_waf.lua step 26).
   if pingback or has(nb, "pingback.ping") then
-    return "AUTH_WP_XMLRPC_PINGBACK", names[#names] == "pingback.ping"
+    return "AUTH_WP_XMLRPC_PINGBACK", (not body_was_cut(body, headers)) and names[#names] == "pingback.ping"
   end
   -- The edge reads the first XMLRPC_HIDDEN_LEN (waf_body_max_len) bytes of
   -- a body. A cut body with no name in them, or whose last visible name is

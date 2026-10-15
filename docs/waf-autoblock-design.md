@@ -418,14 +418,25 @@ UAs. A UA carve-out was rejected (a one-line spoof; `ALLOW_UA_CONTAINS`
 exempts every family). As a held block rule it would shadow armed rules, so
 it is recorded with the late group (`st.xmlrpc_pingback`), after 10019/10020
 and before 201, at `::done::`, and on a raise (`_M.check`, the 201 pattern).
-What counts as a pingback for the hold: the method IXR dispatches, the LAST
-`methodName`, is `pingback.ping`. The detector also fires on the words
-anywhere in the first 2 KB; such a request is still a 511 block but keeps the
-30 min IP block and counts toward 512, or adding the words to a
-`wp.getUsersBlogs` guess would buy a sprayer out of 512 and every ban. A real
-pingback skips 512 (its block used to end evaluation before 512 counted) and
-its IP block is `block_ttl_sec` (10 s): the 30 min ipState block 403'd every
-request from the sender's server on every vhost of the node.
+What counts as a real pingback: the method IXR dispatches, the LAST
+`methodName`, is `pingback.ping`, in a body the edge saw whole
+(`body_was_cut`, the same test 501 uses: shorter than `waf_body_max_len`
+and no shorter than its Content-Length; IXR reads the whole body, so a decoy
+padded past the cut or read short hides the call it runs). The detector also fires on the words anywhere in
+the first 2 KB; such a request is still a 511 block but keeps the 30 min IP
+block and counts toward 512, or adding the words to a `wp.getUsersBlogs` guess
+would buy a sprayer out of 512 and every ban. A real pingback that 511 STOPS
+(`block`, `challenge`, `challenge_v2`: a server never solves a challenge)
+skips 512 (it never reaches PHP, and a block used to end evaluation before
+512 counted) and its IP decision is `block_ttl_sec` (10 s): the 30 min
+ipState decision 403'd / challenged every request from the sender's server on
+every vhost of the node. A pingback 511 lets through (`logonly`, excluded)
+reaches WordPress and counts toward 512 exactly as before this change, ttl
+included. Two review rounds disagreed here: one wanted 512 to count those for
+flood protection, the other noted that 512 is per IP, so a distributed
+reflection flood stays under it while a legitimate busy sender does not.
+Keeping the pre-hold behaviour for the let-through case keeps this change to
+what it fixes; revisit with the per-IP 512 question on its own.
 Side effects, as for 201: a pingback now runs the remaining detectors before
 it blocks (the fleet saw ~680 rule-511 hits in two weeks, so the cost is
 small, but a pingback flood now pays it and is never nft-dropped); the

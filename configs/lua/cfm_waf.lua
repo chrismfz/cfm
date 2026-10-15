@@ -954,10 +954,13 @@ local function check_impl(ctx, st)
   local final_action  = nil
   local final_rule_id = nil
 
-  -- Rule 201's block, held back until after every armed block-tier family
-  -- (step 1 sets it; recorded before traversal, or at ::done:: if an earlier
-  -- block ended evaluation first, so the hit is never lost). It lives in
-  -- `st` so _M.check can still block as 201 if a later rule raises.
+  -- Deferred blocks of held / un-armed rules, recorded after every armed
+  -- block-tier family (before traversal), or at ::done:: if an earlier block
+  -- ended evaluation first, so the hit is never lost: st.bad_ua (rule 201,
+  -- set at step 1) and st.xmlrpc_pingback (rule 511, set at step 26). They
+  -- live in `st` so _M.check can still block as the deferred rule if a later
+  -- rule raises. st.pingback_skip_burst (step 26 → 27) is in `st` only
+  -- because a local there would sit in the scope of the `goto done` jumps.
 
   local function record(reason, ttl, action, rule_id)
     local sev = ACTION_SEVERITY[action] or 0
@@ -1703,10 +1706,6 @@ local function check_impl(ctx, st)
     if not det.is_known_legit_xmlrpc(uri, args, headers, body, ip) then
       xtag, real_pingback = det.detect_xmlrpc_probe(uri, method, body, ip, args, headers)
     end
-    -- A real pingback skips 512 below whatever 511's mode or exclusion: an
-    -- operator who lets pingbacks through must not see their sender banned
-    -- by the burst counter instead.
-    st.real_pingback = xtag == "AUTH_WP_XMLRPC_PINGBACK" and real_pingback == true
 
     if xtag == "AUTH_WP_XMLRPC_MULTICALL" then
       local mode = rule_mode(CFG.rule_xmlrpc_multicall, "block")
@@ -1724,20 +1723,27 @@ local function check_impl(ctx, st)
         -- counts toward 512 below and keeps the long IP block, or adding the
         -- words would buy a credential sprayer out of every ban now that
         -- 511's own is held.
-        local real = st.real_pingback
-        -- A real one blocks this request only: the IP block is block_ttl_sec
-        -- (10 s), as for any block, not the 30 min that 403'd every request
-        -- from the sender's (shared hosting) server on every vhost here.
-        local ttl = real and CFG.block_ttl_sec
-                    or CFG.auth_xmlrpc_pingback_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
+        local ttl = CFG.auth_xmlrpc_pingback_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
+        local excluded = skip_rule_ids and skip_rule_ids[RULE_IDS.rule_xmlrpc_pingback]
+        -- A real pingback that 511 STOPS here (block, challenge,
+        -- challenge_v2; a server never solves a challenge) never reaches
+        -- PHP. It stops this request only: its IP decision is block_ttl_sec
+        -- (10 s), not the 30 min that 403'd / challenged every request from
+        -- the sender's (shared hosting) server on every vhost here, and it
+        -- skips 512 below (a block used to end evaluation before 512
+        -- counted; a ban for a request that never ran is the incident this
+        -- hold fixes). A pingback 511 lets through (logonly, excluded)
+        -- reaches WordPress and counts toward 512 as it always did.
+        if real_pingback and not excluded
+           and (ACTION_SEVERITY[mode] or 0) > (ACTION_SEVERITY.logonly or 0) then
+          ttl = CFG.block_ttl_sec or ttl
+          st.pingback_skip_burst = true
+        end
         -- A block is recorded late (see "XML-RPC pingback block, deferred"):
         -- its autoblock is held in code (RULE_511 = 0), and as the first
         -- block hit it would own the headline and shadow an armed rule on
-        -- the same body (a serialized object, 329). A real pingback skips
-        -- 512 below: its block used to end evaluation before 512 counted,
-        -- and must not count toward a ban now. (501 counts a password
-        -- field, which a pingback does not carry.)
-        if mode == "block" and not (skip_rule_ids and skip_rule_ids[RULE_IDS.rule_xmlrpc_pingback]) then
+        -- the same body (a serialized object, 329).
+        if mode == "block" and not excluded then
           st.xmlrpc_pingback = { reason = "WAF_AUTH_BURST:" .. xtag, ttl = ttl }
         else
           record("WAF_AUTH_BURST:" .. xtag, ttl, mode, RULE_IDS.rule_xmlrpc_pingback)
@@ -1757,7 +1763,7 @@ local function check_impl(ctx, st)
   -- ── 27) Generic XML-RPC POST burst ───────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_xmlrpc_post_burst, "block")
-    if mode ~= "disabled" and not st.real_pingback then
+    if mode ~= "disabled" and not st.pingback_skip_burst then
       local tag = det.detect_xmlrpc_post_burst(ip, nil, uri, method, shdict, args, headers, body)
       if tag then
         local ttl = CFG.xmlrpc_post_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec

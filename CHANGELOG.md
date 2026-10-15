@@ -50,11 +50,13 @@ back-filled here — see the git/PR history for that period.
   on the fleet list. Multicall (510) and the XML-RPC POST burst (512) keep the
   ban. Since a held block rule would take the headline, and with it the ban,
   from an armed rule on the same body, the 511 block is now recorded after
-  the armed rules. A real pingback (the call WordPress runs is
-  `pingback.ping`) never counts toward 512, and the edge's IP block after it
-  lasts 10 seconds instead of 30 minutes, which used to 403 every request from
-  the sender's server to every site on the node. The words carried inside
-  another XML-RPC call (a password guess) still count toward 512's ban.
+  the armed rules. A real pingback that 511 stops (block or challenge; the
+  call WordPress runs is `pingback.ping`) never counts toward 512, and the
+  edge's IP decision after it lasts 10 seconds instead of 30 minutes, which
+  used to 403 every request from the sender's server to every site on the
+  node. The words carried inside another XML-RPC call (a password guess), a
+  decoy padded past the edge's body window, and a pingback 511 lets through
+  (`logonly`, excluded) still count toward 512's ban, as before.
   `RULE_511 = 1` in `[waf_security]` arms it again.
 
 ## 2026.10.13
