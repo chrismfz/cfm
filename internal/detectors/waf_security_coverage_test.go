@@ -147,4 +147,18 @@ func TestWAFSecurityRuleHolds(t *testing.T) {
 	if _, ok := wafSecurityRuleOverrides(KV{})["10018"]; ok {
 		t.Errorf("10018 (TranslatePress reset preview) must stay armed with the family, not held")
 	}
+	// 511 (xmlrpc pingback) is held: WordPress's own pingback client got its
+	// host banned. 510 (multicall) and 512 (POST burst) stay armed, and so
+	// does the family.
+	if got, ok := wafSecurityRuleOverrides(KV{})["511"]; !ok || got != 0 {
+		t.Errorf("RULE_511 should default to the code hold 0, got %d (present=%v)", got, ok)
+	}
+	for _, id := range []string{"510", "512"} {
+		if _, ok := wafSecurityRuleOverrides(KV{})[id]; ok {
+			t.Errorf("rule %s must stay armed with WAF_AUTH_BURST, not held", id)
+		}
+	}
+	if got := wafSecurityFamilies(KV{})["WAF_AUTH_BURST"]; got != 1 {
+		t.Errorf("WAF_AUTH_BURST must stay armed (510/512), got %d", got)
+	}
 }

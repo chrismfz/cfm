@@ -233,7 +233,7 @@ BAD_UTF8        = 0      ; WAF_BAD_UTF8 (611, disabled) — off (FP-only, 2026-0
 ; For rules that behave differently from their family — tighten the ones that
 ; are almost-always-attack, loosen the noisy ones — same idea as
 ; exim_security's core-rule + per-signal "specials".
-;RULE_511 = 2           ; xmlrpc pingback: near-always attack → strict
+;RULE_511 = 1           ; xmlrpc pingback: re-arm (held in code since 2026-10-15)
 ;RULE_501 = 25          ; generic auth-burst: extra-lenient (bulk-admin devs)
 ;RULE_411 = 1           ; webshell-ping fingerprint: instant
 
@@ -405,6 +405,49 @@ the deferred block no longer lets the scanner through under `fail_open`
 (cfm.lua's `waf_error` path): `_M.check` runs the pipeline under `xpcall`
 and, when a 201 block is pending, blocks as 201 and logs `[cfm_waf] rule
 raised behind a deferred rule-201 block`.
+
+**Rule 511 is held per rule and joins the late group (2026-10-15).** Every
+`pingback.ping` still gets a 403, but `HoldAutoblock` holds its ban
+(`RULE_511 = 0`): WordPress's own pingback client (UA `The Incutio XML-RPC PHP
+Library -- WordPress/x`) sends one when a post links to one of our sites, and
+at threshold 1 the ban (the section `BLOCK`, 7 d on orion/titan, reported to the
+fleet list) landed on the sender's shared hosting server, every port. Fleet
+read of the WAF logs that day: 35 such pingbacks among ~680 rule-511 hits,
+three of the senders still on the fleet list; the rest were `PHP/6.x` botnet
+UAs. A UA carve-out was rejected (a one-line spoof; `ALLOW_UA_CONTAINS`
+exempts every family). As a held block rule it would shadow armed rules, so
+it is recorded with the late group (`st.xmlrpc_pingback`), after 10019/10020
+and before 201, at `::done::`, and on a raise (`_M.check`, the 201 pattern).
+What counts as a real pingback: the method IXR dispatches, the LAST
+`methodName`, is `pingback.ping`, in a body the edge saw whole
+(`body_was_cut`, the same test 501 uses: shorter than `waf_body_max_len`
+and no shorter than its Content-Length; IXR reads the whole body, so a decoy
+padded past the cut or read short hides the call it runs). The detector also fires on the words anywhere in
+the first 2 KB; such a request is still a 511 block but keeps the 30 min IP
+block and counts toward 512, or adding the words to a `wp.getUsersBlogs` guess
+would buy a sprayer out of 512 and every ban. A real pingback that 511 STOPS
+(`block`, `challenge`, `challenge_v2`: a server never solves a challenge)
+skips 512 (it never reaches PHP, and a block used to end evaluation before
+512 counted) and its IP decision is `block_ttl_sec` (10 s): the 30 min
+ipState decision 403'd / challenged every request from the sender's server on
+every vhost of the node. A pingback 511 lets through (`logonly`, excluded)
+reaches WordPress and counts toward 512 exactly as before this change, ttl
+included. Two review rounds disagreed here: one wanted 512 to count those for
+flood protection, the other noted that 512 is per IP, so a distributed
+reflection flood stays under it while a legitimate busy sender does not.
+Keeping the pre-hold behaviour for the let-through case keeps this change to
+what it fixes; revisit with the per-IP 512 question on its own.
+Side effects, as for 201: a pingback now runs the remaining detectors before
+it blocks (the fleet saw ~680 rule-511 hits in two weeks, so the cost is
+small, but a pingback flood now pays it and is never nft-dropped); the
+challenge / logonly hits behind 511 now show in `also_rule_ids`, so burn-in
+"also" counts include pingback bodies from this date. Mirror images: an
+operator who arms `BAD_UA` loses the 201 ban on a scanner-UA pingback (511 is
+recorded first and is held), and one who re-arms `RULE_511 = 1` while holding
+another block rule gets the usual mirror; at the shipped arming neither side
+bans. With three deferred blocks (101/103 by position, 201 and 511 by `st.*`)
+the generic fix above (`record()` continuing past a held block) is due; it
+was left out of this change to keep it small.
 
 ## Open questions (decide before Phase 1)
 

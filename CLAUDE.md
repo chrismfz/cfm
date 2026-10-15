@@ -462,7 +462,7 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   `WAF_UPLOAD_CONTENT` (402), `WAF_WEBSHELL` since 2026-07-03 (413, the
   proper-noun drop-path subset), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305)
   `WAF_AUTH_BURST` (510-512, the xmlrpc multicall / pingback / burst
-  rules) — all armed to 1 — plus
+  rules; 511 pingback held per rule since 2026-10-15) — all armed to 1 — plus
   `WAF_TRAVERSAL` since 2026-09-05 (rule 101;
   raw-path rule 103 since 2026-09-22; **held at 0** through its burn-in, see
   below) — those are the only ones that
@@ -470,7 +470,8 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   ship in code: `HoldAutoblock` on its `WAFRule` (`waf_rule_ids.go`) is the
   default for a `RULE_<id>` key, so the hold reaches configs that predate the
   rule (10019 and 10020, the TranslatePress id-lookup leg and the
-  logged-in reset-preview request). The rendered `[waf_security]` template is derived from
+  logged-in reset-preview request; 511, the xmlrpc pingback WordPress itself
+  sends, deferred in `cfm_waf.lua` like them). The rendered `[waf_security]` template is derived from
   the same code defaults, so a fresh `detectors.conf` lists exactly these.
 - **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
   default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and

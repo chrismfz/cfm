@@ -1397,6 +1397,27 @@ limit applies. Closing it needs the part of the body past the cut (a plain
 Before reading, the reader drops one `<?xml…?>` from the first 100 bytes, as
 IXR does wherever it sits.
 
+**511 blocks, but does not ban** (since 2026-10-15). Its `waf_security` ban
+is held in code (`HoldAutoblock`, `RULE_511 = 0`): WordPress sends a
+`pingback.ping` itself (UA `The Incutio XML-RPC PHP Library -- WordPress/x`)
+when a post links to one of our sites, and the ban landed on the sender's
+shared hosting server, every port, for the section `BLOCK`. A UA carve-out was
+not an option (a one-line spoof, and `ALLOW_UA_CONTAINS` exempts every family).
+Like 10019/10020 the block is recorded after every armed block rule
+(`st.xmlrpc_pingback`), so a pingback carrying an armed payload (a serialized
+object, rule 329) is banned by that rule. A real pingback (the method IXR
+dispatches, the last `methodName`, is `pingback.ping`, in a body the edge saw
+whole: shorter than `waf_body_max_len` and no shorter than its
+Content-Length) that 511 stops (`block`, `challenge`, `challenge_v2`) never
+counts toward 512, as when its block ended evaluation at step 26, and leaves
+a 10 s IP decision (`block_ttl_sec`) instead of 30 min. Everything else still
+counts toward 512: the words carried as a param of another call, a decoy
+padded past the window or read short (the call IXR runs is behind the cut),
+and any pingback 511 lets through (`logonly`, excluded), which reaches
+WordPress, as before the hold. Botnet pingbacks (`PHP/6.x`, a PHP that never
+existed) get the same 403 and no ban. Decision record:
+`docs/waf-autoblock-design.md`.
+
 510-512 and the auth burst (501) skip Jetpack's own traffic
 (`is_known_legit_xmlrpc`): a Jetpack marker (`?for=jetpack`, a Jetpack /
 WordPress.com User-Agent, the word in the body) **from a Jetpack network**. The
