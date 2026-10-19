@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.19
+
 ### Added
 - **Traffic rules export / import, to move a site's rules between servers.**
   cfm-admin → Traffic Rules → **Export / Import** downloads the rules of the
