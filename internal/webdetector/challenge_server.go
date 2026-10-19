@@ -177,7 +177,8 @@ func normalizeChallengeNext(raw string) string {
 // lines) to one line per key a minute. nextRedirects is the challenge page's
 // loop breaker: a second redirect to next (cleared or exempt client) for the
 // same (ip, scope, host, canonical target) within 10 s serves the page
-// instead. Both use the package's one bounded TTL store through putIfAbsent: a
+// instead, except that a cleared client gets one cache-busting retry first
+// (challenge_cdn_cache.go). Both use the package's one bounded TTL store through putIfAbsent: a
 // key the full store cannot record reads as seen, so both then take their
 // conservative branch (no log line, serve the page).
 var (
@@ -1187,7 +1188,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		time.Sleep(500 * time.Millisecond)
 
 		// Redirect back to original path (relative redirect avoids scheme/host loops)
-		w.Header().Set("Cache-Control", "no-store")
+		setNoStore(w.Header())
 		w.Header().Set("Connection", "close")
 
 		// Safety: next is already forced to start with "/" above.
@@ -1249,7 +1250,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 					postIPStr, logHost, logPath, logURI, len(next), logCType, r.ContentLength, postReason,
 				)
 
-				w.Header().Set("Cache-Control", "no-store")
+				setNoStore(w.Header())
 				http.Redirect(w, r, challengePath+"?next="+url.QueryEscape(normalizeChallengeNext(next)), http.StatusSeeOther) // 303
 				return
 			}
@@ -1259,10 +1260,19 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		}
 
 		// Avoid browsers hitting /favicon.ico etc causing token/cookie churn.
-		// Always serve the challenge page from canonical challenge paths only.
-		if r.URL.Path != "/" && r.URL.Path != challengePath {
+		// Always serve the challenge page from its canonical path only, "/"
+		// included: a challenged homepage used to get the page itself at "/",
+		// and a CDN that caches "/" regardless of no-store (a Cloudflare rule
+		// overriding the origin's Cache-Control) then served that page, with
+		// another visitor's token and no cfm_chal cookie, to every visitor of
+		// the homepage (challenge_cdn_cache.go). The legacy "/?next=X" form
+		// keeps its next.
+		if r.URL.Path != challengePath {
 			next := r.URL.RequestURI()
-			w.Header().Set("Cache-Control", "no-store")
+			if r.URL.Path == "/" && r.URL.Query().Has("next") {
+				next = r.URL.Query().Get("next")
+			}
+			setNoStore(w.Header())
 
 			http.Redirect(w, r, challengePath+"?next="+url.QueryEscape(normalizeChallengeNext(next)), http.StatusFound)
 			return
@@ -1311,7 +1321,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// window: this side re-reads the secret, the edge caches it for ~10s),
 		// it challenges next again and the client comes straight back here.
 		// The breaker then serves the page instead of bouncing the client
-		// into ERR_TOO_MANY_REDIRECTS and the page rate limit's firewall ban.
+		// into ERR_TOO_MANY_REDIRECTS and the page rate limit's firewall ban
+		// (after one cache-busting retry for a cleared client: a CDN serving
+		// a cached challenge is the usual cause, challenge_cdn_cache.go).
 		// Only on /__cfm_challenge itself: that location stamps the host and
 		// the scope headers. A challenge the edge proxies through
 		// `location /` carries the client's X-Forwarded-Host / port headers,
@@ -1347,9 +1359,14 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// page (even post.php with another ?post=) is not mistaken
 				// for a loop. Per method too: a fetcher's HEAD then GET of the
 				// same page is not a loop.
+				// cfm_nc is left out: a cache-busted next is the same
+				// target, so its bounce hits the same key (one bust per
+				// target per window, see below).
 				canon := next
 				if u, err := url.ParseRequestURI(next); err == nil {
-					canon = u.Path + "?" + u.Query().Encode()
+					q := u.Query()
+					q.Del(cdnBustParam)
+					canon = u.Path + "?" + q.Encode()
 				}
 				sum := sha256.Sum256([]byte(canon))
 				key := ip.String() + "|" + scope + "|" + host + "|" + r.Method + "|" + hex.EncodeToString(sum[:8])
@@ -1357,9 +1374,37 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 					if why != "cleared" {
 						s.bridge.noteChallengePageExemptRedirect(host, ip.String(), r.UserAgent(), why, next, now)
 					}
-					w.Header().Set("Cache-Control", "no-store")
+					setNoStore(w.Header())
 					http.Redirect(w, r, next, http.StatusSeeOther) // 303
 					return
+				}
+				// A CLEARED client bounced straight back for the same target:
+				// the edge passes a valid clearance at Step 2b, so what sent it
+				// here is almost always a cache in front of the edge (a CDN
+				// serving a cached challenge page or redirect for next). Try
+				// next once more with a cfm_nc parameter the cache has never
+				// seen, and count the host for edge_health, instead of serving
+				// the PoW again: re-solving cannot help, and each solve walked
+				// the visitor toward the page rate limit's ban. ONE bust per
+				// target per window (its own key): a CDN that ignores the
+				// query string answers the busted URL with the same cached
+				// redirect, and the client comes back with the plain next;
+				// a second bust would only redirect-loop it into the page
+				// rate limit. That bounce, and one whose next already carries
+				// cfm_nc, fall through to the page, as before.
+				// Web scope only: the panel listeners sit behind no CDN, so a
+				// cleared bounce there is a validator disagreement, not a cache.
+				if why == "cleared" && scope == "web" && nextRedirects.putIfAbsent(key+"|nc", struct{}{}, now) {
+					if busted := cdnBustNext(next); busted != "" {
+						noteCDNCachedChallenge(host, ip.String(), now)
+						if verifyRejects.putIfAbsent(ip.String()+"|cdn_cached_challenge", struct{}{}, now) {
+							logging.LogfCHALLENGES("[challenge] cdn_cached_challenge ip=%s host=%s scope=%s next=%q note=cleared_bounce_cache_bust",
+								ip.String(), truncateForLog(host, 120), scope, truncateForLog(next, 220))
+						}
+						setNoStore(w.Header())
+						http.Redirect(w, r, busted, http.StatusSeeOther) // 303
+						return
+					}
 				}
 				if verifyRejects.putIfAbsent(ip.String()+"|next_redirect_loop", struct{}{}, now) {
 					logging.LogfCHALLENGES("[challenge] next_redirect_loop ip=%s host=%s scope=%s why=%q next=%q note=serving_page",
@@ -1392,7 +1437,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 
 		// Render challenge page (JS calls /verify with token)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
+		setNoStore(w.Header())
 		// Prevent search engines from indexing the challenge page or following its links.
 		// X-Robots-Tag is the authoritative signal; the meta tag below is belt-and-suspenders.
 		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
@@ -1682,7 +1727,7 @@ func (s *ChallengeServer) rlReject(w http.ResponseWriter, retry time.Duration) {
 		secs = 1
 	}
 	w.Header().Set("Retry-After", fmt.Sprintf("%d", secs))
-	w.Header().Set("Cache-Control", "no-store")
+	setNoStore(w.Header())
 	w.Header().Set("Connection", "close")
 	http.Error(w, "rate limited", http.StatusTooManyRequests)
 }
@@ -1976,7 +2021,7 @@ func (s *ChallengeServer) autoSolveAndRelease(w http.ResponseWriter, r *http.Req
 	// cfm_chal is kept, as in the verify path: another tab's challenge page
 	// may still be verifying with it.
 
-	w.Header().Set("Cache-Control", "no-store")
+	setNoStore(w.Header())
 	w.Header().Set("Connection", "close")
 	http.Redirect(w, r, next, http.StatusSeeOther) // 303
 }

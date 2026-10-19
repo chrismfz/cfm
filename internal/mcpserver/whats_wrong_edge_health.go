@@ -77,6 +77,7 @@ var edgeHealthCheckTitles = map[string]string{
 	"origin-421-fingerprint": "cross-SNI 421 origin reuse",
 	"engine-version-trap":    "edge upstream-keepalive trap",
 	"origin-ka-tier":         "origin keepalive degraded",
+	"cdn-cached-challenge":   "CDN caching the challenge",
 }
 
 func edgeHealthTitle(check string) string {

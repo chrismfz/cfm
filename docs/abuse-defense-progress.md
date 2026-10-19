@@ -76,7 +76,10 @@
      www.stereotiki.gr and mars shopzy.gr. The edge's challenge source is
      not found yet; the leading candidate is the Step-0c fingerprint floor.
      No harm, since the breaker serves the page, but the mirror is
-     incomplete.
+     incomplete. Since the CDN-cache fix (2026-10-19), a CLEARED client's
+     second bounce logs `cdn_cached_challenge` (one cache-busting retry), not
+     `next_redirect_loop`, so `why="cleared"` loop counts after it are not
+     comparable with reads 1–2; exempt clients (this item) are unchanged.
 - **Open decisions** (master plan §5 / E4):
   1. Tighten the rescue or leave it, including a score ceiling (it clears
      up to 150; the measured human class scored exactly 100).

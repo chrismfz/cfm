@@ -155,6 +155,50 @@ Drill-down path the finding names, which is the one that actually solved the
 incident: `edge_error_tail grep="upstream prematurely closed"` → `dmesg_tail
 grep=segfault` → `service_status` for the origin daemon.
 
+### F. A CDN caching CFM's challenge (challenge server, in memory)
+
+Added after 2026-10-19 on mars: anastasiadi.gr sits behind Cloudflare, whose
+Cache Rule set the Edge TTL to ignore the origin's `Cache-Control`. Cloudflare
+cached CFM's challenge page (then served at the challenged `/` itself) and its
+redirects, despite `no-store`. Every visitor of a cached URL got the challenge,
+the cached page carried another visitor's token and no `cfm_chal` cookie, and a
+visitor who solved on a fresh page was sent back to the cached challenge: ~30
+solves in two minutes, then the challenge rate limit's ban.
+
+The challenge server now:
+
+- serves its page only at `/__cfm_challenge` (a challenged `/` gets a redirect
+  there, like every other content URL);
+- sends `CDN-Cache-Control` and `Cloudflare-CDN-Cache-Control: no-store` with
+  every response;
+- sends a **cleared** visitor bounced back for the same target within the
+  breaker window to `next` once more with a fresh `cfm_nc` query parameter,
+  instead of serving the PoW again (once per target per window; web scope only,
+  the panel listeners sit behind no CDN), and counts the host and the client IP.
+
+A cleared bounce means a cache in front of the edge: the edge passes a valid
+clearance at Step 2b. Check F reports the hosts where at least 3 **distinct
+client IPs** bounced in the last 24 h as `warn` ("likely a CDN"), with the fix:
+the vhost's CDN rule must respect the origin's `Cache-Control`, then purge. The
+threshold is on IPs, not bounces, because the host is the client's own `Host`
+header (the web servers are `server_name _`): one client must not be able to
+make a tenant look like a CDN casualty. The count is in memory, so it is empty after a
+daemon restart. Honest limits:
+
+- a CDN that overrides `no-store` ignores the CDN headers too;
+- one that drops the query string from its cache key defeats the `cfm_nc` retry
+  (the bounce then ends at the page, as before);
+- one that also caches `/__cfm_challenge?next=X` defeats all of it, the page's
+  own retry URL included, and no bounce reaches the origin, so Check F stays
+  silent;
+- a cached redirect still challenges every visitor of that URL until the entry
+  expires;
+- the count is a heuristic: a cleared bounce without a CDN (several tabs on one
+  target, a validator disagreement such as a bridge-token rotation window, which
+  can hit many IPs at once) counts too, hence "likely".
+
+The check exists so the operator learns which tenant's CDN to fix.
+
 ## Output shape
 
 Structured JSON, most-severe first, so `whats_wrong` and a human read it the same

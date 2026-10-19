@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
+
+	webdet "cfm/internal/webdetector"
 )
 
 func itoa64(n int64) string { return strconv.FormatInt(n, 10) }
@@ -369,9 +372,12 @@ func TestEdgeHealthReport_WarmReuseNoTimestampFailsafe(t *testing.T) {
 
 func stubEdgeHealth(t *testing.T) func() {
 	t.Helper()
-	oDet, oAcc, oErr, oBridge, oNow := edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow
+	oDet, oAcc, oErr, oBridge, oNow, oCDN := edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow, edgeHealthCDNSuspects
+	// Check F reads the challenge server's in-process tracker; a test that
+	// does not set it sees no suspects, whatever else ran in this binary.
+	edgeHealthCDNSuspects = func(time.Time) []webdet.CDNCacheSuspect { return nil }
 	return func() {
-		edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow = oDet, oAcc, oErr, oBridge, oNow
+		edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow, edgeHealthCDNSuspects = oDet, oAcc, oErr, oBridge, oNow, oCDN
 	}
 }
 

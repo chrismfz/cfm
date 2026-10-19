@@ -116,7 +116,7 @@ func TestChallengePage_ClearedClientGoesStraightToNext(t *testing.T) {
 	)
 	next := "/wp-admin/post.php?post=66091&action=edit&cfm_rt=abc"
 	resetThrottleStores(t)
-	get := func(clientIP, cookieHost string, withCookie bool) *http.Response {
+	getNext := func(next, clientIP, cookieHost string, withCookie bool) *http.Response {
 		req, _ := http.NewRequest(http.MethodGet, base+challengePath+"?next="+url.QueryEscape(next), nil)
 		req.Header.Set("User-Agent", ua)
 		req.Header.Set("X-Real-IP", clientIP)
@@ -132,6 +132,9 @@ func TestChallengePage_ClearedClientGoesStraightToNext(t *testing.T) {
 		resp.Body.Close()
 		return resp
 	}
+	get := func(clientIP, cookieHost string, withCookie bool) *http.Response {
+		return getNext(next, clientIP, cookieHost, withCookie)
+	}
 
 	if r := get(ip, host, true); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != next {
 		t.Fatalf("cleared: %d %q, want 303 to next (cfm_rt kept, so the edge replays the POST)", r.StatusCode, r.Header.Get("Location"))
@@ -145,11 +148,56 @@ func TestChallengePage_ClearedClientGoesStraightToNext(t *testing.T) {
 	if r := get(ip, "other.example.com", true); r.StatusCode != http.StatusOK {
 		t.Fatalf("clearance for another host: %d, want the challenge page", r.StatusCode)
 	}
-	// Loop breaker: the edge bounced the cleared client straight back (its
-	// validator disagrees) — the second redirect within the window serves the
-	// page instead of ping-ponging into ERR_TOO_MANY_REDIRECTS.
-	if r := get(ip, host, true); r.StatusCode != http.StatusOK {
-		t.Fatalf("second cleared redirect for the same next within 10 s: %d, want the page", r.StatusCode)
+	// Loop breaker: the cleared client came straight back for the same next.
+	// The edge passes a valid clearance, so a cache in front of it (a CDN
+	// serving a cached challenge) is the usual cause: the second bounce goes
+	// to next once more with a cache-busting cfm_nc (cfm_rt kept), and the
+	// host is counted for edge_health.
+	resetCDNCachedChallengeForTest()
+	t.Cleanup(resetCDNCachedChallengeForTest)
+	r := get(ip, host, true)
+	busted := r.Header.Get("Location")
+	if r.StatusCode != http.StatusSeeOther || !strings.HasPrefix(busted, next+"&cfm_nc=") {
+		t.Fatalf("second cleared bounce for the same next within 10 s: %d %q, want 303 to next+cfm_nc", r.StatusCode, busted)
+	}
+	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 1 || hs[0].Host != host || hs[0].IPs != 1 {
+		t.Fatalf("cdn suspects = %+v, want %s counted once", hs, host)
+	}
+	// Still bounced with the cache-busted next (the edge's validator really
+	// disagrees): the same target, so the page instead of ping-ponging into
+	// ERR_TOO_MANY_REDIRECTS.
+	if r := getNext(busted, ip, host, true); r.StatusCode != http.StatusOK {
+		t.Fatalf("bounce with cfm_nc: %d %q, want the page", r.StatusCode, r.Header.Get("Location"))
+	}
+	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 1 || hs[0].Bounces != 1 {
+		t.Fatalf("a bounce that could not be busted was counted: %+v", hs)
+	}
+}
+
+// A CDN that ignores the query string answers the busted URL with the same
+// cached redirect, so the client comes back with the PLAIN next. One bust per
+// target per window: that third bounce gets the page, not another bust (each
+// of which would redirect-loop it into the page rate limit's ban).
+func TestChallengePage_OneCacheBustPerTarget(t *testing.T) {
+	useClearanceBridgeToken(t, unitTestBridgeSecret)
+	base, _ := startVerifyServer(t)
+	resetThrottleStores(t)
+	resetCDNCachedChallengeForTest()
+	t.Cleanup(resetCDNCachedChallengeForTest)
+	const ip, host = "87.202.177.128", "www.anastasiadi.gr"
+	clr := &http.Cookie{Name: "cfm_clearance", Value: issueClearanceToken(ip, host, "web", time.Now().Add(time.Hour))}
+	ua := "Mozilla/5.0 (X11; Linux x86_64; rv:158.0) Gecko/20100101 Firefox/158.0"
+	if r := doChallengePage(t, http.MethodGet, base, ip, host, ua, "/", nil, clr); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/" {
+		t.Fatalf("first: %d %q, want 303 to /", r.StatusCode, r.Header.Get("Location"))
+	}
+	if r := doChallengePage(t, http.MethodGet, base, ip, host, ua, "/", nil, clr); r.StatusCode != http.StatusSeeOther || !strings.HasPrefix(r.Header.Get("Location"), "/?cfm_nc=") {
+		t.Fatalf("second: %d %q, want the one cache-bust", r.StatusCode, r.Header.Get("Location"))
+	}
+	if r := doChallengePage(t, http.MethodGet, base, ip, host, ua, "/", nil, clr); r.StatusCode != http.StatusOK {
+		t.Fatalf("third (the CDN ignored the query string): %d %q, want the page", r.StatusCode, r.Header.Get("Location"))
+	}
+	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 1 || hs[0].Bounces != 1 {
+		t.Fatalf("cdn suspects = %+v, want the host counted once", hs)
 	}
 }
 
@@ -357,7 +405,7 @@ func TestChallengePage_BreakerIsPerPath(t *testing.T) {
 	base, _ := startVerifyServer(t)
 	resetThrottleStores(t)
 	const ip, host = "203.0.113.82", "shop.example.com"
-	get := func(rawNextQuery string) int {
+	getResp := func(rawNextQuery string) *http.Response {
 		req, _ := http.NewRequest(http.MethodGet, base+challengePath+"?next="+rawNextQuery, nil)
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
 		req.Header.Set("X-Real-IP", ip)
@@ -368,8 +416,9 @@ func TestChallengePage_BreakerIsPerPath(t *testing.T) {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
-		return resp.StatusCode
+		return resp
 	}
+	get := func(rawNextQuery string) int { return getResp(rawNextQuery).StatusCode }
 	if c := get(url.QueryEscape("/προϊόν/ένα?x=1")); c != http.StatusSeeOther {
 		t.Fatalf("first cleared visit: %d, want 303", c)
 	}
@@ -380,9 +429,15 @@ func TestChallengePage_BreakerIsPerPath(t *testing.T) {
 	if c := get(url.QueryEscape("/wp-admin/post.php?post=66091&action=edit")); c != http.StatusSeeOther {
 		t.Fatalf("same path, other query: %d, want 303 (not a loop)", c)
 	}
-	// The bounce: the same target, rebuilt (percent-encoded path, reordered query).
-	if c := get(url.QueryEscape("/%CF%80%CF%81%CE%BF%CF%8A%CF%8C%CE%BD/%CE%AD%CE%BD%CE%B1?x=1")); c != http.StatusOK {
-		t.Fatalf("same target back within the window: %d, want the page (loop broken)", c)
+	// The bounce: the same target, rebuilt (percent-encoded path, reordered
+	// query). Recognised as the same target, so the breaker fires: a cleared
+	// client gets the one cache-busting retry (challenge_cdn_cache.go).
+	resetCDNCachedChallengeForTest()
+	t.Cleanup(resetCDNCachedChallengeForTest)
+	bounce := "/%CF%80%CF%81%CE%BF%CF%8A%CF%8C%CE%BD/%CE%AD%CE%BD%CE%B1?x=1"
+	if r := getResp(url.QueryEscape(bounce)); r.StatusCode != http.StatusSeeOther ||
+		!strings.Contains(r.Header.Get("Location"), "&cfm_nc=") {
+		t.Fatalf("same target back within the window: %d %q, want 303 with cfm_nc (loop broken)", r.StatusCode, r.Header.Get("Location"))
 	}
 }
 
@@ -406,7 +461,9 @@ func TestChallengeNext_LocationNeverLeavesTheOrigin(t *testing.T) {
 }
 
 // The cleared-client check runs only on /__cfm_challenge (its location stamps
-// the host and scope headers), never on a challenge proxied through `/`.
+// the host and scope headers), never on a challenge proxied through `/`: that
+// request is redirected to /__cfm_challenge (whose location stamps them), not
+// sent to next on the client's own X-Forwarded-Host.
 func TestChallengePage_ClearedCheckOnlyOnTheChallengePath(t *testing.T) {
 	useClearanceBridgeToken(t, unitTestBridgeSecret)
 	base, _ := startVerifyServer(t)
@@ -422,8 +479,8 @@ func TestChallengePage_ClearedCheckOnlyOnTheChallengePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET / (proxied challenge, unstamped headers): %d, want the page", resp.StatusCode)
+	if want := challengePath + "?next=%2Fwp-admin%2F"; resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != want {
+		t.Fatalf("GET / (proxied challenge, unstamped headers): %d %q, want 302 to %s", resp.StatusCode, resp.Header.Get("Location"), want)
 	}
 }
 
