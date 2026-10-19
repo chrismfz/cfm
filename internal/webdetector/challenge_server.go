@@ -1395,9 +1395,11 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// ignores cfm_nc, so it is still once per target per window.
 				// Web scope only: the panel listeners sit behind no CDN, so a
 				// cleared bounce there is a validator disagreement, not a cache.
+				// Counted whether or not the bust can be built (a '#' or an
+				// over-long target): it is the same CDN symptom.
 				if why == "cleared" && scope == "web" && nextRedirects.putIfAbsent(key+"|nc", struct{}{}, now) {
+					noteCDNCachedChallenge(host, ip.String(), now)
 					if busted := cdnBustNext(next); busted != "" {
-						noteCDNCachedChallenge(host, ip.String(), now)
 						if verifyRejects.putIfAbsent(ip.String()+"|cdn_cached_challenge", struct{}{}, now) {
 							logging.LogfCHALLENGES("[challenge] cdn_cached_challenge ip=%s host=%s scope=%s next=%q note=cleared_bounce_cache_bust",
 								ip.String(), truncateForLog(host, 120), scope, truncateForLog(next, 220))

@@ -24,7 +24,8 @@ package webdetector
 //     cfm_nc query parameter, which a CDN keying on the query string has never
 //     cached, instead of being served the PoW again (cdnBustNext). Once per
 //     target per window: a further bounce gets the page;
-//   - counts those bounces per host and distinct client IP over 24 h
+//   - counts those bounces per host and distinct client (an IPv4 address, an
+//     IPv6 /64) over 24 h
 //     (noteCDNCachedChallenge; web scope only: the panel listeners sit behind
 //     no CDN), which edge_health reports as the cdn-cached-challenge check and
 //     whats_wrong surfaces, so the operator learns which tenant's CDN to fix.
@@ -115,11 +116,12 @@ func cdnBustNext(next string) string {
 // challenge page: the sign of a CDN serving a cached challenge or redirect.
 // IPs is the number of DISTINCT clients bounced in the last 24 h (an IPv4
 // address, an IPv6 /64: cdnSuspectClient), which is what edge_health
-// thresholds on: the host is the client's own Host header (the web servers
-// are `server_name _`), so a single client could otherwise pump the count for
-// any name. Three proxies still can; the finding says "likely" for that. Bounces and First cover the whole
-// current run (it lasts while any of its IPs is inside the window), so they
-// can span more than 24 h.
+// thresholds on (the field keeps its name): the host is the client's own Host
+// header (the web servers are `server_name _`), so a single client could
+// otherwise pump the count for any name. Three proxies still can; the finding
+// says "likely" for that. Bounces and First cover the whole current run (it
+// lasts while any of its clients is inside the window), so they can span more
+// than 24 h.
 type CDNCacheSuspect struct {
 	Host    string    `json:"host"`
 	IPs     int       `json:"ips"`
@@ -135,7 +137,7 @@ const (
 )
 
 type cdnSuspectEntry struct {
-	ips     map[string]time.Time // client IP -> its last bounce
+	ips     map[string]time.Time // client (cdnSuspectClient) -> its last bounce
 	bounces int
 	first   time.Time
 	last    time.Time
@@ -146,7 +148,7 @@ var cdnSuspects = struct {
 	hosts map[string]*cdnSuspectEntry
 }{hosts: map[string]*cdnSuspectEntry{}}
 
-// pruneLocked drops the IPs whose last bounce left the window and reports
+// pruneLocked drops the clients whose last bounce left the window and reports
 // whether anything is left.
 func (e *cdnSuspectEntry) pruneLocked(now time.Time) bool {
 	for ip, t := range e.ips {
@@ -213,7 +215,7 @@ func noteCDNCachedChallenge(host, ip string, now time.Time) {
 }
 
 // CDNCachedChallengeHosts returns the hosts with a cleared bounce in the last
-// 24 hours, the most distinct IPs first. edge_health reads it
+// 24 hours, the most distinct clients first. edge_health reads it
 // (cdn-cached-challenge). It is in-memory, so it starts empty after a daemon
 // restart.
 func CDNCachedChallengeHosts(now time.Time) []CDNCacheSuspect {
@@ -237,9 +239,9 @@ func CDNCachedChallengeHosts(now time.Time) []CDNCacheSuspect {
 }
 
 // challengeHTTPServing counts the challenge server's live HTTP listeners (the
-// v4 one; the v6 loopback twin shares its server). Zero means nothing here
-// can bounce a client, so edge_health reports Check F as not measured rather
-// than as all-clear.
+// primary one; the v6 loopback twin shares its server and is not counted).
+// Zero means nothing here serves a challenge, so edge_health reports Check F
+// as not measured (measured=false) unless the tracker still holds suspects.
 var challengeHTTPServing atomic.Int32
 
 // ChallengeServerServing reports whether the challenge server's HTTP listener

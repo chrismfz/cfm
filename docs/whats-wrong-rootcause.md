@@ -218,10 +218,11 @@ surface **only** when it is an operational problem, never routine.
 `whats_wrong` now carries an `edge_health` section (`evalEdgeHealth`), so the
 "edge and every daemon are up, but the ORIGIN is dropping requests" class is
 covered: origin premature-closes / gateway 5xx, cross-SNI 421 reuse, and
-origin-keepalive degradation. Thresholds stay in the endpoint (it owns the
+origin-keepalive degradation. Since 2026-10-19 it also surfaces a CDN in
+front of the edge caching CFM's challenge (Check F, `cdn-cached-challenge`). Thresholds stay in the endpoint (it owns the
 logs and the calibration); this layer only ranks an already-classified
 severity, and `ok`/`unknown` emit nothing. Design: `docs/edge-health.md`
-Check E.
+Checks E and F.
 
 The motivating miss: a node's Apache workers segfaulting in `mod_brotli` cost
 ~900 requests/day across dozens of vhosts, and every signal `what's_wrong`

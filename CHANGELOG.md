@@ -60,16 +60,6 @@ back-filled here — see the git/PR history for that period.
   `RULE_511 = 1` in `[waf_security]` arms it again.
 
 ### Fixed
-- **Follow-up to the Cloudflare challenge-loop fix (review findings).**
-  - The CDN check (`cdn-cached-challenge`) counts an IPv6 /64 as one client,
-    so one subscriber can no longer raise it for any site it names. It reads
-    `unknown`, not `ok`, on a node whose challenge server is not running.
-  - A tenant homepage's own `?next=` parameter is no longer read as the
-    challenge target (`/?next=/account` stays the target's query).
-  - The cache-busting retry is skipped for a target that carries a `#`
-    fragment or would grow past the length limit, instead of landing the
-    visitor on the homepage.
-  - The `edge_health` and `whats_wrong` tool descriptions list the new check.
 - **A site behind Cloudflare no longer traps cleared visitors in a challenge
   loop.** When a vhost's Cloudflare Cache Rule ignores the origin's
   `Cache-Control`, Cloudflare cached CFM's challenge page and its redirects
@@ -80,17 +70,20 @@ back-filled here — see the git/PR history for that period.
   - the challenge page is served only at `/__cfm_challenge`, so a challenged
     homepage is a redirect there, never a cacheable copy of the page (a
     challenged `/` now answers 302 instead of 200, like every other URL; an
-    uptime monitor that does not follow redirects sees the change);
+    uptime monitor that does not follow redirects sees the change). A tenant
+    homepage's own `?next=` parameter is no longer read as the challenge
+    target (`/?next=/account` stays the homepage's query);
   - every challenge response also carries `CDN-Cache-Control` and
     `Cloudflare-CDN-Cache-Control: no-store`;
   - a visitor who already holds a valid clearance and is bounced back is sent
     to the page they wanted once more, with a `cfm_nc` parameter the CDN has
     not cached, instead of being asked to solve again (once per page per
-    10 s; web ports only);
+    10 s; web ports only; not for a target that would grow past the length
+    limit or carries a `#` fragment, where the parameter could not work);
   - `edge_health` (and so `whats_wrong`) reports the vhosts where 3 or more
-    distinct visitors were bounced like this in 24 h (`cdn-cached-challenge`),
-    naming the fix: set the vhost's Cloudflare Cache Rule to respect the
-    origin's Cache-Control, then purge.
+    distinct visitors (an IPv6 /64 counts as one) were bounced like this in
+    24 h (`cdn-cached-challenge`), naming the fix: set the vhost's Cloudflare
+    Cache Rule to respect the origin's Cache-Control, then purge.
 
   CFM cannot override a CDN that ignores `no-store`. Until its rule is fixed,
   every visitor of a cached URL is still challenged once.

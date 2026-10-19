@@ -175,7 +175,8 @@ The challenge server now:
 - sends a **cleared** visitor bounced back for the same target within the
   breaker window to `next` once more with a fresh `cfm_nc` query parameter,
   instead of serving the PoW again (once per target per window; web scope only,
-  the panel listeners sit behind no CDN), and counts the host and the client (an IPv4 address, an IPv6 /64).
+  the panel listeners sit behind no CDN), and counts the host and the client
+  (an IPv4 address, an IPv6 /64), also when the retry cannot be built.
 
 A cleared bounce means a cache in front of the edge: the edge passes a valid
 clearance at Step 2b. Check F reports the hosts where at least 3 **distinct
@@ -185,9 +186,14 @@ the vhost's CDN rule must respect the origin's `Cache-Control`, then purge. The
 threshold is on clients, not bounces, because the host is the client's own
 `Host` header (the web servers are `server_name _`): one client, even one with a
 whole IPv6 /64, must not be able to make a tenant look like a CDN casualty
-(three proxies still can, hence "likely"). The count is in memory, so it is empty after a
-daemon restart. With no challenge server serving on the node (`CHALLENGE_HTTP_LISTEN`
-unset) the check is `unknown`: nothing could be measured. Honest limits:
+(three proxies still can, hence "likely"). The evidence key `ips` counts these
+clients. The count is in memory, so it is empty after a daemon restart. With
+no challenge server serving on the node (`CHALLENGE_HTTP_LISTEN` unset, or its
+listener failed) and nothing counted, the check is `ok` with
+`measured: false`: the node then serves no challenge page a CDN could cache,
+and an `unknown` would pin `overall` on every node running without it. Hosts
+already counted still `warn` while the listener is down (a reload stops it
+briefly; the tracker outlives it). Honest limits:
 
 - a CDN that overrides `no-store` ignores the CDN headers too;
 - one that drops the query string from its cache key defeats the `cfm_nc` retry

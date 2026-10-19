@@ -82,8 +82,8 @@ var (
 	edgeHealthChallengeServing = webdet.ChallengeServerServing
 )
 
-// edgeHealthCDNSuspectMin is the distinct client IPs a host needs bounced in
-// 24 h before Check F reports it.
+// edgeHealthCDNSuspectMin is the distinct clients (an IPv4 address, an IPv6
+// /64) a host needs bounced in 24 h before Check F reports it.
 const edgeHealthCDNSuspectMin = 3
 
 var (
@@ -571,18 +571,24 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	// A cleared visitor bounced straight back to the challenge page for the same
 	// target means something in front of the edge served it a cached challenge
 	// page or redirect: the edge itself passes a valid clearance. The challenge
-	// server counts those bounces per host and distinct client IP
-	// (webdet.CDNCachedChallengeHosts, 24 h)
+	// server counts those bounces per host and distinct client (an IPv4
+	// address, an IPv6 /64; webdet.CDNCachedChallengeHosts, 24 h)
 	// and sends the visitor on with a cache-busting parameter, but every visitor
 	// of a cached URL is still challenged until the CDN entry expires. Only the
 	// tenant's CDN rule can fix that, so the finding names the hosts.
-	// The threshold is on DISTINCT IPs (edgeHealthCDNSuspectMin): the host is the
+	// The threshold is on DISTINCT clients (edgeHealthCDNSuspectMin): the host is the
 	// client's own Host header, so one client must not be able to raise it. It is
 	// a heuristic, hence "likely": several tabs on one target or a validator
 	// disagreement (a bridge-token rotation window, which can hit many IPs at
 	// once) bounce cleared clients too. A CDN that also caches the challenge
 	// page's own URL sends no bounce here at all (challenge_cdn_cache.go).
-	// `ips` is the 24 h count; `bounces` covers the host's whole current run.
+	// `ips` is the 24 h count of distinct clients (the key keeps its name);
+	// `bounces` covers the host's whole current run.
+	// Suspects come first: the tracker outlives a listener that stopped after
+	// counting them. With no challenge server serving and nothing counted the
+	// check is `ok`, marked measured=false: no challenge page is served from
+	// this node, so there is none a CDN could cache (an `unknown` there would
+	// pin `overall` on every node that runs without the challenge server).
 	fEv := map[string]any{"window_hours": 24}
 	suspects := []map[string]any{}
 	for _, s := range edgeHealthCDNSuspects(time.Unix(now, 0)) {
@@ -595,10 +601,6 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	}
 	fEv["hosts"] = suspects
 	switch {
-	case !edgeHealthChallengeServing():
-		findings = append(findings, sev.add("cdn-cached-challenge", "unknown",
-			"the challenge server is not serving on this node (CHALLENGE_HTTP_LISTEN unset or failed), so no cleared bounce can be measured",
-			fEv, ""))
 	case len(suspects) > 0:
 		names := make([]string, 0, 4)
 		for i, s := range suspects {
@@ -611,6 +613,10 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 		findings = append(findings, sev.add("cdn-cached-challenge", "warn",
 			itoa(len(suspects))+" vhost(s) likely behind a CDN that serves CFM's challenge from its cache ("+strings.Join(names, ", ")+"): visitors holding a valid clearance were bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct clients each (IPv6 per /64), so every visitor of a cached URL is challenged until the CDN entry expires",
 			fEv, "in that vhost's CDN (Cloudflare: Caching → Cache Rules) set Edge TTL to respect the origin's Cache-Control (CFM's challenge responses are no-store), then purge the cache"))
+	case !edgeHealthChallengeServing():
+		fEv["measured"] = false
+		findings = append(findings, sev.add("cdn-cached-challenge", "ok",
+			"not measured: the challenge server is not serving on this node (CHALLENGE_HTTP_LISTEN unset, or its listener failed), so it serves no challenge page a CDN could cache", fEv, ""))
 	default:
 		findings = append(findings, sev.add("cdn-cached-challenge", "ok",
 			"no vhost had visitors holding a valid clearance bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct clients in the last 24 h (in-memory: empty after a daemon restart)", fEv, ""))

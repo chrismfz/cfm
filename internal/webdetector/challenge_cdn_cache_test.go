@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -79,6 +80,14 @@ func TestCDNBustNext(t *testing.T) {
 		if again == got || strings.Count(again, cdnBustParam+"=") != 1 || !strings.HasPrefix(again, next+sep+cdnBustParam+"=") {
 			t.Fatalf("cdnBustNext(%q) = %q, want next with one fresh %s", got, again, cdnBustParam)
 		}
+	}
+	// The bound is the result's length: one byte under it still busts.
+	room := maxNextLen - len("?"+cdnBustParam+"=") - 12
+	if got := cdnBustNext("/" + strings.Repeat("a", room-1)); len(got) != maxNextLen {
+		t.Fatalf("a next that busts to exactly maxNextLen gave %d bytes, want %d", len(got), maxNextLen)
+	}
+	if got := cdnBustNext("/" + strings.Repeat("a", room)); got != "" {
+		t.Fatalf("a next one byte past the bound busted to %d bytes", len(got))
 	}
 	if a, b := cdnBustNext("/"), cdnBustNext("/"); a == b {
 		t.Fatalf("two busts gave the same URL %q: a cache could hold it", a)
@@ -181,5 +190,30 @@ func TestChallengePage_PanelBounceIsNotACDN(t *testing.T) {
 	}
 	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 0 {
 		t.Fatalf("a panel bounce was counted as a CDN: %+v", hs)
+	}
+}
+
+// edge_health reads ChallengeServerServing to tell "nothing bounced" from
+// "nothing could bounce": Start raises it, Stop lowers it again.
+func TestChallengeServerServing(t *testing.T) {
+	before := challengeHTTPServing.Load()
+	srv := NewChallengeServer(nil)
+	if err := srv.Start(context.Background(), "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !ChallengeServerServing() || challengeHTTPServing.Load() != before+1 {
+		t.Fatalf("after Start: serving=%d, want %d", challengeHTTPServing.Load(), before+1)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := srv.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	// Serve returns asynchronously after Shutdown.
+	for deadline := time.Now().Add(2 * time.Second); challengeHTTPServing.Load() != before; {
+		if time.Now().After(deadline) {
+			t.Fatalf("after Stop: serving=%d, want %d", challengeHTTPServing.Load(), before)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

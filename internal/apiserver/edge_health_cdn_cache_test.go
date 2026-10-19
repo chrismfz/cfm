@@ -25,7 +25,7 @@ func TestCDNCachedChallenge_NamesTheHost(t *testing.T) {
 			{Host: "www.anastasiadi.gr", IPs: 41, Bounces: 147, First: last.Add(-time.Hour), Last: last},
 			{Host: "anastasiadi.gr", IPs: 9, Bounces: 32, First: last, Last: last},
 			// One client bouncing many times (it chose the Host header) stays
-			// out of triage: the threshold is on distinct IPs.
+			// out of triage: the threshold is on distinct clients.
 			{Host: "happy-nest.gr", IPs: 1, Bounces: 40, First: last, Last: last},
 		}
 	}
@@ -63,14 +63,36 @@ func TestCDNCachedChallenge_QuietIsOK(t *testing.T) {
 	}
 }
 
-// Without a challenge server nothing can bounce: Check F measured nothing,
-// which is unknown, never an all-clear.
-func TestCDNCachedChallenge_NoChallengeServerIsUnknown(t *testing.T) {
+// Without a challenge server this node serves no challenge page a CDN could
+// cache: Check F is ok, marked measured=false, and leaves overall alone (an
+// unknown there pinned overall on every node running without it).
+func TestCDNCachedChallenge_NoChallengeServerIsNotMeasured(t *testing.T) {
+	defer stubEdgeHealth(t)()
+	stubDropScan(t, 1000, nil)
+	base := buildEdgeHealthReport(context.Background(), 1000)["overall"]
+	edgeHealthChallengeServing = func() bool { return false }
+	rep := buildEdgeHealthReport(context.Background(), 1000)
+	f := findFinding(t, rep, "cdn-cached-challenge")
+	if f["severity"] != "ok" || f["evidence"].(map[string]any)["measured"] != false ||
+		!strings.Contains(f["summary"].(string), "not measured") {
+		t.Fatalf("finding = %v, want ok, measured=false, \"not measured\"", f)
+	}
+	if rep["overall"] != base {
+		t.Fatalf("overall = %v, want %v as with the server up", rep["overall"], base)
+	}
+}
+
+// The tracker outlives a listener that stopped after counting (a reload builds
+// a new Engine; the old Serve exits first): what it counted still warns.
+func TestCDNCachedChallenge_SuspectsWarnWhileNotServing(t *testing.T) {
 	defer stubEdgeHealth(t)()
 	stubDropScan(t, 1000, nil)
 	edgeHealthChallengeServing = func() bool { return false }
-	f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "cdn-cached-challenge")
-	if f["severity"] != "unknown" {
-		t.Fatalf("severity = %v, want unknown when the challenge server is not serving", f["severity"])
+	last := time.Unix(dropTestNow-120, 0)
+	edgeHealthCDNSuspects = func(time.Time) []webdet.CDNCacheSuspect {
+		return []webdet.CDNCacheSuspect{{Host: "www.anastasiadi.gr", IPs: 5, Bounces: 9, First: last, Last: last}}
+	}
+	if f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "cdn-cached-challenge"); f["severity"] != "warn" {
+		t.Fatalf("severity = %v, want warn: counted suspects outrank a stopped listener", f["severity"])
 	}
 }
