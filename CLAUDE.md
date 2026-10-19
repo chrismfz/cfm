@@ -425,6 +425,14 @@ exception is a `next` that carries a `cfm_rt`: the exemption cannot clear
 that challenged POST, and its owner would lose it. Before 2026-10-06 these
 clients got the PoW: titan served it to meta-externalagent ~1 940 times in
 14 hours.
+Never serve challenge CONTENT at a content URL: a CDN whose rule ignores the
+origin's `Cache-Control` caches it despite `no-store`. Cloudflare in front of
+anastasiadi.gr cached the page CFM rendered at a challenged `/`, with another
+visitor's token, and its redirects (2026-10-19). Cleared visitors re-solved
+~30 times in two minutes until the page rate limit banned them. The page now
+lives only at `/__cfm_challenge`. A cleared client bounced back gets one
+`cfm_nc` cache-busting retry, and `edge_health` names the host
+(`challenge_cdn_cache.go`, Check F).
 
 ### Traffic rules — `Simulate` IS the enforcement path
 `trafficRuleStore.Simulate` is wired as the nginx bridge's `RuleDecision`, so

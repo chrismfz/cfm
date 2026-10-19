@@ -59,6 +59,28 @@ back-filled here — see the git/PR history for that period.
   (`logonly`, excluded) still count toward 512's ban, as before.
   `RULE_511 = 1` in `[waf_security]` arms it again.
 
+### Fixed
+- **A site behind Cloudflare no longer traps cleared visitors in a challenge
+  loop.** When a vhost's Cloudflare Cache Rule ignores the origin's
+  `Cache-Control`, Cloudflare cached CFM's challenge page and its redirects
+  despite `no-store` (anastasiadi.gr on mars). Every visitor of a cached URL got
+  the challenge, often a copy carrying another visitor's token. Visitors who
+  solved were sent back to the cached challenge, solved again (~30 times in two
+  minutes) and were finally banned by the challenge rate limit. Now:
+  - the challenge page is served only at `/__cfm_challenge`, so a challenged
+    homepage is a redirect there, never a cacheable copy of the page;
+  - every challenge response also carries `CDN-Cache-Control` and
+    `Cloudflare-CDN-Cache-Control: no-store`;
+  - a visitor who already holds a valid clearance and is bounced back is sent
+    to the page they wanted once more, with a `cfm_nc` parameter the CDN has
+    not cached, instead of being asked to solve again;
+  - `edge_health` (and so `whats_wrong`) reports the vhosts this happens on
+    (`cdn-cached-challenge`), naming the fix: set the vhost's Cloudflare Cache
+    Rule to respect the origin's Cache-Control, then purge.
+
+  CFM cannot override a CDN that ignores `no-store`. Until its rule is fixed,
+  every visitor of a cached URL is still challenged once.
+
 ## 2026.10.13
 
 ### Changed
