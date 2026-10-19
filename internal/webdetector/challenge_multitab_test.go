@@ -463,7 +463,9 @@ func TestChallengeNext_LocationNeverLeavesTheOrigin(t *testing.T) {
 // The cleared-client check runs only on /__cfm_challenge (its location stamps
 // the host and scope headers), never on a challenge proxied through `/`: that
 // request is redirected to /__cfm_challenge (whose location stamps them), not
-// sent to next on the client's own X-Forwarded-Host.
+// sent to next on the client's own X-Forwarded-Host. Its ?next= is only the
+// homepage's query now (the old "/?next=" page form is gone), so the 302 also
+// pins that a cleared client at "/" is never sent to that value.
 func TestChallengePage_ClearedCheckOnlyOnTheChallengePath(t *testing.T) {
 	useClearanceBridgeToken(t, unitTestBridgeSecret)
 	base, _ := startVerifyServer(t)
@@ -479,7 +481,7 @@ func TestChallengePage_ClearedCheckOnlyOnTheChallengePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if want := challengePath + "?next=%2Fwp-admin%2F"; resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != want {
+	if want := challengePath + "?next=" + url.QueryEscape("/?next=%2Fwp-admin%2F"); resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != want {
 		t.Fatalf("GET / (proxied challenge, unstamped headers): %d %q, want 302 to %s", resp.StatusCode, resp.Header.Get("Location"), want)
 	}
 }

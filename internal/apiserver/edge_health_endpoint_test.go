@@ -372,12 +372,13 @@ func TestEdgeHealthReport_WarmReuseNoTimestampFailsafe(t *testing.T) {
 
 func stubEdgeHealth(t *testing.T) func() {
 	t.Helper()
-	oDet, oAcc, oErr, oBridge, oNow, oCDN := edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow, edgeHealthCDNSuspects
+	oDet, oAcc, oErr, oBridge, oNow, oCDN, oServ := edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow, edgeHealthCDNSuspects, edgeHealthChallengeServing
 	// Check F reads the challenge server's in-process tracker; a test that
 	// does not set it sees no suspects, whatever else ran in this binary.
 	edgeHealthCDNSuspects = func(time.Time) []webdet.CDNCacheSuspect { return nil }
+	edgeHealthChallengeServing = func() bool { return true }
 	return func() {
-		edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow, edgeHealthCDNSuspects = oDet, oAcc, oErr, oBridge, oNow, oCDN
+		edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow, edgeHealthCDNSuspects, edgeHealthChallengeServing = oDet, oAcc, oErr, oBridge, oNow, oCDN, oServ
 	}
 }
 

@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -43,10 +44,11 @@ func TestChallengePage_RootRedirectsToTheChallengePath(t *testing.T) {
 		{"/", "/"},
 		{"/?utm_source=fb", "/?utm_source=fb"},
 		{"/shop/?a=1", "/shop/?a=1"},
-		// The legacy "/?next=X" form keeps its target.
-		{"/?next=" + url.QueryEscape("/wp-admin/post.php?post=7"), "/wp-admin/post.php?post=7"},
-		// ... normalized like every next: never another origin.
-		{"/?next=" + url.QueryEscape("//evil.example/x"), "/"},
+		// The old "/?next=X" page form is not read any more: a tenant
+		// homepage's own next parameter stays the target's query.
+		{"/?next=" + url.QueryEscape("/account"), "/?next=" + url.QueryEscape("/account")},
+		// ... whatever it holds: it is a query value, never the target.
+		{"/?next=" + url.QueryEscape("//evil.example/x"), "/?next=" + url.QueryEscape("//evil.example/x")},
 	} {
 		r := get(tc.path)
 		want := challengePath + "?next=" + url.QueryEscape(tc.next)
@@ -79,10 +81,21 @@ func TestCDNBustNext(t *testing.T) {
 			t.Fatalf("cdnBustNext(%q) = %q, want next with one fresh %s", got, again, cdnBustParam)
 		}
 	}
+	// The bound is the result's length: one byte under it still busts.
+	room := maxNextLen - len("?"+cdnBustParam+"=") - 12
+	if got := cdnBustNext("/" + strings.Repeat("a", room-1)); len(got) != maxNextLen {
+		t.Fatalf("a next that busts to exactly maxNextLen gave %d bytes, want %d", len(got), maxNextLen)
+	}
+	if got := cdnBustNext("/" + strings.Repeat("a", room)); got != "" {
+		t.Fatalf("a next one byte past the bound busted to %d bytes", len(got))
+	}
 	if a, b := cdnBustNext("/"), cdnBustNext("/"); a == b {
 		t.Fatalf("two busts gave the same URL %q: a cache could hold it", a)
 	}
-	for _, bad := range []string{"", "shop", "//evil.example/x", "/\\evil.example"} {
+	// A fragment (a cfm_nc after '#' never reaches the server) and a result
+	// past maxNextLen (the bounce would normalize to "/") are refused too.
+	for _, bad := range []string{"", "shop", "//evil.example/x", "/\\evil.example", "/foo#x", "/foo?a=1#x",
+		"/" + strings.Repeat("a", maxNextLen-10)} {
 		if got := cdnBustNext(bad); got != "" {
 			t.Fatalf("cdnBustNext(%q) = %q, want \"\"", bad, got)
 		}
@@ -116,6 +129,22 @@ func TestCDNCachedChallengeHosts(t *testing.T) {
 	}
 	if hs := CDNCachedChallengeHosts(t0.Add(48 * time.Hour)); len(hs) != 0 {
 		t.Fatalf("after 48 h: %+v, want none", hs)
+	}
+	// One IPv6 subscriber holds a whole /64: its addresses are ONE client.
+	resetCDNCachedChallengeForTest()
+	for _, a := range []string{"2a02:587:1:2::1", "2a02:587:1:2::2", "2a02:587:1:2:aaaa::9"} {
+		noteCDNCachedChallenge("v6.gr", a, t0)
+	}
+	noteCDNCachedChallenge("v6.gr", "2a02:587:1:3::1", t0)
+	noteCDNCachedChallenge("v6.gr", "::ffff:203.0.113.7", t0)
+	if hs := CDNCachedChallengeHosts(t0); len(hs) != 1 || hs[0].IPs != 3 || hs[0].Bounces != 5 {
+		t.Fatalf("IPv6 per /64: %+v, want 3 clients (one /64, another /64, one mapped IPv4) over 5 bounces", hs)
+	}
+	// The host is the client's own Host header: cut to 120 bytes.
+	resetCDNCachedChallengeForTest()
+	noteCDNCachedChallenge(strings.Repeat("a", 300)+".gr", "203.0.113.5", t0)
+	if hs := CDNCachedChallengeHosts(t0); len(hs) != 1 || len(hs[0].Host) != 120 {
+		t.Fatalf("a long Host kept %d bytes, want 120", len(hs[0].Host))
 	}
 	// A host keeps at most cdnSuspectMaxIPsHost addresses.
 	resetCDNCachedChallengeForTest()
@@ -161,5 +190,30 @@ func TestChallengePage_PanelBounceIsNotACDN(t *testing.T) {
 	}
 	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 0 {
 		t.Fatalf("a panel bounce was counted as a CDN: %+v", hs)
+	}
+}
+
+// edge_health reads ChallengeServerServing to tell "nothing bounced" from
+// "nothing could bounce": Start raises it, Stop lowers it again.
+func TestChallengeServerServing(t *testing.T) {
+	before := challengeHTTPServing.Load()
+	srv := NewChallengeServer(nil)
+	if err := srv.Start(context.Background(), "127.0.0.1:0"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !ChallengeServerServing() || challengeHTTPServing.Load() != before+1 {
+		t.Fatalf("after Start: serving=%d, want %d", challengeHTTPServing.Load(), before+1)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := srv.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	// Serve returns asynchronously after Shutdown.
+	for deadline := time.Now().Add(2 * time.Second); challengeHTTPServing.Load() != before; {
+		if time.Now().After(deadline) {
+			t.Fatalf("after Stop: serving=%d, want %d", challengeHTTPServing.Load(), before)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
