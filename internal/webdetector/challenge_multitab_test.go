@@ -164,16 +164,40 @@ func TestChallengePage_ClearedClientGoesStraightToNext(t *testing.T) {
 		t.Fatalf("cdn suspects = %+v, want %s counted once", hs, host)
 	}
 	// Still bounced with the cache-busted next (the edge's validator really
-	// disagrees, or the CDN ignores the query string): one plain redirect,
-	// then the page instead of ping-ponging into ERR_TOO_MANY_REDIRECTS.
-	if r := getNext(busted, ip, host, true); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != busted {
-		t.Fatalf("first bounce with cfm_nc: %d %q, want 303 to it", r.StatusCode, r.Header.Get("Location"))
-	}
+	// disagrees): the same target, so the page instead of ping-ponging into
+	// ERR_TOO_MANY_REDIRECTS.
 	if r := getNext(busted, ip, host, true); r.StatusCode != http.StatusOK {
-		t.Fatalf("second bounce with cfm_nc: %d, want the page", r.StatusCode)
+		t.Fatalf("bounce with cfm_nc: %d %q, want the page", r.StatusCode, r.Header.Get("Location"))
 	}
-	if hs := CDNCachedChallengeHosts(time.Now()); hs[0].Count != 1 {
+	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 1 || hs[0].Count != 1 {
 		t.Fatalf("a bounce that could not be busted was counted: %+v", hs)
+	}
+}
+
+// A CDN that ignores the query string answers the busted URL with the same
+// cached redirect, so the client comes back with the PLAIN next. One bust per
+// target per window: that third bounce gets the page, not another bust (each
+// of which would redirect-loop it into the page rate limit's ban).
+func TestChallengePage_OneCacheBustPerTarget(t *testing.T) {
+	useClearanceBridgeToken(t, unitTestBridgeSecret)
+	base, _ := startVerifyServer(t)
+	resetThrottleStores(t)
+	resetCDNCachedChallengeForTest()
+	t.Cleanup(resetCDNCachedChallengeForTest)
+	const ip, host = "87.202.177.128", "www.anastasiadi.gr"
+	clr := &http.Cookie{Name: "cfm_clearance", Value: issueClearanceToken(ip, host, "web", time.Now().Add(time.Hour))}
+	ua := "Mozilla/5.0 (X11; Linux x86_64; rv:158.0) Gecko/20100101 Firefox/158.0"
+	if r := doChallengePage(t, http.MethodGet, base, ip, host, ua, "/", nil, clr); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != "/" {
+		t.Fatalf("first: %d %q, want 303 to /", r.StatusCode, r.Header.Get("Location"))
+	}
+	if r := doChallengePage(t, http.MethodGet, base, ip, host, ua, "/", nil, clr); r.StatusCode != http.StatusSeeOther || !strings.HasPrefix(r.Header.Get("Location"), "/?cfm_nc=") {
+		t.Fatalf("second: %d %q, want the one cache-bust", r.StatusCode, r.Header.Get("Location"))
+	}
+	if r := doChallengePage(t, http.MethodGet, base, ip, host, ua, "/", nil, clr); r.StatusCode != http.StatusOK {
+		t.Fatalf("third (the CDN ignored the query string): %d %q, want the page", r.StatusCode, r.Header.Get("Location"))
+	}
+	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 1 || hs[0].Count != 1 {
+		t.Fatalf("cdn suspects = %+v, want the host counted once", hs)
 	}
 }
 

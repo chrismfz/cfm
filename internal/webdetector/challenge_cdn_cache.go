@@ -22,7 +22,8 @@ package webdetector
 //   - breaks the loop: a CLEARED client bounced back to the page for the same
 //     target within the breaker window is sent to next once more with a fresh
 //     cfm_nc query parameter, which a CDN keying on the query string has never
-//     cached, instead of being served the PoW again (cdnBustNext);
+//     cached, instead of being served the PoW again (cdnBustNext). Once per
+//     target per window: a further bounce gets the page;
 //   - counts those bounces per host (noteCDNCachedChallenge), which edge_health
 //     reports as the cdn-cached-challenge check and whats_wrong surfaces, so the
 //     operator learns which tenant's CDN to fix.
@@ -66,7 +67,7 @@ const cdnBustParam = "cfm_nc"
 // (normalizeChallengeNext); its existing query is kept byte for byte.
 func cdnBustNext(next string) string {
 	u, err := url.ParseRequestURI(next)
-	if err != nil || !strings.HasPrefix(next, "/") {
+	if err != nil || !strings.HasPrefix(next, "/") || !isSameOriginPath(next) {
 		return ""
 	}
 	if _, ok := u.Query()[cdnBustParam]; ok {

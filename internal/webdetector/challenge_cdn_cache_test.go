@@ -76,8 +76,8 @@ func TestCDNBustNext(t *testing.T) {
 	if a, b := cdnBustNext("/"), cdnBustNext("/"); a == b {
 		t.Fatalf("two busts gave the same URL %q: a cache could hold it", a)
 	}
-	for _, bad := range []string{"", "shop", "//evil.example/x"} {
-		if got := cdnBustNext(bad); got != "" && !strings.HasPrefix(bad, "/") {
+	for _, bad := range []string{"", "shop", "//evil.example/x", "/\\evil.example"} {
+		if got := cdnBustNext(bad); got != "" {
 			t.Fatalf("cdnBustNext(%q) = %q, want \"\"", bad, got)
 		}
 	}

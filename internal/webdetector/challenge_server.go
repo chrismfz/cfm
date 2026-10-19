@@ -177,7 +177,8 @@ func normalizeChallengeNext(raw string) string {
 // lines) to one line per key a minute. nextRedirects is the challenge page's
 // loop breaker: a second redirect to next (cleared or exempt client) for the
 // same (ip, scope, host, canonical target) within 10 s serves the page
-// instead. Both use the package's one bounded TTL store through putIfAbsent: a
+// instead, except that a cleared client gets one cache-busting retry first
+// (challenge_cdn_cache.go). Both use the package's one bounded TTL store through putIfAbsent: a
 // key the full store cannot record reads as seen, so both then take their
 // conservative branch (no log line, serve the page).
 var (
@@ -1320,7 +1321,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// window: this side re-reads the secret, the edge caches it for ~10s),
 		// it challenges next again and the client comes straight back here.
 		// The breaker then serves the page instead of bouncing the client
-		// into ERR_TOO_MANY_REDIRECTS and the page rate limit's firewall ban.
+		// into ERR_TOO_MANY_REDIRECTS and the page rate limit's firewall ban
+		// (after one cache-busting retry for a cleared client: a CDN serving
+		// a cached challenge is the usual cause, challenge_cdn_cache.go).
 		// Only on /__cfm_challenge itself: that location stamps the host and
 		// the scope headers. A challenge the edge proxies through
 		// `location /` carries the client's X-Forwarded-Host / port headers,
@@ -1356,9 +1359,14 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// page (even post.php with another ?post=) is not mistaken
 				// for a loop. Per method too: a fetcher's HEAD then GET of the
 				// same page is not a loop.
+				// cfm_nc is left out: a cache-busted next is the same
+				// target, so its bounce hits the same key (one bust per
+				// target per window, see below).
 				canon := next
 				if u, err := url.ParseRequestURI(next); err == nil {
-					canon = u.Path + "?" + u.Query().Encode()
+					q := u.Query()
+					q.Del(cdnBustParam)
+					canon = u.Path + "?" + q.Encode()
 				}
 				sum := sha256.Sum256([]byte(canon))
 				key := ip.String() + "|" + scope + "|" + host + "|" + r.Method + "|" + hex.EncodeToString(sum[:8])
@@ -1377,9 +1385,14 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// next once more with a cfm_nc parameter the cache has never
 				// seen, and count the host for edge_health, instead of serving
 				// the PoW again: re-solving cannot help, and each solve walked
-				// the visitor toward the page rate limit's ban. A next that
-				// already carries cfm_nc falls through to the page, as before.
-				if why == "cleared" {
+				// the visitor toward the page rate limit's ban. ONE bust per
+				// target per window (its own key): a CDN that ignores the
+				// query string answers the busted URL with the same cached
+				// redirect, and the client comes back with the plain next;
+				// a second bust would only redirect-loop it into the page
+				// rate limit. That bounce, and one whose next already carries
+				// cfm_nc, fall through to the page, as before.
+				if why == "cleared" && nextRedirects.putIfAbsent(key+"|nc", struct{}{}, now) {
 					if busted := cdnBustNext(next); busted != "" {
 						noteCDNCachedChallenge(host, now)
 						if verifyRejects.putIfAbsent(ip.String()+"|cdn_cached_challenge", struct{}{}, now) {
