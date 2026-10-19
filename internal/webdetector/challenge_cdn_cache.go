@@ -29,12 +29,20 @@ package webdetector
 //     no CDN), which edge_health reports as the cdn-cached-challenge check and
 //     whats_wrong surfaces, so the operator learns which tenant's CDN to fix.
 //
-// HONEST LIMITS: a CDN that overrides no-store ignores the CDN headers too
-// (they help only where the origin's headers are respected), and one that
-// ignores the query string in its cache key defeats the cache-bust (the bounce
-// then ends at the page, as before). A cached redirect at a content URL still
-// sends every visitor of that URL to the challenge until the CDN entry expires:
-// the fix for that is the CDN's own rule, which the edge_health finding names.
+// HONEST LIMITS:
+//   - a CDN that overrides no-store ignores the CDN headers too (they help
+//     only where the origin's headers are respected);
+//   - one that ignores the query string in its cache key defeats the
+//     cache-bust (the bounce then ends at the page, as before);
+//   - one that also caches /__cfm_challenge?next=X (a host-wide rule keyed on
+//     the query) defeats all of it, the page's own retry URL included, and
+//     no bounce reaches the origin, so the edge_health check stays silent;
+//   - a cached redirect at a content URL still sends every visitor of that URL
+//     to the challenge until the CDN entry expires: the fix is the CDN's own
+//     rule, which the edge_health finding names;
+//   - the count is a heuristic: a cleared bounce without a CDN (several tabs
+//     on one target, a validator disagreement such as a bridge-token rotation
+//     window) counts too, and the latter can hit many IPs at once.
 
 import (
 	"crypto/rand"
@@ -62,27 +70,33 @@ func setNoStore(h http.Header) {
 // it; its only job is to make the URL one no cache has seen.
 const cdnBustParam = "cfm_nc"
 
-// cdnBustNext returns next with a fresh cfm_nc parameter appended, or ""
-// when next already carries one (that bounce already tried a cache-bust; a
-// second would only loop). next is the server-normalized same-origin target
-// (normalizeChallengeNext); its existing query is kept byte for byte.
+// cdnBustNext returns next with a fresh cfm_nc parameter, or "" for a next
+// that is not a same-origin path. An existing cfm_nc is REPLACED, not kept: a
+// busted URL ends up in address bars, bookmarks and shared links, and a CDN
+// caches that exact URL too. The caller bounds the busts (one per target per
+// window), so a fresh value can never loop. next is the server-normalized
+// target (normalizeChallengeNext); the rest of its query is kept byte for byte.
 func cdnBustNext(next string) string {
-	u, err := url.ParseRequestURI(next)
-	if err != nil || !strings.HasPrefix(next, "/") || !isSameOriginPath(next) {
-		return ""
-	}
-	if _, ok := u.Query()[cdnBustParam]; ok {
+	if _, err := url.ParseRequestURI(next); err != nil || !strings.HasPrefix(next, "/") || !isSameOriginPath(next) {
 		return ""
 	}
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return ""
 	}
-	sep := "?"
-	if strings.Contains(next, "?") {
-		sep = "&"
+	path, query, _ := strings.Cut(next, "?")
+	kept := make([]string, 0, 4)
+	for _, kv := range strings.Split(query, "&") {
+		if kv == "" {
+			continue
+		}
+		if k, _, _ := strings.Cut(kv, "="); k == cdnBustParam {
+			continue
+		}
+		kept = append(kept, kv)
 	}
-	return next + sep + cdnBustParam + "=" + hex.EncodeToString(b[:])
+	kept = append(kept, cdnBustParam+"="+hex.EncodeToString(b[:]))
+	return path + "?" + strings.Join(kept, "&")
 }
 
 // CDNCacheSuspect is one host whose cleared visitors were bounced back to the
@@ -90,7 +104,9 @@ func cdnBustNext(next string) string {
 // IPs is the number of DISTINCT client addresses bounced in the last 24 h,
 // which is what edge_health thresholds on: the host is the client's own Host
 // header (the web servers are `server_name _`), so a single client could
-// otherwise pump the count for any name. Bounces counts every bounce.
+// otherwise pump the count for any name. Bounces and First cover the whole
+// current run (it lasts while any of its IPs is inside the window), so they
+// can span more than 24 h.
 type CDNCacheSuspect struct {
 	Host    string    `json:"host"`
 	IPs     int       `json:"ips"`

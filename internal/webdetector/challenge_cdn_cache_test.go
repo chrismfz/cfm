@@ -72,8 +72,11 @@ func TestCDNBustNext(t *testing.T) {
 		if !strings.HasPrefix(got, next+sep+cdnBustParam+"=") || len(got) != len(next)+len(sep)+len(cdnBustParam)+1+12 {
 			t.Fatalf("cdnBustNext(%q) = %q, want next kept byte for byte plus %s%s=<12 hex>", next, got, sep, cdnBustParam)
 		}
-		if again := cdnBustNext(got); again != "" {
-			t.Fatalf("cdnBustNext of an already busted next = %q, want \"\" (one try only)", again)
+		// An already busted next (a bookmarked or shared URL a CDN may have
+		// cached too) gets a FRESH value: the old one is replaced, not kept.
+		again := cdnBustNext(got)
+		if again == got || strings.Count(again, cdnBustParam+"=") != 1 || !strings.HasPrefix(again, next+sep+cdnBustParam+"=") {
+			t.Fatalf("cdnBustNext(%q) = %q, want next with one fresh %s", got, again, cdnBustParam)
 		}
 	}
 	if a, b := cdnBustNext("/"), cdnBustNext("/"); a == b {

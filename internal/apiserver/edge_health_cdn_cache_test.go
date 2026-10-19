@@ -57,4 +57,8 @@ func TestCDNCachedChallenge_QuietIsOK(t *testing.T) {
 	if f["severity"] != "ok" {
 		t.Fatalf("severity = %v, want ok with no suspects", f["severity"])
 	}
+	// An empty list, never JSON null.
+	if hosts, ok := f["evidence"].(map[string]any)["hosts"].([]map[string]any); !ok || hosts == nil {
+		t.Fatalf("evidence hosts = %#v, want an empty list", f["evidence"].(map[string]any)["hosts"])
+	}
 }

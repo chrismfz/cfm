@@ -183,11 +183,21 @@ the vhost's CDN rule must respect the origin's `Cache-Control`, then purge. The
 threshold is on IPs, not bounces, because the host is the client's own `Host`
 header (the web servers are `server_name _`): one client must not be able to
 make a tenant look like a CDN casualty. The count is in memory, so it is empty after a
-daemon restart. Honest limits: a CDN that overrides `no-store` ignores the CDN
-headers too, one that drops the query string from its cache key defeats the
-`cfm_nc` retry (the bounce then ends at the page, as before), and a cached
-redirect still challenges every visitor of that URL until the entry expires. The
-check exists so the operator learns which tenant's CDN to fix.
+daemon restart. Honest limits:
+
+- a CDN that overrides `no-store` ignores the CDN headers too;
+- one that drops the query string from its cache key defeats the `cfm_nc` retry
+  (the bounce then ends at the page, as before);
+- one that also caches `/__cfm_challenge?next=X` defeats all of it, the page's
+  own retry URL included, and no bounce reaches the origin, so Check F stays
+  silent;
+- a cached redirect still challenges every visitor of that URL until the entry
+  expires;
+- the count is a heuristic: a cleared bounce without a CDN (several tabs on one
+  target, a validator disagreement such as a bridge-token rotation window, which
+  can hit many IPs at once) counts too, hence "likely".
+
+The check exists so the operator learns which tenant's CDN to fix.
 
 ## Output shape
 

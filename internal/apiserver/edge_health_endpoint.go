@@ -574,10 +574,14 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	// of a cached URL is still challenged until the CDN entry expires. Only the
 	// tenant's CDN rule can fix that, so the finding names the hosts.
 	// The threshold is on DISTINCT IPs (edgeHealthCDNSuspectMin): the host is the
-	// client's own Host header, so one client must not be able to raise it, and
-	// one stray bounce (a bridge-token rotation window) stays out of triage.
+	// client's own Host header, so one client must not be able to raise it. It is
+	// a heuristic, hence "likely": several tabs on one target or a validator
+	// disagreement (a bridge-token rotation window, which can hit many IPs at
+	// once) bounce cleared clients too. A CDN that also caches the challenge
+	// page's own URL sends no bounce here at all (challenge_cdn_cache.go).
+	// `ips` is the 24 h count; `bounces` covers the host's whole current run.
 	fEv := map[string]any{"window_hours": 24}
-	var suspects []map[string]any
+	suspects := []map[string]any{}
 	for _, s := range edgeHealthCDNSuspects(time.Unix(now, 0)) {
 		if s.IPs < edgeHealthCDNSuspectMin {
 			continue
@@ -588,9 +592,10 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	}
 	fEv["hosts"] = suspects
 	if len(suspects) > 0 {
-		names := make([]string, 0, 3)
+		names := make([]string, 0, 4)
 		for i, s := range suspects {
 			if i == 3 {
+				names = append(names, "+"+itoa(len(suspects)-3)+" more")
 				break
 			}
 			names = append(names, s["host"].(string))
@@ -600,7 +605,7 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 			fEv, "in that vhost's CDN (Cloudflare: Caching → Cache Rules) set Edge TTL to respect the origin's Cache-Control (CFM's challenge responses are no-store), then purge the cache"))
 	} else {
 		findings = append(findings, sev.add("cdn-cached-challenge", "ok",
-			"no cleared visitor was bounced back to the challenge in the last 24 h (in-memory: empty after a daemon restart)", fEv, ""))
+			"no vhost had visitors holding a valid clearance bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct IPs in the last 24 h (in-memory: empty after a daemon restart)", fEv, ""))
 	}
 
 	sort.SliceStable(findings, func(i, j int) bool {
