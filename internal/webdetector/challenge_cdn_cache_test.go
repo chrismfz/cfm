@@ -3,6 +3,7 @@ package webdetector
 import (
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,8 @@ func TestChallengePage_RootRedirectsToTheChallengePath(t *testing.T) {
 		{"/shop/?a=1", "/shop/?a=1"},
 		// The legacy "/?next=X" form keeps its target.
 		{"/?next=" + url.QueryEscape("/wp-admin/post.php?post=7"), "/wp-admin/post.php?post=7"},
+		// ... normalized like every next: never another origin.
+		{"/?next=" + url.QueryEscape("//evil.example/x"), "/"},
 	} {
 		r := get(tc.path)
 		want := challengePath + "?next=" + url.QueryEscape(tc.next)
@@ -87,37 +90,73 @@ func TestCDNCachedChallengeHosts(t *testing.T) {
 	resetCDNCachedChallengeForTest()
 	t.Cleanup(resetCDNCachedChallengeForTest)
 	t0 := time.Date(2026, 10, 19, 9, 48, 0, 0, time.UTC)
-	for i := 0; i < 3; i++ {
-		noteCDNCachedChallenge("www.anastasiadi.gr", t0.Add(time.Duration(i)*time.Minute))
+	// One client bouncing many times is ONE IP: the Host header is its own, so
+	// it must not be able to make a host look like a CDN casualty.
+	for i := 0; i < 5; i++ {
+		noteCDNCachedChallenge("www.anastasiadi.gr", "87.202.177.128", t0.Add(time.Duration(i)*time.Second))
 	}
-	noteCDNCachedChallenge("Shop.Example.com ", t0)
-	noteCDNCachedChallenge("", t0)
+	noteCDNCachedChallenge("www.anastasiadi.gr", "94.65.1.2", t0.Add(time.Minute))
+	noteCDNCachedChallenge("www.anastasiadi.gr", "2a02:587::1", t0.Add(2*time.Minute))
+	noteCDNCachedChallenge("Shop.Example.com ", "203.0.113.5", t0)
+	noteCDNCachedChallenge("", "203.0.113.5", t0)
+	noteCDNCachedChallenge("x.gr", "", t0)
 	hs := CDNCachedChallengeHosts(t0.Add(time.Hour))
-	if len(hs) != 2 || hs[0].Host != "www.anastasiadi.gr" || hs[0].Count != 3 ||
+	if len(hs) != 2 || hs[0].Host != "www.anastasiadi.gr" || hs[0].IPs != 3 || hs[0].Bounces != 7 ||
 		!hs[0].First.Equal(t0) || !hs[0].Last.Equal(t0.Add(2*time.Minute)) ||
-		hs[1].Host != "shop.example.com" || hs[1].Count != 1 {
+		hs[1].Host != "shop.example.com" || hs[1].IPs != 1 {
 		t.Fatalf("hosts = %+v", hs)
 	}
-	// Past the 24 h window a host drops out, and a new bounce starts afresh.
-	if hs := CDNCachedChallengeHosts(t0.Add(25 * time.Hour)); len(hs) != 0 {
-		t.Fatalf("after 25 h: %+v, want none", hs)
+	// A real 24 h window per IP: one stray bounce a day does not add up.
+	noteCDNCachedChallenge("www.anastasiadi.gr", "198.51.100.9", t0.Add(23*time.Hour))
+	if hs := CDNCachedChallengeHosts(t0.Add(24*time.Hour + 30*time.Minute)); len(hs) != 1 || hs[0].IPs != 1 {
+		t.Fatalf("after 24.5 h: %+v, want only the IP seen at 23 h", hs)
 	}
-	noteCDNCachedChallenge("www.anastasiadi.gr", t0.Add(26*time.Hour))
-	if hs := CDNCachedChallengeHosts(t0.Add(26 * time.Hour)); len(hs) != 1 || hs[0].Count != 1 {
-		t.Fatalf("a bounce after the window: %+v, want a fresh count of 1", hs)
+	if hs := CDNCachedChallengeHosts(t0.Add(48 * time.Hour)); len(hs) != 0 {
+		t.Fatalf("after 48 h: %+v, want none", hs)
+	}
+	// A host keeps at most cdnSuspectMaxIPsHost addresses.
+	resetCDNCachedChallengeForTest()
+	for i := 0; i < cdnSuspectMaxIPsHost+10; i++ {
+		noteCDNCachedChallenge("big.gr", "10.0.0."+strconv.Itoa(i), t0)
+	}
+	if hs := CDNCachedChallengeHosts(t0); hs[0].IPs != cdnSuspectMaxIPsHost {
+		t.Fatalf("%d IPs kept, want the cap %d", hs[0].IPs, cdnSuspectMaxIPsHost)
 	}
 	// Bounded: past the cap the stalest host makes room.
 	resetCDNCachedChallengeForTest()
 	for i := 0; i < cdnSuspectMaxHosts+5; i++ {
-		noteCDNCachedChallenge("h"+string(rune('a'+i%26))+strings.Repeat("x", i/26)+".gr", t0.Add(time.Duration(i)*time.Second))
+		noteCDNCachedChallenge("h"+strconv.Itoa(i)+".gr", "203.0.113.1", t0.Add(time.Duration(i)*time.Second))
 	}
 	hs = CDNCachedChallengeHosts(t0.Add(time.Hour))
 	if len(hs) != cdnSuspectMaxHosts {
 		t.Fatalf("%d hosts tracked, want the cap %d", len(hs), cdnSuspectMaxHosts)
 	}
 	for _, h := range hs {
-		if h.Host == "ha.gr" {
+		if h.Host == "h0.gr" {
 			t.Fatal("the stalest host was kept past the cap")
 		}
+	}
+}
+
+// The panel listeners sit behind no CDN: a cleared bounce there is a validator
+// disagreement, so it gets the page as before and is never counted.
+func TestChallengePage_PanelBounceIsNotACDN(t *testing.T) {
+	useClearanceBridgeToken(t, unitTestBridgeSecret)
+	base, _ := startVerifyServer(t)
+	resetThrottleStores(t)
+	resetCDNCachedChallengeForTest()
+	t.Cleanup(resetCDNCachedChallengeForTest)
+	const ip, host = "203.0.113.79", "cpanel.example.com"
+	hdr := map[string]string{"X-CFM-Panel-Port": "2083", "X-Forwarded-Port": "2083"}
+	clr := &http.Cookie{Name: "cfm_clearance_p2083", Value: issueClearanceToken(ip, host, "panel:2083", time.Now().Add(time.Hour))}
+	ua := "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+	if r := doChallengePage(t, http.MethodGet, base, ip, host, ua, "/cpsess1/frontend/", hdr, clr); r.StatusCode != http.StatusSeeOther {
+		t.Fatalf("first: %d, want 303", r.StatusCode)
+	}
+	if r := doChallengePage(t, http.MethodGet, base, ip, host, ua, "/cpsess1/frontend/", hdr, clr); r.StatusCode != http.StatusOK {
+		t.Fatalf("second panel bounce: %d %q, want the page (no cache-bust on a panel port)", r.StatusCode, r.Header.Get("Location"))
+	}
+	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 0 {
+		t.Fatalf("a panel bounce was counted as a CDN: %+v", hs)
 	}
 }

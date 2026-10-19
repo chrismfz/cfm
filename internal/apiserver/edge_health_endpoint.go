@@ -79,8 +79,8 @@ var (
 	edgeHealthCDNSuspects = webdet.CDNCachedChallengeHosts
 )
 
-// edgeHealthCDNSuspectMin is the bounces a host needs in 24 h before Check F
-// reports it.
+// edgeHealthCDNSuspectMin is the distinct client IPs a host needs bounced in
+// 24 h before Check F reports it.
 const edgeHealthCDNSuspectMin = 3
 
 var (
@@ -568,20 +568,22 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	// A cleared visitor bounced straight back to the challenge page for the same
 	// target means something in front of the edge served it a cached challenge
 	// page or redirect: the edge itself passes a valid clearance. The challenge
-	// server counts those bounces per host (webdet.CDNCachedChallengeHosts, 24 h)
+	// server counts those bounces per host and distinct client IP
+	// (webdet.CDNCachedChallengeHosts, 24 h)
 	// and sends the visitor on with a cache-busting parameter, but every visitor
 	// of a cached URL is still challenged until the CDN entry expires. Only the
 	// tenant's CDN rule can fix that, so the finding names the hosts.
-	// edgeHealthCDNSuspectMin keeps one stray bounce (a bridge-token rotation
-	// window) out of triage.
+	// The threshold is on DISTINCT IPs (edgeHealthCDNSuspectMin): the host is the
+	// client's own Host header, so one client must not be able to raise it, and
+	// one stray bounce (a bridge-token rotation window) stays out of triage.
 	fEv := map[string]any{"window_hours": 24}
 	var suspects []map[string]any
 	for _, s := range edgeHealthCDNSuspects(time.Unix(now, 0)) {
-		if s.Count < edgeHealthCDNSuspectMin {
+		if s.IPs < edgeHealthCDNSuspectMin {
 			continue
 		}
 		suspects = append(suspects, map[string]any{
-			"host": s.Host, "count": s.Count, "last": s.Last.UTC().Format(time.RFC3339),
+			"host": s.Host, "ips": s.IPs, "bounces": s.Bounces, "last": s.Last.UTC().Format(time.RFC3339),
 		})
 	}
 	fEv["hosts"] = suspects
@@ -594,7 +596,7 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 			names = append(names, s["host"].(string))
 		}
 		findings = append(findings, sev.add("cdn-cached-challenge", "warn",
-			itoa(len(suspects))+" vhost(s) whose CDN serves CFM's challenge from its cache ("+strings.Join(names, ", ")+"): cleared visitors were bounced back to the challenge, so every visitor of a cached URL is challenged until the CDN entry expires",
+			itoa(len(suspects))+" vhost(s) likely behind a CDN that serves CFM's challenge from its cache ("+strings.Join(names, ", ")+"): visitors holding a valid clearance were bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct IPs each, so every visitor of a cached URL is challenged until the CDN entry expires",
 			fEv, "in that vhost's CDN (Cloudflare: Caching → Cache Rules) set Edge TTL to respect the origin's Cache-Control (CFM's challenge responses are no-store), then purge the cache"))
 	} else {
 		findings = append(findings, sev.add("cdn-cached-challenge", "ok",

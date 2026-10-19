@@ -68,15 +68,19 @@ back-filled here — see the git/PR history for that period.
   solved were sent back to the cached challenge, solved again (~30 times in two
   minutes) and were finally banned by the challenge rate limit. Now:
   - the challenge page is served only at `/__cfm_challenge`, so a challenged
-    homepage is a redirect there, never a cacheable copy of the page;
+    homepage is a redirect there, never a cacheable copy of the page (a
+    challenged `/` now answers 302 instead of 200, like every other URL; an
+    uptime monitor that does not follow redirects sees the change);
   - every challenge response also carries `CDN-Cache-Control` and
     `Cloudflare-CDN-Cache-Control: no-store`;
   - a visitor who already holds a valid clearance and is bounced back is sent
     to the page they wanted once more, with a `cfm_nc` parameter the CDN has
-    not cached, instead of being asked to solve again;
-  - `edge_health` (and so `whats_wrong`) reports the vhosts this happens on
-    (`cdn-cached-challenge`), naming the fix: set the vhost's Cloudflare Cache
-    Rule to respect the origin's Cache-Control, then purge.
+    not cached, instead of being asked to solve again (once per page per
+    10 s; web ports only);
+  - `edge_health` (and so `whats_wrong`) reports the vhosts where 3 or more
+    distinct visitors were bounced like this in 24 h (`cdn-cached-challenge`),
+    naming the fix: set the vhost's Cloudflare Cache Rule to respect the
+    origin's Cache-Control, then purge.
 
   CFM cannot override a CDN that ignores `no-store`. Until its rule is fixed,
   every visitor of a cached URL is still challenged once.

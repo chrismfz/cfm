@@ -160,7 +160,7 @@ func TestChallengePage_ClearedClientGoesStraightToNext(t *testing.T) {
 	if r.StatusCode != http.StatusSeeOther || !strings.HasPrefix(busted, next+"&cfm_nc=") {
 		t.Fatalf("second cleared bounce for the same next within 10 s: %d %q, want 303 to next+cfm_nc", r.StatusCode, busted)
 	}
-	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 1 || hs[0].Host != host || hs[0].Count != 1 {
+	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 1 || hs[0].Host != host || hs[0].IPs != 1 {
 		t.Fatalf("cdn suspects = %+v, want %s counted once", hs, host)
 	}
 	// Still bounced with the cache-busted next (the edge's validator really
@@ -169,7 +169,7 @@ func TestChallengePage_ClearedClientGoesStraightToNext(t *testing.T) {
 	if r := getNext(busted, ip, host, true); r.StatusCode != http.StatusOK {
 		t.Fatalf("bounce with cfm_nc: %d %q, want the page", r.StatusCode, r.Header.Get("Location"))
 	}
-	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 1 || hs[0].Count != 1 {
+	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 1 || hs[0].Bounces != 1 {
 		t.Fatalf("a bounce that could not be busted was counted: %+v", hs)
 	}
 }
@@ -196,7 +196,7 @@ func TestChallengePage_OneCacheBustPerTarget(t *testing.T) {
 	if r := doChallengePage(t, http.MethodGet, base, ip, host, ua, "/", nil, clr); r.StatusCode != http.StatusOK {
 		t.Fatalf("third (the CDN ignored the query string): %d %q, want the page", r.StatusCode, r.Header.Get("Location"))
 	}
-	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 1 || hs[0].Count != 1 {
+	if hs := CDNCachedChallengeHosts(time.Now()); len(hs) != 1 || hs[0].Bounces != 1 {
 		t.Fatalf("cdn suspects = %+v, want the host counted once", hs)
 	}
 }

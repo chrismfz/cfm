@@ -1392,9 +1392,11 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// a second bust would only redirect-loop it into the page
 				// rate limit. That bounce, and one whose next already carries
 				// cfm_nc, fall through to the page, as before.
-				if why == "cleared" && nextRedirects.putIfAbsent(key+"|nc", struct{}{}, now) {
+				// Web scope only: the panel listeners sit behind no CDN, so a
+				// cleared bounce there is a validator disagreement, not a cache.
+				if why == "cleared" && scope == "web" && nextRedirects.putIfAbsent(key+"|nc", struct{}{}, now) {
 					if busted := cdnBustNext(next); busted != "" {
-						noteCDNCachedChallenge(host, now)
+						noteCDNCachedChallenge(host, ip.String(), now)
 						if verifyRejects.putIfAbsent(ip.String()+"|cdn_cached_challenge", struct{}{}, now) {
 							logging.LogfCHALLENGES("[challenge] cdn_cached_challenge ip=%s host=%s scope=%s next=%q note=cleared_bounce_cache_bust",
 								ip.String(), truncateForLog(host, 120), scope, truncateForLog(next, 220))

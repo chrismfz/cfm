@@ -173,12 +173,16 @@ The challenge server now:
   every response;
 - sends a **cleared** visitor bounced back for the same target within the
   breaker window to `next` once more with a fresh `cfm_nc` query parameter,
-  instead of serving the PoW again, and counts the host.
+  instead of serving the PoW again (once per target per window; web scope only,
+  the panel listeners sit behind no CDN), and counts the host and the client IP.
 
 A cleared bounce means a cache in front of the edge: the edge passes a valid
-clearance at Step 2b. Check F reports the hosts with at least 3 such bounces in
-24 h as `warn`, with the fix: the vhost's CDN rule must respect the origin's
-`Cache-Control`, then purge. The count is in memory, so it is empty after a
+clearance at Step 2b. Check F reports the hosts where at least 3 **distinct
+client IPs** bounced in the last 24 h as `warn` ("likely a CDN"), with the fix:
+the vhost's CDN rule must respect the origin's `Cache-Control`, then purge. The
+threshold is on IPs, not bounces, because the host is the client's own `Host`
+header (the web servers are `server_name _`): one client must not be able to
+make a tenant look like a CDN casualty. The count is in memory, so it is empty after a
 daemon restart. Honest limits: a CDN that overrides `no-store` ignores the CDN
 headers too, one that drops the query string from its cache key defeats the
 `cfm_nc` retry (the bounce then ends at the page, as before), and a cached

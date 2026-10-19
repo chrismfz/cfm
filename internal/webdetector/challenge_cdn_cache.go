@@ -24,9 +24,10 @@ package webdetector
 //     cfm_nc query parameter, which a CDN keying on the query string has never
 //     cached, instead of being served the PoW again (cdnBustNext). Once per
 //     target per window: a further bounce gets the page;
-//   - counts those bounces per host (noteCDNCachedChallenge), which edge_health
-//     reports as the cdn-cached-challenge check and whats_wrong surfaces, so the
-//     operator learns which tenant's CDN to fix.
+//   - counts those bounces per host and distinct client IP over 24 h
+//     (noteCDNCachedChallenge; web scope only: the panel listeners sit behind
+//     no CDN), which edge_health reports as the cdn-cached-challenge check and
+//     whats_wrong surfaces, so the operator learns which tenant's CDN to fix.
 //
 // HONEST LIMITS: a CDN that overrides no-store ignores the CDN headers too
 // (they help only where the origin's headers are respected), and one that
@@ -86,71 +87,100 @@ func cdnBustNext(next string) string {
 
 // CDNCacheSuspect is one host whose cleared visitors were bounced back to the
 // challenge page: the sign of a CDN serving a cached challenge or redirect.
+// IPs is the number of DISTINCT client addresses bounced in the last 24 h,
+// which is what edge_health thresholds on: the host is the client's own Host
+// header (the web servers are `server_name _`), so a single client could
+// otherwise pump the count for any name. Bounces counts every bounce.
 type CDNCacheSuspect struct {
-	Host  string    `json:"host"`
-	Count int       `json:"count"`
-	First time.Time `json:"first"`
-	Last  time.Time `json:"last"`
+	Host    string    `json:"host"`
+	IPs     int       `json:"ips"`
+	Bounces int       `json:"bounces"`
+	First   time.Time `json:"first"`
+	Last    time.Time `json:"last"`
 }
 
 const (
-	cdnSuspectWindow   = 24 * time.Hour
-	cdnSuspectMaxHosts = 256
+	cdnSuspectWindow     = 24 * time.Hour
+	cdnSuspectMaxHosts   = 256
+	cdnSuspectMaxIPsHost = 64 // past this, a host is suspect whatever else comes
 )
+
+type cdnSuspectEntry struct {
+	ips     map[string]time.Time // client IP -> its last bounce
+	bounces int
+	first   time.Time
+	last    time.Time
+}
 
 var cdnSuspects = struct {
 	mu    sync.Mutex
-	hosts map[string]*CDNCacheSuspect
-}{hosts: map[string]*CDNCacheSuspect{}}
+	hosts map[string]*cdnSuspectEntry
+}{hosts: map[string]*cdnSuspectEntry{}}
 
-// noteCDNCachedChallenge counts one cleared bounce for host. Bounded: past
-// cdnSuspectMaxHosts it drops the stalest host, so a flood of Host headers
-// cannot grow it (the host is the edge-stamped one, so it is a real vhost).
-func noteCDNCachedChallenge(host string, now time.Time) {
+// pruneLocked drops the IPs whose last bounce left the window and reports
+// whether anything is left.
+func (e *cdnSuspectEntry) pruneLocked(now time.Time) bool {
+	for ip, t := range e.ips {
+		if now.Sub(t) > cdnSuspectWindow {
+			delete(e.ips, ip)
+		}
+	}
+	return len(e.ips) > 0
+}
+
+// noteCDNCachedChallenge records one cleared bounce of ip on host. Bounded:
+// past cdnSuspectMaxHosts it drops the stalest host, and a host keeps at most
+// cdnSuspectMaxIPsHost addresses.
+func noteCDNCachedChallenge(host, ip string, now time.Time) {
 	host = strings.ToLower(strings.TrimSpace(host))
-	if host == "" {
+	if host == "" || ip == "" {
 		return
 	}
 	cdnSuspects.mu.Lock()
 	defer cdnSuspects.mu.Unlock()
 	e := cdnSuspects.hosts[host]
-	if e != nil && now.Sub(e.Last) > cdnSuspectWindow {
-		e = nil // the old run aged out: start counting afresh
+	if e != nil && !e.pruneLocked(now) {
+		delete(cdnSuspects.hosts, host) // the old run aged out: start afresh
+		e = nil
 	}
 	if e == nil {
 		if len(cdnSuspects.hosts) >= cdnSuspectMaxHosts {
 			var oldest string
 			for h, x := range cdnSuspects.hosts {
-				if oldest == "" || x.Last.Before(cdnSuspects.hosts[oldest].Last) {
+				if oldest == "" || x.last.Before(cdnSuspects.hosts[oldest].last) {
 					oldest = h
 				}
 			}
 			delete(cdnSuspects.hosts, oldest)
 		}
-		e = &CDNCacheSuspect{Host: host, First: now}
+		e = &cdnSuspectEntry{ips: map[string]time.Time{}, first: now}
 		cdnSuspects.hosts[host] = e
 	}
-	e.Count++
-	e.Last = now
+	if _, ok := e.ips[ip]; ok || len(e.ips) < cdnSuspectMaxIPsHost {
+		e.ips[ip] = now
+	}
+	e.bounces++
+	e.last = now
 }
 
 // CDNCachedChallengeHosts returns the hosts with a cleared bounce in the last
-// 24 hours, the most bounces first. edge_health reads it (cdn-cached-challenge).
-// It is in-memory, so it starts empty after a daemon restart.
+// 24 hours, the most distinct IPs first. edge_health reads it
+// (cdn-cached-challenge). It is in-memory, so it starts empty after a daemon
+// restart.
 func CDNCachedChallengeHosts(now time.Time) []CDNCacheSuspect {
 	cdnSuspects.mu.Lock()
 	defer cdnSuspects.mu.Unlock()
 	out := make([]CDNCacheSuspect, 0, len(cdnSuspects.hosts))
 	for h, e := range cdnSuspects.hosts {
-		if now.Sub(e.Last) > cdnSuspectWindow {
+		if !e.pruneLocked(now) {
 			delete(cdnSuspects.hosts, h)
 			continue
 		}
-		out = append(out, *e)
+		out = append(out, CDNCacheSuspect{Host: h, IPs: len(e.ips), Bounces: e.bounces, First: e.first, Last: e.last})
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Count != out[j].Count {
-			return out[i].Count > out[j].Count
+		if out[i].IPs != out[j].IPs {
+			return out[i].IPs > out[j].IPs
 		}
 		return out[i].Host < out[j].Host
 	})
@@ -160,6 +190,6 @@ func CDNCachedChallengeHosts(now time.Time) []CDNCacheSuspect {
 // resetCDNCachedChallengeForTest empties the tracker.
 func resetCDNCachedChallengeForTest() {
 	cdnSuspects.mu.Lock()
-	cdnSuspects.hosts = map[string]*CDNCacheSuspect{}
+	cdnSuspects.hosts = map[string]*cdnSuspectEntry{}
 	cdnSuspects.mu.Unlock()
 }
