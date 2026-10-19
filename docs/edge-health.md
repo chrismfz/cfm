@@ -29,8 +29,9 @@ Read-only: it never blocks, reloads, or changes config. It may run
 
 ## Scope: Tier 1 (as shipped)
 
-Five correlated checks. A–D, together, would have caught the 421 incident in
-minutes; E covers the second origin-hop failure class we hit (below). Each
+Six correlated checks. A–D, together, would have caught the 421 incident in
+minutes; E covers the second origin-hop failure class we hit, and F a CDN in
+front of the edge caching CFM's challenge (both below). Each
 finding carries a `severity`; the tool's `overall` is the max of
 them — **`ok | warn | critical | unknown`**, where `unknown` means a log/version
 couldn't be read and is NEVER silently downgraded to `ok`.
@@ -174,16 +175,19 @@ The challenge server now:
 - sends a **cleared** visitor bounced back for the same target within the
   breaker window to `next` once more with a fresh `cfm_nc` query parameter,
   instead of serving the PoW again (once per target per window; web scope only,
-  the panel listeners sit behind no CDN), and counts the host and the client IP.
+  the panel listeners sit behind no CDN), and counts the host and the client (an IPv4 address, an IPv6 /64).
 
 A cleared bounce means a cache in front of the edge: the edge passes a valid
 clearance at Step 2b. Check F reports the hosts where at least 3 **distinct
-client IPs** bounced in the last 24 h as `warn` ("likely a CDN"), with the fix:
+clients** (an IPv4 address, an IPv6 /64) bounced in the last 24 h as `warn`
+("likely a CDN"), with the fix:
 the vhost's CDN rule must respect the origin's `Cache-Control`, then purge. The
-threshold is on IPs, not bounces, because the host is the client's own `Host`
-header (the web servers are `server_name _`): one client must not be able to
-make a tenant look like a CDN casualty. The count is in memory, so it is empty after a
-daemon restart. Honest limits:
+threshold is on clients, not bounces, because the host is the client's own
+`Host` header (the web servers are `server_name _`): one client, even one with a
+whole IPv6 /64, must not be able to make a tenant look like a CDN casualty
+(three proxies still can, hence "likely"). The count is in memory, so it is empty after a
+daemon restart. With no challenge server serving on the node (`CHALLENGE_HTTP_LISTEN`
+unset) the check is `unknown`: nothing could be measured. Honest limits:
 
 - a CDN that overrides `no-store` ignores the CDN headers too;
 - one that drops the query string from its cache key defeats the `cfm_nc` retry

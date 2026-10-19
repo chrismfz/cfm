@@ -60,6 +60,16 @@ back-filled here — see the git/PR history for that period.
   `RULE_511 = 1` in `[waf_security]` arms it again.
 
 ### Fixed
+- **Follow-up to the Cloudflare challenge-loop fix (review findings).**
+  - The CDN check (`cdn-cached-challenge`) counts an IPv6 /64 as one client,
+    so one subscriber can no longer raise it for any site it names. It reads
+    `unknown`, not `ok`, on a node whose challenge server is not running.
+  - A tenant homepage's own `?next=` parameter is no longer read as the
+    challenge target (`/?next=/account` stays the target's query).
+  - The cache-busting retry is skipped for a target that carries a `#`
+    fragment or would grow past the length limit, instead of landing the
+    visitor on the homepage.
+  - The `edge_health` and `whats_wrong` tool descriptions list the new check.
 - **A site behind Cloudflare no longer traps cleared visitors in a challenge
   loop.** When a vhost's Cloudflare Cache Rule ignores the origin's
   `Cache-Control`, Cloudflare cached CFM's challenge page and its redirects

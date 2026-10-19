@@ -479,7 +479,7 @@ func TestChallengePage_ClearedCheckOnlyOnTheChallengePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if want := challengePath + "?next=%2Fwp-admin%2F"; resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != want {
+	if want := challengePath + "?next=" + url.QueryEscape("/?next=%2Fwp-admin%2F"); resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != want {
 		t.Fatalf("GET / (proxied challenge, unstamped headers): %d %q, want 302 to %s", resp.StatusCode, resp.Header.Get("Location"), want)
 	}
 }

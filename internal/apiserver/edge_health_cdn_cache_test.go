@@ -62,3 +62,15 @@ func TestCDNCachedChallenge_QuietIsOK(t *testing.T) {
 		t.Fatalf("evidence hosts = %#v, want an empty list", f["evidence"].(map[string]any)["hosts"])
 	}
 }
+
+// Without a challenge server nothing can bounce: Check F measured nothing,
+// which is unknown, never an all-clear.
+func TestCDNCachedChallenge_NoChallengeServerIsUnknown(t *testing.T) {
+	defer stubEdgeHealth(t)()
+	stubDropScan(t, 1000, nil)
+	edgeHealthChallengeServing = func() bool { return false }
+	f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "cdn-cached-challenge")
+	if f["severity"] != "unknown" {
+		t.Fatalf("severity = %v, want unknown when the challenge server is not serving", f["severity"])
+	}
+}

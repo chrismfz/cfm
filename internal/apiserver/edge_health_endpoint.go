@@ -77,6 +77,9 @@ var (
 	edgeHealthNow = func() int64 { return time.Now().Unix() }
 	// Check F's source: the challenge server's per-host cleared-bounce counts.
 	edgeHealthCDNSuspects = webdet.CDNCachedChallengeHosts
+	// Whether the challenge server is up here: without it Check F measures
+	// nothing, which is `unknown`, never an all-clear.
+	edgeHealthChallengeServing = webdet.ChallengeServerServing
 )
 
 // edgeHealthCDNSuspectMin is the distinct client IPs a host needs bounced in
@@ -591,7 +594,12 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 		})
 	}
 	fEv["hosts"] = suspects
-	if len(suspects) > 0 {
+	switch {
+	case !edgeHealthChallengeServing():
+		findings = append(findings, sev.add("cdn-cached-challenge", "unknown",
+			"the challenge server is not serving on this node (CHALLENGE_HTTP_LISTEN unset or failed), so no cleared bounce can be measured",
+			fEv, ""))
+	case len(suspects) > 0:
 		names := make([]string, 0, 4)
 		for i, s := range suspects {
 			if i == 3 {
@@ -601,11 +609,11 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 			names = append(names, s["host"].(string))
 		}
 		findings = append(findings, sev.add("cdn-cached-challenge", "warn",
-			itoa(len(suspects))+" vhost(s) likely behind a CDN that serves CFM's challenge from its cache ("+strings.Join(names, ", ")+"): visitors holding a valid clearance were bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct IPs each, so every visitor of a cached URL is challenged until the CDN entry expires",
+			itoa(len(suspects))+" vhost(s) likely behind a CDN that serves CFM's challenge from its cache ("+strings.Join(names, ", ")+"): visitors holding a valid clearance were bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct clients each (IPv6 per /64), so every visitor of a cached URL is challenged until the CDN entry expires",
 			fEv, "in that vhost's CDN (Cloudflare: Caching → Cache Rules) set Edge TTL to respect the origin's Cache-Control (CFM's challenge responses are no-store), then purge the cache"))
-	} else {
+	default:
 		findings = append(findings, sev.add("cdn-cached-challenge", "ok",
-			"no vhost had visitors holding a valid clearance bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct IPs in the last 24 h (in-memory: empty after a daemon restart)", fEv, ""))
+			"no vhost had visitors holding a valid clearance bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct clients in the last 24 h (in-memory: empty after a daemon restart)", fEv, ""))
 	}
 
 	sort.SliceStable(findings, func(i, j int) bool {

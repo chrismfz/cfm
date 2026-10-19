@@ -48,10 +48,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -76,8 +78,14 @@ const cdnBustParam = "cfm_nc"
 // caches that exact URL too. The caller bounds the busts (one per target per
 // window), so a fresh value can never loop. next is the server-normalized
 // target (normalizeChallengeNext); the rest of its query is kept byte for byte.
+//
+// It also returns "" for a next carrying a fragment (a cfm_nc after the '#'
+// never reaches the server; the edge never builds one, only a crafted
+// next=%23 does) and when the result would exceed maxNextLen (the bounce would
+// then normalize to "/" and land the visitor on the homepage).
 func cdnBustNext(next string) string {
-	if _, err := url.ParseRequestURI(next); err != nil || !strings.HasPrefix(next, "/") || !isSameOriginPath(next) {
+	if _, err := url.ParseRequestURI(next); err != nil || !strings.HasPrefix(next, "/") ||
+		!isSameOriginPath(next) || strings.Contains(next, "#") {
 		return ""
 	}
 	var b [6]byte
@@ -96,15 +104,20 @@ func cdnBustNext(next string) string {
 		kept = append(kept, kv)
 	}
 	kept = append(kept, cdnBustParam+"="+hex.EncodeToString(b[:]))
-	return path + "?" + strings.Join(kept, "&")
+	out := path + "?" + strings.Join(kept, "&")
+	if len(out) > maxNextLen {
+		return ""
+	}
+	return out
 }
 
 // CDNCacheSuspect is one host whose cleared visitors were bounced back to the
 // challenge page: the sign of a CDN serving a cached challenge or redirect.
-// IPs is the number of DISTINCT client addresses bounced in the last 24 h,
-// which is what edge_health thresholds on: the host is the client's own Host
-// header (the web servers are `server_name _`), so a single client could
-// otherwise pump the count for any name. Bounces and First cover the whole
+// IPs is the number of DISTINCT clients bounced in the last 24 h (an IPv4
+// address, an IPv6 /64: cdnSuspectClient), which is what edge_health
+// thresholds on: the host is the client's own Host header (the web servers
+// are `server_name _`), so a single client could otherwise pump the count for
+// any name. Three proxies still can; the finding says "likely" for that. Bounces and First cover the whole
 // current run (it lasts while any of its IPs is inside the window), so they
 // can span more than 24 h.
 type CDNCacheSuspect struct {
@@ -144,11 +157,31 @@ func (e *cdnSuspectEntry) pruneLocked(now time.Time) bool {
 	return len(e.ips) > 0
 }
 
+// cdnSuspectClient is the client key the tracker counts: the address itself
+// for IPv4, its /64 for IPv6, where one subscriber holds the whole /64 and
+// could otherwise count as any number of "distinct" clients.
+func cdnSuspectClient(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	a = a.Unmap()
+	if a.Is4() {
+		return a.String()
+	}
+	if p, err := a.Prefix(64); err == nil {
+		return p.String()
+	}
+	return a.String()
+}
+
 // noteCDNCachedChallenge records one cleared bounce of ip on host. Bounded:
-// past cdnSuspectMaxHosts it drops the stalest host, and a host keeps at most
-// cdnSuspectMaxIPsHost addresses.
+// past cdnSuspectMaxHosts it drops the stalest host, a host keeps at most
+// cdnSuspectMaxIPsHost clients (IPv6 per /64, cdnSuspectClient), and the host
+// is cut to 120 bytes (it is the client's own Host header).
 func noteCDNCachedChallenge(host, ip string, now time.Time) {
-	host = strings.ToLower(strings.TrimSpace(host))
+	host = truncateForLog(strings.ToLower(strings.TrimSpace(host)), 120)
+	ip = cdnSuspectClient(strings.TrimSpace(ip))
 	if host == "" || ip == "" {
 		return
 	}
@@ -202,6 +235,16 @@ func CDNCachedChallengeHosts(now time.Time) []CDNCacheSuspect {
 	})
 	return out
 }
+
+// challengeHTTPServing counts the challenge server's live HTTP listeners (the
+// v4 one; the v6 loopback twin shares its server). Zero means nothing here
+// can bounce a client, so edge_health reports Check F as not measured rather
+// than as all-clear.
+var challengeHTTPServing atomic.Int32
+
+// ChallengeServerServing reports whether the challenge server's HTTP listener
+// is up in this process.
+func ChallengeServerServing() bool { return challengeHTTPServing.Load() > 0 }
 
 // resetCDNCachedChallengeForTest empties the tracker.
 func resetCDNCachedChallengeForTest() {
