@@ -638,6 +638,21 @@ verified crawler when serving one (`CHALLENGE_GOODBOT_EXEMPT`). Other
 sections that ban web clients (`waf_security`, `modsec`, challenge_*) do not
 consult it: a WAF block-tier hit is the request's own payload.
 
+**Origin 403 on WordPress REST calls (decided 2026-10-20):** the 403
+counters (`403_flood`, and `40x_combo`'s 403 side) no longer count a 403 on a
+WordPress REST call (`/wp-json/…` at the root or one directory down, or a
+root `?rest_route=…`; `isWPRestAPIRequest`). WordPress answers 403 there when
+the caller may not do that one thing, so a working client polling one route
+crossed `IP403_COUNT` on the origin's own answers: the Site Kit admin above,
+and (2026-10-20 read) a WooCommerce stock sync on mars whose API key lacks
+write access (84-89% 403 on `/wp-json/wc/v3/…`, banned 2 h and reported to
+the fleet). Neither country nor ASN tells these apart: a GR residential
+address in the same weeks ran a `wp-login.php` brute force that `403_flood`
+correctly banned. Excluding REST 403s dropped none of the day's 193 IPs over
+the threshold on mars, orion, titan and speedhost. The request still counts
+in the IP's total, so it dilutes the 403 share. A REST-only prober that
+earns only 403s is left to the WAF, 404/MALPATH and the rate signals.
+
 **Gate for `enforce`:** the good-bot fix deployed (above), the
 logged-in-origin-403 case decided, then a fresh read of every node shows no
 would-block on a verified good bot or a residential address with a normal
