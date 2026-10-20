@@ -432,7 +432,11 @@ visitor's token, and its redirects (2026-10-19). Cleared visitors re-solved
 ~30 times in two minutes until the page rate limit banned them. The page now
 lives only at `/__cfm_challenge`. A cleared client bounced back gets one
 `cfm_nc` cache-busting retry, and `edge_health` names the host
-(`challenge_cdn_cache.go`, Check F).
+(`challenge_cdn_cache.go`, Check F). The edge drops `cfm_nc` before the
+origin (`cfm.lua` `strip_cdn_bust_arg`), or a signed URL (Laravel) fails its
+signature check — only on a plain path (raw `$request_uri` path == `$uri`): a
+changed query makes nginx send the DECODED path, so anyone appending
+`?cfm_nc=x` could otherwise turn `%3C` into a literal `<` at the origin.
 
 ### Traffic rules — `Simulate` IS the enforcement path
 `trafficRuleStore.Simulate` is wired as the nginx bridge's `RuleDecision`, so

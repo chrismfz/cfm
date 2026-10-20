@@ -65,7 +65,9 @@ func TestChallengePage_RootRedirectsToTheChallengePath(t *testing.T) {
 }
 
 func TestCDNBustNext(t *testing.T) {
-	for _, next := range []string{"/", "/shop/", "/?a=1&b=%2F", "/wp-admin/post.php?post=7&cfm_rt=abc"} {
+	// Empty pairs too: the edge strips only the cfm_nc pairs again, and the
+	// origin must get the original query back (cfm.lua strip_cdn_bust_arg).
+	for _, next := range []string{"/", "/shop/", "/?a=1&b=%2F", "/wp-admin/post.php?post=7&cfm_rt=abc", "/x?a=1&&b=", "/x?a=1&"} {
 		got := cdnBustNext(next)
 		sep := "?"
 		if strings.Contains(next, "?") {
