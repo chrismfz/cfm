@@ -616,7 +616,7 @@ type ChallengeSolve struct {
 	// of rejecting (challengeV2GoodBot). Rendered as v2_waived=<name>.
 	V2Waived string
 	// V2Rescued names what rescues a FAILING score ("" = nothing): today only
-	// "input" — real pointer input and no certain tell
+	// "input" — real pointer input, no certain tell and hs at most 100
 	// (challengeV2InputRescue). Set for armed and unarmed solves alike, but
 	// rendered as v2_rescued=<what> only where it means something: under an
 	// arm (V2Grain set) on the solve line and history row — the solve took
@@ -1060,13 +1060,14 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// greppable too.
 		if v2On && hs >= v2Fail {
 			// Real input rescues a failing score that has no certain tell
-			// (challengeV2InputRescue, operator decision 2026-09-29; kill
-			// switch CHALLENGE_V2_INPUT_RESCUE). Decided before the waiver
+			// and is at most rescueMaxScore, 100 (challengeV2InputRescue,
+			// operator decisions 2026-09-29 and 2026-10-20; kill switch
+			// CHALLENGE_V2_INPUT_RESCUE). Decided before the waiver
 			// lookup, for armed and unarmed solves alike: armed, the solve
 			// takes the solved path marked v2_rescued=input; unarmed, the
 			// would_v2 line carries the marker, so a would-be arm is sized
 			// net of it.
-			if v2Rescue && challengeV2InputRescue(hsSig, hsTells) {
+			if v2Rescue && challengeV2InputRescue(hsSig, hsTells, hs) {
 				solve.V2Rescued = v2RescuedInput
 			}
 			switch {

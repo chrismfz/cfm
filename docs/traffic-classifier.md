@@ -1142,7 +1142,15 @@ mitigation (master plan E4, READ 2026-09-29): **real input rescues**. A failing
 score with those readings (≥ 5 events, ≥ 100 px) and no certain tell
 (webdriver, headless UA) takes the solved path under every grain, marked
 `v2_rescued=input` (`challengeV2InputRescue`; kill switch
-`CHALLENGE_V2_INPUT_RESCUE`). Trajectory readings followed, log-only (and the
+`CHALLENGE_V2_INPUT_RESCUE`). Since 2026-10-20 (E4 read 3) it is **capped at
+100** (`rescueMaxScore`): a failing score above it is never rescued, whatever
+`CHALLENGE_V2_FAIL_SCORE` is set to (the gate asks the rescue only at or over
+the fail score, so a cap that followed it would rescue one score alone).
+The class it exists for scores exactly 100; the device-claim family above it
+(`sw_renderer` + `mobile_hw_lie` / `mac_hw_lie` / `touch_lie`, 110-150) is
+farm-only in the corpus, carries `no_input` on nearly every reject, and
+would otherwise pass by faking input. In three weekly reads the rescue fired
+0 times at any score. Trajectory readings followed, log-only (and the
 page now counts trusted events only), then the confirm fallback for the
 humans who did not move a pointer. The honest limit: the counts are
 client-authored — a bot can post any numbers, and a CDP-dispatched pointer
@@ -1181,8 +1189,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   either — the PTR wasn't known at verify — and that is NOT evidence the
   client isn't a crawler. `grep v2_rescued=` (since 2026-09-29) is "which
   failing solves did real pointer input let through": under ANY grain, a
-  failing score with no certain tell and `sig=` reporting ≥ 5 pointer events
-  covering ≥ 100 px (`mv` as `sig=` shows it; "Who the deterministic-FP
+  failing score of at most 100 with no certain tell and `sig=` reporting ≥ 5
+  pointer events covering ≥ 100 px (`mv` as `sig=` shows it; "Who the deterministic-FP
   residual is" above). It rides only an armed solve's line, after `v2=` /
   `v2_waived=`, with the failing `hs=`/`tells=` intact, and the history row
   carries `v2_rescued`. An unarmed failing solve had nothing to be let
@@ -1260,7 +1268,7 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `by_fp`, `by_provider`, `by_ptr_domain`, `by_scope`, …). Since 2026-09-29
   `scope=` rides last (see below), and `v2_rescued=input` (before `src=`)
   marks a line an arm would have let through after all — real pointer input,
-  no certain tell — counted as `humanity.rescued`. Lines minus rescued is an
+  no certain tell, hs at most 100 — counted as `humanity.rescued`. Lines minus rescued is an
   upper bound on what an arm would reject (the geo/vhost good-bot waiver
   clears verified crawlers too).
 - **`src=` — challenge provenance** (`challenge_src.go`, 2026-09-23): a

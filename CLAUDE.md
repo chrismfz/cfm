@@ -713,8 +713,11 @@ from rotating first-seen IPs, so the gate forward-confirms a crawler-looking
 PTR inline — bounded, reject path only; a reject whose PTR claims a crawler
 carries `v2_waiver_miss=<grain|mark|off|spoofed|timeout|transient>`, or it
 would read like a spoof) — and except, under EVERY grain, a failing score with
-real pointer input (sig ptr >= 5 AND mv >= 100) and no certain tell
-(webdriver / headless UA): `v2_rescued=input` on an armed solve's line/history
+real pointer input (sig ptr >= 5 AND mv >= 100), no certain tell
+(webdriver / headless UA) and a score of at most 100, never above it (the
+cap, `rescueMaxScore`, 2026-10-20, E4 read 3 — fixed, not the fail score;
+above it sits the farm-only device-claim family, which faked input must not
+carry through): `v2_rescued=input` on an armed solve's line/history
 row and on the unarmed would_v2 line, never on an unarmed solve line (2026-09-29,
 E4: Windows Chrome/109 PCs score exactly 100 with a software renderer and no
 window size, and a retry cannot change that; the counts are client-authored —

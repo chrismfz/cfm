@@ -17,7 +17,16 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **ChallengeV2: the real-input rescue no longer clears a score above 100.**
+  A failing solve with real pointer input is still rescued at 100, the score
+  of the old Windows Chrome/109 PCs the rescue exists for. Above it (a
+  software renderer plus a device claim the report contradicts, 110-150) it is
+  rejected as before the rescue. In three weeks the rescue fired 0 times at
+  any score, and that family is farm-only in every measurement; without the
+  cap a farm that learned to post fake mouse movement would pass. The cap is
+  fixed at 100 whatever `CHALLENGE_V2_FAIL_SCORE` says;
+  `CHALLENGE_V2_INPUT_RESCUE = 0` still turns the rescue off.
 
 ## 2026.10.19
 

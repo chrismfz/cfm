@@ -96,12 +96,13 @@
        `cdn_cached_challenge`, not `next_redirect_loop`. So `why="cleared"`
        counts are not comparable with reads 1–2.
 - **Open decisions** (master plan §5 / E4). Read 3 carries a proposal for
-  each; none is decided until the operator says so:
-  1. **The rescue.** Proposed: keep it, and cap it at the fail score
-     (rescue only `hs ≤ 100`). In three weeks it never fired, so the cap
-     costs no measured human. It would keep the device-claim farm families
-     (`mobile_hw_lie` / `mac_hw_lie`, ~93 000 of read 3's 153 354 rejects)
-     rejected even if they learn to post fake input.
+  each; item 1 is decided, the others wait for the operator:
+  1. **The rescue.** **Decided 2026-10-20: capped at 100** (rescue only
+     `hs ≤ 100`, whatever the fail score; master plan §5 E4). In
+     three weeks it never fired, so the cap costs no measured human. It
+     keeps the device-claim farm families (`mobile_hw_lie` /
+     `mac_hw_lie`, ~93 000 of read 3's 153 354 rejects) rejected even if
+     they learn to post fake input.
   2. **α (the Rung-2 confirm fallback).** Proposed: do not build it now.
      One profile is walled off, 3 IPs this week: Windows Chrome/109, no
      input, `outer_zero` on every retry. First confirm whether those are
@@ -382,6 +383,9 @@ decided: the master plan records only what the operator decides.
 #### Proposals (for the operator; nothing is implemented without a go)
 
 **(a) The real-input rescue: keep it, and cap it at the fail score.**
+*Decided 2026-10-20 as a FIXED cap of 100, not the fail score: the gate asks
+the rescue only at or over the fail score, so a cap that followed it would
+rescue one score alone (review finding; master plan §5 E4).*
 - *The rule as shipped* (`challengeV2InputRescue`): a failing solve with
   ptr ≥ 5 AND mv ≥ 100 and no certain tell (webdriver, headless UA) is
   rescued at any score.

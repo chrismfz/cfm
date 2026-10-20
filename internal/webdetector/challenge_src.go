@@ -208,7 +208,7 @@ func (s ChallengeSolve) SrcSuffix() string {
 // quoted. ua_bot=1 means the UA SELF-DECLARES a bot (isBotUA) — unverified,
 // the same substring test the vhost bot_ratio uses. v2_rescued=input says an
 // arm would NOT have rejected this failing score after all (real pointer
-// input, no certain tell — challengeV2InputRescue). Each key is emitted only
+// input, no certain tell, hs at most 100 — challengeV2InputRescue). Each key is emitted only
 // when known (absent never zero, as on the solve line); src, then scope, are
 // last.
 func (s ChallengeSolve) ShadowContextSuffix() string {
