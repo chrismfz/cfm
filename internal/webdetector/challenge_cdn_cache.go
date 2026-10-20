@@ -69,8 +69,10 @@ func setNoStore(h http.Header) {
 	h.Set("Cloudflare-CDN-Cache-Control", "no-store")
 }
 
-// cdnBustParam is the query parameter cdnBustNext adds. The origin ignores
-// it; its only job is to make the URL one no cache has seen.
+// cdnBustParam is the query parameter cdnBustNext adds. Its only job is to
+// make the URL one no cache has seen: the edge drops it before the origin
+// (cfm.lua strip_cdn_bust_arg, same raw case-sensitive key), so an app that
+// signs its URLs (Laravel signed routes) still sees the URL it signed.
 const cdnBustParam = "cfm_nc"
 
 // cdnBustNext returns next with a fresh cfm_nc parameter, or "" for a next

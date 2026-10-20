@@ -28,6 +28,15 @@ back-filled here — see the git/PR history for that period.
   fixed at 100 whatever `CHALLENGE_V2_FAIL_SCORE` says;
   `CHALLENGE_V2_INPUT_RESCUE = 0` still turns the rescue off.
 
+### Fixed
+- **A signed link no longer fails after the Cloudflare cache-busting retry.**
+  When a CDN bounces a visitor who already passed the challenge, CFM sends
+  them to the page once more with an extra `cfm_nc` parameter the CDN has not
+  cached. That parameter now stops at the edge: the site receives the URL the
+  visitor asked for. Before, an app that signs its links (Laravel email
+  verification, password reset and unsubscribe links, payment callbacks)
+  saw the extra parameter and answered "invalid signature".
+
 ## 2026.10.19
 
 ### Added

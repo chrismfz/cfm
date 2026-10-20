@@ -1255,6 +1255,52 @@ local function origin_pass_for(s_in)
          (s_in == "https" and ":443" or ":80")
 end
 
+-- ── Pre-step: drop the challenge server's CDN cache-bust (cfm_nc) ───────────
+-- A visitor holding a valid clearance whom a CDN bounced back to the challenge
+-- (a cached challenge page or redirect, challenge_cdn_cache.go) is sent to
+-- next once more with ?cfm_nc=<random>, a URL the CDN has never cached. The
+-- parameter is for the CDN only: the origin must get the URL the visitor asked
+-- for, or an app that signs its URLs (Laravel's signed routes: email
+-- verification, password reset, unsubscribe; payment callbacks with an HMAC
+-- over the query) rejects the extra parameter as a bad signature. So it is
+-- removed here, before anything reads the query, and every other byte of the
+-- query is kept as sent (order, encoding, empty pairs). Keyed exactly like
+-- cdnBustNext: a raw `cfm_nc` key, case-sensitive. ngx.var.arg_cfm_nc is the
+-- cheap presence gate (nil when absent), so the common request pays one arg
+-- lookup; set_uri_args runs only when a pair was actually dropped.
+-- HONEST LIMIT: a changed query makes nginx rebuild the upstream URI from the
+-- decoded path, so a percent-encoded path reaches the origin re-encoded (upper
+-- case hex, an encoded slash decoded) — the same as the cfm_rt resume. It
+-- applies only to the one cache-busting request; $request_uri (the logs, the
+-- challenge redirect's next) keeps the URL as sent.
+local function strip_cdn_bust_arg()
+  if ngx.var.arg_cfm_nc == nil then return false end
+  local args = ngx.var.args
+  if not args or args == "" then return false end
+  local kept, removed, pos, n = {}, false, 1, #args
+  while true do
+    local amp = args:find("&", pos, true)
+    local seg = args:sub(pos, (amp or (n + 1)) - 1)
+    if seg:match("^[^=]*") == "cfm_nc" then
+      removed = true
+    else
+      kept[#kept + 1] = seg
+    end
+    if not amp then break end
+    pos = amp + 1
+  end
+  if not removed then return false end
+  if #kept == 0 then
+    ngx.req.set_uri_args({})
+  else
+    ngx.req.set_uri_args(table.concat(kept, "&"))
+  end
+  return true
+end
+-- pcall: a failure here must never end the access phase (fail-open would then
+-- skip every step below); the request just keeps its cfm_nc.
+pcall(strip_cdn_bust_arg)
+
 -- ── Step 0: Static IP/CIDR bypass ───────────────────────────────────────────
 do
   if ngx.var.cfm_bypass_ip == "1" then

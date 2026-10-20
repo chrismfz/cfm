@@ -173,8 +173,9 @@ The challenge server now:
 - sends `CDN-Cache-Control` and `Cloudflare-CDN-Cache-Control: no-store` with
   every response;
 - sends a **cleared** visitor bounced back for the same target within the
-  breaker window to `next` once more with a fresh `cfm_nc` query parameter,
-  instead of serving the PoW again (once per target per window; web scope only,
+  breaker window to `next` once more with a fresh `cfm_nc` query parameter
+  (for the CDN only: the edge drops it before the origin, so a signed URL
+  still verifies), instead of serving the PoW again (once per target per window; web scope only,
   the panel listeners sit behind no CDN), and counts the host and the client
   (an IPv4 address, an IPv6 /64), also when the retry cannot be built.
 
