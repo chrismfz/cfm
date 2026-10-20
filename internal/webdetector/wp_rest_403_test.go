@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestIsWPRestAPIRequest(t *testing.T) {
+func TestWPRestRoute(t *testing.T) {
 	yes := []string{
 		"/wp-json/wc/v3/products/14832/variations/14836?consumer_key=x&consumer_secret=y",
 		"/wp-json/google-site-kit/v1/?_locale=user",
@@ -40,13 +40,42 @@ func TestIsWPRestAPIRequest(t *testing.T) {
 		"/wp-config.php.bak/?rest_route=/x",
 	}
 	for _, u := range yes {
-		if !isWPRestAPIRequest(u) {
-			t.Errorf("isWPRestAPIRequest(%q) = false, want true", u)
+		if _, ok := wpRestRoute(u); !ok {
+			t.Errorf("wpRestRoute(%q) ok=false, want true", u)
 		}
 	}
 	for _, u := range no {
-		if isWPRestAPIRequest(u) {
-			t.Errorf("isWPRestAPIRequest(%q) = true, want false", u)
+		if _, ok := wpRestRoute(u); ok {
+			t.Errorf("wpRestRoute(%q) ok=true, want false", u)
+		}
+	}
+}
+
+func TestIsWPRestOrigin403(t *testing.T) {
+	origin := func(uri string) LogRec {
+		return LogRec{URI: uri, Status: 403, Upstream: true, UpstreamName: "cfm_apache"}
+	}
+	if !isWPRestOrigin403(origin("/wp-json/wc/v3/products/1")) {
+		t.Fatal("origin 403 on a REST route must be exempt")
+	}
+	if !isWPRestOrigin403(LogRec{URI: "/wp-json/wc/v3/products/1", Status: 403, Upstream: true}) {
+		t.Fatal("an edge on the 12-column module names no upstream: still the origin")
+	}
+	for name, rec := range map[string]LogRec{
+		"edge 403 (WAF)":        {URI: "/wp-json/gravitysmtp/v1/tests/mock-data", Status: 403},
+		"challenge server 403":  {URI: "/wp-json/wc/v3/products/1", Status: 403, Upstream: true, UpstreamName: "cfm_challenge"},
+		"404":                   {URI: "/wp-json/wc/v3/products/1", Status: 404, Upstream: true, UpstreamName: "cfm_apache"},
+		"jwt token":             origin("/wp-json/jwt-auth/v1/token"),
+		"login route":           origin("/wp-json/simple-jwt-login/v1/auth"),
+		"rest_route jwt":        origin("/?rest_route=%2Fjwt-auth%2Fv1%2Ftoken"),
+		"escaped credential":    origin("/wp-json/jwt-a%75th/v1/token"),
+		"escaped rest_route":    origin("/?rest_route=/jwt-a%75th/v1/t%6fken"),
+		"rest_route bad escape": origin("/?rest_route=%zz"),
+		"rest_route climbs out": origin("/?rest_route=/../../.env"),
+		"password reset route":  origin("/wp-json/wp/v2/users/lostpassword"),
+	} {
+		if isWPRestOrigin403(rec) {
+			t.Errorf("%s: %+v must not be exempt", name, rec)
 		}
 	}
 }
@@ -83,13 +112,14 @@ func TestIP403Flood_WPRestAPIIgnored(t *testing.T) {
 		e.ingest(LogRec{
 			TS: now + float64(i), IP: "10.0.1.1", Host: "shop.example", Method: "post",
 			URI:    "/wp-json/wc/v3/products/" + itoa(100+i) + "/variations/" + itoa(200+i) + "?consumer_key=ck&consumer_secret=cs",
-			Status: 403, UA: "WooCommerce API Client-PHP/3.1.0",
+			Status: 403, UA: "WooCommerce API Client-PHP/3.1.0", Upstream: true, UpstreamName: "cfm_apache",
 		}, "raw")
 	}
 	for i := 0; i < 20; i++ {
 		e.ingest(LogRec{
 			TS: now + float64(i), IP: "10.0.1.2", Host: "news.example", Method: "get",
 			URI: "/wordpress/wp-json/google-site-kit/v1/?_locale=user", Status: 403, UA: "Mozilla/5.0",
+			Upstream: true, UpstreamName: "cfm_apache",
 		}, "raw")
 		e.ingest(LogRec{
 			TS: now + float64(i), IP: "10.0.1.2", Host: "news.example", Method: "get",
@@ -104,15 +134,20 @@ func TestIP403Flood_WPRestAPIIgnored(t *testing.T) {
 	}
 }
 
-// The exclusion must not open a hole: a wp-login brute force, and probes that
-// only dress up as REST calls, still trip 403_flood.
+// The exclusion must not open a hole: a wp-login brute force, probes that only
+// dress up as REST calls, a REST scanner the edge's WAF refuses, and a JWT
+// brute force the origin refuses all still trip 403_flood.
 func TestIP403Flood_RESTLookalikesStillCount(t *testing.T) {
 	cases := map[string][]string{
 		"10.0.2.1": {"/wp-login.php"},
 		"10.0.2.2": {"/.env?rest_route=/wp/v2/users", "/.git/config?rest_route=/x"},
 		"10.0.2.3": {"/wp-json/../.env", "/a/b/wp-json/x", "/wp-json/%2e%2e/wp-config.php"},
 		"10.0.2.4": {"/.git/wp-json/x", "/.env/?rest_route=/x"},
+		"10.0.2.5": {"/wp-json/jwt-auth/v1/token", "/?rest_route=/jwt-auth/v1/token"},
 	}
+	// 10.0.2.6: the edge (WAF) refused these REST calls itself, no upstream.
+	edgeOnly := map[string]bool{"10.0.2.6": true}
+	cases["10.0.2.6"] = []string{"/wp-json/gravitysmtp/v1/tests/mock-data", "/wp-json/batch/v1"}
 	e := NewEngine(Config{
 		Every:      1 * time.Second,
 		Window:     2 * time.Minute,
@@ -124,6 +159,7 @@ func TestIP403Flood_RESTLookalikesStillCount(t *testing.T) {
 			e.ingest(LogRec{
 				TS: now + float64(i), IP: ip, Host: "example.com", Method: "post",
 				URI: uris[i%len(uris)], Status: 403, UA: "ua",
+				Upstream: !edgeOnly[ip], UpstreamName: map[bool]string{true: "", false: "cfm_apache"}[edgeOnly[ip]],
 			}, "raw")
 		}
 	}

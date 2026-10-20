@@ -1,10 +1,13 @@
 package webdetector
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
-// isWPRestAPIRequest reports whether uri ($request_uri, query included) is a
-// WordPress REST API call: /wp-json/… or the root ?rest_route=… form, at the
-// site root or one directory down (a WordPress installed in /wordpress/).
+// isWPRestOrigin403 reports whether rec is a 403 the SITE's WordPress gave
+// to a REST API call (/wp-json/… or the root ?rest_route=… form, at the site
+// root or one directory down, e.g. a WordPress installed in /wordpress/).
 //
 // The 403 counters (403_flood and 40x_combo) skip these: WordPress answers a
 // REST call the caller may not make with 403 (rest_forbidden), so a working
@@ -12,22 +15,45 @@ import "strings"
 // Both cases the 2026-10-20 edge-ban read found were that: a WooCommerce stock
 // sync whose API key lacks write access (84-89% 403 on /wp-json/wc/v3/…, mars)
 // and a logged-in admin on the Site Kit dashboard (/wp-json/google-site-kit/v1/
-// every ~5 s, orion). Excluding them dropped none of the day's 193 403_flood
-// IPs on mars, orion, titan and speedhost. The request still counts in the
-// IP's total, so it dilutes the 403 share instead of hiding it.
+// every ~5 s, orion). The request still counts in the IP's total, so it
+// dilutes the 403 share instead of hiding it.
 //
-// Kept narrow so it cannot be used to hide a probe: the marker has to sit in
-// the first or second path segment, a path that climbs out of it (`..`,
-// `%2e`, `//`) never matches, and rest_route counts only on the root page
-// (`/`, `/index.php`), never on an arbitrary path such as /.env?rest_route=.
-func isWPRestAPIRequest(uri string) bool {
+// Kept narrow so it cannot hide an attack:
+//   - only the ORIGIN's 403 (rec.Upstream, and a cfm_apache* upstream where
+//     the edge names one). The edge's own 403s on REST paths are the WAF
+//     stopping scanners (Gravity SMTP mock-data, /wp-json/batch/v1, …: 99.7%
+//     of speedhost's REST 403s, 10 IPs over the threshold in three days) and
+//     keep counting. A line without upstream info (the Apache origin log)
+//     counts too;
+//   - not a route that takes credentials (token, login, auth, jwt, password):
+//     JWT Auth answers a wrong password with 403, and rule 501 does not see
+//     REST logins, so a brute force there must still reach 403_flood;
+//   - the marker has to sit in the first or second path segment, behind an
+//     install directory with no dot or escape in it; a path that climbs out
+//     (`..`, `%2e`, `//`) or carries any escape after the marker never
+//     matches, and rest_route counts only on the root page, never on an
+//     arbitrary path such as /.env?rest_route=.
+func isWPRestOrigin403(rec LogRec) bool {
+	if rec.Status != 403 || !rec.Upstream {
+		return false
+	}
+	if rec.UpstreamName != "" && !strings.HasPrefix(rec.UpstreamName, "cfm_apache") {
+		return false
+	}
+	route, ok := wpRestRoute(rec.URI)
+	return ok && !wpRestCredentialRoute(route)
+}
+
+// wpRestRoute returns the REST route uri addresses ("/wc/v3/products/1"), or
+// ok=false when uri is not a WordPress REST call (see isWPRestOrigin403).
+func wpRestRoute(uri string) (string, bool) {
 	path, query, _ := strings.Cut(uri, "?")
 	if path == "" || path[0] != '/' {
-		return false
+		return "", false
 	}
 	lp := strings.ToLower(path)
 	if strings.Contains(lp, "..") || strings.Contains(lp, "%2e") || strings.Contains(lp, "//") {
-		return false
+		return "", false
 	}
 	// "/wp-json…" or "/<dir>/wp-json…": strip at most one leading directory,
 	// and only a plausible install directory (wpInstallDir).
@@ -38,16 +64,34 @@ func isWPRestAPIRequest(uri string) bool {
 		}
 	}
 	if rest == "/wp-json" || strings.HasPrefix(rest, "/wp-json/") {
-		return true
+		route := strings.TrimPrefix(rest, "/wp-json")
+		if strings.Contains(route, "%") {
+			return "", false // an escaped route could spell a credential one
+		}
+		return route, true
 	}
-	if query == "" {
-		return false
-	}
-	if !isWPRootPage(lp) {
-		return false
+	if query == "" || !isWPRootPage(lp) {
+		return "", false
 	}
 	for _, kv := range strings.Split(query, "&") {
-		if k, _, _ := strings.Cut(kv, "="); strings.EqualFold(k, "rest_route") {
+		k, v, _ := strings.Cut(kv, "=")
+		if !strings.EqualFold(k, "rest_route") {
+			continue
+		}
+		route, err := url.QueryUnescape(v)
+		if err != nil || strings.Contains(route, "..") {
+			return "", false
+		}
+		return strings.ToLower(route), true
+	}
+	return "", false
+}
+
+// wpRestCredentialRoute: a route that takes a credential (JWT / application
+// password / plugin login endpoints). Its 403s are a wrong password.
+func wpRestCredentialRoute(route string) bool {
+	for _, w := range []string{"token", "login", "auth", "jwt", "passw"} {
+		if strings.Contains(route, w) {
 			return true
 		}
 	}

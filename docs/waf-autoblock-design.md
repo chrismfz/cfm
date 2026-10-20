@@ -639,19 +639,23 @@ sections that ban web clients (`waf_security`, `modsec`, challenge_*) do not
 consult it: a WAF block-tier hit is the request's own payload.
 
 **Origin 403 on WordPress REST calls (decided 2026-10-20):** the 403
-counters (`403_flood`, and `40x_combo`'s 403 side) no longer count a 403 on a
-WordPress REST call (`/wp-json/…` at the root or one directory down, or a
-root `?rest_route=…`; `isWPRestAPIRequest`). WordPress answers 403 there when
-the caller may not do that one thing, so a working client polling one route
-crossed `IP403_COUNT` on the origin's own answers: the Site Kit admin above,
-and (2026-10-20 read) a WooCommerce stock sync on mars whose API key lacks
-write access (84-89% 403 on `/wp-json/wc/v3/…`, banned 2 h and reported to
-the fleet). Neither country nor ASN tells these apart: a GR residential
-address in the same weeks ran a `wp-login.php` brute force that `403_flood`
-correctly banned. Excluding REST 403s dropped none of the day's 193 IPs over
-the threshold on mars, orion, titan and speedhost. The request still counts
-in the IP's total, so it dilutes the 403 share. A REST-only prober that
-earns only 403s is left to the WAF, 404/MALPATH and the rate signals.
+counters (`403_flood`, and `40x_combo`'s 403 side) no longer count the 403
+WordPress itself gives a REST call (`/wp-json/…` at the root or one directory
+down, or a root `?rest_route=…`; `isWPRestOrigin403`). WordPress answers 403
+there when the caller may not do that one thing, so a working client polling
+one route crossed `IP403_COUNT` on the origin's own answers: the Site Kit
+admin above, and (2026-10-20 read) a WooCommerce stock sync on mars whose API
+key lacks write access (84-89% 403 on `/wp-json/wc/v3/…`, banned 2 h and
+reported to the fleet). Neither country nor ASN tells these apart: a GR
+residential address in the same weeks ran a `wp-login.php` brute force that
+`403_flood` correctly banned. Three limits keep it from hiding an attack:
+only the ORIGIN's 403 is skipped (the edge's own REST 403s are the WAF
+stopping scanners: 99.7% of speedhost's, with 10 IPs over the threshold in
+three days, and they keep counting); a route that takes a credential (`token`,
+`login`, `auth`, `jwt`, `passw`) keeps counting, because JWT Auth answers a
+wrong password with 403 and rule 501 does not see REST logins; and the marker
+must sit behind a plain install directory, with no climb or escape. The
+request still counts in the IP's total, so it dilutes the 403 share.
 
 **Gate for `enforce`:** the good-bot fix deployed (above), the
 logged-in-origin-403 case decided, then a fresh read of every node shows no
