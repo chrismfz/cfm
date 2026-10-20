@@ -1143,7 +1143,9 @@ score with those readings (≥ 5 events, ≥ 100 px) and no certain tell
 (webdriver, headless UA) takes the solved path under every grain, marked
 `v2_rescued=input` (`challengeV2InputRescue`; kill switch
 `CHALLENGE_V2_INPUT_RESCUE`). Since 2026-10-20 (E4 read 3) it is **capped at
-the fail score**: a score above `CHALLENGE_V2_FAIL_SCORE` is never rescued.
+100** (`rescueMaxScore`): a failing score above it is never rescued, whatever
+`CHALLENGE_V2_FAIL_SCORE` is set to (the gate asks the rescue only at or over
+the fail score, so a cap that followed it would rescue one score alone).
 The class it exists for scores exactly 100; the device-claim family above it
 (`sw_renderer` + `mobile_hw_lie` / `mac_hw_lie` / `touch_lie`, 110-150) is
 farm-only in the corpus, carries `no_input` on nearly every reject, and

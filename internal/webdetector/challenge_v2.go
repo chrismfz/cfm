@@ -131,8 +131,9 @@ package webdetector
 //     can't complete (slots busy, resolver down, PTR not resolved yet)
 //     rejects as before (retry-able, D5c); a reject whose PTR claims a
 //     crawler says why with v2_waiver_miss=<reason> (v2Waiver*).
-//   - Real pointer input RESCUES a failing score that has no certain tell
-//     (v2_rescued=input, challengeV2InputRescue), under every grain — unlike
+//   - Real pointer input RESCUES a failing score of at most 100 that has no
+//     certain tell (v2_rescued=input, challengeV2InputRescue; the cap is
+//     rescueMaxScore), under every grain — unlike
 //     the good-bot waiver, whose question (is this a verified crawler?) the
 //     decision path answers per grain, this one (is a person at the
 //     controls?) is the question the rung itself asks. It exists because a
@@ -634,8 +635,9 @@ func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 // ── Real-input rescue (operator decision, 2026-09-29) ──────────────────────
 //
 // A failing score is RESCUED — never rejected, under any arm, the operator's
-// fingerprint policy included — when the payload reports real pointer input
-// and no CERTAIN tell fired. The first E4 read
+// fingerprint policy included — when the payload reports real pointer input,
+// no CERTAIN tell fired, and the score is at most rescueMaxScore (the cap,
+// below). The first E4 read
 // (docs/abuse-defense-master-plan.md §5, E4) found who the automatic v2 arm
 // would reject: Windows Chrome/109 (the last Chrome for Windows 7/8.1) on old
 // hardware, reporting a software renderer AND no window size — exactly the
@@ -650,16 +652,20 @@ func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 // rescued: each fails alone because the browser declares its own automation.
 // Kill switch: CHALLENGE_V2_INPUT_RESCUE = 0 (challengeV2State.inputRescue).
 //
-// THE CAP (operator decision 2026-10-20, E4 read 3): only a score AT the fail
-// score is rescued, never one above it. The class the rescue exists for —
+// THE CAP (operator decision 2026-10-20, E4 read 3): a score above
+// rescueMaxScore (100) is never rescued. The class the rescue exists for —
 // sw_renderer + outer_zero — scores exactly 100, so the cap costs it nothing,
-// and in three weekly reads the rescue fired 0 times at any score. Above the
-// fail score sits the device-claim farm family (sw_renderer + mobile_hw_lie /
+// and in three weekly reads the rescue fired 0 times at any score. Above it
+// sits the device-claim farm family (sw_renderer + touch_lie / mobile_hw_lie /
 // mac_hw_lie, 110-150; ~93 000 of read 3's 153 354 rejects, 0 humans in the
 // hardware-tells corpus). Nearly every farm reject also carries no_input, so a
 // farm that learned to post ptr/mv past the bars would lose those 30 points
 // AND be rescued; with the cap it stays rejected. The residual is the 100
 // bucket itself, which humans share: faked input still passes there.
+// The cap is that class's score, NOT CHALLENGE_V2_FAIL_SCORE: the gate asks
+// only when hs >= the fail score, so a cap that followed it would rescue one
+// score and no other — a fail score of 90 would lose the 100 class, one of
+// 110 would rescue the very family the cap keeps out.
 //
 // HONEST LIMIT: ptr/mv are client-authored like every reading. A bot can post
 // any counts, and a pointer event a farm dispatches through CDP is a trusted
@@ -672,16 +678,19 @@ func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 const (
 	rescueMinPointerEvents = 5   // sig.ptr: trusted pointer-move events seen while solving
 	rescueMinMovePx        = 100 // sig.mv: accumulated |movementX|+|movementY|
-	v2RescuedInput         = "input"
+	// rescueMaxScore: the highest failing score the rescue clears (THE CAP
+	// above) — the Chrome/109 class's sw_renderer + outer_zero.
+	rescueMaxScore = tellSWRenderer + tellOuterZero
+	v2RescuedInput = "input"
 )
 
 // challengeV2InputRescue reports whether a failing solve is rescued by real
 // pointer input: at least rescueMinPointerEvents events covering
 // rescueMinMovePx, none of the certain tells in tells (the solve's
-// comma-joined list), and a score hs no higher than failScore (the cap, see
-// above). An absent reading never rescues.
-func challengeV2InputRescue(sig *humanitySignals, tells string, hs, failScore int) bool {
-	if sig == nil || sig.PTR == nil || sig.MV == nil || hs > failScore {
+// comma-joined list), and a score hs no higher than rescueMaxScore (the cap,
+// see above). An absent reading never rescues.
+func challengeV2InputRescue(sig *humanitySignals, tells string, hs int) bool {
+	if sig == nil || sig.PTR == nil || sig.MV == nil || hs > rescueMaxScore {
 		return false
 	}
 	for _, t := range strings.Split(tells, ",") {

@@ -96,9 +96,9 @@
        `cdn_cached_challenge`, not `next_redirect_loop`. So `why="cleared"`
        counts are not comparable with reads 1–2.
 - **Open decisions** (master plan §5 / E4). Read 3 carries a proposal for
-  each; none is decided until the operator says so:
-  1. **The rescue.** **Decided 2026-10-20: capped at the fail score**
-     (rescue only `hs ≤ CHALLENGE_V2_FAIL_SCORE`; master plan §5 E4). In
+  each; item 1 is decided, the others wait for the operator:
+  1. **The rescue.** **Decided 2026-10-20: capped at 100** (rescue only
+     `hs ≤ 100`, whatever the fail score; master plan §5 E4). In
      three weeks it never fired, so the cap costs no measured human. It
      keeps the device-claim farm families (`mobile_hw_lie` /
      `mac_hw_lie`, ~93 000 of read 3's 153 354 rejects) rejected even if

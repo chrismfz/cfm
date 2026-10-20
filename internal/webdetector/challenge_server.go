@@ -1060,14 +1060,14 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// greppable too.
 		if v2On && hs >= v2Fail {
 			// Real input rescues a failing score that has no certain tell
-			// and is AT the fail score, not above it (challengeV2InputRescue,
+			// and is at most rescueMaxScore, 100 (challengeV2InputRescue,
 			// operator decisions 2026-09-29 and 2026-10-20; kill switch
 			// CHALLENGE_V2_INPUT_RESCUE). Decided before the waiver
 			// lookup, for armed and unarmed solves alike: armed, the solve
 			// takes the solved path marked v2_rescued=input; unarmed, the
 			// would_v2 line carries the marker, so a would-be arm is sized
 			// net of it.
-			if v2Rescue && challengeV2InputRescue(hsSig, hsTells, hs, v2Fail) {
+			if v2Rescue && challengeV2InputRescue(hsSig, hsTells, hs) {
 				solve.V2Rescued = v2RescuedInput
 			}
 			switch {

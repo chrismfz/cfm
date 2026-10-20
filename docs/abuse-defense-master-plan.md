@@ -170,7 +170,8 @@ D3/D4 are the process fix.
   pointer movement, or injects it through browser automation, passes) for no wall for anyone who moves a
   pointer; a keyboard-only or touch user on such a machine is still walled
   until the confirm fallback. The trajectory readings that could tighten the
-  rescue are measured first.
+  rescue are measured first. *Capped 2026-10-20:* a failing score above 100
+  is never rescued (§5, E4).
 
 ## 5. Enforcement roadmap — the only live checklist
 
@@ -645,8 +646,10 @@ already opened.
              decide anything.
 
           **Decided (operator, 2026-10-20, after E4 read 3):** cap the
-          rescue at the fail score: a score above
-          `CHALLENGE_V2_FAIL_SCORE` is never rescued. Measured cost 0
+          rescue at 100: a failing score above it is never rescued
+          (`rescueMaxScore`, the Chrome/109 class's `sw_renderer` +
+          `outer_zero`; fixed, not `CHALLENGE_V2_FAIL_SCORE`, which only
+          gates when the rescue is asked). Measured cost 0
           humans (the rescue fired 0 times in three reads, and its class
           scores exactly 100); it keeps the farm-only device-claim family
           (110-150, ~93 000 of read 3's 153 354 rejects) rejected if a farm

@@ -92,7 +92,7 @@ type Entry struct {
 	Src      string `json:"src,omitempty"`       // challenge provenance snapshot ("-" = none covered)
 	Scope    string `json:"scope,omitempty"`     // verify surface: web / panel:<port>
 	// Rescued names what would clear this failing score under an arm (today
-	// only "input": real pointer input and no certain tell —
+	// only "input": real pointer input, no certain tell and hs at most 100 —
 	// challengeV2InputRescue). The line still reads would_v2 (the SCORE
 	// fails); an armed gate would let the solve through instead.
 	Rescued string `json:"v2_rescued,omitempty"`
