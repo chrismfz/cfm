@@ -31,8 +31,15 @@ import (
 //   - the marker has to sit in the first or second path segment, behind an
 //     install directory with no dot or escape in it; a path that climbs out
 //     (`..`, `%2e`, `//`) or carries any escape after the marker never
-//     matches, and rest_route counts only on the root page, never on an
-//     arbitrary path such as /.env?rest_route=.
+//     matches, and rest_route counts only on the root page or a /wp-json
+//     path, never on an arbitrary path such as /.env?rest_route=;
+//   - a query rest_route is read as PHP and WordPress read it: it overrides
+//     the /wp-json path, the last duplicate wins and "rest.route" is the
+//     same key, so every such key must be clean (wpQueryRestRoute).
+//
+// Residual: WordPress also takes rest_route from a POST body, which the log
+// line does not carry, so a POST to /wp-json/<plain route> whose body names a
+// credential route is exempt. Rule 501 does not cover REST logins either.
 func isWPRestOrigin403(rec LogRec) bool {
 	if rec.Status != 403 || !rec.Upstream {
 		return false
@@ -63,6 +70,19 @@ func wpRestRoute(uri string) (string, bool) {
 			rest = rest[1+i:]
 		}
 	}
+	// A rest_route in the query overrides the path route in WordPress
+	// (WP::parse_request takes $_GET before the permalink's query vars), so the
+	// query decides whenever it carries one.
+	qroute, qok, qfound := wpQueryRestRoute(query)
+	if qfound {
+		if !qok {
+			return "", false
+		}
+		if rest == "/wp-json" || strings.HasPrefix(rest, "/wp-json/") || isWPRootPage(lp) {
+			return qroute, true
+		}
+		return "", false
+	}
 	if rest == "/wp-json" || strings.HasPrefix(rest, "/wp-json/") {
 		route := strings.TrimPrefix(rest, "/wp-json")
 		if strings.Contains(route, "%") {
@@ -70,21 +90,39 @@ func wpRestRoute(uri string) (string, bool) {
 		}
 		return route, true
 	}
-	if query == "" || !isWPRootPage(lp) {
-		return "", false
+	return "", false
+}
+
+// wpQueryRestRoute reads the rest_route PHP would see in query: the LAST
+// parameter whose key PHP maps to "rest_route" ('.' and ' ' become '_', the
+// key url-decoded first). found reports any such key; ok=false when any of
+// them fails to decode, climbs out ("..") or names a credential route, so
+// no ordering trick (?rest_route=/wc/v3/x&rest.route=/jwt-auth/v1/token)
+// passes a login off as a harmless call.
+func wpQueryRestRoute(query string) (route string, ok, found bool) {
+	if query == "" {
+		return "", false, false
 	}
+	ok = true
 	for _, kv := range strings.Split(query, "&") {
 		k, v, _ := strings.Cut(kv, "=")
-		if !strings.EqualFold(k, "rest_route") {
+		key, err := url.QueryUnescape(k)
+		if err != nil {
+			key = k
+		}
+		key = strings.NewReplacer(".", "_", " ", "_").Replace(key)
+		if !strings.EqualFold(key, "rest_route") {
 			continue
 		}
-		route, err := url.QueryUnescape(v)
-		if err != nil || strings.Contains(route, "..") {
-			return "", false
+		found = true
+		r, err := url.QueryUnescape(v)
+		r = strings.ToLower(r)
+		if err != nil || strings.Contains(r, "..") || wpRestCredentialRoute(r) {
+			ok = false
 		}
-		return strings.ToLower(route), true
+		route = r
 	}
-	return "", false
+	return route, ok, found
 }
 
 // wpRestCredentialRoute: a route that takes a credential (JWT / application

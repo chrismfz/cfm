@@ -654,7 +654,11 @@ stopping scanners: 99.7% of speedhost's, with 10 IPs over the threshold in
 three days, and they keep counting); a route that takes a credential (`token`,
 `login`, `auth`, `jwt`, `passw`) keeps counting, because JWT Auth answers a
 wrong password with 403 and rule 501 does not see REST logins; and the marker
-must sit behind a plain install directory, with no climb or escape. The
+must sit behind a plain install directory, with no climb or escape. A query
+`rest_route` is read the way PHP and WordPress read it (it overrides the
+path, the last duplicate wins, `rest.route` is the same key). Residual: a
+`rest_route` in a POST body, which the log does not carry, also overrides
+the path, so a REST credential brute force sent that way is not counted. The
 request still counts in the IP's total, so it dilutes the 403 share.
 
 **Gate for `enforce`:** the good-bot fix deployed (above), the

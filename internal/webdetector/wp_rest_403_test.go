@@ -55,6 +55,12 @@ func TestIsWPRestOrigin403(t *testing.T) {
 	origin := func(uri string) LogRec {
 		return LogRec{URI: uri, Status: 403, Upstream: true, UpstreamName: "cfm_apache"}
 	}
+	if !isWPRestOrigin403(origin("/wp-json/wc/v3/products/1?consumer_key=ck&consumer_secret=cs")) {
+		t.Fatal("a REST call with a non-route query must stay exempt")
+	}
+	if !isWPRestOrigin403(origin("/wp-json/x?rest_route=/wc/v3/orders")) {
+		t.Fatal("query rest_route to a plain route on /wp-json: exempt")
+	}
 	if !isWPRestOrigin403(origin("/wp-json/wc/v3/products/1")) {
 		t.Fatal("origin 403 on a REST route must be exempt")
 	}
@@ -62,17 +68,23 @@ func TestIsWPRestOrigin403(t *testing.T) {
 		t.Fatal("an edge on the 12-column module names no upstream: still the origin")
 	}
 	for name, rec := range map[string]LogRec{
-		"edge 403 (WAF)":        {URI: "/wp-json/gravitysmtp/v1/tests/mock-data", Status: 403},
-		"challenge server 403":  {URI: "/wp-json/wc/v3/products/1", Status: 403, Upstream: true, UpstreamName: "cfm_challenge"},
-		"404":                   {URI: "/wp-json/wc/v3/products/1", Status: 404, Upstream: true, UpstreamName: "cfm_apache"},
-		"jwt token":             origin("/wp-json/jwt-auth/v1/token"),
-		"login route":           origin("/wp-json/simple-jwt-login/v1/auth"),
-		"rest_route jwt":        origin("/?rest_route=%2Fjwt-auth%2Fv1%2Ftoken"),
-		"escaped credential":    origin("/wp-json/jwt-a%75th/v1/token"),
-		"escaped rest_route":    origin("/?rest_route=/jwt-a%75th/v1/t%6fken"),
-		"rest_route bad escape": origin("/?rest_route=%zz"),
-		"rest_route climbs out": origin("/?rest_route=/../../.env"),
-		"password reset route":  origin("/wp-json/wp/v2/users/lostpassword"),
+		"edge 403 (WAF)":           {URI: "/wp-json/gravitysmtp/v1/tests/mock-data", Status: 403},
+		"challenge server 403":     {URI: "/wp-json/wc/v3/products/1", Status: 403, Upstream: true, UpstreamName: "cfm_challenge"},
+		"404":                      {URI: "/wp-json/wc/v3/products/1", Status: 404, Upstream: true, UpstreamName: "cfm_apache"},
+		"jwt token":                origin("/wp-json/jwt-auth/v1/token"),
+		"login route":              origin("/wp-json/simple-jwt-login/v1/auth"),
+		"rest_route jwt":           origin("/?rest_route=%2Fjwt-auth%2Fv1%2Ftoken"),
+		"escaped credential":       origin("/wp-json/jwt-a%75th/v1/token"),
+		"escaped rest_route":       origin("/?rest_route=/jwt-a%75th/v1/t%6fken"),
+		"rest_route bad escape":    origin("/?rest_route=%zz"),
+		"rest_route climbs out":    origin("/?rest_route=/../../.env"),
+		"password reset route":     origin("/wp-json/wp/v2/users/lostpassword"),
+		"duplicate key, last wins": origin("/?rest_route=/wc/v3/x&rest_route=/jwt-auth/v1/token"),
+		"php key mangling (dot)":   origin("/?rest_route=/wc/v3/x&rest.route=/jwt-auth/v1/token"),
+		"php key mangling (space)": origin("/?rest_route=/wc/v3/x&rest+route=/jwt-auth/v1/token"),
+		"encoded key":              origin("/?rest_route=/wc/v3/x&rest%5Froute=/jwt-auth/v1/token"),
+		"query overrides wp-json":  origin("/wp-json/wc/v3/products/1?rest_route=/jwt-auth/v1/token"),
+		"rest_route on deep path":  origin("/shop/cart/?rest_route=/wc/v3/x"),
 	} {
 		if isWPRestOrigin403(rec) {
 			t.Errorf("%s: %+v must not be exempt", name, rec)
