@@ -650,6 +650,17 @@ func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 // rescued: each fails alone because the browser declares its own automation.
 // Kill switch: CHALLENGE_V2_INPUT_RESCUE = 0 (challengeV2State.inputRescue).
 //
+// THE CAP (operator decision 2026-10-20, E4 read 3): only a score AT the fail
+// score is rescued, never one above it. The class the rescue exists for —
+// sw_renderer + outer_zero — scores exactly 100, so the cap costs it nothing,
+// and in three weekly reads the rescue fired 0 times at any score. Above the
+// fail score sits the device-claim farm family (sw_renderer + mobile_hw_lie /
+// mac_hw_lie, 110-150; ~93 000 of read 3's 153 354 rejects, 0 humans in the
+// hardware-tells corpus). Nearly every farm reject also carries no_input, so a
+// farm that learned to post ptr/mv past the bars would lose those 30 points
+// AND be rescued; with the cap it stays rejected. The residual is the 100
+// bucket itself, which humans share: faked input still passes there.
+//
 // HONEST LIMIT: ptr/mv are client-authored like every reading. A bot can post
 // any counts, and a pointer event a farm dispatches through CDP is a trusted
 // one (the page counts trusted events only; script-dispatched ones go to ut).
@@ -666,10 +677,11 @@ const (
 
 // challengeV2InputRescue reports whether a failing solve is rescued by real
 // pointer input: at least rescueMinPointerEvents events covering
-// rescueMinMovePx, and none of the certain tells in tells (the solve's
-// comma-joined list). An absent reading never rescues.
-func challengeV2InputRescue(sig *humanitySignals, tells string) bool {
-	if sig == nil || sig.PTR == nil || sig.MV == nil {
+// rescueMinMovePx, none of the certain tells in tells (the solve's
+// comma-joined list), and a score hs no higher than failScore (the cap, see
+// above). An absent reading never rescues.
+func challengeV2InputRescue(sig *humanitySignals, tells string, hs, failScore int) bool {
+	if sig == nil || sig.PTR == nil || sig.MV == nil || hs > failScore {
 		return false
 	}
 	for _, t := range strings.Split(tells, ",") {

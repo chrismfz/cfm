@@ -68,7 +68,7 @@ func TestTrajectoryReadingsDecideNothing(t *testing.T) {
 		t.Fatalf("trajectory readings moved the score: %d %v vs %d %v", hs1, t1, hs2, t2)
 	}
 	tells := strings.Join(t2, ",")
-	if challengeV2InputRescue(plain, tells) != challengeV2InputRescue(botty, tells) {
+	if challengeV2InputRescue(plain, tells, hs1, defaultV2FailScore) != challengeV2InputRescue(botty, tells, hs2, defaultV2FailScore) {
 		t.Fatal("trajectory readings moved the rescue")
 	}
 }

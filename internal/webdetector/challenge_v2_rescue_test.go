@@ -11,8 +11,9 @@ import (
 )
 
 // The rescue's rule, at its boundaries: both readings REPORTED and at or over
-// the bar, and no certain tell. It is a pure predicate over the parsed report;
-// the gate decides when it is consulted.
+// the bar, no certain tell, and a score no higher than the fail score (the
+// cap). It is a pure predicate over the parsed report; the gate decides when
+// it is consulted.
 func TestChallengeV2InputRescue(t *testing.T) {
 	i := func(v int) *int { return &v }
 	f := func(v float64) *float64 { return &v }
@@ -20,35 +21,47 @@ func TestChallengeV2InputRescue(t *testing.T) {
 		name  string
 		sig   *humanitySignals
 		tells string
+		hs    int // 0 = the fail score, the bucket the rescue exists for
 		want  bool
 	}{
-		{"E4 human (41 events, 714 px)", &humanitySignals{PTR: i(41), MV: f(714)}, "sw_renderer,outer_zero", true},
-		{"at both bars", &humanitySignals{PTR: i(rescueMinPointerEvents), MV: f(rescueMinMovePx)}, "sw_renderer,outer_zero", true},
-		{"one event short", &humanitySignals{PTR: i(rescueMinPointerEvents - 1), MV: f(rescueMinMovePx)}, "sw_renderer,outer_zero", false},
-		{"a pixel short", &humanitySignals{PTR: i(rescueMinPointerEvents), MV: f(rescueMinMovePx - 1)}, "sw_renderer,outer_zero", false},
+		{"E4 human (41 events, 714 px)", &humanitySignals{PTR: i(41), MV: f(714)}, "sw_renderer,outer_zero", 0, true},
+		{"at both bars", &humanitySignals{PTR: i(rescueMinPointerEvents), MV: f(rescueMinMovePx)}, "sw_renderer,outer_zero", 0, true},
+		{"one event short", &humanitySignals{PTR: i(rescueMinPointerEvents - 1), MV: f(rescueMinMovePx)}, "sw_renderer,outer_zero", 0, false},
+		{"a pixel short", &humanitySignals{PTR: i(rescueMinPointerEvents), MV: f(rescueMinMovePx - 1)}, "sw_renderer,outer_zero", 0, false},
 		// Events without movement: a pointer parked over the page, or an
 		// event stream with movementX/Y left at zero.
-		{"events, no movement", &humanitySignals{PTR: i(200), MV: f(0)}, "sw_renderer,outer_zero", false},
-		{"device-claim group", &humanitySignals{PTR: i(12), MV: f(400)}, "sw_renderer,touch_lie", true},
+		{"events, no movement", &humanitySignals{PTR: i(200), MV: f(0)}, "sw_renderer,outer_zero", 0, false},
+		// The cap: at the fail score is rescued, one point over is not. The
+		// device-claim family (sw_renderer + touch_lie / mobile_hw_lie /
+		// mac_hw_lie, 110-150) is farm-only in the corpus, and faking input
+		// must not carry it through.
+		{"at the cap", &humanitySignals{PTR: i(12), MV: f(400)}, "sw_renderer,outer_zero", defaultV2FailScore, true},
+		{"one over the cap", &humanitySignals{PTR: i(12), MV: f(400)}, "sw_renderer,outer_zero", defaultV2FailScore + 1, false},
+		{"device-claim group", &humanitySignals{PTR: i(12), MV: f(400)}, "sw_renderer,touch_lie", 110, false},
+		{"device-claim group at 150", &humanitySignals{PTR: i(41), MV: f(714)}, "sw_renderer,outer_zero,mobile_hw_lie", 150, false},
 		// The certain tells: the browser declares its own automation, so
 		// input never outweighs them — alone or in company.
-		{"webdriver", &humanitySignals{PTR: i(41), MV: f(714)}, "webdriver", false},
-		{"webdriver among others", &humanitySignals{PTR: i(41), MV: f(714)}, "sw_renderer,webdriver,outer_zero", false},
-		{"headless UA", &humanitySignals{PTR: i(41), MV: f(714)}, "headless_ua", false},
+		{"webdriver", &humanitySignals{PTR: i(41), MV: f(714)}, "webdriver", 0, false},
+		{"webdriver among others", &humanitySignals{PTR: i(41), MV: f(714)}, "sw_renderer,webdriver,outer_zero", 0, false},
+		{"headless UA", &humanitySignals{PTR: i(41), MV: f(714)}, "headless_ua", 0, false},
 		// Absent is never input (D5b's mirror image: absence neither
 		// convicts nor exculpates).
-		{"no payload", nil, "", false},
-		{"ptr absent", &humanitySignals{MV: f(714)}, "sw_renderer,outer_zero", false},
-		{"mv absent", &humanitySignals{PTR: i(41)}, "sw_renderer,outer_zero", false},
+		{"no payload", nil, "", 0, false},
+		{"ptr absent", &humanitySignals{MV: f(714)}, "sw_renderer,outer_zero", 0, false},
+		{"mv absent", &humanitySignals{PTR: i(41)}, "sw_renderer,outer_zero", 0, false},
 		// A tell name that merely CONTAINS a certain one is not it.
-		{"substring is not a tell", &humanitySignals{PTR: i(41), MV: f(714)}, "sw_renderer,not_webdriver", true},
+		{"substring is not a tell", &humanitySignals{PTR: i(41), MV: f(714)}, "sw_renderer,not_webdriver", 0, true},
 		// The bar is read off the value sig= shows (one decimal), so the log
 		// line alone explains the decision: 99.96 renders mv:100.
-		{"mv rounds up to the bar", &humanitySignals{PTR: i(5), MV: f(99.96)}, "sw_renderer,outer_zero", true},
-		{"mv rounds below the bar", &humanitySignals{PTR: i(5), MV: f(99.94)}, "sw_renderer,outer_zero", false},
+		{"mv rounds up to the bar", &humanitySignals{PTR: i(5), MV: f(99.96)}, "sw_renderer,outer_zero", 0, true},
+		{"mv rounds below the bar", &humanitySignals{PTR: i(5), MV: f(99.94)}, "sw_renderer,outer_zero", 0, false},
 	}
 	for _, c := range cases {
-		if got := challengeV2InputRescue(c.sig, c.tells); got != c.want {
+		hs := c.hs
+		if hs == 0 {
+			hs = defaultV2FailScore
+		}
+		if got := challengeV2InputRescue(c.sig, c.tells, hs, defaultV2FailScore); got != c.want {
 			t.Errorf("%s: rescue=%v, want %v", c.name, got, c.want)
 		}
 	}
@@ -236,5 +249,40 @@ func TestVerify_InputRescueKillSwitch(t *testing.T) {
 	}
 	if _, _, _, _, _, on := challengeV2SettingsAll(); on {
 		t.Fatal("the snapshot does not carry the switch")
+	}
+}
+
+// The cap at the gate (operator decision 2026-10-20): a phone UA on a software
+// renderer with zero touch points (sw_renderer 60 + touch_lie 50 = 110) is
+// rejected under an arm even with real pointer input — faking movement must not
+// carry the device-claim farm family through. The cap follows the configured
+// fail score: raised to 120, the same solve is rescued.
+func TestVerify_V2RescueCappedAtFailScore(t *testing.T) {
+	base, capt := startVerifyServer(t)
+	const (
+		armedHost = "shop.example.gr"
+		phone     = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36"
+		moved     = `{"v":1,"wd":false,"glr":"Google SwiftShader","ow":412,"oh":915,"mtp":0,"tch":0,"key":0,"ptr":41,"mv":714}`
+	)
+	setV2HostArmed(t, func(host string) bool { return host == armedHost })
+	setV2GoodBot(t, func(context.Context, string, string) (string, string) { return "", "" })
+
+	resp := postVerify(t, base, "203.0.113.40", armedHost, phone, moved)
+	if resp.StatusCode != http.StatusForbidden || resp.Header.Get("X-CFM-V2") != "reject" {
+		t.Fatalf("hs 110 with input: status=%d X-CFM-V2=%q, want 403 + reject (over the cap)", resp.StatusCode, resp.Header.Get("X-CFM-V2"))
+	}
+	if _, rejects := capt.counts(); rejects != 1 || capt.rejects[0].HumanityScore != 110 || capt.rejects[0].V2Rescued != "" {
+		t.Fatalf("reject not recorded as an unrescued 110: rejects=%d %+v", rejects, capt.rejects)
+	}
+
+	on, _, debug, shadow := challengeV2Settings()
+	ConfigureChallengeV2(on, 120, debug, shadow)
+	t.Cleanup(func() { ConfigureChallengeV2(on, defaultV2FailScore, debug, shadow) })
+	// 110 is now under the fail score: an ordinary pass, nothing to rescue.
+	if resp = postVerify(t, base, "203.0.113.41", armedHost, phone, moved); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("fail score 120, hs 110: status=%d, want a pass", resp.StatusCode)
+	}
+	if s := capt.solved[len(capt.solved)-1]; s.V2Rescued != "" {
+		t.Fatalf("a passing score was marked rescued: %q", s.V2Rescued)
 	}
 }

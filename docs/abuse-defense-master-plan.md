@@ -644,6 +644,17 @@ already opened.
              offset and approach path are measured the same way before they
              decide anything.
 
+          **Decided (operator, 2026-10-20, after E4 read 3):** cap the
+          rescue at the fail score: a score above
+          `CHALLENGE_V2_FAIL_SCORE` is never rescued. Measured cost 0
+          humans (the rescue fired 0 times in three reads, and its class
+          scores exactly 100); it keeps the farm-only device-claim family
+          (110-150, ~93 000 of read 3's 153 354 rejects) rejected if a farm
+          learns to fake input. The `sw_renderer,outer_zero` bucket at 100
+          stays the honest residual. α and the `cfm_pcw` review were
+          proposed in the same read (`docs/abuse-defense-progress.md`) and
+          are not decided.
+
           Weekly reads from 2026-10-06 are recorded in
           `docs/abuse-defense-progress.md`, not here; this plan keeps the
           decisions they lead to.

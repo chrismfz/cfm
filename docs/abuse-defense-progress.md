@@ -97,11 +97,12 @@
        counts are not comparable with reads 1–2.
 - **Open decisions** (master plan §5 / E4). Read 3 carries a proposal for
   each; none is decided until the operator says so:
-  1. **The rescue.** Proposed: keep it, and cap it at the fail score
-     (rescue only `hs ≤ 100`). In three weeks it never fired, so the cap
-     costs no measured human. It would keep the device-claim farm families
-     (`mobile_hw_lie` / `mac_hw_lie`, ~93 000 of read 3's 153 354 rejects)
-     rejected even if they learn to post fake input.
+  1. **The rescue.** **Decided 2026-10-20: capped at the fail score**
+     (rescue only `hs ≤ CHALLENGE_V2_FAIL_SCORE`; master plan §5 E4). In
+     three weeks it never fired, so the cap costs no measured human. It
+     keeps the device-claim farm families (`mobile_hw_lie` /
+     `mac_hw_lie`, ~93 000 of read 3's 153 354 rejects) rejected even if
+     they learn to post fake input.
   2. **α (the Rung-2 confirm fallback).** Proposed: do not build it now.
      One profile is walled off, 3 IPs this week: Windows Chrome/109, no
      input, `outer_zero` on every retry. First confirm whether those are

@@ -1142,7 +1142,13 @@ mitigation (master plan E4, READ 2026-09-29): **real input rescues**. A failing
 score with those readings (≥ 5 events, ≥ 100 px) and no certain tell
 (webdriver, headless UA) takes the solved path under every grain, marked
 `v2_rescued=input` (`challengeV2InputRescue`; kill switch
-`CHALLENGE_V2_INPUT_RESCUE`). Trajectory readings followed, log-only (and the
+`CHALLENGE_V2_INPUT_RESCUE`). Since 2026-10-20 (E4 read 3) it is **capped at
+the fail score**: a score above `CHALLENGE_V2_FAIL_SCORE` is never rescued.
+The class it exists for scores exactly 100; the device-claim family above it
+(`sw_renderer` + `mobile_hw_lie` / `mac_hw_lie` / `touch_lie`, 110-150) is
+farm-only in the corpus, carries `no_input` on nearly every reject, and
+would otherwise pass by faking input. In three weekly reads the rescue fired
+0 times at any score. Trajectory readings followed, log-only (and the
 page now counts trusted events only), then the confirm fallback for the
 humans who did not move a pointer. The honest limit: the counts are
 client-authored — a bot can post any numbers, and a CDP-dispatched pointer
