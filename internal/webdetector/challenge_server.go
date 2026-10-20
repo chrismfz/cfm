@@ -616,7 +616,7 @@ type ChallengeSolve struct {
 	// of rejecting (challengeV2GoodBot). Rendered as v2_waived=<name>.
 	V2Waived string
 	// V2Rescued names what rescues a FAILING score ("" = nothing): today only
-	// "input" — real pointer input and no certain tell
+	// "input" — real pointer input, no certain tell and hs at most 100
 	// (challengeV2InputRescue). Set for armed and unarmed solves alike, but
 	// rendered as v2_rescued=<what> only where it means something: under an
 	// arm (V2Grain set) on the solve line and history row — the solve took

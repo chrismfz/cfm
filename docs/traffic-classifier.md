@@ -1189,8 +1189,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   either — the PTR wasn't known at verify — and that is NOT evidence the
   client isn't a crawler. `grep v2_rescued=` (since 2026-09-29) is "which
   failing solves did real pointer input let through": under ANY grain, a
-  failing score with no certain tell and `sig=` reporting ≥ 5 pointer events
-  covering ≥ 100 px (`mv` as `sig=` shows it; "Who the deterministic-FP
+  failing score of at most 100 with no certain tell and `sig=` reporting ≥ 5
+  pointer events covering ≥ 100 px (`mv` as `sig=` shows it; "Who the deterministic-FP
   residual is" above). It rides only an armed solve's line, after `v2=` /
   `v2_waived=`, with the failing `hs=`/`tells=` intact, and the history row
   carries `v2_rescued`. An unarmed failing solve had nothing to be let
@@ -1268,7 +1268,7 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `by_fp`, `by_provider`, `by_ptr_domain`, `by_scope`, …). Since 2026-09-29
   `scope=` rides last (see below), and `v2_rescued=input` (before `src=`)
   marks a line an arm would have let through after all — real pointer input,
-  no certain tell — counted as `humanity.rescued`. Lines minus rescued is an
+  no certain tell, hs at most 100 — counted as `humanity.rescued`. Lines minus rescued is an
   upper bound on what an arm would reject (the geo/vhost good-bot waiver
   clears verified crawlers too).
 - **`src=` — challenge provenance** (`challenge_src.go`, 2026-09-23): a

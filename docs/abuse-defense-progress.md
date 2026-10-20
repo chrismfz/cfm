@@ -383,6 +383,9 @@ decided: the master plan records only what the operator decides.
 #### Proposals (for the operator; nothing is implemented without a go)
 
 **(a) The real-input rescue: keep it, and cap it at the fail score.**
+*Decided 2026-10-20 as a FIXED cap of 100, not the fail score: the gate asks
+the rescue only at or over the fail score, so a cap that followed it would
+rescue one score alone (review finding; master plan §5 E4).*
 - *The rule as shipped* (`challengeV2InputRescue`): a failing solve with
   ptr ≥ 5 AND mv ≥ 100 and no certain tell (webdriver, headless UA) is
   rescued at any score.

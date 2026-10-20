@@ -255,7 +255,7 @@ func TestVerify_InputRescueKillSwitch(t *testing.T) {
 // carry the device-claim farm family through. The cap is a fixed 100, not the
 // fail score: raised to 110, the same solve is still not rescued (it is
 // rejected), and lowered to 90 the 100 class is still rescued.
-func TestVerify_V2RescueCappedAtFailScore(t *testing.T) {
+func TestVerify_V2RescueCapIsFixed(t *testing.T) {
 	base, capt := startVerifyServer(t)
 	const (
 		armedHost = "shop.example.gr"
