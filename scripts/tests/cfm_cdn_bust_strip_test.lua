@@ -86,7 +86,7 @@ for line in src:sub(fn_end, call):gmatch("[^\n]+") do
   check(line:match("^%s*%-%-") ~= nil, "only comments between the function and its call, got: " .. line)
 end
 -- And again after the POST resume, whose replay restores a stored query.
-check(src:find("if try_apply_post_resume(ip, host) then\n  pcall(strip_cdn_bust_arg)", 1, true) ~= nil,
+check(src:find("\ntry_apply_post_resume(ip, host)\nif ngx.ctx.cfm_resumed_post then\n  pcall(strip_cdn_bust_arg)", 1, true) ~= nil,
   "strip_cdn_bust_arg re-runs after an applied POST resume")
 
 if fails > 0 then

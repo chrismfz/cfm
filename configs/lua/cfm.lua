@@ -1540,7 +1540,8 @@ if CFG.fp_policy then
 end
 
 -- ── POST resume ──────────────────────────────────────────────────────────────
-if try_apply_post_resume(ip, host) then
+try_apply_post_resume(ip, host)
+if ngx.ctx.cfm_resumed_post then
   pcall(strip_cdn_bust_arg) -- the replay's stored query (see the pre-step)
 end
 method = ngx.req.get_method() or method
