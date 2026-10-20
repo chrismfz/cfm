@@ -1692,7 +1692,9 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 			// so counting them let a customer browsing their OWN site cross
 			// IP403_COUNT and self-block (WEB/403). Real 403-floods hit
 			// forbidden non-static paths (wp-login, /.git, config files).
-			if !isStaticAssetPath(p) {
+			// So is WordPress's own 403 to a REST API call: the app's answer
+			// to a client it knows (isWPRestOrigin403).
+			if !isStaticAssetPath(p) && !isWPRestOrigin403(rec) {
 				if b.ips403 == nil {
 					b.ips403 = make(map[string]int)
 				}
@@ -2009,8 +2011,11 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 
 	// 40x combo counters (403+404) per IP, with optional ignore prefixes + unique-path gating.
 	// Static asset paths are excluded to reduce false positives from missing files.
+	// WordPress's own REST 403 is skipped as in 403_flood (isWPRestOrigin403);
+	// a REST 404 still counts.
 	if rec.IP != "" && e.cfg.IP40xComboCount > 0 && (rec.Status == 403 || rec.Status == 404) {
-		if !isStaticAssetPath(p) && !hasAnyPrefix(p, e.cfg.Ignore40xPrefixes) {
+		if !isStaticAssetPath(p) && !hasAnyPrefix(p, e.cfg.Ignore40xPrefixes) &&
+			!isWPRestOrigin403(rec) {
 			if b.ips40x == nil {
 				b.ips40x = make(map[string]int)
 			}

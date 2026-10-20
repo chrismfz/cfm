@@ -29,6 +29,16 @@ back-filled here — see the git/PR history for that period.
   `CHALLENGE_V2_INPUT_RESCUE = 0` still turns the rescue off.
 
 ### Fixed
+- **A WordPress API client or logged-in admin is no longer banned for the
+  403s WordPress itself returns.** The web detector's 403 flood ban counted
+  the 403 a site's WordPress gives to a REST API call (`/wp-json/…`,
+  `?rest_route=…`) like a scanner probing forbidden paths. A WooCommerce
+  stock sync whose API key lacked write access, and an admin whose Site Kit
+  dashboard polls a route the site answers with 403, were banned (and the
+  sync reported to the fleet blocklist). Those 403s no longer count toward
+  the ban. Still counted: the 403s CFM's WAF gives scanners on REST paths, a
+  REST login/token endpoint (a password guess there gets a 403), a
+  `wp-login.php` brute force and forbidden-file scans.
 - **A signed link no longer fails after the CDN cache-busting retry.** When a
   CDN (e.g. Cloudflare) bounces a visitor who already passed the challenge,
   CFM sends them to the page once more with an extra `cfm_nc` parameter the
