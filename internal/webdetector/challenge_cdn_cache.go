@@ -22,7 +22,9 @@ package webdetector
 //   - breaks the loop: a CLEARED client bounced back to the page for the same
 //     target within the breaker window is sent to next once more with a fresh
 //     cfm_nc query parameter, which a CDN keying on the query string has never
-//     cached, instead of being served the PoW again (cdnBustNext). Once per
+//     cached, instead of being served the PoW again (cdnBustNext; the edge
+//     drops cfm_nc again before the origin on a plain path, cfm.lua
+//     strip_cdn_bust_arg). Once per
 //     target per window: a further bounce gets the page;
 //   - counts those bounces per host and distinct client (an IPv4 address, an
 //     IPv6 /64) over 24 h
@@ -80,7 +82,8 @@ const cdnBustParam = "cfm_nc"
 // busted URL ends up in address bars, bookmarks and shared links, and a CDN
 // caches that exact URL too. The caller bounds the busts (one per target per
 // window), so a fresh value can never loop. next is the server-normalized
-// target (normalizeChallengeNext); the rest of its query is kept byte for byte.
+// target (normalizeChallengeNext); the rest of its query is kept byte for byte,
+// empty pairs included.
 //
 // It also returns "" for a next carrying a fragment (a cfm_nc after the '#'
 // never reaches the server; the edge never builds one, only a crafted
@@ -97,14 +100,16 @@ func cdnBustNext(next string) string {
 	}
 	path, query, _ := strings.Cut(next, "?")
 	kept := make([]string, 0, 4)
-	for _, kv := range strings.Split(query, "&") {
-		if kv == "" {
-			continue
+	if query != "" {
+		// Empty pairs are kept like every other byte: the edge drops only
+		// the cfm_nc pairs again (cfm.lua strip_cdn_bust_arg), and the
+		// origin must get the original query back (an HMAC over it).
+		for _, kv := range strings.Split(query, "&") {
+			if k, _, _ := strings.Cut(kv, "="); k == cdnBustParam {
+				continue
+			}
+			kept = append(kept, kv)
 		}
-		if k, _, _ := strings.Cut(kv, "="); k == cdnBustParam {
-			continue
-		}
-		kept = append(kept, kv)
 	}
 	kept = append(kept, cdnBustParam+"="+hex.EncodeToString(b[:]))
 	out := path + "?" + strings.Join(kept, "&")

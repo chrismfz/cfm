@@ -174,9 +174,10 @@ The challenge server now:
   every response;
 - sends a **cleared** visitor bounced back for the same target within the
   breaker window to `next` once more with a fresh `cfm_nc` query parameter
-  (for the CDN only: the edge drops it before the origin, so a signed URL
-  still verifies), instead of serving the PoW again (once per target per window; web scope only,
-  the panel listeners sit behind no CDN), and counts the host and the client
+  (for the CDN only: on a plain, unencoded path the edge drops it before the
+  origin, so a signed URL still verifies), instead of serving the PoW again
+  (once per target per window; web scope only, the panel listeners sit behind
+  no CDN), and counts the host and the client
   (an IPv4 address, an IPv6 /64), also when the retry cannot be built.
 
 A cleared bounce means a cache in front of the edge: the edge passes a valid

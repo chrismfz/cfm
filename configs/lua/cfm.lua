@@ -1264,19 +1264,32 @@ end
 -- verification, password reset, unsubscribe; payment callbacks with an HMAC
 -- over the query) rejects the extra parameter as a bad signature. So it is
 -- removed here, before anything reads the query, and every other byte of the
--- query is kept as sent (order, encoding, empty pairs). Keyed exactly like
--- cdnBustNext: a raw `cfm_nc` key, case-sensitive. ngx.var.arg_cfm_nc is the
--- cheap presence gate (nil when absent), so the common request pays one arg
--- lookup; set_uri_args runs only when a pair was actually dropped.
--- HONEST LIMIT: a changed query makes nginx rebuild the upstream URI from the
--- decoded path, so a percent-encoded path reaches the origin re-encoded (upper
--- case hex, an encoded slash decoded) — the same as the cfm_rt resume. It
--- applies only to the one cache-busting request; $request_uri (the logs, the
--- challenge redirect's next) keeps the URL as sent.
+-- query is kept as sent (order, encoding, empty pairs; cdnBustNext keeps them
+-- too, so the origin gets the original query back). Keyed exactly like
+-- cdnBustNext: a raw `cfm_nc=` key, case-sensitive. ngx.var.arg_cfm_nc is the
+-- cheap presence gate (nil when no `cfm_nc=` pair; a bare `cfm_nc` without `=`
+-- never opens it and is kept), so the common request pays one arg lookup;
+-- set_uri_args runs only when a pair was actually dropped. It runs again after
+-- the POST resume, whose replay restores the stored query (taken from
+-- $request_uri, so it can carry cfm_nc).
+-- ONLY FOR A PLAIN PATH: a changed query makes nginx rebuild the upstream URI
+-- from the DECODED path (r->uri), which it re-escapes only partly — %3C would
+-- reach the origin as a literal '<', %2F as '/', and dot segments and '//'
+-- resolved. Anyone can append ?cfm_nc=x, so that would be an on-demand switch
+-- from the client's bytes to decoded ones (an app echoing REQUEST_URI). The
+-- strip therefore runs only when the raw path in $request_uri equals ngx.var.uri
+-- byte for byte (no '%', no '//', no dot segment): then the rebuilt URI is the
+-- one the client sent. A percent-encoded path keeps its cfm_nc, as before this
+-- step. $request_uri itself is never changed (the logs, the challenge
+-- redirect's next and the micro-cache key keep cfm_nc: a busted URL is one
+-- extra, never-hit Tier B entry).
 local function strip_cdn_bust_arg()
   if ngx.var.arg_cfm_nc == nil then return false end
   local args = ngx.var.args
   if not args or args == "" then return false end
+  local raw = ngx.var.request_uri or ""
+  local q = raw:find("?", 1, true)
+  if (q and raw:sub(1, q - 1) or raw) ~= ngx.var.uri then return false end
   local kept, removed, pos, n = {}, false, 1, #args
   while true do
     local amp = args:find("&", pos, true)
@@ -1527,7 +1540,9 @@ if CFG.fp_policy then
 end
 
 -- ── POST resume ──────────────────────────────────────────────────────────────
-try_apply_post_resume(ip, host)
+if try_apply_post_resume(ip, host) then
+  pcall(strip_cdn_bust_arg) -- the replay's stored query (see the pre-step)
+end
 method = ngx.req.get_method() or method
 uri    = ngx.var.uri          or uri
 
