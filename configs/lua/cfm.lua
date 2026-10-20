@@ -1280,9 +1280,12 @@ end
 -- strip therefore runs only when the raw path in $request_uri equals ngx.var.uri
 -- byte for byte (no '%', no '//', no dot segment): then the rebuilt URI is the
 -- one the client sent. A percent-encoded path keeps its cfm_nc, as before this
--- step. $request_uri itself is never changed (the logs, the challenge
--- redirect's next and the micro-cache key keep cfm_nc: a busted URL is one
--- extra, never-hit Tier B entry).
+-- step — except on an applied POST resume, whose set_uri already holds the raw
+-- stored path (the equality then passes) and has already made nginx rebuild
+-- the upstream URI, so dropping the pair there changes only the query.
+-- $request_uri itself is never changed (the logs, the challenge redirect's
+-- next and the Site Cache keys keep cfm_nc: a busted URL is one extra,
+-- never-hit cache entry).
 local function strip_cdn_bust_arg()
   if ngx.var.arg_cfm_nc == nil then return false end
   local args = ngx.var.args

@@ -36,8 +36,9 @@ back-filled here — see the git/PR history for that period.
   the URL the visitor asked for. Before, an app that signs its links (Laravel
   email verification, password reset and unsubscribe links, payment
   callbacks) saw the extra parameter and answered "invalid signature". A URL
-  whose path is percent-encoded (non-Latin letters, `%2F`) keeps the
-  parameter as before: removing it there would hand the site a decoded path.
+  whose path is percent-encoded (non-Latin letters, `%2F`) or carries `//` or
+  `/./` keeps the parameter as before: removing it there would hand the site a
+  decoded path.
 
 ## 2026.10.19
 
