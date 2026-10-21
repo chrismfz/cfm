@@ -1397,15 +1397,20 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// Web scope only: the panel listeners sit behind no CDN, so a
 				// cleared bounce there is a validator disagreement, not a cache.
 				// Counted whether or not the bust can be built (a '#' or an
-				// over-long target): it is the same CDN symptom. Counted only
-				// when the request may have come through a CDN
-				// (cdnRelayedCounts): a direct client's own tab re-requesting
-				// the page (an Android PDF download leaves it on the challenge
-				// URL) is not a CDN, and named mathematica.gr on orion.
+				// over-long target): it is the same CDN symptom. Never for a
+				// download target (cdnDownloadTarget), and a bounce that
+				// reached the edge directly goes to its own list, which
+				// edge_health shows without a warning (cdnRelayedCounts): a
+				// download leaves the tab on the challenge URL, and visitors
+				// re-tapping it named mathematica.gr on orion, which has no CDN.
 				if why == "cleared" && scope == "web" && nextRedirects.putIfAbsent(key+"|nc", struct{}{}, now) {
 					relayed := r.Header.Get(cdnRelayedHeader)
-					if cdnRelayedCounts(relayed) {
+					switch {
+					case cdnDownloadTarget(next):
+					case cdnRelayedCounts(relayed):
 						noteCDNCachedChallenge(host, ip.String(), now)
+					default:
+						noteDirectClearedBounce(host, ip.String(), now)
 					}
 					if busted := cdnBustNext(next); busted != "" {
 						if verifyRejects.putIfAbsent(ip.String()+"|cdn_cached_challenge", struct{}{}, now) {

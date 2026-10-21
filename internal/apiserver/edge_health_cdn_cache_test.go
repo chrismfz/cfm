@@ -96,3 +96,43 @@ func TestCDNCachedChallenge_SuspectsWarnWhileNotServing(t *testing.T) {
 		t.Fatalf("severity = %v, want warn: counted suspects outrank a stopped listener", f["severity"])
 	}
 }
+
+// orion, 2026-10-21: cleared bounces that reached the edge directly (no
+// trusted proxy) are listed in evidence.direct_hosts and named in the summary,
+// but never raise the warning: a browser re-opening the challenge address, or
+// a CDN the edge does not trust as a proxy. A relayed suspect still warns.
+func TestCDNCachedChallenge_DirectBouncesAreListedNotWarned(t *testing.T) {
+	defer stubEdgeHealth(t)()
+	stubDropScan(t, 1000, nil)
+	last := time.Unix(dropTestNow-120, 0)
+	edgeHealthDirectBounces = func(time.Time) []webdet.CDNCacheSuspect {
+		return []webdet.CDNCacheSuspect{
+			{Host: "www.mathematica.gr", IPs: 6, Bounces: 7, First: last, Last: last},
+			{Host: "one-client.gr", IPs: 1, Bounces: 9, First: last, Last: last},
+		}
+	}
+	rep := buildEdgeHealthReport(context.Background(), 1000)
+	f := findFinding(t, rep, "cdn-cached-challenge")
+	if f["severity"] != "ok" || rep["overall"] == "warn" {
+		t.Fatalf("direct bounces only: severity %v, overall %v; want ok", f["severity"], rep["overall"])
+	}
+	ev := f["evidence"].(map[string]any)
+	direct := ev["direct_hosts"].([]map[string]any)
+	if len(direct) != 1 || direct[0]["host"] != "www.mathematica.gr" || direct[0]["ips"] != 6 {
+		t.Fatalf("direct_hosts = %v, want mathematica.gr only (the floor applies)", direct)
+	}
+	if hosts := ev["hosts"].([]map[string]any); len(hosts) != 0 {
+		t.Fatalf("hosts = %v, want none", hosts)
+	}
+	if s := f["summary"].(string); !strings.Contains(s, "1 vhost(s) had such bounces reach the edge DIRECTLY") {
+		t.Fatalf("summary = %q, want the direct note", s)
+	}
+
+	edgeHealthCDNSuspects = func(time.Time) []webdet.CDNCacheSuspect {
+		return []webdet.CDNCacheSuspect{{Host: "www.amabilecreations.com", IPs: 4, Bounces: 6, First: last, Last: last}}
+	}
+	f = findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "cdn-cached-challenge")
+	if f["severity"] != "warn" || !strings.Contains(f["summary"].(string), "www.amabilecreations.com") {
+		t.Fatalf("relayed suspect: %v %q, want warn naming it", f["severity"], f["summary"])
+	}
+}

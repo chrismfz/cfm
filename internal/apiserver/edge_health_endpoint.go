@@ -77,6 +77,9 @@ var (
 	edgeHealthNow = func() int64 { return time.Now().Unix() }
 	// Check F's source: the challenge server's per-host cleared-bounce counts.
 	edgeHealthCDNSuspects = webdet.CDNCachedChallengeHosts
+	// Check F's informational list: cleared bounces that reached the edge
+	// directly (no trusted proxy), never a warning.
+	edgeHealthDirectBounces = webdet.DirectClearedBounceHosts
 	// Whether the challenge server is up here: without it Check F measures
 	// nothing, which is `unknown`, never an all-clear.
 	edgeHealthChallengeServing = webdet.ChallengeServerServing
@@ -580,11 +583,14 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	// client's own Host header, so one client must not be able to raise it. It is
 	// a heuristic, hence "likely": several tabs on one target or a validator
 	// disagreement (a bridge-token rotation window, which can hit many IPs at
-	// once) bounce cleared clients too. A bounce the edge marks as direct (no
-	// trusted proxy between client and edge, X-CFM-Relayed: 0) is not counted:
-	// an Android PDF download leaves the tab on the challenge URL, which named
-	// a vhost with no CDN at all (orion, 2026-10-21). A CDN that also caches
-	// the challenge page's own URL sends no bounce here at all
+	// once) bounce cleared clients too. A download leaves the tab on the
+	// challenge URL and each re-tap bounces with no cache involved, which named
+	// a vhost with no CDN at all (orion, 2026-10-21, PDFs on Android): a
+	// download target is not counted, and a bounce the edge marks as direct (no
+	// trusted proxy between client and edge, X-CFM-Relayed: 0) only lands in
+	// evidence.direct_hosts, never a warning: a browser re-opening the address,
+	// or a CDN the edge does not trust as a proxy. A CDN that also caches the
+	// challenge page's own URL sends no bounce here at all
 	// (challenge_cdn_cache.go).
 	// `ips` is the 24 h count of distinct clients (the key keeps its name);
 	// `bounces` covers the host's whole current run.
@@ -604,6 +610,20 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 		})
 	}
 	fEv["hosts"] = suspects
+	direct := []map[string]any{}
+	for _, s := range edgeHealthDirectBounces(time.Unix(now, 0)) {
+		if s.IPs < edgeHealthCDNSuspectMin {
+			continue
+		}
+		direct = append(direct, map[string]any{
+			"host": s.Host, "ips": s.IPs, "bounces": s.Bounces, "last": s.Last.UTC().Format(time.RFC3339),
+		})
+	}
+	fEv["direct_hosts"] = direct
+	directNote := ""
+	if len(direct) > 0 {
+		directNote = "; " + itoa(len(direct)) + " vhost(s) had such bounces reach the edge DIRECTLY (no trusted proxy, evidence.direct_hosts): a browser re-opening the challenge address, or a CDN the edge does not trust as a proxy — not a warning"
+	}
 	switch {
 	case len(suspects) > 0:
 		names := make([]string, 0, 4)
@@ -615,15 +635,15 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 			names = append(names, s["host"].(string))
 		}
 		findings = append(findings, sev.add("cdn-cached-challenge", "warn",
-			itoa(len(suspects))+" vhost(s) likely behind a CDN that serves CFM's challenge from its cache ("+strings.Join(names, ", ")+"): visitors holding a valid clearance, relayed by a trusted proxy (the CDN), were bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct clients each (IPv6 per /64), so every visitor of a cached URL is challenged until the CDN entry expires",
+			itoa(len(suspects))+" vhost(s) likely behind a CDN that serves CFM's challenge from its cache ("+strings.Join(names, ", ")+"): visitors holding a valid clearance were bounced back to the challenge, not marked direct by the edge (relayed by a trusted proxy, i.e. the CDN), from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct clients each (IPv6 per /64), so every visitor of a cached URL is challenged until the CDN entry expires"+directNote,
 			fEv, "in that vhost's CDN (Cloudflare: Caching → Cache Rules) set Edge TTL to respect the origin's Cache-Control (CFM's challenge responses are no-store), then purge the cache"))
 	case !edgeHealthChallengeServing():
 		fEv["measured"] = false
 		findings = append(findings, sev.add("cdn-cached-challenge", "ok",
-			"not measured: the challenge server is not serving on this node (CHALLENGE_HTTP_LISTEN unset, or its listener failed), so it serves no challenge page a CDN could cache", fEv, ""))
+			"not measured: the challenge server is not serving on this node (CHALLENGE_HTTP_LISTEN unset, or its listener failed), so it serves no challenge page a CDN could cache"+directNote, fEv, ""))
 	default:
 		findings = append(findings, sev.add("cdn-cached-challenge", "ok",
-			"no vhost had visitors holding a valid clearance bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct clients in the last 24 h (in-memory: empty after a daemon restart)", fEv, ""))
+			"no vhost had visitors holding a valid clearance bounced back to the challenge through a trusted proxy from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct clients in the last 24 h (in-memory: empty after a daemon restart)"+directNote, fEv, ""))
 	}
 
 	sort.SliceStable(findings, func(i, j int) bool {
