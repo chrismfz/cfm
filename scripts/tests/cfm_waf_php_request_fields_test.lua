@@ -25,17 +25,12 @@ local function show(s) return (s:gsub("[%c\128-\255]", function(c) return ("\\%0
 local fails = 0
 for i, c in ipairs(cases) do
   local f = det.php_request_fields(c.method:lower(), c.query, c.body, { ["Content-Type"] = c.ct })
-  -- A body with more non-empty file parts than PHP's default max_file_uploads
-  -- (20) is read twice and the reads joined (each_multipart_field): there the
-  -- reader must still hold every name and value PHP registered (the rules
-  -- read every value), but may hold more. Elsewhere it must match PHP exactly.
-  local nfiles = 0
-  if c.method == "POST" then
-    for _, fname in ipairs(det.php_file_names(c.body, c.ct)) do
-      if fname ~= "" then nfiles = nfiles + 1 end
-    end
-  end
-  local superset = nfiles > 20
+  -- A body the reader reads more than once, the reads joined
+  -- (each_multipart_field: more files than PHP's default max_file_uploads, or
+  -- a file a MAX_FILE_SIZE field may cut short): there it must still hold
+  -- every name and value PHP registered (the rules read every value), but may
+  -- hold more. Elsewhere it must match PHP exactly.
+  local superset = c.method == "POST" and det.php_multipart_joined(c.body, c.ct)
   local bad = {}
   for name, want in pairs(c.want) do
     local got = f[name]
@@ -56,7 +51,8 @@ for i, c in ipairs(cases) do
   end
   -- Every file name PHP registered (php_ap_basename of it) must be among the
   -- file parts the reader sees (rules 401 / 415). More is allowed: the reader
-  -- also reports a file part PHP skips (past max_file_uploads).
+  -- also reports a file part PHP skips (past max_file_uploads), and a joined
+  -- read may report one twice.
   if c.files and #c.files > 0 then
     local seen = {}
     for _, fname in ipairs(det.php_file_names(c.body, c.ct)) do

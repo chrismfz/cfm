@@ -6,8 +6,9 @@
 -- next "\n--<boundary>" after every part and so missed that part: a
 -- `shell.php` whose name is split over a colon-less continuation line (only
 -- the reader joins it; the raw scan cannot see it), right after an empty file
--- part, passed rule 401 and Elementor's 10016. Checked against PHP 8.3.6:
--- PHP stores shell.php in each shape below.
+-- part, passed rule 401 and Elementor's 10016. So did one placed where PHP
+-- resumes after a MAX_FILE_SIZE field cuts an upload short. Checked against
+-- PHP 8.3.6: PHP stores shell.php in each positive shape below.
 
 _G.ngx = {
   now           = function() return 1000 end,
@@ -47,6 +48,28 @@ do
   end
   t[#t + 1] = '--XB\r\nContent-Disposition: form-data; name="over"; filename="b.txt"\r\n\r\n'
   check(f401(table.concat(t) .. SPLIT .. END), "split name right after a file past max_file_uploads")
+end
+-- MAX_FILE_SIZE (any case) makes PHP cancel a bigger upload partway and
+-- resume find_boundary from where the read stopped, 2 x 5119 bytes in here:
+-- PHP 8.3.6 stores the shell.php part placed there.
+do
+  local function mfs_body(field, value, pad)
+    return '--XB\r\nContent-Disposition: form-data; name="' .. field .. '"\r\n\r\n' .. value .. '\r\n' ..
+           '--XB\r\nContent-Disposition: form-data; name="a"; filename="a.txt"\r\n\r\n' .. ("A"):rep(pad) .. SPLIT .. END
+  end
+  check(f401(mfs_body("MAX_FILE_SIZE", "1000", 10238)), "shell.php where PHP resumes after a MAX_FILE_SIZE cut")
+  check(f401(mfs_body("max_file_size", "1", 10238 + 5120)), "the same, lowercase name, one FILLUNIT step later")
+  -- No MAX_FILE_SIZE (or 0): PHP reads the whole file; its bytes hold no part.
+  check(not det.php_multipart_joined(mfs_body("other", "1000", 10238), CT), "no MAX_FILE_SIZE: one read")
+  check(not det.php_multipart_joined(mfs_body("MAX_FILE_SIZE", "0", 10238), CT), "MAX_FILE_SIZE 0: one read")
+  check(det.php_multipart_joined(mfs_body("MAX_FILE_SIZE", "1000", 10238), CT), "a file over MAX_FILE_SIZE: joined reads")
+  -- A legit form with a MAX_FILE_SIZE field and an image under it: clean.
+  check(not f401('--XB\r\nContent-Disposition: form-data; name="MAX_FILE_SIZE"\r\n\r\n2000000\r\n' ..
+                 '--XB\r\nContent-Disposition: form-data; name="photo"; filename="cat.jpg"\r\n\r\n' .. ("J"):rep(20000) .. "\r\n" .. END),
+        "MAX_FILE_SIZE form with an image under the limit")
+  check(not f401('--XB\r\nContent-Disposition: form-data; name="MAX_FILE_SIZE"\r\n\r\n1000\r\n' ..
+                 '--XB\r\nContent-Disposition: form-data; name="photo"; filename="cat.jpg"\r\n\r\n' .. ("J"):rep(20000) .. "\r\n" .. END),
+        "MAX_FILE_SIZE form with an image over the limit (no boundary inside it)")
 end
 -- A kept file's bytes are not parts: a `--XB` line inside them ends the file
 -- (PHP reads to the next "\n--XB"), so a clean upload stays clean.

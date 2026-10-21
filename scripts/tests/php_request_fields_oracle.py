@@ -137,6 +137,13 @@ def gen_multipart(r, bnd):
         if r.random() < 0.9:
             out.append(nl())
         out.append(r.choice(VALUES) + r.choice(["", "", "\r", "x\n--" + bnd + "X"]) + nl())
+    if r.random() < 0.08:  # MAX_FILE_SIZE, then a file it cuts short with a part where PHP resumes
+        out.append("--" + bnd + nl() + 'Content-Disposition: form-data; name="' + r.choice(["MAX_FILE_SIZE", "max_file_size"]) + '"' + nl() + nl()
+                   + r.choice(["1000", "1", "0", "-5", "x"]) + nl())
+        out.append("--" + bnd + nl() + 'Content-Disposition: form-data; name="big"; filename="big.bin"' + nl() + nl())
+        out.append("A" * (2 * 5119 + r.choice([0, 0, 5120, 1, -1])) + "--" + bnd + nl()
+                   + 'Content-Disposition: form-data; name="' + r.choice(["up", "action", "pagename"]) + '"'
+                   + r.choice(['; filename="shell.php"', ""]) + nl() + nl() + r.choice(VALUES) + nl())
     if r.random() < 0.8:
         out.append("--" + bnd + "--" + nl())
     return "".join(out)
@@ -186,6 +193,13 @@ FIXED = [
                      for i in range(20))
              + "--XB\r\nContent-Disposition: form-data; name=\"over\"; filename=\"b.txt\"\r\n\r\n"
              "--XB\r\nContent-Disposition: form-data; name=\"pagename\"\r\n\r\nv\r\n--XB--\r\n"},
+    # MAX_FILE_SIZE cuts big.bin short; PHP resumes 2 x 5119 bytes in, where a
+    # shell.php part (name split over a continuation) and a field sit.
+    {"method": "POST", "query": "", "ct": "multipart/form-data; boundary=XB",
+     "body": "--XB\r\nContent-Disposition: form-data; name=\"MAX_FILE_SIZE\"\r\n\r\n1000\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\n" + "A" * 10238 +
+             "--XB\r\nContent-Disposition: form-data; name=\"up\"; filename=\"shell.p\r\nhp\"\r\n\r\n<?php x ?>\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"action\"\r\n\r\ntrp\r\n--XB--\r\n"},
     # The same after a CD-less part, and a value field after both.
     {"method": "POST", "query": "", "ct": "multipart/form-data; boundary=XB",
      "body": "--XB\r\nX: 1\r\n\r\n--XB\r\nContent-Disposition: form-data; name=\"e\"; filename=\"\"\r\n\r\n"
