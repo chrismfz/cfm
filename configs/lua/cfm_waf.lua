@@ -248,6 +248,8 @@ local CFG = {
   rule_cve_translatepress_id_lookup = "block", -- CVE-2026-19632 second leg: unauthenticated action=trp_get_translations_regular with string_ids reads stored strings back by id. Only the logged-in editor (trp-editor.js) sends string_ids; gated on no wordpress_logged_in_ cookie (FP filter, a junk cookie bypasses it). Edge block; autoblock held per rule (RULE_10019 = 0): a translator whose login expired mid-session would otherwise be banned.
   rule_cve_php_multipart_oom = "block", -- CVE-2026-109618 (GHSA-w8hw-w9fx-j79w; also the OOM producer of CVE-2026-109619, GHSA-6wmf-4rv5-p3rp): PHP < 8.2.35/8.3.36/8.4.27/8.5.12 unauth RCE via out-of-memory during the startup multipart parse (mod_php confirmed). Keyed on the body shapes the advisory names, on a multipart POST: a part with >16 header lines (PART_HEADERS), >=128 empty-filename file controls (EMPTY_FILES), a file part's name nested >16 levels or a plain field's >32 (NESTING). Real forms send none of them (fastest FP lever: a per-host/path WAF exclude for 10021, which also covers the body burn-in). Armed like every WAF_CVE block rule: the exploit needs many attempts (AC:H), and the 6h ban on the first one stops the rest. Not a substitute for the PHP update.
   rule_cve_php_multipart_no_length = "block", -- CVE-2026-109618, the fourth shape: a multipart POST with no Content-Length (NO_CL) that nginx streams to the origin as it is (cfm.lua no_body_length: a body the edge never read — a failed HTTP/3 read, a streaming path off the body allowlist; a body read in full first goes upstream with a real Content-Length). Edge block, autoblock held per rule (RULE_10022 = 0): a non-browser client that streams multipart chunked (Go io.Pipe, curl -F f=@-, Java chunked mode) sends the same shape, and a 6h ban of it (and its NAT) is the wrong answer. Runs late, with 10019/10020, so the held hit cannot take the ban from an armed rule.
+  rule_cve_php_upload_progress = "block", -- CVE-2026-109619 (GHSA-6wmf-4rv5-p3rp) as PHP2Shell exploits it: a multipart field (or file part) named PHP_SESSION_UPLOAD_PROGRESS, any case, with neither a same-site Referer nor a same-site Origin (NO_REFERER / XSITE), or with one but no same-site Sec-Fetch-Site (NO_FETCH_METADATA: the scanner forged a same-site Referer here): block; a browser's own upload-progress form sends all three (SAME_SITE) and is logonly. Source: Imunify360 ruleset 8.85 (77866818 / 77236259), which caught the tool on this fleet on 2026-10-21 after it passed the edge; Origin and Fetch Metadata are our additions (a browser sends both on every POST, also under Referrer-Policy: no-referrer). Armed: a scanner hitting many sites is what it bans. Runs in step 0 after 10021 and is enforced in the body burn-in (cfm.lua BURNIN_ENFORCE_IDS). Not a substitute for session.upload_progress.enabled = 0 and the PHP update.
+  rule_cve_php2shell_tool = "block", -- CVE-2026-109618/109619, the public PHP2Shell tool by its request head: User-Agent `php2shell-...` (seen here as php2shell-scanner) or one of its multipart boundaries (B7kQpoc61N, UctxPoc20NN, -*nphp618/619, *php2shell). Source: Imunify360 ruleset 8.85 rule 77318849 and this fleet's edge logs. Armed; header-only, so it holds on the panel ports too. A renamed tool passes.
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
 
   -- [top-4]  Upload controls
@@ -671,6 +673,8 @@ local RULE_IDS = {
   rule_cve_elementor_pro_form_upload = 10016,
   rule_cve_php_multipart_oom = 10021,
   rule_cve_php_multipart_no_length = 10022,
+  rule_cve_php2shell_tool = 10023,
+  rule_cve_php_upload_progress = 10024,
   rule_cve_wp_pagename_traversal = 10017,
   rule_cve_translatepress_reset_preview = 10018,
   rule_cve_translatepress_reset_preview_authed = 10020,
@@ -988,7 +992,8 @@ local function check_impl(ctx, st)
   end
 
   -- ── 0) PHP core multipart OOM -> RCE (CVE-2026-109618 / -109619) ────────
-  -- The body shapes (rule 10021). FIRST, before every other rule: an armed
+  -- The body shapes (rule 10021), then 10024 and 10023 below. FIRST, before
+  -- every other rule: an armed
   -- block whose request is ALSO built to trip another block rule must still
   -- be recorded, because in cfm.lua's body burn-in (a large or chunked body
   -- on `location /`) only 10021 is enforced, and an earlier block hit would
@@ -1001,6 +1006,31 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_109618:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_multipart_oom) then goto done end
+      end
+    end
+  end
+  -- PHP session upload progress (CVE-2026-109619), rule 10024: right after
+  -- 10021 and for the same reason (enforced in the body burn-in, so no earlier
+  -- block may end the check first). A same-site Referer / Origin is logonly.
+  do
+    local mode = rule_mode(CFG.rule_cve_php_upload_progress, "block")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_cve_php_upload_progress(m_lower, body, headers, ctx.host)
+      if tag then
+        if tag == "SAME_SITE" then mode = "logonly" end
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_109619:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_upload_progress) then goto done end
+      end
+    end
+  end
+  -- The PHP2Shell tool by its request head, rule 10023.
+  do
+    local mode = rule_mode(CFG.rule_cve_php2shell_tool, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_php2shell_tool(headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_109619:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php2shell_tool) then goto done end
       end
     end
   end

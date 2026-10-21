@@ -1632,10 +1632,12 @@ local clearance_allow = clearance_ok
 -- Burn-in (Step 2): the strongest of the body's own hits is the one recorded.
 local BURNIN_SEV = { logonly = 1, challenge = 2, challenge_v2 = 3, block = 4 }
 -- Body rules whose block is enforced in burn-in too. 10021 (CVE-2026-109618,
--- the PHP multipart OOM shapes) is new to every body, and its exploit is
--- exactly a large or chunked body on `location /` (POST / to WordPress's
--- index.php), which the burn-in would otherwise turn into a logonly hit.
-local BURNIN_ENFORCE_IDS = { ["10021"] = true }
+-- the PHP multipart OOM shapes) and 10024 (CVE-2026-109619, the session
+-- upload progress field PHP2Shell sends) are new to every body, and their
+-- exploit is exactly a large or chunked body on `location /` (POST / to
+-- WordPress's index.php), which the burn-in would otherwise turn into a
+-- logonly hit: on 2026-10-21 PHP2Shell's POST / passed this edge.
+local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true }
 
 -- Set by a logonly WAF hit, which records and pushes it, then goes on through
 -- Steps 2b-4 like a clean request (it used to route to the origin there and

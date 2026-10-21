@@ -7155,4 +7155,98 @@ function _M.detect_cve_php_multipart_no_length(method, headers, no_length)
   return "NO_CL"
 end
 
+-- Rules 10023 / 10024 — CVE-2026-109619 (GHSA-6wmf-4rv5-p3rp) as it is
+-- exploited in the wild: the public PHP2Shell tool drives PHP's session
+-- upload progress (a multipart field named after session.upload_progress.name,
+-- PHP_SESSION_UPLOAD_PROGRESS by default). Its requests carry none of the
+-- 10021 shapes: on 2026-10-21 they passed this edge to the origin, where
+-- Imunify360 stopped them (orion 120.gr, mars 11ads.gr; 3deers.studio
+-- answered 200). Sources: Imunify360 WAF ruleset 8.85 (rules 77318849,
+-- 77866818, 77236259) and this fleet's own edge logs (ua="php2shell-scanner").
+--
+--   10023 (armed), the request head: the tool's User-Agent (`php2shell-…`) or
+--          one of its multipart boundaries.
+--   10024 (armed), the body: a multipart field or file part named
+--          PHP_SESSION_UPLOAD_PROGRESS (any case: PHP compares it exactly,
+--          so this is a superset) with neither a same-site Referer nor a
+--          same-site Origin (NO_REFERER, XSITE), or with one but without a
+--          same-site Sec-Fetch-Site (NO_FETCH_METADATA: a forged Referer).
+--          A browser's own upload-progress form sends all of them, so that
+--          request (SAME_SITE) is logonly telemetry. Beyond Imunify's
+--          Referer test: Origin (a browser sends it on every POST, also under
+--          `Referrer-Policy: no-referrer`) and Fetch Metadata (the scanner
+--          forged a same-site Referer here).
+--
+-- Neither one fixes PHP: `session.upload_progress.enabled = 0` and the PHP
+-- update do. A tool that renames itself passes 10023; one that forges a
+-- same-site Referer AND Sec-Fetch-Site passes 10024, as does a progress field
+-- placed past the scanned window (waf_body_max_len, 32 KB) or a body the edge
+-- never read (a large one off the read allowlist; length-less ones are 10022's).
+
+-- 10023: the boundary values PHP2Shell sends (Imunify 77318849), lowercased:
+-- B7kQpoc61N, UctxPoc20NN, up to 70 dashes + nphp618/619, and any run of
+-- [-0-9a-z_.] (up to 80) before "php2shell".
+local function php2shell_boundary(v)
+  if v:find("^b7kqpoc61%d$") or v:find("^uctxpoc20%d%d$") then return true end
+  local dashes = v:match("^(%-*)nphp61[89]")
+  if dashes and #dashes <= 70 then return true end
+  local pre = v:match("^([%-%w_.]*)php2shell")
+  return pre ~= nil and #pre <= 80
+end
+
+function _M.detect_cve_php2shell_tool(headers)
+  headers = headers or {}
+  local ua = lower(header_string(headers["user-agent"] or headers["User-Agent"]) or "")
+  if ua:find("^php2shell%-") then return "TOOL_UA" end
+  local ct = lower(php_content_type(headers))
+  if not (ct:find("poc", 1, true) or ct:find("php", 1, true)) then return nil end
+  for v in (" " .. ct):gmatch("[;,%s]boundary%s*=%s*\"?([^\";,%s]*)") do
+    if php2shell_boundary(v) then return "TOOL_BOUNDARY" end
+  end
+  return nil
+end
+
+-- 10024: the field name, case-insensitive, as a Lua pattern ("[Pp][Hh]…"),
+-- so a body without it costs one scan and no parse.
+local UPLOAD_PROGRESS_NAME = "php_session_upload_progress"
+local UPLOAD_PROGRESS_PAT = UPLOAD_PROGRESS_NAME:gsub("%a", function(c)
+  return "[" .. c:upper() .. c .. "]"
+end)
+
+-- The host of an absolute URL (a Referer or an Origin), lowercased, without
+-- userinfo or port; nil for anything else ("null", a relative Referer).
+local function url_host(s)
+  local auth = s and s:match("^%a[%w+.%-]*://([^/?#]*)")
+  if not auth or auth == "" then return nil end
+  return lower(strip_host_port((auth:gsub("^.*@", ""))))
+end
+
+function _M.detect_cve_php_upload_progress(method, body, headers, req_host)
+  if method ~= "post" or not body or body == "" then return nil end
+  if not body:find(UPLOAD_PROGRESS_PAT) then return nil end
+  headers = headers or {}
+  local ct_raw = php_content_type(headers)
+  if php_media_type(ct_raw) ~= "multipart/form-data" then return nil end
+  local found = false
+  local function seen(name)
+    if not found and name and lower(name) == UPLOAD_PROGRESS_NAME then found = true end
+  end
+  each_multipart_field(body, ct_raw, seen, function(_, name) seen(name) end)
+  if not found then return nil end
+  local host = lower(strip_host_port(header_string(headers["host"] or headers["Host"]) or req_host or ""))
+  local ref = url_host(header_string(headers["referer"] or headers["Referer"]))
+  local org = url_host(header_string(headers["origin"] or headers["Origin"]))
+  if host ~= "" and (ref == host or org == host) then
+    -- A script forges a Referer as easily as anything else, and PHP2Shell's
+    -- scanner did (94.26.104.67, a same-site Referer, 2026-10-21). A browser
+    -- also sends Fetch Metadata on every request (Chrome 76+, Firefox 90+,
+    -- Safari 16.4+): a same-site one without it is not a browser's form.
+    local sfs = lower(header_string(headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]) or "")
+    if sfs == "same-origin" or sfs == "same-site" then return "SAME_SITE" end
+    return "NO_FETCH_METADATA"
+  end
+  if ref or org then return "XSITE" end
+  return "NO_REFERER"
+end
+
 return _M
