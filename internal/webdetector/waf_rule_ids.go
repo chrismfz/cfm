@@ -212,6 +212,15 @@ var wafRuleIDs = []WAFRule{
 	// its autoblock held, since a streaming upload client sends it too.
 	{ID: 10021, Name: "rule_cve_php_multipart_oom", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10022, Name: "rule_cve_php_multipart_no_length", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
+	// 10023 / 10024: CVE-2026-109619 as the PHP2Shell tool exploits it (it
+	// passed 10021). 10023 (armed) = the tool's User-Agent or boundary.
+	// 10024 (armed) = a PHP_SESSION_UPLOAD_PROGRESS multipart field without a
+	// same-site Referer or Origin, or with one but no same-site
+	// Sec-Fetch-Site; logonly with both (a browser's own form, also from a
+	// www./sibling host) or with Origin "null", no Referer and a same-origin
+	// / same-site Sec-Fetch-Site (Referrer-Policy: no-referrer).
+	{ID: 10023, Name: "rule_cve_php2shell_tool", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	{ID: 10024, Name: "rule_cve_php_upload_progress", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

@@ -17,7 +17,25 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **New WAF rules 10023 / 10024 block PHP2Shell (CVE-2026-109619) as it is
+  exploited in the wild.** The public tool drives PHP's session upload
+  progress, and its requests carry none of the shapes rule 10021 looks for:
+  on 2026-10-21 they passed the edge to the origin on orion and mars, where
+  Imunify360 stopped them (one site answered 200). Rule **10023** blocks the
+  tool by its request head (User-Agent `php2shell-…`, or one of its multipart
+  boundaries). Rule **10024** blocks a multipart field named
+  `PHP_SESSION_UPLOAD_PROGRESS` unless the request carries a same-site Referer
+  or Origin *and* a same-site `Sec-Fetch-Site`: the scanner forged a same-site
+  Referer here, and every modern browser sends Fetch Metadata. A browser's own
+  upload-progress form is only logged, including one posted from the `www.`
+  or a sibling host and one under `Referrer-Policy: no-referrer` (`Origin:
+  null`, no Referer). The field name is read as PHP joins it, so splitting it
+  across header lines does not get past the rule. Both are armed (a 6 h ban), and 10024
+  is enforced in the body burn-in too, which is where the tool's `POST /`
+  passed. Built from Imunify360 ruleset 8.85 and the fleet's own logs. Not a
+  fix: set `session.upload_progress.enabled = 0` and update PHP (8.2.35 /
+  8.3.36 / 8.4.27 / 8.5.12).
 
 ## 2026.10.21
 
