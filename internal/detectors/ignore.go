@@ -258,3 +258,15 @@ func ensureCFMGroupRead(path string) {
 	}
 	_ = os.Chown(path, -1, gid)
 }
+
+// GlobalIgnoreFromFile reads [global] IGNORE_IPS / IGNORE_NETS from the
+// detectors config at path (with its detectors.d overlays) for code that runs
+// before the manager does (the daemon's TTL ban restore). It returns nil when
+// the file can't be read or ignores nothing; ShouldIgnore on nil is false.
+func GlobalIgnoreFromFile(path string) (*IPIgnore, error) {
+	secs, err := ReadLayeredFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return newIPIgnoreFromGlobal(secs.Global), nil
+}

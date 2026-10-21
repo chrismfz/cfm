@@ -78,6 +78,16 @@ keeps the old-port accepts until DNATOn has moved the redirect). The web ones
 were deleted and re-added on every reload, a window of dropped DNAT'd
 connections that the live test now pins (a reload must not change a handle).
 
+**TTL bans live only in nft** (timed elements of `block_v4`/`block_v6`;
+`cfm.deny` is permanent-only and must never take one). Nothing on a restart
+may empty the `inet cfm` table: the rpm `%post` ran `cfm disable` on every
+upgrade and freed every TTL-banned attacker (2026-10-21). For what still does
+(reboot, `cfm reset`), `internal/ttlban` persists them to
+`/var/lib/cfm/ttlbans.json` and restores them after EnsureBase. A new unblock
+path calls `ttlban.Forget` next to `edgeban.Unban`, or a restart resurrects
+the ban. Live test: `-run LiveNFTTTLBans` (both engines). See
+`docs/DETECTORS.md` "TTL bans across a restart".
+
 ---
 
 ## 3. CI gates — these MUST pass before pushing
@@ -304,6 +314,9 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
     `SetSystemConfigPathForTest` from the apiserver `TestMain`).
   - the `edgeban` `DefaultPath` (`/var/lib/cfm/edgeban.json`, via
     `SetPathForTest`; a test installing a Default store gives it a temp path);
+  - the `ttlban` `DefaultPath` (`/var/lib/cfm/ttlbans.json`, the persisted
+    TTL bans; via `SetPathForTest`, and a test building a store gives it a
+    temp path);
   - the `hostsecrets` `Dir` (`/var/lib/cfm/secrets`, the per-host
     CHALLENGE_TOKEN / OPENRESTY_TOKEN / SSLCOLLECTOR_SOCK_TOKEN store; via `SetDirForTest`, which also
     clears the per-process token caches, from the `TestMain` of a package whose
@@ -875,7 +888,8 @@ because of that. Hard-won points:
   worker re-reads the switch within ~10 s and serves the old generation until
   it next polls.
 - **`detectors.conf` edits apply without a reload.** The manager polls the file.
-  The daemon has no SIGHUP handler, so `systemctl reload cfm` restarts it
+  SIGHUP still ends the daemon (its only handler saves the TTL bans,
+  `internal/ttlban`, then re-raises the signal), so `systemctl reload cfm` restarts it
   (systemd `Restart=always`). A config reload builds a new webdetector Engine,
   which empties the in-memory Site Cache stats view. A reload follows any save
   (the signature is the file mtime) and the rotation of a tailed detector log

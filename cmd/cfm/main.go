@@ -56,6 +56,7 @@ import (
 	"cfm/internal/kernsec"
 	"cfm/internal/lsm"
 	"cfm/internal/mailqcli"
+	"cfm/internal/ttlban"
 	"cfm/internal/unblock"
 )
 
@@ -814,6 +815,13 @@ func runDaemon(args []string) {
 	}
 	done()
 
+	// TTL bans (internal/ttlban): re-add the bans a fresh table lost (a
+	// reboot, `cfm reset`, `cfm disable`), each for the time it has left. In
+	// the background; the edge ban store's first reconcile waits for it, or
+	// it would drop the edge's copy of every ban nft does not hold yet. The
+	// store is refreshed from that reconcile's read and once more on SIGTERM.
+	ttlRestored := startTTLBans(be, cfgDir)
+
 	// Edge ban store (internal/edgeban): the web-related and manual bans the
 	// edge enforces itself, for clients behind a trusted proxy that the nft
 	// drop never sees. Loaded from disk, then narrowed to what nft still
@@ -821,7 +829,10 @@ func runDaemon(args []string) {
 	edgeStore := edgeban.New(edgeban.DefaultPath)
 	edgeStore.Load()
 	edgeban.SetDefault(edgeStore)
-	go runEdgeBanReconcile(edgeStore, be)
+	go func() {
+		<-ttlRestored
+		runEdgeBanReconcile(edgeStore, be)
+	}()
 
 	//Notify manager
 
@@ -960,6 +971,7 @@ func runDaemon(args []string) {
 						continue
 					}
 					edgeban.Unban(e.IP.String()) // nft accepts it now: so does the edge
+					ttlban.Forget(e.IP.String()) // and a restart must not restore the ban
 				}
 				seenAllow[key] = spec
 			} else {

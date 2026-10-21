@@ -17,7 +17,23 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **A package upgrade, restart or reboot no longer frees every TTL-banned
+  address.** TTL bans (autoblock, WAF autoblock, `cfm block --ttl`, fleet
+  blocklist deltas) live only as timed elements of `block_v4` / `block_v6`,
+  and the rpm upgrade script ran `cfm disable`, which deletes the whole
+  firewall table: on the 2026.10.21 upgrade, 49 of 50 bans on one node
+  disappeared while the notifier had already reported "Blocked: Yes". This
+  had been in the rpm package since 2025-10. The upgrade now restarts the
+  daemon without deleting the table, as the deb always did. The daemon also
+  saves its TTL bans to `/var/lib/cfm/ttlbans.json` (every ~2 minutes and on
+  stop) and restores them at start for the time they have left, which covers
+  a reboot or `cfm reset`. Expired bans are dropped, and so are bans an allow
+  entry, `cfm.ignore` or `IGNORE_IPS` now covers. Unblocks remove the entry at
+  once, so a restart never brings an unblocked address back. Permanent bans
+  still come from `cfm.deny`. As on deb nodes, a change of the input chain
+  priority now needs `cfm reset` on rpm nodes too. See `docs/DETECTORS.md`
+  "TTL bans across a restart".
 
 ## 2026.10.21
 

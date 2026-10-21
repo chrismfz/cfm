@@ -8,6 +8,7 @@ import (
 	"cfm/internal/edgeban"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
+	"cfm/internal/ttlban"
 )
 
 // edgeBanReconcileEvery paces the edge ban store's narrowing to nft (an
@@ -76,6 +77,13 @@ func readEdgeBanSnapshot(be firewall.Backend) (edgeban.Snapshot, error) {
 			return snap, fmt.Errorf("%s: %w", set, err)
 		}
 		snap.Blocks = append(snap.Blocks, elems...)
+	}
+	// The block sets are complete: refresh the persisted TTL bans
+	// (internal/ttlban) from them, whatever the allow sets' read does next.
+	if ts := ttlban.Default(); ts != nil {
+		if err := ts.Snapshot(snap.ReadAt, snap.Blocks); err != nil {
+			logging.Logf("[ttlban] snapshot save failed: %v", err)
+		}
 	}
 	for _, set := range edgeBanAllowSets {
 		elems, err := be.ListSetElementsTimed(set)

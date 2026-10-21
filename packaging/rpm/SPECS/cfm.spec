@@ -270,11 +270,14 @@ if systemctl is-active --quiet cfm.service; then
     systemctl stop cfm.service || true
 fi
 
-# Step 2: always disable (flush nftables)
-if [ -x "%{_bindir}/cfm" ]; then
-    echo "Flushing tables with: cfm disable"
-    "%{_bindir}/cfm" disable || true
-fi
+# Step 2 used to run `cfm disable` here, which deletes the whole inet cfm
+# table. Every TTL ban (autoblock, WAF, manual --ttl) lives only as a timed
+# element in block_v4/block_v6 (cfm.deny holds the permanent ones), so each
+# upgrade silently freed every banned attacker (2026-10-21). EnsureBase is
+# idempotent and keeps the table, its sets and their elements, as on a deb
+# upgrade, which never did this. The daemon also persists the TTL bans
+# (/var/lib/cfm/ttlbans.json) for the cases that do empty the table: a
+# reboot, `cfm reset`, `cfm disable`.
 
 # Step 3: if it was running, start again
 if [ "$was_active" -eq 1 ]; then
