@@ -3,7 +3,9 @@
 -- scripts/tests/php_request_fields_oracle.py — through
 -- cfm_waf_detectors.php_request_fields, the reader the field-keyed WAF rules
 -- (10017, 10018/10019/10020) use. Every name PHP registered must be read, with
--- PHP's value as the reader's LAST value for it (an array in PHP: name only).
+-- PHP's value as the reader's LAST value for it (an array in PHP: name only),
+-- and every file name PHP registered in $_FILES must be a file part the
+-- reader sees (php_file_names: the parts rules 401 / 415 read).
 -- The reader may not invent names PHP did not register either, so a
 -- divergence in either direction fails. Optional arg: another fixture path.
 
@@ -23,17 +25,47 @@ local function show(s) return (s:gsub("[%c\128-\255]", function(c) return ("\\%0
 local fails = 0
 for i, c in ipairs(cases) do
   local f = det.php_request_fields(c.method:lower(), c.query, c.body, { ["Content-Type"] = c.ct })
+  -- A body the reader reads more than once, the reads joined
+  -- (each_multipart_field: more files than PHP's default max_file_uploads, or
+  -- a file a MAX_FILE_SIZE field may cut short): there it must still hold
+  -- every name and value PHP registered (the rules read every value), but may
+  -- hold more. Elsewhere it must match PHP exactly.
+  local superset = c.method == "POST" and det.php_multipart_joined(c.body, c.ct)
   local bad = {}
   for name, want in pairs(c.want) do
     local got = f[name]
     if not got then
       bad[#bad + 1] = "missing " .. show(name)
-    elseif want ~= true and got[#got] ~= want then
+    elseif want ~= true and not superset and got[#got] ~= want then
       bad[#bad + 1] = ("%s: last=%s php=%s"):format(show(name), show(got[#got]), show(want))
+    elseif want ~= true and superset then
+      local ok = false
+      for _, v in ipairs(got) do if v == want then ok = true end end
+      if not ok then bad[#bad + 1] = ("%s: php=%s not among the values read"):format(show(name), show(want)) end
     end
   end
-  for name in pairs(f) do
-    if name ~= "" and c.want[name] == nil then bad[#bad + 1] = "extra " .. show(name) end
+  if not superset then
+    for name in pairs(f) do
+      if name ~= "" and c.want[name] == nil then bad[#bad + 1] = "extra " .. show(name) end
+    end
+  end
+  -- Every file name PHP registered (php_ap_basename of it) must be among the
+  -- file parts the reader sees (rules 401 / 415). More is allowed: the reader
+  -- also reports a file part PHP skips (past max_file_uploads), and a joined
+  -- read may report one twice.
+  if c.files and #c.files > 0 then
+    local seen = {}
+    for _, fname in ipairs(det.php_file_names(c.body, c.ct)) do
+      local base = fname:match("[^/\\]*$")
+      seen[base] = (seen[base] or 0) + 1
+    end
+    for _, fname in ipairs(c.files) do
+      if (seen[fname] or 0) == 0 then
+        bad[#bad + 1] = "missing file " .. show(fname)
+      else
+        seen[fname] = seen[fname] - 1
+      end
+    end
   end
   -- The rules' filtered read (PHP_FIELDS_WANT, lowercased names) must hold
   -- every value PHP registered for a wanted name.

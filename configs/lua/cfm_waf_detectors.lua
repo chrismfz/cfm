@@ -300,7 +300,12 @@ local function mp_get_line(b, p, n)
     if e >= p and b:byte(e) == 13 then e = e - 1 end
     line, nxt = b:sub(p, e), le + 1
   elseif n - p + 1 >= MP_FILLUNIT then
-    line, nxt = b:sub(p, lim), lim + 1
+    -- A piece is cut at a NUL below: find it first and copy only what is
+    -- kept (the piece is bounded, so this search is too). Not in the LF
+    -- branch, where the search would run past the line, quadratic on a
+    -- body of short NUL-free lines.
+    local z = b:find("\0", p, true)
+    line, nxt = b:sub(p, (z and z <= lim) and z - 1 or lim), lim + 1
   else
     return nil
   end
@@ -319,72 +324,251 @@ end
 -- one CR before it dropped. fn(name, value) runs once per field, in order;
 -- on_file(filename, name, s, e), when given, once per file part PHP registers
 -- (its bytes are b[s..e]). fn may be nil: no field value is then copied.
-local function each_multipart_field(b, ct_raw, fn, on_file)
+--
+-- Where the parse goes on after a part. PHP reads a part's bytes up to the
+-- next "\n--<boundary>" (php_ap_memstr) and then runs find_boundary, so this
+-- jumps there too — but only for a part PHP reads. A file part with an empty
+-- filename (UPLOAD_ERR_NO_FILE), or one past max_file_uploads, is not read:
+-- find_boundary then scans line by line from the end of its headers, so a
+-- boundary line right there opens the next part. Jumping missed that part: a
+-- `shell.php` name split over a continuation line, right after an empty file
+-- part, passed rule 401 (checked against PHP 8.3.6). Such a part is now
+-- followed line by line, and so is a file part whose name PHP refuses
+-- (mp_upload_name_ok). max_file_uploads is a per-host setting: the parse
+-- assumes PHP's default (MP_MAX_FILE_UPLOADS, also cPanel's), and when a body
+-- holds more non-empty file parts than that it is read a second time as if
+-- every one were kept, the two reads joined (a field or file may then be
+-- reported twice). A host whose limit sits between the two, or below 20, can
+-- still be read differently from PHP past its limit.
+--
+-- A kept file can also be cut short: an earlier field named MAX_FILE_SIZE
+-- (any case, attacker-chosen) makes PHP cancel the upload once it has read
+-- more than that, and find_boundary then resumes from wherever the read
+-- stopped (about 10 KB in, then FILLUNIT steps) — not at a line PHP's jump or
+-- this scan would reach. A `shell.php` part placed there was stored by PHP
+-- and seen by no rule (checked against PHP 8.3.6). Rather than copy PHP's
+-- buffer arithmetic, a body where that can happen is read once more part by
+-- part from EVERY boundary line in it (multipart_rescue), which reaches any
+-- resume point; it can only add parts. Not modelled: file_uploads=Off (PHP
+-- then skips every file part; no $_FILES exist, but a field right after one
+-- is missed here) and an upload_max_filesize / post_max_size cut inside the
+-- window (those limits are far above it).
+local MP_MAX_FILE_UPLOADS = 20
+-- rfc1867.c skips a file part whose name has unbalanced brackets, or a `]`
+-- followed by anything but `[` ("never repair potential malicious user
+-- input"). An anonymous file (no name) is named by PHP and kept.
+local function mp_upload_name_ok(name)
+  if not name then return true end
+  local c = 0
+  for i = 1, #name do
+    local ch = name:sub(i, i)
+    if ch == "[" then
+      c = c + 1
+    elseif ch == "]" then
+      c = c - 1
+      local nx = name:sub(i + 1, i + 1)
+      if nx ~= "" and nx ~= "[" then return false end
+    end
+    if c < 0 then return false end
+  end
+  return c == 0
+end
+-- One part's headers, read as multipart_buffer_headers reads them, from p
+-- (just past its boundary line) to a blank line or the end; at most
+-- max_lines lines when given. Returns p after them; whether the part has a
+-- Content-Disposition (the FIRST one, any case, with its continuations) and
+-- its LAST `name=` and `filename=` parameters; and the header lines read.
+local function mp_part_head(b, p, n, max_lines)
+  local hdrs, cur, lines = {}, nil, 0
+  while true do
+    local l, np = mp_get_line(b, p, n)
+    if not l then break end
+    p = np
+    if l == "" then break end
+    lines = lines + 1
+    if max_lines and lines > max_lines then break end
+    local c1 = l:sub(1, 1)
+    local colon = (not c1:find("^%s")) and l:find(":", 1, true)
+    if colon then
+      cur = { k = lower(l:sub(1, colon - 1)), v = { (l:sub(colon + 1):gsub("^%s+", "")) } }
+      hdrs[#hdrs + 1] = cur
+    elseif cur then
+      cur.v[#cur.v + 1] = l
+    end
+  end
+  local cd
+  for _, h in ipairs(hdrs) do
+    if h.k == "content-disposition" then cd = table.concat(h.v); break end
+  end
+  if not cd then return p, false, nil, nil, lines end
+  local name, filename
+  local i = cd:find("%S") or #cd + 1
+  while i <= #cd do
+    local pair
+    pair, i = php_ap_getword(cd, i, ";")
+    i = cd:find("%S", i) or #cd + 1
+    if pair:find("=", 1, true) then
+      local key, j = php_ap_getword(pair, 1, "=")
+      local lk = lower(key)
+      if lk == "name" then name = php_ap_getword_conf(pair, j)
+      elseif lk == "filename" then filename = php_ap_getword_conf(pair, j) end
+    end
+  end
+  return p, true, name, filename, lines
+end
+
+-- A value part's bytes from p, as php_ap_memstr cuts them: to the next
+-- "\n--<bnd>" (bound), one CR before it dropped. It also matches a boundary
+-- PREFIX that runs to the end of the body ("\n", "\n--", ...): a last value
+-- is cut there too. nextb holds one LF (its first byte), so only the body's
+-- last LF can start such a prefix: one comparison.
+-- lastlf, when given, is the index of the body's last LF (or false): a
+-- caller cutting many values from one body finds it once, not per value.
+local function mp_value(b, p, n, nextb, bound, lastlf)
+  local cut = bound
+  if not cut then
+    local k
+    if lastlf == nil then k = b:find("\n[^\n]*$", p)
+    elseif lastlf and lastlf >= p then k = lastlf end
+    if k and n - k + 1 < #nextb and nextb:sub(1, n - k + 1) == b:sub(k) then cut = k end
+  end
+  local v = b:sub(p, (cut or n + 1) - 1)
+  if cut and v:sub(-1) == "\r" then v = v:sub(1, -2) end
+  return v
+end
+
+-- MAX_FILE_SIZE as rfc1867.c reads it: strtoll of the field's value.
+local function mp_strtoll(v)
+  return tonumber((v or ""):match("^%s*([+-]?%d+)")) or 0
+end
+
+-- Returns the non-empty file parts seen and whether a kept file may have been
+-- cut short by an earlier MAX_FILE_SIZE field (see each_multipart_field).
+local function multipart_parse(b, ct_raw, fn, on_file, max_uploads)
   local bnd = php_mp_boundary(ct_raw)
-  if not bnd then return end -- an EMPTY boundary is valid to PHP: parts split on `--` lines
+  if not bnd then return 0, false end -- an EMPTY boundary is valid to PHP: parts split on `--` lines
   local B, nextb = "--" .. bnd, "\n--" .. bnd
   local n, p = #b, 1
+  local uploads, mfs, cut_short = 0, 0, false
   while true do
     local line
     repeat
       line, p = mp_get_line(b, p, n)
-      if not line then return end
+      if not line then return uploads, cut_short end
     until line == B
-    local hdrs, cur = {}, nil
-    while true do
-      local l, np = mp_get_line(b, p, n)
-      if not l then break end
-      p = np
-      if l == "" then break end
-      local c1 = l:sub(1, 1)
-      local colon = (not c1:find("^%s")) and l:find(":", 1, true)
-      if colon then
-        cur = { k = lower(l:sub(1, colon - 1)), v = { (l:sub(colon + 1):gsub("^%s+", "")) } }
-        hdrs[#hdrs + 1] = cur
-      elseif cur then
-        cur.v[#cur.v + 1] = l
-      end
-    end
-    local cd
-    for _, h in ipairs(hdrs) do
-      if h.k == "content-disposition" then cd = table.concat(h.v); break end
-    end
-    if cd then
-      local name, filename
-      local i = cd:find("%S") or #cd + 1
-      while i <= #cd do
-        local pair
-        pair, i = php_ap_getword(cd, i, ";")
-        i = cd:find("%S", i) or #cd + 1
-        if pair:find("=", 1, true) then
-          local key, j = php_ap_getword(pair, 1, "=")
-          local lk = lower(key)
-          if lk == "name" then name = php_ap_getword_conf(pair, j)
-          elseif lk == "filename" then filename = php_ap_getword_conf(pair, j) end
-        end
-      end
-      if not name and not filename then return end
+    local has_cd, name, filename
+    p, has_cd, name, filename = mp_part_head(b, p, n)
+    if has_cd then
+      if not name and not filename then return uploads, cut_short end
       local bound = b:find(nextb, p, true)
       -- The file's bytes are b[p .. (bound or n + 1) - 1], CR before the
       -- boundary included (a scanner over-reading one byte is harmless).
       if filename and on_file then on_file(filename, name, p, (bound or n + 1) - 1) end
-      if fn and name and not filename and name ~= "" then
-        -- php_ap_memstr also matches a boundary PREFIX that runs to the end of
-        -- the body ("\n", "\n--", ...): a last value is cut there too.
-        -- nextb holds one LF (its first byte), so only the body's last LF can
-        -- start such a prefix: one comparison.
-        local cut = bound
-        if not cut then
-          local k = b:find("\n[^\n]*$", p)
-          if k and n - k + 1 < #nextb and nextb:sub(1, n - k + 1) == b:sub(k) then cut = k end
+      if name and not filename and name ~= "" then
+        local is_mfs = lower(name) == "max_file_size"
+        if fn or is_mfs then
+          local v = mp_value(b, p, n, nextb, bound)
+          if fn then fn(name, v) end
+          if is_mfs then mfs = mp_strtoll(v) end
         end
-        local v = b:sub(p, (cut or n + 1) - 1)
-        if cut and v:sub(-1) == "\r" then v = v:sub(1, -2) end
-        fn(name, v)
       end
-      p = bound or n + 1
+      local kept = true
+      if filename then
+        if not mp_upload_name_ok(name) then
+          kept = false -- skip_upload: "never repair potential malicious user input"
+        elseif filename == "" then
+          kept = false
+        else
+          uploads = uploads + 1
+          kept = uploads <= max_uploads
+          if kept and mfs ~= 0 and (bound or n + 1) - p > mfs then cut_short = true end
+        end
+      end
+      if kept then p = bound or n + 1 end -- else: line by line from here
     end
   end
+end
+
+-- Every "--<bnd>" that starts a line PHP could read from ANY resume point:
+-- the line from there, read as find_boundary reads it (mp_get_line: one CR
+-- dropped before the LF, cut at a NUL, a long line in 5120-byte pieces), is
+-- equal to --<bnd>. visit(p) gets the index where the next line starts —
+-- after the LF, or 5120 bytes on for a NUL-cut piece — and stops the walk
+-- by returning true. Each hit moves the search on by at least one byte; the
+-- cost per hit is the visitor's (bounded by its header-line cap).
+local function mp_boundary_lines(b, bnd, visit)
+  local B = "--" .. bnd
+  local n, pos, last = #b, 1, nil
+  while true do
+    local s = b:find(B, pos, true)
+    if not s then return end
+    -- The line read from s can equal B only when the byte after B ends it
+    -- (LF, CR before an LF, a NUL) or B is exactly one 5120-byte piece: an
+    -- exact pre-filter, so each other hit costs no line copy (an empty
+    -- boundary makes every "--" a hit).
+    local c = b:byte(s + #B)
+    if c == 10 or c == 13 or c == 0 or #B == MP_FILLUNIT then
+      local l, hs = mp_get_line(b, s, n)
+      -- Several hits on one line share its next line: read its part once.
+      if l == B and hs ~= last then
+        last = hs
+        if visit(hs) then return end
+      end
+    end
+    pos = s + 1
+  end
+end
+
+-- After a MAX_FILE_SIZE cut: every part that starts at a boundary line, read
+-- on its own (fields and files reported again, at most ones PHP never saw).
+-- Each reads at most 17 header lines (a body of boundary lines would cost
+-- 64 x more otherwise): a part hiding its Content-Disposition below 16 header
+-- lines is left to rule 10021 (PART_HEADERS), which reads every boundary line
+-- too — so where 10021 is excluded or below block, such a part (a file for
+-- 401 / 10016, a field for 10017-10020) after a MAX_FILE_SIZE cut is missed.
+local MP_RESCUE_MAX_LINES = 17
+local function multipart_rescue(b, ct_raw, fn, on_file)
+  local bnd = php_mp_boundary(ct_raw)
+  if not bnd then return end
+  local nextb, n = "\n--" .. bnd, #b
+  -- Per-body caches, so each part costs its own bytes, not the body's: the
+  -- next "\n--<bnd>" at or after p (a forward cursor; the visits move
+  -- forward), and the body's last LF for mp_value.
+  local nb_at, nb_from, nb_none = nil, 0, nil
+  local function next_bound(p)
+    if nb_none and p >= nb_none then return nil end
+    if not (nb_at and nb_at >= p and nb_from <= p) then
+      nb_at, nb_from = b:find(nextb, p, true), p
+      if not nb_at then nb_none = p end
+    end
+    return nb_at
+  end
+  local lastlf = b:find("\n[^\n]*$") or false
+  mp_boundary_lines(b, bnd, function(hs)
+    local p, has_cd, name, filename = mp_part_head(b, hs, n, MP_RESCUE_MAX_LINES)
+    if not has_cd or (not name and not filename) then return false end
+    local bound = next_bound(p)
+    if filename and on_file then on_file(filename, name, p, (bound or n + 1) - 1) end
+    if fn and name and not filename and name ~= "" then fn(name, mp_value(b, p, n, nextb, bound, lastlf)) end
+    return false
+  end)
+end
+
+-- Returns true when the body was read more than once (the reads joined).
+local function each_multipart_field(b, ct_raw, fn, on_file)
+  local uploads, cut_short = multipart_parse(b, ct_raw, fn, on_file, MP_MAX_FILE_UPLOADS)
+  local again = false
+  if uploads > MP_MAX_FILE_UPLOADS then
+    local _, c2 = multipart_parse(b, ct_raw, fn, on_file, math.huge)
+    cut_short, again = cut_short or c2, true
+  end
+  if cut_short then multipart_rescue(b, ct_raw, fn, on_file); again = true end
+  return again
+end
+-- For the oracle test: whether each_multipart_field joins several reads of
+-- this body (then it may report more than PHP registered, never less).
+function _M.php_multipart_joined(body, ct_raw)
+  return each_multipart_field(body or "", ct_raw or "", nil, nil)
 end
 
 -- Every form field PHP registers: the query string ($_GET), then, for a POST
@@ -416,6 +600,12 @@ local function php_file_parts(body, ct_raw)
   end)
   fp_body, fp_ct, fp_parts = body, ct_raw, parts
   return parts
+end
+-- The file names php_file_parts sees (raw, as sent), for the oracle test.
+function _M.php_file_names(body, ct_raw)
+  local out = {}
+  for _, f in ipairs(php_file_parts(body, ct_raw)) do out[#out + 1] = f[1] end
+  return out
 end
 
 -- skip(s), when given, may rule a whole urlencoded source (the query string,
@@ -6911,11 +7101,14 @@ end
 -- (waf_body_max_len, 32 KB by default). PHP frees a part's headers before the
 -- next one, so ONE abusive part after 32 KB of padding is enough and is not
 -- seen here: this catches the exploit as published and unpadded copies of it,
--- and is no substitute for the PHP update. Parts are split like rfc1867.c
--- (mp_get_line / php_mp_boundary / php_ap_getword, read-only use):
--- find_boundary skips lines until one EQUAL to `--<bnd>`, so a closing
--- `--<bnd>--` does not end the parse, and the FIRST Content-Disposition (with
--- its own continuation lines) is the one read.
+-- and is no substitute for the PHP update. A part is read from EVERY
+-- boundary line in the body (mp_boundary_lines), wherever it starts: PHP's
+-- find_boundary can resume anywhere (after a part it skips, or mid-file
+-- after a MAX_FILE_SIZE cut), and a line scan missed a part placed at such a
+-- point. That is a superset of the parts PHP opens (a closing `--<bnd>--`
+-- does not end it, nor does a garbled part); it can only add detections.
+-- Headers are read like rfc1867.c (mp_part_head: the FIRST
+-- Content-Disposition with its own continuation lines).
 local MP_OOM_MAX_PART_HEADERS    = 16
 local MP_OOM_MAX_EMPTY_FILES     = 128
 local MP_OOM_MAX_NESTING         = 16
@@ -6930,67 +7123,20 @@ _M.MP_OOM_LIMITS = {
 local function mp_oom_structure(b, ct_raw)
   local bnd = php_mp_boundary(ct_raw)
   if not bnd then return nil end
-  local B = "--" .. bnd
-  local n, p = #b, 1
-  local empty_files = 0
-  while true do
-    local line
-    repeat
-      line, p = mp_get_line(b, p, n)
-      if not line then return nil end
-    until line == B
-    local nhdr, cd, in_cd = 0, nil, false
-    while true do
-      local l, np = mp_get_line(b, p, n)
-      if not l then break end
-      p = np
-      if l == "" then break end
-      nhdr = nhdr + 1
-      if nhdr > MP_OOM_MAX_PART_HEADERS then return "PART_HEADERS" end
-      local c1 = l:sub(1, 1)
-      local colon = (not c1:find("^%s")) and l:find(":", 1, true)
-      if colon then
-        in_cd = false
-        if not cd and lower(l:sub(1, colon - 1)) == "content-disposition" then
-          cd, in_cd = (l:sub(colon + 1):gsub("^%s+", "")), true
-        end
-      elseif in_cd then
-        cd = cd .. l
-      end
+  local n, empty_files, tag = #b, 0, nil
+  mp_boundary_lines(b, bnd, function(hs)
+    local _, has_cd, name, filename, lines = mp_part_head(b, hs, n, MP_OOM_MAX_PART_HEADERS + 1)
+    if lines > MP_OOM_MAX_PART_HEADERS then tag = "PART_HEADERS"; return true end
+    if not has_cd then return false end
+    local _, depth = (name or ""):gsub("%[", "")
+    if depth > (filename and MP_OOM_MAX_NESTING or MP_OOM_MAX_FIELD_NESTING) then tag = "NESTING"; return true end
+    if filename == "" then
+      empty_files = empty_files + 1
+      if empty_files >= MP_OOM_MAX_EMPTY_FILES then tag = "EMPTY_FILES"; return true end
     end
-    if cd then
-      local name, filename
-      local i = cd:find("%S") or #cd + 1
-      while i <= #cd do
-        local pair
-        pair, i = php_ap_getword(cd, i, ";")
-        i = cd:find("%S", i) or #cd + 1
-        if pair:find("=", 1, true) then
-          local key, j = php_ap_getword(pair, 1, "=")
-          local lk = lower(key)
-          if lk == "name" then name = php_ap_getword_conf(pair, j)
-          elseif lk == "filename" then filename = php_ap_getword_conf(pair, j) end
-        end
-      end
-      local _, depth = (name or ""):gsub("%[", "")
-      if depth > (filename and MP_OOM_MAX_NESTING or MP_OOM_MAX_FIELD_NESTING) then return "NESTING" end
-      if filename == "" then
-        empty_files = empty_files + 1
-        if empty_files >= MP_OOM_MAX_EMPTY_FILES then return "EMPTY_FILES" end
-      end
-    end
-    -- Back to find_boundary, line by line from the end of the headers. PHP
-    -- does that itself for a part it does not read (no Content-Disposition,
-    -- an empty filename, a file past max_file_uploads), so a `--<bnd>` line
-    -- right there opens the next part; for one it reads, the value ends at
-    -- the next "\n--<bnd>", a line this scan reaches too. Scanning every
-    -- part's bytes this way finds every part PHP finds (a boundary line
-    -- inside a value would have ended it), plus at most decoys inside a
-    -- value or file, which only add detections. For the same reason a part
-    -- with neither name nor filename, where PHP stops ("Mime headers
-    -- garbled"), does not stop this scan: a desync could otherwise end it
-    -- early on a decoy.
-  end
+    return false
+  end)
+  return tag
 end
 
 function _M.detect_cve_php_multipart_oom(method, body, headers)

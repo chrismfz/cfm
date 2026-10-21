@@ -7,8 +7,9 @@ PHP registers it. This script builds crafted query strings and POST bodies
 lines, header continuations, the 5120-byte line cut, quoting, escapes, NULs,
 duplicate parameters), sends each to `php -S` (the cli-server SAPI runs the
 same rfc1867.c / php_variables.c as php-fpm), and records what PHP put in
-$_GET + $_POST. The Lua reader must produce every name PHP registered, with
-PHP's value as its last value.
+$_GET + $_POST and the file names in $_FILES. The Lua reader must produce
+every name PHP registered, with PHP's value as its last value, and every file
+name PHP registered (the multipart file parts rules 401 / 415 read).
 
     php_request_fields_oracle.py check [N]     # N random cases (default 3000) + the fixed ones
     php_request_fields_oracle.py record        # rewrite the CI fixture (fixed + seeded random cases)
@@ -22,7 +23,9 @@ import json, os, random, socket, subprocess, sys, tempfile, time
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIXTURE = os.path.join(ROOT, "scripts/tests/fixtures/php_request_fields.lua")
 ROUTER = "<?php header('Content-Type: application/json');" \
-         "echo json_encode(['get'=>$_GET,'post'=>$_POST], JSON_INVALID_UTF8_SUBSTITUTE|JSON_PARTIAL_OUTPUT_ON_ERROR);"
+         "$fl=[]; $w=function($v)use(&$w,&$fl){ if(is_array($v)){foreach($v as $x)$w($x);} else $fl[]=$v; };" \
+         "foreach($_FILES as $f){ $w($f['name']); }" \
+         "echo json_encode(['get'=>$_GET,'post'=>$_POST,'files'=>$fl], JSON_INVALID_UTF8_SUBSTITUTE|JSON_PARTIAL_OUTPUT_ON_ERROR);"
 
 
 def start_php():
@@ -62,7 +65,7 @@ def php(port, case):
         if isinstance(v, dict):
             for k, val in v.items():
                 merged[k] = val if isinstance(val, str) else None  # None: an array
-    return merged
+    return merged, sorted(f for f in res.get("files", []) if isinstance(f, str) and f != "")
 
 
 # ── case generation ─────────────────────────────────────────────────────────
@@ -121,9 +124,31 @@ def gen_multipart(r, bnd):
                 out.append(r.choice(["Content-Type: text/plain", "X-A: b", "nocolon", " cont"]) + nl())
             else:
                 out.append("X: a\x00" + 'Content-Disposition: form-data; name="nul"' + nl())
+        if r.random() < 0.15:  # a file part: empty or named, its name maybe split over a continuation
+            fname = r.choice(["", "", "a.txt", "shell.php", "x.phtml"])
+            line = 'Content-Disposition: form-data; name="' + r.choice(["up", "f[]", "a"]) + '"; filename="' + fname + '"'
+            if fname and r.random() < 0.4:
+                cut = r.randint(len(line) - len(fname) - 1, len(line) - 2)
+                line = line[:cut] + nl() + r.choice(["", " ", "\t"]) + line[cut:]
+            out.append(line + nl())
+            if r.random() < 0.5:  # tight: the next boundary right after the blank line
+                out.append(nl())
+                continue
         if r.random() < 0.9:
             out.append(nl())
         out.append(r.choice(VALUES) + r.choice(["", "", "\r", "x\n--" + bnd + "X"]) + nl())
+    if r.random() < 0.08:  # MAX_FILE_SIZE, then a file it cuts short with a part where PHP resumes
+        out.append("--" + bnd + nl() + 'Content-Disposition: form-data; name="' + r.choice(["MAX_FILE_SIZE", "max_file_size"]) + '"' + nl() + nl()
+                   + r.choice(["1000", "1", "0", "-5", "x"]) + nl())
+        out.append("--" + bnd + nl() + 'Content-Disposition: form-data; name="big"; filename="big.bin"' + nl() + nl())
+        # The resume line: plain, or cut at a NUL and padded to a 5120-byte
+        # piece (its next line starts 5120 bytes on), after LF-ended filler.
+        bline = r.choice(["--" + bnd + nl(), "--" + bnd + nl(), "--" + bnd + "\x00" + "C" * (5120 - len(bnd) - 3)])
+        lead = r.choice(["A" * (2 * 5119 + r.choice([0, 0, 5120, 1, -1])),
+                         "A" * 12000 + "\n" + "B" * 5120])
+        out.append(lead + bline
+                   + 'Content-Disposition: form-data; name="' + r.choice(["up", "action", "pagename"]) + '"'
+                   + r.choice(['; filename="shell.php"', ""]) + nl() + nl() + r.choice(VALUES) + nl())
     if r.random() < 0.8:
         out.append("--" + bnd + "--" + nl())
     return "".join(out)
@@ -160,6 +185,43 @@ FIXED = [
      "body": "--b\r\nContent-Disposition: form-data; x=\"\\\\\"; name=\"q\"\r\n\r\nv\r\n--b--\r\n"},
     {"method": "POST", "query": "", "ct": "application/x-www-form-urlencoded",
      "body": "wc%5Breset%5Bpass.word=1&a.b=1&+c=1&%09d=1&e%00f=1&g[h=1&i[j]k=1"},
+    # An empty file part, then (no CRLF between) a file whose name is split
+    # over a colon-less continuation line: PHP stores shell.php.
+    {"method": "POST", "query": "", "ct": "multipart/form-data; boundary=XB",
+     "body": "--XB\r\nContent-Disposition: form-data; name=\"e\"; filename=\"\"\r\n\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"up\"; filename=\"shell.p\r\nhp\"\r\n\r\n<?php x ?>\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"action\"\r\n\r\nv\r\n--XB--\r\n"},
+    # 21 kept files (PHP's default max_file_uploads is 20), then one PHP skips,
+    # then, right after its headers, a part only a line-by-line scan reaches.
+    {"method": "POST", "query": "", "ct": "multipart/form-data; boundary=XB",
+     "body": "".join("--XB\r\nContent-Disposition: form-data; name=\"f%d\"; filename=\"a%d.txt\"\r\n\r\nz\r\n" % (i, i)
+                     for i in range(20))
+             + "--XB\r\nContent-Disposition: form-data; name=\"over\"; filename=\"b.txt\"\r\n\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"pagename\"\r\n\r\nv\r\n--XB--\r\n"},
+    # MAX_FILE_SIZE cuts big.bin short; PHP resumes 2 x 5119 bytes in, where a
+    # shell.php part (name split over a continuation) and a field sit.
+    {"method": "POST", "query": "", "ct": "multipart/form-data; boundary=XB",
+     "body": "--XB\r\nContent-Disposition: form-data; name=\"MAX_FILE_SIZE\"\r\n\r\n1000\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\n" + "A" * 10238 +
+             "--XB\r\nContent-Disposition: form-data; name=\"up\"; filename=\"shell.p\r\nhp\"\r\n\r\n<?php x ?>\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"action\"\r\n\r\ntrp\r\n--XB--\r\n"},
+    # The same cut with the resume line cut at a NUL and filled to a 5120-byte
+    # piece: the next part's headers start 5120 bytes after it (review 2).
+    {"method": "POST", "query": "", "ct": "multipart/form-data; boundary=XB",
+     "body": "--XB\r\nContent-Disposition: form-data; name=\"MAX_FILE_SIZE\"\r\n\r\n100\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\n" + "A" * 12000 + "\n" +
+             "B" * 5120 + "--XB\x00" + "C" * 5115 +
+             "Content-Disposition: form-data; name=\"up\"; filename=\"shell.p\r\nhp\"\r\n\r\n<?php x ?>\r\n--XB--\r\n"},
+    {"method": "POST", "query": "", "ct": "multipart/form-data; boundary=XB",
+     "body": "--XB\r\nContent-Disposition: form-data; name=\"MAX_FILE_SIZE\"\r\n\r\n100\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\n" + "A" * 12000 + "\n" +
+             "B" * 5120 + "--XB\x00" + "C" * 5115 +
+             "Content-Disposition: form-data; name=\"action\"\r\n\r\ntrp_x\r\n--XB--\r\n"},
+    # The same after a CD-less part, and a value field after both.
+    {"method": "POST", "query": "", "ct": "multipart/form-data; boundary=XB",
+     "body": "--XB\r\nX: 1\r\n\r\n--XB\r\nContent-Disposition: form-data; name=\"e\"; filename=\"\"\r\n\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"up\"; filename=\"a.phtml\"\r\n\r\nz\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"pagename\"\r\n\r\nv\r\n--XB--\r\n"},
 ]
 
 
@@ -188,8 +250,9 @@ def to_lua(cases):
            "'s $_GET + $_POST for each request. Do not edit; re-record.", "return {"]
     for c in cases:
         want = ", ".join("[%s] = %s" % (lua_quote(k), "true" if v is None else lua_quote(v)) for k, v in sorted(c["want"].items()))
-        out.append("  { method = %s, query = %s, ct = %s, body = %s, want = { %s } }," % (
-            lua_quote(c["method"]), lua_quote(c["query"]), lua_quote(c["ct"]), lua_quote(c["body"]), want))
+        files = ", ".join(lua_quote(f) for f in c["files"])
+        out.append("  { method = %s, query = %s, ct = %s, body = %s, want = { %s }, files = { %s } }," % (
+            lua_quote(c["method"]), lua_quote(c["query"]), lua_quote(c["ct"]), lua_quote(c["body"]), want, files))
     out.append("}")
     return "\n".join(out) + "\n"
 
@@ -212,7 +275,7 @@ def main():
             r = random.Random(int(time.time()))
             cases = FIXED + [gen_case(r) for _ in range(n)]
         for c in cases:
-            c["want"] = php(port, c)
+            c["want"], c["files"] = php(port, c)
     finally:
         proc.terminate()
     if mode == "record":

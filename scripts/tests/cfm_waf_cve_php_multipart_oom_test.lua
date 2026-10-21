@@ -150,6 +150,19 @@ do
   for _ = 1, L.empty_files do t[#t + 1] = file("f[]", "", "") end
   fires(post(body(t)), "garbled part first, then empty file controls", "EMPTY_FILES")
 end
+-- A boundary line cut at a NUL and filled to a 5120-byte piece: PHP reads the
+-- part's headers from the next piece (review 2 of PR 1610, against PHP 8.3.6).
+do
+  local nul = B .. "\0" .. ("C"):rep(5120 - #B - 1)
+  fires(post(body({ field("q", "v"), nul .. 'Content-Disposition: form-data; name="a' ..
+             string.rep("[x]", L.nesting + 4) .. '"; filename="z.txt"\r\n\r\nzz\r\n' })),
+        "NUL-cut 5120-byte boundary line, then a deeply nested file part", "NESTING")
+  local hdrs = {}
+  for i = 1, L.part_headers do hdrs[#hdrs + 1] = "X-H" .. i .. ": v\r\n" end
+  fires(post(body({ field("q", "v"), nul .. 'Content-Disposition: form-data; name="q2"\r\n' ..
+             table.concat(hdrs) .. "\r\nzz\r\n" })),
+        "NUL-cut 5120-byte boundary line, then a part with too many headers", "PART_HEADERS")
+end
 -- Only the FIRST Content-Disposition is read, with its own continuation lines;
 -- a second one's continuation must not replace its name.
 fires(post(body({ B .. "\r\n" ..
