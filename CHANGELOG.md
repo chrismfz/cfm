@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.21
+
 ### Security
 - **Rule 401 (and the upload CVE rules) no longer miss an upload placed where
   PHP looks for the next field.** PHP does not read a file field that is left
