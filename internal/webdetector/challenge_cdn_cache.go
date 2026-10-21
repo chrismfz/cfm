@@ -27,7 +27,8 @@ package webdetector
 //     strip_cdn_bust_arg). Once per
 //     target per window: a further bounce gets the page;
 //   - counts those bounces per host and distinct client (an IPv4 address, an
-//     IPv6 /64) over 24 h
+//     IPv6 /64) over 24 h, relayed ones for a page target only (direct and
+//     download bounces are listed apart, see HONEST LIMITS)
 //     (noteCDNCachedChallenge; web scope only: the panel listeners sit behind
 //     no CDN), which edge_health reports as the cdn-cached-challenge check and
 //     whats_wrong surfaces, so the operator learns which tenant's CDN to fix.
@@ -49,8 +50,11 @@ package webdetector
 //   - a download leaves the tab on the challenge address, and each re-tap is
 //     a cleared bounce with no cache involved: orion's mathematica.gr
 //     (2026-10-21) has no CDN at all, and every bounce there was a PDF opened
-//     on Android. So a bounce for a download target (cdnDownloadTarget) is
-//     not counted, and one the edge marks as DIRECT (cdnRelayedHeader "0":
+//     on Android. So a bounce for a download target (cdnDownloadTarget)
+//     never warns: direct, it is not counted; relayed, it goes to a list,
+//     cdnDownloads, edge_health shows without warning, so a CDN rule caching
+//     only file extensions is listed but not named as a fault. A bounce for
+//     any other target the edge marks as DIRECT (cdnRelayedHeader "0":
 //     the TCP peer is the client itself) goes to a second list, cdnDirect,
 //     which edge_health shows without warning. A direct bounce is a browser
 //     re-opening the address (a download served from a script URL, which no
@@ -112,11 +116,13 @@ func cdnRelayedLogValue(v string) string {
 }
 
 // cdnDownloadTarget: next names a file a browser downloads rather than shows
-// (by its path's extension). A cleared bounce for one is not counted at all:
-// the download leaves the tab on the challenge address, and the visitor's
-// next tap on it is a cleared bounce with no cache involved (orion's
-// mathematica.gr PDFs on Android, through a CDN or not). A CDN that caches the
-// challenge caches the site's pages too, so the host still shows there.
+// (by its path's extension). A cleared bounce for one never raises the
+// warning: the download leaves the tab on the challenge address, and the
+// visitor's next tap on it is a cleared bounce with no cache involved (orion's
+// mathematica.gr PDFs on Android). Direct, it is not counted at all; relayed,
+// it is listed (cdnDownloads), since a CDN rule that caches only file
+// extensions (Cloudflare's default cacheable list overlaps this one) shows
+// nowhere else.
 func cdnDownloadTarget(next string) bool {
 	p, _, _ := strings.Cut(next, "?")
 	p, _, _ = strings.Cut(p, "#")
@@ -216,18 +222,20 @@ type cdnSuspectEntry struct {
 	last    time.Time
 }
 
-// cdnTracker holds cleared bounces per host. Two of them: cdnSuspects for the
-// bounces a trusted proxy relayed (or an edge conf too old to say), which
-// edge_health warns on, and cdnDirect for the ones that reached the edge
-// directly, which it only lists (see the file header).
+// cdnTracker holds cleared bounces per host. Three of them: cdnSuspects for
+// the bounces a trusted proxy relayed (or an edge conf too old to say), which
+// edge_health warns on; cdnDirect for the ones that reached the edge
+// directly, and cdnDownloads for relayed ones whose target is a download,
+// which it only lists (see the file header).
 type cdnTracker struct {
 	mu    sync.Mutex
 	hosts map[string]*cdnSuspectEntry
 }
 
 var (
-	cdnSuspects = &cdnTracker{hosts: map[string]*cdnSuspectEntry{}}
-	cdnDirect   = &cdnTracker{hosts: map[string]*cdnSuspectEntry{}}
+	cdnSuspects  = &cdnTracker{hosts: map[string]*cdnSuspectEntry{}}
+	cdnDirect    = &cdnTracker{hosts: map[string]*cdnSuspectEntry{}}
+	cdnDownloads = &cdnTracker{hosts: map[string]*cdnSuspectEntry{}}
 )
 
 // pruneLocked drops the clients whose last bounce left the window and reports
@@ -269,6 +277,10 @@ func noteCDNCachedChallenge(host, ip string, now time.Time) { cdnSuspects.note(h
 // noteDirectClearedBounce records one cleared bounce that reached the edge
 // directly (X-CFM-Relayed: 0), with the same bounds.
 func noteDirectClearedBounce(host, ip string, now time.Time) { cdnDirect.note(host, ip, now) }
+
+// noteRelayedDownloadBounce records one relayed cleared bounce whose target is
+// a download (cdnDownloadTarget), with the same bounds.
+func noteRelayedDownloadBounce(host, ip string, now time.Time) { cdnDownloads.note(host, ip, now) }
 
 func (t *cdnTracker) note(host, ip string, now time.Time) {
 	host = truncateForLog(strings.ToLower(strings.TrimSpace(host)), 120)
@@ -335,6 +347,12 @@ func CDNCachedChallengeHosts(now time.Time) []CDNCacheSuspect { return cdnSuspec
 // not trust as a proxy (the file header).
 func DirectClearedBounceHosts(now time.Time) []CDNCacheSuspect { return cdnDirect.list(now) }
 
+// RelayedDownloadBounceHosts returns the hosts whose cleared visitors came
+// back through a trusted proxy for a DOWNLOAD target in the last 24 hours.
+// edge_health lists them without a warning: an Android download re-tapped
+// behind the CDN, or a CDN rule that caches only file extensions.
+func RelayedDownloadBounceHosts(now time.Time) []CDNCacheSuspect { return cdnDownloads.list(now) }
+
 // challengeHTTPServing counts the challenge server's live HTTP listeners (the
 // primary one; the v6 loopback twin shares its server and is not counted).
 // Zero means nothing here serves a challenge, so edge_health reports Check F
@@ -345,9 +363,9 @@ var challengeHTTPServing atomic.Int32
 // is up in this process.
 func ChallengeServerServing() bool { return challengeHTTPServing.Load() > 0 }
 
-// resetCDNCachedChallengeForTest empties both trackers.
+// resetCDNCachedChallengeForTest empties the trackers.
 func resetCDNCachedChallengeForTest() {
-	for _, t := range []*cdnTracker{cdnSuspects, cdnDirect} {
+	for _, t := range []*cdnTracker{cdnSuspects, cdnDirect, cdnDownloads} {
 		t.mu.Lock()
 		t.hosts = map[string]*cdnSuspectEntry{}
 		t.mu.Unlock()

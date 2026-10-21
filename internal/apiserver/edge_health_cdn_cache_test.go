@@ -101,7 +101,7 @@ func TestCDNCachedChallenge_SuspectsWarnWhileNotServing(t *testing.T) {
 // trusted proxy) are listed in evidence.direct_hosts and named in the summary,
 // but never raise the warning: a browser re-opening the challenge address, or
 // a CDN the edge does not trust as a proxy. A relayed suspect still warns.
-func TestCDNCachedChallenge_DirectBouncesAreListedNotWarned(t *testing.T) {
+func TestCDNCachedChallenge_DirectAndDownloadBouncesAreListedNotWarned(t *testing.T) {
 	defer stubEdgeHealth(t)()
 	stubDropScan(t, 1000, nil)
 	last := time.Unix(dropTestNow-120, 0)
@@ -124,15 +124,39 @@ func TestCDNCachedChallenge_DirectBouncesAreListedNotWarned(t *testing.T) {
 	if hosts := ev["hosts"].([]map[string]any); len(hosts) != 0 {
 		t.Fatalf("hosts = %v, want none", hosts)
 	}
-	if s := f["summary"].(string); !strings.Contains(s, "1 vhost(s) had such bounces reach the edge DIRECTLY") {
+	if s := f["summary"].(string); !strings.Contains(s, "1 vhost(s) had cleared visitors bounce back to the challenge DIRECTLY") {
 		t.Fatalf("summary = %q, want the direct note", s)
 	}
+	if d := ev["download_hosts"].([]map[string]any); len(d) != 0 {
+		t.Fatalf("download_hosts = %v, want an empty list", d)
+	}
+
+	// A relayed download (a CDN rule caching file extensions only, or a phone
+	// re-tapping a download behind the CDN): listed, not a warning.
+	edgeHealthDownloadBounces = func(time.Time) []webdet.CDNCacheSuspect {
+		return []webdet.CDNCacheSuspect{{Host: "cf-pdfs.example", IPs: 3, Bounces: 3, First: last, Last: last}}
+	}
+	f = findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "cdn-cached-challenge")
+	if f["severity"] != "ok" || !strings.Contains(f["summary"].(string), "for a DOWNLOAD") {
+		t.Fatalf("relayed downloads: %v %q, want ok with the download note", f["severity"], f["summary"])
+	}
+	if d := f["evidence"].(map[string]any)["download_hosts"].([]map[string]any); len(d) != 1 || d[0]["host"] != "cf-pdfs.example" {
+		t.Fatalf("download_hosts = %v", d)
+	}
+
+	// Not measured: the note still reads on its own.
+	edgeHealthChallengeServing = func() bool { return false }
+	f = findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "cdn-cached-challenge")
+	if s := f["summary"].(string); f["severity"] != "ok" || !strings.HasPrefix(s, "not measured") || !strings.Contains(s, "bounce back to the challenge DIRECTLY") {
+		t.Fatalf("measured=false: %v %q", f["severity"], s)
+	}
+	edgeHealthChallengeServing = func() bool { return true }
 
 	edgeHealthCDNSuspects = func(time.Time) []webdet.CDNCacheSuspect {
 		return []webdet.CDNCacheSuspect{{Host: "www.amabilecreations.com", IPs: 4, Bounces: 6, First: last, Last: last}}
 	}
 	f = findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "cdn-cached-challenge")
-	if f["severity"] != "warn" || !strings.Contains(f["summary"].(string), "www.amabilecreations.com") {
-		t.Fatalf("relayed suspect: %v %q, want warn naming it", f["severity"], f["summary"])
+	if s := f["summary"].(string); f["severity"] != "warn" || !strings.Contains(s, "www.amabilecreations.com") || !strings.Contains(s, "DIRECTLY") || !strings.Contains(s, "for a DOWNLOAD") {
+		t.Fatalf("relayed suspect: %v %q, want warn naming it, with both notes", f["severity"], s)
 	}
 }

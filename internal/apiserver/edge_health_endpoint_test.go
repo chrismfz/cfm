@@ -376,11 +376,12 @@ func stubEdgeHealth(t *testing.T) func() {
 	// Check F reads the challenge server's in-process tracker; a test that
 	// does not set it sees no suspects, whatever else ran in this binary.
 	edgeHealthCDNSuspects = func(time.Time) []webdet.CDNCacheSuspect { return nil }
-	oDirect := edgeHealthDirectBounces
+	oDirect, oDownloads := edgeHealthDirectBounces, edgeHealthDownloadBounces
 	edgeHealthDirectBounces = func(time.Time) []webdet.CDNCacheSuspect { return nil }
+	edgeHealthDownloadBounces = func(time.Time) []webdet.CDNCacheSuspect { return nil }
 	edgeHealthChallengeServing = func() bool { return true }
 	return func() {
-		edgeHealthDirectBounces = oDirect
+		edgeHealthDirectBounces, edgeHealthDownloadBounces = oDirect, oDownloads
 		edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow, edgeHealthCDNSuspects, edgeHealthChallengeServing = oDet, oAcc, oErr, oBridge, oNow, oCDN, oServ
 	}
 }

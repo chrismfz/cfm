@@ -223,11 +223,10 @@ func TestChallengeServerServing(t *testing.T) {
 // orion, 2026-10-21: edge_health named www.mathematica.gr, a vhost with no
 // CDN at all. Every bounce was a PDF opened on Android: the download leaves the
 // tab on /__cfm_challenge?next=…pdf, and each re-tap reaches the page as a
-// cleared client for the same target. A download target is not counted at
-// all; a bounce the edge marks as direct (X-CFM-Relayed: 0) goes to the direct
-// list, which edge_health only shows; one through a trusted proxy counts for
-// the warning, and so does one from an edge conf that sends no header (as
-// before). The cache-bust redirect itself is unchanged in every case.
+// cleared client for the same target. Only a relayed bounce for a page counts
+// for the warning (and one from an edge conf that sends no header, as before);
+// a direct page bounce and a relayed download go to lists edge_health only
+// shows; a direct download is not counted. The cache-bust redirect itself is unchanged in every case.
 func TestChallengePage_DirectBounceNotCountedAsCDN(t *testing.T) {
 	useClearanceBridgeToken(t, unitTestBridgeSecret)
 	base, _ := startVerifyServer(t)
@@ -264,7 +263,8 @@ func TestChallengePage_DirectBounceNotCountedAsCDN(t *testing.T) {
 	for _, ip := range []string{"94.46.1.1", "87.228.1.1", "109.242.1.1"} {
 		bounce(ip, "www.mathematica.gr", "/forum/oldfiles/mk_285_1.pdf", direct)
 	}
-	// The same download behind Cloudflare: still not a cached challenge.
+	// The same download behind Cloudflare: listed apart, never a suspect (a
+	// phone re-tapping it, or a CDN rule caching file extensions only).
 	for _, ip := range []string{"62.74.2.1", "62.74.2.2", "62.74.2.3"} {
 		bounce(ip, "cf-pdfs.example", "/files/Report.PDF?v=2", relayed)
 	}
@@ -281,16 +281,16 @@ func TestChallengePage_DirectBounceNotCountedAsCDN(t *testing.T) {
 		bounce(ip, "old-conf.example", "/", nil)
 	}
 	now := time.Now()
-	sus, dir := CDNCachedChallengeHosts(now), DirectClearedBounceHosts(now)
-	for host, want := range map[string][2]int{
-		"www.mathematica.gr":       {0, 0},
-		"cf-pdfs.example":          {0, 0},
-		"direct-page.example":      {0, 3},
-		"www.amabilecreations.com": {3, 0},
-		"old-conf.example":         {2, 0},
+	sus, dir, dl := CDNCachedChallengeHosts(now), DirectClearedBounceHosts(now), RelayedDownloadBounceHosts(now)
+	for host, want := range map[string][3]int{
+		"www.mathematica.gr":       {0, 0, 0},
+		"cf-pdfs.example":          {0, 0, 3},
+		"direct-page.example":      {0, 3, 0},
+		"www.amabilecreations.com": {3, 0, 0},
+		"old-conf.example":         {2, 0, 0},
 	} {
-		if got := [2]int{count(sus, host), count(dir, host)}; got != want {
-			t.Errorf("%s: (suspect, direct) clients = %v, want %v", host, got, want)
+		if got := [3]int{count(sus, host), count(dir, host), count(dl, host)}; got != want {
+			t.Errorf("%s: (suspect, direct, download) clients = %v, want %v", host, got, want)
 		}
 	}
 }

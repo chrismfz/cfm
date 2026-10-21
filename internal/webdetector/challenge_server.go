@@ -1397,20 +1397,25 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// Web scope only: the panel listeners sit behind no CDN, so a
 				// cleared bounce there is a validator disagreement, not a cache.
 				// Counted whether or not the bust can be built (a '#' or an
-				// over-long target): it is the same CDN symptom. Never for a
-				// download target (cdnDownloadTarget), and a bounce that
-				// reached the edge directly goes to its own list, which
-				// edge_health shows without a warning (cdnRelayedCounts): a
-				// download leaves the tab on the challenge URL, and visitors
-				// re-tapping it named mathematica.gr on orion, which has no CDN.
+				// over-long target): it is the same CDN symptom. Only a
+				// relayed bounce for a page target can raise the warning: a
+				// download (cdnDownloadTarget) leaves the tab on the challenge
+				// URL, and visitors re-tapping it named mathematica.gr on
+				// orion, which has no CDN. A direct page bounce and a relayed
+				// download go to lists edge_health shows without a warning;
+				// a direct download is not counted.
 				if why == "cleared" && scope == "web" && nextRedirects.putIfAbsent(key+"|nc", struct{}{}, now) {
 					relayed := r.Header.Get(cdnRelayedHeader)
+					dl := cdnDownloadTarget(next)
 					switch {
-					case cdnDownloadTarget(next):
-					case cdnRelayedCounts(relayed):
-						noteCDNCachedChallenge(host, ip.String(), now)
+					case !cdnRelayedCounts(relayed):
+						if !dl {
+							noteDirectClearedBounce(host, ip.String(), now)
+						}
+					case dl:
+						noteRelayedDownloadBounce(host, ip.String(), now)
 					default:
-						noteDirectClearedBounce(host, ip.String(), now)
+						noteCDNCachedChallenge(host, ip.String(), now)
 					}
 					if busted := cdnBustNext(next); busted != "" {
 						if verifyRejects.putIfAbsent(ip.String()+"|cdn_cached_challenge", struct{}{}, now) {
