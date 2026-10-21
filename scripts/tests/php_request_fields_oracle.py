@@ -141,7 +141,12 @@ def gen_multipart(r, bnd):
         out.append("--" + bnd + nl() + 'Content-Disposition: form-data; name="' + r.choice(["MAX_FILE_SIZE", "max_file_size"]) + '"' + nl() + nl()
                    + r.choice(["1000", "1", "0", "-5", "x"]) + nl())
         out.append("--" + bnd + nl() + 'Content-Disposition: form-data; name="big"; filename="big.bin"' + nl() + nl())
-        out.append("A" * (2 * 5119 + r.choice([0, 0, 5120, 1, -1])) + "--" + bnd + nl()
+        # The resume line: plain, or cut at a NUL and padded to a 5120-byte
+        # piece (its next line starts 5120 bytes on), after LF-ended filler.
+        bline = r.choice(["--" + bnd + nl(), "--" + bnd + nl(), "--" + bnd + "\x00" + "C" * (5120 - len(bnd) - 3)])
+        lead = r.choice(["A" * (2 * 5119 + r.choice([0, 0, 5120, 1, -1])),
+                         "A" * 12000 + "\n" + "B" * 5120])
+        out.append(lead + bline
                    + 'Content-Disposition: form-data; name="' + r.choice(["up", "action", "pagename"]) + '"'
                    + r.choice(['; filename="shell.php"', ""]) + nl() + nl() + r.choice(VALUES) + nl())
     if r.random() < 0.8:
@@ -200,6 +205,18 @@ FIXED = [
              "--XB\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\n" + "A" * 10238 +
              "--XB\r\nContent-Disposition: form-data; name=\"up\"; filename=\"shell.p\r\nhp\"\r\n\r\n<?php x ?>\r\n"
              "--XB\r\nContent-Disposition: form-data; name=\"action\"\r\n\r\ntrp\r\n--XB--\r\n"},
+    # The same cut with the resume line cut at a NUL and filled to a 5120-byte
+    # piece: the next part's headers start 5120 bytes after it (review 2).
+    {"method": "POST", "query": "", "ct": "multipart/form-data; boundary=XB",
+     "body": "--XB\r\nContent-Disposition: form-data; name=\"MAX_FILE_SIZE\"\r\n\r\n100\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\n" + "A" * 12000 + "\n" +
+             "B" * 5120 + "--XB\x00" + "C" * 5115 +
+             "Content-Disposition: form-data; name=\"up\"; filename=\"shell.p\r\nhp\"\r\n\r\n<?php x ?>\r\n--XB--\r\n"},
+    {"method": "POST", "query": "", "ct": "multipart/form-data; boundary=XB",
+     "body": "--XB\r\nContent-Disposition: form-data; name=\"MAX_FILE_SIZE\"\r\n\r\n100\r\n"
+             "--XB\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.txt\"\r\n\r\n" + "A" * 12000 + "\n" +
+             "B" * 5120 + "--XB\x00" + "C" * 5115 +
+             "Content-Disposition: form-data; name=\"action\"\r\n\r\ntrp_x\r\n--XB--\r\n"},
     # The same after a CD-less part, and a value field after both.
     {"method": "POST", "query": "", "ct": "multipart/form-data; boundary=XB",
      "body": "--XB\r\nX: 1\r\n\r\n--XB\r\nContent-Disposition: form-data; name=\"e\"; filename=\"\"\r\n\r\n"

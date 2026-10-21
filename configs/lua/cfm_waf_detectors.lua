@@ -417,10 +417,14 @@ end
 -- PREFIX that runs to the end of the body ("\n", "\n--", ...): a last value
 -- is cut there too. nextb holds one LF (its first byte), so only the body's
 -- last LF can start such a prefix: one comparison.
-local function mp_value(b, p, n, nextb, bound)
+-- lastlf, when given, is the index of the body's last LF (or false): a
+-- caller cutting many values from one body finds it once, not per value.
+local function mp_value(b, p, n, nextb, bound, lastlf)
   local cut = bound
   if not cut then
-    local k = b:find("\n[^\n]*$", p)
+    local k
+    if lastlf == nil then k = b:find("\n[^\n]*$", p)
+    elseif lastlf and lastlf >= p then k = lastlf end
     if k and n - k + 1 < #nextb and nextb:sub(1, n - k + 1) == b:sub(k) then cut = k end
   end
   local v = b:sub(p, (cut or n + 1) - 1)
@@ -480,28 +484,21 @@ local function multipart_parse(b, ct_raw, fn, on_file, max_uploads)
   end
 end
 
--- Every "--<bnd>" that ends a line, wherever it starts: the places PHP's
--- find_boundary can open a part from ANY resume point (a line equal to
--- --<bnd>, cut at a NUL, one CR dropped before the LF). visit(p) gets the
--- index after that line and stops the walk by returning true. Linear: the
--- search moves on by at least one byte per hit.
+-- Every "--<bnd>" that starts a line PHP could read from ANY resume point:
+-- the line from there, read as find_boundary reads it (mp_get_line: one CR
+-- dropped before the LF, cut at a NUL, a long line in 5120-byte pieces), is
+-- equal to --<bnd>. visit(p) gets the index where the next line starts —
+-- after the LF, or 5120 bytes on for a NUL-cut piece — and stops the walk
+-- by returning true. Each hit moves the search on by at least one byte; the
+-- cost per hit is the visitor's (bounded by its header-line cap).
 local function mp_boundary_lines(b, bnd, visit)
   local B = "--" .. bnd
   local n, pos = #b, 1
   while true do
     local s = b:find(B, pos, true)
     if not s then return end
-    local e = s + #B
-    local c = b:byte(e)
-    local hs
-    if c == 10 then
-      hs = e + 1
-    elseif c == 13 and b:byte(e + 1) == 10 then
-      hs = e + 2
-    elseif c == 0 then
-      hs = (b:find("\n", e, true) or n) + 1
-    end
-    if hs and visit(hs) then return end
+    local l, hs = mp_get_line(b, s, n)
+    if l == B and visit(hs) then return end
     pos = s + 1
   end
 end
@@ -510,18 +507,33 @@ end
 -- on its own (fields and files reported again, at most ones PHP never saw).
 -- Each reads at most 17 header lines (a body of boundary lines would cost
 -- 64 x more otherwise): a part hiding its Content-Disposition below 16 header
--- lines is rule 10021's (PART_HEADERS), which reads every boundary line too.
+-- lines is left to rule 10021 (PART_HEADERS), which reads every boundary line
+-- too — so where 10021 is excluded or below block, such a part (a file for
+-- 401 / 10016, a field for 10017-10020) after a MAX_FILE_SIZE cut is missed.
 local MP_RESCUE_MAX_LINES = 17
 local function multipart_rescue(b, ct_raw, fn, on_file)
   local bnd = php_mp_boundary(ct_raw)
   if not bnd then return end
   local nextb, n = "\n--" .. bnd, #b
+  -- Per-body caches, so each part costs its own bytes, not the body's: the
+  -- next "\n--<bnd>" at or after p (a forward cursor; the visits move
+  -- forward), and the body's last LF for mp_value.
+  local nb_at, nb_from, nb_none = nil, 0, nil
+  local function next_bound(p)
+    if nb_none and p >= nb_none then return nil end
+    if not (nb_at and nb_at >= p and nb_from <= p) then
+      nb_at, nb_from = b:find(nextb, p, true), p
+      if not nb_at then nb_none = p end
+    end
+    return nb_at
+  end
+  local lastlf = b:find("\n[^\n]*$") or false
   mp_boundary_lines(b, bnd, function(hs)
     local p, has_cd, name, filename = mp_part_head(b, hs, n, MP_RESCUE_MAX_LINES)
     if not has_cd or (not name and not filename) then return false end
-    local bound = b:find(nextb, p, true)
+    local bound = next_bound(p)
     if filename and on_file then on_file(filename, name, p, (bound or n + 1) - 1) end
-    if fn and name and not filename and name ~= "" then fn(name, mp_value(b, p, n, nextb, bound)) end
+    if fn and name and not filename and name ~= "" then fn(name, mp_value(b, p, n, nextb, bound, lastlf)) end
     return false
   end)
 end

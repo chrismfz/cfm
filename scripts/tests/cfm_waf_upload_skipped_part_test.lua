@@ -59,6 +59,25 @@ do
   end
   check(f401(mfs_body("MAX_FILE_SIZE", "1000", 10238)), "shell.php where PHP resumes after a MAX_FILE_SIZE cut")
   check(f401(mfs_body("max_file_size", "1", 10238 + 5120)), "the same, lowercase name, one FILLUNIT step later")
+  -- The resume line cut at a NUL and filled to a 5120-byte piece: the part's
+  -- headers start 5120 bytes after its start (review 2).
+  check(f401('--XB\r\nContent-Disposition: form-data; name="MAX_FILE_SIZE"\r\n\r\n100\r\n' ..
+             '--XB\r\nContent-Disposition: form-data; name="a"; filename="a.txt"\r\n\r\n' .. ("A"):rep(12000) ..
+             "\n" .. ("B"):rep(5120) .. "--XB\0" .. ("C"):rep(5115) ..
+             'Content-Disposition: form-data; name="up"; filename="shell.p\r\nhp"\r\n\r\n<?php x ?>\r\n' .. END),
+        "shell.php after a MAX_FILE_SIZE cut, behind a NUL-cut 5120-byte boundary line")
+  -- A rescue read must cost each part its own bytes: parts opened mid-line,
+  -- none followed by "\n--XB" (quadratic before; review 2).
+  do
+    local b = '--XB\r\nContent-Disposition: form-data; name="MAX_FILE_SIZE"\r\n\r\n1\r\n' ..
+              '--XB\r\nContent-Disposition: form-data; name="a"; filename="a.txt"\r\n\r\n' ..
+              ("x--XB\nContent-Disposition:name=a\n\n"):rep(900)
+    b = b:sub(1, 32768)
+    local t0 = os.clock()
+    for _ = 1, 5 do det.php_request_fields("post", "", b, H) end
+    local ms = (os.clock() - t0) * 1000 / 5
+    check(ms < 60, ("rescue read of 900 mid-line parts: %.1f ms (must stay linear)"):format(ms))
+  end
   -- No MAX_FILE_SIZE (or 0): PHP reads the whole file; its bytes hold no part.
   check(not det.php_multipart_joined(mfs_body("other", "1000", 10238), CT), "no MAX_FILE_SIZE: one read")
   check(not det.php_multipart_joined(mfs_body("MAX_FILE_SIZE", "0", 10238), CT), "MAX_FILE_SIZE 0: one read")

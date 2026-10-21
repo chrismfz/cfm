@@ -29,7 +29,9 @@ back-filled here — see the git/PR history for that period.
   PHP after a skipped field, and reads a body where a `MAX_FILE_SIZE` cut can
   happen once more from every field boundary in it; rule 10021 reads every
   body that way. A body with more than 20 files is read twice (for hosts that
-  raised `max_file_uploads`). Still not modelled: `file_uploads = Off`.
+  raised `max_file_uploads`). Still not modelled: `file_uploads = Off`; and
+  after a `MAX_FILE_SIZE` cut, a part hiding its file name below 16 header
+  lines is left to rule 10021, so it passes where 10021 is excluded.
 
 - **WAF rules 10021 / 10022 block the PHP core RCE request shapes
   (CVE-2026-109618 / CVE-2026-109619, "PHP2Shell").** PHP before 8.2.35 /
