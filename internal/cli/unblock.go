@@ -15,6 +15,7 @@ import (
 	ipquery "cfm/internal/ipquery"
 	"cfm/internal/locate"
 	"cfm/internal/reporting"
+	"cfm/internal/ttlban"
 	"cfm/internal/unblock"
 )
 
@@ -77,6 +78,11 @@ func RunUnblock(args []string, be firewall.Backend, cfgDir string, tableExists f
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "unblock error:", err)
 		return 1
+	}
+	// The persisted TTL ban goes too, or a daemon started later (it may be
+	// stopped now, or its force-unblock above may have failed) restores it.
+	if ferr := ttlban.ForgetInFile(ttlban.DefaultPath, ip.String()); ferr != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not drop %s from %s (%v): a daemon restart may restore its ban\n", ip, ttlban.DefaultPath, ferr)
 	}
 
 	suffix := ipquery.EnrichSuffix(cfgDir, ip.String())

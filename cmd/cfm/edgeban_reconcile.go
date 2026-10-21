@@ -8,6 +8,7 @@ import (
 	"cfm/internal/edgeban"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
+	"cfm/internal/ttlban"
 )
 
 // edgeBanReconcileEvery paces the edge ban store's narrowing to nft (an
@@ -33,7 +34,7 @@ const edgeBanFailRemind = 30
 // to both backends' EnsureBase: a set missing here leaves an allow unseen, a
 // set that no longer exists fails every read and turns the edge ban off.
 var (
-	edgeBanBlockSets = []string{"block_v4", "block_v6"}
+	edgeBanBlockSets = ttlban.Sets // one list: the persisted TTL bans read the same sets
 	edgeBanAllowSets = []string{
 		"self_v4", "self_v6",
 		"allow_v4", "allow_v6", "allow_dyn_v4", "allow_dyn_v6",
@@ -69,13 +70,17 @@ func loadEdgeBanTrustedProxies() {
 // readEdgeBanSnapshot reads every set, or fails: a partial read (one set
 // missing or erroring) must not reconcile, it would drop real bans.
 func readEdgeBanSnapshot(be firewall.Backend) (edgeban.Snapshot, error) {
-	snap := edgeban.Snapshot{ReadAt: time.Now()}
-	for _, set := range edgeBanBlockSets {
-		elems, err := be.ListSetElementsTimed(set)
-		if err != nil {
-			return snap, fmt.Errorf("%s: %w", set, err)
+	snap := edgeban.Snapshot{}
+	var err error
+	if snap.ReadAt, snap.Blocks, err = readBlockSets(be); err != nil {
+		return snap, err
+	}
+	// The block sets are complete: refresh the persisted TTL bans
+	// (internal/ttlban) from them, whatever the allow sets' read does next.
+	if ts := ttlban.Default(); ts != nil {
+		if err := ts.Snapshot(snap.ReadAt, snap.Blocks); err != nil {
+			logging.Logf("[ttlban] snapshot save failed: %v", err)
 		}
-		snap.Blocks = append(snap.Blocks, elems...)
 	}
 	for _, set := range edgeBanAllowSets {
 		elems, err := be.ListSetElementsTimed(set)
@@ -87,6 +92,22 @@ func readEdgeBanSnapshot(be firewall.Backend) (edgeban.Snapshot, error) {
 		}
 	}
 	return snap, nil
+}
+
+// readBlockSets reads every host block set, or fails, and returns when the
+// read began. The edge ban reconcile and the TTL ban shutdown snapshot share
+// it.
+func readBlockSets(be firewall.Backend) (time.Time, []firewall.SetElementTimed, error) {
+	readAt := time.Now()
+	var out []firewall.SetElementTimed
+	for _, set := range edgeBanBlockSets {
+		elems, err := be.ListSetElementsTimed(set)
+		if err != nil {
+			return readAt, nil, fmt.Errorf("%s: %w", set, err)
+		}
+		out = append(out, elems...)
+	}
+	return readAt, out, nil
 }
 
 // edgeBanReconcileOnce runs one reconcile and returns the failed reads in a

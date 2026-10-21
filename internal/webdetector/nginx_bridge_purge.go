@@ -27,6 +27,7 @@ import (
 
 	"cfm/internal/dnat"
 	"cfm/internal/edgeban"
+	"cfm/internal/ttlban"
 	"cfm/internal/unblock"
 )
 
@@ -47,6 +48,7 @@ func (b *NginxBridge) ForceUnblock(ip string) unblock.WAFResult {
 	// The edge ban goes whatever the bridge's state: `cfm unblock` reaches
 	// the daemon only through here.
 	edgeban.Unban(ip)
+	ttlban.Forget(ip) // nor may a restart restore its TTL ban
 	if b == nil || !b.cfg.Enabled {
 		return unblock.WAFResult{}
 	}

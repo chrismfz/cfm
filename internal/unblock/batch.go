@@ -22,6 +22,7 @@ import (
 	"cfm/internal/firewall"
 	"cfm/internal/ipquery"
 	"cfm/internal/locate"
+	"cfm/internal/ttlban"
 )
 
 // graceBatchMax is the largest batch whose every IP gets the imunify white
@@ -117,9 +118,17 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 			}
 		}
 		// The edge's own ban goes with the nft one (no-op outside the daemon).
+		// Nor may a restart bring the TTL ban back (internal/ttlban, likewise;
+		// one call, one file write), for the IPs nft really let go: a ban
+		// still in nft must stay restorable.
+		forget := make([]string, 0, len(list))
 		for _, ip := range list {
 			edgeban.Unban(ip.String())
+			if errs[ip.String()] == nil {
+				forget = append(forget, ip.String())
+			}
 		}
+		ttlban.Forget(forget...)
 		via := ""
 		if batchErr != nil {
 			via = "per IP, after the batch failed: " + batchErr.Error()

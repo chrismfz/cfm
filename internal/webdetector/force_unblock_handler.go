@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"cfm/internal/edgeban"
+	"cfm/internal/ttlban"
 	"cfm/internal/unblock"
 )
 
@@ -54,6 +55,7 @@ func (e *Engine) handleForceUnblockIP(w http.ResponseWriter, r *http.Request) {
 	// — but the edge ban goes all the same (ForceUnblock would drop it).
 	if e.nginxBridge == nil {
 		edgeban.Unban(ip)
+		ttlban.Forget(ip)
 		writeJSON(w, http.StatusOK, unblock.WAFResult{})
 		return
 	}

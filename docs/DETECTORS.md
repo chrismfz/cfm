@@ -199,6 +199,68 @@ BLOCK_COOLDOWN = 20m
 - duration (for example `10m`, `2h`, `24h`, `7d`): TTL block, auto-expired by timed sets
 - `BLOCK_COOLDOWN`: minimum time before same section can block same IP again
 
+#### TTL bans across a restart, an upgrade or a reboot
+
+A TTL block exists only as a timed element of `inet cfm block_v4` /
+`block_v6`; `cfm.deny` holds the permanent bans and never a TTL one (it has
+no expiry, so a TTL ban there would become permanent). Until 2026-10-21 the
+rpm `%post` ran `cfm disable` on every upgrade, deleting the table, so an
+upgrade freed every TTL-banned attacker after the notifier had reported
+"Blocked: Yes". It no longer does: a restart's `EnsureBase` keeps the table,
+its sets and their elements on both engines (the live netns test
+`LiveNFTTTLBansSurviveRestart` pins it).
+
+For what still empties the table (a reboot, `cfm reset`, `cfm disable`) the
+daemon persists the TTL host bans in `/var/lib/cfm/ttlbans.json`
+(`internal/ttlban`):
+
+- **Saved** from nft every ~2 minutes (the edge ban reconcile's read of the
+  block sets, which must cover both or it saves nothing) and once more on
+  SIGTERM / SIGINT / SIGHUP. A snapshot replaces the file with what nft holds,
+  so an element that expired or was unblocked leaves it, with one exception:
+  a read that lost at least three stored live bans, and more than half of
+  them, is a table deleted and recreated empty under the daemon (`cfm
+  disable`, then any CLI command that runs EnsureBase; a `flush ruleset`), so
+  those bans are kept in the file and the log says to restart the daemon to
+  re-apply them (as for cfm.deny, the running daemon does not re-add them).
+  Fewer is ordinary churn and taken as it is. `cfm flush` removes the file and
+  leaves a `ttlbans.json.flushed` marker: the daemon's next read begun after
+  it is the truth, and a start that finds it restores nothing. Permanent
+  elements are not saved (cfm.deny re-applies them), nor are TTL'd CIDR
+  blocks.
+- **Restored** after `EnsureBase`, in the background (the first edge ban
+  reconcile waits for it, up to 30 seconds, and nothing is saved before it ends):
+  each ban for the time it has left, through `AddBlockBatch`, which adds or
+  extends but never shortens a ban or turns a permanent one temporary. An
+  expired entry is dropped, and so is one covered by an nft allow / ignore
+  set, `cfm.allow`, `cfm.ignore` or `[global] IGNORE_IPS` / `IGNORE_NETS`.
+  The startup log has one `[ttlban] restore:` line with the counts.
+- **Unblocks** inside the daemon (`/unblock`, `cfm unblock` through the
+  daemon's force-unblock, cfm-web pending unblocks) drop the entry at once,
+  and a snapshot whose nft read began before the unblock cannot put it back.
+  `cfm unblock` also removes it from the file itself, so an unblock done while
+  the daemon is stopped (or unreachable) holds too.
+  An allow does not remove the block element (nft accepts before it drops),
+  so the entry stays; the restore skips it while the allow is in place, and
+  a ban that outlives a `cfm allow --ttl` comes back, as it would in nft.
+
+A crash loses the bans added since the last snapshot (at most ~2 minutes).
+If the restore batch keeps failing (three tries), the bans stay in the file
+until they expire or nft holds them again, so the next start retries them. The
+time left is capped at what the ban had when the file was saved (a clock behind
+at boot cannot stretch it; the file is rewritten at every stop and at least
+every 10 minutes, so that base stays recent); a clock *ahead* reads as downtime and expires bans
+early. An unblock *and* a fresh ban of the same address both landing while the
+restore is still writing lose the fresh ban (the restore takes out what was
+unblocked during it); the detector bans again on the next hit.
+
+The rpm upgrade no longer rebuilds the table, so a release that changes
+`NFT_INPUT_PRIORITY`'s default applies on rpm nodes, as on deb ones, only after
+`cfm reset` (EnsureBase keeps an existing input chain and logs the mismatch).
+`cfm reset` and `cfm disable` keep the file, so the next start restores the
+bans (as it re-applies cfm.deny). To drop every TTL ban for good, use `cfm
+flush`, or delete `/var/lib/cfm/ttlbans.json` with the daemon stopped.
+
 > **Duration units.** All duration values in `detectors.conf` (`BLOCK`, `EVERY`,
 > `WINDOW`, `COOLDOWN`, `TIMEOUT`, mysql `QUERY_RULES` max-time, …) use Go's
 > duration syntax — `s` (seconds), `m` (minutes), `h` (hours) — extended by CFM

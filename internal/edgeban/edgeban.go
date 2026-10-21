@@ -579,3 +579,10 @@ func IsBanned(ip string) (bool, time.Duration) { return Default().Banned(ip) }
 
 // List is the Default store's List (nil without one).
 func List() []Item { return Default().List() }
+
+// AddrMatcher returns a matcher for nft set elements as nft lists them
+// (hosts, CIDRs, first-last ranges), the one edge ban reconcile uses for the
+// allow sets. The daemon's TTL ban restore (internal/ttlban) shares it.
+func AddrMatcher(elems []string) func(net.IP) bool {
+	return parseAllowSet(elems).contains
+}
