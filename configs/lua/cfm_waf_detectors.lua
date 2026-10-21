@@ -6893,20 +6893,22 @@ end
 --                 which multiplies that work. Real forms nest a few levels.
 --
 --   10022 (edge block, ban held), from the request head:
---   NO_CL         a multipart POST with no Content-Length on a location that
---                 streams the body to the origin: PHP then sees no length,
---                 and the body passes the post_max_size check. A location
---                 that buffers the body (`location /`) sends the origin a
---                 real Content-Length, so cfm.lua does not flag it there.
+--   NO_CL         a multipart POST with no Content-Length that nginx streams
+--                 to the origin as it is: PHP then sees no length, and the
+--                 body passes the post_max_size check. A body read in full
+--                 first (by cfm.lua, or buffered by `location /`) goes
+--                 upstream with a real Content-Length, so cfm.lua flags only
+--                 one the edge never read (its no_body_length).
 --
--- The structural legs read the body cfm.lua handed over (waf_body_max_len,
--- 32 KB by default), so a padded request can push its abuse past it: the first
--- window of an OOM attempt is the abuse itself, which is why this works, but
--- it is no substitute for the PHP update. Parts are split like rfc1867.c and
--- each_multipart_field (mp_get_line / php_mp_boundary / php_ap_getword,
--- read-only use): find_boundary skips lines until one EQUAL to `--<bnd>`, so a
--- closing `--<bnd>--` does not end the parse, and the FIRST Content-Disposition
--- (with its own continuation lines) is the one read.
+-- The structural legs read only the body cfm.lua handed over
+-- (waf_body_max_len, 32 KB by default). PHP frees a part's headers before the
+-- next one, so ONE abusive part after 32 KB of padding is enough and is not
+-- seen here: this catches the exploit as published and unpadded copies of it,
+-- and is no substitute for the PHP update. Parts are split like rfc1867.c
+-- (mp_get_line / php_mp_boundary / php_ap_getword, read-only use):
+-- find_boundary skips lines until one EQUAL to `--<bnd>`, so a closing
+-- `--<bnd>--` does not end the parse, and the FIRST Content-Disposition (with
+-- its own continuation lines) is the one read.
 local MP_OOM_MAX_PART_HEADERS = 16
 local MP_OOM_MAX_EMPTY_FILES  = 64
 local MP_OOM_MAX_NESTING      = 16
@@ -6919,7 +6921,7 @@ _M.MP_OOM_LIMITS = {
 local function mp_oom_structure(b, ct_raw)
   local bnd = php_mp_boundary(ct_raw)
   if not bnd then return nil end
-  local B, nextb = "--" .. bnd, "\n--" .. bnd
+  local B = "--" .. bnd
   local n, p = #b, 1
   local empty_files = 0
   while true do
@@ -6961,8 +6963,6 @@ local function mp_oom_structure(b, ct_raw)
           elseif lk == "filename" then filename = php_ap_getword_conf(pair, j) end
         end
       end
-      -- neither: PHP ends the parse ("Mime headers garbled")
-      if not name and not filename then return nil end
       local _, depth = (name or ""):gsub("%[", "")
       if depth > MP_OOM_MAX_NESTING then return "NESTING" end
       if filename == "" then
@@ -6970,8 +6970,17 @@ local function mp_oom_structure(b, ct_raw)
         if empty_files >= MP_OOM_MAX_EMPTY_FILES then return "EMPTY_FILES" end
       end
     end
-    -- back to find_boundary from the LF before the next "--<bnd>"
-    p = b:find(nextb, p, true) or n + 1
+    -- Back to find_boundary, line by line from the end of the headers. PHP
+    -- does that itself for a part it does not read (no Content-Disposition,
+    -- an empty filename, a file past max_file_uploads), so a `--<bnd>` line
+    -- right there opens the next part; for one it reads, the value ends at
+    -- the next "\n--<bnd>", a line this scan reaches too. Scanning every
+    -- part's bytes this way finds every part PHP finds (a boundary line
+    -- inside a value would have ended it), plus at most decoys inside a
+    -- value or file, which only add detections. For the same reason a part
+    -- with neither name nor filename, where PHP stops ("Mime headers
+    -- garbled"), does not stop this scan: a desync could otherwise end it
+    -- early on a decoy.
   end
 end
 
@@ -6982,8 +6991,8 @@ function _M.detect_cve_php_multipart_oom(method, body, headers)
   return mp_oom_structure(body, ct_raw)
 end
 
--- no_length: the request declared no body length on a streaming location
--- (cfm.lua's waf ctx no_body_length). A caller that does not know passes nil,
+-- no_length: the request declared no body length and the edge never read
+-- it (cfm.lua's waf ctx no_body_length). A caller that does not know passes nil,
 -- and the rule stays off (the panel gate).
 function _M.detect_cve_php_multipart_no_length(method, headers, no_length)
   if method ~= "post" or not no_length then return nil end

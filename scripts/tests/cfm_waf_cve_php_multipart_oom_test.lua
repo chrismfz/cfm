@@ -124,6 +124,32 @@ do
   parts[2] = B .. "--x\r\n"
   fires(post(body(parts)), "empty file controls after a --<bnd>--x line", "EMPTY_FILES")
 end
+-- A part PHP does not read (no Content-Disposition, an empty filename, a file
+-- past max_file_uploads) sends find_boundary line by line from the end of its
+-- headers, so a boundary line right there opens the next part (review 2,
+-- confirmed against PHP 8.3.6). Tight-packed: no CRLF before the boundary.
+do
+  local empty = B .. '\r\nContent-Disposition: form-data; name="f[]"; filename=""\r\n\r\n'
+  local nocd  = B .. "\r\nX: 1\r\n\r\n"
+  local t = {}
+  for _ = 1, L.empty_files do t[#t + 1] = empty end
+  fires(post(table.concat(t) .. B .. "--\r\n"), "tight-packed empty file controls", "EMPTY_FILES")
+  t = {}
+  for _ = 1, L.empty_files do t[#t + 1] = nocd; t[#t + 1] = empty end
+  fires(post(table.concat(t) .. B .. "--\r\n"), "tight-packed CD-less + empty file pairs", "EMPTY_FILES")
+  local hdrs = {}
+  for i = 1, L.part_headers + 4 do hdrs[#hdrs + 1] = "X-Pad-" .. i .. ": a\r\n" end
+  fires(post(empty .. B .. '\r\nContent-Disposition: form-data; name="victim"\r\n' ..
+             table.concat(hdrs) .. "\r\nv\r\n" .. B .. "--\r\n"),
+        "empty file part, then a part with too many headers", "PART_HEADERS")
+  fires(post(empty .. B .. '\r\nContent-Disposition: form-data; name="a' .. string.rep("[x]", L.nesting + 4) ..
+             '"\r\n\r\nv\r\n' .. B .. "--\r\n"),
+        "empty file part, then a deeply nested name", "NESTING")
+  -- A part with neither name nor filename does not stop the scan.
+  t = { B .. '\r\nContent-Disposition: form-data\r\n\r\nx\r\n' }
+  for _ = 1, L.empty_files do t[#t + 1] = file("f[]", "", "") end
+  fires(post(body(t)), "garbled part first, then empty file controls", "EMPTY_FILES")
+end
 -- Only the FIRST Content-Disposition is read, with its own continuation lines;
 -- a second one's continuation must not replace its name.
 fires(post(body({ B .. "\r\n" ..

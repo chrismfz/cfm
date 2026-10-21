@@ -26,12 +26,14 @@ back-filled here — see the git/PR history for that period.
   more than 16 header lines, 64 or more empty file fields, or a field name
   nested more than 16 levels — browsers never send these, so a hit is a 403
   plus a 6 h ban and a `WAF/CVE-2026-109618` alert (the exploit needs many
-  attempts, so the first one is enough). Rule 10022: a multipart POST with no
-  Content-Length on a path the edge streams to PHP (`.php`, admin paths) — a
-  403 without a ban, because a few upload tools stream that way too
-  (`RULE_10022 = 1` in `[waf_security]` arms the ban). This is a stopgap:
-  update PHP and set `session.upload_progress.enabled = 0`. It does not cover
-  the panel ports (no body is read there) or nodes without the edge.
+  attempts, so the first one is enough). It is enforced on every path,
+  including a large or chunked `POST /` that the body burn-in would otherwise
+  only log. Rule 10022: a multipart POST with no Content-Length that the edge
+  passes on unread (an HTTP/3 upload it cannot read) — a 403 without a ban
+  (`RULE_10022 = 1` in `[waf_security]` arms it). A stopgap with limits: it
+  sees the first 32 KB of a body only (an attacker who pads past it is not
+  stopped), not the panel ports, not nodes without the edge. Update PHP and
+  set `session.upload_progress.enabled = 0`.
 
 ### Changed
 - **ChallengeV2: the real-input rescue no longer clears a score above 100.**
