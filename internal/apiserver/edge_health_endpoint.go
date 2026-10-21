@@ -580,8 +580,12 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	// client's own Host header, so one client must not be able to raise it. It is
 	// a heuristic, hence "likely": several tabs on one target or a validator
 	// disagreement (a bridge-token rotation window, which can hit many IPs at
-	// once) bounce cleared clients too. A CDN that also caches the challenge
-	// page's own URL sends no bounce here at all (challenge_cdn_cache.go).
+	// once) bounce cleared clients too. A bounce the edge marks as direct (no
+	// trusted proxy between client and edge, X-CFM-Relayed: 0) is not counted:
+	// an Android PDF download leaves the tab on the challenge URL, which named
+	// a vhost with no CDN at all (orion, 2026-10-21). A CDN that also caches
+	// the challenge page's own URL sends no bounce here at all
+	// (challenge_cdn_cache.go).
 	// `ips` is the 24 h count of distinct clients (the key keeps its name);
 	// `bounces` covers the host's whole current run.
 	// Suspects come first: the tracker outlives a listener that stopped after
@@ -611,7 +615,7 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 			names = append(names, s["host"].(string))
 		}
 		findings = append(findings, sev.add("cdn-cached-challenge", "warn",
-			itoa(len(suspects))+" vhost(s) likely behind a CDN that serves CFM's challenge from its cache ("+strings.Join(names, ", ")+"): visitors holding a valid clearance were bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct clients each (IPv6 per /64), so every visitor of a cached URL is challenged until the CDN entry expires",
+			itoa(len(suspects))+" vhost(s) likely behind a CDN that serves CFM's challenge from its cache ("+strings.Join(names, ", ")+"): visitors holding a valid clearance, relayed by a trusted proxy (the CDN), were bounced back to the challenge from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct clients each (IPv6 per /64), so every visitor of a cached URL is challenged until the CDN entry expires",
 			fEv, "in that vhost's CDN (Cloudflare: Caching → Cache Rules) set Edge TTL to respect the origin's Cache-Control (CFM's challenge responses are no-store), then purge the cache"))
 	case !edgeHealthChallengeServing():
 		fEv["measured"] = false

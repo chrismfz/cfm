@@ -112,3 +112,29 @@ func TestChallengeLocations_WebListenersStampHostAndClearScope(t *testing.T) {
 		}
 	}
 }
+
+// The challenge page counts a cleared bounce as a CDN-cached challenge only
+// when the edge says a trusted proxy relayed it (challenge_cdn_cache.go). The
+// edge must set X-CFM-Relayed itself, from realip's own decision: a location
+// that passed the client's header would let a direct client claim either way.
+func TestChallengeLocations_SetRelayedFromTheTrustedPeerMap(t *testing.T) {
+	set := regexp.MustCompile(`proxy_set_header\s+X-CFM-Relayed\s+\$xfp_trusted_peer;`)
+	for _, f := range []string{"../../configs/openresty.conf", "../../configs/angie.conf"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		if !strings.Contains(string(b), `map "$remote_addr#$realip_remote_addr" $xfp_trusted_peer {`) {
+			t.Fatalf("%s: $xfp_trusted_peer map not found", f)
+		}
+		locs := exactLocations(t, string(b), "/__cfm_challenge")
+		if len(locs) == 0 {
+			t.Fatalf("%s: no /__cfm_challenge location found", f)
+		}
+		for i, loc := range locs {
+			if !set.MatchString(loc) {
+				t.Errorf("%s: /__cfm_challenge #%d does not set X-CFM-Relayed from $xfp_trusted_peer", f, i+1)
+			}
+		}
+	}
+}

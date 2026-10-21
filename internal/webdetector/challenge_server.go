@@ -1397,13 +1397,20 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// Web scope only: the panel listeners sit behind no CDN, so a
 				// cleared bounce there is a validator disagreement, not a cache.
 				// Counted whether or not the bust can be built (a '#' or an
-				// over-long target): it is the same CDN symptom.
+				// over-long target): it is the same CDN symptom. Counted only
+				// when the request may have come through a CDN
+				// (cdnRelayedCounts): a direct client's own tab re-requesting
+				// the page (an Android PDF download leaves it on the challenge
+				// URL) is not a CDN, and named mathematica.gr on orion.
 				if why == "cleared" && scope == "web" && nextRedirects.putIfAbsent(key+"|nc", struct{}{}, now) {
-					noteCDNCachedChallenge(host, ip.String(), now)
+					relayed := r.Header.Get(cdnRelayedHeader)
+					if cdnRelayedCounts(relayed) {
+						noteCDNCachedChallenge(host, ip.String(), now)
+					}
 					if busted := cdnBustNext(next); busted != "" {
 						if verifyRejects.putIfAbsent(ip.String()+"|cdn_cached_challenge", struct{}{}, now) {
-							logging.LogfCHALLENGES("[challenge] cdn_cached_challenge ip=%s host=%s scope=%s next=%q note=cleared_bounce_cache_bust",
-								ip.String(), truncateForLog(host, 120), scope, truncateForLog(next, 220))
+							logging.LogfCHALLENGES("[challenge] cdn_cached_challenge ip=%s host=%s scope=%s relayed=%s next=%q note=cleared_bounce_cache_bust",
+								ip.String(), truncateForLog(host, 120), scope, cdnRelayedLogValue(relayed), truncateForLog(next, 220))
 						}
 						setNoStore(w.Header())
 						http.Redirect(w, r, busted, http.StatusSeeOther) // 303

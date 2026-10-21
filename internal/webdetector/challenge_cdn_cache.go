@@ -45,7 +45,18 @@ package webdetector
 //     rule, which the edge_health finding names;
 //   - the count is a heuristic: a cleared bounce without a CDN (several tabs
 //     on one target, a validator disagreement such as a bridge-token rotation
-//     window) counts too, and the latter can hit many IPs at once.
+//     window) counts too, and the latter can hit many IPs at once. A bounce
+//     the edge marks as DIRECT (cdnRelayedHeader "0": the TCP peer is the
+//     client itself) is not counted: no CDN stood between them. That was
+//     orion's mathematica.gr (2026-10-21): no CDN at all, every bounce a PDF
+//     opened on Android, whose download leaves the tab on the challenge URL;
+//     each re-tap was a cleared bounce from a new client;
+//   - so a CDN the edge does not trust as a proxy (not in
+//     trusted_proxies.conf) is not counted either. Behind one, every visitor
+//     arrives from the CDN's own addresses, so the per-client clearance and
+//     the distinct-client count already describe CDN nodes, not visitors.
+//     An edge conf from before the header (no header at all) counts every
+//     bounce, as before.
 
 import (
 	"crypto/rand"
@@ -69,6 +80,33 @@ func setNoStore(h http.Header) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("CDN-Cache-Control", "no-store")
 	h.Set("Cloudflare-CDN-Cache-Control", "no-store")
+}
+
+// cdnRelayedHeader is the edge's answer to "did this request reach the edge
+// through a trusted proxy?": the confs' location = /__cfm_challenge sets it to
+// $xfp_trusted_peer, "1" when realip rewrote the client address (the peer is
+// in trusted_proxies.conf), "0" when the peer is the client. The edge sets it
+// itself, so a client cannot choose it on a current conf.
+const cdnRelayedHeader = "X-CFM-Relayed"
+
+// cdnRelayedCounts: whether a cleared bounce with this cdnRelayedHeader value
+// counts toward the cdn-cached-challenge check. Only an explicit "0" (direct)
+// is left out; an absent header is an edge conf from before it, which keeps
+// counting every bounce, and "1" is a bounce through a CDN.
+func cdnRelayedCounts(v string) bool {
+	return strings.TrimSpace(v) != "0"
+}
+
+// cdnRelayedLogValue: the header for the log line, "-" when absent (an older
+// edge conf), anything else but 0/1 shown as "?" (never the raw client text).
+func cdnRelayedLogValue(v string) string {
+	switch v = strings.TrimSpace(v); v {
+	case "0", "1":
+		return v
+	case "":
+		return "-"
+	}
+	return "?"
 }
 
 // cdnBustParam is the query parameter cdnBustNext adds. Its only job is to
