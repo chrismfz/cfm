@@ -90,6 +90,28 @@ fires(post(body({ field("a", "1"), field("b", "2"), field("PHP_SESSION_UPLOAD_PR
       "progress field third, quoted boundary", "NO_REFERER")
 -- a same-site Referer on ANOTHER host of the same box is still cross-site
 fires(post(PROGRESS, { Referer = "https://other.example.gr/" }), "Referer of another vhost", "XSITE")
+-- a name split across header lines: PHP joins a continuation line, and a
+-- NUL ends a 5120-byte line piece (both confirmed on PHP 8.3 to reach
+-- upload progress); the name is read from the parse, never the raw body
+local function raw_part(disp) return B .. "\r\n" .. disp .. "\r\n\r\nx\r\n" end
+fires(post(body({ raw_part('Content-Disposition: form-data; name="PHP_SESSION_\r\nUPLOAD_PROGRESS"'),
+                  file("f", "a.txt", "zz") })), "name split by a continuation line", "NO_REFERER", "block")
+do
+  local head = 'Content-Disposition: form-data; name="PHP_SESSION_'
+  local pad = ("A"):rep(5120 - #head - 1)
+  fires(post(body({ raw_part(head .. "\0" .. pad .. 'UPLOAD_PROGRESS"'), file("f", "a.txt", "zz") })),
+        "name split by the 5120-byte line cut", "NO_REFERER", "block")
+end
+-- Sec-Fetch-Site same-site does not make an unrelated host same-site
+fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-site", Referer = "https://evil.example/" }),
+      "same-site header, unrelated Referer", "XSITE", "block")
+fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-site", Host = "example.gr", Referer = "https://other.gr/" }),
+      "same-site header, a different registrable domain", "XSITE", "block")
+-- same-origin with Origin null but a Referer of another site
+fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-origin", Origin = "null", Referer = "https://evil.example/" }),
+      "Origin null with a cross-site Referer", "XSITE", "block")
+-- Origin null without Fetch Metadata
+fires(post(PROGRESS, { Origin = "null" }), "Origin null, no Sec-Fetch-Site", "NO_REFERER", "block")
 
 -- ── 10024: same site is logonly ─────────────────────────────────────────────
 fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-origin", Referer = "https://shop.example.gr/upload" }), "same-site Referer", "SAME_SITE", "logonly")
@@ -98,6 +120,18 @@ fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "Same-Site", Referer = "http://SHOP.
 fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-origin", Origin = "https://shop.example.gr" }), "same-site Origin, no Referer", "SAME_SITE", "logonly")
 fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-origin", Host = "shop.example.gr:443", Origin = "https://shop.example.gr" }),
       "Host header with a port", "SAME_SITE", "logonly")
+-- Sec-Fetch-Site same-site from www. or a sibling host
+fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-site", Host = "example.gr", Referer = "https://www.example.gr/up",
+                       Origin = "https://www.example.gr" }), "www Referer to the apex", "SAME_SITE", "logonly")
+fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-site", Host = "www.example.gr", Origin = "https://example.gr" }),
+      "apex Origin to www", "SAME_SITE", "logonly")
+fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-site", Referer = "https://cdn.example.gr/" }),
+      "sibling host", "SAME_SITE", "logonly")
+-- Referrer-Policy: no-referrer: Origin null, no Referer
+fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-origin", Origin = "null" }), "no-referrer policy", "SAME_SITE", "logonly")
+-- a trailing dot on the Host
+fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-origin", Host = "shop.example.gr.", Referer = "https://shop.example.gr/" }),
+      "Host with a trailing dot", "SAME_SITE", "logonly")
 
 -- A forged same-site Referer without Fetch Metadata (the scanner did this).
 fires(post(PROGRESS, { Referer = "https://shop.example.gr/" }), "same-site Referer, no Sec-Fetch-Site", "NO_FETCH_METADATA", "block")

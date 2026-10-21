@@ -591,15 +591,23 @@ end
 -- The file parts PHP registers in a multipart body, as { filename, s, e }
 -- (bytes body[s..e]). Rules 401 and 415 both read them: the last parse is kept
 -- (Lua strings are interned, so the key test is a pointer compare).
-local fp_body, fp_ct, fp_parts
-local function php_file_parts(body, ct_raw)
-  if body == fp_body and ct_raw == fp_ct then return fp_parts end
-  local parts = {}
-  each_multipart_field(body, ct_raw, nil, function(fname, _, s, e)
+-- The same parse also keeps every part name PHP joined (fields and file
+-- parts, lowercased) for rule 10024, so a multipart body is parsed once.
+local fp_body, fp_ct, fp_parts, fp_names
+local function php_multipart_parse(body, ct_raw)
+  if body == fp_body and ct_raw == fp_ct then return fp_parts, fp_names end
+  local parts, names = {}, {}
+  each_multipart_field(body, ct_raw, function(name)
+    names[lower(name)] = true
+  end, function(fname, name, s, e)
     parts[#parts + 1] = { fname, s, e }
+    if name then names[lower(name)] = true end
   end)
-  fp_body, fp_ct, fp_parts = body, ct_raw, parts
-  return parts
+  fp_body, fp_ct, fp_parts, fp_names = body, ct_raw, parts, names
+  return parts, names
+end
+local function php_file_parts(body, ct_raw)
+  return (php_multipart_parse(body, ct_raw))
 end
 -- The file names php_file_parts sees (raw, as sent), for the oracle test.
 function _M.php_file_names(body, ct_raw)
@@ -7173,9 +7181,15 @@ end
 --          same-site Sec-Fetch-Site (NO_FETCH_METADATA: a forged Referer).
 --          A browser's own upload-progress form sends all of them, so that
 --          request (SAME_SITE) is logonly telemetry. Beyond Imunify's
---          Referer test: Origin (a browser sends it on every POST, also under
---          `Referrer-Policy: no-referrer`) and Fetch Metadata (the scanner
---          forged a same-site Referer here).
+--          Referer test: Origin (a browser sends it on a POST; under
+--          `Referrer-Policy: no-referrer` it is "null" and there is no
+--          Referer, which with Sec-Fetch-Site same-origin is SAME_SITE too),
+--          Fetch Metadata (the scanner forged a same-site Referer here), and
+--          for Sec-Fetch-Site same-site a Referer / Origin on the parent or a
+--          sibling host (www.example.gr posting to example.gr).
+--          A browser without Fetch Metadata (Safari < 16.4) posting its own
+--          upload-progress form is blocked (NO_FETCH_METADATA): a rare field
+--          on a rare browser, against a Referer the scanner already forges.
 --
 -- Neither one fixes PHP: `session.upload_progress.enabled = 0` and the PHP
 -- update do. A tool that renames itself passes 10023; one that forges a
@@ -7206,44 +7220,59 @@ function _M.detect_cve_php2shell_tool(headers)
   return nil
 end
 
--- 10024: the field name, case-insensitive, as a Lua pattern ("[Pp][Hh]…"),
--- so a body without it costs one scan and no parse.
+-- 10024: the field name as PHP registers it, compared lowercased. It is read
+-- from the multipart parse, never found in the raw body: PHP joins a name
+-- split across header lines (a continuation line, the 5120-byte line cut),
+-- so it need not appear whole anywhere (field_gate_open).
 local UPLOAD_PROGRESS_NAME = "php_session_upload_progress"
-local UPLOAD_PROGRESS_PAT = UPLOAD_PROGRESS_NAME:gsub("%a", function(c)
-  return "[" .. c:upper() .. c .. "]"
-end)
 
 -- The host of an absolute URL (a Referer or an Origin), lowercased, without
--- userinfo or port; nil for anything else ("null", a relative Referer).
+-- userinfo, port or a trailing dot; nil for anything else ("null", a
+-- relative Referer).
 local function url_host(s)
   local auth = s and s:match("^%a[%w+.%-]*://([^/?#]*)")
   if not auth or auth == "" then return nil end
-  return lower(strip_host_port((auth:gsub("^.*@", ""))))
+  return (lower(strip_host_port((auth:gsub("^.*@", "")))):gsub("%.$", ""))
+end
+
+-- Same site for Sec-Fetch-Site same-site: equal, one under the other, or
+-- siblings under a parent that still has a dot (a.example.gr / b.example.gr,
+-- not example.gr / other.gr). An approximation of the registrable domain;
+-- a sibling under a public suffix such as com.gr also passes, and only to
+-- logonly, with the browser's own same-site header.
+local function parent(h) return h:match("^[^.]+%.(.+%..+)$") end
+local function same_site(a, b)
+  if not a or not b then return false end
+  if a == b then return true end
+  if a:sub(-#b - 1) == "." .. b or b:sub(-#a - 1) == "." .. a then return true end
+  local pa = parent(a)
+  return pa ~= nil and pa == parent(b)
 end
 
 function _M.detect_cve_php_upload_progress(method, body, headers, req_host)
   if method ~= "post" or not body or body == "" then return nil end
-  if not body:find(UPLOAD_PROGRESS_PAT) then return nil end
   headers = headers or {}
   local ct_raw = php_content_type(headers)
   if php_media_type(ct_raw) ~= "multipart/form-data" then return nil end
-  local found = false
-  local function seen(name)
-    if not found and name and lower(name) == UPLOAD_PROGRESS_NAME then found = true end
-  end
-  each_multipart_field(body, ct_raw, seen, function(_, name) seen(name) end)
-  if not found then return nil end
-  local host = lower(strip_host_port(header_string(headers["host"] or headers["Host"]) or req_host or ""))
-  local ref = url_host(header_string(headers["referer"] or headers["Referer"]))
-  local org = url_host(header_string(headers["origin"] or headers["Origin"]))
-  if host ~= "" and (ref == host or org == host) then
-    -- A script forges a Referer as easily as anything else, and PHP2Shell's
-    -- scanner did (94.26.104.67, a same-site Referer, 2026-10-21). A browser
-    -- also sends Fetch Metadata on every request (Chrome 76+, Firefox 90+,
-    -- Safari 16.4+): a same-site one without it is not a browser's form.
-    local sfs = lower(header_string(headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]) or "")
-    if sfs == "same-origin" or sfs == "same-site" then return "SAME_SITE" end
-    return "NO_FETCH_METADATA"
+  local _, names = php_multipart_parse(body, ct_raw)
+  if not names[UPLOAD_PROGRESS_NAME] then return nil end
+  local host = (lower(strip_host_port(header_string(headers["host"] or headers["Host"]) or req_host or "")):gsub("%.$", ""))
+  local ref_raw = header_string(headers["referer"] or headers["Referer"])
+  local org_raw = header_string(headers["origin"] or headers["Origin"])
+  local ref, org = url_host(ref_raw), url_host(org_raw)
+  -- A script forges a Referer as easily as anything else, and PHP2Shell's
+  -- scanner did (94.26.104.67, a same-site Referer, 2026-10-21). A browser
+  -- also sends Fetch Metadata on every request (Chrome 76+, Firefox 90+,
+  -- Safari 16.4+): a same-site one without it is not a browser's form.
+  local sfs = lower(header_string(headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]) or "")
+  if host ~= "" then
+    if ref == host or org == host then
+      if sfs == "same-origin" or sfs == "same-site" then return "SAME_SITE" end
+      return "NO_FETCH_METADATA"
+    end
+    if sfs == "same-site" and (same_site(ref, host) or same_site(org, host)) then return "SAME_SITE" end
+    -- Referrer-Policy: no-referrer: no Referer and Origin "null".
+    if sfs == "same-origin" and not ref and org_raw and lower(org_raw) == "null" then return "SAME_SITE" end
   end
   if ref or org then return "XSITE" end
   return "NO_REFERER"
