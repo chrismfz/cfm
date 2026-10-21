@@ -6872,4 +6872,119 @@ end
 
 
 
+
+-- Rule 10021 — CVE-2026-109618 ("RCE via OOM corruption", GHSA-w8hw-w9fx-j79w),
+-- PHP < 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12, plus the OOM producer that the
+-- related CVE-2026-109619 (GHSA-6wmf-4rv5-p3rp, session upload progress) needs.
+-- Source: the two php-src advisories published 2026-10-21. PHP leaves request
+-- memory half-initialised when an allocation fails during the automatic
+-- multipart parse at request startup, and shutdown then uses it (mod_php RCE
+-- confirmed with default limits). The advisory names three request shapes
+-- that drive that parse into memory_limit; each is one leg here:
+--
+--   NO_CL         a multipart POST with no Content-Length: it passes the
+--                 post_max_size check and keeps supplying body data. A
+--                 browser always declares the length of a form it submits.
+--   PART_HEADERS  a part with more than MP_OOM_MAX_PART_HEADERS header lines:
+--                 their in-PHP form is far bigger than on the wire. A real
+--                 part carries Content-Disposition and maybe Content-Type.
+--   EMPTY_FILES   MP_OOM_MAX_EMPTY_FILES or more file controls with an empty
+--                 filename (not counted by max_file_uploads, each still
+--                 builds a $_FILES metadata entry).
+--   NESTING       a part name nested deeper than MP_OOM_MAX_NESTING levels,
+--                 which multiplies that work. Real forms nest a few levels.
+--
+-- The structural legs read only the body the WAF was handed (the multipart
+-- scan budget), so a padded request can push its abuse past it: the first
+-- window of an OOM attempt is the abuse itself, which is why this works, but
+-- it is no substitute for the PHP update. Parts are split like rfc1867.c
+-- (mp_get_line / php_mp_boundary / php_ap_getword, read-only use).
+local MP_OOM_MAX_PART_HEADERS = 16
+local MP_OOM_MAX_EMPTY_FILES  = 64
+local MP_OOM_MAX_NESTING      = 16
+_M.MP_OOM_LIMITS = {
+  part_headers = MP_OOM_MAX_PART_HEADERS,
+  empty_files  = MP_OOM_MAX_EMPTY_FILES,
+  nesting      = MP_OOM_MAX_NESTING,
+}
+
+local function mp_nesting(name)
+  local _, n = name:gsub("%[", "")
+  return n
+end
+
+local function mp_oom_structure(b, ct_raw)
+  local bnd = php_mp_boundary(ct_raw)
+  if not bnd then return nil end
+  local B, nextb = "--" .. bnd, "\n--" .. bnd
+  local n, p = #b, 1
+  local empty_files = 0
+  -- find the first boundary line, as find_boundary does
+  while true do
+    local line
+    line, p = mp_get_line(b, p, n)
+    if not line then return nil end
+    if line == B then break end
+  end
+  while true do
+    local nhdr, cd, cur = 0, nil, nil
+    while true do
+      local l, np = mp_get_line(b, p, n)
+      if not l then break end
+      p = np
+      if l == "" then break end
+      nhdr = nhdr + 1
+      if nhdr > MP_OOM_MAX_PART_HEADERS then return "PART_HEADERS" end
+      local c1 = l:sub(1, 1)
+      local colon = (not c1:find("^%s")) and l:find(":", 1, true)
+      if colon then
+        cur = lower(l:sub(1, colon - 1))
+        if cur == "content-disposition" and not cd then cd = l:sub(colon + 1) end
+      elseif cur == "content-disposition" and cd then
+        cd = cd .. l
+      end
+    end
+    if cd then
+      local name, filename
+      local i = cd:find("%S") or #cd + 1
+      while i <= #cd do
+        local pair
+        pair, i = php_ap_getword(cd, i, ";")
+        i = cd:find("%S", i) or #cd + 1
+        if pair:find("=", 1, true) then
+          local key, j = php_ap_getword(pair, 1, "=")
+          local lk = lower(key)
+          if lk == "name" then name = php_ap_getword_conf(pair, j)
+          elseif lk == "filename" then filename = php_ap_getword_conf(pair, j) end
+        end
+      end
+      if name and mp_nesting(name) > MP_OOM_MAX_NESTING then return "NESTING" end
+      if filename == "" then
+        empty_files = empty_files + 1
+        if empty_files >= MP_OOM_MAX_EMPTY_FILES then return "EMPTY_FILES" end
+      end
+    end
+    local bound = b:find(nextb, p, true)
+    if not bound then return nil end
+    -- step past "\n--<boundary>" and the rest of that line ("--" ends the body)
+    local _, np = mp_get_line(b, bound + 1, n)
+    if not np then return nil end
+    if b:sub(bound + 1 + #B, bound + 2 + #B) == "--" then return nil end
+    p = np
+  end
+end
+
+-- no_length: the request declared no body length (cfm.lua's waf ctx
+-- no_body_length; false for a replayed challenged POST, whose stored body is
+-- re-injected without the header). A caller that does not know passes nil,
+-- and the NO_CL leg stays off (the panel gate).
+function _M.detect_cve_php_multipart_oom(method, body, headers, no_length)
+  if method ~= "post" then return nil end
+  local ct_raw = php_content_type(headers or {})
+  if php_media_type(ct_raw) ~= "multipart/form-data" then return nil end
+  if no_length then return "NO_CL" end
+  if not body or body == "" then return nil end
+  return mp_oom_structure(body, ct_raw)
+end
+
 return _M
