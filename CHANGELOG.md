@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.21
+
 ### Fixed
 - **A package upgrade, restart or reboot no longer frees every TTL-banned
   address.** TTL bans (autoblock, WAF autoblock, `cfm block --ttl`, fleet
@@ -35,8 +39,6 @@ back-filled here — see the git/PR history for that period.
   still come from `cfm.deny`. As on deb nodes, a change of the input chain
   priority now needs `cfm reset` on rpm nodes too. See `docs/DETECTORS.md`
   "TTL bans across a restart".
-
-## 2026.10.21
 
 ### Security
 - **Rule 401 (and the upload CVE rules) no longer miss an upload placed where
