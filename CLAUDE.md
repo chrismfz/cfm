@@ -483,7 +483,11 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   default for a `RULE_<id>` key, so the hold reaches configs that predate the
   rule (10019 and 10020, the TranslatePress id-lookup leg and the
   logged-in reset-preview request; 511, the xmlrpc pingback WordPress itself
-  sends, deferred in `cfm_waf.lua` like them). The rendered `[waf_security]` template is derived from
+  sends, deferred in `cfm_waf.lua` like them; 10022, CVE-2026-109618's
+  length-less multipart leg, which a chunked upload client also sends). The
+  armed body rule 10021 (same CVE) runs FIRST in `check()` and is the one
+  body rule cfm.lua enforces during the body burn-in (`BURNIN_ENFORCE_IDS`),
+  because its exploit is a large or chunked `POST /`. The rendered `[waf_security]` template is derived from
   the same code defaults, so a fresh `detectors.conf` lists exactly these.
 - **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
   default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and

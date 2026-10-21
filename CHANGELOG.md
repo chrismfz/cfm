@@ -17,6 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **WAF rules 10021 / 10022 block the PHP core RCE request shapes
+  (CVE-2026-109618 / CVE-2026-109619, "PHP2Shell").** PHP before 8.2.35 /
+  8.3.36 / 8.4.27 / 8.5.12 can be taken over by a request that runs PHP out of
+  memory while it parses a multipart upload, before any site code runs. The
+  edge now refuses the shapes the PHP advisories name. Rule 10021: a part with
+  more than 16 header lines, 128 or more empty file fields, or a field name
+  nested too deep (more than 16 levels on a file field, 32 on a plain one) —
+  real forms don't send these, so a hit is a 403 plus a 6 h ban and a
+  `WAF/CVE-2026-109618` alert (the exploit needs many attempts, so the first
+  one is enough). It also applies to a large or chunked `POST /`, which the
+  body burn-in would otherwise only log, and to a client holding a solved
+  challenge. A false positive is cleared fastest with a WAF exclude for rule
+  10021 on that host or path. Rule 10022: a multipart POST with no
+  Content-Length that the edge passes on unread (an HTTP/3 upload it cannot
+  read) — a 403 without a ban (`RULE_10022 = 1` in `[waf_security]` arms it);
+  it needs the edge conf shipped with this release. A stopgap with limits: it
+  sees the first 32 KB of a body only (an attacker who pads past it is not
+  stopped), not the panel ports, not unread streaming paths, not nodes without
+  the edge. Update PHP and set `session.upload_progress.enabled = 0`.
+
 ### Changed
 - **ChallengeV2: the real-input rescue no longer clears a score above 100.**
   A failing solve with real pointer input is still rescued at 100, the score

@@ -597,6 +597,9 @@ local function get_req_body_for_waf(uri, method, max_len)
     end
     ngx.ctx.waf_body = ""; return ""
   end
+  -- Read in full here, so nginx sends the origin a real Content-Length even
+  -- on a proxy_request_buffering=off location (rule 10022 reads this).
+  ngx.ctx.cfm_body_read = true
   local data = ngx.req.get_body_data()
   if data and data ~= "" then
     local result = (#data > max_len) and string.sub(data, 1, max_len) or data
@@ -1628,6 +1631,11 @@ local clearance_allow = clearance_ok
 
 -- Burn-in (Step 2): the strongest of the body's own hits is the one recorded.
 local BURNIN_SEV = { logonly = 1, challenge = 2, challenge_v2 = 3, block = 4 }
+-- Body rules whose block is enforced in burn-in too. 10021 (CVE-2026-109618,
+-- the PHP multipart OOM shapes) is new to every body, and its exploit is
+-- exactly a large or chunked body on `location /` (POST / to WordPress's
+-- index.php), which the burn-in would otherwise turn into a logonly hit.
+local BURNIN_ENFORCE_IDS = { ["10021"] = true }
 
 -- Set by a logonly WAF hit, which records and pushes it, then goes on through
 -- Steps 2b-4 like a clean request (it used to route to the origin there and
@@ -1686,6 +1694,22 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
       headers = req_headers, body = body_burnin and "" or req_body, self_origin = self_origin,
       skip_rule_ids = skip_rule_ids,
+      -- Rule 10022 (CVE-2026-109618): the request declared no body length
+      -- (chunked, or HTTP/2-3 without the header) and nginx will stream it to
+      -- the origin without one. A body read in full first goes upstream with
+      -- a real Content-Length, even on a proxy_request_buffering=off
+      -- location: read here (get_req_body_for_waf, so nearly every .php /
+      -- admin POST), or buffered by `location /`, or a replayed challenged
+      -- POST rebuilt from a stored body. What is left is a body the edge
+      -- never read: a failed read (HTTP/3 without a length) or a streaming
+      -- path off the body allowlist (/sysadmin/).
+      -- An edge conf older than $cfm_body_buffered (2026-10-09) cannot say
+      -- whether the location buffers, so the rule stays off there.
+      no_body_length = (ngx.var.http_content_length == nil)
+                       and not ngx.ctx.cfm_body_read
+                       and ngx.var.cfm_body_buffered ~= nil
+                       and ngx.var.cfm_body_buffered ~= "1"
+                       and not ngx.ctx.cfm_resumed_post,
     }
     -- A rule that raised used to take the whole request into the
     -- request_failure handler, which under fail_open skipped every step after
@@ -1713,11 +1737,14 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- maybe_flush_waf_insp piggybacks on the request to push the snapshot
       -- to Go without needing an init_worker timer.
       waf_insp_incr(host)
-      if body_burnin and (not hit or waf_action == "logonly") then
+      if body_burnin and (not hit or waf_action ~= "block") then
         -- The body's own hits: shdict nil, so the burst counters the check
         -- above already moved are not counted twice (those rules need it,
         -- and they decided above). With no hit above, a body hit becomes the
-        -- (logonly) hit; after a logonly one it is only logged.
+        -- (logonly) hit; after a logonly or challenge one it is only logged.
+        -- A BURNIN_ENFORCE_IDS block is the exception: it is enforced, over a
+        -- challenge too (which a cleared client would otherwise turn into
+        -- logonly below and pass upstream with the body).
         waf_ctx.body, waf_ctx.shdict = req_body, nil
         local b_ok, b_hit, b_reason, b_ttl, b_action, b_hits, b_rule = pcall(waf.check, waf_ctx)
         if not b_ok then
@@ -1742,7 +1769,13 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
               log_ev(ngx.WARN, "[cfm] waf_body_burnin would=", tostring(best.action), " ip=", ip, " host=", host,
                      " uri=", uri, " reason=", tostring(best.reason), " waf_rule_id=", tostring(best.waf_rule_id))
             end
-            if not hit then
+            local enf
+            for _, h in ipairs(b_hits or {}) do
+              if h.action == "block" and BURNIN_ENFORCE_IDS[tostring(h.waf_rule_id)] then enf = h; break end
+            end
+            if enf then
+              hit, reason, ttl, waf_action, waf_hits, waf_rule_id = true, enf.reason, enf.ttl, "block", b_hits, enf.waf_rule_id
+            elseif not hit then
               hit, reason, ttl, waf_action, waf_hits, waf_rule_id = true, best.reason, best.ttl, "logonly", b_hits, best.waf_rule_id
             end
           end
