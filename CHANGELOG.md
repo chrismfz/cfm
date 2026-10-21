@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.21
+
 ### Security
 - **New WAF rules 10023 / 10024 block PHP2Shell (CVE-2026-109619) as it is
   exploited in the wild.** The public tool drives PHP's session upload
@@ -36,8 +40,6 @@ back-filled here — see the git/PR history for that period.
   passed. Built from Imunify360 ruleset 8.85 and the fleet's own logs. Not a
   fix: set `session.upload_progress.enabled = 0` and update PHP (8.2.35 /
   8.3.36 / 8.4.27 / 8.5.12).
-
-## 2026.10.21
 
 ### Fixed
 - **A package upgrade, restart or reboot no longer frees every TTL-banned
