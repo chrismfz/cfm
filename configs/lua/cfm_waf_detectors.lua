@@ -300,7 +300,12 @@ local function mp_get_line(b, p, n)
     if e >= p and b:byte(e) == 13 then e = e - 1 end
     line, nxt = b:sub(p, e), le + 1
   elseif n - p + 1 >= MP_FILLUNIT then
-    line, nxt = b:sub(p, lim), lim + 1
+    -- A piece is cut at a NUL below: find it first and copy only what is
+    -- kept (the piece is bounded, so this search is too). Not in the LF
+    -- branch, where the search would run past the line, quadratic on a
+    -- body of short NUL-free lines.
+    local z = b:find("\0", p, true)
+    line, nxt = b:sub(p, (z and z <= lim) and z - 1 or lim), lim + 1
   else
     return nil
   end
@@ -493,12 +498,23 @@ end
 -- cost per hit is the visitor's (bounded by its header-line cap).
 local function mp_boundary_lines(b, bnd, visit)
   local B = "--" .. bnd
-  local n, pos = #b, 1
+  local n, pos, last = #b, 1, nil
   while true do
     local s = b:find(B, pos, true)
     if not s then return end
-    local l, hs = mp_get_line(b, s, n)
-    if l == B and visit(hs) then return end
+    -- The line read from s can equal B only when the byte after B ends it
+    -- (LF, CR before an LF, a NUL) or B is exactly one 5120-byte piece: an
+    -- exact pre-filter, so each other hit costs no line copy (an empty
+    -- boundary makes every "--" a hit).
+    local c = b:byte(s + #B)
+    if c == 10 or c == 13 or c == 0 or #B == MP_FILLUNIT then
+      local l, hs = mp_get_line(b, s, n)
+      -- Several hits on one line share its next line: read its part once.
+      if l == B and hs ~= last then
+        last = hs
+        if visit(hs) then return end
+      end
+    end
     pos = s + 1
   end
 end
