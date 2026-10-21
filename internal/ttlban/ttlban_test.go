@@ -373,48 +373,114 @@ func TestDefaultPathIsRedirectable(t *testing.T) {
 	}
 }
 
-// A read that lost every stored live ban is a table recreated empty under
-// the daemon (`cfm disable`, then a CLI command running EnsureBase): those
-// bans stay for the next start, a new ban beside them is added, and an
-// expired one still goes. A few of many lost is ordinary churn.
+// A read that lost at least three stored live bans, and more than half, is
+// a table recreated empty under the daemon (`cfm disable`, then a CLI command
+// running EnsureBase): those bans stay for the next start, a new ban beside
+// them is added, and an expired one still goes.
 func TestSnapshotKeepsBansARecreatedTableLost(t *testing.T) {
 	s, path := newStore(t)
 	_, _ = s.Restore(nil, nil)
 	_ = s.Snapshot(t0, []firewall.SetElementTimed{
 		{Elem: "192.0.2.1", Expires: time.Hour},
-		{Elem: "192.0.2.2", Expires: 2 * time.Minute},
+		{Elem: "192.0.2.2", Expires: time.Hour},
+		{Elem: "192.0.2.3", Expires: time.Hour},
+		{Elem: "192.0.2.4", Expires: 2 * time.Minute},
 	})
 	_ = s.Snapshot(t0.Add(5*time.Minute), []firewall.SetElementTimed{{Elem: "192.0.2.9", Expires: time.Hour}})
 	got := readFile(t, path)
-	if _, ok := got["192.0.2.1"]; !ok || len(got) != 2 {
-		t.Fatalf("after a recreated table: %v, want 192.0.2.1 kept and 192.0.2.9 added (192.0.2.2 expired)", got)
+	if len(got) != 4 {
+		t.Fatalf("after a recreated table: %v, want .1-.3 kept and .9 added (.4 expired)", got)
 	}
+}
 
+// Losing one or two bans, or a few of many, is ordinary churn (an AddBlock
+// that replaced a ban, a hand-run `nft delete element`): taken as it is, or
+// a node with one ban would keep a removed ban until it expired.
+func TestSnapshotTakesOrdinaryChurn(t *testing.T) {
+	s, path := newStore(t)
+	_, _ = s.Restore(nil, nil)
+	_ = s.Snapshot(t0, []firewall.SetElementTimed{{Elem: "192.0.2.1", Expires: 6 * time.Hour}})
+	_ = s.Snapshot(t0.Add(time.Minute), nil) // the one ban removed
+	if got := readFile(t, path); len(got) != 0 {
+		t.Fatalf("1 of 1 lost: %v, want it gone", got)
+	}
 	var many []firewall.SetElementTimed
 	for i := 10; i < 30; i++ {
 		many = append(many, firewall.SetElementTimed{Elem: net.IPv4(198, 51, 100, byte(i)).String(), Expires: time.Hour})
 	}
-	_ = s.Snapshot(t0.Add(6*time.Minute), many)
-	_ = s.Snapshot(t0.Add(7*time.Minute), many[3:]) // 3 of 20 gone (a flush of one IP, nft-side)
+	_ = s.Snapshot(t0.Add(2*time.Minute), many)
+	_ = s.Snapshot(t0.Add(3*time.Minute), many[3:])
 	if got := readFile(t, path); len(got) != 17 {
-		t.Fatalf("ordinary churn kept dropped bans: %d entries, want 17", len(got))
+		t.Fatalf("3 of 20 lost: %d entries, want 17", len(got))
 	}
 }
 
-// `cfm flush` removes the file: the daemon then takes its read as it is.
+// `cfm flush` leaves a marker: a read begun after it is the truth (even with
+// the file rewritten by a save that raced the flush, and over a failed
+// restore's carry); a read begun before it is not.
 func TestSnapshotAfterDiscardTakesTheRead(t *testing.T) {
 	s, path := newStore(t)
-	_, _ = s.Restore(nil, nil)
-	_ = s.Snapshot(t0, []firewall.SetElementTimed{{Elem: "192.0.2.1", Expires: time.Hour}})
+	base := time.Now()
+	s.now = func() time.Time { return base }
+	writeFile(t, path, map[string]Entry{"192.0.2.7": {Expires: base.Add(time.Hour)}})
+	_ = s.Load()
+	_, _ = s.Restore(&batchFake{err: errors.New("nft: busy")}, nil) // .7 carried
+	var three []firewall.SetElementTimed
+	for _, ip := range []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"} {
+		three = append(three, firewall.SetElementTimed{Elem: ip, Expires: time.Hour})
+	}
+	_ = s.Snapshot(base.Add(-time.Minute), three)
 	if err := Discard(path); err != nil {
 		t.Fatal(err)
 	}
-	if err := Discard(path); err != nil {
-		t.Fatalf("a second Discard: %v", err)
+	_ = s.Snapshot(base.Add(-30*time.Second), three) // began before the flush, saved after it
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("the racing save did not rewrite the file; the test proves nothing")
 	}
-	_ = s.Snapshot(t0.Add(time.Minute), []firewall.SetElementTimed{{Elem: "192.0.2.5", Expires: time.Hour}})
+	_ = s.Snapshot(time.Now().Add(time.Second), []firewall.SetElementTimed{{Elem: "192.0.2.5", Expires: time.Hour}})
 	if got := readFile(t, path); len(got) != 1 || got["192.0.2.5"].Expires.IsZero() {
 		t.Fatalf("after cfm flush: %v, want only the new ban", got)
+	}
+	if _, err := os.Stat(flushMarker(path)); !os.IsNotExist(err) {
+		t.Fatal("the marker outlived the read that acted on it")
+	}
+}
+
+// A flush while the daemon was down: the next start restores nothing.
+func TestRestoreAfterDiscardRestoresNothing(t *testing.T) {
+	s, path := newStore(t)
+	writeFile(t, path, map[string]Entry{"192.0.2.1": {Expires: t0.Add(time.Hour)}})
+	if err := Discard(path); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, map[string]Entry{"192.0.2.1": {Expires: t0.Add(time.Hour)}}) // a save that raced it
+	_ = s.Load()
+	be := &batchFake{}
+	res, err := s.Restore(be, nil)
+	if err != nil || len(be.got) != 0 || res.Flushed != 1 {
+		t.Fatalf("restored %v (res %+v, err %v), want nothing after a flush", be.got, res, err)
+	}
+	if len(readFile(t, path)) != 0 {
+		t.Fatal("the flushed bans stayed in the file")
+	}
+}
+
+// `cfm unblock` with the daemon stopped edits the file itself.
+func TestForgetInFile(t *testing.T) {
+	_, path := newStore(t)
+	writeFile(t, path, map[string]Entry{
+		"192.0.2.1":   {Expires: t0.Add(time.Hour)},
+		"2001:db8::1": {Expires: t0.Add(time.Hour)},
+	})
+	if err := ForgetInFile(path, "2001:DB8::1", "not-an-ip"); err != nil {
+		t.Fatal(err)
+	}
+	got := readFile(t, path)
+	if _, ok := got["2001:db8::1"]; ok || len(got) != 1 {
+		t.Fatalf("file %v, want only 192.0.2.1", got)
+	}
+	if err := ForgetInFile(filepath.Join(t.TempDir(), "none.json"), "192.0.2.1"); err != nil {
+		t.Fatalf("missing file: %v", err)
 	}
 }
 

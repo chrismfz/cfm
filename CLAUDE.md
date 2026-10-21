@@ -86,8 +86,9 @@ upgrade and freed every TTL-banned attacker (2026-10-21). For what still does
 `/var/lib/cfm/ttlbans.json` and restores them after EnsureBase. A new unblock
 path (not an allow: the block element stays under an allow) calls
 `ttlban.Forget` next to `edgeban.Unban`, or a restart resurrects the ban. A
-snapshot that lost every stored ban is taken as a recreated table and kept;
-`cfm flush` is the intended clear (it removes the file). Live test: `-run LiveNFTTTLBans` (both engines). See
+snapshot that lost at least three stored bans, and most of them, is taken as
+a recreated table and kept; `cfm flush` is the intended clear (it removes the
+file and leaves a `.flushed` marker the daemon acts on). Live test: `-run LiveNFTTTLBans` (both engines). See
 `docs/DETECTORS.md` "TTL bans across a restart".
 
 ---

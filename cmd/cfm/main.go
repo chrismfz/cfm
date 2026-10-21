@@ -829,7 +829,7 @@ func runDaemon(args []string) {
 	edgeStore.Load()
 	edgeban.SetDefault(edgeStore)
 	go func() {
-		<-ttlRestored
+		waitTTLBanRestore(ttlRestored)
 		runEdgeBanReconcile(edgeStore, be)
 	}()
 

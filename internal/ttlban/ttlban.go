@@ -26,6 +26,7 @@
 package ttlban
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -175,6 +176,7 @@ type RestoreResult struct {
 	Stored   int // entries in the store before the restore
 	Expired  int // their time ran out while the daemon was down: dropped
 	Excluded int // an allow / ignore covers them: dropped, never re-added
+	Flushed  int // `cfm flush` ran while the daemon was down: dropped
 	Batch    firewall.BlockBatchResult
 }
 
@@ -192,9 +194,16 @@ type RestoreResult struct {
 // A clock AHEAD reads as a long downtime and expires bans early; nothing in
 // the file can tell the two apart.
 func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (RestoreResult, error) {
+	// `cfm flush` ran since the file was last written by a daemon that then
+	// never read nft again: whatever the file holds was flushed.
+	flushed := s.flushPending(time.Time{})
 	s.mu.Lock()
 	now := s.now()
 	res := RestoreResult{Stored: len(s.bans)}
+	if flushed {
+		res.Flushed = len(s.bans)
+		s.bans = map[string]Entry{}
+	}
 	var entries []firewall.BlockEntry
 	keep := map[string]Entry{}
 	for k, e := range s.bans {
@@ -220,8 +229,11 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 	s.mu.Unlock()
 
 	var err error
-	if len(entries) > 0 && be != nil {
-		sort.Slice(entries, func(i, j int) bool { return entries[i].IP.String() < entries[j].IP.String() })
+	if be == nil {
+		entries = nil // nothing written, nothing to undo
+	}
+	if len(entries) > 0 {
+		sort.Slice(entries, func(i, j int) bool { return bytes.Compare(entries[i].IP.To16(), entries[j].IP.To16()) < 0 })
 		wait := restoreBackoff
 		for attempt := 1; ; attempt++ {
 			res.Batch, err = be.AddBlockBatch(entries) // adds or extends: safe to repeat
@@ -237,9 +249,6 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 	s.mu.Lock()
 	var undo []net.IP
 	for _, e := range entries {
-		if be == nil {
-			break
-		}
 		if t, ok := s.forgot[e.IP.String()]; ok && !t.Before(now) {
 			undo = append(undo, e.IP)
 		}
@@ -256,7 +265,7 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 			err = fmt.Errorf("ttlban: undo restore of unblocked %s: %w", ip, rerr)
 		}
 	}
-	if res.Expired > 0 || res.Excluded > 0 {
+	if res.Expired > 0 || res.Excluded > 0 || flushed {
 		if serr := s.save(); serr != nil && err == nil {
 			err = serr
 		}
@@ -272,13 +281,15 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 // read older than one already applied (a slow periodic read finishing after
 // the shutdown one).
 //
-// A read that lost all the stored live bans, or most of many, is not taken
-// as the truth: unblocks go through Forget and expiry is checked here, so
-// that is a table deleted and recreated empty under the daemon (`cfm
-// disable` and then any CLI command that runs EnsureBase, a `flush
-// ruleset`). Those bans are kept until they expire or are forgotten, so the
-// next start restores them. The exception is `cfm flush`, which removes the
-// file: a store whose file is gone takes the read as it is.
+// A read that lost at least three stored live bans, and more than half of
+// them, is not taken as the truth: unblocks go through Forget and expiry is
+// checked here, so that is a table deleted and recreated empty under the
+// daemon (`cfm disable` and then any CLI command that runs EnsureBase, a
+// `flush ruleset`). Those bans are kept until they expire or are forgotten,
+// so the next start restores them. Fewer is ordinary churn (an AddBlock that
+// replaced a ban, a hand-run `nft delete element`), taken as it is. The
+// exception is `cfm flush`: a read begun after its marker is the truth, and
+// so are the carried bans of a failed restore it wiped.
 func (s *Store) Snapshot(readAt time.Time, elems []firewall.SetElementTimed) error {
 	s.mu.Lock()
 	if !s.armed || readAt.Before(s.lastRead) {
@@ -286,6 +297,12 @@ func (s *Store) Snapshot(readAt time.Time, elems []firewall.SetElementTimed) err
 		return nil
 	}
 	s.lastRead = readAt
+	s.mu.Unlock()
+	flushed := s.flushPending(readAt)
+	s.mu.Lock()
+	if flushed {
+		s.carry = map[string]Entry{}
+	}
 	next := make(map[string]Entry, len(elems))
 	for _, el := range elems {
 		if el.Expires <= 0 {
@@ -319,11 +336,11 @@ func (s *Store) Snapshot(readAt time.Time, elems []firewall.SetElementTimed) err
 			lost = append(lost, k)
 		}
 	}
-	if massDrop(len(lost), live) && !s.discarded() {
+	if massDrop(len(lost), live) && !flushed {
 		for _, k := range lost {
 			next[k] = s.bans[k]
 		}
-		logging.Logf("[ttlban] a read of the block sets lost %d of %d live bans at once (table recreated?); keeping them for the next start", len(lost), live)
+		logging.Logf("[ttlban] a read of the block sets lost %d of %d live bans at once (table recreated?); keeping them in %s: restart the daemon to re-apply them", len(lost), live, s.path)
 	}
 	for k, t := range s.forgot {
 		if t.Before(readAt) {
@@ -423,30 +440,74 @@ func (s *Store) save() error {
 	return nil
 }
 
-// massDrop: every stored live ban gone, or more than half of at least ten.
+// massDrop: at least three stored live bans gone at once, and more than
+// half of them.
 func massDrop(lost, live int) bool {
-	return lost > 0 && (lost == live || (lost >= 10 && 2*lost > live))
+	return lost >= 3 && 2*lost > live
 }
 
-// discarded: this process wrote the file and it is gone (`cfm flush`).
-// Called with s.mu held.
-func (s *Store) discarded() bool {
-	if s.saved == nil || s.path == "" {
+// flushMarker is the file `cfm flush` leaves for the daemon (Discard).
+func flushMarker(path string) string { return path + ".flushed" }
+
+// flushPending reports a `cfm flush` marker the daemon has not acted on and
+// removes it. For a snapshot it counts only when the read began after the
+// flush (a read begun before it still saw the bans); zero readAt (Restore)
+// takes any marker. Must not be called with s.mu held.
+func (s *Store) flushPending(readAt time.Time) bool {
+	if s.path == "" {
 		return false
 	}
-	_, err := os.Stat(s.path)
-	return errors.Is(err, fs.ErrNotExist)
+	m := flushMarker(s.path)
+	fi, err := os.Stat(m)
+	if err != nil {
+		return false
+	}
+	if !readAt.IsZero() && readAt.Before(fi.ModTime()) {
+		return false
+	}
+	_ = os.Remove(m)
+	return true
 }
 
-// Discard removes the file at path: `cfm flush` emptied the block sets on
-// purpose, and a restart must not bring those bans back. The daemon's store
-// then takes its next read as the truth.
+// Discard is `cfm flush`'s part: it removes the file and leaves a marker, so
+// neither a restart nor the running daemon (whose store, or a save racing
+// the flush, still holds them) brings the flushed bans back. The daemon's
+// next read begun after the marker is taken as the truth.
 func Discard(path string) error {
+	if err := os.WriteFile(flushMarker(path), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
+		return err
+	}
 	err := os.Remove(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	return err
+}
+
+// ForgetInFile drops ips from the file at path directly, for an unblock run
+// outside the daemon (`cfm unblock`): with the daemon stopped, its next start
+// would otherwise restore the ban. With it running, the daemon also forgets
+// it (force-unblock), and its next read no longer holds the element.
+func ForgetInFile(path string, ips ...string) error {
+	s := New(path)
+	if err := s.Load(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	changed := false
+	for _, raw := range ips {
+		if ip := net.ParseIP(raw); ip != nil {
+			if _, ok := s.bans[ip.String()]; ok {
+				delete(s.bans, ip.String())
+				changed = true
+			}
+		}
+	}
+	s.mu.Unlock()
+	if !changed {
+		return nil
+	}
+	return s.save()
 }
 
 func setFor(ip net.IP) string {

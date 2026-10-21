@@ -218,12 +218,16 @@ daemon persists the TTL host bans in `/var/lib/cfm/ttlbans.json`
   block sets, which must cover both or it saves nothing) and once more on
   SIGTERM / SIGINT / SIGHUP. A snapshot replaces the file with what nft holds,
   so an element that expired or was unblocked leaves it, with one exception:
-  a read that lost every stored live ban (or more than half of at least ten)
-  is a table deleted and recreated empty under the daemon (`cfm disable`, then
-  any CLI command that runs EnsureBase; a `flush ruleset`), so those bans are
-  kept for the next start. `cfm flush` removes the file, and the daemon then
-  takes its next read as it is. Permanent elements are not saved (cfm.deny
-  re-applies them), nor are TTL'd CIDR blocks.
+  a read that lost at least three stored live bans, and more than half of
+  them, is a table deleted and recreated empty under the daemon (`cfm
+  disable`, then any CLI command that runs EnsureBase; a `flush ruleset`), so
+  those bans are kept in the file and the log says to restart the daemon to
+  re-apply them (as for cfm.deny, the running daemon does not re-add them).
+  Fewer is ordinary churn and taken as it is. `cfm flush` removes the file and
+  leaves a `ttlbans.json.flushed` marker: the daemon's next read begun after
+  it is the truth, and a start that finds it restores nothing. Permanent
+  elements are not saved (cfm.deny re-applies them), nor are TTL'd CIDR
+  blocks.
 - **Restored** after `EnsureBase`, in the background (the first edge ban
   reconcile waits for it, up to 30 seconds, and nothing is saved before it ends):
   each ban for the time it has left, through `AddBlockBatch`, which adds or
@@ -234,11 +238,11 @@ daemon persists the TTL host bans in `/var/lib/cfm/ttlbans.json`
 - **Unblocks** inside the daemon (`/unblock`, `cfm unblock` through the
   daemon's force-unblock, cfm-web pending unblocks) drop the entry at once,
   and a snapshot whose nft read began before the unblock cannot put it back.
+  `cfm unblock` also removes it from the file itself, so an unblock done while
+  the daemon is stopped (or unreachable) holds too.
   An allow does not remove the block element (nft accepts before it drops),
   so the entry stays; the restore skips it while the allow is in place, and
   a ban that outlives a `cfm allow --ttl` comes back, as it would in nft.
-  An unblock done while the daemon is stopped (`cfm unblock` with no daemon
-  to reach) only reaches nft: the next start restores that ban.
 
 A crash loses the bans added since the last snapshot (at most ~2 minutes).
 If the restore batch keeps failing (three tries), the bans stay in the file

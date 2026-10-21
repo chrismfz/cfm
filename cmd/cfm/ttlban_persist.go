@@ -97,8 +97,8 @@ func restoreTTLBans(be firewall.Backend, cfgDir string) *ttlban.Store {
 	}
 	res, err := s.Restore(be, exclude)
 	b := res.Batch
-	logging.Logf("[ttlban] restore: stored=%d expired=%d excluded=%d added=%d extended=%d kept=%d present=%d skipped=%d",
-		res.Stored, res.Expired, res.Excluded, b.Added, b.Extended, b.Kept, b.Present, b.Skipped)
+	logging.Logf("[ttlban] restore: stored=%d expired=%d excluded=%d flushed=%d added=%d extended=%d kept=%d present=%d skipped=%d",
+		res.Stored, res.Expired, res.Excluded, res.Flushed, b.Added, b.Extended, b.Kept, b.Present, b.Skipped)
 	if err != nil {
 		logging.Logf("[ttlban] restore failed: %v", err)
 		fmt.Fprintln(os.Stderr, "ttlban restore error:", err)
@@ -108,23 +108,23 @@ func restoreTTLBans(be firewall.Backend, cfgDir string) *ttlban.Store {
 
 // startTTLBans runs the restore in the background (on the exec backend each
 // set read is an nft process; startup must not wait on them) and returns a
-// channel closed when it is done, or after ttlBanRestoreWait.
+// channel closed when it is done.
 func startTTLBans(be firewall.Backend, cfgDir string) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		watchTTLBanShutdown(restoreTTLBans(be, cfgDir), be)
 	}()
-	waited := make(chan struct{})
-	go func() {
-		defer close(waited)
-		select {
-		case <-done:
-		case <-time.After(ttlBanRestoreWait):
-			logging.Logf("[ttlban] restore still running after %s; the edge ban reconcile starts without it", ttlBanRestoreWait)
-		}
-	}()
-	return waited
+	return done
+}
+
+// waitTTLBanRestore blocks until the restore is done, or ttlBanRestoreWait.
+func waitTTLBanRestore(done <-chan struct{}) {
+	select {
+	case <-done:
+	case <-time.After(ttlBanRestoreWait):
+		logging.Logf("[ttlban] restore still running after %s; the edge ban reconcile starts without it", ttlBanRestoreWait)
+	}
 }
 
 // snapshotTTLBans reads the block sets and saves their timed elements. Any
@@ -154,6 +154,9 @@ func watchTTLBanShutdown(s *ttlban.Store, be firewall.Backend) {
 	signal.Notify(ch, sigs...)
 	go func() {
 		sig := <-ch
+		// A second signal during the snapshot ends the process at once (a
+		// second Ctrl-C, systemd's SIGKILL aside).
+		signal.Reset(sigs...)
 		done := make(chan error, 1)
 		go func() { done <- snapshotTTLBans(s, be) }()
 		select {
@@ -166,7 +169,6 @@ func watchTTLBanShutdown(s *ttlban.Store, be firewall.Backend) {
 		case <-time.After(ttlBanShutdownBudget):
 			logging.Logf("[ttlban] shutdown snapshot timed out after %s (%s); the last periodic one stands", ttlBanShutdownBudget, sig)
 		}
-		signal.Reset(sig)
 		if ss, ok := sig.(syscall.Signal); ok {
 			_ = syscall.Kill(os.Getpid(), ss)
 		}
