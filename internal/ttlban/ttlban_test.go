@@ -497,3 +497,86 @@ func TestSnapshotDriftIsBoundedByTheFile(t *testing.T) {
 		t.Fatalf("file expiry %s: 12s of drift never saved", got)
 	}
 }
+
+// Bans a recreated table lost stay kept when new bans later outnumber them
+// (they move to the carry, so they no longer count as lost each read).
+func TestKeptBansDoNotFadeAsNewBansArrive(t *testing.T) {
+	s, path := newStore(t)
+	_, _ = s.Restore(nil, nil)
+	var four []firewall.SetElementTimed
+	for i := 1; i <= 4; i++ {
+		four = append(four, firewall.SetElementTimed{Elem: net.IPv4(192, 0, 2, byte(i)).String(), Expires: 6 * time.Hour})
+	}
+	_ = s.Snapshot(t0, four)
+	_ = s.Snapshot(t0.Add(time.Minute), nil) // table recreated: 4 of 4 lost
+	var fresh []firewall.SetElementTimed
+	for i := 10; i < 20; i++ {
+		fresh = append(fresh, firewall.SetElementTimed{Elem: net.IPv4(198, 51, 100, byte(i)).String(), Expires: time.Hour})
+	}
+	_ = s.Snapshot(t0.Add(2*time.Minute), fresh)
+	if got := readFile(t, path); len(got) != 14 {
+		t.Fatalf("after 10 new bans: %d entries, want the 4 kept + 10 new", len(got))
+	}
+}
+
+// The shutdown snapshot always rewrites the file (saved_at = stop time), and
+// a periodic one rewrites an unchanged file once it is saveMaxAge old.
+func TestSavedAtStaysRecent(t *testing.T) {
+	s, path := newStore(t)
+	_, _ = s.Restore(nil, nil)
+	ban := []firewall.SetElementTimed{{Elem: "192.0.2.1", Expires: 7 * 24 * time.Hour}}
+	_ = s.Snapshot(t0, ban)
+	savedAt := func() time.Time {
+		raw, _ := os.ReadFile(path)
+		var f fileFormat
+		_ = json.Unmarshal(raw, &f)
+		return f.SavedAt
+	}
+	s.now = func() time.Time { return t0.Add(time.Minute) }
+	_ = s.Snapshot(t0.Add(time.Minute), []firewall.SetElementTimed{{Elem: "192.0.2.1", Expires: 7*24*time.Hour - time.Minute}})
+	if !savedAt().Equal(t0) {
+		t.Fatal("an unchanged read within saveMaxAge rewrote the file")
+	}
+	s.now = func() time.Time { return t0.Add(2 * time.Minute) }
+	_ = s.SnapshotFinal(t0.Add(2*time.Minute), ban)
+	if !savedAt().Equal(t0.Add(2 * time.Minute)) {
+		t.Fatal("the shutdown snapshot did not rewrite the file")
+	}
+	later := t0.Add(2*time.Minute + saveMaxAge + time.Second)
+	s.now = func() time.Time { return later }
+	_ = s.Snapshot(later, ban)
+	if !savedAt().Equal(later) {
+		t.Fatal("an unchanged file older than saveMaxAge was not rewritten")
+	}
+}
+
+// save never creates the state dir (the package owns /var/lib/cfm).
+func TestSaveDoesNotCreateTheDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	s := New(filepath.Join(dir, "ttlbans.json"))
+	_, _ = s.Restore(nil, nil)
+	if err := s.Snapshot(time.Now(), []firewall.SetElementTimed{{Elem: "192.0.2.1", Expires: time.Hour}}); err == nil {
+		t.Fatal("save into a missing dir succeeded")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal("save created the state dir")
+	}
+}
+
+// Concurrent snapshots (the periodic read and the shutdown one) are
+// serialised: the newer read is what stays.
+func TestConcurrentSnapshotsKeepTheNewerRead(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		s, path := newStore(t)
+		_, _ = s.Restore(nil, nil)
+		older := []firewall.SetElementTimed{{Elem: "192.0.2.1", Expires: time.Hour}}
+		newer := []firewall.SetElementTimed{{Elem: "192.0.2.1", Expires: time.Hour}, {Elem: "192.0.2.2", Expires: time.Hour}}
+		done := make(chan struct{})
+		go func() { _ = s.Snapshot(t0, older); close(done) }()
+		_ = s.SnapshotFinal(t0.Add(time.Second), newer)
+		<-done
+		if got := readFile(t, path); len(got) != 2 {
+			t.Fatalf("run %d: file %v, want the newer read", i, got)
+		}
+	}
+}

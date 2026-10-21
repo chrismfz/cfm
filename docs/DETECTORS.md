@@ -248,7 +248,8 @@ A crash loses the bans added since the last snapshot (at most ~2 minutes).
 If the restore batch keeps failing (three tries), the bans stay in the file
 until they expire or nft holds them again, so the next start retries them. The
 time left is capped at what the ban had when the file was saved (a clock behind
-at boot cannot stretch it); a clock *ahead* reads as downtime and expires bans
+at boot cannot stretch it; the file is rewritten at every stop and at least
+every 10 minutes, so that base stays recent); a clock *ahead* reads as downtime and expires bans
 early. An unblock *and* a fresh ban of the same address both landing while the
 restore is still writing lose the fresh ban (the restore takes out what was
 unblocked during it); the detector bans again on the next hit.

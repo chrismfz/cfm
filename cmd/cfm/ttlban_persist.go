@@ -127,14 +127,15 @@ func waitTTLBanRestore(done <-chan struct{}) {
 	}
 }
 
-// snapshotTTLBans reads the block sets and saves their timed elements. Any
-// set failing to read skips the save: a partial read would drop real bans.
+// snapshotTTLBans is the shutdown snapshot: it reads the block sets and
+// always rewrites the file. Any set failing to read skips the save: a
+// partial read would drop real bans.
 func snapshotTTLBans(s *ttlban.Store, be firewall.Backend) error {
 	readAt, elems, err := readBlockSets(be)
 	if err != nil {
 		return err
 	}
-	return s.Snapshot(readAt, elems)
+	return s.SnapshotFinal(readAt, elems)
 }
 
 // watchTTLBanShutdown takes a last snapshot when the daemon is told to stop

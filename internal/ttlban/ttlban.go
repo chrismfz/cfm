@@ -90,14 +90,20 @@ type Store struct {
 	// carry: bans a failed restore may not have written. Every snapshot keeps
 	// them until they expire or are forgotten, so the next start retries them
 	// instead of the first snapshot dropping them for good.
-	carry    map[string]Entry
-	savedAt  time.Time        // the loaded file's saved_at
-	lastRead time.Time        // readAt of the last applied snapshot
-	saved    map[string]Entry // what the file holds (nil: never written by this process)
-	now      func() time.Time
-	sleep    func(time.Duration)
-	saveMu   sync.Mutex
+	carry      map[string]Entry
+	savedAt    time.Time        // the loaded file's saved_at
+	lastRead   time.Time        // readAt of the last applied snapshot
+	saved      map[string]Entry // what the file holds (nil: never written by this process)
+	lastSaveAt time.Time        // when this process last wrote the file
+	now        func() time.Time
+	sleep      func(time.Duration)
+	saveMu     sync.Mutex
+	snapMu     sync.Mutex // one Snapshot at a time, its save included
 }
+
+// saveMaxAge: a snapshot rewrites an unchanged file this old, so its
+// saved_at (the clock-behind cap's base) stays recent after a crash.
+const saveMaxAge = 10 * time.Minute
 
 // restoreAttempts is how many times Restore tries the batch (an nft busy at
 // boot); restoreBackoff is the wait before the second, doubled after.
@@ -291,6 +297,20 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 // exception is `cfm flush`: a read begun after its marker is the truth, and
 // so are the carried bans of a failed restore it wiped.
 func (s *Store) Snapshot(readAt time.Time, elems []firewall.SetElementTimed) error {
+	return s.snapshot(readAt, elems, false)
+}
+
+// SnapshotFinal is the shutdown snapshot: it always rewrites the file, so
+// saved_at is the stop time (the clock-behind cap's base).
+func (s *Store) SnapshotFinal(readAt time.Time, elems []firewall.SetElementTimed) error {
+	return s.snapshot(readAt, elems, true)
+}
+
+func (s *Store) snapshot(readAt time.Time, elems []firewall.SetElementTimed, force bool) error {
+	// Serialised whole: two reads checked against lastRead at entry and
+	// committed in the other order would let the older one win.
+	s.snapMu.Lock()
+	defer s.snapMu.Unlock()
 	s.mu.Lock()
 	if !s.armed || readAt.Before(s.lastRead) {
 		s.mu.Unlock()
@@ -337,8 +357,12 @@ func (s *Store) Snapshot(readAt time.Time, elems []firewall.SetElementTimed) err
 		}
 	}
 	if massDrop(len(lost), live) && !flushed {
+		// Carried, like a failed restore's bans: kept until nft holds them,
+		// they expire, are forgotten or flushed. Left in s.bans only, they
+		// would stop counting as lost once new bans outnumber them.
 		for _, k := range lost {
 			next[k] = s.bans[k]
+			s.carry[k] = s.bans[k]
 		}
 		logging.Logf("[ttlban] a read of the block sets lost %d of %d live bans at once (table recreated?); keeping them in %s: restart the daemon to re-apply them", len(lost), live, s.path)
 	}
@@ -349,7 +373,7 @@ func (s *Store) Snapshot(readAt time.Time, elems []firewall.SetElementTimed) err
 	}
 	// Against the file, not the last read: changes below the tolerance must
 	// not pile up unsaved one read at a time.
-	changed := s.saved == nil || !sameBans(s.saved, next)
+	changed := force || s.saved == nil || !sameBans(s.saved, next) || readAt.Sub(s.lastSaveAt) > saveMaxAge
 	s.bans = next
 	s.mu.Unlock()
 	if !changed {
@@ -410,10 +434,9 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
+	// No MkdirAll: /var/lib/cfm is the package's (systemd StateDirectory),
+	// and creating it 0700 here would lock the edge out of its Lua.
 	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
 	tmp, err := os.CreateTemp(dir, ".ttlbans-*.json")
 	if err != nil {
 		return err
@@ -436,6 +459,7 @@ func (s *Store) save() error {
 	}
 	s.mu.Lock()
 	s.saved = saved
+	s.lastSaveAt = f.SavedAt
 	s.mu.Unlock()
 	return nil
 }
