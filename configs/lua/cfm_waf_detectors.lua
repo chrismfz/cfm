@@ -319,16 +319,53 @@ end
 -- one CR before it dropped. fn(name, value) runs once per field, in order;
 -- on_file(filename, name, s, e), when given, once per file part PHP registers
 -- (its bytes are b[s..e]). fn may be nil: no field value is then copied.
-local function each_multipart_field(b, ct_raw, fn, on_file)
+--
+-- Where the parse goes on after a part. PHP reads a part's bytes up to the
+-- next "\n--<boundary>" (php_ap_memstr) and then runs find_boundary, so this
+-- jumps there too — but only for a part PHP reads. A file part with an empty
+-- filename (UPLOAD_ERR_NO_FILE), or one past max_file_uploads, is not read:
+-- find_boundary then scans line by line from the end of its headers, so a
+-- boundary line right there opens the next part. Jumping missed that part: a
+-- `shell.php` name split over a continuation line, right after an empty file
+-- part, passed rule 401 (checked against PHP 8.3.6). Such a part is now
+-- followed line by line, and so is a file part whose name PHP refuses
+-- (mp_upload_name_ok). max_file_uploads is a per-host setting: the parse
+-- assumes PHP's default (MP_MAX_FILE_UPLOADS, also cPanel's), and when a body
+-- holds more non-empty file parts than that it is read a second time as if
+-- every one were kept, the two reads joined (a field or file may then be
+-- reported twice). A host whose limit sits between the two, or below 20, can
+-- still be read differently from PHP past its limit.
+local MP_MAX_FILE_UPLOADS = 20
+-- rfc1867.c skips a file part whose name has unbalanced brackets, or a `]`
+-- followed by anything but `[` ("never repair potential malicious user
+-- input"). An anonymous file (no name) is named by PHP and kept.
+local function mp_upload_name_ok(name)
+  if not name then return true end
+  local c = 0
+  for i = 1, #name do
+    local ch = name:sub(i, i)
+    if ch == "[" then
+      c = c + 1
+    elseif ch == "]" then
+      c = c - 1
+      local nx = name:sub(i + 1, i + 1)
+      if nx ~= "" and nx ~= "[" then return false end
+    end
+    if c < 0 then return false end
+  end
+  return c == 0
+end
+local function multipart_parse(b, ct_raw, fn, on_file, max_uploads)
   local bnd = php_mp_boundary(ct_raw)
-  if not bnd then return end -- an EMPTY boundary is valid to PHP: parts split on `--` lines
+  if not bnd then return 0 end -- an EMPTY boundary is valid to PHP: parts split on `--` lines
   local B, nextb = "--" .. bnd, "\n--" .. bnd
   local n, p = #b, 1
+  local uploads = 0
   while true do
     local line
     repeat
       line, p = mp_get_line(b, p, n)
-      if not line then return end
+      if not line then return uploads end
     until line == B
     local hdrs, cur = {}, nil
     while true do
@@ -363,7 +400,7 @@ local function each_multipart_field(b, ct_raw, fn, on_file)
           elseif lk == "filename" then filename = php_ap_getword_conf(pair, j) end
         end
       end
-      if not name and not filename then return end
+      if not name and not filename then return uploads end
       local bound = b:find(nextb, p, true)
       -- The file's bytes are b[p .. (bound or n + 1) - 1], CR before the
       -- boundary included (a scanner over-reading one byte is harmless).
@@ -382,8 +419,24 @@ local function each_multipart_field(b, ct_raw, fn, on_file)
         if cut and v:sub(-1) == "\r" then v = v:sub(1, -2) end
         fn(name, v)
       end
-      p = bound or n + 1
+      local kept = true
+      if filename then
+        if not mp_upload_name_ok(name) then
+          kept = false -- skip_upload: "never repair potential malicious user input"
+        elseif filename == "" then
+          kept = false
+        else
+          uploads = uploads + 1
+          kept = uploads <= max_uploads
+        end
+      end
+      if kept then p = bound or n + 1 end -- else: line by line from here
     end
+  end
+end
+local function each_multipart_field(b, ct_raw, fn, on_file)
+  if multipart_parse(b, ct_raw, fn, on_file, MP_MAX_FILE_UPLOADS) > MP_MAX_FILE_UPLOADS then
+    multipart_parse(b, ct_raw, fn, on_file, math.huge)
   end
 end
 
@@ -416,6 +469,12 @@ local function php_file_parts(body, ct_raw)
   end)
   fp_body, fp_ct, fp_parts = body, ct_raw, parts
   return parts
+end
+-- The file names php_file_parts sees (raw, as sent), for the oracle test.
+function _M.php_file_names(body, ct_raw)
+  local out = {}
+  for _, f in ipairs(php_file_parts(body, ct_raw)) do out[#out + 1] = f[1] end
+  return out
 end
 
 -- skip(s), when given, may rule a whole urlencoded source (the query string,

@@ -18,6 +18,16 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **Rule 401 (and the upload CVE rules) no longer miss an upload placed right
+  after a file field PHP skips.** PHP does not read a file field that is left
+  empty, has a malformed name, or comes past `max_file_uploads`, and then looks
+  for the next field on the very next line. The WAF jumped further ahead and
+  missed that field. A `shell.php` upload written that way, right after an
+  empty file field, passed rule 401 and the Elementor rule 10016 (checked
+  against PHP 8.3.6). The WAF now reads those fields the way PHP does. A body
+  with more than 20 files is read twice (for hosts that raised
+  `max_file_uploads`), and both readings are checked.
+
 - **WAF rules 10021 / 10022 block the PHP core RCE request shapes
   (CVE-2026-109618 / CVE-2026-109619, "PHP2Shell").** PHP before 8.2.35 /
   8.3.36 / 8.4.27 / 8.5.12 can be taken over by a request that runs PHP out of
