@@ -6888,9 +6888,16 @@ end
 --                 part carries Content-Disposition and maybe Content-Type.
 --   EMPTY_FILES   MP_OOM_MAX_EMPTY_FILES or more file controls with an empty
 --                 filename (not counted by max_file_uploads, each still
---                 builds a $_FILES metadata entry).
---   NESTING       a part name nested deeper than MP_OOM_MAX_NESTING levels,
---                 which multiplies that work. Real forms nest a few levels.
+--                 builds a $_FILES metadata entry). Shallow ones are cheap
+--                 (1000 cost PHP 8.3 about 1 MB), so the bar sits well above
+--                 real forms; a dense attack still fits ~200 in the window.
+--   NESTING       a FILE part's name nested deeper than MP_OOM_MAX_NESTING
+--                 levels (the advisory's multiplier: 200 empty files cost
+--                 8 MB at depth 16, 30 MB at 60), or a plain field's deeper
+--                 than MP_OOM_MAX_FIELD_NESTING. Real file inputs are shallow;
+--                 plain fields are not always (Drupal Paragraphs adds 3 per
+--                 level, axios / Inertia FormData nests whole objects), and
+--                 PHP accepts up to max_input_nesting_level (64).
 --
 --   10022 (edge block, ban held), from the request head:
 --   NO_CL         a multipart POST with no Content-Length that nginx streams
@@ -6909,13 +6916,15 @@ end
 -- find_boundary skips lines until one EQUAL to `--<bnd>`, so a closing
 -- `--<bnd>--` does not end the parse, and the FIRST Content-Disposition (with
 -- its own continuation lines) is the one read.
-local MP_OOM_MAX_PART_HEADERS = 16
-local MP_OOM_MAX_EMPTY_FILES  = 64
-local MP_OOM_MAX_NESTING      = 16
+local MP_OOM_MAX_PART_HEADERS    = 16
+local MP_OOM_MAX_EMPTY_FILES     = 128
+local MP_OOM_MAX_NESTING         = 16
+local MP_OOM_MAX_FIELD_NESTING   = 32
 _M.MP_OOM_LIMITS = {
-  part_headers = MP_OOM_MAX_PART_HEADERS,
-  empty_files  = MP_OOM_MAX_EMPTY_FILES,
-  nesting      = MP_OOM_MAX_NESTING,
+  part_headers  = MP_OOM_MAX_PART_HEADERS,
+  empty_files   = MP_OOM_MAX_EMPTY_FILES,
+  nesting       = MP_OOM_MAX_NESTING,
+  field_nesting = MP_OOM_MAX_FIELD_NESTING,
 }
 
 local function mp_oom_structure(b, ct_raw)
@@ -6964,7 +6973,7 @@ local function mp_oom_structure(b, ct_raw)
         end
       end
       local _, depth = (name or ""):gsub("%[", "")
-      if depth > MP_OOM_MAX_NESTING then return "NESTING" end
+      if depth > (filename and MP_OOM_MAX_NESTING or MP_OOM_MAX_FIELD_NESTING) then return "NESTING" end
       if filename == "" then
         empty_files = empty_files + 1
         if empty_files >= MP_OOM_MAX_EMPTY_FILES then return "EMPTY_FILES" end

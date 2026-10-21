@@ -31,12 +31,14 @@ local function empty_files(n, lead)
   t[#t + 1] = "--XB--\r\n"
   return table.concat(t)
 end
-local OOM = empty_files(80)
+local OOM = empty_files(140)
 local CLEAN = '--XB\r\nContent-Disposition: form-data; name="comment"\r\n\r\nhello\r\n--XB--\r\n'
 
 local function post(t)
-  local vars = { http_content_type = CT, http_content_length = t.cl }
-  if t.buffered then vars.cfm_body_buffered = "1" end
+  -- The current confs declare $cfm_body_buffered everywhere: "1" on
+  -- `location /`, "" on the streaming locations.
+  local vars = { http_content_type = CT, http_content_length = t.cl,
+                 cfm_body_buffered = t.buffered and "1" or "" }
   return H.run{ method = "POST", uri = t.uri or "/", args = "", body = t.body or OOM,
                 headers = { ["content-type"] = CT, ["user-agent"] = "Mozilla/5.0" }, vars = vars,
                 read_body_error = t.read_body_error }
@@ -51,9 +53,19 @@ do
   check(r.ok and r.exited == 403 and r.action == "block", "chunked OOM body on `location /`: blocked in burn-in (" .. desc(r) .. ")")
   check(r.rpcs:find("ip_push", 1, true) ~= nil, "the enforced burn-in hit is pushed (" .. r.rpcs .. ")")
   -- …even when the body also trips another block rule first (SQLi field).
-  local mixed = empty_files(80, "--XB\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\n1' UNION SELECT user_pass FROM wp_users-- -\r\n")
+  local mixed = empty_files(140, "--XB\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\n1' UNION SELECT user_pass FROM wp_users-- -\r\n")
   r = post{ buffered = true, body = mixed }
   check(r.ok and r.exited == 403 and r.action == "block", "OOM body + SQLi field in burn-in: still blocked (" .. desc(r) .. ")")
+  -- A cleared client whose request also trips a low-risk challenge-tier rule
+  -- (XSS in the query, rule 302): the challenge used to skip the burn-in body
+  -- pass and turn into logonly for the clearance holder, so the body went
+  -- upstream. 10021 must still block it.
+  r = H.run{ method = "POST", uri = "/", args = "q=<script>alert(1)</script>", body = OOM, clearance = true,
+             cookie = "cfm_clearance=good",
+             headers = { ["content-type"] = CT, ["user-agent"] = "Mozilla/5.0", cookie = "cfm_clearance=good" },
+             vars = { http_content_type = CT, cfm_body_buffered = "1", cookie_cfm_clearance = "good" } }
+  check(r.ok and r.exited == 403 and r.action == "block",
+        "cleared client + challenge-tier query + OOM body in burn-in: blocked (" .. desc(r) .. ")")
   -- A clean multipart body in burn-in stays allowed.
   r = post{ buffered = true, body = CLEAN }
   check(r.ok and r.exited == nil and r.action == "allow", "clean chunked multipart on `location /`: allowed (" .. desc(r) .. ")")
@@ -74,6 +86,11 @@ do
   -- A streaming path off the body allowlist: never read, blocked.
   r = post{ uri = "/sysadmin/", body = CLEAN }
   check(r.ok and r.exited == 403 and r.reads == 0, "length-less multipart on an unread streaming path: blocked (" .. desc(r) .. ")")
+  -- An edge conf older than $cfm_body_buffered: unknown, so never 10022.
+  r = H.run{ method = "POST", uri = "/sysadmin/", body = CLEAN,
+             headers = { ["content-type"] = CT, ["user-agent"] = "Mozilla/5.0" },
+             vars = { http_content_type = CT } }
+  check(r.ok and r.exited == nil, "old conf (no $cfm_body_buffered): no 10022 (" .. desc(r) .. ")")
   -- With a Content-Length: never 10022.
   r = post{ uri = "/sysadmin/", body = CLEAN, cl = tostring(#CLEAN) }
   check(r.ok and r.exited == nil, "measured multipart on the same path: allowed (" .. desc(r) .. ")")

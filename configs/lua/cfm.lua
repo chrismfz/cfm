@@ -1703,8 +1703,11 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- POST rebuilt from a stored body. What is left is a body the edge
       -- never read: a failed read (HTTP/3 without a length) or a streaming
       -- path off the body allowlist (/sysadmin/).
+      -- An edge conf older than $cfm_body_buffered (2026-10-09) cannot say
+      -- whether the location buffers, so the rule stays off there.
       no_body_length = (ngx.var.http_content_length == nil)
                        and not ngx.ctx.cfm_body_read
+                       and ngx.var.cfm_body_buffered ~= nil
                        and ngx.var.cfm_body_buffered ~= "1"
                        and not ngx.ctx.cfm_resumed_post,
     }
@@ -1734,12 +1737,14 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       -- maybe_flush_waf_insp piggybacks on the request to push the snapshot
       -- to Go without needing an init_worker timer.
       waf_insp_incr(host)
-      if body_burnin and (not hit or waf_action == "logonly") then
+      if body_burnin and (not hit or waf_action ~= "block") then
         -- The body's own hits: shdict nil, so the burst counters the check
         -- above already moved are not counted twice (those rules need it,
         -- and they decided above). With no hit above, a body hit becomes the
-        -- (logonly) hit; after a logonly one it is only logged. A
-        -- BURNIN_ENFORCE_IDS block is the exception: it is enforced.
+        -- (logonly) hit; after a logonly or challenge one it is only logged.
+        -- A BURNIN_ENFORCE_IDS block is the exception: it is enforced, over a
+        -- challenge too (which a cleared client would otherwise turn into
+        -- logonly below and pass upstream with the body).
         waf_ctx.body, waf_ctx.shdict = req_body, nil
         local b_ok, b_hit, b_reason, b_ttl, b_action, b_hits, b_rule = pcall(waf.check, waf_ctx)
         if not b_ok then

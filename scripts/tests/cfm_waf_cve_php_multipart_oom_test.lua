@@ -113,7 +113,7 @@ do
 end
 
 -- NESTING: deeply nested names.
-fires(post(body({ field("a" .. string.rep("[x]", L.nesting + 1), "1") })), "deeply nested field name", "NESTING")
+fires(post(body({ field("a" .. string.rep("[x]", L.field_nesting + 1), "1") })), "deeply nested plain field name", "NESTING")
 fires(post(body({ file("a" .. string.rep("[]", L.nesting + 1), "", "") })), "deeply nested empty file control", "NESTING")
 -- A closing delimiter does not end PHP's parse (find_boundary skips lines
 -- until one EQUAL to --<bnd>): the parts after it still count.
@@ -142,7 +142,7 @@ do
   fires(post(empty .. B .. '\r\nContent-Disposition: form-data; name="victim"\r\n' ..
              table.concat(hdrs) .. "\r\nv\r\n" .. B .. "--\r\n"),
         "empty file part, then a part with too many headers", "PART_HEADERS")
-  fires(post(empty .. B .. '\r\nContent-Disposition: form-data; name="a' .. string.rep("[x]", L.nesting + 4) ..
+  fires(post(empty .. B .. '\r\nContent-Disposition: form-data; name="a' .. string.rep("[x]", L.field_nesting + 4) ..
              '"\r\n\r\nv\r\n' .. B .. "--\r\n"),
         "empty file part, then a deeply nested name", "NESTING")
   -- A part with neither name nor filename does not stop the scan.
@@ -153,12 +153,12 @@ end
 -- Only the FIRST Content-Disposition is read, with its own continuation lines;
 -- a second one's continuation must not replace its name.
 fires(post(body({ B .. "\r\n" ..
-  'Content-Disposition: form-data; name="a' .. string.rep("[x]", L.nesting + 1) .. '"\r\n' ..
+  'Content-Disposition: form-data; name="a' .. string.rep("[x]", L.field_nesting + 1) .. '"\r\n' ..
   "Content-Disposition: x\r\n" ..
   ' ; name="ok"\r\n\r\nv\r\n' })),
   "nested name, decoy second Content-Disposition with a continuation", "NESTING")
 fires(post(body({ B .. "\r\n" ..
-  'Content-Disposition: form-data;\r\n name="a' .. string.rep("[x]", L.nesting + 1) .. '"\r\n\r\nv\r\n' })),
+  'Content-Disposition: form-data;\r\n name="a' .. string.rep("[x]", L.field_nesting + 1) .. '"\r\n\r\nv\r\n' })),
   "nested name on the first Content-Disposition's continuation line", "NESTING")
 
 -- ── Negatives ───────────────────────────────────────────────────────────────
@@ -184,7 +184,19 @@ do
   local parts = {}
   for _ = 1, L.empty_files - 1 do parts[#parts + 1] = file("f[]", "", "") end
   clean(post(body(parts)), "empty file controls below the limit")
-  clean(post(body({ field("a" .. string.rep("[x]", L.nesting), "1") })), "nesting at the limit")
+  clean(post(body({ field("a" .. string.rep("[x]", L.field_nesting), "1") })), "plain field nesting at the limit")
+  clean(post(body({ file("a" .. string.rep("[]", L.nesting), "", "") })), "file part nesting at the limit")
+end
+-- Drupal nested Paragraphs (3 brackets a level) and axios / Inertia FormData
+-- nest plain fields past 16; with a few empty file widgets beside them.
+do
+  local drupal = "field_p[0][subform][field_q][0][subform][field_r][0][subform][field_s][0][subform]" ..
+                 "[field_t][0][subform][field_link][0][options][attributes][target]"  -- 23
+  local axios = "blocks" .. string.rep("[children][0]", 12) .. "[props][title]"           -- 26
+  clean(post(body({
+    field(drupal, "_blank"), field(axios, "Hello"),
+    file("files[field_p_0_subform_field_image_0]", "", ""), file("files[field_q_0]", "", ""),
+  }), { uri = "/node/12/edit" }), "Drupal Paragraphs / axios nested plain fields")
 end
 -- Brackets and many 'headers' inside a VALUE / file content are not headers.
 clean(post(body({
