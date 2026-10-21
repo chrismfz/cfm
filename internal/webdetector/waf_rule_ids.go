@@ -204,11 +204,14 @@ var wafRuleIDs = []WAFRule{
 	{ID: 10018, Name: "rule_cve_translatepress_reset_preview", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10019, Name: "rule_cve_translatepress_id_lookup", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
 	{ID: 10020, Name: "rule_cve_translatepress_reset_preview_authed", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
-	// 10021: CVE-2026-109618 (and the OOM producer of CVE-2026-109619), PHP
-	// core RCE via out-of-memory in the startup multipart parse — a multipart
-	// POST with no Content-Length, a part with too many headers, too many
-	// empty file controls, or a too deeply nested name. Armed.
+	// 10021 / 10022: CVE-2026-109618 (and the OOM producer of
+	// CVE-2026-109619), PHP core RCE via out-of-memory in the startup
+	// multipart parse. 10021 (armed) = a part with too many headers, too many
+	// empty file controls, or a too deeply nested name. 10022 = a multipart
+	// POST with no Content-Length on a streaming location: edge block with
+	// its autoblock held, since a streaming upload client sends it too.
 	{ID: 10021, Name: "rule_cve_php_multipart_oom", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	{ID: 10022, Name: "rule_cve_php_multipart_no_length", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

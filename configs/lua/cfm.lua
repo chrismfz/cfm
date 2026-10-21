@@ -1686,10 +1686,14 @@ if waf_ok and waf and waf.enabled and waf.enabled() then
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
       headers = req_headers, body = body_burnin and "" or req_body, self_origin = self_origin,
       skip_rule_ids = skip_rule_ids,
-      -- Rule 10021 (CVE-2026-109618): the request declared no body length
-      -- (chunked, or HTTP/2-3 without the header). A replayed challenged POST
-      -- is rebuilt from a stored, fully-read body, not a length-less one.
-      no_body_length = (ngx.var.http_content_length == nil) and not ngx.ctx.cfm_resumed_post,
+      -- Rule 10022 (CVE-2026-109618): the request declared no body length
+      -- (chunked, or HTTP/2-3 without the header) on a location that streams
+      -- it to the origin. `location /` buffers the body and sends the origin a
+      -- real Content-Length, so a length-less body there is not the exploit.
+      -- A replayed challenged POST is rebuilt from a stored, fully-read body.
+      no_body_length = (ngx.var.http_content_length == nil)
+                       and ngx.var.cfm_body_buffered ~= "1"
+                       and not ngx.ctx.cfm_resumed_post,
     }
     -- A rule that raised used to take the whole request into the
     -- request_failure handler, which under fail_open skipped every step after

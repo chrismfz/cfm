@@ -1,9 +1,10 @@
--- Tests for the PHP core multipart OOM detector (rule 10021, WAF_CVE;
--- CVE-2026-109618, the OOM producer of CVE-2026-109619). Production tier: block.
+-- Tests for the PHP core multipart OOM detectors (rules 10021 and 10022,
+-- WAF_CVE; CVE-2026-109618, the OOM producer of CVE-2026-109619). Production
+-- tier: block (10021 armed, 10022 with its autoblock held).
 --
 -- Source: php-src advisories GHSA-w8hw-w9fx-j79w / GHSA-6wmf-4rv5-p3rp
 -- (2026-10-21). The OOM strategies they name, one leg each:
---   NO_CL         multipart POST without a usable Content-Length
+--   NO_CL         multipart POST without a usable Content-Length (10022)
 --   PART_HEADERS  unlimited headers per multipart part
 --   EMPTY_FILES   empty file controls (not counted by max_file_uploads)
 --   NESTING       nested field names multiplying that work
@@ -71,7 +72,7 @@ local function clean(c, label)
   check(hit ~= true, label .. " — must NOT fire (got " .. tostring(reason) .. ")")
 end
 
-set_only({ rule_cve_php_multipart_oom = "block" })
+set_only({ rule_cve_php_multipart_oom = "block", rule_cve_php_multipart_no_length = "block" })
 
 local L = det.MP_OOM_LIMITS
 
@@ -81,6 +82,14 @@ fires(post(body({ field("a", "1") }), { no_cl = true }), "multipart POST without
 fires(post("", { no_cl = true }), "length-less multipart POST, body unread", "NO_CL")
 fires(post(body({ field("a", "1") }), { no_cl = true, ct = "Multipart/Form-Data; boundary=----WebKitFormBoundaryAbC123" }),
       "media type case-insensitive", "NO_CL")
+-- Both shapes on one request: the armed body rule (10021) runs first and
+-- owns the hit, so the held length-less rule cannot take its ban.
+do
+  local hdrs = {}
+  for i = 1, L.part_headers do hdrs[#hdrs + 1] = "X-Pad-" .. i .. ": a\r\n" end
+  fires(post(body({ field("a", "1", table.concat(hdrs)) }), { no_cl = true }),
+        "length-less AND too many part headers -> 10021", "PART_HEADERS")
+end
 
 -- PART_HEADERS: one part padded with header lines.
 do
@@ -106,6 +115,25 @@ end
 -- NESTING: deeply nested names.
 fires(post(body({ field("a" .. string.rep("[x]", L.nesting + 1), "1") })), "deeply nested field name", "NESTING")
 fires(post(body({ file("a" .. string.rep("[]", L.nesting + 1), "", "") })), "deeply nested empty file control", "NESTING")
+-- A closing delimiter does not end PHP's parse (find_boundary skips lines
+-- until one EQUAL to --<bnd>): the parts after it still count.
+do
+  local parts = { field("a", "1"), B .. "--\r\n" }
+  for _ = 1, L.empty_files do parts[#parts + 1] = file("f[]", "", "") end
+  fires(post(body(parts)), "empty file controls after an early closing delimiter", "EMPTY_FILES")
+  parts[2] = B .. "--x\r\n"
+  fires(post(body(parts)), "empty file controls after a --<bnd>--x line", "EMPTY_FILES")
+end
+-- Only the FIRST Content-Disposition is read, with its own continuation lines;
+-- a second one's continuation must not replace its name.
+fires(post(body({ B .. "\r\n" ..
+  'Content-Disposition: form-data; name="a' .. string.rep("[x]", L.nesting + 1) .. '"\r\n' ..
+  "Content-Disposition: x\r\n" ..
+  ' ; name="ok"\r\n\r\nv\r\n' })),
+  "nested name, decoy second Content-Disposition with a continuation", "NESTING")
+fires(post(body({ B .. "\r\n" ..
+  'Content-Disposition: form-data;\r\n name="a' .. string.rep("[x]", L.nesting + 1) .. '"\r\n\r\nv\r\n' })),
+  "nested name on the first Content-Disposition's continuation line", "NESTING")
 
 -- ── Negatives ───────────────────────────────────────────────────────────────
 -- WordPress media upload (async-upload.php).

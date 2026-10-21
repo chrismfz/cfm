@@ -246,7 +246,8 @@ local CFG = {
   rule_cve_translatepress_reset_preview = "block", -- CVE-2026-19632 (TranslatePress <= 3.3.1, fixed 3.3.2): `trp-edit-translation` on a password-reset request (wp-login.php lostpassword/retrievepassword, or WooCommerce's lost-password POST) forces translation preview so the reset mail — key included — is stored as a translatable string. Its one legitimate source is the editor preview, which adds it to every form; a hit with a WordPress login cookie is filed under id 10020 (same mode, autoblock held in code), one without under 10018 (armed: 6h ban + WAF/CVE-2026-19632 alert). Fleet sightings 09-15..10-08: the titan attack only.
   rule_cve_translatepress_reset_preview_authed = "block", -- CVE-2026-19632, 10018's request WITH a WordPress login cookie: most likely a translator submitting a lost-password form inside the editor preview (the preview adds the parameter to every form). Edge 403 only; autoblock held in code (RULE_10020 = 0) so the translator is not banned.
   rule_cve_translatepress_id_lookup = "block", -- CVE-2026-19632 second leg: unauthenticated action=trp_get_translations_regular with string_ids reads stored strings back by id. Only the logged-in editor (trp-editor.js) sends string_ids; gated on no wordpress_logged_in_ cookie (FP filter, a junk cookie bypasses it). Edge block; autoblock held per rule (RULE_10019 = 0): a translator whose login expired mid-session would otherwise be banned.
-  rule_cve_php_multipart_oom = "block", -- CVE-2026-109618 (GHSA-w8hw-w9fx-j79w; also the OOM producer of CVE-2026-109619, GHSA-6wmf-4rv5-p3rp): PHP < 8.2.35/8.3.36/8.4.27/8.5.12 unauth RCE via out-of-memory during the startup multipart parse (mod_php confirmed). Keyed on the three request shapes the advisory names, all multipart POST: no Content-Length (NO_CL), a part with >16 header lines (PART_HEADERS), >=64 empty-filename file controls (EMPTY_FILES), a field name nested >16 levels (NESTING). A browser form never sends any of them. Armed like every WAF_CVE block rule: the exploit needs many attempts (AC:H), and the 6h ban on the first one stops the rest. A streaming non-browser multipart client (chunked) would hit NO_CL: hold the ban with RULE_10021 = 0 or exclude the path. Not a substitute for the PHP update.
+  rule_cve_php_multipart_oom = "block", -- CVE-2026-109618 (GHSA-w8hw-w9fx-j79w; also the OOM producer of CVE-2026-109619, GHSA-6wmf-4rv5-p3rp): PHP < 8.2.35/8.3.36/8.4.27/8.5.12 unauth RCE via out-of-memory during the startup multipart parse (mod_php confirmed). Keyed on the body shapes the advisory names, on a multipart POST: a part with >16 header lines (PART_HEADERS), >=64 empty-filename file controls (EMPTY_FILES), a field name nested >16 levels (NESTING). A browser form sends none of them. Armed like every WAF_CVE block rule: the exploit needs many attempts (AC:H), and the 6h ban on the first one stops the rest. Not a substitute for the PHP update.
+  rule_cve_php_multipart_no_length = "block", -- CVE-2026-109618, the fourth shape: a multipart POST with no Content-Length (NO_CL) on a location that streams the body to the origin (cfm.lua no_body_length; `location /` buffers and sends a real length, so it is not flagged there). Edge block, autoblock held per rule (RULE_10022 = 0): a non-browser client that streams multipart chunked (Go io.Pipe, curl -F f=@-, Java chunked mode) sends the same shape, and a 6h ban of it (and its NAT) is the wrong answer. Runs late, with 10019/10020, so the held hit cannot take the ban from an armed rule.
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
 
   -- [top-4]  Upload controls
@@ -669,6 +670,7 @@ local RULE_IDS = {
   -- vBulletin runMaths CVE-2026-61511 block rule — see WAF_CVE.md "Removed".
   rule_cve_elementor_pro_form_upload = 10016,
   rule_cve_php_multipart_oom = 10021,
+  rule_cve_php_multipart_no_length = 10022,
   rule_cve_wp_pagename_traversal = 10017,
   rule_cve_translatepress_reset_preview = 10018,
   rule_cve_translatepress_reset_preview_authed = 10020,
@@ -1452,14 +1454,13 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- PHP core multipart OOM -> RCE (CVE-2026-109618 / -109619). Not gated on
-  -- body_inspect_ok: the NO_CL leg reads headers only, so it also holds where
-  -- the body is not read (HTTP/3 without a length, a burn-in body). Before the
-  -- generic upload rules so an exploit's empty file parts are attributed here.
+  -- PHP core multipart OOM -> RCE (CVE-2026-109618 / -109619), the body
+  -- shapes. Before the generic upload rules so an exploit's empty file parts
+  -- are attributed here. The length-less leg (10022) runs late, with 10019.
   do
     local mode = rule_mode(CFG.rule_cve_php_multipart_oom, "block")
-    if mode ~= "disabled" then
-      local tag = det.detect_cve_php_multipart_oom(m_lower, body, headers, ctx.no_body_length == true)
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_cve_php_multipart_oom(m_lower, body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_109618:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_multipart_oom) then goto done end
@@ -2414,6 +2415,19 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_19632:TRANSLATEPRESS:" .. tag, ttl, mode, RULE_IDS.rule_cve_translatepress_id_lookup) then goto done end
+      end
+    end
+  end
+  -- PHP core multipart OOM (CVE-2026-109618), the length-less shape. Its ban
+  -- is held in code (HoldAutoblock), so it runs here with the other held block
+  -- rules. Request head only: it holds where the body is not read too.
+  do
+    local mode = rule_mode(CFG.rule_cve_php_multipart_no_length, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_php_multipart_no_length(m_lower, headers, ctx.no_body_length == true)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_109618:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_multipart_no_length) then goto done end
       end
     end
   end
