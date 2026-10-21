@@ -184,9 +184,8 @@ func TestRestoreFailureCarriesTheBans(t *testing.T) {
 	_ = s.Forget("192.0.2.3")
 	// 192.0.2.1 now in nft (gone from the carry); .4 expired; .3 forgotten.
 	_ = s.Snapshot(t0.Add(5*time.Minute), []firewall.SetElementTimed{{Elem: "192.0.2.1", Expires: 55 * time.Minute}})
-	_ = s.Snapshot(t0.Add(6*time.Minute), nil)
-	if got := readFile(t, path); len(got) != 0 {
-		t.Fatalf("carry outlived nft / expiry / unblock: %v", got)
+	if got := readFile(t, path); len(got) != 1 || len(s.carry) != 0 {
+		t.Fatalf("carry outlived nft / expiry / unblock: file %v carry %v", got, s.carry)
 	}
 }
 
@@ -371,5 +370,64 @@ func TestDefaultPathIsRedirectable(t *testing.T) {
 	restore()
 	if DefaultPath != "/var/lib/cfm/ttlbans.json" {
 		t.Fatalf("DefaultPath = %q", DefaultPath)
+	}
+}
+
+// A read that lost every stored live ban is a table recreated empty under
+// the daemon (`cfm disable`, then a CLI command running EnsureBase): those
+// bans stay for the next start, a new ban beside them is added, and an
+// expired one still goes. A few of many lost is ordinary churn.
+func TestSnapshotKeepsBansARecreatedTableLost(t *testing.T) {
+	s, path := newStore(t)
+	_, _ = s.Restore(nil, nil)
+	_ = s.Snapshot(t0, []firewall.SetElementTimed{
+		{Elem: "192.0.2.1", Expires: time.Hour},
+		{Elem: "192.0.2.2", Expires: 2 * time.Minute},
+	})
+	_ = s.Snapshot(t0.Add(5*time.Minute), []firewall.SetElementTimed{{Elem: "192.0.2.9", Expires: time.Hour}})
+	got := readFile(t, path)
+	if _, ok := got["192.0.2.1"]; !ok || len(got) != 2 {
+		t.Fatalf("after a recreated table: %v, want 192.0.2.1 kept and 192.0.2.9 added (192.0.2.2 expired)", got)
+	}
+
+	var many []firewall.SetElementTimed
+	for i := 10; i < 30; i++ {
+		many = append(many, firewall.SetElementTimed{Elem: net.IPv4(198, 51, 100, byte(i)).String(), Expires: time.Hour})
+	}
+	_ = s.Snapshot(t0.Add(6*time.Minute), many)
+	_ = s.Snapshot(t0.Add(7*time.Minute), many[3:]) // 3 of 20 gone (a flush of one IP, nft-side)
+	if got := readFile(t, path); len(got) != 17 {
+		t.Fatalf("ordinary churn kept dropped bans: %d entries, want 17", len(got))
+	}
+}
+
+// `cfm flush` removes the file: the daemon then takes its read as it is.
+func TestSnapshotAfterDiscardTakesTheRead(t *testing.T) {
+	s, path := newStore(t)
+	_, _ = s.Restore(nil, nil)
+	_ = s.Snapshot(t0, []firewall.SetElementTimed{{Elem: "192.0.2.1", Expires: time.Hour}})
+	if err := Discard(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := Discard(path); err != nil {
+		t.Fatalf("a second Discard: %v", err)
+	}
+	_ = s.Snapshot(t0.Add(time.Minute), []firewall.SetElementTimed{{Elem: "192.0.2.5", Expires: time.Hour}})
+	if got := readFile(t, path); len(got) != 1 || got["192.0.2.5"].Expires.IsZero() {
+		t.Fatalf("after cfm flush: %v, want only the new ban", got)
+	}
+}
+
+// Expiry moves below the tolerance on each read must not pile up unsaved:
+// the comparison is against the file.
+func TestSnapshotDriftIsBoundedByTheFile(t *testing.T) {
+	s, path := newStore(t)
+	_, _ = s.Restore(nil, nil)
+	_ = s.Snapshot(t0, []firewall.SetElementTimed{{Elem: "192.0.2.1", Expires: time.Hour}})
+	for i := 1; i <= 4; i++ { // +3s on each read: 12s in all
+		_ = s.Snapshot(t0.Add(time.Duration(i)*time.Minute), []firewall.SetElementTimed{{Elem: "192.0.2.1", Expires: time.Hour - time.Duration(i)*time.Minute + time.Duration(3*i)*time.Second}})
+	}
+	if got := readFile(t, path)["192.0.2.1"].Expires; got.Sub(t0.Add(time.Hour)) <= expiryTolerance {
+		t.Fatalf("file expiry %s: 12s of drift never saved", got)
 	}
 }

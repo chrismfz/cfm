@@ -56,7 +56,6 @@ import (
 	"cfm/internal/kernsec"
 	"cfm/internal/lsm"
 	"cfm/internal/mailqcli"
-	"cfm/internal/ttlban"
 	"cfm/internal/unblock"
 )
 
@@ -971,7 +970,6 @@ func runDaemon(args []string) {
 						continue
 					}
 					edgeban.Unban(e.IP.String()) // nft accepts it now: so does the edge
-					ttlban.Forget(e.IP.String()) // and a restart must not restore the ban
 				}
 				seenAllow[key] = spec
 			} else {

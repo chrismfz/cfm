@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
+	"cfm/internal/logging"
 )
 
 // DefaultPath is where the daemon persists the store. A var so tests point it
@@ -89,8 +90,9 @@ type Store struct {
 	// them until they expire or are forgotten, so the next start retries them
 	// instead of the first snapshot dropping them for good.
 	carry    map[string]Entry
-	savedAt  time.Time // the loaded file's saved_at
-	lastRead time.Time // readAt of the last applied snapshot
+	savedAt  time.Time        // the loaded file's saved_at
+	lastRead time.Time        // readAt of the last applied snapshot
+	saved    map[string]Entry // what the file holds (nil: never written by this process)
 	now      func() time.Time
 	sleep    func(time.Duration)
 	saveMu   sync.Mutex
@@ -269,6 +271,14 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 // predates the unblock). It does nothing before Restore ran, and ignores a
 // read older than one already applied (a slow periodic read finishing after
 // the shutdown one).
+//
+// A read that lost all the stored live bans, or most of many, is not taken
+// as the truth: unblocks go through Forget and expiry is checked here, so
+// that is a table deleted and recreated empty under the daemon (`cfm
+// disable` and then any CLI command that runs EnsureBase, a `flush
+// ruleset`). Those bans are kept until they expire or are forgotten, so the
+// next start restores them. The exception is `cfm flush`, which removes the
+// file: a store whose file is gone takes the read as it is.
 func (s *Store) Snapshot(readAt time.Time, elems []firewall.SetElementTimed) error {
 	s.mu.Lock()
 	if !s.armed || readAt.Before(s.lastRead) {
@@ -298,12 +308,31 @@ func (s *Store) Snapshot(readAt time.Time, elems []firewall.SetElementTimed) err
 		}
 		next[k] = e
 	}
+	var lost []string
+	live := 0
+	for k, e := range s.bans {
+		if !e.Expires.After(readAt) {
+			continue
+		}
+		live++
+		if _, ok := next[k]; !ok {
+			lost = append(lost, k)
+		}
+	}
+	if massDrop(len(lost), live) && !s.discarded() {
+		for _, k := range lost {
+			next[k] = s.bans[k]
+		}
+		logging.Logf("[ttlban] a read of the block sets lost %d of %d live bans at once (table recreated?); keeping them for the next start", len(lost), live)
+	}
 	for k, t := range s.forgot {
 		if t.Before(readAt) {
 			delete(s.forgot, k) // this read already reflects that unblock
 		}
 	}
-	changed := !sameBans(s.bans, next)
+	// Against the file, not the last read: changes below the tolerance must
+	// not pile up unsaved one read at a time.
+	changed := s.saved == nil || !sameBans(s.saved, next)
 	s.bans = next
 	s.mu.Unlock()
 	if !changed {
@@ -354,8 +383,10 @@ func (s *Store) save() error {
 	defer s.saveMu.Unlock()
 	s.mu.Lock()
 	f := fileFormat{Version: 1, SavedAt: s.now().UTC(), Bans: make(map[string]Entry, len(s.bans))}
+	saved := make(map[string]Entry, len(s.bans))
 	for k, e := range s.bans {
 		f.Bans[k] = Entry{Set: e.Set, Expires: e.Expires.UTC()}
+		saved[k] = e
 	}
 	s.mu.Unlock()
 	raw, err := json.MarshalIndent(f, "", "  ")
@@ -383,7 +414,39 @@ func (s *Store) save() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, s.path)
+	if err := os.Rename(name, s.path); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.saved = saved
+	s.mu.Unlock()
+	return nil
+}
+
+// massDrop: every stored live ban gone, or more than half of at least ten.
+func massDrop(lost, live int) bool {
+	return lost > 0 && (lost == live || (lost >= 10 && 2*lost > live))
+}
+
+// discarded: this process wrote the file and it is gone (`cfm flush`).
+// Called with s.mu held.
+func (s *Store) discarded() bool {
+	if s.saved == nil || s.path == "" {
+		return false
+	}
+	_, err := os.Stat(s.path)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// Discard removes the file at path: `cfm flush` emptied the block sets on
+// purpose, and a restart must not bring those bans back. The daemon's store
+// then takes its next read as the truth.
+func Discard(path string) error {
+	err := os.Remove(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func setFor(ip net.IP) string {

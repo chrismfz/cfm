@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"cfm/internal/edgeban"
-	"cfm/internal/ttlban"
 )
 
 // handleEdgeBan records a manual ban in the edge ban store (internal/edgeban):
@@ -42,7 +41,6 @@ func (e *Engine) handleEdgeBan(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Query().Get("unban") == "1" {
 		edgeban.Unban(ip.String())
-		ttlban.Forget(ip.String()) // `cfm allow`: a restart must not restore the ban either
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ip": ip.String(), "unbanned": true})
 		return
 	}

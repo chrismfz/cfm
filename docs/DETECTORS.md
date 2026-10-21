@@ -217,20 +217,26 @@ daemon persists the TTL host bans in `/var/lib/cfm/ttlbans.json`
 - **Saved** from nft every ~2 minutes (the edge ban reconcile's read of the
   block sets, which must cover both or it saves nothing) and once more on
   SIGTERM / SIGINT / SIGHUP. A snapshot replaces the file with what nft holds,
-  so an element that expired, was flushed (`cfm flush`) or unblocked leaves
-  it. Permanent elements are not saved (cfm.deny re-applies them), nor are
-  TTL'd CIDR blocks.
+  so an element that expired or was unblocked leaves it, with one exception:
+  a read that lost every stored live ban (or more than half of at least ten)
+  is a table deleted and recreated empty under the daemon (`cfm disable`, then
+  any CLI command that runs EnsureBase; a `flush ruleset`), so those bans are
+  kept for the next start. `cfm flush` removes the file, and the daemon then
+  takes its next read as it is. Permanent elements are not saved (cfm.deny
+  re-applies them), nor are TTL'd CIDR blocks.
 - **Restored** after `EnsureBase`, in the background (the first edge ban
-  reconcile waits for it, up to 2 minutes, and nothing is saved before it ends):
+  reconcile waits for it, up to 30 seconds, and nothing is saved before it ends):
   each ban for the time it has left, through `AddBlockBatch`, which adds or
   extends but never shortens a ban or turns a permanent one temporary. An
   expired entry is dropped, and so is one covered by an nft allow / ignore
   set, `cfm.allow`, `cfm.ignore` or `[global] IGNORE_IPS` / `IGNORE_NETS`.
   The startup log has one `[ttlban] restore:` line with the counts.
 - **Unblocks** inside the daemon (`/unblock`, `cfm unblock` through the
-  daemon's force-unblock, cfm-web pending unblocks) and allows (`cfm allow`,
-  a cfm.allow entry the daemon applies) drop the entry at once,
+  daemon's force-unblock, cfm-web pending unblocks) drop the entry at once,
   and a snapshot whose nft read began before the unblock cannot put it back.
+  An allow does not remove the block element (nft accepts before it drops),
+  so the entry stays; the restore skips it while the allow is in place, and
+  a ban that outlives a `cfm allow --ttl` comes back, as it would in nft.
   An unblock done while the daemon is stopped (`cfm unblock` with no daemon
   to reach) only reaches nft: the next start restores that ban.
 
@@ -246,10 +252,9 @@ unblocked during it); the detector bans again on the next hit.
 The rpm upgrade no longer rebuilds the table, so a release that changes
 `NFT_INPUT_PRIORITY`'s default applies on rpm nodes, as on deb ones, only after
 `cfm reset` (EnsureBase keeps an existing input chain and logs the mismatch).
-With the daemon running, `cfm reset` or `cfm flush block_v4` empties the file
-at the next snapshot. With it stopped, the next start restores the bans: to
-drop every TTL ban for good, delete `/var/lib/cfm/ttlbans.json` before
-starting it.
+`cfm reset` and `cfm disable` keep the file, so the next start restores the
+bans (as it re-applies cfm.deny). To drop every TTL ban for good, use `cfm
+flush`, or delete `/var/lib/cfm/ttlbans.json` with the daemon stopped.
 
 > **Duration units.** All duration values in `detectors.conf` (`BLOCK`, `EVERY`,
 > `WINDOW`, `COOLDOWN`, `TIMEOUT`, mysql `QUERY_RULES` max-time, …) use Go's

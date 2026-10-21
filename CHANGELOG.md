@@ -30,7 +30,8 @@ back-filled here — see the git/PR history for that period.
   stop) and restores them at start for the time they have left, which covers
   a reboot or `cfm reset`. Expired bans are dropped, and so are bans an allow
   entry, `cfm.ignore` or `IGNORE_IPS` now covers. Unblocks remove the entry at
-  once, so a restart never brings an unblocked address back. Permanent bans
+  once, so a restart never brings an unblocked address back; `cfm flush`
+  clears the saved bans too. Permanent bans
   still come from `cfm.deny`. As on deb nodes, a change of the input chain
   priority now needs `cfm reset` on rpm nodes too. See `docs/DETECTORS.md`
   "TTL bans across a restart".

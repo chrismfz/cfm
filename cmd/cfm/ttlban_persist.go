@@ -77,7 +77,9 @@ func ttlBanExclude(be firewall.Backend, cfgDir string) func(net.IP) bool {
 // ttlBanRestoreWait bounds how long the first edge ban reconcile waits for
 // the restore (a hung nft must not keep the edge from answering bans
 // forever; the store stays unarmed, so nothing is saved over the file).
-const ttlBanRestoreWait = 2 * time.Minute
+// Until then the edge answers no ban (as before every first reconcile); an
+// empty store returns at once.
+const ttlBanRestoreWait = 30 * time.Second
 
 // restoreTTLBans loads the persisted TTL bans, re-adds those with time left
 // and installs the store as the default (Forget, the snapshots). Called once,
@@ -128,14 +130,9 @@ func startTTLBans(be firewall.Backend, cfgDir string) <-chan struct{} {
 // snapshotTTLBans reads the block sets and saves their timed elements. Any
 // set failing to read skips the save: a partial read would drop real bans.
 func snapshotTTLBans(s *ttlban.Store, be firewall.Backend) error {
-	readAt := time.Now()
-	var elems []firewall.SetElementTimed
-	for _, set := range ttlban.Sets {
-		got, err := be.ListSetElementsTimed(set)
-		if err != nil {
-			return fmt.Errorf("%s: %w", set, err)
-		}
-		elems = append(elems, got...)
+	readAt, elems, err := readBlockSets(be)
+	if err != nil {
+		return err
 	}
 	return s.Snapshot(readAt, elems)
 }

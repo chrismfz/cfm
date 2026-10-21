@@ -82,10 +82,12 @@ connections that the live test now pins (a reload must not change a handle).
 `cfm.deny` is permanent-only and must never take one). Nothing on a restart
 may empty the `inet cfm` table: the rpm `%post` ran `cfm disable` on every
 upgrade and freed every TTL-banned attacker (2026-10-21). For what still does
-(reboot, `cfm reset`), `internal/ttlban` persists them to
+(reboot, `cfm reset`, `cfm disable`), `internal/ttlban` persists them to
 `/var/lib/cfm/ttlbans.json` and restores them after EnsureBase. A new unblock
-path calls `ttlban.Forget` next to `edgeban.Unban`, or a restart resurrects
-the ban. Live test: `-run LiveNFTTTLBans` (both engines). See
+path (not an allow: the block element stays under an allow) calls
+`ttlban.Forget` next to `edgeban.Unban`, or a restart resurrects the ban. A
+snapshot that lost every stored ban is taken as a recreated table and kept;
+`cfm flush` is the intended clear (it removes the file). Live test: `-run LiveNFTTTLBans` (both engines). See
 `docs/DETECTORS.md` "TTL bans across a restart".
 
 ---
