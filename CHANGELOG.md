@@ -29,6 +29,18 @@ back-filled here — see the git/PR history for that period.
   `CHALLENGE_V2_INPUT_RESCUE = 0` still turns the rescue off.
 
 ### Fixed
+- **edge_health no longer blames a CDN for a site that has none.** The
+  "CDN caches the challenge" finding (whats_wrong, Check F) counted every
+  visitor with a valid clearance who came back to the challenge page. On a site
+  with no CDN in front, visitors opening a PDF on Android did exactly that: the
+  download leaves the tab on the challenge address, and each re-tap counted.
+  The edge now tells the challenge page whether a trusted proxy (Cloudflare)
+  relayed the request, and only a relayed bounce for a page raises the
+  warning. Bounces that reached the server directly, and relayed ones for a
+  download (PDF, zip, office documents …), are listed in the finding's
+  evidence (`direct_hosts`, `download_hosts`) instead, so a CDN CFM does not
+  know about, or one that caches only files, stays visible. Needs the new edge
+  conf; with the old one every page bounce still counts.
 - **A WordPress API client or logged-in admin is no longer banned for the
   403s WordPress itself returns.** The web detector's 403 flood ban counted
   the 403 a site's WordPress gives to a REST API call (`/wp-json/…`,

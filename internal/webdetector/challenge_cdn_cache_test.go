@@ -219,3 +219,110 @@ func TestChallengeServerServing(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// orion, 2026-10-21: edge_health named www.mathematica.gr, a vhost with no
+// CDN at all. Every bounce was a PDF opened on Android: the download leaves the
+// tab on /__cfm_challenge?next=…pdf, and each re-tap reaches the page as a
+// cleared client for the same target. Only a relayed bounce for a page counts
+// for the warning (and one from an edge conf that sends no header, as before);
+// a direct page bounce and a relayed download go to lists edge_health only
+// shows; a direct download is not counted. The cache-bust redirect itself is unchanged in every case.
+func TestChallengePage_DirectBounceNotCountedAsCDN(t *testing.T) {
+	useClearanceBridgeToken(t, unitTestBridgeSecret)
+	base, _ := startVerifyServer(t)
+	ua := "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36"
+	bounce := func(ip, host, next string, hdr map[string]string) {
+		t.Helper()
+		clr := &http.Cookie{Name: "cfm_clearance", Value: issueClearanceToken(ip, host, "web", time.Now().Add(time.Hour))}
+		if r := doChallengePage(t, http.MethodGet, base, ip, host, ua, next, hdr, clr); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != next {
+			t.Fatalf("%s first: %d %q, want 303 to next", ip, r.StatusCode, r.Header.Get("Location"))
+		}
+		sep := "?"
+		if strings.Contains(next, "?") {
+			sep = "&"
+		}
+		if r := doChallengePage(t, http.MethodGet, base, ip, host, ua, next, hdr, clr); r.StatusCode != http.StatusSeeOther || !strings.HasPrefix(r.Header.Get("Location"), next+sep+"cfm_nc=") {
+			t.Fatalf("%s second: %d %q, want the one cache-bust (unchanged)", ip, r.StatusCode, r.Header.Get("Location"))
+		}
+	}
+	count := func(list []CDNCacheSuspect, host string) int {
+		for _, s := range list {
+			if s.Host == host {
+				return s.IPs
+			}
+		}
+		return 0
+	}
+	relayed := map[string]string{cdnRelayedHeader: "1"}
+	direct := map[string]string{cdnRelayedHeader: "0"}
+
+	resetThrottleStores(t)
+	resetCDNCachedChallengeForTest()
+	t.Cleanup(resetCDNCachedChallengeForTest)
+	// mathematica.gr as it happened: direct, PDFs. Counted nowhere.
+	for _, ip := range []string{"94.46.1.1", "87.228.1.1", "109.242.1.1"} {
+		bounce(ip, "www.mathematica.gr", "/forum/oldfiles/mk_285_1.pdf", direct)
+	}
+	// The same download behind Cloudflare: listed apart, never a suspect (a
+	// phone re-tapping it, or a CDN rule caching file extensions only).
+	for _, ip := range []string{"62.74.2.1", "62.74.2.2", "62.74.2.3"} {
+		bounce(ip, "cf-pdfs.example", "/files/Report.PDF?v=2", relayed)
+	}
+	// A page bounced directly: listed, not a CDN suspect.
+	for _, ip := range []string{"198.51.100.11", "198.51.100.12", "198.51.100.13"} {
+		bounce(ip, "direct-page.example", "/shop/", direct)
+	}
+	// rigel's amabilecreations.com: "/" through Cloudflare. A suspect.
+	for _, ip := range []string{"2a02:587:1::1", "62.74.1.1", "186.247.1.1"} {
+		bounce(ip, "www.amabilecreations.com", "/", relayed)
+	}
+	// An edge conf from before the header: counted as before.
+	for _, ip := range []string{"198.51.100.1", "198.51.100.2"} {
+		bounce(ip, "old-conf.example", "/", nil)
+	}
+	now := time.Now()
+	sus, dir, dl := CDNCachedChallengeHosts(now), DirectClearedBounceHosts(now), RelayedDownloadBounceHosts(now)
+	for host, want := range map[string][3]int{
+		"www.mathematica.gr":       {0, 0, 0},
+		"cf-pdfs.example":          {0, 0, 3},
+		"direct-page.example":      {0, 3, 0},
+		"www.amabilecreations.com": {3, 0, 0},
+		"old-conf.example":         {2, 0, 0},
+	} {
+		if got := [3]int{count(sus, host), count(dir, host), count(dl, host)}; got != want {
+			t.Errorf("%s: (suspect, direct, download) clients = %v, want %v", host, got, want)
+		}
+	}
+}
+
+func TestCDNDownloadTarget(t *testing.T) {
+	for _, next := range []string{
+		"/forum/oldfiles/mk_285_1.pdf", "/a/B.PDF", "/x.zip?dl=1", "/docs/file%2Epdf",
+		"/x.docx#page=2", "/x.pdf?cfm_nc=ab", "/media/v.mp4",
+	} {
+		if !cdnDownloadTarget(next) {
+			t.Errorf("cdnDownloadTarget(%q) = false, want true", next)
+		}
+	}
+	for _, next := range []string{
+		"/", "/shop/", "/product/x.html", "/index.php?file=x.pdf", "/v1.2/page",
+		"/pdf", "/x.pdf/", "/wp-admin/admin-ajax.php", "/?s=a.zip",
+	} {
+		if cdnDownloadTarget(next) {
+			t.Errorf("cdnDownloadTarget(%q) = true, want false", next)
+		}
+	}
+}
+
+func TestCDNRelayedHeaderValues(t *testing.T) {
+	for v, want := range map[string]bool{"0": false, " 0 ": false, "1": true, "": true, "yes": true} {
+		if got := cdnRelayedCounts(v); got != want {
+			t.Errorf("cdnRelayedCounts(%q) = %v, want %v", v, got, want)
+		}
+	}
+	for v, want := range map[string]string{"0": "0", "1": "1", "": "-", "x\" note=forged": "?"} {
+		if got := cdnRelayedLogValue(v); got != want {
+			t.Errorf("cdnRelayedLogValue(%q) = %q, want %q", v, got, want)
+		}
+	}
+}

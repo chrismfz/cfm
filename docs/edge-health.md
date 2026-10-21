@@ -178,11 +178,14 @@ The challenge server now:
   origin, so a signed URL still verifies), instead of serving the PoW again
   (once per target per window; web scope only, the panel listeners sit behind
   no CDN), and counts the host and the client
-  (an IPv4 address, an IPv6 /64), also when the retry cannot be built.
+  (an IPv4 address, an IPv6 /64), also when the retry cannot be built (a
+  relayed bounce for a page only; direct and download bounces are listed
+  apart, below).
 
-A cleared bounce means a cache in front of the edge: the edge passes a valid
-clearance at Step 2b. Check F reports the hosts where at least 3 **distinct
-clients** (an IPv4 address, an IPv6 /64) bounced in the last 24 h as `warn`
+A cleared bounce relayed by a CDN means a cache in front of the edge: the edge
+passes a valid clearance at Step 2b. Check F reports the hosts where at least 3
+**distinct clients** (an IPv4 address, an IPv6 /64) bounced in the last 24 h
+through a trusted proxy (or from an edge conf too old to say, below) as `warn`
 ("likely a CDN"), with the fix:
 the vhost's CDN rule must respect the origin's `Cache-Control`, then purge. The
 threshold is on clients, not bounces, because the host is the client's own
@@ -207,7 +210,28 @@ briefly; the tracker outlives it). Honest limits:
   expires;
 - the count is a heuristic: a cleared bounce without a CDN (several tabs on one
   target, a validator disagreement such as a bridge-token rotation window, which
-  can hit many IPs at once) counts too, hence "likely".
+  can hit many IPs at once) counts too, hence "likely";
+- a download leaves the tab on the challenge address, and each re-tap is a
+  cleared bounce with no cache involved. orion's `www.mathematica.gr` has no
+  CDN; every bounce there was a PDF opened on Android. Since 2026-10-21 a bounce
+  for a download target (`.pdf`, `.zip`, office documents, media …, by the
+  path's extension) never raises the `warn`. Through a trusted proxy it is
+  listed in `evidence.download_hosts` (3-client floor, named in the summary):
+  a phone re-tapping a download behind the CDN looks the same as a CDN rule
+  that caches only file extensions (Cloudflare's default cacheable list
+  includes pdf, office documents, zip, media), so it is shown, not blamed.
+  Directly, it is not counted at all;
+- the edge's `/__cfm_challenge` location sends `X-CFM-Relayed:
+  $xfp_trusted_peer`: `1` when realip rewrote the client address (the peer is
+  in `trusted_proxies.conf`), `0` when the peer is the client. Only relayed
+  bounces for a page raise the `warn`. Direct page bounces (a browser
+  re-opening the address, for instance a download from a script URL no
+  extension names, or a CDN the edge does not trust as a proxy, whose POP
+  addresses then look like clients) are listed in `evidence.direct_hosts`,
+  with the same 3-client floor, and named in the summary, never as a warning.
+  An edge conf from before the header sends none, and then every page bounce
+  counts for the warning, as before. The
+  `cdn_cached_challenge` line in `cfm.challenges.log` carries `relayed=0|1|-`.
 
 The check exists so the operator learns which tenant's CDN to fix.
 
