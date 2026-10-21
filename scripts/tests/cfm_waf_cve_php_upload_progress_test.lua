@@ -129,6 +129,15 @@ fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-site", Referer = "https://cdn.
       "sibling host", "SAME_SITE", "logonly")
 -- Referrer-Policy: no-referrer: Origin null, no Referer
 fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-origin", Origin = "null" }), "no-referrer policy", "SAME_SITE", "logonly")
+fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-site", Origin = "null" }), "no-referrer policy, sibling host", "SAME_SITE", "logonly")
+-- no Host header: the request host (h2/h3 :authority) stands in
+do
+  local c = post(PROGRESS, { ["Sec-Fetch-Site"] = "same-origin", Referer = "https://shop.example.gr/" })
+  c.headers.Host = nil
+  local hit, reason, _, act = waf.check(c)
+  check(hit and reason == "WAF_CVE:CVE_2026_109619:PHP:SAME_SITE" and act == "logonly",
+        "no Host header falls back to ctx.host (got " .. tostring(reason) .. ")")
+end
 -- a trailing dot on the Host
 fires(post(PROGRESS, { ["Sec-Fetch-Site"] = "same-origin", Host = "shop.example.gr.", Referer = "https://shop.example.gr/" }),
       "Host with a trailing dot", "SAME_SITE", "logonly")

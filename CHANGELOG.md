@@ -28,7 +28,10 @@ back-filled here — see the git/PR history for that period.
   `PHP_SESSION_UPLOAD_PROGRESS` unless the request carries a same-site Referer
   or Origin *and* a same-site `Sec-Fetch-Site`: the scanner forged a same-site
   Referer here, and every modern browser sends Fetch Metadata. A browser's own
-  upload-progress form is only logged. Both are armed (a 6 h ban), and 10024
+  upload-progress form is only logged, including one posted from the `www.`
+  or a sibling host and one under `Referrer-Policy: no-referrer` (`Origin:
+  null`, no Referer). The field name is read as PHP joins it, so splitting it
+  across header lines does not get past the rule. Both are armed (a 6 h ban), and 10024
   is enforced in the body burn-in too, which is where the tool's `POST /`
   passed. Built from Imunify360 ruleset 8.85 and the fleet's own logs. Not a
   fix: set `session.upload_progress.enabled = 0` and update PHP (8.2.35 /

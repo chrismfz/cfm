@@ -216,7 +216,9 @@ var wafRuleIDs = []WAFRule{
 	// passed 10021). 10023 (armed) = the tool's User-Agent or boundary.
 	// 10024 (armed) = a PHP_SESSION_UPLOAD_PROGRESS multipart field without a
 	// same-site Referer or Origin, or with one but no same-site
-	// Sec-Fetch-Site; logonly only with both (a browser's own form).
+	// Sec-Fetch-Site; logonly with both (a browser's own form, also from a
+	// www./sibling host) or with Origin "null", no Referer and a same-origin
+	// / same-site Sec-Fetch-Site (Referrer-Policy: no-referrer).
 	{ID: 10023, Name: "rule_cve_php2shell_tool", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10024, Name: "rule_cve_php_upload_progress", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }

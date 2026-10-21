@@ -589,7 +589,7 @@ local function php_content_type(headers)
 end
 
 -- The file parts PHP registers in a multipart body, as { filename, s, e }
--- (bytes body[s..e]). Rules 401 and 415 both read them: the last parse is kept
+-- (bytes body[s..e]). Rules 401, 402 and 415 read them: the last parse is kept
 -- (Lua strings are interned, so the key test is a pointer compare).
 -- The same parse also keeps every part name PHP joined (fields and file
 -- parts, lowercased) for rule 10024, so a multipart body is parsed once.
@@ -7256,7 +7256,9 @@ function _M.detect_cve_php_upload_progress(method, body, headers, req_host)
   if php_media_type(ct_raw) ~= "multipart/form-data" then return nil end
   local _, names = php_multipart_parse(body, ct_raw)
   if not names[UPLOAD_PROGRESS_NAME] then return nil end
-  local host = (lower(strip_host_port(header_string(headers["host"] or headers["Host"]) or req_host or "")):gsub("%.$", ""))
+  local host = header_string(headers["host"] or headers["Host"])
+  if host == "" then host = req_host or "" end
+  host = (lower(strip_host_port(host)):gsub("%.$", ""))
   local ref_raw = header_string(headers["referer"] or headers["Referer"])
   local org_raw = header_string(headers["origin"] or headers["Origin"])
   local ref, org = url_host(ref_raw), url_host(org_raw)
@@ -7271,8 +7273,9 @@ function _M.detect_cve_php_upload_progress(method, body, headers, req_host)
       return "NO_FETCH_METADATA"
     end
     if sfs == "same-site" and (same_site(ref, host) or same_site(org, host)) then return "SAME_SITE" end
-    -- Referrer-Policy: no-referrer: no Referer and Origin "null".
-    if sfs == "same-origin" and not ref and org_raw and lower(org_raw) == "null" then return "SAME_SITE" end
+    -- Referrer-Policy no-referrer (or same-origin, from a sibling host): no
+    -- Referer and Origin "null".
+    if (sfs == "same-origin" or sfs == "same-site") and not ref and org_raw and lower(org_raw) == "null" then return "SAME_SITE" end
   end
   if ref or org then return "XSITE" end
   return "NO_REFERER"
