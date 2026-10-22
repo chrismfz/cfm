@@ -1130,6 +1130,28 @@ with the honest limit that a CDP click is trusted and the accessible
 keyboard path has no trajectory, so it is an escape hatch for humans, not a
 wall.
 
+**A minimized window is not a 0x0 one (2026-10-22).** `outer_zero` is read
+from `window.outerWidth/Height`, the browser window's size. A challenge that
+loaded in a minimized window most likely read 0x0 at load (a hypothesis,
+not measured; a background tab in a normal window reports its real size), so
+E4 read 3's walled class (Windows Chrome/109, `sw_renderer,outer_zero,no_input`
+= 130, six rejects in ~2 minutes, then the page's give-up) was most likely a
+page nobody was looking at; the same fingerprint population (`260c7eae`),
+visible, scores 9-90 and passes. The page now reads the size when it POSTs
+the solve, not at load, and a page that is hidden then
+(`document.visibilityState`) sends no size and `hid:1` instead: an absent
+size is never a tell, so the same machine scores 90 and passes. It still
+posts at once, so a background tab finishes on its own and no PoW or POST
+resume token runs out (making the page wait until visible was reviewed and
+dropped for that). The farm catch is expected to hold but is NOT measured:
+headless Chrome reports a visible page, but a headful farm solving in
+minimized or background windows now sends `hid:1` and escapes `outer_zero`
+(read 3 counted ~57 000 farm rejects carrying it in a week). A farm claiming
+hidden only withholds the size, which it can already do (D5b). `hid` is
+scored by nothing; the next read counts it on the walled class's
+fingerprint population AND on the convicted farm fingerprints, and compares
+their `outer_zero` reject counts with read 3.
+
 **Who the deterministic-FP residual is (first read, 2026-09-29, before the
 release).** In a week of `would_v2` lines the likely-human would-rejects under
 the automatic sources are Windows **Chrome/109** — the last Chrome for Windows
@@ -1199,9 +1221,10 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   rejects it would clear. Finally `sig=` carries the report AS REPORTED —
   `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
   `hc`, `dm`, `dpr`, `raf`, then (since 2026-09-29) the trajectory readings
-  `ut`/`co`/`st`/`dj`/`mj`/`pd` — in that fixed order, omitting any signal the
-  browser did not report. `dm`/`dpr`/`raf` and the trajectory readings are
-  scored by nothing; `hc` feeds
+  `ut`/`co`/`st`/`dj`/`mj`/`pd`, then (since 2026-10-22) `hid` (1 = the page
+  was hidden at POST time and sent no window size) — in that fixed order,
+  omitting any signal the browser did not report. `dm`/`dpr`/`raf`, the
+  trajectory readings and `hid` are scored by nothing; `hc` feeds
   `mobile_hw_lie`/`mac_hw_lie` ("Rung-1 hardware tells" above);
   `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, and
   `ptr`+`mv` decide the real-input rescue (which only ever clears), so logging

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -336,6 +337,9 @@ func TestNormalizeChallengeNext_KeepsALongResumeTarget(t *testing.T) {
 func TestChallengePage_RetryTargetLogic(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("node is required in CI for the challenge-page retry test")
+		}
 		t.Skip("node not installed")
 	}
 	html := challengeHTML()

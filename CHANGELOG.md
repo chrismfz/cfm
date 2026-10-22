@@ -17,7 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **A challenge opened in a minimized window should no longer fail on its
+  own.** The challenge page measured the window when it loaded: a minimized
+  window most likely reads as 0x0, which counts as a headless-browser sign,
+  and on an old PC with software graphics that was enough to reject the
+  solve. The page then retried while still hidden, was rejected the same way
+  each time, and gave up, so a visitor who came back to it found
+  "Verification could not complete". The page now measures the window when
+  it sends the solve, and a page nobody can see sends no window size (and a
+  log-only `hid:1` in `sig=`), so that sign cannot fire on it. Background
+  tabs still finish on their own, as before. Seen on shop pages, from Greek
+  home ISPs.
 
 ## 2026.10.21
 

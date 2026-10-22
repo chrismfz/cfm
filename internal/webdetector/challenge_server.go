@@ -2496,11 +2496,7 @@ func challengeHTML() string {
   try { if (typeof navigator.maxTouchPoints === 'number') HS.mtp = navigator.maxTouchPoints; } catch (e) {}
   try { if (typeof navigator.hardwareConcurrency === 'number') HS.hc = navigator.hardwareConcurrency; } catch (e) {}
   try { if (typeof navigator.deviceMemory === 'number') HS.dm = navigator.deviceMemory; } catch (e) {}
-  try {
-    if (typeof window.outerWidth === 'number' && typeof window.outerHeight === 'number') {
-      HS.ow = window.outerWidth; HS.oh = window.outerHeight;
-    }
-  } catch (e) {}
+  // ow/oh (the outer window size) are read when the solve is POSTed, in hsBody.
   try { if (typeof window.devicePixelRatio === 'number') HS.dpr = window.devicePixelRatio; } catch (e) {}
   try {
     var cv = document.createElement('canvas');
@@ -2574,6 +2570,21 @@ func challengeHTML() string {
     requestAnimationFrame(rafStep);
   } catch (e) {}
   function hsBody(){
+    // The window size is read only here, when the solve is POSTed, and only
+    // from a page someone can see (2026-10-22, E4 read 3). A challenge that
+    // loaded in a minimized window most likely read 0x0 (outer_zero), and it
+    // was rejected on every auto-retry until the page gave up, so a person
+    // who came back to it found a dead end. A hidden page sends hid:1 (log
+    // only, scored by nothing) and no size: an absent size is never a tell.
+    // It posts at once, as before, so a background tab still finishes on its
+    // own and no token runs out while it waits.
+    try {
+      if (document.visibilityState === 'hidden') {
+        HS.hid = 1; delete HS.ow; delete HS.oh;
+      } else if (typeof window.outerWidth === 'number' && typeof window.outerHeight === 'number') {
+        HS.ow = window.outerWidth; HS.oh = window.outerHeight; delete HS.hid;
+      }
+    } catch (e) {}
     try {
       if (TR.n > 0 || TR.ut > 0) HS.ut = TR.ut;
       if (TR.n > 0) {

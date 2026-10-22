@@ -98,9 +98,10 @@
 - **E4 is CLOSED (operator, 2026-10-22).** Decided: the rescue cap (item 1),
   `vhost_config` in auto-v2, `cfm_pcw` kept as log-only evidence (item 3),
   the trajectory readings kept log-only and no longer re-read weekly, the
-  orphan `HUMANITY_*` keys left to an operator cleanup. Open: α (item 2,
-  after a `visibilityState` reading) and the `solver_farm` defaults. Master
-  plan §5 E4 holds the record.
+  orphan `HUMANITY_*` keys left to an operator cleanup. Open: α (item 2;
+  a hidden page now sends no window size and a log-only `hid:1`, and the
+  next read checks whether the walled class is gone) and the `solver_farm`
+  defaults. Master plan §5 E4 holds the record.
 - **Open decisions** (as proposed in read 3):
   1. **The rescue.** **Decided 2026-10-20: capped at 100** (rescue only
      `hs ≤ 100`, whatever the fail score; master plan §5 E4). In
@@ -118,9 +119,13 @@
      names its datacenter scrapers.
   4. Config decisions after E4: `vhost_config` in auto-v2; the shipped
      `solver_farm` defaults; the orphan `HUMANITY_*` keys.
-- **Next read:** one week after the `visibilityState` reading and
-  `vhost_config` in auto-v2 ship: the α question (are the pointer-less
-  rejects visible pages?) and the first week of `v2_via=auto:vhost_config`.
+- **Next read:** one week after the hidden-page fix (`hid`) and
+  `vhost_config` in auto-v2 ship: does the walled class (Windows Chrome/109,
+  hs 130 `sw_renderer,outer_zero,no_input`, six rejects then nothing) still
+  appear, and the first week of `v2_via=auto:vhost_config`. Also the
+  farm side of the same fix: the `hid:1` share and the `outer_zero` reject
+  counts on the convicted farm fingerprints (`c28caa00`, `95070673`) against
+  read 3.
 - **Kill switches, if a read shows harm:** `CHALLENGE_V2_INPUT_RESCUE = 0`
   (rescue off) · `CHALLENGE_V2_AUTO_VHOST = off` (auto-v2 off) · per vhost
   `cfm webtop challenge tier <vhost> v1` · `CHALLENGE_V2_HW_TELLS = 0` ·
@@ -154,6 +159,7 @@ week missed is a week lost on virgo and speedhost.
 | Would-reject sizing | `abuse_shadow` `humanity` (`lines`, `rescued`, `by_src_kind`) | #1525 / #1528 | Sizes any new v2 arm before it is turned on |
 | Payload health | the `hs=-` share of scored solves | — | A jump after a release = the page payload broke (parse / 1 KB cap) |
 | Payload stripping under an arm | `hs=-` solve lines that carry `v2=` (a pass: D5b never fails a missing payload) | read 1 | A rising share on a convicted fp = the farm bypasses the arm by stripping the body → a master-plan decision |
+| Hidden-page solves | `sig=` `hid:1` (page hidden at POST time, no window size sent), humans vs convicted-farm fps | 2026-10-22 | A rising `hid` share on a convicted fp, or its `outer_zero` rejects disappearing, means the arm lost that catch → a master-plan decision |
 | Farm catch rate under an arm | farm-fp `result=solved` vs `result=v2_reject` lines carrying `v2=` (per node: `c28caa00`, `95070673`) | read 3 | Sizes how much of a farm the arm stops (read 3: ~39 %); a falling rate on a convicted fp = the farm scores under the fail score → the operator fingerprint policy (E3), not a harder score |
 
 ## 5. Entry template
@@ -300,7 +306,9 @@ decided: the master plan records only what the operator decides.
        (ptr 21–58), so the bucket is a genuine browser population.
      - The persistent 0×0 outer window with no input fits a minimized
        window or a background tab (Chrome reports outerWidth/Height 0 for a
-       minimized window). That is a hypothesis, not measured.
+       minimized window). That is a hypothesis, not measured. *Corrected
+       2026-10-22:* a background tab in a normal window reports its real
+       size; only the minimized window fits.
   - Not human: mars athensescorts.uk.com, an OTEnet IP with `webdriver` and
     16 cores (hs 190, 5 rows), is automation.
   - Google-Read-Aloud and Meta: 0 reject rows.
@@ -434,6 +442,9 @@ rescue one score alone (review finding; master plan §5 E4).*
   cheapest way is a one-key page reading, `document.visibilityState` at
   solve time (a `vs` sig key, log-only, scored by nothing, under the D5
   rules). Then decide on the next read that carries it.
+  *Done differently 2026-10-22:* no `vs` key. A page hidden at POST time
+  sends `hid:1` in `sig=` and no window size, so the next read tells the
+  cases apart.
 - Revisit α if a pointer-less human class shows up while the page was
   visible.
 

@@ -460,3 +460,37 @@ func TestMarkStoreFullWarnsOncePerEpisode(t *testing.T) {
 		t.Fatal("dropping below the cap must end the episode")
 	}
 }
+
+// E4 read 3's walled class, Windows Chrome/109 with a software renderer and no
+// input, scored 130 on a 0x0 outer window (most likely a minimized one). Its
+// page now posts hid:1 and no size when hidden: the same machine scores 90,
+// under the fail score, and hid is logged only. hid accepts 1 alone.
+func TestHumanityHiddenPageSendsNoSize(t *testing.T) {
+	const chrome109 = "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
+	body := `{"v":1,"wd":false,"glr":"ANGLE (Google, Vulkan 1.1.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",` +
+		`"ptr":0,"tch":0,"key":0,"mv":0,"hc":4,"dpr":1%s}`
+	sig := parseHumanityBody([]byte(fmt.Sprintf(body, `,"ow":0,"oh":0`)))
+	if hs, _ := scoreHumanity(sig, chrome109); hs != tellSWRenderer+tellOuterZero+ampNoInput {
+		t.Fatalf("visible 0x0: hs=%d", hs)
+	}
+	sig = parseHumanityBody([]byte(fmt.Sprintf(body, `,"hid":1`)))
+	hs, tells := scoreHumanity(sig, chrome109)
+	if hs != tellSWRenderer+ampNoInput || strings.Contains(strings.Join(tells, ","), "outer_zero") {
+		t.Fatalf("hidden: hs=%d tells=%v", hs, tells)
+	}
+	if got := (ChallengeSolve{sig: sig.sigFields()}).SignalSuffix(); !strings.HasSuffix(got, ",hid:1") {
+		t.Fatalf("hid not retained: %q", got)
+	}
+	// A forged hid gains nothing server-side: with a reported 0x0 the score
+	// and the rescue answer are unchanged.
+	sig = parseHumanityBody([]byte(fmt.Sprintf(body, `,"ow":0,"oh":0,"hid":1`)))
+	if hs, _ := scoreHumanity(sig, chrome109); hs != tellSWRenderer+tellOuterZero+ampNoInput {
+		t.Fatalf("hid with a reported 0x0: hs=%d", hs)
+	}
+	for _, v := range []string{"0", "2", "-1"} {
+		sig = parseHumanityBody([]byte(fmt.Sprintf(body, `,"hid":`+v)))
+		if strings.Contains((ChallengeSolve{sig: sig.sigFields()}).SignalSuffix(), "hid") {
+			t.Fatalf("hid:%s must be dropped", v)
+		}
+	}
+}
