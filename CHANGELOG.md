@@ -38,11 +38,13 @@ back-filled here — see the git/PR history for that period.
   erased the detector rule from the entry, so solve lines read `src=ip`
   instead of `src=ip:CHALLENGE_PATHS` (and the solved hook got no reason).
 - **More leaked-file probes are malpaths.** WordPress `debug.log`, SQL dump
-  names (`/database.sql`, `/dump.sql`, `*.sql.gz`, ...), config templates
-  (`*.php.example`, `*.php.dist`), schema files (`.dbml`) and Live Helper
+  names (`/database.sql`, `/dump.sql`, `/db.sql`, ...; matched as a path
+  substring, so `/db.sqlite` too), schema files (`.dbml`) and Live Helper
   Chat's `/cache/default.log` and `/doc/update_db/` now trigger the malpath
   challenge (and count toward the malpath flood block). The same pentest
-  read three of them. In 15 hours of the fleet's edge logs about 700 IPs
+  read two of them. `*.sql.gz` is left out (cPanel's own MySQL backup
+  download ends in it), and so are config templates (`*.php.example`): a
+  WebDAV sync of a code tree would request them. In 15 hours of the fleet's edge logs about 700 IPs
   asked for these on hundreds of sites, and not one was a real file. The
   list is a conffile: a node whose `/etc/cfm/webdetector_malpaths.txt` was
   edited gets the new entries as `.dpkg-dist` / `.rpmnew`.

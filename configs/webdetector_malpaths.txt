@@ -169,8 +169,9 @@
 /db.sql
 /data.sql
 /mysql.sql
-.sql.gz
-.sql.zip
-.php.example
-.php.dist
 .dbml
+# Not listed, on purpose: .sql.gz (cPanel's own "Download a MySQL Database
+# Backup" is /cpsess<N>/getsqlbackup/<db>.sql.gz — 20 of them in a migration
+# would trip the malpath flood BAN), .php.example / .php.dist (a WebDAV sync
+# client walking a dev tree cannot solve a challenge). Matching is a substring
+# of the path, so /db.sql also covers /db.sqlite.

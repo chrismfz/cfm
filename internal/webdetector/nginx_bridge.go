@@ -1131,10 +1131,11 @@ func (b *NginxBridge) ChallengeIPWithReason(ip string, ttl time.Duration, reason
 	now := time.Now()
 	reason = strings.TrimSpace(reason)
 	b.mu.Lock()
+	wafRuleID := 0
 	if cur, ok := b.ipState[ip]; ok && reason == "" && cur.Action == "challenge" && cur.Expires.After(now) {
-		reason = cur.Reason
+		reason, wafRuleID = cur.Reason, cur.WAFRuleID
 	}
-	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: reason}
+	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: reason, WAFRuleID: wafRuleID}
 	b.mu.Unlock()
 
 	// A malpath challenge runs at the v2 tier (challengeV2PathsArms), for as

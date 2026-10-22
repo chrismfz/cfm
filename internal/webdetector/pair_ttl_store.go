@@ -8,8 +8,9 @@ import (
 )
 
 // pairTTLStore is the ONE bounded, TTL'd store behind the ChallengeV2 rung
-// marks (gate teeth: challengeV2Marks per (ip,host), challengeV2IPMarks per
-// IP), the traffic-rule challenge notes (telemetry, challengeRuleNotes), the
+// marks (gate teeth: challengeV2Marks per (ip,host), challengeV2IPMarks and
+// challengeV2PathMarks per IP, the latter written with putFor), the
+// traffic-rule challenge notes (telemetry, challengeRuleNotes), the
 // challenge server's verify_reject log throttle (verifyRejects) and its
 // challenge-page redirect loop breaker (nextRedirects) — one implementation, so a
 // fix to the sweep, the cap or the once-per-episode warning reaches all of
