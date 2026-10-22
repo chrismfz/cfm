@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.22
+
 ### Changed
 - **ChallengeV2: the always-on vhost challenge list now runs at v2 too.** A
   vhost on `CHALLENGE_VHOST` — by default every tenant's `webmail.`, `whm.`
