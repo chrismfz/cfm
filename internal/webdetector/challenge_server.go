@@ -1344,8 +1344,13 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		if host, scope := trustedForwardedHost(r), clearanceScope(r); r.URL.Path == challengePath && host != "" {
 			now := time.Now()
 			why := ""
+			// A web cookie whose clearance a malpath challenge revoked
+			// (clearance_revoke.go) is not "cleared": the edge challenged it
+			// on purpose, and bouncing it to next looped it and read as a
+			// CDN-cached challenge.
 			if c, err := r.Cookie(clearanceCookieName(scope)); err == nil &&
-				verifyClearanceToken(c.Value, ip.String(), host, scope, now) {
+				verifyClearanceToken(c.Value, ip.String(), host, scope, now) &&
+				!(scope == "web" && s.bridge.ClearanceRevoked(ip.String())) {
 				why = "cleared"
 			} else if scope == "web" && s.bridge != nil && !carriesResumeToken(next) {
 				why, _ = s.bridge.challengePageExempt(ip.String(), host, r.UserAgent(), next, now)

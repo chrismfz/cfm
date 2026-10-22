@@ -604,6 +604,9 @@ CLAUDE.md §6): fingerprint policy, geo policy, a v2-tier vhost challenge, and
 rung marks from three writers — a traffic rule (per ip+host), a WAF rule at
 `challenge_v2` (per IP) and, since 2026-10-22, the malpath challenge
 (`CHALLENGE_PATHS`, per IP, `CHALLENGE_V2_PATHS`; master plan slice E).
+The malpath challenge also revokes the IP's clearance cookie
+(`clearance_revoke.go`, `CHALLENGE_PATHS_REVOKE`) and its rejects escalate to a
+ban (`CHALLENGE_V2_PATHS_REJECT_BAN`); an unblock clears every mark on the IP.
 
 ### Decision record (2026-09-12) — v2 is a RUNG, not a second on/off axis; Rung-1 (passive) ships first
 

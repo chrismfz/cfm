@@ -322,4 +322,126 @@ function _M.normalize_forwarded_port(port)
   return normalize_forwarded_port(port)
 end
 
+-- ── Clearance revocation (internal/webdetector/clearance_revoke.go) ──────────
+-- A malpath challenge (CHALLENGE_PATHS) on a client that holds a valid cookie
+-- revokes that IP's clearance: the cookie is stateless, so the daemon lists
+-- the IP on GET /nginx/clearance/revoked and the edge keeps a copy in its
+-- decisions dict, "clrrv|<ip>" (TTL = what the daemon says is left). cfm.lua
+-- Step 1 does not honour the cookie of a listed IP, so the request takes the
+-- decision path and gets the challenge. The daemon ends a revocation on a
+-- solve, an unblock, or with its challenge, and the next poll drops it here.
+--
+-- One worker at a time polls (a dict lock while the poll is in flight),
+-- every RV_POLL_SEC, from a timer cfm.lua's cleared requests start: only a
+-- cleared request reads the list, so only one starts a poll. The edge sends
+-- the version it holds and gets {"same":true} or the whole (small) list.
+-- FAIL-OPEN: no dict, a missing endpoint (an older daemon), a bad reply —
+-- nothing is revoked that was not listed. A list write the dict refuses, or
+-- a listed key the dict evicted since (checked on every "same"), forgets the
+-- version, so the next poll writes the whole list again. A listed key that
+-- simply ran out its TTL also reads as evicted: one full list, harmless.
+--
+-- Timer callbacks take everything as arguments (see waf_insp_flush_cb in
+-- cfm.lua for why a per-request upvalue is unsafe there).
+local RV_PFX      = "clrrv|"
+local RV_LIST     = "clrrv:ips"    -- the listed IPs, comma-separated
+local RV_VER      = "clrrv:ver"    -- the daemon's version of that list
+local RV_POLLED   = "clrrv:polled"
+local RV_LOCK     = "clrrv:lock"
+local RV_POLL_SEC = 5
+local RV_LOCK_TTL = 30             -- frees a lock only if its timer never ran
+local RV_MAX      = 4096           -- the daemon's cap (clearanceRevokeMax)
+
+-- revoked reports whether ip's clearance is revoked (d: the decisions dict).
+function _M.revoked(d, ip)
+  if not d or not ip or ip == "" then return false end
+  return d:get(RV_PFX .. ip) ~= nil
+end
+
+-- revoke_apply writes a decoded /nginx/clearance/revoked reply into d.
+function _M.revoke_apply(d, r)
+  if not d or type(r) ~= "table" or type(r.v) ~= "string" or r.v == "" then return false end
+  if r.same then
+    -- The busy decisions dict evicts least-recently-used keys under
+    -- pressure: a listed IP whose key went (or the list itself) would stay
+    -- unrevoked for as long as the daemon's version holds. Forget the
+    -- version, so the next poll writes the whole list again.
+    local cur = d:get(RV_LIST)
+    if type(cur) ~= "string" then d:delete(RV_VER); return false end
+    for ip in cur:gmatch("[^,]+") do
+      if d:get(RV_PFX .. ip) == nil then d:delete(RV_VER); return false end
+    end
+    return true
+  end
+  if type(r.ips) ~= "table" then return false end
+  local keep, list, n, ok_all = {}, {}, 0, true
+  for ip, left in pairs(r.ips) do
+    left = tonumber(left)
+    if type(ip) == "string" and ip ~= "" and not ip:find("[,|%s]") and left and left > 0 then
+      n = n + 1
+      if n > RV_MAX then break end
+      local ok = d:set(RV_PFX .. ip, 1, left)
+      if not ok then ok_all = false end
+      keep[ip] = true
+      list[#list + 1] = ip
+    end
+  end
+  local prev = d:get(RV_LIST)
+  if type(prev) == "string" then
+    for ip in prev:gmatch("[^,]+") do
+      if not keep[ip] then d:delete(RV_PFX .. ip) end
+    end
+  end
+  if not d:set(RV_LIST, table.concat(list, ",")) then ok_all = false end
+  if ok_all then d:set(RV_VER, r.v) else d:delete(RV_VER) end
+  return ok_all
+end
+
+local function revoke_poll(d, dec, decode)
+  local path = "/nginx/clearance/revoked"
+  local have = d:get(RV_VER)
+  if type(have) == "string" and have ~= "" then path = path .. "?v=" .. ngx.escape_uri(have) end
+  local body = dec:rpc("clrrevoke", "GET", path)
+  if not body then return end
+  _M.revoke_apply(d, decode(body))
+end
+
+local function revoke_poll_cb(premature, dname, dec, decode)
+  local d = ngx.shared[dname]
+  if not d then return end
+  if not premature and dec and decode then
+    pcall(revoke_poll, d, dec, decode)
+  end
+  d:delete(RV_LOCK)
+end
+_M._revoke_poll_cb = revoke_poll_cb
+
+-- revoke_tick starts a poll when one is due. dname names the decisions dict;
+-- dec is cfm.lua's bridge client, decode a JSON decoder. Never raises.
+local rv_next = 0 -- per worker: no dict read before this
+local function revoke_tick_impl(dname, dec, decode)
+  local now = ngx.now()
+  if now < rv_next then return end
+  local d = ngx.shared[dname]
+  if not d or not dec then return end
+  local polled = d:get(RV_POLLED) or 0
+  if now - polled < RV_POLL_SEC then
+    rv_next = polled + RV_POLL_SEC
+    return
+  end
+  rv_next = now + 1 -- another worker may be polling: look again in a second
+  if not d:add(RV_LOCK, 1, RV_LOCK_TTL) then return end
+  d:set(RV_POLLED, now)
+  if not ngx.timer.at(0, revoke_poll_cb, dname, dec, decode) then d:delete(RV_LOCK) end
+end
+
+function _M.revoke_tick(dname, dec, decode)
+  pcall(revoke_tick_impl, dname, dec, decode)
+end
+
+_M.RV_POLL_SEC = RV_POLL_SEC
+
+-- _revoke_reset clears the per-worker state (tests).
+function _M._revoke_reset() rv_next = 0 end
+
 return _M

@@ -1616,6 +1616,21 @@ end
 local clearance_scope = "web"
 local clearance_cookie = ngx.var.cookie_cfm_clearance
 local clearance_ok, clearance_status = validate_clearance_token(clearance_cookie, ip, host, clearance_scope)
+-- A malpath challenge revokes the IP's clearance (cfm_clearance.lua "Clearance
+-- revocation"): its cookie is not honoured while the daemon lists the IP, so
+-- the request takes the decision path (Step 3) and gets that challenge. Only a
+-- cleared request reads the list, and only one starts its poll. A module
+-- without these functions (upgrade lag) revokes nothing.
+if clearance_ok and SH and clearance_validator.revoked then
+  clearance_validator.revoke_tick("cfm_decisions", decision, cjson.decode)
+  if clearance_validator.revoked(SH, ip) then
+    clearance_ok, clearance_status = false, "revoked"
+    if not SH:get("clrrv_log|" .. ip) then
+      SH:set("clrrv_log|" .. ip, 1, 60)
+      log_ev(ngx.WARN, "[cfm] clearance_revoked ip=", ip, " host=", host, " uri=", uri)
+    end
+  end
+end
 if CFG.debug_headers then ngx.header["X-CFM-Clearance"] = clearance_status end
 -- A resumed POST (challenge replay) holding valid clearance is treated EXACTLY
 -- like any cleared client: the WAF still runs unconditionally in Step 2 (a solved
@@ -2056,6 +2071,13 @@ local ua_raw   = ngx.var.http_user_agent or ""
 local country  = geo_country_cached(ip)
 local qs_raw    = ngx.var.args or ""
 local d        = decision:get(ip, host, uri, qs_raw, method, scheme, ua_raw, country, clearance_scope)
+-- A revoked clearance the daemon has since ended (the client solved): drop the
+-- edge's copy now rather than on the next poll, or the fresh cookie is ignored
+-- for up to RV_POLL_SEC. Only an explicit 0 from a live (uncached) decision:
+-- a fail-open answer or an older daemon carries no clrrv.
+if clearance_status == "revoked" and SH and d and not d._cache and d.clrrv == 0 then
+  SH:delete("clrrv|" .. ip)
+end
 
 local ip_action        = d.ip_action        or "allow"
 local vh_action        = d.vhost_action      or "allow"

@@ -31,8 +31,30 @@ back-filled here — see the git/PR history for that period.
   0` restores v1. Rejecting webdriver / headless browsers on every
   challenge was considered and not done: unarmed, they are mostly the site
   owner's own tools (HubSpot, iubenda's cookie radar, the Plesk screenshot
-  bot). Not covered: a client that already holds a clearance cookie for the
-  site never meets the malpath challenge there.
+  bot).
+- **The malpath challenge revokes the client's clearance cookie.** A client
+  that had solved a challenge before (even at v1) kept fetching `/.env`,
+  backups and webshell names with its cookie, never meeting the malpath
+  challenge, and the daemon's solved-ok state answered "allow" over it on
+  the decision path too. Now the edge stops honouring that IP's cookie
+  within ~5 s of the challenge and serves it (the challenge page no longer
+  waves the cookie through either); solving it gives a working cookie
+  again. `[webdetector] CHALLENGE_PATHS_REVOKE = 0` turns it off.
+- **A malpath-challenged IP that keeps failing the v2 check is held, then
+  banned.** Before, such a scanner waited out the 10-minute challenge and
+  walked back in, not challenged again for the 45-minute cooldown. Now each
+  failed solve holds the malpath challenge for an hour (a later, shorter
+  challenge no longer cuts it short), and a second failed visit in that
+  hour (rejects 10+ minutes apart, or 30 minutes into one that never
+  pauses; the page's retries and a reload are one visit) raises `WEB/CHALLENGE_V2_MALPATH_REJECT`, which the webdetector
+  section blocks per its BLOCK policy (edge ban and notification included;
+  DRY_RUN applies). The hold survives a `detectors.conf` reload (not a
+  daemon restart). A person sharing
+  the address passes by solving, which ends the hold and starts the count
+  over. Only IPs the malpath challenge marked
+  count. `[webdetector]
+  CHALLENGE_V2_PATHS_REJECT_BAN` sets the visits (default 2); 0 turns it
+  off.
 - **More leaked-file probes are malpaths.** WordPress `debug.log`, SQL dump
   names (`/database.sql`, `/dump.sql`, `/db.sql`, ...; matched as a path
   substring, so `/db.sqlite` too), schema files (`.dbml`) and Live Helper
@@ -50,6 +72,11 @@ back-filled here — see the git/PR history for that period.
   site owner viewing their own `backup.sql` would have been challenged.
 
 ### Fixed
+- **An unblock clears the client's ChallengeV2 marks.** After `cfm unblock`
+  (or an unblock from cfm-web) the client's next challenge within the mark's
+  lifetime still ran at the v2 tier it had failed. The WAF, malpath and
+  traffic-rule marks on the IP now go with the unblock, which lists them as
+  `challenge_v2_mark`.
 - **A detector's challenge keeps its reason.** The bridge sends each
   challenge to its own `/nginx/ip` handler without a reason, and that echo
   erased the detector rule from the entry, so solve lines read `src=ip`

@@ -19,6 +19,8 @@
 //   GET  /nginx/status      → NginxBridgeStatus (for cfm status / debug)
 //   GET  /nginx/edgeban?epoch=E&seq=N → the edge-ban changes since N, or the
 //                              whole list (cfm_edgeban.lua; edge_ban_feed.go)
+//   GET  /nginx/clearance/revoked?v=V → the IPs whose clearance a malpath
+//                              challenge revoked (cfm_clearance.lua; clearance_revoke.go)
 //
 // Lua polls these from the shared-dict server (cfm_decisions.lua) which
 // subscribes to the same socket.
@@ -87,6 +89,14 @@ type NginxBridge struct {
 	bypassFunc     func(string) bool        // set once at startup; no lock needed (written before serving starts)
 	hostBypassFunc func(string) bool        // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
 	stats          bridgeStatsState
+
+	// clrRevoked: ip → until, the IPs whose clearance a malpath challenge
+	// revoked (clearance_revoke.go); clrRevokeVer changes with it (the edge
+	// polls the list by version). Guarded by mu.
+	clrRevoked     map[string]time.Time
+	clrPublished   map[string]time.Time // ip → the until last published (a version bump)
+	clrRevokeVer   uint64
+	clrRevokeEpoch string
 
 	// goodBotExempt: when set (CHALLENGE_GOODBOT_EXEMPT, default on), a would-be
 	// challenge is downgraded to allow for an FCrDNS-verified good bot (it cannot
@@ -296,6 +306,10 @@ type bridgeIPEntry struct {
 	Expires   time.Time
 	Reason    string
 	WAFRuleID int // cfm_waf RULE_IDS handle (e.g. 302). 0 if unknown.
+	// HoldUntil: a malpath challenge on this IP lives at least until here
+	// (withMalpathHoldLocked). Carried across every later challenge write,
+	// whatever its reason; a block replaces it.
+	HoldUntil time.Time
 }
 
 type bridgeVhostEntry struct {
@@ -1080,6 +1094,8 @@ func NewNginxBridge(sockPath, token string, defaultTTL, okIPTTL time.Duration) *
 		},
 		decisionSem: make(chan struct{}, decisionConcurrencyCap()),
 		goodBot:     newBridgeGoodBotState(),
+
+		clrRevokeEpoch: newClearanceRevokeEpoch(),
 	}
 
 	if b.cfg.Enabled {
@@ -1135,7 +1151,16 @@ func (b *NginxBridge) ChallengeIPWithReason(ip string, ttl time.Duration, reason
 	if cur, ok := b.ipState[ip]; ok && reason == "" && cur.Action == "challenge" && cur.Expires.After(now) {
 		reason, wafRuleID = cur.Reason, cur.WAFRuleID
 	}
-	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: reason, WAFRuleID: wafRuleID}
+	e := bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: reason, WAFRuleID: wafRuleID}
+	if reason == challengeV2PathsReason {
+		e.HoldUntil = e.Expires
+	}
+	b.ipState[ip] = b.withMalpathHoldLocked(ip, e, now)
+	// A malpath challenge also revokes the IP's clearance (clearance_revoke.go):
+	// a client holding a cfm_clearance cookie would otherwise never see it.
+	if clearanceRevokeArms(reason) {
+		b.revokeClearanceLocked(ip, now.Add(ttl), now)
+	}
 	b.mu.Unlock()
 
 	// A malpath challenge runs at the v2 tier (challengeV2PathsArms), for as
@@ -1161,7 +1186,119 @@ func (b *NginxBridge) pushedIPEntryLocked(ip, action string, expires time.Time, 
 			reason, wafRuleID = cur.Reason, cur.WAFRuleID
 		}
 	}
-	return bridgeIPEntry{Action: action, Expires: expires, Reason: reason, WAFRuleID: wafRuleID}
+	return b.withMalpathHoldLocked(ip, bridgeIPEntry{Action: action, Expires: expires, Reason: reason, WAFRuleID: wafRuleID}, time.Now())
+}
+
+// withMalpathHoldLocked keeps a live malpath challenge (CHALLENGE_PATHS,
+// including the hour-long hold of challenge_v2_paths_ban.go) from being
+// SHORTENED by a later challenge over it: a WAF push or a detector's 10m
+// re-challenge rewrote the entry to its own TTL, the hold's mark and
+// revocation outlived the decision, and once it ran out the decision
+// answered allow for the rest of the hour. The floor rides on HoldUntil,
+// not on the reason, which a later write may replace (a first cut floored
+// on the reason, and two WAF pushes in a row undid it). A challenge write
+// inherits the live entry's HoldUntil and expires no earlier; a block (or
+// any other action) replaces the entry as before. Caller holds b.mu.
+func (b *NginxBridge) withMalpathHoldLocked(ip string, e bridgeIPEntry, now time.Time) bridgeIPEntry {
+	if e.Action != "challenge" {
+		e.HoldUntil = time.Time{}
+		return e
+	}
+	if cur, ok := b.ipState[ip]; ok && cur.Action == "challenge" && cur.HoldUntil.After(now) && cur.HoldUntil.After(e.HoldUntil) {
+		e.HoldUntil = cur.HoldUntil
+	}
+	if e.HoldUntil.After(e.Expires) {
+		e.Expires = e.HoldUntil
+	}
+	return e
+}
+
+// HoldChallengeIP holds the malpath challenge on ip for at least ttl (the
+// v2-reject hold, challenge_v2_paths_ban.go): the per-IP challenge, its v2
+// mark and its clearance revocation, never shortened. A live block is left
+// alone (a reject must not weaken it). No self-post: the decision lives in
+// ipState, which this writes. It answers whether it held.
+func (b *NginxBridge) HoldChallengeIP(ip string, ttl time.Duration) bool {
+	ip = strings.TrimSpace(ip)
+	if b == nil || !b.cfg.Enabled || ip == "" || ttl <= 0 {
+		return false
+	}
+	if b.bypassFunc != nil && b.bypassFunc(ip) {
+		return false
+	}
+	now := time.Now()
+	b.mu.Lock()
+	cur, live := b.ipState[ip]
+	live = live && cur.Expires.After(now)
+	if live && cur.Action == "block" {
+		b.mu.Unlock()
+		return false
+	}
+	// The entry keeps what challenged the client (src=, the solved hook's
+	// reason / rule id) when it is a live challenge; the hold only floors it.
+	e := bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: challengeV2PathsReason, HoldUntil: now.Add(ttl)}
+	if live && cur.Action == "challenge" {
+		if cur.Reason != "" || cur.WAFRuleID != 0 {
+			e.Reason, e.WAFRuleID = cur.Reason, cur.WAFRuleID
+		}
+		if cur.Expires.After(e.Expires) {
+			e.Expires = cur.Expires
+		}
+	}
+	e = b.withMalpathHoldLocked(ip, e, now)
+	b.ipState[ip] = e
+	if clearanceRevokeArms(challengeV2PathsReason) {
+		b.revokeClearanceLocked(ip, e.HoldUntil, now)
+	}
+	b.mu.Unlock()
+	// Kept outside the bridge too, so a config reload (a new Engine, a new
+	// bridge, an empty ipState) restores it (RestoreMalpathHolds).
+	malpathHolds.putFor(ip, struct{}{}, now, e.HoldUntil.Sub(now))
+	if challengeV2PathsArms(challengeV2PathsReason) {
+		markChallengeV2Path(ip, e.HoldUntil.Sub(now))
+	}
+	return true
+}
+
+// endMalpathHold ends ip's malpath episode outside the bridge entry: the
+// v2-reject count, the stored hold (or a reload would restore it) and the
+// malpath mark. A web solve (ClearIPScoped) and a manual /nginx/ip/clear
+// share it.
+func endMalpathHold(ip string) {
+	forgetChallengeV2PathsRejects(ip)
+	malpathHolds.delete(ip)
+	challengeV2PathMarks.delete(ip)
+}
+
+// malpathHolds remembers the live v2-reject holds by IP, outside any one
+// bridge: a config reload builds a new Engine and bridge with an empty
+// ipState, and the hold ("cannot be waited out") must survive it. The
+// store's TTL is only the floor of a hold written through putFor.
+var malpathHolds = pairTTLStore[struct{}]{
+	m:       map[string]time.Time{},
+	ttl:     time.Minute,
+	maxKeys: v2PathsRejectMax,
+	fullMsg: "[challenge_v2] malpath hold store full (%d) — new holds do not survive a config reload",
+}
+
+// RestoreMalpathHolds re-imposes the live v2-reject holds on this bridge
+// (the detectors' webdetector wiring, after a reload, once the IGNORE bypass
+// is set). A hold this bridge refuses (an IP now in IGNORE_IPS) is forgotten.
+// It answers how many it restored.
+func (b *NginxBridge) RestoreMalpathHolds() int {
+	if b == nil {
+		return 0
+	}
+	now := time.Now()
+	n := 0
+	for ip, until := range malpathHolds.live(now) {
+		if b.HoldChallengeIP(ip, until.Sub(now)) {
+			n++
+		} else if b.cfg.Enabled {
+			endMalpathHold(ip)
+		}
+	}
+	return n
 }
 
 // BlockIP tells OpenResty to hard-block this IP (return 403, no challenge).
@@ -1326,8 +1463,16 @@ func (b *NginxBridge) ClearIPScoped(ip, host, scope string) {
 	host = normalizeHost(host)
 	scope = strings.TrimSpace(scope)
 
+	if scope == "web" {
+		// A web solve (or a clear) starts the v2 reject count over: a person
+		// who failed once and then passed is not one visit from a ban; and
+		// ends the malpath hold and mark (a later, unrelated challenge must
+		// not run at v2 and count toward the malpath ban for an hour).
+		endMalpathHold(ip)
+	}
 	b.mu.Lock()
 	delete(b.ipState, ip)
+	b.unrevokeClearanceLocked(ip)
 	if b.cfg.OkIPTTL > 0 {
 		if ip != "" && host != "" && scope != "" {
 			b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = time.Now().Add(b.cfg.OkIPTTL)
@@ -1341,7 +1486,9 @@ func (b *NginxBridge) ClearIPScoped(ip, host, scope string) {
 	}
 	b.mu.Unlock()
 
-	b.post("/nginx/ip/clear", nginxIPClearMsg{IP: ip})
+	// No self-post of /nginx/ip/clear: it dialled this same bridge to delete
+	// the entry deleted above, and a hold written by a concurrent reject in
+	// between (two tabs, a NAT neighbour) was wiped by it.
 }
 
 // vhostVariantsForBridge returns the exact host variants we want to mirror
@@ -1853,6 +2000,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/events/batch", b.instrument("/nginx/events/batch", b.handleEventsBatch))
 	mux.HandleFunc("/nginx/fppolicy", b.instrument("/nginx/fppolicy", b.handleFpPolicy))
 	mux.HandleFunc("/nginx/edgeban", b.instrument("/nginx/edgeban", b.handleEdgeBan))
+	mux.HandleFunc("/nginx/clearance/revoked", b.instrument("/nginx/clearance/revoked", b.handleClearanceRevoked))
 
 	srv := newBridgeHTTPServer(mux)
 
@@ -2166,8 +2314,17 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	if scope == "" {
 		scope = "web"
 	}
-	// Solved-ok: IP passed PoW recently for same host/scope.
-	if b.cfg.OkIPTTL > 0 {
+	// Answered on every full decision (clearance_revoke.go): an edge that
+	// still lists the IP after a solve drops its copy on a 0, at once,
+	// instead of on its next poll.
+	clrRevoked := 0
+	if scope == "web" && b.clearanceRevokedLocked(ip, now) {
+		clrRevoked = 1
+	}
+	// Solved-ok: IP passed PoW recently for same host/scope. Not while a
+	// malpath challenge revokes the IP's (web) clearance: the solved-ok state
+	// predates it and answered "allow" over that challenge (clearance_revoke.go).
+	if b.cfg.OkIPTTL > 0 && clrRevoked == 0 {
 		k := okStateKey{IP: ip, Host: host, Scope: scope}
 		if exp, ok := b.okState[k]; ok && exp.After(now) {
 			vhAction = "allow"
@@ -2306,6 +2463,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"ip_action":    ipAction, // "allow" | "challenge" | "block"
 		"vhost_action": vhAction, // "allow" | "challenge"
+		"clrrv":        clrRevoked,
 	}
 	if b.RuleDecision != nil {
 		// verified_bot rules: reuse the verdict the exemption block already
@@ -2643,7 +2801,9 @@ func (b *NginxBridge) handleIPClear(w http.ResponseWriter, r *http.Request) {
 
 	b.mu.Lock()
 	delete(b.ipState, msg.IP)
+	b.unrevokeClearanceLocked(msg.IP)
 	b.mu.Unlock()
+	endMalpathHold(strings.TrimSpace(msg.IP)) // as ClearIP does
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -2743,6 +2903,14 @@ func (b *NginxBridge) handleOKTouch(w http.ResponseWriter, r *http.Request) {
 	exp := now.Add(ttl)
 
 	b.mu.Lock()
+	// A revoked clearance (clearance_revoke.go) earns no solved-ok: the touch
+	// comes from a cookie the edge has not learned to refuse yet.
+	if scope == "web" && b.clearanceRevokedLocked(ip, now) {
+		b.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "revoked": true})
+		return
+	}
 	b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = exp
 	b.mu.Unlock()
 
@@ -2905,7 +3073,9 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			}
 			exp := now.Add(ttl)
 			b.mu.Lock()
-			b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = exp
+			if scope != "web" || !b.clearanceRevokedLocked(ip, now) { // see handleOKTouch
+				b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = exp
+			}
 			b.mu.Unlock()
 			processed++
 
