@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -193,5 +195,103 @@ func TestClearanceRevokeCap(t *testing.T) {
 	}
 	if !room {
 		t.Fatalf("an expired entry did not make room")
+	}
+}
+
+// The challenge page does not bounce a revoked client back to next as
+// "cleared": the edge challenged it on purpose (review finding on the first
+// cut: a revoked client looped page → next → page and read as a CDN-cached
+// challenge).
+func TestChallengePage_RevokedClearanceIsServedThePage(t *testing.T) {
+	useClearanceBridgeToken(t, unitTestBridgeSecret)
+	resetThrottleStores(t)
+	b := NewNginxBridge("/tmp/cfm-test-clrrv.sock", "tok", time.Minute, time.Minute)
+	base, _ := startVerifyServerWithBridge(t, b)
+	const ip, host, next = "203.0.113.97", "shop.example.com", "/account/"
+	get := func() *http.Response {
+		req, _ := http.NewRequest(http.MethodGet, base+challengePath+"?next="+url.QueryEscape(next), nil)
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
+		req.Header.Set("X-Real-IP", ip)
+		req.Header.Set("X-Forwarded-Host", host)
+		req.AddCookie(&http.Cookie{Name: "cfm_clearance", Value: issueClearanceToken(ip, host, "web", time.Now().Add(time.Hour))})
+		resp, err := noFollow().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+	b.ChallengeIPWithReason(ip, 10*time.Minute, "CHALLENGE_PATHS")
+	if r := get(); r.StatusCode == http.StatusSeeOther {
+		t.Fatalf("a revoked clearance was bounced to %q", r.Header.Get("Location"))
+	}
+	b.ClearIP(ip) // solved
+	resetThrottleStores(t)
+	if r := get(); r.StatusCode != http.StatusSeeOther || r.Header.Get("Location") != next {
+		t.Fatalf("after the solve: %d %q, want the cleared bounce to next", r.StatusCode, r.Header.Get("Location"))
+	}
+}
+
+// A reload builds a new bridge with an empty list and its version at 0: its
+// versions must never match the old bridge's (review finding: an edge holding
+// E:N kept a stale list and never learned the new one's revocations).
+func TestClearanceRevokeEpochPerBridge(t *testing.T) {
+	a := NewNginxBridge("/tmp/cfm-test-clrrv.sock", "tok", time.Minute, time.Minute)
+	b := NewNginxBridge("/tmp/cfm-test-clrrv.sock", "tok", time.Minute, time.Minute)
+	va := revokeFeed(t, a, "")["v"].(string)
+	vb := revokeFeed(t, b, "")["v"].(string)
+	if va == vb {
+		t.Fatalf("two bridges share version %q", va)
+	}
+	if same := revokeFeed(t, b, va); same["same"] == true {
+		t.Fatalf("the new bridge answered same to the old bridge's version")
+	}
+}
+
+// The full decision answers clrrv (0/1) so an edge can drop its copy as soon as
+// the daemon ends a revocation; the panel scope is never revoked.
+func TestDecisionCarriesClearanceRevokedAndPanelUntouched(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test-clrrv.sock", "tok", time.Minute, time.Minute)
+	const ip, host = "203.0.113.98", "a.example.com"
+	decision := func(scope string) map[string]any {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/nginx/decision?ip="+ip+"&host="+host+"&scope="+scope, nil)
+		req.Header.Set("X-CFM-Token", "tok")
+		b.handleDecision(rr, req)
+		var out map[string]any
+		_ = json.Unmarshal(rr.Body.Bytes(), &out)
+		return out
+	}
+	if d := decision("web"); d["clrrv"] != float64(0) {
+		t.Fatalf("unrevoked: clrrv=%v", d["clrrv"])
+	}
+	// A panel solve's okState survives the web revocation, and a panel touch
+	// is not refused.
+	b.mu.Lock()
+	b.okState[okStateKey{IP: ip, Host: host, Scope: "panel:2083"}] = time.Now().Add(time.Hour)
+	b.mu.Unlock()
+	b.ChallengeIPWithReason(ip, 10*time.Minute, "CHALLENGE_PATHS")
+	if d := decision("web"); d["clrrv"] != float64(1) {
+		t.Fatalf("revoked: clrrv=%v", d["clrrv"])
+	}
+	if d := decision("panel:2083"); d["clrrv"] != float64(0) {
+		t.Fatalf("panel scope reported revoked: %v", d["clrrv"])
+	}
+	b.mu.RLock()
+	_, kept := b.okState[okStateKey{IP: ip, Host: host, Scope: "panel:2083"}]
+	b.mu.RUnlock()
+	if !kept {
+		t.Fatalf("the web revocation dropped the panel okState")
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/nginx/ok/touch", bytes.NewBufferString(`{"ip":"`+ip+`","host":"`+host+`","scope":"panel:2083","ttl_sec":120}`))
+	req.Header.Set("X-CFM-Token", "tok")
+	b.handleOKTouch(rr, req)
+	if strings.Contains(rr.Body.String(), "revoked") {
+		t.Fatalf("a panel touch was refused: %s", rr.Body.String())
+	}
+	b.ClearIP(ip)
+	if d := decision("web"); d["clrrv"] != float64(0) {
+		t.Fatalf("after the solve: clrrv=%v", d["clrrv"])
 	}
 }

@@ -37,11 +37,18 @@ import (
 // then the decision path answers allow (the solve cleared the challenge).
 // Per IP, like the challenge: the cookie is per host, the challenge is not.
 //
+// The challenge page (challenge_server.go) does not count a revoked web
+// cookie as cleared, and every full decision answers "clrrv" (0/1) so an edge
+// still listing a solved client drops its copy on the spot. Web scope only:
+// panel okState and panel touches are untouched (the malpath challenge is
+// web-only). A config reload builds a new bridge with an empty list and a new
+// epoch (newClearanceRevokeEpoch), like the rest of the bridge state.
+//
 // Residuals (HONEST LIMITS in challenge_v2.go): the edge learns of a
 // revocation on its next poll (~5 s, plus the log-driven detector's own lag),
 // and a challenge that expires unsolved ends the revocation with it — the
-// cookie works again after CHALLENGE_PATHS_TTL (repeat offenders: the
-// v2_reject escalation, not this).
+// cookie works again after CHALLENGE_PATHS_TTL (a client that fails a verify
+// gets the hour-long hold of challenge_v2_paths_ban.go).
 
 // clearanceRevokeOn is [webdetector] CHALLENGE_PATHS_REVOKE (default on).
 var clearanceRevokeOn atomic.Bool
@@ -65,9 +72,15 @@ func clearanceRevokeArms(reason string) bool {
 // a new revocation is not recorded (fails toward the old behaviour).
 const clearanceRevokeMax = 4096
 
-// clearanceRevokeEpoch tells one daemon run's list versions from another's,
-// so an edge holding version N from before a restart never matches N again.
-var clearanceRevokeEpoch = strconv.FormatInt(time.Now().UnixNano(), 36)
+// newClearanceRevokeEpoch names one bridge's list (NewNginxBridge): a
+// restart AND a config reload (a new Engine builds a new bridge, with an
+// empty list and its version back at 0) start a new epoch, so an edge
+// holding version N of the old list never matches N of the new one.
+var clearanceRevokeEpochSeq atomic.Uint64
+
+func newClearanceRevokeEpoch() string {
+	return strconv.FormatInt(time.Now().UnixNano(), 36) + "." + strconv.FormatUint(clearanceRevokeEpochSeq.Add(1), 36)
+}
 
 // revokeClearanceLocked records (or extends) ip's revocation until `until`
 // and drops its okState. Caller holds b.mu.
@@ -93,8 +106,10 @@ func (b *NginxBridge) revokeClearanceLocked(ip string, until, now time.Time) {
 		b.clrRevoked[ip] = until
 		b.clrRevokeVer++
 	}
+	// Web scope only: the panel cookie is not revoked (the malpath
+	// challenge, its marks and its release are web-only).
 	for k := range b.okState {
-		if k.IP == ip {
+		if k.IP == ip && k.Scope == "web" {
 			delete(b.okState, k)
 		}
 	}
@@ -108,8 +123,8 @@ func (b *NginxBridge) unrevokeClearanceLocked(ip string) {
 	}
 }
 
-// clearanceRevokedLocked reports whether ip's clearance is revoked now.
-// Caller holds b.mu (read or write).
+// clearanceRevokedLocked reports whether ip's (web) clearance is revoked
+// now. Caller holds b.mu (read or write).
 func (b *NginxBridge) clearanceRevokedLocked(ip string, now time.Time) bool {
 	u, ok := b.clrRevoked[ip]
 	return ok && u.After(now)
@@ -147,7 +162,7 @@ func (b *NginxBridge) handleClearanceRevoked(w http.ResponseWriter, r *http.Requ
 	}
 	now := time.Now()
 	b.mu.RLock()
-	ver := clearanceRevokeEpoch + ":" + strconv.FormatUint(b.clrRevokeVer, 10)
+	ver := b.clrRevokeEpoch + ":" + strconv.FormatUint(b.clrRevokeVer, 10)
 	out := map[string]any{"v": ver}
 	if r.URL.Query().Get("v") == ver {
 		out["same"] = true

@@ -11,57 +11,63 @@ func resetV2PathsRejects(t *testing.T) {
 		v2PathsRejects.mu.Lock()
 		v2PathsRejects.m = map[string]v2PathsRejectState{}
 		v2PathsRejects.mu.Unlock()
-		ConfigureChallengeV2PathsRejectBan(3)
+		ConfigureChallengeV2PathsRejectBan(2)
 	}
 	reset()
 	t.Cleanup(reset)
 }
 
-// Only a web-scope reject from a malpath-marked IP counts, and the third
-// (one visit's retries) asks for the ban, once.
+// Only a web-scope reject from a malpath-marked IP counts. It counts visits
+// (the page's retries within a minute are one); the first failed visit asks
+// for the hold, the second within the window for the ban, once.
 func TestChallengeV2PathsRejectBan(t *testing.T) {
 	resetChallengeV2Marks(t)
 	resetV2PathsRejects(t)
 	now := time.Now()
 	const ip = "203.0.113.120"
 	rej := ChallengeSolve{IP: ip, Host: "a.example", Scope: "web"}
+	at := func(d time.Duration) V2PathsReject { return NoteChallengeV2PathsReject(rej, now.Add(d)) }
 
-	// Not marked: a reject under another grain (a traffic-rule mark, a vhost
-	// arm) never counts.
+	// Not malpath-marked: a reject under another grain (a traffic-rule mark,
+	// a WAF mark) never counts.
 	MarkChallengeV2(ip, "a.example")
 	MarkChallengeV2IP(ip)
 	for i := 0; i < 5; i++ {
-		if _, ban := NoteChallengeV2PathsReject(rej, now); ban {
-			t.Fatalf("a reject with no malpath mark asked for a ban")
+		if r := at(time.Duration(i) * 2 * time.Minute); r.Visits != 0 || r.Hold() || r.Ban {
+			t.Fatalf("a reject with no malpath mark counted: %+v", r)
 		}
 	}
 
-	markChallengeV2Path(ip, 10*time.Minute)
-	if _, ban := NoteChallengeV2PathsReject(ChallengeSolve{IP: ip, Scope: "panel:2083"}, now); ban {
-		t.Fatalf("a panel-scope reject counted")
+	markChallengeV2Path(ip, 2*time.Hour)
+	if r := NoteChallengeV2PathsReject(ChallengeSolve{IP: ip, Scope: "panel:2083"}, now); r.Visits != 0 {
+		t.Fatalf("a panel-scope reject counted: %+v", r)
 	}
-	for i := 1; i <= 2; i++ {
-		if n, ban := NoteChallengeV2PathsReject(rej, now.Add(time.Duration(i)*time.Second)); ban || n != i {
-			t.Fatalf("reject %d: n=%d ban=%v", i, n, ban)
+	// First visit: four retries within ~20 s are one visit, held once.
+	if r := at(0); r.Visits != 1 || !r.Hold() || r.Ban {
+		t.Fatalf("first reject: %+v, want visit 1 with a hold", r)
+	}
+	for _, d := range []time.Duration{5 * time.Second, 12 * time.Second, 20 * time.Second} {
+		if r := at(d); r.Visits != 1 || r.Hold() || r.Ban {
+			t.Fatalf("a retry at %v: %+v, want the same visit and no new hold", d, r)
 		}
 	}
-	if n, ban := NoteChallengeV2PathsReject(rej, now.Add(3*time.Second)); !ban || n != 3 {
-		t.Fatalf("third reject: n=%d ban=%v, want the ban", n, ban)
+	// The second failed visit (it waited for the challenge, came back) bans.
+	if r := at(11 * time.Minute); r.Visits != 2 || !r.Ban || r.Hold() {
+		t.Fatalf("second visit: %+v, want the ban", r)
 	}
 	// The count starts over.
-	if n, ban := NoteChallengeV2PathsReject(rej, now.Add(4*time.Second)); ban || n != 1 {
-		t.Fatalf("after the ban: n=%d ban=%v", n, ban)
+	if r := at(12 * time.Minute); r.Visits != 1 || r.Ban {
+		t.Fatalf("after the ban: %+v", r)
 	}
-	// Rejects spread past the window do not add up (a mark that outlives it).
-	markChallengeV2Path(ip, time.Hour)
-	if n, _ := NoteChallengeV2PathsReject(rej, now.Add(v2PathsRejectWindow+5*time.Second)); n != 1 {
-		t.Fatalf("a reject past the window: n=%d, want 1", n)
+	// Visits spread past the window do not add up.
+	if r := at(12*time.Minute + v2PathsRejectWindow + time.Minute); r.Visits != 1 || r.Ban {
+		t.Fatalf("a visit past the window: %+v, want a new first visit", r)
 	}
 
 	ConfigureChallengeV2PathsRejectBan(0)
 	for i := 0; i < 5; i++ {
-		if _, ban := NoteChallengeV2PathsReject(rej, now); ban {
-			t.Fatalf("CHALLENGE_V2_PATHS_REJECT_BAN=0 still banned")
+		if r := at(3*time.Hour + time.Duration(i)*2*time.Minute); r.Ban || r.Hold() {
+			t.Fatalf("CHALLENGE_V2_PATHS_REJECT_BAN=0 still acted: %+v", r)
 		}
 	}
 }

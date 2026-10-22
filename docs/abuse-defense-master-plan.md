@@ -558,20 +558,31 @@ already opened.
             IP on `GET /nginx/clearance/revoked`. The edge polls the list
             every ~5 s (`cfm_clearance.lua` `revoke_tick`, one worker,
             only cleared requests start it), and Step 1 does not honour a
-            listed IP's cookie. A solve, `/nginx/ip/clear`, an unblock or
-            the challenge running out ends it.
-          - **Repeated v2_reject → ban** (`challenge_v2_paths_ban.go`,
-            `CHALLENGE_V2_PATHS_REJECT_BAN`, default 3 within 15m, 0 =
-            off). Fleet read first (5 nodes, the day's challenge logs): a
-            client's repeated rejects are the page's own retries (3-4
-            within ~20 s), under every grain, and include clients a site
-            owner runs (the Plesk screenshot bot under a traffic-rule
-            mark). So only a web-scope reject from an IP with a live
-            MALPATH mark counts; the threshold-th asks the webdetector
-            sink for a ban (`WEB/CHALLENGE_V2_MALPATH_REJECT`: the BLOCK
-            policy, the edge ban, the notification, DRY_RUN). It closes
-            the wait-out-the-10m-challenge hole for that client, which the
-            sink's `CHALLENGE_COOLDOWN` (45m) otherwise left open.
+            listed IP's cookie; the challenge page does not wave a revoked
+            cookie through either, and a live decision answers `clrrv` so
+            the edge drops its copy as soon as the client solves. Web
+            scope only (the panel cookie and okState are untouched). A
+            solve, `/nginx/ip/clear`, an unblock or the challenge running
+            out ends it; a config reload (a new bridge, a new list epoch)
+            drops it with the rest of the bridge state.
+          - **Repeated v2_reject → hold, then ban**
+            (`challenge_v2_paths_ban.go`, `CHALLENGE_V2_PATHS_REJECT_BAN`,
+            default 2 failed visits within 1h, 0 = off). Fleet read first
+            (5 nodes, the day's challenge logs): a client's repeated
+            rejects are the page's own retries (3-4 within ~20 s), under
+            every grain, and include clients a site owner runs (the Plesk
+            screenshot bot under a traffic-rule mark). So only a web-scope
+            reject from an IP with a live MALPATH mark counts, and it
+            counts VISITS (rejects a minute apart): a score does not change
+            between retries, so counting rejects banned a person behind a
+            scanner-marked NAT on their first failed visit (review
+            finding). Visits alone closed nothing — after the 10m challenge
+            the sink's cooldown serves no new one — so a first failed
+            visit HOLDS the malpath challenge (mark and revocation with it)
+            for an hour through `ChallengeIPWithReason`, and a second one
+            asks the webdetector sink for a ban
+            (`WEB/CHALLENGE_V2_MALPATH_REJECT`: the BLOCK policy, the edge
+            ban, the notification, DRY_RUN).
           - **An unblock clears the rung marks** (`ForceUnblock` →
             `clearChallengeV2Marks`): per-IP WAF and malpath marks, the
             per-(ip,host) traffic-rule marks and the reject count.

@@ -37,17 +37,20 @@ back-filled here — see the git/PR history for that period.
   backups and webshell names with its cookie, never meeting the malpath
   challenge, and the daemon's solved-ok state answered "allow" over it on
   the decision path too. Now the edge stops honouring that IP's cookie
-  within ~5 s of the challenge and serves it; solving it gives a working
-  cookie again. `[webdetector] CHALLENGE_PATHS_REVOKE = 0` turns it off.
-- **A malpath-challenged IP that keeps failing the v2 check is banned.**
-  Three rejected solves within 15 minutes (the page's own retries of one
-  visit) from an IP the malpath challenge marked raise
-  `WEB/CHALLENGE_V2_MALPATH_REJECT`, which the webdetector section blocks
-  per its BLOCK policy (edge ban and notification included; DRY_RUN
-  applies). Before, such a scanner waited out the 10-minute challenge and
-  walked back in, not challenged again for the 45-minute cooldown. Rejects
-  under other arms never count. `[webdetector] CHALLENGE_V2_PATHS_REJECT_BAN`
-  sets the count; 0 turns it off.
+  within ~5 s of the challenge and serves it (the challenge page no longer
+  waves the cookie through either); solving it gives a working cookie
+  again. `[webdetector] CHALLENGE_PATHS_REVOKE = 0` turns it off.
+- **A malpath-challenged IP that keeps failing the v2 check is held, then
+  banned.** Before, such a scanner waited out the 10-minute challenge and
+  walked back in, not challenged again for the 45-minute cooldown. Now its
+  first failed visit (the page's retries within a minute count once) holds
+  the malpath challenge for an hour. A second failed visit in that hour
+  raises `WEB/CHALLENGE_V2_MALPATH_REJECT`, which the webdetector section
+  blocks per its BLOCK policy (edge ban and notification included; DRY_RUN
+  applies). A person sharing the address passes by solving. Only IPs the
+  malpath challenge marked count. `[webdetector]
+  CHALLENGE_V2_PATHS_REJECT_BAN` sets the visits (default 2); 0 turns it
+  off.
 - **More leaked-file probes are malpaths.** WordPress `debug.log`, SQL dump
   names (`/database.sql`, `/dump.sql`, `/db.sql`, ...; matched as a path
   substring, so `/db.sqlite` too), schema files (`.dbml`) and Live Helper

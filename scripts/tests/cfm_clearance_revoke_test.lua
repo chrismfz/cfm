@@ -134,6 +134,12 @@ check(s1 and rv and allow and s2b, "cfm.lua carries the revocation check")
 check(s1 and rv and allow and s1 < rv and rv < allow and allow < s2b,
   "the revocation check runs after validation and before clearance_allow is taken")
 
+-- A live decision that answers clrrv=0 drops the copy at once (after a solve);
+-- a cached or fail-open answer (no clrrv) never does.
+local drop = src:find('clearance_status == "revoked" and SH and d and not d._cache and d.clrrv == 0', 1, true)
+local dget = src:find("local d        = decision:get(", 1, true)
+check(drop and dget and dget < drop, "cfm.lua drops a revoked IP's copy on a live clrrv=0 decision")
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)

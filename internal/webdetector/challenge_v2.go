@@ -152,10 +152,11 @@ package webdetector
 //     a WAF challenge_v2 hit on a cleared client is still downgraded at the
 //     edge (post_clearance_action), never revoked. A rejected client that
 //     waits out the malpath decision (CHALLENGE_PATHS_TTL, 10m shipped) is
-//     not re-challenged while the sink's CHALLENGE_COOLDOWN holds — unless
-//     it failed often enough to be banned (CHALLENGE_V2_PATHS_REJECT_BAN,
-//     challenge_v2_paths_ban.go); a client that gives up after fewer
-//     rejects walks back in after the TTL.
+//     not re-challenged while the sink's CHALLENGE_COOLDOWN holds — except
+//     that a failed visit holds the challenge for an hour and a second one
+//     bans (CHALLENGE_V2_PATHS_REJECT_BAN, challenge_v2_paths_ban.go): a
+//     client that never fails a verify (it stops at the challenge page)
+//     still walks back in after the TTL.
 
 import (
 	"context"

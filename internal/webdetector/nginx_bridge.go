@@ -93,8 +93,9 @@ type NginxBridge struct {
 	// clrRevoked: ip → until, the IPs whose clearance a malpath challenge
 	// revoked (clearance_revoke.go); clrRevokeVer changes with it (the edge
 	// polls the list by version). Guarded by mu.
-	clrRevoked   map[string]time.Time
-	clrRevokeVer uint64
+	clrRevoked     map[string]time.Time
+	clrRevokeVer   uint64
+	clrRevokeEpoch string
 
 	// goodBotExempt: when set (CHALLENGE_GOODBOT_EXEMPT, default on), a would-be
 	// challenge is downgraded to allow for an FCrDNS-verified good bot (it cannot
@@ -1088,6 +1089,8 @@ func NewNginxBridge(sockPath, token string, defaultTTL, okIPTTL time.Duration) *
 		},
 		decisionSem: make(chan struct{}, decisionConcurrencyCap()),
 		goodBot:     newBridgeGoodBotState(),
+
+		clrRevokeEpoch: newClearanceRevokeEpoch(),
 	}
 
 	if b.cfg.Enabled {
@@ -2181,6 +2184,13 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	if scope == "" {
 		scope = "web"
 	}
+	// Answered on every full decision (clearance_revoke.go): an edge that
+	// still lists the IP after a solve drops its copy on a 0, at once,
+	// instead of on its next poll.
+	clrRevoked := 0
+	if scope == "web" && b.clearanceRevokedLocked(ip, now) {
+		clrRevoked = 1
+	}
 	// Solved-ok: IP passed PoW recently for same host/scope.
 	if b.cfg.OkIPTTL > 0 {
 		k := okStateKey{IP: ip, Host: host, Scope: scope}
@@ -2321,6 +2331,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"ip_action":    ipAction, // "allow" | "challenge" | "block"
 		"vhost_action": vhAction, // "allow" | "challenge"
+		"clrrv":        clrRevoked,
 	}
 	if b.RuleDecision != nil {
 		// verified_bot rules: reuse the verdict the exemption block already
@@ -2761,7 +2772,7 @@ func (b *NginxBridge) handleOKTouch(w http.ResponseWriter, r *http.Request) {
 	b.mu.Lock()
 	// A revoked clearance (clearance_revoke.go) earns no solved-ok: the touch
 	// comes from a cookie the edge has not learned to refuse yet.
-	if b.clearanceRevokedLocked(ip, now) {
+	if scope == "web" && b.clearanceRevokedLocked(ip, now) {
 		b.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "revoked": true})
@@ -2929,7 +2940,7 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			}
 			exp := now.Add(ttl)
 			b.mu.Lock()
-			if !b.clearanceRevokedLocked(ip, now) { // see handleOKTouch
+			if scope != "web" || !b.clearanceRevokedLocked(ip, now) { // see handleOKTouch
 				b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = exp
 			}
 			b.mu.Unlock()

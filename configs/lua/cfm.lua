@@ -2071,6 +2071,13 @@ local ua_raw   = ngx.var.http_user_agent or ""
 local country  = geo_country_cached(ip)
 local qs_raw    = ngx.var.args or ""
 local d        = decision:get(ip, host, uri, qs_raw, method, scheme, ua_raw, country, clearance_scope)
+-- A revoked clearance the daemon has since ended (the client solved): drop the
+-- edge's copy now rather than on the next poll, or the fresh cookie is ignored
+-- for up to RV_POLL_SEC. Only an explicit 0 from a live (uncached) decision:
+-- a fail-open answer or an older daemon carries no clrrv.
+if clearance_status == "revoked" and SH and d and not d._cache and d.clrrv == 0 then
+  SH:delete("clrrv|" .. ip)
+end
 
 local ip_action        = d.ip_action        or "allow"
 local vh_action        = d.vhost_action      or "allow"
