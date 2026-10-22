@@ -99,7 +99,7 @@
   `vhost_config` in auto-v2, `cfm_pcw` kept as log-only evidence (item 3),
   the trajectory readings kept log-only and no longer re-read weekly, the
   orphan `HUMANITY_*` keys left to an operator cleanup. Open: α (item 2;
-  the page now waits until it is visible before posting the solve, and the
+  a hidden page now sends no window size and a log-only `hid:1`, and the
   next read checks whether the walled class is gone) and the `solver_farm`
   defaults. Master plan §5 E4 holds the record.
 - **Open decisions** (as proposed in read 3):
@@ -119,7 +119,7 @@
      names its datacenter scrapers.
   4. Config decisions after E4: `vhost_config` in auto-v2; the shipped
      `solver_farm` defaults; the orphan `HUMANITY_*` keys.
-- **Next read:** one week after the visible-page fix (`cfmWhenVisible`) and
+- **Next read:** one week after the hidden-page fix (`hid`) and
   `vhost_config` in auto-v2 ship: does the walled class (Windows Chrome/109,
   hs 130 `sw_renderer,outer_zero,no_input`, six rejects then nothing) still
   appear, and the first week of `v2_via=auto:vhost_config`.
@@ -436,6 +436,9 @@ rescue one score alone (review finding; master plan §5 E4).*
   cheapest way is a one-key page reading, `document.visibilityState` at
   solve time (a `vs` sig key, log-only, scored by nothing, under the D5
   rules). Then decide on the next read that carries it.
+  *Done differently 2026-10-22:* no `vs` key. A page hidden at POST time
+  sends `hid:1` in `sig=` and no window size, so the next read tells the
+  cases apart.
 - Revisit α if a pointer-less human class shows up while the page was
   visible.
 

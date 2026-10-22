@@ -2496,11 +2496,7 @@ func challengeHTML() string {
   try { if (typeof navigator.maxTouchPoints === 'number') HS.mtp = navigator.maxTouchPoints; } catch (e) {}
   try { if (typeof navigator.hardwareConcurrency === 'number') HS.hc = navigator.hardwareConcurrency; } catch (e) {}
   try { if (typeof navigator.deviceMemory === 'number') HS.dm = navigator.deviceMemory; } catch (e) {}
-  try {
-    if (typeof window.outerWidth === 'number' && typeof window.outerHeight === 'number') {
-      HS.ow = window.outerWidth; HS.oh = window.outerHeight;
-    }
-  } catch (e) {}
+  // ow/oh (the outer window size) are read when the solve is POSTed, in hsBody.
   try { if (typeof window.devicePixelRatio === 'number') HS.dpr = window.devicePixelRatio; } catch (e) {}
   try {
     var cv = document.createElement('canvas');
@@ -2573,49 +2569,20 @@ func challengeHTML() string {
     };
     requestAnimationFrame(rafStep);
   } catch (e) {}
-  // BEGIN cfmWhenVisible (run in node by TestChallengePage_WhenVisibleLogic)
-  // Resolves once the page is visible, or on the first TRUSTED pointer, key
-  // or touch input (a page someone is using, whatever the visibility API
-  // says). The solve is POSTed only then (2026-10-22, E4 read 3): a challenge
-  // that loaded in a minimized window or a background tab reported a 0x0
-  // outer window, scored outer_zero, and its auto-retries were rejected the
-  // same way until the page gave up, so a person who came back later found a
-  // dead end. A headless farm reports a visible page and posts at once, so
-  // nothing changes for it. No timeout: a page that never becomes visible
-  // never needed to pass, and an expired token only reloads into a fresh one.
-  function cfmWhenVisible(doc, win){
-    return new Promise(function(resolve){
-      try {
-        if (doc.visibilityState !== 'hidden') { resolve(false); return; }
-        var done = false;
-        var evs = ['pointerdown', 'keydown', 'touchstart'];
-        var go = function(ev){
-          if (done) return;
-          if (ev && ev.type === 'visibilitychange') {
-            if (doc.visibilityState === 'hidden') return;
-          } else if (ev && ev.isTrusted === false) {
-            return;
-          }
-          done = true;
-          try {
-            doc.removeEventListener('visibilitychange', go);
-            for (var i = 0; i < evs.length; i++) win.removeEventListener(evs[i], go, true);
-          } catch (e) {}
-          resolve(true);
-        };
-        doc.addEventListener('visibilitychange', go);
-        for (var j = 0; j < evs.length; j++) win.addEventListener(evs[j], go, true);
-      } catch (e) { resolve(false); }
-    });
-  }
-  // END cfmWhenVisible
   function hsBody(){
-    // The window size is read again when the solve is POSTed: a page loaded
-    // in a minimized window reported 0x0 at load (outer_zero) and kept that
-    // reading after the window was restored.
+    // The window size is read only here, when the solve is POSTed, and only
+    // from a page someone can see (2026-10-22, E4 read 3). A challenge that
+    // loaded in a minimized window most likely read 0x0 (outer_zero), and it
+    // was rejected on every auto-retry until the page gave up, so a person
+    // who came back to it found a dead end. A hidden page sends hid:1 (log
+    // only, scored by nothing) and no size: an absent size is never a tell.
+    // It posts at once, as before, so a background tab still finishes on its
+    // own and no token runs out while it waits.
     try {
-      if (typeof window.outerWidth === 'number' && typeof window.outerHeight === 'number') {
-        HS.ow = window.outerWidth; HS.oh = window.outerHeight;
+      if (document.visibilityState === 'hidden') {
+        HS.hid = 1; delete HS.ow; delete HS.oh;
+      } else if (typeof window.outerWidth === 'number' && typeof window.outerHeight === 'number') {
+        HS.ow = window.outerWidth; HS.oh = window.outerHeight; delete HS.hid;
       }
     } catch (e) {}
     try {
@@ -2705,7 +2672,6 @@ func challengeHTML() string {
   (async function(){
     try {
       var sol = await solvePow();
-      await cfmWhenVisible(document, window);
 
        fetch("/__cfm_verify?next="+encodeURIComponent(next), {
         method: "POST",

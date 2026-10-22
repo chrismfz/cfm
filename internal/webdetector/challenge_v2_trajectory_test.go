@@ -82,7 +82,7 @@ func TestTrajectoryReadingsDecideNothing(t *testing.T) {
 func TestHumanityPayloadWorstCaseFitsTheCap(t *testing.T) {
 	num := "-0.0000012345678901234567"
 	keys := []string{"v", "mv", "ptr", "tch", "key", "mtp", "hc", "dm", "ow", "oh", "dpr", "raf",
-		"ut", "co", "st", "dj", "mj", "pd"}
+		"ut", "co", "st", "dj", "mj", "pd", "hid"}
 	var b strings.Builder
 	b.WriteString(`{"wd":false,"glr":"` + strings.Repeat("€", 128) + `"`)
 	for _, k := range keys {
@@ -189,6 +189,25 @@ function mv(x, y, t, dx, dy, extra) {
 		return false
 	}
 
+	t.Run("the window size is the one at POST time, not at load", func(t *testing.T) {
+		// Loaded at 1366x728 (the stub), restored to another size before the
+		// POST: a load-time read would post the stale size (a minimized
+		// window's 0x0, E4 read 3).
+		m := run(t, "window.outerWidth = 1280; window.outerHeight = 0;")
+		if m["ow"] != float64(1280) || m["oh"] != float64(0) {
+			t.Fatalf("ow/oh: %v", m)
+		}
+	})
+	t.Run("a hidden page posts hid:1 and no window size", func(t *testing.T) {
+		m := run(t, "document.visibilityState = 'hidden';")
+		if m["hid"] != float64(1) || hasAny(m, "ow", "oh") {
+			t.Fatalf("hidden page: %v", m)
+		}
+		m = run(t, "")
+		if hasAny(m, "hid") || m["ow"] != float64(1366) {
+			t.Fatalf("visible page: %v", m)
+		}
+	})
 	t.Run("no events: no trajectory keys", func(t *testing.T) {
 		m := run(t, "")
 		if m["ptr"] != float64(0) || m["mv"] != float64(0) || hasAny(m, "ut", "co", "st", "dj", "mj", "pd") {

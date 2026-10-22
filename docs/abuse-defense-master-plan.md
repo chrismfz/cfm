@@ -691,12 +691,13 @@ already opened.
             them, the reference config no longer carries them; §3 row 12).
           - **α is not decided yet.** Operator, 2026-10-22: the walled class
             (no input, `outer_zero` on every retry) reads like a challenge
-            loaded in a minimized window or a background tab — the page
-            read its 0x0 window at load and its auto-retries were rejected
-            the same way until it gave up. So the page now POSTs only once
-            it is visible, or on the first trusted input, and reads the
-            window size at POST time (`cfmWhenVisible`). The next read checks
-            whether that class is gone; α is decided on what remains.
+            loaded in a minimized window — the page most likely read its
+            0x0 window at load and its auto-retries were rejected
+            the same way until it gave up. So the page now reads the window
+            size at POST time, and a hidden page sends none plus a log-only
+            `hid:1` (an absent size is never a tell). The next read checks
+            whether that class is gone and counts `hid`; α is decided on
+            what remains.
 
           Weekly reads from 2026-10-06 are recorded in
           `docs/abuse-defense-progress.md`, not here; this plan keeps the

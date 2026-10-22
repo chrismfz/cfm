@@ -698,9 +698,11 @@ every other member — `v2_via`, a waiver, a rescue, and `ms`, which times the
 waiver's inline forward-confirm — narrows the grain; stripping `v2` alone
 left `v2_waived` without `v2_via` an exact `v2=geo`);
 `sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` (+ since 2026-09-29
-the trajectory readings `ut,co,st,dj,mj,pd`; the input counts are trusted
-events only) is the report AS REPORTED — dm/dpr/raf and the trajectory
-readings corpus-only and scored by nothing, ptr+mv decide
+the trajectory readings `ut,co,st,dj,mj,pd`, + since 2026-10-22 `hid:1`, a
+page hidden at POST time, which sends no window size so `outer_zero` cannot
+fire on a minimized window; the input counts are trusted
+events only) is the report AS REPORTED — dm/dpr/raf, the trajectory
+readings and hid corpus-only and scored by nothing, ptr+mv decide
 the real-input rescue below (it only ever clears), hc feeds the
 corpus-measured mobile_hw_lie/mac_hw_lie tells (2026-09-23,
 `docs/traffic-classifier.md` "Rung-1 hardware tells"; scored as ONE

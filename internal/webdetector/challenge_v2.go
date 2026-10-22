@@ -199,6 +199,12 @@ type humanitySignals struct {
 	DJ *float64 `json:"dj"` // inter-event timing jitter: coefficient of variation of the gaps; needs 3 gaps
 	MJ *float64 `json:"mj"` // the largest single-event |movementX|+|movementY|, px
 	PD *float64 `json:"pd"` // ms from the first pointer-move event to the last; needs 2 events
+	// HID (2026-10-22, E4 read 3) is 1 when the page was hidden at POST time
+	// (document.visibilityState); such a page sends no ow/oh, so outer_zero
+	// cannot fire on a minimized window. Retained like the readings above
+	// and scored by NOTHING. A client claiming hidden only withholds its
+	// window size, which it can already do by omitting it: the D5b residual.
+	HID *int `json:"hid"`
 }
 
 // Bounds for the retained readings. These exist for DIGIT SANITY only — a
@@ -845,6 +851,9 @@ func (s *humanitySignals) sanitize() {
 	dropFloat(&s.DJ)
 	dropFloat(&s.MJ)
 	dropFloat(&s.PD)
+	if s.HID != nil && *s.HID != 1 {
+		s.HID = nil
+	}
 }
 
 // uaClaimsMobile reports whether the UA presents itself as a touch device —
@@ -1029,6 +1038,7 @@ func (s *humanitySignals) sigFields() []sigField {
 	addFloat("dj", s.DJ, 2)
 	addFloat("mj", s.MJ, 1)
 	addFloat("pd", s.PD, 0)
+	addInt("hid", s.HID)
 	return out
 }
 
@@ -1036,8 +1046,8 @@ func (s *humanitySignals) sigFields() []sigField {
 // — the Rung-1 report as REPORTED, before any scoring. Empty when nothing was
 // retained, so a no-payload solve adds no field.
 //
-// Precisely: dm/dpr/raf and the trajectory readings (ut/co/st/dj/mj/pd) are
-// scored by NOTHING — they are corpus only,
+// Precisely: dm/dpr/raf, the trajectory readings (ut/co/st/dj/mj/pd) and hid
+// are scored by NOTHING — they are corpus only,
 // logged so a future tell can be written from measured distributions instead
 // of from memory. hc feeds mobile_hw_lie / mac_hw_lie (written exactly that
 // way, from this corpus), ptr/tch/key feed the no_input amplifier (only
