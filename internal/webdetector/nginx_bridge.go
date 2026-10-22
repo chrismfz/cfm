@@ -1259,6 +1259,17 @@ func (b *NginxBridge) HoldChallengeIP(ip string, ttl time.Duration) bool {
 	return true
 }
 
+// endMalpathHold ends ip's malpath episode outside the bridge entry: the
+// v2-reject count, the stored hold (or a reload would restore it) and the
+// malpath mark. A web solve (ClearIPScoped) and a manual /nginx/ip/clear
+// share it.
+func endMalpathHold(ip string) {
+	forgetChallengeV2PathsRejects(ip)
+	exact := func(k string) bool { return k == ip }
+	malpathHolds.deleteWhere(exact)
+	challengeV2PathMarks.deleteWhere(exact)
+}
+
 // malpathHolds remembers the live v2-reject holds by IP, outside any one
 // bridge: a config reload builds a new Engine and bridge with an empty
 // ipState, and the hold ("cannot be waited out") must survive it. The
@@ -1271,7 +1282,9 @@ var malpathHolds = pairTTLStore[struct{}]{
 }
 
 // RestoreMalpathHolds re-imposes the live v2-reject holds on this bridge
-// (NewEngine, after a reload). It answers how many it restored.
+// (the detectors' webdetector wiring, after a reload, once the IGNORE bypass
+// is set). A hold this bridge refuses (an IP now in IGNORE_IPS) is forgotten.
+// It answers how many it restored.
 func (b *NginxBridge) RestoreMalpathHolds() int {
 	if b == nil {
 		return 0
@@ -1281,6 +1294,8 @@ func (b *NginxBridge) RestoreMalpathHolds() int {
 	for ip, until := range malpathHolds.live(now) {
 		if b.HoldChallengeIP(ip, until.Sub(now)) {
 			n++
+		} else if b.cfg.Enabled {
+			endMalpathHold(ip)
 		}
 	}
 	return n
@@ -1453,10 +1468,7 @@ func (b *NginxBridge) ClearIPScoped(ip, host, scope string) {
 		// who failed once and then passed is not one visit from a ban; and
 		// ends the malpath hold and mark (a later, unrelated challenge must
 		// not run at v2 and count toward the malpath ban for an hour).
-		forgetChallengeV2PathsRejects(ip)
-		exact := func(k string) bool { return k == ip }
-		malpathHolds.deleteWhere(exact)
-		challengeV2PathMarks.deleteWhere(exact)
+		endMalpathHold(ip)
 	}
 	b.mu.Lock()
 	delete(b.ipState, ip)
@@ -2789,6 +2801,7 @@ func (b *NginxBridge) handleIPClear(w http.ResponseWriter, r *http.Request) {
 	delete(b.ipState, msg.IP)
 	b.unrevokeClearanceLocked(msg.IP)
 	b.mu.Unlock()
+	endMalpathHold(strings.TrimSpace(msg.IP)) // as ClearIP does
 
 	w.WriteHeader(http.StatusOK)
 }

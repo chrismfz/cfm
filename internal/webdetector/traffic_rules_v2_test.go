@@ -31,6 +31,9 @@ func resetChallengeV2Marks(t *testing.T) {
 		challengeV2PathMarks.m = map[string]time.Time{}
 		challengeV2PathMarks.fullWarn = false
 		challengeV2PathMarks.mu.Unlock()
+		malpathHolds.mu.Lock()
+		malpathHolds.m = map[string]time.Time{}
+		malpathHolds.mu.Unlock()
 	}
 	reset()
 	t.Cleanup(reset)

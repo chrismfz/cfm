@@ -674,10 +674,6 @@ func NewEngine(cfg Config) *Engine {
 	// disk in manualChal.init above) now that the bridge exists — push each with
 	// its remaining window so a long manual TTL keeps enforcing across upgrades.
 	e.restoreManualChallenges()
-	// The v2-reject holds (challenge_v2_paths_ban.go) live outside the
-	// bridge: re-impose them on this one, so a config reload cannot be used
-	// to wait one out.
-	e.nginxBridge.RestoreMalpathHolds()
 
 	// Register the bridge as the process-wide WAF cleaner so in-daemon
 	// unblock paths (the /unblock endpoint and the agent's pending-unblock

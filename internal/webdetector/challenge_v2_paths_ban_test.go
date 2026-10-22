@@ -183,11 +183,11 @@ func TestChallengeV2PathsRejectBanContinuousFailer(t *testing.T) {
 	now := time.Now()
 	rej := ChallengeSolve{IP: ip, Scope: "web"}
 	banned := false
-	for m := 0; m <= 30; m += 5 {
+	for m := 0; m <= 60; m += 5 {
 		if r := NoteChallengeV2PathsReject(rej, now.Add(time.Duration(m)*time.Minute)); r.Ban {
 			banned = true
-			if m != 10 {
-				t.Fatalf("banned at +%dm, want +10m (the visit's age reached the gap)", m)
+			if m != 30 {
+				t.Fatalf("banned at +%dm, want +30m (the visit's age reached v2PathsRejectVisitMax)", m)
 			}
 			break
 		}
@@ -229,5 +229,21 @@ func TestMalpathHoldSurvivesReload(t *testing.T) {
 	again := NewNginxBridge("/tmp/cfm-test-v2-hold.sock", "tok", time.Minute, time.Minute)
 	if n := again.RestoreMalpathHolds(); n != 0 {
 		t.Fatalf("a solved hold came back after a reload (%d)", n)
+	}
+}
+
+// A person who keeps reloading as the page asks (a reload every 3 minutes for
+// 15) is one visit: never banned for following the page's advice.
+func TestChallengeV2PathsRejectBanPersonReloading(t *testing.T) {
+	resetChallengeV2Marks(t)
+	resetV2PathsRejects(t)
+	const ip = "203.0.113.142"
+	markChallengeV2Path(ip, 2*time.Hour)
+	now := time.Now()
+	rej := ChallengeSolve{IP: ip, Scope: "web"}
+	for s := 0; s <= 15*60; s += 20 { // retries every 20s, reloads in between
+		if r := NoteChallengeV2PathsReject(rej, now.Add(time.Duration(s)*time.Second)); r.Ban {
+			t.Fatalf("a person reloading for 15 minutes was banned at +%ds", s)
+		}
 	}
 }

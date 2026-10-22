@@ -585,7 +585,8 @@ already opened.
             longer shortens a malpath one (`bridgeIPEntry.HoldUntil`,
             carried by `withMalpathHoldLocked` across every later
             challenge write whatever its reason; `putFor` for the mark), a
-            visit that goes on for 10m without a pause counts as a new one
+            visit that goes on for 30m without a pause counts as a new one (10m
+            banned a person reloading as the page asks)
             (a crawler failing page after page is banned too), holds live
             outside the bridge (`malpathHolds`) and are restored after a
             config reload (`RestoreMalpathHolds`), a web solve ends the

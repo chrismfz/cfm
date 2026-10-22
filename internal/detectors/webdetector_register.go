@@ -229,6 +229,10 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			if w.ipIgnore != nil {
 				b.SetBypassFunc(w.ipIgnore.ShouldIgnore)
 			}
+			// The v2-reject holds live outside the bridge: re-impose them on
+			// this one, so a config reload cannot be used to wait one out.
+			// After the bypass wiring, so an IP added to IGNORE_IPS is dropped.
+			b.RestoreMalpathHolds()
 			_ = TryWireClamBridge()
 
 			go b.RunExpireLoop(pctx)

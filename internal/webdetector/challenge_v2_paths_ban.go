@@ -29,7 +29,7 @@ import (
 // retries, so counting rejects banned on the first failed visit — a real
 // person behind a NAT a scanner had marked, failing the rung once, among
 // them. A reject within v2PathsRejectVisitGap of the IP's previous one is
-// the same visit, for at most v2PathsRejectVisitGap (failing on and on
+// the same visit, for at most v2PathsRejectVisitMax (30m: failing on and on
 // without a pause starts a new visit that long after the first); the gap is longer than the page's whole retry cycle plus
 // the reload its give-up text asks for ("wait a minute and reload", its
 // cfm_v2r counter lives 120 s), so following the page's own advice is not a
@@ -74,6 +74,7 @@ const ChallengeV2PathsRejectHold = v2PathsRejectWindow
 const (
 	v2PathsRejectWindow   = time.Hour        // first visit to the banning one
 	v2PathsRejectVisitGap = 10 * time.Minute // rejects closer than this: one visit
+	v2PathsRejectVisitMax = 30 * time.Minute // a visit without a pause ends this long after its first reject
 	v2PathsRejectMax      = 4096             // tracked IPs; at the cap a new IP is not counted
 )
 
@@ -135,15 +136,18 @@ func NoteChallengeV2PathsReject(s ChallengeSolve, now time.Time) V2PathsReject {
 			}
 		}
 		st.first = now
-	} else if now.Sub(st.last) < v2PathsRejectVisitGap && now.Sub(st.visitStart) < v2PathsRejectVisitGap {
+	} else if now.Sub(st.last) < v2PathsRejectVisitGap && now.Sub(st.visitStart) < v2PathsRejectVisitMax {
 		// The page's retry of the same visit, or its reload.
 		st.last = now
 		v2PathsRejects.m[s.IP] = st
 		return V2PathsReject{Visits: st.n}
 	}
 	// A new visit: after a pause of v2PathsRejectVisitGap, or once the
-	// current one has gone on that long (a crawler failing on page after
-	// page without a pause is not one endless visit).
+	// current one has gone on for v2PathsRejectVisitMax (a crawler failing on
+	// page after page without a pause is not one endless visit). The max is
+	// well past what a person does: the page gives up after ~2 minutes and
+	// asks for a reload, and someone reloading every few minutes for 10 was
+	// banned when the max was the 10m gap (review finding).
 	st.n++
 	st.last, st.visitStart = now, now
 	if st.n >= limit {
