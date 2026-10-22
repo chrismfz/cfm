@@ -127,7 +127,7 @@ func (s *pairTTLStore[V]) storeLocked(key string, v V, now time.Time) {
 // (the store's TTL is the floor; a longer caller TTL extends one entry), and
 // never earlier than the key's live expiry: a shorter write over a longer
 // entry (a 10m malpath re-challenge over the hour-long v2-reject hold) keeps
-// the longer one, as the bridge decision does (malpathFloorLocked).
+// the longer one, as the bridge decision does (withMalpathHoldLocked).
 func (s *pairTTLStore[V]) putFor(key string, v V, now time.Time, ttl time.Duration) {
 	if key == "" {
 		return
@@ -200,4 +200,17 @@ func (s *pairTTLStore[V]) deleteWhere(match func(key string) bool) int {
 		}
 	}
 	return n
+}
+
+// live returns a copy of the live keys and their expiries.
+func (s *pairTTLStore[V]) live(now time.Time) map[string]time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]time.Time, len(s.m))
+	for k, exp := range s.m {
+		if now.Before(exp) {
+			out[k] = exp
+		}
+	}
+	return out
 }

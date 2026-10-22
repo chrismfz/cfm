@@ -29,7 +29,8 @@ import (
 // retries, so counting rejects banned on the first failed visit — a real
 // person behind a NAT a scanner had marked, failing the rung once, among
 // them. A reject within v2PathsRejectVisitGap of the IP's previous one is
-// the same visit; the gap is longer than the page's whole retry cycle plus
+// the same visit, for at most v2PathsRejectVisitGap (failing on and on
+// without a pause starts a new visit that long after the first); the gap is longer than the page's whole retry cycle plus
 // the reload its give-up text asks for ("wait a minute and reload", its
 // cfm_v2r counter lives 120 s), so following the page's own advice is not a
 // second visit. Counting visits alone would close nothing, though: after the
@@ -77,9 +78,10 @@ const (
 )
 
 type v2PathsRejectState struct {
-	n     int // visits
-	first time.Time
-	last  time.Time // the last reject (any, counted or not)
+	n          int // visits
+	first      time.Time
+	visitStart time.Time // the current visit's first reject
+	last       time.Time // the last reject (any, counted or not)
 }
 
 var v2PathsRejects = struct {
@@ -116,7 +118,9 @@ func NoteChallengeV2PathsReject(s ChallengeSolve, now time.Time) V2PathsReject {
 	v2PathsRejects.mu.Lock()
 	defer v2PathsRejects.mu.Unlock()
 	st, had := v2PathsRejects.m[s.IP]
-	if had && now.Sub(st.first) > v2PathsRejectWindow {
+	// The window ends only between visits: a client failing without a pause
+	// would otherwise restart its count every hour, mid-visit, and never ban.
+	if had && now.Sub(st.first) > v2PathsRejectWindow && now.Sub(st.last) >= v2PathsRejectVisitGap {
 		st, had = v2PathsRejectState{}, false
 	}
 	if !had {
@@ -131,14 +135,17 @@ func NoteChallengeV2PathsReject(s ChallengeSolve, now time.Time) V2PathsReject {
 			}
 		}
 		st.first = now
-	} else if now.Sub(st.last) < v2PathsRejectVisitGap {
-		// The page's retry of the same visit.
+	} else if now.Sub(st.last) < v2PathsRejectVisitGap && now.Sub(st.visitStart) < v2PathsRejectVisitGap {
+		// The page's retry of the same visit, or its reload.
 		st.last = now
 		v2PathsRejects.m[s.IP] = st
 		return V2PathsReject{Visits: st.n}
 	}
+	// A new visit: after a pause of v2PathsRejectVisitGap, or once the
+	// current one has gone on that long (a crawler failing on page after
+	// page without a pause is not one endless visit).
 	st.n++
-	st.last = now
+	st.last, st.visitStart = now, now
 	if st.n >= limit {
 		delete(v2PathsRejects.m, s.IP)
 		return V2PathsReject{Visits: st.n, NewVisit: true, Ban: true}

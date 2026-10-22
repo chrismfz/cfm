@@ -582,8 +582,14 @@ already opened.
             so every reject HOLDS the malpath challenge (mark and
             revocation with it) for an hour (`HoldChallengeIP`: no
             self-post, never over a block), a later shorter challenge no
-            longer shortens a malpath one (`malpathFloorLocked`, `putFor`),
-            a web solve resets the count, and a second failed visit
+            longer shortens a malpath one (`bridgeIPEntry.HoldUntil`,
+            carried by `withMalpathHoldLocked` across every later
+            challenge write whatever its reason; `putFor` for the mark), a
+            visit that goes on for 10m without a pause counts as a new one
+            (a crawler failing page after page is banned too), holds live
+            outside the bridge (`malpathHolds`) and are restored after a
+            config reload (`RestoreMalpathHolds`), a web solve ends the
+            hold, the mark and the count, and a second failed visit
             asks the webdetector sink for a ban
             (`WEB/CHALLENGE_V2_MALPATH_REJECT`: the BLOCK policy, the edge
             ban, the notification, DRY_RUN).

@@ -786,7 +786,7 @@ per-IP challenge; the challenge page must not wave a revoked cookie through
 either; `CHALLENGE_PATHS_REVOKE`), and its failed visits (rejects 10+ min
 apart, never raw rejects: the page retries, and its give-up text asks for a
 reload) hold the challenge for an hour (no later challenge may shorten a
-malpath one: `malpathFloorLocked`), then ban (`CHALLENGE_V2_PATHS_REJECT_BAN`, malpath-marked IPs only: the
+malpath one: `HoldUntil`, `withMalpathHoldLocked`; holds survive a config reload, a solve ends them), then ban (`CHALLENGE_V2_PATHS_REJECT_BAN`, malpath-marked IPs only: the
 other grains' rejects are site owners' own bots and arm-held farms).
 An unblock clears every rung mark on the IP (`clearChallengeV2Marks`).
 Making webdriver / headless UA reject at every tier was measured and

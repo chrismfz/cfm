@@ -18,8 +18,9 @@ func resetV2PathsRejects(t *testing.T) {
 }
 
 // Only a web-scope reject from a malpath-marked IP counts. It counts visits
-// (the page's retries within a minute are one); the first failed visit asks
-// for the hold, the second within the window for the ban, once.
+// (the page's retries and its reload, within v2PathsRejectVisitGap, are
+// one); every counted reject asks for the hold, the second visit within the
+// window for the ban, once.
 func TestChallengeV2PathsRejectBan(t *testing.T) {
 	resetChallengeV2Marks(t)
 	resetV2PathsRejects(t)
@@ -43,7 +44,7 @@ func TestChallengeV2PathsRejectBan(t *testing.T) {
 		t.Fatalf("a panel-scope reject counted: %+v", r)
 	}
 	// First visit: the page's retries, and the reload its give-up text asks
-	// for a minute later, are one visit; each refreshes the hold.
+	// for ("wait a minute"), are one visit; each refreshes the hold.
 	if r := at(0); r.Visits != 1 || !r.NewVisit || !r.Hold() || r.Ban {
 		t.Fatalf("first reject: %+v, want visit 1 with a hold", r)
 	}
@@ -122,12 +123,21 @@ func TestHoldChallengeIP(t *testing.T) {
 	if !b.HoldChallengeIP(ip, time.Hour) {
 		t.Fatalf("no hold")
 	}
-	// A detector's 10m re-challenge and a WAF challenge push over it.
+	// A detector's 10m re-challenge, then TWO WAF challenge pushes and an
+	// unrelated detector challenge over it (a floor keyed on the reason was
+	// undone by the second write).
 	b.ChallengeIPWithReason(ip, 10*time.Minute, "CHALLENGE_PATHS")
 	b.mu.Lock()
 	b.ipState[ip] = b.pushedIPEntryLocked(ip, "challenge", time.Now().Add(5*time.Minute), "WAF_XSS", 302)
+	b.ipState[ip] = b.pushedIPEntryLocked(ip, "challenge", time.Now().Add(5*time.Minute), "WAF_XSS", 302)
+	b.mu.Unlock()
+	b.ChallengeIPWithReason(ip, 5*time.Minute, "CHALLENGE_ERR_RATIO")
+	b.mu.Lock()
 	e := b.ipState[ip]
 	b.mu.Unlock()
+	if e.Reason != "CHALLENGE_ERR_RATIO" {
+		t.Fatalf("the hold hid what challenged the client: reason %q", e.Reason)
+	}
 	if time.Until(e.Expires) < 59*time.Minute {
 		t.Fatalf("a later challenge shortened the hold to %v", time.Until(e.Expires))
 	}
@@ -159,5 +169,65 @@ func TestHoldChallengeIP(t *testing.T) {
 	v2PathsRejects.mu.Unlock()
 	if counted {
 		t.Fatalf("a solve left the reject count")
+	}
+}
+
+// A client that fails without ever pausing is not one endless visit: once its
+// visit has gone on for v2PathsRejectVisitGap, the next reject is the second
+// visit, and the window never restarts mid-visit.
+func TestChallengeV2PathsRejectBanContinuousFailer(t *testing.T) {
+	resetChallengeV2Marks(t)
+	resetV2PathsRejects(t)
+	const ip = "203.0.113.140"
+	markChallengeV2Path(ip, 6*time.Hour)
+	now := time.Now()
+	rej := ChallengeSolve{IP: ip, Scope: "web"}
+	banned := false
+	for m := 0; m <= 30; m += 5 {
+		if r := NoteChallengeV2PathsReject(rej, now.Add(time.Duration(m)*time.Minute)); r.Ban {
+			banned = true
+			if m != 10 {
+				t.Fatalf("banned at +%dm, want +10m (the visit's age reached the gap)", m)
+			}
+			break
+		}
+	}
+	if !banned {
+		t.Fatalf("a reject every 5 minutes never banned")
+	}
+}
+
+// A hold survives a config reload (a new bridge): RestoreMalpathHolds puts it
+// back; a solve ends it, its mark with it, and nothing is restored after.
+func TestMalpathHoldSurvivesReload(t *testing.T) {
+	resetChallengeV2Marks(t)
+	resetV2PathsRejects(t)
+	t.Cleanup(func() { malpathHolds.deleteWhere(func(string) bool { return true }) })
+	const ip = "203.0.113.141"
+	old := NewNginxBridge("/tmp/cfm-test-v2-hold.sock", "tok", time.Minute, time.Minute)
+	if !old.HoldChallengeIP(ip, time.Hour) {
+		t.Fatalf("no hold")
+	}
+	fresh := NewNginxBridge("/tmp/cfm-test-v2-hold.sock", "tok", time.Minute, time.Minute)
+	if n := fresh.RestoreMalpathHolds(); n != 1 {
+		t.Fatalf("restored %d holds, want 1", n)
+	}
+	if a, _ := fresh.GetIPDecision(ip); a != "challenge" || !fresh.ClearanceRevoked(ip) {
+		t.Fatalf("after a reload: decision %q, revoked %v", a, fresh.ClearanceRevoked(ip))
+	}
+	fresh.mu.RLock()
+	left := time.Until(fresh.ipState[ip].Expires)
+	fresh.mu.RUnlock()
+	if left < 59*time.Minute {
+		t.Fatalf("the restored hold has %v left", left)
+	}
+
+	fresh.ClearIP(ip) // solved
+	if _, ok := challengeV2PathMarks.get(ip, time.Now()); ok {
+		t.Fatalf("a solve left the malpath mark")
+	}
+	again := NewNginxBridge("/tmp/cfm-test-v2-hold.sock", "tok", time.Minute, time.Minute)
+	if n := again.RestoreMalpathHolds(); n != 0 {
+		t.Fatalf("a solved hold came back after a reload (%d)", n)
 	}
 }

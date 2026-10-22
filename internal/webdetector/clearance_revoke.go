@@ -42,7 +42,9 @@ import (
 // still listing a solved client drops its copy on the spot. Web scope only:
 // panel okState and panel touches are untouched (the malpath challenge is
 // web-only). A config reload builds a new bridge with an empty list and a new
-// epoch (newClearanceRevokeEpoch), like the rest of the bridge state.
+// epoch (newClearanceRevokeEpoch), like the rest of the bridge state; the
+// v2-reject holds are restored on it (RestoreMalpathHolds) with their
+// revocations, a plain malpath challenge is not (no per-IP challenge is).
 //
 // Residuals (HONEST LIMITS in challenge_v2.go): the edge learns of a
 // revocation on its next poll (~5 s, plus the log-driven detector's own lag),
@@ -102,9 +104,21 @@ func (b *NginxBridge) revokeClearanceLocked(ip string, until, now time.Time) {
 			return
 		}
 	}
-	if !had || until.After(cur) {
+	wasLive := had && cur.After(now)
+	if !wasLive || until.After(cur) {
 		b.clrRevoked[ip] = until
-		b.clrRevokeVer++
+		// The edge list carries seconds left, so an extension changes
+		// nothing it acts on until the old time nears: only a new entry, or
+		// one moved by more than a minute, makes every edge refetch the list
+		// (every reject of a held client extends it).
+		if !wasLive || until.Sub(cur) > time.Minute {
+			b.clrRevokeVer++
+		}
+	}
+	if wasLive {
+		// okState was dropped when the revocation began, and no touch could
+		// write it back since: skip the O(okState) scan on every reject.
+		return
 	}
 	// Web scope only: the panel cookie is not revoked (the malpath
 	// challenge, its marks and its release are web-only).

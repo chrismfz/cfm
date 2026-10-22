@@ -71,15 +71,15 @@ func (b *NginxBridge) ForceUnblock(ip string) unblock.WAFResult {
 	//    in-memory okState bypass is only cleared by ClearIP when OkIPTTL==0;
 	//    leaving it is harmless — it suppresses re-challenging, it never
 	//    blocks.)
-	b.ClearIP(ip)
-
-	// 2b) The ChallengeV2 rung marks (per-IP WAF / malpath, per-(ip,host)
-	//     traffic rule): left behind, the client's next challenge within a
-	//     mark's TTL would run at v2 again. (ClearIP above also ended a
-	//     malpath challenge's clearance revocation.)
+	//    First the ChallengeV2 rung marks (per-IP WAF / malpath, per-(ip,host)
+	//    traffic rule): left behind, the client's next challenge within a
+	//    mark's TTL would run at v2 again. Counted before ClearIP, which drops
+	//    the malpath mark itself; ClearIP also ends a malpath challenge's
+	//    clearance revocation and its v2-reject hold.
 	if n := clearChallengeV2Marks(ip); n > 0 {
 		res.Cleared = append(res.Cleared, unblock.WAFFinding{Plane: "challenge_v2_mark", Detail: fmt.Sprintf("%d mark(s)", n)})
 	}
+	b.ClearIP(ip)
 
 	// 3) Purge the per-IP shared-dict caches inside nginx.
 	purged, err := b.purgeShared(ip)

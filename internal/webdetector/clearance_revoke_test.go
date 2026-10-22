@@ -295,3 +295,25 @@ func TestDecisionCarriesClearanceRevokedAndPanelUntouched(t *testing.T) {
 		t.Fatalf("after the solve: clrrv=%v", d["clrrv"])
 	}
 }
+
+// Every reject of a held client extends the revocation: only a new entry or a
+// move of more than a minute changes the version the edge polls by.
+func TestClearanceRevokeVersionOnlyOnRealChange(t *testing.T) {
+	b := NewNginxBridge("/tmp/cfm-test-clrrv.sock", "tok", time.Minute, time.Minute)
+	now := time.Now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.revokeClearanceLocked("203.0.113.150", now.Add(time.Hour), now)
+	v := b.clrRevokeVer
+	b.revokeClearanceLocked("203.0.113.150", now.Add(time.Hour+30*time.Second), now.Add(30*time.Second))
+	if b.clrRevokeVer != v {
+		t.Fatalf("a 30s extension changed the version")
+	}
+	if !b.clrRevoked["203.0.113.150"].Equal(now.Add(time.Hour + 30*time.Second)) {
+		t.Fatalf("the extension was not recorded")
+	}
+	b.revokeClearanceLocked("203.0.113.150", now.Add(2*time.Hour), now)
+	if b.clrRevokeVer == v {
+		t.Fatalf("an hour's extension did not change the version")
+	}
+}

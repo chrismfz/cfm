@@ -45,11 +45,12 @@ back-filled here — see the git/PR history for that period.
   walked back in, not challenged again for the 45-minute cooldown. Now each
   failed solve holds the malpath challenge for an hour (a later, shorter
   challenge no longer cuts it short), and a second failed visit in that
-  hour (rejects 10+ minutes apart; the page's retries and a reload are one
-  visit) raises `WEB/CHALLENGE_V2_MALPATH_REJECT`, which the webdetector
+  hour (rejects 10+ minutes apart, or 10 minutes into one that never
+  pauses; the page's retries and a reload are one visit) raises `WEB/CHALLENGE_V2_MALPATH_REJECT`, which the webdetector
   section blocks per its BLOCK policy (edge ban and notification included;
-  DRY_RUN applies). A person sharing the address passes by solving, which
-  also starts the count over. Only IPs the malpath challenge marked
+  DRY_RUN applies). The hold survives a config reload. A person sharing
+  the address passes by solving, which ends the hold and starts the count
+  over. Only IPs the malpath challenge marked
   count. `[webdetector]
   CHALLENGE_V2_PATHS_REJECT_BAN` sets the visits (default 2); 0 turns it
   off.
