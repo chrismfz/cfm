@@ -1663,6 +1663,9 @@ local function auth_endpoint_tag(uri, method)
   method = lower(method or "get")
 
   if has(uri, "/wp-login.php") then return "AUTH_WP_LOGIN" end
+  -- phpMyAdmin's index.php serves every action; only a POST carrying
+  -- pma_password (its login form) counts, so not login-only.
+  if has(uri, "phpmyadmin") and method == "post" then return "AUTH_PHPMYADMIN" end
   if has(uri, "/xmlrpc.php")   then return "AUTH_WP_XMLRPC" end
   if has(uri, "/user/login") then return "AUTH_DRUPAL_LOGIN" end
 
@@ -1715,7 +1718,7 @@ end
 
 -- The password field names a login form posts, as PHP registers them
 -- (php_var_name): WordPress `pwd`, Drupal `pass`, Joomla `passwd`, OpenCart
--- and most custom forms `password`; plus `login`, Magento's login[username] +
+-- and most custom forms `password`, phpMyAdmin `pma_password`; plus `login`, Magento's login[username] +
 -- login[password] array, read only on its admin route.
 -- waf_body_max_len as cfm.lua reads it (cfm_cfg.lua), like XMLRPC_HIDDEN_LEN.
 local AUTH_BODY_CUT = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "") or 32768
@@ -1731,7 +1734,8 @@ local function body_was_cut(body, headers)
   return #body >= AUTH_BODY_CUT or clen > #body or (body == "" and clen_raw == nil)
 end
 local AUTH_QUERY_FIELDS = { route = true, _format = true }
-local AUTH_PASSWORD_FIELDS = { pwd = true, pass = true, passwd = true, password = true, login = true }
+local AUTH_PASSWORD_FIELDS = { pwd = true, pass = true, passwd = true, password = true, login = true,
+                               pma_password = true }
 
 -- Rule 501 counts credential SUBMISSIONS: a POST to a login endpoint that
 -- carries a password field, read the way PHP reads the body

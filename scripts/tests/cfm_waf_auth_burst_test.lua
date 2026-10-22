@@ -73,6 +73,7 @@ do
     { "OpenCart",    { uri = "/admin/index.php", args = "route=common/login", body = "username=admin&password=guess" } },
     { "Magento",     { uri = "/admin/admin/index/index/", body = "form_key=x&login%5Busername%5D=admin&login%5Bpassword%5D=guess" } },
     { "generic",     { uri = "/account/login", body = "email=a%40b.c&password=guess" } },
+    { "phpMyAdmin",   { uri = "/phpMyAdmin/index.php", args = "route=/", body = "set_session=x&pma_username=root&pma_password=guess&server=1&token=y" } },
   }
   for _, c in ipairs(cases) do
     local a = burst(9, c[2])
@@ -84,6 +85,12 @@ do
     check(a == "challenge_v2", c[1] .. ": 9 proxied credential POSTs → 501 challenge_v2 (got " .. tostring(a) .. ")")
   end
   check(burst(7, { uri = "/wp-login.php", body = "log=admin&pwd=guess" }) == nil, "7 submissions: under the threshold")
+  -- phpMyAdmin's index.php serves every action: its saves and SQL queries
+  -- (no pma_password) never count, however many.
+  check(burst(20, { uri = "/phpmyadmin/index.php", args = "route=/sql", body = "db=x&sql_query=select+1&token=y" }) == nil,
+        "phpMyAdmin queries are not logins")
+  check(burst(20, { uri = "/phpmyadmin/index.php", body = "", clen = "40000" }) == nil,
+        "a big phpMyAdmin import (unread body) is not a login")
   -- No peer at all reads as direct.
   check(burst(9, { uri = "/wp-login.php", body = "log=admin&pwd=guess", peer = false }) == "challenge_v2", "no peer: direct, challenge_v2")
   -- Drupal's JSON login.

@@ -29,6 +29,10 @@ back-filled here — see the git/PR history for that period.
   `/wp-admin/` (except admin-ajax) and `/administrator/` paths, where editors
   and page builders post markup by design. Log-only: it blocks nothing, and
   its fleet hits decide whether it is ever promoted.
+- **phpMyAdmin logins count toward the login-burst rule (501).** Eight
+  `pma_password` submissions in 20 seconds from one IP to a `phpmyadmin` path
+  now get the same `challenge_v2` as a WordPress or Joomla login burst. Its
+  queries, saves and imports carry no password field and never count.
 - **The malpath challenge now runs at the ChallengeV2 tier.** An IP
   challenged for asking for a malpath (`/.env`, `/.git/config`, a wp-config
   backup, a webshell name; `CHALLENGE_PATHS`) can no longer clear that

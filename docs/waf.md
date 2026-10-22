@@ -1330,7 +1330,9 @@ the way PHP reads it (`php_request_fields`): WordPress `wp-login.php` `pwd`, Dru
 `/user/login` `pass`, Joomla `/administrator/index.php` `passwd`, OpenCart
 `/admin/index.php` and custom `…/login` forms `password` / `pass` / `pwd` / `passwd`,
 Magento's `login[username]` + `login[password]` (two `login` values) on any of those
-endpoints, or on its admin route (an `admin` path segment) alone. The query's `route` /
+endpoints, or on its admin route (an `admin` path segment) alone, and phpMyAdmin's login
+form (`pma_password` in a POST to a `phpmyadmin` path; since 2026-10-22 — its queries,
+saves and imports carry no password field and never count). The query's `route` /
 `_format` are read as PHP registers them in `$_GET` (`%5Fformat`, `.format`), the route
 after its leading blanks as OpenCart 4 trims it.
 A JSON body (by media type or a leading `{`) counts by one of those keys, its `\u00XX`
