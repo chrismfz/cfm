@@ -31,6 +31,15 @@ back-filled here — see the git/PR history for that period.
   challenge was considered and not done: unarmed, they are mostly the site
   owner's own tools (HubSpot, iubenda's cookie radar, the Plesk screenshot
   bot).
+- **More leaked-file probes are malpaths.** WordPress `debug.log`, SQL dump
+  names (`/database.sql`, `/dump.sql`, `*.sql.gz`, ...), config templates
+  (`*.php.example`, `*.php.dist`), schema files (`.dbml`) and Live Helper
+  Chat's `/cache/default.log` and `/doc/update_db/` now trigger the malpath
+  challenge (and count toward the malpath flood block). The same pentest
+  read three of them. In 15 hours of the fleet's edge logs about 700 IPs
+  asked for these on hundreds of sites, and not one was a real file. The
+  list is a conffile: a node whose `/etc/cfm/webdetector_malpaths.txt` was
+  edited gets the new entries as `.dpkg-dist` / `.rpmnew`.
 
 ## 2026.10.22
 
