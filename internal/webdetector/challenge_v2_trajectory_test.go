@@ -203,9 +203,11 @@ function mv(x, y, t, dx, dy, extra) {
 		if m["hid"] != float64(1) || hasAny(m, "ow", "oh") {
 			t.Fatalf("hidden page: %v", m)
 		}
-		m = run(t, "")
-		if hasAny(m, "hid") || m["ow"] != float64(1366) {
-			t.Fatalf("visible page: %v", m)
+		for _, vs := range []string{"undefined", "'visible'", "'prerender'"} {
+			m = run(t, "document.visibilityState = "+vs+";")
+			if hasAny(m, "hid") || m["ow"] != float64(1366) {
+				t.Fatalf("visibilityState %s: %v", vs, m)
+			}
 		}
 	})
 	t.Run("no events: no trajectory keys", func(t *testing.T) {

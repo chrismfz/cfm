@@ -1143,10 +1143,14 @@ the solve, not at load, and a page that is hidden then
 size is never a tell, so the same machine scores 90 and passes. It still
 posts at once, so a background tab finishes on its own and no PoW or POST
 resume token runs out (making the page wait until visible was reviewed and
-dropped for that). A headless farm reports a visible page, so the tell keeps
-its farm catch; a farm claiming hidden only withholds the size, which it can
-already do (D5b). `hid` is scored by nothing; the next read counts it on
-the walled class's fingerprint population.
+dropped for that). The farm catch is expected to hold but is NOT measured:
+headless Chrome reports a visible page, but a headful farm solving in
+minimized or background windows now sends `hid:1` and escapes `outer_zero`
+(read 3 counted ~57 000 farm rejects carrying it in a week). A farm claiming
+hidden only withholds the size, which it can already do (D5b). `hid` is
+scored by nothing; the next read counts it on the walled class's
+fingerprint population AND on the convicted farm fingerprints, and compares
+their `outer_zero` reject counts with read 3.
 
 **Who the deterministic-FP residual is (first read, 2026-09-29, before the
 release).** In a week of `would_v2` lines the likely-human would-rejects under

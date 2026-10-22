@@ -481,6 +481,12 @@ func TestHumanityHiddenPageSendsNoSize(t *testing.T) {
 	if got := (ChallengeSolve{sig: sig.sigFields()}).SignalSuffix(); !strings.HasSuffix(got, ",hid:1") {
 		t.Fatalf("hid not retained: %q", got)
 	}
+	// A forged hid gains nothing server-side: with a reported 0x0 the score
+	// and the rescue answer are unchanged.
+	sig = parseHumanityBody([]byte(fmt.Sprintf(body, `,"ow":0,"oh":0,"hid":1`)))
+	if hs, _ := scoreHumanity(sig, chrome109); hs != tellSWRenderer+tellOuterZero+ampNoInput {
+		t.Fatalf("hid with a reported 0x0: hs=%d", hs)
+	}
 	for _, v := range []string{"0", "2", "-1"} {
 		sig = parseHumanityBody([]byte(fmt.Sprintf(body, `,"hid":`+v)))
 		if strings.Contains((ChallengeSolve{sig: sig.sigFields()}).SignalSuffix(), "hid") {

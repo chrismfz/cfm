@@ -696,8 +696,9 @@ already opened.
             the same way until it gave up. So the page now reads the window
             size at POST time, and a hidden page sends none plus a log-only
             `hid:1` (an absent size is never a tell). The next read checks
-            whether that class is gone and counts `hid`; α is decided on
-            what remains.
+            whether that class is gone and counts `hid`, on humans and on the
+            convicted farm fingerprints (whose `outer_zero` catch must not
+            drop); α is decided on what remains.
 
           Weekly reads from 2026-10-06 are recorded in
           `docs/abuse-defense-progress.md`, not here; this plan keeps the
