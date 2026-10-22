@@ -1010,8 +1010,10 @@ device-claim group.
 Until now the vhost grain was armed only by a MANUAL arm at `rung=v2`. Since
 2026-09-29 an **automatic** vhost challenge runs at v2 too, when its source
 is in `[webdetector] CHALLENGE_V2_AUTO_VHOST` (default
-`suspicious_vhost,uniqpaths_short,under_attack`; `vhost_config` is opt-in,
-`off` arms none). Code: `challenge_v2_auto.go`.
+`suspicious_vhost,uniqpaths_short,under_attack,vhost_config`; `vhost_config`
+shipped opt-in and joined the default on 2026-10-22 after E4's three reads
+found only farm traffic failing under it; `off` arms none). Code:
+`challenge_v2_auto.go`.
 
 **Measured first (D3 exit contract).** The week after the hardware tells
 shipped (2026-09-23 → 09-29, 7 nodes, `src=` on every solve) sized the arm
@@ -1033,8 +1035,33 @@ reject is deterministic per device (a retry fails the same way), so
 what bounds it is the automatic challenge's LIFETIME — while the scorer keeps
 the vhost suspicious (plus holddown) or Under-Attack holds. That is not a
 fixed TTL: a vhost suspicious for days is at v2 for days, and the v1 pin is
-the per-vhost way out. The config list (permanent by nature) is therefore
-opt-in, and the fingerprint/geo policies stay explicit operator arms.
+the per-vhost way out. The config list (permanent by nature) was therefore
+opt-in; since 2026-10-22 it is in the default too, so on a listed host only
+the pin or the node knob bounds a false reject. The fingerprint/geo policies
+stay explicit operator arms.
+
+*vhost_config joins the default (2026-10-22, E4 closed).* The shipped
+`CHALLENGE_VHOST = webmail.*, whm.*, cpanel.*` makes this mostly the panel
+proxy subdomains, and a vhost arm covers every verify scope, so the panel
+ports' human-entry challenge on a listed host too. Measured over the 14 days
+to 2026-10-22, 7 nodes, solves with `src=vhost:vhost_config`: ~650 from
+Greek/Cypriot consumer ISPs on `webmail.` / `cpanel.` hosts, **0** of which
+would fail; the would-fails were convicted farms, a Google Cloud scanner
+(`ua_lie,sw_renderer,no_input`) and webdriver bots. That sample is GR/CY
+consumer ISPs only: foreign, mobile-carrier, corporate and VPN admins were
+not measured, and 0 of ~650 still allows up to ~0.5 % (rule of three), on
+hosts where the exposure has no TTL. The residual it carries:
+the pointer-less Windows Chrome/109 class E4 read 3 found walled (hs 130,
+`outer_zero` on every retry) would be walled on a listed host for good, not
+for an automatic challenge's lifetime. The hidden-page fix (`hid`, #1615,
+in the same release) is expected to clear it, since a minimized window no longer
+reports a 0x0 size; if the next read still finds it, that is the α question.
+Counting this arm's rejects: `autoSourceOrder` puts `vhost_config` last, so a
+listed host that is also suspicious logs `v2_via=auto:suspicious_vhost`; count
+`src=vhost:vhost_config` as well. A wildcard-listed host is noted only while
+it is in the tick's candidate set (the note lives 2-10 minutes), so the first
+solve after a long quiet spell can verify at v1 (fails open; the gate and
+every surface still agree).
 
 **One resolver** (`challengeV2VhostTier`) answers "what tier is this vhost
 at", for the verify gate AND every surface (vhost list/status, controls

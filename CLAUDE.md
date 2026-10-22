@@ -758,8 +758,11 @@ fingerprint policy, geo policy, a per-vhost v2 tier (a `rung=v2` MANUAL
 vhost challenge — arm-surfaces slice A: API/CLI/cfm-admin Tier picker;
 persisted with the challenge — or, since 2026-09-29, an AUTOMATIC vhost
 challenge whose source is in `CHALLENGE_V2_AUTO_VHOST`, default
-`suspicious_vhost,uniqpaths_short,under_attack` (a D5 amendment: TTL'd by
-the challenge, sized from the `src=` corpus first), overridable per vhost by
+`suspicious_vhost,uniqpaths_short,under_attack,vhost_config` (a D5 amendment:
+TTL'd by the challenge, sized from the `src=` corpus first — except
+`vhost_config`, the always-on list (by default the `webmail.*, whm.*, cpanel.*`
+panel subdomains, every verify scope), which joined on 2026-10-22 after E4
+with no TTL: its bound is the pin or the node knob), overridable per vhost by
 a persisted tier pin `v1|v2|auto`; a manual v1 arm never downgrades an
 automatic v2 — that was a scoped bypass of an operator's v2 pin; ONE
 resolver, `challengeV2VhostTier`, serves the gate and every surface — never

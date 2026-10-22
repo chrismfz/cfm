@@ -11,9 +11,11 @@ package webdetector
 // the scorer keeps the vhost suspicious (plus its holddown) or Under-Attack
 // holds, and ends with it. That is not a fixed TTL — a vhost that stays
 // suspicious for days stays at v2 for days — so the per-vhost v1 pin is the
-// way out, and the CHALLENGE_VHOST list (permanent by nature) is opt-in. So
-// the automatic sources arm v2 by default, and an operator can pin any host
-// back to v1 (or forward to v2).
+// way out. The CHALLENGE_VHOST list (permanent by nature) shipped opt-in for
+// that reason and joined the default on 2026-10-22 (DefaultChallengeV2AutoVhost):
+// there no lifetime bounds a false reject, only the operator's pin or the
+// node knob. So every automatic source arms v2 by default, and an operator
+// can pin any host back to v1 (or forward to v2).
 //
 // The ONE resolver is challengeV2VhostTier: the verify gate
 // (challengeV2HostArmedVia, wired in NewEngine) and every read surface (the vhost
@@ -86,11 +88,17 @@ func ChallengeV2AutoVhostSources() []string {
 	return append([]string(nil), autoSourceOrder[:]...)
 }
 
-// DefaultChallengeV2AutoVhost is the shipped CHALLENGE_V2_AUTO_VHOST: the two
-// score-driven challenges and Under-Attack. vhost_config (the operator's own
-// always-on list) is opt-in — it can be long-lived, which is exactly where a
-// deterministic false reject would stop being bounded.
-const DefaultChallengeV2AutoVhost = autoV2SuspiciousVhost + "," + autoV2UniqPathsShort + "," + autoV2UnderAttack
+// DefaultChallengeV2AutoVhost is the shipped CHALLENGE_V2_AUTO_VHOST: every
+// automatic source. vhost_config (the operator's own always-on
+// CHALLENGE_VHOST list) shipped opt-in, because it can be long-lived and a
+// deterministic false reject would stop being bounded there; it joined the
+// default on 2026-10-22 (operator decision, E4 closed): its would_v2 lines
+// were farm traffic in all three E4 reads (read 3: 16 931) with no
+// human-labelled line, after 0 of 780 likely-human solves would have failed
+// before shipping. A vhost on the list that must stay v1 takes a tier pin
+// (`cfm webtop challenge tier <vhost> v1`); the node-wide drop-back is a list
+// without it.
+const DefaultChallengeV2AutoVhost = autoV2SuspiciousVhost + "," + autoV2UniqPathsShort + "," + autoV2UnderAttack + "," + autoV2VhostConfig
 
 // ParseChallengeV2AutoVhost parses the CHALLENGE_V2_AUTO_VHOST list.
 // `off` (or none / 0 / -) anywhere in the list arms NOTHING and sets off —

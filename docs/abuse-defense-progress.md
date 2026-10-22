@@ -117,12 +117,15 @@
      not promote it: there is no actuator, and 20 of its 28 episodes this
      week were humans. Do not retire it: D3a, it is alive and nothing else
      names its datacenter scrapers.
-  4. Config decisions after E4: `vhost_config` in auto-v2; the shipped
-     `solver_farm` defaults; the orphan `HUMANITY_*` keys.
+  4. Config decisions after E4: `vhost_config` in auto-v2 (**decided
+     2026-10-22**, shipped with it); the orphan `HUMANITY_*` keys (decided:
+     operator cleanup); the shipped `solver_farm` defaults (open).
 - **Next read:** one week after the hidden-page fix (`hid`) and
   `vhost_config` in auto-v2 ship: does the walled class (Windows Chrome/109,
   hs 130 `sw_renderer,outer_zero,no_input`, six rejects then nothing) still
-  appear, and the first week of `v2_via=auto:vhost_config`. Also the
+  appear, and the first week of `v2_via=auto:vhost_config` (count
+  `src=vhost:vhost_config` too: a listed host that is also suspicious logs
+  `auto:suspicious_vhost`). Also the
   farm side of the same fix: the `hid:1` share and the `outer_zero` reject
   counts on the convicted farm fingerprints (`c28caa00`, `95070673`) against
   read 3.
