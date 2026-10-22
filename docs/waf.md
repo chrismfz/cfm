@@ -1053,6 +1053,15 @@ Current assignments:
                                        326  rule_java_deserialize
                                        327  rule_coinminer
                                        328  rule_log4shell
+                                       329  rule_php_object_injection
+                                       330  rule_xss_body           (logonly, 2026-10-22: explicit XSS markup in a POST
+                                                                    body — attribute breakout, a tag with an event handler,
+                                                                    <script, a javascript: URL; not for a logged-in WordPress
+                                                                    user, a request with Authorization, /wp-admin/ (not
+                                                                    admin-ajax / admin-post), /administrator/ or LHC's
+                                                                    /site_admin/; expected noise: other apps' admin areas
+                                                                    (OpenCart, PrestaShop, Drupal, WHMCS tickets); runs after
+                                                                    the 421-439 scanners so it never takes their headline)
 
 4xx — Upload / malware
   401  rule_upload_filename            405  rule_script_obfuscation
@@ -1325,7 +1334,9 @@ the way PHP reads it (`php_request_fields`): WordPress `wp-login.php` `pwd`, Dru
 `/user/login` `pass`, Joomla `/administrator/index.php` `passwd`, OpenCart
 `/admin/index.php` and custom `…/login` forms `password` / `pass` / `pwd` / `passwd`,
 Magento's `login[username]` + `login[password]` (two `login` values) on any of those
-endpoints, or on its admin route (an `admin` path segment) alone. The query's `route` /
+endpoints, or on its admin route (an `admin` path segment) alone, and phpMyAdmin's login
+form (`pma_password` in a POST to a `phpmyadmin` path; since 2026-10-22 — its queries,
+saves and imports carry no password field and never count). The query's `route` /
 `_format` are read as PHP registers them in `$_GET` (`%5Fformat`, `.format`), the route
 after its leading blanks as OpenCart 4 trims it.
 A JSON body (by media type or a leading `{`) counts by one of those keys, its `\u00XX`

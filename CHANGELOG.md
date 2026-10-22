@@ -18,6 +18,24 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **XSS in a POST body is now logged (rule 330, `WAF_XSS_BODY`, logonly).**
+  Rule 302 reads only the path and query string, so a stored-XSS payload
+  posted in a form field passed with no WAF line at all: on 2026-10-22 Live
+  Helper Chat's chat-start email field took `x" onmouseover="alert(…)"` and
+  it ran in the operator's browser. The new rule logs explicit markup in the
+  body: a quote breaking out of an attribute into an event handler, a tag
+  carrying an event handler (`<img onerror=`), a `<script` tag, a
+  `javascript:` URL followed by code. It skips logged-in WordPress users,
+  requests with an `Authorization` header (API clients, forms behind HTTP
+  basic auth) and the `/wp-admin/` (except admin-ajax and admin-post),
+  `/administrator/` and Live Helper Chat `/site_admin/` paths, where editors
+  and operators post markup by design. Other apps' admin areas (OpenCart,
+  PrestaShop, Drupal, WHMCS tickets with code) will show up in its log. Log-only: it blocks nothing, and
+  its fleet hits decide whether it is ever promoted.
+- **phpMyAdmin logins count toward the login-burst rule (501).** Eight
+  `pma_password` submissions in 20 seconds from one IP to a `phpmyadmin` path
+  now get the same `challenge_v2` as a WordPress or Joomla login burst. Its
+  queries, saves and imports carry no password field and never count.
 - **The malpath challenge now runs at the ChallengeV2 tier.** An IP
   challenged for asking for a malpath (`/.env`, `/.git/config`, a wp-config
   backup, a webshell name; `CHALLENGE_PATHS`) can no longer clear that
