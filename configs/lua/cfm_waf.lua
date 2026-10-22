@@ -91,7 +91,7 @@ local CFG = {
                                        -- served; FP cost unchanged (a real
                                        -- user's solve still passes — absence
                                        -- never convicts, D5b).
-  rule_xss_body        = "logonly",      -- explicit markup in a POST body (attribute breakout `" onmouseover=`, `<script` tag, `javascript:` in an attribute), not with a WordPress login cookie or on /wp-admin/ (not admin-ajax) or /administrator/. Visibility only: rule 302 reads the path and query, and a stored-XSS payload in a form field (LHC's chat email field, 2026-10-22) passed unseen. Logonly through burn-in; page builders and editors post markup legitimately.
+  rule_xss_body        = "logonly",      -- explicit markup in a POST body (attribute breakout `" onmouseover=`, `<script` tag, `javascript:` in an attribute, a tag carrying an event handler), not with a WordPress login cookie or an Authorization header, or on /wp-admin/ (not admin-ajax / admin-post) or /administrator/. Visibility only: rule 302 reads the path and query, and a stored-XSS payload in a form field (LHC's chat email field, 2026-10-22) passed unseen. Logonly through burn-in; page builders and editors post markup legitimately.
   rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
   rule_sqli_blind_lexical = "block", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted challenge→block 2026-08-23 after expanded fleet burn-in; prior 188/188 TP, 0 FP review (docs/waf.md)
   rule_sqli_union_variant = "challenge_v2",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; promoted logonly→challenge 2026-08-23, challenge→challenge_v2 2026-09-23 (pure sqlmap-style attack traffic; solves get the Rung-1 humanity gate) — docs/waf.md
@@ -1629,22 +1629,6 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 20b) XSS in the POST body (logonly, visibility) ───────────────────────
-  -- Explicit markup only (det.detect_xss_body), never for a logged-in
-  -- WordPress user or a CMS admin path (det.xss_body_admin_request): editors
-  -- and page builders post markup by design. The gate is an FP filter, not a
-  -- control (a junk login cookie skips it) — fine for a log-only rule.
-  do
-    local mode = rule_mode(CFG.rule_xss_body, "logonly")
-    if mode ~= "disabled" and body_inspect_ok and not det.xss_body_admin_request(uri, cookie) then
-      local tag = det.detect_xss_body(get_norm_body())
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_XSS_BODY:" .. tag, ttl, mode, RULE_IDS.rule_xss_body) then goto done end
-      end
-    end
-  end
-
   -- ── 21) SQLi (+ SQL comment bypass) ──────────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_sqli, "challenge")
@@ -2445,6 +2429,26 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_BACKDOOR:" .. tag, ttl, mode, RULE_IDS.rule_php_numeric_xor_obfuscation) then goto done end
+      end
+    end
+  end
+
+  -- ── 60b) XSS in the POST body (330, logonly, visibility) ──────────────────
+  -- Late on purpose: among logonly hits the FIRST recorded owns the headline
+  -- (record() replaces it only on a higher severity) and the push window, so
+  -- here it never takes them from the dropper / backdoor scanners above (a
+  -- webshell with an HTML UI posts markup too). 612 stays last.
+  -- Explicit markup only (det.detect_xss_body), never for a logged-in
+  -- WordPress user or a CMS admin path (det.xss_body_admin_request): editors
+  -- and page builders post markup by design. The gate is an FP filter, not a
+  -- control (a junk login cookie skips it) — fine for a log-only rule.
+  do
+    local mode = rule_mode(CFG.rule_xss_body, "logonly")
+    if mode ~= "disabled" and body_inspect_ok and not det.xss_body_admin_request(uri, cookie, headers) then
+      local tag = det.detect_xss_body(get_norm_body())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_XSS_BODY:" .. tag, ttl, mode, RULE_IDS.rule_xss_body) then goto done end
       end
     end
   end

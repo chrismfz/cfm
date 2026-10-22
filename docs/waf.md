@@ -1057,7 +1057,9 @@ Current assignments:
                                        330  rule_xss_body           (logonly, 2026-10-22: explicit XSS markup in a POST
                                                                     body — attribute breakout, a tag with an event handler,
                                                                     <script, a javascript: URL; not for a logged-in WordPress
-                                                                    user, /wp-admin/ (not admin-ajax) or /administrator/)
+                                                                    user, a request with Authorization, /wp-admin/ (not
+                                                                    admin-ajax / admin-post) or /administrator/; runs after
+                                                                    the 421-439 scanners so it never takes their headline)
 
 4xx — Upload / malware
   401  rule_upload_filename            405  rule_script_obfuscation

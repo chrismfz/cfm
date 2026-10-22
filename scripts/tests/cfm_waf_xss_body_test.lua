@@ -68,6 +68,15 @@ fires(post("url=%22+href%3D%22javascript:alert(1)"), "JS_URI", "javascript: href
 fires(post("--b\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nx\" onclick=\"alert(1)\r\n--b--\r\n",
   { ct = "multipart/form-data; boundary=b" }), "ATTR_BREAKOUT", "multipart field")
 
+fires(post("comment=%3Cscript+src%3D%2F%2Fevil%2Fx.js%3E%3C%2Fscript%3E"), "SCRIPT_TAG",
+  "<script src=…> as a form posts it (blank as +)")
+fires(post("Email=x%22+autofocus+onfocus%3D%22alert(1)"), "ATTR_BREAKOUT",
+  "breakout with an attribute before the handler")
+fires(post("Email=x%22+onmouseover+%3Dalert(1)"), "ATTR_BREAKOUT", "`+` before the =")
+fires(post("Email=x%22+onclick%3D1", { uri = "/wp-admin/admin-post.php" }), "ATTR_BREAKOUT",
+  "anonymous admin-post (front-end forms post there) is scanned")
+clean(post("text=%22hi%22+then+online%3D1"), "a quoted word, then a non-handler on…=")
+
 -- ── Not markup ──────────────────────────────────────────────────────────────
 clean(post("Email=user%40example.com&Question=Hello%2C+I+need+help"), "an ordinary form")
 clean(post('{"onclick":"track","online":true}', { ct = "application/json" }), "a JSON key named like a handler")
@@ -93,6 +102,11 @@ clean(post(markup, { uri = "/wp-json/wp/v2/posts/12", cookie = "wordpress_logged
   "a logged-in WordPress user (REST editor)")
 clean(post(markup, { uri = "/wp-admin/post.php" }), "WordPress admin page")
 clean(post(markup, { uri = "/administrator/index.php" }), "Joomla administrator")
+do
+  local c = post(markup, { uri = "/wp-json/wc/v3/products" })
+  c.headers.authorization = "Basic Y2tfeDpjc195"
+  clean(c, "an API client (Authorization)")
+end
 fires(post(markup, { uri = "/wp-admin/admin-ajax.php" }), "TAG_HANDLER",
   "anonymous admin-ajax (front-end forms post there) is scanned")
 
@@ -102,6 +116,17 @@ check(det.detect_xss_body(nil) == nil and det.detect_xss_body("") == nil, "empty
 check(det.detect_xss_body("x\"+/onload=1") == "ATTR_BREAKOUT", "`+` and `/` between quote and handler")
 check(det.xss_body_admin_request("/wp-admin/admin-ajax.php", "") == false, "admin-ajax alone is not admin")
 check(det.xss_body_admin_request("/x", "a=1; WordPress_Logged_In_x=y") == true, "cookie name, any case")
+
+-- ── 330 runs late: among logonly hits the first recorded owns the headline,
+-- so it must follow the dropper / backdoor scanners (421-439) ──────────────
+do
+  local f = assert(io.open("configs/lua/cfm_waf.lua"))
+  local src = f:read("*a"); f:close()
+  local at = src:find("RULE_IDS.rule_xss_body", 1, true)
+  local s60 = src:find("── 60) Generic phpfuck", 1, true)
+  local last = src:find("── LAST) Fetch-metadata missing", 1, true)
+  check(at and s60 and last and s60 < at and at < last, "rule 330 sits after step 60 and before 612")
+end
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
