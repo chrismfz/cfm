@@ -176,3 +176,22 @@ func (s *pairTTLStore[V]) get(key string, now time.Time) (V, bool) {
 	}
 	return v, true
 }
+
+// deleteWhere drops every key match accepts (an operator unblock clearing an
+// IP's marks); it returns how many it dropped. O(n) under the write lock:
+// rare admin path only.
+func (s *pairTTLStore[V]) deleteWhere(match func(key string) bool) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for k := range s.m {
+		if match(k) {
+			delete(s.m, k)
+			if s.vals != nil {
+				delete(s.vals, k)
+			}
+			n++
+		}
+	}
+	return n
+}

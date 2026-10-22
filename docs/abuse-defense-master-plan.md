@@ -542,16 +542,39 @@ already opened.
           are strict). Review findings folded in: the bridge's own
           `/nginx/ip` echo erased every detector challenge's reason
           (`src=ip`, not `src=ip:CHALLENGE_PATHS`) — fixed
-          (`pushedIPEntryLocked`). Open, pre-existing: a rejected client
-          that waits out the decision is not re-challenged during the
-          sink's `CHALLENGE_COOLDOWN` (45m reference) — a repeated-v2_reject
-          escalation is the candidate follow-up. Also open: a client that
-          already holds a clearance cookie for the host returns at cfm.lua
-          Step 2b and never meets the malpath challenge there (the mark
-          bites only on a verify). Third review: cPanel's File Manager
+          (`pushedIPEntryLocked`). Third review: cPanel's File Manager
           viewer carries the file name in the path
           (`/cpsess<N>/viewer/…/backup.sql`), so `/cpsess<N>/` paths are
           skipped by both malpath matchers (`isCpanelSessionPath`).
+          Follow-ups, same day (the two holes the slice left open, plus
+          the unblock):
+          - **Clearance revocation** (`clearance_revoke.go`,
+            `CHALLENGE_PATHS_REVOKE`, default on). A client already holding
+            a clearance cookie returned at cfm.lua Step 2b and never met
+            the malpath challenge, and the bridge's solved-ok state
+            (`okState`) answered "allow" over a later per-IP challenge on
+            the decision path too. The malpath challenge now drops the
+            IP's okState, refuses ok-touches while it lives, and lists the
+            IP on `GET /nginx/clearance/revoked`. The edge polls the list
+            every ~5 s (`cfm_clearance.lua` `revoke_tick`, one worker,
+            only cleared requests start it), and Step 1 does not honour a
+            listed IP's cookie. A solve, `/nginx/ip/clear`, an unblock or
+            the challenge running out ends it.
+          - **Repeated v2_reject → ban** (`challenge_v2_paths_ban.go`,
+            `CHALLENGE_V2_PATHS_REJECT_BAN`, default 3 within 15m, 0 =
+            off). Fleet read first (5 nodes, the day's challenge logs): a
+            client's repeated rejects are the page's own retries (3-4
+            within ~20 s), under every grain, and include clients a site
+            owner runs (the Plesk screenshot bot under a traffic-rule
+            mark). So only a web-scope reject from an IP with a live
+            MALPATH mark counts; the threshold-th asks the webdetector
+            sink for a ban (`WEB/CHALLENGE_V2_MALPATH_REJECT`: the BLOCK
+            policy, the edge ban, the notification, DRY_RUN). It closes
+            the wait-out-the-10m-challenge hole for that client, which the
+            sink's `CHALLENGE_COOLDOWN` (45m) otherwise left open.
+          - **An unblock clears the rung marks** (`ForceUnblock` →
+            `clearChallengeV2Marks`): per-IP WAF and malpath marks, the
+            per-(ip,host) traffic-rule marks and the reject count.
 - [x] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.

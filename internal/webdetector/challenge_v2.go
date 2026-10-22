@@ -145,13 +145,17 @@ package webdetector
 //     confirm fallback carries, accepted over walling the humans out.
 //   - A per-IP mark (WAF or malpath) bites only on a client that reaches the
 //     verify. A client already holding a valid clearance cookie for the host
-//     returns at cfm.lua Step 2b before the bridge decision is read, so a
-//     clearance earned from an earlier v1 challenge walks past a later
-//     malpath challenge there. And a rejected client that waits out the
-//     decision (CHALLENGE_PATHS_TTL, 10m shipped) is not re-challenged
-//     while the sink's CHALLENGE_COOLDOWN holds. The mark raises the cost;
-//     it does not close those. Candidate follow-ups: a malpath challenge
-//     that invalidates the IP's clearance, and repeated v2_reject → ban.
+//     returns at cfm.lua Step 2b before the bridge decision is read. For the
+//     MALPATH challenge the cookie is revoked (clearance_revoke.go), but the
+//     edge learns of it on its next poll (~5 s, after the log-driven
+//     detector's own lag), so a fast scanner gets that many requests in;
+//     a WAF challenge_v2 hit on a cleared client is still downgraded at the
+//     edge (post_clearance_action), never revoked. A rejected client that
+//     waits out the malpath decision (CHALLENGE_PATHS_TTL, 10m shipped) is
+//     not re-challenged while the sink's CHALLENGE_COOLDOWN holds — unless
+//     it failed often enough to be banned (CHALLENGE_V2_PATHS_REJECT_BAN,
+//     challenge_v2_paths_ban.go); a client that gives up after fewer
+//     rejects walks back in after the TTL.
 
 import (
 	"context"
@@ -567,6 +571,24 @@ var challengeV2PathMarks = pairTTLStore[struct{}]{
 // for ttl (the decision's TTL; never shorter than challengeV2MarkTTL).
 func markChallengeV2Path(ip string, ttl time.Duration) {
 	challengeV2PathMarks.putFor(strings.TrimSpace(ip), struct{}{}, time.Now(), ttl)
+}
+
+// clearChallengeV2Marks drops every rung mark on ip: its per-IP WAF and
+// malpath marks and its per-(ip,host) traffic-rule marks, with the malpath
+// reject count (challenge_v2_paths_ban.go). An operator unblock
+// (ForceUnblock) means "let this client through": a mark left behind made
+// its next challenge, within the mark's TTL, a v2 one it could fail again.
+// It answers how many marks it dropped.
+func clearChallengeV2Marks(ip string) int {
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return 0
+	}
+	exact := func(k string) bool { return k == ip }
+	n := challengeV2IPMarks.deleteWhere(exact) + challengeV2PathMarks.deleteWhere(exact)
+	n += challengeV2Marks.deleteWhere(func(k string) bool { return strings.HasPrefix(k, ip+"|") })
+	forgetChallengeV2PathsRejects(ip)
+	return n
 }
 
 // challengeV2MarkCovers is the mark grain as the verify gate sees it: for a

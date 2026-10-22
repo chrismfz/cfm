@@ -13,6 +13,7 @@
 --   ds|<ip>|<host>|<scope>                     static-asset decision cache
 --   geo|<ip>                                   country-code cache (cfm_geocache dict; direct-deleted, F25)
 --   ok_touch|<ip>|<host>|<scope>               solved-IP touch gate
+--   clrrv|<ip>                                 clearance revoked by a malpath challenge
 --   wafpush|<family>[:<tag>|#<rule id>]|<action>|<ip>  WAF push cooldown (IP is the LAST field)
 --   panel_cooldown|<ip>|<host>                 panel challenge cooldown (cfm_panel)
 --   panel_ok|<ip>|<host>                       panel challenge passed/bypass
@@ -115,7 +116,7 @@ end
 
 -- purge_ip deletes all per-IP keys for `ip` and returns per-plane counts.
 function _M.purge_ip(ip)
-  local deleted = { throttle = 0, decision_cache = 0, geo = 0, ok_touch = 0, wafpush = 0, panel = 0 }
+  local deleted = { throttle = 0, decision_cache = 0, geo = 0, ok_touch = 0, wafpush = 0, panel = 0, clearance_revoke = 0 }
   local sh = ngx.shared[SHNAME]
   if not sh then
     return { ip = ip or "", deleted = deleted, scanned = 0, error = "shdict unavailable" }
@@ -170,6 +171,8 @@ function _M.purge_ip(ip)
       if parts[2] == ip then plane = "decision_cache" end
     elseif prefix == "ok_touch" then
       if parts[2] == ip then plane = "ok_touch" end
+    elseif prefix == "clrrv" then
+      if parts[2] == ip then plane = "clearance_revoke" end
     elseif prefix == "panel_ok" or prefix == "panel_cooldown" or prefix == "panel_loop" then
       -- cfm_panel.lua: panel_*|<ip>|<host>. panel_cooldown is active
       -- "stuck behind a challenge" state, so it must be cleared on unblock.

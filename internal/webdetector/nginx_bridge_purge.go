@@ -73,6 +73,14 @@ func (b *NginxBridge) ForceUnblock(ip string) unblock.WAFResult {
 	//    blocks.)
 	b.ClearIP(ip)
 
+	// 2b) The ChallengeV2 rung marks (per-IP WAF / malpath, per-(ip,host)
+	//     traffic rule): left behind, the client's next challenge within a
+	//     mark's TTL would run at v2 again. (ClearIP above also ended a
+	//     malpath challenge's clearance revocation.)
+	if n := clearChallengeV2Marks(ip); n > 0 {
+		res.Cleared = append(res.Cleared, unblock.WAFFinding{Plane: "challenge_v2_mark", Detail: fmt.Sprintf("%d mark(s)", n)})
+	}
+
 	// 3) Purge the per-IP shared-dict caches inside nginx.
 	purged, err := b.purgeShared(ip)
 	res.Cleared = append(res.Cleared, purged...)
@@ -142,7 +150,7 @@ func (b *NginxBridge) purgeShared(ip string) ([]unblock.WAFFinding, error) {
 	// Map non-zero per-plane counts to findings. The plane names mirror the
 	// shared-dict key namespaces in configs/lua/cfm_purge.lua.
 	findings := make([]unblock.WAFFinding, 0, len(pr.Deleted))
-	for _, plane := range []string{"throttle", "decision_cache", "geo", "ok_touch", "wafpush", "panel"} {
+	for _, plane := range []string{"throttle", "decision_cache", "geo", "ok_touch", "wafpush", "panel", "clearance_revoke"} {
 		if n := pr.Deleted[plane]; n > 0 {
 			detail := fmt.Sprintf("%d key", n)
 			if n != 1 {

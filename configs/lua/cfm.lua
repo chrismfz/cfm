@@ -1616,6 +1616,21 @@ end
 local clearance_scope = "web"
 local clearance_cookie = ngx.var.cookie_cfm_clearance
 local clearance_ok, clearance_status = validate_clearance_token(clearance_cookie, ip, host, clearance_scope)
+-- A malpath challenge revokes the IP's clearance (cfm_clearance.lua "Clearance
+-- revocation"): its cookie is not honoured while the daemon lists the IP, so
+-- the request takes the decision path (Step 3) and gets that challenge. Only a
+-- cleared request reads the list, and only one starts its poll. A module
+-- without these functions (upgrade lag) revokes nothing.
+if clearance_ok and SH and clearance_validator.revoked then
+  clearance_validator.revoke_tick("cfm_decisions", decision, cjson.decode)
+  if clearance_validator.revoked(SH, ip) then
+    clearance_ok, clearance_status = false, "revoked"
+    if not SH:get("clrrv_log|" .. ip) then
+      SH:set("clrrv_log|" .. ip, 1, 60)
+      log_ev(ngx.WARN, "[cfm] clearance_revoked ip=", ip, " host=", host, " uri=", uri)
+    end
+  end
+end
 if CFG.debug_headers then ngx.header["X-CFM-Clearance"] = clearance_status end
 -- A resumed POST (challenge replay) holding valid clearance is treated EXACTLY
 -- like any cleared client: the WAF still runs unconditionally in Step 2 (a solved

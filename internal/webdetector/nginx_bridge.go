@@ -19,6 +19,8 @@
 //   GET  /nginx/status      → NginxBridgeStatus (for cfm status / debug)
 //   GET  /nginx/edgeban?epoch=E&seq=N → the edge-ban changes since N, or the
 //                              whole list (cfm_edgeban.lua; edge_ban_feed.go)
+//   GET  /nginx/clearance/revoked?v=V → the IPs whose clearance a malpath
+//                              challenge revoked (cfm_clearance.lua; clearance_revoke.go)
 //
 // Lua polls these from the shared-dict server (cfm_decisions.lua) which
 // subscribes to the same socket.
@@ -87,6 +89,12 @@ type NginxBridge struct {
 	bypassFunc     func(string) bool        // set once at startup; no lock needed (written before serving starts)
 	hostBypassFunc func(string) bool        // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
 	stats          bridgeStatsState
+
+	// clrRevoked: ip → until, the IPs whose clearance a malpath challenge
+	// revoked (clearance_revoke.go); clrRevokeVer changes with it (the edge
+	// polls the list by version). Guarded by mu.
+	clrRevoked   map[string]time.Time
+	clrRevokeVer uint64
 
 	// goodBotExempt: when set (CHALLENGE_GOODBOT_EXEMPT, default on), a would-be
 	// challenge is downgraded to allow for an FCrDNS-verified good bot (it cannot
@@ -1136,6 +1144,11 @@ func (b *NginxBridge) ChallengeIPWithReason(ip string, ttl time.Duration, reason
 		reason, wafRuleID = cur.Reason, cur.WAFRuleID
 	}
 	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: reason, WAFRuleID: wafRuleID}
+	// A malpath challenge also revokes the IP's clearance (clearance_revoke.go):
+	// a client holding a cfm_clearance cookie would otherwise never see it.
+	if clearanceRevokeArms(reason) {
+		b.revokeClearanceLocked(ip, now.Add(ttl), now)
+	}
 	b.mu.Unlock()
 
 	// A malpath challenge runs at the v2 tier (challengeV2PathsArms), for as
@@ -1328,6 +1341,7 @@ func (b *NginxBridge) ClearIPScoped(ip, host, scope string) {
 
 	b.mu.Lock()
 	delete(b.ipState, ip)
+	b.unrevokeClearanceLocked(ip)
 	if b.cfg.OkIPTTL > 0 {
 		if ip != "" && host != "" && scope != "" {
 			b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = time.Now().Add(b.cfg.OkIPTTL)
@@ -1853,6 +1867,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/events/batch", b.instrument("/nginx/events/batch", b.handleEventsBatch))
 	mux.HandleFunc("/nginx/fppolicy", b.instrument("/nginx/fppolicy", b.handleFpPolicy))
 	mux.HandleFunc("/nginx/edgeban", b.instrument("/nginx/edgeban", b.handleEdgeBan))
+	mux.HandleFunc("/nginx/clearance/revoked", b.instrument("/nginx/clearance/revoked", b.handleClearanceRevoked))
 
 	srv := newBridgeHTTPServer(mux)
 
@@ -2643,6 +2658,7 @@ func (b *NginxBridge) handleIPClear(w http.ResponseWriter, r *http.Request) {
 
 	b.mu.Lock()
 	delete(b.ipState, msg.IP)
+	b.unrevokeClearanceLocked(msg.IP)
 	b.mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)
@@ -2743,6 +2759,14 @@ func (b *NginxBridge) handleOKTouch(w http.ResponseWriter, r *http.Request) {
 	exp := now.Add(ttl)
 
 	b.mu.Lock()
+	// A revoked clearance (clearance_revoke.go) earns no solved-ok: the touch
+	// comes from a cookie the edge has not learned to refuse yet.
+	if b.clearanceRevokedLocked(ip, now) {
+		b.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "revoked": true})
+		return
+	}
 	b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = exp
 	b.mu.Unlock()
 
@@ -2905,7 +2929,9 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 			}
 			exp := now.Add(ttl)
 			b.mu.Lock()
-			b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = exp
+			if !b.clearanceRevokedLocked(ip, now) { // see handleOKTouch
+				b.okState[okStateKey{IP: ip, Host: host, Scope: scope}] = exp
+			}
 			b.mu.Unlock()
 			processed++
 

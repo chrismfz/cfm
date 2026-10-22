@@ -307,6 +307,29 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			// reject's log line is written by the challenge server itself.
 			webdet.SetChallengeV2RejectHook(func(s webdet.ChallengeSolve) {
 				w.eng.RecordChallengeV2Reject(s)
+				// A malpath-marked IP that keeps failing the rung is banned
+				// (CHALLENGE_V2_PATHS_REJECT_BAN): the section sink applies
+				// the BLOCK policy, the edge ban and the notification.
+				if n, ban := webdet.NoteChallengeV2PathsReject(s, time.Now()); ban {
+					sample := fmt.Sprintf("[challenge_v2_malpath_reject] ip=%s host=%s uri=%s rejects=%d hs=%d tells=%s", s.IP, s.Host, s.URI, n, s.HumanityScore, s.HumanityTells)
+					logging.LogfCHALLENGES("%s", sample)
+					w.enqueueExternal(core.Alert{
+						Kind:    "WEB/CHALLENGE_V2_MALPATH_REJECT",
+						Key:     s.IP,
+						When:    time.Now(),
+						Count:   n,
+						Samples: []string{sample},
+						Extra: map[string]string{
+							"ip":      s.IP,
+							"host":    s.Host,
+							"uri":     s.URI,
+							"rejects": fmt.Sprintf("%d", n),
+							"hs":      fmt.Sprintf("%d", s.HumanityScore),
+							"tells":   s.HumanityTells,
+							"reason":  "challenge_v2_malpath_reject",
+						},
+					})
+				}
 			})
 
 			// Hook WAF trigger events (from cfm_waf.lua via POST /nginx/ip)
@@ -996,6 +1019,10 @@ func init() {
 		webdet.ConfigureChallengeV2InputRescue(kvBool(kv, "CHALLENGE_V2_INPUT_RESCUE", true))
 		// The malpath (CHALLENGE_PATHS) challenge at the v2 tier; default on.
 		webdet.ConfigureChallengeV2Paths(kvBool(kv, "CHALLENGE_V2_PATHS", true))
+		// The malpath challenge also revokes the IP's clearance cookie; default on.
+		webdet.ConfigureClearanceRevoke(kvBool(kv, "CHALLENGE_PATHS_REVOKE", true))
+		// Rejects from a malpath-marked IP that ban it; 0 = off.
+		webdet.ConfigureChallengeV2PathsRejectBan(kvInt(kv, "CHALLENGE_V2_PATHS_REJECT_BAN", 3))
 
 		engine := webdet.NewEngine(cfg)
 

@@ -778,6 +778,14 @@ block, only block short-circuits; handleIPPush records the mark), and,
 since 2026-10-22, the per-IP malpath challenge (`CHALLENGE_PATHS`), per IP
 (slice E, `ChallengeIPWithReason`; `CHALLENGE_V2_PATHS = 0` turns it off:
 a HeadlessChrome scanner solved it at v1 and downloaded an app's storage).
+The malpath challenge also REVOKES the IP's clearance (the cookie is
+stateless, so the daemon lists the IP on `/nginx/clearance/revoked`, the edge
+polls it into `clrrv|<ip>` and cfm.lua Step 1 stops honouring the cookie;
+it drops the bridge's `okState`, which otherwise answered allow over a later
+per-IP challenge; `CHALLENGE_PATHS_REVOKE`), and its rejects escalate to a
+ban (`CHALLENGE_V2_PATHS_REJECT_BAN`, malpath-marked IPs only: the other
+grains' repeated rejects are the page's retries and site owners' own bots).
+An unblock clears every rung mark on the IP (`clearChallengeV2Marks`).
 Making webdriver / headless UA reject at every tier was measured and
 rejected: unarmed, they are mostly the site owner's own tools (HubSpot,
 iubenda, the Plesk screenshot bot). The WAF

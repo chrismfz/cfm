@@ -58,10 +58,12 @@ local function fresh_store()
     ["panel_cooldown|1.2.3.4|panel.example.com"] = "x",
     ["panel_ok|1.2.3.4|panel.example.com"]       = "x",
     ["panel_loop|1.2.3.4|panel.example.com"]     = "x",
+    ["clrrv|1.2.3.4"]                            = "x",
     -- Must SURVIVE (different IP, or victim IP only in a non-IP field):
     ["tr|soft_bot|example.com|9.9.9.9"]          = "x",
     ["wafpush|403waf_flood|9.9.9.9"]             = "x",
     ["panel_cooldown|9.9.9.9|panel.example.com"] = "x",
+    ["clrrv|9.9.9.9"]                            = "x",
     ["d|9.9.9.9|1.2.3.4|GET|https|/"]            = "x", -- victim IP as Host field
     -- Geo now lives in cfm_geocache (F25): a stray geo key in cfm_decisions
     -- (e.g. lingering from before an upgrade) is NO LONGER scanned/purged here.
@@ -78,6 +80,8 @@ check(r.deleted.geo == 1,            "geo should be 1 (deleted from cfm_geocache
 check(r.deleted.ok_touch == 1,       "ok_touch should be 1")
 check(r.deleted.wafpush == 1,        "wafpush should be 1 (IP is last field), got " .. tostring(r.deleted.wafpush))
 check(r.deleted.panel == 3,          "panel should be 3, got " .. tostring(r.deleted.panel))
+check(r.deleted.clearance_revoke == 1, "clearance_revoke should be 1, got " .. tostring(r.deleted.clearance_revoke))
+check(store["clrrv|9.9.9.9"] ~= nil, "other-IP clearance revoke must survive")
 
 check(geostore["geo|1.2.3.4"] == nil,                          "geo key must be deleted from cfm_geocache")
 check(store["geo|1.2.3.4"] ~= nil,                             "stray geo in cfm_decisions is no longer scanned/purged (F25: geo moved to cfm_geocache)")
