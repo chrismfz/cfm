@@ -585,8 +585,7 @@ func clearChallengeV2Marks(ip string) int {
 	if ip == "" {
 		return 0
 	}
-	exact := func(k string) bool { return k == ip }
-	n := challengeV2IPMarks.deleteWhere(exact) + challengeV2PathMarks.deleteWhere(exact)
+	n := challengeV2IPMarks.delete(ip) + challengeV2PathMarks.delete(ip)
 	n += challengeV2Marks.deleteWhere(func(k string) bool { return strings.HasPrefix(k, ip+"|") })
 	forgetChallengeV2PathsRejects(ip)
 	return n

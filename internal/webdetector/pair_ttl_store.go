@@ -183,9 +183,24 @@ func (s *pairTTLStore[V]) get(key string, now time.Time) (V, bool) {
 	return v, true
 }
 
+// delete drops key; it returns 1 if it was there (live or not), else 0.
+// O(1): a web solve ends an IP's malpath hold and mark through it.
+func (s *pairTTLStore[V]) delete(key string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.m[key]; !ok {
+		return 0
+	}
+	delete(s.m, key)
+	if s.vals != nil {
+		delete(s.vals, key)
+	}
+	return 1
+}
+
 // deleteWhere drops every key match accepts (an operator unblock clearing an
-// IP's marks); it returns how many it dropped. O(n) under the write lock:
-// rare admin path only.
+// IP's per-(ip,host) marks); it returns how many it dropped. O(n) under the
+// write lock: rare admin path only (exact keys go through delete).
 func (s *pairTTLStore[V]) deleteWhere(match func(key string) bool) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

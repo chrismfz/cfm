@@ -94,6 +94,7 @@ type NginxBridge struct {
 	// revoked (clearance_revoke.go); clrRevokeVer changes with it (the edge
 	// polls the list by version). Guarded by mu.
 	clrRevoked     map[string]time.Time
+	clrPublished   map[string]time.Time // ip → the until last published (a version bump)
 	clrRevokeVer   uint64
 	clrRevokeEpoch string
 
@@ -1265,9 +1266,8 @@ func (b *NginxBridge) HoldChallengeIP(ip string, ttl time.Duration) bool {
 // share it.
 func endMalpathHold(ip string) {
 	forgetChallengeV2PathsRejects(ip)
-	exact := func(k string) bool { return k == ip }
-	malpathHolds.deleteWhere(exact)
-	challengeV2PathMarks.deleteWhere(exact)
+	malpathHolds.delete(ip)
+	challengeV2PathMarks.delete(ip)
 }
 
 // malpathHolds remembers the live v2-reject holds by IP, outside any one
@@ -2321,8 +2321,10 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	if scope == "web" && b.clearanceRevokedLocked(ip, now) {
 		clrRevoked = 1
 	}
-	// Solved-ok: IP passed PoW recently for same host/scope.
-	if b.cfg.OkIPTTL > 0 {
+	// Solved-ok: IP passed PoW recently for same host/scope. Not while a
+	// malpath challenge revokes the IP's (web) clearance: the solved-ok state
+	// predates it and answered "allow" over that challenge (clearance_revoke.go).
+	if b.cfg.OkIPTTL > 0 && clrRevoked == 0 {
 		k := okStateKey{IP: ip, Host: host, Scope: scope}
 		if exp, ok := b.okState[k]; ok && exp.After(now) {
 			vhAction = "allow"

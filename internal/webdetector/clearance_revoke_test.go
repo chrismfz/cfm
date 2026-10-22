@@ -316,4 +316,14 @@ func TestClearanceRevokeVersionOnlyOnRealChange(t *testing.T) {
 	if b.clrRevokeVer == v {
 		t.Fatalf("an hour's extension did not change the version")
 	}
+	// Small extensions add up against what the edge was last sent, not the
+	// last extension: 20 of 30s each must bump the version.
+	v = b.clrRevokeVer
+	base := now.Add(2 * time.Hour)
+	for i := 1; i <= 20; i++ {
+		b.revokeClearanceLocked("203.0.113.150", base.Add(time.Duration(i)*30*time.Second), now)
+	}
+	if b.clrRevokeVer == v {
+		t.Fatalf("10 minutes of 30s extensions never told the edge")
+	}
 }

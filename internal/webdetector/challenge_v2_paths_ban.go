@@ -45,7 +45,11 @@ import (
 // through by solving; one who cannot (no real input, a score above the
 // rescue cap) stays challenged for the hour, and banned if they leave for
 // more than v2PathsRejectVisitGap and fail again — the accepted cost on an
-// address that asked for /.env-class paths.
+// address that asked for /.env-class paths. A block over a hold (a WAF
+// block push) replaces it: once that block runs out, the IP is no longer
+// challenged although its mark and revocation may still live (the block
+// was the stronger answer; a config reload restores the hold). The holds
+// survive a config reload, not a daemon restart: all of this is in memory.
 //
 // [webdetector] CHALLENGE_V2_PATHS_REJECT_BAN = the failed visits within
 // v2PathsRejectWindow that ban (default 2; 0 = off, and no hold either).

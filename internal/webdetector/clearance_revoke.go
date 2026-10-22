@@ -22,19 +22,24 @@ import (
 // A per-IP challenge whose reason revokes (clearanceRevokeArms: the malpath
 // challenge, CHALLENGE_PATHS, while [webdetector] CHALLENGE_PATHS_REVOKE is
 // on) therefore also:
-//   - drops the IP's okState on every host, and refuses an ok-touch for it
-//     while the revocation lives (a touch from a cookie the edge has not yet
-//     learned to refuse would write it back);
+//   - stops its web okState from answering (handleDecision skips the
+//     solved-ok check for a revoked IP; deleting it scanned all of okState
+//     under the write lock for every newly revoked IP), and refuses a web
+//     ok-touch for it while the revocation lives;
 //   - lists the IP on GET /nginx/clearance/revoked, which the edge polls
 //     every few seconds (cfm_clearance.lua revoke_tick) into its decisions
 //     dict. cfm.lua Step 1 does not honour a clearance cookie for a listed
 //     IP, so the request takes the decision path and gets the challenge.
 //
-// The revocation lives as long as the challenge (it is extended with it) and
+// The revocation lives as long as the challenge (it is extended with it,
+// and with the v2-reject hold: up to an hour after the last reject) and
 // ends with it: a solve (ClearIPScoped, the web-scope solve's release), an
 // /nginx/ip/clear and a force unblock remove it. After a solve the client's
 // new cookie is honoured again once the edge's next poll drops the IP; until
-// then the decision path answers allow (the solve cleared the challenge).
+// then the decision path answers allow (the solve cleared the challenge) —
+// and under a vhost-wide challenge that request is sent through the
+// challenge page once more, which waves the now unrevoked cookie back to
+// next (one extra round trip, accepted).
 // Per IP, like the challenge: the cookie is per host, the challenge is not.
 //
 // The challenge page (challenge_server.go) does not count a revoked web
@@ -45,6 +50,8 @@ import (
 // epoch (newClearanceRevokeEpoch), like the rest of the bridge state; the
 // v2-reject holds are restored on it (RestoreMalpathHolds) with their
 // revocations, a plain malpath challenge is not (no per-IP challenge is).
+// All of it is in memory: a daemon restart (`systemctl reload cfm` is one)
+// drops the list, the holds and the marks, failing open.
 //
 // Residuals (HONEST LIMITS in challenge_v2.go): the edge learns of a
 // revocation on its next poll (~5 s, plus the log-driven detector's own lag),
@@ -98,6 +105,7 @@ func (b *NginxBridge) revokeClearanceLocked(ip string, until, now time.Time) {
 		for k, u := range b.clrRevoked {
 			if !u.After(now) {
 				delete(b.clrRevoked, k)
+				delete(b.clrPublished, k)
 			}
 		}
 		if len(b.clrRevoked) >= clearanceRevokeMax {
@@ -108,29 +116,27 @@ func (b *NginxBridge) revokeClearanceLocked(ip string, until, now time.Time) {
 	if !wasLive || until.After(cur) {
 		b.clrRevoked[ip] = until
 		// The edge list carries seconds left, so an extension changes
-		// nothing it acts on until the old time nears: only a new entry, or
-		// one moved by more than a minute, makes every edge refetch the list
-		// (every reject of a held client extends it).
-		if !wasLive || until.Sub(cur) > time.Minute {
+		// nothing it acts on until the time it was last told nears: only a
+		// new entry, or one more than a minute past what the edge was last
+		// sent, makes every edge refetch the list (every reject of a held
+		// client extends it). Compared with the last PUBLISHED until, not
+		// the last extension, or extensions under a minute added up unseen.
+		if b.clrPublished == nil {
+			b.clrPublished = make(map[string]time.Time)
+		}
+		if pub, ok := b.clrPublished[ip]; !wasLive || !ok || until.Sub(pub) > time.Minute {
 			b.clrRevokeVer++
+			b.clrPublished[ip] = until
 		}
 	}
-	if wasLive {
-		// okState was dropped when the revocation began, and no touch could
-		// write it back since: skip the O(okState) scan on every reject.
-		return
-	}
-	// Web scope only: the panel cookie is not revoked (the malpath
-	// challenge, its marks and its release are web-only).
-	for k := range b.okState {
-		if k.IP == ip && k.Scope == "web" {
-			delete(b.okState, k)
-		}
-	}
+	// okState is not scanned here (O(okState) under the write lock, once per
+	// newly revoked IP — a botnet sweep is thousands): handleDecision skips
+	// it for a revoked IP, and no touch writes it while the revocation lives.
 }
 
 // unrevokeClearanceLocked ends ip's revocation. Caller holds b.mu.
 func (b *NginxBridge) unrevokeClearanceLocked(ip string) {
+	delete(b.clrPublished, ip)
 	if _, ok := b.clrRevoked[ip]; ok {
 		delete(b.clrRevoked, ip)
 		b.clrRevokeVer++

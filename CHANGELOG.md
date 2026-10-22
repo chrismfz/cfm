@@ -48,7 +48,8 @@ back-filled here — see the git/PR history for that period.
   hour (rejects 10+ minutes apart, or 30 minutes into one that never
   pauses; the page's retries and a reload are one visit) raises `WEB/CHALLENGE_V2_MALPATH_REJECT`, which the webdetector
   section blocks per its BLOCK policy (edge ban and notification included;
-  DRY_RUN applies). The hold survives a config reload. A person sharing
+  DRY_RUN applies). The hold survives a `detectors.conf` reload (not a
+  daemon restart). A person sharing
   the address passes by solving, which ends the hold and starts the count
   over. Only IPs the malpath challenge marked
   count. `[webdetector]
