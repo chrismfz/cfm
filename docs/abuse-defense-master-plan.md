@@ -520,7 +520,10 @@ already opened.
           `webdetector_malpaths.txt`: `/.env`, `/.git/config`, wp-config
           backups, webshell names) writes a per-IP mark where the bridge
           stores the decision (`ChallengeIPWithReason`,
-          `challengeV2PathsArms`); `CHALLENGE_V2_PATHS = 0` turns it off.
+          `challengeV2PathsArms`) in its own store
+          (`challengeV2PathMarks`, so scanner volume cannot crowd out WAF
+          marks), living as long as the decision (`CHALLENGE_PATHS_TTL`, at
+          least 15m); `CHALLENGE_V2_PATHS = 0` turns it off.
           Why: that day an automated pentest hit chat.myip.gr. A
           HeadlessChrome scanner (webdriver + headless UA, hs=290) solved
           the v1 malpath challenge, and the clearance let it list and
@@ -534,9 +537,15 @@ already opened.
           logging in to cPanel. Rejecting all of them is D5a's "teeth only
           where armed" turned inside out; the malpath source is the one
           where the client has already asked for something no visitor
-          asks for. Same per-IP scope, TTL and web-scope reading as the
-          WAF mark; the real-input rescue applies; no good-bot waiver
-          (marks are strict).
+          asks for. Same per-IP scope and web-scope reading as the WAF
+          mark; the real-input rescue applies; no good-bot waiver (marks
+          are strict). Review findings folded in: the bridge's own
+          `/nginx/ip` echo erased every detector challenge's reason
+          (`src=ip`, not `src=ip:CHALLENGE_PATHS`) — fixed
+          (`pushedIPEntryLocked`). Open, pre-existing: a rejected client
+          that waits out the decision is not re-challenged during the
+          sink's `CHALLENGE_COOLDOWN` (45m reference) — a repeated-v2_reject
+          escalation is the candidate follow-up.
 - [x] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.

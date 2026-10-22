@@ -414,12 +414,7 @@ func challengeV2PathsArms(reason string) bool {
 //   - traffic rule → per (ip, host) (challengeV2Marks). The rule is evaluated
 //     per request, so its challenge is served on that request's host; the
 //     verify POST rides the same origin.
-//   - WAF rule → per IP (challengeV2IPMarks).
-//   - the malpath challenge (CHALLENGE_PATHS, a per-IP bridge decision) →
-//     per IP too, written where the bridge stores the decision
-//     (ChallengeIPWithReason, challengeV2PathsArms); off with
-//     CHALLENGE_V2_PATHS = 0. Its decision TTL (CHALLENGE_PATHS_TTL, 10m
-//     shipped) sits inside the mark's 15m. handleIPPush stores an ipState
+//   - WAF rule → per IP (challengeV2IPMarks). handleIPPush stores an ipState
 //     decision keyed by IP alone, and cfm.lua Step 3 serves it on EVERY web
 //     host the IP visits. Until 2026-09-29 this mark was per (ip, host) too, so
 //     a client that tripped the rule on host A solved the same WAF-imposed
@@ -428,14 +423,25 @@ func challengeV2PathsArms(reason string) bool {
 //     tenant vhost with webdriver + a software renderer (hs=190), and was not
 //     rejected. (A passing solve then also released the IP's decision on
 //     every host — releaseSolvedIP.)
+//   - the malpath challenge (CHALLENGE_PATHS, a per-IP bridge decision like
+//     the WAF one) → per IP (challengeV2PathMarks, its own store so scanner
+//     volume cannot crowd out WAF marks), written where the bridge stores the
+//     decision (ChallengeIPWithReason, challengeV2PathsArms); off with
+//     CHALLENGE_V2_PATHS = 0. The mark lives as long as the decision
+//     (CHALLENGE_PATHS_TTL: 10m shipped, 30m code default), at least the
+//     15m every mark gets. A verified good bot is not exempted here: it is let
+//     through at decision time (goodBotDowngrade), so it rarely reaches the
+//     verify, and marks are strict.
 //
-// Both writers mark WEB challenges, so the mark grain is read for web-scope
-// verifies only (challengeV2MarkCovers): the panel ports never serve the WAF
-// decision, and their human-entry challenge is armed by neither writer. A
+// All three writers mark WEB challenges, so the mark grain is read for
+// web-scope verifies only (challengeV2MarkCovers): the panel ports never
+// serve these decisions, and their human-entry challenge is armed by none of
+// them. A
 // panel-scope solve also releases nothing (challenge_server.go), so it cannot
 // lift a WAF challenge the web edge set.
 //
-// A WAF mark arms EVERY web-scope solve from the IP for its 15 minutes — also
+// A per-IP mark (WAF or malpath) arms EVERY web-scope solve from the IP for
+// its lifetime — also
 // one that answers a challenge the WAF did not impose (a v1 vhost or rule
 // challenge, the fingerprint floor), or comes after the IP's decision was
 // released or expired. So `v2=mark` beside `src=vhost:…` is expected, not a
@@ -525,16 +531,36 @@ func MarkChallengeV2IP(ip string) {
 	challengeV2IPMarks.put(strings.TrimSpace(ip), struct{}{}, time.Now())
 }
 
-// challengeV2IPMarked reports whether a live per-IP WAF mark covers ip.
-// RLock only, no delete — same reasoning as challengeV2Marked.
+// challengeV2IPMarked reports whether a live per-IP mark (WAF or malpath)
+// covers ip. RLock only, no delete — same reasoning as challengeV2Marked.
 func challengeV2IPMarked(ip string) bool {
-	_, ok := challengeV2IPMarks.get(strings.TrimSpace(ip), time.Now())
+	ip = strings.TrimSpace(ip)
+	now := time.Now()
+	if _, ok := challengeV2IPMarks.get(ip, now); ok {
+		return true
+	}
+	_, ok := challengeV2PathMarks.get(ip, now)
 	return ok
 }
 
+// challengeV2PathMarks holds the malpath challenge's per-IP marks (see the
+// section comment above). Same knobs as challengeV2IPMarks, its own cap.
+var challengeV2PathMarks = pairTTLStore[struct{}]{
+	m:       map[string]time.Time{},
+	ttl:     challengeV2MarkTTL,
+	maxKeys: challengeV2MarkMaxKeys,
+	fullMsg: "[challenge_v2] per-IP malpath mark store full (%d) — new malpath v2 marks degrade to plain challenge until pressure drops",
+}
+
+// markChallengeV2Path records that the malpath challenge was imposed on ip
+// for ttl (the decision's TTL; never shorter than challengeV2MarkTTL).
+func markChallengeV2Path(ip string, ttl time.Duration) {
+	challengeV2PathMarks.putFor(strings.TrimSpace(ip), struct{}{}, time.Now(), ttl)
+}
+
 // challengeV2MarkCovers is the mark grain as the verify gate sees it: for a
-// web-scope verify, a traffic-rule mark on exactly (ip, host) or a WAF mark on
-// ip; never for a panel-scope one. scope is clearanceScope(r): "web" or
+// web-scope verify, a traffic-rule mark on exactly (ip, host) or a per-IP
+// (WAF or malpath) mark on ip; never for a panel-scope one. scope is clearanceScope(r): "web" or
 // "panel:<port>" (anything else is not web, so unarmed — fail-open, D5a).
 func challengeV2MarkCovers(ip, host, scope string) bool {
 	if scope != "web" {

@@ -537,9 +537,51 @@ func TestChallengePathsChallengeArmsV2(t *testing.T) {
 		}
 	}
 
+	// The mark lives as long as the decision (30m, the code default TTL),
+	// never shorter than every mark's 15m.
+	b.ChallengeIPWithReason("203.0.113.84", 30*time.Minute, "CHALLENGE_PATHS")
+	if _, ok := challengeV2PathMarks.get("203.0.113.84", time.Now().Add(25*time.Minute)); !ok {
+		t.Fatalf("a 30m malpath challenge's mark expired before the decision")
+	}
+	if _, ok := challengeV2PathMarks.get("203.0.113.80", time.Now().Add(14*time.Minute)); !ok {
+		t.Fatalf("a 1m malpath challenge's mark must still get the 15m floor")
+	}
+	// It does not use the WAF mark store (its own cap).
+	if _, ok := challengeV2IPMarks.get("203.0.113.80", time.Now()); ok {
+		t.Fatalf("the malpath mark landed in the WAF mark store")
+	}
+
 	ConfigureChallengeV2Paths(false)
 	b.ChallengeIPWithReason("203.0.113.83", time.Minute, "CHALLENGE_PATHS")
 	if g, _ := challengeV2ArmGrainVia("", "203.0.113.83", "any.example", "web"); g != "" {
 		t.Fatalf("CHALLENGE_V2_PATHS=0 still armed %q", g)
+	}
+}
+
+// ChallengeIPWithReason posts its decision to the bridge's own /nginx/ip
+// handler with no reason; that echo must keep the detector's reason (it read
+// src=ip, not src=ip:CHALLENGE_PATHS, on the fleet), while a push that names
+// its own reason or WAF rule still replaces it.
+func TestIPPushEchoKeepsDetectorReason(t *testing.T) {
+	resetChallengeV2Marks(t)
+	b := NewNginxBridge("/tmp/cfm-test-src-echo.sock", "tok", time.Minute, time.Minute)
+	b.ChallengeIPWithReason("203.0.113.90", time.Minute, "CHALLENGE_PATHS")
+	if code := postIPPush(t, b, `{"ip":"203.0.113.90","action":"challenge","ttl_sec":60}`); code != 200 {
+		t.Fatalf("echo push code %d", code)
+	}
+	if got := b.GetReason("203.0.113.90"); got != "CHALLENGE_PATHS" {
+		t.Fatalf("the reason-less echo erased the reason: %q", got)
+	}
+	if code := postIPPush(t, b, `{"ip":"203.0.113.90","action":"challenge","reason":"WAF_XSS","waf_rule_id":302,"ttl_sec":60}`); code != 200 {
+		t.Fatalf("waf push code %d", code)
+	}
+	if got := b.GetReason("203.0.113.90"); got != "WAF_XSS" {
+		t.Fatalf("a push with its own reason must replace it, got %q", got)
+	}
+	// A different action does not inherit it.
+	b.ChallengeIPWithReason("203.0.113.91", time.Minute, "CHALLENGE_PATHS")
+	postIPPush(t, b, `{"ip":"203.0.113.91","action":"block","ttl_sec":60}`)
+	if got := b.GetReason("203.0.113.91"); got != "" {
+		t.Fatalf("a block push inherited the challenge reason %q", got)
 	}
 }
