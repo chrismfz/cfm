@@ -585,3 +585,19 @@ func TestIPPushEchoKeepsDetectorReason(t *testing.T) {
 		t.Fatalf("a block push inherited the challenge reason %q", got)
 	}
 }
+
+func TestIsCpanelSessionPath(t *testing.T) {
+	for p, want := range map[string]bool{
+		"/cpsess0291518687/viewer/home%2fu%2fpublic_html/backup.sql": true,
+		"/cpsess1/getsqlbackup/u_db.sql.gz":                          true,
+		"/cpsess/x":                                                  false,
+		"/cpsessx1/x":                                                false,
+		"/cpsess123":                                                 false,
+		"/backup.sql":                                                false,
+		"/a/cpsess12/b":                                              false,
+	} {
+		if got := isCpanelSessionPath(p); got != want {
+			t.Errorf("%q: %v, want %v", p, got, want)
+		}
+	}
+}

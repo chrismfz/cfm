@@ -34,6 +34,26 @@ func isPanelSessionAPIChallengeExempt(host, p string) bool {
 	return isPanelProxyHost(host) && isPanelSessionAPIPath(p)
 }
 
+// isCpanelSessionPath reports whether p is one of cpsrvd's own authenticated
+// session URLs (/cpsess<digits>/...). The malpath matchers (CHALLENGE_PATHS,
+// MALPATH) skip them: File Manager's viewer puts the file name in the path
+// (/cpsess<N>/viewer/home%2fuser%2fpublic_html/backup.sql), so a site owner
+// viewing their own dump would be challenged, and twenty would trip the
+// malpath flood ban. Skipping them gives a scanner nothing: on a site's own
+// vhost such a path maps to a different (nonexistent) file, not the one the
+// malpath names.
+func isCpanelSessionPath(p string) bool {
+	if !strings.HasPrefix(p, "/cpsess") {
+		return false
+	}
+	i := len("/cpsess")
+	j := i
+	for j < len(p) && p[j] >= '0' && p[j] <= '9' {
+		j++
+	}
+	return j > i && j < len(p) && p[j] == '/'
+}
+
 // isPanelProxyHost mirrors cfm_panel_hosts.is_proxy_panel_host: a cpanel./
 // whm./webmail. prefix on a registrable domain. At least three labels, and
 // exactly three only if the middle one is not a second-level name under a

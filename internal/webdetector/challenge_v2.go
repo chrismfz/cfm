@@ -24,8 +24,10 @@ package webdetector
 //                    traffic rule with action challenge_v2 at decision time
 //                    (its challenge is that request's host's), per IP for a
 //                    WAF rule set to "challenge_v2" via its ip_push (its
-//                    decision challenges the IP on every web host); either is
-//                    read for web-scope verifies only — same
+//                    decision challenges the IP on every web host), per IP
+//                    for the malpath challenge (CHALLENGE_PATHS,
+//                    CHALLENGE_V2_PATHS); each is read for web-scope
+//                    verifies only — same
 //                    edge-authoritative ip/host inputs as the decision and
 //                    verify paths; everyone else is scored shadow/log-only.
 //   (b) ABSENCE    — a solve can fail ONLY on positive headless evidence
@@ -141,6 +143,15 @@ package webdetector
 //     client-authored: a farm that dispatches pointer events through CDP
 //     gets trusted ones and is rescued — the same residual the Rung-2
 //     confirm fallback carries, accepted over walling the humans out.
+//   - A per-IP mark (WAF or malpath) bites only on a client that reaches the
+//     verify. A client already holding a valid clearance cookie for the host
+//     returns at cfm.lua Step 2b before the bridge decision is read, so a
+//     clearance earned from an earlier v1 challenge walks past a later
+//     malpath challenge there. And a rejected client that waits out the
+//     decision (CHALLENGE_PATHS_TTL, 10m shipped) is not re-challenged
+//     while the sink's CHALLENGE_COOLDOWN holds. The mark raises the cost;
+//     it does not close those. Candidate follow-ups: a malpath challenge
+//     that invalidates the IP's clearance, and repeated v2_reject → ban.
 
 import (
 	"context"

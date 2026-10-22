@@ -599,6 +599,12 @@ challenge (the cleared path skips the daemon decision), so it goes through
 `docs/challenge-waf-release-checklist.md`. Sequence it **after** the evidence
 ledger (which says *who* to arm it on) and the B3 burn-in.
 
+**Arm grains, as built** (the list lives in `challenge_v2.go`'s header and
+CLAUDE.md §6): fingerprint policy, geo policy, a v2-tier vhost challenge, and
+rung marks from three writers — a traffic rule (per ip+host), a WAF rule at
+`challenge_v2` (per IP) and, since 2026-10-22, the malpath challenge
+(`CHALLENGE_PATHS`, per IP, `CHALLENGE_V2_PATHS`; master plan slice E).
+
 ### Decision record (2026-09-12) — v2 is a RUNG, not a second on/off axis; Rung-1 (passive) ships first
 
 Settles the recurring "how do we not create a config panic" question (operator,

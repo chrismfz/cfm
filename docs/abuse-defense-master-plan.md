@@ -545,7 +545,13 @@ already opened.
           (`pushedIPEntryLocked`). Open, pre-existing: a rejected client
           that waits out the decision is not re-challenged during the
           sink's `CHALLENGE_COOLDOWN` (45m reference) — a repeated-v2_reject
-          escalation is the candidate follow-up.
+          escalation is the candidate follow-up. Also open: a client that
+          already holds a clearance cookie for the host returns at cfm.lua
+          Step 2b and never meets the malpath challenge there (the mark
+          bites only on a verify). Third review: cPanel's File Manager
+          viewer carries the file name in the path
+          (`/cpsess<N>/viewer/…/backup.sql`), so `/cpsess<N>/` paths are
+          skipped by both malpath matchers (`isCpanelSessionPath`).
 - [x] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.

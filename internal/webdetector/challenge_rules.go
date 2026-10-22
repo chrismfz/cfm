@@ -408,6 +408,9 @@ func (e *Engine) trackChallengePaths(rec LogRec, path string, b *bucketSW) {
 		return
 	}
 
+	if isCpanelSessionPath(path) {
+		return
+	}
 	pl := strings.ToLower(path)
 
 	for ridx, r := range e.chalRules {

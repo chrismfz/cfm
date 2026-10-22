@@ -21,10 +21,9 @@ back-filled here — see the git/PR history for that period.
 - **The malpath challenge now runs at the ChallengeV2 tier.** An IP
   challenged for asking for a malpath (`/.env`, `/.git/config`, a wp-config
   backup, a webshell name; `CHALLENGE_PATHS`) can no longer clear that
-  challenge with an automated browser. For as long as that challenge lasts
-  (`CHALLENGE_PATHS_TTL`, at least 15 minutes), on every web host, a solve
-  showing `navigator.webdriver` or a HeadlessChrome UA earns no clearance
-  (`v2=mark`, `result=v2_reject` on the solve line). On 2026-10-22 a
+  challenge with an automated browser. For at least 15 minutes (or
+  `CHALLENGE_PATHS_TTL` if longer), on every web host, a solve showing
+  `navigator.webdriver` or a HeadlessChrome UA earns no clearance (`v2=mark`, `result=v2_reject` on the solve line). On 2026-10-22 a
   HeadlessChrome scanner solved the old v1 challenge on a hosted chat app
   and went on to list and download its files. A person who mistypes such a
   path pays nothing unless their browser fails the Rung-1 check (moving the
@@ -32,11 +31,8 @@ back-filled here — see the git/PR history for that period.
   0` restores v1. Rejecting webdriver / headless browsers on every
   challenge was considered and not done: unarmed, they are mostly the site
   owner's own tools (HubSpot, iubenda's cookie radar, the Plesk screenshot
-  bot).
-- **A detector's challenge keeps its reason.** The bridge sends each
-  challenge to its own `/nginx/ip` handler without a reason, and that echo
-  erased the detector rule from the entry, so solve lines read `src=ip`
-  instead of `src=ip:CHALLENGE_PATHS` (and the solved hook got no reason).
+  bot). Not covered: a client that already holds a clearance cookie for the
+  site never meets the malpath challenge there.
 - **More leaked-file probes are malpaths.** WordPress `debug.log`, SQL dump
   names (`/database.sql`, `/dump.sql`, `/db.sql`, ...; matched as a path
   substring, so `/db.sqlite` too), schema files (`.dbml`) and Live Helper
@@ -44,10 +40,20 @@ back-filled here — see the git/PR history for that period.
   challenge (and count toward the malpath flood block). The same pentest
   read two of them. `*.sql.gz` is left out (cPanel's own MySQL backup
   download ends in it), and so are config templates (`*.php.example`): a
-  WebDAV sync of a code tree would request them. In 15 hours of the fleet's edge logs about 700 IPs
-  asked for these on hundreds of sites, and not one was a real file. The
+  WebDAV sync of a code tree would request them. In 15 hours of the fleet's
+  edge logs about 700 IPs asked for these on hundreds of sites, and not one
+  was a real file. The
   list is a conffile: a node whose `/etc/cfm/webdetector_malpaths.txt` was
-  edited gets the new entries as `.dpkg-dist` / `.rpmnew`.
+  edited gets the new entries as `.dpkg-dist` / `.rpmnew`. cPanel's own
+  session URLs (`/cpsess<N>/…`) are no longer matched against the malpath
+  list at all: File Manager's viewer puts the file name in the path, so a
+  site owner viewing their own `backup.sql` would have been challenged.
+
+### Fixed
+- **A detector's challenge keeps its reason.** The bridge sends each
+  challenge to its own `/nginx/ip` handler without a reason, and that echo
+  erased the detector rule from the entry, so solve lines read `src=ip`
+  instead of `src=ip:CHALLENGE_PATHS` (and the solved hook got no reason).
 
 ## 2026.10.22
 

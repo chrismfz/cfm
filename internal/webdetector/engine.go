@@ -1984,7 +1984,7 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	// Now that we have normalized path `p`, count malicious probes per IP.
 	if rec.IP != "" && e.cfg.MalPathCount > 0 && len(e.cfg.MalPathList) > 0 {
 
-		if rec.IP != "" && len(e.malRules) > 0 {
+		if rec.IP != "" && len(e.malRules) > 0 && !isCpanelSessionPath(p) {
 			pl := strings.ToLower(p)
 			for ridx, r := range e.malRules {
 				if r.sub != "" && strings.Contains(pl, r.sub) {
