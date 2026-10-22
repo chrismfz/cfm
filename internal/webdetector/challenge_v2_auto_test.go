@@ -72,7 +72,7 @@ func dropSource(e *Engine, host, src string) {
 
 func TestParseChallengeV2AutoVhost(t *testing.T) {
 	armed, unknown, off := ParseChallengeV2AutoVhost(DefaultChallengeV2AutoVhost)
-	if strings.Join(armed, ",") != "suspicious_vhost,uniqpaths_short,under_attack" || len(unknown) != 0 || off {
+	if strings.Join(armed, ",") != "suspicious_vhost,uniqpaths_short,under_attack,vhost_config" || len(unknown) != 0 || off {
 		t.Fatalf("default: armed=%v unknown=%v off=%v", armed, unknown, off)
 	}
 	for _, v := range []string{"off", "none", "0", "-", "  OFF ", "no", `"off"`} {
