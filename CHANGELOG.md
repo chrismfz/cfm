@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.22
+
 ### Security
 - **XSS in a POST body is now logged (rule 330, `WAF_XSS_BODY`, logonly).**
   Rule 302 reads only the path and query string, so a stored-XSS payload
@@ -99,8 +103,6 @@ back-filled here — see the git/PR history for that period.
   challenge to its own `/nginx/ip` handler without a reason, and that echo
   erased the detector rule from the entry, so solve lines read `src=ip`
   instead of `src=ip:CHALLENGE_PATHS` (and the solved hook got no reason).
-
-## 2026.10.22
 
 ### Changed
 - **ChallengeV2: the always-on vhost challenge list now runs at v2 too.** A
