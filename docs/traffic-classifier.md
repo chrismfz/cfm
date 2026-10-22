@@ -1050,7 +1050,9 @@ would fail; the would-fails were convicted farms, a Google Cloud scanner
 (`ua_lie,sw_renderer,no_input`) and webdriver bots. The residual it carries:
 the pointer-less Windows Chrome/109 class E4 read 3 found walled (hs 130,
 `outer_zero` on every retry) would be walled on a listed host for good, not
-for an automatic challenge's lifetime. That is the α question.
+for an automatic challenge's lifetime. The hidden-page fix (`hid`, #1615,
+shipped first) is expected to clear it, since a minimized window no longer
+reports a 0x0 size; if the next read still finds it, that is the α question.
 
 **One resolver** (`challengeV2VhostTier`) answers "what tier is this vhost
 at", for the verify gate AND every surface (vhost list/status, controls
