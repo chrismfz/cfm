@@ -98,9 +98,10 @@
 - **E4 is CLOSED (operator, 2026-10-22).** Decided: the rescue cap (item 1),
   `vhost_config` in auto-v2, `cfm_pcw` kept as log-only evidence (item 3),
   the trajectory readings kept log-only and no longer re-read weekly, the
-  orphan `HUMANITY_*` keys left to an operator cleanup. Open: α (item 2,
-  after a `visibilityState` reading) and the `solver_farm` defaults. Master
-  plan §5 E4 holds the record.
+  orphan `HUMANITY_*` keys left to an operator cleanup. Open: α (item 2;
+  the page now waits until it is visible before posting the solve, and the
+  next read checks whether the walled class is gone) and the `solver_farm`
+  defaults. Master plan §5 E4 holds the record.
 - **Open decisions** (as proposed in read 3):
   1. **The rescue.** **Decided 2026-10-20: capped at 100** (rescue only
      `hs ≤ 100`, whatever the fail score; master plan §5 E4). In
@@ -118,9 +119,10 @@
      names its datacenter scrapers.
   4. Config decisions after E4: `vhost_config` in auto-v2; the shipped
      `solver_farm` defaults; the orphan `HUMANITY_*` keys.
-- **Next read:** one week after the `visibilityState` reading and
-  `vhost_config` in auto-v2 ship: the α question (are the pointer-less
-  rejects visible pages?) and the first week of `v2_via=auto:vhost_config`.
+- **Next read:** one week after the visible-page fix (`cfmWhenVisible`) and
+  `vhost_config` in auto-v2 ship: does the walled class (Windows Chrome/109,
+  hs 130 `sw_renderer,outer_zero,no_input`, six rejects then nothing) still
+  appear, and the first week of `v2_via=auto:vhost_config`.
 - **Kill switches, if a read shows harm:** `CHALLENGE_V2_INPUT_RESCUE = 0`
   (rescue off) · `CHALLENGE_V2_AUTO_VHOST = off` (auto-v2 off) · per vhost
   `cfm webtop challenge tier <vhost> v1` · `CHALLENGE_V2_HW_TELLS = 0` ·

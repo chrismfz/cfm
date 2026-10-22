@@ -1130,6 +1130,17 @@ with the honest limit that a CDP click is trusted and the accessible
 keyboard path has no trajectory, so it is an escape hatch for humans, not a
 wall.
 
+**A minimized window is not a 0x0 one (2026-10-22).** `outer_zero` is read
+from `window.outerWidth/Height`. A challenge that loaded in a minimized
+window or a background tab read 0x0 at load, so E4 read 3's walled class
+(Windows Chrome/109, `sw_renderer,outer_zero,no_input` = 130, six rejects in
+~2 minutes, then the page's give-up) was most likely a page nobody was
+looking at; the same machines visible score 90 or 60 and pass. The page now
+POSTs its solve only once the page is visible, or on the first trusted input
+(`cfmWhenVisible`), and reads the window size at POST time, not load. A
+headless farm reports a visible page and posts at once, so the tell keeps
+its farm catch.
+
 **Who the deterministic-FP residual is (first read, 2026-09-29, before the
 release).** In a week of `would_v2` lines the likely-human would-rejects under
 the automatic sources are Windows **Chrome/109** — the last Chrome for Windows

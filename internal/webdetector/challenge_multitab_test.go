@@ -511,3 +511,79 @@ func TestChallengePage_RefreshesTheSharedChallengeCookie(t *testing.T) {
 	}
 	t.Fatal("the page did not refresh cfm_chal")
 }
+
+// The challenge page POSTs its solve only once the page is visible, or on the
+// first trusted input (cfmWhenVisible, 2026-10-22): a page loaded in a
+// minimized window reported a 0x0 outer window (outer_zero) and its
+// auto-retries were rejected until it gave up. Run in node against a fake
+// document/window.
+func TestChallengePage_WhenVisibleLogic(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	html := challengeHTML()
+	begin := strings.Index(html, "// BEGIN cfmWhenVisible")
+	end := strings.Index(html, "// END cfmWhenVisible")
+	if begin < 0 || end < 0 {
+		t.Fatal("cfmWhenVisible markers not found in the challenge page")
+	}
+	if !strings.Contains(html, "await cfmWhenVisible(document, window);") {
+		t.Fatal("the solve is no longer gated on cfmWhenVisible")
+	}
+	if strings.Index(html, "await cfmWhenVisible(document, window);") > strings.Index(html, `fetch("/__cfm_verify`) {
+		t.Fatal("cfmWhenVisible must run before the verify POST")
+	}
+	script := html[begin:end] + `
+const assert = require("assert");
+function target() {
+  const l = {};
+  return {
+    l,
+    addEventListener(t, f) { (l[t] = l[t] || []).push(f); },
+    removeEventListener(t, f) { l[t] = (l[t] || []).filter(g => g !== f); },
+    fire(t, ev) { for (const f of (l[t] || []).slice()) f(Object.assign({ type: t }, ev || {})); },
+    n() { return Object.values(l).reduce((a, v) => a + v.length, 0); },
+  };
+}
+const tick = () => new Promise(r => setImmediate(r));
+(async () => {
+  // Visible: resolves at once, false (it did not wait), no listener left.
+  let doc = Object.assign(target(), { visibilityState: "visible" }), win = target();
+  assert.strictEqual(await cfmWhenVisible(doc, win), false);
+  assert.strictEqual(doc.n() + win.n(), 0);
+
+  // Hidden: waits; a visibilitychange that stays hidden, an untrusted click
+  // and a scripted key do not release it; becoming visible does, and every
+  // listener is removed.
+  doc = Object.assign(target(), { visibilityState: "hidden" }); win = target();
+  let done = null;
+  cfmWhenVisible(doc, win).then(v => { done = v; });
+  doc.fire("visibilitychange"); win.fire("pointerdown", { isTrusted: false }); win.fire("keydown", { isTrusted: false });
+  await tick();
+  assert.strictEqual(done, null, "released while still hidden");
+  doc.visibilityState = "visible"; doc.fire("visibilitychange");
+  await tick();
+  assert.strictEqual(done, true);
+  assert.strictEqual(doc.n() + win.n(), 0, "listeners left behind");
+
+  // Hidden, but a person types or touches: a trusted input releases it.
+  for (const ev of ["pointerdown", "keydown", "touchstart"]) {
+    doc = Object.assign(target(), { visibilityState: "hidden" }); win = target();
+    done = null;
+    cfmWhenVisible(doc, win).then(v => { done = v; });
+    win.fire(ev, { isTrusted: true });
+    await tick();
+    assert.strictEqual(done, true, ev + " did not release");
+  }
+
+  // A browser without the API (undefined visibilityState) never waits.
+  assert.strictEqual(await cfmWhenVisible(target(), target()), false);
+  console.log("ok");
+})().catch(e => { console.error(e); process.exit(1); });
+`
+	out, err := exec.Command(node, "-e", script).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "ok") {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}

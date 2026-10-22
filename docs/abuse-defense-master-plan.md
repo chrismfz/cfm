@@ -689,9 +689,14 @@ already opened.
           - **The orphan `HUMANITY_*` / `MINORITY_PCT` keys:** an operator
             cleanup on the live `/etc/cfm/detectors.conf` files (no code reads
             them, the reference config no longer carries them; §3 row 12).
-          - **α is not decided yet:** first a log-only `visibilityState`
-            reading at solve time, to tell a minimized window from a person
-            who never touches the mouse.
+          - **α is not decided yet.** Operator, 2026-10-22: the walled class
+            (no input, `outer_zero` on every retry) reads like a challenge
+            loaded in a minimized window or a background tab — the page
+            read its 0x0 window at load and its auto-retries were rejected
+            the same way until it gave up. So the page now POSTs only once
+            it is visible, or on the first trusted input, and reads the
+            window size at POST time (`cfmWhenVisible`). The next read checks
+            whether that class is gone; α is decided on what remains.
 
           Weekly reads from 2026-10-06 are recorded in
           `docs/abuse-defense-progress.md`, not here; this plan keeps the
