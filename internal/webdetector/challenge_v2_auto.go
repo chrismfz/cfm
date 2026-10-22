@@ -11,9 +11,11 @@ package webdetector
 // the scorer keeps the vhost suspicious (plus its holddown) or Under-Attack
 // holds, and ends with it. That is not a fixed TTL — a vhost that stays
 // suspicious for days stays at v2 for days — so the per-vhost v1 pin is the
-// way out, and the CHALLENGE_VHOST list (permanent by nature) is opt-in. So
-// the automatic sources arm v2 by default, and an operator can pin any host
-// back to v1 (or forward to v2).
+// way out. The CHALLENGE_VHOST list (permanent by nature) shipped opt-in for
+// that reason and joined the default on 2026-10-22 (DefaultChallengeV2AutoVhost):
+// there no lifetime bounds a false reject, only the operator's pin or the
+// node knob. So every automatic source arms v2 by default, and an operator
+// can pin any host back to v1 (or forward to v2).
 //
 // The ONE resolver is challengeV2VhostTier: the verify gate
 // (challengeV2HostArmedVia, wired in NewEngine) and every read surface (the vhost

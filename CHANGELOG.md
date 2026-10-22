@@ -19,13 +19,21 @@ back-filled here — see the git/PR history for that period.
 
 ### Changed
 - **ChallengeV2: the always-on vhost challenge list now runs at v2 too.** A
-  vhost on `CHALLENGE_VHOST` is challenged at the v2 tier by default, like the
-  automatic challenges (`CHALLENGE_V2_AUTO_VHOST` gains `vhost_config`): a
-  solve that fails the passive humanity score earns no clearance there and is
-  retried. Three weeks of measurement found only farm traffic failing under
-  it and no person. A node that sets `CHALLENGE_V2_AUTO_VHOST` itself keeps
-  its list. To keep one vhost at the old tier, pin it:
-  `cfm webtop challenge tier <vhost> v1`.
+  vhost on `CHALLENGE_VHOST` — by default every tenant's `webmail.`, `whm.`
+  and `cpanel.` subdomain, and the panel ports' login challenge for a listed
+  host — is challenged at the v2 tier by default, like the automatic
+  challenges (`CHALLENGE_V2_AUTO_VHOST` gains `vhost_config`). A solve that
+  fails the passive humanity score earns no clearance there; the page retries
+  a few times, then asks the visitor to contact the site. Measured first, over
+  14 days on 7 nodes: none of ~650 solves from Greek and Cypriot home ISPs on
+  those hosts would have failed; the failures were bot farms, a cloud scanner
+  and automated browsers. Unlike an automatic challenge this one never
+  expires, so to keep one vhost at the old tier, pin it
+  (`cfm webtop challenge tier <vhost> v1`), or drop it node-wide with
+  `CHALLENGE_V2_AUTO_VHOST = suspicious_vhost,uniqpaths_short,under_attack`. A
+  node with its own list of sources keeps it; `on`, `default`, `1` or a blank
+  value follow the new default. Watch it with `v2_via=auto:vhost_config` on
+  `challenge_v2_reject`.
 
 ### Fixed
 - **A challenge opened in a minimized window should no longer fail on its

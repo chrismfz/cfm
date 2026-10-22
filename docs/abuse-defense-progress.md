@@ -117,8 +117,9 @@
      not promote it: there is no actuator, and 20 of its 28 episodes this
      week were humans. Do not retire it: D3a, it is alive and nothing else
      names its datacenter scrapers.
-  4. Config decisions after E4: `vhost_config` in auto-v2; the shipped
-     `solver_farm` defaults; the orphan `HUMANITY_*` keys.
+  4. Config decisions after E4: `vhost_config` in auto-v2 (**decided
+     2026-10-22**, shipped with it); the orphan `HUMANITY_*` keys (decided:
+     operator cleanup); the shipped `solver_farm` defaults (open).
 - **Next read:** one week after the hidden-page fix (`hid`) and
   `vhost_config` in auto-v2 ship: does the walled class (Windows Chrome/109,
   hs 130 `sw_renderer,outer_zero,no_input`, six rejects then nothing) still
