@@ -95,8 +95,13 @@
      - Since 2026-10-19 a CLEARED client's second bounce logs
        `cdn_cached_challenge`, not `next_redirect_loop`. So `why="cleared"`
        counts are not comparable with reads 1–2.
-- **Open decisions** (master plan §5 / E4). Read 3 carries a proposal for
-  each; item 1 is decided, the others wait for the operator:
+- **E4 is CLOSED (operator, 2026-10-22).** Decided: the rescue cap (item 1),
+  `vhost_config` in auto-v2, `cfm_pcw` kept as log-only evidence (item 3),
+  the trajectory readings kept log-only and no longer re-read weekly, the
+  orphan `HUMANITY_*` keys left to an operator cleanup. Open: α (item 2,
+  after a `visibilityState` reading) and the `solver_farm` defaults. Master
+  plan §5 E4 holds the record.
+- **Open decisions** (as proposed in read 3):
   1. **The rescue.** **Decided 2026-10-20: capped at 100** (rescue only
      `hs ≤ 100`, whatever the fail score; master plan §5 E4). In
      three weeks it never fired, so the cap costs no measured human. It
@@ -113,8 +118,9 @@
      names its datacenter scrapers.
   4. Config decisions after E4: `vhost_config` in auto-v2; the shipped
      `solver_farm` defaults; the orphan `HUMANITY_*` keys.
-- **Next read:** none scheduled. E4's three reads are done; a further read
-  follows an operator decision (e.g. a week after the rescue cap ships).
+- **Next read:** one week after the `visibilityState` reading and
+  `vhost_config` in auto-v2 ship: the α question (are the pointer-less
+  rejects visible pages?) and the first week of `v2_via=auto:vhost_config`.
 - **Kill switches, if a read shows harm:** `CHALLENGE_V2_INPUT_RESCUE = 0`
   (rescue off) · `CHALLENGE_V2_AUTO_VHOST = off` (auto-v2 off) · per vhost
   `cfm webtop challenge tier <vhost> v1` · `CHALLENGE_V2_HW_TELLS = 0` ·

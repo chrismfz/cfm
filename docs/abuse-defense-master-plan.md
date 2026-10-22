@@ -73,7 +73,7 @@ reviewed PR.
 | 5 | `abuse_shadow` rate_outlier (Signal C) | `abuse_shadow.go` | shadow | populated, dominant grain-A signal | **KEEP as evidence** (Track-1 fusion input). |
 | 6 | `abuse_shadow` facet / cost / dc_fraction / fused | `abuse_shadow_{facet,cost,dcfrac,fused}.go` | shadow | thin; no Class-2 flood observed since built | **KEEP-FROZEN**: no new sub-signals, no weight-tuning PRs until the next real Class-2 flood provides data. Review then, with §4-D3 criteria. |
 | 7 | WAF rule 612 `WAF_FETCH_METADATA` (Sec-Fetch tell) | `cfm_waf.lua` | logonly | fires as designed | **KEEP logonly** (evidence). Not promoted alone. |
-| 8 | `cfm_pcw` post-clearance nav cadence (B2) | `configs/lua/cfm_pcw.lua` | log-only, **and it fires** | 2 episodes in the live window (rigel, `santorinitours.org`): two separate IPs each reaching 60 navs/60s post-clearance, both `would_deny`. **`rate_outlier` did NOT flag either** — that vhost appears in its output only under `dc_fraction` (50 reqs / 50 distinct DC IPs, the DISTRIBUTED shape). Different shape, not covered elsewhere. | **KEEP — retire REVERSED 2026-09-22.** It was proposed for retirement on "fed no decision in its lifetime", which is trivially true of every log-only signal and was never evidence. A fleet-wide check before deleting it found it alive and non-redundant. It is also the only sensor for the exact failure mode ChallengeV2 exists to address (a farm that SOLVES, then pulls pages). **Exit contract (D3), finally set:** its starting constants (`T1`=30, `T2`=60 navs/60s) were never tuned from real lines — tune them from the `[cfm_pcw]` lines and re-review by 2026-10-20 with promote / keep-as-evidence / retire. Known FP risk, unchanged and untested: the key is per-(ip,host), not per-browser, so a shared egress (CGNAT) could pool real users — neither observed episode has that shape. |
+| 8 | `cfm_pcw` post-clearance nav cadence (B2) | `configs/lua/cfm_pcw.lua` | log-only, **and it fires** | 2 episodes in the live window (rigel, `santorinitours.org`): two separate IPs each reaching 60 navs/60s post-clearance, both `would_deny`. **`rate_outlier` did NOT flag either** — that vhost appears in its output only under `dc_fraction` (50 reqs / 50 distinct DC IPs, the DISTRIBUTED shape). Different shape, not covered elsewhere. | **KEEP — retire REVERSED 2026-09-22.** It was proposed for retirement on "fed no decision in its lifetime", which is trivially true of every log-only signal and was never evidence. A fleet-wide check before deleting it found it alive and non-redundant. It is also the only sensor for the exact failure mode ChallengeV2 exists to address (a farm that SOLVES, then pulls pages). **Exit contract (D3), finally set:** its starting constants (`T1`=30, `T2`=60 navs/60s) were never tuned from real lines — tune them from the `[cfm_pcw]` lines and re-review by 2026-10-20 with promote / keep-as-evidence / retire. **Reviewed 2026-10-22: KEEP as log-only evidence** (37 lines / 28 episodes in a week, 20 of them humans — residential visitors on paginated shop pages and logged-in admin/webmail; 5 from 3 datacenter IPs; no actuator; §5 E4). Known FP risk, unchanged and untested: the key is per-(ip,host), not per-browser, so a shared egress (CGNAT) could pool real users — neither observed episode has that shape. |
 | 9 | `under_attack` I1 state machine + notify | `under_attack.go` | detect-only (DRYRUN) | alarm value real ("challenge defeated" as an alert) | **KEEP as the alarm.** I1b read-surfaces shipped (`state` field, cfm-admin badge, `cfm webtop attack on\|off`, `POST /api/v1/challenge/vhost/attack`). Since 2026-09-29 it also puts a vhost's automatic challenge at v2 (`CHALLENGE_V2_AUTO_VHOST`), but UNDER_ATTACK has never been entered fleet-wide (no `vhost_under_attack_on` row on any node; leg 3 needs ≥50% origin errors), so that link is dormant until an operator `attack on`. The RT-baseline clause of leg 3 (frozen, `docs/under-attack-mode.md`) would widen it to slow origins only. |
 | 10 | `under_attack` campaign fingerprinter I2 | `under_attack_fingerprint.go` | shadow | no consumer; I3–I5 never built | **FROZEN — operator-ratified 2026-09-22.** Code STAYS as-is (this is a freeze, not a retire: unlike `cfm_pcw` its mechanism is sound, it simply has no consumer). No new predicates, no weight tuning, no sub-signals, no I3–I5. E1–E3 superseded its enforcement path; revisit ONLY if the draft-rule idea (I3) is deliberately picked up, and then with a §4-D3 exit contract. |
 | 11 | `ua_family=` solve-log corpus | `challenge_server.go` | log-first | builds the fp↔UA corpus | **KEEP.** The JA4↔UA coherence tell it was kept for was measured 2026-09-23 and **NOT adopted**: 0 extra farm catch over `mobile_hw_lie`, and the broad forms hit humans (docs/traffic-classifier.md, "UA ↔ TLS coherence tell"). |
@@ -123,7 +123,8 @@ D3/D4 are the process fix.
 - **D4 — Sensor freeze.** No new shadow signals and no new design docs in
   this area until E1–E3 (§5) have shipped and been measured. The next PR here
   is an actuator. *(2026-09-29: E1 closed manual-only, E2 dropped, E3 shipped;
-  the freeze now lifts on E4's measurement.)*
+  the freeze now lifts on E4's measurement.)* **Lifted 2026-10-22** (E4
+  closed, §5): a new signal or reading still needs a D3 exit contract.
 - **D5 — Humanity checks must not be authoritarian (operator, 2026-09-19;
   governs ChallengeV2 Rung 1 and any successor).** Four locks, all hard
   requirements: **(a) scope** — passive humanity scoring gets TEETH only for
@@ -507,7 +508,7 @@ already opened.
           the scoped Tier picker on the
           WebDetector overview page pre-existed via slice A under the
           same server-side scope checks.
-- [ ] **E4 — Measure and publish the result** (one page appended here): bans
+- [x] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.
       - Instrument landed 2026-09-22: a Rung-1 reject is now durable
@@ -654,9 +655,43 @@ already opened.
           scores exactly 100); it keeps the farm-only device-claim family
           (110-150, ~93 000 of read 3's 153 354 rejects) rejected if a farm
           learns to fake input. The `sw_renderer,outer_zero` bucket at 100
-          stays the honest residual. α and the `cfm_pcw` review were
-          proposed in the same read (`docs/abuse-defense-progress.md`) and
-          are not decided.
+          stays the honest residual.
+
+          **E4 CLOSED (operator, 2026-10-22).** Three weekly reads (2026-10-06,
+          -13, -20; `docs/abuse-defense-progress.md`) answered what E4 asked:
+          - *False rejects on humans:* a handful a week, nearly all
+            pointer-light Windows Chrome/109 machines that passed on the plain
+            retry within seconds. The one class that did not recover (3 Nova
+            IPs in read 3: no input, `outer_zero` on every retry) is the α
+            question below.
+          - *Farm solve-rate:* under an armed vhost the arm stopped ~39 % of
+            the convicted farms' solves (read 3: orion `95070673` 32 %,
+            titan `c28caa00` 52 %, mars 95 %). The rest pass under the fail
+            score by design (D5b); stopping them is the operator
+            fingerprint policy's job (E3), not a harder score.
+          - *The rescue* fired 0 times; capped (above).
+
+          **Decided with it (operator, 2026-10-22):**
+          - **`vhost_config` joins `CHALLENGE_V2_AUTO_VHOST`'s default.**
+            Its would_v2 lines were farm traffic in all three reads (read 3:
+            16 931, nearly all orion mail.mathematica.gr) with no human-labelled
+            line, on top of the 0 of 780 likely-human solves measured before
+            (`docs/traffic-classifier.md` "Auto-v2").
+          - **`cfm_pcw` exit review closed: keep as log-only evidence** (§3
+            row 8). It emits (37 lines in read 3's week, 5 nodes), but 20 of
+            its 28 episodes were humans (14 residential visitors on one shop's
+            paginated pages, 6 logged-in admin / webmail sessions) and it has
+            no actuator. Re-opened only by a proposal that names one.
+          - **The trajectory readings stay log-only and stop being a
+            tightening source:** three reads found no band separating humans
+            from farms. They are kept for a future question, not re-read
+            weekly.
+          - **The orphan `HUMANITY_*` / `MINORITY_PCT` keys:** an operator
+            cleanup on the live `/etc/cfm/detectors.conf` files (no code reads
+            them, the reference config no longer carries them; §3 row 12).
+          - **α is not decided yet:** first a log-only `visibilityState`
+            reading at solve time, to tell a minimized window from a person
+            who never touches the mouse.
 
           Weekly reads from 2026-10-06 are recorded in
           `docs/abuse-defense-progress.md`, not here; this plan keeps the
@@ -667,11 +702,12 @@ already opened.
 
 **Candidates, in order (operator review, 2026-09-29):**
 
-1. **E4's measurement** — the false-positive burn-in of the auto-v2 and
+1. ~~**E4's measurement**~~ *Closed 2026-10-22 (E4 note above).* The false-positive burn-in of the auto-v2 and
    WAF-mark v2 arms (`challenge_v2_reject` by `v2` / `v2_via` / `src` /
    `scope`, humans labelled as in the hardware-tells corpus) and the farm
    solve-rate. It also lifts D4.
-2. **The `cfm_pcw` exit review, by 2026-10-20** (§3 row 8). It is the only
+2. ~~**The `cfm_pcw` exit review, by 2026-10-20**~~ *Closed 2026-10-22: keep
+   as log-only evidence (E4 note above).* (§3 row 8). It is the only
    sensor for the solve-then-pull shape. The 2026-09-29 read found 3
    episodes fleet-wide in the edge error logs' short windows (rigel ×2, the
    known ones; mars ×1, a scanner) and none from the `hs=0` farms, which
@@ -700,7 +736,9 @@ already opened.
    the precondition for the `harden` rung (below). A page change:
    `docs/challenge-waf-release-checklist.md`.
 
-**Config decisions after E4:** `vhost_config` in `CHALLENGE_V2_AUTO_VHOST`
+**Config decisions after E4** (2026-10-22: `vhost_config` decided yes, the
+orphan keys are the operator's cleanup, the `solver_farm` defaults are still
+open — E4 did not measure them): `vhost_config` in `CHALLENGE_V2_AUTO_VHOST`
 (measured 0 of 780 likely-human solves would fail, `docs/traffic-classifier.md`
 "Auto-v2"); the shipped `solver_farm` defaults (`WINDOW` 60s catches the
 AS398781 swarm only at 120s AND lowered thresholds, 16/20 against the
