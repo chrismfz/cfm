@@ -1035,8 +1035,22 @@ reject is deterministic per device (a retry fails the same way), so
 what bounds it is the automatic challenge's LIFETIME — while the scorer keeps
 the vhost suspicious (plus holddown) or Under-Attack holds. That is not a
 fixed TTL: a vhost suspicious for days is at v2 for days, and the v1 pin is
-the per-vhost way out. The config list (permanent by nature) is therefore
-opt-in, and the fingerprint/geo policies stay explicit operator arms.
+the per-vhost way out. The config list (permanent by nature) was therefore
+opt-in; since 2026-10-22 it is in the default too, so on a listed host only
+the pin or the node knob bounds a false reject. The fingerprint/geo policies
+stay explicit operator arms.
+
+*vhost_config joins the default (2026-10-22, E4 closed).* The shipped
+`CHALLENGE_VHOST = webmail.*, whm.*, cpanel.*` makes this mostly the panel
+proxy subdomains, and a vhost arm covers every verify scope, so the panel
+ports' human-entry challenge on a listed host too. Measured over the 14 days
+to 2026-10-22, 7 nodes, solves with `src=vhost:vhost_config`: ~650 from
+Greek/Cypriot consumer ISPs on `webmail.` / `cpanel.` hosts, **0** of which
+would fail; the would-fails were convicted farms, a Google Cloud scanner
+(`ua_lie,sw_renderer,no_input`) and webdriver bots. The residual it carries:
+the pointer-less Windows Chrome/109 class E4 read 3 found walled (hs 130,
+`outer_zero` on every retry) would be walled on a listed host for good, not
+for an automatic challenge's lifetime. That is the α question.
 
 **One resolver** (`challengeV2VhostTier`) answers "what tier is this vhost
 at", for the verify gate AND every surface (vhost list/status, controls

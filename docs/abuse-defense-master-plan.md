@@ -156,6 +156,13 @@ D3/D4 are the process fix.
   measured (36% of convicted-farm solves, ~0.06% of likely humans;
   `docs/traffic-classifier.md` "Auto-v2"). Long-lived arms (manual,
   `vhost_config`, fp/geo policy) stay explicit operator choices.
+  *Amendment (operator, 2026-10-22, E4 closed):* `vhost_config` — the
+  always-on `CHALLENGE_VHOST` list, by default the panel proxy subdomains
+  `webmail.*, whm.*, cpanel.*` — is now a shipped default too. It is the one
+  shipped arm with no TTL: its bound is the per-vhost pin and the node knob.
+  Measured first: 0 of ~650 GR/CY consumer-ISP solves on those hosts would
+  fail (14 days, 7 nodes; the would-fails were farms, a cloud scanner and
+  webdriver bots). Manual and fp/geo arms stay explicit.
   *Amendment (operator, 2026-09-29):* the escalation (c) anticipates is the
   Rung-2 **confirm** fallback (a visible "confirm you're human" step with an
   accessible path, §5 candidates), not a visible puzzle — the puzzle was
