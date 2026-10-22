@@ -328,6 +328,10 @@ type challengeV2State struct {
 	// Off, a failing armed solve is rejected (or waived) exactly as before
 	// the rescue existed, and no surface carries v2_rescued.
 	inputRescue bool
+	// pathsMark arms the CHALLENGE_PATHS per-IP challenge at v2
+	// (challengeV2PathsArms): CHALLENGE_V2_PATHS, default on. Off, a
+	// malpath challenge writes no mark and is solved at v1 as before.
+	pathsMark bool
 	// hostTier answers "is this host's vhost tier v2" plus what put it there
 	// (manual / pin / auto:<source>, rendered as v2_via=), from ONE
 	// resolution — NewEngine wires challengeV2GateTier (challenge_v2_auto.go:
@@ -346,7 +350,7 @@ type challengeV2State struct {
 	goodBot func(ctx context.Context, ip, ptr string) (name, miss string)
 }
 
-var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true, inputRescue: true}
+var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true, inputRescue: true, pathsMark: true}
 
 // ConfigureChallengeV2HWTells applies [webdetector] CHALLENGE_V2_HW_TELLS
 // (every reload; see challengeV2State.hwTells).
@@ -364,6 +368,37 @@ func ConfigureChallengeV2InputRescue(on bool) {
 	challengeV2.mu.Unlock()
 }
 
+// ConfigureChallengeV2Paths applies [webdetector] CHALLENGE_V2_PATHS (every
+// reload; see challengeV2State.pathsMark).
+func ConfigureChallengeV2Paths(on bool) {
+	challengeV2.mu.Lock()
+	challengeV2.pathsMark = on
+	challengeV2.mu.Unlock()
+}
+
+// challengeV2PathsReason is the bridge reason the CHALLENGE_PATHS challenge
+// carries (the section sink passes the alert's Extra["rule"]).
+const challengeV2PathsReason = "CHALLENGE_PATHS"
+
+// challengeV2PathsArms reports whether a per-IP bridge challenge with this
+// reason writes a per-IP v2 mark: the malpath challenge (CHALLENGE_PATHS),
+// while CHALLENGE_V2_PATHS is on and the rung is enabled.
+//
+// The client asked for /.env, /.git/config, a wp-config backup or a webshell
+// name (webdetector_malpaths.txt). On 2026-10-22 a HeadlessChrome scanner
+// (webdriver + headless UA, hs=290) solved that v1 challenge on
+// chat.myip.gr, and the clearance let it list and download the app's
+// storage. Under the mark it is rejected; a person who mistypes such a path
+// pays nothing (D5b), and the real-input rescue still applies.
+func challengeV2PathsArms(reason string) bool {
+	if reason != challengeV2PathsReason {
+		return false
+	}
+	challengeV2.mu.RLock()
+	defer challengeV2.mu.RUnlock()
+	return challengeV2.enabled && challengeV2.pathsMark
+}
+
 // ── ChallengeV2 rung marks (arm-surfaces slices B and C) ───────────────────
 //
 // Some v2-tier arm sources are TRANSIENT: a traffic rule with action
@@ -379,7 +414,12 @@ func ConfigureChallengeV2InputRescue(on bool) {
 //   - traffic rule → per (ip, host) (challengeV2Marks). The rule is evaluated
 //     per request, so its challenge is served on that request's host; the
 //     verify POST rides the same origin.
-//   - WAF rule → per IP (challengeV2IPMarks). handleIPPush stores an ipState
+//   - WAF rule → per IP (challengeV2IPMarks).
+//   - the malpath challenge (CHALLENGE_PATHS, a per-IP bridge decision) →
+//     per IP too, written where the bridge stores the decision
+//     (ChallengeIPWithReason, challengeV2PathsArms); off with
+//     CHALLENGE_V2_PATHS = 0. Its decision TTL (CHALLENGE_PATHS_TTL, 10m
+//     shipped) sits inside the mark's 15m. handleIPPush stores an ipState
 //     decision keyed by IP alone, and cfm.lua Step 3 serves it on EVERY web
 //     host the IP visits. Until 2026-09-29 this mark was per (ip, host) too, so
 //     a client that tripped the rule on host A solved the same WAF-imposed

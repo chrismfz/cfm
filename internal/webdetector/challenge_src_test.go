@@ -510,3 +510,36 @@ func TestVerify_SolveCarriesProvenanceBeforeRelease(t *testing.T) {
 		t.Fatalf("per-IP entry still active after the solve: %q", action)
 	}
 }
+
+// The malpath challenge (CHALLENGE_PATHS) writes a per-IP v2 mark where the
+// bridge stores its decision, so the solve that answers it is gated
+// (v2=mark); another reason, a reason-less refresh of a different rule's
+// entry, and CHALLENGE_V2_PATHS = 0 write none. 2026-10-22: a HeadlessChrome
+// scanner solved the v1 malpath challenge on chat.myip.gr.
+func TestChallengePathsChallengeArmsV2(t *testing.T) {
+	resetChallengeV2Marks(t)
+	t.Cleanup(func() { ConfigureChallengeV2Paths(true) })
+	b := NewNginxBridge("/tmp/cfm-test-v2-paths.sock", "tok", time.Minute, time.Minute)
+
+	b.ChallengeIPWithReason("203.0.113.80", time.Minute, "CHALLENGE_PATHS")
+	if g, _ := challengeV2ArmGrainVia("", "203.0.113.80", "any.example", "web"); g != v2GrainMark {
+		t.Fatalf("malpath challenge: grain %q, want %q", g, v2GrainMark)
+	}
+	if g, _ := challengeV2ArmGrainVia("", "203.0.113.80", "any.example", "panel:2083"); g != "" {
+		t.Fatalf("the mark is web-scope only, panel grain %q", g)
+	}
+
+	b.ChallengeIPWithReason("203.0.113.81", time.Minute, "CHALLENGE_ERR_RATIO")
+	b.ChallengeIP("203.0.113.82", time.Minute)
+	for _, ip := range []string{"203.0.113.81", "203.0.113.82"} {
+		if g, _ := challengeV2ArmGrainVia("", ip, "any.example", "web"); g != "" {
+			t.Fatalf("%s: non-malpath challenge armed %q", ip, g)
+		}
+	}
+
+	ConfigureChallengeV2Paths(false)
+	b.ChallengeIPWithReason("203.0.113.83", time.Minute, "CHALLENGE_PATHS")
+	if g, _ := challengeV2ArmGrainVia("", "203.0.113.83", "any.example", "web"); g != "" {
+		t.Fatalf("CHALLENGE_V2_PATHS=0 still armed %q", g)
+	}
+}

@@ -17,7 +17,20 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **The malpath challenge now runs at the ChallengeV2 tier.** An IP
+  challenged for asking for a malpath (`/.env`, `/.git/config`, a wp-config
+  backup, a webshell name; `CHALLENGE_PATHS`) can no longer clear that
+  challenge with an automated browser. For 15 minutes, on every web host, a
+  solve showing `navigator.webdriver` or a HeadlessChrome UA earns no
+  clearance (`v2=mark`, `result=v2_reject` on the solve line). On
+  2026-10-22 a HeadlessChrome scanner solved the old v1 challenge on a
+  hosted chat app and went on to list and download its files. A person who
+  mistypes such a path is not affected. `[webdetector] CHALLENGE_V2_PATHS =
+  0` restores v1. Rejecting webdriver / headless browsers on every
+  challenge was considered and not done: unarmed, they are mostly the site
+  owner's own tools (HubSpot, iubenda's cookie radar, the Plesk screenshot
+  bot).
 
 ## 2026.10.22
 

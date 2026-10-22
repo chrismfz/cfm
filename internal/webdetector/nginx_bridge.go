@@ -1137,6 +1137,11 @@ func (b *NginxBridge) ChallengeIPWithReason(ip string, ttl time.Duration, reason
 	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: reason}
 	b.mu.Unlock()
 
+	// A malpath challenge runs at the v2 tier (challengeV2PathsArms).
+	if challengeV2PathsArms(reason) {
+		MarkChallengeV2IP(ip)
+	}
+
 	b.post("/nginx/ip", nginxIPMsg{IP: ip, Action: "challenge", TTLSec: int(ttl.Seconds())})
 }
 

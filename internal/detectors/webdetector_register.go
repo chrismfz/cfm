@@ -994,6 +994,8 @@ func init() {
 		// Kill switch for the real-input rescue of a failing armed solve;
 		// default on.
 		webdet.ConfigureChallengeV2InputRescue(kvBool(kv, "CHALLENGE_V2_INPUT_RESCUE", true))
+		// The malpath (CHALLENGE_PATHS) challenge at the v2 tier; default on.
+		webdet.ConfigureChallengeV2Paths(kvBool(kv, "CHALLENGE_V2_PATHS", true))
 
 		engine := webdet.NewEngine(cfg)
 

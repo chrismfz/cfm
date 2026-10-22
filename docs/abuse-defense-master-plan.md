@@ -515,6 +515,28 @@ already opened.
           the scoped Tier picker on the
           WebDetector overview page pre-existed via slice A under the
           same server-side scope checks.
+        - [x] **E — the malpath challenge at v2 — 2026-10-22.** A third
+          mark writer: the per-IP `CHALLENGE_PATHS` challenge (one hit on
+          `webdetector_malpaths.txt`: `/.env`, `/.git/config`, wp-config
+          backups, webshell names) writes a per-IP mark where the bridge
+          stores the decision (`ChallengeIPWithReason`,
+          `challengeV2PathsArms`); `CHALLENGE_V2_PATHS = 0` turns it off.
+          Why: that day an automated pentest hit chat.myip.gr. A
+          HeadlessChrome scanner (webdriver + headless UA, hs=290) solved
+          the v1 malpath challenge, and the clearance let it list and
+          download the app's storage. Considered and REJECTED: making the
+          certain tells (webdriver / headless UA) reject at EVERY tier,
+          armed or not. A 3-day fleet read of unarmed solves carrying one
+          found mostly tools a site owner runs on purpose: HubSpot's
+          crawler and a HeadlessChrome fetcher on a manual vhost
+          challenge, iubenda's cookie-compliance radar, the Plesk
+          screenshot bot, Scanory, and a Greek consumer-ISP HeadlessChrome
+          logging in to cPanel. Rejecting all of them is D5a's "teeth only
+          where armed" turned inside out; the malpath source is the one
+          where the client has already asked for something no visitor
+          asks for. Same per-IP scope, TTL and web-scope reading as the
+          WAF mark; the real-input rescue applies; no good-bot waiver
+          (marks are strict).
 - [x] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.
