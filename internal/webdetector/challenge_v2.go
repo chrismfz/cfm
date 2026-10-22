@@ -62,7 +62,7 @@ package webdetector
 //                           (ConfigureChallengeV2HWTells)
 //   CHALLENGE_V2_INPUT_RESCUE (default 1) kill switch for the real-input
 //                           rescue (ConfigureChallengeV2InputRescue)
-//   CHALLENGE_V2_AUTO_VHOST (default suspicious_vhost,uniqpaths_short,under_attack)
+//   CHALLENGE_V2_AUTO_VHOST (default suspicious_vhost,uniqpaths_short,under_attack,vhost_config)
 //                           the automatic vhost challenges that run at the v2
 //                           tier (engine config; challenge_v2_auto.go)
 //

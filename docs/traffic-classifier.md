@@ -1010,8 +1010,10 @@ device-claim group.
 Until now the vhost grain was armed only by a MANUAL arm at `rung=v2`. Since
 2026-09-29 an **automatic** vhost challenge runs at v2 too, when its source
 is in `[webdetector] CHALLENGE_V2_AUTO_VHOST` (default
-`suspicious_vhost,uniqpaths_short,under_attack`; `vhost_config` is opt-in,
-`off` arms none). Code: `challenge_v2_auto.go`.
+`suspicious_vhost,uniqpaths_short,under_attack,vhost_config`; `vhost_config`
+shipped opt-in and joined the default on 2026-10-22 after E4's three reads
+found only farm traffic failing under it; `off` arms none). Code:
+`challenge_v2_auto.go`.
 
 **Measured first (D3 exit contract).** The week after the hardware tells
 shipped (2026-09-23 → 09-29, 7 nodes, `src=` on every solve) sized the arm

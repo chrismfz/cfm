@@ -17,7 +17,15 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **ChallengeV2: the always-on vhost challenge list now runs at v2 too.** A
+  vhost on `CHALLENGE_VHOST` is challenged at the v2 tier by default, like the
+  automatic challenges (`CHALLENGE_V2_AUTO_VHOST` gains `vhost_config`): a
+  solve that fails the passive humanity score earns no clearance there and is
+  retried. Three weeks of measurement found only farm traffic failing under
+  it and no person. A node that sets `CHALLENGE_V2_AUTO_VHOST` itself keeps
+  its list. To keep one vhost at the old tier, pin it:
+  `cfm webtop challenge tier <vhost> v1`.
 
 ## 2026.10.21
 
