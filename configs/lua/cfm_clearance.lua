@@ -336,8 +336,10 @@ end
 -- cleared request reads the list, so only one starts a poll. The edge sends
 -- the version it holds and gets {"same":true} or the whole (small) list.
 -- FAIL-OPEN: no dict, a missing endpoint (an older daemon), a bad reply —
--- nothing is revoked that was not listed. A list write the dict refuses
--- leaves the version where it was, so the next poll writes it again.
+-- nothing is revoked that was not listed. A list write the dict refuses, or
+-- a listed key the dict evicted since (checked on every "same"), forgets the
+-- version, so the next poll writes the whole list again. A listed key that
+-- simply ran out its TTL also reads as evicted: one full list, harmless.
 --
 -- Timer callbacks take everything as arguments (see waf_insp_flush_cb in
 -- cfm.lua for why a per-request upvalue is unsafe there).
@@ -359,7 +361,18 @@ end
 -- revoke_apply writes a decoded /nginx/clearance/revoked reply into d.
 function _M.revoke_apply(d, r)
   if not d or type(r) ~= "table" or type(r.v) ~= "string" or r.v == "" then return false end
-  if r.same then return true end
+  if r.same then
+    -- The busy decisions dict evicts least-recently-used keys under
+    -- pressure: a listed IP whose key went (or the list itself) would stay
+    -- unrevoked for as long as the daemon's version holds. Forget the
+    -- version, so the next poll writes the whole list again.
+    local cur = d:get(RV_LIST)
+    if type(cur) ~= "string" then d:delete(RV_VER); return false end
+    for ip in cur:gmatch("[^,]+") do
+      if d:get(RV_PFX .. ip) == nil then d:delete(RV_VER); return false end
+    end
+    return true
+  end
   if type(r.ips) ~= "table" then return false end
   local keep, list, n, ok_all = {}, {}, 0, true
   for ip, left in pairs(r.ips) do

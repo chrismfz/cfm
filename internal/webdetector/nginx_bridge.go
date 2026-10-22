@@ -1146,7 +1146,7 @@ func (b *NginxBridge) ChallengeIPWithReason(ip string, ttl time.Duration, reason
 	if cur, ok := b.ipState[ip]; ok && reason == "" && cur.Action == "challenge" && cur.Expires.After(now) {
 		reason, wafRuleID = cur.Reason, cur.WAFRuleID
 	}
-	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: reason, WAFRuleID: wafRuleID}
+	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: b.malpathFloorLocked(ip, "challenge", now.Add(ttl), now), Reason: reason, WAFRuleID: wafRuleID}
 	// A malpath challenge also revokes the IP's clearance (clearance_revoke.go):
 	// a client holding a cfm_clearance cookie would otherwise never see it.
 	if clearanceRevokeArms(reason) {
@@ -1177,7 +1177,62 @@ func (b *NginxBridge) pushedIPEntryLocked(ip, action string, expires time.Time, 
 			reason, wafRuleID = cur.Reason, cur.WAFRuleID
 		}
 	}
-	return bridgeIPEntry{Action: action, Expires: expires, Reason: reason, WAFRuleID: wafRuleID}
+	return bridgeIPEntry{Action: action, Expires: b.malpathFloorLocked(ip, action, expires, time.Now()), Reason: reason, WAFRuleID: wafRuleID}
+}
+
+// malpathFloorLocked keeps a live malpath challenge (reason CHALLENGE_PATHS,
+// including the hour-long hold of challenge_v2_paths_ban.go) from being
+// SHORTENED by a later challenge over it: a WAF push or a detector's 10m
+// re-challenge rewrote the entry to its own TTL, the hold's mark and
+// revocation outlived the decision, and once it ran out the decision
+// answered allow for the rest of the hour. It answers the expiry to store:
+// the later of the two. A block over it, or a different action, is not
+// touched. Caller holds b.mu.
+func (b *NginxBridge) malpathFloorLocked(ip, action string, expires, now time.Time) time.Time {
+	if action != "challenge" {
+		return expires
+	}
+	if cur, ok := b.ipState[ip]; ok && cur.Action == "challenge" && cur.Reason == challengeV2PathsReason &&
+		cur.Expires.After(now) && cur.Expires.After(expires) {
+		return cur.Expires
+	}
+	return expires
+}
+
+// HoldChallengeIP holds the malpath challenge on ip for at least ttl (the
+// v2-reject hold, challenge_v2_paths_ban.go): the per-IP challenge, its v2
+// mark and its clearance revocation, never shortened. A live block is left
+// alone (a reject must not weaken it). No self-post: the decision lives in
+// ipState, which this writes. It answers whether it held.
+func (b *NginxBridge) HoldChallengeIP(ip string, ttl time.Duration) bool {
+	ip = strings.TrimSpace(ip)
+	if b == nil || !b.cfg.Enabled || ip == "" || ttl <= 0 {
+		return false
+	}
+	if b.bypassFunc != nil && b.bypassFunc(ip) {
+		return false
+	}
+	now := time.Now()
+	until := now.Add(ttl)
+	b.mu.Lock()
+	cur, live := b.ipState[ip]
+	live = live && cur.Expires.After(now)
+	if live && cur.Action == "block" {
+		b.mu.Unlock()
+		return false
+	}
+	if live && cur.Action == "challenge" && cur.Expires.After(until) {
+		until = cur.Expires
+	}
+	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: until, Reason: challengeV2PathsReason}
+	if clearanceRevokeArms(challengeV2PathsReason) {
+		b.revokeClearanceLocked(ip, until, now)
+	}
+	b.mu.Unlock()
+	if challengeV2PathsArms(challengeV2PathsReason) {
+		markChallengeV2Path(ip, until.Sub(now))
+	}
+	return true
 }
 
 // BlockIP tells OpenResty to hard-block this IP (return 403, no challenge).
@@ -1342,6 +1397,11 @@ func (b *NginxBridge) ClearIPScoped(ip, host, scope string) {
 	host = normalizeHost(host)
 	scope = strings.TrimSpace(scope)
 
+	if scope == "web" {
+		// A web solve (or a clear) starts the v2 reject count over: a person
+		// who failed once and then passed is not one visit from a ban.
+		forgetChallengeV2PathsRejects(ip)
+	}
 	b.mu.Lock()
 	delete(b.ipState, ip)
 	b.unrevokeClearanceLocked(ip)

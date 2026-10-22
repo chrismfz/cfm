@@ -85,6 +85,17 @@ check(not cl.revoked(dict, "6.6.6.6") and not cl.revoked(dict, "7.7.7.7") and no
 check(cl.revoked(dict, "8.8.8.8"), "the good entry is written")
 check(dict:get("clrrv:ips") == "8.8.8.8", "the kept list holds only the good entry")
 
+-- An evicted key (or list) makes "same" forget the version
+check(cl.revoke_apply(dict, { v = "e:5", ips = { ["8.8.4.4"] = 600 } }), "list for eviction test")
+check(cl.revoke_apply(dict, { v = "e:5", same = true }), "same with the list intact")
+check(dict:get("clrrv:ver") == "e:5", "same keeps the version while every key is there")
+dict:delete("clrrv|8.8.4.4")
+check(not cl.revoke_apply(dict, { v = "e:5", same = true }), "same with an evicted key fails")
+check(dict:get("clrrv:ver") == nil, "an evicted key forgets the version")
+check(cl.revoke_apply(dict, { v = "e:5", ips = { ["8.8.4.4"] = 600 } }), "the full list is written again")
+dict:delete("clrrv:ips")
+check(not cl.revoke_apply(dict, { v = "e:5", same = true }) and dict:get("clrrv:ver") == nil, "an evicted list forgets the version")
+
 -- A write the dict refuses leaves no version: the next poll asks for the list again
 dict.refuse = true
 check(not cl.revoke_apply(dict, { v = "e:4", ips = { ["4.4.4.4"] = 60 } }), "a refused write fails")

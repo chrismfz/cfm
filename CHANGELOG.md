@@ -42,13 +42,15 @@ back-filled here — see the git/PR history for that period.
   again. `[webdetector] CHALLENGE_PATHS_REVOKE = 0` turns it off.
 - **A malpath-challenged IP that keeps failing the v2 check is held, then
   banned.** Before, such a scanner waited out the 10-minute challenge and
-  walked back in, not challenged again for the 45-minute cooldown. Now its
-  first failed visit (the page's retries within a minute count once) holds
-  the malpath challenge for an hour. A second failed visit in that hour
-  raises `WEB/CHALLENGE_V2_MALPATH_REJECT`, which the webdetector section
-  blocks per its BLOCK policy (edge ban and notification included; DRY_RUN
-  applies). A person sharing the address passes by solving. Only IPs the
-  malpath challenge marked count. `[webdetector]
+  walked back in, not challenged again for the 45-minute cooldown. Now each
+  failed solve holds the malpath challenge for an hour (a later, shorter
+  challenge no longer cuts it short), and a second failed visit in that
+  hour (rejects 10+ minutes apart; the page's retries and a reload are one
+  visit) raises `WEB/CHALLENGE_V2_MALPATH_REJECT`, which the webdetector
+  section blocks per its BLOCK policy (edge ban and notification included;
+  DRY_RUN applies). A person sharing the address passes by solving, which
+  also starts the count over. Only IPs the malpath challenge marked
+  count. `[webdetector]
   CHALLENGE_V2_PATHS_REJECT_BAN` sets the visits (default 2); 0 turns it
   off.
 - **More leaked-file probes are malpaths.** WordPress `debug.log`, SQL dump

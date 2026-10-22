@@ -308,14 +308,13 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			webdet.SetChallengeV2RejectHook(func(s webdet.ChallengeSolve) {
 				w.eng.RecordChallengeV2Reject(s)
 				// A malpath-marked IP that fails the rung (webdet
-				// CHALLENGE_V2_PATHS_REJECT_BAN): a first failed visit holds
-				// the malpath challenge for an hour, so it cannot be waited
-				// out; the next one is banned — the section sink applies the
-				// BLOCK policy, the edge ban and the notification.
+				// CHALLENGE_V2_PATHS_REJECT_BAN): every reject holds the
+				// malpath challenge for an hour, so it cannot be waited out;
+				// a second failed visit is banned — the section sink applies
+				// the BLOCK policy, the edge ban and the notification.
 				rv := webdet.NoteChallengeV2PathsReject(s, time.Now())
 				if rv.Hold() {
-					if b := w.eng.NginxBridge(); b != nil {
-						b.ChallengeIPWithReason(s.IP, webdet.ChallengeV2PathsRejectHold, "CHALLENGE_PATHS")
+					if b := w.eng.NginxBridge(); b != nil && b.HoldChallengeIP(s.IP, webdet.ChallengeV2PathsRejectHold) && rv.NewVisit {
 						logging.LogfCHALLENGES("[challenge_v2_malpath_hold] ip=%s host=%s visits=%d hold=%s", s.IP, s.Host, rv.Visits, webdet.ChallengeV2PathsRejectHold)
 					}
 				}

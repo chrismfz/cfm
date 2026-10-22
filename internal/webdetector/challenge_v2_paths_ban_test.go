@@ -42,25 +42,26 @@ func TestChallengeV2PathsRejectBan(t *testing.T) {
 	if r := NoteChallengeV2PathsReject(ChallengeSolve{IP: ip, Scope: "panel:2083"}, now); r.Visits != 0 {
 		t.Fatalf("a panel-scope reject counted: %+v", r)
 	}
-	// First visit: four retries within ~20 s are one visit, held once.
-	if r := at(0); r.Visits != 1 || !r.Hold() || r.Ban {
+	// First visit: the page's retries, and the reload its give-up text asks
+	// for a minute later, are one visit; each refreshes the hold.
+	if r := at(0); r.Visits != 1 || !r.NewVisit || !r.Hold() || r.Ban {
 		t.Fatalf("first reject: %+v, want visit 1 with a hold", r)
 	}
-	for _, d := range []time.Duration{5 * time.Second, 12 * time.Second, 20 * time.Second} {
-		if r := at(d); r.Visits != 1 || r.Hold() || r.Ban {
-			t.Fatalf("a retry at %v: %+v, want the same visit and no new hold", d, r)
+	for _, d := range []time.Duration{5 * time.Second, 12 * time.Second, 20 * time.Second, 50 * time.Second, 2*time.Minute + 30*time.Second} {
+		if r := at(d); r.Visits != 1 || r.NewVisit || !r.Hold() || r.Ban {
+			t.Fatalf("a retry at %v: %+v, want the same visit, held", d, r)
 		}
 	}
-	// The second failed visit (it waited for the challenge, came back) bans.
-	if r := at(11 * time.Minute); r.Visits != 2 || !r.Ban || r.Hold() {
+	// The second failed visit (it left, came back) bans.
+	if r := at(13 * time.Minute); r.Visits != 2 || !r.Ban || r.Hold() {
 		t.Fatalf("second visit: %+v, want the ban", r)
 	}
 	// The count starts over.
-	if r := at(12 * time.Minute); r.Visits != 1 || r.Ban {
+	if r := at(14 * time.Minute); r.Visits != 1 || r.Ban {
 		t.Fatalf("after the ban: %+v", r)
 	}
 	// Visits spread past the window do not add up.
-	if r := at(12*time.Minute + v2PathsRejectWindow + time.Minute); r.Visits != 1 || r.Ban {
+	if r := at(14*time.Minute + v2PathsRejectWindow + time.Minute); r.Visits != 1 || r.Ban {
 		t.Fatalf("a visit past the window: %+v, want a new first visit", r)
 	}
 
@@ -107,5 +108,56 @@ func TestForceUnblockClearsChallengeV2Marks(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the unblock report does not name the marks: %+v", res.Cleared)
+	}
+}
+
+// The hold: never shortened by a later challenge, never over a block, and a
+// web solve starts the reject count over.
+func TestHoldChallengeIP(t *testing.T) {
+	resetChallengeV2Marks(t)
+	resetV2PathsRejects(t)
+	b := NewNginxBridge("/tmp/cfm-test-v2-hold.sock", "tok", time.Minute, time.Minute)
+	const ip = "203.0.113.130"
+
+	if !b.HoldChallengeIP(ip, time.Hour) {
+		t.Fatalf("no hold")
+	}
+	// A detector's 10m re-challenge and a WAF challenge push over it.
+	b.ChallengeIPWithReason(ip, 10*time.Minute, "CHALLENGE_PATHS")
+	b.mu.Lock()
+	b.ipState[ip] = b.pushedIPEntryLocked(ip, "challenge", time.Now().Add(5*time.Minute), "WAF_XSS", 302)
+	e := b.ipState[ip]
+	b.mu.Unlock()
+	if time.Until(e.Expires) < 59*time.Minute {
+		t.Fatalf("a later challenge shortened the hold to %v", time.Until(e.Expires))
+	}
+	if _, ok := challengeV2PathMarks.get(ip, time.Now().Add(50*time.Minute)); !ok {
+		t.Fatalf("the hold's mark does not last the hour")
+	}
+	if !b.clearanceRevokedLocked(ip, time.Now().Add(50*time.Minute)) {
+		t.Fatalf("the hold's revocation does not last the hour")
+	}
+
+	// A block is never weakened by a hold.
+	const blocked = "203.0.113.131"
+	b.mu.Lock()
+	b.ipState[blocked] = bridgeIPEntry{Action: "block", Expires: time.Now().Add(time.Hour)}
+	b.mu.Unlock()
+	if b.HoldChallengeIP(blocked, time.Hour) {
+		t.Fatalf("a hold over a live block")
+	}
+	if a, _ := b.GetIPDecision(blocked); a != "block" {
+		t.Fatalf("the block became %q", a)
+	}
+
+	// A web solve forgets the reject count.
+	markChallengeV2Path(ip, time.Hour)
+	NoteChallengeV2PathsReject(ChallengeSolve{IP: ip, Scope: "web"}, time.Now())
+	b.ClearIP(ip)
+	v2PathsRejects.mu.Lock()
+	_, counted := v2PathsRejects.m[ip]
+	v2PathsRejects.mu.Unlock()
+	if counted {
+		t.Fatalf("a solve left the reject count")
 	}
 }

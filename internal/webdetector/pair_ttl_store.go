@@ -124,7 +124,10 @@ func (s *pairTTLStore[V]) storeLocked(key string, v V, now time.Time) {
 }
 
 // putFor is put with an expiry of now+ttl, never earlier than now+s.ttl
-// (the store's TTL is the floor; a longer caller TTL extends one entry).
+// (the store's TTL is the floor; a longer caller TTL extends one entry), and
+// never earlier than the key's live expiry: a shorter write over a longer
+// entry (a 10m malpath re-challenge over the hour-long v2-reject hold) keeps
+// the longer one, as the bridge decision does (malpathFloorLocked).
 func (s *pairTTLStore[V]) putFor(key string, v V, now time.Time, ttl time.Duration) {
 	if key == "" {
 		return
@@ -136,6 +139,9 @@ func (s *pairTTLStore[V]) putFor(key string, v V, now time.Time, ttl time.Durati
 	defer s.mu.Unlock()
 	if !s.roomForLocked(key, now) {
 		return // fail-open, as put
+	}
+	if exp, ok := s.m[key]; ok && exp.After(now.Add(ttl)) {
+		ttl = exp.Sub(now)
 	}
 	s.storeLockedFor(key, v, now, ttl)
 }

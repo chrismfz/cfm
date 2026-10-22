@@ -573,13 +573,17 @@ already opened.
             every grain, and include clients a site owner runs (the Plesk
             screenshot bot under a traffic-rule mark). So only a web-scope
             reject from an IP with a live MALPATH mark counts, and it
-            counts VISITS (rejects a minute apart): a score does not change
-            between retries, so counting rejects banned a person behind a
-            scanner-marked NAT on their first failed visit (review
-            finding). Visits alone closed nothing — after the 10m challenge
-            the sink's cooldown serves no new one — so a first failed
-            visit HOLDS the malpath challenge (mark and revocation with it)
-            for an hour through `ChallengeIPWithReason`, and a second one
+            counts VISITS (rejects 10+ minutes apart, longer than the
+            page's retry cycle and the reload its give-up text asks for): a
+            score does not change between retries, so counting rejects
+            banned a person behind a scanner-marked NAT on their first
+            failed visit (review finding). Visits alone closed nothing —
+            after the 10m challenge the sink's cooldown serves no new one —
+            so every reject HOLDS the malpath challenge (mark and
+            revocation with it) for an hour (`HoldChallengeIP`: no
+            self-post, never over a block), a later shorter challenge no
+            longer shortens a malpath one (`malpathFloorLocked`, `putFor`),
+            a web solve resets the count, and a second failed visit
             asks the webdetector sink for a ban
             (`WEB/CHALLENGE_V2_MALPATH_REJECT`: the BLOCK policy, the edge
             ban, the notification, DRY_RUN).

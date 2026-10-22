@@ -29,14 +29,22 @@ import (
 // retries, so counting rejects banned on the first failed visit — a real
 // person behind a NAT a scanner had marked, failing the rung once, among
 // them. A reject within v2PathsRejectVisitGap of the IP's previous one is
-// the same visit. Counting visits alone would close nothing, though: after
-// the challenge runs out the sink's cooldown serves no new one, so there is
-// no second visit to count. So a failed visit that does not ban HOLDS the
-// malpath challenge (with its mark and its clearance revocation) for
-// ChallengeV2PathsRejectHold, re-imposed through the bridge (the reject hook
-// in the detectors layer): waiting it out takes an hour, and coming back
-// sooner to fail again is the second visit that bans. A person on that
-// address still gets through by solving it.
+// the same visit; the gap is longer than the page's whole retry cycle plus
+// the reload its give-up text asks for ("wait a minute and reload", its
+// cfm_v2r counter lives 120 s), so following the page's own advice is not a
+// second visit. Counting visits alone would close nothing, though: after the
+// challenge runs out the sink's cooldown serves no new one, so there is no
+// second visit to count. So every reject that does not ban HOLDS the malpath
+// challenge (with its mark and its clearance revocation) for at least
+// ChallengeV2PathsRejectHold from now (NginxBridge.HoldChallengeIP, from the
+// reject hook in the detectors layer; never shortened, never over a block):
+// waiting it out takes an hour of not trying, and leaving and coming back to
+// fail again is the second visit that bans. A web solve starts the count
+// over (ClearIPScoped). Someone on that address who can pass the rung gets
+// through by solving; one who cannot (no real input, a score above the
+// rescue cap) stays challenged for the hour, and banned if they leave for
+// more than v2PathsRejectVisitGap and fail again — the accepted cost on an
+// address that asked for /.env-class paths.
 //
 // [webdetector] CHALLENGE_V2_PATHS_REJECT_BAN = the failed visits within
 // v2PathsRejectWindow that ban (default 2; 0 = off, and no hold either).
@@ -64,7 +72,7 @@ const ChallengeV2PathsRejectHold = v2PathsRejectWindow
 
 const (
 	v2PathsRejectWindow   = time.Hour        // first visit to the banning one
-	v2PathsRejectVisitGap = 60 * time.Second // rejects closer than this: one visit
+	v2PathsRejectVisitGap = 10 * time.Minute // rejects closer than this: one visit
 	v2PathsRejectMax      = 4096             // tracked IPs; at the cap a new IP is not counted
 )
 
@@ -87,8 +95,9 @@ type V2PathsReject struct {
 }
 
 // Hold reports whether the caller should hold the malpath challenge
-// (ChallengeV2PathsRejectHold): a new failed visit that did not ban.
-func (r V2PathsReject) Hold() bool { return r.NewVisit && !r.Ban }
+// (ChallengeV2PathsRejectHold): every counted reject that did not ban, so a
+// client that keeps failing stays challenged.
+func (r V2PathsReject) Hold() bool { return r.Visits > 0 && !r.Ban }
 
 // NoteChallengeV2PathsReject counts a Rung-1 reject from a web-scope verify
 // of an IP with a live malpath mark. Ban is set once, when the reject starts
