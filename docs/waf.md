@@ -1053,6 +1053,11 @@ Current assignments:
                                        326  rule_java_deserialize
                                        327  rule_coinminer
                                        328  rule_log4shell
+                                       329  rule_php_object_injection
+                                       330  rule_xss_body           (logonly, 2026-10-22: explicit XSS markup in a POST
+                                                                    body — attribute breakout, a tag with an event handler,
+                                                                    <script, a javascript: URL; not for a logged-in WordPress
+                                                                    user, /wp-admin/ (not admin-ajax) or /administrator/)
 
 4xx — Upload / malware
   401  rule_upload_filename            405  rule_script_obfuscation

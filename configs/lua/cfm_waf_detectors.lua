@@ -1387,6 +1387,50 @@ function _M.detect_xss(uri, args, _s)
   return false
 end
 
+-- XSS in a POST body (rule 330, logonly). Rule 302 reads the path and the
+-- query only, so a stored-XSS payload posted in a form field passed unseen:
+-- LHC's chat-start email field took `x" onmouseover="alert(document.domain)"
+-- data-x="` on 2026-10-22 and ran in the operator's browser. Explicit markup
+-- only, on the decoded body (s: get_norm_body, lowercase):
+--   ATTR_BREAKOUT  a quote, then (blanks, `+`, `/`) an event handler and `=`:
+--                  the value closes its attribute and opens a handler;
+--   TAG_HANDLER    a tag carrying an event handler (`<img src=x onerror=`,
+--                  `<svg/onload=`): `<` + a letter, then within the tag (no
+--                  `<` / `>`) a blank, `+`, `/` or quote before the handler
+--                  and `=`;
+--   SCRIPT_TAG     `<script` followed by a blank, `>` or `/`;
+--   JS_URI         `javascript:` right after a quote or an `=` (an href, or
+--                  a field whose value starts with it).
+-- A JSON key ("onclick": …) never matches: a key is followed by `:`.
+-- Returns the tag or nil.
+function _M.detect_xss_body(s)
+  if not s or s == "" then return nil end
+  for handler in s:gmatch("[\"'`][%s+/]*(on%a+)%s*=") do
+    if XSS_EVENT_HANDLERS[handler] then return "ATTR_BREAKOUT" end
+  end
+  -- Linear: a start is `<` + a letter, and `[^<>]` stops each scan at the
+  -- next angle bracket.
+  for handler in s:gmatch("<%a[^<>]-[%s+/\"'](on%a+)%s*=") do
+    if XSS_EVENT_HANDLERS[handler] then return "TAG_HANDLER" end
+  end
+  if s:find("<script[%s>/]") then return "SCRIPT_TAG" end
+  if s:find("[\"'=][%s+]*javascript:") then return "JS_URI" end
+  return nil
+end
+
+-- xss_body_admin_request: a request rule 330 leaves alone — a logged-in
+-- WordPress user (wordpress_logged_in_ cookie: the block / classic editor,
+-- Elementor and the other page builders save markup through admin-ajax and
+-- the REST API with it), WordPress's admin pages except admin-ajax.php
+-- (anonymous front-end forms post there too), and Joomla's /administrator/.
+function _M.xss_body_admin_request(uri, cookie)
+  if has(lower(cookie or ""), "wordpress_logged_in_") then return true end
+  local u = lower(uri or "")
+  if has(u, "/wp-admin/") and not has(u, "/wp-admin/admin-ajax.php") then return true end
+  if has(u, "/administrator/") then return true end
+  return false
+end
+
 -- sqlmap-class blind-SQLi primitives, split into two confidence tiers.
 --
 -- SQLI_BLIND_TOKENS: DBMS-unique time-based primitives that do NOT collide

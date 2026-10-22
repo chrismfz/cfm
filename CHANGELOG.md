@@ -18,6 +18,17 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **XSS in a POST body is now logged (rule 330, `WAF_XSS_BODY`, logonly).**
+  Rule 302 reads only the path and query string, so a stored-XSS payload
+  posted in a form field passed with no WAF line at all: on 2026-10-22 Live
+  Helper Chat's chat-start email field took `x" onmouseover="alert(…)"` and
+  it ran in the operator's browser. The new rule logs explicit markup in the
+  body: a quote breaking out of an attribute into an event handler, a tag
+  carrying an event handler (`<img onerror=`), a `<script` tag, a
+  `javascript:` URL. It skips logged-in WordPress users and the
+  `/wp-admin/` (except admin-ajax) and `/administrator/` paths, where editors
+  and page builders post markup by design. Log-only: it blocks nothing, and
+  its fleet hits decide whether it is ever promoted.
 - **The malpath challenge now runs at the ChallengeV2 tier.** An IP
   challenged for asking for a malpath (`/.env`, `/.git/config`, a wp-config
   backup, a webshell name; `CHALLENGE_PATHS`) can no longer clear that
