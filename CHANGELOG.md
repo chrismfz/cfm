@@ -32,8 +32,12 @@ back-filled here — see the git/PR history for that period.
   (`cfm webtop challenge tier <vhost> v1`), or drop it node-wide with
   `CHALLENGE_V2_AUTO_VHOST = suspicious_vhost,uniqpaths_short,under_attack`. A
   node with its own list of sources keeps it; `on`, `default`, `1` or a blank
-  value follow the new default. Watch it with `v2_via=auto:vhost_config` on
-  `challenge_v2_reject`.
+  value follow the new default. Watch it with `v2_via=auto:vhost_config` or
+  `src=vhost:vhost_config` on `challenge_v2_reject`. An upgraded node's own
+  `detectors.conf` still describes `vhost_config` as opt-in and carries the
+  old default as a commented line; the daemon now logs the sources it arms
+  when it reads the config (`CHALLENGE_V2_AUTO_VHOST: automatic vhost
+  challenges at v2: …`).
 
 ### Fixed
 - **A challenge opened in a minimized window should no longer fail on its

@@ -952,3 +952,24 @@ func TestAutoV2_ReviewFoldsFifteen(t *testing.T) {
 		t.Fatalf("a hand-deleted pin file was not picked up on reload")
 	}
 }
+
+// The SHIPPED default arms vhost_config (2026-10-22): a host on the always-on
+// list verifies at v2 with v2_via=auto:vhost_config, and the old explicit
+// three-source list (a node that keeps its own) leaves it at v1.
+func TestShippedDefaultArmsVhostConfig(t *testing.T) {
+	armed, unknown, off := ParseChallengeV2AutoVhost(DefaultChallengeV2AutoVhost)
+	if off || len(unknown) > 0 {
+		t.Fatalf("default parse: armed=%v unknown=%v off=%v", armed, unknown, off)
+	}
+	e := newAutoV2TestEngine(t, armed...)
+	setVhostEntry(e, "webmail.example.gr", autoV2VhostConfig)
+	if via := e.challengeV2VhostTier("webmail.example.gr").via(); via != "auto:vhost_config" {
+		t.Fatalf("default: via=%q, want auto:vhost_config", via)
+	}
+	old, _, _ := ParseChallengeV2AutoVhost("suspicious_vhost,uniqpaths_short,under_attack")
+	e = newAutoV2TestEngine(t, old...)
+	setVhostEntry(e, "webmail.example.gr", autoV2VhostConfig)
+	if via := e.challengeV2VhostTier("webmail.example.gr").via(); via != "" {
+		t.Fatalf("old explicit list: via=%q, want v1 (none)", via)
+	}
+}

@@ -1047,12 +1047,21 @@ ports' human-entry challenge on a listed host too. Measured over the 14 days
 to 2026-10-22, 7 nodes, solves with `src=vhost:vhost_config`: ~650 from
 Greek/Cypriot consumer ISPs on `webmail.` / `cpanel.` hosts, **0** of which
 would fail; the would-fails were convicted farms, a Google Cloud scanner
-(`ua_lie,sw_renderer,no_input`) and webdriver bots. The residual it carries:
+(`ua_lie,sw_renderer,no_input`) and webdriver bots. That sample is GR/CY
+consumer ISPs only: foreign, mobile-carrier, corporate and VPN admins were
+not measured, and 0 of ~650 still allows up to ~0.5 % (rule of three), on
+hosts where the exposure has no TTL. The residual it carries:
 the pointer-less Windows Chrome/109 class E4 read 3 found walled (hs 130,
 `outer_zero` on every retry) would be walled on a listed host for good, not
 for an automatic challenge's lifetime. The hidden-page fix (`hid`, #1615,
-shipped first) is expected to clear it, since a minimized window no longer
+in the same release) is expected to clear it, since a minimized window no longer
 reports a 0x0 size; if the next read still finds it, that is the α question.
+Counting this arm's rejects: `autoSourceOrder` puts `vhost_config` last, so a
+listed host that is also suspicious logs `v2_via=auto:suspicious_vhost`; count
+`src=vhost:vhost_config` as well. A wildcard-listed host is noted only while
+it is in the tick's candidate set (the note lives 2-10 minutes), so the first
+solve after a long quiet spell can verify at v1 (fails open; the gate and
+every surface still agree).
 
 **One resolver** (`challengeV2VhostTier`) answers "what tier is this vhost
 at", for the verify gate AND every surface (vhost list/status, controls

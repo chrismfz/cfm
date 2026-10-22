@@ -1188,7 +1188,20 @@ func resolveChallengeCookieLife(global, kv map[string]string) time.Duration {
 // explicit `off` arms none: an absent, blank ("" / `; comment`) or
 // all-unknown value (e.g. a typo) falls back to the shipped default and says
 // so, because silently disarming the node is the dangerous direction.
+// The effective set is logged on every read: the default changed under
+// existing configs (vhost_config joined it on 2026-10-22), and a live
+// detectors.conf can still carry the old commented default.
 func challengeV2AutoVhost(kv KV) []string {
+	armed := challengeV2AutoVhostArmed(kv)
+	set := "none (off)"
+	if len(armed) > 0 {
+		set = strings.Join(armed, ",")
+	}
+	logging.Logf("[webdetector] CHALLENGE_V2_AUTO_VHOST: automatic vhost challenges at v2: %s", set)
+	return armed
+}
+
+func challengeV2AutoVhostArmed(kv KV) []string {
 	raw := kvStrClean(kv, "CHALLENGE_V2_AUTO_VHOST", webdet.DefaultChallengeV2AutoVhost)
 	armed, unknown, off := webdet.ParseChallengeV2AutoVhost(raw)
 	if len(unknown) > 0 {
