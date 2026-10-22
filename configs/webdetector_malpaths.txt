@@ -154,3 +154,24 @@
 /bs1.php
 /repeater.php
 
+
+# ─── LEAKED LOGS / DUMPS / CONFIG TEMPLATES (added 2026-10-22) ───────────────
+# An automated pentest read an app's debug log (with chat access hashes), its
+# DB schema and a config template that named the admin user. A 15-hour read
+# of the fleet's edges: ~700 IPs asking for these on hundreds of vhosts, never
+# a real file (every 200 was a site's catch-all HTML page).
+/wp-content/debug.log
+/cache/default.log
+/doc/update_db/
+/backup.sql
+/dump.sql
+/database.sql
+/db.sql
+/data.sql
+/mysql.sql
+.dbml
+# Not listed, on purpose: .sql.gz (cPanel's own "Download a MySQL Database
+# Backup" is /cpsess<N>/getsqlbackup/<db>.sql.gz — 20 of them in a migration
+# would trip the malpath flood BAN), .php.example / .php.dist (a WebDAV sync
+# client walking a dev tree cannot solve a challenge). Matching is a substring
+# of the path, so /db.sql also covers /db.sqlite.

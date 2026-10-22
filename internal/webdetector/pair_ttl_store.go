@@ -8,8 +8,9 @@ import (
 )
 
 // pairTTLStore is the ONE bounded, TTL'd store behind the ChallengeV2 rung
-// marks (gate teeth: challengeV2Marks per (ip,host), challengeV2IPMarks per
-// IP), the traffic-rule challenge notes (telemetry, challengeRuleNotes), the
+// marks (gate teeth: challengeV2Marks per (ip,host), challengeV2IPMarks and
+// challengeV2PathMarks per IP, the latter written with putFor), the
+// traffic-rule challenge notes (telemetry, challengeRuleNotes), the
 // challenge server's verify_reject log throttle (verifyRejects) and its
 // challenge-page redirect loop breaker (nextRedirects) — one implementation, so a
 // fix to the sweep, the cap or the once-per-episode warning reaches all of
@@ -119,7 +120,28 @@ func (s *pairTTLStore[V]) roomForLocked(key string, now time.Time) bool {
 // storeLocked writes key and re-arms the full warning. Caller holds the write
 // lock and has checked roomForLocked.
 func (s *pairTTLStore[V]) storeLocked(key string, v V, now time.Time) {
-	s.m[key] = now.Add(s.ttl)
+	s.storeLockedFor(key, v, now, s.ttl)
+}
+
+// putFor is put with an expiry of now+ttl, never earlier than now+s.ttl
+// (the store's TTL is the floor; a longer caller TTL extends one entry).
+func (s *pairTTLStore[V]) putFor(key string, v V, now time.Time, ttl time.Duration) {
+	if key == "" {
+		return
+	}
+	if ttl < s.ttl {
+		ttl = s.ttl
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.roomForLocked(key, now) {
+		return // fail-open, as put
+	}
+	s.storeLockedFor(key, v, now, ttl)
+}
+
+func (s *pairTTLStore[V]) storeLockedFor(key string, v V, now time.Time, ttl time.Duration) {
+	s.m[key] = now.Add(ttl)
 	if s.vals != nil {
 		s.vals[key] = v
 	}

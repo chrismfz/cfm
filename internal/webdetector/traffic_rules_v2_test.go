@@ -27,6 +27,10 @@ func resetChallengeV2Marks(t *testing.T) {
 		challengeV2IPMarks.m = map[string]time.Time{}
 		challengeV2IPMarks.fullWarn = false
 		challengeV2IPMarks.mu.Unlock()
+		challengeV2PathMarks.mu.Lock()
+		challengeV2PathMarks.m = map[string]time.Time{}
+		challengeV2PathMarks.fullWarn = false
+		challengeV2PathMarks.mu.Unlock()
 	}
 	reset()
 	t.Cleanup(reset)

@@ -515,6 +515,43 @@ already opened.
           the scoped Tier picker on the
           WebDetector overview page pre-existed via slice A under the
           same server-side scope checks.
+        - [x] **E — the malpath challenge at v2 — 2026-10-22.** A third
+          mark writer: the per-IP `CHALLENGE_PATHS` challenge (one hit on
+          `webdetector_malpaths.txt`: `/.env`, `/.git/config`, wp-config
+          backups, webshell names) writes a per-IP mark where the bridge
+          stores the decision (`ChallengeIPWithReason`,
+          `challengeV2PathsArms`) in its own store
+          (`challengeV2PathMarks`, so scanner volume cannot crowd out WAF
+          marks), living as long as the decision (`CHALLENGE_PATHS_TTL`, at
+          least 15m); `CHALLENGE_V2_PATHS = 0` turns it off.
+          Why: that day an automated pentest hit chat.myip.gr. A
+          HeadlessChrome scanner (webdriver + headless UA, hs=290) solved
+          the v1 malpath challenge, and the clearance let it list and
+          download the app's storage. Considered and REJECTED: making the
+          certain tells (webdriver / headless UA) reject at EVERY tier,
+          armed or not. A 3-day fleet read of unarmed solves carrying one
+          found mostly tools a site owner runs on purpose: HubSpot's
+          crawler and a HeadlessChrome fetcher on a manual vhost
+          challenge, iubenda's cookie-compliance radar, the Plesk
+          screenshot bot, Scanory, and a Greek consumer-ISP HeadlessChrome
+          logging in to cPanel. Rejecting all of them is D5a's "teeth only
+          where armed" turned inside out; the malpath source is the one
+          where the client has already asked for something no visitor
+          asks for. Same per-IP scope and web-scope reading as the WAF
+          mark; the real-input rescue applies; no good-bot waiver (marks
+          are strict). Review findings folded in: the bridge's own
+          `/nginx/ip` echo erased every detector challenge's reason
+          (`src=ip`, not `src=ip:CHALLENGE_PATHS`) — fixed
+          (`pushedIPEntryLocked`). Open, pre-existing: a rejected client
+          that waits out the decision is not re-challenged during the
+          sink's `CHALLENGE_COOLDOWN` (45m reference) — a repeated-v2_reject
+          escalation is the candidate follow-up. Also open: a client that
+          already holds a clearance cookie for the host returns at cfm.lua
+          Step 2b and never meets the malpath challenge there (the mark
+          bites only on a verify). Third review: cPanel's File Manager
+          viewer carries the file name in the path
+          (`/cpsess<N>/viewer/…/backup.sql`), so `/cpsess<N>/` paths are
+          skipped by both malpath matchers (`isCpanelSessionPath`).
 - [x] **E4 — Measure and publish the result** (one page appended here): bans
       issued, farm solve-rate before/after, FP reports. This is the exit
       review that D3 demands for the whole arc.

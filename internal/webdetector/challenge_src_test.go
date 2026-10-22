@@ -510,3 +510,94 @@ func TestVerify_SolveCarriesProvenanceBeforeRelease(t *testing.T) {
 		t.Fatalf("per-IP entry still active after the solve: %q", action)
 	}
 }
+
+// The malpath challenge (CHALLENGE_PATHS) writes a per-IP v2 mark where the
+// bridge stores its decision, so the solve that answers it is gated
+// (v2=mark); another reason, a reason-less refresh of a different rule's
+// entry, and CHALLENGE_V2_PATHS = 0 write none. 2026-10-22: a HeadlessChrome
+// scanner solved the v1 malpath challenge on chat.myip.gr.
+func TestChallengePathsChallengeArmsV2(t *testing.T) {
+	resetChallengeV2Marks(t)
+	t.Cleanup(func() { ConfigureChallengeV2Paths(true) })
+	b := NewNginxBridge("/tmp/cfm-test-v2-paths.sock", "tok", time.Minute, time.Minute)
+
+	b.ChallengeIPWithReason("203.0.113.80", time.Minute, "CHALLENGE_PATHS")
+	if g, _ := challengeV2ArmGrainVia("", "203.0.113.80", "any.example", "web"); g != v2GrainMark {
+		t.Fatalf("malpath challenge: grain %q, want %q", g, v2GrainMark)
+	}
+	if g, _ := challengeV2ArmGrainVia("", "203.0.113.80", "any.example", "panel:2083"); g != "" {
+		t.Fatalf("the mark is web-scope only, panel grain %q", g)
+	}
+
+	b.ChallengeIPWithReason("203.0.113.81", time.Minute, "CHALLENGE_ERR_RATIO")
+	b.ChallengeIP("203.0.113.82", time.Minute)
+	for _, ip := range []string{"203.0.113.81", "203.0.113.82"} {
+		if g, _ := challengeV2ArmGrainVia("", ip, "any.example", "web"); g != "" {
+			t.Fatalf("%s: non-malpath challenge armed %q", ip, g)
+		}
+	}
+
+	// The mark lives as long as the decision (30m, the code default TTL),
+	// never shorter than every mark's 15m.
+	b.ChallengeIPWithReason("203.0.113.84", 30*time.Minute, "CHALLENGE_PATHS")
+	if _, ok := challengeV2PathMarks.get("203.0.113.84", time.Now().Add(25*time.Minute)); !ok {
+		t.Fatalf("a 30m malpath challenge's mark expired before the decision")
+	}
+	if _, ok := challengeV2PathMarks.get("203.0.113.80", time.Now().Add(14*time.Minute)); !ok {
+		t.Fatalf("a 1m malpath challenge's mark must still get the 15m floor")
+	}
+	// It does not use the WAF mark store (its own cap).
+	if _, ok := challengeV2IPMarks.get("203.0.113.80", time.Now()); ok {
+		t.Fatalf("the malpath mark landed in the WAF mark store")
+	}
+
+	ConfigureChallengeV2Paths(false)
+	b.ChallengeIPWithReason("203.0.113.83", time.Minute, "CHALLENGE_PATHS")
+	if g, _ := challengeV2ArmGrainVia("", "203.0.113.83", "any.example", "web"); g != "" {
+		t.Fatalf("CHALLENGE_V2_PATHS=0 still armed %q", g)
+	}
+}
+
+// ChallengeIPWithReason posts its decision to the bridge's own /nginx/ip
+// handler with no reason; that echo must keep the detector's reason (it read
+// src=ip, not src=ip:CHALLENGE_PATHS, on the fleet), while a push that names
+// its own reason or WAF rule still replaces it.
+func TestIPPushEchoKeepsDetectorReason(t *testing.T) {
+	resetChallengeV2Marks(t)
+	b := NewNginxBridge("/tmp/cfm-test-src-echo.sock", "tok", time.Minute, time.Minute)
+	b.ChallengeIPWithReason("203.0.113.90", time.Minute, "CHALLENGE_PATHS")
+	if code := postIPPush(t, b, `{"ip":"203.0.113.90","action":"challenge","ttl_sec":60}`); code != 200 {
+		t.Fatalf("echo push code %d", code)
+	}
+	if got := b.GetReason("203.0.113.90"); got != "CHALLENGE_PATHS" {
+		t.Fatalf("the reason-less echo erased the reason: %q", got)
+	}
+	if code := postIPPush(t, b, `{"ip":"203.0.113.90","action":"challenge","reason":"WAF_XSS","waf_rule_id":302,"ttl_sec":60}`); code != 200 {
+		t.Fatalf("waf push code %d", code)
+	}
+	if got := b.GetReason("203.0.113.90"); got != "WAF_XSS" {
+		t.Fatalf("a push with its own reason must replace it, got %q", got)
+	}
+	// A different action does not inherit it.
+	b.ChallengeIPWithReason("203.0.113.91", time.Minute, "CHALLENGE_PATHS")
+	postIPPush(t, b, `{"ip":"203.0.113.91","action":"block","ttl_sec":60}`)
+	if got := b.GetReason("203.0.113.91"); got != "" {
+		t.Fatalf("a block push inherited the challenge reason %q", got)
+	}
+}
+
+func TestIsCpanelSessionPath(t *testing.T) {
+	for p, want := range map[string]bool{
+		"/cpsess0291518687/viewer/home%2fu%2fpublic_html/backup.sql": true,
+		"/cpsess1/getsqlbackup/u_db.sql.gz":                          true,
+		"/cpsess/x":                                                  false,
+		"/cpsessx1/x":                                                false,
+		"/cpsess123":                                                 false,
+		"/backup.sql":                                                false,
+		"/a/cpsess12/b":                                              false,
+	} {
+		if got := isCpanelSessionPath(p); got != want {
+			t.Errorf("%q: %v, want %v", p, got, want)
+		}
+	}
+}

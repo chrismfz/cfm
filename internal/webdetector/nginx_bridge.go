@@ -1131,13 +1131,37 @@ func (b *NginxBridge) ChallengeIPWithReason(ip string, ttl time.Duration, reason
 	now := time.Now()
 	reason = strings.TrimSpace(reason)
 	b.mu.Lock()
+	wafRuleID := 0
 	if cur, ok := b.ipState[ip]; ok && reason == "" && cur.Action == "challenge" && cur.Expires.After(now) {
-		reason = cur.Reason
+		reason, wafRuleID = cur.Reason, cur.WAFRuleID
 	}
-	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: reason}
+	b.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: now.Add(ttl), Reason: reason, WAFRuleID: wafRuleID}
 	b.mu.Unlock()
 
+	// A malpath challenge runs at the v2 tier (challengeV2PathsArms), for as
+	// long as the decision lives.
+	if challengeV2PathsArms(reason) {
+		markChallengeV2Path(ip, ttl)
+	}
+
 	b.post("/nginx/ip", nginxIPMsg{IP: ip, Action: "challenge", TTLSec: int(ttl.Seconds())})
+}
+
+// pushedIPEntryLocked builds the ipState entry for an /nginx/ip push. A push
+// with no reason and no WAF rule id onto a live entry of the same action keeps
+// that entry's reason and rule id: ChallengeIPWithReason posts its own
+// decision to this same handler (b.post dials the bridge's own socket) with
+// no reason, and that echo erased the detector's reason (src=ip instead of
+// src=ip:CHALLENGE_PATHS, an empty reason for the solved hook). The same
+// rule ChallengeIPWithReason applies to a reason-less refresh. Caller holds
+// b.mu.
+func (b *NginxBridge) pushedIPEntryLocked(ip, action string, expires time.Time, reason string, wafRuleID int) bridgeIPEntry {
+	if reason == "" && wafRuleID == 0 {
+		if cur, ok := b.ipState[ip]; ok && cur.Action == action && cur.Expires.After(time.Now()) {
+			reason, wafRuleID = cur.Reason, cur.WAFRuleID
+		}
+	}
+	return bridgeIPEntry{Action: action, Expires: expires, Reason: reason, WAFRuleID: wafRuleID}
 }
 
 // BlockIP tells OpenResty to hard-block this IP (return 403, no challenge).
@@ -2580,12 +2604,7 @@ func (b *NginxBridge) handleIPPush(w http.ResponseWriter, r *http.Request) {
 	// - but it MUST NOT create an active IP decision in the bridge
 	if msg.Action != "logonly" {
 		b.mu.Lock()
-		b.ipState[msg.IP] = bridgeIPEntry{
-			Action:    storeAction,
-			Expires:   time.Now().Add(ttl),
-			Reason:    reason,
-			WAFRuleID: msg.WAFRuleID,
-		}
+		b.ipState[msg.IP] = b.pushedIPEntryLocked(msg.IP, storeAction, time.Now().Add(ttl), reason, msg.WAFRuleID)
 		b.mu.Unlock()
 	}
 
@@ -2918,12 +2937,7 @@ func (b *NginxBridge) handleEventsBatch(w http.ResponseWriter, r *http.Request) 
 
 			if msg.Action != "logonly" {
 				b.mu.Lock()
-				b.ipState[msg.IP] = bridgeIPEntry{
-					Action:    storeAction,
-					Expires:   now.Add(ttl),
-					Reason:    reason,
-					WAFRuleID: msg.WAFRuleID,
-				}
+				b.ipState[msg.IP] = b.pushedIPEntryLocked(msg.IP, storeAction, now.Add(ttl), reason, msg.WAFRuleID)
 				b.mu.Unlock()
 			}
 			if reason != "" && b.OnTrigger != nil {

@@ -768,13 +768,19 @@ automatic v2 — that was a scoped bypass of an operator's v2 pin; ONE
 resolver, `challengeV2VhostTier`, serves the gate and every surface — never
 read the manual rung alone for "is this vhost v2"; a `v2=vhost` line/row
 carries `v2_via=manual|pin|auto:<source>` — src= cannot say, it reads the
-bridge entry's sticky reason), and a rung mark with two writers, each
+bridge entry's sticky reason), and a rung mark with three writers, each
 scoped like the challenge it imposed and read for web-scope verifies only —
 a traffic rule with action `challenge_v2` at decision time, per (ip,host)
 (slice B: rules-model.js and traffic_rules.go changed in the same PR, per
 the Simulate rule), and a WAF rule set to `"challenge_v2"` in
 cfm_waf_config.lua, per IP (slice C: severity challenge < challenge_v2 <
-block, only block short-circuits; handleIPPush records the mark). The WAF
+block, only block short-circuits; handleIPPush records the mark), and,
+since 2026-10-22, the per-IP malpath challenge (`CHALLENGE_PATHS`), per IP
+(slice E, `ChallengeIPWithReason`; `CHALLENGE_V2_PATHS = 0` turns it off:
+a HeadlessChrome scanner solved it at v1 and downloaded an app's storage).
+Making webdriver / headless UA reject at every tier was measured and
+rejected: unarmed, they are mostly the site owner's own tools (HubSpot,
+iubenda, the Plesk screenshot bot). The WAF
 mark is per IP because its ipState decision is: until 2026-09-29 it was per
 (ip,host), and a client solved the same challenge at v1 on a sibling vhost.
 A passing solve releases the IP's decision on every host, so only a
