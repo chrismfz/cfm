@@ -26,7 +26,7 @@ back-filled here — see the git/PR history for that period.
   each time, and gave up, so a visitor who came back to the tab found
   "Verification could not complete". The page now waits until it is visible
   (or the visitor clicks or types) before sending the solve, and measures the
-  window at that moment. Seen on webmail and shop pages from Greek home ISPs.
+  window at that moment. Seen on shop pages, from Greek home ISPs.
 
 ## 2026.10.21
 
