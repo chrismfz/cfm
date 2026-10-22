@@ -1391,36 +1391,57 @@ end
 -- query only, so a stored-XSS payload posted in a form field passed unseen:
 -- LHC's chat-start email field took `x" onmouseover="alert(document.domain)"
 -- data-x="` on 2026-10-22 and ran in the operator's browser. Explicit markup
--- only, on the decoded body (s: get_norm_body, lowercase):
---   ATTR_BREAKOUT  a quote, then (blanks, `+`, `/`, or other attributes up to
---                  the next quote) an event handler and `=`: the value
---                  closes its attribute and opens a handler;
+-- only, on the decoded body (s: get_norm_body, lowercase). cfm.waf.log never
+-- carries the body, so the tag is the burn-in's only description of a hit:
 --   TAG_HANDLER    a tag carrying an event handler (`<img src=x onerror=`,
---                  `<svg/onload=`): `<` + a letter, then within the tag (no
---                  `<` / `>`) a blank, `+`, `/` or quote before the handler
---                  and `=`;
+--                  `<svg/onload=`, `<a href="x" onclick=`): `<` + a letter,
+--                  then within the tag (no `<` / `>`) a blank, `+`, `/` or
+--                  quote before the handler. Checked first, so markup with a
+--                  quoted attribute before its handler is not called a
+--                  breakout;
+--   ATTR_BREAKOUT  no tag: a quote, then the handler (`x" onmouseover=`), or a
+--                  blank right after the quote, a few attributes and the
+--                  handler (`x" autofocus onfocus=`), never across a line or
+--                  another quote. The blank keeps out prose: a JSON value
+--                  ("set onclick=x"), an apostrophe (it's … onchange =), a
+--                  multipart part header's closing quote;
 --   SCRIPT_TAG     `<script` followed by a blank, `+`, `>` or `/`;
---   JS_URI         `javascript:` right after a quote or an `=` (an href, or
---                  a field whose value starts with it).
--- A JSON key ("onclick": …) never matches: a key is followed by `:`.
+--   JS_URI         `javascript:` right after a quote or an `=`, then code: an
+--                  identifier and `(`, `/`, `.` or a backtick
+--                  (`javascript:alert(1)`, `javascript:/*`). Prose ("JavaScript:
+--                  The Good Parts", a subject field) has none.
+-- The handler set is 302's plus handlers that fire without a click, which a
+-- log-only rule can afford (XSS_BODY_EXTRA_HANDLERS). The three loops run only
+-- when the body holds an `on<word>=` at all.
 -- Returns the tag or nil.
+local XSS_BODY_EXTRA_HANDLERS = {
+  onfocusin = true, onresize = true, onbeforeunload = true, onunload = true,
+  onpagehide = true, onhashchange = true, onmessage = true, onpopstate = true,
+  onanimationcancel = true, oncontentvisibilityautostatechange = true,
+  onpointercancel = true, onselect = true, onpaste = true, ontouchstart = true,
+  oninvalid = true,
+}
+local function xss_body_handler(h)
+  return XSS_EVENT_HANDLERS[h] or XSS_BODY_EXTRA_HANDLERS[h]
+end
+
 function _M.detect_xss_body(s)
   if not s or s == "" then return nil end
-  for handler in s:gmatch("[\"'`][%s+/]*(on%a+)[%s+]*=") do
-    if XSS_EVENT_HANDLERS[handler] then return "ATTR_BREAKOUT" end
-  end
-  -- …or a few attributes later (`x" autofocus onfocus="…`): within the same
-  -- run up to the next quote or angle bracket, after a blank, `+` or `/`.
-  for handler in s:gmatch("[\"'`][^\"'`<>=]-[%s+/](on%a+)[%s+]*=") do
-    if XSS_EVENT_HANDLERS[handler] then return "ATTR_BREAKOUT" end
-  end
-  -- Linear: a start is `<` + a letter, and `[^<>]` stops each scan at the
-  -- next angle bracket.
-  for handler in s:gmatch("<%a[^<>]-[%s+/\"'](on%a+)[%s+]*=") do
-    if XSS_EVENT_HANDLERS[handler] then return "TAG_HANDLER" end
+  if s:find("on%a+[%s+]*=") then
+    -- Linear: a start is `<` + a letter, or a quote, and every run stops at
+    -- the next angle bracket (or quote / line).
+    for handler in s:gmatch("<%a[^<>]-[%s+/\"'](on%a+)[%s+]*=") do
+      if xss_body_handler(handler) then return "TAG_HANDLER" end
+    end
+    for handler in s:gmatch("[\"'`][%s+/]*(on%a+)[%s+]*=") do
+      if xss_body_handler(handler) then return "ATTR_BREAKOUT" end
+    end
+    for handler in s:gmatch("[\"'`][%s+/][^\"'`<>=\r\n]-[%s+/](on%a+)[%s+]*=") do
+      if xss_body_handler(handler) then return "ATTR_BREAKOUT" end
+    end
   end
   if s:find("<script[%s>/+]") then return "SCRIPT_TAG" end
-  if s:find("[\"'=][%s+]*javascript:") then return "JS_URI" end
+  if s:find("[\"'=][%s+]*javascript:[%s+]*[%w_$]*[%(/%.`]") then return "JS_URI" end
   return nil
 end
 
@@ -1428,9 +1449,10 @@ end
 -- WordPress user (wordpress_logged_in_ cookie: the block / classic editor,
 -- Elementor and the other page builders save markup through admin-ajax and
 -- the REST API with it), a request carrying Authorization (REST / API
--- clients: application passwords, WooCommerce keys, site managers),
--- WordPress's admin pages except admin-ajax.php and admin-post.php (anonymous
--- front-end forms post there too), and Joomla's /administrator/.
+-- clients: application passwords, WooCommerce keys, site managers; also any
+-- form behind HTTP basic auth), WordPress's admin pages except admin-ajax.php
+-- and admin-post.php (anonymous front-end forms post there too), Joomla's
+-- /administrator/ and Live Helper Chat's operator area /site_admin/.
 function _M.xss_body_admin_request(uri, cookie, headers)
   if has(lower(cookie or ""), "wordpress_logged_in_") then return true end
   if headers and (headers["authorization"] or headers["Authorization"]) then return true end
@@ -1438,6 +1460,7 @@ function _M.xss_body_admin_request(uri, cookie, headers)
   if has(u, "/wp-admin/") and not has(u, "/wp-admin/admin-ajax.php")
      and not has(u, "/wp-admin/admin-post.php") then return true end
   if has(u, "/administrator/") then return true end
+  if has(u, "/site_admin/") then return true end
   return false
 end
 

@@ -77,6 +77,15 @@ fires(post("Email=x%22+onclick%3D1", { uri = "/wp-admin/admin-post.php" }), "ATT
   "anonymous admin-post (front-end forms post there) is scanned")
 clean(post("text=%22hi%22+then+online%3D1"), "a quoted word, then a non-handler on…=")
 
+-- Tags name the payload right: markup with a quoted attribute before its
+-- handler is a tag, not a breakout.
+fires(post('c=<svg xmlns="http://www.w3.org/2000/svg" onload="x()">'), "TAG_HANDLER", "svg with a quoted attr first")
+fires(post('c=<a href="x" onclick="ga()">'), "TAG_HANDLER", "a href then onclick")
+-- Handlers 302 lacks that fire on their own.
+fires(post("c=x%22+onfocusin%3D%22alert(1)%22+autofocus"), "ATTR_BREAKOUT", "onfocusin")
+fires(post("c=%3Cbody+onhashchange%3Dalert(1)%3E"), "TAG_HANDLER", "onhashchange")
+fires(post("c=%22%3E%3Ca+href%3D%22javascript:alert(1)%22%3E"), "JS_URI", "javascript: with code")
+
 -- ── Not markup ──────────────────────────────────────────────────────────────
 clean(post("Email=user%40example.com&Question=Hello%2C+I+need+help"), "an ordinary form")
 clean(post('{"onclick":"track","online":true}', { ct = "application/json" }), "a JSON key named like a handler")
@@ -84,6 +93,14 @@ clean(post("text=he said \"online=yes\" and left"), "on…= that is not a handle
 clean(post("text=the scripture says"), "<script needs a tag")
 clean(post("text=see <scripts/> folder"), "<scripts is not <script")
 clean(post("note=I+like+javascript:+the+good+parts"), "javascript: in prose")
+clean(post("subject=JavaScript%3A+closures+explained"), "a subject that starts with JavaScript:")
+clean(post('{"title":"JavaScript: a primer"}', { ct = "application/json" }), "JSON prose JavaScript:")
+clean(post("ref=https%3A%2F%2Fx.example%2F%3Fa%3Djavascript:void"), "javascript:void with no call")
+clean(post("msg=It%27s+weird%2C+the+onchange+%3D+event+fires"), "apostrophe, then prose onchange =")
+clean(post('{"m":"set onclick=x"}', { ct = "application/json" }), "JSON value with onclick=")
+clean(post("--b\r\nContent-Disposition: form-data; name=\"msg\"\r\n\r\nThe button triggers onclick = handler\r\n--b--\r\n",
+  { ct = "multipart/form-data; boundary=b" }), "multipart prose onclick =")
+clean(post(markup, { uri = "/index.php/site_admin/chat/single/5" }), "LHC operator area")
 fires(post("website=javascript:alert(1)"), "JS_URI", "a field that is a javascript: URL")
 fires(post("comment=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E"), "TAG_HANDLER", "<img onerror=>")
 fires(post("comment=<svg/onload=alert(1)>"), "TAG_HANDLER", "<svg/onload=>")

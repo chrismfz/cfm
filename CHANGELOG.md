@@ -25,10 +25,12 @@ back-filled here — see the git/PR history for that period.
   it ran in the operator's browser. The new rule logs explicit markup in the
   body: a quote breaking out of an attribute into an event handler, a tag
   carrying an event handler (`<img onerror=`), a `<script` tag, a
-  `javascript:` URL. It skips logged-in WordPress users, API clients (an
-  `Authorization` header) and the `/wp-admin/` (except admin-ajax and
-  admin-post) and `/administrator/` paths, where editors and page builders
-  post markup by design. Log-only: it blocks nothing, and
+  `javascript:` URL followed by code. It skips logged-in WordPress users,
+  requests with an `Authorization` header (API clients, forms behind HTTP
+  basic auth) and the `/wp-admin/` (except admin-ajax and admin-post),
+  `/administrator/` and Live Helper Chat `/site_admin/` paths, where editors
+  and operators post markup by design. Other apps' admin areas (OpenCart,
+  PrestaShop, Drupal, WHMCS tickets with code) will show up in its log. Log-only: it blocks nothing, and
   its fleet hits decide whether it is ever promoted.
 - **phpMyAdmin logins count toward the login-burst rule (501).** Eight
   `pma_password` submissions in 20 seconds from one IP to a `phpmyadmin` path

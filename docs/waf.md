@@ -1058,7 +1058,9 @@ Current assignments:
                                                                     body — attribute breakout, a tag with an event handler,
                                                                     <script, a javascript: URL; not for a logged-in WordPress
                                                                     user, a request with Authorization, /wp-admin/ (not
-                                                                    admin-ajax / admin-post) or /administrator/; runs after
+                                                                    admin-ajax / admin-post), /administrator/ or LHC's
+                                                                    /site_admin/; expected noise: other apps' admin areas
+                                                                    (OpenCart, PrestaShop, Drupal, WHMCS tickets); runs after
                                                                     the 421-439 scanners so it never takes their headline)
 
 4xx — Upload / malware

@@ -76,10 +76,12 @@ var wafRuleIDs = []WAFRule{
 	{ID: 319, Name: "rule_sqli_union_variant", ReasonFamily: "WAF_SQLI_UNION_VARIANT", DefaultMode: "challenge_v2"},
 	{ID: 318, Name: "rule_superglobal_override", ReasonFamily: "WAF_SUPERGLOBAL", DefaultMode: "challenge_v2"},
 	{ID: 302, Name: "rule_xss", ReasonFamily: "WAF_XSS", DefaultMode: "challenge_v2"},
-	// Explicit XSS markup in a POST body (attribute breakout, <script, a
-	// javascript: href); not for a logged-in WordPress user or a CMS admin
-	// path. Logonly through burn-in: visibility for stored XSS posted in a
-	// form field, which 302 (path + query) never read.
+	// Explicit XSS markup in a POST body (a tag with an event handler, an
+	// attribute breakout, <script, a javascript: URL); not for a logged-in
+	// WordPress user, a request with Authorization, /wp-admin/ (except
+	// admin-ajax / admin-post), /administrator/ or LHC's /site_admin/.
+	// Logonly through burn-in: visibility for stored XSS posted in a form
+	// field, which 302 (path + query) never read.
 	{ID: 330, Name: "rule_xss_body", ReasonFamily: "WAF_XSS_BODY", DefaultMode: "logonly"},
 	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "challenge_v2"},
 	{ID: 304, Name: "rule_b64_injection", ReasonFamily: "WAF_B64_INJECT", DefaultMode: "challenge_v2"},
