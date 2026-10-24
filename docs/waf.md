@@ -1060,7 +1060,8 @@ Current assignments:
                                                                     TranslatePress / PixelYourSite noise, 99.8% of 48 h of
                                                                     hits); not for a logged-in WordPress user, a request with
                                                                     Authorization, /wp-admin/ (not admin-ajax / admin-post),
-                                                                    /administrator/, LHC's /site_admin/ or /cpsess<N>/;
+                                                                    /administrator/, LHC's /site_admin/ or /cpsess<N>/ on
+                                                                    a cpanel./whm./webmail. host;
                                                                     expected noise: other apps' admin areas
                                                                     (OpenCart, PrestaShop, Drupal, WHMCS tickets); runs after
                                                                     the 421-439 scanners so it never takes their headline)

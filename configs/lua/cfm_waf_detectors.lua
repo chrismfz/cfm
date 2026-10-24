@@ -1452,9 +1452,23 @@ end
 -- form behind HTTP basic auth), WordPress's admin pages except admin-ajax.php
 -- and admin-post.php (anonymous front-end forms post there too), Joomla's
 -- /administrator/, Live Helper Chat's operator area /site_admin/, and a
--- cPanel session path (/cpsess<N>/, File Manager saving a user's .html on a
--- cpanel.* proxy host; the same carve-out the malpath matchers make).
-function _M.xss_body_admin_request(uri, cookie, headers)
+-- cPanel session path (/cpsess<N>/: File Manager saving a user's .html) on a
+-- cpanel./whm./webmail. proxy host only (cfm_panel_hosts.is_proxy_panel_host).
+-- Not on any host, as the malpath matchers skip it: a body rule's request
+-- still reaches the app (WordPress boots for POST /cpsess1/x and its plugins
+-- read $_POST), so a host-free skip would let a payload go unlogged. Not
+-- gated on proxy_hosts_reach_panel either: the File Manager hit came from a
+-- node where that gate is off. The module missing (upgrade lag): no skip.
+local xss_panel_hosts
+local function xss_is_panel_host(host)
+  if xss_panel_hosts == nil then
+    local ok, m = pcall(require, "cfm_panel_hosts")
+    xss_panel_hosts = (ok and type(m) == "table" and m.is_proxy_panel_host) and m or false
+  end
+  return xss_panel_hosts and xss_panel_hosts.is_proxy_panel_host(host) or false
+end
+
+function _M.xss_body_admin_request(uri, cookie, headers, host)
   if has(lower(cookie or ""), "wordpress_logged_in_") then return true end
   if headers and (headers["authorization"] or headers["Authorization"]) then return true end
   local u = lower(uri or "")
@@ -1462,7 +1476,7 @@ function _M.xss_body_admin_request(uri, cookie, headers)
      and not has(u, "/wp-admin/admin-post.php") then return true end
   if has(u, "/administrator/") then return true end
   if has(u, "/site_admin/") then return true end
-  if u:find("^/cpsess%d+/") then return true end
+  if u:find("^/cpsess%d+/") and xss_is_panel_host(host) then return true end
   return false
 end
 

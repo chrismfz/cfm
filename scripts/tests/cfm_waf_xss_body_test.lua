@@ -102,8 +102,20 @@ clean(post("--b\r\nContent-Disposition: form-data; name=\"msg\"\r\n\r\nThe butto
   { ct = "multipart/form-data; boundary=b" }), "multipart prose onclick =")
 clean(post(markup, { uri = "/index.php/site_admin/chat/single/5" }), "LHC operator area")
 clean(post("website=javascript:alert(1)"), "a javascript: field value (no tag)")
-clean(post("content=%3Chtml%3E%3Cscript%3Ex()%3C%2Fscript%3E", { uri = "/cpsess2562032739/json-api/cpanel" }),
-  "cPanel File Manager save on a cpanel.* proxy host")
+do
+  local fm = "content=%3Chtml%3E%3Cscript%3Ex()%3C%2Fscript%3E"
+  local c = post(fm, { uri = "/cpsess2562032739/json-api/cpanel" })
+  c.host = "cpanel.trouvas.gr"
+  clean(c, "cPanel File Manager save on a cpanel.* proxy host")
+  c = post(fm, { uri = "/CPSESS2562032739/json-api/cpanel" }); c.host = "cpanel.trouvas.gr"
+  clean(c, "uppercase CPSESS on a proxy host")
+  c = post(fm, { uri = "/cpsess1/x" }); c.host = "www.wp-site.gr"
+  fires(c, "SCRIPT_TAG", "/cpsess on a non-panel host is still scanned (WordPress boots for it)")
+  c = post(fm, { uri = "/cpsess1/x" })
+  fires(c, "SCRIPT_TAG", "/cpsess with no host is still scanned")
+  c = post(fm, { uri = "/cpsess1/x" }); c.host = "cpanel.gr"
+  fires(c, "SCRIPT_TAG", "cpanel.<public suffix> is a tenant domain, not a proxy host")
+end
 fires(post("content=%3Cscript%3Ex()%3C%2Fscript%3E", { uri = "/x/cpsess12/y" }), "SCRIPT_TAG",
   "cpsess only as the first path segment")
 fires(post("comment=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E"), "TAG_HANDLER", "<img onerror=>")

@@ -79,7 +79,8 @@ var wafRuleIDs = []WAFRule{
 	// Explicit XSS markup in a POST body (a tag with an event handler, an
 	// attribute breakout, <script); not for a logged-in WordPress user, a
 	// request with Authorization, /wp-admin/ (except admin-ajax / admin-post),
-	// /administrator/, LHC's /site_admin/ or a cPanel /cpsess<N>/ path.
+	// /administrator/, LHC's /site_admin/ or a cPanel /cpsess<N>/ path on a
+	// cpanel./whm./webmail. proxy host.
 	// Logonly through burn-in: visibility for stored XSS posted in a form
 	// field, which 302 (path + query) never read.
 	{ID: 330, Name: "rule_xss_body", ReasonFamily: "WAF_XSS_BODY", DefaultMode: "logonly"},
