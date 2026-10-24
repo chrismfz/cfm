@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.24
+
 ### Changed
 - **Rule 330 (`WAF_XSS_BODY`, logonly) no longer logs `javascript:` URLs,
   and skips cPanel session paths.** In its first 48 hours on seven nodes the
