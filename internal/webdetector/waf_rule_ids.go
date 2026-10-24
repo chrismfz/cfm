@@ -77,9 +77,10 @@ var wafRuleIDs = []WAFRule{
 	{ID: 318, Name: "rule_superglobal_override", ReasonFamily: "WAF_SUPERGLOBAL", DefaultMode: "challenge_v2"},
 	{ID: 302, Name: "rule_xss", ReasonFamily: "WAF_XSS", DefaultMode: "challenge_v2"},
 	// Explicit XSS markup in a POST body (a tag with an event handler, an
-	// attribute breakout, <script, a javascript: URL); not for a logged-in
-	// WordPress user, a request with Authorization, /wp-admin/ (except
-	// admin-ajax / admin-post), /administrator/ or LHC's /site_admin/.
+	// attribute breakout, <script); not for a logged-in WordPress user, a
+	// request with Authorization, /wp-admin/ (except admin-ajax / admin-post),
+	// /administrator/, LHC's /site_admin/ or a cPanel /cpsess<N>/ path on a
+	// cpanel./whm./webmail. proxy host.
 	// Logonly through burn-in: visibility for stored XSS posted in a form
 	// field, which 302 (path + query) never read.
 	{ID: 330, Name: "rule_xss_body", ReasonFamily: "WAF_XSS_BODY", DefaultMode: "logonly"},

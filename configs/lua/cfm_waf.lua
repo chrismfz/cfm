@@ -91,7 +91,7 @@ local CFG = {
                                        -- served; FP cost unchanged (a real
                                        -- user's solve still passes — absence
                                        -- never convicts, D5b).
-  rule_xss_body        = "logonly",      -- explicit markup in a POST body (attribute breakout `" onmouseover=`, `<script` tag, `javascript:` in an attribute, a tag carrying an event handler), not with a WordPress login cookie or an Authorization header, or on /wp-admin/ (not admin-ajax / admin-post), /administrator/ or LHC's /site_admin/. Visibility only: rule 302 reads the path and query, and a stored-XSS payload in a form field (LHC's chat email field, 2026-10-22) passed unseen. Logonly through burn-in; page builders and editors post markup legitimately.
+  rule_xss_body        = "logonly",      -- explicit markup in a POST body (attribute breakout `" onmouseover=`, `<script` tag, a tag carrying an event handler; `javascript:` dropped 2026-10-24, it was 99.8% of the hits and all noise), not with a WordPress login cookie or an Authorization header, or on /wp-admin/ (not admin-ajax / admin-post), /administrator/, LHC's /site_admin/ or a cPanel /cpsess<N>/ path on a cpanel./whm./webmail. host. Visibility only: rule 302 reads the path and query, and a stored-XSS payload in a form field (LHC's chat email field, 2026-10-22) passed unseen. Logonly through burn-in; page builders and editors post markup legitimately.
   rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
   rule_sqli_blind_lexical = "block", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted challenge→block 2026-08-23 after expanded fleet burn-in; prior 188/188 TP, 0 FP review (docs/waf.md)
   rule_sqli_union_variant = "challenge_v2",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; promoted logonly→challenge 2026-08-23, challenge→challenge_v2 2026-09-23 (pure sqlmap-style attack traffic; solves get the Rung-1 humanity gate) — docs/waf.md
@@ -2444,7 +2444,7 @@ local function check_impl(ctx, st)
   -- control (a junk login cookie skips it) — fine for a log-only rule.
   do
     local mode = rule_mode(CFG.rule_xss_body, "logonly")
-    if mode ~= "disabled" and body_inspect_ok and not det.xss_body_admin_request(uri, cookie, headers) then
+    if mode ~= "disabled" and body_inspect_ok and not det.xss_body_admin_request(uri, cookie, headers, ctx.host) then
       local tag = det.detect_xss_body(get_norm_body())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec

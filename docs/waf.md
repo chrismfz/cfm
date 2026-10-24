@@ -1056,10 +1056,13 @@ Current assignments:
                                        329  rule_php_object_injection
                                        330  rule_xss_body           (logonly, 2026-10-22: explicit XSS markup in a POST
                                                                     body — attribute breakout, a tag with an event handler,
-                                                                    <script, a javascript: URL; not for a logged-in WordPress
-                                                                    user, a request with Authorization, /wp-admin/ (not
-                                                                    admin-ajax / admin-post), /administrator/ or LHC's
-                                                                    /site_admin/; expected noise: other apps' admin areas
+                                                                    <script (a javascript: URL tag was dropped 2026-10-24:
+                                                                    TranslatePress / PixelYourSite noise, 99.8% of 48 h of
+                                                                    hits); not for a logged-in WordPress user, a request with
+                                                                    Authorization, /wp-admin/ (not admin-ajax / admin-post),
+                                                                    /administrator/, LHC's /site_admin/ or /cpsess<N>/ on
+                                                                    a cpanel./whm./webmail. host;
+                                                                    expected noise: other apps' admin areas
                                                                     (OpenCart, PrestaShop, Drupal, WHMCS tickets); runs after
                                                                     the 421-439 scanners so it never takes their headline)
 
