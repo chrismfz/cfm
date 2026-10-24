@@ -64,7 +64,7 @@ fires(post('{"email":"x\\" onmouseover=\\"alert(1)"}', { ct = "application/json"
   "ATTR_BREAKOUT", "JSON body, escaped quote")
 fires(post("comment=%3Cscript%3Ealert(1)%3C%2Fscript%3E"), "SCRIPT_TAG", "<script> in a comment")
 fires(post("comment=<SCRIPT src=//evil/x.js>"), "SCRIPT_TAG", "<SCRIPT src=")
-fires(post("url=%22+href%3D%22javascript:alert(1)"), "JS_URI", "javascript: href")
+clean(post("url=%22+href%3D%22javascript:alert(1)"), "javascript: is no longer a tag (TranslatePress / PixelYourSite noise)")
 fires(post("--b\r\nContent-Disposition: form-data; name=\"email\"\r\n\r\nx\" onclick=\"alert(1)\r\n--b--\r\n",
   { ct = "multipart/form-data; boundary=b" }), "ATTR_BREAKOUT", "multipart field")
 
@@ -84,7 +84,7 @@ fires(post('c=<a href="x" onclick="ga()">'), "TAG_HANDLER", "a href then onclick
 -- Handlers 302 lacks that fire on their own.
 fires(post("c=x%22+onfocusin%3D%22alert(1)%22+autofocus"), "ATTR_BREAKOUT", "onfocusin")
 fires(post("c=%3Cbody+onhashchange%3Dalert(1)%3E"), "TAG_HANDLER", "onhashchange")
-fires(post("c=%22%3E%3Ca+href%3D%22javascript:alert(1)%22%3E"), "JS_URI", "javascript: with code")
+clean(post("c=%3Ca+href%3D%22javascript:void(0)%22%3E"), "a page's own javascript:void(0) link")
 
 -- ── Not markup ──────────────────────────────────────────────────────────────
 clean(post("Email=user%40example.com&Question=Hello%2C+I+need+help"), "an ordinary form")
@@ -101,7 +101,11 @@ clean(post('{"m":"set onclick=x"}', { ct = "application/json" }), "JSON value wi
 clean(post("--b\r\nContent-Disposition: form-data; name=\"msg\"\r\n\r\nThe button triggers onclick = handler\r\n--b--\r\n",
   { ct = "multipart/form-data; boundary=b" }), "multipart prose onclick =")
 clean(post(markup, { uri = "/index.php/site_admin/chat/single/5" }), "LHC operator area")
-fires(post("website=javascript:alert(1)"), "JS_URI", "a field that is a javascript: URL")
+clean(post("website=javascript:alert(1)"), "a javascript: field value (no tag)")
+clean(post("content=%3Chtml%3E%3Cscript%3Ex()%3C%2Fscript%3E", { uri = "/cpsess2562032739/json-api/cpanel" }),
+  "cPanel File Manager save on a cpanel.* proxy host")
+fires(post("content=%3Cscript%3Ex()%3C%2Fscript%3E", { uri = "/x/cpsess12/y" }), "SCRIPT_TAG",
+  "cpsess only as the first path segment")
 fires(post("comment=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E"), "TAG_HANDLER", "<img onerror=>")
 fires(post("comment=<svg/onload=alert(1)>"), "TAG_HANDLER", "<svg/onload=>")
 clean(post("comment=a+<b>bold</b>+and+<i>online=1</i>"), "plain tags, no handler")

@@ -1406,10 +1406,10 @@ end
 --                  ("set onclick=x"), an apostrophe (it's … onchange =), a
 --                  multipart part header's closing quote;
 --   SCRIPT_TAG     `<script` followed by a blank, `+`, `>` or `/`;
---   JS_URI         `javascript:` right after a quote or an `=`, then code: an
---                  identifier and `(`, `/`, `.` or a backtick
---                  (`javascript:alert(1)`, `javascript:/*`). Prose ("JavaScript:
---                  The Good Parts", a subject field) has none.
+-- No `javascript:` tag: in its first 48 h on seven nodes (2026-10-22..24) it
+-- was 2 826 of 2 831 hits and caught no attack — TranslatePress (trp-ajax.php)
+-- and PixelYourSite post the page's own `href="javascript:void(0)"` links.
+-- The LHC-style breakout (`x" onmouseover=`) is ATTR_BREAKOUT's.
 -- The handler set is 302's plus handlers that fire without a click, which a
 -- log-only rule can afford (XSS_BODY_EXTRA_HANDLERS). The three loops run only
 -- when the body holds an `on<word>=` at all.
@@ -1441,7 +1441,6 @@ function _M.detect_xss_body(s)
     end
   end
   if s:find("<script[%s>/+]") then return "SCRIPT_TAG" end
-  if s:find("[\"'=][%s+]*javascript:[%s+]*[%w_$]*[%(/%.`]") then return "JS_URI" end
   return nil
 end
 
@@ -1452,7 +1451,9 @@ end
 -- clients: application passwords, WooCommerce keys, site managers; also any
 -- form behind HTTP basic auth), WordPress's admin pages except admin-ajax.php
 -- and admin-post.php (anonymous front-end forms post there too), Joomla's
--- /administrator/ and Live Helper Chat's operator area /site_admin/.
+-- /administrator/, Live Helper Chat's operator area /site_admin/, and a
+-- cPanel session path (/cpsess<N>/, File Manager saving a user's .html on a
+-- cpanel.* proxy host; the same carve-out the malpath matchers make).
 function _M.xss_body_admin_request(uri, cookie, headers)
   if has(lower(cookie or ""), "wordpress_logged_in_") then return true end
   if headers and (headers["authorization"] or headers["Authorization"]) then return true end
@@ -1461,6 +1462,7 @@ function _M.xss_body_admin_request(uri, cookie, headers)
      and not has(u, "/wp-admin/admin-post.php") then return true end
   if has(u, "/administrator/") then return true end
   if has(u, "/site_admin/") then return true end
+  if u:find("^/cpsess%d+/") then return true end
   return false
 end
 

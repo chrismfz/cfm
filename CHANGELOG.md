@@ -17,7 +17,15 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **Rule 330 (`WAF_XSS_BODY`, logonly) no longer logs `javascript:` URLs,
+  and skips cPanel session paths.** In its first 48 hours on seven nodes the
+  `javascript:` tag was 2 826 of 2 831 hits and caught no attack: Translate-
+  Press (`trp-ajax.php`) and PixelYourSite (`/wp-json/pys-facebook/v1/event`)
+  post the page's own `href="javascript:void(0)"` links. The other tags
+  (attribute breakout, a tag with an event handler, `<script`) fired 5 times:
+  a CS-Cart scanner on two sites, a CS-Cart admin and a cPanel File Manager
+  save through `cpanel.<domain>/cpsess<N>/`, which is now skipped.
 
 ## 2026.10.22
 
