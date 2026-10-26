@@ -229,6 +229,12 @@ var wafRuleIDs = []WAFRule{
 	// / same-site Sec-Fetch-Site (Referrer-Policy: no-referrer).
 	{ID: 10023, Name: "rule_cve_php2shell_tool", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10024, Name: "rule_cve_php_upload_progress", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	// 10025: CVE-2026-1844 / CVE-2026-1841 / CVE-2026-109987, PixelYourSite
+	// unauth stored XSS. A pysTrafficSource / pys_landing_page cookie (or
+	// its last_ twin) whose PHP-decoded value carries markup reaches a
+	// WooCommerce order and runs in the admin who opens it. Armed: the
+	// plugin only stores URLs and host names there.
+	{ID: 10025, Name: "rule_cve_pixelyoursite_xss", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.
