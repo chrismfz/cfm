@@ -78,7 +78,7 @@ fires(ck('a=1;pysTrafficSource=<script>x</script>'), "no space after the ';' del
 fires(ck('a=1;\t  pysTrafficSource=<b>'), "whitespace-padded name (PHP drops it)", MARKUP)
 fires(ck('%70ysTrafficSource=%3Cscript%3E'), "encoded name over-reads on the safe side", MARKUP)
 fires(ck('PYSTRAFFICSOURCE=<script>'), "case variant over-reads on the safe side", MARKUP)
-fires(ck('pys.landing.page=x>y'), "dotted name PHP registers as pys_landing_page", MARKUP)
+fires(ck('pys.landing.page=x<b>y'), "dotted name PHP registers as pys_landing_page", MARKUP)
 fires(ck('pys_utm_source=<img src=x onerror=alert(1)>'), "UTM cookie (printUtm prints it raw)", MARKUP)
 fires(ck('last_pys_utm_campaign=%3Csvg%2Fonload%3Dalert(1)%3E'), "last_ UTM cookie", MARKUP)
 
@@ -86,12 +86,18 @@ fires(ck('last_pys_utm_campaign=%3Csvg%2Fonload%3Dalert(1)%3E'), "last_ UTM cook
 fires(ck('pys_landing_page=https://shop.gr/" onmouseover="alert(1)'), "space-separated handler", ATTR)
 fires(ck('pys_landing_page=https://shop.gr/x"onmouseover="alert(1)'), "handler with no space", ATTR)
 fires(ck('pys_landing_page=x%22%2Fstyle%3D%22x'), "encoded quote + /style=", ATTR)
+fires(ck('pys_landing_page=x" tabindex=1 autofocus onfocus=alert(1) x="'), "other attributes before the handler (review BP1)", ATTR)
+fires(ck('pys_landing_page=x%22%20title%3Dy%20onmouseover%3Dalert(1)'), "encoded, title= first", ATTR)
 
 -- a landing URL that runs on click
 fires(ck('pys_landing_page=javascript:alert(document.cookie)'), "javascript: landing URL", SCRIPT_URL)
 fires(ck('pys_landing_page=javascript%3Aalert(1)'), "encoded colon", SCRIPT_URL)
 fires(ck('last_pys_landing_page=java%09script:alert(1)'), "tab inside the scheme (browsers drop it)", SCRIPT_URL)
 fires(ck('pys_landing_page="data:text/html;base64,PHNjcmlwdD4="'), "quoted data: URL", SCRIPT_URL)
+fires(ck('pys_landing_page=javascript&colon;alert(1)'), "&colon; (HTML decodes it in href; review BP2)", SCRIPT_URL)
+fires(ck('pys_landing_page=javascript%26%2358%3Balert(1)'), "encoded &#58;", SCRIPT_URL)
+fires(ck('pys_landing_page=%26%23106%3Bavascript:alert(1)'), "&#106; for the j", SCRIPT_URL)
+fires(ck('pys_landing_page=java%26Tab%3Bscript:alert(1)'), "&Tab; inside the scheme (encoded: a raw ; ends the cookie)", SCRIPT_URL)
 
 -- ── 10025 Referer host (getTrafficSource copies parse_url(...)['host']) ─────
 fires(req({ referer = "http://x<img src=x onerror=alert(1)>y" }), "markup in the host", REF)
@@ -107,6 +113,8 @@ fires(req({ args = "a=1&utm.content=<b>" }), "dotted key PHP registers as utm_co
 -- ── 10026 raw request path (the landing page's session copy) ───────────────
 fires(req({ raw_uri = "/<iframe/srcdoc=x>" }), "raw markup in the path", PATH)
 fires(req({ raw_uri = '/x"onmouseover="alert(1)?a=1' }), "quote opening an attribute in the path", PATH_ATTR)
+fires(req({ raw_uri = '/x"/title=y/onmouseover=alert(1)' }), "slash-separated attributes (review BP1)", PATH_ATTR)
+fires(req({ raw_uri = '/x"autofocus/onfocus=alert(1)' }), "autofocus then onfocus", PATH_ATTR)
 
 -- ── Negatives ───────────────────────────────────────────────────────────────
 clean(req(), "nothing")
@@ -136,6 +144,24 @@ clean(req({ args = "utm_source=newsletter&utm_campaign=summer+sale" }), "real ut
 clean(req({ args = "q=<b>" }), "markup in a non-utm field (rule 302's job)")
 clean(req({ raw_uri = "/product/%3Cb%3E?x=<b>" }), "encoded path, markup only in the query")
 clean(req({ raw_uri = "/shop/it's-fine/" }), "apostrophe in a path")
+clean(req({ raw_uri = '/search/"red shoes"' }), "quoted words in a path, no handler")
+clean(req({ raw_uri = "/a>b" }), "bare > in a path")
+-- review FP1: campaign names carry bare < and >
+clean(req({ args = "utm_campaign=Retargeting%20%3E%2030%20days" }), "utm with a bare >")
+clean(req({ args = "utm_campaign=%3C3%20valentines" }), "utm with <3")
+clean(ck("pys_utm_campaign=RT%20%3E%2030d; last_pys_utm_campaign=Sale >50%"), "UTM cookies with a bare >")
+clean(ck("pys_utm_campaign=%3C3%20valentines"), "UTM cookie with <3")
+-- review FP2: the plugin reads $_GET only
+do
+  local c = req({ method = "POST", uri = "/contact/" })
+  c.body = "utm_source=%3Cb%3E&name=x"
+  c.headers["content-type"] = "application/x-www-form-urlencoded"
+  clean(c, "utm_* in a POST body")
+end
+-- review FP3: a landing value with a port and no scheme
+clean(ck("pys_landing_page=www.shop.gr:8080/x"), "host:port landing value")
+clean(ck("pys_landing_page=localhost:8080"), "localhost:port landing value")
+clean(ck("pys_landing_page=https%3A%2F%2Fshop.gr%2F%3Fa%3D1%26amp%3Bb%3D2"), "https URL with an &amp;")
 
 check(det.detect_cve_pixelyoursite_xss("a=%3C") == nil, "a %-bearing cookie without a target name")
 check(det.detect_cve_pixelyoursite_xss(nil) == nil, "nil everything")

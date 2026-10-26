@@ -4113,18 +4113,20 @@ end
 --
 -- Rule 10025 (armed) refuses, on any method (the payload rides on every
 -- request of the bot's session):
---   COOKIE_MARKUP        one of the cookies below holds `<` or `>`;
---   COOKIE_ATTR_BREAKOUT a quote that closes an attribute (`"` then an
---                        `on…=` / `style=` attribute, with or without space);
---   COOKIE_SCRIPT_URL    a landing-page cookie whose URL scheme is not
---                        http(s) (javascript:, data:, with tabs/newlines
---                        dropped as a browser drops them);
+--   COOKIE_MARKUP        one of the cookies below holds a tag opener (`<`
+--                        then a letter, `/`, `!`, `?`; a bare `<`/`>` is a
+--                        campaign name such as "Retargeting > 30 days");
+--   COOKIE_ATTR_BREAKOUT a quote that closes an attribute, then (after any
+--                        other attributes) a known event handler or style;
+--   COOKIE_SCRIPT_URL    a landing-page cookie whose URL, character
+--                        references decoded and tabs/newlines dropped as a
+--                        browser does, is not http(s), a path or host:port;
 --   REFERER_HOST_MARKUP  `<` or `>` in what parse_url takes as the Referer's
 --                        host: the authority after `//`, or the head before
 --                        the first `/` (parse_url reads `x<b>:80` as host:port);
---   QUERY_UTM_MARKUP     `<` or `>` in a utm_* request field.
--- The plugin's own JS stores a URL or a host name (`google.com`, `direct`,
--- `undefined`) there, URL-encoded, so a value never holds `<`/`>`, and a URL,
+--   QUERY_UTM_MARKUP     a tag opener in a utm_* query ($_GET) field.
+-- The plugin's own JS stores a URL, a host name (`google.com`, `direct`,
+-- `undefined`) or the campaign's own UTM text there, never a tag, and a URL,
 -- quoted or not, has no `"` followed by an attribute. Cookie values are
 -- %-decoded (PHP decodes them raw: `+` stays); names are matched after a
 -- %-decode and php_var_name, lowercased, which over-reads (PHP decodes no
@@ -4141,18 +4143,44 @@ for _, t in ipairs({ "source", "medium", "campaign", "term", "content" }) do
 end
 local PYS_UTM_FIELDS = { "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content" }
 
--- A double quote that closes an attribute value and opens a handler (or a
--- style) attribute: `" onmouseover=`, `"onfocus=`, `"/style=`. A URL never
--- has `"` followed by an attribute name and `=`.
+-- A tag opener as HTML reads one: `<` then a letter, `/`, `!` or `?`. A bare
+-- `<`/`>` is text, and real campaign names carry them ("Retargeting > 30
+-- days", "<3 valentines"); in an href value they cannot break out either.
+local function tag_open(v) return v:find("<[%a/!?]") ~= nil end
+
+-- A double quote that closes an attribute value, followed (after any other
+-- attributes: `" tabindex=1 autofocus onfocus=`, `"/title=y/onmouseover=`) by
+-- an event-handler attribute 302 or 330 knows, or a style attribute. The
+-- handler must start an attribute (after space, `/` or the quote), so URL
+-- words such as `/online=` or `utm_content=` do not count, and a URL, quoted
+-- or not, has no quote before them.
 local function attr_breakout(v)
   local vl = lower(v)
-  return vl:find('"[%s/]*on%a+%s*=') ~= nil or vl:find('"[%s/]*style%s*=') ~= nil
+  local q = vl:find('"', 1, true)
+  if not q then return false end
+  local rest = vl:sub(q)
+  for h in rest:gmatch("[%s/\"](on%a+)%s*=") do
+    if xss_body_handler(h) then return true end
+  end
+  return rest:find('[%s/"]style%s*=') ~= nil
 end
 
+-- HTML decodes character references in an attribute value before the URL is
+-- used, and a browser drops tabs and newlines from it: undo both, then the
+-- value must be http(s), a path, or schemeless (a host with a port counts).
+local NAMED_REFS = { colon = ":", tab = "\t", newline = "\n", sol = "/", lpar = "(", rpar = ")" }
+local function html_unescape(s)
+  s = s:gsub("&#[xX](%x+);?", function(h) local n = tonumber(h, 16); return n and n < 256 and string.char(n) or "" end)
+  s = s:gsub("&#(%d+);?", function(d) local n = tonumber(d); return n and n < 256 and string.char(n) or "" end)
+  s = s:gsub("&(%a+);?", function(n) return NAMED_REFS[lower(n)] end)
+  return s
+end
 local function landing_script_url(v)
-  local u = lower(v):gsub("[%c%s]", ""):gsub('^["\']+', "")
-  local scheme = u:match("^(%a[%w+.%-]*):")
-  return scheme ~= nil and scheme ~= "http" and scheme ~= "https"
+  local u = lower(html_unescape(v)):gsub("[%c%s]", ""):gsub('^["\']+', "")
+  if not u:find(":", 1, true) then return false end
+  if u:find("^https?:") or u:find("^/") then return false end
+  if u:find("^[%w%.%-]+:%d") then return false end   -- host:port, no scheme
+  return u:find("^%a[%w+.%-]*:") ~= nil
 end
 
 local function pys_referer_host_markup(headers)
@@ -4176,8 +4204,11 @@ function _M.detect_cve_pixelyoursite_xss(cookie, headers, method, args, body, _n
       local f = get_fields and get_fields()
                 or _M.php_request_fields(method, args, body, headers, _M.PHP_FIELDS_WANT)
       for _, name in ipairs(PYS_UTM_FIELDS) do
-        for _, v in ipairs(f[name] or {}) do
-          if v:find("[<>]") then return "QUERY_UTM_MARKUP" end
+        local t = f[name]
+        if t then
+          for i, v in ipairs(t) do   -- the plugin reads $_GET only
+            if t.srcs[i] == "args" and tag_open(v) then return "QUERY_UTM_MARKUP" end
+          end
         end
       end
     end
@@ -4196,8 +4227,8 @@ function _M.detect_cve_pixelyoursite_xss(cookie, headers, method, args, body, _n
       if PYS_COOKIES[k] then
         local v = pair:sub(eq + 1)
         if v:find("%", 1, true) then v = url_decode_once(v) end
-        if v:find("[<>]") then return "COOKIE_MARKUP" end
-        if v:find('"', 1, true) and attr_breakout(v) then return "COOKIE_ATTR_BREAKOUT" end
+        if tag_open(v) then return "COOKIE_MARKUP" end
+        if attr_breakout(v) then return "COOKIE_ATTR_BREAKOUT" end
         if PYS_LANDING[k] and landing_script_url(v) then return "COOKIE_SCRIPT_URL" end
       end
     end
@@ -4208,8 +4239,8 @@ end
 -- Rule 10026 (edge block, ban held): the landing-page session copy is the raw
 -- REQUEST_URI path of a session's first request, which PHP does not decode.
 -- A browser percent-encodes `"`, `<` and `>` in a path (WHATWG path
--- percent-encode set), so a raw one is a hand-made request: `<`/`>` is
--- PATH_MARKUP, a quote that opens an attribute is PATH_ATTR_BREAKOUT. Rule 302
+-- percent-encode set), so a raw one is a hand-made request: a tag opener is
+-- PATH_MARKUP, a quote that opens a handler attribute is PATH_ATTR_BREAKOUT. Rule 302
 -- (challenge_v2) already sees some of these; this one blocks them, but its
 -- ban is held (HoldAutoblock): generic scanners send the same paths, and
 -- banning and alerting them as CVE-2026-1844 is not what 302's tier chose.
@@ -4217,8 +4248,8 @@ end
 function _M.detect_cve_pixelyoursite_path_xss(raw_uri)
   if not raw_uri or raw_uri == "" then return nil end
   local path = raw_uri:match("^[^?]*")
-  if path:find("[<>]") then return "PATH_MARKUP" end
-  if path:find('"', 1, true) and attr_breakout(path) then return "PATH_ATTR_BREAKOUT" end
+  if tag_open(path) then return "PATH_MARKUP" end
+  if attr_breakout(path) then return "PATH_ATTR_BREAKOUT" end
   return nil
 end
 
