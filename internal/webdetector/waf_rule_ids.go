@@ -229,12 +229,17 @@ var wafRuleIDs = []WAFRule{
 	// / same-site Sec-Fetch-Site (Referrer-Policy: no-referrer).
 	{ID: 10023, Name: "rule_cve_php2shell_tool", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10024, Name: "rule_cve_php_upload_progress", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
-	// 10025: CVE-2026-1844 / CVE-2026-1841 / CVE-2026-109987, PixelYourSite
-	// unauth stored XSS. A pysTrafficSource / pys_landing_page cookie (or
-	// its last_ twin) whose PHP-decoded value carries markup reaches a
-	// WooCommerce order and runs in the admin who opens it. Armed: the
-	// plugin only stores URLs and host names there.
+	// 10025 / 10026: CVE-2026-1844 / CVE-2026-1841 / CVE-2026-109987,
+	// PixelYourSite unauth stored XSS. The plugin stores the traffic source,
+	// landing page and UTMs of a Store API checkout in the WooCommerce order
+	// unescaped, and the script runs in the admin who opens the order.
+	// 10025 (armed) = markup in the pys cookies, the Referer's host or a
+	// utm_* field, or a non-http(s) landing URL. 10026 = a raw `<`, `>` or
+	// attribute-opening quote in the request path (the landing page's
+	// session copy): edge block with its autoblock held, since generic XSS
+	// scanners send the same paths.
 	{ID: 10025, Name: "rule_cve_pixelyoursite_xss", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	{ID: 10026, Name: "rule_cve_pixelyoursite_path_xss", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

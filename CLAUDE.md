@@ -500,7 +500,8 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   rule (10019 and 10020, the TranslatePress id-lookup leg and the
   logged-in reset-preview request; 511, the xmlrpc pingback WordPress itself
   sends, deferred in `cfm_waf.lua` like them; 10022, CVE-2026-109618's
-  length-less multipart leg, which a chunked upload client also sends). The
+  length-less multipart leg, which a chunked upload client also sends;
+  10026, the PixelYourSite raw-path leg, which generic XSS scanners send). The
   armed body rules 10021 (same CVE) and 10024 (CVE-2026-109619's
   `PHP_SESSION_UPLOAD_PROGRESS` field, which the public PHP2Shell tool sent
   past 10021 on 2026-10-21) run FIRST in `check()` and are the body rules
