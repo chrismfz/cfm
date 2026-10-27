@@ -17,7 +17,16 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **No more detector reload loop after a restart on an exim host that has docker
+  installed.** With the docker CLI present and no postfix container, the postfix
+  and dovecot sections assumed a mailcow container was still booting and forced
+  a full detector rebuild once a minute for five minutes after every restart
+  (qualityweb, 2026-10-27). Each rebuild started a new web-detector engine: the
+  edge lost the bridge socket for a moment (decisions failed open, log lines
+  dropped) and the vhost uniqIP windows emptied. A host whose own exim service
+  is running no longer waits for a mail container; a mailcow host (exim stopped)
+  keeps the retry.
 
 ## 2026.10.27
 
