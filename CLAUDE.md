@@ -437,6 +437,10 @@ address bar shows, so fetchers handed that URL (Google-Read-Aloud, Meta link
 previews) fetch it directly, and its location bypasses cfm.lua.
 `challengePageExempt` mirrors the three `handleDecision` blocks and sends
 those clients to `next`; change the blocks and the mirror together. The
+vhost uniqIP count is a third mirror (`vhostChallengeExemptClient`,
+`uniqip_exempt.go`, since 2026-10-27): a client that passes a vhost challenge
+(the good-bot and exclude-file blocks, plus the bypass list the edge flags in
+`log-cfm.lua` column 13) is not counted toward arming one. The
 exception is a `next` that carries a `cfm_rt`: the exemption cannot clear
 that challenged POST, and its owner would lose it. Before 2026-10-06 these
 clients got the PoW: titan served it to meta-externalagent ~1 940 times in

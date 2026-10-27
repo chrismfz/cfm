@@ -53,6 +53,11 @@ type LogRec struct {
 	// routed nowhere it names; empty when the line had no such column (an
 	// edge on the older 12-column module, the combined format).
 	UpstreamName string
+	// Bypass is the edge's $cfm_bypass_ip (log-cfm.lua column 13): the client
+	// is on challenge_waf_bypass.conf, which cfm.lua Step 0 passes before any
+	// challenge. False when the line had no such column (an older module, a
+	// file tailer).
+	Bypass bool
 }
 
 // parseTSV reads the 12-column TSV of the file tailers (access_cfm_tsv.log,
@@ -64,24 +69,25 @@ func parseTSV(line string) (LogRec, bool) { return parseTSVCols(line, false) }
 
 // parseSocketTSV reads a line of the edge's ingest socket (log-cfm.lua), which
 // strips TABs from every field and may add a 13th column, the upstream name,
-// taken as written; an edge still on the older module sends 12. The socket
-// hands over newline-terminated records only (serveConn), so a record cut off
-// mid-send never reads as a 12-column one.
+// taken as written, and a 14th, the bypass flag; an edge still on an older
+// module sends 12 or 13. The socket hands over newline-terminated records only
+// (serveConn), so a record cut off mid-send never reads as a shorter one.
 func parseSocketTSV(line string) (LogRec, bool) { return parseTSVCols(line, true) }
 
 func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 	n := 12
 	if upstreamCol {
-		n = 13
+		n = 14
 	}
 	f := strings.SplitN(line, "\t", n)
 	if len(f) < 12 {
 		return LogRec{}, false
 	}
 	upName := ""
-	if len(f) == 13 {
+	if len(f) >= 13 {
 		upName = f[12]
 	}
+	bypass := len(f) == 14 && f[13] == "1"
 	ts, _ := strconv.ParseFloat(f[0], 64)
 	st, _ := strconv.Atoi(f[6])
 	by, _ := strconv.ParseInt(f[7], 10, 64)
@@ -109,6 +115,7 @@ func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 
 		Upstream:     f[9] != "" && f[9] != "-",
 		UpstreamName: upName,
+		Bypass:       bypass,
 	}, true
 }
 
@@ -164,6 +171,15 @@ type bucketSW struct {
 	sumBytes int64
 
 	ips map[string]int
+
+	// ipsExempt counts, per IP, the requests of a client a vhost-wide
+	// challenge cannot reach (vhostChallengeExemptClient: the bypass list, a
+	// verified good bot, the operator exclude file). An IP all of whose
+	// requests in the window are exempt is left out of UniqueIPs
+	// (countedUniqueIPs): it drives the vhost challenge on, yet passes it, so
+	// only humans would see the challenge it set off. Everything else keeps
+	// reading ips.
+	ipsExempt map[string]int
 
 	// ipsDyn counts DYNAMIC requests per IP only — static assets (css/js/img/
 	// fonts, isStaticAssetPath) excluded. Signal C (abuse_shadow rate outlier)
@@ -1543,6 +1559,10 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		return
 	}
 
+	// Before the engine lock: the matcher reads the bridge's own caches.
+	exempt := rec.IP != "" && e.cfg.ChallengeSuspiciousUniqIPExempt &&
+		e.nginxBridge.vhostChallengeExemptClient(rec.IP, host, rec.UA, rec.Bypass, time.Now())
+
 	t := tsToTime(rec.TS)
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1645,6 +1665,12 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	}
 	if rec.IP != "" {
 		b.ips[rec.IP]++
+		if exempt {
+			if b.ipsExempt == nil {
+				b.ipsExempt = make(map[string]int)
+			}
+			b.ipsExempt[rec.IP]++
+		}
 
 		// Dynamic-only mirror for Signal C — maintained ONLY when the shadow
 		// signal that reads it is enabled (off by default), so it adds no map
@@ -2194,6 +2220,7 @@ func (e *Engine) snapshotMiniLocked(now time.Time) map[string]MiniMetrics {
 		var sumRT float64
 		var sumBytes int64
 		ipCounts := map[string]int{}
+		exemptCounts := map[string]int{}
 		// για diversity / bot signals / methods
 		uaCounts := map[string]int{}
 		pathsUnion := map[string]struct{}{}
@@ -2228,6 +2255,9 @@ func (e *Engine) snapshotMiniLocked(now time.Time) map[string]MiniMetrics {
 			sumBytes += b.sumBytes
 			for ip, n := range b.ips {
 				ipCounts[ip] += n
+			}
+			for ip, n := range b.ipsExempt {
+				exemptCounts[ip] += n
 			}
 			for ua, n := range b.uas {
 				uaCounts[ua] += n
@@ -2278,7 +2308,7 @@ func (e *Engine) snapshotMiniLocked(now time.Time) map[string]MiniMetrics {
 
 		// median per-IP RPS (approx)
 		if len(ipCounts) > 0 {
-			m.UniqueIPs = len(ipCounts)
+			m.UniqueIPs = countedUniqueIPs(ipCounts, exemptCounts)
 			vals := make([]float64, 0, len(ipCounts))
 
 			// μετράμε και “ζεστές” IPs
@@ -2545,6 +2575,7 @@ func (e *Engine) HostDetail(host string, topN int) HostDetail {
 	var sumBytes int64
 
 	ipc := map[string]int{}
+	exc := map[string]int{}
 	uac := map[string]int{}
 	rfc := map[string]int{}
 	ptc := map[string]int{}
@@ -2579,6 +2610,9 @@ func (e *Engine) HostDetail(host string, topN int) HostDetail {
 		for k, v := range b.ips {
 			ipc[k] += v
 		}
+		for k, v := range b.ipsExempt {
+			exc[k] += v
+		}
 		for k, v := range b.uas {
 			uac[k] += v
 		}
@@ -2601,7 +2635,7 @@ func (e *Engine) HostDetail(host string, topN int) HostDetail {
 	var hotIPs int
 
 	if len(ipc) > 0 {
-		uniqueIPs = len(ipc)
+		uniqueIPs = countedUniqueIPs(ipc, exc)
 		vals := make([]float64, 0, len(ipc))
 		const hotRPS = 1.0
 		for _, cnt := range ipc {
@@ -3505,6 +3539,11 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 		URI:    p,
 		Status: status,
 	}
+	// The same vhost uniqIP exemption as ingest (no bypass flag here: a
+	// bypass-listed client skips the WAF), or a WAF hit would make an exempt
+	// client count.
+	exempt := e.cfg.ChallengeSuspiciousUniqIPExempt &&
+		e.nginxBridge.vhostChallengeExemptClient(ip, host, strings.ToLower(strings.TrimSpace(ua)), false, now)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -3562,6 +3601,12 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 		b.ips = make(map[string]int)
 	}
 	b.ips[ip]++
+	if exempt {
+		if b.ipsExempt == nil {
+			b.ipsExempt = make(map[string]int)
+		}
+		b.ipsExempt[ip]++
+	}
 	// Dynamic-only mirror for Signal C (a 403 is a dynamic response; static
 	// assets almost never 403, but gate anyway for parity with the main ingest).
 	// Only maintained when the shadow signal that reads it is enabled.

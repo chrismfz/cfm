@@ -2366,6 +2366,8 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	// a challenge would otherwise be served, so the verify work is limited to
 	// challenged clients. Downgrades "challenge" only; a per-IP "block" is never
 	// softened, and the WAF / traffic-rule engine below still applies.
+	// The good-bot and exclude-file lifts below are mirrored on the count side
+	// by vhostChallengeExemptClient (uniqip_exempt.go): change both.
 	// verifiedBot is computed at most once per decision and shared by the
 	// challenge exemption below and the verified_bot traffic rules further
 	// down. ptrFn is lazy: the enrich/PTR lookup happens only on a good-bot
@@ -2423,7 +2425,8 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 
 	// Operator challenge-exclude file (webdetector_challenge_exclude.txt)
 	// against the VHOST-WIDE challenge, per request (mirrored by
-	// challengePageExempt for the challenge page itself). Before this, a vhost-wide
+	// challengePageExempt for the challenge page itself, and by
+	// vhostChallengeExemptClient for the vhost uniqIP count). Before this, a vhost-wide
 	// challenge (auto suspicious_vhost / under_attack / manual) consulted the
 	// file only through BypassIPTemp for IPs already seen in the vhost's
 	// window, and with an EMPTY UA — so ua-gated rules never matched there.

@@ -168,6 +168,31 @@ do
         "MAX_LINES dropped the overflowed batch, keeping memory bounded")
 end
 
+-- ── record shape: 14 TAB-separated columns, the last two up and bp ──────────
+-- parseSocketTSV (engine.go) reads column 13 as the bypass flag; a conf
+-- without the geo must send "-", never shift or drop a column.
+do
+  local function fields(rec)
+    local f = {}
+    for v in (rec .. "\t"):gmatch("([^\t]*)\t") do f[#f + 1] = v end
+    return f
+  end
+  for _, c in ipairs({ { bp = "1", want = "1" }, { bp = "0", want = "0" }, { bp = nil, want = "-" } }) do
+    local m = fresh()
+    ngx.var = { msec = "1000.0", remote_addr = "17.166.20.62", host = "h", request_method = "GET",
+                request_uri = "/", server_protocol = "HTTP/2.0", status = "200",
+                body_bytes_sent = "10", request_time = "0.001", upstream_response_time = "0.001",
+                http_referer = "", http_user_agent = "ua", cfm_upstream = "cfm_apache",
+                cfm_bypass_ip = c.bp }
+    m.log()
+    fire("interval")
+    local f = fields((sent[1] or ""):gsub("\n$", ""))
+    check(#f == 14, "record has 14 columns (got " .. #f .. ")")
+    check(f[13] == "cfm_apache" and f[14] == c.want,
+          "up/bp columns: got " .. tostring(f[13]) .. "/" .. tostring(f[14]) .. ", want cfm_apache/" .. c.want)
+  end
+end
+
 if fails > 0 then
   io.stderr:write("\n" .. fails .. " test(s) failed in cfm_log_batching_test.lua\n")
   os.exit(1)

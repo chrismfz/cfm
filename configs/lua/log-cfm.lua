@@ -32,11 +32,11 @@
 -- are disabled in a premature timer), same best-effort class as before.
 --
 -- Emits one TSV record per request to /run/cfm/ingest.sock, in the column
--- order of the cfm_tsv access_log format plus a 13th column (below). The
+-- order of the cfm_tsv access_log format plus a 13th and 14th column (below). The
 -- receiver reads it with parseSocketTSV, so the contract MUST stay in sync
 -- with internal/webdetector/engine.go::parseTSVCols.
 --
--- Field order (TAB-separated, newline-terminated, 13 columns):
+-- Field order (TAB-separated, newline-terminated, 14 columns):
 --
 --   idx  field   ngx source               type / notes
 --   ---  ------  -----------------------  ----------------------------------
@@ -56,11 +56,24 @@
 --                                         request: "cfm_apache*" = the site's
 --                                         origin, "cfm_challenge" = CFM's own
 --                                         challenge server, "-" when unset.
---                                         Added 2026-10-08 as the LAST column;
---                                         the daemon reads 12 or 13 (an edge
+--                                         Added 2026-10-08 after ua;
+--                                         the daemon reads 12, 13 or 14 (an edge
 --                                         still on the old module sends 12). An
 --                                         older daemon would fold it into ua, so
 --                                         the package ships both together.
+--   13   bp      ngx.var.cfm_bypass_ip    "1" when the client is on
+--                                         challenge_waf_bypass.conf (cfm.lua
+--                                         Step 0 passes it before any
+--                                         challenge), "0" otherwise, "-" on a
+--                                         conf without the geo. Added
+--                                         2026-10-27: the daemon leaves such a
+--                                         client out of the vhost uniqIP count,
+--                                         since a vhost challenge cannot reach
+--                                         it. It reads 12, 13 or 14 columns; an
+--                                         older daemon folds it into up
+--                                         ("cfm_apache\t1"), which its
+--                                         HasPrefix("cfm_apache") readers still
+--                                         take as the origin.
 --
 -- Connection reuse: setkeepalive(10000, 100) gives us up to 100 pooled
 -- cosockets per worker, idle timeout 10s. First timer per worker pays
@@ -247,6 +260,7 @@ function _M.log()
     clean(var.http_referer),
     clean(var.http_user_agent),
     nz(var.cfm_upstream),
+    nz(var.cfm_bypass_ip),
   }, "\t") .. "\n"
 
   buf_n     = buf_n + 1

@@ -763,6 +763,8 @@ func init() {
 			ChallengeSuspiciousUniqIPOff: kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_OFF", 0),
 			ChallengeSuspiciousUniqIPMax: kvInt(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_MAX", 0),
 
+			ChallengeSuspiciousUniqIPExempt: kvBool(kv, "CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_EXEMPT", true),
+
 			ChallengeSubnetEnabled:       kvBool(kv, "CHALLENGE_SUBNET_ENABLED", false),
 			ChallengeSubnetPrefixV4:      kvInt(kv, "CHALLENGE_SUBNET_PREFIX_V4", 24),
 			ChallengeSubnetMinIPs:        kvInt(kv, "CHALLENGE_SUBNET_MIN_IPS", 4),
