@@ -18,6 +18,21 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Security
+- **A shell command that writes a PHP file is now logged in any field
+  (rule 331, `WAF_RCE:SHELL_*`, logonly).** The tophair.gr webshell
+  terminal posted `wget … -O wp-admin/…/colors.php`, `curl -o x.php`,
+  `echo <b64> | base64 -d > upgrade.php` and `touch -d '2025-07-10' g.php`
+  in a form field, and the command rules (310-317) read only the query
+  string. The new rule reads the decoded args and body: query, form, JSON
+  and multipart. It logs `wget`/`curl` output to an executable name, a `>`/`>>`
+  redirect or a `tee` to one (`.php*`, `.phtml`, `.phar`, `.inc`,
+  `.htaccess`, `.user.ini`), and `touch -d/-t/-r` backdating, also behind
+  `sudo`/`nohup`/`HOME=…`, an absolute path, `sh -c '…'` or inside a JSON
+  value. The `wget -q -O - …/wp-cron.php` cron line (stdout) does not count.
+  Its cost is linear in the body: under 1 µs on ordinary requests, about
+  0.1-0.15 ms on a 19 KB body naming `.php` and a verb on every line, at most
+  about 1.5 ms on a crafted 32 KB body. Logonly: it never bans, and
+  goes to block after a clean hit-rate review. See `docs/waf.md` "Rule 331".
 - **A WordPress admin action a stored XSS sends is now logged (rule 503,
   `WAF_ADMIN_XSCREEN`, logonly).** On tophair.gr staff opened an order
   carrying the PixelYourSite payload, and within five seconds their own

@@ -92,6 +92,7 @@ local CFG = {
                                        -- user's solve still passes — absence
                                        -- never convicts, D5b).
   rule_xss_body        = "logonly",      -- explicit markup in a POST body (attribute breakout `" onmouseover=`, `<script` tag, a tag carrying an event handler; `javascript:` dropped 2026-10-24, it was 99.8% of the hits and all noise), not with a WordPress login cookie or an Authorization header, or on /wp-admin/ (not admin-ajax / admin-post), /administrator/, LHC's /site_admin/ or a cPanel /cpsess<N>/ path on a cpanel./whm./webmail. host. Visibility only: rule 302 reads the path and query, and a stored-XSS payload in a form field (LHC's chat email field, 2026-10-22) passed unseen. Logonly through burn-in; page builders and editors post markup legitimately.
+  rule_shell_write_exec = "logonly",  -- rule 331: a shell command in the args OR body that writes an executable file into the site (wget/curl -O x.php, curl -O of a .php URL, echo|base64 -d|cat … > x.php) or backdates one (touch -d/-t/-r). Rules 310-317 read the query only: the tophair.gr webshell terminal (/?dark&term=1, 2026-10-08) POSTed exactly these and nothing matched. Logonly through burn-in (a tutorial pasted into a comment could carry one); family WAF_RCE.
   rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
   rule_sqli_blind_lexical = "block", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted challenge→block 2026-08-23 after expanded fleet burn-in; prior 188/188 TP, 0 FP review (docs/waf.md)
   rule_sqli_union_variant = "challenge_v2",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; promoted logonly→challenge 2026-08-23, challenge→challenge_v2 2026-09-23 (pure sqlmap-style attack traffic; solves get the Rung-1 humanity gate) — docs/waf.md
@@ -573,6 +574,7 @@ local RULE_IDS = {
   rule_superglobal_override    = 318,
   rule_xss                     = 302,
   rule_xss_body                = 330,
+  rule_shell_write_exec        = 331,
   rule_js_proto                = 303,
   rule_b64_injection           = 304,
   rule_php_wrappers            = 305,
@@ -2472,6 +2474,20 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_XSS_BODY:" .. tag, ttl, mode, RULE_IDS.rule_xss_body) then goto done end
+      end
+    end
+  end
+
+  -- ── 60c) Shell command writing an executable file (331, logonly) ─────────
+  -- Late, beside 330, for the same headline reason: a webshell's terminal
+  -- post also trips the dropper / backdoor scanners above, which keep it.
+  do
+    local mode = rule_mode(CFG.rule_shell_write_exec, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_shell_write_exec(get_norm_ab())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:SHELL_" .. tag, ttl, mode, RULE_IDS.rule_shell_write_exec) then goto done end
       end
     end
   end

