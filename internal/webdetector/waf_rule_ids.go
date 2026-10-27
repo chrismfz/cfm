@@ -145,6 +145,13 @@ var wafRuleIDs = []WAFRule{
 	// 5xx auth abuse
 	{ID: 501, Name: "rule_auth_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge_v2"},
 	{ID: 502, Name: "rule_auth_wp_checks", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge_v2"},
+	// A logged-in WordPress privileged action (create user, change role,
+	// upload or activate a plugin, upload a theme, edit a file) that did not
+	// come from its own form: a stored XSS driving an administrator's browser
+	// (tophair.gr, 2026-10-06).
+	// Logonly through burn-in. The IP is the victim's: a block promotion must
+	// set HoldAutoblock.
+	{ID: 503, Name: "rule_wp_admin_cross_screen", ReasonFamily: "WAF_ADMIN_XSCREEN", DefaultMode: "logonly"},
 	{ID: 510, Name: "rule_xmlrpc_multicall", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	// 511: every pingback.ping is a 403, but its ban is held: WordPress itself
 	// sends one when a post links to our site, and at threshold 1 that banned

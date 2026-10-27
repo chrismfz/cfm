@@ -634,6 +634,7 @@ end
 _M.PHP_FIELDS_WANT = {
   pagename = true, action = true, string_ids = true, ["trp-edit-translation"] = true,
   user_login = true, wc_reset_password = true, ["woocommerce-lost-password-nonce"] = true,
+  changeit = true, changeit2 = true,  -- rule 503: users.php's role change
 }
 
 -- want_hints(want): for each wanted name, the literal pieces any key PHP
@@ -7531,6 +7532,14 @@ local function url_host(s)
   return (lower(strip_host_port((auth:gsub("^.*@", "")))):gsub("%.$", ""))
 end
 
+-- The request's own host as the browser named it (the Host header, else the
+-- edge's), lowercased, without a port or a trailing dot; "" when unknown.
+local function request_host(headers, req_host)
+  local host = header_string(headers["host"] or headers["Host"])
+  if host == "" then host = req_host or "" end
+  return (lower(strip_host_port(host)):gsub("%.$", ""))
+end
+
 -- Same site for Sec-Fetch-Site same-site: equal, one under the other, or
 -- siblings under a parent that still has a dot (a.example.gr / b.example.gr,
 -- not example.gr / other.gr). An approximation of the registrable domain;
@@ -7552,9 +7561,7 @@ function _M.detect_cve_php_upload_progress(method, body, headers, req_host)
   if php_media_type(ct_raw) ~= "multipart/form-data" then return nil end
   local _, names = php_multipart_parse(body, ct_raw)
   if not names[UPLOAD_PROGRESS_NAME] then return nil end
-  local host = header_string(headers["host"] or headers["Host"])
-  if host == "" then host = req_host or "" end
-  host = (lower(strip_host_port(host)):gsub("%.$", ""))
+  local host = request_host(headers, req_host)
   local ref_raw = header_string(headers["referer"] or headers["Referer"])
   local org_raw = header_string(headers["origin"] or headers["Origin"])
   local ref, org = url_host(ref_raw), url_host(org_raw)
@@ -7575,6 +7582,191 @@ function _M.detect_cve_php_upload_progress(method, body, headers, req_host)
   end
   if ref or org then return "XSITE" end
   return "NO_REFERER"
+end
+
+-- Rule 503 — a WordPress privileged admin action that did not come from its own
+-- form (logonly). A stored XSS needs no exploit to own a site: the script runs
+-- in an administrator's browser and uses that session's cookie and nonces. On
+-- tophair.gr (2026-10-06) staff opened an order carrying the PixelYourSite
+-- payload and, within five seconds, their own browser fetched user-new.php and
+-- plugin-install.php for the nonces, POSTed user-new.php (a new administrator)
+-- and update.php?action=upload-plugin (a backdoor plugin as a ZIP) — every
+-- request with the ORDER SCREEN as its Referer. Nothing in those requests looks
+-- like an attack except where they came from.
+--
+-- WordPress sends these actions only from their own screen, by a navigation:
+--   * FROM:<screen> — a same-host Referer whose admin screen is not the
+--     form's (or a front-end page: FROM:front). Two months of titan's access
+--     logs (545 files, 2026-09/10): user-new.php 53 from user-new.php, 1 other;
+--     upload-plugin 332 from plugin-install.php, 1 none, 1 other; users.php 108
+--     and upload-theme 13, all from their own screen. The two others were the
+--     tophair attack. A missing Referer (Referrer-Policy no-referrer) is no
+--     signal on a form, and a cross-host one is left to the nonce.
+--   * SCRIPT / FRAME — Sec-Fetch-Dest `empty` (fetch / XHR) or `iframe`. A
+--     script can set a same-origin Referer with fetch() or drop it with a meta
+--     referrer policy, but it cannot set Fetch Metadata.
+--   * CROSS_SITE — Sec-Fetch-Site cross-site.
+--   * NO_ACTIVATION — a document navigation (Sec-Fetch-Mode navigate, Dest
+--     document) without Sec-Fetch-User: a form.submit() no click started.
+--   * NONCE_SCRAPE:<screen> / NONCE_FRAME:<screen> — a GET of a screen that
+--     hands out one of these nonces by fetch / XHR, or into an iframe (the
+--     browser loads them as documents; only plugin-install.php's
+--     plugin-information thickbox is an iframe, so it is not checked there).
+--     The tophair script fetched two of them first.
+-- The legs: user-new.php (USER_NEW), user-edit.php / profile.php (USER_EDIT /
+-- PROFILE; saving your own account from user-edit.php posts to profile.php),
+-- users.php POST (USERS: the delete confirmation) and its role change, which
+-- WordPress sends as a GET of the list's own form (USERS_ROLE: changeit /
+-- changeit2 / action=promote), update.php upload-plugin / upload-theme,
+-- plugin activation (ACTIVATE, Fetch Metadata only: an "Activate" link sits on
+-- plugins.php, update.php, plugin-install.php and on themes' and plugins' own
+-- pages), and the admin-ajax file editor (FILE_EDITOR: admin-ajax is always
+-- XHR, so the Referer, and NO_REFERER for a same-origin call without one —
+-- WordPress admin pages send strict-origin-when-cross-origin; a spoofed
+-- theme-editor.php Referer remains a residual).
+-- Fields are read as PHP registers them (php_request_fields), any value of
+-- `action` rather than PHP's last: the project's rule (a trailing duplicate
+-- past max_input_vars is a decoy PHP never saw), and an over-read here only
+-- logs a request no browser sends.
+-- The screen is cut at its `.php`: Apache's AcceptPathInfo runs
+-- /wp-admin/user-new.php/x as user-new.php. Only with a WordPress login
+-- cookie: without one WordPress refuses the action anyway. options.php is left
+-- out: plugin settings pages (admin.php?page=…) post to it, nine screens on
+-- titan alone.
+--
+-- Logonly through its burn-in. The client IP is the victim's (the staff
+-- member's browser), never the attacker's: a promotion to block must hold the
+-- autoblock for this rule (HoldAutoblock), and a hit means the site already
+-- holds a stored payload somewhere an administrator just opened.
+local XSCREEN_POST = {
+  ["user-new.php"]  = { tag = "USER_NEW",  from = { ["user-new.php"] = true } },
+  ["users.php"]     = { tag = "USERS",     from = { ["users.php"] = true } },
+  ["user-edit.php"] = { tag = "USER_EDIT", from = { ["user-edit.php"] = true } },
+  ["profile.php"]   = { tag = "PROFILE",   from = { ["profile.php"] = true, ["user-edit.php"] = true } },
+}
+local XSCREEN_UPDATE = {
+  ["upload-plugin"] = { tag = "UPLOAD_PLUGIN", from = { ["plugin-install.php"] = true } },
+  ["upload-theme"]  = { tag = "UPLOAD_THEME",  from = { ["theme-install.php"] = true } },
+}
+local XSCREEN_AJAX = {
+  ["edit-theme-plugin-file"] = { tag = "FILE_EDITOR",
+                                 from = { ["theme-editor.php"] = true, ["plugin-editor.php"] = true } },
+}
+local XSCREEN_ROLE = { tag = "USERS_ROLE", from = { ["users.php"] = true } }
+local XSCREEN_ACTIVATE = { tag = "ACTIVATE" }  -- no `from`: Fetch Metadata only
+local XSCREEN_ACTIVATE_ACTIONS = { activate = true, ["activate-selected"] = true }
+-- Screens holding a nonce for one of the legs; true = also not loaded in an
+-- iframe by WordPress (plugin-install.php is, for plugin information).
+local XSCREEN_NONCE_PAGES = {
+  ["user-new.php"] = true, ["users.php"] = true, ["user-edit.php"] = true, ["profile.php"] = true,
+  ["plugin-install.php"] = false, ["theme-install.php"] = true,
+  ["theme-editor.php"] = true, ["plugin-editor.php"] = true,
+}
+
+-- The admin screen of a path: what follows the last "/wp-admin/" (so a
+-- subdirectory install keeps working), without the multisite "network/"
+-- prefix (the network admin has the same forms), cut after its `.php`
+-- (PATH_INFO), lowercased. "/wp-admin/" itself is index.php. nil off wp-admin.
+local function wp_admin_screen(path)
+  local s = lower(path or ""):match(".*/wp%-admin/(.*)$")
+  if not s then return nil end
+  s = s:gsub("^network/", "")
+  s = s:match("^([^/]-%.php)") or s
+  if s == "" then s = "index.php" end
+  return s
+end
+
+-- A screen as it may appear in a reason tag: a short, plain token.
+local function screen_token(s)
+  return (s:gsub("[^%w%._%-/]", "_")):sub(1, 48)
+end
+
+local function hdr_lower(headers, name, canon)
+  return lower(header_string(headers[name] or headers[canon]) or "")
+end
+
+local function any_action(f, set)
+  for _, v in ipairs(f.action or {}) do
+    local a = lower((v:gsub("\r", "")))
+    if set[a] then return set[a] end
+  end
+  return nil
+end
+
+function _M.detect_wp_admin_cross_screen(method, uri, args, body, headers, cookie, req_host, get_fields, get_nab)
+  local screen = wp_admin_screen(uri)
+  if not screen then return nil end
+  if not has(lower(cookie or ""), "wordpress_logged_in_") then return nil end
+  headers = headers or {}
+  local dest = hdr_lower(headers, "sec-fetch-dest", "Sec-Fetch-Dest")
+
+  local ep, ajax
+  if method == "get" then
+    if screen == "users.php" then
+      local f = request_fields(method, args, body, headers, get_fields)
+      if f.changeit or f.changeit2 or any_action(f, { promote = true }) then ep = XSCREEN_ROLE end
+    elseif screen == "plugins.php" then
+      if any_action(request_fields(method, args, body, headers, get_fields), XSCREEN_ACTIVATE_ACTIONS) then
+        ep = XSCREEN_ACTIVATE
+      end
+    end
+    if not ep then
+      local frame_ok = XSCREEN_NONCE_PAGES[screen]
+      if frame_ok == nil then return nil end
+      -- <link rel=prefetch> is Dest empty too, and says so in Sec-Purpose.
+      if dest == "empty" and not has(hdr_lower(headers, "sec-purpose", "Sec-Purpose"), "prefetch") then
+        return "NONCE_SCRAPE:" .. screen_token(screen)
+      end
+      if dest == "iframe" and frame_ok then return "NONCE_FRAME:" .. screen_token(screen) end
+      return nil
+    end
+  elseif method == "post" then
+    ep = XSCREEN_POST[screen]
+    if ep and screen == "users.php" then
+      local f = request_fields(method, args, body, headers, get_fields)
+      if f.changeit or f.changeit2 or any_action(f, { promote = true }) then ep = XSCREEN_ROLE end
+    elseif not ep and screen == "plugins.php" then
+      if any_action(request_fields(method, args, body, headers, get_fields), XSCREEN_ACTIVATE_ACTIONS) then
+        ep = XSCREEN_ACTIVATE
+      end
+    elseif not ep and (screen == "update.php" or screen == "admin-ajax.php") then
+      ajax = (screen == "admin-ajax.php")
+      -- admin-ajax carries every logged-in user's heartbeat: parse its fields
+      -- only when the decoded surface holds the one action checked there.
+      if ajax and not field_gate_open(method, args, body, headers, get_nab and get_nab(),
+                                      "edit-theme-plugin-file", true) then
+        return nil
+      end
+      ep = any_action(request_fields(method, args, body, headers, get_fields), ajax and XSCREEN_AJAX or XSCREEN_UPDATE)
+    end
+  end
+  if not ep then return nil end
+
+  if not ajax then
+    if dest == "empty" then return ep.tag .. ":SCRIPT" end
+    if dest == "iframe" then return ep.tag .. ":FRAME" end
+  end
+
+  local site = hdr_lower(headers, "sec-fetch-site", "Sec-Fetch-Site")
+  if ep.from then
+    local host = request_host(headers, req_host)
+    local ref_raw = header_string(headers["referer"] or headers["Referer"])
+    if host ~= "" and url_host(ref_raw) == host then
+      local path = ref_raw:match("^%a[%w+.%-]*://[^/?#]*([^?#]*)")
+      local from = wp_admin_screen((path == nil or path == "") and "/" or path)
+      if not from then return ep.tag .. ":FROM:front" end
+      if not ep.from[from] then return ep.tag .. ":FROM:" .. screen_token(from) end
+    elseif ajax and ref_raw == "" and site == "same-origin" then
+      return ep.tag .. ":NO_REFERER"
+    end
+  end
+
+  if site == "cross-site" then return ep.tag .. ":CROSS_SITE" end
+  if not ajax and hdr_lower(headers, "sec-fetch-mode", "Sec-Fetch-Mode") == "navigate" and dest == "document"
+     and hdr_lower(headers, "sec-fetch-user", "Sec-Fetch-User") == "" then
+    return ep.tag .. ":NO_ACTIVATION"
+  end
+  return nil
 end
 
 return _M

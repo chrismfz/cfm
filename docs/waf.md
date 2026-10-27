@@ -1092,6 +1092,7 @@ Current assignments:
 5xx — Auth abuse
   501  rule_auth_burst                 510  rule_xmlrpc_multicall
   502  rule_auth_wp_checks             511  rule_xmlrpc_pingback
+  503  rule_wp_admin_cross_screen      (logonly; see "Rule 503")
                                        512  rule_xmlrpc_post_burst
                                        520  (retired 2026-10-08: SP Page Builder contact-form mail relay)
 
@@ -1385,6 +1386,72 @@ Magento's admin login padded past the cut on its bare route (`/admin/…`, where
 names outside the list (`session[password]`, Symfony `_password`, an array-wrapped or
 BOM-prefixed JSON body). An OpenCart admin
 customer save sends an empty `password=` and counts; eight in 20 s is not a workflow.
+
+## Rule 503 — `rule_wp_admin_cross_screen` (a stored XSS driving an admin's browser)
+
+Reason family **`WAF_ADMIN_XSCREEN`**, logonly. A stored XSS needs no exploit
+to take a WordPress site: its script runs in an administrator's browser with
+that session's cookie and nonces, and every request it sends is a legitimate
+admin request. On tophair.gr (2026-10-06) staff opened an order carrying the
+PixelYourSite payload (CVE-2026-1844); within five seconds their own browser
+fetched `user-new.php` and `plugin-install.php?tab=upload` for the nonces,
+POSTed `user-new.php` (a new administrator) and
+`update.php?action=upload-plugin` (a backdoor plugin as a ZIP), all with the
+**order screen** as the Referer. No content rule could see it: the user is
+logged in, the plugin is compressed, nothing in the body is an attack.
+
+What gives it away is where the request came from. WordPress submits these
+forms only from their own screen, as a navigation a click started:
+
+| tag | signal |
+|---|---|
+| `<EP>:SCRIPT` / `<EP>:FRAME` | `Sec-Fetch-Dest: empty` (fetch / XHR) or `iframe`. A script can set a same-origin Referer (`fetch(…, {referrer})`) or drop it (a meta referrer policy), but not Fetch Metadata. |
+| `<EP>:FROM:<screen>` | a same-host Referer from another admin screen (`post.php`, `admin.php`, …) or the front end (`front`). |
+| `<EP>:CROSS_SITE` | `Sec-Fetch-Site: cross-site`. |
+| `<EP>:NO_ACTIVATION` | a document navigation (`Sec-Fetch-Mode: navigate`, `Dest: document`) without `Sec-Fetch-User`: a `form.submit()` no click started. |
+| `FILE_EDITOR:NO_REFERER` | the admin-ajax file editor called same-origin (`Sec-Fetch-Site`) with no Referer; WordPress admin pages send `strict-origin-when-cross-origin`. |
+| `NONCE_SCRAPE:<screen>` / `NONCE_FRAME:<screen>` | a GET of a nonce-bearing screen (`user-new.php`, `users.php`, `user-edit.php`, `profile.php`, `plugin-install.php`, `theme-install.php`, the file editors) by fetch / XHR (not a `Sec-Purpose: prefetch`), or into an iframe (not `plugin-install.php`, whose plugin-information thickbox is one). |
+
+`<EP>` is:
+- `USER_NEW` (`user-new.php`), `USER_EDIT` (`user-edit.php`), `PROFILE`
+  (`profile.php`, also from `user-edit.php`: saving your own account there
+  posts to `profile.php`), `USERS` (a `users.php` POST, the delete
+  confirmation);
+- `USERS_ROLE`: the role change, which WordPress sends as a **GET** of
+  `users.php`'s own list form (`changeit` / `changeit2` / `action=promote`);
+- `UPLOAD_PLUGIN` / `UPLOAD_THEME` (`update.php?action=…`);
+- `ACTIVATE` (`plugins.php` `action=activate` / `activate-selected`): Fetch
+  Metadata only, never the Referer, as themes and plugins put "Activate" links
+  on their own pages;
+- `FILE_EDITOR` (`admin-ajax.php` `action=edit-theme-plugin-file`): Referer
+  and `NO_REFERER` only, as admin-ajax is always XHR. A spoofed
+  `theme-editor.php` Referer is a residual.
+
+`action` is read as PHP registers it (`php_request_fields`), any value rather
+than PHP's last (the project's rule: a trailing duplicate past
+`max_input_vars` is a decoy PHP never saw). The admin screen is what follows
+the last `/wp-admin/` (subdirectory installs) without `network/` (multisite),
+cut at its `.php` (Apache's AcceptPathInfo runs `user-new.php/x` as
+`user-new.php`).
+
+Only with a `wordpress_logged_in_` cookie. No Referer is no signal (a
+`no-referrer` policy), and a cross-host Referer without `Sec-Fetch-Site` is
+left to the nonce. `options.php` is out of scope: plugin settings pages post
+to it from `admin.php?page=…` (nine distinct screens on titan).
+
+**FP baseline (titan, 545 access logs, 2026-09/10):** `user-new.php` 53 POSTs
+from its own screen + 1 other; `upload-plugin` 332 from `plugin-install.php`
++ 1 without a Referer + 1 other; `users.php` 108 and `upload-theme` 13, all
+from their own screen. Both "other" were the tophair attack. The access logs
+carry no Fetch Metadata, so the SCRIPT / NO_ACTIVATION signals have no
+baseline yet: the burn-in measures them.
+
+**Promotion.** The client IP is the victim's (a staff member's browser), never
+the attacker's: a block promotion must set `HoldAutoblock` on rule 503 so the
+edge 403s without an nft ban. A hit means the site already stores a payload
+in something an administrator just opened (an order, a comment, a product
+review, a form entry): find and clean it, as the PixelYourSite clean-up did
+for `pys_enrich_data`.
 
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 

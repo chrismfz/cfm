@@ -118,6 +118,7 @@ local CFG = {
   rule_auth_wp_checks     = "challenge_v2", -- HEAD wp-login (qualified/repeated), no UA+Referer POST wp-login
                                          -- rollout: start this rule in "logonly" to baseline HEAD noise,
                                          -- then promote to "challenge" after validating logs.
+  rule_wp_admin_cross_screen = "logonly", -- rule 503: a logged-in WordPress privileged action (user-new.php, user-edit.php, profile.php, users.php incl. its GET role change, update.php upload-plugin/upload-theme, plugin activation, the admin-ajax file editor) that did not come from its own form: a same-host Referer from another screen or the front end, Fetch Metadata of a script (fetch/XHR, iframe), cross-site, or a navigation no click started; and a GET of a nonce-bearing screen by fetch/XHR or into an iframe. The stored-XSS kill chain of tophair.gr (2026-10-06): the order screen's script created an administrator and uploaded a backdoor plugin from staff's own browser. Logonly through burn-in; the IP is the victim's, so a block promotion must hold the autoblock (HoldAutoblock).
   rule_xmlrpc_multicall   = "block", -- system.multicall in XML-RPC body
   rule_xmlrpc_pingback    = "block", -- pingback.ping in XML-RPC body. Edge 403 only: autoblock held in code (RULE_511 = 0), WordPress's own pingback client sends it. Recorded late, after the armed families.
   rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
@@ -628,6 +629,7 @@ local RULE_IDS = {
   -- 5xx auth abuse
   rule_auth_burst              = 501,
   rule_auth_wp_checks          = 502,
+  rule_wp_admin_cross_screen   = 503,
   rule_xmlrpc_multicall        = 510,
   rule_xmlrpc_pingback         = 511,
   rule_xmlrpc_post_burst       = 512,
@@ -2470,6 +2472,21 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_XSS_BODY:" .. tag, ttl, mode, RULE_IDS.rule_xss_body) then goto done end
+      end
+    end
+  end
+
+  -- ── 60c) WordPress privileged action from another screen (503, logonly) ──
+  -- Late, beside 330, for the same headline reason. A request-context rule:
+  -- the payload is the admin's own session, so nothing earlier sees it (see
+  -- det.detect_wp_admin_cross_screen).
+  do
+    local mode = rule_mode(CFG.rule_wp_admin_cross_screen, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_wp_admin_cross_screen(m_lower, uri, args, body, headers, cookie, ctx.host, get_php_fields, get_norm_ab)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_ADMIN_XSCREEN:" .. tag, ttl, mode, RULE_IDS.rule_wp_admin_cross_screen) then goto done end
       end
     end
   end
