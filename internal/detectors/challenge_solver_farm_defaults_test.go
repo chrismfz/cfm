@@ -10,12 +10,20 @@ import (
 	"cfm/internal/detectors/solverfarm"
 )
 
-// The solver_farm subnet-spread defaults live once, in solverfarm (Default*).
-// The register's template and the reference detectors.conf must say the
-// same, or a fresh install and an upgraded one run different thresholds
+// TestSolverFarmDefaultsAgree pins the solver_farm subnet-spread defaults,
+// which live once, in solverfarm (Default*). A section that omits the keys,
+// the register's template and the reference detectors.conf must all give
+// them, or a fresh install and an upgraded one run different thresholds
 // (2026-10-27: the fleet ran 180s / 15 / 15 by hand while the code shipped
 // 60s / 40 / 40).
 func TestSolverFarmDefaultsAgree(t *testing.T) {
+	cfg := solverFarmConfig("challenge_solver_farm", KV{}, KV{})
+	if cfg.Window != solverfarm.DefaultWindow || cfg.MinSubnets != solverfarm.DefaultMinSubnets || cfg.MinSolves != solverfarm.DefaultMinSolves {
+		t.Errorf("a section without the keys runs %s / %d / %d, want %s / %d / %d",
+			cfg.Window, cfg.MinSubnets, cfg.MinSolves,
+			solverfarm.DefaultWindow, solverfarm.DefaultMinSubnets, solverfarm.DefaultMinSolves)
+	}
+
 	want := map[string]string{
 		"WINDOW":      solverfarm.DefaultWindow.String(),
 		"MIN_SUBNETS": strconv.Itoa(solverfarm.DefaultMinSubnets),

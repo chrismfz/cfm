@@ -14,16 +14,12 @@ import (
 // challenge_solver_farm turns the challenge-solve event stream into a per-vhost
 // "distributed solver farm" finding.
 //
-// Thresholds are calibrated against 23h of production edge traffic containing a
-// live farm: distinct /24s solving one vhost within a 60s window measured 73
-// (median), 49 (p01), 110 (max) for the farm, against a maximum of 22 across
-// every other vhost on the same server. MIN_SUBNETS was set to 40 then — it
-// caught 1380 of 1381 farm-minutes with zero hits on 1605 legitimate
-// vhost-minutes.
-//
-// That calibration was ONE server over ONE day. Since 2026-10-27 the defaults
-// are 180s / 30 / 15 (solverfarm.DefaultWindow and friends), re-measured on
-// the fleet: at 15 subnets a Greek shop's ad traffic read as a farm. A very
+// The thresholds were first calibrated against 23h of production edge traffic
+// containing a live farm, at 60s / 40 (the figures are in the solverfarm
+// package doc). That calibration was ONE server over ONE day. Since 2026-10-27
+// the defaults are 180s / 30 / 15 (solverfarm.DefaultWindow and friends),
+// re-measured on the fleet: at 15 subnets a Greek shop's ad traffic read as a
+// farm. A very
 // large vhost with a genuinely global mobile audience could still spread
 // wider, which is why the threshold is a config knob and the detector ships
 // alert-only.
@@ -75,48 +71,7 @@ func init() {
 	})
 
 	Register("challenge_solver_farm", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
-		defEvery := kvDur(global, "DEFAULT_EVERY", 30*time.Second)
-
-		// ACTION decides what a flagged vhost gets. Absent = observe, so a config
-		// predating the key is unchanged. A value we cannot honour falls back to
-		// observe and says so loudly — an operator must never be left believing
-		// enforcement is on when it is not.
-		action, note := solverfarm.ParseAction(kvStrClean(kv, "ACTION", ""))
-		if note != "" {
-			logging.Logf("[%s] %s", section, note)
-		}
-
-		cfg := solverfarm.Config{
-			Every:             kvDur(kv, "EVERY", defEvery),
-			Action:            action,
-			Window:            kvDur(kv, "WINDOW", solverfarm.DefaultWindow),
-			MinSubnets:        kvInt(kv, "MIN_SUBNETS", solverfarm.DefaultMinSubnets),
-			MinSolves:         kvInt(kv, "MIN_SOLVES", solverfarm.DefaultMinSolves),
-			PrefixV4:          kvInt(kv, "PREFIX_V4", 24),
-			PrefixV6:          kvInt(kv, "PREFIX_V6", 48),
-			Cooldown:          kvDur(kv, "COOLDOWN", 30*time.Minute),
-			MaxTrackedPerHost: kvInt(kv, "MAX_TRACKED_PER_HOST", 20000),
-			MaxQueue:          kvInt(kv, "MAX_QUEUE", 20000),
-			SampleLimit:       kvInt(kv, "SAMPLE_LIMIT", 10),
-			AllowHosts:        csvKV(kv, "ALLOW_HOSTS"),
-			AllowIPs:          csvKV(kv, "ALLOW_IPS"),
-			AllowNets:         csvKV(kv, "ALLOW_NETS"),
-			AllowUAContains:   csvKV(kv, "ALLOW_UA_CONTAINS"),
-			FPTrack:           kvBool(kv, "FP_TRACK", true),
-			MinFPSubnets:      kvInt(kv, "MIN_FP_SUBNETS", 8),
-			MinFPCountries:    kvInt(kv, "MIN_FP_COUNTRIES", 6),
-			AllowFPs:          csvKV(kv, "ALLOW_FPS"),
-			NotifyCooldown:    kvDur(kv, "NOTIFY_COOLDOWN", 6*time.Hour),
-			// Cross-host track. Share is read as an integer percent (idiomatic
-			// integer knob) and converted to a fraction; solves_per_ip is not a
-			// config gate (evidence only).
-			XHTrack:        kvBool(kv, "XH_TRACK", true),
-			XHWindow:       kvDur(kv, "XH_WINDOW", 30*time.Minute),
-			MinXHHostShare: float64(kvInt(kv, "MIN_XH_HOST_SHARE_PCT", 50)) / 100.0,
-			MinXHHosts:     kvInt(kv, "MIN_XH_HOSTS", 4),
-			MinXHCountries: kvInt(kv, "MIN_XH_COUNTRIES", 12),
-			MinXHSubnets:   kvInt(kv, "MIN_XH_SUBNETS", 30),
-		}
+		cfg := solverFarmConfig(section, kv, global)
 		// Setting BLOCK here does not block — enforcement=observe wins — but it
 		// moves the alert onto a path that logs without notifying. "BLOCK = dryrun
 		// while tuning" is what every other section teaches, so the most likely
@@ -144,4 +99,52 @@ func init() {
 		})
 		return d, nil
 	})
+}
+
+// solverFarmConfig builds the detector's Config from its section. A key the
+// section omits takes the solverfarm.Default* value (a node whose
+// detectors.conf predates a key), which TestSolverFarmDefaultsAgree pins.
+func solverFarmConfig(section string, kv KV, global KV) solverfarm.Config {
+	defEvery := kvDur(global, "DEFAULT_EVERY", 30*time.Second)
+
+	// ACTION decides what a flagged vhost gets. Absent = observe, so a config
+	// predating the key is unchanged. A value we cannot honour falls back to
+	// observe and says so loudly — an operator must never be left believing
+	// enforcement is on when it is not.
+	action, note := solverfarm.ParseAction(kvStrClean(kv, "ACTION", ""))
+	if note != "" {
+		logging.Logf("[%s] %s", section, note)
+	}
+
+	return solverfarm.Config{
+		Every:             kvDur(kv, "EVERY", defEvery),
+		Action:            action,
+		Window:            kvDur(kv, "WINDOW", solverfarm.DefaultWindow),
+		MinSubnets:        kvInt(kv, "MIN_SUBNETS", solverfarm.DefaultMinSubnets),
+		MinSolves:         kvInt(kv, "MIN_SOLVES", solverfarm.DefaultMinSolves),
+		PrefixV4:          kvInt(kv, "PREFIX_V4", 24),
+		PrefixV6:          kvInt(kv, "PREFIX_V6", 48),
+		Cooldown:          kvDur(kv, "COOLDOWN", 30*time.Minute),
+		MaxTrackedPerHost: kvInt(kv, "MAX_TRACKED_PER_HOST", 20000),
+		MaxQueue:          kvInt(kv, "MAX_QUEUE", 20000),
+		SampleLimit:       kvInt(kv, "SAMPLE_LIMIT", 10),
+		AllowHosts:        csvKV(kv, "ALLOW_HOSTS"),
+		AllowIPs:          csvKV(kv, "ALLOW_IPS"),
+		AllowNets:         csvKV(kv, "ALLOW_NETS"),
+		AllowUAContains:   csvKV(kv, "ALLOW_UA_CONTAINS"),
+		FPTrack:           kvBool(kv, "FP_TRACK", true),
+		MinFPSubnets:      kvInt(kv, "MIN_FP_SUBNETS", 8),
+		MinFPCountries:    kvInt(kv, "MIN_FP_COUNTRIES", 6),
+		AllowFPs:          csvKV(kv, "ALLOW_FPS"),
+		NotifyCooldown:    kvDur(kv, "NOTIFY_COOLDOWN", 6*time.Hour),
+		// Cross-host track. Share is read as an integer percent (idiomatic
+		// integer knob) and converted to a fraction; solves_per_ip is not a
+		// config gate (evidence only).
+		XHTrack:        kvBool(kv, "XH_TRACK", true),
+		XHWindow:       kvDur(kv, "XH_WINDOW", 30*time.Minute),
+		MinXHHostShare: float64(kvInt(kv, "MIN_XH_HOST_SHARE_PCT", 50)) / 100.0,
+		MinXHHosts:     kvInt(kv, "MIN_XH_HOSTS", 4),
+		MinXHCountries: kvInt(kv, "MIN_XH_COUNTRIES", 12),
+		MinXHSubnets:   kvInt(kv, "MIN_XH_SUBNETS", 30),
+	}
 }

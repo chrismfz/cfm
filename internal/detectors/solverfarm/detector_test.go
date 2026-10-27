@@ -670,7 +670,7 @@ func ipCountry(ip string) string {
 	return fpTestCountries[int(v[2])%len(fpTestCountries)]
 }
 
-// The c28caa00 shape: ~8/min, well below MIN_SUBNETS(40)/MIN_SOLVES(40) so the
+// The c28caa00 shape: ~8/min, well below the default MIN_SUBNETS (30) so the
 // subnet-spread track stays silent, but one fingerprint spans many subnets AND
 // many countries. The concentration track must catch it — this is the whole gap.
 func TestFPConcentrationLowAndSlowFarm(t *testing.T) {
@@ -692,7 +692,7 @@ func TestFPConcentrationLowAndSlowFarm(t *testing.T) {
 		t.Errorf("fp_track = %q, want 1", a.Extra["fp_track"])
 	}
 	if a.Extra["tracks"] != "fp_concentration" {
-		t.Errorf("tracks = %q, want fp_concentration only (subnet-spread must NOT fire at 12<40 subnets)", a.Extra["tracks"])
+		t.Errorf("tracks = %q, want fp_concentration only (subnet-spread must NOT fire at 12<30 subnets)", a.Extra["tracks"])
 	}
 	if a.Extra["top_fp"] != "c28caa00" {
 		t.Errorf("top_fp = %q, want c28caa00 (the grouping fingerprint, reported as evidence)", a.Extra["top_fp"])
@@ -1200,7 +1200,7 @@ func TestFPSubnetsNeverOutliveTrackedIPs(t *testing.T) {
 	t.Cleanup(func() { SetFindingSink(nil) })
 
 	// Tiny cap so it binds after two addresses; the divergence is scale-free.
-	h := newHarness(t, Config{FPTrack: true, MinFPSubnets: 2, MinFPCountries: 1, MaxTrackedPerHost: 2})
+	h := newHarness(t, Config{Window: time.Minute, FPTrack: true, MinFPSubnets: 2, MinFPCountries: 1, MaxTrackedPerHost: 2})
 	h.d.countryFn = ipCountry
 
 	// t0: two addresses in two distinct /24s fill the IP cap (both tracked).

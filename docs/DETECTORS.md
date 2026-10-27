@@ -327,10 +327,20 @@ friends; `TestSolverFarmDefaultsAgree` pins the template and the reference
 config to them). Every web node had run 180s / 15 / 15 by hand for weeks. At
 15, the fingerprint-blind findings were real Greek shop audiences (paid-ad
 traffic, 15–25 `/24` per 180s window: mirego.gr, more4u.gr, marmaridis.gr),
-while fingerprint-less findings on farm-hit vhosts reached 33–77. A
-fingerprinted farm is caught by the fingerprint tracks whatever `MIN_SUBNETS`
-is. The longer window is for slow farms: 60s caught the AS398781 swarm only at
-120s with lower thresholds (`docs/abuse-defense-progress.md`, read 4).
+while fingerprint-less findings on farm-hit vhosts reached 33–77. 30 sits
+between the two with thin margins (1.2× over the humans, 1.1× under the
+farms; the first calibration had 1.5×). A fingerprinted farm spread over
+enough countries is caught by the fingerprint tracks whatever `MIN_SUBNETS`
+is; a single-country one is not. The longer window is for slow farms: a 60s
+window missed the AS398781 swarm (about 31 `/24` in 140s), which was caught
+only once the window was widened to 120s with lower thresholds. The
+fingerprint track counts over the same window, so it is three times as wide
+too; the fleet ran it at 180s for weeks with only known farms flagged
+(`docs/abuse-defense-progress.md`, read 4). `MIN_SOLVES` only bites when set
+above `MIN_SUBNETS`. The stock `detectors.conf` has always written these keys:
+a conffile the operator has edited keeps its 60s / 40 / 40 lines on upgrade
+(the package leaves a `.dpkg-dist` / `.rpmnew` beside it), so those lines
+must be changed by hand.
 
 Two deliberate design choices:
 

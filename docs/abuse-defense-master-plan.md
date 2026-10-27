@@ -847,9 +847,9 @@ The fleet's hand-set 15 subnets flagged real Greek shop audiences at 15-25
 /24 per window, while fingerprint-less farm findings reached 33-77; the
 operator moves the 7 web nodes from 15 to 30): `vhost_config` in `CHALLENGE_V2_AUTO_VHOST`
 (measured 0 of 780 likely-human solves would fail, `docs/traffic-classifier.md`
-"Auto-v2"); the shipped `solver_farm` defaults (`WINDOW` 60s catches the
-AS398781 swarm only at 120s AND lowered thresholds, 16/20 against the
-shipped 40/40 — the live web nodes already run 180s / 15 / 15); the orphan
+"Auto-v2"); the `solver_farm` defaults (decided above: the old 60s window
+caught the AS398781 swarm only once widened to 120s with lowered
+thresholds, 16/20 against the then-shipped 40/40); the orphan
 `HUMANITY_*` keys (§3 row 12).
 
 **Frozen, with a condition (not next, do not start):**
