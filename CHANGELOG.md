@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.27
+
 ### Fixed
 - **No more detector reload loop after a restart on an exim host that has docker
   installed.** With the docker CLI present and no postfix container, the postfix
@@ -27,8 +31,6 @@ back-filled here — see the git/PR history for that period.
   dropped) and the vhost uniqIP windows emptied. A host whose own exim service
   is running no longer waits for a mail container; a mailcow host (exim stopped)
   keeps the retry.
-
-## 2026.10.27
 
 ### Added
 - **Vhost lockdown: an emergency brake for a crawler storm.** A vhost
