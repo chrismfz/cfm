@@ -56,6 +56,16 @@ Grounded in the code (so we don't rebuild what's there):
   rps** (e.g. `mathematica.gr` 179 IPs @ 0.27 rps; `himaira.gr` 163 @ 0.40) —
   i.e. distributed shapes — while benign low-traffic sites cluster at score
   0.3–0.6 on ratio noise but are saved from arming by the uniqIP floors.
+  **Since 2026-10-27 the uniqIP count leaves out the clients a vhost challenge
+  cannot reach** (`vhostChallengeExemptClient`, `uniqip_exempt.go`): the bypass
+  list (the edge flags it per request, log-cfm.lua column 13), an FCrDNS-verified
+  good bot under `CHALLENGE_GOODBOT_EXEMPT`, and a match in
+  `webdetector_challenge_exclude.txt` (the edge's own `MatchNoDNS`). On
+  qualityweb, Applebot (bypass-listed) brought ~1 300 IPs to one shop in 10
+  minutes and armed a challenge only the humans saw. A fleet read the same day
+  (titan, orion, earth, mars, rigel) found Google + Bing at 2–20 IPs per vhost
+  per 10 min, so the change mainly moves vhosts a large exempt crawler visits.
+  Kill switch `CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_EXEMPT = 0`.
 - **ASN — resolved, but display-only.** `internal/enrich` (MaxMind
   GeoLite2-ASN) gives `Result{ASN uint, ASNName string}` inline (µs, no DNS) via
   `e.enr.Lookup(ip)` / `LookupGeoFast` / `LookupCachedOrAsync`. The **challenge

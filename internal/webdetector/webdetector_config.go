@@ -288,6 +288,12 @@ type Config struct {
 	ChallengeSuspiciousUniqIPOff int  // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_OFF
 	ChallengeSuspiciousUniqIPMax int  // CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_MAX (hard cap; optional)
 
+	// CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_EXEMPT (default 1): leave the clients a
+	// vhost-wide challenge cannot reach (bypass list, verified good bot,
+	// exclude file) out of UniqueIPs — vhostChallengeExemptClient. 0 counts
+	// every client, as before 2026-10-27.
+	ChallengeSuspiciousUniqIPExempt bool
+
 	// Under-Attack Mode (I1): per-vhost challenge-efficacy detector, log-only.
 	// Escalates a CHALLENGED vhost whose challenge is being defeated to
 	// UNDER_ATTACK and emits a notification. See docs/under-attack-mode.md.
