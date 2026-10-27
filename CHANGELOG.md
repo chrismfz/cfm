@@ -76,6 +76,20 @@ back-filled here — see the git/PR history for that period.
   database clean-up, and the plugin still needs updating (free 11.4.3, PRO
   12.6.8).
 
+### Changed
+- **The challenge solver-farm detector's shipped thresholds now match what
+  the fleet measured: a 180s window, 30 subnets, 15 solves** (were 60s / 40 /
+  40). The longer window catches slow farms the 60s one missed, and the
+  fingerprint track counts over it too. 30 subnets sits above the Greek shop
+  audiences that a 15-subnet setting flagged as farms (paid-ad traffic peaks
+  at 15–25 networks in three minutes) and below the farms seen without a
+  fingerprint (33–77); the margins are thin, so watch the alerts. It is
+  still alert-only. **An existing install keeps its own lines:** the stock
+  `detectors.conf` has always written these three keys, so an edited
+  conffile still says 60s / 40 / 40 (or whatever was set) after the upgrade.
+  Change the `[challenge_solver_farm]` lines by hand; a node that set
+  `MIN_SUBNETS = 15` should raise it to 30 to stop those alerts.
+
 ## 2026.10.24
 
 ### Changed

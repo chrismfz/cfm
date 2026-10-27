@@ -160,7 +160,8 @@ two detectors are mirror images on purpose (`cookiediscard` keys on the address,
 enough.
 
 **`solver_farm` did not fire on it, and the reason is `WINDOW`, not the
-thresholds.** The shipped default is `WINDOW = "60s"`; an operator who lowers
+thresholds.** The shipped default was `WINDOW = "60s"` (180s since
+2026-10-27, `solverfarm.DefaultWindow`); an operator who lowers
 `MIN_SUBNETS`/`MIN_SOLVES` and leaves the window alone inherits it. Sliding a
 60 s window over the swarm's real timestamps peaks at **18 solves / 18 subnets**
 — the subnet threshold (16) was met and the solve threshold (20) missed **by

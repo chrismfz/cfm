@@ -14,8 +14,8 @@
 // would be evaded by randomising a header. The UA breakdown is carried on the
 // alert as *evidence* for attribution, not as the detection key.
 //
-// Calibration, measured the way this code measures — a SLIDING 60s window
-// sampled every 30s, not disjoint one-minute buckets. That distinction matters:
+// The first calibration, measured the way this code measures — a SLIDING 60s
+// window sampled every 30s, not disjoint one-minute buckets. That distinction matters:
 // the maximum over sliding windows is always >= the maximum over fixed buckets,
 // so calibrating on buckets would overstate the headroom. Over the same 23h
 // capture, replayed at its original timestamps:
@@ -23,9 +23,11 @@
 //	farm vhost   : median 73 distinct /24 per window, p01 49, max 122
 //	every other  : max 27, across 3212 evaluations
 //
-// MinSubnets = 40 therefore flags 2758 of 2761 farm evaluations and 0 of 3212
-// legitimate ones — a 1.5x margin over the busiest legitimate vhost observed.
-// (Bucket-derived figures would have read "max 22" and implied 1.8x.)
+// MinSubnets = 40, the first default, flagged 2758 of 2761 farm evaluations and
+// 0 of 3212 legitimate ones — a 1.5x margin over the busiest legitimate vhost
+// observed. (Bucket-derived figures would have read "max 22" and implied
+// 1.8x.) The defaults since 2026-10-27 are DefaultWindow / DefaultMinSubnets /
+// DefaultMinSolves (180s / 30 / 15), re-measured on the fleet; see there.
 //
 // This detector is alert-only by design: at ~1 solve per IP a per-IP nft ban is
 // useless (the address is never seen again) and actively risky (the pool is
@@ -179,6 +181,32 @@ func ParseAction(raw string) (Action, string) {
 	}
 }
 
+// The shipped defaults of the subnet-spread track (WINDOW, MIN_SUBNETS,
+// MIN_SOLVES), read by the register too so there is one copy. Re-measured on
+// the fleet on 2026-10-27 (docs/abuse-defense-progress.md, read 4), where
+// every web node had run 180s / 15 / 15 by hand for weeks:
+//   - at 15 subnets the fingerprint-blind findings were real Greek shop
+//     audiences (paid-ad traffic, 15-25 /24 per 180s window), alert noise;
+//   - the fingerprint-blind findings on farm-hit vhosts reached 33-77;
+//   - a fingerprinted farm spread over enough countries (MinFPCountries, or
+//     the cross-host track's MinXHCountries) is caught by the fp tracks
+//     whatever MinSubnets is; a single-country one is not.
+//
+// 30 sits between the two, with thin margins (1.2x over the humans, 1.1x
+// under the farms; the first calibration had 1.5x). The 60s / 40 / 40
+// calibration in the package doc came first, on one server over one day. A
+// 60s window missed the slower AS398781 swarm (about 31 /24 in 140s); it was
+// caught only once the window was widened to 120s with lower thresholds. A
+// 180s window triples what the fp track counts too (it prunes at the same
+// cutoff); the fleet ran 180s for weeks with only known farms convicted.
+// MinSolves only bites when set above MinSubnets: each subnet in the window
+// comes from at least one solve in it.
+const (
+	DefaultWindow     = 180 * time.Second
+	DefaultMinSubnets = 30
+	DefaultMinSolves  = 15
+)
+
 type Config struct {
 	Every  time.Duration
 	Window time.Duration
@@ -254,13 +282,13 @@ type Config struct {
 	// XHTrack enables the CROSS-HOST fingerprint-concentration track: a single
 	// fingerprint that DOMINATES many vhosts (super-majority of each vhost's
 	// solves) and spans many countries+subnets across the NODE, even when it stays
-	// under the per-vhost 60s country bar on every individual host. This catches
+	// under the per-vhost country bar (per Window) on every individual host. This catches
 	// the thin farm the per-host FPTrack misses (measured: 95070673 across 22
 	// vhosts / 44 countries, ~1 solve/IP). Fingerprint is a GROUP-BY key, never a
 	// matched value. See docs/archive/solver-farm-cross-host-phase2.md.
 	XHTrack bool
 	// XHWindow is the (longer) aggregation window for the cross-host track — a thin
-	// farm needs time to accumulate its spread. Independent of Window (60s).
+	// farm needs time to accumulate its spread. Independent of Window.
 	XHWindow time.Duration
 	// MinXHHostShare is the PRIMARY cross-host guard: a (host, fp) pair is admitted
 	// to the fingerprint's cross-host tally only when that fp is at least this
@@ -306,7 +334,7 @@ type hostState struct {
 	// truncated counts records the evidence cap dropped SINCE THE LAST
 	// EVALUATION. It is reset every pass, not only when an alert fires —
 	// otherwise a vhost that truncates for an hour without ever crossing the
-	// threshold would attribute an hour of drops to one 60s window the next time
+	// threshold would attribute an hour of drops to one Window the next time
 	// it did.
 	truncated int
 	// setsCapped records that the subnet/IP sets themselves hit MaxTrackedPerHost
@@ -514,7 +542,7 @@ func New(cfg Config) *Detector {
 		cfg.Every = 30 * time.Second
 	}
 	if cfg.Window <= 0 {
-		cfg.Window = time.Minute
+		cfg.Window = DefaultWindow
 	}
 	// An evaluation interval longer than the window leaves a blind gap: each pass
 	// prunes everything older than Window, so solves that arrived more than
@@ -525,10 +553,10 @@ func New(cfg Config) *Detector {
 		cfg.Every = cfg.Window
 	}
 	if cfg.MinSubnets <= 0 {
-		cfg.MinSubnets = 40
+		cfg.MinSubnets = DefaultMinSubnets
 	}
 	if cfg.MinSolves <= 0 {
-		cfg.MinSolves = 40
+		cfg.MinSolves = DefaultMinSolves
 	}
 	if cfg.PrefixV4 <= 0 || cfg.PrefixV4 > 32 {
 		cfg.PrefixV4 = 24
@@ -828,7 +856,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// Guarded so state is never reclaimed while it still suppresses something:
 		// the alert cooldown, the NOTIFY cooldown (else a farm that idles past
 		// Cooldown loses lastNotify and re-mails within NotifyCooldown — the pulsing
-		// bypass), or a cross-host flag this pass (its per-host 60s state can be
+		// bypass), or a cross-host flag this pass (its per-host Window state can be
 		// empty while the fp is farming it thin).
 		if len(st.subnets) == 0 && len(st.recs) == 0 &&
 			now.Sub(st.lastAlert) > d.cfg.Cooldown &&
@@ -1061,8 +1089,8 @@ func (d *Detector) topConcentratedFP(st *hostState) (fp string, subnets, countri
 // it, that fingerprint's node-wide tally (over the pre-gated hosts), the
 // aggregate solves-per-IP (evidence only), and THIS vhost's share of the fp. The
 // host* fields are this vhost's own counts over XHWindow, used to render an honest
-// headline when the per-host 60s state has already been reclaimed (a thin farm can
-// flag cross-host with no solve in the last 60s).
+// headline when the per-host Window state has already been reclaimed (a thin farm can
+// flag cross-host with no solve in the last Window).
 type xhVerdict struct {
 	fp          string
 	hosts       int
@@ -1238,11 +1266,11 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 	if sampled > 0 {
 		uaShare = topUACount * 100 / sampled
 	}
-	// Display counts. Normally the per-host 60s window; but a cross-host-only
-	// finding on a vhost whose 60s state was already reclaimed (a thin farm can
-	// flag with no solve in the last minute) would otherwise render solves=0 —
+	// Display counts. Normally the per-host Window; but a cross-host-only
+	// finding on a vhost whose Window state was already reclaimed (a thin farm
+	// can flag with no solve in the last Window) would otherwise render solves=0 —
 	// misleading. In that one case, report this vhost's own counts over XHWindow,
-	// which the cross-host verdict carries. Combined findings keep the 60s counts.
+	// which the cross-host verdict carries. Combined findings keep the Window counts.
 	dispSolves, dispIPs, dispSubnets := solves, len(st.ips), len(st.subnets)
 	dispWindow := d.cfg.Window
 	if xh != nil && solves == 0 && dispSubnets == 0 {
@@ -1337,10 +1365,10 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 			"solves_per_ip": fmt.Sprintf("%.2f", solvesPerIP),
 			"top_ua":        topUA,
 			"top_ua_share":  fmt.Sprintf("%d%%", uaShare),
-			// dispWindow matches the counts: normally the 60s Window, but XHWindow
-			// for a reclaimed-vhost cross-host-only finding whose solves/ips/subnets
-			// were switched above — so a consumer computing solves/window gets the
-			// right rate, not a ~30x over-read.
+			// dispWindow matches the counts: normally Window, but XHWindow for a
+			// reclaimed-vhost cross-host-only finding whose solves/ips/subnets were
+			// switched above — so a consumer computing solves/window gets the right
+			// rate, not an XHWindow/Window-fold over-read.
 			"window": dispWindow.String(),
 			// Corroboration only — never part of the threshold.
 			"impossible_ua": fmt.Sprint(impossibleUA),

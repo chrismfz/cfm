@@ -108,10 +108,10 @@
 - **E4 is CLOSED (operator, 2026-10-22).** Decided: the rescue cap (item 1),
   `vhost_config` in auto-v2, `cfm_pcw` kept as log-only evidence (item 3),
   the trajectory readings kept log-only and no longer re-read weekly, the
-  orphan `HUMANITY_*` keys left to an operator cleanup. Open: α (item 2)
-  and the `solver_farm` defaults. Read 4 proposes both: close α (the walled
-  class has 0 rejects since #1615), and ship the 180s / 15 / 15 the fleet
-  already runs. Master plan §5 E4 holds the record.
+  orphan `HUMANITY_*` keys left to an operator cleanup. Read 4
+  (2026-10-27) closed the last two: α is closed, not built (the walled class
+  has 0 rejects since #1615), and the `solver_farm` defaults are
+  180s / 30 / 15. Master plan §5 E4 holds the record.
 - **Open decisions** (as proposed in read 3):
   1. **The rescue.** **Decided 2026-10-20: capped at 100** (rescue only
      `hs ≤ 100`, whatever the fail score; master plan §5 E4). In
@@ -123,15 +123,15 @@
      One profile is walled off, 3 IPs this week: Windows Chrome/109, no
      input, `outer_zero` on every retry. First confirm whether those are
      minimized windows. **Read 4: 0 such rejects since #1615 (`hid`);
-     proposed: close α.**
+     closed 2026-10-27, not built.**
   3. **`cfm_pcw` exit review.** Proposed: keep it as log-only evidence. Do
      not promote it: there is no actuator, and 20 of its 28 episodes this
      week were humans. Do not retire it: D3a, it is alive and nothing else
      names its datacenter scrapers.
   4. Config decisions after E4: `vhost_config` in auto-v2 (**decided
      2026-10-22**, shipped with it); the orphan `HUMANITY_*` keys (decided:
-     operator cleanup); the shipped `solver_farm` defaults (open; read 4
-     proposes the fleet's 180s / 15 / 15).
+     operator cleanup); the shipped `solver_farm` defaults (**decided
+     2026-10-27: 180s / 30 / 15**; the fleet moves from 15 to 30).
 - **Next read:** after the operator's decisions on read 4's proposals. It
   watches the payload stripping on earth's who-is.gr (watch item 1), the
   farm catch rate per node, human rejects under every v2 source (including
@@ -156,8 +156,9 @@
 | virgo | angie | 2026.10.24 | 1 | **7 d** | defaults |
 
 `[challenge_solver_farm]` on every web node: `WINDOW = 180s`, `MIN_SUBNETS =
-15`, `MIN_SOLVES = 15` (mars in `detectors.d/50-web.conf`), not the shipped
-60s / 40 / 40 (read 4).
+15`, `MIN_SOLVES = 15` (mars in `detectors.d/50-web.conf`), against the
+shipped 60s / 40 / 40 (read 4). The defaults become 180s / 30 / 15; the
+nodes' own `MIN_SUBNETS = 15` stays until the operator moves it to 30.
 
 `/var/log/cfm/*.log` (challenges, abuse_shadow) keeps 14 generations, daily
 or at 200 MB, so a busy node may hold less than 14 days. **A read therefore
@@ -341,6 +342,15 @@ node sets 180s / 15 / 15 by hand, and this week it convicted nothing but the
 three known farms. Shipping them as the defaults changes no live node and
 gives a new install the setting the fleet measured. A small code + reference
 config change (`WINDOW`, `MIN_SUBNETS`, `MIN_SOLVES`).
+*Corrected before it shipped (2026-10-27):* "convicted nothing but the three
+farms" holds for the fingerprint tracks only. The fingerprint-blind
+`subnet_spread` track at 15 flagged real Greek shop audiences: mirego.gr
+(rigel, ~16 findings in 10 days, shoppers from paid Facebook/Instagram ads,
+1 800+ GR solves at hs 0), more4u.gr (orion), marmaridis.gr and
+anastasiadi.gr (mars), all at 15-25 `/24` per 180s window. The
+fingerprint-less findings on farm-hit vhosts (www.mathematica.gr,
+gastronom.hk) reached 33-77. The operator chose **180s / 30 / 15**, and moves
+the fleet from 15 to 30.
 
 **(c) Payload stripping on earth's who-is.gr (watch item 1).** `c28caa00`
 passes the armed vhost there with no payload ~150 times a day. D5b rules out
@@ -351,8 +361,8 @@ decision for who-is.gr. Watch it next read; no code change proposed.
 **(d) `hid`: keep as is.** It costs the farm catch ~4 solves in 5 days and
 lets the background-tab and minimized-window humans through.
 
-- **Actions:** none. Proposals only; nothing goes to the master plan until
-  the operator decides.
+- **Actions:** the operator approved all four on 2026-10-27, (b) at
+  180s / 30 / 15 after the correction above; recorded in master plan §5 E4.
 
 ### 2026-10-20 — read 3 (window: 7 days to 2026-10-20 12:00 Athens)
 
