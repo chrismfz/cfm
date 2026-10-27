@@ -58,6 +58,43 @@ func TestPlannerBootRaceArmingScope(t *testing.T) {
 	}
 }
 
+// qualityweb (2026-10-27): a cPanel host running exim, with the docker CLI
+// installed and no container. No container is coming, so nothing arms the
+// boot-race retry (it rebuilt every detector once a minute for five minutes
+// after each restart). It keys on the RUNNING exim unit: a mailcow host keeps
+// a stopped exim4 binary (the Debian default), and its retry stays armed.
+func TestPlannerBootRaceHostEximRunning(t *testing.T) {
+	swapPresence(t, true, false, true) // exim binary present, docker CLI present
+	for _, unit := range []string{"exim.service", "exim4.service"} {
+		pr := planProbes(nil, []string{unit}, nil, nil)
+		if p := planPostfixLogSource("postfix_security", KV{}, pr); p.bootRace || !p.disable {
+			t.Errorf("%s running: postfix log must self-disable, no bootRace: %+v", unit, p)
+		}
+		if p, _, _ := planPostfixQueues("postfix_queues", KV{}, pr); p.bootRace || !p.disable {
+			t.Errorf("%s running: postfix queues must self-disable, no bootRace: %+v", unit, p)
+		}
+		if p := planDovecotSource("dovecot_auth", KV{}, pr); p.bootRace || !p.provisional {
+			t.Errorf("%s running: dovecot must be provisional, no bootRace: %+v", unit, p)
+		}
+	}
+	// The exim binary alone (service stopped: a mailcow host) keeps the retry.
+	pr := planProbes(nil, nil, nil, nil)
+	if p := planPostfixLogSource("postfix_security", KV{}, pr); !p.bootRace {
+		t.Errorf("stopped exim: postfix log must arm bootRace: %+v", p)
+	}
+	if p, _, _ := planPostfixQueues("postfix_queues", KV{}, pr); !p.bootRace {
+		t.Errorf("stopped exim: postfix queues must arm bootRace: %+v", p)
+	}
+	if p := planDovecotSource("dovecot_auth", KV{}, pr); !p.bootRace {
+		t.Errorf("stopped exim: dovecot must arm bootRace: %+v", p)
+	}
+	// A mailcow container found still resolves to it, exim or not.
+	pr = planProbes(nil, []string{"exim.service"}, nil, []string{"mailcowdockerized-postfix-mailcow-1"})
+	if p, total, _ := planPostfixQueues("postfix_queues", KV{}, pr); p.res.Kind != srcresolve.KindDocker || total == "" {
+		t.Errorf("container present: queues must wrap docker exec: %+v total=%q", p, total)
+	}
+}
+
 func TestBootRaceRetryDue(t *testing.T) {
 	m := &manager{}
 	now := time.Unix(1_700_000_000, 0)

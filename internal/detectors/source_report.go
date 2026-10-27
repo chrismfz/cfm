@@ -49,6 +49,23 @@ var (
 	dockerCLIPresentFn = dockerCLIPresent
 )
 
+// hostEximActive reports whether exim is RUNNING on the host (an active
+// exim.service / exim4.service). It narrows the boot-race retry: a host whose
+// own exim is up is not waiting for a mailcow container, and on qualityweb
+// (2026-10-27: cPanel, exim, the docker CLI installed with no container) the
+// retry rebuilt every detector once a minute for five minutes after each
+// restart, each rebuild a new webdetector Engine (the bridge socket gone for a
+// moment, the uniqIP windows emptied). It asks for the running unit, not the
+// binary: Debian installs exim4 by default and a mailcow host keeps the binary
+// with the service stopped (mailcow takes port 25). An exim not up yet at boot
+// leaves the retry armed, and the next rebuild that sees it running clears it.
+func hostEximActive(p srcresolve.Probes) bool {
+	if p.UnitActive == nil {
+		return false
+	}
+	return p.UnitActive("exim.service") || p.UnitActive("exim4.service")
+}
+
 // ── per-detector planners ─────────────────────────────────────────────────────
 
 func planSSHSource(section string, kv KV, p srcresolve.Probes) sourcePlan {
@@ -106,9 +123,10 @@ func planDovecotSource(section string, kv KV, p srcresolve.Probes) sourcePlan {
 	// Boot-race retry ONLY when docker is present and no dovecot container was
 	// found: a mailcow dovecot container may still be coming up (and can start
 	// slightly after postfix, so dovecot must keep the retry alive on its own).
-	// Without docker there is nothing to wait for — provisional-on-file is the
-	// final answer, so it is not flagged.
-	if dockerCLIPresentFn() {
+	// Without docker, or with the host's own exim running (hostEximActive),
+	// there is nothing to wait for — provisional-on-file is the final answer,
+	// so it is not flagged.
+	if dockerCLIPresentFn() && !hostEximActive(p) {
 		pl.bootRace = true
 		pl.res.Reason = "provisional default (docker present, dovecot container not found yet)"
 	}
@@ -193,10 +211,12 @@ func planPostfixLogSource(section string, kv KV, p srcresolve.Probes) sourcePlan
 			note: res.Reason + "; keeping explicit config as-is"}
 	}
 	if !postfixPresentFn() {
-		if dockerCLIPresentFn() {
+		if dockerCLIPresentFn() && !hostEximActive(p) {
 			// Docker exists but no postfix container was discovered — the
 			// daemon or container may simply not be up yet (boot ordering).
-			// Inconclusive: stay alive on the blind default.
+			// Inconclusive: stay alive on the blind default. A host whose own
+			// exim is running expects no container (hostEximActive): postfix
+			// is simply absent there.
 			return sourcePlan{
 				res:         srcresolve.Result{Kind: srcresolve.KindFile, Path: postfixLogFiles[1], Reason: "provisional default (docker present, container not found yet)"},
 				provisional: true,
@@ -239,7 +259,7 @@ func planPostfixQueues(section string, kv KV, p srcresolve.Probes) (pl sourcePla
 			res:  srcresolve.Result{Kind: srcresolve.KindDocker, Container: name, Reason: why},
 			note: "queue commands wrapped in docker exec",
 		}, t, l
-	case dockerCLIPresentFn():
+	case dockerCLIPresentFn() && !hostEximActive(p):
 		return sourcePlan{
 			res:         srcresolve.Result{Kind: srcresolve.KindNone, Reason: why},
 			passthrough: true, provisional: true, bootRace: true, // docker present, no postfix container yet → retry
