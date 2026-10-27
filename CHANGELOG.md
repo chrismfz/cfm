@@ -32,9 +32,12 @@ back-filled here — see the git/PR history for that period.
   were and now count only the traffic a challenge can stop. A crawler removed
   from those lists is challenged and counted again. Across five busy nodes
   Google and Bing were 2–20 IPs per vhost, so most vhosts see no change.
-  `CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_EXEMPT = 0` restores the old count. The
-  edge's `log-cfm.lua` and the daemon ship together: an older daemon reading
-  the new 14-column record would fold the bypass flag into the upstream name.
+  The same number is the `uniqIP=` in the auto_on/auto_off lines and history,
+  and feeds the vhost score; the top-IP lists still show every client. Where
+  the daemon cannot check an exemption cheaply it counts the client (a crawler
+  is exempt once the edge has verified it). The edge's `log-cfm.lua` sends the
+  bypass flag as a new last column; an older daemon ignores it safely.
+  `CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_EXEMPT = 0` restores the old count.
 
 ### Fixed
 - **`install-openresty.sh` works on AlmaLinux / Rocky / RHEL 10.** OpenResty

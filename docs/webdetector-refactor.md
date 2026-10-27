@@ -65,6 +65,11 @@ Grounded in the code (so we don't rebuild what's there):
   minutes and armed a challenge only the humans saw. A fleet read the same day
   (titan, orion, earth, mars, rigel) found Google + Bing at 2–20 IPs per vhost
   per 10 min, so the change mainly moves vhosts a large exempt crawler visits.
+  The filtered number is the vhost's UniqueIPs everywhere (score, MIN_UNIQIP,
+  longwin floor, Under-Attack leg 3, `uniqIP=` in logs/history); HotIPs and the
+  top lists still see every client. It errs toward counting: good-bot verdicts
+  come from the cache only (fresh positives), and `ptr=` exclude rules never
+  exempt on the count side (no cache-only PTR read exists).
   Kill switch `CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_EXEMPT = 0`.
 - **ASN — resolved, but display-only.** `internal/enrich` (MaxMind
   GeoLite2-ASN) gives `Result{ASN uint, ASNName string}` inline (µs, no DNS) via

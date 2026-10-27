@@ -16,9 +16,17 @@ import (
 // the challenge it had set off. Counting a client the challenge cannot stop
 // buys no protection; it only lowers the threshold for everyone else.
 //
+// The filtered number IS the vhost's UniqueIPs wherever that is read: the
+// uniqIP trip, the score (uniqNorm, the many_unique_ips reason) and its
+// MIN_UNIQIP gate, the longwin suspicion floor, Under-Attack leg 3, and the
+// uniqIP= of the auto_on / auto_off lines and history rows. All of them ask
+// "how many clients could a vhost challenge act on". HotIPs, the median
+// per-IP rate and the top-IP lists still see every client, so a drilldown can
+// list exempt crawler IPs beside a lower uniqIP.
+//
 // vhostChallengeExemptClient is the count-side mirror of what lifts a
-// vhost-wide challenge for one request at the edge, so "passes the vhost
-// challenge" and "is not counted" are the same set of clients:
+// vhost-wide challenge for one request at the edge (handleDecision), so a
+// client that passes the vhost challenge is not counted:
 //   - the bypass list (challenge_waf_bypass.conf, cfm.lua Step 0), which the
 //     edge reports per request (log-cfm.lua column 13, LogRec.Bypass); the
 //     daemon never loads that file itself;
@@ -30,16 +38,28 @@ import (
 //
 // So the operator file stays the switch: drop a crawler from the file (and
 // from the bypass list / good-bot exemption it is also on) and it is both
-// challenged and counted again. Challenge Access-Control entries are not
-// mirrored: they exempt by path, country or method as well as by client, and
-// a client exempt on one path is still challenged on the others.
+// challenged and counted again.
 //
-// Cost: it runs once per ingested request, outside the engine lock. A bypass
-// flag answers at once; the good-bot check is a read-locked cache hit, and
-// only a crawler-looking UA (isBotUA) may start the bounded async verify (the
-// edge only starts one for a challenged client, which before a challenge is
-// nobody); the exclude matcher decides most rules on host / UA, reads the ASN
-// from the local mmdb, and the PTR from the enrich cache, never DNS.
+// It errs toward COUNTING wherever it cannot match the edge cheaply, never
+// the other way, so a client the edge would challenge is always counted:
+//   - the good-bot check reads the cache only, and only a fresh positive
+//     verdict counts (the edge also serves a stale one while it re-verifies).
+//     It never starts a verify: the edge verifies a crawler once a challenge
+//     is on (and Google, Bing and Apple are on the bypass list anyway), so an
+//     unverified crawler is counted until then. Every ingested request runs
+//     this, so a spoofed crawler UA must not buy a reverse lookup;
+//   - the exclude matcher gets the ASN from the local mmdb and NO PTR: the
+//     enricher has no cache-only PTR read (a miss starts a reverse lookup),
+//     so a ptr= rule never exempts here;
+//   - not mirrored at all: Challenge Access-Control entries and the
+//     challenge-exempt endpoints, which exempt by path, country or method as
+//     well as by client (a client exempt on one path is challenged on others);
+//   - InjectObserved (a WAF hit re-fed to the engine) bumps ips but never
+//     ipsExempt, so an exempt client that trips the WAF counts.
+//
+// Cost: once per ingested request, outside the engine lock: a bool, one
+// read-locked map hit, then the exclude rules (host / UA first, an mmdb read
+// only for a rule they leave undecided). No DNS, no async work.
 func (b *NginxBridge) vhostChallengeExemptClient(ip, host, ua string, bypass bool, now time.Time) bool {
 	if bypass {
 		return true
@@ -47,18 +67,8 @@ func (b *NginxBridge) vhostChallengeExemptClient(ip, host, ua string, bypass boo
 	if b == nil || ip == "" {
 		return false
 	}
-	ptrFn := func() string {
-		if b.enr == nil {
-			return ""
-		}
-		return b.enr.LookupCachedOrAsync(ip).PTR
-	}
 	if b.goodBotExempt && b.goodBot != nil && b.enr != nil {
-		if isBotUA(ua) {
-			if b.goodBot.verified(ip, ptrFn, now) != "" {
-				return true
-			}
-		} else if l, fresh := b.goodBot.cached(ip, now); (fresh && l.name != "") || l.stale != "" {
+		if l, fresh := b.goodBot.cached(ip, now); fresh && l.name != "" {
 			return true
 		}
 	}
@@ -69,7 +79,8 @@ func (b *NginxBridge) vhostChallengeExemptClient(ip, host, ua string, bypass boo
 			}
 			return ""
 		}
-		if _, _, ok := b.ChalExcludeHot(host, ua, asnFn, ptrFn, "CHALLENGE_VHOST"); ok {
+		noPTR := func() string { return "" }
+		if _, _, ok := b.ChalExcludeHot(host, ua, asnFn, noPTR, "CHALLENGE_VHOST"); ok {
 			return true
 		}
 	}

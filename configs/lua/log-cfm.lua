@@ -56,8 +56,8 @@
 --                                         request: "cfm_apache*" = the site's
 --                                         origin, "cfm_challenge" = CFM's own
 --                                         challenge server, "-" when unset.
---                                         Added 2026-10-08 as the LAST column;
---                                         the daemon reads 12 or 13 (an edge
+--                                         Added 2026-10-08 after ua;
+--                                         the daemon reads 12, 13 or 14 (an edge
 --                                         still on the old module sends 12). An
 --                                         older daemon would fold it into ua, so
 --                                         the package ships both together.
@@ -70,8 +70,10 @@
 --                                         client out of the vhost uniqIP count,
 --                                         since a vhost challenge cannot reach
 --                                         it. It reads 12, 13 or 14 columns; an
---                                         older daemon would fold it into up,
---                                         so the package ships both together.
+--                                         older daemon folds it into up
+--                                         ("cfm_apache\t1"), which its
+--                                         HasPrefix("cfm_apache") readers still
+--                                         take as the origin.
 --
 -- Connection reuse: setkeepalive(10000, 100) gives us up to 100 pooled
 -- cosockets per worker, idle timeout 10s. First timer per worker pays

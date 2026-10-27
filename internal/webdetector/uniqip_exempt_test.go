@@ -98,6 +98,22 @@ func TestVhostChallengeExemptClient(t *testing.T) {
 		}
 	}
 
+	// A stale positive (expired, inside the edge's grace) counts: the edge may
+	// drop it on re-verify, and the count side never re-verifies.
+	b.goodBot.store("66.249.66.9", "googlebot", now.Add(-goodBotIPPosTTL-time.Minute))
+	if b.vhostChallengeExemptClient("66.249.66.9", "shop.gr", "mozilla/5.0 (compatible; googlebot/2.1)", false, now) {
+		t.Error("a stale good-bot verdict must not exempt")
+	}
+	// The count side never asks the enricher for a PTR (no reverse lookup):
+	// a ptr= rule cannot match, so its client counts.
+	b.ChalExcludeHot = func(host, ua string, asn, ptr func() string, rule string) (string, string, bool) {
+		return "skip", "asn=as15169; ptr=*.googlezip.net", ptr() != ""
+	}
+	if b.vhostChallengeExemptClient("66.249.80.1", "shop.gr", "mozilla/5.0", false, now) {
+		t.Error("a ptr= rule must not exempt on the count side")
+	}
+	b.ChalExcludeHot = appleExcludeBridge(t).ChalExcludeHot
+
 	// CHALLENGE_GOODBOT_EXEMPT=0: the edge challenges a verified crawler, so it counts.
 	b.goodBotExempt = false
 	if b.vhostChallengeExemptClient("66.249.66.1", "shop.gr", "mozilla/5.0 (compatible; googlebot/2.1)", false, now) {
@@ -131,10 +147,17 @@ func TestUniqIPExemptCount(t *testing.T) {
 		e.nginxBridge.ChalExcludeHot = ab.ChalExcludeHot
 		e.nginxBridge.enr = stubPageEnricher{}
 
-		ts := float64(time.Now().Unix())
+		e.nginxBridge.goodBotExempt = true
+		e.nginxBridge.goodBot.store("66.249.66.1", "googlebot", time.Now())
+
+		// Spread over the window so the count spans several buckets.
+		t0 := float64(time.Now().Add(-90 * time.Second).Unix())
+		n := 0
 		rec := func(ip, ua string, bypass bool) LogRec {
-			return LogRec{TS: ts, IP: ip, Host: "www.trimel.gr", Method: "get", URI: "/", Status: 200, UA: ua, Bypass: bypass}
+			n++
+			return LogRec{TS: t0 + float64(n%90), IP: ip, Host: "www.trimel.gr", Method: "get", URI: "/", Status: 200, UA: ua, Bypass: bypass}
 		}
+		e.ingest(rec("66.249.66.1", "mozilla/5.0 (compatible; googlebot/2.1)", false), "raw") // verified good bot
 		for i := 0; i < 300; i++ { // Applebot through the exclude file
 			e.ingest(rec(fmt.Sprintf("17.166.%d.%d", i/250, i%250+1), "mozilla/5.0 (applebot/0.1)", false), "raw")
 		}
@@ -151,7 +174,7 @@ func TestUniqIPExemptCount(t *testing.T) {
 		e.mu.Lock()
 		m := e.snapshotMiniLocked(time.Now())["www.trimel.gr"]
 		e.mu.Unlock()
-		want := 390
+		want := 391
 		if on {
 			want = 40
 		}
