@@ -444,8 +444,11 @@ vhost uniqIP count is a third mirror (`vhostChallengeExemptClient`,
 LOCKDOWN (`vhost_lockdown.go`, `docs/vhost-lockdown.md`, a manual arm's
 attribute, 30m default / 6h max) withdraws all of them: Step 0 stops
 bypassing crawler (`1`) prefixes for that host (`cfm_lockdown.lua`; CDN `2`
-prefixes, QUIC.cloud, keep it), and every mirror above stands down for it — a
-new client exemption must check `vhostLockedDown` too. The
+prefixes, QUIC.cloud, keep it; a held crawler also skips the inline WAF, or
+bait on the site would get Googlebot node-wide nft-banned by `waf_security`),
+and the decision and challenge-page mirrors stand down for it — a new client
+exemption must check `vhostLockedDown` too. The uniqIP count is deliberately
+NOT locked down (it would arm an automatic v2 that outlives the lockdown). The
 exception is a `next` that carries a `cfm_rt`: the exemption cannot clear
 that challenged POST, and its owner would lose it. Before 2026-10-06 these
 clients got the PoW: titan served it to meta-externalagent ~1 940 times in

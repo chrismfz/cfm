@@ -231,40 +231,60 @@ func TestChallengeV2WaiverBar_Lockdown(t *testing.T) {
 	}
 }
 
-// The uniqIP count under a lockdown exempts only CDN clients: a crawler is
-// challenged there, so it counts.
-func TestVhostChallengeExemptClient_Lockdown(t *testing.T) {
+// A lockdown leaves the uniqIP count as it is: counting the crawlers it holds
+// would arm an automatic challenge that outlives the lockdown.
+func TestVhostChallengeExemptClient_LockdownLeavesCount(t *testing.T) {
 	b := appleExcludeBridge(t)
 	now := time.Now()
 	b.setVhostLockdowns(map[string]time.Time{"shop.gr": now.Add(time.Minute)})
-	cases := []struct {
-		ip, ua      string
-		bp, bpCDN   bool
-		want        bool
-		description string
-	}{
-		{"40.77.167.1", "bingbot", true, false, false, "crawler bypass counts"},
-		{"141.95.1.1", "qcbot", true, true, true, "CDN bypass stays exempt"},
-		{"17.166.20.62", "applebot", false, false, false, "exclude-file match counts"},
-		{"79.129.88.110", "mozilla/5.0", false, false, false, "a human counts"},
+	if !b.vhostChallengeExemptClient("40.77.167.1", "shop.gr", "bingbot", true, now) {
+		t.Error("a bypass-listed crawler stays out of the count under a lockdown")
 	}
-	for _, c := range cases {
-		if got := b.vhostChallengeExemptClient(c.ip, "shop.gr", c.ua, c.bp, c.bpCDN, now); got != c.want {
-			t.Errorf("%s: got %v, want %v", c.description, got, c.want)
-		}
+	if !b.vhostChallengeExemptClient("17.166.20.62", "shop.gr", "applebot", false, now) {
+		t.Error("an exclude-file match stays out of the count under a lockdown")
 	}
-	if !b.vhostChallengeExemptClient("17.166.20.62", "other.gr", "applebot", false, false, now) {
-		t.Error("an unlocked vhost keeps the exclude-file exemption")
+	if b.vhostChallengeExemptClient("79.129.88.110", "shop.gr", "mozilla/5.0", false, now) {
+		t.Error("a human counts")
 	}
 }
 
-func TestParseSocketTSV_BypassCDN(t *testing.T) {
+func TestParseSocketTSV_BypassKinds(t *testing.T) {
 	base := "1791466170.6\t141.95.1.1\ta.gr\tGET\t/\tHTTP/2.0\t200\t7\t0.002\t0.001\t-\tqcbot\tcfm_apache\t"
-	for bp, want := range map[string][2]bool{"1": {true, false}, "2": {true, true}, "0": {false, false}} {
-		rec, ok := parseSocketTSV(base + bp)
-		if !ok || rec.Bypass != want[0] || rec.BypassCDN != want[1] {
-			t.Errorf("bp=%s: bypass=%v cdn=%v, want %v", bp, rec.Bypass, rec.BypassCDN, want)
+	for bp, want := range map[string]bool{"1": true, "2": true, "0": false, "-": false} {
+		if rec, ok := parseSocketTSV(base + bp); !ok || rec.Bypass != want {
+			t.Errorf("bp=%s: bypass=%v, want %v", bp, rec.Bypass, want)
 		}
+	}
+}
+
+// A NEW www. arm under a locked-down apex inherits the lockdown (arming www.
+// from a lockdown-unaware surface must not unlock it); a www. arm that lapses
+// hands www. back to the apex's lockdown on the next tick's resync.
+func TestLockdown_WWWArmInheritsAndLapses(t *testing.T) {
+	e, _ := lockdownTestEngine(t)
+	e.ManualChallengeVhost("shop.gr", time.Hour, "manual", "")
+	until, _, _, _ := e.SetManualChallengeLockdownAs("shop.gr", 30*time.Minute, "")
+	e.ManualChallengeVhost("www.shop.gr", time.Hour, "panic-button", "v2")
+	if got := e.manualChal.lockdownUntil("www.shop.gr"); !got.Equal(until) {
+		t.Fatalf("new www. arm did not inherit the apex lockdown: %v, want %v", got, until)
+	}
+	if !e.nginxBridge.vhostLockedDown("www.shop.gr", time.Now()) {
+		t.Fatal("www. unlocked at the bridge after its own arm was created")
+	}
+	// A www. arm with no lockdown of its own lapses: the resync gives www.
+	// back to the apex lockdown.
+	e.SetManualChallengeLockdownAs("www.shop.gr", 0, "")
+	if e.nginxBridge.vhostLockedDown("www.shop.gr", time.Now()) {
+		t.Fatal("www. arm's own lift not published")
+	}
+	e.manualChal.mu.Lock()
+	ent := e.manualChal.vhosts["www.shop.gr"]
+	ent.ExpiresAt = time.Now().Add(-time.Second)
+	e.manualChal.vhosts["www.shop.gr"] = ent
+	e.manualChal.mu.Unlock()
+	e.syncVhostLockdowns() // what RunOnce does every tick
+	if !e.nginxBridge.vhostLockedDown("www.shop.gr", time.Now()) {
+		t.Fatal("after the www. arm lapsed, www. must fall back to the apex lockdown")
 	}
 }
 
@@ -394,6 +414,7 @@ func TestCLILockdownCommands(t *testing.T) {
 		{func() error { return runChallengeAdd(ts.URL, []string{"shop.gr", "--lockdown"}) }, "lockdown=1"},
 		{func() error { return runChallengeAdd(ts.URL, []string{"shop.gr", "--lockdown-ttl", "1h"}) }, "lockdown=1&lockdown_ttl=1h"},
 		{func() error { return runChallengeAdd(ts.URL, []string{"shop.gr", "--no-lockdown"}) }, "lockdown=0"},
+		{func() error { return runChallengeAdd(ts.URL, []string{"shop.gr", "--no-lockdown", "--lockdown-ttl", "1h"}) }, "&lockdown=0"},
 		{func() error { return runChallengeLockdown(ts.URL, []string{"shop.gr", "on", "--ttl", "45m"}) }, "/api/v1/challenge/vhost/lockdown?host=shop.gr&lockdown=1&ttl=45m"},
 		{func() error { return runChallengeLockdown(ts.URL, []string{"shop.gr", "off"}) }, "/api/v1/challenge/vhost/lockdown?host=shop.gr&lockdown=0"},
 	}

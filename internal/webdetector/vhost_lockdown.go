@@ -29,8 +29,11 @@ import (
 //   - handleDecision skips the good-bot downgrade, Access-Control and the
 //     exclude-file lift;
 //   - the challenge page grants no exemption (challengePageExempt);
-//   - a v2 arm waives no good bot at verify;
-//   - the uniqIP count exempts nobody but CDN clients (vhostChallengeExemptClient).
+//   - a v2 arm waives no good bot at verify.
+// The vhost uniqIP count is left as it is (vhostChallengeExemptClient says
+// why), and a crawler held at Step 0 skips the inline WAF as its bypass always
+// did (cfm.lua): an armed rule tripped by bait on the locked site would
+// otherwise have waf_security nft-ban Googlebot for the whole node.
 // Crawlers cannot solve the challenge, so they are in effect shut out of that
 // vhost, while people solve it as on any challenged vhost. What a lockdown
 // leaves alone is about paths and the node, not clients: /.well-known/ (ACME),
@@ -108,6 +111,8 @@ func (e *Engine) syncVhostLockdowns() {
 	if e.nginxBridge == nil {
 		return
 	}
+	e.lockdownSync.Lock()
+	defer e.lockdownSync.Unlock()
 	m := map[string]time.Time{}
 	now := time.Now()
 	for host, ent := range e.manualChal.snapshot() {

@@ -1329,8 +1329,13 @@ pcall(strip_cdn_bust_arg)
 -- challenge_waf_bypass.conf: "1" = a crawler, "2" = a CDN fetching for a
 -- site's visitors (QUIC.cloud). A vhost in LOCKDOWN (a manual vhost challenge
 -- armed with lockdown; internal/webdetector/vhost_lockdown.go) withdraws the
--- crawler bypass, so a "1" client there goes on through every step below and
--- meets the vhost challenge; a "2" client keeps its bypass.
+-- crawler bypass, so a "1" client there goes on through the steps below and
+-- meets the vhost challenge; a "2" client keeps its bypass. A held client
+-- skips the inline WAF (Step 2), as its bypass always did: a crawler fed bait
+-- by a site (a sitemap link carrying SQLi) would otherwise trip an armed rule,
+-- and waf_security, which has no good-bot exemption, would nft-ban Googlebot
+-- for the whole node, outliving the lockdown. The challenge is all it meets.
+local lockdown_held = false
 do
   local bp = ngx.var.cfm_bypass_ip
   if bp == "1" or bp == "2" then
@@ -1339,6 +1344,7 @@ do
       local ok, act = pcall(lockdown.active, host)
       held = ok and act == true
     end
+    lockdown_held = held
     if not held then
       ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
       return
@@ -1684,7 +1690,8 @@ local waf_allow_action
 -- Runs even when clearance is valid: a solved challenge does not authorise
 -- exploit payloads, and a logonly hit must not silently let a webshell
 -- upload through just because the client is browser-capable.
-if waf_ok and waf and waf.enabled and waf.enabled() then
+-- A crawler a vhost lockdown held at Step 0 skips it (see there).
+if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
   local skip_all, skip_rule_ids = waf_skip_for(host, uri)
   if skip_all then
     if CFG.debug_headers then ngx.header["X-CFM-WAF-Excluded"] = "1" end

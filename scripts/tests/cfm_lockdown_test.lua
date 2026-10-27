@@ -55,6 +55,30 @@ do
   check(asked == nil, "a CDN client must not consult the lockdown set")
 end
 
+-- ── A held crawler skips the inline WAF, as its bypass always did ────────────
+-- (a site's bait — a sitemap link carrying SQLi — must not make an armed rule
+-- push an autoblock that nft-bans Googlebot node-wide). Everyone else on the
+-- locked vhost still meets the WAF.
+do
+  local calls = 0
+  local fake = {
+    enabled = function() return true end,
+    check = function() calls = calls + 1; return true, "WAF_SQLI:T", 21600, "block", {}, 301 end,
+    should_push = function() return true end,
+    also_rule_ids = function() return {} end,
+    post_clearance_action = function(a) return a, false end,
+  }
+  local r = H.run{ host = "shop.gr", vars = { cfm_bypass_ip = "1" }, lockdown = { ["shop.gr"] = true },
+                   verdict = CHAL, waf_fake = fake }
+  check(r.ok and calls == 0, "a held crawler must not reach the WAF (calls=" .. calls .. "): " .. desc(r))
+  check(not r.rpcs:find("ip", 1, true) or r.rpcs:find("decision", 1, true) == 1,
+        "no WAF push for a held crawler: " .. desc(r))
+  calls = 0
+  r = H.run{ host = "shop.gr", vars = { cfm_bypass_ip = "0" }, lockdown = { ["shop.gr"] = true },
+             verdict = CHAL, waf_fake = fake }
+  check(calls == 1, "a client not on the bypass list still meets the WAF on a locked vhost (calls=" .. calls .. ")")
+end
+
 -- ── cfm_lockdown.lua ──────────────────────────────────────────────────────────
 do
   local now, timers = 1000, {}
@@ -86,6 +110,37 @@ do
   check(L.active("") == false, "an empty host is not locked")
   now = 1700
   check(L.active("shop.gr") == false, "the entry's own expiry ends the lockdown without a refresh")
+
+  -- A successful refresh replaces the list with the bridge's (token, path).
+  package.loaded["cfm_bridge_cfg"] = { token = function() return "tok" end }
+  package.loaded["cjson.safe"] = { decode = function(b)
+    if b == '{"hosts":{"new.gr":1900}}' then return { hosts = { ["new.gr"] = 1900 } } end
+  end }
+  local sent
+  local lines = { "HTTP/1.1 200 OK", "Content-Length: 25", "" }
+  _G.ngx.socket = { tcp = function()
+    return {
+      settimeouts = function() end,
+      connect = function() return true end,
+      send = function(_, req) sent = req; return #req end,
+      receive = function(_, pat)
+        if pat == "*l" then return table.remove(lines, 1) end
+        return '{"hosts":{"new.gr":1900}}'
+      end,
+      close = function() end,
+    }
+  end }
+  package.loaded["cfm_lockdown"] = nil
+  timers = {}
+  now = 1000
+  local L2 = require("cfm_lockdown")
+  L2.active("x.gr") -- schedules the first refresh
+  for _, fn in ipairs(timers) do fn(false) end
+  check(sent and sent:find("GET /nginx/lockdown HTTP/1.1", 1, true) and sent:find("X-CFM-Token: tok", 1, true),
+        "refresh must GET /nginx/lockdown with the bridge token, sent: " .. tostring(sent))
+  check(L2.active("new.gr") == true, "a successful refresh installs the bridge's list")
+  check(L2.active("shop.gr") == false, "a successful refresh replaces the old list")
+  L = L2
 
   -- The scheduled refresh runs out of band; a failed fetch keeps the last list.
   now = 1000

@@ -354,6 +354,11 @@ export const controlsMixin = {
     async panicLockdownToggle() {
       const host = String(this.panicHost || "").trim();
       if (!host) { this.panicMsg = "Pick a vhost first."; return; }
+      // Decide from THIS host's current status: the input's @change refresh is
+      // async, and a stale status (none yet, or the previous host's) would
+      // re-arm an existing manual challenge with the lockdown's shorter TTL.
+      await this.refreshPanicStatus();
+      if (String(this.panicStatus?.host || host).toLowerCase() !== host.toLowerCase()) { this.panicMsg = `Could not read the status of ${host}.`; return; }
       const on = !this.panicLockdownOn();
       if (on && !window.confirm(`Lock down ${host}?\n\n${LOCKDOWN_HELP}`)) return;
       const req = lockdownRequest(host, this.panicStatus || {}, on, this.panicLockdownTTL);

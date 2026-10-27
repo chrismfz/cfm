@@ -1587,7 +1587,6 @@ func runChallengeAdd(baseURL string, args []string) error {
 				return fmt.Errorf("--lockdown-ttl requires a value (e.g. 30m)")
 			}
 			lockdownTTL = args[i+1]
-			lockdown = "1"
 			i++
 		default:
 			if strings.HasPrefix(args[i], "--ttl=") {
@@ -1598,7 +1597,6 @@ func runChallengeAdd(baseURL string, args []string) error {
 				rung = strings.TrimPrefix(args[i], "--rung=")
 			} else if strings.HasPrefix(args[i], "--lockdown-ttl=") {
 				lockdownTTL = strings.TrimPrefix(args[i], "--lockdown-ttl=")
-				lockdown = "1"
 			} else if strings.HasPrefix(args[i], "--lockdown=") {
 				lockdown = strings.TrimPrefix(args[i], "--lockdown=")
 			}
@@ -1607,6 +1605,14 @@ func runChallengeAdd(baseURL string, args []string) error {
 
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=%s&reason=%s&rung=%s",
 		baseURL, url.QueryEscape(host), url.QueryEscape(ttlStr), url.QueryEscape(reason), url.QueryEscape(rung))
+	// --lockdown-ttl alone implies --lockdown; with --no-lockdown it is moot
+	// (whatever the flag order).
+	if lockdownTTL != "" && lockdown == "" {
+		lockdown = "1"
+	}
+	if lockdown == "0" {
+		lockdownTTL = ""
+	}
 	if lockdown != "" {
 		u += "&lockdown=" + url.QueryEscape(lockdown)
 	}

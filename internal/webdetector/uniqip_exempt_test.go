@@ -93,7 +93,7 @@ func TestVhostChallengeExemptClient(t *testing.T) {
 		{"79.129.88.111", "mozilla/5.0 (compatible; googlebot/2.1)", false, false, "a spoofed crawler UA, not verified"},
 	}
 	for _, c := range cases {
-		if got := b.vhostChallengeExemptClient(c.ip, "shop.gr", c.ua, c.bypass, false, now); got != c.want {
+		if got := b.vhostChallengeExemptClient(c.ip, "shop.gr", c.ua, c.bypass, now); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.describe, got, c.want)
 		}
 	}
@@ -103,11 +103,11 @@ func TestVhostChallengeExemptClient(t *testing.T) {
 	// challenge, so a fresh-only count would re-arm the challenge ~30 min
 	// after it went off. Past the grace it counts.
 	b.goodBot.store("66.249.66.9", "googlebot", now.Add(-goodBotIPPosTTL-time.Minute))
-	if !b.vhostChallengeExemptClient("66.249.66.9", "shop.gr", "mozilla/5.0 (compatible; googlebot/2.1)", false, false, now) {
+	if !b.vhostChallengeExemptClient("66.249.66.9", "shop.gr", "mozilla/5.0 (compatible; googlebot/2.1)", false, now) {
 		t.Error("a stale good-bot verdict inside the grace must exempt")
 	}
 	b.goodBot.store("66.249.66.10", "googlebot", now.Add(-goodBotIPPosTTL-goodBotIPStaleGrace-time.Minute))
-	if b.vhostChallengeExemptClient("66.249.66.10", "shop.gr", "mozilla/5.0 (compatible; googlebot/2.1)", false, false, now) {
+	if b.vhostChallengeExemptClient("66.249.66.10", "shop.gr", "mozilla/5.0 (compatible; googlebot/2.1)", false, now) {
 		t.Error("a verdict past the stale grace must not exempt")
 	}
 	// The count side never asks the enricher for a PTR (no reverse lookup):
@@ -115,24 +115,24 @@ func TestVhostChallengeExemptClient(t *testing.T) {
 	b.ChalExcludeHot = func(host, ua string, asn, ptr func() string, rule string) (string, string, bool) {
 		return "skip", "asn=as15169; ptr=*.googlezip.net", ptr() != ""
 	}
-	if b.vhostChallengeExemptClient("66.249.80.1", "shop.gr", "mozilla/5.0", false, false, now) {
+	if b.vhostChallengeExemptClient("66.249.80.1", "shop.gr", "mozilla/5.0", false, now) {
 		t.Error("a ptr= rule must not exempt on the count side")
 	}
 	b.ChalExcludeHot = appleExcludeBridge(t).ChalExcludeHot
 
 	// CHALLENGE_GOODBOT_EXEMPT=0: the edge challenges a verified crawler, so it counts.
 	b.goodBotExempt = false
-	if b.vhostChallengeExemptClient("66.249.66.1", "shop.gr", "mozilla/5.0 (compatible; googlebot/2.1)", false, false, now) {
+	if b.vhostChallengeExemptClient("66.249.66.1", "shop.gr", "mozilla/5.0 (compatible; googlebot/2.1)", false, now) {
 		t.Error("good-bot exemption off: a verified crawler must count")
 	}
 	// No exclude file loaded: Apple counts again (the operator dropped the rule).
 	b.ChalExcludeHot = nil
-	if b.vhostChallengeExemptClient("17.166.20.62", "shop.gr", "mozilla/5.0 (applebot/0.1)", false, false, now) {
+	if b.vhostChallengeExemptClient("17.166.20.62", "shop.gr", "mozilla/5.0 (applebot/0.1)", false, now) {
 		t.Error("no exclude rule: Apple must count")
 	}
 	// The bypass flag needs no bridge state at all.
 	var nb *NginxBridge
-	if !nb.vhostChallengeExemptClient("1.2.3.4", "shop.gr", "", true, false, now) || nb.vhostChallengeExemptClient("1.2.3.4", "shop.gr", "", false, false, now) {
+	if !nb.vhostChallengeExemptClient("1.2.3.4", "shop.gr", "", true, now) || nb.vhostChallengeExemptClient("1.2.3.4", "shop.gr", "", false, now) {
 		t.Error("nil bridge: only the bypass flag may exempt")
 	}
 }

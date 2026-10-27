@@ -26,7 +26,7 @@ A lockdown is about *clients*, not paths or the node. These are left alone:
 
 The default is **30 minutes** and the maximum is **6 hours**; the daemon caps it and the response says `lockdown_capped`. It never outlives the challenge it belongs to. Crawlers kept out for hours start to cost a shop its search ranking, so a lockdown always ends on its own. Renew it deliberately if the storm goes on.
 
-A re-arm of the challenge (the `c` key in the TUI, a TTL extension, a button that sends no lockdown field) **keeps** the lockdown, clamped to the new expiry. Only an explicit `lockdown=0`, the lockdown endpoint, or removing the challenge lifts it.
+A re-arm of the challenge (a TTL extension, a button or command that sends no lockdown field) **keeps** the lockdown, clamped to the new expiry. Only an explicit `lockdown=0`, the lockdown endpoint, or removing the challenge lifts it (the TUI's `c` on a manual challenge removes it, lockdown included). A **new** `www.` arm under a locked-down apex inherits the apex's lockdown: arming `www.` from a surface that knows nothing of lockdowns must not quietly unlock it.
 
 ## Controls
 
@@ -50,8 +50,10 @@ Audit:
 
 - **Daemon.** `manualChalEntry.LockdownUntil` is persisted with the manual challenge (`lockdown_until`; an older snapshot loads as none). `SetManualChallengeLockdownAs` is the one change point. `syncVhostLockdowns` publishes `host → expiry` to the bridge. An apex arm also covers its `www.` variant, unless that `www.` host has an arm of its own.
 - **Edge Step 0.** `configs/lua/cfm_lockdown.lua` keeps each worker's copy of `GET /nginx/lockdown`, refreshed out of band every 5 s (`CFM_LOCKDOWN_REFRESH_SEC`). Each entry carries its expiry, so a lockdown ends on time even while the bridge is unreachable. For a `1` (crawler) bypass client on a locked host, Step 0 does not return; the request goes through every later step and meets the vhost challenge. A `2` (CDN) client keeps its bypass. Any failure of the module (load, fetch, a raise) leaves the bypass as it always was: fail-open to the old behaviour. The refresh is lazy: a worker that served no bypass request for a while serves its first one after a new lockdown with its old table, then refreshes (one request per worker, at most).
+  A crawler held this way **skips the inline WAF**, as its bypass always did: a site could feed a crawler bait (a sitemap link carrying SQLi) and an armed rule would make `waf_security`, which has no good-bot exemption, nft-ban Googlebot for the whole node, long after the lockdown. The challenge is all it meets.
 - **Decision.** `handleDecision` skips the good-bot downgrade, Access-Control and the exclude-file lift on a locked host. The challenge page grants no exemption (`challengePageExempt`). A v2 arm waives no good bot at verify (`v2_waiver_miss=lockdown`).
-- **Vhost uniqIP count.** Under a lockdown, only CDN clients stay out of the count (`vhostChallengeExemptClient`).
+- **Vhost uniqIP count.** Unchanged by a lockdown, on purpose: the vhost is already under its manual challenge, and counting the crawlers it holds would arm an automatic challenge (v2 by default) that outlives the lockdown.
+- **Resync.** The daemon republishes the lockdown set on every tick (`RunOnce`), so a `www.` arm that lapses on its own hands `www.` back to the apex's lockdown within seconds.
 
 The bypass list's two kinds come from `scripts/build_bypass_list.py`: a source in `CDN_SOURCES` is written as `<cidr> 2;`, every other source as `<cidr> 1;`, and a prefix in both kinds as `2`. `bypass_list_test.py` pins the format and fails a committed list that lost the `2` lines. The edge's `log-cfm.lua` sends the value as column 13, and the daemon reads `1` and `2` as bypass and `2` as CDN.
 

@@ -97,7 +97,7 @@ func (s *manualChalState) init(path string) {
 // set adds or refreshes a manual challenge for host. rung "" = plain
 // challenge; "v2" = ChallengeV2 (verify-time distinction, see manualChalEntry).
 // A lockdown already on the arm is kept, clamped to the new expiry: a re-arm
-// (the TUI's toggle, a button that sends no lockdown field) must not quietly
+// (a TTL extension, a button that sends no lockdown field) must not quietly
 // lift it; setLockdown is the one place that changes it.
 func (s *manualChalState) set(host string, ttl time.Duration, reason, rung string) {
 	s.mu.Lock()
@@ -392,7 +392,23 @@ func (e *Engine) ManualChallengeVhostAs(host string, ttl time.Duration, reason, 
 }
 
 func (e *Engine) manualChallengeVhostRecord(host string, ttl time.Duration, reason, rung, actor string) {
+	// A NEW www. arm under a locked-down apex inherits the apex's lockdown:
+	// the www. host was covered by it, and its own arm now governs it
+	// (manualRungTarget), so arming it from a lockdown-unaware surface (a
+	// panic button, the bots drilldown) must not quietly unlock it.
+	var inherit time.Time
+	if apex, isWWW := strings.CutPrefix(host, "www."); isWWW && apex != "" {
+		if own, _, _ := e.manualChal.active(host); !own {
+			inherit = e.manualChal.lockdownUntil(apex)
+		}
+	}
 	e.manualChal.set(host, ttl, reason, rung)
+	if !inherit.IsZero() {
+		if _, stored, ok := e.manualChal.setLockdown(host, inherit); ok && !stored.IsZero() {
+			logging.LogfCHALLENGES("[challenge][vhost] action=lockdown_inherit host=%s from=%s until=%s",
+				host, strings.TrimPrefix(host, "www."), stored.UTC().Format(time.RFC3339))
+		}
+	}
 
 	// reason is %q-quoted: it can be attacker-influenced free text (a scoped
 	// customer's API field), and this line IS the audit trail — an unquoted
