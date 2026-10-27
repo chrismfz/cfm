@@ -17,28 +17,6 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-### Changed
-- **A vhost's unique-IP count no longer includes clients the vhost challenge
-  lets through.** The suspicious-vhost challenge arms once a vhost sees more
-  than `CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_ON` distinct IPs (150 by default).
-  That count included the crawlers the edge then waves through the challenge
-  anyway. On a cPanel node, Applebot alone (on the bypass list) brought about
-  1 300 IPs to one shop in 10 minutes: the shop went into challenge, Applebot
-  kept crawling, and only its human visitors saw the challenge. The count now
-  leaves out what passes a vhost challenge: the bypass list
-  (`challenge_waf_bypass.conf`, now reported by the edge per request), an
-  FCrDNS-verified good bot under `CHALLENGE_GOODBOT_EXEMPT`, and a match in
-  `webdetector_challenge_exclude.txt`. The thresholds stay as tight as they
-  were and now count only the traffic a challenge can stop. A crawler removed
-  from those lists is challenged and counted again. Across five busy nodes
-  Google and Bing were 2–20 IPs per vhost, so most vhosts see no change.
-  The same number is the `uniqIP=` in the auto_on/auto_off lines and history,
-  and feeds the vhost score; the top-IP lists still show every client. Where
-  the daemon cannot check an exemption cheaply it counts the client (a crawler
-  is exempt once the edge has verified it). The edge's `log-cfm.lua` sends the
-  bypass flag as a new last column; an older daemon ignores it safely.
-  `CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_EXEMPT = 0` restores the old count.
-
 ### Fixed
 - **`install-openresty.sh` works on AlmaLinux / Rocky / RHEL 10.** OpenResty
   publishes no EL10 repository, so the installer's repo file (`$releasever`
@@ -108,6 +86,26 @@ back-filled here — see the git/PR history for that period.
   12.6.8).
 
 ### Changed
+- **A vhost's unique-IP count no longer includes clients the vhost challenge
+  lets through.** The suspicious-vhost challenge arms once a vhost sees more
+  than `CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_ON` distinct IPs (150 by default).
+  That count included the crawlers the edge then waves through the challenge
+  anyway. On a cPanel node, Applebot alone (on the bypass list) brought about
+  1 300 IPs to one shop in 10 minutes: the shop went into challenge, Applebot
+  kept crawling, and only its human visitors saw the challenge. The count now
+  leaves out what passes a vhost challenge: the bypass list
+  (`challenge_waf_bypass.conf`, now reported by the edge per request), an
+  FCrDNS-verified good bot under `CHALLENGE_GOODBOT_EXEMPT`, and a match in
+  `webdetector_challenge_exclude.txt`. The thresholds stay as tight as they
+  were and now count only the traffic a challenge can stop. A crawler removed
+  from those lists is challenged and counted again. Across five busy nodes
+  Google and Bing were 2–20 IPs per vhost, so most vhosts see no change.
+  The same number is the `uniqIP=` in the auto_on/auto_off lines and history,
+  and feeds the vhost score; the top-IP lists still show every client. Where
+  the daemon cannot check an exemption cheaply it counts the client (a crawler
+  is exempt once the edge has verified it). The edge's `log-cfm.lua` sends the
+  bypass flag as a new last column; an older daemon ignores it safely.
+  `CHALLENGE_SUSPICIOUS_VHOST_UNIQIP_EXEMPT = 0` restores the old count.
 - **The challenge solver-farm detector's shipped thresholds now match what
   the fleet measured: a 180s window, 30 subnets, 15 solves** (were 60s / 40 /
   40). The longer window catches slow farms the 60s one missed, and the
