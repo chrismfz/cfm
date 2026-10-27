@@ -2476,21 +2476,6 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 60c) WordPress privileged action from another screen (503, logonly) ──
-  -- Late, beside 330, for the same headline reason. A request-context rule:
-  -- the payload is the admin's own session, so nothing earlier sees it (see
-  -- det.detect_wp_admin_cross_screen).
-  do
-    local mode = rule_mode(CFG.rule_wp_admin_cross_screen, "logonly")
-    if mode ~= "disabled" then
-      local tag = det.detect_wp_admin_cross_screen(m_lower, uri, args, body, headers, cookie, ctx.host, get_php_fields, get_norm_ab)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_ADMIN_XSCREEN:" .. tag, ttl, mode, RULE_IDS.rule_wp_admin_cross_screen) then goto done end
-      end
-    end
-  end
-
   -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018-10020) ──
   -- Placed after every armed block-tier family, next to traversal, for the
   -- same reason: 10019 and 10020 block at the edge but their autoblock is
@@ -2634,6 +2619,23 @@ local function check_impl(ctx, st)
       local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
       ttl, mode = mode_ttl_action(mode, ttl)
       if record("WAF_TRAVERSAL:RAW_PATH", ttl, mode, RULE_IDS.rule_traversal_raw_path) then goto done end
+    end
+  end
+
+  -- ── WordPress privileged action from another screen (503, logonly) ──────
+  -- A request-context rule: the payload is the admin's own session, so
+  -- nothing earlier sees it (det.detect_wp_admin_cross_screen). Last but 612,
+  -- after every armed block-tier rule: its block promotion must hold the
+  -- autoblock (the IP is the victim's), and a held block evaluated earlier
+  -- would take the headline and end evaluation before an armed rule's ban.
+  do
+    local mode = rule_mode(CFG.rule_wp_admin_cross_screen, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_wp_admin_cross_screen(m_lower, uri, args, body, headers, cookie, ctx.host, get_php_fields, get_norm_ab)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_ADMIN_XSCREEN:" .. tag, ttl, mode, RULE_IDS.rule_wp_admin_cross_screen) then goto done end
+      end
     end
   end
 

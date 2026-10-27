@@ -1408,8 +1408,8 @@ forms only from their own screen, as a navigation a click started:
 | `<EP>:FROM:<screen>` | a same-host Referer from another admin screen (`post.php`, `admin.php`, …) or the front end (`front`). |
 | `<EP>:CROSS_SITE` | `Sec-Fetch-Site: cross-site`. |
 | `<EP>:NO_ACTIVATION` | a document navigation (`Sec-Fetch-Mode: navigate`, `Dest: document`) without `Sec-Fetch-User`: a `form.submit()` no click started. |
-| `FILE_EDITOR:NO_REFERER` | the admin-ajax file editor called same-origin (`Sec-Fetch-Site`) with no Referer; WordPress admin pages send `strict-origin-when-cross-origin`. |
-| `NONCE_SCRAPE:<screen>` / `NONCE_FRAME:<screen>` | a GET of a nonce-bearing screen (`user-new.php`, `users.php`, `user-edit.php`, `profile.php`, `plugin-install.php`, `theme-install.php`, the file editors) by fetch / XHR (not a `Sec-Purpose: prefetch`), or into an iframe (not `plugin-install.php`, whose plugin-information thickbox is one). |
+| `<EP>:NO_REFERER` | an XHR leg (admin-ajax, REST) called same-origin (`Sec-Fetch-Site`) with no Referer or a bare origin; a WordPress admin page sends the full URL (`strict-origin-when-cross-origin`). |
+| `NONCE_SCRAPE:<screen>` / `NONCE_FRAME:<screen>` | a GET of a nonce-bearing screen (`user-new.php`, `users.php`, `user-edit.php`, `profile.php`, `site-users.php`, `plugin-install.php`, `theme-install.php`, the file editors) by fetch / XHR (not a `Sec-Purpose: prefetch`), or into an iframe (not `plugin-install.php`, whose plugin-information thickbox is one). |
 
 `<EP>` is (WordPress reads these from `$_REQUEST`, so the legs match any
 method that carries the action):
@@ -1422,7 +1422,9 @@ method that carries the action):
   which WordPress sends as a **GET** of the list's own form);
 - `UPLOAD_PLUGIN` / `UPLOAD_THEME` (`update.php?action=upload-…`, POST or
   the GET that installs an uploaded package, `&package=<attachment id>`; from
-  the install screen or `update.php`);
+  the install screen or `update.php`) and `INSTALL_PLUGIN` / `INSTALL_THEME`
+  (`update.php?action=install-…`, the wordpress.org install; from
+  `plugin-install.php`, or `theme-install.php` / `themes.php`);
 - `ACTIVATE` (`plugins.php` `action=activate` / `activate-selected`): Fetch
   Metadata only, never the Referer, as themes and plugins put "Activate"
   links on their own pages;
@@ -1430,12 +1432,22 @@ method that carries the action):
   (admin-ajax `install-plugin` / `activate-plugin`, from `plugins.php` /
   `plugin-install.php`): Referer and `NO_REFERER` only, as admin-ajax is always
   XHR. A spoofed Referer is a residual;
-- `REST_USERS` / `REST_PLUGINS`: a cookie-authenticated write to
-  `/wp/v2/users` (`/users/<id>`, `/users/me`) or `/wp/v2/plugins`, by
-  `/wp-json/` or `?rest_route=`. No admin screen sends these: every Referer
-  is logged (`FROM:<screen>`), and a same-origin call without one
-  (`NO_REFERER`). The block editor's block directory installs plugins this
-  way, so `REST_PLUGINS` needs its own look in the burn-in.
+- `REST_USERS`, `REST_APP_PASSWORD`, `REST_PLUGINS`: a cookie-authenticated
+  REST write, routed as WordPress routes it. Every `rest_route` field (any
+  spelling PHP registers: `rest.route`, `rest[route`, an encoded name) is a
+  candidate and overrides the `/wp-json/` path. Routes match
+  case-insensitively after untrailingslashit (every trailing `/` or `\`). A
+  GET counts as a write under `_method` or `X-HTTP-Method-Override`.
+  - `/wp/v2/users` and `/users/<id>`: any write, and no screen is allowed, so
+    any Referer is logged (`FROM:<screen>`).
+  - `/users/me`: only a write naming an account field (`email`, `password`,
+    `roles`, `username`). The block editor (`persisted_preferences`) and
+    wc-admin (`woocommerce_meta`) save their preferences there.
+  - `/users/<id|me>/application-passwords`: allowed from `profile.php` /
+    `user-edit.php`, the screens that create them.
+  - `/wp/v2/plugins`: allowed from `plugins.php` / `plugin-install.php`. The
+    block editor's block directory installs plugins from `post.php`, so
+    `REST_PLUGINS:FROM:post.php` needs a look in the burn-in.
 
 Fields are read as PHP registers them (`php_request_fields`), any value rather
 than PHP's last (the project's rule: a trailing duplicate past
@@ -1443,8 +1455,15 @@ than PHP's last (the project's rule: a trailing duplicate past
 the FIRST `/wp-admin/` (as WordPress's `$pagenow`; subdirectory installs keep
 their prefix), without the multisite `network/` and `user/` prefixes, cut at
 its `.php` (Apache's AcceptPathInfo runs `user-new.php/x` as
-`user-new.php`). An origin-only Referer (`Referrer-Policy: origin` /
-`strict-origin`) is no signal, like a missing one.
+`user-new.php`). A bare-origin Referer (`Referrer-Policy: origin` /
+`strict-origin`: `https://host/`, never a query) names no screen. On a form
+it is no signal, like a missing one; on an XHR leg it counts as missing
+(`NO_REFERER`). A `/` with a query (plain permalinks, `/?product=x`) is the
+front end.
+
+The step runs last but 612, after every armed block-tier rule, because a
+block promotion must hold the autoblock: a held block evaluated earlier takes
+the headline and ends evaluation before an armed rule's ban.
 
 Only with a `wordpress_logged_in_` cookie. No Referer is no signal (a
 `no-referrer` policy), and a cross-host Referer without `Sec-Fetch-Site` is
