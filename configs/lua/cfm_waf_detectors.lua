@@ -7693,6 +7693,16 @@ XSC.nonce_pages = {
   ["theme-editor.php"] = true, ["plugin-editor.php"] = true, ["options-general.php"] = true,
 }
 XSC.rest_write = { post = true, put = true, patch = true, delete = true }
+-- Busy core admin screens: real files Apache serves itself, never rewritten to
+-- index.php, so no REST route runs there. (A path under /wp-admin/ that is no
+-- file is rewritten to index.php, which serves ?rest_route=.)
+XSC.core_screens = {
+  ["post.php"] = true, ["post-new.php"] = true, ["edit.php"] = true, ["admin.php"] = true, ["index.php"] = true,
+  ["upload.php"] = true, ["async-upload.php"] = true, ["admin-post.php"] = true, ["admin-ajax.php"] = true,
+  ["load-scripts.php"] = true, ["load-styles.php"] = true, ["edit-tags.php"] = true, ["term.php"] = true,
+  ["nav-menus.php"] = true, ["widgets.php"] = true, ["customize.php"] = true, ["site-editor.php"] = true,
+  ["options.php"] = true, ["themes.php"] = true, ["update-core.php"] = true, ["media-new.php"] = true,
+}
 -- Sec-Fetch-Dest of a request a page's own script or markup sent, not a
 -- navigation: a framed load (FRAME) or anything else (SCRIPT: fetch/XHR
 -- `empty`, and `<img>`, `<script>`, `<link>`… — a GET via new Image() is a
@@ -7782,8 +7792,8 @@ end
 -- decoded surface, not a value that merely mentions one.
 function XSC.names_account_field(nab)
   for _, k in ipairs(XSC.account_keys) do
-    if nab:find('"' .. k .. '"%s*:') or nab:find("^" .. k .. "=") or nab:find("[&?]" .. k .. "=")
-       or nab:find("[&?]" .. k .. "%[") then
+    if nab:find(k, 1, true) and (nab:find('"' .. k .. '"%s*:') or nab:find("^" .. k .. "=") or nab:find("[&?]" .. k .. "=")
+       or nab:find("[&?]" .. k .. "%[")) then
       return true
     end
   end
@@ -7803,8 +7813,13 @@ function _M.detect_wp_admin_cross_screen(method, uri, args, body, headers, cooki
   -- first, the parse decides.
   local function may_name_route()
     local a, b = args or "", body or ""
-    return (a ~= "" and (a:find("%", 1, true) or has(lower(a), "route")))
-        or (b ~= "" and (b:find("%", 1, true) or has(lower(b), "route")))
+    if a == "" and b == "" then return false end
+    -- The decoded, lowercased args+body the earlier rules already built
+    -- (memoized by cfm_waf.check): PHP decodes field names, so an encoded
+    -- letter cannot hide the word there. A standalone caller has none: the
+    -- raw word, or any escape at all.
+    if get_nab then return has(get_nab(), "route") end
+    return a:find("route", 1, true) or a:find("%", 1, true) or b:find("route", 1, true) or b:find("%", 1, true)
   end
   if not screen and not json_path and not may_name_route() then return nil end
   headers = headers or {}
@@ -7822,11 +7837,8 @@ function _M.detect_wp_admin_cross_screen(method, uri, args, body, headers, cooki
     -- only when the decoded surface holds one of the actions checked there.
     if screen == "admin-ajax.php" then
       if method ~= "post" then return nil end
-      local nab, open = get_nab and get_nab(), false
-      for word in pairs(XSC.ajax) do
-        if field_gate_open(method, args, body, headers, nab, word, true) then open = true; break end
-      end
-      if not open then return nil end
+      -- Every XSC.ajax action holds "plugin" (the Lua test pins it).
+      if not field_gate_open(method, args, body, headers, get_nab and get_nab(), "plugin", true) then return nil end
     end
     ep = XSC.leg_of(method, screen, fields)
     if not ep and method == "get" then
@@ -7844,6 +7856,7 @@ function _M.detect_wp_admin_cross_screen(method, uri, args, body, headers, cooki
     end
   end
   if not ep then
+    if screen and XSC.core_screens[screen] then return nil end
     -- REST. WordPress prefers $_GET / $_POST rest_route over the permalink
     -- (and serves it from a path its rewrite sends to index.php, even one
     -- under /wp-admin/), and a GET under _method or X-HTTP-Method-Override

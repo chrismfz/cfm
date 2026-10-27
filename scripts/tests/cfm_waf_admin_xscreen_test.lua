@@ -206,6 +206,10 @@ fires(req({ uri = "/", args = "rest_route=%2Fwp%2Fv2%2Fusers%0A", referer = ORDE
       "a route ending in a newline (PCRE $)", P .. "REST_USERS:FROM:post.php")
 fires(req({ uri = "/wp-admin/x/", args = "rest_route=/wp/v2/users", referer = ORDER, body = "{}" }),
       "?rest_route= on a /wp-admin/ path WordPress rewrites to index.php", P .. "REST_USERS:FROM:post.php")
+fires(req({ uri = "/wp-admin/zz.php", args = "rest_route=/wp/v2/users", referer = ORDER, body = "{}" }),
+      "?rest_route= on a .php under /wp-admin/ that is no file", P .. "REST_USERS:FROM:post.php")
+clean(req({ uri = "/wp-admin/post.php", args = "rest_route=/wp/v2/users", referer = ORDER, body = "{}" }),
+      "?rest_route= on post.php (a real file: no REST runs there)")
 
 -- review 2: multisite user admin and site-users.php
 fires(req({ uri = "/wp-admin/user/profile.php", referer = ORDER, body = "action=update" }),
@@ -369,6 +373,10 @@ clean(req({ method = "PUT", uri = "/wp-admin/user-new.php", referer = ORDER }), 
 clean(req({ uri = "/wp-content/plugins/x/user-new.php", referer = ORDER }), "not under wp-admin")
 
 check(det.detect_wp_admin_cross_screen("post", nil, nil, nil, nil, nil, nil, nil) == nil, "nil everything")
+-- The admin-ajax gate looks for "plugin" only: every checked action must hold it.
+for _, a in ipairs({ "edit-theme-plugin-file", "install-plugin", "activate-plugin" }) do
+  check(a:find("plugin", 1, true) ~= nil, "admin-ajax gate word covers " .. a)
+end
 check(det.detect_wp_admin_cross_screen("post", "/wp-admin/user-new.php", "", "", nil, LOGIN, nil, nil) == nil, "nil headers")
 
 set_only({ rule_wp_admin_cross_screen = "disabled" })
