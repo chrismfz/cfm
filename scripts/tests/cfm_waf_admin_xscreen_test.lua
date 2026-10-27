@@ -113,8 +113,47 @@ fires(form({ uri = "/wp-admin/user-new.php", referer = "https://www.tophair.gr/w
       "HPOS order screen, real form navigation", P .. "USER_NEW:FROM:admin.php")
 fires(form({ uri = "/wp-admin/user-new.php", referer = "https://www.tophair.gr/product/shampoo/", body = USER_NEW_BODY }),
       "a front-end page (payload in a comment or review)", P .. "USER_NEW:FROM:front")
-fires(form({ uri = "/wp-admin/user-new.php", referer = "https://www.tophair.gr", body = USER_NEW_BODY }),
-      "the home page, no path", P .. "USER_NEW:FROM:front")
+-- review 2: Referrer-Policy origin / strict-origin sends "https://site/" from
+-- every screen: an origin-only Referer is no signal, like a missing one.
+clean(form({ uri = "/wp-admin/user-new.php", referer = "https://www.tophair.gr/", body = USER_NEW_BODY }),
+      "origin-only Referer (Referrer-Policy strict-origin)")
+clean(form({ uri = "/wp-admin/user-new.php", referer = "https://www.tophair.gr", body = USER_NEW_BODY }),
+      "origin-only Referer without the slash")
+-- review 2: the FIRST /wp-admin/ is the screen ($pagenow); PATH_INFO may hold another
+fires(req({ uri = "/wp-admin/user-new.php/wp-admin/", referer = ORDER, body = USER_NEW_BODY }),
+      "a second /wp-admin/ in PATH_INFO", P .. "USER_NEW:FROM:post.php")
+-- review 2: an uploaded package installed by GET (update.php?package=<attachment>)
+fires(req({ method = "GET", uri = "/wp-admin/update.php", args = "action=upload-plugin&package=123&_wpnonce=a", referer = ORDER, dest = "empty" }),
+      "GET upload-plugin of a media-library package by fetch", P .. "UPLOAD_PLUGIN:SCRIPT")
+fires(req({ method = "GET", uri = "/wp-admin/update.php", args = "action=upload-plugin&package=123&_wpnonce=a", referer = ORDER }),
+      "GET upload-plugin of a package from the order", P .. "UPLOAD_PLUGIN:FROM:post.php")
+-- review 2: the REST API with the cookie + nonce admin pages print
+fires(req({ uri = "/wp-json/wp/v2/users", referer = ORDER, dest = "empty", ct = "application/json",
+            body = '{"username":"maint","password":"x","email":"m@x.io","roles":["administrator"]}' }),
+      "REST: create a user from the order", P .. "REST_USERS:FROM:post.php")
+fires(req({ uri = "/", args = "rest_route=%2Fwp%2Fv2%2Fusers%2F1", referer = ORDER, dest = "empty", ct = "application/json",
+            body = '{"email":"evil@x.io"}' }), "REST via ?rest_route=, update user 1", P .. "REST_USERS:FROM:post.php")
+fires(req({ uri = "/", args = "rest%5Froute=/wp/v2/users", referer = ORDER, dest = "empty", body = "{}" }),
+      "REST via an encoded rest_route name", P .. "REST_USERS:FROM:post.php")
+fires(req({ uri = "/wp-json/wp/v2/plugins/bd/bd", referer = "https://www.tophair.gr/wp-admin/edit.php?post_type=shop_order", dest = "empty",
+            ct = "application/json", body = '{"status":"active"}' }), "REST: activate a plugin", P .. "REST_PLUGINS:FROM:edit.php")
+fires(req({ uri = "/wp-json/wp/v2/users", dest = "empty", site = "same-origin", body = "{}" }),
+      "REST: create a user, same-origin, no Referer", P .. "REST_USERS:NO_REFERER")
+-- review 2: multisite user admin and site-users.php
+fires(req({ uri = "/wp-admin/user/profile.php", referer = ORDER, body = "action=update" }),
+      "multisite user admin profile.php", P .. "PROFILE:FROM:post.php")
+fires(req({ uri = "/wp-admin/network/site-users.php", referer = ORDER, body = "action=newuser&id=2&user%5Brole%5D=administrator" }),
+      "multisite site-users.php newuser", P .. "SITE_USERS:FROM:post.php")
+-- review 2: admin-ajax plugin install / activate (wp.updates)
+fires(req({ uri = "/wp-admin/admin-ajax.php", referer = ORDER, dest = "empty", ct = "application/x-www-form-urlencoded",
+            body = "action=activate-plugin&plugin=bd%2Fbd.php&_ajax_nonce=a" }), "admin-ajax activate-plugin", P .. "AJAX_PLUGIN:FROM:post.php")
+fires(req({ uri = "/wp-admin/admin-ajax.php", referer = ORDER, dest = "empty", ct = "application/x-www-form-urlencoded",
+            body = "action=install-plugin&slug=wp-file-manager&_ajax_nonce=a" }), "admin-ajax install-plugin", P .. "AJAX_PLUGIN:FROM:post.php")
+-- review 2: privileged actions WordPress also runs by GET
+fires(form({ method = "GET", uri = "/wp-admin/users.php", args = "action=dodelete&users%5B%5D=1&_wpnonce=a", referer = ORDER }),
+      "GET user delete from the order", P .. "USERS:FROM:post.php")
+fires(form({ method = "GET", uri = "/wp-admin/user-new.php", args = "action=adduser&email=a%40x.io&role=administrator&_wpnonce_add-user=a", referer = ORDER }),
+      "GET multisite adduser from the order", P .. "USER_NEW:FROM:post.php")
 fires(req({ uri = "/wp-admin/user-new.php", dest = "iframe", mode = "navigate", site = "same-origin", body = USER_NEW_BODY }),
       "a form posted into a hidden iframe, no Referer", P .. "USER_NEW:FRAME")
 fires(form({ uri = "/wp-admin/users.php", referer = "https://www.tophair.gr/wp-admin/edit.php?post_type=shop_order",
@@ -187,6 +226,14 @@ clean(form({ uri = "/wp-admin/users.php", referer = "https://www.tophair.gr/wp-a
 clean(form({ uri = "/wp-admin/user-edit.php", referer = "https://www.tophair.gr/wp-admin/user-edit.php?user_id=7&wp_http_referer=%2Fwp-admin%2Fusers.php",
              body = "user_id=7&action=update" }), "edit a user from user-edit.php")
 clean(form({ uri = "/wp-admin/profile.php", referer = "https://www.tophair.gr/wp-admin/profile.php", body = "action=update" }), "own profile")
+clean(req({ uri = "/wp-admin/admin-ajax.php", referer = "https://www.tophair.gr/wp-admin/plugin-install.php?s=x", dest = "empty",
+            ct = "application/x-www-form-urlencoded", body = "action=install-plugin&slug=x&_ajax_nonce=a" }), "Install Now on plugin-install.php")
+clean(form({ method = "GET", uri = "/wp-admin/update.php", args = "action=upload-plugin&package=123&overwrite=update-plugin&_wpnonce=a",
+             referer = "https://www.tophair.gr/wp-admin/update.php?action=upload-plugin" }), "Replace current with uploaded (GET from update.php)")
+clean(req({ uri = "/wp-json/wp/v2/users/me", method = "GET", referer = ORDER, dest = "empty" }), "REST read of the current user")
+clean(req({ uri = "/wp-json/wp/v2/posts/40544", referer = ORDER, dest = "empty", body = "{}" }), "REST write to another route")
+clean(req({ uri = "/", args = "rest_route=/wp/v2/users", referer = ORDER, dest = "empty", body = "{}", cookie = "" }), "REST without a login cookie")
+clean(form({ method = "GET", uri = "/wp-admin/users.php", args = "role=administrator", referer = ORDER }), "browsing the users list")
 clean(form({ uri = "/wp-admin/profile.php", referer = "https://www.tophair.gr/wp-admin/user-edit.php?user_id=1", body = "action=update" }),
       "own account saved from user-edit.php (its form posts to profile.php)")
 clean(form({ method = "GET", uri = "/wp-admin/users.php", args = "_wpnonce=a&new_role=editor&changeit=Change&users%5B%5D=7",

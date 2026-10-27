@@ -23,9 +23,10 @@ back-filled here — see the git/PR history for that period.
   carrying the PixelYourSite payload, and within five seconds their own
   browser created an administrator and uploaded a backdoor plugin: logged-in
   admin requests no other rule could judge. The rule logs creating a user,
-  changing a role, a user's email or password, uploading or activating a
-  plugin, uploading a theme, and saving the file editor when the request did
-  not come from that form:
+  changing a role, a user's email or password, uploading, installing or
+  activating a plugin, uploading a theme, and saving the file editor (and the
+  REST API's user and plugin writes) when the request did not come from that
+  form:
   sent by a script (fetch / XHR, a hidden iframe), from another admin screen
   or a front-end page (the order screen, on tophair), cross-site, or as a
   navigation no click started; and a script fetching the screens that hold

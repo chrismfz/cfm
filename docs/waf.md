@@ -1092,8 +1092,7 @@ Current assignments:
 5xx — Auth abuse
   501  rule_auth_burst                 510  rule_xmlrpc_multicall
   502  rule_auth_wp_checks             511  rule_xmlrpc_pingback
-  503  rule_wp_admin_cross_screen      (logonly; see "Rule 503")
-                                       512  rule_xmlrpc_post_burst
+  503  rule_wp_admin_cross_screen      512  rule_xmlrpc_post_burst
                                        520  (retired 2026-10-08: SP Page Builder contact-form mail relay)
 
 6xx — Header / protocol anomaly
@@ -1412,27 +1411,40 @@ forms only from their own screen, as a navigation a click started:
 | `FILE_EDITOR:NO_REFERER` | the admin-ajax file editor called same-origin (`Sec-Fetch-Site`) with no Referer; WordPress admin pages send `strict-origin-when-cross-origin`. |
 | `NONCE_SCRAPE:<screen>` / `NONCE_FRAME:<screen>` | a GET of a nonce-bearing screen (`user-new.php`, `users.php`, `user-edit.php`, `profile.php`, `plugin-install.php`, `theme-install.php`, the file editors) by fetch / XHR (not a `Sec-Purpose: prefetch`), or into an iframe (not `plugin-install.php`, whose plugin-information thickbox is one). |
 
-`<EP>` is:
-- `USER_NEW` (`user-new.php`), `USER_EDIT` (`user-edit.php`), `PROFILE`
-  (`profile.php`, also from `user-edit.php`: saving your own account there
-  posts to `profile.php`), `USERS` (a `users.php` POST, the delete
-  confirmation);
-- `USERS_ROLE`: the role change, which WordPress sends as a **GET** of
-  `users.php`'s own list form (`changeit` / `changeit2` / `action=promote`);
-- `UPLOAD_PLUGIN` / `UPLOAD_THEME` (`update.php?action=…`);
+`<EP>` is (WordPress reads these from `$_REQUEST`, so the legs match any
+method that carries the action):
+- `USER_NEW` (`user-new.php`: any POST, or a GET `action=adduser` /
+  `createuser`), `USER_EDIT` (`user-edit.php`), `PROFILE` (`profile.php`, also
+  from `user-edit.php`: saving your own account there posts to `profile.php`),
+  `SITE_USERS` (multisite `site-users.php`);
+- `USERS` (`users.php`: a POST, or `action=dodelete` / `remove`) and
+  `USERS_ROLE` (its role change: `changeit` / `changeit2` / `action=promote`,
+  which WordPress sends as a **GET** of the list's own form);
+- `UPLOAD_PLUGIN` / `UPLOAD_THEME` (`update.php?action=upload-…`, POST or
+  the GET that installs an uploaded package, `&package=<attachment id>`; from
+  the install screen or `update.php`);
 - `ACTIVATE` (`plugins.php` `action=activate` / `activate-selected`): Fetch
-  Metadata only, never the Referer, as themes and plugins put "Activate" links
-  on their own pages;
-- `FILE_EDITOR` (`admin-ajax.php` `action=edit-theme-plugin-file`): Referer
-  and `NO_REFERER` only, as admin-ajax is always XHR. A spoofed
-  `theme-editor.php` Referer is a residual.
+  Metadata only, never the Referer, as themes and plugins put "Activate"
+  links on their own pages;
+- `FILE_EDITOR` (admin-ajax `edit-theme-plugin-file`) and `AJAX_PLUGIN`
+  (admin-ajax `install-plugin` / `activate-plugin`, from `plugins.php` /
+  `plugin-install.php`): Referer and `NO_REFERER` only, as admin-ajax is always
+  XHR. A spoofed Referer is a residual;
+- `REST_USERS` / `REST_PLUGINS`: a cookie-authenticated write to
+  `/wp/v2/users` (`/users/<id>`, `/users/me`) or `/wp/v2/plugins`, by
+  `/wp-json/` or `?rest_route=`. No admin screen sends these: every Referer
+  is logged (`FROM:<screen>`), and a same-origin call without one
+  (`NO_REFERER`). The block editor's block directory installs plugins this
+  way, so `REST_PLUGINS` needs its own look in the burn-in.
 
-`action` is read as PHP registers it (`php_request_fields`), any value rather
+Fields are read as PHP registers them (`php_request_fields`), any value rather
 than PHP's last (the project's rule: a trailing duplicate past
 `max_input_vars` is a decoy PHP never saw). The admin screen is what follows
-the last `/wp-admin/` (subdirectory installs) without `network/` (multisite),
-cut at its `.php` (Apache's AcceptPathInfo runs `user-new.php/x` as
-`user-new.php`).
+the FIRST `/wp-admin/` (as WordPress's `$pagenow`; subdirectory installs keep
+their prefix), without the multisite `network/` and `user/` prefixes, cut at
+its `.php` (Apache's AcceptPathInfo runs `user-new.php/x` as
+`user-new.php`). An origin-only Referer (`Referrer-Policy: origin` /
+`strict-origin`) is no signal, like a missing one.
 
 Only with a `wordpress_logged_in_` cookie. No Referer is no signal (a
 `no-referrer` policy), and a cross-host Referer without `Sec-Fetch-Site` is
