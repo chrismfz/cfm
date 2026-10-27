@@ -1404,31 +1404,40 @@ forms only from their own screen, as a navigation a click started:
 
 | tag | signal |
 |---|---|
-| `<EP>:SCRIPT` / `<EP>:FRAME` | `Sec-Fetch-Dest: empty` (fetch / XHR) or `iframe`. A script can set a same-origin Referer (`fetch(…, {referrer})`) or drop it (a meta referrer policy), but not Fetch Metadata. |
+| `<EP>:SCRIPT` / `<EP>:FRAME` | any `Sec-Fetch-Dest` but `document`: framed (`iframe`, `frame`, `object`, `embed`) is FRAME, the rest (fetch/XHR `empty`, `<img>`, `<script>`, …) SCRIPT. A script can set a same-origin Referer (`fetch(…, {referrer})`) or drop it (a meta referrer policy), but not Fetch Metadata. |
 | `<EP>:FROM:<screen>` | a same-host Referer from another admin screen (`post.php`, `admin.php`, …) or the front end (`front`). |
 | `<EP>:CROSS_SITE` | `Sec-Fetch-Site: cross-site`. |
 | `<EP>:NO_ACTIVATION` | a document navigation (`Sec-Fetch-Mode: navigate`, `Dest: document`) without `Sec-Fetch-User`: a `form.submit()` no click started. |
 | `<EP>:NO_REFERER` | an XHR leg (admin-ajax, REST) called same-origin (`Sec-Fetch-Site`) with no Referer or a bare origin; a WordPress admin page sends the full URL (`strict-origin-when-cross-origin`). |
-| `NONCE_SCRAPE:<screen>` / `NONCE_FRAME:<screen>` | a GET of a nonce-bearing screen (`user-new.php`, `users.php`, `user-edit.php`, `profile.php`, `site-users.php`, `plugin-install.php`, `theme-install.php`, the file editors) by fetch / XHR (not a `Sec-Purpose: prefetch`), or into an iframe (not `plugin-install.php`, whose plugin-information thickbox is one). |
+| `NONCE_SCRAPE:<screen>` / `NONCE_FRAME:<screen>` | a GET of a nonce-bearing screen (`user-new.php`, `users.php`, `user-edit.php`, `profile.php`, `site-users.php`, `plugins.php`, `plugin-install.php`, `theme-install.php`, `options-general.php`, the file editors) by a script or markup (not a `Sec-Purpose: prefetch`), or framed (not `plugin-install.php?tab=plugin-information`, WordPress's own thickbox). |
 
 `<EP>` is (WordPress reads these from `$_REQUEST`, so the legs match any
 method that carries the action):
 - `USER_NEW` (`user-new.php`: any POST, or a GET `action=adduser` /
   `createuser`), `USER_EDIT` (`user-edit.php`), `PROFILE` (`profile.php`, also
   from `user-edit.php`: saving your own account there posts to `profile.php`),
-  `SITE_USERS` (multisite `site-users.php`);
-- `USERS` (`users.php`: a POST, or `action=dodelete` / `remove`) and
+  `SITE_USERS` (multisite `site-users.php`, incl. `remove`);
+- `USERS` (`users.php`: a POST, or `action=dodelete` / `doremove`) and
   `USERS_ROLE` (its role change: `changeit` / `changeit2` / `action=promote`,
   which WordPress sends as a **GET** of the list's own form);
+- `OPTIONS_GENERAL` (`options.php` with `option_page=general`:
+  `users_can_register`, `default_role`, `new_admin_email`; from
+  `options-general.php`). Other `option_page`s are out of scope: plugin
+  settings pages post to `options.php` from `admin.php?page=…`;
 - `UPLOAD_PLUGIN` / `UPLOAD_THEME` (`update.php?action=upload-…`, POST or
   the GET that installs an uploaded package, `&package=<attachment id>`; from
   the install screen or `update.php`) and `INSTALL_PLUGIN` / `INSTALL_THEME`
   (`update.php?action=install-…`, the wordpress.org install; from
-  `plugin-install.php`, or `theme-install.php` / `themes.php`);
-- `ACTIVATE` (`plugins.php` `action=activate` / `activate-selected`): Fetch
-  Metadata only, never the Referer, as themes and plugins put "Activate"
-  links on their own pages;
-- `FILE_EDITOR` (admin-ajax `edit-theme-plugin-file`) and `AJAX_PLUGIN`
+  `plugin-install.php`, or `theme-install.php` / `themes.php`). An
+  `update.php` POST whose action lies past the edge's body window is `UPLOAD`
+  (update.php takes nothing but uploads by POST);
+- `ACTIVATE` (`plugins.php` `action=activate` / `activate-selected`, and
+  `update.php?action=activate-plugin`, which also includes the plugin under
+  `failure=true`): Fetch Metadata only, never the Referer, as themes and
+  plugins put "Activate" links on their own pages;
+- `FILE_EDITOR`: a POST to `theme-editor.php` / `plugin-editor.php` (the
+  non-AJAX save) from its own screen, and admin-ajax
+  `edit-theme-plugin-file`; `AJAX_PLUGIN`
   (admin-ajax `install-plugin` / `activate-plugin`, from `plugins.php` /
   `plugin-install.php`): Referer and `NO_REFERER` only, as admin-ajax is always
   XHR. A spoofed Referer is a residual;
@@ -1436,15 +1445,20 @@ method that carries the action):
   REST write, routed as WordPress routes it. Every `rest_route` field (any
   spelling PHP registers: `rest.route`, `rest[route`, an encoded name) is a
   candidate and overrides the `/wp-json/` path. Routes match
-  case-insensitively after untrailingslashit (every trailing `/` or `\`). A
-  GET counts as a write under `_method` or `X-HTTP-Method-Override`.
+  case-insensitively after untrailingslashit (every trailing `/` or `\`),
+  and PCRE's `$` also matches before one final newline (`%0A`). A
+  `rest_route` on a path WordPress's rewrite sends to `index.php` counts too,
+  even under `/wp-admin/`. A GET counts as a write under `_method` or
+  `X-HTTP-Method-Override`.
   - `/wp/v2/users` and `/users/<id>`: any write, and no screen is allowed, so
     any Referer is logged (`FROM:<screen>`).
   - `/users/me`: only a write naming an account field (`email`, `password`,
-    `roles`, `username`). The block editor (`persisted_preferences`) and
-    wc-admin (`woocommerce_meta`) save their preferences there.
-  - `/users/<id|me>/application-passwords`: allowed from `profile.php` /
-    `user-edit.php`, the screens that create them.
+    `roles`, `username`) as a JSON or form KEY, not a value that mentions it.
+    The block editor (`persisted_preferences`) and wc-admin
+    (`woocommerce_meta`) save their preferences there.
+  - `/users/<id|me>/application-passwords`: allowed from `profile.php`,
+    `user-edit.php` and `authorize-application.php`, the screens that create
+    them.
   - `/wp/v2/plugins`: allowed from `plugins.php` / `plugin-install.php`. The
     block editor's block directory installs plugins from `post.php`, so
     `REST_PLUGINS:FROM:post.php` needs a look in the burn-in.
@@ -1469,6 +1483,29 @@ Only with a `wordpress_logged_in_` cookie. No Referer is no signal (a
 `no-referrer` policy), and a cross-host Referer without `Sec-Fetch-Site` is
 left to the nonce. `options.php` is out of scope: plugin settings pages post
 to it from `admin.php?page=…` (nine distinct screens on titan).
+
+**Push window.** `WAF_ADMIN_XSCREEN` keeps its leg in the push key
+(`PUSH_KEY_KEEPS_TAG`): a kill chain sends several legs from one IP within
+seconds, and a family-keyed window logged only the first (the nonce scrape,
+not the user or the plugin). A flood of one leg still collapses to one push
+per window.
+
+**Limits (what four review rounds taught).** A rule that enumerates WordPress's
+privileged endpoints is never complete: core alone has many routes to the
+same outcome, every round found more, and plugins add their own. 503 is a
+detector for the stored-XSS kill chain as it is run today. It is not a seal.
+Known residuals:
+- an action no leg lists;
+- a body padded past the edge's body window, which hides a field: the same
+  limit every body rule has;
+- a spoofed Referer on an XHR leg (admin-ajax, REST), where Fetch Metadata
+  cannot help;
+- a browser without Fetch Metadata (Safari < 16.4), where only the Referer
+  speaks.
+
+The backstop for all of these is watching the outcome, not the request: a new
+administrator, a new plugin or a PHP file written by the web user (see the
+2026-10-27 gap analysis, D1/D2).
 
 **FP baseline (titan, 545 access logs, 2026-09/10):** `user-new.php` 53 POSTs
 from its own screen + 1 other; `upload-plugin` 332 from `plugin-install.php`

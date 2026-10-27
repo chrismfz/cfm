@@ -2740,6 +2740,12 @@ end
 -- fixed and small and the family has no block tier.
 local PUSH_KEY_KEEPS_TAG = {
   WAF_FETCH_METADATA = true,
+  -- Rule 503's first tag is the LEG (USER_NEW, UPLOAD_PLUGIN, NONCE_SCRAPE…):
+  -- one kill chain sends several legs from one IP within seconds (tophair:
+  -- nonce scrapes, then the user, then the plugin), and a family-keyed window
+  -- logged only the first. Logonly, a fixed set of legs: a flood of one leg
+  -- still collapses to one push per window.
+  WAF_ADMIN_XSCREEN = true,
 }
 
 -- also_rule_ids: the distinct waf_rule_ids in a check()'s `hits` other than

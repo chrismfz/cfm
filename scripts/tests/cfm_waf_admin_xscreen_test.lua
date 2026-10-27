@@ -177,6 +177,36 @@ fires(req({ method = "GET", uri = "/wp-admin/update.php", args = "action=install
 fires(form({ uri = "/wp-admin/user-new.php", referer = "https://www.tophair.gr/?product=shampoo", body = USER_NEW_BODY }),
       "plain-permalink front page", P .. "USER_NEW:FROM:front")
 
+-- review 4: requests a page's markup sends (not only fetch/XHR)
+fires(req({ method = "GET", uri = "/wp-admin/plugins.php", args = "action=activate&plugin=bd%2Fbd.php&_wpnonce=a", dest = "image" }),
+      "plugin activation via new Image()", P .. "ACTIVATE:SCRIPT")
+fires(req({ method = "GET", uri = "/wp-admin/users.php", args = "changeit=Change&new_role=administrator&users%5B%5D=7&_wpnonce=a", dest = "image" }),
+      "role change via an <img>", P .. "USERS_ROLE:SCRIPT")
+fires(req({ method = "GET", uri = "/wp-admin/user-new.php", dest = "object", mode = "navigate" }),
+      "user-new.php in an <object>", P .. "NONCE_FRAME:user-new.php")
+fires(req({ uri = "/wp-admin/user-new.php", referer = "https://www.tophair.gr/wp-admin/user-new.php", dest = "frame", mode = "navigate", body = USER_NEW_BODY }),
+      "its form submitted inside a <frame>", P .. "USER_NEW:FRAME")
+fires(req({ method = "GET", uri = "/wp-admin/plugin-install.php", args = "tab=upload", dest = "iframe", mode = "navigate" }),
+      "plugin-install.php?tab=upload in a hidden iframe", P .. "NONCE_FRAME:plugin-install.php")
+fires(req({ method = "GET", uri = "/wp-admin/plugins.php", dest = "empty" }), "plugins.php fetched for the activate nonce", P .. "NONCE_SCRAPE:plugins.php")
+-- review 4: other routes to the same actions
+fires(req({ method = "GET", uri = "/wp-admin/update.php", args = "action=activate-plugin&failure=true&plugin=bd%2Fbd.php&_wpnonce=a", referer = ORDER, dest = "empty" }),
+      "update.php activate-plugin by fetch", P .. "ACTIVATE:SCRIPT")
+fires(req({ uri = "/wp-admin/theme-editor.php", referer = ORDER, ct = "application/x-www-form-urlencoded",
+            body = "nonce=a&action=update&file=functions.php&theme=woodmart&newcontent=%3C%3Fphp" }),
+      "theme-editor.php form save from the order", P .. "FILE_EDITOR:FROM:post.php")
+fires(req({ uri = "/wp-admin/options.php", referer = ORDER, ct = "application/x-www-form-urlencoded",
+            body = "option_page=general&action=update&users_can_register=1&default_role=administrator&_wpnonce=a" }),
+      "General settings: open registration as administrator", P .. "OPTIONS_GENERAL:FROM:post.php")
+fires(req({ uri = "/wp-admin/update.php", referer = ORDER, ct = UPLOAD_CT, body = UPLOAD_BODY }),
+      "an update.php POST whose action lies past the body window", P .. "UPLOAD:FROM:post.php")
+fires(form({ method = "GET", uri = "/wp-admin/users.php", args = "action=doremove&users%5B%5D=7&_wpnonce=a", referer = ORDER }),
+      "multisite doremove from the order", P .. "USERS:FROM:post.php")
+fires(req({ uri = "/", args = "rest_route=%2Fwp%2Fv2%2Fusers%0A", referer = ORDER, body = "{}" }),
+      "a route ending in a newline (PCRE $)", P .. "REST_USERS:FROM:post.php")
+fires(req({ uri = "/wp-admin/x/", args = "rest_route=/wp/v2/users", referer = ORDER, body = "{}" }),
+      "?rest_route= on a /wp-admin/ path WordPress rewrites to index.php", P .. "REST_USERS:FROM:post.php")
+
 -- review 2: multisite user admin and site-users.php
 fires(req({ uri = "/wp-admin/user/profile.php", referer = ORDER, body = "action=update" }),
       "multisite user admin profile.php", P .. "PROFILE:FROM:post.php")
@@ -274,6 +304,21 @@ clean(req({ uri = "/wp-json/wp/v2/users/me", referer = ORDER, dest = "empty", ct
       "block editor saving persisted preferences (users/me)")
 clean(req({ uri = "/wp-json/wp/v2/users/me", referer = "https://www.tophair.gr/wp-admin/admin.php?page=wc-admin", dest = "empty",
             ct = "application/json", body = '{"woocommerce_meta":{"help_panel_highlight_shown":"\\"yes\\""}}' }), "wc-admin saving woocommerce_meta")
+clean(req({ uri = "/wp-json/wp/v2/users/me", referer = "https://www.tophair.gr/wp-admin/admin.php?page=wc-admin&path=/customers", dest = "empty",
+            ct = "application/json", body = '{"woocommerce_meta":{"customers_report_columns":"[\\"email\\",\\"orders\\"]"}}' }),
+      "wc-admin column preference that mentions email as a value")
+clean(req({ uri = "/wp-json/wp/v2/users/me", referer = ORDER, dest = "empty", ct = "application/json",
+            body = '{"meta":{"persisted_preferences":{"core/block-editor":{"insertUsage":{"jetpack/field-email":{"count":1}}}}}}' }),
+      "block editor insert usage of an email block")
+clean(req({ uri = "/wp-json/wp/v2/users/me/application-passwords", referer = "https://www.tophair.gr/wp-admin/authorize-application.php?app_name=WordPress",
+            dest = "empty", ct = "application/json", body = '{"name":"WordPress"}' }), "Approve Connection on authorize-application.php")
+clean(form({ uri = "/wp-admin/theme-editor.php", referer = "https://www.tophair.gr/wp-admin/theme-editor.php?file=style.css",
+             body = "action=update&file=style.css&newcontent=x" }), "theme editor form save from its own screen")
+clean(form({ uri = "/wp-admin/options.php", referer = "https://www.tophair.gr/wp-admin/options-general.php",
+             body = "option_page=general&action=update&blogname=x" }), "General settings saved from options-general.php")
+clean(form({ uri = "/wp-admin/options.php", referer = "https://www.tophair.gr/wp-admin/options-reading.php",
+             body = "option_page=reading&action=update" }), "another settings page is out of scope")
+clean(req({ method = "GET", uri = "/wp-admin/plugins.php", dest = "document", mode = "navigate" }), "opening plugins.php")
 clean(req({ uri = "/wp-json/wp/v2/users/me/application-passwords", referer = "https://www.tophair.gr/wp-admin/profile.php", dest = "empty",
             ct = "application/json", body = '{"name":"phone"}' }), "Add New Application Password on profile.php")
 clean(req({ uri = "/", args = "add-to-cart=11533", referer = ORDER, body = "quantity=1" }), "a logged-in shop POST with no route")
@@ -328,6 +373,21 @@ check(det.detect_wp_admin_cross_screen("post", "/wp-admin/user-new.php", "", "",
 
 set_only({ rule_wp_admin_cross_screen = "disabled" })
 clean(req({ uri = "/wp-admin/user-new.php", referer = ORDER, body = USER_NEW_BODY }), "503 disabled")
+
+-- ── The push window keeps the leg (review 4): every step of a chain is logged ──
+do
+  local dict = { s = {} }
+  function dict:add(k, v) if self.s[k] then return false, "exists" end self.s[k] = v; return true end
+  function dict:get(k) return self.s[k] end
+  function dict:set(k, v) self.s[k] = v; return true end
+  local ip = "2a02:587:6e02:1400:dc5d:81c0:469e:a107"
+  local chain = { P .. "NONCE_SCRAPE:user-new.php", P .. "USER_NEW:SCRIPT", P .. "UPLOAD_PLUGIN:SCRIPT", P .. "ACTIVATE:SCRIPT" }
+  for _, r in ipairs(chain) do
+    check(waf.should_push(dict, ip, r, "logonly", 503) == true, "push window: " .. r .. " is pushed")
+  end
+  check(waf.should_push(dict, ip, P .. "USER_NEW:FROM:post.php", "logonly", 503) == false,
+        "push window: a second USER_NEW hit in the window is not")
+end
 
 if fails > 0 then
   io.stderr:write(("cfm_waf admin cross-screen tests: %d FAILED\n"):format(fails))
