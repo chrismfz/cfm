@@ -17,6 +17,15 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **`install-openresty.sh` works on AlmaLinux / Rocky / RHEL 10.** OpenResty
+  publishes no EL10 repository, so the installer's repo file (`$releasever`
+  = 10) failed with a 404 on `centos/10/.../repomd.xml` and nothing was
+  installed. On EL10 the installer now pins the repo to the EL9 tree, whose
+  packages bring their own OpenSSL / PCRE2 / zlib and run on EL10 (checked on
+  AlmaLinux 10.2). A repo file left behind by the failed run is rewritten
+  automatically, so re-running the installer is enough.
+
 ### Security
 - **New WAF CVE rules 10025 (block, autoblock armed) and 10026 (block, ban
   held): PixelYourSite stored XSS (CVE-2026-1844 / CVE-2026-1841 /

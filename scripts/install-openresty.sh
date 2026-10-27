@@ -175,9 +175,21 @@ setup_openresty_repo_el() {
             ;;
     esac
 
-    if [ ! -f "$repo_file" ] || ! grep -q "openresty.org/package/centos" "$repo_file"; then
+    # OpenResty publishes no EL10 tree (centos/rhel/rocky/almalinux all
+    # stop at 9), so the stock baseurl's $releasever 404s there. EL10 uses
+    # the EL9 packages: their deps are all openresty-* (openssl3, pcre2,
+    # zlib), their signatures pass EL10's crypto policy, and nginx -V runs
+    # (checked on AlmaLinux 10.2). Drop the pin once centos/10/ exists.
+    if [ ! -f "$repo_file" ] || ! grep -q "openresty.org/package/centos" "$repo_file" \
+        || { [ "$major" = "10" ] && grep -q 'releasever' "$repo_file"; }; then
         log "Adding OpenResty YUM/DNF repository for EL$major"
         wget -qO "$repo_file" "$repo_url"
+        if [ "$major" = "10" ]; then
+            warn "OpenResty has no EL10 repository; using its EL9 packages"
+            sed -i 's|/package/centos/\$releasever/|/package/centos/9/|' "$repo_file"
+            grep -q '/package/centos/9/' "$repo_file" \
+                || die "Could not pin $repo_file to the EL9 OpenResty tree"
+        fi
     fi
 }
 
