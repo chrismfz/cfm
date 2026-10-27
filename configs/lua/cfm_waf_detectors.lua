@@ -7791,8 +7791,10 @@ function XSC.names_account_field(nab)
 end
 
 function _M.detect_wp_admin_cross_screen(method, uri, args, body, headers, cookie, req_host, get_fields, get_nab)
-  -- The login cookie first: nearly all traffic is anonymous.
-  if not cookie or cookie == "" or not has(lower(cookie), "wordpress_logged_in_") then return nil end
+  -- The login cookie first: nearly all traffic is anonymous. A plain find, no
+  -- lowercased copy of the whole header: the cookie is the one WordPress set
+  -- in the victim's browser, always named in lowercase.
+  if not cookie or cookie == "" or not cookie:find("wordpress_logged_in_", 1, true) then return nil end
   local u = lower(uri or "")
   local screen = XSC.screen(u)
   local json_path = not screen and u:match("^.-/wp%-json(/.*)$")
