@@ -125,6 +125,16 @@ SOURCES = [
 
 ]
 
+# CDN_SOURCES: the SOURCES entries whose clients are a CDN fetching for its
+# site's visitors, not a crawler. Their prefixes are written as `<cidr> 2;`,
+# every other source's as `<cidr> 1;`. Both bypass (cfm.lua Step 0), but a
+# vhost LOCKDOWN (a manual vhost challenge with --lockdown) withdraws the
+# bypass of "1" only: locking a shop out of crawlers must not lock out the
+# visitors of a site behind QUIC.cloud. A prefix in both kinds is written "2".
+CDN_SOURCES = {
+    "txt:https://www.quic.cloud/ips?ln",
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 
 GOOGLE_FEEDS = {
@@ -147,6 +157,7 @@ class SourceResult:
     origin: str
     prefixes: set[str] = field(default_factory=set)
     meta: dict[str, Any] = field(default_factory=dict)
+    cdn: bool = False  # from a CDN_SOURCES entry: written as `<cidr> 2;`
 
 
 def eprint(*args: Any) -> None:
@@ -373,11 +384,13 @@ def address_space(prefixes: Iterable[str], drop_largest: bool = False) -> tuple[
 
 
 def existing_prefixes(path: str) -> list[str]:
-    """The ``<cidr>`` of each ``<cidr> 1;`` data line in an existing output file."""
+    """The ``<cidr>`` of each ``<cidr> 1;`` / ``<cidr> 2;`` data line in an
+    existing output file."""
     try:
         with open(path, encoding="utf-8") as fh:
             return [s[:-2].strip() for line in fh
-                    if (s := line.strip()) and not s.startswith("#") and s.endswith(" 1;")]
+                    if (s := line.strip()) and not s.startswith("#")
+                    and (s.endswith(" 1;") or s.endswith(" 2;"))]
     except OSError:
         return []
 
@@ -449,7 +462,8 @@ def render_output(results: list[SourceResult], output: str, union: set[str]) -> 
     lines: list[str] = [
         "# Auto-generated nginx/OpenResty geo include for $cfm_bypass_ip",
         f"# Generated at: {datetime.now(timezone.utc).isoformat()}",
-        "# Format: <cidr> 1;",
+        "# Format: <cidr> 1;  crawler (a vhost lockdown withdraws its bypass)",
+        "#         <cidr> 2;  CDN fetching for visitors (bypasses even a lockdown)",
         "#",
         "#   geo $cfm_bypass_ip {",
         "#       default 0;",
@@ -462,10 +476,16 @@ def render_output(results: list[SourceResult], output: str, union: set[str]) -> 
         lines.append(f"#   {oneline(res.origin)}")
         for k, v in sorted(res.meta.items()):
             lines.append(f"#   {oneline(k)}: {oneline(v)}")
+        if res.cdn:
+            lines.append("#   class: cdn (written as 2: bypasses even a vhost lockdown)")
     lines.append("")
 
+    cdn: set[str] = set()
+    for res in results:
+        if res.cdn:
+            cdn.update(res.prefixes)
     for prefix in sorted(union, key=sort_key):
-        lines.append(f"{prefix} 1;")
+        lines.append(f"{prefix} {2 if prefix in cdn else 1};")
 
     data = "\n".join(lines).rstrip() + "\n"
 
@@ -512,6 +532,7 @@ def main() -> int:
     for spec in SOURCES:
         try:
             for res in load_source(spec):
+                res.cdn = spec in CDN_SOURCES
                 if len(res.prefixes) > MAX_PREFIXES_PER_SOURCE:
                     # A source suddenly emitting a huge set is a red flag (feed
                     # compromise / format change). Refuse the whole run rather

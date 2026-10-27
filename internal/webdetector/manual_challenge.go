@@ -44,6 +44,13 @@ type manualChalEntry struct {
 	// The rung changes nothing at the edge; it is consulted only by the
 	// verify gate via challengeV2HostArmedVia.
 	Rung string
+	// LockdownUntil, while in the future, withdraws every client exemption from
+	// this vhost challenge: the crawler bypass list (cfm.lua Step 0, the "1"
+	// prefixes of challenge_waf_bypass.conf; CDN "2" prefixes keep it), the
+	// FCrDNS good-bot downgrade, Challenge Access-Control and the exclude file
+	// (handleDecision), the challenge page's exemptions and the v2 good-bot
+	// waiver. Never past ExpiresAt. Zero = no lockdown. See vhost_lockdown.go.
+	LockdownUntil time.Time
 }
 
 // manualChalPersistEntry is the on-disk shape of one manual challenge. Kept
@@ -60,6 +67,9 @@ type manualChalPersistEntry struct {
 	// Rung persists the challenge tier ("v2" or absent). A snapshot from an
 	// older build has no key and loads as "" — plain challenge, fail-safe.
 	Rung string `json:"rung,omitempty"`
+	// LockdownUntil persists the lockdown expiry (absent = none; an older
+	// build's snapshot has no key).
+	LockdownUntil *time.Time `json:"lockdown_until,omitempty"`
 }
 
 // manualChalState is embedded in Engine.
@@ -86,16 +96,70 @@ func (s *manualChalState) init(path string) {
 
 // set adds or refreshes a manual challenge for host. rung "" = plain
 // challenge; "v2" = ChallengeV2 (verify-time distinction, see manualChalEntry).
+// A lockdown already on the arm is kept, clamped to the new expiry: a re-arm
+// (the TUI's toggle, a button that sends no lockdown field) must not quietly
+// lift it; setLockdown is the one place that changes it.
 func (s *manualChalState) set(host string, ttl time.Duration, reason, rung string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now()
+	exp := now.Add(ttl)
+	var lock time.Time
+	if prev, ok := s.vhosts[host]; ok && prev.LockdownUntil.After(now) && now.Before(prev.ExpiresAt) {
+		lock = prev.LockdownUntil
+		if lock.After(exp) {
+			lock = exp
+		}
+	}
 	s.vhosts[host] = manualChalEntry{
-		ExpiresAt: time.Now().Add(ttl),
-		Reason:    reason,
-		TTL:       ttl,
-		Rung:      rung,
+		ExpiresAt:     exp,
+		Reason:        reason,
+		TTL:           ttl,
+		Rung:          rung,
+		LockdownUntil: lock,
 	}
 	s.saveLocked()
+}
+
+// lockdownUntil returns the lockdown expiry of an active manual challenge on
+// host (exact key), or zero when there is none, it has lapsed, or the arm has.
+func (s *manualChalState) lockdownUntil(host string) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.vhosts[host]
+	now := time.Now()
+	if !ok || now.After(e.ExpiresAt) || !e.LockdownUntil.After(now) {
+		return time.Time{}
+	}
+	return e.LockdownUntil
+}
+
+// setLockdown sets (until in the future, clamped to the arm's expiry) or lifts
+// (zero until) the lockdown of an ACTIVE manual challenge on host, keeping
+// everything else. It returns the previous effective lockdown expiry (zero =
+// none), the value stored, and ok=false when host has no active arm: a
+// lockdown never creates or extends an arm.
+func (s *manualChalState) setLockdown(host string, until time.Time) (prev, stored time.Time, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, found := s.vhosts[host]
+	now := time.Now()
+	if !found || now.After(e.ExpiresAt) {
+		return time.Time{}, time.Time{}, false
+	}
+	if e.LockdownUntil.After(now) {
+		prev = e.LockdownUntil
+	}
+	if until.After(e.ExpiresAt) {
+		until = e.ExpiresAt
+	}
+	if !until.After(now) {
+		until = time.Time{}
+	}
+	e.LockdownUntil = until
+	s.vhosts[host] = e
+	s.saveLocked()
+	return prev, until, true
 }
 
 // rung returns the challenge tier of an active (non-expired) manual challenge
@@ -182,11 +246,19 @@ func (s *manualChalState) load() {
 			ttl = e.ExpiresAt.Sub(now).Round(time.Second)
 			backfilled++
 		}
+		var lock time.Time
+		if e.LockdownUntil != nil && e.LockdownUntil.After(now) {
+			lock = *e.LockdownUntil
+			if lock.After(e.ExpiresAt) {
+				lock = e.ExpiresAt
+			}
+		}
 		s.vhosts[h] = manualChalEntry{
-			ExpiresAt: e.ExpiresAt,
-			Reason:    reason,
-			TTL:       ttl,
-			Rung:      e.Rung, // older snapshot → "" (plain challenge)
+			ExpiresAt:     e.ExpiresAt,
+			Reason:        reason,
+			TTL:           ttl,
+			Rung:          e.Rung, // older snapshot → "" (plain challenge)
+			LockdownUntil: lock,
 		}
 		restored++
 	}
@@ -217,13 +289,18 @@ func (s *manualChalState) saveLocked() {
 		if now.After(e.ExpiresAt) {
 			continue
 		}
-		arr = append(arr, manualChalPersistEntry{
+		pe := manualChalPersistEntry{
 			Host:      h,
 			ExpiresAt: e.ExpiresAt,
 			Reason:    e.Reason,
 			TTLSec:    int(e.TTL.Round(time.Second) / time.Second),
 			Rung:      e.Rung,
-		})
+		}
+		if e.LockdownUntil.After(now) {
+			lu := e.LockdownUntil
+			pe.LockdownUntil = &lu
+		}
+		arr = append(arr, pe)
 	}
 	sort.Slice(arr, func(i, j int) bool { return arr[i].Host < arr[j].Host })
 	b, err := json.MarshalIndent(arr, "", "  ")
@@ -336,14 +413,20 @@ func (e *Engine) manualChallengeVhostRecord(host string, ttl time.Duration, reas
 	if e.nginxBridge != nil {
 		e.nginxBridge.ChallengeVhostWithReason(host, ttl, "manual")
 	}
+	// The re-arm keeps (and may shorten) a lockdown: republish it.
+	e.syncVhostLockdowns()
 
 	// Record in ChalAPI store.
 	if e.chalAPI != nil {
 		e.chalAPI.RecordVhostManual(host, true, ttl, reason)
 	}
 	// Rung always recorded (v1 explicit, so absence of the key means an event
-	// from before this field existed, never "v1"); actor only when known.
+	// from before this field existed, never "v1"); actor only when known; a
+	// lockdown the re-arm kept, with its (possibly clamped) expiry.
 	payload := map[string]interface{}{"rung": rungOrV1(rung)}
+	if lu := e.manualChal.lockdownUntil(host); !lu.IsZero() {
+		payload["lockdown_until"] = lu.Unix()
+	}
 	if actor != "" {
 		payload["actor"] = actor
 	}
@@ -408,6 +491,7 @@ func (e *Engine) ClearManualChallengeVhost(host string) {
 // principal recorded (see ManualChallengeVhostAs).
 func (e *Engine) ClearManualChallengeVhostAs(host, actor string) {
 	wasActive := e.manualChal.clear(host)
+	e.syncVhostLockdowns() // the arm's lockdown goes with it
 
 	logging.LogfCHALLENGES(
 		"[challenge][vhost] action=manual_off host=%s was_active=%v actor=%s",
@@ -544,5 +628,10 @@ func (e *Engine) restoreManualChallenges() {
 			// the operator granted rather than what survived the restart.
 			e.chalAPI.RecordVhostManualRestored(host, rem, ent.TTL, ent.Reason)
 		}
+		if !ent.LockdownUntil.IsZero() {
+			logging.LogfCHALLENGES("[challenge][vhost] action=lockdown_restore host=%s until=%s",
+				host, ent.LockdownUntil.UTC().Format(time.RFC3339))
+		}
 	}
+	e.syncVhostLockdowns()
 }

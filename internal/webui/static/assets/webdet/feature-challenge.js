@@ -12,6 +12,7 @@ import {
   tierUnpinRequest,
   tierUnpinnable,
 } from "./challenge-tier.js";
+import { lockdownLabel } from "./challenge-lockdown.js";
 
 export const challengeMixin = {
   data() {
@@ -70,6 +71,7 @@ export const challengeMixin = {
           rung_unpin_locked: Boolean(row.rung_unpin_locked),
           // the manual arm's expiry: a companion v1 pin lasts as long
           expires_at: mode.startsWith("manual") ? row.expires_at : undefined,
+          lockdown_until: row.lockdown_until || null,
         };
       }
       return byHost;
@@ -84,8 +86,9 @@ export const challengeMixin = {
     challengeModeLabel(host) {
       const s = this.activeChallengeByHost[host] || {};
       const tier = tierSuffix(s);
-      if (s.manual_active && s.auto_active) return "manual+auto" + tier;
-      if (s.manual_active) return "manual" + tier;
+      const lock = lockdownLabel(s) ? " · LOCKDOWN" : "";
+      if (s.manual_active && s.auto_active) return "manual+auto" + tier + lock;
+      if (s.manual_active) return "manual" + tier + lock;
       if (s.auto_active) return "auto" + tier;
       return "";
     },
@@ -134,6 +137,7 @@ export const challengeMixin = {
           rung_unpin_locked: Boolean(status.rung_unpin_locked),
           reason: status.reason,
           expires_at: status.expires_at,
+          lockdown_until: status.lockdown_until || null,
           auto_since: status.auto_since,
           solver_farm: Boolean(status.solver_farm),
           shadow_outliers: Number(status.shadow_outliers) || 0,

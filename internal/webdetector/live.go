@@ -67,6 +67,9 @@ type liveSnapshot struct {
 	ChallengeActive bool
 	ChallengeMode   string // "manual" | "auto" | ""
 	ChallengeExpiry string
+	// ChallengeLockdown is the time left on the manual arm's LOCKDOWN (no
+	// client exemption, vhost_lockdown.go); "" = none.
+	ChallengeLockdown string
 }
 
 func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
@@ -132,7 +135,7 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 		snap.Reasons = detail.ShortReasons
 	}
 
-	snap.ChallengeActive, snap.ChallengeMode, snap.ChallengeExpiry, err = fetchChallengeStatus(baseURL, host)
+	snap.ChallengeActive, snap.ChallengeMode, snap.ChallengeExpiry, snap.ChallengeLockdown, err = fetchChallengeStatus(baseURL, host)
 	if err != nil {
 		return snap, err
 	}
@@ -140,7 +143,7 @@ func fetchLiveSnapshot(baseURL, host string) (liveSnapshot, error) {
 	return snap, nil
 }
 
-func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry string, err error) {
+func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry, lockdown string, err error) {
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/status?host=%s", baseURL, url.QueryEscape(host))
 	r, err := clihttp.Get(u)
 	if err != nil {
@@ -178,7 +181,44 @@ func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry strin
 		active = true
 		mode = "auto"
 	}
+	if on, _ := result["lockdown"].(bool); on {
+		lockdown = "?"
+		if lu, _ := result["lockdown_until"].(string); lu != "" {
+			if t, perr := time.Parse(time.RFC3339, lu); perr == nil {
+				lockdown = leftDuration(t)
+			}
+		}
+	}
 	return
+}
+
+// liveLockdownToggle is the TUI's [L] key: lift a lockdown, lock down an
+// armed vhost in place, or arm a 30m challenge with the lockdown at once. It
+// returns a one-line outcome for the status bar.
+func liveLockdownToggle(baseURL, host string, snap liveSnapshot) string {
+	var u, did string
+	switch {
+	case snap.ChallengeLockdown != "":
+		u = fmt.Sprintf("%s/api/v1/challenge/vhost/lockdown?host=%s&lockdown=0", baseURL, url.QueryEscape(host))
+		did = "lockdown lifted"
+	case snap.ChallengeActive && snap.ChallengeMode == "manual":
+		u = fmt.Sprintf("%s/api/v1/challenge/vhost/lockdown?host=%s&lockdown=1&ttl=30m", baseURL, url.QueryEscape(host))
+		did = "LOCKDOWN 30m on the manual challenge"
+	default:
+		u = fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=30m&reason=live_lockdown&lockdown=1&lockdown_ttl=30m", baseURL, url.QueryEscape(host))
+		did = "challenge + LOCKDOWN 30m armed"
+	}
+	resp, err := clihttp.Post(u, "application/json", nil)
+	if err != nil {
+		return "lockdown: " + err.Error()
+	}
+	defer resp.Body.Close()
+	var result map[string]interface{}
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	if msg, ok := result["error"].(string); ok {
+		return "lockdown: " + msg
+	}
+	return did
 }
 
 func clamp(v, lo, hi float64) float64 {
@@ -513,6 +553,9 @@ func RunLiveDrilldown(baseURL, host string) error {
 			switch snap.ChallengeMode {
 			case "manual":
 				chalBadge = fmt.Sprintf("  [🔒 CHALLENGE manual left=%s](fg:red,mod:bold)", snap.ChallengeExpiry)
+				if snap.ChallengeLockdown != "" {
+					chalBadge += fmt.Sprintf(" [⛔ LOCKDOWN left=%s](fg:white,bg:red,mod:bold)", snap.ChallengeLockdown)
+				}
 			case "auto":
 				chalBadge = "  [🔒 CHALLENGE auto](fg:yellow,mod:bold)"
 			default:
@@ -574,6 +617,11 @@ func RunLiveDrilldown(baseURL, host string) error {
 		if snap.ChallengeActive && snap.ChallengeMode == "manual" {
 			chalHint = "[c] remove challenge"
 		}
+		if snap.ChallengeLockdown != "" {
+			chalHint += "  [L] lift lockdown"
+		} else {
+			chalHint += "  [L] lockdown (no exemptions, crawlers too)"
+		}
 		ipHint := "[↑↓] navigate IPs  [b] block"
 		if ipCursor >= 0 && ipCursor < len(snap.EnrichedIPs) {
 			ipHint = fmt.Sprintf("[↑↓] IP#%d: %s  [b] block", ipCursor+1, snap.EnrichedIPs[ipCursor]["ip"])
@@ -627,6 +675,10 @@ func RunLiveDrilldown(baseURL, host string) error {
 				return nil
 			case "c", "C":
 				chalToggle(snap)
+				snap, fetchErr = fetchLiveSnapshot(baseURL, host)
+				renderAll(snap, fetchErr, tickN)
+			case "L":
+				lastBlockMsg = liveLockdownToggle(baseURL, host, snap)
 				snap, fetchErr = fetchLiveSnapshot(baseURL, host)
 				renderAll(snap, fetchErr, tickN)
 			case "<Up>", "k":
@@ -706,6 +758,8 @@ type challLite struct {
 	dc      int // dc_fraction (%)
 	shadow  int // shadow_outliers
 	farm    bool
+	// lockdown: the manual arm is in LOCKDOWN until then (zero = none).
+	lockdown time.Time
 }
 
 // sigLetters renders a compact fixed-slot facet/cost/dc/shadow presence cell for
@@ -847,17 +901,18 @@ func RunLiveTop(baseURL string, limit int) error {
 		}
 
 		var vhs []struct {
-			Host             string   `json:"host"`
-			Mode             string   `json:"mode"`
-			Score            float64  `json:"score"`
-			RPS              float64  `json:"rps"`
-			UniqIP           int      `json:"uniq_ip"`
-			Reasons          []string `json:"reasons"`
-			QueryCardinality int      `json:"query_cardinality"`
-			CostPressure     int      `json:"cost_pressure"`
-			DCFraction       int      `json:"dc_fraction"`
-			ShadowOutliers   int      `json:"shadow_outliers"`
-			SolverFarm       bool     `json:"solver_farm"`
+			Host             string     `json:"host"`
+			Mode             string     `json:"mode"`
+			Score            float64    `json:"score"`
+			RPS              float64    `json:"rps"`
+			UniqIP           int        `json:"uniq_ip"`
+			Reasons          []string   `json:"reasons"`
+			QueryCardinality int        `json:"query_cardinality"`
+			CostPressure     int        `json:"cost_pressure"`
+			DCFraction       int        `json:"dc_fraction"`
+			ShadowOutliers   int        `json:"shadow_outliers"`
+			SolverFarm       bool       `json:"solver_farm"`
+			LockdownUntil    *time.Time `json:"lockdown_until"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&vhs); err != nil {
 			return nil, err
@@ -871,6 +926,11 @@ func RunLiveTop(baseURL string, limit int) error {
 				host: v.Host, mode: v.Mode, score: v.Score, rps: v.RPS, uniq: v.UniqIP,
 				reasons: v.Reasons, facet: v.QueryCardinality, cost: v.CostPressure,
 				dc: v.DCFraction, shadow: v.ShadowOutliers, farm: v.SolverFarm,
+			}
+			if v.LockdownUntil != nil {
+				cl := m[strings.ToLower(v.Host)]
+				cl.lockdown = *v.LockdownUntil
+				m[strings.ToLower(v.Host)] = cl
 			}
 		}
 		return m, nil
@@ -1226,9 +1286,11 @@ func RunLiveTop(baseURL string, limit int) error {
 
 		selectedHost := "-"
 		selectedChal := ""
+		var selectedLock time.Time
 		if len(rows) > 0 && cursor < len(rows) {
 			selectedHost = rows[cursor].Host
 			selectedChal = challenged[strings.ToLower(selectedHost)].mode
+			selectedLock = challenged[strings.ToLower(selectedHost)].lockdown
 		}
 
 		chalBadge := ""
@@ -1237,6 +1299,9 @@ func RunLiveTop(baseURL string, limit int) error {
 			chalBadge = "  [🔒 CHALLENGED manual](fg:red,mod:bold)"
 		case "auto":
 			chalBadge = "  [🔒 CHALLENGED auto](fg:yellow,mod:bold)"
+		}
+		if time.Now().Before(selectedLock) {
+			chalBadge += fmt.Sprintf(" [⛔ LOCKDOWN left=%s](fg:white,bg:red,mod:bold)", leftDuration(selectedLock))
 		}
 
 		header.Text = fmt.Sprintf(
@@ -1262,6 +1327,11 @@ func RunLiveTop(baseURL string, limit int) error {
 			chalHint = "[c] remove challenge"
 		} else if selectedChal == "auto" {
 			chalHint = "[c] add manual"
+		}
+		if time.Now().Before(selectedLock) {
+			chalHint += "  [L] lift lockdown"
+		} else {
+			chalHint += "  [L] lockdown"
 		}
 
 		ipHint := "[j/k] navigate IPs  [l] drill  [b] block"
@@ -1318,6 +1388,20 @@ func RunLiveTop(baseURL string, limit int) error {
 
 			case "c", "C":
 				chalToggleSelected()
+				fetchAndSort()
+				renderAll()
+
+			case "L":
+				// Lockdown on the selected vhost (lowercase l drills into an IP).
+				if len(rows) > 0 && cursor < len(rows) {
+					h := rows[cursor].Host
+					cl := challenged[strings.ToLower(h)]
+					ls := liveSnapshot{ChallengeActive: cl.mode != "", ChallengeMode: cl.mode}
+					if time.Now().Before(cl.lockdown) {
+						ls.ChallengeLockdown = leftDuration(cl.lockdown)
+					}
+					lastBlockMsg = h + ": " + liveLockdownToggle(baseURL, h, ls)
+				}
 				fetchAndSort()
 				renderAll()
 
@@ -1383,7 +1467,7 @@ func RunLiveTop(baseURL string, limit int) error {
 				}
 				renderAll()
 
-			case "l", "L":
+			case "l":
 				if bottomMode != "ips" {
 					lastBlockMsg = "switch bottom panel to IPs first (x)"
 					renderAll()

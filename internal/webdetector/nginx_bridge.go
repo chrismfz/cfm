@@ -105,6 +105,9 @@ type NginxBridge struct {
 	// Written once at startup (before serving), so no lock needed for the flag.
 	goodBotExempt bool
 	goodBot       *bridgeGoodBotState
+	// lockdown: the vhosts whose manual challenge is in LOCKDOWN (no client
+	// exemption at all; vhost_lockdown.go). Fed by the engine.
+	lockdown bridgeLockdown
 
 	// decisionSem caps concurrent in-flight handleDecision goroutines.
 	// Without it, the http.Server is goroutine-per-connection with no
@@ -2000,6 +2003,7 @@ func (b *NginxBridge) ServeDecisions(ctx context.Context) error {
 	mux.HandleFunc("/nginx/events/batch", b.instrument("/nginx/events/batch", b.handleEventsBatch))
 	mux.HandleFunc("/nginx/fppolicy", b.instrument("/nginx/fppolicy", b.handleFpPolicy))
 	mux.HandleFunc("/nginx/edgeban", b.instrument("/nginx/edgeban", b.handleEdgeBan))
+	mux.HandleFunc("/nginx/lockdown", b.instrument("/nginx/lockdown", b.handleLockdownFeed))
 	mux.HandleFunc("/nginx/clearance/revoked", b.instrument("/nginx/clearance/revoked", b.handleClearanceRevoked))
 
 	srv := newBridgeHTTPServer(mux)
@@ -2379,7 +2383,10 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		}
 		return b.enr.LookupCachedOrAsync(ip).PTR
 	}
-	if b.goodBotExempt && b.goodBot != nil && ip != "" && b.enr != nil &&
+	// A vhost in LOCKDOWN (vhost_lockdown.go) has no client exemption: the
+	// good-bot, Access-Control and exclude-file lifts below all stand down.
+	locked := b.vhostLockedDown(host, now)
+	if !locked && b.goodBotExempt && b.goodBot != nil && ip != "" && b.enr != nil &&
 		ipAction != "block" && (ipAction == "challenge" || vhAction == "challenge") {
 		// Skipped entirely when the IP is already blocked (block wins regardless).
 		verifiedBot, verifiedBotChecked = b.goodBot.verified(ip, ptrFn, now), true
@@ -2393,7 +2400,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	// verified-bot, per-vhost or global). Mirrored by challengePageExempt. Mirrors goodBotDowngrade: NEVER
 	// softens a per-IP block, and the WAF / traffic-rule engine below still
 	// applies. Runs only when a challenge would otherwise be served.
-	if b.ChallengeAccessExempt != nil && ipAction != "block" &&
+	if !locked && b.ChallengeAccessExempt != nil && ipAction != "block" &&
 		(ipAction == "challenge" || vhAction == "challenge") {
 		// verified_bot dimension: reuse the verdict the good-bot exemption
 		// already fetched; else consult the cache only when an entry scoped to
@@ -2443,7 +2450,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	// ran, else an inline mmdb read; the PTR comes from the enrich cache (a
 	// cache miss there warms it in the background, bounded by the enricher's
 	// async slots, and the rule simply does not match this request).
-	if b.ChalExcludeHot != nil && ipAction != "block" && vhAction == "challenge" {
+	if !locked && b.ChalExcludeHot != nil && ipAction != "block" && vhAction == "challenge" {
 		asnFn := func() string {
 			var n uint32
 			if geoLoaded {
@@ -2599,6 +2606,10 @@ func (b *NginxBridge) chalExcludeASN(ip string) uint32 {
 // back.
 func (b *NginxBridge) challengePageExempt(ip, host, ua, next string, now time.Time) (string, bool) {
 	if b == nil || ip == "" {
+		return "", false
+	}
+	// A vhost in lockdown exempts nobody, here as in handleDecision.
+	if b.vhostLockedDown(host, now) {
 		return "", false
 	}
 	goodBotOn := b.goodBotExempt && b.goodBot != nil && b.enr != nil

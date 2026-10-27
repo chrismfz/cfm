@@ -55,9 +55,11 @@ type LogRec struct {
 	UpstreamName string
 	// Bypass is the edge's $cfm_bypass_ip (log-cfm.lua column 13): the client
 	// is on challenge_waf_bypass.conf, which cfm.lua Step 0 passes before any
-	// challenge. False when the line had no such column (an older module, a
-	// file tailer).
-	Bypass bool
+	// challenge ("1" a crawler, "2" a CDN). BypassCDN is the "2" kind, which
+	// keeps its bypass under a vhost lockdown. Both false when the line had no
+	// such column (an older module, a file tailer).
+	Bypass    bool
+	BypassCDN bool
 }
 
 // parseTSV reads the 12-column TSV of the file tailers (access_cfm_tsv.log,
@@ -87,7 +89,8 @@ func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 	if len(f) >= 13 {
 		upName = f[12]
 	}
-	bypass := len(f) == 14 && f[13] == "1"
+	bypass := len(f) == 14 && (f[13] == "1" || f[13] == "2")
+	bypassCDN := len(f) == 14 && f[13] == "2"
 	ts, _ := strconv.ParseFloat(f[0], 64)
 	st, _ := strconv.Atoi(f[6])
 	by, _ := strconv.ParseInt(f[7], 10, 64)
@@ -116,6 +119,7 @@ func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 		Upstream:     f[9] != "" && f[9] != "-",
 		UpstreamName: upName,
 		Bypass:       bypass,
+		BypassCDN:    bypassCDN,
 	}, true
 }
 
@@ -842,6 +846,13 @@ func NewEngine(cfg Config) *Engine {
 	} else {
 		SetChallengeV2GoodBot(nil)
 	}
+	// A vhost in lockdown waives no good bot at verify either.
+	if e.nginxBridge != nil {
+		br := e.nginxBridge
+		SetChallengeV2Lockdown(func(host string) bool { return br.vhostLockedDown(host, time.Now()) })
+	} else {
+		SetChallengeV2Lockdown(nil)
+	}
 
 	return e
 }
@@ -1561,7 +1572,7 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 
 	// Before the engine lock: the matcher reads the bridge's own caches.
 	exempt := rec.IP != "" && e.cfg.ChallengeSuspiciousUniqIPExempt &&
-		e.nginxBridge.vhostChallengeExemptClient(rec.IP, host, rec.UA, rec.Bypass, time.Now())
+		e.nginxBridge.vhostChallengeExemptClient(rec.IP, host, rec.UA, rec.Bypass, rec.BypassCDN, time.Now())
 
 	t := tsToTime(rec.TS)
 	e.mu.Lock()
@@ -3543,7 +3554,7 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 	// bypass-listed client skips the WAF), or a WAF hit would make an exempt
 	// client count.
 	exempt := e.cfg.ChallengeSuspiciousUniqIPExempt &&
-		e.nginxBridge.vhostChallengeExemptClient(ip, host, strings.ToLower(strings.TrimSpace(ua)), false, now)
+		e.nginxBridge.vhostChallengeExemptClient(ip, host, strings.ToLower(strings.TrimSpace(ua)), false, false, now)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()

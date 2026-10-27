@@ -440,7 +440,12 @@ those clients to `next`; change the blocks and the mirror together. The
 vhost uniqIP count is a third mirror (`vhostChallengeExemptClient`,
 `uniqip_exempt.go`, since 2026-10-27): a client that passes a vhost challenge
 (the good-bot and exclude-file blocks, plus the bypass list the edge flags in
-`log-cfm.lua` column 13) is not counted toward arming one. The
+`log-cfm.lua` column 13) is not counted toward arming one. A vhost in
+LOCKDOWN (`vhost_lockdown.go`, `docs/vhost-lockdown.md`, a manual arm's
+attribute, 30m default / 6h max) withdraws all of them: Step 0 stops
+bypassing crawler (`1`) prefixes for that host (`cfm_lockdown.lua`; CDN `2`
+prefixes, QUIC.cloud, keep it), and every mirror above stands down for it — a
+new client exemption must check `vhostLockedDown` too. The
 exception is a `next` that carries a `cfm_rt`: the exemption cannot clear
 that challenged POST, and its owner would lose it. Before 2026-10-06 these
 clients got the PoW: titan served it to meta-externalagent ~1 940 times in
@@ -967,6 +972,7 @@ because of that. Hard-won points:
 | Backup check (JetBackup / Virtualmin / Proxmox → detection_history) | `docs/backup-check.md` |
 | Mail abuse findings (hacked site / contact form, mailbox spike, hijacked mailbox → detection_history) | `docs/mail-abuse.md` |
 | Site Cache (per-vhost edge caching): design + as-built / operating it | `docs/site-cache-design.md` · `docs/site-cache-runbook.md` |
+| Vhost lockdown (no client exemption on a manual vhost challenge: crawler storms) | `docs/vhost-lockdown.md` |
 
 **Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
 `docs/edge-lua-audit-2026-07-08.md` (audit closed) · `docs/waf-analysis-2026-05-08.md` (→ `docs/waf.md`) ·
@@ -1006,7 +1012,10 @@ offline validator (`bypass_list_test.py`, what `check_bypass_list.sh` runs in
 CI) failing does stop the release, and so does having no Python >= 3.9 to run
 it (the newest `python3.x` on PATH is used; EL8's `python3` is 3.6).
 `BYPASS_REFRESH=0` skips both for an offline build, and the release commit
-then leaves the list out. **Never add a source
+then leaves the list out. Prefixes are written `<cidr> 1;` (crawler) or
+`<cidr> 2;` (a `CDN_SOURCES` entry, QUIC.cloud): both bypass, but a vhost
+lockdown withdraws only the `1` kind (`docs/vhost-lockdown.md`), and the
+validator fails a committed list that lost its `2` lines. **Never add a source
 whose target URL anyone can choose** (ChatGPT-User, Stripe webhooks, uptime
 monitors): a bypass skips the WAF too (`cfm.lua` Step 0), so that source
 becomes a free WAF-bypass proxy; such callers need a path-scoped exclude.

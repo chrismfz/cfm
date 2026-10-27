@@ -17,6 +17,29 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Vhost lockdown: an emergency brake for a crawler storm.** A vhost
+  challenge lets crawlers on the bypass list, verified good bots and
+  exclude-file matches through, and nothing else at the edge reached a
+  bypass-listed crawler. So a crawl from 1 300 Applebot IPs on one shop could
+  not be stopped short of an nft block. A manual vhost challenge can now be
+  put in LOCKDOWN: no client exemption at all on that vhost. Crawlers cannot
+  solve the challenge, so they are kept out; people solve it as usual. CDN
+  fetchers (QUIC.cloud), `/.well-known/` (SSL), webhook endpoints, the server
+  itself and visitors already cleared still pass. It lasts 30 minutes by
+  default, at most 6 hours (hours of locked-out crawlers cost search
+  ranking), and never past the challenge. Controls:
+  - CLI: `cfm webtop challenge add <vhost> --lockdown`,
+    `cfm webtop challenge lockdown <vhost> on|off`, shown in `cfm --help` and
+    `cfm webtop help`.
+  - TUI: the `L` key in `cfm webtop live`.
+  - cfm-admin: the Emergency challenge card, with a LOCKDOWN badge in the
+    controls table.
+  - API: `vhost/add lockdown=1` and the new `vhost/lockdown`.
+
+  cPanel tenants may lock down their own vhosts. The bypass list now tells
+  CDN prefixes (`2`) from crawler prefixes (`1`). See `docs/vhost-lockdown.md`.
+
 ### Fixed
 - **`install-openresty.sh` works on AlmaLinux / Rocky / RHEL 10.** OpenResty
   publishes no EL10 repository, so the installer's repo file (`$releasever`

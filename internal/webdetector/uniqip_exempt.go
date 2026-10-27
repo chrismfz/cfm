@@ -28,8 +28,8 @@ import (
 // vhost-wide challenge for one request at the edge (handleDecision), so a
 // client that passes the vhost challenge is not counted:
 //   - the bypass list (challenge_waf_bypass.conf, cfm.lua Step 0), which the
-//     edge reports per request (log-cfm.lua column 13, LogRec.Bypass); the
-//     daemon never loads that file itself;
+//     edge reports per request (log-cfm.lua column 13, LogRec.Bypass /
+//     BypassCDN); the daemon never loads that file itself;
 //   - an FCrDNS-verified good bot, under CHALLENGE_GOODBOT_EXEMPT
 //     (handleDecision's goodBotDowngrade), from the same cache;
 //   - the operator exclude file (webdetector_challenge_exclude.txt) through
@@ -71,7 +71,14 @@ import (
 // Cost: once per ingested request, outside the engine lock: a bool, one
 // read-locked map hit, then the exclude rules (host / UA first, an mmdb read
 // only for a rule they leave undecided). No DNS, no async work.
-func (b *NginxBridge) vhostChallengeExemptClient(ip, host, ua string, bypass bool, now time.Time) bool {
+//
+// A vhost in LOCKDOWN (vhost_lockdown.go) exempts only a CDN client (bypass
+// "2", which keeps its Step 0 bypass there): every other client is challenged,
+// so every other client counts.
+func (b *NginxBridge) vhostChallengeExemptClient(ip, host, ua string, bypass, bypassCDN bool, now time.Time) bool {
+	if b.vhostLockedDown(host, now) {
+		return bypassCDN
+	}
 	if bypass {
 		return true
 	}

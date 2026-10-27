@@ -364,6 +364,9 @@ type challengeV2State struct {
 	// (verifiedBeforeReject); nil = no waiver (exemption off, or pre-wire) —
 	// the gate then rejects as it always did.
 	goodBot func(ctx context.Context, ip, ptr string) (name, miss string)
+	// lockdown reports whether host's vhost challenge is in LOCKDOWN
+	// (vhost_lockdown.go): no good bot is waived there. nil = never.
+	lockdown func(host string) bool
 }
 
 var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true, inputRescue: true, pathsMark: true}
@@ -629,6 +632,15 @@ func SetChallengeV2GoodBot(fn func(ctx context.Context, ip, ptr string) (name, m
 	challengeV2.mu.Unlock()
 }
 
+// SetChallengeV2Lockdown wires the vhost-lockdown check challengeV2WaiverBar
+// consults. Same lifecycle as SetChallengeV2GoodBot: set from NewEngine on
+// every engine build.
+func SetChallengeV2Lockdown(fn func(host string) bool) {
+	challengeV2.mu.Lock()
+	challengeV2.lockdown = fn
+	challengeV2.mu.Unlock()
+}
+
 // challengeV2GoodBot returns the verified good-bot name that waives a
 // rejection for ip, or "" (unwired, unknown, or not a verified bot) with the
 // reason a crawler-looking PTR still got no waiver (v2Waiver*; "" when there
@@ -658,6 +670,7 @@ func challengeV2GoodBot(ctx context.Context, ip, ptr string) (name, miss string)
 const (
 	v2WaiverGrain     = "grain"     // the arm itself (v2=fp / v2=mark) is never waived
 	v2WaiverMark      = "mark"      // a geo/vhost arm, but a traffic-rule/WAF mark covers the client too
+	v2WaiverLockdown  = "lockdown"  // the vhost is in lockdown: no client is exempt (vhost_lockdown.go)
 	v2WaiverOff       = "off"       // CHALLENGE_GOODBOT_EXEMPT = 0 (no waiver wired)
 	v2WaiverSpoofed   = "spoofed"   // the PTR's forward-confirm did not match: not the crawler it claims
 	v2WaiverTimeout   = "timeout"   // no verify slot in time, or the client gave up
@@ -815,11 +828,20 @@ func challengeV2InputRescue(sig *humanitySignals, tells string, hs int) bool {
 // grain that covers the solve (fp, geo, vhost, mark), so a geo or vhost answer
 // already rules out a fingerprint policy; the mark is checked here because it
 // comes last.
+//
+// A vhost in lockdown waives nobody (v2WaiverLockdown): the decision path
+// skips the good-bot exemption there too.
 func challengeV2WaiverBar(grain, ip, host, scope string) string {
 	switch grain {
 	case v2GrainGeo, v2GrainVhost:
 		if challengeV2MarkCovers(ip, host, scope) {
 			return v2WaiverMark
+		}
+		challengeV2.mu.RLock()
+		lockFn := challengeV2.lockdown
+		challengeV2.mu.RUnlock()
+		if lockFn != nil && lockFn(host) {
+			return v2WaiverLockdown
 		}
 		return ""
 	}

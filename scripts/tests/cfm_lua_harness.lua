@@ -108,6 +108,19 @@ function H.run(req)
   package.preload["cfm_clamav"] = function() error("no clamav in harness") end
   package.preload["cfm_rules"] = function() error("no") end
   package.preload["cfm_ua_emergency"] = function() error("no") end
+  -- req.lockdown: a host -> true table (Step 0's lockdown set), a function
+  -- (host) -> bool, or "raise" for a module whose check errors; absent = the
+  -- module fails to load (the fail-open path).
+  package.loaded["cfm_lockdown"] = nil
+  if req.lockdown == "raise" then
+    package.loaded["cfm_lockdown"] = { active = function() error("boom") end }
+  elseif type(req.lockdown) == "function" then
+    package.loaded["cfm_lockdown"] = { active = req.lockdown }
+  elseif type(req.lockdown) == "table" then
+    package.loaded["cfm_lockdown"] = { active = function(h) return req.lockdown[h] == true end }
+  else
+    package.preload["cfm_lockdown"] = function() error("no") end
+  end
   package.preload["cfm_pcw"] = function() error("no") end
   package.loaded["cfm_cache"] = nil
   if req.micro then

@@ -77,6 +77,15 @@ func (e *Engine) deriveVhostStateForHost(host string, now time.Time) string {
 	return e.deriveVhostState(&cv, now)
 }
 
+// decorateLockdown stamps the covering manual arm's lockdown onto a row
+// (render-time only; zero until = none).
+func (v *ChallengeVhostState) decorateLockdown(until time.Time) {
+	v.Lockdown, v.LockdownUntil = false, nil
+	if !until.IsZero() {
+		v.Lockdown, v.LockdownUntil = true, &until
+	}
+}
+
 // decorateTier stamps the resolved vhost tier onto a row (render-time only).
 func (v *ChallengeVhostState) decorateTier(t vhostV2Tier) {
 	v.Rung = t.Rung
@@ -118,6 +127,7 @@ func (e *Engine) handleChallengeVhosts(w http.ResponseWriter, r *http.Request) {
 		// The tier rides from the gate's own resolver, not the row — see
 		// ChallengeVhostState.Rung.
 		rows[i].decorateTier(e.challengeV2VhostTier(rows[i].Host))
+		rows[i].decorateLockdown(e.vhostLockdownUntil(rows[i].Host))
 	}
 	writeJSON(w, http.StatusOK, rows)
 }
@@ -181,6 +191,7 @@ func (e *Engine) handleChallengeVhost(w http.ResponseWriter, r *http.Request) {
 	v.State = e.deriveVhostState(&v, now)
 	tier := e.challengeV2VhostTierForScope(v.Host)
 	v.decorateTier(tier)
+	v.decorateLockdown(e.vhostLockdownUntil(v.Host))
 	scope := vhostScopeFromContext(r.Context())
 	v.RungPinLocked = tier.pinLockedFor(scope)
 	v.RungUnpinLocked = tier.unpinLockedFor(scope)

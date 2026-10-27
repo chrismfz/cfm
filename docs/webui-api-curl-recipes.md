@@ -101,6 +101,24 @@ HOST="example.com"
 curl -sS -X POST "$CFM_API/api/v1/challenge/vhost/rung?host=${HOST}&rung=v2" | jq .
 ```
 
+### Lockdown: no client exemption on a vhost's challenge
+
+The emergency brake for a crawler storm: the vhost's challenge stops letting
+crawlers on the bypass list, verified good bots and exclude-file matches
+through. Default 30m, max 6h, never past the challenge; CDN fetchers,
+`/.well-known/` and webhook endpoints still pass. See
+[`vhost-lockdown.md`](vhost-lockdown.md).
+
+```bash
+HOST="example.com"
+# Arm a manual challenge with the lockdown at once:
+curl -sS -X POST "$CFM_API/api/v1/challenge/vhost/add?host=${HOST}&ttl=1h&lockdown=1&lockdown_ttl=30m" | jq .
+# Switch it on an armed vhost in place (409 without a manual challenge):
+curl -sS -X POST "$CFM_API/api/v1/challenge/vhost/lockdown?host=${HOST}&lockdown=1&ttl=30m" | jq .
+# Lift it (the challenge stays):
+curl -sS -X POST "$CFM_API/api/v1/challenge/vhost/lockdown?host=${HOST}&lockdown=0" | jq .
+```
+
 ### Pin an automatic challenge's tier (v1 / v2 / auto)
 
 Automatic vhost challenges run at v2 when their source is in

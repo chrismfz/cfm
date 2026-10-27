@@ -266,6 +266,11 @@ if rules_ok and rules and rules.init then rules.init(CFG) end
 -- silently disabled and traffic flows through the normal pipeline.
 local ua_emerg_ok, ua_emerg = pcall(require, "cfm_ua_emergency")
 
+-- Vhost LOCKDOWN set (cfm_lockdown.lua, fed from the daemon): Step 0 withdraws
+-- the crawler bypass on a locked vhost. A load failure leaves the bypass as it
+-- always was (fail-open to the old behaviour).
+local lockdown_ok, lockdown = pcall(require, "cfm_lockdown")
+
 -- WAF module loaded once at worker init, not on every request.
 -- pcall here behaves identically to the previous per-request pcall:
 -- a load failure sets waf_ok=false and disables inline WAF checks.
@@ -1321,10 +1326,23 @@ end
 pcall(strip_cdn_bust_arg)
 
 -- ── Step 0: Static IP/CIDR bypass ───────────────────────────────────────────
+-- challenge_waf_bypass.conf: "1" = a crawler, "2" = a CDN fetching for a
+-- site's visitors (QUIC.cloud). A vhost in LOCKDOWN (a manual vhost challenge
+-- armed with lockdown; internal/webdetector/vhost_lockdown.go) withdraws the
+-- crawler bypass, so a "1" client there goes on through every step below and
+-- meets the vhost challenge; a "2" client keeps its bypass.
 do
-  if ngx.var.cfm_bypass_ip == "1" then
-    ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
-    return
+  local bp = ngx.var.cfm_bypass_ip
+  if bp == "1" or bp == "2" then
+    local held = false
+    if bp == "1" and lockdown_ok and lockdown then
+      local ok, act = pcall(lockdown.active, host)
+      held = ok and act == true
+    end
+    if not held then
+      ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+      return
+    end
   end
 end
 
