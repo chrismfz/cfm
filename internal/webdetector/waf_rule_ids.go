@@ -233,13 +233,13 @@ var wafRuleIDs = []WAFRule{
 	// PixelYourSite unauth stored XSS. The plugin stores the traffic source,
 	// landing page and UTMs of a Store API checkout in the WooCommerce order
 	// unescaped, and the script runs in the admin who opens the order.
-	// 10025 (armed) = markup in the pys cookies, the Referer's host or a
-	// utm_* field, or a non-http(s) landing URL. 10026 = a raw `<`, `>` or
-	// attribute-opening quote in the request path (the landing page's
-	// session copy): edge block with its autoblock held, since generic XSS
-	// scanners send the same paths.
+	// 10025 (armed) = executable markup, a handler-attribute breakout or a
+	// script URL in the plugin's own cookies, names nothing else sends.
+	// 10026 = the same in the session copies it takes from the raw request
+	// path, the Referer's host and the utm_* query: request parts every site
+	// sees, so edge block with its autoblock held.
 	{ID: 10025, Name: "rule_cve_pixelyoursite_xss", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
-	{ID: 10026, Name: "rule_cve_pixelyoursite_path_xss", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
+	{ID: 10026, Name: "rule_cve_pixelyoursite_session_xss", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.
