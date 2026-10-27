@@ -1303,7 +1303,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		if ok, retry, bannedNow := s.rlAllow(ip.String(), rlKindPage); !ok {
 			if bannedNow {
 				s.rlLogAbuse(r, ip.String(), rlKindPage, retry)
-				s.rlFirewallBlock(ip, rlKindPage)
+				s.rlPageFirewallBlock(ip, trustedForwardedHost(r))
 			}
 			s.rlReject(w, retry)
 			return
@@ -1758,6 +1758,18 @@ func (s *ChallengeServer) rlReject(w http.ResponseWriter, retry time.Duration) {
 	setNoStore(w.Header())
 	w.Header().Set("Connection", "close")
 	http.Error(w, "rate limited", http.StatusTooManyRequests)
+}
+
+// rlPageFirewallBlock escalates a challenge-PAGE self-protection ban for a
+// visitor of host, except on a vhost in LOCKDOWN: there the page's busiest
+// visitors are the crawlers the lockdown sent to it (a fast Googlebot IP), and
+// a firewall block would ban them from EVERY vhost on the node, long after the
+// lockdown. They get the 429 only (vhost_lockdown.go).
+func (s *ChallengeServer) rlPageFirewallBlock(ip net.IP, host string) {
+	if s.bridge != nil && s.bridge.vhostLockedDown(host, time.Now()) {
+		return
+	}
+	s.rlFirewallBlock(ip, rlKindPage)
 }
 
 // rlFirewallBlock optionally escalates a self-protection ban into a local firewall block.

@@ -1727,16 +1727,7 @@ func runChallengeStatus(baseURL string, args []string) error {
 	trigger, _ := result["rung_trigger"].(string)
 	pin, _ := result["rung_pin"].(string)
 	fmt.Printf("  tier:    %s\n", tierDescription(rung, source, trigger, pin))
-	if on, _ := result["lockdown"].(bool); on {
-		until, _ := result["lockdown_until"].(string)
-		left := "-"
-		if t, err := time.Parse(time.RFC3339, until); err == nil {
-			left = leftDuration(t)
-		}
-		fmt.Printf("  lockdown: ON  until=%s  left=%s  (no client exemption: crawlers too)\n", until, left)
-	} else {
-		fmt.Println("  lockdown: off")
-	}
+	printLockdownLine(result)
 	return nil
 }
 
@@ -1757,6 +1748,9 @@ func printLockdownLine(result map[string]interface{}) {
 		capped = "  (capped: at most 6h, never past the challenge)"
 	}
 	fmt.Printf("  LOCKDOWN ON until=%s left=%s — no client exemption on this vhost (crawlers too)%s\n", until, left, capped)
+	if note, _ := result["note"].(string); note != "" {
+		fmt.Printf("  note: %s\n", note)
+	}
 }
 
 // runChallengeLockdown handles: cfm webtop challenge lockdown <vhost> on|off [--ttl 30m]

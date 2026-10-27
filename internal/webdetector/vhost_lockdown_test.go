@@ -3,6 +3,7 @@ package webdetector
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"cfm/internal/edgeban"
+	"cfm/internal/firewall"
 )
 
 // Vhost LOCKDOWN (vhost_lockdown.go): an attribute of a manual vhost
@@ -117,25 +121,6 @@ func TestSetManualChallengeLockdownAs(t *testing.T) {
 	e.ClearManualChallengeVhost("short.gr")
 	if e.nginxBridge.vhostLockedDown("short.gr", time.Now()) {
 		t.Fatal("cleared arm left its lockdown at the bridge")
-	}
-}
-
-// A www. host with an arm of its own is governed by that arm, not the apex's
-// lockdown (manualRungTarget prefers it, and so must the edge).
-func TestSyncVhostLockdowns_WWWOwnArmWins(t *testing.T) {
-	e, _ := lockdownTestEngine(t)
-	e.ManualChallengeVhost("shop.gr", time.Hour, "manual", "")
-	e.ManualChallengeVhost("www.shop.gr", time.Hour, "manual", "")
-	e.SetManualChallengeLockdownAs("shop.gr", time.Hour, "")
-	now := time.Now()
-	if !e.nginxBridge.vhostLockedDown("shop.gr", now) {
-		t.Fatal("apex not locked")
-	}
-	if e.nginxBridge.vhostLockedDown("www.shop.gr", now) {
-		t.Fatal("www. has its own (unlocked) arm and must not inherit the apex lockdown")
-	}
-	if !e.vhostLockdownUntil("www.shop.gr").IsZero() {
-		t.Fatal("vhostLockdownUntil must resolve www. to its own arm")
 	}
 }
 
@@ -254,37 +239,6 @@ func TestParseSocketTSV_BypassKinds(t *testing.T) {
 		if rec, ok := parseSocketTSV(base + bp); !ok || rec.Bypass != want {
 			t.Errorf("bp=%s: bypass=%v, want %v", bp, rec.Bypass, want)
 		}
-	}
-}
-
-// A NEW www. arm under a locked-down apex inherits the lockdown (arming www.
-// from a lockdown-unaware surface must not unlock it); a www. arm that lapses
-// hands www. back to the apex's lockdown on the next tick's resync.
-func TestLockdown_WWWArmInheritsAndLapses(t *testing.T) {
-	e, _ := lockdownTestEngine(t)
-	e.ManualChallengeVhost("shop.gr", time.Hour, "manual", "")
-	until, _, _, _ := e.SetManualChallengeLockdownAs("shop.gr", 30*time.Minute, "")
-	e.ManualChallengeVhost("www.shop.gr", time.Hour, "panic-button", "v2")
-	if got := e.manualChal.lockdownUntil("www.shop.gr"); !got.Equal(until) {
-		t.Fatalf("new www. arm did not inherit the apex lockdown: %v, want %v", got, until)
-	}
-	if !e.nginxBridge.vhostLockedDown("www.shop.gr", time.Now()) {
-		t.Fatal("www. unlocked at the bridge after its own arm was created")
-	}
-	// A www. arm with no lockdown of its own lapses: the resync gives www.
-	// back to the apex lockdown.
-	e.SetManualChallengeLockdownAs("www.shop.gr", 0, "")
-	if e.nginxBridge.vhostLockedDown("www.shop.gr", time.Now()) {
-		t.Fatal("www. arm's own lift not published")
-	}
-	e.manualChal.mu.Lock()
-	ent := e.manualChal.vhosts["www.shop.gr"]
-	ent.ExpiresAt = time.Now().Add(-time.Second)
-	e.manualChal.vhosts["www.shop.gr"] = ent
-	e.manualChal.mu.Unlock()
-	e.syncVhostLockdowns() // what RunOnce does every tick
-	if !e.nginxBridge.vhostLockedDown("www.shop.gr", time.Now()) {
-		t.Fatal("after the www. arm lapsed, www. must fall back to the apex lockdown")
 	}
 }
 
@@ -414,7 +368,9 @@ func TestCLILockdownCommands(t *testing.T) {
 		{func() error { return runChallengeAdd(ts.URL, []string{"shop.gr", "--lockdown"}) }, "lockdown=1"},
 		{func() error { return runChallengeAdd(ts.URL, []string{"shop.gr", "--lockdown-ttl", "1h"}) }, "lockdown=1&lockdown_ttl=1h"},
 		{func() error { return runChallengeAdd(ts.URL, []string{"shop.gr", "--no-lockdown"}) }, "lockdown=0"},
-		{func() error { return runChallengeAdd(ts.URL, []string{"shop.gr", "--no-lockdown", "--lockdown-ttl", "1h"}) }, "&lockdown=0"},
+		{func() error {
+			return runChallengeAdd(ts.URL, []string{"shop.gr", "--no-lockdown", "--lockdown-ttl", "1h"})
+		}, "&lockdown=0"},
 		{func() error { return runChallengeLockdown(ts.URL, []string{"shop.gr", "on", "--ttl", "45m"}) }, "/api/v1/challenge/vhost/lockdown?host=shop.gr&lockdown=1&ttl=45m"},
 		{func() error { return runChallengeLockdown(ts.URL, []string{"shop.gr", "off"}) }, "/api/v1/challenge/vhost/lockdown?host=shop.gr&lockdown=0"},
 	}
@@ -439,5 +395,113 @@ func TestCLILockdownCommands(t *testing.T) {
 	conflict = true
 	if err := runChallengeLockdown(ts.URL, []string{"shop.gr", "on"}); err == nil || !strings.Contains(err.Error(), "add shop.gr --lockdown") {
 		t.Errorf("409 must point at add --lockdown, got %v", err)
+	}
+}
+
+// A lockdown on an apex covers its www. host even when www. has an arm of its
+// own (the union, vhostLockdownUntil): an existing www. arm is not left out,
+// and lifting www.'s own lockdown — the move a token holding only www. can
+// make — never unlocks it while the apex's holds.
+func TestLockdown_ApexCoversWWWUnion(t *testing.T) {
+	e, _ := lockdownTestEngine(t)
+	e.ManualChallengeVhost("www.shop.gr", time.Hour, "panic-button", "") // armed earlier, no lockdown
+	e.ManualChallengeVhost("shop.gr", time.Hour, "manual", "")
+	until, _, _, _ := e.SetManualChallengeLockdownAs("shop.gr", 30*time.Minute, "admin")
+	now := time.Now()
+	if !e.nginxBridge.vhostLockedDown("www.shop.gr", now) || !e.vhostLockdownUntil("www.shop.gr").Equal(until) {
+		t.Fatal("an existing www. arm must be covered by the apex lockdown")
+	}
+
+	// Scoped token holding only www.: lifting its own does nothing while the
+	// apex lockdown holds, and the response says so.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/add?host=www.shop.gr&ttl=1h&lockdown=0", nil)
+	ctx := context.WithValue(req.Context(), CtxRoleKey{}, CtxRoleScoped)
+	ctx = context.WithValue(ctx, CtxScopeKey{}, map[string]struct{}{"www.shop.gr": {}})
+	rr := httptest.NewRecorder()
+	e.handleChallengeVhostAdd(rr, req.WithContext(ctx))
+	if !strings.Contains(rr.Body.String(), `"lockdown":true`) {
+		t.Fatalf("scoped www. lift must leave www. locked by the apex: %s", rr.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/lockdown?host=www.shop.gr&lockdown=0", nil)
+	rr = httptest.NewRecorder()
+	e.handleChallengeVhostLockdown(rr, req.WithContext(ctx))
+	if !strings.Contains(rr.Body.String(), `"lockdown":true`) || !strings.Contains(rr.Body.String(), "lift it there") {
+		t.Fatalf("lockdown off on www. must report the apex lockdown: %d %s", rr.Code, rr.Body.String())
+	}
+	if !e.nginxBridge.vhostLockedDown("www.shop.gr", time.Now()) {
+		t.Fatal("www. unlocked at the bridge while the apex lockdown holds")
+	}
+
+	// The operator lifts the apex: www. is free again (its own arm has none).
+	e.SetManualChallengeLockdownAs("shop.gr", 0, "admin")
+	if e.nginxBridge.vhostLockedDown("www.shop.gr", time.Now()) || !e.vhostLockdownUntil("www.shop.gr").IsZero() {
+		t.Fatal("lifting the apex must free www.")
+	}
+	// The sync is a no-op with nothing to publish.
+	e.syncVhostLockdowns()
+	if e.nginxBridge.hasVhostLockdowns() {
+		t.Fatal("empty lockdown set still published")
+	}
+}
+
+// The challenge page's self-protection never firewall-blocks a visitor of a
+// locked vhost (the crawlers it sent there); elsewhere it does.
+func TestChallengePageRateLimit_NoFirewallBlockUnderLockdown(t *testing.T) {
+	s := installEdgeBans(t)
+	cs := NewChallengeServer(extendOnlyFW{})
+	cs.rlFwEnabled = true
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	b.setVhostLockdowns(map[string]time.Time{"shop.gr": time.Now().Add(time.Minute)})
+	cs.SetNginxBridge(b)
+
+	cs.rlPageFirewallBlock(net.ParseIP("66.249.66.1"), "shop.gr")
+	cs.rlPageFirewallBlock(net.ParseIP("203.0.113.81"), "other.gr")
+	s.Reconcile(edgeban.Snapshot{Blocks: []firewall.SetElementTimed{{Elem: "66.249.66.1"}, {Elem: "203.0.113.81"}}, ReadAt: time.Now().Add(time.Second)})
+	if ok, _ := s.Banned("66.249.66.1"); ok {
+		t.Fatal("a visitor of a locked vhost was firewall-blocked by the page rate limit")
+	}
+	if ok, _ := s.Banned("203.0.113.81"); !ok {
+		t.Fatal("the page rate limit must still escalate on an unlocked vhost")
+	}
+}
+
+// The TUI's [L] arms a lockdown only on a second press within the window;
+// lifting acts at once.
+func TestLockdownKeyPress(t *testing.T) {
+	var host string
+	var at time.Time
+	t0 := time.Now()
+	if act, msg := lockdownKeyPress("shop.gr", false, &host, &at, t0); act || !strings.Contains(msg, "press L again") {
+		t.Fatalf("first press must ask for confirmation: act=%v msg=%q", act, msg)
+	}
+	if act, _ := lockdownKeyPress("shop.gr", false, &host, &at, t0.Add(2*time.Second)); !act {
+		t.Fatal("second press within the window must act")
+	}
+	lockdownKeyPress("shop.gr", false, &host, &at, t0)
+	if act, _ := lockdownKeyPress("shop.gr", false, &host, &at, t0.Add(6*time.Second)); act {
+		t.Fatal("a second press after the window must ask again")
+	}
+	lockdownKeyPress("a.gr", false, &host, &at, t0)
+	if act, _ := lockdownKeyPress("b.gr", false, &host, &at, t0.Add(time.Second)); act {
+		t.Fatal("a press on another vhost must not confirm the first")
+	}
+	if act, _ := lockdownKeyPress("shop.gr", true, &host, &at, t0); !act {
+		t.Fatal("lifting needs no confirmation")
+	}
+}
+
+// lockdown_ttl is read only when a lockdown is being set: a bad one must not
+// block a plain arm.
+func TestLockdownTTLIgnoredWithoutLockdown(t *testing.T) {
+	e, _ := lockdownTestEngine(t)
+	rr := httptest.NewRecorder()
+	e.handleChallengeVhostAdd(rr, httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/add?host=shop.gr&ttl=1h&lockdown_ttl=30min", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("plain arm with a stray lockdown_ttl refused: %d %s", rr.Code, rr.Body.String())
+	}
+	rr = httptest.NewRecorder()
+	e.handleChallengeVhostAdd(rr, httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/add?host=shop.gr&ttl=1h&lockdown=1&lockdown_ttl=30min", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("a bad lockdown_ttl with lockdown=1 must be refused: %d", rr.Code)
 	}
 }

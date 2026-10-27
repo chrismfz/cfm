@@ -192,6 +192,27 @@ func fetchChallengeStatus(baseURL, host string) (active bool, mode, expiry, lock
 	return
 }
 
+// lockdownConfirmWindow: the TUI's [L] arms a lockdown only on a second press
+// within this window (a single keystroke must not shut every crawler out of a
+// production vhost; lifting needs no confirmation).
+const lockdownConfirmWindow = 5 * time.Second
+
+// lockdownKeyPress is the [L] key's confirm step: it returns whether to act
+// now, and the status-bar line to show when not. pending holds the host and
+// time of the first press.
+func lockdownKeyPress(host string, locked bool, pendingHost *string, pendingAt *time.Time, now time.Time) (act bool, msg string) {
+	if locked {
+		*pendingHost = ""
+		return true, ""
+	}
+	if *pendingHost == host && now.Sub(*pendingAt) <= lockdownConfirmWindow {
+		*pendingHost = ""
+		return true, ""
+	}
+	*pendingHost, *pendingAt = host, now
+	return false, "press L again within 5s to LOCK DOWN " + host + " (crawlers and verified bots get the challenge too, 30m)"
+}
+
 // liveLockdownToggle is the TUI's [L] key: lift a lockdown, lock down an
 // armed vhost in place, or arm a 30m challenge with the lockdown at once. It
 // returns a one-line outcome for the status bar.
@@ -477,6 +498,8 @@ func RunLiveDrilldown(baseURL, host string) error {
 
 	ipCursor := -1
 	lastBlockMsg := ""
+	var lockPendHost string // [L] confirm step (lockdownKeyPress)
+	var lockPendAt time.Time
 
 	var (
 		ipTableW int
@@ -678,8 +701,12 @@ func RunLiveDrilldown(baseURL, host string) error {
 				snap, fetchErr = fetchLiveSnapshot(baseURL, host)
 				renderAll(snap, fetchErr, tickN)
 			case "L":
-				lastBlockMsg = liveLockdownToggle(baseURL, host, snap)
-				snap, fetchErr = fetchLiveSnapshot(baseURL, host)
+				if act, msg := lockdownKeyPress(host, snap.ChallengeLockdown != "", &lockPendHost, &lockPendAt, time.Now()); !act {
+					lastBlockMsg = msg
+				} else {
+					lastBlockMsg = liveLockdownToggle(baseURL, host, snap)
+					snap, fetchErr = fetchLiveSnapshot(baseURL, host)
+				}
 				renderAll(snap, fetchErr, tickN)
 			case "<Up>", "k":
 				if ipCursor < 0 {
@@ -881,6 +908,8 @@ func RunLiveTop(baseURL string, limit int) error {
 		bottomMode   string
 		ipCursor     int
 		lastBlockMsg string
+		lockPendHost string // [L] confirm step (lockdownKeyPress)
+		lockPendAt   time.Time
 		cursor       int
 		sortIdx      int
 		lastErr      error
@@ -1399,6 +1428,11 @@ func RunLiveTop(baseURL string, limit int) error {
 					ls := liveSnapshot{ChallengeActive: cl.mode != "", ChallengeMode: cl.mode}
 					if time.Now().Before(cl.lockdown) {
 						ls.ChallengeLockdown = leftDuration(cl.lockdown)
+					}
+					if act, msg := lockdownKeyPress(h, ls.ChallengeLockdown != "", &lockPendHost, &lockPendAt, time.Now()); !act {
+						lastBlockMsg = msg
+						renderAll()
+						continue
 					}
 					lastBlockMsg = h + ": " + liveLockdownToggle(baseURL, h, ls)
 				}

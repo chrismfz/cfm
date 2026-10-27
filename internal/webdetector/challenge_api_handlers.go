@@ -80,10 +80,8 @@ func (e *Engine) deriveVhostStateForHost(host string, now time.Time) string {
 // decorateLockdown stamps the covering manual arm's lockdown onto a row
 // (render-time only; zero until = none).
 func (v *ChallengeVhostState) decorateLockdown(until time.Time) {
-	v.Lockdown, v.LockdownUntil = false, nil
-	if !until.IsZero() {
-		v.Lockdown, v.LockdownUntil = true, &until
-	}
+	v.LockdownUntil = lockdownPtr(until)
+	v.Lockdown = v.LockdownUntil != nil
 }
 
 // decorateTier stamps the resolved vhost tier onto a row (render-time only).

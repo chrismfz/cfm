@@ -753,7 +753,7 @@ rule/WAF marks stay strict), waived under `CHALLENGE_GOODBOT_EXEMPT`
 (`v2_waived=<name>` on the solve line/history; Google-Read-Aloud scores 140
 from rotating first-seen IPs, so the gate forward-confirms a crawler-looking
 PTR inline — bounded, reject path only; a reject whose PTR claims a crawler
-carries `v2_waiver_miss=<grain|mark|off|spoofed|timeout|transient>`, or it
+carries `v2_waiver_miss=<grain|mark|lockdown|off|spoofed|timeout|transient>`, or it
 would read like a spoof) — and except, under EVERY grain, a failing score with
 real pointer input (sig ptr >= 5 AND mv >= 100), no certain tell
 (webdriver / headless UA) and a score of at most 100, never above it (the

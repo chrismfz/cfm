@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -92,21 +93,27 @@ func (e *Engine) SetManualChallengeLockdownAs(target string, ttl time.Duration, 
 	return stored, capped, true, true
 }
 
-// vhostLockdownUntil is the lockdown expiry of the manual arm covering host
-// (manualRungTarget: the host's own arm, else its apex's for a www. host), or
-// zero.
+// vhostLockdownUntil is host's EFFECTIVE lockdown expiry, or zero: the later
+// of its own arm's lockdown and, for a www. host, its apex arm's. A lockdown
+// on an apex covers www. even when www. has an arm of its own (the canonical
+// host of most shops), and lifting www.'s own lockdown never unlocks it while
+// the apex's holds — a scoped token holding only www. cannot undo an
+// operator's apex lockdown.
 func (e *Engine) vhostLockdownUntil(host string) time.Time {
-	t := e.manualRungTarget(host)
-	if t == "" {
-		return time.Time{}
+	host = normalizeHost(host)
+	t := e.manualChal.lockdownUntil(host)
+	if apex, isWWW := strings.CutPrefix(host, "www."); isWWW && apex != "" {
+		if a := e.manualChal.lockdownUntil(apex); a.After(t) {
+			t = a
+		}
 	}
-	return e.manualChal.lockdownUntil(t)
+	return t
 }
 
 // syncVhostLockdowns republishes every active lockdown to the bridge, which
-// answers the edge feed and the in-daemon checks. An apex arm covers its www.
-// variant, as the arm itself does, unless that www. host has an arm of its
-// own (manualRungTarget prefers it, and so must the edge).
+// answers the edge feed and the in-daemon checks: each locked arm's host and
+// its bridge variants (an apex arm's www.), the later expiry winning
+// (vhostLockdownUntil's union).
 func (e *Engine) syncVhostLockdowns() {
 	if e.nginxBridge == nil {
 		return
@@ -120,11 +127,14 @@ func (e *Engine) syncVhostLockdowns() {
 			continue
 		}
 		for _, v := range vhostVariantsForBridge(host) {
-			if e.manualRungTarget(v) != host {
-				continue
+			if ent.LockdownUntil.After(m[v]) {
+				m[v] = ent.LockdownUntil
 			}
-			m[v] = ent.LockdownUntil
 		}
+	}
+	// The usual case: no lockdown anywhere, and the bridge already knows.
+	if len(m) == 0 && !e.nginxBridge.hasVhostLockdowns() {
+		return
 	}
 	e.nginxBridge.setVhostLockdowns(m)
 }
@@ -144,6 +154,16 @@ func lockdownPtr(until time.Time) *time.Time {
 type bridgeLockdown struct {
 	mu    sync.RWMutex
 	until map[string]time.Time
+}
+
+// hasVhostLockdowns reports whether the bridge holds any lockdown entry.
+func (b *NginxBridge) hasVhostLockdowns() bool {
+	if b == nil {
+		return false
+	}
+	b.lockdown.mu.RLock()
+	defer b.lockdown.mu.RUnlock()
+	return len(b.lockdown.until) > 0
 }
 
 func (b *NginxBridge) setVhostLockdowns(m map[string]time.Time) {

@@ -32,7 +32,7 @@ back-filled here — see the git/PR history for that period.
   - CLI: `cfm webtop challenge add <vhost> --lockdown`,
     `cfm webtop challenge lockdown <vhost> on|off`, shown in `cfm --help` and
     `cfm webtop help`.
-  - TUI: the `L` key in `cfm webtop live`.
+  - TUI: the `L` key in `cfm webtop live` (pressed twice to turn it on).
   - cfm-admin: the Emergency challenge card, with a LOCKDOWN badge in the
     controls table.
   - API: `vhost/add lockdown=1` and the new `vhost/lockdown`.

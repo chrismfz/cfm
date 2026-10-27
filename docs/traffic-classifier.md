@@ -1241,7 +1241,8 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   on a `result=v2_reject` line is `v2_waiver_miss=<why not>`, after the geo
   fields and only when the client's PTR claims a crawler: `grain` (the arm is a
   fingerprint policy or a mark — never waived), `mark` (a geo/vhost arm, but
-  a mark covers the client too), `off` (`CHALLENGE_GOODBOT_EXEMPT = 0`),
+  a mark covers the client too), `lockdown` (the vhost is in lockdown, which
+  exempts no client: `docs/vhost-lockdown.md`), `off` (`CHALLENGE_GOODBOT_EXEMPT = 0`),
   `spoofed` (the forward-confirm didn't match), `timeout` (no verify slot in
   time) or `transient` (resolver failure). Without it a Read-Aloud the gate
   couldn't confirm reads exactly like an impostor; the `challenge_v2_reject`

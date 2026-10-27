@@ -250,10 +250,15 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rung=v2 is not supported on wildcard hosts yet — arm the concrete vhost(s)"})
 		return
 	}
-	lockTTL, err := parseLockdownTTL(req.LockdownTTL)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+	// lockdown_ttl matters only when a lockdown is being set: a stale or
+	// malformed one must not block a plain arm (or a lift).
+	lockTTL := defaultLockdownTTL
+	if req.Lockdown != nil && *req.Lockdown {
+		var err error
+		if lockTTL, err = parseLockdownTTL(req.LockdownTTL); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	// The edge matches a lockdown on the exact host (cfm_lockdown.lua): a
 	// wildcard lockdown would claim what it never enforces.
@@ -285,8 +290,8 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		Tier:           tierJSON(tier),
 		LockdownCapped: lockCapped,
 	}
-	if lu := e.manualChal.lockdownUntil(req.Host); !lu.IsZero() {
-		resp.Lockdown, resp.LockdownUntil = true, &lu
+	if lu := e.vhostLockdownUntil(req.Host); !lu.IsZero() {
+		resp.Lockdown, resp.LockdownUntil = true, lockdownPtr(lu)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -349,10 +354,13 @@ func (e *Engine) handleChallengeVhostLockdown(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing lockdown (use 1/0, true/false, on/off)"})
 		return
 	}
-	ttl, err := parseLockdownTTL(req.TTL)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
+	ttl := time.Duration(0)
+	if *req.Lockdown {
+		var err error
+		if ttl, err = parseLockdownTTL(req.TTL); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	if *req.Lockdown && strings.Contains(host, "*") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "lockdown is not supported on wildcard hosts — arm the concrete vhost(s)"})
@@ -371,21 +379,25 @@ func (e *Engine) handleChallengeVhostLockdown(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "the arm covering " + host + " is on " + target + ", which is not in scope"})
 		return
 	}
-	if !*req.Lockdown {
-		ttl = 0
-	}
-	until, capped, changed, ok := e.SetManualChallengeLockdownAs(target, ttl, actorFromScope(scope))
+	_, capped, changed, ok := e.SetManualChallengeLockdownAs(target, ttl, actorFromScope(scope))
 	if !ok {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "the manual challenge on " + target + " expired"})
 		return
 	}
+	// Report the EFFECTIVE lockdown of the host asked about: a www. host stays
+	// locked while its apex's lockdown holds, whatever its own arm says.
+	eff := e.vhostLockdownUntil(host)
 	resp := map[string]interface{}{
 		"host":     target,
-		"lockdown": !until.IsZero(),
+		"lockdown": !eff.IsZero(),
 		"changed":  changed,
 	}
-	if !until.IsZero() {
-		resp["lockdown_until"] = until
+	if !eff.IsZero() {
+		resp["lockdown_until"] = eff
+		if !*req.Lockdown {
+			apex := strings.TrimPrefix(host, "www.")
+			resp["note"] = host + " stays locked down by the lockdown on " + apex + " (lift it there)"
+		}
 	}
 	if capped {
 		resp["lockdown_capped"] = true
@@ -840,10 +852,7 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 	}
 
 	lockUntil := e.vhostLockdownUntil(host)
-	var lockUntilJSON *time.Time
-	if !lockUntil.IsZero() {
-		lockUntilJSON = &lockUntil
-	}
+	lockUntilJSON := lockdownPtr(lockUntil)
 
 	tier := e.challengeV2VhostTierForScope(host)
 	// An automatic vhost challenge the store never records (uniqpaths_short
