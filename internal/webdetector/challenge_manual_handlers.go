@@ -25,6 +25,13 @@ type chalVhostAddRequest struct {
 	// scoped tokens may set it for their own vhosts like any manual
 	// challenge — there is no deny here to escalate to.
 	Rung string `json:"rung"`
+	// Lockdown: true puts the arm in LOCKDOWN (no client exemption at all,
+	// vhost_lockdown.go) for LockdownTTL (default 30m, at most 6h, never past
+	// the arm); false lifts it; absent keeps whatever the arm has. Query
+	// form: lockdown=1|0 (true/false/on/off). Scoped tokens may set it on
+	// their own vhosts: it only adds challenges, on a vhost they own.
+	Lockdown    *bool  `json:"lockdown"`
+	LockdownTTL string `json:"lockdown_ttl"`
 }
 
 type chalVhostAddResponse struct {
@@ -43,6 +50,37 @@ type chalVhostAddResponse struct {
 	// a manual arm at v1 does not downgrade an automatic v2, so "rung":"v1"
 	// alone could read as the tier the solves are held to when it is not.
 	Tier map[string]string `json:"tier"`
+	// Lockdown / LockdownUntil: the arm's lockdown after the call (kept,
+	// set or lifted). LockdownCapped: the requested lockdown TTL was cut to
+	// the 6h maximum or to the arm's expiry.
+	Lockdown       bool       `json:"lockdown"`
+	LockdownUntil  *time.Time `json:"lockdown_until,omitempty"`
+	LockdownCapped bool       `json:"lockdown_capped,omitempty"`
+}
+
+// parseLockdownParam reads a lockdown flag from a query value: "" = absent.
+func parseLockdownParam(v string) (val, set bool, err error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "":
+		return false, false, nil
+	case "1", "true", "on", "yes":
+		return true, true, nil
+	case "0", "false", "off", "no":
+		return false, true, nil
+	}
+	return false, false, errors.New("invalid lockdown: " + v + " (use 1/0, true/false, on/off)")
+}
+
+// parseLockdownTTL reads a lockdown TTL ("" = defaultLockdownTTL).
+func parseLockdownTTL(v string) (time.Duration, error) {
+	if strings.TrimSpace(v) == "" {
+		return defaultLockdownTTL, nil
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(v))
+	if err != nil || d <= 0 {
+		return 0, errors.New("invalid lockdown_ttl: " + v)
+	}
+	return d, nil
 }
 
 // sanitizeAuditReason bounds the free-text reason a caller may attach to a
@@ -102,18 +140,27 @@ func normalizeRung(s string) (rung string, ok bool) {
 }
 
 // POST /api/v1/challenge/vhost/add
-// Body: { "host": "example.gr", "ttl": "30m", "reason": "manual", "rung": "v2" }
-// Also accepts query params: ?host=example.gr&ttl=30m&reason=manual&rung=v2
+// Body: { "host": "example.gr", "ttl": "30m", "reason": "manual", "rung": "v2", "lockdown": true, "lockdown_ttl": "30m" }
+// Also accepts query params: ?host=example.gr&ttl=30m&reason=manual&rung=v2&lockdown=1&lockdown_ttl=30m
+// lockdown absent keeps the arm's lockdown (a re-arm never lifts it); see
+// vhost/lockdown for switching it on an armed vhost without re-arming.
 //
 // Scoped tokens: own vhosts only (vhostAllowed, fail-closed), and the TTL is
 // clamped to scopedMaxChallengeTTL (24h) with ttl_capped=true in the
 // response. Admin/loopback callers are uncapped.
 func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request) {
 	req := chalVhostAddRequest{
-		Host:   r.URL.Query().Get("host"),
-		TTL:    r.URL.Query().Get("ttl"),
-		Reason: r.URL.Query().Get("reason"),
-		Rung:   r.URL.Query().Get("rung"),
+		Host:        r.URL.Query().Get("host"),
+		TTL:         r.URL.Query().Get("ttl"),
+		Reason:      r.URL.Query().Get("reason"),
+		Rung:        r.URL.Query().Get("rung"),
+		LockdownTTL: r.URL.Query().Get("lockdown_ttl"),
+	}
+	if v, set, err := parseLockdownParam(r.URL.Query().Get("lockdown")); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	} else if set {
+		req.Lockdown = &v
 	}
 
 	// Accept both JSON body and query params.
@@ -135,6 +182,12 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		}
 		if bodyReq.Rung != "" {
 			req.Rung = bodyReq.Rung
+		}
+		if bodyReq.Lockdown != nil {
+			req.Lockdown = bodyReq.Lockdown
+		}
+		if bodyReq.LockdownTTL != "" {
+			req.LockdownTTL = bodyReq.LockdownTTL
 		}
 	}
 
@@ -197,20 +250,159 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "rung=v2 is not supported on wildcard hosts yet — arm the concrete vhost(s)"})
 		return
 	}
+	// lockdown_ttl matters only when a lockdown is being set: a stale or
+	// malformed one must not block a plain arm (or a lift).
+	lockTTL := defaultLockdownTTL
+	if req.Lockdown != nil && *req.Lockdown {
+		var err error
+		if lockTTL, err = parseLockdownTTL(req.LockdownTTL); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	// The edge matches a lockdown on the exact host (cfm_lockdown.lua): a
+	// wildcard lockdown would claim what it never enforces.
+	if req.Lockdown != nil && *req.Lockdown && strings.Contains(req.Host, "*") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "lockdown is not supported on wildcard hosts — arm the concrete vhost(s)"})
+		return
+	}
 
-	e.ManualChallengeVhostAs(req.Host, ttl, req.Reason, rung, actorFromScope(scope))
+	actor := actorFromScope(scope)
+	e.ManualChallengeVhostAs(req.Host, ttl, req.Reason, rung, actor)
+	lockCapped := false
+	if req.Lockdown != nil {
+		lt := time.Duration(0)
+		if *req.Lockdown {
+			lt = lockTTL
+		}
+		_, lockCapped, _, _ = e.SetManualChallengeLockdownAs(req.Host, lt, actor)
+	}
 
 	tier := e.challengeV2VhostTier(req.Host)
-	writeJSON(w, http.StatusOK, chalVhostAddResponse{
-		Host:      req.Host,
-		Status:    "active",
-		ExpiresAt: time.Now().Add(ttl),
-		TTL:       ttl.String(),
-		Reason:    req.Reason,
-		Rung:      rungOrV1(rung),
-		TTLCapped: ttlCapped,
-		Tier:      tierJSON(tier),
-	})
+	resp := chalVhostAddResponse{
+		Host:           req.Host,
+		Status:         "active",
+		ExpiresAt:      time.Now().Add(ttl),
+		TTL:            ttl.String(),
+		Reason:         req.Reason,
+		Rung:           rungOrV1(rung),
+		TTLCapped:      ttlCapped,
+		Tier:           tierJSON(tier),
+		LockdownCapped: lockCapped,
+	}
+	if lu := e.vhostLockdownUntil(req.Host); !lu.IsZero() {
+		resp.Lockdown, resp.LockdownUntil = true, lockdownPtr(lu)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// POST /api/v1/challenge/vhost/lockdown
+// Body: { "host": "example.gr", "lockdown": true, "ttl": "30m" }
+// (also ?host=&lockdown=1|0&ttl=)
+//
+// Switches the LOCKDOWN (vhost_lockdown.go) of the ACTIVE manual challenge
+// covering host, keeping the arm's expiry, reason and tier — unlike
+// vhost/add, which re-arms. "Covering" is manualRungTarget (the host's own
+// arm, else its apex's for a www. host), and the scope check covers that
+// target too. ttl: default 30m, at most 6h, never past the arm (the response
+// says lockdown_capped). lockdown is REQUIRED. 409 when no manual challenge is
+// active: a lockdown is an attribute of a manual arm (arm with vhost/add
+// lockdown=1 to do both at once). Lifting an absent lockdown is a no-op
+// (changed=false, no audit row). Scope: as vhost/add — a scoped token may
+// lock down its own vhost (it only adds challenges, on a vhost it owns).
+func (e *Engine) handleChallengeVhostLockdown(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	type lockdownRequest struct {
+		Host     string `json:"host"`
+		Lockdown *bool  `json:"lockdown"`
+		TTL      string `json:"ttl"`
+	}
+	req := lockdownRequest{Host: q.Get("host"), TTL: q.Get("ttl")}
+	if v, set, err := parseLockdownParam(q.Get("lockdown")); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	} else if set {
+		req.Lockdown = &v
+	}
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		var body lockdownRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+		if body.Host != "" {
+			req.Host = body.Host
+		}
+		if body.Lockdown != nil {
+			req.Lockdown = body.Lockdown
+		}
+		if body.TTL != "" {
+			req.TTL = body.TTL
+		}
+	}
+	host := normalizeHost(req.Host)
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
+		return
+	}
+	scope := vhostScopeFromContext(r.Context())
+	if !vhostAllowed(host, scope) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
+		return
+	}
+	if req.Lockdown == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing lockdown (use 1/0, true/false, on/off)"})
+		return
+	}
+	ttl := time.Duration(0)
+	if *req.Lockdown {
+		var err error
+		if ttl, err = parseLockdownTTL(req.TTL); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if *req.Lockdown && strings.Contains(host, "*") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "lockdown is not supported on wildcard hosts — arm the concrete vhost(s)"})
+		return
+	}
+	target := e.manualRungTarget(host)
+	if target == "" {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "no active manual challenge on " + host + " — a lockdown is part of a manual challenge (challenge/vhost/add lockdown=1 arms both)",
+		})
+		return
+	}
+	// The arm that changes may be the APEX of the requested www host: a scoped
+	// token must hold it too (as vhost/rung).
+	if target != host && !vhostAllowed(target, scope) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "the arm covering " + host + " is on " + target + ", which is not in scope"})
+		return
+	}
+	_, capped, changed, ok := e.SetManualChallengeLockdownAs(target, ttl, actorFromScope(scope))
+	if !ok {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "the manual challenge on " + target + " expired"})
+		return
+	}
+	// Report the EFFECTIVE lockdown of the host asked about: a www. host stays
+	// locked while its apex's lockdown holds, whatever its own arm says.
+	eff := e.vhostLockdownUntil(host)
+	resp := map[string]interface{}{
+		"host":     target,
+		"lockdown": !eff.IsZero(),
+		"changed":  changed,
+	}
+	if !eff.IsZero() {
+		resp["lockdown_until"] = eff
+		if !*req.Lockdown {
+			apex := strings.TrimPrefix(host, "www.")
+			resp["note"] = host + " stays locked down by the lockdown on " + apex + " (lift it there)"
+		}
+	}
+	if capped {
+		resp["lockdown_capped"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // tierJSON is the effective-tier block the tier-changing endpoints return.
@@ -659,6 +851,9 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	lockUntil := e.vhostLockdownUntil(host)
+	lockUntilJSON := lockdownPtr(lockUntil)
+
 	tier := e.challengeV2VhostTierForScope(host)
 	// An automatic vhost challenge the store never records (uniqpaths_short
 	// writes no row) is still live and still carries a tier: report it as
@@ -685,8 +880,12 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		// pin: the tenant's surfaces hide the pin controls (the write 403s).
 		"rung_pin_locked":   tier.pinLockedFor(vhostScopeFromContext(r.Context())),
 		"rung_unpin_locked": tier.unpinLockedFor(vhostScopeFromContext(r.Context())),
-		"auto_active":       autoActive,
-		"auto_since":        autoSince,
+		// The covering manual arm's LOCKDOWN (vhost_lockdown.go): no client
+		// exemption on this vhost until lockdown_until (null when none).
+		"lockdown":       !lockUntil.IsZero(),
+		"lockdown_until": lockUntilJSON,
+		"auto_active":    autoActive,
+		"auto_since":     autoSince,
 		// Scoped tokens reach the vhost list only through this endpoint, so the
 		// farm mark, the shadow outlier count, the facet cardinality, the cost
 		// pressure, the datacenter fraction and the escalation state have to ride

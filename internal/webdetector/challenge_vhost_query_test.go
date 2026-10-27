@@ -237,7 +237,7 @@ func TestFetchChallengeStatus_ManualShowsRemainingNotClock(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	active, mode, expiry, err := fetchChallengeStatus(ts.URL, "x.gr")
+	active, mode, expiry, lockdown, err := fetchChallengeStatus(ts.URL, "x.gr")
 	if err != nil {
 		t.Fatalf("fetchChallengeStatus: %v", err)
 	}
@@ -250,6 +250,9 @@ func TestFetchChallengeStatus_ManualShowsRemainingNotClock(t *testing.T) {
 	}
 	if d < 33*time.Hour {
 		t.Errorf("remaining = %s, want ~34h (the date must not be dropped)", d)
+	}
+	if lockdown != "" {
+		t.Errorf("no lockdown in the status, got %q", lockdown)
 	}
 }
 

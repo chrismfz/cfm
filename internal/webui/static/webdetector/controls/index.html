@@ -54,8 +54,17 @@
           <button class="btn-quiet" @click="panicUnpin" v-if="panicTierPinned()" :disabled="loading" title="Remove the tier pin: the node default (CHALLENGE_V2_AUTO_VHOST) decides this vhost's automatic tier again">↺ Unpin (auto)</button>
           <button class="btn-quiet" @click="panicDisarm" :disabled="loading || !(panicStatus && panicStatus.manual_active)">Disarm</button>
         </div>
+        <div class="toolbar wrap" :title="lockdownHelp">
+          <label>Lockdown</label>
+          <select class="input" v-model="panicLockdownTTL" :disabled="panicLockdownOn()">
+            <option v-for="c in lockdownTTLChoices" :key="c.value" :value="c.value">{{ c.label }}</option>
+          </select>
+          <button :class="panicLockdownOn() ? 'btn-quiet' : 'btn-danger'" @click="panicLockdownToggle" :disabled="loading || !panicHost">{{ panicLockdownOn() ? 'Lift lockdown' : '⛔ Lockdown (no exemptions)' }}</button>
+          <span class="muted">Nothing gets past the challenge — crawlers and verified bots too (they can't solve it). For a crawler storm; ends on its own, at most 6h.</span>
+        </div>
         <p class="statusline" v-if="panicMsg">{{ panicMsg }}</p>
         <p class="muted" v-if="panicStatus" :title="panicStatusTitle()">{{ panicStatusLine() }}</p>
+        <p class="statusline" v-if="panicLockdownOn()" :title="lockdownHelp"><strong>⛔ {{ panicLockdownLine() }}</strong> — no client exemption on {{ panicHost }}: crawlers, verified bots and excluded clients all get the challenge.</p>
       </section>
 
       <!-- 1. Security Overview -->
@@ -159,6 +168,7 @@
                   <button :class="row.under_attack ? 'btn-danger' : 'btn-quiet'" @click="toggleUnderAttack(row)" :disabled="loading || !row.under_attack_toggleable" :title="underAttackButtonTitle(row)">{{ row.under_attack ? '🚨 UNDER ATTACK' : 'AUTO' }}</button>
                   <button class="btn-quiet btn-sm" v-if="row.under_attack && row.challenge_rung === 'v2'" @click="selectPanicHost(row.host)" :disabled="loading" :title="rowTierTitle(row)">strict v2 ✓</button>
                   <button class="btn-danger btn-sm" v-if="row.under_attack && row.challenge_rung !== 'v2'" @click="quickStrict(row.host)" :disabled="loading" :title="'Under attack = the plain challenge is being solved. Arm a strict (v2) challenge on this vhost for ' + panicTTL + ' (or switch its existing manual arm to v2, keeping the expiry). Status and Disarm in the Emergency challenge card above.'">→ Strict v2</button>
+                  <button class="btn-danger btn-sm" v-if="rowLockdownLabel(row)" @click="selectPanicHost(row.host)" :disabled="loading" :title="lockdownHelp + ' — click to manage it in the Emergency challenge card above.'">⛔ {{ rowLockdownLabel(row) }}</button>
                 </td>
                 <td>
                   <button :class="vhostControlEnabled(row, 'waf') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading || !vhostControlToggleable(row, 'waf')" :title="vhostControlButtonTitle(row, 'waf')">{{ vhostControlButtonLabel(row, 'waf') }}</button>

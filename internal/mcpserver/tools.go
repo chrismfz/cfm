@@ -288,7 +288,7 @@ func registerChallengeVhosts(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "challenge_vhosts",
-		Description: "Virtual hosts under an interactive challenge (proof-of-work / JS), showing whether each was set manually or automatically by the detector, plus its current state. Answers \"which sites are being challenged and why?\".",
+		Description: "Virtual hosts under an interactive challenge (proof-of-work / JS), showing whether each was set manually or automatically by the detector, plus its current state. A row with lockdown=true (lockdown_until) is a manual challenge in LOCKDOWN: no client exemption at all, so crawlers on the bypass list, verified good bots and exclude-file matches are challenged too, until lockdown_until. Answers \"which sites are being challenged and why?\".",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in challengeVhostsInput) (*mcp.CallToolResult, any, error) {
 		q := url.Values{}
 		setStr(q, "status", in.Status)

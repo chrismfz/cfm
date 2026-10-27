@@ -71,6 +71,12 @@ import (
 // Cost: once per ingested request, outside the engine lock: a bool, one
 // read-locked map hit, then the exclude rules (host / UA first, an mmdb read
 // only for a rule they leave undecided). No DNS, no async work.
+//
+// A vhost LOCKDOWN (vhost_lockdown.go) does not change the count, on purpose:
+// the vhost is already under its manual challenge, and counting the crawlers
+// it holds would arm an automatic challenge (at v2 by default) that outlives
+// the lockdown and keeps the humans challenged after the crawlers are exempt
+// again.
 func (b *NginxBridge) vhostChallengeExemptClient(ip, host, ua string, bypass bool, now time.Time) bool {
 	if bypass {
 		return true

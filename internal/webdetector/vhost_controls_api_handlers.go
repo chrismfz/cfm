@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 type webdetVhostControlRow struct {
@@ -38,6 +39,9 @@ type webdetVhostControlRow struct {
 	ChallengeRung        string `json:"challenge_rung,omitempty"`
 	ChallengeRungSource  string `json:"challenge_rung_source,omitempty"`
 	ChallengeRungTrigger string `json:"challenge_rung_trigger,omitempty"`
+	// ChallengeLockdownUntil: the covering manual arm is in LOCKDOWN (no
+	// client exemption, vhost_lockdown.go) until then; absent = none.
+	ChallengeLockdownUntil *time.Time `json:"challenge_lockdown_until,omitempty"`
 
 	// ClamAV upload-scan (async, notify-only). Effective state is
 	// globallyEnabled && (scanDefault XOR override). ClamEnabled is that
@@ -180,6 +184,7 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 			ChallengeRung:           tier.Rung,
 			ChallengeRungSource:     tier.Source,
 			ChallengeRungTrigger:    tier.Trigger,
+			ChallengeLockdownUntil:  lockdownPtr(e.vhostLockdownUntil(host)),
 		})
 	}
 

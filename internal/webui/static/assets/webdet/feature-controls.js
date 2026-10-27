@@ -13,6 +13,13 @@ import {
   tierTitle,
   tierUnpinRequest,
 } from "./challenge-tier.js";
+import {
+  LOCKDOWN_HELP,
+  LOCKDOWN_TTL_CHOICES,
+  lockdownActive,
+  lockdownLabel,
+  lockdownRequest,
+} from "./challenge-lockdown.js";
 
 export const controlsMixin = {
   data() {
@@ -40,6 +47,11 @@ export const controlsMixin = {
       panicTTL: "1h",  // scoped callers are server-clamped to 24h (ttl_capped)
       panicStatus: null,
       panicMsg: "",
+      // Lockdown (challenge-lockdown.js): no client exemption on the vhost's
+      // challenge — the emergency brake for a crawler storm.
+      panicLockdownTTL: "30m",
+      lockdownTTLChoices: LOCKDOWN_TTL_CHOICES,
+      lockdownHelp: LOCKDOWN_HELP,
     };
   },
 
@@ -330,6 +342,44 @@ export const controlsMixin = {
     },
     panicStatusTitle() {
       return tierTitle(this.panicStatus || {});
+    },
+    panicLockdownOn() {
+      return lockdownActive(this.panicStatus || {});
+    },
+    panicLockdownLine() {
+      return lockdownLabel(this.panicStatus || {});
+    },
+    // Lockdown on / off for the selected vhost (lockdownRequest decides: lift,
+    // lock the manual arm in place, or arm the challenge with the lockdown).
+    async panicLockdownToggle() {
+      const host = String(this.panicHost || "").trim();
+      if (!host) { this.panicMsg = "Pick a vhost first."; return; }
+      // Decide from THIS host's current status: the input's @change refresh is
+      // async, and a stale status (none yet, or the previous host's) would
+      // re-arm an existing manual challenge with the lockdown's shorter TTL.
+      await this.refreshPanicStatus();
+      if (String(this.panicStatus?.host || host).toLowerCase() !== host.toLowerCase()) { this.panicMsg = `Could not read the status of ${host}.`; return; }
+      const on = !this.panicLockdownOn();
+      if (on && !window.confirm(`Lock down ${host}?\n\n${LOCKDOWN_HELP}`)) return;
+      const req = lockdownRequest(host, this.panicStatus || {}, on, this.panicLockdownTTL);
+      try {
+        const res = await this.postJSON(req.path, req.body);
+        if (!on) {
+          this.panicMsg = `Lockdown lifted on ${res?.host || host} — the challenge's usual exemptions apply again`;
+        } else {
+          const until = res?.lockdown_until ? new Date(res.lockdown_until).toLocaleString() : "?";
+          this.panicMsg = `LOCKDOWN on ${res?.host || host} until ${until} — no client exemption, crawlers included` +
+            (res?.lockdown_capped ? " (capped: at most 6h, never past the challenge)" : "") +
+            (req.path.endsWith("/add") ? `; a manual challenge was armed for ${res?.ttl || this.panicLockdownTTL}` : "");
+        }
+        await this.refreshPanicStatus();
+      } catch (err) {
+        this.panicMsg = `Lockdown ${on ? "failed" : "lift failed"} for ${host}: ${err}`;
+        console.error("[cfm-admin] lockdown toggle failed", host, err);
+      }
+    },
+    rowLockdownLabel(row) {
+      return lockdownLabel(row || {});
     },
     async panicArm() {
       const host = String(this.panicHost || "").trim();

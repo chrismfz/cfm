@@ -55,8 +55,9 @@ type LogRec struct {
 	UpstreamName string
 	// Bypass is the edge's $cfm_bypass_ip (log-cfm.lua column 13): the client
 	// is on challenge_waf_bypass.conf, which cfm.lua Step 0 passes before any
-	// challenge. False when the line had no such column (an older module, a
-	// file tailer).
+	// challenge ("1" a crawler, "2" a CDN; a vhost lockdown withdraws only the
+	// "1" kind's, at the edge). False when the line had no such column (an
+	// older module, a file tailer).
 	Bypass bool
 }
 
@@ -87,7 +88,7 @@ func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 	if len(f) >= 13 {
 		upName = f[12]
 	}
-	bypass := len(f) == 14 && f[13] == "1"
+	bypass := len(f) == 14 && (f[13] == "1" || f[13] == "2")
 	ts, _ := strconv.ParseFloat(f[0], 64)
 	st, _ := strconv.Atoi(f[6])
 	by, _ := strconv.ParseInt(f[7], 10, 64)
@@ -467,6 +468,9 @@ type Engine struct {
 	chalRules   []chalRule
 	nginxBridge *NginxBridge // always set (edge mode is the only mode)
 	manualChal  manualChalState
+	// lockdownSync serializes syncVhostLockdowns (snapshot + publish), so two
+	// concurrent lockdown changes cannot leave the older map published.
+	lockdownSync sync.Mutex
 
 	// tierPins: per-host tier pins for AUTOMATIC vhost challenges, and
 	// autoV2Armed: the CHALLENGE_V2_AUTO_VHOST source set — both read by the
@@ -841,6 +845,13 @@ func NewEngine(cfg Config) *Engine {
 		})
 	} else {
 		SetChallengeV2GoodBot(nil)
+	}
+	// A vhost in lockdown waives no good bot at verify either.
+	if e.nginxBridge != nil {
+		br := e.nginxBridge
+		SetChallengeV2Lockdown(func(host string) bool { return br.vhostLockedDown(host, time.Now()) })
+	} else {
+		SetChallengeV2Lockdown(nil)
 	}
 
 	return e
@@ -1387,6 +1398,9 @@ func (e *Engine) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// (Without this, snapshots can look "stuck" until traffic resumes.)
 	now := time.Now()
 	e.pruneShort(now)
+	// Republish the lockdowns every tick: a www. arm that lapses on its own
+	// hands its host back to the apex's lockdown, and nothing else notices.
+	e.syncVhostLockdowns()
 
 	// Prune unbounded emit/cooldown maps periodically.
 	// Rate-limited to once per long-horizon interval to keep cost negligible.

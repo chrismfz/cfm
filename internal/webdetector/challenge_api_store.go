@@ -51,6 +51,11 @@ type ChallengeVhostState struct {
 	// RungUnpinLocked: the CALLER (a scoped token) may not clear the covering
 	// pin — not its pin, or set on an apex outside its scope.
 	RungUnpinLocked bool `json:"rung_unpin_locked,omitempty"`
+	// Lockdown / LockdownUntil: the covering manual arm is in LOCKDOWN (no
+	// client exemption, vhost_lockdown.go) until LockdownUntil. Decorated at
+	// render time (decorateLockdown), never stored.
+	Lockdown      bool       `json:"lockdown,omitempty"`
+	LockdownUntil *time.Time `json:"lockdown_until,omitempty"`
 
 	Score     float64  `json:"score"`
 	OnThresh  float64  `json:"on_threshold"`

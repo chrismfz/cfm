@@ -91,9 +91,15 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop challenge            # active vhost challenge list")
 	fmt.Println("  cfm webtop challenge host <H>   # vhost details + recent events")
 	fmt.Println("  cfm webtop challenge events [N] # last N challenge events")
-	fmt.Println("  cfm webtop challenge add <H> [--ttl 30m] [--rung v2]  # manually challenge a vhost (v2 = humanity-gated verify)")
+	fmt.Println("  cfm webtop challenge add <H> [--ttl 30m] [--rung v2] [--lockdown [--lockdown-ttl 30m]]  # manually challenge a vhost (v2 = humanity-gated verify)")
 	fmt.Println("  cfm webtop challenge remove <H>           # remove manual challenge")
-	fmt.Println("  cfm webtop challenge status <H>           # check challenge status")
+	fmt.Println("  cfm webtop challenge status <H>           # check challenge status (incl. lockdown)")
+	fmt.Println("  cfm webtop challenge lockdown <H> on|off [--ttl 30m]  # LOCKDOWN on a manually challenged vhost (below)")
+	fmt.Println("      LOCKDOWN = nothing gets past the vhost challenge: no crawler bypass (Google, Bing, Apple,")
+	fmt.Println("      DuckDuckGo, Skroutz...), no verified good bot, no exclude-file or Access-Control exemption.")
+	fmt.Println("      Crawlers cannot solve a challenge, so they are shut out of that vhost; people solve it as usual.")
+	fmt.Println("      Still pass: CDN fetchers (QUIC.cloud), /.well-known/ (SSL), webhook endpoints, the server itself,")
+	fmt.Println("      IGNORE_IPS, clients already cleared. Default 30m, at most 6h (SEO), never past the challenge.")
 	fmt.Println("  cfm webtop challenge tier [list]          # tier pins on automatic challenges")
 	fmt.Println("  cfm webtop challenge tier <H> v1|v2|auto [--ttl 24h]  # pin an automatic challenge's tier (v1 = emergency drop back)")
 	fmt.Println("  cfm webtop challenge exclude list")
@@ -1261,6 +1267,9 @@ func runChallengeWebTop(baseURL string, args []string) error {
 	if len(args) > 0 && args[0] == "tier" {
 		return runChallengeTier(baseURL, args[1:])
 	}
+	if len(args) > 0 && args[0] == "lockdown" {
+		return runChallengeLockdown(baseURL, args[1:])
+	}
 	if len(args) > 0 && args[0] == "exclude" {
 		return runChallengeExclude(baseURL, args[1:])
 	}
@@ -1539,13 +1548,15 @@ func runAttackStatus(baseURL string) error {
 // runChallengeAdd handles: cfm webtop challenge add <vhost> [--ttl 30m] [--reason manual] [--rung v2]
 func runChallengeAdd(baseURL string, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cfm webtop challenge add <vhost> [--ttl 30m] [--reason text] [--rung v1|v2]")
+		return fmt.Errorf("usage: cfm webtop challenge add <vhost> [--ttl 30m] [--reason text] [--rung v1|v2] [--lockdown[=on|off]] [--lockdown-ttl 30m]")
 	}
 
 	host := args[0]
 	ttlStr := "30m"
 	reason := "manual"
 	rung := ""
+	lockdown := ""    // "" = keep the arm's lockdown, "1" on, "0" off
+	lockdownTTL := "" // "" = the default (30m)
 
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
@@ -1567,6 +1578,16 @@ func runChallengeAdd(baseURL string, args []string) error {
 			}
 			rung = args[i+1]
 			i++
+		case "--lockdown":
+			lockdown = "1"
+		case "--no-lockdown":
+			lockdown = "0"
+		case "--lockdown-ttl":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--lockdown-ttl requires a value (e.g. 30m)")
+			}
+			lockdownTTL = args[i+1]
+			i++
 		default:
 			if strings.HasPrefix(args[i], "--ttl=") {
 				ttlStr = strings.TrimPrefix(args[i], "--ttl=")
@@ -1574,12 +1595,30 @@ func runChallengeAdd(baseURL string, args []string) error {
 				reason = strings.TrimPrefix(args[i], "--reason=")
 			} else if strings.HasPrefix(args[i], "--rung=") {
 				rung = strings.TrimPrefix(args[i], "--rung=")
+			} else if strings.HasPrefix(args[i], "--lockdown-ttl=") {
+				lockdownTTL = strings.TrimPrefix(args[i], "--lockdown-ttl=")
+			} else if strings.HasPrefix(args[i], "--lockdown=") {
+				lockdown = strings.TrimPrefix(args[i], "--lockdown=")
 			}
 		}
 	}
 
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/add?host=%s&ttl=%s&reason=%s&rung=%s",
 		baseURL, url.QueryEscape(host), url.QueryEscape(ttlStr), url.QueryEscape(reason), url.QueryEscape(rung))
+	// --lockdown-ttl alone implies --lockdown; with --no-lockdown it is moot
+	// (whatever the flag order).
+	if lockdownTTL != "" && lockdown == "" {
+		lockdown = "1"
+	}
+	if lockdown == "0" {
+		lockdownTTL = ""
+	}
+	if lockdown != "" {
+		u += "&lockdown=" + url.QueryEscape(lockdown)
+	}
+	if lockdownTTL != "" {
+		u += "&lockdown_ttl=" + url.QueryEscape(lockdownTTL)
+	}
 	resp, err := clihttp.Post(u, "application/json", nil)
 	if err != nil {
 		return err
@@ -1597,6 +1636,7 @@ func runChallengeAdd(baseURL string, args []string) error {
 
 	fmt.Printf("✓ Challenge active for %s  ttl=%s  expires=%s  reason=%s  rung=%v\n",
 		result["host"], result["ttl"], result["expires_at"], result["reason"], result["rung"])
+	printLockdownLine(result)
 	// A manual v1 arm does not downgrade an automatic v2: say what the solves
 	// are actually held to when it differs from the arm's own rung.
 	if tier, ok := result["tier"].(map[string]interface{}); ok {
@@ -1687,6 +1727,87 @@ func runChallengeStatus(baseURL string, args []string) error {
 	trigger, _ := result["rung_trigger"].(string)
 	pin, _ := result["rung_pin"].(string)
 	fmt.Printf("  tier:    %s\n", tierDescription(rung, source, trigger, pin))
+	printLockdownLine(result)
+	return nil
+}
+
+// printLockdownLine reports an add / lockdown response's lockdown state.
+func printLockdownLine(result map[string]interface{}) {
+	on, _ := result["lockdown"].(bool)
+	if !on {
+		fmt.Println("  lockdown: off")
+		return
+	}
+	until, _ := result["lockdown_until"].(string)
+	left := "-"
+	if t, err := time.Parse(time.RFC3339, until); err == nil {
+		left = leftDuration(t)
+	}
+	capped := ""
+	if c, _ := result["lockdown_capped"].(bool); c {
+		capped = "  (capped: at most 6h, never past the challenge)"
+	}
+	fmt.Printf("  LOCKDOWN ON until=%s left=%s — no client exemption on this vhost (crawlers too)%s\n", until, left, capped)
+	if note, _ := result["note"].(string); note != "" {
+		fmt.Printf("  note: %s\n", note)
+	}
+}
+
+// runChallengeLockdown handles: cfm webtop challenge lockdown <vhost> on|off [--ttl 30m]
+// It switches the lockdown of the manual challenge covering the vhost in place
+// (POST /api/v1/challenge/vhost/lockdown); with no manual challenge it says
+// how to arm one with the lockdown (add --lockdown).
+func runChallengeLockdown(baseURL string, args []string) error {
+	usage := fmt.Errorf("usage: cfm webtop challenge lockdown <vhost> on|off [--ttl 30m]")
+	if len(args) < 2 {
+		return usage
+	}
+	host := args[0]
+	var on string
+	switch strings.ToLower(args[1]) {
+	case "on", "1", "true":
+		on = "1"
+	case "off", "0", "false":
+		on = "0"
+	default:
+		return usage
+	}
+	ttl := ""
+	for i := 2; i < len(args); i++ {
+		switch {
+		case args[i] == "--ttl" || args[i] == "-t":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--ttl requires a value")
+			}
+			ttl = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--ttl="):
+			ttl = strings.TrimPrefix(args[i], "--ttl=")
+		default:
+			return fmt.Errorf("unknown option %q", args[i])
+		}
+	}
+	u := fmt.Sprintf("%s/api/v1/challenge/vhost/lockdown?host=%s&lockdown=%s", baseURL, url.QueryEscape(host), on)
+	if ttl != "" {
+		u += "&ttl=" + url.QueryEscape(ttl)
+	}
+	resp, err := clihttp.Post(u, "application/json", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	if errMsg, ok := result["error"].(string); ok {
+		if resp.StatusCode == http.StatusConflict && on == "1" {
+			return fmt.Errorf("%s\n  arm it with the lockdown: cfm webtop challenge add %s --lockdown", errMsg, host)
+		}
+		return fmt.Errorf("challenge lockdown error: %s", errMsg)
+	}
+	fmt.Printf("✓ %s\n", result["host"])
+	printLockdownLine(result)
 	return nil
 }
 

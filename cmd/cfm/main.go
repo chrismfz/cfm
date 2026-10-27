@@ -465,6 +465,9 @@ Usage:
   cfm firewall path [--hook prerouting] [--family inet] [--proto tcp] [--dport 443] [--json] [--strict]
 
   cfm webtop  <vhost> -- Live stats for specific vhost
+  cfm webtop challenge add <vhost> [--ttl 30m] [--lockdown]  -- manually challenge a vhost; see "cfm webtop help"
+  cfm webtop challenge lockdown <vhost> on|off [--ttl 30m]  -- LOCKDOWN: no exemptions at all (crawlers/good bots
+                                    too) on a challenged vhost, for a crawler storm; 30m default, 6h max
   cfm bots             -- Webtop for bots only (UA-keyed, box-wide throttle/block); see "cfm bots help"
   cfm mysqltop -- MySQL Live stats
   cfm health                      -- local-node health summary (federation view planned)
