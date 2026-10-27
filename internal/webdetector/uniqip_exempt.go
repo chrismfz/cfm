@@ -42,20 +42,31 @@ import (
 //
 // It errs toward COUNTING wherever it cannot match the edge cheaply, never
 // the other way, so a client the edge would challenge is always counted:
-//   - the good-bot check reads the cache only, and only a fresh positive
-//     verdict counts (the edge also serves a stale one while it re-verifies).
-//     It never starts a verify: the edge verifies a crawler once a challenge
-//     is on (and Google, Bing and Apple are on the bypass list anyway), so an
-//     unverified crawler is counted until then. Every ingested request runs
-//     this, so a spoofed crawler UA must not buy a reverse lookup;
+//   - the good-bot check reads the cache only and never starts a verify: the
+//     edge verifies a crawler once a challenge is on (and Google, Bing and
+//     Apple are on the bypass list anyway), so an unverified crawler is
+//     counted until then. Every ingested request runs this, so a spoofed
+//     crawler UA must not buy a reverse lookup. A stale positive (expired,
+//     within goodBotIPStaleGrace) still exempts, as the edge serves it: the
+//     edge refreshes verdicts only while it serves a challenge, so a
+//     fresh-only check would count a verified crawler again ~30 min after
+//     the challenge it caused went off, re-arm it, and flap;
 //   - the exclude matcher gets the ASN from the local mmdb and NO PTR: the
 //     enricher has no cache-only PTR read (a miss starts a reverse lookup),
 //     so a ptr= rule never exempts here;
 //   - not mirrored at all: Challenge Access-Control entries and the
 //     challenge-exempt endpoints, which exempt by path, country or method as
 //     well as by client (a client exempt on one path is challenged on others);
-//   - InjectObserved (a WAF hit re-fed to the engine) bumps ips but never
-//     ipsExempt, so an exempt client that trips the WAF counts.
+//   - only the socket carries the bypass flag: when the arbiter falls back
+//     to a file tailer, bypass-listed clients count again (the pre-2026-10-27
+//     count), until the socket is back.
+//
+// InjectObserved (a WAF hit re-fed to the engine) applies the same check, so
+// an exempt client stays exempt when it trips the WAF.
+//
+// A third mirror of handleDecision's client exemptions, beside
+// challengePageExempt: a change to the good-bot or exclude-file blocks there
+// changes this too.
 //
 // Cost: once per ingested request, outside the engine lock: a bool, one
 // read-locked map hit, then the exclude rules (host / UA first, an mmdb read
@@ -68,7 +79,7 @@ func (b *NginxBridge) vhostChallengeExemptClient(ip, host, ua string, bypass boo
 		return false
 	}
 	if b.goodBotExempt && b.goodBot != nil && b.enr != nil {
-		if l, fresh := b.goodBot.cached(ip, now); fresh && l.name != "" {
+		if l, fresh := b.goodBot.cached(ip, now); (fresh && l.name != "") || l.stale != "" {
 			return true
 		}
 	}

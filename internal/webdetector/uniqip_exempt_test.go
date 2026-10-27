@@ -98,11 +98,17 @@ func TestVhostChallengeExemptClient(t *testing.T) {
 		}
 	}
 
-	// A stale positive (expired, inside the edge's grace) counts: the edge may
-	// drop it on re-verify, and the count side never re-verifies.
+	// A stale positive (expired, inside the edge's grace) still exempts, as
+	// the edge serves it: the edge refreshes verdicts only while it serves a
+	// challenge, so a fresh-only count would re-arm the challenge ~30 min
+	// after it went off. Past the grace it counts.
 	b.goodBot.store("66.249.66.9", "googlebot", now.Add(-goodBotIPPosTTL-time.Minute))
-	if b.vhostChallengeExemptClient("66.249.66.9", "shop.gr", "mozilla/5.0 (compatible; googlebot/2.1)", false, now) {
-		t.Error("a stale good-bot verdict must not exempt")
+	if !b.vhostChallengeExemptClient("66.249.66.9", "shop.gr", "mozilla/5.0 (compatible; googlebot/2.1)", false, now) {
+		t.Error("a stale good-bot verdict inside the grace must exempt")
+	}
+	b.goodBot.store("66.249.66.10", "googlebot", now.Add(-goodBotIPPosTTL-goodBotIPStaleGrace-time.Minute))
+	if b.vhostChallengeExemptClient("66.249.66.10", "shop.gr", "mozilla/5.0 (compatible; googlebot/2.1)", false, now) {
+		t.Error("a verdict past the stale grace must not exempt")
 	}
 	// The count side never asks the enricher for a PTR (no reverse lookup):
 	// a ptr= rule cannot match, so its client counts.
@@ -158,7 +164,7 @@ func TestUniqIPExemptCount(t *testing.T) {
 			return LogRec{TS: t0 + float64(n%90), IP: ip, Host: "www.trimel.gr", Method: "get", URI: "/", Status: 200, UA: ua, Bypass: bypass}
 		}
 		e.ingest(rec("66.249.66.1", "mozilla/5.0 (compatible; googlebot/2.1)", false), "raw") // verified good bot
-		for i := 0; i < 300; i++ { // Applebot through the exclude file
+		for i := 0; i < 300; i++ {                                                            // Applebot through the exclude file
 			e.ingest(rec(fmt.Sprintf("17.166.%d.%d", i/250, i%250+1), "mozilla/5.0 (applebot/0.1)", false), "raw")
 		}
 		for i := 0; i < 50; i++ { // a bypass-listed crawler range
@@ -181,5 +187,28 @@ func TestUniqIPExemptCount(t *testing.T) {
 		if m.UniqueIPs != want {
 			t.Errorf("exempt=%v: UniqueIPs = %d, want %d", on, m.UniqueIPs, want)
 		}
+	}
+}
+
+// TestUniqIPExemptInjectObserved: a WAF hit re-fed through InjectObserved
+// applies the same exemption, so an exempt crawler that trips the WAF stays
+// out of the count while a human who does still counts.
+func TestUniqIPExemptInjectObserved(t *testing.T) {
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, ChallengeSuspiciousUniqIPExempt: true})
+	ab := appleExcludeBridge(t)
+	e.nginxBridge.chalExcludeASNFn = ab.chalExcludeASNFn
+	e.nginxBridge.ChalExcludeHot = ab.ChalExcludeHot
+
+	ts := float64(time.Now().Unix())
+	e.ingest(LogRec{TS: ts, IP: "17.166.20.62", Host: "shop.gr", Method: "get", URI: "/", Status: 200, UA: "mozilla/5.0 (applebot/0.1)"}, "raw")
+	e.InjectObserved("17.166.20.62", "shop.gr", "/?x=<script>", "GET", 403, "WAF_XSS", 302, "Mozilla/5.0 (Applebot/0.1)")
+	e.ingest(LogRec{TS: ts, IP: "79.129.88.110", Host: "shop.gr", Method: "get", URI: "/", Status: 200, UA: "mozilla/5.0"}, "raw")
+	e.InjectObserved("79.129.88.110", "shop.gr", "/?x=<script>", "GET", 403, "WAF_XSS", 302, "Mozilla/5.0")
+
+	e.mu.Lock()
+	m := e.snapshotMiniLocked(time.Now())["shop.gr"]
+	e.mu.Unlock()
+	if m.UniqueIPs != 1 {
+		t.Errorf("UniqueIPs = %d, want 1 (the human; Apple stays exempt through its WAF hit)", m.UniqueIPs)
 	}
 }

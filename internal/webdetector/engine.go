@@ -3539,6 +3539,11 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 		URI:    p,
 		Status: status,
 	}
+	// The same vhost uniqIP exemption as ingest (no bypass flag here: a
+	// bypass-listed client skips the WAF), or a WAF hit would make an exempt
+	// client count.
+	exempt := e.cfg.ChallengeSuspiciousUniqIPExempt &&
+		e.nginxBridge.vhostChallengeExemptClient(ip, host, strings.ToLower(strings.TrimSpace(ua)), false, now)
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -3596,6 +3601,12 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 		b.ips = make(map[string]int)
 	}
 	b.ips[ip]++
+	if exempt {
+		if b.ipsExempt == nil {
+			b.ipsExempt = make(map[string]int)
+		}
+		b.ipsExempt[ip]++
+	}
 	// Dynamic-only mirror for Signal C (a 403 is a dynamic response; static
 	// assets almost never 403, but gate anyway for parity with the main ingest).
 	// Only maintained when the shadow signal that reads it is enabled.
