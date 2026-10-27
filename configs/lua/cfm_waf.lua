@@ -251,6 +251,8 @@ local CFG = {
   rule_cve_php_multipart_no_length = "block", -- CVE-2026-109618, the fourth shape: a multipart POST with no Content-Length (NO_CL) that nginx streams to the origin as it is (cfm.lua no_body_length: a body the edge never read — a failed HTTP/3 read, a streaming path off the body allowlist; a body read in full first goes upstream with a real Content-Length). Edge block, autoblock held per rule (RULE_10022 = 0): a non-browser client that streams multipart chunked (Go io.Pipe, curl -F f=@-, Java chunked mode) sends the same shape, and a 6h ban of it (and its NAT) is the wrong answer. Runs late, with 10019/10020, so the held hit cannot take the ban from an armed rule.
   rule_cve_php_upload_progress = "block", -- CVE-2026-109619 (GHSA-6wmf-4rv5-p3rp) as PHP2Shell exploits it: a multipart field (or file part) named PHP_SESSION_UPLOAD_PROGRESS, any case, with neither a same-site Referer nor a same-site Origin (NO_REFERER / XSITE), or with one but no same-site Sec-Fetch-Site (NO_FETCH_METADATA: the scanner forged a same-site Referer here): block; a browser's own upload-progress form sends all three (SAME_SITE) and is logonly. Source: Imunify360 ruleset 8.85 (77866818 / 77236259), which caught the tool on this fleet on 2026-10-21 after it passed the edge; Origin and Fetch Metadata are our additions (a browser sends both on a POST; under Referrer-Policy: no-referrer the Origin is "null", which with Sec-Fetch-Site same-origin is SAME_SITE; Sec-Fetch-Site same-site also accepts a www./sibling host). The name is read from the multipart parse (PHP joins a name split across header lines). Armed: a scanner hitting many sites is what it bans. Runs in step 0 after 10021 and is enforced in the body burn-in (cfm.lua BURNIN_ENFORCE_IDS). Not a substitute for session.upload_progress.enabled = 0 and the PHP update.
   rule_cve_php2shell_tool = "block", -- CVE-2026-109618/109619, the public PHP2Shell tool by its request head: User-Agent `php2shell-...` (seen here as php2shell-scanner) or one of its multipart boundaries (B7kQpoc61N, UctxPoc20NN, -*nphp618/619, *php2shell). Source: Imunify360 ruleset 8.85 rule 77318849 and this fleet's edge logs. Armed; header-only, so it holds on the panel ports too. A renamed tool passes.
+  rule_cve_pixelyoursite_xss = "block", -- CVE-2026-1844 / CVE-2026-1841 / CVE-2026-109987: PixelYourSite (free < 11.4.3, PRO < 12.6.8) unauth stored XSS. On a Store API checkout the plugin stores its traffic-source, landing-page and UTM values in the WooCommerce order unescaped, and the order screen prints them, so the admin who opens the order runs the attacker's script (tophair.gr 2026-10-06: fake plugin + two admins in 15 s; ~100 planted orders on 16 fleet shops from 2026-02-13). This rule reads only the plugin's own cookies (pysTrafficSource, pys_landing_page, pys_utm_* and last_ twins): executable markup (a script/iframe/object/embed/meta/base element, or any element with an event handler, srcdoc or javascript:), a landing value whose inner quote opens a handler attribute, or a javascript:/vbscript:/data: landing URL. A bare `<`/`>` or a placeholder such as `<campaign_name>` does not count. Armed: no other software sends these names, and a ban stops the bot before its checkout. Repeated Cookie headers are also read as Apache merges them.
+  rule_cve_pixelyoursite_session_xss = "block", -- CVE-2026-1844 / -1841 / -109987, the session copies PixelYourSite fills on a session's first request: the raw request path (landing page), the host parse_url takes from the Referer (traffic source) and the utm_* query fields (UTMs), with the same executable-markup / attribute-breakout tests as 10025. These are request parts every site sees, so a scanner or link checker can trip them without the plugin: edge 403 only, autoblock held per rule (HoldAutoblock, RULE_10026 = 0). Runs late with the other held rules.
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
 
   -- [top-4]  Upload controls
@@ -677,6 +679,8 @@ local RULE_IDS = {
   rule_cve_php_multipart_no_length = 10022,
   rule_cve_php2shell_tool = 10023,
   rule_cve_php_upload_progress = 10024,
+  rule_cve_pixelyoursite_xss = 10025,
+  rule_cve_pixelyoursite_session_xss = 10026,
   rule_cve_wp_pagename_traversal = 10017,
   rule_cve_translatepress_reset_preview = 10018,
   rule_cve_translatepress_reset_preview_authed = 10020,
@@ -1119,6 +1123,23 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2024_28000:LITESPEED_CACHE:" .. tag, ttl, mode, RULE_IDS.rule_cve_litespeed_hash_privesc) then goto done end
+      end
+    end
+  end
+
+  -- ── 3b2) PixelYourSite stored XSS (CVE-2026-1844 / -1841 / -109987) ───────
+  -- Cookie-based + all-methods like 3b: the payload rides in the
+  -- PixelYourSite cookies on every request of the bot's session, so the first
+  -- one is refused, before the Store API checkout that would plant it in an
+  -- order. The session-copy legs (path, Referer host, utm_* query; 10026,
+  -- ban held) run late with the held rules.
+  do
+    local mode = rule_mode(CFG.rule_cve_pixelyoursite_xss, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_pixelyoursite_xss(cookie, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_1844:PIXELYOURSITE:" .. tag, ttl, mode, RULE_IDS.rule_cve_pixelyoursite_xss) then goto done end
       end
     end
   end
@@ -2499,6 +2520,20 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_109618:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_multipart_no_length) then goto done end
+      end
+    end
+  end
+
+  -- PixelYourSite session copies (rule 10026, CVE-2026-1844): raw path,
+  -- Referer host, utm_* query. Not specific to the plugin, so the ban is held
+  -- in code and it runs here with the other held block rules.
+  do
+    local mode = rule_mode(CFG.rule_cve_pixelyoursite_session_xss, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_pixelyoursite_session_xss(raw_uri, headers, args)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_1844:PIXELYOURSITE:" .. tag, ttl, mode, RULE_IDS.rule_cve_pixelyoursite_session_xss) then goto done end
       end
     end
   end

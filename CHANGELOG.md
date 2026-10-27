@@ -17,7 +17,32 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+- **New WAF CVE rules 10025 (block, autoblock armed) and 10026 (block, ban
+  held): PixelYourSite stored XSS (CVE-2026-1844 / CVE-2026-1841 /
+  CVE-2026-109987).** Older PixelYourSite and PixelYourSite PRO releases
+  store the traffic source, landing page and UTM values of a Store API
+  checkout in the WooCommerce order and print them unescaped in the order
+  screen. A bot places a cheap order with a `<script src=…>` cookie, and the
+  script runs in the browser of the staff member who opens the order. On
+  tophair.gr it uploaded a fake plugin and created two administrators within
+  15 seconds (2026-10-06). The fleet holds about 100 such planted orders on
+  16 shops, from 2026-02-13 (the day CVE-2026-1844 was published) to
+  2026-10-10; no WAF rule read cookie values. Rule 10025 refuses executable
+  markup (a script, iframe, object, embed, meta or base element, or any
+  element with an event handler, `srcdoc` or `javascript:`) in the
+  PixelYourSite traffic-source, landing-page and UTM cookies, plus a
+  landing-page value that breaks out of its `href` or carries a
+  `javascript:`, `vbscript:` or `data:` URL, and bans the source for 6 h
+  with a `WAF/CVE-2026-1844` alert. Rule 10026 refuses the same markup in
+  the request path, the Referer's host and `utm_*` query fields, which the
+  plugin copies into the session; any site sees those, so it only blocks,
+  without a ban or alert. A campaign named "Retargeting > 30 days", a
+  `<b>` or an unfilled `<campaign_name>` placeholder does not count; a
+  7-day replay of every server's edge log found 10026 hits only from an XSS
+  scanner. They stop new orders only: payloads already stored need a
+  database clean-up, and the plugin still needs updating (free 11.4.3, PRO
+  12.6.8).
 
 ## 2026.10.24
 
