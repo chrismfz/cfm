@@ -123,7 +123,9 @@ linchpin of the whole design.
   → thousands of /24s). The Meta /24 (`57.141.20.0/24`) is a **single** subnet →
   correctly NOT a "farm"; it is the CHALLENGE_SUBNET path (+ good-bot exemption),
   a complementary detector. **Do not lower solver_farm thresholds** — it will
-  fire when a real many-subnet flood is live.
+  fire when a real many-subnet flood is live. *(Superseded 2026-10-27: the
+  defaults are now 180s / 30 / 15, re-measured on the fleet; see
+  `docs/DETECTORS.md` and `solverfarm.DefaultWindow`.)*
 
 ### Finding 4 — a live false positive to fix regardless
 

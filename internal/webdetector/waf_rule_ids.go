@@ -84,6 +84,11 @@ var wafRuleIDs = []WAFRule{
 	// Logonly through burn-in: visibility for stored XSS posted in a form
 	// field, which 302 (path + query) never read.
 	{ID: 330, Name: "rule_xss_body", ReasonFamily: "WAF_XSS_BODY", DefaultMode: "logonly"},
+	// A shell command in the args or body that writes an executable file
+	// into the site (wget/curl -O x.php, … > x.php) or backdates one
+	// (touch -d): the webshell terminal of tophair.gr, which 310-317 (query
+	// only) never read. Logonly through burn-in.
+	{ID: 331, Name: "rule_shell_write_exec", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
 	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "challenge_v2"},
 	{ID: 304, Name: "rule_b64_injection", ReasonFamily: "WAF_B64_INJECT", DefaultMode: "challenge_v2"},
 	{ID: 305, Name: "rule_php_wrappers", ReasonFamily: "WAF_PHP_WRAPPER", DefaultMode: "block"},
@@ -145,6 +150,13 @@ var wafRuleIDs = []WAFRule{
 	// 5xx auth abuse
 	{ID: 501, Name: "rule_auth_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge_v2"},
 	{ID: 502, Name: "rule_auth_wp_checks", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge_v2"},
+	// A logged-in WordPress privileged action (create user, change role,
+	// upload or activate a plugin, upload a theme, edit a file) that did not
+	// come from its own form: a stored XSS driving an administrator's browser
+	// (tophair.gr, 2026-10-06).
+	// Logonly through burn-in. The IP is the victim's: a block promotion must
+	// set HoldAutoblock.
+	{ID: 503, Name: "rule_wp_admin_cross_screen", ReasonFamily: "WAF_ADMIN_XSCREEN", DefaultMode: "logonly"},
 	{ID: 510, Name: "rule_xmlrpc_multicall", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	// 511: every pingback.ping is a 403, but its ban is held: WordPress itself
 	// sends one when a post links to our site, and at threshold 1 that banned

@@ -92,6 +92,7 @@ local CFG = {
                                        -- user's solve still passes — absence
                                        -- never convicts, D5b).
   rule_xss_body        = "logonly",      -- explicit markup in a POST body (attribute breakout `" onmouseover=`, `<script` tag, a tag carrying an event handler; `javascript:` dropped 2026-10-24, it was 99.8% of the hits and all noise), not with a WordPress login cookie or an Authorization header, or on /wp-admin/ (not admin-ajax / admin-post), /administrator/, LHC's /site_admin/ or a cPanel /cpsess<N>/ path on a cpanel./whm./webmail. host. Visibility only: rule 302 reads the path and query, and a stored-XSS payload in a form field (LHC's chat email field, 2026-10-22) passed unseen. Logonly through burn-in; page builders and editors post markup legitimately.
+  rule_shell_write_exec = "logonly",  -- rule 331: a shell command in the args OR body that writes an executable file into the site (wget/curl -O x.php, curl -O of a .php URL, echo|base64 -d|cat … > x.php) or backdates one (touch -d/-t/-r). Rules 310-317 read the query only: the tophair.gr webshell terminal (/?dark&term=1, 2026-10-08) POSTed exactly these and nothing matched. Logonly through burn-in (a tutorial pasted into a comment could carry one); family WAF_RCE.
   rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
   rule_sqli_blind_lexical = "block", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted challenge→block 2026-08-23 after expanded fleet burn-in; prior 188/188 TP, 0 FP review (docs/waf.md)
   rule_sqli_union_variant = "challenge_v2",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; promoted logonly→challenge 2026-08-23, challenge→challenge_v2 2026-09-23 (pure sqlmap-style attack traffic; solves get the Rung-1 humanity gate) — docs/waf.md
@@ -118,6 +119,7 @@ local CFG = {
   rule_auth_wp_checks     = "challenge_v2", -- HEAD wp-login (qualified/repeated), no UA+Referer POST wp-login
                                          -- rollout: start this rule in "logonly" to baseline HEAD noise,
                                          -- then promote to "challenge" after validating logs.
+  rule_wp_admin_cross_screen = "logonly", -- rule 503: a logged-in WordPress privileged action (the user screens incl. users.php's GET role change, update.php upload-plugin/upload-theme, plugin activation, the admin-ajax file editor and plugin install/activate, REST writes to /wp/v2/users and /wp/v2/plugins) that did not come from its own form: a same-host Referer from another screen or the front end, Fetch Metadata of a script (fetch/XHR, iframe), cross-site, or a navigation no click started; and a GET of a nonce-bearing screen by fetch/XHR or into an iframe. The stored-XSS kill chain of tophair.gr (2026-10-06): the order screen's script created an administrator and uploaded a backdoor plugin from staff's own browser. Logonly through burn-in; the IP is the victim's, so a block promotion must hold the autoblock (HoldAutoblock).
   rule_xmlrpc_multicall   = "block", -- system.multicall in XML-RPC body
   rule_xmlrpc_pingback    = "block", -- pingback.ping in XML-RPC body. Edge 403 only: autoblock held in code (RULE_511 = 0), WordPress's own pingback client sends it. Recorded late, after the armed families.
   rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
@@ -572,6 +574,7 @@ local RULE_IDS = {
   rule_superglobal_override    = 318,
   rule_xss                     = 302,
   rule_xss_body                = 330,
+  rule_shell_write_exec        = 331,
   rule_js_proto                = 303,
   rule_b64_injection           = 304,
   rule_php_wrappers            = 305,
@@ -628,6 +631,7 @@ local RULE_IDS = {
   -- 5xx auth abuse
   rule_auth_burst              = 501,
   rule_auth_wp_checks          = 502,
+  rule_wp_admin_cross_screen   = 503,
   rule_xmlrpc_multicall        = 510,
   rule_xmlrpc_pingback         = 511,
   rule_xmlrpc_post_burst       = 512,
@@ -2474,6 +2478,20 @@ local function check_impl(ctx, st)
     end
   end
 
+  -- ── 60c) Shell command writing an executable file (331, logonly) ─────────
+  -- Late, beside 330, for the same headline reason: a webshell's terminal
+  -- post also trips the dropper / backdoor scanners above, which keep it.
+  do
+    local mode = rule_mode(CFG.rule_shell_write_exec, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_shell_write_exec(get_norm_ab())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_RCE:SHELL_" .. tag, ttl, mode, RULE_IDS.rule_shell_write_exec) then goto done end
+      end
+    end
+  end
+
   -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018-10020) ──
   -- Placed after every armed block-tier family, next to traversal, for the
   -- same reason: 10019 and 10020 block at the edge but their autoblock is
@@ -2620,6 +2638,23 @@ local function check_impl(ctx, st)
     end
   end
 
+  -- ── WordPress privileged action from another screen (503, logonly) ──────
+  -- A request-context rule: the payload is the admin's own session, so
+  -- nothing earlier sees it (det.detect_wp_admin_cross_screen). Last but 612,
+  -- after every armed block-tier rule: its block promotion must hold the
+  -- autoblock (the IP is the victim's), and a held block evaluated earlier
+  -- would take the headline and end evaluation before an armed rule's ban.
+  do
+    local mode = rule_mode(CFG.rule_wp_admin_cross_screen, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_wp_admin_cross_screen(m_lower, uri, args, body, headers, cookie, ctx.host, get_php_fields, get_norm_ab)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_ADMIN_XSCREEN:" .. tag, ttl, mode, RULE_IDS.rule_wp_admin_cross_screen) then goto done end
+      end
+    end
+  end
+
   -- ── LAST) Fetch-metadata missing (headless / automation tell) — logonly ───
   -- Track-2 Stage 1b, the edge-only "Sec-Fetch tell": a UA that CLAIMS a modern
   -- Sec-Fetch-capable browser (Chrome >= 76 / Firefox >= 90) but sends a text/html
@@ -2721,6 +2756,12 @@ end
 -- fixed and small and the family has no block tier.
 local PUSH_KEY_KEEPS_TAG = {
   WAF_FETCH_METADATA = true,
+  -- Rule 503's first tag is the LEG (USER_NEW, UPLOAD_PLUGIN, NONCE_SCRAPE…):
+  -- one kill chain sends several legs from one IP within seconds (tophair:
+  -- nonce scrapes, then the user, then the plugin), and a family-keyed window
+  -- logged only the first. Logonly, a fixed set of legs: a flood of one leg
+  -- still collapses to one push per window.
+  WAF_ADMIN_XSCREEN = true,
 }
 
 -- also_rule_ids: the distinct waf_rule_ids in a check()'s `hits` other than

