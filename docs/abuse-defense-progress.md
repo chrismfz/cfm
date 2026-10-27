@@ -24,11 +24,12 @@
 
 ## 2. Current picture (update on every read)
 
-*As of 2026-10-20 (read 3, the last E4 read).*
+*As of 2026-10-27 (read 4).*
 
-- **Fleet version:** the 7 web nodes run `2026.10.19`, deployed
-  2026-10-19 15:26. The 4 nodes without an edge serve no challenge:
-  mymail, saf and watchdog run `2026.10.08`, and 3deers runs `2026.09.26`.
+- **Fleet version:** the 7 web nodes run `2026.10.24`, rebuilt 2026-10-24
+  ~22:30; #1615 and #1616 were live from 10-22 ~06:30. The 4 nodes without
+  an edge serve no challenge: mymail and 3deers run `2026.10.21`, watchdog
+  `2026.10.10`, saf `2026.10.08`.
 - **Live since release 2026.09.29** (deployed 2026-09-29/30):
 
   | PR | What |
@@ -60,23 +61,32 @@
   Release 2026.10.19 added #1602 and #1603: the challenge page lives only
   at `/__cfm_challenge`, and a cleared client bounced back by a CDN cache
   gets one `cfm_nc` retry (`cdn_cached_challenge`, edge_health Check F).
+
+  Releases 2026.10.21 to 2026.10.24 added, in this area: #1605 (the rescue
+  capped at hs 100), #1606 (the edge drops `cfm_nc` before the origin),
+  #1615 (a page hidden at POST time sends no window size and a log-only
+  `hid:1`) and #1616 (`vhost_config` in `CHALLENGE_V2_AUTO_VHOST`'s
+  default).
 - **What bites today:** operator-armed fingerprint / country-ASN policies
   from cfm-web (still no `v2=geo` line in read 3's week), the WAF challenge
   tier at `challenge_v2`, manual vhost v2 tiers, the automatic vhost
-  challenges (auto-v2) and the rescue.
-- **What the arm catches (first measured in read 3):** under an armed vhost
-  the convicted farms passed 232 431 solves and were rejected 150 339 times
-  on orion, titan and mars, so the arm stopped about 39 % of their solves.
-  Their passes score `hs` 0, 60 or 90, under the fail score by design (D5b).
-  Stopping the rest is the operator fingerprint policy's job (E3), not a
-  harder score.
+  challenges (auto-v2, `vhost_config` included since 10-22) and the rescue.
+- **What the arm catches:** read 3 measured 39 % of the convicted farms'
+  solves under an armed vhost on orion, titan and mars. Read 4 measured
+  71 %, mostly because orion's farm moved to mail.mathematica.gr, which is
+  on the always-on list (76 % on orion; titan 36 %, mars 57 %, earth 42 %).
+  The farms' rejects are now device-claim lies (`mobile_hw_lie`,
+  `mac_hw_lie`), no longer `outer_zero`. Their passes stay under the fail
+  score by design (D5b); stopping the rest is the operator fingerprint
+  policy's job (E3), not a harder score.
 - **Under measurement:** the auto-v2 false-reject rate on humans, the
   rescue (`v2_rescued=input`), the trajectory readings (humans vs farms).
 - **Watch items** (findings, not decisions; details in the newest entry):
   1. Farm solves with no payload (`hs=-`) pass an armed vhost, by design
      (D5b). This happened 658 times in read 3 (orion 386, titan 261), up from
-     378 in read 2 and 227 in read 1. Still under 0.5 % of the farms'
-     passes.
+     378 in read 2 and 227 in read 1. **Read 4: 1 271 in 4.9 days**, 724 of
+     them the `c28caa00` farm on earth's who-is.gr, ~13 % of the farm's
+     passes there (proposal (c) in read 4).
   2. *(Closed in read 2.)* Google-Read-Aloud and Meta were served the
      challenge through the challenge page's own URL. #1546 fixed this.
   3. The challenge page sends Meta to `next`, and the edge challenges it
@@ -98,10 +108,10 @@
 - **E4 is CLOSED (operator, 2026-10-22).** Decided: the rescue cap (item 1),
   `vhost_config` in auto-v2, `cfm_pcw` kept as log-only evidence (item 3),
   the trajectory readings kept log-only and no longer re-read weekly, the
-  orphan `HUMANITY_*` keys left to an operator cleanup. Open: α (item 2;
-  a hidden page now sends no window size and a log-only `hid:1`, and the
-  next read checks whether the walled class is gone) and the `solver_farm`
-  defaults. Master plan §5 E4 holds the record.
+  orphan `HUMANITY_*` keys left to an operator cleanup. Open: α (item 2)
+  and the `solver_farm` defaults. Read 4 proposes both: close α (the walled
+  class has 0 rejects since #1615), and ship the 180s / 15 / 15 the fleet
+  already runs. Master plan §5 E4 holds the record.
 - **Open decisions** (as proposed in read 3):
   1. **The rescue.** **Decided 2026-10-20: capped at 100** (rescue only
      `hs ≤ 100`, whatever the fail score; master plan §5 E4). In
@@ -112,23 +122,21 @@
   2. **α (the Rung-2 confirm fallback).** Proposed: do not build it now.
      One profile is walled off, 3 IPs this week: Windows Chrome/109, no
      input, `outer_zero` on every retry. First confirm whether those are
-     minimized windows.
+     minimized windows. **Read 4: 0 such rejects since #1615 (`hid`);
+     proposed: close α.**
   3. **`cfm_pcw` exit review.** Proposed: keep it as log-only evidence. Do
      not promote it: there is no actuator, and 20 of its 28 episodes this
      week were humans. Do not retire it: D3a, it is alive and nothing else
      names its datacenter scrapers.
   4. Config decisions after E4: `vhost_config` in auto-v2 (**decided
      2026-10-22**, shipped with it); the orphan `HUMANITY_*` keys (decided:
-     operator cleanup); the shipped `solver_farm` defaults (open).
-- **Next read:** one week after the hidden-page fix (`hid`) and
-  `vhost_config` in auto-v2 ship: does the walled class (Windows Chrome/109,
-  hs 130 `sw_renderer,outer_zero,no_input`, six rejects then nothing) still
-  appear, and the first week of `v2_via=auto:vhost_config` (count
-  `src=vhost:vhost_config` too: a listed host that is also suspicious logs
-  `auto:suspicious_vhost`). Also the
-  farm side of the same fix: the `hid:1` share and the `outer_zero` reject
-  counts on the convicted farm fingerprints (`c28caa00`, `95070673`) against
-  read 3.
+     operator cleanup); the shipped `solver_farm` defaults (open; read 4
+     proposes the fleet's 180s / 15 / 15).
+- **Next read:** after the operator's decisions on read 4's proposals. It
+  watches the payload stripping on earth's who-is.gr (watch item 1), the
+  farm catch rate per node, human rejects under every v2 source (including
+  `vhost_config`, counted by `v2_via=auto:vhost_config` and
+  `src=vhost:vhost_config`) and the `hid:1` solves on the farm fingerprints.
 - **Kill switches, if a read shows harm:** `CHALLENGE_V2_INPUT_RESCUE = 0`
   (rescue off) · `CHALLENGE_V2_AUTO_VHOST = off` (auto-v2 off) · per vhost
   `cfm webtop challenge tier <vhost> v1` · `CHALLENGE_V2_HW_TELLS = 0` ·
@@ -139,13 +147,17 @@
 
 | Node | Edge | Version | `ABUSE_SHADOW` | History kept | ChallengeV2 knobs |
 |---|---|---|---|---|---|
-| earth | openresty | 2026.10.19 | 1 | 30 d / 1M rows | defaults |
-| mars | openresty | 2026.10.19 | 1 | 30 d / 1M rows | defaults |
-| orion | angie | 2026.10.19 | 1 | 30 d / 1M rows | defaults |
-| rigel | openresty | 2026.10.19 | 1 | 30 d / 1M rows | defaults |
-| server.speedhost.gr | openresty | 2026.10.19 | 1 (since 2026-09-29) | **7 d** | defaults |
-| titan | openresty | 2026.10.19 | 1 | 30 d / 1M rows | defaults |
-| virgo | angie | 2026.10.19 | 1 | **7 d** | defaults |
+| earth | openresty | 2026.10.24 | 1 | 30 d / 1M rows | defaults |
+| mars | openresty | 2026.10.24 | 1 | 30 d / 1M rows | defaults |
+| orion | angie | 2026.10.24 | 1 | 30 d / 1M rows | defaults |
+| rigel | openresty | 2026.10.24 | 1 | 30 d / 1M rows | defaults |
+| server.speedhost.gr | openresty | 2026.10.24 | 1 (since 2026-09-29) | **7 d** | defaults |
+| titan | openresty | 2026.10.24 | 1 | 30 d / 1M rows | defaults |
+| virgo | angie | 2026.10.24 | 1 | **7 d** | defaults |
+
+`[challenge_solver_farm]` on every web node: `WINDOW = 180s`, `MIN_SUBNETS =
+15`, `MIN_SOLVES = 15` (mars in `detectors.d/50-web.conf`), not the shipped
+60s / 40 / 40 (read 4).
 
 `/var/log/cfm/*.log` (challenges, abuse_shadow) keeps 14 generations, daily
 or at 200 MB, so a busy node may hold less than 14 days. **A read therefore
@@ -162,7 +174,7 @@ week missed is a week lost on virgo and speedhost.
 | Would-reject sizing | `abuse_shadow` `humanity` (`lines`, `rescued`, `by_src_kind`) | #1525 / #1528 | Sizes any new v2 arm before it is turned on |
 | Payload health | the `hs=-` share of scored solves | — | A jump after a release = the page payload broke (parse / 1 KB cap) |
 | Payload stripping under an arm | `hs=-` solve lines that carry `v2=` (a pass: D5b never fails a missing payload) | read 1 | A rising share on a convicted fp = the farm bypasses the arm by stripping the body → a master-plan decision |
-| Hidden-page solves | `sig=` `hid:1` (page hidden at POST time, no window size sent), humans vs convicted-farm fps | 2026-10-22 | A rising `hid` share on a convicted fp, or its `outer_zero` rejects disappearing, means the arm lost that catch → a master-plan decision |
+| Hidden-page solves | `sig=` `hid:1` (page hidden at POST time, no window size sent), humans vs convicted-farm fps | 2026-10-22 | A rising `hid` share on a convicted fp means the arm lost that catch → a master-plan decision. Read 4: 793 in 4.9 days, 70 % GR/CY; 4 farm solves passed that a 0x0 size would have failed. (The farms' `outer_zero` rejects had already fallen before #1615.) |
 | Farm catch rate under an arm | farm-fp `result=solved` vs `result=v2_reject` lines carrying `v2=` (per node: `c28caa00`, `95070673`) | read 3 | Sizes how much of a farm the arm stops (read 3: ~39 %); a falling rate on a convicted fp = the farm scores under the fail score → the operator fingerprint policy (E3), not a harder score |
 
 ## 5. Entry template
@@ -214,6 +226,133 @@ week missed is a week lost on virgo and speedhost.
   `hc` before calling a reject human.
 
 ## 6. Entries
+
+### 2026-10-27 — read 4 (window: 2026-10-22 12:00 to 2026-10-27 09:10 Athens, 4.9 days)
+
+The first read after #1615 (a hidden page sends no window size, `hid:1`)
+and #1616 (`vhost_config` in auto-v2). Same method as read 3: every web
+node's own `cfm.challenges.log*` parsed over SSH (read-only, python on
+stdin), the whole window on every node. The window starts at noon on
+10-22, a few hours after both went live, so it is 4.9 days, not 7.
+Weekly comparisons with read 3 are scaled ×1.43.
+
+- **Fleet:**
+  - #1615 and #1616 went live on all 7 web nodes on **10-22 at ~06:30**:
+    the first `hid:1` solve is 06:36 on titan and rigel, and the first
+    `v2_via=auto:vhost_config` 06:30 on orion. The nodes were rebuilt to
+    `2026.10.24` on 10-24 at ~22:30; that is what `list_nodes` shows now.
+    The edgeless nodes are unchanged (mymail, 3deers `2026.10.21`; saf
+    `2026.10.08`; watchdog `2026.10.10`).
+  - Every web node logs `CHALLENGE_V2_AUTO_VHOST: automatic vhost challenges
+    at v2: suspicious_vhost,uniqpaths_short,under_attack,vhost_config` (the
+    #1616 log line), so the new default is armed everywhere.
+  - `[challenge_solver_farm]` on every web node sets `WINDOW = 180s`,
+    `MIN_SUBNETS = 15`, `MIN_SOLVES = 15` (mars in `detectors.d/50-web.conf`,
+    the rest in `detectors.conf`), against the shipped 60s / 40 / 40.
+  - The convicted farm fingerprints are unchanged: `95070673`, `c28caa00`,
+    `19877aeb`. No new conviction this week among 136 active fingerprints.
+- **Health:**
+  - 1 271 solves with no payload (`hs=-`) among 80 169. Read 3 had 735 in
+    a full week, so this has grown about 2.5× per day.
+    - 724 of them are on earth: the `c28caa00` farm on **who-is.gr**,
+      passing the armed vhost with no payload (BR, AR, RU, PK, ZA, …;
+      "Mac" and X11 UAs). That is watch item 1, by design under D5b. On
+      earth it is now ~13 % of the farm's passes, against under 0.5 % of
+      the fleet's in read 3.
+- **The walled class is gone.**
+  - **0** rejects of Windows Chrome/109 humans on any node in the window.
+    The only Chrome/109 rejects are 2 on mars (webdriver, a Russian
+    datacenter) under a traffic-rule mark.
+  - 793 solves carry `hid:1`. 554 of them (70 %) are GR/CY addresses;
+    they score 0 almost without exception: background tabs and minimized
+    windows, which a 0x0 size would not have failed anyway.
+  - Where `hid` made the difference: orion has 3 GR/CY solves that passed
+    at hs 90 (`sw_renderer,no_input`, 2) and 60 (1). With a 0x0 size
+    reported they would have scored 130 and 100 and been rejected, the
+    read-3 profile exactly.
+  - Chrome/109 `hid:1` solves that passed: at least 14 (a relay sample),
+    all GR/CY, 3 of them on `260c7eae` (the walled class's fingerprint).
+- **The farm side of the hid fix: no measurable cost.**
+  - Farm-fp solves with `hid:1` and a score that a 0x0 size would have
+    turned into a reject (hs 60–90): **4** in 4.9 days (orion, earth,
+    rigel, virgo, one each), against ~45 000 farm passes under an arm.
+  - `outer_zero` rejects: 385 in the window (orion 358, titan 24, earth 3).
+    Read 3 had ~57 000 in a week. The drop is **not** `hid`: only ~90
+    non-GR/CY solves on the two farm fingerprints carry `hid:1` (another
+    ~230 are GR/CY humans who share the coarse bucket). They changed shape: their rejects
+    are now device-claim lies (`sw_renderer,mobile_hw_lie,no_input` 95 %,
+    `mac_hw_lie` on earth), and those already were 93 000 of read 3's
+    153 354. The drop was already visible in the history rows from 10-17
+    on titan, mars and earth, before the fix.
+- **Arms:** `challenge_v2_reject` lines per node, all `scope=web`:
+
+  | Node | Rejects | Farm fp under `v2=vhost`: passed / rejected | Caught (read 3) |
+  |---|---|---|---|
+  | orion | 89 486 | `95070673` 27 959 / 89 468 | **76 %** (32 %) |
+  | titan | 5 691 | `c28caa00` 10 008 / 5 615 | 36 % (52 %) |
+  | earth | 4 068 | `c28caa00` 5 501 / 4 054 | 42 % (—) |
+  | mars | 2 757 | `c28caa00` 1 504 / 2 002 | 57 % (95 %) |
+  | virgo | 93 | `95070673` 104 / 56 | — |
+  | rigel | 38 | `c28caa00` 299 / 32 | — |
+  | server.speedhost.gr | 7 | `c28caa00` 46 / 2 | — |
+
+  - Total 102 140 in 4.9 days, ~146 000 a week: level with read 3
+    (153 354).
+  - Over orion, titan and mars together the arm caught **71 %** of the
+    farms' solves under an armed vhost (read 3: 39 %). Most of the change
+    is orion's farm moving to mail.mathematica.gr (below).
+- **`vhost_config` at v2, first week:**
+  - 86 434 rejects under `v2_via=auto:vhost_config` or
+    `src=vhost:vhost_config`, **none from a GR/CY address and none on a
+    panel port**.
+    - 86 029 are on orion: the `95070673` farm on **mail.mathematica.gr**,
+      `sw_renderer,mobile_hw_lie,no_input`, from M247, Datacamp,
+      HostRoyale, code200 and the like. The farm passed ~20 000 times a day
+      on www.mathematica.gr on 10-22 and 10-23. Since #1616 its traffic
+      lands on `mail.`, which is on orion's always-on list, and is
+      rejected there ~18 000 times a day.
+    - The rest (405 on six nodes) are on `cpanel.` / `whm.` / `webmail.`
+      hosts: most are `c28caa00` farm rejects (`mobile_hw_lie`, earth's
+      e-insure.gr and fex.org.gr), the others cloud scanners: AWS
+      us-west-2 (`webdriver,no_input`), Google Cloud (`ua_lie`,
+      `webdriver`), Level 3, Scanory.
+  - 814 GR/CY solves passed on those hosts (webmail, cPanel), plus 1 on
+    `panel:2096`.
+- **Human-labelled rejects (GR/CY consumer ISP, no bot UA): none human.**
+  - virgo, `94.66.129.119` (OTEnet), 26 rejects on cpress.gr and
+    megalopoli-fm.gr: `headless_ua,webdriver`, under a WAF 501 mark.
+    Automation on a home line.
+  - earth, who-is.gr, 10 rejects from OTEnet, Nova, EPIC and Cablenet
+    addresses: a "Mac" UA with 64–128 cores and SwiftShader on `c28caa00`
+    (`mac_hw_lie`). The farm, through Greek and Cypriot residential exits.
+- **Since last read:** the walled class is gone; `vhost_config` caught
+  orion's farm when it moved hosts; the farms moved from `outer_zero` to
+  device-claim lies; payload stripping grew on earth's who-is.gr.
+
+#### Proposals (for the operator; nothing is implemented without a go)
+
+**(a) α: close it, do not build it.** The one class it was for (pointer-less
+Chrome/109, `outer_zero` on every retry) has 0 rejects since #1615, and `hid`
+let the same profile through on orion. Revisit only if a pointer-less human
+class shows up while the page is visible.
+
+**(b) The `solver_farm` defaults: ship the values the fleet runs.** Every web
+node sets 180s / 15 / 15 by hand, and this week it convicted nothing but the
+three known farms. Shipping them as the defaults changes no live node and
+gives a new install the setting the fleet measured. A small code + reference
+config change (`WINDOW`, `MIN_SUBNETS`, `MIN_SOLVES`).
+
+**(c) Payload stripping on earth's who-is.gr (watch item 1).** `c28caa00`
+passes the armed vhost there with no payload ~150 times a day. D5b rules out
+failing a missing payload. The remedy is the operator fingerprint policy
+(E3) on `c28caa00`, which already covers it fleet-wide, or a per-vhost
+decision for who-is.gr. Watch it next read; no code change proposed.
+
+**(d) `hid`: keep as is.** It costs the farm catch ~4 solves in 5 days and
+lets the background-tab and minimized-window humans through.
+
+- **Actions:** none. Proposals only; nothing goes to the master plan until
+  the operator decides.
 
 ### 2026-10-20 — read 3 (window: 7 days to 2026-10-20 12:00 Athens)
 
