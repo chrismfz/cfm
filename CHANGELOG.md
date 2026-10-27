@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.27
+
 ### Added
 - **Vhost lockdown: an emergency brake for a crawler storm.** A vhost
   challenge lets crawlers on the bypass list, verified good bots and
