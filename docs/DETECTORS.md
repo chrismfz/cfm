@@ -297,7 +297,7 @@ Typical defaults below are representative from the shipped template and should b
 | `outbound` | outbound abuse sentinel (per-uid SMTP/scan/HTTP bursts) | `OUTBOUND_*` thresholds, allow users/groups, dedupe | `WINDOW=60s`, alerting focus |
 | `health` | host health anomalies (CPU/RAM/disk/temp/net spikes) | `% thresholds`, spike multipliers, watch lists, `TMP_PCT`/`TMP_CLEAN_OLDER` | `EVERY=20s`, mostly alerting; `/tmp` at `TMP_PCT=85`% alerts and deletes regular files older than `TMP_CLEAN_OLDER=12h` (`TMP_PCT=0` turns it off) |
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
-| `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=60s`, `MIN_SUBNETS=40`, **alert-only** |
+| `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=180s`, `MIN_SUBNETS=30`, `MIN_SOLVES=15`, **alert-only** |
 | `challenge_cookie_discard` | clients that re-solve the challenge while still holding valid clearance | `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `MAX_TRACKED_IPS`, allowlists, `BLOCK` | `EVERY=30s`, `WINDOW=10m`, `MIN_SOLVES=8`, **alert-only unless `BLOCK` is set** |
 
 ### `challenge_solver_farm` — why it exists
@@ -320,6 +320,17 @@ numbers overstate the headroom.
 |---|---|---|
 | distinct `/24` per window | median 73, p01 49, max 122 | **max 27** |
 | evaluations flagged at `MIN_SUBNETS=40` | 2758 / 2761 | **0 / 3212** |
+
+**Re-measured on the fleet (2026-10-27), now the shipped default: `WINDOW =
+180s`, `MIN_SUBNETS = 30`, `MIN_SOLVES = 15`** (`solverfarm.DefaultWindow` and
+friends; `TestSolverFarmDefaultsAgree` pins the template and the reference
+config to them). Every web node had run 180s / 15 / 15 by hand for weeks. At
+15, the fingerprint-blind findings were real Greek shop audiences (paid-ad
+traffic, 15–25 `/24` per 180s window: mirego.gr, more4u.gr, marmaridis.gr),
+while fingerprint-less findings on farm-hit vhosts reached 33–77. A
+fingerprinted farm is caught by the fingerprint tracks whatever `MIN_SUBNETS`
+is. The longer window is for slow farms: 60s caught the AS398781 swarm only at
+120s with lower thresholds (`docs/abuse-defense-progress.md`, read 4).
 
 Two deliberate design choices:
 
@@ -410,8 +421,9 @@ The badge is styled `pill info` (blue), not `warn`/`danger`: those already mean
 anything. Note it is orthogonal to the score beside it — a farm solves the
 challenge *correctly*, so a farmed vhost need not look suspicious at all.
 
-Note the calibration is one server over one day. A very large vhost with a
-genuinely global mobile audience could legitimately spread wider; `MIN_SUBNETS`
+Note the first calibration was one server over one day, and the re-measure
+one fleet over two weeks. A very large vhost with a genuinely global mobile
+audience could legitimately spread wider; `MIN_SUBNETS`
 is a knob and `ALLOW_HOSTS` / `ALLOW_UA_CONTAINS` / `ALLOW_NETS` / `ALLOW_IPS`
 exempt known-good sources.
 

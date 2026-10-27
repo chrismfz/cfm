@@ -17,12 +17,16 @@ import (
 // Thresholds are calibrated against 23h of production edge traffic containing a
 // live farm: distinct /24s solving one vhost within a 60s window measured 73
 // (median), 49 (p01), 110 (max) for the farm, against a maximum of 22 across
-// every other vhost on the same server. MIN_SUBNETS defaults to 40 — it caught
-// 1380 of 1381 farm-minutes with zero hits on 1605 legitimate vhost-minutes.
+// every other vhost on the same server. MIN_SUBNETS was set to 40 then — it
+// caught 1380 of 1381 farm-minutes with zero hits on 1605 legitimate
+// vhost-minutes.
 //
-// That calibration is ONE server over ONE day. A very large vhost with a
-// genuinely global mobile audience could legitimately spread wider, which is why
-// the threshold is a config knob and the detector ships alert-only.
+// That calibration was ONE server over ONE day. Since 2026-10-27 the defaults
+// are 180s / 30 / 15 (solverfarm.DefaultWindow and friends), re-measured on
+// the fleet: at 15 subnets a Greek shop's ad traffic read as a farm. A very
+// large vhost with a genuinely global mobile audience could still spread
+// wider, which is why the threshold is a config knob and the detector ships
+// alert-only.
 //
 // Alert-only is structural, not a burn-in default: the detector stamps
 // ip_scope=host and enforcement=observe on every alert: the first stops the sink
@@ -45,9 +49,9 @@ func init() {
 		DefaultsTemplate: map[string]string{
 			"ENABLED":          "1",
 			"EVERY":            "30s",
-			"WINDOW":           "60s",
-			"MIN_SUBNETS":      "40",
-			"MIN_SOLVES":       "40",
+			"WINDOW":           "180s",
+			"MIN_SUBNETS":      "30",
+			"MIN_SOLVES":       "15",
 			"COOLDOWN":         "30m",
 			"ACTION":           "observe",
 			"PREFIX_V4":        "24",
@@ -85,9 +89,9 @@ func init() {
 		cfg := solverfarm.Config{
 			Every:             kvDur(kv, "EVERY", defEvery),
 			Action:            action,
-			Window:            kvDur(kv, "WINDOW", time.Minute),
-			MinSubnets:        kvInt(kv, "MIN_SUBNETS", 40),
-			MinSolves:         kvInt(kv, "MIN_SOLVES", 40),
+			Window:            kvDur(kv, "WINDOW", solverfarm.DefaultWindow),
+			MinSubnets:        kvInt(kv, "MIN_SUBNETS", solverfarm.DefaultMinSubnets),
+			MinSolves:         kvInt(kv, "MIN_SOLVES", solverfarm.DefaultMinSolves),
 			PrefixV4:          kvInt(kv, "PREFIX_V4", 24),
 			PrefixV6:          kvInt(kv, "PREFIX_V6", 48),
 			Cooldown:          kvDur(kv, "COOLDOWN", 30*time.Minute),

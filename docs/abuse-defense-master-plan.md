@@ -788,6 +788,14 @@ already opened.
             whether that class is gone and counts `hid`, on humans and on the
             convicted farm fingerprints (whose `outer_zero` catch must not
             drop); α is decided on what remains.
+          - **α CLOSED, not built (operator, 2026-10-27, read 4).** The
+            walled class had 0 rejects in the 4.9 days after #1615, and `hid`
+            let the same profile through (3 GR/CY solves at hs 90/60 on
+            orion). The farm cost of `hid`: 4 solves. Reopen only for a
+            pointer-less human class seen while the page is visible. Also
+            decided that day: `hid` stays as is; the payload stripping on
+            earth's who-is.gr (`c28caa00`, `hs=-`, ~13 % of its passes there)
+            is for the operator fingerprint policy (E3), not code (D5b).
 
           Weekly reads from 2026-10-06 are recorded in
           `docs/abuse-defense-progress.md`, not here; this plan keeps the
@@ -833,8 +841,11 @@ already opened.
    `docs/challenge-waf-release-checklist.md`.
 
 **Config decisions after E4** (2026-10-22: `vhost_config` decided yes, the
-orphan keys are the operator's cleanup, the `solver_farm` defaults are still
-open — E4 did not measure them): `vhost_config` in `CHALLENGE_V2_AUTO_VHOST`
+orphan keys are the operator's cleanup; 2026-10-27, read 4: the `solver_farm`
+defaults are **180s / 30 / 15**, shipped in code and the reference config.
+The fleet's hand-set 15 subnets flagged real Greek shop audiences at 15-25
+/24 per window, while fingerprint-less farm findings reached 33-77; the
+operator moves the 7 web nodes from 15 to 30): `vhost_config` in `CHALLENGE_V2_AUTO_VHOST`
 (measured 0 of 780 likely-human solves would fail, `docs/traffic-classifier.md`
 "Auto-v2"); the shipped `solver_farm` defaults (`WINDOW` 60s catches the
 AS398781 swarm only at 120s AND lowered thresholds, 16/20 against the

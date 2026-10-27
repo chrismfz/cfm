@@ -179,6 +179,24 @@ func ParseAction(raw string) (Action, string) {
 	}
 }
 
+// The shipped defaults of the subnet-spread track (WINDOW, MIN_SUBNETS,
+// MIN_SOLVES), read by the register too so there is one copy. Re-measured on
+// the fleet on 2026-10-27 (docs/abuse-defense-progress.md, read 4), where
+// every web node had run 180s / 15 / 15 by hand for weeks:
+//   - at 15 subnets the fingerprint-blind findings were real Greek shop
+//     audiences (paid-ad traffic, 15-25 /24 per 180s window), alert noise;
+//   - the fingerprint-blind findings on farm-hit vhosts reached 33-77;
+//   - fingerprinted farms are caught by the fp tracks whatever MinSubnets is.
+//
+// 30 sits between the two. The 60s / 40 / 40 calibration below came first, on
+// one server over one day; a 60s window caught the slower AS398781 swarm only
+// at 120s with lower thresholds.
+const (
+	DefaultWindow     = 180 * time.Second
+	DefaultMinSubnets = 30
+	DefaultMinSolves  = 15
+)
+
 type Config struct {
 	Every  time.Duration
 	Window time.Duration
@@ -514,7 +532,7 @@ func New(cfg Config) *Detector {
 		cfg.Every = 30 * time.Second
 	}
 	if cfg.Window <= 0 {
-		cfg.Window = time.Minute
+		cfg.Window = DefaultWindow
 	}
 	// An evaluation interval longer than the window leaves a blind gap: each pass
 	// prunes everything older than Window, so solves that arrived more than
@@ -525,10 +543,10 @@ func New(cfg Config) *Detector {
 		cfg.Every = cfg.Window
 	}
 	if cfg.MinSubnets <= 0 {
-		cfg.MinSubnets = 40
+		cfg.MinSubnets = DefaultMinSubnets
 	}
 	if cfg.MinSolves <= 0 {
-		cfg.MinSolves = 40
+		cfg.MinSolves = DefaultMinSolves
 	}
 	if cfg.PrefixV4 <= 0 || cfg.PrefixV4 > 32 {
 		cfg.PrefixV4 = 24

@@ -301,6 +301,37 @@ func TestThresholdBoundaries(t *testing.T) {
 	}
 }
 
+// The shipped defaults (2026-10-27): 30 subnets, 15 solves, a 180s window. A
+// zero Config takes them, so a change to the defaults shows here.
+func TestShippedDefaults(t *testing.T) {
+	cfg := New(Config{}).cfg
+	if cfg.Window != 180*time.Second || cfg.MinSubnets != 30 || cfg.MinSolves != 15 {
+		t.Fatalf("defaults = %s / %d / %d, want 180s / 30 / 15", cfg.Window, cfg.MinSubnets, cfg.MinSolves)
+	}
+	burst := func(t *testing.T, subnets, perSubnet int, spread time.Duration) int {
+		t.Helper()
+		h := newHarness(t, Config{})
+		for i := 0; i < subnets; i++ {
+			for j := 0; j < perSubnet; j++ {
+				h.solve("shop.example.com", fmt.Sprintf("203.0.%d.%d", i, j+1), chromeUA)
+			}
+			h.clock = h.clock.Add(spread)
+		}
+		return len(h.run(t))
+	}
+	// Under 30 /24s stays quiet (a Greek shop's ad traffic peaked at 15-25).
+	if got := burst(t, 29, 1, 0); got != 0 {
+		t.Errorf("29 subnets: got %d alerts, want 0", got)
+	}
+	if got := burst(t, 30, 1, 0); got != 1 {
+		t.Errorf("30 subnets: got %d alerts, want 1", got)
+	}
+	// The window is 180s: 30 subnets over ~2.5 minutes still count.
+	if got := burst(t, 30, 1, 5*time.Second); got != 1 {
+		t.Errorf("30 subnets over 150s: got %d alerts, want 1", got)
+	}
+}
+
 // MinSolves counts every solve seen in the window, including ones the evidence
 // cap dropped — otherwise a flood could stay under the floor by overflowing it.
 func TestMinSolvesCountsTruncatedSolves(t *testing.T) {
