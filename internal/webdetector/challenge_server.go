@@ -455,8 +455,11 @@ func maybeListenV6LoopbackFromV4Loopback(addr string) (string, bool) {
 
 const (
 	maxVerifyBodyBytes = 1 << 10 // 1KB
-	maxUALen           = 256
-	maxHostLen         = 253
+	// 1024: in-app browsers append their own token block to the WebView's UA,
+	// and Facebook's (iOS) and Instagram's (Android) run 280-290 bytes; 256
+	// answered every ad click from them "bad ua" (vol2.gr, 2026-10-28).
+	maxUALen   = 1024
+	maxHostLen = 253
 	// 4096: a challenged POST's next carries the original URI plus cfm_rt,
 	// and 2048 turned a long admin/ajax URI into "/" (the homepage, the stash
 	// never replayed). The page's verify URL carries it escaped (up to ~3x),
@@ -2128,10 +2131,16 @@ func isWeirdUA(ua string) bool {
 		strings.Contains(lower, "nmap") {
 		return true
 	}
-	// If it's insanely "dense" with punctuation, it's usually junk
+	// If it's "dense" with markup / quoting punctuation, it's usually junk.
+	// `;`, `(`, `)`, `[` and `]` are not counted: a real UA is made of them,
+	// and the in-app browsers carry 18-19 (Facebook's
+	// `[FBAN/FBIOS;FBAV/…;…;IABMV/1]`, Instagram's
+	// `Android (34/14; 450dpi; …; IABMV/1)`), which answered every Facebook /
+	// Instagram ad click on a challenged vhost "bad ua" (vol2.gr, 2026-10-28).
+	// The threshold stays 16, so the check only got looser.
 	punct := 0
 	for _, r := range ua {
-		if strings.ContainsRune(`"'\<>[]{}()|;`, r) {
+		if strings.ContainsRune(`"'\<>{}|`, r) {
 			punct++
 		}
 	}

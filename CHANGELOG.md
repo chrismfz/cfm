@@ -17,7 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Facebook / Instagram ad clicks no longer get a blank `bad ua` page on a
+  challenged site.** The challenge server refused any User-Agent longer than
+  256 bytes or carrying 16+ of `;()[]{}"'<>|\`, and the in-app browsers of
+  Facebook, Instagram, WeChat and TikTok carry both: a visitor clicking an ad
+  while the site was under a challenge (an automatic `suspicious_vhost` one, for
+  example) got `403 bad ua` instead of the challenge page (vol2.gr, 2026-10-28;
+  ~4 400 such refusals of ~1 400 client IPs fleet-wide in eight days, almost
+  all Facebook / Instagram in-app browsers, most on titan, rigel, mars and
+  orion). The cap is now 1024 bytes, and `;()[]` no longer count as junk
+  punctuation (16+ of `"'<>{}|\` still do). These clients
+  now see the challenge page and solve it like any other browser.
 
 ## 2026.10.27
 
