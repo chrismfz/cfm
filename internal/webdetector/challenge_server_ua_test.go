@@ -22,6 +22,10 @@ func TestIsWeirdUAInAppBrowsers(t *testing.T) {
 		"Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/22G86 Instagram 400.0.0.37.83 (iPhone15,2; iOS 18_6; el_GR; el; scale=3.00; 1179x2556; 812345678; IABMV/1)",
 		// TikTok, Android
 		"Mozilla/5.0 (Linux; Android 13; SM-G991B Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/130.0.6723.107 Mobile Safari/537.36 trill_370504 JsSdk/1.0 NetType/WIFI Channel/googleplay AppName/musical_ly app_version/37.5.4 ByteLocale/el ByteFullLocale/el Region/GR AppId/1233 Spark/1.6.3 AppVersion/37.5.4 BytedanceWebview/d8a21c6",
+		// exactly the 1024-byte cap
+		"Mozilla/5.0 " + strings.Repeat("a", 1012),
+		// 15 of the counted characters (one under the threshold)
+		`Mozilla/5.0 "a" "b" "c" "d" "e" "f" "g" '`,
 		// a desktop browser
 		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
 	} {
@@ -33,17 +37,18 @@ func TestIsWeirdUAInAppBrowsers(t *testing.T) {
 
 func TestIsWeirdUARejects(t *testing.T) {
 	for name, ua := range map[string]string{
-		"empty":     "",
-		"blank":     "   ",
-		"too long":  "Mozilla/5.0 " + strings.Repeat("a", maxUALen),
-		"newline":   "Mozilla/5.0\r\nX-Injected: 1",
-		"control":   "Mozilla/5.0\x01",
-		"bad utf8":  "Mozilla/5.0 \xff\xfe",
-		"sqlmap":    "sqlmap/1.8#stable (https://sqlmap.org)",
-		"nikto":     "Mozilla/5.00 (Nikto/2.5.0)",
-		"markup":    `"><script>alert('x')</script><img src=x onerror="y"><b>"'`,
-		"quoted":    `'||'"||"{${jndi}}"||"'||'`,
-		"templates": "{{7*7}}{{8*8}}<%= 1 %><><{}>",
+		"empty":      "",
+		"blank":      "   ",
+		"too long":   "Mozilla/5.0 " + strings.Repeat("a", 1013), // 1025 bytes
+		"newline":    "Mozilla/5.0\r\nX-Injected: 1",
+		"control":    "Mozilla/5.0\x01",
+		"bad utf8":   "Mozilla/5.0 \xff\xfe",
+		"sqlmap":     "sqlmap/1.8#stable (https://sqlmap.org)",
+		"nikto":      "Mozilla/5.00 (Nikto/2.5.0)",
+		"markup":     `"><script>alert('x')</script><img src=x onerror="y"><b>"'`,
+		"quoted":     `'||'"||"{${jndi}}"||"'||'`,
+		"16 counted": `Mozilla/5.0 "a" "b" "c" "d" "e" "f" "g" "h"`,
+		"templates":  "{{7*7}}{{8*8}}<%= 1 %><><{}>|||",
 	} {
 		if !isWeirdUA(ua) {
 			t.Errorf("%s: not a bad ua: %q", name, ua)

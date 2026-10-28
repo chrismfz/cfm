@@ -458,7 +458,11 @@ const (
 	// 1024: in-app browsers append their own token block to the WebView's UA,
 	// and Facebook's (iOS) and Instagram's (Android) run 280-290 bytes; 256
 	// answered every ad click from them "bad ua" (vol2.gr, 2026-10-28).
-	maxUALen   = 1024
+	maxUALen = 1024
+	// solveMaxUA bounds the UA a solve carries into its log lines, history
+	// row and solver-farm records: the gate admits 1024 client-chosen bytes,
+	// the real ones run under ~300.
+	solveMaxUA = 512
 	maxHostLen = 253
 	// 4096: a challenged POST's next carries the original URI plus cfm_rt,
 	// and 2048 turned a long admin/ajax URI into "/" (the homepage, the stash
@@ -983,7 +987,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			Host:              host,
 			URI:               next,
 			Diff:              diff,
-			UA:                ua,
+			UA:                boundStr(ua, solveMaxUA),
 			VerifyMS:          time.Since(verifyStart).Milliseconds(),
 			SolveMS:           powSolveLatencyMS(issuedAt, verifyAt, cfg.TTL),
 			UAImpossible:      uaVerdict.Impossible,
