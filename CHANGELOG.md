@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.28
+
 ### Fixed
 - **Facebook / Instagram ad clicks no longer get a blank `bad ua` page on a
   challenged site.** The challenge server refused any User-Agent longer than
