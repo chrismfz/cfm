@@ -17,7 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **`cfm realip`: the origin sees visitors' real IPs behind the edge, on every
+  panel.** The edge proxies to the origin from 127.0.0.1; an origin that does not
+  trust that loopback logs 127.0.0.1 for every visitor and hands PHP
+  `REMOTE_ADDR=127.0.0.1`. That was qualityweb (cPanel without Imunify360, whose
+  `i360.remoteip.conf` carried the trust on the rest of the fleet), reported by a
+  customer. `cfm realip` shows the verdict; `cfm realip fix [--dry-run]` writes the
+  trust where it is missing — cPanel, DirectAdmin, Debian and EL Apache, DirectAdmin
+  and plain nginx — through a config test and a graceful reload, rolled back on
+  failure, trusting only the loopback. LiteSpeed and NGM get the manual step
+  printed instead (CFM does not edit their config). The edge installers run it
+  after deploying the edge (`CFM_SKIP_REALIP=1` skips). `edge_health` gains Check G
+  (`origin-real-ip`), so `whats_wrong` warns about it. See `docs/origin-real-ip.md`.
+
+### Fixed
+- **`cfm health`'s "Origin real-IP" line no longer warns wrongly.** It missed
+  Apache's `conf.d/*.conf` (Imunify360's `i360.remoteip.conf` and the new drop-in),
+  warned on hosts with no edge in front at all (a DirectAdmin nginx facing the
+  internet), took a LiteSpeed `useIpInProxyHeader 2` as trusted without
+  `127.0.0.1T` in the allow list, and called Apache trusted with no
+  `RemoteIPHeader` set (mod_remoteip then reads nothing).
 
 ## 2026.10.28
 

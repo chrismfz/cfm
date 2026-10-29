@@ -29,9 +29,10 @@ Read-only: it never blocks, reloads, or changes config. It may run
 
 ## Scope: Tier 1 (as shipped)
 
-Six correlated checks. A–D, together, would have caught the 421 incident in
+Seven correlated checks. A–D, together, would have caught the 421 incident in
 minutes; E covers the second origin-hop failure class we hit, and F a CDN in
-front of the edge caching CFM's challenge (both below). Each
+front of the edge caching CFM's challenge, and G an origin that logs the edge's
+127.0.0.1 instead of the visitor (all below). Each
 finding carries a `severity`; the tool's `overall` is the max of
 them — **`ok | warn | critical | unknown`**, where `unknown` means a log/version
 couldn't be read and is NEVER silently downgraded to `ok`.
@@ -234,6 +235,22 @@ briefly; the tracker outlives it). Honest limits:
   `cdn_cached_challenge` line in `cfm.challenges.log` carries `relayed=0|1|-`.
 
 The check exists so the operator learns which tenant's CDN to fix.
+
+### G. The origin sees the visitor, not the edge's 127.0.0.1 (configuration)
+
+Added after 2026-10-29 on qualityweb: a cPanel node without Imunify360. The
+edge proxies every request to the origin from 127.0.0.1, and on the rest of
+the fleet Imunify360's `i360.remoteip.conf` is what made Apache trust that
+loopback. qualityweb had only cPanel's `cloudflare.conf`, so every site logged
+127.0.0.1 and PHP's `REMOTE_ADDR` was 127.0.0.1. A customer reported it.
+
+`origin-real-ip` reads the origin's configuration (`internal/originrealip`,
+the same probe as `cfm health` and `cfm realip`): `warn` when an edge engine
+runs and the origin does not trust the loopback with a header the edge sets;
+`ok` when it does, or when no edge engine runs (the origin faces the internet
+itself); `unknown` when no origin is found on disk. The fix is
+`cfm realip fix`, or for LiteSpeed and NGM the manual step the finding names.
+Per panel and stack: [`origin-real-ip.md`](origin-real-ip.md).
 
 ## Output shape
 

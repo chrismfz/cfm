@@ -972,6 +972,7 @@ because of that. Hard-won points:
 | Endpoint scope inventory | `docs/endpoint_scope_inventory.md` |
 | Traffic Rules UX review & redesign proposal (cfm-admin rules builder / recipes) | `docs/traffic-rules-ux-proposal.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
+| Origin real IP (the origin sees the visitor, not the edge's 127.0.0.1; `cfm realip`) | `docs/origin-real-ip.md` |
 | Backup check (JetBackup / Virtualmin / Proxmox → detection_history) | `docs/backup-check.md` |
 | Mail abuse findings (hacked site / contact form, mailbox spike, hijacked mailbox → detection_history) | `docs/mail-abuse.md` |
 | Site Cache (per-vhost edge caching): design + as-built / operating it | `docs/site-cache-design.md` · `docs/site-cache-runbook.md` |

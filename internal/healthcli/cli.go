@@ -3,6 +3,7 @@ package healthcli
 import (
 	"cfm/internal/clihttp"
 	"cfm/internal/healthmodel"
+	"cfm/internal/originrealip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -591,7 +592,18 @@ func printEdgeInterceptorDiagnostics(s parsedSnapshot, opts cliOptions) {
 	// client IPs, not the edge loopback. Neither touches any config.
 	logPath := edgediag.ReadDetectorSectionKV("/etc/cfm/detectors.conf", "webdetector")["LOG_PATH"]
 	printTSVLogHealth(edgediag.ProbeTSVLog(logPath), status, opts)
-	printOriginRealIP(edgediag.ProbeOriginRealIP(s.Modern.Runtime.UpstreamService), opts)
+	printOriginRealIP(originrealip.ProbeSystem(s.Modern.Runtime.UpstreamService), edgeEngineActive(s), opts)
+}
+
+// edgeEngineActive reports whether a CFM edge engine (angie / openresty) runs,
+// i.e. whether the edge fronts the origin at all.
+func edgeEngineActive(s parsedSnapshot) bool {
+	for _, row := range collectWebStackRows(s) {
+		if row.Active {
+			return true
+		}
+	}
+	return false
 }
 
 // printTSVLogHealth renders the configured webdetector TSV access log status.
@@ -640,29 +652,18 @@ func printTSVLogHealth(p edgediag.TSVLogProbe, ingestStatus string, opts cliOpti
 		badge(okLabel, opts), p.Path, recency, bytesIEC(uint64(p.SizeBytes)), note)
 }
 
-// printOriginRealIP renders whether the origin web server trusts 127.0.0.1 as a
-// real-IP proxy — the difference between access logs showing the client IP vs
-// the edge's loopback (127.0.0.1).
-func printOriginRealIP(p edgediag.OriginRealIPProbe, opts cliOptions) {
-	if p.Stack == "" || p.Stack == "unknown" {
-		note := strings.TrimSpace(p.Note)
-		if note == "" {
-			note = "no apache/litespeed/nginx origin detected"
-		}
-		fmt.Printf("  %s  Origin real-IP: stack=unknown — %s\n", badge(warnLabel, opts), note)
-		return
+// printOriginRealIP renders whether the origin web server trusts the edge's
+// 127.0.0.1 to name the client: the difference between access logs and PHP's
+// REMOTE_ADDR showing the visitor or the edge loopback. Without an edge in front
+// there is nothing to trust, so it is not a warning (avgerinos: DirectAdmin
+// nginx facing the internet itself).
+func printOriginRealIP(p originrealip.Probe, edgeActive bool, opts cliOptions) {
+	ok, text := originrealip.Verdict(p, edgeActive)
+	label := okLabel
+	if !ok {
+		label = warnLabel
 	}
-	if p.Trusted {
-		fmt.Printf("  %s  Origin real-IP: stack=%s trusted via %s (%s)\n",
-			badge(okLabel, opts), p.Stack, p.Directive, p.Source)
-		return
-	}
-	note := strings.TrimSpace(p.Note)
-	if note == "" {
-		note = "no 127.0.0.1 trust directive found"
-	}
-	fmt.Printf("  %s  Origin real-IP: stack=%s — %s → access logs will record 127.0.0.1, not client IPs\n",
-		badge(warnLabel, opts), p.Stack, note)
+	fmt.Printf("  %s  %s\n", badge(label, opts), text)
 }
 
 func missingRuntimeFields(s parsedSnapshot, fields ...string) []string {
