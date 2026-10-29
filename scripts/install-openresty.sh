@@ -649,6 +649,34 @@ validate_panel_lua_guard_preflight() {
     return 0
 }
 
+# The edge proxies every web request to the origin from 127.0.0.1. An origin
+# that does not trust that loopback logs 127.0.0.1 for every visitor and hands
+# PHP REMOTE_ADDR=127.0.0.1 (qualityweb, 2026-10-29: cPanel without Imunify360,
+# whose i360.remoteip.conf carries the trust on the rest of the fleet).
+# `cfm realip fix` adds the trust where it is missing (Apache/nginx on cPanel,
+# DirectAdmin or plain: config test + graceful reload, rolled back on failure)
+# and only prints the manual step for LiteSpeed and NGM. Never fatal: the edge
+# works either way, only the origin's logs are wrong. docs/origin-real-ip.md.
+ensure_origin_realip() {
+    if [ "${CFM_SKIP_REALIP:-0}" = "1" ]; then
+        log "Origin real-IP: skipped (CFM_SKIP_REALIP=1); run 'cfm realip fix' later"
+        return 0
+    fi
+    if ! command -v cfm >/dev/null 2>&1; then
+        warn "Origin real-IP: cfm is not installed yet; after installing it run 'cfm realip fix'"
+        return 0
+    fi
+    log "Origin real-IP: making the origin trust the edge's 127.0.0.1 (cfm realip fix)"
+    local rc=0
+    cfm realip fix || rc=$?
+    case "$rc" in
+        0) ;;
+        2) warn "Origin real-IP: this cfm has no 'realip' command; upgrade cfm, then run 'cfm realip fix'" ;;
+        *) warn "Origin real-IP: not set automatically (see above); the origin logs 127.0.0.1 until it is. Check with 'cfm realip'" ;;
+    esac
+    return 0
+}
+
 check_lua_token_files() {
     local token_files=(
         "$CFM_SHARED_LUA_DIR/cfm_token.lua"
@@ -767,6 +795,7 @@ main() {
     validate_shared_lua_runtime
     deploy_nginx_conf
     check_lua_token_files
+    ensure_origin_realip
     log "Shared fallback cert path: /var/lib/cfm/certs/selfsigned/{fullchain,privkey}.pem"
     log "Done"
 }

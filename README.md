@@ -1811,6 +1811,23 @@ Expected output semantics:
 - `cfm health watch` emits a banner with effective interval, then one line per sample.
 - `cfm health live` requires a TTY; otherwise it safely degrades to watch output.
 
+### `cfm realip` (does the origin see visitors, or 127.0.0.1?)
+
+The edge proxies every web request to the origin from 127.0.0.1. Unless the
+origin trusts that loopback, its access logs and PHP's `REMOTE_ADDR` read
+127.0.0.1 for every visitor. `cfm health` shows the verdict on its
+`Origin real-IP` line, and `edge_health` / `whats_wrong` warn about it.
+
+```bash
+cfm realip             # read-only verdict (exit 1 = edge in front, origin logs 127.0.0.1)
+cfm realip fix --dry-run
+cfm realip fix         # add the trust, config-test, graceful reload (rolled back on failure)
+```
+
+The edge installers run `cfm realip fix` themselves (`CFM_SKIP_REALIP=1` skips
+it). Per panel and stack, and the manual steps for LiteSpeed and NGM:
+[`docs/origin-real-ip.md`](docs/origin-real-ip.md).
+
 ---
 
 ## 15. Web Detector HTTP API

@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"cfm/internal/originrealip"
 	webdet "cfm/internal/webdetector"
 )
 
@@ -368,6 +370,49 @@ func TestEdgeHealthReport_WarmReuseNoTimestampFailsafe(t *testing.T) {
 	}
 }
 
+// TestEdgeHealthReport_OriginRealIP covers Check G: an edge in front of an origin
+// that does not trust its loopback warns (qualityweb, 2026-10-29), the same
+// origin without an edge does not (avgerinos), and an undetectable origin is
+// unknown, never a finding.
+func TestEdgeHealthReport_OriginRealIP(t *testing.T) {
+	restore := stubEdgeHealth(t)
+	defer restore()
+	edgeHealthDetect = func(context.Context) (string, string, bool) { return "angie", "Angie/1.12.4", true }
+	edgeHealthScanAccess = func(context.Context, []string, string, int, func(string)) (string, int, error) {
+		return "/var/log/angie/access.log", 0, nil
+	}
+	edgeHealthScanError = func(context.Context, []string, string, int, func(string)) (string, int, error) {
+		return "/var/log/angie/error.log", 0, nil
+	}
+	edgeHealthBridgeConfigPaths = []string{filepath.Join(t.TempDir(), "absent.lua")}
+
+	untrusted := originrealip.Probe{Panel: "cpanel", Stack: "apache", Header: "CF-Connecting-IP",
+		Note: "no RemoteIPInternalProxy/RemoteIPTrustedProxy 127.0.0.1 in the Apache config"}
+	edgeHealthOriginRealIP = func() (originrealip.Probe, bool) { return untrusted, true }
+	rep := buildEdgeHealthReport(context.Background(), 1000)
+	f := findFinding(t, rep, "origin-real-ip")
+	if f["severity"] != "warn" || rep["overall"] != "warn" {
+		t.Fatalf("edge in front, untrusted: finding=%v overall=%v", f, rep["overall"])
+	}
+	if s, _ := f["summary"].(string); !strings.Contains(s, "127.0.0.1") {
+		t.Errorf("summary = %q", s)
+	}
+
+	edgeHealthOriginRealIP = func() (originrealip.Probe, bool) { return untrusted, false }
+	rep = buildEdgeHealthReport(context.Background(), 1000)
+	if f := findFinding(t, rep, "origin-real-ip"); f["severity"] != "ok" {
+		t.Fatalf("no edge in front: %v", f)
+	}
+
+	edgeHealthOriginRealIP = func() (originrealip.Probe, bool) {
+		return originrealip.Probe{Panel: "plain", Stack: "unknown", Note: "no apache/litespeed/nginx origin detected on disk"}, true
+	}
+	rep = buildEdgeHealthReport(context.Background(), 1000)
+	if f := findFinding(t, rep, "origin-real-ip"); f["severity"] != "unknown" {
+		t.Fatalf("unknown origin: %v", f)
+	}
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func stubEdgeHealth(t *testing.T) func() {
@@ -380,7 +425,12 @@ func stubEdgeHealth(t *testing.T) func() {
 	edgeHealthDirectBounces = func(time.Time) []webdet.CDNCacheSuspect { return nil }
 	edgeHealthDownloadBounces = func(time.Time) []webdet.CDNCacheSuspect { return nil }
 	edgeHealthChallengeServing = func() bool { return true }
+	oRealIP := edgeHealthOriginRealIP
+	edgeHealthOriginRealIP = func() (originrealip.Probe, bool) {
+		return originrealip.Probe{Panel: "cpanel", Stack: "apache", Trusted: true, Directive: "RemoteIP{Internal,Trusted}Proxy 127.0.0.1", Source: "/etc/apache2/conf.d/i360.remoteip.conf", Header: "X-Forwarded-For"}, true
+	}
 	return func() {
+		edgeHealthOriginRealIP = oRealIP
 		edgeHealthDirectBounces, edgeHealthDownloadBounces = oDirect, oDownloads
 		edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow, edgeHealthCDNSuspects, edgeHealthChallengeServing = oDet, oAcc, oErr, oBridge, oNow, oCDN, oServ
 	}

@@ -61,6 +61,7 @@ import (
 
 	"cfm/internal/edgeengine"
 	"cfm/internal/edgelog"
+	"cfm/internal/originrealip"
 	webdet "cfm/internal/webdetector"
 )
 
@@ -86,6 +87,11 @@ var (
 	// Whether the challenge server is up here: without it Check F measures
 	// nothing, which is `unknown`, never an all-clear.
 	edgeHealthChallengeServing = webdet.ChallengeServerServing
+	// Check G's source: the origin's real-IP trust of the edge, and whether an
+	// edge engine runs at all (without one there is nothing to trust).
+	edgeHealthOriginRealIP = func() (originrealip.Probe, bool) {
+		return originrealip.ProbeSystem(""), originrealip.EdgeActive()
+	}
 )
 
 // edgeHealthCDNSuspectMin is the distinct clients (an IPv4 address, an IPv6
@@ -655,6 +661,26 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	default:
 		findings = append(findings, sev.add("cdn-cached-challenge", "ok",
 			"no vhost had visitors holding a valid clearance bounced back to the challenge, not marked direct by the edge, for a page, from "+itoa(edgeHealthCDNSuspectMin)+"+ distinct clients in the last 24 h (in-memory: empty after a daemon restart)"+infoNote, fEv, ""))
+	}
+
+	// ── Check G: the origin sees the visitor, not the edge's 127.0.0.1 ──────────
+	// The edge proxies from the loopback; an origin that does not trust it logs
+	// 127.0.0.1 for every visitor and hands PHP REMOTE_ADDR=127.0.0.1 (qualityweb,
+	// 2026-10-29: cPanel without Imunify360, whose i360.remoteip.conf carries the
+	// trust everywhere else). Configuration only (internal/originrealip).
+	rp, edgeUp := edgeHealthOriginRealIP()
+	rEv := map[string]any{"panel": rp.Panel, "stack": rp.Stack, "edge_active": edgeUp, "source": rp.Source, "header": rp.Header}
+	switch ok, text := originrealip.Verdict(rp, edgeUp); {
+	case !ok && rp.Stack == originrealip.StackUnknown:
+		findings = append(findings, sev.add("origin-real-ip", "unknown", text, rEv, ""))
+	case !ok:
+		next := "run `cfm realip fix` (config test + graceful reload of the origin)"
+		if pl := originrealip.PlanFor(rp); pl.Action == originrealip.ActionManual {
+			next = pl.Reason
+		}
+		findings = append(findings, sev.add("origin-real-ip", "warn", text, rEv, next))
+	default:
+		findings = append(findings, sev.add("origin-real-ip", "ok", text, rEv, ""))
 	}
 
 	sort.SliceStable(findings, func(i, j int) bool {
