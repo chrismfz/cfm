@@ -11,22 +11,29 @@
 // i360.remoteip.conf carried the Apache trust; qualityweb (2026-10-29, cPanel
 // without Imunify360) had none and every site logged 127.0.0.1.
 //
-// Only the loopback is ever trusted, never the server's public address: a
-// process on the server (a tenant's PHP calling its own site) could otherwise
-// set the header and pose as any client. From outside the header cannot be
-// spoofed either way, since the edge overwrites X-Real-IP / CF-Connecting-IP and
-// appends the real peer to X-Forwarded-For.
+// What the trust lets through: from outside, nothing (the edge overwrites
+// X-Real-IP / CF-Connecting-IP and appends the real peer to X-Forwarded-For).
+// From the server itself, a process connecting to the origin directly on the
+// loopback can name any client; that is inherent in trusting the loopback, and
+// i360.remoteip.conf has the same exposure. The fix writes X-Real-IP rather
+// than X-Forwarded-For so that a local process going THROUGH the edge cannot:
+// the edge sets X-Real-IP to the peer (127.0.0.1 then), while mod_remoteip
+// walks an X-Forwarded-For past the trusted 127.0.0.1 hop to a forged entry.
+// The server's public address is never trusted.
 //
-// The probe reads configuration only. Apply (fix.go) writes it, and only
-// through a config test and a graceful reload, with a rollback on failure.
+// The probe reads configuration only, following the servers' own include
+// chains. Apply (fix.go) writes it, and only through a config test and a
+// graceful reload, with a rollback on failure.
 package originrealip
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Panel and stack names reported by the probe.
@@ -46,10 +53,10 @@ const (
 type Probe struct {
 	Panel     string `json:"panel"`               // cpanel | directadmin | ngm | plain
 	Stack     string `json:"stack"`               // apache | litespeed | nginx | unknown
-	Trusted   bool   `json:"trusted"`             // the loopback is trusted AND the client header is one the edge sets
+	Trusted   bool   `json:"trusted"`             // the loopback is trusted AND the effective client header is one the edge sets
 	Directive string `json:"directive,omitempty"` // what made it trusted
 	Source    string `json:"source,omitempty"`    // file holding the loopback trust
-	Header    string `json:"header,omitempty"`    // the header the origin reads the client from, when known
+	Header    string `json:"header,omitempty"`    // the effective header the origin reads the client from, when known
 	Note      string `json:"note,omitempty"`      // why it is not trusted, or other context
 }
 
@@ -61,19 +68,9 @@ var edgeHeaders = map[string]bool{
 	"cf-connecting-ip": true,
 }
 
-// loopbackTrust matches the ways an operator trusts the edge's loopback address:
-// the bare host, its /32 (or /128 for v6), and the whole-loopback 127.0.0.0/8.
-// It deliberately does NOT match 127.0.0.100 etc.
-const loopbackTrust = `(?:127\.0\.0\.1(?:/\d{1,2})?|127\.0\.0\.0/\d{1,2}|::1(?:/\d{1,3})?)`
-
 var (
-	// The `^\s*` anchor makes a `#`-commented directive line not match.
-	apacheRemoteIPRe    = regexp.MustCompile(`(?im)^\s*RemoteIP(?:Internal|Trusted)Proxy\s+` + loopbackTrust + `\b`)
-	apacheRemoteIPHdrRe = regexp.MustCompile(`(?im)^\s*RemoteIPHeader\s+(\S+)`)
-	nginxRealIPRe       = regexp.MustCompile(`(?im)^\s*set_real_ip_from\s+` + loopbackTrust + `\s*;`)
-	nginxRealIPHdrRe    = regexp.MustCompile(`(?im)^\s*real_ip_header\s+([^;\s]+)\s*;`)
-	// LiteSpeed's httpd_config.xml uses XML comments, not `#`, so lsNativeMatch
-	// strips `<!-- ... -->` before matching.
+	// LiteSpeed's httpd_config.xml uses XML comments, so lsNativeMatch strips
+	// `<!-- ... -->` before matching.
 	lsNativeRealIPRe = regexp.MustCompile(`(?is)<useIpInProxyHeader>\s*([12])\s*</useIpInProxyHeader>`)
 	// "Trusted IP Only" (2) honours the header only from an address the
 	// Access Control allow list marks trusted with a trailing T (127.0.0.1T),
@@ -82,73 +79,94 @@ var (
 	xmlCommentRe        = regexp.MustCompile(`(?s)<!--.*?-->`)
 )
 
-// layout is where a host keeps each piece; system is the real one, and tests
-// build their own under a temp dir.
+// layout is where a host keeps each piece, as logical paths; root prefixes
+// every one of them (empty on a real host, a temp dir in tests).
 type layout struct {
-	cpanelMarkers, daMarkers, ngmMarkers []string // panel install markers (dirs or files)
-	lsMarkers, apMarkers, ngMarkers      []string // origin install markers (dirs)
-	apacheGlobs, nginxGlobs, lsPaths     []string // config files the probe reads
+	root string
 
-	// activeStack names the origin family whose service is running, or "".
-	// Running beats installed: a DirectAdmin or NGM host running nginx keeps a
-	// leftover /etc/httpd (avgerinos, ngm.myip.gr).
-	activeStack func() string
+	cpanelMarkers, daMarkers, ngmMarkers []string // panel install markers (dirs or files)
+	lsMarkers, apMarkers, ngMarkers      []string // origin install markers
+
+	apacheMains []apacheMain // the first that exists is the server's main config
+	nginxMain   string
+	nginxPrefix string // what relative nginx includes resolve against
+	lsConfig    string
+
+	// activeStack names the origin family that is serving, or "", and whether
+	// that came from the :80 listener (decisive) or only from systemd unit
+	// state. Serving beats installed: DirectAdmin and NGM hosts running nginx
+	// keep a leftover /etc/httpd, and a host can keep a leftover /usr/local/lsws.
+	activeStack func() (stack string, fromListener bool)
 
 	// fix targets (fix.go)
 	cpanelApacheDir  string // cPanel: conf.d, included by httpd.conf
-	debApacheMain    string // Debian/Ubuntu main conf
-	debApacheDir     string // its IncludeOptional conf-enabled dir
-	elApacheMain     string // EL main conf
-	elApacheDir      string // its IncludeOptional conf.d dir
+	debApacheDir     string // Debian/Ubuntu: conf-enabled
+	elApacheDir      string // EL: conf.d
 	daApacheIncludes string // DirectAdmin: the operator include file httpd.conf loads
-	nginxMain        string
 	nginxConfD       string
 	daNginxIncludes  string // DirectAdmin: the operator include file nginx.conf loads in http{}
 }
+
+type apacheMain struct{ conf, serverRoot string }
 
 var system = layout{
 	cpanelMarkers: []string{"/usr/local/cpanel"},
 	daMarkers:     []string{"/usr/local/directadmin"},
 	ngmMarkers:    []string{"/etc/ngm", "/opt/ngm/bin/ngm"},
 	lsMarkers:     []string{"/usr/local/lsws"},
-	apMarkers:     []string{"/etc/apache2", "/usr/local/apache", "/etc/httpd"},
+	apMarkers:     []string{"/etc/apache2", "/etc/httpd"},
 	ngMarkers:     []string{"/etc/nginx"},
-	apacheGlobs: []string{
-		"/etc/apache2/conf.d/*.conf",          // cPanel drop-ins (i360.remoteip.conf, cfm-remoteip.conf)
-		"/etc/apache2/conf.d/includes/*.conf", // cPanel pre_main_*/post_* includes, cloudflare.conf
-		"/etc/apache2/conf/httpd.conf",
-		"/usr/local/apache/conf/includes/*.conf",
-		"/etc/apache2/apache2.conf", // Debian/Ubuntu
-		"/etc/apache2/conf-enabled/*.conf",
-		"/etc/httpd/conf/httpd.conf", // EL + DirectAdmin
-		"/etc/httpd/conf.d/*.conf",
-		"/etc/httpd/conf/extra/*.conf", // DirectAdmin includes
-		"/usr/local/directadmin/data/templates/custom/*.conf",
+	apacheMains: []apacheMain{
+		{"/etc/apache2/conf/httpd.conf", "/etc/apache2"}, // cPanel (EA4)
+		{"/etc/apache2/apache2.conf", "/etc/apache2"},    // Debian / Ubuntu
+		{"/etc/httpd/conf/httpd.conf", "/etc/httpd"},     // EL, DirectAdmin
 	},
-	nginxGlobs: []string{
-		"/etc/nginx/nginx.conf",
-		"/etc/nginx/*.conf", // DirectAdmin keeps its http{} includes here
-		"/etc/nginx/conf.d/*.conf",
-		"/etc/nginx/conf.d/*/*.conf",
-		"/etc/nginx/sites-enabled/*",
-		"/etc/nginx/conf/sites/*.conf", // NGM
-	},
-	lsPaths:          []string{"/usr/local/lsws/conf/httpd_config.xml"},
+	nginxMain:        "/etc/nginx/nginx.conf",
+	nginxPrefix:      "/etc/nginx",
+	lsConfig:         "/usr/local/lsws/conf/httpd_config.xml",
 	activeStack:      activeOriginStack,
 	cpanelApacheDir:  "/etc/apache2/conf.d",
-	debApacheMain:    "/etc/apache2/apache2.conf",
 	debApacheDir:     "/etc/apache2/conf-enabled",
-	elApacheMain:     "/etc/httpd/conf/httpd.conf",
 	elApacheDir:      "/etc/httpd/conf.d",
 	daApacheIncludes: "/etc/httpd/conf/extra/httpd-includes.conf",
-	nginxMain:        "/etc/nginx/nginx.conf",
 	nginxConfD:       "/etc/nginx/conf.d",
 	daNginxIncludes:  "/etc/nginx/nginx-includes.conf",
 }
 
-// grepMaxBytes caps per-file reads (origin configs are far smaller). A var so
-// tests can shrink it.
+// fs maps a logical path to where it is on disk.
+func (l layout) fs(p string) string {
+	if l.root == "" {
+		return p
+	}
+	return filepath.Join(l.root, p)
+}
+
+func (l layout) anyExists(paths []string) bool {
+	for _, p := range paths {
+		if _, err := os.Stat(l.fs(p)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// display strips the test root from a rooted path.
+func (l layout) display(p string) string {
+	if l.root == "" {
+		return p
+	}
+	if rel, err := filepath.Rel(l.root, p); err == nil && !strings.HasPrefix(rel, "..") {
+		return "/" + rel
+	}
+	return p
+}
+
+// grepMaxBytes caps per-file reads. A var so tests can shrink it.
 var grepMaxBytes int64 = 8 << 20 // 8 MiB
+
+// probeTimeout bounds each command the probe runs (systemctl, ss): edge_health
+// runs the probe inside an HTTP handler.
+const probeTimeout = 5 * time.Second
 
 // ProbeSystem checks this host. upstream is the origin service the health
 // collector detected (httpd / lshttpd / nginx), a hint only.
@@ -157,12 +175,20 @@ func ProbeSystem(upstream string) Probe {
 }
 
 func (l layout) probe(upstream string) Probe {
-	if l.activeStack != nil && !anyExists(l.lsMarkers) {
-		if running := l.activeStack(); running != "" {
+	stack := ""
+	if l.activeStack != nil {
+		running, fromListener := l.activeStack()
+		switch {
+		case running != "" && fromListener:
+			stack = running
+		case running != "":
 			upstream = running
 		}
 	}
-	p := l.probeStack(resolveOriginStack(upstream, l.lsMarkers, l.apMarkers, l.ngMarkers))
+	if stack == "" {
+		stack = l.resolveOriginStack(upstream)
+	}
+	p := l.probeStack(stack)
 	p.Panel = l.panel()
 	if !p.Trusted && p.Panel == PanelNGM && p.Stack == StackNginx {
 		p.Note += "; NGM renders nginx itself, so the trust has to come from NGM's templates (a hand-written file is overwritten on apply)"
@@ -172,11 +198,11 @@ func (l layout) probe(upstream string) Probe {
 
 func (l layout) panel() string {
 	switch {
-	case anyExists(l.cpanelMarkers):
+	case l.anyExists(l.cpanelMarkers):
 		return PanelCPanel
-	case anyExists(l.daMarkers):
+	case l.anyExists(l.daMarkers):
 		return PanelDirectAdmin
-	case anyExists(l.ngmMarkers):
+	case l.anyExists(l.ngmMarkers):
 		return PanelNGM
 	default:
 		return PanelPlain
@@ -186,70 +212,144 @@ func (l layout) panel() string {
 func (l layout) probeStack(stack string) Probe {
 	switch stack {
 	case StackApache:
-		return probeApache(StackApache, l.apacheGlobs)
+		return l.probeApache(StackApache)
 	case StackLiteSpeed:
 		// LiteSpeed resolves the client natively (useIpInProxyHeader) or through
 		// the Apache RemoteIP conf it loads (loadApacheConf=1).
-		if f := grepGlobsFunc(l.lsPaths, lsNativeMatch); f != "" {
-			return Probe{Stack: StackLiteSpeed, Trusted: true, Directive: "useIpInProxyHeader", Source: f}
+		if b, err := os.ReadFile(l.fs(l.lsConfig)); err == nil && lsNativeMatch(b) {
+			return Probe{Stack: StackLiteSpeed, Trusted: true, Directive: "useIpInProxyHeader", Source: l.lsConfig}
 		}
-		if ap := probeApache(StackLiteSpeed, l.apacheGlobs); ap.Trusted {
+		if ap := l.probeApache(StackLiteSpeed); ap.Trusted {
 			ap.Directive += " (loadApacheConf)"
 			return ap
 		}
 		return Probe{Stack: StackLiteSpeed, Note: "httpd_config.xml has no useIpInProxyHeader 1, or 2 with 127.0.0.1T in the allow list, and no Apache RemoteIP trust of 127.0.0.1"}
 	case StackNginx:
-		return probeNginx(l.nginxGlobs)
+		return l.probeNginx()
 	default:
 		return Probe{Stack: StackUnknown, Note: "no apache/litespeed/nginx origin detected on disk"}
 	}
 }
 
 // probeApache: mod_remoteip needs BOTH the loopback trusted and a RemoteIPHeader
-// naming a header the edge sets; one without the other leaves 127.0.0.1.
-func probeApache(stack string, globs []string) Probe {
-	trustFile := grepGlobs(globs, apacheRemoteIPRe)
-	headers := collect(globs, apacheRemoteIPHdrRe)
-	if trustFile == "" {
-		return Probe{Stack: stack, Header: strings.Join(headers, ","), Note: "no RemoteIPInternalProxy/RemoteIPTrustedProxy 127.0.0.1 in the Apache config"}
-	}
-	if len(headers) == 0 {
-		return Probe{Stack: stack, Source: trustFile, Note: "127.0.0.1 is trusted but no RemoteIPHeader is set, so mod_remoteip reads no header"}
-	}
-	if bad := foreignHeaders(headers); len(bad) > 0 {
-		return Probe{Stack: stack, Source: trustFile, Header: strings.Join(headers, ","),
-			Note: "RemoteIPHeader " + strings.Join(bad, ",") + " is not a header the edge sets (X-Forwarded-For, X-Real-IP, CF-Connecting-IP)"}
-	}
-	return Probe{Stack: stack, Trusted: true, Directive: "RemoteIP{Internal,Trusted}Proxy 127.0.0.1", Source: trustFile, Header: strings.Join(headers, ",")}
-}
-
-// probeNginx: set_real_ip_from 127.0.0.1 is enough with nginx's default
-// real_ip_header (X-Real-IP), or with one the edge sets.
-func probeNginx(globs []string) Probe {
-	trustFile := grepGlobs(globs, nginxRealIPRe)
-	headers := collect(globs, nginxRealIPHdrRe)
-	header := "X-Real-IP (default)"
-	if len(headers) > 0 {
-		header = strings.Join(headers, ",")
-	}
-	if trustFile == "" {
-		return Probe{Stack: StackNginx, Header: header, Note: "no set_real_ip_from 127.0.0.1 in the nginx config"}
-	}
-	if bad := foreignHeaders(headers); len(bad) > 0 {
-		return Probe{Stack: StackNginx, Source: trustFile, Header: header,
-			Note: "real_ip_header " + strings.Join(bad, ",") + " is not a header the edge sets (X-Forwarded-For, X-Real-IP, CF-Connecting-IP)"}
-	}
-	return Probe{Stack: StackNginx, Trusted: true, Directive: "set_real_ip_from 127.0.0.1", Source: trustFile, Header: header}
-}
-
-func foreignHeaders(headers []string) []string {
-	var bad []string
-	for _, h := range headers {
-		if !edgeHeaders[strings.ToLower(h)] {
-			bad = append(bad, h)
+// naming a header the edge sets, at server level (Apache's last RemoteIPHeader
+// wins). The config is read along Apache's own Include chain, so a file it never
+// loads does not count, and a <VirtualHost>'s own settings do not stand for the
+// server.
+func (l layout) probeApache(stack string) Probe {
+	var main *apacheMain
+	for i := range l.apacheMains {
+		if _, err := os.Stat(l.fs(l.apacheMains[i].conf)); err == nil {
+			main = &l.apacheMains[i]
+			break
 		}
 	}
-	return bad
+	if main == nil {
+		return Probe{Stack: stack, Note: "no Apache main config found"}
+	}
+	ds := l.apacheDirectives(main.conf, main.serverRoot, "remoteipinternalproxy", "remoteiptrustedproxy", "remoteipheader")
+	trust, header, scoped := "", "", 0
+	for _, d := range ds {
+		switch {
+		case d.scoped:
+			scoped++
+		case d.name == "remoteipheader" && len(d.args) > 0:
+			header = d.args[0]
+		case trust == "" && anyLoopback(d.args):
+			trust = l.display(d.file)
+		}
+	}
+	p := Probe{Stack: stack, Source: trust, Header: header}
+	switch {
+	case trust == "":
+		p.Note = "no server-level RemoteIPInternalProxy/RemoteIPTrustedProxy 127.0.0.1 in the Apache config it loads"
+	case header == "":
+		p.Note = "127.0.0.1 is trusted but no server-level RemoteIPHeader is set, so mod_remoteip reads no header"
+	case !edgeHeaders[strings.ToLower(header)]:
+		p.Note = "RemoteIPHeader " + header + " is not a header the edge sets (X-Forwarded-For, X-Real-IP, CF-Connecting-IP)"
+	default:
+		p.Trusted, p.Directive = true, "RemoteIP{Internal,Trusted}Proxy 127.0.0.1"
+	}
+	if scoped > 0 {
+		p.Note = joinNote(p.Note, strconv.Itoa(scoped)+" RemoteIP directive(s) inside <VirtualHost> blocks override the server-level ones for those sites")
+	}
+	return p
+}
+
+// probeNginx: set_real_ip_from 127.0.0.1 at http level is enough with nginx's
+// default real_ip_header (X-Real-IP), or with one the edge sets. Read along
+// nginx's include chain; a server{}'s own set_real_ip_from REPLACES the http
+// list for that site.
+func (l layout) probeNginx() Probe {
+	ds := l.nginxDirectives(l.nginxMain, l.nginxPrefix, "set_real_ip_from", "real_ip_header")
+	trust, header, scoped := "", "", 0
+	for _, d := range ds {
+		switch {
+		case d.scoped:
+			if d.name == "set_real_ip_from" {
+				scoped++
+			}
+		case d.name == "real_ip_header" && len(d.args) > 0:
+			header = d.args[0]
+		case d.name == "set_real_ip_from" && trust == "" && anyLoopback(d.args):
+			trust = l.display(d.file)
+		}
+	}
+	shown := header
+	if shown == "" {
+		shown = "X-Real-IP (default)"
+	}
+	p := Probe{Stack: StackNginx, Source: trust, Header: shown}
+	switch {
+	case trust == "":
+		p.Note = "no http-level set_real_ip_from 127.0.0.1 in the nginx config"
+	case header != "" && !edgeHeaders[strings.ToLower(header)]:
+		p.Note = "real_ip_header " + header + " is not a header the edge sets (X-Forwarded-For, X-Real-IP, CF-Connecting-IP)"
+	default:
+		p.Trusted, p.Directive = true, "set_real_ip_from 127.0.0.1"
+	}
+	if scoped > 0 {
+		p.Note = joinNote(p.Note, strconv.Itoa(scoped)+" set_real_ip_from line(s) inside server{} blocks replace the http-level list for those sites")
+	}
+	return p
+}
+
+// anyLoopback reports whether one of a trust directive's arguments covers the
+// edge's address: 127.0.0.1 or ::1, alone or as a loopback-only network
+// (127.0.0.0/8 .. /32, ::1/128). 127.0.0.1/1 covers half the internet and is
+// not a loopback trust.
+func anyLoopback(args []string) bool {
+	for _, a := range args {
+		if ip := net.ParseIP(a); ip != nil {
+			if ip.Equal(net.ParseIP("127.0.0.1")) || ip.Equal(net.IPv6loopback) {
+				return true
+			}
+			continue
+		}
+		_, n, err := net.ParseCIDR(a)
+		if err != nil {
+			continue
+		}
+		ones, bits := n.Mask.Size()
+		switch bits {
+		case 32:
+			if ones >= 8 && n.IP.IsLoopback() && n.Contains(net.ParseIP("127.0.0.1")) {
+				return true
+			}
+		case 128:
+			if ones == 128 && n.IP.Equal(net.IPv6loopback) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func joinNote(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + "; " + b
 }
 
 // lsNativeMatch reports whether an XML config makes LiteSpeed take the client
@@ -264,23 +364,42 @@ func lsNativeMatch(b []byte) bool {
 	return string(m[1]) == "1" || lsTrustedLoopbackRe.Match(b)
 }
 
-// originUnits maps the origin services to their family, LiteSpeed first. The
-// CFM edge runs as angie / openresty, never as nginx.service.
+// listenerNames maps the process names that can own :80 to their family. The
+// CFM edge (angie / openresty) listens on its own ports and is never the origin.
+var listenerNames = map[string]string{
+	"litespeed": StackLiteSpeed, "lshttpd": StackLiteSpeed,
+	"httpd": StackApache, "apache2": StackApache,
+	"nginx": StackNginx,
+}
+
+var ssUserRe = regexp.MustCompile(`\("([^"]+)",pid=`)
+
+// originUnits is the systemd fallback when the listener cannot be read,
+// LiteSpeed first.
 var originUnits = []struct{ unit, stack string }{
 	{"lsws", StackLiteSpeed}, {"lshttpd", StackLiteSpeed},
 	{"httpd", StackApache}, {"apache2", StackApache},
 	{"nginx", StackNginx},
 }
 
-// activeOriginStack is the family of the first origin service systemd reports
-// active, or "".
-func activeOriginStack() string {
-	for _, u := range originUnits {
-		if _, err := runCmd("systemctl", "is-active", "--quiet", u.unit); err == nil {
-			return u.stack
+// activeOriginStack names the family of the process listening on :80 — the
+// port the edge proxies to, so the one serving even when Apache and nginx both
+// run (DirectAdmin nginx_apache, cPanel ea-nginx) — or, when that cannot be
+// read, the first origin unit systemd reports active.
+func activeOriginStack() (string, bool) {
+	if out, err := runCmd(probeTimeout, "ss", "-Hltnp", "sport = :80"); err == nil {
+		for _, m := range ssUserRe.FindAllStringSubmatch(out, -1) {
+			if s, ok := listenerNames[m[1]]; ok {
+				return s, true
+			}
 		}
 	}
-	return ""
+	for _, u := range originUnits {
+		if _, err := runCmd(probeTimeout, "systemctl", "is-active", "--quiet", u.unit); err == nil {
+			return u.stack, false
+		}
+	}
+	return "", false
 }
 
 func normalizeOriginStack(upstream string) string {
@@ -297,21 +416,19 @@ func normalizeOriginStack(upstream string) string {
 	}
 }
 
-// resolveOriginStack picks the origin web-server family. The collector's
-// upstream hint is only trusted when the corresponding stack is actually
-// installed: LiteSpeed being present wins outright (it is frequently misreported
-// as "nginx" because the edge is nginx-based), and an nginx/apache hint that
-// matches nothing on disk falls back to whatever IS installed.
-func resolveOriginStack(upstream string, lsMarkers, apMarkers, ngMarkers []string) string {
+// resolveOriginStack picks the origin family from a hint and the disk, when
+// the listener could not say: an installed LiteSpeed wins (it is often
+// misreported as "nginx" because the edge is nginx-based), and a hint that
+// matches nothing installed falls back to whatever is.
+func (l layout) resolveOriginStack(upstream string) string {
 	hint := normalizeOriginStack(upstream)
-	lsPresent := anyExists(lsMarkers)
-	apPresent := anyExists(apMarkers)
-	ngPresent := anyExists(ngMarkers)
+	apPresent := l.anyExists(l.apMarkers)
+	ngPresent := l.anyExists(l.ngMarkers)
 	switch {
-	case lsPresent:
+	case l.anyExists(l.lsMarkers):
 		return StackLiteSpeed
 	case hint == StackLiteSpeed:
-		return StackLiteSpeed // confident hint even if the default marker path differs
+		return StackLiteSpeed
 	case hint == StackApache && apPresent:
 		return StackApache
 	case hint == StackNginx && ngPresent:
@@ -322,77 +439,5 @@ func resolveOriginStack(upstream string, lsMarkers, apMarkers, ngMarkers []strin
 		return StackNginx
 	default:
 		return StackUnknown
-	}
-}
-
-func anyExists(paths []string) bool {
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
-// grepGlobs returns the first regular file (expanded from globs) whose contents
-// match re, or "" if none.
-func grepGlobs(globs []string, re *regexp.Regexp) string {
-	return grepGlobsFunc(globs, re.Match)
-}
-
-// grepGlobsFunc is grepGlobs with an arbitrary content matcher. Each file read
-// is size-capped.
-func grepGlobsFunc(globs []string, match func([]byte) bool) string {
-	found := ""
-	eachFile(globs, func(f string, b []byte) bool {
-		if match(b) {
-			found = f
-			return false
-		}
-		return true
-	})
-	return found
-}
-
-// collect returns the distinct first capture group of re across globs, sorted.
-func collect(globs []string, re *regexp.Regexp) []string {
-	seen := map[string]bool{}
-	eachFile(globs, func(_ string, b []byte) bool {
-		for _, m := range re.FindAllSubmatch(b, -1) {
-			seen[string(m[1])] = true
-		}
-		return true
-	})
-	out := make([]string, 0, len(seen))
-	for h := range seen {
-		out = append(out, h)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// eachFile calls fn for every regular file the globs expand to (each path once,
-// size-capped) until fn returns false.
-func eachFile(globs []string, fn func(path string, body []byte) bool) {
-	seen := map[string]bool{}
-	for _, g := range globs {
-		matches, _ := filepath.Glob(g)
-		for _, f := range matches {
-			if seen[f] {
-				continue
-			}
-			seen[f] = true
-			fi, err := os.Stat(f)
-			if err != nil || !fi.Mode().IsRegular() || fi.Size() > grepMaxBytes {
-				continue
-			}
-			b, err := os.ReadFile(f) // #nosec G304 -- fixed system config globs
-			if err != nil {
-				continue
-			}
-			if !fn(f, b) {
-				return
-			}
-		}
 	}
 }

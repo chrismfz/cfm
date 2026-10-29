@@ -23,10 +23,13 @@ back-filled here — see the git/PR history for that period.
   trust that loopback logs 127.0.0.1 for every visitor and hands PHP
   `REMOTE_ADDR=127.0.0.1`. That was qualityweb (cPanel without Imunify360, whose
   `i360.remoteip.conf` carried the trust on the rest of the fleet), reported by a
-  customer. `cfm realip` shows the verdict; `cfm realip fix [--dry-run]` writes the
-  trust where it is missing — cPanel, DirectAdmin, Debian and EL Apache, DirectAdmin
-  and plain nginx — through a config test and a graceful reload, rolled back on
-  failure, trusting only the loopback. LiteSpeed and NGM get the manual step
+  customer. `cfm realip` shows the verdict, reading the config along the server's
+  own Include chain (a `<VirtualHost>`'s or `server{}`'s setting does not stand for
+  the server) and taking the origin from the :80 listener. `cfm realip fix
+  [--dry-run]` writes the trust where it is missing — cPanel, DirectAdmin, Debian
+  and EL Apache, DirectAdmin and plain nginx — through a config test and a graceful
+  reload, rolled back on failure, trusting only the loopback and reading
+  `X-Real-IP` (through the edge a local process cannot forge it). LiteSpeed and NGM get the manual step
   printed instead (CFM does not edit their config). The edge installers run it
   after deploying the edge (`CFM_SKIP_REALIP=1` skips). `edge_health` gains Check G
   (`origin-real-ip`), so `whats_wrong` warns about it. See `docs/origin-real-ip.md`.

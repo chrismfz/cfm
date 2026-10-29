@@ -34,7 +34,7 @@ var edgeUnits = []string{"angie", "openresty"}
 // EdgeActive reports whether a CFM edge engine is running on this host.
 func EdgeActive() bool {
 	for _, u := range edgeUnits {
-		if _, err := runCmd("systemctl", "is-active", "--quiet", u); err == nil {
+		if _, err := runCmd(probeTimeout, "systemctl", "is-active", "--quiet", u); err == nil {
 			return true
 		}
 	}

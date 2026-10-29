@@ -25,42 +25,55 @@ because of that.
 | `cfm health` | The `Origin real-IP` line under the edge diagnostics. |
 | `edge_health` (MCP / `/api/v1/system/edge-health`) | Check G, `origin-real-ip`; a `warn` reaches `whats_wrong`. |
 
-The verdict is **trusted** when the origin trusts 127.0.0.1 (or `::1`, `/32`,
-`127.0.0.0/8`) *and* reads one of the edge's three headers. It is **n/a (OK)**
-when no edge engine runs: then the origin faces the internet itself (avgerinos,
-a DirectAdmin nginx). It reads configuration only (`internal/originrealip`). The origin is the
-service that runs (`systemctl is-active` lsws / httpd / apache2 / nginx), not
-whatever is installed: DirectAdmin and NGM hosts running nginx keep a leftover
-`/etc/httpd` (avgerinos, ngm.myip.gr). An installed LiteSpeed still wins, as
-before (it is often misreported as nginx).
+The verdict is **trusted** when the origin trusts 127.0.0.1 (or `::1`,
+`127.0.0.1/32`, `127.0.0.0/8`) *and* the client header in effect is one of the
+edge's three. It is **n/a (OK)** when no edge engine runs: then the origin faces
+the internet itself (avgerinos, a DirectAdmin nginx).
+
+It reads configuration only (`internal/originrealip`), the way the server loads
+it: from the main config (`/etc/apache2/conf/httpd.conf` on cPanel,
+`/etc/apache2/apache2.conf` on Debian, `/etc/httpd/conf/httpd.conf` on EL and
+DirectAdmin, `/etc/nginx/nginx.conf`) along its `Include` / `IncludeOptional` /
+`include` chain. A file the server never loads does not count. Neither does a
+setting inside one `<VirtualHost>` or `server{}`: it covers that site only, so
+it is reported ("override the server-level ones for those sites") and the
+verdict rests on the server-level settings. A `server{}` with its own
+`set_real_ip_from` list replaces the http-level list for that site, which is
+worth knowing after a fix.
+
+The origin is the process listening on **:80**, the port the edge proxies to
+(`ss -ltnp`). That is right even when Apache and nginx both run (DirectAdmin
+nginx_apache, cPanel ea-nginx), and when DirectAdmin or NGM keep a leftover
+`/etc/httpd` (avgerinos, ngm.myip.gr) or a host keeps a leftover
+`/usr/local/lsws`. When the listener cannot be read, systemd unit state and
+then the installed directories decide.
 
 What counts, per stack:
 
-- **Apache:** `RemoteIPInternalProxy` / `RemoteIPTrustedProxy` with the loopback,
-  plus a `RemoteIPHeader` naming one of the edge's headers. mod_remoteip reads
-  no header without `RemoteIPHeader`, and the loopback alone does nothing. A
+- **Apache:** `RemoteIPInternalProxy` / `RemoteIPTrustedProxy` listing the
+  loopback, plus the **last** server-level `RemoteIPHeader` (Apache keeps the
+  last one) naming one of the edge's headers. mod_remoteip reads no header
+  without `RemoteIPHeader`, and the loopback alone does nothing. A
   `RemoteIPHeader` the edge does not set (say `X-Client-IP`) is reported, never
   overridden.
 - **LiteSpeed:** `useIpInProxyHeader` 1 in `httpd_config.xml`, or 2 ("Trusted
   IP Only") with `127.0.0.1T` in the Access Control allow list (mars). The
   Apache RemoteIP trust it loads (`loadApacheConf`) also counts.
-- **nginx:** `set_real_ip_from` with the loopback. The default `real_ip_header`
-  (`X-Real-IP`) or any of the edge's headers is fine; `proxy_protocol` or any
-  other header is reported.
-
-Files read: Apache `conf.d/*.conf`, `conf.d/includes/*.conf`, the main
-`httpd.conf` / `apache2.conf`, `conf-enabled/`, `/etc/httpd/conf.d/`,
-DirectAdmin's `conf/extra/*.conf`; nginx `nginx.conf`, `/etc/nginx/*.conf`
-(DirectAdmin's http-level includes), `conf.d/`, `sites-enabled/`, NGM's
-`conf/sites/`.
+- **nginx:** an http-level `set_real_ip_from` listing the loopback. The default
+  `real_ip_header` (`X-Real-IP`) or any of the edge's headers is fine;
+  `proxy_protocol` or any other header is reported. `stream{}` is ignored.
 
 ## Fix: `cfm realip fix`
 
-It writes only where the trust is missing, checks that the module is loaded
-(`apachectl -M` shows `remoteip_module`; `nginx -V` shows
+It writes only where the trust is missing. It checks that the module is loaded
+(`apachectl -M` shows `remoteip_module`, on cPanel the
+`ea-apache24-mod_remoteip` package; `nginx -V` shows
 `--with-http_realip_module`), runs the config test, and reloads gracefully. A
 failed config test restores the file byte for byte and reloads nothing. A
-second run changes nothing. `--dry-run` prints what it would write.
+second run changes nothing; it writes through a symlink and keeps the file's
+owner and mode; a marked block whose markers no longer pair up is refused
+rather than guessed at. `--dry-run` prints what it would write. Every command
+has a deadline.
 
 | Panel / stack | Written |
 |---|---|
@@ -79,26 +92,38 @@ The Apache file is
 <IfModule remoteip_module>
     RemoteIPInternalProxy 127.0.0.1
     RemoteIPInternalProxy ::1
-    RemoteIPHeader X-Forwarded-For    # only when no RemoteIPHeader is set anywhere
+    RemoteIPHeader X-Real-IP
 </IfModule>
 ```
 
-and the nginx one is `set_real_ip_from 127.0.0.1; set_real_ip_from ::1;`. When
-the origin already reads an edge header (cPanel's `cloudflare.conf` sets
-`RemoteIPHeader CF-Connecting-IP`), the fix adds the loopback trust only: the
-edge sets that header too.
+and the nginx one is `set_real_ip_from 127.0.0.1; set_real_ip_from ::1;` (with
+nginx's default `X-Real-IP`). On cPanel the drop-in loads after
+`cloudflare.conf`, so its `X-Real-IP` becomes the header in effect; Cloudflare
+visitors are already resolved by the edge. On DirectAdmin the managed block
+loads before `httpd-cloudflare.conf`, whose `X-Forwarded-For` stays in effect.
 
 The edge installers (`scripts/install-angie.sh`, `scripts/install-openresty.sh`)
 run `cfm realip fix` after deploying the edge conf. It is never fatal: the edge
 works either way. `CFM_SKIP_REALIP=1` skips it, and a `cfm` without the command
 prints the upgrade hint.
 
-## Why only the loopback
+## What the trust lets through
 
-The edge always connects from 127.0.0.1. Trusting the server's public address
-as well would let any process on the server set the header and pose as any
-client: a tenant's PHP calling its own site, for instance. From outside the
-header cannot be spoofed: the edge overwrites `X-Real-IP` and
-`CF-Connecting-IP`, and appends the real peer to `X-Forwarded-For`, which
-mod_remoteip and nginx read from the right. A Cloudflare visitor is resolved
-by the edge itself (`trusted_proxies.conf`) before it reaches the origin.
+From outside, nothing: the edge overwrites `X-Real-IP` and `CF-Connecting-IP`
+with the real peer and appends it to `X-Forwarded-For`, and a Cloudflare visitor
+is resolved by the edge itself (`trusted_proxies.conf`) first.
+
+From the server itself, trusting the loopback means trusting every local
+process: a tenant's PHP that connects to the origin directly on 127.0.0.1 can
+set the header and pose as any client (to an app's IP rules, `Require ip`, rate
+limits). That is inherent in the design, and `i360.remoteip.conf` has the same
+exposure. Two choices keep it no wider:
+
+- **Only the loopback is trusted**, never the server's public address (any
+  process could reach that too, and the edge never uses it).
+- **The fix writes `X-Real-IP`, not `X-Forwarded-For`.** Through the edge, the
+  edge sets `X-Real-IP` to its peer, so a local process gets 127.0.0.1 and
+  nothing more. With `X-Forwarded-For`, mod_remoteip walks past the trusted
+  127.0.0.1 hop the edge appends and takes a forged entry before it. Hosts whose
+  existing trust reads `X-Forwarded-For` (Imunify360's file) are left as they
+  are.
