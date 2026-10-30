@@ -487,12 +487,18 @@ local function waf_should_read_body(uri, method)
   -- 10028 (CVE-2026-48356). Read on POST / PUT / PATCH (the reader still caps
   -- the scan at waf_body_max_len). A body the size/CT gate would not have
   -- read is in burn-in for every rule but those two (BURNIN_ENFORCE_IDS).
+  -- Never more than the size/CT gate would have read, so a large or chunked
+  -- PUT / PATCH keeps streaming (an unread body is rule 10028's to refuse).
   if waf_ok and wdet_ok and select(2, pcall(wdet.magento_soap_call, uri, ngx.var.args)) == true then
-    if not (wutil_ok and wutil.waf_body_gate(lower(ngx.var.http_content_type or ""),
-            tonumber(ngx.var.http_content_length or ""), CFG.waf_body_read_max_cl, false)) then
-      ngx.ctx.cfm_body_burnin = true
+    local cl = tonumber(ngx.var.http_content_length or "")
+    local buffered = method == "post" and ngx.var.cfm_body_buffered == "1"
+    if (cl and cl <= (CFG.waf_body_read_max_cl or 0)) or buffered then
+      if not (wutil_ok and wutil.waf_body_gate(lower(ngx.var.http_content_type or ""),
+              cl, CFG.waf_body_read_max_cl, false)) then
+        ngx.ctx.cfm_body_burnin = true
+      end
+      return true
     end
-    return true
   end
 
   local ct = lower(ngx.var.http_content_type or "")
@@ -1755,6 +1761,9 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
       host = host, ip = ip, cookie = ngx.var.http_cookie or "",
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
       headers = req_headers, body = body_burnin and "" or req_body, self_origin = self_origin,
+      -- The body is held back for the second (burn-in) pass below: a rule
+      -- that reads an empty body as "not read" must not decide on it here.
+      body_deferred = body_burnin or nil,
       skip_rule_ids = skip_rule_ids,
       -- Rule 10022 (CVE-2026-109618): the request declared no body length
       -- (chunked, or HTTP/2-3 without the header) and nginx will stream it to
@@ -1807,7 +1816,7 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
         -- A BURNIN_ENFORCE_IDS block is the exception: it is enforced, over a
         -- challenge too (which a cleared client would otherwise turn into
         -- logonly below and pass upstream with the body).
-        waf_ctx.body, waf_ctx.shdict = req_body, nil
+        waf_ctx.body, waf_ctx.shdict, waf_ctx.body_deferred = req_body, nil, nil
         local b_ok, b_hit, b_reason, b_ttl, b_action, b_hits, b_rule = pcall(waf.check, waf_ctx)
         if not b_ok then
           if not SH or SH:add("bodyburnin|" .. tostring(ip), 1, 60) then

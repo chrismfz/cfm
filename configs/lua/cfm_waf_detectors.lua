@@ -5650,39 +5650,28 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
     return "other"
   end
 
-  -- Per-request scan of the names, shared by 10027 and 10028 (the same
-  -- request reaches both; the last call is kept, like php_multipart_parse).
-  -- Keyed on everything the scan reads, the whole Content-Type included (a
-  -- multipart boundary decides what PHP parses): a request that differs in
-  -- any of them is scanned afresh.
-  local m_key, m_hit, m_seen
-  local function names_scan(kind, method, args, body, headers, media)
-    local ct = php_content_type(headers)
-    if m_key and m_key[1] == body and m_key[2] == args and m_key[3] == method
-       and m_key[4] == ct and m_key[5] == kind then
-      return m_hit, m_seen
-    end
+  -- The names scan, done once per request: 10027 and 10028 share it through
+  -- `memo`, a table check() makes per request (nothing is kept between
+  -- requests).
+  local function names_scan(memo, kind, method, args, body, headers, media)
+    if memo and memo.scan then return memo.scan[1], memo.scan[2] end
     local seen = {}
     local hit = ((kind == "soap" or has(media, "xml")) and xml_names_hit(body, seen))
              or (has(media, "json") and json_keys_hit(body, seen))
              or form_keys_hit(method, args, body, headers, seen)
-    m_key, m_hit, m_seen = { body, args, method, ct, kind }, hit, seen
+    if memo then memo.scan = { hit, seen } end
     return hit, seen
   end
 
-  -- What the two rules share for one request, or nil when it is no web API
-  -- call by a method that can carry a body. `route` / `anon` come from the
-  -- raw path and $uri (either counts); `services` only for SOAP.
-  local c_key, c_val
-  local function polyshell_ctx(uri, raw_uri, method, args, body, headers)
+  -- What the two rules share for one request (kept in `memo`), or nil when
+  -- it is no web API call by a method that can carry a body. `route` /
+  -- `anon` come from the raw path and $uri (either counts); `services` only
+  -- for SOAP; `cartsave` is a REST cart route or a SOAP cart service.
+  local function polyshell_ctx(memo, uri, raw_uri, method, args, body, headers)
     if method == "get" or method == "head" or method == "options" then return nil end
+    if memo and memo.done then return memo.ctx end
+    if memo then memo.done = true end
     uri = uri or ""
-    local ct = php_content_type(headers)
-    if c_key and c_key[1] == uri and c_key[2] == raw_uri and c_key[3] == method and c_key[4] == args
-       and c_key[5] == body and c_key[6] == ct then
-      return c_val
-    end
-    c_key, c_val = { uri, raw_uri, method, args, body, ct }, nil
     local raw = raw_uri and raw_uri:match("^[^?#]*") or nil
     local kind = webapi_kind(uri, raw)
     if not kind then return nil end
@@ -5697,7 +5686,7 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
       c.services = soap_services(c.write and method or "get", args, c.body, headers)
     end
     c.cartsave = c.route ~= nil or c.services == "cart"
-    c_val = c
+    if memo then memo.ctx = c end
     return c
   end
 
@@ -5711,12 +5700,12 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
   end
 
   -- Rule 10027 (armed): the three names in a cart-save request.
-  function _M.detect_cve_magento_polyshell(uri, raw_uri, method, args, body, headers)
+  function _M.detect_cve_magento_polyshell(uri, raw_uri, method, args, body, headers, memo)
     if method ~= "post" and method ~= "put" and method ~= "patch" then return nil end
-    local c = polyshell_ctx(uri, raw_uri, method, args, body, headers)
+    local c = polyshell_ctx(memo, uri, raw_uri, method, args, body, headers)
     if not c then return nil end
     if not c.cartsave then return nil end
-    if names_scan(c.kind, method, args, c.body, headers, c.media) then return "FILE_INFO" end
+    if names_scan(memo, c.kind, method, args, c.body, headers, c.media) then return "FILE_INFO" end
     return nil
   end
 
@@ -5760,13 +5749,14 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
   --               other services.
   -- A request at …/soap with neither `services` nor an XML body is a shop's
   -- own page there, not Magento's endpoint, and is left alone.
-  function _M.detect_cve_magento_polyshell_unseen(uri, raw_uri, method, args, body, headers, body_unread)
+  function _M.detect_cve_magento_polyshell_unseen(uri, raw_uri, method, args, body, headers, body_unread, memo)
     if body_unread then return nil end
-    local c = polyshell_ctx(uri, raw_uri, method, args, body, headers)
+    local c = polyshell_ctx(memo, uri, raw_uri, method, args, body, headers)
     if not c then return nil end
     -- The same names off the cart-save routes (on a cart-save request they
-    -- are 10027's, and its exclude or demotion must hold).
-    if c.write and not c.cartsave and (names_scan(c.kind, method, args, c.body, headers, c.media)) then
+    -- are 10027's, and its exclude or demotion must hold; an integration that
+    -- uploads real files, over 32 KB, needs 10028 excluded too, for OVERSIZE).
+    if c.write and not c.cartsave and (names_scan(memo, c.kind, method, args, c.body, headers, c.media)) then
       return "FILE_INFO"
     end
     -- Everything below is about a cart-save request 10027 could not read.
@@ -5801,11 +5791,13 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
     if not cut then return nil end
     if c.kind == "soap" then
       if c.services == "cart" then return "OVERSIZE" end
-      -- `services` only in a form body, past the cut
+      -- `services` only in a form body, past the cut: the body is still the
+      -- SOAP envelope SoapServer parses (it starts with `<`, checked above),
+      -- with the field inside it, e.g. in a comment.
       if maybe_soap_cart and c.media == "application/x-www-form-urlencoded" then return "OVERSIZE" end
       return nil
     end
-    local _, seen = names_scan(c.kind, method, args, c.body, headers, c.media)
+    local _, seen = names_scan(memo, c.kind, method, args, c.body, headers, c.media)
     if seen.co or c.anon then return "OVERSIZE" end
     return nil
   end

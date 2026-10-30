@@ -12,8 +12,9 @@
 --
 -- Magento reads a field name with every `_` removed and the case ignored
 -- (ServiceInputProcessor + hasMethod), so the detector does too. 10027 needs
--- custom_options + file_info in any web API request (/rest/, /soap); 10028 is
--- what keeps it from reading the request (held ban).
+-- custom_options + file_info + base64_encoded_data on a cart-save request (a
+-- REST cart route, a SOAP cart service); 10028 (ban held) takes the same
+-- names elsewhere and what keeps 10027 from reading the request.
 
 _G.ngx = {
   now           = function() return 1000 end,
@@ -55,12 +56,13 @@ end
 
 local function req(uri, body, opts)
   opts = opts or {}
+  local deferred = opts.deferred
   local headers = { ["content-type"] = opts.ct or "application/json" }
   if opts.cl ~= false then headers["content-length"] = tostring(opts.cl or #body) end
   return {
     uri = uri, raw_uri = opts.raw or uri, args = opts.args or "", method = opts.method or "POST",
     ip = "213.163.195.0", headers = headers, body = body, cookie = "",
-    body_unread = opts.unread,
+    body_unread = opts.unread, body_deferred = deferred,
   }
 end
 
@@ -227,6 +229,11 @@ do
   fires(req(GUEST, mpb(), { ct = "multipart/form-data; boundary=BBB" }), "FILE_INFO",
     "the same body under its boundary, right after")
 end
+-- cfm.lua's first pass over a burn-in body (body held back for a second
+-- pass): nothing was cut, nothing to refuse yet
+clean(req("/soap/default", "", { cl = 900, args = "services=quoteGuestCartItemRepositoryV1",
+  ct = "application/octet-stream", deferred = true }), "the first pass over a deferred SOAP body")
+clean(req(GUEST, "", { cl = false, deferred = true }), "the first pass over a deferred chunked cart body")
 -- With 10027 excluded or demoted (an integration's own uploads), 10028 must
 -- not refuse the same cart-save request
 waf.set_rule("rule_cve_magento_polyshell", "disabled")

@@ -1294,7 +1294,8 @@ local function check_impl(ctx, st)
   do
     local mode = rule_mode(CFG.rule_cve_magento_polyshell, "block")
     if mode ~= "disabled" then
-      local tag = det.detect_cve_magento_polyshell(uri, raw_uri, m_lower, args, body, headers)
+      st.polyshell = st.polyshell or {}
+      local tag = det.detect_cve_magento_polyshell(uri, raw_uri, m_lower, args, body, headers, st.polyshell)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag, ttl, mode, RULE_IDS.rule_cve_magento_polyshell) then goto done end
@@ -2570,7 +2571,11 @@ local function check_impl(ctx, st)
   do
     local mode = rule_mode(CFG.rule_cve_magento_polyshell_unseen, "block")
     if mode ~= "disabled" then
-      local tag = det.detect_cve_magento_polyshell_unseen(uri, raw_uri, m_lower, args, body, headers, ctx.body_unread == true)
+      st.polyshell = st.polyshell or {}
+      -- body_deferred: cfm.lua's first pass over a burn-in body, which it
+      -- hands the WAF in a second pass; no body was "cut" here.
+      local tag = det.detect_cve_magento_polyshell_unseen(uri, raw_uri, m_lower, args, body, headers,
+        ctx.body_unread == true or ctx.body_deferred == true, st.polyshell)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag, ttl, mode, RULE_IDS.rule_cve_magento_polyshell_unseen) then goto done end
