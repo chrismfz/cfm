@@ -307,6 +307,9 @@ end
 -- for the pure ct_is_inspectable() classifier used by the body-read gate (F07).
 -- If it fails to load, the F07 Content-Type branch fails closed (skips the read).
 local wutil_ok, wutil = pcall(require, "cfm_waf_util")
+-- cfm_waf_detectors (a dependency of cfm_waf): its Magento SOAP matcher
+-- decides which SOAP bodies waf_should_read_body reads.
+local wdet_ok, wdet = pcall(require, "cfm_waf_detectors")
 
 -- HTTP/3 Alt-Svc emission is intentionally NOT hooked here. It lives in a
 -- server-level header_filter_by_lua_block (see angie.conf / openresty.conf)
@@ -478,22 +481,18 @@ local function waf_should_read_body(uri, method)
   if ngx.ctx.cfm_resumed_post then return true end
 
   -- Magento's SOAP endpoint (…/soap, …/soap/<store>, with `services` in the
-  -- query, which every SOAP call carries): its SoapServer reads the body
-  -- whatever the Content-Type, so a cart-item save sent as
-  -- application/octet-stream reached it unread, past rules 10027 / 10028
-  -- (CVE-2026-48356). Read on POST / PUT / PATCH (the reader still caps the
-  -- scan at waf_body_max_len). A body the size/CT gate would not have read is
-  -- in burn-in for every rule but those two (BURNIN_ENFORCE_IDS).
-  do
-    local p = uri:gsub("/+", "/"):gsub("/$", "")
-    if (p:find("/soap$") or p:find("/soap/[^/]+$"))
-       and lower(ngx.unescape_uri(ngx.var.args or "")):find("services", 1, true) then
-      if not (wutil_ok and wutil.waf_body_gate(lower(ngx.var.http_content_type or ""),
-              tonumber(ngx.var.http_content_length or ""), CFG.waf_body_read_max_cl, false)) then
-        ngx.ctx.cfm_body_burnin = true
-      end
-      return true
+  -- query, which every SOAP call carries; one matcher, in the detector): its
+  -- SoapServer reads the body whatever the Content-Type, so a cart-item save
+  -- sent as application/octet-stream reached it unread, past rules 10027 /
+  -- 10028 (CVE-2026-48356). Read on POST / PUT / PATCH (the reader still caps
+  -- the scan at waf_body_max_len). A body the size/CT gate would not have
+  -- read is in burn-in for every rule but those two (BURNIN_ENFORCE_IDS).
+  if waf_ok and wdet_ok and select(2, pcall(wdet.magento_soap_call, uri, ngx.var.args)) == true then
+    if not (wutil_ok and wutil.waf_body_gate(lower(ngx.var.http_content_type or ""),
+            tonumber(ngx.var.http_content_length or ""), CFG.waf_body_read_max_cl, false)) then
+      ngx.ctx.cfm_body_burnin = true
     end
+    return true
   end
 
   local ct = lower(ngx.var.http_content_type or "")

@@ -67,7 +67,6 @@ back-filled here — see the git/PR history for that period.
   cart or SOAP body larger than it reads or not read, an XML entity
   declaration, or an encoding it cannot read. The edge now reads Magento's
   SOAP bodies whatever their Content-Type, as Magento does.
-  uploads a file option through its own form, not this API.
 
 ## 2026.10.28
 

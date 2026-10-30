@@ -5652,26 +5652,37 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
 
   -- Per-request scan of the names, shared by 10027 and 10028 (the same
   -- request reaches both; the last call is kept, like php_multipart_parse).
+  -- Keyed on everything the scan reads, the whole Content-Type included (a
+  -- multipart boundary decides what PHP parses): a request that differs in
+  -- any of them is scanned afresh.
   local m_key, m_hit, m_seen
   local function names_scan(kind, method, args, body, headers, media)
+    local ct = php_content_type(headers)
     if m_key and m_key[1] == body and m_key[2] == args and m_key[3] == method
-       and m_key[4] == media and m_key[5] == kind then
+       and m_key[4] == ct and m_key[5] == kind then
       return m_hit, m_seen
     end
     local seen = {}
     local hit = ((kind == "soap" or has(media, "xml")) and xml_names_hit(body, seen))
              or (has(media, "json") and json_keys_hit(body, seen))
              or form_keys_hit(method, args, body, headers, seen)
-    m_key, m_hit, m_seen = { body, args, method, media, kind }, hit, seen
+    m_key, m_hit, m_seen = { body, args, method, ct, kind }, hit, seen
     return hit, seen
   end
 
   -- What the two rules share for one request, or nil when it is no web API
   -- call by a method that can carry a body. `route` / `anon` come from the
   -- raw path and $uri (either counts); `services` only for SOAP.
+  local c_key, c_val
   local function polyshell_ctx(uri, raw_uri, method, args, body, headers)
     if method == "get" or method == "head" or method == "options" then return nil end
     uri = uri or ""
+    local ct = php_content_type(headers)
+    if c_key and c_key[1] == uri and c_key[2] == raw_uri and c_key[3] == method and c_key[4] == args
+       and c_key[5] == body and c_key[6] == ct then
+      return c_val
+    end
+    c_key, c_val = { uri, raw_uri, method, args, body, ct }, nil
     local raw = raw_uri and raw_uri:match("^[^?#]*") or nil
     local kind = webapi_kind(uri, raw)
     if not kind then return nil end
@@ -5685,7 +5696,18 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
     else
       c.services = soap_services(c.write and method or "get", args, c.body, headers)
     end
+    c.cartsave = c.route ~= nil or c.services == "cart"
+    c_val = c
     return c
+  end
+
+  -- A Magento SOAP call: a …/soap[/<store>] path whose query names its
+  -- `services` (every SOAP client sends them there), as PHP reads the query.
+  -- cfm.lua reads such a body whatever its Content-Type, as SoapServer does.
+  function _M.magento_soap_call(uri, args)
+    if not is_soap_path(uri) or not args or args == "" then return false end
+    local f = _M.php_request_fields("get", args, "", nil, MAGENTO_SOAP_WANT)
+    return f.services ~= nil and #f.services > 0
   end
 
   -- Rule 10027 (armed): the three names in a cart-save request.
@@ -5693,7 +5715,7 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
     if method ~= "post" and method ~= "put" and method ~= "patch" then return nil end
     local c = polyshell_ctx(uri, raw_uri, method, args, body, headers)
     if not c then return nil end
-    if not (c.route or c.services == "cart") then return nil end
+    if not c.cartsave then return nil end
     if names_scan(c.kind, method, args, c.body, headers, c.media) then return "FILE_INFO" end
     return nil
   end
@@ -5742,12 +5764,22 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
     if body_unread then return nil end
     local c = polyshell_ctx(uri, raw_uri, method, args, body, headers)
     if not c then return nil end
+    -- The same names off the cart-save routes (on a cart-save request they
+    -- are 10027's, and its exclude or demotion must hold).
+    if c.write and not c.cartsave and (names_scan(c.kind, method, args, c.body, headers, c.media)) then
+      return "FILE_INFO"
+    end
+    -- Everything below is about a cart-save request 10027 could not read.
+    -- A SOAP call whose `services` we could not see (none in the query, the
+    -- body not read or cut) may still be one, through a form body.
+    local maybe_soap_cart = c.kind == "soap" and c.services == nil
+    if not c.cartsave and not maybe_soap_cart then return nil end
     local b = c.body
     if b:sub(1, 3) == "\239\187\191" then b = b:sub(4) end
     local lead = b:match("^%s*(.)")
-    if c.kind == "soap" and not c.services and lead ~= "<" then return nil end
+    if maybe_soap_cart and lead ~= nil and lead ~= "<" then return nil end
     local xml = c.kind == "soap" or has(c.media, "xml")
-    if c.write and b ~= "" then
+    if c.write and b ~= "" and c.cartsave then
       if (xml or has(c.media, "json")) and b:find("%z") then return "UNREADABLE" end
       if xml then
         if lead ~= nil and lead ~= "<" then return "UNREADABLE" end
@@ -5755,20 +5787,26 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
         local enc = decl:match("encoding%s*=%s*[\"']([^\"']*)")
         if enc and not xml_enc_ascii_compatible(enc) then return "UNREADABLE" end
         if b:find("<!%s*[Ee][Nn][Tt][Ii][Tt][Yy]") then return "XML_ENTITY" end
+        -- ext/soap honours an xsi:type override: a SOAP-encoded Map builds its
+        -- keys from <key> TEXT, which the name scan does not read. Magento's
+        -- document/literal clients send none.
+        if c.kind == "soap" and b:find("[%w_%.%-]+:[Tt][Yy][Pp][Ee]%s*=") then return "UNREADABLE" end
       end
     end
-    local hit, seen
-    if c.write then hit, seen = names_scan(c.kind, method, args, c.body, headers, c.media) end
-    if hit then return "FILE_INFO" end
-    -- Not held whole: cut by the cap, or a declared body the edge did not read.
+    -- Not held whole: cut by the cap, or (SOAP, which reads a body whatever
+    -- the method) a declared body the edge did not read.
     local cut
-    if c.write then cut = body_was_cut(c.body, headers) else cut = c.body == "" and declares_body(headers) end
+    if c.write then cut = body_was_cut(c.body, headers)
+    elseif c.kind == "soap" then cut = c.body == "" and declares_body(headers) end
     if not cut then return nil end
     if c.kind == "soap" then
-      if c.services ~= "other" then return "OVERSIZE" end
+      if c.services == "cart" then return "OVERSIZE" end
+      -- `services` only in a form body, past the cut
+      if maybe_soap_cart and c.media == "application/x-www-form-urlencoded" then return "OVERSIZE" end
       return nil
     end
-    if (seen and seen.co) or c.anon then return "OVERSIZE" end
+    local _, seen = names_scan(c.kind, method, args, c.body, headers, c.media)
+    if seen.co or c.anon then return "OVERSIZE" end
     return nil
   end
 end

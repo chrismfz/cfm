@@ -182,8 +182,12 @@ do
   local SOAP_HEAD = '<?xml version="1.0"?><!--' .. string.rep("A", 33000)
   fires(req("/soap/default", SOAP_HEAD, { cl = 40000, args = "services=quoteGuestCartItemRepositoryV1",
     ct = "text/xml" }), "OVERSIZE", "a SOAP call padded past the cut")
-  fires(req("/soap/default", SOAP_HEAD, { cl = 40000, ct = "text/xml" }), "OVERSIZE",
-    "a padded SOAP call, services not in the query")
+  fires(req("/soap/default", SOAP_HEAD, { cl = 40000, ct = "application/x-www-form-urlencoded" }), "OVERSIZE",
+    "a padded SOAP call, services possibly in the form body past the cut")
+  clean(req("/soap/server.php", SOAP_HEAD, { cl = 40000, ct = "text/xml" }), "a large envelope to a non-Magento SOAP server")
+  clean(req("/rest/V1/orders", '{"entity":{"items":[{"product_option":{"extension_attributes":{"custom_options":[' ..
+    string.rep(" ", 33000), { cl = 40000 }), "a large order write-back (custom_options, not a cart route)")
+  clean(req(GUEST .. "/5", "", { method = "DELETE", cl = 2 }), "a cart item DELETE with a body")
   clean(req("/soap/default", SOAP_HEAD, { cl = 40000, args = "services=catalogProductRepositoryV1",
     ct = "text/xml" }), "a large SOAP product save")
   fires(req("/soap/default", "", { method = "DELETE", cl = 900, args = "services=quoteGuestCartItemRepositoryV1" }),
@@ -210,6 +214,24 @@ fires(req("/rest/V1/orders", '{"entity":{"items":[{"product_option":{"extension_
   "FILE_INFO", "an order write-back with a file option", 10028)
 clean(req("/rest/V1/orders", '{"entity":{"items":[{"product_option":{"extension_attributes":{"custom_options":' ..
   '[{"extension_attributes":{"file_info":{"name":"logo.png"}}}]}}}]}}'), "an order write-back, no file content")
+-- ext/soap's xsi:type Map builds keys from text the name scan does not read
+fires(req("/soap/default", '<?xml version="1.0"?><env:Envelope><env:Body><cartItem><extensionAttributes ' ..
+  'xsi:type="ns2:Map"><item><key>custom_options</key></item></extensionAttributes></cartItem></env:Body></env:Envelope>',
+  { args = "services=quoteGuestCartItemRepositoryV1", ct = "text/xml" }), "UNREADABLE", "a SOAP-encoded Map")
+-- The per-request scan cache must not carry one request's answer to another
+do
+  local base = "cartItem[product_option][extension_attributes][custom_options][0][extension_attributes][file_info]"
+  local function mpb(bd) return "--BBB\r\n" ..
+    'Content-Disposition: form-data; name="' .. base .. '[base64_encoded_data]"\r\n\r\nR0lG\r\n--BBB--\r\n' end
+  clean(req(GUEST, mpb(), { ct = "multipart/form-data; boundary=AAA" }), "a multipart body under the wrong boundary")
+  fires(req(GUEST, mpb(), { ct = "multipart/form-data; boundary=BBB" }), "FILE_INFO",
+    "the same body under its boundary, right after")
+end
+-- With 10027 excluded or demoted (an integration's own uploads), 10028 must
+-- not refuse the same cart-save request
+waf.set_rule("rule_cve_magento_polyshell", "disabled")
+clean(req(GUEST, attack_json()), "10027 excluded: 10028 leaves a cart-save request alone")
+waf.set_rule("rule_cve_magento_polyshell", "block")
 -- nginx can normalise $uri away from the route Magento reads on the raw path
 fires(req("/", attack_json(), { raw = GUEST }), "FILE_INFO", "the route only on the raw path")
 
@@ -265,7 +287,7 @@ check(det.detect_cve_magento_polyshell_unseen(GUEST, nil, "post", "", ADD,
 do
   local f = assert(io.open("configs/lua/cfm.lua"))
   local src = f:read("*a"); f:close()
-  local a = src:find('if (p:find("/soap$") or p:find("/soap/[^/]+$"))', 1, true)
+  local a = src:find("pcall(wdet.magento_soap_call, uri, ngx.var.args)", 1, true)
   local gate = src:find("local function waf_should_read_body", 1, true)
   local allow = src:find('if has(uri, "/xmlrpc.php")', 1, true)
   check(a and gate and allow and gate < a and a < allow,
