@@ -42,6 +42,14 @@ back-filled here — see the git/PR history for that period.
   `127.0.0.1T` in the allow list, and called Apache trusted with no
   `RemoteIPHeader` set (mod_remoteip then reads nothing).
 
+### Changed
+- **The edge access log records each request's size (`req_len=`).** The
+  `log_format cfm` line (OpenResty and Angie) ends with
+  `req_len=$request_length`, the request line, headers and body as received.
+  It is there to measure which routes legitimately take bodies larger than
+  the 32 KB the WAF reads, before any size-based rule. The log readers parse
+  fields by name, so nothing else changes; the line is a few bytes longer.
+
 ### Security
 - **New WAF rules 10027 / 10028 block the Magento "PolyShell" file upload
   (CVE-2026-48356).** An anonymous request to a cart's items API can make
