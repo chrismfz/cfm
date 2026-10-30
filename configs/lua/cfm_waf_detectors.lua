@@ -5518,114 +5518,168 @@ end
 -- Magento's own storefront uploads a file option through the
 -- /checkout/cart/add form, never through this API.
 --
---   FILE_INFO    such a key / element in the body.
---   OVERSIZE     a body longer than the edge reads (waf_body_max_len), or one
---                it did not read (a PUT over the size gate, a chunked PUT):
---                the field can sit past the cut. A cart item is a few hundred
---                bytes; the attack's was ~106 KB. guest-carts and carts/mine
---                only: carts/<id> is a common REST shape outside Magento.
---   XML_ENTITY   an XML body that declares entities (one could build the
---                element out of a reference).
---   UNREADABLE   a body the scan cannot read the way Magento would: a raw NUL
---                (UTF-16/32 XML; never valid JSON), an XML body that does not
---                start with `<` (after a UTF-8 BOM), or one declaring an
---                encoding other than UTF-8 / ASCII / ISO-8859 / Latin (EBCDIC).
-local MAGENTO_POLYSHELL_KEYS = { fileinfo = true, base64encodeddata = true }
+-- Rule 10027 (FILE_INFO, armed) blocks such a key / element in the body.
+-- Rule 10028 (edge block, ban held) blocks what keeps the scan from seeing it:
+-- a body cut or unread, an XML entity declaration, an unreadable encoding
+-- (detect_cve_magento_polyshell_unseen, below).
+do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
+  local MAGENTO_POLYSHELL_KEYS = { fileinfo = true, base64encodeddata = true }
 
-local function magento_key_hit(k)
-  return MAGENTO_POLYSHELL_KEYS[(lower(k):gsub("_", ""))] == true
-end
+  local function magento_key_hit(k)
+    return MAGENTO_POLYSHELL_KEYS[(lower(k):gsub("_", ""))] == true
+  end
 
--- Every JSON object key in the part of the body the edge holds: a string
--- token followed (after blanks) by `:`. Strings are walked whole, so a key
--- spelled inside a string VALUE is not one. A token cut by the body cap ends
--- the walk.
-local function json_keys_hit(body)
-  local i, n = 1, #body
-  while true do
-    local q = body:find('"', i, true)
-    if not q then return false end
-    local j = q + 1
+  -- Every JSON object key in the part of the body the edge holds: a string
+  -- token followed (after blanks) by `:`. Strings are walked whole, so a key
+  -- spelled inside a string VALUE is not one. A token cut by the body cap ends
+  -- the walk.
+  local function json_keys_hit(body)
+    local i, n = 1, #body
     while true do
-      local k = body:find('["\\]', j)
-      if not k then return false end
-      if body:sub(k, k) == "\\" then j = k + 2 else j = k; break end
+      local q = body:find('"', i, true)
+      if not q then return false end
+      local j = q + 1
+      while true do
+        local k = body:find('["\\]', j)
+        if not k then return false end
+        if body:sub(k, k) == "\\" then j = k + 2 else j = k; break end
+      end
+      local after = body:find("[^ \t\r\n]", j + 1)
+      if after and body:sub(after, after) == ":"
+         and magento_key_hit(util.json_unescape_ascii(body:sub(q + 1, j - 1))) then
+        return true
+      end
+      i = j + 1
+      if i > n then return false end
     end
-    local after = body:find("[^ \t\r\n]", j + 1)
-    if after and body:sub(after, after) == ":"
-       and magento_key_hit(util.json_unescape_ascii(body:sub(q + 1, j - 1))) then
-      return true
+  end
+
+  -- Element names (namespace prefix dropped) and attribute names of an XML
+  -- body, already lowercased.
+  local function xml_names_hit(lb)
+    for name in lb:gmatch("<%s*/?%s*([%w_%.:%-]+)") do
+      if magento_key_hit(name:match("([^:]*)$")) then return true end
     end
-    i = j + 1
-    if i > n then return false end
-  end
-end
-
--- Element names (namespace prefix dropped) and attribute names of an XML
--- body, already lowercased.
-local function xml_names_hit(lb)
-  for name in lb:gmatch("<%s*/?%s*([%w_%.:%-]+)") do
-    if magento_key_hit(name:match("([^:]*)$")) then return true end
-  end
-  for name in lb:gmatch("[%s\"']([%w_%.:%-]+)%s*=") do
-    if magento_key_hit(name:match("([^:]*)$")) then return true end
-  end
-  return false
-end
-
--- The encodings an XML body may declare and still be read by the scan.
-local XML_ASCII_ENC = { ["utf-8"] = true, utf8 = true, ["us-ascii"] = true, ascii = true }
-
--- "guest" (guest-carts/<id>), "mine" (carts/mine) or "cart" (carts/<id>, the
--- admin route) for /rest/[<store>/][async/[bulk/]]V<n>/…/items[/<itemId>]
--- ($uri: decoded and lowercased here; `/rest/` anywhere covers
--- /index.php/rest/). nil otherwise.
-local function magento_cart_items_rest(u)
-  if not has(u, "/rest/") then return nil end
-  u = u:gsub("/+", "/"):gsub("/$", "")
-  local seg, id = u:match("/v%d+/([%w%-]+)/([^/]+)/items$")
-  if not seg then seg, id = u:match("/v%d+/([%w%-]+)/([^/]+)/items/[^/]+$") end
-  if seg == "guest-carts" then return "guest" end
-  if seg == "carts" then return (id == "mine") and "mine" or "cart" end
-  return nil
-end
-
-function _M.detect_cve_magento_polyshell(uri, method, args, body, headers)
-  if method ~= "post" and method ~= "put" then return nil end
-  local u = lower(uri or "")
-  local route = magento_cart_items_rest(u)
-  -- SOAP answers on /soap and /soap/<store> (and under /index.php/); the
-  -- service list is in the query, which PHP %-decodes.
-  if not route and has(u .. "/", "/soap/")
-     and has(lower(util.url_decode_once(((args or ""):gsub("%+", " ")))), "cartitemrepository") then
-    route = "soap"
-  end
-  if not route then return nil end
-  body = body or ""
-  -- A raw NUL is never in a JSON body (it must be escaped) and is what a
-  -- UTF-16 / UTF-32 XML body, which libxml decodes, is full of.
-  if body:find("%z") then return "UNREADABLE" end
-  local ct = lower(header_string(headers and (headers["content-type"] or headers["Content-Type"])) or "")
-  local lb = lower((body:gsub("^\239\187\191", "")))
-  local lead = lb:match("^%s*(.)")
-  if route == "soap" or lead == "<" or has(ct, "xml") then
-    if lead ~= nil and lead ~= "<" then return "UNREADABLE" end
-    -- The declared encoding, wherever the attribute sits in the declaration.
-    local decl = lb:match("^%s*<%?xml(.-)%?>")
-    local enc = decl and decl:match("encoding%s*=%s*[\"']([^\"']*)")
-    if enc and not (XML_ASCII_ENC[enc] or enc:find("^iso%-8859%-") or enc:find("^latin")) then
-      return "UNREADABLE"
+    for name in lb:gmatch("[%s\"']([%w_%.:%-]+)%s*=") do
+      if magento_key_hit(name:match("([^:]*)$")) then return true end
     end
-    if has(lb, "<!entity") then return "XML_ENTITY" end
-    if xml_names_hit(lb) then return "FILE_INFO" end
-  elseif json_keys_hit(body) then
-    return "FILE_INFO"
+    return false
   end
-  -- The admin route's shape (…/v1/carts/<id>/items) is a common REST one,
-  -- so only Magento's own names, guest-carts and carts/mine, are blocked for
-  -- a body the edge did not see whole.
-  if route ~= "cart" and body_was_cut(body, headers) then return "OVERSIZE" end
-  return nil
+
+  -- An XML declaration's encoding whose bytes for `<`, letters, digits and `_`
+  -- are ASCII's, so the scan reads element names as libxml does. Anything else
+  -- (UTF-16/32, UCS, UTF-7, the EBCDIC code pages) is unreadable here.
+  local function xml_enc_ascii_compatible(enc)
+    return enc == "utf-8" or enc == "utf8" or enc == "us-ascii" or enc == "ascii"
+        or enc:find("^iso[%-_]?8859") ~= nil or enc:find("^latin") ~= nil
+        or enc:find("^windows%-?12%d%d$") ~= nil or enc:find("^cp12%d%d$") ~= nil
+        or enc:find("^koi8") ~= nil
+  end
+
+  -- The cart-items route a path names: "guest" (guest-carts/<id>), "mine"
+  -- (carts/mine) or "cart" (carts/<id>, the admin route), for
+  -- /rest/[<store>/][async/[bulk/]]V<n>/…/items[/…]; the second value is true
+  -- for async/bulk (an array of items). `/rest/` anywhere covers
+  -- /index.php/rest/. Anything after /items/ counts: Magento routes on the raw
+  -- path, so an itemId with %2F is one segment there and several in $uri.
+  local function magento_cart_items_rest(path)
+    if not path or not has(path, "/rest/") then return nil end
+    path = path:gsub("/+", "/"):gsub("/$", "")
+    local seg, id = path:match("/v%d+/([%w%-]+)/([^/]+)/items$")
+    if not seg then seg, id = path:match("/v%d+/([%w%-]+)/([^/]+)/items/.+$") end
+    local bulk = has(path, "/async/bulk/")
+    if seg == "guest-carts" then return "guest", bulk end
+    if seg == "carts" then return (id == "mine") and "mine" or "cart", bulk end
+    return nil
+  end
+
+  local MAGENTO_SOAP_WANT = { services = true }
+
+  -- The route the request targets, from the decoded $uri and the raw path
+  -- ($request_uri without its query; nil from the panel gate), or "soap" for
+  -- Magento's SOAP endpoint (/soap, /soap/<store>, under /index.php/ too) when
+  -- the `services` query field, read as PHP reads it, names a cart-item
+  -- repository. REST routes are POST / PUT; SOAP reads the body whatever the
+  -- method, so it takes every method the edge reads a body for.
+  local function magento_cart_route(uri, raw_uri, method, args, headers)
+    local u = lower(uri or "")
+    local raw = raw_uri and lower(raw_uri:match("^[^?#]*")) or nil
+    if method == "post" or method == "put" then
+      local route, bulk = magento_cart_items_rest(u)
+      if not route then route, bulk = magento_cart_items_rest(raw) end
+      if route then return route, bulk end
+    end
+    if method == "post" or method == "put" or method == "patch" then
+      if has(u .. "/", "/soap/") and args and args ~= "" then
+        local f = _M.php_request_fields("get", args, "", headers, MAGENTO_SOAP_WANT)
+        for _, v in ipairs(f.services or {}) do
+          if has(lower(v), "cartitemrepository") then return "soap", false end
+        end
+      end
+    end
+    return nil
+  end
+
+  -- The body without a UTF-8 BOM, and its first non-blank byte.
+  local function magento_body_lead(body)
+    if body:sub(1, 3) == "\239\187\191" then body = body:sub(4) end
+    return body, body:match("^%s*(.)")
+  end
+
+  local function magento_body_is_xml(route, lead, headers)
+    if route == "soap" or lead == "<" then return true end
+    local ct = lower(header_string(headers and (headers["content-type"] or headers["Content-Type"])) or "")
+    return has(ct, "xml")
+  end
+
+  -- Rule 10027 (armed): the field itself.
+  function _M.detect_cve_magento_polyshell(uri, raw_uri, method, args, body, headers)
+    local route = magento_cart_route(uri, raw_uri, method, args, headers)
+    if not route then return nil end
+    body = body or ""
+    local b, lead = magento_body_lead(body)
+    if magento_body_is_xml(route, lead, headers) then
+      if xml_names_hit(lower(b)) then return "FILE_INFO" end
+    elseif json_keys_hit(body) then
+      return "FILE_INFO"
+    end
+    return nil
+  end
+
+  -- Rule 10028 (edge block, autoblock held): a body on the same routes that
+  -- 10027 could not read whole or as Magento would. These are inferences, not
+  -- the field, so they 403 without a ban (an HTTP/3 add-to-cart without a
+  -- Content-Length the edge could not read lands here too).
+  --   UNREADABLE  a raw NUL (never in JSON, which must escape it; what UTF-16/32
+  --               XML is full of), an XML body that does not start with `<`
+  --               (after a BOM), or a declared encoding the scan cannot read.
+  --   XML_ENTITY  an entity declaration (an element could be built out of a
+  --               reference).
+  --   OVERSIZE    a body the edge did not hold whole (past waf_body_max_len,
+  --               or not read: a PUT over the size gate, a chunked PUT) on
+  --               guest-carts / carts/mine, where an item is a few hundred
+  --               bytes. Not on async/bulk (an array of items), not on the
+  --               admin carts/<id> (a common REST shape outside Magento), not
+  --               when the caller read no body at all (the panel gate).
+  function _M.detect_cve_magento_polyshell_unseen(uri, raw_uri, method, args, body, headers, body_unread)
+    local route, bulk = magento_cart_route(uri, raw_uri, method, args, headers)
+    if not route then return nil end
+    body = body or ""
+    if body:find("%z") then return "UNREADABLE" end
+    local b, lead = magento_body_lead(body)
+    if magento_body_is_xml(route, lead, headers) then
+      if lead ~= nil and lead ~= "<" then return "UNREADABLE" end
+      local decl = lower(b):match("^%s*<%?xml(.-)%?>")
+      local enc = decl and decl:match("encoding%s*=%s*[\"']([^\"']*)")
+      if enc and not xml_enc_ascii_compatible(enc) then return "UNREADABLE" end
+      if b:find("<!%s*[Ee][Nn][Tt][Ii][Tt][Yy]") then return "XML_ENTITY" end
+    end
+    if (route == "guest" or route == "mine") and not bulk and not body_unread
+       and body_was_cut(body, headers) then
+      return "OVERSIZE"
+    end
+    return nil
+  end
 end
 
 -- Rules 10018 / 10019 — CVE-2026-19632, TranslatePress (translatepress-

@@ -43,20 +43,20 @@ back-filled here — see the git/PR history for that period.
   `RemoteIPHeader` set (mod_remoteip then reads nothing).
 
 ### Security
-- **New WAF rule 10027 blocks the Magento "PolyShell" file upload
+- **New WAF rules 10027 / 10028 block the Magento "PolyShell" file upload
   (CVE-2026-48356).** An anonymous request to a cart's items API can make
   Magento write any file, a PHP shell included, to
   `pub/media/custom_options/quote/`: the file travels base64-encoded inside the
   JSON body, where no upload rule looked. On 2026-10-29 it wrote eight GIF+PHP
   shells to a Magento 2.3.7 shop on orion through the edge (they did not run:
-  the directory's `.htaccess` denies them). The rule blocks a cart-items
+  the directory's `.htaccess` denies them). Rule 10027 blocks a cart-items
   request (REST guest / customer / admin carts, the async routes, and the SOAP
   service) that carries the `file_info` field, in any spelling Magento accepts
-  (`fileInfo`, `FILE_INFO`, `\u`-escaped), a body larger than the WAF reads or
-  one it could not read, an XML entity declaration, or an XML body in an
-  encoding the scan cannot read. Armed like every CVE rule: 6 h ban and a
-  `WAF/CVE-2026-48356` alert. An ordinary add-to-cart is a few hundred bytes of
-  JSON and never carries these fields.
+  (`fileInfo`, `FILE_INFO`, `\u`-escaped): 6 h ban and a `WAF/CVE-2026-48356`
+  alert, like every CVE rule. Rule 10028 refuses, with a 403 but no ban, a body
+  on those routes the WAF could not read whole: larger than it reads, not read,
+  an XML entity declaration, or an encoding it cannot read. An ordinary
+  add-to-cart is a few hundred bytes of JSON and never carries these fields.
 
 ## 2026.10.28
 

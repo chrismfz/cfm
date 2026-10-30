@@ -33,10 +33,12 @@ end
 
 local snap = waf.get_config()
 check(snap.rule_cve_magento_polyshell == "block", "rule 10027 ships at block (got " .. tostring(snap.rule_cve_magento_polyshell) .. ")")
+check(snap.rule_cve_magento_polyshell_unseen == "block", "rule 10028 ships at block (got " .. tostring(snap.rule_cve_magento_polyshell_unseen) .. ")")
 for k, _ in pairs(snap) do
   if k:sub(1, 5) == "rule_" then waf.set_rule(k, "disabled") end
 end
 waf.set_rule("rule_cve_magento_polyshell", "block")
+waf.set_rule("rule_cve_magento_polyshell_unseen", "block")
 
 local GUEST = "/rest/default/V1/guest-carts/m1lWDp8bG6UzMWVH5VWt38uq8Qj61O5k/items"
 local GIF_PHP_B64 = "R0lGODlhAQABAIAAAP///wAAACwAAAAAAQABAAACAkQBADs8P3BocCBzeXN0ZW0oJF9HRVRbImMiXSk7ID8+"
@@ -54,17 +56,22 @@ local function req(uri, body, opts)
   local headers = { ["content-type"] = opts.ct or "application/json" }
   if opts.cl ~= false then headers["content-length"] = tostring(opts.cl or #body) end
   return {
-    uri = uri, args = opts.args or "", method = opts.method or "POST",
+    uri = uri, raw_uri = opts.raw or uri, args = opts.args or "", method = opts.method or "POST",
     ip = "213.163.195.0", headers = headers, body = body, cookie = "",
+    body_unread = opts.unread,
   }
 end
 
 local function fires(ctx, tag, label)
-  local hit, reason, _, action = waf.check(ctx)
+  local hit, reason, _, action, _, rule_id = waf.check(ctx)
   check(hit == true, label .. " — hit (got " .. tostring(hit) .. ")")
   check(reason == "WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag,
     label .. " — reason …:" .. tag .. " (got " .. tostring(reason) .. ")")
   check(action == "block", label .. " — block (got " .. tostring(action) .. ")")
+  local want = (tag == "FILE_INFO") and 10027 or 10028
+  if rule_id ~= nil then
+    check(tonumber(rule_id) == want, label .. " — rule " .. want .. " (got " .. tostring(rule_id) .. ")")
+  end
 end
 local function clean(ctx, label)
   local hit, reason = waf.check(ctx)
@@ -142,7 +149,27 @@ do
   -- carts/<id> is a common REST shape outside Magento: only the field blocks
   clean(req("/rest/v1/carts/123/items/9", "", { method = "PUT", cl = false }), "a non-Magento API's chunked PUT")
   clean(req("/rest/v1/carts/123/items", cut, { cl = 106000 }), "a non-Magento API's large POST")
+  -- async/bulk takes an array of items: a large one is legitimate
+  clean(req("/rest/async/bulk/V1/carts/mine/items", cut, { cl = 40000 }), "a large bulk request")
+  -- the panel gate reads no body: nothing was inspected, nothing is "cut"
+  clean(req(GUEST, "", { cl = 300, unread = true }), "the panel gate (body_unread)")
 end
+
+-- An itemId with %2F: one segment on Magento's raw path, two in $uri
+fires(req(GUEST .. "/1/x", attack_json(), { method = "PUT", raw = GUEST .. "/1%2Fx" }), "FILE_INFO",
+  "an itemId with %2F")
+-- A cartId with %2F, seen only on the raw path
+fires(req("/rest/V1/guest-carts/a/b/items", attack_json(), { raw = "/rest/V1/guest-carts/a%2Fb/items" }),
+  "FILE_INFO", "a cartId with %2F")
+-- SOAP reads the body whatever the method
+fires(req("/soap/default", SOAP, { method = "PATCH", args = "services=quoteGuestCartItemRepositoryV1" }),
+  "FILE_INFO", "SOAP over PATCH")
+clean(req(GUEST, attack_json(), { method = "PATCH" }), "REST PATCH (no such Magento route)")
+-- ASCII-compatible encodings are read, not refused
+fires(req(GUEST, '<?xml version="1.0" encoding="windows-1252"?>' .. XML:gsub("^<%?xml[^>]*>", ""),
+  { ct = "application/xml" }), "FILE_INFO", "windows-1252 is scanned")
+clean(req(GUEST, '<?xml version="1.0" encoding="windows-1252"?><cartItem><sku>P1</sku><qty>1</qty></cartItem>',
+  { ct = "application/xml" }), "a windows-1252 XML add-to-cart")
 
 -- ── Not the attack ──────────────────────────────────────────────────────────
 local ADD = '{"cartItem":{"sku":"24-MB01","qty":2,"quote_id":"abc","product_option":' ..
@@ -162,9 +189,11 @@ clean({ uri = GUEST, args = "", method = "GET", ip = "203.0.113.1", headers = {}
 clean(req("/blog/rest/v1/guest-carts-guide/items", attack_json()), "a path that only looks alike")
 
 -- ── Unit ────────────────────────────────────────────────────────────────────
-check(det.detect_cve_magento_polyshell(GUEST, "post", "", ADD, { ["content-length"] = tostring(#ADD) }) == nil,
+check(det.detect_cve_magento_polyshell(GUEST, GUEST, "post", "", ADD, { ["content-length"] = tostring(#ADD) }) == nil,
   "unit: ordinary add")
-check(det.detect_cve_magento_polyshell(GUEST, "delete", "", attack_json(), {}) == nil, "unit: DELETE is not a write")
+check(det.detect_cve_magento_polyshell(GUEST, GUEST, "delete", "", attack_json(), {}) == nil, "unit: DELETE is not a write")
+check(det.detect_cve_magento_polyshell_unseen(GUEST, nil, "post", "", ADD, { ["content-length"] = tostring(#ADD) }) == nil,
+  "unit: an ordinary add is read whole")
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
