@@ -255,6 +255,7 @@ local CFG = {
   rule_cve_php2shell_tool = "block", -- CVE-2026-109618/109619, the public PHP2Shell tool by its request head: User-Agent `php2shell-...` (seen here as php2shell-scanner) or one of its multipart boundaries (B7kQpoc61N, UctxPoc20NN, -*nphp618/619, *php2shell). Source: Imunify360 ruleset 8.85 rule 77318849 and this fleet's edge logs. Armed; header-only, so it holds on the panel ports too. A renamed tool passes.
   rule_cve_pixelyoursite_xss = "block", -- CVE-2026-1844 / CVE-2026-1841 / CVE-2026-109987: PixelYourSite (free < 11.4.3, PRO < 12.6.8) unauth stored XSS. On a Store API checkout the plugin stores its traffic-source, landing-page and UTM values in the WooCommerce order unescaped, and the order screen prints them, so the admin who opens the order runs the attacker's script (tophair.gr 2026-10-06: fake plugin + two admins in 15 s; ~100 planted orders on 16 fleet shops from 2026-02-13). This rule reads only the plugin's own cookies (pysTrafficSource, pys_landing_page, pys_utm_* and last_ twins): executable markup (a script/iframe/object/embed/meta/base element, or any element with an event handler, srcdoc or javascript:), a landing value whose inner quote opens a handler attribute, or a javascript:/vbscript:/data: landing URL. A bare `<`/`>` or a placeholder such as `<campaign_name>` does not count. Armed: no other software sends these names, and a ban stops the bot before its checkout. Repeated Cookie headers are also read as Apache merges them.
   rule_cve_pixelyoursite_session_xss = "block", -- CVE-2026-1844 / -1841 / -109987, the session copies PixelYourSite fills on a session's first request: the raw request path (landing page), the host parse_url takes from the Referer (traffic source) and the utm_* query fields (UTMs), with the same executable-markup / attribute-breakout tests as 10025. These are request parts every site sees, so a scanner or link checker can trip them without the plugin: edge 403 only, autoblock held per rule (HoldAutoblock, RULE_10026 = 0). Runs late with the other held rules.
+  rule_cve_magento_polyshell = "block", -- CVE-2026-48356 "PolyShell": Magento Open Source / Adobe Commerce unauth arbitrary file upload through a cart item's custom option `file_info` (base64 file, attacker's name and extension) on the REST cart-items routes (guest-carts, carts/mine, carts/:id; sync, async, async/bulk) and their SOAP service. Blocks such a key or XML element (Magento drops `_` and ignores case, so this does too: FILE_INFO), a body longer than the edge reads or not read on guest-carts / carts/mine (OVERSIZE: a cart item is a few hundred bytes, the orion attack's ~106 KB), an XML entity declaration (XML_ENTITY) or a body the scan cannot read as Magento would (UNREADABLE). Source: Sansec, Magento's own code, the 2026-10-29 attack on orion. Armed: no cart item request carries a file this way.
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
 
   -- [top-4]  Upload controls
@@ -685,6 +686,7 @@ local RULE_IDS = {
   rule_cve_php_upload_progress = 10024,
   rule_cve_pixelyoursite_xss = 10025,
   rule_cve_pixelyoursite_session_xss = 10026,
+  rule_cve_magento_polyshell = 10027,
   rule_cve_wp_pagename_traversal = 10017,
   rule_cve_translatepress_reset_preview = 10018,
   rule_cve_translatepress_reset_preview_authed = 10020,
@@ -1277,6 +1279,23 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_4020:GRAVITY_SMTP:" .. tag, ttl, mode, RULE_IDS.rule_cve_gravity_smtp) then goto done end
+      end
+    end
+  end
+
+  -- ── 3m) Magento "PolyShell" unauth file upload (CVE-2026-48356) ──────────────
+  -- A cart item's custom option `file_info` writes a base64 file, any name and
+  -- extension, to pub/media/custom_options/quote/ (orion, 2026-10-29: GIF+PHP
+  -- shells in ~106 KB of JSON). POST and PUT, so not behind body_inspect_ok;
+  -- an unread or cut body is a hit of its own (OVERSIZE). The body carries a
+  -- base64 file, which none of the upload rules (401/402) decode.
+  do
+    local mode = rule_mode(CFG.rule_cve_magento_polyshell, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_magento_polyshell(uri, m_lower, args, body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag, ttl, mode, RULE_IDS.rule_cve_magento_polyshell) then goto done end
       end
     end
   end
