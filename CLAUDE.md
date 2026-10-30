@@ -523,10 +523,12 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   past 10021 on 2026-10-21) run FIRST in `check()` and are the body rules
   cfm.lua enforces during the body burn-in (`BURNIN_ENFORCE_IDS`), because
   their exploit is a large or chunked `POST /`; 10027 / 10028 (Magento
-  PolyShell) are enforced in the burn-in of a Magento SOAP body
-  (`SOAP_BURNIN_ENFORCE_IDS`, `cfm_soap_burnin`, set however the body was
-  read), and they run right after 10024 in `check()` so no unenforced
-  block (10005 on an envelope's text) ends that pass first. The rendered `[waf_security]` template is derived from
+  PolyShell) are in `BURNIN_ENFORCE_IDS` too (they gate themselves on a
+  Magento cart-save request, and their exploit can arrive as a SOAP body
+  read in burn-in): 10027 runs right after 10024, and the held 10028 joins
+  it there in the burn-in second pass only (`ctx.burnin_pass`; late
+  otherwise, like every held rule), so no unenforced block (10005 on an
+  envelope's text) ends that pass first. The rendered `[waf_security]` template is derived from
   the same code defaults, so a fresh `detectors.conf` lists exactly these.
 - **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
   default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and

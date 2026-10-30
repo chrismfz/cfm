@@ -56,13 +56,13 @@ end
 
 local function req(uri, body, opts)
   opts = opts or {}
-  local deferred = opts.deferred
+  local deferred, burnin_pass = opts.deferred, opts.burnin_pass
   local headers = { ["content-type"] = opts.ct or "application/json" }
   if opts.cl ~= false then headers["content-length"] = tostring(opts.cl or #body) end
   return {
     uri = uri, raw_uri = opts.raw or uri, args = opts.args or "", method = opts.method or "POST",
     ip = "213.163.195.0", headers = headers, body = body, cookie = "",
-    body_unread = opts.unread, body_deferred = deferred,
+    body_unread = opts.unread, body_deferred = deferred, burnin_pass = burnin_pass,
   }
 end
 
@@ -247,14 +247,24 @@ clean(req(GUEST, '<?xml version="1.0" encoding="Shift_JIS"?><cartItem><sku>P1</s
 -- An unread form POST to a shop's own …/soap page is left alone
 clean(req("/products/soap", "", { cl = 2000000, ct = "application/x-www-form-urlencoded" }),
   "an unread large form POST to a /soap page")
--- 10028 runs before the rules the burn-in second pass does not enforce
+-- 10028 is held: it runs late, so an armed rule on the same request keeps
+-- its ban; in the burn-in second pass it runs right after 10027 instead
 do
   waf.set_rule("rule_sqli", "block")
-  fires(req("/soap/default", '<?xml version="1.0" encoding="UTF-16"?><a>x=1 union select 1,2,3 from information_schema.tables</a>',
-    { args = "services=quoteGuestCartItemRepositoryV1", ct = "text/xml" }), "UNREADABLE",
-    "an unreadable cart envelope that also trips 301")
+  local env = '<?xml version="1.0" encoding="UTF-16"?><a>x=1 union select 1,2,3 from information_schema.tables</a>'
+  local opts = { args = "services=quoteGuestCartItemRepositoryV1", ct = "text/xml" }
+  local _, reason = waf.check(req("/soap/default", env, opts))
+  check(reason == "WAF_SQLI", "outside burn-in an armed 301 keeps the headline (got " .. tostring(reason) .. ")")
+  opts.burnin_pass = true
+  fires(req("/soap/default", env, opts), "UNREADABLE", "in the burn-in second pass 10028 runs before 301")
   waf.set_rule("rule_sqli", "disabled")
 end
+-- SOAP by any method: Magento runs SoapServer on a GET's body too
+fires(req("/soap/default", "", { method = "GET", cl = 900, args = "services=quoteGuestCartItemRepositoryV1" }),
+  "OVERSIZE", "a SOAP body sent with GET (the edge reads none)")
+-- Anything after /soap/<store> still reaches Magento's SOAP controller
+fires(req("/soap/default/x", SOAP, { args = "services=quoteGuestCartItemRepositoryV1", ct = "text/xml" }),
+  "FILE_INFO", "SOAP with a trailing segment")
 -- With 10027 excluded or demoted (an integration's own uploads), 10028 must
 -- not refuse the same cart-save request
 waf.set_rule("rule_cve_magento_polyshell", "disabled")
@@ -317,15 +327,13 @@ do
   local src = f:read("*a"); f:close()
   local gate = src:find("local function waf_should_read_body(uri, method)", 1, true)
   local wrap = src:find("local function waf_should_read_body_or_soap(uri, method)", 1, true)
-  local soap = src:find("pcall(wdet.magento_soap_call, lower(uri or \"\"), ngx.var.args)", 1, true)
-  local flag = src:find("if soap then ngx.ctx.cfm_soap_burnin = true end", 1, true)
   local first = src:find("if waf_should_read_body(uri, method) then return true end", 1, true)
-  check(gate and wrap and soap and flag and first and gate < wrap and wrap < soap and soap < flag and flag < first,
-    "cfm.lua flags every Magento SOAP body, then reads one only where its gate would not")
-  check(src:find('local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true }', 1, true)
-        and src:find('local SOAP_BURNIN_ENFORCE_IDS = { ["10027"] = true, ["10028"] = true }', 1, true)
-        and src:find("ngx.ctx.cfm_soap_burnin and SOAP_BURNIN_ENFORCE_IDS[", 1, true),
-    "10027 / 10028 are enforced in the burn-in of a SOAP body read for them only")
+  local soap = src:find("pcall(wdet.magento_soap_call, lower(uri or \"\"), ngx.var.args)", 1, true)
+  check(gate and wrap and first and soap and gate < wrap and wrap < first and first < soap,
+    "cfm.lua reads a Magento SOAP body only where its gate would not, after it")
+  check(src:find('local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true, ["10027"] = true, ["10028"] = true }', 1, true),
+    "10027 / 10028 are enforced in the body burn-in")
+  check(src:find("waf_ctx.burnin_pass = true", 1, true), "the burn-in second pass is flagged for check()")
 end
 
 if fails > 0 then

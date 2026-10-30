@@ -5578,8 +5578,11 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
   end
 
   -- The bracket keys (`cartItem[…][custom_options][0][…][file_info]`) of the
-  -- query and of a form POST body (multipart or urlencoded), read as PHP
-  -- reads them.
+  -- query and of a form POST body (multipart or urlencoded), as
+  -- each_request_field splits them (PHP's own reader). Every `[…]` segment
+  -- counts, more than PHP registers (it drops text after a `]` that no `[`
+  -- follows, and nests 64 levels): a superset, so no spelling PHP reads is
+  -- missed.
   local function form_keys_hit(method, args, body, headers, seen)
     local hit = false
     each_request_field(method, args, body, headers, function(k)
@@ -5597,14 +5600,16 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
     local i = u:find("/[Rr][Ee][Ss][Tt]/")
     return i ~= nil and u:find("/[Vv]%d+/", i) ~= nil
   end
-  -- Magento's SOAP front name: …/soap or …/soap/<store>, nothing after (the
-  -- shop can sit in a subdirectory). A shop's own page there (a product or
+  -- Magento's SOAP front name: …/soap or …/soap/<store>[/…] (the shop can
+  -- sit in a subdirectory). A shop's own page there (a product or
   -- category called soap) matches too; the callers tell them apart by
   -- `services` (Magento refuses a SOAP call without it) or the names.
   local function is_soap_path(u)
     if not u or not u:find("[Ss][Oo][Aa][Pp]") then return false end
-    local p = lower(u):gsub("/+", "/"):gsub("/$", "")
-    return p:find("/soap$") ~= nil or p:find("/soap/[^/]+$") ~= nil
+    local p = lower(u):gsub("/+", "/")
+    -- Magento's SOAP controller handles the body whatever follows the store
+    -- segment, so anything after /soap/ counts.
+    return p:find("/soap/?$") ~= nil or p:find("/soap/", 1, true) ~= nil
   end
   -- The web API kind of a request, from the decoded $uri and the raw path
   -- (Magento routes on the raw path; nginx may normalise $uri away from it).
@@ -5664,17 +5669,19 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
   end
 
   -- What the two rules share for one request (kept in `memo`), or nil when
-  -- it is no web API call by a method that can carry a body. `route` /
+  -- it is no web API call (REST by a write method, SOAP by any). `route` /
   -- `anon` come from the raw path and $uri (either counts); `services` only
   -- for SOAP; `cartsave` is a REST cart route or a SOAP cart service.
   local function polyshell_ctx(memo, uri, raw_uri, method, args, body, headers)
-    if method == "get" or method == "head" or method == "options" then return nil end
     if memo and memo.done then return memo.ctx end
     if memo then memo.done = true end
     uri = uri or ""
     local raw = raw_uri and raw_uri:match("^[^?#]*") or nil
     local kind = webapi_kind(uri, raw)
     if not kind then return nil end
+    -- REST cart saves are POST / PUT; Magento's SOAP controller runs
+    -- SoapServer on the body whatever the method (a GET with a body too).
+    if kind == "rest" and method ~= "post" and method ~= "put" and method ~= "patch" then return nil end
     local c = { kind = kind, body = body or "", media = php_media_type(php_content_type(headers)),
                 write = method == "post" or method == "put" or method == "patch" }
     if kind == "rest" then

@@ -2,10 +2,11 @@
 -- A Magento SOAP body the edge's own gate does not read (a Content-Type it
 -- does not inspect, or a chunked body on `location /`) is read for these
 -- rules in the body burn-in, which turns a body hit into logonly unless the
--- rule is enforced there (SOAP_BURNIN_ENFORCE_IDS, cfm_soap_burnin):
+-- rule is enforced there (BURNIN_ENFORCE_IDS):
 --   * a cart-item save with the payload is blocked however the body arrived;
 --   * an earlier block rule the burn-in does not enforce (10005 on the
 --     envelope's text) does not end the pass before 10027;
+--   * `services` in a urlencoded body is enough;
 --   * a chunked SQLi to an allowlisted .php under a …/soap path is still
 --     read by the gate and enforced as before (not put in burn-in).
 
@@ -60,6 +61,15 @@ do
   local r = soap{ buffered = true, body = envelope("<note>revslider_ajax_action update_plugin</note>") }
   check(r.ok and r.exited == 403 and r.action == "block",
     "chunked SOAP cart save with a revslider marker: still blocked (" .. desc(r) .. ")")
+end
+
+-- `services` in a urlencoded body (getParam falls back to $_POST), chunked:
+-- read in burn-in by the gate's buffered branch, still enforced.
+do
+  local r = soap{ buffered = true, ct = "application/x-www-form-urlencoded", args = "",
+                  body = envelope("<!-- &services=quoteGuestCartItemRepositoryV1& -->") }
+  check(r.ok and r.exited == 403 and r.action == "block",
+    "chunked urlencoded SOAP cart save, services in the body: blocked (" .. desc(r) .. ")")
 end
 
 -- A clean SOAP cart call passes.

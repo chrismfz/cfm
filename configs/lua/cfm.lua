@@ -593,19 +593,14 @@ end
 -- never more than it would read (waf_body_read_max_cl, or a buffering
 -- location), so a large or chunked PUT / PATCH keeps streaming (an unread
 -- body is 10028's to refuse). Such a body is in burn-in for every rule but
--- those two (SOAP_BURNIN_ENFORCE_IDS, cfm_soap_burnin).
+-- those two (BURNIN_ENFORCE_IDS).
 local function waf_should_read_body_or_soap(uri, method)
-  local m = lower(method or "")
-  local soap = false
-  if (m == "post" or m == "put" or m == "patch") and waf_ok and wdet_ok then
-    local ok, r = pcall(wdet.magento_soap_call, lower(uri or ""), ngx.var.args)
-    soap = ok and r == true
-  end
-  -- Whichever path reads a Magento SOAP body (the gate's buffered branch
-  -- for a chunked one, or the read below), its burn-in enforces 10027 / 10028.
-  if soap then ngx.ctx.cfm_soap_burnin = true end
   if waf_should_read_body(uri, method) then return true end
-  if not soap then return false end
+  local m = lower(method or "")
+  if m ~= "post" and m ~= "put" and m ~= "patch" then return false end
+  if not (waf_ok and wdet_ok) then return false end
+  local ok, soap = pcall(wdet.magento_soap_call, lower(uri or ""), ngx.var.args)
+  if not (ok and soap == true) then return false end
   local cl = tonumber(ngx.var.http_content_length or "")
   local buffered = m == "post" and ngx.var.cfm_body_buffered == "1"
   if not ((cl and cl <= (CFG.waf_body_read_max_cl or 0)) or buffered) then return false end
@@ -1707,10 +1702,10 @@ local BURNIN_SEV = { logonly = 1, challenge = 2, challenge_v2 = 3, block = 4 }
 -- exploit is exactly a large or chunked body on `location /` (POST / to
 -- WordPress's index.php), which the burn-in would otherwise turn into a
 -- logonly hit: on 2026-10-21 PHP2Shell's POST / passed this edge.
-local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true }
--- On a Magento SOAP body read only for them (waf_should_read_body_or_soap,
--- cfm_soap_burnin): 10027 / 10028, CVE-2026-48356.
-local SOAP_BURNIN_ENFORCE_IDS = { ["10027"] = true, ["10028"] = true }
+-- 10027 / 10028 (CVE-2026-48356, Magento PolyShell) gate themselves on a
+-- Magento cart-save request, and their exploit can arrive as a SOAP body the
+-- edge reads in burn-in (waf_should_read_body_or_soap).
+local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true, ["10027"] = true, ["10028"] = true }
 
 -- Set by a logonly WAF hit, which records and pushes it, then goes on through
 -- Steps 2b-4 like a clean request (it used to route to the origin there and
@@ -1825,6 +1820,9 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
         -- challenge too (which a cleared client would otherwise turn into
         -- logonly below and pass upstream with the body).
         waf_ctx.body, waf_ctx.shdict, waf_ctx.body_deferred = req_body, nil, nil
+        -- check() orders the held 10028 early in this pass only (it ends at
+        -- the first block, and only BURNIN_ENFORCE_IDS blocks are enforced).
+        waf_ctx.burnin_pass = true
         local b_ok, b_hit, b_reason, b_ttl, b_action, b_hits, b_rule = pcall(waf.check, waf_ctx)
         if not b_ok then
           if not SH or SH:add("bodyburnin|" .. tostring(ip), 1, 60) then
@@ -1850,8 +1848,7 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
             end
             local enf
             for _, h in ipairs(b_hits or {}) do
-              if h.action == "block" and (BURNIN_ENFORCE_IDS[tostring(h.waf_rule_id)]
-                  or (ngx.ctx.cfm_soap_burnin and SOAP_BURNIN_ENFORCE_IDS[tostring(h.waf_rule_id)])) then enf = h; break end
+              if h.action == "block" and BURNIN_ENFORCE_IDS[tostring(h.waf_rule_id)] then enf = h; break end
             end
             if enf then
               hit, reason, ttl, waf_action, waf_hits, waf_rule_id = true, enf.reason, enf.ttl, "block", b_hits, enf.waf_rule_id
