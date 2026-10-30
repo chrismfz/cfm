@@ -477,6 +477,16 @@ local function waf_should_read_body(uri, method)
   -- replay a body-borne payload to a clean-URL route with no body inspection at all.
   if ngx.ctx.cfm_resumed_post then return true end
 
+  -- Magento's SOAP endpoint (/soap, /soap/<store>, under /index.php/ too):
+  -- its SoapServer reads the body whatever the Content-Type, so a cart-item
+  -- save sent as application/octet-stream reached it unread, past rules
+  -- 10027 / 10028 (CVE-2026-48356). Read on POST / PUT / PATCH (the reader
+  -- still caps the scan at waf_body_max_len).
+  do
+    local p = uri:gsub("/+", "/"):gsub("/$", ""):gsub("^/index%.php", "")
+    if p == "/soap" or p:find("^/soap/[^/]+$") then return true end
+  end
+
   local ct = lower(ngx.var.http_content_type or "")
   local cl = tonumber(ngx.var.http_content_length or "")
   -- A POST body with no Content-Length (chunked, or HTTP/2 without the

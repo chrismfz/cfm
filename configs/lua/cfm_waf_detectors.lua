@@ -5574,38 +5574,63 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
     return false
   end
 
-  -- The query's bracket keys (`cartItem[…][custom_options][0][…][file_info]`),
-  -- %-decoded once as PHP does.
-  local function query_keys_hit(args, seen)
-    local q = url_decode_once(((args or ""):gsub("%+", " ")))
-    for key in q:gmatch("%[([^%]]*)%]") do
-      if mmark(seen, key) then return true end
-    end
-    return false
+  -- The bracket keys (`cartItem[…][custom_options][0][…][file_info]`) of the
+  -- query and of a form POST body (multipart or urlencoded), read as PHP
+  -- reads them: Magento's REST input is the deserialized body merged with
+  -- getParams(), which holds $_POST, so a multipart POST (which leaves the
+  -- body to PHP and skips the deserializer) carries the cart item as fields.
+  local function form_keys_hit(method, args, body, headers, seen)
+    local hit = false
+    each_request_field(method, args, body, headers, function(k)
+      if hit then return end
+      for key in k:gmatch("%[([^%]]*)%]") do
+        if mmark(seen, key) then hit = true; return end
+      end
+    end)
+    return hit
   end
 
-  local function is_webapi_path(u)
-    return u:find("/[Rr][Ee][Ss][Tt]/") ~= nil
-        or u:find("/[Ss][Oo][Aa][Pp]/") ~= nil or u:find("/[Ss][Oo][Aa][Pp]$") ~= nil
+  -- /rest/ followed by Magento's version segment (/V<n>/).
+  local function is_rest_path(u)
+    if not u then return false end
+    local i = u:find("/[Rr][Ee][Ss][Tt]/")
+    return i ~= nil and u:find("/[Vv]%d+/", i) ~= nil
   end
+  -- Magento's SOAP front name: /soap or /soap/<store>, nothing after (under
+  -- /index.php/ too). A shop's own page under /…/soap/ (a product or
+  -- category slug) is not it.
   local function is_soap_path(u)
-    return u:find("/[Ss][Oo][Aa][Pp]/") ~= nil or u:find("/[Ss][Oo][Aa][Pp]$") ~= nil
+    if not u then return false end
+    local p = lower(u):gsub("/+", "/"):gsub("/$", ""):gsub("^/index%.php", "")
+    return p == "/soap" or p:match("^/soap/[^/]+$") ~= nil
+  end
+  -- The web API kind of a request, from the decoded $uri and the raw path
+  -- (Magento routes on the raw path; nginx may normalise $uri away from it).
+  local function webapi_kind(uri, raw_uri)
+    local raw = raw_uri and raw_uri:match("^[^?#]*") or nil
+    if is_rest_path(uri) or is_rest_path(raw) then return "rest", raw end
+    if is_soap_path(uri) or is_soap_path(raw) then return "soap", raw end
+    return nil, raw
+  end
+
+  -- The pair anywhere Magento reads the input from: JSON keys, XML names
+  -- (SOAP is XML whatever its Content-Type), the query and form fields.
+  -- `seen` comes back too: 10028 asks whether custom_options was visible.
+  local function polyshell_names_hit(kind, method, args, body, headers)
+    local seen = {}
+    local ct = lower(php_content_type(headers))
+    if (kind == "soap" or has(ct, "xml")) and xml_names_hit(lower(body), seen) then return true, seen end
+    if has(ct, "json") and json_keys_hit(body, seen) then return true, seen end
+    if form_keys_hit(method, args, body, headers, seen) then return true, seen end
+    return false, seen
   end
 
   -- Rule 10027 (armed): custom_options + file_info in a web API request.
   function _M.detect_cve_magento_polyshell(uri, raw_uri, method, args, body, headers)
     if method ~= "post" and method ~= "put" and method ~= "patch" then return nil end
-    uri = uri or ""
-    if not is_webapi_path(uri) then return nil end
-    body = body or ""
-    local seen = {}
-    local ct = lower(php_content_type(headers))
-    if is_soap_path(uri) or has(ct, "xml") then
-      if xml_names_hit(lower(body), seen) then return "FILE_INFO" end
-    end
-    if has(ct, "json") and json_keys_hit(body, seen) then return "FILE_INFO" end
-    -- The query is merged into a REST PUT's input; read it on every method.
-    if args and args ~= "" and query_keys_hit(args, {}) then return "FILE_INFO" end
+    local kind = webapi_kind(uri or "", raw_uri)
+    if not kind then return nil end
+    if polyshell_names_hit(kind, method, args, body or "", headers) then return "FILE_INFO" end
     return nil
   end
 
@@ -5619,23 +5644,48 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
         or enc:find("^koi8") ~= nil
   end
 
-  -- "guest" / "mine" / "cart" for a cart-items path, true as the second value
-  -- under async/bulk (an array of items). The earliest /V<n>/ segment is
-  -- where Magento's route starts, and async/bulk counts only right before it.
-  local function cart_items_route(path)
-    if not path or not path:find("/[Rr][Ee][Ss][Tt]/") then return nil end
+  -- The cart-save path a REST path names: "items" for the guest-carts /
+  -- carts/mine items routes (sync, async and async/bulk) and "quote" for the
+  -- customer quote save (PUT /V<n>/carts/mine), both reachable without an
+  -- admin; nil for anything else (the admin carts/<id>, a common REST shape
+  -- outside Magento, is not one). The earliest /V<n>/ is where Magento's
+  -- route starts.
+  local function cart_save_route(path, method)
+    if not path or not is_rest_path(path) then return nil end
     path = lower(path):gsub("/+", "/"):gsub("/$", "")
-    local pre, seg, id = path:match("^(.-)/v%d+/([%w%-]+)/([^/]+)/items$")
-    if not seg then pre, seg, id = path:match("^(.-)/v%d+/([%w%-]+)/([^/]+)/items/.+$") end
-    local bulk = pre ~= nil and pre:sub(-11) == "/async/bulk"
-    if seg == "guest-carts" then return "guest", bulk end
-    if seg == "carts" then return (id == "mine") and "mine" or "cart", bulk end
+    local seg, id = path:match("^.-/v%d+/([%w%-]+)/([^/]+)/items$")
+    if not seg then seg, id = path:match("^.-/v%d+/([%w%-]+)/([^/]+)/items/.+$") end
+    if seg == "guest-carts" or (seg == "carts" and id == "mine") then return "items" end
+    if method == "put" and path:match("^.-/v%d+/carts/mine$") then return "quote" end
     return nil
+  end
+
+  -- The SOAP `services` field (query, or a form POST body), as PHP reads it:
+  -- "cart" when it names a cart-item repository, "other" when it names
+  -- something else, nil when absent.
+  local MAGENTO_SOAP_WANT = { services = true }
+  local function soap_services(method, args, body, headers)
+    local f = _M.php_request_fields(method, args, body, headers, MAGENTO_SOAP_WANT)
+    local vals = f.services
+    if not vals or #vals == 0 then return nil end
+    for _, v in ipairs(vals) do
+      if has(lower(v), "cartitemrepository") then return "cart" end
+    end
+    return "other"
+  end
+
+  -- A request that declares a body (Content-Length > 0, or chunked).
+  local function declares_body(headers)
+    local cl = tonumber(header_string(headers and (headers["content-length"] or headers["Content-Length"])) or "")
+    if cl and cl > 0 then return true end
+    local te = headers and (headers["transfer-encoding"] or headers["Transfer-Encoding"])
+    return te ~= nil and header_string(te) ~= ""
   end
 
   -- Rule 10028 (edge block, autoblock held): a web API request 10027 could
   -- not read whole or as Magento would. Inferences, not the field, so they
-  -- 403 without a ban.
+  -- 403 without a ban. Never from the panel gate (body_unread: it reads no
+  -- body).
   --   UNREADABLE  a raw NUL in a JSON or XML body (JSON must escape it; UTF-16
   --               /32 XML is full of it), an XML body that does not start with
   --               `<` (after a BOM), or a declared encoding the scan cannot
@@ -5643,36 +5693,57 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
   --   XML_ENTITY  an entity declaration in an XML body (an element could be
   --               built out of a reference).
   --   OVERSIZE    a body the edge did not hold whole (past waf_body_max_len,
-  --               or not read: a PUT over the size gate, a chunked PUT) on the
-  --               guest-carts / carts/mine items routes, where an item is a
-  --               few hundred bytes. Not under async/bulk (an array of items),
-  --               not on the admin carts/<id> (a common REST shape outside
-  --               Magento), not when the caller read no body (the panel gate).
-  --               The route is read from the raw path ($request_uri, which
-  --               Magento routes on) and the decoded $uri; either counts.
+  --               or not read: a PUT over the size gate, a chunked PUT, a SOAP
+  --               call by a method the edge reads no body for):
+  --               - with custom_options in the part it saw, on any web API
+  --                 route;
+  --               - on the guest-carts / carts/mine items routes (async/bulk
+  --                 too) and the customer quote save, where an item is a few
+  --                 hundred bytes;
+  --               - on SOAP, unless `services` names only non-cart services.
+  --               A request at /soap with no `services` and no XML body is a
+  --               shop page there, not Magento's endpoint: left alone.
+  --               Routes are read from the raw path and $uri; either counts.
   function _M.detect_cve_magento_polyshell_unseen(uri, raw_uri, method, args, body, headers, body_unread)
-    if method ~= "post" and method ~= "put" and method ~= "patch" then return nil end
-    uri = uri or ""
-    if not is_webapi_path(uri) then return nil end
+    if body_unread or method == "get" or method == "head" or method == "options" then return nil end
+    local kind, raw = webapi_kind(uri or "", raw_uri)
+    if not kind then return nil end
     body = body or ""
+    local write = method == "post" or method == "put" or method == "patch"
     local ct = lower(php_content_type(headers))
-    local xml = is_soap_path(uri) or has(ct, "xml")
-    if (xml or has(ct, "json")) and body:find("%z") then return "UNREADABLE" end
-    if xml and body ~= "" then
-      local b = body
-      if b:sub(1, 3) == "\239\187\191" then b = b:sub(4) end
-      local lead = b:match("^%s*(.)")
-      if lead ~= nil and lead ~= "<" then return "UNREADABLE" end
-      local decl = lower(b:match("^%s*<%?[Xx][Mm][Ll].-%?>") or "")
-      local enc = decl:match("encoding%s*=%s*[\"']([^\"']*)")
-      if enc and not xml_enc_ascii_compatible(enc) then return "UNREADABLE" end
-      if b:find("<!%s*[Ee][Nn][Tt][Ii][Tt][Yy]") then return "XML_ENTITY" end
+    -- A SOAP call names its `services` (Magento refuses one that does not);
+    -- a shop page that happens to sit at /soap/ does not, and is left alone.
+    local services = kind == "soap" and soap_services(write and method or "get", args, body, headers) or nil
+    if kind == "soap" and not services and not (body:match("^\239\187\191?%s*<") or body:match("^%s*<")) then
+      return nil
     end
-    if method ~= "patch" and not body_unread and body_was_cut(body, headers) then
-      local raw = raw_uri and raw_uri:match("^[^?#]*") or nil
+    local xml = kind == "soap" or has(ct, "xml")
+    if write and body ~= "" then
+      if (xml or has(ct, "json")) and body:find("%z") then return "UNREADABLE" end
+      if xml then
+        local b = body
+        if b:sub(1, 3) == "\239\187\191" then b = b:sub(4) end
+        local lead = b:match("^%s*(.)")
+        if lead ~= nil and lead ~= "<" then return "UNREADABLE" end
+        local decl = lower(b:match("^%s*<%?[Xx][Mm][Ll].-%?>") or "")
+        local enc = decl:match("encoding%s*=%s*[\"']([^\"']*)")
+        if enc and not xml_enc_ascii_compatible(enc) then return "UNREADABLE" end
+        if b:find("<!%s*[Ee][Nn][Tt][Ii][Tt][Yy]") then return "XML_ENTITY" end
+      end
+    end
+    -- Not held whole: cut by the cap, or a declared body the edge did not read.
+    local cut
+    if write then cut = body_was_cut(body, headers) else cut = body == "" and declares_body(headers) end
+    if not cut then return nil end
+    if kind == "soap" then
+      if services ~= "other" then return "OVERSIZE" end
+      return nil
+    end
+    if write then
+      local _, seen = polyshell_names_hit(kind, method, args, body, headers)
+      if seen.co then return "OVERSIZE" end
       for _, p in ipairs({ raw, uri }) do
-        local route, bulk = cart_items_route(p)
-        if (route == "guest" or route == "mine") and not bulk then return "OVERSIZE" end
+        if cart_save_route(p, method) then return "OVERSIZE" end
       end
     end
     return nil

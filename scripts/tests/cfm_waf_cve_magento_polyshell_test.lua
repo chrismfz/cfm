@@ -165,12 +165,55 @@ do
   -- carts/<id> is a common REST shape outside Magento: only the field blocks
   clean(req("/rest/v1/carts/123/items/9", "", { method = "PUT", cl = false }), "a non-Magento API's chunked PUT")
   clean(req("/rest/v1/carts/123/items", cut, { cl = 106000 }), "a non-Magento API's large POST")
-  clean(req("/rest/async/bulk/V1/carts/mine/items", cut, { cl = 40000 }), "a large bulk request")
-  clean(req("/rest/V1/carts/mine", cut, { method = "PUT", cl = 40000 }), "a large quote save")
+  -- The cart-save routes reachable without an admin: an item is a few
+  -- hundred bytes, so a cut body is refused (403, no ban), bulk included
+  fires(req("/rest/default/async/bulk/V1/guest-carts/byCartId/items", "[" .. cut, { cl = 40000 }),
+    "OVERSIZE", "a padded async/bulk guest call")
+  fires(req("/rest/V1/carts/mine", cut, { method = "PUT", cl = 40000 }), "OVERSIZE", "a padded quote save")
+  -- Anywhere else under /rest/, custom_options in the part the edge saw
+  fires(req("/rest/V1/carts/5/items", '{"cartItem":{"product_option":{"extension_attributes":{"custom_options":[' ..
+    string.rep(" ", 33000), { cl = 40000 }), "OVERSIZE", "custom_options seen, the rest cut (admin route)")
+  -- SOAP: a cut body unless `services` names only other services
+  local SOAP_HEAD = '<?xml version="1.0"?><!--' .. string.rep("A", 33000)
+  fires(req("/soap/default", SOAP_HEAD, { cl = 40000, args = "services=quoteGuestCartItemRepositoryV1",
+    ct = "text/xml" }), "OVERSIZE", "a SOAP call padded past the cut")
+  fires(req("/soap/default", SOAP_HEAD, { cl = 40000, ct = "text/xml" }), "OVERSIZE",
+    "a padded SOAP call, services not in the query")
+  clean(req("/soap/default", SOAP_HEAD, { cl = 40000, args = "services=catalogProductRepositoryV1",
+    ct = "text/xml" }), "a large SOAP product save")
+  fires(req("/soap/default", "", { method = "DELETE", cl = 900, args = "services=quoteGuestCartItemRepositoryV1" }),
+    "OVERSIZE", "a SOAP body sent with DELETE (the edge reads none)")
+  clean(req("/soap/default", "", { method = "GET", cl = false, args = "wsdl&services=quoteGuestCartItemRepositoryV1" }),
+    "fetching the WSDL")
   clean(req(GUEST, "", { cl = 300, unread = true }), "the panel gate (body_unread)")
 end
 
+-- A multipart POST: PHP fills $_POST, Magento merges it into the input
+do
+  local B = "--x\r\n"
+  local function f(name, v) return B .. 'Content-Disposition: form-data; name="' .. name .. '"\r\n\r\n' .. v .. "\r\n" end
+  local base = "cartItem[product_option][extension_attributes][custom_options][0]"
+  local mp = f("cartItem[sku]", "P31629") .. f("cartItem[qty]", "1") .. f(base .. "[option_value]", "file") ..
+    f(base .. "[extension_attributes][file_info][base64_encoded_data]", GIF_PHP_B64) ..
+    f(base .. "[extension_attributes][file_info][name]", "x.php") .. "--x--\r\n"
+  fires(req(GUEST, mp, { ct = "multipart/form-data; boundary=x" }), "FILE_INFO", "multipart form fields")
+end
+-- nginx can normalise $uri away from the route Magento reads on the raw path
+fires(req("/", attack_json(), { raw = GUEST }), "FILE_INFO", "the route only on the raw path")
+
 -- ── Not the attack ──────────────────────────────────────────────────────────
+-- A shop's own /…/soap/ pages are not Magento's SOAP endpoint
+clean(req("/product/soap/", "quantity=1&add-to-cart=55", { ct = "application/x-www-form-urlencoded" }),
+  "a WooCommerce add-to-cart on a product called soap")
+clean(req("/shop/soap/", '--x\r\nContent-Disposition: form-data; name="add-to-cart"\r\n\r\n55\r\n--x--\r\n',
+  { ct = "multipart/form-data; boundary=x" }), "the same as multipart")
+clean(req("/el/katigoria/soap", "a=1", { ct = "application/x-www-form-urlencoded" }), "a category called soap")
+clean(req("/api/soap/check", '{"a":1}'), "an app folder called soap")
+clean(req("/soap/", "quantity=1&add-to-cart=55", { ct = "application/x-www-form-urlencoded" }),
+  "a WooCommerce category at /soap/ (no services)")
+-- /rest/ without Magento's /V<n>/ (Atlassian and the like)
+clean(req("/rest/api/2/issue", '{"fields":{"customfield_1":{"custom_options":[1]},"attachment":{"file_info":"x"}}}'),
+  "a Jira-style /rest/ API with both names")
 local ADD = '{"cartItem":{"sku":"24-MB01","qty":2,"quote_id":"abc","product_option":' ..
   '{"extension_attributes":{"custom_options":[{"option_id":"3","option_value":"Engraving: file info"}]}}}}'
 clean(req(GUEST, ADD), "an ordinary add-to-cart with a text option")
@@ -203,6 +246,14 @@ check(det.detect_cve_magento_polyshell(GUEST, GUEST, "delete", "", attack_json()
   "unit: DELETE is not a write")
 check(det.detect_cve_magento_polyshell_unseen(GUEST, nil, "post", "", ADD,
   { ["content-type"] = "application/json", ["content-length"] = tostring(#ADD) }) == nil, "unit: an ordinary add is read whole")
+
+-- The edge reads Magento's SOAP bodies whatever their Content-Type
+do
+  local f = assert(io.open("configs/lua/cfm.lua"))
+  local src = f:read("*a"); f:close()
+  check(src:find('if p == "/soap" or p:find("^/soap/[^/]+$") then return true end', 1, true),
+    "cfm.lua reads /soap bodies regardless of Content-Type")
+end
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
