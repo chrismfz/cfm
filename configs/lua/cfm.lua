@@ -308,7 +308,7 @@ end
 -- If it fails to load, the F07 Content-Type branch fails closed (skips the read).
 local wutil_ok, wutil = pcall(require, "cfm_waf_util")
 -- cfm_waf_detectors (a dependency of cfm_waf): its Magento SOAP matcher
--- decides which SOAP bodies waf_should_read_body reads.
+-- decides which SOAP bodies waf_should_read_body_or_soap reads.
 local wdet_ok, wdet = pcall(require, "cfm_waf_detectors")
 
 -- HTTP/3 Alt-Svc emission is intentionally NOT hooked here. It lives in a
@@ -480,27 +480,6 @@ local function waf_should_read_body(uri, method)
   -- replay a body-borne payload to a clean-URL route with no body inspection at all.
   if ngx.ctx.cfm_resumed_post then return true end
 
-  -- Magento's SOAP endpoint (…/soap, …/soap/<store>, with `services` in the
-  -- query, which every SOAP call carries; one matcher, in the detector): its
-  -- SoapServer reads the body whatever the Content-Type, so a cart-item save
-  -- sent as application/octet-stream reached it unread, past rules 10027 /
-  -- 10028 (CVE-2026-48356). Read on POST / PUT / PATCH (the reader still caps
-  -- the scan at waf_body_max_len). A body the size/CT gate would not have
-  -- read is in burn-in for every rule but those two (BURNIN_ENFORCE_IDS).
-  -- Never more than the size/CT gate would have read, so a large or chunked
-  -- PUT / PATCH keeps streaming (an unread body is rule 10028's to refuse).
-  if waf_ok and wdet_ok and select(2, pcall(wdet.magento_soap_call, uri, ngx.var.args)) == true then
-    local cl = tonumber(ngx.var.http_content_length or "")
-    local buffered = method == "post" and ngx.var.cfm_body_buffered == "1"
-    if (cl and cl <= (CFG.waf_body_read_max_cl or 0)) or buffered then
-      if not (wutil_ok and wutil.waf_body_gate(lower(ngx.var.http_content_type or ""),
-              cl, CFG.waf_body_read_max_cl, false)) then
-        ngx.ctx.cfm_body_burnin = true
-      end
-      return true
-    end
-  end
-
   local ct = lower(ngx.var.http_content_type or "")
   local cl = tonumber(ngx.var.http_content_length or "")
   -- A POST body with no Content-Length (chunked, or HTTP/2 without the
@@ -606,8 +585,31 @@ local function waf_should_read_body(uri, method)
   return read
 end
 
+-- Magento's SOAP endpoint (…/soap, …/soap/<store>, with `services` in the
+-- query, which every SOAP call carries; one matcher, in the detector): its
+-- SoapServer reads the body whatever the Content-Type, so a cart-item save
+-- sent as application/octet-stream reached it unread, past rules 10027 /
+-- 10028 (CVE-2026-48356). Read only where the gate above would not, and
+-- never more than it would read (waf_body_read_max_cl, or a buffering
+-- location), so a large or chunked PUT / PATCH keeps streaming (an unread
+-- body is 10028's to refuse). Such a body is in burn-in for every rule but
+-- those two (SOAP_BURNIN_ENFORCE_IDS, cfm_soap_burnin).
+local function waf_should_read_body_or_soap(uri, method)
+  if waf_should_read_body(uri, method) then return true end
+  local m = lower(method or "")
+  if m ~= "post" and m ~= "put" and m ~= "patch" then return false end
+  if not (waf_ok and wdet_ok) then return false end
+  local ok, soap = pcall(wdet.magento_soap_call, lower(uri or ""), ngx.var.args)
+  if not (ok and soap) then return false end
+  local cl = tonumber(ngx.var.http_content_length or "")
+  local buffered = m == "post" and ngx.var.cfm_body_buffered == "1"
+  if not ((cl and cl <= (CFG.waf_body_read_max_cl or 0)) or buffered) then return false end
+  ngx.ctx.cfm_body_burnin, ngx.ctx.cfm_soap_burnin = true, true
+  return true
+end
+
 local function get_req_body_for_waf(uri, method, max_len)
-  if not waf_should_read_body(uri, method) then return "" end
+  if not waf_should_read_body_or_soap(uri, method) then return "" end
   if ngx.ctx.waf_body ~= nil then return ngx.ctx.waf_body end
   -- pcall: lua-nginx-module raises on a body it cannot read here, e.g. an
   -- HTTP/3 request without Content-Length ("http3 requests are not supported
@@ -1699,10 +1701,11 @@ local BURNIN_SEV = { logonly = 1, challenge = 2, challenge_v2 = 3, block = 4 }
 -- upload progress field PHP2Shell sends) are new to every body, and their
 -- exploit is exactly a large or chunked body on `location /` (POST / to
 -- WordPress's index.php), which the burn-in would otherwise turn into a
--- logonly hit: on 2026-10-21 PHP2Shell's POST / passed this edge. 10027 /
--- 10028 (CVE-2026-48356, Magento PolyShell) are the reason a Magento SOAP
--- body is read whatever its Content-Type (waf_should_read_body).
-local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true, ["10027"] = true, ["10028"] = true }
+-- logonly hit: on 2026-10-21 PHP2Shell's POST / passed this edge.
+local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true }
+-- On a Magento SOAP body read only for them (waf_should_read_body_or_soap,
+-- cfm_soap_burnin): 10027 / 10028, CVE-2026-48356.
+local SOAP_BURNIN_ENFORCE_IDS = { ["10027"] = true, ["10028"] = true }
 
 -- Set by a logonly WAF hit, which records and pushes it, then goes on through
 -- Steps 2b-4 like a clean request (it used to route to the origin there and
@@ -1842,7 +1845,8 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
             end
             local enf
             for _, h in ipairs(b_hits or {}) do
-              if h.action == "block" and BURNIN_ENFORCE_IDS[tostring(h.waf_rule_id)] then enf = h; break end
+              if h.action == "block" and (BURNIN_ENFORCE_IDS[tostring(h.waf_rule_id)]
+                  or (ngx.ctx.cfm_soap_burnin and SOAP_BURNIN_ENFORCE_IDS[tostring(h.waf_rule_id)])) then enf = h; break end
             end
             if enf then
               hit, reason, ttl, waf_action, waf_hits, waf_rule_id = true, enf.reason, enf.ttl, "block", b_hits, enf.waf_rule_id

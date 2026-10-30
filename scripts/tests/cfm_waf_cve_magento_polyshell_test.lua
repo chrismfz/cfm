@@ -151,7 +151,7 @@ fires(req("/soap/default", SOAP, { args = "services=quoteGuestCartItemRepository
 fires(req("/soap", SOAP, { args = "services=quoteGuestCartItemRepositoryV1" }), "FILE_INFO", "SOAP on /soap (no store)")
 fires(req("/soap/default", "<!-- &services=quoteGuestCartItemRepositoryV1& -->" .. SOAP:gsub("^<%?xml[^>]*>", ""),
   { ct = "application/x-www-form-urlencoded" }), "FILE_INFO", "SOAP with `services` in a form body")
-fires(req("/soap/default", SOAP, { ct = "application/x-www-form-urlencoded" }), "FILE_INFO",
+fires(req("/soap/default", SOAP, { ct = "application/x-www-form-urlencoded" }), "FILE_INFO_ELSEWHERE",
   "SOAP naming no service: the names still 403 (10028)", 10028)
 fires(req("/shop/soap/default", SOAP, { args = "services=quoteCartRepositoryV1", ct = "text/xml" }), "FILE_INFO",
   "SOAP of a shop in a subdirectory, the quote save service")
@@ -213,7 +213,7 @@ end
 -- back can carry them): 403, no ban
 fires(req("/rest/V1/orders", '{"entity":{"items":[{"product_option":{"extension_attributes":{"custom_options":' ..
   '[{"extension_attributes":{"file_info":{"base64_encoded_data":"R0lG","name":"logo.png"}}}]}}}]}}'),
-  "FILE_INFO", "an order write-back with a file option", 10028)
+  "FILE_INFO_ELSEWHERE", "an order write-back with a file option", 10028)
 clean(req("/rest/V1/orders", '{"entity":{"items":[{"product_option":{"extension_attributes":{"custom_options":' ..
   '[{"extension_attributes":{"file_info":{"name":"logo.png"}}}]}}}]}}'), "an order write-back, no file content")
 -- ext/soap's xsi:type Map builds keys from text the name scan does not read
@@ -234,6 +234,23 @@ end
 clean(req("/soap/default", "", { cl = 900, args = "services=quoteGuestCartItemRepositoryV1",
   ct = "application/octet-stream", deferred = true }), "the first pass over a deferred SOAP body")
 clean(req(GUEST, "", { cl = false, deferred = true }), "the first pass over a deferred chunked cart body")
+-- A caller that passes no raw path still gets the cart route from $uri
+check(det.detect_cve_magento_polyshell(GUEST, nil, "post", "", attack_json(),
+  { ["content-type"] = "application/json" }, {}) == "FILE_INFO", "unit: no raw path, route from $uri")
+-- ASCII-compatible multibyte encodings are read
+clean(req(GUEST, '<?xml version="1.0" encoding="Shift_JIS"?><cartItem><sku>P1</sku><qty>1</qty></cartItem>',
+  { ct = "application/xml" }), "a Shift_JIS XML add-to-cart")
+-- An unread form POST to a shop's own …/soap page is left alone
+clean(req("/products/soap", "", { cl = 2000000, ct = "application/x-www-form-urlencoded" }),
+  "an unread large form POST to a /soap page")
+-- 10028 runs before the rules the burn-in second pass does not enforce
+do
+  waf.set_rule("rule_sqli", "block")
+  fires(req("/soap/default", '<?xml version="1.0" encoding="UTF-16"?><a>x=1 union select 1,2,3 from information_schema.tables</a>',
+    { args = "services=quoteGuestCartItemRepositoryV1", ct = "text/xml" }), "UNREADABLE",
+    "an unreadable cart envelope that also trips 301")
+  waf.set_rule("rule_sqli", "disabled")
+end
 -- With 10027 excluded or demoted (an integration's own uploads), 10028 must
 -- not refuse the same cart-save request
 waf.set_rule("rule_cve_magento_polyshell", "disabled")
@@ -294,13 +311,16 @@ check(det.detect_cve_magento_polyshell_unseen(GUEST, nil, "post", "", ADD,
 do
   local f = assert(io.open("configs/lua/cfm.lua"))
   local src = f:read("*a"); f:close()
-  local a = src:find("pcall(wdet.magento_soap_call, uri, ngx.var.args)", 1, true)
-  local gate = src:find("local function waf_should_read_body", 1, true)
-  local allow = src:find('if has(uri, "/xmlrpc.php")', 1, true)
-  check(a and gate and allow and gate < a and a < allow,
-    "cfm.lua reads a Magento SOAP body regardless of Content-Type, before the size/CT gate")
-  check(src:find('local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true, ["10027"] = true, ["10028"] = true }', 1, true),
-    "10027 / 10028 are enforced in the body burn-in")
+  local gate = src:find("local function waf_should_read_body(uri, method)", 1, true)
+  local wrap = src:find("local function waf_should_read_body_or_soap(uri, method)", 1, true)
+  local first = src:find("if waf_should_read_body(uri, method) then return true end", 1, true)
+  local soap = src:find("pcall(wdet.magento_soap_call, lower(uri or \"\"), ngx.var.args)", 1, true)
+  check(gate and wrap and first and soap and gate < wrap and wrap < first and first < soap,
+    "cfm.lua reads a Magento SOAP body only where its gate would not, after it")
+  check(src:find('local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true }', 1, true)
+        and src:find('local SOAP_BURNIN_ENFORCE_IDS = { ["10027"] = true, ["10028"] = true }', 1, true)
+        and src:find("ngx.ctx.cfm_soap_burnin and SOAP_BURNIN_ENFORCE_IDS[", 1, true),
+    "10027 / 10028 are enforced in the burn-in of a SOAP body read for them only")
 end
 
 if fails > 0 then

@@ -5678,8 +5678,9 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
     local c = { kind = kind, body = body or "", media = php_media_type(php_content_type(headers)),
                 write = method == "post" or method == "put" or method == "patch" }
     if kind == "rest" then
-      for _, p in ipairs({ raw, uri }) do
-        local r, anon = cart_save_route(p, method)
+      -- Both paths; `raw` is nil from a caller that passes none.
+      for _, p in ipairs({ raw or false, uri }) do
+        local r, anon = cart_save_route(p or nil, method)
         if r then c.route = c.route or r; c.anon = c.anon or anon end
       end
     else
@@ -5717,6 +5718,11 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
         or enc:find("^iso[%-_]?8859") ~= nil or enc:find("^latin") ~= nil
         or enc:find("^windows%-?12%d%d$") ~= nil or enc:find("^cp12%d%d$") ~= nil
         or enc:find("^koi8") ~= nil
+        -- ASCII-compatible multibyte: their trail bytes never fall on `<`,
+        -- and an element name Magento maps is ASCII anyway
+        or enc == "shift_jis" or enc == "sjis" or enc == "windows-31j" or enc == "euc-jp"
+        or enc == "euc-kr" or enc == "gbk" or enc == "gb2312" or enc == "gb18030" or enc == "big5"
+        or enc == "tis-620" or enc == "windows-874" or enc == "macintosh"
   end
 
   -- A request that declares a body (Content-Length > 0, or chunked).
@@ -5728,46 +5734,46 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
   end
 
   -- Rule 10028 (edge block, autoblock held): 403 without a ban. Never from
-  -- the panel gate (body_unread: it reads no body).
-  --   FILE_INFO   the three names on any other web API route or SOAP service
-  --               (no file is written there, but no legitimate client sends a
-  --               file this way).
+  -- the panel gate (body_unread: it reads no body) nor from cfm.lua's first
+  -- pass over a burn-in body (body_deferred: the body comes in the second).
+  -- Two entry points, one rule id:
+  --
+  -- detect_cve_magento_polyshell_unseen runs right after 10027, because the
+  -- burn-in second pass ends at the first block hit, and a rule that is not
+  -- enforced there (301 on an envelope's text) must not end it first. It
+  -- fires only on a cart-save request (a REST cart route, a SOAP cart
+  -- service) that 10027 could not read, where a 403 is the answer anyway:
   --   UNREADABLE  a raw NUL in a JSON or XML body (JSON must escape it; UTF-16
   --               /32 XML is full of it), an XML body that does not start with
-  --               `<` (after a BOM), or a declared encoding the scan cannot
-  --               read.
+  --               `<` (after a BOM), a declared encoding the scan cannot read,
+  --               or a SOAP xsi:type override (ext/soap builds a Map's keys
+  --               from <key> text, which the name scan does not read).
   --   XML_ENTITY  an entity declaration in an XML body (an element could be
   --               built out of a reference).
   --   OVERSIZE    a body the edge did not hold whole: cut past
   --               waf_body_max_len, or declared but not read (a PUT over the
-  --               size gate or without a Content-Length, a SOAP call by
-  --               DELETE). Refused when custom_options was in the part it saw,
-  --               on the cart-save routes a guest or customer reaches (the
-  --               items routes for guest-carts and carts/mine, async/bulk
-  --               too, and the PUT carts/mine quote save: an item is a few
-  --               hundred bytes), and on SOAP unless `services` names only
-  --               other services.
+  --               size gate or without a Content-Length; a SOAP call by
+  --               DELETE with a Content-Length or Transfer-Encoding). On REST
+  --               when custom_options was in the part it saw, or on the routes
+  --               a guest or customer reaches (guest-carts and carts/mine
+  --               items, async/bulk too, and the carts/mine quote save: an
+  --               item is a few hundred bytes); on SOAP when `services` names
+  --               a cart service, or when it may sit in a form body past the
+  --               cut (an envelope, starting with `<`, sent urlencoded).
   -- A request at …/soap with neither `services` nor an XML body is a shop's
   -- own page there, not Magento's endpoint, and is left alone.
   function _M.detect_cve_magento_polyshell_unseen(uri, raw_uri, method, args, body, headers, body_unread, memo)
     if body_unread then return nil end
     local c = polyshell_ctx(memo, uri, raw_uri, method, args, body, headers)
     if not c then return nil end
-    -- The same names off the cart-save routes (on a cart-save request they
-    -- are 10027's, and its exclude or demotion must hold; an integration that
-    -- uploads real files, over 32 KB, needs 10028 excluded too, for OVERSIZE).
-    if c.write and not c.cartsave and (names_scan(memo, c.kind, method, args, c.body, headers, c.media)) then
-      return "FILE_INFO"
-    end
-    -- Everything below is about a cart-save request 10027 could not read.
     -- A SOAP call whose `services` we could not see (none in the query, the
-    -- body not read or cut) may still be one, through a form body.
+    -- body cut) may still be one, through a form body: only an envelope.
     local maybe_soap_cart = c.kind == "soap" and c.services == nil
     if not c.cartsave and not maybe_soap_cart then return nil end
     local b = c.body
     if b:sub(1, 3) == "\239\187\191" then b = b:sub(4) end
     local lead = b:match("^%s*(.)")
-    if maybe_soap_cart and lead ~= nil and lead ~= "<" then return nil end
+    if maybe_soap_cart and lead ~= "<" then return nil end
     local xml = c.kind == "soap" or has(c.media, "xml")
     if c.write and b ~= "" and c.cartsave then
       if (xml or has(c.media, "json")) and b:find("%z") then return "UNREADABLE" end
@@ -5777,9 +5783,6 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
         local enc = decl:match("encoding%s*=%s*[\"']([^\"']*)")
         if enc and not xml_enc_ascii_compatible(enc) then return "UNREADABLE" end
         if b:find("<!%s*[Ee][Nn][Tt][Ii][Tt][Yy]") then return "XML_ENTITY" end
-        -- ext/soap honours an xsi:type override: a SOAP-encoded Map builds its
-        -- keys from <key> TEXT, which the name scan does not read. Magento's
-        -- document/literal clients send none.
         if c.kind == "soap" and b:find("[%w_%.%-]+:[Tt][Yy][Pp][Ee]%s*=") then return "UNREADABLE" end
       end
     end
@@ -5791,14 +5794,24 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
     if not cut then return nil end
     if c.kind == "soap" then
       if c.services == "cart" then return "OVERSIZE" end
-      -- `services` only in a form body, past the cut: the body is still the
-      -- SOAP envelope SoapServer parses (it starts with `<`, checked above),
-      -- with the field inside it, e.g. in a comment.
       if maybe_soap_cart and c.media == "application/x-www-form-urlencoded" then return "OVERSIZE" end
       return nil
     end
     local _, seen = names_scan(memo, c.kind, method, args, c.body, headers, c.media)
     if seen.co or c.anon then return "OVERSIZE" end
+    return nil
+  end
+
+  -- detect_cve_magento_polyshell_elsewhere runs late, with the other held
+  -- rules: the three names on a web API request that saves no cart
+  -- (FILE_INFO_ELSEWHERE; an order an integration writes back can carry them,
+  -- and no file is written there). On a cart-save request the names are
+  -- 10027's alone, so its exclude or demotion holds.
+  function _M.detect_cve_magento_polyshell_elsewhere(uri, raw_uri, method, args, body, headers, body_unread, memo)
+    if body_unread or (method ~= "post" and method ~= "put" and method ~= "patch") then return nil end
+    local c = polyshell_ctx(memo, uri, raw_uri, method, args, body, headers)
+    if not c or c.cartsave then return nil end
+    if names_scan(memo, c.kind, method, args, c.body, headers, c.media) then return "FILE_INFO_ELSEWHERE" end
     return nil
   end
 end
