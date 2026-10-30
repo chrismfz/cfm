@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.10.30
+
 ### Added
 - **`cfm realip`: the origin sees visitors' real IPs behind the edge, on every
   panel.** The edge proxies to the origin from 127.0.0.1; an origin that does not
