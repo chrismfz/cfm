@@ -5602,7 +5602,7 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
   -- category called soap) matches too; the callers tell them apart by
   -- `services` (Magento refuses a SOAP call without it) or the names.
   local function is_soap_path(u)
-    if not u then return false end
+    if not u or not u:find("[Ss][Oo][Aa][Pp]") then return false end
     local p = lower(u):gsub("/+", "/"):gsub("/$", "")
     return p:find("/soap$") ~= nil or p:find("/soap/[^/]+$") ~= nil
   end
@@ -5746,8 +5746,10 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
   --   UNREADABLE  a raw NUL in a JSON or XML body (JSON must escape it; UTF-16
   --               /32 XML is full of it), an XML body that does not start with
   --               `<` (after a BOM), a declared encoding the scan cannot read,
-  --               or a SOAP xsi:type override (ext/soap builds a Map's keys
-  --               from <key> text, which the name scan does not read).
+  --               or a SOAP xsi:type="…:Map" (ext/soap builds a Map's keys
+  --               from <key> text, which the name scan does not read; other
+  --               xsi:types, e.g. a SoapClient's xsd:string for an anyType,
+  --               keep element names).
   --   XML_ENTITY  an entity declaration in an XML body (an element could be
   --               built out of a reference).
   --   OVERSIZE    a body the edge did not hold whole: cut past
@@ -5783,7 +5785,11 @@ do -- rules 10027 / 10028: locals scoped (the file is near the 200-local cap)
         local enc = decl:match("encoding%s*=%s*[\"']([^\"']*)")
         if enc and not xml_enc_ascii_compatible(enc) then return "UNREADABLE" end
         if b:find("<!%s*[Ee][Nn][Tt][Ii][Tt][Yy]") then return "XML_ENTITY" end
-        if c.kind == "soap" and b:find("[%w_%.%-]+:[Tt][Yy][Pp][Ee]%s*=") then return "UNREADABLE" end
+        if c.kind == "soap" then
+          for tag in b:gmatch("<([^<>]*)") do
+            if tag:find(":[Tt][Yy][Pp][Ee]%s*=%s*[\"'][^\"']-[Mm][Aa][Pp]%s*[\"']") then return "UNREADABLE" end
+          end
+        end
       end
     end
     -- Not held whole: cut by the cap, or (SOAP, which reads a body whatever

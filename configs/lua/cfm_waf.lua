@@ -256,7 +256,7 @@ local CFG = {
   rule_cve_pixelyoursite_xss = "block", -- CVE-2026-1844 / CVE-2026-1841 / CVE-2026-109987: PixelYourSite (free < 11.4.3, PRO < 12.6.8) unauth stored XSS. On a Store API checkout the plugin stores its traffic-source, landing-page and UTM values in the WooCommerce order unescaped, and the order screen prints them, so the admin who opens the order runs the attacker's script (tophair.gr 2026-10-06: fake plugin + two admins in 15 s; ~100 planted orders on 16 fleet shops from 2026-02-13). This rule reads only the plugin's own cookies (pysTrafficSource, pys_landing_page, pys_utm_* and last_ twins): executable markup (a script/iframe/object/embed/meta/base element, or any element with an event handler, srcdoc or javascript:), a landing value whose inner quote opens a handler attribute, or a javascript:/vbscript:/data: landing URL. A bare `<`/`>` or a placeholder such as `<campaign_name>` does not count. Armed: no other software sends these names, and a ban stops the bot before its checkout. Repeated Cookie headers are also read as Apache merges them.
   rule_cve_pixelyoursite_session_xss = "block", -- CVE-2026-1844 / -1841 / -109987, the session copies PixelYourSite fills on a session's first request: the raw request path (landing page), the host parse_url takes from the Referer (traffic source) and the utm_* query fields (UTMs), with the same executable-markup / attribute-breakout tests as 10025. These are request parts every site sees, so a scanner or link checker can trip them without the plugin: edge 403 only, autoblock held per rule (HoldAutoblock, RULE_10026 = 0). Runs late with the other held rules.
   rule_cve_magento_polyshell = "block", -- CVE-2026-48356 "PolyShell": Magento Open Source / Adobe Commerce unauth arbitrary file upload through a cart item's custom option `file_info` (base64 file, attacker's name and extension). Blocks a cart-save request (REST cart-items routes for guest / customer / admin carts, the quote save PUT …/carts/<id>, sync / async / async-bulk, route read from $uri and the raw path; SOAP naming a cart or cart-item repository) carrying custom_options, file_info AND base64_encoded_data in its JSON keys, XML element / attribute names (SOAP is XML whatever its type) or query / form-field bracket keys (a multipart POST reaches Magento's input through $_POST), in any spelling Magento reads as them (it drops `_` and ignores case; FILE_INFO). Source: Sansec, Magento's own code, the 2026-10-29 attack on orion. Armed: no legitimate client sends a file this way.
-  rule_cve_magento_polyshell_unseen = "block", -- CVE-2026-48356, the inferences, 403 with the autoblock held per rule (HoldAutoblock, RULE_10028 = 0). Right after 10027, on a cart-save request it could not read: a body the edge did not hold whole (OVERSIZE: cut past waf_body_max_len or declared but unread, with custom_options in view or on the guest / customer cart-save routes; on SOAP naming a cart service), an XML entity declaration (XML_ENTITY), or a JSON / XML body the scan cannot read as Magento would (UNREADABLE). Late, with the other held rules: the same three names on a web API request that saves no cart (FILE_INFO_ELSEWHERE: an order an integration writes back can carry them, and no file is written there).
+  rule_cve_magento_polyshell_unseen = "block", -- CVE-2026-48356, the inferences, 403 with the autoblock held per rule (HoldAutoblock, RULE_10028 = 0). Right after 10027, on a cart-save request it could not read: a body the edge did not hold whole (OVERSIZE: cut past waf_body_max_len or declared but unread, with custom_options in view or on the guest / customer cart-save routes; on SOAP naming a cart service), an XML entity declaration (XML_ENTITY), or a JSON / XML body the scan cannot read as Magento would (UNREADABLE). Late, logonly: the same three names on a web API request that saves no cart (FILE_INFO_ELSEWHERE: an order an integration writes back can carry them, and no file is written there).
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
 
   -- [top-4]  Upload controls
@@ -1052,6 +1052,46 @@ local function check_impl(ctx, st)
       end
     end
   end
+  -- Magento "PolyShell" unauth file upload (CVE-2026-48356), rule 10027: a
+  -- cart item's custom option `file_info` writes a base64 file, any name and
+  -- extension, to pub/media/custom_options/quote/ (orion, 2026-10-29: GIF+PHP
+  -- shells in ~106 KB of JSON). POST / PUT / PATCH, so not behind
+  -- body_inspect_ok; the upload rules (401/402) do not decode the base64.
+  -- Right after 10024 and for the same reason: a Magento SOAP body the edge
+  -- reads only for it is in the body burn-in (cfm.lua SOAP_BURNIN_ENFORCE_IDS),
+  -- where an earlier block that is not enforced (10005 on an envelope's text)
+  -- would end the check first and turn the pass into logonly.
+  do
+    local mode = rule_mode(CFG.rule_cve_magento_polyshell, "block")
+    if mode ~= "disabled" then
+      st.polyshell = st.polyshell or {}
+      local tag = det.detect_cve_magento_polyshell(uri, raw_uri, m_lower, args, body, headers, st.polyshell)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag, ttl, mode, RULE_IDS.rule_cve_magento_polyshell) then goto done end
+      end
+    end
+  end
+
+  -- Magento PolyShell, a cart-save request rule 10027 could not read (rule
+  -- 10028, ban held): cut or unread, an XML entity, an unreadable encoding.
+  -- Held, yet it runs here and not with the other held rules, for the same
+  -- burn-in reason as 10027. It fires only where a 403 is the answer anyway,
+  -- so shadowing an armed rule after it costs that rule's ban, not the block.
+  do
+    local mode = rule_mode(CFG.rule_cve_magento_polyshell_unseen, "block")
+    if mode ~= "disabled" then
+      st.polyshell = st.polyshell or {}
+      -- body_deferred: cfm.lua's first pass over a burn-in body, which it
+      -- hands the WAF in a second pass; no body was "cut" here.
+      local tag = det.detect_cve_magento_polyshell_unseen(uri, raw_uri, m_lower, args, body, headers,
+        ctx.body_unread == true or ctx.body_deferred == true, st.polyshell)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag, ttl, mode, RULE_IDS.rule_cve_magento_polyshell_unseen) then goto done end
+      end
+    end
+  end
   -- The PHP2Shell tool by its request head, rule 10023.
   do
     local mode = rule_mode(CFG.rule_cve_php2shell_tool, "block")
@@ -1281,46 +1321,6 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_4020:GRAVITY_SMTP:" .. tag, ttl, mode, RULE_IDS.rule_cve_gravity_smtp) then goto done end
-      end
-    end
-  end
-
-  -- ── 3m) Magento "PolyShell" unauth file upload (CVE-2026-48356) ──────────────
-  -- A cart item's custom option `file_info` writes a base64 file, any name and
-  -- extension, to pub/media/custom_options/quote/ (orion, 2026-10-29: GIF+PHP
-  -- shells in ~106 KB of JSON). Any web API route, POST / PUT / PATCH, so not
-  -- behind body_inspect_ok. The body carries a base64 file, which none of the
-  -- upload rules (401/402) decode. What it cannot read is rule 10028's, late.
-  do
-    local mode = rule_mode(CFG.rule_cve_magento_polyshell, "block")
-    if mode ~= "disabled" then
-      st.polyshell = st.polyshell or {}
-      local tag = det.detect_cve_magento_polyshell(uri, raw_uri, m_lower, args, body, headers, st.polyshell)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag, ttl, mode, RULE_IDS.rule_cve_magento_polyshell) then goto done end
-      end
-    end
-  end
-
-  -- ── 3m') Magento PolyShell, a cart-save request rule 10027 could not read
-  -- (rule 10028, ban held): cut or unread, an XML entity, an unreadable
-  -- encoding. Held, yet it runs here and not with the other held rules: the
-  -- burn-in second pass (cfm.lua) ends at the first block hit, and a rule not
-  -- enforced there (301 on the envelope's text) must not end it before this
-  -- one. It fires only where a 403 is the answer anyway, so shadowing an
-  -- armed rule after it costs that rule's ban, not the block.
-  do
-    local mode = rule_mode(CFG.rule_cve_magento_polyshell_unseen, "block")
-    if mode ~= "disabled" then
-      st.polyshell = st.polyshell or {}
-      -- body_deferred: cfm.lua's first pass over a burn-in body, which it
-      -- hands the WAF in a second pass; no body was "cut" here.
-      local tag = det.detect_cve_magento_polyshell_unseen(uri, raw_uri, m_lower, args, body, headers,
-        ctx.body_unread == true or ctx.body_deferred == true, st.polyshell)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag, ttl, mode, RULE_IDS.rule_cve_magento_polyshell_unseen) then goto done end
       end
     end
   end
@@ -2588,8 +2588,7 @@ local function check_impl(ctx, st)
 
   -- Magento PolyShell (rule 10028, CVE-2026-48356): the payload names on a
   -- web API request that saves no cart (an order an integration writes back
-  -- can carry them; no file is written there). Held in code, so it runs here
-  -- with the other held block rules.
+  -- can carry them; no file is written there). Logged, not blocked.
   do
     local mode = rule_mode(CFG.rule_cve_magento_polyshell_unseen, "block")
     if mode ~= "disabled" then
@@ -2597,8 +2596,10 @@ local function check_impl(ctx, st)
       local tag = det.detect_cve_magento_polyshell_elsewhere(uri, raw_uri, m_lower, args, body, headers,
         ctx.body_unread == true or ctx.body_deferred == true, st.polyshell)
       if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag, ttl, mode, RULE_IDS.rule_cve_magento_polyshell_unseen) then goto done end
+        -- logonly: no file is written off the cart-save routes, and an
+        -- integration's order write-back can legitimately carry the names
+        record("WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag, CFG.default_ttl_sec, "logonly",
+          RULE_IDS.rule_cve_magento_polyshell_unseen)
       end
     end
   end

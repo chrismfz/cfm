@@ -66,12 +66,12 @@ local function req(uri, body, opts)
   }
 end
 
-local function fires(ctx, tag, label, rule)
+local function fires(ctx, tag, label, rule, want_action)
   local hit, reason, _, action, _, rule_id = waf.check(ctx)
   check(hit == true, label .. " — hit (got " .. tostring(hit) .. ")")
   check(reason == "WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag,
     label .. " — reason …:" .. tag .. " (got " .. tostring(reason) .. ")")
-  check(action == "block", label .. " — block (got " .. tostring(action) .. ")")
+  check(action == (want_action or "block"), label .. " — " .. (want_action or "block") .. " (got " .. tostring(action) .. ")")
   local want = rule or ((tag == "FILE_INFO") and 10027 or 10028)
   if rule_id ~= nil then
     check(tonumber(rule_id) == want, label .. " — rule " .. want .. " (got " .. tostring(rule_id) .. ")")
@@ -152,7 +152,7 @@ fires(req("/soap", SOAP, { args = "services=quoteGuestCartItemRepositoryV1" }), 
 fires(req("/soap/default", "<!-- &services=quoteGuestCartItemRepositoryV1& -->" .. SOAP:gsub("^<%?xml[^>]*>", ""),
   { ct = "application/x-www-form-urlencoded" }), "FILE_INFO", "SOAP with `services` in a form body")
 fires(req("/soap/default", SOAP, { ct = "application/x-www-form-urlencoded" }), "FILE_INFO_ELSEWHERE",
-  "SOAP naming no service: the names still 403 (10028)", 10028)
+  "SOAP naming no service: logged (10028)", 10028, "logonly")
 fires(req("/shop/soap/default", SOAP, { args = "services=quoteCartRepositoryV1", ct = "text/xml" }), "FILE_INFO",
   "SOAP of a shop in a subdirectory, the quote save service")
 fires(req("/soap/default", SOAP, { method = "PATCH", args = "services=quoteGuestCartItemRepositoryV1" }),
@@ -213,13 +213,17 @@ end
 -- back can carry them): 403, no ban
 fires(req("/rest/V1/orders", '{"entity":{"items":[{"product_option":{"extension_attributes":{"custom_options":' ..
   '[{"extension_attributes":{"file_info":{"base64_encoded_data":"R0lG","name":"logo.png"}}}]}}}]}}'),
-  "FILE_INFO_ELSEWHERE", "an order write-back with a file option", 10028)
+  "FILE_INFO_ELSEWHERE", "an order write-back with a file option: logged, not blocked", 10028, "logonly")
 clean(req("/rest/V1/orders", '{"entity":{"items":[{"product_option":{"extension_attributes":{"custom_options":' ..
   '[{"extension_attributes":{"file_info":{"name":"logo.png"}}}]}}}]}}'), "an order write-back, no file content")
 -- ext/soap's xsi:type Map builds keys from text the name scan does not read
 fires(req("/soap/default", '<?xml version="1.0"?><env:Envelope><env:Body><cartItem><extensionAttributes ' ..
   'xsi:type="ns2:Map"><item><key>custom_options</key></item></extensionAttributes></cartItem></env:Body></env:Envelope>',
   { args = "services=quoteGuestCartItemRepositoryV1", ct = "text/xml" }), "UNREADABLE", "a SOAP-encoded Map")
+clean(req("/soap/default", '<?xml version="1.0"?><env:Envelope><env:Body><quote><customAttributes><item>' ..
+  '<attributeCode>c</attributeCode><value xsi:type="xsd:string">x</value></item></customAttributes></quote>' ..
+  '</env:Body></env:Envelope>', { args = "services=quoteCartRepositoryV1", ct = "text/xml" }),
+  "a SoapClient anyType value (xsi:type=xsd:string)")
 -- The per-request scan cache must not carry one request's answer to another
 do
   local base = "cartItem[product_option][extension_attributes][custom_options][0][extension_attributes][file_info]"
@@ -313,10 +317,11 @@ do
   local src = f:read("*a"); f:close()
   local gate = src:find("local function waf_should_read_body(uri, method)", 1, true)
   local wrap = src:find("local function waf_should_read_body_or_soap(uri, method)", 1, true)
-  local first = src:find("if waf_should_read_body(uri, method) then return true end", 1, true)
   local soap = src:find("pcall(wdet.magento_soap_call, lower(uri or \"\"), ngx.var.args)", 1, true)
-  check(gate and wrap and first and soap and gate < wrap and wrap < first and first < soap,
-    "cfm.lua reads a Magento SOAP body only where its gate would not, after it")
+  local flag = src:find("if soap then ngx.ctx.cfm_soap_burnin = true end", 1, true)
+  local first = src:find("if waf_should_read_body(uri, method) then return true end", 1, true)
+  check(gate and wrap and soap and flag and first and gate < wrap and wrap < soap and soap < flag and flag < first,
+    "cfm.lua flags every Magento SOAP body, then reads one only where its gate would not")
   check(src:find('local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true }', 1, true)
         and src:find('local SOAP_BURNIN_ENFORCE_IDS = { ["10027"] = true, ["10028"] = true }', 1, true)
         and src:find("ngx.ctx.cfm_soap_burnin and SOAP_BURNIN_ENFORCE_IDS[", 1, true),

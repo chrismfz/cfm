@@ -595,16 +595,21 @@ end
 -- body is 10028's to refuse). Such a body is in burn-in for every rule but
 -- those two (SOAP_BURNIN_ENFORCE_IDS, cfm_soap_burnin).
 local function waf_should_read_body_or_soap(uri, method)
-  if waf_should_read_body(uri, method) then return true end
   local m = lower(method or "")
-  if m ~= "post" and m ~= "put" and m ~= "patch" then return false end
-  if not (waf_ok and wdet_ok) then return false end
-  local ok, soap = pcall(wdet.magento_soap_call, lower(uri or ""), ngx.var.args)
-  if not (ok and soap) then return false end
+  local soap = false
+  if (m == "post" or m == "put" or m == "patch") and waf_ok and wdet_ok then
+    local ok, r = pcall(wdet.magento_soap_call, lower(uri or ""), ngx.var.args)
+    soap = ok and r == true
+  end
+  -- Whichever path reads a Magento SOAP body (the gate's buffered branch
+  -- for a chunked one, or the read below), its burn-in enforces 10027 / 10028.
+  if soap then ngx.ctx.cfm_soap_burnin = true end
+  if waf_should_read_body(uri, method) then return true end
+  if not soap then return false end
   local cl = tonumber(ngx.var.http_content_length or "")
   local buffered = m == "post" and ngx.var.cfm_body_buffered == "1"
   if not ((cl and cl <= (CFG.waf_body_read_max_cl or 0)) or buffered) then return false end
-  ngx.ctx.cfm_body_burnin, ngx.ctx.cfm_soap_burnin = true, true
+  ngx.ctx.cfm_body_burnin = true
   return true
 end
 
