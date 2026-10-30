@@ -252,6 +252,17 @@ var wafRuleIDs = []WAFRule{
 	// sees, so edge block with its autoblock held.
 	{ID: 10025, Name: "rule_cve_pixelyoursite_xss", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10026, Name: "rule_cve_pixelyoursite_session_xss", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
+	// 10027 / 10028: CVE-2026-48356 "PolyShell", Magento unauth file upload
+	// through a cart item's custom option file_info. 10027 (armed) =
+	// custom_options + file_info + base64_encoded_data in a cart-save request
+	// (REST cart routes, SOAP cart services), any spelling Magento reads as
+	// them; no legitimate client sends a file this way. 10028 = the
+	// inferences on a cart-save request 10027 could not read (a body the edge
+	// did not hold whole, an XML entity, an unreadable encoding): edge block
+	// with its autoblock held. It also logs (logonly) the same names on a
+	// route that saves no cart, where no file is written.
+	{ID: 10027, Name: "rule_cve_magento_polyshell", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	{ID: 10028, Name: "rule_cve_magento_polyshell_unseen", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

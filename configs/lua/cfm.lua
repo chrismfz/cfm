@@ -307,6 +307,9 @@ end
 -- for the pure ct_is_inspectable() classifier used by the body-read gate (F07).
 -- If it fails to load, the F07 Content-Type branch fails closed (skips the read).
 local wutil_ok, wutil = pcall(require, "cfm_waf_util")
+-- cfm_waf_detectors (a dependency of cfm_waf): its Magento SOAP matcher
+-- decides which SOAP bodies waf_should_read_body_or_soap reads.
+local wdet_ok, wdet = pcall(require, "cfm_waf_detectors")
 
 -- HTTP/3 Alt-Svc emission is intentionally NOT hooked here. It lives in a
 -- server-level header_filter_by_lua_block (see angie.conf / openresty.conf)
@@ -582,8 +585,31 @@ local function waf_should_read_body(uri, method)
   return read
 end
 
+-- Magento's SOAP endpoint (…/soap, …/soap/<store>, with `services` in the
+-- query, which every SOAP call carries; one matcher, in the detector): its
+-- SoapServer reads the body whatever the Content-Type, so a cart-item save
+-- sent as application/octet-stream reached it unread, past rules 10027 /
+-- 10028 (CVE-2026-48356). Read only where the gate above would not, and
+-- never more than it would read (waf_body_read_max_cl, or a buffering
+-- location), so a large or chunked PUT / PATCH keeps streaming (an unread
+-- body is 10028's to refuse). Such a body is in burn-in for every rule but
+-- those two (BURNIN_ENFORCE_IDS).
+local function waf_should_read_body_or_soap(uri, method)
+  if waf_should_read_body(uri, method) then return true end
+  local m = lower(method or "")
+  if m ~= "post" and m ~= "put" and m ~= "patch" then return false end
+  if not (waf_ok and wdet_ok) then return false end
+  local ok, soap = pcall(wdet.magento_soap_call, lower(uri or ""), ngx.var.args)
+  if not (ok and soap == true) then return false end
+  local cl = tonumber(ngx.var.http_content_length or "")
+  local buffered = m == "post" and ngx.var.cfm_body_buffered == "1"
+  if not ((cl and cl <= (CFG.waf_body_read_max_cl or 0)) or buffered) then return false end
+  ngx.ctx.cfm_body_burnin = true
+  return true
+end
+
 local function get_req_body_for_waf(uri, method, max_len)
-  if not waf_should_read_body(uri, method) then return "" end
+  if not waf_should_read_body_or_soap(uri, method) then return "" end
   if ngx.ctx.waf_body ~= nil then return ngx.ctx.waf_body end
   -- pcall: lua-nginx-module raises on a body it cannot read here, e.g. an
   -- HTTP/3 request without Content-Length ("http3 requests are not supported
@@ -1676,7 +1702,10 @@ local BURNIN_SEV = { logonly = 1, challenge = 2, challenge_v2 = 3, block = 4 }
 -- exploit is exactly a large or chunked body on `location /` (POST / to
 -- WordPress's index.php), which the burn-in would otherwise turn into a
 -- logonly hit: on 2026-10-21 PHP2Shell's POST / passed this edge.
-local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true }
+-- 10027 / 10028 (CVE-2026-48356, Magento PolyShell) gate themselves on a
+-- Magento cart-save request, and their exploit can arrive as a SOAP body the
+-- edge reads in burn-in (waf_should_read_body_or_soap).
+local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true, ["10027"] = true, ["10028"] = true }
 
 -- Set by a logonly WAF hit, which records and pushes it, then goes on through
 -- Steps 2b-4 like a clean request (it used to route to the origin there and
@@ -1735,6 +1764,9 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
       host = host, ip = ip, cookie = ngx.var.http_cookie or "",
       peer = peer_ip, cf_ip = cf_ip, shdict = SH,
       headers = req_headers, body = body_burnin and "" or req_body, self_origin = self_origin,
+      -- The body is held back for the second (burn-in) pass below: a rule
+      -- that reads an empty body as "not read" must not decide on it here.
+      body_deferred = body_burnin or nil,
       skip_rule_ids = skip_rule_ids,
       -- Rule 10022 (CVE-2026-109618): the request declared no body length
       -- (chunked, or HTTP/2-3 without the header) and nginx will stream it to
@@ -1787,7 +1819,10 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
         -- A BURNIN_ENFORCE_IDS block is the exception: it is enforced, over a
         -- challenge too (which a cleared client would otherwise turn into
         -- logonly below and pass upstream with the body).
-        waf_ctx.body, waf_ctx.shdict = req_body, nil
+        waf_ctx.body, waf_ctx.shdict, waf_ctx.body_deferred = req_body, nil, nil
+        -- check() orders the held 10028 early in this pass only (it ends at
+        -- the first block, and only BURNIN_ENFORCE_IDS blocks are enforced).
+        waf_ctx.burnin_pass = true
         local b_ok, b_hit, b_reason, b_ttl, b_action, b_hits, b_rule = pcall(waf.check, waf_ctx)
         if not b_ok then
           if not SH or SH:add("bodyburnin|" .. tostring(ip), 1, 60) then

@@ -46,6 +46,33 @@ _Nothing yet._
   `127.0.0.1T` in the allow list, and called Apache trusted with no
   `RemoteIPHeader` set (mod_remoteip then reads nothing).
 
+### Changed
+- **The edge access log records each request's size (`req_len=`).** The
+  `log_format cfm` line (OpenResty and Angie) ends with
+  `req_len=$request_length`, the request line, headers and body as received.
+  It is there to measure which routes legitimately take bodies larger than
+  the 32 KB the WAF reads, before any size-based rule. The log readers parse
+  fields by name, so nothing else changes; the line is a few bytes longer.
+
+### Security
+- **New WAF rules 10027 / 10028 block the Magento "PolyShell" file upload
+  (CVE-2026-48356).** An anonymous request to a cart's items API can make
+  Magento write any file, a PHP shell included, to
+  `pub/media/custom_options/quote/`: the file travels base64-encoded inside the
+  JSON body, where no upload rule looked. On 2026-10-29 it wrote eight GIF+PHP
+  shells to a Magento 2.3.7 shop on orion through the edge (they did not run:
+  the directory's `.htaccess` denies them). Rule 10027 blocks a cart-save
+  request (REST cart routes, SOAP cart services) that carries the
+  `custom_options` → `file_info` → `base64_encoded_data` names, in any
+  spelling Magento accepts (`fileInfo`, `FILE_INFO`, `\u`-escaped), in its
+  JSON, XML, query or form fields: 6 h ban and a `WAF/CVE-2026-48356` alert,
+  like every CVE rule. Rule 10028 refuses, with a 403 but no ban, a cart
+  request the WAF could not read: a cart or SOAP body larger than it reads or
+  not read, an XML entity declaration, or an encoding it cannot read; the
+  same names on any other Magento API route (no file is written there) are
+  only logged. The edge now reads Magento's
+  SOAP bodies whatever their Content-Type, as Magento does.
+
 ## 2026.10.28
 
 ### Fixed
