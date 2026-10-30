@@ -477,14 +477,23 @@ local function waf_should_read_body(uri, method)
   -- replay a body-borne payload to a clean-URL route with no body inspection at all.
   if ngx.ctx.cfm_resumed_post then return true end
 
-  -- Magento's SOAP endpoint (/soap, /soap/<store>, under /index.php/ too):
-  -- its SoapServer reads the body whatever the Content-Type, so a cart-item
-  -- save sent as application/octet-stream reached it unread, past rules
-  -- 10027 / 10028 (CVE-2026-48356). Read on POST / PUT / PATCH (the reader
-  -- still caps the scan at waf_body_max_len).
+  -- Magento's SOAP endpoint (…/soap, …/soap/<store>, with `services` in the
+  -- query, which every SOAP call carries): its SoapServer reads the body
+  -- whatever the Content-Type, so a cart-item save sent as
+  -- application/octet-stream reached it unread, past rules 10027 / 10028
+  -- (CVE-2026-48356). Read on POST / PUT / PATCH (the reader still caps the
+  -- scan at waf_body_max_len). A body the size/CT gate would not have read is
+  -- in burn-in for every rule but those two (BURNIN_ENFORCE_IDS).
   do
-    local p = uri:gsub("/+", "/"):gsub("/$", ""):gsub("^/index%.php", "")
-    if p == "/soap" or p:find("^/soap/[^/]+$") then return true end
+    local p = uri:gsub("/+", "/"):gsub("/$", "")
+    if (p:find("/soap$") or p:find("/soap/[^/]+$"))
+       and lower(ngx.unescape_uri(ngx.var.args or "")):find("services", 1, true) then
+      if not (wutil_ok and wutil.waf_body_gate(lower(ngx.var.http_content_type or ""),
+              tonumber(ngx.var.http_content_length or ""), CFG.waf_body_read_max_cl, false)) then
+        ngx.ctx.cfm_body_burnin = true
+      end
+      return true
+    end
   end
 
   local ct = lower(ngx.var.http_content_type or "")
@@ -1685,8 +1694,10 @@ local BURNIN_SEV = { logonly = 1, challenge = 2, challenge_v2 = 3, block = 4 }
 -- upload progress field PHP2Shell sends) are new to every body, and their
 -- exploit is exactly a large or chunked body on `location /` (POST / to
 -- WordPress's index.php), which the burn-in would otherwise turn into a
--- logonly hit: on 2026-10-21 PHP2Shell's POST / passed this edge.
-local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true }
+-- logonly hit: on 2026-10-21 PHP2Shell's POST / passed this edge. 10027 /
+-- 10028 (CVE-2026-48356, Magento PolyShell) are the reason a Magento SOAP
+-- body is read whatever its Content-Type (waf_should_read_body).
+local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true, ["10027"] = true, ["10028"] = true }
 
 -- Set by a logonly WAF hit, which records and pushes it, then goes on through
 -- Steps 2b-4 like a clean request (it used to route to the origin there and

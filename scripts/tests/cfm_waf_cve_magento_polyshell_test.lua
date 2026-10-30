@@ -64,13 +64,13 @@ local function req(uri, body, opts)
   }
 end
 
-local function fires(ctx, tag, label)
+local function fires(ctx, tag, label, rule)
   local hit, reason, _, action, _, rule_id = waf.check(ctx)
   check(hit == true, label .. " — hit (got " .. tostring(hit) .. ")")
   check(reason == "WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag,
     label .. " — reason …:" .. tag .. " (got " .. tostring(reason) .. ")")
   check(action == "block", label .. " — block (got " .. tostring(action) .. ")")
-  local want = (tag == "FILE_INFO") and 10027 or 10028
+  local want = rule or ((tag == "FILE_INFO") and 10027 or 10028)
   if rule_id ~= nil then
     check(tonumber(rule_id) == want, label .. " — rule " .. want .. " (got " .. tostring(rule_id) .. ")")
   end
@@ -103,14 +103,15 @@ fires(req(GUEST, attack_json("fileInfo", "base64EncodedData")), "FILE_INFO", "ca
 fires(req(GUEST, attack_json("FILE_INFO")), "FILE_INFO", "upper case")
 fires(req(GUEST, attack_json("f_ile_info_")), "FILE_INFO", "extra underscores")
 fires(req(GUEST, attack_json("\\u0066ile_info")), "FILE_INFO", "\\u-escaped key")
-fires(req(GUEST, '{ "cartItem" : { "custom_options"\n : [ { "file_info"\n  :\t{} } ] } }'),
+fires(req(GUEST, '{ "cartItem" : { "custom_options"\n : [ { "file_info"\n  :\t{ "base64_encoded_data" : "R0lG" } } ] } }'),
   "FILE_INFO", "blanks before the colon")
 fires(req(GUEST, attack_json(), { ct = "application/json; charset=utf-8" }), "FILE_INFO", "JSON with a charset")
 
 -- The query, which Magento merges into a PUT's input
 fires(req(GUEST .. "/5", "{}", { method = "PUT", args =
   "cartItem[product_option][extension_attributes][custom_options][0][option_value]=file" ..
-  "&cartItem[product_option][extension_attributes][custom_options][0][extension_attributes][file%5Finfo][name]=x.php" }),
+  "&cartItem[product_option][extension_attributes][custom_options][0][extension_attributes][file%5Finfo][name]=x.php" ..
+  "&cartItem[product_option][extension_attributes][custom_options][0][extension_attributes][file_info][base64_encoded_data]=R0lG" }),
   "FILE_INFO", "the payload in a PUT's query")
 
 -- XML bodies (Magento's REST takes application/xml and text/xml)
@@ -146,8 +147,12 @@ local SOAP = '<?xml version="1.0"?><env:Envelope xmlns:env="http://www.w3.org/20
 fires(req("/soap/default", SOAP, { args = "services=quoteGuestCartItemRepositoryV1", ct = "application/soap+xml" }),
   "FILE_INFO", "SOAP guest cart item save")
 fires(req("/soap", SOAP, { args = "services=quoteGuestCartItemRepositoryV1" }), "FILE_INFO", "SOAP on /soap (no store)")
+fires(req("/soap/default", "<!-- &services=quoteGuestCartItemRepositoryV1& -->" .. SOAP:gsub("^<%?xml[^>]*>", ""),
+  { ct = "application/x-www-form-urlencoded" }), "FILE_INFO", "SOAP with `services` in a form body")
 fires(req("/soap/default", SOAP, { ct = "application/x-www-form-urlencoded" }), "FILE_INFO",
-  "SOAP with `services` in the body, no query")
+  "SOAP naming no service: the names still 403 (10028)", 10028)
+fires(req("/shop/soap/default", SOAP, { args = "services=quoteCartRepositoryV1", ct = "text/xml" }), "FILE_INFO",
+  "SOAP of a shop in a subdirectory, the quote save service")
 fires(req("/soap/default", SOAP, { method = "PATCH", args = "services=quoteGuestCartItemRepositoryV1" }),
   "FILE_INFO", "SOAP over PATCH")
 
@@ -198,6 +203,13 @@ do
     f(base .. "[extension_attributes][file_info][name]", "x.php") .. "--x--\r\n"
   fires(req(GUEST, mp, { ct = "multipart/form-data; boundary=x" }), "FILE_INFO", "multipart form fields")
 end
+-- The names on a route that writes no file (an order an integration writes
+-- back can carry them): 403, no ban
+fires(req("/rest/V1/orders", '{"entity":{"items":[{"product_option":{"extension_attributes":{"custom_options":' ..
+  '[{"extension_attributes":{"file_info":{"base64_encoded_data":"R0lG","name":"logo.png"}}}]}}}]}}'),
+  "FILE_INFO", "an order write-back with a file option", 10028)
+clean(req("/rest/V1/orders", '{"entity":{"items":[{"product_option":{"extension_attributes":{"custom_options":' ..
+  '[{"extension_attributes":{"file_info":{"name":"logo.png"}}}]}}}]}}'), "an order write-back, no file content")
 -- nginx can normalise $uri away from the route Magento reads on the raw path
 fires(req("/", attack_json(), { raw = GUEST }), "FILE_INFO", "the route only on the raw path")
 
@@ -209,6 +221,8 @@ clean(req("/shop/soap/", '--x\r\nContent-Disposition: form-data; name="add-to-ca
   { ct = "multipart/form-data; boundary=x" }), "the same as multipart")
 clean(req("/el/katigoria/soap", "a=1", { ct = "application/x-www-form-urlencoded" }), "a category called soap")
 clean(req("/api/soap/check", '{"a":1}'), "an app folder called soap")
+clean(req("/rest/V1/files/upload", "--json\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\r\n\0\1\2\r\n--json--\r\n",
+  { ct = "multipart/form-data; boundary=json" }), "a binary multipart upload whose boundary says json")
 clean(req("/soap/", "quantity=1&add-to-cart=55", { ct = "application/x-www-form-urlencoded" }),
   "a WooCommerce category at /soap/ (no services)")
 -- /rest/ without Magento's /V<n>/ (Atlassian and the like)
@@ -251,8 +265,13 @@ check(det.detect_cve_magento_polyshell_unseen(GUEST, nil, "post", "", ADD,
 do
   local f = assert(io.open("configs/lua/cfm.lua"))
   local src = f:read("*a"); f:close()
-  check(src:find('if p == "/soap" or p:find("^/soap/[^/]+$") then return true end', 1, true),
-    "cfm.lua reads /soap bodies regardless of Content-Type")
+  local a = src:find('if (p:find("/soap$") or p:find("/soap/[^/]+$"))', 1, true)
+  local gate = src:find("local function waf_should_read_body", 1, true)
+  local allow = src:find('if has(uri, "/xmlrpc.php")', 1, true)
+  check(a and gate and allow and gate < a and a < allow,
+    "cfm.lua reads a Magento SOAP body regardless of Content-Type, before the size/CT gate")
+  check(src:find('local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true, ["10027"] = true, ["10028"] = true }', 1, true),
+    "10027 / 10028 are enforced in the body burn-in")
 end
 
 if fails > 0 then

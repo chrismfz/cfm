@@ -514,14 +514,17 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   sends, deferred in `cfm_waf.lua` like them; 10022, CVE-2026-109618's
   length-less multipart leg, which a chunked upload client also sends;
   10026, the PixelYourSite session-copy leg (raw path, Referer host,
-  utm_* query), request parts any scanner can trip; 10028, the Magento
-  PolyShell requests 10027 cannot read: a cut or unread cart-items body, an
-  XML entity, an unreadable encoding). The
+  utm_* query), request parts any scanner can trip; 10028, Magento
+  PolyShell's inferences: the payload names off the cart-save routes, and
+  what 10027 cannot read — a cut or unread body, an XML entity, an
+  unreadable encoding). The
   armed body rules 10021 (same CVE) and 10024 (CVE-2026-109619's
   `PHP_SESSION_UPLOAD_PROGRESS` field, which the public PHP2Shell tool sent
   past 10021 on 2026-10-21) run FIRST in `check()` and are the body rules
   cfm.lua enforces during the body burn-in (`BURNIN_ENFORCE_IDS`), because
-  their exploit is a large or chunked `POST /`. The rendered `[waf_security]` template is derived from
+  their exploit is a large or chunked `POST /`; 10027 / 10028 (Magento
+  PolyShell) are enforced there too, because the edge now reads a Magento
+  SOAP body whatever its Content-Type. The rendered `[waf_security]` template is derived from
   the same code defaults, so a fresh `detectors.conf` lists exactly these.
 - **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
   default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and
