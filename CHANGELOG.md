@@ -39,6 +39,9 @@ back-filled here — see the git/PR history for that period.
   `DEFAULT_VAL` (it was `NESTED`). The rule also reports the strongest tag in
   the whole request, so a `${date:}` in the query no longer masks a `${jndi:`
   header as logonly.
+_Nothing yet._
+
+## 2026.11.01
 
 ### Fixed
 - **Rule 412 (polyglot upload) no longer blocks and bans customers for
