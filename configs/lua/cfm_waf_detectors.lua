@@ -6750,7 +6750,8 @@ end
 -- `<jsp:`) were removed 2026-11-01: two bytes in binary data, `<%` turned
 -- up in the first 64 bytes of 1 in ~1 000 real images (307 of 301 123 on
 -- rigel; a JPEG quantization table, a WebP RIFF size), and in 14 days every
--- 412 hit was a customer's product photo, two of them banned.
+-- 412 hit was a customer's product photo, two of them banned. `<?=` counts
+-- only with a PHP expression after it (has_php_short_echo).
 local POLYGLOT_OPENERS = {
   { "<?php",   "POLYGLOT_PHP" },
   { "<?=",     "POLYGLOT_PHP_SHORT" },
@@ -6855,7 +6856,12 @@ function _M.detect_polyglot_upload(body, headers)
       local p_low = lower(payload)
       for i = 1, #POLYGLOT_OPENERS do
         local opener = POLYGLOT_OPENERS[i]
-        if has(p_low, opener[1]) then
+        -- `<?=` needs a PHP expression after it (has_php_short_echo, as
+        -- rules 402 and 432 read it): three bytes, a stray 3C 3F 3D turns
+        -- up in binary image data too.
+        local hit
+        if opener[1] == "<?=" then hit = has_php_short_echo(p_low) else hit = has(p_low, opener[1]) end
+        if hit then
           return opener[2]
         end
       end

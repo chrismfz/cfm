@@ -27,6 +27,9 @@ back-filled here — see the git/PR history for that period.
   into a block, so two were banned (test-toplevel.gr on rigel, e-geoponiki.gr
   on mars). Nothing on the fleet runs ASP or JSP, so the rule now checks the
   PHP and `<script` openers only; those matched none of the 301 123 images.
+  A short echo `<?=` now counts only with a PHP expression after it, the
+  guard rules 402 and 432 already use, because those three bytes can also
+  occur in an image by chance.
 
 ## 2026.10.30
 

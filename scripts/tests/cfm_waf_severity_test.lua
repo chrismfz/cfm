@@ -1221,6 +1221,17 @@ do
     }))
     check(hit == false, "60b: W4 polyglot — real " .. sm[1] .. " with <% by chance, no hit (got " .. tostring(reason) .. ")")
   end
+  -- A stray 3C 3F 3D in an image's binary is not a short echo; a real one is.
+  local stray = multipart_body(
+    'Content-Disposition: form-data; name="up"; filename="x.jpg"\r\nContent-Type: image/jpeg',
+    "\255\216\255\224\0\16JFIF\0\1<?=\3\200\255\219\0\132" .. string.rep("\0", 64))
+  check(waf.check(fresh_ctx({ method = "POST", headers = { ["Content-Type"] = TEST_CT }, body = stray })) == false,
+        "60b: W4 polyglot — stray <?= bytes in a JPEG, no hit")
+  local short = multipart_body(
+    'Content-Disposition: form-data; name="up"; filename="x.gif"\r\nContent-Type: image/gif',
+    "GIF89a<?=`$_GET[c]`?>")
+  local _, sreason = waf.check(fresh_ctx({ method = "POST", headers = { ["Content-Type"] = TEST_CT }, body = short }))
+  check(sreason == "WAF_UPLOAD_CONTENT:POLYGLOT_PHP_SHORT", "60b: W4 polyglot — GIF89a<?=`$_GET[c]`?> still fires (got " .. tostring(sreason) .. ")")
   -- An ASP/JSP opener at the very start no longer counts either.
   local body = multipart_body(
     'Content-Disposition: form-data; name="up"; filename="x.jpg"',

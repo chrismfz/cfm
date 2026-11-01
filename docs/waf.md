@@ -2436,7 +2436,7 @@ The original detector / engine roadmap is shipped end-to-end. Every item is now 
 | **W1k** Proper-noun webshell path names (`/c99.php`, `/r57.php`, `/wso.php`, `/b374k.php`, …) | 413 | block-tier split of W1 (2026-07-03); near-zero legit use, so hard-blocked |
 | **W2** Webshell magic strings in body (`b374k`, `WSO 2.5`, `@eval(`, …) | 404 | scored; covers `b374k` / `c99shell` / `r57shell` / `wso 2./4./5.` / `weevelyshell` / `filesman` |
 | **W3** PHP function obfuscation (`\x65val`, `chr().chr()…`, `hex2bin($_POST[`) | 405 | shared scorer across body and upload paths |
-| **W4** Polyglot upload (image CT/ext + `<?php`/`<?=`/`<%`/`<script` in first 64 B) | 412 | required a multipart parser; also unblocked W2/W3 in upload context |
+| **W4** Polyglot upload (image CT/ext + `<?php`/`<?=` with a PHP expression/`<script` in first 64 B; `<%` dropped 2026-11-01) | 412 | required a multipart parser; also unblocked W2/W3 in upload context |
 | **X1** C2 tunnel hostnames (pastebin, ngrok, webhook.site, discord cdn, telegram) | 702 | 21 hostnames |
 | **X2** Coinminer (`xmrig --url`, `pool.minexmr.com`, `stratum+tcp://`, monerod, ethminer) | 327 | |
 | **B1** HTTP smuggling (CL+TE coexist / multi-CL / malformed CL / multi-TE) | 608 | header-shape detector |
