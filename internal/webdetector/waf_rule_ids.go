@@ -111,6 +111,10 @@ var wafRuleIDs = []WAFRule{
 	{ID: 325, Name: "rule_lolbin", ReasonFamily: "WAF_RCE", DefaultMode: "challenge_v2"},
 	{ID: 326, Name: "rule_java_deserialize", ReasonFamily: "WAF_RCE", DefaultMode: "challenge_v2"},
 	{ID: 327, Name: "rule_coinminer", ReasonFamily: "WAF_RCE", DefaultMode: "challenge_v2"},
+	// 328: challenge_v2 since 2026-11-01 for its Log4Shell-only tags (JNDI,
+	// DEFAULT_VAL, LOWER, UPPER); NESTED / ENV / SYS / MAIN / DATE / BASE64
+	// stay logonly at ANY mode (cfm_waf.lua LOG4SHELL_LOGONLY_TAGS): template
+	// syntax a cleared customer can send, in a high-risk armed family.
 	{ID: 328, Name: "rule_log4shell", ReasonFamily: "WAF_CVE", DefaultMode: "challenge_v2"},
 	{ID: 329, Name: "rule_php_object_injection", ReasonFamily: "WAF_RCE", DefaultMode: "block"},
 

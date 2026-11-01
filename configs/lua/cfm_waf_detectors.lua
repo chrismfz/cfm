@@ -6959,33 +6959,77 @@ end
 -- attribute strings, some Vue SFCs, and Prettier-formatted JavaScript
 -- template literals can produce `${${expr}.field}`-shaped tokens.
 --
--- Tag order: the Log4Shell-only lookups (JNDI, DEFAULT_VAL `${::-`, LOWER,
--- UPPER) are tested before NESTED, so the classic `${${::-j}${::-n}…` payload
--- is DEFAULT_VAL, and NESTED is left with a bare `${${` that names no
--- Log4Shell lookup. cfm_waf.lua enforces only those four tags at the rule's
+-- Tag order: the Log4Shell-only lookups (JNDI, DEFAULT_VAL — `${::-` or a
+-- one-character default glued to more text, `${env:X:-j}ndi` — LOWER, UPPER)
+-- are tested before NESTED and ENV across EVERY source (args/body and all
+-- headers), so `${${::-j}…` / `${${env:X:-j}ndi…` are DEFAULT_VAL wherever
+-- they sit, a weak tag elsewhere in the request cannot mask them, and NESTED
+-- is left with a bare `${${` that names no Log4Shell lookup. cfm_waf.lua
+-- enforces only those four tags at the rule's
 -- mode (challenge_v2 since 2026-11-01); NESTED / ENV / SYS / MAIN / DATE /
 -- BASE64 stay logonly whatever the mode (LOG4SHELL_LOGONLY_TAGS), for the
 -- template collisions above: WAF_CVE is high-risk and armed, so a cleared
 -- customer's challenge-tier hit is a 403 and a ban. In 30 days of fleet
 -- logs every 328 hit was a JNDI tag in a scanner's header (2026-11-01).
+
+-- A lookup whose `:-` default is ONE character glued to more text:
+-- ${env:NaN:-j}ndi${env:NaN:-:}… spells "jndi:" out of defaults (the public
+-- payload lists' favourite). A template's default is a value, followed by a
+-- space, quote or end; bash's ${1:-x} included. One forward pass: a cursor
+-- over the `$` / `}` bytes tracks the last "${" and the last "}" before each
+-- `:-` match (no per-match substring or back-scan: 32 KB of `}x:-a}b` after
+-- one "${" cost 35 ms a request that way).
+local function has_glued_default(h)
+  local i, nextp, last_open, last_close = 1, h:find("[%$}]"), nil, 0
+  while true do
+    local s = h:find(":%-[^}]}[%a%$]", i)
+    if not s then return false end
+    while nextp and nextp < s do
+      if h:byte(nextp) == 125 then           -- "}"
+        last_close = nextp
+      elseif h:byte(nextp + 1) == 123 then   -- "${"
+        last_open = nextp
+      end
+      nextp = h:find("[%$}]", nextp + 1)
+    end
+    if last_open and last_open > last_close and s - last_open <= 64 then return true end
+    i = s + 1
+  end
+end
+
+-- The Log4Shell-only lookups: what cfm_waf.lua enforces at the rule's mode.
+local function log4shell_strong(h)
+  if has(h, "${jndi:")                           then return "JNDI"        end
+  if has(h, "${::-") or has_glued_default(h)     then return "DEFAULT_VAL" end
+  if has(h, "${lower:")                          then return "LOWER"       end
+  if has(h, "${upper:")                          then return "UPPER"       end
+  return nil
+end
+
+-- The lookups template engines share: logonly at any mode in cfm_waf.lua.
+local function log4shell_weak(h)
+  if has(h, "${${")      then return "NESTED" end
+  if has(h, "${env:")    then return "ENV"    end
+  if has(h, "${sys:")    then return "SYS"    end
+  if has(h, "${main:")   then return "MAIN"   end
+  if has(h, "${date:")   then return "DATE"   end
+  if has(h, "${base64:") then return "BASE64" end
+  return nil
+end
+
 function _M.detect_log4shell(args, body, headers, _norm_ab)
   local s = _norm_ab or normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
 
-  -- Single cheap precheck on the (potentially 32 KB) scan buffer. The
-  -- dominant case is "no '${' anywhere" → one find() returns nil and we
-  -- fall through to the header walk. Without this gate we'd run 10
-  -- linear scans on every request.
+  -- A strong tag anywhere (args/body or ANY header) wins over a weak one
+  -- anywhere: returning the first tag found let `?q=${date:x}` downgrade a
+  -- `${jndi:` header to logonly (and pairs() order decided between headers).
+  -- Single cheap precheck on the (potentially 32 KB) scan buffer: the
+  -- dominant case is "no '${' anywhere".
+  local weak
   if has(s, "${") then
-    if has(s, "${jndi:")     then return "JNDI"        end
-    if has(s, "${::-")       then return "DEFAULT_VAL" end
-    if has(s, "${lower:")    then return "LOWER"       end
-    if has(s, "${upper:")    then return "UPPER"       end
-    if has(s, "${${")        then return "NESTED"      end
-    if has(s, "${env:")      then return "ENV"         end
-    if has(s, "${sys:")      then return "SYS"         end
-    if has(s, "${main:")     then return "MAIN"        end
-    if has(s, "${date:")     then return "DATE"        end
-    if has(s, "${base64:")   then return "BASE64"      end
+    local t = log4shell_strong(s)
+    if t then return t end
+    weak = log4shell_weak(s)
   end
 
   -- Header walk: Log4Shell historically arrived in User-Agent, X-Forwarded-
@@ -6997,6 +7041,7 @@ function _M.detect_log4shell(args, body, headers, _norm_ab)
   -- here but is caught by the body/args path above (normalize double-
   -- decodes). Real-world Log4Shell campaigns didn't double-encode
   -- headers, so the asymmetry is acceptable.
+  local weak_hdr
   if type(headers) == "table" then
     for hname, hval in pairs(headers) do
       local raw = header_string(hval)
@@ -7021,22 +7066,18 @@ function _M.detect_log4shell(args, body, headers, _norm_ab)
                         or raw:find("%24{", 1, true)
                         or raw:find("$%7", 1, true)) then
         local h = lower(url_decode_once(raw))
-        if     has(h, "${jndi:")   then return "JNDI:HDR:"   .. tostring(hname):sub(1, 32)
-        elseif has(h, "${::-")     then return "DEFAULT_VAL:HDR:" .. tostring(hname):sub(1, 32)
-        elseif has(h, "${lower:")  then return "LOWER:HDR:"  .. tostring(hname):sub(1, 32)
-        elseif has(h, "${upper:")  then return "UPPER:HDR:"  .. tostring(hname):sub(1, 32)
-        elseif has(h, "${${")      then return "NESTED:HDR:" .. tostring(hname):sub(1, 32)
-        elseif has(h, "${env:")    then return "ENV:HDR:"    .. tostring(hname):sub(1, 32)
-        elseif has(h, "${sys:")    then return "SYS:HDR:"    .. tostring(hname):sub(1, 32)
-        elseif has(h, "${main:")   then return "MAIN:HDR:"   .. tostring(hname):sub(1, 32)
-        elseif has(h, "${date:")   then return "DATE:HDR:"   .. tostring(hname):sub(1, 32)
-        elseif has(h, "${base64:") then return "BASE64:HDR:" .. tostring(hname):sub(1, 32)
+        local name = tostring(hname):sub(1, 32)
+        local t = log4shell_strong(h)
+        if t then return t .. ":HDR:" .. name end
+        if not weak_hdr then
+          local w = log4shell_weak(h)
+          if w then weak_hdr = w .. ":HDR:" .. name end
         end
       end
     end
   end
 
-  return nil
+  return weak or weak_hdr
 end
 
 -- Bad UTF-8 encoding detector. Port of Coraza's validateUtf8Encoding operator

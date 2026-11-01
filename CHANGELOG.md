@@ -27,10 +27,13 @@ back-filled here — see the git/PR history for that period.
   `${upper:`. The tags template engines also produce (`${${`, `${env:`,
   `${sys:`, `${main:`, `${date:`, `${base64:`) stay logonly at any mode:
   `WAF_CVE` is high-risk and armed for autoblock, so a challenge for a
-  logged-in customer becomes a block and a ban. The classic
-  `${${::-j}${::-n}…` payload now reports as `DEFAULT_VAL` (it was `NESTED`),
-  so it is enforced; `NESTED` keeps only a bare `${${` that names no
-  Log4Shell lookup.
+  logged-in customer becomes a block and a ban. A lookup whose default is one
+  character glued to more text (`${env:X:-j}ndi`, `${${env:X:-j}ndi…`, the
+  public payload lists' spelling) and the classic `${${::-j}${::-n}…` now
+  report as `DEFAULT_VAL` (they were `ENV` / `NESTED`), so they are enforced;
+  a template default such as `${env:HOME:-/root}` is not. The rule also
+  reports the strongest tag in the whole request, so a `${date:}` in the query
+  no longer masks a `${jndi:` header as logonly.
 
 ### Fixed
 - **Rule 412 (polyglot upload) no longer blocks and bans customers for
