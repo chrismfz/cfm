@@ -17,6 +17,28 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Rule 328 (Log4Shell lookup forms) now challenges instead of only
+  logging** (`challenge_v2`). In 30 days every 328 hit on the fleet (29) was a
+  scanner sending `${jndi:` in an `X-Api-Version`, `Referer` or
+  `Authentication` header from cloud IPs; none came from a customer. Only the
+  Log4Shell-specific tags are enforced: `${jndi:` (in a header; rule 320
+  already blocks it in the query and body), `${::-`, `${lower:` and
+  `${upper:`. The tags template engines also produce (`${${`, `${env:`,
+  `${sys:`, `${main:`, `${date:`, `${base64:`) stay logonly at any mode:
+  `WAF_CVE` is high-risk and armed for autoblock, so a challenge for a
+  logged-in customer becomes a block and a ban. The rule now resolves the
+  lookups the way Log4j would (`${…:-X}`, `${date:'X'}`, `${lower:X}` give
+  X) and enforces any that resolve to a `${jndi:` lookup (new tag
+  `RESOLVED`): `${${env:X:-j}ndi…` with any variable-name length and
+  `${${date:'j'}${date:'n'}…` were `NESTED` / `ENV` and only logged. A
+  template or shell default (`${env:HOME:-/root}`, `${PREFIX:-/}usr`)
+  resolves to plain text and is not a hit. Lookups nested past 8 levels are
+  enforced as `DEEP` (no template nests that deep, and unwrapping further
+  would be unbounded work). The classic `${${::-j}${::-n}…` reports as
+  `DEFAULT_VAL` (it was `NESTED`). The rule also reports the strongest tag in
+  the whole request, so a `${date:}` in the query no longer masks a `${jndi:`
+  header as logonly.
 _Nothing yet._
 
 ## 2026.11.01

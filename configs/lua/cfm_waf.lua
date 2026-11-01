@@ -230,7 +230,7 @@ local CFG = {
   -- (CVE=1), so a block here 403s the request AND nft-bans + Slack/mails as
   -- WAF/CVE-YYYY-NNNN; hold a lower-confidence CVE rule with RULE_<id>=0 in
   -- [waf_security] (not by un-arming the family). rule_log4shell (328) is also
-  -- WAF_CVE (logonly).
+  -- WAF_CVE (challenge_v2, its template-shaped tags logonly).
   rule_cve_simple_file_list_upload = "block", -- CVE-2025-34085 / CVE-2020-36847: Simple File List (WP) unauth upload->rename RCE. Endpoints ee-upload-engine.php (PHP tag in upload) + ee-file-engine.php (rename target ->.php/.phtml/.php[0-9]); param names vary across PoCs so we key on endpoint + exec-ext/php-tag marker.
   rule_cve_joomla_jce_profile_import = "block", -- CVE-2026-48907: Joomla JCE (<2.9.99.5) unauth PHP upload->RCE. POST index.php?option=com_jce, JCE action value "profiles.import" (a multipart field, not a key=value pair), + php-executable multipart upload filename (double-ext .xml.php). Keyed on component+action-value+exec-ext, not the random filename/CSRF field.
   rule_cve_ninja_forms_fu_upload = "block", -- CVE-2026-0740: Ninja Forms File Uploads add-on unauth arbitrary file upload + path traversal. POST wp-admin/admin-ajax.php, action value "nf_fu_upload" + (php-executable upload filename OR image_jpg=../ traversal). Keyed on the specific action (NOT bare admin-ajax) + exploit marker.
@@ -301,8 +301,12 @@ local CFG = {
   -- ${env:X:-j}…, ${${::-j}…) that defeat substring matching on rule 320.
   rule_java_deserialize  = "challenge_v2", -- rO0AB base64 prefix / 0xACED0005 magic / aced0005 hex
                                         -- (Java-serialization-specific marker; not in legit web traffic)
-  rule_log4shell         = "logonly",   -- ${lower:j}…, ${env:X:-j}…, ${${::-j}${::-n}…, ${base64:…}
-                                        -- (Log4Shell JNDI-lookup evasion forms not caught by rule 320)
+  rule_log4shell         = "challenge_v2", -- ${jndi: in a header, ${::-j}…, ${lower:j}…, ${upper:J}…,
+                                        -- lookups that resolve to ${jndi: (${${env:X:-j}ndi…, ${${date:'j'}…)
+                                        -- (Log4Shell lookup forms rule 320 misses). challenge_v2 since
+                                        -- 2026-11-01: 30 days of fleet hits were all scanners (JNDI in
+                                        -- X-Api-Version / Referer). The template-shaped tags (NESTED, ENV,
+                                        -- SYS, MAIN, DATE, BASE64) stay logonly: LOG4SHELL_LOGONLY_TAGS.
 
   -- ── Phase 4 — C2 / exfiltration (logonly rollout) ────────────────────────
   -- Sources: docs/waf.md "Detector phases" §Phase 4. X1 covers tunnel/paste
@@ -695,6 +699,15 @@ local RULE_IDS = {
   rule_cve_translatepress_reset_preview = 10018,
   rule_cve_translatepress_reset_preview_authed = 10020,
   rule_cve_translatepress_id_lookup = 10019,
+}
+
+-- rule_log4shell (328) tags held at logonly whatever the rule's mode: the
+-- lookups template engines share (Commons Configuration's ${env:} / ${sys:}
+-- / ${date:} / ${base64:}, ${main:}) and a bare ${${ (JS template literals).
+-- Only JNDI / DEFAULT_VAL / LOWER / UPPER / RESOLVED are enforced
+-- (detect_log4shell).
+local LOG4SHELL_LOGONLY_TAGS = {
+  NESTED = true, ENV = true, SYS = true, MAIN = true, DATE = true, BASE64 = true,
 }
 
 -- Per-tag override for cmd_payload sub-rules. Falls back to the parent ID
@@ -1410,6 +1423,10 @@ local function check_impl(ctx, st)
     if mode ~= "disabled" then
       local tag = det.detect_log4shell(args, body, headers, get_norm_ab())
       if tag then
+        -- The template-shaped tags stay logonly whatever the mode: a cleared
+        -- customer's JS or template text can carry them, and WAF_CVE is
+        -- high-risk and armed (a challenge-tier hit is a 403 and a ban).
+        if LOG4SHELL_LOGONLY_TAGS[tag:match("^[^:]+")] then mode = "logonly" end
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:LOG4SHELL:" .. tag, ttl, mode, RULE_IDS.rule_log4shell) then goto done end
       end

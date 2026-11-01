@@ -1,5 +1,5 @@
 -- Tests for the Log4Shell header precheck hex-case fix (audit F35, rule 328
--- WAF_CVE:LOG4SHELL, production tier: logonly).
+-- WAF_CVE:LOG4SHELL, production tier: challenge_v2 since 2026-11-01).
 --
 -- detect_log4shell's per-header gate was:
 --     raw:find("${") or raw:find("%24%7b")

