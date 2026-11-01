@@ -301,7 +301,8 @@ local CFG = {
   -- ${env:X:-j}…, ${${::-j}…) that defeat substring matching on rule 320.
   rule_java_deserialize  = "challenge_v2", -- rO0AB base64 prefix / 0xACED0005 magic / aced0005 hex
                                         -- (Java-serialization-specific marker; not in legit web traffic)
-  rule_log4shell         = "challenge_v2", -- ${jndi: in a header, ${::-j}…, ${lower:j}…, ${upper:J}…
+  rule_log4shell         = "challenge_v2", -- ${jndi: in a header, ${::-j}…, ${lower:j}…, ${upper:J}…,
+                                        -- lookups that resolve to ${jndi: (${${env:X:-j}ndi…, ${${date:'j'}…)
                                         -- (Log4Shell lookup forms rule 320 misses). challenge_v2 since
                                         -- 2026-11-01: 30 days of fleet hits were all scanners (JNDI in
                                         -- X-Api-Version / Referer). The template-shaped tags (NESTED, ENV,
@@ -703,7 +704,8 @@ local RULE_IDS = {
 -- rule_log4shell (328) tags held at logonly whatever the rule's mode: the
 -- lookups template engines share (Commons Configuration's ${env:} / ${sys:}
 -- / ${date:} / ${base64:}, ${main:}) and a bare ${${ (JS template literals).
--- Only JNDI / DEFAULT_VAL / LOWER / UPPER are enforced (detect_log4shell).
+-- Only JNDI / DEFAULT_VAL / LOWER / UPPER / RESOLVED are enforced
+-- (detect_log4shell).
 local LOG4SHELL_LOGONLY_TAGS = {
   NESTED = true, ENV = true, SYS = true, MAIN = true, DATE = true, BASE64 = true,
 }

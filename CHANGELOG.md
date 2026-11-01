@@ -27,13 +27,18 @@ back-filled here — see the git/PR history for that period.
   `${upper:`. The tags template engines also produce (`${${`, `${env:`,
   `${sys:`, `${main:`, `${date:`, `${base64:`) stay logonly at any mode:
   `WAF_CVE` is high-risk and armed for autoblock, so a challenge for a
-  logged-in customer becomes a block and a ban. A lookup whose default is one
-  character glued to more text (`${env:X:-j}ndi`, `${${env:X:-j}ndi…`, the
-  public payload lists' spelling) and the classic `${${::-j}${::-n}…` now
-  report as `DEFAULT_VAL` (they were `ENV` / `NESTED`), so they are enforced;
-  a template default such as `${env:HOME:-/root}` is not. The rule also
-  reports the strongest tag in the whole request, so a `${date:}` in the query
-  no longer masks a `${jndi:` header as logonly.
+  logged-in customer becomes a block and a ban. The rule now resolves the
+  lookups the way Log4j would (`${…:-X}`, `${date:'X'}`, `${lower:X}` give
+  X) and enforces any that resolve to a `${jndi:` lookup (new tag
+  `RESOLVED`): `${${env:X:-j}ndi…` with any variable-name length and
+  `${${date:'j'}${date:'n'}…` were `NESTED` / `ENV` and only logged. A
+  template or shell default (`${env:HOME:-/root}`, `${PREFIX:-/}usr`)
+  resolves to plain text and is not a hit. Lookups nested past 8 levels are
+  enforced as `DEEP` (no template nests that deep, and unwrapping further
+  would be unbounded work). The classic `${${::-j}${::-n}…` reports as
+  `DEFAULT_VAL` (it was `NESTED`). The rule also reports the strongest tag in
+  the whole request, so a `${date:}` in the query no longer masks a `${jndi:`
+  header as logonly.
 
 ### Fixed
 - **Rule 412 (polyglot upload) no longer blocks and bans customers for
