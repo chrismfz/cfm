@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.01
+
 ### Fixed
 - **Rule 412 (polyglot upload) no longer blocks and bans customers for
   ordinary photos.** It flagged an image whose first 64 bytes held the ASP
