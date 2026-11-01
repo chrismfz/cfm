@@ -2540,7 +2540,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 44 | Polyglot upload | Multipart parser → first 64 B of image-claimed parts checked vs PHP/script openers (ASP/JSP dropped 2026-11-01: `<%` occurs by chance in ~1 in 1 000 real images, and nothing on the fleet runs ASP/JSP) | `cfm_waf_detectors.lua:2423` |
 | 45 | Range abuse | `Request-Range`, multi `Range`, oversized, ≥ 8 ranges | `cfm_waf_detectors.lua:2533` |
 | 46 | IP host | Host header is bare IPv4 / IPv6 literal | `cfm_waf_detectors.lua:162` |
-| 47 | Log4Shell evasion | `${${::-j}…`, `${lower:j}…`, `${env:` / `sys:` / `main:` / `date:` / `base64:` in args+body+headers | `cfm_waf_detectors.lua` (`detect_log4shell`) |
+| 47 | Log4Shell evasion | `${${::-j}…`, `${lower:j}…`, `${env:` / `sys:` / `main:` / `date:` / `base64:` in args+body+headers; lookups resolved like Log4j (`${…:-X}`, `${date:'X'}`, `${lower:X}` → X, ≤ 8 passes): a result holding `${jndi:` is `RESOLVED`, nesting past the passes is `DEEP`; the strongest tag across the whole request wins | `cfm_waf_detectors.lua` (`detect_log4shell`) |
 | 48 | Bad UTF-8 | Overlong / surrogate / truncated multibyte in normalized args+body (Coraza `validateUtf8Encoding` port) | `cfm_waf_detectors.lua` (`detect_bad_utf8`) |
 | 49 | PHP split-string canary (421) | `<?php print "A"."B";exit;` exec-test probe; print/echo/die + quoted-string concat + whole-word `exit`/`die`, no control-flow disqualifiers | `cfm_waf_detectors.lua` (`detect_php_split_string_canary`) |
 | 50 | PHP wget+curl dropper (422) | `wget -O` + `curl -o` fallback pair + `filesize()` integrity + `@touch(`/`file_exists(` | `cfm_waf_detectors.lua` (`detect_php_dropper_wget_curl`) |
