@@ -2533,7 +2533,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 41 | Smuggling CL/TE | CL+TE coexist / multi-CL / malformed CL / multi-TE | `cfm_waf_detectors.lua:2267` |
 | 42 | Long path segment | ≥ 800 B segment with `data:` URI artifact carve-out | `cfm_waf_detectors.lua:2347` |
 | 43 | Header flood | > 16 KB excluding Cookie / Authorization | `cfm_waf_detectors.lua:2374` |
-| 44 | Polyglot upload | Multipart parser → first 64 B of image-claimed parts checked vs PHP/ASP/JSP/script openers | `cfm_waf_detectors.lua:2423` |
+| 44 | Polyglot upload | Multipart parser → first 64 B of image-claimed parts checked vs PHP/script openers (ASP/JSP dropped 2026-11-01: `<%` occurs by chance in ~1 in 1 000 real images, and nothing on the fleet runs ASP/JSP) | `cfm_waf_detectors.lua:2423` |
 | 45 | Range abuse | `Request-Range`, multi `Range`, oversized, ≥ 8 ranges | `cfm_waf_detectors.lua:2533` |
 | 46 | IP host | Host header is bare IPv4 / IPv6 literal | `cfm_waf_detectors.lua:162` |
 | 47 | Log4Shell evasion | `${${::-j}…`, `${lower:j}…`, `${env:` / `sys:` / `main:` / `date:` / `base64:` in args+body+headers | `cfm_waf_detectors.lua` (`detect_log4shell`) |
