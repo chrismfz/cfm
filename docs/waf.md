@@ -1052,7 +1052,10 @@ Current assignments:
                                        325  rule_lolbin
                                        326  rule_java_deserialize
                                        327  rule_coinminer
-                                       328  rule_log4shell
+                                       328  rule_log4shell          (challenge_v2 since 2026-11-01 for the
+                                                                    JNDI / DEFAULT_VAL / LOWER / UPPER tags;
+                                                                    NESTED / ENV / SYS / MAIN / DATE / BASE64
+                                                                    stay logonly at any mode)
                                        329  rule_php_object_injection
                                        330  rule_xss_body           (logonly, 2026-10-22: explicit XSS markup in a POST
                                                                     body — attribute breakout, a tag with an event handler,
@@ -2426,7 +2429,7 @@ The original detector / engine roadmap is shipped end-to-end. Every item is now 
 | Item | Rule(s) | Notes |
 |---|---|---|
 | File split of `cfm_waf.lua` into `cfm_waf_util.lua` + `cfm_waf_detectors.lua` + engine | — | foundation; lets each detector tag header/uri/body/multipart surface |
-| **C1** Log4Shell (bare `${jndi:` + lookup-syntax evasions) | 320, 328 | bare forms in `detect_rce` at `block`; evasion variants (`${${::-j}…`, `${lower:j}`, `${env:` etc.) in `detect_log4shell` at `logonly` |
+| **C1** Log4Shell (bare `${jndi:` + lookup-syntax evasions) | 320, 328 | bare forms in `detect_rce` at `block`; evasion variants (`${${::-j}…`, `${lower:j}`, `${env:` etc.) in `detect_log4shell`: `challenge_v2` since 2026-11-01 for the Log4Shell-only tags (JNDI in a header, `${::-`, `${lower:`, `${upper:`), the template-shaped tags (`${${`, `${env:`, `${sys:`, `${main:`, `${date:`, `${base64:`) logonly |
 | **C2** Java deserialization (`rO0AB…`, `\xac\xed\x00\x05`) | 326 | scans body / Cookie / Authorization / X-Forwarded-* |
 | **R1** Reverse-shell one-liners (`bash -i >& /dev/tcp/`, `python -c 'import socket'`, `socat tcp-connect`, …) | 322 | 24 literal needles |
 | **R2** Persistence (cron / systemd / bashrc / authorized_keys) | 323 | |

@@ -111,7 +111,7 @@ var wafRuleIDs = []WAFRule{
 	{ID: 325, Name: "rule_lolbin", ReasonFamily: "WAF_RCE", DefaultMode: "challenge_v2"},
 	{ID: 326, Name: "rule_java_deserialize", ReasonFamily: "WAF_RCE", DefaultMode: "challenge_v2"},
 	{ID: 327, Name: "rule_coinminer", ReasonFamily: "WAF_RCE", DefaultMode: "challenge_v2"},
-	{ID: 328, Name: "rule_log4shell", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
+	{ID: 328, Name: "rule_log4shell", ReasonFamily: "WAF_CVE", DefaultMode: "challenge_v2"},
 	{ID: 329, Name: "rule_php_object_injection", ReasonFamily: "WAF_RCE", DefaultMode: "block"},
 
 	// 4xx upload / malware

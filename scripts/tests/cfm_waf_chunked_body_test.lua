@@ -30,7 +30,7 @@ local function post(t)
   local vars = { http_content_type = t.ct or FORM, http_content_length = t.cl }
   if t.buffered then vars.cfm_body_buffered = "1" end
   local headers = { ["content-type"] = t.ct or FORM, ["user-agent"] = "Mozilla/5.0" }
-  if t.headers_extra then headers["x-a"] = "${date:}" end  -- trips logonly rule_log4shell
+  if t.headers_extra then headers["x-a"] = "${date:}" end  -- trips rule_log4shell's logonly DATE tag
   return H.run{ method = t.method or "POST", uri = t.uri or "/checkout", args = t.args or "", body = t.body or SQLI,
                 headers = headers, vars = vars,
                 read_body_error = t.read_body_error, verdict = t.verdict, env = t.env }

@@ -17,6 +17,21 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Rule 328 (Log4Shell lookup forms) now challenges instead of only
+  logging** (`challenge_v2`). In 30 days every 328 hit on the fleet (29) was a
+  scanner sending `${jndi:` in an `X-Api-Version`, `Referer` or
+  `Authentication` header from cloud IPs; none came from a customer. Only the
+  Log4Shell-specific tags are enforced: `${jndi:` (in a header; rule 320
+  already blocks it in the query and body), `${::-`, `${lower:` and
+  `${upper:`. The tags template engines also produce (`${${`, `${env:`,
+  `${sys:`, `${main:`, `${date:`, `${base64:`) stay logonly at any mode:
+  `WAF_CVE` is high-risk and armed for autoblock, so a challenge for a
+  logged-in customer becomes a block and a ban. The classic
+  `${${::-j}${::-n}…` payload now reports as `DEFAULT_VAL` (it was `NESTED`),
+  so it is enforced; `NESTED` keeps only a bare `${${` that names no
+  Log4Shell lookup.
+
 ### Fixed
 - **Rule 412 (polyglot upload) no longer blocks and bans customers for
   ordinary photos.** It flagged an image whose first 64 bytes held the ASP

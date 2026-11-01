@@ -25,7 +25,7 @@ end
 local H = dofile("scripts/tests/cfm_lua_harness.lua")
 
 
-local LOG4 = { ["x-a"] = "${date:}" }  -- trips rule_log4shell (logonly)
+local LOG4 = { ["x-a"] = "${date:}" }  -- trips rule_log4shell's DATE tag (logonly at any mode)
 local function desc(r)
   return ("ok=%s action=%s up=%s exit=%s rpcs=%s err=%s"):format(tostring(r.ok), tostring(r.action),
     tostring(r.upstream), tostring(r.exited), r.rpcs, tostring(r.err))

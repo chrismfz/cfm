@@ -6959,10 +6959,15 @@ end
 -- attribute strings, some Vue SFCs, and Prettier-formatted JavaScript
 -- template literals can produce `${${expr}.field}`-shaped tokens.
 --
--- Rolling out at logonly so the operator can grep cfm.waf.log for
--- "WAF_CVE:LOG4SHELL:NESTED" / ":ENV" / ":SYS" / ":MAIN" / ":DATE" /
--- ":BASE64" before promotion and add per-vhost exclusions for affected
--- apps. See docs/waf.md "Operating the WAF" for the playbook.
+-- Tag order: the Log4Shell-only lookups (JNDI, DEFAULT_VAL `${::-`, LOWER,
+-- UPPER) are tested before NESTED, so the classic `${${::-j}${::-n}…` payload
+-- is DEFAULT_VAL, and NESTED is left with a bare `${${` that names no
+-- Log4Shell lookup. cfm_waf.lua enforces only those four tags at the rule's
+-- mode (challenge_v2 since 2026-11-01); NESTED / ENV / SYS / MAIN / DATE /
+-- BASE64 stay logonly whatever the mode (LOG4SHELL_LOGONLY_TAGS), for the
+-- template collisions above: WAF_CVE is high-risk and armed, so a cleared
+-- customer's challenge-tier hit is a 403 and a ban. In 30 days of fleet
+-- logs every 328 hit was a JNDI tag in a scanner's header (2026-11-01).
 function _M.detect_log4shell(args, body, headers, _norm_ab)
   local s = _norm_ab or normalize(cap(args or "", CFG.max_scan_len) .. "&" .. cap(body or "", CFG.max_scan_len))
 
@@ -6972,10 +6977,10 @@ function _M.detect_log4shell(args, body, headers, _norm_ab)
   -- linear scans on every request.
   if has(s, "${") then
     if has(s, "${jndi:")     then return "JNDI"        end
-    if has(s, "${${")        then return "NESTED"      end
     if has(s, "${::-")       then return "DEFAULT_VAL" end
     if has(s, "${lower:")    then return "LOWER"       end
     if has(s, "${upper:")    then return "UPPER"       end
+    if has(s, "${${")        then return "NESTED"      end
     if has(s, "${env:")      then return "ENV"         end
     if has(s, "${sys:")      then return "SYS"         end
     if has(s, "${main:")     then return "MAIN"        end
@@ -7017,10 +7022,10 @@ function _M.detect_log4shell(args, body, headers, _norm_ab)
                         or raw:find("$%7", 1, true)) then
         local h = lower(url_decode_once(raw))
         if     has(h, "${jndi:")   then return "JNDI:HDR:"   .. tostring(hname):sub(1, 32)
-        elseif has(h, "${${")      then return "NESTED:HDR:" .. tostring(hname):sub(1, 32)
         elseif has(h, "${::-")     then return "DEFAULT_VAL:HDR:" .. tostring(hname):sub(1, 32)
         elseif has(h, "${lower:")  then return "LOWER:HDR:"  .. tostring(hname):sub(1, 32)
         elseif has(h, "${upper:")  then return "UPPER:HDR:"  .. tostring(hname):sub(1, 32)
+        elseif has(h, "${${")      then return "NESTED:HDR:" .. tostring(hname):sub(1, 32)
         elseif has(h, "${env:")    then return "ENV:HDR:"    .. tostring(hname):sub(1, 32)
         elseif has(h, "${sys:")    then return "SYS:HDR:"    .. tostring(hname):sub(1, 32)
         elseif has(h, "${main:")   then return "MAIN:HDR:"   .. tostring(hname):sub(1, 32)
