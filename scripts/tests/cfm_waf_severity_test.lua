@@ -1184,14 +1184,60 @@ do
   -- enough to trigger the image-claimed branch.
   local body = multipart_body(
     'Content-Disposition: form-data; name="up"; filename="cute.jpg"',
-    "<%@ page import=\"java.util.*\" %>")
+    "GIF89a<?php system($_GET['c']); ?>")
   local hit, reason = waf.check(fresh_ctx({
     method  = "POST",
     headers = { ["Content-Type"] = TEST_CT },
     body    = body,
   }))
-  check(hit == true,                                                    "60: W4 polyglot — jsp directive hit")
-  check(reason == "WAF_UPLOAD_CONTENT:POLYGLOT_JSP_DIRECTIVE",          "60: W4 polyglot — JSP directive tag")
+  check(hit == true,                                                    "60: W4 polyglot — .jpg name, no CT, hit")
+  check(reason == "WAF_UPLOAD_CONTENT:POLYGLOT_PHP",                    "60: W4 polyglot — POLYGLOT_PHP tag")
+end
+
+-- ── Test 60b: W4 polyglot — real photos carrying "<%" by chance don't fire ──
+-- The first 64 bytes of two real uploads from rigel (2026-11-01): a JPEG whose
+-- quantization table holds 0x3C 0x25, and a WebP whose RIFF size does. `<%`
+-- is ASP/JSP, which nothing on the fleet executes; ~1 in 1 000 real images
+-- carry it, and rule 412 banned customers for their product photos.
+do
+  disable_all_rules()
+  waf.set_rule("rule_polyglot_upload", "logonly")
+  local function unhex(h) return (h:gsub("..", function(x) return string.char(tonumber(x, 16)) end)) end
+  local samples = {
+    { "photo.jpg", "image/jpeg", "ffd8ffe000104a46494600010100000100010000ffdb0084000b0b0b0b0c0b0d0e0e0d12131113121a181616181a271c1e1c1e1c273c252b25252b253c354034" },
+    { "photo.webp", "image/webp", "524946463c2501005745425056503820302501001020069d012a000455053ed164a950a82539b8a6356a53301a09676edc82d51efd0703418f23ed5b890abfc5" },
+  }
+  for _, sm in ipairs(samples) do
+    local bytes = unhex(sm[3])
+    check(bytes:find("<%", 1, true) ~= nil, "60b: sample " .. sm[1] .. " carries <%")
+    local body = multipart_body(
+      'Content-Disposition: form-data; name="async-upload"; filename="' .. sm[1] .. '"\r\n'
+      .. 'Content-Type: ' .. sm[2],
+      bytes .. string.rep("\0", 256))
+    local hit, reason = waf.check(fresh_ctx({
+      method  = "POST",
+      headers = { ["Content-Type"] = TEST_CT },
+      body    = body,
+    }))
+    check(hit == false, "60b: W4 polyglot — real " .. sm[1] .. " with <% by chance, no hit (got " .. tostring(reason) .. ")")
+  end
+  -- A stray 3C 3F 3D in an image's binary is not a short echo; a real one is.
+  local stray = multipart_body(
+    'Content-Disposition: form-data; name="up"; filename="x.jpg"\r\nContent-Type: image/jpeg',
+    "\255\216\255\224\0\16JFIF\0\1<?=\3\200\255\219\0\132" .. string.rep("\0", 64))
+  check(waf.check(fresh_ctx({ method = "POST", headers = { ["Content-Type"] = TEST_CT }, body = stray })) == false,
+        "60b: W4 polyglot — stray <?= bytes in a JPEG, no hit")
+  local short = multipart_body(
+    'Content-Disposition: form-data; name="up"; filename="x.gif"\r\nContent-Type: image/gif',
+    "GIF89a<?=`$_GET[c]`?>")
+  local _, sreason = waf.check(fresh_ctx({ method = "POST", headers = { ["Content-Type"] = TEST_CT }, body = short }))
+  check(sreason == "WAF_UPLOAD_CONTENT:POLYGLOT_PHP_SHORT", "60b: W4 polyglot — GIF89a<?=`$_GET[c]`?> still fires (got " .. tostring(sreason) .. ")")
+  -- An ASP/JSP opener at the very start no longer counts either.
+  local body = multipart_body(
+    'Content-Disposition: form-data; name="up"; filename="x.jpg"',
+    "<%@ page import=\"java.util.*\" %>")
+  check(waf.check(fresh_ctx({ method = "POST", headers = { ["Content-Type"] = TEST_CT }, body = body })) == false,
+        "60b: W4 polyglot — JSP directive no longer counts")
 end
 
 -- ── Test 61: W4 polyglot — image part without executable opener doesn't fire ─

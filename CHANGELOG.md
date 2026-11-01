@@ -17,7 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Rule 412 (polyglot upload) no longer blocks and bans customers for
+  ordinary photos.** It flagged an image whose first 64 bytes held the ASP
+  opener `<%`. Those two bytes turn up by chance in about 1 in 1 000 real
+  images: 307 of 301 123 on rigel, in a JPEG's quantization table or a WebP's
+  size field. In 14 days every 412 hit on the fleet was a customer uploading
+  product photos to WordPress. On a logged-in customer the challenge turns
+  into a block, so two were banned (test-toplevel.gr on rigel, e-geoponiki.gr
+  on mars). Nothing on the fleet runs ASP or JSP, so the rule now checks the
+  PHP and `<script` openers only; those matched none of the 301 123 images.
+  A short echo `<?=` now counts only with a PHP expression after it, the
+  guard rules 402 and 432 already use, because those three bytes can also
+  occur in an image by chance.
 
 ## 2026.10.30
 

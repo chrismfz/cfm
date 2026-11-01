@@ -346,11 +346,13 @@ local CFG = {
   -- Source: docs/waf.md "Detector phases" §Phase 1 (W4). Distinct from rule
   -- 402 (detect_upload_content) which substring-scans the entire raw
   -- multipart body — W4 parses parts and checks the first 64 bytes of any
-  -- image-typed / image-extension part for PHP/ASP/JSP/script openers.
+  -- image-typed / image-extension part for PHP/script openers (ASP/JSP
+  -- dropped 2026-11-01: `<%` occurs by chance in ~1 in 1 000 real images).
   -- Same family WAF_UPLOAD_CONTENT (high-risk) so post-clearance routing
   -- is correct when promoted.
-  rule_polyglot_upload   = "challenge_v2", -- image CT/ext + <?php/<%/<jsp:/<script in first 64 bytes
-                                        -- (polyglot image upload; legit images never contain these openers)
+  rule_polyglot_upload   = "challenge_v2", -- image CT/ext + <?php/<?=expr/<script in first 64 bytes
+                                        -- (polyglot image upload; none of 301 123 real images on rigel
+                                        -- matched these, 2026-11-01 — `<%` did, 1 in ~1 000, so it went)
 
   -- ── PHP dropper / canary family (421-425) ────────────────────────────────
   -- Source: 2026-05-19 production /tmp dump from a compromised shared host.
@@ -2248,10 +2250,10 @@ local function check_impl(ctx, st)
 
   -- ── 46) Polyglot upload (W4) ─────────────────────────────────────────────
   -- Multipart parts whose Content-Type / filename claim "image" but whose
-  -- first 64 bytes start with an executable opener (`<?php`, `<%`, `<jsp:`,
-  -- `<script`). Distinct from rule 402 (raw substring scan over the whole
-  -- multipart body) — W4 parses parts and bounds the search so a legit form
-  -- field containing `<?php` text can't trigger.
+  -- first 64 bytes carry an executable opener (`<?php`, `<?=` with a PHP
+  -- expression, `<script`). Distinct from rule 402 (raw substring scan over
+  -- the whole multipart body) — W4 parses parts and bounds the search so a
+  -- legit form field containing `<?php` text can't trigger.
   do
     local mode = rule_mode(CFG.rule_polyglot_upload, "logonly")
     if mode ~= "disabled" and body_inspect_ok then
