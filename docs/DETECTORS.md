@@ -480,7 +480,9 @@ is the one the challenge server resolved at verify; one missing is looked up
 only when the summary is built (once per address, for a firing cluster only).
 
 It appears as a `[challenge] humanity of passed solves …` line in the alert
-(after the UA lines), as `Finding.Humanity`, and as `payload.humanity` on the
+(after the UA lines, so the Alerts page, which keeps 5 sample lines per alert
+in `alerts.db`, usually cuts it: read it in the mail, the detector log or the
+history row), as `Finding.Humanity`, and as `payload.humanity` on the
 `detection_history` `solver_farm` row (`cluster`, `fingerprint`, `window`, `n`,
 `truncated`, `hs`, `tells`, `countries`). That key is admin-only: it is
 stripped for scoped (cPanel) callers like `ips`, as defence in depth
