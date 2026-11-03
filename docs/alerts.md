@@ -51,7 +51,8 @@ sample lines (2 KB each) and the detector's extra fields (JSON).
   before SQLite opens it, so the `-wal`/`-shm` files (which SQLite gives the
   database file's mode) are 0600 too, whatever the umask.
 - Retention: 30 days and 500,000 rows, whichever comes first; pruned every 10
-  minutes. Not configurable yet.
+  minutes, 5,000 rows per DELETE so a large prune never holds the writer for
+  long. Not configurable yet.
 - Writes go through a buffered queue (8192) to one writer goroutine that
   inserts in batches of up to 256 every 500 ms. A detector never waits on it: a
   full queue drops the row and counts it (`dropped_since_start` in stats).
@@ -73,6 +74,8 @@ All admin-only (`adminOnlyHandler`; the store holds every tenant's events).
   `category`, `kind`, `delivery` (comma lists or repeated), `min_severity`,
   `ip`, `country` (ISO-2 or part of the name), `asn` (number or part of the
   name), `vhost`, `mode`, `q` (substring of reason/kind/ptr/asn/vhost/samples).
+  `ip`/`country`/`asn`/`vhost` = `-` selects the rows with no value (the group
+  a summary returns with an empty key, or ASN `0`).
   `limit` (1–500, default 100), `cursor` = the previous page's `next_cursor`.
 - `GET /api/v1/alerts/summary` — the same filters plus `group_by` (up to three
   of `category`, `kind`, `severity`, `ip`, `country`, `asn`, `vhost`, `reason`,
@@ -88,7 +91,8 @@ All admin-only (`adminOnlyHandler`; the store holds every tenant's events).
 - cfm-admin → **Alerts** (`/cfm-admin/alerts/`): category chips with counts,
   filters (kept in the URL hash, so a view can be linked), headline tiles,
   group-by with click-to-drill (an hour/day group narrows the view to that
-  bucket), and per-row detail with the sample lines.
+  bucket), and per-row detail with the sample lines. Auto-refresh skips the
+  store-size read and pauses while more than the first page is loaded.
 - MCP: `alerts` and `alerts_summary` (MCP.md §4).
 
 Example — "did we block many legit Greek users this week, and why?":

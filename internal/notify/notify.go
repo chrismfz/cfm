@@ -166,12 +166,18 @@ func Init(cfgDir string) error {
 	cfgMu.Lock()
 	cfg = c
 	recordLoadResultLocked(cfgDir, true, nil, false)
+	// queueCh is read by Enqueue on detector goroutines, so it is set under
+	// cfgMu (and read under it) rather than published bare.
+	startWorker := queueCh == nil
+	if startWorker {
+		queueCh = make(chan Event, 100)
+	}
+	q := queueCh
 	cfgMu.Unlock()
 	ensureRetentionPruner()
 	dedup = newDeduper(c.DedupeTTL)
-	if queueCh == nil {
-		queueCh = make(chan Event, 100)
-		go worker()
+	if startWorker {
+		go worker(q)
 	}
 	return nil
 }
@@ -305,8 +311,8 @@ func RuntimeStatus() RuntimeMetadata {
 	return runtimeMeta
 }
 
-func worker() {
-	for ev := range queueCh {
+func worker(q <-chan Event) {
+	for ev := range q {
 		_ = Emit(ev)
 	}
 }
@@ -343,14 +349,17 @@ func Enqueue(ev Event) {
 		}
 	}
 
-	if queueCh == nil {
+	cfgMu.RLock()
+	q := queueCh
+	cfgMu.RUnlock()
+	if q == nil {
 		// Init never ran (or failed before starting the worker): nothing will
 		// deliver it, but the alert store still keeps it.
 		recordAlert(ev, alerts.DeliveryNotifierOff, "")
 		return
 	}
 	select {
-	case queueCh <- ev:
+	case q <- ev:
 	default:
 		recordAlert(ev, alerts.DeliveryQueueFull, "")
 		cfgMu.RLock()

@@ -17,14 +17,16 @@ type Filter struct {
 	Categories  []string  // WAF, WEB, MYSQL, ... (case-insensitive)
 	Kinds       []string  // exact kinds, case-insensitive
 	MinSeverity string    // info | warning | critical
-	IP          string    // exact address
-	Country     string    // ISO-2 ("GR") or a substring of the display name
-	ASN         string    // number ("6799", "AS6799") or a substring of the name
-	Vhost       string    // exact website
-	Deliveries  []string  // notified, deduped, notifier_off, ...
-	Mode        string    // ttl | permanent
-	Query       string    // substring of reason, kind, ptr, asn, vhost or samples
-	Before      *Cursor   // only rows after this one in List order (paging)
+	// IP, Country, ASN and Vhost take None ("-") for "rows with no value",
+	// the group a Summarize returns with an empty key (ASN: key "0").
+	IP         string   // exact address
+	Country    string   // ISO-2 ("GR") or a substring of the display name
+	ASN        string   // number ("6799", "AS6799") or a substring of the name
+	Vhost      string   // exact website
+	Deliveries []string // notified, deduped, notifier_off, ...
+	Mode       string   // ttl | permanent
+	Query      string   // substring of reason, kind, ptr, asn, vhost or samples
+	Before     *Cursor  // only rows after this one in List order (paging)
 }
 
 // Cursor is a position in List's order (newest first: ts_unix, then id).
@@ -33,7 +35,9 @@ type Cursor struct {
 	ID     int64
 }
 
-func (c Cursor) String() string { return strconv.FormatInt(c.TsUnix, 10) + "." + strconv.FormatInt(c.ID, 10) }
+func (c Cursor) String() string {
+	return strconv.FormatInt(c.TsUnix, 10) + "." + strconv.FormatInt(c.ID, 10)
+}
 
 // ParseCursor reads a Page.NextCursor back.
 func ParseCursor(s string) (Cursor, error) {
@@ -47,6 +51,9 @@ func ParseCursor(s string) (Cursor, error) {
 	}
 	return Cursor{}, fmt.Errorf("invalid cursor")
 }
+
+// None as an IP/Country/ASN/Vhost filter selects the rows with no value.
+const None = "-"
 
 func (f Filter) where() (string, []any) {
 	var conds []string
@@ -89,11 +96,15 @@ func (f Filter) where() (string, []any) {
 		}
 		in("severity", sev, false)
 	}
-	if v := strings.TrimSpace(f.IP); v != "" {
+	if v := strings.TrimSpace(f.IP); v == None {
+		conds = append(conds, "ip = ''")
+	} else if v != "" {
 		conds = append(conds, "ip = ?")
 		args = append(args, v)
 	}
-	if v := strings.TrimSpace(f.Country); v != "" {
+	if v := strings.TrimSpace(f.Country); v == None {
+		conds = append(conds, "country_iso = ''")
+	} else if v != "" {
 		if len(v) == 2 {
 			conds = append(conds, "country_iso = ?")
 			args = append(args, strings.ToUpper(v))
@@ -102,7 +113,9 @@ func (f Filter) where() (string, []any) {
 			args = append(args, likeArg(v))
 		}
 	}
-	if v := strings.TrimSpace(f.ASN); v != "" {
+	if v := strings.TrimSpace(f.ASN); v == None {
+		conds = append(conds, "asn_num = 0")
+	} else if v != "" {
 		if n := ParseASN(v); n > 0 && strings.TrimLeft(strings.ToUpper(v), "AS0123456789 ") == "" {
 			conds = append(conds, "asn_num = ?")
 			args = append(args, n)
@@ -111,7 +124,9 @@ func (f Filter) where() (string, []any) {
 			args = append(args, likeArg(v))
 		}
 	}
-	if v := strings.TrimSpace(f.Vhost); v != "" {
+	if v := strings.TrimSpace(f.Vhost); v == None {
+		conds = append(conds, "vhost = ''")
+	} else if v != "" {
 		conds = append(conds, "vhost = ?")
 		args = append(args, strings.ToLower(v))
 	}

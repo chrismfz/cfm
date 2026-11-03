@@ -17,10 +17,10 @@ type alertsFilterInput struct {
 	Category    string `json:"category,omitempty" jsonschema:"comma list of families, e.g. WAF,WEB,MODSEC,MYSQL,CLAM,SSH,DOVECOT,PORTSCAN — the part of the kind before the slash"`
 	Kind        string `json:"kind,omitempty" jsonschema:"comma list of exact kinds, e.g. WAF/SQLI,WEB/MALPATH"`
 	MinSeverity string `json:"min_severity,omitempty" jsonschema:"info | warning | critical floor"`
-	IP          string `json:"ip,omitempty" jsonschema:"one client address"`
-	Country     string `json:"country,omitempty" jsonschema:"ISO-2 code (GR) or part of the country name"`
-	ASN         string `json:"asn,omitempty" jsonschema:"AS number (6799 or AS6799) or part of the network name"`
-	Vhost       string `json:"vhost,omitempty" jsonschema:"one website the event was about"`
+	IP          string `json:"ip,omitempty" jsonschema:"one client address; - for events with no address"`
+	Country     string `json:"country,omitempty" jsonschema:"ISO-2 code (GR) or part of the country name; - for events with no country"`
+	ASN         string `json:"asn,omitempty" jsonschema:"AS number (6799 or AS6799) or part of the network name; - for events with no ASN"`
+	Vhost       string `json:"vhost,omitempty" jsonschema:"one website the event was about; - for events with no vhost"`
 	Mode        string `json:"mode,omitempty" jsonschema:"ttl | permanent (bans only)"`
 	Delivery    string `json:"delivery,omitempty" jsonschema:"comma list: notified, send_failed, deduped, notifier_off, no_channels, muted, below_severity, queue_full"`
 	Query       string `json:"q,omitempty" jsonschema:"text to find in reason, kind, PTR, ASN, vhost or sample lines"`

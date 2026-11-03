@@ -140,3 +140,24 @@ func TestEmitWithoutStore(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Events recorded on Enqueue's own paths (here: the notifier never started)
+// carry the configured hostname_override, like the ones Emit records.
+func TestEnqueuePathUsesHostnameOverride(t *testing.T) {
+	s := installTestStore(t)
+	cfgMu.Lock()
+	prevQ, prevHost := queueCh, hostname
+	queueCh, hostname = nil, "orion.override"
+	cfgMu.Unlock()
+	defer func() {
+		cfgMu.Lock()
+		queueCh, hostname = prevQ, prevHost
+		cfgMu.Unlock()
+	}()
+	Enqueue(Event{Kind: "PORTSCAN", SrcIP: "203.0.113.5", Reason: "portscan"})
+	s.Flush()
+	page, _ := s.List(alerts.Filter{}, 5)
+	if len(page.Rows) != 1 || page.Rows[0].Host != "orion.override" || page.Rows[0].Delivery != alerts.DeliveryNotifierOff {
+		t.Fatalf("rows: %+v", page.Rows)
+	}
+}

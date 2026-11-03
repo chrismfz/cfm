@@ -421,25 +421,52 @@ func (s *Store) pruner() {
 	}
 }
 
+// pruneChunk bounds one prune DELETE. Each statement holds the writer's only
+// connection and the write lock while it runs; deleting a 30-day backlog or a
+// cap overflow in one statement stalled inserts for seconds and filled the
+// queue. Between chunks the writer gets the connection back. A var for tests.
+var pruneChunk int64 = 5000
+
 // Prune deletes rows older than the max age and, past the row cap, the oldest
-// rows. Returns how many rows it deleted.
+// rows, a bounded chunk per statement. Returns how many rows it deleted.
 func (s *Store) Prune(now time.Time) (int64, error) {
-	var total int64
-	res, err := s.db.Exec(`DELETE FROM alerts WHERE ts_unix < ?`, now.Add(-s.maxAge).Unix())
-	if err != nil {
-		return 0, err
+	total, err := s.deleteChunked(`DELETE FROM alerts WHERE id IN (SELECT id FROM alerts WHERE ts_unix < ? LIMIT ?)`,
+		now.Add(-s.maxAge).Unix())
+	if err != nil || s.maxRows <= 0 {
+		return total, err
 	}
-	n, _ := res.RowsAffected()
-	total += n
-	if s.maxRows > 0 {
-		res, err = s.db.Exec(`DELETE FROM alerts WHERE id <= (SELECT id FROM alerts ORDER BY id DESC LIMIT 1 OFFSET ?)`, s.maxRows)
+	// the newest row past the cap; it and everything older go
+	var cut sql.NullInt64
+	if err := s.db.QueryRow(`SELECT id FROM alerts ORDER BY id DESC LIMIT 1 OFFSET ?`, s.maxRows).Scan(&cut); err != nil {
+		if err == sql.ErrNoRows {
+			return total, nil
+		}
+		return total, err
+	}
+	n, err := s.deleteChunked(`DELETE FROM alerts WHERE id IN (SELECT id FROM alerts WHERE id <= ? LIMIT ?)`, cut.Int64)
+	return total + n, err
+}
+
+// deleteChunked runs q (whose last two args are the bound and the chunk size)
+// until a chunk deletes less than a full chunk, or the store is closing.
+func (s *Store) deleteChunked(q string, bound int64) (int64, error) {
+	var total int64
+	for {
+		res, err := s.db.Exec(q, bound, pruneChunk)
 		if err != nil {
 			return total, err
 		}
-		n, _ = res.RowsAffected()
+		n, _ := res.RowsAffected()
 		total += n
+		if n < pruneChunk {
+			return total, nil
+		}
+		select {
+		case <-s.stop:
+			return total, nil
+		default:
+		}
 	}
-	return total, nil
 }
 
 // Stats is the store's size and health, for the API and the UI header.

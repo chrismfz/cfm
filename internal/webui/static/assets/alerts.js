@@ -9,10 +9,16 @@
     country: 'alertsCountry', asn: 'alertsASN', vhost: 'alertsVhost', delivery: 'alertsDelivery', q: 'alertsQuery',
   };
   const REFRESH_MS = 15000;
+  const ROWS_PER_PAGE = 100;
 
   // range: a from/to window set by drilling into an hour/day group (overrides
   // the hours select); mode: a ban-mode filter set the same way.
-  const state = { category: '', range: null, mode: '', cursor: '', rows: [], timer: null, loading: false, pending: false };
+  // pending / pendingAppend: a refresh or a "Load more" asked for while a load
+  // was running, run when it finishes.
+  const state = {
+    category: '', range: null, mode: '', cursor: '', rows: [], timer: null,
+    loading: false, pending: false, pendingAppend: false,
+  };
   const byId = (id) => document.getElementById(id);
 
   function request(path) {
@@ -230,7 +236,8 @@
       else if (d === 'category') state.category = v;
       else if (d === 'severity') byId('alertsSeverity').value = v === 'critical' ? 'critical' : v === 'warning' ? 'warning' : '';
       else if (d === 'reason') byId('alertsQuery').value = v;
-      else if (map[d] && v && v !== '0') byId(map[d]).value = v;
+      // an empty key (ASN: "0") is the group with no value: the API's "-"
+      else if (map[d]) byId(map[d]).value = !v || (d === 'asn' && v === '0') ? '-' : v;
     }
     byId('alertsGroup1').value = '';
     byId('alertsGroup2').value = '';
@@ -238,7 +245,7 @@
   }
 
   async function loadRows(f, append) {
-    const extra = { limit: '100' };
+    const extra = { limit: String(ROWS_PER_PAGE) };
     if (append && state.cursor) extra.cursor = state.cursor;
     const page = await request(`${API}?${queryString(f, extra)}`);
     if (!append) state.rows = [];
@@ -316,9 +323,12 @@
   // A refresh asked for while one is loading runs right after it, with the
   // filters as they are then — dropping it left the table showing data for the
   // previous filters under the new selection.
-  async function refresh({ append = false } = {}) {
+  // stats: the store-size pill reads the whole table, so auto-refresh ticks
+  // skip it; it loads on page load and on a manual refresh.
+  async function refresh({ append = false, stats = true } = {}) {
     if (state.loading) {
-      if (!append) state.pending = true;
+      if (append) state.pendingAppend = true;
+      else state.pending = true;
       return;
     }
     state.loading = true;
@@ -327,12 +337,13 @@
     renderActiveExtra();
     try {
       if (!append) {
-        await Promise.all([loadStats(), loadOverview(f)]);
+        await Promise.all([stats ? loadStats() : null, loadOverview(f)]);
       }
       const grouped = Boolean(f.group_by);
       byId('alertsGroupsWrap').style.display = grouped ? '' : 'none';
       byId('alertsRowsWrap').style.display = grouped ? 'none' : '';
       if (grouped) {
+        state.rows = [];
         byId('alertsMoreBtn').style.display = 'none';
         await loadGroups(f);
       } else {
@@ -343,16 +354,25 @@
       showStatus(e.message || String(e), false);
     } finally {
       state.loading = false;
+      // a full refresh replaces the rows, so it supersedes a pending "Load more"
       if (state.pending) {
         state.pending = false;
+        state.pendingAppend = false;
         refresh();
+      } else if (state.pendingAppend) {
+        state.pendingAppend = false;
+        refresh({ append: true });
       }
     }
   }
 
   function setAutoRefresh(on) {
     clearInterval(state.timer);
-    state.timer = on ? setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS) : null;
+    // A tick reloads the first page, so it waits while the operator has paged
+    // further with "Load more" rather than throwing those rows away.
+    state.timer = on ? setInterval(() => {
+      if (!document.hidden && state.rows.length <= ROWS_PER_PAGE) refresh({ stats: false });
+    }, REFRESH_MS) : null;
   }
 
   function init() {

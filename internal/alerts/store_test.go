@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -312,5 +313,51 @@ func TestShutdownFlushesQueuedRows(t *testing.T) {
 	st, err := again.Stats()
 	if err != nil || st.Rows != 50 {
 		t.Fatalf("rows after shutdown: %v %+v", err, st)
+	}
+}
+
+func TestPruneInChunks(t *testing.T) {
+	prev := pruneChunk
+	pruneChunk = 2
+	defer func() { pruneChunk = prev }()
+	s := openTestStore(t, time.Hour, 3)
+	now := time.Now()
+	for i := 0; i < 7; i++ { // 7 expired rows: chunks of 2, 2, 2, 1
+		s.Add(Record{TsUnix: now.Add(-2 * time.Hour).Unix(), Kind: "PORTSCAN"})
+	}
+	for i := 0; i < 8; i++ { // 8 fresh rows, cap 3: 5 more go
+		s.Add(Record{TsUnix: now.Add(-time.Minute).Unix(), Kind: "WAF/SQLI", IP: fmt.Sprintf("198.51.100.%d", i)})
+	}
+	s.Flush()
+	n, err := s.Prune(now)
+	if err != nil || n != 12 {
+		t.Fatalf("pruned %d (%v), want 12", n, err)
+	}
+	page, _ := s.List(Filter{}, 10)
+	if len(page.Rows) != 3 || page.Rows[0].IP != "198.51.100.7" {
+		t.Fatalf("kept: %+v", page.Rows)
+	}
+}
+
+// "-" selects the rows with no value: the group a Summarize returns with an
+// empty key, so drilling into it narrows to exactly that group.
+func TestNoneFilters(t *testing.T) {
+	s := openTestStore(t, 0, 0)
+	now := time.Now()
+	seed(t, s, now)
+	day := now.Add(-24 * time.Hour)
+	for name, f := range map[string]Filter{
+		"ip":      {From: day, IP: None},
+		"country": {From: day, Country: None},
+		"asn":     {From: day, ASN: None},
+	} {
+		page, err := s.List(f, 10)
+		if err != nil || len(page.Rows) != 1 || page.Rows[0].Kind != "MYSQL/CONN_LIMIT" {
+			t.Errorf("%s=-: %v %+v", name, err, page.Rows)
+		}
+	}
+	page, _ := s.List(Filter{From: day, Vhost: None}, 10)
+	if len(page.Rows) != 2 {
+		t.Errorf("vhost=-: %d rows, want 2", len(page.Rows))
 	}
 }

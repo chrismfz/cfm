@@ -13,6 +13,12 @@ func recordAlert(ev Event, delivery, eventID string) {
 	if alerts.Default() == nil {
 		return
 	}
+	// Emit already did this; the Enqueue paths (queue_full, never started)
+	// did not, and without it the store would stamp the raw os.Hostname and
+	// ignore notify.conf's hostname_override.
+	if ev.Host == "" {
+		ev.Host = hostname
+	}
 	r := alerts.Record{
 		TsUnix:   ev.When.Unix(),
 		Host:     ev.Host,
@@ -37,11 +43,12 @@ func recordAlert(ev Event, delivery, eventID string) {
 	// The display country ("Athens, Greece") is for humans; filtering and
 	// grouping need the ISO code. Enqueue's lookup usually set it; otherwise
 	// (callers that enrich themselves, or call Emit directly) the enricher's
-	// cache has the IP from that lookup, and a miss costs one mmdb read, no DNS.
+	// cache has the IP from that lookup; a miss costs one mmdb read — no DNS,
+	// and no background lookup started just to fill a country code.
 	r.CountryISO = ev.CountryISO
 	if r.CountryISO == "" && ev.SrcIP != "" {
 		if enr := enricher; enr != nil {
-			res := enr.LookupCachedOrAsync(ev.SrcIP)
+			res := enr.LookupCachedOrGeo(ev.SrcIP)
 			r.CountryISO = res.CountryISO
 			if r.ASN == "" && res.ASN > 0 {
 				r.ASN = fmt.Sprintf("AS%d %s", res.ASN, res.ASNName)
