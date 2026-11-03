@@ -160,7 +160,7 @@
 | earth | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
 | mars | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
 | orion | angie | 2026.11.01 | 1 | 30 d / 1M rows (the 1M cap holds ~6 days) | defaults |
-| qualityweb | angie | 2026.11.01 | **0** (stock) | 30 d / 1M rows | defaults |
+| qualityweb | angie | 2026.11.01 | 1 (since 2026-11-03) | 30 d / 1M rows | defaults |
 | rigel | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
 | server.speedhost.gr | openresty | 2026.11.01 | 1 (since 2026-09-29) | **7 d** | defaults |
 | titan | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
@@ -401,7 +401,11 @@ stays last: no read has shown harm that needed it.
 `would_v2` sizing. Setting it to `1` like the other seven is the operator's
 call.
 
-- **Actions:** none yet; awaiting the operator.
+- **Actions:** the operator approved (a)–(e) on 2026-11-03; recorded in
+  master plan §5 E4. qualityweb's `ABUSE_SHADOW` went from 0 to 1 that day
+  at 16:08 local (the file backed up next to it; the daemon reloaded the
+  config on its own). Candidate 3 is next. Read 6 is scheduled for
+  2026-11-10.
 
 ### 2026-10-27 — read 4 (window: 2026-10-22 12:00 to 2026-10-27 09:10 Athens, 4.9 days)
 

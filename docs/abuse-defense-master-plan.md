@@ -796,6 +796,19 @@ already opened.
             decided that day: `hid` stays as is; the payload stripping on
             earth's who-is.gr (`c28caa00`, `hs=-`, ~13 % of its passes there)
             is for the operator fingerprint policy (E3), not code (D5b).
+          - **Read 5 decisions (operator, 2026-11-03).** `solver_farm` stays
+            at 30 subnets: it stopped flagging a real Greek audience
+            (mirego.gr) and every farm-hit vhost kept its fingerprint
+            findings. `hid` stays as is: `95070673` now reports a hidden page
+            from DigitalOcean, but at hs 0, where a 0x0 size would not have
+            failed it; reopen only if those solves move to hs 60–99. The
+            honest limit is named: what the arm misses now is mostly hs 0,
+            real browsers where a farm and the humans sharing its coarse
+            bucket look the same (titan's e-vafeiadis.gr, orion's
+            mathematica.gr). No score reaches it (D5b), and a fingerprint
+            policy would land on those humans too (`challenge`) or block
+            them (`deny`). Next: candidate 3. qualityweb's `ABUSE_SHADOW`
+            set to 1 like the other web nodes.
 
           Weekly reads from 2026-10-06 are recorded in
           `docs/abuse-defense-progress.md`, not here; this plan keeps the
@@ -818,7 +831,9 @@ already opened.
    solve once per IP and pull a few pages. The review needs a longer window
    than the live edge logs hold, and B3 — its only designed consumer — is
    dropped, so a "promote" outcome must name its actuator.
-3. **Humanity context on farm alerts** — the `solver_farm` / `cookie_discard`
+3. **Humanity context on farm alerts** (**next**, operator 2026-11-03, read
+   5: e-vafeiadis.gr needed it to tell a farm from a Greek audience sharing
+   the bucket) — the `solver_farm` / `cookie_discard`
    alert carries the cluster's `hs` / `tells` distribution
    (`docs/roadmaps/challenge-engine.md` §8.3 leg 1). Alert text only.
 4. **The Rung-2 confirm fallback** (E4 note above). Order decided
