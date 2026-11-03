@@ -24,12 +24,12 @@
 
 ## 2. Current picture (update on every read)
 
-*As of 2026-10-27 (read 4).*
+*As of 2026-11-03 (read 5).*
 
-- **Fleet version:** the 7 web nodes run `2026.10.24`, rebuilt 2026-10-24
-  ~22:30; #1615 and #1616 were live from 10-22 ~06:30. The 4 nodes without
-  an edge serve no challenge: mymail and 3deers run `2026.10.21`, watchdog
-  `2026.10.10`, saf `2026.10.08`.
+- **Fleet version:** the 8 web nodes run `2026.11.01` (qualityweb, Angie,
+  joined on 2026-10-27). The 5 nodes without an edge serve no challenge:
+  mymail, 3deers, saf and watchdog run `2026.10.21`, avglb (new)
+  `2026.10.28`.
 - **Live since release 2026.09.29** (deployed 2026-09-29/30):
 
   | PR | What |
@@ -67,6 +67,10 @@
   #1615 (a page hidden at POST time sends no window size and a log-only
   `hid:1`) and #1616 (`vhost_config` in `CHALLENGE_V2_AUTO_VHOST`'s
   default).
+
+  Releases 2026.10.27 to 2026.11.01 added, in this area: #1625 (the
+  `solver_farm` defaults 180s / 30 / 15) and #1629 (the challenge server
+  no longer refuses in-app browsers as a bad UA).
 - **What bites today:** operator-armed fingerprint / country-ASN policies
   from cfm-web (still no `v2=geo` line in read 3's week), the WAF challenge
   tier at `challenge_v2`, manual vhost v2 tiers, the automatic vhost
@@ -75,6 +79,10 @@
   solves under an armed vhost on orion, titan and mars. Read 4 measured
   71 %, mostly because orion's farm moved to mail.mathematica.gr, which is
   on the always-on list (76 % on orion; titan 36 %, mars 57 %, earth 42 %).
+  Read 5 measured 81 % over the same three nodes (orion 94 %, mars 86 %,
+  titan 26 %). The fingerprints are coarse buckets, so their "passes"
+  include the bucket's humans: on titan most of them are a GR audience on
+  www.e-vafeiadis.gr at hs 0.
   The farms' rejects are now device-claim lies (`mobile_hw_lie`,
   `mac_hw_lie`), no longer `outer_zero`. Their passes stay under the fail
   score by design (D5b); stopping the rest is the operator fingerprint
@@ -86,7 +94,9 @@
      (D5b). This happened 658 times in read 3 (orion 386, titan 261), up from
      378 in read 2 and 227 in read 1. **Read 4: 1 271 in 4.9 days**, 724 of
      them the `c28caa00` farm on earth's who-is.gr, ~13 % of the farm's
-     passes there (proposal (c) in read 4).
+     passes there (proposal (c) in read 4). **Read 5: 329 in 7 days**, 144
+     of them farm passes under an arm. who-is.gr had 5 solves all week:
+     the farm left it.
   2. *(Closed in read 2.)* Google-Read-Aloud and Meta were served the
      challenge through the challenge page's own URL. #1546 fixed this.
   3. The challenge page sends Meta to `next`, and the edge challenges it
@@ -132,11 +142,11 @@
      2026-10-22**, shipped with it); the orphan `HUMANITY_*` keys (decided:
      operator cleanup); the shipped `solver_farm` defaults (**decided
      2026-10-27: 180s / 30 / 15**; the fleet moves from 15 to 30).
-- **Next read:** after the operator's decisions on read 4's proposals. It
-  watches the payload stripping on earth's who-is.gr (watch item 1), the
-  farm catch rate per node, human rejects under every v2 source (including
-  `vhost_config`, counted by `v2_via=auto:vhost_config` and
-  `src=vhost:vhost_config`) and the `hid:1` solves on the farm fingerprints.
+- **Next read:** 2026-11-10, after the operator's decisions on read 5's
+  proposals. It watches the `hid:1` solves on `95070673` (orion,
+  DigitalOcean), the farm catch rate per node, human rejects under every v2
+  source (including `vhost_config`), and the `solver_farm` findings at 30
+  (fingerprint-blind ones on a GR audience).
 - **Kill switches, if a read shows harm:** `CHALLENGE_V2_INPUT_RESCUE = 0`
   (rescue off) · `CHALLENGE_V2_AUTO_VHOST = off` (auto-v2 off) · per vhost
   `cfm webtop challenge tier <vhost> v1` · `CHALLENGE_V2_HW_TELLS = 0` ·
@@ -147,18 +157,20 @@
 
 | Node | Edge | Version | `ABUSE_SHADOW` | History kept | ChallengeV2 knobs |
 |---|---|---|---|---|---|
-| earth | openresty | 2026.10.24 | 1 | 30 d / 1M rows | defaults |
-| mars | openresty | 2026.10.24 | 1 | 30 d / 1M rows | defaults |
-| orion | angie | 2026.10.24 | 1 | 30 d / 1M rows | defaults |
-| rigel | openresty | 2026.10.24 | 1 | 30 d / 1M rows | defaults |
-| server.speedhost.gr | openresty | 2026.10.24 | 1 (since 2026-09-29) | **7 d** | defaults |
-| titan | openresty | 2026.10.24 | 1 | 30 d / 1M rows | defaults |
-| virgo | angie | 2026.10.24 | 1 | **7 d** | defaults |
+| earth | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
+| mars | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
+| orion | angie | 2026.11.01 | 1 | 30 d / 1M rows (the 1M cap holds ~6 days) | defaults |
+| qualityweb | angie | 2026.11.01 | **0** (stock) | 30 d / 1M rows | defaults |
+| rigel | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
+| server.speedhost.gr | openresty | 2026.11.01 | 1 (since 2026-09-29) | **7 d** | defaults |
+| titan | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
+| virgo | angie | 2026.11.01 | 1 | **7 d** | defaults |
 
 `[challenge_solver_farm]` on every web node: `WINDOW = 180s`, `MIN_SUBNETS =
-15`, `MIN_SOLVES = 15` (mars in `detectors.d/50-web.conf`), against the
-shipped 60s / 40 / 40 (read 4). The defaults become 180s / 30 / 15; the
-nodes' own `MIN_SUBNETS = 15` stays until the operator moves it to 30.
+30`, `MIN_SOLVES = 15` (mars in `detectors.d/50-web.conf`), the shipped
+defaults since #1625. The operator moved the nodes from 15 to 30 on
+2026-10-27 at ~21:03 (backups of the edited files next to them);
+qualityweb shipped with 30.
 
 `/var/log/cfm/*.log` (challenges, abuse_shadow) keeps 14 generations, daily
 or at 200 MB, so a busy node may hold less than 14 days. **A read therefore
@@ -175,7 +187,7 @@ week missed is a week lost on virgo and speedhost.
 | Would-reject sizing | `abuse_shadow` `humanity` (`lines`, `rescued`, `by_src_kind`) | #1525 / #1528 | Sizes any new v2 arm before it is turned on |
 | Payload health | the `hs=-` share of scored solves | — | A jump after a release = the page payload broke (parse / 1 KB cap) |
 | Payload stripping under an arm | `hs=-` solve lines that carry `v2=` (a pass: D5b never fails a missing payload) | read 1 | A rising share on a convicted fp = the farm bypasses the arm by stripping the body → a master-plan decision |
-| Hidden-page solves | `sig=` `hid:1` (page hidden at POST time, no window size sent), humans vs convicted-farm fps | 2026-10-22 | A rising `hid` share on a convicted fp means the arm lost that catch → a master-plan decision. Read 4: 793 in 4.9 days, 70 % GR/CY; 4 farm solves passed that a 0x0 size would have failed. (The farms' `outer_zero` rejects had already fallen before #1615.) |
+| Hidden-page solves | `sig=` `hid:1` (page hidden at POST time, no window size sent), humans vs convicted-farm fps | 2026-10-22 | A rising `hid` share on a convicted fp means the arm lost that catch → a master-plan decision. Read 4: 793 in 4.9 days, 70 % GR/CY; 4 farm solves passed that a 0x0 size would have failed. (The farms' `outer_zero` rejects had already fallen before #1615.) Read 5: 1 533, 45 % GR/CY; the drop is `95070673` sending `hid:1` from DigitalOcean on orion (702), at hs 0, so a 0x0 size would not have failed them either. |
 | Farm catch rate under an arm | farm-fp `result=solved` vs `result=v2_reject` lines carrying `v2=` (per node: `c28caa00`, `95070673`) | read 3 | Sizes how much of a farm the arm stops (read 3: ~39 %); a falling rate on a convicted fp = the farm scores under the fail score → the operator fingerprint policy (E3), not a harder score |
 
 ## 5. Entry template
@@ -207,7 +219,8 @@ week missed is a week lost on virgo and speedhost.
 - `cfm_log_tail` reads at most ~200 000 rotated lines. That is the full week
   on most nodes, but only from ~10-01 on mars and orion. With a small
   `limit` it stops early, so `matched` is not a count; count from the lines.
-- Log lines carry node-local time (Athens, UTC+3). History `ts_utc` is UTC.
+- Log lines carry node-local time (Athens: UTC+3 until 10-25, UTC+2
+  after). History `ts_utc` is UTC.
 - **Read 2 onwards: parse the nodes' own logs over SSH (read-only)** when
   the operator's SSH access is available. Use `cfm.challenges.log*`,
   `cfm.abuse_shadow.log*`, `challenge.access.log*` and the edge's
@@ -220,6 +233,11 @@ week missed is a week lost on virgo and speedhost.
   - `access.cfm.log` records challenged and blocked requests, not passes.
   - `post_resume_applied` is logged at INFO, below the edge's error_log
     level, so a replay is not countable.
+  - The `solver_farm` findings: read each node's
+    `/var/lib/cfm/webdetector-history.db` with SQLite opened read-only
+    (`file:…?mode=ro`, table `history_events`, `event_type='solver_farm'`,
+    `tracks` in `payload_json`). The MCP `detection_history` call returns
+    the newest few hundred rows, about two days on titan.
 - Human label = GR/CY consumer ISP ASN **and** a GR/CY address, no bot UA.
   A Greek public-sector or school network (AS8248, PTR `…sch.gr`) also
   counts.
@@ -227,6 +245,163 @@ week missed is a week lost on virgo and speedhost.
   `hc` before calling a reject human.
 
 ## 6. Entries
+
+### 2026-11-03 — read 5 (window: 2026-10-27 09:10 to 2026-11-03 09:05 Athens, 7 days)
+
+The first full week at `solver_farm` 30 subnets, and the first with
+qualityweb. Same method as read 4: every web node's own `cfm.challenges.log*`
+parsed over SSH (read-only, python on stdin), the whole window on every node;
+the `solver_farm` findings read from each node's history database (read-only
+SQLite). qualityweb's log starts at 10-27 15:33.
+
+- **Fleet:**
+  - All 8 web nodes run `2026.11.01` (qualityweb's binary is from 11-01
+    21:28). In this area since read 4: #1625 (the `solver_farm` defaults)
+    and #1629 (in-app browsers no longer refused as a bad UA). #1633 (WAF
+    rule 328 at `challenge_v2`) merged after the release and is not live.
+  - `[challenge_solver_farm]` is 180s / 30 / 15 on all 8 nodes (mars in
+    `detectors.d/50-web.conf`). The change from 15 to 30 was made at the
+    operator's request on 10-27 at ~21:03 local.
+  - qualityweb runs the stock `ABUSE_SHADOW = 0`, so it writes no
+    `would_v2` sizing.
+  - **No operator policy bites:** no `v2=fp` and no `v2=geo` line on any
+    node. Every reject is `v2=vhost` (automatic, 104 056) or a rung mark
+    (264). No `manual` or `pin` reject.
+  - cfm-web: no new conviction among 134 fingerprints active this week.
+    The farm verdicts are `c28caa00`, `95070673` and `ba6b4aad` (WAF hits
+    only since 09-20); `19877aeb` still solves on all 8 nodes (2 to 116
+    times each).
+- **Health:**
+  - 329 solves with no payload (`hs=-`) among 61 911 (read 4: 1 271 in 4.9
+    days). 144 of them are farm passes under an arm (orion 90, titan 48).
+  - **who-is.gr (watch item 1): the farm left.** earth logged 5 solves on
+    who-is.gr all week, none of them `hs=-`. earth's farm traffic fell
+    overall: `c28caa00` solved or was rejected ~600 times under an arm,
+    against ~9 500 in read 4's 4.9 days.
+  - No `v2_rescued`, and 0 Windows Chrome/109 rejects, on any node.
+- **Arms:** `challenge_v2_reject` lines per node (all `scope=web`):
+
+  | Node | Rejects | Farm fp under an arm: passed / rejected | Caught (read 4) |
+  |---|---|---|---|
+  | orion | 91 148 | `95070673` 5 646 / 90 893 | **94 %** (76 %) |
+  | titan | 6 311 | `c28caa00` 17 446 / 6 221 | 26 % (36 %) |
+  | qualityweb | 4 285 | `c28caa00` 4 383 / 4 043 | 48 % (new) |
+  | mars | 2 040 | `c28caa00` 265 / 1 615 | 86 % (57 %) |
+  | earth | 306 | `c28caa00` 387 / 216 | 36 % (42 %) |
+  | virgo | 154 | `95070673` 168 / 30 | 15 % (35 %) |
+  | rigel | 42 | `c28caa00` 247 / 11 | — |
+  | server.speedhost.gr | 34 | `c28caa00` 48 / 17 | — |
+
+  - Total 104 320 in 7 days (read 4: ~146 000 a week). 83 % of them are
+    orion's `95070673` on **mail.mathematica.gr** (82 321), the
+    `vhost_config` catch read 4 first saw.
+  - Over orion, titan and mars the arm caught **81 %** of the farms' solves
+    under an armed vhost (read 4: 71 %).
+  - **The rate counts the bucket's humans as farm passes.** A fingerprint
+    is a population (CLAUDE.md §6). On titan, 12 323 of the 17 446 passes
+    are on **www.e-vafeiadis.gr** under `auto:suspicious_vhost`, from 10 923
+    IPs, ~1.1 solve per IP, almost all at hs 0. 6 959 are GR addresses
+    (OTEnet 4 652, Vodafone 1 235, Nova 741): a Greek audience, with a
+    surge on 10-31 to 11-02 (3 329, 4 709, 2 325 a day). The other 5 364
+    come from residential lines abroad (Comcast, Orange, Free, BT) and
+    Tencent / Huawei Cloud, 677 of them at hs 60–99 (`sw_renderer`).
+    That second half is farm-shaped, but nothing in the log separates it
+    from the first except the address. Orion's passes include 1 698 GR/CY
+    solves on www.mathematica.gr (1 518 at hs 0) in the same way.
+  - The farms' rejects are still device-claim lies:
+    `sw_renderer,mobile_hw_lie,no_input` is 97 % of orion's, 95 % of
+    titan's and 93 % of qualityweb's.
+- **`hid:1` on a convicted fingerprint (watch signal).**
+  - 1 533 solves carry `hid:1`, 683 of them (45 %) GR/CY. Read 4: 793 in
+    4.9 days, 70 % GR/CY.
+  - The drop is orion's `95070673`. It sent 702 non-GR/CY `hid:1` solves
+    this week, mostly on **www.mathematica.gr** under
+    `auto:suspicious_vhost`. Daily: 2 to 51 before 10-31, then 166, 341,
+    140. They come from DigitalOcean (the sampled lines: US, DE) with an X11 Linux Chrome/146–152
+    UA, `ptr:0,mv:0`, 8–16 cores, and score **hs 0 with no tell**.
+  - So the farm pages report hidden, and no input. A 0x0 window would have
+    added `outer_zero` (40) and they would still have passed. The arm lost
+    nothing to it. Solves that `hid` let through and a 0x0 size would have
+    failed (hs 60–99, farm fp, under an arm): 4 on orion (hs 80,
+    `mobile_hw_lie,no_input`, webmail hosts), 0 on titan.
+- **`vhost_config` at v2, second week:** 83 266 rejects, 82 642 of them on
+  orion. **None from a GR/CY address and none on a panel port.** 1 543
+  GR/CY solves passed on the always-on hosts, plus 15 on panel ports on
+  speedhost (2083, 2087, 2096).
+- **Human-labelled rejects (GR/CY consumer ISP, no bot UA): none human.**
+  All four sources run automation from a home line:
+  - mars ksilokosmos.gr, `94.69.165.110` (OTEnet): 110 rejects,
+    `webdriver,no_input` at hs 130, under `auto:suspicious_vhost`. The UA
+    alternates between an Android "moto g" and a Mac.
+  - mars, `94.66.129.119` (OTEnet, the same address as read 4's virgo
+    case): ~26 rejects on escort-ad sites, `webdriver,sw_renderer,no_input`,
+    under WAF 501 marks.
+  - titan nevergiveupskg.gr, `194.187.255.205` (Medianet): 15 rejects,
+    `webdriver,no_input`, on `c28caa00` under the malpath mark.
+  - orion laikiserron.gr and mixailidis.gr, `109.242.248.58` (Nova): 5
+    rejects, `headless_ua,webdriver`, malpath mark.
+- **`solver_farm` at 30 (from 10-27 19:03 UTC):**
+
+  | Node | Findings since the change | Tracks (a finding can carry two) | Fingerprint-blind (`subnet_spread`) |
+  |---|---|---|---|
+  | titan | 1 188 | `cross_host` 1 168, `fp_concentration` 34 | 3, all on gastronom.hk |
+  | orion | ≥ 588 (history from 10-28 23:22 only) | `cross_host` 577, `fp_concentration` 17 | 0 |
+  | mars | 452 | `cross_host` 387, `fp_concentration` 75 | 0 |
+  | earth, rigel, virgo, speedhost, qualityweb | 0 | — | — |
+
+  - **No fingerprint-blind finding on a human audience.** The 3
+    `subnet_spread` findings are all on titan's gastronom.hk, a farm-hit
+    vhost: two together with `c28caa00` (62 and 202 `/24`) and one with no
+    fingerprint at exactly 30. mirego.gr (rigel) was flagged every few days
+    from 10-16 to 10-27 at 15–25 `/24`; its last finding was 10-27 at 17:45
+    local, before the change, and none since.
+  - **A fingerprint-less farm below 30 `/24` per 180s is invisible by
+    construction**, so "none missed" cannot be shown. In the week before
+    the change, the fingerprint-less findings were 4 on titan and 4 on mars
+    (plus rigel's mirego.gr). Every farm-hit vhost this week also had
+    fingerprint findings.
+  - qualityweb: 0 findings, although `c28caa00` solved 4 383 times under an
+    arm and was rejected 4 043 times there. That is ~26 farm solves an hour
+    over two vhosts (www.ekalogeropoulos.gr, www.somabed.gr), probably
+    below the windows. Not checked further.
+- **Since last read:** the farm left earth's who-is.gr, so watch item 1
+  went quiet; orion's catch rose to 94 % on mail.mathematica.gr;
+  `95070673` began reporting hidden pages from DigitalOcean (no catch lost);
+  `solver_farm` at 30 stopped flagging mirego.gr.
+
+#### Proposals (for the operator; nothing is implemented without a go)
+
+**(a) `solver_farm` at 30: keep it.** It stopped the false findings on a
+real Greek audience (mirego.gr) and kept every farm-hit vhost covered by the
+fingerprint tracks.
+
+**(b) `hid`: keep it, and keep watching it.** `95070673` now claims a hidden
+page from datacenter IPs, but at hs 0 a 0x0 size would not have stopped it.
+`hid` is client-authored (D5b), so a rule on it would cost the humans it was
+built for. Reopen only if the farm's `hid:1` solves move to hs 60–99, where a
+0x0 size would have rejected them.
+
+**(c) Name the honest limit in the plan.** What the arm misses now is mostly
+hs 0: real browsers, where the farms and their buckets' humans look the
+same (titan's e-vafeiadis.gr, orion's mathematica.gr). D5b and E3's honest
+limits already say a harder score cannot reach it, and the remaining lever,
+an operator fingerprint policy, is armed nowhere. A `challenge` floor on
+`c28caa00` would also challenge the GR shoppers who share it; a `deny` would
+block them.
+
+**(d) Next on the plan: candidate 3, humanity context on farm alerts.** The
+`solver_farm` and `cookie_discard` alerts would carry the cluster's `hs` /
+`tells` and country split. That is exactly what e-vafeiadis.gr needed this
+week to tell "a farm" from "a Greek audience sharing the bucket". Alert text
+only, no enforcement. After it: candidate 6 (a faster in-page PoW solver),
+which unfreezes the `harden` rung. Candidate 5 (`CHALLENGE_V2_ENFORCE`)
+stays last: no read has shown harm that needed it.
+
+**(e) qualityweb's `ABUSE_SHADOW`.** It runs the stock `0`, so it writes no
+`would_v2` sizing. Setting it to `1` like the other seven is the operator's
+call.
+
+- **Actions:** none yet; awaiting the operator.
 
 ### 2026-10-27 — read 4 (window: 2026-10-22 12:00 to 2026-10-27 09:10 Athens, 4.9 days)
 
