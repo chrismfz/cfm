@@ -216,3 +216,64 @@ func TestHistoryEventsRedactsSolverFarmIPsForScopedCallers(t *testing.T) {
 		t.Error("admin must still receive good_bots")
 	}
 }
+
+// The finding's humanity summary is persisted as payload.humanity for admin
+// readers and stripped for a scoped (cPanel) caller, like the ips sample.
+func TestHistoryEventsRedactsSolverFarmHumanityForScopedCallers(t *testing.T) {
+	e := newSolveTestEngine(t)
+	e.RecordSolverFarmFinding(solverfarm.Finding{
+		When: time.Now(), Host: "shop.example.com", Fingerprint: "c28caa00",
+		Tracks: "fp_concentration", Solves: 12, DistinctIPs: 12, Subnets: 12, Countries: 8, Hosts: 1, SolvesPerIP: 1,
+		Humanity: &solverfarm.HumanitySummary{
+			Cluster: "fp_concentration", Fingerprint: "c28caa00", Window: 3 * time.Minute, N: 12,
+			Buckets:   map[string]int{"none": 1, "unscored": 0, "0": 8, "1-59": 0, "60-99": 2, "100+": 1},
+			Tells:     []solverfarm.KeyCount{{Key: "sw_renderer,no_input", N: 3}},
+			Countries: []solverfarm.KeyCount{{Key: "GR", N: 7}, {Key: "US", N: 5}},
+		},
+	})
+	rows, err := e.history.QueryEvents("", "", "solver_farm", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("QueryEvents: %d rows, err=%v", len(rows), err)
+	}
+	hum, ok := rows[0].Payload["humanity"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("payload.humanity = %#v, want an object", rows[0].Payload["humanity"])
+	}
+	for _, k := range []string{"cluster", "fingerprint", "window", "n", "truncated", "hs", "tells", "countries"} {
+		if _, ok := hum[k]; !ok {
+			t.Errorf("payload.humanity lacks %q: %v", k, hum)
+		}
+	}
+	if hs, _ := hum["hs"].(map[string]interface{}); hs["0"] != float64(8) || hs["none"] != float64(1) {
+		t.Errorf("payload.humanity.hs = %v", hum["hs"])
+	}
+	admin := []HistoryEvent{{Type: rows[0].Type, Host: rows[0].Host, Payload: map[string]interface{}{}}}
+	for k, v := range rows[0].Payload {
+		admin[0].Payload[k] = v
+	}
+
+	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(scopedCtx("shop.example.com")), rows)
+	if _, present := rows[0].Payload["humanity"]; present {
+		t.Error("humanity must not cross the scoped boundary")
+	}
+	if _, present := rows[0].Payload["fingerprint"]; !present {
+		t.Error("scoped caller lost the fingerprint")
+	}
+	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(adminCtx()), admin)
+	if _, ok := admin[0].Payload["humanity"]; !ok {
+		t.Error("admin must still receive humanity")
+	}
+}
+
+// No evidence record → no humanity key (older/empty rows stay compact).
+func TestRecordSolverFarmFindingOmitsEmptyHumanity(t *testing.T) {
+	e := newSolveTestEngine(t)
+	e.RecordSolverFarmFinding(solverfarm.Finding{When: time.Now(), Host: "shop.example.com", Tracks: "subnet_spread", Solves: 40})
+	rows, err := e.history.QueryEvents("", "", "solver_farm", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("QueryEvents: %d rows, err=%v", len(rows), err)
+	}
+	if _, ok := rows[0].Payload["humanity"]; ok {
+		t.Error("a finding without a summary must not write payload.humanity")
+	}
+}

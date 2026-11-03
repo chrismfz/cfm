@@ -21,7 +21,23 @@ import (
 // span many subnets/countries but collapse onto a single fingerprint — a shape
 // no diverse human audience produces. It is a group-by key, never matched to a
 // value: a new tool with a new fingerprint trips the same shape.
+//
+// Humanity and CountryISO are evidence for the solver-farm finding (the hs
+// distribution and country split of a flagged cluster), never a detection
+// input. Humanity is filled only behind the HumanityScored gate, exactly like
+// HumanitySuffix: a solve the Rung-1 scorer never saw carries nil, never a
+// fabricated hs=0. HumanityNoPayload is set only by a scored verify, so the
+// gate covers the hs=- case too.
 func (s ChallengeSolve) InputEvent() core.InputEvent {
+	var hs *core.Humanity
+	if s.HumanityScored {
+		hs = &core.Humanity{
+			Scored:    true,
+			Score:     s.HumanityScore,
+			Tells:     s.HumanityTells,
+			NoPayload: s.HumanityNoPayload,
+		}
+	}
 	return core.InputEvent{
 		Source:      "challenge",
 		Reason:      "CHALLENGE_SOLVED",
@@ -31,6 +47,8 @@ func (s ChallengeSolve) InputEvent() core.InputEvent {
 		Path:        s.URI,
 		UserAgent:   s.UA,
 		Fingerprint: s.TLSFP,
+		CountryISO:  s.CountryISO,
+		Humanity:    hs,
 		Count:       1,
 	}
 }

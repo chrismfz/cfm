@@ -836,6 +836,14 @@ already opened.
    the bucket) — the `solver_farm` / `cookie_discard`
    alert carries the cluster's `hs` / `tells` distribution
    (`docs/roadmaps/challenge-engine.md` §8.3 leg 1). Alert text only.
+   **Shipped for `solver_farm` (2026-11-03):** every finding carries the
+   flagged cluster's hs buckets (`none` / `unscored` / `0` / `1-59` / `60-99`
+   / `100+`), top-5 exact `tells` strings and top-5 countries, with `n` and a
+   truncation flag — on the alert text, the `Finding`, and the
+   `detection_history` row as `payload.humanity` (admin-only; stripped for
+   scoped callers). Motivated by read 5: half of `c28caa00`'s 12 323 solves on
+   www.e-vafeiadis.gr were a Greek audience at hs 0. Evidence only, no
+   decision or threshold reads it. **`cookie_discard` is not covered yet.**
 4. **The Rung-2 confirm fallback** (E4 note above). Order decided
    2026-09-29: the real-input rescue (shipped, `v2_rescued=input`), then the
    log-only trajectory readings (shipped), then the confirm step. It is for the

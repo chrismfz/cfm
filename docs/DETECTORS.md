@@ -446,6 +446,38 @@ self-contradictory User-Agent (see below). It is corroboration for the operator
 reading the alert, never part of the threshold: a farm can send a well-formed UA
 whenever it chooses.
 
+#### Humanity context (since 2026-11-03)
+
+A fingerprint is a population, not one client: a farm and a real audience can
+share one coarse TLS bucket (read 5: half of `c28caa00`'s 12 323 solves on
+www.e-vafeiadis.gr were a Greek audience at `hs` 0, half farm-shaped from
+abroad). So every finding also carries the ChallengeV2 Rung-1 humanity
+distribution and the country split of the cluster it is about:
+
+- **hs buckets** — `none` (no payload, the solve line's `hs=-`), `unscored`
+  (the rung was off: never counted as 0), `0`, `1-59`, `60-99`, `100+`;
+- the **top 5 exact `tells` strings** and the **top 5 countries**, by count
+  then key (deterministic);
+- `n`, the solves the summary covers, and `truncated` when the evidence cap
+  (`MAX_TRACKED_PER_HOST`, or the cross-host buffer's cap) dropped a solve
+  inside the window — the counts are then of a sample.
+
+The cluster follows the finding's fingerprint: for `cross_host` (including a
+combined finding with it) the cross-host fingerprint's solves **on this vhost**
+over the cross-host window; for `fp_concentration` the per-host fingerprint's
+solves on this vhost over `WINDOW`; for `subnet_spread` alone, every solve on
+the vhost over `WINDOW`. The country is the one the challenge server resolved at
+verify, falling back to the detector's own GeoIP lookup.
+
+It appears as a `[challenge] humanity of …` line in the alert, as
+`Finding.Humanity`, and as `payload.humanity` on the `detection_history`
+`solver_farm` row (`cluster`, `fingerprint`, `window`, `n`, `truncated`, `hs`,
+`tells`, `countries`). That key is admin-only: it is stripped for scoped
+(cPanel) callers like `ips` (`docs/endpoint_scope_inventory.md`). It is
+**evidence only** — it is folded from the capped evidence records after every
+decision, and no track, threshold or mark reads it. `challenge_cookie_discard`
+does not carry it yet.
+
 ### `challenge_cookie_discard` — why it exists
 
 The mirror image of `challenge_solver_farm`, and its exact blind spot.

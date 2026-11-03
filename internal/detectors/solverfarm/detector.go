@@ -316,6 +316,15 @@ type solveRec struct {
 	// threshold never depends on it, because a farm can trivially send a
 	// well-formed UA.
 	uaBad string
+
+	// Humanity evidence (humanity.go): the solve's normalised fingerprint ("" =
+	// none), its Rung-1 hs bucket and exact tells string, and its country.
+	// Folded only into the finding's humanity summary — never into subnets /
+	// ips / fps or any threshold — and held under this buffer's existing cap.
+	fp      string
+	hb      hsBucket
+	tells   string
+	country string
 }
 
 type hostState struct {
@@ -343,6 +352,10 @@ type hostState struct {
 	// (20000 by default, against a farm observed at ~110), but the alert must not
 	// claim completeness it cannot verify.
 	setsCapped bool
+	// evDroppedAt is the newest solve the evidence cap refused (zero = never).
+	// Unlike truncated it is not reset per pass, so a humanity summary can say
+	// whether ANY record inside its window is missing (evidence only).
+	evDroppedAt time.Time
 
 	lastAlert time.Time
 	// lastNotify stamps the last time an alert for this vhost actually NOTIFIED
@@ -395,6 +408,12 @@ type xhRec struct {
 	subnet  string
 	ip      string
 	country string
+	// Humanity evidence, as on solveRec. evCountry is the evidence country
+	// (the event's own when it carried one); country above stays the
+	// detection input, from countryFn, so this field changed no decision.
+	hb        hsBucket
+	tells     string
+	evCountry string
 }
 
 // xhAgg is the per-fingerprint cross-host tally, folded from the pre-gated hosts
@@ -484,6 +503,10 @@ type Detector struct {
 	// last pass. Both are unused when XHTrack is off.
 	xhRecs    []xhRec
 	xhDropped int
+	// xhDroppedAt is the newest solve the cross-host cap refused (zero =
+	// never); a humanity summary drawn from xhRecs is truncated when it falls
+	// inside XHWindow. Evidence only.
+	xhDroppedAt time.Time
 
 	// nowFn is the detector's clock. Injectable so tests can replay a recorded
 	// traffic window at its original timestamps instead of wall-clock.
@@ -782,6 +805,12 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		} else {
 			st.setsCapped = true
 		}
+		// Humanity evidence (humanity.go) — read here, folded only into the
+		// finding's summary, never into a threshold input.
+		fpKey := strings.ToLower(strings.TrimSpace(ev.Fingerprint))
+		hb, tells := bucketOf(ev.Humanity), tellsOf(ev.Humanity)
+		evCC := strings.ToUpper(strings.TrimSpace(ev.CountryISO))
+		detCC, detCCDone := "", false
 		// Fingerprint tracks — per-host concentration (FPTrack) and cross-host
 		// (XHTrack). Both group usable fingerprints and need the client's country,
 		// so look it up HERE (RunOnce, off the hot Enqueue path) ONCE per fp-bearing
@@ -790,9 +819,10 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// cannot. Empty fingerprint is never a group key (it pools unrelated
 		// clients); allow-listed fingerprints are skipped from both tracks.
 		if (d.cfg.FPTrack || d.cfg.XHTrack) && d.countryFn != nil {
-			if fp := strings.ToLower(strings.TrimSpace(ev.Fingerprint)); fp != "" {
+			if fp := fpKey; fp != "" {
 				if _, skip := d.allowFPs[fp]; !skip {
 					cc := d.countryFn(ev.SrcIP)
+					detCC, detCCDone = cc, true
 					if d.cfg.FPTrack {
 						a := st.fps[fp]
 						if a == nil && len(st.fps) < maxFPsPerHost {
@@ -830,9 +860,15 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 					}
 					if d.cfg.XHTrack {
 						if len(d.xhRecs) < maxXHRecords {
-							d.xhRecs = append(d.xhRecs, xhRec{when: ev.When, host: host, fp: fp, subnet: sn, ip: ev.SrcIP, country: cc})
+							xcc := evCC
+							if xcc == "" {
+								xcc = cc
+							}
+							d.xhRecs = append(d.xhRecs, xhRec{when: ev.When, host: host, fp: fp, subnet: sn, ip: ev.SrcIP, country: cc,
+								hb: hb, tells: tells, evCountry: xcc})
 						} else {
 							d.xhDropped++
+							d.xhDroppedAt = ev.When
 						}
 					}
 				}
@@ -840,9 +876,22 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 		if len(st.recs) >= d.cfg.MaxTrackedPerHost {
 			st.truncated++
+			st.evDroppedAt = ev.When
 			continue
 		}
-		st.recs = append(st.recs, solveRec{when: ev.When, subnet: sn, ip: ev.SrcIP, ua: ev.UserAgent, uaBad: ev.Signal})
+		// Evidence country: the event's own (resolved at verify) when present,
+		// else the lookup the fp tracks already made, else one lookup here —
+		// in RunOnce, off the hot Enqueue path, and only for a record the
+		// evidence cap admitted.
+		if evCC == "" {
+			if detCCDone {
+				evCC = detCC
+			} else if d.countryFn != nil {
+				evCC = d.countryFn(ev.SrcIP)
+			}
+		}
+		st.recs = append(st.recs, solveRec{when: ev.When, subnet: sn, ip: ev.SrcIP, ua: ev.UserAgent, uaBad: ev.Signal,
+			fp: fpKey, hb: hb, tells: tells, country: evCC})
 	}
 
 	// Cross-host track: fold the node-level buffer once, up front, so the per-host
@@ -985,6 +1034,11 @@ type Finding struct {
 	// fleet store enriches these (PTR/ASN/country/datacenter) so an operator can
 	// tell a residential-proxy pool from a datacenter crawler and act accordingly.
 	IPs []string
+	// Humanity is the ChallengeV2 Rung-1 humanity distribution and country
+	// split of the cluster this finding is about (HumanitySummary says which
+	// cluster), nil when no evidence record covers it. Evidence only: it is
+	// computed after every decision and feeds none.
+	Humanity *HumanitySummary
 }
 
 // findingSink, if set, receives every emitted Finding. Package-level and wired by
@@ -1299,6 +1353,12 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 			"[challenge] cross-host concentration: fingerprint %s dominates this vhost (share=%.0f%%) and spans hosts=%d countries=%d subnets=%d node-wide (solves_per_ip=%.2f, evidence only) — thin cross-host farm",
 			xh.fp, xh.hostShare*100, xh.hosts, xh.countries, xh.subnets, xh.solvesPerIP))
 	}
+	// The humanity context of the convicted cluster (evidence only): who is
+	// behind the fingerprint, by Rung-1 score and country.
+	humanity := d.humanityFor(now, host, st, loFP, xh)
+	if line := humanity.Line(); line != "" {
+		samples = append(samples, line)
+	}
 	type uaCount struct {
 		ua string
 		n  int
@@ -1443,6 +1503,7 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 		When: now, Host: host, Tracks: tracks,
 		Solves: dispSolves, DistinctIPs: dispIPs, Subnets: dispSubnets,
 		SolvesPerIP: solvesPerIP, Hosts: 1,
+		Humanity: humanity,
 	}
 	switch {
 	case xh != nil:
@@ -1472,4 +1533,45 @@ func (d *Detector) buildAlert(now time.Time, host string, st *hostState,
 	// (A subnet-spread-only finding carries no fingerprint and leaves IPs empty —
 	// the fleet store skips it, so there is nothing to attribute addresses to.)
 	return alert, finding
+}
+
+// humanityFor summarises the humanity evidence of the cluster a finding is
+// about, resolved the way the finding resolves its fingerprint (cross-host
+// first, then the per-host concentration fp, else the whole vhost):
+//
+//   - cross-host: the cross-host fp's records ON THIS VHOST in xhRecs, over
+//     XHWindow — the same scope as the headline's host counts on a
+//     cross-host-only finding, and still populated when the per-host Window
+//     state was reclaimed;
+//   - fp_concentration: the per-host fp's records in st.recs, over Window;
+//   - subnet_spread: every record in st.recs, over Window.
+//
+// Truncated is set when the evidence cap behind those records refused a
+// solve inside the window (it may have been another fingerprint's: the cap
+// does not know, so the flag errs towards "sample"). Read-only; nothing it
+// computes reaches a decision.
+func (d *Detector) humanityFor(now time.Time, host string, st *hostState, loFP string, xh *xhVerdict) *HumanitySummary {
+	acc := newHumanityAcc()
+	switch {
+	case xh != nil:
+		cutoff := now.Add(-d.cfg.XHWindow)
+		for _, r := range d.xhRecs {
+			if r.host == host && r.fp == xh.fp && r.when.After(cutoff) {
+				acc.add(r.hb, r.tells, r.evCountry)
+			}
+		}
+		return acc.summary("cross_host", xh.fp, d.cfg.XHWindow, d.xhDroppedAt.After(cutoff))
+	case loFP != "":
+		for _, r := range st.recs {
+			if r.fp == loFP {
+				acc.add(r.hb, r.tells, r.country)
+			}
+		}
+		return acc.summary("fp_concentration", loFP, d.cfg.Window, st.evDroppedAt.After(now.Add(-d.cfg.Window)))
+	default:
+		for _, r := range st.recs {
+			acc.add(r.hb, r.tells, r.country)
+		}
+		return acc.summary("subnet_spread", "", d.cfg.Window, st.evDroppedAt.After(now.Add(-d.cfg.Window)))
+	}
 }

@@ -7,7 +7,8 @@ distributed solver farm on a production edge.
 > §1's solver fix is a candidate; §2 per-vhost difficulty / `ACTION = harden`
 > is frozen until it lands; the §6 single-fingerprint rule hypotheses and the
 > §7 edge module are dropped; §8.2 shipped as ChallengeV2 Rung 1; §8.3 leg 1
-> is a candidate, leg 2 is dropped; §8.4's visible puzzle is dropped.
+> shipped for `solver_farm` on 2026-11-03 (not yet for `cookie_discard`), leg 2
+> is dropped; §8.4's visible puzzle is dropped.
 
 Bots now complete the whole cookie + JS + PoW flow correctly. "Solved" is no
 longer evidence of a human, so the challenge engine needs work in two separate
@@ -471,7 +472,8 @@ This section records a design worked out in discussion, so the reasoning is not
 lost. *(2026-09-29: §8.2 shipped as ChallengeV2 Rung 1 — `ptr`/`tch`/`key`/`mv`
 in `sig=`. The automatic v2 arm (`suspicious_vhost` / `uniqpaths_short` /
 `under_attack`) plays §8.4's vhost-level trigger role without §8.3 leg 2, and
-the Rung-1 score is the per-request gate. §8.3 leg 1 is a candidate; leg 2 and
+the Rung-1 score is the per-request gate. §8.3 leg 1 shipped for `solver_farm`
+(2026-11-03; `cookie_discard` not done); leg 2 and
 §8.4's visible puzzle are dropped; master plan §5.)* **As first written, nothing here was built or measured**; the numbers to justify each
 threshold do not exist until the evidence signal in §8.2 has run. Treat every
 "human vs farm" claim below as a hypothesis to confirm against real logs, the
@@ -526,6 +528,10 @@ JS-executing headless-browser farm, which is the threat.
    `solver_farm` / `cookiediscard` fire, attach the interaction distribution of
    the flagged cluster, exactly as UA/`tls_fp` breakdowns already ride on the
    alert. Makes the finding actionable; changes no decision; needs no threshold.
+   **Shipped for `solver_farm` (2026-11-03)** as the Rung-1 `hs` / `tells`
+   distribution and country split of the flagged cluster (alert text, the
+   `Finding`, `detection_history` `payload.humanity`; `solverfarm/humanity.go`,
+   see `docs/DETECTORS.md`). **`cookie_discard`: not done.**
 2. **Aggregate detector signal (the payoff, after burn-in).** Per-solve is
    spoofable, so — like `solver_farm` — key on the **population over a
    vhost/window**: the fraction of solves with human-plausible interaction

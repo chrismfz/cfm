@@ -1,8 +1,41 @@
 package webdetector
 
 import (
+	"reflect"
 	"testing"
+
+	core "cfm/internal/detectors/core"
 )
+
+// Humanity rides the event only behind the HumanityScored gate (as on the
+// solve line): an unscored solve carries nil, never a fabricated hs 0, and a
+// scored hs 0 stays a real reading. CountryISO is carried as resolved.
+func TestChallengeSolveInputEventHumanityGate(t *testing.T) {
+	cases := []struct {
+		name string
+		in   ChallengeSolve
+		want *core.Humanity
+	}{
+		{"unscored solve carries nil", ChallengeSolve{IP: "203.0.113.9", Host: "h"}, nil},
+		{"unscored ignores stray fields", ChallengeSolve{IP: "203.0.113.9", Host: "h", HumanityScore: 140, HumanityTells: "webdriver", HumanityNoPayload: true}, nil},
+		{"scored clean is a real 0", ChallengeSolve{IP: "203.0.113.9", Host: "h", HumanityScored: true}, &core.Humanity{Scored: true}},
+		{"scored with tells", ChallengeSolve{IP: "203.0.113.9", Host: "h", HumanityScored: true, HumanityScore: 120, HumanityTells: "sw_renderer,no_input"},
+			&core.Humanity{Scored: true, Score: 120, Tells: "sw_renderer,no_input"}},
+		{"no payload", ChallengeSolve{IP: "203.0.113.9", Host: "h", HumanityScored: true, HumanityNoPayload: true},
+			&core.Humanity{Scored: true, NoPayload: true}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.in.InputEvent().Humanity
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("Humanity = %+v, want %+v", got, c.want)
+			}
+		})
+	}
+	if ev := (ChallengeSolve{IP: "203.0.113.9", Host: "h", CountryISO: "GR"}).InputEvent(); ev.CountryISO != "GR" {
+		t.Errorf("CountryISO = %q, want GR", ev.CountryISO)
+	}
+}
 
 func withCleanSolveSubs(t *testing.T) {
 	t.Helper()

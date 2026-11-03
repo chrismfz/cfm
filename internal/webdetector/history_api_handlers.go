@@ -60,6 +60,10 @@ var scopedRedactedPayloadKeys = map[string]struct{}{
 	// tenant-facing row that needs an "ips" list must use another key.
 	"ips":       {},
 	"good_bots": {},
+	// The solver_farm humanity summary — the seventh entry: the ChallengeV2
+	// scorer's verdicts and country split for a convicted cluster. Generic
+	// name, withheld on every row type like ips.
+	"humanity": {},
 }
 
 // scopedRedactedPayloadPrefix strips every v2_* key (v2_via, v2_waived,
@@ -91,7 +95,7 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // (scopedRedactedPayloadKeys) from history rows before they leave the endpoint
 // for a SCOPED (cPanel) caller. Admin callers see the rows untouched.
 //
-// Six entries today (the fifth and sixth are families of keys). The first is payload.sig — the ChallengeV2 Rung-1 device readings
+// Seven entries today (the fifth and sixth are families of keys). The first is payload.sig — the ChallengeV2 Rung-1 device readings
 // (hardwareConcurrency, deviceMemory, devicePixelRatio, pointer/touch/key
 // counts) collected by CFM's own challenge page. A tenant could measure the
 // same things from their own site's JS, so this is not a secret; it is
@@ -171,6 +175,19 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 // no identity. So does the fingerprint id: evidence, not operator policy,
 // and the tenant sees tls_fp on its own solve rows anyway. The fleet store
 // pulls these rows with an admin token, so ingestion is unchanged.
+//
+// The seventh is the solver_farm humanity summary (payload.humanity): the
+// ChallengeV2 Rung-1 hs bucket counts, the top tells strings and the top
+// countries of the cluster the finding is about (solverfarm.HumanitySummary).
+// On a cross-host or fp-concentration row the cluster is the convicted
+// fingerprint's solves on this vhost, which is the tenant's own traffic — but
+// the tells are the output of CFM's own humanity scorer (which tells exist,
+// which fire on whom), the same class of operator-side detection material sig
+// is stripped for, and their distribution under an armed fingerprint is how
+// an operator sizes a v2 arm (src / v2 territory). Closed by default; the
+// readout it exists for is admin/MCP, and the fleet store's pull is an admin
+// read. The per-solve hs / tells on the tenant's own challenge_solved rows are
+// NOT stripped; this is the aggregate on the farm row only.
 //
 // The payload map is copied rather than edited so the caller's own map is
 // never mutated, but note the LIMIT of that: the slice element is reassigned

@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Solver-farm alerts now show who is behind the flagged fingerprint.** A
+  `challenge_solver_farm` finding carries the ChallengeV2 humanity
+  distribution of the cluster it flagged: how many of its solves scored
+  `hs` 0, 1–59, 60–99 and 100+, how many sent no humanity report (`none`)
+  or were not scored at all (`unscored`), the five most common `tells`
+  combinations and the five top countries, with the number of solves covered
+  and a note when the evidence cap made it a sample. A fingerprint is shared
+  by everyone on the same TLS stack, so this tells a farm from a real
+  audience on the same fingerprint (on one site, half of a convicted
+  fingerprint's 12 323 solves were Greek visitors at `hs` 0). It appears in
+  the alert mail/log, and on the `detection_history` `solver_farm` row as
+  `payload.humanity` for admin and MCP readers; cPanel (scoped) users do not
+  get it. Evidence only: no threshold or decision changed.
+  `challenge_cookie_discard` alerts do not carry it yet.
 - **Alert log: every detector event, mailed or not, in one searchable place.**
   Each event the detectors hand the notifier (the `[CFM] host — KIND ip …`
   mails: WAF/WEB/MODSEC blocks, autoblock bans, portscans, SSH/Dovecot auth

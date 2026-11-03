@@ -40,6 +40,7 @@ func newSolverFarmGoodBot() *bridgeGoodBotState {
 // finding), never a matched signature; `solves_per_ip` is evidence, not a gate.
 // `ips` is the bounded address sample; `good_bots` is the sparse {ip: name} subset
 // of those addresses that are FCrDNS-verified crawlers (a per-IP block exemption).
+// `humanity` is the flagged cluster's Rung-1 humanity distribution (evidence).
 func (e *Engine) RecordSolverFarmFinding(f solverfarm.Finding) {
 	if e == nil || e.history == nil {
 		return
@@ -75,6 +76,14 @@ func (e *Engine) RecordSolverFarmFinding(f solverfarm.Finding) {
 		if gb := e.goodBotsForFinding(f.IPs); len(gb) > 0 {
 			payload["good_bots"] = gb
 		}
+	}
+	// The ChallengeV2 Rung-1 humanity distribution and country split of the
+	// cluster the finding is about (solverfarm.HumanitySummary: hs buckets,
+	// top tells, top countries, n, truncated, which cluster). Evidence only —
+	// it decided nothing — and admin-only: redactScopedHistoryRows strips it
+	// for scoped callers. Omitted when no evidence record covered the cluster.
+	if hp := f.Humanity.Payload(); hp != nil {
+		payload["humanity"] = hp
 	}
 	e.appendHistory(HistoryEvent{
 		TsUnix:  ts.Unix(),
