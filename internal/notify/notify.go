@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	//	"net"
+	"cfm/internal/alerts"
 	"cfm/internal/enrich"
 	"fmt"
 	"os"
@@ -165,12 +166,18 @@ func Init(cfgDir string) error {
 	cfgMu.Lock()
 	cfg = c
 	recordLoadResultLocked(cfgDir, true, nil, false)
+	// queueCh is read by Enqueue on detector goroutines, so it is set under
+	// cfgMu (and read under it) rather than published bare.
+	startWorker := queueCh == nil
+	if startWorker {
+		queueCh = make(chan Event, 100)
+	}
+	q := queueCh
 	cfgMu.Unlock()
 	ensureRetentionPruner()
 	dedup = newDeduper(c.DedupeTTL)
-	if queueCh == nil {
-		queueCh = make(chan Event, 100)
-		go worker()
+	if startWorker {
+		go worker(q)
 	}
 	return nil
 }
@@ -179,15 +186,18 @@ func Emit(ev Event) error {
 	cfgMu.RLock()
 	c := cfg
 	cfgMu.RUnlock()
-	if c == nil || !c.Enabled {
-		return nil
-	}
 
 	if ev.Host == "" {
 		ev.Host = hostname
 	}
 	if ev.When.IsZero() {
 		ev.When = time.Now()
+	}
+	// Every event reaches the alert store, whatever happens to its delivery
+	// below; each return records why it was (not) sent.
+	if c == nil || !c.Enabled {
+		recordAlert(ev, alerts.DeliveryNotifierOff, "")
+		return nil
 	}
 
 	// dedupe
@@ -200,6 +210,7 @@ func Emit(ev Event) error {
 	// detector override lookup
 	ov, hasOV := matchOverride(c, ev)
 	if hasOV && !ov.Notify {
+		recordAlert(ev, alerts.DeliveryMuted, "")
 		return nil // detector explicitly disabled
 	}
 	ttl := c.DedupeTTL
@@ -211,12 +222,14 @@ func Emit(ev Event) error {
 	}
 
 	if !dedup.allow(key, ttl) {
+		recordAlert(ev, alerts.DeliveryDeduped, "")
 		return nil
 	}
 
 	// severity gate (if configured)
 	if hasOV && ov.MinSeverity != "" {
 		if severityRank(ev.Severity) < severityRank(ov.MinSeverity) {
+			recordAlert(ev, alerts.DeliveryBelowSeverity, "")
 			return nil
 		}
 	}
@@ -229,6 +242,11 @@ func Emit(ev Event) error {
 	var firstErr error
 	dest := selectChannels(c, ov, hasOV)
 	eventID := notificationEventID()
+	if len(dest) == 0 {
+		recordAlert(ev, alerts.DeliveryNoChannels, "")
+		return nil
+	}
+	delivered := false
 	for _, ch := range dest {
 		attemptedAt := time.Now().UTC()
 		attemptStart := time.Now()
@@ -237,6 +255,7 @@ func Emit(ev Event) error {
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
+		delivered = delivered || err == nil
 
 		// audit JSONL (per-channel attempt row)
 		_ = appendJSONL(c.JSONLPath, map[string]interface{}{
@@ -262,6 +281,14 @@ func Emit(ev Event) error {
 		})
 	}
 
+	// Recorded after the sends, so a broken SMTP/sendmail shows as send_failed
+	// rather than as mailed. The event_id is the delivery journal's
+	// correlation_id for these attempts.
+	if delivered {
+		recordAlert(ev, alerts.DeliveryNotified, eventID)
+	} else {
+		recordAlert(ev, alerts.DeliverySendFailed, eventID)
+	}
 	return firstErr
 }
 
@@ -284,8 +311,8 @@ func RuntimeStatus() RuntimeMetadata {
 	return runtimeMeta
 }
 
-func worker() {
-	for ev := range queueCh {
+func worker(q <-chan Event) {
+	for ev := range q {
 		_ = Emit(ev)
 	}
 }
@@ -296,6 +323,9 @@ func Enqueue(ev Event) {
 	if (ev.PTR == "" || ev.ASN == "" || ev.Country == "") && ev.SrcIP != "" {
 		if enr := enricher; enr != nil {
 			info := enr.Lookup(ev.SrcIP)
+			if ev.CountryISO == "" {
+				ev.CountryISO = info.CountryISO
+			}
 			if ev.PTR == "" && info.PTR != "" {
 				ev.PTR = info.PTR
 			}
@@ -319,9 +349,19 @@ func Enqueue(ev Event) {
 		}
 	}
 
+	cfgMu.RLock()
+	q := queueCh
+	cfgMu.RUnlock()
+	if q == nil {
+		// Init never ran (or failed before starting the worker): nothing will
+		// deliver it, but the alert store still keeps it.
+		recordAlert(ev, alerts.DeliveryNotifierOff, "")
+		return
+	}
 	select {
-	case queueCh <- ev:
+	case q <- ev:
 	default:
+		recordAlert(ev, alerts.DeliveryQueueFull, "")
 		cfgMu.RLock()
 		path := ""
 		if cfg != nil {
@@ -544,15 +584,12 @@ func selectChannels(c *config, ov detectorOverride, hasOV bool) []Channel {
 	return out
 }
 
+// severityRank orders severities for a detector override's min_severity, on
+// the alert store's scale. An empty or unknown severity ranks as info, as it
+// always has here.
 func severityRank(s string) int {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "critical":
-		return 2
-	case "warn", "warning":
-		return 1
-	case "info", "":
-		return 0
-	default:
-		return 0
+	if r := alerts.SeverityRank(s); r > 0 {
+		return r
 	}
+	return alerts.SeverityRank("info")
 }

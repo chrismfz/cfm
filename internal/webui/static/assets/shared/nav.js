@@ -34,6 +34,7 @@ const MENU_GROUPS = [
   { title: "Overview", items: [
     { label: "Dashboard", href: "/cfm-admin/", icon: "gauge" },
     { label: "Health", href: "/cfm-admin/health/", icon: "pulse" },
+    { label: "Alerts", href: "/cfm-admin/alerts/", icon: "bell" },
   ]},
   { title: "Web protection", items: [
     { label: "WebDetector", href: "/cfm-admin/webdetector/", icon: "radar" },

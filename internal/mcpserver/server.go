@@ -252,6 +252,9 @@ Orientation:
   top_talkers (request-rate leaders), hot_ips, host_drilldown / ip_drilldown for
   the "why" behind one host or IP, bots_top for user-agents.
 - Durable log: detection_history (WAF/challenge/clam/… events over time).
+- Alert log: alerts (every detector event raised for the notifier — the
+  "[CFM] host — KIND ip" mails — recorded even when no mail went out) and
+  alerts_summary (the same, grouped by kind/country/asn/vhost/hour/...).
 - Enforcement & platform: firewall_blocks (active nft bans incl. WAF autoblocks),
   detectors_status, system_health.
 

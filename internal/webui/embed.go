@@ -17,6 +17,7 @@
 //   /mail/                   → static/mail/index.html
 //   /mailmon/                → static/mailmon/index.html
 //   /settings/               → static/settings/index.html
+//   /alerts/                 → static/alerts/index.html
 //   /assets/                → static/assets/  (JS, CSS)
 //   unknown path             → static/index.html  (fallback)
 //

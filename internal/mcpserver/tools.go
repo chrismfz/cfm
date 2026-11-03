@@ -49,6 +49,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerHostDrilldown(srv, d)
 	registerIPDrilldown(srv, d)
 	registerDetectionHistory(srv, d)
+	registerAlerts(srv, d)
 	registerBotsTop(srv, d)
 	registerFirewallBlocks(srv, d)
 	registerFirewallCounters(srv, d)

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM — Alerts</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2032%2032%27%3E%3Crect%20width=%2732%27%20height=%2732%27%20rx=%277%27%20fill=%27%23141b2d%27/%3E%3Cpath%20d=%27M16%206l8.7%205v10L16%2026l-8.7-5V11z%27%20fill=%27none%27%20stroke=%27%234da3ff%27%20stroke-width=%272.4%27/%3E%3C/svg%3E" />
+  <script type="module" src="/cfm-admin/assets/alerts.js"></script>
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar" data-shared-nav></aside>
+<div class="main">
+<div class="landing-shell">
+    <header class="topbar">
+      <button class="nav-burger" type="button" data-nav-burger aria-label="Toggle navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <h1>Alerts</h1>
+      <div class="meta">
+        <span id="alertsStoreInfo" class="pill" title="Alert store size and retention">—</span>
+        <label class="muted"><input type="checkbox" id="alertsAutoRefresh" /> auto-refresh</label>
+        <button id="alertsRefreshBtn" class="btn-quiet">Refresh</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card wide">
+        <p class="muted" style="margin-top:0">Every event the detectors raised for the notifier, recorded whether or not a mail went out.
+          <em>Delivery</em> says what the notifier did with it (mail/Slack config lives under <a href="/cfm-admin/notifier/">Notifier</a>).</p>
+        <div class="toolbar wrap">
+          <select id="alertsHours" class="input" title="Time window">
+            <option value="1">Last hour</option>
+            <option value="6">Last 6 hours</option>
+            <option value="24" selected>Last 24 hours</option>
+            <option value="168">Last 7 days</option>
+            <option value="720">Last 30 days</option>
+          </select>
+          <input id="alertsKind" class="input" placeholder="kind (WAF/SQLI,…)" />
+          <select id="alertsSeverity" class="input" title="Minimum severity">
+            <option value="">any severity</option>
+            <option value="warning">warning+</option>
+            <option value="critical">critical</option>
+          </select>
+          <input id="alertsIP" class="input" placeholder="ip" />
+          <input id="alertsCountry" class="input" placeholder="country (GR / name)" />
+          <input id="alertsASN" class="input" placeholder="asn (6799 / name)" />
+          <input id="alertsVhost" class="input" placeholder="vhost" />
+          <select id="alertsDelivery" class="input" title="What the notifier did">
+            <option value="">any delivery</option>
+            <option value="notified">notified</option>
+            <option value="send_failed">send failed</option>
+            <option value="deduped">deduped</option>
+            <option value="notifier_off">notifier off</option>
+            <option value="no_channels">no channels</option>
+            <option value="muted">muted</option>
+            <option value="below_severity">below severity</option>
+            <option value="queue_full">queue full</option>
+          </select>
+          <input id="alertsQuery" class="input input-wide" placeholder="search reason / ptr / samples" />
+          <button id="alertsApplyBtn">Apply</button>
+          <button id="alertsClearBtn" class="btn-quiet">Clear</button>
+        </div>
+        <div id="alertsCategoryChips" class="chip-row" aria-label="Category"></div>
+        <div id="alertsActiveExtra" class="chip-row" aria-label="Other active filters" style="display:none"></div>
+        <p id="alertsStatus" class="statusline" style="display:none"></p>
+      </section>
+
+      <section class="card wide">
+        <div class="summary-grid">
+          <div class="summary-card"><h4>Alerts</h4><div class="value" id="alertsTotal">0</div></div>
+          <div class="summary-card"><h4>Distinct IPs</h4><div class="value" id="alertsDistinctIPs">0</div></div>
+          <div class="summary-card"><h4>Top kind</h4><div class="value" id="alertsTopKind">—</div></div>
+          <div class="summary-card"><h4>Top country</h4><div class="value" id="alertsTopCountry">—</div></div>
+          <div class="summary-card"><h4>Not mailed</h4><div class="value" id="alertsNotMailed" title="Alerts no channel accepted: send failed, deduped, muted, notifier off, …">0</div></div>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <div class="toolbar wrap">
+          <h2 style="margin:0">Group by</h2>
+          <select id="alertsGroup1" class="input">
+            <option value="">— none (rows) —</option>
+            <option value="kind">kind</option>
+            <option value="category">category</option>
+            <option value="country">country</option>
+            <option value="asn">network (ASN)</option>
+            <option value="ip">ip</option>
+            <option value="vhost">vhost</option>
+            <option value="reason">reason</option>
+            <option value="severity">severity</option>
+            <option value="delivery">delivery</option>
+            <option value="mode">ban mode</option>
+            <option value="hour">hour</option>
+            <option value="day">day</option>
+          </select>
+          <span class="muted">then</span>
+          <select id="alertsGroup2" class="input">
+            <option value="">—</option>
+            <option value="kind">kind</option>
+            <option value="category">category</option>
+            <option value="country">country</option>
+            <option value="asn">network (ASN)</option>
+            <option value="ip">ip</option>
+            <option value="vhost">vhost</option>
+            <option value="reason">reason</option>
+            <option value="severity">severity</option>
+            <option value="delivery">delivery</option>
+            <option value="mode">ban mode</option>
+          </select>
+          <span class="toolbar-gap"></span>
+          <span class="muted">Click a group to filter by it.</span>
+        </div>
+        <div id="alertsGroupsWrap" class="table-wrap wide-table-wrap" style="display:none">
+          <table>
+            <thead id="alertsGroupsHead"></thead>
+            <tbody id="alertsGroupsBody"></tbody>
+          </table>
+        </div>
+        <div id="alertsRowsWrap" class="table-wrap wide-table-wrap">
+          <table>
+            <thead>
+              <tr><th>Time</th><th>Category</th><th>Kind</th><th>IP</th><th>Country</th><th>Network</th><th>Vhost</th><th>Reason</th><th>Action</th><th>Delivery</th></tr>
+            </thead>
+            <tbody id="alertsRowsBody"></tbody>
+          </table>
+        </div>
+        <div class="toolbar wrap">
+          <button id="alertsMoreBtn" class="btn-quiet" style="display:none">Load more</button>
+          <span id="alertsRowsInfo" class="muted"></span>
+        </div>
+      </section>
+
+      <section id="alertsDetail" class="card wide" style="display:none">
+        <div class="toolbar wrap">
+          <h2 style="margin:0">Alert detail</h2>
+          <span class="toolbar-gap"></span>
+          <button id="alertsDetailClose" class="btn-quiet btn-sm">Close</button>
+        </div>
+        <div id="alertsDetailMeta" class="summary-grid"></div>
+        <h3>Sample lines</h3>
+        <pre id="alertsDetailSamples" class="diff-preview" style="white-space:pre-wrap"></pre>
+        <h3>Detector fields</h3>
+        <pre id="alertsDetailExtra" class="diff-preview"></pre>
+      </section>
+    </main>
+</div>
+</div><!-- /.main -->
+</div><!-- /.shell -->
+</body>
+</html>

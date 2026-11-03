@@ -390,6 +390,20 @@ func (e *Enricher) LookupCachedOrAsync(ipStr string) Result {
 	return partial
 }
 
+// LookupCachedOrGeo returns the cached Result for ipStr, or on a miss the
+// mmdb-only one (country + ASN, no PTR). Unlike LookupCachedOrAsync it never
+// starts a background reverse lookup: for callers that only need geo data
+// and must not add DNS load (the alert store's country code).
+func (e *Enricher) LookupCachedOrGeo(ipStr string) Result {
+	if e == nil || ipStr == "" {
+		return Result{}
+	}
+	if r, ok := e.cache.Get(ipStr); ok {
+		return r
+	}
+	return e.LookupGeoFast(ipStr)
+}
+
 // dispatchAsyncLookup runs the full Lookup for ip on a background goroutine,
 // best-effort: non-blocking on asyncSem saturation (the next request retries),
 // singleflight-coalesced per IP.
