@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.03
+
 ### Added
 - **Solver-farm alerts now show who is behind the flagged fingerprint.** A
   `challenge_solver_farm` finding carries the ChallengeV2 humanity
