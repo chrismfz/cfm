@@ -217,6 +217,8 @@ func Start(
 
 	// ── Notifier admin API (admin-only) ─────────────────────────────────────
 	RegisterNotifierEndpoints(m, cfgDir)
+	// ── Alert store (admin-only): every notifier event, sent or not ─────────
+	RegisterAlertsEndpoints(m)
 	RegisterDetectorsEndpoints(m, cfgDir)
 
 	// ── MySQL governor ────────────────────────────────────────────────────────

@@ -17,6 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Alert log: every detector event, mailed or not, in one searchable place.**
+  Each event the detectors hand the notifier (the `[CFM] host — KIND ip …`
+  mails: WAF/WEB/MODSEC blocks, autoblock bans, portscans, SSH/Dovecot auth
+  failures, MySQL governor, ClamAV, outbound abuse, LSM) is now also stored in
+  `/var/lib/cfm/alerts.db` (SQLite, 30 days / 500k rows), whether or not a
+  mail or Slack channel is configured, and whatever dedupe or a detector
+  override then decides. Each row records what the notifier did with it
+  (`notified`, `deduped`, `notifier_off`, `no_channels`, `muted`,
+  `below_severity`, `queue_full`), so "why didn't I get a mail?" has an answer.
+  The store adds the ISO country code, the ASN number and the vhost (from the
+  detector's fields or the sample line) so events can be grouped. Writes are
+  batched on their own goroutine and never block a detector. New admin-only
+  `GET /api/v1/alerts` (filters, cursor paging), `/api/v1/alerts/summary`
+  (`group_by=` up to three of kind/category/country/asn/ip/vhost/reason/
+  severity/delivery/mode/hour/day) and `/api/v1/alerts/stats`; a cfm-admin
+  **Alerts** page (category chips, filters, group-by with click-to-drill,
+  sample lines); and node MCP tools `alerts` and `alerts_summary`. The
+  notifier's `notify.log.jsonl` stays the per-channel delivery journal. See
+  `docs/alerts.md`.
+
 ### Changed
 - **Rule 328 (Log4Shell lookup forms) now challenges instead of only
   logging** (`challenge_v2`). In 30 days every 328 hit on the fleet (29) was a

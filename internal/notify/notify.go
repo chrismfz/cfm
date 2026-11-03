@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	//	"net"
+	"cfm/internal/alerts"
 	"cfm/internal/enrich"
 	"fmt"
 	"os"
@@ -179,15 +180,18 @@ func Emit(ev Event) error {
 	cfgMu.RLock()
 	c := cfg
 	cfgMu.RUnlock()
-	if c == nil || !c.Enabled {
-		return nil
-	}
 
 	if ev.Host == "" {
 		ev.Host = hostname
 	}
 	if ev.When.IsZero() {
 		ev.When = time.Now()
+	}
+	// Every event reaches the alert store, whatever happens to its delivery
+	// below; each return records why it was (not) sent.
+	if c == nil || !c.Enabled {
+		recordAlert(ev, alerts.DeliveryNotifierOff, "")
+		return nil
 	}
 
 	// dedupe
@@ -200,6 +204,7 @@ func Emit(ev Event) error {
 	// detector override lookup
 	ov, hasOV := matchOverride(c, ev)
 	if hasOV && !ov.Notify {
+		recordAlert(ev, alerts.DeliveryMuted, "")
 		return nil // detector explicitly disabled
 	}
 	ttl := c.DedupeTTL
@@ -211,12 +216,14 @@ func Emit(ev Event) error {
 	}
 
 	if !dedup.allow(key, ttl) {
+		recordAlert(ev, alerts.DeliveryDeduped, "")
 		return nil
 	}
 
 	// severity gate (if configured)
 	if hasOV && ov.MinSeverity != "" {
 		if severityRank(ev.Severity) < severityRank(ov.MinSeverity) {
+			recordAlert(ev, alerts.DeliveryBelowSeverity, "")
 			return nil
 		}
 	}
@@ -229,6 +236,12 @@ func Emit(ev Event) error {
 	var firstErr error
 	dest := selectChannels(c, ov, hasOV)
 	eventID := notificationEventID()
+	if len(dest) == 0 {
+		recordAlert(ev, alerts.DeliveryNoChannels, "")
+	} else {
+		// the event_id is the delivery journal's correlation_id for its attempts
+		recordAlert(ev, alerts.DeliveryNotified, eventID)
+	}
 	for _, ch := range dest {
 		attemptedAt := time.Now().UTC()
 		attemptStart := time.Now()
@@ -319,9 +332,16 @@ func Enqueue(ev Event) {
 		}
 	}
 
+	if queueCh == nil {
+		// Init never ran (or failed before starting the worker): nothing will
+		// deliver it, but the alert store still keeps it.
+		recordAlert(ev, alerts.DeliveryNotifierOff, "")
+		return
+	}
 	select {
 	case queueCh <- ev:
 	default:
+		recordAlert(ev, alerts.DeliveryQueueFull, "")
 		cfgMu.RLock()
 		path := ""
 		if cfg != nil {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"cfm/internal/alerts"
 	"cfm/internal/detectorscfg"
 	"cfm/internal/hostsecrets"
 	"cfm/internal/notify"
@@ -20,7 +21,7 @@ import (
 // It also points the webdetector store/log defaults at the temp dir, so a test
 // that builds an Engine can never reach /var/lib/cfm, and the per-host token
 // store (hostsecrets.Dir): the health snapshot's challenge-token probe reads
-// it.
+// it. The alert store's DefaultPath goes there too.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "cfm-apiserver-test-")
 	if err != nil {
@@ -31,11 +32,13 @@ func TestMain(m *testing.M) {
 	restoreDetectors := detectorscfg.SetSystemConfigPathForTest(filepath.Join(dir, "absent", "detectors.conf"))
 	restoreWebdet := webdetector.SetDefaultDirsForTest(filepath.Join(dir, "webdetector"))
 	restoreSecrets := hostsecrets.SetDirForTest(filepath.Join(dir, "secrets"))
+	restoreAlerts := alerts.SetPathForTest(filepath.Join(dir, "alerts.db"))
 	code := m.Run()
 	restoreNotify()
 	restoreDetectors()
 	restoreWebdet()
 	restoreSecrets()
+	restoreAlerts()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }

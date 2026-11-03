@@ -33,6 +33,7 @@ import (
 	"time"
 
 	// api server for debug and api endpoints //
+	"cfm/internal/alerts"
 	"cfm/internal/apiserver"
 
 	nflog "cfm/internal/nflog"
@@ -841,6 +842,14 @@ func runDaemon(args []string) {
 		waitTTLBanRestore(ttlRestored)
 		runEdgeBanReconcile(edgeStore, be)
 	}()
+
+	// Alert store: every notifier event, sent or not (internal/alerts). Opened
+	// before the notifier so nothing it handles is missed.
+	done = step("alerts.Init")
+	if err := alerts.Init(); err != nil {
+		logging.Logf("[alerts] init error (alerts are not recorded): %v", err)
+	}
+	done()
 
 	//Notify manager
 
