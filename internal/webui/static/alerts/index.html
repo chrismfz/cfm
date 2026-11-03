@@ -50,6 +50,7 @@
           <select id="alertsDelivery" class="input" title="What the notifier did">
             <option value="">any delivery</option>
             <option value="notified">notified</option>
+            <option value="send_failed">send failed</option>
             <option value="deduped">deduped</option>
             <option value="notifier_off">notifier off</option>
             <option value="no_channels">no channels</option>
@@ -62,6 +63,7 @@
           <button id="alertsClearBtn" class="btn-quiet">Clear</button>
         </div>
         <div id="alertsCategoryChips" class="chip-row" aria-label="Category"></div>
+        <div id="alertsActiveExtra" class="chip-row" aria-label="Other active filters" style="display:none"></div>
         <p id="alertsStatus" class="statusline" style="display:none"></p>
       </section>
 
@@ -71,7 +73,7 @@
           <div class="summary-card"><h4>Distinct IPs</h4><div class="value" id="alertsDistinctIPs">0</div></div>
           <div class="summary-card"><h4>Top kind</h4><div class="value" id="alertsTopKind">—</div></div>
           <div class="summary-card"><h4>Top country</h4><div class="value" id="alertsTopCountry">—</div></div>
-          <div class="summary-card"><h4>Not mailed</h4><div class="value" id="alertsNotMailed" title="Rows whose delivery is anything but notified">0</div></div>
+          <div class="summary-card"><h4>Not mailed</h4><div class="value" id="alertsNotMailed" title="Alerts no channel accepted: send failed, deduped, muted, notifier off, …">0</div></div>
         </div>
       </section>
 

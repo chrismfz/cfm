@@ -53,7 +53,7 @@ func getJSON(t *testing.T, mux *http.ServeMux, path string, admin bool, wantCode
 
 func TestAlertsEndpointsAreAdminOnly(t *testing.T) {
 	mux, _ := alertsTestMux(t)
-	for _, p := range []string{"/api/v1/alerts", "/api/v1/alerts/summary", "/api/v1/alerts/stats"} {
+	for _, p := range []string{"/api/v1/alerts", "/api/v1/alerts/summary", "/api/v1/alerts/overview", "/api/v1/alerts/stats"} {
 		getJSON(t, mux, p, false, http.StatusForbidden)
 	}
 }
@@ -90,6 +90,10 @@ func TestAlertsSummary(t *testing.T) {
 		t.Fatalf("groups: %v", groups)
 	}
 	getJSON(t, mux, "/api/v1/alerts/summary?group_by=secret", true, http.StatusBadRequest)
+	ov := getJSON(t, mux, "/api/v1/alerts/overview?category=WAF", true, http.StatusOK)
+	if ov["total"].(float64) != 2 || ov["not_notified"].(float64) != 1 || len(ov["categories"].([]any)) != 2 {
+		t.Fatalf("overview: %v", ov)
+	}
 	stats := getJSON(t, mux, "/api/v1/alerts/stats", true, http.StatusOK)
 	if stats["rows"].(float64) != 4 {
 		t.Fatalf("stats: %v", stats)

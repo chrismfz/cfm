@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,7 +59,8 @@ const (
 // Delivery outcomes: what the notifier did with the event. Recorded so the
 // store can answer "why didn't I get a mail for this?".
 const (
-	DeliveryNotified      = "notified"       // handed to at least one channel
+	DeliveryNotified      = "notified"       // at least one channel accepted it
+	DeliverySendFailed    = "send_failed"    // every channel it went to returned an error
 	DeliveryNotifierOff   = "notifier_off"   // notifier disabled or its config failed to load
 	DeliveryNoChannels    = "no_channels"    // enabled, but no channel matched
 	DeliveryDeduped       = "deduped"        // same dedupe key inside its cooldown
@@ -99,7 +101,8 @@ type Store struct {
 	path    string
 	maxAge  time.Duration
 	maxRows int
-	db      *sql.DB
+	db      *sql.DB // the writer's: inserts and prunes, one connection
+	ro      *sql.DB // the readers': List, Summarize, Overview, Stats
 
 	queue   chan Record
 	flushCh chan chan struct{}
@@ -163,12 +166,19 @@ func Open(path string, maxAge time.Duration, maxRows int) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, err
 	}
+	// The store holds every tenant's events (client IPs, vhosts, MySQL users,
+	// log lines), so it is 0600 from the first byte: SQLite gives the -wal and
+	// -shm files the database file's mode, so the file must exist with that
+	// mode before SQLite creates it under the process umask.
+	if err := createPrivate(path); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("alerts: open %s: %w", path, err)
 	}
-	// One connection: the writer and the readers share it, which keeps the
-	// pragmas below applied (they are per connection) and serialises writes.
+	// The writer's connection: one, so inserts and prunes serialise and the
+	// pragmas below (per connection) stay applied.
 	db.SetMaxOpenConns(1)
 	for _, p := range []string{
 		`PRAGMA journal_mode=WAL;`,
@@ -187,12 +197,25 @@ func Open(path string, maxAge time.Duration, maxRows int) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	_ = os.Chmod(path, 0o600)
+	for _, p := range []string{path + "-wal", path + "-shm"} {
+		_ = os.Chmod(p, 0o600) // a store created by an earlier build under the umask
+	}
+	// The readers get their own small pool: in WAL mode they never block the
+	// writer, so a slow 30-day query can't stall inserts and fill the queue.
+	// query_only makes every reader connection refuse writes.
+	ro, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path,
+		RawQuery: "_pragma=busy_timeout(5000)&_pragma=query_only(1)"}).String())
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("alerts: open readers %s: %w", path, err)
+	}
+	ro.SetMaxOpenConns(4)
 	s := &Store{
 		path:    path,
 		maxAge:  maxAge,
 		maxRows: maxRows,
 		db:      db,
+		ro:      ro,
 		queue:   make(chan Record, queueSize),
 		flushCh: make(chan chan struct{}),
 		stop:    make(chan struct{}),
@@ -212,8 +235,28 @@ func (s *Store) Close() {
 	s.stopOnce.Do(func() {
 		close(s.stop)
 		s.done.Wait()
+		_ = s.ro.Close()
 		_ = s.db.Close()
 	})
+}
+
+// Shutdown flushes and closes the default store and uninstalls it. For the
+// daemon's exit path: rows still queued are written, not lost.
+func Shutdown() {
+	if s := SetDefault(nil); s != nil {
+		s.Close()
+	}
+}
+
+// createPrivate creates path with mode 0600 if it does not exist, and
+// tightens it to 0600 if it does.
+func createPrivate(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("alerts: create %s: %w", path, err)
+	}
+	_ = f.Close()
+	return os.Chmod(path, 0o600)
 }
 
 func ensureSchema(db *sql.DB) error {
@@ -424,7 +467,7 @@ func (s *Store) Stats() (Stats, error) {
 		Queued:    len(s.queue),
 	}
 	var oldest, newest sql.NullInt64
-	if err := s.db.QueryRow(`SELECT COUNT(*), MIN(ts_unix), MAX(ts_unix) FROM alerts`).Scan(&st.Rows, &oldest, &newest); err != nil {
+	if err := s.ro.QueryRow(`SELECT COUNT(*), MIN(ts_unix), MAX(ts_unix) FROM alerts`).Scan(&st.Rows, &oldest, &newest); err != nil {
 		return st, err
 	}
 	st.OldestUnix, st.NewestUnix = oldest.Int64, newest.Int64

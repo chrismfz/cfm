@@ -849,6 +849,9 @@ func runDaemon(args []string) {
 	if err := alerts.Init(); err != nil {
 		logging.Logf("[alerts] init error (alerts are not recorded): %v", err)
 	}
+	// On exit, write what is still queued (an upgrade restart mid-burst would
+	// otherwise lose the events right before it).
+	defer alerts.Shutdown()
 	done()
 
 	//Notify manager

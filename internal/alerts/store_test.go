@@ -1,6 +1,8 @@
 package alerts
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -166,11 +168,15 @@ func TestSummarize(t *testing.T) {
 		t.Fatalf("hour buckets: %+v", byHour)
 	}
 
-	if _, err := s.Summarize(day, []string{"password"}, 10); err == nil {
-		t.Fatal("unknown group_by accepted")
+	if _, err := s.Summarize(day, []string{"password"}, 10); !errors.Is(err, ErrBadGroupBy) {
+		t.Fatalf("unknown group_by: %v", err)
 	}
-	if _, err := s.Summarize(day, []string{"kind", "ip", "asn", "vhost"}, 10); err == nil {
-		t.Fatal("four dimensions accepted")
+	if _, err := s.Summarize(day, []string{"kind", "ip", "asn", "vhost"}, 10); !errors.Is(err, ErrBadGroupBy) {
+		t.Fatalf("four dimensions: %v", err)
+	}
+	dims := []string{" KIND "}
+	if _, err := s.Summarize(day, dims, 10); err != nil || dims[0] != " KIND " {
+		t.Fatalf("Summarize changed the caller's group_by: %q %v", dims[0], err)
 	}
 }
 
@@ -232,5 +238,79 @@ func TestNormalize(t *testing.T) {
 	}
 	if !strings.HasSuffix(r.Reason, "α") {
 		t.Fatal("clip split a UTF-8 sequence")
+	}
+}
+
+func TestOverview(t *testing.T) {
+	s := openTestStore(t, 0, 0)
+	now := time.Now()
+	seed(t, s, now)
+	ov, err := s.Overview(Filter{From: now.Add(-24 * time.Hour), Categories: []string{"WAF"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// tallies follow the category filter; the chip counts ignore it
+	if ov.Total != 2 || ov.DistinctIPs != 2 || ov.NotNotified != 1 {
+		t.Fatalf("tallies: %+v", ov)
+	}
+	if ov.TopKind == nil || ov.TopKind.Key["kind"] != "WAF/SQLI" || ov.TopCountry == nil || ov.TopCountry.Key["country"] != "GR" {
+		t.Fatalf("tops: %+v %+v", ov.TopKind, ov.TopCountry)
+	}
+	cats := map[string]int64{}
+	for _, g := range ov.Categories {
+		cats[g.Key["category"]] = g.Count
+	}
+	if cats["WAF"] != 2 || cats["MODSEC"] != 1 || cats["MYSQL"] != 1 {
+		t.Fatalf("categories: %v", cats)
+	}
+}
+
+// The store holds every tenant's events: none of its files may be readable by
+// other local users, whatever the process umask.
+func TestFilesArePrivate(t *testing.T) {
+	old := setUmask(0o022)
+	defer setUmask(old)
+	path := filepath.Join(t.TempDir(), "alerts.db")
+	s, err := Open(path, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Add(Record{Kind: "WAF/SQLI", IP: "198.51.100.1"})
+	s.Flush()
+	defer s.Close()
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("%s is %o, want no group/other access", filepath.Base(p), perm)
+		}
+	}
+}
+
+func TestShutdownFlushesQueuedRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "alerts.db")
+	s, err := Open(path, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := SetDefault(s)
+	defer SetDefault(prev)
+	for i := 0; i < 50; i++ {
+		Add(Record{Kind: "PORTSCAN", IP: "203.0.113.9"})
+	}
+	Shutdown()
+	if Default() != nil {
+		t.Fatal("Shutdown left the store installed")
+	}
+	again, err := Open(path, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	st, err := again.Stats()
+	if err != nil || st.Rows != 50 {
+		t.Fatalf("rows after shutdown: %v %+v", err, st)
 	}
 }

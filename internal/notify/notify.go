@@ -238,10 +238,9 @@ func Emit(ev Event) error {
 	eventID := notificationEventID()
 	if len(dest) == 0 {
 		recordAlert(ev, alerts.DeliveryNoChannels, "")
-	} else {
-		// the event_id is the delivery journal's correlation_id for its attempts
-		recordAlert(ev, alerts.DeliveryNotified, eventID)
+		return nil
 	}
+	delivered := false
 	for _, ch := range dest {
 		attemptedAt := time.Now().UTC()
 		attemptStart := time.Now()
@@ -250,6 +249,7 @@ func Emit(ev Event) error {
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
+		delivered = delivered || err == nil
 
 		// audit JSONL (per-channel attempt row)
 		_ = appendJSONL(c.JSONLPath, map[string]interface{}{
@@ -275,6 +275,14 @@ func Emit(ev Event) error {
 		})
 	}
 
+	// Recorded after the sends, so a broken SMTP/sendmail shows as send_failed
+	// rather than as mailed. The event_id is the delivery journal's
+	// correlation_id for these attempts.
+	if delivered {
+		recordAlert(ev, alerts.DeliveryNotified, eventID)
+	} else {
+		recordAlert(ev, alerts.DeliverySendFailed, eventID)
+	}
 	return firstErr
 }
 
@@ -309,6 +317,9 @@ func Enqueue(ev Event) {
 	if (ev.PTR == "" || ev.ASN == "" || ev.Country == "") && ev.SrcIP != "" {
 		if enr := enricher; enr != nil {
 			info := enr.Lookup(ev.SrcIP)
+			if ev.CountryISO == "" {
+				ev.CountryISO = info.CountryISO
+			}
 			if ev.PTR == "" && info.PTR != "" {
 				ev.PTR = info.PTR
 			}
@@ -564,15 +575,12 @@ func selectChannels(c *config, ov detectorOverride, hasOV bool) []Channel {
 	return out
 }
 
+// severityRank orders severities for a detector override's min_severity, on
+// the alert store's scale. An empty or unknown severity ranks as info, as it
+// always has here.
 func severityRank(s string) int {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "critical":
-		return 2
-	case "warn", "warning":
-		return 1
-	case "info", "":
-		return 0
-	default:
-		return 0
+	if r := alerts.SeverityRank(s); r > 0 {
+		return r
 	}
+	return alerts.SeverityRank("info")
 }

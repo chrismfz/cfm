@@ -22,7 +22,7 @@ type alertsFilterInput struct {
 	ASN         string `json:"asn,omitempty" jsonschema:"AS number (6799 or AS6799) or part of the network name"`
 	Vhost       string `json:"vhost,omitempty" jsonschema:"one website the event was about"`
 	Mode        string `json:"mode,omitempty" jsonschema:"ttl | permanent (bans only)"`
-	Delivery    string `json:"delivery,omitempty" jsonschema:"comma list: notified, deduped, notifier_off, no_channels, muted, below_severity, queue_full"`
+	Delivery    string `json:"delivery,omitempty" jsonschema:"comma list: notified, send_failed, deduped, notifier_off, no_channels, muted, below_severity, queue_full"`
 	Query       string `json:"q,omitempty" jsonschema:"text to find in reason, kind, PTR, ASN, vhost or sample lines"`
 }
 
@@ -58,7 +58,7 @@ func registerAlerts(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "alerts",
-		Description: "This node's alert log: every event its detectors raised for the notifier (WAF/WEB/MODSEC blocks, autoblock bans, portscans, SSH/Dovecot auth failures, MySQL governor, ClamAV, outbound abuse, LSM, …), newest first — the same events that used to arrive only as '[CFM] host — KIND ip …' mails, but recorded even when no mail channel is set up, and including the ones dedupe or a detector override did not send. Each row: time, category (the kind's family), kind, severity, ip with country (+ ISO code), ASN and PTR, the vhost it was about when known, reason, ban mode/ttl, count, delivery (what the notifier did: notified, deduped, notifier_off, no_channels, muted, below_severity, queue_full), up to 5 sample log lines and the detector's extra fields. Filter by hours, category, kind, severity, ip, country, asn, vhost, mode, delivery or free text; page with cursor. For counts and 'which kind/country/network/site is this mostly?' use alerts_summary instead of paging through rows.",
+		Description: "This node's alert log: every event its detectors raised for the notifier (WAF/WEB/MODSEC blocks, autoblock bans, portscans, SSH/Dovecot auth failures, MySQL governor, ClamAV, outbound abuse, LSM, …), newest first — the same events that used to arrive only as '[CFM] host — KIND ip …' mails, but recorded even when no mail channel is set up, and including the ones dedupe or a detector override did not send. Each row: time, category (the kind's family), kind, severity, ip with country (+ ISO code), ASN and PTR, the vhost it was about when known, reason, ban mode/ttl, count, delivery (what the notifier did: notified, send_failed (every channel errored), deduped, notifier_off, no_channels, muted, below_severity, queue_full), up to 5 sample log lines and the detector's extra fields. Filter by hours, category, kind, severity, ip, country, asn, vhost, mode, delivery or free text; page with cursor. For counts and 'which kind/country/network/site is this mostly?' use alerts_summary instead of paging through rows.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in alertsListInput) (*mcp.CallToolResult, any, error) {
 		q := in.values()
 		setInt(q, "limit", in.Limit)

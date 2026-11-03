@@ -4,6 +4,7 @@ package apiserver
 //
 //	GET /api/v1/alerts          newest-first rows matching the filters (cursor paging)
 //	GET /api/v1/alerts/summary  the same filters, grouped (group_by=) with counts
+//	GET /api/v1/alerts/overview the page header in one read: tallies, top kind/country, category counts
 //	GET /api/v1/alerts/stats    store size, retention and writer counters
 //
 // Admin-only: the store holds every detector's events for the whole server
@@ -30,6 +31,7 @@ func RegisterAlertsEndpoints(m *http.ServeMux) {
 	}
 	m.Handle("/api/v1/alerts", adminOnlyHandler(http.HandlerFunc(handleAlertsList)))
 	m.Handle("/api/v1/alerts/summary", adminOnlyHandler(http.HandlerFunc(handleAlertsSummary)))
+	m.Handle("/api/v1/alerts/overview", adminOnlyHandler(http.HandlerFunc(handleAlertsOverview)))
 	m.Handle("/api/v1/alerts/stats", adminOnlyHandler(http.HandlerFunc(handleAlertsStats)))
 }
 
@@ -89,7 +91,7 @@ func handleAlertsSummary(w http.ResponseWriter, r *http.Request) {
 	sum, err := s.Summarize(f, groupBy, clampInt(r.URL.Query().Get("top"), 50, 1, 500))
 	if err != nil {
 		code := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "group_by") {
+		if errors.Is(err, alerts.ErrBadGroupBy) {
 			code = http.StatusBadRequest
 		}
 		writeNotifierJSON(w, code, map[string]any{"error": err.Error()})
@@ -99,6 +101,28 @@ func handleAlertsSummary(w http.ResponseWriter, r *http.Request) {
 		"from": unixOrZero(f.From), "to": unixOrZero(f.To),
 		"group_by": sum.GroupBy, "total": sum.Total, "distinct_ips": sum.DistinctIPs,
 		"groups": sum.Groups, "truncated": sum.Truncated,
+	})
+}
+
+func handleAlertsOverview(w http.ResponseWriter, r *http.Request) {
+	s := alertsStoreOr503(w, r)
+	if s == nil {
+		return
+	}
+	f, err := alertsFilterFromQuery(r)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	ov, err := s.Overview(f)
+	if err != nil {
+		writeNotifierJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeNotifierJSON(w, http.StatusOK, map[string]any{
+		"from": unixOrZero(f.From), "to": unixOrZero(f.To),
+		"total": ov.Total, "distinct_ips": ov.DistinctIPs, "not_notified": ov.NotNotified,
+		"top_kind": ov.TopKind, "top_country": ov.TopCountry, "categories": ov.Categories,
 	})
 }
 

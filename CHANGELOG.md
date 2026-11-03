@@ -25,14 +25,17 @@ back-filled here — see the git/PR history for that period.
   `/var/lib/cfm/alerts.db` (SQLite, 30 days / 500k rows), whether or not a
   mail or Slack channel is configured, and whatever dedupe or a detector
   override then decides. Each row records what the notifier did with it
-  (`notified`, `deduped`, `notifier_off`, `no_channels`, `muted`,
-  `below_severity`, `queue_full`), so "why didn't I get a mail?" has an answer.
+  (`notified`, `send_failed`, `deduped`, `notifier_off`, `no_channels`,
+  `muted`, `below_severity`, `queue_full`), so "why didn't I get a mail?" has
+  an answer.
   The store adds the ISO country code, the ASN number and the vhost (from the
   detector's fields or the sample line) so events can be grouped. Writes are
-  batched on their own goroutine and never block a detector. New admin-only
-  `GET /api/v1/alerts` (filters, cursor paging), `/api/v1/alerts/summary`
-  (`group_by=` up to three of kind/category/country/asn/ip/vhost/reason/
-  severity/delivery/mode/hour/day) and `/api/v1/alerts/stats`; a cfm-admin
+  batched on their own goroutine and never block a detector, and reads use
+  their own pool so they never block the writer. The files are 0600. New
+  admin-only `GET /api/v1/alerts` (filters, cursor paging),
+  `/api/v1/alerts/summary` (`group_by=` up to three of kind/category/country/
+  asn/ip/vhost/reason/severity/delivery/mode/hour/day), `/api/v1/alerts/overview`
+  and `/api/v1/alerts/stats`; a cfm-admin
   **Alerts** page (category chips, filters, group-by with click-to-drill,
   sample lines); and node MCP tools `alerts` and `alerts_summary`. The
   notifier's `notify.log.jsonl` stays the per-channel delivery journal. See

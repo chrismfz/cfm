@@ -10,7 +10,9 @@
   };
   const REFRESH_MS = 15000;
 
-  const state = { category: '', cursor: '', rows: [], timer: null, loading: false };
+  // range: a from/to window set by drilling into an hour/day group (overrides
+  // the hours select); mode: a ban-mode filter set the same way.
+  const state = { category: '', range: null, mode: '', cursor: '', rows: [], timer: null, loading: false, pending: false };
   const byId = (id) => document.getElementById(id);
 
   function request(path) {
@@ -38,6 +40,8 @@
       if (v) f[key] = v;
     }
     if (state.category) f.category = state.category;
+    if (state.range) { f.from = String(state.range.from); f.to = String(state.range.to); }
+    if (state.mode) f.mode = state.mode;
     const g1 = byId('alertsGroup1').value;
     const g2 = byId('alertsGroup2').value;
     if (g1) f.group_by = g2 && g2 !== g1 ? `${g1},${g2}` : g1;
@@ -49,6 +53,9 @@
       byId(id).value = f[key] || (key === 'hours' ? '24' : '');
     }
     state.category = f.category || '';
+    const from = Number(f.from); const to = Number(f.to);
+    state.range = from > 0 && to > from ? { from, to } : null;
+    state.mode = f.mode || '';
     const [g1 = '', g2 = ''] = String(f.group_by || '').split(',');
     byId('alertsGroup1').value = g1;
     byId('alertsGroup2').value = g2;
@@ -107,7 +114,8 @@
   }
 
   function deliveryPill(d) {
-    const cls = d === 'notified' ? 'pill ok' : (d === 'deduped' || d === 'muted' || d === 'below_severity') ? 'pill' : 'pill warn';
+    const cls = d === 'notified' ? 'pill ok' : d === 'send_failed' ? 'pill danger'
+      : (d === 'deduped' || d === 'muted' || d === 'below_severity') ? 'pill' : 'pill warn';
     return el('span', d || '—', cls);
   }
 
@@ -129,40 +137,48 @@
     }
   }
 
-  async function loadCategoryChips(f) {
-    const base = { ...f };
-    delete base.category;
-    const sum = await request(`${API}/summary?${queryString(base, { group_by: 'category', top: '50' })}`);
+  // One request for the header: tallies, top kind/country and the chip counts
+  // (counted without the category filter, so every chip keeps its number).
+  async function loadOverview(f) {
+    const ov = await request(`${API}/overview?${queryString(f)}`);
     const row = byId('alertsCategoryChips');
     row.replaceChildren();
-    const all = el('button', `All · ${fmtNum(sum.total)}`, `chip${state.category ? '' : ' on'}`);
-    all.type = 'button';
-    all.addEventListener('click', () => { state.category = ''; refresh(); });
-    row.appendChild(all);
-    for (const g of sum.groups || []) {
+    let all = 0;
+    for (const g of ov.categories || []) all += g.count;
+    const allChip = el('button', `All · ${fmtNum(all)}`, `chip${state.category ? '' : ' on'}`);
+    allChip.type = 'button';
+    allChip.addEventListener('click', () => { state.category = ''; refresh(); });
+    row.appendChild(allChip);
+    for (const g of ov.categories || []) {
       const cat = g.key.category || 'OTHER';
       const chip = el('button', `${cat} · ${fmtNum(g.count)}`, `chip${state.category === cat ? ' on' : ''}`);
       chip.type = 'button';
       chip.addEventListener('click', () => { state.category = state.category === cat ? '' : cat; refresh(); });
       row.appendChild(chip);
     }
+    byId('alertsTotal').textContent = fmtNum(ov.total);
+    byId('alertsDistinctIPs').textContent = fmtNum(ov.distinct_ips);
+    const k = ov.top_kind;
+    byId('alertsTopKind').textContent = k ? `${k.key.kind || '—'} (${fmtNum(k.count)})` : '—';
+    const c = ov.top_country;
+    byId('alertsTopCountry').textContent = c ? `${c.key.country || '??'} ${c.label ? `· ${c.label}` : ''} (${fmtNum(c.count)})` : '—';
+    byId('alertsNotMailed').textContent = fmtNum(ov.not_notified);
   }
 
-  async function loadHeadline(f) {
-    const [kinds, countries, deliveries] = await Promise.all([
-      request(`${API}/summary?${queryString(f, { group_by: 'kind', top: '1' })}`),
-      request(`${API}/summary?${queryString(f, { group_by: 'country', top: '1' })}`),
-      request(`${API}/summary?${queryString(f, { group_by: 'delivery', top: '20' })}`),
-    ]);
-    byId('alertsTotal').textContent = fmtNum(kinds.total);
-    byId('alertsDistinctIPs').textContent = fmtNum(kinds.distinct_ips);
-    const k = (kinds.groups || [])[0];
-    byId('alertsTopKind').textContent = k ? `${k.key.kind || '—'} (${fmtNum(k.count)})` : '—';
-    const c = (countries.groups || [])[0];
-    byId('alertsTopCountry').textContent = c ? `${c.key.country || '??'} ${c.label ? `· ${c.label}` : ''} (${fmtNum(c.count)})` : '—';
-    let notMailed = 0;
-    for (const g of deliveries.groups || []) if (g.key.delivery !== 'notified') notMailed += g.count;
-    byId('alertsNotMailed').textContent = fmtNum(notMailed);
+  // Chips for the filters that have no input of their own (a drilled-into
+  // time bucket, a ban mode); clicking one clears it.
+  function renderActiveExtra() {
+    const row = byId('alertsActiveExtra');
+    row.replaceChildren();
+    const add = (text, clear) => {
+      const chip = el('button', `${text} ×`, 'chip on');
+      chip.type = 'button';
+      chip.addEventListener('click', () => { clear(); refresh(); });
+      row.appendChild(chip);
+    };
+    if (state.range) add(`${fmtTime(state.range.from)} – ${fmtTime(state.range.to)}`, () => { state.range = null; });
+    if (state.mode) add(`mode: ${state.mode}`, () => { state.mode = ''; });
+    row.style.display = row.childElementCount ? '' : 'none';
   }
 
   async function loadGroups(f) {
@@ -207,7 +223,11 @@
     const map = { kind: 'alertsKind', ip: 'alertsIP', country: 'alertsCountry', asn: 'alertsASN', vhost: 'alertsVhost', delivery: 'alertsDelivery' };
     for (const d of dims) {
       const v = key[d];
-      if (d === 'category') state.category = v;
+      if (d === 'hour' || d === 'day') {
+        const from = Math.floor(Date.parse(d === 'day' ? `${v}T00:00:00Z` : v) / 1000);
+        if (from > 0) state.range = { from, to: from + (d === 'day' ? 86400 : 3600) };
+      } else if (d === 'mode') state.mode = v;
+      else if (d === 'category') state.category = v;
       else if (d === 'severity') byId('alertsSeverity').value = v === 'critical' ? 'critical' : v === 'warning' ? 'warning' : '';
       else if (d === 'reason') byId('alertsQuery').value = v;
       else if (map[d] && v && v !== '0') byId(map[d]).value = v;
@@ -293,14 +313,21 @@
   }
 
   // ── orchestration ────────────────────────────────────────────────────────
+  // A refresh asked for while one is loading runs right after it, with the
+  // filters as they are then — dropping it left the table showing data for the
+  // previous filters under the new selection.
   async function refresh({ append = false } = {}) {
-    if (state.loading) return;
+    if (state.loading) {
+      if (!append) state.pending = true;
+      return;
+    }
     state.loading = true;
     const f = readFilters();
     filtersToHash(f);
+    renderActiveExtra();
     try {
       if (!append) {
-        await Promise.all([loadStats(), loadCategoryChips(f), loadHeadline(f)]);
+        await Promise.all([loadStats(), loadOverview(f)]);
       }
       const grouped = Boolean(f.group_by);
       byId('alertsGroupsWrap').style.display = grouped ? '' : 'none';
@@ -316,6 +343,10 @@
       showStatus(e.message || String(e), false);
     } finally {
       state.loading = false;
+      if (state.pending) {
+        state.pending = false;
+        refresh();
+      }
     }
   }
 
@@ -332,7 +363,9 @@
     byId('alertsMoreBtn').addEventListener('click', () => refresh({ append: true }));
     byId('alertsDetailClose').addEventListener('click', () => { byId('alertsDetail').style.display = 'none'; });
     byId('alertsAutoRefresh').addEventListener('change', (e) => setAutoRefresh(e.target.checked));
-    for (const id of ['alertsHours', 'alertsSeverity', 'alertsDelivery', 'alertsGroup1', 'alertsGroup2']) {
+    // picking a window replaces a drilled-into time bucket
+    byId('alertsHours').addEventListener('change', () => { state.range = null; refresh(); });
+    for (const id of ['alertsSeverity', 'alertsDelivery', 'alertsGroup1', 'alertsGroup2']) {
       byId(id).addEventListener('change', () => refresh());
     }
     for (const id of ['alertsKind', 'alertsIP', 'alertsCountry', 'alertsASN', 'alertsVhost', 'alertsQuery']) {

@@ -35,10 +35,13 @@ func recordAlert(ev Event, delivery, eventID string) {
 		r.TsUnix = 0 // the store stamps it
 	}
 	// The display country ("Athens, Greece") is for humans; filtering and
-	// grouping need the ISO code. mmdb only, no DNS.
-	if ev.SrcIP != "" {
+	// grouping need the ISO code. Enqueue's lookup usually set it; otherwise
+	// (callers that enrich themselves, or call Emit directly) the enricher's
+	// cache has the IP from that lookup, and a miss costs one mmdb read, no DNS.
+	r.CountryISO = ev.CountryISO
+	if r.CountryISO == "" && ev.SrcIP != "" {
 		if enr := enricher; enr != nil {
-			res := enr.LookupGeoFast(ev.SrcIP)
+			res := enr.LookupCachedOrAsync(ev.SrcIP)
 			r.CountryISO = res.CountryISO
 			if r.ASN == "" && res.ASN > 0 {
 				r.ASN = fmt.Sprintf("AS%d %s", res.ASN, res.ASNName)

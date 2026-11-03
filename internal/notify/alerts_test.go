@@ -9,12 +9,17 @@ import (
 	"cfm/internal/alerts"
 )
 
+// recordingChannel accepts every event except WAF/SQLI, which it fails like a
+// broken SMTP server would.
 type recordingChannel struct{ sent int }
 
 func (c *recordingChannel) Name() string { return "rec" }
-func (c *recordingChannel) Send(Event, string, string) error {
+func (c *recordingChannel) Send(ev Event, _ string, _ string) error {
 	c.sent++
-	return errors.New("smtp down")
+	if ev.Kind == "WAF/SQLI" {
+		return errors.New("smtp down")
+	}
+	return nil
 }
 
 // installTestConfig swaps the package notifier state for one test.
@@ -58,6 +63,7 @@ func TestEmitRecordsEveryOutcome(t *testing.T) {
 		Detectors: map[string]detectorOverride{
 			"mysql/governor": {Notify: false},
 			"clam/down":      {Notify: true, MinSeverity: "critical"},
+			"clam/up":        {Notify: true, MinSeverity: "info"},
 			"ssh/authfail":   {Notify: true, Channels: []string{"nonexistent"}},
 		},
 	})
@@ -71,6 +77,11 @@ func TestEmitRecordsEveryOutcome(t *testing.T) {
 	_ = Emit(Event{Kind: "MYSQL/GOVERNOR", Reason: "long query"})
 	_ = Emit(Event{Kind: "CLAM/DOWN", Reason: "clamd unreachable", Severity: "warning"})
 	_ = Emit(Event{Kind: "SSH/AUTHFAIL", SrcIP: "198.51.100.4", Reason: "authfail"})
+	if err := Emit(Event{Kind: "WEB/MALPATH", SrcIP: "34.156.121.46", Reason: "WEB/MALPATH"}); err != nil {
+		t.Fatal(err)
+	}
+	// no severity at all ranks as info, so a min_severity=info override still sends it
+	_ = Emit(Event{Kind: "CLAM/UP", Reason: "clamd recovered"})
 
 	installTestConfig(t, &config{Enabled: false})
 	_ = Emit(Event{Kind: "PORTSCAN", SrcIP: "203.0.113.5", Reason: "portscan 8 ports"})
@@ -85,7 +96,9 @@ func TestEmitRecordsEveryOutcome(t *testing.T) {
 		got[r.Kind] = append(got[r.Kind], r.Delivery)
 	}
 	want := map[string][]string{
-		"WAF/SQLI":       {alerts.DeliveryDeduped, alerts.DeliveryNotified},
+		"WAF/SQLI":       {alerts.DeliveryDeduped, alerts.DeliverySendFailed},
+		"WEB/MALPATH":    {alerts.DeliveryNotified},
+		"CLAM/UP":        {alerts.DeliveryNotified},
 		"MYSQL/GOVERNOR": {alerts.DeliveryMuted},
 		"CLAM/DOWN":      {alerts.DeliveryBelowSeverity},
 		"SSH/AUTHFAIL":   {alerts.DeliveryNoChannels},
@@ -106,11 +119,11 @@ func TestEmitRecordsEveryOutcome(t *testing.T) {
 			}
 		}
 	}
-	if ch.sent != 1 {
-		t.Fatalf("channel sent %d times, want 1", ch.sent)
+	if ch.sent != 3 {
+		t.Fatalf("channel sent %d times, want 3", ch.sent)
 	}
 
-	waf, _ := s.List(alerts.Filter{Kinds: []string{"WAF/SQLI"}, Deliveries: []string{alerts.DeliveryNotified}}, 1)
+	waf, _ := s.List(alerts.Filter{Kinds: []string{"WAF/SQLI"}, Deliveries: []string{alerts.DeliverySendFailed}}, 1)
 	r := waf.Rows[0]
 	if r.Host != "orion.example" || r.IP != "31.217.169.106" || r.TTLSec != 900 || r.Mode != "ttl" ||
 		r.Vhost != "shop.example.gr" || r.EventID == "" || r.Severity != "warning" {

@@ -23,7 +23,8 @@ notifier did with it:
 
 | `delivery` | meaning |
 |---|---|
-| `notified` | handed to at least one channel (`event_id` = the delivery journal's `correlation_id`) |
+| `notified` | at least one channel accepted it (`event_id` = the delivery journal's `correlation_id`) |
+| `send_failed` | every channel it went to returned an error (broken SMTP/sendmail, bad webhook); recorded after the attempts |
 | `deduped` | same dedupe key inside its cooldown |
 | `muted` | the detector's override has `notify = false` |
 | `below_severity` | below the detector override's `min_severity` |
@@ -46,15 +47,20 @@ sample lines (2 KB each) and the detector's extra fields (JSON).
 
 ## Storage
 
-- `/var/lib/cfm/alerts.db` (SQLite, WAL, mode 0600), `alerts.DefaultPath`.
+- `/var/lib/cfm/alerts.db` (SQLite, WAL), `alerts.DefaultPath`. Created 0600
+  before SQLite opens it, so the `-wal`/`-shm` files (which SQLite gives the
+  database file's mode) are 0600 too, whatever the umask.
 - Retention: 30 days and 500,000 rows, whichever comes first; pruned every 10
   minutes. Not configurable yet.
 - Writes go through a buffered queue (8192) to one writer goroutine that
   inserts in batches of up to 256 every 500 ms. A detector never waits on it: a
   full queue drops the row and counts it (`dropped_since_start` in stats).
+- Reads (API, MCP, the page) use a separate small read-only pool: in WAL mode
+  they never block the writer, so a slow 30-day query can't fill the queue.
 - Opened by `alerts.Init()` in `cmd/cfm/main.go`, before `notify.Init`. If it
   fails to open, `cfm.log` says `[alerts] init error` and recording is off; the
-  notifier is unaffected.
+  notifier is unaffected. `alerts.Shutdown()` (deferred in `runDaemon`) writes
+  what is still queued on exit.
 - Tests: `alerts.SetPathForTest`; nothing opens the default store unless
   `Init` runs, and `notify` records nothing without one.
 
@@ -74,11 +80,15 @@ All admin-only (`adminOnlyHandler`; the store holds every tenant's events).
   Per group: `key`, `count`, `distinct_ips`, `first_unix`, `last_unix`, and a
   `label` (the ASN or country name). Sorted by count; hour/day buckets in time
   order.
+- `GET /api/v1/alerts/overview` — the same filters; the page header in one
+  read: `total`, `distinct_ips`, `not_notified`, `top_kind`, `top_country`, and
+  `categories` (counted without the category filter, for the chips).
 - `GET /api/v1/alerts/stats` — rows, size, oldest/newest, limits, writer
   counters.
 - cfm-admin → **Alerts** (`/cfm-admin/alerts/`): category chips with counts,
   filters (kept in the URL hash, so a view can be linked), headline tiles,
-  group-by with click-to-drill, and per-row detail with the sample lines.
+  group-by with click-to-drill (an hour/day group narrows the view to that
+  bucket), and per-row detail with the sample lines.
 - MCP: `alerts` and `alerts_summary` (MCP.md §4).
 
 Example — "did we block many legit Greek users this week, and why?":
