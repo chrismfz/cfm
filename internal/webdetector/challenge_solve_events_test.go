@@ -1,8 +1,96 @@
 package webdetector
 
 import (
+	"reflect"
+	"strconv"
+	"strings"
 	"testing"
+
+	core "cfm/internal/detectors/core"
+	"cfm/internal/detectors/solverfarm"
 )
+
+// Humanity rides the event only behind the HumanityScored gate (as on the
+// solve line): an unscored solve carries nil, never a fabricated hs 0, and a
+// scored hs 0 stays a real reading. CountryISO is carried as resolved.
+func TestChallengeSolveInputEventHumanityGate(t *testing.T) {
+	cases := []struct {
+		name string
+		in   ChallengeSolve
+		want *core.Humanity
+	}{
+		{"unscored solve carries nil", ChallengeSolve{IP: "203.0.113.9", Host: "h"}, nil},
+		{"unscored ignores stray fields", ChallengeSolve{IP: "203.0.113.9", Host: "h", HumanityScore: 140, HumanityTells: "webdriver", HumanityNoPayload: true}, nil},
+		{"scored clean is a real 0", ChallengeSolve{IP: "203.0.113.9", Host: "h", HumanityScored: true}, &core.Humanity{}},
+		{"scored with tells", ChallengeSolve{IP: "203.0.113.9", Host: "h", HumanityScored: true, HumanityScore: 120, HumanityTells: "sw_renderer,no_input"},
+			&core.Humanity{Score: 120, Tells: "sw_renderer,no_input"}},
+		{"no payload", ChallengeSolve{IP: "203.0.113.9", Host: "h", HumanityScored: true, HumanityNoPayload: true},
+			&core.Humanity{NoPayload: true}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.in.InputEvent().Humanity
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("Humanity = %+v, want %+v", got, c.want)
+			}
+		})
+	}
+	if ev := (ChallengeSolve{IP: "203.0.113.9", Host: "h", CountryISO: "GR"}).InputEvent(); ev.CountryISO != "GR" {
+		t.Errorf("CountryISO = %q, want GR", ev.CountryISO)
+	}
+}
+
+// The solver-farm hs bucket of a solve (ChallengeSolve → InputEvent →
+// solverfarm.BucketName) agrees with what its solve line renders
+// (HumanitySuffix): hs=- is "none", no hs= is "unscored", and hs=N lands in
+// N's bucket — including a no-payload solve a UA-borne opener scored.
+func TestSolverFarmBucketAgreesWithHumanitySuffix(t *testing.T) {
+	bucketOfLine := func(suffix string) string {
+		i := strings.Index(suffix, " hs=")
+		if i < 0 {
+			return "unscored"
+		}
+		v := suffix[i+len(" hs="):]
+		if j := strings.IndexByte(v, ' '); j >= 0 {
+			v = v[:j]
+		}
+		if v == "-" {
+			return "none"
+		}
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			t.Fatalf("unparseable hs in %q", suffix)
+		}
+		switch {
+		case n <= 0:
+			return "0"
+		case n < 60:
+			return "1-59"
+		case n < 100:
+			return "60-99"
+		default:
+			return "100+"
+		}
+	}
+	for _, s := range []ChallengeSolve{
+		{},
+		{HumanityNoPayload: true, HumanityScore: 50}, // unscored: stray fields
+		{HumanityScored: true},
+		{HumanityScored: true, HumanityNoPayload: true},
+		{HumanityScored: true, HumanityNoPayload: true, HumanityTells: "x"},
+		{HumanityScored: true, HumanityNoPayload: true, HumanityScore: 50, HumanityTells: "ua_lie"},
+		{HumanityScored: true, HumanityNoPayload: true, HumanityScore: 100, HumanityTells: "webdriver"},
+		{HumanityScored: true, HumanityScore: 59, HumanityTells: "a"},
+		{HumanityScored: true, HumanityScore: 60, HumanityTells: "a"},
+		{HumanityScored: true, HumanityScore: 140, HumanityTells: "a,b"},
+	} {
+		s.IP, s.Host = "203.0.113.9", "h"
+		line := s.HumanitySuffix()
+		if got, want := solverfarm.BucketName(s.InputEvent().Humanity), bucketOfLine(line); got != want {
+			t.Errorf("%+v: bucket %q, solve line %q reads as %q", s, got, line, want)
+		}
+	}
+}
 
 func withCleanSolveSubs(t *testing.T) {
 	t.Helper()

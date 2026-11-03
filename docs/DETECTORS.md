@@ -446,6 +446,51 @@ self-contradictory User-Agent (see below). It is corroboration for the operator
 reading the alert, never part of the threshold: a farm can send a well-formed UA
 whenever it chooses.
 
+#### Humanity context (since 2026-11-03)
+
+A fingerprint is a population, not one client: a farm and a real audience can
+share one coarse TLS bucket (read 5: half of `c28caa00`'s 12 323 solves on
+www.e-vafeiadis.gr were a Greek audience at `hs` 0, half farm-shaped from
+abroad). So every finding also carries the ChallengeV2 Rung-1 humanity
+distribution and the country split of the **passed solves** of the cluster it
+is about:
+
+- **hs buckets** — `none` (the solve line's `hs=-`: no payload and a zero
+  score), `unscored` (the rung was off: never counted as 0), `0`, `1-59`,
+  `60-99`, `100+`;
+- the **top 5 exact `tells` strings** and the **top 5 countries** (as counts),
+  by count then key (deterministic);
+- `n`, the solves the summary covers, and `truncated` when the evidence cap
+  (`MAX_TRACKED_PER_HOST`, or the cross-host buffer's cap) dropped a solve
+  inside the window — the counts are then of a sample.
+
+**Passed solves only.** The detector is fed from the solve event, and a Rung-1
+reject returns before that event is published, so under a `challenge_v2` arm
+the failing population never reaches it: a summary of an armed fingerprint
+shows who got through, not who tried. The rejected side is
+`detection_history type=challenge_v2_reject`.
+
+The cluster follows the finding's fingerprint and is always on the finding's
+vhost: for `cross_host` (including a combined finding with it) the cross-host
+fingerprint's solves on this vhost over the cross-host window (the row's own
+`solves` / `distinct_*` are node-wide on such a finding, so `n` need not match
+them); for `fp_concentration` the per-host fingerprint's solves over `WINDOW`;
+for `subnet_spread` alone, every solve on the vhost over `WINDOW`. The country
+is the one the challenge server resolved at verify; one missing is looked up
+only when the summary is built (once per address, for a firing cluster only).
+
+It appears as a `[challenge] humanity of passed solves …` line in the alert
+(after the UA lines, so the Alerts page, which keeps 5 sample lines per alert
+in `alerts.db`, usually cuts it: read it in the mail, the detector log or the
+history row), as `Finding.Humanity`, and as `payload.humanity` on the
+`detection_history` `solver_farm` row (`cluster`, `fingerprint`, `window`, `n`,
+`truncated`, `hs`, `tells`, `countries`). That key is admin-only: it is
+stripped for scoped (cPanel) callers like `ips`, as defence in depth
+(`docs/endpoint_scope_inventory.md`). It is
+**evidence only** — it is folded from the capped evidence records after every
+decision, and no track, threshold or mark reads it. `challenge_cookie_discard`
+does not carry it yet.
+
 ### `challenge_cookie_discard` — why it exists
 
 The mirror image of `challenge_solver_farm`, and its exact blind spot.

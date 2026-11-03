@@ -539,6 +539,24 @@ WAF fire constantly (you aggregate on the node and publish the rollup; you never
 stream the raw firehose to cfm-web). Same PULL-cursor mechanism as `solver_farm`,
 just a richer payload with more `source`s.
 
+**`solver_farm` findings carry the cluster's humanity (2026-11-03, master plan
+§5 candidate 3).** Because a fingerprint is a population, each finding also
+carries the ChallengeV2 Rung-1 distribution of the PASSED solves of the cluster
+it convicted: hs buckets (`none` / `unscored` / `0` / `1-59` / `60-99` /
+`100+`), the top-5 exact `tells` strings and the top-5 countries, with `n` and a
+`truncated` flag. The cluster is the convicted fingerprint's solves on the
+finding's vhost (cross-host over its window, fp-concentration over `WINDOW`), or
+every solve on the vhost for a subnet-spread-only finding. A Rung-1 reject never
+reaches the detector (it returns before the solve event is published), so under
+a `challenge_v2` arm the summary shows who got through; the rejected side is
+`detection_history type=challenge_v2_reject`. It rides the alert text, `solverfarm.Finding`
+and the `detection_history` row as `payload.humanity` (admin-only, stripped for
+scoped callers). It is evidence for the operator deciding on a fingerprint
+policy (read 5: half of `c28caa00` on www.e-vafeiadis.gr was a Greek audience at
+hs 0), never a gate: it is folded from the capped evidence records after every
+decision. `cookie_discard` does not carry it yet. Details: `docs/DETECTORS.md`
+"Humanity context".
+
 **Caveat (unchanged):** the ledger makes guilt easier to SEE and DECIDE; it does
 not change the ENFORCEMENT safety rules. A fingerprint is still a population, so
 the uniqueness gate (§ "Two axes, two actions") still governs whether a verdict

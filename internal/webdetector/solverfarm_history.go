@@ -40,6 +40,7 @@ func newSolverFarmGoodBot() *bridgeGoodBotState {
 // finding), never a matched signature; `solves_per_ip` is evidence, not a gate.
 // `ips` is the bounded address sample; `good_bots` is the sparse {ip: name} subset
 // of those addresses that are FCrDNS-verified crawlers (a per-IP block exemption).
+// `humanity` is the flagged cluster's Rung-1 humanity distribution (evidence).
 func (e *Engine) RecordSolverFarmFinding(f solverfarm.Finding) {
 	if e == nil || e.history == nil {
 		return
@@ -76,6 +77,14 @@ func (e *Engine) RecordSolverFarmFinding(f solverfarm.Finding) {
 			payload["good_bots"] = gb
 		}
 	}
+	// The ChallengeV2 Rung-1 humanity distribution and country split of the
+	// PASSED solves of the cluster the finding is about (humanityPayload).
+	// Evidence only — it decided nothing — and admin-only:
+	// redactScopedHistoryRows strips it for scoped callers. Omitted when no
+	// evidence record covered the cluster.
+	if hp := humanityPayload(f.Humanity); hp != nil {
+		payload["humanity"] = hp
+	}
 	e.appendHistory(HistoryEvent{
 		TsUnix:  ts.Unix(),
 		Type:    "solver_farm",
@@ -84,6 +93,46 @@ func (e *Engine) RecordSolverFarmFinding(f solverfarm.Finding) {
 		UniqIP:  f.DistinctIPs,
 		Payload: payload,
 	})
+}
+
+// humanityPayload renders a finding's humanity summary as the solver_farm
+// row's `humanity` object, part of the same row contract as the keys above:
+// cluster (cross_host / fp_concentration / subnet_spread), fingerprint
+// (omitted when empty), window, n, truncated, hs {bucket: count, all six of
+// none / unscored / 0 / 1-59 / 60-99 / 100+}, tells [{tells, n}] and
+// countries [{cc, n}]. It describes the PASSED solves of the cluster on the
+// row's vhost only — a Rung-1 reject is never published to the detector
+// (detection_history type=challenge_v2_reject holds those) — while the row's
+// solves / distinct_* are node-wide on a cross_host finding. nil when s is.
+func humanityPayload(s *solverfarm.HumanitySummary) map[string]interface{} {
+	if s == nil {
+		return nil
+	}
+	hs := make(map[string]interface{}, len(s.Buckets))
+	for k, v := range s.Buckets {
+		hs[k] = v
+	}
+	tells := make([]map[string]interface{}, 0, len(s.Tells))
+	for _, t := range s.Tells {
+		tells = append(tells, map[string]interface{}{"tells": t.Key, "n": t.N})
+	}
+	ccs := make([]map[string]interface{}, 0, len(s.Countries))
+	for _, c := range s.Countries {
+		ccs = append(ccs, map[string]interface{}{"cc": c.Key, "n": c.N})
+	}
+	p := map[string]interface{}{
+		"cluster":   s.Cluster,
+		"window":    s.Window.String(),
+		"n":         s.N,
+		"truncated": s.Truncated,
+		"hs":        hs,
+		"tells":     tells,
+		"countries": ccs,
+	}
+	if s.Fingerprint != "" {
+		p["fingerprint"] = s.Fingerprint
+	}
+	return p
 }
 
 // maxFindingFileConfirm bounds the operator-file forward-confirm DNS spent on a
