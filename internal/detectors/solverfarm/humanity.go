@@ -11,7 +11,8 @@ import (
 
 // Humanity context on a finding (abuse-defense master plan §5 candidate 3,
 // docs/roadmaps/challenge-engine.md §8.3 leg 1): the ChallengeV2 Rung-1
-// humanity distribution and country split of the cluster a finding is about.
+// humanity distribution and country split of the PASSED solves of the cluster
+// a finding is about.
 //
 // EVIDENCE ONLY. Nothing here is read by a threshold, a track or a mark: the
 // readings ride the evidence records (solveRec, xhRec) under the caps those
@@ -20,14 +21,19 @@ import (
 // real visitors (read 5: half of www.e-vafeiadis.gr's c28caa00 solves were a
 // Greek audience at hs 0); this lets the operator see that on the alert
 // instead of acting on the fingerprint blind.
+//
+// PASSED SOLVES ONLY. The detector is fed from the solve event stream, and a
+// Rung-1 reject returns before that event is published, so under a
+// challenge_v2 arm the failing population never reaches it. The rejected side
+// is detection_history type=challenge_v2_reject.
 
 // hsBucket is a solve's humanity bucket. The zero value is hsUnscored, so a
 // record built without a reading can never claim a score.
 type hsBucket uint8
 
 const (
-	hsUnscored hsBucket = iota // no reading: the rung was off, or not a scored solve
-	hsNone                     // scored, but the verify carried no payload (hs=-)
+	hsUnscored hsBucket = iota // no reading: the rung was off
+	hsNone                     // scored, no report: the solve line's hs=-
 	hs0                        // scored clean
 	hs1to59
 	hs60to99
@@ -36,7 +42,7 @@ const (
 )
 
 // hsBucketNames are the bucket keys of HumanitySummary.Buckets and of the
-// history payload's humanity.hs object, in display order.
+// history payload's humanity.hs object.
 var hsBucketNames = [hsBucketCount]string{
 	hsUnscored: "unscored",
 	hsNone:     "none",
@@ -53,17 +59,20 @@ var hsBucketOrder = [hsBucketCount]hsBucket{hsNone, hsUnscored, hs0, hs1to59, hs
 // humanityTopN is how many tells strings and countries a summary lists.
 const humanityTopN = 5
 
-// bucketOf maps an event's reading to its bucket. A nil reading (or one that
-// says it was not scored) is unscored, never 0. hs=- mirrors the solve line
-// (HumanitySuffix): a no-payload solve renders hs=- only while its score is 0
-// — a UA-borne opener can still score one, and the line then shows that
-// score, so the bucket does too.
+// maxInternedTells bounds the tells-string intern table. The scorer has a
+// handful of tells, so the distinct comma-joined combinations seen in
+// practice are far below this; past it a record keeps its own string.
+const maxInternedTells = 512
+
+// bucketOf maps an event's reading to its bucket. nil is the only unscored
+// (never 0). hs=- is core.Humanity.NoReport, the same predicate the solve
+// line renders with, so a no-payload solve that a UA-borne opener scored is
+// bucketed by its score, as the line shows it.
 func bucketOf(h *core.Humanity) hsBucket {
-	if h == nil || !h.Scored {
-		return hsUnscored
-	}
 	switch {
-	case h.NoPayload && h.Score == 0:
+	case h == nil:
+		return hsUnscored
+	case h.NoReport():
 		return hsNone
 	case h.Score <= 0:
 		return hs0
@@ -76,37 +85,63 @@ func bucketOf(h *core.Humanity) hsBucket {
 	}
 }
 
-// tellsOf is the exact tells string a record keeps: only a scored reading has
-// one.
+// BucketName is the hs bucket name ("none", "unscored", "0", "1-59",
+// "60-99", "100+") a reading lands in — exported so the challenge server's
+// tests can pin the buckets to its solve line (HumanitySuffix).
+func BucketName(h *core.Humanity) string { return hsBucketNames[bucketOf(h)] }
+
+// tellsOf is the exact tells string a record keeps: none for an unscored or
+// no-report (hs=-) reading, which the solve line renders without tells.
 func tellsOf(h *core.Humanity) string {
-	if h == nil || !h.Scored {
+	if h == nil || h.NoReport() {
 		return ""
 	}
 	return strings.TrimSpace(h.Tells)
 }
 
-// KeyCount is one ranked entry of a humanity summary (a tells string or a
-// country) with the number of solves carrying it.
+// internTells returns a shared copy of s, so a record retains the table's
+// string rather than the per-solve allocation the event carried. Bounded at
+// maxInternedTells distinct values; past that, s itself is returned. Owned by
+// RunOnce (serial), like hosts.
+func (d *Detector) internTells(s string) string {
+	if s == "" {
+		return ""
+	}
+	if v, ok := d.tellsIntern[s]; ok {
+		return v
+	}
+	if len(d.tellsIntern) >= maxInternedTells {
+		return s
+	}
+	v := strings.Clone(s)
+	d.tellsIntern[v] = v
+	return v
+}
+
+// KeyCount is one ranked entry (a tells string, a country, a UA) with the
+// number of solves carrying it.
 type KeyCount struct {
 	Key string
 	N   int
 }
 
-// HumanitySummary is the humanity distribution of the cluster a finding is
-// about. Which cluster is named by Cluster:
+// HumanitySummary is the humanity distribution of the PASSED solves of the
+// cluster a finding is about (a Rung-1 reject never reaches this detector;
+// see detection_history type=challenge_v2_reject for those). Which cluster
+// is named by Cluster, always on the finding's vhost:
 //
 //   - "cross_host": the cross-host fingerprint's solves ON THIS VHOST over
 //     XHWindow (from the cross-host record buffer). A combined finding that
 //     includes cross_host uses this one, because the finding's Fingerprint is
-//     the cross-host fp.
-//   - "fp_concentration": the per-host fingerprint's solves on this vhost over
-//     Window.
+//     the cross-host fp. Note the finding's own solves / distinct_* are
+//     node-wide on a cross-host finding; this summary is not.
+//   - "fp_concentration": the per-host fingerprint's solves over Window.
 //   - "subnet_spread": every solve of the vhost over Window (no fingerprint
 //     convicted, so the whole vhost is the cluster).
 //
 // N is the number of solves the summary covers (the evidence records). When
-// Truncated is set, an evidence cap dropped records inside the window, so the
-// counts are of a sample and N is a lower bound on the cluster's solves.
+// Truncated is set, an evidence cap dropped a record inside the window, so
+// the counts are of a sample and N is a lower bound on the cluster's solves.
 type HumanitySummary struct {
 	Cluster     string
 	Fingerprint string
@@ -138,9 +173,7 @@ func newHumanityAcc() *humanityAcc {
 
 func (a *humanityAcc) add(b hsBucket, tells, cc string) {
 	a.n++
-	if b < hsBucketCount {
-		a.buckets[b]++
-	}
+	a.buckets[b]++
 	if tells != "" {
 		a.tells[tells]++
 	}
@@ -168,7 +201,8 @@ func (a *humanityAcc) summary(cluster, fp string, window time.Duration, truncate
 }
 
 // topKeys ranks m by count (descending) then key (ascending), so equal counts
-// come out in the same order on every pass, and keeps the first n.
+// come out in the same order on every pass, and keeps the first n (all when
+// n <= 0).
 func topKeys(m map[string]int, n int) []KeyCount {
 	if len(m) == 0 {
 		return nil
@@ -183,60 +217,25 @@ func topKeys(m map[string]int, n int) []KeyCount {
 		}
 		return out[i].Key < out[j].Key
 	})
-	if len(out) > n {
+	if n > 0 && len(out) > n {
 		out = out[:n]
 	}
 	return out
 }
 
-// Payload renders the summary as the detection_history solver_farm row's
-// `humanity` object. The keys are a contract (the abuse-defense reads and
-// cfm-web parse them): cluster, fingerprint (omitted when empty), window,
-// n, truncated, hs {bucket: count, all six keys}, tells [{tells, n}],
-// countries [{cc, n}].
-func (h *HumanitySummary) Payload() map[string]interface{} {
-	if h == nil {
-		return nil
-	}
-	hs := make(map[string]interface{}, len(h.Buckets))
-	for k, v := range h.Buckets {
-		hs[k] = v
-	}
-	tells := make([]map[string]interface{}, 0, len(h.Tells))
-	for _, t := range h.Tells {
-		tells = append(tells, map[string]interface{}{"tells": t.Key, "n": t.N})
-	}
-	ccs := make([]map[string]interface{}, 0, len(h.Countries))
-	for _, c := range h.Countries {
-		ccs = append(ccs, map[string]interface{}{"cc": c.Key, "n": c.N})
-	}
-	p := map[string]interface{}{
-		"cluster":   h.Cluster,
-		"window":    h.Window.String(),
-		"n":         h.N,
-		"truncated": h.Truncated,
-		"hs":        hs,
-		"tells":     tells,
-		"countries": ccs,
-	}
-	if h.Fingerprint != "" {
-		p["fingerprint"] = h.Fingerprint
-	}
-	return p
-}
-
 // Line renders the summary for the alert text (one Samples line), e.g.
 //
-//	[challenge] humanity of fp c28caa00 on this vhost (fp_concentration, 3m0s, n=967): hs none ×3, 0 ×812, 60-99 ×140, 100+ ×12; tells: sw_renderer,no_input ×120; countries: GR 61%, US 9%
+//	[challenge] humanity of passed solves of fp c28caa00 on this vhost (fp_concentration, 3m0s, n=967): hs none ×3, 0 ×812, 60-99 ×140, 100+ ×12; tells: "sw_renderer,no_input" ×120; countries: GR ×590, US ×88; rejects not included (detection_history type=challenge_v2_reject)
 //
-// Empty buckets are left out; shares are of n.
+// Empty buckets are left out; countries are counts (a solve with no country
+// is in n only).
 func (h *HumanitySummary) Line() string {
 	if h == nil {
 		return ""
 	}
-	subject := "all solves on this vhost"
+	subject := "passed solves on this vhost"
 	if h.Fingerprint != "" {
-		subject = "fp " + h.Fingerprint + " on this vhost"
+		subject = "passed solves of fp " + h.Fingerprint + " on this vhost"
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[challenge] humanity of %s (%s, %s, n=%d): hs", subject, h.Cluster, h.Window, h.N)
@@ -271,10 +270,11 @@ func (h *HumanitySummary) Line() string {
 		if i > 0 {
 			b.WriteString(",")
 		}
-		fmt.Fprintf(&b, " %s %d%%", c.Key, c.N*100/h.N)
+		fmt.Fprintf(&b, " %s ×%d", c.Key, c.N)
 	}
 	if h.Truncated {
 		b.WriteString(" (evidence cap hit in this window: counts are of a sample)")
 	}
+	b.WriteString("; rejects not included (detection_history type=challenge_v2_reject)")
 	return b.String()
 }

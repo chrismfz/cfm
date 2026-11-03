@@ -837,7 +837,8 @@ already opened.
    alert carries the cluster's `hs` / `tells` distribution
    (`docs/roadmaps/challenge-engine.md` §8.3 leg 1). Alert text only.
    **Shipped for `solver_farm` (2026-11-03):** every finding carries the
-   flagged cluster's hs buckets (`none` / `unscored` / `0` / `1-59` / `60-99`
+   hs buckets of the flagged cluster's PASSED solves (Rung-1 rejects never
+   reach the detector; they are `challenge_v2_reject` history rows) (`none` / `unscored` / `0` / `1-59` / `60-99`
    / `100+`), top-5 exact `tells` strings and top-5 countries, with `n` and a
    truncation flag — on the alert text, the `Finding`, and the
    `detection_history` row as `payload.humanity` (admin-only; stripped for

@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+	"unsafe"
 
 	core "cfm/internal/detectors/core"
 )
@@ -15,7 +17,7 @@ func (h *harness) solveHS(host, ip, fp, cc string, hs *core.Humanity) {
 }
 
 func scored(score int, tells string) *core.Humanity {
-	return &core.Humanity{Scored: true, Score: score, Tells: tells}
+	return &core.Humanity{Score: score, Tells: tells}
 }
 
 func captureFindings(t *testing.T) *[]Finding {
@@ -36,10 +38,8 @@ func TestHumanityBucketOf(t *testing.T) {
 		want string
 	}{
 		{"nil reading is unscored, not 0", nil, "unscored"},
-		{"not scored is unscored even with a zero score", &core.Humanity{Scored: false}, "unscored"},
-		{"not scored ignores a stray score", &core.Humanity{Scored: false, Score: 140}, "unscored"},
-		{"no payload is none", &core.Humanity{Scored: true, NoPayload: true}, "none"},
-		{"no payload but a UA opener scored it", &core.Humanity{Scored: true, NoPayload: true, Score: 80}, "60-99"},
+		{"no payload is none", &core.Humanity{NoPayload: true}, "none"},
+		{"no payload but a UA opener scored it", &core.Humanity{NoPayload: true, Score: 80}, "60-99"},
 		{"scored clean", scored(0, ""), "0"},
 		{"1", scored(1, "x"), "1-59"},
 		{"59", scored(59, "x"), "1-59"},
@@ -55,8 +55,15 @@ func TestHumanityBucketOf(t *testing.T) {
 			}
 		})
 	}
-	if tellsOf(&core.Humanity{Scored: false, Tells: "webdriver"}) != "" {
+	if tellsOf(nil) != "" {
 		t.Error("an unscored reading must carry no tells")
+	}
+	// hs=- renders no tells on the solve line, so its bucket keeps none.
+	if tellsOf(&core.Humanity{NoPayload: true, Tells: "webdriver"}) != "" {
+		t.Error("a no-report (hs=-) reading must carry no tells")
+	}
+	if tellsOf(&core.Humanity{NoPayload: true, Score: 50, Tells: "ua_lie"}) != "ua_lie" {
+		t.Error("a scored no-payload reading keeps its tells, as the line shows them")
 	}
 }
 
@@ -131,7 +138,7 @@ func TestHumanitySummaryClusterSelection(t *testing.T) {
 		for i := 0; i < 40; i++ {
 			var hs *core.Humanity // unscored: the rung was off
 			if i < 10 {
-				hs = &core.Humanity{Scored: true, NoPayload: true}
+				hs = &core.Humanity{NoPayload: true}
 			}
 			h.solveHS("shop.example.com", fmt.Sprintf("203.0.%d.1", i), "", "BR", hs)
 		}
@@ -241,13 +248,155 @@ func TestHumanityLineInAlert(t *testing.T) {
 	if len(alerts) != 1 {
 		t.Fatalf("alerts=%d", len(alerts))
 	}
-	want := `[challenge] humanity of fp c28caa00 on this vhost (fp_concentration, 3m0s, n=10): hs 0 ×8, 60-99 ×2; tells: "mobile_hw_lie" ×2; countries: GR 100%`
-	for _, s := range alerts[0].Samples {
+	want := `[challenge] humanity of passed solves of fp c28caa00 on this vhost (fp_concentration, 3m0s, n=10): hs 0 ×8, 60-99 ×2; tells: "mobile_hw_lie" ×2; countries: GR ×10; rejects not included (detection_history type=challenge_v2_reject)`
+	at, lastUA := -1, -1
+	for i, s := range alerts[0].Samples {
 		if s == want {
-			return
+			at = i
+		}
+		if strings.HasPrefix(s, "[challenge] ua=") {
+			lastUA = i
 		}
 	}
-	t.Errorf("humanity line missing; want %q in %v", want, alerts[0].Samples)
+	if at < 0 {
+		t.Fatalf("humanity line missing; want %q in %v", want, alerts[0].Samples)
+	}
+	// alerts.db keeps only the first few samples: the headline and UA lines
+	// go first, the humanity line after them.
+	if lastUA < 0 || at < lastUA {
+		t.Errorf("humanity line at %d, last UA line at %d: it must come after the UA lines", at, lastUA)
+	}
+}
+
+// Cross-host truncation: the cross-host buffer's cap refusing a record inside
+// XHWindow marks the cross_host summary a sample.
+func TestHumanityCrossHostTruncation(t *testing.T) {
+	got := captureFindings(t)
+	h := newHarness(t, xhCfg())
+	h.d.countryFn = xhCountry
+	h.d.xhCap = 30 // 6 hosts × 6 solves: the sixth host's solves are refused
+	for hi := 0; hi < 6; hi++ {
+		for s := 0; s < 6; s++ {
+			h.solveHS(fmt.Sprintf("h%d.shop", hi), fmt.Sprintf("10.%d.%d.1", hi+1, s), "95070673", "", scored(0, ""))
+		}
+	}
+	if a := h.run(t); len(a) == 0 {
+		t.Fatal("expected cross-host alerts")
+	}
+	for _, f := range *got {
+		if f.Humanity == nil || f.Humanity.Cluster != "cross_host" || !f.Humanity.Truncated {
+			t.Errorf("%s: summary = %+v, want a truncated cross_host summary", f.Host, f.Humanity)
+		}
+	}
+}
+
+// A per-host evidence-cap drop that has left the window no longer truncates
+// the summary: only a drop INSIDE the window means the counts are a sample.
+func TestHumanityOldDropDoesNotTruncate(t *testing.T) {
+	got := captureFindings(t)
+	h := newHarness(t, Config{MaxTrackedPerHost: 50, Cooldown: time.Second})
+	h.farmBurst("shop.example.com", 200, func(int) string { return chromeUA })
+	h.run(t)
+	if len(*got) != 1 || !(*got)[0].Humanity.Truncated {
+		t.Fatalf("first pass: want one truncated summary, got %+v", *got)
+	}
+	h.clock = h.clock.Add(h.d.cfg.Window + time.Second)
+	h.farmBurst("shop.example.com", 40, func(int) string { return chromeUA })
+	h.run(t)
+	if len(*got) != 2 {
+		t.Fatalf("findings=%d, want 2", len(*got))
+	}
+	if hum := (*got)[1].Humanity; hum == nil || hum.Truncated || hum.N != 40 {
+		t.Errorf("second pass summary = %+v, want n=40 and not truncated (the drop left the window)", hum)
+	}
+}
+
+// A cross_host finding on a vhost whose per-host Window state was pruned
+// (a thin farm with no solve in the last Window) still gets its humanity,
+// from the cross-host records over XHWindow.
+func TestHumanityCrossHostAfterPerHostPrune(t *testing.T) {
+	got := captureFindings(t)
+	cfg := xhCfg()
+	cfg.Cooldown = time.Second
+	h := newHarness(t, cfg)
+	h.d.countryFn = xhCountry
+	for hi := 0; hi < 6; hi++ {
+		for s := 0; s < 6; s++ {
+			h.solveHS(fmt.Sprintf("h%d.shop", hi), fmt.Sprintf("10.%d.%d.1", hi+1, s), "95070673", "", scored(120, "webdriver"))
+		}
+	}
+	h.run(t)
+	first := len(*got)
+	h.clock = h.clock.Add(h.d.cfg.Window + 10*time.Second) // past Window, inside XHWindow
+	if a := h.run(t); len(a) == 0 {
+		t.Fatal("expected cross-host-only alerts on the second pass")
+	}
+	for _, f := range (*got)[first:] {
+		if st := h.d.hosts[f.Host]; st != nil && len(st.recs) != 0 {
+			t.Fatalf("%s: per-host records still present; the test needs them pruned", f.Host)
+		}
+		hum := f.Humanity
+		if hum == nil || hum.Cluster != "cross_host" || hum.N != 6 || hum.Buckets["100+"] != 6 {
+			t.Errorf("%s: summary = %+v, want cross_host n=6 all 100+ from the cross-host records", f.Host, hum)
+		}
+	}
+}
+
+// Country is resolved lazily: never per solve at ingest, only for the
+// records of a firing cluster that carried none, once per address.
+func TestHumanityCountryIsLazy(t *testing.T) {
+	calls := 0
+	countFn := func(ip string) string { calls++; return "BR" }
+
+	// Below threshold, no fingerprint: no lookup at all.
+	h := newHarness(t, Config{})
+	h.d.countryFn = countFn
+	for i := 0; i < 10; i++ {
+		h.solveHS("quiet.example", fmt.Sprintf("203.0.%d.1", i), "", "", nil)
+	}
+	h.run(t)
+	if calls != 0 {
+		t.Errorf("countryFn called %d times for a cluster that never fired", calls)
+	}
+
+	// Firing subnet_spread: one lookup per address lacking a country; the
+	// event's own country is used as is.
+	got := captureFindings(t)
+	h2 := newHarness(t, Config{})
+	h2.d.countryFn = countFn
+	for i := 0; i < 40; i++ {
+		cc := ""
+		if i < 10 {
+			cc = "GR"
+		}
+		h2.solveHS("busy.example", fmt.Sprintf("203.0.%d.1", i), "", cc, nil)
+	}
+	h2.solveHS("busy.example", "203.0.39.1", "", "", nil) // repeat address: memoised
+	h2.run(t)
+	if calls != 30 {
+		t.Errorf("countryFn called %d times, want 30 (one per address without a country)", calls)
+	}
+	want := []KeyCount{{"BR", 31}, {"GR", 10}}
+	if hum := (*got)[0].Humanity; hum == nil || !reflect.DeepEqual(hum.Countries, want) {
+		t.Errorf("countries = %+v, want %v", hum, want)
+	}
+}
+
+// The tells strings are interned: records share one copy, bounded.
+func TestHumanityTellsInterned(t *testing.T) {
+	d := New(Config{})
+	a := d.internTells(strings.Repeat("x", 1) + "webdriver")
+	b := d.internTells(strings.Repeat("x", 1) + "webdriver")
+	if unsafe.StringData(a) != unsafe.StringData(b) {
+		t.Error("equal tells strings must share one interned copy")
+	}
+	for i := 0; len(d.tellsIntern) < maxInternedTells; i++ {
+		d.internTells(fmt.Sprintf("t%d", i))
+	}
+	raw := fmt.Sprintf("overflow-%d", 1)
+	if got := d.internTells(raw); got != raw || len(d.tellsIntern) != maxInternedTells {
+		t.Errorf("past the bound the raw string is returned and the table stops growing (len=%d)", len(d.tellsIntern))
+	}
 }
 
 // Evidence only: the same traffic with and without humanity readings yields

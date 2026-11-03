@@ -170,6 +170,7 @@ import (
 	"sync"
 	"time"
 
+	core "cfm/internal/detectors/core"
 	"cfm/internal/uaplausible"
 )
 
@@ -1228,7 +1229,7 @@ func (s ChallengeSolve) HumanitySuffix() string {
 		return ""
 	}
 	var out string
-	if s.HumanityNoPayload && s.HumanityScore == 0 {
+	if core.HumanityNoReport(s.HumanityNoPayload, s.HumanityScore) {
 		out = " hs=-"
 	} else {
 		out = fmt.Sprintf(" hs=%d", s.HumanityScore)

@@ -529,7 +529,8 @@ JS-executing headless-browser farm, which is the threat.
    the flagged cluster, exactly as UA/`tls_fp` breakdowns already ride on the
    alert. Makes the finding actionable; changes no decision; needs no threshold.
    **Shipped for `solver_farm` (2026-11-03)** as the Rung-1 `hs` / `tells`
-   distribution and country split of the flagged cluster (alert text, the
+   distribution and country split of the flagged cluster's passed solves
+   (Rung-1 rejects never reach the detector; alert text, the
    `Finding`, `detection_history` `payload.humanity`; `solverfarm/humanity.go`,
    see `docs/DETECTORS.md`). **`cookie_discard`: not done.**
 2. **Aggregate detector signal (the payoff, after burn-in).** Per-solve is

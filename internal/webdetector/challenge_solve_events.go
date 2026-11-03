@@ -27,12 +27,13 @@ import (
 // input. Humanity is filled only behind the HumanityScored gate, exactly like
 // HumanitySuffix: a solve the Rung-1 scorer never saw carries nil, never a
 // fabricated hs=0. HumanityNoPayload is set only by a scored verify, so the
-// gate covers the hs=- case too.
+// gate covers the hs=- case too. Only PASSED solves are published (a Rung-1
+// reject returns before publishChallengeSolveEvent), so under an arm the
+// failing population is not here: it is the challenge_v2_reject history rows.
 func (s ChallengeSolve) InputEvent() core.InputEvent {
 	var hs *core.Humanity
 	if s.HumanityScored {
 		hs = &core.Humanity{
-			Scored:    true,
 			Score:     s.HumanityScore,
 			Tells:     s.HumanityTells,
 			NoPayload: s.HumanityNoPayload,

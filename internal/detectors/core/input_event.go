@@ -32,17 +32,28 @@ type InputEvent struct {
 }
 
 // Humanity carries a ChallengeV2 Rung-1 reading on an InputEvent. A non-nil
-// value always means the scorer ran (webdetector's HumanityScored gate), so a
-// zero Score is a real "scored clean"; a solve the scorer never saw has a nil
-// *Humanity, never a fabricated 0.
+// value means the scorer ran (webdetector's HumanityScored gate), so a zero
+// Score is a real "scored clean"; a solve the scorer never saw has a nil
+// *Humanity — nil is the ONLY "unscored", never a fabricated 0.
 type Humanity struct {
-	// Scored mirrors HumanityScored; always true on a value a source fills.
-	Scored bool
 	// Score is the Rung-1 score (0 = scored, nothing fired).
 	Score int
 	// Tells is the comma-joined list of tells that fired ("" when none).
 	Tells string
-	// NoPayload says the verify carried no humanity report (the hs=- of the
-	// solve line).
+	// NoPayload says the verify carried no parseable humanity body.
 	NoPayload bool
+}
+
+// NoReport reports whether this reading renders as hs=- on the solve line:
+// no payload AND a zero score. A UA-borne opener can still score a
+// no-payload solve, and the line then shows that number. Nil-safe (false).
+func (h *Humanity) NoReport() bool {
+	return h != nil && HumanityNoReport(h.NoPayload, h.Score)
+}
+
+// HumanityNoReport is the ONE hs=- predicate, shared by the solve line
+// (webdetector ChallengeSolve.HumanitySuffix) and the solver-farm humanity
+// buckets, so the two can never disagree about what "no report" is.
+func HumanityNoReport(noPayload bool, score int) bool {
+	return noPayload && score == 0
 }
