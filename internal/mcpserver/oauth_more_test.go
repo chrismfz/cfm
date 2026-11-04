@@ -389,3 +389,16 @@ func TestConsentPageShowsRedirectAndWarns(t *testing.T) {
 		t.Errorf("consent page missing cross-site warning: %s", b)
 	}
 }
+
+func TestAuthCorpusRouting(t *testing.T) {
+	fd := &fakeDispatch{}
+	ts := newTestServer(t, fd)
+	mcpPost(t, ts, testAdminToken,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"auth_corpus","arguments":{"tag":"JOOMLA_ADMIN","outcome":"?","limit":20}}}`)
+	if fd.lastPath != "/api/v1/webdet/auth-corpus" {
+		t.Errorf("auth_corpus routed to %q, want /api/v1/webdet/auth-corpus", fd.lastPath)
+	}
+	if fd.lastQuery.Get("tag") != "JOOMLA_ADMIN" || fd.lastQuery.Get("outcome") != "?" || fd.lastQuery.Get("limit") != "20" {
+		t.Errorf("query = %v", fd.lastQuery)
+	}
+}

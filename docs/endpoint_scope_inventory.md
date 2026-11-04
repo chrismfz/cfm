@@ -44,6 +44,7 @@ than being mistaken for admin. Code that reads `CtxScopeKey{}` **directly**
 
 - `/api/v1/webdet/summary`
 - `/api/v1/webdet/hot-ips`, `/api/v1/webdet/ip-short`, `/api/v1/webdet/ip-drilldown`, `/api/v1/webdet/analyze-ip`
+- `/api/v1/webdet/auth-corpus` (`RequireAdmin`, since 2026-11-04): the login-outcome corpus (`auth_corpus.go`), login POST shapes with example hosts of every tenant. Node-wide, so admin-only. Backs the MCP `auth_corpus` tool.
 - `/api/v1/webdet/history/stats|prune|truncate`
 - `/api/v1/webdet/force-unblock-ip` (`RequireAdmin`; `cfm unblock`'s path into the daemon: clears the per-IP WAF planes and the edge ban) and `/api/v1/webdet/edge-ban` (`RequireAdmin`, since 2026-10-10: POST — `cfm block` records a manual ban in the edge ban store, `internal/edgeban`, so the edge also blocks the client behind a trusted proxy; GET — the edge copy's status, mode and would-block / blocked counts)
 - `/api/v1/webdet/ua-top`, `/api/v1/webdet/ua-drill`, `/api/v1/webdet/ua-emergency` (global "Web Bots" UA controls — `RequireAdmin`)

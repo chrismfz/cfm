@@ -10,8 +10,9 @@
 -- can be defined before init() runs (Lua reads upvalues at call time).
 --
 -- Public surface: each detector is exported as _M.detect_<name>. Internal
--- helpers (auth_endpoint_tag, is_known_legit_xmlrpc, etc.) stay local to
--- this module — only other detectors in this file call them.
+-- helpers (is_known_legit_xmlrpc, etc.) stay local to this module, except
+-- auth_endpoint_tag, the one list of login endpoints, which log-cfm.lua also
+-- reads (the login-outcome column, docs/webdetector-signals-v2.md).
 
 local _M = {}
 
@@ -26,6 +27,15 @@ local has, header_string, lower, cap, count_occurs, has_long_b64_blob,
       is_known_legit_php_upload_endpoint, score_obfuscation_blob, begins,
       normalize, strip_sql_comments, scan_str,
       strip_host_port, is_ipv4_literal, is_ipv6_literal, body_budget
+
+-- has/lower are pure (cfm_waf_util requires nothing), so they are bound at
+-- load as well: _M.auth_endpoint_tag is called by log-cfm.lua, which can run
+-- in a worker before cfm_waf has called init(). init() rebinds them to the
+-- same functions.
+do
+  local ok, u = pcall(require, "cfm_waf_util")
+  if ok and type(u) == "table" then has, lower = u.has, u.lower end
+end
 
 function _M.init(cfg, u)
   CFG  = cfg
@@ -1751,6 +1761,7 @@ end
 
   return nil
 end
+_M.auth_endpoint_tag = auth_endpoint_tag
 
 -- A fixed-window hit counter: the count of hits on key in the window its
 -- first hit opened (`win` seconds). cfm_shdict.incr: one atomic incr, the

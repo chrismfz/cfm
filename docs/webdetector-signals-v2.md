@@ -1,6 +1,9 @@
 # Web detector signals v2: login outcomes, compromise, abuse, behaviour
 
-Status: **design, nothing built** (2026-11-04). Context: the vol2.gr takeover
+Status: **design; phase 0 built** (2026-11-04): the `auth` column
+(`log-cfm.lua`, column 14, login POSTs only), `LogRec.Auth`, and the corpus
+behind the MCP `auth_corpus` tool (`auth_corpus.go`). Nothing counts logins
+yet. Context: the vol2.gr takeover
 attempt (titan, 2026-11-04). It got rule 440 and the rule 501 clearance cap
 (PR #1638). It also showed that slow or distributed login attacks pass the
 edge unseen. This document plans what the log-driven web detector
@@ -101,8 +104,27 @@ read of that corpus then decides each CMS's `ok`/`fail` rule. A CMS whose
 success cookie cannot be told from its anonymous session cookie stays `?`, and
 only its failure-shaped answers count.
 
-Version skew: the Go parser already accepts 12–14 columns, so it must accept
-15 too, and an old edge with no `auth` column simply feeds no login signal.
+As built, the field is `<TAG>:<outcome>;l=<location path>;c=<cookie
+names>[;a=<action>]`. The tag is `auth_endpoint_tag` minus `AUTH_`; xmlrpc is
+left out (rule 510). `na` marks another `wp-login.php` action (lostpassword,
+register), with `a=` naming it. The column is sent **only on a login POST**:
+every other line keeps its 14 columns byte for byte. That is what keeps an
+older daemon right during an upgrade. Its parser folds anything past column 13
+into the bypass flag, so a 15th column on every line would have turned every
+bypass client into a non-bypass one. The new parser reads 12–15 columns, and an
+old edge simply feeds no login field.
+
+The corpus (`auth_corpus.go`, MCP `auth_corpus`) groups login lines by
+(tag, outcome, method, status, path, Location path, cookie names).
+The path keeps the query fields that name a front controller's action
+(`option`, `task`, `route`, `controller`, `action`, `view`): every Joomla
+admin POST is tagged, a save as well as the login, and only those tell
+them apart. Hex and
+digit runs are folded, so a Joomla md5 cookie name or a site id does not
+make a shape per site. Each shape keeps a count, distinct IPs and hosts
+(capped at 64) and up to 5 example hosts. It is bounded at 2 000 shapes,
+in memory, and emptied by a restart or config reload. Reading it per CMS is
+the input to phase 1's outcome rules.
 
 ---
 

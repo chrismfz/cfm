@@ -70,6 +70,7 @@ func registerTools(srv *mcp.Server, d Deps) {
 	registerDmesgTail(srv, d)
 	registerServiceStatus(srv, d)
 	registerEdgeAccessTail(srv, d)
+	registerAuthCorpus(srv, d)
 	registerIPForensics(srv, d)
 	registerHostAccessHistory(srv, d)
 	registerEdgeErrorTail(srv, d)
@@ -402,6 +403,12 @@ type edgeAccessTailInput struct {
 	Path   string `json:"path,omitempty" jsonschema:"case-insensitive substring of the request URI (e.g. 'admin-ajax.php')"`
 	Since  string `json:"since,omitempty" jsonschema:"only entries newer than now minus this duration (e.g. '10m', '2h')"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"max rows (default 50, max 500)"`
+}
+
+type authCorpusInput struct {
+	Tag     string `json:"tag,omitempty" jsonschema:"one login tag, e.g. WP_LOGIN, JOOMLA_ADMIN, DRUPAL_LOGIN, MAGENTO_ADMIN, OPENCART_ADMIN, ADMIN_LOGIN, LOGIN_POST, PHPMYADMIN; omit for all"`
+	Outcome string `json:"outcome,omitempty" jsonschema:"ok, fail, na or ? (the edge's verdict; every CMS but WordPress is ?); omit for all"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"max shapes (default 100, max 1000), most frequent first"`
 }
 
 type ipForensicsInput struct {
@@ -890,6 +897,20 @@ func registerEdgeAccessTail(srv *mcp.Server, d Deps) {
 		setStr(q, "since", in.Since)
 		setInt(q, "limit", in.Limit)
 		return dispatchJSON(ctx, d, "/api/v1/webdet/access-recent", q)
+	})
+}
+
+func registerAuthCorpus(srv *mcp.Server, d Deps) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Annotations: readOnly,
+		Name:        "auth_corpus",
+		Description: "Login POSTs the edge saw since the daemon started, grouped by SHAPE: login tag (WP_LOGIN, JOOMLA_ADMIN, ...), the edge's outcome (ok/fail/na for WordPress; ? for every other CMS until a rule is measured), method, status, normalised path, the response's Location path and Set-Cookie NAMES (hex/digit runs folded), with line count, distinct IPs and hosts (capped at 64) and example hosts. For deciding each CMS's success/failure signature from real traffic: a shape with many IPs on many hosts is a brute-force failure; a shape with a few IPs followed by admin pages is a success. Totals per tag/outcome included. In-memory, bounded (2000 shapes; dropped counts the overflow), emptied by a restart or config reload. No cookie values, query strings or bodies.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in authCorpusInput) (*mcp.CallToolResult, any, error) {
+		q := url.Values{}
+		setStr(q, "tag", in.Tag)
+		setStr(q, "outcome", in.Outcome)
+		setInt(q, "limit", in.Limit)
+		return dispatchJSON(ctx, d, "/api/v1/webdet/auth-corpus", q)
 	})
 }
 

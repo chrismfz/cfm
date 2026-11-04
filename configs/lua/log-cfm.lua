@@ -32,11 +32,12 @@
 -- are disabled in a premature timer), same best-effort class as before.
 --
 -- Emits one TSV record per request to /run/cfm/ingest.sock, in the column
--- order of the cfm_tsv access_log format plus a 13th and 14th column (below). The
+-- order of the cfm_tsv access_log format plus a 13th, 14th and (login POSTs
+-- only) 15th column (below). The
 -- receiver reads it with parseSocketTSV, so the contract MUST stay in sync
 -- with internal/webdetector/engine.go::parseTSVCols.
 --
--- Field order (TAB-separated, newline-terminated, 14 columns):
+-- Field order (TAB-separated, newline-terminated, 14 columns, 15 on a login POST):
 --
 --   idx  field   ngx source               type / notes
 --   ---  ------  -----------------------  ----------------------------------
@@ -75,6 +76,12 @@
 --                                         ("cfm_apache\t1"), which its
 --                                         HasPrefix("cfm_apache") readers still
 --                                         take as the origin.
+--   14   auth    auth_field() below       ONLY on a login POST (the
+--                                         auth_endpoint_tag list): the login
+--                                         outcome + Set-Cookie names +
+--                                         Location path. Added 2026-11-04;
+--                                         every other line keeps 14 columns
+--                                         (why: auth_field's comment).
 --
 -- Connection reuse: setkeepalive(10000, 100) gives us up to 100 pooled
 -- cosockets per worker, idle timeout 10s. First timer per worker pays
@@ -245,8 +252,118 @@ local function arm(delay, kind)
   return false
 end
 
+-- ── Column 14: the login outcome (docs/webdetector-signals-v2.md §2) ─────────
+-- Status alone cannot tell a login's outcome: a hide-login plugin answers a
+-- FAILED wp-login.php post with a 302 to ?login=failed, just like a success.
+-- What a success alone carries is the CMS's logged-in cookie, so the edge
+-- reads the response's Set-Cookie NAMES (never a value) and Location PATH
+-- (never its query) for a login POST and sends them, with the outcome where
+-- it is known, as one more column (idx 14, the 15th). Every other request
+-- sends no such column, so its line stays byte-identical to before. That keeps an OLDER
+-- daemon (which folds anything past column 13 into the bypass flag) reading
+-- the bypass flag of every non-login line right during an upgrade.
+--
+-- Value: "<TAG>:<outcome>;l=<location path>;c=<cookie names>[;a=<action>]"
+--   TAG      auth_endpoint_tag (cfm_waf_detectors.lua, the one list) minus
+--            "AUTH_": WP_LOGIN, JOOMLA_ADMIN, DRUPAL_LOGIN, MAGENTO_ADMIN, ...
+--   outcome  WP_LOGIN only (the one CMS verified so far): "ok" = a
+--            wordpress_logged_in_* cookie with a real value (WordPress sets it
+--            on a completed login only, after a 2FA step too; a logout's
+--            expired one carries a blank value); "fail" = no such cookie and
+--            the login form again (200) or a redirect back to a login page;
+--            "na" = another wp-login action (lostpassword, register, ...);
+--            "?" = anything else (a 2FA or CAPTCHA step elsewhere). Every
+--            other CMS is "?" until a fleet corpus decides its rule.
+local AUTH_MAX_COOKIES = 8
+local AUTH_MAX_NAME    = 48
+local AUTH_MAX_LOC     = 96
+local WP_LI            = "wordpress_logged_in_"
+
+local auth_tag_fn -- nil = not resolved yet, false = unavailable
+local function auth_tag(uri)
+  if auth_tag_fn == nil then
+    -- Already loaded by cfm_waf in this worker, so this is a table lookup;
+    -- pcall so a WAF module that fails to load never takes the log line down.
+    local ok, d = pcall(require, "cfm_waf_detectors")
+    auth_tag_fn = (ok and type(d) == "table" and type(d.auth_endpoint_tag) == "function")
+      and d.auth_endpoint_tag or false
+  end
+  if not auth_tag_fn then return nil end
+  local ok, tag = pcall(auth_tag_fn, uri, "post")
+  if ok and type(tag) == "string" then return tag end
+  return nil
+end
+
+local function as_list(v)
+  if v == nil then return {} end
+  if type(v) == "table" then return v end
+  return { v }
+end
+
+local function auth_field(var)
+  if var.request_method ~= "POST" then return nil end
+  local uri = var.request_uri
+  if not uri or uri == "" then return nil end
+  local tag = auth_tag(uri)
+  -- xmlrpc is rule 510's (one POST can carry hundreds of attempts).
+  if not tag or tag == "AUTH_WP_XMLRPC" then return nil end
+  tag = tag:gsub("^AUTH_", "")
+
+  local hdr = ngx.header
+  local names, logged_in = {}, false
+  for _, sc in ipairs(as_list(hdr and hdr["Set-Cookie"])) do
+    if type(sc) == "string" then
+      local name, value = sc:match("^%s*([^=;%s]+)=([^;]*)")
+      if name then
+        if #names < AUTH_MAX_COOKIES then
+          names[#names + 1] = name:gsub("[^%w%-%._]", "_"):sub(1, AUTH_MAX_NAME)
+        end
+        -- A real logged-in value is "user|expiration|token|hmac"; a logout's
+        -- expired cookie carries " " (sent as "+"), "deleted" or nothing.
+        if name:sub(1, #WP_LI) == WP_LI and #value >= 20 then logged_in = true end
+      end
+    end
+  end
+
+  local loc = hdr and hdr["Location"]
+  if type(loc) == "table" then loc = loc[1] end
+  if type(loc) == "string" then
+    loc = loc:match("^[^?#]*") or ""
+    loc = loc:gsub("^%a[%w+.-]*://[^/]*", "")
+    loc = loc:gsub("[^%w%-%._~/%%]", "_"):sub(1, AUTH_MAX_LOC)
+  else
+    loc = ""
+  end
+
+  local outcome, action = "?", nil
+  if tag == "WP_LOGIN" then
+    local a = var.arg_action
+    if type(a) == "string" and a ~= "" and a:lower() ~= "login" then
+      outcome = "na"
+      action = a:lower():gsub("[^%w_%-]", "_"):sub(1, 24)
+    elseif logged_in then
+      outcome = "ok"
+    else
+      local st = tonumber(var.status) or 0
+      if st == 200 or (st >= 300 and st < 400 and loc:lower():find("login", 1, true)) then
+        outcome = "fail"
+      end
+    end
+  end
+
+  local v = tag .. ":" .. outcome .. ";l=" .. loc .. ";c=" .. table.concat(names, ",")
+  if action then v = v .. ";a=" .. action end
+  return v
+end
+_M._auth_field = auth_field -- exposed for scripts/tests/cfm_log_auth_test.lua
+
 function _M.log()
   local var = ngx.var
+  local af
+  do
+    local ok, v = pcall(auth_field, var)
+    if ok then af = v end
+  end
   local line = table.concat({
     nz(var.msec),
     nz(var.remote_addr),
@@ -262,7 +379,9 @@ function _M.log()
     clean(var.http_user_agent),
     nz(var.cfm_upstream),
     nz(var.cfm_bypass_ip),
-  }, "\t") .. "\n"
+  }, "\t")
+  if af then line = line .. "\t" .. clean(af) end
+  line = line .. "\n"
 
   buf_n     = buf_n + 1
   buf_bytes = buf_bytes + #line

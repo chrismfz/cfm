@@ -59,6 +59,11 @@ type LogRec struct {
 	// "1" kind's, at the edge). False when the line had no such column (an
 	// older module, a file tailer).
 	Bypass bool
+	// Auth is the edge's login-outcome field (log-cfm.lua column 14, sent
+	// on a login POST only): "<TAG>:<outcome>;l=<location path>;c=<cookie
+	// names>[;a=<action>]". Empty on every other line, and on any line from
+	// an older module or a file tailer. Read with parseAuthField.
+	Auth string
 }
 
 // parseTSV reads the 12-column TSV of the file tailers (access_cfm_tsv.log,
@@ -70,15 +75,16 @@ func parseTSV(line string) (LogRec, bool) { return parseTSVCols(line, false) }
 
 // parseSocketTSV reads a line of the edge's ingest socket (log-cfm.lua), which
 // strips TABs from every field and may add a 13th column, the upstream name,
-// taken as written, and a 14th, the bypass flag; an edge still on an older
-// module sends 12 or 13. The socket hands over newline-terminated records only
+// taken as written, a 14th, the bypass flag, and on a login POST only a 15th,
+// the login outcome (LogRec.Auth); an edge still on an older module sends 12
+// or 13. The socket hands over newline-terminated records only
 // (serveConn), so a record cut off mid-send never reads as a shorter one.
 func parseSocketTSV(line string) (LogRec, bool) { return parseTSVCols(line, true) }
 
 func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 	n := 12
 	if upstreamCol {
-		n = 14
+		n = 15
 	}
 	f := strings.SplitN(line, "\t", n)
 	if len(f) < 12 {
@@ -88,7 +94,14 @@ func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 	if len(f) >= 13 {
 		upName = f[12]
 	}
-	bypass := len(f) == 14 && (f[13] == "1" || f[13] == "2")
+	bypass := len(f) >= 14 && (f[13] == "1" || f[13] == "2")
+	auth := ""
+	if len(f) == 15 {
+		auth = f[14]
+		if len(auth) > maxAuthField {
+			auth = auth[:maxAuthField]
+		}
+	}
 	ts, _ := strconv.ParseFloat(f[0], 64)
 	st, _ := strconv.Atoi(f[6])
 	by, _ := strconv.ParseInt(f[7], 10, 64)
@@ -117,6 +130,7 @@ func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 		Upstream:     f[9] != "" && f[9] != "-",
 		UpstreamName: upName,
 		Bypass:       bypass,
+		Auth:         auth,
 	}, true
 }
 
@@ -465,6 +479,10 @@ type Engine struct {
 	// WAF false-positive triage — the raw request context around a hit.
 	accessRing *accessRing
 
+	// authCorpus groups the edge's login-outcome lines by shape (auth_corpus.go;
+	// docs/webdetector-signals-v2.md §2) for the per-CMS outcome rules.
+	authCorpus *authCorpus
+
 	chalRules   []chalRule
 	nginxBridge *NginxBridge // always set (edge mode is the only mode)
 	manualChal  manualChalState
@@ -637,6 +655,7 @@ func NewEngine(cfg Config) *Engine {
 		//chris//
 		adapter:    NewAutoDetectAdapter(),
 		accessRing: newAccessRing(accessRingCap),
+		authCorpus: newAuthCorpus(authCorpusCap),
 
 		ipLong: &ipLongMem{
 			stats: make(map[string]*ipLongAgg),
@@ -1560,6 +1579,9 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	// Own mutex, off the engine lock; bounded + truncated in newAccessEntry.
 	if e.accessRing != nil {
 		e.accessRing.add(newAccessEntry(rec))
+	}
+	if rec.Auth != "" && e.authCorpus != nil {
+		e.authCorpus.add(rec, host)
 	}
 
 	// cPanel's own session API on a proxy subdomain (File Manager save/upload,
