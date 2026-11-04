@@ -11,7 +11,7 @@ import (
 // WAF reason-family from the code registry — so adding a new WAF family can
 // never leave it silently unconfigurable — and that the ON-by-default set is
 // exactly the families that have an edge-`block` rule (the only ones that can
-// autoblock in Phase 1), plus WAF_BACKDOOR armed for a future promotion, minus
+// autoblock in Phase 1; WAF_BACKDOOR among them since block rule 440), minus
 // WAF_TRAVERSAL, whose block rule (101) landed 2026-09-05 and is held through
 // its burn-in (see waf_security_register.go).
 func TestWAFSecurityFamilyCoverage(t *testing.T) {
@@ -29,7 +29,7 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 	}
 
 	// Every family with an edge-block rule must default ON; a family without one
-	// (except the armed WAF_BACKDOOR) must default 0. WAF_WEBSHELL is armed by
+	// must default 0. WAF_WEBSHELL is armed by
 	// default as of 2026-07-18 (edge-block rule 413) — it follows the normal rule
 	// like WAF_CVE — after the operator confirmed it runs cleanly fleet-wide.
 	for _, f := range fams {
@@ -48,12 +48,13 @@ func TestWAFSecurityFamilyCoverage(t *testing.T) {
 			}
 		case block && def != 1:
 			t.Errorf("%s has an edge-block rule but defaults to %d, want 1", f, def)
-		case !block && f != "WAF_BACKDOOR" && def != 0:
+		case !block && def != 0:
 			t.Errorf("%s has no edge-block rule but defaults to %d, want 0", f, def)
 		}
 	}
-	if cov["WAF_BACKDOOR"] != 1 {
-		t.Errorf("WAF_BACKDOOR should be armed to 1, got %d", cov["WAF_BACKDOOR"])
+	// WAF_BACKDOOR was armed before it had a block rule; rule 440 keeps it armed.
+	if !webdetector.WAFFamilyHasBlockRule("WAF_BACKDOOR") || cov["WAF_BACKDOOR"] != 1 {
+		t.Errorf("WAF_BACKDOOR should have block rule 440 and be armed to 1, got %d", cov["WAF_BACKDOOR"])
 	}
 	// The rendered detectors.conf template is derived from the same defaults:
 	// every armed family appears as "1", every held one as "0", and a family
@@ -146,6 +147,11 @@ func TestWAFSecurityRuleHolds(t *testing.T) {
 	}
 	if got, ok := wafSecurityRuleOverrides(KV{})["10028"]; !ok || got != 0 {
 		t.Errorf("RULE_10028 should default to the code hold 0, got %d (present=%v)", got, ok)
+	}
+	// 440: task=run alone is the marker and a page can make a visitor's
+	// browser send it; arming its ban is a decision after the burn-in.
+	if got, ok := wafSecurityRuleOverrides(KV{})["440"]; !ok || got != 0 {
+		t.Errorf("RULE_440 should default to the code hold 0, got %d (present=%v)", got, ok)
 	}
 	for _, id := range []string{"10021", "10023", "10024", "10025", "10027"} {
 		if _, ok := wafSecurityRuleOverrides(KV{})[id]; ok {

