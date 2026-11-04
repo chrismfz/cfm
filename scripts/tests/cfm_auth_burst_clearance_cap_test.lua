@@ -4,7 +4,8 @@
 -- the submissions that cross the threshold are refused (403) instead, and the
 -- hit is still pushed as logonly (no waf_security ban).
 --   * cleared: the first 7 login posts in the window pass, the 8th is refused;
---   * cleared, resumed: the replayed POST of a solved challenge passes;
+--   * cleared, resumed: the replayed POST of a solved challenge passes, once per window;
+--   * cleared, another rule headlining (302): still capped;
 --   * uncleared: the 8th is challenged, as before.
 
 local H = dofile("scripts/tests/cfm_lua_harness.lua")
@@ -21,11 +22,12 @@ local function desc(r)
 end
 
 local BODY = "log=admin&pwd=secret1&wp-submit=Log+In"
-local function login(SH, cleared, ip)
+local function login(SH, cleared, ip, args, resumed)
   local ct = "application/x-www-form-urlencoded"
   return H.run{
     SH = SH, method = "POST", uri = "/wp-login.php", body = BODY, ip = ip or "203.0.113.20",
-    clearance = cleared,
+    clearance = cleared, args = args,
+    ctx_init = resumed and function(c) c.cfm_resumed_post = true end or nil,
     headers = { ["content-type"] = ct, ["user-agent"] = "Mozilla/5.0", host = "shop.gr" },
     vars = { http_content_type = ct, http_content_length = tostring(#BODY),
              cookie_cfm_clearance = cleared and "good" or nil },
@@ -51,19 +53,30 @@ do
 end
 
 -- Cleared and resumed: the stashed login the client was challenged for, replayed
--- after the solve, passes even past the threshold.
+-- after the solve, passes even past the threshold; a second one in the same
+-- window (resume tokens can be minted by posting without the cookie) does not.
 do
   local SH, r
   for _ = 1, 8 do r = login(SH, true, "203.0.113.22"); SH = r.SH end
-  local ct = "application/x-www-form-urlencoded"
-  r = H.run{
-    SH = SH, method = "POST", uri = "/wp-login.php", body = BODY, ip = "203.0.113.22", clearance = true,
-    ctx_init = function(c) c.cfm_resumed_post = true end,
-    headers = { ["content-type"] = ct, ["user-agent"] = "Mozilla/5.0", host = "shop.gr" },
-    vars = { http_content_type = ct, http_content_length = tostring(#BODY), cookie_cfm_clearance = "good" },
-  }
+  r = login(SH, true, "203.0.113.22", nil, true)
   check(r.ok and r.exited ~= 403 and r.action ~= "login_capped_pc",
     "a cleared resumed login past the threshold passes (" .. desc(r) .. ")")
+  r = login(r.SH, true, "203.0.113.22", nil, true)
+  check(r.ok and r.exited == 403 and r.action == "login_capped_pc",
+    "a second resumed login in the window is refused (" .. desc(r) .. ")")
+end
+
+-- A cleared client cannot switch the cap off by letting an equal-tier rule
+-- that runs earlier take the headline (302 on an XSS-shaped arg).
+do
+  local SH, r
+  for i = 1, 9 do
+    r = login(SH, true, "203.0.113.23", "x=%3Cscript%3Ealert(1)%3C/script%3E"); SH = r.SH
+    if i >= 8 then
+      check(r.ok and r.exited == 403 and r.action == "login_capped_pc",
+        "cleared login #" .. i .. " with an XSS-shaped arg is refused (" .. desc(r) .. ")")
+    end
+  end
 end
 
 -- Uncleared: the 8th is challenged, not capped.

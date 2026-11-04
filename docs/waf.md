@@ -1342,8 +1342,13 @@ Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see 
 ## Rule 440 — `rule_plugin_dropper_cmd` (a fake plugin's command call)
 
 Reason family **`WAF_BACKDOOR`**, tag `PLUGIN_CMD:DOWNLOAD` / `PLUGIN_CMD:RUN`,
-**block** (the family's first block-tier rule; `BACKDOOR = 1` in `waf_security`,
-so a hit also bans for 6 h and alerts). Since 2026-11-04.
+**block** at the edge (the family's first block-tier rule). Its `waf_security`
+ban, and with it the alert, is **held in code** (`HoldAutoblock`, `RULE_440 = 0`)
+through a burn-in: `task=run` alone is the marker, and a page can make a
+visitor's browser send it (an `<img>` src), which would plant a 6 h node-wide ban
+on that visitor. A held block rule runs late in `cfm_waf.lua`, with the others,
+so it never shadows an armed rule's ban. `RULE_440 = 1` arms it. Since
+2026-11-04.
 
 **What it stops.** The last step of a WordPress takeover seen on vol2.gr
 (titan): an IP logs in with a stolen password, uploads a plugin with a random
@@ -1371,9 +1376,14 @@ mars, earth, virgo, rigel, speedhost): no request to a PHP file under those
 directories carried a `task` field outside these attacks. Joomla's `task=` on
 `/index.php` and `/administrator/` is not on that path.
 
-**Not covered.** A theme's PHP file, another field name, a dropper whose command
-is in a header or a cookie. The upload itself is not refused here: a logged-in
-upload is the administrator's own action, as far as the edge can tell.
+**Not covered.** A theme's PHP file, another content directory (Bedrock's
+`/app/plugins/`, a renamed `wp-content`), a directory index
+(`/wp-content/plugins/x/?task=run` reaching an `index.php`), another field name, a
+`url` without a scheme (`151.245.195.51/bog`, `//host/x`) or no `url` at all (the
+URL inside the dropper), a command in a header or a cookie, and a form body padded
+past `waf_body_max_len` (32 KB), which the edge does not read whole: only the
+query is certain. The upload itself is not refused here: a logged-in upload is the
+administrator's own action, as far as the edge can tell.
 
 ## Rule 331 — `rule_shell_write_exec` (a webshell terminal writing a dropper)
 
@@ -1526,8 +1536,12 @@ cleared client, so it is never challenged again; for 501 that meant a client tha
 the challenge once could post logins without limit from its IP. cfm.lua now refuses the
 cleared client's submissions that cross the threshold (403, `X-CFM-Action:
 login_capped_pc`) until the window closes (`auth_window_sec`), and pushes the hit as
-`logonly` as before, so it never earns a `waf_security` ban. A resumed POST (the
-stashed login a client was challenged for, replayed after the solve) is let through. In the three weeks before
+`logonly` as before, so it never earns a `waf_security` ban. 501 counts wherever it
+sits in the hit list: an equal-tier rule that runs earlier (302 on a `<script` arg)
+takes the headline, and keying on the headline let a cleared client switch the cap off
+with one junk argument. A resumed POST (the stashed login a client was challenged for,
+replayed after the solve) is let through once per IP and host per window: a client can
+mint resume tokens by posting without its cookie. In the three weeks before
 (2026-10-14 → 11-04, seven nodes, `cfm.waf.log`) 501 fired ~15 800 times, all at
 `challenge_v2` but 7 converted ones, and those 7 were Greek ISPs, a `cpanel.` login and an
 office tool: a ban would have hit them, a 20-second refusal does not hurt them. A cleared

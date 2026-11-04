@@ -23,15 +23,18 @@ back-filled here — see the git/PR history for that period.
   attacker on vol2.gr (titan) called the plugin's own PHP file with
   `?task=download&url=http://…` and then `?task=run` to fetch and start the
   payload. A PHP file under `wp-content/plugins/` or `mu-plugins/` called with
-  that `task` field is now refused, and the IP is banned for 6 h with an alert
-  (`WAF_BACKDOOR`, already armed in `waf_security`). A month of seven nodes'
-  traffic held no such request outside these attacks.
+  that `task` field is now refused at the edge (`WAF_BACKDOOR`). A month of
+  seven nodes' traffic held no such request outside these attacks. The ban is
+  held for a burn-in (`RULE_440 = 0` by default; set `RULE_440 = 1` in
+  `[waf_security]` to ban and alert), because a page can make a visitor's
+  browser send `task=run`.
 - **A cleared visitor can no longer post logins without limit.** Rule 501
   (8 login posts per IP and site in 20 s) challenges the client, but one that
   had already solved a challenge only got a log line, so it could keep
   guessing passwords from its IP. Those posts past the limit now get a 403
-  until the 20 s window closes. They earn no ban: in the last three weeks the
-  only cleared clients over the limit were legitimate users.
+  until the 20 s window closes, whichever rule takes the headline. They earn no
+  ban: in the last three weeks the only cleared clients over the limit were
+  legitimate users.
 
 ## 2026.11.03
 

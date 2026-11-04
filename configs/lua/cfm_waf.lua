@@ -381,7 +381,7 @@ local CFG = {
   rule_php_concat_funcname_eval   = "logonly", -- $a = "sys"."tem"; $a(); short-string funcname concat + invoke
   rule_php_decode_chain           = "logonly", -- 3+ decoder primitives (base64_decode/gzinflate/strrev/…) within 300 bytes
   rule_php_numeric_xor_obfuscation = "logonly", -- phpfuck: a long tight [0-9().^] run with a paren/^/dot storm — arbitrary PHP built for a restricted-charset eval() sink (e.g. vBulletin runMaths / CVE-2026-61511). Best-effort visibility only; STAYS logonly (a block companion was removed for FP-banning spaced math posts).
-  rule_plugin_dropper_cmd = "block",  -- the command call of a fake-plugin dropper on the plugin's own PHP file: /wp-content/(mu-)plugins/…/*.php with task=download + a url, or task=run (vol2.gr, 2026-11-04). The field never appeared on that path in a month of seven nodes' traffic. Bans through waf_security (WAF_BACKDOOR is armed).
+  rule_plugin_dropper_cmd = "block",  -- the command call of a fake-plugin dropper on the plugin's own PHP file: /wp-content/(mu-)plugins/…/*.php with task=download + a url, or task=run (vol2.gr, 2026-11-04). The field never appeared on that path in a month of seven nodes' traffic. Edge 403, logged to cfm.waf.log / history; the waf_security ban (and its alert) is held in code (RULE_440 = 0) through a burn-in.
   rule_php_encoded_opener         = "challenge_v2", -- encoded `<?php` opener — JS `\x` hex-escape form only (`\x3c\x3fphp`).
                                                  -- Audit F16 REMOVED the URL (`%3C%3Fphp`), HTML-entity (`&lt;?php`) and
                                                  --  JS-unicode (`<…`) forms: they are the normal on-wire encodings of
@@ -2084,21 +2084,6 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 34b) Fake-plugin dropper command (440) ───────────────────────────────
-  -- The dropper's own PHP file called with its download / run command
-  -- (det.detect_plugin_dropper_cmd). Block: the plugin is already on disk and
-  -- this call fetches and runs the payload.
-  do
-    local mode = rule_mode(CFG.rule_plugin_dropper_cmd, "block")
-    if mode ~= "disabled" then
-      local tag = det.detect_plugin_dropper_cmd(uri, method, args, body, headers)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_BACKDOOR:PLUGIN_CMD:" .. tag, ttl, mode, RULE_IDS.rule_plugin_dropper_cmd) then goto done end
-      end
-    end
-  end
-
   -- ── 35) Reverse shell payload (R1) ───────────────────────────────────────
   -- Literal reverse-shell strings in URI/args/body (bash -i >& /dev/tcp/,
   -- python -c 'import socket', socat tcp-connect …). Family WAF_RCE so it
@@ -2573,6 +2558,24 @@ local function check_impl(ctx, st)
     end
   end
 
+  -- ── Fake-plugin dropper command (440) ────────────────────────────────────
+  -- The dropper's own PHP file called with its download / run command
+  -- (det.detect_plugin_dropper_cmd). Block: the plugin is already on disk and
+  -- this call fetches and runs the payload. Its ban is held in code through a
+  -- burn-in (WAFRule.HoldAutoblock: `task=run` on any plugin PHP is enough,
+  -- and a page can make a visitor's browser send it), so it runs here with
+  -- the other held block rules, after every armed one (CLAUDE.md §6).
+  do
+    local mode = rule_mode(CFG.rule_plugin_dropper_cmd, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_plugin_dropper_cmd(uri, method, args, body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:PLUGIN_CMD:" .. tag, ttl, mode, RULE_IDS.rule_plugin_dropper_cmd) then goto done end
+      end
+    end
+  end
+
   -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018-10020) ──
   -- Placed after every armed block-tier family, next to traversal, for the
   -- same reason: 10019 and 10020 block at the edge but their autoblock is
@@ -2980,8 +2983,19 @@ _M.WAF_HIGH_RISK_REASONS = {
   WAF_BACKDOOR           = true,
 }
 
--- Rule 501's id, for cfm.lua's post-clearance login cap.
+-- For cfm.lua's post-clearance login cap: did rule 501 match this request
+-- (anywhere in the hit list, not only as the headline: an equal-tier rule that
+-- runs earlier, 302 on a stray `<script` arg, takes the headline), and how long
+-- its window is.
 _M.AUTH_BURST_RULE_ID = RULE_IDS.rule_auth_burst
+function _M.hits_auth_burst(hits)
+  if type(hits) ~= "table" then return false end
+  for _, h in ipairs(hits) do
+    if tonumber(h and h.waf_rule_id) == RULE_IDS.rule_auth_burst then return true end
+  end
+  return false
+end
+function _M.auth_window_sec() return tonumber(CFG.auth_window_sec) or 20 end
 
 function _M.is_high_risk_reason(reason)
   if not reason or reason == "" then return false end

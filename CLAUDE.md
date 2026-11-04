@@ -501,7 +501,8 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   2026-08-23), `WAF_RCE` (320, 329), `WAF_UPLOAD_FNAME` (401, 414),
   `WAF_UPLOAD_CONTENT` (402), `WAF_WEBSHELL` since 2026-07-03 (413, the
   proper-noun drop-path subset), `WAF_BACKDOOR` since 2026-11-04 (440, a fake
-  plugin's own PHP file called with its download / run command), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305)
+  plugin's own PHP file called with its download / run command; its ban held
+  per rule, `HoldAutoblock`, through a burn-in), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305)
   `WAF_AUTH_BURST` (510-512, the xmlrpc multicall / pingback / burst
   rules; 511 pingback held per rule since 2026-10-15) — all armed to 1 — plus
   `WAF_TRAVERSAL` since 2026-09-05 (rule 101;

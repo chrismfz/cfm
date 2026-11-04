@@ -22,7 +22,8 @@ import (
 // families that can actually autoblock. Everything else defaults to 0
 // (edge-only). WAF_BACKDOOR was armed to 1 before it had a block rule, so its
 // first one would autoblock with no config change; it has had one since
-// 2026-11-04 (440, the fake-plugin dropper's command call).
+// 2026-11-04 (440, the fake-plugin dropper's command call), whose own ban is
+// held per rule (HoldAutoblock) through a burn-in.
 //
 // WAF_CVE follows the normal block-rule rule: it has an edge-`block` rule
 // (10001, the Simple File List upload RCE) so it arms to 1 by default — the

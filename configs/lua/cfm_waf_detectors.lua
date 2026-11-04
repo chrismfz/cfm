@@ -6130,6 +6130,8 @@ end
 -- read as PHP registers them ($_GET, and $_POST for a form body: a backdoor
 -- reads $_REQUEST as often as $_GET), every value tested, case and blanks
 -- ignored (the safe side). PATH_INFO after the .php still runs that file.
+-- A form body padded past waf_body_max_len is not read whole, so only the
+-- query is certain (docs/waf.md, rule 440 "Not covered").
 do
   local DROPPER_FIELDS = { task = true, url = true }
   local function plugin_php_path(uri)

@@ -199,13 +199,14 @@ COOLDOWN = "20m"
 ; do — but as of 2026-07-18 the operator runs it armed fleet-wide and confirms it
 ; cleanly bans malicious scanners/scrapers/bots, so it now arms to 1 by default
 ; like the rest. BACKDOOR was armed to 1 before it had a block rule; its first,
-; 440 (the fake-plugin dropper's command call), landed 2026-11-04.
+; 440 (the fake-plugin dropper's command call), landed 2026-11-04 with its own
+; ban held per rule (RULE_440 = 0) through a burn-in.
 ; Every family is a knob and the full registry is covered automatically
 ; (TestWAFSecurityFamilyCoverage).
 SQLI            = 1      ; WAF_SQLI (301, block). Separate key SQLI_LEXICAL (309)
                         ;   is challenge-tier → inert in Phase 1.
 RCE             = 1      ; WAF_RCE (has block rule 320)
-BACKDOOR        = 1      ; WAF_BACKDOOR (block rule 440; 430-439 logonly/challenge)
+BACKDOOR        = 1      ; WAF_BACKDOOR (block rule 440, ban held: RULE_440 = 0)
 UPLOAD_EXPLOIT  = 1      ; = UPLOAD_FNAME (401) + UPLOAD_CONTENT (402), both block
 WEBSHELL        = 1      ; WAF_WEBSHELL (413, block) — armed by default (2026-07-18).
                         ;   Exempt a benign scanner with ALLOW_UA_CONTAINS/ALLOW_NETS
