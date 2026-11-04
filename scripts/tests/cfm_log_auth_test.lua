@@ -49,6 +49,7 @@ local function uri_args(uri)
   return out
 end
 ngx.req = { get_uri_args = function() return ngx._args or {} end }
+ngx.unescape_uri = function(x) return (x:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)) end
 
 local function req(method, uri, status, hdr, extra)
   local v = { request_method = method, request_uri = uri, status = tostring(status or 200) }
@@ -137,10 +138,27 @@ do
   end
 end
 
+-- ── The tag is decided on the decoded PATH, never the query (third review) ──
+check(af(req("POST", "/wp-l%6Fgin.php", 200, {})) == "WP_LOGIN;li=0;l=;c=",
+  "an encoded login path is still a login (Apache decodes it before WordPress runs)")
+check(af(req("POST", "/wp-login%2ephp", 200, {})) == "WP_LOGIN;li=0;l=;c=", "an encoded dot")
+check(af(req("POST", "/contact/?redirect_to=/wp-login.php", 200, {})) == nil,
+  "a form post with a login URL in its query is not a login")
+check(af(req("POST", "/wp-admin/admin-ajax.php?action=nsl_login", 200, {})) == nil,
+  "admin-ajax with a login-ish action is not a Magento login")
+check(af(req("POST", "/wp-admin/admin-post.php?action=oauth_cb", 200, {})) == nil, "admin-post oauth")
+check(af(req("POST", "/x?" .. string.rep("login=admin&", 500), 200, {})) == nil,
+  "a long query with login/admin in it is never scanned or tagged")
+check(af(req("POST", "/wp-login.php", 302, { Location = "https:/evil.example/a" })) == "WP_LOGIN;li=0;l=/a;c=",
+  "a one-slash host is dropped")
+check(af(req("POST", "/wp-login.php", 302, { Location = "https:evil.example/a" })) == "WP_LOGIN;li=0;l=/a;c=",
+  "a no-slash host is dropped")
+
 -- ── Not login lines ──────────────────────────────────────────────────────────
 check(af(req("GET", "/wp-login.php", 200, {})) == nil, "a GET of the login page")
 check(af(req("POST", "/xmlrpc.php", 200, {})) == nil, "xmlrpc is rule 510's")
-check(af(req("POST", "/wp-admin/admin-ajax.php?action=heartbeat", 200, {})) == nil, "an ordinary POST")
+check(af(req("POST", "/wp-admin/admin-ajax.php?action=heartbeat", 200, {})) == nil,
+  "admin-ajax: past the admin pre-check, and no tag leg matches its path")
 check(af(req("POST", "/wp-json/wp/v2/posts", 200, {})) == nil, "a POST without login/admin")
 check(af(req("POST", "/secret-login/", 302, { Location = "/secret-login/?err=1" })) == nil,
   "a hide-login path auth_endpoint_tag does not know")

@@ -309,11 +309,19 @@ local function auth_field(var)
   if var.request_method ~= "POST" then return nil end
   local uri = var.request_uri
   if not uri or uri == "" then return nil end
+  -- The login is decided on the PATH, decoded, as the origin will route it:
+  -- on the raw $request_uri, /wp-l%6Fgin.php hid a login from the column and
+  -- POST /contact/?redirect_to=/wp-login.php made a form post a WordPress
+  -- login. The path is the raw one decoded once (what Apache does), not
+  -- $uri, which an internal redirect (the challenge location) rewrites.
+  local path = uri:match("^[^?#]*") or ""
+  if path:find("%", 1, true) then path = ngx.unescape_uri(path) end
+  path = path:lower()
   -- Every auth_endpoint_tag leg (but xmlrpc, left out below) needs "login" or
-  -- "admin" in the URI (phpmyadmin included), so an ordinary POST skips the
-  -- tag's lower() of the whole URI and its dozen scans.
-  if not (uri:find("[Ll][Oo][Gg][Ii][Nn]") or uri:find("[Aa][Dd][Mm][Ii][Nn]")) then return nil end
-  local tag = auth_tag(uri)
+  -- "admin" in the path (phpmyadmin included), so most POSTs stop here: a
+  -- plain find on the short path, never a scan of a long query.
+  if not (path:find("login", 1, true) or path:find("admin", 1, true)) then return nil end
+  local tag = auth_tag(path)
   -- xmlrpc is rule 510's (one POST can carry hundreds of attempts).
   if not tag or tag == "AUTH_WP_XMLRPC" then return nil end
   tag = tag:gsub("^AUTH_", "")
@@ -345,9 +353,10 @@ local function auth_field(var)
   if type(loc) == "table" then loc = loc[1] end
   if type(loc) == "string" then
     loc = loc:match("^[^?#]*") or ""
-    -- Drop the scheme+host and a protocol-relative "//host", with either
-    -- slash: browsers read "https:\\host/" and "\\host/" as hosts too.
-    loc = loc:gsub("^%a[%w+.-]*:[/\\][/\\][^/\\]*", ""):gsub("^[/\\][/\\][^/\\]*", "")
+    -- Drop the scheme+host (any number of either slash: browsers read
+    -- "https:/host", "https:\\host" and "https:host" as hosts too) and a
+    -- protocol-relative "//host".
+    loc = loc:gsub("^%a[%w+.-]*:[/\\]*[^/\\]*", ""):gsub("^[/\\][/\\][^/\\]*", "")
     loc = loc:gsub("[^%w%-%._~/%%]", "_"):sub(1, AUTH_MAX_LOC)
   else
     loc = ""

@@ -17,4 +17,13 @@ func TestExtractUserAgentWebdetTSV(t *testing.T) {
 	if got := extractUserAgent([]string{"a\tb\tcurl/8"}); got != "curl/8" {
 		t.Errorf("short TSV: %q", got)
 	}
+	// A webdetector line with no UA: nothing, never a quoted piece of the URI;
+	// the next sample is tried.
+	noUA := "1000.5\t1.2.3.4\th.gr\tGET\t/a\"b\"c\tHTTP/1.1\t200\t0\t0.1\t0.1\t-\t-\tcfm_apache\t0"
+	if got := extractUserAgent([]string{noUA}); got != "" {
+		t.Errorf("no UA: %q", got)
+	}
+	if got := extractUserAgent([]string{base, noUA}); got != "Mozilla/5.0 X" {
+		t.Errorf("falls back to the earlier sample: %q", got)
+	}
 }

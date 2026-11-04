@@ -31,10 +31,34 @@ func TestParseSocketTSVAuthColumn(t *testing.T) {
 	if rec, _ = parseTSV(authBase + "\t0\tWP_LOGIN;li=1;l=;c="); rec.Auth != "" {
 		t.Fatalf("file TSV read an auth column: %+v", rec)
 	}
-	// A 16th TAB (cannot come from log-cfm, which cleans the field) stays inside Auth, capped.
-	rec, _ = parseSocketTSV(authBase + "\t0\t" + strings.Repeat("x", 800))
-	if len(rec.Auth) != maxAuthField {
+	// A 16th TAB (cannot come from log-cfm, which cleans the field) stays inside Auth.
+	if rec, _ = parseSocketTSV(authBase + "\t0\tWP_LOGIN;li=0;l=;c=\textra"); rec.Auth != "WP_LOGIN;li=0;l=;c=\textra" {
+		t.Fatalf("16th column: %q", rec.Auth)
+	}
+	// A field past maxAuthField is cut to it.
+	if rec, _ = parseSocketTSV(authBase + "\t0\t" + strings.Repeat("x", 800)); len(rec.Auth) != maxAuthField {
 		t.Fatalf("auth not capped: %d", len(rec.Auth))
+	}
+}
+
+// Version skew: an older daemon split socket lines into at most 14 columns.
+// Every line but a login POST's keeps 14, so the old reading of its bypass
+// flag and upstream name is unchanged; only a login POST's bypass bit folds.
+func TestAuthColumnOldParserSkew(t *testing.T) {
+	oldParse := func(line string) (up string, bypass bool) {
+		f := strings.SplitN(line, "\t", 14)
+		return f[12], len(f) == 14 && (f[13] == "1" || f[13] == "2")
+	}
+	plain := authBase + "\t1"
+	if up, bp := oldParse(plain); up != "cfm_apache" || !bp {
+		t.Fatalf("old parser on a 14-column line: %q %v", up, bp)
+	}
+	rec, _ := parseSocketTSV(plain)
+	if rec.UpstreamName != "cfm_apache" || !rec.Bypass || rec.Auth != "" {
+		t.Fatalf("new parser on a 14-column line: %+v", rec)
+	}
+	if up, bp := oldParse(plain + "\tWP_LOGIN;li=0;l=;c="); up != "cfm_apache" || bp {
+		t.Fatalf("old parser on a login line (bypass is expected to fold): %q %v", up, bp)
 	}
 }
 
@@ -177,15 +201,8 @@ func TestAuthCorpusClonesStrings(t *testing.T) {
 				t.Errorf("entry field %q points into the line", f)
 			}
 		}
-		for k := range e.ipSet {
-			if in(k) {
-				t.Errorf("ip key %q points into the line", k)
-			}
-		}
-		for k := range e.hostSet {
-			if in(k) {
-				t.Errorf("host key %q points into the line", k)
-			}
+		if in(e.net) {
+			t.Errorf("net %q points into the line", e.net)
 		}
 		for _, h := range e.Examples {
 			if in(h) {
@@ -193,9 +210,9 @@ func TestAuthCorpusClonesStrings(t *testing.T) {
 			}
 		}
 	}
-	for k := range c.byIP {
+	for k := range c.byNet {
 		if in(k) {
-			t.Errorf("byIP key %q points into the line", k)
+			t.Errorf("byNet key %q points into the line", k)
 		}
 	}
 	for k := range c.totals {
@@ -205,50 +222,82 @@ func TestAuthCorpusClonesStrings(t *testing.T) {
 	}
 }
 
-func TestAuthCorpusPerIPAndEviction(t *testing.T) {
+func TestAuthCorpusPerNetAndEviction(t *testing.T) {
 	c := newAuthCorpus(0)
 	for i := 0; i < 40; i++ {
-		c.add(authRec("6.6.6.6", "a.gr", "/x"+strconv.Itoa(i)+"z/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
+		ip := "6.6.6." + strconv.Itoa(i) // one /24
+		c.add(authRec(ip, "a.gr", "/"+strings.Repeat("q", i+1)+"/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
 	}
 	s := c.snapshot("", "", 0)
-	// digits fold, so vary letters instead
-	if s.Shapes != 1 {
-		t.Fatalf("digit-folded paths should be one shape: %d", s.Shapes)
+	if s.Shapes != authCorpusPerNet || s.DroppedByTag["LOGIN_POST"] != int64(40-authCorpusPerNet) {
+		t.Fatalf("per-/24 share: shapes=%d dropped=%v", s.Shapes, s.DroppedByTag)
 	}
 	c = newAuthCorpus(0)
 	for i := 0; i < 40; i++ {
-		c.add(authRec("6.6.6.6", "a.gr", "/"+strings.Repeat("q", i+1)+"/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
+		ip := "2001:db8::" + strconv.FormatInt(int64(i+1), 16) // one /64
+		c.add(authRec(ip, "a.gr", "/"+strings.Repeat("r", i+1)+"/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
 	}
-	s = c.snapshot("", "", 0)
-	if s.Shapes != authCorpusPerIP || s.DroppedByTag["LOGIN_POST"] != int64(40-authCorpusPerIP) {
-		t.Fatalf("per-IP cap: shapes=%d dropped=%v", s.Shapes, s.DroppedByTag)
+	if s = c.snapshot("", "", 0); s.Shapes != authCorpusPerNet {
+		t.Fatalf("per-/64 share: shapes=%d", s.Shapes)
 	}
-	// A full corpus evicts the oldest one-line shape for a new one.
-	c = newAuthCorpus(2)
-	r := authRec("1.1.1.1", "a.gr", "/a/login", 200, "LOGIN_POST;li=0;l=;c=")
-	c.add(r, "a.gr")
-	c.add(r, "a.gr") // count 2: never evicted
-	r2 := authRec("2.2.2.2", "a.gr", "/b/login", 200, "LOGIN_POST;li=0;l=;c=")
-	r2.TS = 900
-	c.add(r2, "a.gr")
-	c.add(authRec("3.3.3.3", "a.gr", "/c/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
-	s = c.snapshot("", "", 0)
-	if s.Shapes != 2 || s.Evicted != 1 || s.Dropped != 0 {
-		t.Fatalf("eviction: %+v", s)
-	}
-	for _, e := range s.Entries {
-		if e.Path == "/b/login" {
-			t.Fatalf("the one-line shape was not the one evicted: %+v", s.Entries)
+
+	// The third review's lock: 125 networks x 16 shapes x 2 lines filled the
+	// corpus with count-2 shapes and every later real shape was dropped. The
+	// least-used shape is evicted now, and a real one that keeps coming stays.
+	c = newAuthCorpus(0)
+	for n := 0; n < 125; n++ {
+		for k := 0; k < authCorpusPerNet; k++ {
+			r := authRec("10."+strconv.Itoa(n)+".0.1", "a.gr", "/"+letters(n)+"-"+strings.Repeat("z", k+1)+"/login", 200, "LOGIN_POST;li=0;l=;c=")
+			r.TS = float64(100 + n)
+			c.add(r, "a.gr")
+			c.add(r, "a.gr")
 		}
 	}
-	// Full of repeated shapes: refused, not evicted.
-	c.add(authRec("3.3.3.3", "a.gr", "/c/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
-	c.add(authRec("4.4.4.4", "a.gr", "/d/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
-	if s = c.snapshot("", "", 0); s.Dropped != 1 || s.Shapes != 2 {
-		t.Fatalf("full of repeats: %+v", s)
+	if s = c.snapshot("", "", 0); s.Shapes != authCorpusCap {
+		t.Fatalf("not full: %d", s.Shapes)
+	}
+	for i := 0; i < 1000; i++ {
+		c.add(authRec("203.0.113."+strconv.Itoa(i%250), "w.gr", "/wp-login.php", 200, "WP_LOGIN;li=0;l=;c="), "w.gr")
+	}
+	s = c.snapshot("WP_LOGIN", "", 0)
+	if len(s.Entries) != 1 || s.Entries[0].Count != 1000 || s.Dropped != 0 {
+		t.Fatalf("real shape after the junk: %+v", s)
+	}
+	if len(c.byNet) > authCorpusCap {
+		t.Fatalf("net bookkeeping outgrew the corpus: %d", len(c.byNet))
+	}
+	// The evicted shape released its network's slot.
+	total := 0
+	for _, n := range c.byNet {
+		total += n
+	}
+	if total != len(c.entries) {
+		t.Fatalf("net slots %d != live shapes %d", total, len(c.entries))
 	}
 	if e := newAuthCorpus(0).snapshot("", "", 0); e.Entries == nil {
 		t.Fatal("entries must be [] not null")
+	}
+}
+
+// letters spells n without digits or hex letters (both fold in a shape).
+func letters(n int) string {
+	out := ""
+	for {
+		out = string(rune('g'+n%20)) + out
+		n /= 20
+		if n == 0 {
+			return out
+		}
+	}
+}
+
+func TestAuthNet(t *testing.T) {
+	for in, want := range map[string]string{
+		"1.2.3.4": "1.2.3.0/24", "2001:db8::1": "2001:db8::/64", "::ffff:1.2.3.4": "1.2.3.0/24", "junk": "junk",
+	} {
+		if got := authNet(in); got != want {
+			t.Errorf("%s → %s, want %s", in, got, want)
+		}
 	}
 }
 

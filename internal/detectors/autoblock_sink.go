@@ -1116,11 +1116,15 @@ func extractUserAgent(samples []string) string {
 		// the old last-column guess.
 		if strings.Contains(ln, "\t") {
 			cols := strings.Split(ln, "\t")
-			ua := strings.TrimSpace(cols[len(cols)-1])
 			if len(cols) >= 12 {
-				ua = strings.TrimSpace(cols[11])
+				// A webdetector line: its UA column or nothing. The quoted
+				// scan below would pick a piece of the URI out of it.
+				if ua := strings.TrimSpace(cols[11]); ua != "" && ua != "-" {
+					return ua
+				}
+				continue
 			}
-			if ua != "" && ua != "-" {
+			if ua := strings.TrimSpace(cols[len(cols)-1]); ua != "" && ua != "-" {
 				return ua
 			}
 		}

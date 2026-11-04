@@ -59,10 +59,11 @@ type LogRec struct {
 	// "1" kind's, at the edge). False when the line had no such column (an
 	// older module, a file tailer).
 	Bypass bool
-	// Auth is the edge's login-outcome field (log-cfm.lua column 14, sent
-	// on a login POST only): "<TAG>:<outcome>;l=<location path>;c=<cookie
-	// names>[;a=<action>]". Empty on every other line, and on any line from
-	// an older module or a file tailer. Read with parseAuthField.
+	// Auth is the edge's login-facts field (log-cfm.lua column 14, sent on a
+	// login POST only): "<TAG>;li=<0|1>[;a=<action>];l=<location path>;c=<
+	// cookie names>". The daemon decides the outcome (authOutcome). Empty on
+	// every other line, and on any line from an older module or a file
+	// tailer. Read with parseAuthField.
 	Auth string
 }
 

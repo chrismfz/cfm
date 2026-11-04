@@ -139,9 +139,12 @@ columns byte for byte. That is what keeps an older daemon right during an
 upgrade. Its parser folds anything past column 13 into the bypass flag, so a
 15th column on every line would have turned every bypass client into a
 non-bypass one. The new parser reads 12–15 columns, and an old edge simply
-feeds no login field. A POST whose URI holds neither `login` nor `admin` is
-skipped before the tag is computed (every tag leg needs one of them; the Lua
-test pins it).
+feeds no login field. The tag is computed on the request's PATH, decoded
+once (as Apache will route it), never on the query: on the raw URI,
+`/wp-l%6Fgin.php` hid a login and `POST /contact/?redirect_to=/wp-login.php`
+made a form post a WordPress login. A POST whose path holds neither `login`
+nor `admin` is skipped before the tag is computed (every tag leg needs one
+of them; the Lua test pins it), so a long query is never scanned.
 
 ### 2.1 What the fleet's edge logs say (2026-11-04)
 
@@ -198,11 +201,13 @@ make a shape per site. Each shape keeps a count, distinct IPs and hosts
 (capped at 64) and up to 5 example hosts. The Location keeps two path
 segments, a person's name after `/members/`, `/user/`, `/author/` (...)
 folded to `<user>`. Every kept string is a copy, so no entry pins the 256 KB
-socket line it came from. It is bounded at 2 000 shapes. A client can create
-at most 16 of them, because the path is the client's to choose. A full corpus
-evicts its oldest one-line shape (`evicted`), and refuses a new shape only
-when every shape was seen more than once (`dropped`, `dropped_by_tag`). It
-lives in memory, and emptied by a restart or config reload. Reading it per CMS is
+socket line it came from, and the distinct-IP and -host counts keep only
+hashes. It is bounded at 2 000 shapes. One /24 (or IPv6 /64) can hold at most
+16 of them, because the path is the client's to choose; a network past its
+share has its new shapes refused (`dropped`, `dropped_by_tag`). A full corpus
+evicts its least-used shape (lowest count, then oldest), releasing its
+network's slot (`evicted`), so neither junk nor an old busy week freezes it.
+It lives in memory, and emptied by a restart or config reload. Reading it per CMS is
 the input to phase 1's outcome rules.
 
 ---

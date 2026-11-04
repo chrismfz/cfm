@@ -1,7 +1,9 @@
 package webdetector
 
 import (
+	"hash/fnv"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"sort"
 	"strconv"
@@ -21,28 +23,34 @@ import (
 // a success and which a failure, before any signal is keyed on it. A rule
 // written from memory is what made the first hunt read 302s as successes.
 //
-// Bounded: at most authCorpusCap shapes, each with a few example hosts and
-// distinct-IP / distinct-host counts capped at authCorpusSetCap. A shape past
-// the cap is counted in Dropped, not stored. It lives in memory only (a daemon
-// restart or config reload empties it) and it is node-wide, so its API is
-// admin-only. It holds no cookie value, no query string and no request body.
+// Bounded: at most authCorpusCap shapes, at most authCorpusPerNet of them
+// created by one /24 (or IPv6 /64), each with a few example hosts and
+// distinct-IP / distinct-host counts (FNV hashes, capped at authCorpusSetCap).
+// A full corpus evicts its least-used shape, so it never freezes. Lines whose
+// new shape is refused (a network past its share) are counted in Dropped. It
+// lives in memory only (a daemon restart or config reload empties it) and it
+// is node-wide, so its API is admin-only. It holds no cookie value, no query
+// string beyond a few route fields, and no request body.
 
 const (
 	// The edge's field tops out near 530 bytes (tag, 96-byte Location, 8
 	// cookie names of 48, a 24-byte action); a cut one would lose its tail.
 	maxAuthField      = 640
 	authCorpusMaxHost = 128
-	// authCorpusPerIP is how many shapes one client may create: shapes come
-	// from request paths an attacker chooses, so one IP could otherwise fill
-	// the corpus with junk. authCorpusCreators bounds that bookkeeping.
-	authCorpusPerIP    = 16
-	authCorpusCreators = 8192
-	authCorpusCap      = 2000
-	authCorpusSetCap   = 64
-	authCorpusHosts    = 5
-	authCorpusMaxURI   = 96
-	authCorpusDefLim   = 100
-	authCorpusMaxLim   = 1000
+	// authCorpusPerNet is how many live shapes one network (a /24, or a /64
+	// for IPv6) may hold: shapes come from request paths an attacker chooses.
+	// A shape's slot is released when it is evicted, so the bookkeeping
+	// never outgrows the corpus.
+	authCorpusPerNet = 16
+	// authCorpusEvictBatch is how many least-used shapes one full-corpus
+	// scan evicts.
+	authCorpusEvictBatch = 20
+	authCorpusCap        = 2000
+	authCorpusSetCap     = 64
+	authCorpusHosts      = 5
+	authCorpusMaxURI     = 96
+	authCorpusDefLim     = 100
+	authCorpusMaxLim     = 1000
 )
 
 // authField is a parsed LogRec.Auth: the facts the edge saw. The outcome
@@ -55,7 +63,8 @@ type authField struct {
 	Action   string // the query's action, when present
 }
 
-// parseAuthField reads "<TAG>;li=<0|1>;l=<loc>;c=<a,b>[;a=<action>]". An
+// parseAuthField reads "<TAG>;li=<0|1>[;a=<action>];l=<loc>;c=<a,b>" (keys
+// in any order). An
 // empty or malformed value is not a login line.
 func parseAuthField(s string) (authField, bool) {
 	if s == "" || s == "-" {
@@ -267,8 +276,9 @@ type AuthCorpusEntry struct {
 	LastTS   int64    `json:"last_ts"`
 
 	key     string
-	ipSet   map[string]struct{}
-	hostSet map[string]struct{}
+	net     string              // the network that created it (authCorpusPerNet)
+	ipSet   map[uint64]struct{} // FNV hashes: distinct counts only, no strings kept
+	hostSet map[uint64]struct{}
 }
 
 type authCorpus struct {
@@ -276,9 +286,9 @@ type authCorpus struct {
 	entries map[string]*AuthCorpusEntry
 	totals  map[string]map[string]int64 // tag → outcome → lines
 	dropped int64
-	dropTag map[string]int64 // shapes refused at the cap, per tag
-	evicted int64            // single-line shapes evicted to make room
-	byIP    map[string]int   // shapes each client created (authCorpusPerIP)
+	dropTag map[string]int64 // lines whose new shape was refused, per tag
+	evicted int64            // least-used shapes evicted to make room
+	byNet   map[string]int   // live shapes per creating network
 	since   int64
 	cap     int
 }
@@ -291,24 +301,49 @@ func newAuthCorpus(capacity int) *authCorpus {
 		entries: make(map[string]*AuthCorpusEntry),
 		totals:  make(map[string]map[string]int64),
 		dropTag: make(map[string]int64),
-		byIP:    make(map[string]int),
+		byNet:   make(map[string]int),
 		since:   time.Now().Unix(),
 		cap:     capacity,
 	}
 }
 
-func addCapped(set map[string]struct{}, v string) (map[string]struct{}, bool) {
+func authHash(v string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(v))
+	return h.Sum64()
+}
+
+func addCapped(set map[uint64]struct{}, v string) (map[uint64]struct{}, bool, bool) {
 	if set == nil {
-		set = make(map[string]struct{})
+		set = make(map[uint64]struct{})
 	}
-	if _, ok := set[v]; ok {
-		return set, false
+	k := authHash(v)
+	if _, ok := set[k]; ok {
+		return set, false, false
 	}
 	if len(set) >= authCorpusSetCap {
-		return set, true
+		return set, true, false
 	}
-	set[strings.Clone(v)] = struct{}{}
-	return set, false
+	set[k] = struct{}{}
+	return set, false, true
+}
+
+// authNet is the network a client's share is counted on: its /24, or its /64
+// for IPv6, so one host's neighbours (or one IPv6 prefix) share a quota.
+func authNet(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	bits := 24
+	if a.Is6() && !a.Is4In6() {
+		bits = 64
+	}
+	p, err := a.Unmap().Prefix(bits)
+	if err != nil {
+		return ip
+	}
+	return p.String()
 }
 
 // add records one login line. Every string it keeps is cloned: the parsed
@@ -359,20 +394,19 @@ func (c *authCorpus) add(rec LogRec, host string) {
 
 	cur := c.entries[key]
 	if cur == nil {
-		if c.byIP[rec.IP] >= authCorpusPerIP {
+		netKey := authNet(rec.IP)
+		if c.byNet[netKey] >= authCorpusPerNet {
 			c.dropped++
 			c.dropTag[af.Tag]++
 			return
 		}
-		if len(c.entries) >= c.cap && !c.evictOneLocked() {
+		if len(c.entries) >= c.cap && !c.evictLocked() {
 			c.dropped++
 			c.dropTag[af.Tag]++
 			return
 		}
-		if len(c.byIP) >= authCorpusCreators {
-			c.byIP = make(map[string]int)
-		}
-		c.byIP[strings.Clone(rec.IP)]++
+		c.byNet[netKey]++ // netip's String() is its own string
+		e.net = netKey
 		e.Tag, e.Upstream, e.Method = strings.Clone(e.Tag), strings.Clone(e.Upstream), strings.Clone(e.Method)
 		e.Path, e.Location = strings.Clone(e.Path), strings.Clone(e.Location)
 		e.Cookies, e.Action = strings.Clone(e.Cookies), strings.Clone(e.Action)
@@ -384,32 +418,57 @@ func (c *authCorpus) add(rec LogRec, host string) {
 	cur.Count++
 	cur.LastTS = ts
 	var full bool
-	cur.ipSet, full = addCapped(cur.ipSet, rec.IP)
+	cur.ipSet, full, _ = addCapped(cur.ipSet, rec.IP)
 	cur.Capped = cur.Capped || full
-	_, seen := cur.hostSet[host]
-	cur.hostSet, full = addCapped(cur.hostSet, host)
+	var newHost bool
+	cur.hostSet, full, newHost = addCapped(cur.hostSet, host)
 	cur.Capped = cur.Capped || full
-	if !seen && !full && len(cur.Examples) < authCorpusHosts {
+	if newHost && len(cur.Examples) < authCorpusHosts {
 		cur.Examples = append(cur.Examples, strings.Clone(host))
 	}
 }
 
-// evictOneLocked makes room by dropping the oldest shape seen only once (a
-// one-off, or junk a scanner made); it reports false when every shape has
-// been seen more than once. O(cap) on a full corpus only.
-func (c *authCorpus) evictOneLocked() bool {
-	var victim *AuthCorpusEntry
+// evictLocked makes room by dropping the least-used shapes (the lowest
+// count, oldest last sighting first) and releasing their networks' slots.
+// Any shape can go, so neither junk nor a busy week can freeze the corpus:
+// what stays is what keeps being seen. It evicts authCorpusEvictBatch at a
+// time, so the O(cap) scan is paid once per batch, not on every new shape a
+// botnet's unique paths bring (18 µs a shape with one per scan).
+func (c *authCorpus) evictLocked() bool {
+	batch := c.cap / 50 // 2% of the corpus, at most authCorpusEvictBatch
+	if batch < 1 {
+		batch = 1
+	}
+	if batch > authCorpusEvictBatch {
+		batch = authCorpusEvictBatch
+	}
+	victims := make([]*AuthCorpusEntry, 0, batch+1)
+	less := func(a, b *AuthCorpusEntry) bool {
+		return a.Count < b.Count || (a.Count == b.Count && a.LastTS < b.LastTS)
+	}
 	for _, e := range c.entries {
-		if e.Count == 1 && (victim == nil || e.LastTS < victim.LastTS) {
-			victim = e
+		// Keep victims sorted, best victim first, at most a batch long.
+		if len(victims) == batch && !less(e, victims[len(victims)-1]) {
+			continue
+		}
+		k := sort.Search(len(victims), func(i int) bool { return less(e, victims[i]) })
+		victims = append(victims, nil)
+		copy(victims[k+1:], victims[k:])
+		victims[k] = e
+		if len(victims) > batch {
+			victims = victims[:batch]
 		}
 	}
-	if victim == nil {
-		return false
+	for _, v := range victims {
+		delete(c.entries, v.key)
+		if n := c.byNet[v.net]; n <= 1 {
+			delete(c.byNet, v.net)
+		} else {
+			c.byNet[v.net] = n - 1
+		}
+		c.evicted++
 	}
-	delete(c.entries, victim.key)
-	c.evicted++
-	return true
+	return len(victims) > 0
 }
 
 // AuthCorpusSnapshot is what the API returns.
@@ -419,10 +478,9 @@ type AuthCorpusSnapshot struct {
 	Shapes  int    `json:"shapes"`
 	Cap     int    `json:"cap"`
 	Dropped int64  `json:"dropped"`
-	Evicted int64  `json:"evicted"` // one-line shapes dropped to make room
-	// DroppedByTag says whose shapes the caps refused (corpus full of
-	// repeated shapes, or a client past its per-IP share): their lines are in
-	// Totals but in no entry.
+	Evicted int64  `json:"evicted"` // least-used shapes dropped to make room
+	// DroppedByTag says whose lines found no room (a network past its
+	// share): they are in Totals but in no entry.
 	DroppedByTag map[string]int64            `json:"dropped_by_tag,omitempty"`
 	Totals       map[string]map[string]int64 `json:"totals"`
 	Entries      []AuthCorpusEntry           `json:"entries"`
