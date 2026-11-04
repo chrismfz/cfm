@@ -52,6 +52,22 @@ Behaviour + FP runbooks: **`docs/waf.md`**, `docs/waf-analysis-2026-05-08.md`,
   `10000+` band. As-built + "CVE hunting" recipe: **`WAF_CVE.md`**; design +
   candidate backlog: `WAF_CVE_PLAN.md`. Never write a signature from memory.
 - **Gap analysis follow-ups** — [idea]. See `docs/waf-gap-analysis-ninjafirewall.md`.
+- **Login brute-force signals in the web detector** — [next]. The edge counts
+  login *submissions* (rule 501: 8 per IP and site in 20 s), so a slow or
+  distributed attack never trips it: vol2.gr (titan) took 2 787 failed
+  `wp-login.php` posts in October from 1 121 IPs, none over 5 in 20 s, and the
+  same three IPs (217.60.196.2, 103.47.145.17, 49.232.230.213) tried 150+
+  WordPress sites on every node. The web detector already reads the origin's
+  status per request (`engine.go`, the 40x counters), so it can count FAILED
+  logins (a `wp-login.php` POST the origin answered 200; a 302 is a success):
+  per IP across vhosts over hours (ban), per vhost (alert, then a tighter per-IP
+  limit while the site is under attack), per /24, and a success from an IP that
+  failed elsewhere (alert). Every CMS the edge knows the same way (the
+  `auth_endpoint_tag` list: WordPress, Joomla `/administrator/`, OpenCart,
+  Magento, Drupal `/user/login`, Laravel-style `/admin/login`, generic `/login`),
+  each with its own success/failure answer to verify. The action (a ban through
+  the detector sink, or an edge deny) is open. Context: the 2026-11-04 vol2.gr
+  takeover attempt (rule 440, the 501 clearance cap).
 
 ## 3. MCP telemetry surface
 
