@@ -6140,7 +6140,9 @@ do
   -- controller with PATH_INFO, not a plugin file.
   local function plugin_php_path(uri)
     local p = lower(uri or "")
-    local s = p:find("/wp-content/plugins/", 1, true) or p:find("/wp-content/mu-plugins/", 1, true)
+    local a = p:find("/wp-content/plugins/", 1, true)
+    local b = p:find("/wp-content/mu-plugins/", 1, true)
+    local s = (a and b) and math.min(a, b) or a or b
     if not s then return false end
     if p:sub(1, s):find("%.php") then return false end
     local rest = p:sub(s)

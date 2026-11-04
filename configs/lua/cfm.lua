@@ -2005,8 +2005,12 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
         and waf.hits_auth_burst and waf.hits_auth_burst(waf_hits)
       if abh and not (ngx.ctx.cfm_resumed_post and SH
                       and SH:add("abrs|" .. ip, 1, waf.auth_window_sec and waf.auth_window_sec() or 20)) then
-        reason, waf_rule_id = abh.reason, abh.waf_rule_id
+        reason, ttl, waf_rule_id = abh.reason, abh.ttl or ttl, abh.waf_rule_id
         push_and_log_waf_hit()
+        -- The push and its waf_logonly line say logonly (no ban); this line
+        -- records that the request was refused.
+        log_route(ngx.INFO, "login_capped_pc ip=" .. ip .. " host=" .. host ..
+          " reason=" .. tostring(reason) .. " waf_rule_id=" .. tostring(waf_rule_id))
         ngx.header["X-CFM-Action"] = "login_capped_pc"
         ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
         observe_waf(ip, host, p_uri, p_meth, 403, reason, waf_rule_id)

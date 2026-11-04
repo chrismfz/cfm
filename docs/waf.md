@@ -1538,7 +1538,8 @@ cleared client, so it is never challenged again; for 501 that meant a client tha
 the challenge once could post logins without limit from its IP. cfm.lua now refuses the
 cleared client's submissions that cross the threshold (403, `X-CFM-Action:
 login_capped_pc`) until the window closes (`auth_window_sec`), and pushes the hit as
-`logonly` as before, so it never earns a `waf_security` ban. 501 counts wherever it
+`logonly` as before, so it never earns a `waf_security` ban; a `login_capped_pc` line in
+the edge error log records the refusal (cfm.waf.log and the history read logonly). 501 counts wherever it
 sits in the hit list: an equal-tier rule that runs earlier (302 on a `<script` arg)
 takes the headline, and keying on the headline let a cleared client switch the cap off
 with one junk argument. A resumed POST (the stashed login a client was challenged for,
@@ -1548,7 +1549,8 @@ mint resume tokens by posting without its cookie. In the three weeks before
 (2026-10-14 → 11-04, seven nodes, `cfm.waf.log`) 501 fired ~15 800 times, all at
 `challenge_v2` but 7 converted ones, and those 7 were Greek ISPs, a `cpanel.` login and an
 office tool: a ban would have hit them, a 20-second refusal does not hurt them. A cleared
-client posting at the cap still gets ~21 tries a minute; banning that is the job of a
+client posting at the cap still gets ~21 tries a minute (plus one resumed login per
+window, about 3 a minute, if it mints resume tokens); banning that is the job of a
 failed-login count in the web detector, which can see the origin's answer (planned, see
 `docs/ROADMAP.md`).
 
