@@ -198,14 +198,14 @@ COOLDOWN = "20m"
 ; GET-probe (`/c99.php`) is also what benign scanners (Shodan/Censys/monitors)
 ; do — but as of 2026-07-18 the operator runs it armed fleet-wide and confirms it
 ; cleanly bans malicious scanners/scrapers/bots, so it now arms to 1 by default
-; like the rest. BACKDOOR has no block rule yet (430-438 are logonly/challenge) so
-; it is inert, but is armed to 1 so it fires the moment one (e.g. 438) is promoted.
+; like the rest. BACKDOOR was armed to 1 before it had a block rule; its first,
+; 440 (the fake-plugin dropper's command call), landed 2026-11-04.
 ; Every family is a knob and the full registry is covered automatically
 ; (TestWAFSecurityFamilyCoverage).
 SQLI            = 1      ; WAF_SQLI (301, block). Separate key SQLI_LEXICAL (309)
                         ;   is challenge-tier → inert in Phase 1.
 RCE             = 1      ; WAF_RCE (has block rule 320)
-BACKDOOR        = 1      ; WAF_BACKDOOR (430-438) — armed; no block rule yet
+BACKDOOR        = 1      ; WAF_BACKDOOR (block rule 440; 430-439 logonly/challenge)
 UPLOAD_EXPLOIT  = 1      ; = UPLOAD_FNAME (401) + UPLOAD_CONTENT (402), both block
 WEBSHELL        = 1      ; WAF_WEBSHELL (413, block) — armed by default (2026-07-18).
                         ;   Exempt a benign scanner with ALLOW_UA_CONTAINS/ALLOW_NETS

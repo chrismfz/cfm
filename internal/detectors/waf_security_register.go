@@ -20,9 +20,9 @@ import (
 // Default: a family ships ON (threshold 1) iff it has an edge-`block` rule
 // today — because Phase 1 only feeds edge-`block` hits, those are the only
 // families that can actually autoblock. Everything else defaults to 0
-// (edge-only). WAF_BACKDOOR is armed to 1 as well even though it has no block
-// rule yet, so it autoblocks the moment one of its rules (e.g. 438) is promoted
-// to block after that rule's own burn-in.
+// (edge-only). WAF_BACKDOOR was armed to 1 before it had a block rule, so its
+// first one would autoblock with no config change; it has had one since
+// 2026-11-04 (440, the fake-plugin dropper's command call).
 //
 // WAF_CVE follows the normal block-rule rule: it has an edge-`block` rule
 // (10001, the Simple File List upload RCE) so it arms to 1 by default — the
@@ -99,7 +99,7 @@ func wafSecurityFamilies(kv KV) map[string]int {
 	families := map[string]int{}
 	for _, fam := range webdetector.WAFReasonFamilies() {
 		def := 0
-		if webdetector.WAFFamilyHasBlockRule(fam) || fam == "WAF_BACKDOOR" {
+		if webdetector.WAFFamilyHasBlockRule(fam) {
 			def = 1
 		}
 		if _, held := heldAutoblockFamilies[fam]; held {
@@ -167,8 +167,9 @@ func init() {
 		// candidate"). This scopes autoblock to what the edge itself already
 		// blocks — the high-confidence, rule-accurate set — rather than every
 		// rule in a family: a family like WAF_RCE spans block rule 320 AND
-		// logonly 322-327, and WAF_BACKDOOR has no block-tier rules at all, so
-		// family-only keying would pull in logonly/challenge recon. Phase 2 will
+		// logonly 322-327, and WAF_BACKDOOR block rule 440 with the logonly /
+		// challenge 430-439, so family-only keying would pull in logonly /
+		// challenge recon. Phase 2 will
 		// relax this to also feed challenge-tier families (bot-persistence).
 		webdetector.SubscribeWAFHitEvents(func(ev webdetector.WAFHitEvent) {
 			if ev.Action != "block" {

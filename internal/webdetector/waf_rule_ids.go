@@ -150,6 +150,10 @@ var wafRuleIDs = []WAFRule{
 	{ID: 437, Name: "rule_php_encoded_opener", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "challenge_v2"},
 	{ID: 438, Name: "rule_php_encoded_opener_b64", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "challenge_v2"},
 	{ID: 439, Name: "rule_php_numeric_xor_obfuscation", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
+	// 440: the fake-plugin dropper's download / run command on its own PHP
+	// file (vol2.gr, 2026-11-04). WAF_BACKDOOR's first block rule; the family
+	// was already armed in waf_security, so its hits ban.
+	{ID: 440, Name: "rule_plugin_dropper_cmd", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "block"},
 
 	// 5xx auth abuse
 	{ID: 501, Name: "rule_auth_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "challenge_v2"},

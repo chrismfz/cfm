@@ -1985,6 +1985,26 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
           (waf_rule_id and (" waf_rule_id=" .. tostring(waf_rule_id)) or ""))
       end
 
+      -- Rule 501 under a valid clearance: the post-clearance conversion makes
+      -- its challenge a logonly, and a client that solved the challenge once
+      -- could then post logins without limit from its IP. Refuse its posts
+      -- from the threshold-th on instead (403 until the window closes,
+      -- auth_window_sec), and push the hit as logonly as before, so
+      -- this never earns a waf_security ban: the cleared clients that crossed
+      -- 501 in the three weeks before (7 on seven nodes) were Greek ISPs and a
+      -- panel login, not attackers. A ban for a cleared brute force is the log
+      -- detector's job, on failed logins. A resumed POST is the login the
+      -- client was challenged for and has just solved: it is let through.
+      if waf_action == "logonly" and converted_from_challenge
+         and not ngx.ctx.cfm_resumed_post
+         and tonumber(waf_rule_id) == (waf.AUTH_BURST_RULE_ID or 501) then
+        push_and_log_waf_hit()
+        ngx.header["X-CFM-Action"] = "login_capped_pc"
+        ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
+        observe_waf(ip, host, p_uri, p_meth, 403, reason, waf_rule_id)
+        return ngx.exit(CFG.block_code)
+      end
+
       if waf_action == "logonly" then
         -- Not a decision: Steps 2b-4 decide (see waf_allow_action).
         -- The steps after this one set X-CFM-Action from it.
