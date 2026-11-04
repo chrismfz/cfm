@@ -1718,6 +1718,9 @@ end
 -- AUTH / BRUTE / XML-RPC HELPERS
 -- ─────────────────────────────────────────────────────────────────────────────
 
+-- log-cfm.lua's auth_field skips any POST whose URI holds neither "login"
+-- nor "admin" before calling this: a new leg keyed on neither must change
+-- that pre-check too (scripts/tests/cfm_log_auth_test.lua pins every leg).
 local function auth_endpoint_tag(uri, method)
   uri = lower(uri or "")
   method = lower(method or "get")

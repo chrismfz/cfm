@@ -77,9 +77,11 @@
 --                                         HasPrefix("cfm_apache") readers still
 --                                         take as the origin.
 --   14   auth    auth_field() below       ONLY on a login POST (the
---                                         auth_endpoint_tag list): the login
---                                         outcome + Set-Cookie names +
---                                         Location path. Added 2026-11-04;
+--                                         auth_endpoint_tag list): the
+--                                         logged-in-cookie bit + Set-Cookie
+--                                         names + Location path + query
+--                                         action; the daemon decides the
+--                                         outcome. Added 2026-11-04;
 --                                         every other line keeps 14 columns
 --                                         (why: auth_field's comment).
 --
@@ -252,28 +254,29 @@ local function arm(delay, kind)
   return false
 end
 
--- ── Column 14: the login outcome (docs/webdetector-signals-v2.md §2) ─────────
+-- ── Column 14: the login facts (docs/webdetector-signals-v2.md §2) ──────────
 -- Status alone cannot tell a login's outcome: a hide-login plugin answers a
 -- FAILED wp-login.php post with a 302 to ?login=failed, just like a success.
 -- What a success alone carries is the CMS's logged-in cookie, so the edge
 -- reads the response's Set-Cookie NAMES (never a value) and Location PATH
--- (never its query) for a login POST and sends them, with the outcome where
--- it is known, as one more column (idx 14, the 15th). Every other request
--- sends no such column, so its line stays byte-identical to before. That keeps an OLDER
--- daemon (which folds anything past column 13 into the bypass flag) reading
--- the bypass flag of every non-login line right during an upgrade.
+-- (never its query or host) for a login POST and sends them as one more
+-- column (idx 14, the 15th). The edge reports facts only; the DAEMON decides
+-- the outcome per CMS (auth_corpus.go authOutcome), where a rule learned from
+-- the corpus is a Go change, not an edge release. Every other request sends
+-- no such column, so its line stays byte-identical to before. That keeps an
+-- OLDER daemon (which folds anything past column 13 into the bypass flag)
+-- reading the bypass flag of every non-login line right during an upgrade.
 --
--- Value: "<TAG>:<outcome>;l=<location path>;c=<cookie names>[;a=<action>]"
---   TAG      auth_endpoint_tag (cfm_waf_detectors.lua, the one list) minus
---            "AUTH_": WP_LOGIN, JOOMLA_ADMIN, DRUPAL_LOGIN, MAGENTO_ADMIN, ...
---   outcome  WP_LOGIN only (the one CMS verified so far): "ok" = a
---            wordpress_logged_in_* cookie with a real value (WordPress sets it
---            on a completed login only, after a 2FA step too; a logout's
---            expired one carries a blank value); "fail" = no such cookie and
---            the login form again (200) or a redirect back to a login page;
---            "na" = another wp-login action (lostpassword, register, ...);
---            "?" = anything else (a 2FA or CAPTCHA step elsewhere). Every
---            other CMS is "?" until a fleet corpus decides its rule.
+-- Value: "<TAG>;li=<0|1>;l=<location path>;c=<cookie names>[;a=<action>]"
+--   TAG  auth_endpoint_tag (cfm_waf_detectors.lua, the one list) minus
+--        "AUTH_": WP_LOGIN, JOOMLA_ADMIN, DRUPAL_LOGIN, MAGENTO_ADMIN, ...
+--   li   1 = a wordpress_logged_in_* cookie with a real value (WordPress
+--        sets it on a completed login only, after a 2FA step too; a
+--        logout's expired one carries a blank value). Only the edge sees
+--        the value, so only this bit of the verdict is taken here.
+--   a    the query's `action`, when present (wp-login.php's lostpassword,
+--        register, ...). It is the QUERY's only: PHP's $_REQUEST lets a body
+--        field override it, so the daemon never lets `a` hide an li=1.
 local AUTH_MAX_COOKIES = 8
 local AUTH_MAX_NAME    = 48
 local AUTH_MAX_LOC     = 96
@@ -304,6 +307,10 @@ local function auth_field(var)
   if var.request_method ~= "POST" then return nil end
   local uri = var.request_uri
   if not uri or uri == "" then return nil end
+  -- Every auth_endpoint_tag leg (but xmlrpc, left out below) needs "login" or
+  -- "admin" in the URI (phpmyadmin included), so an ordinary POST skips the
+  -- tag's lower() of the whole URI and its dozen scans.
+  if not (uri:find("[Ll][Oo][Gg][Ii][Nn]") or uri:find("[Aa][Dd][Mm][Ii][Nn]")) then return nil end
   local tag = auth_tag(uri)
   -- xmlrpc is rule 510's (one POST can carry hundreds of attempts).
   if not tag or tag == "AUTH_WP_XMLRPC" then return nil end
@@ -329,30 +336,18 @@ local function auth_field(var)
   if type(loc) == "table" then loc = loc[1] end
   if type(loc) == "string" then
     loc = loc:match("^[^?#]*") or ""
-    loc = loc:gsub("^%a[%w+.-]*://[^/]*", "")
+    -- Drop the scheme+host, and a protocol-relative "//host": a path only.
+    loc = loc:gsub("^%a[%w+.-]*://[^/]*", ""):gsub("^//[^/]*", "")
     loc = loc:gsub("[^%w%-%._~/%%]", "_"):sub(1, AUTH_MAX_LOC)
   else
     loc = ""
   end
 
-  local outcome, action = "?", nil
-  if tag == "WP_LOGIN" then
-    local a = var.arg_action
-    if type(a) == "string" and a ~= "" and a:lower() ~= "login" then
-      outcome = "na"
-      action = a:lower():gsub("[^%w_%-]", "_"):sub(1, 24)
-    elseif logged_in then
-      outcome = "ok"
-    else
-      local st = tonumber(var.status) or 0
-      if st == 200 or (st >= 300 and st < 400 and loc:lower():find("login", 1, true)) then
-        outcome = "fail"
-      end
-    end
+  local v = tag .. ";li=" .. (logged_in and "1" or "0") .. ";l=" .. loc .. ";c=" .. table.concat(names, ",")
+  local a = var.arg_action
+  if type(a) == "string" and a ~= "" then
+    v = v .. ";a=" .. a:lower():gsub("[^%w_%-]", "_"):sub(1, 24)
   end
-
-  local v = tag .. ":" .. outcome .. ";l=" .. loc .. ";c=" .. table.concat(names, ",")
-  if action then v = v .. ";a=" .. action end
   return v
 end
 _M._auth_field = auth_field -- exposed for scripts/tests/cfm_log_auth_test.lua

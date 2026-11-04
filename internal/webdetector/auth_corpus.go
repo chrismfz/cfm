@@ -12,11 +12,12 @@ import (
 
 // The login-outcome corpus (docs/webdetector-signals-v2.md §2, phase 0).
 //
-// The edge sends, on every login POST, the outcome it can tell (WordPress
-// only, so far) plus the response's Set-Cookie NAMES and Location PATH
-// (log-cfm.lua column 14, LogRec.Auth). Nothing counts logins yet. This
-// corpus groups those lines by their shape (tag, outcome, status, path,
-// Location, cookie names) so a fleet read can decide, per CMS, which shape is
+// The edge sends, on every login POST, what it alone can see: whether the
+// response set WordPress's logged-in cookie with a real value, the
+// Set-Cookie NAMES and the Location PATH (log-cfm.lua column 14,
+// LogRec.Auth). authOutcome turns those into a verdict. Nothing counts logins
+// yet. This corpus groups those lines by their shape (tag, outcome, upstream,
+// status, path, Location, cookie names) so a fleet read can decide, per CMS, which shape is
 // a success and which a failure, before any signal is keyed on it. A rule
 // written from memory is what made the first hunt read 302s as successes.
 //
@@ -36,39 +37,37 @@ const (
 	authCorpusMaxLim = 1000
 )
 
-// authField is a parsed LogRec.Auth.
+// authField is a parsed LogRec.Auth: the facts the edge saw. The outcome
+// is the daemon's call (authOutcome).
 type authField struct {
-	Tag     string // WP_LOGIN, JOOMLA_ADMIN, ... (auth_endpoint_tag minus AUTH_)
-	Outcome string // ok | fail | na | ?
-	Loc     string // the Location path, query dropped at the edge
-	Cookies []string
-	Action  string // a wp-login action other than login (outcome na)
+	Tag      string // WP_LOGIN, JOOMLA_ADMIN, ... (auth_endpoint_tag minus AUTH_)
+	LoggedIn bool   // a wordpress_logged_in_* cookie with a real value
+	Loc      string // the Location path, query and host dropped at the edge
+	Cookies  []string
+	Action   string // the query's action, when present
 }
 
-// parseAuthField reads "<TAG>:<outcome>;l=<loc>;c=<a,b>[;a=<action>]". An
+// parseAuthField reads "<TAG>;li=<0|1>;l=<loc>;c=<a,b>[;a=<action>]". An
 // empty or malformed value is not a login line.
 func parseAuthField(s string) (authField, bool) {
 	if s == "" || s == "-" {
 		return authField{}, false
 	}
 	parts := strings.Split(s, ";")
-	head := parts[0]
-	i := strings.IndexByte(head, ':')
-	if i <= 0 || i == len(head)-1 {
+	if parts[0] == "" || strings.ContainsAny(parts[0], ":=,") || len(parts) < 2 {
 		return authField{}, false
 	}
-	af := authField{Tag: head[:i], Outcome: head[i+1:]}
-	switch af.Outcome {
-	case "ok", "fail", "na", "?":
-	default:
-		return authField{}, false
-	}
+	af := authField{Tag: parts[0]}
+	sawLI := false
 	for _, p := range parts[1:] {
 		k, v, ok := strings.Cut(p, "=")
 		if !ok {
 			continue
 		}
 		switch k {
+		case "li":
+			sawLI = true
+			af.LoggedIn = v == "1"
 		case "l":
 			af.Loc = v
 		case "c":
@@ -79,7 +78,41 @@ func parseAuthField(s string) (authField, bool) {
 			af.Action = v
 		}
 	}
+	if !sawLI {
+		return authField{}, false
+	}
 	return af, true
+}
+
+// authOutcome is the verdict on one login line: "ok", "fail", "na" (another
+// wp-login.php action) or "?" (not known). Only an answer from the site's
+// origin counts: a login POST CFM routed to its challenge server or blocked
+// at the edge says nothing about the password. WordPress is the one CMS
+// whose rule is verified (docs/webdetector-signals-v2.md §2); every other tag
+// is "?" until the corpus decides its rule, and that rule goes here.
+func authOutcome(rec LogRec, af authField) string {
+	if !strings.HasPrefix(rec.UpstreamName, "cfm_apache") {
+		return "?"
+	}
+	switch af.Tag {
+	case "WP_LOGIN":
+		// The cookie first: the query's action cannot hide a success, since
+		// PHP's $_REQUEST lets a body action=login override it.
+		if af.LoggedIn {
+			return "ok"
+		}
+		if af.Action != "" && af.Action != "login" {
+			// A real lostpassword/register POST, or a login hidden behind a
+			// query action: both answer 200 on a failure, so the line is kept
+			// apart (na) rather than counted as a failed login.
+			return "na"
+		}
+		st := rec.Status
+		if st == 200 || (st >= 300 && st < 400 && strings.Contains(strings.ToLower(af.Loc), "login")) {
+			return "fail"
+		}
+	}
+	return "?"
 }
 
 // Shape normalisation: hex runs (a Joomla session cookie is an md5 name,
@@ -162,6 +195,8 @@ func authCookieShape(names []string) string {
 type AuthCorpusEntry struct {
 	Tag      string   `json:"tag"`
 	Outcome  string   `json:"outcome"`
+	Upstream string   `json:"upstream"`
+	LoggedIn bool     `json:"logged_in_cookie"`
 	Method   string   `json:"method"`
 	Status   int      `json:"status"`
 	Path     string   `json:"path"`
@@ -185,6 +220,7 @@ type authCorpus struct {
 	entries map[string]*AuthCorpusEntry
 	totals  map[string]map[string]int64 // tag → outcome → lines
 	dropped int64
+	dropTag map[string]int64 // shapes refused at the cap, per tag
 	since   int64
 	cap     int
 }
@@ -196,6 +232,7 @@ func newAuthCorpus(capacity int) *authCorpus {
 	return &authCorpus{
 		entries: make(map[string]*AuthCorpusEntry),
 		totals:  make(map[string]map[string]int64),
+		dropTag: make(map[string]int64),
 		since:   time.Now().Unix(),
 		cap:     capacity,
 	}
@@ -220,9 +257,12 @@ func (c *authCorpus) add(rec LogRec, host string) {
 	if !ok {
 		return
 	}
+	outcome := authOutcome(rec, af)
 	e := AuthCorpusEntry{
 		Tag:      af.Tag,
-		Outcome:  af.Outcome,
+		Outcome:  outcome,
+		Upstream: rec.UpstreamName,
+		LoggedIn: af.LoggedIn,
 		Method:   rec.Method,
 		Status:   rec.Status,
 		Path:     authPathShape(rec.URI),
@@ -230,7 +270,11 @@ func (c *authCorpus) add(rec LogRec, host string) {
 		Cookies:  authCookieShape(af.Cookies),
 		Action:   af.Action,
 	}
-	key := e.Tag + "\x00" + e.Outcome + "\x00" + e.Method + "\x00" + strconv.Itoa(e.Status) + "\x00" +
+	li := "0"
+	if e.LoggedIn {
+		li = "1"
+	}
+	key := e.Tag + "\x00" + e.Outcome + "\x00" + e.Upstream + "\x00" + li + "\x00" + e.Method + "\x00" + strconv.Itoa(e.Status) + "\x00" +
 		e.Path + "\x00" + e.Location + "\x00" + e.Cookies + "\x00" + e.Action
 	ts := int64(rec.TS)
 
@@ -245,12 +289,13 @@ func (c *authCorpus) add(rec LogRec, host string) {
 		t = make(map[string]int64)
 		c.totals[af.Tag] = t
 	}
-	t[af.Outcome]++
+	t[outcome]++
 
 	cur := c.entries[key]
 	if cur == nil {
 		if len(c.entries) >= c.cap {
 			c.dropped++
+			c.dropTag[af.Tag]++
 			return
 		}
 		e.FirstTS = ts
@@ -275,13 +320,16 @@ func (c *authCorpus) add(rec LogRec, host string) {
 
 // AuthCorpusSnapshot is what the API returns.
 type AuthCorpusSnapshot struct {
-	Schema  string                      `json:"schema"`
-	Since   int64                       `json:"since"`
-	Shapes  int                         `json:"shapes"`
-	Cap     int                         `json:"cap"`
-	Dropped int64                       `json:"dropped"`
-	Totals  map[string]map[string]int64 `json:"totals"`
-	Entries []AuthCorpusEntry           `json:"entries"`
+	Schema  string `json:"schema"`
+	Since   int64  `json:"since"`
+	Shapes  int    `json:"shapes"`
+	Cap     int    `json:"cap"`
+	Dropped int64  `json:"dropped"`
+	// DroppedByTag says whose shapes the cap refused: their lines are in
+	// Totals but in no entry.
+	DroppedByTag map[string]int64            `json:"dropped_by_tag,omitempty"`
+	Totals       map[string]map[string]int64 `json:"totals"`
+	Entries      []AuthCorpusEntry           `json:"entries"`
 }
 
 func (c *authCorpus) snapshot(tag, outcome string, limit int) AuthCorpusSnapshot {
@@ -300,6 +348,15 @@ func (c *authCorpus) snapshot(tag, outcome string, limit int) AuthCorpusSnapshot
 		Cap:     c.cap,
 		Dropped: c.dropped,
 		Totals:  make(map[string]map[string]int64, len(c.totals)),
+	}
+	for k, n := range c.dropTag {
+		if tag != "" && k != tag {
+			continue
+		}
+		if out.DroppedByTag == nil {
+			out.DroppedByTag = make(map[string]int64)
+		}
+		out.DroppedByTag[k] = n
 	}
 	for k, m := range c.totals {
 		if tag != "" && k != tag {

@@ -10,15 +10,15 @@ import (
 const authBase = "1000.5\t1.2.3.4\tShop.GR\tPOST\t/wp-login.php\tHTTP/1.1\t302\t0\t0.1\t0.1\t-\tMozilla/5.0\tcfm_apache"
 
 func TestParseSocketTSVAuthColumn(t *testing.T) {
-	rec, ok := parseSocketTSV(authBase + "\t0\tWP_LOGIN:ok;l=/wp-admin/;c=wordpress_logged_in_ab")
-	if !ok || rec.Auth != "WP_LOGIN:ok;l=/wp-admin/;c=wordpress_logged_in_ab" || rec.Bypass || rec.UpstreamName != "cfm_apache" {
+	rec, ok := parseSocketTSV(authBase + "\t0\tWP_LOGIN;li=1;l=/wp-admin/;c=wordpress_logged_in_ab")
+	if !ok || rec.Auth != "WP_LOGIN;li=1;l=/wp-admin/;c=wordpress_logged_in_ab" || rec.Bypass || rec.UpstreamName != "cfm_apache" {
 		t.Fatalf("15 columns: %+v ok=%v", rec, ok)
 	}
 	if rec.UA != "mozilla/5.0" {
 		t.Fatalf("ua = %q", rec.UA)
 	}
 	// The bypass flag still reads with the 15th column after it.
-	if rec, _ = parseSocketTSV(authBase + "\t1\tWP_LOGIN:fail;l=;c="); !rec.Bypass || rec.Auth == "" {
+	if rec, _ = parseSocketTSV(authBase + "\t1\tWP_LOGIN;li=0;l=;c="); !rec.Bypass || rec.Auth == "" {
 		t.Fatalf("bypass beside auth: %+v", rec)
 	}
 	// 14 columns (every non-login line, every older module): no Auth.
@@ -26,7 +26,7 @@ func TestParseSocketTSVAuthColumn(t *testing.T) {
 		t.Fatalf("14 columns: %+v", rec)
 	}
 	// File tailers never read past column 11.
-	if rec, _ = parseTSV(authBase + "\t0\tWP_LOGIN:ok;l=;c="); rec.Auth != "" {
+	if rec, _ = parseTSV(authBase + "\t0\tWP_LOGIN;li=1;l=;c="); rec.Auth != "" {
 		t.Fatalf("file TSV read an auth column: %+v", rec)
 	}
 	// A 16th TAB (cannot come from log-cfm, which cleans the field) stays inside Auth, capped.
@@ -37,35 +37,64 @@ func TestParseSocketTSVAuthColumn(t *testing.T) {
 }
 
 func TestParseAuthField(t *testing.T) {
-	af, ok := parseAuthField("WP_LOGIN:na;l=/wp-login.php;c=a,b;a=lostpassword")
-	if !ok || af.Tag != "WP_LOGIN" || af.Outcome != "na" || af.Loc != "/wp-login.php" ||
+	af, ok := parseAuthField("WP_LOGIN;li=1;l=/wp-login.php;c=a,b;a=lostpassword")
+	if !ok || af.Tag != "WP_LOGIN" || !af.LoggedIn || af.Loc != "/wp-login.php" ||
 		len(af.Cookies) != 2 || af.Action != "lostpassword" {
 		t.Fatalf("%+v %v", af, ok)
 	}
-	for _, bad := range []string{"", "-", "WP_LOGIN", ":ok", "WP_LOGIN:", "WP_LOGIN:maybe;l=", strings.Repeat("x", 300)} {
+	for _, bad := range []string{"", "-", "WP_LOGIN", ";li=0", "WP_LOGIN;l=;c=", "WP_LOGIN:ok;li=1", strings.Repeat("x", 300)} {
 		if _, ok := parseAuthField(bad); ok {
 			t.Errorf("%q parsed", bad)
 		}
 	}
-	if af, ok := parseAuthField("JOOMLA_ADMIN:?;c=;l="); !ok || af.Cookies != nil {
+	if af, ok := parseAuthField("JOOMLA_ADMIN;li=0;c=;l="); !ok || af.Cookies != nil || af.LoggedIn {
 		t.Errorf("empty lists: %+v", af)
 	}
 }
 
+func TestAuthOutcome(t *testing.T) {
+	origin := func(st int) LogRec { return LogRec{Status: st, UpstreamName: "cfm_apache_ssl"} }
+	cases := []struct {
+		name string
+		rec  LogRec
+		af   authField
+		want string
+	}{
+		{"cookie set", origin(302), authField{Tag: "WP_LOGIN", LoggedIn: true, Loc: "/wp-admin/"}, "ok"},
+		{"form again", origin(200), authField{Tag: "WP_LOGIN"}, "fail"},
+		{"302 back to login (glaveris)", origin(302), authField{Tag: "WP_LOGIN", Loc: "/wp-login.php"}, "fail"},
+		{"hide-login slug", origin(302), authField{Tag: "WP_LOGIN", Loc: "/My-Login/"}, "fail"},
+		{"302 elsewhere without cookie (2FA)", origin(302), authField{Tag: "WP_LOGIN", Loc: "/2fa/"}, "?"},
+		{"lostpassword", origin(302), authField{Tag: "WP_LOGIN", Action: "lostpassword", Loc: "/wp-login.php"}, "na"},
+		{"query action cannot hide a success", origin(302), authField{Tag: "WP_LOGIN", LoggedIn: true, Action: "lostpassword"}, "ok"},
+		{"action=login is the login", origin(200), authField{Tag: "WP_LOGIN", Action: "login"}, "fail"},
+		{"the challenge server answered", LogRec{Status: 200, UpstreamName: "cfm_challenge"}, authField{Tag: "WP_LOGIN"}, "?"},
+		{"edge block", LogRec{Status: 403, UpstreamName: "cfm_block"}, authField{Tag: "WP_LOGIN", LoggedIn: true}, "?"},
+		{"no upstream name", LogRec{Status: 200, UpstreamName: "-"}, authField{Tag: "WP_LOGIN"}, "?"},
+		{"other CMS", origin(200), authField{Tag: "JOOMLA_ADMIN"}, "?"},
+		{"5xx", origin(500), authField{Tag: "WP_LOGIN"}, "?"},
+	}
+	for _, c := range cases {
+		if got := authOutcome(c.rec, c.af); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func authRec(ip, host, uri string, status int, auth string) LogRec {
-	return LogRec{TS: 1000, IP: ip, Host: host, Method: "post", URI: uri, Status: status, Auth: auth}
+	return LogRec{TS: 1000, IP: ip, Host: host, Method: "post", URI: uri, Status: status, Auth: auth, UpstreamName: "cfm_apache"}
 }
 
 func TestAuthCorpusShapes(t *testing.T) {
 	c := newAuthCorpus(0)
 	// Two Joomla sites: md5 cookie names and per-site digits fold into one shape.
 	c.add(authRec("1.1.1.1", "a.gr", "/administrator/index.php?task=login&option=com_login&x=1&return=aHR0cA", 303,
-		"JOOMLA_ADMIN:?;l=/administrator/index.php;c=0123456789abcdef0123456789abcdef,joomla_user_state"), "a.gr")
+		"JOOMLA_ADMIN;li=0;l=/administrator/index.php;c=0123456789abcdef0123456789abcdef,joomla_user_state"), "a.gr")
 	c.add(authRec("2.2.2.2", "b.gr", "/administrator/index.php?option=com_login&task=login", 303,
-		"JOOMLA_ADMIN:?;l=/administrator/index.php;c=joomla_user_state,fedcba9876543210fedcba9876543210"), "b.gr")
+		"JOOMLA_ADMIN;li=0;l=/administrator/index.php;c=joomla_user_state,fedcba9876543210fedcba9876543210"), "b.gr")
 	c.add(authRec("2.2.2.2", "b.gr", "/administrator/index.php?option=com_login&task=login#x", 303,
-		"JOOMLA_ADMIN:?;l=/administrator/index.php;c=joomla_user_state,fedcba9876543210fedcba9876543210"), "b.gr")
-	c.add(authRec("3.3.3.3", "c.gr", "/wp-login.php", 200, "WP_LOGIN:fail;l=;c="), "c.gr")
+		"JOOMLA_ADMIN;li=0;l=/administrator/index.php;c=joomla_user_state,fedcba9876543210fedcba9876543210"), "b.gr")
+	c.add(authRec("3.3.3.3", "c.gr", "/wp-login.php", 200, "WP_LOGIN;li=0;l=;c="), "c.gr")
 	c.add(LogRec{Host: "c.gr", Auth: "garbage"}, "c.gr")
 
 	s := c.snapshot("", "", 0)
@@ -109,16 +138,16 @@ func TestAuthPathShape(t *testing.T) {
 func TestAuthCorpusBounds(t *testing.T) {
 	c := newAuthCorpus(3)
 	for i := 0; i < 5; i++ {
-		c.add(authRec("1.1.1.1", "a.gr", "/login", 302, "LOGIN_POST:?;l=/p"+string(rune('a'+i))+";c="), "a.gr")
+		c.add(authRec("1.1.1.1", "a.gr", "/login", 302, "LOGIN_POST;li=0;l=/p"+string(rune('a'+i))+";c="), "a.gr")
 	}
 	s := c.snapshot("", "", 0)
-	if s.Shapes != 3 || s.Dropped != 2 || s.Totals["LOGIN_POST"]["?"] != 5 {
+	if s.Shapes != 3 || s.Dropped != 2 || s.DroppedByTag["LOGIN_POST"] != 2 || s.Totals["LOGIN_POST"]["?"] != 5 {
 		t.Fatalf("cap: shapes=%d dropped=%d totals=%v", s.Shapes, s.Dropped, s.Totals)
 	}
 	c = newAuthCorpus(0)
 	for i := 0; i < 100; i++ {
 		ip := "10.0." + string(rune('0'+i/10)) + "." + string(rune('0'+i%10))
-		c.add(authRec(ip, ip+".gr", "/wp-login.php", 200, "WP_LOGIN:fail;l=;c="), ip+".gr")
+		c.add(authRec(ip, ip+".gr", "/wp-login.php", 200, "WP_LOGIN;li=0;l=;c="), ip+".gr")
 	}
 	e := c.snapshot("", "", 0).Entries[0]
 	if e.Count != 100 || e.IPs != authCorpusSetCap || e.Hosts != authCorpusSetCap || !e.Capped || len(e.Examples) != authCorpusHosts {
@@ -131,7 +160,7 @@ func TestAuthCorpusBounds(t *testing.T) {
 
 func TestAuthCorpusIngestAndAPI(t *testing.T) {
 	e := NewEngine(Config{})
-	rec, _ := parseSocketTSV(authBase + "\t0\tWP_LOGIN:fail;l=/wp-login.php;c=")
+	rec, _ := parseSocketTSV(authBase + "\t0\tWP_LOGIN;li=0;l=/wp-login.php;c=")
 	e.ingest(rec, "")
 	other, _ := parseSocketTSV(strings.Replace(authBase, "/wp-login.php", "/", 1) + "\t0")
 	e.ingest(other, "")

@@ -74,56 +74,73 @@ plugin directories). vol2.gr was an attempt, cut off by rule 440.
 
 ## 2. Login outcomes: the missing column
 
-Today the socket line has 14 columns (`log-cfm.lua` `_M.log`, parsed by
-`parseTSVCols`, `engine.go`). It has no `Location` and no `Set-Cookie`.
-The edge's file log already writes `uloc="$upstream_http_location"`; the
-socket does not.
+Before phase 0 the socket line had 14 columns (`log-cfm.lua` `_M.log`,
+parsed by `parseTSVCols`, `engine.go`), with no `Location` and no
+`Set-Cookie`. The edge's file log writes `uloc="$upstream_http_location"`;
+the socket did not.
 
-**Add one column, `auth`, computed at the edge in the log phase, ONLY for a
-request `auth_endpoint_tag` classifies as a login.** That is a cheap test,
-and every other request carries `-`. Its value is
-`<tag>:<outcome>`, for example `WP:ok`, `WP:fail`, `JOOMLA:?`.
+**One more column, `auth`, sent ONLY for a POST `auth_endpoint_tag`
+classifies as a login.** The edge reports facts; the daemon decides the
+outcome (`authOutcome`, `auth_corpus.go`). That way a per-CMS rule learned
+from the corpus is a Go change, not an edge release. As built the field is
 
-- `ok`: the response sets the CMS's logged-in cookie. For WordPress that is
-  `wordpress_logged_in_*`, which WordPress sets only on a completed login,
-  after a 2FA step too. This is the only reliable success marker. The edge
-  reads it with `ngx.resp.get_headers()["set-cookie"]` in the log phase,
-  name prefix only, never the value.
-- `fail`: a POST that set no logged-in cookie and either answered 200 (the
-  form shown again) or redirected to the login page (`Location` containing
-  `wp-login.php` / `login=failed`).
-- `?`: anything else (a 2FA interstitial, a CAPTCHA plugin's own page). It
-  is counted as neither.
+    <TAG>;li=<0|1>;l=<location path>;c=<cookie names>[;a=<action>]
+
+- `TAG`: `auth_endpoint_tag` minus `AUTH_` (`WP_LOGIN`, `JOOMLA_ADMIN`,
+  `DRUPAL_LOGIN`, `MAGENTO_ADMIN`, ...). xmlrpc is left out (rule 510).
+- `li=1`: the response set a `wordpress_logged_in_*` cookie with a real
+  value. WordPress sets it only on a completed login, after a 2FA step too.
+  A logout's expired cookie carries a blank value. Only the edge sees cookie
+  values, so this one bit is decided there (`ngx.header["Set-Cookie"]`).
+  The value never leaves the edge.
+- `l=`: the `Location` path, its scheme, host (protocol-relative too) and
+  query dropped.
+- `c=`: the names of up to 8 cookies the response set.
+- `a=`: the query's `action`, when present.
+
+The daemon's WordPress rule (the one verified so far):
+
+- `?` whenever the origin did not answer (`cfm_upstream` is not
+  `cfm_apache*`: CFM's challenge server, an edge block). Such an answer says
+  nothing about the password.
+- `ok`: `li=1`. This is checked first, whatever the action. PHP's
+  `$_REQUEST` lets a body `action=login` override the query, so a query
+  action must never hide a success.
+- `na`: another query action (lostpassword, register, ...). A login hidden
+  behind `?action=lostpassword` also lands here; both answer 200 on a
+  failure, so phase 1 has to read `na` + 200 on its own, not as a failure.
+- `fail`: the form again (200), or a redirect to a path containing `login`
+  (`wp-login.php`, a hide-login slug). The `?login=failed` query itself
+  never reaches the daemon.
+- `?`: anything else (a 2FA or CAPTCHA step elsewhere).
 
 Per-CMS markers must be **measured, not guessed**: the CLAUDE.md rule for CVE
-signatures applies here too. WordPress is the one verified. For Joomla
-(`/administrator/`), OpenCart, Magento, Drupal, Laravel `/admin/login` and
-generic `/login`, phase 0 ships the column with outcome `?` plus a corpus
-line: tag, status, Location path, and the names of the cookies set. A fleet
-read of that corpus then decides each CMS's `ok`/`fail` rule. A CMS whose
-success cookie cannot be told from its anonymous session cookie stays `?`, and
-only its failure-shaped answers count.
+signatures applies here too. Joomla (`/administrator/`), OpenCart, Magento,
+Drupal, Laravel `/admin/login` and generic `/login` are `?` until a fleet
+read of the corpus decides each rule. A CMS whose success cookie cannot be
+told from its anonymous session cookie (Laravel's `laravel_session` is set on
+every answer) is decided by its Location alone, or stays `?`.
 
-As built, the field is `<TAG>:<outcome>;l=<location path>;c=<cookie
-names>[;a=<action>]`. The tag is `auth_endpoint_tag` minus `AUTH_`; xmlrpc is
-left out (rule 510). `na` marks another `wp-login.php` action (lostpassword,
-register), with `a=` naming it. The column is sent **only on a login POST**:
-every other line keeps its 14 columns byte for byte. That is what keeps an
-older daemon right during an upgrade. Its parser folds anything past column 13
-into the bypass flag, so a 15th column on every line would have turned every
-bypass client into a non-bypass one. The new parser reads 12–15 columns, and an
-old edge simply feeds no login field.
+The column is sent **only on a login POST**: every other line keeps its 14
+columns byte for byte. That is what keeps an older daemon right during an
+upgrade. Its parser folds anything past column 13 into the bypass flag, so a
+15th column on every line would have turned every bypass client into a
+non-bypass one. The new parser reads 12–15 columns, and an old edge simply
+feeds no login field. A POST whose URI holds neither `login` nor `admin` is
+skipped before the tag is computed (every tag leg needs one of them; the Lua
+test pins it).
 
 The corpus (`auth_corpus.go`, MCP `auth_corpus`) groups login lines by
-(tag, outcome, method, status, path, Location path, cookie names).
+(tag, outcome, upstream, `li`, method, status, path, Location path, cookie
+names).
 The path keeps the query fields that name a front controller's action
 (`option`, `task`, `route`, `controller`, `action`, `view`): every Joomla
 admin POST is tagged, a save as well as the login, and only those tell
 them apart. Hex and
 digit runs are folded, so a Joomla md5 cookie name or a site id does not
 make a shape per site. Each shape keeps a count, distinct IPs and hosts
-(capped at 64) and up to 5 example hosts. It is bounded at 2 000 shapes,
-in memory, and emptied by a restart or config reload. Reading it per CMS is
+(capped at 64) and up to 5 example hosts. It is bounded at 2 000 shapes
+(`dropped_by_tag` names whose shapes the cap refused), in memory, and emptied by a restart or config reload. Reading it per CMS is
 the input to phase 1's outcome rules.
 
 ---

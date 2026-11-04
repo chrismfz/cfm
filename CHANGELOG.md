@@ -23,9 +23,10 @@ back-filled here — see the git/PR history for that period.
   `?login=failed`, exactly like a success. A login POST (the WAF's list of
   login endpoints: WordPress, Joomla, Drupal, Magento, OpenCart, `/login`, …)
   now sends the web detector one more field: whether WordPress set its
-  logged-in cookie (`ok`), showed the form again (`fail`), or something else,
-  plus the response's cookie NAMES and redirect path (never a cookie value or
-  a query string). Nothing counts or blocks on it yet: the new MCP tool
+  logged-in cookie, plus the response's cookie NAMES and redirect path (never
+  a cookie value, a host or a query string). The daemon turns that into an
+  outcome (`ok`, `fail`, or unknown), only for answers that came from the
+  site itself. Nothing counts or blocks on it yet: the new MCP tool
   `auth_corpus` (`/api/v1/webdet/auth-corpus`, admin-only) groups what was
   seen by shape, so each CMS's success and failure answer can be read from
   real traffic before the login brute-force signals are built on it

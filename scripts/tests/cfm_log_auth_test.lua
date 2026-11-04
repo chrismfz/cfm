@@ -1,5 +1,5 @@
--- Tests for log-cfm.lua's login-outcome column (idx 14, login POSTs only;
--- docs/webdetector-signals-v2.md §2). Status alone cannot tell a login's
+-- Tests for log-cfm.lua's login-facts column (idx 14, login POSTs only;
+-- docs/webdetector-signals-v2.md §2; the daemon decides the outcome). Status alone cannot tell a login's
 -- outcome (glaveris.gr: a hide-login plugin answered a failed wp-login.php
 -- post with 302 → ?login=failed); the wordpress_logged_in_* cookie can.
 
@@ -43,42 +43,62 @@ end
 local LI = "wordpress_logged_in_0123abcd=admin%7C1790000000%7CtOkEn%7Chm4c; path=/; secure; HttpOnly"
 local SEC = "wordpress_sec_0123abcd=admin%7C1790000000%7CtOkEn%7Chm4c; path=/wp-admin; secure; HttpOnly"
 
--- ── WordPress outcomes ──────────────────────────────────────────────────────
+-- ── The facts (the daemon decides the outcome: auth_corpus.go) ──────────────
 check(af(req("POST", "/wp-login.php", 302, { ["Set-Cookie"] = { SEC, LI }, Location = "https://x.gr/wp-admin/" }))
-  == "WP_LOGIN:ok;l=/wp-admin/;c=wordpress_sec_0123abcd,wordpress_logged_in_0123abcd",
-  "a success: the logged-in cookie, the host-stripped Location path, the cookie NAMES only")
-check(af(req("POST", "/wp-login.php", 200, {})) == "WP_LOGIN:fail;l=;c=",
-  "a failure: the form shown again (200), no cookie")
+  == "WP_LOGIN;li=1;l=/wp-admin/;c=wordpress_sec_0123abcd,wordpress_logged_in_0123abcd",
+  "a success: li=1, the host-stripped Location path, the cookie NAMES only")
+check(af(req("POST", "/wp-login.php", 200, {})) == "WP_LOGIN;li=0;l=;c=", "the form shown again")
 check(af(req("POST", "/wp-login.php", 302, { Location = "https://x.gr/wp-login.php?login=failed" }))
-  == "WP_LOGIN:fail;l=/wp-login.php;c=",
-  "the glaveris.gr case: a 302 back to the login page is a failure, its query dropped")
-check(af(req("POST", "/secret-login/", 302, { Location = "/secret-login/?err=1" })) == nil,
-  "a hide-login path auth_endpoint_tag does not know is not a login line")
-check(af(req("POST", "/wp-login.php", 302, { Location = "/2fa-step/" })):sub(1, 11) == "WP_LOGIN:?;",
-  "a redirect elsewhere without the cookie (a 2FA step) is unknown, not a failure")
+  == "WP_LOGIN;li=0;l=/wp-login.php;c=",
+  "the glaveris.gr case: a 302 back to the login page, its query dropped")
+check(af(req("POST", "/wp-login.php", 302, { Location = "//other.example/wp-admin/" })) == "WP_LOGIN;li=0;l=/wp-admin/;c=",
+  "a protocol-relative Location loses its host")
 check(af(req("POST", "/wp-login.php", 302, { ["Set-Cookie"] = "wordpress_logged_in_0123abcd=+; expires=Thu, 01-Jan-1970 00:00:01 GMT; path=/",
-  Location = "/wp-login.php?loggedout=true" })) == "WP_LOGIN:fail;l=/wp-login.php;c=wordpress_logged_in_0123abcd",
-  "an expired logged-in cookie (blank value) is not a success")
-check(af(req("POST", "/wp-login.php?action=lostpassword", 302, { Location = "/wp-login.php?checkemail=confirm" }, { arg_action = "lostpassword" }))
-  == "WP_LOGIN:na;l=/wp-login.php;c=;a=lostpassword",
-  "another wp-login action is na, with the action")
-check(af(req("POST", "/wp-login.php?action=login", 200, {}, { arg_action = "LOGIN" })) == "WP_LOGIN:fail;l=;c=",
-  "action=login is the login")
-check(af(req("POST", "/wp-login.php?action=x%09y", 200, {}, { arg_action = "re\tg;i=1" })) == "WP_LOGIN:na;l=;c=;a=re_g_i_1",
+  Location = "/wp-login.php?loggedout=true" })) == "WP_LOGIN;li=0;l=/wp-login.php;c=wordpress_logged_in_0123abcd",
+  "an expired logged-in cookie (blank value) is not li=1")
+check(af(req("POST", "/wp-login.php?action=lostpassword", 302, { ["Set-Cookie"] = LI, Location = "/wp-admin/" }, { arg_action = "lostpassword" }))
+  == "WP_LOGIN;li=1;l=/wp-admin/;c=wordpress_logged_in_0123abcd;a=lostpassword",
+  "a query action is reported beside li, never instead of it (a body action=login overrides it in PHP)")
+check(af(req("POST", "/wp-login.php?action=x%09y", 200, {}, { arg_action = "re\tg;i=1" })) == "WP_LOGIN;li=0;l=;c=;a=re_g_i_1",
   "the action is reduced to a safe charset")
-check(af(req("POST", "/blog/wp-login.php", 200, {})) == "WP_LOGIN:fail;l=;c=", "WordPress in a subdirectory")
+check(af(req("POST", "/blog/wp-login.php", 200, {})) == "WP_LOGIN;li=0;l=;c=", "WordPress in a subdirectory")
+check(af(req("POST", "/WP-LOGIN.PHP", 200, {})) == "WP_LOGIN;li=0;l=;c=", "the pre-check is case-insensitive")
 
--- ── Other CMSes: corpus only, no outcome yet ─────────────────────────────────
+-- ── Other CMSes: the same facts ──────────────────────────────────────────────
 check(af(req("POST", "/administrator/index.php", 303, { ["Set-Cookie"] = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4=sess; path=/", Location = "/administrator/index.php" }))
-  == "JOOMLA_ADMIN:?;l=/administrator/index.php;c=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-  "Joomla admin: unknown outcome, the corpus fields")
-check(af(req("POST", "/user/login", 200, {})) == "DRUPAL_LOGIN:?;l=;c=", "Drupal")
-check(af(req("POST", "/login", 302, { Location = "/dashboard" })) == "LOGIN_POST:?;l=/dashboard;c=", "a generic /login")
+  == "JOOMLA_ADMIN;li=0;l=/administrator/index.php;c=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", "Joomla admin")
+check(af(req("POST", "/user/login", 200, {})) == "DRUPAL_LOGIN;li=0;l=;c=", "Drupal")
+check(af(req("POST", "/login", 302, { Location = "/dashboard" })) == "LOGIN_POST;li=0;l=/dashboard;c=", "a generic /login")
+
+-- Every auth_endpoint_tag leg gets past auth_field's login/admin pre-check
+-- (a new leg keyed on neither word must change the pre-check too).
+do
+  local legs = {
+    ["/wp-login.php"] = "WP_LOGIN", ["/phpmyadmin/index.php"] = "PHPMYADMIN", ["/user/login"] = "DRUPAL_LOGIN",
+    ["/administrator/index.php"] = "JOOMLA_ADMIN", ["/admin/auth/x"] = "MAGENTO_ADMIN",
+    ["/admin/index.php"] = "OPENCART_ADMIN", ["/admin/login"] = "MAGENTO_ADMIN", ["/login"] = "LOGIN_POST",
+  }
+  for uri, want in pairs(legs) do
+    local v = af(req("POST", uri, 200, {}))
+    check(v and v:match("^([%u_]+);") == want, "leg " .. uri .. " → " .. want .. " (got " .. tostring(v) .. ")")
+  end
+  -- …and the pre-check's own premise, against the real list: a URI without
+  -- either word is never tagged.
+  local d = require("cfm_waf_detectors")
+  for _, uri in ipairs({ "/xmlrpc.php", "/wp-admin/admin-ajax.php", "/index.php?option=com_users", "/user/register" }) do
+    local t = d.auth_endpoint_tag(uri, "post")
+    check(t == nil or t == "AUTH_WP_XMLRPC" or uri:lower():find("login") or uri:lower():find("admin"),
+      "a tag without login/admin in the URI: " .. uri .. " → " .. tostring(t))
+  end
+end
 
 -- ── Not login lines ──────────────────────────────────────────────────────────
 check(af(req("GET", "/wp-login.php", 200, {})) == nil, "a GET of the login page")
 check(af(req("POST", "/xmlrpc.php", 200, {})) == nil, "xmlrpc is rule 510's")
 check(af(req("POST", "/wp-admin/admin-ajax.php?action=heartbeat", 200, {})) == nil, "an ordinary POST")
+check(af(req("POST", "/wp-json/wp/v2/posts", 200, {})) == nil, "a POST without login/admin")
+check(af(req("POST", "/secret-login/", 302, { Location = "/secret-login/?err=1" })) == nil,
+  "a hide-login path auth_endpoint_tag does not know")
 check(af(req("POST", "", 200, {})) == nil, "no URI")
 
 -- ── Bounds and sanitising ────────────────────────────────────────────────────
@@ -95,9 +115,11 @@ do
   check(#l == 96, "the Location path is capped (got " .. #l .. ")")
   check(not v:find("[\t\n<>]"), "no TAB, newline or markup in the field")
   v = af(req("POST", "/wp-login.php", 302, { Location = { "/wp-login.php?x", "/other" } }))
-  check(v == "WP_LOGIN:fail;l=/wp-login.php;c=", "a repeated Location: the first")
+  check(v == "WP_LOGIN;li=0;l=/wp-login.php;c=", "a repeated Location: the first")
   v = af(req("POST", "/wp-login.php", 200, { ["Set-Cookie"] = "we!rd\"name=1" }))
-  check(v == "WP_LOGIN:fail;l=;c=we_rd_name", "a cookie name reduced to a safe charset")
+  check(v == "WP_LOGIN;li=0;l=;c=we_rd_name", "a cookie name reduced to a safe charset")
+  v = af(req("POST", "/wp-login.php", 200, { ["Set-Cookie"] = { "x=1", LI } }))
+  check(v:find(";li=1;", 1, true), "li=1 even when the logged-in cookie is not the first")
 end
 
 -- ── The line: 15 columns on a login POST, 14 otherwise ──────────────────────
@@ -124,7 +146,7 @@ end
 do
   local l = line_for("POST", "/wp-login.php", 302, { ["Set-Cookie"] = LI, Location = "/wp-admin/" })
   check(ncols(l) == 15, "a login POST line has 15 columns (got " .. ncols(l) .. ")")
-  check(l:find("\tWP_LOGIN:ok;l=/wp-admin/;c=wordpress_logged_in_0123abcd\n", 1, true), "…ending in the auth field")
+  check(l:find("\tWP_LOGIN;li=1;l=/wp-admin/;c=wordpress_logged_in_0123abcd\n", 1, true), "…ending in the auth field")
   check(not l:find("tOkEn", 1, true), "no cookie VALUE reaches the line")
   l = line_for("GET", "/", 200, { ["Set-Cookie"] = LI })
   check(ncols(l) == 14, "any other line keeps 14 columns (got " .. ncols(l) .. ")")
