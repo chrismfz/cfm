@@ -1381,7 +1381,9 @@ directories carried a `task` field outside these attacks. Joomla's `task=` on
 (`/wp-content/plugins/x/?task=run` reaching an `index.php`), another field name, a
 `url` without a scheme (`151.245.195.51/bog`, `//host/x`) or no `url` at all (the
 URL inside the dropper), a command in a header or a cookie, and a form body padded
-past `waf_body_max_len` (32 KB), which the edge does not read whole: only the
+past `waf_body_max_len` (32 KB), which the edge does not read whole, or one it
+reads only in the body burn-in (chunked, no Content-Length, or over the read limit),
+where 440 is not enforced (`BURNIN_ENFORCE_IDS`) and its hit is logged: only the
 query is certain. The upload itself is not refused here: a logged-in upload is the
 administrator's own action, as far as the edge can tell.
 
@@ -1540,7 +1542,8 @@ login_capped_pc`) until the window closes (`auth_window_sec`), and pushes the hi
 sits in the hit list: an equal-tier rule that runs earlier (302 on a `<script` arg)
 takes the headline, and keying on the headline let a cleared client switch the cap off
 with one junk argument. A resumed POST (the stashed login a client was challenged for,
-replayed after the solve) is let through once per IP and host per window: a client can
+replayed after the solve) is let through once per IP per window, the counter's own grain
+(501 counts per IP across vhosts): a client can
 mint resume tokens by posting without its cookie. In the three weeks before
 (2026-10-14 → 11-04, seven nodes, `cfm.waf.log`) 501 fired ~15 800 times, all at
 `challenge_v2` but 7 converted ones, and those 7 were Greek ISPs, a `cpanel.` login and an

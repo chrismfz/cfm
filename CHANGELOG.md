@@ -29,7 +29,7 @@ back-filled here — see the git/PR history for that period.
   `[waf_security]` to ban and alert), because a page can make a visitor's
   browser send `task=run`.
 - **A cleared visitor can no longer post logins without limit.** Rule 501
-  (8 login posts per IP and site in 20 s) challenges the client, but one that
+  (8 login posts per IP in 20 s, across sites) challenges the client, but one that
   had already solved a challenge only got a log line, so it could keep
   guessing passwords from its IP. Those posts past the limit now get a 403
   until the 20 s window closes, whichever rule takes the headline. They earn no

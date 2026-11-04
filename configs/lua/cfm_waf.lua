@@ -2558,24 +2558,6 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── Fake-plugin dropper command (440) ────────────────────────────────────
-  -- The dropper's own PHP file called with its download / run command
-  -- (det.detect_plugin_dropper_cmd). Block: the plugin is already on disk and
-  -- this call fetches and runs the payload. Its ban is held in code through a
-  -- burn-in (WAFRule.HoldAutoblock: `task=run` on any plugin PHP is enough,
-  -- and a page can make a visitor's browser send it), so it runs here with
-  -- the other held block rules, after every armed one (CLAUDE.md §6).
-  do
-    local mode = rule_mode(CFG.rule_plugin_dropper_cmd, "block")
-    if mode ~= "disabled" then
-      local tag = det.detect_plugin_dropper_cmd(uri, method, args, body, headers)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_BACKDOOR:PLUGIN_CMD:" .. tag, ttl, mode, RULE_IDS.rule_plugin_dropper_cmd) then goto done end
-      end
-    end
-  end
-
   -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018-10020) ──
   -- Placed after every armed block-tier family, next to traversal, for the
   -- same reason: 10019 and 10020 block at the edge but their autoblock is
@@ -2705,6 +2687,24 @@ local function check_impl(ctx, st)
     local b = st.bad_ua
     st.bad_ua = nil
     if record(b.reason, b.ttl, "block", RULE_IDS.rule_bad_ua) then goto done end
+  end
+
+  -- ── Fake-plugin dropper command (440) ────────────────────────────────────
+  -- The dropper's own PHP file called with its download / run command
+  -- (det.detect_plugin_dropper_cmd). Block: the plugin is already on disk and
+  -- this call fetches and runs the payload. Its ban is held in code through a
+  -- burn-in (WAFRule.HoldAutoblock: `task=run` on any plugin PHP is enough,
+  -- and a page can make a visitor's browser send it), so it runs here with
+  -- the other held block rules, after every armed one (CLAUDE.md §6).
+  do
+    local mode = rule_mode(CFG.rule_plugin_dropper_cmd, "block")
+    if mode ~= "disabled" then
+      local tag = det.detect_plugin_dropper_cmd(uri, method, args, body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_BACKDOOR:PLUGIN_CMD:" .. tag, ttl, mode, RULE_IDS.rule_plugin_dropper_cmd) then goto done end
+      end
+    end
   end
 
   -- ── Traversal (rule 101) — AFTER every armed block-tier family on purpose ──
@@ -2983,17 +2983,21 @@ _M.WAF_HIGH_RISK_REASONS = {
   WAF_BACKDOOR           = true,
 }
 
--- For cfm.lua's post-clearance login cap: did rule 501 match this request
--- (anywhere in the hit list, not only as the headline: an equal-tier rule that
--- runs earlier, 302 on a stray `<script` arg, takes the headline), and how long
--- its window is.
-_M.AUTH_BURST_RULE_ID = RULE_IDS.rule_auth_burst
+-- For cfm.lua's post-clearance login cap: rule 501's hit at a challenge tier
+-- (the tier the post-clearance conversion turned into logonly), anywhere in
+-- the hit list, not only as the headline: an equal-tier rule that runs
+-- earlier, 302 on a stray `<script` arg, takes the headline. nil when 501 did
+-- not match, or matched at logonly (an operator stepping 501 back). Also how
+-- long its window is.
 function _M.hits_auth_burst(hits)
-  if type(hits) ~= "table" then return false end
+  if type(hits) ~= "table" then return nil end
   for _, h in ipairs(hits) do
-    if tonumber(h and h.waf_rule_id) == RULE_IDS.rule_auth_burst then return true end
+    if type(h) == "table" and tonumber(h.waf_rule_id) == RULE_IDS.rule_auth_burst
+       and (h.action == "challenge" or h.action == "challenge_v2") then
+      return h
+    end
   end
-  return false
+  return nil
 end
 function _M.auth_window_sec() return tonumber(CFG.auth_window_sec) or 20 end
 

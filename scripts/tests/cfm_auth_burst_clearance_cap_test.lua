@@ -6,6 +6,7 @@
 --   * cleared: the first 7 login posts in the window pass, the 8th is refused;
 --   * cleared, resumed: the replayed POST of a solved challenge passes, once per window;
 --   * cleared, another rule headlining (302): still capped;
+--   * the resume pass is per IP across sites; 501 at logonly turns the cap off;
 --   * uncleared: the 8th is challenged, as before.
 
 local H = dofile("scripts/tests/cfm_lua_harness.lua")
@@ -22,11 +23,11 @@ local function desc(r)
 end
 
 local BODY = "log=admin&pwd=secret1&wp-submit=Log+In"
-local function login(SH, cleared, ip, args, resumed)
+local function login(SH, cleared, ip, args, resumed, host)
   local ct = "application/x-www-form-urlencoded"
   return H.run{
     SH = SH, method = "POST", uri = "/wp-login.php", body = BODY, ip = ip or "203.0.113.20",
-    clearance = cleared, args = args,
+    clearance = cleared, args = args, host = host,
     ctx_init = resumed and function(c) c.cfm_resumed_post = true end or nil,
     headers = { ["content-type"] = ct, ["user-agent"] = "Mozilla/5.0", host = "shop.gr" },
     vars = { http_content_type = ct, http_content_length = tostring(#BODY),
@@ -64,6 +65,30 @@ do
   r = login(r.SH, true, "203.0.113.22", nil, true)
   check(r.ok and r.exited == 403 and r.action == "login_capped_pc",
     "a second resumed login in the window is refused (" .. desc(r) .. ")")
+end
+
+-- The resume pass is per IP, as 501's counter is: a second resumed login on
+-- another site in the same window is refused.
+do
+  local SH, r
+  for _ = 1, 8 do r = login(SH, true, "203.0.113.24"); SH = r.SH end
+  r = login(SH, true, "203.0.113.24", nil, true, "a.gr")
+  check(r.ok and r.exited ~= 403, "first resumed login (site a) passes (" .. desc(r) .. ")")
+  r = login(r.SH, true, "203.0.113.24", nil, true, "b.gr")
+  check(r.ok and r.exited == 403 and r.action == "login_capped_pc",
+    "a resumed login on a second site in the window is refused (" .. desc(r) .. ")")
+end
+
+-- An operator stepping 501 back to logonly turns the cap off too, even when
+-- another rule's challenge is converted on the same request.
+do
+  local waf = H.real_waf()
+  waf.set_rule("rule_auth_burst", "logonly")
+  local SH, r
+  for _ = 1, 9 do r = login(SH, true, "203.0.113.25", "x=%3Cscript%3Ealert(1)%3C/script%3E"); SH = r.SH end
+  waf.set_rule("rule_auth_burst", "challenge_v2")
+  check(r.ok and r.exited ~= 403 and r.action ~= "login_capped_pc",
+    "with 501 at logonly the cap does not fire (" .. desc(r) .. ")")
 end
 
 -- A cleared client cannot switch the cap off by letting an equal-tier rule

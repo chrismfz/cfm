@@ -148,6 +148,11 @@ func TestWAFSecurityRuleHolds(t *testing.T) {
 	if got, ok := wafSecurityRuleOverrides(KV{})["10028"]; !ok || got != 0 {
 		t.Errorf("RULE_10028 should default to the code hold 0, got %d (present=%v)", got, ok)
 	}
+	// 440: task=run alone is the marker and a page can make a visitor's
+	// browser send it; arming its ban is a decision after the burn-in.
+	if got, ok := wafSecurityRuleOverrides(KV{})["440"]; !ok || got != 0 {
+		t.Errorf("RULE_440 should default to the code hold 0, got %d (present=%v)", got, ok)
+	}
 	for _, id := range []string{"10021", "10023", "10024", "10025", "10027"} {
 		if _, ok := wafSecurityRuleOverrides(KV{})[id]; ok {
 			t.Errorf("RULE_%s is armed: it must carry no code hold", id)

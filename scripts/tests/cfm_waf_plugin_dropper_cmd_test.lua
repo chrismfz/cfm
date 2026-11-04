@@ -97,6 +97,8 @@ clean(req("/wp-content/plugins/x/readme.txt", "task=run"), "a text file under pl
 clean(req("/wp-content/uploads/x.php", "task=run"), "uploads (not a plugin dir)")
 clean(req("/wp-content/themes/t/functions.php", "task=run"), "a theme file (residual, not keyed)")
 clean(req("/wp-content/plugins-old/x/x.php", "task=run"), "a directory only named like plugins")
+clean(req("/index.php/wp-content/plugins/x/readme.txt", "task=run"), "a front controller with PATH_INFO")
+clean(req("/app.php/wp-content/plugins/x/x.php", "task=run"), "a front controller whose PATH_INFO ends in .php")
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")

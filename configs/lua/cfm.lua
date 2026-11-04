@@ -1996,16 +1996,16 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
       -- detector's job, on failed logins. 501 counts wherever it sits in the
       -- hit list: an equal-tier rule that runs earlier (302 on a `<script`
       -- arg) takes the headline, and keying on the headline let a cleared
-      -- client switch the cap off with one junk arg. A resumed POST is the
-      -- login the client was challenged for and has just solved: one per
-      -- (ip, host) per window is let through, since a client can mint resume
-      -- tokens by posting without its cookie.
-      if waf_action == "logonly" and converted_from_challenge
-         and (tonumber(waf_rule_id) == (waf.AUTH_BURST_RULE_ID or 501)
-              or (waf.hits_auth_burst and waf.hits_auth_burst(waf_hits)))
-         and not (ngx.ctx.cfm_resumed_post and SH
-                  and SH:add("abrs|" .. ip .. "|" .. tostring(p_host),
-                             1, waf.auth_window_sec and waf.auth_window_sec() or 20)) then
+      -- client switch the cap off with one junk arg; the refusal is reported
+      -- as 501's. A resumed POST is the login the client was challenged for
+      -- and has just solved: one per IP per window is let through (501
+      -- counts per IP across vhosts), since a client can mint resume tokens
+      -- by posting without its cookie.
+      local abh = waf_action == "logonly" and converted_from_challenge
+        and waf.hits_auth_burst and waf.hits_auth_burst(waf_hits)
+      if abh and not (ngx.ctx.cfm_resumed_post and SH
+                      and SH:add("abrs|" .. ip, 1, waf.auth_window_sec and waf.auth_window_sec() or 20)) then
+        reason, waf_rule_id = abh.reason, abh.waf_rule_id
         push_and_log_waf_hit()
         ngx.header["X-CFM-Action"] = "login_capped_pc"
         ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""

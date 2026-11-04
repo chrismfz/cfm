@@ -6130,16 +6130,21 @@ end
 -- read as PHP registers them ($_GET, and $_POST for a form body: a backdoor
 -- reads $_REQUEST as often as $_GET), every value tested, case and blanks
 -- ignored (the safe side). PATH_INFO after the .php still runs that file.
--- A form body padded past waf_body_max_len is not read whole, so only the
--- query is certain (docs/waf.md, rule 440 "Not covered").
+-- A form body padded past waf_body_max_len is not read whole, and one read
+-- in the body burn-in is logged, not enforced, so only the query is certain
+-- (docs/waf.md, rule 440 "Not covered").
 do
   local DROPPER_FIELDS = { task = true, url = true }
+  -- The script PHP runs must be the file under the plugin directory: a .php
+  -- before that segment (`/index.php/wp-content/plugins/…`) is a front
+  -- controller with PATH_INFO, not a plugin file.
   local function plugin_php_path(uri)
     local p = lower(uri or "")
-    if not (p:find("/wp-content/plugins/", 1, true) or p:find("/wp-content/mu-plugins/", 1, true)) then
-      return false
-    end
-    return p:find("%.php$") ~= nil or p:find("%.php/") ~= nil
+    local s = p:find("/wp-content/plugins/", 1, true) or p:find("/wp-content/mu-plugins/", 1, true)
+    if not s then return false end
+    if p:sub(1, s):find("%.php") then return false end
+    local rest = p:sub(s)
+    return rest:find("%.php$") ~= nil or rest:find("%.php/") ~= nil
   end
   local function norm(v) return lower((tostring(v or ""):gsub("^%s+", ""):gsub("%s+$", ""))) end
   function _M.detect_plugin_dropper_cmd(uri, method, args, body, headers)

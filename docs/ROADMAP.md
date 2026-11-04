@@ -53,7 +53,7 @@ Behaviour + FP runbooks: **`docs/waf.md`**, `docs/waf-analysis-2026-05-08.md`,
   candidate backlog: `WAF_CVE_PLAN.md`. Never write a signature from memory.
 - **Gap analysis follow-ups** — [idea]. See `docs/waf-gap-analysis-ninjafirewall.md`.
 - **Login brute-force signals in the web detector** — [next]. The edge counts
-  login *submissions* (rule 501: 8 per IP and site in 20 s), so a slow or
+  login *submissions* (rule 501: 8 per IP in 20 s, across sites), so a slow or
   distributed attack never trips it: vol2.gr (titan) took 2 787 failed
   `wp-login.php` posts in October from 1 121 IPs, none over 5 in 20 s, and the
   same three IPs (217.60.196.2, 103.47.145.17, 49.232.230.213) tried 150+
