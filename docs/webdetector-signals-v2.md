@@ -84,31 +84,44 @@ classifies as a login.** The edge reports facts; the daemon decides the
 outcome (`authOutcome`, `auth_corpus.go`). That way a per-CMS rule learned
 from the corpus is a Go change, not an edge release. As built the field is
 
-    <TAG>;li=<0|1>;l=<location path>;c=<cookie names>[;a=<action>]
+    <TAG>;li=<0|1>[;a=<action>];l=<location path>;c=<cookie names>
 
 - `TAG`: `auth_endpoint_tag` minus `AUTH_` (`WP_LOGIN`, `JOOMLA_ADMIN`,
   `DRUPAL_LOGIN`, `MAGENTO_ADMIN`, ...). xmlrpc is left out (rule 510).
-- `li=1`: the response set a `wordpress_logged_in_*` cookie with a real
-  value. WordPress sets it only on a completed login, after a 2FA step too.
-  A logout's expired cookie carries a blank value. Only the edge sees cookie
+- `li=1`: the LAST `wordpress_logged_in_*` cookie the response set has a
+  real value. A logout's expired cookie carries a blank value. "Last" matters
+  for 2FA: with the Two Factor or WP 2FA plugin, `wp_signon` sets the real
+  cookie, the plugin clears it in the same answer and shows its
+  second-factor form (200). That is `li=0`, a `fail`. The second-factor POST
+  that sets the cookie for good is the `ok`. Only the edge sees cookie
   values, so this one bit is decided there (`ngx.header["Set-Cookie"]`).
   The value never leaves the edge.
-- `l=`: the `Location` path, its scheme, host (protocol-relative too) and
-  query dropped.
+- `l=`: the `Location` path, its scheme, host (protocol-relative and
+  backslash forms too) and query dropped.
 - `c=`: the names of up to 8 cookies the response set.
-- `a=`: the query's `action`, when present.
+- `a=`: the query's `action`, read as PHP reads it: the exact name,
+  URL-decoded, the last occurrence (`ngx.req.get_uri_args`, not nginx's
+  `$arg_action`, which is raw, first and case-insensitive). It comes before
+  `c=`, so a field cut at the daemon's 640-byte cap loses cookie names, not
+  the action.
 
 The daemon's WordPress rule (the one verified so far):
 
-- `?` whenever the origin did not answer (`cfm_upstream` is not
-  `cfm_apache*`: CFM's challenge server, an edge block). Such an answer says
+- `?` whenever the origin did not answer: `cfm_upstream` is not
+  `cfm_apache*` (CFM's challenge server, an edge block), or no upstream time
+  was logged (the conf presets `cfm_apache`, and some edge exits keep it). Such an answer says
   nothing about the password.
 - `ok`: `li=1`. This is checked first, whatever the action. PHP's
   `$_REQUEST` lets a body `action=login` override the query, so a query
   action must never hide a success.
-- `na`: another query action (lostpassword, register, ...). A login hidden
-  behind `?action=lostpassword` also lands here; both answer 200 on a
-  failure, so phase 1 has to read `na` + 200 on its own, not as a failure.
+- `na`: one of wp-login.php's own other actions (lostpassword,
+  retrievepassword, resetpass, rp, register, postpass, logout,
+  checkemail, confirmaction, confirm_admin_email, entered_recovery_mode).
+  Any other value, an unknown one included, is a login: wp-login.php runs
+  its login case for it. A login hidden behind `?action=lostpassword` with
+  `action=login` in the BODY still lands here (the edge does not read the
+  body), and both answer 200 on a failure, so phase 1 has to read `na` + 200
+  on its own, not ignore it.
 - `fail`: the form again (200), or a redirect to a path containing `login`
   (`wp-login.php`, a hide-login slug). The `?login=failed` query itself
   never reaches the daemon.
@@ -182,8 +195,14 @@ admin POST is tagged, a save as well as the login, and only those tell
 them apart. Hex and
 digit runs are folded, so a Joomla md5 cookie name or a site id does not
 make a shape per site. Each shape keeps a count, distinct IPs and hosts
-(capped at 64) and up to 5 example hosts. It is bounded at 2 000 shapes
-(`dropped_by_tag` names whose shapes the cap refused), in memory, and emptied by a restart or config reload. Reading it per CMS is
+(capped at 64) and up to 5 example hosts. The Location keeps two path
+segments, a person's name after `/members/`, `/user/`, `/author/` (...)
+folded to `<user>`. Every kept string is a copy, so no entry pins the 256 KB
+socket line it came from. It is bounded at 2 000 shapes. A client can create
+at most 16 of them, because the path is the client's to choose. A full corpus
+evicts its oldest one-line shape (`evicted`), and refuses a new shape only
+when every shape was seen more than once (`dropped`, `dropped_by_tag`). It
+lives in memory, and emptied by a restart or config reload. Reading it per CMS is
 the input to phase 1's outcome rules.
 
 ---

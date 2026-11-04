@@ -3,8 +3,10 @@ package webdetector
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 const authBase = "1000.5\t1.2.3.4\tShop.GR\tPOST\t/wp-login.php\tHTTP/1.1\t302\t0\t0.1\t0.1\t-\tMozilla/5.0\tcfm_apache"
@@ -30,7 +32,7 @@ func TestParseSocketTSVAuthColumn(t *testing.T) {
 		t.Fatalf("file TSV read an auth column: %+v", rec)
 	}
 	// A 16th TAB (cannot come from log-cfm, which cleans the field) stays inside Auth, capped.
-	rec, _ = parseSocketTSV(authBase + "\t0\t" + strings.Repeat("x", 400))
+	rec, _ = parseSocketTSV(authBase + "\t0\t" + strings.Repeat("x", 800))
 	if len(rec.Auth) != maxAuthField {
 		t.Fatalf("auth not capped: %d", len(rec.Auth))
 	}
@@ -53,7 +55,7 @@ func TestParseAuthField(t *testing.T) {
 }
 
 func TestAuthOutcome(t *testing.T) {
-	origin := func(st int) LogRec { return LogRec{Status: st, UpstreamName: "cfm_apache_ssl"} }
+	origin := func(st int) LogRec { return LogRec{Status: st, UpstreamName: "cfm_apache_ssl", Upstream: true} }
 	cases := []struct {
 		name string
 		rec  LogRec
@@ -68,6 +70,9 @@ func TestAuthOutcome(t *testing.T) {
 		{"lostpassword", origin(302), authField{Tag: "WP_LOGIN", Action: "lostpassword", Loc: "/wp-login.php"}, "na"},
 		{"query action cannot hide a success", origin(302), authField{Tag: "WP_LOGIN", LoggedIn: true, Action: "lostpassword"}, "ok"},
 		{"action=login is the login", origin(200), authField{Tag: "WP_LOGIN", Action: "login"}, "fail"},
+		{"an unknown action runs the login", origin(200), authField{Tag: "WP_LOGIN", Action: "zz"}, "fail"},
+		{"register", origin(200), authField{Tag: "WP_LOGIN", Action: "register"}, "na"},
+		{"cfm_apache preset, but no upstream answered", LogRec{Status: 200, UpstreamName: "cfm_apache"}, authField{Tag: "WP_LOGIN"}, "?"},
 		{"the challenge server answered", LogRec{Status: 200, UpstreamName: "cfm_challenge"}, authField{Tag: "WP_LOGIN"}, "?"},
 		{"edge block", LogRec{Status: 403, UpstreamName: "cfm_block"}, authField{Tag: "WP_LOGIN", LoggedIn: true}, "?"},
 		{"no upstream name", LogRec{Status: 200, UpstreamName: "-"}, authField{Tag: "WP_LOGIN"}, "?"},
@@ -82,7 +87,7 @@ func TestAuthOutcome(t *testing.T) {
 }
 
 func authRec(ip, host, uri string, status int, auth string) LogRec {
-	return LogRec{TS: 1000, IP: ip, Host: host, Method: "post", URI: uri, Status: status, Auth: auth, UpstreamName: "cfm_apache"}
+	return LogRec{TS: 1000, IP: ip, Host: host, Method: "post", URI: uri, Status: status, Auth: auth, UpstreamName: "cfm_apache", Upstream: true}
 }
 
 func TestAuthCorpusShapes(t *testing.T) {
@@ -135,14 +140,126 @@ func TestAuthPathShape(t *testing.T) {
 	}
 }
 
+func TestAuthLocShape(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                                    "",
+		"/wp-admin/":                          "/wp-admin/",
+		"/wp-login.php":                       "/wp-login.php",
+		"/members/john/":                      "/members/<user>/",
+		"/user/Maria/profile/edit":            "/user/<user>/…",
+		"/admin123/admin/index/index/key/ab/": "/admin<n>/admin/…",
+		"/administrator/index.php":            "/administrator/index.php",
+	} {
+		if got := authLocShape(in); got != want {
+			t.Errorf("%q → %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The corpus must not pin the socket line its fields were cut from.
+func TestAuthCorpusClonesStrings(t *testing.T) {
+	line := authBase + "\t0\tWP_LOGIN;li=0;l=/wp-login.php;c=x" + strings.Repeat(" ", 4096)
+	rec, _ := parseSocketTSV(line)
+	c := newAuthCorpus(0)
+	host := rec.Host
+	c.add(rec, host)
+	lo, hi := uintptr(unsafe.Pointer(unsafe.StringData(line))), uintptr(unsafe.Pointer(unsafe.StringData(line)))+uintptr(len(line))
+	in := func(s string) bool {
+		if s == "" {
+			return false
+		}
+		p := uintptr(unsafe.Pointer(unsafe.StringData(s)))
+		return p >= lo && p < hi
+	}
+	for _, e := range c.entries {
+		for _, f := range []string{e.Tag, e.Upstream, e.Method, e.Path, e.Location, e.Cookies, e.Action, e.key} {
+			if in(f) {
+				t.Errorf("entry field %q points into the line", f)
+			}
+		}
+		for k := range e.ipSet {
+			if in(k) {
+				t.Errorf("ip key %q points into the line", k)
+			}
+		}
+		for k := range e.hostSet {
+			if in(k) {
+				t.Errorf("host key %q points into the line", k)
+			}
+		}
+		for _, h := range e.Examples {
+			if in(h) {
+				t.Errorf("example %q points into the line", h)
+			}
+		}
+	}
+	for k := range c.byIP {
+		if in(k) {
+			t.Errorf("byIP key %q points into the line", k)
+		}
+	}
+	for k := range c.totals {
+		if in(k) {
+			t.Errorf("totals key %q points into the line", k)
+		}
+	}
+}
+
+func TestAuthCorpusPerIPAndEviction(t *testing.T) {
+	c := newAuthCorpus(0)
+	for i := 0; i < 40; i++ {
+		c.add(authRec("6.6.6.6", "a.gr", "/x"+strconv.Itoa(i)+"z/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
+	}
+	s := c.snapshot("", "", 0)
+	// digits fold, so vary letters instead
+	if s.Shapes != 1 {
+		t.Fatalf("digit-folded paths should be one shape: %d", s.Shapes)
+	}
+	c = newAuthCorpus(0)
+	for i := 0; i < 40; i++ {
+		c.add(authRec("6.6.6.6", "a.gr", "/"+strings.Repeat("q", i+1)+"/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
+	}
+	s = c.snapshot("", "", 0)
+	if s.Shapes != authCorpusPerIP || s.DroppedByTag["LOGIN_POST"] != int64(40-authCorpusPerIP) {
+		t.Fatalf("per-IP cap: shapes=%d dropped=%v", s.Shapes, s.DroppedByTag)
+	}
+	// A full corpus evicts the oldest one-line shape for a new one.
+	c = newAuthCorpus(2)
+	r := authRec("1.1.1.1", "a.gr", "/a/login", 200, "LOGIN_POST;li=0;l=;c=")
+	c.add(r, "a.gr")
+	c.add(r, "a.gr") // count 2: never evicted
+	r2 := authRec("2.2.2.2", "a.gr", "/b/login", 200, "LOGIN_POST;li=0;l=;c=")
+	r2.TS = 900
+	c.add(r2, "a.gr")
+	c.add(authRec("3.3.3.3", "a.gr", "/c/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
+	s = c.snapshot("", "", 0)
+	if s.Shapes != 2 || s.Evicted != 1 || s.Dropped != 0 {
+		t.Fatalf("eviction: %+v", s)
+	}
+	for _, e := range s.Entries {
+		if e.Path == "/b/login" {
+			t.Fatalf("the one-line shape was not the one evicted: %+v", s.Entries)
+		}
+	}
+	// Full of repeated shapes: refused, not evicted.
+	c.add(authRec("3.3.3.3", "a.gr", "/c/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
+	c.add(authRec("4.4.4.4", "a.gr", "/d/login", 200, "LOGIN_POST;li=0;l=;c="), "a.gr")
+	if s = c.snapshot("", "", 0); s.Dropped != 1 || s.Shapes != 2 {
+		t.Fatalf("full of repeats: %+v", s)
+	}
+	if e := newAuthCorpus(0).snapshot("", "", 0); e.Entries == nil {
+		t.Fatal("entries must be [] not null")
+	}
+}
+
 func TestAuthCorpusBounds(t *testing.T) {
 	c := newAuthCorpus(3)
 	for i := 0; i < 5; i++ {
 		c.add(authRec("1.1.1.1", "a.gr", "/login", 302, "LOGIN_POST;li=0;l=/p"+string(rune('a'+i))+";c="), "a.gr")
 	}
 	s := c.snapshot("", "", 0)
-	if s.Shapes != 3 || s.Dropped != 2 || s.DroppedByTag["LOGIN_POST"] != 2 || s.Totals["LOGIN_POST"]["?"] != 5 {
-		t.Fatalf("cap: shapes=%d dropped=%d totals=%v", s.Shapes, s.Dropped, s.Totals)
+	if s.Shapes != 3 || s.Evicted != 2 || s.Dropped != 0 || s.Totals["LOGIN_POST"]["?"] != 5 {
+		t.Fatalf("cap: shapes=%d evicted=%d dropped=%d totals=%v", s.Shapes, s.Evicted, s.Dropped, s.Totals)
 	}
 	c = newAuthCorpus(0)
 	for i := 0; i < 100; i++ {

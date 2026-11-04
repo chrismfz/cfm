@@ -33,6 +33,12 @@ back-filled here — see the git/PR history for that period.
   (`docs/webdetector-signals-v2.md`). Every other request's log line is
   unchanged.
 
+### Fixed
+- **A challenge exclude keyed on the User-Agent now sees the real UA for web
+  detector alerts.** The UA was taken from the last column of the sample log
+  line, which on the edge's lines is the bypass flag (`0`), not the
+  User-Agent, so a UA-keyed exclude never matched those challenges.
+
 ## 2026.11.04
 
 ### Security

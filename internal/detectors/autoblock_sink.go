@@ -1109,13 +1109,19 @@ func extractUserAgent(samples []string) string {
 		}
 
 		// --- (1) TSV mode ---
+		// A webdetector line (log-cfm.lua / cfm_tsv) has the UA at column 11;
+		// the edge socket adds the upstream name, the bypass flag and, on a
+		// login POST, the login field after it, so "the last column" was the
+		// bypass flag ("0") and would now be WP_LOGIN;li=…. Shorter TSV keeps
+		// the old last-column guess.
 		if strings.Contains(ln, "\t") {
 			cols := strings.Split(ln, "\t")
-			if len(cols) > 0 {
-				ua := strings.TrimSpace(cols[len(cols)-1])
-				if ua != "" && ua != "-" {
-					return ua
-				}
+			ua := strings.TrimSpace(cols[len(cols)-1])
+			if len(cols) >= 12 {
+				ua = strings.TrimSpace(cols[11])
+			}
+			if ua != "" && ua != "-" {
+				return ua
 			}
 		}
 

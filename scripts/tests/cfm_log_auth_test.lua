@@ -33,10 +33,28 @@ _G.ngx = {
 local m = require("log-cfm")
 local af = m._auth_field
 
+-- A tiny query decoder standing in for ngx.req.get_uri_args: exact-case
+-- names, %XX decoded, a repeated name becomes a list (as OpenResty does).
+local function uri_args(uri)
+  local out = {}
+  local q = uri:match("%?(.*)$") or ""
+  for kv in q:gmatch("[^&]+") do
+    local k, v = kv:match("^([^=]*)=?(.*)$")
+    local function dec(x) return (x:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)) end
+    k, v = dec(k), dec(v)
+    if out[k] == nil then out[k] = v
+    elseif type(out[k]) == "table" then table.insert(out[k], v)
+    else out[k] = { out[k], v } end
+  end
+  return out
+end
+ngx.req = { get_uri_args = function() return ngx._args or {} end }
+
 local function req(method, uri, status, hdr, extra)
   local v = { request_method = method, request_uri = uri, status = tostring(status or 200) }
   for k, x in pairs(extra or {}) do v[k] = x end
   ngx.header = hdr or {}
+  ngx._args = uri_args(uri)
   return v
 end
 
@@ -56,11 +74,27 @@ check(af(req("POST", "/wp-login.php", 302, { Location = "//other.example/wp-admi
 check(af(req("POST", "/wp-login.php", 302, { ["Set-Cookie"] = "wordpress_logged_in_0123abcd=+; expires=Thu, 01-Jan-1970 00:00:01 GMT; path=/",
   Location = "/wp-login.php?loggedout=true" })) == "WP_LOGIN;li=0;l=/wp-login.php;c=wordpress_logged_in_0123abcd",
   "an expired logged-in cookie (blank value) is not li=1")
-check(af(req("POST", "/wp-login.php?action=lostpassword", 302, { ["Set-Cookie"] = LI, Location = "/wp-admin/" }, { arg_action = "lostpassword" }))
-  == "WP_LOGIN;li=1;l=/wp-admin/;c=wordpress_logged_in_0123abcd;a=lostpassword",
+check(af(req("POST", "/wp-login.php?action=lostpassword", 302, { ["Set-Cookie"] = LI, Location = "/wp-admin/" }))
+  == "WP_LOGIN;li=1;a=lostpassword;l=/wp-admin/;c=wordpress_logged_in_0123abcd",
   "a query action is reported beside li, never instead of it (a body action=login overrides it in PHP)")
-check(af(req("POST", "/wp-login.php?action=x%09y", 200, {}, { arg_action = "re\tg;i=1" })) == "WP_LOGIN;li=0;l=;c=;a=re_g_i_1",
-  "the action is reduced to a safe charset")
+check(af(req("POST", "/wp-login.php?action=re%09g%3Bi%3D1", 200, {})) == "WP_LOGIN;li=0;a=re_g_i_1;l=;c=",
+  "the action is decoded, then reduced to a safe charset")
+check(af(req("POST", "/wp-login.php?action=log%69n", 200, {})) == "WP_LOGIN;li=0;a=login;l=;c=",
+  "an encoded action is decoded as PHP does (log%69n is login)")
+check(af(req("POST", "/wp-login.php?action=lostpassword&action=login", 200, {})) == "WP_LOGIN;li=0;a=login;l=;c=",
+  "a repeated action: the last, as PHP takes it")
+check(af(req("POST", "/wp-login.php?ACTION=lostpassword", 200, {})) == "WP_LOGIN;li=0;l=;c=",
+  "ACTION is another name to PHP: no action")
+check(af(req("POST", "/wp-login.php?action", 200, {})) == "WP_LOGIN;li=0;l=;c=", "an action with no value")
+check(af(req("POST", "/wp-login.php", 200, { ["Set-Cookie"] = { LI, "wordpress_logged_in_0123abcd=+; expires=Thu, 01-Jan-1970 00:00:01 GMT; path=/" } }))
+  :find(";li=0;", 1, true),
+  "a 2FA plugin clears the cookie wp_signon set in the same answer: the last one decides (li=0)")
+check(af(req("POST", "/wp-login.php", 200, { ["Set-Cookie"] = { "wordpress_logged_in_0123abcd=+", LI } }))
+  :find(";li=1;", 1, true), "cleared then set: li=1")
+check(af(req("POST", "/wp-login.php", 302, { Location = "https:\\\\evil.example/a" })) == "WP_LOGIN;li=0;l=/a;c=",
+  "a backslash host is dropped too")
+check(af(req("POST", "/wp-login.php", 302, { Location = "\\\\evil.example/a" })) == "WP_LOGIN;li=0;l=/a;c=",
+  "a backslash protocol-relative host is dropped too")
 check(af(req("POST", "/blog/wp-login.php", 200, {})) == "WP_LOGIN;li=0;l=;c=", "WordPress in a subdirectory")
 check(af(req("POST", "/WP-LOGIN.PHP", 200, {})) == "WP_LOGIN;li=0;l=;c=", "the pre-check is case-insensitive")
 
@@ -82,13 +116,24 @@ do
     local v = af(req("POST", uri, 200, {}))
     check(v and v:match("^([%u_]+);") == want, "leg " .. uri .. " → " .. want .. " (got " .. tostring(v) .. ")")
   end
-  -- …and the pre-check's own premise, against the real list: a URI without
-  -- either word is never tagged.
-  local d = require("cfm_waf_detectors")
-  for _, uri in ipairs({ "/xmlrpc.php", "/wp-admin/admin-ajax.php", "/index.php?option=com_users", "/user/register" }) do
-    local t = d.auth_endpoint_tag(uri, "post")
-    check(t == nil or t == "AUTH_WP_XMLRPC" or uri:lower():find("login") or uri:lower():find("admin"),
-      "a tag without login/admin in the URI: " .. uri .. " → " .. tostring(t))
+  -- Every tag the real function can return is in `legs` above (xmlrpc
+  -- aside, and ADMIN_LOGIN, which the Magento leg always takes first), so a
+  -- new leg fails here until it is added there, and checked against the
+  -- login/admin pre-check.
+  local f = assert(io.open("configs/lua/cfm_waf_detectors.lua", "r"))
+  local src = f:read("*a"); f:close()
+  local body = src:match("local function auth_endpoint_tag%(.-\nend\n")
+  check(body ~= nil, "auth_endpoint_tag found in cfm_waf_detectors.lua")
+  local covered = {}
+  for _, t in pairs(legs) do covered[t] = true end
+  for t in (body or ""):gmatch('return "AUTH_([%u_]+)"') do
+    check(covered[t] or t == "WP_XMLRPC" or t == "ADMIN_LOGIN",
+      "auth_endpoint_tag returns AUTH_" .. t .. ", which this test's legs do not cover")
+  end
+  for lit in (body or ""):gmatch('has%(uri, "([^"]+)"%)') do
+    check(lit:find("login") or lit:find("admin") or lit == "/xmlrpc.php" or lit == "index.php" or lit == "auth"
+      or lit:find("option=com_login") or lit == "view=login",
+      "an auth_endpoint_tag literal the pre-check may not cover: " .. lit)
   end
 end
 
@@ -134,6 +179,7 @@ local function line_for(method, uri, status, hdr, extra)
   for k, x in pairs(extra or {}) do v[k] = x end
   ngx.var = v
   ngx.header = hdr or {}
+  ngx._args = {}
   mm.log()
   for _, t in ipairs(timers) do t.cb(false, t.kind) end
   return sent[1] or ""

@@ -267,7 +267,7 @@ end
 -- OLDER daemon (which folds anything past column 13 into the bypass flag)
 -- reading the bypass flag of every non-login line right during an upgrade.
 --
--- Value: "<TAG>;li=<0|1>;l=<location path>;c=<cookie names>[;a=<action>]"
+-- Value: "<TAG>;li=<0|1>[;a=<action>];l=<location path>;c=<cookie names>"
 --   TAG  auth_endpoint_tag (cfm_waf_detectors.lua, the one list) minus
 --        "AUTH_": WP_LOGIN, JOOMLA_ADMIN, DRUPAL_LOGIN, MAGENTO_ADMIN, ...
 --   li   1 = a wordpress_logged_in_* cookie with a real value (WordPress
@@ -275,8 +275,10 @@ end
 --        logout's expired one carries a blank value). Only the edge sees
 --        the value, so only this bit of the verdict is taken here.
 --   a    the query's `action`, when present (wp-login.php's lostpassword,
---        register, ...). It is the QUERY's only: PHP's $_REQUEST lets a body
---        field override it, so the daemon never lets `a` hide an li=1.
+--        register, ...), read as PHP reads it. It is the QUERY's only: PHP's
+--        $_REQUEST lets a body field override it, so the daemon never lets
+--        `a` hide an li=1, and counts only wp-login's own actions as `na`.
+--        It comes before `c`, so a cut field loses cookie names, not it.
 local AUTH_MAX_COOKIES = 8
 local AUTH_MAX_NAME    = 48
 local AUTH_MAX_LOC     = 96
@@ -317,7 +319,7 @@ local function auth_field(var)
   tag = tag:gsub("^AUTH_", "")
 
   local hdr = ngx.header
-  local names, logged_in = {}, false
+  local names, li_last = {}, {}
   for _, sc in ipairs(as_list(hdr and hdr["Set-Cookie"])) do
     if type(sc) == "string" then
       local name, value = sc:match("^%s*([^=;%s]+)=([^;]*)")
@@ -327,28 +329,44 @@ local function auth_field(var)
         end
         -- A real logged-in value is "user|expiration|token|hmac"; a logout's
         -- expired cookie carries " " (sent as "+"), "deleted" or nothing.
-        if name:sub(1, #WP_LI) == WP_LI and #value >= 20 then logged_in = true end
+        -- The LAST Set-Cookie of a name is what the browser keeps: a 2FA
+        -- plugin (Two Factor, WP 2FA) lets wp_signon set the real cookie,
+        -- then clears it in the same answer and shows its second-factor form.
+        if name:sub(1, #WP_LI) == WP_LI then li_last[name] = #value >= 20 end
       end
     end
+  end
+  local logged_in = false
+  for _, real in pairs(li_last) do
+    if real then logged_in = true end
   end
 
   local loc = hdr and hdr["Location"]
   if type(loc) == "table" then loc = loc[1] end
   if type(loc) == "string" then
     loc = loc:match("^[^?#]*") or ""
-    -- Drop the scheme+host, and a protocol-relative "//host": a path only.
-    loc = loc:gsub("^%a[%w+.-]*://[^/]*", ""):gsub("^//[^/]*", "")
+    -- Drop the scheme+host and a protocol-relative "//host", with either
+    -- slash: browsers read "https:\\host/" and "\\host/" as hosts too.
+    loc = loc:gsub("^%a[%w+.-]*:[/\\][/\\][^/\\]*", ""):gsub("^[/\\][/\\][^/\\]*", "")
     loc = loc:gsub("[^%w%-%._~/%%]", "_"):sub(1, AUTH_MAX_LOC)
   else
     loc = ""
   end
 
-  local v = tag .. ";li=" .. (logged_in and "1" or "0") .. ";l=" .. loc .. ";c=" .. table.concat(names, ",")
-  local a = var.arg_action
+  -- The query's `action` as PHP reads it: the exact (case-sensitive) name,
+  -- URL-decoded, the LAST occurrence. nginx's $arg_action is none of those
+  -- (raw, first, any case), so ?action=log%69n or ?ACTION=… would differ.
+  local a
+  local okq, args = pcall(ngx.req.get_uri_args, 1000)
+  if okq and type(args) == "table" then
+    a = args["action"]
+    if type(a) == "table" then a = a[#a] end
+  end
+  local v = tag .. ";li=" .. (logged_in and "1" or "0")
   if type(a) == "string" and a ~= "" then
     v = v .. ";a=" .. a:lower():gsub("[^%w_%-]", "_"):sub(1, 24)
   end
-  return v
+  return v .. ";l=" .. loc .. ";c=" .. table.concat(names, ",")
 end
 _M._auth_field = auth_field -- exposed for scripts/tests/cfm_log_auth_test.lua
 
