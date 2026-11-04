@@ -130,6 +130,49 @@ feeds no login field. A POST whose URI holds neither `login` nor `admin` is
 skipped before the tag is computed (every tag leg needs one of them; the Lua
 test pins it).
 
+### 2.1 What the fleet's edge logs say (2026-11-04)
+
+These come from a read of the edge's full access logs (`log_format cfm`,
+which carries `ust` and `uloc`) on all 8 nodes, about 5 days each. They are
+the input to phase 1's rules. "Verified" means the follow-up requests of
+the same client confirmed the outcome.
+
+| login | failure | success | decided by |
+|---|---|---|---|
+| WordPress `wp-login.php` | 200, or 302 back to a login path | `wordpress_logged_in_*` set | the cookie (built) |
+| cPanel webmail `/login/?login_only` | `ust=401` (verified) | 200 with no Location, then `/cpsess<N>/…` (verified, hundreds) | status; it is tagged `LOGIN_POST`, and must be split from a generic `/login` |
+| Joomla `/administrator/index.php` | 303 → `/administrator/index.php`, then ONE 200 and nothing (inferred); brute force: 200, no follow-ups | the same 303, then admin XHRs (`com_ajax`, `com_joomlaupdate`, `com_cpanel`) (verified) | follow-ups only. Every admin save is a POST to the same URL, with `option=com_login` in the BODY |
+| OpenCart `route=common/login` | 200 re-render (inferred) | 302 → `common/dashboard&user_token=` (verified) | Location; OpenCart 4's AJAX login answers 200 JSON both ways |
+| Magento 2 `/<adm>/admin/index/index/key/<K>/` | the same 302, the follow-up GET answers 200 (the form) (inferred) | 302 → the same URL, whose GET then → 302 dashboard (verified) | follow-ups only |
+| PrestaShop `/admin<x>/index.php?rand=` | no navigation (inferred) | GETs `controller=AdminDashboard&token=` (verified) | follow-ups; AJAX, 200 both ways. A logged-out admin's background XHR → 302 AdminLogin is NOT a login |
+| WHMCS admin `dologin.php` | 302 → `login.php?…&incorrect=1` (verified) | 302 → `index.php` / `clients.php` (verified) | Location (the query, which the edge drops today) |
+| WHMCS 8 client `/login` | 302 → `/login` (verified) | 302 → `/clientarea.php` (inferred) | Location |
+| Laravel classic / Fortify `/login` | 302 back to `/login` (public) | 302 elsewhere, but `/two-factor-challenge` is a step, not a success | Location target |
+| Laravel Livewire / Filament (ekdosi, invoicer, mycs) | more Livewire POSTs, no navigation (inferred) | navigation to `/admin/<tenant>`, `/dashboard` (verified) | follow-ups only; the login is `POST /livewire-<hash>/update`, 200 both ways, never tagged today |
+| Drupal `/user/login`, phpMyAdmin | not seen (scanners only; standalone pma stopped by the challenge) | — | unmeasured |
+
+What this means for phase 1:
+
+- **Only an origin answer counts.** Many login POSTs never reach the origin:
+  the edge challenges them (303/307 → `/__cfm_challenge`; 1 074 generic
+  `/login` POSTs on speedhost). `authOutcome` already returns `?` unless
+  `cfm_upstream` is `cfm_apache*`.
+- **Location and cookies decide only a few CMSes** (WordPress, OpenCart,
+  WHMCS, classic Laravel). The rest need a **follow-up check**: after a
+  login POST from (ip, host), watch that client's next requests for a few
+  minutes. Admin pages, dashboard XHRs or a session-only path mean a
+  success. One more login page, or nothing, means a failure. Everything a
+  follow-up check needs is in `LogRec`, so it is daemon-only work: a small
+  per-(ip, host) pending map with a TTL. Brute force needs no follow-up
+  check at all: its signature is the repeated POST with no navigation in
+  between.
+- **WHMCS's `incorrect=1` is in the Location QUERY**, which the edge drops.
+  A short allow-list of outcome query keys (`incorrect`, `login`, `error`)
+  can be carried as key names only, without their values, if WHMCS is in
+  scope.
+- **`LOGIN_POST` mixes cPanel webmail, WHMCS, Laravel, Django and
+  WordPress's `/login` alias.** Phase 1 splits it by path before any rule.
+
 The corpus (`auth_corpus.go`, MCP `auth_corpus`) groups login lines by
 (tag, outcome, upstream, `li`, method, status, path, Location path, cookie
 names).
