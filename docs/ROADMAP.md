@@ -58,8 +58,10 @@ Behaviour + FP runbooks: **`docs/waf.md`**, `docs/waf-analysis-2026-05-08.md`,
   `wp-login.php` posts in October from 1 121 IPs, none over 5 in 20 s, and the
   same three IPs (217.60.196.2, 103.47.145.17, 49.232.230.213) tried 150+
   WordPress sites on every node. The web detector already reads the origin's
-  status per request (`engine.go`, the 40x counters), so it can count FAILED
-  logins (a `wp-login.php` POST the origin answered 200; a 302 is a success):
+  status per request (`engine.go`, the 40x counters), but status alone cannot
+  tell a login's outcome (a hide-login plugin answers a failure with a 302 to
+  `?login=failed`), so the edge adds an outcome column (the logged-in cookie)
+  and the detector counts FAILED logins:
   per IP across vhosts over hours (ban), per vhost (alert, then a tighter per-IP
   limit while the site is under attack), per /24, and a success from an IP that
   failed elsewhere (alert). Every CMS the edge knows the same way (the
@@ -68,6 +70,8 @@ Behaviour + FP runbooks: **`docs/waf.md`**, `docs/waf-analysis-2026-05-08.md`,
   each with its own success/failure answer to verify. The action (a ban through
   the detector sink, or an edge deny) is open. Context: the 2026-11-04 vol2.gr
   takeover attempt (rule 440, the 501 clearance cap).
+  Design (with compromise, recon/abuse and shadow behaviour signals, and the
+  fleet numbers): `docs/webdetector-signals-v2.md`.
 
 ## 3. MCP telemetry surface
 

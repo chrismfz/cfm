@@ -17,7 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **The edge now reports how each login POST ended.** Status alone cannot
+  tell: a hide-login plugin answers a failed `wp-login.php` post with a 302 to
+  `?login=failed`, exactly like a success. A login POST (the WAF's list of
+  login endpoints: WordPress, Joomla, Drupal, Magento, OpenCart, `/login`, …)
+  now sends the web detector one more field: whether WordPress set its
+  logged-in cookie, plus the response's cookie NAMES and redirect path (never
+  a cookie value, a host or a query string). The daemon turns that into an
+  outcome (`ok`, `fail`, `na` for another wp-login action such as a password
+  reset, or unknown), only for answers that came from the site itself. Nothing counts or blocks on it yet: the new MCP tool
+  `auth_corpus` (`/api/v1/webdet/auth-corpus`, admin-only) groups what was
+  seen by shape, so each CMS's success and failure answer can be read from
+  real traffic before the login brute-force signals are built on it
+  (`docs/webdetector-signals-v2.md`). Every other request's log line is
+  unchanged.
+
+### Fixed
+- **A challenge exclude keyed on the User-Agent now sees the real UA for web
+  detector alerts.** The UA was taken from the last column of the sample log
+  line, which on the edge's lines is the bypass flag (`0`), not the
+  User-Agent, so a UA-keyed exclude never matched those challenges.
 
 ## 2026.11.04
 
