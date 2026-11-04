@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.04
+
 ### Security
 - **New WAF rule 440 blocks a fake plugin's command call.** After logging in
   with a stolen password and uploading a plugin with a random name, the
