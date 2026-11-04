@@ -1032,6 +1032,9 @@ func init() {
 		// Kill switch for the real-input rescue of a failing armed solve;
 		// default on.
 		webdet.ConfigureChallengeV2InputRescue(kvBool(kv, "CHALLENGE_V2_INPUT_RESCUE", true))
+		// Shadow login signals (login_spray / login_spray_net /
+		// login_dirty_success history rows); default on, nothing enforced.
+		webdet.ConfigureLoginSignals(kvBool(kv, "LOGIN_SIGNALS", true))
 		// The malpath (CHALLENGE_PATHS) challenge at the v2 tier; default on.
 		webdet.ConfigureChallengeV2Paths(kvBool(kv, "CHALLENGE_V2_PATHS", true))
 		// The malpath challenge also revokes the IP's clearance cookie; default on.

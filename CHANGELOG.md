@@ -32,6 +32,21 @@ back-filled here — see the git/PR history for that period.
   real traffic before the login brute-force signals are built on it
   (`docs/webdetector-signals-v2.md`). Every other request's log line is
   unchanged.
+- **Shadow login brute-force signals.** The web detector counts the failed
+  WordPress logins that field reports and writes three new detection history
+  rows, without blocking or alerting anything:
+  - `login_spray`: one IP failing on 3+ sites (10+ tries in 24 h), or 20+
+    tries in an hour, or 50+ in a day. This is the slow, cross-site sprayer
+    that rule 501 (8 tries in 20 s) never sees.
+  - `login_spray_net`: a /24 (IPv6 /64) with 5+ such IPs, or 30+ failures
+    from 5+ of its IPs, i.e. a proxy pool sending one or two tries per address.
+  - `login_dirty_success`: a successful login from such an IP or network,
+    or after 10+ failures of its own on that site.
+
+  Spray rows name no site, only counts. Query them with
+  `detection_history type=login_spray node="all"`. The thresholds and the
+  action (a ban or an edge deny) are decided after a fleet read. Kill
+  switch: `[webdetector] LOGIN_SIGNALS = 0` (`docs/webdetector-signals-v2.md` §3).
 
 ### Fixed
 - **A challenge exclude keyed on the User-Agent now sees the real UA for web

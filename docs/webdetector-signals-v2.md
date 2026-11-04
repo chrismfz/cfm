@@ -214,6 +214,19 @@ the input to phase 1's outcome rules.
 
 ## 3. Login signals (all keyed on `auth`)
 
+**Built (shadow), 2026-11-04: L1, L2 and L4 for WordPress**
+(`login_ledger.go`, rows `login_spray`, `login_spray_net`,
+`login_dirty_success`, kill switch `[webdetector] LOGIN_SIGNALS`). The
+thresholds below are the starting ones. The ledger keeps a fixed 24 h window
+and a sliding one-hour estimate per IP (100 000 IPs, idle-for-a-day evicted
+first) and per network (20 000). It caps 32 sites per IP and 64 IPs per
+network. A row is written at most once per key per 6 h (a dirty success once
+per (IP, site) per hour). Spray rows carry counts, never a site name, so a
+scoped caller reading its own host's rows sees no other tenant. L3 (vhost
+under attack), L5 and L6 are not built. They need a per-vhost baseline, the
+learned admin origins, and the follow-up-request check (§2.1). The other
+CMSes join when the corpus gives them an outcome rule.
+
 Every signal ships **shadow** first: a history row plus the MCP, with no
 action. Proposed action tiers follow the user's open "ban through the
 Sinker or an edge deny" question; that decision is made per signal after
@@ -221,10 +234,10 @@ the shadow read.
 
 | id | grain | fires when (starting thresholds, tuned on the shadow read) | proposed action |
 |---|---|---|---|
-| L1 spray | IP, all vhosts, 1 h / 24 h | ≥ 20 `fail` on ≥ 3 vhosts in 1 h, or ≥ 50 in 24 h | ban through the detector sink (leniency, edgeban for proxied clients, notify) |
-| L2 block spray | /24 (v4), /48 (v6) | ≥ 5 IPs of the block in L1's ledger, or ≥ 100 `fail` from the block in 1 h | ban the IPs seen; a subnet ban only after its own review |
+| L1 spray | IP, all vhosts, 1 h / 24 h | ≥ 10 `fail` on ≥ 3 vhosts in 24 h, or ≥ 20 in 1 h, or ≥ 50 in 24 h (built) | ban through the detector sink (leniency, edgeban for proxied clients, notify) |
+| L2 block spray | /24 (v4), /64 (v6) | ≥ 5 IPs of the block flagged by L1 in 24 h, or ≥ 30 `fail` from ≥ 5 of its IPs in 24 h (built) | ban the IPs seen; a subnet ban only after its own review |
 | L3 vhost under attack | vhost | `fail`/h ≥ 10× its 7-day median, and ≥ 50 | alert, then a tighter per-IP limit on that vhost (≥ 3 `fail` in 1 h → L1 action) for the attack's TTL |
-| L4 dirty success | (vhost, IP) | `ok` from an IP in the L1/L2 ledger, or ≥ 10 own `fail` before it | **alert, high priority** (never an automatic ban: it can be the owner after typos) |
+| L4 dirty success | (vhost, IP) | `ok` from an IP flagged by L1/L2 in the last 24 h, or after ≥ 10 own `fail` on that site in 24 h (built) | **alert, high priority** (never an automatic ban: it can be the owner after typos) |
 | L5 new admin origin | vhost | `ok` from a country + ASN never seen succeed on that vhost in 30 days | info alert, shadow-only until its FP rate is known |
 | L6 risky follow-up | (vhost, IP) | within 30 min of an L4 or L5 login: a plugin/theme upload (`update.php?action=upload-plugin`, `plugin-install.php`), `plugin-editor.php`/`theme-editor.php` POST, `user-new.php` POST | **alert, critical**: the needlestories / vol2.gr chain |
 
