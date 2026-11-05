@@ -128,8 +128,13 @@ func authOutcome(rec LogRec, af authField) string {
 			// login: wp-login.php runs its login case for an unknown one.
 			return "na"
 		}
+		// A failure is the form again (200), or WordPress / a hide-login
+		// plugin sending the client back to a login page: wp_redirect, a
+		// 302 (or a 303). A 301/308 to the login page is the site's
+		// canonical redirect (http to https, www), which moves the POST
+		// before WordPress reads it: no outcome (lelaki.gr, 2026-11-05).
 		st := rec.Status
-		if st == 200 || (st >= 300 && st < 400 && strings.Contains(strings.ToLower(af.Loc), "login")) {
+		if st == 200 || ((st == 302 || st == 303) && strings.Contains(strings.ToLower(af.Loc), "login")) {
 			return "fail"
 		}
 	}

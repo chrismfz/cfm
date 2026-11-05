@@ -17,7 +17,13 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **A canonical redirect of a WordPress login is no longer counted as a
+  failed login.** The login outcome took any redirect to a login page as a
+  failure. A site's own 301/308 (http to https, www) moves the login POST
+  before WordPress reads it, and the first day's corpus showed one counted
+  as a failure. Only a 302/303 back to a login page (what WordPress and
+  hide-login plugins send) is a failure now.
 
 ## 2026.11.05
 

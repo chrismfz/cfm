@@ -122,8 +122,10 @@ The daemon's WordPress rule (the one verified so far):
   `action=login` in the BODY still lands here (the edge does not read the
   body), and both answer 200 on a failure, so phase 1 has to read `na` + 200
   on its own, not ignore it.
-- `fail`: the form again (200), or a redirect to a path containing `login`
-  (`wp-login.php`, a hide-login slug). The `?login=failed` query itself
+- `fail`: the form again (200), or a 302/303 to a path containing `login`
+  (`wp-login.php`, a hide-login slug). A 301/308 to the login page is the
+  site's canonical redirect (http to https, www), not a verdict, so it is
+  `?` (lelaki.gr, the first day's corpus). The `?login=failed` query itself
   never reaches the daemon.
 - `?`: anything else (a 2FA or CAPTCHA step elsewhere).
 
