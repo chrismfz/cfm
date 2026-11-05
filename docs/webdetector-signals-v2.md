@@ -101,7 +101,12 @@ from the corpus is a Go change, not an edge release. As built the field is
   (`$upstream_http_location`). On an HTTP/2 or HTTP/3 answer,
   `ngx.header["Location"]` is already empty in the log phase, and that is
   how most browsers log in (813 of 895 login redirects on orion). Until
-  2026-11-05 those redirects read as having no Location.
+  2026-11-05 those redirects read as having no Location. A residual
+  of the `x=1` rule: a hide-login plugin on an https site answers a failed
+  login made over plain **http** with a redirect to `https://`. That is the
+  same shape as a canonical http→https 302, so it reads `?`, not `fail`.
+  Plain WordPress answers a failure with 200, so only hide-login sites
+  reached over http are affected.
 - `c=`: the names of up to 8 cookies the response set.
 - `x=1`: the Location leaves the request's scheme or host (a canonical
   redirect: http to https, bare to www). Only the bit is sent, never the
