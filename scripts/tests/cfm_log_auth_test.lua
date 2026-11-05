@@ -119,6 +119,12 @@ check(af(req("POST", "/wp-login.php", 302, { Location = "https://X.GR:443/wp-log
   "host case and a port do not make it cross")
 check(af(req("POST", "/wp-login.php", 302, { Location = "https://x.gr/wp-login.php" }, { scheme = "http" })) == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=",
   "http to https (Apache [R], a 302) is cross")
+check(af(req("POST", "/wp-login.php", 302, { Location = "https://x.gr/slug/?login=failed" }, { scheme = "http" })) == "WP_LOGIN;li=0;l=/slug/;c=",
+  "an http login sent to https on the same host with a new query is the plugin's verdict, not cross")
+check(af(req("POST", "/wp-login.php?redirect_to=x", 302, { Location = "https://x.gr/wp-login.php?redirect_to=x" }, { scheme = "http" })) == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=",
+  "a canonical upgrade keeping the request's query is still cross")
+check(af(req("POST", "/wp-login.php", 302, { Location = "https://www.x.gr/wp-login.php?login=failed" }, { scheme = "http" })) == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=",
+  "another host is cross whatever the query")
 check(af(req("POST", "/wp-login.php", 301, { Location = "https://www.x.gr/wp-login.php" })) == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=",
   "bare to www is cross")
 check(af(req("POST", "/wp-login.php", 302, { Location = "https://user@x.gr/a" })) == "WP_LOGIN;li=0;l=/a;c=",

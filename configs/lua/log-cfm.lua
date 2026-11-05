@@ -367,6 +367,7 @@ local function auth_field(var)
   if type(loc) == "table" then loc = loc[1] end
   local cross = false
   if type(loc) == "string" then
+    local loc_query = loc:find("?", 1, true) ~= nil
     loc = loc:match("^[^?#]*") or ""
     -- Does the redirect leave the request's scheme or host? That is a
     -- canonical redirect (http to https, bare to www), which moves the POST
@@ -376,9 +377,18 @@ local function auth_field(var)
     if not sch then auth = loc:match("^[/\\][/\\]([^/\\]*)") end
     if auth and auth ~= "" then
       local h = auth:gsub("^.*@", ""):gsub(":%d*$", ""):lower()
+      local rsch = tostring(var.scheme or ""):lower()
       if h ~= tostring(var.host or ""):lower()
-        or (sch and sch:lower() ~= tostring(var.scheme or ""):lower()) then
+        or (sch and sch:lower() ~= rsch) then
         cross = true
+      end
+      -- An http login answered on the same host over https WITH a query the
+      -- request lacked is the plugin's verdict (a hide-login plugin on an
+      -- https site: ?login=failed), not a canonical redirect, which keeps
+      -- the request's query.
+      if cross and h == tostring(var.host or ""):lower() and sch and sch:lower() == "https"
+        and rsch == "http" and loc_query and not tostring(var.request_uri or ""):find("?", 1, true) then
+        cross = false
       end
     end
     -- Drop the scheme+host (any number of either slash: browsers read
