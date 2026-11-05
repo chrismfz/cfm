@@ -99,6 +99,19 @@ check(af(req("POST", "/wp-login.php", 302, { Location = "\\\\evil.example/a" }))
 check(af(req("POST", "/blog/wp-login.php", 200, {})) == "WP_LOGIN;li=0;l=;c=", "WordPress in a subdirectory")
 check(af(req("POST", "/WP-LOGIN.PHP", 200, {})) == "WP_LOGIN;li=0;l=;c=", "the pre-check is case-insensitive")
 
+-- ── The origin's Location ($upstream_http_location): ngx.header has none on
+-- an HTTP/2 or HTTP/3 answer by the log phase ────────────────────────────────
+check(af(req("POST", "/wp-login.php", 302, {}, { upstream_http_location = "https://x.gr/wp-login.php?login=failed" }))
+  == "WP_LOGIN;li=0;l=/wp-login.php;c=", "h2: the Location comes from the upstream variable")
+check(af(req("POST", "/wp-login.php", 302, { Location = "/ignored/" }, { upstream_http_location = "https://www.x.gr/wp-login.php" }))
+  == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=", "the upstream's Location wins over ngx.header, and cross still reads")
+check(af(req("POST", "/wp-login.php", 302, {}, { upstream_http_location = "https://x.gr/a, https://x.gr/wp-admin/" }))
+  == "WP_LOGIN;li=0;l=/wp-admin/;c=", "a retried upstream: the last answer's Location")
+check(af(req("POST", "/wp-login.php", 302, {}, { upstream_http_location = "https://x.gr/a,b/wp-login.php?x=1,2" }))
+  == "WP_LOGIN;li=0;l=/a_b/wp-login.php;c=", "a comma inside the URL is not a list separator")
+check(af(req("POST", "/wp-login.php", 302, { Location = "/__cfm_challenge" }, { upstream_http_location = "" }))
+  == "WP_LOGIN;li=0;l=/__cfm_challenge;c=", "no upstream Location: ngx.header (an edge-made redirect)")
+
 -- ── x=1: the redirect leaves the request's scheme or host ───────────────────
 check(af(req("POST", "/wp-login.php", 302, { Location = "https://x.gr/wp-login.php?login=failed" })) == "WP_LOGIN;li=0;l=/wp-login.php;c=",
   "a same-origin absolute redirect (wp_redirect) has no x")

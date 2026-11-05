@@ -351,7 +351,19 @@ local function auth_field(var)
     if real then logged_in = true end
   end
 
-  local loc = hdr and hdr["Location"]
+  -- The ORIGIN's Location ($upstream_http_location, what the file log's
+  -- uloc= shows). ngx.header["Location"] is empty here for an HTTP/2 or
+  -- HTTP/3 answer: their header filters consume the Location (hash 0)
+  -- before the log phase, and most browsers' logins are h2/h3 (orion:
+  -- 813 of 895 login redirects). A retried upstream lists every answer
+  -- ("a, b"): the last is the one sent. Edge-made redirects (no upstream)
+  -- fall back to ngx.header.
+  local loc = var.upstream_http_location
+  if type(loc) == "string" and loc ~= "" then
+    if loc:find(", ", 1, true) then loc = loc:match(".*, (.*)$") or loc end
+  else
+    loc = hdr and hdr["Location"]
+  end
   if type(loc) == "table" then loc = loc[1] end
   local cross = false
   if type(loc) == "string" then

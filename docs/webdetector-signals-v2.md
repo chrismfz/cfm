@@ -97,7 +97,11 @@ from the corpus is a Go change, not an edge release. As built the field is
   values, so this one bit is decided there (`ngx.header["Set-Cookie"]`).
   The value never leaves the edge.
 - `l=`: the `Location` path, its scheme, host (protocol-relative and
-  backslash forms too) and query dropped.
+  backslash forms too) and query dropped. It is the ORIGIN's Location
+  (`$upstream_http_location`). On an HTTP/2 or HTTP/3 answer,
+  `ngx.header["Location"]` is already empty in the log phase, and that is
+  how most browsers log in (813 of 895 login redirects on orion). Until
+  2026-11-05 those redirects read as having no Location.
 - `c=`: the names of up to 8 cookies the response set.
 - `x=1`: the Location leaves the request's scheme or host (a canonical
   redirect: http to https, bare to www). Only the bit is sent, never the

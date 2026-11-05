@@ -17,7 +17,14 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The login field now sees the site's redirect over HTTP/2 and HTTP/3.**
+  On an HTTP/2 or HTTP/3 answer, nginx consumes the `Location` header before
+  the log phase. Most real browsers log in over h2/h3 (813 of 895 login
+  redirects on orion), so for them a hide-login plugin's failure redirect and
+  a canonical redirect to another host were invisible: the failure read as
+  unknown. The edge now reads the origin's own `Location`
+  (`$upstream_http_location`, the access log's `uloc=`).
 
 ## 2026.11.05
 
