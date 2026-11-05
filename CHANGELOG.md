@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.05
+
 ### Fixed
 - **A canonical redirect of a WordPress login is no longer counted as a
   failed login.** The login outcome took any redirect to a login page as a
@@ -26,8 +30,6 @@ back-filled here — see the git/PR history for that period.
   host (what WordPress and hide-login plugins send) is a failure now. The
   edge tells the daemon whether a redirect leaves the request's scheme or
   host (never the host itself), because Apache's `[R]` redirect is a 302.
-
-## 2026.11.05
 
 ### Added
 - **The edge now reports how each login POST ended.** Status alone cannot
