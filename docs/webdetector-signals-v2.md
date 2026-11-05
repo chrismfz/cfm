@@ -287,7 +287,7 @@ the shadow read.
 | L1 spray | IP, all vhosts, 1 h / 24 h | ≥ 10 `fail` on ≥ 3 vhosts in 24 h, or ≥ 20 in 1 h, or ≥ 50 in 24 h (built) | ban through the detector sink (leniency, edgeban for proxied clients, notify) |
 | L2 block spray | /24 (v4), /48 (v6) | ≥ 5 IPs of the block flagged by L1 in 24 h, or ≥ 30 `fail` from ≥ 5 of its IPs in 24 h (built) | ban the IPs seen; a subnet ban only after its own review |
 | L3 vhost under attack | vhost | `fail`/h ≥ 10× its 7-day median, and ≥ 50 | alert, then a tighter per-IP limit on that vhost (≥ 3 `fail` in 1 h → L1 action) for the attack's TTL |
-| L4 dirty success | (vhost, IP) | `ok` from an IP flagged by L1/L2 in the last 24 h, or after ≥ 10 own `fail` on that site in 24 h (built) | **alert, high priority** (never an automatic ban: it can be the owner after typos) |
+| L4 dirty success | (vhost, IP) | `ok` from an IP flagged by L1/L2 in the last 24 h, or after ≥ 10 own `fail` on that site in 24 h (built). Not when the client already succeeded there at least as often as it failed (an owner's tool), or reset its password there (an attacker cannot): the first fleet day's two rows of each kind. The FIRST success on a site always counts | **alert, high priority** (never an automatic ban: it can be the owner after typos) |
 | L5 new admin origin | vhost | `ok` from a country + ASN never seen succeed on that vhost in 30 days | info alert, shadow-only until its FP rate is known |
 | L6 risky follow-up | (vhost, IP) | within 30 min of an L4 or L5 login: a plugin/theme upload (`update.php?action=upload-plugin`, `plugin-install.php`), `plugin-editor.php`/`theme-editor.php` POST, `user-new.php` POST | **alert, critical**: the needlestories / vol2.gr chain |
 

@@ -129,8 +129,10 @@ func (w *loginWin) hourEst(now int64) float64 {
 }
 
 type loginSite struct {
-	h uint64
-	n uint16
+	h     uint64
+	n     uint16 // failures on the site, day window
+	ok    uint16 // successes on the site, day window
+	reset bool   // the client reset its password there (wp-login lostpassword/rp)
 }
 
 type loginOK struct {
@@ -147,6 +149,42 @@ type loginIP struct {
 	flagged int64 // flagged by L1 until
 	rowAt   int64 // last login_spray row
 	oks     [loginOKRows]loginOK
+}
+
+// failedSites is how many of the client's sites it failed on (an entry can
+// hold only successes or a password reset).
+func (s *loginIP) failedSites() int {
+	n := 0
+	for i := 0; i < int(s.nsites); i++ {
+		if s.sites[i].n > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// siteSlot returns the client's entry for a site, adding an empty one when
+// there is room (nil when the client already holds loginMaxSites).
+func (s *loginIP) siteSlot(h uint64) *loginSite {
+	if st := s.site(h); st != nil {
+		return st
+	}
+	if int(s.nsites) < loginMaxSites {
+		s.sites[s.nsites] = loginSite{h: h}
+		s.nsites++
+		return &s.sites[s.nsites-1]
+	}
+	return nil
+}
+
+// rollDay moves the client's 24 h window without counting, dropping its
+// sites when a new window starts.
+func (s *loginIP) rollDay(now int64) {
+	prev := s.win.dayStart
+	s.win.roll(now)
+	if s.win.dayStart != prev {
+		s.nsites, s.full = 0, false
+	}
 }
 
 func (s *loginIP) site(h uint64) *loginSite {
@@ -240,8 +278,17 @@ func loginSiteKey(host string) string {
 }
 
 // observe takes one login line with its outcome. Only "fail" and "ok" count.
-func (l *loginLedger) observe(rec LogRec, host, tag, outcome string) {
-	if l == nil || !loginSignalsOn.Load() || (outcome != "fail" && outcome != "ok") || rec.IP == "" {
+// loginResetActions are wp-login.php's password-reset steps: an attacker
+// cannot complete one (the link goes to the owner's mailbox), so a reset on
+// a site marks its later successes as the owner's.
+var loginResetActions = map[string]bool{"lostpassword": true, "retrievepassword": true, "rp": true, "resetpass": true}
+
+func (l *loginLedger) observe(rec LogRec, host, tag, outcome, action string) {
+	if l == nil || !loginSignalsOn.Load() || rec.IP == "" {
+		return
+	}
+	reset := outcome == "na" && loginResetActions[action]
+	if outcome != "fail" && outcome != "ok" && !reset {
 		return
 	}
 	wall := l.wall()
@@ -253,9 +300,16 @@ func (l *loginLedger) observe(rec LogRec, host, tag, outcome string) {
 	site := authHash(loginSiteKey(host))
 	var rows []HistoryEvent
 	l.mu.Lock()
-	if outcome == "fail" {
+	switch {
+	case reset:
+		s := l.ipLocked(client, now)
+		s.rollDay(now)
+		if st := s.siteSlot(site); st != nil {
+			st.reset = true
+		}
+	case outcome == "fail":
 		rows = l.failLocked(rec.IP, client, network, site, tag, now)
-	} else {
+	default:
 		rows = l.okLocked(rec.IP, client, network, host, site, tag, now)
 	}
 	rows = l.budgetLocked(rows, wall)
@@ -358,13 +412,10 @@ func (l *loginLedger) failLocked(ip, client, network string, site uint64, tag st
 	if s.win.dayStart != prevDay {
 		s.nsites, s.full = 0, false
 	}
-	if st := s.site(site); st != nil {
+	if st := s.siteSlot(site); st != nil {
 		if st.n < 0xffff {
 			st.n++
 		}
-	} else if int(s.nsites) < loginMaxSites {
-		s.sites[s.nsites] = loginSite{h: site, n: 1}
-		s.nsites++
 	} else {
 		s.full = true
 	}
@@ -385,7 +436,7 @@ func (l *loginLedger) failLocked(ip, client, network string, site uint64, tag st
 	}
 
 	// L1: one client.
-	sites, hourEst := int(s.nsites), s.win.hourEst(now)
+	sites, hourEst := s.failedSites(), s.win.hourEst(now)
 	if (s.win.day >= loginSprayDayFails && sites >= loginSpraySites) || hourEst >= loginBurstHour || s.win.day >= loginHeavyDay {
 		s.flagged = now + loginFlagTTL
 		addHash(ns.flagged[:], &ns.nflag, ch)
@@ -422,15 +473,32 @@ func (l *loginLedger) failLocked(ip, client, network string, site uint64, tag st
 }
 
 func (l *loginLedger) okLocked(ip, client, network, host string, site uint64, tag string, now int64) []HistoryEvent {
-	s := l.ips[client]
+	// Every success is recorded on the client's site entry, so that a later
+	// success can be told apart: an owner's tool that logs in all day and
+	// sometimes fails (mygreecetours.org, virgo: 655 successes, 155
+	// failures) or a person who reset their password, from a first success
+	// after a run of failures.
+	s := l.ipLocked(client, now)
+	s.rollDay(now)
+	if now > s.last {
+		s.last = now
+	}
 	ns := l.nets[network]
 	var own uint16
-	sites := 0
-	if s != nil && now-s.win.dayStart < 86400 {
-		if st := s.site(site); st != nil {
-			own = st.n
+	owner := false
+	if st := s.siteSlot(site); st != nil {
+		own = st.n
+		// The FIRST success on a site is never the owner's by this rule
+		// (ok 0): a flagged sprayer's way into a site it never failed on is
+		// the case L4 exists for.
+		owner = st.reset || (st.ok > 0 && st.ok >= st.n)
+		if st.ok < 0xffff {
+			st.ok++
 		}
-		sites = int(s.nsites)
+	}
+	sites := s.failedSites()
+	if owner {
+		return nil
 	}
 	by := ""
 	switch {
@@ -443,10 +511,6 @@ func (l *loginLedger) okLocked(ip, client, network, host string, site uint64, ta
 	}
 	if by == "" {
 		return nil
-	}
-	if s == nil {
-		s = l.ipLocked(client, now)
-		s.last = now
 	}
 	// At most one row per (client, site) per hour, and loginOKRows per client.
 	slot := -1
