@@ -271,6 +271,9 @@ func TestLoginLedgerBounded(t *testing.T) {
 	if c := l.ips["198.51.100.10"]; c.nsites != loginMaxSites || !c.full {
 		t.Fatalf("sites cap: %d full=%v", c.nsites, c.full)
 	}
+	if siteCount(8, true) != "8+" || siteCount(3, false) != "3" {
+		t.Fatal("siteCount")
+	}
 	if n := l.nets["10.9.8.0/24"].nips; n != loginMaxNetIPs {
 		t.Fatalf("net clients cap: %d", n)
 	}

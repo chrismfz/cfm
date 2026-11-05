@@ -221,6 +221,14 @@ func loginKeys(ip string) (client, network string) {
 	return c.String(), n.String()
 }
 
+// siteCount renders a site count, "8+" once the per-client cap was passed.
+func siteCount(n int, capped bool) string {
+	if capped {
+		return fmt.Sprintf("%d+", n)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
 // loginSiteKey is the registrable domain of a host: one owner's www.,
 // staging. and bare names are one site.
 func loginSiteKey(host string) string {
@@ -384,7 +392,7 @@ func (l *loginLedger) failLocked(ip, client, network string, site uint64, tag st
 			s.rowAt = now
 			rows = append(rows, HistoryEvent{
 				TsUnix: now, Type: "login_spray", IP: strings.Clone(ip), Mode: "shadow", Score: float64(s.win.day),
-				Reason: fmt.Sprintf("login spray (shadow): %d failed %s logins on %d sites in 24h, %.0f in the last hour", s.win.day, tag, sites, hourEst),
+				Reason: fmt.Sprintf("login spray (shadow): %d failed %s logins on %s sites in 24h, %.0f in the last hour", s.win.day, tag, siteCount(sites, s.full), hourEst),
 				Payload: map[string]interface{}{
 					"tag": tag, "client": client, "fails_24h": s.win.day, "fails_1h": int(hourEst + 0.5),
 					"sites": sites, "sites_capped": s.full, "single_site": sites == 1,
