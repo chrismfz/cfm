@@ -214,6 +214,51 @@ the input to phase 1's outcome rules.
 
 ## 3. Login signals (all keyed on `auth`)
 
+**Built (shadow), 2026-11-04: L1, L2 and L4 for WordPress**
+(`login_ledger.go`, rows `login_spray`, `login_spray_net`,
+`login_dirty_success`, kill switch `[webdetector] LOGIN_SIGNALS`). The
+thresholds below are the starting ones. The units, as built:
+
+- A **client** is an IPv4 address or an IPv6 /64, since one host holds a
+  whole /64. Counted per address, one IPv6 machine spread its tries out of
+  sight.
+- A **network** is an IPv4 /24 or an IPv6 /48. A /48 sprayer with one try
+  per /64 wrote no row at /64 grain.
+- A **site** is a registrable domain (public suffix aware). An owner's typos
+  on `example.gr`, `www.` and `staging.` are one site, not a spray.
+- **Not counted:** a client on the bypass list or flagged `rec.Bypass` (a
+  crawler, QUIC.cloud). Through a CDN that address is every visitor of the
+  sites behind it. A proxy CFM does not know (Sucuri, a tenant's own) still
+  reads as one client; the fleet read has to look for it.
+- **Windows:** a fixed 24 h window and a sliding one-hour estimate per
+  client and per network. A line older than the current hour counts into it
+  (the edge's batches arrive out of order), and a line stamped more than 5
+  minutes ahead of the daemon's clock is counted at the daemon's time.
+- **Bounds:**
+  - 100 000 clients and 20 000 networks. Eviction drops idle-for-a-day
+    entries first, then unflagged ones, and flagged ones last, so a flood of
+    new addresses cannot erase the sprayer whose later success L4 must catch.
+  - 8 sites per client and 16 clients per network.
+- **Rows:**
+  - A spray row is written once per key per 6 h.
+  - A dirty success is written once per (client, site) per hour, and at most
+    4 per client per hour.
+  - Each row type has a budget of 30 a minute (bursts of 60). The rest are
+    counted into the next row's `suppressed`, because a row is a synchronous
+    insert on the ingest path into a history store whose row cap
+    (`HISTORY_MAX_ROWS`) every other detector shares.
+- **Single site:** `single_site` marks an L1 row from one site (the
+  20-an-hour and 50-a-day shapes). An owner's app with a stale password
+  looks the same, so phase 2 must not ban those blindly.
+- **CGNAT:** mobile-carrier /24s may trip L2's pool rule on a busy node, and
+  then every login from them reads `flagged_by=net`. Check this in the read.
+
+Spray rows carry counts, never a site name, so a scoped caller reading its
+own host's rows sees no other tenant. L3 (vhost
+under attack), L5 and L6 are not built. They need a per-vhost baseline, the
+learned admin origins, and the follow-up-request check (§2.1). The other
+CMSes join when the corpus gives them an outcome rule.
+
 Every signal ships **shadow** first: a history row plus the MCP, with no
 action. Proposed action tiers follow the user's open "ban through the
 Sinker or an edge deny" question; that decision is made per signal after
@@ -221,10 +266,10 @@ the shadow read.
 
 | id | grain | fires when (starting thresholds, tuned on the shadow read) | proposed action |
 |---|---|---|---|
-| L1 spray | IP, all vhosts, 1 h / 24 h | ≥ 20 `fail` on ≥ 3 vhosts in 1 h, or ≥ 50 in 24 h | ban through the detector sink (leniency, edgeban for proxied clients, notify) |
-| L2 block spray | /24 (v4), /48 (v6) | ≥ 5 IPs of the block in L1's ledger, or ≥ 100 `fail` from the block in 1 h | ban the IPs seen; a subnet ban only after its own review |
+| L1 spray | IP, all vhosts, 1 h / 24 h | ≥ 10 `fail` on ≥ 3 vhosts in 24 h, or ≥ 20 in 1 h, or ≥ 50 in 24 h (built) | ban through the detector sink (leniency, edgeban for proxied clients, notify) |
+| L2 block spray | /24 (v4), /48 (v6) | ≥ 5 IPs of the block flagged by L1 in 24 h, or ≥ 30 `fail` from ≥ 5 of its IPs in 24 h (built) | ban the IPs seen; a subnet ban only after its own review |
 | L3 vhost under attack | vhost | `fail`/h ≥ 10× its 7-day median, and ≥ 50 | alert, then a tighter per-IP limit on that vhost (≥ 3 `fail` in 1 h → L1 action) for the attack's TTL |
-| L4 dirty success | (vhost, IP) | `ok` from an IP in the L1/L2 ledger, or ≥ 10 own `fail` before it | **alert, high priority** (never an automatic ban: it can be the owner after typos) |
+| L4 dirty success | (vhost, IP) | `ok` from an IP flagged by L1/L2 in the last 24 h, or after ≥ 10 own `fail` on that site in 24 h (built) | **alert, high priority** (never an automatic ban: it can be the owner after typos) |
 | L5 new admin origin | vhost | `ok` from a country + ASN never seen succeed on that vhost in 30 days | info alert, shadow-only until its FP rate is known |
 | L6 risky follow-up | (vhost, IP) | within 30 min of an L4 or L5 login: a plugin/theme upload (`update.php?action=upload-plugin`, `plugin-install.php`), `plugin-editor.php`/`theme-editor.php` POST, `user-new.php` POST | **alert, critical**: the needlestories / vol2.gr chain |
 

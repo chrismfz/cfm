@@ -930,7 +930,7 @@ func registerIPDrilldown(srv *mcp.Server, d Deps) {
 
 type detectionHistoryInput struct {
 	Limit int    `json:"limit,omitempty" jsonschema:"max event rows to return; default server-side"`
-	Type  string `json:"type,omitempty" jsonschema:"filter by event type, e.g. waf_trigger, challenge_issued, challenge_solved, challenge_v2_reject, clam_infected, hardware_ecc; omit for all"`
+	Type  string `json:"type,omitempty" jsonschema:"filter by event type, e.g. waf_trigger, challenge_issued, challenge_solved, challenge_v2_reject, clam_infected, hardware_ecc, login_spray, login_spray_net, login_dirty_success (shadow login brute-force signals); omit for all"`
 	Host  string `json:"host,omitempty" jsonschema:"restrict to one vhost; omit for all"`
 	IP    string `json:"ip,omitempty" jsonschema:"restrict to ONE source IP — the events CFM recorded for it (WAF hits, challenge, autoblock), i.e. WHO/WHY this IP was acted on; omit for all. Detector/WAF/challenge bans appear here; manual/blocklist bans do not."`
 }

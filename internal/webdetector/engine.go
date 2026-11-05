@@ -483,6 +483,9 @@ type Engine struct {
 	// authCorpus groups the edge's login-outcome lines by shape (auth_corpus.go;
 	// docs/webdetector-signals-v2.md §2) for the per-CMS outcome rules.
 	authCorpus *authCorpus
+	// loginLedger counts failed logins into shadow login_spray /
+	// login_spray_net / login_dirty_success history rows (login_ledger.go).
+	loginLedger *loginLedger
 
 	chalRules   []chalRule
 	nginxBridge *NginxBridge // always set (edge mode is the only mode)
@@ -687,6 +690,8 @@ func NewEngine(cfg Config) *Engine {
 	for _, src := range cfg.ChallengeV2AutoVhost {
 		e.autoV2Armed[src] = true
 	}
+
+	e.loginLedger = newLoginLedger(e.appendHistory)
 
 	// Edge (OpenResty/Angie) decision bridge — always on. Edge mode is the
 	// only mode (docs/edge-unification-plan.md Phase 1); the old OPENRESTY_MODE
@@ -1581,8 +1586,18 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	if e.accessRing != nil {
 		e.accessRing.add(newAccessEntry(rec))
 	}
-	if rec.Auth != "" && e.authCorpus != nil {
-		e.authCorpus.add(rec, host)
+	if rec.Auth != "" {
+		if af, ok := parseAuthField(rec.Auth); ok {
+			outcome := authOutcome(rec, af)
+			if e.authCorpus != nil {
+				e.authCorpus.addParsed(rec, host, af, outcome)
+			}
+			// A bypass client (a crawler, QUIC.cloud: rec.Bypass) is not
+			// counted: through a CDN it is every visitor of the sites behind it.
+			if !rec.Bypass && !e.isBypassed(rec.IP) {
+				e.loginLedger.observe(rec, host, af.Tag, outcome)
+			}
+		}
 	}
 
 	// cPanel's own session API on a proxy subdomain (File Manager save/upload,

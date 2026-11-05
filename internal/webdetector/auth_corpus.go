@@ -355,10 +355,15 @@ func (c *authCorpus) add(rec LogRec, host string) {
 	if !ok {
 		return
 	}
+	c.addParsed(rec, host, af, authOutcome(rec, af))
+}
+
+// addParsed is add for a line already parsed (the engine parses once for
+// the corpus and the login ledger).
+func (c *authCorpus) addParsed(rec LogRec, host string, af authField, outcome string) {
 	if len(host) > authCorpusMaxHost {
 		host = host[:authCorpusMaxHost]
 	}
-	outcome := authOutcome(rec, af)
 	e := AuthCorpusEntry{
 		Tag:      af.Tag,
 		Outcome:  outcome,
