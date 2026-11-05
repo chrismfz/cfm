@@ -102,9 +102,14 @@ from the corpus is a Go change, not an edge release. As built the field is
   `ngx.header["Location"]` is already empty in the log phase, and that is
   how most browsers log in (813 of 895 login redirects on orion). Until
   2026-11-05 those redirects read as having no Location. An http
-  login sent to `https://` on the same host WITH a query the request lacked
-  (a hide-login plugin on an https site: `?login=failed`) is the plugin's
-  verdict, not `x=1`: a canonical redirect keeps the request's query.
+  login sent to `https://` on the same host with a query DIFFERENT from the
+  request's (a hide-login plugin on an https site: `?login=failed`) is the
+  plugin's verdict, not `x=1`. A canonical redirect keeps the request's
+  query. The queries are compared whole, so a client cannot hide its
+  failures behind a query of its own. A 302 canonical rule that changes the
+  query reads as a verdict: rare, since most keep `REQUEST_URI`. The scheme
+  compared is `$cf_xfp`, the one the origin is told, not the listener's
+  `$scheme`, which is http behind Cloudflare Flexible.
 - `c=`: the names of up to 8 cookies the response set.
 - `x=1`: the Location leaves the request's scheme or host (a canonical
   redirect: http to https, bare to www). Only the bit is sent, never the

@@ -277,6 +277,15 @@ func TestLoginLedgerBounded(t *testing.T) {
 	if siteCount(8, true) != "8+" || siteCount(3, false) != "3" {
 		t.Fatal("siteCount")
 	}
+	// A capped network reads 16+ in its row.
+	sink := &rowSink{}
+	l2 := newLoginLedger(sink.emit)
+	for i := 0; i < 40; i++ {
+		l2.observe(loginRec("10.7.7."+strconv.Itoa(i+1), t0+int64(i)), "x.gr", "WP_LOGIN", "fail")
+	}
+	if n := sink.of("login_spray_net"); len(n) != 1 || !strings.Contains(n[0].Reason, "from 16+ clients") {
+		t.Fatalf("capped net reason: %+v", n)
+	}
 	if n := l.nets["10.9.8.0/24"].nips; n != loginMaxNetIPs {
 		t.Fatalf("net clients cap: %d", n)
 	}

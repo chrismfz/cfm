@@ -105,8 +105,10 @@ check(af(req("POST", "/wp-login.php", 302, {}, { upstream_http_location = "https
   == "WP_LOGIN;li=0;l=/wp-login.php;c=", "h2: the Location comes from the upstream variable")
 check(af(req("POST", "/wp-login.php", 302, { Location = "/ignored/" }, { upstream_http_location = "https://www.x.gr/wp-login.php" }))
   == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=", "the upstream's Location wins over ngx.header, and cross still reads")
-check(af(req("POST", "/wp-login.php", 302, {}, { upstream_http_location = "https://x.gr/a, https://x.gr/wp-admin/" }))
-  == "WP_LOGIN;li=0;l=/wp-admin/;c=", "a retried upstream: the last answer's Location")
+check(af(req("POST", "/wp-login.php", 302, {}, { upstream_http_location = "https://x.gr/wp-login.php?msg=Wrong, try again" }))
+  == "WP_LOGIN;li=0;l=/wp-login.php;c=", "a ', ' inside the URL is part of it (nginx keeps one Location; a retry resets it)")
+check(af(req("POST", "/wp-login.php", 302, {}, { upstream_http_location = "/wp-login.php?r=a, https://evil.example/x" }))
+  == "WP_LOGIN;li=0;l=/wp-login.php;c=", "a ', https://' inside the query is not another Location")
 check(af(req("POST", "/wp-login.php", 302, {}, { upstream_http_location = "https://x.gr/a,b/wp-login.php?x=1,2" }))
   == "WP_LOGIN;li=0;l=/a_b/wp-login.php;c=", "a comma inside the URL is not a list separator")
 check(af(req("POST", "/wp-login.php", 302, { Location = "/__cfm_challenge" }, { upstream_http_location = "" }))
@@ -121,7 +123,17 @@ check(af(req("POST", "/wp-login.php", 302, { Location = "https://x.gr/wp-login.p
   "http to https (Apache [R], a 302) is cross")
 check(af(req("POST", "/wp-login.php", 302, { Location = "https://x.gr/slug/?login=failed" }, { scheme = "http" })) == "WP_LOGIN;li=0;l=/slug/;c=",
   "an http login sent to https on the same host with a new query is the plugin's verdict, not cross")
-check(af(req("POST", "/wp-login.php?redirect_to=x", 302, { Location = "https://x.gr/wp-login.php?redirect_to=x" }, { scheme = "http" })) == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=",
+check(af(req("POST", "/wp-login.php?z=1", 302, { Location = "https://x.gr/slug/?login=failed" }, { scheme = "http", request_uri = "/wp-login.php?z=1" })) == "WP_LOGIN;li=0;l=/slug/;c=",
+  "a dummy query of the client's own does not hide the verdict (queries compared whole)")
+check(af(req("POST", "/wp-login.php?redirect_to=a&reauth=1", 302, { Location = "https://x.gr/wp-login.php?login=failed" }, { scheme = "http", request_uri = "/wp-login.php?redirect_to=a&reauth=1" })) == "WP_LOGIN;li=0;l=/wp-login.php;c=",
+  "a browser login with redirect_to: the verdict's query differs, so not cross")
+check(af(req("POST", "/wp-login.php?a=1", 302, { Location = "https://x.gr/wp-login.php?a=1#?x" }, { scheme = "http", request_uri = "/wp-login.php?a=1" })) == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=",
+  "a '?' in the fragment is not a query: the canonical upgrade keeps the query, cross")
+check(af(req("POST", "/wp-login.php", 302, { Location = "https://x.gr/slug/" }, { scheme = "http", cf_xfp = "https" })) == "WP_LOGIN;li=0;l=/slug/;c=",
+  "Cloudflare Flexible: http to the edge, https to the origin ($cf_xfp): a same-host https redirect is not cross")
+check(af(req("POST", "/wp-login.php", 302, { Location = "http://x.gr/slug/" }, { scheme = "https", cf_xfp = "http" })) == "WP_LOGIN;li=0;l=/slug/;c=",
+  "the origin's own scheme is the reference, whatever the listener")
+check(af(req("POST", "/wp-login.php?redirect_to=x", 302, { Location = "https://x.gr/wp-login.php?redirect_to=x" }, { scheme = "http", request_uri = "/wp-login.php?redirect_to=x" })) == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=",
   "a canonical upgrade keeping the request's query is still cross")
 check(af(req("POST", "/wp-login.php", 302, { Location = "https://www.x.gr/wp-login.php?login=failed" }, { scheme = "http" })) == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=",
   "another host is cross whatever the query")

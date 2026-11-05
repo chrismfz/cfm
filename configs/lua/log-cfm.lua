@@ -355,40 +355,43 @@ local function auth_field(var)
   -- uloc= shows). ngx.header["Location"] is empty here for an HTTP/2 or
   -- HTTP/3 answer: their header filters consume the Location (hash 0)
   -- before the log phase, and most browsers' logins are h2/h3 (orion:
-  -- 813 of 895 login redirects). A retried upstream lists every answer
-  -- ("a, b"): the last is the one sent. Edge-made redirects (no upstream)
-  -- fall back to ngx.header.
+  -- 813 of 895 login redirects). nginx resets the upstream headers on a
+  -- retry and keeps the first of two Location headers, so the variable is
+  -- one value (a ", " inside it is part of the URL). Edge-made redirects
+  -- (no upstream) fall back to ngx.header.
   local loc = var.upstream_http_location
-  if type(loc) == "string" and loc ~= "" then
-    if loc:find(", ", 1, true) then loc = loc:match(".*, (.*)$") or loc end
-  else
+  if type(loc) ~= "string" or loc == "" then
     loc = hdr and hdr["Location"]
   end
   if type(loc) == "table" then loc = loc[1] end
   local cross = false
   if type(loc) == "string" then
-    local loc_query = loc:find("?", 1, true) ~= nil
+    local loc_q = loc:match("^[^#]*"):match("%?(.*)$") or ""
     loc = loc:match("^[^?#]*") or ""
-    -- Does the redirect leave the request's scheme or host? That is a
+    -- Does the redirect leave the scheme or host the ORIGIN saw? That is a
     -- canonical redirect (http to https, bare to www), which moves the POST
     -- before the CMS reads it, whatever its status (Apache's [R] is a 302).
-    -- Only this bit is sent, never the host.
+    -- Only this bit is sent, never the host. The scheme is $cf_xfp (what
+    -- the origin is told: Cloudflare Flexible is http to the edge, https
+    -- to the origin), $scheme on a conf without it.
     local sch, auth = loc:match("^(%a[%w+.-]*):[/\\]*([^/\\]*)")
     if not sch then auth = loc:match("^[/\\][/\\]([^/\\]*)") end
     if auth and auth ~= "" then
       local h = auth:gsub("^.*@", ""):gsub(":%d*$", ""):lower()
-      local rsch = tostring(var.scheme or ""):lower()
-      if h ~= tostring(var.host or ""):lower()
-        or (sch and sch:lower() ~= rsch) then
+      local rhost = tostring(var.host or ""):lower()
+      local rsch = var.cf_xfp
+      if type(rsch) ~= "string" or rsch == "" then rsch = var.scheme end
+      rsch = tostring(rsch or ""):lower()
+      if h ~= rhost or (sch and sch:lower() ~= rsch) then
         cross = true
       end
-      -- An http login answered on the same host over https WITH a query the
-      -- request lacked is the plugin's verdict (a hide-login plugin on an
-      -- https site: ?login=failed), not a canonical redirect, which keeps
-      -- the request's query.
-      if cross and h == tostring(var.host or ""):lower() and sch and sch:lower() == "https"
-        and rsch == "http" and loc_query and not tostring(var.request_uri or ""):find("?", 1, true) then
-        cross = false
+      -- A canonical upgrade (http to https, same host) keeps the request's
+      -- query; one that changes it is the site's verdict (a hide-login
+      -- plugin on an https site: ?login=failed). Compared whole, so a
+      -- client cannot hide its failures behind a query of its own.
+      if cross and h == rhost and sch and sch:lower() == "https" and rsch == "http" then
+        local req_q = tostring(var.request_uri or ""):match("^[^#]*"):match("%?(.*)$") or ""
+        if loc_q ~= req_q then cross = false end
       end
     end
     -- Drop the scheme+host (any number of either slash: browsers read
