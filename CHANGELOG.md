@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.05
+
 ### Fixed
 - **Shadow `login_dirty_success` rows no longer flag a site's own tool.** In
   the first fleet day most rows came from one site's own tool that logs in
@@ -30,8 +34,6 @@ back-filled here — see the git/PR history for that period.
   spray. Sites with only successes no longer count as failed sites in
   `login_spray`, and never keep a failure from being counted: a client that
   logged in on many sites still has a later slow spray seen.
-
-## 2026.11.05
 
 ### Fixed
 - **The login field now sees the site's redirect over HTTP/2 and HTTP/3.**
