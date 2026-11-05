@@ -518,3 +518,160 @@ func TestLoginLedgerWiredFromIngest(t *testing.T) {
 		t.Fatalf("ingest ok → ledger: %d rows", n)
 	}
 }
+
+// The first fleet day's two L4 false positives (2026-11-05).
+func TestLoginLedgerDirtySuccessOwnerPatterns(t *testing.T) {
+	// mygreecetours.org (virgo): the owner's tool logs in every few seconds
+	// and sometimes fails; its sporadic failures flag it (L1 single-site),
+	// but it had already succeeded there more often than it failed.
+	sink := &rowSink{}
+	l := newLoginLedger(sink.emit)
+	ts := t0
+	for i := 0; i < 30; i++ {
+		ts += 6
+		l.observe(loginRec("94.66.129.119", ts), "mygreecetours.org", "WP_LOGIN", "ok")
+	}
+	for i := 0; i < 25; i++ {
+		ts += 6
+		l.observe(loginRec("94.66.129.119", ts), "mygreecetours.org", "WP_LOGIN", "fail")
+	}
+	if len(sink.of("login_spray")) != 1 {
+		t.Fatalf("the tool's burst still reads as an L1 shape (single_site): %d", len(sink.of("login_spray")))
+	}
+	l.observe(loginRec("94.66.129.119", ts+6), "mygreecetours.org", "WP_LOGIN", "ok")
+	if d := sink.of("login_dirty_success"); len(d) != 0 {
+		t.Fatalf("owner tool (more successes than failures before) got a dirty row: %+v", d)
+	}
+
+	// 62.1.118.59 (rigel): typos on welder.gr, a password-reset REQUEST,
+	// then in. Anyone can request a reset (an attacker too, before its
+	// spray), so it excuses nothing: still a row. Shadow; the fleet read
+	// decides.
+	sink = &rowSink{}
+	l = newLoginLedger(sink.emit)
+	for i := 0; i < 12; i++ {
+		l.observe(loginRec("62.1.118.59", t0+int64(i)*60), "welder.gr", "WP_LOGIN", "fail")
+	}
+	l.observe(loginRec("62.1.118.59", t0+800), "dvs.welder.gr", "WP_LOGIN", "na")
+	l.observe(loginRec("62.1.118.59", t0+900), "welder.gr", "WP_LOGIN", "ok")
+	if d := sink.of("login_dirty_success"); len(d) != 1 || d[0].Payload["flagged_by"] != "own_fails" {
+		t.Fatalf("a reset request must not excuse a success: %+v", d)
+	}
+}
+
+func TestLoginLedgerDirtySuccessStillFires(t *testing.T) {
+	// The first success after a run of failures, with no success before it.
+	sink := &rowSink{}
+	l := newLoginLedger(sink.emit)
+	for i := 0; i < 12; i++ {
+		l.observe(loginRec("192.0.2.50", t0+int64(i)*60), "one.gr", "WP_LOGIN", "fail")
+	}
+	l.observe(loginRec("192.0.2.50", t0+900), "one.gr", "WP_LOGIN", "ok")
+	if len(sink.of("login_dirty_success")) != 1 {
+		t.Fatal("first success after failures must still be a row")
+	}
+	// A flagged sprayer's FIRST success on a site it never touched (ok 0,
+	// fails 0 there): still a row.
+	sink = &rowSink{}
+	l = newLoginLedger(sink.emit)
+	for i := 0; i < 12; i++ {
+		l.observe(loginRec("217.60.196.9", t0+int64(i)*60), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail")
+	}
+	l.observe(loginRec("217.60.196.9", t0+900), "victim.gr", "WP_LOGIN", "ok")
+	if d := sink.of("login_dirty_success"); len(d) != 1 || d[0].Payload["flagged_by"] != "ip" {
+		t.Fatalf("flagged sprayer on a fresh site: %+v", d)
+	}
+	// One earlier success does not excuse many failures after it.
+	sink = &rowSink{}
+	l = newLoginLedger(sink.emit)
+	l.observe(loginRec("192.0.2.51", t0), "one.gr", "WP_LOGIN", "ok")
+	for i := 0; i < 12; i++ {
+		l.observe(loginRec("192.0.2.51", t0+60+int64(i)*60), "one.gr", "WP_LOGIN", "fail")
+	}
+	l.observe(loginRec("192.0.2.51", t0+5000), "one.gr", "WP_LOGIN", "ok")
+	if len(sink.of("login_dirty_success")) != 1 {
+		t.Fatal("1 success then 12 failures then a success: still a row")
+	}
+}
+
+func TestLoginLedgerSitesCountOnlyFailures(t *testing.T) {
+	// Successes on other sites do not make a three-site spray.
+	sink := &rowSink{}
+	l := newLoginLedger(sink.emit)
+	l.observe(loginRec("198.51.100.60", t0), "a.gr", "WP_LOGIN", "ok")
+	l.observe(loginRec("198.51.100.60", t0+1), "b.gr", "WP_LOGIN", "ok")
+	for i := 0; i < 12; i++ {
+		l.observe(loginRec("198.51.100.60", t0+10+int64(i)*600), "c.gr", "WP_LOGIN", "fail")
+	}
+	if n := len(sink.of("login_spray")); n != 0 {
+		t.Fatalf("ok/reset sites counted as failed sites: %d rows", n)
+	}
+	if c := l.ips["198.51.100.60"]; c.failedSites() != 1 || c.nsites != 3 {
+		t.Fatalf("failedSites=%d nsites=%d", c.failedSites(), c.nsites)
+	}
+}
+
+func TestLoginLedgerResetRequestThroughIngest(t *testing.T) {
+	e := NewEngine(Config{})
+	sink := &rowSink{}
+	e.loginLedger.emit = sink.emit
+	feed := func(i int, auth string) {
+		line := strings.Replace(authBase, "1000.5", strconv.FormatInt(t0+int64(i), 10), 1) + "\t0\t" + auth
+		rec, ok := parseSocketTSV(line)
+		if !ok {
+			t.Fatal("parse")
+		}
+		e.ingest(rec, line)
+	}
+	for i := 0; i < 12; i++ {
+		feed(i, "WP_LOGIN;li=0;l=/wp-login.php;c=")
+	}
+	feed(20, "WP_LOGIN;li=0;a=lostpassword;l=/wp-login.php;c=")
+	feed(30, "WP_LOGIN;li=1;l=/wp-admin/;c=wordpress_logged_in_x")
+	if n := len(sink.of("login_dirty_success")); n != 1 {
+		t.Fatalf("a reset request in between excuses nothing: %d rows", n)
+	}
+}
+
+func TestLoginLedgerSuccessSitesDoNotStarveFailures(t *testing.T) {
+	// A client that logged in on every slot's worth of sites, then fails
+	// slowly on other sites: the failures still take slots, so L1's site
+	// spread sees them.
+	sink := &rowSink{}
+	l := newLoginLedger(sink.emit)
+	for i := 0; i < loginMaxSites; i++ {
+		l.observe(loginRec("198.51.100.70", t0+int64(i)), "own"+strconv.Itoa(i)+".gr", "WP_LOGIN", "ok")
+	}
+	for i := 0; i < 12; i++ {
+		l.observe(loginRec("198.51.100.70", t0+600+int64(i)*400), "v"+strconv.Itoa(i%4)+".gr", "WP_LOGIN", "fail")
+	}
+	r := sink.of("login_spray")
+	if len(r) != 1 || r[0].Payload["sites"] != 4 {
+		t.Fatalf("slow spray after logins on %d sites: %+v", loginMaxSites, r)
+	}
+}
+
+func TestLoginLedgerStuffingHitBeforeFlagStillReported(t *testing.T) {
+	// One try on victim.gr gets in (not flagged yet: no row), then the
+	// client sprays and is flagged, then uses the account again: that use
+	// is a dirty success. A success with no failure on the site excuses
+	// nothing.
+	sink := &rowSink{}
+	l := newLoginLedger(sink.emit)
+	l.observe(loginRec("203.0.113.9", t0), "victim.gr", "WP_LOGIN", "ok")
+	for i := 0; i < 12; i++ {
+		l.observe(loginRec("203.0.113.9", t0+10+int64(i)*10), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail")
+	}
+	if len(sink.of("login_spray")) != 1 {
+		t.Fatal("the spray must flag the client")
+	}
+	l.observe(loginRec("203.0.113.9", t0+4000), "victim.gr", "WP_LOGIN", "ok")
+	if d := sink.of("login_dirty_success"); len(d) != 1 || d[0].Payload["flagged_by"] != "ip" {
+		t.Fatalf("stuffing hit's later use: %+v", d)
+	}
+	// And a later use more than an hour on is reported again.
+	l.observe(loginRec("203.0.113.9", t0+8000), "victim.gr", "WP_LOGIN", "ok")
+	if len(sink.of("login_dirty_success")) != 2 {
+		t.Fatal("hourly re-report of a flagged client's use")
+	}
+}

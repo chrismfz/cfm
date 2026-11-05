@@ -17,7 +17,19 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Shadow `login_dirty_success` rows no longer flag a site's own tool.** In
+  the first fleet day most rows came from one site's own tool that logs in
+  all day and fails now and then (mygreecetours.org: 655 successes, 155
+  failures). A success is no longer reported when the client had failed on
+  that site and already succeeded there at least as often. Successes alone
+  excuse nothing: a credential-stuffing hit before the spray flags the
+  client is still reported when the account is used again. The first success
+  on a site, and the first after a run of failures, are still reported. A
+  password-reset request excuses nothing: anyone can send one before a
+  spray. Sites with only successes no longer count as failed sites in
+  `login_spray`, and never keep a failure from being counted: a client that
+  logged in on many sites still has a later slow spray seen.
 
 ## 2026.11.05
 
