@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.05
+
 ### Fixed
 - **The login field now sees the site's redirect over HTTP/2 and HTTP/3.**
   On an HTTP/2 or HTTP/3 answer, nginx consumes the `Location` header before
@@ -31,8 +35,6 @@ back-filled here — see the git/PR history for that period.
   plain-http login that the site answers with an https redirect on the same
   host whose query differs from the request's. A hide-login plugin on an
   https site sends exactly that; a canonical redirect keeps the query.
-
-## 2026.11.05
 
 ### Fixed
 - **A canonical redirect of a WordPress login is no longer counted as a
