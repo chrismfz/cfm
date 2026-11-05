@@ -222,7 +222,7 @@ func loginKeys(ip string) (client, network string) {
 	return c.String(), n.String()
 }
 
-// siteCount renders a site count, "8+" once the per-client cap was passed.
+// siteCount renders a capped count, "8+" once the cap was reached.
 func siteCount(n int, capped bool) string {
 	if capped {
 		return strconv.Itoa(n) + "+"
@@ -410,7 +410,7 @@ func (l *loginLedger) failLocked(ip, client, network string, site uint64, tag st
 			ns.rowAt = now
 			rows = append(rows, HistoryEvent{
 				TsUnix: now, Type: "login_spray_net", Mode: "shadow", Score: float64(ns.win.day),
-				Reason: fmt.Sprintf("login spray from %s (shadow): %d failed %s logins from %d clients in 24h, %d of them flagged", network, ns.win.day, tag, ns.nips, ns.nflag),
+				Reason: fmt.Sprintf("login spray from %s (shadow): %d failed %s logins from %s clients in 24h, %d of them flagged", network, ns.win.day, tag, siteCount(int(ns.nips), int(ns.nips) == loginMaxNetIPs), ns.nflag),
 				Payload: map[string]interface{}{
 					"tag": tag, "net": network, "fails_24h": ns.win.day, "clients": int(ns.nips),
 					"clients_capped": int(ns.nips) == loginMaxNetIPs, "clients_flagged": int(ns.nflag), "would": "ban",

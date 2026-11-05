@@ -24,7 +24,10 @@ back-filled here — see the git/PR history for that period.
   redirects on orion), so for them a hide-login plugin's failure redirect and
   a canonical redirect to another host were invisible: the failure read as
   unknown. The edge now reads the origin's own `Location`
-  (`$upstream_http_location`, the access log's `uloc=`).
+  (`$upstream_http_location`, the access log's `uloc=`). One more case is
+  now a failure, not unknown: a plain-http login that the site answers with
+  an https redirect on the same host, carrying a query the request lacked.
+  A hide-login plugin on an https site sends exactly that.
 
 ## 2026.11.05
 
