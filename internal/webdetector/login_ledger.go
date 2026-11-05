@@ -492,10 +492,13 @@ func (l *loginLedger) okLocked(ip, client, network, host string, site uint64, ta
 	owner := false
 	if st := s.siteSlot(site); st != nil {
 		own = st.n
-		// The FIRST success on a site is never the owner's by this rule
-		// (ok 0): a flagged sprayer's way into a site it never failed on is
-		// the case L4 exists for.
-		owner = st.ok > 0 && st.ok >= st.n
+		// Only a client that also FAILED here can be the owner by this rule
+		// (n > 0), and only once its successes cover its failures. Successes
+		// alone excuse nothing: a credential-stuffing hit (one try, in) lands
+		// before the spray flags the client, and every later use of that
+		// account would otherwise read as the owner's. The first success on
+		// a site is never excused either (ok 0).
+		owner = st.n > 0 && st.ok >= st.n
 		if st.ok < 0xffff {
 			st.ok++
 		}

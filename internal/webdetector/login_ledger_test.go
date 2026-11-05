@@ -650,3 +650,28 @@ func TestLoginLedgerSuccessSitesDoNotStarveFailures(t *testing.T) {
 		t.Fatalf("slow spray after logins on %d sites: %+v", loginMaxSites, r)
 	}
 }
+
+func TestLoginLedgerStuffingHitBeforeFlagStillReported(t *testing.T) {
+	// One try on victim.gr gets in (not flagged yet: no row), then the
+	// client sprays and is flagged, then uses the account again: that use
+	// is a dirty success. A success with no failure on the site excuses
+	// nothing.
+	sink := &rowSink{}
+	l := newLoginLedger(sink.emit)
+	l.observe(loginRec("203.0.113.9", t0), "victim.gr", "WP_LOGIN", "ok")
+	for i := 0; i < 12; i++ {
+		l.observe(loginRec("203.0.113.9", t0+10+int64(i)*10), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail")
+	}
+	if len(sink.of("login_spray")) != 1 {
+		t.Fatal("the spray must flag the client")
+	}
+	l.observe(loginRec("203.0.113.9", t0+4000), "victim.gr", "WP_LOGIN", "ok")
+	if d := sink.of("login_dirty_success"); len(d) != 1 || d[0].Payload["flagged_by"] != "ip" {
+		t.Fatalf("stuffing hit's later use: %+v", d)
+	}
+	// And a later use more than an hour on is reported again.
+	l.observe(loginRec("203.0.113.9", t0+8000), "victim.gr", "WP_LOGIN", "ok")
+	if len(sink.of("login_dirty_success")) != 2 {
+		t.Fatal("hourly re-report of a flagged client's use")
+	}
+}
