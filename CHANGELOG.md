@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.05
+
 ### Added
 - **The edge now reports how each login POST ended.** Status alone cannot
   tell: a hide-login plugin answers a failed `wp-login.php` post with a 302 to
