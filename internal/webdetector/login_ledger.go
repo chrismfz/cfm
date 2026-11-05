@@ -129,10 +129,9 @@ func (w *loginWin) hourEst(now int64) float64 {
 }
 
 type loginSite struct {
-	h     uint64
-	n     uint16 // failures on the site, day window
-	ok    uint16 // successes on the site, day window
-	reset bool   // the client reset its password there (wp-login lostpassword/rp)
+	h  uint64
+	n  uint16 // failures on the site, day window
+	ok uint16 // successes on the site, day window
 }
 
 type loginOK struct {
@@ -152,7 +151,7 @@ type loginIP struct {
 }
 
 // failedSites is how many of the client's sites it failed on (an entry can
-// hold only successes or a password reset).
+// hold only successes).
 func (s *loginIP) failedSites() int {
 	n := 0
 	for i := 0; i < int(s.nsites); i++ {
@@ -278,17 +277,8 @@ func loginSiteKey(host string) string {
 }
 
 // observe takes one login line with its outcome. Only "fail" and "ok" count.
-// loginResetActions are wp-login.php's password-reset steps: an attacker
-// cannot complete one (the link goes to the owner's mailbox), so a reset on
-// a site marks its later successes as the owner's.
-var loginResetActions = map[string]bool{"lostpassword": true, "retrievepassword": true, "rp": true, "resetpass": true}
-
-func (l *loginLedger) observe(rec LogRec, host, tag, outcome, action string) {
-	if l == nil || !loginSignalsOn.Load() || rec.IP == "" {
-		return
-	}
-	reset := outcome == "na" && loginResetActions[action]
-	if outcome != "fail" && outcome != "ok" && !reset {
+func (l *loginLedger) observe(rec LogRec, host, tag, outcome string) {
+	if l == nil || !loginSignalsOn.Load() || (outcome != "fail" && outcome != "ok") || rec.IP == "" {
 		return
 	}
 	wall := l.wall()
@@ -301,12 +291,6 @@ func (l *loginLedger) observe(rec LogRec, host, tag, outcome, action string) {
 	var rows []HistoryEvent
 	l.mu.Lock()
 	switch {
-	case reset:
-		s := l.ipLocked(client, now)
-		s.rollDay(now)
-		if st := s.siteSlot(site); st != nil {
-			st.reset = true
-		}
 	case outcome == "fail":
 		rows = l.failLocked(rec.IP, client, network, site, tag, now)
 	default:
@@ -476,8 +460,10 @@ func (l *loginLedger) okLocked(ip, client, network, host string, site uint64, ta
 	// Every success is recorded on the client's site entry, so that a later
 	// success can be told apart: an owner's tool that logs in all day and
 	// sometimes fails (mygreecetours.org, virgo: 655 successes, 155
-	// failures) or a person who reset their password, from a first success
-	// after a run of failures.
+	// failures), from a first success after a run of failures. A client
+	// cannot fake a success (it is WordPress's logged-in cookie), so it
+	// cannot buy itself this exemption. A password-reset REQUEST is not
+	// one either: anyone can send it, so it excuses nothing.
 	s := l.ipLocked(client, now)
 	s.rollDay(now)
 	if now > s.last {
@@ -491,7 +477,7 @@ func (l *loginLedger) okLocked(ip, client, network, host string, site uint64, ta
 		// The FIRST success on a site is never the owner's by this rule
 		// (ok 0): a flagged sprayer's way into a site it never failed on is
 		// the case L4 exists for.
-		owner = st.reset || (st.ok > 0 && st.ok >= st.n)
+		owner = st.ok > 0 && st.ok >= st.n
 		if st.ok < 0xffff {
 			st.ok++
 		}

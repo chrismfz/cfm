@@ -18,18 +18,15 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
-- **Shadow `login_dirty_success` rows no longer flag a site's own owner.** In
-  the first fleet day every row was a real owner:
-  - a site's own tool that logs in all day and fails now and then
-    (mygreecetours.org: 655 successes, 155 failures);
-  - a person who mistyped on two sites, reset the password and got in.
-
-  A success is no longer reported when the client had already succeeded on
-  that site at least as often as it failed, or reset its password there,
-  which an attacker cannot do since the link goes to the owner's mailbox.
-  The first success on a site, and the first after a run of failures, are
-  still reported. Sites with only successes or resets no longer count as
-  failed sites in `login_spray`.
+- **Shadow `login_dirty_success` rows no longer flag a site's own tool.** In
+  the first fleet day most rows came from one site's own tool that logs in
+  all day and fails now and then (mygreecetours.org: 655 successes, 155
+  failures). A success is no longer reported when the client had already
+  succeeded on that site at least as often as it failed. The first success
+  on a site, and the first after a run of failures, are still reported. A
+  password-reset request excuses nothing: anyone can send one before a
+  spray. Sites with only successes no longer count as failed sites in
+  `login_spray`.
 
 ## 2026.11.05
 

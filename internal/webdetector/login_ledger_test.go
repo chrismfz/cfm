@@ -29,12 +29,12 @@ func TestLoginLedgerSlowCrossSiteSprayer(t *testing.T) {
 	l := newLoginLedger(sink.emit)
 	// The vol2.gr shape: a few tries per site, minutes apart, many sites.
 	for i := 0; i < 9; i++ {
-		l.observe(loginRec("217.60.196.2", t0+int64(i)*600), "site"+strconv.Itoa(i%4)+".gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("217.60.196.2", t0+int64(i)*600), "site"+strconv.Itoa(i%4)+".gr", "WP_LOGIN", "fail")
 	}
 	if n := len(sink.of("login_spray")); n != 0 {
 		t.Fatalf("9 failures: %d rows", n)
 	}
-	l.observe(loginRec("217.60.196.2", t0+5400), "site0.gr", "WP_LOGIN", "fail", "")
+	l.observe(loginRec("217.60.196.2", t0+5400), "site0.gr", "WP_LOGIN", "fail")
 	rows := sink.of("login_spray")
 	if len(rows) != 1 {
 		t.Fatalf("10 failures on 4 sites: %d rows", len(rows))
@@ -54,12 +54,12 @@ func TestLoginLedgerSlowCrossSiteSprayer(t *testing.T) {
 	}
 	// Throttled: one row per IP per 6 h.
 	for i := 0; i < 20; i++ {
-		l.observe(loginRec("217.60.196.2", t0+6000+int64(i)), "site9.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("217.60.196.2", t0+6000+int64(i)), "site9.gr", "WP_LOGIN", "fail")
 	}
 	if n := len(sink.of("login_spray")); n != 1 {
 		t.Fatalf("throttle: %d rows", n)
 	}
-	l.observe(loginRec("217.60.196.2", t0+5400+6*3600), "site9.gr", "WP_LOGIN", "fail", "")
+	l.observe(loginRec("217.60.196.2", t0+5400+6*3600), "site9.gr", "WP_LOGIN", "fail")
 	if n := len(sink.of("login_spray")); n != 2 {
 		t.Fatalf("after 6 h: %d rows", n)
 	}
@@ -83,7 +83,7 @@ func TestLoginLedgerThresholds(t *testing.T) {
 		sink := &rowSink{}
 		l := newLoginLedger(sink.emit)
 		for i := 0; i < c.fails; i++ {
-			l.observe(loginRec("198.51.100.7", t0+int64(i)*c.gap), "s"+strconv.Itoa(i%c.sites)+".gr", "WP_LOGIN", "fail", "")
+			l.observe(loginRec("198.51.100.7", t0+int64(i)*c.gap), "s"+strconv.Itoa(i%c.sites)+".gr", "WP_LOGIN", "fail")
 		}
 		if n := len(sink.of("login_spray")); n != c.rowsIP {
 			t.Errorf("%s: %d login_spray rows, want %d", c.name, n, c.rowsIP)
@@ -95,8 +95,8 @@ func TestLoginLedgerOnlyFailAndOKCount(t *testing.T) {
 	sink := &rowSink{}
 	l := newLoginLedger(sink.emit)
 	for i := 0; i < 100; i++ {
-		l.observe(loginRec("198.51.100.8", t0+int64(i)), "a.gr", "WP_LOGIN", "?", "")
-		l.observe(loginRec("198.51.100.8", t0+int64(i)), "a.gr", "WP_LOGIN", "na", "")
+		l.observe(loginRec("198.51.100.8", t0+int64(i)), "a.gr", "WP_LOGIN", "?")
+		l.observe(loginRec("198.51.100.8", t0+int64(i)), "a.gr", "WP_LOGIN", "na")
 	}
 	if len(sink.rows) != 0 || len(l.ips) != 0 {
 		t.Fatalf("? and na counted: %d rows, %d ips", len(sink.rows), len(l.ips))
@@ -110,7 +110,7 @@ func TestLoginLedgerNetPools(t *testing.T) {
 	l := newLoginLedger(sink.emit)
 	for i := 0; i < 30; i++ {
 		ip := "104.234.53." + strconv.Itoa(10+i%6)
-		l.observe(loginRec(ip, t0+int64(i)*400), "s"+strconv.Itoa(i%2)+".gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec(ip, t0+int64(i)*400), "s"+strconv.Itoa(i%2)+".gr", "WP_LOGIN", "fail")
 	}
 	if n := len(sink.of("login_spray")); n != 0 {
 		t.Fatalf("no single IP should be flagged: %d", n)
@@ -125,7 +125,7 @@ func TestLoginLedgerNetPools(t *testing.T) {
 	l = newLoginLedger(sink.emit)
 	for n := 0; n < 5; n++ {
 		for i := 0; i < 20; i++ {
-			l.observe(loginRec("155.2.215."+strconv.Itoa(80+n), t0+int64(n*100+i)), "x.gr", "WP_LOGIN", "fail", "")
+			l.observe(loginRec("155.2.215."+strconv.Itoa(80+n), t0+int64(n*100+i)), "x.gr", "WP_LOGIN", "fail")
 		}
 	}
 	if n := sink.of("login_spray_net"); len(n) == 1 && !strings.Contains(n[0].Reason, "from 5 clients") {
@@ -139,7 +139,7 @@ func TestLoginLedgerNetPools(t *testing.T) {
 	sink = &rowSink{}
 	l = newLoginLedger(sink.emit)
 	for i := 0; i < 30; i++ {
-		l.observe(loginRec("2001:db8:1:2::"+strconv.FormatInt(int64(i+1), 16), t0+int64(i)*60), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("2001:db8:1:2::"+strconv.FormatInt(int64(i+1), 16), t0+int64(i)*60), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail")
 	}
 	if sp := sink.of("login_spray"); len(sp) != 1 || sp[0].Payload["client"] != "2001:db8:1:2::/64" {
 		t.Fatalf("v6 /64 as one client: %+v", sp)
@@ -151,7 +151,7 @@ func TestLoginLedgerNetPools(t *testing.T) {
 	l = newLoginLedger(sink.emit)
 	for i := 0; i < 2000; i++ {
 		ip := "2001:db8:abcd:" + strconv.FormatInt(int64(i+1), 16) + "::1"
-		l.observe(loginRec(ip, t0+int64(i)), "s"+strconv.Itoa(i%50)+".gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec(ip, t0+int64(i)), "s"+strconv.Itoa(i%50)+".gr", "WP_LOGIN", "fail")
 	}
 	if nets := sink.of("login_spray_net"); len(nets) != 1 || nets[0].Payload["net"] != "2001:db8:abcd::/48" {
 		t.Fatalf("v6 /48 spread: %+v", nets)
@@ -162,48 +162,48 @@ func TestLoginLedgerDirtySuccess(t *testing.T) {
 	sink := &rowSink{}
 	l := newLoginLedger(sink.emit)
 	// A clean success: nothing.
-	l.observe(loginRec("203.0.113.1", t0), "shop.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("203.0.113.1", t0), "shop.gr", "WP_LOGIN", "ok")
 	if len(sink.rows) != 0 {
 		t.Fatalf("clean success: %+v", sink.rows)
 	}
 	// An owner after a few typos: nothing.
 	for i := 0; i < 3; i++ {
-		l.observe(loginRec("203.0.113.2", t0+int64(i)), "shop.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("203.0.113.2", t0+int64(i)), "shop.gr", "WP_LOGIN", "fail")
 	}
-	l.observe(loginRec("203.0.113.2", t0+10), "shop.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("203.0.113.2", t0+10), "shop.gr", "WP_LOGIN", "ok")
 	if len(sink.of("login_dirty_success")) != 0 {
 		t.Fatalf("owner after typos: %+v", sink.rows)
 	}
 
 	// A sprayer that gets in.
 	for i := 0; i < 12; i++ {
-		l.observe(loginRec("217.60.196.2", t0+int64(i)*600), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("217.60.196.2", t0+int64(i)*600), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail")
 	}
-	l.observe(loginRec("217.60.196.2", t0+8000), "victim.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("217.60.196.2", t0+8000), "victim.gr", "WP_LOGIN", "ok")
 	d := sink.of("login_dirty_success")
 	if len(d) != 1 || d[0].Host != "victim.gr" || d[0].IP != "217.60.196.2" || d[0].Payload["flagged_by"] != "ip" || d[0].Payload["sites_failed_24h"] != 3 {
 		t.Fatalf("sprayer success: %+v", d)
 	}
 	// Throttled per (ip, host) per hour.
-	l.observe(loginRec("217.60.196.2", t0+8100), "victim.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("217.60.196.2", t0+8100), "victim.gr", "WP_LOGIN", "ok")
 	if len(sink.of("login_dirty_success")) != 1 {
 		t.Fatal("throttle")
 	}
 
 	// Brute force on one site, then in: own_fails.
 	for i := 0; i < 12; i++ {
-		l.observe(loginRec("192.0.2.9", t0+int64(i)*400), "one.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("192.0.2.9", t0+int64(i)*400), "one.gr", "WP_LOGIN", "fail")
 	}
-	l.observe(loginRec("192.0.2.9", t0+6000), "one.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("192.0.2.9", t0+6000), "one.gr", "WP_LOGIN", "ok")
 	if d = sink.of("login_dirty_success"); len(d) != 2 || d[1].Payload["flagged_by"] != "own_fails" {
 		t.Fatalf("own fails: %+v", d)
 	}
 
 	// A never-seen IP of a flagged net (no IP state of its own): net, no panic.
 	for i := 0; i < 30; i++ {
-		l.observe(loginRec("104.234.53."+strconv.Itoa(10+i%6), t0+int64(i)*400), "s.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("104.234.53."+strconv.Itoa(10+i%6), t0+int64(i)*400), "s.gr", "WP_LOGIN", "fail")
 	}
-	l.observe(loginRec("104.234.53.200", t0+13000), "shop2.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("104.234.53.200", t0+13000), "shop2.gr", "WP_LOGIN", "ok")
 	if d = sink.of("login_dirty_success"); len(d) != 3 || d[2].Payload["flagged_by"] != "net" {
 		t.Fatalf("net-flagged newcomer: %+v", d)
 	}
@@ -215,7 +215,7 @@ func TestLoginLedgerKillSwitch(t *testing.T) {
 	sink := &rowSink{}
 	l := newLoginLedger(sink.emit)
 	for i := 0; i < 60; i++ {
-		l.observe(loginRec("198.51.100.9", t0+int64(i)), "a.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("198.51.100.9", t0+int64(i)), "a.gr", "WP_LOGIN", "fail")
 	}
 	if len(sink.rows) != 0 || len(l.ips) != 0 {
 		t.Fatal("LOGIN_SIGNALS=0 still counted")
@@ -268,8 +268,8 @@ func TestLoginLedgerBounded(t *testing.T) {
 	// Per-client sites and per-net client sets are capped.
 	l := newLoginLedger(nil)
 	for i := 0; i < 100; i++ {
-		l.observe(loginRec("198.51.100.10", t0+int64(i)), "h"+strconv.Itoa(i)+".gr", "WP_LOGIN", "fail", "")
-		l.observe(loginRec("10.9.8."+strconv.Itoa(i), t0+int64(i)), "x.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("198.51.100.10", t0+int64(i)), "h"+strconv.Itoa(i)+".gr", "WP_LOGIN", "fail")
+		l.observe(loginRec("10.9.8."+strconv.Itoa(i), t0+int64(i)), "x.gr", "WP_LOGIN", "fail")
 	}
 	if c := l.ips["198.51.100.10"]; c.nsites != loginMaxSites || !c.full {
 		t.Fatalf("sites cap: %d full=%v", c.nsites, c.full)
@@ -281,7 +281,7 @@ func TestLoginLedgerBounded(t *testing.T) {
 	sink := &rowSink{}
 	l2 := newLoginLedger(sink.emit)
 	for i := 0; i < 40; i++ {
-		l2.observe(loginRec("10.7.7."+strconv.Itoa(i+1), t0+int64(i)), "x.gr", "WP_LOGIN", "fail", "")
+		l2.observe(loginRec("10.7.7."+strconv.Itoa(i+1), t0+int64(i)), "x.gr", "WP_LOGIN", "fail")
 	}
 	if n := sink.of("login_spray_net"); len(n) != 1 || !strings.Contains(n[0].Reason, "from 16+ clients") {
 		t.Fatalf("capped net reason: %+v", n)
@@ -298,15 +298,15 @@ func TestLoginLedgerFloodKeepsFlagged(t *testing.T) {
 	l := newLoginLedger(sink.emit)
 	l.maxIPs, l.maxNets = 3000, 3000
 	for i := 0; i < 12; i++ {
-		l.observe(loginRec("217.60.196.2", t0+int64(i)*60), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("217.60.196.2", t0+int64(i)*60), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail")
 	}
 	for i := 0; i < 20000; i++ {
-		l.observe(loginRec("10."+strconv.Itoa(i>>16&255)+"."+strconv.Itoa(i>>8&255)+"."+strconv.Itoa(i&255), t0+1000+int64(i%100)), "x.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("10."+strconv.Itoa(i>>16&255)+"."+strconv.Itoa(i>>8&255)+"."+strconv.Itoa(i&255), t0+1000+int64(i%100)), "x.gr", "WP_LOGIN", "fail")
 	}
 	if len(l.ips) > 3000 || len(l.nets) > 3000 {
 		t.Fatalf("caps: %d ips %d nets", len(l.ips), len(l.nets))
 	}
-	l.observe(loginRec("217.60.196.2", t0+2000), "victim.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("217.60.196.2", t0+2000), "victim.gr", "WP_LOGIN", "ok")
 	if d := sink.of("login_dirty_success"); len(d) != 1 || d[0].Payload["flagged_by"] != "ip" {
 		t.Fatalf("flagged sprayer evicted by the flood: %+v", d)
 	}
@@ -319,9 +319,9 @@ func TestLoginLedgerOutOfOrderAndSkew(t *testing.T) {
 	l := newLoginLedger(sink.emit)
 	h := t0 - t0%3600 + 3600
 	for i := 0; i < 19; i++ {
-		l.observe(loginRec("198.51.100.20", h+int64(i)), "one.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("198.51.100.20", h+int64(i)), "one.gr", "WP_LOGIN", "fail")
 	}
-	l.observe(loginRec("198.51.100.20", h-7200), "one.gr", "WP_LOGIN", "fail", "")
+	l.observe(loginRec("198.51.100.20", h-7200), "one.gr", "WP_LOGIN", "fail")
 	if len(sink.of("login_spray")) != 1 {
 		t.Fatalf("an old line wiped the hour: %d rows, hour=%d", len(sink.of("login_spray")), l.ips["198.51.100.20"].win.hour)
 	}
@@ -329,7 +329,7 @@ func TestLoginLedgerOutOfOrderAndSkew(t *testing.T) {
 	// and does not move the day window ahead.
 	l = newLoginLedger(nil)
 	l.wall = func() int64 { return t0 }
-	l.observe(loginRec("198.51.100.21", t0+86400), "one.gr", "WP_LOGIN", "fail", "")
+	l.observe(loginRec("198.51.100.21", t0+86400), "one.gr", "WP_LOGIN", "fail")
 	if ds := l.ips["198.51.100.21"].win.dayStart; ds != t0 {
 		t.Fatalf("future line moved the window: dayStart=%d", ds)
 	}
@@ -347,7 +347,7 @@ func TestLoginLedgerSitesAreRegistrableDomains(t *testing.T) {
 	l := newLoginLedger(sink.emit)
 	for i, h := range []string{"example.gr", "www.example.gr", "staging.example.gr", "example.gr", "www.example.gr",
 		"staging.example.gr", "example.gr", "www.example.gr", "staging.example.gr", "example.gr"} {
-		l.observe(loginRec("198.51.100.30", t0+int64(i)*600), h, "WP_LOGIN", "fail", "")
+		l.observe(loginRec("198.51.100.30", t0+int64(i)*600), h, "WP_LOGIN", "fail")
 	}
 	if n := len(sink.of("login_spray")); n != 0 {
 		t.Fatalf("one owner's hostnames counted as sites: %d rows", n)
@@ -377,7 +377,7 @@ func TestLoginLedgerBoundaries(t *testing.T) {
 		sink := &rowSink{}
 		l := newLoginLedger(sink.emit)
 		for i := 0; i < c.n; i++ {
-			l.observe(loginRec("198.51.100.40", t0+int64(i)*c.gap), "s"+strconv.Itoa(i%c.sites)+".gr", "WP_LOGIN", "fail", "")
+			l.observe(loginRec("198.51.100.40", t0+int64(i)*c.gap), "s"+strconv.Itoa(i%c.sites)+".gr", "WP_LOGIN", "fail")
 		}
 		rows := sink.of("login_spray")
 		if len(rows) != c.want {
@@ -392,9 +392,9 @@ func TestLoginLedgerBoundaries(t *testing.T) {
 		sink := &rowSink{}
 		l := newLoginLedger(sink.emit)
 		for i := 0; i < n; i++ {
-			l.observe(loginRec("198.51.100.41", t0+int64(i)*1700), "one.gr", "WP_LOGIN", "fail", "")
+			l.observe(loginRec("198.51.100.41", t0+int64(i)*1700), "one.gr", "WP_LOGIN", "fail")
 		}
-		l.observe(loginRec("198.51.100.41", t0+int64(n)*1700), "one.gr", "WP_LOGIN", "ok", "")
+		l.observe(loginRec("198.51.100.41", t0+int64(n)*1700), "one.gr", "WP_LOGIN", "ok")
 		if got := len(sink.of("login_dirty_success")); got != n-9 {
 			t.Errorf("%d own failures: %d dirty rows", n, got)
 		}
@@ -403,7 +403,7 @@ func TestLoginLedgerBoundaries(t *testing.T) {
 	sink := &rowSink{}
 	l := newLoginLedger(sink.emit)
 	for i := 0; i < 50; i++ {
-		l.observe(loginRec("198.51.100.42", t0+int64(i)), "one.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("198.51.100.42", t0+int64(i)), "one.gr", "WP_LOGIN", "fail")
 	}
 	if n := len(sink.of("login_spray_net")); n != 0 {
 		t.Fatalf("one IP made a net row: %d", n)
@@ -416,19 +416,19 @@ func TestLoginLedgerDayRolls(t *testing.T) {
 	// 9 failures on 3 sites, then a day later 1 more on a 4th: the day reset
 	// clears the sites, so no spray.
 	for i := 0; i < 9; i++ {
-		l.observe(loginRec("198.51.100.50", t0+int64(i)*60), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("198.51.100.50", t0+int64(i)*60), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail")
 	}
-	l.observe(loginRec("198.51.100.50", t0+86400+10), "s9.gr", "WP_LOGIN", "fail", "")
+	l.observe(loginRec("198.51.100.50", t0+86400+10), "s9.gr", "WP_LOGIN", "fail")
 	if c := l.ips["198.51.100.50"]; c.nsites != 1 || c.win.day != 1 || len(sink.rows) != 0 {
 		t.Fatalf("day roll: sites=%d day=%d rows=%d", c.nsites, c.win.day, len(sink.rows))
 	}
 	// 12 own failures, then a success more than a day after the window began:
 	// the old failures no longer count.
 	for i := 0; i < 12; i++ {
-		l.observe(loginRec("198.51.100.51", t0+int64(i)*60), "one.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("198.51.100.51", t0+int64(i)*60), "one.gr", "WP_LOGIN", "fail")
 	}
 	l.ips["198.51.100.51"].flagged = 0 // only own_fails could match
-	l.observe(loginRec("198.51.100.51", t0+86400+100), "one.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("198.51.100.51", t0+86400+100), "one.gr", "WP_LOGIN", "ok")
 	if n := len(sink.of("login_dirty_success")); n != 0 {
 		t.Fatalf("stale own failures counted: %d", n)
 	}
@@ -438,18 +438,18 @@ func TestLoginLedgerDirtyThrottleAndBudget(t *testing.T) {
 	sink := &rowSink{}
 	l := newLoginLedger(sink.emit)
 	for i := 0; i < 12; i++ {
-		l.observe(loginRec("217.60.196.3", t0+int64(i)*60), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("217.60.196.3", t0+int64(i)*60), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail")
 	}
 	// Alternating two victims for 17 minutes: one row each per hour.
 	for i := 0; i < 1000; i++ {
-		l.observe(loginRec("217.60.196.3", t0+1000+int64(i)), []string{"a.gr", "b.gr"}[i%2], "WP_LOGIN", "ok", "")
+		l.observe(loginRec("217.60.196.3", t0+1000+int64(i)), []string{"a.gr", "b.gr"}[i%2], "WP_LOGIN", "ok")
 	}
 	if n := len(sink.of("login_dirty_success")); n != 2 {
 		t.Fatalf("alternating victims: %d rows", n)
 	}
 	// Round-robin over many sites: at most loginOKRows per client per hour.
 	for i := 0; i < 50; i++ {
-		l.observe(loginRec("217.60.196.3", t0+1000+int64(i)), "v"+strconv.Itoa(i)+".gr", "WP_LOGIN", "ok", "")
+		l.observe(loginRec("217.60.196.3", t0+1000+int64(i)), "v"+strconv.Itoa(i)+".gr", "WP_LOGIN", "ok")
 	}
 	if n := len(sink.of("login_dirty_success")); n != loginOKRows {
 		t.Fatalf("round-robin: %d rows", n)
@@ -465,16 +465,16 @@ func TestLoginLedgerDirtyThrottleAndBudget(t *testing.T) {
 	for n := 0; n < 5000; n++ {
 		ip := "10." + strconv.Itoa(n>>8&255) + "." + strconv.Itoa(n&255) + ".1"
 		for i := 0; i < 20; i++ {
-			l.observe(loginRec(ip, t0), "x.gr", "WP_LOGIN", "fail", "")
+			l.observe(loginRec(ip, t0), "x.gr", "WP_LOGIN", "fail")
 		}
 	}
 	if n := len(sink.of("login_spray")); n != loginRowsBurst {
 		t.Fatalf("burst: %d rows", n)
 	}
 	wall += 60
-	l.observe(loginRec("10.200.0.1", t0+60), "x.gr", "WP_LOGIN", "fail", "")
+	l.observe(loginRec("10.200.0.1", t0+60), "x.gr", "WP_LOGIN", "fail")
 	for i := 0; i < 19; i++ {
-		l.observe(loginRec("10.200.0.1", t0+60), "x.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("10.200.0.1", t0+60), "x.gr", "WP_LOGIN", "fail")
 	}
 	rows := sink.of("login_spray")
 	if len(rows) != loginRowsBurst+1 || rows[len(rows)-1].Payload["suppressed"] == nil {
@@ -529,41 +529,33 @@ func TestLoginLedgerDirtySuccessOwnerPatterns(t *testing.T) {
 	ts := t0
 	for i := 0; i < 30; i++ {
 		ts += 6
-		l.observe(loginRec("94.66.129.119", ts), "mygreecetours.org", "WP_LOGIN", "ok", "")
+		l.observe(loginRec("94.66.129.119", ts), "mygreecetours.org", "WP_LOGIN", "ok")
 	}
 	for i := 0; i < 25; i++ {
 		ts += 6
-		l.observe(loginRec("94.66.129.119", ts), "mygreecetours.org", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("94.66.129.119", ts), "mygreecetours.org", "WP_LOGIN", "fail")
 	}
 	if len(sink.of("login_spray")) != 1 {
 		t.Fatalf("the tool's burst still reads as an L1 shape (single_site): %d", len(sink.of("login_spray")))
 	}
-	l.observe(loginRec("94.66.129.119", ts+6), "mygreecetours.org", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("94.66.129.119", ts+6), "mygreecetours.org", "WP_LOGIN", "ok")
 	if d := sink.of("login_dirty_success"); len(d) != 0 {
 		t.Fatalf("owner tool (more successes than failures before) got a dirty row: %+v", d)
 	}
 
-	// 62.1.118.59 (rigel): typos on welder.gr, a password reset, then in.
+	// 62.1.118.59 (rigel): typos on welder.gr, a password-reset REQUEST,
+	// then in. Anyone can request a reset (an attacker too, before its
+	// spray), so it excuses nothing: still a row. Shadow; the fleet read
+	// decides.
 	sink = &rowSink{}
 	l = newLoginLedger(sink.emit)
 	for i := 0; i < 12; i++ {
-		l.observe(loginRec("62.1.118.59", t0+int64(i)*60), "welder.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("62.1.118.59", t0+int64(i)*60), "welder.gr", "WP_LOGIN", "fail")
 	}
-	l.observe(loginRec("62.1.118.59", t0+800), "dvs.welder.gr", "WP_LOGIN", "na", "lostpassword")
-	l.observe(loginRec("62.1.118.59", t0+900), "welder.gr", "WP_LOGIN", "ok", "")
-	if d := sink.of("login_dirty_success"); len(d) != 0 {
-		t.Fatalf("success after a password reset got a dirty row: %+v", d)
-	}
-	// Another wp-login action is not a reset.
-	sink = &rowSink{}
-	l = newLoginLedger(sink.emit)
-	for i := 0; i < 12; i++ {
-		l.observe(loginRec("62.1.118.60", t0+int64(i)*60), "welder.gr", "WP_LOGIN", "fail", "")
-	}
-	l.observe(loginRec("62.1.118.60", t0+800), "welder.gr", "WP_LOGIN", "na", "register")
-	l.observe(loginRec("62.1.118.60", t0+900), "welder.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("62.1.118.59", t0+800), "dvs.welder.gr", "WP_LOGIN", "na")
+	l.observe(loginRec("62.1.118.59", t0+900), "welder.gr", "WP_LOGIN", "ok")
 	if d := sink.of("login_dirty_success"); len(d) != 1 || d[0].Payload["flagged_by"] != "own_fails" {
-		t.Fatalf("register is not a reset: %+v", d)
+		t.Fatalf("a reset request must not excuse a success: %+v", d)
 	}
 }
 
@@ -572,9 +564,9 @@ func TestLoginLedgerDirtySuccessStillFires(t *testing.T) {
 	sink := &rowSink{}
 	l := newLoginLedger(sink.emit)
 	for i := 0; i < 12; i++ {
-		l.observe(loginRec("192.0.2.50", t0+int64(i)*60), "one.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("192.0.2.50", t0+int64(i)*60), "one.gr", "WP_LOGIN", "fail")
 	}
-	l.observe(loginRec("192.0.2.50", t0+900), "one.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("192.0.2.50", t0+900), "one.gr", "WP_LOGIN", "ok")
 	if len(sink.of("login_dirty_success")) != 1 {
 		t.Fatal("first success after failures must still be a row")
 	}
@@ -583,20 +575,20 @@ func TestLoginLedgerDirtySuccessStillFires(t *testing.T) {
 	sink = &rowSink{}
 	l = newLoginLedger(sink.emit)
 	for i := 0; i < 12; i++ {
-		l.observe(loginRec("217.60.196.9", t0+int64(i)*60), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("217.60.196.9", t0+int64(i)*60), "s"+strconv.Itoa(i%3)+".gr", "WP_LOGIN", "fail")
 	}
-	l.observe(loginRec("217.60.196.9", t0+900), "victim.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("217.60.196.9", t0+900), "victim.gr", "WP_LOGIN", "ok")
 	if d := sink.of("login_dirty_success"); len(d) != 1 || d[0].Payload["flagged_by"] != "ip" {
 		t.Fatalf("flagged sprayer on a fresh site: %+v", d)
 	}
 	// One earlier success does not excuse many failures after it.
 	sink = &rowSink{}
 	l = newLoginLedger(sink.emit)
-	l.observe(loginRec("192.0.2.51", t0), "one.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("192.0.2.51", t0), "one.gr", "WP_LOGIN", "ok")
 	for i := 0; i < 12; i++ {
-		l.observe(loginRec("192.0.2.51", t0+60+int64(i)*60), "one.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("192.0.2.51", t0+60+int64(i)*60), "one.gr", "WP_LOGIN", "fail")
 	}
-	l.observe(loginRec("192.0.2.51", t0+5000), "one.gr", "WP_LOGIN", "ok", "")
+	l.observe(loginRec("192.0.2.51", t0+5000), "one.gr", "WP_LOGIN", "ok")
 	if len(sink.of("login_dirty_success")) != 1 {
 		t.Fatal("1 success then 12 failures then a success: still a row")
 	}
@@ -606,10 +598,10 @@ func TestLoginLedgerSitesCountOnlyFailures(t *testing.T) {
 	// Successes and resets on other sites do not make a three-site spray.
 	sink := &rowSink{}
 	l := newLoginLedger(sink.emit)
-	l.observe(loginRec("198.51.100.60", t0), "a.gr", "WP_LOGIN", "ok", "")
-	l.observe(loginRec("198.51.100.60", t0+1), "b.gr", "WP_LOGIN", "na", "lostpassword")
+	l.observe(loginRec("198.51.100.60", t0), "a.gr", "WP_LOGIN", "ok")
+	l.observe(loginRec("198.51.100.60", t0+1), "b.gr", "WP_LOGIN", "ok")
 	for i := 0; i < 12; i++ {
-		l.observe(loginRec("198.51.100.60", t0+10+int64(i)*600), "c.gr", "WP_LOGIN", "fail", "")
+		l.observe(loginRec("198.51.100.60", t0+10+int64(i)*600), "c.gr", "WP_LOGIN", "fail")
 	}
 	if n := len(sink.of("login_spray")); n != 0 {
 		t.Fatalf("ok/reset sites counted as failed sites: %d rows", n)
@@ -619,12 +611,12 @@ func TestLoginLedgerSitesCountOnlyFailures(t *testing.T) {
 	}
 }
 
-func TestLoginLedgerResetThroughIngest(t *testing.T) {
+func TestLoginLedgerResetRequestThroughIngest(t *testing.T) {
 	e := NewEngine(Config{})
 	sink := &rowSink{}
 	e.loginLedger.emit = sink.emit
-	feed := func(i int, auth string, status string) {
-		line := strings.Replace(strings.Replace(authBase, "1000.5", strconv.FormatInt(t0+int64(i), 10), 1), "\t302\t", "\t"+status+"\t", 1) + "\t0\t" + auth
+	feed := func(i int, auth string) {
+		line := strings.Replace(authBase, "1000.5", strconv.FormatInt(t0+int64(i), 10), 1) + "\t0\t" + auth
 		rec, ok := parseSocketTSV(line)
 		if !ok {
 			t.Fatal("parse")
@@ -632,11 +624,11 @@ func TestLoginLedgerResetThroughIngest(t *testing.T) {
 		e.ingest(rec, line)
 	}
 	for i := 0; i < 12; i++ {
-		feed(i, "WP_LOGIN;li=0;l=/wp-login.php;c=", "302")
+		feed(i, "WP_LOGIN;li=0;l=/wp-login.php;c=")
 	}
-	feed(20, "WP_LOGIN;li=0;a=lostpassword;l=/wp-login.php;c=", "302")
-	feed(30, "WP_LOGIN;li=1;l=/wp-admin/;c=wordpress_logged_in_x", "302")
-	if n := len(sink.of("login_dirty_success")); n != 0 {
-		t.Fatalf("ingest passes the action: a reset excuses the success; got %d rows", n)
+	feed(20, "WP_LOGIN;li=0;a=lostpassword;l=/wp-login.php;c=")
+	feed(30, "WP_LOGIN;li=1;l=/wp-admin/;c=wordpress_logged_in_x")
+	if n := len(sink.of("login_dirty_success")); n != 1 {
+		t.Fatalf("a reset request in between excuses nothing: %d rows", n)
 	}
 }
