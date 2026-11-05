@@ -2,10 +2,13 @@ package webdetector
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 // The login ledger: phase 1 of docs/webdetector-signals-v2.md (§3), SHADOW
@@ -15,23 +18,40 @@ import (
 // alerted; the rows are for a fleet read (detection_history) that sets the
 // thresholds and the action (a sink ban or an edge deny) of phase 2.
 //
-//   login_spray          one IP: >= loginSprayDayFails failed logins on >=
-//                        loginSpraySites sites in its 24 h window, or >=
+//   login_spray          one client: >= loginSprayDayFails failed logins on
+//                        >= loginSpraySites sites in its 24 h window, or >=
 //                        loginBurstHour in an hour, or >= loginHeavyDay in a
 //                        day (L1). The slow cross-site sprayer rule 501 never
-//                        sees (8 POSTs in 20 s).
-//   login_spray_net      one /24 (or IPv6 /64): >= loginNetFlagged of its IPs
+//                        sees (8 POSTs in 20 s). single_site marks the last
+//                        two shapes when only one site saw them (an owner's
+//                        app with a stale password looks the same).
+//   login_spray_net      one network: >= loginNetFlagged of its clients
 //                        flagged by L1 in 24 h, or >= loginNetDayFails
-//                        failures from >= loginNetIPs of its IPs (L2): the
-//                        proxy pools that send one or two tries per address.
-//   login_dirty_success  a successful login from an IP flagged by L1 or L2 in
-//                        the last 24 h, or after >= loginOwnFails of its own
-//                        failures on that site (L4). Row on the site's host.
+//                        failures from >= loginNetIPs of its clients (L2):
+//                        the proxy pools that send a try or two per address.
+//   login_dirty_success  a successful login from a client flagged by L1 or
+//                        L2 in the last 24 h, or after >= loginOwnFails of
+//                        its own failures on that site (L4). Row on the
+//                        site's host.
 //
-// Tenant privacy: a spray row names no site (counts only), so a scoped
-// caller (who reads its own host's rows) never sees another tenant's name.
-// The ledger is in memory: a restart or a config reload (a new Engine)
-// empties it. Kill switch: [webdetector] LOGIN_SIGNALS.
+// A "client" is an IPv4 address or an IPv6 /64 (one host holds a whole /64,
+// so per-address counting let one machine spread its tries); a "network" is
+// an IPv4 /24 or an IPv6 /48. A "site" is a registrable domain (example.gr,
+// www.example.gr and staging.example.gr are one site, one owner).
+//
+// Not counted: a client on the bypass list (crawlers, QUIC.cloud) or
+// rec.Bypass, which would add every visitor of a CDN-fronted site to the
+// CDN node's count. A proxy CFM does not know (Sucuri, a tenant's own) still
+// reads as one client: a residual for the fleet read.
+//
+// Bounded: loginMaxIPs clients and loginMaxNets networks (idle ones evicted
+// first, flagged ones last), 8 sites per client, 16 clients per network, and
+// a row budget per row type (loginRowsPerMin, the rest counted into the next
+// row's `suppressed`), because rows are synchronous inserts into a history
+// store whose row cap is shared with every other detector. The ledger is in
+// memory: a restart or a config reload (a new Engine) empties it. Tenant
+// privacy: a spray row names no site (counts only). Kill switch:
+// [webdetector] LOGIN_SIGNALS.
 
 const (
 	loginSprayDayFails = 10
@@ -42,14 +62,17 @@ const (
 	loginNetDayFails   = 30
 	loginNetIPs        = 5
 	loginOwnFails      = 10
-	loginFlagTTL       = 24 * time.Hour
-	loginRowEvery      = 6 * time.Hour // one spray row per key per 6 h
-	loginOKRowEvery    = time.Hour     // one dirty-success row per (ip, host) per hour
+	loginFlagTTL       = int64(24 * 3600)
+	loginRowEvery      = int64(6 * 3600) // one spray row per key per 6 h
+	loginOKRows        = 4               // dirty-success rows per client per hour
+	loginRowsPerMin    = 30              // per row type
+	loginRowsBurst     = 60
+	loginFutureSkew    = int64(300) // a line stamped further ahead uses the wall clock
 
 	loginMaxIPs     = 100000
 	loginMaxNets    = 20000
-	loginMaxHosts   = 32 // per IP, in its day window
-	loginMaxNetIPs  = 64 // distinct IPs kept per net, in its day window
+	loginMaxSites   = 8
+	loginMaxNetIPs  = 16
 	loginEvictBatch = 1000
 )
 
@@ -60,7 +83,9 @@ func init() { loginSignalsOn.Store(true) }
 // ConfigureLoginSignals applies [webdetector] LOGIN_SIGNALS (every reload).
 func ConfigureLoginSignals(on bool) { loginSignalsOn.Store(on) }
 
-// loginWin is a fixed 24 h window plus a sliding one-hour estimate.
+// loginWin is a fixed 24 h window plus a sliding one-hour estimate. A line
+// older than the current hour (the edge's batches can arrive out of order)
+// counts into the current hour: the window never moves back.
 type loginWin struct {
 	dayStart  int64
 	day       uint32
@@ -75,8 +100,8 @@ func (w *loginWin) roll(now int64) {
 	}
 	h := now - now%3600
 	switch {
-	case w.hourStart == h:
-	case w.hourStart == h-3600:
+	case h <= w.hourStart:
+	case h == w.hourStart+3600:
 		w.prevHour, w.hour, w.hourStart = w.hour, 0, h
 	default:
 		w.prevHour, w.hour, w.hourStart = 0, 0, h
@@ -93,40 +118,116 @@ func (w *loginWin) add(now int64) {
 // of the previous one the sliding window still covers.
 func (w *loginWin) hourEst(now int64) float64 {
 	frac := float64(now-w.hourStart) / 3600
+	if frac < 0 {
+		frac = 0
+	}
 	if frac > 1 {
 		frac = 1
 	}
 	return float64(w.hour) + float64(w.prevHour)*(1-frac)
 }
 
+type loginSite struct {
+	h uint64
+	n uint16
+}
+
+type loginOK struct {
+	h  uint64
+	at int64
+}
+
 type loginIP struct {
 	win     loginWin
-	hosts   map[uint64]uint16 // host hash → failures, reset with the day window
+	sites   [loginMaxSites]loginSite // reset with the day window
+	nsites  uint8
+	full    bool // a ninth site was seen
 	last    int64
 	flagged int64 // flagged by L1 until
 	rowAt   int64 // last login_spray row
-	okRowAt int64 // last login_dirty_success row
-	okHost  uint64
+	oks     [loginOKRows]loginOK
+}
+
+func (s *loginIP) site(h uint64) *loginSite {
+	for i := 0; i < int(s.nsites); i++ {
+		if s.sites[i].h == h {
+			return &s.sites[i]
+		}
+	}
+	return nil
 }
 
 type loginNet struct {
 	win     loginWin
-	ips     map[uint64]struct{} // distinct failing IPs in the day window
-	flagged map[uint64]struct{} // its IPs flagged by L1 in the day window
+	ips     [loginMaxNetIPs]uint64 // distinct failing clients, day window
+	nips    uint8
+	flagged [loginMaxNetIPs]uint64 // its clients flagged by L1, day window
+	nflag   uint8
 	last    int64
 	until   int64 // flagged by L2 until
 	rowAt   int64
 }
 
+func addHash(arr []uint64, n *uint8, h uint64) {
+	for i := 0; i < int(*n); i++ {
+		if arr[i] == h {
+			return
+		}
+	}
+	if int(*n) < len(arr) {
+		arr[*n] = h
+		*n++
+	}
+}
+
+type loginBucket struct {
+	tokens     float64
+	last       int64
+	suppressed int
+}
+
 type loginLedger struct {
-	mu   sync.Mutex
-	ips  map[string]*loginIP
-	nets map[string]*loginNet
-	emit func(HistoryEvent)
+	mu      sync.Mutex
+	ips     map[string]*loginIP
+	nets    map[string]*loginNet
+	budget  map[string]*loginBucket
+	emit    func(HistoryEvent)
+	wall    func() int64
+	maxIPs  int
+	maxNets int
 }
 
 func newLoginLedger(emit func(HistoryEvent)) *loginLedger {
-	return &loginLedger{ips: make(map[string]*loginIP), nets: make(map[string]*loginNet), emit: emit}
+	return &loginLedger{
+		ips: make(map[string]*loginIP), nets: make(map[string]*loginNet), budget: make(map[string]*loginBucket),
+		emit: emit, wall: func() int64 { return time.Now().Unix() }, maxIPs: loginMaxIPs, maxNets: loginMaxNets,
+	}
+}
+
+// loginKeys is the client (an IPv4 address, an IPv6 /64) and the network
+// (an IPv4 /24, an IPv6 /48) a failure is counted on.
+func loginKeys(ip string) (client, network string) {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return strings.Clone(ip), strings.Clone(ip)
+	}
+	a = a.Unmap()
+	if a.Is4() {
+		n, _ := a.Prefix(24)
+		return a.String(), n.String()
+	}
+	c, _ := a.Prefix(64)
+	n, _ := a.Prefix(48)
+	return c.String(), n.String()
+}
+
+// loginSiteKey is the registrable domain of a host: one owner's www.,
+// staging. and bare names are one site.
+func loginSiteKey(host string) string {
+	if d, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
+		return d
+	}
+	return host
 }
 
 // observe takes one login line with its outcome. Only "fail" and "ok" count.
@@ -134,17 +235,21 @@ func (l *loginLedger) observe(rec LogRec, host, tag, outcome string) {
 	if l == nil || !loginSignalsOn.Load() || (outcome != "fail" && outcome != "ok") || rec.IP == "" {
 		return
 	}
+	wall := l.wall()
 	now := int64(rec.TS)
-	if now <= 0 {
-		now = time.Now().Unix()
+	if now <= 0 || now > wall+loginFutureSkew {
+		now = wall // a skewed edge clock must not move a window ahead
 	}
+	client, network := loginKeys(rec.IP)
+	site := authHash(loginSiteKey(host))
 	var rows []HistoryEvent
 	l.mu.Lock()
 	if outcome == "fail" {
-		rows = l.failLocked(rec.IP, host, tag, now)
+		rows = l.failLocked(rec.IP, client, network, site, tag, now)
 	} else {
-		rows = l.okLocked(rec.IP, host, tag, now)
+		rows = l.okLocked(rec.IP, client, network, host, site, tag, now)
 	}
+	rows = l.budgetLocked(rows, wall)
 	l.mu.Unlock()
 	for _, r := range rows {
 		if l.emit != nil {
@@ -153,109 +258,153 @@ func (l *loginLedger) observe(rec LogRec, host, tag, outcome string) {
 	}
 }
 
-func (l *loginLedger) ipLocked(ip string, now int64) *loginIP {
-	s := l.ips[ip]
+// budgetLocked lets at most loginRowsPerMin rows of a type through per
+// minute (bursts of loginRowsBurst); the rest are counted into the next
+// row's `suppressed`.
+func (l *loginLedger) budgetLocked(rows []HistoryEvent, wall int64) []HistoryEvent {
+	out := rows[:0]
+	for _, r := range rows {
+		b := l.budget[r.Type]
+		if b == nil {
+			b = &loginBucket{tokens: loginRowsBurst, last: wall}
+			l.budget[r.Type] = b
+		}
+		b.tokens += float64(wall-b.last) * loginRowsPerMin / 60
+		if b.tokens > loginRowsBurst {
+			b.tokens = loginRowsBurst
+		}
+		b.last = wall
+		if b.tokens < 1 {
+			b.suppressed++
+			continue
+		}
+		b.tokens--
+		if b.suppressed > 0 {
+			r.Payload["suppressed"] = b.suppressed
+			b.suppressed = 0
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func (l *loginLedger) ipLocked(client string, now int64) *loginIP {
+	s := l.ips[client]
 	if s == nil {
-		if len(l.ips) >= loginMaxIPs {
-			evictLogin(l.ips, now, func(s *loginIP) int64 { return s.last })
+		if len(l.ips) >= l.maxIPs {
+			evictLogin(l.ips, now, func(s *loginIP) (int64, bool) { return s.last, s.flagged > now })
 		}
 		s = &loginIP{}
-		l.ips[strings.Clone(ip)] = s // a key cut from the socket line would pin it
+		l.ips[client] = s
 	}
 	return s
 }
 
-func (l *loginLedger) netLocked(n string, now int64) *loginNet {
-	s := l.nets[n]
+func (l *loginLedger) netLocked(network string, now int64) *loginNet {
+	s := l.nets[network]
 	if s == nil {
-		if len(l.nets) >= loginMaxNets {
-			evictLogin(l.nets, now, func(s *loginNet) int64 { return s.last })
+		if len(l.nets) >= l.maxNets {
+			evictLogin(l.nets, now, func(s *loginNet) (int64, bool) { return s.last, s.until > now })
 		}
 		s = &loginNet{}
-		l.nets[n] = s
+		l.nets[network] = s
 	}
 	return s
 }
 
-// evictLogin drops entries idle for a day, or failing that a batch of
-// arbitrary ones (map order), so a full map costs one pass per batch.
-func evictLogin[T any](m map[string]T, now int64, last func(T) int64) {
+// evictLogin frees a batch: entries idle for a day first, then unflagged
+// ones, and flagged ones only when nothing else is left, so a flood of new
+// addresses cannot wipe the clients a later success must be checked against.
+func evictLogin[T any](m map[string]T, now int64, state func(T) (last int64, flagged bool)) {
 	n := 0
 	for k, v := range m {
-		if now-last(v) >= 86400 {
+		if last, _ := state(v); now-last >= 86400 {
+			delete(m, k)
+			n++
+		}
+	}
+	for k, v := range m {
+		if n >= loginEvictBatch {
+			return
+		}
+		if _, flagged := state(v); !flagged {
 			delete(m, k)
 			n++
 		}
 	}
 	for k := range m {
 		if n >= loginEvictBatch {
-			break
+			return
 		}
 		delete(m, k)
 		n++
 	}
 }
 
-func (l *loginLedger) failLocked(ip, host, tag string, now int64) []HistoryEvent {
+func (l *loginLedger) failLocked(ip, client, network string, site uint64, tag string, now int64) []HistoryEvent {
 	var rows []HistoryEvent
-	s := l.ipLocked(ip, now)
+	s := l.ipLocked(client, now)
 	prevDay := s.win.dayStart
 	s.win.add(now)
-	if s.win.dayStart != prevDay || s.hosts == nil {
-		s.hosts = make(map[uint64]uint16)
+	if s.win.dayStart != prevDay {
+		s.nsites, s.full = 0, false
 	}
-	hh := authHash(host)
-	if c, ok := s.hosts[hh]; ok || len(s.hosts) < loginMaxHosts {
-		if c < 0xffff {
-			s.hosts[hh] = c + 1
+	if st := s.site(site); st != nil {
+		if st.n < 0xffff {
+			st.n++
 		}
+	} else if int(s.nsites) < loginMaxSites {
+		s.sites[s.nsites] = loginSite{h: site, n: 1}
+		s.nsites++
+	} else {
+		s.full = true
 	}
-	s.last = now
+	if now > s.last {
+		s.last = now
+	}
 
-	netKey := authNet(ip)
-	ns := l.netLocked(netKey, now)
+	ns := l.netLocked(network, now)
 	prevNetDay := ns.win.dayStart
 	ns.win.add(now)
-	if ns.win.dayStart != prevNetDay || ns.ips == nil {
-		ns.ips, ns.flagged = make(map[uint64]struct{}), make(map[uint64]struct{})
+	if ns.win.dayStart != prevNetDay {
+		ns.nips, ns.nflag = 0, 0
 	}
-	ih := authHash(ip)
-	if len(ns.ips) < loginMaxNetIPs {
-		ns.ips[ih] = struct{}{}
+	ch := authHash(client)
+	addHash(ns.ips[:], &ns.nips, ch)
+	if now > ns.last {
+		ns.last = now
 	}
-	ns.last = now
 
-	// L1: one IP.
-	sites, hourEst := len(s.hosts), s.win.hourEst(now)
+	// L1: one client.
+	sites, hourEst := int(s.nsites), s.win.hourEst(now)
 	if (s.win.day >= loginSprayDayFails && sites >= loginSpraySites) || hourEst >= loginBurstHour || s.win.day >= loginHeavyDay {
-		s.flagged = now + int64(loginFlagTTL/time.Second)
-		if len(ns.flagged) < loginMaxNetIPs {
-			ns.flagged[ih] = struct{}{}
-		}
-		if now-s.rowAt >= int64(loginRowEvery/time.Second) {
+		s.flagged = now + loginFlagTTL
+		addHash(ns.flagged[:], &ns.nflag, ch)
+		if now-s.rowAt >= loginRowEvery {
 			s.rowAt = now
 			rows = append(rows, HistoryEvent{
 				TsUnix: now, Type: "login_spray", IP: strings.Clone(ip), Mode: "shadow", Score: float64(s.win.day),
 				Reason: fmt.Sprintf("login spray (shadow): %d failed %s logins on %d sites in 24h, %.0f in the last hour", s.win.day, tag, sites, hourEst),
 				Payload: map[string]interface{}{
-					"tag": tag, "fails_24h": s.win.day, "fails_1h": int(hourEst + 0.5), "sites": sites,
-					"net": netKey, "would": "ban",
+					"tag": tag, "client": client, "fails_24h": s.win.day, "fails_1h": int(hourEst + 0.5),
+					"sites": sites, "sites_capped": s.full, "single_site": sites == 1,
+					"net": network, "would": "ban",
 				},
 			})
 		}
 	}
 
 	// L2: its network.
-	if len(ns.flagged) >= loginNetFlagged || (ns.win.day >= loginNetDayFails && len(ns.ips) >= loginNetIPs) {
-		ns.until = now + int64(loginFlagTTL/time.Second)
-		if now-ns.rowAt >= int64(loginRowEvery/time.Second) {
+	if int(ns.nflag) >= loginNetFlagged || (ns.win.day >= loginNetDayFails && int(ns.nips) >= loginNetIPs) {
+		ns.until = now + loginFlagTTL
+		if now-ns.rowAt >= loginRowEvery {
 			ns.rowAt = now
 			rows = append(rows, HistoryEvent{
 				TsUnix: now, Type: "login_spray_net", Mode: "shadow", Score: float64(ns.win.day),
-				Reason: fmt.Sprintf("login spray from %s (shadow): %d failed %s logins from %d IPs in 24h, %d of them flagged", netKey, ns.win.day, tag, len(ns.ips), len(ns.flagged)),
+				Reason: fmt.Sprintf("login spray from %s (shadow): %d failed %s logins from %d clients in 24h, %d of them flagged", network, ns.win.day, tag, ns.nips, ns.nflag),
 				Payload: map[string]interface{}{
-					"tag": tag, "net": netKey, "fails_24h": ns.win.day, "ips": len(ns.ips),
-					"ips_flagged": len(ns.flagged), "would": "ban",
+					"tag": tag, "net": network, "fails_24h": ns.win.day, "clients": int(ns.nips),
+					"clients_capped": int(ns.nips) == loginMaxNetIPs, "clients_flagged": int(ns.nflag), "would": "ban",
 				},
 			})
 		}
@@ -263,15 +412,16 @@ func (l *loginLedger) failLocked(ip, host, tag string, now int64) []HistoryEvent
 	return rows
 }
 
-func (l *loginLedger) okLocked(ip, host, tag string, now int64) []HistoryEvent {
-	s := l.ips[ip]
-	ns := l.nets[authNet(ip)]
-	hh := authHash(host)
+func (l *loginLedger) okLocked(ip, client, network, host string, site uint64, tag string, now int64) []HistoryEvent {
+	s := l.ips[client]
+	ns := l.nets[network]
 	var own uint16
 	sites := 0
 	if s != nil && now-s.win.dayStart < 86400 {
-		own = s.hosts[hh]
-		sites = len(s.hosts)
+		if st := s.site(site); st != nil {
+			own = st.n
+		}
+		sites = int(s.nsites)
 	}
 	by := ""
 	switch {
@@ -286,18 +436,32 @@ func (l *loginLedger) okLocked(ip, host, tag string, now int64) []HistoryEvent {
 		return nil
 	}
 	if s == nil {
-		s = l.ipLocked(ip, now)
+		s = l.ipLocked(client, now)
 		s.last = now
 	}
-	if s.okHost == hh && now-s.okRowAt < int64(loginOKRowEvery/time.Second) {
+	// At most one row per (client, site) per hour, and loginOKRows per client.
+	slot := -1
+	for i, o := range s.oks {
+		if o.at != 0 && now-o.at < 3600 {
+			if o.h == site {
+				return nil
+			}
+			continue
+		}
+		if slot < 0 {
+			slot = i
+		}
+	}
+	if slot < 0 {
 		return nil
 	}
-	s.okHost, s.okRowAt = hh, now
+	s.oks[slot] = loginOK{h: site, at: now}
 	return []HistoryEvent{{
 		TsUnix: now, Type: "login_dirty_success", Host: strings.Clone(host), IP: strings.Clone(ip), Mode: "shadow", Score: float64(own),
-		Reason: fmt.Sprintf("successful %s login (shadow) from an IP flagged by %s: %d failures on this site, %d sites failed in 24h", tag, by, own, sites),
+		Reason: fmt.Sprintf("successful %s login (shadow) from a client flagged by %s: %d failures on this site, %d sites failed in 24h", tag, by, own, sites),
 		Payload: map[string]interface{}{
-			"tag": tag, "flagged_by": by, "own_fails_24h": own, "sites_failed_24h": sites, "net": authNet(ip), "would": "alert",
+			"tag": tag, "flagged_by": by, "own_fails_24h": own, "sites_failed_24h": sites,
+			"client": client, "net": network, "would": "alert",
 		},
 	}}
 }

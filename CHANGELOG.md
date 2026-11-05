@@ -35,14 +35,17 @@ back-filled here — see the git/PR history for that period.
 - **Shadow login brute-force signals.** The web detector counts the failed
   WordPress logins that field reports and writes three new detection history
   rows, without blocking or alerting anything:
-  - `login_spray`: one IP failing on 3+ sites (10+ tries in 24 h), or 20+
-    tries in an hour, or 50+ in a day. This is the slow, cross-site sprayer
-    that rule 501 (8 tries in 20 s) never sees.
-  - `login_spray_net`: a /24 (IPv6 /64) with 5+ such IPs, or 30+ failures
+  - `login_spray`: one IP (an IPv6 /64) failing on 3+ sites (10+ tries in
+    24 h), or 20+ tries in an hour, or 50+ in a day. This is the slow,
+    cross-site sprayer that rule 501 (8 tries in 20 s) never sees.
+  - `login_spray_net`: a /24 (IPv6 /48) with 5+ such IPs, or 30+ failures
     from 5+ of its IPs, i.e. a proxy pool sending one or two tries per address.
   - `login_dirty_success`: a successful login from such an IP or network,
     or after 10+ failures of its own on that site.
 
+  A site is a registrable domain (an owner's `www.` and `staging.` are one).
+  Crawlers and CDNs on the bypass list are not counted, and rows are
+  budgeted (30 a minute per type), so a botnet cannot flood the history.
   Spray rows name no site, only counts. Query them with
   `detection_history type=login_spray node="all"`. The thresholds and the
   action (a ban or an edge deny) are decided after a fleet read. Kill

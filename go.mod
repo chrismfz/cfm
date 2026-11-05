@@ -18,6 +18,7 @@ require (
 	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.57.0
+	golang.org/x/net v0.59.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
@@ -57,7 +58,6 @@ require (
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	modernc.org/libc v1.75.7 // indirect
