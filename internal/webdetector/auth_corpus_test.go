@@ -63,6 +63,9 @@ func TestAuthColumnOldParserSkew(t *testing.T) {
 }
 
 func TestParseAuthField(t *testing.T) {
+	if af, ok := parseAuthField("WP_LOGIN;li=0;x=1;l=/wp-login.php;c="); !ok || !af.Cross {
+		t.Fatalf("x=1: %+v", af)
+	}
 	af, ok := parseAuthField("WP_LOGIN;li=1;l=/wp-login.php;c=a,b;a=lostpassword")
 	if !ok || af.Tag != "WP_LOGIN" || !af.LoggedIn || af.Loc != "/wp-login.php" ||
 		len(af.Cookies) != 2 || af.Action != "lostpassword" {
@@ -94,6 +97,8 @@ func TestAuthOutcome(t *testing.T) {
 		{"301 canonical redirect to the login page (lelaki.gr)", origin(301), authField{Tag: "WP_LOGIN", Loc: "/wp-login.php"}, "?"},
 		{"308 canonical redirect", origin(308), authField{Tag: "WP_LOGIN", Loc: "/wp-login.php"}, "?"},
 		{"307 to the login page", origin(307), authField{Tag: "WP_LOGIN", Loc: "/wp-login.php"}, "?"},
+		{"302 canonical redirect to another scheme/host (Apache [R])", origin(302), authField{Tag: "WP_LOGIN", Loc: "/wp-login.php", Cross: true}, "?"},
+		{"a cross-host success is still a success", origin(302), authField{Tag: "WP_LOGIN", LoggedIn: true, Cross: true}, "ok"},
 		{"302 elsewhere without cookie (2FA)", origin(302), authField{Tag: "WP_LOGIN", Loc: "/2fa/"}, "?"},
 		{"lostpassword", origin(302), authField{Tag: "WP_LOGIN", Action: "lostpassword", Loc: "/wp-login.php"}, "na"},
 		{"query action cannot hide a success", origin(302), authField{Tag: "WP_LOGIN", LoggedIn: true, Action: "lostpassword"}, "ok"},

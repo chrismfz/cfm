@@ -61,9 +61,10 @@ type authField struct {
 	Loc      string // the Location path, query and host dropped at the edge
 	Cookies  []string
 	Action   string // the query's action, when present
+	Cross    bool   // the Location left the request's scheme or host
 }
 
-// parseAuthField reads "<TAG>;li=<0|1>[;a=<action>];l=<loc>;c=<a,b>" (keys
+// parseAuthField reads "<TAG>;li=<0|1>[;a=<action>][;x=1];l=<loc>;c=<a,b>" (keys
 // in any order). An
 // empty or malformed value is not a login line.
 func parseAuthField(s string) (authField, bool) {
@@ -93,6 +94,8 @@ func parseAuthField(s string) (authField, bool) {
 			}
 		case "a":
 			af.Action = v
+		case "x":
+			af.Cross = v == "1"
 		}
 	}
 	if !sawLI {
@@ -134,6 +137,12 @@ func authOutcome(rec LogRec, af authField) string {
 		// canonical redirect (http to https, www), which moves the POST
 		// before WordPress reads it: no outcome (lelaki.gr, 2026-11-05).
 		st := rec.Status
+		if af.Cross && st >= 300 && st < 400 {
+			// A redirect to another scheme or host is a canonical one
+			// (http to https, bare to www), whatever its status: Apache's
+			// [R] is a 302. It moved the POST before WordPress read it.
+			return "?"
+		}
 		if st == 200 || ((st == 302 || st == 303) && strings.Contains(strings.ToLower(af.Loc), "login")) {
 			return "fail"
 		}

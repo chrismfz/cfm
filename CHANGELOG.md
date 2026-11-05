@@ -22,8 +22,10 @@ back-filled here — see the git/PR history for that period.
   failed login.** The login outcome took any redirect to a login page as a
   failure. A site's own 301/308 (http to https, www) moves the login POST
   before WordPress reads it, and the first day's corpus showed one counted
-  as a failure. Only a 302/303 back to a login page (what WordPress and
-  hide-login plugins send) is a failure now.
+  as a failure. Only a 302/303 back to a login page on the same scheme and
+  host (what WordPress and hide-login plugins send) is a failure now. The
+  edge tells the daemon whether a redirect leaves the request's scheme or
+  host (never the host itself), because Apache's `[R]` redirect is a 302.
 
 ## 2026.11.05
 

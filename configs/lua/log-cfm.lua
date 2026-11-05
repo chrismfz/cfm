@@ -267,13 +267,15 @@ end
 -- OLDER daemon (which folds anything past column 13 into the bypass flag)
 -- reading the bypass flag of every non-login line right during an upgrade.
 --
--- Value: "<TAG>;li=<0|1>[;a=<action>];l=<location path>;c=<cookie names>"
+-- Value: "<TAG>;li=<0|1>[;a=<action>][;x=1];l=<location path>;c=<cookie names>"
 --   TAG  auth_endpoint_tag (cfm_waf_detectors.lua, the one list) minus
 --        "AUTH_": WP_LOGIN, JOOMLA_ADMIN, DRUPAL_LOGIN, MAGENTO_ADMIN, ...
 --   li   1 = a wordpress_logged_in_* cookie with a real value (WordPress
 --        sets it on a completed login only, after a 2FA step too; a
 --        logout's expired one carries a blank value). Only the edge sees
 --        the value, so only this bit of the verdict is taken here.
+--   x    1 when the Location leaves the request's scheme or host (a
+--        canonical redirect, any status): the host itself is never sent.
 --   a    the query's `action`, when present (wp-login.php's lostpassword,
 --        register, ...), read as PHP reads it. It is the QUERY's only: PHP's
 --        $_REQUEST lets a body field override it, so the daemon never lets
@@ -351,8 +353,22 @@ local function auth_field(var)
 
   local loc = hdr and hdr["Location"]
   if type(loc) == "table" then loc = loc[1] end
+  local cross = false
   if type(loc) == "string" then
     loc = loc:match("^[^?#]*") or ""
+    -- Does the redirect leave the request's scheme or host? That is a
+    -- canonical redirect (http to https, bare to www), which moves the POST
+    -- before the CMS reads it, whatever its status (Apache's [R] is a 302).
+    -- Only this bit is sent, never the host.
+    local sch, auth = loc:match("^(%a[%w+.-]*):[/\\]*([^/\\]*)")
+    if not sch then auth = loc:match("^[/\\][/\\]([^/\\]*)") end
+    if auth and auth ~= "" then
+      local h = auth:gsub("^.*@", ""):gsub(":%d*$", ""):lower()
+      if h ~= tostring(var.host or ""):lower()
+        or (sch and sch:lower() ~= tostring(var.scheme or ""):lower()) then
+        cross = true
+      end
+    end
     -- Drop the scheme+host (any number of either slash: browsers read
     -- "https:/host", "https:\\host" and "https:host" as hosts too) and a
     -- protocol-relative "//host".
@@ -375,6 +391,7 @@ local function auth_field(var)
   if type(a) == "string" and a ~= "" then
     v = v .. ";a=" .. a:lower():gsub("[^%w_%-]", "_"):sub(1, 24)
   end
+  if cross then v = v .. ";x=1" end
   return v .. ";l=" .. loc .. ";c=" .. table.concat(names, ",")
 end
 _M._auth_field = auth_field -- exposed for scripts/tests/cfm_log_auth_test.lua

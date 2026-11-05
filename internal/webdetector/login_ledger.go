@@ -3,6 +3,7 @@ package webdetector
 import (
 	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -224,9 +225,9 @@ func loginKeys(ip string) (client, network string) {
 // siteCount renders a site count, "8+" once the per-client cap was passed.
 func siteCount(n int, capped bool) string {
 	if capped {
-		return fmt.Sprintf("%d+", n)
+		return strconv.Itoa(n) + "+"
 	}
-	return fmt.Sprintf("%d", n)
+	return strconv.Itoa(n)
 }
 
 // loginSiteKey is the registrable domain of a host: one owner's www.,
