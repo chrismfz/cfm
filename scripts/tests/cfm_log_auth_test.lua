@@ -52,7 +52,7 @@ ngx.req = { get_uri_args = function() return ngx._args or {} end }
 ngx.unescape_uri = function(x) return (x:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)) end
 
 local function req(method, uri, status, hdr, extra)
-  local v = { request_method = method, request_uri = uri, status = tostring(status or 200) }
+  local v = { request_method = method, request_uri = uri, status = tostring(status or 200), host = "x.gr", scheme = "https" }
   for k, x in pairs(extra or {}) do v[k] = x end
   ngx.header = hdr or {}
   ngx._args = uri_args(uri)
@@ -70,7 +70,7 @@ check(af(req("POST", "/wp-login.php", 200, {})) == "WP_LOGIN;li=0;l=;c=", "the f
 check(af(req("POST", "/wp-login.php", 302, { Location = "https://x.gr/wp-login.php?login=failed" }))
   == "WP_LOGIN;li=0;l=/wp-login.php;c=",
   "the glaveris.gr case: a 302 back to the login page, its query dropped")
-check(af(req("POST", "/wp-login.php", 302, { Location = "//other.example/wp-admin/" })) == "WP_LOGIN;li=0;l=/wp-admin/;c=",
+check(af(req("POST", "/wp-login.php", 302, { Location = "//other.example/wp-admin/" })) == "WP_LOGIN;li=0;x=1;l=/wp-admin/;c=",
   "a protocol-relative Location loses its host")
 check(af(req("POST", "/wp-login.php", 302, { ["Set-Cookie"] = "wordpress_logged_in_0123abcd=+; expires=Thu, 01-Jan-1970 00:00:01 GMT; path=/",
   Location = "/wp-login.php?loggedout=true" })) == "WP_LOGIN;li=0;l=/wp-login.php;c=wordpress_logged_in_0123abcd",
@@ -92,12 +92,24 @@ check(af(req("POST", "/wp-login.php", 200, { ["Set-Cookie"] = { LI, "wordpress_l
   "a 2FA plugin clears the cookie wp_signon set in the same answer: the last one decides (li=0)")
 check(af(req("POST", "/wp-login.php", 200, { ["Set-Cookie"] = { "wordpress_logged_in_0123abcd=+", LI } }))
   :find(";li=1;", 1, true), "cleared then set: li=1")
-check(af(req("POST", "/wp-login.php", 302, { Location = "https:\\\\evil.example/a" })) == "WP_LOGIN;li=0;l=/a;c=",
+check(af(req("POST", "/wp-login.php", 302, { Location = "https:\\\\evil.example/a" })) == "WP_LOGIN;li=0;x=1;l=/a;c=",
   "a backslash host is dropped too")
-check(af(req("POST", "/wp-login.php", 302, { Location = "\\\\evil.example/a" })) == "WP_LOGIN;li=0;l=/a;c=",
+check(af(req("POST", "/wp-login.php", 302, { Location = "\\\\evil.example/a" })) == "WP_LOGIN;li=0;x=1;l=/a;c=",
   "a backslash protocol-relative host is dropped too")
 check(af(req("POST", "/blog/wp-login.php", 200, {})) == "WP_LOGIN;li=0;l=;c=", "WordPress in a subdirectory")
 check(af(req("POST", "/WP-LOGIN.PHP", 200, {})) == "WP_LOGIN;li=0;l=;c=", "the pre-check is case-insensitive")
+
+-- ── x=1: the redirect leaves the request's scheme or host ───────────────────
+check(af(req("POST", "/wp-login.php", 302, { Location = "https://x.gr/wp-login.php?login=failed" })) == "WP_LOGIN;li=0;l=/wp-login.php;c=",
+  "a same-origin absolute redirect (wp_redirect) has no x")
+check(af(req("POST", "/wp-login.php", 302, { Location = "https://X.GR:443/wp-login.php" })) == "WP_LOGIN;li=0;l=/wp-login.php;c=",
+  "host case and a port do not make it cross")
+check(af(req("POST", "/wp-login.php", 302, { Location = "https://x.gr/wp-login.php" }, { scheme = "http" })) == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=",
+  "http to https (Apache [R], a 302) is cross")
+check(af(req("POST", "/wp-login.php", 301, { Location = "https://www.x.gr/wp-login.php" })) == "WP_LOGIN;li=0;x=1;l=/wp-login.php;c=",
+  "bare to www is cross")
+check(af(req("POST", "/wp-login.php", 302, { Location = "https://user@x.gr/a" })) == "WP_LOGIN;li=0;l=/a;c=",
+  "userinfo is not the host")
 
 -- ── Other CMSes: the same facts ──────────────────────────────────────────────
 check(af(req("POST", "/administrator/index.php", 303, { ["Set-Cookie"] = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4=sess; path=/", Location = "/administrator/index.php" }))
@@ -149,9 +161,9 @@ check(af(req("POST", "/wp-admin/admin-ajax.php?action=nsl_login", 200, {})) == n
 check(af(req("POST", "/wp-admin/admin-post.php?action=oauth_cb", 200, {})) == nil, "admin-post oauth")
 check(af(req("POST", "/x?" .. string.rep("login=admin&", 500), 200, {})) == nil,
   "a long query with login/admin in it is never scanned or tagged")
-check(af(req("POST", "/wp-login.php", 302, { Location = "https:/evil.example/a" })) == "WP_LOGIN;li=0;l=/a;c=",
+check(af(req("POST", "/wp-login.php", 302, { Location = "https:/evil.example/a" })) == "WP_LOGIN;li=0;x=1;l=/a;c=",
   "a one-slash host is dropped")
-check(af(req("POST", "/wp-login.php", 302, { Location = "https:evil.example/a" })) == "WP_LOGIN;li=0;l=/a;c=",
+check(af(req("POST", "/wp-login.php", 302, { Location = "https:evil.example/a" })) == "WP_LOGIN;li=0;x=1;l=/a;c=",
   "a no-slash host is dropped")
 
 -- ── Not login lines ──────────────────────────────────────────────────────────

@@ -84,7 +84,7 @@ classifies as a login.** The edge reports facts; the daemon decides the
 outcome (`authOutcome`, `auth_corpus.go`). That way a per-CMS rule learned
 from the corpus is a Go change, not an edge release. As built the field is
 
-    <TAG>;li=<0|1>[;a=<action>];l=<location path>;c=<cookie names>
+    <TAG>;li=<0|1>[;a=<action>][;x=1];l=<location path>;c=<cookie names>
 
 - `TAG`: `auth_endpoint_tag` minus `AUTH_` (`WP_LOGIN`, `JOOMLA_ADMIN`,
   `DRUPAL_LOGIN`, `MAGENTO_ADMIN`, ...). xmlrpc is left out (rule 510).
@@ -99,6 +99,9 @@ from the corpus is a Go change, not an edge release. As built the field is
 - `l=`: the `Location` path, its scheme, host (protocol-relative and
   backslash forms too) and query dropped.
 - `c=`: the names of up to 8 cookies the response set.
+- `x=1`: the Location leaves the request's scheme or host (a canonical
+  redirect: http to https, bare to www). Only the bit is sent, never the
+  host.
 - `a=`: the query's `action`, read as PHP reads it: the exact name,
   URL-decoded, the last occurrence (`ngx.req.get_uri_args`, not nginx's
   `$arg_action`, which is raw, first and case-insensitive). It comes before
@@ -122,8 +125,11 @@ The daemon's WordPress rule (the one verified so far):
   `action=login` in the BODY still lands here (the edge does not read the
   body), and both answer 200 on a failure, so phase 1 has to read `na` + 200
   on its own, not ignore it.
-- `fail`: the form again (200), or a redirect to a path containing `login`
-  (`wp-login.php`, a hide-login slug). The `?login=failed` query itself
+- `fail`: the form again (200), or a 302/303 to a path containing `login`
+  (`wp-login.php`, a hide-login slug) on the same scheme and host. A
+  canonical redirect is not a verdict, so it is `?`. A canonical redirect is
+  a 301/308 to the login page (lelaki.gr, the first day's corpus), or any 3xx
+  with `x=1` (Apache's `RewriteRule [R]` is a 302). The `?login=failed` query itself
   never reaches the daemon.
 - `?`: anything else (a 2FA or CAPTCHA step elsewhere).
 
