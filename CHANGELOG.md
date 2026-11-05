@@ -26,7 +26,8 @@ back-filled here — see the git/PR history for that period.
   on a site, and the first after a run of failures, are still reported. A
   password-reset request excuses nothing: anyone can send one before a
   spray. Sites with only successes no longer count as failed sites in
-  `login_spray`.
+  `login_spray`, and never keep a failure from being counted: a client that
+  logged in on many sites still has a later slow spray seen.
 
 ## 2026.11.05
 

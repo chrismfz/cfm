@@ -595,7 +595,7 @@ func TestLoginLedgerDirtySuccessStillFires(t *testing.T) {
 }
 
 func TestLoginLedgerSitesCountOnlyFailures(t *testing.T) {
-	// Successes and resets on other sites do not make a three-site spray.
+	// Successes on other sites do not make a three-site spray.
 	sink := &rowSink{}
 	l := newLoginLedger(sink.emit)
 	l.observe(loginRec("198.51.100.60", t0), "a.gr", "WP_LOGIN", "ok")
@@ -630,5 +630,23 @@ func TestLoginLedgerResetRequestThroughIngest(t *testing.T) {
 	feed(30, "WP_LOGIN;li=1;l=/wp-admin/;c=wordpress_logged_in_x")
 	if n := len(sink.of("login_dirty_success")); n != 1 {
 		t.Fatalf("a reset request in between excuses nothing: %d rows", n)
+	}
+}
+
+func TestLoginLedgerSuccessSitesDoNotStarveFailures(t *testing.T) {
+	// A client that logged in on every slot's worth of sites, then fails
+	// slowly on other sites: the failures still take slots, so L1's site
+	// spread sees them.
+	sink := &rowSink{}
+	l := newLoginLedger(sink.emit)
+	for i := 0; i < loginMaxSites; i++ {
+		l.observe(loginRec("198.51.100.70", t0+int64(i)), "own"+strconv.Itoa(i)+".gr", "WP_LOGIN", "ok")
+	}
+	for i := 0; i < 12; i++ {
+		l.observe(loginRec("198.51.100.70", t0+600+int64(i)*400), "v"+strconv.Itoa(i%4)+".gr", "WP_LOGIN", "fail")
+	}
+	r := sink.of("login_spray")
+	if len(r) != 1 || r[0].Payload["sites"] != 4 {
+		t.Fatalf("slow spray after logins on %d sites: %+v", loginMaxSites, r)
 	}
 }

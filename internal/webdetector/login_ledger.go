@@ -176,6 +176,24 @@ func (s *loginIP) siteSlot(h uint64) *loginSite {
 	return nil
 }
 
+// failSlot is siteSlot for a failure: when every slot is taken, it takes
+// one that holds only successes (the oldest such), so a client that logged
+// in on loginMaxSites sites still has its failures on other sites counted
+// (L1's site spread). That site loses its owner record; a failure is what
+// the ledger exists to count.
+func (s *loginIP) failSlot(h uint64) *loginSite {
+	if st := s.siteSlot(h); st != nil {
+		return st
+	}
+	for i := 0; i < int(s.nsites); i++ {
+		if s.sites[i].n == 0 {
+			s.sites[i] = loginSite{h: h}
+			return &s.sites[i]
+		}
+	}
+	return nil
+}
+
 // rollDay moves the client's 24 h window without counting, dropping its
 // sites when a new window starts.
 func (s *loginIP) rollDay(now int64) {
@@ -391,12 +409,9 @@ func evictLogin[T any](m map[string]T, now int64, state func(T) (last int64, fla
 func (l *loginLedger) failLocked(ip, client, network string, site uint64, tag string, now int64) []HistoryEvent {
 	var rows []HistoryEvent
 	s := l.ipLocked(client, now)
-	prevDay := s.win.dayStart
+	s.rollDay(now)
 	s.win.add(now)
-	if s.win.dayStart != prevDay {
-		s.nsites, s.full = 0, false
-	}
-	if st := s.siteSlot(site); st != nil {
+	if st := s.failSlot(site); st != nil {
 		if st.n < 0xffff {
 			st.n++
 		}
@@ -460,10 +475,13 @@ func (l *loginLedger) okLocked(ip, client, network, host string, site uint64, ta
 	// Every success is recorded on the client's site entry, so that a later
 	// success can be told apart: an owner's tool that logs in all day and
 	// sometimes fails (mygreecetours.org, virgo: 655 successes, 155
-	// failures), from a first success after a run of failures. A client
-	// cannot fake a success (it is WordPress's logged-in cookie), so it
-	// cannot buy itself this exemption. A password-reset REQUEST is not
-	// one either: anyone can send it, so it excuses nothing.
+	// failures), from a first success after a run of failures. A success
+	// cannot be faked (it is the site's logged-in cookie), but it is per
+	// client and site, not per account: on a site with open registration a
+	// client can bank successes on its own account and so hide a later
+	// success as the admin. Shadow only; phase 2 weighs it before anything
+	// acts on L4. A password-reset REQUEST excuses nothing: anyone can send
+	// one.
 	s := l.ipLocked(client, now)
 	s.rollDay(now)
 	if now > s.last {
@@ -488,7 +506,7 @@ func (l *loginLedger) okLocked(ip, client, network, host string, site uint64, ta
 	}
 	by := ""
 	switch {
-	case s != nil && s.flagged > now:
+	case s.flagged > now:
 		by = "ip"
 	case ns != nil && ns.until > now:
 		by = "net"
