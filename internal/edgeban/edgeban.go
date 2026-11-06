@@ -563,7 +563,7 @@ func WebSection(section string) bool {
 	case "waf_security", "webdetector", "modsec", "cfm_endpoints", "cpanel", "login_bruteforce":
 		return true
 	}
-	return strings.HasPrefix(s, "challenge_")
+	return strings.HasPrefix(s, "challenge_") || strings.HasPrefix(s, "login_bruteforce:")
 }
 
 // Ban records a ban in the Default store (no-op without one).

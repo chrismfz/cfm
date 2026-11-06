@@ -407,7 +407,7 @@ type edgeAccessTailInput struct {
 
 type authCorpusInput struct {
 	Tag     string `json:"tag,omitempty" jsonschema:"one login tag, e.g. WP_LOGIN, JOOMLA_ADMIN, DRUPAL_LOGIN, MAGENTO_ADMIN, OPENCART_ADMIN, LOGIN_POST, PHPMYADMIN; omit for all"`
-	Outcome string `json:"outcome,omitempty" jsonschema:"ok, fail, na or ? (the daemon's verdict; every CMS but WordPress is ?); omit for all"`
+	Outcome string `json:"outcome,omitempty" jsonschema:"ok, fail, mfa (a 2FA password step), na or ? (the daemon's verdict; every CMS but WordPress is ?); omit for all"`
 	Limit   int    `json:"limit,omitempty" jsonschema:"max shapes (default 100, max 1000), most frequent first"`
 }
 
@@ -904,7 +904,7 @@ func registerAuthCorpus(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "auth_corpus",
-		Description: "Login POSTs the edge saw since the daemon started, grouped by SHAPE: login tag (WP_LOGIN, JOOMLA_ADMIN, ...), the daemon's outcome (ok/fail/na for WordPress, and only when the site's origin answered; ? for every other CMS until a rule is measured), the logged-in-cookie bit, the upstream, method, status, normalised path, the response's Location path and Set-Cookie NAMES (hex/digit runs folded), with line count, distinct IPs and hosts (capped at 64) and example hosts. For deciding each CMS's success/failure signature from real traffic: a shape with many IPs on many hosts is a brute-force failure; a shape with a few IPs followed by admin pages is a success. Totals per tag/outcome included. In-memory, bounded (2000 shapes, 16 per /24 or IPv6 /64; the least-used shape is evicted for a new one; evicted/dropped/dropped_by_tag count the overflow), emptied by a restart or config reload. No cookie values, query strings or bodies.",
+		Description: "Login POSTs the edge saw since the daemon started, grouped by SHAPE: login tag (WP_LOGIN, JOOMLA_ADMIN, ...), the daemon's outcome (ok/fail/mfa/na for WordPress, mfa = a 2FA password step, and only when the site's origin answered; ? for every other CMS until a rule is measured), the logged-in-cookie bit, the upstream, method, status, normalised path, the response's Location path and Set-Cookie NAMES (hex/digit runs folded), with line count, distinct IPs and hosts (capped at 64) and example hosts. For deciding each CMS's success/failure signature from real traffic: a shape with many IPs on many hosts is a brute-force failure; a shape with a few IPs followed by admin pages is a success. Totals per tag/outcome included. In-memory, bounded (2000 shapes, 16 per /24 or IPv6 /64; the least-used shape is evicted for a new one; evicted/dropped/dropped_by_tag count the overflow), emptied by a restart or config reload. No cookie values, query strings or bodies.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in authCorpusInput) (*mcp.CallToolResult, any, error) {
 		q := url.Values{}
 		setStr(q, "tag", in.Tag)

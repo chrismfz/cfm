@@ -882,7 +882,7 @@ var sectionBlockDefaults = map[string]KV{
 	"ssh_auth": {"BLOCK": "permanent", "BLOCK_COOLDOWN": "30m"},
 	// A [login_bruteforce] the operator wrote without BLOCK still bans as
 	// the built-in section does (applyBuiltinLoginBruteforce).
-	"login_bruteforce": {"BLOCK": "90d", "BLOCK_COOLDOWN": "15m"},
+	"login_bruteforce": {"BLOCK": "90d", "BLOCK_COOLDOWN": "6h"},
 }
 
 // sectionBlockPolicy is parseBlockPolicy with the section type's defaults

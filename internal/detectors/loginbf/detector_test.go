@@ -7,6 +7,7 @@ import (
 	"time"
 
 	core "cfm/internal/detectors/core"
+	"cfm/internal/enrich"
 )
 
 var t0 = time.Unix(1_793_900_000, 0)
@@ -17,7 +18,22 @@ func newTest(cfg Config) *Detector {
 	}
 	d := New(cfg)
 	d.now = func() time.Time { return t0.Add(10 * time.Minute) }
+	d.setGeo(fakeGeo{})
 	return d
+}
+
+// fakeGeo: every address is in the US on AS64500, but 203.0.113.250 is on
+// Sucuri's AS30148 and 203.0.113.251 has no record.
+type fakeGeo struct{}
+
+func (fakeGeo) LookupGeoFast(ip string) enrich.Result {
+	switch ip {
+	case "203.0.113.250":
+		return enrich.Result{CountryISO: "US", ASN: 30148, ASNName: "Sucuri"}
+	case "203.0.113.251":
+		return enrich.Result{}
+	}
+	return enrich.Result{CountryISO: "US", ASN: 64500}
 }
 
 func run(t *testing.T, d *Detector) []core.Alert {
@@ -151,11 +167,119 @@ func TestPruneAndBound(t *testing.T) {
 	if n := len(d.clients); n > 20 {
 		t.Fatalf("clients past the bound: %d", n)
 	}
-	// Two hours on: every client's last failure left the window.
-	d.now = func() time.Time { return t0.Add(2 * time.Hour) }
-	d.Enqueue(failAt("203.0.113.200", "a.gr", t0))
+	// A failure two hours on: every other client's last failure left the
+	// window (the clock is the newest failure, not the wall).
+	d.Enqueue(failAt("203.0.113.200", "a.gr", t0.Add(2*time.Hour)))
 	run(t, d)
-	if n := len(d.clients); n != 0 {
+	if n := len(d.clients); n != 1 {
 		t.Fatalf("stale clients kept: %d", n)
+	}
+}
+
+func TestNeverBanned(t *testing.T) {
+	d := newTest(Config{AllowASNs: []string{"AS30148"}})
+	for i := 0; i < 6; i++ {
+		at := t0.Add(time.Duration(i) * time.Minute)
+		for _, ip := range []string{"203.0.113.250", "10.0.0.5", "192.168.1.9", "100.64.3.3", "127.0.0.1", "fe80::1", "::1"} {
+			d.Enqueue(failAt(ip, "a.gr", at))
+		}
+	}
+	if got := run(t, d); len(got) != 0 {
+		t.Fatalf("a proxy ASN / non-public address was alerted: %+v", got)
+	}
+}
+
+func TestNoGeoIsADryRun(t *testing.T) {
+	d := newTest(Config{})
+	for i := 0; i < 5; i++ {
+		d.Enqueue(failAt("203.0.113.251", "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	got := run(t, d)
+	if len(got) != 1 || got[0].Extra["enforcement"] != "dryrun" || got[0].Extra["geo"] != "unknown" {
+		t.Fatalf("no geo record must not ban: %+v", got)
+	}
+	// And with no database at all.
+	d = New(Config{SiteFails: 5, Sites: 5})
+	for i := 0; i < 5; i++ {
+		d.Enqueue(failAt("203.0.113.30", "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	if got := run(t, d); len(got) != 1 || got[0].Extra["enforcement"] != "dryrun" {
+		t.Fatalf("no enricher must not ban: %+v", got)
+	}
+	// A record with a country bans.
+	d = newTest(Config{})
+	for i := 0; i < 5; i++ {
+		d.Enqueue(failAt("203.0.113.31", "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	if got := run(t, d); len(got) != 1 || got[0].Extra["enforcement"] != "" {
+		t.Fatalf("a geo record must ban: %+v", got)
+	}
+}
+
+func TestIPv6CountsPer64AndBansTheAddress(t *testing.T) {
+	d := newTest(Config{})
+	for i := 0; i < 5; i++ {
+		d.Enqueue(failAt("2001:db8:1:2::"+strconv.Itoa(i+1), "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	got := run(t, d)
+	if len(got) != 1 || got[0].Extra["ip"] != "2001:db8:1:2::5" || got[0].Extra["client"] != "2001:db8:1:2::/64" {
+		t.Fatalf("rotation inside one /64: %+v", got)
+	}
+}
+
+func TestAddressesAreNormalised(t *testing.T) {
+	d := newTest(Config{AllowIPs: []string{"2001:DB8::1"}})
+	for i := 0; i < 6; i++ {
+		d.Enqueue(failAt("2001:db8::1", "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	if got := run(t, d); len(got) != 0 {
+		t.Fatalf("ALLOW_IPS in another spelling: %+v", got)
+	}
+	// A mapped address is the IPv4 one, in one count.
+	d = newTest(Config{})
+	for i := 0; i < 5; i++ {
+		ip := "203.0.113.40"
+		if i%2 == 1 {
+			ip = "::ffff:203.0.113.40"
+		}
+		d.Enqueue(failAt(ip, "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	if got := run(t, d); len(got) != 1 || got[0].Extra["ip"] != "203.0.113.40" {
+		t.Fatalf("mapped and plain forms: %+v", got)
+	}
+}
+
+func TestOutOfOrderLines(t *testing.T) {
+	// 4 failures now and one stamped 67 minutes earlier, arriving last: not
+	// 5 within an hour.
+	d := newTest(Config{})
+	for i := 0; i < 4; i++ {
+		d.Enqueue(failAt("203.0.113.50", "a.gr", t0.Add(time.Duration(70+i)*time.Minute)))
+	}
+	d.Enqueue(failAt("203.0.113.50", "a.gr", t0.Add(3*time.Minute)))
+	if got := run(t, d); len(got) != 0 {
+		t.Fatalf("a late line outside the window counted: %+v", got)
+	}
+	// A late line inside the window counts.
+	d.Enqueue(failAt("203.0.113.50", "a.gr", t0.Add(60*time.Minute)))
+	if got := run(t, d); len(got) != 1 {
+		t.Fatalf("a late line inside the window: %d", len(got))
+	}
+}
+
+func TestBacklogIsPrunedOnItsOwnClock(t *testing.T) {
+	// A backlog two hours old, read in two batches: the wall clock must not
+	// drop the first batch's failures before the second.
+	d := newTest(Config{})
+	d.now = func() time.Time { return t0.Add(3 * time.Hour) }
+	for i := 0; i < 3; i++ {
+		d.Enqueue(failAt("203.0.113.60", "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	run(t, d)
+	for i := 3; i < 5; i++ {
+		d.Enqueue(failAt("203.0.113.60", "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	if got := run(t, d); len(got) != 1 {
+		t.Fatalf("backlog across two runs: %d", len(got))
 	}
 }

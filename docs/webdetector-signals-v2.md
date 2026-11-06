@@ -92,8 +92,9 @@ from the corpus is a Go change, not an edge release. As built the field is
   real value. A logout's expired cookie carries a blank value. "Last" matters
   for 2FA: with the Two Factor or WP 2FA plugin, `wp_signon` sets the real
   cookie, the plugin clears it in the same answer and shows its
-  second-factor form (200). That is `li=0`, a `fail`. The second-factor POST
-  that sets the cookie for good is the `ok`. Only the edge sees cookie
+  second-factor form (200). That is `li=0`, and the daemon reads it as `mfa`
+  (the cookie NAME is in `c=`): the password was right. The second-factor
+  POST that sets the cookie for good is the `ok`. Only the edge sees cookie
   values, so this one bit is decided there (`ngx.header["Set-Cookie"]`).
   The value never leaves the edge.
 - `l=`: the `Location` path, its scheme, host (protocol-relative and
@@ -129,6 +130,9 @@ The daemon's WordPress rule (the one verified so far):
 - `ok`: `li=1`. This is checked first, whatever the action. PHP's
   `$_REQUEST` lets a body `action=login` override the query, so a query
   action must never hide a success.
+- `mfa`: no real cookie, but the answer set a `wordpress_logged_in_*` one
+  (cleared): a 2FA plugin's password step. Counted nowhere. Until
+  2026-11-06 it read as `fail`, so an admin's every 2FA login was one.
 - `na`: one of wp-login.php's own other actions (lostpassword,
   retrievepassword, resetpass, rp, register, postpass, logout,
   checkemail, confirmaction, confirm_admin_email, entered_recovery_mode).

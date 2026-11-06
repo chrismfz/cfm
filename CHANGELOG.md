@@ -28,9 +28,19 @@ back-filled here — see the git/PR history for that period.
     tries once or twice per site per address.
 
   Greek and Cypriot addresses get a 10 minute ban, reported nowhere (customers
-  know unblock.myip.gr). A site's own tool is never banned for its failures
-  there: it already succeeded on the site at least as often as it failed. The
-  ban reaches the edge too, for a client behind Cloudflare. Every node runs it
+  know unblock.myip.gr). Never banned:
+  - a site's own tool, for its failures there (it already succeeded on the
+    site at least as often as it failed);
+  - a 2FA login: the password step no longer reads as a failure;
+  - a reverse proxy or WAF CDN address (`ALLOW_ASNS`: Sucuri, Imperva,
+    Fastly, Akamai, StackPath, Bunny, Cloudflare), which stands for every
+    visitor of the sites behind it;
+  - private, loopback and CGNAT addresses.
+
+  An address with no geo record only logs "would block", since the GR/CY
+  leniency needs its country. IPv6 counts per /64. The ban is also recorded
+  for the edge, for a client behind Cloudflare (enforced there with
+  `EDGE_BAN_MODE = enforce`). Every node runs it
   with the upgrade, without a `detectors.conf` change: the section and its
   leniency are built in until the operator writes their own
   `[login_bruteforce]`. `DRY_RUN = 1` there previews it. Only WordPress logins

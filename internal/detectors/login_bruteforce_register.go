@@ -11,6 +11,14 @@ import (
 
 const loginBruteforceType = "login_bruteforce"
 
+// loginBruteforceProxyASNs are reverse proxies and WAF CDNs CFM does not
+// trust to name the client: every visitor of a site behind one reads as the
+// proxy's address, and a 90 day ban reported to the fleet would take every
+// site behind it down. Cloudflare is trusted (trusted_proxies.conf), but a
+// request a Cloudflare address sends without CF-Connecting-IP (a Worker)
+// reads as Cloudflare's own address too.
+const loginBruteforceProxyASNs = "13335,209242,30148,19551,54113,20940,16625,12989,33438,200325"
+
 // loginBruteforceDefaults is the [login_bruteforce] section a node runs when
 // its detectors.conf has none (every node whose conffile predates it): the
 // operator wanted it on fleet-wide from the start, not only on fresh
@@ -18,14 +26,18 @@ const loginBruteforceType = "login_bruteforce"
 // (TestLoginBruteforceDefaultsMatchReferenceConfig pins it).
 func loginBruteforceDefaults() KV {
 	return KV{
-		"ENABLED":        "1",
-		"EVERY":          "10s",
-		"WINDOW":         "1h",
-		"SITE_FAILS":     "5",
-		"SITES":          "5",
-		"DRY_RUN":        "0",
-		"BLOCK":          "90d",
-		"BLOCK_COOLDOWN": "15m",
+		"ENABLED":    "1",
+		"EVERY":      "10s",
+		"WINDOW":     "1h",
+		"SITE_FAILS": "5",
+		"SITES":      "5",
+		"DRY_RUN":    "0",
+		"BLOCK":      "90d",
+		// A banned client behind Cloudflare is not stopped by the nft drop and,
+		// with [webdetector] EDGE_BAN_MODE = log, not at the edge either: it keeps
+		// failing, and every new alert would mail and report it again.
+		"BLOCK_COOLDOWN": "6h",
+		"ALLOW_ASNS":     loginBruteforceProxyASNs,
 	}
 }
 
@@ -94,6 +106,7 @@ func init() {
 			DryRun:    kvBool(kv, "DRY_RUN", false),
 			AllowIPs:  csvKV(kv, "ALLOW_IPS"),
 			AllowNets: csvKV(kv, "ALLOW_NETS"),
+			AllowASNs: csvKV(kv, "ALLOW_ASNS"),
 		})
 		d.SetName(section)
 		d.AddUnsubscribe(webdetector.SubscribeLoginFailEvents(func(ev webdetector.LoginFailEvent) {

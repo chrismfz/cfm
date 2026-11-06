@@ -22,7 +22,7 @@ func TestLoginBruteforceDefaultsMatchReferenceConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]KV{
-		loginBruteforceType:              loginBruteforceDefaults(),
+		loginBruteforceType:               loginBruteforceDefaults(),
 		loginBruteforceType + ".leniency": loginBruteforceLeniencyDefaults(),
 	} {
 		got, ok := secs.ByName[name]

@@ -104,8 +104,8 @@ func parseAuthField(s string) (authField, bool) {
 	return af, true
 }
 
-// authOutcome is the verdict on one login line: "ok", "fail", "na" (another
-// wp-login.php action) or "?" (not known). Only an answer from the site's
+// authOutcome is the verdict on one login line: "ok", "fail", "mfa" (a 2FA
+// password step), "na" (another wp-login.php action) or "?" (not known). Only an answer from the site's
 // origin counts: a login POST CFM routed to its challenge server or blocked
 // at the edge says nothing about the password. WordPress is the one CMS
 // whose rule is verified (docs/webdetector-signals-v2.md §2); every other tag
@@ -122,6 +122,13 @@ func authOutcome(rec LogRec, af authField) string {
 		// PHP's $_REQUEST lets a body action=login override it.
 		if af.LoggedIn {
 			return "ok"
+		}
+		if wpLoginCookieCleared(af.Cookies) {
+			// The origin set a wordpress_logged_in_ cookie and cleared it in
+			// the same answer: a 2FA plugin (Two Factor, WP 2FA) accepted the
+			// PASSWORD and shows its second-factor form. Not a failure: an
+			// admin's every 2FA login read as one, enough for a ban.
+			return "mfa"
 		}
 		if wpNonLoginActions[af.Action] {
 			// A real lostpassword/register POST, or a login hidden behind a
@@ -148,6 +155,18 @@ func authOutcome(rec LogRec, af authField) string {
 		}
 	}
 	return "?"
+}
+
+// wpLoginCookieCleared: the answer set a wordpress_logged_in_ cookie, but
+// not a real one (af.LoggedIn is false), which on a login POST is a 2FA
+// plugin's password step.
+func wpLoginCookieCleared(names []string) bool {
+	for _, n := range names {
+		if strings.HasPrefix(n, "wordpress_logged_in_") {
+			return true
+		}
+	}
+	return false
 }
 
 // wpNonLoginActions are wp-login.php's own actions other than login (its
@@ -574,7 +593,7 @@ func (c *authCorpus) snapshot(tag, outcome string, limit int) AuthCorpusSnapshot
 // handleAuthCorpus serves GET /api/v1/webdet/auth-corpus. Admin-only: the
 // corpus is node-wide (example hosts of every tenant). Backs the MCP
 // auth_corpus tool. Query params (optional): tag (e.g. JOOMLA_ADMIN),
-// outcome (ok|fail|na|?), limit (default 100, max 1000).
+// outcome (ok|fail|mfa|na|?), limit (default 100, max 1000).
 func (e *Engine) handleAuthCorpus(w http.ResponseWriter, r *http.Request) {
 	if !RequireAdmin(w, r) {
 		return

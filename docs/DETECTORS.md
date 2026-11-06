@@ -508,16 +508,35 @@ and this detector bans per client address, over `WINDOW` (1 h):
   sees: on virgo, 1-6 Nov 2026, 1 363 site-hours had 10+ failing addresses
   with fewer than 5 failures each (22 532 failures on 147 sites).
 
-A failure on a site where the client already succeeded at least as often as
-it failed (the ledger's 24 h record: a site's own tool) counts toward
-neither rule. A success alone is not ownership. Bypass clients (crawlers,
-CDN prefixes) never reach the ledger, `[global] IGNORE_IPS` is never
-banned, and `[webdetector] LOGIN_SIGNALS = 0` stops the events with the
-shadow rows. After an alert, only later failures count toward the next one:
-a lenient client that keeps failing is banned again.
+A client is an IPv4 address or an IPv6 /64 (one subscriber, who can rotate
+addresses inside it); the ban is on the address that failed. Never counted
+or banned:
 
-The ban is the section sink's: `BLOCK = 90d`, reported to cfm-web, and at
-the edge too (a client behind Cloudflare never meets the nft drop). The
+- a failure on a site where the client failed and already succeeded at
+  least as often (the ledger's per-site record: a site's own tool). A
+  success alone is not ownership. The record is the ledger's fixed 24 h
+  window, in memory: a restart, a `detectors.conf` save or a tailed log's
+  rotation empties it, and a tool that fails first after that counts until
+  its successes catch up;
+- a 2FA password step (`mfa`, `docs/webdetector-signals-v2.md` §3);
+- bypass clients (crawlers, CDN prefixes), `[global] IGNORE_IPS`, private,
+  loopback, link-local and CGNAT addresses, `ALLOW_IPS` / `ALLOW_NETS`;
+- `ALLOW_ASNS`: reverse proxies and WAF CDNs CFM does not trust to name the
+  client (Cloudflare, Sucuri, Imperva, Fastly, Akamai, StackPath, Bunny). A
+  site behind one reads as the proxy's address for all its visitors, and a
+  90 day ban reported to the fleet would take every site behind it down.
+
+An address with no geo record (no GeoLite/IPLocate database yet, `[global]
+ENRICH = 0`) only logs "would block": the GR/CY leniency is decided on the
+country. `[webdetector] LOGIN_SIGNALS = 0` stops the events with the shadow
+rows. After an alert, only later failures count toward the next one: a
+lenient client that keeps failing is banned again.
+
+The ban is the section sink's: `BLOCK = 90d`, reported to cfm-web, and
+recorded in the edge ban store for a client behind Cloudflare, which never
+meets the nft drop (enforced there once `[webdetector] EDGE_BAN_MODE =
+enforce`; until then such a client keeps failing, and `BLOCK_COOLDOWN = 6h`
+keeps it from being mailed and reported again every few minutes). The
 `[login_bruteforce.leniency]` tier gives a Greek or Cypriot address a 10
 minute ban reported nowhere: customers who lock themselves out use
 unblock.myip.gr. Measured on virgo (Apache logs, 1-6 Nov): no Greek address

@@ -111,6 +111,9 @@ func TestAuthOutcome(t *testing.T) {
 		{"no upstream name", LogRec{Status: 200, UpstreamName: "-"}, authField{Tag: "WP_LOGIN"}, "?"},
 		{"other CMS", origin(200), authField{Tag: "JOOMLA_ADMIN"}, "?"},
 		{"5xx", origin(500), authField{Tag: "WP_LOGIN"}, "?"},
+		{"2FA password step: the login cookie set and cleared (ksilokosmos.gr)", origin(200),
+			authField{Tag: "WP_LOGIN", Cookies: []string{"pbid", "wordpress_logged_in_0123456789abcdef", "wordpress_sec_0123456789abcdef"}}, "mfa"},
+		{"the test cookie alone is a failure", origin(200), authField{Tag: "WP_LOGIN", Cookies: []string{"wordpress_test_cookie"}}, "fail"},
 	}
 	for _, c := range cases {
 		if got := authOutcome(c.rec, c.af); got != c.want {
