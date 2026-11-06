@@ -17,8 +17,9 @@
 // most failures in the window, not on whichever failed last: in an office
 // /64 a colleague's one typo must not take the ban for another's spray.
 //
-// A success takes back the client's latest failure on that site in the last
-// RetractWindow: a 2FA plugin that sends no cookie on the password step (Two
+// A success takes back up to RetractMax of the client's latest failures on
+// that site in the last RetractWindow, and a failure counts only once it is
+// Grace old, so the success arrives first: a 2FA plugin that sends no cookie on the password step (Two
 // Factor 0.8+) shows its second-factor form as a failure, and the success
 // after it is the same login. A typo then a success is not brute force
 // either. Only a real success (the site's logged-in cookie) does it.
@@ -126,6 +127,10 @@ type client struct {
 	// failures count toward the next one. A banned client sends none; a
 	// lenient one (a 10 minute ban) that keeps failing is banned again.
 	firedAt int64
+	// quietUntil: under DRY_RUN a client is never banned, so it keeps
+	// failing; one would-be ban per client per WINDOW, or the burn-in's
+	// counts (and mail) would be many times what armed mode does.
+	quietUntil int64
 }
 
 type geoLookup interface {
@@ -448,6 +453,13 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 	if rule == "" {
 		return core.Alert{}, false
 	}
+	if d.cfg.DryRun && at < c.quietUntil {
+		c.firedAt = c.last
+		return core.Alert{}, false
+	}
+	if d.cfg.DryRun {
+		c.quietUntil = at + win
+	}
 	a := d.alert(ev, key, c, rule, onSite, sites)
 	if ip, worst, addrs := worstAddr(c.fails, c.firedAt); ip != "" {
 		a.Key, a.Extra["ip"] = ip, ip
@@ -484,7 +496,7 @@ func (d *Detector) alert(ev Event, key string, c *client, rule string, onSite in
 	}
 	var samples []string
 	for _, f := range fails {
-		samples = append(samples, fmt.Sprintf("%s %s failed %s login on %s",
+		samples = append(samples, fmt.Sprintf("%s %s failed %s login host=%s",
 			time.Unix(f.at, 0).UTC().Format(time.RFC3339), f.ip, f.tag, f.host))
 	}
 	a := core.Alert{

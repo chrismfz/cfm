@@ -8,8 +8,9 @@ import (
 // LoginEvent is one login the login ledger counted (the edge's login
 // column, an origin answer read as "fail" or "ok"; see authOutcome). It is
 // published for the login_bruteforce detector, which bans on the failures
-// and lets a success take back the failure just before it on that site (a
-// 2FA plugin that sends no cookie on the password step: Two Factor 0.8+).
+// and lets a success take back up to 3 failures just before it on that
+// site (a 2FA plugin that sends no cookie on the password step, Two Factor
+// 0.8+, and a mistyped code).
 // Bypass clients (a crawler, a CDN prefix) never reach the ledger, so they
 // are never published.
 type LoginEvent struct {

@@ -279,6 +279,8 @@ end
 --        failure, so reading that as 2FA hid every failure from the ban.
 --        Only the edge sees the value, so only this bit of the verdict is
 --        taken here.
+--   tc   1 when the answer set wordpress_test_cookie (wp-login.php does on
+--        every request), over all Set-Cookie headers, the names cap aside.
 --   x    1 when the Location leaves the request's scheme or host (a
 --        canonical redirect, any status): the host itself is never sent.
 --   a    the query's `action`, when present (wp-login.php's lostpassword,
@@ -337,6 +339,7 @@ local function auth_field(var)
 
   local hdr = ngx.header
   local names, li_last, li_real = {}, {}, {}
+  local test_cookie = false
   for _, sc in ipairs(as_list(hdr and hdr["Set-Cookie"])) do
     if type(sc) == "string" then
       local name, value = sc:match("^%s*([^=;%s]+)=([^;]*)")
@@ -349,6 +352,9 @@ local function auth_field(var)
         -- The LAST Set-Cookie of a name is what the browser keeps: a 2FA
         -- plugin (Two Factor, WP 2FA) lets wp_signon set the real cookie,
         -- then clears it in the same answer and shows its second-factor form.
+        -- Over every Set-Cookie, past the names cap: the daemon counts a
+        -- failure only on an answer wp-login.php wrote, which carries it.
+        if name == "wordpress_test_cookie" then test_cookie = true end
         if name:sub(1, #WP_LI) == WP_LI then
           li_last[name] = #value >= 20
           if #value >= 20 then li_real[name] = true end
@@ -438,6 +444,7 @@ local function auth_field(var)
     v = v .. ";a=" .. a
   end
   if cross then v = v .. ";x=1" end
+  if test_cookie then v = v .. ";tc=1" end
   return v .. ";l=" .. loc .. ";c=" .. table.concat(names, ",")
 end
 _M._auth_field = auth_field -- exposed for scripts/tests/cfm_log_auth_test.lua

@@ -20,8 +20,9 @@ back-filled here — see the git/PR history for that period.
 ### Added
 - **WordPress brute force can be banned (`login_bruteforce`), in a dry run
   first.** It ships `DRY_RUN = 1`: every would-be ban is logged
-  (`cfm.detectors.log`, the alert log with `mode=dryrun`) and nothing is
-  banned or reported until `DRY_RUN = 0` in `[login_bruteforce]`. Until now nothing
+  (`cfm.detectors.log`, the alert log with `mode=dryrun`, with the site, the
+  rule and whether GR/CY leniency applied), once per client per hour, and
+  nothing is banned or reported until `DRY_RUN = 0` in `[login_bruteforce]`. Until now nothing
   stopped it: of the 314 addresses the shadow `login_spray` signal flagged in
   one day on seven nodes, 11 were blocked by anything else. A client address is
   banned for 3 days, and reported to cfm-web, after either of these within an
@@ -37,9 +38,9 @@ back-filled here — see the git/PR history for that period.
   - a site's own tool, for its failures there (it already succeeded on the
     site at least as often as it failed);
   - a 2FA login: the password step (the origin sets the login cookie and
-    clears it in the same answer) no longer reads as a failure, and a
-    success takes back the failure just before it on that site (Two Factor
-    0.8+ sends no cookie on the password step). A login hidden behind
+    clears it in the same answer) no longer reads as a failure (Two Factor
+    0.8+, which sends no cookie on that step, is covered by the success that
+    follows, below). A login hidden behind
     `?action=lostpassword`, and one with `?reauth=1`, still counts when it
     fails;
   - a password reset that went through, or a protected post's password;

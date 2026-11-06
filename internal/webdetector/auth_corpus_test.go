@@ -63,6 +63,9 @@ func TestAuthColumnOldParserSkew(t *testing.T) {
 }
 
 func TestParseAuthField(t *testing.T) {
+	if af, ok := parseAuthField("WP_LOGIN;li=0;tc=1;l=;c="); !ok || !af.TC {
+		t.Fatalf("tc=1: %+v", af)
+	}
 	if af, ok := parseAuthField("WP_LOGIN;li=2;l=;c=wordpress_logged_in_0123abcd"); !ok || !af.MFA || af.LoggedIn {
 		t.Fatalf("li=2 is a 2FA step, not a login: %+v", af)
 	}
@@ -132,6 +135,7 @@ func TestAuthOutcome(t *testing.T) {
 		{"a protected post's password (postpass, 200, its cookie set)", origin(200),
 			authField{Tag: "WP_LOGIN", Action: "postpass", Cookies: []string{"wordpress_test_cookie", "wp-postpass_0123456789abcdef"}}, "na"},
 		{"a login hidden behind ?action=postpass fails with 200", origin(200), authField{Tag: "WP_LOGIN", Action: "postpass", Cookies: tc}, "fail"},
+		{"tc=1: the test cookie past the names cap", origin(200), authField{Tag: "WP_LOGIN", TC: true, Cookies: []string{"a", "b"}}, "fail"},
 		{"the test cookie alone is a failure", origin(200), authField{Tag: "WP_LOGIN", Cookies: []string{"wordpress_test_cookie"}}, "fail"},
 		{"a login hidden behind ?action=lostpassword (body action=login) fails with 200", origin(200),
 			authField{Tag: "WP_LOGIN", Action: "lostpassword", Cookies: tc}, "fail"},

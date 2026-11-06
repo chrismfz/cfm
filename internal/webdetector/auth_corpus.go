@@ -59,6 +59,7 @@ type authField struct {
 	Tag      string // WP_LOGIN, JOOMLA_ADMIN, ... (auth_endpoint_tag minus AUTH_)
 	LoggedIn bool   // a wordpress_logged_in_* cookie with a real value
 	MFA      bool   // li=2: a real one set and cleared in the same answer (a 2FA password step)
+	TC       bool   // tc=1: the answer set wordpress_test_cookie (over all Set-Cookie headers)
 	Loc      string // the Location path, query and host dropped at the edge
 	Cookies  []string
 	Action   string // the query's action, when present
@@ -96,6 +97,8 @@ func parseAuthField(s string) (authField, bool) {
 			}
 		case "a":
 			af.Action = v
+		case "tc":
+			af.TC = v == "1"
 		case "x":
 			af.Cross = v == "1"
 		}
@@ -184,9 +187,15 @@ func authOutcome(rec LogRec, af authField) string {
 // wordpress_test_cookie on every request before any action or plugin hook
 // runs (the cookie-support check), so every answer it writes carries it,
 // a plugin's redirect from login_init or wp_login_failed included. The
-// origin sets it, not the client. The edge sends the first AUTH_MAX_COOKIES
-// names: a cut list can only make a failure "?" here, never a ban.
+// origin sets it, not the client. The edge reports it as tc=1 over every
+// Set-Cookie header, so a plugin that sets many cookies first (the names
+// list stops at AUTH_MAX_COOKIES) cannot hide it; an older edge sends only
+// the names. A site with a renamed TEST_COOKIE, or one where it is missing
+// (4yourhealth.gr's successes carry none), never counts a failure.
 func wpAnswered(af authField) bool {
+	if af.TC {
+		return true
+	}
 	for _, c := range af.Cookies {
 		if c == "wordpress_test_cookie" {
 			return true

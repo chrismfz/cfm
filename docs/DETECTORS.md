@@ -582,6 +582,9 @@ Known gaps, where a legitimate client can still be banned:
   login monitor whose stored password went stale is banned soon after it
   empties;
 - a lostpassword request the site cannot mail answers 200 and counts;
+- the other way round, a site whose wp-login.php answers carry no
+  `wordpress_test_cookie` (a renamed `TEST_COOKIE`; 4yourhealth.gr's real
+  successes carry none) never counts a failure;
 - a captcha that fails a real user (reCAPTCHA v3 on a VPN, Turnstile blocked
   by an extension) or Wordfence's verify-by-email answers 200 inside
   WordPress with the right password;
@@ -590,7 +593,10 @@ Known gaps, where a legitimate client can still be banned:
 
 **It ships as a dry run** (`DRY_RUN = 1`, also for a written section that
 leaves the key out): each would-be ban is an alert with `mode=dryrun` in
-`cfm.detectors.log` and the alert log, and nothing is banned or reported.
+`cfm.detectors.log` and the alert log (with `host`, `rule`, `site`,
+`leniency`, and `geo=unknown` / `ipv6_ambiguous` when they apply), at most
+once per client per `WINDOW` (a client that is never banned keeps
+failing), and nothing is banned or reported.
 `DRY_RUN = 0` arms it.
 
 Armed, the ban is the section sink's: `BLOCK = 3d`, reported to cfm-web, and

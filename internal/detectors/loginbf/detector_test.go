@@ -431,3 +431,21 @@ func TestAmbiguousIPv6IsADryRun(t *testing.T) {
 		t.Fatalf("an ambiguous /64 must not ban: %+v", got)
 	}
 }
+
+func TestDryRunAlertsOncePerClientPerWindow(t *testing.T) {
+	// Never banned, a dry-run client keeps failing: one would-be ban an hour.
+	d := newTest(Config{DryRun: true})
+	for i := 0; i < 30; i++ {
+		d.Enqueue(failAt("203.0.113.90", "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	got := run(t, d)
+	if len(got) != 1 || got[0].Extra["enforcement"] != "dryrun" {
+		t.Fatalf("dry run alerted %d times in 30 minutes", len(got))
+	}
+	for i := 0; i < 5; i++ {
+		d.Enqueue(failAt("203.0.113.90", "a.gr", t0.Add(70*time.Minute+time.Duration(i)*time.Minute)))
+	}
+	if got := run(t, d); len(got) != 1 {
+		t.Fatalf("an hour on: %d alerts", len(got))
+	}
+}

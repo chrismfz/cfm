@@ -749,6 +749,7 @@ func (s *sectionSink) Publish(a core.Alert) {
 		if out.Extra["block_kept"] != "" {
 			ev.Extra["block_kept"] = out.Extra["block_kept"]
 		}
+		copyAlertFields(ev.Extra, out.Extra)
 
 		notify.Enqueue(ev)
 
@@ -809,6 +810,11 @@ func (s *sectionSink) Publish(a core.Alert) {
 				"key": a.Key,
 			},
 		}
+		// A dry run is "dryrun" here: the alert log groups would-be bans by it.
+		if m := out.Extra["block_mode"]; m != "" {
+			ev.Extra["block_mode"] = m
+		}
+		copyAlertFields(ev.Extra, out.Extra)
 		notify.Enqueue(ev)
 	}
 	// --- end NEW ---
@@ -816,6 +822,18 @@ func (s *sectionSink) Publish(a core.Alert) {
 	// Now publish ONCE with the final outcome
 	if s.inner != nil {
 		s.inner.Publish(out)
+	}
+}
+
+// alertFields are the detector Extra keys the alert log keeps for grouping
+// (vhost from host, and what a login_bruteforce row needs to be measured).
+var alertFields = []string{"host", "rule", "site", "leniency", "geo", "ipv6_ambiguous"}
+
+func copyAlertFields(dst, src map[string]string) {
+	for _, k := range alertFields {
+		if v := src[k]; v != "" {
+			dst[k] = v
+		}
 	}
 }
 
