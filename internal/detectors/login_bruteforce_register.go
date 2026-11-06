@@ -35,8 +35,8 @@ func loginBruteforceDefaults() KV {
 		"SITES":      "5",
 		// Burn-in: alerts log "would block" and land in the alert log; nothing
 		// is banned or reported until the operator sets DRY_RUN = 0.
-		"DRY_RUN":    "1",
-		"BLOCK":      "3d",
+		"DRY_RUN": "1",
+		"BLOCK":   "3d",
 		// A banned client behind Cloudflare is not stopped by the nft drop and,
 		// with [webdetector] EDGE_BAN_MODE = log, not at the edge either: it keeps
 		// failing, and every new alert would mail and report it again.
