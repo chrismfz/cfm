@@ -299,6 +299,7 @@ Typical defaults below are representative from the shipped template and should b
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
 | `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=180s`, `MIN_SUBNETS=30`, `MIN_SOLVES=15`, **alert-only** |
 | `challenge_cookie_discard` | clients that re-solve the challenge while still holding valid clearance | `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `MAX_TRACKED_IPS`, allowlists, `BLOCK` | `EVERY=30s`, `WINDOW=10m`, `MIN_SOLVES=8`, **alert-only unless `BLOCK` is set** |
+| `login_bruteforce` | login brute force from the web detector's login column: one site, or a spray over many sites | `SITE_FAILS`, `SITES`, `WINDOW`, `BLOCK`, allowlists; `[login_bruteforce.leniency]` | `WINDOW=1h`, `SITE_FAILS=5`, `SITES=5`, `BLOCK=90d`; GR/CY `10m`, not reported. **Built in**: a config without the section runs these |
 
 ### `challenge_solver_farm` — why it exists
 
@@ -490,6 +491,52 @@ stripped for scoped (cPanel) callers like `ips`, as defence in depth
 **evidence only** — it is folded from the capped evidence records after every
 decision, and no track, threshold or mark reads it. `challenge_cookie_discard`
 does not carry it yet.
+
+### `login_bruteforce` — why it exists
+
+Until 2026-11 nothing banned a WordPress brute forcer: of the 314 addresses
+the shadow `login_spray` signal flagged in one day on seven nodes, 11 were
+blocked by anything else. The edge marks every login POST (the login column,
+`docs/webdetector-signals-v2.md` §3) and the web detector reads the origin's
+answer as a failure or a success. The login ledger publishes every failure,
+and this detector bans per client address, over `WINDOW` (1 h):
+
+- `SITE_FAILS` (5) failed logins on ONE site (a registrable domain: `www.`,
+  `staging.` and the bare name are one site);
+- failed logins on `SITES` (5) different sites, any number on each. A proxy
+  pool sprays one or two tries per site per address, which no per-site count
+  sees: on virgo, 1-6 Nov 2026, 1 363 site-hours had 10+ failing addresses
+  with fewer than 5 failures each (22 532 failures on 147 sites).
+
+A failure on a site where the client already succeeded at least as often as
+it failed (the ledger's 24 h record: a site's own tool) counts toward
+neither rule. A success alone is not ownership. Bypass clients (crawlers,
+CDN prefixes) never reach the ledger, `[global] IGNORE_IPS` is never
+banned, and `[webdetector] LOGIN_SIGNALS = 0` stops the events with the
+shadow rows. After an alert, only later failures count toward the next one:
+a lenient client that keeps failing is banned again.
+
+The ban is the section sink's: `BLOCK = 90d`, reported to cfm-web, and at
+the edge too (a client behind Cloudflare never meets the nft drop). The
+`[login_bruteforce.leniency]` tier gives a Greek or Cypriot address a 10
+minute ban reported nowhere: customers who lock themselves out use
+unblock.myip.gr. Measured on virgo (Apache logs, 1-6 Nov): no Greek address
+among the 391 that failed 5-19 times in an hour on one site.
+
+**Built in.** A node whose `detectors.conf` has no `[login_bruteforce]` runs
+the stock section and its leniency (`applyBuiltinLoginBruteforce`), so the
+rule reached every node with the upgrade. A section the operator writes is
+taken as written (give it its own `.leniency`); one without `BLOCK` still
+bans for 90 days.
+
+Only WordPress logins carry an outcome today. A Joomla
+(`/administrator/index.php`), Drupal or Laravel login joins when
+`authOutcome` learns to read its answer: on virgo Joomla had ~1 300 login
+POSTs in those six days against ~137 000 for WordPress.
+
+Each ban is a notifier event; with hundreds a day per node, route
+`[detector "login_bruteforce"]` in `notify.conf` (e.g. `notify = 0`) if
+mail is too much.
 
 ### `challenge_cookie_discard` — why it exists
 

@@ -675,3 +675,48 @@ func TestLoginLedgerStuffingHitBeforeFlagStillReported(t *testing.T) {
 		t.Fatal("hourly re-report of a flagged client's use")
 	}
 }
+
+func TestLoginLedgerPublishesFailEvents(t *testing.T) {
+	var got []LoginFailEvent
+	unsub := SubscribeLoginFailEvents(func(ev LoginFailEvent) { got = append(got, ev) })
+	defer unsub()
+	l := newLoginLedger((&rowSink{}).emit)
+
+	// A site's own tool: successes first, then a failure there is the owner's.
+	for i := 0; i < 3; i++ {
+		l.observe(loginRec("94.66.129.119", t0+int64(i)), "www.mygreecetours.org", "WP_LOGIN", "ok")
+	}
+	l.observe(loginRec("94.66.129.119", t0+10), "mygreecetours.org", "WP_LOGIN", "fail")
+	// A stranger's failure, and a success (never published).
+	l.observe(loginRec("203.0.113.9", t0+20), "staging.victim.gr", "WP_LOGIN", "fail")
+	l.observe(loginRec("203.0.113.9", t0+30), "victim.gr", "WP_LOGIN", "ok")
+	// A success alone is not ownership: the next failure there still counts.
+	l.observe(loginRec("203.0.113.10", t0+40), "a.gr", "WP_LOGIN", "fail")
+	l.observe(loginRec("203.0.113.10", t0+41), "a.gr", "WP_LOGIN", "fail")
+	l.observe(loginRec("203.0.113.10", t0+42), "a.gr", "WP_LOGIN", "ok")
+	l.observe(loginRec("203.0.113.10", t0+43), "a.gr", "WP_LOGIN", "fail")
+
+	if len(got) != 5 {
+		t.Fatalf("published %d events, want 5: %+v", len(got), got)
+	}
+	if !got[0].Owner || got[0].Site != "mygreecetours.org" || got[0].IP != "94.66.129.119" {
+		t.Fatalf("owner tool's failure: %+v", got[0])
+	}
+	if got[1].Owner || got[1].Site != "victim.gr" || got[1].Host != "staging.victim.gr" || got[1].Tag != "WP_LOGIN" {
+		t.Fatalf("stranger's failure: %+v", got[1])
+	}
+	if got[4].Owner {
+		t.Fatalf("1 success after 2 failures made the client the owner: %+v", got[4])
+	}
+	if got[1].When.Unix() != t0+20 {
+		t.Fatalf("event time: %v", got[1].When)
+	}
+
+	// The kill switch stops the events with the rows.
+	ConfigureLoginSignals(false)
+	defer ConfigureLoginSignals(true)
+	l.observe(loginRec("203.0.113.11", t0+50), "a.gr", "WP_LOGIN", "fail")
+	if len(got) != 5 {
+		t.Fatal("LOGIN_SIGNALS = 0 still published")
+	}
+}

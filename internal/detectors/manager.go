@@ -220,6 +220,11 @@ func (m *manager) maybeReload(parent context.Context) {
 		}
 	}
 	applyBuiltinCFMEndpoints(&secs)
+	if err == nil {
+		// Only from a config that was read: the degraded start-up keeps to the
+		// control-plane protection above.
+		applyBuiltinLoginBruteforce(&secs)
+	}
 	sig := cfgSig(&secs)
 	configured := make([]detectorstatus.SectionConfig, 0, len(secs.ByName))
 	configuredSections := make([]string, 0, len(secs.ByName))
@@ -875,6 +880,9 @@ func parseBlockPolicy(kv KV) blockPolicy {
 // (reference_defaults_config_test.go pins it).
 var sectionBlockDefaults = map[string]KV{
 	"ssh_auth": {"BLOCK": "permanent", "BLOCK_COOLDOWN": "30m"},
+	// A [login_bruteforce] the operator wrote without BLOCK still bans as
+	// the built-in section does (applyBuiltinLoginBruteforce).
+	"login_bruteforce": {"BLOCK": "90d", "BLOCK_COOLDOWN": "15m"},
 }
 
 // sectionBlockPolicy is parseBlockPolicy with the section type's defaults

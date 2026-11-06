@@ -558,8 +558,8 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
 - **An nft ban never stops a client behind a trusted proxy** (Cloudflare): on
   the wire it is the proxy's address. A banned scanner kept hitting sites for
   half an hour after each ban (2026-10-09). The web-related bans (the
-  waf_security / webdetector / challenge_* / modsec / cfm_endpoints / cpanel
-  sections, the challenge server, manual API/CLI bans) also go to the edge ban
+  waf_security / webdetector / challenge_* / modsec / cfm_endpoints / cpanel /
+  login_bruteforce sections, the challenge server, manual API/CLI bans) also go to the edge ban
   store (`internal/edgeban`), which the bridge decision answers
   `ip_action=block` for PROXIED requests only (`px=1` from cfm_decision.lua;
   a direct client is nft's, allow sets included), after IGNORE_IPS, before

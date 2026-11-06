@@ -555,12 +555,12 @@ func (s *Store) save() {
 
 // WebSection reports whether a detectors.conf section's bans are web
 // bans the edge must enforce too (its WAF, web detector, challenge, ModSecurity,
-// CFM endpoint and cPanel sections). Mail / SSH / FTP / database bans stay
+// CFM endpoint, cPanel and login brute-force sections). Mail / SSH / FTP / database bans stay
 // nft-only: a proxy relays only HTTP.
 func WebSection(section string) bool {
 	s := strings.ToLower(strings.TrimSpace(section))
 	switch s {
-	case "waf_security", "webdetector", "modsec", "cfm_endpoints", "cpanel":
+	case "waf_security", "webdetector", "modsec", "cfm_endpoints", "cpanel", "login_bruteforce":
 		return true
 	}
 	return strings.HasPrefix(s, "challenge_")

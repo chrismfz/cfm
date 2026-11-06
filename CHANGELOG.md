@@ -17,7 +17,25 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **WordPress brute force is banned (`login_bruteforce`).** Until now nothing
+  stopped it: of the 314 addresses the shadow `login_spray` signal flagged in
+  one day on seven nodes, 11 were blocked by anything else. A client address is
+  banned for 90 days, and reported to cfm-web, after either of these within an
+  hour:
+  - 5 failed logins on one site;
+  - failed logins on 5 different sites, one each is enough: a proxy pool
+    tries once or twice per site per address.
+
+  Greek and Cypriot addresses get a 10 minute ban, reported nowhere (customers
+  know unblock.myip.gr). A site's own tool is never banned for its failures
+  there: it already succeeded on the site at least as often as it failed. The
+  ban reaches the edge too, for a client behind Cloudflare. Every node runs it
+  with the upgrade, without a `detectors.conf` change: the section and its
+  leniency are built in until the operator writes their own
+  `[login_bruteforce]`. `DRY_RUN = 1` there previews it. Only WordPress logins
+  are read today. Each ban is a notifier event: route
+  `[detector "login_bruteforce"]` in `notify.conf` if mail is too much.
 
 ## 2026.11.05
 

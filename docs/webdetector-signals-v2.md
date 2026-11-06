@@ -277,6 +277,12 @@ under attack), L5 and L6 are not built. They need a per-vhost baseline, the
 learned admin origins, and the follow-up-request check (§2.1). The other
 CMSes join when the corpus gives them an outcome rule.
 
+**L1 enforcement (built 2026-11-06):** the `login_bruteforce` detector
+(`docs/DETECTORS.md`) bans from the ledger's failures with its own, stricter
+rules: ≥ 5 `fail` on one site in 1 h, or `fail` on ≥ 5 sites in 1 h, a 90 day
+ban sent to cfm-web, GR/CY 10 minutes and not sent. The shadow rows below keep
+their own thresholds and keep being written.
+
 Every signal ships **shadow** first: a history row plus the MCP, with no
 action. Proposed action tiers follow the user's open "ban through the
 Sinker or an edge deny" question; that decision is made per signal after
