@@ -210,6 +210,9 @@ func (d *Detector) Name() string {
 }
 func (d *Detector) Every() time.Duration { return d.cfg.Every }
 
+// DryRun reports whether every alert is a dry run (DRY_RUN).
+func (d *Detector) DryRun() bool { return d.cfg.DryRun }
+
 // SetEnricher is called by the manager with the node's geo database.
 func (d *Detector) SetEnricher(e *enrich.Enricher) {
 	if e == nil {

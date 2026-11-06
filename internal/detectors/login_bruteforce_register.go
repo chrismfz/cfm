@@ -33,7 +33,9 @@ func loginBruteforceDefaults() KV {
 		"WINDOW":     "1h",
 		"SITE_FAILS": "5",
 		"SITES":      "5",
-		"DRY_RUN":    "0",
+		// Burn-in: alerts log "would block" and land in the alert log; nothing
+		// is banned or reported until the operator sets DRY_RUN = 0.
+		"DRY_RUN":    "1",
 		"BLOCK":      "3d",
 		// A banned client behind Cloudflare is not stopped by the nft drop and,
 		// with [webdetector] EDGE_BAN_MODE = log, not at the edge either: it keeps
@@ -132,7 +134,8 @@ func init() {
 			Window:    kvDur(kv, "WINDOW", time.Hour),
 			SiteFails: kvInt(kv, "SITE_FAILS", 5),
 			Sites:     kvInt(kv, "SITES", 5),
-			DryRun:    kvBool(kv, "DRY_RUN", false),
+			// A written section without the key runs the burn-in too.
+			DryRun:    kvBool(kv, "DRY_RUN", true),
 			AllowIPs:  csvKV(kv, "ALLOW_IPS"),
 			AllowNets: csvKV(kv, "ALLOW_NETS"),
 			// The proxy list is the default even for a section the operator

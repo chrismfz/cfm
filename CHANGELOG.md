@@ -18,7 +18,10 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
-- **WordPress brute force is banned (`login_bruteforce`).** Until now nothing
+- **WordPress brute force can be banned (`login_bruteforce`), in a dry run
+  first.** It ships `DRY_RUN = 1`: every would-be ban is logged
+  (`cfm.detectors.log`, the alert log with `mode=dryrun`) and nothing is
+  banned or reported until `DRY_RUN = 0` in `[login_bruteforce]`. Until now nothing
   stopped it: of the 314 addresses the shadow `login_spray` signal flagged in
   one day on seven nodes, 11 were blocked by anything else. A client address is
   banned for 3 days, and reported to cfm-web, after either of these within an
@@ -61,7 +64,7 @@ back-filled here — see the git/PR history for that period.
   `EDGE_BAN_MODE = enforce`). Every node runs it
   with the upgrade, without a `detectors.conf` change: the section and its
   leniency are built in until the operator writes their own
-  `[login_bruteforce]`. `DRY_RUN = 1` there previews it. Only WordPress logins
+  `[login_bruteforce]`. Only WordPress logins
   are read today. Each ban is a notifier event: route
   `[detector "login_bruteforce"]` in `notify.conf` if mail is too much.
 

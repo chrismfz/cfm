@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"cfm/internal/detectors/loginbf"
 	"cfm/internal/edgeban"
 )
 
@@ -131,4 +132,30 @@ func TestLoginBruteforceWrittenSectionKeepsTheProxyASNs(t *testing.T) {
 	if loginBruteforceDefaults()["ALLOW_ASNS"] != loginBruteforceProxyASNs {
 		t.Fatal("the built-in section and the code default differ")
 	}
+}
+
+func TestLoginBruteforceShipsAsADryRun(t *testing.T) {
+	f, ok := getFactory(loginBruteforceType)
+	if !ok {
+		t.Fatal("login_bruteforce not registered")
+	}
+	for name, kv := range map[string]KV{
+		"built-in":                loginBruteforceDefaults(),
+		"written without DRY_RUN": {"SITE_FAILS": "5"},
+	} {
+		det, err := f(loginBruteforceType, kv, KV{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := det.(*loginbf.Detector)
+		if !d.DryRun() {
+			t.Errorf("%s: armed, want the burn-in dry run", name)
+		}
+		_ = d.Shutdown()
+	}
+	det, _ := f(loginBruteforceType, KV{"DRY_RUN": "0"}, KV{})
+	if det.(*loginbf.Detector).DryRun() {
+		t.Error("DRY_RUN = 0 still a dry run")
+	}
+	_ = det.(*loginbf.Detector).Shutdown()
 }

@@ -299,7 +299,7 @@ Typical defaults below are representative from the shipped template and should b
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
 | `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=180s`, `MIN_SUBNETS=30`, `MIN_SOLVES=15`, **alert-only** |
 | `challenge_cookie_discard` | clients that re-solve the challenge while still holding valid clearance | `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `MAX_TRACKED_IPS`, allowlists, `BLOCK` | `EVERY=30s`, `WINDOW=10m`, `MIN_SOLVES=8`, **alert-only unless `BLOCK` is set** |
-| `login_bruteforce` | login brute force from the web detector's login column: one site, or a spray over many sites | `SITE_FAILS`, `SITES`, `WINDOW`, `BLOCK`, allowlists; `[login_bruteforce.leniency]` | `WINDOW=1h`, `SITE_FAILS=5`, `SITES=5`, `BLOCK=3d`; GR/CY `10m`, not reported. **Built in**: a config without the section runs these |
+| `login_bruteforce` | login brute force from the web detector's login column: one site, or a spray over many sites | `SITE_FAILS`, `SITES`, `WINDOW`, `BLOCK`, allowlists; `[login_bruteforce.leniency]` | `WINDOW=1h`, `SITE_FAILS=5`, `SITES=5`, `BLOCK=3d`, **`DRY_RUN=1`** (burn-in); GR/CY `10m`, not reported. **Built in**: a config without the section runs these |
 
 ### `challenge_solver_farm` — why it exists
 
@@ -588,7 +588,12 @@ Known gaps, where a legitimate client can still be banned:
 - company SASE gateways (Zscaler, Netskope) put Greek staff on foreign
   addresses outside the leniency.
 
-The ban is the section sink's: `BLOCK = 3d`, reported to cfm-web, and
+**It ships as a dry run** (`DRY_RUN = 1`, also for a written section that
+leaves the key out): each would-be ban is an alert with `mode=dryrun` in
+`cfm.detectors.log` and the alert log, and nothing is banned or reported.
+`DRY_RUN = 0` arms it.
+
+Armed, the ban is the section sink's: `BLOCK = 3d`, reported to cfm-web, and
 recorded in the edge ban store for a client behind Cloudflare, which never
 meets the nft drop (enforced there once `[webdetector] EDGE_BAN_MODE =
 enforce`; until then such a client keeps failing, and `BLOCK_COOLDOWN = 6h`
