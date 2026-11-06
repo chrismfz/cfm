@@ -305,12 +305,21 @@ func (l *loginLedger) observe(rec LogRec, host, tag, outcome string) {
 		now = wall // a skewed edge clock must not move a window ahead
 	}
 	client, network := loginKeys(rec.IP)
-	site := authHash(loginSiteKey(host))
+	siteKey := loginSiteKey(host)
+	site := authHash(siteKey)
 	var rows []HistoryEvent
+	owner := false
 	l.mu.Lock()
 	switch {
 	case outcome == "fail":
 		rows = l.failLocked(rec.IP, client, network, site, tag, now)
+		// The same owner rule as L4 (okLocked): the client already succeeded
+		// on this site at least as often as it failed there.
+		if s := l.ips[client]; s != nil {
+			if st := s.site(site); st != nil {
+				owner = st.n > 0 && st.ok >= st.n
+			}
+		}
 	default:
 		rows = l.okLocked(rec.IP, client, network, host, site, tag, now)
 	}
@@ -321,6 +330,9 @@ func (l *loginLedger) observe(rec LogRec, host, tag, outcome string) {
 			l.emit(r)
 		}
 	}
+	publishLoginEvent(LoginEvent{
+		When: time.Unix(now, 0), IP: rec.IP, Host: host, Site: siteKey, Tag: tag, OK: outcome == "ok", Owner: owner,
+	})
 }
 
 // budgetLocked lets at most loginRowsPerMin rows of a type through per

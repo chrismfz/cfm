@@ -42,7 +42,9 @@ info/warning/critical), `ip`, `country` (display, e.g. "Athens, Greece"),
 `country_iso` (from mmdb, no DNS), `asn` (text) and `asn_num`, `ptr`, `vhost`
 (the detector's `vhost`/`host` extra when it names a domain, else the first
 sample line's `host=` or ModSecurity `[hostname "…"]`), `reason`, `mode`
-(ttl/permanent), `ttl_sec`, `count`, `section`, `delivery`, `event_id`, up to 5
+(the extra `mode`, else the detector sink's `block_mode`: ttl / permanent /
+dryrun; before 2026-11-06 only `mode` was read, so sink rows had none),
+`ttl_sec`, `count`, `section`, `delivery`, `event_id`, up to 5
 sample lines (2 KB each) and the detector's extra fields (JSON).
 
 ## Storage

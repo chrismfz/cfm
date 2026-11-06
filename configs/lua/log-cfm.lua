@@ -272,14 +272,23 @@ end
 --        "AUTH_": WP_LOGIN, JOOMLA_ADMIN, DRUPAL_LOGIN, MAGENTO_ADMIN, ...
 --   li   1 = a wordpress_logged_in_* cookie with a real value (WordPress
 --        sets it on a completed login only, after a 2FA step too; a
---        logout's expired one carries a blank value). Only the edge sees
---        the value, so only this bit of the verdict is taken here.
+--        logout's expired one carries a blank value). 2 = a real value was
+--        set and then cleared in the same answer: a 2FA plugin's password
+--        step (the password was right). A cleared cookie with no real value
+--        before it is neither: wp-login.php?reauth=1 clears it on every
+--        failure, so reading that as 2FA hid every failure from the ban.
+--        Only the edge sees the value, so only this bit of the verdict is
+--        taken here.
+--   tc   1 when the answer set wordpress_test_cookie (wp-login.php does on
+--        every request), over all Set-Cookie headers, the names cap aside.
 --   x    1 when the Location leaves the request's scheme or host (a
 --        canonical redirect, any status): the host itself is never sent.
 --   a    the query's `action`, when present (wp-login.php's lostpassword,
 --        register, ...), read as PHP reads it. It is the QUERY's only: PHP's
 --        $_REQUEST lets a body field override it, so the daemon never lets
 --        `a` hide an li=1, and counts only wp-login's own actions as `na`.
+--        Sent exactly as PHP compares it, or as "~" (an action PHP does not
+--        know: it runs the login).
 --        It comes before `c`, so a cut field loses cookie names, not it.
 local AUTH_MAX_COOKIES = 8
 local AUTH_MAX_NAME    = 48
@@ -329,7 +338,8 @@ local function auth_field(var)
   tag = tag:gsub("^AUTH_", "")
 
   local hdr = ngx.header
-  local names, li_last = {}, {}
+  local names, li_last, li_real = {}, {}, {}
+  local test_cookie = false
   for _, sc in ipairs(as_list(hdr and hdr["Set-Cookie"])) do
     if type(sc) == "string" then
       local name, value = sc:match("^%s*([^=;%s]+)=([^;]*)")
@@ -342,13 +352,23 @@ local function auth_field(var)
         -- The LAST Set-Cookie of a name is what the browser keeps: a 2FA
         -- plugin (Two Factor, WP 2FA) lets wp_signon set the real cookie,
         -- then clears it in the same answer and shows its second-factor form.
-        if name:sub(1, #WP_LI) == WP_LI then li_last[name] = #value >= 20 end
+        -- Over every Set-Cookie, past the names cap: the daemon counts a
+        -- failure only on an answer wp-login.php wrote, which carries it.
+        if name == "wordpress_test_cookie" then test_cookie = true end
+        if name:sub(1, #WP_LI) == WP_LI then
+          li_last[name] = #value >= 20
+          if #value >= 20 then li_real[name] = true end
+        end
       end
     end
   end
-  local logged_in = false
-  for _, real in pairs(li_last) do
-    if real then logged_in = true end
+  local logged_in, set_cleared = false, false
+  for name, real in pairs(li_last) do
+    if real then
+      logged_in = true
+    elseif li_real[name] then
+      set_cleared = true
+    end
   end
 
   -- The ORIGIN's Location ($upstream_http_location, what the file log's
@@ -412,11 +432,19 @@ local function auth_field(var)
     a = args["action"]
     if type(a) == "table" then a = a[#a] end
   end
-  local v = tag .. ";li=" .. (logged_in and "1" or "0")
+  local v = tag .. ";li=" .. (logged_in and "1" or (set_cleared and "2" or "0"))
   if type(a) == "string" and a ~= "" then
-    v = v .. ";a=" .. a:lower():gsub("[^%w_%-]", "_"):sub(1, 24)
+    -- Exactly as PHP compares it (in_array strict, case-sensitive): every
+    -- wp-login.php action is lowercase letters, digits and "_". Any other
+    -- value (LostPassword, "confirm admin email", one past 24 bytes) is an
+    -- unknown action to PHP, which runs the login, so it is sent as "~",
+    -- which no daemon list holds. Lowercasing it here once made the daemon
+    -- read such a login as the lostpassword action and never count it.
+    if #a > 24 or a:find("[^a-z0-9_]") then a = "~" end
+    v = v .. ";a=" .. a
   end
   if cross then v = v .. ";x=1" end
+  if test_cookie then v = v .. ";tc=1" end
   return v .. ";l=" .. loc .. ";c=" .. table.concat(names, ",")
 end
 _M._auth_field = auth_field -- exposed for scripts/tests/cfm_log_auth_test.lua

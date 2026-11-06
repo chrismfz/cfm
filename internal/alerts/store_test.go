@@ -240,6 +240,15 @@ func TestNormalize(t *testing.T) {
 	if !strings.HasSuffix(r.Reason, "α") {
 		t.Fatal("clip split a UTF-8 sequence")
 	}
+	// The detector sink's block_mode is the mode (a login_bruteforce dry run
+	// is grouped by it), and its host the vhost.
+	r = normalize(Record{Kind: "WEB/LOGIN_BRUTEFORCE", Extra: map[string]string{"block_mode": "dryrun", "host": "www.a.gr"}})
+	if r.Mode != "dryrun" || r.Vhost != "www.a.gr" {
+		t.Fatalf("mode %q vhost %q", r.Mode, r.Vhost)
+	}
+	if r = normalize(Record{Extra: map[string]string{"mode": "ttl", "block_mode": "dryrun"}}); r.Mode != "ttl" {
+		t.Fatalf("an explicit mode lost to block_mode: %q", r.Mode)
+	}
 }
 
 func TestOverview(t *testing.T) {

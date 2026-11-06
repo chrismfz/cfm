@@ -299,6 +299,7 @@ Typical defaults below are representative from the shipped template and should b
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
 | `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=180s`, `MIN_SUBNETS=30`, `MIN_SOLVES=15`, **alert-only** |
 | `challenge_cookie_discard` | clients that re-solve the challenge while still holding valid clearance | `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `MAX_TRACKED_IPS`, allowlists, `BLOCK` | `EVERY=30s`, `WINDOW=10m`, `MIN_SOLVES=8`, **alert-only unless `BLOCK` is set** |
+| `login_bruteforce` | login brute force from the web detector's login column: one site, or a spray over many sites | `SITE_FAILS`, `SITES`, `WINDOW`, `BLOCK`, allowlists; `[login_bruteforce.leniency]` | `WINDOW=1h`, `SITE_FAILS=5`, `SITES=5`, `BLOCK=3d`, **`DRY_RUN=1`** (burn-in); GR/CY `10m`, not reported. **Built in**: a config without the section runs these |
 
 ### `challenge_solver_farm` — why it exists
 
@@ -490,6 +491,151 @@ stripped for scoped (cPanel) callers like `ips`, as defence in depth
 **evidence only** — it is folded from the capped evidence records after every
 decision, and no track, threshold or mark reads it. `challenge_cookie_discard`
 does not carry it yet.
+
+### `login_bruteforce` — why it exists
+
+Until 2026-11 nothing banned a WordPress brute forcer: of the 314 addresses
+the shadow `login_spray` signal flagged in one day on seven nodes, 11 were
+blocked by anything else. The edge marks every login POST (the login column,
+`docs/webdetector-signals-v2.md` §3) and the web detector reads the origin's
+answer as a failure or a success. The login ledger publishes every failure,
+and this detector bans per client address, over `WINDOW` (1 h):
+
+- `SITE_FAILS` (5) failed logins on ONE site (a registrable domain: `www.`,
+  `staging.` and the bare name are one site);
+- failed logins on `SITES` (5) different sites, any number on each. A proxy
+  pool sprays one or two tries per site per address, which no per-site count
+  sees: on virgo, 1-6 Nov 2026, 1 363 site-hours had 10+ failing addresses
+  with fewer than 5 failures each (22 532 failures on 147 sites).
+
+A client is an IPv4 address or an IPv6 /64 (one subscriber, who can rotate
+addresses inside it); the ban is on the /64's address with the most
+failures in the window (in an office /64, a colleague's one typo must not
+take the ban for another's spray; an attacker rotating inside its /64 gets
+one address banned per round, a known gap). A /64 whose worst address has
+a single failure among several (a VPS provider's shared /64) is a dry run.
+Never counted or banned:
+
+- a failure on a site where the client failed and already succeeded at
+  least as often (the ledger's per-site record: a site's own tool). A
+  success alone is not ownership. The record is the ledger's fixed 24 h
+  window, in memory: a restart, a `detectors.conf` save or a tailed log's
+  rotation empties it, and a tool that fails first after that counts until
+  its successes catch up. Successes are per client and site, not per
+  account: on a site with open registration a client that logs into its own
+  account once per failed admin guess stays the "owner" (a known gap);
+- a 2FA password step (`mfa`: the edge's `li=2`, a real login cookie set
+  and cleared in one answer, `docs/webdetector-signals-v2.md` §3). A
+  cleared cookie alone is a failure: `wp-login.php?reauth=1` clears it on
+  every failed login. A login hidden behind `?action=lostpassword` (the body's
+  `action=login` wins in PHP) that fails with 200 is a failure too, and so
+  is a lostpassword / register form shown again (an unknown user); a
+  password reset that went through (200, its `wp-resetpass-` cookie
+  cleared) is not. On a site whose plugin answers a failed login with a
+  redirect, such a hidden login still reads `na` (a known gap);
+- an answer WordPress did not write: a failure needs `wordpress_test_cookie`
+  in the answer, which wp-login.php sets on every request before any action
+  or plugin runs. A server-level captcha or bot page, a suspended-account
+  page or a site broken before wp-login.php ran is "?" (on speedhost,
+  2026-11-06, 3 044 of 3 462 "failures" were such cookie-less 200s);
+- a protected post's password (`?action=postpass`, its `wp-postpass_`
+  cookie set);
+- the failures just before a success: a success takes back up to 3 of the
+  same address's latest failures on that site within 15 minutes. Two Factor
+  0.8+ sends no cookie at all on the password step, so its second-factor
+  form reads as a failure, and a mistyped code is another; the code that
+  works is the success. A typo then a success is no brute force either. A
+  failure counts only once it is 2 minutes old, so that success arrives
+  first: five client sites opened in parallel tabs, all on Two Factor, are
+  not a spray;
+- bypass clients (crawlers, CDN prefixes), `[global] IGNORE_IPS`, private,
+  loopback, link-local and CGNAT addresses, `ALLOW_IPS` / `ALLOW_NETS`;
+- Cloudflare's own proxy ranges (`trusted_proxies.conf`; the edge sees one
+  only when a Worker's subrequest names itself). That exempts every Worker:
+  a brute force run from Workers is a known gap, since banning one bans
+  them all;
+- `ALLOW_ASNS`: reverse proxies and WAF CDNs CFM does not trust to name the
+  client (Sucuri, Imperva, Fastly, Akamai, StackPath, Bunny). A site behind
+  one reads as the proxy's address for all its visitors, and a 3 day ban
+  reported to the fleet would take every site behind it down. It is the
+  default for a written section that leaves the key out. Cloudflare's
+  ASN is not listed: WARP and the Workers' egress share it, and an attacker
+  can use both. Apple Private Relay egress shares Fastly's and Akamai's, a
+  known gap.
+
+An address with no geo record (no GeoLite/IPLocate database yet, `[global]
+ENRICH = 0`) only logs "would block": the GR/CY leniency is decided on the
+country. `[webdetector] LOGIN_SIGNALS = 0` stops the events with the shadow
+rows. After an alert, only later failures count toward the next one: a
+lenient client that keeps failing is banned again. The leniency matches the
+country OR the Greek and Cypriot eyeball ASNs (OTE, Vodafone, Wind, Nova,
+Cyta, GRNET), for a range the geo database places abroad.
+
+Known gaps, where a legitimate client can still be banned:
+
+- a CDN or reverse proxy whose ASN is a cloud's (CloudFront on AWS, Azure
+  Front Door, Google's load balancer, Gcore, CDN77): its address stands for
+  every visitor of the sites behind it, and an ASN exemption would exempt
+  everyone renting a server there. Their published ranges would need a
+  generated list like the bypass list;
+- the owner record is the ledger's fixed 24 h window, in memory (above): a
+  login monitor whose stored password went stale is banned soon after it
+  empties;
+- a lostpassword request the site cannot mail answers 200 and counts;
+- the other way round, a site whose wp-login.php answers carry no
+  `wordpress_test_cookie` (a renamed `TEST_COOKIE`; 4yourhealth.gr's real
+  successes carry none) never counts a failure;
+- a captcha that fails a real user (reCAPTCHA v3 on a VPN, Turnstile blocked
+  by an extension) or Wordfence's verify-by-email answers 200 inside
+  WordPress with the right password;
+- company SASE gateways (Zscaler, Netskope) put Greek staff on foreign
+  addresses outside the leniency.
+
+**It ships as a dry run** (`DRY_RUN = 1`, also for a written section that
+leaves the key out): each would-be ban is an alert with `mode=dryrun` in
+`cfm.detectors.log` and the alert log (with `host`, `rule`, `site`,
+`leniency`, and `geo=unknown` / `ipv6_ambiguous` when they apply), at most
+once per client per `WINDOW` (a client that is never banned keeps
+failing), and nothing is banned or reported.
+`DRY_RUN = 0` arms it.
+
+Armed, the ban is the section sink's: `BLOCK = 3d`, reported to cfm-web, and
+recorded in the edge ban store for a client behind Cloudflare, which never
+meets the nft drop (enforced there once `[webdetector] EDGE_BAN_MODE =
+enforce`; until then such a client keeps failing, and `BLOCK_COOLDOWN = 6h`
+keeps it from being mailed and reported again every few minutes). The
+`[login_bruteforce.leniency]` tier gives a Greek or Cypriot address a 10
+minute ban reported nowhere: customers who lock themselves out use
+unblock.myip.gr. Measured on virgo (Apache logs, 1-6 Nov): no Greek address
+among the 391 that failed 5-19 times in an hour on one site.
+
+**Built in.** A node whose `detectors.conf` has no `[login_bruteforce]` runs
+the stock section and its leniency (`applyBuiltinLoginBruteforce`), so the
+rule reached every node with the upgrade. A section the operator writes is
+taken as written, one without `BLOCK` still bans for 3 days, and one
+without a `.leniency`, or with one that has no `MATCH_COUNTRY` /
+`MATCH_ASN`, still gets the GR/CY one: cfm-admin's "Add" writes the section
+without it, and its "Add leniency companion" writes it empty. Turn it off
+with `ENABLED = 0` in the `.leniency`. The config-drift report skips the
+type, written sections included. A node with no `detectors.conf` at all (or an unreadable one at
+start-up) runs only the built-in control-plane protection, not this.
+
+Only WordPress logins carry an outcome today. A Joomla
+(`/administrator/index.php`), Drupal or Laravel login joins when
+`authOutcome` learns to read its answer: on virgo Joomla had ~1 300 login
+POSTs in those six days against ~137 000 for WordPress.
+
+Each ban is a notifier event; with hundreds a day per node, route
+`[detector "login_bruteforce"]` in `notify.conf` (e.g. `notify = 0`) if
+mail is too much. That silences the mail only. Every alert still lands in:
+
+- `cfm.detectors.log` (`Type: WEB/LOGIN_BRUTEFORCE, ip …`, the outcome
+  `Blocked:` line, up to 10 sample failures with their host);
+- the alert log (`/var/lib/cfm/alerts.db`, `docs/alerts.md`), `muted`
+  included: MCP `alerts kind=WEB/LOGIN_BRUTEFORCE` for the rows and
+  `alerts_summary kind=WEB/LOGIN_BRUTEFORCE group_by=country,asn` (or
+  `mode`, `delivery`, `hour`) with `node="all"` for the fleet picture.
+  A dry run (no geo record) reads `mode=dryrun` there.
 
 ### `challenge_cookie_discard` — why it exists
 

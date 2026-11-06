@@ -78,8 +78,10 @@ check(af(req("POST", "/wp-login.php", 302, { ["Set-Cookie"] = "wordpress_logged_
 check(af(req("POST", "/wp-login.php?action=lostpassword", 302, { ["Set-Cookie"] = LI, Location = "/wp-admin/" }))
   == "WP_LOGIN;li=1;a=lostpassword;l=/wp-admin/;c=wordpress_logged_in_0123abcd",
   "a query action is reported beside li, never instead of it (a body action=login overrides it in PHP)")
-check(af(req("POST", "/wp-login.php?action=re%09g%3Bi%3D1", 200, {})) == "WP_LOGIN;li=0;a=re_g_i_1;l=;c=",
-  "the action is decoded, then reduced to a safe charset")
+check(af(req("POST", "/wp-login.php?action=LostPassword", 200, {})) == "WP_LOGIN;li=0;a=~;l=;c=",
+  "an action PHP does not know (case differs) is sent as ~, never as lostpassword")
+check(af(req("POST", "/wp-login.php?action=re%09g%3Bi%3D1", 200, {})) == "WP_LOGIN;li=0;a=~;l=;c=",
+  "an action outside PHP's charset (a tab, ;, =) is sent as ~")
 check(af(req("POST", "/wp-login.php?action=log%69n", 200, {})) == "WP_LOGIN;li=0;a=login;l=;c=",
   "an encoded action is decoded as PHP does (log%69n is login)")
 check(af(req("POST", "/wp-login.php?action=lostpassword&action=login", 200, {})) == "WP_LOGIN;li=0;a=login;l=;c=",
@@ -88,10 +90,22 @@ check(af(req("POST", "/wp-login.php?ACTION=lostpassword", 200, {})) == "WP_LOGIN
   "ACTION is another name to PHP: no action")
 check(af(req("POST", "/wp-login.php?action", 200, {})) == "WP_LOGIN;li=0;l=;c=", "an action with no value")
 check(af(req("POST", "/wp-login.php", 200, { ["Set-Cookie"] = { LI, "wordpress_logged_in_0123abcd=+; expires=Thu, 01-Jan-1970 00:00:01 GMT; path=/" } }))
+  :find(";li=2;", 1, true),
+  "a 2FA plugin clears the cookie wp_signon set in the same answer: set then cleared (li=2)")
+check(af(req("POST", "/wp-login.php?reauth=1", 200, { ["Set-Cookie"] = { "wordpress_logged_in_0123abcd=+; expires=Thu, 01-Jan-1970 00:00:01 GMT; path=/" } }))
   :find(";li=0;", 1, true),
-  "a 2FA plugin clears the cookie wp_signon set in the same answer: the last one decides (li=0)")
+  "reauth=1 clears the cookie on a FAILED login: no real value before it, so li=0 (a failure), not 2FA")
 check(af(req("POST", "/wp-login.php", 200, { ["Set-Cookie"] = { "wordpress_logged_in_0123abcd=+", LI } }))
   :find(";li=1;", 1, true), "cleared then set: li=1")
+do
+  local many = {}
+  for i = 1, 9 do many[#many + 1] = "c" .. i .. "=v" end
+  many[#many + 1] = "wordpress_test_cookie=WP%20Cookie%20check; path=/"
+  local v = af(req("POST", "/wp-login.php", 200, { ["Set-Cookie"] = many }))
+  check(v:find(";tc=1;", 1, true) and not v:find("wordpress_test_cookie", 1, true),
+    "the test cookie past the names cap still sets tc=1")
+end
+check(not af(req("POST", "/wp-login.php", 200, {})):find("tc=", 1, true), "no test cookie, no tc")
 check(af(req("POST", "/wp-login.php", 302, { Location = "https:\\\\evil.example/a" })) == "WP_LOGIN;li=0;x=1;l=/a;c=",
   "a backslash host is dropped too")
 check(af(req("POST", "/wp-login.php", 302, { Location = "\\\\evil.example/a" })) == "WP_LOGIN;li=0;x=1;l=/a;c=",

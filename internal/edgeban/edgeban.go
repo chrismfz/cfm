@@ -100,6 +100,11 @@ func SetTrustedProxies(nets []*net.IPNet) {
 // that expires drops out of List with no write).
 func Version() uint64 { return version.Load() }
 
+// IsTrustedProxy reports whether ip is in the trusted proxies' own ranges
+// (SetTrustedProxies): an address the edge only sees when the proxy named
+// itself, which stands for every visitor who arrives the same way.
+func IsTrustedProxy(ip net.IP) bool { return isTrustedProxy(ip) }
+
 func isTrustedProxy(ip net.IP) bool {
 	p := proxies.Load()
 	if p == nil {
@@ -555,15 +560,22 @@ func (s *Store) save() {
 
 // WebSection reports whether a detectors.conf section's bans are web
 // bans the edge must enforce too (its WAF, web detector, challenge, ModSecurity,
-// CFM endpoint and cPanel sections). Mail / SSH / FTP / database bans stay
+// CFM endpoint, cPanel and login brute-force sections). Mail / SSH / FTP / database bans stay
 // nft-only: a proxy relays only HTTP.
 func WebSection(section string) bool {
 	s := strings.ToLower(strings.TrimSpace(section))
 	switch s {
-	case "waf_security", "webdetector", "modsec", "cfm_endpoints", "cpanel":
+	case "waf_security", "webdetector", "modsec", "cfm_endpoints", "cpanel", "login_bruteforce":
 		return true
 	}
-	return strings.HasPrefix(s, "challenge_")
+	if strings.HasPrefix(s, "challenge_") {
+		return true
+	}
+	// An instance of the type ("login_bruteforce:strict", or with a space).
+	if typ, _, cut := strings.Cut(strings.NewReplacer("\t", " ", ":", " ").Replace(s), " "); cut {
+		return typ == "login_bruteforce"
+	}
+	return false
 }
 
 // Ban records a ban in the Default store (no-op without one).

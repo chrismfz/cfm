@@ -39,6 +39,10 @@ func normalize(r Record) Record {
 	if r.Mode == "" {
 		r.Mode = strings.TrimSpace(r.Extra["mode"])
 	}
+	if r.Mode == "" {
+		// The detector sink names it block_mode (ttl, permanent, dryrun).
+		r.Mode = strings.TrimSpace(r.Extra["block_mode"])
+	}
 	r.Mode = clip(r.Mode, 32)
 	if r.Vhost == "" {
 		r.Vhost = vhostOf(r.Extra, r.Samples)

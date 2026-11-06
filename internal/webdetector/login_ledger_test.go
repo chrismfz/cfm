@@ -501,13 +501,13 @@ func TestLoginLedgerWiredFromIngest(t *testing.T) {
 	}
 	// A bypass client (a crawler, a CDN) is not counted.
 	for i := 0; i < 25; i++ {
-		feed(line(i, "2", "WP_LOGIN;li=0;l=/wp-login.php;c="))
+		feed(line(i, "2", "WP_LOGIN;li=0;l=/wp-login.php;c=wordpress_test_cookie"))
 	}
 	if len(sink.rows) != 0 {
 		t.Fatalf("a bypass client was counted: %+v", sink.rows)
 	}
 	for i := 0; i < 25; i++ {
-		feed(line(i, "0", "WP_LOGIN;li=0;l=/wp-login.php;c="))
+		feed(line(i, "0", "WP_LOGIN;li=0;l=/wp-login.php;c=wordpress_test_cookie"))
 	}
 	if n := len(sink.of("login_spray")); n != 1 {
 		t.Fatalf("ingest → ledger: %d rows (%+v)", n, sink.rows)
@@ -624,9 +624,9 @@ func TestLoginLedgerResetRequestThroughIngest(t *testing.T) {
 		e.ingest(rec, line)
 	}
 	for i := 0; i < 12; i++ {
-		feed(i, "WP_LOGIN;li=0;l=/wp-login.php;c=")
+		feed(i, "WP_LOGIN;li=0;l=/wp-login.php;c=wordpress_test_cookie")
 	}
-	feed(20, "WP_LOGIN;li=0;a=lostpassword;l=/wp-login.php;c=")
+	feed(20, "WP_LOGIN;li=0;a=lostpassword;l=/wp-login.php;c=wordpress_test_cookie")
 	feed(30, "WP_LOGIN;li=1;l=/wp-admin/;c=wordpress_logged_in_x")
 	if n := len(sink.of("login_dirty_success")); n != 1 {
 		t.Fatalf("a reset request in between excuses nothing: %d rows", n)
@@ -673,5 +673,57 @@ func TestLoginLedgerStuffingHitBeforeFlagStillReported(t *testing.T) {
 	l.observe(loginRec("203.0.113.9", t0+8000), "victim.gr", "WP_LOGIN", "ok")
 	if len(sink.of("login_dirty_success")) != 2 {
 		t.Fatal("hourly re-report of a flagged client's use")
+	}
+}
+
+func TestLoginLedgerPublishesLoginEvents(t *testing.T) {
+	var got []LoginEvent
+	oks := 0
+	unsub := SubscribeLoginEvents(func(ev LoginEvent) {
+		if ev.OK {
+			oks++
+			return
+		}
+		got = append(got, ev)
+	})
+	defer unsub()
+	l := newLoginLedger((&rowSink{}).emit)
+
+	// A site's own tool: successes first, then a failure there is the owner's.
+	for i := 0; i < 3; i++ {
+		l.observe(loginRec("94.66.129.119", t0+int64(i)), "www.mygreecetours.org", "WP_LOGIN", "ok")
+	}
+	l.observe(loginRec("94.66.129.119", t0+10), "mygreecetours.org", "WP_LOGIN", "fail")
+	// A stranger's failure, and a success (never published).
+	l.observe(loginRec("203.0.113.9", t0+20), "staging.victim.gr", "WP_LOGIN", "fail")
+	l.observe(loginRec("203.0.113.9", t0+30), "victim.gr", "WP_LOGIN", "ok")
+	// A success alone is not ownership: the next failure there still counts.
+	l.observe(loginRec("203.0.113.10", t0+40), "a.gr", "WP_LOGIN", "fail")
+	l.observe(loginRec("203.0.113.10", t0+41), "a.gr", "WP_LOGIN", "fail")
+	l.observe(loginRec("203.0.113.10", t0+42), "a.gr", "WP_LOGIN", "ok")
+	l.observe(loginRec("203.0.113.10", t0+43), "a.gr", "WP_LOGIN", "fail")
+
+	if len(got) != 5 || oks != 5 {
+		t.Fatalf("published %d failures and %d successes, want 5 and 5: %+v", len(got), oks, got)
+	}
+	if !got[0].Owner || got[0].Site != "mygreecetours.org" || got[0].IP != "94.66.129.119" {
+		t.Fatalf("owner tool's failure: %+v", got[0])
+	}
+	if got[1].Owner || got[1].Site != "victim.gr" || got[1].Host != "staging.victim.gr" || got[1].Tag != "WP_LOGIN" {
+		t.Fatalf("stranger's failure: %+v", got[1])
+	}
+	if got[4].Owner {
+		t.Fatalf("1 success after 2 failures made the client the owner: %+v", got[4])
+	}
+	if got[1].When.Unix() != t0+20 {
+		t.Fatalf("event time: %v", got[1].When)
+	}
+
+	// The kill switch stops the events with the rows.
+	ConfigureLoginSignals(false)
+	defer ConfigureLoginSignals(true)
+	l.observe(loginRec("203.0.113.11", t0+50), "a.gr", "WP_LOGIN", "fail")
+	if len(got) != 5 {
+		t.Fatal("LOGIN_SIGNALS = 0 still published")
 	}
 }

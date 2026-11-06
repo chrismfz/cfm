@@ -17,7 +17,57 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **WordPress brute force can be banned (`login_bruteforce`), in a dry run
+  first.** It ships `DRY_RUN = 1`: every would-be ban is logged
+  (`cfm.detectors.log`, the alert log with `mode=dryrun`, with the site, the
+  rule and whether GR/CY leniency applied), once per client per hour, and
+  nothing is banned or reported until `DRY_RUN = 0` in `[login_bruteforce]`. Until now nothing
+  stopped it: of the 314 addresses the shadow `login_spray` signal flagged in
+  one day on seven nodes, 11 were blocked by anything else. A client address is
+  banned for 3 days, and reported to cfm-web, after either of these within an
+  hour:
+  - 5 failed logins on one site;
+  - failed logins on 5 different sites, one each is enough: a proxy pool
+    tries once or twice per site per address.
+
+  Greek and Cypriot addresses, and the Greek / Cypriot ISPs' networks
+  (OTE, Vodafone, Wind, Nova, Cyta, GRNET) wherever the geo database places
+  them, get a 10 minute ban, reported nowhere (customers know
+  unblock.myip.gr). Never banned:
+  - a site's own tool, for its failures there (it already succeeded on the
+    site at least as often as it failed);
+  - a 2FA login: the password step (the origin sets the login cookie and
+    clears it in the same answer) no longer reads as a failure (Two Factor
+    0.8+, which sends no cookie on that step, is covered by the success that
+    follows, below). A login hidden behind
+    `?action=lostpassword`, and one with `?reauth=1`, still counts when it
+    fails;
+  - a password reset that went through, or a protected post's password;
+  - an answer WordPress did not write (no `wordpress_test_cookie`): a
+    server-level captcha or bot page answered nearly every login on
+    speedhost, real users' too;
+  - a failure the next success takes back: a success takes back up to 3 of
+    the same address's failures on that site within 15 minutes, and a
+    failure counts only once it is 2 minutes old, so 2FA users (a mistyped
+    code, five client sites opened at once) are not banned;
+  - an ambiguous shared IPv6 /64 (several addresses, one failure each): dry
+    run;
+  - a reverse proxy or WAF CDN address (`ALLOW_ASNS`: Sucuri, Imperva,
+    Fastly, Akamai, StackPath, Bunny; and Cloudflare's own proxy ranges),
+    which stands for every visitor of the sites behind it;
+  - private, loopback and CGNAT addresses.
+
+  An address with no geo record only logs "would block", since the GR/CY
+  leniency needs its country. IPv6 counts per /64 and bans the /64's address
+  with the most failures. The ban is also recorded
+  for the edge, for a client behind Cloudflare (enforced there with
+  `EDGE_BAN_MODE = enforce`). Every node runs it
+  with the upgrade, without a `detectors.conf` change: the section and its
+  leniency are built in until the operator writes their own
+  `[login_bruteforce]`. Only WordPress logins
+  are read today. Each ban is a notifier event: route
+  `[detector "login_bruteforce"]` in `notify.conf` if mail is too much.
 
 ## 2026.11.05
 

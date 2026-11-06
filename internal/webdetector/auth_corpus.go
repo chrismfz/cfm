@@ -58,13 +58,15 @@ const (
 type authField struct {
 	Tag      string // WP_LOGIN, JOOMLA_ADMIN, ... (auth_endpoint_tag minus AUTH_)
 	LoggedIn bool   // a wordpress_logged_in_* cookie with a real value
+	MFA      bool   // li=2: a real one set and cleared in the same answer (a 2FA password step)
+	TC       bool   // tc=1: the answer set wordpress_test_cookie (over all Set-Cookie headers)
 	Loc      string // the Location path, query and host dropped at the edge
 	Cookies  []string
 	Action   string // the query's action, when present
 	Cross    bool   // the Location left the request's scheme or host
 }
 
-// parseAuthField reads "<TAG>;li=<0|1>[;a=<action>][;x=1];l=<loc>;c=<a,b>" (keys
+// parseAuthField reads "<TAG>;li=<0|1|2>[;a=<action>][;x=1];l=<loc>;c=<a,b>" (keys
 // in any order). An
 // empty or malformed value is not a login line.
 func parseAuthField(s string) (authField, bool) {
@@ -86,6 +88,7 @@ func parseAuthField(s string) (authField, bool) {
 		case "li":
 			sawLI = true
 			af.LoggedIn = v == "1"
+			af.MFA = v == "2"
 		case "l":
 			af.Loc = v
 		case "c":
@@ -94,6 +97,8 @@ func parseAuthField(s string) (authField, bool) {
 			}
 		case "a":
 			af.Action = v
+		case "tc":
+			af.TC = v == "1"
 		case "x":
 			af.Cross = v == "1"
 		}
@@ -104,8 +109,8 @@ func parseAuthField(s string) (authField, bool) {
 	return af, true
 }
 
-// authOutcome is the verdict on one login line: "ok", "fail", "na" (another
-// wp-login.php action) or "?" (not known). Only an answer from the site's
+// authOutcome is the verdict on one login line: "ok", "fail", "mfa" (a 2FA
+// password step), "na" (another wp-login.php action) or "?" (not known). Only an answer from the site's
 // origin counts: a login POST CFM routed to its challenge server or blocked
 // at the edge says nothing about the password. WordPress is the one CMS
 // whose rule is verified (docs/webdetector-signals-v2.md §2); every other tag
@@ -123,12 +128,31 @@ func authOutcome(rec LogRec, af authField) string {
 		if af.LoggedIn {
 			return "ok"
 		}
+		if af.MFA {
+			// The origin set a real wordpress_logged_in_ cookie and cleared
+			// it in the same answer (the edge's li=2): a 2FA plugin (Two
+			// Factor, WP 2FA) accepted the PASSWORD and shows its
+			// second-factor form. Not a failure: an admin's every 2FA login
+			// read as one, enough for a ban. A cleared cookie with no real
+			// one before it is no such step: wp-login.php?reauth=1 clears it
+			// on every failed login.
+			return "mfa"
+		}
 		if wpNonLoginActions[af.Action] {
 			// A real lostpassword/register POST, or a login hidden behind a
-			// query action (a body action=login overrides it in PHP): both
-			// answer 200 on a failure, so the line is kept apart (na) rather
-			// than counted as a failed login. Any other action value is a
-			// login: wp-login.php runs its login case for an unknown one.
+			// query action: a body action=login overrides the query's in
+			// PHP's $_REQUEST, so ?action=lostpassword with a login body
+			// runs the login. Both answer 200 on a failure (the form again),
+			// and the edge cannot tell them apart, so a 200 is a failure:
+			// otherwise every failure of a brute forcer that adds the query
+			// read as na and was never counted. A lostpassword / register
+			// form shown again is a failed attempt too (an unknown user).
+			// Anything else (the redirect after a reset mail) stays na. Any
+			// other action value is a login: wp-login.php runs its login
+			// case for an unknown one.
+			if rec.Status == 200 && wpAnswered(af) && !wpResetDone(af) && !wpPostpassDone(af) {
+				return "fail"
+			}
 			return "na"
 		}
 		// A failure is the form again (200), or WordPress / a hide-login
@@ -143,11 +167,73 @@ func authOutcome(rec LogRec, af authField) string {
 			// [R] is a 302. It moved the POST before WordPress read it.
 			return "?"
 		}
+		if !wpAnswered(af) {
+			// No wordpress_test_cookie: WordPress did not write this answer
+			// (a server-level captcha or bot page, a suspended-account page,
+			// a site broken before wp-login.php ran). It says nothing about
+			// the password, and counting it banned everyone it answered:
+			// speedhost, 2026-11-06, 3 044 of 3 462 "failures" were 200s
+			// with no cookie at all, on 64+ sites.
+			return "?"
+		}
 		if st == 200 || ((st == 302 || st == 303) && strings.Contains(strings.ToLower(af.Loc), "login")) {
 			return "fail"
 		}
 	}
 	return "?"
+}
+
+// wpAnswered: wp-login.php itself wrote the answer. It sets
+// wordpress_test_cookie on every request before any action or plugin hook
+// runs (the cookie-support check), so every answer it writes carries it,
+// a plugin's redirect from login_init or wp_login_failed included. The
+// origin sets it, not the client. The edge reports it as tc=1 over every
+// Set-Cookie header, so a plugin that sets many cookies first (the names
+// list stops at AUTH_MAX_COOKIES) cannot hide it; an older edge sends only
+// the names. A site with a renamed TEST_COOKIE, or one where it is missing
+// (4yourhealth.gr's successes carry none), never counts a failure.
+func wpAnswered(af authField) bool {
+	if af.TC {
+		return true
+	}
+	for _, c := range af.Cookies {
+		if c == "wordpress_test_cookie" {
+			return true
+		}
+	}
+	return false
+}
+
+// wpPostpassDone: a protected post's password was posted
+// (?action=postpass): WordPress sets wp-postpass_<hash>, and with no usable
+// referer it answers 200 instead of redirecting. A login hidden behind
+// ?action=postpass sets no such cookie.
+func wpPostpassDone(af authField) bool {
+	if af.Action != "postpass" {
+		return false
+	}
+	for _, c := range af.Cookies {
+		if strings.HasPrefix(c, "wp-postpass_") {
+			return true
+		}
+	}
+	return false
+}
+
+// wpResetDone: a password reset that went through. wp-login.php's
+// resetpass / rp answers 200 ("Your password has been reset") and clears
+// its wp-resetpass-<hash> cookie in that answer; a login hidden behind
+// ?action=rp touches no such cookie, so it still reads as a failure.
+func wpResetDone(af authField) bool {
+	if af.Action != "rp" && af.Action != "resetpass" {
+		return false
+	}
+	for _, c := range af.Cookies {
+		if strings.HasPrefix(c, "wp-resetpass-") {
+			return true
+		}
+	}
+	return false
 }
 
 // wpNonLoginActions are wp-login.php's own actions other than login (its
@@ -574,7 +660,7 @@ func (c *authCorpus) snapshot(tag, outcome string, limit int) AuthCorpusSnapshot
 // handleAuthCorpus serves GET /api/v1/webdet/auth-corpus. Admin-only: the
 // corpus is node-wide (example hosts of every tenant). Backs the MCP
 // auth_corpus tool. Query params (optional): tag (e.g. JOOMLA_ADMIN),
-// outcome (ok|fail|na|?), limit (default 100, max 1000).
+// outcome (ok|fail|mfa|na|?), limit (default 100, max 1000).
 func (e *Engine) handleAuthCorpus(w http.ResponseWriter, r *http.Request) {
 	if !RequireAdmin(w, r) {
 		return
