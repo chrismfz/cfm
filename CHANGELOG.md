@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.06
+
 ### Added
 - **WordPress brute force can be banned (`login_bruteforce`), in a dry run
   first.** It ships `DRY_RUN = 1`: every would-be ban is logged
