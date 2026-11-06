@@ -283,7 +283,7 @@ CMSes join when the corpus gives them an outcome rule.
 
 **L1 enforcement (built 2026-11-06):** the `login_bruteforce` detector
 (`docs/DETECTORS.md`) bans from the ledger's failures with its own, stricter
-rules: ≥ 5 `fail` on one site in 1 h, or `fail` on ≥ 5 sites in 1 h, a 90 day
+rules: ≥ 5 `fail` on one site in 1 h, or `fail` on ≥ 5 sites in 1 h, a 3 day
 ban sent to cfm-web, GR/CY 10 minutes and not sent. The shadow rows below keep
 their own thresholds and keep being written.
 

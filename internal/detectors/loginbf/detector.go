@@ -22,7 +22,7 @@
 //   - a private, loopback, link-local or CGNAT address;
 //   - an address of ALLOW_ASNS: a reverse proxy CFM does not trust to name
 //     the client (Sucuri, Imperva, Fastly, ...) reads as one client for all
-//     its visitors, and a 90 day ban reported to the fleet would take every
+//     its visitors, and a 3 day ban reported to the fleet would take every
 //     site behind it down;
 //   - an address with no geo record (no database yet, ENRICH = 0): the
 //     GR/CY leniency cannot be decided, so the alert is a dry run.

@@ -299,7 +299,7 @@ Typical defaults below are representative from the shipped template and should b
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
 | `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=180s`, `MIN_SUBNETS=30`, `MIN_SOLVES=15`, **alert-only** |
 | `challenge_cookie_discard` | clients that re-solve the challenge while still holding valid clearance | `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `MAX_TRACKED_IPS`, allowlists, `BLOCK` | `EVERY=30s`, `WINDOW=10m`, `MIN_SOLVES=8`, **alert-only unless `BLOCK` is set** |
-| `login_bruteforce` | login brute force from the web detector's login column: one site, or a spray over many sites | `SITE_FAILS`, `SITES`, `WINDOW`, `BLOCK`, allowlists; `[login_bruteforce.leniency]` | `WINDOW=1h`, `SITE_FAILS=5`, `SITES=5`, `BLOCK=90d`; GR/CY `10m`, not reported. **Built in**: a config without the section runs these |
+| `login_bruteforce` | login brute force from the web detector's login column: one site, or a spray over many sites | `SITE_FAILS`, `SITES`, `WINDOW`, `BLOCK`, allowlists; `[login_bruteforce.leniency]` | `WINDOW=1h`, `SITE_FAILS=5`, `SITES=5`, `BLOCK=3d`; GR/CY `10m`, not reported. **Built in**: a config without the section runs these |
 
 ### `challenge_solver_farm` — why it exists
 
@@ -524,7 +524,7 @@ or banned:
 - `ALLOW_ASNS`: reverse proxies and WAF CDNs CFM does not trust to name the
   client (Cloudflare, Sucuri, Imperva, Fastly, Akamai, StackPath, Bunny). A
   site behind one reads as the proxy's address for all its visitors, and a
-  90 day ban reported to the fleet would take every site behind it down.
+  3 day ban reported to the fleet would take every site behind it down.
 
 An address with no geo record (no GeoLite/IPLocate database yet, `[global]
 ENRICH = 0`) only logs "would block": the GR/CY leniency is decided on the
@@ -532,7 +532,7 @@ country. `[webdetector] LOGIN_SIGNALS = 0` stops the events with the shadow
 rows. After an alert, only later failures count toward the next one: a
 lenient client that keeps failing is banned again.
 
-The ban is the section sink's: `BLOCK = 90d`, reported to cfm-web, and
+The ban is the section sink's: `BLOCK = 3d`, reported to cfm-web, and
 recorded in the edge ban store for a client behind Cloudflare, which never
 meets the nft drop (enforced there once `[webdetector] EDGE_BAN_MODE =
 enforce`; until then such a client keeps failing, and `BLOCK_COOLDOWN = 6h`
@@ -546,7 +546,7 @@ among the 391 that failed 5-19 times in an hour on one site.
 the stock section and its leniency (`applyBuiltinLoginBruteforce`), so the
 rule reached every node with the upgrade. A section the operator writes is
 taken as written (give it its own `.leniency`); one without `BLOCK` still
-bans for 90 days.
+bans for 3 days.
 
 Only WordPress logins carry an outcome today. A Joomla
 (`/administrator/index.php`), Drupal or Laravel login joins when

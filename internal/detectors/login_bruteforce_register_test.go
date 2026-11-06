@@ -55,7 +55,7 @@ func TestApplyBuiltinLoginBruteforce(t *testing.T) {
 		t.Fatalf("built-in section: %v", kv)
 	}
 	pol := sectionBlockPolicy(loginBruteforceType, kv)
-	if pol.Mode != "ttl" || pol.TTL != 90*24*time.Hour {
+	if pol.Mode != "ttl" || pol.TTL != 3*24*time.Hour {
 		t.Fatalf("built-in block policy: %+v", pol)
 	}
 	lp := parseLeniencyPolicy(secs.ByName[loginBruteforceType+".leniency"])
@@ -71,7 +71,7 @@ func TestApplyBuiltinLoginBruteforce(t *testing.T) {
 		t.Fatalf("operator section changed: %v", secs.ByName)
 	}
 	// A section without BLOCK still bans like the built-in one.
-	if pol := sectionBlockPolicy(loginBruteforceType, KV{}); pol.Mode != "ttl" || pol.TTL != 90*24*time.Hour {
+	if pol := sectionBlockPolicy(loginBruteforceType, KV{}); pol.Mode != "ttl" || pol.TTL != 3*24*time.Hour {
 		t.Fatalf("written section without BLOCK: %+v", pol)
 	}
 	// A named instance counts as written too.

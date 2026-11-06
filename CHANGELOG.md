@@ -21,7 +21,7 @@ back-filled here — see the git/PR history for that period.
 - **WordPress brute force is banned (`login_bruteforce`).** Until now nothing
   stopped it: of the 314 addresses the shadow `login_spray` signal flagged in
   one day on seven nodes, 11 were blocked by anything else. A client address is
-  banned for 90 days, and reported to cfm-web, after either of these within an
+  banned for 3 days, and reported to cfm-web, after either of these within an
   hour:
   - 5 failed logins on one site;
   - failed logins on 5 different sites, one each is enough: a proxy pool

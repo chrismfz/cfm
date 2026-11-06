@@ -13,7 +13,7 @@ const loginBruteforceType = "login_bruteforce"
 
 // loginBruteforceProxyASNs are reverse proxies and WAF CDNs CFM does not
 // trust to name the client: every visitor of a site behind one reads as the
-// proxy's address, and a 90 day ban reported to the fleet would take every
+// proxy's address, and a 3 day ban reported to the fleet would take every
 // site behind it down. Cloudflare is trusted (trusted_proxies.conf), but a
 // request a Cloudflare address sends without CF-Connecting-IP (a Worker)
 // reads as Cloudflare's own address too.
@@ -32,7 +32,7 @@ func loginBruteforceDefaults() KV {
 		"SITE_FAILS": "5",
 		"SITES":      "5",
 		"DRY_RUN":    "0",
-		"BLOCK":      "90d",
+		"BLOCK":      "3d",
 		// A banned client behind Cloudflare is not stopped by the nft drop and,
 		// with [webdetector] EDGE_BAN_MODE = log, not at the edge either: it keeps
 		// failing, and every new alert would mail and report it again.
