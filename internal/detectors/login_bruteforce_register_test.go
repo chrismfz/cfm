@@ -72,11 +72,19 @@ func TestApplyBuiltinLoginBruteforce(t *testing.T) {
 		parseLeniencyPolicy(secs.ByName[loginBruteforceType+".leniency"]) == nil {
 		t.Fatalf("operator section: %v", secs.ByName)
 	}
-	// A leniency written with no criteria turns it off, and is kept.
-	secs = Sections{ByName: map[string]KV{loginBruteforceType: {}, loginBruteforceType + ".leniency": {"MATCH_COUNTRY": ""}}}
+	// cfm-admin's "Add leniency companion" writes no criteria: GR/CY still,
+	// with the operator's own values kept.
+	secs = Sections{ByName: map[string]KV{loginBruteforceType: {}, loginBruteforceType + ".leniency": {"MATCH_COUNTRY": "", "BLOCK": "30m"}}}
+	applyBuiltinLoginBruteforce(&secs)
+	lp = parseLeniencyPolicy(secs.ByName[loginBruteforceType+".leniency"])
+	if lp == nil || len(lp.Countries) != 2 || lp.Pol.TTL != 30*time.Minute {
+		t.Fatalf("an empty leniency: %+v", lp)
+	}
+	// Only ENABLED = 0 turns it off.
+	secs = Sections{ByName: map[string]KV{loginBruteforceType: {}, loginBruteforceType + ".leniency": {"ENABLED": "0", "MATCH_COUNTRY": "GR"}}}
 	applyBuiltinLoginBruteforce(&secs)
 	if parseLeniencyPolicy(secs.ByName[loginBruteforceType+".leniency"]) != nil {
-		t.Fatalf("an operator's empty leniency was replaced: %v", secs.ByName)
+		t.Fatalf("ENABLED = 0 left a leniency: %v", secs.ByName)
 	}
 	// A section without BLOCK still bans like the built-in one.
 	if pol := sectionBlockPolicy(loginBruteforceType, KV{}); pol.Mode != "ttl" || pol.TTL != 3*24*time.Hour {
@@ -112,5 +120,15 @@ func TestLoginBruteforceIsAWebSection(t *testing.T) {
 	}
 	if edgeban.WebSection("login_bruteforcex") || edgeban.WebSection("ssh_auth:x") {
 		t.Fatal("WebSection matches too much")
+	}
+}
+
+func TestLoginBruteforceWrittenSectionKeepsTheProxyASNs(t *testing.T) {
+	// A minimal written section must not ban a Sucuri edge.
+	if got := kvStrClean(KV{}, "ALLOW_ASNS", loginBruteforceProxyASNs); got != loginBruteforceProxyASNs {
+		t.Fatalf("default ALLOW_ASNS: %q", got)
+	}
+	if loginBruteforceDefaults()["ALLOW_ASNS"] != loginBruteforceProxyASNs {
+		t.Fatal("the built-in section and the code default differ")
 	}
 }

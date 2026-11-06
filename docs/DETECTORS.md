@@ -511,7 +511,8 @@ and this detector bans per client address, over `WINDOW` (1 h):
 A client is an IPv4 address or an IPv6 /64 (one subscriber, who can rotate
 addresses inside it); the ban is on the /64's address with the most
 failures in the window (in an office /64, a colleague's one typo must not
-take the ban for another's spray). Never counted or banned:
+take the ban for another's spray; an attacker rotating inside its /64 gets
+one address banned per round, a known gap). Never counted or banned:
 
 - a failure on a site where the client failed and already succeeded at
   least as often (the ledger's per-site record: a site's own tool). A
@@ -525,15 +526,27 @@ take the ban for another's spray). Never counted or banned:
   and cleared in one answer, `docs/webdetector-signals-v2.md` §3). A
   cleared cookie alone is a failure: `wp-login.php?reauth=1` clears it on
   every failed login. A login hidden behind `?action=lostpassword` (the body's
-  `action=login` wins in PHP) that fails with 200 is a failure too;
+  `action=login` wins in PHP) that fails with 200 is a failure too, and so
+  is a lostpassword / register form shown again (an unknown user); a
+  password reset that went through (200, its `wp-resetpass-` cookie
+  cleared) is not. On a site whose plugin answers a failed login with a
+  redirect, such a hidden login still reads `na` (a known gap);
+- the failure just before a success: a success takes back the client's
+  latest failure on that site from the same address within 15 minutes. Two
+  Factor 0.8+ sends no cookie at all on the password step, so its
+  second-factor form reads as a failure and the second step is the success;
+  a typo then a success is no brute force either;
 - bypass clients (crawlers, CDN prefixes), `[global] IGNORE_IPS`, private,
   loopback, link-local and CGNAT addresses, `ALLOW_IPS` / `ALLOW_NETS`;
 - Cloudflare's own proxy ranges (`trusted_proxies.conf`; the edge sees one
-  only when a Worker's subrequest names itself);
+  only when a Worker's subrequest names itself). That exempts every Worker:
+  a brute force run from Workers is a known gap, since banning one bans
+  them all;
 - `ALLOW_ASNS`: reverse proxies and WAF CDNs CFM does not trust to name the
   client (Sucuri, Imperva, Fastly, Akamai, StackPath, Bunny). A site behind
   one reads as the proxy's address for all its visitors, and a 3 day ban
-  reported to the fleet would take every site behind it down. Cloudflare's
+  reported to the fleet would take every site behind it down. It is the
+  default for a written section that leaves the key out. Cloudflare's
   ASN is not listed: WARP and the Workers' egress share it, and an attacker
   can use both. Apple Private Relay egress shares Fastly's and Akamai's, a
   known gap.
@@ -558,9 +571,11 @@ among the 391 that failed 5-19 times in an hour on one site.
 the stock section and its leniency (`applyBuiltinLoginBruteforce`), so the
 rule reached every node with the upgrade. A section the operator writes is
 taken as written, one without `BLOCK` still bans for 3 days, and one
-without a `.leniency` still gets the GR/CY one: cfm-admin's "Add" writes the
-section without it. Turn it off with a `.leniency` whose `MATCH_COUNTRY` is
-empty. A node with no `detectors.conf` at all (or an unreadable one at
+without a `.leniency`, or with one that has no `MATCH_COUNTRY` /
+`MATCH_ASN`, still gets the GR/CY one: cfm-admin's "Add" writes the section
+without it, and its "Add leniency companion" writes it empty. Turn it off
+with `ENABLED = 0` in the `.leniency`. The config-drift report skips the
+type, written sections included. A node with no `detectors.conf` at all (or an unreadable one at
 start-up) runs only the built-in control-plane protection, not this.
 
 Only WordPress logins carry an outcome today. A Joomla

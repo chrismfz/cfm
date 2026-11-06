@@ -32,9 +32,12 @@ back-filled here — see the git/PR history for that period.
   - a site's own tool, for its failures there (it already succeeded on the
     site at least as often as it failed);
   - a 2FA login: the password step (the origin sets the login cookie and
-    clears it in the same answer) no longer reads as a failure. A login
-    hidden behind `?action=lostpassword`, and one with `?reauth=1`, still
-    counts when it fails;
+    clears it in the same answer) no longer reads as a failure, and a
+    success takes back the failure just before it on that site (Two Factor
+    0.8+ sends no cookie on the password step). A login hidden behind
+    `?action=lostpassword`, and one with `?reauth=1`, still counts when it
+    fails;
+  - a password reset that went through;
   - a reverse proxy or WAF CDN address (`ALLOW_ASNS`: Sucuri, Imperva,
     Fastly, Akamai, StackPath, Bunny; and Cloudflare's own proxy ranges),
     which stands for every visitor of the sites behind it;

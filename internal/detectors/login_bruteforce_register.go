@@ -16,8 +16,9 @@ const loginBruteforceType = "login_bruteforce"
 // proxy's address, and a 3 day ban reported to the fleet would take every
 // site behind it down. Sucuri, Imperva, Fastly, Akamai, StackPath and Bunny.
 // Cloudflare is NOT listed: its proxies are trusted (trusted_proxies.conf,
-// and the detector skips those ranges), while its ASN is also WARP's and the
-// Workers' egress, which an attacker can brute force from.
+// and the detector skips those ranges, which exempts every Worker too: a
+// known gap), while its ASN is also WARP's egress, which an attacker can
+// brute force from.
 const loginBruteforceProxyASNs = "30148,19551,54113,20940,16625,12989,33438,200325"
 
 // loginBruteforceDefaults is the [login_bruteforce] section a node runs when
@@ -61,9 +62,10 @@ func loginBruteforceLeniencyDefaults() KV {
 // one with ENABLED = 0, is otherwise left as written. The leniency is added
 // even to a written section because cfm-admin's "Add" and "Initialize from
 // catalog" write the section without one, and without it a Greek customer
-// who mistypes gets the full ban and a fleet report. To run a section with
-// no leniency, write its [.leniency] with MATCH_COUNTRY = "" (no criteria
-// turns it off).
+// who mistypes gets the full ban and a fleet report. A leniency with no
+// criteria gets the GR/CY ones too: cfm-admin's "Add leniency companion"
+// writes MATCH_COUNTRY = "". A section runs with no leniency only when its
+// [.leniency] says ENABLED = 0.
 func applyBuiltinLoginBruteforce(secs *Sections) {
 	if secs == nil {
 		return
@@ -88,8 +90,21 @@ func applyBuiltinLoginBruteforce(secs *Sections) {
 		written = []string{loginBruteforceType}
 	}
 	for _, name := range written {
-		if _, ok := secs.ByName[name+".leniency"]; !ok {
-			secs.ByName[name+".leniency"] = loginBruteforceLeniencyDefaults()
+		lk := name + ".leniency"
+		lkv, ok := secs.ByName[lk]
+		switch {
+		case !ok:
+			secs.ByName[lk] = loginBruteforceLeniencyDefaults()
+		case !kvBool(lkv, "ENABLED", true):
+			secs.ByName[lk] = KV{} // no criteria: parseLeniencyPolicy turns it off
+		case kvStrClean(lkv, "MATCH_COUNTRY", "") == "" && kvStrClean(lkv, "MATCH_ASN", "") == "":
+			merged := loginBruteforceLeniencyDefaults()
+			for k, v := range lkv {
+				if cleanScalar(v) != "" {
+					merged[k] = v
+				}
+			}
+			secs.ByName[lk] = merged
 		}
 	}
 }
@@ -117,11 +132,13 @@ func init() {
 			DryRun:    kvBool(kv, "DRY_RUN", false),
 			AllowIPs:  csvKV(kv, "ALLOW_IPS"),
 			AllowNets: csvKV(kv, "ALLOW_NETS"),
-			AllowASNs: []string{kvStrClean(kv, "ALLOW_ASNS", "")},
+			// The proxy list is the default even for a section the operator
+			// wrote without the key: a minimal section must not ban a proxy.
+			AllowASNs: []string{kvStrClean(kv, "ALLOW_ASNS", loginBruteforceProxyASNs)},
 		})
 		d.SetName(section)
-		d.AddUnsubscribe(webdetector.SubscribeLoginFailEvents(func(ev webdetector.LoginFailEvent) {
-			d.Enqueue(loginbf.Event{When: ev.When, IP: ev.IP, Host: ev.Host, Site: ev.Site, Tag: ev.Tag, Owner: ev.Owner})
+		d.AddUnsubscribe(webdetector.SubscribeLoginEvents(func(ev webdetector.LoginEvent) {
+			d.Enqueue(loginbf.Event{When: ev.When, IP: ev.IP, Host: ev.Host, Site: ev.Site, Tag: ev.Tag, OK: ev.OK, Owner: ev.Owner})
 		}))
 		return d, nil
 	})

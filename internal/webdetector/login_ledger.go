@@ -330,11 +330,9 @@ func (l *loginLedger) observe(rec LogRec, host, tag, outcome string) {
 			l.emit(r)
 		}
 	}
-	if outcome == "fail" {
-		publishLoginFailEvent(LoginFailEvent{
-			When: time.Unix(now, 0), IP: rec.IP, Host: host, Site: siteKey, Tag: tag, Owner: owner,
-		})
-	}
+	publishLoginEvent(LoginEvent{
+		When: time.Unix(now, 0), IP: rec.IP, Host: host, Site: siteKey, Tag: tag, OK: outcome == "ok", Owner: owner,
+	})
 }
 
 // budgetLocked lets at most loginRowsPerMin rows of a type through per

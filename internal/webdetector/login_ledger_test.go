@@ -676,9 +676,16 @@ func TestLoginLedgerStuffingHitBeforeFlagStillReported(t *testing.T) {
 	}
 }
 
-func TestLoginLedgerPublishesFailEvents(t *testing.T) {
-	var got []LoginFailEvent
-	unsub := SubscribeLoginFailEvents(func(ev LoginFailEvent) { got = append(got, ev) })
+func TestLoginLedgerPublishesLoginEvents(t *testing.T) {
+	var got []LoginEvent
+	oks := 0
+	unsub := SubscribeLoginEvents(func(ev LoginEvent) {
+		if ev.OK {
+			oks++
+			return
+		}
+		got = append(got, ev)
+	})
 	defer unsub()
 	l := newLoginLedger((&rowSink{}).emit)
 
@@ -696,8 +703,8 @@ func TestLoginLedgerPublishesFailEvents(t *testing.T) {
 	l.observe(loginRec("203.0.113.10", t0+42), "a.gr", "WP_LOGIN", "ok")
 	l.observe(loginRec("203.0.113.10", t0+43), "a.gr", "WP_LOGIN", "fail")
 
-	if len(got) != 5 {
-		t.Fatalf("published %d events, want 5: %+v", len(got), got)
+	if len(got) != 5 || oks != 5 {
+		t.Fatalf("published %d failures and %d successes, want 5 and 5: %+v", len(got), oks, got)
 	}
 	if !got[0].Owner || got[0].Site != "mygreecetours.org" || got[0].IP != "94.66.129.119" {
 		t.Fatalf("owner tool's failure: %+v", got[0])

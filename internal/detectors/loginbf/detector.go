@@ -1,5 +1,5 @@
 // Package loginbf is the login_bruteforce detector: it turns the login
-// ledger's failed logins (webdetector.SubscribeLoginFailEvents) into an nft
+// ledger's failed logins (webdetector.SubscribeLoginEvents) into an nft
 // ban through the shared section sink, which owns the block policy, the
 // leniency tier (GR/CY), the edge ban, the central API report and the mail.
 //
@@ -17,6 +17,12 @@
 // most failures in the window, not on whichever failed last: in an office
 // /64 a colleague's one typo must not take the ban for another's spray.
 //
+// A success takes back the client's latest failure on that site in the last
+// RetractWindow: a 2FA plugin that sends no cookie on the password step (Two
+// Factor 0.8+) shows its second-factor form as a failure, and the success
+// after it is the same login. A typo then a success is not brute force
+// either. Only a real success (the site's logged-in cookie) does it.
+//
 // Never banned:
 //   - a failure on a site where the client is its owner (the ledger's
 //     record: it failed there and already succeeded at least as often), a
@@ -29,7 +35,8 @@
 //     the client (Sucuri, Imperva, Fastly, ...) reads as one client for all
 //     its visitors, and a 3 day ban reported to the fleet would take every
 //     site behind it down. Cloudflare is not listed by ASN: its ASN is also
-//     WARP's and the Workers' egress, which an attacker can use;
+//     WARP's egress, which an attacker can use. (Workers come in from the
+//     trusted ranges above and are exempt: a known gap.)
 //   - an address with no geo record (no database yet, ENRICH = 0): the
 //     GR/CY leniency cannot be decided, so the alert is a dry run.
 //
@@ -80,15 +87,19 @@ const (
 
 var cgnat = netip.MustParsePrefix("100.64.0.0/10")
 
-// Event is one failed login.
+// Event is one failed login, or a success (OK).
 type Event struct {
 	When  time.Time
 	IP    string
 	Host  string
 	Site  string
 	Tag   string
+	OK    bool
 	Owner bool
 }
+
+// RetractWindow is how far back a success takes back a failure.
+const RetractWindow = 15 * time.Minute
 
 type fail struct {
 	at   int64
@@ -226,7 +237,7 @@ func (d *Detector) Shutdown() error {
 // Enqueue takes one failed login. It runs on the ingest path: it only
 // appends, bounded, and the work happens in RunOnce.
 func (d *Detector) Enqueue(ev Event) {
-	if ev.Owner {
+	if ev.Owner && !ev.OK {
 		return
 	}
 	addr, err := netip.ParseAddr(strings.TrimSpace(ev.IP))
@@ -345,6 +356,10 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		d.newest = at
 	}
 	key := clientKey(ev.IP)
+	if ev.OK {
+		d.retractLocked(key, ev, at)
+		return core.Alert{}, false
+	}
 	c := d.clients[key]
 	if c == nil {
 		if len(d.clients) >= d.cfg.MaxClients {
@@ -452,6 +467,26 @@ func (d *Detector) alert(ev Event, key string, c *client, rule string, onSite in
 		a.Extra["enforcement"] = "dryrun"
 	}
 	return a
+}
+
+// retractLocked drops the client's latest failure on ev's site from the
+// address that succeeded, within RetractWindow before the success.
+func (d *Detector) retractLocked(key string, ev Event, at int64) {
+	c := d.clients[key]
+	if c == nil {
+		return
+	}
+	from := at - int64(RetractWindow/time.Second)
+	best := -1
+	for i, f := range c.fails {
+		if f.site == ev.Site && f.ip == ev.IP && f.at >= from && f.at <= at && f.at > c.firedAt &&
+			(best < 0 || f.at >= c.fails[best].at) {
+			best = i
+		}
+	}
+	if best >= 0 {
+		c.fails = append(c.fails[:best], c.fails[best+1:]...)
+	}
 }
 
 // worstAddr is the address with the most failures after firedAt (the newest

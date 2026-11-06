@@ -78,8 +78,10 @@ check(af(req("POST", "/wp-login.php", 302, { ["Set-Cookie"] = "wordpress_logged_
 check(af(req("POST", "/wp-login.php?action=lostpassword", 302, { ["Set-Cookie"] = LI, Location = "/wp-admin/" }))
   == "WP_LOGIN;li=1;a=lostpassword;l=/wp-admin/;c=wordpress_logged_in_0123abcd",
   "a query action is reported beside li, never instead of it (a body action=login overrides it in PHP)")
-check(af(req("POST", "/wp-login.php?action=re%09g%3Bi%3D1", 200, {})) == "WP_LOGIN;li=0;a=re_g_i_1;l=;c=",
-  "the action is decoded, then reduced to a safe charset")
+check(af(req("POST", "/wp-login.php?action=LostPassword", 200, {})) == "WP_LOGIN;li=0;a=~;l=;c=",
+  "an action PHP does not know (case differs) is sent as ~, never as lostpassword")
+check(af(req("POST", "/wp-login.php?action=re%09g%3Bi%3D1", 200, {})) == "WP_LOGIN;li=0;a=~;l=;c=",
+  "an action outside PHP's charset (a tab, ;, =) is sent as ~")
 check(af(req("POST", "/wp-login.php?action=log%69n", 200, {})) == "WP_LOGIN;li=0;a=login;l=;c=",
   "an encoded action is decoded as PHP does (log%69n is login)")
 check(af(req("POST", "/wp-login.php?action=lostpassword&action=login", 200, {})) == "WP_LOGIN;li=0;a=login;l=;c=",

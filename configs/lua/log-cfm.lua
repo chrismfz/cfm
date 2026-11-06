@@ -285,6 +285,8 @@ end
 --        register, ...), read as PHP reads it. It is the QUERY's only: PHP's
 --        $_REQUEST lets a body field override it, so the daemon never lets
 --        `a` hide an li=1, and counts only wp-login's own actions as `na`.
+--        Sent exactly as PHP compares it, or as "~" (an action PHP does not
+--        know: it runs the login).
 --        It comes before `c`, so a cut field loses cookie names, not it.
 local AUTH_MAX_COOKIES = 8
 local AUTH_MAX_NAME    = 48
@@ -426,7 +428,14 @@ local function auth_field(var)
   end
   local v = tag .. ";li=" .. (logged_in and "1" or (set_cleared and "2" or "0"))
   if type(a) == "string" and a ~= "" then
-    v = v .. ";a=" .. a:lower():gsub("[^%w_%-]", "_"):sub(1, 24)
+    -- Exactly as PHP compares it (in_array strict, case-sensitive): every
+    -- wp-login.php action is lowercase letters, digits and "_". Any other
+    -- value (LostPassword, "confirm admin email", one past 24 bytes) is an
+    -- unknown action to PHP, which runs the login, so it is sent as "~",
+    -- which no daemon list holds. Lowercasing it here once made the daemon
+    -- read such a login as the lostpassword action and never count it.
+    if #a > 24 or a:find("[^a-z0-9_]") then a = "~" end
+    v = v .. ";a=" .. a
   end
   if cross then v = v .. ";x=1" end
   return v .. ";l=" .. loc .. ";c=" .. table.concat(names, ",")

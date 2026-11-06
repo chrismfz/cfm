@@ -147,7 +147,7 @@ func authOutcome(rec LogRec, af authField) string {
 			// Anything else (the redirect after a reset mail) stays na. Any
 			// other action value is a login: wp-login.php runs its login
 			// case for an unknown one.
-			if rec.Status == 200 {
+			if rec.Status == 200 && !wpResetDone(af) {
 				return "fail"
 			}
 			return "na"
@@ -169,6 +169,22 @@ func authOutcome(rec LogRec, af authField) string {
 		}
 	}
 	return "?"
+}
+
+// wpResetDone: a password reset that went through. wp-login.php's
+// resetpass / rp answers 200 ("Your password has been reset") and clears
+// its wp-resetpass-<hash> cookie in that answer; a login hidden behind
+// ?action=rp touches no such cookie, so it still reads as a failure.
+func wpResetDone(af authField) bool {
+	if af.Action != "rp" && af.Action != "resetpass" {
+		return false
+	}
+	for _, c := range af.Cookies {
+		if strings.HasPrefix(c, "wp-resetpass-") {
+			return true
+		}
+	}
+	return false
 }
 
 // wpNonLoginActions are wp-login.php's own actions other than login (its

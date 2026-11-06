@@ -320,3 +320,45 @@ func TestAllowASNsAcceptsSpaces(t *testing.T) {
 		}
 	}
 }
+
+func okAt(ip, site string, at time.Time) Event {
+	ev := failAt(ip, site, at)
+	ev.OK = true
+	return ev
+}
+
+func TestSuccessTakesBackTheFailureBeforeIt(t *testing.T) {
+	// Two Factor 0.8+: the password step reads as a failure, the 2FA step
+	// is the success. An agency logging into 5 client sites in an hour,
+	// and one admin logging in 6 times on one site, are not brute force.
+	d := newTest(Config{})
+	for i := 0; i < 6; i++ {
+		at := t0.Add(time.Duration(i) * time.Minute)
+		d.Enqueue(failAt("203.0.113.70", "s"+strconv.Itoa(i)+".gr", at))
+		d.Enqueue(okAt("203.0.113.70", "s"+strconv.Itoa(i)+".gr", at.Add(20*time.Second)))
+		d.Enqueue(failAt("203.0.113.71", "a.gr", at))
+		d.Enqueue(okAt("203.0.113.71", "a.gr", at.Add(20*time.Second)))
+	}
+	if got := run(t, d); len(got) != 0 {
+		t.Fatalf("2FA logins banned: %+v", got)
+	}
+	// One success takes back one failure only, on its own site, from its
+	// own address, and not one older than RetractWindow.
+	d = newTest(Config{})
+	for i := 0; i < 5; i++ {
+		d.Enqueue(failAt("203.0.113.72", "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	d.Enqueue(okAt("203.0.113.72", "b.gr", t0.Add(5*time.Minute)))
+	if got := run(t, d); len(got) != 1 {
+		t.Fatalf("a success elsewhere took back a failure: %d", len(got))
+	}
+	d = newTest(Config{})
+	for i := 0; i < 4; i++ {
+		d.Enqueue(failAt("203.0.113.73", "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	d.Enqueue(okAt("203.0.113.73", "a.gr", t0.Add(20*time.Minute)))
+	d.Enqueue(failAt("203.0.113.73", "a.gr", t0.Add(21*time.Minute)))
+	if got := run(t, d); len(got) != 1 {
+		t.Fatalf("a success past RetractWindow took back a failure: %d", len(got))
+	}
+}

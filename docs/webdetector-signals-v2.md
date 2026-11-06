@@ -144,7 +144,12 @@ The daemon's WordPress rule (the one verified so far):
   body), and both answer 200 on a failure. Since 2026-11-06 `na` + 200 is
   therefore a `fail` (a lostpassword / register form shown again is a failed
   attempt too): the ban must not be dodged by adding `?action=lostpassword`.
-  Only a non-200 answer to those actions stays `na`.
+  Only a non-200 answer to those actions stays `na`, and a password reset
+  that went through (`rp` / `resetpass`, 200, its `wp-resetpass-` cookie
+  cleared in the answer). The edge sends `a` exactly as PHP compares it
+  (case-sensitive), or `~` for a value PHP does not know (it runs the
+  login): it used to lowercase it, and `?action=LostPassword` read as
+  lostpassword.
 - `fail`: the form again (200), or a 302/303 to a path containing `login`
   (`wp-login.php`, a hide-login slug) on the same scheme and host. A
   canonical redirect is not a verdict, so it is `?`. A canonical redirect is
