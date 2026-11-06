@@ -501,13 +501,13 @@ func TestLoginLedgerWiredFromIngest(t *testing.T) {
 	}
 	// A bypass client (a crawler, a CDN) is not counted.
 	for i := 0; i < 25; i++ {
-		feed(line(i, "2", "WP_LOGIN;li=0;l=/wp-login.php;c="))
+		feed(line(i, "2", "WP_LOGIN;li=0;l=/wp-login.php;c=wordpress_test_cookie"))
 	}
 	if len(sink.rows) != 0 {
 		t.Fatalf("a bypass client was counted: %+v", sink.rows)
 	}
 	for i := 0; i < 25; i++ {
-		feed(line(i, "0", "WP_LOGIN;li=0;l=/wp-login.php;c="))
+		feed(line(i, "0", "WP_LOGIN;li=0;l=/wp-login.php;c=wordpress_test_cookie"))
 	}
 	if n := len(sink.of("login_spray")); n != 1 {
 		t.Fatalf("ingest → ledger: %d rows (%+v)", n, sink.rows)
@@ -624,9 +624,9 @@ func TestLoginLedgerResetRequestThroughIngest(t *testing.T) {
 		e.ingest(rec, line)
 	}
 	for i := 0; i < 12; i++ {
-		feed(i, "WP_LOGIN;li=0;l=/wp-login.php;c=")
+		feed(i, "WP_LOGIN;li=0;l=/wp-login.php;c=wordpress_test_cookie")
 	}
-	feed(20, "WP_LOGIN;li=0;a=lostpassword;l=/wp-login.php;c=")
+	feed(20, "WP_LOGIN;li=0;a=lostpassword;l=/wp-login.php;c=wordpress_test_cookie")
 	feed(30, "WP_LOGIN;li=1;l=/wp-admin/;c=wordpress_logged_in_x")
 	if n := len(sink.of("login_dirty_success")); n != 1 {
 		t.Fatalf("a reset request in between excuses nothing: %d rows", n)

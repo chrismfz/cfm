@@ -98,8 +98,18 @@ type Event struct {
 	Owner bool
 }
 
-// RetractWindow is how far back a success takes back a failure.
-const RetractWindow = 15 * time.Minute
+// RetractWindow is how far back a success takes back failures, and
+// RetractMax how many: the 2FA password step, and a mistyped code or two.
+const (
+	RetractWindow = 15 * time.Minute
+	RetractMax    = 3
+)
+
+// Grace is how long a failure waits before it counts toward a rule, so the
+// success that takes it back (a 2FA code typed a minute later, five client
+// sites opened in parallel tabs) arrives first. Brute force loses nothing
+// to it.
+const Grace = 2 * time.Minute
 
 type fail struct {
 	at   int64
@@ -133,6 +143,8 @@ type Detector struct {
 	qmu     sync.Mutex
 	queue   []Event
 	dropped int
+
+	pending []Event // failures inside Grace, under mu
 
 	mu      sync.Mutex
 	clients map[string]*client
@@ -305,10 +317,36 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	var alerts []core.Alert
 	d.mu.Lock()
 	for _, ev := range batch {
-		if a, ok := d.addLocked(ev, win); ok {
-			alerts = append(alerts, a)
+		if at := ev.When.Unix(); at > d.newest {
+			d.newest = at
 		}
+		if ev.OK {
+			// Pending failures first (the usual case: the 2FA step), then
+			// counted ones.
+			n := d.retractPendingLocked(ev, RetractMax)
+			d.retractLocked(clientKey(ev.IP), ev, ev.When.Unix(), RetractMax-n)
+			continue
+		}
+		d.pending = append(d.pending, ev)
 	}
+	// A failure counts once it is Grace old, by the newest line or the wall
+	// (no line for a while), or at once when the pending set is too large.
+	clock := d.newest
+	if w := d.now().Unix(); w > clock {
+		clock = w
+	}
+	cutoff := clock - int64(Grace/time.Second)
+	kept := d.pending[:0]
+	for i, ev := range d.pending {
+		if ev.When.Unix() <= cutoff || len(d.pending)-i > maxQueue {
+			if a, ok := d.addLocked(ev, win); ok {
+				alerts = append(alerts, a)
+			}
+			continue
+		}
+		kept = append(kept, ev)
+	}
+	d.pending = kept
 	d.pruneLocked(win)
 	d.mu.Unlock()
 
@@ -356,10 +394,6 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		d.newest = at
 	}
 	key := clientKey(ev.IP)
-	if ev.OK {
-		d.retractLocked(key, ev, at)
-		return core.Alert{}, false
-	}
 	c := d.clients[key]
 	if c == nil {
 		if len(d.clients) >= d.cfg.MaxClients {
@@ -412,8 +446,15 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		return core.Alert{}, false
 	}
 	a := d.alert(ev, key, c, rule, onSite, sites)
-	if ip := worstAddr(c.fails, c.firedAt); ip != "" {
+	if ip, worst, addrs := worstAddr(c.fails, c.firedAt); ip != "" {
 		a.Key, a.Extra["ip"] = ip, ip
+		if addrs > 1 && worst < 2 {
+			// Several addresses of one /64, none with more than one failure:
+			// nothing says which is the attacker (a VPS provider's shared
+			// /64, a rotating client). Logged, never banned.
+			a.Extra["enforcement"] = "dryrun"
+			a.Extra["ipv6_ambiguous"] = "1"
+		}
 	}
 	c.firedAt = c.last
 	return a, true
@@ -469,29 +510,51 @@ func (d *Detector) alert(ev Event, key string, c *client, rule string, onSite in
 	return a
 }
 
-// retractLocked drops the client's latest failure on ev's site from the
-// address that succeeded, within RetractWindow before the success.
-func (d *Detector) retractLocked(key string, ev Event, at int64) {
+// retractPendingLocked drops up to max of the latest pending failures on
+// ev's site from the address that succeeded, within RetractWindow before
+// the success, and says how many it dropped.
+func (d *Detector) retractPendingLocked(ev Event, max int) int {
+	at := ev.When.Unix()
+	from := at - int64(RetractWindow/time.Second)
+	n := 0
+	for i := len(d.pending) - 1; i >= 0 && n < max; i-- {
+		p := d.pending[i]
+		if p.Site == ev.Site && p.IP == ev.IP && p.When.Unix() >= from && p.When.Unix() <= at {
+			d.pending = append(d.pending[:i], d.pending[i+1:]...)
+			n++
+		}
+	}
+	return n
+}
+
+// retractLocked drops up to max of the client's latest counted failures on
+// ev's site from the address that succeeded, within RetractWindow before the
+// success.
+func (d *Detector) retractLocked(key string, ev Event, at int64, max int) {
 	c := d.clients[key]
 	if c == nil {
 		return
 	}
 	from := at - int64(RetractWindow/time.Second)
-	best := -1
-	for i, f := range c.fails {
-		if f.site == ev.Site && f.ip == ev.IP && f.at >= from && f.at <= at && f.at > c.firedAt &&
-			(best < 0 || f.at >= c.fails[best].at) {
-			best = i
+	for n := 0; n < max; n++ {
+		best := -1
+		for i, f := range c.fails {
+			if f.site == ev.Site && f.ip == ev.IP && f.at >= from && f.at <= at && f.at > c.firedAt &&
+				(best < 0 || f.at >= c.fails[best].at) {
+				best = i
+			}
 		}
-	}
-	if best >= 0 {
+		if best < 0 {
+			return
+		}
 		c.fails = append(c.fails[:best], c.fails[best+1:]...)
 	}
 }
 
 // worstAddr is the address with the most failures after firedAt (the newest
-// one's on a tie). For IPv4 it is the only one.
-func worstAddr(fails []fail, after int64) string {
+// one's on a tie), its count, and how many addresses failed. For IPv4 it is
+// the only one.
+func worstAddr(fails []fail, after int64) (string, int, int) {
 	n := map[string]int{}
 	last := map[string]int64{}
 	for _, f := range fails {
@@ -505,11 +568,11 @@ func worstAddr(fails []fail, after int64) string {
 	}
 	best := ""
 	for ip, k := range n {
-		if best == "" || k > n[best] || (k == n[best] && last[ip] > last[best]) {
+		if best == "" || k > n[best] || (k == n[best] && (last[ip] > last[best] || (last[ip] == last[best] && ip < best))) {
 			best = ip
 		}
 	}
-	return best
+	return best, n[best], len(n)
 }
 
 // pruneLocked drops the clients whose last failure left the window. The

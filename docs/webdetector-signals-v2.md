@@ -150,7 +150,11 @@ The daemon's WordPress rule (the one verified so far):
   (case-sensitive), or `~` for a value PHP does not know (it runs the
   login): it used to lowercase it, and `?action=LostPassword` read as
   lostpassword.
-- `fail`: the form again (200), or a 302/303 to a path containing `login`
+- `fail`: only an answer wp-login.php wrote, which carries
+  `wordpress_test_cookie` (set on every request before any action or plugin
+  hook; since 2026-11-06, a cookie-less 200 is `?`: a server-level captcha
+  page answered every login on speedhost). Then: the form again (200), or a
+  302/303 to a path containing `login`
   (`wp-login.php`, a hide-login slug) on the same scheme and host. A
   canonical redirect is not a verdict, so it is `?`. A canonical redirect is
   a 301/308 to the login page (lelaki.gr, the first day's corpus), or any 3xx

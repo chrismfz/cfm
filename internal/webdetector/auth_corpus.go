@@ -147,7 +147,7 @@ func authOutcome(rec LogRec, af authField) string {
 			// Anything else (the redirect after a reset mail) stays na. Any
 			// other action value is a login: wp-login.php runs its login
 			// case for an unknown one.
-			if rec.Status == 200 && !wpResetDone(af) {
+			if rec.Status == 200 && wpAnswered(af) && !wpResetDone(af) && !wpPostpassDone(af) {
 				return "fail"
 			}
 			return "na"
@@ -164,11 +164,51 @@ func authOutcome(rec LogRec, af authField) string {
 			// [R] is a 302. It moved the POST before WordPress read it.
 			return "?"
 		}
+		if !wpAnswered(af) {
+			// No wordpress_test_cookie: WordPress did not write this answer
+			// (a server-level captcha or bot page, a suspended-account page,
+			// a site broken before wp-login.php ran). It says nothing about
+			// the password, and counting it banned everyone it answered:
+			// speedhost, 2026-11-06, 3 044 of 3 462 "failures" were 200s
+			// with no cookie at all, on 64+ sites.
+			return "?"
+		}
 		if st == 200 || ((st == 302 || st == 303) && strings.Contains(strings.ToLower(af.Loc), "login")) {
 			return "fail"
 		}
 	}
 	return "?"
+}
+
+// wpAnswered: wp-login.php itself wrote the answer. It sets
+// wordpress_test_cookie on every request before any action or plugin hook
+// runs (the cookie-support check), so every answer it writes carries it,
+// a plugin's redirect from login_init or wp_login_failed included. The
+// origin sets it, not the client. The edge sends the first AUTH_MAX_COOKIES
+// names: a cut list can only make a failure "?" here, never a ban.
+func wpAnswered(af authField) bool {
+	for _, c := range af.Cookies {
+		if c == "wordpress_test_cookie" {
+			return true
+		}
+	}
+	return false
+}
+
+// wpPostpassDone: a protected post's password was posted
+// (?action=postpass): WordPress sets wp-postpass_<hash>, and with no usable
+// referer it answers 200 instead of redirecting. A login hidden behind
+// ?action=postpass sets no such cookie.
+func wpPostpassDone(af authField) bool {
+	if af.Action != "postpass" {
+		return false
+	}
+	for _, c := range af.Cookies {
+		if strings.HasPrefix(c, "wp-postpass_") {
+			return true
+		}
+	}
+	return false
 }
 
 // wpResetDone: a password reset that went through. wp-login.php's

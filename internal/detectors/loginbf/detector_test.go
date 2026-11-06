@@ -19,7 +19,8 @@ func newTest(cfg Config) *Detector {
 		cfg.SiteFails, cfg.Sites = 5, 5
 	}
 	d := New(cfg)
-	d.now = func() time.Time { return t0.Add(10 * time.Minute) }
+	// Far ahead: every failure is past Grace when a test runs.
+	d.now = func() time.Time { return t0.Add(24 * time.Hour) }
 	d.setGeo(fakeGeo{})
 	return d
 }
@@ -360,5 +361,73 @@ func TestSuccessTakesBackTheFailureBeforeIt(t *testing.T) {
 	d.Enqueue(failAt("203.0.113.73", "a.gr", t0.Add(21*time.Minute)))
 	if got := run(t, d); len(got) != 1 {
 		t.Fatalf("a success past RetractWindow took back a failure: %d", len(got))
+	}
+}
+
+func TestGraceLetsTheSuccessArriveFirst(t *testing.T) {
+	// An agency opens 5 Two Factor sites in parallel tabs: the 5 password
+	// steps (failures) inside 30 s, the codes a minute later. Runs follow
+	// the real clock.
+	d := newTest(Config{})
+	now := t0
+	d.now = func() time.Time { return now }
+	for i := 0; i < 5; i++ {
+		d.Enqueue(failAt("203.0.113.80", "s"+strconv.Itoa(i)+".gr", t0.Add(time.Duration(i)*5*time.Second)))
+	}
+	now = t0.Add(30 * time.Second)
+	if got := run(t, d); len(got) != 0 {
+		t.Fatalf("banned inside Grace: %+v", got)
+	}
+	for i := 0; i < 5; i++ {
+		d.Enqueue(okAt("203.0.113.80", "s"+strconv.Itoa(i)+".gr", t0.Add(70*time.Second+time.Duration(i)*5*time.Second)))
+	}
+	now = t0.Add(10 * time.Minute)
+	if got := run(t, d); len(got) != 0 {
+		t.Fatalf("parallel 2FA logins banned: %+v", got)
+	}
+
+	// One admin who mistypes the code each time: password step, wrong code,
+	// right code. One success takes back both failures.
+	d = newTest(Config{})
+	now = t0
+	d.now = func() time.Time { return now }
+	for i := 0; i < 6; i++ {
+		at := t0.Add(time.Duration(i) * 5 * time.Minute)
+		d.Enqueue(failAt("203.0.113.81", "a.gr", at))
+		d.Enqueue(failAt("203.0.113.81", "a.gr", at.Add(20*time.Second)))
+		d.Enqueue(okAt("203.0.113.81", "a.gr", at.Add(40*time.Second)))
+		now = at.Add(time.Minute)
+		if got := run(t, d); len(got) != 0 {
+			t.Fatalf("round %d: a 2FA user with a mistyped code banned: %+v", i, got)
+		}
+	}
+
+	// A brute forcer is still banned, Grace later.
+	d = newTest(Config{})
+	now = t0
+	d.now = func() time.Time { return now }
+	for i := 0; i < 5; i++ {
+		d.Enqueue(failAt("203.0.113.82", "a.gr", t0.Add(time.Duration(i)*time.Second)))
+	}
+	now = t0.Add(10 * time.Second)
+	if got := run(t, d); len(got) != 0 {
+		t.Fatal("decided inside Grace")
+	}
+	now = t0.Add(Grace + 10*time.Second)
+	if got := run(t, d); len(got) != 1 {
+		t.Fatalf("brute force after Grace: %d", len(got))
+	}
+}
+
+func TestAmbiguousIPv6IsADryRun(t *testing.T) {
+	// A shared /64 (a VPS provider's): five addresses with one failure
+	// each, nobody to blame.
+	d := newTest(Config{})
+	for i := 0; i < 5; i++ {
+		d.Enqueue(failAt("2001:db8:9:9::"+strconv.Itoa(i+1), "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	got := run(t, d)
+	if len(got) != 1 || got[0].Extra["enforcement"] != "dryrun" || got[0].Extra["ipv6_ambiguous"] != "1" {
+		t.Fatalf("an ambiguous /64 must not ban: %+v", got)
 	}
 }

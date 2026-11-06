@@ -512,7 +512,9 @@ A client is an IPv4 address or an IPv6 /64 (one subscriber, who can rotate
 addresses inside it); the ban is on the /64's address with the most
 failures in the window (in an office /64, a colleague's one typo must not
 take the ban for another's spray; an attacker rotating inside its /64 gets
-one address banned per round, a known gap). Never counted or banned:
+one address banned per round, a known gap). A /64 whose worst address has
+a single failure among several (a VPS provider's shared /64) is a dry run.
+Never counted or banned:
 
 - a failure on a site where the client failed and already succeeded at
   least as often (the ledger's per-site record: a site's own tool). A
@@ -531,11 +533,21 @@ one address banned per round, a known gap). Never counted or banned:
   password reset that went through (200, its `wp-resetpass-` cookie
   cleared) is not. On a site whose plugin answers a failed login with a
   redirect, such a hidden login still reads `na` (a known gap);
-- the failure just before a success: a success takes back the client's
-  latest failure on that site from the same address within 15 minutes. Two
-  Factor 0.8+ sends no cookie at all on the password step, so its
-  second-factor form reads as a failure and the second step is the success;
-  a typo then a success is no brute force either;
+- an answer WordPress did not write: a failure needs `wordpress_test_cookie`
+  in the answer, which wp-login.php sets on every request before any action
+  or plugin runs. A server-level captcha or bot page, a suspended-account
+  page or a site broken before wp-login.php ran is "?" (on speedhost,
+  2026-11-06, 3 044 of 3 462 "failures" were such cookie-less 200s);
+- a protected post's password (`?action=postpass`, its `wp-postpass_`
+  cookie set);
+- the failures just before a success: a success takes back up to 3 of the
+  same address's latest failures on that site within 15 minutes. Two Factor
+  0.8+ sends no cookie at all on the password step, so its second-factor
+  form reads as a failure, and a mistyped code is another; the code that
+  works is the success. A typo then a success is no brute force either. A
+  failure counts only once it is 2 minutes old, so that success arrives
+  first: five client sites opened in parallel tabs, all on Two Factor, are
+  not a spray;
 - bypass clients (crawlers, CDN prefixes), `[global] IGNORE_IPS`, private,
   loopback, link-local and CGNAT addresses, `ALLOW_IPS` / `ALLOW_NETS`;
 - Cloudflare's own proxy ranges (`trusted_proxies.conf`; the edge sees one
@@ -555,7 +567,26 @@ An address with no geo record (no GeoLite/IPLocate database yet, `[global]
 ENRICH = 0`) only logs "would block": the GR/CY leniency is decided on the
 country. `[webdetector] LOGIN_SIGNALS = 0` stops the events with the shadow
 rows. After an alert, only later failures count toward the next one: a
-lenient client that keeps failing is banned again.
+lenient client that keeps failing is banned again. The leniency matches the
+country OR the Greek and Cypriot eyeball ASNs (OTE, Vodafone, Wind, Nova,
+Cyta, GRNET), for a range the geo database places abroad.
+
+Known gaps, where a legitimate client can still be banned:
+
+- a CDN or reverse proxy whose ASN is a cloud's (CloudFront on AWS, Azure
+  Front Door, Google's load balancer, Gcore, CDN77): its address stands for
+  every visitor of the sites behind it, and an ASN exemption would exempt
+  everyone renting a server there. Their published ranges would need a
+  generated list like the bypass list;
+- the owner record is the ledger's fixed 24 h window, in memory (above): a
+  login monitor whose stored password went stale is banned soon after it
+  empties;
+- a lostpassword request the site cannot mail answers 200 and counts;
+- a captcha that fails a real user (reCAPTCHA v3 on a VPN, Turnstile blocked
+  by an extension) or Wordfence's verify-by-email answers 200 inside
+  WordPress with the right password;
+- company SASE gateways (Zscaler, Netskope) put Greek staff on foreign
+  addresses outside the leniency.
 
 The ban is the section sink's: `BLOCK = 3d`, reported to cfm-web, and
 recorded in the edge ban store for a client behind Cloudflare, which never

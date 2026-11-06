@@ -49,7 +49,10 @@ func loginBruteforceDefaults() KV {
 // themselves out know unblock.myip.gr.
 func loginBruteforceLeniencyDefaults() KV {
 	return KV{
-		"MATCH_COUNTRY":  "GR,CY",
+		"MATCH_COUNTRY": "GR,CY",
+		// OR the Greek and Cypriot eyeball networks (OTE, Vodafone, Wind,
+		// Nova, Cyta, GRNET), for a range the geo database places abroad.
+		"MATCH_ASN":      "6799,3329,25472,1241,6866,5408",
 		"BLOCK":          "10m",
 		"BLOCK_COOLDOWN": "10m",
 		"SEND_TO_API":    "no",

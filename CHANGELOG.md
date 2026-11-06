@@ -27,8 +27,10 @@ back-filled here — see the git/PR history for that period.
   - failed logins on 5 different sites, one each is enough: a proxy pool
     tries once or twice per site per address.
 
-  Greek and Cypriot addresses get a 10 minute ban, reported nowhere (customers
-  know unblock.myip.gr). Never banned:
+  Greek and Cypriot addresses, and the Greek / Cypriot ISPs' networks
+  (OTE, Vodafone, Wind, Nova, Cyta, GRNET) wherever the geo database places
+  them, get a 10 minute ban, reported nowhere (customers know
+  unblock.myip.gr). Never banned:
   - a site's own tool, for its failures there (it already succeeded on the
     site at least as often as it failed);
   - a 2FA login: the password step (the origin sets the login cookie and
@@ -37,7 +39,16 @@ back-filled here — see the git/PR history for that period.
     0.8+ sends no cookie on the password step). A login hidden behind
     `?action=lostpassword`, and one with `?reauth=1`, still counts when it
     fails;
-  - a password reset that went through;
+  - a password reset that went through, or a protected post's password;
+  - an answer WordPress did not write (no `wordpress_test_cookie`): a
+    server-level captcha or bot page answered nearly every login on
+    speedhost, real users' too;
+  - a failure the next success takes back: a success takes back up to 3 of
+    the same address's failures on that site within 15 minutes, and a
+    failure counts only once it is 2 minutes old, so 2FA users (a mistyped
+    code, five client sites opened at once) are not banned;
+  - an ambiguous shared IPv6 /64 (several addresses, one failure each): dry
+    run;
   - a reverse proxy or WAF CDN address (`ALLOW_ASNS`: Sucuri, Imperva,
     Fastly, Akamai, StackPath, Bunny; and Cloudflare's own proxy ranges),
     which stands for every visitor of the sites behind it;
