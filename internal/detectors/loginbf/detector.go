@@ -13,17 +13,23 @@
 //     site-hours of 10+ addresses with fewer than 5 failures each).
 //
 // A client is an IPv4 address or an IPv6 /64 (one subscriber, who can
-// rotate addresses inside it); the ban is on the address that failed.
+// rotate addresses inside it); the ban is on the /64's address with the
+// most failures in the window, not on whichever failed last: in an office
+// /64 a colleague's one typo must not take the ban for another's spray.
 //
 // Never banned:
 //   - a failure on a site where the client is its owner (the ledger's
 //     record: it failed there and already succeeded at least as often), a
 //     site's own tool;
 //   - a private, loopback, link-local or CGNAT address;
+//   - an address of a trusted proxy (trusted_proxies.conf, Cloudflare): the
+//     edge sees one only when the proxy named itself (a Worker's
+//     subrequest), and it stands for every visitor arriving that way;
 //   - an address of ALLOW_ASNS: a reverse proxy CFM does not trust to name
 //     the client (Sucuri, Imperva, Fastly, ...) reads as one client for all
 //     its visitors, and a 3 day ban reported to the fleet would take every
-//     site behind it down;
+//     site behind it down. Cloudflare is not listed by ASN: its ASN is also
+//     WARP's and the Workers' egress, which an attacker can use;
 //   - an address with no geo record (no database yet, ENRICH = 0): the
 //     GR/CY leniency cannot be decided, so the alert is a dry run.
 //
@@ -41,6 +47,7 @@ import (
 	"time"
 
 	core "cfm/internal/detectors/core"
+	"cfm/internal/edgeban"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
 )
@@ -156,7 +163,13 @@ func New(cfg Config) *Detector {
 			d.allowNets = append(d.allowNets, p.Masked())
 		}
 	}
+	var asns []string
 	for _, s := range cfg.AllowASNs {
+		asns = append(asns, strings.FieldsFunc(s, func(r rune) bool {
+			return r == ',' || r == ';' || r == ' ' || r == '\t'
+		})...)
+	}
+	for _, s := range asns {
 		s = strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(s)), "AS")
 		if n, err := strconv.ParseUint(s, 10, 32); err == nil && n > 0 {
 			d.allowASNs[uint(n)] = struct{}{}
@@ -221,7 +234,8 @@ func (d *Detector) Enqueue(ev Event) {
 		return
 	}
 	addr = addr.Unmap()
-	if !addr.IsGlobalUnicast() || addr.IsPrivate() || cgnat.Contains(addr) || d.allowed(addr) {
+	if !addr.IsGlobalUnicast() || addr.IsPrivate() || cgnat.Contains(addr) || d.allowed(addr) ||
+		edgeban.IsTrustedProxy(addr.AsSlice()) {
 		return
 	}
 	if ev.When.IsZero() {
@@ -383,6 +397,9 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		return core.Alert{}, false
 	}
 	a := d.alert(ev, key, c, rule, onSite, sites)
+	if ip := worstAddr(c.fails, c.firedAt); ip != "" {
+		a.Key, a.Extra["ip"] = ip, ip
+	}
 	c.firedAt = c.last
 	return a, true
 }
@@ -435,6 +452,29 @@ func (d *Detector) alert(ev Event, key string, c *client, rule string, onSite in
 		a.Extra["enforcement"] = "dryrun"
 	}
 	return a
+}
+
+// worstAddr is the address with the most failures after firedAt (the newest
+// one's on a tie). For IPv4 it is the only one.
+func worstAddr(fails []fail, after int64) string {
+	n := map[string]int{}
+	last := map[string]int64{}
+	for _, f := range fails {
+		if f.at <= after {
+			continue
+		}
+		n[f.ip]++
+		if f.at > last[f.ip] {
+			last[f.ip] = f.at
+		}
+	}
+	best := ""
+	for ip, k := range n {
+		if best == "" || k > n[best] || (k == n[best] && last[ip] > last[best]) {
+			best = ip
+		}
+	}
+	return best
 }
 
 // pruneLocked drops the clients whose last failure left the window. The

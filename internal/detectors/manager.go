@@ -239,6 +239,9 @@ func (m *manager) maybeReload(parent context.Context) {
 		if typ == cfmEndpointsType {
 			sourceOK, sourceMsg = true, "in-process control-plane security events"
 		}
+		if typ == loginBruteforceType {
+			sourceOK, sourceMsg = true, "in-process login failures (web detector)"
+		}
 		configured = append(configured, detectorstatus.SectionConfig{
 			Section:            secName,
 			Type:               typ,

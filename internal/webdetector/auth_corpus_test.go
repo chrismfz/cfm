@@ -63,6 +63,9 @@ func TestAuthColumnOldParserSkew(t *testing.T) {
 }
 
 func TestParseAuthField(t *testing.T) {
+	if af, ok := parseAuthField("WP_LOGIN;li=2;l=;c=wordpress_logged_in_0123abcd"); !ok || !af.MFA || af.LoggedIn {
+		t.Fatalf("li=2 is a 2FA step, not a login: %+v", af)
+	}
 	if af, ok := parseAuthField("WP_LOGIN;li=0;x=1;l=/wp-login.php;c="); !ok || !af.Cross {
 		t.Fatalf("x=1: %+v", af)
 	}
@@ -104,16 +107,21 @@ func TestAuthOutcome(t *testing.T) {
 		{"query action cannot hide a success", origin(302), authField{Tag: "WP_LOGIN", LoggedIn: true, Action: "lostpassword"}, "ok"},
 		{"action=login is the login", origin(200), authField{Tag: "WP_LOGIN", Action: "login"}, "fail"},
 		{"an unknown action runs the login", origin(200), authField{Tag: "WP_LOGIN", Action: "zz"}, "fail"},
-		{"register", origin(200), authField{Tag: "WP_LOGIN", Action: "register"}, "na"},
+		{"register form shown again: a failure", origin(200), authField{Tag: "WP_LOGIN", Action: "register"}, "fail"},
+		{"register redirect", origin(302), authField{Tag: "WP_LOGIN", Action: "register", Loc: "/wp-login.php"}, "na"},
 		{"cfm_apache preset, but no upstream answered", LogRec{Status: 200, UpstreamName: "cfm_apache"}, authField{Tag: "WP_LOGIN"}, "?"},
 		{"the challenge server answered", LogRec{Status: 200, UpstreamName: "cfm_challenge"}, authField{Tag: "WP_LOGIN"}, "?"},
 		{"edge block", LogRec{Status: 403, UpstreamName: "cfm_block"}, authField{Tag: "WP_LOGIN", LoggedIn: true}, "?"},
 		{"no upstream name", LogRec{Status: 200, UpstreamName: "-"}, authField{Tag: "WP_LOGIN"}, "?"},
 		{"other CMS", origin(200), authField{Tag: "JOOMLA_ADMIN"}, "?"},
 		{"5xx", origin(500), authField{Tag: "WP_LOGIN"}, "?"},
-		{"2FA password step: the login cookie set and cleared (ksilokosmos.gr)", origin(200),
-			authField{Tag: "WP_LOGIN", Cookies: []string{"pbid", "wordpress_logged_in_0123456789abcdef", "wordpress_sec_0123456789abcdef"}}, "mfa"},
+		{"2FA password step: a real login cookie set and cleared (li=2, ksilokosmos.gr)", origin(200),
+			authField{Tag: "WP_LOGIN", MFA: true, Cookies: []string{"pbid", "wordpress_logged_in_0123456789abcdef"}}, "mfa"},
+		{"reauth=1 clears the cookie on a failure (li=0): still a failure", origin(200),
+			authField{Tag: "WP_LOGIN", Cookies: []string{"wordpress_logged_in_0123456789abcdef"}}, "fail"},
 		{"the test cookie alone is a failure", origin(200), authField{Tag: "WP_LOGIN", Cookies: []string{"wordpress_test_cookie"}}, "fail"},
+		{"a login hidden behind ?action=lostpassword (body action=login) fails with 200", origin(200),
+			authField{Tag: "WP_LOGIN", Action: "lostpassword"}, "fail"},
 	}
 	for _, c := range cases {
 		if got := authOutcome(c.rec, c.af); got != c.want {

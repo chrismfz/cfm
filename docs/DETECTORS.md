@@ -509,22 +509,34 @@ and this detector bans per client address, over `WINDOW` (1 h):
   with fewer than 5 failures each (22 532 failures on 147 sites).
 
 A client is an IPv4 address or an IPv6 /64 (one subscriber, who can rotate
-addresses inside it); the ban is on the address that failed. Never counted
-or banned:
+addresses inside it); the ban is on the /64's address with the most
+failures in the window (in an office /64, a colleague's one typo must not
+take the ban for another's spray). Never counted or banned:
 
 - a failure on a site where the client failed and already succeeded at
   least as often (the ledger's per-site record: a site's own tool). A
   success alone is not ownership. The record is the ledger's fixed 24 h
   window, in memory: a restart, a `detectors.conf` save or a tailed log's
   rotation empties it, and a tool that fails first after that counts until
-  its successes catch up;
-- a 2FA password step (`mfa`, `docs/webdetector-signals-v2.md` §3);
+  its successes catch up. Successes are per client and site, not per
+  account: on a site with open registration a client that logs into its own
+  account once per failed admin guess stays the "owner" (a known gap);
+- a 2FA password step (`mfa`: the edge's `li=2`, a real login cookie set
+  and cleared in one answer, `docs/webdetector-signals-v2.md` §3). A
+  cleared cookie alone is a failure: `wp-login.php?reauth=1` clears it on
+  every failed login. A login hidden behind `?action=lostpassword` (the body's
+  `action=login` wins in PHP) that fails with 200 is a failure too;
 - bypass clients (crawlers, CDN prefixes), `[global] IGNORE_IPS`, private,
   loopback, link-local and CGNAT addresses, `ALLOW_IPS` / `ALLOW_NETS`;
+- Cloudflare's own proxy ranges (`trusted_proxies.conf`; the edge sees one
+  only when a Worker's subrequest names itself);
 - `ALLOW_ASNS`: reverse proxies and WAF CDNs CFM does not trust to name the
-  client (Cloudflare, Sucuri, Imperva, Fastly, Akamai, StackPath, Bunny). A
-  site behind one reads as the proxy's address for all its visitors, and a
-  3 day ban reported to the fleet would take every site behind it down.
+  client (Sucuri, Imperva, Fastly, Akamai, StackPath, Bunny). A site behind
+  one reads as the proxy's address for all its visitors, and a 3 day ban
+  reported to the fleet would take every site behind it down. Cloudflare's
+  ASN is not listed: WARP and the Workers' egress share it, and an attacker
+  can use both. Apple Private Relay egress shares Fastly's and Akamai's, a
+  known gap.
 
 An address with no geo record (no GeoLite/IPLocate database yet, `[global]
 ENRICH = 0`) only logs "would block": the GR/CY leniency is decided on the
@@ -545,8 +557,11 @@ among the 391 that failed 5-19 times in an hour on one site.
 **Built in.** A node whose `detectors.conf` has no `[login_bruteforce]` runs
 the stock section and its leniency (`applyBuiltinLoginBruteforce`), so the
 rule reached every node with the upgrade. A section the operator writes is
-taken as written (give it its own `.leniency`); one without `BLOCK` still
-bans for 3 days.
+taken as written, one without `BLOCK` still bans for 3 days, and one
+without a `.leniency` still gets the GR/CY one: cfm-admin's "Add" writes the
+section without it. Turn it off with a `.leniency` whose `MATCH_COUNTRY` is
+empty. A node with no `detectors.conf` at all (or an unreadable one at
+start-up) runs only the built-in control-plane protection, not this.
 
 Only WordPress logins carry an outcome today. A Joomla
 (`/administrator/index.php`), Drupal or Laravel login joins when
@@ -555,7 +570,15 @@ POSTs in those six days against ~137 000 for WordPress.
 
 Each ban is a notifier event; with hundreds a day per node, route
 `[detector "login_bruteforce"]` in `notify.conf` (e.g. `notify = 0`) if
-mail is too much.
+mail is too much. That silences the mail only. Every alert still lands in:
+
+- `cfm.detectors.log` (`Type: WEB/LOGIN_BRUTEFORCE, ip …`, the outcome
+  `Blocked:` line, up to 10 sample failures with their host);
+- the alert log (`/var/lib/cfm/alerts.db`, `docs/alerts.md`), `muted`
+  included: MCP `alerts kind=WEB/LOGIN_BRUTEFORCE` for the rows and
+  `alerts_summary kind=WEB/LOGIN_BRUTEFORCE group_by=country,asn` (or
+  `mode`, `delivery`, `hour`) with `node="all"` for the fleet picture.
+  A dry run (no geo record) reads `mode=dryrun` there.
 
 ### `challenge_cookie_discard` — why it exists
 

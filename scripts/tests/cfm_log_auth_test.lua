@@ -88,8 +88,11 @@ check(af(req("POST", "/wp-login.php?ACTION=lostpassword", 200, {})) == "WP_LOGIN
   "ACTION is another name to PHP: no action")
 check(af(req("POST", "/wp-login.php?action", 200, {})) == "WP_LOGIN;li=0;l=;c=", "an action with no value")
 check(af(req("POST", "/wp-login.php", 200, { ["Set-Cookie"] = { LI, "wordpress_logged_in_0123abcd=+; expires=Thu, 01-Jan-1970 00:00:01 GMT; path=/" } }))
+  :find(";li=2;", 1, true),
+  "a 2FA plugin clears the cookie wp_signon set in the same answer: set then cleared (li=2)")
+check(af(req("POST", "/wp-login.php?reauth=1", 200, { ["Set-Cookie"] = { "wordpress_logged_in_0123abcd=+; expires=Thu, 01-Jan-1970 00:00:01 GMT; path=/" } }))
   :find(";li=0;", 1, true),
-  "a 2FA plugin clears the cookie wp_signon set in the same answer: the last one decides (li=0)")
+  "reauth=1 clears the cookie on a FAILED login: no real value before it, so li=0 (a failure), not 2FA")
 check(af(req("POST", "/wp-login.php", 200, { ["Set-Cookie"] = { "wordpress_logged_in_0123abcd=+", LI } }))
   :find(";li=1;", 1, true), "cleared then set: li=1")
 check(af(req("POST", "/wp-login.php", 302, { Location = "https:\\\\evil.example/a" })) == "WP_LOGIN;li=0;x=1;l=/a;c=",

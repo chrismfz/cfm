@@ -2,11 +2,13 @@ package loginbf
 
 import (
 	"context"
+	"net"
 	"strconv"
 	"testing"
 	"time"
 
 	core "cfm/internal/detectors/core"
+	"cfm/internal/edgeban"
 	"cfm/internal/enrich"
 )
 
@@ -281,5 +283,40 @@ func TestBacklogIsPrunedOnItsOwnClock(t *testing.T) {
 	}
 	if got := run(t, d); len(got) != 1 {
 		t.Fatalf("backlog across two runs: %d", len(got))
+	}
+}
+
+func TestIPv6BansTheWorstAddressOfThe64(t *testing.T) {
+	// ::1 sprays 4 times, a colleague at ::2 mistypes once: the ban is ::1's.
+	d := newTest(Config{})
+	for i := 0; i < 4; i++ {
+		d.Enqueue(failAt("2001:db8:7:7::1", "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	d.Enqueue(failAt("2001:db8:7:7::2", "a.gr", t0.Add(5*time.Minute)))
+	got := run(t, d)
+	if len(got) != 1 || got[0].Extra["ip"] != "2001:db8:7:7::1" || got[0].Key != "2001:db8:7:7::1" {
+		t.Fatalf("the colleague took the ban: %+v", got)
+	}
+}
+
+func TestTrustedProxyAddressesAreNeverBanned(t *testing.T) {
+	_, n, _ := net.ParseCIDR("104.16.0.0/13")
+	edgeban.SetTrustedProxies([]*net.IPNet{n})
+	defer edgeban.SetTrustedProxies(nil)
+	d := newTest(Config{})
+	for i := 0; i < 6; i++ {
+		d.Enqueue(failAt("104.16.1.1", "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	if got := run(t, d); len(got) != 0 {
+		t.Fatalf("a Cloudflare proxy address was alerted: %+v", got)
+	}
+}
+
+func TestAllowASNsAcceptsSpaces(t *testing.T) {
+	d := New(Config{AllowASNs: []string{"AS13335  30148;54113\t20940"}})
+	for _, n := range []uint{13335, 30148, 54113, 20940} {
+		if _, ok := d.allowASNs[n]; !ok {
+			t.Fatalf("AS%d not parsed: %v", n, d.allowASNs)
+		}
 	}
 }

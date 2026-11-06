@@ -92,8 +92,11 @@ from the corpus is a Go change, not an edge release. As built the field is
   real value. A logout's expired cookie carries a blank value. "Last" matters
   for 2FA: with the Two Factor or WP 2FA plugin, `wp_signon` sets the real
   cookie, the plugin clears it in the same answer and shows its
-  second-factor form (200). That is `li=0`, and the daemon reads it as `mfa`
-  (the cookie NAME is in `c=`): the password was right. The second-factor
+  second-factor form (200). The edge sends `li=2` for that (a real value set,
+  then cleared), and the daemon reads it as `mfa`: the password was right. A
+  cleared cookie with no real value before it stays `li=0`:
+  `wp-login.php?reauth=1` clears it on every failed login, and reading that
+  as 2FA hid every failure. The second-factor
   POST that sets the cookie for good is the `ok`. Only the edge sees cookie
   values, so this one bit is decided there (`ngx.header["Set-Cookie"]`).
   The value never leaves the edge.
@@ -130,8 +133,7 @@ The daemon's WordPress rule (the one verified so far):
 - `ok`: `li=1`. This is checked first, whatever the action. PHP's
   `$_REQUEST` lets a body `action=login` override the query, so a query
   action must never hide a success.
-- `mfa`: no real cookie, but the answer set a `wordpress_logged_in_*` one
-  (cleared): a 2FA plugin's password step. Counted nowhere. Until
+- `mfa`: `li=2`, a 2FA plugin's password step. Counted nowhere. Until
   2026-11-06 it read as `fail`, so an admin's every 2FA login was one.
 - `na`: one of wp-login.php's own other actions (lostpassword,
   retrievepassword, resetpass, rp, register, postpass, logout,
@@ -139,8 +141,10 @@ The daemon's WordPress rule (the one verified so far):
   Any other value, an unknown one included, is a login: wp-login.php runs
   its login case for it. A login hidden behind `?action=lostpassword` with
   `action=login` in the BODY still lands here (the edge does not read the
-  body), and both answer 200 on a failure, so phase 1 has to read `na` + 200
-  on its own, not ignore it.
+  body), and both answer 200 on a failure. Since 2026-11-06 `na` + 200 is
+  therefore a `fail` (a lostpassword / register form shown again is a failed
+  attempt too): the ban must not be dodged by adding `?action=lostpassword`.
+  Only a non-200 answer to those actions stays `na`.
 - `fail`: the form again (200), or a 302/303 to a path containing `login`
   (`wp-login.php`, a hide-login slug) on the same scheme and host. A
   canonical redirect is not a verdict, so it is `?`. A canonical redirect is

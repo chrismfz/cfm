@@ -64,11 +64,19 @@ func TestApplyBuiltinLoginBruteforce(t *testing.T) {
 		t.Fatalf("built-in leniency: %+v", lp)
 	}
 
-	// Written by the operator, even disabled and without leniency: as is.
+	// Written by the operator (cfm-admin's "Add" writes no leniency): the
+	// section as is, the GR/CY leniency added.
 	secs = Sections{ByName: map[string]KV{loginBruteforceType: {"ENABLED": "0"}}}
 	applyBuiltinLoginBruteforce(&secs)
-	if len(secs.ByName) != 1 || secs.ByName[loginBruteforceType]["ENABLED"] != "0" {
-		t.Fatalf("operator section changed: %v", secs.ByName)
+	if len(secs.ByName) != 2 || secs.ByName[loginBruteforceType]["ENABLED"] != "0" ||
+		parseLeniencyPolicy(secs.ByName[loginBruteforceType+".leniency"]) == nil {
+		t.Fatalf("operator section: %v", secs.ByName)
+	}
+	// A leniency written with no criteria turns it off, and is kept.
+	secs = Sections{ByName: map[string]KV{loginBruteforceType: {}, loginBruteforceType + ".leniency": {"MATCH_COUNTRY": ""}}}
+	applyBuiltinLoginBruteforce(&secs)
+	if parseLeniencyPolicy(secs.ByName[loginBruteforceType+".leniency"]) != nil {
+		t.Fatalf("an operator's empty leniency was replaced: %v", secs.ByName)
 	}
 	// A section without BLOCK still bans like the built-in one.
 	if pol := sectionBlockPolicy(loginBruteforceType, KV{}); pol.Mode != "ttl" || pol.TTL != 3*24*time.Hour {
@@ -79,6 +87,9 @@ func TestApplyBuiltinLoginBruteforce(t *testing.T) {
 	applyBuiltinLoginBruteforce(&secs)
 	if _, added := secs.ByName[loginBruteforceType]; added {
 		t.Fatal("built-in section added next to a written instance")
+	}
+	if secs.ByName[loginBruteforceType+":strict.leniency"] == nil {
+		t.Fatal("no leniency added to the written instance")
 	}
 	// A leniency written on its own is kept; the section is still added.
 	secs = Sections{ByName: map[string]KV{loginBruteforceType + ".leniency": {"MATCH_COUNTRY": "GR", "BLOCK": "1h"}}}
@@ -93,5 +104,13 @@ func TestLoginBruteforceIsAWebSection(t *testing.T) {
 	// meets the nft drop.
 	if !edgeban.WebSection(loginBruteforceType) {
 		t.Fatal("login_bruteforce bans are not enforced at the edge")
+	}
+	for _, inst := range []string{"login_bruteforce:strict", "login_bruteforce strict"} {
+		if !edgeban.WebSection(inst) {
+			t.Fatalf("instance %q bans are not enforced at the edge", inst)
+		}
+	}
+	if edgeban.WebSection("login_bruteforcex") || edgeban.WebSection("ssh_auth:x") {
+		t.Fatal("WebSection matches too much")
 	}
 }

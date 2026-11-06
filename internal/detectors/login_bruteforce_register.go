@@ -14,10 +14,11 @@ const loginBruteforceType = "login_bruteforce"
 // loginBruteforceProxyASNs are reverse proxies and WAF CDNs CFM does not
 // trust to name the client: every visitor of a site behind one reads as the
 // proxy's address, and a 3 day ban reported to the fleet would take every
-// site behind it down. Cloudflare is trusted (trusted_proxies.conf), but a
-// request a Cloudflare address sends without CF-Connecting-IP (a Worker)
-// reads as Cloudflare's own address too.
-const loginBruteforceProxyASNs = "13335,209242,30148,19551,54113,20940,16625,12989,33438,200325"
+// site behind it down. Sucuri, Imperva, Fastly, Akamai, StackPath and Bunny.
+// Cloudflare is NOT listed: its proxies are trusted (trusted_proxies.conf,
+// and the detector skips those ranges), while its ASN is also WARP's and the
+// Workers' egress, which an attacker can brute force from.
+const loginBruteforceProxyASNs = "30148,19551,54113,20940,16625,12989,33438,200325"
 
 // loginBruteforceDefaults is the [login_bruteforce] section a node runs when
 // its detectors.conf has none (every node whose conffile predates it): the
@@ -54,10 +55,15 @@ func loginBruteforceLeniencyDefaults() KV {
 	}
 }
 
-// applyBuiltinLoginBruteforce adds the default section (and its leniency)
-// when the config has no login_bruteforce section at all. A section the
-// operator wrote, even one with ENABLED = 0 or without a leniency block, is
-// left exactly as written.
+// applyBuiltinLoginBruteforce adds the default section when the config has
+// no login_bruteforce section at all, and the GR/CY leniency to every
+// login_bruteforce section that has none. A section the operator wrote, even
+// one with ENABLED = 0, is otherwise left as written. The leniency is added
+// even to a written section because cfm-admin's "Add" and "Initialize from
+// catalog" write the section without one, and without it a Greek customer
+// who mistypes gets the full ban and a fleet report. To run a section with
+// no leniency, write its [.leniency] with MATCH_COUNTRY = "" (no criteria
+// turns it off).
 func applyBuiltinLoginBruteforce(secs *Sections) {
 	if secs == nil {
 		return
@@ -68,19 +74,24 @@ func applyBuiltinLoginBruteforce(secs *Sections) {
 	if secs.ByType == nil {
 		secs.ByType = make(map[string][]string)
 	}
+	var written []string
 	for name := range secs.ByName {
 		if typ, _ := SplitTypeInstance(name); typ == loginBruteforceType {
-			return
+			written = append(written, name)
 		}
 	}
-	def := loginBruteforceDefaults()
-	def[cfmEndpointsSyntheticKey] = "1"
-	secs.ByName[loginBruteforceType] = def
-	// A leniency block written on its own is the operator's: keep it.
-	if _, ok := secs.ByName[loginBruteforceType+".leniency"]; !ok {
-		secs.ByName[loginBruteforceType+".leniency"] = loginBruteforceLeniencyDefaults()
+	if len(written) == 0 {
+		def := loginBruteforceDefaults()
+		def[cfmEndpointsSyntheticKey] = "1"
+		secs.ByName[loginBruteforceType] = def
+		secs.ByType[loginBruteforceType] = []string{loginBruteforceType}
+		written = []string{loginBruteforceType}
 	}
-	secs.ByType[loginBruteforceType] = []string{loginBruteforceType}
+	for _, name := range written {
+		if _, ok := secs.ByName[name+".leniency"]; !ok {
+			secs.ByName[name+".leniency"] = loginBruteforceLeniencyDefaults()
+		}
+	}
 }
 
 func init() {
@@ -106,7 +117,7 @@ func init() {
 			DryRun:    kvBool(kv, "DRY_RUN", false),
 			AllowIPs:  csvKV(kv, "ALLOW_IPS"),
 			AllowNets: csvKV(kv, "ALLOW_NETS"),
-			AllowASNs: csvKV(kv, "ALLOW_ASNS"),
+			AllowASNs: []string{kvStrClean(kv, "ALLOW_ASNS", "")},
 		})
 		d.SetName(section)
 		d.AddUnsubscribe(webdetector.SubscribeLoginFailEvents(func(ev webdetector.LoginFailEvent) {

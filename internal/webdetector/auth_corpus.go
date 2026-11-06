@@ -58,13 +58,14 @@ const (
 type authField struct {
 	Tag      string // WP_LOGIN, JOOMLA_ADMIN, ... (auth_endpoint_tag minus AUTH_)
 	LoggedIn bool   // a wordpress_logged_in_* cookie with a real value
+	MFA      bool   // li=2: a real one set and cleared in the same answer (a 2FA password step)
 	Loc      string // the Location path, query and host dropped at the edge
 	Cookies  []string
 	Action   string // the query's action, when present
 	Cross    bool   // the Location left the request's scheme or host
 }
 
-// parseAuthField reads "<TAG>;li=<0|1>[;a=<action>][;x=1];l=<loc>;c=<a,b>" (keys
+// parseAuthField reads "<TAG>;li=<0|1|2>[;a=<action>][;x=1];l=<loc>;c=<a,b>" (keys
 // in any order). An
 // empty or malformed value is not a login line.
 func parseAuthField(s string) (authField, bool) {
@@ -86,6 +87,7 @@ func parseAuthField(s string) (authField, bool) {
 		case "li":
 			sawLI = true
 			af.LoggedIn = v == "1"
+			af.MFA = v == "2"
 		case "l":
 			af.Loc = v
 		case "c":
@@ -123,19 +125,31 @@ func authOutcome(rec LogRec, af authField) string {
 		if af.LoggedIn {
 			return "ok"
 		}
-		if wpLoginCookieCleared(af.Cookies) {
-			// The origin set a wordpress_logged_in_ cookie and cleared it in
-			// the same answer: a 2FA plugin (Two Factor, WP 2FA) accepted the
-			// PASSWORD and shows its second-factor form. Not a failure: an
-			// admin's every 2FA login read as one, enough for a ban.
+		if af.MFA {
+			// The origin set a real wordpress_logged_in_ cookie and cleared
+			// it in the same answer (the edge's li=2): a 2FA plugin (Two
+			// Factor, WP 2FA) accepted the PASSWORD and shows its
+			// second-factor form. Not a failure: an admin's every 2FA login
+			// read as one, enough for a ban. A cleared cookie with no real
+			// one before it is no such step: wp-login.php?reauth=1 clears it
+			// on every failed login.
 			return "mfa"
 		}
 		if wpNonLoginActions[af.Action] {
 			// A real lostpassword/register POST, or a login hidden behind a
-			// query action (a body action=login overrides it in PHP): both
-			// answer 200 on a failure, so the line is kept apart (na) rather
-			// than counted as a failed login. Any other action value is a
-			// login: wp-login.php runs its login case for an unknown one.
+			// query action: a body action=login overrides the query's in
+			// PHP's $_REQUEST, so ?action=lostpassword with a login body
+			// runs the login. Both answer 200 on a failure (the form again),
+			// and the edge cannot tell them apart, so a 200 is a failure:
+			// otherwise every failure of a brute forcer that adds the query
+			// read as na and was never counted. A lostpassword / register
+			// form shown again is a failed attempt too (an unknown user).
+			// Anything else (the redirect after a reset mail) stays na. Any
+			// other action value is a login: wp-login.php runs its login
+			// case for an unknown one.
+			if rec.Status == 200 {
+				return "fail"
+			}
 			return "na"
 		}
 		// A failure is the form again (200), or WordPress / a hide-login
@@ -155,18 +169,6 @@ func authOutcome(rec LogRec, af authField) string {
 		}
 	}
 	return "?"
-}
-
-// wpLoginCookieCleared: the answer set a wordpress_logged_in_ cookie, but
-// not a real one (af.LoggedIn is false), which on a login POST is a 2FA
-// plugin's password step.
-func wpLoginCookieCleared(names []string) bool {
-	for _, n := range names {
-		if strings.HasPrefix(n, "wordpress_logged_in_") {
-			return true
-		}
-	}
-	return false
 }
 
 // wpNonLoginActions are wp-login.php's own actions other than login (its

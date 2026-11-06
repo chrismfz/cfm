@@ -272,8 +272,13 @@ end
 --        "AUTH_": WP_LOGIN, JOOMLA_ADMIN, DRUPAL_LOGIN, MAGENTO_ADMIN, ...
 --   li   1 = a wordpress_logged_in_* cookie with a real value (WordPress
 --        sets it on a completed login only, after a 2FA step too; a
---        logout's expired one carries a blank value). Only the edge sees
---        the value, so only this bit of the verdict is taken here.
+--        logout's expired one carries a blank value). 2 = a real value was
+--        set and then cleared in the same answer: a 2FA plugin's password
+--        step (the password was right). A cleared cookie with no real value
+--        before it is neither: wp-login.php?reauth=1 clears it on every
+--        failure, so reading that as 2FA hid every failure from the ban.
+--        Only the edge sees the value, so only this bit of the verdict is
+--        taken here.
 --   x    1 when the Location leaves the request's scheme or host (a
 --        canonical redirect, any status): the host itself is never sent.
 --   a    the query's `action`, when present (wp-login.php's lostpassword,
@@ -329,7 +334,7 @@ local function auth_field(var)
   tag = tag:gsub("^AUTH_", "")
 
   local hdr = ngx.header
-  local names, li_last = {}, {}
+  local names, li_last, li_real = {}, {}, {}
   for _, sc in ipairs(as_list(hdr and hdr["Set-Cookie"])) do
     if type(sc) == "string" then
       local name, value = sc:match("^%s*([^=;%s]+)=([^;]*)")
@@ -342,13 +347,20 @@ local function auth_field(var)
         -- The LAST Set-Cookie of a name is what the browser keeps: a 2FA
         -- plugin (Two Factor, WP 2FA) lets wp_signon set the real cookie,
         -- then clears it in the same answer and shows its second-factor form.
-        if name:sub(1, #WP_LI) == WP_LI then li_last[name] = #value >= 20 end
+        if name:sub(1, #WP_LI) == WP_LI then
+          li_last[name] = #value >= 20
+          if #value >= 20 then li_real[name] = true end
+        end
       end
     end
   end
-  local logged_in = false
-  for _, real in pairs(li_last) do
-    if real then logged_in = true end
+  local logged_in, set_cleared = false, false
+  for name, real in pairs(li_last) do
+    if real then
+      logged_in = true
+    elseif li_real[name] then
+      set_cleared = true
+    end
   end
 
   -- The ORIGIN's Location ($upstream_http_location, what the file log's
@@ -412,7 +424,7 @@ local function auth_field(var)
     a = args["action"]
     if type(a) == "table" then a = a[#a] end
   end
-  local v = tag .. ";li=" .. (logged_in and "1" or "0")
+  local v = tag .. ";li=" .. (logged_in and "1" or (set_cleared and "2" or "0"))
   if type(a) == "string" and a ~= "" then
     v = v .. ";a=" .. a:lower():gsub("[^%w_%-]", "_"):sub(1, 24)
   end

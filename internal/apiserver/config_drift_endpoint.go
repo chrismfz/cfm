@@ -207,7 +207,9 @@ func diffDetectorsConfig(stock, live detconf.Sections) configdrift.DetectorsRepo
 	return configdrift.DiffDetectorsSectionsIgnoring(stock, live, func(section string) bool {
 		base := strings.TrimSuffix(strings.TrimSpace(section), ".leniency")
 		typ, _ := detconf.SplitTypeInstance(base)
-		return typ == "cfm_endpoints" || typ == "api_abuse"
+		// Built in when absent (the daemon runs the stock values), so a
+		// config without them is not missing anything.
+		return typ == "cfm_endpoints" || typ == "api_abuse" || typ == "login_bruteforce"
 	})
 }
 
