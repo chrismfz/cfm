@@ -569,7 +569,10 @@ country. `[webdetector] LOGIN_SIGNALS = 0` stops the events with the shadow
 rows. After an alert, only later failures count toward the next one: a
 lenient client that keeps failing is banned again. The leniency matches the
 country OR the Greek and Cypriot eyeball ASNs (OTE, Vodafone, Wind, Nova,
-Cyta, GRNET), for a range the geo database places abroad.
+Cyta, GRNET), for a range the geo database places abroad, OR Cloudflare's
+(13335): a WARP egress address (104.28.x, 2a09:bac*) is shared by many of its
+users, and the first day's dry run had 12 WARP alerts, so a brute forcer on
+WARP gets the 10 minute local ban instead of a 3 day fleet ban.
 
 Known gaps, where a legitimate client can still be banned:
 

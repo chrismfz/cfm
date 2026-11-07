@@ -64,6 +64,16 @@ func TestApplyBuiltinLoginBruteforce(t *testing.T) {
 		len(lp.Countries) != 2 || lp.Countries[0] != "GR" || lp.Countries[1] != "CY" {
 		t.Fatalf("built-in leniency: %+v", lp)
 	}
+	// A WARP address is shared: Cloudflare gets the soft tier too.
+	warp := false
+	for _, a := range lp.ASNs {
+		if a == "AS13335" {
+			warp = true
+		}
+	}
+	if !warp {
+		t.Fatalf("built-in leniency without Cloudflare (WARP): %v", lp.ASNs)
+	}
 
 	// Written by the operator (cfm-admin's "Add" writes no leniency): the
 	// section as is, the GR/CY leniency added.

@@ -53,8 +53,12 @@ func loginBruteforceLeniencyDefaults() KV {
 	return KV{
 		"MATCH_COUNTRY": "GR,CY",
 		// OR the Greek and Cypriot eyeball networks (OTE, Vodafone, Wind,
-		// Nova, Cyta, GRNET), for a range the geo database places abroad.
-		"MATCH_ASN":      "6799,3329,25472,1241,6866,5408",
+		// Nova, Cyta, GRNET), for a range the geo database places abroad, and
+		// Cloudflare (13335): a WARP address is shared by many of its users,
+		// so a brute forcer on it gets the soft tier rather than a 3 day fleet
+		// ban that would lock them all out (the first day's dry run: 12 WARP
+		// alerts, 104.28.x and 2a09:bac*).
+		"MATCH_ASN":      "6799,3329,25472,1241,6866,5408,13335",
 		"BLOCK":          "10m",
 		"BLOCK_COOLDOWN": "10m",
 		"SEND_TO_API":    "no",

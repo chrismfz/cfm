@@ -90,6 +90,14 @@ back-filled here — see the git/PR history for that period.
   change is in both `openresty.conf` and `angie.conf`, and a node gets it
   with the new edge conf.
 
+### Changed
+- **`login_bruteforce`: a Cloudflare WARP address gets the soft tier.** A
+  WARP egress address is shared by many people, so a brute forcer on it now
+  gets the 10 minute local ban, reported nowhere, instead of a 3 day fleet
+  ban that would lock every WARP user out. The first day's dry run had 12
+  WARP alerts. AS13335 is added to `[login_bruteforce.leniency] MATCH_ASN`.
+  A `detectors.conf` with its own leniency block needs the same edit.
+
 ## 2026.11.06
 
 ### Added
