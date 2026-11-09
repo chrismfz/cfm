@@ -131,6 +131,13 @@ ptr=*.google.com;    verify_fcrdns=1; action=skip
 #    2026-10-02, 98% of its requests were AS15169; the rest (Hetzner, Vultr,
 #    Online SAS) were spoofs and stay challenged.
 asn=as15169; ua=*google-read-aloud*; action=skip
+#    google-xrawler: the fetcher Google Merchant Center / Google Ads use for a
+#    shop's product feed (csv_feed*.php and similar). Its addresses (173.194.x,
+#    74.125.x) have NO PTR at all, so the FCrDNS rules above can never match
+#    it; under a vhost challenge it got the challenge page instead of the feed
+#    (somabed.gr, qualityweb, 2026-11-09: 11 of 11 fetches challenged). Same
+#    ASN pin as Read-Aloud: the UA from any other network stays challenged.
+asn=as15169; ua=*google-xrawler*;    action=skip
 
 # -----------------------------------------------------------------------------
 # 2) Bingbot — verified via FCrDNS (PTRs under search.msn.com).

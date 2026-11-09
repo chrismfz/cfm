@@ -17,7 +17,16 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Google Merchant Center feeds are no longer challenged.** Its feed fetcher
+  (`google-xrawler`) got the challenge page instead of a shop's product feed
+  whenever the vhost was under a challenge. Its addresses have no reverse DNS,
+  so the Googlebot FCrDNS rules could never exempt it. The shipped
+  `webdetector_challenge_exclude.txt` now skips it from Google's own network
+  (AS15169) only. The same UA from anywhere else is still challenged.
+  `/etc/cfm/webdetector_challenge_exclude.txt` is a config file: a node that
+  edited its copy keeps it on upgrade. Add the line by hand there:
+  `asn=as15169; ua=*google-xrawler*; action=skip`.
 
 ## 2026.11.09
 
