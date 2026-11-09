@@ -45,8 +45,8 @@ func TestCrawlerThrottleBlockSameOnBothEdges(t *testing.T) {
 		blk := crawlerThrottleBlock(t, f, string(b))
 		for _, want := range []string{
 			"map $uri $meta_throttle_image {",
-			`"~^1\|0\|0$" 1;`, // pages: crawler, host not exempt, not an image
-			`"~^1\|0\|1$" 1;`, // images
+			`"~^[12]\|0\|0$" 1;`, // pages: any listed crawler, host not exempt
+			`"~^2\|0\|1$" 1;`, // images: Meta crawlers only
 			"zone=meta_img_host_rps:20m rate=50r/s;",
 			"zone=meta_img_host_conn:20m;",
 		} {
@@ -75,7 +75,7 @@ func TestCrawlerThrottleImageLimitsWhereverPageLimitsApply(t *testing.T) {
 		}
 		for _, want := range []string{
 			"limit_req  zone=meta_img_host_rps burst=200 nodelay;",
-			"limit_conn meta_img_host_conn 60;",
+			"limit_conn meta_img_host_conn 30;",
 		} {
 			if n := strings.Count(conf, want); n != page {
 				t.Errorf("%s: %q in %d servers, page limit in %d", f, want, n, page)
