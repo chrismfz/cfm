@@ -17,7 +17,29 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Facebook catalog imports no longer fail on product images.** The edge's
+  crawler throttle gave a Meta crawler's image requests the same 5
+  requests/s per site as pages. This covers facebookcatalog,
+  facebookexternalhit, meta-externalagent and meta-externalads. A catalog
+  crawl therefore got `429 Too Many Requests` on most of a shop's images:
+  about 89 000 rejected image fetches in an hour on one shop (2026-11-09),
+  and the import failed. A Meta crawler's images
+  (`.jpg/.jpeg/.jfif/.png/.gif/.webp/.avif/.ico/.bmp/.tif/.tiff`) now have
+  their own budget per site: 50 requests/s, burst 200, 30 connections. They
+  have no per-IP limit. Everything else keeps the old limits:
+  - pages;
+  - `.svg` and `.php/…/x.jpg` paths;
+  - the SEO crawlers' images (AhrefsBot, SemrushBot, …).
+
+  Images keep a limit because the edge cannot tell a file on disk from one
+  PHP renders, whether a resizer or the app's 404 handler. `throttle.log`
+  lines now carry `img=1` when the image budget applied and `img=0` for the
+  page budget. They also carry `limit_conn_status`, so a connection-cap
+  reject reads `REJECTED` there. An origin's own 429 reads `REJECTED` in
+  neither status field. The
+  change is in both `openresty.conf` and `angie.conf`, and a node gets it
+  with the new edge conf.
 
 ## 2026.11.06
 
