@@ -39,7 +39,10 @@ back-filled here — see the git/PR history for that period.
   per site, burst 100. The SEO bots keep 5/s. The 30-connection cap and the
   60/min per-IP limit are unchanged, and images keep their own 50/s budget.
   Expect fewer 429s, not none: a wave of 200 pages a second is still cut,
-  and Meta retries the rest later.
+  and Meta retries the rest later. On a slow site the cost is higher: at
+  1 s a page, 10 pages/s keeps about 10 PHP workers busy (the 30-connection
+  cap is the bound). The edge error log names the page zones
+  `meta_seo_host_rps` / `meta_fb_host_rps`; it used to be `meta_host_rps`.
 
 ## 2026.11.09
 

@@ -52,7 +52,10 @@ func TestCrawlerThrottleBlockSameOnBothEdges(t *testing.T) {
 			// Pages: SEO crawlers 5 r/s, Meta's 10 r/s, per vhost.
 			"zone=meta_seo_host_rps:20m rate=5r/s;",
 			"zone=meta_fb_host_rps:20m  rate=10r/s;",
+			`"1|1"   "seo";`,
 			`"2|1"   "meta";`,
+			`"~^([^|]+)\|seo$" "$1";`,
+			`"~^([^|]+)\|meta$" "$1";`,
 			// Only value-2 (Meta) crawlers reach the image budget: a Meta UA
 			// set back to 1 would silently 429 catalog image fetches again.
 			`"~*meta-externalagent"   2;`,
