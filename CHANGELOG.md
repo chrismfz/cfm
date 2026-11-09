@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.09
+
 ### Fixed
 - **Facebook catalog imports no longer fail on product images.** The edge's
   crawler throttle gave a Meta crawler's image requests the same 5
