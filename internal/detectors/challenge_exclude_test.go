@@ -318,6 +318,12 @@ func TestShippedExcludeFile_PreviewFetchers(t *testing.T) {
 		{"read-aloud, ASN unknown", readAloud, "", false},
 		{"iMessage/Messages on-device preview, residential", onDevice, "AS6799", false},
 		{"plain Google UA on AS15169 is not read-aloud", "Mozilla/5.0 (compatible; Google-Something/1.0)", "AS15169", false},
+		// google-xrawler (Merchant Center feed fetcher): no PTR, so only the
+		// ASN pin can exempt it (qualityweb 2026-11-09).
+		{"google-xrawler from Google", "google-xrawler", "AS15169", true},
+		{"google-xrawler from Google Cloud", "google-xrawler", "AS396982", false},
+		{"google-xrawler spoof from Hetzner", "google-xrawler", "AS24940", false},
+		{"google-xrawler, ASN unknown", "google-xrawler", "", false},
 	} {
 		_, _, ok := ce.MatchNoDNS("shop.gr", c.ua, str(c.asn), nil, "CHALLENGE_VHOST")
 		if ok != c.want {

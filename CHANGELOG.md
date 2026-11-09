@@ -17,7 +17,32 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Google Merchant Center feeds are no longer challenged.** Its feed fetcher
+  (`google-xrawler`) got the challenge page instead of a shop's product feed
+  whenever the vhost was under a challenge. Its addresses have no reverse DNS,
+  so the Googlebot FCrDNS rules could never exempt it. The shipped
+  `webdetector_challenge_exclude.txt` now skips it from Google's own network
+  (AS15169) only. The same UA from anywhere else is still challenged.
+  `/etc/cfm/webdetector_challenge_exclude.txt` is a config file: a node that
+  edited its copy keeps it on upgrade. Add the line by hand there:
+  `asn=as15169; ua=*google-xrawler*; action=skip`. Then save
+  `/etc/cfm/detectors.conf` (`touch` is enough) or restart cfm: the exclude
+  file is read only when the detectors config reloads, not on its own
+  change.
+- **Meta crawlers get a larger page budget than the SEO bots.** The edge's
+  crawler throttle gave facebookexternalhit, facebookcatalog,
+  meta-externalagent and meta-externalads the SEO bots' 5 pages/s per site.
+  Meta checks a shop's product pages in waves: 2 563 pages in one minute on
+  one shop (2026-11-09), from 737 Meta addresses. About 3 900 product pages
+  got `429 Too Many Requests` that day. Meta's crawlers now have 10 pages/s
+  per site, burst 100. The SEO bots keep 5/s. The 30-connection cap and the
+  60/min per-IP limit are unchanged, and images keep their own 50/s budget.
+  Expect fewer 429s, not none: a wave of 200 pages a second is still cut,
+  and Meta retries the rest later. On a slow site the cost is higher: at
+  1 s a page, 10 pages/s keeps about 10 PHP workers busy (the 30-connection
+  cap is the bound). The edge error log names the page zones
+  `meta_seo_host_rps` / `meta_fb_host_rps`; it used to be `meta_host_rps`.
 
 ## 2026.11.09
 
