@@ -26,7 +26,10 @@ back-filled here — see the git/PR history for that period.
   (AS15169) only. The same UA from anywhere else is still challenged.
   `/etc/cfm/webdetector_challenge_exclude.txt` is a config file: a node that
   edited its copy keeps it on upgrade. Add the line by hand there:
-  `asn=as15169; ua=*google-xrawler*; action=skip`.
+  `asn=as15169; ua=*google-xrawler*; action=skip`. Then save
+  `/etc/cfm/detectors.conf` (`touch` is enough) or restart cfm: the exclude
+  file is read only when the detectors config reloads, not on its own
+  change.
 - **Meta crawlers get a larger page budget than the SEO bots.** The edge's
   crawler throttle gave facebookexternalhit, facebookcatalog,
   meta-externalagent and meta-externalads the SEO bots' 5 pages/s per site.
