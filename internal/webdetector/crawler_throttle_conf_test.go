@@ -46,13 +46,22 @@ func TestCrawlerThrottleBlockSameOnBothEdges(t *testing.T) {
 		for _, want := range []string{
 			"map $uri $meta_throttle_image {",
 			`"~^[12]\|0\|0$" 1;`, // pages: any listed crawler, host not exempt
-			`"~^2\|0\|1$" 1;`, // images: Meta crawlers only
+			`"~^2\|0\|1$" 1;`,    // images: Meta crawlers only
 			"zone=meta_img_host_rps:20m rate=50r/s;",
 			"zone=meta_img_host_conn:20m;",
+			// Only value-2 (Meta) crawlers reach the image budget: a Meta UA
+			// set back to 1 would silently 429 catalog image fetches again.
+			`"~*meta-externalagent"   2;`,
+			`"~*meta-externalads"     2;`,
+			`"~*facebookexternalhit"  2;`,
+			`"~*facebookcatalog"      2;`,
 		} {
 			if !strings.Contains(blk, want) {
 				t.Errorf("%s: crawler throttle block lacks %q", f, want)
 			}
+		}
+		if !strings.Contains(string(b), "img=$is_meta_crawler_img_throttled") {
+			t.Errorf("%s: throttle.log format must log which budget applied (img=$is_meta_crawler_img_throttled)", f)
 		}
 		blocks = append(blocks, blk)
 	}

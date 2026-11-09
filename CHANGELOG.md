@@ -34,7 +34,10 @@ back-filled here — see the git/PR history for that period.
 
   Images keep a limit because the edge cannot tell a file on disk from one
   PHP renders, whether a resizer or the app's 404 handler. `throttle.log`
-  lines now carry `img=1` for an image URL and `img=0` for any other. The
+  lines now carry `img=1` when the image budget applied and `img=0` for the
+  page budget. They also carry `limit_conn_status`, so a connection-cap
+  reject reads `REJECTED` there. An origin's own 429 reads `REJECTED` in
+  neither status field. The
   change is in both `openresty.conf` and `angie.conf`, and a node gets it
   with the new edge conf.
 
