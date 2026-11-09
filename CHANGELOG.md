@@ -27,6 +27,16 @@ back-filled here — see the git/PR history for that period.
   `/etc/cfm/webdetector_challenge_exclude.txt` is a config file: a node that
   edited its copy keeps it on upgrade. Add the line by hand there:
   `asn=as15169; ua=*google-xrawler*; action=skip`.
+- **Meta crawlers get a larger page budget than the SEO bots.** The edge's
+  crawler throttle gave facebookexternalhit, facebookcatalog,
+  meta-externalagent and meta-externalads the SEO bots' 5 pages/s per site.
+  Meta checks a shop's product pages in waves: 2 563 pages in one minute on
+  one shop (2026-11-09), from 737 Meta addresses. About 3 900 product pages
+  got `429 Too Many Requests` that day. Meta's crawlers now have 10 pages/s
+  per site, burst 100. The SEO bots keep 5/s. The 30-connection cap and the
+  60/min per-IP limit are unchanged, and images keep their own 50/s budget.
+  Expect fewer 429s, not none: a wave of 200 pages a second is still cut,
+  and Meta retries the rest later.
 
 ## 2026.11.09
 

@@ -49,6 +49,10 @@ func TestCrawlerThrottleBlockSameOnBothEdges(t *testing.T) {
 			`"~^2\|0\|1$" 1;`,    // images: Meta crawlers only
 			"zone=meta_img_host_rps:20m rate=50r/s;",
 			"zone=meta_img_host_conn:20m;",
+			// Pages: SEO crawlers 5 r/s, Meta's 10 r/s, per vhost.
+			"zone=meta_seo_host_rps:20m rate=5r/s;",
+			"zone=meta_fb_host_rps:20m  rate=10r/s;",
+			`"2|1"   "meta";`,
 			// Only value-2 (Meta) crawlers reach the image budget: a Meta UA
 			// set back to 1 would silently 429 catalog image fetches again.
 			`"~*meta-externalagent"   2;`,
@@ -78,11 +82,12 @@ func TestCrawlerThrottleImageLimitsWhereverPageLimitsApply(t *testing.T) {
 			t.Fatal(err)
 		}
 		conf := string(b)
-		page := strings.Count(conf, "limit_req  zone=meta_host_rps    burst=60 nodelay;")
+		page := strings.Count(conf, "limit_req  zone=meta_seo_host_rps burst=60 nodelay;")
 		if page == 0 {
 			t.Fatalf("%s: no server applies the crawler page limit", f)
 		}
 		for _, want := range []string{
+			"limit_req  zone=meta_fb_host_rps  burst=100 nodelay;",
 			"limit_req  zone=meta_img_host_rps burst=200 nodelay;",
 			"limit_conn meta_img_host_conn 30;",
 		} {
