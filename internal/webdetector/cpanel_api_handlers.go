@@ -3,7 +3,9 @@
 // GET /api/v1/cpanel/user-info?user=X
 //
 // Admin-only endpoint used by the cPanel plugin (bootstrap.php) to
-// discover the domains and DB users belonging to a cPanel account.
+// discover the domains and DB users belonging to a cPanel account. The
+// domains it returns become the scoped token's vhosts: each domain plus its
+// www. name and cPanel ServerAlias names (panelmap.WithWebAliases).
 // Called server-side from the plugin via loopback curl with an actor assertion.
 // Runs as root inside cfm so it can read all cPanel metadata files.
 package webdetector
@@ -11,6 +13,7 @@ package webdetector
 import (
 	"bufio"
 	"cfm/internal/panelauth"
+	"cfm/internal/panelmap"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -112,7 +115,12 @@ func loadUserMetadata(user string) (cpanelUserInfo, int, error, string) {
 	info := cpanelUserInfo{User: user}
 	// Metadata phase intentionally reads from filesystem only:
 	// /etc/userdatadomains, /etc/userdomains, /var/cpanel/userdata/<user>, /var/cpanel/databases/<user>.json.
-	info.Domains = cpanelDomainsForUser(user)
+	// The scoped token's vhosts are these domains PLUS the names their sites
+	// answer on (www., the userdata ServerAlias list): traffic is logged under
+	// the requested Host, and a token holding only "trimel.gr" matched 13 of
+	// 41 907 requests to that site (qualityweb, 2026-11-09; the rest were
+	// www.trimel.gr). Aliases outside the account's own domains are dropped.
+	info.Domains = panelmap.WithWebAliases(user, cpanelDomainsForUser(user))
 	info.DBUsers, info.Databases = cpanelDBInfoForUser(user)
 	return info, http.StatusOK, nil, ""
 }

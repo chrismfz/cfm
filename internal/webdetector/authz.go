@@ -36,3 +36,18 @@ func RequireScopedOrAdmin(w http.ResponseWriter, r *http.Request) bool {
 	writeJSON(w, http.StatusForbidden, map[string]string{"error": errForbidden})
 	return false
 }
+
+// IsScopedRequest returns true when auth middleware marked this request as
+// authenticated with the scoped (per-vhost cPanel/DA) role: a scoped bearer
+// token or the scoped embed-bootstrap cookie. Admin requests are never scoped.
+func IsScopedRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	authn, _ := r.Context().Value(CtxAuthnKey{}).(bool)
+	if !authn {
+		return false
+	}
+	role, _ := r.Context().Value(CtxRoleKey{}).(string)
+	return role == CtxRoleScoped
+}

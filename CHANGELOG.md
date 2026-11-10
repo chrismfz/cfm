@@ -18,6 +18,26 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **cPanel users see their site's traffic.** CFM opened from cPanel
+  covered only the domain names in `/etc/userdatadomains` (`trimel.gr`), but
+  a site's traffic is logged under the name it was asked for, nearly always
+  `www.trimel.gr`. On qualityweb such a user saw 13 of 41 907 requests to
+  their own site: empty stats, and no forensics for `www.`. The token now
+  also holds every domain's `www.` name and its cPanel ServerAlias names. A
+  name outside the account's own domains is never added. Users get it the
+  next time they open CFM from cPanel.
+- **cPanel users no longer land on admin pages.** A cPanel user who reached
+  the Dashboard, Alerts, Web Bots or another admin-only page saw empty cards
+  saying "admin token required". Those pages now send a cPanel user to Vhost
+  controls. Admin access is unchanged on every route: hostname, port, edge
+  proxy, WHM SSO and cfm-web SSO.
+- **An admin who opened a customer's cPanel CFM stays admin.** Staff who
+  logged in to a customer's cPanel (WHM "log in as user") and opened CFM there
+  got that customer's cookie on the node's host, for every port. Its rolling
+  renewal kept it alive, and the admin's own tab (`hostname/cfm-admin` or
+  `hostname:<port>/cfm-admin`) then browsed as that customer until logout. The
+  admin login now takes precedence over it. Calls from inside the cPanel
+  frame keep the customer's identity.
 - **Google Merchant Center feeds are no longer challenged.** Its feed fetcher
   (`google-xrawler`) got the challenge page instead of a shop's product feed
   whenever the vhost was under a challenge. Its addresses have no reverse DNS,

@@ -63,7 +63,6 @@ import (
 	"cfm/internal/panelmap"
 	sslpkg "cfm/internal/sslcollector"
 	webdet "cfm/internal/webdetector"
-	webui "cfm/internal/webui"
 )
 
 // ── package-level mux (shared with Phase 2 callers via Register()) ────────────
@@ -172,7 +171,7 @@ func Start(
 	// ── Embedded static UI ────────────────────────────────────────────────────
 	// Serves the embedded HTML/JS/CSS at /.
 	// Registered first — API routes below take priority via longest-prefix matching.
-	m.Handle("/", webui.Handler())
+	m.Handle("/", webUIHandler()) // scoped users never get an admin-only page (scoped_page_redirect.go)
 
 	// /cfm-admin/ prefix rewriter — strips the prefix and re-dispatches on the
 	// same mux. Enables direct port access (:6061) when HTML/JS use hardcoded

@@ -15,6 +15,27 @@ than being mistaken for admin. Code that reads `CtxScopeKey{}` **directly**
 (bypassing that helper — today only `deriveScopedMySQLOwners`) must keep its own
 `len(scope)==0` guard.
 
+**What a cPanel scoped token's vhost set holds** (since 2026-11-10). The
+plugin mints it from `/api/v1/cpanel/user-info`, which returns the account's
+domains from `/etc/userdatadomains` plus the names their sites answer on:
+`www.<domain>` for each, and the domain's cPanel ServerAlias list
+(`panelmap.WithWebAliases`). A name is kept only at or under one of the
+account's own domains, and wildcards are dropped. Before, the set held only
+the bare names, while traffic is logged under the requested Host (nearly
+always `www.`), so scope checks matched almost none of the account's traffic.
+
+**Who wins when a browser carries both cookies** (`TokenMiddleware`): a
+bearer token, then the admin SSO cookie (cfm-web / WHM SSO), then the admin
+login session (non-embedded requests only), then the scoped embed cookie.
+The session used to come after the scoped cookie, so an admin who had opened
+a customer's cPanel CFM on the same host (any port) browsed as that customer.
+
+**Admin-only cfm-admin PAGES** (HTML, not endpoints): a scoped request for
+one of `scopedAdminOnlyPages` (`internal/apiserver/scoped_page_redirect.go`,
+the nav's `ADMIN_ONLY_NAV_PATHS`), or for an unknown page path (served as the
+dashboard), gets a `303` to `/cfm-admin/webdetector/controls/`. Assets and
+`/api/` paths are never redirected.
+
 ## `internal/webdetector/http_api.go` + related handlers
 
 ### Scoped-allowed

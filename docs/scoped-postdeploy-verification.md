@@ -36,6 +36,14 @@ Expected:
 - Page loads without redirect loops or blank state.
 - Scoped badge remains visible on each page.
 
+Then, still in **Tab B**, open an admin-only page by URL: `/cfm-admin/`,
+`/cfm-admin/alerts/`, `/cfm-admin/webdetector/bots/`. Expected: each one
+lands on `/cfm-admin/webdetector/controls/` (a `303` from the daemon,
+`scopedAdminOnlyPages` in `internal/apiserver/scoped_page_redirect.go`), never
+a page of empty cards saying "admin token required". In **Tab A (admin)** the
+same URLs open normally, and must keep doing so from every admin route:
+hostname, the direct port, the edge proxy and WHM SSO.
+
 ## 3) Verify token identity via API
 
 Open devtools Network in each tab and inspect `GET /cfm-admin/api/v1/tokens/me`.
@@ -44,6 +52,12 @@ Expected payload semantics:
 
 - **Tab A (admin):** response indicates non-scoped/admin context (`scoped:false`).
 - **Tab B (plugin scoped user):** response indicates scoped context (`scoped:true`).
+- **Tab B `vhosts`:** each of the account's domains appears with its `www.`
+  name and its cPanel ServerAlias names (`trimel.gr`, `www.trimel.gr`,
+  `mail.trimel.gr`). A site's traffic is logged under the Host asked for,
+  nearly always `www.`: a token holding only `trimel.gr` saw 13 of 41 907
+  requests (qualityweb, 2026-11-09). A token minted before this change keeps
+  its old list until the user reopens CFM from cPanel (scoped token TTL 4h).
 
 ## 4) Verify authorization boundaries
 
