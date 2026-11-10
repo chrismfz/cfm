@@ -501,9 +501,11 @@ blocked by anything else. The edge marks every login POST (the login column,
 answer as a failure or a success. The login ledger publishes every failure,
 and this detector bans per client address, over `WINDOW` (1 h):
 
-- `SITE_FAILS` (4) failed logins on ONE site (a registrable domain: `www.`,
+- `SITE_FAILS` (4) failed logins on ONE site (a lostpassword / register
+  form shown again counts a third, below) (a registrable domain: `www.`,
   `staging.` and the bare name are one site);
-- failed logins on `SITES` (3) different sites, any number on each. A proxy
+- failed logins on `SITES` (3) different sites, any number on each (a site
+  counts with one failed login, or three lostpassword / register forms). A proxy
   pool sprays one or two tries per site per address, which no per-site count
   sees: on virgo, 1-6 Nov 2026, 1 363 site-hours had 10+ failing addresses
   with fewer than 5 failures each (22 532 failures on 147 sites).
@@ -515,7 +517,8 @@ take the ban for another's spray; an attacker rotating inside its /64 gets
 one address banned per round, a known gap). In a /64 with several failing
 addresses, a worst address with a single failure (a VPS provider's shared
 /64), or on the one-site rule with no more than half of `SITE_FAILS` on that
-site (two colleagues who mistyped twice each), is a dry run. A second such
+site (two colleagues who mistyped twice each), is a dry run; a lostpassword /
+register form weighs a third there too, as below. A second such
 alert within `WINDOW` bans the worst address: an attacker alternating two
 addresses of its /64 does it every round, colleagues do not.
 Never counted or banned:
@@ -533,7 +536,12 @@ Never counted or banned:
   cleared cookie alone is a failure: `wp-login.php?reauth=1` clears it on
   every failed login. A login hidden behind `?action=lostpassword` (the body's
   `action=login` wins in PHP) that fails with 200 is a failure too, and so
-  is a lostpassword / register form shown again (an unknown user); a
+  is a lostpassword / register form shown again (an unknown user). The edge
+  cannot tell those two apart, so each counts as a third of a failure on
+  the one-site rule: a customer who forgot the password and tries a few
+  addresses is not banned (gacbp.com, 2026-11-08: 2 failed logins and 4
+  reset requests, 3.3 of 4), and a bot hiding its logins there needs three
+  times the tries; a
   password reset that went through (200, its `wp-resetpass-` cookie
   cleared) is not. On a site whose plugin answers a failed login with a
   redirect, such a hidden login still reads `na` (a known gap);
@@ -588,7 +596,7 @@ Known gaps, where a legitimate client can still be banned:
 - the owner record is the ledger's fixed 24 h window, in memory (above): a
   login monitor whose stored password went stale is banned soon after it
   empties;
-- a lostpassword request the site cannot mail answers 200 and counts;
+- a lostpassword request the site cannot mail answers 200 and counts (a third);
 - the other way round, a site whose wp-login.php answers carry no
   `wordpress_test_cookie` (a renamed `TEST_COOKIE`; 4yourhealth.gr's real
   successes carry none) never counts a failure;

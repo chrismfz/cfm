@@ -6,7 +6,8 @@
 // Two rules, per client, over one sliding WINDOW (1 h by default):
 //
 //   - SITE_FAILS: that many failed logins on ONE site (a registrable domain:
-//     www., staging. and the bare name are one site);
+//     www., staging. and the bare name are one site); a lostpassword /
+//     register form shown again counts a third (Event.Form);
 //   - SITES: failed logins on that many DIFFERENT sites, any number on each.
 //     A proxy pool spreads a spray as one or two tries per site per address,
 //     which no per-site count ever sees (virgo, 1-6 Nov 2026: 1 363
@@ -71,7 +72,7 @@ const Kind = core.AlertKind("WEB/LOGIN_BRUTEFORCE")
 type Config struct {
 	Every     time.Duration
 	Window    time.Duration
-	SiteFails int // failures on one site within Window; 0 turns the rule off
+	SiteFails int // failures on one site within Window (a Form one counts a third); 0 turns the rule off
 	Sites     int // distinct failed sites within Window; 0 turns the rule off
 	DryRun    bool
 
@@ -102,6 +103,10 @@ type Event struct {
 	Tag   string
 	OK    bool
 	Owner bool
+	// Form: a lostpassword / register form shown again, or a login hidden
+	// behind that query (webdetector.LoginEvent.Form): a third of a failure on
+	// the one-site rule.
+	Form bool
 }
 
 // RetractWindow is how far back a success takes back failures, and
@@ -123,6 +128,7 @@ type fail struct {
 	site string
 	host string
 	tag  string
+	form bool
 }
 
 type client struct {
@@ -435,26 +441,42 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 	if at <= cut {
 		return core.Alert{}, false // older than the window: too late to count
 	}
-	c.fails = append(c.fails, fail{at: at, ip: ev.IP, site: ev.Site, host: ev.Host, tag: ev.Tag})
+	c.fails = append(c.fails, fail{at: at, ip: ev.IP, site: ev.Site, host: ev.Host, tag: ev.Tag, form: ev.Form})
 	if len(c.fails) > maxEventsPerIP {
 		sort.Slice(c.fails, func(i, j int) bool { return c.fails[i].at < c.fails[j].at })
 		c.fails = append(c.fails[:0], c.fails[len(c.fails)-maxEventsPerIP:]...)
 	}
 
-	onSite := 0
-	sites := map[string]int{}
+	// onSite3 is three times the failures on this site: a Form failure
+	// counts 1, a login 3. On gacbp.com (2026-11-08) a Greek customer failed
+	// twice, then asked for a reset four times with the wrong address: 6
+	// "failures", 3.3 now, under SITE_FAILS = 4.
+	onSite3, onSite, onSiteForm := 0, 0, 0
+	siteW := map[string]int{} // weight per site, a login 3, a form 1
 	for _, f := range c.fails {
 		if f.at <= c.firedAt {
 			continue
 		}
-		sites[f.site]++
+		siteW[f.site] += failWeight(f)
 		if f.site == ev.Site {
 			onSite++
+			onSite3 += failWeight(f)
+			if f.form {
+				onSiteForm++
+			}
+		}
+	}
+	// A site counts toward SITES with one failed login, or three forms: a
+	// customer asking three of their sites for a reset is no spray.
+	sites := map[string]int{}
+	for s, w := range siteW {
+		if w >= 3 {
+			sites[s] = w
 		}
 	}
 	rule := ""
 	switch {
-	case d.cfg.SiteFails > 0 && onSite >= d.cfg.SiteFails:
+	case d.cfg.SiteFails > 0 && onSite3 >= 3*d.cfg.SiteFails:
 		rule = "site"
 	case d.cfg.Sites > 0 && len(sites) >= d.cfg.Sites:
 		rule = "sites"
@@ -470,6 +492,13 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		c.quietUntil = at + win
 	}
 	a := d.alert(ev, key, c, rule, onSite, sites)
+	if onSiteForm > 0 && rule == "site" {
+		// Say how many were reset / register forms (a third each): what an
+		// unblock request needs to see.
+		a.Extra["site_form_fails"] = strconv.Itoa(onSiteForm)
+		a.Extra["reason"] = fmt.Sprintf("%d failed %s logins and %d failed lostpassword / register forms (a third each) on %s in %s",
+			onSite-onSiteForm, ev.Tag, onSiteForm, ev.Site, d.cfg.Window)
+	}
 	// On the one-site rule the /64's addresses are weighed on that site only.
 	scope := ""
 	if rule == "site" {
@@ -482,16 +511,17 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		// shared /64, a rotating client, two colleagues in an office /64 who
 		// mistyped twice each at SITE_FAILS = 4). Logged, never banned. The
 		// worst address needs more than half of SITE_FAILS on the rule's
-		// site, and 2 failures either way.
+		// site, and 2 failures either way, weighed as the rule weighs them
+		// (worst is in thirds: a login 3, a form 1).
 		need := 2
 		if rule == "site" && d.cfg.SiteFails/2+1 > need {
 			need = d.cfg.SiteFails/2 + 1
 		}
 		switch {
-		case addrs > 1 && worst < 2:
+		case addrs > 1 && worst < 2*3:
 			a.Extra["enforcement"] = "dryrun"
 			a.Extra["ipv6_ambiguous"] = "1"
-		case addrs > 1 && worst < need:
+		case addrs > 1 && worst < need*3:
 			// Colleagues do not do it twice in one window; an attacker
 			// alternating two addresses of its /64 does, every round.
 			if c.ambigAt > 0 && at-c.ambigAt < win {
@@ -528,8 +558,12 @@ func (d *Detector) alert(ev Event, key string, c *client, rule string, onSite in
 	}
 	var samples []string
 	for _, f := range fails {
-		samples = append(samples, fmt.Sprintf("%s %s failed %s login host=%s",
-			time.Unix(f.at, 0).UTC().Format(time.RFC3339), f.ip, f.tag, f.host))
+		what := "login"
+		if f.form {
+			what = "form (lostpassword / register)"
+		}
+		samples = append(samples, fmt.Sprintf("%s %s failed %s %s host=%s",
+			time.Unix(f.at, 0).UTC().Format(time.RFC3339), f.ip, f.tag, what, f.host))
 	}
 	a := core.Alert{
 		When:    ev.When,
@@ -598,8 +632,9 @@ func (d *Detector) retractLocked(key string, ev Event, at int64, max int) {
 	}
 }
 
-// worstAddr is the address with the most failures after firedAt (the newest
-// one's on a tie), its count, and how many addresses failed. For IPv4 it is
+// worstAddr is the address with the most failures after firedAt, weighed in
+// thirds (failWeight; the newest one's on a tie), that weight, and how many
+// addresses failed. For IPv4 it is
 // the only one.
 func worstAddr(fails []fail, after int64, site string) (string, int, int) {
 	n := map[string]int{}
@@ -608,7 +643,7 @@ func worstAddr(fails []fail, after int64, site string) (string, int, int) {
 		if f.at <= after || (site != "" && f.site != site) {
 			continue
 		}
-		n[f.ip]++
+		n[f.ip] += failWeight(f)
 		if f.at > last[f.ip] {
 			last[f.ip] = f.at
 		}
@@ -620,6 +655,16 @@ func worstAddr(fails []fail, after int64, site string) (string, int, int) {
 		}
 	}
 	return best, n[best], len(n)
+}
+
+// failWeight is a failure in thirds: a login 3, a lostpassword / register
+// form shown again 1 (Event.Form). The rules, the /64 guard and the choice of
+// the /64's address all weigh with it.
+func failWeight(f fail) int {
+	if f.form {
+		return 1
+	}
+	return 3
 }
 
 // pruneLocked drops the clients whose last failure left the window. The

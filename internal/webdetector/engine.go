@@ -1595,7 +1595,7 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 			// A bypass client (a crawler, QUIC.cloud: rec.Bypass) is not
 			// counted: through a CDN it is every visitor of the sites behind it.
 			if !rec.Bypass && !e.isBypassed(rec.IP) {
-				e.loginLedger.observe(rec, host, af.Tag, outcome)
+				e.loginLedger.observeForm(rec, host, af.Tag, outcome, authFormFail(af))
 			}
 		}
 	}

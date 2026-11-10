@@ -52,6 +52,18 @@ back-filled here — see the git/PR history for that period.
   A `detectors.conf` with its own leniency block needs the same edit.
 
 ### Fixed
+- **`login_bruteforce`: a forgotten password no longer adds up to a ban.**
+  A lostpassword or register form shown again (an unknown user or address)
+  counted as a full failed login, so a customer who failed twice and then
+  tried four addresses for a reset reached the threshold (a Greek customer on
+  gacbp.com, 2026-11-08, during the dry run: armed, the GR/CY leniency would
+  have made it 10 minutes, and a customer abroad would have had 3 days). Such a form now counts as a third of a
+  failure on the one-site rule: that customer is at 3.3 of the 4 needed. A
+  brute forcer hiding its logins behind `?action=lostpassword` (the edge
+  cannot tell the two apart) is still banned, at three times the tries (12).
+  A site counts toward the many-sites rule with one failed login or three
+  forms, and in an IPv6 /64 the address banned, and the ambiguity check, weigh
+  forms the same way.
 - **cPanel users see their site's traffic.** CFM opened from cPanel
   covered only the domain names in `/etc/userdatadomains` (`trimel.gr`), but
   a site's traffic is logged under the name it was asked for, nearly always

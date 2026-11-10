@@ -387,3 +387,17 @@ func TestAuthCorpusIngestAndAPI(t *testing.T) {
 		t.Fatalf("admin: %d %s", w.Code, w.Body.String())
 	}
 }
+
+// The real path from the edge column: a lostpassword form shown again is a
+// failure, and a Form one; a plain login failure is not a Form.
+func TestLostpasswordLineIsAFormFailure(t *testing.T) {
+	rec := LogRec{Status: 200, UpstreamName: "cfm_apache", Upstream: true}
+	af, ok := parseAuthField("WP_LOGIN;li=0;a=lostpassword;tc=1;l=;c=wordpress_test_cookie")
+	if !ok || authOutcome(rec, af) != "fail" || !authFormFail(af) {
+		t.Fatalf("lostpassword: ok=%v outcome=%q form=%v", ok, authOutcome(rec, af), authFormFail(af))
+	}
+	af, ok = parseAuthField("WP_LOGIN;li=0;tc=1;l=;c=wordpress_test_cookie")
+	if !ok || authOutcome(rec, af) != "fail" || authFormFail(af) {
+		t.Fatalf("login: ok=%v outcome=%q form=%v", ok, authOutcome(rec, af), authFormFail(af))
+	}
+}
