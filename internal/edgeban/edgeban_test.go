@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -274,8 +275,9 @@ func TestListMatchesBanned(t *testing.T) {
 			t.Errorf("List has %s, Banned says no", it.IP)
 		}
 	}
+	sort.Strings(ips) // List is unordered
 	if want := "198.51.100.1 198.51.100.2 203.0.113.9"; strings.Join(ips, " ") != want {
-		t.Fatalf("List = %v, want %s (sorted; no allowed or proxy address)", ips, want)
+		t.Fatalf("List = %v, want %s (no allowed or proxy address)", ips, want)
 	}
 	now = now.Add(2 * time.Minute)
 	if got := len(s.List()); got != 2 {

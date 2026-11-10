@@ -22,10 +22,11 @@ back-filled here — see the git/PR history for that period.
   list was rebuilt, every ban was checked against every nft allow net in
   turn. With ~23 000 bans that took 55-150 ms per rebuild on mars, orion and
   virgo, ~800-1 700 "slow handler" lines a day. The allow nets are now
-  merged into sorted ranges and searched (190 ms → 9 ms with 1 000 allow
-  nets). A ban that expires no longer triggers a rebuild either: the edge
-  drops it at its expiry by itself, and the next change removes it from the
-  list.
+  merged into sorted ranges and searched, and the list is no longer sorted
+  for nothing (190 ms → 3 ms with 1 000 allow nets). The rebuild also runs
+  less often: a ban that expires no longer triggers one (the edge drops it at
+  its expiry by itself), and neither does the 2 minute reconcile with nft
+  when it changed nothing.
 - **cPanel users see their site's traffic.** CFM opened from cPanel
   covered only the domain names in `/etc/userdatadomains` (`trimel.gr`), but
   a site's traffic is logged under the name it was asked for, nearly always

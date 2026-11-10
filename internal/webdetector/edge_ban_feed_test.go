@@ -157,7 +157,15 @@ func TestEdgeBanSyncOnlyOnChange(t *testing.T) {
 	if _, idle, raw := pollEdgeBan(t, b, at(ch), "tok"); len(idle.Del) != 0 || scans != before {
 		t.Fatalf("an expiry alone resynced: %s", raw)
 	}
-	// The next change carries the expired ban's delete.
+	// The edgeBanSyncMax bound alone (nothing moves the version: a reconcile
+	// that cannot read nft) removes it too.
+	b.edgeBanJournal.mu.Lock()
+	b.edgeBanJournal.recheck = time.Now().Add(-time.Second)
+	b.edgeBanJournal.mu.Unlock()
+	if _, r, raw := pollEdgeBan(t, b, at(ch), "tok"); len(r.Del) != 1 || r.Del[0] != "198.51.100.9" {
+		t.Fatalf("after edgeBanSyncMax: %s, want the expired ban deleted", raw)
+	}
+	// The next change carries the expired ban's delete (from the old position).
 	s.Add(net.ParseIP("198.51.100.10"), nil, "manual", true)
 	if _, next, raw := pollEdgeBan(t, b, at(ch), "tok"); len(next.Del) != 1 || next.Del[0] != "198.51.100.9" {
 		t.Fatalf("after the next change: %s, want the expired ban deleted", raw)

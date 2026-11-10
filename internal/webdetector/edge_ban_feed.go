@@ -35,10 +35,13 @@ const edgeBanJournalMax = 4096
 
 // edgeBanSyncMax bounds how long the published list goes unchecked against
 // the store when nothing bumps its version (IGNORE_IPS can change under it on
-// a config reload, and expired bans leave it). An expiry alone does not
-// resync: the edge drops an entry at its expiry by itself (the dict TTL),
-// and with ~20 000 TTL bans the earliest expiry is always seconds away, so
-// resyncing on it rebuilt the whole list on nearly every poll.
+// a config reload). An expiry alone does not resync: the edge drops an
+// entry at its expiry by itself (the dict TTL), and with ~20 000 TTL bans the
+// earliest expiry is always seconds away, so resyncing on it rebuilt the
+// whole list on nearly every poll. Expired bans leave the published list at
+// the next resync: the store's reconcile (every ~2 minutes) deletes them,
+// which moves the version, and this bound covers a reconcile that cannot
+// read nft.
 const edgeBanSyncMax = 5 * time.Minute
 
 // edgeBanChange is one journal line: ip banned until Exp (unix seconds, 0 =
@@ -109,6 +112,9 @@ func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) map[strin
 			ea, ec := items[a].Expires, items[c].Expires
 			if ea.IsZero() != ec.IsZero() {
 				return ea.IsZero()
+			}
+			if ea.Equal(ec) {
+				return items[a].IP < items[c].IP // List is unordered: ties stay deterministic
 			}
 			return ea.After(ec)
 		})

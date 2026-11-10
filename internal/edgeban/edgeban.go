@@ -29,6 +29,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -93,13 +94,12 @@ var (
 // one (a Cloudflare Worker's subrequest), so a ban of that address would
 // 403 every visitor who arrives the same way.
 func SetTrustedProxies(nets []*net.IPNet) {
-	elems := make([]string, 0, len(nets))
+	a := &allowSet{}
 	for _, n := range nets {
-		if n != nil {
-			elems = append(elems, n.String())
-		}
+		a.addNet(n)
 	}
-	proxies.Store(parseAllowSet(elems))
+	a.merge()
+	proxies.Store(a)
 	version.Add(1)
 }
 
@@ -298,17 +298,18 @@ type Item struct {
 	Expires time.Time
 }
 
-// List returns every address Banned answers true for now, sorted by
-// address: the feed the edge pulls (/nginx/edgeban). Empty until the first
-// Reconcile and while switched off, as Banned.
+// List returns every address Banned answers true for now, in no particular
+// order: the feed the edge pulls (/nginx/edgeban), which puts it in a map.
+// Empty until the first Reconcile and while switched off, as Banned.
 func (s *Store) List() []Item {
 	if s == nil || !enabled.Load() || !s.ready.Load() {
 		return nil
 	}
 	now := s.now()
-	// Copy under the lock, check outside it: the allow sets are scanned per
-	// entry, and a writer waiting on a long read lock would stall every
-	// Banned() behind it (Go's writer preference) on the decision hot path.
+	// Copy under the lock, check outside it: every entry is checked against
+	// the allow sets and the trusted proxies, and a writer waiting on a long
+	// read lock would stall every Banned() behind it (Go's writer
+	// preference) on the decision hot path.
 	s.mu.RLock()
 	all := make([]Item, 0, len(s.m))
 	ents := make([]Entry, 0, len(s.m))
@@ -323,7 +324,6 @@ func (s *Store) List() []Item {
 			out = append(out, it)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
 	return out
 }
 
@@ -375,7 +375,7 @@ func (s *Store) Reconcile(snap Snapshot) {
 		}
 	}
 	allow := parseAllowSet(snap.Allows)
-	s.allow.Store(allow)
+	old := s.allow.Swap(allow)
 	changed := false
 	s.mu.Lock()
 	for k, e := range s.m {
@@ -399,11 +399,14 @@ func (s *Store) Reconcile(snap Snapshot) {
 		}
 	}
 	s.mu.Unlock()
-	s.ready.Store(true)
-	s.cleared.Store(false)
-	version.Add(1) // the allow sets and readiness, even with no entry changed
+	wasReady, wasCleared := s.ready.Swap(true), s.cleared.Swap(false)
 	if changed {
-		s.save()
+		s.save() // bumps the version
+	} else if !wasReady || wasCleared || !allow.equal(old) {
+		// The answers moved without an entry changing: readiness, or the
+		// allow sets. A reconcile that changed nothing leaves the version
+		// alone, or every 2 minute reconcile rebuilt the edge's list.
+		version.Add(1)
 	}
 }
 
@@ -448,23 +451,7 @@ func parseAllowSet(elems []string) *allowSet {
 		case e == "":
 		case strings.Contains(e, "/"):
 			if _, n, err := net.ParseCIDR(e); err == nil {
-				// As net.IPNet.Contains reads it: a v4-mapped v6 CIDR is a v4 one.
-				ip, m := n.IP.To4(), n.Mask
-				if ip == nil {
-					ip = n.IP
-				}
-				if len(m) == net.IPv6len && len(ip) == net.IPv4len {
-					m = m[12:]
-				}
-				if len(m) != len(ip) {
-					continue
-				}
-				lo, hi := make(net.IP, len(ip)), make(net.IP, len(ip))
-				for i := range ip {
-					lo[i] = ip[i] & m[i]
-					hi[i] = lo[i] | ^m[i]
-				}
-				a.add(lo, hi)
+				a.addNet(n)
 			}
 		case strings.Contains(e, "-"):
 			parts := strings.SplitN(e, "-", 2)
@@ -473,11 +460,59 @@ func parseAllowSet(elems []string) *allowSet {
 				a.add(norm(lo), norm(hi))
 			}
 		default:
-			if ip := net.ParseIP(e); ip != nil {
+			// key() refuses the unspecified address, as the old host map did.
+			if ip := net.ParseIP(e); ip != nil && !ip.IsUnspecified() {
 				a.add(norm(ip), norm(ip))
 			}
 		}
 	}
+	a.merge()
+	return a
+}
+
+// addNet records a CIDR as net.IPNet.Contains reads it: a v4-mapped v6 CIDR
+// is a v4 one. A mask that is not a prefix (only an IPNet built by hand; a
+// parsed CIDR always is one) is no single interval and is skipped.
+func (a *allowSet) addNet(n *net.IPNet) {
+	if n == nil {
+		return
+	}
+	ip, m := n.IP.To4(), n.Mask
+	if ip == nil {
+		ip = n.IP
+	}
+	if len(m) == net.IPv6len && len(ip) == net.IPv4len {
+		m = m[12:]
+	}
+	if len(m) != len(ip) {
+		return
+	}
+	if ones, bits := m.Size(); ones == 0 && bits == 0 {
+		return // not a prefix: no single interval
+	}
+	lo, hi := make(net.IP, len(ip)), make(net.IP, len(ip))
+	for i := range ip {
+		lo[i] = ip[i] & m[i]
+		hi[i] = lo[i] | ^m[i]
+	}
+	a.add(lo, hi)
+}
+
+// equal reports whether a and b answer the same (nil is empty).
+func (a *allowSet) equal(b *allowSet) bool {
+	var av4, bv4 []span4
+	var av6, bv6 []span6
+	if a != nil {
+		av4, av6 = a.v4, a.v6
+	}
+	if b != nil {
+		bv4, bv6 = b.v4, b.v6
+	}
+	return slices.Equal(av4, bv4) && slices.Equal(av6, bv6)
+}
+
+// merge sorts and merges the spans (parseAllowSet, after the adds).
+func (a *allowSet) merge() {
 	a.v4 = mergeSpans(a.v4, func(x, y span4) bool { return x.lo < y.lo },
 		func(cur *span4, next span4) bool {
 			if cur.hi == ^uint32(0) || next.lo <= cur.hi+1 {
@@ -498,7 +533,6 @@ func parseAllowSet(elems []string) *allowSet {
 			}
 			return false
 		})
-	return a
 }
 
 // add records the interval lo-hi of one family (4 or 16 bytes, as a v4 or

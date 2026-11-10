@@ -44,7 +44,7 @@ func benchStore(b *testing.B, n, nets, hosts int) *Store {
 
 func BenchmarkList(b *testing.B) {
 	for _, c := range []struct{ n, nets, hosts int }{{23000, 0, 0}, {23000, 100, 1000}, {23000, 1000, 5000}} {
-		b.Run(fmt.Sprintf("bans=%d/nets=%d", c.n, c.nets), func(b *testing.B) {
+		b.Run(fmt.Sprintf("bans=%d/nets=%d/hosts=%d", c.n, c.nets, c.hosts), func(b *testing.B) {
 			s := benchStore(b, c.n, c.nets, c.hosts)
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -138,5 +138,25 @@ func TestAllowSetMatchesIPNetRandom(t *testing.T) {
 				t.Fatalf("round %d: %s: %v, IPNet %v (%v)", round, ip, got, want, elems)
 			}
 		}
+	}
+}
+
+// A reconcile that changes nothing (same entries, same allow sets) leaves
+// the version alone: the edge's list is not rebuilt every 2 minutes.
+func TestIdleReconcileKeepsTheVersion(t *testing.T) {
+	s := New("")
+	allows := []string{"192.0.2.0/24", "198.51.100.7"}
+	s.Reconcile(Snapshot{Allows: allows})
+	v := Version()
+	s.Reconcile(Snapshot{Allows: []string{"198.51.100.7", "192.0.2.0/24"}})
+	if Version() != v {
+		t.Fatal("an idle reconcile moved the version")
+	}
+	s.Reconcile(Snapshot{Allows: []string{"192.0.2.0/24"}})
+	if Version() == v {
+		t.Fatal("a changed allow set did not move the version")
+	}
+	if a := parseAllowSet([]string{"0.0.0.0", "::"}); a.contains(net.ParseIP("0.0.0.0")) || a.contains(net.ParseIP("::")) {
+		t.Fatal("the unspecified address is an allow host")
 	}
 }
