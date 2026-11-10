@@ -6,6 +6,7 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectors/loginbf"
 	"cfm/internal/detectors/meta"
+	"cfm/internal/logging"
 	"cfm/internal/webdetector"
 )
 
@@ -122,6 +123,21 @@ func applyBuiltinLoginBruteforce(secs *Sections) {
 	}
 }
 
+// loginBruteforceDryRun: a written section without DRY_RUN is armed, but a
+// value kvBool cannot read (y, dryrun, enabled) keeps the dry run and says
+// so: a garbled burn-in setting must not start 3 day fleet bans.
+func loginBruteforceDryRun(section string, kv KV) bool {
+	on, off := kvBool(kv, "DRY_RUN", true), kvBool(kv, "DRY_RUN", false)
+	if on == off {
+		return on
+	}
+	if v := cleanScalar(kv["DRY_RUN"]); v != "" {
+		logging.Logf("[detectors] %s: DRY_RUN = %q is neither 0 nor 1: dry run", section, v)
+		return true
+	}
+	return false
+}
+
 func init() {
 	tmpl := map[string]string{}
 	for k, v := range loginBruteforceDefaults() {
@@ -142,8 +158,7 @@ func init() {
 			Window:    kvDur(kv, "WINDOW", time.Hour),
 			SiteFails: kvInt(kv, "SITE_FAILS", 4),
 			Sites:     kvInt(kv, "SITES", 3),
-			// A written section without the key is armed too.
-			DryRun:    kvBool(kv, "DRY_RUN", false),
+			DryRun:    loginBruteforceDryRun(section, kv),
 			AllowIPs:  csvKV(kv, "ALLOW_IPS"),
 			AllowNets: csvKV(kv, "ALLOW_NETS"),
 			// The proxy list is the default even for a section the operator

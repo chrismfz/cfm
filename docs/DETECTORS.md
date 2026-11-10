@@ -514,8 +514,10 @@ failures in the window (in an office /64, a colleague's one typo must not
 take the ban for another's spray; an attacker rotating inside its /64 gets
 one address banned per round, a known gap). In a /64 with several failing
 addresses, a worst address with a single failure (a VPS provider's shared
-/64), or on the one-site rule with no more than half of `SITE_FAILS` (two
-colleagues who mistyped twice each), is a dry run.
+/64), or on the one-site rule with no more than half of `SITE_FAILS` on that
+site (two colleagues who mistyped twice each), is a dry run. A second such
+alert within `WINDOW` bans the worst address: an attacker alternating two
+addresses of its /64 does it every round, colleagues do not.
 Never counted or banned:
 
 - a failure on a site where the client failed and already succeeded at
@@ -616,8 +618,9 @@ meets the nft drop (`[webdetector] EDGE_BAN_MODE = enforce`, the default,
 6h` keeps it from being mailed and reported again every few minutes). The
 `[login_bruteforce.leniency]` tier gives a Greek or Cypriot address a 10
 minute ban reported nowhere: customers who lock themselves out use
-unblock.myip.gr. Measured on virgo (Apache logs, 1-6 Nov): no Greek address
-among the 391 that failed 5-19 times in an hour on one site.
+unblock.myip.gr. Measured on virgo, mars and titan (Apache logs, 6-10 Nov):
+no Greek or Cypriot address among those 4 failures on a site or 3 sites
+catch beyond 5 and 5.
 
 **Built in.** A node whose `detectors.conf` has no `[login_bruteforce]` runs
 the stock section and its leniency (`applyBuiltinLoginBruteforce`), so the

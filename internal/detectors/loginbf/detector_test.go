@@ -454,6 +454,33 @@ func TestOfficeIPv6WithTwoTyposEachIsADryRun(t *testing.T) {
 	}
 }
 
+func TestIPv6HalfRuleCountsTheRulesSiteOnly(t *testing.T) {
+	// ::1 fails twice on a.gr and once on b.gr, ::2 twice on a.gr: on a.gr
+	// it is still two colleagues with two typos each.
+	d := newTest(Config{SiteFails: 4, Sites: 3})
+	for i, f := range [][2]string{{"::1", "b.gr"}, {"::1", "a.gr"}, {"::2", "a.gr"}, {"::1", "a.gr"}, {"::2", "a.gr"}} {
+		d.Enqueue(failAt("2001:db8:7:9"+f[0], f[1], t0.Add(time.Duration(i)*time.Minute)))
+	}
+	got := run(t, d)
+	if len(got) != 1 || got[0].Extra["ipv6_ambiguous"] != "1" {
+		t.Fatalf("stray typos elsewhere tipped the /64 guard: %+v", got)
+	}
+}
+
+func TestIPv6AlternatingAddressesBannedOnTheSecondRound(t *testing.T) {
+	// An attacker alternating two addresses of its /64, 2 + 2 a round.
+	d := newTest(Config{SiteFails: 4, Sites: 3})
+	addrs := []string{"2001:db8:7:a::1", "2001:db8:7:a::2"}
+	for i := 0; i < 8; i++ {
+		d.Enqueue(failAt(addrs[i%2], "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	got := run(t, d)
+	if len(got) != 2 || got[0].Extra["ipv6_ambiguous"] != "1" ||
+		got[1].Extra["ipv6_ambiguous"] == "1" || got[1].Extra["enforcement"] == "dryrun" {
+		t.Fatalf("second round of an alternating /64 must ban: %+v", got)
+	}
+}
+
 func TestDryRunAlertsOncePerClientPerWindow(t *testing.T) {
 	// Never banned, a dry-run client keeps failing: one would-be ban an hour.
 	d := newTest(Config{DryRun: true})

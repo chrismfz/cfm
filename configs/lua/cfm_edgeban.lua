@@ -44,8 +44,9 @@
 --
 -- MODE ([webdetector] EDGE_BAN_MODE, sent with every reply): "enforce" (the
 -- daemon's default since 2026-11-10) answers 403; "log" counts and logs what
--- it would block. Before the first reply the copy is empty, so nothing is
--- blocked either way. The counts ride on the next poll to the daemon (cfm debug / the
+-- it would block. Until a reply comes, the copy and the mode the dict
+-- already holds (they survive a same-size reload and a daemon restart)
+-- keep applying; on a fresh dict the copy is empty and nothing is blocked. The counts ride on the next poll to the daemon (cfm debug / the
 -- admin API). Logging is one line per address per minute.
 --
 -- PROXIED ONLY: a direct client is nft's (an allow set there wins over a

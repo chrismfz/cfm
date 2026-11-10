@@ -163,9 +163,16 @@ func TestLoginBruteforceShipsArmed(t *testing.T) {
 		}
 		_ = d.Shutdown()
 	}
-	det, _ := f(loginBruteforceType, KV{"DRY_RUN": "1"}, KV{})
-	if !det.(*loginbf.Detector).DryRun() {
-		t.Error("DRY_RUN = 1 is armed")
+	for _, v := range []string{"1", "y", "dryrun", "enabled"} {
+		det, _ := f(loginBruteforceType, KV{"DRY_RUN": v}, KV{})
+		if !det.(*loginbf.Detector).DryRun() {
+			t.Errorf("DRY_RUN = %q is armed, want the dry run", v)
+		}
+		_ = det.(*loginbf.Detector).Shutdown()
+	}
+	det, _ := f(loginBruteforceType, KV{"DRY_RUN": "0"}, KV{})
+	if det.(*loginbf.Detector).DryRun() {
+		t.Error("DRY_RUN = 0 is a dry run")
 	}
 	_ = det.(*loginbf.Detector).Shutdown()
 }

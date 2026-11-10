@@ -25,12 +25,16 @@ back-filled here — see the git/PR history for that period.
   thresholds go from 5 and 5 to 4 failures on one site, or failures on 3
   sites, within an hour: botnets were sending 4 tries per address, or trying
   3-4 sites, to stay under 5. On virgo, mars and titan's Apache logs that
-  catches 17-42% more addresses, none Greek or Cypriot. The GR/CY leniency
-  (10 minutes, not reported) is unchanged. In an IPv6 /64 with several
-  failing addresses, the worst one needs more than half of `SITE_FAILS` on
+  catches 17-42% more addresses, none Greek or Cypriot. The GR/CY tier
+  (10 minutes, not reported) is unchanged; it adds Cloudflare, below. In an IPv6 /64
+  with several failing addresses, the worst one needs more than half of `SITE_FAILS` on
   one site (3 of 4), or the alert only logs: two colleagues who mistyped
-  twice each are not banned. A `detectors.conf` that writes `DRY_RUN = 1` or
-  its own thresholds keeps them.
+  twice each are not banned, and an attacker alternating two addresses is
+  banned on its second round. A garbled `DRY_RUN` (`y`, `dryrun`) keeps the
+  dry run, with a warning. A `detectors.conf` that writes `DRY_RUN = 1` or
+  its own thresholds keeps them: a node whose `detectors.conf` came from
+  the previous reference config is NOT armed until it is edited (and its
+  leniency block needs Cloudflare's 13335 added, below).
 - **A banned client behind Cloudflare is now blocked at the edge.**
   `[webdetector] EDGE_BAN_MODE` defaults to `enforce`: the edge answers 403
   to a proxied client the web detectors, the WAF autoblock, modsec,
