@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.10
+
 ### Added
 - **The challenge log and history rows name the software-renderer family.**
   When a software renderer is detected, `sig=` (and `payload.sig` on the
@@ -50,8 +54,6 @@ back-filled here — see the git/PR history for that period.
   rather than closing the gap. Kill switch: `[webdetector]
   CHALLENGE_V2_HW_TELLS = 0` (turns off `linux_sw` with `mobile_hw_lie` /
   `mac_hw_lie`).
-
-## 2026.11.10
 
 ### Changed
 - **`login_bruteforce` is armed, at 4 failures per site or 3 sites.** After
