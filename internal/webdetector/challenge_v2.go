@@ -295,17 +295,21 @@ const (
 	// payload.
 	tellUALie = 50
 
-	// A desktop Linux UA (X11; Linux / Linux x86_64 / Linux aarch64 — never
-	// Android, ChromeOS or any mobile UA: uaClaimsDesktopLinux) reporting a
-	// SOFTWARE renderer (the sw_renderer match). Operator decision
+	// A desktop Linux UA (an X11 Linux platform — never Android, ChromeOS, a
+	// mobile UA, a TV / cast device / car or a cloud browser:
+	// uaClaimsDesktopLinux) reporting a SOFTWARE renderer (the sw_renderer
+	// match): an OS prior on the renderer rather than a contradiction with
+	// the claimed device, scored in the same group. Operator decision
 	// 2026-11-10, E4 read 6 (docs/abuse-defense-progress.md): the convicted
 	// farm fingerprint c28caa00 dropped its device-claim lies and passed at
 	// exactly sw_renderer,no_input = 90 with an X11 Linux Chrome UA — 85 684
 	// passes on four nodes vs 23 GR/CY consumer-ISP solves, all on the farm's
 	// own fingerprints. A device-claim member like the four above (scored as
-	// the group's max, once), so it never rejects alone and never stacks with
-	// them: Linux + sw_renderer = 80 still PASSES (D5b), only with no_input
-	// (110) or another opener does it reject. NOT a core-count tell — the
+	// the group's max, once), so it never stacks with them: Linux +
+	// sw_renderer = 80 still PASSES (D5b), and only no_input (110) or another
+	// opener rejects. It never decides a reject alone: the real-input rescue
+	// discounts its share (linuxSWShare), so a solve with real input is
+	// rescued exactly as it would be without it. NOT a core-count tell — the
 	// RDS/VDI rule below still holds; this reads the UA's OS claim against
 	// the renderer, not hardwareConcurrency. Honest limit: the UA is
 	// client-authored, so the farm can claim Windows, where sw_renderer,
@@ -318,9 +322,10 @@ const (
 	macHWLieMinCores    = 64
 )
 
-// THE DEVICE-CLAIM GROUP. touch_lie, mobile_hw_lie, mac_hw_lie, ua_lie and
-// (since 2026-11-10) linux_sw all say one thing — "this is not the
-// device/browser the UA claims" — and one spoof trips several at once (DevTools phone emulation or a UA switcher on a
+// THE DEVICE-CLAIM GROUP. touch_lie, mobile_hw_lie, mac_hw_lie and ua_lie
+// say "this is not the device/browser the UA claims" — a contradiction with
+// the claimed device — and linux_sw (since 2026-11-10) is an OS prior on the
+// renderer, scored the same way. One spoof trips several at once (DevTools phone emulation or a UA switcher on a
 // 16-thread desktop reports zero touch points AND desktop core counts). Summed,
 // a single exotic setup would reject on ONE fact, which D5b forbids. So every
 // member that fires is still LISTED in tells (the log shows what was seen), but
@@ -351,8 +356,10 @@ type challengeV2State struct {
 	shadowLines bool // emit would_v2 lines to the abuse-shadow log (rides ABUSE_SHADOW)
 	// hwTells gates the device-claim hardware tells (mobile_hw_lie,
 	// mac_hw_lie, and since 2026-11-10 linux_sw): CHALLENGE_V2_HW_TELLS,
-	// default on. A kill switch, not a burn-in flag — the tells were measured before shipping — kept because
-	// they bite fleet-wide the moment the binary lands (every WAF
+	// default on. A kill switch, not a burn-in flag — mobile_hw_lie and
+	// mac_hw_lie were measured on a corpus before shipping, linux_sw on read
+	// 6's farm and human counts — kept because they bite fleet-wide the
+	// moment the binary lands (every WAF
 	// challenge-tier rule is challenge_v2 by default, and those marks are
 	// strict). Off, the three tells are not evaluated (touch_lie, ua_lie
 	// and sw_renderer itself are unaffected). Read in the same snapshot as
@@ -801,6 +808,11 @@ func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 // farm that learned to post ptr/mv past the bars would lose those 30 points
 // AND be rescued; with the cap it stays rejected. The residual is the 100
 // bucket itself, which humans share: faked input still passes there.
+// linux_sw's share does NOT count against the cap (linuxSWShare, operator
+// decision 2026-11-10): Linux + sw_renderer + outer_zero with real input
+// scores 120 and is rescued exactly as its Windows twin at 100, so linux_sw
+// never decides a reject alone. It costs no catch: a farm that fakes input
+// to reach the rescue loses no_input and scores 80, a pass, anyway.
 // The cap is that class's score, NOT CHALLENGE_V2_FAIL_SCORE: the gate asks
 // only when hs >= the fail score, so a cap that followed it would rescue one
 // score and no other — a fail score of 90 would lose the 100 class, one of
@@ -818,7 +830,8 @@ const (
 	rescueMinPointerEvents = 5   // sig.ptr: trusted pointer-move events seen while solving
 	rescueMinMovePx        = 100 // sig.mv: accumulated |movementX|+|movementY|
 	// rescueMaxScore: the highest failing score the rescue clears (THE CAP
-	// above) — the Chrome/109 class's sw_renderer + outer_zero.
+	// above) — the Chrome/109 class's sw_renderer + outer_zero — measured
+	// without linux_sw's share.
 	rescueMaxScore = tellSWRenderer + tellOuterZero
 	v2RescuedInput = "input"
 )
@@ -827,9 +840,10 @@ const (
 // pointer input: at least rescueMinPointerEvents events covering
 // rescueMinMovePx, none of the certain tells in tells (the solve's
 // comma-joined list), and a score hs no higher than rescueMaxScore (the cap,
-// see above). An absent reading never rescues.
+// see above) once linux_sw's share is taken off. An absent reading never
+// rescues.
 func challengeV2InputRescue(sig *humanitySignals, tells string, hs int) bool {
-	if sig == nil || sig.PTR == nil || sig.MV == nil || hs > rescueMaxScore {
+	if sig == nil || sig.PTR == nil || sig.MV == nil || hs-linuxSWShare(tells) > rescueMaxScore {
 		return false
 	}
 	for _, t := range strings.Split(tells, ",") {
@@ -838,6 +852,36 @@ func challengeV2InputRescue(sig *humanitySignals, tells string, hs int) bool {
 		}
 	}
 	return *sig.PTR >= rescueMinPointerEvents && sigRound(*sig.MV, sigMVDecimals) >= rescueMinMovePx
+}
+
+// deviceClaimWeights are the device-claim group's members and weights, as the
+// scorer claims them — read back from a solve's tells by linuxSWShare.
+var deviceClaimWeights = map[string]int{
+	"touch_lie":     tellTouchLie,
+	"mobile_hw_lie": tellMobileHWLie,
+	"mac_hw_lie":    tellMacHWLie,
+	"ua_lie":        tellUALie,
+	"linux_sw":      tellLinuxSW,
+}
+
+// linuxSWShare is how much linux_sw added to a score with these tells (the
+// solve's comma-joined list): the group's max with it minus the group's max
+// without it. tellLinuxSW when it is the only group member, 0 when a
+// stronger member (ua_lie) also fired or it did not fire. Read from tells,
+// so the log line alone explains a rescue.
+func linuxSWShare(tells string) int {
+	with, without := 0, 0
+	for _, t := range strings.Split(tells, ",") {
+		w, ok := deviceClaimWeights[t]
+		if !ok {
+			continue
+		}
+		with = max(with, w)
+		if t != "linux_sw" {
+			without = max(without, w)
+		}
+	}
+	return with - without
 }
 
 // challengeV2WaiverBar says whether a failing solve under grain may be waived
@@ -1015,24 +1059,44 @@ func uaClaimsMobile(ua string) bool {
 }
 
 // uaClaimsDesktopLinux reports a DESKTOP Linux UA — the claim linux_sw holds
-// a software renderer against: "X11; Linux" (every desktop Chrome/Firefox on
-// Linux) or the bare "Linux x86_64" / "Linux aarch64" desktop form. Never a
-// phone or tablet (uaClaimsMobile: "Linux; Android …", the Kindle's "Linux
-// armv7l like Android"), never ChromeOS ("X11; CrOS x86_64", where a software
-// renderer is an ordinary low-end Chromebook), and never a UA carrying a
-// "Mobile" token. A plain substring check in the style of its two siblings
+// a software renderer against: an "X11;" platform token AND a "linux" token,
+// both case-insensitive, so every desktop Chrome/Firefox on Linux matches,
+// distro and arch forms included ("X11; Linux x86_64", "X11; Ubuntu; Linux
+// i686", "X11; Fedora; Linux armv7l"). Excluded:
+//   - a phone or tablet (uaClaimsMobile: "Linux; Android …", the Kindle's
+//     "Linux armv7l like Android") and any UA with a "Mobile" token;
+//   - ChromeOS ("X11; CrOS x86_64", where a software renderer is an ordinary
+//     low-end Chromebook; matched case-sensitively, because "cros" is inside
+//     "Microsoft");
+//   - TVs, cast devices, cars and cloud browsers that send an X11 Linux UA
+//     (desktopLinuxNotDesktop): their software GL is ordinary, and Puffin
+//     renders a real iOS/Android user's page on its own servers.
+//
+// Android Chrome's "desktop site" mode sends exactly "X11; Linux x86_64", so
+// such a tablet IS classified desktop Linux; only its hardware GPU keeps it
+// clear of the tell. A plain substring check in the style of its two siblings
 // above: uaplausible classifies families and contradictions, not the OS.
 func uaClaimsDesktopLinux(ua string) bool {
-	if uaClaimsMobile(ua) || strings.Contains(ua, "CrOS") || strings.Contains(ua, "Mobile") {
+	if uaClaimsMobile(ua) || strings.Contains(ua, "CrOS") {
 		return false
 	}
-	return strings.Contains(ua, "X11; Linux") ||
-		strings.Contains(ua, "Linux x86_64") ||
-		strings.Contains(ua, "Linux aarch64")
+	l := strings.ToLower(ua)
+	if strings.Contains(l, "mobile") {
+		return false
+	}
+	for _, tok := range desktopLinuxNotDesktop {
+		if strings.Contains(l, tok) {
+			return false
+		}
+	}
+	return strings.Contains(l, "x11;") && strings.Contains(l, "linux")
 }
 
-var softwareRendererMarks = []string{
-	"swiftshader", "llvmpipe", "softpipe", "software rasterizer", "mesa offscreen", "angle (google, vulkan 1.1.0 (swiftshader",
+// desktopLinuxNotDesktop are the (lower-cased) tokens of non-desktop clients
+// that send an X11 Linux UA: Samsung / LG / HbbTV televisions, Chromecast
+// (CrKey), Tesla's in-car browser and the Puffin cloud browser.
+var desktopLinuxNotDesktop = []string{
+	"smart-tv", "smarttv", "netcast", "crkey", "tizen", "web0s", "webos", "hbbtv", "tesla", "puffin",
 }
 
 // Software-renderer families: the log-only rf: reading (sigFields). A short
@@ -1047,49 +1111,38 @@ const (
 	rfSoftpipe         = "softpipe"
 	rfSWRast           = "swrast"
 	rfMesaOffscreen    = "mesa-offscreen"
-	rfOther            = "other"
 )
 
+// softwareRenderers is THE software-renderer table, in match order: a
+// lower-cased WebGL renderer containing mark (and also, when set) is a
+// software renderer of that family. The ANGLE-wrapped SwiftShader row comes
+// before the plain one. The set of strings it calls software is exactly what
+// the earlier marks list matched (TestSoftwareRenderers_SameSetAsBefore).
+var softwareRenderers = []struct{ mark, also, family string }{
+	{"swiftshader", "angle (", rfANGLESwiftShader},
+	{"swiftshader", "", rfSwiftShader},
+	{"llvmpipe", "", rfLLVMPipe},
+	{"softpipe", "", rfSoftpipe},
+	{"software rasterizer", "", rfSWRast},
+	{"mesa offscreen", "", rfMesaOffscreen},
+}
+
 // softwareRendererFamily is THE software-renderer detection: "" when the
-// reported WebGL renderer matches none of softwareRendererMarks (hardware, or
-// not reported), else the family the matching mark names. The scorer's
-// sw_renderer tell and the rf: reading both call it, so they cannot disagree
-// about whether a renderer is software.
+// reported WebGL renderer matches no row of softwareRenderers (hardware, or
+// not reported), else that row's family. The scorer's sw_renderer tell and
+// the rf: reading both call it, so they cannot disagree about whether a
+// renderer is software.
 func softwareRendererFamily(glr string) string {
 	glr = strings.ToLower(glr)
 	if glr == "" {
 		return ""
 	}
-	for _, m := range softwareRendererMarks {
-		if strings.Contains(glr, m) {
-			return rendererFamilyForMark(m, glr)
+	for _, r := range softwareRenderers {
+		if strings.Contains(glr, r.mark) && (r.also == "" || strings.Contains(glr, r.also)) {
+			return r.family
 		}
 	}
 	return ""
-}
-
-// rendererFamilyForMark names the family of a matched mark. A SwiftShader
-// wrapped in ANGLE ("ANGLE (Google, Vulkan … (SwiftShader Device …") is told
-// apart from a bare one. rfOther is the fallback for a mark added to the list
-// without a family here, so the reading is never absent when sw_renderer
-// fired (TestRendererFamily_EveryMarkIsNamed fails such an addition).
-func rendererFamilyForMark(mark, glr string) string {
-	switch mark {
-	case "swiftshader", "angle (google, vulkan 1.1.0 (swiftshader":
-		if strings.Contains(glr, "angle (") {
-			return rfANGLESwiftShader
-		}
-		return rfSwiftShader
-	case "llvmpipe":
-		return rfLLVMPipe
-	case "softpipe":
-		return rfSoftpipe
-	case "software rasterizer":
-		return rfSWRast
-	case "mesa offscreen":
-		return rfMesaOffscreen
-	}
-	return rfOther
 }
 
 // scoreHumanity is the pure Rung-1 scorer. sig may be nil (no payload): only
@@ -1108,7 +1161,10 @@ func scoreHumanityOpts(sig *humanitySignals, ua string, hwTells bool) (hs int, t
 		tells = append(tells, name)
 	}
 	claimMax := 0
-	claim := func(name string, w int) {
+	// claim lists a device-claim member and keeps the group max; the weight
+	// is deviceClaimWeights[name], the one table linuxSWShare reads back.
+	claim := func(name string) {
+		w := deviceClaimWeights[name]
 		tells = append(tells, name)
 		if w > claimMax {
 			claimMax = w
@@ -1122,7 +1178,7 @@ func scoreHumanityOpts(sig *humanitySignals, ua string, hwTells bool) (hs int, t
 	}
 	// UA-borne device-claim member (see THE DEVICE-CLAIM GROUP).
 	if uaplausible.LegacyEdgeOnModernChrome(ua) {
-		claim("ua_lie", tellUALie)
+		claim("ua_lie")
 	}
 
 	if sig != nil {
@@ -1135,13 +1191,13 @@ func scoreHumanityOpts(sig *humanitySignals, ua string, hwTells bool) (hs int, t
 			// tellLinuxSW): a desktop Linux UA on a software renderer.
 			// Kill switch: CHALLENGE_V2_HW_TELLS.
 			if hwTells && uaClaimsDesktopLinux(ua) {
-				claim("linux_sw", tellLinuxSW)
+				claim("linux_sw")
 			}
 		}
 		// Device-claim group members (see THE DEVICE-CLAIM GROUP): listed
 		// as they fire, scored once at the group's strongest weight below.
 		if sig.MTP != nil && *sig.MTP == 0 && uaClaimsMobile(ua) {
-			claim("touch_lie", tellTouchLie)
+			claim("touch_lie")
 		}
 		if sig.OW != nil && sig.OH != nil && *sig.OW == 0 && *sig.OH == 0 {
 			add("outer_zero", tellOuterZero)
@@ -1150,10 +1206,10 @@ func scoreHumanityOpts(sig *humanitySignals, ua string, hwTells bool) (hs int, t
 		// a lie (D5b). Kill switch: CHALLENGE_V2_HW_TELLS.
 		if sig.HC != nil && hwTells {
 			if *sig.HC >= mobileHWLieMinCores && uaClaimsMobile(ua) {
-				claim("mobile_hw_lie", tellMobileHWLie)
+				claim("mobile_hw_lie")
 			}
 			if *sig.HC >= macHWLieMinCores && uaClaimsMac(ua) {
-				claim("mac_hw_lie", tellMacHWLie)
+				claim("mac_hw_lie")
 			}
 		}
 	}

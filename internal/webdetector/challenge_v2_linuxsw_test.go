@@ -2,6 +2,7 @@ package webdetector
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -18,12 +19,11 @@ const (
 	linuxChromeUA  = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 	linuxFirefoxUA = "Mozilla/5.0 (X11; Linux x86_64; rv:158.0) Gecko/20100101 Firefox/158.0"
 	linuxArmUA     = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
-	// The bare desktop form, without X11 (Wayland-only builds, some Electron apps).
-	linuxBareUA = "Mozilla/5.0 (Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
-	crosUA      = "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
-	// Android's reduced UA ("Linux; Android 10; K") and the desktop-mode
-	// request some Android browsers send ("X11; Linux x86_64" is NOT in it,
-	// but "Linux; Android" with no "Mobile" token is: a tablet).
+	crosUA         = "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+	// Android's reduced UA, without a "Mobile" token: a tablet. (Android
+	// Chrome's "desktop site" mode sends exactly "X11; Linux x86_64" instead,
+	// which IS classified desktop Linux: only such a tablet's hardware GPU
+	// keeps it clear of the tell.)
 	androidTabUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
 	kindleUA     = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/531.2+ Kindle/3.0+"
 	// A Linux phone OS that still says Mobile.
@@ -33,32 +33,57 @@ const (
 	hwGLR         = "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 (0x00002504) Direct3D11 vs_5_0 ps_5_0, D3D11)"
 )
 
+// The UA rule, one case per clause and per exclusion: removing any one of
+// them flips at least one row (the mutation check in the change's review).
+// "isolated" rows are combinations built so that ONE exclusion is all that
+// keeps the UA out; the others are real UAs.
 func TestUAClaimsDesktopLinux(t *testing.T) {
-	for ua, want := range map[string]bool{
-		linuxChromeUA:  true,
-		linuxFirefoxUA: true,
-		linuxArmUA:     true,
-		linuxBareUA:    true,
-		crosUA:         false,
-		androidUA:      false,
-		androidTabUA:   false,
-		oldGalaxyUA:    false,
-		kindleUA:       false,
-		linuxMobileUA:  false,
-		winChromeUA:    false,
-		// Smart TVs: Linux, but not the desktop form.
-		"Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) 85.0.4183.93/6.0 TV Safari/537.36":         false,
-		"Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36 WebAppManager": false,
-		// Defensive exclusions: an Android-x86 build naming its arch, and a
-		// CrOS token beside a Linux one — Android / ChromeOS win.
-		"Mozilla/5.0 (Linux; Android 9; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36":           false,
-		"Mozilla/5.0 (X11; CrOS x86_64 14541.0.0; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36": false,
-		macUA:    false,
-		iphoneUA: false,
-		"":       false,
+	for _, c := range []struct {
+		ua   string
+		want bool
+		why  string
+	}{
+		{linuxChromeUA, true, "X11; Linux x86_64"},
+		{linuxFirefoxUA, true, "Firefox on Linux"},
+		{linuxArmUA, true, "X11; Linux aarch64"},
+		{"Mozilla/5.0 (X11; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0", true, "X11; Linux i686"},
+		{"Mozilla/5.0 (X11; Ubuntu; Linux i686; rv:109.0) Gecko/20100101 Firefox/115.0", true, "distro form"},
+		{"Mozilla/5.0 (X11; Fedora; Linux armv7l; rv:109.0) Gecko/20100101 Firefox/115.0", true, "distro + arch form"},
+		{"mozilla/5.0 (x11; linux x86_64) applewebkit/537.36 (khtml, like gecko) chrome/154.0.0.0 safari/537.36", true, "tokens match case-insensitively"},
+		// The X11 clause.
+		{"Mozilla/5.0 (Windows NT 10.0; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36", false, "Linux without X11"},
+		{"Mozilla/5.0 (Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36", false, "bare Linux form, unsourced"},
+		// The Linux clause.
+		{"Mozilla/5.0 (X11; FreeBSD amd64; rv:120.0) Gecko/20100101 Firefox/120.0", false, "X11 without Linux"},
+		// Android (uaClaimsMobile), CrOS, Mobile.
+		{androidTabUA, false, "Android tablet"},
+		{androidUA, false, "Android phone"},
+		{kindleUA, false, "X11 Linux like Android: the Android exclusion"},
+		{crosUA, false, "ChromeOS"},
+		{"Mozilla/5.0 (X11; CrOS x86_64 14541.0.0; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36", false, "isolated: the CrOS exclusion"},
+		{linuxMobileUA, false, "the Mobile exclusion"},
+		// TVs, cast devices, cars, cloud browsers.
+		{"Mozilla/5.0 (SMART-TV; X11; Linux armv7l) AppleWebKit/537.42 (KHTML, like Gecko) Chromium/25.0.1349.2 Chrome/25.0.1349.2 Safari/537.42", false, "Samsung SMART-TV"},
+		{"Mozilla/5.0 (X11; Linux; ko-KR) AppleWebKit/534.26+ (KHTML, like Gecko) Version/5.0 Safari/534.26+ LG Browser/5.00.00(+mouse+3D; SmartTV; 2012) LG NetCast.TV-2012", false, "LG NetCast (also SmartTV)"},
+		{"Mozilla/5.0 (X11; Linux; ko-KR) AppleWebKit/534.26+ (KHTML, like Gecko) Version/5.0 Safari/534.26+ LG NetCast.TV-2012", false, "isolated: NetCast"},
+		{"Mozilla/5.0 (X11; Linux armv7l; SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36", false, "isolated: SmartTV"},
+		{"Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.196 Safari/537.36 CrKey/1.56.500000", false, "Chromecast CrKey"},
+		{"Mozilla/5.0 (X11; Linux armv7l; Tizen 2.3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36", false, "isolated: Tizen"},
+		{"Mozilla/5.0 (X11; Linux armv7l; Web0S) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36", false, "isolated: Web0S"},
+		{"Mozilla/5.0 (X11; Linux armv7l; webOS) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36", false, "isolated: webOS"},
+		{"Mozilla/5.0 (X11; Linux armv7l) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36 HbbTV/1.5.1", false, "isolated: HbbTV"},
+		{"Mozilla/5.0 (X11; GNU/Linux) AppleWebKit/537.36 (KHTML, like Gecko) Chromium/79.0.3945.130 Chrome/79.0.3945.130 Safari/537.36 Tesla/2020.16.2.1-e99c70fff409", false, "Tesla, GNU/Linux"},
+		{"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.5414.120 Safari/537.36 Tesla/2023.44.30", false, "Tesla, Linux x86_64"},
+		{"Mozilla/5.0 (X11; U; Linux x86_64; en-US) AppleWebKit/534.35 (KHTML, like Gecko) Chrome/11.0.696.65 Safari/534.35 Puffin/2.9174AP", false, "Puffin, X11 form"},
+		{"Mozilla/5.0 (Linux; U; Linux x86_64; en-US) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36 Puffin/9.7.2.51367AP", false, "Puffin, no X11"},
+		{oldGalaxyUA, false, "Android phone with Mobile"},
+		{winChromeUA, false, "Windows"},
+		{macUA, false, "Mac"},
+		{iphoneUA, false, "iPhone"},
+		{"", false, "empty"},
 	} {
-		if got := uaClaimsDesktopLinux(ua); got != want {
-			t.Errorf("uaClaimsDesktopLinux(%.50q) = %v, want %v", ua, got, want)
+		if got := uaClaimsDesktopLinux(c.ua); got != c.want {
+			t.Errorf("%s: uaClaimsDesktopLinux(%.60q) = %v, want %v", c.why, c.ua, got, c.want)
 		}
 	}
 }
@@ -66,7 +91,6 @@ func TestUAClaimsDesktopLinux(t *testing.T) {
 // The score table the operator approved, and everything around it that must
 // NOT move.
 func TestLinuxSW_ScoreTable(t *testing.T) {
-	fail := defaultV2FailScore
 	cases := []struct {
 		name, tells string
 		sig         *humanitySignals
@@ -85,8 +109,6 @@ func TestLinuxSW_ScoreTable(t *testing.T) {
 			&humanitySignals{V: 1, GLR: llvmpipeGLR}, linuxFirefoxUA, tellSWRenderer + tellLinuxSW},
 		{"linux aarch64 + no input", "sw_renderer,linux_sw,no_input",
 			noInput(&humanitySignals{V: 1, GLR: swiftShader}), linuxArmUA, tellSWRenderer + tellLinuxSW + ampNoInput},
-		{"bare linux x86_64 form", "sw_renderer,linux_sw",
-			&humanitySignals{V: 1, GLR: swiftShader}, linuxBareUA, tellSWRenderer + tellLinuxSW},
 		// Unchanged: Windows / Mac with the same report stay at 90 — the RDP
 		// human's profile (D5b).
 		{"windows + swiftshader + no input", "sw_renderer,no_input",
@@ -133,13 +155,6 @@ func TestLinuxSW_ScoreTable(t *testing.T) {
 			t.Errorf("%s: want hs=%d tells=%q, got hs=%d tells=%q", c.name, c.hs, c.tells, hs, tells)
 		}
 	}
-	// The two numbers the operator approved, spelled out.
-	if hs, _ := tellsOf(t, &humanitySignals{V: 1, GLR: swiftShader}, linuxChromeUA); hs != 80 || hs >= fail {
-		t.Fatalf("linux + sw_renderer alone must be 80 and pass, got %d", hs)
-	}
-	if hs, _ := tellsOf(t, noInput(&humanitySignals{V: 1, GLR: swiftShader}), linuxChromeUA); hs != 110 || hs < fail {
-		t.Fatalf("linux + sw_renderer + no_input must be 110 and reject, got %d", hs)
-	}
 }
 
 // CHALLENGE_V2_HW_TELLS = 0 turns linux_sw off with the other hardware tells;
@@ -151,30 +166,49 @@ func TestLinuxSW_KillSwitch(t *testing.T) {
 	}
 }
 
-// The real-input rescue: linux_sw with real input can only score 80 (no_input
-// needs zero events), which passes without a rescue; with outer_zero it is 120,
-// over the fixed cap, and is not rescued.
+// The real-input rescue does not count linux_sw: Linux + sw + outer_zero with
+// real input scores 120 and is rescued exactly as the Windows 100 class is. A
+// stronger group member (ua_lie) leaves linux_sw no share, so that solve is
+// judged at its full score.
 func TestLinuxSW_Rescue(t *testing.T) {
-	moved := &humanitySignals{V: 1, GLR: swiftShader, PTR: intp(41), MV: fptr(714), TCH: intp(0), KEY: intp(0)}
-	hs, tells := tellsOf(t, moved, linuxChromeUA)
-	if hs != tellSWRenderer+tellLinuxSW || hs >= defaultV2FailScore {
-		t.Fatalf("linux + sw with input: hs=%d tells=%s, want a passing 80", hs, tells)
+	moved := func() *humanitySignals {
+		return &humanitySignals{V: 1, GLR: swiftShader, PTR: intp(41), MV: fptr(714), TCH: intp(0), KEY: intp(0), OW: intp(0), OH: intp(0)}
 	}
-	if !challengeV2InputRescue(moved, tells, hs) {
-		t.Fatalf("the predicate itself must accept a <= cap score with input")
+	for _, c := range []struct {
+		name, ua, tells string
+		hs              int
+		rescued         bool
+	}{
+		{"linux 120", linuxChromeUA, "sw_renderer,linux_sw,outer_zero", 120, true},
+		{"windows 100", winChromeUA, "sw_renderer,outer_zero", 100, true},
+		{"linux ua_lie 150", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.6422.60 Safari/537.36 Edge/12.246",
+			"ua_lie,sw_renderer,linux_sw,outer_zero", 150, false},
+	} {
+		sig := moved()
+		hs, tells := tellsOf(t, sig, c.ua)
+		if hs != c.hs || tells != c.tells || challengeV2InputRescue(sig, tells, hs) != c.rescued {
+			t.Errorf("%s: hs=%d tells=%q rescued=%v, want %d %q %v", c.name, hs, tells,
+				challengeV2InputRescue(sig, tells, hs), c.hs, c.tells, c.rescued)
+		}
 	}
-	moved.OW, moved.OH = intp(0), intp(0)
-	hs, tells = tellsOf(t, moved, linuxChromeUA)
-	if hs != rescueMaxScore+tellLinuxSW || challengeV2InputRescue(moved, tells, hs) {
-		t.Fatalf("linux + sw + outer_zero with input: hs=%d rescued=%v, want an unrescued %d",
-			hs, challengeV2InputRescue(moved, tells, hs), rescueMaxScore+tellLinuxSW)
+	for tells, want := range map[string]int{
+		"sw_renderer,linux_sw":                tellLinuxSW,
+		"sw_renderer,linux_sw,no_input":       tellLinuxSW,
+		"ua_lie,sw_renderer,linux_sw":         0,
+		"sw_renderer,outer_zero":              0,
+		"sw_renderer,touch_lie,mobile_hw_lie": 0,
+		"":                                    0,
+	} {
+		if got := linuxSWShare(tells); got != want {
+			t.Errorf("linuxSWShare(%q) = %d, want %d", tells, got, want)
+		}
 	}
 }
 
 // End to end at the gate, under a vhost arm: the read-6 farm profile is
 // rejected, the same machine with real input passes, the Windows twin still
-// passes at 90, a Windows 100-class solve with input is still rescued and a
-// Linux one at 120 is not. Unarmed, the farm profile passes and is scored at
+// passes at 90, and the 100 class with real input is rescued on Windows (100)
+// and on Linux (120) alike. Unarmed, the farm profile passes and is scored at
 // the same 110 (what the would_v2 shadow line reports).
 func TestVerify_LinuxSWAtTheGate(t *testing.T) {
 	base, capt := startVerifyServer(t)
@@ -213,12 +247,12 @@ func TestVerify_LinuxSWAtTheGate(t *testing.T) {
 	if s := capt.solved[len(capt.solved)-1]; s.V2Rescued != v2RescuedInput {
 		t.Fatalf("windows 100 class: rescued=%q, want input", s.V2Rescued)
 	}
-	resp = postVerify(t, base, "203.0.113.64", armedHost, linuxChromeUA, oldPC)
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("linux 120 with input: status=%d, want 403 (over the rescue cap)", resp.StatusCode)
+	if resp = postVerify(t, base, "203.0.113.64", armedHost, linuxChromeUA, oldPC); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("linux 120 with input: status=%d, want the rescued 303 (linux_sw is not counted against the cap)", resp.StatusCode)
 	}
-	if r := capt.rejects[len(capt.rejects)-1]; r.HumanityScore != 120 || r.V2Rescued != "" {
-		t.Fatalf("linux 120: hs=%d rescued=%q", r.HumanityScore, r.V2Rescued)
+	if s := capt.solved[len(capt.solved)-1]; s.HumanityScore != 120 || s.V2Rescued != v2RescuedInput ||
+		!strings.Contains(s.HumanitySuffix(), " v2_rescued=input") {
+		t.Fatalf("linux 120: hs=%d rescued=%q line=%q", s.HumanityScore, s.V2Rescued, s.HumanitySuffix())
 	}
 	// Unarmed: passes, shadow-scored at the same 110.
 	if resp = postVerify(t, base, "203.0.113.65", "blog.example.gr", linuxChromeUA, farm); resp.StatusCode != http.StatusSeeOther {
@@ -239,8 +273,8 @@ func TestVerify_LinuxSWAtTheGate(t *testing.T) {
 	}
 }
 
-// rf: the software-renderer family, log-only. One case per family, the
-// fallback, and absent whenever the renderer is not software.
+// rf: the software-renderer family, log-only. One case per family, and
+// absent whenever the renderer is not software.
 func TestRendererFamily(t *testing.T) {
 	for glr, want := range map[string]string{
 		"Google SwiftShader": rfSwiftShader,
@@ -259,23 +293,43 @@ func TestRendererFamily(t *testing.T) {
 		if got := softwareRendererFamily(glr); got != want {
 			t.Errorf("softwareRendererFamily(%q) = %q, want %q", glr, got, want)
 		}
-		// The scorer's sw_renderer and the reading agree on every input.
-		_, tells := tellsOf(t, &humanitySignals{V: 1, GLR: glr}, winChromeUA)
-		if (tells == "sw_renderer") != (want != "") {
-			t.Errorf("%q: tells=%q but family=%q", glr, tells, want)
-		}
-	}
-	if got := rendererFamilyForMark("some future software gl", "some future software gl"); got != rfOther {
-		t.Errorf("an unnamed mark must map to %q, got %q", rfOther, got)
 	}
 }
 
-// Every mark the detector matches has a named family, so rf:other only ever
-// means "a mark was added without one" — and this test fails that addition.
-func TestRendererFamily_EveryMarkIsNamed(t *testing.T) {
-	for _, m := range softwareRendererMarks {
-		if f := softwareRendererFamily(m); f == "" || f == rfOther {
-			t.Errorf("mark %q: family %q", m, f)
+// The table must call EXACTLY the same strings software as the marks list it
+// replaced (2026-11-10): sw_renderer is a scored tell, and the rf refactor
+// must not move it. oldMarks is that list verbatim; the corpus embeds each
+// mark in real renderer shapes, in both cases, plus hardware strings.
+func TestSoftwareRenderers_SameSetAsBefore(t *testing.T) {
+	oldMarks := []string{
+		"swiftshader", "llvmpipe", "softpipe", "software rasterizer", "mesa offscreen", "angle (google, vulkan 1.1.0 (swiftshader",
+	}
+	oldIsSoftware := func(glr string) bool {
+		glr = strings.ToLower(glr)
+		if glr == "" {
+			return false
+		}
+		for _, m := range oldMarks {
+			if strings.Contains(glr, m) {
+				return true
+			}
+		}
+		return false
+	}
+	corpus := []string{"", "Apple M2", hwGLR, llvmpipeGLR, swiftShader, "angle (", "ANGLE (Google, Vulkan 1.1.0 (SwiftShader",
+		"Mesa Intel(R) UHD Graphics 620 (KBL GT2)", "Mesa DRI Intel(R) HD Graphics", "Microsoft Basic Render Driver",
+		"Software", "rasterizer", "Mesa", "offscreen", "swift shader", "ANGLE (SwiftShader)"}
+	for _, m := range oldMarks {
+		for _, f := range []string{"%s", "ANGLE (Google, %s)", "Google %s Device", "%s driver"} {
+			corpus = append(corpus, fmt.Sprintf(f, m), fmt.Sprintf(f, strings.ToUpper(m)))
+		}
+	}
+	for _, r := range softwareRenderers {
+		corpus = append(corpus, r.mark, r.mark+" "+r.also, r.also)
+	}
+	for _, glr := range corpus {
+		if got, want := softwareRendererFamily(glr) != "", oldIsSoftware(glr); got != want {
+			t.Errorf("%q: software=%v, the old list said %v", glr, got, want)
 		}
 	}
 }

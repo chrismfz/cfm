@@ -429,7 +429,11 @@ small open item from #1637: the humanity line usually misses the 5-sample
 `alerts.db` (it comes after the UA lines). Moving it before them costs one
 UA line there.
 
-- **Actions:** none yet; awaiting the operator.
+- **Actions:** the operator approved (a) on 2026-11-10 at **+20**, not the
+  +10 in the proposal text above: `sw_renderer,no_input` on a desktop Linux
+  UA scores 110 and rejects, `sw_renderer` alone 80 and passes. It ships
+  with the `linux_sw` change, together with the log-only `rf` reading
+  (docs/traffic-classifier.md, "`linux_sw`").
 
 ### 2026-11-03 — read 5 (window: 2026-10-27 09:10 to 2026-11-03 09:05 Athens, 7 days)
 
