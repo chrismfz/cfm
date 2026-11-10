@@ -64,10 +64,10 @@ func formAt(ip, site string, at time.Time) Event {
 	return ev
 }
 
-func TestFormFailuresCountHalf(t *testing.T) {
+func TestFormFailuresCountAThird(t *testing.T) {
 	// 2 failed logins, then 4 reset requests with the wrong address (the
-	// gacbp.com customer): 4 of the 5 needed, no ban.
-	d := newTest(Config{})
+	// gacbp.com customer): 3.3 of the 4 needed, no ban.
+	d := newTest(Config{SiteFails: 4, Sites: 3})
 	evs := []Event{failAt("203.0.113.60", "a.gr", t0), failAt("203.0.113.60", "a.gr", t0.Add(time.Minute))}
 	for i := 0; i < 4; i++ {
 		evs = append(evs, formAt("203.0.113.60", "a.gr", t0.Add(time.Duration(2+i)*time.Minute)))
@@ -78,19 +78,19 @@ func TestFormFailuresCountHalf(t *testing.T) {
 	if got := run(t, d); len(got) != 0 {
 		t.Fatalf("a forgotten password banned: %+v", got)
 	}
-	// A bot hiding its logins behind ?action=lostpassword: 10 tries ban.
-	d = newTest(Config{})
-	for i := 0; i < 10; i++ {
+	// A bot hiding its logins behind ?action=lostpassword: 12 tries ban.
+	d = newTest(Config{SiteFails: 4, Sites: 3})
+	for i := 0; i < 12; i++ {
 		d.Enqueue(formAt("203.0.113.61", "a.gr", t0.Add(time.Duration(i)*time.Second)))
 	}
 	got := run(t, d)
-	if len(got) != 1 || got[0].Extra["rule"] != "site" || got[0].Extra["site_form_fails"] != "10" ||
-		!strings.Contains(got[0].Extra["reason"], "0 failed WP_LOGIN logins and 10 failed lostpassword") {
-		t.Fatalf("10 hidden logins: %+v", got)
+	if len(got) != 1 || got[0].Extra["rule"] != "site" || got[0].Extra["site_form_fails"] != "12" ||
+		!strings.Contains(got[0].Extra["reason"], "0 failed WP_LOGIN logins and 12 failed lostpassword") {
+		t.Fatalf("12 hidden logins: %+v", got)
 	}
-	// The mixed boundary at SITE_FAILS = 5: 2 logins + 6 forms is 5, 2 + 5 is not.
+	// The mixed boundary at SITE_FAILS = 4: 2 logins + 6 forms is 4, 2 + 5 is not.
 	for forms, want := range map[int]int{5: 0, 6: 1} {
-		d = newTest(Config{})
+		d = newTest(Config{SiteFails: 4, Sites: 3})
 		d.Enqueue(failAt("203.0.113.62", "a.gr", t0))
 		d.Enqueue(failAt("203.0.113.62", "a.gr", t0.Add(time.Second)))
 		for i := 0; i < forms; i++ {

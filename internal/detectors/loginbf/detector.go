@@ -7,7 +7,7 @@
 //
 //   - SITE_FAILS: that many failed logins on ONE site (a registrable domain:
 //     www., staging. and the bare name are one site); a lostpassword /
-//     register form shown again counts half (Event.Form);
+//     register form shown again counts a third (Event.Form);
 //   - SITES: failed logins on that many DIFFERENT sites, any number on each.
 //     A proxy pool spreads a spray as one or two tries per site per address,
 //     which no per-site count ever sees (virgo, 1-6 Nov 2026: 1 363
@@ -72,7 +72,7 @@ const Kind = core.AlertKind("WEB/LOGIN_BRUTEFORCE")
 type Config struct {
 	Every     time.Duration
 	Window    time.Duration
-	SiteFails int // failures on one site within Window (a Form one counts half); 0 turns the rule off
+	SiteFails int // failures on one site within Window (a Form one counts a third); 0 turns the rule off
 	Sites     int // distinct failed sites within Window; 0 turns the rule off
 	DryRun    bool
 
@@ -104,7 +104,7 @@ type Event struct {
 	OK    bool
 	Owner bool
 	// Form: a lostpassword / register form shown again, or a login hidden
-	// behind that query (webdetector.LoginEvent.Form): half a failure on
+	// behind that query (webdetector.LoginEvent.Form): a third of a failure on
 	// the one-site rule.
 	Form bool
 }
@@ -447,10 +447,11 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		c.fails = append(c.fails[:0], c.fails[len(c.fails)-maxEventsPerIP:]...)
 	}
 
-	// onSite2 is twice the failures on this site: a Form failure counts 1,
-	// a login 2. On gacbp.com (2026-11-08) a Greek customer failed twice,
-	// then asked for a reset four times with the wrong address: 6 "failures".
-	onSite2, onSite, onSiteForm := 0, 0, 0
+	// onSite3 is three times the failures on this site: a Form failure
+	// counts 1, a login 3. On gacbp.com (2026-11-08) a Greek customer failed
+	// twice, then asked for a reset four times with the wrong address: 6
+	// "failures", 3.3 now, under SITE_FAILS = 4.
+	onSite3, onSite, onSiteForm := 0, 0, 0
 	sites := map[string]int{}
 	for _, f := range c.fails {
 		if f.at <= c.firedAt {
@@ -460,16 +461,16 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		if f.site == ev.Site {
 			onSite++
 			if f.form {
-				onSite2++
+				onSite3++
 				onSiteForm++
 			} else {
-				onSite2 += 2
+				onSite3 += 3
 			}
 		}
 	}
 	rule := ""
 	switch {
-	case d.cfg.SiteFails > 0 && onSite2 >= 2*d.cfg.SiteFails:
+	case d.cfg.SiteFails > 0 && onSite3 >= 3*d.cfg.SiteFails:
 		rule = "site"
 	case d.cfg.Sites > 0 && len(sites) >= d.cfg.Sites:
 		rule = "sites"
@@ -486,10 +487,10 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 	}
 	a := d.alert(ev, key, c, rule, onSite, sites)
 	if onSiteForm > 0 && rule == "site" {
-		// Say how many were reset / register forms (half each): what an
+		// Say how many were reset / register forms (a third each): what an
 		// unblock request needs to see.
 		a.Extra["site_form_fails"] = strconv.Itoa(onSiteForm)
-		a.Extra["reason"] = fmt.Sprintf("%d failed %s logins and %d failed lostpassword / register forms (half each) on %s in %s",
+		a.Extra["reason"] = fmt.Sprintf("%d failed %s logins and %d failed lostpassword / register forms (a third each) on %s in %s",
 			onSite-onSiteForm, ev.Tag, onSiteForm, ev.Site, d.cfg.Window)
 	}
 	// On the one-site rule the /64's addresses are weighed on that site only.

@@ -27,10 +27,11 @@ type LoginEvent struct {
 	Owner bool
 	// Form (failures only): not a login but the lostpassword /
 	// retrievepassword / register form shown again (an unknown user or
-	// address), or a login hidden behind that query. The edge cannot tell those apart, so login_bruteforce counts
-	// one as half a failure: a customer who forgot the password and tries a
-	// few addresses is not a brute forcer, and a bot hiding its logins
-	// there still reaches the threshold at twice the tries.
+	// address), or a login hidden behind that query. The edge cannot tell
+	// those apart, so login_bruteforce counts one as a third of a failure:
+	// a customer who forgot the password and tries a few addresses is not a
+	// brute forcer, and a bot hiding its logins there still reaches the
+	// threshold at three times the tries.
 	Form bool
 }
 
