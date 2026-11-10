@@ -102,6 +102,46 @@ func TestFormFailuresCountAThird(t *testing.T) {
 	}
 }
 
+func TestFormsWeighInTheIPv6GuardAndSitesRule(t *testing.T) {
+	// ::b guesses 3 logins, then colleague ::a sends 3 reset forms: the ban
+	// goes to ::b, the one guessing passwords.
+	d := newTest(Config{SiteFails: 4, Sites: 3})
+	d.Enqueue(failAt("2001:db8:5:5::b", "a.gr", t0))
+	d.Enqueue(failAt("2001:db8:5:5::b", "a.gr", t0.Add(time.Second)))
+	d.Enqueue(failAt("2001:db8:5:5::b", "a.gr", t0.Add(2*time.Second)))
+	for i := 0; i < 3; i++ {
+		d.Enqueue(formAt("2001:db8:5:5::a", "a.gr", t0.Add(time.Duration(10+i)*time.Second)))
+	}
+	got := run(t, d)
+	if len(got) != 1 || got[0].Key != "2001:db8:5:5::b" || got[0].Extra["ipv6_ambiguous"] == "1" {
+		t.Fatalf("the /64 ban on the form sender: %+v", got)
+	}
+	// Two colleagues, 6 reset forms each (2 failures' worth each): ambiguous.
+	d = newTest(Config{SiteFails: 4, Sites: 3})
+	for i := 0; i < 12; i++ {
+		d.Enqueue(formAt("2001:db8:5:6::"+strconv.Itoa(1+i%2), "a.gr", t0.Add(time.Duration(i)*time.Second)))
+	}
+	got = run(t, d)
+	if len(got) != 1 || got[0].Extra["ipv6_ambiguous"] != "1" {
+		t.Fatalf("two colleagues' reset forms banned: %+v", got)
+	}
+	// One reset form on each of 3 sites is no spray; a login on each is.
+	d = newTest(Config{SiteFails: 4, Sites: 3})
+	for i, s := range []string{"a.gr", "b.gr", "c.gr"} {
+		d.Enqueue(formAt("203.0.113.63", s, t0.Add(time.Duration(i)*time.Second)))
+	}
+	if got := run(t, d); len(got) != 0 {
+		t.Fatalf("3 sites' reset forms banned: %+v", got)
+	}
+	d = newTest(Config{SiteFails: 4, Sites: 3})
+	for i, s := range []string{"a.gr", "b.gr", "c.gr"} {
+		d.Enqueue(failAt("203.0.113.64", s, t0.Add(time.Duration(i)*time.Second)))
+	}
+	if got := run(t, d); len(got) != 1 || got[0].Extra["rule"] != "sites" {
+		t.Fatalf("3 sites' failed logins: %+v", got)
+	}
+}
+
 func TestSiteFailsRule(t *testing.T) {
 	d := newTest(Config{})
 	for i := 0; i < 4; i++ {

@@ -504,7 +504,8 @@ and this detector bans per client address, over `WINDOW` (1 h):
 - `SITE_FAILS` (4) failed logins on ONE site (a lostpassword / register
   form shown again counts a third, below) (a registrable domain: `www.`,
   `staging.` and the bare name are one site);
-- failed logins on `SITES` (3) different sites, any number on each. A proxy
+- failed logins on `SITES` (3) different sites, any number on each (a site
+  counts with one failed login, or three lostpassword / register forms). A proxy
   pool sprays one or two tries per site per address, which no per-site count
   sees: on virgo, 1-6 Nov 2026, 1 363 site-hours had 10+ failing addresses
   with fewer than 5 failures each (22 532 failures on 147 sites).
@@ -516,7 +517,8 @@ take the ban for another's spray; an attacker rotating inside its /64 gets
 one address banned per round, a known gap). In a /64 with several failing
 addresses, a worst address with a single failure (a VPS provider's shared
 /64), or on the one-site rule with no more than half of `SITE_FAILS` on that
-site (two colleagues who mistyped twice each), is a dry run. A second such
+site (two colleagues who mistyped twice each), is a dry run; a lostpassword /
+register form weighs a third there too, as below. A second such
 alert within `WINDOW` bans the worst address: an attacker alternating two
 addresses of its /64 does it every round, colleagues do not.
 Never counted or banned:

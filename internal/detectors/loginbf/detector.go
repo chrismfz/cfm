@@ -452,20 +452,26 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 	// twice, then asked for a reset four times with the wrong address: 6
 	// "failures", 3.3 now, under SITE_FAILS = 4.
 	onSite3, onSite, onSiteForm := 0, 0, 0
-	sites := map[string]int{}
+	siteW := map[string]int{} // weight per site, a login 3, a form 1
 	for _, f := range c.fails {
 		if f.at <= c.firedAt {
 			continue
 		}
-		sites[f.site]++
+		siteW[f.site] += failWeight(f)
 		if f.site == ev.Site {
 			onSite++
+			onSite3 += failWeight(f)
 			if f.form {
-				onSite3++
 				onSiteForm++
-			} else {
-				onSite3 += 3
 			}
+		}
+	}
+	// A site counts toward SITES with one failed login, or three forms: a
+	// customer asking three of their sites for a reset is no spray.
+	sites := map[string]int{}
+	for s, w := range siteW {
+		if w >= 3 {
+			sites[s] = w
 		}
 	}
 	rule := ""
@@ -505,16 +511,17 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		// shared /64, a rotating client, two colleagues in an office /64 who
 		// mistyped twice each at SITE_FAILS = 4). Logged, never banned. The
 		// worst address needs more than half of SITE_FAILS on the rule's
-		// site, and 2 failures either way.
+		// site, and 2 failures either way, weighed as the rule weighs them
+		// (worst is in thirds: a login 3, a form 1).
 		need := 2
 		if rule == "site" && d.cfg.SiteFails/2+1 > need {
 			need = d.cfg.SiteFails/2 + 1
 		}
 		switch {
-		case addrs > 1 && worst < 2:
+		case addrs > 1 && worst < 2*3:
 			a.Extra["enforcement"] = "dryrun"
 			a.Extra["ipv6_ambiguous"] = "1"
-		case addrs > 1 && worst < need:
+		case addrs > 1 && worst < need*3:
 			// Colleagues do not do it twice in one window; an attacker
 			// alternating two addresses of its /64 does, every round.
 			if c.ambigAt > 0 && at-c.ambigAt < win {
@@ -625,8 +632,9 @@ func (d *Detector) retractLocked(key string, ev Event, at int64, max int) {
 	}
 }
 
-// worstAddr is the address with the most failures after firedAt (the newest
-// one's on a tie), its count, and how many addresses failed. For IPv4 it is
+// worstAddr is the address with the most failures after firedAt, weighed in
+// thirds (failWeight; the newest one's on a tie), that weight, and how many
+// addresses failed. For IPv4 it is
 // the only one.
 func worstAddr(fails []fail, after int64, site string) (string, int, int) {
 	n := map[string]int{}
@@ -635,7 +643,7 @@ func worstAddr(fails []fail, after int64, site string) (string, int, int) {
 		if f.at <= after || (site != "" && f.site != site) {
 			continue
 		}
-		n[f.ip]++
+		n[f.ip] += failWeight(f)
 		if f.at > last[f.ip] {
 			last[f.ip] = f.at
 		}
@@ -647,6 +655,16 @@ func worstAddr(fails []fail, after int64, site string) (string, int, int) {
 		}
 	}
 	return best, n[best], len(n)
+}
+
+// failWeight is a failure in thirds: a login 3, a lostpassword / register
+// form shown again 1 (Event.Form). The rules, the /64 guard and the choice of
+// the /64's address all weigh with it.
+func failWeight(f fail) int {
+	if f.form {
+		return 1
+	}
+	return 3
 }
 
 // pruneLocked drops the clients whose last failure left the window. The
