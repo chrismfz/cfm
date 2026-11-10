@@ -1006,9 +1006,9 @@ func init() {
 		// nft bans itself, for clients behind a trusted proxy (internal/edgeban).
 		// 0 = the edge stops answering them at once (the store keeps its entries).
 		edgeban.SetEnabled(kvBool(kv, "EDGE_BAN", true))
-		// EDGE_BAN_MODE (default log): the edge's own check, before every
-		// exemption (cfm.lua Step 0e, static files), only counts and logs
-		// until it is "enforce". Burn-in first, as every new enforcement.
+		// EDGE_BAN_MODE (default enforce since 2026-11-10, after the burn-in):
+		// the edge's own check, before every exemption (cfm.lua Step 0e,
+		// static files), 403s; "log" only counts and logs.
 		edgeban.SetEdgeMode(cleanScalar(kv["EDGE_BAN_MODE"]))
 
 		webdet.ConfigureFingerprintPolicyEnforcement(

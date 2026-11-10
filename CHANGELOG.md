@@ -17,6 +17,40 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **`login_bruteforce` is armed, at 4 failures per site or 3 sites.** After
+  the 6-10 Nov dry run (~2 600 would-be bans on eight nodes, nearly all
+  datacenter networks) it now bans for 3 days and reports to cfm-web
+  (`DRY_RUN = 0`, also for a written section without the key). The
+  thresholds go from 5 and 5 to 4 failures on one site, or failures on 3
+  sites, within an hour: botnets were sending 4 tries per address, or trying
+  3-4 sites, to stay under 5. On virgo, mars and titan's Apache logs that
+  catches 17-42% more addresses, none Greek or Cypriot. The GR/CY tier
+  (10 minutes, not reported) is unchanged; it adds Cloudflare, below. In an IPv6 /64
+  with several failing addresses, the worst one needs more than half of `SITE_FAILS` on
+  one site (3 of 4), or the alert only logs: two colleagues who mistyped
+  twice each are not banned, and an attacker alternating two addresses is
+  banned on its second round. A garbled `DRY_RUN` (`y`, `dryrun`) keeps the
+  dry run, with a warning. A `detectors.conf` that writes `DRY_RUN = 1` or
+  its own thresholds keeps them: a node whose `detectors.conf` came from
+  the previous reference config is NOT armed until it is edited (and its
+  leniency block needs Cloudflare's 13335 added, below).
+- **A banned client behind Cloudflare is now blocked at the edge.**
+  `[webdetector] EDGE_BAN_MODE` defaults to `enforce`: the edge answers 403
+  to a proxied client the web detectors, the WAF autoblock, modsec,
+  `login_bruteforce` or a manual ban have banned, which the nft drop never
+  sees. It used to only log `would_block edge_ban`: mars had 171 such
+  addresses on 2026-11-10, none Greek or Cypriot. `EDGE_BAN_MODE = log`
+  brings the logging-only mode back; a `detectors.conf` that writes `log`
+  keeps it. Any other value (a typo such as `logonly`) logs only, with a
+  warning in the daemon log, rather than enforce.
+- **`login_bruteforce`: a Cloudflare WARP address gets the soft tier.** A
+  WARP egress address is shared by many people, so a brute forcer on it now
+  gets the 10 minute local ban, reported nowhere, instead of a 3 day fleet
+  ban that would lock every WARP user out. The first day's dry run had 12
+  WARP alerts. AS13335 is added to `[login_bruteforce.leniency] MATCH_ASN`.
+  A `detectors.conf` with its own leniency block needs the same edit.
+
 ### Fixed
 - **cPanel users see their site's traffic.** CFM opened from cPanel
   covered only the domain names in `/etc/userdatadomains` (`trimel.gr`), but

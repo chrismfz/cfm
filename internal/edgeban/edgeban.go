@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
+	"cfm/internal/logging"
 )
 
 // DefaultPath is where the daemon persists the store (a restart keeps the
@@ -155,23 +156,31 @@ func SetEnabled(on bool) {
 }
 
 // EdgeMode is how the edge treats a banned proxied client at cfm.lua's top
-// and on the static location ([webdetector] EDGE_BAN_MODE): "log" (count and
-// log what it would block; the burn-in default) or "enforce" (403). The
-// bridge decision path answers bans either way (EDGE_BAN alone gates it).
+// and on the static location ([webdetector] EDGE_BAN_MODE): "enforce" (403,
+// the default since 2026-11-10) or "log" (count and log what it would block,
+// as the burn-in ran). The bridge decision path answers bans either way
+// (EDGE_BAN alone gates it).
 func EdgeMode() string {
-	if m, _ := edgeMode.Load().(string); m == "enforce" {
+	if m, _ := edgeMode.Load().(string); m == "log" {
 		return m
 	}
-	return "log"
+	return "enforce"
 }
 
-// SetEdgeMode sets EdgeMode; anything but "enforce" is "log".
+// SetEdgeMode sets EdgeMode: "enforce", or empty (the key left out), is
+// enforce; "log" is log. Any other value is a typo for something the
+// operator meant (logonly, dryrun, off): it logs instead of enforcing, and
+// says so, rather than start 403ing on a misspelt observe-only setting.
 func SetEdgeMode(m string) {
-	if strings.EqualFold(strings.TrimSpace(m), "enforce") {
+	switch v := strings.ToLower(strings.TrimSpace(m)); v {
+	case "", "enforce":
 		edgeMode.Store("enforce")
-		return
+	case "log":
+		edgeMode.Store("log")
+	default:
+		logging.Logf("[edgeban] EDGE_BAN_MODE = %q is neither enforce nor log: logging only", m)
+		edgeMode.Store("log")
 	}
-	edgeMode.Store("log")
 }
 
 // Enabled reports the kill switch.

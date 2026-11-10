@@ -299,7 +299,7 @@ Typical defaults below are representative from the shipped template and should b
 | `webdetector` | L7 abuse behavior / challenge integration | `MODE`, path files, scoring knobs, challenge knobs, `BLOCK` | `EVERY=5s`, `WINDOW=120s`, `BLOCK=2h` |
 | `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=180s`, `MIN_SUBNETS=30`, `MIN_SOLVES=15`, **alert-only** |
 | `challenge_cookie_discard` | clients that re-solve the challenge while still holding valid clearance | `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `MAX_TRACKED_IPS`, allowlists, `BLOCK` | `EVERY=30s`, `WINDOW=10m`, `MIN_SOLVES=8`, **alert-only unless `BLOCK` is set** |
-| `login_bruteforce` | login brute force from the web detector's login column: one site, or a spray over many sites | `SITE_FAILS`, `SITES`, `WINDOW`, `BLOCK`, allowlists; `[login_bruteforce.leniency]` | `WINDOW=1h`, `SITE_FAILS=5`, `SITES=5`, `BLOCK=3d`, **`DRY_RUN=1`** (burn-in); GR/CY `10m`, not reported. **Built in**: a config without the section runs these |
+| `login_bruteforce` | login brute force from the web detector's login column: one site, or a spray over many sites | `SITE_FAILS`, `SITES`, `WINDOW`, `BLOCK`, allowlists; `[login_bruteforce.leniency]` | `WINDOW=1h`, `SITE_FAILS=4`, `SITES=3`, `BLOCK=3d`, armed (`DRY_RUN=0`); GR/CY `10m`, not reported. **Built in**: a config without the section runs these |
 
 ### `challenge_solver_farm` — why it exists
 
@@ -501,9 +501,9 @@ blocked by anything else. The edge marks every login POST (the login column,
 answer as a failure or a success. The login ledger publishes every failure,
 and this detector bans per client address, over `WINDOW` (1 h):
 
-- `SITE_FAILS` (5) failed logins on ONE site (a registrable domain: `www.`,
+- `SITE_FAILS` (4) failed logins on ONE site (a registrable domain: `www.`,
   `staging.` and the bare name are one site);
-- failed logins on `SITES` (5) different sites, any number on each. A proxy
+- failed logins on `SITES` (3) different sites, any number on each. A proxy
   pool sprays one or two tries per site per address, which no per-site count
   sees: on virgo, 1-6 Nov 2026, 1 363 site-hours had 10+ failing addresses
   with fewer than 5 failures each (22 532 failures on 147 sites).
@@ -512,8 +512,12 @@ A client is an IPv4 address or an IPv6 /64 (one subscriber, who can rotate
 addresses inside it); the ban is on the /64's address with the most
 failures in the window (in an office /64, a colleague's one typo must not
 take the ban for another's spray; an attacker rotating inside its /64 gets
-one address banned per round, a known gap). A /64 whose worst address has
-a single failure among several (a VPS provider's shared /64) is a dry run.
+one address banned per round, a known gap). In a /64 with several failing
+addresses, a worst address with a single failure (a VPS provider's shared
+/64), or on the one-site rule with no more than half of `SITE_FAILS` on that
+site (two colleagues who mistyped twice each), is a dry run. A second such
+alert within `WINDOW` bans the worst address: an attacker alternating two
+addresses of its /64 does it every round, colleagues do not.
 Never counted or banned:
 
 - a failure on a site where the client failed and already succeeded at
@@ -569,7 +573,10 @@ country. `[webdetector] LOGIN_SIGNALS = 0` stops the events with the shadow
 rows. After an alert, only later failures count toward the next one: a
 lenient client that keeps failing is banned again. The leniency matches the
 country OR the Greek and Cypriot eyeball ASNs (OTE, Vodafone, Wind, Nova,
-Cyta, GRNET), for a range the geo database places abroad.
+Cyta, GRNET), for a range the geo database places abroad, OR Cloudflare's
+(13335): a WARP egress address (104.28.x, 2a09:bac*) is shared by many of its
+users, and the first day's dry run had 12 WARP alerts, so a brute forcer on
+WARP gets the 10 minute local ban instead of a 3 day fleet ban.
 
 Known gaps, where a legitimate client can still be banned:
 
@@ -591,23 +598,29 @@ Known gaps, where a legitimate client can still be banned:
 - company SASE gateways (Zscaler, Netskope) put Greek staff on foreign
   addresses outside the leniency.
 
-**It ships as a dry run** (`DRY_RUN = 1`, also for a written section that
-leaves the key out): each would-be ban is an alert with `mode=dryrun` in
+**It ships armed** (`DRY_RUN = 0`, also for a written section that leaves
+the key out) since 2026-11-10. It ran as a dry run 6-10 Nov: ~2 600
+would-be bans on eight nodes, nearly all datacenter networks, and botnets
+sending 4 tries per address, or trying 3-4 sites, to stay under the first
+thresholds (5 and 5). On virgo, mars and titan's Apache logs, 4 and 3 catch
+17-42% more addresses than 5 and 5, none Greek or Cypriot. The one real
+customer the dry run would have banned was Greek (2 failed logins, then 4
+lostpassword forms shown again), so the leniency covered it. `DRY_RUN = 1`
+brings the dry run back: each would-be ban is an alert with `mode=dryrun` in
 `cfm.detectors.log` and the alert log (with `host`, `rule`, `site`,
 `leniency`, and `geo=unknown` / `ipv6_ambiguous` when they apply), at most
-once per client per `WINDOW` (a client that is never banned keeps
-failing), and nothing is banned or reported.
-`DRY_RUN = 0` arms it.
+once per client per `WINDOW`, and nothing is banned or reported.
 
 Armed, the ban is the section sink's: `BLOCK = 3d`, reported to cfm-web, and
 recorded in the edge ban store for a client behind Cloudflare, which never
-meets the nft drop (enforced there once `[webdetector] EDGE_BAN_MODE =
-enforce`; until then such a client keeps failing, and `BLOCK_COOLDOWN = 6h`
-keeps it from being mailed and reported again every few minutes). The
+meets the nft drop (`[webdetector] EDGE_BAN_MODE = enforce`, the default,
+403s it there; with `log` such a client keeps failing, and `BLOCK_COOLDOWN =
+6h` keeps it from being mailed and reported again every few minutes). The
 `[login_bruteforce.leniency]` tier gives a Greek or Cypriot address a 10
 minute ban reported nowhere: customers who lock themselves out use
-unblock.myip.gr. Measured on virgo (Apache logs, 1-6 Nov): no Greek address
-among the 391 that failed 5-19 times in an hour on one site.
+unblock.myip.gr. Measured on virgo, mars and titan (Apache logs, 6-10 Nov):
+no Greek or Cypriot address among those 4 failures on a site or 3 sites
+catch beyond 5 and 5.
 
 **Built in.** A node whose `detectors.conf` has no `[login_bruteforce]` runs
 the stock section and its leniency (`applyBuiltinLoginBruteforce`), so the
