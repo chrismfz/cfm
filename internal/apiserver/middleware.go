@@ -467,6 +467,33 @@ func TokenMiddleware(adminToken string, store *TokenStore, opts ...TokenMiddlewa
 				}
 			}
 
+			// ── 2c. Valid goauth session (admin login), before the scoped cookie ─
+			// An admin's browser can carry BOTH: staff open a customer's cPanel
+			// (WHM "log in as user") and the plugin sets the scoped embed cookie
+			// on this same host, for every port (cookies ignore the port). Its
+			// rolling renewal then keeps it alive on every request of the
+			// admin's own tab. Checked after it, the session lost and the admin
+			// browsed as that customer, and a scoped request is redirected away
+			// from admin-only pages (scoped_page_redirect.go). The admin login is
+			// the stronger identity held by the same browser, so it wins.
+			// Embedded requests keep their own rule (step 3: token or embed
+			// cookie only), so a cPanel iframe call is never answered as admin
+			// on the strength of a session cookie.
+			if !tokenHeaderSupplied && !embedded && sessionAllowedRequest(r) {
+				if shouldLogSessionCookieAuth(time.Now()) {
+					logging.LogfAPI("[apiserver] auth_source=session_cookie src_ip=%s method=%s path=%q ua=%q (sampled_every=60s)",
+						realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
+				}
+				ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
+				ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
+				ctx = withAuthnMechanism(ctx, authnMechanismSession)
+				if u, ok := authUserFromContext(r.Context()); ok && u != nil && u.Username != "" {
+					ctx = withAuthnSubject(ctx, "user:"+u.Username) // per-user session bucket (Step 8)
+				}
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
 			// ── 2b. Scoped bootstrap cookie (HTML under /cfm-admin only) ────
 			if !tokenHeaderSupplied {
 				if ctx, ok := embedScopedContextFromCookie(w, r, store); ok {
@@ -488,22 +515,6 @@ func TokenMiddleware(adminToken string, store *TokenStore, opts ...TokenMiddlewa
 				w.Header().Set("WWW-Authenticate", `Bearer realm="cfm"`)
 				setAPIAnomalyReason(w, r, "auth_missing")
 				http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
-				return
-			}
-
-			// ── 4. Valid goauth session (fallback when no token header) ───
-			if !tokenHeaderSupplied && sessionAllowedRequest(r) {
-				if shouldLogSessionCookieAuth(time.Now()) {
-					logging.LogfAPI("[apiserver] auth_source=session_cookie src_ip=%s method=%s path=%q ua=%q (sampled_every=60s)",
-						realIPFromRequest(r), r.Method, r.URL.Path, strings.TrimSpace(r.UserAgent()))
-				}
-				ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
-				ctx = context.WithValue(ctx, webdet.CtxRoleKey{}, webdet.CtxRoleAdmin)
-				ctx = withAuthnMechanism(ctx, authnMechanismSession)
-				if u, ok := authUserFromContext(r.Context()); ok && u != nil && u.Username != "" {
-					ctx = withAuthnSubject(ctx, "user:"+u.Username) // per-user session bucket (Step 8)
-				}
-				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 

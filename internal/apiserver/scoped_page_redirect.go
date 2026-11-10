@@ -64,8 +64,12 @@ func isScopedAdminOnlyPage(static fs.FS, path string) bool {
 	if p == "" {
 		p = "/"
 	}
-	if strings.HasPrefix(p, "/assets/") || p == "/assets" {
-		return false
+	// Assets and the API are never a page: an unknown /api/ path must not turn
+	// into a redirect to HTML.
+	for _, pre := range []string{"/assets", "/api"} {
+		if p == pre || strings.HasPrefix(p, pre+"/") {
+			return false
+		}
 	}
 	// A file (has an extension in its last segment) is not a page.
 	if last := p[strings.LastIndexByte(p, '/')+1:]; strings.Contains(last, ".") {

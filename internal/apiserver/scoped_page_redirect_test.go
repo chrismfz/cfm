@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	webdet "cfm/internal/webdetector"
 )
 
 // The server-side list mirrors the nav's ADMIN_ONLY_NAV_PATHS. Read the JS
@@ -107,6 +109,7 @@ func TestScopedUserRedirectedFromAdminOnlyPages(t *testing.T) {
 		{"scoped cookie, controls", "https://host/cfm-admin/webdetector/controls/", scopedCookie, false},
 		{"scoped cookie, forensics", "https://host/cfm-admin/webdetector/forensics/", scopedCookie, false},
 		{"scoped cookie, asset", "https://host/cfm-admin/assets/style.css", scopedCookie, false},
+		{"scoped cookie, unknown API path", "https://host/cfm-admin/api/v1/no-such-endpoint", scopedCookie, false},
 		// Admin, by every route: never redirected.
 		{"admin bearer, dashboard", "https://host/cfm-admin/", func(r *http.Request) { r.Header.Set("Authorization", "Bearer admin-secret") }, false},
 		{"admin bearer via edge, alerts", "https://host/alerts/", func(r *http.Request) { proxied(r); r.Header.Set("Authorization", "Bearer admin-secret") }, false},
@@ -133,5 +136,62 @@ func TestScopedUserRedirectedFromAdminOnlyPages(t *testing.T) {
 				t.Fatalf("want 200, got %d (Location=%q)", rr.Code, rr.Header().Get("Location"))
 			}
 		})
+	}
+}
+
+// An admin who logged in normally can also carry a customer's scoped embed
+// cookie: staff open the customer's cPanel (WHM "log in as user"), and the
+// plugin sets it on the same host, for every port. The admin login must win,
+// on the hostname and on the direct port, or the admin browses as that
+// customer and is bounced off the dashboard. A cPanel iframe call (embedded)
+// keeps its scoped identity.
+func TestAdminSessionBeatsLingeringScopedEmbedCookie(t *testing.T) {
+	useTestEmbedCookieSigningKey(t)
+	store := NewTokenStore()
+	st := store.Issue([]string{"trimel.gr"}, nil, nil, "viewer", "cpanel:trimel", time.Hour)
+	old := sessionAllowedRequest
+	sessionAllowedRequest = func(*http.Request) bool { return true }
+	t.Cleanup(func() { sessionAllowedRequest = old })
+
+	var role string
+	m := http.NewServeMux()
+	m.HandleFunc("/cfm-admin/api/v1/__role__", func(w http.ResponseWriter, r *http.Request) {
+		role, _ = r.Context().Value(webdet.CtxRoleKey{}).(string)
+	})
+	probe := TokenMiddleware("admin-secret", store)(m)
+	page := uiChain(store)
+
+	for _, host := range []string{"https://node.example", "https://node.example:6061"} {
+		withScoped := func(path string) *http.Request {
+			req := httptest.NewRequest(http.MethodGet, host+path, nil)
+			req.Header.Set("Accept", "text/html")
+			v, err := encodeEmbedCookie(req, st.ID, time.Now().Add(time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.AddCookie(&http.Cookie{Name: embedBootstrapCookieName, Value: v})
+			return req
+		}
+
+		rr := httptest.NewRecorder()
+		page.ServeHTTP(rr, withScoped("/cfm-admin/"))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: admin session + scoped cookie on the dashboard: want 200, got %d Location=%q",
+				host, rr.Code, rr.Header().Get("Location"))
+		}
+
+		role = ""
+		probe.ServeHTTP(httptest.NewRecorder(), withScoped("/cfm-admin/api/v1/__role__"))
+		if role != webdet.CtxRoleAdmin {
+			t.Fatalf("%s: admin session + scoped cookie: role=%q, want admin", host, role)
+		}
+
+		role = ""
+		req := withScoped("/cfm-admin/api/v1/__role__")
+		req.Header.Set("X-CFM-Embedded", "cpanel")
+		probe.ServeHTTP(httptest.NewRecorder(), req)
+		if role != webdet.CtxRoleScoped {
+			t.Fatalf("%s: embedded request with both cookies: role=%q, want scoped", host, role)
+		}
 	}
 }

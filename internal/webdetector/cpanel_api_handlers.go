@@ -3,7 +3,9 @@
 // GET /api/v1/cpanel/user-info?user=X
 //
 // Admin-only endpoint used by the cPanel plugin (bootstrap.php) to
-// discover the domains and DB users belonging to a cPanel account.
+// discover the domains and DB users belonging to a cPanel account. The
+// domains it returns become the scoped token's vhosts: each domain plus its
+// www. name and cPanel ServerAlias names (panelmap.WithWebAliases).
 // Called server-side from the plugin via loopback curl with an actor assertion.
 // Runs as root inside cfm so it can read all cPanel metadata files.
 package webdetector
