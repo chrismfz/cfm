@@ -555,9 +555,10 @@ failed nft reads (the table gone after `cfm disable`) publishes an empty
 list, so the edge drops its copy; only a store not yet reconciled since a
 start replies `{"ready":false}`. An IPv4-mapped peer is looked up as IPv4.
 
-**Mode.** `[webdetector] EDGE_BAN_MODE`, sent with every reply: `log` (the
-default, the burn-in) counts and logs what it would block, `enforce` answers
-403 (`X-CFM-Action: block`, `X-CFM-Edge-Ban: 1`, `$cfm_upstream = cfm_block`).
+**Mode.** `[webdetector] EDGE_BAN_MODE`, sent with every reply: `enforce`
+(the default since 2026-11-10, read below) answers
+403 (`X-CFM-Action: block`, `X-CFM-Edge-Ban: 1`, `$cfm_upstream = cfm_block`);
+`log` counts and logs what it would block, as the burn-in ran.
 One `would_block edge_ban` / `block edge_ban` line per address per minute in
 the edge error log. The edge's counts ride on its next poll; `GET
 /api/v1/webdet/edge-ban` (admin; `edge-ban.json` in a `cfm debug` bundle) and
@@ -582,6 +583,16 @@ both confs call it.
 **Not covered:** the panel ports (2083/2087/2096, B3), the challenge page and
 `/__cfm_verify`, `/cpanelwebcall` and `/cfm-admin`, which skip `cfm.lua` and
 are not static assets.
+
+### Enforce (2026-11-10)
+
+Armed on all eight edge nodes and made the default, together with
+`login_bruteforce`. The day's read (mars, virgo, rigel): 389 addresses with a
+`would_block` line, 0 Greek or Cypriot, nearly all `waf_security` bans
+(scanners and xmlrpc brute forcers on datacenter networks; the "Google LLC"
+ones are Palo Alto Cortex Xpanse on GCP, not Googlebot, which the static
+bypass exempts before Step 0e anyway). Without it a banned client behind
+Cloudflare walked through: mars had 171 such addresses that day, orion 85.
 
 ### Burn-in read (2026-10-10, ~4 h after the deploy) — enforce is gated on it
 

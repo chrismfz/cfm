@@ -52,7 +52,7 @@ func TestApplyBuiltinLoginBruteforce(t *testing.T) {
 	secs := Sections{ByName: map[string]KV{"global": {}}}
 	applyBuiltinLoginBruteforce(&secs)
 	kv := secs.ByName[loginBruteforceType]
-	if kvStrClean(kv, "SITE_FAILS", "") != "5" || kvStrClean(kv, "SITES", "") != "5" {
+	if kvStrClean(kv, "SITE_FAILS", "") != "4" || kvStrClean(kv, "SITES", "") != "3" {
 		t.Fatalf("built-in section: %v", kv)
 	}
 	pol := sectionBlockPolicy(loginBruteforceType, kv)
@@ -144,28 +144,28 @@ func TestLoginBruteforceWrittenSectionKeepsTheProxyASNs(t *testing.T) {
 	}
 }
 
-func TestLoginBruteforceShipsAsADryRun(t *testing.T) {
+func TestLoginBruteforceShipsArmed(t *testing.T) {
 	f, ok := getFactory(loginBruteforceType)
 	if !ok {
 		t.Fatal("login_bruteforce not registered")
 	}
 	for name, kv := range map[string]KV{
 		"built-in":                loginBruteforceDefaults(),
-		"written without DRY_RUN": {"SITE_FAILS": "5"},
+		"written without DRY_RUN": {"SITE_FAILS": "4"},
 	} {
 		det, err := f(loginBruteforceType, kv, KV{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		d := det.(*loginbf.Detector)
-		if !d.DryRun() {
-			t.Errorf("%s: armed, want the burn-in dry run", name)
+		if d.DryRun() {
+			t.Errorf("%s: a dry run, want armed", name)
 		}
 		_ = d.Shutdown()
 	}
-	det, _ := f(loginBruteforceType, KV{"DRY_RUN": "0"}, KV{})
-	if det.(*loginbf.Detector).DryRun() {
-		t.Error("DRY_RUN = 0 still a dry run")
+	det, _ := f(loginBruteforceType, KV{"DRY_RUN": "1"}, KV{})
+	if !det.(*loginbf.Detector).DryRun() {
+		t.Error("DRY_RUN = 1 is armed")
 	}
 	_ = det.(*loginbf.Detector).Shutdown()
 }

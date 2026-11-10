@@ -155,23 +155,25 @@ func SetEnabled(on bool) {
 }
 
 // EdgeMode is how the edge treats a banned proxied client at cfm.lua's top
-// and on the static location ([webdetector] EDGE_BAN_MODE): "log" (count and
-// log what it would block; the burn-in default) or "enforce" (403). The
-// bridge decision path answers bans either way (EDGE_BAN alone gates it).
+// and on the static location ([webdetector] EDGE_BAN_MODE): "enforce" (403,
+// the default since 2026-11-10) or "log" (count and log what it would block,
+// as the burn-in ran). The bridge decision path answers bans either way
+// (EDGE_BAN alone gates it).
 func EdgeMode() string {
-	if m, _ := edgeMode.Load().(string); m == "enforce" {
+	if m, _ := edgeMode.Load().(string); m == "log" {
 		return m
 	}
-	return "log"
+	return "enforce"
 }
 
-// SetEdgeMode sets EdgeMode; anything but "enforce" is "log".
+// SetEdgeMode sets EdgeMode; anything but "log" (an empty value included) is
+// "enforce".
 func SetEdgeMode(m string) {
-	if strings.EqualFold(strings.TrimSpace(m), "enforce") {
-		edgeMode.Store("enforce")
+	if strings.EqualFold(strings.TrimSpace(m), "log") {
+		edgeMode.Store("log")
 		return
 	}
-	edgeMode.Store("log")
+	edgeMode.Store("enforce")
 }
 
 // Enabled reports the kill switch.

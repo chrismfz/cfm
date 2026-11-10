@@ -28,18 +28,22 @@ const loginBruteforceProxyASNs = "30148,19551,54113,20940,16625,12989,33438,2003
 // (TestLoginBruteforceDefaultsMatchReferenceConfig pins it).
 func loginBruteforceDefaults() KV {
 	return KV{
-		"ENABLED":    "1",
-		"EVERY":      "10s",
-		"WINDOW":     "1h",
-		"SITE_FAILS": "5",
-		"SITES":      "5",
-		// Burn-in: alerts log "would block" and land in the alert log; nothing
-		// is banned or reported until the operator sets DRY_RUN = 0.
-		"DRY_RUN": "1",
+		"ENABLED": "1",
+		"EVERY":   "10s",
+		"WINDOW":  "1h",
+		// 4 and 3, not 5 and 5: the 6-10 Nov 2026 burn-in's Apache logs (virgo,
+		// mars, titan) had botnets sending 4 tries per address, or 3-4 sites,
+		// to stay under 5. 0 Greek or Cypriot addresses among the 17-42% more
+		// addresses 4 / 3 catch, nearly all of them datacenters.
+		"SITE_FAILS": "4",
+		"SITES":      "3",
+		// Armed: DRY_RUN = 1 logs "would block" to the alert log and bans
+		// nothing (the 6-10 Nov 2026 burn-in ran so).
+		"DRY_RUN": "0",
 		"BLOCK":   "3d",
-		// A banned client behind Cloudflare is not stopped by the nft drop and,
-		// with [webdetector] EDGE_BAN_MODE = log, not at the edge either: it keeps
-		// failing, and every new alert would mail and report it again.
+		// A client that keeps failing after its ban (one behind Cloudflare, when
+		// [webdetector] EDGE_BAN_MODE = log, which only logs at the edge) would
+		// otherwise be mailed and reported again on every alert.
 		"BLOCK_COOLDOWN": "6h",
 		"ALLOW_ASNS":     loginBruteforceProxyASNs,
 	}
@@ -136,10 +140,10 @@ func init() {
 		d := loginbf.New(loginbf.Config{
 			Every:     kvDur(kv, "EVERY", 10*time.Second),
 			Window:    kvDur(kv, "WINDOW", time.Hour),
-			SiteFails: kvInt(kv, "SITE_FAILS", 5),
-			Sites:     kvInt(kv, "SITES", 5),
-			// A written section without the key runs the burn-in too.
-			DryRun:    kvBool(kv, "DRY_RUN", true),
+			SiteFails: kvInt(kv, "SITE_FAILS", 4),
+			Sites:     kvInt(kv, "SITES", 3),
+			// A written section without the key is armed too.
+			DryRun:    kvBool(kv, "DRY_RUN", false),
 			AllowIPs:  csvKV(kv, "ALLOW_IPS"),
 			AllowNets: csvKV(kv, "ALLOW_NETS"),
 			// The proxy list is the default even for a section the operator
