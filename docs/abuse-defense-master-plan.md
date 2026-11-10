@@ -179,7 +179,7 @@ D3/D4 are the process fix.
   pointer; a keyboard-only or touch user on such a machine is still walled
   until the confirm fallback. The trajectory readings that could tighten the
   rescue are measured first. *Capped 2026-10-20:* a failing score above 100
-  is never rescued (§5, E4).
+  is never rescued (§5, E4); since 2026-11-10 that is a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve).
 
 ## 5. Enforcement roadmap — the only live checklist
 
@@ -737,7 +737,8 @@ already opened.
 
           **Decided (operator, 2026-10-20, after E4 read 3):** cap the
           rescue at 100: a failing score above it is never rescued
-          (`rescueMaxScore`, the Chrome/109 class's `sw_renderer` +
+          (since 2026-11-10: a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve);
+          `rescueMaxScore`, the Chrome/109 class's `sw_renderer` +
           `outer_zero`; fixed, not `CHALLENGE_V2_FAIL_SCORE`, which only
           gates when the rescue is asked). Measured cost 0
           humans (the rescue fired 0 times in three reads, and its class
@@ -809,6 +810,27 @@ already opened.
             policy would land on those humans too (`challenge`) or block
             them (`deny`). Next: candidate 3. qualityweb's `ABUSE_SHADOW`
             set to 1 like the other web nodes.
+          - **Read 6 decision (operator, 2026-11-10): `linux_sw` +20 in the
+            device-claim group.** `c28caa00` dropped its device-claim lies
+            and passed at exactly `sw_renderer,no_input` = 90 with an X11
+            Linux Chrome UA: 85 684 farm passes on four nodes vs 23 GR/CY
+            consumer-ISP solves, all on the farm's own fingerprints. A
+            desktop X11 Linux UA (never Android / ChromeOS / Mobile, nor a
+            TV, cast device, Tesla or Puffin) on a software renderer now
+            adds 20 as a device-claim member (the group's max, once):
+            Linux + `sw_renderer` = 80 still passes, + `no_input` = 110
+            rejects. Under `CHALLENGE_V2_HW_TELLS`. Not a
+            core-count tell (the RDS/VDI rule stands). With it, a log-only
+            `rf` reading (the software-renderer family) on `sig=`, so the
+            next reads calibrate per automation stack. Honest limit: the UA
+            is client-authored, and on a Windows UA the same report is the
+            RDP human's 90, which D5b keeps passing: the tell buys time. The
+            real-input rescue is unchanged: `linux_sw`'s share is not
+            counted against its cap, so a Linux solve with real input is
+            rescued exactly as before and `linux_sw` never decides a reject
+            alone. As built:
+            `docs/traffic-classifier.md`, "`linux_sw`". Next read: does the
+            farm flip its UA, and does any Linux human land at 110.
 
           Weekly reads from 2026-10-06 are recorded in
           `docs/abuse-defense-progress.md`, not here; this plan keeps the

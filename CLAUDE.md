@@ -727,7 +727,8 @@ the trajectory readings `ut,co,st,dj,mj,pd`, + since 2026-10-22 `hid:1`, a
 page hidden at POST time, which sends no window size so `outer_zero` cannot
 fire on a minimized window; the input counts are trusted
 events only) is the report AS REPORTED — dm/dpr/raf, the trajectory
-readings and hid corpus-only and scored by nothing, ptr+mv decide
+readings, hid and rf (the software-renderer family, an enum, 2026-11-10)
+corpus-only and scored by nothing, ptr+mv decide
 the real-input rescue below (it only ever clears), hc feeds the
 corpus-measured mobile_hw_lie/mac_hw_lie tells (2026-09-23,
 `docs/traffic-classifier.md` "Rung-1 hardware tells"; scored as ONE
@@ -736,7 +737,11 @@ device-claim group (its max, once) with touch_lie and the UA-borne ua_lie
 uaplausible rule the scorer reads, not under the kill switch below), so a
 single spoofed device never rejects alone; no core-count tell for a Windows/Linux UA — an
 RDS/VDI host is indistinguishable from a farm box; kill switch
-`CHALLENGE_V2_HW_TELLS`), ptr/tch/key
+`CHALLENGE_V2_HW_TELLS`); the same group and kill switch carry linux_sw
+(2026-11-10, E4 read 6, the c28caa00 hs-90 profile: 20 for a desktop X11
+Linux UA — never Android/CrOS/Mobile/TV/cast/Tesla/Puffin — on a software
+renderer, an OS prior read from the UA and glr, not from hc; Linux +
+sw_renderer 80 passes, + no_input 110 rejects), ptr/tch/key
 also the no_input amplifier's inputs; absent keys = not reported, never a
 fabricated zero; since 2026-09-22 every solve AND reject line also carries
 `cc=`/`asn=`/`asn_name=`/`ptr=`, resolved once at verify — country/ASN from a
@@ -767,10 +772,11 @@ PTR inline — bounded, reject path only; a reject whose PTR claims a crawler
 carries `v2_waiver_miss=<grain|mark|lockdown|off|spoofed|timeout|transient>`, or it
 would read like a spoof) — and except, under EVERY grain, a failing score with
 real pointer input (sig ptr >= 5 AND mv >= 100), no certain tell
-(webdriver / headless UA) and a score of at most 100, never above it (the
+(webdriver / headless UA) and a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve), never above it (the
 cap, `rescueMaxScore`, 2026-10-20, E4 read 3 — fixed, not the fail score;
 above it sits the farm-only device-claim family, which faked input must not
-carry through): `v2_rescued=input` on an armed solve's line/history
+carry through; linux_sw's share is not counted against it, so a Linux 120
+with real input is rescued like the Windows 100): `v2_rescued=input` on an armed solve's line/history
 row and on the unarmed would_v2 line, never on an unarmed solve line (2026-09-29,
 E4: Windows Chrome/109 PCs score exactly 100 with a software renderer and no
 window size, and a retry cannot change that; the counts are client-authored —

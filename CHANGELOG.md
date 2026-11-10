@@ -17,7 +17,39 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **The challenge log and history rows name the software-renderer family.**
+  When a software renderer is detected, `sig=` (and `payload.sig` on the
+  history row) carries `rf:` with a short family name (`swiftshader`,
+  `angle-swiftshader`, `llvmpipe`, `softpipe`, `swrast`, `mesa-offscreen`),
+  never the raw renderer string. Scored by nothing; it lets the weekly reads
+  tell automation stacks apart. A solve that reports only a software
+  renderer now has a `sig=rf:…` field where it had none. Stripped for scoped
+  (cPanel) callers with the rest of `sig`.
+
+### Changed
+- **ChallengeV2: a desktop Linux UA on a software renderer now scores +20
+  (`linux_sw`).** The convicted farm fingerprint `c28caa00` stopped faking
+  its device and passed v2 at exactly hs 90 (an X11 Linux Chrome UA,
+  SwiftShader, no input): 85 684 farm passes on four nodes in the 3-10 Nov
+  read, against 23 Greek/Cypriot consumer-ISP solves, all on the farm's own
+  fingerprints. That profile now scores 110 and is rejected wherever v2 is
+  armed. Linux with a software renderer and real input scores 80 and still
+  passes, and Windows/Mac scores are unchanged (an RDP user's 90 still
+  passes). The real-input rescue is unchanged: a Linux visitor with a
+  software renderer, a window size reported as 0×0 and real mouse input
+  scores 120 but is rescued exactly as before (the rescue now takes a score
+  of at most 100, not counting linux_sw's share, so at most 120 for a
+  desktop Linux solve), so at the default fail score (any
+  `CHALLENGE_V2_FAIL_SCORE` above 80) `linux_sw` never fails a solve on its
+  own. It never fires for Android, ChromeOS, a mobile UA, smart TVs,
+  Chromecast, Tesla or the Puffin browser (an Android tablet in desktop-site
+  mode sends a Linux UA; only its hardware GPU keeps it clear), and counts
+  once with the other device-claim tells. Unarmed vhosts show the farm profile as
+  `would_v2` at 110. The farm can switch to a Windows UA, so this buys time
+  rather than closing the gap. Kill switch: `[webdetector]
+  CHALLENGE_V2_HW_TELLS = 0` (turns off `linux_sw` with `mobile_hw_lie` /
+  `mac_hw_lie`).
 
 ## 2026.11.10
 

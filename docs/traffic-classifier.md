@@ -721,13 +721,16 @@ counts only where it is IMPOSSIBLE for the claimed device:
 | `mobile_hw_lie` | phone/tablet UA **and** `hardwareConcurrency ≥ 16` (human mobiles report 4-10) | 0 / 1 217 mobile | 42.3% | 50 |
 | `mac_hw_lie` | Mac UA **and** `hardwareConcurrency ≥ 64` (human Macs in H topped out at 16) | 0 / 37 Mac | 15% | 50 |
 
-**The device-claim group.** `touch_lie`, `mobile_hw_lie`, `mac_hw_lie` and,
-since 2026-09-29, the UA-borne `ua_lie` (see "ua_lie" below) all say "this is
-not the device the UA claims", and one spoof trips several at once: DevTools phone emulation or a UA switcher on a 16-thread desktop fires
+**The device-claim group.** `touch_lie`, `mobile_hw_lie`, `mac_hw_lie`,
+since 2026-09-29 the UA-borne `ua_lie` (see "ua_lie" below) and, since
+2026-11-10, `linux_sw` (see "linux_sw" below) are scored as one group. The
+first four are a contradiction with the claimed device ("this is not the
+device the UA claims"); `linux_sw` is an OS prior on the renderer. All of
+them are claims about the device, and one spoof trips several at once: DevTools phone emulation or a UA switcher on a 16-thread desktop fires
 both `touch_lie` and `mobile_hw_lie`. Summed, ONE exotic setup would reject,
 which D5b forbids. So each member that fires is LISTED in `tells=`, but the
-group adds only its strongest weight to `hs`, once. All of them weigh 50, so
-Google-Read-Aloud still scores exactly 140. A rejection needs independent
+group adds only its strongest weight to `hs`, once. All of them but
+`linux_sw` (20) weigh 50, so Google-Read-Aloud still scores exactly 140. A rejection needs independent
 evidence from outside the group; in the corpus every farm solve caught
 through it also carried `sw_renderer`.
 
@@ -749,7 +752,8 @@ all 13 299 rows):
   (1.01 solves/IP, 85% convicted fingerprints, foreign sources on Greek shops).
 
 **Kill switch:** `[webdetector] CHALLENGE_V2_HW_TELLS` (default 1), read in the
-same settings snapshot as the other v2 knobs.
+same settings snapshot as the other v2 knobs. It gates `mobile_hw_lie`,
+`mac_hw_lie` and, since 2026-11-10, `linux_sw`.
 
 **Measured, not adopted: `webkit_lie`** (an iPhone/iPad UA reporting
 `deviceMemory`, a Blink-only API). It fired on 0 of 321 human iOS solves and
@@ -835,14 +839,97 @@ The clean-report variant scores 50 + 30 = 80 and still passes. This is
 deliberate: D5b forbids rejecting on one fact, and a UA switcher set to this
 string is one fact. That variant is a documented residual. The bound is
 Chrome/80, not 71: margin over the last real pairing, at no cost. It is not
-under `CHALLENGE_V2_HW_TELLS` (that switch gates the core-count tells), and it
-has no switch of its own: it cannot fail a solve alone, and in ~590 000
+under `CHALLENGE_V2_HW_TELLS` (that switch gates the hardware tells:
+`mobile_hw_lie`, `mac_hw_lie` and `linux_sw`), and it has no switch of its
+own: it cannot fail a solve alone, and in ~590 000
 challenge-log lines it fired on nothing but that scanner. The weight is set so
 that `ua_lie` + `outer_zero` alone (90) still passes; `ua_lie` +
 `sw_renderer` (110) is the same two-fact rejection `mac_hw_lie` +
 `sw_renderer` already makes. Tests:
 `internal/uaplausible` (`TestLegacyEdgeOnModernChrome`) and
 `challenge_v2_ualie_test.go` (the three logged variants).
+
+#### `linux_sw` — a desktop Linux UA on a software renderer (2026-11-10) — adopted
+
+**What it is.** A device-claim member (20, the group's max once). It is an OS
+prior on the renderer, not a contradiction with the claimed device. It fires
+when the software-renderer detection that sets `sw_renderer` matched AND the
+UA is a desktop Linux one: an `X11;` token and a `linux` token, both
+case-insensitive (`uaClaimsDesktopLinux`). That covers `X11; Linux x86_64`,
+the distro and arch forms (`X11; Ubuntu; Linux i686`, `X11; Fedora; Linux
+armv7l`) and `X11; GNU/Linux`. It never fires for:
+- Android (`Linux; Android`, the Kindle's `Linux armv7l like Android`);
+- ChromeOS (`CrOS`), where a software renderer is an ordinary low-end
+  Chromebook;
+- a UA carrying a `Mobile` token;
+- TVs, cast devices, cars and cloud browsers that send an X11 Linux UA:
+  `SMART-TV`, `SmartTV`, `NetCast`, `CrKey` (Chromecast), `Tizen`, `Web0S`,
+  `webOS`, `HbbTV`, `Tesla`, and `Puffin` (which renders a real iOS/Android
+  user's page on its own servers). Matched case-insensitively.
+
+Android Chrome's "desktop site" mode sends exactly `X11; Linux x86_64`, so
+such a tablet is classified desktop Linux; only its hardware GPU keeps it
+clear of the tell.
+
+It is **not a core-count tell**: the RDS/VDI rule above still holds, and
+`linux_sw` reads the UA's OS claim against the renderer, never
+`hardwareConcurrency`. Under `CHALLENGE_V2_HW_TELLS`.
+
+**Why** (E4 read 6, `docs/abuse-defense-progress.md`; operator decision
+2026-11-10). The convicted farm fingerprint `c28caa00` dropped its
+device-claim lies and passed at exactly `sw_renderer,no_input` = 90: an X11
+Linux Chrome UA, SwiftShader, no input, 4-16 cores, from datacenters and
+residential proxies. Read 6 counted **85 684** farm passes with this profile
+on four nodes, against **23** solves from GR/CY consumer ISPs, all of them on
+the farm's own fingerprints. The catch rate under an arm fell to 14 %
+fleet-wide.
+
+**Scores** (fail score 100):
+
+| Report | Linux desktop UA | Windows / Mac UA |
+|---|---|---|
+| `sw_renderer` alone | 80, passes | 60, passes |
+| `sw_renderer` + `no_input` | **110, rejects** | 90, passes |
+| `sw_renderer` + `outer_zero` | 120, rejects | 100, rejects |
+| `sw_renderer` + `outer_zero` + real input | 120, **rescued** (`v2_rescued=input`) | 100, rescued |
+| `sw_renderer` + `ua_lie` | 110 (the group's max is `ua_lie`'s 50) | 110 |
+
+The read-6 proposal sized the tell at ~10 (so the profile reached exactly
+100). The operator chose 20, which leaves the Linux human in the first row
+at 80 and puts the farm profile 10 points over the bar.
+
+**Interactions.**
+- **Real-input rescue:** `linux_sw`'s share does not count against the cap
+  of 100 (`linuxSWShare`: the group's max with it minus without it, read
+  from the solve's tells). A Linux solve with real input is rescued exactly
+  as its Windows twin, so `linux_sw` never decides a reject alone. It costs
+  no catch: a farm that fakes input to reach the rescue loses `no_input` and
+  scores 80, a pass, anyway. A stronger group member (`ua_lie`) leaves it no
+  share, so that solve is judged at its full score. "Never decides a reject
+  alone" holds at the default fail score (any `CHALLENGE_V2_FAIL_SCORE`
+  above 80): at 61-80, a Linux software-renderer visitor with some input
+  but fewer than 5 pointer events scores 80 and is rejected.
+- **Good-bot waiver:** unchanged. Google-Read-Aloud claims Android (no
+  `linux_sw`, still 140); Googlebot/Bingbot rendering UAs carry no Linux
+  token. A verified crawler that did would reach the waiver at 110 under a
+  geo/vhost arm, exactly as any failing crawler does.
+- **Malpath ban:** a malpath-marked IP's failed visits escalate to a ban
+  (`CHALLENGE_V2_PATHS_REJECT_BAN`). A Linux client with a software renderer
+  and no input that requested a malpath now fails there (110) and can reach
+  that ban; before, at 90, it passed.
+- **Unarmed (`would_v2`):** the shadow path scores with the same scorer, so
+  the farm profile now writes `would_v2` lines at 110 on unarmed vhosts; expect
+  the `abuse_shadow` humanity counts to jump by that farm's volume, and the
+  `solver_farm` humanity buckets to shift for the farm (hs 90 in `60-99` →
+  110 in `100+`).
+
+**Honest limit.** The UA is client-authored. The farm can switch to a Windows
+UA, where `sw_renderer,no_input` = 90 is the RDP human's profile (read 3) and
+stays below the fail score by D5b. The tell buys time; it closes nothing. The
+next read measures whether the farm flips its UA. The `rf` reading (the
+software-renderer family, see the `sig=` list under "Observability contract"
+below) lets it read the renderer per automation stack. Tests:
+`challenge_v2_linuxsw_test.go`.
 
 #### `deviceMemory` tells (2026-09-29) — measured, NOT adopted
 
@@ -1221,13 +1308,15 @@ score with those readings (≥ 5 events, ≥ 100 px) and no certain tell
 (webdriver, headless UA) takes the solved path under every grain, marked
 `v2_rescued=input` (`challengeV2InputRescue`; kill switch
 `CHALLENGE_V2_INPUT_RESCUE`). Since 2026-10-20 (E4 read 3) it is **capped at
-100** (`rescueMaxScore`): a failing score above it is never rescued, whatever
+100** (`rescueMaxScore`; a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve)): a failing score above it is never rescued, whatever
 `CHALLENGE_V2_FAIL_SCORE` is set to (the gate asks the rescue only at or over
 the fail score, so a cap that followed it would rescue one score alone).
 The class it exists for scores exactly 100; the device-claim family above it
 (`sw_renderer` + `mobile_hw_lie` / `mac_hw_lie` / `touch_lie`, 110-150) is
 farm-only in the corpus, carries `no_input` on nearly every reject, and
-would otherwise pass by faking input. In three weekly reads the rescue fired
+would otherwise pass by faking input. `linux_sw`'s share is not counted
+against the cap (since 2026-11-10): Linux + `sw_renderer` + `outer_zero`
+with real input scores 120 and is rescued like its Windows twin at 100. In three weekly reads the rescue fired
 0 times at any score. Trajectory readings followed, log-only (and the
 page now counts trusted events only), then the confirm fallback for the
 humans who did not move a pointer. The honest limit: the counts are
@@ -1268,7 +1357,7 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   either — the PTR wasn't known at verify — and that is NOT evidence the
   client isn't a crawler. `grep v2_rescued=` (since 2026-09-29) is "which
   failing solves did real pointer input let through": under ANY grain, a
-  failing score of at most 100 with no certain tell and `sig=` reporting ≥ 5
+  failing score with no certain tell, a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve), and `sig=` reporting ≥ 5
   pointer events covering ≥ 100 px (`mv` as `sig=` shows it; "Who the deterministic-FP
   residual is" above). It rides only an armed solve's line, after `v2=` /
   `v2_waived=`, with the failing `hs=`/`tells=` intact, and the history row
@@ -1279,9 +1368,15 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
   `hc`, `dm`, `dpr`, `raf`, then (since 2026-09-29) the trajectory readings
   `ut`/`co`/`st`/`dj`/`mj`/`pd`, then (since 2026-10-22) `hid` (1 = the page
-  was hidden at POST time and sent no window size) — in that fixed order,
+  was hidden at POST time and sent no window size), then (since 2026-11-10)
+  `rf`, the software-renderer family (`swiftshader`, `angle-swiftshader`,
+  `llvmpipe`, `softpipe`, `swrast`, `mesa-offscreen`; present only when
+  `sw_renderer` fired, a short enum and never the raw renderer string, a
+  JSON string on the history row; a payload that reports only a software
+  renderer now carries `sig=rf:…` where it had no `sig=` before) — in that
+  fixed order,
   omitting any signal the browser did not report. `dm`/`dpr`/`raf`, the
-  trajectory readings and `hid` are scored by nothing; `hc` feeds
+  trajectory readings, `hid` and `rf` are scored by nothing; `hc` feeds
   `mobile_hw_lie`/`mac_hw_lie` ("Rung-1 hardware tells" above);
   `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, and
   `ptr`+`mv` decide the real-input rescue (which only ever clears), so logging
@@ -1348,7 +1443,7 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `by_fp`, `by_provider`, `by_ptr_domain`, `by_scope`, …). Since 2026-09-29
   `scope=` rides last (see below), and `v2_rescued=input` (before `src=`)
   marks a line an arm would have let through after all — real pointer input,
-  no certain tell, hs at most 100 — counted as `humanity.rescued`. Lines minus rescued is an
+  no certain tell, a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve) — counted as `humanity.rescued`. Lines minus rescued is an
   upper bound on what an arm would reject (the geo/vhost good-bot waiver
   clears verified crawlers too).
 - **`src=` — challenge provenance** (`challenge_src.go`, 2026-09-23): a

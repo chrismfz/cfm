@@ -100,8 +100,9 @@ func hasScopedRedactedKey(p map[string]interface{}) bool {
 //
 // The first is payload.sig — the ChallengeV2 Rung-1 device readings
 // (hardwareConcurrency, deviceMemory, devicePixelRatio, pointer/touch/key
-// counts) collected by CFM's own challenge page. A tenant could measure the
-// same things from their own site's JS, so this is not a secret; it is
+// counts, the software-renderer family rf) collected by CFM's own challenge
+// page. A tenant could measure the same things from their own site's JS, so
+// this is not a secret; it is
 // nonetheless per-visitor browser-fingerprinting material that CFM gathered,
 // and the scoped surface previously exposed nothing of the kind (the UA was
 // the most it carried). Scoped-vs-admin is a hard boundary in this repo and

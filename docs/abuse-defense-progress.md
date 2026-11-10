@@ -90,7 +90,9 @@
   fleet-wide.** `c28caa00` dropped its device-claim lie and passes at
   exactly hs 90 (X11 Linux UA, `sw_renderer,no_input`): 85 684 passes on
   qualityweb, rigel, titan and orion, against 23 GR/CY consumer-ISP solves
-  with that profile (proposal (a) in read 6).
+  with that profile (proposal (a) in read 6). `linux_sw` shipped with the
+  change that approved it (operator, 2026-11-10), so the hs-90 Linux
+  profile now scores 110.
   The farms' rejects are now device-claim lies (`mobile_hw_lie`,
   `mac_hw_lie`), no longer `outer_zero`. Their passes stay under the fail
   score by design (D5b); stopping the rest is the operator fingerprint
@@ -429,7 +431,11 @@ small open item from #1637: the humanity line usually misses the 5-sample
 `alerts.db` (it comes after the UA lines). Moving it before them costs one
 UA line there.
 
-- **Actions:** none yet; awaiting the operator.
+- **Actions:** the operator approved (a) on 2026-11-10 at **+20**, not the
+  +10 in the proposal text above: `sw_renderer,no_input` on a desktop Linux
+  UA scores 110 and rejects, `sw_renderer` alone 80 and passes. It ships
+  with the `linux_sw` change, together with the log-only `rf` reading
+  (docs/traffic-classifier.md, "`linux_sw`").
 
 ### 2026-11-03 — read 5 (window: 2026-10-27 09:10 to 2026-11-03 09:05 Athens, 7 days)
 
